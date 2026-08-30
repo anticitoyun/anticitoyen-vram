@@ -1,0 +1,262 @@
+"""Assemble a runnable model from acvram shards and a placement plan.
+
+The manifest written by the converter records, for every tensor, which format
+it is in and which keys carry it. Loading is therefore mechanical: read the
+keys, rebuild the quantized container, and put it where the plan says --
+resident on a GPU, or pinned in host memory behind a
+:class:`~acvram.engine.layers.StreamedWeight`.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from typing import Any, Optional
+
+import torch
+
+from ..memory.kvcache import BLOCK_SIZE, KVCacheConfig, PagedKVCache
+from ..memory.tiering import Plan
+from ..quant.calibrate import ChannelScaler
+from ..quant.formats import INT8Tensor, PlainTensor
+from ..quant.int4 import INT4Tensor
+from ..quant.nvfp4 import NVFP4Tensor
+from .config import ModelSpec
+from .layers import QuantLinear, RMSNorm, RotaryEmbedding
+from .model import ACVRamModel, Attention, DecoderLayer, MLP, MoEBlock
+
+__all__ = ["LoadedModel", "load_model"]
+
+
+class _ShardReader:
+    """Lazy access to the tensors in a set of safetensors shards."""
+
+    def __init__(self, path: str, weight_map: dict[str, str]) -> None:
+        self.path = path
+        self.weight_map = weight_map
+        self._open: dict[str, Any] = {}
+
+    def get(self, key: str) -> torch.Tensor:
+        from safetensors import safe_open
+        fn = self.weight_map.get(key)
+        if fn is None:
+            raise KeyError(f"{key} is not in the manifest weight map")
+        if fn not in self._open:
+            self._open[fn] = safe_open(os.path.join(self.path, fn),
+                                       framework="pt", device="cpu")
+        return self._open[fn].get_tensor(key)
+
+    def has(self, key: str) -> bool:
+        return key in self.weight_map
+
+    def close(self) -> None:
+        self._open.clear()
+
+
+class LoadedModel:
+    def __init__(self, model: ACVRamModel, spec: ModelSpec, plan: Plan,
+                 manifest: dict, path: str) -> None:
+        self.model = model
+        self.spec = spec
+        self.plan = plan
+        self.manifest = manifest
+        self.path = path
+
+
+def _build_quant(entry: dict, name: str, reader: _ShardReader,
+                 group_size: int) -> Any:
+    fmt = entry["format"]
+    shape = tuple(entry["shape"])
+    sd = {k.rsplit(".", 1)[-1]: reader.get(k) for k in entry["keys"]}
+    if fmt == "nvfp4":
+        return NVFP4Tensor(
+            sd["qweight"], sd["block_scale"].view(torch.float8_e4m3fn),
+            sd["global_scale"], shape, sd["qweight"].shape[-1] * 2)
+    if fmt == "int4_awq":
+        return INT4Tensor(sd["qweight"], sd["scales"], sd["zeros"],
+                          entry.get("group_size", group_size), shape,
+                          sd["qweight"].shape[-1] * 2)
+    if fmt == "int8":
+        return INT8Tensor(sd["qweight"], sd["scales"], sd["zeros"],
+                          entry.get("group_size", group_size), shape)
+    if fmt in ("bf16", "fp16"):
+        return PlainTensor(sd["weight"], shape, fmt)
+    raise KeyError(f"unknown format {fmt!r} for {name}")
+
+
+def _build_scaler(entry: dict, name: str, reader: _ShardReader) -> Optional[ChannelScaler]:
+    block = entry.get("hadamard_block", 0)
+    scale = None
+    key = f"{name}.act_scale"
+    if entry.get("has_act_scale") and reader.has(key):
+        scale = reader.get(key)
+    if scale is None and not block:
+        return None
+    return ChannelScaler(scale, block)
+
+
+def _linear(name: str, manifest: dict, reader: _ShardReader,
+            group_size: int) -> Optional[QuantLinear]:
+    entry = manifest["tensors"].get(name)
+    if entry is None:
+        return None
+    q = _build_quant(entry, name, reader, group_size)
+    scaler = _build_scaler(entry, name, reader)
+    bias_key = name.replace(".weight", ".bias")
+    bias = reader.get(bias_key) if reader.has(bias_key) else None
+    return QuantLinear(q, bias, scaler, entry["shape"][0], entry["shape"][1])
+
+
+def load_model(path: str, plan: Optional[Plan] = None,
+               dtype: torch.dtype = torch.bfloat16,
+               max_model_len: Optional[int] = None,
+               device_override: Optional[str] = None) -> LoadedModel:
+    """Load a converted model directory into memory, placed per the plan."""
+    with open(os.path.join(path, "acvram_manifest.json"), "r", encoding="utf-8") as fh:
+        manifest = json.load(fh)
+
+    spec = ModelSpec(**{k: v for k, v in manifest["model"].items()
+                        if k in ModelSpec.__dataclass_fields__})
+    if plan is None:
+        plan = _plan_from_manifest(manifest)
+    reader = _ShardReader(path, manifest["weight_map"])
+    group_size = manifest.get("options", {}).get("group_size", 128)
+
+    def dev(name: str) -> torch.device:
+        return torch.device(device_override or name)
+
+    # embeddings: a gather, so host RAM costs one small copy per token
+    embed = reader.get("model.embed_tokens.weight").to(dtype)
+    embed_dev = dev(plan.embed_device) if plan.embed_device != "cpu" \
+        else torch.device("cpu")
+    embed = embed.to(embed_dev)
+
+    rope = RotaryEmbedding(spec.head_dim, spec.max_position_embeddings,
+                           spec.rope_theta, spec.rope_scaling)
+
+    layers: list[DecoderLayer] = []
+    caches: dict[int, PagedKVCache] = {}
+    kv_blocks = _kv_blocks_per_device(plan, spec, max_model_len)
+
+    for lp in plan.layers:
+        i = lp.index
+        p = f"model.layers.{i}."
+        d = dev(lp.exec_device)
+        streamed_attn = lp.attn_storage == "cpu"
+        streamed_mlp = lp.mlp_storage == "cpu"
+
+        def lin(suffix: str, streamed: bool) -> QuantLinear:
+            m = _linear(p + suffix, manifest, reader, group_size)
+            if m is None:
+                raise KeyError(f"missing tensor {p + suffix}")
+            return m.to_device(d, streamed=streamed)
+
+        # The MLP may live and run on the CPU while attention stays on the GPU.
+        mlp_on_cpu = (lp.mlp_storage == "cpu"
+                      and getattr(lp, "mlp_exec", "gpu") == "cpu")
+        mlp_dev = torch.device("cpu") if mlp_on_cpu else d
+        streamed_mlp = streamed_mlp and not mlp_on_cpu
+
+        def mlin(suffix: str) -> QuantLinear:
+            m = _linear(p + suffix, manifest, reader, group_size)
+            if m is None:
+                raise KeyError(f"missing tensor {p + suffix}")
+            return m.to_device(mlp_dev, streamed=streamed_mlp)
+
+        attn = Attention(
+            spec,
+            lin("self_attn.q_proj.weight", streamed_attn),
+            lin("self_attn.k_proj.weight", streamed_attn),
+            lin("self_attn.v_proj.weight", streamed_attn),
+            lin("self_attn.o_proj.weight", streamed_attn),
+            rope)
+
+        if manifest["tensors"].get(p + "mlp.gate.weight") is not None:
+            router = mlin("mlp.gate.weight")
+            experts = []
+            e = 0
+            while manifest["tensors"].get(p + f"mlp.experts.{e}.gate_proj.weight"):
+                experts.append(MLP(
+                    mlin(f"mlp.experts.{e}.gate_proj.weight"),
+                    mlin(f"mlp.experts.{e}.up_proj.weight"),
+                    mlin(f"mlp.experts.{e}.down_proj.weight")))
+                e += 1
+            shared = None
+            if manifest["tensors"].get(p + "mlp.shared_expert.gate_proj.weight"):
+                shared = MLP(
+                    mlin("mlp.shared_expert.gate_proj.weight"),
+                    mlin("mlp.shared_expert.up_proj.weight"),
+                    mlin("mlp.shared_expert.down_proj.weight"))
+            mlp: torch.nn.Module = MoEBlock(
+                router, experts, spec.num_experts_per_tok or 2, shared)
+        else:
+            mlp = MLP(mlin("mlp.gate_proj.weight"),
+                      mlin("mlp.up_proj.weight"),
+                      mlin("mlp.down_proj.weight"))
+
+        in_norm = RMSNorm(reader.get(p + "input_layernorm.weight").to(dtype).to(d),
+                          spec.rms_norm_eps)
+        post_norm = RMSNorm(
+            reader.get(p + "post_attention_layernorm.weight").to(dtype).to(d),
+            spec.rms_norm_eps)
+
+        layers.append(DecoderLayer(i, attn, mlp, in_norm, post_norm, d, mlp_dev))
+
+        n_blocks = kv_blocks.get(lp.exec_device, 0)
+        if n_blocks:
+            kv_fmt = next((t.kv_format for t in plan.tiers
+                           if t.name == lp.exec_device), "int8")
+            caches[i] = PagedKVCache(KVCacheConfig(
+                num_layers=1, num_kv_heads=spec.num_key_value_heads,
+                head_dim=spec.head_dim, num_blocks=n_blocks,
+                dtype=kv_fmt, device=str(d)))
+
+    head_dev = dev(plan.lm_head_device) if plan.lm_head_device != "cpu" \
+        else torch.device("cpu")
+    norm = RMSNorm(reader.get("model.norm.weight").to(dtype).to(head_dev),
+                   spec.rms_norm_eps)
+    if manifest["tensors"].get("lm_head.weight"):
+        lm_head = _linear("lm_head.weight", manifest, reader,
+                          group_size).to_device(head_dev)
+    else:
+        # tied embeddings
+        lm_head = QuantLinear(PlainTensor(embed.to(head_dev),
+                                          tuple(embed.shape), "bf16"))
+    reader.close()
+
+    model = ACVRamModel(spec, embed, layers, norm, lm_head, caches, dtype)
+    return LoadedModel(model, spec, plan, manifest, path)
+
+
+def _kv_blocks_per_device(plan: Plan, spec: ModelSpec,
+                          max_model_len: Optional[int]) -> dict[str, int]:
+    """Split each device's KV budget into blocks, shared across its layers."""
+    out: dict[str, int] = {}
+    layers_on = {}
+    for lp in plan.layers:
+        layers_on[lp.exec_device] = layers_on.get(lp.exec_device, 0) + 1
+    for dev, budget in plan.kv_budget.items():
+        n_layers = max(1, layers_on.get(dev, 1))
+        per_layer = budget // n_layers
+        bytes_per_block = (2 * BLOCK_SIZE * spec.num_key_value_heads
+                           * spec.head_dim + 2 * BLOCK_SIZE
+                           * spec.num_key_value_heads * 2)
+        out[dev] = max(1, per_layer // max(1, bytes_per_block))
+    return out
+
+
+def _plan_from_manifest(manifest: dict) -> Plan:
+    from ..memory.tiering import LayerPlacement, Plan as _Plan, Tier
+    d = manifest["plan"]
+    plan = _Plan(model=d["model"])
+    plan.tiers = [Tier(**t) for t in d["tiers"]]
+    plan.layers = [LayerPlacement(**{k: v for k, v in l.items()
+                                     if k not in ("streamed", "total_bytes",
+                                                  "resident_bytes")})
+                   for l in d["layers"]]
+    plan.embed_device = d["embed_device"]
+    plan.lm_head_device = d["lm_head_device"]
+    plan.kv_budget = d.get("kv_budget", {})
+    plan.kv_bytes_per_token = d.get("kv_bytes_per_token", 0)
+    plan.kv_max_tokens = d.get("kv_max_tokens", 0)
+    return plan
