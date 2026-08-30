@@ -1,15 +1,17 @@
-"""The transformer itself: llama-family dense and MoE, placed across tiers.
+"""Le transformeur lui-même : famille llama, dense et à mélange d'experts,
+réparti sur les étages de mémoire.
 
-Scope is deliberate. This covers the architecture that essentially every
-open-weights model in the size range worth running on this rig uses -- RMSNorm,
-RoPE, grouped-query attention, SwiGLU, and optionally a sparse MoE feed-forward
--- rather than trying to be a general model zoo. Llama, Mistral, Qwen2/3,
-Mixtral and DeepSeek all fit it.
+Le périmètre est délibéré. Il couvre l'architecture qu'emploie à peu près tout
+modèle à poids ouverts de la gamme de tailles qui vaut la peine d'être exécutée
+sur cette machine — RMSNorm, RoPE, attention à requêtes groupées, SwiGLU, et
+optionnellement un bloc à mélange d'experts creux — plutôt que d'essayer d'être
+une ménagerie universelle. Llama, Mistral, Qwen2/3, Mixtral et DeepSeek y
+entrent tous.
 
-What is specific to this project is that a layer knows which device it runs on
-and whether its weights are resident or streamed, and that the MoE block only
-touches the experts the router selected, which is what makes host RAM a
-sensible place to keep the other 120 of them.
+Ce qui est propre à ce projet, c'est qu'une couche sait sur quel appareil elle
+s'exécute et si ses poids sont résidents ou transférés, et que le bloc à mélange
+d'experts ne touche que les experts choisis par le routeur — ce qui fait de la
+mémoire vive un endroit raisonnable pour garder les 120 autres.
 """
 
 from __future__ import annotations
@@ -32,11 +34,11 @@ __all__ = ["Attention", "MLP", "MoEBlock", "DecoderLayer", "ACVRamModel",
 
 @dataclass
 class ForwardBatch:
-    """One step of work, prefill or decode.
+    """Une étape de travail, prefill ou décodage.
 
-    ``seq_lens`` is the total context length of each sequence *after* the
-    tokens in this batch are appended, which is what attention needs to know
-    how much history to read.
+    ``seq_lens`` est la longueur de contexte totale de chaque séquence *après*
+    ajout des jetons de ce lot : c'est ce dont l'attention a besoin pour savoir
+    quelle quantité d'histoire lire.
     """
 
     tokens: torch.Tensor              # [total_tokens] flattened across sequences
@@ -57,7 +59,7 @@ class ForwardBatch:
 
     @property
     def q_offsets(self) -> list[int]:
-        """Absolute position at which each sequence's query block starts."""
+        """Position absolue à laquelle commence le bloc de requêtes de chaque séquence."""
         return [s - q for s, q in zip(self.seq_lens, self.query_lens)]
 
     def last_token_indices(self) -> torch.Tensor:
@@ -108,16 +110,16 @@ class Attention(nn.Module):
             end = start + qlen
             offset = batch.seq_lens[i] - qlen
             if cache is not None and offset > 0:
-                # Part of this sequence is already in the cache -- a served
-                # prefix, or an earlier chunk. Read it back and mask against
-                # the query's absolute offset.
+                # Une partie de cette séquence est déjà en cache : un préfixe
+                # servi, ou un morceau antérieur. On la relit et on masque selon
+                # le décalage absolu de la requête.
                 kk, vv = cache.gather(batch.block_tables[i].to(q.device),
                                       batch.seq_lens[i], q.dtype)
             else:
-                # Nothing prior: use the keys we just computed rather than
-                # reading them back through the cache. That skips a
-                # quantize/dequantize round trip on every prefill token, which
-                # is both faster and slightly more accurate.
+                # Rien avant : on utilise les clés qu'on vient de calculer
+                # plutôt que de les relire par le cache. Cela évite un
+                # aller-retour de quantification sur chaque jeton de prefill, ce
+                # qui est à la fois plus rapide et un peu plus précis.
                 kk, vv = k[start:end], v[start:end]
             kk = repeat_kv(kk, self.n_rep)
             vv = repeat_kv(vv, self.n_rep)
@@ -128,7 +130,7 @@ class Attention(nn.Module):
 
     def _decode(self, q, k, v, batch: ForwardBatch,
                 cache: Optional[PagedKVCache], t: int) -> torch.Tensor:
-        """Decode, and speculative verification, for the whole batch at once."""
+        """Décodage, et vérification spéculative, pour tout le lot d'un coup."""
         if cache is None:
             return self._prefill(q, k, v, batch, cache, t)
 
@@ -144,8 +146,9 @@ class Attention(nn.Module):
             out = out.reshape(t, self.n_heads * self.head_dim)
             return self.o_proj(out)
 
-        # Speculative verification: several query positions per sequence, each
-        # attending to its own prefix. Still causal, still offset.
+        # Vérification spéculative : plusieurs positions de requête par
+        # séquence, chacune attendant sur son propre préfixe. Toujours causal,
+        # toujours décalé.
         out = torch.empty_like(q)
         start = 0
         for i, qlen in enumerate(batch.query_lens):
@@ -169,12 +172,13 @@ class MLP(nn.Module):
 
 
 class MoEBlock(nn.Module):
-    """Sparse mixture of experts.
+    """Mélange d'experts creux.
 
-    Only the ``top_k`` experts a token routed to are evaluated, so the cost of
-    a layer is independent of how many experts it owns. That is what lets 128
-    experts sit in host RAM while the model still decodes at a usable rate:
-    per token the machine reads 8 of them, not 128.
+    Seuls les ``top_k`` experts vers lesquels un jeton a été routé sont évalués :
+    le coût d'une couche est donc indépendant du nombre d'experts qu'elle
+    possède. C'est ce qui permet à 128 experts de résider en mémoire vive pendant
+    que le modèle décode à un rythme exploitable — par jeton, la machine en lit
+    8, pas 128.
     """
 
     def __init__(self, router: QuantLinear, experts: list[MLP], top_k: int,
@@ -197,8 +201,8 @@ class MoEBlock(nn.Module):
         topw = topw.to(x.dtype)
 
         out = torch.zeros_like(x)
-        # Group tokens by expert so each expert runs one batched GEMM rather
-        # than one per token.
+        # On regroupe les jetons par expert, pour que chaque expert fasse un
+        # seul produit matriciel par lot au lieu d'un par jeton.
         flat_expert = topi.reshape(-1)
         flat_weight = topw.reshape(-1)
         flat_token = torch.arange(t, device=x.device).repeat_interleave(self.top_k)
@@ -228,9 +232,10 @@ class DecoderLayer(nn.Module):
         self.input_layernorm = input_norm
         self.post_attention_layernorm = post_norm
         self.device = device
-        # Attention and MLP need not run on the same device. When the MLP's
-        # weights live in host RAM it is usually cheaper to compute them there
-        # than to copy them across PCIe -- see PlannerOptions.host_exec.
+        # L'attention et le MLP n'ont pas à s'exécuter sur le même appareil.
+        # Quand les poids du MLP résident en mémoire vive, il est en général
+        # moins coûteux de les y calculer que de les copier par le PCIe — voir
+        # PlannerOptions.host_exec.
         self.mlp_device = mlp_device or device
 
     def forward(self, x: torch.Tensor, batch: ForwardBatch,
@@ -238,8 +243,8 @@ class DecoderLayer(nn.Module):
         x = x + self.self_attn(self.input_layernorm(x), batch, cache)
         h = self.post_attention_layernorm(x)
         if self.mlp_device != self.device:
-            # Only the hidden state crosses the bus: [tokens, hidden], a few
-            # kilobytes per decoded token against gigabytes of weights.
+            # Seul l'état caché traverse le bus : [jetons, dimension], quelques
+            # kilooctets par jeton décodé face à des gigaoctets de poids.
             y = self.mlp(h.to(self.mlp_device)).to(x.device, non_blocking=True)
         else:
             y = self.mlp(h)
@@ -252,7 +257,7 @@ class DecoderLayer(nn.Module):
 
 
 class ACVRamModel(nn.Module):
-    """The assembled model, with its layers spread across devices."""
+    """Le modèle assemblé, ses couches réparties sur plusieurs appareils."""
 
     def __init__(self, spec: ModelSpec, embed: torch.Tensor,
                  layers: list[DecoderLayer], norm: RMSNorm,
@@ -270,13 +275,13 @@ class ACVRamModel(nn.Module):
     @torch.inference_mode()
     def forward(self, batch: ForwardBatch, return_hidden: bool = False,
                 logits_positions: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Logits for the last token of every sequence.
+        """Logits du dernier jeton de chaque séquence.
 
-        With ``return_hidden`` the normalised hidden states are returned
-        instead, for every token rather than only the last -- that is what
-        /v1/embeddings pools over. Skipping lm_head also skips the single
-        most expensive GEMM in the model, so embedding a document costs
-        noticeably less than generating from it.
+        Avec ``return_hidden``, ce sont les états cachés normalisés qui sont
+        rendus, pour tous les jetons et non seulement le dernier — c'est sur eux
+        que /v1/embeddings fait sa moyenne. Sauter lm_head évite aussi le produit
+        matriciel le plus coûteux du modèle : plonger un document coûte donc
+        nettement moins que d'engendrer à partir de lui.
         """
         idx = batch.tokens.to(self.embed_tokens.device)
         x = F.embedding(idx, self.embed_tokens).to(self.dtype)
@@ -286,8 +291,9 @@ class ACVRamModel(nn.Module):
             if layer.device != current:
                 x = x.to(layer.device, non_blocking=True)
                 current = layer.device
-            # Start the next layer's transfer before running this one, so a
-            # host-resident layer's PCIe copy hides behind real work.
+            # On lance le transfert de la couche suivante avant d'exécuter
+            # celle-ci, pour que la copie PCIe d'une couche résidant en mémoire
+            # vive se cache derrière du vrai travail.
             if i + 1 < len(self.layers):
                 self.layers[i + 1].prefetch()
             x = layer(x, batch, self.caches.get(i))
@@ -295,10 +301,11 @@ class ACVRamModel(nn.Module):
         x = self.norm(x.to(self.norm.weight.device))
         if return_hidden:
             return x
-        # Speculative verification and perplexity both need logits at more
-        # than the final position, so which rows reach lm_head is a parameter.
-        # It matters: lm_head is the single largest GEMM in the model, and
-        # running it on every prefill token instead of one costs real time.
+        # La vérification spéculative et la perplexité ont toutes deux besoin
+        # de logits ailleurs qu'à la position finale : les lignes qui atteignent
+        # lm_head sont donc un paramètre. Cela compte, car lm_head est le plus
+        # gros produit matriciel du modèle, et l'exécuter sur chaque jeton de
+        # prefill au lieu d'un seul coûte du temps réel.
         idx = (batch.last_token_indices() if logits_positions is None
                else logits_positions)
         x = x[idx.to(x.device)]

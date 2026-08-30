@@ -1,4 +1,4 @@
-"""Loading a converted model and running it, end to end on CPU."""
+"""Charger un modèle converti et l'exécuter, de bout en bout sur processeur."""
 
 import json
 import os
@@ -56,7 +56,7 @@ def test_finished_sequences_return_their_blocks(converted):
 
 def test_quantized_model_tracks_the_bf16_reference(tiny_checkpoint, target_rig,
                                                    tmp_path):
-    """4-bit must degrade, but not diverge."""
+    """Le 4 bits doit dégrader, mais pas diverger."""
     from acvram.engine.config import load_model_spec
     from acvram.memory.tiering import PlannerOptions, auto_plan
     from acvram.quant.convert import ConversionOptions, convert_checkpoint
@@ -101,7 +101,8 @@ def test_kv_cache_roundtrip(dtype):
 
 
 def test_int8_kv_beats_fp8_at_equal_size():
-    """Per-head scaling supplies the dynamic range FP8 spends exponent bits on."""
+    """L'échelle par tête fournit la plage dynamique pour laquelle le FP8 dépense
+    des bits d'exposant."""
     torch.manual_seed(0)
     k = torch.randn(64, 8, 128) * 0.5
     errs = {}

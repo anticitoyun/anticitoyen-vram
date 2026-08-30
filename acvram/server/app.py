@@ -1,11 +1,11 @@
-"""The OpenAI-compatible HTTP server.
+"""Le serveur HTTP compatible avec l'API OpenAI.
 
-The engine is single-threaded and synchronous; the API is asynchronous and
-concurrent. The join between them is one background thread running the
-engine's step loop and pushing outputs into per-request asyncio queues via
-``loop.call_soon_threadsafe``. Requests never touch the model directly, which
-is what lets a dozen streaming clients share one pipeline spread across two
-GPUs and host RAM.
+Le moteur est monothread et synchrone ; l'API est asynchrone et concurrente. La
+jonction entre les deux est un unique fil d'arrière-plan qui fait tourner la
+boucle d'étapes du moteur et pousse les sorties dans des files asyncio propres à
+chaque requête, via ``loop.call_soon_threadsafe``. Les requêtes ne touchent
+jamais le modèle directement, et c'est ce qui permet à une douzaine de clients
+en flux de partager un seul pipeline réparti sur deux GPU et la mémoire vive.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ __all__ = ["create_app", "EngineService"]
 
 
 class EngineService:
-    """Drives the engine from a background thread and fans results out."""
+    """Anime le moteur depuis un fil d'arrière-plan et redistribue les résultats."""
 
     def __init__(self, engine: Engine, tokenizer: Optional[Tokenizer],
                  model_name: str) -> None:
@@ -57,12 +57,14 @@ class EngineService:
             self._thread.start()
 
     def ensure_started(self) -> None:
-        """Start on first request if the lifespan hook never fired.
+        """Démarre à la première requête si le crochet de cycle de vie n'a jamais
+        été déclenché.
 
-        Some ASGI hosts (and every test harness that instantiates the app
-        without entering its lifespan) skip startup events. A server whose
-        engine thread never starts accepts requests and then hangs forever,
-        which is a far worse failure than starting one thread lazily.
+        Certains hôtes ASGI — et tout harnais de test qui instancie
+        l'application sans entrer dans son cycle de vie — sautent les événements
+        de démarrage. Un serveur dont le fil moteur ne démarre jamais accepte les
+        requêtes puis reste bloqué indéfiniment, ce qui est une panne bien pire
+        que de démarrer paresseusement un fil.
         """
         if self._thread is None:
             self.start(asyncio.get_running_loop())
@@ -149,7 +151,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                model_name: str, served_paths: Optional[dict] = None) -> FastAPI:
     service = EngineService(engine, tokenizer, model_name)
     app = FastAPI(title="acvram", version="0.1.0",
-                  description="anticitoyen VRAM/RAM - OpenAI-compatible inference")
+                  description="anticitoyen VRAM/RAM — inférence compatible OpenAI")
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                        allow_headers=["*"])
     app.state.service = service
@@ -262,7 +264,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             ids = item if isinstance(item, list) else _encode(tokenizer, str(item))
             ids = ids[: engine.max_model_len]
             if not ids:
-                raise HTTPException(400, "empty input")
+                raise HTTPException(400, "entrée vide")
             total += len(ids)
             vec = await asyncio.to_thread(_embed_once, engine, ids)
             if req.dimensions:
@@ -282,19 +284,19 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
 
 def _encode(tokenizer: Optional[Tokenizer], text: str) -> list[int]:
     if tokenizer is None:
-        raise HTTPException(500, "no tokenizer was found in the model directory")
+        raise HTTPException(500, "aucun tokeniseur trouvé dans le répertoire du modèle")
     ids = tokenizer.encode(text)
     if not ids:
-        raise HTTPException(400, "prompt encoded to zero tokens")
+        raise HTTPException(400, "l'invite s'est encodée en zéro jeton")
     return ids
 
 
 def _embed_once(engine: Engine, ids: list[int]) -> list[float]:
-    """Mean-pool the final hidden states, then L2-normalise.
+    """Moyenne les états cachés finaux, puis normalise en L2.
 
-    Runs outside the batching loop: an embedding request is a single prefill
-    with no KV to keep, so it does not need a cache slot and must not take one
-    away from a generation that does.
+    S'exécute hors de la boucle de lot : une requête de plongement est un simple
+    prefill sans KV à conserver, elle n'a donc pas besoin d'un emplacement de
+    cache et ne doit pas en retirer un à une génération qui, elle, en a besoin.
     """
     import torch
     from ..engine.model import ForwardBatch

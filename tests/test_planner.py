@@ -1,4 +1,4 @@
-"""The placement planner's decisions, on the real target rig."""
+"""Les décisions du planificateur de placement, sur la vraie machine cible."""
 
 import json
 import os
@@ -22,7 +22,7 @@ def _spec(tmp_path, name, **cfg):
     return load_model_spec(str(d), name)
 
 
-def test_blackwell_gets_fp4_ampere_does_not():
+def test_blackwell_a_le_fp4_ampere_non():
     assert capabilities_for_sm(120).weight_format == "nvfp4"
     assert capabilities_for_sm(120).fp4_tensor_core
     assert capabilities_for_sm(86).weight_format == "int4_awq"
@@ -31,11 +31,11 @@ def test_blackwell_gets_fp4_ampere_does_not():
 
 
 def test_second_gpu_is_left_idle_when_the_model_fits_on_the_first(tmp_path, target_rig):
-    """Pipelining onto a slower card costs single-stream throughput."""
+    """Étendre le pipeline à une carte plus lente coûte du débit mono-flux."""
     spec = _spec(tmp_path, "small", num_hidden_layers=24)
     plan, _ = auto_plan(spec, target_rig, PlannerOptions(max_model_len=4096))
     assert {lp.exec_device for lp in plan.layers} == {"cuda:0"}
-    assert any("left idle on purpose" in w for w in plan.warnings)
+    assert any("laisse oisif a dessein" in w for w in plan.warnings)
 
 
 def test_big_model_uses_both_gpus(tmp_path, target_rig):
@@ -55,16 +55,17 @@ def test_pipeline_crosses_gpus_exactly_once(tmp_path, target_rig):
 
 
 def test_attention_is_pinned_before_mlp_spills(tmp_path, target_rig):
-    """Attention is small and latency-critical; the MLP is what goes to RAM."""
-    # 128 experts of 1536 over 60 layers is ~145 G parameters: comfortably
-    # past the 44 GB of combined VRAM, so something must spill.
+    """L'attention est petite et critique en latence ; c'est le MLP qui part en RAM."""
+    # 128 experts de 1536 sur 60 couches font environ 145 milliards de
+    # paramètres : bien au-delà des 44 Go de VRAM cumulée, donc quelque chose
+    # doit déborder.
     spec = _spec(tmp_path, "moe", hidden_size=4096, num_hidden_layers=60,
                  architectures=["Qwen3MoeForCausalLM"], num_experts=128,
                  num_experts_per_tok=8, moe_intermediate_size=1536)
     plan, _ = auto_plan(spec, target_rig, PlannerOptions(max_model_len=4096))
     host_mlp = [lp for lp in plan.layers if lp.mlp_storage == "cpu"]
     host_attn = [lp for lp in plan.layers if lp.attn_storage == "cpu"]
-    assert host_mlp, "this model should not fit entirely in VRAM"
+    assert host_mlp, "ce modèle ne devrait pas tenir entièrement en VRAM"
     assert len(host_attn) < len(host_mlp)
 
 
@@ -80,8 +81,8 @@ def test_impossible_model_is_reported_not_silently_truncated(tmp_path, target_ri
     spec = _spec(tmp_path, "huge", hidden_size=16384, intermediate_size=53248,
                  num_hidden_layers=126)
     plan, _ = auto_plan(spec, target_rig, PlannerOptions(max_model_len=4096))
-    assert any("does not fit" in w for w in plan.warnings)
-    assert any("bits per weight" in w for w in plan.warnings)
+    assert any("ne tient pas sur cette machine" in w for w in plan.warnings)
+    assert any("bits par poids" in w for w in plan.warnings)
 
 
 def test_kv_budget_shrinks_to_keep_weights_in_vram(tmp_path, target_rig):

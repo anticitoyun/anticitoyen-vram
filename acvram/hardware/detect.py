@@ -1,15 +1,16 @@
-"""Hardware discovery and per-device capability resolution.
+"""Découverte du matériel et résolution des capacités de chaque appareil.
 
-Deliberately dependency-light: this module must work on a machine with no
-torch and no CUDA (e.g. while planning a deployment from a laptop), falling
-back through NVML -> nvidia-smi -> torch -> a declared static profile.
+Délibérément pauvre en dépendances : ce module doit fonctionner sur une machine
+sans torch et sans CUDA — par exemple pour préparer un déploiement depuis un
+portable — en se rabattant successivement sur NVML, nvidia-smi, torch, puis un
+profil statique déclaré.
 
-The output of :func:`detect_rig` is what every other subsystem consumes to
-decide *which numeric format a given weight is stored in*, because the two
-GPUs in the target rig do not have the same tensor-core capabilities:
+Ce que produit :func:`detect_rig` est ce que consomme tout le reste du système
+pour décider *dans quel format numérique un poids donné est stocké*, car les
+deux GPU de la machine cible n'ont pas les mêmes capacités de tensor cores :
 
-    RTX 5090   GB202  sm_120  FP4 + FP8 tensor cores  -> NVFP4 weights
-    RTX 3080Ti GA102  sm_86   no FP8, no FP4          -> INT4 weight-only
+    RTX 5090    GB202  sm_120  tensor cores FP4 + FP8  -> poids NVFP4
+    RTX 3080 Ti GA102  sm_86   ni FP8 ni FP4           -> INT4, poids seuls
 """
 
 from __future__ import annotations
@@ -58,12 +59,13 @@ _SMI_FIELDS = [
 
 @dataclass(frozen=True)
 class GpuCaps:
-    """What a given compute capability can actually do in *hardware*.
+    """Ce qu'une capacité de calcul donnée sait réellement faire en *matériel*.
 
-    ``fp4_tensor_core`` is the discriminator that splits the target rig: it is
-    true only for Blackwell (sm_100/103/120+). Everything else has to reach a
-    4-bit footprint through *weight-only* quantization, i.e. store 4 bits and
-    dequantize to a format the tensor cores do support.
+    ``fp4_tensor_core`` est le discriminant qui sépare les deux cartes de la
+    machine cible : il n'est vrai que pour Blackwell (sm_100/103/120 et
+    au-delà). Tout le reste doit atteindre une empreinte de 4 bits par une
+    quantification *des poids seuls*, c'est-à-dire stocker 4 bits et
+    déquantifier vers un format que les tensor cores savent traiter.
     """
 
     sm: int
@@ -94,14 +96,15 @@ class GpuCaps:
 
 
 def capabilities_for_sm(sm: int) -> GpuCaps:
-    """Map a compute capability (e.g. 120 for sm_120) to a capability set.
+    """Associe une capacité de calcul (par exemple 120 pour sm_120) à un jeu de
+    capacités.
 
-    The weight/KV format choice encoded here is the single place where the
-    "one format per GPU" policy lives.
+    Le choix de format de poids et de cache KV codé ici est le seul endroit où
+    vit la politique « un format par GPU ».
     """
-    fp4 = sm >= 100                       # Blackwell family (100, 103, 120, 121)
-    fp8 = sm >= 89                        # Ada onward
-    # s4 mma exists on Turing and Ampere only; nvcc dropped it for sm_90+.
+    fp4 = sm >= 100                       # famille Blackwell (100, 103, 120, 121)
+    fp8 = sm >= 89                        # à partir d'Ada
+    # Le mma s4 n'existe que sur Turing et Ampere ; nvcc l'a retiré pour sm_90+.
     int4_mma = 75 <= sm <= 89
     int8_mma = sm >= 75
     bf16 = sm >= 80
@@ -109,22 +112,22 @@ def capabilities_for_sm(sm: int) -> GpuCaps:
     async_copy = sm >= 80
     tma = sm >= 90
 
-    # KV cache defaults to INT8 even where FP8 exists. Measured on this
-    # codebase (tests/test_kvcache.py): with one scale per (token, head), INT8
-    # reaches ~44 dB against ~32 dB for FP8 E4M3 at identical size, because
-    # per-head scaling already supplies the dynamic range that FP8 spends
-    # exponent bits on, while INT8 keeps a uniform grid. FP8 is still worth
-    # selecting when an attention kernel can consume it without dequantizing
-    # -- that is a throughput argument, not an accuracy one -- so it stays
-    # available through --kv-format fp8_e4m3.
+    # Le cache KV se règle par défaut sur l'INT8, y compris là où le FP8
+    # existe. Mesuré dans ce dépôt (tests/test_engine.py) : avec une échelle par
+    # (jeton, tête), l'INT8 atteint environ 44 dB contre 32 pour le FP8 E4M3 à
+    # taille identique, parce que la mise à l'échelle par tête fournit déjà la
+    # plage dynamique pour laquelle le FP8 dépense des bits d'exposant, tandis
+    # que l'INT8 conserve une grille uniforme. Le FP8 reste intéressant lorsque
+    # le noyau d'attention sait le consommer sans déquantifier — un argument de
+    # débit, pas de précision — donc il demeure accessible.
     if fp4:
         weight_format, kv_format = "nvfp4", "int8"
     elif fp8:
-        # Ada: no FP4 tensor cores, but FP8 storage + FP8 mma is available.
+        # Ada : pas de tensor cores FP4, mais stockage et mma FP8 disponibles.
         weight_format, kv_format = "int4_awq", "int8"
     elif bf16:
-        # Ampere consumer (3080 Ti): weight-only INT4, dequantized to FP16 on
-        # the fly, then a normal FP16 tensor-core GEMM.
+        # Ampere grand public (3080 Ti) : INT4 sur les poids seuls, déquantifié
+        # en FP16 à la volée, puis produit matriciel FP16 ordinaire.
         weight_format, kv_format = "int4_awq", "int8"
     else:
         weight_format, kv_format = "int8", "fp16"
@@ -178,11 +181,11 @@ class Gpu:
 
     @property
     def host_link_gbps(self) -> float:
-        """Effective host<->device bandwidth in GB/s for the *current* link.
+        """Bande passante effective hôte-appareil en Go/s pour le lien *actuel*.
 
-        PCIe raw rates per lane, 128b/130b encoded, one direction:
-            gen3 ~0.985, gen4 ~1.969, gen5 ~3.938 GB/s per lane.
-        A 0.85 factor approximates real achievable copy throughput.
+        Débits PCIe bruts par voie, codage 128b/130b, dans un sens :
+            gen3 ≈ 0,985, gen4 ≈ 1,969, gen5 ≈ 3,938 Go/s par voie.
+        Le facteur 0,85 approche le débit de copie réellement atteignable.
         """
         per_lane = {1: 0.25, 2: 0.5, 3: 0.985, 4: 1.969, 5: 3.938, 6: 7.877}
         gen = self.pcie_gen_cur or self.pcie_gen_max or 4
@@ -191,7 +194,7 @@ class Gpu:
 
     @property
     def vram_bandwidth_gbps(self) -> float:
-        """Rough on-package bandwidth, used only to rank tiers."""
+        """Bande passante mémoire approximative, servant seulement à classer les étages."""
         table = {
             "5090": 1792.0, "5080": 960.0, "4090": 1008.0, "4080": 717.0,
             "3090": 936.0, "3080 ti": 912.0, "3080": 760.0, "3060": 360.0,
@@ -229,9 +232,9 @@ class Cpu:
     model: str = ""
     physical_cores: int = 0
     logical_cores: int = 0
-    performance_cores: int = 0     # P-cores on hybrid Intel
-    efficiency_cores: int = 0      # E-cores
-    p_core_cpuset: str = ""        # e.g. "0-15" -- what we pin worker threads to
+    performance_cores: int = 0     # cœurs P sur Intel hybride
+    efficiency_cores: int = 0      # cœurs E
+    p_core_cpuset: str = ""        # ex. « 0-15 » : où épingler les fils de travail
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -247,7 +250,7 @@ class Rig:
     kernel: str = ""
     distro: str = ""
     p2p_matrix: list[list[bool]] = field(default_factory=list)
-    source: str = "unknown"        # nvml | nvidia-smi | torch | profile
+    source: str = "unknown"        # nvml | nvidia-smi | torch | profil
 
     @property
     def total_vram(self) -> int:
@@ -365,11 +368,12 @@ def _probe_gpus_torch() -> tuple[list[Gpu], str]:
 
 
 def _probe_p2p(n: int) -> list[list[bool]]:
-    """Peer-to-peer reachability.
+    """Accessibilité en pair-à-pair.
 
-    Consumer GeForce boards have no NVLink and NVIDIA disables PCIe P2P on
-    them, so this is expected to be all-false on the target rig -- which is
-    why the runner stages inter-GPU tensors through pinned host memory.
+    Les cartes GeForce grand public n'ont pas de NVLink et NVIDIA y désactive le
+    pair-à-pair PCIe : on s'attend donc à tout faux sur la machine cible, ce qui
+    explique pourquoi le moteur fait transiter les tenseurs entre GPU par la
+    mémoire hôte épinglée.
     """
     if n < 2:
         return [[True]] if n == 1 else []
@@ -422,8 +426,8 @@ def _probe_cpu() -> Cpu:
     cores = set(re.findall(r"^core id\s*:\s*(\d+)", text, re.M))
     cpu.physical_cores = len(cores) or cpu.logical_cores
 
-    # Hybrid Intel: P-cores expose SMT siblings, E-cores do not. Reading the
-    # per-CPU topology is the only reliable discriminator.
+    # Intel hybride : les cœurs P exposent des jumeaux SMT, les cœurs E non.
+    # Lire la topologie par processeur est le seul discriminant fiable.
     p_cpus: list[int] = []
     e_cpus: list[int] = []
     base = "/sys/devices/system/cpu"
@@ -498,10 +502,11 @@ def _probe_distro() -> str:
 
 
 def detect_rig(profile: Optional[str] = None) -> Rig:
-    """Detect the local machine, or load a declared profile.
+    """Détecte la machine locale, ou charge un profil déclaré.
 
-    ``profile`` is the escape hatch used to plan a deployment from a machine
-    that is not the target (``acvram plan --profile rig-14900k-5090-3080ti``).
+    ``profile`` est l'échappatoire qui permet de préparer un déploiement depuis
+    une machine qui n'est pas la cible
+    (``acvram plan --profile rig-14900k-5090-3080ti``).
     """
     if profile:
         from .profiles import load_profile

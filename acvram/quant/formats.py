@@ -1,17 +1,18 @@
-"""Weight format registry.
+"""Registre des formats de poids.
 
-One entry per storage format, with the bookkeeping the placement planner
-needs (bits per weight) and the minimum compute capability that can *use* it
-natively. This is what makes "a different format per GPU" a first-class idea
-rather than a special case scattered through the loader.
+Une entrée par format de stockage, avec la comptabilité dont le planificateur
+de placement a besoin (les bits par poids) et la capacité de calcul minimale
+qui sait l'*exploiter* nativement. C'est ce qui fait de « un format différent
+par GPU » une idée de premier plan plutôt qu'un cas particulier dispersé dans
+le chargeur.
 
-    format      bpw     native on        notes
-    --------    -----   --------------   ----------------------------------
-    nvfp4       4.50    sm_100+          FP4 tensor cores (RTX 5090)
-    int4_awq    4.16    sm_75+           weight-only, dequant to FP16 in-kernel
-    int8        8.13    sm_75+           per-group symmetric, fallback
-    bf16       16.00    sm_80+           untouched, for norms / embeddings
-    fp16       16.00    any              untouched
+    format      bits/poids  natif sur   notes
+    --------    ----------  ----------  -------------------------------------
+    nvfp4          4,50     sm_100+     tensor cores FP4 (RTX 5090)
+    int4_awq       4,16     sm_75+      poids seuls, déquantifiés dans le noyau
+    int8           8,19     sm_75+      symétrique par groupe, repli
+    bf16          16,00     sm_80+      intact, normalisations et plongements
+    fp16          16,00     tous        intact
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ __all__ = ["FormatSpec", "FORMATS", "get_format", "quantize", "dequantize",
 
 @dataclass
 class PlainTensor:
-    """Uncompressed passthrough, so every code path can assume the same API."""
+    """Passe-plat non compressé, pour que tous les chemins voient la même API."""
 
     weight: torch.Tensor
     shape: tuple[int, ...]
@@ -57,15 +58,15 @@ class PlainTensor:
 
 
 def _q_int8(w: torch.Tensor, group_size: int = 128, **_: Any) -> INT4Tensor:
-    """INT8 reuses the grouped-affine machinery with a wider range."""
+    """L'INT8 réutilise la machinerie affine par groupes, sur une plage plus large."""
     raise NotImplementedError("int8 path is handled by quantize() directly")
 
 
 @dataclass(frozen=True)
 class FormatSpec:
     name: str
-    bpw: float                       # nominal, at the default group size
-    min_sm: int                      # lowest cc that can run it natively
+    bpw: float                       # nominal, à la taille de groupe par défaut
+    min_sm: int                      # plus petite capacité qui l'exécute nativement
     quantize: Optional[Callable[..., Any]]
     dequantize: Optional[Callable[..., torch.Tensor]]
     compute_dtype: torch.dtype
@@ -88,29 +89,29 @@ FORMATS: dict[str, FormatSpec] = {
         name="nvfp4", bpw=4.5, min_sm=100,
         quantize=quantize_nvfp4, dequantize=dequantize_nvfp4,
         compute_dtype=torch.bfloat16,
-        description="FP4 E2M1 + FP8 E4M3 block scale (16), Blackwell tensor cores",
+        description="E2M1 FP4 + échelle de bloc FP8 E4M3 (16), tensor cores Blackwell",
     ),
     "int4_awq": FormatSpec(
         name="int4_awq", bpw=4.15625, min_sm=75,
         quantize=quantize_int4, dequantize=dequantize_int4,
         compute_dtype=torch.float16,
-        description="uint4 group-128 affine, weight-only, dequant to FP16 in-kernel",
+        description="uint4 affine par groupes de 128, poids seuls, déquantifié dans le noyau",
     ),
     "int8": FormatSpec(
         name="int8", bpw=8.1875, min_sm=75,
         quantize=None, dequantize=None,
         compute_dtype=torch.float16,
-        description="uint8 group-128 affine, fallback for sensitive layers",
+        description="uint8 affine par groupes de 128, repli pour couches sensibles",
     ),
     "bf16": FormatSpec(
         name="bf16", bpw=16.0, min_sm=80,
         quantize=None, dequantize=None, compute_dtype=torch.bfloat16,
-        description="uncompressed bfloat16",
+        description="bfloat16 non compressé",
     ),
     "fp16": FormatSpec(
         name="fp16", bpw=16.0, min_sm=0,
         quantize=None, dequantize=None, compute_dtype=torch.float16,
-        description="uncompressed float16",
+        description="float16 non compressé",
     ),
 }
 
@@ -119,8 +120,8 @@ def get_format(name: str) -> FormatSpec:
     try:
         return FORMATS[name]
     except KeyError:
-        raise KeyError(f"unknown weight format {name!r}; "
-                       f"known: {', '.join(FORMATS)}") from None
+        raise KeyError(f"format de poids inconnu {name!r} ; "
+                       f"connus : {', '.join(FORMATS)}") from None
 
 
 def bits_per_weight(name: str, in_features: int = 4096,
@@ -134,7 +135,7 @@ def estimate_bytes(n_params: int, name: str, group_size: Optional[int] = None) -
 
 def quantize(weight: torch.Tensor, fmt: str, group_size: Optional[int] = None,
              **kwargs: Any):
-    """Quantize a 2-D weight into ``fmt``."""
+    """Quantifie un poids 2-D dans le format ``fmt``."""
     spec = get_format(fmt)
     if fmt == "nvfp4":
         return spec.quantize(weight, **kwargs)
@@ -160,11 +161,11 @@ def dequantize(t: Any, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         return t.weight.to(dtype) if dtype else t.weight
     if isinstance(t, torch.Tensor):
         return t.to(dtype) if dtype else t
-    raise TypeError(f"cannot dequantize {type(t)!r}")
+    raise TypeError(f"impossible de déquantifier {type(t)!r}")
 
 
 # --------------------------------------------------------------------------
-# INT8 grouped affine -- kept here because it shares INT4Tensor's container
+# INT8 affine par groupes — ici même, car il partage le conteneur d'INT4Tensor
 # --------------------------------------------------------------------------
 
 
@@ -229,5 +230,5 @@ FORMATS["int8"] = FormatSpec(
     name="int8", bpw=8.1875, min_sm=75,
     quantize=_quantize_int8, dequantize=_dequantize_int8,
     compute_dtype=torch.float16,
-    description="uint8 group-128 affine, fallback for sensitive layers",
+    description="uint8 affine par groupes de 128, repli pour couches sensibles",
 )

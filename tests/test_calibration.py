@@ -1,4 +1,4 @@
-"""AWQ calibration: it must collect real statistics and actually help."""
+"""Calibration AWQ : elle doit relever de vraies statistiques et aider réellement."""
 
 import json
 import os
@@ -13,7 +13,7 @@ from acvram.quant.collect import collect_activation_stats, load_calib_ids
 
 @pytest.fixture(scope="module")
 def tokenized_checkpoint(tiny_checkpoint):
-    """Give the source checkpoint a tokenizer so calibration can run."""
+    """Donne un tokeniseur au point de contrôle source pour que la calibration tourne."""
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers
 
     vocab = {f"tok{i}": i for i in range(1024)}
@@ -30,8 +30,8 @@ def tokenized_checkpoint(tiny_checkpoint):
 
 
 def test_calibration_refuses_to_pretend_without_a_tokenizer():
-    """A silent no-op would be worse than an error."""
-    with pytest.raises(ValueError, match="tokenizer"):
+    """Une inaction silencieuse serait pire qu'une erreur."""
+    with pytest.raises(ValueError, match="tokeniseur"):
         load_calib_ids(None, None, 4, 128, 1024)
 
 
@@ -43,7 +43,7 @@ def test_collects_one_entry_per_linear(tokenized_checkpoint):
     calib = load_calib_ids(tok, None, 4, 64, spec.vocab_size)
     stats = collect_activation_stats(tokenized_checkpoint, spec, calib,
                                      device="cpu", dtype=torch.float32)
-    # 7 linears per block: q, k, v, o, gate, up, down
+    # 7 couches linéaires par bloc : q, k, v, o, gate, up, down
     assert len(stats) == spec.num_layers * 7
     for name, st in stats.items():
         assert isinstance(st, ActStats)
@@ -53,7 +53,7 @@ def test_collects_one_entry_per_linear(tokenized_checkpoint):
 
 
 def test_statistics_are_not_uniform(tokenized_checkpoint):
-    """If every channel looked alike there would be nothing for AWQ to exploit."""
+    """Si tous les canaux se ressemblaient, AWQ n'aurait rien à exploiter."""
     from acvram.server.chat import load_tokenizer
 
     spec = load_model_spec(tokenized_checkpoint, "tiny")
@@ -67,12 +67,15 @@ def test_statistics_are_not_uniform(tokenized_checkpoint):
 
 
 def test_awq_improves_the_objective_it_optimises(tokenized_checkpoint):
-    """AWQ minimises *layer output* error, so that is what must improve.
+    """AWQ minimise l'erreur en *sortie de couche* : c'est donc elle qui doit
+    s'améliorer.
 
-    Measuring end-to-end logit cosine on a four-layer model of random weights
-    puts the effect inside the noise floor -- the earlier version of this test
-    did exactly that and flapped. The layer-output SNR is AWQ's own objective
-    and is deterministic given the statistics, so it is what gets asserted.
+    Mesurer le cosinus des logits de bout en bout sur un modèle de quatre
+    couches à poids aléatoires place l'effet sous le plancher de bruit — la
+    version précédente de ce test faisait exactement cela et oscillait. Le
+    rapport signal/bruit en sortie de couche est l'objectif propre d'AWQ et il
+    est déterministe une fois les statistiques données : c'est donc lui qu'on
+    affirme.
     """
     from safetensors import safe_open
 
@@ -102,24 +105,24 @@ def test_awq_improves_the_objective_it_optimises(tokenized_checkpoint):
                 w.to(torch.float32), fmt, st, use_hadamard=False, use_awq=False)
             _, _, awq = quantize_with_calibration(
                 w.to(torch.float32), fmt, st, use_hadamard=False, use_awq=True)
-            # The grid includes alpha=0, i.e. no scaling, so a calibrated
-            # search can never do worse than round-to-nearest on its own
-            # objective.
+            # La grille contient alpha = 0, c'est-à-dire aucune mise à
+            # l'échelle : une recherche calibrée ne peut donc jamais faire pire
+            # que l'arrondi au plus proche sur son propre objectif.
             assert awq["out_snr_db"] >= rtn["out_snr_db"] - 1e-6, (
                 f"{name} {fmt}: {awq['out_snr_db']:.3f} < {rtn['out_snr_db']:.3f}")
             if awq["out_snr_db"] > rtn["out_snr_db"] + 0.01:
                 wins[fmt] += 1
 
     assert total > 0
-    # It should be a real improvement on a real majority of tensors, not a
-    # rounding artefact on one of them.
+    # Ce doit être une amélioration réelle sur une majorité réelle de tenseurs,
+    # pas un artefact d'arrondi sur l'un d'eux.
     assert wins["nvfp4"] > total / 2, wins
     assert wins["int4_awq"] > total / 2, wins
 
 
 def test_awq_does_not_degrade_the_model_end_to_end(tokenized_checkpoint,
                                                    target_rig, tmp_path):
-    """The end-to-end check is a guard rail, not a demonstration."""
+    """Le contrôle de bout en bout est un garde-fou, pas une démonstration."""
     from acvram.engine.loader import load_model
     from acvram.engine.model import ForwardBatch
     from acvram.memory.kvcache import BLOCK_SIZE, BlockAllocator
@@ -162,8 +165,9 @@ def test_awq_does_not_degrade_the_model_end_to_end(tokenized_checkpoint,
         awq = prefill(build(f"{fmt}-awq", fmt, stats, True), prompt)
         cos_rtn = torch.nn.functional.cosine_similarity(ref, rtn, dim=0).item()
         cos_awq = torch.nn.functional.cosine_similarity(ref, awq, dim=0).item()
-        # A guard rail, not a demonstration: on four layers of random weights
-        # the end-to-end difference between AWQ and RTN is inside the noise,
-        # so this only asserts that calibration does not make things clearly
-        # worse. The demonstration is the layer-output test above.
+        # Un garde-fou, pas une démonstration : sur quatre couches de poids
+        # aléatoires, l'écart de bout en bout entre AWQ et l'arrondi au plus
+        # proche est dans le bruit. On affirme donc seulement que la calibration
+        # n'aggrave pas nettement les choses. La démonstration est le test en
+        # sortie de couche ci-dessus.
         assert cos_awq > cos_rtn - 0.03, f"{fmt}: AWQ {cos_awq:.5f} vs RTN {cos_rtn:.5f}"

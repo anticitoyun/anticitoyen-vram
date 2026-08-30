@@ -1,26 +1,28 @@
-"""Layer-sequential activation statistics, for AWQ.
+"""Statistiques d'activation relevées couche par couche, pour AWQ.
 
-Activation-aware scaling needs to know which input channels carry large
-activations, and that cannot be read off the weights -- it is a property of
-the data. Collecting it naively would mean holding the whole model in bf16,
-which defeats the purpose on a machine that cannot hold the model in bf16 in
-the first place.
+La mise à l'échelle guidée par les activations a besoin de savoir quels canaux
+d'entrée portent de grandes activations, et cela ne se lit pas dans les poids :
+c'est une propriété des données. Le relever naïvement supposerait de tenir tout
+le modèle en bf16, ce qui n'a pas de sens sur une machine incapable de tenir le
+modèle en bf16 en premier lieu.
 
-So the collection walks the model one block at a time:
+Le relevé parcourt donc le modèle un bloc à la fois :
 
-    hidden <- embed(calibration tokens)
-    for each block:
-        materialise the block in bf16 from the source checkpoint
-        run `hidden` through it, recording every linear's input magnitudes
-        hidden <- the block's output
-        free the block
+    caché <- plongement(jetons de calibration)
+    pour chaque bloc :
+        matérialiser le bloc en bf16 depuis le point de contrôle source
+        y faire passer `caché`, en notant les magnitudes d'entrée de chaque linéaire
+        caché <- la sortie du bloc
+        libérer le bloc
 
-Peak memory is one block, not the model. This is the same structure AWQ and
-GPTQ use, and it is what makes calibrating a 70B checkpoint possible here.
+Le pic de mémoire est d'un bloc, pas du modèle. C'est la structure qu'emploient
+AWQ et GPTQ, et c'est elle qui rend possible ici la calibration d'un modèle de
+70 milliards de paramètres.
 
-Without this, ``--awq`` has nothing to work from and the converter silently
-degrades to round-to-nearest -- so the CLI treats "AWQ requested, no stats
-collected" as an error rather than quietly doing less than it claims.
+Sans cela, ``--awq`` n'a rien sur quoi travailler et le convertisseur retombe en
+silence sur l'arrondi au plus proche — le CLI traite donc « AWQ demandé, aucune
+statistique relevée » comme une erreur, plutôt que d'en faire discrètement moins
+qu'annoncé.
 """
 
 from __future__ import annotations
@@ -38,9 +40,9 @@ from .calibrate import ActStats
 
 __all__ = ["collect_activation_stats", "DEFAULT_CALIB_TEXT", "load_calib_ids"]
 
-# A deliberately mixed sample: prose, code, and non-English text, because the
-# channels that matter differ between them and a monolingual calibration set
-# biases the scales toward whatever it contained.
+# Un échantillon délibérément mêlé : prose, code et texte non anglais, parce
+# que les canaux qui comptent diffèrent d'un registre à l'autre et qu'un jeu de
+# calibration monolingue biaise les échelles vers ce qu'il contenait.
 DEFAULT_CALIB_TEXT = [
     "The quick brown fox jumps over the lazy dog. "
     "Machine learning models are trained on large corpora of text.",
@@ -62,7 +64,7 @@ DEFAULT_CALIB_TEXT = [
 
 def load_calib_ids(tokenizer, path: Optional[str], n_seqs: int,
                    seq_len: int, vocab_size: int) -> list[list[int]]:
-    """Tokenize the calibration corpus, or fall back to noise with a warning."""
+    """Tokenise le corpus de calibration, ou échoue plutôt que de rendre du bruit."""
     texts: list[str] = []
     if path and os.path.isfile(path):
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
@@ -73,11 +75,12 @@ def load_calib_ids(tokenizer, path: Optional[str], n_seqs: int,
         texts = (DEFAULT_CALIB_TEXT * ((n_seqs // len(DEFAULT_CALIB_TEXT)) + 1))[:n_seqs]
 
     if tokenizer is None:
-        # Random ids give uniform channel statistics, which makes AWQ a no-op.
-        # Returning them anyway would be worse than saying so.
+        # Des identifiants aléatoires donnent des statistiques de canaux
+        # uniformes, ce qui rend AWQ inopérant. Les rendre quand même serait
+        # pire que de le dire.
         raise ValueError(
-            "calibration needs a tokenizer; none was found in the model "
-            "directory. Pass --no-awq to convert without it.")
+            "la calibration exige un tokeniseur ; aucun n'a été trouvé dans le "
+            "répertoire du modèle. Passez --no-awq pour convertir sans lui.")
 
     out = []
     for text in texts:
@@ -85,12 +88,12 @@ def load_calib_ids(tokenizer, path: Optional[str], n_seqs: int,
         if len(ids) >= 8:
             out.append(ids)
     if not out:
-        raise ValueError("calibration corpus produced no usable sequences")
+        raise ValueError("le corpus de calibration n'a produit aucune séquence utilisable")
     return out
 
 
 class _StatCollector:
-    """Forward pre-hooks that accumulate per-channel input magnitudes."""
+    """Crochets d'avant-passe accumulant les magnitudes d'entrée par canal."""
 
     def __init__(self) -> None:
         self.stats: dict[str, ActStats] = {}
@@ -134,7 +137,7 @@ def collect_activation_stats(
     dtype: torch.dtype = torch.bfloat16,
     progress: Optional[Callable[[int, int], None]] = None,
 ) -> dict[str, ActStats]:
-    """Walk the checkpoint block by block, recording linear input statistics."""
+    """Parcourt le point de contrôle bloc par bloc, en notant les statistiques d'entrée."""
     from safetensors import safe_open
 
     dev = torch.device(device if torch.cuda.is_available()
@@ -155,7 +158,7 @@ def collect_activation_stats(
                            spec.rope_theta, spec.rope_scaling)
     embed = get("model.embed_tokens.weight").to(dtype).to(dev)
 
-    # One hidden-state tensor per calibration sequence, carried forward.
+    # Un tenseur d'état caché par séquence de calibration, transporté d'un bloc à l'autre.
     hiddens = [torch.nn.functional.embedding(
         torch.tensor(ids, device=dev), embed).to(dtype) for ids in calib_ids]
 

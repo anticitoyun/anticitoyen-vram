@@ -1,194 +1,205 @@
 # Architecture
 
-## The path a model takes
+## Le chemin que suit un modèle
 
 ```
-  HF checkpoint (safetensors, bf16)
+  point de contrôle Hugging Face (safetensors, bf16)
         |
-        |  acvram plan     ->  where does every tensor go?
+        |  acvram plan     ->  où va chaque tenseur ?
         v
-  placement plan  ---------------------------------+
+  plan de placement  ------------------------------+
         |                                          |
-        |  acvram convert  ->  quantize per        |
-        v                      destination device  |
-  acvram shards + manifest.json                    |
+        |  acvram convert  ->  quantifie selon     |
+        v                      l'appareil visé     |
+  fragments acvram + manifest.json                 |
         |                                          |
         |  acvram serve                            |
         v                                          v
-  loader ------> placed model ------> engine ------> OpenAI HTTP
+  chargeur ----> modèle placé ----> moteur ----> HTTP OpenAI
 ```
 
-The plan is computed **before** conversion and stored **inside** the converted
-model's manifest. That is what removes an entire class of bug: at load time
-there is never a question of whether this GPU can read this tensor, because
-the tensor was written for that GPU.
+Le plan est calculé **avant** la conversion et rangé **dans** le manifeste du
+modèle converti. C'est ce qui supprime toute une classe de bogues : au
+chargement, la question « ce GPU sait-il lire ce tenseur ? » ne se pose jamais,
+parce que le tenseur a été écrit pour ce GPU.
 
-## The planner
+## Le planificateur
 
-`memory/tiering.py`. Given a `ModelSpec` and a `Rig`, it produces a `Plan`.
+`memory/tiering.py`. À partir d'un `ModelSpec` et d'un `Rig`, il produit un
+`Plan`.
 
-It works from a memory-bound model of decode: producing one token means
-reading every *active* weight once, so the time is
+Il raisonne sur un modèle de décodage limité par la mémoire : produire un jeton
+revient à lire une fois chaque poids *actif*, donc le temps vaut
 
 ```
-  sum over layers of:
-      resident   ->  active_bytes / vram_bandwidth
-      streamed   ->  max(active_bytes / pcie_bandwidth,
-                         active_bytes / vram_bandwidth)      # prefetch overlaps
-  + one host-staged hop per GPU boundary crossing
+  somme sur les couches de :
+      résident  ->  octets_actifs / bande_passante_vram
+      streamé   ->  max(octets_actifs / bande_passante_pcie,
+                        octets_actifs / bande_passante_vram)   # le préchargement recouvre
+  + un saut par le tampon hôte à chaque changement de GPU
 ```
 
-`active_bytes` is the whole layer for a dense block, and only the routed
-experts for an MoE block — which is the entire reason a 235B MoE and a 70B
-dense model behave so differently on the same machine.
+`octets_actifs` vaut toute la couche pour un bloc dense, et seulement les
+experts routés pour un bloc à mélange d'experts — ce qui explique à lui seul
+pourquoi un modèle MoE de 235 milliards de paramètres et un modèle dense de 70
+se comportent si différemment sur la même machine.
 
-Four decisions, in order:
+Quatre décisions, dans cet ordre :
 
-1. **KV cache budget.** Taken first, because it scales with traffic while
-   weights do not.
-2. **Pipeline stages.** Contiguous layer ranges per GPU, sized so the pipeline
-   crosses a GPU boundary exactly once. GeForce boards have no NVLink and
-   NVIDIA disables PCIe P2P on them, so a crossing stages through pinned host
-   memory — cheap for one hidden state per token, ruinous if it happened per
-   layer.
-3. **Attention placement.** Pinned to its stage's GPU whenever it fits. It is
-   small and it is on the latency-critical path.
-4. **MLP and experts.** Fill VRAM front to back; the remainder goes to host
-   RAM. Leftover VRAM becomes an LRU cache for hot experts.
+1. **Budget du cache KV.** Pris en premier, parce qu'il croît avec le trafic
+   alors que les poids, non.
+2. **Tranches du pipeline.** Des plages de couches contiguës par GPU,
+   dimensionnées pour que le pipeline ne franchisse qu'une seule fois une
+   frontière entre cartes. Les cartes GeForce n'ont pas de NVLink et NVIDIA y
+   désactive le pair-à-pair PCIe : un franchissement transite donc par la
+   mémoire hôte épinglée — négligeable pour un état caché par jeton, ruineux si
+   cela arrivait à chaque couche.
+3. **Placement de l'attention.** Épinglée sur le GPU de sa tranche dès qu'elle y
+   tient. Elle est petite et se trouve sur le chemin critique de la latence.
+4. **MLP et experts.** Remplissent la VRAM de l'avant vers l'arrière ; le reste
+   part en RAM hôte. La VRAM qui subsiste devient un cache LRU d'experts
+   fréquents.
 
-`auto_plan` then searches over (number of GPUs used) × (KV cache fraction) and
-ranks by estimated decode throughput, rejecting anything that overflows or
-cannot hold one full context.
+`auto_plan` explore ensuite le produit (nombre de GPU utilisés) × (fraction de
+VRAM pour le cache KV) et classe par débit de décodage estimé, en rejetant toute
+configuration qui déborde ou qui ne tient pas un contexte complet.
 
 ## Formats
 
 | | NVFP4 | INT4 |
 |---|---|---|
-| element | E2M1 (4 bit) | uint4 |
-| scale | FP8 E4M3, one per 16 | FP16, one per 128 |
-| zero point | none (symmetric) | uint4, one per 128 |
-| global | FP32 per tensor | none |
-| bits/weight | 4.50 | 4.156 |
-| dequantized as | `level * e4m3(block) * global` | `(q - zero) * scale` |
+| élément | E2M1 (4 bits) | uint4 |
+| échelle | FP8 E4M3, une pour 16 | FP16, une pour 128 |
+| point zéro | aucun (symétrique) | uint4, un pour 128 |
+| échelle globale | FP32 par tenseur | aucune |
+| bits par poids | 4,50 | 4,156 |
+| déquantification | `niveau × e4m3(bloc) × globale` | `(q − zéro) × échelle` |
 
-The FP32 global scale in NVFP4 exists because E4M3 saturates at 448: it is
-chosen as `amax / (6 * 448)` so the largest block scale lands exactly on that
-ceiling, whatever the tensor's dynamic range.
+L'échelle globale en FP32 du NVFP4 existe parce que l'E4M3 sature à 448 : on la
+choisit égale à `amax / (6 × 448)`, de sorte que la plus grande échelle de bloc
+atterrisse exactement sur ce plafond, quelle que soit la dynamique du tenseur.
 
-## Kernels
+## Noyaux de calcul
 
-Two entry points per format:
+Deux points d'entrée par format :
 
-* `*_dequant` — materialise the matrix in a compute dtype, then hand it to
-  cuBLAS. This is the **prefill** path: the dequantization cost is amortised
-  over the batch, and cuBLAS beats anything hand-rolled.
-* `*_gemv` — fused dequantize-and-multiply for one to eight rows. This is the
-  **decode** path, purely memory bound; the point is to read 4-bit weights
-  from global memory and never write a 16-bit copy.
+* `*_dequant` — matérialise la matrice dans un type de calcul, puis laisse
+  cuBLAS faire le produit. C'est le chemin du **prefill** : le coût de
+  déquantification s'amortit sur tout le lot, et cuBLAS bat tout produit écrit à
+  la main.
+* `*_gemv` — déquantification et multiplication fusionnées, pour un lot de 1 à
+  8. C'est le chemin du **décodage**, purement limité par la mémoire : il s'agit
+  de lire les poids 4 bits depuis la mémoire globale sans jamais en écrire une
+  copie 16 bits.
 
-The threshold between them is `gemv_threshold=8` in `kernels/__init__.py`.
+Le seuil entre les deux est `gemv_threshold=8` dans `kernels/__init__.py`.
 
-`kernels/__init__.py` compiles the extension on first use, emitting code for
-exactly the architectures present. If the build fails for any reason it warns
-once and falls back to the PyTorch reference — slow, but numerically identical
-and enough for the test suite to run anywhere.
+`kernels/__init__.py` compile l'extension au premier usage, en n'émettant du
+code que pour les architectures présentes. Si la compilation échoue pour une
+raison quelconque, il avertit une fois et retombe sur l'implémentation PyTorch
+de référence — lente, mais numériquement identique, et suffisante pour que la
+suite de tests s'exécute n'importe où.
 
-## Engine
+## Moteur
 
-`engine/runner.py` runs a continuous batch: at each step it admits whatever
-new requests the free KV blocks can pay for, prefills them one at a time (a
-long prompt mixed into a decode batch would stall everything behind it),
-decodes one token for everything running, and frees a sequence's blocks the
-moment it stops.
+`engine/runner.py` fait tourner un lot continu : à chaque étape il admet autant
+de requêtes en attente que les blocs KV libres le permettent, précalcule chacune
+séparément (une longue invite mêlée à un lot de décodage bloquerait tout ce qui
+la suit), décode un jeton pour tout ce qui tourne, et libère les blocs d'une
+séquence dès qu'elle s'arrête.
 
-It is single-threaded on purpose. The model's layers are spread across two
-GPUs and host memory and a step touches them in sequence; threads would
-contend without adding parallelism. Concurrency comes from batching. The
-asyncio server bridges to it with one background thread and per-request
-queues.
+Il est monothread à dessein. Les couches du modèle sont réparties sur deux GPU
+et la mémoire hôte, et une étape les touche en série ; des fils d'exécution se
+disputeraient les mêmes appareils sans ajouter de parallélisme. La concurrence
+vient du lot, pas des fils. Le serveur asynchrone fait le lien avec un fil
+d'arrière-plan et une file par requête.
 
-## Streaming weights
+## Poids streamés
 
-`engine/layers.py:StreamedWeight`. Host-resident weights live in **pinned**
-memory — pageable memory would force the driver to stage the copy
-synchronously and the overlap would vanish — and are copied on a side CUDA
-stream into a double buffer. `ACVRamModel.forward` starts layer *i+1*'s
-transfer before running layer *i*, so a streamed layer costs
-`max(copy, compute)` rather than their sum. That is exactly what the planner's
-cost model assumes; if you change one, change the other.
+`engine/layers.py:StreamedWeight`. Les poids résidant en RAM vivent en mémoire
+**épinglée** — une mémoire paginable forcerait le pilote à sérialiser la copie
+et le recouvrement disparaîtrait — et sont copiés sur un flux CUDA annexe vers
+un double tampon. `ACVRamModel.forward` lance le transfert de la couche *i+1*
+avant d'exécuter la couche *i*, de sorte qu'une couche streamée coûte
+`max(copie, calcul)` et non leur somme. C'est exactement ce que suppose le
+modèle de coût du planificateur : si l'un change, l'autre doit changer.
 
-## Prefix caching
+## Cache de préfixe
 
-`memory/kvcache.py:BlockAllocator` is both the free list and the prefix cache,
-because they compete for the same blocks.
+`memory/kvcache.py:BlockAllocator` est à la fois la liste des blocs libres et le
+cache de préfixe, parce que les deux se disputent la même ressource.
 
-A block's contents are determined by the tokens that produced it *and* every
-token before them, so blocks are addressed by a chained hash:
+Le contenu d'un bloc est déterminé par les jetons qui l'ont produit *et* par
+tous ceux qui précèdent, d'où un hachage chaîné :
 
 ```
-h_0 = hash((0,     tokens[0:16]))
-h_1 = hash((h_0,   tokens[16:32]))
-h_i = hash((h_{i-1}, tokens[16i:16i+16]))
+h_0 = hachage((0,     jetons[0:16]))
+h_1 = hachage((h_0,   jetons[16:32]))
+h_i = hachage((h_{i-1}, jetons[16i:16i+16]))
 ```
 
-Chaining is not decoration. The same 16 tokens appearing in two different
-contexts do not produce the same keys and values, because attention saw
-different history; hashing the span alone would happily serve one sequence's
-cache to another.
+Le chaînage n'est pas décoratif. Les mêmes seize jetons apparaissant dans deux
+contextes différents ne produisent pas les mêmes clés et valeurs, puisque
+l'attention a vu une histoire différente ; hacher la seule tranche servirait
+volontiers le cache d'une séquence à une autre.
 
-Only **complete** blocks are published. A half-filled block matched by a hash
-naming content it does not hold yet would hand a later request keys and values
-that were never written.
+Seuls les blocs **complets** sont publiés. Un bloc à moitié rempli, retrouvé par
+un hachage qui décrit un contenu qu'il ne porte pas encore, livrerait à une
+requête ultérieure des clés et des valeurs jamais écrites.
 
-On release, a block whose contents are still identifiable goes to the back of
-an LRU queue instead of the free list, and is recycled only when the pool runs
-dry — so the cache survives between requests without ever refusing an
-allocation it could have served.
+À la libération, un bloc dont le contenu reste identifiable part en fin de file
+LRU au lieu de rejoindre les blocs libres, et n'est recyclé que lorsque la
+réserve s'épuise — le cache survit donc entre les requêtes sans jamais refuser
+une allocation qu'il aurait pu servir.
 
-One block is always held back from a match: a request whose prompt is entirely
-cached still needs a token to run through the model, or there is nothing to
-produce logits from.
+Un bloc est toujours retenu lors d'une correspondance : une requête dont
+l'invite est entièrement en cache a tout de même besoin d'un jeton à faire
+traverser le modèle, sans quoi il n'y a rien pour produire des logits.
 
-## Speculative decoding
+## Décodage spéculatif
 
-`engine/speculative.py`. The verification batch is `[last produced token] +
-[K proposals]`, fed at absolute positions `n-1 .. n+K-1`. Feeding the last
-produced token is not overhead: its keys and values were never written,
-because a token only enters the cache when it is fed. So K+1 positions give
-exactly the K+1 predictions needed.
+`engine/speculative.py`. Le lot de vérification est `[dernier jeton produit] +
+[K propositions]`, présenté aux positions absolues `n-1 .. n+K-1`. Fournir le
+dernier jeton produit n'est pas un surcoût : ses clés et valeurs n'ont jamais
+été écrites, puisqu'un jeton n'entre dans le cache qu'au moment où on le
+présente. Les K+1 positions donnent donc exactement les K+1 prédictions
+nécessaires.
 
-Rejected positions leave stale entries in the cache beyond the sequence's
-length. Nothing reads past `seq_len`, and the next step overwrites them.
+Les positions rejetées laissent des entrées périmées dans le cache au-delà de la
+longueur de la séquence. Rien ne lit au-delà de `seq_len`, et l'étape suivante
+les écrase.
 
-Acceptance uses the standard rejection rule. For a proposer with no
-distribution (n-gram), q is a point mass at the proposal, so the accept
-probability is `p(x)` and a rejection resamples from `p` with that token
-removed — which is exact, not an approximation.
+L'acceptation suit la règle de rejet standard. Pour un propositeur sans
+distribution (les n-grammes), q est une masse de Dirac sur la proposition : la
+probabilité d'acceptation vaut donc `p(x)`, et un rejet rééchantillonne dans `p`
+privé de ce jeton — ce qui est exact, et non une approximation.
 
-## The host tier as a compute device
+## L'étage hôte comme appareil de calcul
 
-`DecoderLayer` carries two devices: attention runs on `self.device`, the MLP on
-`self.mlp_device`. When the planner decides a host-resident MLP is better
-computed in place, only the hidden state crosses the bus — `[tokens, hidden]`,
-a few kilobytes per decoded token against gigabytes of weights.
+`DecoderLayer` porte deux appareils : l'attention s'exécute sur `self.device`,
+le MLP sur `self.mlp_device`. Quand le planificateur juge qu'un MLP résidant en
+RAM vaut mieux calculé sur place, seul l'état caché traverse le bus —
+`[jetons, dimension]`, quelques kilooctets par jeton décodé face à des
+gigaoctets de poids.
 
-The decision is made in `plan_placement`, comparing the executing GPU's
-measured host link against `PlannerOptions.host_compute_gb_s`. `acvram bench
---what bandwidth` prints both numbers and the resulting recommendation.
+La décision se prend dans `plan_placement`, en comparant le lien hôte mesuré du
+GPU exécutant à `PlannerOptions.host_compute_gb_s`. `acvram bench --what
+bandwidth` affiche les deux nombres et la recommandation qui en découle.
 
-## Kernel layout
+## Répartition des noyaux
 
-Three backends, all numerically identical:
+Trois implémentations, numériquement identiques :
 
-| backend | file | when |
+| implémentation | fichier | quand |
 |---|---|---|
-| CUDA | `acvram_kernels.cu` | weights on a GPU |
-| CPU | `acvram_cpu.cpp` (ctypes) | weights in host RAM |
-| reference | `quant/*.py` | anything that failed to build |
+| CUDA | `acvram_kernels.cu` | poids sur un GPU |
+| processeur | `acvram_cpu.cpp` (ctypes) | poids en RAM hôte |
+| référence | `quant/*.py` | tout ce qui n'a pas pu se compiler |
 
-The CUDA GEMV gets its speed from three things: `uint2` loads carrying 16
-packed weights (exactly one NVFP4 scale block, and a whole number of INT4
-groups, so a thread never straddles a scale boundary); four output rows per
-block, so the activation slice is read once and reused; and split-K when the
-matrix is too short to fill the device, which the small projections of a GQA
-attention block always are.
+Le GEMV CUDA tire sa vitesse de trois choses : des chargements `uint2` portant
+16 poids empaquetés (exactement un bloc d'échelle NVFP4, et un nombre entier de
+groupes INT4, si bien qu'un fil ne chevauche jamais une frontière d'échelle) ;
+quatre lignes de sortie par bloc, de sorte que la tranche d'activation est lue
+une fois et réutilisée ; et un découpage de la réduction sur K quand la matrice
+est trop courte pour occuper l'appareil, ce qui est toujours le cas des petites
+projections d'un bloc d'attention à requêtes groupées.

@@ -7,12 +7,14 @@ import torch
 
 @pytest.fixture(scope="session")
 def tiny_checkpoint(tmp_path_factory):
-    """A 4-layer llama-shaped checkpoint, small enough to convert in a second.
+    """Un point de contrôle de 4 couches, de forme llama, assez petit pour être
+    converti en une seconde.
 
-    Seeded. Without a seed the whole suite is non-deterministic, and the tests
-    that compare quantization formats on this model sit close enough to the
-    noise floor that a different draw flips them -- which is exactly how a
-    green run in one checkout became a red one in another.
+    Avec une graine fixe. Sans elle, toute la suite est non déterministe, et les
+    tests qui comparent des formats de quantification sur ce modèle sont assez
+    proches du plancher de bruit pour qu'un tirage différent les fasse basculer
+    — c'est exactement ainsi qu'une exécution verte dans un répertoire de travail
+    est devenue rouge dans une extraction propre.
     """
     from safetensors.torch import save_file
 

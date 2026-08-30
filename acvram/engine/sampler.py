@@ -1,8 +1,9 @@
-"""Token sampling: temperature, top-k, top-p, repetition and presence penalties.
+"""Échantillonnage des jetons : température, top-k, top-p, pénalités de
+répétition et de présence.
 
-Everything runs batched on the logits tensor. The order is the one the OpenAI
-API implies: penalties adjust the raw logits, then temperature, then the
-truncation filters, then a single multinomial draw.
+Tout s'exécute par lot sur le tenseur de logits. L'ordre est celui qu'implique
+l'API OpenAI : les pénalités ajustent les logits bruts, puis la température,
+puis les filtres de troncature, puis un unique tirage multinomial.
 """
 
 from __future__ import annotations
@@ -47,8 +48,8 @@ def _apply_penalties(logits: torch.Tensor, history: list[list[int]],
         ids = torch.tensor(sorted(set(toks)), device=logits.device, dtype=torch.long)
         if p.repetition_penalty != 1.0:
             vals = logits[i, ids]
-            # Dividing positives and multiplying negatives keeps the direction
-            # of the penalty consistent regardless of the logit's sign.
+            # Diviser les valeurs positives et multiplier les négatives garde
+            # le sens de la pénalité cohérent quel que soit le signe du logit.
             logits[i, ids] = torch.where(
                 vals > 0, vals / p.repetition_penalty, vals * p.repetition_penalty)
         if p.presence_penalty:
@@ -65,7 +66,7 @@ def sample(logits: torch.Tensor, params: list[SamplingParams],
            history: Optional[list[list[int]]] = None,
            generator: Optional[torch.Generator] = None
            ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Returns ``(token_ids, logprobs_of_chosen)`` for a ``[batch, vocab]`` tensor."""
+    """Rend ``(identifiants, logprobs des choisis)`` pour un tenseur ``[lot, vocabulaire]``."""
     logits = logits.to(torch.float32).clone()
     if history is not None:
         logits = _apply_penalties(logits, history, params)
@@ -90,8 +91,8 @@ def sample(logits: torch.Tensor, params: list[SamplingParams],
         if 0.0 < p.top_p < 1.0:
             sorted_logits, sorted_idx = torch.sort(scaled[i], descending=True)
             cumulative = torch.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
-            # Keep the first token that crosses the threshold, so top_p never
-            # empties the distribution.
+            # On garde le premier jeton qui franchit le seuil, pour que top_p
+            # ne vide jamais la distribution.
             drop = cumulative - torch.softmax(sorted_logits, dim=-1) > p.top_p
             sorted_logits[drop] = float("-inf")
             scaled[i] = torch.full_like(scaled[i], float("-inf")).scatter(

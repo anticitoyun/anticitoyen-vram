@@ -1,4 +1,4 @@
-"""The codecs, checked against their own definitions."""
+"""Les codecs, vérifiés face à leurs propres définitions."""
 
 import math
 
@@ -15,14 +15,14 @@ from acvram.quant.nvfp4 import (E2M1_LEVELS, dequantize_nvfp4, pack_e2m1,
 
 
 def test_e2m1_grid_is_exact():
-    """Values already on the E2M1 grid must survive a round trip untouched."""
+    """Des valeurs déjà sur la grille E2M1 doivent traverser l'aller-retour intactes."""
     w = torch.tensor([E2M1_LEVELS], dtype=torch.float32).repeat(4, 2)
     t = quantize_nvfp4(w)
     assert torch.equal(dequantize_nvfp4(t, torch.float32), w)
 
 
 def test_e2m1_rounds_ties_to_even():
-    # Midpoints must land on an even code, not simply round up or down.
+    # Les milieux doivent tomber sur un code pair, pas simplement monter ou descendre.
     m = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
     assert round_to_e2m1(m).tolist() == [0, 2, 2, 4, 4, 6, 6]
 
@@ -41,9 +41,9 @@ def test_nvfp4_roundtrip(shape):
 
 
 def test_nvfp4_bits_per_weight():
-    # 4 bits per element plus one E4M3 byte per 16 of them. The single fp32
-    # per-tensor global scale puts it a hair above 4.5, which is why the
-    # tolerance is not exact.
+    # 4 bits par élément, plus un octet E4M3 pour 16 d'entre eux. L'unique
+    # échelle globale fp32 par tenseur place le résultat un cheveu au-dessus de
+    # 4,5 : d'où une tolérance qui n'est pas exacte.
     t = quantize_nvfp4(torch.randn(512, 4096) * 0.02)
     assert 4.5 <= t.bits_per_weight < 4.501
 
@@ -67,7 +67,7 @@ def test_all_zero_weight_stays_zero():
 
 
 def test_format_ordering_by_size_and_error():
-    """More bits must mean fewer bytes lost and better fidelity."""
+    """Plus de bits doit signifier plus d'octets et une meilleure fidélité."""
     w = torch.randn(256, 1024) * 0.02
     prev_bytes, prev_err = 0, 1.0
     for fmt in ("int4_awq", "nvfp4", "int8", "bf16"):
@@ -86,7 +86,7 @@ def test_hadamard_is_orthonormal_and_involutive():
 
 
 def test_hadamard_handles_non_power_of_two():
-    # 11008 = 256 * 43: block-diagonal over the largest power-of-two divisor.
+    # 11008 = 256 × 43 : bloc-diagonal sur le plus grand diviseur puissance de deux.
     assert largest_pow2_divisor(11008) == 256
     x = torch.randn(2, 11008)
     assert torch.allclose(x.norm(dim=-1), hadamard_transform(x).norm(dim=-1),
@@ -94,7 +94,7 @@ def test_hadamard_handles_non_power_of_two():
 
 
 def test_hadamard_helps_int4_on_outlier_channels():
-    """The rotation exists to spread outliers; check that it does."""
+    """La rotation existe pour étaler les valeurs aberrantes ; vérifions-le."""
     torch.manual_seed(0)
     w = torch.randn(256, 1024) * 0.02
     w[:, ::64] *= 8.0

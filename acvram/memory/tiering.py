@@ -1,31 +1,34 @@
-"""Placement planner: which layer lives where, and in which format.
+"""Planificateur de placement : quelle couche vit où, et dans quel format.
 
-The rig has three memory tiers with wildly different characteristics:
+La machine offre trois étages de mémoire aux caractéristiques très éloignées :
 
-    tier        size    read bandwidth   format
-    ---------   -----   --------------   ---------
-    RTX 5090     32 GB      ~1790 GB/s   NVFP4   (4.50 bpw)
-    RTX 3080 Ti  12 GB       ~912 GB/s   INT4    (4.16 bpw)
-    DDR5 host    96 GB    ~70 GB/s local
-                          but only as fast as the PCIe link when streamed
+    étage         taille   bande passante   format
+    -----------   ------   --------------   ---------
+    RTX 5090       32 Go     ~1790 Go/s     NVFP4  (4,50 bits/poids)
+    RTX 3080 Ti    12 Go      ~912 Go/s     INT4   (4,16 bits/poids)
+    DDR5 hôte      96 Go     ~70 Go/s en local, mais limitée à la vitesse
+                             du lien PCIe dès qu'on transfère
 
-Decode of a single token is memory-bound: the time to produce one token is
-essentially the time to read every active weight once. So the planner's job
-is to minimise total read time subject to the capacity of each tier, and the
-crucial asymmetry is that a *streamed* layer is limited by its PCIe link, not
-by VRAM bandwidth -- roughly 55 GB/s on a Gen5 x16 slot, and only ~7 GB/s on
-a chipset-attached Gen4 x4 slot.
+Décoder un seul jeton est limité par la mémoire : le temps de produire un jeton
+est essentiellement le temps de lire une fois chaque poids actif. Le travail du
+planificateur est donc de minimiser le temps de lecture total sous la contrainte
+de capacité de chaque étage, et l'asymétrie décisive est qu'une couche
+*transférée* est limitée par son lien PCIe et non par la bande passante de la
+VRAM — environ 55 Go/s sur un port Gen5 x16, et seulement 7 Go/s sur un port
+Gen4 x4 relié au chipset.
 
-Two structural facts drive every decision here:
+Deux faits structurels guident chaque décision :
 
-* A sparse MoE layer only reads ``top_k`` experts per token. A 235B MoE with
-  8 of 128 experts active reads ~5% of its weights, so host RAM becomes a
-  perfectly reasonable place for experts -- this is what makes 96 GB of DDR5
-  worth more than it looks.
-* GeForce boards have no NVLink and NVIDIA disables PCIe P2P on them, so a
-  GPU-to-GPU handoff goes through pinned host memory. That handoff is one
-  hidden-state vector per token (a few KB), so it is cheap -- but it means
-  the pipeline should cross between GPUs exactly once.
+* Une couche à mélange d'experts creux ne lit que ``top_k`` experts par jeton.
+  Un modèle MoE de 235 milliards de paramètres dont 8 experts sur 128 sont
+  actifs lit environ 5 % de ses poids : la mémoire vive devient alors un
+  emplacement parfaitement raisonnable pour les experts, et c'est ce qui rend
+  96 Go de DDR5 plus précieux qu'il n'y paraît.
+* Les cartes GeForce n'ont pas de NVLink et NVIDIA y désactive le pair-à-pair
+  PCIe : un passage d'un GPU à l'autre transite donc par la mémoire hôte
+  épinglée. Ce passage ne transporte qu'un vecteur d'état caché par jeton,
+  quelques kilooctets, donc il est bon marché — mais cela impose que le pipeline
+  ne franchisse qu'une seule fois la frontière entre les cartes.
 """
 
 from __future__ import annotations
@@ -43,13 +46,15 @@ __all__ = ["Tier", "LayerPlacement", "Plan", "PlannerOptions", "plan_placement"]
 MB = 1024 ** 2
 GB = 1024 ** 3
 
-# Per-GPU overhead we cannot allocate: CUDA context, cuBLAS/cuDNN workspaces,
-# the allocator's own bookkeeping, and whatever the display server holds.
+# Surcoût par GPU que l'on ne peut pas allouer : contexte CUDA, tampons de
+# travail de cuBLAS et cuDNN, comptabilité propre de l'allocateur, et ce que
+# retient le serveur d'affichage.
 CUDA_CONTEXT_RESERVE = 800 * MB
 FRAGMENTATION_MARGIN = 0.03
 
-# Nameplate dense throughput, used only to rank prefill options. These are
-# estimates, not measurements: `acvram bench` replaces them with real numbers.
+# Débits denses de plaque signalétique, utilisés seulement pour classer les
+# options de prefill. Ce sont des estimations, pas des mesures : `acvram bench`
+# les remplace par de vrais nombres.
 TFLOPS = {
     120: {"nvfp4": 838.0, "fp8": 419.0, "bf16": 209.0, "fp16": 209.0},
     89:  {"fp8": 660.0, "bf16": 330.0, "fp16": 330.0},
@@ -76,13 +81,14 @@ class Tier:
 
 @dataclass
 class LayerPlacement:
-    """Where one transformer block lives.
+    """Où vit un bloc de transformeur.
 
-    Attention and MLP are placed independently. That distinction is the whole
-    point for a sparse MoE: the attention block of a Qwen3-235B layer is ~71 M
-    parameters while its 128 experts are ~2.4 B, so pinning attention in VRAM
-    costs almost nothing and keeps the latency-critical path off the PCIe bus,
-    while the experts -- of which only 8 are read per token -- live in host RAM.
+    L'attention et le MLP sont placés indépendamment. Cette distinction est tout
+    l'intérêt pour un MoE creux : le bloc d'attention d'une couche de
+    Qwen3-235B compte environ 71 millions de paramètres quand ses 128 experts en
+    comptent 2,4 milliards. Épingler l'attention en VRAM ne coûte donc presque
+    rien et garde le chemin critique de la latence hors du bus PCIe, tandis que
+    les experts — dont 8 seulement sont lus par jeton — résident en mémoire vive.
     """
 
     index: int
@@ -151,6 +157,11 @@ class Plan:
     expert_cache_bytes: dict[str, int] = field(default_factory=dict)
     stage_ranges: dict[str, tuple[int, int]] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    # Drapeau structuré plutôt qu'une recherche dans le texte des
+    # avertissements : la recherche d'une sous-chaîne anglaise dans un message
+    # destiné à l'utilisateur a silencieusement cessé de fonctionner le jour où
+    # ce message est passé en français.
+    overflowed: bool = False
     est_decode_tok_s: float = 0.0
     est_prefill_tok_s: float = 0.0
     est_bytes_per_token: int = 0
@@ -174,6 +185,7 @@ class Plan:
             "est_decode_tok_s": round(self.est_decode_tok_s, 2),
             "est_prefill_tok_s": round(self.est_prefill_tok_s, 1),
             "est_bytes_per_token": self.est_bytes_per_token,
+            "overflowed": self.overflowed,
             "warnings": self.warnings,
         }
 
@@ -181,55 +193,55 @@ class Plan:
         return self.layers[i].exec_device
 
     def render(self) -> str:
-        lines = [f"placement plan for {self.model}", ""]
+        lines = [f"plan de placement pour {self.model}", ""]
         w = max([len(t.name) for t in self.tiers] + [6])
-        lines.append(f"  {'tier':<{w}}  {'format':<9} {'capacity':>10} "
-                     f"{'weights':>10} {'KV':>10}  {'stage':<12}")
+        lines.append(f"  {'etage':<{w}}  {'format':<9} {'capacite':>10} "
+                     f"{'poids':>10} {'KV':>10}  {'tranche':<14}")
         for t in self.tiers:
             used = self.bytes_per_tier.get(t.name, 0)
             kv = self.kv_budget.get(t.name, 0)
             rng = self.stage_ranges.get(t.name)
-            stage = f"layers {rng[0]}-{rng[1]}" if rng else "-"
+            stage = f"couches {rng[0]}-{rng[1]}" if rng else "-"
             lines.append(f"  {t.name:<{w}}  {t.weight_format:<9} {_h(t.capacity):>10} "
-                         f"{_h(used):>10} {_h(kv):>10}  {stage:<12}")
+                         f"{_h(used):>10} {_h(kv):>10}  {stage:<14}")
         lines.append("")
         host_attn = [l.index for l in self.layers if l.attn_storage == "cpu"]
         host_mlp = [l.index for l in self.layers if l.mlp_storage == "cpu"]
-        lines.append(f"  weights total      {_h(self.total_weight_bytes)}")
-        lines.append(f"  read per token     {_h(self.est_bytes_per_token)}")
-        lines.append(f"  KV per token       {_h(self.kv_bytes_per_token)}"
-                     f"  -> {self.kv_max_tokens:,} tokens cached")
-        lines.append(f"  embeddings         {self.embed_device}")
+        lines.append(f"  poids au total     {_h(self.total_weight_bytes)}")
+        lines.append(f"  lu par jeton       {_h(self.est_bytes_per_token)}")
+        lines.append(f"  KV par jeton       {_h(self.kv_bytes_per_token)}"
+                     f"  -> {self.kv_max_tokens:,} jetons en cache")
+        lines.append(f"  plongements        {self.embed_device}")
         lines.append(f"  lm_head            {self.lm_head_device}")
         if host_mlp:
-            lines.append(f"  MLP in host RAM    {_compact_ranges(host_mlp)}")
+            lines.append(f"  MLP en RAM hote    {_compact_ranges(host_mlp)}")
             on_cpu = [l.index for l in self.layers if l.mlp_exec == "cpu"]
             if on_cpu:
-                lines.append(f"    computed on CPU  {_compact_ranges(on_cpu)}"
-                             f"  (DDR5 is wider than the PCIe link)")
+                lines.append(f"    calcule sur CPU  {_compact_ranges(on_cpu)}"
+                             f"  (la DDR5 est plus large que le lien PCIe)")
             streamed = [l.index for l in self.layers
                         if l.mlp_storage == "cpu" and l.mlp_exec == "gpu"]
             if streamed:
-                lines.append(f"    streamed to GPU  {_compact_ranges(streamed)}")
+                lines.append(f"    transfere au GPU {_compact_ranges(streamed)}")
         if host_attn:
-            lines.append(f"  attn in host RAM   {_compact_ranges(host_attn)}")
+            lines.append(f"  attention en RAM   {_compact_ranges(host_attn)}")
         for dev, b in self.expert_cache_bytes.items():
             if b:
-                lines.append(f"  expert cache       {_h(b)} on {dev}")
+                lines.append(f"  cache d'experts    {_h(b)} sur {dev}")
         lines.append("")
-        lines.append(f"  estimated decode   {self.est_decode_tok_s:.1f} tok/s  (batch 1)")
-        lines.append(f"  estimated prefill  {self.est_prefill_tok_s:,.0f} tok/s")
+        lines.append(f"  decodage estime    {self.est_decode_tok_s:.1f} jetons/s  (lot de 1)")
+        lines.append(f"  prefill estime     {self.est_prefill_tok_s:,.0f} jetons/s")
         for warn in self.warnings:
             lines.append(f"  ! {warn}")
         return "\n".join(lines)
 
 
 def _h(n: float) -> str:
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if abs(n) < 1024 or unit == "TiB":
-            return f"{int(n)} B" if unit == "B" else f"{n:.1f} {unit}"
+    for unite in ("o", "Kio", "Mio", "Gio", "Tio"):
+        if abs(n) < 1024 or unite == "Tio":
+            return f"{int(n)} o" if unite == "o" else f"{n:.1f} {unite}"
         n /= 1024
-    return f"{n:.1f} TiB"
+    return f"{n:.1f} Tio"
 
 
 def _compact_ranges(nums: list[int]) -> str:
@@ -289,14 +301,15 @@ def _bytes(n_params: float, fmt: str, group_size: int) -> int:
 
 def plan_placement(spec: ModelSpec, rig: Rig,
                    opts: Optional[PlannerOptions] = None) -> Plan:
-    """Assign every tensor to a tier and estimate what it will cost.
+    """Affecte chaque tenseur à un étage et estime ce qu'il en coûtera.
 
-    The order of decisions is deliberate. KV cache is sized first because it
-    scales with traffic and a model that cannot hold its context is useless
-    however well its weights fit. Attention comes next because it is small and
-    sits on the latency-critical path. MLP and expert weights compete for what
-    is left, and whatever loses goes to host RAM, where the cost of a miss is
-    a PCIe transfer rather than an out-of-memory error.
+    L'ordre des décisions est délibéré. Le cache KV est dimensionné en premier
+    parce qu'il croît avec le trafic, et qu'un modèle incapable de tenir son
+    contexte est inutile même si ses poids logent parfaitement. Vient ensuite
+    l'attention, parce qu'elle est petite et se trouve sur le chemin critique de
+    la latence. Les poids des MLP et des experts se disputent ce qui reste, et
+    le perdant part en mémoire vive, où le coût d'un défaut est un transfert
+    PCIe plutôt qu'une erreur de mémoire saturée.
     """
     opts = opts or PlannerOptions()
     tiers = build_tiers(rig, opts)
@@ -305,12 +318,12 @@ def plan_placement(spec: ModelSpec, rig: Rig,
     plan = Plan(model=spec.name, tiers=tiers)
 
     if not gpu_tiers:
-        plan.warnings.append("no CUDA device detected; planning a CPU-only run")
+        plan.warnings.append("aucun peripherique CUDA detecte ; plan pour processeur seul")
         gpu_tiers = []
 
     remaining = {t.name: float(t.capacity) for t in tiers}
 
-    # ---- 1. KV cache -----------------------------------------------------
+    # ---- 1. cache KV -----------------------------------------------------
     kv_per_tok = spec.kv_bytes_per_token(opts.kv_bits)
     plan.kv_bytes_per_token = kv_per_tok
     if gpu_tiers and kv_per_tok:
@@ -324,14 +337,16 @@ def plan_placement(spec: ModelSpec, rig: Rig,
         plan.kv_max_tokens = int(sum(plan.kv_budget.values()) // max(1, kv_per_tok))
         if plan.kv_max_tokens < opts.max_model_len:
             plan.warnings.append(
-                f"KV budget holds {plan.kv_max_tokens:,} tokens, less than one "
-                f"full context of {opts.max_model_len:,}; lower --max-model-len "
-                f"or raise --kv-vram-fraction")
+                f"le budget KV tient {plan.kv_max_tokens:,} jetons, moins qu'un "
+                f"contexte complet de {opts.max_model_len:,} ; baissez "
+                f"--max-model-len ou montez --kv-vram-fraction")
 
-    # ---- 2. pipeline stages ---------------------------------------------
-    # Contiguous ranges, sized in proportion to each GPU's post-KV capacity so
-    # the pipeline crosses a GPU boundary exactly once. Crossing is cheap (one
-    # hidden state through pinned host memory) but must not happen per layer.
+    # ---- 2. tranches du pipeline -----------------------------------------
+    # Des plages contiguës, dimensionnées proportionnellement à la capacité de
+    # chaque GPU une fois le cache KV retiré, pour que le pipeline ne franchisse
+    # qu'une seule frontière entre cartes. Un franchissement est bon marché — un
+    # état caché par la mémoire hôte épinglée — mais ne doit pas arriver à
+    # chaque couche.
     n = spec.num_layers
     stage_of: list[str] = []
     if gpu_tiers:
@@ -352,7 +367,7 @@ def plan_placement(spec: ModelSpec, rig: Rig,
     else:
         stage_of = ["cpu"] * n
 
-    # ---- 3. attention: pinned to its stage GPU when it fits ---------------
+    # ---- 3. attention : épinglée sur le GPU de sa tranche si elle y tient --
     placements: list[LayerPlacement] = []
     used = {t.name: 0.0 for t in tiers}
     for layer in spec.layers:
@@ -378,10 +393,11 @@ def plan_placement(spec: ModelSpec, rig: Rig,
             mlp_storage="pending", fmt=fmt, attn_bytes=a_bytes,
             mlp_bytes=m_bytes, mlp_active_bytes=m_active, is_moe=layer.is_moe))
 
-    # ---- 4. embeddings and lm_head ---------------------------------------
-    # The embedding table is a gather of one row per token: leaving it in host
-    # RAM costs a few KB of PCIe traffic. lm_head is a full vocabulary GEMM on
-    # every step, so it earns its place on the fastest GPU.
+    # ---- 4. plongements et lm_head ---------------------------------------
+    # La table de plongements n'est qu'une collecte d'une ligne par jeton : la
+    # laisser en mémoire vive coûte quelques kilooctets de trafic PCIe. lm_head
+    # est en revanche un produit matriciel sur tout le vocabulaire à chaque
+    # étape : il mérite sa place sur le GPU le plus rapide.
     embed_bytes = spec.embed_params * 2
     fastest = gpu_tiers[0].name if gpu_tiers else "cpu"
     head_fmt = gpu_tiers[0].weight_format if gpu_tiers else "int4_awq"
@@ -400,7 +416,7 @@ def plan_placement(spec: ModelSpec, rig: Rig,
     else:
         used["cpu"] += embed_bytes
 
-    # ---- 5. MLP / experts: fill VRAM front to back, spill the rest --------
+    # ---- 5. MLP et experts : remplir la VRAM d'avant en arrière -----------
     for lp in placements:
         dev = lp.exec_device
         if dev != "cpu" and remaining.get(dev, 0) >= lp.mlp_bytes:
@@ -417,16 +433,18 @@ def plan_placement(spec: ModelSpec, rig: Rig,
             remaining["cpu"] -= lp.mlp_bytes
 
     if host_tier is not None and remaining["cpu"] < 0:
+        plan.overflowed = True
         plan.warnings.append(
-            f"model overflows every tier by {_h(-remaining['cpu'])}; "
-            f"use a smaller model, or add --kv-vram-fraction 0.15 to free VRAM")
+            f"le modele deborde tous les etages de {_h(-remaining['cpu'])} ; "
+            f"prenez un modele plus petit, ou ajoutez --kv-vram-fraction 0.15")
 
-    # ---- 5b. how host-resident weights get computed ----------------------
-    # A layer left in host RAM can be copied to the GPU or computed in place.
-    # Both are memory bound and read the same bytes, so the faster one is
-    # simply whichever bus is wider: PCIe 5.0 x16 gives ~54 GB/s, dual-channel
-    # DDR5-6000 gives ~70 GB/s of streaming reads. Computing in place also
-    # leaves the GPU free rather than making it wait on a copy.
+    # ---- 5b. comment sont calculés les poids résidant en mémoire vive -----
+    # Une couche laissée en RAM peut être copiée vers le GPU ou calculée sur
+    # place. Les deux chemins sont limités par la mémoire et lisent les mêmes
+    # octets : le plus rapide est donc simplement celui dont le bus est le plus
+    # large. Le PCIe 5.0 x16 donne environ 54 Go/s, la DDR5-6000 en double canal
+    # environ 70 Go/s en lecture séquentielle. Calculer sur place laisse en
+    # outre le GPU libre au lieu de le faire attendre une copie.
     for lp in placements:
         if lp.mlp_storage != "cpu":
             lp.mlp_exec = "gpu"
@@ -440,10 +458,11 @@ def plan_placement(spec: ModelSpec, rig: Rig,
                          if t.name == lp.exec_device), 25.0)
             lp.mlp_exec = "cpu" if opts.host_compute_gb_s > link else "gpu"
 
-    # ---- 6. hot-expert cache --------------------------------------------
-    # Whatever VRAM survived becomes an LRU cache for the experts that stayed
-    # in host RAM. Routing is not uniform in practice, so a cache holding a
-    # tenth of the experts serves noticeably more than a tenth of the reads.
+    # ---- 6. cache d'experts fréquents -------------------------------------
+    # La VRAM qui subsiste devient un cache LRU pour les experts restés en
+    # mémoire vive. Le routage n'est pas uniforme en pratique : un cache
+    # contenant un dixième des experts sert donc sensiblement plus qu'un dixième
+    # des lectures.
     host_moe = [lp for lp in placements if lp.is_moe and lp.mlp_storage == "cpu"]
     if host_moe and gpu_tiers:
         for t in gpu_tiers:
@@ -455,8 +474,9 @@ def plan_placement(spec: ModelSpec, rig: Rig,
         host_expert_bytes = sum(lp.mlp_bytes for lp in host_moe)
         if host_expert_bytes:
             raw = cache_total / host_expert_bytes
-            # Mild routing skew: hot experts are hit more often than their
-            # share. Capped at 1 -- never claim more than a full hit rate.
+            # Léger biais de routage : les experts fréquents sont touchés plus
+            # souvent que leur part. Plafonné à 1, pour ne jamais annoncer plus
+            # qu'un taux de succès complet.
             hit = min(1.0, raw * 1.3)
             for lp in host_moe:
                 lp.cached_expert_fraction = hit
@@ -480,7 +500,7 @@ def _estimate(spec: ModelSpec, plan: Plan, tiers: list[Tier],
     for lp in plan.layers:
         t = by_name.get(lp.exec_device)
         if t is None or t.kind != "gpu":
-            # CPU execution: bound by DDR bandwidth.
+            # Exécution sur processeur : limitée par la bande passante DDR.
             seconds += (lp.attn_bytes + lp.mlp_active_bytes) / (70.0 * 1e9)
             bytes_read += lp.attn_bytes + lp.mlp_active_bytes
             continue
@@ -492,11 +512,12 @@ def _estimate(spec: ModelSpec, plan: Plan, tiers: list[Tier],
             seconds += lp.attn_bytes / (t.read_bandwidth * 1e9)
         bytes_read += lp.attn_bytes
 
-        # MLP / experts
+        # MLP et experts
         active = lp.mlp_active_bytes
         if lp.mlp_storage == "cpu" and lp.mlp_exec == "cpu":
-            # Computed where it lies: bounded by DDR bandwidth, plus a hidden
-            # state crossing the bus in each direction (a few KB -- noise).
+            # Calculé sur place : limité par la bande passante DDR, plus un
+            # état caché qui traverse le bus dans chaque sens — quelques
+            # kilooctets, donc du bruit.
             seconds += active / (opts.host_compute_gb_s * 1e9)
             bytes_read += active
         elif lp.mlp_storage == "cpu":
@@ -504,7 +525,7 @@ def _estimate(spec: ModelSpec, plan: Plan, tiers: list[Tier],
             from_host = active - from_cache
             t_copy = from_host / (t.link_bandwidth * 1e9)
             t_math = active / (t.read_bandwidth * 1e9)
-            seconds += max(t_copy, t_math)      # prefetch overlaps compute
+            seconds += max(t_copy, t_math)      # le préchargement recouvre le calcul
             bytes_read += int(from_host)
         else:
             seconds += active / (t.read_bandwidth * 1e9)
@@ -517,8 +538,8 @@ def _estimate(spec: ModelSpec, plan: Plan, tiers: list[Tier],
     plan.est_bytes_per_token = bytes_read
     plan.est_decode_tok_s = 1.0 / seconds if seconds > 0 else 0.0
 
-    # prefill: compute-bound, and a streamed layer's weights are read once for
-    # the whole batch rather than once per token
+    # prefill : limité par le calcul, et les poids d'une couche transférée sont
+    # lus une fois pour tout le lot au lieu d'une fois par jeton
     pf = 0.0
     for lp in plan.layers:
         t = by_name.get(lp.exec_device)
@@ -532,31 +553,33 @@ def _estimate(spec: ModelSpec, plan: Plan, tiers: list[Tier],
 
 
 # --------------------------------------------------------------------------
-# outer search
+# recherche externe
 # --------------------------------------------------------------------------
 
 
 def auto_plan(spec: ModelSpec, rig: Rig,
               opts: Optional[PlannerOptions] = None,
               verbose: bool = False) -> tuple[Plan, list[dict]]:
-    """Search the small space of sane configurations and keep the best.
+    """Explore le petit espace des configurations sensées et retient la meilleure.
 
-    ``plan_placement`` answers "given these knobs, where does everything go".
-    It cannot answer the two questions that actually decide throughput:
+    ``plan_placement`` répond à « ces réglages étant donnés, où va chaque
+    chose ». Il ne peut pas répondre aux deux questions qui décident réellement
+    du débit :
 
-    * Should the second GPU be used at all? Pipelining a model that already
-      fits on the 5090 onto the 3080 Ti makes single-stream decode *slower*,
-      because the stages run in sequence and half of them now read at
-      912 GB/s instead of 1790 GB/s. A second GPU earns its place only when it
-      keeps weights out of host RAM.
-    * How much VRAM should the KV cache get? Every gigabyte given to the cache
-      is a gigabyte of weights pushed onto the PCIe bus, and a weight read
-      over PCIe costs ~30x what it costs from VRAM. Past the point where one
-      full context fits, more cache is close to worthless for a single stream.
+    * Faut-il seulement utiliser le second GPU ? Étendre à la 3080 Ti un modèle
+      qui tient déjà sur la 5090 rend le décodage mono-flux *plus lent*, parce
+      que les tranches s'exécutent en série et que la moitié d'entre elles lit
+      désormais à 912 Go/s au lieu de 1790. Un second GPU ne mérite sa place que
+      lorsqu'il évite de renvoyer des poids en mémoire vive.
+    * Quelle part de VRAM donner au cache KV ? Chaque gigaoctet donné au cache
+      est un gigaoctet de poids repoussé sur le bus PCIe, et lire un poids par
+      le PCIe coûte environ trente fois ce qu'il coûte depuis la VRAM. Passé le
+      point où un contexte complet tient, davantage de cache ne vaut presque
+      rien pour un flux unique.
 
-    Both are answered by trying the handful of combinations and ranking them
-    on estimated decode throughput, rejecting anything that cannot hold one
-    full context or that overflows the machine.
+    On répond aux deux en essayant la poignée de combinaisons et en les classant
+    sur le débit de décodage estimé, en rejetant tout ce qui ne peut pas tenir un
+    contexte complet ou qui déborde la machine.
     """
     base = opts or PlannerOptions()
     n_gpus = len([g for g in rig.gpus])
@@ -571,7 +594,7 @@ def auto_plan(spec: ModelSpec, rig: Rig,
         for kvf in kv_fractions:
             o = PlannerOptions(**{**base.__dict__, "kv_vram_fraction": kvf})
             p = plan_placement(spec, sub, o)
-            overflow = any("overflows every tier" in w for w in p.warnings)
+            overflow = p.overflowed
             ctx_ok = p.kv_max_tokens >= base.max_model_len
             host_bytes = p.bytes_per_tier.get("cpu", 0)
             rec = {
@@ -587,8 +610,9 @@ def auto_plan(spec: ModelSpec, rig: Rig,
                 candidates.append((p, rec))
 
     if not candidates:
-        # Nothing satisfies every constraint. Report which constraint bit, and
-        # by how much, rather than silently returning a plan that cannot run.
+        # Aucune configuration ne satisfait toutes les contraintes. On dit
+        # laquelle a cédé, et de combien, plutôt que de rendre en silence un
+        # plan inexécutable.
         fits = [t for t in trials if not t["overflow"]]
         if fits:
             best = max(fits, key=lambda t: t["decode_tok_s"])
@@ -597,25 +621,25 @@ def auto_plan(spec: ModelSpec, rig: Rig,
             sub = _subset_rig(rig, best["gpus"])
             p = plan_placement(spec, sub, o)
             p.warnings.append(
-                f"no configuration holds a full {base.max_model_len:,}-token "
-                f"context; the cache was shortened to {p.kv_max_tokens:,} tokens "
-                f"so the weights fit")
+                f"aucune configuration ne tient un contexte complet de "
+                f"{base.max_model_len:,} jetons ; le cache a ete raccourci a "
+                f"{p.kv_max_tokens:,} jetons pour que les poids logent")
             return p, trials
 
-        # It does not fit anywhere. Say what it would take.
+        # Cela ne tient nulle part. Disons ce qu'il faudrait.
         p = plan_placement(spec, rig, base)
         capacity = sum(t.capacity for t in p.tiers)
         short = p.total_weight_bytes - capacity
         need_bpw = capacity * 8 / max(1, spec.total_params)
         p.warnings.append(
-            f"{spec.name} does not fit on this machine: {_h(p.total_weight_bytes)} "
-            f"of weights against {_h(capacity)} of usable capacity, "
-            f"{_h(max(0, short))} short.")
+            f"{spec.name} ne tient pas sur cette machine : {_h(p.total_weight_bytes)} "
+            f"de poids contre {_h(capacity)} de capacite utilisable, il manque "
+            f"{_h(max(0, short))}.")
         p.warnings.append(
-            f"it would need {need_bpw:.2f} bits per weight or less; the "
-            f"formats here are {bits_per_weight('nvfp4'):.2f} (NVFP4) and "
+            f"il faudrait {need_bpw:.2f} bits par poids ou moins ; les formats "
+            f"disponibles sont {bits_per_weight('nvfp4'):.2f} (NVFP4) et "
             f"{bits_per_weight('int4_awq', group_size=base.group_size):.2f} (INT4). "
-            f"Options: --host-fraction 0.95, a smaller model, or more RAM.")
+            f"Options : --host-fraction 0.95, un modele plus petit, ou plus de RAM.")
         return p, trials
 
     best_plan, best_rec = max(candidates, key=lambda pr: pr[1]["decode_tok_s"])
@@ -623,18 +647,18 @@ def auto_plan(spec: ModelSpec, rig: Rig,
         idle = [f"cuda:{g.index}" for g in
                 sorted(rig.gpus, key=lambda g: -g.vram_bandwidth_gbps)[best_rec["gpus"]:]]
         best_plan.warnings.append(
-            f"{', '.join(idle)} left idle on purpose: the model fits without it "
-            f"and adding a slower stage to the pipeline would cost throughput. "
-            f"Use it for a second model, or force it with --gpus all.")
+            f"{', '.join(idle)} laisse oisif a dessein : le modele tient sans lui, "
+            f"et ajouter une tranche plus lente au pipeline couterait du debit. "
+            f"Servez-vous-en pour un second modele, ou forcez avec --gpus all.")
     if verbose:
         best_plan.warnings.append(
-            f"chose {best_rec['gpus']} GPU(s), kv_fraction={best_rec['kv_fraction']} "
-            f"from {len(trials)} candidates")
+            f"retenu {best_rec['gpus']} GPU, kv_fraction={best_rec['kv_fraction']} "
+            f"parmi {len(trials)} candidats")
     return best_plan, trials
 
 
 def _subset_rig(rig: Rig, n_gpus: int) -> Rig:
-    """A copy of the rig exposing only the ``n_gpus`` fastest boards."""
+    """Une copie de la machine n'exposant que les ``n_gpus`` cartes les plus rapides."""
     return Rig(
         gpus=sorted(rig.gpus, key=lambda g: -g.vram_bandwidth_gbps)[:n_gpus],
         host=rig.host, cpu=rig.cpu, driver_version=rig.driver_version,
@@ -644,12 +668,13 @@ def _subset_rig(rig: Rig, n_gpus: int) -> Rig:
 
 
 def _gpu_counts(spec: Optional[str], n_gpus: int) -> list[int]:
-    """Which GPU counts the search is allowed to consider.
+    """Quels nombres de GPU la recherche a le droit d'envisager.
 
-    ``auto`` (the default) tries every count and lets throughput decide, which
-    is what leaves a slower second card idle when the model does not need it.
-    ``all`` forces every card in -- useful when you would rather have the VRAM
-    headroom for a longer context than the last few tokens per second.
+    ``auto``, la valeur par défaut, essaie tous les nombres et laisse le débit
+    trancher : c'est ce qui laisse une seconde carte plus lente oisive quand le
+    modèle n'en a pas besoin. ``all`` impose toutes les cartes — utile lorsqu'on
+    préfère la marge de VRAM pour un contexte plus long aux quelques derniers
+    jetons par seconde.
     """
     if not n_gpus:
         return [0]
@@ -660,8 +685,8 @@ def _gpu_counts(spec: Optional[str], n_gpus: int) -> list[int]:
     try:
         wanted = {int(x) for x in spec.replace(" ", "").split(",") if x != ""}
     except ValueError:
-        raise ValueError(f"--gpus expects auto, all, or indices like 0,1; "
-                         f"got {spec!r}") from None
+        raise ValueError(f"--gpus attend auto, all, ou des indices comme 0,1 ; "
+                         f"reçu {spec!r}") from None
     if not wanted:
         return [n_gpus]
     return [min(n_gpus, max(wanted) + 1)]

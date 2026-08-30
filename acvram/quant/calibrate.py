@@ -1,30 +1,32 @@
-"""Making 4 bits actually usable: AWQ channel scaling + Hadamard rotation.
+"""Rendre 4 bits réellement utilisables : mise à l'échelle AWQ et rotation de
+Hadamard.
 
-Naive 4-bit round-to-nearest costs roughly 20 dB SNR on a weight matrix,
-which is enough to visibly damage a model. Two cheap, orthogonal techniques
-recover most of it, and both are *storage-compatible* with the codecs in
-:mod:`acvram.quant.nvfp4` and :mod:`acvram.quant.int4` -- they only change
-what gets quantized, never how it is packed.
+Un arrondi naïf au plus proche sur 4 bits coûte environ 20 dB de rapport
+signal/bruit sur une matrice de poids, ce qui suffit à abîmer visiblement un
+modèle. Deux techniques peu coûteuses et orthogonales en récupèrent l'essentiel,
+et toutes deux sont *compatibles avec le stockage* des codecs de
+:mod:`acvram.quant.nvfp4` et :mod:`acvram.quant.int4` : elles ne changent que ce
+qui est quantifié, jamais la façon dont c'est empaqueté.
 
-1. Activation-aware channel scaling (AWQ)
-   Salient input channels -- the ones activations are large on -- deserve
-   more of the 4-bit budget. Scale weight column j up by s_j before
-   quantizing and divide the activation by s_j at run time; the product is
-   unchanged but the quantization grid now lands where it matters.
-   s = mean|x_j| ** alpha, with alpha found by grid search on layer output
-   error.
+1. Mise à l'échelle des canaux guidée par les activations (AWQ)
+   Les canaux d'entrée saillants — ceux sur lesquels les activations sont
+   grandes — méritent une plus grande part du budget de 4 bits. On multiplie la
+   colonne j du poids par s_j avant de quantifier, et on divise l'activation par
+   s_j à l'exécution : le produit est inchangé, mais la grille de quantification
+   atterrit désormais là où cela compte. s = moyenne|x_j| ** alpha, alpha étant
+   trouvé par recherche sur grille sur l'erreur en sortie de couche.
 
-2. Random Hadamard rotation (QuaRot / SpinQuant family)
-   Multiplying by an orthogonal Hadamard matrix spreads outliers across
-   channels, turning a heavy-tailed distribution into a near-Gaussian one
-   that a uniform 4-bit grid fits far better. Applied to both sides it
-   cancels exactly:  y = x W^T = (x H)(W H)^T  because H H^T = I.
-   This is what makes NVFP4 viable on attention projections.
+2. Rotation de Hadamard aléatoire (famille QuaRot / SpinQuant)
+   Multiplier par une matrice de Hadamard orthogonale répartit les valeurs
+   aberrantes entre les canaux, transformant une distribution à queue lourde en
+   une distribution quasi gaussienne, qu'une grille uniforme sur 4 bits épouse
+   bien mieux. Appliquée des deux côtés, elle s'annule exactement :
+   y = x W^T = (x H)(W H)^T, puisque H H^T = I.
 
-Both produce a per-layer ``ChannelScaler`` that the runtime applies to the
-input activation. The cost at decode time is one elementwise multiply (AWQ)
-and one n log n transform (Hadamard) per linear -- negligible against the
-GEMM itself.
+Toutes deux produisent un ``ChannelScaler`` par couche, que l'exécution applique
+à l'activation d'entrée. Le coût au décodage est d'une multiplication terme à
+terme (AWQ) et d'une transformée en n log n (Hadamard) par couche linéaire —
+négligeable devant le produit matriciel lui-même.
 """
 
 from __future__ import annotations
@@ -48,7 +50,7 @@ __all__ = ["ChannelScaler", "search_channel_scales", "hadamard_transform",
 
 
 def largest_pow2_divisor(n: int, cap: int = 8192) -> int:
-    """Largest power of two that divides ``n`` (bounded, for block-diagonal use)."""
+    """Plus grande puissance de deux divisant ``n``, bornée, pour un usage bloc-diagonal."""
     p = 1
     while p * 2 <= min(n, cap) and n % (p * 2) == 0:
         p *= 2
@@ -57,19 +59,20 @@ def largest_pow2_divisor(n: int, cap: int = 8192) -> int:
 
 def hadamard_transform(x: torch.Tensor, block: Optional[int] = None,
                        normalize: bool = True) -> torch.Tensor:
-    """Fast Walsh-Hadamard transform over the last dimension.
+    """Transformée de Walsh-Hadamard rapide sur la dernière dimension.
 
-    When the last dim is not a power of two the transform is applied
-    block-diagonally over the largest power-of-two divisor, which is still an
-    exact orthogonal map (a direct sum of Hadamards) and still decorrelates
-    within each block.
+    Lorsque la dernière dimension n'est pas une puissance de deux, la
+    transformée est appliquée par blocs diagonaux sur le plus grand diviseur
+    puissance de deux, ce qui reste une application orthogonale exacte — une
+    somme directe de matrices de Hadamard — et décorrèle toujours à l'intérieur
+    de chaque bloc.
     """
     n = x.shape[-1]
     b = block or largest_pow2_divisor(n)
     if b < 2:
         return x
     if n % b:
-        raise ValueError(f"hadamard block {b} does not divide {n}")
+        raise ValueError(f"le bloc de Hadamard {b} ne divise pas {n}")
     orig_shape = x.shape
     y = x.reshape(-1, n // b, b).clone()
     h = 1
@@ -86,7 +89,7 @@ def hadamard_transform(x: torch.Tensor, block: Optional[int] = None,
 
 
 def apply_hadamard_weight(weight: torch.Tensor, block: Optional[int] = None) -> torch.Tensor:
-    """Rotate a ``[out, in]`` weight along its input dimension: ``W <- W H``."""
+    """Fait tourner un poids selon sa dimension d'entrée : ``W <- W H``."""
     return hadamard_transform(weight, block=block)
 
 
@@ -97,7 +100,7 @@ def apply_hadamard_weight(weight: torch.Tensor, block: Optional[int] = None) -> 
 
 @dataclass
 class ActStats:
-    """Per-input-channel activation magnitude, collected on calibration data."""
+    """Magnitude d'activation par canal d'entrée, relevée sur des données de calibration."""
 
     mean_abs: torch.Tensor          # [in_features]
     max_abs: Optional[torch.Tensor] = None
@@ -123,10 +126,10 @@ class ActStats:
 
 @dataclass
 class ChannelScaler:
-    """What the runtime must apply to the activation before the GEMM.
+    """Ce que l'exécution applique à l'activation avant le produit matriciel.
 
-    ``x_eff = hadamard(x) / scale``  when ``hadamard`` is set, else
-    ``x_eff = x / scale``.
+    ``x_eff = hadamard(x) / échelle`` quand la rotation est active, sinon
+    ``x_eff = x / échelle``.
     """
 
     scale: Optional[torch.Tensor]      # [in_features], fp16/bf16
@@ -175,12 +178,12 @@ def search_channel_scales(
     n_grid: int = 20,
     calib_x: Optional[torch.Tensor] = None,
 ) -> tuple[ChannelScaler, float]:
-    """AWQ grid search for the per-channel scale.
+    """Recherche AWQ sur grille de l'échelle par canal.
 
-    Returns the chosen scaler and the relative output error it achieves. When
-    ``calib_x`` is given the objective is the true layer output error on real
-    activations; otherwise the activation is approximated by its per-channel
-    mean magnitude, which is what AWQ's cheap mode does.
+    Rend l'échelle retenue et l'erreur relative en sortie qu'elle atteint.
+    Lorsque ``calib_x`` est fourni, l'objectif est la véritable erreur en sortie
+    de couche sur de vraies activations ; sinon l'activation est approchée par sa
+    magnitude moyenne par canal, ce que fait le mode économique d'AWQ.
     """
     w = weight.detach().to(torch.float32)
     device = w.device
@@ -194,8 +197,9 @@ def search_channel_scales(
     if calib_x is not None:
         x = calib_x.reshape(-1, k).to(torch.float32).to(device)
     else:
-        # Surrogate: a diagonal probe weighted by channel magnitude reproduces
-        # AWQ's per-channel error weighting without storing activations.
+        # Substitut : une sonde diagonale pondérée par la magnitude des canaux
+        # reproduit la pondération d'erreur par canal d'AWQ sans conserver les
+        # activations.
         x = torch.diag(act)
 
     y_ref = x @ w.t()
@@ -207,7 +211,7 @@ def search_channel_scales(
     for i in range(n_grid + 1):
         alpha = i / n_grid
         s = act.pow(alpha)
-        s = s / s.mean().clamp(min=1e-12)            # keep the scale centred
+        s = s / s.mean().clamp(min=1e-12)            # garde l'échelle centrée
         s = s.clamp(min=1e-4, max=1e4)
         wq = _quant_dequant(w * s.unsqueeze(0), fmt, group_size)
         y = (x / s) @ wq.t()
@@ -233,11 +237,12 @@ def quantize_with_calibration(
     use_awq: bool = True,
     n_grid: int = 20,
 ) -> tuple[Any, ChannelScaler, dict]:
-    """Full per-layer pipeline: rotate, scale, quantize.
+    """Chaîne complète par couche : tourner, mettre à l'échelle, quantifier.
 
-    Order matters. The Hadamard rotation goes first because it changes the
-    channel statistics the AWQ search operates on; searching before rotating
-    would optimise a scale for a distribution that no longer exists.
+    L'ordre compte. La rotation de Hadamard vient en premier parce qu'elle
+    change les statistiques de canaux sur lesquelles opère la recherche AWQ :
+    chercher avant de tourner optimiserait une échelle pour une distribution qui
+    n'existe plus.
     """
     w = weight.detach().to(torch.float32)
     had_block = 0
@@ -265,16 +270,16 @@ def quantize_with_calibration(
     if scaler.scale is not None:
         deq = deq / scaler.scale.to(torch.float32).unsqueeze(0)
 
-    # Two different errors, and they do not move together.
+    # Deux erreurs différentes, et elles ne varient pas ensemble.
     #
-    #   w_err   how far the reconstructed weights are from the originals
-    #   out_err how far the *layer output* is, on activations that look like
-    #           the calibration set
+    #   w_err    à quelle distance les poids reconstruits sont des originaux
+    #   out_err  à quelle distance est la *sortie de couche*, sur des
+    #            activations ressemblant au jeu de calibration
     #
-    # AWQ deliberately makes w_err worse to make out_err better: it spends
-    # grid resolution on the channels the activations are actually large on.
-    # Judging AWQ by w_err would reject it every time, so out_err is the
-    # number the converter reports and ranks on.
+    # AWQ dégrade délibérément w_err pour améliorer out_err : il dépense de la
+    # résolution de grille sur les canaux où les activations sont réellement
+    # grandes. Juger AWQ sur w_err le rejetterait à chaque fois ; c'est donc
+    # out_err que le convertisseur rapporte et sur quoi il classe.
     w_err = ((deq - w).norm() / w.norm().clamp(min=1e-12)).item()
 
     probe = (stats.mean_abs.to(torch.float32).clamp(min=1e-6)

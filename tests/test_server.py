@@ -1,4 +1,4 @@
-"""The OpenAI surface, exercised through the real ASGI app."""
+"""La surface OpenAI, exercée à travers la véritable application ASGI."""
 
 import json
 import os

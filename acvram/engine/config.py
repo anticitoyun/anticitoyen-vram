@@ -1,8 +1,9 @@
-"""Model description, derived from a Hugging Face ``config.json``.
+"""Description d'un modèle, dérivée d'un ``config.json`` Hugging Face.
 
-Only what the planner and the runtime need: shapes, parameter counts per
-layer group, and whether the layer is a sparse MoE (which changes the cost of
-putting it in host RAM by an order of magnitude).
+Uniquement ce dont le planificateur et l'exécution ont besoin : les formes, le
+nombre de paramètres par groupe de couches, et le fait qu'une couche soit ou
+non à mélange d'experts creux — ce qui change d'un ordre de grandeur le coût de
+la placer en mémoire vive.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ __all__ = ["ModelSpec", "LayerSpec", "load_model_spec"]
 
 @dataclass
 class LayerSpec:
-    """One transformer block, split into the tensors the planner moves."""
+    """Un bloc de transformeur, découpé selon les tenseurs que déplace le planificateur."""
 
     index: int
     attn_params: int
@@ -35,12 +36,13 @@ class LayerSpec:
 
     @property
     def active_params(self) -> int:
-        """Parameters actually read for a single token.
+        """Paramètres réellement lus pour un seul jeton.
 
-        For a dense block this is everything. For an MoE block only the router,
-        the shared expert and ``n_experts_active`` of the experts are touched,
-        which is why a 235B MoE streams from host RAM at a workable speed while
-        a 70B dense model does not.
+        Pour un bloc dense, c'est la totalité. Pour un bloc à mélange d'experts,
+        seuls le routeur, l'expert partagé et ``n_experts_active`` experts sont
+        touchés — et c'est pourquoi un MoE de 235 milliards de paramètres se
+        transfère depuis la mémoire vive à une vitesse exploitable, là où un
+        modèle dense de 70 milliards ne le peut pas.
         """
         if not self.is_moe or self.n_experts == 0:
             return self.total_params
@@ -130,22 +132,24 @@ class ModelSpec:
         return self.num_experts > 0
 
     def kv_bytes_per_token(self, kv_bits: int = 8) -> int:
-        """Bytes of KV cache for one token across all layers.
+        """Octets de cache KV pour un jeton, toutes couches confondues.
 
-        GQA is already accounted for: only ``num_key_value_heads`` are stored.
+        L'attention à requêtes groupées est déjà prise en compte : seules
+        ``num_key_value_heads`` têtes sont stockées.
         """
         per_layer = 2 * self.num_key_value_heads * self.head_dim * kv_bits / 8
-        # grouped scales for quantized KV: one fp16 per head per token per kv
+        # échelles groupées du KV quantifié : un fp16 par tête, par jeton, par kv
         overhead = 0.0 if kv_bits >= 16 else 2 * self.num_key_value_heads * 2
         return int((per_layer + overhead) * self.num_layers)
 
     def summary(self) -> str:
         b = self.total_params / 1e9
         a = self.active_params / 1e9
-        moe = f", MoE {self.num_experts}x top-{self.num_experts_per_tok}" if self.is_moe else ""
-        return (f"{self.name}: {self.architecture}, {self.num_layers} layers, "
-                f"h={self.hidden_size}, {b:.1f}B params "
-                f"({a:.1f}B active/token){moe}")
+        moe = (f", MoE {self.num_experts} experts, top-{self.num_experts_per_tok}"
+               if self.is_moe else "")
+        return (f"{self.name} : {self.architecture}, {self.num_layers} couches, "
+                f"h={self.hidden_size}, {b:.1f} G parametres "
+                f"({a:.1f} G actifs par jeton){moe}")
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -173,12 +177,12 @@ _ARCH_ALIASES = {
 
 
 def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
-    """Read a HF model directory (or a bare ``config.json``) into a ModelSpec."""
+    """Lit un répertoire de modèle Hugging Face, ou un simple ``config.json``."""
     cfg_path = path if path.endswith(".json") else os.path.join(path, "config.json")
     with open(cfg_path, "r", encoding="utf-8") as fh:
         cfg: dict[str, Any] = json.load(fh)
 
-    # Some configs nest the language model (VLMs).
+    # Certaines configurations imbriquent le modèle de langage (modèles visuels).
     if "text_config" in cfg and "hidden_size" not in cfg:
         cfg = {**cfg, **cfg["text_config"]}
 

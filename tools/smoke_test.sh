@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Minimal end-to-end check on a real machine: convert a small model and serve it.
+# Verification minimale de bout en bout sur une vraie machine : convertir un
+# petit modele et le servir.
 set -euo pipefail
-MODEL="${1:?usage: smoke_test.sh /path/to/hf-model}"
+MODEL="${1:?usage : smoke_test.sh /chemin/vers/modele-hf}"
 OUT="${2:-/tmp/acvram-smoke}"
 
 acvram doctor
@@ -18,6 +19,6 @@ sleep 20
 curl -sf http://127.0.0.1:8123/v1/models | head -c 400; echo
 curl -sf http://127.0.0.1:8123/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"smoke","messages":[{"role":"user","content":"Say hello in French."}],"max_tokens":32}' \
+  -d '{"model":"smoke","messages":[{"role":"user","content":"Dis bonjour en francais."}],"max_tokens":32}' \
   | head -c 600; echo
-echo "smoke test finished"
+echo "test de fumee termine"

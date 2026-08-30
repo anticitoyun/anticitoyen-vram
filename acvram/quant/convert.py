@@ -1,16 +1,18 @@
-"""Convert a Hugging Face checkpoint into acvram shards.
+"""Convertit un point de contrôle Hugging Face en fragments acvram.
 
-The output is not one quantized model but one *per device class*: a tensor
-destined for the RTX 5090 is written as NVFP4, the same tensor destined for
-the RTX 3080 Ti is written as INT4. The placement plan decides which, so the
-conversion and the eventual load agree by construction -- there is no run-time
-"can this GPU read this format" check to get wrong.
+Le résultat n'est pas un modèle quantifié mais un modèle *par classe
+d'appareil* : un tenseur destiné à la RTX 5090 est écrit en NVFP4, le même
+tenseur destiné à la RTX 3080 Ti est écrit en INT4. C'est le plan de placement
+qui tranche, si bien que la conversion et le chargement s'accordent par
+construction — il n'existe aucune vérification à l'exécution du type « ce GPU
+sait-il lire ce format ? » que l'on puisse rater.
 
-Calibration, when enabled, is layer-sequential in the AWQ manner: hold exactly
-one block in bf16, push the calibration hidden states through it to collect
-per-channel activation magnitudes, quantize that block, free it, move to the
-next. Peak memory is one block, not the whole model, which is what makes it
-possible to calibrate a 70B checkpoint on this machine at all.
+La calibration, quand elle est activée, procède couche par couche à la manière
+d'AWQ : ne tenir qu'un seul bloc en bf16, y faire passer les états cachés de
+calibration pour relever les magnitudes d'activation par canal, quantifier ce
+bloc, le libérer, passer au suivant. Le pic de mémoire est d'un bloc et non du
+modèle entier, ce qui rend simplement possible la calibration d'un modèle de
+70 milliards de paramètres sur cette machine.
 """
 
 from __future__ import annotations
@@ -43,15 +45,15 @@ class ConversionOptions:
     use_hadamard: str = "auto"        # auto | always | never
     awq: bool = True
     group_size: int = 128
-    keep_sensitive_16bit: bool = True  # norms, router, embeddings
+    keep_sensitive_16bit: bool = True  # normalisations, routeur, plongements
     lm_head_format: Optional[str] = None
     n_grid: int = 20
     device: str = "cuda:0"
     dry_run: bool = False
     mixed_precision: str = "auto"     # auto | off
-    snr_floor: float = 25.0           # dB of layer-output SNR below which a
-                                      # tensor is promoted to a wider format
-    max_promotions: float = 0.15      # fraction of tensors allowed to promote
+    snr_floor: float = 25.0           # dB de rapport signal/bruit en sortie de
+                                      # couche sous lequel un tenseur est promu
+    max_promotions: float = 0.15      # part maximale de tenseurs promus
 
 
 @dataclass
@@ -71,36 +73,36 @@ class ConversionReport:
         return self.in_bytes / max(1, self.out_bytes)
 
     def render(self) -> str:
-        lines = [f"converted {self.model}", ""]
-        lines.append(f"  tensors          {self.tensors}")
-        lines.append(f"  input            {_h(self.in_bytes)}")
-        lines.append(f"  output           {_h(self.out_bytes)}  "
-                     f"({self.ratio:.2f}x smaller)")
+        lines = [f"converti : {self.model}", ""]
+        lines.append(f"  tenseurs         {self.tensors}")
+        lines.append(f"  entree           {_h(self.in_bytes)}")
+        lines.append(f"  sortie           {_h(self.out_bytes)}  "
+                     f"(x{self.ratio:.2f} plus petit)")
         for fmt, n in sorted(self.per_format.items(), key=lambda kv: -kv[1]):
             lines.append(f"    {fmt:<12} {_h(n)}")
-        lines.append(f"  mean output SNR  {self.mean_out_snr_db:.1f} dB")
+        lines.append(f"  SNR sortie moyen {self.mean_out_snr_db:.1f} dB")
         if self.promotions:
-            lines.append(f"  promoted         {len(self.promotions)} tensors to a "
-                         f"wider format (below the SNR floor):")
+            lines.append(f"  promus           {len(self.promotions)} tenseurs vers un "
+                         f"format plus large (sous le plancher de SNR) :")
             for p in self.promotions[:5]:
                 lines.append(f"    {p['name']:<46} {p['from']} -> {p['to']}  "
                              f"{p['before']:.1f} -> {p['after']:.1f} dB")
             if len(self.promotions) > 5:
-                lines.append(f"    ... and {len(self.promotions) - 5} more")
+                lines.append(f"    ... et {len(self.promotions) - 5} autres")
         if self.worst_layers:
-            lines.append("  worst layers:")
+            lines.append("  pires tenseurs :")
             for w in self.worst_layers[:5]:
                 lines.append(f"    {w['name']:<52} {w['out_snr_db']:6.1f} dB")
-        lines.append(f"  took             {self.seconds:.1f} s")
+        lines.append(f"  duree            {self.seconds:.1f} s")
         return "\n".join(lines)
 
 
 def _h(n: float) -> str:
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if abs(n) < 1024 or unit == "TiB":
-            return f"{int(n)} B" if unit == "B" else f"{n:.1f} {unit}"
+    for unite in ("o", "Kio", "Mio", "Gio", "Tio"):
+        if abs(n) < 1024 or unite == "Tio":
+            return f"{int(n)} o" if unite == "o" else f"{n:.1f} {unite}"
         n /= 1024
-    return f"{n:.1f} TiB"
+    return f"{n:.1f} Tio"
 
 
 # --------------------------------------------------------------------------
@@ -108,21 +110,21 @@ def _h(n: float) -> str:
 # --------------------------------------------------------------------------
 
 
-# Promotion ladders. A tensor that quantizes badly moves one rung up rather
-# than dragging the whole model to a wider format: spending 8 bits on the few
-# per cent of tensors that need them costs a fraction of a bit per weight
-# overall and recovers most of the loss.
+# Échelles de promotion. Un tenseur qui se quantifie mal monte d'un barreau
+# plutôt que d'entraîner tout le modèle vers un format plus large : dépenser
+# 8 bits sur les quelques pour cent de tenseurs qui en ont besoin coûte une
+# fraction de bit par poids sur l'ensemble.
 PROMOTE = {"int4_awq": "int8", "nvfp4": "int8", "int8": "bf16"}
 
 SENSITIVE_SUFFIXES = (
     "layernorm.weight", "norm.weight", "_norm.weight",
-    "mlp.gate.weight",            # MoE router: 1 x n_experts, tiny and decisive
+    "mlp.gate.weight",            # routeur MoE : minuscule et décisif
     "embed_tokens.weight",
 )
 
 
 class TensorRouter:
-    """Decides the storage format of every tensor, from the placement plan."""
+    """Décide du format de stockage de chaque tenseur, à partir du plan de placement."""
 
     def __init__(self, spec: ModelSpec, plan: Plan, opts: ConversionOptions) -> None:
         self.spec = spec
@@ -141,7 +143,7 @@ class TensorRouter:
         return None
 
     def format_for(self, name: str) -> str:
-        """A tensor's format is the format of the device its layer runs on."""
+        """Le format d'un tenseur est celui de l'appareil où sa couche s'exécute."""
         if self.opts.keep_sensitive_16bit and name.endswith(SENSITIVE_SUFFIXES):
             return "bf16"
         if name.endswith(".bias"):
@@ -160,11 +162,12 @@ class TensorRouter:
             return False
         if mode == "always":
             return True
-        # auto: a rotation earns its keep when the scale group is wide. INT4's
-        # 128-wide groups cannot absorb a single outlier channel, so spreading
-        # the outliers helps measurably. NVFP4's 16-wide blocks already carry
-        # their own scale and the rotation buys little, at the cost of an
-        # n log n transform on every activation.
+        # auto : une rotation mérite sa place quand le groupe d'échelle est
+        # large. Les groupes de 128 de l'INT4 ne peuvent pas absorber un canal
+        # aberrant isolé, si bien qu'étaler les valeurs extrêmes aide de façon
+        # mesurable. Les blocs de 16 du NVFP4 portent déjà leur propre échelle
+        # et la rotation n'apporte que peu, au prix d'une transformée en
+        # n log n sur chaque activation.
         return fmt == "int4_awq" and not name.endswith(SENSITIVE_SUFFIXES)
 
 
@@ -174,7 +177,7 @@ class TensorRouter:
 
 
 def _iter_checkpoint(path: str) -> Iterator[tuple[str, torch.Tensor]]:
-    """Stream tensors from a safetensors checkpoint without loading it whole."""
+    """Lit les tenseurs d'un point de contrôle safetensors sans le charger en entier."""
     from safetensors import safe_open
 
     index_path = os.path.join(path, "model.safetensors.index.json")
@@ -185,7 +188,7 @@ def _iter_checkpoint(path: str) -> Iterator[tuple[str, torch.Tensor]]:
     else:
         files = [f for f in sorted(os.listdir(path)) if f.endswith(".safetensors")]
     if not files:
-        raise FileNotFoundError(f"no .safetensors files in {path}")
+        raise FileNotFoundError(f"aucun fichier .safetensors dans {path}")
 
     for fn in files:
         full = os.path.join(path, fn)
@@ -195,7 +198,7 @@ def _iter_checkpoint(path: str) -> Iterator[tuple[str, torch.Tensor]]:
 
 
 class ShardWriter:
-    """Accumulates tensors and flushes them into ~4 GiB safetensors shards."""
+    """Accumule des tenseurs et les vide en fragments safetensors d'environ 4 Gio."""
 
     def __init__(self, out_dir: str, target: int = SHARD_TARGET_BYTES) -> None:
         self.out_dir = out_dir
@@ -245,7 +248,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                        stats: Optional[dict[str, ActStats]] = None,
                        progress: Optional[Callable[[str, int, int], None]] = None
                        ) -> ConversionReport:
-    """Quantize every tensor into the format its destination device wants."""
+    """Quantifie chaque tenseur dans le format qu'attend son appareil de destination."""
     t0 = time.time()
     spec = spec or load_model_spec(model_path)
     router = TensorRouter(spec, plan, opts)
@@ -292,9 +295,9 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             n_grid=opts.n_grid,
         )
 
-        # Mixed precision: a tensor that lands below the floor is worth more
-        # bits. Capped, so a badly calibrated run cannot quietly inflate the
-        # whole model back to 8 bits.
+        # Précision mixte : un tenseur qui tombe sous le plancher mérite plus
+        # de bits. Plafonné, pour qu'une exécution mal calibrée ne puisse pas
+        # regonfler discrètement tout le modèle à 8 bits.
         if (opts.mixed_precision != "off"
                 and metrics["out_snr_db"] < opts.snr_floor
                 and fmt in PROMOTE

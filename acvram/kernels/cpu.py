@@ -1,15 +1,17 @@
-"""CPU dequantize-and-multiply, for the host memory tier.
+"""Déquantification et multiplication sur processeur, pour l'étage hôte.
 
-Built on demand from ``acvram_cpu.cpp`` into a plain shared object and loaded
-through ctypes. No torch extension, so no Python headers and no ninja are
-needed on the machine that runs this -- only a C++ compiler, and if even that
-is missing everything falls back to the PyTorch reference path.
+Construit à la demande depuis ``acvram_cpu.cpp`` en une bibliothèque partagée
+ordinaire, chargée par ctypes. Pas d'extension torch, donc ni en-têtes Python ni
+ninja ne sont nécessaires sur la machine qui l'exécute — seulement un
+compilateur C++, et si même celui-ci manque, tout retombe sur le chemin de
+référence PyTorch.
 
-Why this exists at all: a layer whose weights sit in host RAM can either be
-copied to the GPU over PCIe or computed where it already is. Computing in
-place only wins if the CPU reads the packed 4-bit weights directly. Going
-through ``dequantize() @ x`` materialises a 32-bit copy of the whole matrix
-first -- eight times the traffic -- which hands the advantage straight back.
+Pourquoi cela existe : une couche dont les poids résident en mémoire vive peut
+être copiée vers le GPU par le PCIe, ou calculée là où elle se trouve déjà.
+Calculer sur place ne gagne que si le processeur lit directement les poids
+empaquetés sur 4 bits. Passer par ``dequantize() @ x`` matérialise d'abord une
+copie 32 bits de toute la matrice — huit fois le trafic — et rend aussitôt
+l'avantage.
 """
 
 from __future__ import annotations
@@ -57,7 +59,7 @@ def _build() -> Optional[str]:
 
     compiler = os.environ.get("CXX") or shutil.which("g++") or shutil.which("c++")
     if compiler is None:
-        raise RuntimeError("no C++ compiler found (install g++)")
+        raise RuntimeError("aucun compilateur C++ trouve (installez g++)")
     cmd = [compiler, *_FLAGS, "-o", out, src]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if proc.returncode != 0:
@@ -71,7 +73,7 @@ def get_cpu_lib() -> Optional[ctypes.CDLL]:
         return _LIB
     _TRIED = True
     if os.environ.get("ACVRAM_DISABLE_CPU_KERNELS"):
-        _ERROR = "disabled by ACVRAM_DISABLE_CPU_KERNELS"
+        _ERROR = "desactive par ACVRAM_DISABLE_CPU_KERNELS"
         return None
     try:
         path = _build()
@@ -90,8 +92,8 @@ def get_cpu_lib() -> Optional[ctypes.CDLL]:
         _LIB = lib
     except Exception as exc:                          # noqa: BLE001
         _ERROR = f"{type(exc).__name__}: {exc}"
-        warnings.warn(f"acvram: CPU kernels unavailable ({_ERROR}); "
-                      f"host-tier layers will use the reference path")
+        warnings.warn(f"acvram : noyaux processeur indisponibles ({_ERROR}) ; "
+                      f"les couches de l'etage hote utiliseront la reference")
         _LIB = None
     return _LIB
 

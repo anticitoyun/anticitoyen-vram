@@ -1,22 +1,24 @@
-"""Blackwell FP4 tensor-core GEMM, when the installed torch exposes one.
+"""Produit matriciel FP4 sur tensor cores Blackwell, quand le torch installé en
+expose un.
 
-The fused GEMV in ``acvram_kernels.cu`` solves the decode problem: it reads
-4-bit weights and never expands them. It does not solve the *prefill* problem,
-because prefill is compute bound, and there the interesting number is not how
-few bytes were read but how many FLOPs the tensor cores can retire. On
-Blackwell the FP4 datapath is roughly four times the BF16 one, and the current
-prefill path throws that away by dequantizing to BF16 and calling cuBLAS.
+Le GEMV fusionné d'``acvram_kernels.cu`` résout le problème du décodage : il lit
+des poids sur 4 bits et ne les étend jamais. Il ne résout pas celui du
+*prefill*, car le prefill est limité par le calcul, et le nombre intéressant n'y
+est pas le peu d'octets lus mais le nombre d'opérations que les tensor cores
+peuvent retirer. Sur Blackwell, le chemin de données FP4 vaut environ quatre
+fois le BF16, et le chemin de prefill actuel jette cela en déquantifiant vers le
+BF16 pour appeler cuBLAS.
 
-Reaching it needs a block-scaled FP4 GEMM. Writing one from scratch means
-CUTLASS; borrowing one means whatever the installed PyTorch exposes, which is
-moving quickly and differs between versions. So this module *probes* rather
-than assumes: it tries the operation once on a small matrix, remembers whether
-it worked, and reports the reason if it did not. ``acvram doctor`` prints that
-reason, so the answer to "am I getting tensor-core FP4?" is always a fact
-rather than a hope.
+Y accéder demande un produit matriciel FP4 à échelle par bloc. En écrire un de
+zéro signifie CUTLASS ; en emprunter un signifie prendre ce que le PyTorch
+installé expose, ce qui évolue vite et diffère d'une version à l'autre. Ce
+module *sonde* donc au lieu de supposer : il tente l'opération une fois sur une
+petite matrice, retient si elle a marché, et rapporte la raison sinon.
+``acvram doctor`` affiche cette raison, si bien que la réponse à « est-ce que
+j'obtiens du FP4 sur tensor cores ? » est toujours un fait et non un espoir.
 
-The fallback is not a failure mode -- it is the same dequantize-and-cuBLAS
-path that was there before, with identical numerics.
+Le repli n'est pas un mode de panne : c'est le même chemin
+déquantification-puis-cuBLAS qu'avant, à numérique identique.
 """
 
 from __future__ import annotations
@@ -37,10 +39,11 @@ _IMPL = ""
 
 
 def _swizzle_scales(bs: torch.Tensor) -> torch.Tensor:
-    """Block scales as the GEMM wants them: contiguous E4M3 bytes, row major.
+    """Les échelles de bloc telles que le produit matriciel les veut : octets E4M3
+    contigus, rangés par lignes.
 
-    Kept as its own step because every implementation that has appeared so far
-    wants a different layout, and this is the one place to change it.
+    Isolé en une étape propre parce que chaque implémentation apparue jusqu'ici
+    veut une disposition différente, et que c'est le seul endroit à changer.
     """
     return bs.view(torch.float8_e4m3fn).contiguous()
 
@@ -52,24 +55,24 @@ def _probe() -> None:
     _PROBED = True
 
     if os.environ.get("ACVRAM_DISABLE_FP4_GEMM"):
-        _REASON = "disabled by ACVRAM_DISABLE_FP4_GEMM"
+        _REASON = "desactive par ACVRAM_DISABLE_FP4_GEMM"
         return
     if not torch.cuda.is_available():
-        _REASON = "no CUDA device"
+        _REASON = "aucun peripherique CUDA"
         return
     caps = {torch.cuda.get_device_capability(i)
             for i in range(torch.cuda.device_count())}
     if not any(c >= (10, 0) for c in caps):
-        _REASON = (f"no Blackwell device (found "
-                   f"{', '.join(f'sm_{a}{b}' for a, b in sorted(caps))}); "
-                   f"FP4 tensor cores need sm_100 or newer")
+        _REASON = (f"aucun peripherique Blackwell (trouve "
+                   f"{', '.join(f'sm_{a}{b}' for a, b in sorted(caps))}) ; "
+                   f"les tensor cores FP4 exigent sm_100 ou plus recent")
         return
     if not hasattr(torch, "float4_e2m1fn_x2"):
-        _REASON = (f"torch {torch.__version__} has no float4_e2m1fn_x2 dtype; "
-                   f"2.8 or newer is needed")
+        _REASON = (f"torch {torch.__version__} n'a pas le type float4_e2m1fn_x2 ; "
+                   f"il faut 2.8 ou plus recent")
         return
     if not hasattr(torch, "_scaled_mm"):
-        _REASON = "torch._scaled_mm is missing"
+        _REASON = "torch._scaled_mm est absent"
         return
 
     dev = next(torch.device(f"cuda:{i}")
@@ -88,8 +91,8 @@ def _probe() -> None:
         _IMPL = "torch._scaled_mm(float4_e2m1fn_x2)"
         _REASON = ""
     except Exception as exc:                          # noqa: BLE001
-        _REASON = (f"torch._scaled_mm rejected the FP4 operands "
-                   f"({type(exc).__name__}: {str(exc)[:180]})")
+        _REASON = (f"torch._scaled_mm a rejete les operandes FP4 "
+                   f"({type(exc).__name__} : {str(exc)[:180]})")
         _OK = False
 
 
@@ -105,13 +108,14 @@ def fp4_mm_info() -> dict:
 
 
 def nvfp4_mm_tensorcore(x: torch.Tensor, t: NVFP4Tensor) -> Optional[torch.Tensor]:
-    """``x @ W.T`` on the FP4 tensor cores, or None if that path is unavailable.
+    """``x @ W.T`` sur les tensor cores FP4, ou None si ce chemin est indisponible.
 
-    The activation is quantized to NVFP4 on the fly with per-16 block scales,
-    which is what makes the operation a *tensor-core* FP4 GEMM rather than a
-    weight-only one. That is only sound for prefill: at 4 bits the activation
-    quantization is a real error source, and it is amortised over a large
-    batch but not over a single decoded token. The caller decides.
+    L'activation est quantifiée en NVFP4 à la volée, avec des échelles par bloc
+    de 16 : c'est ce qui fait de l'opération un produit matriciel FP4 *sur
+    tensor cores* et non une opération sur les poids seuls. Cela n'a de sens que
+    pour le prefill : à 4 bits, la quantification de l'activation est une source
+    d'erreur réelle, amortie sur un grand lot mais pas sur un unique jeton
+    décodé. C'est à l'appelant de trancher.
     """
     if not fp4_mm_available():
         return None
@@ -134,5 +138,5 @@ def nvfp4_mm_tensorcore(x: torch.Tensor, t: NVFP4Tensor) -> Optional[torch.Tenso
     except Exception:                                 # noqa: BLE001
         global _OK, _REASON
         _OK = False
-        _REASON = "the FP4 GEMM probe succeeded but a real call failed"
+        _REASON = "la sonde FP4 a reussi mais un appel reel a echoue"
         return None

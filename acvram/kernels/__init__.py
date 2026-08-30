@@ -1,12 +1,12 @@
-"""Loading the fused kernels, with a working fallback when they are absent.
+"""Chargement des noyaux fusionnés, avec un repli qui fonctionne en leur absence.
 
-The CUDA extension is compiled on first use with ``torch.utils.cpp_extension``
-and cached under ``~/.cache/acvram/kernels``. If nvcc is missing, the arch is
-unsupported, or the build fails, every entry point falls back to the pure
-PyTorch reference implementation. That fallback is slow -- it materialises a
-16-bit copy of the weights -- but it is numerically identical, so the engine
-runs correctly on a machine with no compiler, and the test suite can check the
-kernels against it.
+L'extension CUDA est compilée au premier usage par
+``torch.utils.cpp_extension`` et mise en cache sous ``~/.cache/acvram/kernels``.
+Si nvcc manque, si l'architecture n'est pas gérée ou si la compilation échoue,
+chaque point d'entrée retombe sur l'implémentation PyTorch de référence. Ce
+repli est lent — il matérialise une copie 16 bits des poids — mais il est
+numériquement identique : le moteur tourne donc correctement sur une machine
+sans compilateur, et la suite de tests peut vérifier les noyaux face à lui.
 """
 
 from __future__ import annotations
@@ -35,12 +35,12 @@ _EXT: Optional[Any] = None
 _TRIED = False
 _ERROR: str = ""
 
-# Blackwell needs CUDA 12.8 or newer; anything older cannot emit sm_120 at all.
+# Blackwell exige CUDA 12.8 ou plus récent ; rien de plus ancien ne sait émettre du sm_120.
 _MIN_CUDA_FOR_SM120 = (12, 8)
 
 
 def _arch_flags() -> list[str]:
-    """Emit code for exactly the architectures present, plus a PTX fallback."""
+    """Émet du code pour exactement les architectures présentes, plus un repli PTX."""
     archs: set[tuple[int, int]] = set()
     if torch.cuda.is_available():
         for i in range(torch.cuda.device_count()):
@@ -85,25 +85,25 @@ def build_info() -> dict:
 
 
 def get_extension():
-    """Compile (once) and return the extension module, or None."""
+    """Compile une fois, puis rend le module d'extension, ou None."""
     global _EXT, _TRIED, _ERROR
     if _TRIED:
         return _EXT
     _TRIED = True
 
     if os.environ.get("ACVRAM_DISABLE_KERNELS"):
-        _ERROR = "disabled by ACVRAM_DISABLE_KERNELS"
+        _ERROR = "desactive par ACVRAM_DISABLE_KERNELS"
         return None
     if not torch.cuda.is_available():
-        _ERROR = "no CUDA device"
+        _ERROR = "aucun peripherique CUDA"
         return None
 
     caps = {torch.cuda.get_device_capability(i)
             for i in range(torch.cuda.device_count())}
     if any(c >= (12, 0) for c in caps) and _cuda_version() < _MIN_CUDA_FOR_SM120:
-        _ERROR = (f"a Blackwell device is present but torch was built against "
-                  f"CUDA {torch.version.cuda}; sm_120 needs 12.8 or newer. "
-                  f"Install a cu128/cu130 torch build.")
+        _ERROR = (f"un peripherique Blackwell est present mais torch a ete "
+                  f"compile pour CUDA {torch.version.cuda} ; sm_120 exige 12.8 "
+                  f"ou plus recent. Installez une version cu128 ou cu130.")
         warnings.warn(_ERROR)
         return None
 
@@ -120,10 +120,10 @@ def get_extension():
             build_directory=cache,
             verbose=bool(os.environ.get("ACVRAM_VERBOSE_BUILD")),
         )
-    except Exception as exc:                      # noqa: BLE001 - report, don't crash
+    except Exception as exc:                      # noqa: BLE001 — signaler, pas planter
         _ERROR = f"{type(exc).__name__}: {exc}"
         _EXT = None
-        warnings.warn(f"acvram: falling back to reference kernels ({_ERROR})")
+        warnings.warn(f"acvram : repli sur les noyaux de reference ({_ERROR})")
     return _EXT
 
 
@@ -150,17 +150,17 @@ def nvfp4_dequant(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16) -> torch.
 
 def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
                  gemv_threshold: int = 8) -> torch.Tensor:
-    """``x @ W.T`` with W stored in NVFP4.
+    """``x @ W.T`` avec W stocké en NVFP4.
 
-    Below ``gemv_threshold`` rows the fused path wins, because the weights are
-    read once and never written back out in 16-bit. Above it, materialising
-    the matrix and handing it to cuBLAS is faster: the dequantization cost is
-    paid once for the whole batch and cuBLAS's GEMM is far better tuned than
-    anything hand-rolled here.
+    En dessous de ``gemv_threshold`` lignes, le chemin fusionné l'emporte : les
+    poids sont lus une fois et jamais réécrits en 16 bits. Au-dessus,
+    matérialiser la matrice et la confier à cuBLAS est plus rapide, car le coût
+    de déquantification est payé une seule fois pour tout le lot et le produit
+    matriciel de cuBLAS est bien mieux réglé que tout ce qu'on écrirait ici.
     """
     if not t.qweight.is_cuda:
-        # Host tier: read the packed weights in place rather than copying them
-        # to the GPU or expanding them to 16 bits first.
+        # Étage hôte : on lit les poids empaquetés sur place, plutôt que de les
+        # copier vers le GPU ou de les étendre d'abord en 16 bits.
         return nvfp4_matmul_cpu(x, t)
 
     ext = get_extension()
@@ -177,9 +177,10 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
             float(t.global_scale.item()), xf.contiguous(), t.padded_in)
         return y.to(x.dtype).reshape(*orig_shape[:-1], t.shape[0])
 
-    # Prefill. Try the FP4 tensor cores first: at this batch size the
-    # activation quantization error is amortised and the datapath is roughly
-    # four times BF16. Falls straight through when unavailable.
+    # Prefill. On essaie d'abord les tensor cores FP4 : à cette taille de lot,
+    # l'erreur de quantification de l'activation est amortie et le chemin de
+    # données vaut environ quatre fois le BF16. On passe outre s'il est
+    # indisponible.
     if n > gemv_threshold:
         tc = nvfp4_mm_tensorcore(x, t)
         if tc is not None:

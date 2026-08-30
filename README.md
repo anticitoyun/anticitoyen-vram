@@ -1,60 +1,62 @@
 # anticitoyen VRAM/RAM (`acvram`)
 
-An OpenAI-compatible inference server that treats memory as a hierarchy and
-gives each GPU the numeric format its own silicon reads best.
+Une passerelle d'inférence compatible avec l'API OpenAI, qui traite la mémoire
+comme une hiérarchie et donne à chaque GPU le format numérique que son silicium
+sait le mieux lire.
 
-Built for one specific machine:
+Conçue pour une machine précise :
 
 | | |
 |---|---|
-| CPU | Intel Core i9-14900K (8 P-cores + 16 E-cores) |
-| Board | ASUS ROG Maximus Z790 Dark Hero |
-| RAM | 96 GB DDR5 |
-| GPU 0 | ASUS RTX 5090 Astral LC OC, 32 GB — Blackwell, `sm_120` |
-| GPU 1 | ASUS RTX 3080 Ti, 12 GB — Ampere, `sm_86` |
-| OS | Linux Mint 22.3 |
+| Processeur | Intel Core i9-14900K (8 cœurs P + 16 cœurs E) |
+| Carte mère | ASUS ROG Maximus Z790 Dark Hero |
+| Mémoire | 96 Go DDR5 |
+| GPU 0 | ASUS RTX 5090 Astral LC OC, 32 Go — Blackwell, `sm_120` |
+| GPU 1 | ASUS RTX 3080 Ti, 12 Go — Ampere, `sm_86` |
+| Système | Linux Mint 22.3 |
 
-## The two ideas
+## Les deux idées
 
-**One format per GPU.** The RTX 5090 has FP4 tensor cores; the RTX 3080 Ti does
-not, and has no FP8 either. Levelling both down to a shared format wastes the
-5090; so the converter writes the *same checkpoint twice*, in the format each
-destination can actually use:
+**Un format par GPU.** La RTX 5090 possède des tensor cores FP4 ; la RTX 3080 Ti
+n'en a pas, et n'a pas non plus de FP8. Aligner les deux sur un format commun
+gâcherait la 5090. Le convertisseur écrit donc *deux fois le même modèle*, dans
+le format que chaque destination sait réellement exploiter :
 
 | | RTX 5090 | RTX 3080 Ti |
 |---|---|---|
-| weights | **NVFP4** — E2M1 + FP8 E4M3 scale per 16 | **INT4** — uint4 + fp16 scale/zero per 128 |
-| bits per weight | 4.50 | 4.16 |
-| vs BF16 | 3.56× smaller | 3.85× smaller |
-| how it computes | FP4 tensor cores | dequantized to FP16 in-kernel, FP16 tensor cores |
-| KV cache | INT8 | INT8 |
+| poids | **NVFP4** — E2M1 + échelle FP8 E4M3 tous les 16 | **INT4** — uint4 + échelle et zéro fp16 tous les 128 |
+| bits par poids | 4,50 | 4,16 |
+| face au BF16 | ×3,56 plus petit | ×3,85 plus petit |
+| mode de calcul | tensor cores FP4 | déquantifié en FP16 dans le noyau, tensor cores FP16 |
+| cache KV | INT8 | INT8 |
 
-32 GB of VRAM at 4.5 bpw holds about **56 G parameters** of weight, against
-16 G in BF16. Across both cards that is roughly **78 G parameters resident**,
-before host RAM is touched at all.
+32 Go de VRAM à 4,5 bits par poids contiennent environ **56 milliards de
+paramètres**, contre 16 milliards en BF16. Sur les deux cartes, cela fait
+approximativement **78 milliards de paramètres résidents** avant même de
+toucher à la mémoire vive.
 
-**Memory is a hierarchy, not a wall.** Three tiers, and the planner measures
-what each costs rather than hoping the model fits:
+**La mémoire est une hiérarchie, pas un mur.** Trois étages, et le planificateur
+mesure ce que chacun coûte au lieu d'espérer que le modèle tienne :
 
 ```
-RTX 5090     32 GB   ~1790 GB/s     NVFP4
-RTX 3080 Ti  12 GB    ~912 GB/s     INT4
-DDR5 host    96 GB   PCIe-limited   whichever the executing GPU uses
+RTX 5090     32 Go   ~1790 Go/s     NVFP4
+RTX 3080 Ti  12 Go    ~912 Go/s     INT4
+DDR5 hôte    96 Go   limité par le PCIe ou la DDR
 ```
 
-## Quick start
+## Démarrage rapide
 
 ```bash
-./install.sh                       # venv + torch cu128 + acvram
-acvram doctor                      # is this machine ready
-acvram detect                      # what is actually here
+./install.sh                       # environnement virtuel + torch cu128 + acvram
+acvram doctor                      # cette machine est-elle prête, et pour quoi
+acvram detect                      # qu'y a-t-il réellement ici
 
-acvram plan  ~/models/Qwen3-32B                    # where each layer would go
-acvram convert ~/models/Qwen3-32B -o ~/acv/qwen3-32b
+acvram plan  ~/modeles/Qwen3-32B                    # où irait chaque couche
+acvram convert ~/modeles/Qwen3-32B -o ~/acv/qwen3-32b
 acvram serve ~/acv/qwen3-32b --port 8000
 ```
 
-Then point any OpenAI client at it:
+N'importe quel client OpenAI s'y branche ensuite :
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
@@ -64,174 +66,186 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="unused")
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="inutilise")
 client.chat.completions.create(model="qwen3-32b",
                                messages=[{"role": "user", "content": "Bonjour"}])
 ```
 
-## What `acvram plan` tells you
+## Ce que dit `acvram plan`
 
-The planner is worth running before you download anything. It answers the
-questions that decide whether a model is usable on this box:
-
-```
-$ acvram plan ~/models/Llama-3.3-70B --max-model-len 32768 --max-seqs 4
-
-  tier    format      capacity    weights         KV  stage
-  cuda:0  nvfp4       30.3 GiB   25.5 GiB    4.5 GiB  layers 0-58
-  cuda:1  int4_awq    10.9 GiB    8.7 GiB    1.6 GiB  layers 59-79
-  cpu     nvfp4       74.8 GiB    3.4 GiB        0 B  -
-
-  weights total      37.6 GiB
-  read per token     35.1 GiB
-  KV per token       162.5 KiB  -> 39,843 tokens cached
-  MLP in host RAM    55-58
-
-  estimated decode   17.8 tok/s  (batch 1)
-  estimated prefill  847 tok/s
-```
-
-It searches the configuration space rather than taking the first layout that
-fits, and two of its decisions are counter-intuitive enough to be worth
-stating:
-
-* **It will leave the 3080 Ti idle** when a model fits on the 5090 alone.
-  Pipeline stages run in sequence, so adding a 912 GB/s stage to a 1790 GB/s
-  pipeline makes single-stream decoding *slower*. Override with `--gpus all`.
-* **It will shrink the KV cache to keep weights in VRAM.** A gigabyte given to
-  the cache is a gigabyte of weights pushed onto the PCIe bus, and a weight
-  read over PCIe costs about 30× what it costs from VRAM. On the 70B above
-  that single trade is worth 2.3 → 17.8 tok/s.
-
-## Making it fast
-
-Four optimisations, each checked for equivalence rather than just for speed --
-an optimisation that changes the answer is a bug.
-
-### Speculative decoding (`--speculative`)
-
-Decoding one token at batch 1 is memory bound: the machine reads every active
-weight to produce a single token. Verifying K proposed tokens reads those same
-weights **once**. Two proposers:
-
-* `ngram` (default) — looks for the current suffix earlier in the context and
-  proposes what followed. Costs nothing, needs no model. Pays off when the
-  output quotes the input: code editing, RAG, summarisation.
-* `draft` — a small model on a second device. On this rig that device is the
-  RTX 3080 Ti, which the planner deliberately leaves idle for any model that
-  fits on the 5090.
-
-Acceptance is exact, not approximate: a proposal is accepted with probability
-`min(1, p/q)` and a rejection resamples from the normalised positive part of
-`p - q`. Measured over 40 000 draws against a deliberately mismatched draft,
-the emitted distribution is within 0.002 total variation of the target's —
-speculation buys speed, never a different answer.
+Le planificateur mérite d'être lancé avant tout téléchargement. Il répond aux
+questions qui décident si un modèle est utilisable sur cette machine :
 
 ```
-tiny model, greedy, k=4      model steps   tokens/step   output
-  no speculation                     23          1.00    reference
-  ngram                              13          1.77    identical
-  draft (draft == target)             5          4.60    identical
+$ acvram plan ~/modeles/Llama-3.3-70B --max-model-len 32768 --max-seqs 4
+
+  etage   format      capacite      poids         KV  tranche
+  cuda:0  nvfp4        30,3 Gio   25,5 Gio   4,5 Gio  couches 0-58
+  cuda:1  int4_awq     10,9 Gio    8,7 Gio   1,6 Gio  couches 59-79
+  cpu     nvfp4        74,8 Gio    3,4 Gio       0 o  -
+
+  poids au total     37,6 Gio
+  lu par jeton       35,1 Gio
+  KV par jeton       162,5 Kio  -> 39 843 jetons en cache
+  MLP en RAM hote    55-58
+
+  decodage estime    17,8 jetons/s  (lot de 1)
+  prefill estime     847 jetons/s
 ```
 
-### Prefix caching (on by default)
+Il explore l'espace des configurations au lieu de retenir la première qui
+tient, et deux de ses décisions sont assez contre-intuitives pour mériter
+d'être énoncées :
 
-Blocks are addressed by the *chained* hash of their token span, so two
-requests sharing a system prompt share its blocks outright and the second
-skips prefilling them. Chaining matters: the same 16 tokens in a different
-context do not hold the same keys and values, and hashing the span alone would
-serve one sequence's cache to another.
+* **Il laisse la 3080 Ti inutilisée** quand un modèle tient sur la seule 5090.
+  Les tranches d'un pipeline s'exécutent en série : ajouter une étape à
+  912 Go/s dans un pipeline à 1790 Go/s ralentit le décodage mono-flux. On force
+  avec `--gpus all`.
+* **Il rétrécit le cache KV pour garder les poids en VRAM.** Chaque gigaoctet
+  donné au cache est un gigaoctet de poids repoussé sur le bus PCIe, et lire un
+  poids par le PCIe coûte environ trente fois ce qu'il coûte depuis la VRAM. Sur
+  le 70B ci-dessus, ce seul arbitrage fait passer de 2,3 à 17,8 jetons/s.
 
-A freed block whose contents are still identifiable goes to an LRU queue
-rather than back to the free list, so the cache survives between requests
-without ever refusing an allocation it could have served.
+## Aller vite
 
-### Host-tier compute (`--host-exec`)
+Quatre optimisations, chacune vérifiée par une preuve d'équivalence et pas
+seulement par un chronomètre : une optimisation qui change la réponse est un
+bogue.
 
-A layer whose weights sit in host RAM can be copied to the GPU or computed
-where it is. Both are memory bound and read the same bytes, so the faster path
-is whichever bus is wider — PCIe 5.0 x16 gives ~54 GB/s, dual-channel DDR5
-gives ~70 GB/s — and computing in place also leaves the GPU free instead of
-making it wait on a copy.
+### Décodage spéculatif (`--speculative`)
 
-That only holds if the CPU reads the packed 4-bit weights directly, so there
-is a small C++ kernel with an AVX2 path (`acvram_cpu.cpp`, built through
-ctypes, no Python headers or ninja required). Even on the *scalar* fallback it
-beats `dequantize() @ x` by 1.4x for INT4 and 3.2x for NVFP4, because the
-dequantize path first writes a 32-bit copy of the whole matrix.
+Décoder un jeton avec un lot de taille 1 est limité par la mémoire : la machine
+lit tous les poids actifs pour produire un seul jeton. Vérifier K jetons
+proposés lit ces mêmes poids **une seule fois**. Deux propositeurs :
 
-On Mistral-Large-123B the planner's estimate moves from 1.35 to 2.42 tok/s.
+* `ngram` (par défaut) — cherche le suffixe courant plus tôt dans le contexte et
+  propose ce qui suivait. Ne coûte rien, ne demande aucun modèle. Rentable quand
+  la sortie recopie l'entrée : édition de code, RAG, résumé.
+* `draft` — un petit modèle sur un second appareil. Sur ce rig, cet appareil est
+  la RTX 3080 Ti, que le planificateur laisse volontairement oisive pour tout
+  modèle qui tient sur la 5090.
 
-### Mixed precision (`--mixed-precision auto`)
+L'acceptation est exacte, pas approchée : une proposition est acceptée avec la
+probabilité `min(1, p/q)` et un rejet rééchantillonne dans la partie positive
+normalisée de `p - q`. Mesuré sur 40 000 tirages face à un brouillon
+volontairement mal calibré, la distribution émise reste à 0,002 de variation
+totale de la cible — la spéculation achète de la vitesse, jamais une réponse
+différente.
 
-The converter measures each tensor's layer-output SNR and promotes the ones
-that land below `--snr-floor` to a wider format, capped at 15% of tensors.
-Spending 8 bits on the few per cent that need them costs a fraction of a bit
-per weight overall.
+```
+modele jouet, glouton, k=4    etapes   jetons/etape   sortie
+  sans speculation                23           1,00   reference
+  n-grammes                       13           1,77   identique
+  brouillon (= cible)              5           4,60   identique
+```
 
-### And `acvram eval`
+### Cache de préfixe (actif par défaut)
 
-SNR and logit cosine are proxies. `acvram eval DIR [DIR ...]` measures sliding-
-window perplexity so a format choice can be settled with evidence:
+Les blocs sont adressés par le hachage *chaîné* de leur tranche de jetons : deux
+requêtes qui partagent une consigne système partagent ses blocs, et la seconde
+n'a plus à les précalculer. Le chaînage est indispensable : les mêmes seize
+jetons dans un contexte différent ne contiennent pas les mêmes clés et valeurs,
+et hacher la seule tranche servirait le cache d'une séquence à une autre.
+
+Un bloc libéré dont le contenu reste identifiable rejoint une file LRU plutôt
+que la liste des blocs libres : le cache survit ainsi entre les requêtes sans
+jamais refuser une allocation qu'il aurait pu servir.
+
+### Calcul de l'étage hôte (`--host-exec`)
+
+Une couche dont les poids résident en RAM peut être copiée vers le GPU ou
+calculée sur place. Les deux chemins sont limités par la mémoire et lisent les
+mêmes octets : le plus rapide est celui dont le bus est le plus large — le PCIe
+5.0 x16 donne environ 54 Go/s, la DDR5 en double canal environ 70 Go/s — et
+calculer sur place laisse en outre le GPU libre au lieu de le faire attendre une
+copie.
+
+Cela ne vaut que si le processeur lit directement les poids empaquetés sur
+4 bits. D'où un petit noyau C++ avec un chemin AVX2 (`acvram_cpu.cpp`, chargé
+par ctypes, sans en-têtes Python ni ninja). Même sur sa branche **scalaire** de
+repli, il bat `dequantize() @ x` d'un facteur 1,44 en INT4 et 3,21 en NVFP4,
+parce que ce dernier écrit d'abord une copie 32 bits de toute la matrice.
+
+Sur Mistral-Large-123B, l'estimation du planificateur passe de 1,35 à
+2,42 jetons/s.
+
+### Précision mixte (`--mixed-precision auto`)
+
+Le convertisseur mesure le rapport signal/bruit en sortie de couche pour chaque
+tenseur et promeut vers un format plus large ceux qui tombent sous
+`--snr-floor`, dans la limite de 15 % des tenseurs. Dépenser 8 bits sur les
+quelques pour cent qui en ont besoin coûte une fraction de bit par poids sur
+l'ensemble.
+
+### Et `acvram eval`
+
+Le rapport signal/bruit et le cosinus des logits sont des approximations.
+`acvram eval REP [REP ...]` mesure la perplexité par fenêtre glissante, pour
+qu'un choix de format se tranche sur des preuves :
 
 ```
 $ acvram eval ~/acv/qwen3-32b-nvfp4 ~/acv/qwen3-32b-int4
-  model                    ppl     bpw        size    tokens
-  qwen3-32b-nvfp4        6.412    4.51    17.4GiB      8192
-  qwen3-32b-int4         6.583    4.17    16.1GiB      8192  (+2.7%)
+  modele                   ppl     bpp      taille    jetons
+  qwen3-32b-nvfp4        6,412    4,51    17,4 Gio      8192
+  qwen3-32b-int4         6,583    4,17    16,1 Gio      8192  (+2,7 %)
 ```
 
-## Endpoints
+## Points d'entrée HTTP
 
-| endpoint | notes |
+| point d'entrée | notes |
 |---|---|
-| `POST /v1/chat/completions` | streaming (SSE) and non-streaming; the checkpoint's own Jinja chat template |
-| `POST /v1/completions` | text or token-id prompts |
-| `POST /v1/embeddings` | mean-pooled final hidden states, L2-normalised, `dimensions` honoured |
-| `GET /v1/models` | plus an `acvram` block: formats, devices, KV capacity |
-| `GET /health`, `GET /metrics` | live decode rate, KV block occupancy |
+| `POST /v1/chat/completions` | flux SSE ou réponse unique ; utilise le gabarit de conversation du modèle |
+| `POST /v1/completions` | invite en texte ou en identifiants de jetons |
+| `POST /v1/embeddings` | états cachés finaux moyennés, normalisés L2, `dimensions` respecté |
+| `GET /v1/models` | plus un bloc `acvram` : formats, appareils, capacité du cache KV |
+| `GET /health`, `GET /metrics` | débit de décodage, occupation des blocs KV |
 
-## Where the numbers come from
+Les noms de champs de ces réponses restent en anglais : c'est le protocole
+OpenAI, et les traduire romprait tous les clients existants.
 
-Every figure quoted above is produced by code in this repository and checked
-by `pytest`. Measured on CPU with the reference kernels:
+## D'où viennent les chiffres
 
-| format | bpw | weight SNR | logit cosine vs BF16 |
+Chaque valeur citée ci-dessus est produite par du code de ce dépôt et vérifiée
+par `pytest`. Mesures faites sur processeur avec les noyaux de référence :
+
+| format | bits/poids | SNR des poids | cosinus des logits vs BF16 |
 |---|---|---|---|
-| BF16 | 16.00 | — | 1.0000 |
-| INT8 | 8.19 | 44.6 dB | 0.9998 |
-| NVFP4 | 4.50 | 20.4 dB | 0.9664 |
-| INT4 | 4.16 | 20.0 dB | 0.9427 |
-| INT4 + Hadamard | 4.16 | 21.0 dB | 0.9582 |
+| BF16 | 16,00 | — | 1,0000 |
+| INT8 | 8,19 | 44,6 dB | 0,9998 |
+| NVFP4 | 4,50 | 20,4 dB | 0,9664 |
+| INT4 | 4,16 | 20,0 dB | 0,9427 |
+| INT4 + Hadamard | 4,16 | 21,0 dB | 0,9582 |
 
-Two findings from those measurements changed the defaults:
+Deux constats issus de ces mesures ont changé les valeurs par défaut :
 
-* **A Hadamard rotation helps INT4 and not NVFP4.** INT4's 128-wide groups
-  cannot absorb a single outlier channel, so spreading outliers is worth an
-  `n log n` transform per activation. NVFP4's 16-wide blocks already carry
-  their own scale. Hence `--hadamard auto` applies it to INT4 only.
-* **INT8 beats FP8 E4M3 for the KV cache**, 44 dB against 32 dB at identical
-  size, because a per-(token, head) scale already supplies the dynamic range
-  FP8 spends exponent bits on. Both cards default to INT8 KV even though the
-  5090 could do FP8.
+* **Une rotation de Hadamard aide l'INT4 et pas le NVFP4.** Les groupes de 128
+  de l'INT4 ne peuvent pas absorber un canal aberrant isolé, si bien qu'étaler
+  les valeurs extrêmes vaut une transformée en n log n par activation. Les blocs
+  de 16 du NVFP4 portent déjà leur propre échelle. D'où `--hadamard auto`, qui
+  ne l'applique qu'à l'INT4.
+* **L'INT8 bat le FP8 E4M3 pour le cache KV**, 44 dB contre 32 dB à taille
+  identique, parce qu'une échelle par (jeton, tête) fournit déjà la plage
+  dynamique pour laquelle le FP8 dépense des bits d'exposant. Les deux cartes
+  utilisent donc un cache KV en INT8, même si la 5090 saurait faire du FP8.
 
 ## Documentation
 
-* [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the pieces fit
-* [`docs/HARDWARE.md`](docs/HARDWARE.md) — tuning this specific rig
-* [`docs/ROADMAP.md`](docs/ROADMAP.md) — **what is not done yet**, read this first
-* [`CLAUDE.md`](CLAUDE.md) — orientation for working on the code with Claude
+* [`REPRISE.md`](REPRISE.md) — **reprendre le projet sur une autre machine**
+* [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — comment les pièces s'assemblent
+* [`docs/MATERIEL.md`](docs/MATERIEL.md) — régler cette machine précise
+* [`docs/FEUILLE-DE-ROUTE.md`](docs/FEUILLE-DE-ROUTE.md) — **ce qui n'est pas fait**, à lire en premier
+* [`CLAUDE.md`](CLAUDE.md) — repères pour travailler sur le code avec Claude
 
-## Status
+## État
 
-Version 0.2.0. Written before the target machine was available, so every code
-path is exercised on CPU and none has yet run on a 5090. The CPU kernels *are*
-compiled and tested; the CUDA ones have never seen nvcc. See
-[`docs/ROADMAP.md`](docs/ROADMAP.md) for exactly what that means and what to
-check first on the real hardware.
+Version 0.2.0. Écrit avant que la machine cible ne soit disponible : tous les
+chemins de code sont exercés sur processeur, aucun n'a encore tourné sur une
+5090. Les noyaux processeur *sont* compilés et testés ; les noyaux CUDA n'ont
+jamais vu nvcc. Voir [`docs/FEUILLE-DE-ROUTE.md`](docs/FEUILLE-DE-ROUTE.md) pour
+ce que cela implique exactement.
 
-67 tests, all on CPU, about a minute: `pytest -q`.
+67 tests, sur processeur, déterministes, environ une minute : `pytest -q`.
 
-## License
+## Licence
 
-GPL-3.0-or-later.
+GPL-3.0 ou ultérieure.

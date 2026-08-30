@@ -1,11 +1,12 @@
-"""Transformer building blocks that know about quantization and tiering.
+"""Briques de transformeur conscientes de la quantification et des étages.
 
-Every linear layer in the model is a :class:`QuantLinear`. It holds its weight
-in whatever format its device chose, applies the calibration scaler the
-converter produced, and dispatches to the fused kernel when one is available.
-A layer whose weights live in host RAM wraps them in :class:`StreamedWeight`,
-which copies them to the GPU on a side stream so the transfer for layer i+1
-overlaps the compute of layer i.
+Chaque couche linéaire du modèle est un :class:`QuantLinear`. Elle détient son
+poids dans le format qu'a choisi son appareil, applique la mise à l'échelle de
+calibration produite par le convertisseur, et aiguille vers le noyau fusionné
+lorsqu'il en existe un. Une couche dont les poids résident en mémoire vive les
+enveloppe dans un :class:`StreamedWeight`, qui les copie vers le GPU sur un flux
+annexe, de sorte que le transfert de la couche i+1 recouvre le calcul de la
+couche i.
 """
 
 from __future__ import annotations
@@ -30,13 +31,14 @@ __all__ = ["QuantLinear", "StreamedWeight", "RMSNorm", "RotaryEmbedding",
 
 
 class StreamedWeight:
-    """A weight that lives in pinned host memory and visits the GPU on demand.
+    """Un poids qui vit en mémoire hôte épinglée et ne visite le GPU qu'à la demande.
 
-    Pinned memory is what makes the copy asynchronous; a pageable source would
-    force the driver to stage it synchronously and the overlap would vanish.
-    The double buffer means layer i+1's transfer is already in flight while
-    layer i computes, so a streamed layer costs ``max(copy, compute)`` rather
-    than their sum -- which is exactly what the planner's cost model assumes.
+    C'est la mémoire épinglée qui rend la copie asynchrone : une source
+    paginable forcerait le pilote à la sérialiser et le recouvrement
+    disparaîtrait. Le double tampon fait que le transfert de la couche i+1 est
+    déjà en vol pendant que la couche i calcule, si bien qu'une couche
+    transférée coûte ``max(copie, calcul)`` et non leur somme — ce que suppose
+    exactement le modèle de coût du planificateur.
     """
 
     def __init__(self, host_tensors: dict[str, torch.Tensor], device: torch.device,
@@ -61,7 +63,7 @@ class StreamedWeight:
                 torch.cuda.Event() if self.device.type == "cuda" else None)
 
     def prefetch(self) -> int:
-        """Start the copy into the next buffer; returns its slot."""
+        """Lance la copie vers le tampon suivant ; rend son emplacement."""
         if self.device.type != "cuda":
             return 0
         self._ensure()
@@ -85,11 +87,11 @@ class StreamedWeight:
 
 
 class QuantLinear(nn.Module):
-    """``y = x @ W.T (+ b)`` where W is stored quantized.
+    """``y = x @ W.T (+ b)`` où W est stocké quantifié.
 
-    The scaler is applied to the *input*, never folded into the weight: the
-    converter chose it precisely so the weight quantizes well after scaling,
-    and folding it back would undo that.
+    La mise à l'échelle s'applique à l'*entrée*, jamais repliée dans le poids :
+    le convertisseur l'a choisie précisément pour que le poids se quantifie bien
+    une fois mis à l'échelle, et la replier défairait cela.
     """
 
     def __init__(self, qweight: Any, bias: Optional[torch.Tensor] = None,
@@ -161,7 +163,7 @@ class QuantLinear(nn.Module):
 
 
 def _rehydrate(template: Any, tensors: dict[str, torch.Tensor]) -> Any:
-    """Rebuild a quantized tensor object around freshly copied GPU buffers."""
+    """Reconstruit un objet tenseur quantifié autour de tampons GPU fraîchement copiés."""
     if isinstance(template, NVFP4Tensor):
         return NVFP4Tensor(
             tensors["qweight"], tensors["block_scale"].view(torch.float8_e4m3fn),
@@ -171,7 +173,7 @@ def _rehydrate(template: Any, tensors: dict[str, torch.Tensor]) -> Any:
                           template.group_size, template.shape, template.padded_in)
     if isinstance(template, PlainTensor):
         return PlainTensor(tensors["weight"], template.shape, template.format)
-    raise TypeError(f"cannot rehydrate {type(template)!r}")
+    raise TypeError(f"impossible de reconstruire {type(template)!r}")
 
 
 class RMSNorm(nn.Module):
@@ -182,9 +184,9 @@ class RMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         dtype = x.dtype
-        # Accumulate the variance in fp32: at 4-bit weights the activations are
-        # already noisy, and a half-precision reduction over 8192 channels adds
-        # error for no speed worth having.
+        # On accumule la variance en fp32 : avec des poids sur 4 bits, les
+        # activations sont déjà bruitées, et une réduction en demi-précision sur
+        # 8192 canaux ajoute de l'erreur pour un gain de vitesse dérisoire.
         x32 = x.to(torch.float32)
         var = x32.pow(2).mean(-1, keepdim=True)
         x32 = x32 * torch.rsqrt(var + self.eps)
@@ -192,7 +194,7 @@ class RMSNorm(nn.Module):
 
 
 class RotaryEmbedding(nn.Module):
-    """RoPE with the scaling variants current models actually ship."""
+    """RoPE, avec les variantes de mise à l'échelle que les modèles actuels embarquent."""
 
     def __init__(self, head_dim: int, max_position: int, base: float = 10000.0,
                  scaling: Optional[dict] = None, device: Optional[torch.device] = None,
@@ -260,7 +262,7 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 def apply_rope(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor,
                sin: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """``q``/``k`` are [tokens, heads, dim]; cos/sin are [tokens, dim]."""
+    """``q`` et ``k`` valent [jetons, têtes, dim] ; cos et sin valent [jetons, dim]."""
     cos = cos.unsqueeze(1).to(q.dtype)
     sin = sin.unsqueeze(1).to(q.dtype)
     return (q * cos + _rotate_half(q) * sin,
@@ -268,7 +270,7 @@ def apply_rope(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor,
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """Expand GQA key/value heads to match the query head count."""
+    """Étend les têtes clé/valeur de la GQA au nombre de têtes de requête."""
     if n_rep == 1:
         return x
     t, h, d = x.shape
@@ -277,20 +279,21 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 def causal_mask(q_len: int, kv_len: int, q_offset: int, device,
                 dtype: torch.dtype) -> Optional[torch.Tensor]:
-    """Mask for a query block that starts at absolute position ``q_offset``.
+    """Masque pour un bloc de requêtes commençant à la position absolue ``q_offset``.
 
-    ``F.scaled_dot_product_attention(is_causal=True)`` aligns the triangle to
-    the *top left*, which is only correct when the query covers the whole
-    sequence. The moment a prefill is chunked -- or a prefix is served from
-    cache and only the tail is prefilled -- the query block starts partway
-    through the sequence and the built-in flag silently masks the wrong
-    cells. Prefix caching and chunked prefill both depend on getting this
-    right, so the mask is built explicitly whenever the query is offset.
+    ``F.scaled_dot_product_attention(is_causal=True)`` aligne le triangle en
+    *haut à gauche*, ce qui n'est correct que si la requête couvre toute la
+    séquence. Dès qu'un prefill est découpé — ou qu'un préfixe est servi depuis
+    le cache et que seule la queue est précalculée — le bloc de requêtes commence
+    en cours de séquence et le drapeau intégré masque silencieusement les
+    mauvaises cellules. Le cache de préfixe et le prefill par morceaux dépendent
+    tous deux de ce détail, d'où un masque construit explicitement dès que la
+    requête est décalée.
     """
     if q_len == 1:
-        return None                       # decode attends to everything
+        return None                       # le décodage attend sur tout
     if q_offset == 0 and q_len == kv_len:
-        return None                       # the built-in causal flag is correct
+        return None                       # le drapeau causal intégré est correct
     rows = torch.arange(q_offset, q_offset + q_len, device=device).unsqueeze(1)
     cols = torch.arange(kv_len, device=device).unsqueeze(0)
     allowed = cols <= rows
@@ -301,10 +304,10 @@ def causal_mask(q_len: int, kv_len: int, q_offset: int, device,
 def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
               causal: bool = True, scale: Optional[float] = None,
               q_offset: int = 0) -> torch.Tensor:
-    """Scaled dot-product attention over ``[tokens, heads, dim]`` tensors.
+    """Attention par produit scalaire normalisé sur des tenseurs ``[jetons, têtes, dim]``.
 
-    Delegates to PyTorch's SDPA, which picks FlashAttention on any GPU that
-    supports it. The transposes are views, not copies.
+    Délègue au SDPA de PyTorch, qui choisit FlashAttention sur tout GPU qui le
+    gère. Les transpositions sont des vues, pas des copies.
     """
     qh = q.transpose(0, 1).unsqueeze(0)          # [1, heads, tq, dim]
     kh = k.transpose(0, 1).unsqueeze(0)
@@ -324,13 +327,14 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
 def batched_decode_attention(q: torch.Tensor, keys: list[torch.Tensor],
                              values: list[torch.Tensor], n_rep: int,
                              scale: float) -> torch.Tensor:
-    """One SDPA call for a whole decode batch, instead of one per sequence.
+    """Un seul appel SDPA pour tout un lot de décodage, au lieu d'un par séquence.
 
-    Sequences have different context lengths, so the keys are right-padded to
-    the longest and the padding is masked out. That costs
-    ``batch x (max_len - len)`` wasted key slots; against it, the Python loop
-    disappears and the GPU sees one launch instead of ``batch``. At batch 16
-    the launch overhead alone was the larger cost.
+    Les séquences ont des longueurs de contexte différentes : les clés sont donc
+    complétées à droite jusqu'à la plus longue, et ce remplissage est masqué.
+    Cela coûte ``lot × (longueur_max − longueur)`` emplacements de clé gâchés ;
+    en face, la boucle Python disparaît et le GPU ne voit qu'un lancement au
+    lieu de ``lot``. À un lot de 16, le seul surcoût de lancement était déjà le
+    plus grand des deux.
     """
     b = len(keys)
     lens = [kk.shape[0] for kk in keys]
@@ -359,7 +363,7 @@ def batched_decode_attention(q: torch.Tensor, keys: list[torch.Tensor],
 
 
 def repeat_kv_batched(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """``[b, s, h_kv, d]`` -> ``[b, s, h_kv * n_rep, d]``."""
+    """``[lot, s, têtes_kv, d]`` -> ``[lot, s, têtes_kv × n_rep, d]``."""
     if n_rep == 1:
         return x
     b, s, h, d = x.shape

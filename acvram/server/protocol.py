@@ -1,10 +1,12 @@
-"""OpenAI-compatible request and response schemas.
+"""Schémas de requête et de réponse compatibles OpenAI.
 
-Field names and shapes follow the OpenAI HTTP API so that existing clients --
-the openai SDK, LangChain, Open WebUI, Continue, curl scripts -- work against
-this server without modification. Parameters the engine cannot honour are
-accepted and ignored rather than rejected, because clients routinely send the
-full parameter set regardless of backend.
+Les noms et les formes des champs suivent l'API HTTP d'OpenAI, pour que les
+clients existants — le SDK openai, LangChain, Open WebUI, Continue, de simples
+scripts curl — fonctionnent avec ce serveur sans modification. C'est aussi la
+raison pour laquelle ces noms restent en anglais : ils constituent un protocole,
+pas de la prose. Les paramètres que le moteur ne sait pas honorer sont acceptés
+et ignorés plutôt que rejetés, car les clients envoient couramment le jeu
+complet quel que soit le serveur.
 """
 
 from __future__ import annotations
@@ -41,7 +43,7 @@ class ChatMessage(BaseModel):
     tool_call_id: Optional[str] = None
 
     def text(self) -> str:
-        """Flatten the content, which may be a string or a content-part list."""
+        """Aplatit le contenu, qui peut être une chaîne ou une liste de fragments."""
         if self.content is None:
             return ""
         if isinstance(self.content, str):
@@ -181,7 +183,7 @@ class ModelCard(BaseModel):
     object: str = "model"
     created: int = Field(default_factory=lambda: int(time.time()))
     owned_by: str = "acvram"
-    # non-standard, but useful enough to be worth exposing
+    # hors norme, mais assez utile pour mériter d'être exposé
     acvram: Optional[dict[str, Any]] = None
 
 

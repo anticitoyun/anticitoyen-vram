@@ -1,9 +1,9 @@
-"""Declared hardware profiles.
+"""Profils matériels déclarés.
 
-A profile lets you build a placement plan for a machine you are not sitting
-in front of. The target rig profile below is used to prepare the deployment
-before the hardware is reachable; once ``acvram detect`` runs on the real box
-it always wins over the profile.
+Un profil permet de bâtir un plan de placement pour une machine devant laquelle
+on n'est pas assis. Le profil de la machine cible ci-dessous sert à préparer le
+déploiement avant que le matériel ne soit joignable ; dès qu'``acvram detect``
+tourne sur la vraie machine, il l'emporte toujours sur le profil.
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ GB = 1024 ** 3
 
 _BUILTIN: dict[str, dict] = {
     # ------------------------------------------------------------------
-    # The target machine. Numbers are nameplate values; anything the real
-    # `acvram detect` reports supersedes them.
+    # La machine cible. Les nombres sont des valeurs de plaque signalétique ;
+    # tout ce que rapporte le vrai `acvram detect` les remplace.
     # ------------------------------------------------------------------
     "rig-14900k-5090-3080ti": {
         "description": "i9-14900K / ROG Maximus Z790 Dark Hero / 96 GB DDR5 / "
@@ -31,7 +31,7 @@ _BUILTIN: dict[str, dict] = {
             "logical_cores": 32,
             "performance_cores": 8,
             "efficiency_cores": 16,
-            "p_core_cpuset": "0-15",   # P-core SMT siblings come first on RPL
+            "p_core_cpuset": "0-15",   # sur Raptor Lake, les jumeaux SMT des cœurs P viennent en premier
         },
         "host": {
             "total": 96 * GB,
@@ -45,7 +45,7 @@ _BUILTIN: dict[str, dict] = {
                 "total_mem": 32 * GB,
                 "sm": 120,
                 "pci_bus_id": "00000000:01:00.0",
-                # Slot 1 on the Dark Hero is CPU-attached PCIe 5.0 x16.
+                # Le port 1 de la Dark Hero est en PCIe 5.0 x16 relié au processeur.
                 "pcie_gen_max": 5, "pcie_gen_cur": 5,
                 "pcie_width_max": 16, "pcie_width_cur": 16,
                 "power_limit_w": 600.0,
@@ -56,15 +56,16 @@ _BUILTIN: dict[str, dict] = {
                 "total_mem": 12 * GB,
                 "sm": 86,
                 "pci_bus_id": "00000000:02:00.0",
-                # Second slot is chipset-attached and much narrower. This is a
-                # pessimistic default on purpose: the planner must not assume
-                # cheap host<->GPU1 traffic. Real values come from detection.
+                # Le second port passe par le chipset et est bien plus étroit.
+                # Valeur pessimiste à dessein : le planificateur ne doit pas
+                # supposer un trafic hôte-GPU1 bon marché. Les vraies valeurs
+                # viennent de la détection.
                 "pcie_gen_max": 4, "pcie_gen_cur": 4,
                 "pcie_width_max": 4, "pcie_width_cur": 4,
                 "power_limit_w": 350.0,
             },
         ],
-        # No NVLink on either board, and NVIDIA disables PCIe P2P on GeForce.
+        # Aucune des deux cartes n'a de NVLink, et NVIDIA désactive le pair-à-pair PCIe sur GeForce.
         "p2p_matrix": [[True, False], [False, True]],
         "driver_version": "580.00",
         "cuda_version": "13.0",

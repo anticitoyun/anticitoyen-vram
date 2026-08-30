@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "acvram"
 version = "0.2.0"
-description = "anticitoyen VRAM/RAM - OpenAI-compatible inference gateway with per-GPU quantization and VRAM->VRAM->RAM tiering"
+description = "anticitoyen VRAM/RAM — passerelle d'inference compatible OpenAI, quantification par GPU et etagement VRAM->VRAM->RAM"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "GPL-3.0-or-later" }

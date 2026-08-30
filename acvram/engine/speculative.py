@@ -1,33 +1,35 @@
-"""Speculative decoding.
+"""Décodage spéculatif.
 
-Decoding one token at batch 1 is memory bound: the machine reads every active
-weight to produce a single token. Verifying K proposed tokens reads those same
-weights *once*. So if something cheap can guess the next few tokens and be
-right often enough, throughput multiplies by the number of guesses accepted --
-for free, in the sense that the expensive part of the step did not get more
-expensive.
+Décoder un jeton avec un lot de taille 1 est limité par la mémoire : la machine
+lit tous les poids actifs pour produire un seul jeton. Vérifier K jetons
+proposés lit ces mêmes poids *une seule fois*. Si donc quelque chose de bon
+marché sait deviner les quelques jetons suivants et tombe juste assez souvent,
+le débit est multiplié par le nombre de propositions acceptées — gratuitement,
+au sens où la partie coûteuse de l'étape n'est pas devenue plus coûteuse.
 
-Two proposers, deliberately different in cost:
+Deux propositeurs, de coûts délibérément différents :
 
 ``NGramProposer``
-    Looks for the current suffix earlier in the context and proposes whatever
-    followed it. Costs nothing, needs no model, and is useless in open-ended
-    conversation -- but on code editing, RAG answers and summarisation, where
-    the output quotes the input heavily, it is often right.
+    Cherche le suffixe courant plus tôt dans le contexte et propose ce qui le
+    suivait. Ne coûte rien, ne demande aucun modèle, et ne sert à rien dans une
+    conversation libre — mais sur l'édition de code, les réponses de RAG et le
+    résumé, où la sortie recopie largement l'entrée, il tombe souvent juste.
 
 ``DraftModelProposer``
-    A small model running on a second device. On the target rig that device is
-    the RTX 3080 Ti, which the placement planner deliberately leaves idle for
-    any model that fits on the 5090. Turning idle silicon into a draft model
-    is the best use available for it.
+    Un petit modèle tournant sur un second appareil. Sur la machine cible, cet
+    appareil est la RTX 3080 Ti, que le planificateur de placement laisse
+    volontairement oisive pour tout modèle qui tient sur la 5090. Transformer du
+    silicium inutilisé en modèle brouillon est le meilleur usage disponible.
 
-Acceptance is *exact*, not approximate. With a draft distribution q and the
-target's p, a proposal x is accepted with probability min(1, p(x)/q(x)) and a
-rejection resamples from the normalised positive part of (p - q). The n-gram
-proposer has no distribution, so q is a point mass at its proposal: accept
-with probability p(x), and on rejection resample from p with that token
-removed. Both cases leave the output distribution identical to ordinary
-sequential decoding -- speculation buys speed, never a different answer.
+L'acceptation est *exacte*, pas approchée. Avec une distribution de brouillon q
+et celle de la cible p, une proposition x est acceptée avec la probabilité
+min(1, p(x)/q(x)), et un rejet rééchantillonne dans la partie positive
+normalisée de (p − q). Le propositeur par n-grammes n'a pas de distribution : q
+est alors une masse de Dirac sur sa proposition, donc on accepte avec la
+probabilité p(x) et, en cas de rejet, on rééchantillonne dans p privé de ce
+jeton. Dans les deux cas la distribution de sortie reste identique à celle d'un
+décodage séquentiel ordinaire — la spéculation achète de la vitesse, jamais une
+réponse différente.
 """
 
 from __future__ import annotations
@@ -46,7 +48,7 @@ __all__ = ["Proposal", "Proposer", "NGramProposer", "DraftModelProposer",
 @dataclass
 class Proposal:
     tokens: list[int]
-    # [k, vocab] draft probabilities, or None for a proposer without a model
+    # [k, vocabulaire] probabilités du brouillon, ou None sans modèle
     probs: Optional[torch.Tensor] = None
 
     def __len__(self) -> int:
@@ -69,11 +71,11 @@ class Proposer(Protocol):
 
 
 class NGramProposer:
-    """Propose the continuation of the most recent repeated suffix.
+    """Propose la suite du suffixe répété le plus récent.
 
-    Searches from the longest n-gram down: a longer match is rarer but far
-    more likely to be right, so trying 4 before 2 costs one extra scan and
-    materially raises the acceptance rate.
+    Cherche du n-gramme le plus long au plus court : une correspondance longue
+    est plus rare mais bien plus souvent juste, si bien qu'essayer 4 avant 2
+    coûte un balayage de plus et relève sensiblement le taux d'acceptation.
     """
 
     name = "ngram"
@@ -92,7 +94,7 @@ class NGramProposer:
         base = len(ids) - len(window)
         for n in range(min(self.max_ngram, len(window) - 1), self.min_ngram - 1, -1):
             suffix = window[-n:]
-            # Search backwards for the most recent earlier occurrence.
+            # On remonte à la recherche de l'occurrence antérieure la plus récente.
             for start in range(len(window) - n - 1, -1, -1):
                 if window[start:start + n] != suffix:
                     continue
@@ -122,13 +124,13 @@ class _DraftState:
 
 
 class DraftModelProposer:
-    """A small model with its own KV cache, kept in step with the target.
+    """Un petit modèle avec son propre cache KV, tenu au pas avec la cible.
 
-    The draft keeps its own paged cache so proposing K tokens costs K small
-    decode steps rather than K re-prefills. Its state is synchronised lazily:
-    whatever the target accepted since the last call is fed in one batch
-    before the new proposals are generated, which also repairs the divergence
-    left behind by a rejection.
+    Le brouillon garde son propre cache paginé, si bien que proposer K jetons
+    coûte K petites étapes de décodage plutôt que K précalculs complets. Son
+    état est synchronisé paresseusement : tout ce que la cible a accepté depuis
+    le dernier appel lui est présenté en un lot avant de produire de nouvelles
+    propositions, ce qui répare aussi la divergence laissée par un rejet.
     """
 
     name = "draft"
@@ -176,8 +178,9 @@ class DraftModelProposer:
         ids = seq.all_ids
         if len(ids) > self.max_model_len:
             return None
-        # Everything except the final token: that one is fed as the first step
-        # of proposing, so its logits become the first proposal.
+        # Tout sauf le dernier jeton : celui-là est présenté à la première
+        # étape de proposition, si bien que ses logits deviennent la première
+        # proposition.
         target = len(ids) - 1
         if st.length >= target:
             return st
@@ -218,9 +221,10 @@ class DraftModelProposer:
         return Proposal(tokens, torch.stack(probs))
 
     def commit(self, seq: Any, accepted: list[int]) -> None:
-        # A rejection leaves the draft's cache holding tokens the target did
-        # not take. Rewinding the length is enough: those slots are overwritten
-        # on the next sync, and nothing reads past `length`.
+        # Un rejet laisse dans le cache du brouillon des jetons que la cible
+        # n'a pas retenus. Rembobiner la longueur suffit : ces emplacements sont
+        # écrasés à la prochaine synchronisation, et rien ne lit au-delà de
+        # `length`.
         st = self.state.get(seq.id)
         if st is not None:
             st.length = min(st.length, len(seq.all_ids) - 1)
@@ -248,14 +252,15 @@ def verify_proposal(logits: torch.Tensor, proposal: Proposal,
                     params: SamplingParams,
                     generator: Optional[torch.Generator] = None
                     ) -> tuple[list[int], int]:
-    """Accept a prefix of the proposal, then emit exactly one more token.
+    """Accepte un préfixe de la proposition, puis émet exactement un jeton de plus.
 
-    ``logits`` is ``[k + 1, vocab]``: row *i* is the target's prediction for
-    the position proposal token *i* would occupy, and the final row is the
-    prediction that follows a fully accepted proposal.
+    ``logits`` vaut ``[k + 1, vocabulaire]`` : la ligne *i* est la prédiction de
+    la cible pour la position qu'occuperait le jeton proposé *i*, et la dernière
+    ligne est la prédiction qui suit une proposition entièrement acceptée.
 
-    Returns the tokens to append and how many proposals were accepted. The
-    result is always at least one token long, so a step can never stall.
+    Rend les jetons à ajouter et le nombre de propositions acceptées. Le
+    résultat fait toujours au moins un jeton, si bien qu'une étape ne peut
+    jamais caler.
     """
     k = len(proposal)
     accepted: list[int] = []
@@ -277,8 +282,9 @@ def verify_proposal(logits: torch.Tensor, proposal: Proposal,
             accepted.append(x)
             continue
 
-        # Rejected. Resample from the normalised positive part of (p - q) so
-        # the overall distribution stays exactly the target's.
+        # Rejeté. On rééchantillonne dans la partie positive normalisée de
+        # (p − q), pour que la distribution globale reste exactement celle de la
+        # cible.
         residual = p.clone()
         if proposal.probs is None:
             residual[x] = 0.0
@@ -295,7 +301,7 @@ def verify_proposal(logits: torch.Tensor, proposal: Proposal,
         tok = int(torch.multinomial(residual, 1, generator=generator))
         return accepted + [tok], len(accepted)
 
-    # Every proposal accepted: the final row gives one free bonus token.
+    # Toutes les propositions acceptées : la dernière ligne offre un jeton en prime.
     p = _target_probs(logits[k], params)
     tok = int(p.argmax()) if params.temperature <= 0 else \
         int(torch.multinomial(p, 1, generator=generator))

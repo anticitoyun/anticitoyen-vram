@@ -1,21 +1,23 @@
-"""Paged, quantized KV cache.
+"""Cache clés-valeurs paginé et quantifié.
 
-Paging (the vLLM idea): the cache is a pool of fixed-size blocks and each
-sequence owns a list of block indices. Nothing is contiguous, so a sequence
-can grow without reserving its worst-case context up front, and finished
-sequences return their blocks immediately. On a 32 GB card serving several
-conversations at once this is the difference between four concurrent
-sequences and forty.
+La pagination, reprise de vLLM : le cache est une réserve de blocs de taille
+fixe et chaque séquence détient une liste d'indices de blocs. Rien n'est
+contigu, si bien qu'une séquence peut croître sans réserver d'avance son
+contexte du pire cas, et qu'une séquence terminée rend ses blocs
+immédiatement. Sur une carte de 32 Go servant plusieurs conversations à la
+fois, c'est la différence entre quatre séquences simultanées et quarante.
 
-Quantization on top of that: keys and values are stored at 8 bits with one
-fp16 scale per (block, position, head), which is 2x smaller than fp16 for
-about 0.4% of overhead. Both GPUs get 8-bit storage, but not the same 8 bits:
+La quantification par-dessus : les clés et les valeurs sont stockées sur 8 bits
+avec une échelle fp16 par (bloc, position, tête), soit deux fois moins que le
+fp16 pour environ 0,4 % de surcoût. Les deux GPU reçoivent un stockage sur
+8 bits, mais pas les mêmes 8 bits :
 
-    RTX 5090   FP8 E4M3 -- wider dynamic range, no zero point needed
-    RTX 3080Ti INT8     -- Ampere has no FP8, so symmetric integer instead
+    RTX 5090    FP8 E4M3 — plage dynamique plus large, pas de point zéro
+    RTX 3080 Ti INT8     — Ampere n'a pas de FP8, donc entier symétrique
 
-The cache is per (layer, device): a layer executing on cuda:1 keeps its
-blocks on cuda:1, so attention never reaches across the PCIe bus.
+Le cache est propre à chaque couple (couche, appareil) : une couche s'exécutant
+sur cuda:1 garde ses blocs sur cuda:1, si bien que l'attention ne traverse
+jamais le bus PCIe.
 """
 
 from __future__ import annotations
@@ -32,22 +34,23 @@ BLOCK_SIZE = 16
 
 
 class BlockAllocator:
-    """Free list over a fixed pool of blocks, with content-addressed reuse.
+    """Liste de blocs libres, avec réutilisation adressée par le contenu.
 
-    Two jobs in one object, because they are the same resource:
+    Deux rôles dans un seul objet, parce qu'ils se disputent la même ressource :
 
-    * **Allocation.** Blocks are handed out and returned; a sequence that
-      finishes releases its blocks immediately.
-    * **Prefix caching.** A full block's contents are entirely determined by
-      the tokens that produced it *and* everything before them, so a block can
-      be addressed by the chained hash of its token span. Two requests sharing
-      a system prompt then share its blocks outright, and the second request
-      skips prefilling that span altogether.
+    * **Allocation.** Les blocs sont distribués et rendus ; une séquence qui se
+      termine libère les siens immédiatement.
+    * **Cache de préfixe.** Le contenu d'un bloc complet est entièrement
+      déterminé par les jetons qui l'ont produit *et* par tous ceux qui
+      précèdent : un bloc peut donc être adressé par le hachage chaîné de sa
+      tranche de jetons. Deux requêtes partageant une consigne système
+      partagent alors ses blocs, et la seconde évite complètement de
+      précalculer cette tranche.
 
-    A freed block whose contents are still identifiable is not returned to the
-    free list: it goes to the back of an LRU queue and is only recycled when
-    the pool runs dry. That is what makes the cache survive between requests
-    without ever refusing an allocation it could have served.
+    Un bloc libéré dont le contenu reste identifiable ne rejoint pas la liste
+    des libres : il part en fin de file LRU et n'est recyclé que lorsque la
+    réserve s'épuise. C'est ce qui fait survivre le cache entre les requêtes
+    sans jamais refuser une allocation qu'il aurait pu servir.
     """
 
     def __init__(self, num_blocks: int, enable_prefix_cache: bool = True) -> None:
@@ -65,7 +68,7 @@ class BlockAllocator:
     # -- capacity --------------------------------------------------------
     @property
     def num_free(self) -> int:
-        """Blocks obtainable without waiting -- free plus reclaimable."""
+        """Blocs obtenables sans attendre : libres plus récupérables."""
         return len(self._free) + len(self._lru)
 
     @property
@@ -85,8 +88,8 @@ class BlockAllocator:
     def allocate(self, n: int = 1) -> list[int]:
         if n > self.num_free:
             raise MemoryError(
-                f"KV cache exhausted: {n} blocks requested, {self.num_free} "
-                f"available of {self.num_blocks}")
+                f"cache KV épuisé : {n} blocs demandés, {self.num_free} "
+                f"disponibles sur {self.num_blocks}")
         out: list[int] = []
         for _ in range(n):
             if self._free:
@@ -98,7 +101,7 @@ class BlockAllocator:
         return out
 
     def _evict_one(self) -> int:
-        """Recycle the least recently released cached block."""
+        """Recycle le bloc en cache libéré le moins récemment."""
         blk, _ = self._lru.popitem(last=False)
         h = self._hash_of.pop(blk, None)
         if h is not None and self._by_hash.get(h) == blk:
@@ -114,7 +117,7 @@ class BlockAllocator:
                 continue
             self._refs.pop(blk, None)
             if blk in self._hash_of:
-                # Identifiable contents: keep it around to be matched again.
+                # Contenu identifiable : on le garde pour qu'il soit retrouvé.
                 self._lru[blk] = None
                 self._lru.move_to_end(blk)
             else:
@@ -136,12 +139,12 @@ class BlockAllocator:
     @staticmethod
     def block_hashes(token_ids: Sequence[int], block_size: int = BLOCK_SIZE,
                      ) -> list[int]:
-        """Chained hashes, one per *complete* block.
+        """Hachages chaînés, un par bloc *complet*.
 
-        Chaining matters: a block holding the same 16 tokens in two different
-        contexts does not hold the same keys and values, because attention saw
-        different history. Hashing the span alone would happily serve one
-        sequence's cache to another.
+        Le chaînage compte : un bloc contenant les mêmes 16 jetons dans deux
+        contextes différents ne contient pas les mêmes clés et valeurs, puisque
+        l'attention a vu une histoire différente. Hacher la seule tranche
+        servirait volontiers le cache d'une séquence à une autre.
         """
         out: list[int] = []
         prev = 0
@@ -154,11 +157,12 @@ class BlockAllocator:
 
     def match_prefix(self, hashes: Sequence[int],
                      limit: Optional[int] = None) -> list[int]:
-        """Longest run of leading blocks already in the cache.
+        """Plus longue suite de blocs de tête déjà présents dans le cache.
 
-        ``limit`` caps how many blocks may be served, because a request whose
-        prompt is entirely cached still needs at least one token to run
-        through the model -- there has to be something to produce logits from.
+        ``limit`` plafonne le nombre de blocs servis : une requête dont
+        l'invite est entièrement en cache a tout de même besoin d'au moins un
+        jeton à faire traverser le modèle, sans quoi il n'y a rien pour produire
+        des logits.
         """
         if not self.enable_prefix_cache:
             return []
@@ -177,16 +181,17 @@ class BlockAllocator:
         return matched
 
     def register(self, block: int, chained_hash: int) -> None:
-        """Publish a filled block so later requests can match it.
+        """Publie un bloc rempli, pour que des requêtes ultérieures le retrouvent.
 
-        Only ever called on a *complete* block. A partially filled block would
-        be matched by a hash describing content it does not yet hold.
+        Appelé uniquement sur un bloc *complet*. Un bloc partiellement rempli
+        serait retrouvé par un hachage décrivant un contenu qu'il ne porte pas
+        encore.
         """
         if not self.enable_prefix_cache:
             return
         existing = self._by_hash.get(chained_hash)
         if existing is not None and existing != block:
-            return                     # someone else published it first
+            return                     # quelqu'un d'autre l'a publié avant
         self._hash_of[block] = chained_hash
         self._by_hash[chained_hash] = block
 
@@ -242,7 +247,7 @@ class KVCacheConfig:
 
 
 class PagedKVCache:
-    """One layer's cache, living on one device."""
+    """Le cache d'une seule couche, résidant sur un seul appareil."""
 
     def __init__(self, cfg: KVCacheConfig, device: Optional[str] = None) -> None:
         self.cfg = cfg
@@ -260,7 +265,7 @@ class PagedKVCache:
 
     # -- quantization ----------------------------------------------------
     def _quantize(self, x: torch.Tensor) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """``x`` is [n_tokens, n_kv_heads, head_dim] -> storage + per-head scale."""
+        """``x`` vaut [jetons, têtes_kv, dim_tête] -> stockage + échelle par tête."""
         if not self.cfg.quantized:
             return x.to(self.cfg.torch_dtype), None
         amax = x.abs().amax(dim=-1, keepdim=True).to(torch.float32)
@@ -282,11 +287,11 @@ class PagedKVCache:
     # -- I/O -------------------------------------------------------------
     def write(self, slot_mapping: torch.Tensor, k: torch.Tensor,
               v: torch.Tensor) -> None:
-        """Scatter new keys/values into their slots.
+        """Disperse les nouvelles clés et valeurs dans leurs emplacements.
 
-        ``slot_mapping[i]`` is the flat position ``block * block_size + offset``
-        for token ``i``; computing it on the scheduler side keeps this a single
-        vectorised scatter instead of a per-sequence loop.
+        ``slot_mapping[i]`` est la position à plat ``bloc × taille_bloc +
+        décalage`` du jeton ``i`` ; la calculer du côté de l'ordonnanceur garde
+        ici une unique dispersion vectorisée au lieu d'une boucle par séquence.
         """
         kq, ks = self._quantize(k)
         vq, vs = self._quantize(v)
@@ -301,7 +306,7 @@ class PagedKVCache:
 
     def gather(self, block_table: torch.Tensor, length: int,
                dtype: torch.dtype = torch.float16) -> tuple[torch.Tensor, torch.Tensor]:
-        """Read one sequence's cache back as dense ``[length, heads, dim]``."""
+        """Relit le cache d'une séquence sous forme dense ``[longueur, têtes, dim]``."""
         bs = self.cfg.block_size
         n_blocks = (length + bs - 1) // bs
         blocks = block_table[:n_blocks]

@@ -1,15 +1,16 @@
-"""Scheduling and generation: continuous batching over a paged KV cache.
+"""Ordonnancement et génération : lot continu sur un cache KV paginé.
 
-Requests arrive at any time and finish at different lengths, so the engine
-runs a *continuous* batch: at every step it admits whatever new requests the
-free KV blocks can pay for, decodes one token for everything already running,
-and evicts sequences the moment they stop. Nothing waits for a batch boundary.
+Les requêtes arrivent n'importe quand et se terminent à des longueurs
+différentes : le moteur fait donc tourner un lot *continu*. À chaque étape, il
+admet toutes les nouvelles requêtes que les blocs KV libres peuvent payer,
+décode un jeton pour tout ce qui tourne déjà, et évince les séquences dès
+qu'elles s'arrêtent. Rien n'attend une frontière de lot.
 
-The engine is single-threaded by design. The model's layers are spread across
-two GPUs and host memory, and a step touches all of them in sequence; adding
-threads on top of that would contend for the same devices without adding
-parallelism. Concurrency comes from batching, not from threads, and the
-asyncio server hands work in and out through a queue.
+Le moteur est monothread à dessein. Les couches du modèle sont réparties sur
+deux GPU et la mémoire hôte, et une étape les touche toutes en série ; ajouter
+des fils par-dessus ferait se disputer les mêmes appareils sans ajouter de
+parallélisme. La concurrence vient du lot, pas des fils, et le serveur asyncio
+fait entrer et sortir le travail par une file.
 """
 
 from __future__ import annotations
@@ -47,9 +48,9 @@ class Sequence:
     first_token_at: float = 0.0
     cumulative_logprob: float = 0.0
     prefilled: bool = False
-    cached_len: int = 0                 # prompt tokens served from the prefix cache
+    cached_len: int = 0                 # jetons d'invite servis par le cache de préfixe
     hashes: list[int] = field(default_factory=list)
-    n_accepted: int = 0                 # speculative tokens accepted
+    n_accepted: int = 0                 # jetons spéculatifs acceptés
     n_proposed: int = 0
 
     @property
@@ -125,12 +126,12 @@ class EngineStats:
 
     @property
     def tokens_per_step(self) -> float:
-        """Decoded tokens per model step. Above 1.0 means speculation paid."""
+        """Jetons décodés par étape de modèle. Au-dessus de 1, la spéculation a payé."""
         return self.decode_tokens / self.spec_steps if self.spec_steps else 1.0
 
 
 class Engine:
-    """Owns the model, the block allocator and the request queues."""
+    """Détient le modèle, l'allocateur de blocs et les files de requêtes."""
 
     def __init__(self, loaded: LoadedModel, tokenizer: Any = None,
                  max_batch_size: int = 16, max_model_len: int = 8192,
@@ -172,7 +173,7 @@ class Engine:
                     request_id: str = "") -> Sequence:
         if len(prompt_ids) >= self.max_model_len:
             raise ValueError(
-                f"prompt of {len(prompt_ids)} tokens exceeds max_model_len "
+                f"invite de {len(prompt_ids)} jetons au-delà de max_model_len "
                 f"{self.max_model_len}")
         seq = Sequence(list(prompt_ids), params, request_id)
         with self._lock:
@@ -186,21 +187,23 @@ class Engine:
                     self._finish(seq, "abort")
 
     def _admit(self) -> list[Sequence]:
-        """Move as many waiting sequences into the batch as blocks allow."""
+        """Fait entrer dans le lot autant de séquences en attente que les blocs le permettent."""
         admitted = []
         with self._lock:
             while self.waiting and len(self.running) < self.max_batch_size:
                 seq = self.waiting[0]
-                # Reserve the prompt plus a little headroom so the first few
-                # decode steps do not immediately need another block.
+                # On réserve l'invite plus un peu de marge, pour que les
+                # premières étapes de décodage n'aient pas besoin aussitôt d'un
+                # bloc supplémentaire.
                 need = seq.blocks_needed(extra=BLOCK_SIZE)
                 if need > self.allocator.num_free:
                     break
                 self.waiting.pop(0)
 
-                # Serve whatever leading blocks the cache already holds. One
-                # block is always held back: a request with a fully cached
-                # prompt still needs a token to run through the model.
+                # On sert les blocs de tête que le cache détient déjà. Un bloc
+                # est toujours retenu : une requête dont l'invite est
+                # entièrement en cache a tout de même besoin d'un jeton à faire
+                # traverser le modèle.
                 hashes = BlockAllocator.block_hashes(seq.prompt_ids, BLOCK_SIZE)
                 limit = max(0, (len(seq.prompt_ids) - 1) // BLOCK_SIZE)
                 matched = self.allocator.match_prefix(hashes, limit=limit)
@@ -215,11 +218,12 @@ class Engine:
         return admitted
 
     def _register_complete_blocks(self, seq: Sequence) -> None:
-        """Publish blocks that are now full, so later requests can reuse them.
+        """Publie les blocs désormais pleins, pour que des requêtes ultérieures les
+        réutilisent.
 
-        Only complete blocks: a half-filled block matched by a hash naming
-        content it does not hold yet would hand a later request keys and
-        values that were never written.
+        Uniquement des blocs complets : un bloc à moitié rempli, retrouvé par un
+        hachage nommant un contenu qu'il ne porte pas encore, livrerait à une
+        requête ultérieure des clés et des valeurs jamais écrites.
         """
         ids = seq.all_ids
         n_full = min(len(ids) // BLOCK_SIZE, len(seq.blocks))
@@ -264,7 +268,7 @@ class Engine:
 
         for seq in seqs:
             if prefill:
-                # Skip whatever the prefix cache already holds.
+                # On saute ce que le cache de préfixe détient déjà.
                 ids = seq.prompt_ids[seq.cached_len:]
                 start = seq.cached_len
             else:
@@ -290,12 +294,13 @@ class Engine:
 
     # -- the step --------------------------------------------------------
     def step(self) -> list[GenerationOutput]:
-        """Run one forward pass and return whatever it produced."""
+        """Exécute une passe avant et rend ce qu'elle a produit."""
         new = self._admit()
         outputs: list[GenerationOutput] = []
 
-        # Prefill newly admitted sequences one at a time. Mixing a long prompt
-        # into a decode batch would stall every running sequence behind it.
+        # On précalcule les séquences nouvellement admises une par une. Mêler
+        # une longue invite à un lot de décodage bloquerait derrière elle toutes
+        # les séquences en cours.
         for seq in new:
             t0 = time.perf_counter()
             batch = self._build_batch([seq], prefill=True)
@@ -339,20 +344,20 @@ class Engine:
 
     def _speculative_decode(self, decodable: list[Sequence]
                             ) -> list[GenerationOutput]:
-        """Propose, verify in one forward pass, keep the accepted prefix.
+        """Proposer, vérifier en une passe avant, garder le préfixe accepté.
 
-        The whole batch is verified together even though proposals differ in
-        length: the attention path already handles a per-sequence query block
-        with its own absolute offset, which is the same machinery prefix
-        caching needed.
+        Tout le lot est vérifié ensemble bien que les propositions diffèrent en
+        longueur : le chemin d'attention gère déjà un bloc de requêtes par
+        séquence avec son propre décalage absolu, la machinerie même dont le
+        cache de préfixe avait besoin.
         """
         proposals: dict[int, Proposal] = {}
         for seq in decodable:
             budget = max(0, seq.params.max_tokens - len(seq.output_ids) - 1)
             k = min(self.spec_k, budget)
             prop = self.speculator.propose(seq, k) if k > 0 else Proposal([])
-            # A proposal that would run past the context limit is trimmed
-            # rather than dropped: a shorter speculation still pays.
+            # Une proposition qui dépasserait la limite de contexte est rognée
+            # plutôt qu'abandonnée : une spéculation plus courte paie encore.
             room = self.max_model_len - seq.length - 1
             if len(prop) > room:
                 prop = Proposal(prop.tokens[:max(0, room)],
@@ -388,12 +393,12 @@ class Engine:
 
     def _build_spec_batch(self, seqs: list[Sequence],
                           proposals: dict[int, Proposal]) -> ForwardBatch:
-        """The verification batch: last real token, then the proposals.
+        """Le lot de vérification : le dernier vrai jeton, puis les propositions.
 
-        Feeding the last produced token alongside the proposals is not an
-        extra cost -- its keys and values were never written, because a token
-        only enters the cache when it is fed. So the K+1 positions are exactly
-        the K+1 predictions needed.
+        Présenter le dernier jeton produit à côté des propositions ne coûte
+        rien de plus : ses clés et valeurs n'ont jamais été écrites, puisqu'un
+        jeton n'entre dans le cache qu'au moment où on le présente. Les K+1
+        positions sont donc exactement les K+1 prédictions nécessaires.
         """
         tokens: list[int] = []
         positions: list[int] = []
@@ -426,7 +431,7 @@ class Engine:
             is_prefill=False)
 
     def _append(self, seq: Sequence, tokens: list[int]) -> GenerationOutput:
-        """Append several accepted tokens, stopping at the first that ends it."""
+        """Ajoute plusieurs jetons acceptés, en s'arrêtant au premier qui termine."""
         reason = ""
         kept: list[int] = []
         for tok in tokens:
@@ -500,11 +505,11 @@ class Engine:
         return out
 
     def _decode_delta(self, seq: Sequence, n_new: int = 1) -> str:
-        """Decode incrementally, honouring multi-token UTF-8 sequences.
+        """Décode au fil de l'eau, en respectant les séquences UTF-8 multi-jetons.
 
-        Decoding the last token alone would split multi-byte characters and
-        emit replacement characters mid-word, so we decode a small window and
-        return only what is new.
+        Décoder le seul dernier jeton couperait les caractères multi-octets et
+        émettrait des caractères de remplacement en plein mot : on décode donc
+        une petite fenêtre et on ne rend que ce qui est nouveau.
         """
         tok = self.tokenizer
         span = max(8, n_new + 4)
@@ -526,7 +531,7 @@ class Engine:
     # -- convenience -----------------------------------------------------
     def generate(self, prompt_ids: list[int], params: SamplingParams
                  ) -> Iterator[GenerationOutput]:
-        """Blocking generator for a single request. Used by the CLI and tests."""
+        """Générateur bloquant pour une requête unique. Utilisé par le CLI et les tests."""
         seq = self.add_request(prompt_ids, params)
         while not seq.finished:
             for out in self.step():

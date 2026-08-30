@@ -1,26 +1,28 @@
-"""INT4 group-wise weight-only quantization (Ampere / sm_86 path).
+"""Quantification INT4 par groupes, sur les poids seuls (chemin Ampere / sm_86).
 
-The RTX 3080 Ti is GA102: its tensor cores do FP16/BF16/TF32/INT8, but there
-is no FP8 and no FP4 datapath, so a 4-bit *compute* format is not available.
-The way to still get a 4x smaller footprint is weight-only quantization --
-store 4 bits, dequantize a tile to FP16 inside the kernel, and feed the
-ordinary FP16 tensor cores. Memory traffic (the actual bottleneck during
-decode) drops 4x; arithmetic stays FP16.
+La RTX 3080 Ti est une GA102 : ses tensor cores traitent le FP16, le BF16, le
+TF32 et l'INT8, mais il n'existe ni chemin FP8 ni chemin FP4. Un format de
+*calcul* sur 4 bits n'est donc pas disponible. La façon d'obtenir malgré tout
+une empreinte quatre fois moindre est de ne quantifier que les poids : stocker
+4 bits, déquantifier une tuile en FP16 à l'intérieur du noyau, et alimenter les
+tensor cores FP16 ordinaires. Le trafic mémoire — le véritable goulot pendant
+le décodage — est divisé par quatre ; l'arithmétique reste en FP16.
 
-Layout, asymmetric, AWQ-compatible:
+Disposition, asymétrique, compatible AWQ :
 
-    q[i]   uint4                   group of 128 along K
-    scale  fp16   per group
-    zero   uint4  per group
+    q[i]     uint4                  groupe de 128 le long de K
+    échelle  fp16   par groupe
+    zéro     uint4  par groupe
 
-    w[i] ~= (q[i] - zero) * scale
+    w[i] ≈ (q[i] − zéro) × échelle
 
-Storage cost per weight:
+Coût de stockage par poids :
 
-    4 + 16/128 + 4/128 = 4.156 bpw   (3.85x smaller than FP16)
+    4 + 16/128 + 4/128 = 4,156 bits par poids   (×3,85 plus petit que le FP16)
 
-The "AWQ" part proper -- activation-aware channel scaling -- lives in
-:mod:`acvram.quant.calibrate`; this module is the pure integer codec.
+La partie proprement « AWQ » — la mise à l'échelle des canaux guidée par les
+activations — vit dans :mod:`acvram.quant.calibrate` ; ce module-ci n'est que
+le codec entier.
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ GROUP = 128
 
 
 def pack_uint4(x: torch.Tensor) -> torch.Tensor:
-    """Pack 4-bit values, two per byte, low nibble first."""
+    """Empaquette des valeurs 4 bits, deux par octet, quartet bas en premier."""
     if x.shape[-1] % 2:
         x = torch.nn.functional.pad(x, (0, 1))
     x = x.to(torch.uint8)
@@ -97,14 +99,14 @@ class INT4Tensor:
 
 def quantize_int4(weight: torch.Tensor, group_size: int = GROUP,
                   symmetric: bool = False) -> INT4Tensor:
-    """Quantize ``[out_features, in_features]`` to grouped uint4.
+    """Quantifie ``[sorties, entrées]`` en uint4 par groupes.
 
-    Asymmetric by default: LLM weight groups are rarely centred on zero, and
-    spending the zero-point buys roughly half a bit of effective precision
-    for 4 bits of metadata per 128 weights.
+    Asymétrique par défaut : les groupes de poids d'un modèle de langage sont
+    rarement centrés sur zéro, et dépenser un point zéro rapporte environ un
+    demi-bit de précision effective pour 4 bits de métadonnées par 128 poids.
     """
     if weight.dim() != 2:
-        raise ValueError(f"expected a 2-D weight, got {tuple(weight.shape)}")
+        raise ValueError(f"poids 2-D attendu, reçu {tuple(weight.shape)}")
     orig_shape = tuple(weight.shape)
     w = weight.detach().to(torch.float32)
     out_f, k = w.shape
@@ -121,23 +123,23 @@ def quantize_int4(weight: torch.Tensor, group_size: int = GROUP,
     else:
         wmax = wg.amax(dim=-1, keepdim=True)
         wmin = wg.amin(dim=-1, keepdim=True)
-        # Never let a constant group collapse the scale to zero.
+        # Un groupe constant ne doit jamais faire tomber l'échelle à zéro.
         scale = ((wmax - wmin) / 15.0).clamp(min=1e-8)
         zero = (-wmin / scale).round().clamp(0, 15)
 
     q = (wg / scale + zero).round().clamp(0, 15).to(torch.uint8)
     q = q.reshape(out_f, k_pad)
 
-    scales = scale.squeeze(-1).to(torch.float16)          # [out, ng]
-    zeros = pack_uint4(zero.squeeze(-1).to(torch.uint8))  # [out, ceil(ng/2)]
+    scales = scale.squeeze(-1).to(torch.float16)          # [sortie, ng]
+    zeros = pack_uint4(zero.squeeze(-1).to(torch.uint8))  # [sortie, ceil(ng/2)]
 
     return INT4Tensor(pack_uint4(q), scales, zeros, group_size,
                       orig_shape, k_pad)
 
 
 def dequantize_int4(t: INT4Tensor, dtype: torch.dtype = torch.float16) -> torch.Tensor:
-    """Reference dequantization; the fused CUDA kernel must match this."""
-    q = unpack_uint4(t.qweight).to(torch.float32)         # [out, k_pad]
+    """Déquantification de référence ; le noyau CUDA fusionné doit s'y conformer."""
+    q = unpack_uint4(t.qweight).to(torch.float32)         # [sortie, k_rempli]
     out_f, k_pad = q.shape
     ng = k_pad // t.group_size
     zeros = unpack_uint4(t.zeros)[:, :ng].to(torch.float32)

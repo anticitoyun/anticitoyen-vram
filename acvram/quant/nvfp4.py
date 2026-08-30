@@ -1,29 +1,29 @@
-"""NVFP4 -- 4-bit block-scaled floating point (Blackwell / sm_120).
+"""NVFP4 — virgule flottante 4 bits à échelle par bloc (Blackwell / sm_120).
 
-Layout, matching the NVIDIA/OCP definition that Blackwell tensor cores and
-CUTLASS consume:
+Disposition, conforme à la définition NVIDIA/OCP que consomment les tensor
+cores Blackwell et CUTLASS :
 
-    element      FP4 E2M1     1 sign + 2 exponent + 1 mantissa
-                              magnitudes {0, .5, 1, 1.5, 2, 3, 4, 6}
-    block scale  FP8 E4M3     one per 16 consecutive elements along K
-    global scale FP32         one per tensor
+    élément        FP4 E2M1   1 signe + 2 exposant + 1 mantisse
+                              magnitudes {0, 0,5, 1, 1,5, 2, 3, 4, 6}
+    échelle bloc   FP8 E4M3   une pour 16 éléments consécutifs le long de K
+    échelle glob.  FP32       une par tenseur
 
-    w[i] ~= code_level(q[i]) * e4m3(block_scale[i//16]) * global_scale
+    w[i] ≈ niveau(q[i]) × e4m3(échelle_bloc[i//16]) × échelle_globale
 
-Storage cost per weight:
+Coût de stockage par poids :
 
-    4 bits (element) + 8/16 bits (block scale) = 4.5 bpw
+    4 bits (élément) + 8/16 bits (échelle de bloc) = 4,5 bits par poids
 
-i.e. 3.56x smaller than BF16. On 32 GB of VRAM that is ~56 G parameters of
-weight, against ~16 G in BF16.
+soit ×3,56 plus petit que le BF16. Sur 32 Go de VRAM cela fait environ
+56 milliards de paramètres de poids, contre 16 en BF16.
 
-Why a *global* scale on top of the block scale: E4M3 tops out at 448, so a
-per-tensor divisor is what keeps every block scale inside the representable
-range regardless of the tensor's dynamic range.
+Pourquoi une échelle *globale* par-dessus l'échelle de bloc : l'E4M3 sature à
+448, et c'est un diviseur par tenseur qui maintient chaque échelle de bloc
+dans la plage représentable, quelle que soit la dynamique du tenseur.
 
-This module is pure PyTorch and runs on CPU, which makes it testable without
-a GPU; the fused CUDA path in ``acvram.kernels`` must reproduce it bit for
-bit (see tests/test_quant_roundtrip.py).
+Ce module est en PyTorch pur et tourne sur processeur, ce qui le rend testable
+sans GPU ; le chemin CUDA fusionné de ``acvram.kernels`` doit le reproduire au
+bit près (voir tests/test_quant.py).
 """
 
 from __future__ import annotations
@@ -49,30 +49,32 @@ BLOCK = 16
 E2M1_MAX = 6.0
 E4M3_MAX = 448.0
 
-# code -> magnitude, index is the 3-bit magnitude field of E2M1
+# code -> magnitude ; l'index est le champ de magnitude sur 3 bits de l'E2M1
 E2M1_LEVELS = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
-# Midpoints between consecutive levels. Round-to-nearest-even on the *code*
-# index means alternating strict / non-strict comparisons: a tie must land on
-# an even code, so 0.25 rounds down to code 0 while 0.75 rounds up to code 2.
-_TIE_DOWN = (0.25, 1.25, 2.5, 5.0)     # ties resolve downward (even code below)
-_TIE_UP = (0.75, 1.75, 3.5)            # ties resolve upward   (even code above)
+# Milieux entre niveaux consécutifs. L'arrondi au pair le plus proche porte sur
+# l'index du *code*, d'où l'alternance de comparaisons strictes et larges : une
+# égalité doit tomber sur un code pair, donc 0,25 descend vers le code 0 tandis
+# que 0,75 monte vers le code 2.
+_EGALITE_BAS = (0.25, 1.25, 2.5, 5.0)   # l'égalité descend (code pair en dessous)
+_EGALITE_HAUT = (0.75, 1.75, 3.5)       # l'égalité monte   (code pair au-dessus)
 
 
 def round_to_e2m1(x: torch.Tensor) -> torch.Tensor:
-    """Round magnitudes to the E2M1 grid, returning the 3-bit code 0..7.
+    """Arrondit les magnitudes sur la grille E2M1 et rend le code 3 bits 0..7.
 
-    Saturating: anything above 6 clamps to code 7 (E2M1 has no infinity).
+    Saturant : tout ce qui dépasse 6 est ramené au code 7, l'E2M1 n'ayant pas
+    d'infini.
     """
     m = x.abs()
     code = (
-        (m > _TIE_DOWN[0]).to(torch.uint8)
-        + (m >= _TIE_UP[0]).to(torch.uint8)
-        + (m > _TIE_DOWN[1]).to(torch.uint8)
-        + (m >= _TIE_UP[1]).to(torch.uint8)
-        + (m > _TIE_DOWN[2]).to(torch.uint8)
-        + (m >= _TIE_UP[2]).to(torch.uint8)
-        + (m > _TIE_DOWN[3]).to(torch.uint8)
+        (m > _EGALITE_BAS[0]).to(torch.uint8)
+        + (m >= _EGALITE_HAUT[0]).to(torch.uint8)
+        + (m > _EGALITE_BAS[1]).to(torch.uint8)
+        + (m >= _EGALITE_HAUT[1]).to(torch.uint8)
+        + (m > _EGALITE_BAS[2]).to(torch.uint8)
+        + (m >= _EGALITE_HAUT[2]).to(torch.uint8)
+        + (m > _EGALITE_BAS[3]).to(torch.uint8)
     )
     return code
 
@@ -82,14 +84,16 @@ def _levels_tensor(device, dtype=torch.float32) -> torch.Tensor:
 
 
 def pack_e2m1(codes: torch.Tensor) -> torch.Tensor:
-    """Pack 4-bit codes (last dim, even length) two per byte.
+    """Empaquette des codes 4 bits (dernière dimension, de longueur paire), deux
+    par octet.
 
-    Nibble order is low-first: element 2k goes in bits 0..3, element 2k+1 in
-    bits 4..7. This is the ``e2m1_x2`` convention CUTLASS and TensorRT use, so
-    a packed buffer can be handed to a Blackwell GEMM unchanged.
+    L'ordre des quartets place le bas en premier : l'élément 2k occupe les bits
+    0 à 3, l'élément 2k+1 les bits 4 à 7. C'est la convention ``e2m1_x2``
+    qu'utilisent CUTLASS et TensorRT, si bien qu'un tampon empaqueté peut être
+    remis tel quel à un produit matriciel Blackwell.
     """
     if codes.shape[-1] % 2:
-        raise ValueError("e2m1 packing needs an even number of elements")
+        raise ValueError("l'empaquetage e2m1 exige un nombre pair d'éléments")
     codes = codes.to(torch.uint8)
     lo = codes[..., 0::2]
     hi = codes[..., 1::2]
@@ -97,7 +101,7 @@ def pack_e2m1(codes: torch.Tensor) -> torch.Tensor:
 
 
 def unpack_e2m1(packed: torch.Tensor) -> torch.Tensor:
-    """Inverse of :func:`pack_e2m1`."""
+    """Inverse de :func:`pack_e2m1`."""
     lo = packed & 0x0F
     hi = (packed >> 4) & 0x0F
     out = torch.stack((lo, hi), dim=-1)
@@ -106,12 +110,12 @@ def unpack_e2m1(packed: torch.Tensor) -> torch.Tensor:
 
 @dataclass
 class NVFP4Tensor:
-    """A weight matrix stored in NVFP4.
+    """Une matrice de poids stockée en NVFP4.
 
-    ``qweight``     uint8            [out, in//2]     packed E2M1 pairs
-    ``block_scale`` float8_e4m3fn    [out, in//16]
-    ``global_scale`` float32         scalar
-    ``shape``       original logical shape (before any K padding)
+    ``qweight``      uint8         [sortie, entrée//2]  paires E2M1 empaquetées
+    ``block_scale``  float8_e4m3fn [sortie, entrée//16]
+    ``global_scale`` float32       scalaire
+    ``shape``        forme logique d'origine, avant tout remplissage de K
     """
 
     qweight: torch.Tensor
@@ -149,8 +153,9 @@ class NVFP4Tensor:
     def state_dict(self, prefix: str = "") -> dict[str, torch.Tensor]:
         return {
             f"{prefix}qweight": self.qweight,
-            # safetensors cannot store float8 metadata portably in every
-            # version, so scales travel as raw bytes and are reinterpreted.
+            # safetensors ne sait pas transporter des métadonnées float8 de
+            # façon portable selon les versions : les échelles voyagent donc en
+            # octets bruts, et sont réinterprétées à la lecture.
             f"{prefix}block_scale": self.block_scale.view(torch.uint8),
             f"{prefix}global_scale": self.global_scale,
         }
@@ -178,14 +183,15 @@ def quantize_nvfp4(
     block: int = BLOCK,
     global_scale: Optional[torch.Tensor] = None,
 ) -> NVFP4Tensor:
-    """Quantize a 2-D weight ``[out_features, in_features]`` to NVFP4.
+    """Quantifie en NVFP4 un poids 2-D ``[sorties, entrées]``.
 
-    Blocks run along ``in_features`` (the reduction dimension), which is what
-    a K-major GEMM wants: every 16-wide slice of K carries its own scale, so a
-    single outlier channel cannot flatten a whole row.
+    Les blocs courent le long des entrées, c'est-à-dire de la dimension de
+    réduction, ce qu'attend un produit matriciel orienté K : chaque tranche de
+    16 porte sa propre échelle, si bien qu'un unique canal aberrant ne peut pas
+    aplatir toute une ligne.
     """
     if weight.dim() != 2:
-        raise ValueError(f"expected a 2-D weight, got {tuple(weight.shape)}")
+        raise ValueError(f"poids 2-D attendu, reçu {tuple(weight.shape)}")
     orig_shape = tuple(weight.shape)
     w = weight.detach().to(torch.float32)
     w, orig_k = _pad_k(w, block)
@@ -194,19 +200,20 @@ def quantize_nvfp4(
 
     if global_scale is None:
         amax = wb.abs().amax()
-        # Pick g so the largest block scale lands exactly on E4M3's ceiling.
+        # On choisit g pour que la plus grande échelle de bloc tombe exactement
+        # sur le plafond de l'E4M3.
         g = amax / (E2M1_MAX * E4M3_MAX)
         if not torch.isfinite(g) or g <= 0:
             g = torch.tensor(1.0)
         global_scale = g.reshape(())
     gs = global_scale.to(torch.float32).reshape(())
 
-    block_amax = wb.abs().amax(dim=-1)                    # [out, k/block]
-    ideal = block_amax / E2M1_MAX                         # exact per-block scale
-    # Represent the block scale in E4M3 -- this is a real, lossy rounding and
-    # the kernel must use the *rounded* value, never `ideal`.
+    block_amax = wb.abs().amax(dim=-1)                    # [sortie, k/bloc]
+    ideal = block_amax / E2M1_MAX                         # échelle exacte par bloc
+    # On représente l'échelle de bloc en E4M3 : c'est un arrondi réel et avec
+    # perte, et le noyau doit utiliser la valeur *arrondie*, jamais `ideal`.
     bs_e4m3 = (ideal / gs).clamp(max=E4M3_MAX).to(torch.float8_e4m3fn)
-    bs = bs_e4m3.to(torch.float32) * gs                   # effective scale
+    bs = bs_e4m3.to(torch.float32) * gs                   # échelle effective
 
     safe = bs.clamp(min=torch.finfo(torch.float32).tiny)
     normed = wb / safe.unsqueeze(-1)
@@ -226,7 +233,7 @@ def quantize_nvfp4(
 
 
 def dequantize_nvfp4(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
-    """Reference dequantization. The CUDA kernel must match this exactly."""
+    """Déquantification de référence. Le noyau CUDA doit s'y conformer exactement."""
     codes = unpack_e2m1(t.qweight)                        # [out, k]
     out_f, k = codes.shape
     mag = codes & 0x07

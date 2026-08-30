@@ -1,7 +1,8 @@
-"""Prefix caching, speculative decoding, CPU kernels, mixed precision.
+"""Cache de préfixe, décodage spéculatif, noyaux processeur, précision mixte.
 
-Every one of these is an optimisation, and an optimisation that changes the
-output is a bug. Most of what follows checks equivalence, not speed.
+Chacun de ces points est une optimisation, et une optimisation qui change la
+sortie est un bogue. L'essentiel de ce qui suit vérifie une équivalence, pas une
+vitesse.
 """
 
 import math
@@ -28,7 +29,7 @@ from acvram.memory.kvcache import BLOCK_SIZE, BlockAllocator
 
 
 def test_offset_causal_mask_matches_a_full_causal_run():
-    """Prefix caching and chunked prefill both stand on this."""
+    """Le cache de préfixe et le prefill par morceaux reposent tous deux là-dessus."""
     torch.manual_seed(0)
     s, h, d = 12, 4, 16
     q, k, v = (torch.randn(s, h, d) for _ in range(3))
@@ -39,7 +40,7 @@ def test_offset_causal_mask_matches_a_full_causal_run():
 
 
 def test_builtin_causal_flag_would_have_been_wrong():
-    """SDPA aligns its triangle top-left, which is why the mask is explicit."""
+    """SDPA aligne son triangle en haut à gauche : d'où un masque explicite."""
     import torch.nn.functional as F
     torch.manual_seed(0)
     s, h, d = 12, 4, 16
@@ -72,7 +73,7 @@ def test_batched_decode_matches_per_sequence():
 
 
 def test_block_hash_chains_on_history():
-    """Identical spans in different contexts must not collide."""
+    """Des tranches identiques dans des contextes différents ne doivent pas se confondre."""
     a = BlockAllocator.block_hashes([1] * 16 + [2] * 16)
     b = BlockAllocator.block_hashes([9] * 16 + [2] * 16)
     assert a[0] != b[0]
@@ -88,7 +89,7 @@ def test_allocator_reuses_then_evicts():
     assert alloc.num_cached == 2
     assert alloc.match_prefix([111]) == [blocks[0]]
     alloc.free([blocks[0]])
-    # Under pressure the cache gives way rather than refusing the allocation.
+    # Sous pression, le cache cède plutôt que de refuser l'allocation.
     got = alloc.allocate(2)
     assert len(got) == 2
     assert alloc.evictions > 0
@@ -111,22 +112,22 @@ def test_prefix_cache_is_output_identical(converted):
 
     (a1, a2, warm) = run(True)
     (b1, b2, _) = run(False)
-    assert a1 == a2, "a warm cache changed the answer"
-    assert a1 == b1, "the cache changed the answer against an uncached run"
+    assert a1 == a2, "un cache chaud a change la reponse"
+    assert a1 == b1, "le cache a change la reponse face a une execution sans cache"
     assert a2 == b2
-    assert warm.stats.cached_prompt_tokens > 0, "nothing was served from cache"
+    assert warm.stats.cached_prompt_tokens > 0, "rien n'a ete servi depuis le cache"
 
 
 def test_prefix_cache_saves_prefill(converted):
     loaded = load_model(converted, dtype=torch.float32, device_override="cpu")
-    prompt = [7, 3, 9, 1, 4, 8, 2, 5] * 6         # 48 tokens = 3 whole blocks
+    prompt = [7, 3, 9, 1, 4, 8, 2, 5] * 6         # 48 jetons = 3 blocs entiers
     e = Engine(loaded, None, max_batch_size=2, max_model_len=256)
     params = SamplingParams(temperature=0.0, max_tokens=3)
     list(e.generate(prompt, params))
     after_first = e.stats.prefill_tokens
     list(e.generate(prompt, params))
     added = e.stats.prefill_tokens - after_first
-    assert added < len(prompt), f"second run still prefilled {added} tokens"
+    assert added < len(prompt), f"la seconde execution a encore precalcule {added} jetons"
 
 
 # --------------------------------------------------------------------------
@@ -135,13 +136,13 @@ def test_prefix_cache_saves_prefill(converted):
 
 
 def test_speculation_preserves_the_target_distribution():
-    """The guarantee that makes speculation safe, checked statistically."""
+    """La garantie qui rend la spéculation sûre, vérifiée statistiquement."""
     torch.manual_seed(0)
     vocab, trials = 8, 40000
     params = SamplingParams(temperature=1.0)
     logits = torch.randn(vocab) * 1.5
     p = torch.softmax(logits, -1)
-    q = torch.softmax(torch.randn(vocab) * 3.0, -1)     # deliberately wrong
+    q = torch.softmax(torch.randn(vocab) * 3.0, -1)     # volontairement faux
 
     counts = torch.zeros(vocab)
     for _ in range(trials):
@@ -150,12 +151,12 @@ def test_speculation_preserves_the_target_distribution():
         out, _ = verify_proposal(rows, Proposal([tok], q.unsqueeze(0)), params)
         counts[out[0]] += 1
     tv = 0.5 * float((counts / trials - p).abs().sum())
-    assert tv < 0.02, f"total variation {tv:.4f} from the target distribution"
+    assert tv < 0.02, f"variation totale {tv:.4f} par rapport a la distribution cible"
 
 
 def test_greedy_verification_accepts_only_exact_matches():
     logits = torch.zeros(3, 5)
-    logits[:, 2] = 10.0                       # argmax is token 2 everywhere
+    logits[:, 2] = 10.0                       # l'argmax vaut le jeton 2 partout
     params = SamplingParams(temperature=0.0)
     out, n = verify_proposal(logits, Proposal([2, 2]), params)
     assert n == 2 and out == [2, 2, 2]
@@ -184,12 +185,12 @@ def test_ngram_speculation_is_output_identical(converted):
 
     base, sb = run(None)
     spec, ss = run(NGramProposer())
-    assert spec == base, "speculation changed the greedy output"
-    assert ss.spec_steps < sb.spec_steps, "speculation saved no model steps"
+    assert spec == base, "la speculation a change la sortie gloutonne"
+    assert ss.spec_steps < sb.spec_steps, "la speculation n'a economise aucune etape"
 
 
 def test_draft_model_identical_to_itself_accepts_everything(converted):
-    """A draft that *is* the target must be accepted every time."""
+    """Un brouillon qui *est* la cible doit être accepté à chaque fois."""
     loaded = load_model(converted, dtype=torch.float32, device_override="cpu")
     draft = load_model(converted, dtype=torch.float32, device_override="cpu")
     prompt = [7, 3, 9, 1, 4, 8, 2, 5] * 4
@@ -286,15 +287,15 @@ def test_mixed_precision_promotes_and_improves_snr(tiny_checkpoint, target_rig,
                                                 mixed_precision="auto",
                                                 snr_floor=25.0, dry_run=True),
                               spec=spec)
-    assert auto.promotions, "nothing was promoted below a 25 dB floor"
+    assert auto.promotions, "rien n'a ete promu sous un plancher de 25 dB"
     assert auto.mean_out_snr_db > off.mean_out_snr_db
-    assert auto.out_bytes > off.out_bytes         # accuracy is not free
+    assert auto.out_bytes > off.out_bytes         # la precision n'est pas gratuite
     for p in auto.promotions:
         assert p["after"] > p["before"]
 
 
 def test_promotion_stays_within_its_cap(tiny_checkpoint, target_rig, tmp_path):
-    """A bad calibration must not silently inflate the whole model."""
+    """Une mauvaise calibration ne doit pas gonfler tout le modèle en silence."""
     from acvram.engine.config import load_model_spec
     from acvram.memory.tiering import PlannerOptions, auto_plan
     from acvram.quant.convert import ConversionOptions, convert_checkpoint
@@ -304,7 +305,7 @@ def test_promotion_stays_within_its_cap(tiny_checkpoint, target_rig, tmp_path):
     r = convert_checkpoint(tiny_checkpoint, plan,
                            ConversionOptions(out_dir=str(tmp_path / "c"),
                                              mixed_precision="auto",
-                                             snr_floor=999.0,   # promote all
+                                             snr_floor=999.0,   # tout promouvoir
                                              max_promotions=0.15,
                                              dry_run=True), spec=spec)
     assert len(r.promotions) <= 0.15 * r.tensors + 1

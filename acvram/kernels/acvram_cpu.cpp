@@ -1,28 +1,31 @@
-// CPU dequantize-and-multiply kernels, for the host memory tier.
+// Noyaux processeur de déquantification et multiplication, pour l'étage hôte.
 //
-// A layer whose weights live in host RAM has two ways to be computed:
+// Une couche dont les poids résident en mémoire vive peut être calculée de deux
+// façons :
 //
-//   stream   copy the weights to the GPU over PCIe, compute there
-//   cpu      compute in place on the CPU
+//   transfert  copier les poids vers le GPU par le PCIe et calculer là-bas
+//   processeur calculer sur place
 //
-// On the target rig the second is the better bet. PCIe 5.0 x16 delivers about
-// 54 GB/s of usable host-to-device bandwidth; dual-channel DDR5-6000 delivers
-// roughly 70-75 GB/s of streaming reads. Both paths are memory bound and read
-// the same bytes, so computing in place is around 1.4x faster -- and it leaves
-// the GPU free instead of making it wait on a copy.
+// Sur la machine cible, la seconde est le meilleur pari. Le PCIe 5.0 x16 offre
+// environ 54 Go/s de bande passante utile vers l'appareil ; la DDR5-6000 en
+// double canal offre environ 70 à 75 Go/s en lecture séquentielle. Les deux
+// chemins sont limités par la mémoire et lisent les mêmes octets : calculer sur
+// place est donc environ 1,4 fois plus rapide, et laisse en outre le GPU libre
+// au lieu de le faire attendre une copie.
 //
-// That only holds if the CPU side actually reads the packed 4-bit weights
-// rather than materialising a 16-bit copy first, which would triple the
-// traffic and hand the advantage straight back. Hence these kernels: they
-// unpack nibbles into vector registers and never write a dequantized weight
-// to memory.
+// Cela ne tient que si le processeur lit réellement les poids empaquetés sur
+// 4 bits, au lieu d'en matérialiser d'abord une copie 16 bits, ce qui
+// triplerait le trafic et rendrait aussitôt l'avantage. D'où ces noyaux : ils
+// dépaquettent les quartets dans des registres vectoriels et n'écrivent jamais
+// un poids déquantifié en mémoire.
 //
-// Numerics must match acvram/quant/nvfp4.py and acvram/quant/int4.py exactly;
-// tests/test_cpu_kernels.py checks that.
+// La numérique doit correspondre exactement à acvram/quant/nvfp4.py et
+// acvram/quant/int4.py ; tests/test_improvements.py le vérifie.
 
-// Built as a plain shared object with a C ABI and loaded through ctypes, not
-// as a torch extension. That drops the build-time dependency on Python
-// headers and ninja, which a deployment machine has no reason to carry:
+// Construit en bibliothèque partagée ordinaire à interface C et chargé par
+// ctypes, et non en extension torch. Cela supprime la dépendance de compilation
+// aux en-têtes Python et à ninja, qu'une machine de déploiement n'a aucune
+// raison d'embarquer :
 //
 //     g++ -O3 -fPIC -shared -fopenmp -o libacvram_cpu.so acvram_cpu.cpp
 
@@ -43,17 +46,17 @@
 
 namespace {
 
-// E2M1 magnitudes, indexed by the 3-bit magnitude field.
+// Magnitudes E2M1, indexées par le champ de magnitude sur 3 bits.
 const float kE2M1[8] = {0.f, 0.5f, 1.f, 1.5f, 2.f, 3.f, 4.f, 6.f};
 
-// FP8 E4M3 (OCP "fn" variant: no infinities, one NaN encoding) -> float.
+// FP8 E4M3 (variante OCP « fn » : pas d'infinis, un seul encodage NaN) -> float.
 inline float e4m3_to_float(uint8_t bits) {
     const uint32_t sign = (bits >> 7) & 0x1u;
     const uint32_t exp = (bits >> 3) & 0xFu;
     const uint32_t man = bits & 0x7u;
     float mag;
     if (exp == 0) {
-        // subnormal: 2^-6 * (man / 8)
+        // sous-normal : 2^-6 × (mantisse / 8)
         mag = static_cast<float>(man) * 0.001953125f;   // 2^-9
     } else {
         const int e = static_cast<int>(exp) - 7;
@@ -79,7 +82,7 @@ inline float half_to_float(uint16_t h) {
 }
 
 // -------------------------------------------------------------------------
-// scalar reference paths -- always compiled, always correct
+// chemins scalaires de référence — toujours compilés, toujours corrects
 // -------------------------------------------------------------------------
 
 float int4_dot_scalar(const uint8_t *q, const uint16_t *scales,
@@ -120,8 +123,9 @@ float nvfp4_dot_scalar(const uint8_t *q, const uint8_t *bscale, float gscale,
 }
 
 // -------------------------------------------------------------------------
-// AVX2 paths -- compiled unconditionally via a target attribute, so this
-// builds on a machine that cannot execute them, and selected at run time.
+// chemins AVX2 — compilés inconditionnellement via un attribut de cible, si
+// bien que le fichier se construit sur une machine incapable de les exécuter,
+// et sélectionnés à l'exécution.
 // -------------------------------------------------------------------------
 
 #ifdef ACVRAM_X86
@@ -136,14 +140,14 @@ inline float hsum256(__m256 v) {
     return _mm_cvtss_f32(lo);
 }
 
-// 8 packed bytes -> 16 nibbles in natural order, as two vectors of 8 int32.
+// 8 octets empaquetés -> 16 quartets dans l'ordre naturel, en deux vecteurs de 8 int32.
 __attribute__((target("avx2,fma")))
 inline void unpack16(const uint8_t *p, __m256i &n0, __m256i &n1) {
     const __m128i b = _mm_loadl_epi64(reinterpret_cast<const __m128i *>(p));
     const __m128i mask = _mm_set1_epi8(0x0F);
     const __m128i lo = _mm_and_si128(b, mask);
     const __m128i hi = _mm_and_si128(_mm_srli_epi16(b, 4), mask);
-    // interleaving gives [lo0, hi0, lo1, hi1, ...] which is nibble order
+    // l'entrelacement donne [bas0, haut0, bas1, haut1, ...], soit l'ordre des quartets
     const __m128i inter = _mm_unpacklo_epi8(lo, hi);
     n0 = _mm256_cvtepu8_epi32(inter);
     n1 = _mm256_cvtepu8_epi32(_mm_srli_si128(inter, 8));
@@ -156,7 +160,7 @@ float int4_dot_avx2(const uint8_t *q, const uint16_t *scales,
     const int half_k = K >> 1;
     int idx = 0;
     for (; idx + 8 <= half_k; idx += 8) {
-        const int k0 = idx << 1;                 // 16 weights per iteration
+        const int k0 = idx << 1;                 // 16 poids par itération
         const int g = k0 / group;
         const float s = half_to_float(scales[g]);
         const uint8_t zpacked = zeros[g >> 1];
@@ -192,13 +196,13 @@ float nvfp4_dot_avx2(const uint8_t *q, const uint8_t *bscale, float gscale,
     const int half_k = K >> 1;
     int idx = 0;
     for (; idx + 8 <= half_k; idx += 8) {
-        const int k0 = idx << 1;                 // exactly one 16-wide block
+        const int k0 = idx << 1;                 // exactement un bloc de 16
         const float s = e4m3_to_float(bscale[k0 >> 4]) * gscale;
         const __m256 vs = _mm256_set1_ps(s);
 
         __m256i n0, n1;
         unpack16(q + idx, n0, n1);
-        // magnitude from the low 3 bits, sign from bit 3 flipped into bit 31
+        // magnitude sur les 3 bits bas, signe du bit 3 basculé vers le bit 31
         __m256 v0 = _mm256_permutevar8x32_ps(lut, _mm256_and_si256(n0, seven));
         __m256 v1 = _mm256_permutevar8x32_ps(lut, _mm256_and_si256(n1, seven));
         const __m256i s0 = _mm256_slli_epi32(_mm256_and_si256(n0, eight), 28);
@@ -238,7 +242,7 @@ extern "C" {
 
 int acvram_cpu_has_avx2() { return have_avx2() ? 1 : 0; }
 
-// y[n, m] = sum_k dequant(W[m, k]) * x[n, k]
+// y[n, m] = somme_k dequant(W[m, k]) * x[n, k]
 void acvram_int4_gemv(const uint8_t *q, const uint16_t *scales,
                       const uint8_t *zeros, const float *x, float *y,
                       int64_t M, int64_t K, int64_t N, int64_t group) {

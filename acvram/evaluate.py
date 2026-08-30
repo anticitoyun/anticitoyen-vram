@@ -1,14 +1,16 @@
-"""Perplexity, so format decisions rest on a measurement.
+"""La perplexité, pour que les choix de format reposent sur une mesure.
 
-SNR on a weight matrix and cosine similarity between logit vectors are proxies.
-They correlate with quality, they are cheap, and they are what the converter
-reports per tensor -- but they cannot answer "is NVFP4 with a promotion floor
-of 25 dB better than plain INT4 on this model". Perplexity can.
+Le rapport signal/bruit d'une matrice de poids et la similarité cosinus entre
+vecteurs de logits sont des approximations. Elles corrèlent avec la qualité,
+elles sont bon marché, et c'est ce que le convertisseur rapporte par tenseur —
+mais elles ne savent pas répondre à « le NVFP4 avec un plancher de promotion à
+25 dB vaut-il mieux que de l'INT4 simple sur ce modèle ». La perplexité, si.
 
-The evaluation is a straightforward sliding window: feed a window of tokens,
-score the model's prediction of each token given everything before it, slide
-by ``stride`` and only count the newly exposed positions so no token is scored
-twice with different amounts of context.
+L'évaluation est une fenêtre glissante sans détour : on présente une fenêtre de
+jetons, on note la prédiction du modèle pour chaque jeton connaissant tout ce
+qui précède, on glisse de ``stride`` et on ne compte que les positions
+nouvellement exposées, afin qu'aucun jeton ne soit noté deux fois avec des
+quantités de contexte différentes.
 """
 
 from __future__ import annotations
@@ -89,7 +91,7 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
                dtype: torch.dtype = torch.bfloat16,
                progress: Optional[Callable[[int, int], None]] = None
                ) -> EvalResult:
-    """Sliding-window perplexity over a converted model."""
+    """Perplexité par fenêtre glissante sur un modèle converti."""
     from .engine.loader import load_model
     from .engine.model import ForwardBatch
     from .memory.kvcache import BLOCK_SIZE, BlockAllocator
@@ -99,12 +101,12 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
     loaded = load_model(model_dir, dtype=dtype, device_override=device)
     tokenizer = load_tokenizer(model_dir)
     if tokenizer is None:
-        raise ValueError(f"no tokenizer.json in {model_dir}; "
-                         f"perplexity needs one to build the token stream")
+        raise ValueError(f"pas de tokenizer.json dans {model_dir} ; la perplexité "
+                         f"en a besoin pour bâtir le flux de jetons")
 
     ids = tokenizer.encode(_load_corpus(corpus_path))[:max_tokens]
     if len(ids) < 16:
-        raise ValueError("corpus is too short to evaluate")
+        raise ValueError("corpus trop court pour être évalué")
 
     model = loaded.model
     result = EvalResult(model=os.path.basename(os.path.abspath(model_dir)))
@@ -140,8 +142,9 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
         logits = logits[:-1].to(torch.float32)
         targets = torch.tensor(chunk[1:], dtype=torch.long, device=logits.device)
 
-        # Only score positions this window exposes for the first time, so a
-        # token is never counted twice with different amounts of context.
+        # On ne note que les positions que cette fenêtre expose pour la
+        # première fois, afin qu'un jeton ne soit jamais compté deux fois avec
+        # des quantités de contexte différentes.
         first_new = 0 if start == 0 else max(0, (window - stride) - 1)
         if first_new >= logits.shape[0]:
             break
@@ -163,21 +166,21 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
 
 
 def compare_models(model_dirs: list[str], **kwargs: Any) -> list[EvalResult]:
-    """Evaluate several converted models on the same corpus and rank them."""
+    """Évalue plusieurs modèles convertis sur le même corpus et les classe."""
     out = [perplexity(d, **kwargs) for d in model_dirs]
     return sorted(out, key=lambda r: r.perplexity)
 
 
 def render(results: list[EvalResult]) -> str:
     if not results:
-        return "no results"
+        return "aucun resultat"
     width = max(len(r.model) for r in results)
-    lines = [f"  {'model':<{width}}  {'ppl':>9}  {'bpw':>6}  {'size':>10}  "
-             f"{'tokens':>8}"]
+    lines = [f"  {'modele':<{width}}  {'ppl':>9}  {'bpp':>6}  {'taille':>10}  "
+             f"{'jetons':>8}"]
     best = min(r.perplexity for r in results)
     for r in results:
         delta = "" if r.perplexity == best else f"  (+{100*(r.perplexity/best-1):.1f}%)"
         lines.append(f"  {r.model:<{width}}  {r.perplexity:9.3f}  "
-                     f"{r.bits_per_weight:6.2f}  {r.weights_bytes/2**20:8.1f}MiB  "
+                     f"{r.bits_per_weight:6.2f}  {r.weights_bytes/2**20:8.1f}Mio  "
                      f"{r.tokens:8d}{delta}")
     return "\n".join(lines)

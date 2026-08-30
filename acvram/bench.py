@@ -1,10 +1,12 @@
-"""Measurements that replace the planner's estimates with real numbers.
+"""Des mesures, pour remplacer les estimations du planificateur par de vrais
+nombres.
 
-The placement planner works from nameplate bandwidths and a memory-bound cost
-model. That is good enough to choose a layout, but the only way to know what
-this machine actually does is to measure it -- particularly the host-to-device
-link, which is the single number that decides whether streaming a layer from
-RAM is viable, and which depends on the slot the card ended up in.
+Le planificateur de placement travaille à partir de bandes passantes de plaque
+signalétique et d'un modèle de coût limité par la mémoire. C'est suffisant pour
+choisir une disposition, mais la seule façon de savoir ce que fait réellement
+cette machine est de la mesurer — en particulier le lien vers l'appareil, seul
+nombre qui décide si transférer une couche depuis la mémoire vive est viable, et
+qui dépend du port dans lequel la carte a atterri.
 """
 
 from __future__ import annotations
@@ -36,10 +38,11 @@ def _timeit(fn, iters: int, warmup: int, device: Any) -> float:
 
 
 def bench_link_bandwidth(size_mb: int = 512, iters: int = 5) -> list[dict]:
-    """Pinned host <-> device copy rate, per GPU, both directions.
+    """Débit de copie hôte-appareil en mémoire épinglée, par GPU, dans les deux sens.
 
-    Pinned memory is used deliberately: that is what the streaming path uses,
-    and a pageable-memory number would understate the link by roughly half.
+    La mémoire épinglée est utilisée à dessein : c'est ce qu'emploie le chemin de
+    transfert, et un chiffre mesuré en mémoire paginable sous-estimerait le lien
+    de près de moitié.
     """
     import torch
     out = []
@@ -68,7 +71,7 @@ def bench_link_bandwidth(size_mb: int = 512, iters: int = 5) -> list[dict]:
 
 
 def bench_vram_bandwidth(size_mb: int = 1024, iters: int = 20) -> list[dict]:
-    """Device-local read bandwidth, as a large contiguous copy."""
+    """Bande passante de lecture locale à l'appareil, mesurée par une grande copie contiguë."""
     import torch
     out = []
     if not torch.cuda.is_available():
@@ -82,7 +85,7 @@ def bench_vram_bandwidth(size_mb: int = 1024, iters: int = 20) -> list[dict]:
         except torch.cuda.OutOfMemoryError:
             continue
         t = _timeit(lambda: dst.copy_(src), iters, 5, dev)
-        # a copy reads once and writes once
+        # une copie lit une fois et écrit une fois
         out.append({"device": f"cuda:{i}",
                     "copy_gb_s": round(2 * size_mb / 1024 / t, 1)})
         del src, dst
@@ -91,11 +94,11 @@ def bench_vram_bandwidth(size_mb: int = 1024, iters: int = 20) -> list[dict]:
 
 
 def bench_host_memory(size_mb: int = 512, iters: int = 5) -> dict:
-    """Streaming read bandwidth of host RAM.
+    """Bande passante de lecture séquentielle de la mémoire vive.
 
-    This is the number that decides whether a host-resident layer should be
-    computed on the CPU or copied to the GPU: compare it against the h2d
-    figure from `bench_link_bandwidth`, and feed the winner to
+    C'est le nombre qui décide si une couche résidant en RAM doit être calculée
+    sur le processeur ou copiée vers le GPU : à comparer au chiffre hôte-appareil
+    de `bench_link_bandwidth`, puis à donner au vainqueur via
     `acvram plan --host-gb-s`.
     """
     import torch
@@ -109,7 +112,7 @@ def bench_host_memory(size_mb: int = 512, iters: int = 5) -> dict:
 
 
 def bench_cpu_kernels(shapes: Optional[list] = None, iters: int = 5) -> list[dict]:
-    """Fused CPU GEMV against the dequantize-then-matmul path it replaces."""
+    """GEMV processeur fusionné, face au chemin déquantification-puis-produit qu'il remplace."""
     import torch
 
     from .kernels.cpu import (cpu_build_info, int4_matmul_cpu, nvfp4_matmul_cpu)
@@ -142,7 +145,7 @@ def bench_cpu_kernels(shapes: Optional[list] = None, iters: int = 5) -> list[dic
 
 def bench_kernels(shapes: Optional[list[tuple[int, int]]] = None,
                   iters: int = 50) -> list[dict]:
-    """Fused GEMV against the dequantize-then-cuBLAS path, per format."""
+    """GEMV fusionné face au chemin déquantification-puis-cuBLAS, par format."""
     import torch
 
     from . import kernels
@@ -182,8 +185,8 @@ def bench_kernels(shapes: Optional[list[tuple[int, int]]] = None,
                     iters, 5, dev), 4)
                 nbytes = q.nbytes
 
-            # A weight-only GEMV is memory bound: this is the fraction of the
-            # card's read bandwidth the kernel manages to use.
+            # Un GEMV sur les poids seuls est limité par la mémoire : voici la
+            # fraction de la bande passante de lecture que le noyau exploite.
             row["effective_gb_s"] = round(nbytes / 1e9 / (row["gemv_ms"] / 1e3), 1)
             wbf = w.to(dev, dtype=torch.bfloat16)
             row["bf16_ref_ms"] = round(1e3 * _timeit(
@@ -197,7 +200,7 @@ def bench_kernels(shapes: Optional[list[tuple[int, int]]] = None,
 
 def bench_decode(model_dir: str, n_tokens: int = 64,
                  prompt_len: int = 128) -> dict:
-    """End-to-end decode rate on the real model, which is the number that counts."""
+    """Débit de décodage de bout en bout sur le vrai modèle, le nombre qui compte."""
     import torch
 
     from .engine.loader import load_model
@@ -252,25 +255,25 @@ def run_benchmarks(args: argparse.Namespace) -> int:
         print(f"  {row['device']:<8} {row['name']:<28} "
               f"h2d {row['h2d_gb_s']:>7.1f} GB/s   d2h {row['d2h_gb_s']:>7.1f} GB/s")
     for row in results.get("vram", []):
-        print(f"  {row['device']:<8} {'local copy':<28} "
-              f"{row['copy_gb_s']:>7.1f} GB/s")
+        print(f"  {row['device']:<8} {'copie locale':<28} "
+              f"{row['copy_gb_s']:>7.1f} Go/s")
     hm = results.get("host_memory")
     if hm:
-        print(f"  {'host':<8} {'DDR streaming read':<28} "
+        print(f"  {'hote':<8} {'lecture sequentielle DDR':<28} "
               f"{hm['read_gb_s']:>7.1f} GB/s   ({hm['threads']} threads)")
         links = [r["h2d_gb_s"] for r in results.get("host_link", [])]
         if links:
             best = max(links)
-            verdict = ("compute host-tier layers on the CPU"
+            verdict = ("calculer l'etage hote sur le processeur"
                        if hm["read_gb_s"] > best
-                       else "stream host-tier weights to the GPU")
+                       else "transferer les poids de l'etage hote vers le GPU")
             print(f"           -> {verdict}  "
                   f"(--host-exec {'cpu' if hm['read_gb_s'] > best else 'stream'}"
                   f" --host-gb-s {hm['read_gb_s']})")
     if results.get("cpu_kernels"):
         print()
         simd = "AVX2" if results["cpu_kernels"][0]["avx2"] else "scalar"
-        print(f"  CPU kernels ({simd} path):")
+        print(f"  Noyaux processeur (chemin {simd}) :")
         for r in results["cpu_kernels"]:
             print(f"    {r['shape']:<12} int4 {r['int4_fused_ms']:7.2f}ms "
                   f"(vs {r['int4_dequant_ms']:7.2f}ms dequant)   "
@@ -278,8 +281,8 @@ def run_benchmarks(args: argparse.Namespace) -> int:
                   f"(vs {r['nvfp4_dequant_ms']:7.2f}ms)")
     if results.get("kernels"):
         print()
-        print(f"  {'device':<8} {'shape':<12} {'format':<10} {'gemv':>9} "
-              f"{'bf16 ref':>9} {'eff bw':>11}")
+        print(f"  {'appareil':<8} {'forme':<12} {'format':<10} {'gemv':>9} "
+              f"{'ref bf16':>9} {'bp eff':>11}")
         for row in results["kernels"]:
             print(f"  {row['device']:<8} {row['shape']:<12} {row['format']:<10} "
                   f"{row['gemv_ms']:>7.3f}ms {row['bf16_ref_ms']:>7.3f}ms "
@@ -287,9 +290,9 @@ def run_benchmarks(args: argparse.Namespace) -> int:
     if results.get("decode"):
         d = results["decode"]
         print()
-        print(f"  decode        {d['decode_tok_s']} tok/s measured, "
-              f"{d['planned_decode_tok_s']} tok/s planned")
-        print(f"  load          {d['load_seconds']} s")
+        print(f"  decodage      {d['decode_tok_s']} jetons/s mesures, "
+              f"{d['planned_decode_tok_s']} prevus")
+        print(f"  chargement    {d['load_seconds']} s")
     if not results:
-        print("nothing to benchmark (no CUDA device, and no model given)")
+        print("rien a mesurer (aucun peripherique CUDA, et aucun modele fourni)")
     return 0

@@ -1,39 +1,43 @@
-// acvram fused dequantization kernels.
+// Noyaux acvram de déquantification fusionnée.
 //
-// Two formats, because the two GPUs in the target rig cannot run the same one:
+// Deux formats, parce que les deux GPU de la machine cible ne peuvent pas
+// exécuter le même :
 //
-//   NVFP4     E2M1 elements + E4M3 scale every 16       RTX 5090   sm_120
-//   INT4      uint4 elements + fp16 scale/zero per 128  RTX 3080Ti sm_86
+//   NVFP4  éléments E2M1 + échelle E4M3 tous les 16        RTX 5090    sm_120
+//   INT4   éléments uint4 + échelle/zéro fp16 tous les 128 RTX 3080 Ti sm_86
 //
-// Each format gets two entry points:
+// Chaque format reçoit deux points d'entrée :
 //
-//   *_dequant   materialise the full matrix in a compute dtype, then let
-//               cuBLAS do the GEMM. This is the prefill path: the dequant
-//               cost is amortised over the whole batch and cuBLAS beats any
-//               hand-written GEMM.
+//   *_dequant  matérialise la matrice entière dans un type de calcul, puis
+//              laisse cuBLAS faire le produit. C'est le chemin du prefill : le
+//              coût de déquantification est amorti sur tout le lot et cuBLAS
+//              bat tout produit écrit à la main.
 //
-//   *_gemv      fused dequantize-and-multiply for batch 1..8. This is the
-//               decode path, and it is purely memory bound: the point is to
-//               read the 4-bit weights straight out of global memory and
-//               never write a 16-bit copy of them anywhere.
+//   *_gemv     déquantification et multiplication fusionnées pour un lot de 1
+//              à 8. C'est le chemin du décodage, purement limité par la
+//              mémoire : il s'agit de lire les poids 4 bits directement depuis
+//              la mémoire globale sans jamais en écrire une copie 16 bits.
 //
-// Three things make the GEMV fast, and all three matter:
+// Trois choses rendent le GEMV rapide, et les trois comptent :
 //
-//   * 8-byte vector loads. One `uint2` carries 16 packed weights, which is
-//     exactly one NVFP4 scale block and a whole number of INT4 groups -- so a
-//     thread never straddles a scale boundary and the scale is read once per
-//     load rather than once per weight.
-//   * Several output rows per block. The activation slice is read once and
-//     reused across ROWS rows, cutting activation traffic by that factor.
-//     Weight traffic is irreducible; activation traffic is not.
-//   * Split-K when the matrix is short. A 4096-row GEMV launches 4096/ROWS
-//     blocks; on a 170-SM card with 4 rows per block that is fine, but the
-//     small projections in a GQA attention block would leave most of the
-//     device idle, so those split the reduction instead.
+//   * Des chargements vectoriels de 8 octets. Un `uint2` porte 16 poids
+//     empaquetés, ce qui fait exactement un bloc d'échelle NVFP4 et un nombre
+//     entier de groupes INT4 : un fil ne chevauche donc jamais une frontière
+//     d'échelle, et l'échelle est lue une fois par chargement au lieu d'une
+//     fois par poids.
+//   * Plusieurs lignes de sortie par bloc. La tranche d'activation est lue une
+//     fois et réutilisée sur ROWS lignes, divisant d'autant le trafic
+//     d'activation. Le trafic de poids est incompressible ; celui des
+//     activations ne l'est pas.
+//   * Une découpe sur K quand la matrice est courte. Un GEMV de 4096 lignes
+//     lance 4096/ROWS blocs, ce qui va bien sur une carte à 170 multiprocesseurs
+//     avec 4 lignes par bloc ; mais les petites projections d'un bloc
+//     d'attention à requêtes groupées laisseraient l'essentiel de la carte
+//     oisive, elles découpent donc la réduction à la place.
 //
-// The numerics must match the reference implementations in
-// acvram/quant/nvfp4.py and acvram/quant/int4.py exactly; tests/test_kernels.py
-// checks that against the PyTorch path.
+// La numérique doit correspondre exactement aux implémentations de référence
+// d'acvram/quant/nvfp4.py et d'acvram/quant/int4.py ; tests/test_improvements.py
+// le vérifie face au chemin PyTorch.
 
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -48,7 +52,7 @@ constexpr int WARP = 32;
 constexpr int ROWS_PER_BLOCK = 4;
 constexpr int WEIGHTS_PER_LOAD = 16;      // one uint2
 
-// E2M1 magnitudes, indexed by the 3-bit magnitude field.
+// Magnitudes E2M1, indexées par le champ de magnitude sur 3 bits.
 __constant__ float kE2M1[8] = {0.f, 0.5f, 1.f, 1.5f, 2.f, 3.f, 4.f, 6.f};
 
 __device__ __forceinline__ float e4m3_to_float(unsigned char bits) {
@@ -65,8 +69,8 @@ template <> __device__ __forceinline__ __half from_float<__half>(float x) {
 template <> __device__ __forceinline__ __nv_bfloat16
 from_float<__nv_bfloat16>(float x) { return __float2bfloat16(x); }
 
-// nibble j of a uint2: bytes are little-endian, so nibble j sits at bit 4*j
-// of the low word for j < 8 and of the high word beyond that.
+// Quartet j d'un uint2 : les octets sont en petit-boutien, donc le quartet j se
+// trouve au bit 4*j du mot bas pour j < 8, et du mot haut au-delà.
 __device__ __forceinline__ unsigned int nibble(const uint2 &p, int j) {
     const unsigned int w = (j < 8) ? p.x : p.y;
     return (w >> ((j & 7) * 4)) & 0xFu;
@@ -79,8 +83,8 @@ __device__ __forceinline__ float warp_reduce(float v) {
     return v;
 }
 
-// Reduce ROWS accumulators across the block. shared must hold
-// ROWS * (blockDim.x / WARP) floats.
+// Réduit ROWS accumulateurs sur tout le bloc. `shared` doit contenir
+// ROWS * (blockDim.x / WARP) flottants.
 template <int ROWS>
 __device__ __forceinline__ void block_reduce_rows(float (&acc)[ROWS],
                                                   float *shared, int nwarps) {
@@ -162,7 +166,7 @@ __global__ void nvfp4_gemv_kernel(
         for (int r = 0; r < ROWS; ++r) acc[r] = 0.f;
 
         for (int i = lo + threadIdx.x; i < hi; i += blockDim.x) {
-            // Read the activation slice once and reuse it across ROWS rows.
+            // On lit la tranche d'activation une fois et on la réutilise sur ROWS lignes.
             float xs[WEIGHTS_PER_LOAD];
             const float4 *x4 = reinterpret_cast<const float4 *>(
                 xn + (long)i * WEIGHTS_PER_LOAD);
@@ -235,7 +239,7 @@ __global__ void int4_dequant_kernel(
     for (int i = threadIdx.x; i < nloads; i += blockDim.x) {
         const uint2 p = qrow[i];
         const int base = i * WEIGHTS_PER_LOAD;
-        const int g = base / group;           // group is a multiple of 16
+        const int g = base / group;           // le groupe est un multiple de 16
         const float s = __half2float(srow[g]);
         const float z = group_zero(zrow, g);
         #pragma unroll
@@ -321,7 +325,7 @@ int threads_for(int K) {
     return t;
 }
 
-// Enough blocks to fill the device, without splitting when it is unnecessary.
+// Assez de blocs pour occuper la carte, sans découper quand c'est inutile.
 int splits_for(int M, int K, int device) {
     cudaDeviceProp prop{};
     if (cudaGetDeviceProperties(&prop, device) != cudaSuccess) return 1;
@@ -340,15 +344,15 @@ int splits_for(int M, int K, int device) {
 // bindings
 // -------------------------------------------------------------------------
 
-#define CHECK_CUDA(x) TORCH_CHECK((x).is_cuda(), #x " must live on a CUDA device")
-#define CHECK_CONTIG(x) TORCH_CHECK((x).is_contiguous(), #x " must be contiguous")
+#define CHECK_CUDA(x) TORCH_CHECK((x).is_cuda(), #x " doit resider sur un peripherique CUDA")
+#define CHECK_CONTIG(x) TORCH_CHECK((x).is_contiguous(), #x " doit etre contigu")
 
 torch::Tensor nvfp4_dequant(torch::Tensor qweight, torch::Tensor block_scale,
                             double global_scale, int64_t K,
                             c10::ScalarType dtype) {
     CHECK_CUDA(qweight); CHECK_CUDA(block_scale);
     CHECK_CONTIG(qweight); CHECK_CONTIG(block_scale);
-    TORCH_CHECK(K % 16 == 0, "NVFP4 needs K divisible by 16, got ", K);
+    TORCH_CHECK(K % 16 == 0, "le NVFP4 exige K divisible par 16, recu ", K);
     const int M = qweight.size(0);
     auto out = torch::empty({M, K}, qweight.options().dtype(dtype));
     auto stream = at::cuda::getCurrentCUDAStream();
@@ -368,7 +372,7 @@ torch::Tensor nvfp4_dequant(torch::Tensor qweight, torch::Tensor block_scale,
         nvfp4_dequant_kernel<float><<<M, threads, 0, stream>>>(
             qw, bs, (float)global_scale, out.data_ptr<float>(), M, (int)K);
     } else {
-        TORCH_CHECK(false, "nvfp4_dequant: unsupported output dtype");
+        TORCH_CHECK(false, "nvfp4_dequant : type de sortie non gere");
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return out;
@@ -378,7 +382,7 @@ torch::Tensor nvfp4_gemv(torch::Tensor qweight, torch::Tensor block_scale,
                          double global_scale, torch::Tensor x, int64_t K) {
     CHECK_CUDA(qweight); CHECK_CUDA(x);
     CHECK_CONTIG(qweight); CHECK_CONTIG(block_scale);
-    TORCH_CHECK(K % 16 == 0, "NVFP4 needs K divisible by 16");
+    TORCH_CHECK(K % 16 == 0, "le NVFP4 exige K divisible par 16");
     auto xc = x.dim() == 1 ? x.reshape({1, -1}) : x;
     xc = xc.to(torch::kFloat).contiguous();
     const int M = qweight.size(0);
@@ -404,8 +408,8 @@ torch::Tensor int4_dequant(torch::Tensor qweight, torch::Tensor scales,
                            c10::ScalarType dtype) {
     CHECK_CUDA(qweight); CHECK_CUDA(scales); CHECK_CUDA(zeros);
     CHECK_CONTIG(qweight); CHECK_CONTIG(scales); CHECK_CONTIG(zeros);
-    TORCH_CHECK(K % group == 0, "K must be divisible by the group size");
-    TORCH_CHECK(group % 16 == 0, "group size must be a multiple of 16");
+    TORCH_CHECK(K % group == 0, "K doit etre divisible par la taille de groupe");
+    TORCH_CHECK(group % 16 == 0, "la taille de groupe doit etre un multiple de 16");
     const int M = qweight.size(0);
     auto out = torch::empty({M, K}, qweight.options().dtype(dtype));
     auto stream = at::cuda::getCurrentCUDAStream();
@@ -426,7 +430,7 @@ torch::Tensor int4_dequant(torch::Tensor qweight, torch::Tensor scales,
         int4_dequant_kernel<float><<<M, threads, 0, stream>>>(
             qw, sc, zr, out.data_ptr<float>(), M, (int)K, (int)group);
     } else {
-        TORCH_CHECK(false, "int4_dequant: unsupported output dtype");
+        TORCH_CHECK(false, "int4_dequant : type de sortie non gere");
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return out;
@@ -436,8 +440,8 @@ torch::Tensor int4_gemv(torch::Tensor qweight, torch::Tensor scales,
                         torch::Tensor zeros, torch::Tensor x,
                         int64_t K, int64_t group) {
     CHECK_CUDA(qweight); CHECK_CUDA(x);
-    TORCH_CHECK(K % group == 0, "K must be divisible by the group size");
-    TORCH_CHECK(group % 16 == 0, "group size must be a multiple of 16");
+    TORCH_CHECK(K % group == 0, "K doit etre divisible par la taille de groupe");
+    TORCH_CHECK(group % 16 == 0, "la taille de groupe doit etre un multiple de 16");
     auto xc = x.dim() == 1 ? x.reshape({1, -1}) : x;
     xc = xc.to(torch::kFloat).contiguous();
     const int M = qweight.size(0);
@@ -460,8 +464,8 @@ torch::Tensor int4_gemv(torch::Tensor qweight, torch::Tensor scales,
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("nvfp4_dequant", &nvfp4_dequant, "NVFP4 -> dense dequantization");
-    m.def("nvfp4_gemv", &nvfp4_gemv, "fused NVFP4 dequantize + matvec");
-    m.def("int4_dequant", &int4_dequant, "INT4 group affine -> dense");
-    m.def("int4_gemv", &int4_gemv, "fused INT4 dequantize + matvec");
+    m.def("nvfp4_dequant", &nvfp4_dequant, "NVFP4 -> matrice dense");
+    m.def("nvfp4_gemv", &nvfp4_gemv, "NVFP4 : dequantification + produit fusionnes");
+    m.def("int4_dequant", &int4_dequant, "INT4 affine par groupes -> matrice dense");
+    m.def("int4_gemv", &int4_gemv, "INT4 : dequantification + produit fusionnes");
 }

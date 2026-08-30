@@ -1,10 +1,11 @@
-"""Prompt construction: tokenizer and chat template handling.
+"""Construction de l'invite : tokeniseur et gabarits de conversation.
 
-Chat templates ship inside the checkpoint as Jinja source, so the correct
-prompt for a given model is whatever its own template produces. When Jinja is
-available that template is used verbatim. When it is not -- or the checkpoint
-has none -- a ChatML fallback keeps the server usable, and says so, rather
-than silently producing a prompt shaped for a different model.
+Les gabarits de conversation voyagent dans le point de contrôle sous forme de
+source Jinja : l'invite correcte pour un modèle donné est donc celle que produit
+son propre gabarit. Quand Jinja est disponible, ce gabarit est utilisé tel quel.
+Quand il ne l'est pas — ou que le point de contrôle n'en porte aucun — un repli
+au format ChatML garde le serveur utilisable, et le dit, plutôt que de produire
+en silence une invite taillée pour un autre modèle.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ __all__ = ["Tokenizer", "load_tokenizer", "render_chat"]
 
 
 class Tokenizer:
-    """Thin wrapper over ``tokenizers.Tokenizer`` with template support."""
+    """Fine enveloppe autour de ``tokenizers.Tokenizer``, avec gabarits."""
 
     def __init__(self, backend: Any, config: dict, template: Optional[str],
                  template_source: str) -> None:

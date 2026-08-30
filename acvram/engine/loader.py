@@ -1,9 +1,10 @@
-"""Assemble a runnable model from acvram shards and a placement plan.
+"""Assemble un modèle exécutable à partir des fragments acvram et d'un plan de
+placement.
 
-The manifest written by the converter records, for every tensor, which format
-it is in and which keys carry it. Loading is therefore mechanical: read the
-keys, rebuild the quantized container, and put it where the plan says --
-resident on a GPU, or pinned in host memory behind a
+Le manifeste écrit par le convertisseur consigne, pour chaque tenseur, son
+format et les clés qui le portent. Le chargement est donc mécanique : lire les
+clés, reconstruire le conteneur quantifié, et le poser là où le plan l'indique —
+résident sur un GPU, ou épinglé en mémoire hôte derrière un
 :class:`~acvram.engine.layers.StreamedWeight`.
 """
 
@@ -29,7 +30,7 @@ __all__ = ["LoadedModel", "load_model"]
 
 
 class _ShardReader:
-    """Lazy access to the tensors in a set of safetensors shards."""
+    """Accès paresseux aux tenseurs d'un ensemble de fragments safetensors."""
 
     def __init__(self, path: str, weight_map: dict[str, str]) -> None:
         self.path = path
@@ -40,7 +41,7 @@ class _ShardReader:
         from safetensors import safe_open
         fn = self.weight_map.get(key)
         if fn is None:
-            raise KeyError(f"{key} is not in the manifest weight map")
+            raise KeyError(f"{key} est absent de la table du manifeste")
         if fn not in self._open:
             self._open[fn] = safe_open(os.path.join(self.path, fn),
                                        framework="pt", device="cpu")
@@ -111,7 +112,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
                dtype: torch.dtype = torch.bfloat16,
                max_model_len: Optional[int] = None,
                device_override: Optional[str] = None) -> LoadedModel:
-    """Load a converted model directory into memory, placed per the plan."""
+    """Charge en mémoire un répertoire de modèle converti, placé selon le plan."""
     with open(os.path.join(path, "acvram_manifest.json"), "r", encoding="utf-8") as fh:
         manifest = json.load(fh)
 
@@ -125,7 +126,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
     def dev(name: str) -> torch.device:
         return torch.device(device_override or name)
 
-    # embeddings: a gather, so host RAM costs one small copy per token
+    # plongements : une simple collecte, donc la RAM ne coûte qu'une petite copie par jeton
     embed = reader.get("model.embed_tokens.weight").to(dtype)
     embed_dev = dev(plan.embed_device) if plan.embed_device != "cpu" \
         else torch.device("cpu")
@@ -148,10 +149,10 @@ def load_model(path: str, plan: Optional[Plan] = None,
         def lin(suffix: str, streamed: bool) -> QuantLinear:
             m = _linear(p + suffix, manifest, reader, group_size)
             if m is None:
-                raise KeyError(f"missing tensor {p + suffix}")
+                raise KeyError(f"tenseur manquant {p + suffix}")
             return m.to_device(d, streamed=streamed)
 
-        # The MLP may live and run on the CPU while attention stays on the GPU.
+        # Le MLP peut vivre et s'exécuter sur le processeur pendant que l'attention reste sur le GPU.
         mlp_on_cpu = (lp.mlp_storage == "cpu"
                       and getattr(lp, "mlp_exec", "gpu") == "cpu")
         mlp_dev = torch.device("cpu") if mlp_on_cpu else d
@@ -160,7 +161,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
         def mlin(suffix: str) -> QuantLinear:
             m = _linear(p + suffix, manifest, reader, group_size)
             if m is None:
-                raise KeyError(f"missing tensor {p + suffix}")
+                raise KeyError(f"tenseur manquant {p + suffix}")
             return m.to_device(mlp_dev, streamed=streamed_mlp)
 
         attn = Attention(
@@ -219,7 +220,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
         lm_head = _linear("lm_head.weight", manifest, reader,
                           group_size).to_device(head_dev)
     else:
-        # tied embeddings
+        # plongements partagés avec la sortie
         lm_head = QuantLinear(PlainTensor(embed.to(head_dev),
                                           tuple(embed.shape), "bf16"))
     reader.close()
@@ -230,7 +231,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
 
 def _kv_blocks_per_device(plan: Plan, spec: ModelSpec,
                           max_model_len: Optional[int]) -> dict[str, int]:
-    """Split each device's KV budget into blocks, shared across its layers."""
+    """Répartit le budget KV de chaque appareil en blocs, partagés entre ses couches."""
     out: dict[str, int] = {}
     layers_on = {}
     for lp in plan.layers:
