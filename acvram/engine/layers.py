@@ -374,13 +374,16 @@ def decode_attention_fixed(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     sur le GPU, seul le masque en dépend.
     """
     b, s = k.shape[0], k.shape[1]
-    kh = repeat_kv_batched(k, n_rep).permute(0, 2, 1, 3)      # [b, hq, S, d]
-    vh = repeat_kv_batched(v, n_rep).permute(0, 2, 1, 3)
+    # enable_gqa laisse SDPA diffuser les têtes KV vers les têtes de requête :
+    # l'ancien repeat_kv passait par reshape-sur-expand, qui matérialise une
+    # copie ×n_rep de K et de V à chaque couche, à chaque pas.
+    kh = k.permute(0, 2, 1, 3)                                # [b, hkv, S, d]
+    vh = v.permute(0, 2, 1, 3)
     mask = (torch.arange(s, device=q.device)[None, :]
             < seq_lens[:, None]).view(b, 1, 1, s)
     out = F.scaled_dot_product_attention(
         q.unsqueeze(2), kh, vh,
-        attn_mask=mask, scale=scale)                          # [b, hq, 1, d]
+        attn_mask=mask, scale=scale, enable_gqa=(n_rep > 1))  # [b, hq, 1, d]
     return out.squeeze(2)                                     # [b, hq, d]
 
 

@@ -181,7 +181,24 @@ class Gpu:
 
     @property
     def host_link_gbps(self) -> float:
-        """Bande passante effective hôte-appareil en Go/s pour le lien *actuel*.
+        """Bande passante hôte-appareil en Go/s : mesurée si possible, sinon estimée.
+
+        La génération PCIe rapportée au repos est celle de l'économie d'énergie
+        (une 3080 Ti se déclare en gen1 et remonte en gen4 sous charge) : s'y
+        fier ferait croire à un lien de 1,7 Go/s là où la mesure dit 12. Si
+        ``acvram bench --what topology`` est passé sur cette machine, son
+        chiffre mesuré fait autorité.
+        """
+        from ..bench import load_topology
+        topo = load_topology()
+        if topo:
+            for row in topo.get("links", []):
+                if row.get("device") == f"cuda:{self.index}":
+                    return float(row["h2d_gb_s"])
+        return self._host_link_estimated()
+
+    def _host_link_estimated(self) -> float:
+        """Estimation théorique du lien *actuel*, à défaut de mesure.
 
         Débits PCIe bruts par voie, codage 128b/130b, dans un sens :
             gen3 ≈ 0,985, gen4 ≈ 1,969, gen5 ≈ 3,938 Go/s par voie.

@@ -218,7 +218,9 @@ def _iter_checkpoint(path: str) -> Iterator[tuple[str, torch.Tensor]]:
 
     from .gguf import GGUFFile, is_gguf
     if is_gguf(path):
-        yield from GGUFFile(path).iter_tensors()
+        g = GGUFFile(path)
+        g.check_executable()
+        yield from g.iter_tensors()
         return
 
     from .exl3 import EXL3Checkpoint, is_exl3

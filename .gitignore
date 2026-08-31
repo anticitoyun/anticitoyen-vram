@@ -22,3 +22,4 @@ vacancesgitlab
 *.db
 .beads-credential-key
 .beads/proxieddb/
+acvram_*.deb

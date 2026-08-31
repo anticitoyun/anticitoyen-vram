@@ -45,12 +45,25 @@ def is_gguf(path: str) -> bool:
 
 
 def find_gguf(path: str) -> Optional[str]:
-    """Le fichier .gguf d'un répertoire — le premier fragment s'il y en a plusieurs."""
+    """Le fichier .gguf d'un répertoire.
+
+    Les points de contrôle éclatés (``-00001-of-00002.gguf``) ne sont pas
+    encore lus : mieux vaut le dire que de charger un tiers du modèle. Les
+    projecteurs multimodaux (``mmproj-*``) sont ignorés — ils accompagnent le
+    modèle de langage, ils ne le contiennent pas.
+    """
     if os.path.isfile(path):
         return path
-    cands = sorted(f for f in os.listdir(path) if f.endswith(".gguf"))
+    cands = sorted(f for f in os.listdir(path)
+                   if f.endswith(".gguf") and not f.startswith("mmproj"))
     if not cands:
         return None
+    import re
+    if any(re.search(r"-\d{5}-of-\d{5}\.gguf$", c) for c in cands):
+        raise ValueError(
+            f"{path} : point de contrôle GGUF en plusieurs fragments "
+            f"(-NNNNN-of-NNNNN) — non géré pour l'instant. Recollez-le avec "
+            f"llama-gguf-split --merge, ou convertissez depuis la source.")
     return os.path.join(path, cands[0])
 
 
@@ -145,6 +158,22 @@ class GGUFFile:
     # -- configuration ---------------------------------------------------
     def arch(self) -> str:
         return str(self.kv.get("general.architecture", "llama"))
+
+    # Architectures que le moteur ne sait PAS exécuter : récurrences linéaires
+    # (SSM, Gated DeltaNet, KDA). Les convertir quand même produirait un modèle
+    # mutilé qui répond du charabia — le pire des échecs, le silencieux.
+    UNSUPPORTED = ("kimi-linear", "qwen35", "qwen35moe", "nemotron_h",
+                   "falcon-h1", "falcon_h1", "lfm2", "lfm2moe", "mamba",
+                   "jamba", "granitehybrid")
+
+    def check_executable(self) -> None:
+        a = self.arch()
+        if a in self.UNSUPPORTED or any(".ssm_" in n for n in self.tensors):
+            raise ValueError(
+                f"architecture « {a} » : hybride à récurrence linéaire "
+                f"(couches SSM/DeltaNet) — le moteur acvram est un "
+                f"transformeur pur et ne peut pas l'exécuter. La convertir "
+                f"produirait un modèle mutilé. Non converti.")
 
     def hf_config(self) -> dict:
         a = self.arch()

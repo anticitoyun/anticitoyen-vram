@@ -330,7 +330,7 @@ async def _stream_chat(service: EngineService, request_id: str,
     first = ChatCompletionChunk(
         id=cid, model=model,
         choices=[ChunkChoice(delta=DeltaMessage(role="assistant", content=""))])
-    yield f"data: {first.model_dump_json()}\n\n"
+    yield f"data: {first.model_dump_json(exclude_none=True)}\n\n"
 
     n_out = 0
     try:
@@ -340,7 +340,7 @@ async def _stream_chat(service: EngineService, request_id: str,
                 chunk = ChatCompletionChunk(
                     id=cid, model=model,
                     choices=[ChunkChoice(delta=DeltaMessage(content=out.text_delta))])
-                yield f"data: {chunk.model_dump_json()}\n\n"
+                yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
             if out.finished:
                 done = ChatCompletionChunk(
                     id=cid, model=model,
@@ -350,7 +350,7 @@ async def _stream_chat(service: EngineService, request_id: str,
                     done.usage = Usage(prompt_tokens=prompt_tokens,
                                        completion_tokens=n_out,
                                        total_tokens=prompt_tokens + n_out)
-                yield f"data: {done.model_dump_json()}\n\n"
+                yield f"data: {done.model_dump_json(exclude_none=True)}\n\n"
     except Exception as exc:                          # noqa: BLE001
         err = ErrorResponse.make(str(exc), "server_error")
         yield f"data: {json.dumps(err.model_dump())}\n\n"
@@ -367,7 +367,7 @@ async def _stream_completion(service: EngineService, request_id: str,
                 choices=[CompletionChoice(
                     text=out.text_delta,
                     finish_reason=out.finish_reason if out.finished else None)])
-            yield f"data: {resp.model_dump_json()}\n\n"
+            yield f"data: {resp.model_dump_json(exclude_none=True)}\n\n"
     except Exception as exc:                          # noqa: BLE001
         err = ErrorResponse.make(str(exc), "server_error")
         yield f"data: {json.dumps(err.model_dump())}\n\n"

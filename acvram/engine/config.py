@@ -197,7 +197,9 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         # Un point de contrôle GGUF porte sa configuration dans son en-tête.
         from ..quant.gguf import GGUFFile, is_gguf
         if is_gguf(path):
-            cfg = GGUFFile(path).hf_config()
+            g = GGUFFile(path)
+            g.check_executable()
+            cfg = g.hf_config()
         else:
             raise FileNotFoundError(f"ni config.json ni .gguf sous {path}")
     else:
@@ -226,6 +228,14 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
             pass
 
     archs = cfg.get("architectures") or ["LlamaForCausalLM"]
+    mt = str(cfg.get("model_type", ""))
+    if (mt in ("kimi_linear", "qwen3_5", "qwen3_5_moe", "nemotron_h",
+               "falcon_h1", "lfm2_moe", "mamba", "mamba2", "jamba")
+            or "linear_attn" in json.dumps(cfg.get("layer_types", ""))):
+        raise ValueError(
+            f"architecture « {archs[0]} » (model_type={mt}) : recurrence "
+            f"lineaire ou hybride SSM — le moteur acvram est un transformeur "
+            f"pur et ne peut pas l'executer.")
     arch = _ARCH_ALIASES.get(archs[0], "llama")
 
     n_heads = cfg.get("num_attention_heads", 32)

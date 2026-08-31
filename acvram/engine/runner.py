@@ -132,6 +132,29 @@ class EngineStats:
         return self.decode_tokens / self.spec_steps if self.spec_steps else 1.0
 
 
+
+def _trim_at_stop(joined: str, delta: str,
+                  stops: list[str]) -> tuple[str, bool]:
+    """Coupe le delta juste avant la première séquence d'arrêt rencontrée.
+
+    L'API s'y engage : la chaîne d'arrêt est *exclue* de la sortie. La
+    détection se fait sur le texte assemblé (une séquence peut chevaucher deux
+    jetons) ; la coupe, elle, ne peut retrancher que le delta courant — un
+    chevauchement sur un delta déjà livré en flux est perdu pour le client,
+    comme chez les autres serveurs.
+    """
+    cut = -1
+    for st in stops:
+        if st:
+            at = joined.find(st)
+            if at >= 0 and (cut < 0 or at < cut):
+                cut = at
+    if cut < 0:
+        return delta, False
+    prev = len(joined) - len(delta)
+    return (joined[prev:cut] if cut > prev else ""), True
+
+
 class Engine:
     """Détient le modèle, l'allocateur de blocs et les files de requêtes."""
 
@@ -472,11 +495,10 @@ class Engine:
 
         text = self._decode_delta(seq, len(kept)) if self.tokenizer else ""
         if not reason and seq.params.stop and text:
-            joined = self._decode_all(seq)
-            for stop in seq.params.stop:
-                if stop and stop in joined:
-                    reason = "stop"
-                    break
+            text, coupe = _trim_at_stop(self._decode_all(seq), text,
+                                        seq.params.stop)
+            if coupe:
+                reason = "stop"
         if reason:
             self._finish(seq, reason)
         return GenerationOutput(
@@ -509,11 +531,10 @@ class Engine:
             if self.tokenizer is not None:
                 text = self._decode_delta(seq)
             if not reason and seq.params.stop and text:
-                joined = self._decode_all(seq)
-                for s in seq.params.stop:
-                    if s and s in joined:
-                        reason = "stop"
-                        break
+                text, coupe = _trim_at_stop(self._decode_all(seq), text,
+                                            seq.params.stop)
+                if coupe:
+                    reason = "stop"
 
             if reason:
                 self._finish(seq, reason)
