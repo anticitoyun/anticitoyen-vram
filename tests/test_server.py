@@ -136,3 +136,29 @@ def test_trim_at_stop():
     # plusieurs stops : le plus précoce gagne
     texte, coupe = _trim_at_stop("aXbYc", "aXbYc", ["Y", "X"])
     assert coupe and texte == "a"
+
+
+def test_anthropic_messages_route(client):
+    """/v1/messages : format Anthropic, non-stream et stream."""
+    r = client.post("/v1/messages", json={
+        "model": "m", "max_tokens": 8,
+        "system": "Réponds brièvement.",
+        "messages": [{"role": "user",
+                      "content": [{"type": "text", "text": "Bonjour"}]}],
+        "temperature": 0})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["type"] == "message" and d["role"] == "assistant"
+    assert d["content"][0]["type"] == "text"
+    assert d["stop_reason"] in ("end_turn", "max_tokens")
+    assert d["usage"]["input_tokens"] > 0
+
+    with client.stream("POST", "/v1/messages", json={
+            "model": "m", "max_tokens": 8, "stream": True,
+            "messages": [{"role": "user", "content": "Bonjour"}]}) as r:
+        assert r.status_code == 200
+        evenements = [l for l in r.iter_lines() if l.startswith("event: ")]
+    noms = [e.split(": ", 1)[1] for e in evenements]
+    assert noms[0] == "message_start"
+    assert "content_block_delta" in noms
+    assert noms[-1] == "message_stop"

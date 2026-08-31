@@ -216,6 +216,93 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             usage=Usage(prompt_tokens=len(prompt_ids), completion_tokens=n_out,
                         total_tokens=len(prompt_ids) + n_out))
 
+
+    # -- API Anthropic (/v1/messages) --------------------------------------
+    # Claude Code parle cette API-là, pas celle d'OpenAI : l'exposer permet
+    # aux menus locaux de brancher Claude directement sur ce serveur. Champs
+    # couverts : system, messages (texte ou blocs), stop_sequences,
+    # temperature/top_p/top_k, stream (evenements message_start,
+    # content_block_delta, message_delta, message_stop).
+    @app.post("/v1/messages")
+    async def anthropic_messages(raw: Request):
+        req = await raw.json()
+        messages = []
+        sys_prompt = req.get("system")
+        if sys_prompt:
+            if isinstance(sys_prompt, list):
+                sys_prompt = "".join(b.get("text", "") for b in sys_prompt)
+            messages.append({"role": "system", "content": sys_prompt})
+        for m in req.get("messages", []):
+            contenu = m.get("content", "")
+            if isinstance(contenu, list):
+                contenu = "".join(b.get("text", "") for b in contenu
+                                  if isinstance(b, dict)
+                                  and b.get("type") == "text")
+            messages.append({"role": m.get("role", "user"),
+                             "content": contenu})
+        prompt = render_chat(tokenizer, messages, True)
+        prompt_ids = _encode(tokenizer, prompt)
+        params = SamplingParams(
+            temperature=float(req.get("temperature", 1.0)),
+            top_p=float(req.get("top_p", 1.0)),
+            top_k=int(req.get("top_k", 0) or 0),
+            max_tokens=int(req.get("max_tokens", 512)),
+            stop=list(req.get("stop_sequences") or []),
+        )
+        request_id, q = await service.submit(prompt_ids, params)
+        mid = new_id("msg")
+
+        def stop_reason(r: str) -> str:
+            return {"stop": "end_turn", "length": "max_tokens"}.get(r, "end_turn")
+
+        if req.get("stream"):
+            async def flux():
+                def ev(nom: str, data: dict) -> str:
+                    return (f"event: {nom}\n"
+                            f"data: {json.dumps(data, ensure_ascii=False)}\n\n")
+                yield ev("message_start", {"type": "message_start", "message": {
+                    "id": mid, "type": "message", "role": "assistant",
+                    "content": [], "model": model_name, "stop_reason": None,
+                    "usage": {"input_tokens": len(prompt_ids),
+                              "output_tokens": 0}}})
+                yield ev("content_block_start",
+                         {"type": "content_block_start", "index": 0,
+                          "content_block": {"type": "text", "text": ""}})
+                n_out, raison = 0, "end_turn"
+                async for out in service.collect(request_id, q):
+                    n_out = out.completion_tokens
+                    if out.text_delta:
+                        yield ev("content_block_delta",
+                                 {"type": "content_block_delta", "index": 0,
+                                  "delta": {"type": "text_delta",
+                                            "text": out.text_delta}})
+                    if out.finished:
+                        raison = stop_reason(out.finish_reason or "stop")
+                yield ev("content_block_stop",
+                         {"type": "content_block_stop", "index": 0})
+                yield ev("message_delta", {"type": "message_delta",
+                         "delta": {"stop_reason": raison,
+                                   "stop_sequence": None},
+                         "usage": {"output_tokens": n_out}})
+                yield ev("message_stop", {"type": "message_stop"})
+            return StreamingResponse(
+                flux(), media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache",
+                         "X-Accel-Buffering": "no"})
+
+        text, raison, n_out = "", "end_turn", 0
+        async for out in service.collect(request_id, q):
+            text += out.text_delta
+            n_out = out.completion_tokens
+            if out.finished:
+                raison = stop_reason(out.finish_reason or "stop")
+        return {"id": mid, "type": "message", "role": "assistant",
+                "content": [{"type": "text", "text": text}],
+                "model": model_name, "stop_reason": raison,
+                "stop_sequence": None,
+                "usage": {"input_tokens": len(prompt_ids),
+                          "output_tokens": n_out}}
+
     # -- legacy completions ------------------------------------------------
     @app.post("/v1/completions")
     async def completions(req: CompletionRequest):
