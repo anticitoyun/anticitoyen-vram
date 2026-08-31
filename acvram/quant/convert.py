@@ -49,6 +49,11 @@ class ConversionOptions:
     lm_head_format: Optional[str] = None
     n_grid: int = 20
     device: str = "cuda:0"
+    # Appareil sur lequel se fait la recherche AWQ et la quantification. Elle
+    # est dominee par des produits matriciels sur la grille de recherche : un
+    # GPU la rend une dizaine de fois plus rapide qu'un i9. "auto" prend le
+    # premier GPU disponible, "cpu" force l'ancien chemin.
+    quant_device: str = "auto"
     dry_run: bool = False
     mixed_precision: str = "auto"     # auto | off
     snr_floor: float = 25.0           # dB de rapport signal/bruit en sortie de
@@ -171,6 +176,37 @@ class TensorRouter:
         return fmt == "int4_awq" and not name.endswith(SENSITIVE_SUFFIXES)
 
 
+def _quantize_on(dev: torch.device, tensor: torch.Tensor, fmt: str,
+                 st: Optional[ActStats], **kw):
+    """Quantifie sur ``dev``, en retombant sur le processeur si la VRAM manque.
+
+    La recherche AWQ garde plusieurs copies en float32 du tenseur ; sur un
+    ``lm_head`` de 150 000 lignes cela depasse ce que laisse une carte deja
+    occupee. Un tenseur trop gros n'est pas une erreur : il se quantifie plus
+    lentement, ailleurs.
+    """
+    if dev.type != "cpu":
+        try:
+            st_dev = None if st is None else ActStats(
+                st.mean_abs.to(dev),
+                None if st.max_abs is None else st.max_abs.to(dev),
+                st.n_samples)
+            return quantize_with_calibration(
+                tensor.to(torch.float32).to(dev), fmt, st_dev, **kw)
+        except torch.OutOfMemoryError:
+            torch.cuda.empty_cache()
+    return quantize_with_calibration(tensor.to(torch.float32), fmt, st, **kw)
+
+
+def _resolve_quant_device(choice: str) -> torch.device:
+    """Ou quantifier. ``auto`` prend un GPU s'il y en a un, sinon le processeur."""
+    if choice not in ("auto", ""):
+        return torch.device(choice)
+    if torch.cuda.is_available():
+        return torch.device("cuda:0")
+    return torch.device("cpu")
+
+
 # --------------------------------------------------------------------------
 # checkpoint reading
 # --------------------------------------------------------------------------
@@ -262,6 +298,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         "tensors": {},
     }
 
+    qdev = _resolve_quant_device(opts.quant_device)
+
     snrs: list[float] = []
     per_layer: list[dict] = []
     keys = []
@@ -287,8 +325,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             continue
 
         st = stats.get(name) if stats else None
-        qt, scaler, metrics = quantize_with_calibration(
-            tensor.to(torch.float32), fmt, st,
+        qt, scaler, metrics = _quantize_on(
+            qdev, tensor, fmt, st,
             group_size=opts.group_size,
             use_hadamard=router.wants_hadamard(name, fmt),
             use_awq=opts.awq,
@@ -303,8 +341,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 and fmt in PROMOTE
                 and len(report.promotions) < opts.max_promotions * max(1, len(keys) + 1)):
             wider = PROMOTE[fmt]
-            q2, s2, m2 = quantize_with_calibration(
-                tensor.to(torch.float32), wider, st,
+            q2, s2, m2 = _quantize_on(
+                qdev, tensor, wider, st,
                 group_size=opts.group_size,
                 use_hadamard=router.wants_hadamard(name, wider),
                 use_awq=opts.awq, n_grid=opts.n_grid)
@@ -322,6 +360,9 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
 
         sd = qt.state_dict(prefix=f"{name}.")
         sd.update(scaler.state_dict(prefix=f"{name}."))
+        # Les fragments s'ecrivent depuis la memoire hote : on redescend ce que
+        # la quantification a produit sur le GPU.
+        sd = {k: v.cpu() for k, v in sd.items()}
         if not opts.dry_run:
             for k, v in sd.items():
                 writer.add(k, v)

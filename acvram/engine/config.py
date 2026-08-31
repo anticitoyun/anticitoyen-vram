@@ -78,6 +78,11 @@ class ModelSpec:
     shared_expert_intermediate_size: int = 0
     first_k_dense_replace: int = 0
     torch_dtype: str = "bfloat16"
+    # Jetons d'arret. Sans eux le moteur ne s'arrete jamais de lui-meme et
+    # rend toujours max_tokens jetons, en repartant en roue libre apres la
+    # reponse.
+    eos_token_id: list[int] = field(default_factory=list)
+    bos_token_id: Optional[int] = None
     layers: list[LayerSpec] = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
@@ -176,6 +181,15 @@ _ARCH_ALIASES = {
 }
 
 
+def _as_id_list(v: Any) -> list[int]:
+    """``eos_token_id`` vaut tantot un entier, tantot une liste."""
+    if isinstance(v, int):
+        return [v]
+    if isinstance(v, (list, tuple)):
+        return [int(x) for x in v if isinstance(x, int)]
+    return []
+
+
 def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
     """Lit un répertoire de modèle Hugging Face, ou un simple ``config.json``."""
     cfg_path = path if path.endswith(".json") else os.path.join(path, "config.json")
@@ -185,6 +199,22 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
     # Certaines configurations imbriquent le modèle de langage (modèles visuels).
     if "text_config" in cfg and "hidden_size" not in cfg:
         cfg = {**cfg, **cfg["text_config"]}
+
+    # generation_config.json fait autorite sur les jetons d'arret : Qwen y
+    # declare <|im_end|>, absent du eos_token_id de config.json sur certains
+    # points de controle.
+    gen_path = os.path.join(os.path.dirname(os.path.abspath(cfg_path)),
+                            "generation_config.json")
+    if os.path.isfile(gen_path):
+        try:
+            with open(gen_path, "r", encoding="utf-8") as fh:
+                gen = json.load(fh)
+            merged = _as_id_list(cfg.get("eos_token_id")) + \
+                _as_id_list(gen.get("eos_token_id"))
+            if merged:
+                cfg = {**cfg, "eos_token_id": sorted(set(merged))}
+        except (OSError, json.JSONDecodeError):
+            pass
 
     archs = cfg.get("architectures") or ["LlamaForCausalLM"]
     arch = _ARCH_ALIASES.get(archs[0], "llama")
@@ -212,6 +242,9 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         shared_expert_intermediate_size=cfg.get("shared_expert_intermediate_size", 0),
         first_k_dense_replace=cfg.get("first_k_dense_replace", 0),
         torch_dtype=str(cfg.get("torch_dtype", "bfloat16")),
+        eos_token_id=_as_id_list(cfg.get("eos_token_id")),
+        bos_token_id=(cfg.get("bos_token_id")
+                      if isinstance(cfg.get("bos_token_id"), int) else None),
         raw=cfg,
     )
     return spec

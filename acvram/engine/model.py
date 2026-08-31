@@ -53,6 +53,25 @@ class ForwardBatch:
     def batch_size(self) -> int:
         return len(self.seq_lens)
 
+    # Les index d'une etape (positions, slots) naissent sur l'hote et sont lus
+    # par chaque couche. Les transferer a chaque couche coutait ~0,7 ms par
+    # appel — plus que le calcul de la couche elle-meme. On les copie donc une
+    # fois par peripherique et par etape ; le lot est reconstruit a chaque
+    # etape, le cache ne peut pas devenir obsolete.
+    def positions_on(self, device: torch.device) -> torch.Tensor:
+        cache = self.__dict__.setdefault("_pos_cache", {})
+        t = cache.get(device)
+        if t is None:
+            t = cache[device] = self.positions.to(device, non_blocking=True)
+        return t
+
+    def slots_on(self, device: torch.device) -> torch.Tensor:
+        cache = self.__dict__.setdefault("_slot_cache", {})
+        t = cache.get(device)
+        if t is None:
+            t = cache[device] = self.slot_mapping.to(device, non_blocking=True)
+        return t
+
     @property
     def is_decode(self) -> bool:
         return not self.is_prefill
@@ -75,9 +94,15 @@ class ForwardBatch:
 
 class Attention(nn.Module):
     def __init__(self, spec: ModelSpec, q: QuantLinear, k: QuantLinear,
-                 v: QuantLinear, o: QuantLinear, rope: RotaryEmbedding) -> None:
+                 v: QuantLinear, o: QuantLinear, rope: RotaryEmbedding,
+                 q_norm: Optional[nn.Module] = None,
+                 k_norm: Optional[nn.Module] = None) -> None:
         super().__init__()
         self.q_proj, self.k_proj, self.v_proj, self.o_proj = q, k, v, o
+        # Qwen3, Gemma 3 et Olmo 2 normalisent Q et K par tete, avant la RoPE.
+        # L'ordre compte : normaliser apres ferait tourner un vecteur puis
+        # ecraserait sa norme, ce que le modele n'a pas appris.
+        self.q_norm, self.k_norm = q_norm, k_norm
         self.n_heads = spec.num_attention_heads
         self.n_kv_heads = spec.num_key_value_heads
         self.head_dim = spec.head_dim
@@ -92,11 +117,17 @@ class Attention(nn.Module):
         k = self.k_proj(x).view(t, self.n_kv_heads, self.head_dim)
         v = self.v_proj(x).view(t, self.n_kv_heads, self.head_dim)
 
-        cos, sin = self.rope(batch.positions.to(x.device), x.device, x.dtype)
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+        if self.k_norm is not None:
+            k = self.k_norm(k)
+
+        cos, sin = self.rope(batch.positions_on(x.device), x.device, x.dtype,
+                             max_pos=max(batch.seq_lens))
         q, k = apply_rope(q, k, cos, sin)
 
         if cache is not None:
-            cache.write(batch.slot_mapping.to(x.device), k, v)
+            cache.write(batch.slots_on(x.device), k, v)
 
         if batch.is_decode:
             return self._decode(q, k, v, batch, cache, t)

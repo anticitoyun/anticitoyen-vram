@@ -144,6 +144,8 @@ class QuantLinear(nn.Module):
             y = kernels.nvfp4_matmul(x, w)
         elif fmt == "int4_awq":
             y = kernels.int4_matmul(x, w)
+        elif fmt == "int8":
+            y = kernels.int8_matmul(x, w)
         elif isinstance(w, PlainTensor):
             y = F.linear(x, w.weight.to(x.dtype))
         else:
@@ -248,10 +250,17 @@ class RotaryEmbedding(nn.Module):
         self._sin = emb.sin().to(dtype)
         self._cache_len = n
 
-    def forward(self, positions: torch.Tensor, device, dtype
+    def forward(self, positions: torch.Tensor, device, dtype,
+                max_pos: Optional[int] = None
                 ) -> tuple[torch.Tensor, torch.Tensor]:
-        self._ensure(int(positions.max().item()) + 1 if positions.numel() else 1,
-                     device, dtype)
+        # ``positions.max()`` vit sur le GPU : le rapatrier synchronise tout le
+        # flux, a chaque couche, a chaque jeton — 40 synchronisations par jeton
+        # sur un modele de 40 couches. L'appelant connait deja la longueur de
+        # contexte en Python ; qu'il la donne, et le cache s'etend sans jamais
+        # attendre le GPU.
+        if max_pos is None:
+            max_pos = int(positions.max().item()) + 1 if positions.numel() else 1
+        self._ensure(max_pos, device, dtype)
         return self._cos[positions], self._sin[positions]
 
 

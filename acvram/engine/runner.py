@@ -16,6 +16,8 @@ fait entrer et sortir le travail par une file.
 from __future__ import annotations
 
 import itertools
+import json
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -160,13 +162,24 @@ class Engine:
         ids: set[int] = set()
         cfg = self.loaded.manifest.get("model", {})
         raw = self.loaded.manifest.get("generation_config", {})
+        # Le generation_config.json est recopie a cote du modele converti :
+        # c'est lui qui porte <|im_end|> chez Qwen.
+        disque: dict = {}
+        d = getattr(self.loaded, "path", "") or ""
+        gen_path = os.path.join(d, "generation_config.json") if d else ""
+        if gen_path and os.path.isfile(gen_path):
+            try:
+                with open(gen_path, "r", encoding="utf-8") as fh:
+                    disque = json.load(fh)
+            except (OSError, json.JSONDecodeError):
+                disque = {}
         for key in ("eos_token_id", "eos_token_ids"):
-            for src in (cfg, raw):
+            for src in (cfg, raw, disque):
                 v = src.get(key)
                 if isinstance(v, int):
                     ids.add(v)
                 elif isinstance(v, list):
-                    ids.update(int(x) for x in v)
+                    ids.update(int(x) for x in v if isinstance(x, int))
         return ids
 
     def add_request(self, prompt_ids: list[int], params: SamplingParams,

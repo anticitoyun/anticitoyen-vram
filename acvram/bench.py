@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from typing import Any, Optional
 
@@ -68,6 +69,106 @@ def bench_link_bandwidth(size_mb: int = 512, iters: int = 5) -> list[dict]:
         del dst
         torch.cuda.empty_cache()
     return out
+
+
+def bench_peer_links(size_mb: int = 256, iters: int = 5) -> list[dict]:
+    """Debit reel entre GPU, et disponibilite du P2P, dans les deux sens.
+
+    Le P2P n'est pas garanti : sans NVLink et derriere un pont de chipset
+    (``PHB`` chez ``nvidia-smi topo -m``), une copie entre cartes repasse par
+    l'hote et peut se reveler plus lente qu'un aller-retour par la memoire
+    vive. C'est une mesure, pas une hypothese : le placement en depend.
+    """
+    import torch
+    out: list[dict] = []
+    if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
+        return out
+    n = size_mb * 1024 * 1024 // 4
+    for i in range(torch.cuda.device_count()):
+        for j in range(torch.cuda.device_count()):
+            if i == j:
+                continue
+            di, dj = torch.device(f"cuda:{i}"), torch.device(f"cuda:{j}")
+            try:
+                src = torch.empty(n, dtype=torch.float32, device=di)
+                dst = torch.empty(n, dtype=torch.float32, device=dj)
+            except torch.OutOfMemoryError:
+                continue
+            t = _timeit(lambda: dst.copy_(src), iters, 2, dj)
+            out.append({
+                "from": f"cuda:{i}", "to": f"cuda:{j}",
+                "p2p": bool(torch.cuda.can_device_access_peer(i, j)),
+                "gb_s": round(size_mb / 1024 / t, 1),
+            })
+            del src, dst
+            torch.cuda.empty_cache()
+    return out
+
+
+def pcie_link_state() -> list[dict]:
+    """Largeur et generation PCIe effectives, telles que le pilote les rapporte.
+
+    Une carte cablee en x16 mais negociee en x8 divise par deux tout transfert :
+    le planificateur doit connaitre la largeur courante, pas celle du connecteur.
+
+    Attention a la lecture : au repos le pilote retrograde le lien (une carte
+    peut se declarer en ``PCIe 1.0`` alors qu'elle remonte en 4.0 des la
+    premiere copie). Seule la *largeur* est fiable a froid ; pour la
+    generation, c'est le debit mesure par ``bench_link_bandwidth`` qui tranche.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,name,pcie.link.gen.current,"
+             "pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    rows = []
+    for line in out.strip().splitlines():
+        f = [c.strip() for c in line.split(",")]
+        if len(f) < 6:
+            continue
+        rows.append({"device": f"cuda:{f[0]}", "name": f[1],
+                     "gen": int(f[2]), "width": int(f[3]),
+                     "gen_max": int(f[4]), "width_max": int(f[5]),
+                     "degraded": int(f[3]) < int(f[5]) or int(f[2]) < int(f[4])})
+    return rows
+
+
+def topology(size_mb: int = 256) -> dict:
+    """Carte complete des couts de transfert de cette machine.
+
+    Ecrite une fois dans ``acvram-topology.json``, elle remplace les constantes
+    du planificateur par des chiffres mesures ici.
+    """
+    import torch
+    gpus = []
+    for i in range(torch.cuda.device_count() if torch.cuda.is_available() else 0):
+        pr = torch.cuda.get_device_properties(i)
+        cc = (pr.major, pr.minor)
+        gpus.append({
+            "device": f"cuda:{i}", "name": pr.name,
+            "compute_capability": f"{cc[0]}.{cc[1]}",
+            "memory_bytes": pr.total_memory,
+            "multiprocessors": pr.multi_processor_count,
+        })
+    host_ram = 0
+    try:
+        host_ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError):
+        pass
+    return {
+        "acvram_topology": 1,
+        "gpus": gpus,
+        "host": {"ram_bytes": host_ram,
+                 "memory": bench_host_memory(size_mb)},
+        "pcie": pcie_link_state(),
+        "links": bench_link_bandwidth(size_mb),
+        "peers": bench_peer_links(size_mb),
+        "vram": bench_vram_bandwidth(size_mb * 2),
+    }
 
 
 def bench_vram_bandwidth(size_mb: int = 1024, iters: int = 20) -> list[dict]:
@@ -233,6 +334,19 @@ def bench_decode(model_dir: str, n_tokens: int = 64,
     }
 
 
+DEFAULT_TOPOLOGY_PATH = os.path.expanduser("~/.config/acvram/acvram-topology.json")
+
+
+def load_topology(path: Optional[str] = None) -> Optional[dict]:
+    """Relit la topologie mesuree, si ``acvram bench --what topology`` est passe."""
+    p = path or DEFAULT_TOPOLOGY_PATH
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def run_benchmarks(args: argparse.Namespace) -> int:
     results: dict[str, Any] = {}
     what = getattr(args, "what", "all")
@@ -244,12 +358,48 @@ def run_benchmarks(args: argparse.Namespace) -> int:
     if what in ("all", "kernels"):
         results["kernels"] = bench_kernels()
         results["cpu_kernels"] = bench_cpu_kernels()
+    if what in ("all", "topology"):
+        results["topology"] = topology()
+        out = getattr(args, "topology_out", None) or DEFAULT_TOPOLOGY_PATH
+        try:
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            with open(out, "w", encoding="utf-8") as fh:
+                json.dump(results["topology"], fh, indent=2)
+            results["topology_path"] = out
+        except OSError as exc:
+            results["topology_error"] = str(exc)
     if what in ("all", "decode") and getattr(args, "model", None):
         results["decode"] = bench_decode(args.model)
 
     if getattr(args, "json", False):
         print(json.dumps(results, indent=2))
         return 0
+
+    topo = results.get("topology")
+    if topo:
+        print()
+        print("  topologie")
+        for g in topo["gpus"]:
+            print(f"    {g['device']:<8} {g['name']:<26} "
+                  f"cc {g['compute_capability']:<5} "
+                  f"{g['memory_bytes'] / 1024 ** 3:5.1f} Gio")
+        for r in topo.get("pcie", []):
+            etat = f"PCIe {r['gen']}.0 x{r['width']} au repos"
+            if r["width"] < r["width_max"]:
+                etat += (f"  (largeur bridee : la carte sait faire "
+                         f"x{r['width_max']})")
+            print(f"    {r['device']:<8} {etat}")
+        for r in topo.get("peers", []):
+            p2p = "P2P" if r["p2p"] else "sans P2P, par l'hote"
+            print(f"    {r['from']} -> {r['to']:<8} {r['gb_s']:>6.1f} Go/s  ({p2p})")
+        hm = topo["host"]["memory"]["read_gb_s"]
+        pires = [r["gb_s"] for r in topo.get("peers", [])]
+        if pires and hm > max(pires):
+            print(f"    -> la memoire vive ({hm:.1f} Go/s) est plus rapide que "
+                  f"le meilleur lien entre cartes ({max(pires):.1f} Go/s) : "
+                  f"n'y faire transiter que ce qui y reside.")
+        if results.get("topology_path"):
+            print(f"    ecrit dans {results['topology_path']}")
 
     for row in results.get("host_link", []):
         print(f"  {row['device']:<8} {row['name']:<28} "

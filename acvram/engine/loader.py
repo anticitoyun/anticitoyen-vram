@@ -164,13 +164,21 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 raise KeyError(f"tenseur manquant {p + suffix}")
             return m.to_device(mlp_dev, streamed=streamed_mlp)
 
+        def norm_opt(suffix: str) -> Optional[RMSNorm]:
+            """RMSNorm facultative — absente des modeles sans QK-norm."""
+            w = reader.get(p + suffix) if p + suffix in manifest["tensors"] else None
+            return None if w is None else RMSNorm(w.to(dtype).to(d),
+                                                  spec.rms_norm_eps)
+
         attn = Attention(
             spec,
             lin("self_attn.q_proj.weight", streamed_attn),
             lin("self_attn.k_proj.weight", streamed_attn),
             lin("self_attn.v_proj.weight", streamed_attn),
             lin("self_attn.o_proj.weight", streamed_attn),
-            rope)
+            rope,
+            norm_opt("self_attn.q_norm.weight"),
+            norm_opt("self_attn.k_norm.weight"))
 
         if manifest["tensors"].get(p + "mlp.gate.weight") is not None:
             router = mlin("mlp.gate.weight")

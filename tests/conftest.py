@@ -67,3 +67,62 @@ def converted(tiny_checkpoint, target_rig, tmp_path_factory):
     convert_checkpoint(tiny_checkpoint, plan,
                        ConversionOptions(out_dir=out), spec=spec)
     return out
+
+
+@pytest.fixture(scope="session")
+def tiny_checkpoint_qknorm(tmp_path_factory):
+    """Le même modèle minuscule, mais de forme Qwen3 : une RMSNorm par tête sur
+    Q et sur K, appliquée avant la RoPE.
+
+    Les poids de ces normalisations sont volontairement tirés au hasard autour
+    de 1 : à un, la normalisation reste visible mais un test qui les ignorerait
+    resterait proche, ce qui masquerait l'erreur.
+    """
+    from safetensors.torch import save_file
+
+    torch.manual_seed(20260831)
+    H, I, L, NH, NKV, V = 256, 688, 4, 8, 2, 1024
+    hd = H // NH
+    d = tmp_path_factory.mktemp("hf_qknorm")
+    json.dump({
+        "architectures": ["Qwen3ForCausalLM"], "hidden_size": H,
+        "intermediate_size": I, "num_hidden_layers": L,
+        "num_attention_heads": NH, "num_key_value_heads": NKV,
+        "vocab_size": V, "max_position_embeddings": 2048, "head_dim": hd,
+        "rms_norm_eps": 1e-6, "rope_theta": 1000000.0, "torch_dtype": "bfloat16",
+        "model_type": "qwen3",
+    }, open(d / "config.json", "w"))
+
+    sd = {"model.embed_tokens.weight": torch.randn(V, H, dtype=torch.bfloat16) * 0.02}
+    for i in range(L):
+        p = f"model.layers.{i}."
+        sd[p + "self_attn.q_proj.weight"] = torch.randn(NH * hd, H, dtype=torch.bfloat16) * .02
+        sd[p + "self_attn.k_proj.weight"] = torch.randn(NKV * hd, H, dtype=torch.bfloat16) * .02
+        sd[p + "self_attn.v_proj.weight"] = torch.randn(NKV * hd, H, dtype=torch.bfloat16) * .02
+        sd[p + "self_attn.o_proj.weight"] = torch.randn(H, NH * hd, dtype=torch.bfloat16) * .02
+        sd[p + "self_attn.q_norm.weight"] = (1 + torch.randn(hd) * .1).to(torch.bfloat16)
+        sd[p + "self_attn.k_norm.weight"] = (1 + torch.randn(hd) * .1).to(torch.bfloat16)
+        sd[p + "mlp.gate_proj.weight"] = torch.randn(I, H, dtype=torch.bfloat16) * .02
+        sd[p + "mlp.up_proj.weight"] = torch.randn(I, H, dtype=torch.bfloat16) * .02
+        sd[p + "mlp.down_proj.weight"] = torch.randn(H, I, dtype=torch.bfloat16) * .02
+        sd[p + "input_layernorm.weight"] = torch.ones(H, dtype=torch.bfloat16)
+        sd[p + "post_attention_layernorm.weight"] = torch.ones(H, dtype=torch.bfloat16)
+    sd["model.norm.weight"] = torch.ones(H, dtype=torch.bfloat16)
+    sd["lm_head.weight"] = torch.randn(V, H, dtype=torch.bfloat16) * 0.02
+    save_file(sd, str(d / "model.safetensors"))
+    return str(d)
+
+
+@pytest.fixture(scope="session")
+def converted_qknorm(tiny_checkpoint_qknorm, target_rig, tmp_path_factory):
+    from acvram.engine.config import load_model_spec
+    from acvram.memory.tiering import PlannerOptions, auto_plan
+    from acvram.quant.convert import ConversionOptions, convert_checkpoint
+
+    spec = load_model_spec(tiny_checkpoint_qknorm, "tiny-qknorm")
+    plan, _ = auto_plan(spec, target_rig,
+                        PlannerOptions(max_model_len=512, max_concurrent_seqs=2))
+    out = str(tmp_path_factory.mktemp("acvram_qknorm"))
+    convert_checkpoint(tiny_checkpoint_qknorm, plan,
+                       ConversionOptions(out_dir=out), spec=spec)
+    return out

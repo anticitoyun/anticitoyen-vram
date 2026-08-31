@@ -126,6 +126,19 @@ class NVFP4Tensor:
 
     format = "nvfp4"
 
+    def global_scale_float(self) -> float:
+        """Le scalaire d'echelle, memorise cote hote.
+
+        ``global_scale`` est un tenseur d'un element qui ne change jamais apres
+        la quantification ; le relire par ``.item()`` a chaque GEMV synchronise
+        le flux CUDA et dominait le temps de decodage (62 % au profil).
+        """
+        gs = self.__dict__.get("_gs_f")
+        if gs is None:
+            gs = float(self.global_scale.item())
+            self.__dict__["_gs_f"] = gs
+        return gs
+
     @property
     def nbytes(self) -> int:
         return (

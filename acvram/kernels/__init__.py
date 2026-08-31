@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import functools
 import os
+import re
+import shutil
 import sys
 import warnings
 from typing import Any, Optional
@@ -20,6 +22,7 @@ from typing import Any, Optional
 import torch
 
 from ..quant.int4 import INT4Tensor, dequantize_int4
+from ..quant.formats import INT8Tensor, _dequantize_int8
 from ..quant.nvfp4 import NVFP4Tensor, dequantize_nvfp4
 
 from .cpu import (cpu_build_info, cpu_kernels_available, int4_matmul_cpu,
@@ -28,6 +31,7 @@ from .fp4_gemm import fp4_mm_available, fp4_mm_info, nvfp4_mm_tensorcore
 
 __all__ = ["get_extension", "kernels_available", "build_info",
            "nvfp4_dequant", "nvfp4_matmul", "int4_dequant", "int4_matmul",
+           "int8_dequant", "int8_matmul",
            "cpu_kernels_available", "cpu_build_info",
            "fp4_mm_available", "fp4_mm_info"]
 
@@ -64,6 +68,72 @@ def _cuda_version() -> tuple[int, int]:
         return int(parts[0]), int(parts[1])
     except (ValueError, IndexError):
         return (0, 0)
+
+
+def _nvcc_version(nvcc: str) -> tuple[int, int]:
+    """Version de nvcc, ou (0, 0) s'il est introuvable ou muet."""
+    import subprocess
+    try:
+        out = subprocess.run([nvcc, "--version"], capture_output=True,
+                             text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return (0, 0)
+    m = re.search(r"release (\d+)\.(\d+)", out)
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+
+
+def _venv_cuda_home() -> Optional[str]:
+    """Racine du toolkit CUDA livré par pip (paquets ``nvidia-cuda-nvcc``).
+
+    Les roues ``cuda-toolkit[nvcc]`` déposent un arbre complet sous
+    ``site-packages/nvidia/cuXX``. Il lui manque le ``lib64`` et le
+    ``libcudart.so`` non versionné que ``cpp_extension`` attend ; on les pose
+    en liens symboliques, ce qui est sans effet s'ils existent déjà.
+    """
+    import glob
+    import sysconfig
+    roots = [sysconfig.get_paths().get("purelib", ""),
+             os.path.join(sys.prefix, "lib")]
+    for root in roots:
+        for cand in sorted(glob.glob(os.path.join(root, "**", "nvidia", "cu[0-9]*"),
+                                     recursive=True), reverse=True):
+            if not os.path.isfile(os.path.join(cand, "bin", "nvcc")):
+                continue
+            try:
+                lib = os.path.join(cand, "lib")
+                lib64 = os.path.join(cand, "lib64")
+                if os.path.isdir(lib) and not os.path.exists(lib64):
+                    os.symlink("lib", lib64)
+                so = os.path.join(lib, "libcudart.so")
+                if not os.path.exists(so):
+                    for versioned in sorted(glob.glob(so + ".*")):
+                        os.symlink(os.path.basename(versioned), so)
+                        break
+            except OSError:
+                pass                      # arbre en lecture seule : tant pis
+            return cand
+    return None
+
+
+def _ensure_cuda_home(need: tuple[int, int]) -> None:
+    """Choisit un nvcc capable d'émettre pour ``need``, sans rien exiger du système.
+
+    Une distribution peut livrer un nvcc plus ancien que la roue torch installée
+    — Linux Mint 22.3 fournit CUDA 12.0, qui ignore ``compute_120``. Dans ce
+    cas on bascule ``CUDA_HOME`` sur le toolkit du virtualenv.
+    """
+    if os.environ.get("ACVRAM_CUDA_HOME"):
+        os.environ["CUDA_HOME"] = os.environ["ACVRAM_CUDA_HOME"]
+        return
+    current = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    nvcc = (os.path.join(current, "bin", "nvcc") if current
+            else shutil.which("nvcc") or "")
+    if nvcc and _nvcc_version(nvcc) >= need:
+        return
+    venv = _venv_cuda_home()
+    if venv is not None and _nvcc_version(os.path.join(venv, "bin", "nvcc")) >= need:
+        os.environ["CUDA_HOME"] = venv
+        os.environ["PATH"] = os.path.join(venv, "bin") + os.pathsep + os.environ.get("PATH", "")
 
 
 def build_info() -> dict:
@@ -107,6 +177,10 @@ def get_extension():
         warnings.warn(_ERROR)
         return None
 
+    # nvcc doit savoir emettre pour la plus haute architecture presente.
+    _ensure_cuda_home(_MIN_CUDA_FOR_SM120 if any(c >= (12, 0) for c in caps)
+                      else (11, 0))
+
     try:
         from torch.utils.cpp_extension import load
         here = os.path.dirname(os.path.abspath(__file__))
@@ -143,7 +217,7 @@ def nvfp4_dequant(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16) -> torch.
     out = ext.nvfp4_dequant(
         t.qweight.contiguous(),
         t.block_scale.view(torch.uint8).contiguous(),
-        float(t.global_scale.item()),
+        t.global_scale_float(),
         t.padded_in, dtype)
     return out[:, : t.shape[-1]] if t.padded_in != t.shape[-1] else out
 
@@ -174,7 +248,7 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
         y = ext.nvfp4_gemv(
             t.qweight.contiguous(),
             t.block_scale.view(torch.uint8).contiguous(),
-            float(t.global_scale.item()), xf.contiguous(), t.padded_in)
+            t.global_scale_float(), xf.contiguous(), t.padded_in)
         return y.to(x.dtype).reshape(*orig_shape[:-1], t.shape[0])
 
     # Prefill. On essaie d'abord les tensor cores FP4 : à cette taille de lot,
@@ -224,4 +298,48 @@ def int4_matmul(x: torch.Tensor, t: INT4Tensor,
         return y.to(x.dtype).reshape(*orig_shape[:-1], t.shape[0])
 
     w = int4_dequant(t, x.dtype if x.dtype != torch.float32 else torch.float16)
+    return torch.nn.functional.linear(x, w.to(x.dtype))
+
+
+# --------------------------------------------------------------------------
+# INT8
+# --------------------------------------------------------------------------
+
+
+def int8_dequant(t: INT8Tensor, dtype: torch.dtype = torch.float16) -> torch.Tensor:
+    ext = get_extension()
+    if ext is None or not t.qweight.is_cuda:
+        return _dequantize_int8(t, dtype)
+    out = ext.int8_dequant(
+        t.qweight.contiguous(), t.scales.contiguous(), t.zeros.contiguous(),
+        t.group_size, dtype)
+    k = t.shape[-1]
+    return out[:, :k] if out.shape[1] != k else out
+
+
+def int8_matmul(x: torch.Tensor, t: INT8Tensor,
+                gemv_threshold: int = 8) -> torch.Tensor:
+    """``x @ W.T`` avec W stocké en INT8 affine par groupes.
+
+    Sans ce chemin, les tenseurs promus en INT8 par la conversion — quelques
+    pour cent du modèle, choisis précisément parce qu'ils sont sensibles —
+    étaient rematérialisés en 16 bits par PyTorch à chaque jeton, et dominaient
+    le temps de décodage entier.
+    """
+    ext = get_extension()
+    orig_shape = x.shape
+    xf = x.reshape(-1, x.shape[-1])
+    n = xf.shape[0]
+    k_pad = t.qweight.shape[1]
+
+    if ext is not None and t.qweight.is_cuda and n <= gemv_threshold:
+        if k_pad != xf.shape[-1]:
+            xf = torch.nn.functional.pad(xf, (0, k_pad - xf.shape[-1]))
+        y = ext.int8_gemv(
+            t.qweight.contiguous(), t.scales.contiguous(), t.zeros.contiguous(),
+            xf.contiguous(), t.group_size)
+        y = y[..., : t.shape[0]]
+        return y.to(x.dtype).reshape(*orig_shape[:-1], t.shape[0])
+
+    w = int8_dequant(t, x.dtype if x.dtype != torch.float32 else torch.float16)
     return torch.nn.functional.linear(x, w.to(x.dtype))

@@ -41,6 +41,7 @@
 
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
@@ -318,6 +319,111 @@ __global__ void int4_gemv_kernel(
     }
 }
 
+
+// -------------------------------------------------------------------------
+// INT8 affine par groupes (zeros pleins, non empaquetes)
+// -------------------------------------------------------------------------
+
+template <typename T>
+__global__ void int8_dequant_kernel(
+    const unsigned char *__restrict__ qw,     // [M, K]
+    const __half *__restrict__ scales,        // [M, ng]
+    const unsigned char *__restrict__ zeros,  // [M, ng]
+    T *__restrict__ out,                      // [M, K]
+    int M, int K, int group) {
+    const long row = blockIdx.x;
+    if (row >= M) return;
+    const int nloads = K / WEIGHTS_PER_LOAD;  // 16 octets = un uint4
+    const int ng = K / group;
+    const uint4 *qrow = reinterpret_cast<const uint4 *>(qw + row * (long)K);
+    const __half *srow = scales + row * (long)ng;
+    const unsigned char *zrow = zeros + row * (long)ng;
+    T *orow = out + row * (long)K;
+
+    for (int i = threadIdx.x; i < nloads; i += blockDim.x) {
+        const uint4 p = qrow[i];
+        const int base = i * WEIGHTS_PER_LOAD;
+        const int g = base / group;
+        const float s = __half2float(srow[g]);
+        const float z = static_cast<float>(zrow[g]);
+        const unsigned int words[4] = {p.x, p.y, p.z, p.w};
+        #pragma unroll
+        for (int j = 0; j < WEIGHTS_PER_LOAD; ++j) {
+            const unsigned int b = (words[j >> 2] >> ((j & 3) * 8)) & 0xFFu;
+            orow[base + j] = from_float<T>((static_cast<float>(b) - z) * s);
+        }
+    }
+}
+
+template <int ROWS>
+__global__ void int8_gemv_kernel(
+    const unsigned char *__restrict__ qw,
+    const __half *__restrict__ scales,
+    const unsigned char *__restrict__ zeros,
+    const float *__restrict__ x,
+    float *__restrict__ y,
+    int M, int K, int N, int group, int k_splits) {
+    extern __shared__ float smem[];
+    const int nwarps = (blockDim.x + WARP - 1) / WARP;
+    const int row0 = blockIdx.x * ROWS;
+    if (row0 >= M) return;
+    const int nloads = K / WEIGHTS_PER_LOAD;
+    const int ng = K / group;
+    const int split = blockIdx.y;
+    const int per_split = (nloads + k_splits - 1) / k_splits;
+    const int lo = split * per_split;
+    const int hi = min(nloads, lo + per_split);
+
+    for (int n = 0; n < N; ++n) {
+        const float *xn = x + (long)n * K;
+        float acc[ROWS];
+        #pragma unroll
+        for (int r = 0; r < ROWS; ++r) acc[r] = 0.f;
+
+        for (int i = lo + threadIdx.x; i < hi; i += blockDim.x) {
+            float xs[WEIGHTS_PER_LOAD];
+            const float4 *x4 = reinterpret_cast<const float4 *>(
+                xn + (long)i * WEIGHTS_PER_LOAD);
+            #pragma unroll
+            for (int c = 0; c < WEIGHTS_PER_LOAD / 4; ++c) {
+                const float4 v = x4[c];
+                xs[c * 4 + 0] = v.x; xs[c * 4 + 1] = v.y;
+                xs[c * 4 + 2] = v.z; xs[c * 4 + 3] = v.w;
+            }
+            const int g = (i * WEIGHTS_PER_LOAD) / group;
+            #pragma unroll
+            for (int r = 0; r < ROWS; ++r) {
+                const int row = row0 + r;
+                if (row >= M) continue;
+                const uint4 p = reinterpret_cast<const uint4 *>(
+                    qw + (long)row * K)[i];
+                const float s = __half2float(scales[(long)row * ng + g]);
+                const float z = static_cast<float>(zeros[(long)row * ng + g]);
+                const unsigned int words[4] = {p.x, p.y, p.z, p.w};
+                float part = 0.f;
+                #pragma unroll
+                for (int j = 0; j < WEIGHTS_PER_LOAD; ++j) {
+                    const unsigned int b = (words[j >> 2] >> ((j & 3) * 8)) & 0xFFu;
+                    part += (static_cast<float>(b) - z) * xs[j];
+                }
+                acc[r] += part * s;
+            }
+        }
+
+        block_reduce_rows<ROWS>(acc, smem, nwarps);
+        if (threadIdx.x == 0) {
+            #pragma unroll
+            for (int r = 0; r < ROWS; ++r) {
+                const int row = row0 + r;
+                if (row >= M) continue;
+                if (k_splits == 1) y[(long)n * M + row] = acc[r];
+                else atomicAdd(&y[(long)n * M + row], acc[r]);
+            }
+        }
+        __syncthreads();
+    }
+}
+
 int threads_for(int K) {
     const int nloads = K / WEIGHTS_PER_LOAD;
     int t = 256;
@@ -345,12 +451,20 @@ int splits_for(int M, int K, int device) {
 // -------------------------------------------------------------------------
 
 #define CHECK_CUDA(x) TORCH_CHECK((x).is_cuda(), #x " doit resider sur un peripherique CUDA")
+
+// Le flux courant appartient au *peripherique courant*, pas a celui des
+// tenseurs. Sans ce garde, un appel visant la seconde carte lance son noyau
+// sur la premiere et lit des adresses qui n'existent pas chez elle : une
+// machine a un seul GPU ne le voit jamais, une machine a deux GPU plante des
+// le premier appel. Il est donc obligatoire en tete de chaque point d'entree.
+#define ACVRAM_DEVICE_GUARD(x) const at::cuda::CUDAGuard acvram_guard((x).device())
 #define CHECK_CONTIG(x) TORCH_CHECK((x).is_contiguous(), #x " doit etre contigu")
 
 torch::Tensor nvfp4_dequant(torch::Tensor qweight, torch::Tensor block_scale,
                             double global_scale, int64_t K,
                             c10::ScalarType dtype) {
     CHECK_CUDA(qweight); CHECK_CUDA(block_scale);
+    ACVRAM_DEVICE_GUARD(qweight);
     CHECK_CONTIG(qweight); CHECK_CONTIG(block_scale);
     TORCH_CHECK(K % 16 == 0, "le NVFP4 exige K divisible par 16, recu ", K);
     const int M = qweight.size(0);
@@ -381,6 +495,7 @@ torch::Tensor nvfp4_dequant(torch::Tensor qweight, torch::Tensor block_scale,
 torch::Tensor nvfp4_gemv(torch::Tensor qweight, torch::Tensor block_scale,
                          double global_scale, torch::Tensor x, int64_t K) {
     CHECK_CUDA(qweight); CHECK_CUDA(x);
+    ACVRAM_DEVICE_GUARD(qweight);
     CHECK_CONTIG(qweight); CHECK_CONTIG(block_scale);
     TORCH_CHECK(K % 16 == 0, "le NVFP4 exige K divisible par 16");
     auto xc = x.dim() == 1 ? x.reshape({1, -1}) : x;
@@ -407,6 +522,7 @@ torch::Tensor int4_dequant(torch::Tensor qweight, torch::Tensor scales,
                            torch::Tensor zeros, int64_t K, int64_t group,
                            c10::ScalarType dtype) {
     CHECK_CUDA(qweight); CHECK_CUDA(scales); CHECK_CUDA(zeros);
+    ACVRAM_DEVICE_GUARD(qweight);
     CHECK_CONTIG(qweight); CHECK_CONTIG(scales); CHECK_CONTIG(zeros);
     TORCH_CHECK(K % group == 0, "K doit etre divisible par la taille de groupe");
     TORCH_CHECK(group % 16 == 0, "la taille de groupe doit etre un multiple de 16");
@@ -440,6 +556,7 @@ torch::Tensor int4_gemv(torch::Tensor qweight, torch::Tensor scales,
                         torch::Tensor zeros, torch::Tensor x,
                         int64_t K, int64_t group) {
     CHECK_CUDA(qweight); CHECK_CUDA(x);
+    ACVRAM_DEVICE_GUARD(qweight);
     TORCH_CHECK(K % group == 0, "K doit etre divisible par la taille de groupe");
     TORCH_CHECK(group % 16 == 0, "la taille de groupe doit etre un multiple de 16");
     auto xc = x.dim() == 1 ? x.reshape({1, -1}) : x;
@@ -463,9 +580,75 @@ torch::Tensor int4_gemv(torch::Tensor qweight, torch::Tensor scales,
     return x.dim() == 1 ? out.squeeze(0) : out;
 }
 
+
+torch::Tensor int8_dequant(torch::Tensor qweight, torch::Tensor scales,
+                           torch::Tensor zeros, int64_t group,
+                           c10::ScalarType dtype) {
+    CHECK_CUDA(qweight); CHECK_CUDA(scales); CHECK_CUDA(zeros);
+    ACVRAM_DEVICE_GUARD(qweight);
+    CHECK_CONTIG(qweight); CHECK_CONTIG(scales); CHECK_CONTIG(zeros);
+    const int M = qweight.size(0);
+    const int K = qweight.size(1);
+    TORCH_CHECK(K % group == 0, "K doit etre divisible par la taille de groupe");
+    TORCH_CHECK(group % 16 == 0, "la taille de groupe doit etre un multiple de 16");
+    auto out = torch::empty({M, K}, qweight.options().dtype(dtype));
+    auto stream = at::cuda::getCurrentCUDAStream();
+    const int threads = threads_for(K);
+    const auto *qw = qweight.data_ptr<unsigned char>();
+    const auto *sc = reinterpret_cast<const __half *>(scales.data_ptr());
+    const auto *zr = zeros.data_ptr<unsigned char>();
+    if (dtype == torch::kHalf) {
+        int8_dequant_kernel<__half><<<M, threads, 0, stream>>>(
+            qw, sc, zr, reinterpret_cast<__half *>(out.data_ptr()),
+            M, K, (int)group);
+    } else if (dtype == torch::kBFloat16) {
+        int8_dequant_kernel<__nv_bfloat16><<<M, threads, 0, stream>>>(
+            qw, sc, zr, reinterpret_cast<__nv_bfloat16 *>(out.data_ptr()),
+            M, K, (int)group);
+    } else if (dtype == torch::kFloat) {
+        int8_dequant_kernel<float><<<M, threads, 0, stream>>>(
+            qw, sc, zr, out.data_ptr<float>(), M, K, (int)group);
+    } else {
+        TORCH_CHECK(false, "int8_dequant : type de sortie non gere");
+    }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
+torch::Tensor int8_gemv(torch::Tensor qweight, torch::Tensor scales,
+                        torch::Tensor zeros, torch::Tensor x, int64_t group) {
+    CHECK_CUDA(qweight); CHECK_CUDA(x);
+    ACVRAM_DEVICE_GUARD(qweight);
+    CHECK_CONTIG(qweight); CHECK_CONTIG(scales); CHECK_CONTIG(zeros);
+    const int K = qweight.size(1);
+    TORCH_CHECK(K % group == 0, "K doit etre divisible par la taille de groupe");
+    TORCH_CHECK(group % 16 == 0, "la taille de groupe doit etre un multiple de 16");
+    auto xc = x.dim() == 1 ? x.reshape({1, -1}) : x;
+    xc = xc.to(torch::kFloat).contiguous();
+    const int M = qweight.size(0);
+    const int N = xc.size(0);
+    const int threads = threads_for(K);
+    const int nwarps = (threads + 31) / 32;
+    const int splits = splits_for(M, K, (int)qweight.get_device());
+    auto out = splits == 1 ? torch::empty({N, M}, xc.options())
+                           : torch::zeros({N, M}, xc.options());
+    dim3 grid((M + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK, splits);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    int8_gemv_kernel<ROWS_PER_BLOCK>
+        <<<grid, threads, ROWS_PER_BLOCK * nwarps * sizeof(float), stream>>>(
+            qweight.data_ptr<unsigned char>(),
+            reinterpret_cast<const __half *>(scales.data_ptr()),
+            zeros.data_ptr<unsigned char>(), xc.data_ptr<float>(),
+            out.data_ptr<float>(), M, K, N, (int)group, splits);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return x.dim() == 1 ? out.squeeze(0) : out;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("nvfp4_dequant", &nvfp4_dequant, "NVFP4 -> matrice dense");
     m.def("nvfp4_gemv", &nvfp4_gemv, "NVFP4 : dequantification + produit fusionnes");
     m.def("int4_dequant", &int4_dequant, "INT4 affine par groupes -> matrice dense");
     m.def("int4_gemv", &int4_gemv, "INT4 : dequantification + produit fusionnes");
+    m.def("int8_dequant", &int8_dequant, "INT8 affine par groupes -> matrice dense");
+    m.def("int8_gemv", &int8_gemv, "INT8 : dequantification + produit fusionnes");
 }

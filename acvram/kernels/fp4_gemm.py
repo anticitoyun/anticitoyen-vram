@@ -39,13 +39,25 @@ _IMPL = ""
 
 
 def _swizzle_scales(bs: torch.Tensor) -> torch.Tensor:
-    """Les échelles de bloc telles que le produit matriciel les veut : octets E4M3
-    contigus, rangés par lignes.
+    """Les échelles de bloc dans la disposition « tuilée » qu'exige cuBLAS.
 
-    Isolé en une étape propre parce que chaque implémentation apparue jusqu'ici
-    veut une disposition différente, et que c'est le seul endroit à changer.
+    Le produit FP4 par blocs de 16 ne lit pas les échelles ligne par ligne : il
+    attend des tuiles de 128 lignes sur 4 blocs, elles-mêmes rangées en
+    sous-tuiles de 32×4×4 octets. Les lignes sont donc remplies au multiple de
+    128 et les blocs au multiple de 4 — c'est pour cela qu'un lot de 64
+    requêtes était refusé : 64 lignes d'échelles là où la tuile en veut 128.
     """
-    return bs.view(torch.float8_e4m3fn).contiguous()
+    m, ng = bs.shape
+    bs = bs.view(torch.float8_e4m3fn)
+    mb = (m + 127) // 128
+    nb = (ng + 3) // 4
+    if (mb * 128 != m) or (nb * 4 != ng):
+        bs = torch.nn.functional.pad(bs.view(torch.uint8),
+                                     (0, nb * 4 - ng, 0, mb * 128 - m)
+                                     ).view(torch.float8_e4m3fn)
+    t = bs.view(mb, 128, nb, 4).permute(0, 2, 1, 3)       # [mb, nb, 128, 4]
+    t = t.reshape(-1, 4, 32, 4).transpose(1, 2)           # [mb*nb, 32, 4, 4]
+    return t.reshape(-1).contiguous()
 
 
 def _probe() -> None:

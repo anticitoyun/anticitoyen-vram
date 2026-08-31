@@ -27,9 +27,14 @@ def _tty() -> bool:
 
 
 def _progress(text: str) -> None:
+    """Ligne d'avancement. Sur un terminal elle s'ecrase ; redirigee vers un
+    fichier elle s'empile, faute de quoi une conversion lancee en tache de fond
+    ne montre plus rien du tout."""
     if _tty():
         sys.stderr.write(f"\r{text[:100]:<100}")
-        sys.stderr.flush()
+    else:
+        sys.stderr.write(text.strip() + "\n")
+    sys.stderr.flush()
 
 
 def _progress_done() -> None:
@@ -284,7 +289,8 @@ def cmd_convert(args: argparse.Namespace) -> int:
         out_dir=args.out, awq=use_awq, use_hadamard=args.hadamard,
         group_size=args.group_size, n_grid=args.grid,
         lm_head_format=args.lm_head_format, dry_run=args.dry_run,
-        mixed_precision=args.mixed_precision, snr_floor=args.snr_floor)
+        mixed_precision=args.mixed_precision, snr_floor=args.snr_floor,
+        quant_device=args.quant_device)
 
     last = [0.0]
 
@@ -293,7 +299,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         if now - last[0] < 0.5:
             return
         last[0] = now
-        _progress(f"  {n} tensors  {name}")
+        _progress(f"  {n} tenseurs quantifies  {name}")
 
     report = convert_checkpoint(args.model, plan, opts, spec=spec, stats=stats,
                                 progress=progress)
@@ -471,6 +477,9 @@ def build_parser() -> argparse.ArgumentParser:
     cv.add_argument("--calib-len", type=int, default=512)
     cv.add_argument("--calib-device", default="cuda:0",
                     help="appareil sur lequel executer les passes de calibration")
+    cv.add_argument("--quant-device", default="auto",
+                    help="appareil de la recherche AWQ et de la quantification "
+                         "(auto, cpu, cuda:0 ...)")
     cv.add_argument("--mixed-precision", choices=["auto", "off"], default="auto",
                     help="promeut vers un format plus large les tenseurs mal quantifies")
     cv.add_argument("--snr-floor", type=float, default=25.0,
@@ -514,8 +523,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     bn = sub.add_parser("bench", help="mesure noyaux, bande passante et debit")
     bn.add_argument("model", nargs="?", help="repertoire de modele converti")
+    bn.add_argument("--topology-out",
+                    help="ou ecrire la topologie mesuree "
+                         "(defaut ~/.config/acvram/acvram-topology.json)")
     bn.add_argument("--what", default="all",
-                    choices=["all", "kernels", "bandwidth", "decode"])
+                    choices=["all", "kernels", "bandwidth", "topology", "decode"])
     bn.add_argument("--json", action="store_true")
     bn.set_defaults(func=cmd_bench)
 

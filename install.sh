@@ -25,8 +25,9 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     CAPS=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | tr -d ' ' | sort -u)
     say "capacites de calcul presentes : ${CAPS//$'\n'/, }"
     if grep -qE '^(12|10)\.' <<<"$CAPS"; then
-        INDEX="https://download.pytorch.org/whl/cu128"
-        say "Blackwell detecte -> installation de torch pour CUDA 12.8"
+        INDEX="https://download.pytorch.org/whl/cu130"
+        NVCC_WHEEL=1
+        say "Blackwell detecte -> installation de torch pour CUDA 13.0"
     else
         INDEX="https://download.pytorch.org/whl/cu124"
     fi
@@ -46,6 +47,15 @@ pip install --quiet --upgrade pip wheel
 
 say "installation de torch depuis $INDEX"
 pip install --quiet --index-url "$INDEX" torch
+
+# Le nvcc de la distribution est souvent trop ancien pour emettre du sm_120
+# (Mint 22.3 livre CUDA 12.0). On prend celui des roues pip, que
+# acvram/kernels/__init__.py sait trouver tout seul.
+if [ "${NVCC_WHEEL:-0}" = 1 ]; then
+    say "installation de nvcc (roues cuda-toolkit)"
+    pip install --quiet --only-binary=:all: 'cuda-toolkit[nvcc]' \
+        || warn "nvcc non installe ; les noyaux fusionnes retomberont sur la reference"
+fi
 
 say "installation d'acvram"
 pip install --quiet -e '.[dev]'

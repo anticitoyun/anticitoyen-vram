@@ -283,7 +283,7 @@ def quantize_with_calibration(
     w_err = ((deq - w).norm() / w.norm().clamp(min=1e-12)).item()
 
     probe = (stats.mean_abs.to(torch.float32).clamp(min=1e-6)
-             if stats is not None else torch.ones(w.shape[1]))
+             if stats is not None else torch.ones(w.shape[1], device=w.device))
     x = torch.diag(probe.to(w.device))
     y_ref = x @ w.t()
     y_q = x @ deq.t()
