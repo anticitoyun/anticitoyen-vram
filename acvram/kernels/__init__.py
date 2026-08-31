@@ -242,7 +242,9 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
     xf = x.reshape(-1, x.shape[-1])
     n = xf.shape[0]
 
-    if ext is not None and n <= gemv_threshold:
+    if ext is not None and n <= gemv_threshold and t.padded_in % 32 == 0:
+        # Le noyau lit les blocs par paires (32 poids) ; un K non multiple de
+        # 32 — jamais vu sur un vrai modele — prend le chemin dequantifie.
         if t.padded_in != xf.shape[-1]:
             xf = torch.nn.functional.pad(xf, (0, t.padded_in - xf.shape[-1]))
         y = ext.nvfp4_gemv(

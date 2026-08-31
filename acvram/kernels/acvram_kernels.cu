@@ -166,13 +166,20 @@ __global__ void nvfp4_gemv_kernel(
         #pragma unroll
         for (int r = 0; r < ROWS; ++r) acc[r] = 0.f;
 
-        for (int i = lo + threadIdx.x; i < hi; i += blockDim.x) {
-            // On lit la tranche d'activation une fois et on la réutilise sur ROWS lignes.
-            float xs[WEIGHTS_PER_LOAD];
+        // Deux blocs de 16 par itération : un uint4 charge 32 poids d'un
+        // coup, soit une transaction de 16 octets par fil — la 5090 n'attei-
+        // gnait qu'un quart de sa bande passante avec des lectures de 8.
+        // Le découpage se fait en paires de blocs, jamais au milieu d'une.
+        const int npairs = nloads >> 1;
+        const int per_split_p = (npairs + k_splits - 1) / k_splits;
+        const int lo_p = split * per_split_p;
+        const int hi_p = min(npairs, lo_p + per_split_p);
+        for (int i = lo_p + threadIdx.x; i < hi_p; i += blockDim.x) {
+            float xs[2 * WEIGHTS_PER_LOAD];
             const float4 *x4 = reinterpret_cast<const float4 *>(
-                xn + (long)i * WEIGHTS_PER_LOAD);
+                xn + (long)i * 2 * WEIGHTS_PER_LOAD);
             #pragma unroll
-            for (int c = 0; c < WEIGHTS_PER_LOAD / 4; ++c) {
+            for (int c = 0; c < 2 * WEIGHTS_PER_LOAD / 4; ++c) {
                 const float4 v = x4[c];
                 xs[c * 4 + 0] = v.x; xs[c * 4 + 1] = v.y;
                 xs[c * 4 + 2] = v.z; xs[c * 4 + 3] = v.w;
@@ -181,18 +188,26 @@ __global__ void nvfp4_gemv_kernel(
             for (int r = 0; r < ROWS; ++r) {
                 const int row = row0 + r;
                 if (row >= M) continue;
-                const uint2 p = reinterpret_cast<const uint2 *>(
+                const uint4 p4 = reinterpret_cast<const uint4 *>(
                     qw + (long)row * half_k)[i];
-                const float s = e4m3_to_float(bscale[(long)row * nloads + i])
-                                * gscale;
-                float part = 0.f;
+                const float s0 = e4m3_to_float(bscale[(long)row * nloads + 2 * i])
+                                 * gscale;
+                const float s1 = e4m3_to_float(bscale[(long)row * nloads + 2 * i + 1])
+                                 * gscale;
+                const uint2 lo16 = make_uint2(p4.x, p4.y);
+                const uint2 hi16 = make_uint2(p4.z, p4.w);
+                float part0 = 0.f, part1 = 0.f;
                 #pragma unroll
                 for (int j = 0; j < WEIGHTS_PER_LOAD; ++j) {
-                    const unsigned int c = nibble(p, j);
-                    const float v = kE2M1[c & 7u];
-                    part += (c & 8u) ? -v * xs[j] : v * xs[j];
+                    const unsigned int c0 = nibble(lo16, j);
+                    const float v0 = kE2M1[c0 & 7u];
+                    part0 += (c0 & 8u) ? -v0 * xs[j] : v0 * xs[j];
+                    const unsigned int c1 = nibble(hi16, j);
+                    const float v1 = kE2M1[c1 & 7u];
+                    part1 += (c1 & 8u) ? -v1 * xs[WEIGHTS_PER_LOAD + j]
+                                       : v1 * xs[WEIGHTS_PER_LOAD + j];
                 }
-                acc[r] += part * s;
+                acc[r] += part0 * s0 + part1 * s1;
             }
         }
 

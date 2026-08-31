@@ -92,3 +92,51 @@ acvram bench --what kernels      # noyaux CUDA et processeur face à la référe
 pytest -q                        # le chemin de référence doit toujours passer
 acvram plan ~/modeles/Qwen3-32B  # le plan correspond-il à docs/MATERIEL.md
 ```
+
+## Mesuré sur la machine cible (31 août 2026)
+
+La machine (i9-14900K, RTX 5090 32 Gio, RTX 3080 Ti 12 Gio, 96 Gio DDR5) a
+tranché plusieurs questions que le développement à l'aveugle laissait ouvertes.
+
+| mesure | valeur | conséquence |
+|---|---|---|
+| P2P entre cartes | **indisponible** (pont chipset, pas de NVLink) | l'arête GPU↔GPU du graphe mémoire n'existe pas |
+| GPU↔GPU par l'hôte | 6,6–7,2 Go/s | pire que la RAM : ne jamais *transiter* par la 3080 Ti |
+| RAM épinglée → 5090 | 20,8 Go/s (x8 : les 16 lignes CPU se partagent) | hiérarchie réelle : 5090 → **RAM** → 3080 Ti *résidente* |
+| lecture DDR5 | 33,5 Go/s | l'étage hôte se calcule sur place, confirmé |
+| GEMV NVFP4 (5090) | 390–528 Go/s après uint4 | ~30 % du pic : marge ×3 dans le noyau |
+| GEMV INT4 (3080 Ti) | 456–606 Go/s | 66 % du pic : le schéma est sain |
+| Qwen3-14B NVFP4 | 9,5 → 22,3 jetons/s dans la journée | le mur restant est la surcouche Python (~2/3 du temps) |
+
+## Enseignements des systèmes voisins, transposés ici
+
+Lus le 31 août (FlexGen, ZeRO-Inference, TensorRT-LLM, Petals, nakshatra,
+ExLlamaV2), retenu ce qui s'applique à *cette* topologie :
+
+1. **CUDA Graphs sur le pas de décodage** — le profil montre ~68 ms de Python
+   par jeton contre ~30 ms de GPU : capturer le graphe du pas mono-jeton est
+   le levier n° 1, avant toute nouvelle optimisation de noyau.
+2. **Affectation de formats par budget, à la EXL2** — remplacer le plancher de
+   SNR fixe de la conversion par un sac à dos : quantifier chaque tenseur en
+   2–3 formats candidats (déjà fait pour les promus), puis choisir l'ensemble
+   qui minimise l'erreur totale sous un budget d'octets. Donne « le meilleur
+   modèle qui tient dans N Gio » au lieu d'un seuil arbitraire.
+3. **Prefill W4A8** — le chemin tensor-core actuel est W4A4 (~9,5 % d'erreur
+   relative par lot) ; passer l'activation en FP8 (Blackwell le fait
+   nativement) garderait l'essentiel de la vitesse en divisant l'erreur.
+4. **Ordonnancement par blocs, à la FlexGen** — pour un modèle plus grand que
+   la VRAM en mode débit : réutiliser chaque couche streamée sur tout le lot
+   avant de la remplacer. La machinerie de streaming existe ; c'est
+   l'ordonnanceur qui traite aujourd'hui séquence par séquence.
+5. **Chargement bi-lien, à la ZeRO-Inference** — les deux liens x8 sont
+   indépendants : pour l'étage hôte d'un très grand modèle, chaque carte peut
+   tirer sa moitié de couche (≈ 33 Go/s cumulés). *Sans* l'échange GPU↔GPU
+   final qui suit chez eux — ici il coûterait plus qu'il ne rapporte.
+6. **Brouillon spéculatif sur la carte secondaire** — nakshatra mesure ×2,3–2,7
+   sur silicium comparable ; `--speculative draft --draft-device cuda:1` existe
+   déjà, il manque le banc qui le prouve ici.
+
+Ce qui ne se transpose **pas** : le placement pair-à-pair de Petals (fait pour
+un essaim, pas deux cartes), le KV 4 bits de FlexGen (mesuré ici : INT8 par
+(jeton, tête) bat le FP8, et 4 bits dégraderait), l'échange inter-GPU de
+ZeRO-Inference (lien plus lent que la RAM).
