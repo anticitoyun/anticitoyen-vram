@@ -76,7 +76,17 @@ class GraphRunner:
             return False                     # pipeline multi-appareils : eager
         for mod in m.modules():
             if isinstance(mod, MoEBlock):
-                return False                 # routage dependant des donnees
+                # Le chemin groupé est à formes fixes : le routage ne varie
+                # que par le contenu du tenseur d'indices, pas par les formes.
+                # Les piles doivent exister avant la capture — les construire
+                # pendant remplacerait des adresses que le graphe a retenues.
+                if mod._stack_state == "?":
+                    dev = next(iter({l.device for l in m.layers}))
+                    if dev.type == "cuda":
+                        mod._stack_state = ("oui" if mod._try_build_stacks()
+                                            else "non")
+                if mod._stack_state != "oui":
+                    return False             # pile heterogene : eager
             if isinstance(mod, QuantLinear) and mod.streamed is not None:
                 return False                 # les adresses changent en vol
         if len(m.caches) != len(m.layers):

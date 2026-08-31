@@ -451,6 +451,169 @@ __global__ void int8_gemv_kernel(
     }
 }
 
+// -------------------------------------------------------------------------
+// GEMV groupés : une passe pour tous les experts actifs d'une couche MoE.
+//
+// Les poids des E experts d'une projection sont empilés en un tenseur
+// contigu ; chaque tranche z de la grille traite une paire (jeton, expert
+// actif) : `expert_ids[z]` choisit la matrice, `token_ids[z]` la ligne
+// d'activation. Une couche MoE coûte ainsi trois lancements au lieu de
+// trois par expert actif — la boucle Python par expert lançait un millier
+// de petits noyaux par jeton décodé.
+// -------------------------------------------------------------------------
+
+template <int ROWS>
+__global__ void nvfp4_gemv_grouped_kernel(
+    const unsigned char *__restrict__ qw,     // [E, M, K/2] empile
+    const unsigned char *__restrict__ bscale, // [E, M, K/16]
+    const float *__restrict__ gscales,        // [E]
+    const int *__restrict__ expert_ids,       // [G]
+    const int *__restrict__ token_ids,        // [G]
+    const float *__restrict__ x,              // [T, K]
+    float *__restrict__ y,                    // [G, M]
+    int M, int K, int k_splits) {
+    extern __shared__ float smem[];
+    const int nwarps = (blockDim.x + WARP - 1) / WARP;
+    const int row0 = blockIdx.x * ROWS;
+    if (row0 >= M) return;
+    const int g = blockIdx.z;
+    const int e = expert_ids[g];
+    const long half_k = (long)K >> 1;
+    const int nloads = K / WEIGHTS_PER_LOAD;
+    const unsigned char *qe = qw + (long)e * M * half_k;
+    const unsigned char *be = bscale + (long)e * M * nloads;
+    const float gscale = gscales[e];
+    const float *xn = x + (long)token_ids[g] * K;
+    const int split = blockIdx.y;
+
+    float acc[ROWS];
+    #pragma unroll
+    for (int r = 0; r < ROWS; ++r) acc[r] = 0.f;
+
+    const int npairs = nloads >> 1;
+    const int per_split_p = (npairs + k_splits - 1) / k_splits;
+    const int lo_p = split * per_split_p;
+    const int hi_p = min(npairs, lo_p + per_split_p);
+    for (int i = lo_p + threadIdx.x; i < hi_p; i += blockDim.x) {
+        float xs[2 * WEIGHTS_PER_LOAD];
+        const float4 *x4 = reinterpret_cast<const float4 *>(
+            xn + (long)i * 2 * WEIGHTS_PER_LOAD);
+        #pragma unroll
+        for (int c = 0; c < 2 * WEIGHTS_PER_LOAD / 4; ++c) {
+            const float4 v = x4[c];
+            xs[c * 4 + 0] = v.x; xs[c * 4 + 1] = v.y;
+            xs[c * 4 + 2] = v.z; xs[c * 4 + 3] = v.w;
+        }
+        #pragma unroll
+        for (int r = 0; r < ROWS; ++r) {
+            const int row = row0 + r;
+            if (row >= M) continue;
+            const uint4 p4 = reinterpret_cast<const uint4 *>(
+                qe + (long)row * half_k)[i];
+            const float s0 = e4m3_to_float(be[(long)row * nloads + 2 * i])
+                             * gscale;
+            const float s1 = e4m3_to_float(be[(long)row * nloads + 2 * i + 1])
+                             * gscale;
+            const unsigned int words[4] = {p4.x, p4.y, p4.z, p4.w};
+            float part0 = 0.f, part1 = 0.f;
+            #pragma unroll
+            for (int b = 0; b < 8; ++b) {
+                const unsigned int w0 = words[b >> 2];
+                const float2 v0 = e2m1_pair((w0 >> ((b & 3) * 8)) & 0xFFu);
+                part0 += v0.x * xs[2 * b] + v0.y * xs[2 * b + 1];
+                const unsigned int w1 = words[2 + (b >> 2)];
+                const float2 v1 = e2m1_pair((w1 >> ((b & 3) * 8)) & 0xFFu);
+                part1 += v1.x * xs[WEIGHTS_PER_LOAD + 2 * b]
+                       + v1.y * xs[WEIGHTS_PER_LOAD + 2 * b + 1];
+            }
+            acc[r] += part0 * s0 + part1 * s1;
+        }
+    }
+
+    block_reduce_rows<ROWS>(acc, smem, nwarps);
+    if (threadIdx.x == 0) {
+        #pragma unroll
+        for (int r = 0; r < ROWS; ++r) {
+            const int row = row0 + r;
+            if (row >= M) continue;
+            if (k_splits == 1) y[(long)g * M + row] = acc[r];
+            else atomicAdd(&y[(long)g * M + row], acc[r]);
+        }
+    }
+}
+
+template <int ROWS>
+__global__ void int4_gemv_grouped_kernel(
+    const unsigned char *__restrict__ qw,     // [E, M, K/2]
+    const __half *__restrict__ scales,        // [E, M, ng]
+    const unsigned char *__restrict__ zeros,  // [E, M, zb]
+    const int *__restrict__ expert_ids,
+    const int *__restrict__ token_ids,
+    const float *__restrict__ x,
+    float *__restrict__ y,
+    int M, int K, int group, int k_splits) {
+    extern __shared__ float smem[];
+    const int nwarps = (blockDim.x + WARP - 1) / WARP;
+    const int row0 = blockIdx.x * ROWS;
+    if (row0 >= M) return;
+    const int g = blockIdx.z;
+    const int e = expert_ids[g];
+    const int nloads = K / WEIGHTS_PER_LOAD;
+    const int ng = K / group;
+    const int zbytes = (ng + 1) >> 1;
+    const long half_k = (long)K >> 1;
+    const unsigned char *qe = qw + (long)e * M * half_k;
+    const __half *se = scales + (long)e * M * ng;
+    const unsigned char *ze = zeros + (long)e * M * zbytes;
+    const float *xn = x + (long)token_ids[g] * K;
+    const int split = blockIdx.y;
+    const int per_split = (nloads + k_splits - 1) / k_splits;
+    const int lo = split * per_split;
+    const int hi = min(nloads, lo + per_split);
+
+    float acc[ROWS];
+    #pragma unroll
+    for (int r = 0; r < ROWS; ++r) acc[r] = 0.f;
+
+    for (int i = lo + threadIdx.x; i < hi; i += blockDim.x) {
+        float xs[WEIGHTS_PER_LOAD];
+        const float4 *x4 = reinterpret_cast<const float4 *>(
+            xn + (long)i * WEIGHTS_PER_LOAD);
+        #pragma unroll
+        for (int c = 0; c < WEIGHTS_PER_LOAD / 4; ++c) {
+            const float4 v = x4[c];
+            xs[c * 4 + 0] = v.x; xs[c * 4 + 1] = v.y;
+            xs[c * 4 + 2] = v.z; xs[c * 4 + 3] = v.w;
+        }
+        const int gq = (i * WEIGHTS_PER_LOAD) / group;
+        #pragma unroll
+        for (int r = 0; r < ROWS; ++r) {
+            const int row = row0 + r;
+            if (row >= M) continue;
+            const uint2 p = reinterpret_cast<const uint2 *>(
+                qe + (long)row * half_k)[i];
+            const float sc = __half2float(se[(long)row * ng + gq]);
+            const float z = group_zero(ze + (long)row * zbytes, gq);
+            float part = 0.f;
+            #pragma unroll
+            for (int j = 0; j < WEIGHTS_PER_LOAD; ++j)
+                part += (static_cast<float>(nibble(p, j)) - z) * xs[j];
+            acc[r] += part * sc;
+        }
+    }
+
+    block_reduce_rows<ROWS>(acc, smem, nwarps);
+    if (threadIdx.x == 0) {
+        #pragma unroll
+        for (int r = 0; r < ROWS; ++r) {
+            const int row = row0 + r;
+            if (row >= M) continue;
+            if (k_splits == 1) y[(long)g * M + row] = acc[r];
+            else atomicAdd(&y[(long)g * M + row], acc[r]);
+        }
+    }
+}
+
 int threads_for(int K) {
     const int nloads = K / WEIGHTS_PER_LOAD;
     int t = 256;
@@ -684,6 +847,62 @@ torch::Tensor int8_gemv(torch::Tensor qweight, torch::Tensor scales,
     return x.dim() == 1 ? out.squeeze(0) : out;
 }
 
+torch::Tensor nvfp4_gemv_grouped(torch::Tensor qw, torch::Tensor bscale,
+                                 torch::Tensor gscales,
+                                 torch::Tensor expert_ids,
+                                 torch::Tensor token_ids,
+                                 torch::Tensor x, int64_t K) {
+    CHECK_CUDA(qw); CHECK_CUDA(x);
+    ACVRAM_DEVICE_GUARD(qw);
+    CHECK_CONTIG(qw); CHECK_CONTIG(bscale); CHECK_CONTIG(x);
+    TORCH_CHECK(K % 32 == 0, "le chemin groupe exige K divisible par 32");
+    const int M = qw.size(1);
+    const int G = expert_ids.size(0);
+    auto xc = x.to(torch::kFloat).contiguous();
+    const int threads = threads_for_pairs((int)K);
+    const int nwarps = (threads + 31) / 32;
+    // G tranches occupent deja la grille : pas de decoupage en profondeur.
+    auto out = torch::empty({G, M}, xc.options());
+    dim3 grid((M + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK, 1, G);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    nvfp4_gemv_grouped_kernel<ROWS_PER_BLOCK>
+        <<<grid, threads, ROWS_PER_BLOCK * nwarps * sizeof(float), stream>>>(
+            qw.data_ptr<unsigned char>(), bscale.data_ptr<unsigned char>(),
+            gscales.data_ptr<float>(), expert_ids.data_ptr<int>(),
+            token_ids.data_ptr<int>(), xc.data_ptr<float>(),
+            out.data_ptr<float>(), M, (int)K, 1);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
+torch::Tensor int4_gemv_grouped(torch::Tensor qw, torch::Tensor scales,
+                                torch::Tensor zeros,
+                                torch::Tensor expert_ids,
+                                torch::Tensor token_ids,
+                                torch::Tensor x, int64_t K, int64_t group) {
+    CHECK_CUDA(qw); CHECK_CUDA(x);
+    ACVRAM_DEVICE_GUARD(qw);
+    CHECK_CONTIG(qw); CHECK_CONTIG(scales); CHECK_CONTIG(zeros);
+    TORCH_CHECK(K % group == 0, "K doit etre divisible par la taille de groupe");
+    const int M = qw.size(1);
+    const int G = expert_ids.size(0);
+    auto xc = x.to(torch::kFloat).contiguous();
+    const int threads = threads_for((int)K);
+    const int nwarps = (threads + 31) / 32;
+    auto out = torch::empty({G, M}, xc.options());
+    dim3 grid((M + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK, 1, G);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    int4_gemv_grouped_kernel<ROWS_PER_BLOCK>
+        <<<grid, threads, ROWS_PER_BLOCK * nwarps * sizeof(float), stream>>>(
+            qw.data_ptr<unsigned char>(),
+            reinterpret_cast<const __half *>(scales.data_ptr()),
+            zeros.data_ptr<unsigned char>(), expert_ids.data_ptr<int>(),
+            token_ids.data_ptr<int>(), xc.data_ptr<float>(),
+            out.data_ptr<float>(), M, (int)K, (int)group, 1);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("nvfp4_dequant", &nvfp4_dequant, "NVFP4 -> matrice dense");
     m.def("nvfp4_gemv", &nvfp4_gemv, "NVFP4 : dequantification + produit fusionnes");
@@ -691,4 +910,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("int4_gemv", &int4_gemv, "INT4 : dequantification + produit fusionnes");
     m.def("int8_dequant", &int8_dequant, "INT8 affine par groupes -> matrice dense");
     m.def("int8_gemv", &int8_gemv, "INT8 : dequantification + produit fusionnes");
+    m.def("nvfp4_gemv_grouped", &nvfp4_gemv_grouped,
+          "NVFP4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
+    m.def("int4_gemv_grouped", &int4_gemv_grouped,
+          "INT4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
 }

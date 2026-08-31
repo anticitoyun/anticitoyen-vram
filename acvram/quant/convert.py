@@ -348,7 +348,13 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         # Précision mixte : un tenseur qui tombe sous le plancher mérite plus
         # de bits. Plafonné, pour qu'une exécution mal calibrée ne puisse pas
         # regonfler discrètement tout le modèle à 8 bits.
-        if (opts.mixed_precision != "off"
+        # Les experts d'un bloc doivent partager leur format : le chemin de
+        # decodage groupe lit leurs poids comme une pile homogene, et un
+        # expert promu isolement la briserait. Leur SNR individuel pese aussi
+        # moins : chaque expert ne voit qu'une fraction des jetons.
+        est_expert = ".mlp.experts." in name
+        if (not est_expert
+                and opts.mixed_precision != "off"
                 and metrics["out_snr_db"] < opts.snr_floor
                 and fmt in PROMOTE
                 and len(report.promotions) < opts.max_promotions * max(1, len(keys) + 1)):

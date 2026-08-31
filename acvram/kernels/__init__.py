@@ -411,3 +411,33 @@ for _dev in ("cuda", "cpu"):
         matmul=_ref_matmul,
         dequant=lambda w, dt: _dequantize_ref(w, dt),
         note="PyTorch pur ; lent, numeriquement identique, ferme la liste"))
+
+
+# --------------------------------------------------------------------------
+# GEMV groupés MoE — les poids des experts empilés, un lancement par projection
+# --------------------------------------------------------------------------
+
+
+def nvfp4_gemv_grouped(x: torch.Tensor, qw: torch.Tensor, bscale: torch.Tensor,
+                       gscales: torch.Tensor, expert_ids: torch.Tensor,
+                       token_ids: torch.Tensor, k: int) -> Optional[torch.Tensor]:
+    ext = get_extension()
+    if ext is None or k % 32 != 0:
+        return None
+    if x.shape[-1] != k:
+        x = torch.nn.functional.pad(x, (0, k - x.shape[-1]))
+    return ext.nvfp4_gemv_grouped(qw, bscale, gscales, expert_ids, token_ids,
+                                  x.contiguous(), k)
+
+
+def int4_gemv_grouped(x: torch.Tensor, qw: torch.Tensor, scales: torch.Tensor,
+                      zeros: torch.Tensor, expert_ids: torch.Tensor,
+                      token_ids: torch.Tensor, k: int,
+                      group_size: int) -> Optional[torch.Tensor]:
+    ext = get_extension()
+    if ext is None:
+        return None
+    if x.shape[-1] != k:
+        x = torch.nn.functional.pad(x, (0, k - x.shape[-1]))
+    return ext.int4_gemv_grouped(qw, scales, zeros, expert_ids, token_ids,
+                                 x.contiguous(), k, group_size)

@@ -276,6 +276,86 @@ class MoEBlock(nn.Module):
         self.top_k = top_k
         self.shared = shared
         self.norm_topk_prob = norm_topk_prob
+        self._stack_state = "?"                # ? | oui | non
+        self._stacks = None
+
+    # ------------------------------------------------------------------
+    # Pile d'experts pour le chemin groupé. Les qweight/échelles de tous les
+    # experts d'une projection sont recopiés dans un tenseur [E, ...] contigu,
+    # puis chaque expert reçoit une *vue* de la pile — la mémoire n'est pas
+    # doublée, et la boucle par expert du prefill continue de marcher.
+    # ------------------------------------------------------------------
+    def _try_build_stacks(self) -> bool:
+        from ..quant.int4 import INT4Tensor
+        from ..quant.nvfp4 import NVFP4Tensor
+
+        def one(projs):
+            ws = [p.qweight for p in projs]
+            if any(p.streamed is not None for p in projs):
+                return None
+            if any(p.scaler is not None and not p.scaler.is_identity
+                   for p in projs):
+                return None                    # échelle AWQ par expert : repli
+            if all(isinstance(w, NVFP4Tensor) for w in ws):
+                if len({(w.shape, w.padded_in) for w in ws}) != 1:
+                    return None
+                qw = torch.stack([w.qweight for w in ws]).contiguous()
+                bs = torch.stack([w.block_scale.view(torch.uint8)
+                                  for w in ws]).contiguous()
+                gs = torch.tensor([w.global_scale_float() for w in ws],
+                                  dtype=torch.float32, device=qw.device)
+                for e, w in enumerate(ws):     # vues : une seule mémoire
+                    w.qweight = qw[e]
+                    w.block_scale = bs[e].view(torch.float8_e4m3fn)
+                return ("nvfp4", qw, bs, gs, ws[0].padded_in, ws[0].shape[0])
+            if all(isinstance(w, INT4Tensor) for w in ws):
+                if len({(w.shape, w.padded_in, w.group_size) for w in ws}) != 1:
+                    return None
+                qw = torch.stack([w.qweight for w in ws]).contiguous()
+                sc = torch.stack([w.scales for w in ws]).contiguous()
+                zr = torch.stack([w.zeros for w in ws]).contiguous()
+                for e, w in enumerate(ws):
+                    w.qweight, w.scales, w.zeros = qw[e], sc[e], zr[e]
+                return ("int4", qw, sc, zr, ws[0].padded_in,
+                        ws[0].group_size, ws[0].shape[0])
+            return None
+
+        piles = {}
+        for nom in ("gate_proj", "up_proj", "down_proj"):
+            pile = one([getattr(e, nom) for e in self.experts])
+            if pile is None:
+                return False
+            piles[nom] = pile
+        self._stacks = piles
+        return True
+
+    def _grouped(self, x32: torch.Tensor, pile, expert_ids, token_ids):
+        from .. import kernels
+        if pile[0] == "nvfp4":
+            _, qw, bs, gs, k, m = pile
+            return kernels.nvfp4_gemv_grouped(x32, qw, bs, gs, expert_ids,
+                                              token_ids, k)[:, :m]
+        _, qw, sc, zr, k, gsz, m = pile
+        return kernels.int4_gemv_grouped(x32, qw, sc, zr, expert_ids,
+                                         token_ids, k, gsz)[:, :m]
+
+    def _forward_grouped(self, x, topw, topi):
+        t = x.shape[0]
+        eid = topi.reshape(-1).to(torch.int32)
+        tok = torch.arange(t, device=x.device,
+                           dtype=torch.int32).repeat_interleave(self.top_k)
+        x32 = x.to(torch.float32)
+        g = self._grouped(x32, self._stacks["gate_proj"], eid, tok)
+        u = self._grouped(x32, self._stacks["up_proj"], eid, tok)
+        act = F.silu(g) * u                     # [G, I] fp32
+        seq = torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
+        d = self._grouped(act, self._stacks["down_proj"], eid, seq)
+        d = d * topw.reshape(-1, 1).to(d.dtype)
+        # Chaque jeton possède exactement top_k lignes contiguës : une somme
+        # sur cet axe remplace l'index_add_ atomique — déterministe, plus
+        # rapide, et rejouable dans un graphe CUDA sans écart d'un rejeu à
+        # l'autre.
+        return d.view(t, self.top_k, -1).sum(dim=1).to(x.dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         t, h = x.shape
@@ -285,6 +365,19 @@ class MoEBlock(nn.Module):
         if self.norm_topk_prob:
             topw = topw / topw.sum(dim=-1, keepdim=True)
         topw = topw.to(x.dtype)
+
+        # Chemin groupé : trois lancements pour toute la couche, quel que soit
+        # le nombre d'experts touchés. La boucle par expert reste le chemin des
+        # grands lots de prefill (le regroupement par expert y redevient
+        # rentable) et le repli des piles hétérogènes.
+        if x.is_cuda and t <= 8 and self._stack_state != "non":
+            if self._stack_state == "?":
+                self._stack_state = "oui" if self._try_build_stacks() else "non"
+            if self._stack_state == "oui":
+                y = self._forward_grouped(x, topw, topi)
+                if self.shared is not None:
+                    y = y + self.shared(x)
+                return y
 
         out = torch.zeros_like(x)
         # On regroupe les jetons par expert, pour que chaque expert fasse un
