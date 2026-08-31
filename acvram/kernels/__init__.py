@@ -385,8 +385,13 @@ _bk.register(_bk.Backend(
 _bk.register(_bk.Backend(
     name="fp4-tensorcores", formats=("nvfp4",), device_type="cuda",
     priority=110, available=_sm100_ok,
+    # La garde par capacité est répétée ici : un échec réel dans
+    # nvfp4_mm_tensorcore éteint son chemin globalement, et il ne faut pas
+    # qu'un appel parti sur une carte sans FP4 le fasse pour toutes.
     matmul=lambda x, w: (nvfp4_mm_tensorcore(x, w)
-                         if x.reshape(-1, x.shape[-1]).shape[0] > 8 else None),
+                         if (x.reshape(-1, x.shape[-1]).shape[0] > 8
+                             and torch.cuda.get_device_capability(x.device)
+                             >= (10, 0)) else None),
     note="prefill W4A4 via torch._scaled_mm, sm_100+"))
 
 _bk.register(_bk.Backend(

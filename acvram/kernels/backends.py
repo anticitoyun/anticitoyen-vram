@@ -50,7 +50,10 @@ def resolve(fmt: str, device: torch.device) -> list[Backend]:
     """Les backends candidats pour ce format sur ce périphérique, les plus
     prioritaires d'abord. Mémoïsé — la disponibilité d'une machine ne change
     pas en cours d'exécution."""
-    key = (fmt, device.type)
+    # Par périphérique précis, pas par type : deux cartes CUDA de générations
+    # différentes n'ont pas les mêmes capacités (la 3080 Ti n'a pas de tensor
+    # cores FP4, la 5090 si).
+    key = (fmt, str(device))
     got = _RESOLVED.get(key)
     if got is None:
         got = sorted((b for b in _REGISTRY

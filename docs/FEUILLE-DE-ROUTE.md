@@ -241,3 +241,25 @@ Chantiers de débit relevés par la campagne, par ordre de valeur :
   remplissage, plongement) — les 21 ms attribuées à l'embedding par cProfile
   étaient l'attente GPU imputée au mauvais site. Le pas est GPU-borné.
 * **Paquet Debian** : `tools/construire-deb.sh` → `acvram_0.3.0_amd64.deb`.
+
+## Banc uniforme du 1er septembre (200 jetons, greedy, graphes chauds)
+
+| modèle | source | jetons/s | premier passage |
+|---|---|---|---|
+| Qwen3-0.6B | GGUF Q8_0 | **67** | 45 |
+| Qwen2.5-Coder-3B | safetensors+AWQ | **57** | 16 |
+| Qwen3B-pipeline (5090+3080 Ti) | safetensors | **37** | — |
+| Qwen3-4B | GGUF Q4_K_M | **49** | 32 |
+| Nemo-12B-Claude | safetensors+AWQ | **32** | 28 |
+| Qwen3-14B | safetensors+AWQ | **30** | 9,5 |
+| Cydonia-24B | EXL3 6 bpw | **28** | 16 |
+| Qwen3-Coder-30B-A3B (MoE 128 exp.) | EXL3 4 bpw | **24** | 7-8 |
+
+Les trois modèles « kimi » locaux restent refusés à la conversion (hybrides
+SSM/DeltaNet), message explicite vérifié sur les trois.
+
+L'amorce du paquet .deb a été exécutée de bout en bout hors dpkg (arbre
+extrait, ACVRAM_HOME isolé) : venv, torch cu130, nvcc des roues, doctor
+complet. Elle a révélé et fait corriger la résolution des backends par *type*
+de périphérique — la 3080 Ti héritait du chemin FP4 de la 5090, et un échec
+FP4 sur elle aurait éteint le chemin pour les deux cartes.
