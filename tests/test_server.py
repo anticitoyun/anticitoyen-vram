@@ -118,3 +118,21 @@ def test_embeddings_honour_dimensions(client):
 def test_kv_blocks_are_returned_after_traffic(client):
     metrics = client.get("/metrics").json()["engine"]
     assert metrics["kv_blocks_free"] == metrics["kv_blocks_total"]
+
+
+def test_trim_at_stop():
+    """La séquence d'arrêt est exclue de la sortie, comme l'API s'y engage."""
+    from acvram.engine.runner import _trim_at_stop
+
+    # le stop tombe dans le delta courant
+    texte, coupe = _trim_at_stop("1, 2, 3, 4, 5, 6, 7", ", 6, 7", ["7"])
+    assert coupe and texte == ", 6, "
+    # le stop commence avant le delta courant : rien à livrer de plus
+    texte, coupe = _trim_at_stop("abcSTOPdef", "def", ["STOP"])
+    assert coupe and texte == ""
+    # pas de stop : delta intact
+    texte, coupe = _trim_at_stop("abcdef", "def", ["ZZZ"])
+    assert not coupe and texte == "def"
+    # plusieurs stops : le plus précoce gagne
+    texte, coupe = _trim_at_stop("aXbYc", "aXbYc", ["Y", "X"])
+    assert coupe and texte == "a"

@@ -203,3 +203,26 @@ journée). Huit lignes par bloc ont été essayées et retirées : la pression d
 registres l'emporte, mesuré plus lent partout. Le prochain palier du décodage
 n'est plus le GEMV : à 31,6 jetons/s, le pas se partage entre ~8 ms de GEMV,
 l'attention, le cache KV et ~10 ms de Python autour du graphe.
+
+## Campagne de validation du 1er septembre — tout ce qui tourne, tout ce qui ne tourne pas
+
+Testé sur machine, modèle par modèle, fonctionnalité par fonctionnalité :
+
+| quoi | verdict |
+|---|---|
+| API (12 points : routes, flux SSE, stop, sampling, concurrence ×4, cache de préfixe ×6, usage, embeddings) | ✔ 12/12 après deux correctifs (stop exclu de la sortie ; deltas SSE sans null) |
+| safetensors + AWQ (Qwen3-14B, **Nemo-12B-Claude** 28 j/s) | ✔ |
+| GGUF Q8_0 / Q4_K_M (Qwen3-0.6B, 4B) | ✔ |
+| EXL3 dense (Cydonia-24B) et **MoE** (Qwen3-Coder-30B-A3B, 128 experts) | ✔ — première exécution réelle du chemin MoE |
+| **Pipeline hétérogène** --gpus all : NVFP4 sur 5090 + INT4 sur 3080 Ti, un seul modèle | ✔ — première exécution réelle du concept fondateur |
+| eval (perplexité), ngram, --fp16, --device cuda:1 | ✔ |
+| Modèles « kimi » locaux (kimi-linear, qwen35, qwen35moe) | ✘ hybrides SSM/DeltaNet : refus **explicite** à la conversion — les convertir produisait du charabia silencieux |
+| GGUF en fragments multiples | ✘ refus explicite (llama-gguf-split --merge) |
+
+Chantiers de débit relevés par la campagne, par ordre de valeur :
+1. **GEMM groupé MoE** : 7-8 j/s seulement sur 3B actifs — la boucle Python
+   par expert lance ~1150 petits GEMV par jeton, et le MoE est inéligible aux
+   graphes CUDA.
+2. **Noyau d'attention paginée fusionné** (int8 → attention sans
+   matérialisation bf16) — décisif au long contexte.
+3. Profil de la 3080 Ti en NVFP4 (9 j/s sur le 3B, anormalement bas).
