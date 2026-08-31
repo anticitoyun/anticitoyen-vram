@@ -180,3 +180,26 @@ ZeRO-Inference (lien plus lent que la RAM).
 * **Coffre de jetons** : `~/.config/acvram/jetons-acvram.sh` — JSON
   {projet: jeton} chiffré AES-256 (gpg symétrique), `ajouter/projets/jeton`,
   et `git-credential-acvram` le sert à git pour outils.nuages.noho.st.
+
+## GEMV NVFP4 optimisé pour Blackwell (1er septembre 2026)
+
+Le goulot n'était pas le schéma mémoire mais le décodage : la table `kE2M1` en
+mémoire `__constant__`, indexée par les bits de chaque poids, se sérialise dès
+que les fils d'un warp lisent des entrées différentes — c'est-à-dire toujours.
+Remplacée par la conversion FP4→half2 *native* de Blackwell
+(`__nv_cvt_fp4x2_to_halfraw2`, un octet = deux poids, émulée sans accès mémoire
+sur les architectures plus anciennes), plus des fils dimensionnés sur les
+paires de blocs que la boucle consomme réellement.
+
+| forme | avant | après | part du pic (1792 Go/s) |
+|---|---|---|---|
+| 4096×4096 | 390 Go/s | 786 Go/s | 44 % |
+| 14336×4096 | 480 Go/s | 1155 Go/s | **64 %** |
+| 5120×5120 | 445 Go/s | 852 Go/s | 48 % |
+| lm_head 151936×5120 | 528 Go/s | 1031 Go/s | 58 % |
+
+Qwen3-14B de bout en bout : 27,3 → **31,6 jetons/s** (9,5 au début de la
+journée). Huit lignes par bloc ont été essayées et retirées : la pression de
+registres l'emporte, mesuré plus lent partout. Le prochain palier du décodage
+n'est plus le GEMV : à 31,6 jetons/s, le pas se partage entre ~8 ms de GEMV,
+l'attention, le cache KV et ~10 ms de Python autour du graphe.

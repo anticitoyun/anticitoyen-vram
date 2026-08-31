@@ -46,6 +46,7 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
+#include <cuda_fp4.h>
 
 namespace {
 
@@ -75,6 +76,18 @@ from_float<__nv_bfloat16>(float x) { return __float2bfloat16(x); }
 __device__ __forceinline__ unsigned int nibble(const uint2 &p, int j) {
     const unsigned int w = (j < 8) ? p.x : p.y;
     return (w >> ((j & 7) * 4)) & 0xFu;
+}
+
+// Un octet contient deux poids E2M1 ; Blackwell les convertit en half2 en
+// une instruction. Sur les architectures sans elle, l'intrinseque retombe sur
+// une emulation arithmetique — dans les deux cas, aucun acces memoire : la
+// table en __constant__ qu'elle remplace se serialisait des que les fils d'un
+// warp lisaient des entrees differentes, c'est-a-dire toujours.
+__device__ __forceinline__ float2 e2m1_pair(unsigned char byte) {
+    const __half2_raw h2 = __nv_cvt_fp4x2_to_halfraw2(
+        static_cast<__nv_fp4x2_storage_t>(byte), __NV_E2M1);
+    const __half2 hv = *reinterpret_cast<const __half2 *>(&h2);
+    return __half22float2(hv);
 }
 
 __device__ __forceinline__ float warp_reduce(float v) {
@@ -194,18 +207,17 @@ __global__ void nvfp4_gemv_kernel(
                                  * gscale;
                 const float s1 = e4m3_to_float(bscale[(long)row * nloads + 2 * i + 1])
                                  * gscale;
-                const uint2 lo16 = make_uint2(p4.x, p4.y);
-                const uint2 hi16 = make_uint2(p4.z, p4.w);
+                const unsigned int words[4] = {p4.x, p4.y, p4.z, p4.w};
                 float part0 = 0.f, part1 = 0.f;
                 #pragma unroll
-                for (int j = 0; j < WEIGHTS_PER_LOAD; ++j) {
-                    const unsigned int c0 = nibble(lo16, j);
-                    const float v0 = kE2M1[c0 & 7u];
-                    part0 += (c0 & 8u) ? -v0 * xs[j] : v0 * xs[j];
-                    const unsigned int c1 = nibble(hi16, j);
-                    const float v1 = kE2M1[c1 & 7u];
-                    part1 += (c1 & 8u) ? -v1 * xs[WEIGHTS_PER_LOAD + j]
-                                       : v1 * xs[WEIGHTS_PER_LOAD + j];
+                for (int b = 0; b < 8; ++b) {
+                    const unsigned int w0 = words[b >> 2];
+                    const float2 v0 = e2m1_pair((w0 >> ((b & 3) * 8)) & 0xFFu);
+                    part0 += v0.x * xs[2 * b] + v0.y * xs[2 * b + 1];
+                    const unsigned int w1 = words[2 + (b >> 2)];
+                    const float2 v1 = e2m1_pair((w1 >> ((b & 3) * 8)) & 0xFFu);
+                    part1 += v1.x * xs[WEIGHTS_PER_LOAD + 2 * b]
+                           + v1.y * xs[WEIGHTS_PER_LOAD + 2 * b + 1];
                 }
                 acc[r] += part0 * s0 + part1 * s1;
             }
@@ -446,6 +458,16 @@ int threads_for(int K) {
     return t;
 }
 
+// Le GEMV NVFP4 marche par paires de blocs (32 poids) : moitié moins
+// d'iterations que de blocs. Dimensionner ses fils sur les blocs simples en
+// laissait 96 sur 256 sans travail pour K = 5120.
+int threads_for_pairs(int K) {
+    const int npairs = K / (2 * WEIGHTS_PER_LOAD);
+    int t = 256;
+    while (t > 64 && t > npairs) t >>= 1;
+    return t;
+}
+
 // Assez de blocs pour occuper la carte, sans découper quand c'est inutile.
 int splits_for(int M, int K, int device) {
     cudaDeviceProp prop{};
@@ -517,13 +539,16 @@ torch::Tensor nvfp4_gemv(torch::Tensor qweight, torch::Tensor block_scale,
     xc = xc.to(torch::kFloat).contiguous();
     const int M = qweight.size(0);
     const int N = xc.size(0);
-    const int threads = threads_for(K);
+    const int threads = threads_for_pairs(K);
     const int nwarps = (threads + 31) / 32;
     const int splits = splits_for(M, (int)K, (int)qweight.get_device());
     auto out = splits == 1 ? torch::empty({N, M}, xc.options())
                            : torch::zeros({N, M}, xc.options());
-    dim3 grid((M + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK, splits);
     auto stream = at::cuda::getCurrentCUDAStream();
+    // Huit lignes par bloc ont ete essayees pour reutiliser davantage la
+    // tranche d'activation : la pression de registres l'emporte, mesure plus
+    // lent sur toutes les formes. Quatre lignes restent l'optimum ici.
+    dim3 grid((M + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK, splits);
     nvfp4_gemv_kernel<ROWS_PER_BLOCK>
         <<<grid, threads, ROWS_PER_BLOCK * nwarps * sizeof(float), stream>>>(
             qweight.data_ptr<unsigned char>(),
