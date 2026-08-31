@@ -23,10 +23,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..memory.kvcache import PagedKVCache
+from ..memory.kvcache import PagedKVCache, bucket_blocks
 from .config import ModelSpec
 from .layers import (QuantLinear, RMSNorm, RotaryEmbedding, apply_rope,
-                     attention, batched_decode_attention, repeat_kv)
+                     attention, batched_decode_attention,
+                     decode_attention_fixed, repeat_kv)
 
 __all__ = ["Attention", "MLP", "MoEBlock", "DecoderLayer", "ACVRamModel",
            "ForwardBatch"]
@@ -64,6 +65,28 @@ class ForwardBatch:
         if t is None:
             t = cache[device] = self.positions.to(device, non_blocking=True)
         return t
+
+    def fixed_decode_views(self, device: torch.device
+                           ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Table de blocs complétée au godet et longueurs, en tenseurs.
+
+        C'est la forme sous laquelle le décodage pur consomme le lot — la même
+        pour le chemin eager et pour le graphe CUDA, précisément pour que le
+        second reproduise le premier au bit près. Mémorisé par périphérique,
+        comme les index d'étape.
+        """
+        cache = self.__dict__.setdefault("_fixed_cache", {})
+        got = cache.get(device)
+        if got is None:
+            n = bucket_blocks(max(t.shape[0] for t in self.block_tables))
+            tables = torch.zeros(len(self.block_tables), n, dtype=torch.long)
+            for i, t in enumerate(self.block_tables):
+                tables[i, : t.shape[0]] = t
+            got = cache[device] = (
+                tables.to(device, non_blocking=True),
+                torch.tensor(self.seq_lens, dtype=torch.long).to(
+                    device, non_blocking=True))
+        return got
 
     def slots_on(self, device: torch.device) -> torch.Tensor:
         cache = self.__dict__.setdefault("_slot_cache", {})
@@ -133,6 +156,33 @@ class Attention(nn.Module):
             return self._decode(q, k, v, batch, cache, t)
         return self._prefill(q, k, v, batch, cache, t)
 
+    def decode_fixed(self, x: torch.Tensor, positions: torch.Tensor,
+                     slots: torch.Tensor, block_tables: torch.Tensor,
+                     seq_lens: torch.Tensor, max_pos: int,
+                     cache: PagedKVCache) -> torch.Tensor:
+        """Le pas de décodage à formes fixes — le chemin que capture le graphe.
+
+        Même mathématique que ``forward`` en décodage, mais aucun scalaire
+        Python tiré des données : positions, emplacements, tables et longueurs
+        sont des tenseurs dont seul le *contenu* change entre deux rejeux.
+        ``max_pos`` majore les positions (la longueur maximale du godet) : il ne
+        sert qu'à garantir que le cache RoPE est déjà assez grand.
+        """
+        b = x.shape[0]
+        q = self.q_proj(x).view(b, self.n_heads, self.head_dim)
+        k = self.k_proj(x).view(b, self.n_kv_heads, self.head_dim)
+        v = self.v_proj(x).view(b, self.n_kv_heads, self.head_dim)
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+        if self.k_norm is not None:
+            k = self.k_norm(k)
+        cos, sin = self.rope(positions, x.device, x.dtype, max_pos=max_pos)
+        q, k = apply_rope(q, k, cos, sin)
+        cache.write(slots, k, v)
+        kk, vv = cache.gather_fixed(block_tables, q.dtype)
+        out = decode_attention_fixed(q, kk, vv, seq_lens, self.n_rep, self.scale)
+        return self.o_proj(out.reshape(b, self.n_heads * self.head_dim))
+
     def _prefill(self, q, k, v, batch: ForwardBatch,
                  cache: Optional[PagedKVCache], t: int) -> torch.Tensor:
         out = torch.empty_like(q)
@@ -165,17 +215,22 @@ class Attention(nn.Module):
         if cache is None:
             return self._prefill(q, k, v, batch, cache, t)
 
+        if all(ql == 1 for ql in batch.query_lens):
+            # Décodage pur : le chemin à formes fixes, celui-là même que le
+            # graphe CUDA capture — un seul gather vectorisé, pas de boucle
+            # Python, et une sortie identique au bit près entre eager et rejeu.
+            tables, lens = batch.fixed_decode_views(q.device)
+            kk, vv = cache.gather_fixed(tables, q.dtype)
+            out = decode_attention_fixed(q, kk, vv, lens, self.n_rep,
+                                         self.scale)
+            return self.o_proj(out.reshape(t, self.n_heads * self.head_dim))
+
         keys, values = [], []
         for i in range(batch.batch_size):
             kk, vv = cache.gather(batch.block_tables[i].to(q.device),
                                   batch.seq_lens[i], q.dtype)
             keys.append(kk)
             values.append(vv)
-
-        if all(ql == 1 for ql in batch.query_lens):
-            out = batched_decode_attention(q, keys, values, self.n_rep, self.scale)
-            out = out.reshape(t, self.n_heads * self.head_dim)
-            return self.o_proj(out)
 
         # Vérification spéculative : plusieurs positions de requête par
         # séquence, chacune attendant sur son propre préfixe. Toujours causal,
@@ -281,6 +336,15 @@ class DecoderLayer(nn.Module):
             y = self.mlp(h)
         return x + y
 
+    def decode_fixed(self, x: torch.Tensor, positions: torch.Tensor,
+                     slots: torch.Tensor, block_tables: torch.Tensor,
+                     seq_lens: torch.Tensor, max_pos: int,
+                     cache: PagedKVCache) -> torch.Tensor:
+        x = x + self.self_attn.decode_fixed(self.input_layernorm(x), positions,
+                                            slots, block_tables, seq_lens,
+                                            max_pos, cache)
+        return x + self.mlp(self.post_attention_layernorm(x))
+
     def prefetch(self) -> None:
         for m in self.modules():
             if isinstance(m, QuantLinear) and m.streamed is not None:
@@ -343,6 +407,21 @@ class ACVRamModel(nn.Module):
         head_dev = getattr(self.lm_head.qweight, "qweight", None)
         target = head_dev.device if head_dev is not None else x.device
         return self.lm_head(x.to(target))
+
+    def decode_fixed(self, x: torch.Tensor, positions: torch.Tensor,
+                     slots: torch.Tensor, block_tables: torch.Tensor,
+                     seq_lens: torch.Tensor, max_pos: int) -> torch.Tensor:
+        """Logits d'un pas de décodage pur, à formes fixes.
+
+        Le plongement est déjà fait — ``x`` est l'état caché d'entrée sur le
+        périphérique des couches : l'indexation de la table de plongement vit
+        hors du graphe, sur l'appareil où elle réside.
+        """
+        for i, layer in enumerate(self.layers):
+            x = layer.decode_fixed(x, positions, slots, block_tables,
+                                   seq_lens, max_pos, self.caches[i])
+        x = self.norm(x)
+        return self.lm_head(x)
 
     @property
     def nbytes(self) -> int:

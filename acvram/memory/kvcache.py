@@ -33,6 +33,19 @@ __all__ = ["KVCacheConfig", "PagedKVCache", "BlockAllocator"]
 BLOCK_SIZE = 16
 
 
+def bucket_blocks(n: int) -> int:
+    """Arrondit un nombre de blocs au godet supérieur (puissances de deux).
+
+    Le chemin de décodage à formes fixes — eager comme graphe CUDA — travaille
+    sur ces godets : les deux doivent employer la même formule, c'est elle qui
+    rend leurs sorties identiques au bit près.
+    """
+    b = 8
+    while b < n:
+        b <<= 1
+    return b
+
+
 class BlockAllocator:
     """Liste de blocs libres, avec réutilisation adressée par le contenu.
 
@@ -319,6 +332,30 @@ class PagedKVCache:
             ks, vs = ks[:length], vs[:length]
         return (self._dequantize(k[:length], ks, dtype),
                 self._dequantize(v[:length], vs, dtype))
+
+    def gather_fixed(self, block_tables: torch.Tensor,
+                     dtype: torch.dtype = torch.float16
+                     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Relit tout un lot d'un coup, à forme fixe : ``[lot, N×bloc, têtes, dim]``.
+
+        Contrairement à ``gather``, aucune longueur Python n'intervient : la
+        table est déjà complétée à ``N`` blocs par l'appelant, et c'est à lui de
+        masquer les positions au-delà de la vraie longueur. C'est ce qui rend ce
+        chemin capturable dans un graphe CUDA — chaque forme, chaque adresse est
+        connue à la capture.
+        """
+        b, n = block_tables.shape
+        k = self.k[block_tables]          # [b, n, bs, hkv, d]
+        v = self.v[block_tables]
+        k = k.reshape(b, n * self.cfg.block_size, self.cfg.num_kv_heads,
+                      self.cfg.head_dim)
+        v = v.reshape(b, n * self.cfg.block_size, self.cfg.num_kv_heads,
+                      self.cfg.head_dim)
+        ks = vs = None
+        if self.k_scale is not None:
+            ks = self.k_scale[block_tables].reshape(b, -1, self.cfg.num_kv_heads)
+            vs = self.v_scale[block_tables].reshape(b, -1, self.cfg.num_kv_heads)
+        return (self._dequantize(k, ks, dtype), self._dequantize(v, vs, dtype))
 
     @property
     def nbytes(self) -> int:

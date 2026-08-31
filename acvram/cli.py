@@ -345,7 +345,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
     engine = Engine(loaded, tokenizer, max_batch_size=args.max_batch,
                     max_model_len=args.max_model_len,
                     enable_prefix_cache=not args.no_prefix_cache,
-                    speculator=speculator, spec_k=args.spec_k)
+                    speculator=speculator, spec_k=args.spec_k,
+                    enable_cuda_graphs=not args.no_cuda_graphs)
+    if engine.graphs is not None:
+        print("  graphes CUDA : actifs (decodage)")
     print(f"  charge en {time.time() - t0:.1f} s, "
           f"{_h(loaded.model.nbytes)} de poids")
     print(f"  blocs KV : {engine.allocator.num_blocks} "
@@ -507,6 +510,9 @@ def build_parser() -> argparse.ArgumentParser:
                                            "(par defaut : le GPU le plus oisif)")
     sv.add_argument("--spec-k", type=int, default=4,
                     help="jetons proposes par etape")
+    sv.add_argument("--no-cuda-graphs", action="store_true",
+                    help="rejoue chaque pas de decodage en eager plutot qu'en "
+                         "graphe CUDA capture")
     sv.add_argument("--no-prefix-cache", action="store_true",
                     help="desactive la reutilisation du KV entre requetes")
     sv.set_defaults(func=cmd_serve)

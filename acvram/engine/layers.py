@@ -371,6 +371,27 @@ def batched_decode_attention(q: torch.Tensor, keys: list[torch.Tensor],
     return out.squeeze(2)                                     # [b, hq, d]
 
 
+def decode_attention_fixed(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                           seq_lens: torch.Tensor, n_rep: int,
+                           scale: float) -> torch.Tensor:
+    """Attention de décodage à formes fixes, pour la capture en graphe CUDA.
+
+    ``q`` vaut ``[lot, têtes, dim]`` (un jeton par séquence), ``k``/``v``
+    ``[lot, S, têtes_kv, dim]`` avec ``S`` fixé par le godet de capture, et
+    ``seq_lens`` est un tenseur — jamais une liste Python : la frontière vit
+    sur le GPU, seul le masque en dépend.
+    """
+    b, s = k.shape[0], k.shape[1]
+    kh = repeat_kv_batched(k, n_rep).permute(0, 2, 1, 3)      # [b, hq, S, d]
+    vh = repeat_kv_batched(v, n_rep).permute(0, 2, 1, 3)
+    mask = (torch.arange(s, device=q.device)[None, :]
+            < seq_lens[:, None]).view(b, 1, 1, s)
+    out = F.scaled_dot_product_attention(
+        q.unsqueeze(2), kh, vh,
+        attn_mask=mask, scale=scale)                          # [b, hq, 1, d]
+    return out.squeeze(2)                                     # [b, hq, d]
+
+
 def repeat_kv_batched(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     """``[lot, s, têtes_kv, d]`` -> ``[lot, s, têtes_kv × n_rep, d]``."""
     if n_rep == 1:

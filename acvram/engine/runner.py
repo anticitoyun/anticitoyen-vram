@@ -138,7 +138,8 @@ class Engine:
     def __init__(self, loaded: LoadedModel, tokenizer: Any = None,
                  max_batch_size: int = 16, max_model_len: int = 8192,
                  enable_prefix_cache: bool = True,
-                 speculator: Any = None, spec_k: int = 4) -> None:
+                 speculator: Any = None, spec_k: int = 4,
+                 enable_cuda_graphs: bool = True) -> None:
         self.loaded = loaded
         self.model = loaded.model
         self.spec = loaded.spec
@@ -156,6 +157,11 @@ class Engine:
         self.stats = EngineStats(kv_blocks_total=n_blocks)
         self._lock = threading.Lock()
         self._eos = self._eos_ids()
+        self.graphs = None
+        if enable_cuda_graphs:
+            from .graphs import GraphRunner
+            gr = GraphRunner(self.model, max_model_len)
+            self.graphs = gr if gr.enabled else None
 
     # -- admission -------------------------------------------------------
     def _eos_ids(self) -> set[int]:
@@ -351,7 +357,9 @@ class Engine:
         if not decodable:
             return []
         batch = self._build_batch(decodable, prefill=False)
-        logits = self.model(batch)
+        logits = self.graphs.run(batch) if self.graphs is not None else None
+        if logits is None:
+            logits = self.model(batch)
         self.stats.decode_tokens += len(decodable)
         return self._emit(logits, decodable)
 
