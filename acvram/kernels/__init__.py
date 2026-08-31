@@ -29,7 +29,7 @@ from .cpu import (cpu_build_info, cpu_kernels_available, int4_matmul_cpu,
                   nvfp4_matmul_cpu)
 from .fp4_gemm import fp4_mm_available, fp4_mm_info, nvfp4_mm_tensorcore
 
-__all__ = ["get_extension", "kernels_available", "build_info",
+__all__ = ["get_extension", "kernels_available", "build_info", "matmul",
            "nvfp4_dequant", "nvfp4_matmul", "int4_dequant", "int4_matmul",
            "int8_dequant", "int8_matmul",
            "cpu_kernels_available", "cpu_build_info",
@@ -345,3 +345,69 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
 
     w = int8_dequant(t, x.dtype if x.dtype != torch.float32 else torch.float16)
     return torch.nn.functional.linear(x, w.to(x.dtype))
+
+
+# --------------------------------------------------------------------------
+# Enregistrement des backends livrés — voir backends.py pour le contrat.
+# --------------------------------------------------------------------------
+
+from . import backends as _bk
+from ..quant.formats import PlainTensor, dequantize as _dequantize_ref
+
+matmul = _bk.matmul                      # le point d'entrée du moteur
+
+
+def _cuda_ok(dev: torch.device) -> bool:
+    return get_extension() is not None
+
+
+def _sm100_ok(dev: torch.device) -> bool:
+    return (fp4_mm_available()
+            and torch.cuda.get_device_capability(dev) >= (10, 0))
+
+
+def _gemv_or_none(fn):
+    """Adapte les wrappers historiques : ils font déjà seuils et replis."""
+    def call(x, w):
+        return fn(x, w)
+    return call
+
+
+_bk.register(_bk.Backend(
+    name="cuda-fusionne", formats=("nvfp4", "int4_awq", "int8"),
+    device_type="cuda", priority=100, available=_cuda_ok,
+    matmul=lambda x, w: {"nvfp4": nvfp4_matmul, "int4_awq": int4_matmul,
+                         "int8": int8_matmul}[w.format](x, w),
+    dequant=lambda w, dt: {"nvfp4": nvfp4_dequant, "int4_awq": int4_dequant,
+                           "int8": int8_dequant}[w.format](w, dt),
+    note="dequantification + GEMV fusionnes, acvram_kernels.cu"))
+
+_bk.register(_bk.Backend(
+    name="fp4-tensorcores", formats=("nvfp4",), device_type="cuda",
+    priority=110, available=_sm100_ok,
+    matmul=lambda x, w: (nvfp4_mm_tensorcore(x, w)
+                         if x.reshape(-1, x.shape[-1]).shape[0] > 8 else None),
+    note="prefill W4A4 via torch._scaled_mm, sm_100+"))
+
+_bk.register(_bk.Backend(
+    name="cpu-avx2", formats=("nvfp4", "int4_awq"), device_type="cpu",
+    priority=50, available=lambda d: cpu_kernels_available(),
+    matmul=lambda x, w: {"nvfp4": nvfp4_matmul_cpu,
+                         "int4_awq": int4_matmul_cpu}[w.format](x, w),
+    note="GEMV C, AVX2 + repli scalaire, ABI ctypes"))
+
+
+def _ref_matmul(x, w):
+    if isinstance(w, PlainTensor):
+        return torch.nn.functional.linear(x, w.weight.to(x.dtype))
+    return torch.nn.functional.linear(x, _dequantize_ref(w, x.dtype))
+
+
+for _dev in ("cuda", "cpu"):
+    _bk.register(_bk.Backend(
+        name=f"reference-{_dev}",
+        formats=("nvfp4", "int4_awq", "int8", "bf16", "fp16", "plain"),
+        device_type=_dev, priority=0, available=lambda d: True,
+        matmul=_ref_matmul,
+        dequant=lambda w, dt: _dequantize_ref(w, dt),
+        note="PyTorch pur ; lent, numeriquement identique, ferme la liste"))

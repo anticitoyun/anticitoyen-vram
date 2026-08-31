@@ -188,6 +188,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"        le prefill retombe sur dequantification + cuBLAS ; le "
               f"decodage n'est pas affecte")
 
+    from .kernels import backends as bk
+    print(f"  {green('ok')}    backends retenus par (format, peripherique) :")
+    for row in bk.table():
+        print(f"           {row['device']:<8} {row['format']:<9} -> "
+              f"{' > '.join(row['backends'])}")
+
     for mod in ("safetensors", "fastapi", "uvicorn", "tokenizers", "jinja2"):
         try:
             __import__(mod)
@@ -271,7 +277,11 @@ def cmd_convert(args: argparse.Namespace) -> int:
     # mise à l'échelle qui n'a jamais eu lieu.
     stats = None
     use_awq = not args.no_awq
+    from .quant.exl3 import is_exl3
     from .quant.gguf import is_gguf
+    if use_awq and is_exl3(args.model):
+        print(yellow("  source EXL3 : arrondi au plus proche, sans AWQ"))
+        use_awq = False
     if use_awq and is_gguf(args.model):
         # Le collecteur de statistiques lit des safetensors ; et re-calibrer des
         # poids deja quantifies par llama.cpp apporterait peu de toute facon.

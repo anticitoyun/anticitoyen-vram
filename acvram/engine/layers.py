@@ -139,17 +139,9 @@ class QuantLinear(nn.Module):
         if self.scaler is not None and not self.scaler.is_identity:
             x = self.scaler.apply(x)
         w = self._resolved_weight()
-        fmt = getattr(w, "format", None)
-        if fmt == "nvfp4":
-            y = kernels.nvfp4_matmul(x, w)
-        elif fmt == "int4_awq":
-            y = kernels.int4_matmul(x, w)
-        elif fmt == "int8":
-            y = kernels.int8_matmul(x, w)
-        elif isinstance(w, PlainTensor):
-            y = F.linear(x, w.weight.to(x.dtype))
-        else:
-            y = F.linear(x, dequantize(w, x.dtype))
+        # Le registre choisit le backend par (format, peripherique) ; voir
+        # kernels/backends.py. Un acces de dictionnaire memoise, rien de plus.
+        y = kernels.matmul(x, w)
         if self.bias is not None:
             y = y + self.bias.to(y.dtype)
         return y

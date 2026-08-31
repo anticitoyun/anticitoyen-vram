@@ -163,3 +163,20 @@ ZeRO-Inference (lien plus lent que la RAM).
 * **EXL3** : format identifié (treillis QTIP, Hadamard signés, codebook MCG) ;
   décodeur à écrire avec exllamav3 installé comme oracle — sans oracle, un
   décodeur faux produit du charabia silencieux.
+
+## Ajouts du 31 août, nuit
+
+* **Source EXL3** : `acvram convert` lit les modèles exllamav3 en déléguant la
+  reconstruction du treillis QTIP à `exllamav3` (dépendance optionnelle, de
+  conversion seulement — le converti n'en dépend plus). Vérifié :
+  Cydonia-24B 6 bpw → NVFP4, servi, 16 jetons/s. L'extension d'exllamav3 se
+  compile avec le nvcc des roues pip, même détour que nos noyaux.
+* **Registre de backends** (`kernels/backends.py`) : l'abstraction demandée —
+  `(format, périphérique) → [backends par priorité]`, repli en cascade jusqu'à
+  la référence PyTorch. Quatre backends livrés : cuda-fusionné (sm_86+),
+  fp4-tensorcores (sm_100+), cpu-avx2, référence. `acvram doctor` affiche la
+  table retenue. En ajouter un (CUTLASS, cuBLASLt, AVX-512) est un
+  `register()` — le moteur n'y touche pas. Débit inchangé (dispatch mémoïsé).
+* **Coffre de jetons** : `~/.config/acvram/jetons-acvram.sh` — JSON
+  {projet: jeton} chiffré AES-256 (gpg symétrique), `ajouter/projets/jeton`,
+  et `git-credential-acvram` le sert à git pour outils.nuages.noho.st.

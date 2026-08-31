@@ -221,6 +221,11 @@ def _iter_checkpoint(path: str) -> Iterator[tuple[str, torch.Tensor]]:
         yield from GGUFFile(path).iter_tensors()
         return
 
+    from .exl3 import EXL3Checkpoint, is_exl3
+    if is_exl3(path):
+        yield from EXL3Checkpoint(path).iter_tensors()
+        return
+
     index_path = os.path.join(path, "model.safetensors.index.json")
     if os.path.isfile(index_path):
         with open(index_path, "r", encoding="utf-8") as fh:
@@ -393,6 +398,9 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         from .gguf import GGUFFile, is_gguf
         if is_gguf(model_path) and not opts.dry_run:
             GGUFFile(model_path).export_sidecars(opts.out_dir)
+        from .exl3 import EXL3Checkpoint, is_exl3
+        if is_exl3(model_path) and not opts.dry_run:
+            EXL3Checkpoint(model_path).export_sidecars(opts.out_dir)
         report.out_bytes = writer.total_bytes
     else:
         report.out_bytes = sum(report.per_format.values())
