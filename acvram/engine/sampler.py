@@ -68,8 +68,20 @@ def sample(logits: torch.Tensor, params: list[SamplingParams],
            ) -> tuple[torch.Tensor, torch.Tensor]:
     """Rend ``(identifiants, logprobs des choisis)`` pour un tenseur ``[lot, vocabulaire]``."""
     logits = logits.to(torch.float32).clone()
-    if history is not None:
+    if history is not None and any(p.repetition_penalty != 1.0
+                                   or p.presence_penalty
+                                   or p.frequency_penalty for p in params):
         logits = _apply_penalties(logits, history, params)
+
+    # Tout le lot en glouton, sans penalite : un argmax suffit. Le chemin
+    # general fait un tri, deux softmax et un tirage multinomial sur tout le
+    # vocabulaire — plusieurs millisecondes par pas que le decodage a
+    # temperature nulle payait pour rien.
+    if all(p.greedy for p in params):
+        tokens = logits.argmax(dim=-1)
+        logprobs = torch.log_softmax(logits, dim=-1).gather(
+            1, tokens.unsqueeze(-1)).squeeze(-1)
+        return tokens, logprobs
 
     temps = torch.tensor([max(p.temperature, 1e-5) for p in params],
                          device=logits.device).unsqueeze(-1)

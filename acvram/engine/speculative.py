@@ -289,7 +289,11 @@ def verify_proposal(logits: torch.Tensor, proposal: Proposal,
         if proposal.probs is None:
             residual[x] = 0.0
         else:
-            residual = torch.clamp(p - proposal.probs[i].to(p.dtype), min=0.0)
+            # Le brouillon peut vivre sur une autre carte que la cible : ses
+            # probabilites arrivent sur son peripherique a lui.
+            residual = torch.clamp(
+                p - proposal.probs[i].to(device=p.device, dtype=p.dtype),
+                min=0.0)
         total = float(residual.sum())
         if total <= 0:
             residual = p.clone()

@@ -213,8 +213,13 @@ def _resolve_quant_device(choice: str) -> torch.device:
 
 
 def _iter_checkpoint(path: str) -> Iterator[tuple[str, torch.Tensor]]:
-    """Lit les tenseurs d'un point de contrôle safetensors sans le charger en entier."""
+    """Lit les tenseurs d'un point de contrôle safetensors ou GGUF."""
     from safetensors import safe_open
+
+    from .gguf import GGUFFile, is_gguf
+    if is_gguf(path):
+        yield from GGUFFile(path).iter_tensors()
+        return
 
     index_path = os.path.join(path, "model.safetensors.index.json")
     if os.path.isfile(index_path):
@@ -385,6 +390,9 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                   encoding="utf-8") as fh:
             json.dump(manifest, fh, indent=2)
         _copy_tokenizer(model_path, opts.out_dir)
+        from .gguf import GGUFFile, is_gguf
+        if is_gguf(model_path) and not opts.dry_run:
+            GGUFFile(model_path).export_sidecars(opts.out_dir)
         report.out_bytes = writer.total_bytes
     else:
         report.out_bytes = sum(report.per_format.values())

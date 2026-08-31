@@ -193,8 +193,16 @@ def _as_id_list(v: Any) -> list[int]:
 def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
     """Lit un répertoire de modèle Hugging Face, ou un simple ``config.json``."""
     cfg_path = path if path.endswith(".json") else os.path.join(path, "config.json")
-    with open(cfg_path, "r", encoding="utf-8") as fh:
-        cfg: dict[str, Any] = json.load(fh)
+    if not path.endswith(".json") and not os.path.isfile(cfg_path):
+        # Un point de contrôle GGUF porte sa configuration dans son en-tête.
+        from ..quant.gguf import GGUFFile, is_gguf
+        if is_gguf(path):
+            cfg = GGUFFile(path).hf_config()
+        else:
+            raise FileNotFoundError(f"ni config.json ni .gguf sous {path}")
+    else:
+        with open(cfg_path, "r", encoding="utf-8") as fh:
+            cfg = json.load(fh)
 
     # Certaines configurations imbriquent le modèle de langage (modèles visuels).
     if "text_config" in cfg and "hidden_size" not in cfg:
@@ -203,8 +211,9 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
     # generation_config.json fait autorite sur les jetons d'arret : Qwen y
     # declare <|im_end|>, absent du eos_token_id de config.json sur certains
     # points de controle.
-    gen_path = os.path.join(os.path.dirname(os.path.abspath(cfg_path)),
-                            "generation_config.json")
+    gen_path = (os.path.join(os.path.dirname(os.path.abspath(cfg_path)),
+                             "generation_config.json")
+                if os.path.isfile(cfg_path) else "")
     if os.path.isfile(gen_path):
         try:
             with open(gen_path, "r", encoding="utf-8") as fh:

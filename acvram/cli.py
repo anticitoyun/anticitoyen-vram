@@ -239,6 +239,16 @@ def cmd_convert(args: argparse.Namespace) -> int:
 
     rig = detect_rig(args.profile)
     spec = load_model_spec(args.model, args.name)
+    if not args.out:
+        base = os.environ.get("ACVRAM_MODELS_DIR")
+        if not base and os.path.isdir("/mnt/4TO_SATACMR_2022/Modeles"):
+            base = "/mnt/4TO_SATACMR_2022/Modeles/models_acvram"
+        if not base:
+            print(red("aucun repertoire de sortie : passez -o, ou posez "
+                      "ACVRAM_MODELS_DIR"))
+            return 2
+        args.out = os.path.join(base, spec.name.replace("/", "--"))
+        print(f"  sortie : {args.out}")
     plan, _ = auto_plan(spec, rig, PlannerOptions(
         max_model_len=args.max_model_len, max_concurrent_seqs=args.max_seqs,
         group_size=args.group_size, force_format=args.format, gpus=args.gpus,
@@ -261,6 +271,12 @@ def cmd_convert(args: argparse.Namespace) -> int:
     # mise à l'échelle qui n'a jamais eu lieu.
     stats = None
     use_awq = not args.no_awq
+    from .quant.gguf import is_gguf
+    if use_awq and is_gguf(args.model):
+        # Le collecteur de statistiques lit des safetensors ; et re-calibrer des
+        # poids deja quantifies par llama.cpp apporterait peu de toute facon.
+        print(yellow("  source GGUF : arrondi au plus proche, sans AWQ"))
+        use_awq = False
     if use_awq:
         from .quant.collect import collect_activation_stats, load_calib_ids
         from .server.chat import load_tokenizer
@@ -272,7 +288,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
                   f"({sum(len(c) for c in calib)} jetons) ...")
 
             def cprog(done: int, total: int) -> None:
-                _progress(f"  calibrating layer {done}/{total}")
+                _progress(f"  calibration couche {done}/{total}")
 
             stats = collect_activation_stats(
                 args.model, spec, calib, device=args.calib_device,
@@ -462,7 +478,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     cv = sub.add_parser("convert", help="quantifie un point de controle en fragments acvram")
     add_plan_args(cv)
-    cv.add_argument("-o", "--out", required=True, help="repertoire de sortie")
+    cv.add_argument("-o", "--out",
+                    help="repertoire de sortie (defaut : "
+                         "$ACVRAM_MODELS_DIR/<nom> ou "
+                         "/mnt/4TO_SATACMR_2022/Modeles/models_acvram/<nom> "
+                         "si ce volume existe)")
     cv.add_argument("--no-awq", action="store_true",
                     help="simple arrondi au plus proche, sans mise a l'echelle AWQ")
     cv.add_argument("--hadamard", choices=["auto", "always", "never"],

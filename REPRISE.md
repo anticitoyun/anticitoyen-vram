@@ -30,8 +30,12 @@ a été conservée.
 
 ## 2. État actuel
 
-* Version **0.2.0**.
-* **67 tests**, tous sur processeur, déterministes, environ une minute.
+* Version **0.3.0**.
+* **81 tests** ; la base tourne sur processeur, les graphes CUDA et les
+  noyaux exigent la machine cible.
+* Sur la machine cible depuis le 31 août : noyaux compilés (sm_120 + sm_86),
+  graphes CUDA au décodage, sources GGUF, Qwen3-14B servi à 27 jetons/s.
+  Modèles convertis sous /mnt/4TO_SATACMR_2022/Modeles/models_acvram/.
 * Le dépôt est sur `https://outils.nuages.noho.st/gitlab/anticitoyen/anticitoyen-vram`
   (privé).
 * Développé sur un portable i5-3230M / GT 740M / pilote 470 : **aucun code CUDA

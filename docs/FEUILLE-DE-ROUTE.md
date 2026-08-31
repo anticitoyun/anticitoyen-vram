@@ -140,3 +140,26 @@ Ce qui ne se transpose **pas** : le placement pair-à-pair de Petals (fait pour
 un essaim, pas deux cartes), le KV 4 bits de FlexGen (mesuré ici : INT8 par
 (jeton, tête) bat le FP8, et 4 bits dégraderait), l'échange inter-GPU de
 ZeRO-Inference (lien plus lent que la RAM).
+
+## Version 0.3.0 (31 août 2026, soir)
+
+* **Graphes CUDA sur le pas de décodage** : capture par godet (lot, blocs KV),
+  logits identiques au bit près à l'eager — le chemin fixe est partagé.
+  Qwen3-14B : 22,3 → 27,3 jetons/s.
+* **Source GGUF** : `acvram convert` lit les .gguf de llama.cpp
+  (F32/F16/BF16, Q4_0/1, Q5_0/1, Q8_0, Q4_K, Q5_K, Q6_K, IQ4_XS) et
+  reconstruit config, tokenizer BPE et jetons d'arrêt depuis l'en-tête.
+  Vérifié de bout en bout sur Qwen3-0.6B-Q8_0 et Qwen3-4B-Q4_K_M.
+  Style SentencePiece non reconstruit : passer --tokenizer.
+* **Rangement** : les modèles convertis vont par défaut sous
+  `/mnt/4TO_SATACMR_2022/Modeles/models_acvram/` (ou `$ACVRAM_MODELS_DIR`).
+* **Sampler** : raccourci glouton (argmax direct quand tout le lot est à
+  température nulle, pénalités éteintes).
+* **Mesuré et tranché** : le brouillon spéculatif 0.6B (cuda:1) devant le 14B
+  fait *chuter* le débit (27,3 → 14–18 jetons/s) : la vérification
+  (query_lens > 1) est inéligible aux graphes et repasse par l'eager. Rendre
+  la spéculation graph-compatible est le prérequis avant de la recommander ;
+  le bug de périphérique des probabilités du brouillon est corrigé au passage.
+* **EXL3** : format identifié (treillis QTIP, Hadamard signés, codebook MCG) ;
+  décodeur à écrire avec exllamav3 installé comme oracle — sans oracle, un
+  décodeur faux produit du charabia silencieux.
