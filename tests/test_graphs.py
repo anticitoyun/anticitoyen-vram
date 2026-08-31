@@ -95,3 +95,39 @@ def test_graph_end_to_end_finishes(converted):
             for t in o.token_ids]
     assert len(outs) == 12
     assert e.graphs.replays >= 10
+
+
+@needs_cuda
+def test_paged_attention_matches_reference(converted):
+    """Le noyau d'attention paginée reproduit le chemin déquantifier-puis-SDPA."""
+    from acvram import kernels
+    from acvram.engine.layers import decode_attention_fixed
+
+    loaded = load_model(converted, dtype=torch.bfloat16,
+                        device_override="cuda:0")
+    e = Engine(loaded, None, max_batch_size=2, max_model_len=256,
+               enable_cuda_graphs=False)
+    e.add_request(list(range(1, 40)), SamplingParams(temperature=0.0,
+                                                     max_tokens=4))
+    e.step()
+    cache = loaded.model.caches[0]
+    if cache.k_scale is None:
+        pytest.skip("cache non quantifie")
+    dec = [s for s in e.running if not s.finished]
+    for s in dec:
+        e._grow(s)
+    batch = e._build_batch(dec, prefill=False)
+    tables, lens = batch.fixed_decode_views(torch.device("cuda:0"))
+    hq = loaded.spec.num_attention_heads
+    hd = loaded.spec.head_dim
+    torch.manual_seed(0)
+    q = torch.randn(len(dec), hq, hd, device="cuda:0")
+    n_rep = hq // loaded.spec.num_key_value_heads
+
+    fusionne = kernels.paged_attention(q, cache, tables, lens, n_rep,
+                                       hd ** -0.5)
+    assert fusionne is not None, "noyau pagine indisponible"
+    kk, vv = cache.gather_fixed(tables, torch.float32)
+    reference = decode_attention_fixed(q, kk, vv, lens, n_rep, hd ** -0.5)
+    err = (fusionne - reference).abs().max().item()
+    assert err < 5e-3, f"attention paginee : ecart {err:.2e} avec la reference"

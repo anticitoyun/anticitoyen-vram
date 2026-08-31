@@ -441,3 +441,28 @@ def int4_gemv_grouped(x: torch.Tensor, qw: torch.Tensor, scales: torch.Tensor,
         x = torch.nn.functional.pad(x, (0, k - x.shape[-1]))
     return ext.int4_gemv_grouped(qw, scales, zeros, expert_ids, token_ids,
                                  x.contiguous(), k, group_size)
+
+
+def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
+                    seq_lens: torch.Tensor, n_rep: int,
+                    scale: float) -> Optional[torch.Tensor]:
+    """Attention de décodage fusionnée sur le cache paginé INT8, ou None.
+
+    Conditions : extension compilée, cache quantifié en int8, dimension de
+    tête instanciée (64/128/256). Le repli — déquantifier puis SDPA — reste
+    numériquement la référence ; un test les compare.
+    """
+    if os.environ.get("ACVRAM_DISABLE_PAGED_ATTN"):
+        return None
+    ext = get_extension()
+    if ext is None or not q.is_cuda:
+        return None
+    if cache.k_scale is None or cache.cfg.dtype != "int8":
+        return None
+    d = q.shape[-1]
+    if d not in (32, 64, 128, 256):
+        return None
+    return ext.paged_attention(
+        q.to(torch.float32).contiguous(), cache.k, cache.k_scale,
+        cache.v, cache.v_scale, tables.contiguous(),
+        seq_lens.contiguous(), cache.cfg.num_kv_heads, float(scale))

@@ -226,3 +226,18 @@ Chantiers de débit relevés par la campagne, par ordre de valeur :
 2. **Noyau d'attention paginée fusionné** (int8 → attention sans
    matérialisation bf16) — décisif au long contexte.
 3. Profil de la 3080 Ti en NVFP4 (9 j/s sur le 3B, anormalement bas).
+
+## Attention paginée fusionnée + MoE groupé (1er septembre, suite)
+
+* **Noyau d'attention paginée** (`paged_attention`, flash-decoding en deux
+  noyaux) : le cache INT8 est lu une fois et déquantifié en registres — plus
+  de matérialisation bf16, plus de copie GQA. Formes fixées par le godet de
+  blocs, donc rejouable en graphe CUDA ; chemin unique eager/graphe, égalité
+  affirmée par les tests. **Contexte 7 000 : 15,4 → 39,6 jetons/s (×2,6)** ;
+  court contexte : 32. `ACVRAM_DISABLE_PAGED_ATTN=1` pour revenir au chemin
+  déquantifier-puis-SDPA (qui reste la référence des tests).
+* **MoE groupé sous graphes** : 7-8 → 17-19 jetons/s sur Qwen3-Coder-30B-A3B.
+* **Reliquat Python du pas** : mesuré à ~0,2 ms (construction du lot,
+  remplissage, plongement) — les 21 ms attribuées à l'embedding par cProfile
+  étaient l'attente GPU imputée au mauvais site. Le pas est GPU-borné.
+* **Paquet Debian** : `tools/construire-deb.sh` → `acvram_0.3.0_amd64.deb`.

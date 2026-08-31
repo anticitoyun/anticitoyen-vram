@@ -614,6 +614,163 @@ __global__ void int4_gemv_grouped_kernel(
     }
 }
 
+// -------------------------------------------------------------------------
+// Attention paginée fusionnée (décodage, un jeton par séquence).
+//
+// Le chemin PyTorch relisait le cache KV INT8, le matérialisait en bf16 puis
+// le redonnait à SDPA : plusieurs passes mémoire sur tout le contexte, à
+// chaque couche, à chaque jeton. Ici les blocs INT8 sont lus une fois,
+// déquantifiés en registres, et l'attention se calcule en ligne (softmax
+// incrémental, à la flash-decoding). Le contexte est découpé en tranches de
+// PA_CHUNK positions traitées par des blocs indépendants ; un second noyau
+// combine les tranches par log-somme-exp. Les formes ne dépendent que du
+// godet de blocs : le chemin se rejoue tel quel dans un graphe CUDA.
+// -------------------------------------------------------------------------
+
+constexpr int PA_CHUNK = 512;
+constexpr int PA_WARPS = 4;
+
+template <int D>
+__global__ void paged_attn_partial_kernel(
+    const float *__restrict__ q,          // [B, HQ, D]
+    const signed char *__restrict__ kc,   // [NB, 16, HKV, D]
+    const __half *__restrict__ ks,        // [NB, 16, HKV]
+    const signed char *__restrict__ vc,
+    const __half *__restrict__ vs,
+    const long *__restrict__ tables,      // [B, N]
+    const long *__restrict__ seq_lens,    // [B]
+    float *__restrict__ part,             // [B, HQ, C, D]  acc non normalisé
+    float *__restrict__ part_m,           // [B, HQ, C]
+    float *__restrict__ part_l,           // [B, HQ, C]
+    int HQ, int HKV, int N, int C, float scale) {
+    const int b = blockIdx.x;
+    const int h = blockIdx.y;
+    const int c = blockIdx.z;
+    const int hkv = h / (HQ / HKV);
+    const long slen = seq_lens[b];
+    const long start = (long)c * PA_CHUNK;
+    const long out_off = ((long)b * HQ + h) * C + c;
+
+    const int lane = threadIdx.x % WARP;
+    const int wid = threadIdx.x / WARP;
+    constexpr int PER_LANE = D / WARP;
+
+    if (start >= slen) {
+        if (threadIdx.x == 0) {
+            part_m[out_off] = -INFINITY;
+            part_l[out_off] = 0.f;
+        }
+        for (int d = threadIdx.x; d < D; d += blockDim.x)
+            part[out_off * D + d] = 0.f;
+        return;
+    }
+
+    __shared__ float sq[D];
+    __shared__ float sm[PA_WARPS], sl[PA_WARPS], scorr[PA_WARPS];
+    __shared__ float sacc[PA_WARPS][D];
+    for (int d = threadIdx.x; d < D; d += blockDim.x)
+        sq[d] = q[((long)b * HQ + h) * D + d] * scale;
+    __syncthreads();
+
+    float m = -INFINITY, l = 0.f;
+    float acc[PER_LANE];
+    #pragma unroll
+    for (int i = 0; i < PER_LANE; ++i) acc[i] = 0.f;
+
+    const long end = min(slen, start + (long)PA_CHUNK);
+    for (long t = start + wid; t < end; t += PA_WARPS) {
+        const long blk = tables[(long)b * N + (t >> 4)];
+        const long cell = (blk * 16 + (t & 15)) * HKV + hkv;
+        const signed char *kp = kc + cell * D;
+
+        float partial = 0.f;
+        #pragma unroll
+        for (int i = 0; i < PER_LANE; ++i)
+            partial += sq[lane * PER_LANE + i]
+                       * static_cast<float>(kp[lane * PER_LANE + i]);
+        #pragma unroll
+        for (int off = WARP / 2; off > 0; off >>= 1)
+            partial += __shfl_down_sync(0xffffffffu, partial, off);
+        const float score = __shfl_sync(0xffffffffu, partial, 0)
+                            * __half2float(ks[cell]);
+
+        const float m_new = fmaxf(m, score);
+        const float corr = __expf(m - m_new);
+        const float pr = __expf(score - m_new);
+        const signed char *vp = vc + cell * D;
+        const float pv = __half2float(vs[cell]) * pr;
+        #pragma unroll
+        for (int i = 0; i < PER_LANE; ++i)
+            acc[i] = acc[i] * corr
+                     + pv * static_cast<float>(vp[lane * PER_LANE + i]);
+        l = l * corr + pr;
+        m = m_new;
+    }
+
+    if (lane == 0) { sm[wid] = m; sl[wid] = l; }
+    #pragma unroll
+    for (int i = 0; i < PER_LANE; ++i)
+        sacc[wid][lane * PER_LANE + i] = acc[i];
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        float mg = -INFINITY;
+        #pragma unroll
+        for (int w = 0; w < PA_WARPS; ++w) mg = fmaxf(mg, sm[w]);
+        float lg = 0.f;
+        #pragma unroll
+        for (int w = 0; w < PA_WARPS; ++w) {
+            const float cw = (sm[w] > -INFINITY) ? __expf(sm[w] - mg) : 0.f;
+            scorr[w] = cw;
+            lg += sl[w] * cw;
+        }
+        part_m[out_off] = mg;
+        part_l[out_off] = lg;
+    }
+    __syncthreads();
+    for (int d = threadIdx.x; d < D; d += blockDim.x) {
+        float a = 0.f;
+        #pragma unroll
+        for (int w = 0; w < PA_WARPS; ++w) a += sacc[w][d] * scorr[w];
+        part[out_off * D + d] = a;
+    }
+}
+
+template <int D>
+__global__ void paged_attn_reduce_kernel(
+    const float *__restrict__ part,       // [B, HQ, C, D]
+    const float *__restrict__ part_m,
+    const float *__restrict__ part_l,
+    float *__restrict__ out,              // [B, HQ, D]
+    int HQ, int C) {
+    const int b = blockIdx.x;
+    const int h = blockIdx.y;
+    const long base = (long)b * HQ + h;
+    __shared__ float s_m, s_l;
+    __shared__ float s_corr[256];         // C <= 256 tranches (2 M de contexte)
+
+    if (threadIdx.x == 0) {
+        float mg = -INFINITY;
+        for (int c = 0; c < C; ++c) mg = fmaxf(mg, part_m[base * C + c]);
+        float lg = 0.f;
+        for (int c = 0; c < C; ++c) {
+            const float mc = part_m[base * C + c];
+            const float cw = (mc > -INFINITY) ? __expf(mc - mg) : 0.f;
+            s_corr[c] = cw;
+            lg += part_l[base * C + c] * cw;
+        }
+        s_m = mg;
+        s_l = fmaxf(lg, 1e-20f);
+    }
+    __syncthreads();
+    for (int d = threadIdx.x; d < D; d += blockDim.x) {
+        float a = 0.f;
+        for (int c = 0; c < C; ++c)
+            a += part[(base * C + c) * D + d] * s_corr[c];
+        out[base * D + d] = a / s_l;
+    }
+}
+
 int threads_for(int K) {
     const int nloads = K / WEIGHTS_PER_LOAD;
     int t = 256;
@@ -903,6 +1060,53 @@ torch::Tensor int4_gemv_grouped(torch::Tensor qw, torch::Tensor scales,
     return out;
 }
 
+torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
+                              torch::Tensor ks, torch::Tensor vc,
+                              torch::Tensor vs, torch::Tensor tables,
+                              torch::Tensor seq_lens, int64_t hkv,
+                              double scale) {
+    CHECK_CUDA(q); CHECK_CUDA(kc); CHECK_CUDA(tables);
+    ACVRAM_DEVICE_GUARD(q);
+    CHECK_CONTIG(q); CHECK_CONTIG(kc); CHECK_CONTIG(vc);
+    const int B = q.size(0);
+    const int HQ = q.size(1);
+    const int D = q.size(2);
+    const int N = tables.size(1);
+    TORCH_CHECK(D == 32 || D == 64 || D == 128 || D == 256,
+                "dimension de tete non instanciee : ", D);
+    const int C = (N * 16 + PA_CHUNK - 1) / PA_CHUNK;
+    TORCH_CHECK(C <= 256, "contexte au-dela de 256 tranches");
+    auto opts = q.options();
+    auto part = torch::empty({B, HQ, C, D}, opts);
+    auto pm = torch::empty({B, HQ, C}, opts);
+    auto pl = torch::empty({B, HQ, C}, opts);
+    auto out = torch::empty({B, HQ, D}, opts);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    dim3 g1(B, HQ, C), g2(B, HQ);
+    const int threads = PA_WARPS * WARP;
+
+    #define PA_LAUNCH(DD) \
+        paged_attn_partial_kernel<DD><<<g1, threads, 0, stream>>>( \
+            q.data_ptr<float>(), kc.data_ptr<signed char>(), \
+            reinterpret_cast<const __half *>(ks.data_ptr()), \
+            vc.data_ptr<signed char>(), \
+            reinterpret_cast<const __half *>(vs.data_ptr()), \
+            tables.data_ptr<long>(), seq_lens.data_ptr<long>(), \
+            part.data_ptr<float>(), pm.data_ptr<float>(), \
+            pl.data_ptr<float>(), HQ, (int)hkv, N, C, (float)scale); \
+        paged_attn_reduce_kernel<DD><<<g2, 128, 0, stream>>>( \
+            part.data_ptr<float>(), pm.data_ptr<float>(), \
+            pl.data_ptr<float>(), out.data_ptr<float>(), HQ, C)
+
+    if (D == 32) { PA_LAUNCH(32); }
+    else if (D == 64) { PA_LAUNCH(64); }
+    else if (D == 128) { PA_LAUNCH(128); }
+    else { PA_LAUNCH(256); }
+    #undef PA_LAUNCH
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("nvfp4_dequant", &nvfp4_dequant, "NVFP4 -> matrice dense");
     m.def("nvfp4_gemv", &nvfp4_gemv, "NVFP4 : dequantification + produit fusionnes");
@@ -914,4 +1118,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "NVFP4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
     m.def("int4_gemv_grouped", &int4_gemv_grouped,
           "INT4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
+    m.def("paged_attention", &paged_attention,
+          "attention de decodage fusionnee sur cache KV int8 pagine");
 }

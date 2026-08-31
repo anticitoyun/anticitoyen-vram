@@ -23,6 +23,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .. import kernels
 from ..memory.kvcache import PagedKVCache, bucket_blocks
 from .config import ModelSpec
 from .layers import (QuantLinear, RMSNorm, RotaryEmbedding, apply_rope,
@@ -179,8 +180,13 @@ class Attention(nn.Module):
         cos, sin = self.rope(positions, x.device, x.dtype, max_pos=max_pos)
         q, k = apply_rope(q, k, cos, sin)
         cache.write(slots, k, v)
-        kk, vv = cache.gather_fixed(block_tables, q.dtype)
-        out = decode_attention_fixed(q, kk, vv, seq_lens, self.n_rep, self.scale)
+        out = kernels.paged_attention(q, cache, block_tables, seq_lens,
+                                      self.n_rep, self.scale)
+        if out is None:                    # cache non int8, ou pas de noyau
+            kk, vv = cache.gather_fixed(block_tables, q.dtype)
+            out = decode_attention_fixed(q, kk, vv, seq_lens, self.n_rep,
+                                         self.scale)
+        out = out.to(x.dtype)
         return self.o_proj(out.reshape(b, self.n_heads * self.head_dim))
 
     def _prefill(self, q, k, v, batch: ForwardBatch,
@@ -220,9 +226,13 @@ class Attention(nn.Module):
             # graphe CUDA capture — un seul gather vectorisé, pas de boucle
             # Python, et une sortie identique au bit près entre eager et rejeu.
             tables, lens = batch.fixed_decode_views(q.device)
-            kk, vv = cache.gather_fixed(tables, q.dtype)
-            out = decode_attention_fixed(q, kk, vv, lens, self.n_rep,
-                                         self.scale)
+            out = kernels.paged_attention(q, cache, tables, lens,
+                                          self.n_rep, self.scale)
+            if out is None:                # cache non int8, ou pas de noyau
+                kk, vv = cache.gather_fixed(tables, q.dtype)
+                out = decode_attention_fixed(q, kk, vv, lens, self.n_rep,
+                                             self.scale)
+            out = out.to(q.dtype)
             return self.o_proj(out.reshape(t, self.n_heads * self.head_dim))
 
         keys, values = [], []
@@ -330,7 +340,6 @@ class MoEBlock(nn.Module):
         return True
 
     def _grouped(self, x32: torch.Tensor, pile, expert_ids, token_ids):
-        from .. import kernels
         if pile[0] == "nvfp4":
             _, qw, bs, gs, k, m = pile
             return kernels.nvfp4_gemv_grouped(x32, qw, bs, gs, expert_ids,
