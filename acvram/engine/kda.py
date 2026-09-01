@@ -28,6 +28,16 @@ import torch.nn.functional as F
 __all__ = ["KimiDeltaAttention"]
 
 
+def _extension():
+    """L'extension CUDA si elle porte le noyau KDA (et si on ne l'a pas coupée)."""
+    import os
+    if os.environ.get("ACVRAM_HYBRID_KERNELS", "1") == "0":
+        return None
+    from .. import kernels
+    ext = kernels.get_extension()
+    return ext if ext is not None and hasattr(ext, "kda_decode") else None
+
+
 class KimiDeltaAttention(nn.Module):
     def __init__(self, q_proj: nn.Module, k_proj: nn.Module, v_proj: nn.Module,
                  out_proj: nn.Module,
@@ -139,6 +149,23 @@ class KimiDeltaAttention(nn.Module):
 
     def decode_static(self, x: torch.Tensor, st: dict) -> torch.Tensor:
         """Un jeton, une séquence, états mis à jour EN PLACE dans ``st``."""
+        ext = _extension() if x.is_cuda else None
+        if ext is not None:
+            # noyau fusionné : convs, normalisations, portes, récurrence,
+            # norme de sortie — un seul lancement après les projections
+            bf = torch.bfloat16
+            xq = self.q_proj(x).to(bf).reshape(-1)
+            xk = self.k_proj(x).to(bf).reshape(-1)
+            xv = self.v_proj(x).to(bf).reshape(-1)
+            g1_pre = self.f_b(self.f_a(x)).to(bf).reshape(-1)
+            g2 = self.g_b(self.g_a(x)).to(bf).reshape(-1)
+            beta_pre = self.beta_proj(x).to(bf).reshape(-1)
+            y = ext.kda_decode(xq, xk, xv, g1_pre, g2, beta_pre,
+                               self.conv_q, self.conv_k, self.conv_v,
+                               st["cq"], st["ck"], st["cv"],
+                               self.dt_bias, self.a, self.norm_weight,
+                               st["S"], self.eps)
+            return self.out_proj(y.to(x.dtype))
         def conv(xp, w, buf):
             # mêmes noyaux que le chemin fonctionnel (cuDNN, même forme) :
             # les deux chemins doivent arrondir pareil

@@ -133,6 +133,7 @@ SENSITIVE_SUFFIXES = (
     "conv1d_q.weight", "conv1d_k.weight", "conv1d_v.weight",
     ".a.weight",                  # -exp(A_log) de KDA (kimi-linear)
     "e_score_correction_bias",
+    "k_b_proj.weight", "v_b_proj.weight",   # absorptions MLA [H, r, d] : 3D, petits
     "mlp.gate.weight",            # routeur MoE : minuscule et décisif
     "shared_expert_gate.weight",  # porte de l'expert partagé : 1 ligne
     "embed_tokens.weight",

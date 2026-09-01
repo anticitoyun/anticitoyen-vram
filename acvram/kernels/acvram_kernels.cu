@@ -1115,6 +1115,207 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
     return out;
 }
 
+
+// ============================================================================
+// KDA — Kimi Delta Attention, pas de décodage fusionné (une séquence, t = 1).
+// Un bloc par tête, D fils (un par canal). Remplace ~35 lancements : les trois
+// convolutions causales à état (+SiLU), la L2-normalisation de q et k, les
+// portes g1/β, la récurrence delta sur S (décroissance sur l'axe clé), la
+// RMSNorm de sortie et la porte sigmoïde g2.
+// S[h] est [D_i (sortie), D_j (clé)], j contigu ; le fil i porte la ligne i.
+// ============================================================================
+template <int D>
+__global__ void kda_decode_kernel(
+        const __nv_bfloat16 *__restrict__ xq, const __nv_bfloat16 *__restrict__ xk,
+        const __nv_bfloat16 *__restrict__ xv,        // [H*D] projections (bf16)
+        const __nv_bfloat16 *__restrict__ g1_pre,    // [H*D] f_b(f_a(x))
+        const __nv_bfloat16 *__restrict__ g2,        // [H*D] g_b(g_a(x))
+        const __nv_bfloat16 *__restrict__ beta_pre,  // [H]
+        const float *__restrict__ wq, const float *__restrict__ wk,
+        const float *__restrict__ wv,                // [H*D, K] poids conv
+        float *__restrict__ cq, float *__restrict__ ck,
+        float *__restrict__ cv,                      // [H*D, K-1] états conv
+        const float *__restrict__ dt_bias,           // [H*D]
+        const float *__restrict__ a,                 // [H]  = -exp(A_log)
+        const float *__restrict__ norm_w,            // [D]
+        float *__restrict__ S,                       // [H, D, D]
+        __nv_bfloat16 *__restrict__ y,               // [H*D] sortie
+        int K, float eps) {
+    const int h = blockIdx.x, i = threadIdx.x, c = h * D + i;
+    __shared__ float sq[D], sk[D], sv[D], se[D], red[32];
+
+    auto conv = [&](const __nv_bfloat16 *x, const float *w, float *st) {
+        float acc = 0.f;
+        const float xc = __bfloat162float(x[c]);
+        const float *wr = w + (size_t)c * K;
+        float *sr = st + (size_t)c * (K - 1);
+        #pragma unroll 4
+        for (int t = 0; t < K - 1; ++t) acc += wr[t] * sr[t];
+        acc += wr[K - 1] * xc;
+        #pragma unroll 4
+        for (int t = 0; t < K - 2; ++t) sr[t] = sr[t + 1];
+        sr[K - 2] = xc;
+        return acc / (1.f + __expf(-acc));                  // SiLU
+    };
+    auto block_sum = [&](float v) {
+        for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+        if ((i & 31) == 0) red[i >> 5] = v;
+        __syncthreads();
+        float t = 0.f;
+        for (int w = 0; w < D / 32; ++w) t += red[w];
+        __syncthreads();
+        return t;
+    };
+
+    float q = conv(xq, wq, cq), k = conv(xk, wk, ck), v = conv(xv, wv, cv);
+    const float nq = block_sum(q * q), nk = block_sum(k * k);
+    q *= rsqrtf(nq + eps) * rsqrtf((float)D);
+    k *= rsqrtf(nk + eps);
+    const float gp = __bfloat162float(g1_pre[c]) + dt_bias[c];
+    const float sp = gp > 20.f ? gp : log1pf(__expf(gp));   // softplus
+    sq[i] = q; sk[i] = k; sv[i] = v; se[i] = __expf(a[h] * sp);
+    __syncthreads();
+    const float beta = 1.f / (1.f + __expf(-__bfloat162float(beta_pre[h])));
+
+    float *srow = S + ((size_t)h * D + i) * D;
+    float pred = 0.f;
+    float row[D];
+    #pragma unroll
+    for (int j = 0; j < D; ++j) { row[j] = srow[j] * se[j]; pred += row[j] * sk[j]; }
+    const float d = beta * (v - pred);
+    float o = 0.f;
+    #pragma unroll
+    for (int j = 0; j < D; ++j) { row[j] += d * sk[j]; o += row[j] * sq[j]; srow[j] = row[j]; }
+
+    const float ms = block_sum(o * o) / (float)D;
+    const float n = o * rsqrtf(ms + eps) * norm_w[i];
+    y[c] = __float2bfloat16(n / (1.f + __expf(-__bfloat162float(g2[c]))));
+}
+
+torch::Tensor kda_decode(torch::Tensor xq, torch::Tensor xk, torch::Tensor xv,
+                         torch::Tensor g1_pre, torch::Tensor g2,
+                         torch::Tensor beta_pre, torch::Tensor wq,
+                         torch::Tensor wk, torch::Tensor wv, torch::Tensor cq,
+                         torch::Tensor ck, torch::Tensor cv,
+                         torch::Tensor dt_bias, torch::Tensor a,
+                         torch::Tensor norm_w, torch::Tensor S, double eps) {
+    CHECK_CUDA(S); ACVRAM_DEVICE_GUARD(S);
+    CHECK_CONTIG(S); CHECK_CONTIG(cq); CHECK_CONTIG(ck); CHECK_CONTIG(cv);
+    TORCH_CHECK(xq.scalar_type() == torch::kBFloat16, "KDA : projections bf16 attendues");
+    const int H = S.size(0), D = S.size(1), K = wq.size(1);
+    TORCH_CHECK(D == 128 || D == 64, "KDA : dimension de tete non instanciee : ", D);
+    auto y = torch::empty({1, H * D}, xq.options().dtype(torch::kBFloat16));
+    auto stream = at::cuda::getCurrentCUDAStream();
+    #define BF(t) reinterpret_cast<const __nv_bfloat16 *>((t).data_ptr())
+    #define KDA_LAUNCH(DD) kda_decode_kernel<DD><<<H, DD, 0, stream>>>( \
+        BF(xq), BF(xk), BF(xv), BF(g1_pre), BF(g2), BF(beta_pre), \
+        wq.data_ptr<float>(), wk.data_ptr<float>(), wv.data_ptr<float>(), \
+        cq.data_ptr<float>(), ck.data_ptr<float>(), cv.data_ptr<float>(), \
+        dt_bias.data_ptr<float>(), a.data_ptr<float>(), norm_w.data_ptr<float>(), \
+        S.data_ptr<float>(), reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), \
+        K, (float)eps)
+    if (D == 128) { KDA_LAUNCH(128); } else { KDA_LAUNCH(64); }
+    #undef KDA_LAUNCH
+    #undef BF
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return y;
+}
+
+// ============================================================================
+// MLA — attention latente absorbée, pas de décodage (une séquence, t = 1).
+// Noyau 1 : scores[h, r] = q_eff[h]·cache[r] pour r ≤ len (−inf au-delà),
+//           un fil par ligne, grille (H, L/128).
+// Noyau 2 : softmax sur L puis o_lat[h, :] = Σ_r p_r · cache[r, :rank],
+//           un bloc par tête, fils sur la dimension latente.
+// ============================================================================
+__global__ void mla_scores_kernel(const float *__restrict__ q,     // [H, W]
+                                  const __nv_bfloat16 *__restrict__ cache,  // [L, W]
+                                  const long *__restrict__ len,    // scalaire
+                                  float *__restrict__ scores,      // [H, L]
+                                  int L, int W, float scale) {
+    const int h = blockIdx.x, r = blockIdx.y * blockDim.x + threadIdx.x;
+    if (r >= L) return;
+    float s = -INFINITY;
+    if (r <= (int)*len) {
+        const float *qh = q + (size_t)h * W;
+        const __nv_bfloat16 *kr = cache + (size_t)r * W;
+        float acc = 0.f;
+        for (int d = 0; d < W; d += 2) {
+            const float2 kk = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(kr + d));
+            acc += qh[d] * kk.x + qh[d + 1] * kk.y;
+        }
+        s = acc * scale;
+    }
+    scores[(size_t)h * L + r] = s;
+}
+
+__global__ void mla_reduce_kernel(const float *__restrict__ scores,  // [H, L]
+                                  const __nv_bfloat16 *__restrict__ cache,  // [L, W]
+                                  float *__restrict__ o,             // [H, R]
+                                  int L, int W, int R) {
+    const int h = blockIdx.x, tid = threadIdx.x, T = blockDim.x;
+    extern __shared__ float sh[];                 // [L] probabilités
+    __shared__ float red[32];
+    const float *sc = scores + (size_t)h * L;
+    float m = -INFINITY;
+    for (int r = tid; r < L; r += T) m = fmaxf(m, sc[r]);
+    for (int off = 16; off > 0; off >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, off));
+    if ((tid & 31) == 0) red[tid >> 5] = m;
+    __syncthreads();
+    m = -INFINITY;
+    for (int w = 0; w < T / 32; ++w) m = fmaxf(m, red[w]);
+    __syncthreads();
+    float l = 0.f;
+    for (int r = tid; r < L; r += T) { const float p = __expf(sc[r] - m); sh[r] = p; l += p; }
+    for (int off = 16; off > 0; off >>= 1) l += __shfl_xor_sync(0xffffffffu, l, off);
+    if ((tid & 31) == 0) red[tid >> 5] = l;
+    __syncthreads();
+    l = 0.f;
+    for (int w = 0; w < T / 32; ++w) l += red[w];
+    const float inv = 1.f / l;
+    __syncthreads();
+    for (int d = tid; d < R; d += T) {
+        float acc = 0.f;
+        for (int r = 0; r < L; ++r) {
+            const float p = sh[r];
+            if (p != 0.f) acc += p * __bfloat162float(cache[(size_t)r * W + d]);
+        }
+        o[(size_t)h * R + d] = acc * inv;
+    }
+}
+
+torch::Tensor mla_decode(torch::Tensor q_eff, torch::Tensor cache,
+                         torch::Tensor len, torch::Tensor scores,
+                         int64_t L, int64_t rank, double scale) {
+    CHECK_CUDA(q_eff); ACVRAM_DEVICE_GUARD(q_eff);
+    CHECK_CONTIG(q_eff); CHECK_CONTIG(cache); CHECK_CONTIG(scores);
+    const int H = q_eff.size(0), W = q_eff.size(1);
+    TORCH_CHECK(W % 2 == 0, "MLA : largeur paire attendue");
+    TORCH_CHECK(scores.size(0) == H && scores.size(1) >= L, "MLA : scores trop petit");
+    auto o = torch::empty({H, (long)rank}, q_eff.options());
+    auto stream = at::cuda::getCurrentCUDAStream();
+    dim3 g1(H, ((int)L + 127) / 128);
+    mla_scores_kernel<<<g1, 128, 0, stream>>>(
+        q_eff.data_ptr<float>(),
+        reinterpret_cast<const __nv_bfloat16 *>(cache.data_ptr()),
+        len.data_ptr<long>(), scores.data_ptr<float>(), (int)L, W, (float)scale);
+    const size_t shm = (size_t)L * sizeof(float);
+    if (shm > 48 * 1024) {
+        static size_t autorise = 0;
+        if (shm > autorise) {
+            cudaFuncSetAttribute(mla_reduce_kernel,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm);
+            autorise = shm;
+        }
+    }
+    mla_reduce_kernel<<<H, 256, shm, stream>>>(
+        scores.data_ptr<float>(),
+        reinterpret_cast<const __nv_bfloat16 *>(cache.data_ptr()),
+        o.data_ptr<float>(), (int)L, W, (int)rank);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return o;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("nvfp4_dequant", &nvfp4_dequant, "NVFP4 -> matrice dense");
     m.def("nvfp4_gemv", &nvfp4_gemv, "NVFP4 : dequantification + produit fusionnes");
@@ -1126,6 +1327,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "NVFP4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
     m.def("int4_gemv_grouped", &int4_gemv_grouped,
           "INT4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
+    m.def("kda_decode", &kda_decode, "KDA : pas de decodage fusionne (une sequence)");
+    m.def("mla_decode", &mla_decode, "MLA absorbee : scores + softmax + lecture latente");
     m.def("paged_attention", &paged_attention,
           "attention de decodage fusionnee sur cache KV int8 pagine");
 }

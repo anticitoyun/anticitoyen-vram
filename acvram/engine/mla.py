@@ -24,6 +24,15 @@ __all__ = ["MLAttention", "MLA_BUCKET"]
 MLA_BUCKET = 1024
 
 
+def _extension():
+    import os
+    if os.environ.get("ACVRAM_HYBRID_KERNELS", "1") == "0":
+        return None
+    from .. import kernels
+    ext = kernels.get_extension()
+    return ext if ext is not None and hasattr(ext, "mla_decode") else None
+
+
 class MLAttention(nn.Module):
     def __init__(self, q_proj: nn.Module, kv_a_proj: nn.Module,
                  o_proj: nn.Module,
@@ -98,7 +107,10 @@ class MLAttention(nn.Module):
                    dtype: torch.dtype) -> dict:
         return {"cache": torch.zeros(max_len, self.rank + self.rope,
                                      dtype=dtype, device=device),
-                "len": torch.zeros((), dtype=torch.long, device=device)}
+                "len": torch.zeros((), dtype=torch.long, device=device),
+                # scores de travail du noyau fusionné [nh, max_len]
+                "scores": torch.zeros(self.nh, max_len, dtype=torch.float32,
+                                      device=device)}
 
     @staticmethod
     def static_load(st: dict, etat) -> None:
@@ -131,6 +143,14 @@ class MLAttention(nn.Module):
         k_new = torch.cat([c, k_pe], dim=-1)                 # [1, rank+rope]
         cache = st["cache"]
         cache.index_copy_(0, st["len"].view(1), k_new)
+        ext = _extension() if x.is_cuda else None
+        if ext is not None:
+            o_lat = ext.mla_decode(q_eff.to(torch.float32)[0].contiguous(),
+                                   cache, st["len"], st["scores"], bucket,
+                                   self.rank, self.scale)        # [nh, rank]
+            y = torch.einsum('hvr,hr->hv', self.v_b.to(torch.float32), o_lat)
+            st["len"].add_(1)
+            return self.o_proj(y.reshape(1, self.nh * self.dv).to(x.dtype))
         C = cache[:bucket]
         scores = torch.einsum('thr,sr->ths', q_eff.to(torch.float32),
                               C.to(torch.float32)) * self.scale
