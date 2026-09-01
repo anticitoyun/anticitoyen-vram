@@ -177,11 +177,19 @@ class GGUFFile:
             dk = int(self.kv.get(f"{a}.ssm.state_size", 128))
             nvpk = nv // nk
 
+        phi3 = self.arch() == "phi3"
+        if phi3:
+            a = self.arch()
+            nh = int(self.kv.get(f"{a}.attention.head_count"))
+            nkv = int(self.kv.get(f"{a}.attention.head_count_kv", nh))
+            hd = int(self.kv.get(f"{a}.attention.key_length",
+                                 int(self.kv.get(f"{a}.embedding_length")) // nh))
+
         for gname in self.tensors:
             if premiere_mtp >= 0 and gname.startswith("blk."):
                 if int(gname.split(".", 2)[1]) >= premiere_mtp:
                     continue
-            hname = _map_name(gname, gdn, kimi_rec)
+            hname = _map_name(gname, gdn, kimi_rec, phi3)
             if hname is None:
                 continue
             t = self.load(gname)
@@ -208,6 +216,20 @@ class GGUFFile:
                     t = torch.cat([t[:qk], v])
                 elif hname.endswith("out.weight"):
                     t = _detile(t, 1, nk, nvpk, dv)
+            if phi3 and hname.endswith("self_attn.qkv_proj.weight"):
+                # Phi-3/4 : q, k, v fusionnés [q (nh·hd) ; k (nkv·hd) ; v (nkv·hd)]
+                q, k, v = torch.split(t, [nh * hd, nkv * hd, nkv * hd], dim=0)
+                base = hname[: -len("qkv_proj.weight")]
+                yield base + "q_proj.weight", q
+                yield base + "k_proj.weight", k
+                yield base + "v_proj.weight", v
+                continue
+            if phi3 and hname.endswith("mlp.gate_up_proj.weight"):
+                g_, u_ = torch.chunk(t, 2, dim=0)      # gate d'abord (Phi3MLP)
+                base = hname[: -len("gate_up_proj.weight")]
+                yield base + "gate_proj.weight", g_
+                yield base + "up_proj.weight", u_
+                continue
             if hname.endswith("__exps__"):
                 stem = hname[: -len("__exps__")]
                 for e in range(t.shape[0]):
@@ -228,7 +250,7 @@ class GGUFFile:
     # Architectures transformeurs mais aux blocs différents des nôtres
     # (softcap, laurel, attention partagée...) : à mapper avant de convertir.
     UNTRANSLATED = ("glm4", "glm4moe", "glm4_moe", "gemma4", "gemma3",
-                    "gemma3n", "chatglm", "granite", "internlm2", "phi3",
+                    "gemma3n", "chatglm", "granite", "internlm2",
                     "starcoder2", "kat", "deci", "olmoe")
 
     def check_executable(self) -> None:
@@ -263,6 +285,7 @@ class GGUFFile:
                    # vision-langage servis en texte seul : la partie texte est
                    # un qwen2/qwen3 ; en texte pur les trois axes du mrope
                    # portent la même position, soit un RoPE ordinaire
+                   "phi3": "Phi3ForCausalLM",
                    "qwen2vl": "Qwen2ForCausalLM",
                    "qwen3vl": "Qwen3ForCausalLM",
                    "qwen3vlmoe": "Qwen3MoeForCausalLM"}
@@ -500,13 +523,19 @@ _EXPS = {"ffn_gate_exps": "mlp.experts.{e}.gate_proj",
 
 
 def _map_name(g: str, gdn: bool = False,
-              kimi_recurrent: Optional[set] = None) -> Optional[str]:
+              kimi_recurrent: Optional[set] = None,
+              phi3: bool = False) -> Optional[str]:
     if g in _DIRECT:
         return _DIRECT[g]
     if not g.startswith("blk."):
         return None                        # rope_freqs et autres auxiliaires
     _, idx, rest = g.split(".", 2)
     stem, _, kind = rest.rpartition(".")   # "attn_q", "weight"|"bias"
+    if phi3:
+        if stem == "attn_qkv":
+            return f"model.layers.{idx}.self_attn.qkv_proj.{kind}"
+        if stem == "ffn_up":
+            return f"model.layers.{idx}.mlp.gate_up_proj.{kind}"
     if kimi_recurrent is not None:
         if rest == "ssm_a":
             return f"model.layers.{idx}.linear_attn.a.weight"
