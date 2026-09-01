@@ -166,3 +166,44 @@ fusionnée (+20-45 %). L'écart moteur/serveur est le coût du prefill du
 gabarit de chat, du flux SSE et du tokenizer par jeton — chantier suivant.
 Restent côté pas de décodage (7,4 ms) : le MoE groupé (2 ms, 40 % de la bande
 passante sur K=1024/2304) et l'empilement des projections KDA (9 → 5 GEMV).
+
+### Volet serveur — 1er septembre 2026, après-midi
+
+L'écart moteur/serveur (kimi-linear 135 contre 54 t/s) n'était pas un
+surcoût par jeton : la médiane des écarts inter-jetons valait le pas moteur
+(7,8 ms), mais p90 55 ms et max 190 ms. Trois causes, trois correctifs :
+
+1. **Collectes GC de génération 2** (~100 ms, tout le tas parcouru :
+   manifeste de 14 000 tenseurs, tokenizer, modules) → `gc.collect()` +
+   `gc.freeze()` après le chargement, seuils espacés (`ACVRAM_GC_FREEZE=0`
+   pour comparer).
+2. **Spéculation n-gram par défaut** (`--speculative ngram`, k=4) : sur les
+   hybrides la vérification q_len = 5 est inéligible au graphe → passe eager
+   de 26 ms à chaque proposition (plateau sur 10-20 % des pas ; 4B kimi à
+   68 t/s). Désactivée pour les hybrides tant que ce chemin manque.
+3. **Captures de godets en pleine réponse** (40-130 ms aux passages 128, 256,
+   512, 1024 jetons) → `warm_graphs` au démarrage (`ACVRAM_WARM_GRAPHS`,
+   2048 par défaut).
+
+Diagnostic : `ACVRAM_TRACE_STEPS=1` journalise médiane/p90/max des pas, les
+pauses GC (`gc.callbacks`) et le détail des pas lents ; côté client, la
+distribution des écarts (médiane contre p90/max) distingue un surcoût
+constant de décrochages. Le lanceur `acvram-serveur` active le venv du
+projet, pas celui du .deb.
+
+### Tableau final — 1er septembre 2026, 14 h 45
+
+| modèle | départ | moteur (graphe) | serveur (flux HTTP) |
+|---|---|---|---|
+| kimi-linear 35B (KDA+MLA) | 39 t/s | **139** | **105** |
+| Agents 4B kimi (GDN) | 49 | 125 | **111** |
+| Ornith 35B (GDN+MoE 256) | 25 | 108 | 56-89 (instable) |
+| Qwen3-14B (dense) | 36 | — | 46 |
+| Qwen3-Coder-30B-A3B (MoE) | 49 | — | 78 |
+
+Ornith reste instable d'une passe à l'autre (48 à 89 t/s) : une dizaine de
+rejeux de graphe à 70-150 ms par réponse de 300 jetons, sans GC ni capture
+en cause, avec 21,6 Go occupés sur 32 (les piles d'experts doublent
+transitoirement la mémoire à la construction, l'allocateur est près de sa
+limite). Piste : construire les piles avant le placement du cache KV, ou
+libérer explicitement les tenseurs d'origine.
