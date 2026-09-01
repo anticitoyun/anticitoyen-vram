@@ -197,13 +197,19 @@ class RotaryEmbedding(nn.Module):
 
     def __init__(self, head_dim: int, max_position: int, base: float = 10000.0,
                  scaling: Optional[dict] = None, device: Optional[torch.device] = None,
-                 dtype: torch.dtype = torch.float32) -> None:
+                 dtype: torch.dtype = torch.float32,
+                 n_active: Optional[int] = None) -> None:
         super().__init__()
         self.head_dim = head_dim
         self.max_position = max_position
         self.base = base
         self.scaling = scaling or {}
         inv_freq = self._build_inv_freq(device)
+        if n_active is not None and n_active < inv_freq.shape[0]:
+            # RoPE « proportionnel » (Gemma 4) : fréquences calculées sur la
+            # tête entière, seules les n_active premières paires tournent
+            inv_freq = inv_freq.clone()
+            inv_freq[n_active:] = 0.0
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self._cache_len = 0
         self._cos: Optional[torch.Tensor] = None
@@ -317,7 +323,7 @@ def causal_mask(q_len: int, kv_len: int, q_offset: int, device,
 
 def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
               causal: bool = True, scale: Optional[float] = None,
-              q_offset: int = 0) -> torch.Tensor:
+              q_offset: int = 0, window: int = 0) -> torch.Tensor:
     """Attention par produit scalaire normalisé sur des tenseurs ``[jetons, têtes, dim]``.
 
     Délègue au SDPA de PyTorch, qui choisit FlashAttention sur tout GPU qui le
@@ -327,7 +333,14 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     kh = k.transpose(0, 1).unsqueeze(0)
     vh = v.transpose(0, 1).unsqueeze(0)
     q_len, kv_len = q.shape[0], k.shape[0]
-    mask = causal_mask(q_len, kv_len, q_offset, q.device, q.dtype) if causal else None
+    if window > 0:
+        # fenêtre glissante : chaque requête ne voit que les `window` derniers
+        qpos = torch.arange(q_len, device=q.device) + q_offset
+        kpos = torch.arange(kv_len, device=q.device)
+        mask = ((kpos[None, :] <= qpos[:, None])
+                & (kpos[None, :] > qpos[:, None] - window))
+    else:
+        mask = causal_mask(q_len, kv_len, q_offset, q.device, q.dtype) if causal else None
     if mask is not None:
         out = F.scaled_dot_product_attention(qh, kh, vh, attn_mask=mask, scale=scale)
     else:
@@ -378,7 +391,7 @@ def batched_decode_attention(q: torch.Tensor, keys: list[torch.Tensor],
 
 def decode_attention_fixed(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                            seq_lens: torch.Tensor, n_rep: int,
-                           scale: float) -> torch.Tensor:
+                           scale: float, window: int = 0) -> torch.Tensor:
     """Attention de décodage à formes fixes, pour la capture en graphe CUDA.
 
     ``q`` vaut ``[lot, têtes, dim]`` (un jeton par séquence), ``k``/``v``
@@ -392,8 +405,11 @@ def decode_attention_fixed(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     # copie ×n_rep de K et de V à chaque couche, à chaque pas.
     kh = k.permute(0, 2, 1, 3)                                # [b, hkv, S, d]
     vh = v.permute(0, 2, 1, 3)
-    mask = (torch.arange(s, device=q.device)[None, :]
-            < seq_lens[:, None]).view(b, 1, 1, s)
+    pos = torch.arange(s, device=q.device)[None, :]
+    mask = pos < seq_lens[:, None]
+    if window > 0:
+        mask = mask & (pos >= seq_lens[:, None] - window)
+    mask = mask.view(b, 1, 1, s)
     out = F.scaled_dot_product_attention(
         q.unsqueeze(2), kh, vh,
         attn_mask=mask, scale=scale, enable_gqa=(n_rep > 1))  # [b, hq, 1, d]

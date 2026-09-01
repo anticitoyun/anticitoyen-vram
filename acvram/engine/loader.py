@@ -25,7 +25,7 @@ from ..quant.nvfp4 import NVFP4Tensor
 from .config import ModelSpec
 from .layers import QuantLinear, RMSNorm, RotaryEmbedding
 from .model import (ACVRamModel, Attention, DecoderLayer, DecoderLayerGDN,
-                    MLP, MoEBlock)
+                    DecoderLayerGemma, MLP, MoEBlock)
 
 __all__ = ["LoadedModel", "load_model"]
 
@@ -139,6 +139,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
         # collecte en microsecondes et se copie sans étape intermédiaire.
         embed = embed.contiguous().clone().pin_memory()
 
+    rope_gemma = None
     rope = RotaryEmbedding(spec.rotary_dim or spec.head_dim,
                            spec.max_position_embeddings,
                            spec.rope_theta, spec.rope_scaling)
@@ -211,6 +212,51 @@ def load_model(path: str, plan: Optional[Plan] = None,
                             scoring=spec.router_scoring,
                             score_bias=score_bias,
                             routed_scale=spec.routed_scaling_factor)
+
+        if spec.model_type in ("gemma4", "gemma4_text"):
+            if rope_gemma is None:
+                rope_gemma = (
+                    RotaryEmbedding(spec.head_dim, spec.max_position_embeddings,
+                                    spec.rope_theta_swa or 1e4, None, d, dtype),
+                    RotaryEmbedding(spec.global_head_dim, spec.max_position_embeddings,
+                                    spec.rope_theta, None, d, dtype,
+                                    n_active=int(spec.partial_rotary_factor_full
+                                                 * spec.global_head_dim / 2)))
+            local = spec.layer_types[i] == "sliding_attention"
+            hd = spec.head_dim if local else spec.global_head_dim
+            nkv = spec.num_key_value_heads if local else spec.num_global_key_value_heads
+            a_v = manifest["tensors"].get(p + "self_attn.v_proj.weight") is not None
+            attn = Attention(
+                spec,
+                lin("self_attn.q_proj.weight", streamed_attn),
+                lin("self_attn.k_proj.weight", streamed_attn),
+                lin("self_attn.v_proj.weight", streamed_attn) if a_v else None,
+                lin("self_attn.o_proj.weight", streamed_attn),
+                rope_gemma[0] if local else rope_gemma[1],
+                norm_opt("self_attn.q_norm.weight"),
+                norm_opt("self_attn.k_norm.weight"),
+                n_kv_heads=nkv, head_dim=hd, scale=1.0,
+                v_norm_eps=spec.rms_norm_eps, k_eq_v=not a_v,
+                window=spec.sliding_window if local else 0)
+            mlp_g = MLP(mlin("mlp.gate_proj.weight"), mlin("mlp.up_proj.weight"),
+                        mlin("mlp.down_proj.weight"), act=spec.hidden_activation)
+            n4 = lambda suffix: RMSNorm(reader.get(p + suffix).to(dtype).to(d), spec.rms_norm_eps)
+            out_scale = None
+            if manifest["tensors"].get(p + "layer_scalar.weight") is not None:
+                out_scale = reader.get(p + "layer_scalar.weight").to(torch.float32).to(d).reshape(-1)[0]
+            layers.append(DecoderLayerGemma(
+                i, attn, mlp_g, n4("input_layernorm.weight"),
+                n4("post_attention_layernorm.weight"),
+                n4("pre_feedforward_layernorm.weight"),
+                n4("post_feedforward_layernorm.weight"), out_scale, d))
+            n_blocks = kv_blocks.get(lp.exec_device, 0)
+            if n_blocks:
+                kv_fmt = next((t.kv_format for t in plan.tiers
+                               if t.name == lp.exec_device), "int8")
+                caches[i] = PagedKVCache(KVCacheConfig(
+                    num_layers=1, num_kv_heads=nkv, head_dim=hd,
+                    num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
+            continue
 
         est_kimi = spec.model_type == "kimi_linear"
         if est_kimi:

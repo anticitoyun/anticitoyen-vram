@@ -93,6 +93,16 @@ class ModelSpec:
     linear_conv_kernel_dim: int = 4
     rotary_dim: Optional[int] = None      # RoPE partiel (None = tête entière)
     attn_output_gate: bool = False
+    # gemma4 : couches locales (fenêtre) / globales (têtes plus larges, RoPE
+    # proportionnel), v normalisé, k = v global, softcap final
+    sliding_window: int = 0
+    global_head_dim: int = 0
+    num_global_key_value_heads: int = 0
+    rope_theta_swa: float = 0.0
+    partial_rotary_factor_full: float = 1.0
+    final_logit_softcapping: float = 0.0
+    hidden_activation: str = "silu"
+    attention_k_eq_v: bool = False
     # granite : multiplicateurs scalaires (attention, plongement, résidu, logits)
     attention_multiplier: Optional[float] = None
     embedding_multiplier: float = 1.0
@@ -202,6 +212,8 @@ _ARCH_ALIASES = {
     "Gemma2ForCausalLM": "llama",
     "Phi3ForCausalLM": "llama",
     "GraniteForCausalLM": "llama",
+    "Gemma4ForCausalLM": "llama",
+    "Gemma4ForConditionalGeneration": "llama",
     # vision-langage (partie texte seule)
     "Qwen2VLForConditionalGeneration": "llama",
     "Qwen2_5_VLForConditionalGeneration": "llama",
@@ -260,6 +272,16 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
 
     archs = cfg.get("architectures") or ["LlamaForCausalLM"]
     mt = str(cfg.get("model_type", ""))
+    if mt in ("gemma4", "gemma4_text"):
+        rp = cfg.get("rope_parameters") or {}
+        full, swa = rp.get("full_attention", {}), rp.get("sliding_attention", {})
+        cfg = {**cfg,
+               "rope_theta": float(full.get("rope_theta", cfg.get("rope_theta", 1e6))),
+               "rope_theta_swa": float(swa.get("rope_theta", cfg.get("rope_theta_swa", 1e4))),
+               "partial_rotary_factor_full": float(full.get("partial_rotary_factor",
+                                                             cfg.get("partial_rotary_factor_full", 1.0))),
+               "embedding_multiplier": float(cfg["hidden_size"]) ** 0.5,
+               "attention_multiplier": 1.0}
     # qwen3_next est désormais exécutable (couches Gated DeltaNet) quand la
     # configuration porte nos champs layer_types/linear_* ; les autres
     # hybrides restent refusés.
@@ -310,6 +332,14 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         rotary_dim=cfg.get("rotary_dim"),
         attn_output_gate=bool(cfg.get("attn_output_gate")),
         model_type=mt,
+        sliding_window=int(cfg.get("sliding_window") or 0),
+        global_head_dim=int(cfg.get("global_head_dim") or 0),
+        num_global_key_value_heads=int(cfg.get("num_global_key_value_heads") or 0),
+        rope_theta_swa=float(cfg.get("rope_theta_swa") or 0.0),
+        partial_rotary_factor_full=float(cfg.get("partial_rotary_factor_full") or 1.0),
+        final_logit_softcapping=float(cfg.get("final_logit_softcapping") or 0.0),
+        hidden_activation=str(cfg.get("hidden_activation") or cfg.get("hidden_act") or "silu"),
+        attention_k_eq_v=bool(cfg.get("attention_k_eq_v")),
         attention_multiplier=(float(cfg["attention_multiplier"])
                               if cfg.get("attention_multiplier") else None),
         embedding_multiplier=float(cfg.get("embedding_multiplier") or 1.0),

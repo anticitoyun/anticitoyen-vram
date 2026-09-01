@@ -459,7 +459,8 @@ def int4_gemv_grouped(x: torch.Tensor, qw: torch.Tensor, scales: torch.Tensor,
 
 def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
                     seq_lens: torch.Tensor, n_rep: int,
-                    scale: float, q_len: int = 1) -> Optional[torch.Tensor]:
+                    scale: float, q_len: int = 1,
+                    window: int = 0) -> Optional[torch.Tensor]:
     """Attention de décodage fusionnée sur le cache paginé INT8, ou None.
 
     Conditions : extension compilée, cache quantifié en int8, dimension de
@@ -474,10 +475,10 @@ def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
     if cache.k_scale is None or cache.cfg.dtype != "int8":
         return None
     d = q.shape[-1]
-    if d not in (32, 64, 128, 256):
+    if d not in (32, 64, 128, 256, 512):
         return None
     return ext.paged_attention(
         q.to(torch.float32).contiguous(), cache.k, cache.k_scale,
         cache.v, cache.v_scale, tables.contiguous(),
         seq_lens.contiguous(), cache.cfg.num_kv_heads, float(scale),
-        int(q_len))
+        int(q_len), int(window))

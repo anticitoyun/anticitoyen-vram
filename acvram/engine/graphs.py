@@ -113,7 +113,8 @@ class GraphRunner:
         c0 = m.caches.get(pleines[0]) if pleines else None
         self.paged_ok = (c0 is not None and c0.k_scale is not None
                          and c0.cfg.dtype == "int8"
-                         and m.spec.head_dim in (32, 64, 128, 256)
+                         and all(m.caches[i].cfg.head_dim in (32, 64, 128, 256, 512)
+                                 for i in pleines)
                          and kernels.get_extension() is not None)
         return True
 

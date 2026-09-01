@@ -664,7 +664,7 @@ __global__ void paged_attn_partial_kernel(
     float *__restrict__ part,             // [B*QL, HQ, C, D]  acc non normalisé
     float *__restrict__ part_m,           // [B*QL, HQ, C]
     float *__restrict__ part_l,           // [B*QL, HQ, C]
-    int HQ, int HKV, int N, int C, int QL, float scale) {
+    int HQ, int HKV, int N, int C, int QL, float scale, int window) {
     // La vérification spéculative pose QL positions de requête par séquence :
     // la requête qi (0..QL-1) ne voit que les seq_len-QL+1+qi premières
     // positions — causalité oblige. QL=1 redonne le décodage ordinaire.
@@ -675,14 +675,15 @@ __global__ void paged_attn_partial_kernel(
     const int c = blockIdx.z;
     const int hkv = h / (HQ / HKV);
     const long slen = seq_lens[b] - (QL - 1) + qi;
-    const long start = (long)c * PA_CHUNK;
+    const long lo = window > 0 ? max(0L, slen - (long)window) : 0L;   // fenêtre glissante
+    const long start = max((long)c * PA_CHUNK, lo);
     const long out_off = ((long)bq * HQ + h) * C + c;
 
     const int lane = threadIdx.x % WARP;
     const int wid = threadIdx.x / WARP;
     constexpr int PER_LANE = D / WARP;
 
-    if (start >= slen) {
+    if (start >= slen || start >= (long)(c + 1) * PA_CHUNK) {
         if (threadIdx.x == 0) {
             part_m[out_off] = -INFINITY;
             part_l[out_off] = 0.f;
@@ -704,7 +705,7 @@ __global__ void paged_attn_partial_kernel(
     #pragma unroll
     for (int i = 0; i < PER_LANE; ++i) acc[i] = 0.f;
 
-    const long end = min(slen, start + (long)PA_CHUNK);
+    const long end = min(slen, (long)(c + 1) * PA_CHUNK);
     for (long t = start + wid; t < end; t += PA_WARPS) {
         const long blk = tables[(long)b * N + (t >> 4)];
         const long cell = (blk * 16 + (t & 15)) * HKV + hkv;
@@ -1312,7 +1313,7 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
                               torch::Tensor ks, torch::Tensor vc,
                               torch::Tensor vs, torch::Tensor tables,
                               torch::Tensor seq_lens, int64_t hkv,
-                              double scale, int64_t q_len) {
+                              double scale, int64_t q_len, int64_t window) {
     CHECK_CUDA(q); CHECK_CUDA(kc); CHECK_CUDA(tables);
     ACVRAM_DEVICE_GUARD(q);
     CHECK_CONTIG(q); CHECK_CONTIG(kc); CHECK_CONTIG(vc);
@@ -1322,7 +1323,7 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
     const int HQ = q.size(1);
     const int D = q.size(2);
     const int N = tables.size(1);
-    TORCH_CHECK(D == 32 || D == 64 || D == 128 || D == 256,
+    TORCH_CHECK(D == 32 || D == 64 || D == 128 || D == 256 || D == 512,
                 "dimension de tete non instanciee : ", D);
     const int C = (N * 16 + PA_CHUNK - 1) / PA_CHUNK;
     TORCH_CHECK(C <= 256, "contexte au-dela de 256 tranches");
@@ -1344,7 +1345,7 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
             tables.data_ptr<long>(), seq_lens.data_ptr<long>(), \
             part.data_ptr<float>(), pm.data_ptr<float>(), \
             pl.data_ptr<float>(), HQ, (int)hkv, N, C, (int)q_len, \
-            (float)scale); \
+            (float)scale, (int)window); \
         paged_attn_reduce_kernel<DD><<<g2, 128, 0, stream>>>( \
             part.data_ptr<float>(), pm.data_ptr<float>(), \
             pl.data_ptr<float>(), out.data_ptr<float>(), HQ, C)
@@ -1352,7 +1353,8 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
     if (D == 32) { PA_LAUNCH(32); }
     else if (D == 64) { PA_LAUNCH(64); }
     else if (D == 128) { PA_LAUNCH(128); }
-    else { PA_LAUNCH(256); }
+    else if (D == 256) { PA_LAUNCH(256); }
+    else { PA_LAUNCH(512); }
     #undef PA_LAUNCH
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return out;

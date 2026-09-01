@@ -208,6 +208,9 @@ class GGUFFile:
             hname = _map_name(gname, gdn, kimi_rec, phi3)
             if hname is None:
                 continue
+            if self.arch() == "gemma4" and gname.endswith("ffn_norm.weight"):
+                # chez Gemma, ffn_norm précède le MLP (post_attention_norm existe à part)
+                hname = hname.replace("post_attention_layernorm", "pre_feedforward_layernorm")
             t = self.load(gname)
             if hname.endswith("shared_expert_gate.weight") and t.dim() == 1:
                 t = t.reshape(1, -1)      # vecteur GGUF -> Linear(d, 1)
@@ -269,7 +272,7 @@ class GGUFFile:
                    "lfm2", "lfm2moe", "mamba", "jamba", "granitehybrid")
     # Architectures transformeurs mais aux blocs différents des nôtres
     # (softcap, laurel, attention partagée...) : à mapper avant de convertir.
-    UNTRANSLATED = ("glm4", "glm4moe", "glm4_moe", "gemma4", "gemma3",
+    UNTRANSLATED = ("glm4", "glm4moe", "glm4_moe", "gemma3",
                     "gemma3n", "chatglm", "internlm2",
                     "starcoder2", "kat", "deci", "olmoe")
 
@@ -307,6 +310,7 @@ class GGUFFile:
                    # portent la même position, soit un RoPE ordinaire
                    "phi3": "Phi3ForCausalLM",
                    "granite": "GraniteForCausalLM",
+                   "gemma4": "Gemma4ForCausalLM",
                    "qwen2vl": "Qwen2ForCausalLM",
                    "qwen3vl": "Qwen3ForCausalLM",
                    "qwen3vlmoe": "Qwen3MoeForCausalLM"}
@@ -363,6 +367,33 @@ class GGUFFile:
             cfg["attn_output_gate"] = True
             cfg["gdn_a_log_negexp"] = True       # convention du convertisseur llama.cpp
 
+        if a == "gemma4":
+            cfg["model_type"] = "gemma4_text"
+            hkv = self.kv.get(f"{a}.attention.head_count_kv") or []
+            swa = self.kv.get(f"{a}.attention.sliding_window_pattern") or []
+            cfg["layer_types"] = ["sliding_attention" if bool(x) else "full_attention"
+                                  for x in swa]
+            cfg["head_dim"] = int(g("attention.key_length_swa", 256))
+            cfg["global_head_dim"] = int(g("attention.key_length", 512))
+            cfg["num_key_value_heads"] = int(max(hkv)) if hkv else heads
+            cfg["num_global_key_value_heads"] = int(min(hkv)) if hkv else heads
+            cfg["sliding_window"] = int(g("attention.sliding_window", 1024))
+            cfg["rope_theta"] = float(g("rope.freq_base", 1e6))
+            cfg["rope_theta_swa"] = float(g("rope.freq_base_swa", 1e4))
+            # rope_freqs : facteurs 1 sur les paires qui tournent, ~1e30 sinon
+            try:
+                rf = self.load("rope_freqs.weight")
+                cfg["partial_rotary_factor_full"] = int((rf < 1e6).sum()) / float(rf.numel())
+            except Exception:                    # noqa: BLE001
+                cfg["partial_rotary_factor_full"] = 0.25
+            cfg["final_logit_softcapping"] = float(g("final_logit_softcapping", 0.0) or 0.0)
+            cfg["hidden_activation"] = "gelu_pytorch_tanh"
+            globales = {i for i, x in enumerate(swa) if not x}
+            cfg["attention_k_eq_v"] = not any(
+                n.endswith("attn_v.weight") and int(n.split(".")[1]) in globales
+                for n in self.tensors)
+            cfg["embedding_multiplier"] = float(cfg["hidden_size"]) ** 0.5
+            cfg["attention_multiplier"] = 1.0
         if a == "granite":
             # multiplicateurs Granite (llama sinon)
             if g("attention.scale"): cfg["attention_multiplier"] = float(g("attention.scale"))
@@ -466,7 +497,42 @@ class GGUFFile:
                       encoding="utf-8") as fh:
                 json.dump(tok, fh, ensure_ascii=False)
             written.append("tokenizer.json")
-
+        elif model in ("llama", "gemma", "gemma4", "spm", "t5") and tokens:
+            # SentencePiece (Unigram) : pièces avec leurs scores, repli
+            # octet par octet, préfixe « ▁ » selon add_space_prefix
+            scores = self.kv.get("tokenizer.ggml.scores") or [0.0] * len(tokens)
+            prefixe = bool(self.kv.get("tokenizer.ggml.add_space_prefix", model == "llama"))
+            unk = self.kv.get("tokenizer.ggml.unknown_token_id")
+            added = [{"id": i, "content": t, "special": ttypes[i] == 3,
+                      "single_word": False, "lstrip": False,
+                      "rstrip": False, "normalized": False}
+                     for i, t in enumerate(tokens)
+                     if i < len(ttypes) and ttypes[i] in (3, 4)]
+            normalizers = [{"type": "Replace", "pattern": {"String": " "},
+                            "content": "▁"}]
+            if prefixe:
+                normalizers.insert(0, {"type": "Prepend", "prepend": "▁"})
+            decoders = [{"type": "Replace", "pattern": {"String": "▁"}, "content": " "},
+                        {"type": "ByteFallback"}, {"type": "Fuse"}]
+            if prefixe:
+                decoders.append({"type": "Strip", "content": " ", "start": 1, "stop": 0})
+            tok = {
+                "version": "1.0",
+                "added_tokens": added,
+                "normalizer": {"type": "Sequence", "normalizers": normalizers},
+                "pre_tokenizer": None,
+                "post_processor": None,
+                "decoder": {"type": "Sequence", "decoders": decoders},
+                "model": {"type": "Unigram",
+                          "unk_id": int(unk) if unk is not None else 0,
+                          "vocab": [[t, float(sc)] for t, sc in zip(tokens, scores)],
+                          "byte_fallback": True},
+            }
+            with open(os.path.join(out_dir, "tokenizer.json"), "w",
+                      encoding="utf-8") as fh:
+                json.dump(tok, fh, ensure_ascii=False)
+            written.append("tokenizer.json")
+        if "tokenizer.json" in written:
             tcfg: dict[str, Any] = {"tokenizer_class": "PreTrainedTokenizerFast"}
             if "tokenizer.chat_template" in self.kv:
                 tcfg["chat_template"] = self.kv["tokenizer.chat_template"]
@@ -531,6 +597,9 @@ _LAYER_MLA = {
 }
 
 _LAYER = {
+    "post_attention_norm": "post_attention_layernorm",
+    "post_ffw_norm": "post_feedforward_layernorm",
+    "layer_output_scale": "layer_scalar",
     "attn_q": "self_attn.q_proj", "attn_k": "self_attn.k_proj",
     "attn_v": "self_attn.v_proj", "attn_output": "self_attn.o_proj",
     "attn_q_norm": "self_attn.q_norm", "attn_k_norm": "self_attn.k_norm",

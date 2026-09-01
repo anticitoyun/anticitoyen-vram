@@ -124,7 +124,13 @@ class Attention(nn.Module):
                  v: QuantLinear, o: QuantLinear, rope: RotaryEmbedding,
                  q_norm: Optional[nn.Module] = None,
                  k_norm: Optional[nn.Module] = None,
-                 output_gate: bool = False) -> None:
+                 output_gate: bool = False,
+                 n_kv_heads: Optional[int] = None,
+                 head_dim: Optional[int] = None,
+                 scale: Optional[float] = None,
+                 v_norm_eps: Optional[float] = None,
+                 k_eq_v: bool = False,
+                 window: int = 0) -> None:
         super().__init__()
         self.q_proj, self.k_proj, self.v_proj, self.o_proj = q, k, v, o
         # qwen3-next : q_proj sort, par tête, [q | porte] ; la sortie de
@@ -135,11 +141,26 @@ class Attention(nn.Module):
         # ecraserait sa norme, ce que le modele n'a pas appris.
         self.q_norm, self.k_norm = q_norm, k_norm
         self.n_heads = spec.num_attention_heads
-        self.n_kv_heads = spec.num_key_value_heads
-        self.head_dim = spec.head_dim
+        self.n_kv_heads = n_kv_heads or spec.num_key_value_heads
+        self.head_dim = head_dim or spec.head_dim
         self.n_rep = self.n_heads // max(1, self.n_kv_heads)
-        self.scale = spec.attention_multiplier or self.head_dim ** -0.5
+        self.scale = scale if scale is not None \
+            else (spec.attention_multiplier or self.head_dim ** -0.5)
+        # Gemma 4 : v normalisé (RMS sans poids), v = k brut sur les couches
+        # globales (k_eq_v), fenêtre glissante sur les couches locales
+        self.v_norm_eps = v_norm_eps
+        self.k_eq_v = k_eq_v
+        self.window = window
         self.rope = rope
+
+    def _kv(self, x: torch.Tensor, t: int):
+        k = self.k_proj(x).view(t, self.n_kv_heads, self.head_dim)
+        v = k if self.k_eq_v else self.v_proj(x).view(t, self.n_kv_heads, self.head_dim)
+        if self.v_norm_eps is not None:
+            v32 = v.to(torch.float32)
+            v = (v32 * torch.rsqrt(v32.pow(2).mean(-1, keepdim=True)
+                                   + self.v_norm_eps)).to(x.dtype)
+        return k, v
 
     def forward(self, x: torch.Tensor, batch: ForwardBatch,
                 cache: Optional[PagedKVCache]) -> torch.Tensor:
@@ -154,8 +175,7 @@ class Attention(nn.Module):
                 qg[..., self.head_dim:]
         else:
             q = self.q_proj(x).view(t, self.n_heads, self.head_dim)
-        k = self.k_proj(x).view(t, self.n_kv_heads, self.head_dim)
-        v = self.v_proj(x).view(t, self.n_kv_heads, self.head_dim)
+        k, v = self._kv(x, t)
 
         if self.q_norm is not None:
             q = self.q_norm(q)
@@ -195,8 +215,7 @@ class Attention(nn.Module):
             q, gate = qg[..., :self.head_dim].contiguous(), qg[..., self.head_dim:]
         else:
             q = self.q_proj(x).view(b, self.n_heads, self.head_dim)
-        k = self.k_proj(x).view(b, self.n_kv_heads, self.head_dim)
-        v = self.v_proj(x).view(b, self.n_kv_heads, self.head_dim)
+        k, v = self._kv(x, b)
         if self.q_norm is not None:
             q = self.q_norm(q)
         if self.k_norm is not None:
@@ -205,14 +224,15 @@ class Attention(nn.Module):
         q, k = apply_rope(q, k, cos, sin)
         cache.write(slots, k, v)
         out = kernels.paged_attention(q, cache, block_tables, seq_lens,
-                                      self.n_rep, self.scale, q_len=q_len)
+                                      self.n_rep, self.scale, q_len=q_len,
+                                      window=self.window)
         if out is None:                    # cache non int8, ou pas de noyau
             if q_len != 1:
                 raise RuntimeError("verification speculative a formes fixes "
                                    "sans noyau pagine : chemin inéligible")
             kk, vv = cache.gather_fixed(block_tables, q.dtype)
             out = decode_attention_fixed(q, kk, vv, seq_lens, self.n_rep,
-                                         self.scale)
+                                         self.scale, window=self.window)
         out = self._gated(out.to(x.dtype), gate, b)
         return self.o_proj(out.reshape(b, self.n_heads * self.head_dim))
 
@@ -244,7 +264,7 @@ class Attention(nn.Module):
             kk = repeat_kv(kk, self.n_rep)
             vv = repeat_kv(vv, self.n_rep)
             out[start:end] = attention(q[start:end], kk, vv, True, self.scale,
-                                       q_offset=offset)
+                                       q_offset=offset, window=self.window)
             start = end
         out = self._gated(out, gate, t)
         return self.o_proj(out.reshape(t, self.n_heads * self.head_dim))
@@ -262,11 +282,12 @@ class Attention(nn.Module):
             # Python, et une sortie identique au bit près entre eager et rejeu.
             tables, lens = batch.fixed_decode_views(q.device)
             out = kernels.paged_attention(q, cache, tables, lens,
-                                          self.n_rep, self.scale)
+                                          self.n_rep, self.scale,
+                                          window=self.window)
             if out is None:                # cache non int8, ou pas de noyau
                 kk, vv = cache.gather_fixed(tables, q.dtype)
                 out = decode_attention_fixed(q, kk, vv, lens, self.n_rep,
-                                             self.scale)
+                                             self.scale, window=self.window)
             out = self._gated(out.to(q.dtype), gate, t)
             return self.o_proj(out.reshape(t, self.n_heads * self.head_dim))
 
@@ -279,7 +300,8 @@ class Attention(nn.Module):
         if all(q_ == ql for q_ in batch.query_lens):
             tables, lens = batch.fixed_decode_views(q.device)
             out = kernels.paged_attention(q, cache, tables, lens,
-                                          self.n_rep, self.scale, q_len=ql)
+                                          self.n_rep, self.scale, q_len=ql,
+                                          window=self.window)
             if out is not None:
                 out = self._gated(out.to(q.dtype), gate, t)
                 return self.o_proj(out.reshape(t, self.n_heads * self.head_dim))
@@ -299,16 +321,25 @@ class Attention(nn.Module):
             out[start:end] = attention(
                 q[start:end], repeat_kv(keys[i], self.n_rep),
                 repeat_kv(values[i], self.n_rep), True, self.scale,
-                q_offset=offset)
+                q_offset=offset, window=self.window)
             start = end
         out = self._gated(out, gate, t)
         return self.o_proj(out.reshape(t, self.n_heads * self.head_dim))
 
 
 class MLP(nn.Module):
-    def __init__(self, gate: QuantLinear, up: QuantLinear, down: QuantLinear) -> None:
+    def __init__(self, gate: QuantLinear, up: QuantLinear, down: QuantLinear,
+                 act: str = "silu") -> None:
         super().__init__()
         self.gate_proj, self.up_proj, self.down_proj = gate, up, down
+        self.act = act
+
+    def _act(self, g: torch.Tensor) -> torch.Tensor:
+        if self.act in ("gelu_pytorch_tanh", "gelu_tanh"):
+            return F.gelu(g, approximate="tanh")
+        if self.act == "gelu":
+            return F.gelu(g)
+        return F.silu(g)
 
     gate_up: Optional[nn.Module] = None
 
@@ -323,8 +354,8 @@ class MLP(nn.Module):
         if self.gate_up is not None and x.shape[0] <= 8:
             gu = self.gate_up(x)
             g, u = gu.split(gu.shape[-1] // 2, dim=-1)
-            return self.down_proj(F.silu(g) * u)
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+            return self.down_proj(self._act(g) * u)
+        return self.down_proj(self._act(self.gate_proj(x)) * self.up_proj(x))
 
 
 class MoEBlock(nn.Module):
@@ -712,6 +743,54 @@ class DecoderLayer(nn.Module):
                 m.prefetch()
 
 
+class DecoderLayerGemma(nn.Module):
+    """Bloc Gemma 4 : normes avant ET après l'attention et le MLP, puis un
+    scalaire de sortie par couche (layer_scalar)."""
+
+    def __init__(self, index: int, attn: Attention, mlp: nn.Module,
+                 input_norm: RMSNorm, post_attn_norm: RMSNorm,
+                 pre_ffn_norm: RMSNorm, post_ffn_norm: RMSNorm,
+                 out_scale: Optional[torch.Tensor], device: torch.device) -> None:
+        super().__init__()
+        self.index = index
+        self.self_attn = attn
+        self.mlp = mlp
+        self.input_layernorm = input_norm
+        self.post_attention_layernorm = post_attn_norm
+        self.pre_feedforward_layernorm = pre_ffn_norm
+        self.post_feedforward_layernorm = post_ffn_norm
+        self.out_scale = out_scale
+        self.device = device
+        self.mlp_device = device
+        self.residual_multiplier = 1.0
+
+    def _reste(self, x: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
+        x = x + self.post_attention_layernorm(a)
+        y = self.mlp(self.pre_feedforward_layernorm(x))
+        x = x + self.post_feedforward_layernorm(y)
+        if self.out_scale is not None:
+            x = x * self.out_scale.to(x.dtype)
+        return x
+
+    def forward(self, x: torch.Tensor, batch: ForwardBatch,
+                cache: Optional[PagedKVCache]) -> torch.Tensor:
+        return self._reste(x, self.self_attn(self.input_layernorm(x), batch, cache))
+
+    def decode_fixed(self, x: torch.Tensor, positions: torch.Tensor,
+                     slots: torch.Tensor, block_tables: torch.Tensor,
+                     seq_lens: torch.Tensor, max_pos: int,
+                     cache: PagedKVCache, q_len: int = 1) -> torch.Tensor:
+        a = self.self_attn.decode_fixed(self.input_layernorm(x), positions,
+                                        slots, block_tables, seq_lens,
+                                        max_pos, cache, q_len)
+        return self._reste(x, a)
+
+    def prefetch(self) -> None:
+        for m in self.modules():
+            if isinstance(m, QuantLinear) and m.streamed is not None:
+                m.prefetch()
+
+
 class ACVRamModel(nn.Module):
     """Le modèle assemblé, ses couches réparties sur plusieurs appareils."""
 
@@ -770,8 +849,15 @@ class ACVRamModel(nn.Module):
         head_dev = getattr(self.lm_head.qweight, "qweight", None)
         target = head_dev.device if head_dev is not None else x.device
         logits = self.lm_head(x.to(target))
-        return logits if self.spec.logits_scaling == 1.0 \
-            else logits / self.spec.logits_scaling
+        return self._logits_finaux(logits)
+
+    def _logits_finaux(self, logits: torch.Tensor) -> torch.Tensor:
+        if self.spec.logits_scaling != 1.0:
+            logits = logits / self.spec.logits_scaling
+        c = self.spec.final_logit_softcapping
+        if c:
+            logits = torch.tanh(logits.to(torch.float32) / c) * c
+        return logits
 
     def decode_fixed(self, x: torch.Tensor, positions: torch.Tensor,
                      slots: torch.Tensor, block_tables: torch.Tensor,
@@ -787,9 +873,7 @@ class ACVRamModel(nn.Module):
             x = layer.decode_fixed(x, positions, slots, block_tables,
                                    seq_lens, max_pos, self.caches.get(i), q_len)
         x = self.norm(x)
-        logits = self.lm_head(x)
-        return logits if self.spec.logits_scaling == 1.0 \
-            else logits / self.spec.logits_scaling
+        return self._logits_finaux(self.lm_head(x))
 
     @property
     def nbytes(self) -> int:
