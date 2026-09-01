@@ -214,3 +214,18 @@ libérer explicitement les tenseurs d'origine.
    cache de pages coûtait 90-150 ms de lecture disque dans `_fill`. Copie
    contiguë en RAM épinglée au chargement : Ornith 48-89 → **100 t/s**
    stable (p99 10,7 ms). C'était la cause de l'« instabilité » ci-dessus.
+
+### Tableau final après le plongement résident — 1er septembre 2026, 19 h
+
+| modèle | départ (31/08) | serveur maintenant |
+|---|---|---|
+| kimi-linear 35B (KDA+MLA) | 39 t/s | **132** |
+| Agents 4B kimi (GDN) | 49 | **111** |
+| Ornith 35B (GDN+MoE 256) | 25 | **100** |
+| Qwen3-Coder-30B-A3B (MoE) | 49 | **85** |
+| Nemo-12B (dense) | 28 | **58** |
+| Qwen3-14B (dense) | 36 | **50** |
+| Cydonia-24B (dense) | 35 | **44** |
+
+Chiffres en flux HTTP, mesurés par le menu (`acvram-serveur`), prompt de
+200 jetons. L'écart moteur/serveur est désormais de 5 % sur kimi-linear.
