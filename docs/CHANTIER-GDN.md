@@ -244,3 +244,14 @@ Chiffres en flux HTTP, mesurés par le menu (`acvram-serveur`), prompt de
 - Empilements INT8 (même entrée) : q/k/v et f_a/g_a de KDA, gate/up des MLP
   (experts partagés, denses), q/kv_a de la MLA — 158 t/s.
 - Serveur : kimi-linear **152**, Ornith **114**, 4B **112**, Coder-30B **90**.
+- Routage MoE en un noyau (`moe_route` : scores, biais, top-k par argmax
+  itéré, renormalisation, échelle — 7 lancements en moins par couche) :
+  kimi-linear **164 t/s** (6,1 ms/pas), Ornith 121, mêmes experts et poids
+  qu'en torch à 1e-7.
+
+Postes restants du pas (6,1 ms) : GEMV int8 2,2 ms (plancher de rampe DRAM
+sur 216 projections), MoE 1,5 ms, KDA 0,5, MLA 0,3, normes 0,3, reliquat
+élémentaire 0,3 — chaque fusion supplémentaire vaut moins de 3 %. Le gain
+suivant est structurel : vérification spéculative à formes fixes pour les
+hybrides (états récurrents à photographier par position pour le retour
+arrière) — rentable sur les sorties répétitives (code, agents).

@@ -41,6 +41,7 @@
 
 #include <torch/extension.h>
 #include <cstdlib>
+#include <vector>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
@@ -1602,6 +1603,104 @@ torch::Tensor rmsnorm_bf16(torch::Tensor x, torch::Tensor w, double eps) {
     return y;
 }
 
+
+// ============================================================================
+// Routage MoE en un lancement : scores (softmax ou sigmoïde), biais de
+// sélection, top-k par argmax itéré, poids renormalisés et mis à l'échelle.
+// Un bloc par jeton, E <= 1024 experts en mémoire partagée. Remplace
+// sigmoid/softmax + add + topk + gather + sum + div + mul (7 lancements).
+// ============================================================================
+__global__ void moe_route_kernel(const float *__restrict__ logits,   // [T, E]
+                                 const float *__restrict__ bias,     // [E] ou nul
+                                 float *__restrict__ topw,           // [T, k]
+                                 int *__restrict__ topi,             // [T, k]
+                                 int E, int k, int sigmoid, int renorm,
+                                 float scale) {
+    __shared__ float probs[1024];
+    __shared__ float sel[1024];
+    __shared__ float red_v[32];
+    __shared__ int red_i[32];
+    __shared__ int choix[32];
+    const int t = blockIdx.x, tid = threadIdx.x, T = blockDim.x;
+    const float *lg = logits + (long)t * E;
+    if (sigmoid) {
+        for (int i = tid; i < E; i += T) probs[i] = 1.f / (1.f + __expf(-lg[i]));
+    } else {
+        float m = -INFINITY;
+        for (int i = tid; i < E; i += T) m = fmaxf(m, lg[i]);
+        for (int o = 16; o > 0; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
+        if ((tid & 31) == 0) red_v[tid >> 5] = m;
+        __syncthreads();
+        m = -INFINITY;
+        for (int w = 0; w < T / 32; ++w) m = fmaxf(m, red_v[w]);
+        __syncthreads();
+        float sm = 0.f;
+        for (int i = tid; i < E; i += T) { const float e = __expf(lg[i] - m); probs[i] = e; sm += e; }
+        for (int o = 16; o > 0; o >>= 1) sm += __shfl_xor_sync(0xffffffffu, sm, o);
+        if ((tid & 31) == 0) red_v[tid >> 5] = sm;
+        __syncthreads();
+        sm = 0.f;
+        for (int w = 0; w < T / 32; ++w) sm += red_v[w];
+        __syncthreads();
+        for (int i = tid; i < E; i += T) probs[i] /= sm;
+    }
+    __syncthreads();
+    for (int i = tid; i < E; i += T) sel[i] = probs[i] + (bias ? bias[i] : 0.f);
+    __syncthreads();
+    for (int j = 0; j < k; ++j) {
+        float bv = -INFINITY; int bi = 0x7fffffff;
+        for (int i = tid; i < E; i += T) {
+            const float v = sel[i];
+            if (v > bv || (v == bv && i < bi)) { bv = v; bi = i; }
+        }
+        for (int o = 16; o > 0; o >>= 1) {
+            const float ov = __shfl_xor_sync(0xffffffffu, bv, o);
+            const int oi = __shfl_xor_sync(0xffffffffu, bi, o);
+            if (ov > bv || (ov == bv && oi < bi)) { bv = ov; bi = oi; }
+        }
+        if ((tid & 31) == 0) { red_v[tid >> 5] = bv; red_i[tid >> 5] = bi; }
+        __syncthreads();
+        if (tid == 0) {
+            for (int w = 1; w < T / 32; ++w)
+                if (red_v[w] > red_v[0] || (red_v[w] == red_v[0] && red_i[w] < red_i[0])) {
+                    red_v[0] = red_v[w]; red_i[0] = red_i[w];
+                }
+            choix[j] = red_i[0];
+            sel[red_i[0]] = -INFINITY;
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        float somme = 0.f;
+        for (int j = 0; j < k; ++j) somme += probs[choix[j]];
+        const float f = (renorm ? 1.f / somme : 1.f) * scale;
+        for (int j = 0; j < k; ++j) {
+            topw[(long)t * k + j] = probs[choix[j]] * f;
+            topi[(long)t * k + j] = choix[j];
+        }
+    }
+}
+
+std::vector<torch::Tensor> moe_route(torch::Tensor logits, torch::Tensor bias,
+                                     int64_t k, bool sigmoid, bool renorm,
+                                     double scale) {
+    CHECK_CUDA(logits); ACVRAM_DEVICE_GUARD(logits);
+    auto lg = logits.to(torch::kFloat).contiguous();
+    const int T = lg.size(0), E = lg.size(1);
+    TORCH_CHECK(E <= 1024 && k <= 32, "moe_route : E <= 1024 et k <= 32");
+    auto topw = torch::empty({T, k}, lg.options());
+    auto topi = torch::empty({T, k}, lg.options().dtype(torch::kInt32));
+    const float *bp = bias.defined() && bias.numel() > 0
+                      ? bias.to(torch::kFloat).contiguous().data_ptr<float>() : nullptr;
+    auto stream = at::cuda::getCurrentCUDAStream();
+    moe_route_kernel<<<T, 256, 0, stream>>>(lg.data_ptr<float>(), bp,
+                                            topw.data_ptr<float>(), topi.data_ptr<int>(),
+                                            E, (int)k, sigmoid ? 1 : 0, renorm ? 1 : 0,
+                                            (float)scale);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return {topw, topi};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("nvfp4_dequant", &nvfp4_dequant, "NVFP4 -> matrice dense");
     m.def("nvfp4_gemv", &nvfp4_gemv, "NVFP4 : dequantification + produit fusionnes");
@@ -1615,6 +1714,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "MoE NVFP4 : gate et up fusionnes, sortie SiLU(gate)*up");
     m.def("int4_gemv_grouped", &int4_gemv_grouped,
           "INT4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
+    m.def("moe_route", &moe_route, "routage MoE : scores, biais, top-k, poids");
     m.def("rmsnorm_bf16", &rmsnorm_bf16, "RMSNorm bf16 fusionnee (variance fp32)");
     m.def("kda_decode", &kda_decode, "KDA : pas de decodage fusionne (une sequence)");
     m.def("mla_decode", &mla_decode, "MLA absorbee : scores + softmax + lecture latente");

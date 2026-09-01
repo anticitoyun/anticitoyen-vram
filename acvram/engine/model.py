@@ -456,18 +456,29 @@ class MoEBlock(nn.Module):
             self._router_w32 = w32
         logits = (F.linear(x.to(torch.float32), w32) if w32 is not None
                   else self.router(x.to(torch.float32)))
-        if self.scoring == "sigmoid":
-            scores = torch.sigmoid(logits)
-            sel = scores if self.score_bias is None else scores + self.score_bias
-            _, topi = torch.topk(sel, self.top_k, dim=-1)
-            topw = scores.gather(-1, topi)
+        ext = kernels.get_extension() if x.is_cuda else None
+        if (ext is not None and hasattr(ext, "moe_route")
+                and logits.shape[-1] <= 1024 and self.top_k <= 32):
+            # un lancement : scores, biais, top-k, renormalisation, échelle
+            bias = self.score_bias if self.score_bias is not None \
+                else torch.empty(0, device=x.device)
+            topw, topi = ext.moe_route(logits, bias, self.top_k,
+                                       self.scoring == "sigmoid",
+                                       bool(self.norm_topk_prob),
+                                       float(self.routed_scale))
         else:
-            weights = F.softmax(logits, dim=-1)
-            topw, topi = torch.topk(weights, self.top_k, dim=-1)
-        if self.norm_topk_prob:
-            topw = topw / topw.sum(dim=-1, keepdim=True)
-        if self.routed_scale != 1.0:
-            topw = topw * self.routed_scale
+            if self.scoring == "sigmoid":
+                scores = torch.sigmoid(logits)
+                sel = scores if self.score_bias is None else scores + self.score_bias
+                _, topi = torch.topk(sel, self.top_k, dim=-1)
+                topw = scores.gather(-1, topi)
+            else:
+                weights = F.softmax(logits, dim=-1)
+                topw, topi = torch.topk(weights, self.top_k, dim=-1)
+            if self.norm_topk_prob:
+                topw = topw / topw.sum(dim=-1, keepdim=True)
+            if self.routed_scale != 1.0:
+                topw = topw * self.routed_scale
         topw = topw.to(x.dtype)
 
         # Chemin groupé : trois lancements pour toute la couche, quel que soit
