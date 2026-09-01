@@ -216,6 +216,13 @@ class GGUFFile:
             t = self.load(gname)
             if hname.endswith("shared_expert_gate.weight") and t.dim() == 1:
                 t = t.reshape(1, -1)      # vecteur GGUF -> Linear(d, 1)
+            if hname.endswith("linear_attn.ba.weight"):
+                # qwen3next : b et a fusionnés (in_proj_ba, b d'abord)
+                nv_ = t.shape[0] // 2
+                base = hname[: -len("ba.weight")]
+                yield base + "beta.weight", t[:nv_].contiguous()
+                yield base + "alpha.weight", t[nv_:].contiguous()
+                continue
             if kimi_rec is not None:
                 if ".conv1d_" in hname:   # [d_inner, 1, k] -> [d_inner, k]
                     t = t.reshape(t.shape[0], t.shape[-1])
@@ -280,7 +287,7 @@ class GGUFFile:
 
     def check_executable(self) -> None:
         a = self.arch()
-        if a in ("qwen35", "qwen35moe", "kimi-linear") \
+        if a in ("qwen35", "qwen35moe", "qwen3next", "kimi-linear") \
                 and os.environ.get("ACVRAM_GDN"):
             return                        # chemin Gated DeltaNet (expérimental)
         if a in self.UNSUPPORTED or any(".ssm_" in n for n in self.tensors):
@@ -347,7 +354,7 @@ class GGUFFile:
             if g("expert_shared_feed_forward_length"):
                 cfg["shared_expert_intermediate_size"] = int(
                     g("expert_shared_feed_forward_length"))
-        if a in ("qwen35", "qwen35moe"):
+        if a in ("qwen35", "qwen35moe", "qwen3next"):
             interval = int(g("full_attention_interval", 4))
             # les couches MTP (nextn) sont stockées en fin de pile : le modèle
             # principal s'arrête avant elles
@@ -589,6 +596,7 @@ _LAYER_GDN = {
     "attn_qkv": "linear_attn.qkv",
     "attn_gate": "linear_attn.gate",
     "ssm_alpha": "linear_attn.alpha",
+    "ssm_ba": "linear_attn.ba",
     "ssm_beta": "linear_attn.beta",
     "ssm_out": "linear_attn.out",
     "ssm_conv1d": "linear_attn.conv1d",
