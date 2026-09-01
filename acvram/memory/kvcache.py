@@ -77,6 +77,7 @@ class BlockAllocator:
         self.hits = 0
         self.misses = 0
         self.evictions = 0
+        self.spill_cb = None              # branche par le moteur (etage hote)
 
     # -- capacity --------------------------------------------------------
     @property
@@ -114,11 +115,18 @@ class BlockAllocator:
         return out
 
     def _evict_one(self) -> int:
-        """Recycle le bloc en cache libéré le moins récemment."""
+        """Recycle le bloc en cache libéré le moins récemment.
+
+        Si un déversoir est branché (``spill_cb``), le contenu du bloc part
+        vers l'étage hôte avant le recyclage — il reste retrouvable par son
+        hachage, au prix d'une remontée PCIe au lieu d'un prefill.
+        """
         blk, _ = self._lru.popitem(last=False)
         h = self._hash_of.pop(blk, None)
         if h is not None and self._by_hash.get(h) == blk:
             del self._by_hash[h]
+            if self.spill_cb is not None:
+                self.spill_cb(blk, h)
         self.evictions += 1
         return blk
 
@@ -259,6 +267,66 @@ class KVCacheConfig:
         return self.num_blocks * self.block_size
 
 
+
+class HostKVPool:
+    """Étage hôte du cache KV : les blocs de préfixe évincés de la VRAM
+    descendent ici (mémoire épinglée, toujours en INT8 + échelles) au lieu
+    d'être perdus, et remontent quand une requête les redemande.
+
+    C'est le troisième étage de la hiérarchie — VRAM chaude, RAM froide — et
+    la brique qui permet aux longues conversations de garder leur préfixe :
+    recharger un bloc par le PCIe (~30 µs) coûte trois ordres de grandeur de
+    moins que recalculer son prefill.
+
+    Le pool est indexé par le hachage chaîné des blocs, le même que le cache
+    de préfixe VRAM : un bloc n'y est stocké qu'évincé *publié*, donc
+    identifiable. Éviction LRU sous budget d'octets.
+    """
+
+    def __init__(self, budget_bytes: int) -> None:
+        from collections import OrderedDict
+        self.budget = budget_bytes
+        self._data: "OrderedDict[int, list[tuple]]" = OrderedDict()
+        self._bytes = 0
+        self.spills = 0
+        self.refills = 0
+        self.evictions = 0
+
+    @staticmethod
+    def _tuple_bytes(t: tuple) -> int:
+        return sum(x.numel() * x.element_size() for x in t if x is not None)
+
+    def store(self, chained_hash: int, per_layer: list[tuple]) -> None:
+        if self.budget <= 0 or chained_hash in self._data:
+            return
+        taille = sum(self._tuple_bytes(t) for t in per_layer)
+        while self._bytes + taille > self.budget and self._data:
+            _, vieux = self._data.popitem(last=False)
+            self._bytes -= sum(self._tuple_bytes(t) for t in vieux)
+            self.evictions += 1
+        if self._bytes + taille > self.budget:
+            return
+        self._data[chained_hash] = per_layer
+        self._bytes += taille
+        self.spills += 1
+
+    def fetch(self, chained_hash: int):
+        got = self._data.get(chained_hash)
+        if got is not None:
+            self._data.move_to_end(chained_hash)
+            self.refills += 1
+        return got
+
+    def __contains__(self, chained_hash: int) -> bool:
+        return chained_hash in self._data
+
+    def stats(self) -> dict:
+        return {"blocks": len(self._data),
+                "bytes": self._bytes, "budget": self.budget,
+                "spills": self.spills, "refills": self.refills,
+                "evictions": self.evictions}
+
+
 class PagedKVCache:
     """Le cache d'une seule couche, résidant sur un seul appareil."""
 
@@ -332,6 +400,23 @@ class PagedKVCache:
             ks, vs = ks[:length], vs[:length]
         return (self._dequantize(k[:length], ks, dtype),
                 self._dequantize(v[:length], vs, dtype))
+
+    def export_block(self, blk: int) -> tuple:
+        """Copie un bloc vers l'hôte (mémoire épinglée), échelles comprises."""
+        def pin(t):
+            return t.detach().to("cpu", non_blocking=False).pin_memory() \
+                if t.is_cuda else t.detach().clone()
+        return (pin(self.k[blk]), pin(self.v[blk]),
+                None if self.k_scale is None else pin(self.k_scale[blk]),
+                None if self.v_scale is None else pin(self.v_scale[blk]))
+
+    def import_block(self, blk: int, data: tuple) -> None:
+        k, v, ks, vs = data
+        self.k[blk].copy_(k, non_blocking=True)
+        self.v[blk].copy_(v, non_blocking=True)
+        if self.k_scale is not None and ks is not None:
+            self.k_scale[blk].copy_(ks, non_blocking=True)
+            self.v_scale[blk].copy_(vs, non_blocking=True)
 
     def gather_fixed(self, block_tables: torch.Tensor,
                      dtype: torch.dtype = torch.float16

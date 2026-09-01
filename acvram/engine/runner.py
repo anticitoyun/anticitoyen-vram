@@ -89,6 +89,7 @@ class EngineStats:
     running: int = 0
     waiting: int = 0
     kv_blocks_free: int = 0
+    kv_refills: int = 0
     kv_blocks_total: int = 0
     cached_prompt_tokens: int = 0
     accepted_tokens: int = 0
@@ -162,7 +163,8 @@ class Engine:
                  max_batch_size: int = 16, max_model_len: int = 8192,
                  enable_prefix_cache: bool = True,
                  speculator: Any = None, spec_k: int = 4,
-                 enable_cuda_graphs: bool = True) -> None:
+                 enable_cuda_graphs: bool = True,
+                 host_kv_gib: float = 0.0) -> None:
         self.loaded = loaded
         self.model = loaded.model
         self.spec = loaded.spec
@@ -180,6 +182,18 @@ class Engine:
         self.stats = EngineStats(kv_blocks_total=n_blocks)
         self._lock = threading.Lock()
         self._eos = self._eos_ids()
+        # Étage hôte du cache KV : les blocs de préfixe évincés descendent en
+        # RAM et remontent au réemploi, au lieu d'être recalculés.
+        self.host_kv = None
+        if host_kv_gib > 0 and self.model.caches:
+            from ..memory.kvcache import HostKVPool
+            self.host_kv = HostKVPool(int(host_kv_gib * 1024 ** 3))
+
+            def _deverser(blk: int, h: int) -> None:
+                self.host_kv.store(h, [c.export_block(blk)
+                                       for c in self.model.caches.values()])
+            self.allocator.spill_cb = _deverser
+
         self.graphs = None
         if enable_cuda_graphs:
             from .graphs import GraphRunner
@@ -249,6 +263,19 @@ class Engine:
                 hashes = BlockAllocator.block_hashes(seq.prompt_ids, BLOCK_SIZE)
                 limit = max(0, (len(seq.prompt_ids) - 1) // BLOCK_SIZE)
                 matched = self.allocator.match_prefix(hashes, limit=limit)
+                # L'étage hôte prolonge la suite : chaque bloc suivant présent
+                # en RAM remonte dans un bloc VRAM fraîchement alloué.
+                if self.host_kv is not None:
+                    while len(matched) < (limit or 0):
+                        data = self.host_kv.fetch(hashes[len(matched)])
+                        if data is None or self.allocator.num_free < 1:
+                            break
+                        blk = self.allocator.allocate(1)[0]
+                        for c, d in zip(self.model.caches.values(), data):
+                            c.import_block(blk, d)
+                        self.allocator.register(blk, hashes[len(matched)])
+                        matched.append(blk)
+                        self.stats.kv_refills += 1
                 seq.blocks = list(matched)
                 seq.cached_len = len(matched) * BLOCK_SIZE
                 seq.hashes = list(hashes[:len(matched)])

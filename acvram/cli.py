@@ -372,7 +372,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
                     max_model_len=args.max_model_len,
                     enable_prefix_cache=not args.no_prefix_cache,
                     speculator=speculator, spec_k=args.spec_k,
-                    enable_cuda_graphs=not args.no_cuda_graphs)
+                    enable_cuda_graphs=not args.no_cuda_graphs,
+                    host_kv_gib=args.host_kv_gib)
     if engine.graphs is not None:
         print("  graphes CUDA : actifs (decodage)")
     print(f"  charge en {time.time() - t0:.1f} s, "
@@ -544,6 +545,10 @@ def build_parser() -> argparse.ArgumentParser:
                                            "(par defaut : le GPU le plus oisif)")
     sv.add_argument("--spec-k", type=int, default=4,
                     help="jetons proposes par etape")
+    sv.add_argument("--host-kv-gib", type=float, default=8.0,
+                    help="etage hote du cache KV en Gio (0 = desactive) : les "
+                         "prefixes evinces de la VRAM descendent en RAM et "
+                         "remontent au reemploi au lieu d'etre recalcules")
     sv.add_argument("--no-cuda-graphs", action="store_true",
                     help="rejoue chaque pas de decodage en eager plutot qu'en "
                          "graphe CUDA capture")

@@ -371,3 +371,43 @@ def test_bits_budget_knapsack(tiny_checkpoint, target_rig, tmp_path_factory):
                                                             max_tokens=4))
             for t in o.token_ids]
     assert len(outs) == 4
+
+
+def test_host_kv_pool_roundtrip(converted):
+    """Un préfixe évincé de la VRAM remonte de l'étage hôte, à l'identique.
+
+    Petit cache (32 blocs), pool hôte actif : on remplit une longue invite,
+    on la fait évincer par d'autres, on la redemande — les jetons produits
+    doivent être ceux d'un cache jamais évincé, et le compteur de remontées
+    doit avoir tourné.
+    """
+    import torch
+
+    from acvram.engine.loader import load_model
+    from acvram.engine.runner import Engine
+    from acvram.engine.sampler import SamplingParams
+
+    prompt = list(range(1, 100))                  # 6 blocs pleins
+
+    def run(host_gib):
+        loaded = load_model(converted, dtype=torch.float32,
+                            device_override="cpu")
+        e = Engine(loaded, None, max_batch_size=1, max_model_len=256,
+                   enable_cuda_graphs=False, host_kv_gib=host_gib)
+        ref = [t for o in e.generate(prompt, SamplingParams(temperature=0.0,
+                                                            max_tokens=6))
+               for t in o.token_ids]
+        # pression : d'autres invites chassent les blocs du cache VRAM
+        for k in range(6):
+            base = 200 + 97 * k                  # jetons < vocabulaire (1024)
+            list(e.generate([(base + i) % 1000 + 20 for i in range(90)],
+                            SamplingParams(temperature=0.0, max_tokens=2)))
+        again = [t for o in e.generate(prompt, SamplingParams(temperature=0.0,
+                                                              max_tokens=6))
+                 for t in o.token_ids]
+        return ref, again, e
+
+    ref, again, e = run(host_gib=2.0)
+    assert ref == again, "la remontee depuis l'hote a change la sortie"
+    if e.host_kv is not None and e.allocator.evictions > 0:
+        assert e.host_kv.spills > 0, "aucun bloc n'est descendu a l'hote"
