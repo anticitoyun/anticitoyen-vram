@@ -196,8 +196,65 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 if manifest["tensors"].get(p + "mlp.shared_expert_gate.weight"):
                     shared_gate = reader.get(
                         p + "mlp.shared_expert_gate.weight").to(dtype).to(d)
+            score_bias = None
+            if manifest["tensors"].get(p + "mlp.gate.e_score_correction_bias"):
+                score_bias = reader.get(
+                    p + "mlp.gate.e_score_correction_bias").float().to(d)
             return MoEBlock(router, experts, spec.num_experts_per_tok or 2,
-                            shared, shared_gate=shared_gate)
+                            shared, shared_gate=shared_gate,
+                            scoring=spec.router_scoring,
+                            score_bias=score_bias,
+                            routed_scale=spec.routed_scaling_factor)
+
+        est_kimi = spec.model_type == "kimi_linear"
+        if est_kimi:
+            petit = lambda suffix: reader.get(p + suffix).to(torch.float32).to(d)
+            petit16 = lambda suffix: reader.get(p + suffix).to(dtype).to(d)
+            if spec.layer_types[i] == "linear_attention":
+                from .kda import KimiDeltaAttention
+                bloc = KimiDeltaAttention(
+                    q_proj=lin("linear_attn.q_proj.weight", False),
+                    k_proj=lin("linear_attn.k_proj.weight", False),
+                    v_proj=lin("linear_attn.v_proj.weight", False),
+                    out_proj=lin("linear_attn.out_proj.weight", False),
+                    f_a=lin("linear_attn.f_a.weight", False),
+                    f_b=lin("linear_attn.f_b.weight", False),
+                    g_a=lin("linear_attn.g_a.weight", False),
+                    g_b=lin("linear_attn.g_b.weight", False),
+                    beta=lin("linear_attn.beta.weight", False),
+                    conv_q=petit("linear_attn.conv1d_q.weight"),
+                    conv_k=petit("linear_attn.conv1d_k.weight"),
+                    conv_v=petit("linear_attn.conv1d_v.weight"),
+                    dt_bias=petit("linear_attn.dt_bias.weight"),
+                    a=petit("linear_attn.a.weight"),
+                    norm_weight=petit("linear_attn.norm.weight"),
+                    num_heads=spec.linear_num_value_heads,
+                    head_dim=spec.linear_value_head_dim,
+                    eps=spec.rms_norm_eps).to(d)
+            else:
+                from .mla import MLAttention
+                bloc = MLAttention(
+                    q_proj=lin("self_attn.q_proj.weight", False),
+                    kv_a_proj=lin("self_attn.kv_a_proj_with_mqa.weight", False),
+                    o_proj=lin("self_attn.o_proj.weight", False),
+                    kv_a_norm=petit16("self_attn.kv_a_layernorm.weight"),
+                    k_b=petit16("self_attn.k_b_proj.weight"),
+                    v_b=petit16("self_attn.v_b_proj.weight"),
+                    num_heads=spec.num_attention_heads,
+                    qk_nope=spec.qk_nope_head_dim,
+                    qk_rope=spec.qk_rope_head_dim,
+                    kv_lora_rank=spec.kv_lora_rank,
+                    v_dim=spec.v_head_dim,
+                    eps=spec.rms_norm_eps).to(d)
+            mlp_kimi = faire_mlp()
+            in_norm = RMSNorm(reader.get(p + "input_layernorm.weight"
+                                         ).to(dtype).to(d), spec.rms_norm_eps)
+            post_norm = RMSNorm(
+                reader.get(p + "post_attention_layernorm.weight"
+                           ).to(dtype).to(d), spec.rms_norm_eps)
+            layers.append(DecoderLayerGDN(i, bloc, mlp_kimi,
+                                          in_norm, post_norm, d))
+            continue
 
         est_gdn = bool(spec.layer_types) and \
             spec.layer_types[i] == "linear_attention"

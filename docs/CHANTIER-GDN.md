@@ -85,5 +85,35 @@ attendue : llama.cpp exécute l'IQ4_XS, acvram le NVFP4 reconverti, et le
 routage à 256 experts amplifie les écarts d'arrondi. Les deux suites sont
 grammaticales et factuelles. Alias : `acvram-ornith-35b-kimi`.
 
-Reste : kimi-linear (KDA, autre récurrence). Le flag ACVRAM_GDN=1 protège
-les conversions qwen35/qwen35moe tant que la couverture KDA n'existe pas.
+## kimi-linear (Kimi-Linear-REAP-35B-A3B) — 1er septembre 2026
+
+KDA + MLA + routeur DeepSeek implémentés (`engine/kda.py`, `engine/mla.py`),
+**24/24 puis 47/64 jetons greedy identiques à llama.cpp** avant un
+quasi-ex-æquo (Q4_K vs NVFP4). Ce qu'il a fallu établir :
+
+1. **KDA** (trad. llama.cpp kimi-linear.cpp + delta-net-base.cpp) : conv
+   causales séparées q/k/v (+SiLU), q/k L2-normalisés par tête, q/√d,
+   ``g1 = ssm_a · softplus(f_b(f_a(x)) + dt_bias)`` par canal,
+   ``β = sigmoid(beta(x))`` par tête, sortie RMSNorm×sigmoid(g_b(g_a(x))).
+   **La décroissance exp(g1) porte l'axe CLÉ de S** (convention fla/vLLM) —
+   ma lecture du broadcast ggml disait l'axe de sortie : l'autre axe donne
+   7 jetons justes puis des boucles. Tranché par bissection.
+2. **MLA absorbée, sans RoPE** : cache latent [t, 576] par séquence (rank 512
+   + rope 64), q_nope absorbé par k_b, valeurs relues dans l'espace latent
+   puis v_b. Les couches MLA passent par le même magasin d'états que les
+   couches récurrentes — aucun cache paginé dans ce modèle.
+3. **Routeur DeepSeek** : sigmoïde + biais de sélection (exp_probs_b, hors
+   poids) + renormalisation + ×2,446 ; expert partagé sans porte ; couche 0
+   dense (leading_dense_block_count).
+4. **EOG du gabarit** : le GGUF ne déclare qu'un eos (163585) mais le chat
+   Kimi clôt par ``<|im_end|>`` (163586) — heuristique d'export ajoutée.
+5. **Bug de gabarit générique découvert** : `_render_jinja` passait
+   ``bos_token`` deux fois (explicite + **config) → TypeError → repli ChatML
+   silencieux. Invisible sur les modèles ChatML (qwen), fatal pour le format
+   ``<|im_user|>…<|im_middle|>`` de Kimi. Corrigé.
+
+Qualité : le modèle lui-même (REAP-élagué, abliterated) est fragile en
+factuel — llama.cpp répond « Brisbane » à la capitale de l'Australie sur le
+même GGUF. Fiche ★★, 39 t/s, alias `acvram-kimi-linear-35b`.
+
+Le flag ACVRAM_GDN=1 couvre désormais qwen35, qwen35moe et kimi-linear.

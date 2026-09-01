@@ -93,6 +93,14 @@ class ModelSpec:
     linear_conv_kernel_dim: int = 4
     rotary_dim: Optional[int] = None      # RoPE partiel (None = tête entière)
     attn_output_gate: bool = False
+    # kimi-linear : KDA + MLA + routeur DeepSeek
+    model_type: str = ""
+    kv_lora_rank: int = 0
+    qk_rope_head_dim: int = 0
+    qk_nope_head_dim: int = 0
+    v_head_dim: int = 0
+    router_scoring: str = "softmax"
+    routed_scaling_factor: float = 1.0
     layers: list[LayerSpec] = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
@@ -242,7 +250,7 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
     # qwen3_next est désormais exécutable (couches Gated DeltaNet) quand la
     # configuration porte nos champs layer_types/linear_* ; les autres
     # hybrides restent refusés.
-    if mt == "qwen3_next" and cfg.get("linear_num_value_heads"):
+    if mt in ("qwen3_next", "kimi_linear") and cfg.get("linear_num_value_heads"):
         pass
     elif (mt in ("kimi_linear", "qwen3_5", "qwen3_5_moe", "nemotron_h",
                "falcon_h1", "lfm2_moe", "mamba", "mamba2", "jamba")
@@ -284,6 +292,13 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         linear_conv_kernel_dim=int(cfg.get("linear_conv_kernel_dim") or 4),
         rotary_dim=cfg.get("rotary_dim"),
         attn_output_gate=bool(cfg.get("attn_output_gate")),
+        model_type=mt,
+        kv_lora_rank=int(cfg.get("kv_lora_rank") or 0),
+        qk_rope_head_dim=int(cfg.get("qk_rope_head_dim") or 0),
+        qk_nope_head_dim=int(cfg.get("qk_nope_head_dim") or 0),
+        v_head_dim=int(cfg.get("v_head_dim") or 0),
+        router_scoring=str(cfg.get("router_scoring") or "softmax"),
+        routed_scaling_factor=float(cfg.get("routed_scaling_factor") or 1.0),
         eos_token_id=_as_id_list(cfg.get("eos_token_id")),
         bos_token_id=(cfg.get("bos_token_id")
                       if isinstance(cfg.get("bos_token_id"), int) else None),

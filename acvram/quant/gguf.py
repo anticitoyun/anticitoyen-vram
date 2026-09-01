@@ -145,6 +145,10 @@ class GGUFFile:
         """Tenseurs sous leurs noms Hugging Face, experts MoE éclatés."""
         gdn = self.arch() in ("qwen35", "qwen35moe", "qwen3next")
         detile = self.arch() in ("qwen35", "qwen35moe")
+        kimi_rec = None
+        if self.arch() == "kimi-linear":
+            hkv = self.kv.get("kimi-linear.attention.head_count_kv") or []
+            kimi_rec = {i for i, n in enumerate(hkv) if int(n) == 0}
         # couches MTP (nextn) en fin de pile : ignorées entièrement
         nextn = int(self.kv.get(f"{self.arch()}.nextn_predict_layers", 0) or 0)
         premiere_mtp = (int(self.kv.get(f"{self.arch()}.block_count", 0))
@@ -177,12 +181,17 @@ class GGUFFile:
             if premiere_mtp >= 0 and gname.startswith("blk."):
                 if int(gname.split(".", 2)[1]) >= premiere_mtp:
                     continue
-            hname = _map_name(gname, gdn)
+            hname = _map_name(gname, gdn, kimi_rec)
             if hname is None:
                 continue
             t = self.load(gname)
             if hname.endswith("shared_expert_gate.weight") and t.dim() == 1:
                 t = t.reshape(1, -1)      # vecteur GGUF -> Linear(d, 1)
+            if kimi_rec is not None:
+                if ".conv1d_" in hname:   # [d_inner, 1, k] -> [d_inner, k]
+                    t = t.reshape(t.shape[0], t.shape[-1])
+                elif hname.endswith("linear_attn.a.weight"):
+                    t = t.reshape(-1)     # [nh, 1] -> [nh]
             if detile and ".linear_attn." in hname:
                 if hname.endswith("qkv.weight"):
                     kd = nk * dk
@@ -224,7 +233,8 @@ class GGUFFile:
 
     def check_executable(self) -> None:
         a = self.arch()
-        if a in ("qwen35", "qwen35moe") and os.environ.get("ACVRAM_GDN"):
+        if a in ("qwen35", "qwen35moe", "kimi-linear") \
+                and os.environ.get("ACVRAM_GDN"):
             return                        # chemin Gated DeltaNet (expérimental)
         if a in self.UNSUPPORTED or any(".ssm_" in n for n in self.tensors):
             raise ValueError(
@@ -259,7 +269,10 @@ class GGUFFile:
             "intermediate_size": int(g("feed_forward_length", 11008)),
             "num_hidden_layers": int(g("block_count", 32)),
             "num_attention_heads": heads,
-            "num_key_value_heads": int(g("attention.head_count_kv", heads)),
+            # head_count_kv peut être une liste (hybrides) : prendre le max
+            "num_key_value_heads": (lambda v: int(max(v) or heads)
+                                    if isinstance(v, list) else int(v))(
+                g("attention.head_count_kv", heads)),
             "max_position_embeddings": int(g("context_length", 4096)),
             "rms_norm_eps": float(g("attention.layer_norm_rms_epsilon", 1e-5)),
             "rope_theta": float(g("rope.freq_base", 10000.0)),
@@ -298,6 +311,30 @@ class GGUFFile:
             cfg["rotary_dim"] = int(g("rope.dimension_count", 0)) or None
             cfg["attn_output_gate"] = True
 
+        if a == "kimi-linear":
+            hkv = self.kv.get("kimi-linear.attention.head_count_kv") or []
+            cfg["model_type"] = "kimi_linear"
+            cfg["architectures"] = ["KimiLinearForCausalLM"]
+            cfg.pop("head_dim", None)      # key_length (576) est la clé MLA
+            cfg["layer_types"] = [
+                "linear_attention" if int(n) == 0 else "full_attention"
+                for n in hkv]
+            hd = int(g("kda.head_dim", 128))
+            cfg["linear_num_value_heads"] = int(g("attention.head_count", 32))
+            cfg["linear_num_key_heads"] = cfg["linear_num_value_heads"]
+            cfg["linear_key_head_dim"] = hd
+            cfg["linear_value_head_dim"] = hd
+            cfg["linear_conv_kernel_dim"] = int(g("ssm.conv_kernel", 4))
+            cfg["kv_lora_rank"] = int(g("attention.kv_lora_rank", 512))
+            cfg["qk_rope_head_dim"] = int(g("rope.dimension_count", 64))
+            cfg["qk_nope_head_dim"] = (int(g("attention.key_length_mla", 192))
+                                       - cfg["qk_rope_head_dim"])
+            cfg["v_head_dim"] = int(g("attention.value_length_mla", 128))
+            cfg["first_k_dense_replace"] = int(g("leading_dense_block_count", 0))
+            cfg["router_scoring"] = "sigmoid"
+            cfg["routed_scaling_factor"] = float(g("expert_weights_scale", 1.0))
+            cfg["norm_topk_prob"] = True
+
         bos = self.kv.get("tokenizer.ggml.bos_token_id")
         eos = self.kv.get("tokenizer.ggml.eos_token_id")
         if bos is not None:
@@ -326,6 +363,16 @@ class GGUFFile:
                       ("pad_token_id", "tokenizer.ggml.padding_token_id")):
             if ck in self.kv:
                 gen[k] = int(self.kv[ck])
+        # Fins de tour du gabarit de chat : le GGUF ne déclare qu'un eos, mais
+        # les modèles instruits terminent par un marqueur (<|im_end|>...) que
+        # llama.cpp reconnaît par heuristique de nom. Sans lui, la génération
+        # continue après la réponse.
+        toks = self.kv.get("tokenizer.ggml.tokens") or []
+        FINS = ("<|im_end|>", "<|eot_id|>", "<|endoftext|>", "<|end|>",
+                "<|eot|>", "<end_of_turn>", "</s>")
+        eog = [i for i, t in enumerate(toks) if t in FINS]
+        if eog and "eos_token_id" in gen:
+            gen["eos_token_id"] = sorted({int(gen["eos_token_id"]), *eog})
         if gen:
             with open(os.path.join(out_dir, "generation_config.json"), "w",
                       encoding="utf-8") as fh:
@@ -403,6 +450,28 @@ _LAYER_GDN = {
     "post_attention_norm": "post_attention_layernorm",
 }
 
+# kimi-linear : couches KDA (récurrentes) et MLA (attention latente).
+_LAYER_KDA = {
+    "attn_q": "linear_attn.q_proj", "attn_k": "linear_attn.k_proj",
+    "attn_v": "linear_attn.v_proj", "attn_output": "linear_attn.out_proj",
+    "ssm_conv1d_q": "linear_attn.conv1d_q",
+    "ssm_conv1d_k": "linear_attn.conv1d_k",
+    "ssm_conv1d_v": "linear_attn.conv1d_v",
+    "ssm_f_a": "linear_attn.f_a", "ssm_f_b": "linear_attn.f_b",
+    "ssm_g_a": "linear_attn.g_a", "ssm_g_b": "linear_attn.g_b",
+    "ssm_beta": "linear_attn.beta",
+    "ssm_norm": "linear_attn.norm",
+    "attn_norm": "input_layernorm", "ffn_norm": "post_attention_layernorm",
+}
+_LAYER_MLA = {
+    "attn_q": "self_attn.q_proj",
+    "attn_kv_a_mqa": "self_attn.kv_a_proj_with_mqa",
+    "attn_kv_a_norm": "self_attn.kv_a_layernorm",
+    "attn_k_b": "self_attn.k_b_proj", "attn_v_b": "self_attn.v_b_proj",
+    "attn_output": "self_attn.o_proj",
+    "attn_norm": "input_layernorm", "ffn_norm": "post_attention_layernorm",
+}
+
 _LAYER = {
     "attn_q": "self_attn.q_proj", "attn_k": "self_attn.k_proj",
     "attn_v": "self_attn.v_proj", "attn_output": "self_attn.o_proj",
@@ -422,13 +491,29 @@ _EXPS = {"ffn_gate_exps": "mlp.experts.{e}.gate_proj",
          "ffn_down_exps": "mlp.experts.{e}.down_proj"}
 
 
-def _map_name(g: str, gdn: bool = False) -> Optional[str]:
+def _map_name(g: str, gdn: bool = False,
+              kimi_recurrent: Optional[set] = None) -> Optional[str]:
     if g in _DIRECT:
         return _DIRECT[g]
     if not g.startswith("blk."):
         return None                        # rope_freqs et autres auxiliaires
     _, idx, rest = g.split(".", 2)
     stem, _, kind = rest.rpartition(".")   # "attn_q", "weight"|"bias"
+    if kimi_recurrent is not None:
+        if rest == "ssm_a":
+            return f"model.layers.{idx}.linear_attn.a.weight"
+        if stem == "ssm_dt":
+            return f"model.layers.{idx}.linear_attn.dt_bias.weight"
+        if stem == "exp_probs_b":
+            return f"model.layers.{idx}.mlp.gate.e_score_correction_bias"
+        table = _LAYER_KDA if int(idx) in kimi_recurrent else _LAYER_MLA
+        if stem in table:
+            return f"model.layers.{idx}.{table[stem]}.{kind}"
+        if stem in _LAYER:                 # ffn_* et normes partagées
+            return f"model.layers.{idx}.{_LAYER[stem]}.{kind}"
+        if stem in _EXPS:
+            return f"model.layers.{idx}.{_EXPS[stem]}.{kind}__exps__"
+        return None
     if gdn:
         if rest == "ssm_a":                # A_log — seul tenseur SANS suffixe
             return f"model.layers.{idx}.linear_attn.a_log.weight"

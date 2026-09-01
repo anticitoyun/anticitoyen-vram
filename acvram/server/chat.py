@@ -79,7 +79,9 @@ class Tokenizer:
             bos_token=self.bos_token,
             eos_token=self.config.get("eos_token", "") or "",
             **{k: v for k, v in self.config.items()
-               if isinstance(v, (str, int, float, bool))},
+               if isinstance(v, (str, int, float, bool))
+               and k not in ("messages", "add_generation_prompt",
+                             "bos_token", "eos_token")},
         )
 
 

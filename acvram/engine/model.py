@@ -321,7 +321,10 @@ class MoEBlock(nn.Module):
     def __init__(self, router: QuantLinear, experts: list[MLP], top_k: int,
                  shared: Optional[MLP] = None,
                  norm_topk_prob: bool = True,
-                 shared_gate: Optional[torch.Tensor] = None) -> None:
+                 shared_gate: Optional[torch.Tensor] = None,
+                 scoring: str = "softmax",
+                 score_bias: Optional[torch.Tensor] = None,
+                 routed_scale: float = 1.0) -> None:
         super().__init__()
         self.router = router
         self.experts = nn.ModuleList(experts)
@@ -330,6 +333,11 @@ class MoEBlock(nn.Module):
         # porte sigmoïde de l'expert partagé (Qwen3-Next) : vecteur [1, d]
         self.shared_gate = shared_gate
         self.norm_topk_prob = norm_topk_prob
+        # routage DeepSeek (kimi-linear) : scores sigmoïde, biais de sélection
+        # (e_score_correction_bias) hors des poids, renormalisation, échelle
+        self.scoring = scoring
+        self.score_bias = score_bias
+        self.routed_scale = routed_scale
         self._stack_state = "?"                # ? | oui | non
         self._stacks = None
 
@@ -413,10 +421,18 @@ class MoEBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         t, h = x.shape
         logits = self.router(x.to(torch.float32))
-        weights = F.softmax(logits, dim=-1)
-        topw, topi = torch.topk(weights, self.top_k, dim=-1)
+        if self.scoring == "sigmoid":
+            scores = torch.sigmoid(logits)
+            sel = scores if self.score_bias is None else scores + self.score_bias
+            _, topi = torch.topk(sel, self.top_k, dim=-1)
+            topw = scores.gather(-1, topi)
+        else:
+            weights = F.softmax(logits, dim=-1)
+            topw, topi = torch.topk(weights, self.top_k, dim=-1)
         if self.norm_topk_prob:
             topw = topw / topw.sum(dim=-1, keepdim=True)
+        if self.routed_scale != 1.0:
+            topw = topw * self.routed_scale
         topw = topw.to(x.dtype)
 
         # Chemin groupé : trois lancements pour toute la couche, quel que soit
