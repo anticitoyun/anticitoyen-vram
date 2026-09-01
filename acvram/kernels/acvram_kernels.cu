@@ -1014,6 +1014,7 @@ torch::Tensor int8_dequant(torch::Tensor qweight, torch::Tensor scales,
     return out;
 }
 
+
 torch::Tensor int8_gemv(torch::Tensor qweight, torch::Tensor scales,
                         torch::Tensor zeros, torch::Tensor x, int64_t group) {
     CHECK_CUDA(qweight); CHECK_CUDA(x);

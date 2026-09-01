@@ -71,24 +71,7 @@ class KimiDeltaAttention(nn.Module):
     def fuse_projections(self) -> bool:
         """Empile q/k/v et f_a/g_a en deux QuantLinear quand leurs poids sont
         des INT8Tensor de même géométrie : 9 GEMV -> 6 par pas."""
-        from ..quant.formats import INT8Tensor
-        from .layers import QuantLinear
-
-        def pile(lins):
-            ts = [getattr(l, "qweight", None) for l in lins]
-            if not all(isinstance(t, INT8Tensor) for t in ts):
-                return None
-            if len({(t.qweight.shape[1], t.group_size) for t in ts}) != 1:
-                return None
-            if any(l.bias is not None or l.scaler is not None
-                   or l.streamed is not None for l in lins):
-                return None
-            t = INT8Tensor(torch.cat([t.qweight for t in ts]).contiguous(),
-                           torch.cat([t.scales for t in ts]).contiguous(),
-                           torch.cat([t.zeros for t in ts]).contiguous(),
-                           ts[0].group_size,
-                           (sum(t.shape[0] for t in ts), ts[0].shape[1]))
-            return QuantLinear(t)
+        from .layers import stack_int8_linears as pile
 
         self.qkv_proj = pile([self.q_proj, self.k_proj, self.v_proj])
         self.fa_ga = pile([self.f_a, self.g_a])      # même entrée x : empilables

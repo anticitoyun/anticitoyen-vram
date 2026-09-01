@@ -406,3 +406,23 @@ def repeat_kv_batched(x: torch.Tensor, n_rep: int) -> torch.Tensor:
         return x
     b, s, h, d = x.shape
     return x.unsqueeze(3).expand(b, s, h, n_rep, d).reshape(b, s, h * n_rep, d)
+
+
+def stack_int8_linears(lins: list) -> Optional["QuantLinear"]:
+    """Empile des QuantLinear INT8 de même entrée en un seul (lignes
+    concaténées) : une GEMV au lieu de n au décodage. None si inapplicable."""
+    from ..quant.formats import INT8Tensor
+    ts = [getattr(l, "qweight", None) for l in lins]
+    if not all(isinstance(t, INT8Tensor) for t in ts):
+        return None
+    if len({(t.qweight.shape[1], t.group_size) for t in ts}) != 1:
+        return None
+    if any(l.bias is not None or l.scaler is not None or l.streamed is not None
+           for l in lins):
+        return None
+    t = INT8Tensor(torch.cat([t.qweight for t in ts]).contiguous(),
+                   torch.cat([t.scales for t in ts]).contiguous(),
+                   torch.cat([t.zeros for t in ts]).contiguous(),
+                   ts[0].group_size,
+                   (sum(t.shape[0] for t in ts), ts[0].shape[1]))
+    return QuantLinear(t)

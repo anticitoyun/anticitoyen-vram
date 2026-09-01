@@ -102,6 +102,11 @@ class MLAttention(nn.Module):
         y = y.reshape(t, self.nh * self.dv).to(x.dtype)
         return self.o_proj(y), cache
 
+    def fuse_projections(self) -> bool:
+        from .layers import stack_int8_linears
+        self.q_kv = stack_int8_linears([self.q_proj, self.kv_a_proj])
+        return self.q_kv is not None
+
     # -- chemin à formes fixes (graphes CUDA) --------------------------------
     def new_static(self, device: torch.device, max_len: int,
                    dtype: torch.dtype) -> dict:
@@ -131,9 +136,15 @@ class MLAttention(nn.Module):
         """Un jeton, une séquence ; attention sur ``cache[:bucket]`` masquée
         au-delà de ``len`` ; écrit le latent à la ligne ``len`` puis avance."""
         # mêmes formulations que ``forward`` (t = 1), pour arrondir pareil
-        q = self.q_proj(x).reshape(1, self.nh, self.nope + self.rope)
+        if getattr(self, "q_kv", None) is not None:
+            qkv = self.q_kv(x)
+            nq = self.nh * (self.nope + self.rope)
+            q = qkv[:, :nq].reshape(1, self.nh, self.nope + self.rope)
+            kvp = qkv[:, nq:]
+        else:
+            q = self.q_proj(x).reshape(1, self.nh, self.nope + self.rope)
+            kvp = self.kv_a_proj(x)
         q_nope, q_pe = q.split([self.nope, self.rope], dim=-1)
-        kvp = self.kv_a_proj(x)
         c, k_pe = kvp.split([self.rank, self.rope], dim=-1)
         c32 = c.to(torch.float32)
         c = (c32 * torch.rsqrt(c32.pow(2).mean(-1, keepdim=True) + self.eps)

@@ -309,7 +309,20 @@ class MLP(nn.Module):
         super().__init__()
         self.gate_proj, self.up_proj, self.down_proj = gate, up, down
 
+    gate_up: Optional[nn.Module] = None
+
+    def fuse(self) -> bool:
+        """gate et up lisent la même entrée : une GEMV INT8 empilée au lieu
+        de deux (les NVFP4 ont une échelle globale par tenseur : non empilés)."""
+        from .layers import stack_int8_linears
+        self.gate_up = stack_int8_linears([self.gate_proj, self.up_proj])
+        return self.gate_up is not None
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.gate_up is not None and x.shape[0] <= 8:
+            gu = self.gate_up(x)
+            g, u = gu.split(gu.shape[-1] // 2, dim=-1)
+            return self.down_proj(F.silu(g) * u)
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
 

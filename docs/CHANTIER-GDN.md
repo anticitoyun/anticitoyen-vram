@@ -229,3 +229,18 @@ libérer explicitement les tenseurs d'origine.
 
 Chiffres en flux HTTP, mesurés par le menu (`acvram-serveur`), prompt de
 200 jetons. L'écart moteur/serveur est désormais de 5 % sur kimi-linear.
+
+### Soir du 1er septembre — MoE et GEMV int8
+
+- GEMV groupé MoE réécrit « un warp par ligne » + noyau **gate+up+SiLU
+  fusionné** (44 → 32 µs par couche) : kimi-linear 139 → **156 t/s**, Ornith
+  108 → 118, Qwen3-Coder-30B 49 → 104 (moteur). Mesuré et écarté : déroulage
+  ×2 (neutre), plusieurs lignes par warp (pire — le parallélisme l'emporte).
+- Banc int8 : un noyau warp-par-ligne fait jeu égal avec l'existant **hors
+  L2 et sous graphe** (~700-800 Go/s) ; les micro-bancs naïfs mentent deux
+  fois (matrice résidente dans les 128 Mo de L2 ; lanceur Python ~30 µs par
+  appel). Une GEMV de 9 Mo ne rampe pas jusqu'à la bande passante crête :
+  seule la fusion de lancements paie encore. Noyau retiré.
+- Empilements INT8 (même entrée) : q/k/v et f_a/g_a de KDA, gate/up des MLP
+  (experts partagés, denses), q/kv_a de la MLA — 158 t/s.
+- Serveur : kimi-linear **152**, Ornith **114**, 4B **112**, Coder-30B **90**.

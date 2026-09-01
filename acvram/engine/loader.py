@@ -253,6 +253,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
                     kv_lora_rank=spec.kv_lora_rank,
                     v_dim=spec.v_head_dim,
                     eps=spec.rms_norm_eps).to(d)
+                bloc.fuse_projections()
             mlp_kimi = faire_mlp()
             in_norm = RMSNorm(reader.get(p + "input_layernorm.weight"
                                          ).to(dtype).to(d), spec.rms_norm_eps)
@@ -324,6 +325,12 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 num_layers=1, num_kv_heads=spec.num_key_value_heads,
                 head_dim=spec.head_dim, num_blocks=n_blocks,
                 dtype=kv_fmt, device=str(d)))
+
+    # projections gate/up des MLP INT8 (denses, experts partagés) empilées
+    for layer in layers:
+        for m in layer.modules():
+            if isinstance(m, MLP) and m.gate_proj.qweight.__class__.__name__ == "INT8Tensor":
+                m.fuse()
 
     head_dev = dev(plan.lm_head_device) if plan.lm_head_device != "cpu" \
         else torch.device("cpu")
