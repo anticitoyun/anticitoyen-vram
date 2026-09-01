@@ -117,3 +117,36 @@ factuel — llama.cpp répond « Brisbane » à la capitale de l'Australie sur l
 même GGUF. Fiche ★★, 39 t/s, alias `acvram-kimi-linear-35b`.
 
 Le flag ACVRAM_GDN=1 couvre désormais qwen35, qwen35moe et kimi-linear.
+
+## Accélération des hybrides — 1er septembre 2026
+
+Point de départ : kimi-linear à 39 t/s contre ~210 pour llama.cpp. Profil
+d'un pas de décodage : **9 800 lancements CUDA**, 14 ms de GPU pour 25 ms de
+mur — le pas était noyé dans les lancements, pas dans le calcul.
+
+1. **Graphes CUDA pour les couches à états** (`graphs.py`, `model.py`) :
+   chaque couche hybride reçoit des tampons fixes (états KDA/GDN, cache
+   latent MLA borné + longueur sur l'appareil) ; une séquence par graphe,
+   clé `(b=1, q_len=1, blocs, palier MLA de 1024)`. Au changement de
+   séquence, l'état du propriétaire est exporté vers le magasin
+   (sentinelle `_STATIC`) et celui de la nouvelle séquence chargé ; le chemin
+   eager sait relire un état résidant dans les tampons.
+   Piège : l'échauffement de capture (2 passes + rejeu) *avance* une
+   récurrence trois fois pour un jeton — les états sont photographiés avant
+   et restaurés avant le premier vrai rejeu.
+   Piège : eager et graphe divergeaient d'un ulp bf16 dès la couche 8
+   (conv manuelle vs cuDNN, `addcmul_`, GEMM d'attention sur 1024 colonnes
+   contre N) — même noyaux partout et godet `MLA_BUCKET` partagé par le
+   forward t=1 : les deux chemins sont désormais **bit-identiques**.
+   → kimi-linear 39 → 105 t/s, 4B kimi 49 → 105, Ornith 25 → 91.
+2. **Noyaux fusionnés** (`acvram_kernels.cu`) : `kda_decode_kernel` (un bloc
+   par tête : convs, normes, portes, récurrence en registres, norme de
+   sortie — 1 lancement au lieu de ~35), `mla_scores/reduce` (2 au lieu de
+   ~20). GPU 14 → 8,7 ms/pas, 2 388 lancements. → 113 t/s.
+3. Reste dans le pas (8,7 ms) : GEMV int8 des 271 projections hors experts
+   (2,45 ms — promotions SNR du convertisseur ; à comparer avec une
+   conversion tout NVFP4), MoE groupé 2,0 ms (40 % de la bande passante sur
+   K=1024/2304), ~580 copies de conversion (1,2 ms).
+
+`ACVRAM_GRAPHS_EAGER=1` exécute le chemin fixe sans capture ;
+`ACVRAM_HYBRID_KERNELS=0` rétablit le chemin torch des couches hybrides.
