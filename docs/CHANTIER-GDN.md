@@ -255,3 +255,28 @@ sur 216 projections), MoE 1,5 ms, KDA 0,5, MLA 0,3, normes 0,3, reliquat
 suivant est structurel : vérification spéculative à formes fixes pour les
 hybrides (états récurrents à photographier par position pour le retour
 arrière) — rentable sur les sorties répétitives (code, agents).
+
+### Prefill des hybrides — 1er septembre, nuit
+
+Mesure de départ : kimi-linear 176-411 j/s, 4B 259-561 (les denses : 3 400).
+Trois causes : la récurrence KDA en boucle Python par jeton, les scores MLA
+matérialisés en fp32 (2 Go à 4k, OOM à 8k), et le MoE au prefill (boucle
+par expert : ~3 s fixes ; GEMV groupée : relit les poids par paire).
+
+| modèle | avant | après |
+|---|---|---|
+| kimi-linear 4096 / 8192 | 5,3 s / OOM | **1,5 s / 2,65 s** (3 088 j/s) |
+| Agents 4B kimi 4096 | 7,3 s | **0,45 s** (9 191 j/s) |
+| Ornith 4096 | — | 1,30 s (3 160 j/s) |
+| Qwen3-Coder-30B 4096 | — | 1,14 s (3 589 j/s) |
+
+- KDA : `fla.ops.kda.chunk_kda` (Triton) pour t > 1 — même mathématique que
+  la boucle (7e-4), accord llama.cpp 47/64.
+- MLA : attention par tranches de 256 requêtes.
+- MoE : jetons triés par expert, pile déquantifiée en bf16 par projection et
+  par couche, `torch._grouped_mm` ; contre une référence fp32 exacte, ce
+  chemin est à 0,5 %, la GEMV groupée à 0,3 % — et l'ancienne boucle W4A8
+  par expert à **8,5 %** (fp8 par ligne sur de petites matrices) : le
+  prefill MoE gagne en précision en plus de la vitesse.
+- Le premier prefill d'un processus paie l'autotune Triton (3-5 s), absorbé
+  par le warm-up du serveur.
