@@ -632,24 +632,29 @@ constexpr int PA_WARPS = 4;
 
 template <int D>
 __global__ void paged_attn_partial_kernel(
-    const float *__restrict__ q,          // [B, HQ, D]
+    const float *__restrict__ q,          // [B*QL, HQ, D]
     const signed char *__restrict__ kc,   // [NB, 16, HKV, D]
     const __half *__restrict__ ks,        // [NB, 16, HKV]
     const signed char *__restrict__ vc,
     const __half *__restrict__ vs,
     const long *__restrict__ tables,      // [B, N]
-    const long *__restrict__ seq_lens,    // [B]
-    float *__restrict__ part,             // [B, HQ, C, D]  acc non normalisé
-    float *__restrict__ part_m,           // [B, HQ, C]
-    float *__restrict__ part_l,           // [B, HQ, C]
-    int HQ, int HKV, int N, int C, float scale) {
-    const int b = blockIdx.x;
+    const long *__restrict__ seq_lens,    // [B]  longueur TOTALE (dernier jeton inclus)
+    float *__restrict__ part,             // [B*QL, HQ, C, D]  acc non normalisé
+    float *__restrict__ part_m,           // [B*QL, HQ, C]
+    float *__restrict__ part_l,           // [B*QL, HQ, C]
+    int HQ, int HKV, int N, int C, int QL, float scale) {
+    // La vérification spéculative pose QL positions de requête par séquence :
+    // la requête qi (0..QL-1) ne voit que les seq_len-QL+1+qi premières
+    // positions — causalité oblige. QL=1 redonne le décodage ordinaire.
+    const int bq = blockIdx.x;            // b*QL + qi
+    const int b = bq / QL;
+    const int qi = bq % QL;
     const int h = blockIdx.y;
     const int c = blockIdx.z;
     const int hkv = h / (HQ / HKV);
-    const long slen = seq_lens[b];
+    const long slen = seq_lens[b] - (QL - 1) + qi;
     const long start = (long)c * PA_CHUNK;
-    const long out_off = ((long)b * HQ + h) * C + c;
+    const long out_off = ((long)bq * HQ + h) * C + c;
 
     const int lane = threadIdx.x % WARP;
     const int wid = threadIdx.x / WARP;
@@ -669,7 +674,7 @@ __global__ void paged_attn_partial_kernel(
     __shared__ float sm[PA_WARPS], sl[PA_WARPS], scorr[PA_WARPS];
     __shared__ float sacc[PA_WARPS][D];
     for (int d = threadIdx.x; d < D; d += blockDim.x)
-        sq[d] = q[((long)b * HQ + h) * D + d] * scale;
+        sq[d] = q[((long)bq * HQ + h) * D + d] * scale;
     __syncthreads();
 
     float m = -INFINITY, l = 0.f;
@@ -1064,11 +1069,13 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
                               torch::Tensor ks, torch::Tensor vc,
                               torch::Tensor vs, torch::Tensor tables,
                               torch::Tensor seq_lens, int64_t hkv,
-                              double scale) {
+                              double scale, int64_t q_len) {
     CHECK_CUDA(q); CHECK_CUDA(kc); CHECK_CUDA(tables);
     ACVRAM_DEVICE_GUARD(q);
     CHECK_CONTIG(q); CHECK_CONTIG(kc); CHECK_CONTIG(vc);
-    const int B = q.size(0);
+    const int BQ = q.size(0);             // B * q_len lignes de requete
+    const int B = BQ / (int)q_len;
+    TORCH_CHECK(B * (int)q_len == BQ, "q.size(0) doit etre B*q_len");
     const int HQ = q.size(1);
     const int D = q.size(2);
     const int N = tables.size(1);
@@ -1077,12 +1084,12 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
     const int C = (N * 16 + PA_CHUNK - 1) / PA_CHUNK;
     TORCH_CHECK(C <= 256, "contexte au-dela de 256 tranches");
     auto opts = q.options();
-    auto part = torch::empty({B, HQ, C, D}, opts);
-    auto pm = torch::empty({B, HQ, C}, opts);
-    auto pl = torch::empty({B, HQ, C}, opts);
-    auto out = torch::empty({B, HQ, D}, opts);
+    auto part = torch::empty({BQ, HQ, C, D}, opts);
+    auto pm = torch::empty({BQ, HQ, C}, opts);
+    auto pl = torch::empty({BQ, HQ, C}, opts);
+    auto out = torch::empty({BQ, HQ, D}, opts);
     auto stream = at::cuda::getCurrentCUDAStream();
-    dim3 g1(B, HQ, C), g2(B, HQ);
+    dim3 g1(BQ, HQ, C), g2(BQ, HQ);
     const int threads = PA_WARPS * WARP;
 
     #define PA_LAUNCH(DD) \
@@ -1093,7 +1100,8 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
             reinterpret_cast<const __half *>(vs.data_ptr()), \
             tables.data_ptr<long>(), seq_lens.data_ptr<long>(), \
             part.data_ptr<float>(), pm.data_ptr<float>(), \
-            pl.data_ptr<float>(), HQ, (int)hkv, N, C, (float)scale); \
+            pl.data_ptr<float>(), HQ, (int)hkv, N, C, (int)q_len, \
+            (float)scale); \
         paged_attn_reduce_kernel<DD><<<g2, 128, 0, stream>>>( \
             part.data_ptr<float>(), pm.data_ptr<float>(), \
             pl.data_ptr<float>(), out.data_ptr<float>(), HQ, C)

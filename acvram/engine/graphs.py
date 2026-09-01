@@ -56,6 +56,7 @@ class GraphRunner:
         self.device: Optional[torch.device] = None
         self.graphs: dict[tuple[int, int], dict] = {}
         self._pool = None
+        self.paged_ok = False
         self.enabled = self._eligible()
         self.replays = 0
         self.captures = 0
@@ -95,6 +96,12 @@ class GraphRunner:
                for i in range(len(m.layers))):
             return False
         self.device = next(iter(devs))
+        from .. import kernels
+        c0 = m.caches.get(0)
+        self.paged_ok = (c0 is not None and c0.k_scale is not None
+                         and c0.cfg.dtype == "int8"
+                         and m.spec.head_dim in (32, 64, 128, 256)
+                         and kernels.get_extension() is not None)
         return True
 
     # -- exécution -------------------------------------------------------
@@ -102,20 +109,23 @@ class GraphRunner:
         """Logits du lot, ou None si ce lot n'est pas rejouable en graphe."""
         if not self.enabled or batch.is_prefill:
             return None
-        if any(ql != 1 for ql in batch.query_lens):
-            return None                      # verification speculative : eager
+        ql = batch.query_lens[0]
+        if any(q_ != ql for q_ in batch.query_lens):
+            return None                      # longueurs mixtes : eager
+        if ql != 1 and not self.paged_ok:
+            return None                      # la verification exige le noyau
         b = batch.batch_size
         nblk = bucket_blocks(max(t.shape[0] for t in batch.block_tables))
         if nblk * BLOCK_SIZE > self.max_model_len + BLOCK_SIZE:
             nblk = bucket_blocks((self.max_model_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
-        key = (b, nblk)
+        key = (b, ql, nblk)
         self._last_key = key
 
         entry = self.graphs.get(key)
         if entry is None:
             if len(self.graphs) >= MAX_GRAPHS:
                 return None
-            entry = self._capture(b, nblk, batch)
+            entry = self._capture(b, ql, nblk, batch)
             self.graphs[key] = entry
             self.replays += 1                # la capture rejoue deja une fois
             return entry["out"].clone()
@@ -133,7 +143,7 @@ class GraphRunner:
         return torch.nn.functional.embedding(idx, m.embed_tokens).to(m.dtype)
 
     def _fill(self, entry: dict, batch: ForwardBatch) -> None:
-        b, nblk = entry["key"]
+        b, _ql, nblk = entry["key"]
         entry["x"].copy_(self._embed(batch).to(self.device), non_blocking=True)
         entry["positions"].copy_(batch.positions, non_blocking=True)
         entry["slots"].copy_(batch.slot_mapping, non_blocking=True)
@@ -145,15 +155,17 @@ class GraphRunner:
         for i, t in enumerate(batch.block_tables):
             tables[i, : t.shape[0]].copy_(t, non_blocking=True)
 
-    def _capture(self, b: int, nblk: int, batch: ForwardBatch) -> dict:
+    def _capture(self, b: int, ql: int, nblk: int,
+                 batch: ForwardBatch) -> dict:
         m = self.model
         d = self.device
         h = m.spec.hidden_size
         entry = {
-            "key": (b, nblk),
-            "x": torch.zeros(b, h, dtype=m.dtype, device=d),
-            "positions": torch.zeros(b, dtype=torch.long, device=d),
-            "slots": torch.zeros(b, dtype=torch.long, device=d),
+            "key": (b, ql, nblk),
+            "ql": ql,
+            "x": torch.zeros(b * ql, h, dtype=m.dtype, device=d),
+            "positions": torch.zeros(b * ql, dtype=torch.long, device=d),
+            "slots": torch.zeros(b * ql, dtype=torch.long, device=d),
             "tables": torch.zeros(b, nblk, dtype=torch.long, device=d),
             "seq_lens": torch.zeros(b, dtype=torch.long, device=d),
         }
@@ -169,7 +181,7 @@ class GraphRunner:
         def step() -> torch.Tensor:
             return m.decode_fixed(entry["x"], entry["positions"],
                                   entry["slots"], entry["tables"],
-                                  entry["seq_lens"], max_pos)
+                                  entry["seq_lens"], max_pos, q_len=ql)
 
         # Echauffement sur un flux annexe (exige par la capture), puis capture.
         # Les ecritures KV de ces passes sont identiques a celle du pas reel :

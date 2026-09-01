@@ -152,3 +152,41 @@ def nvfp4_mm_tensorcore(x: torch.Tensor, t: NVFP4Tensor) -> Optional[torch.Tenso
         _OK = False
         _REASON = "la sonde FP4 a reussi mais un appel reel a echoue"
         return None
+
+
+# --------------------------------------------------------------------------
+# Prefill W4A8 : poids NVFP4 élargis en FP8 par colonne, activation FP8 par
+# ligne, produit sur les tensor cores FP8 (rowwise scaled_mm).
+#
+# Le chemin W4A4 quantifie l'activation en FP4 : ~9,5 % d'erreur relative par
+# couche, la plus grosse source d'imprécision du prefill. En FP8 l'activation
+# garde ~2 % ; le poids repasse par une matérialisation FP8 par couche et par
+# lot — c'est le prix, amorti sur le lot comme l'était la déquantification du
+# repli bf16, mais le GEMM court ensuite deux fois plus vite qu'en bf16.
+# --------------------------------------------------------------------------
+
+_F8_MAX = 448.0
+
+
+def nvfp4_mm_w4a8(x: torch.Tensor, t: NVFP4Tensor) -> Optional[torch.Tensor]:
+    """``x @ W.T`` en FP8×FP8 rowwise, ou None si indisponible."""
+    if not torch.cuda.is_available():
+        return None
+    if torch.cuda.get_device_capability(x.device) < (8, 9):
+        return None                       # e4m3 sur tensor cores : Ada+
+    from . import nvfp4_dequant
+
+    orig = x.shape
+    xf = x.reshape(-1, x.shape[-1]).to(torch.float32)
+    w = nvfp4_dequant(t, torch.float32)   # [M, K] — matérialisation par lot
+    if xf.shape[-1] != w.shape[-1]:
+        xf = torch.nn.functional.pad(xf, (0, w.shape[-1] - xf.shape[-1]))
+    try:
+        sx = xf.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / _F8_MAX
+        sw = w.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / _F8_MAX
+        x8 = (xf / sx).clamp(-_F8_MAX, _F8_MAX).to(torch.float8_e4m3fn)
+        w8 = (w / sw).clamp(-_F8_MAX, _F8_MAX).to(torch.float8_e4m3fn)
+        y = torch._scaled_mm(x8, w8.t(), sx, sw.t(), out_dtype=torch.bfloat16)
+        return y.to(x.dtype).reshape(*orig[:-1], t.shape[0])
+    except Exception:                     # noqa: BLE001 — repli silencieux
+        return None

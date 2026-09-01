@@ -27,7 +27,8 @@ from ..quant.nvfp4 import NVFP4Tensor, dequantize_nvfp4
 
 from .cpu import (cpu_build_info, cpu_kernels_available, int4_matmul_cpu,
                   nvfp4_matmul_cpu)
-from .fp4_gemm import fp4_mm_available, fp4_mm_info, nvfp4_mm_tensorcore
+from .fp4_gemm import (fp4_mm_available, fp4_mm_info, nvfp4_mm_tensorcore,
+                       nvfp4_mm_w4a8)
 
 __all__ = ["get_extension", "kernels_available", "build_info", "matmul",
            "nvfp4_dequant", "nvfp4_matmul", "int4_dequant", "int4_matmul",
@@ -253,14 +254,22 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
             t.global_scale_float(), xf.contiguous(), t.padded_in)
         return y.to(x.dtype).reshape(*orig_shape[:-1], t.shape[0])
 
-    # Prefill. On essaie d'abord les tensor cores FP4 : à cette taille de lot,
-    # l'erreur de quantification de l'activation est amortie et le chemin de
-    # données vaut environ quatre fois le BF16. On passe outre s'il est
-    # indisponible.
+    # Prefill. Par défaut, W4A8 : activation FP8 (≈2 % d'erreur contre ≈9,5 %
+    # en FP4) sur les tensor cores FP8. ACVRAM_PREFILL=a4 rend le chemin FP4
+    # pur (le plus rapide, le moins précis) ; =bf16 force le repli.
     if n > gemv_threshold:
-        tc = nvfp4_mm_tensorcore(x, t)
-        if tc is not None:
-            return tc
+        mode = os.environ.get("ACVRAM_PREFILL", "a8")
+        if mode == "a4":
+            tc = nvfp4_mm_tensorcore(x, t)
+            if tc is not None:
+                return tc
+        elif mode != "bf16":
+            tc = nvfp4_mm_w4a8(x, t)
+            if tc is not None:
+                return tc
+            tc = nvfp4_mm_tensorcore(x, t)
+            if tc is not None:
+                return tc
 
     w = nvfp4_dequant(t, x.dtype if x.dtype != torch.float32 else torch.bfloat16)
     return torch.nn.functional.linear(x, w.to(x.dtype))
@@ -450,7 +459,7 @@ def int4_gemv_grouped(x: torch.Tensor, qw: torch.Tensor, scales: torch.Tensor,
 
 def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
                     seq_lens: torch.Tensor, n_rep: int,
-                    scale: float) -> Optional[torch.Tensor]:
+                    scale: float, q_len: int = 1) -> Optional[torch.Tensor]:
     """Attention de décodage fusionnée sur le cache paginé INT8, ou None.
 
     Conditions : extension compilée, cache quantifié en int8, dimension de
@@ -470,4 +479,5 @@ def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
     return ext.paged_attention(
         q.to(torch.float32).contiguous(), cache.k, cache.k_scale,
         cache.v, cache.v_scale, tables.contiguous(),
-        seq_lens.contiguous(), cache.cfg.num_kv_heads, float(scale))
+        seq_lens.contiguous(), cache.cfg.num_kv_heads, float(scale),
+        int(q_len))

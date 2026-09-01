@@ -316,7 +316,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         group_size=args.group_size, n_grid=args.grid,
         lm_head_format=args.lm_head_format, dry_run=args.dry_run,
         mixed_precision=args.mixed_precision, snr_floor=args.snr_floor,
-        quant_device=args.quant_device)
+        quant_device=args.quant_device, bits_budget_gib=args.bits_budget)
 
     last = [0.0]
 
@@ -510,6 +510,10 @@ def build_parser() -> argparse.ArgumentParser:
     cv.add_argument("--calib-len", type=int, default=512)
     cv.add_argument("--calib-device", default="cuda:0",
                     help="appareil sur lequel executer les passes de calibration")
+    cv.add_argument("--bits-budget", type=float, default=0.0,
+                    help="budget total de poids en Gio : les promotions sont "
+                         "choisies par gain de SNR par octet (sac a dos), au "
+                         "lieu du plancher SNR fixe")
     cv.add_argument("--quant-device", default="auto",
                     help="appareil de la recherche AWQ et de la quantification "
                          "(auto, cpu, cuda:0 ...)")

@@ -131,3 +131,93 @@ def test_paged_attention_matches_reference(converted):
     reference = decode_attention_fixed(q, kk, vv, lens, n_rep, hd ** -0.5)
     err = (fusionne - reference).abs().max().item()
     assert err < 5e-3, f"attention paginee : ecart {err:.2e} avec la reference"
+
+
+@needs_cuda
+def test_paged_attention_speculative_matches_loop(converted):
+    """q_len > 1 : chaque position de requête voit son propre préfixe causal.
+
+    Le chemin de référence est la boucle attention() par séquence avec
+    q_offset ; le noyau paginé doit rendre la même chose, position par
+    position, dans la marge de la déquantification du cache.
+    """
+    import os
+
+    from acvram.engine.sampler import SamplingParams as SP
+
+    loaded = load_model(converted, dtype=torch.bfloat16,
+                        device_override="cuda:0")
+    e = Engine(loaded, None, max_batch_size=2, max_model_len=256,
+               enable_cuda_graphs=False)
+    e.add_request(list(range(1, 40)), SP(temperature=0.0, max_tokens=30))
+    e.step()
+
+    # un lot de vérification artificiel : 4 positions par séquence
+    dec = [s for s in e.running if not s.finished]
+    for s in dec:
+        assert e._grow(s, extra=3)
+    from acvram.engine.speculative import Proposal
+    props = {s.id: Proposal([5, 6, 7]) for s in dec}
+    batch = e._build_spec_batch(dec, props)
+    logits_noyau = e.model(batch,
+                           logits_positions=batch.all_token_indices()).float()
+    os.environ["ACVRAM_DISABLE_PAGED_ATTN"] = "1"
+    try:
+        logits_boucle = e.model(batch,
+                                logits_positions=batch.all_token_indices()).float()
+    finally:
+        del os.environ["ACVRAM_DISABLE_PAGED_ATTN"]
+    err = (logits_noyau - logits_boucle).abs().max().item()
+    assert err < 5e-2, f"verification speculative : ecart {err:.3e}"
+
+
+@needs_cuda
+def test_graph_speculative_step_equals_eager(converted):
+    """Le pas de vérification spéculative capturé rend les logits de l'eager."""
+    from acvram.engine.sampler import SamplingParams as SP
+    from acvram.engine.speculative import Proposal
+
+    loaded = load_model(converted, dtype=torch.bfloat16,
+                        device_override="cuda:0")
+    e = Engine(loaded, None, max_batch_size=2, max_model_len=256,
+               enable_cuda_graphs=True)
+    assert e.graphs is not None and e.graphs.paged_ok
+    e.add_request(list(range(1, 30)), SP(temperature=0.0, max_tokens=30))
+    e.step()
+    dec = [s for s in e.running if not s.finished]
+    for s in dec:
+        assert e._grow(s, extra=3)
+    props = {s.id: Proposal([5, 6, 7]) for s in dec}
+    batch = e._build_spec_batch(dec, props)
+    eager = e.model(batch, logits_positions=batch.all_token_indices()).float()
+    graphe = e.graphs.run(batch)
+    assert graphe is not None, "pas de graphe pour le pas speculatif"
+    assert torch.equal(eager, graphe.float()), \
+        "pas speculatif : graphe et eager divergent"
+
+
+@needs_cuda
+def test_speculative_generation_under_graphs(converted):
+    """Une génération spéculative complète sous graphes reste exacte.
+
+    À température nulle, l'acceptation exacte garantit la même sortie que le
+    décodage ordinaire — c'est l'invariant historique du projet, désormais
+    affirmé aussi avec les graphes actifs des deux côtés.
+    """
+    from acvram.engine.sampler import SamplingParams as SP
+    from acvram.engine.speculative import NGramProposer
+
+    prompt = [7, 3, 9, 1, 4, 8, 2, 5] * 5
+
+    def run(spec):
+        loaded = load_model(converted, dtype=torch.bfloat16,
+                            device_override="cuda:0")
+        e = Engine(loaded, None, max_batch_size=1, max_model_len=256,
+                   enable_cuda_graphs=True,
+                   speculator=NGramProposer() if spec else None, spec_k=3)
+        return [t for o in e.generate(prompt, SP(temperature=0.0,
+                                                 max_tokens=24))
+                for t in o.token_ids]
+
+    assert run(True) == run(False), \
+        "la speculation sous graphes a change la sortie"

@@ -416,7 +416,9 @@ class Engine:
             return []
 
         batch = self._build_spec_batch(decodable, proposals)
-        flat = self.model(batch, logits_positions=batch.all_token_indices())
+        flat = self.graphs.run(batch) if self.graphs is not None else None
+        if flat is None:
+            flat = self.model(batch, logits_positions=batch.all_token_indices())
 
         outputs: list[GenerationOutput] = []
         cursor = 0

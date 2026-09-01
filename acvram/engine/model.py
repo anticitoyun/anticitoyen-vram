@@ -160,14 +160,17 @@ class Attention(nn.Module):
     def decode_fixed(self, x: torch.Tensor, positions: torch.Tensor,
                      slots: torch.Tensor, block_tables: torch.Tensor,
                      seq_lens: torch.Tensor, max_pos: int,
-                     cache: PagedKVCache) -> torch.Tensor:
+                     cache: PagedKVCache, q_len: int = 1) -> torch.Tensor:
         """Le pas de décodage à formes fixes — le chemin que capture le graphe.
 
         Même mathématique que ``forward`` en décodage, mais aucun scalaire
         Python tiré des données : positions, emplacements, tables et longueurs
         sont des tenseurs dont seul le *contenu* change entre deux rejeux.
-        ``max_pos`` majore les positions (la longueur maximale du godet) : il ne
-        sert qu'à garantir que le cache RoPE est déjà assez grand.
+        ``max_pos`` majore les positions (la longueur maximale du godet).
+        ``q_len`` > 1 est le pas de vérification spéculative : chaque séquence
+        pose q_len positions, chacune voyant son propre préfixe causal — le
+        noyau paginé le gère nativement, et c'est lui qui est exigé ici (le
+        repli déquantifier-puis-SDPA ne connaît que q_len = 1).
         """
         b = x.shape[0]
         q = self.q_proj(x).view(b, self.n_heads, self.head_dim)
@@ -181,8 +184,11 @@ class Attention(nn.Module):
         q, k = apply_rope(q, k, cos, sin)
         cache.write(slots, k, v)
         out = kernels.paged_attention(q, cache, block_tables, seq_lens,
-                                      self.n_rep, self.scale)
+                                      self.n_rep, self.scale, q_len=q_len)
         if out is None:                    # cache non int8, ou pas de noyau
+            if q_len != 1:
+                raise RuntimeError("verification speculative a formes fixes "
+                                   "sans noyau pagine : chemin inéligible")
             kk, vv = cache.gather_fixed(block_tables, q.dtype)
             out = decode_attention_fixed(q, kk, vv, seq_lens, self.n_rep,
                                          self.scale)
@@ -235,6 +241,20 @@ class Attention(nn.Module):
             out = out.to(q.dtype)
             return self.o_proj(out.reshape(t, self.n_heads * self.head_dim))
 
+        # Vérification spéculative : plusieurs positions de requête par
+        # séquence, chacune ne voyant que son propre préfixe. Quand toutes les
+        # séquences vérifient le même nombre de positions — le cas normal —
+        # le noyau paginé les traite en un lancement, chaque ligne de requête
+        # avec sa longueur causale propre.
+        ql = batch.query_lens[0]
+        if all(q_ == ql for q_ in batch.query_lens):
+            tables, lens = batch.fixed_decode_views(q.device)
+            out = kernels.paged_attention(q, cache, tables, lens,
+                                          self.n_rep, self.scale, q_len=ql)
+            if out is not None:
+                out = out.to(q.dtype)
+                return self.o_proj(out.reshape(t, self.n_heads * self.head_dim))
+
         keys, values = [], []
         for i in range(batch.batch_size):
             kk, vv = cache.gather(batch.block_tables[i].to(q.device),
@@ -242,9 +262,6 @@ class Attention(nn.Module):
             keys.append(kk)
             values.append(vv)
 
-        # Vérification spéculative : plusieurs positions de requête par
-        # séquence, chacune attendant sur son propre préfixe. Toujours causal,
-        # toujours décalé.
         out = torch.empty_like(q)
         start = 0
         for i, qlen in enumerate(batch.query_lens):
@@ -441,10 +458,10 @@ class DecoderLayer(nn.Module):
     def decode_fixed(self, x: torch.Tensor, positions: torch.Tensor,
                      slots: torch.Tensor, block_tables: torch.Tensor,
                      seq_lens: torch.Tensor, max_pos: int,
-                     cache: PagedKVCache) -> torch.Tensor:
+                     cache: PagedKVCache, q_len: int = 1) -> torch.Tensor:
         x = x + self.self_attn.decode_fixed(self.input_layernorm(x), positions,
                                             slots, block_tables, seq_lens,
-                                            max_pos, cache)
+                                            max_pos, cache, q_len)
         return x + self.mlp(self.post_attention_layernorm(x))
 
     def prefetch(self) -> None:
@@ -512,7 +529,8 @@ class ACVRamModel(nn.Module):
 
     def decode_fixed(self, x: torch.Tensor, positions: torch.Tensor,
                      slots: torch.Tensor, block_tables: torch.Tensor,
-                     seq_lens: torch.Tensor, max_pos: int) -> torch.Tensor:
+                     seq_lens: torch.Tensor, max_pos: int,
+                     q_len: int = 1) -> torch.Tensor:
         """Logits d'un pas de décodage pur, à formes fixes.
 
         Le plongement est déjà fait — ``x`` est l'état caché d'entrée sur le
@@ -521,7 +539,7 @@ class ACVRamModel(nn.Module):
         """
         for i, layer in enumerate(self.layers):
             x = layer.decode_fixed(x, positions, slots, block_tables,
-                                   seq_lens, max_pos, self.caches[i])
+                                   seq_lens, max_pos, self.caches[i], q_len)
         x = self.norm(x)
         return self.lm_head(x)
 

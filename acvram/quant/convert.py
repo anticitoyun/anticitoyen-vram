@@ -59,6 +59,12 @@ class ConversionOptions:
     snr_floor: float = 25.0           # dB de rapport signal/bruit en sortie de
                                       # couche sous lequel un tenseur est promu
     max_promotions: float = 0.15      # part maximale de tenseurs promus
+    # Budget d'octets pour l'affectation par sac à dos (0 = mécanisme classique
+    # de plancher SNR). Avec un budget, chaque tenseur promouvable est mesuré
+    # dans les deux formats, puis les promotions sont choisies par gain de SNR
+    # par octet dépensé, jusqu'à épuisement : « le meilleur modèle qui tient
+    # dans N gibioctets », au lieu d'un seuil arbitraire.
+    bits_budget_gib: float = 0.0
 
 
 @dataclass
@@ -315,6 +321,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     snrs: list[float] = []
     per_layer: list[dict] = []
     keys = []
+    budget_candidats: list[dict] = []
 
     for name, tensor in _iter_checkpoint(model_path):
         report.tensors += 1
@@ -345,15 +352,40 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             n_grid=opts.n_grid,
         )
 
-        # Précision mixte : un tenseur qui tombe sous le plancher mérite plus
-        # de bits. Plafonné, pour qu'une exécution mal calibrée ne puisse pas
-        # regonfler discrètement tout le modèle à 8 bits.
-        # Les experts d'un bloc doivent partager leur format : le chemin de
-        # decodage groupe lit leurs poids comme une pile homogene, et un
-        # expert promu isolement la briserait. Leur SNR individuel pese aussi
-        # moins : chaque expert ne voit qu'une fraction des jetons.
+        # Précision mixte, deux régimes : plancher SNR classique (défaut,
+        # plafonné), ou budget global (bits_budget_gib > 0) où les deux
+        # formats sont mesurés et la décision revient au sac à dos de fin de
+        # passe. Les experts d'un bloc restent exclus dans les deux cas : le
+        # chemin de décodage groupé exige leur pile homogène, et leur SNR
+        # individuel pèse peu.
         est_expert = ".mlp.experts." in name
-        if (not est_expert
+        candidat_budget = (opts.bits_budget_gib > 0 and not est_expert
+                           and fmt in PROMOTE
+                           and metrics["out_snr_db"] < 40.0)
+        if candidat_budget:
+            wider = PROMOTE[fmt]
+            q2, s2, m2 = _quantize_on(
+                qdev, tensor, wider, st,
+                group_size=opts.group_size,
+                use_hadamard=router.wants_hadamard(name, wider),
+                use_awq=opts.awq, n_grid=opts.n_grid)
+            if m2["out_snr_db"] > metrics["out_snr_db"] + 0.5:
+                sd2 = q2.state_dict(prefix=f"{name}.")
+                sd2.update(s2.state_dict(prefix=f"{name}."))
+                sd2 = {k: v.cpu() for k, v in sd2.items()}
+                base_octets = sum(v.numel() * v.element_size()
+                                  for v in qt.state_dict().values())
+                larges_octets = sum(v.numel() * v.element_size()
+                                    for v in sd2.values())
+                budget_candidats.append({
+                    "name": name, "from": fmt, "to": wider,
+                    "gain_db": m2["out_snr_db"] - metrics["out_snr_db"],
+                    "cout": max(1, larges_octets - base_octets),
+                    "sd": sd2, "metrics": m2,
+                })
+            else:
+                candidat_budget = False
+        elif (not est_expert
                 and opts.mixed_precision != "off"
                 and metrics["out_snr_db"] < opts.snr_floor
                 and fmt in PROMOTE
@@ -372,15 +404,27 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 fmt, qt, scaler, metrics = wider, q2, s2, m2
                 entry["format"] = fmt
                 entry["promoted_from"] = report.promotions[-1]["from"]
-        snrs.append(metrics["out_snr_db"])
-        per_layer.append({"name": name, **{k: round(v, 2) if isinstance(v, float)
-                                           else v for k, v in metrics.items()}})
-
         sd = qt.state_dict(prefix=f"{name}.")
         sd.update(scaler.state_dict(prefix=f"{name}."))
         # Les fragments s'ecrivent depuis la memoire hote : on redescend ce que
         # la quantification a produit sur le GPU.
         sd = {k: v.cpu() for k, v in sd.items()}
+
+        if candidat_budget and budget_candidats and \
+                budget_candidats[-1]["name"] == name:
+            # decision differee au sac a dos : rien n'est ecrit maintenant
+            budget_candidats[-1].update({
+                "sd_base": sd, "entry": entry, "fmt_base": fmt,
+                "metrics_base": metrics, "nbytes_base": qt.nbytes,
+                "hadamard_block": scaler.hadamard_block,
+                "has_act_scale": scaler.scale is not None,
+            })
+            keys.append(name)
+            continue
+
+        snrs.append(metrics["out_snr_db"])
+        per_layer.append({"name": name, **{k: round(v, 2) if isinstance(v, float)
+                                           else v for k, v in metrics.items()}})
         if not opts.dry_run:
             for k, v in sd.items():
                 writer.add(k, v)
@@ -395,6 +439,51 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         report.per_format[fmt] = report.per_format.get(fmt, 0) + qt.nbytes
         manifest["tensors"][name] = entry
         keys.append(name)
+
+    # ---- sac à dos : depenser le budget la ou chaque octet paie le plus ----
+    if budget_candidats:
+        deja = sum(report.per_format.values()) + \
+            sum(c["nbytes_base"] for c in budget_candidats)
+        reste = opts.bits_budget_gib * 1024 ** 3 - deja
+        # par gain de SNR par octet, decroissant — le glouton du sac a dos
+        # fractionnaire, optimal a un tenseur pres
+        ordre = sorted(budget_candidats, key=lambda c: -c["gain_db"] / c["cout"])
+        promus = set()
+        for c in ordre:
+            if c["cout"] <= reste:
+                promus.add(c["name"])
+                reste -= c["cout"]
+        for c in budget_candidats:
+            name = c["name"]
+            large = name in promus
+            sd = c["sd"] if large else c["sd_base"]
+            met = c["metrics"] if large else c["metrics_base"]
+            fmt = c["to"] if large else c["fmt_base"]
+            entry = c["entry"]
+            snrs.append(met["out_snr_db"])
+            per_layer.append({"name": name,
+                              **{k: round(v, 2) if isinstance(v, float) else v
+                                 for k, v in met.items()}})
+            if not opts.dry_run:
+                for k, v in sd.items():
+                    writer.add(k, v)
+            entry.update({
+                "format": fmt,
+                "keys": list(sd.keys()),
+                "group_size": opts.group_size,
+                "hadamard_block": c["hadamard_block"],
+                "has_act_scale": c["has_act_scale"],
+                "bpw": round(met["bpw"], 3),
+                "out_snr_db": round(met["out_snr_db"], 2),
+            })
+            octets = sum(v.numel() * v.element_size() for v in sd.values())
+            report.per_format[fmt] = report.per_format.get(fmt, 0) + octets
+            manifest["tensors"][name] = entry
+            if large:
+                report.promotions.append({
+                    "name": name, "from": c["from"], "to": c["to"],
+                    "before": round(c["metrics_base"]["out_snr_db"], 2),
+                    "after": round(met["out_snr_db"], 2)})
 
     if not opts.dry_run:
         writer.flush()

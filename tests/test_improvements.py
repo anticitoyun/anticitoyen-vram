@@ -329,3 +329,45 @@ def test_perplexity_runs_and_is_finite(converted, tiny_checkpoint):
     assert math.isfinite(r.perplexity)
     assert r.tokens > 0
     assert r.bits_per_weight > 0
+
+
+def test_bits_budget_knapsack(tiny_checkpoint, target_rig, tmp_path_factory):
+    """Le sac à dos dépense le budget là où chaque octet paie le plus.
+
+    Un budget serré promeut moins de tenseurs qu'un budget large, jamais plus ;
+    et le modèle converti sous budget se charge et répond.
+    """
+    import torch
+
+    from acvram.engine.config import load_model_spec
+    from acvram.engine.loader import load_model
+    from acvram.engine.runner import Engine
+    from acvram.engine.sampler import SamplingParams
+    from acvram.memory.tiering import PlannerOptions, auto_plan
+    from acvram.quant.convert import ConversionOptions, convert_checkpoint
+
+    spec = load_model_spec(tiny_checkpoint, "tiny")
+    plan, _ = auto_plan(spec, target_rig,
+                        PlannerOptions(max_model_len=512, max_concurrent_seqs=2))
+
+    def convertir(budget):
+        out = str(tmp_path_factory.mktemp(f"budget_{int(budget * 1000)}"))
+        r = convert_checkpoint(tiny_checkpoint, plan,
+                               ConversionOptions(out_dir=out,
+                                                 bits_budget_gib=budget),
+                               spec=spec)
+        return out, r
+
+    out_serre, r_serre = convertir(0.001)      # ~1 Mio : presque rien ne passe
+    out_large, r_large = convertir(1.0)        # 1 Gio : tout candidat passe
+    assert len(r_large.promotions) >= len(r_serre.promotions)
+    assert len(r_large.promotions) > 0, "aucun candidat promu à budget large"
+    assert sum(r_serre.per_format.values()) <= 0.001 * 1024 ** 3 \
+        or len(r_serre.promotions) == 0
+
+    loaded = load_model(out_large, dtype=torch.float32, device_override="cpu")
+    e = Engine(loaded, None, max_batch_size=1, max_model_len=128)
+    outs = [t for o in e.generate([3, 1, 4], SamplingParams(temperature=0.0,
+                                                            max_tokens=4))
+            for t in o.token_ids]
+    assert len(outs) == 4
