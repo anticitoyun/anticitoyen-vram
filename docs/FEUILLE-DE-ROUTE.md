@@ -263,3 +263,15 @@ extrait, ACVRAM_HOME isolé) : venv, torch cu130, nvcc des roues, doctor
 complet. Elle a révélé et fait corriger la résolution des backends par *type*
 de périphérique — la 3080 Ti héritait du chemin FP4 de la 5090, et un échec
 FP4 sur elle aurait éteint le chemin pour les deux cartes.
+
+## Nuit du 1er au 2 septembre — chantiers 1 à 7
+
+| # | chantier | état |
+|---|---|---|
+| 1 | écart llama.cpp | profil MoE fait : par pas de 20 ms GPU, ~9 ms de micro-noyaux elementwise (55 000 lancements de 1-2 µs : silu/mul/copies du chemin MoE), ~5 ms d'int8 (attention promue), ~2,5 ms de GEMV groupé à 380 Go/s. Cibles chiffrées : fusion silu×up dans le noyau groupé, attention MoE en nvfp4 non promue, agrandir les tuiles du groupé. |
+| 2 | spéculation sous graphes | fait et testé (bit-exact) ; verdict réel : le brouillon inter-GPU reste perdant (16-20 contre 36 t/s) — le goulot est le brouillon eager + le lien 7 Go/s, plus la vérification. ngram conservé pour la recopie. |
+| 3 | prefill W4A8 | fait ; en réel : 3 400 jetons/s dans les trois modes (le prefill est borné par l'attention, pas les GEMM) → la précision ×2,4 est gratuite, défaut a8. |
+| 4 | budget de bits (sac à dos) | fait : convert --bits-budget, testé serré/large. |
+| 5 | conversions en lot | fait : 6 nouveaux modèles valides (parc acvram = 14) ; 31 refus SSM attendus ; 5 conversions mutilées détectées → garde-fou de complétude + refus des archs non traduites. |
+| 6 | Gated DeltaNet | cœur mathématique validé contre transformers (prefill < 1e-4, continuité décodage < 1e-3) ; reste mapping GGUF → loader → états par séquence (docs/CHANTIER-GDN.md). |
+| 7 | étage RAM du KV | fait : HostKVPool, spill à l'éviction, remontée à l'admission, --host-kv-gib. |
