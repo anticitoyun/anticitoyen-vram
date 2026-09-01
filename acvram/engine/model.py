@@ -410,10 +410,20 @@ class MoEBlock(nn.Module):
         eid = topi.reshape(-1).to(torch.int32)
         tok = torch.arange(t, device=x.device,
                            dtype=torch.int32).repeat_interleave(self.top_k)
-        x32 = x.to(torch.float32)
-        g = self._grouped(x32, self._stacks["gate_proj"], eid, tok)
-        u = self._grouped(x32, self._stacks["up_proj"], eid, tok)
-        act = F.silu(g) * u                     # [G, I] fp32
+        pg, pu = self._stacks["gate_proj"], self._stacks["up_proj"]
+        ext = kernels.get_extension()
+        if (pg[0] == "nvfp4" and pu[0] == "nvfp4" and ext is not None
+                and hasattr(ext, "nvfp4_gemv_grouped_gateup")
+                and pg[4] * 4 <= 48 * 1024):
+            # gate, up et SiLU·up en un lancement, activation bf16 lue telle quelle
+            act = ext.nvfp4_gemv_grouped_gateup(
+                pg[1], pg[2], pg[3], pu[1], pu[2], pu[3], eid, tok,
+                x.contiguous(), pg[4])[:, :pg[5]]
+        else:
+            x32 = x.to(torch.float32)
+            g = self._grouped(x32, pg, eid, tok)
+            u = self._grouped(x32, pu, eid, tok)
+            act = F.silu(g) * u                 # [G, I] fp32
         seq = torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
         d = self._grouped(act, self._stacks["down_proj"], eid, seq)
         d = d * topw.reshape(-1, 1).to(d.dtype)
