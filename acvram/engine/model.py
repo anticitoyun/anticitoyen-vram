@@ -664,6 +664,9 @@ class DecoderLayerGDN(nn.Module):
         # vérifié, pour revenir à celui du dernier jeton accepté
         self.static_hist: Optional[dict] = None
         self.static_hist_len = 0
+        # tampons fixes : un créneau par séquence du lot (graphes b > 1)
+        self.statics: list = []
+        self.static_owners: list = []
 
     def forward(self, x: torch.Tensor, batch: ForwardBatch,
                 cache=None) -> torch.Tensor:
@@ -675,9 +678,8 @@ class DecoderLayerGDN(nn.Module):
         for i, ql in enumerate(batch.query_lens):
             sid = batch.seq_ids[i] if batch.seq_ids else i
             etat = store.get(sid)
-            if etat is _STATIC:               # l'état vit dans les tampons fixes
-                etat = self.linear_attn.static_export(self.static)
-                self.static_owner = None
+            if etat is _STATIC:               # l'état vit dans un créneau fixe
+                etat = self._reprendre(sid)
             y, etat = self.linear_attn(h[start:start + ql], etat)
             store[sid] = etat
             sorties.append(y)
@@ -688,33 +690,53 @@ class DecoderLayerGDN(nn.Module):
         return x + self.mlp(self.post_attention_layernorm(x))
 
     # -- chemin à formes fixes (graphes CUDA), une séquence ----------------
-    static: Optional[dict] = None
-    static_owner: Optional[int] = None
     static_bucket: int = 0
 
-    def static_bind(self, sid: int, store: dict, max_len: int,
-                    dtype: torch.dtype) -> None:
-        """Amène l'état de ``sid`` dans les tampons fixes de la couche.
+    @property
+    def static(self) -> Optional[dict]:
+        """Créneau 0 (une séquence : décodage simple et spéculation)."""
+        return self.statics[0] if self.statics else None
 
-        L'état du propriétaire précédent est exporté vers le magasin s'il y
-        vit encore ; celui de ``sid`` est chargé (ou remis à zéro). Le magasin
-        note alors que l'état de ``sid`` réside dans les tampons.
+    def _nouveau_static(self, max_len: int, dtype: torch.dtype) -> dict:
+        la = self.linear_attn
+        if hasattr(la, "rank"):               # MLA : cache latent borné
+            return la.new_static(self.device, max_len, dtype)
+        return la.new_static(self.device)
+
+    def _reprendre(self, sid: int):
+        """Sort l'état de ``sid`` de son créneau (retour au chemin eager)."""
+        if sid not in self.static_owners:
+            return None
+        slot = self.static_owners.index(sid)
+        self.static_owners[slot] = None
+        return self.linear_attn.static_export(self.statics[slot])
+
+    def static_bind(self, slot: int, sid: int, store: dict, max_len: int,
+                    dtype: torch.dtype) -> None:
+        """Amène l'état de ``sid`` dans le créneau ``slot`` de la couche.
+
+        L'état du propriétaire précédent du créneau est exporté vers le
+        magasin s'il y vit encore ; celui de ``sid`` est chargé depuis le
+        magasin, depuis un autre créneau (le lot a changé d'ordre) ou remis
+        à zéro. Le magasin note alors que l'état de ``sid`` réside dans les
+        tampons.
         """
         la = self.linear_attn
-        if self.static is None:
-            if hasattr(la, "rank"):           # MLA : cache latent borné
-                self.static = la.new_static(self.device, max_len, dtype)
-            else:
-                self.static = la.new_static(self.device)
-        if self.static_owner == sid and store.get(sid) is _STATIC:
+        while len(self.statics) <= slot:
+            self.statics.append(self._nouveau_static(max_len, dtype))
+            self.static_owners.append(None)
+        if self.static_owners[slot] == sid and store.get(sid) is _STATIC:
             return
-        prev = self.static_owner
+        prev = self.static_owners[slot]
         if prev is not None and prev != sid and store.get(prev) is _STATIC:
-            store[prev] = la.static_export(self.static)
+            store[prev] = la.static_export(self.statics[slot])
+        self.static_owners[slot] = None
         etat = store.get(sid)
-        la.static_load(self.static, None if etat is _STATIC else etat)
+        if etat is _STATIC:
+            etat = self._reprendre(sid)
+        la.static_load(self.statics[slot], etat)
         store[sid] = _STATIC
-        self.static_owner = sid
+        self.static_owners[slot] = sid
 
     def decode_fixed(self, x: torch.Tensor, positions: torch.Tensor,
                      slots: torch.Tensor, block_tables: torch.Tensor,
@@ -733,15 +755,18 @@ class DecoderLayerGDN(nn.Module):
         l'état après chacun dans ``static_hist``."""
         la = self.linear_attn
         if hasattr(la, "rank"):
-            un = lambda t: la.decode_static(t, self.static, self.static_bucket)
+            un = lambda t, st: la.decode_static(t, st, self.static_bucket)
         else:
-            un = lambda t: la.decode_static(t, self.static)
+            un = lambda t, st: la.decode_static(t, st)
+        b = h.shape[0] // q_len
+        if b > 1:                              # un créneau par séquence
+            return torch.cat([un(h[i:i + 1], self.statics[i]) for i in range(b)], dim=0)
         if q_len == 1:
-            return un(h)
+            return un(h, self.static)
         hist = self.ensure_hist(q_len)
         ys = []
         for j in range(q_len):
-            ys.append(un(h[j:j + 1]))
+            ys.append(un(h[j:j + 1], self.static))
             for k, v in hist.items():
                 v[j].copy_(self.static[k])
         return torch.cat(ys, dim=0)
@@ -852,8 +877,7 @@ class DecoderLayerParallel(DecoderLayerGDN):
             sid = batch.seq_ids[i] if batch.seq_ids else i
             etat = store.get(sid)
             if etat is _STATIC:
-                etat = self.linear_attn.static_export(self.static)
-                self.static_owner = None
+                etat = self._reprendre(sid)
             y, etat = self.linear_attn(h[start:start + ql], etat)
             store[sid] = etat
             sorties.append(y)

@@ -52,6 +52,7 @@ MAX_GRAPHS = 16
 
 class GraphRunner:
     max_ql = 1          # > 1 : lots de vérification spéculative sur hybrides
+    max_slots = int(os.environ.get("ACVRAM_HYBRID_SLOTS", "4"))   # séquences par graphe
 
     """Capture paresseuse et rejeu des pas de décodage purs."""
 
@@ -138,9 +139,10 @@ class GraphRunner:
         trace = bool(os.environ.get("ACVRAM_TRACE_STEPS"))
         t0 = time.perf_counter()
         if self.hybrid_layers:
-            if b != 1 or batch.gdn_store is None or ql > self.max_ql:
-                return None                  # une séquence par graphe
-            lb = -(-batch.seq_lens[0] // MLA_BUCKET) * MLA_BUCKET
+            if (batch.gdn_store is None or ql > self.max_ql
+                    or (b > 1 and ql != 1) or b > self.max_slots):
+                return None                  # spéculation : une séquence
+            lb = -(-max(batch.seq_lens) // MLA_BUCKET) * MLA_BUCKET
             self._bind_hybrid(batch, lb)
         key = (b, ql, nblk, lb)
         self._last_key = key
@@ -180,12 +182,13 @@ class GraphRunner:
 
     # -- hybrides ----------------------------------------------------------
     def _bind_hybrid(self, batch: ForwardBatch, lb: int) -> None:
-        sid = batch.seq_ids[0] if batch.seq_ids else 0
+        sids = batch.seq_ids or list(range(batch.batch_size))
         m = self.model
         for layer in self.hybrid_layers:
             store = batch.gdn_store.setdefault(layer.index, {})
-            layer.static_bind(sid, store, self.max_model_len + MLA_BUCKET,
-                              m.dtype)
+            for slot, sid in enumerate(sids):
+                layer.static_bind(slot, sid, store, self.max_model_len + MLA_BUCKET,
+                                  m.dtype)
             layer.static_bucket = lb
             if self.max_ql > 1:
                 layer.ensure_hist(self.max_ql)
@@ -261,7 +264,7 @@ class GraphRunner:
         # rejeu de capture les feraient avancer trois fois pour un jeton.
         # On les photographie avant, on les restaure avant le vrai rejeu.
         torch.cuda.synchronize(d)
-        instantane = [(l, l.linear_attn.static_export(l.static))
+        instantane = [(l, [l.linear_attn.static_export(st) for st in l.statics[:b]])
                       for l in self.hybrid_layers]
         side = torch.cuda.Stream(d)
         side.wait_stream(torch.cuda.current_stream(d))
@@ -282,8 +285,9 @@ class GraphRunner:
                     entry["out"] = step()
         entry["graph"] = graph
         self.captures += 1
-        for l, e in instantane:
-            l.linear_attn.static_load(l.static, e)
+        for l, es in instantane:
+            for st, e in zip(l.statics, es):
+                l.linear_attn.static_load(st, e)
         torch.cuda.synchronize(d)
         graph.replay()                       # la capture n'execute pas : rejouer
         return entry
