@@ -186,8 +186,6 @@ class Engine:
         # Les hybrides ne vérifient pas encore q_len > 1 à formes fixes : une
         # proposition n-gram y coûte une passe eager (≈3× le pas) pour un gain
         # incertain. Pas de spéculation sur eux tant que ce chemin manque.
-        if self.est_hybride and speculator is not None:
-            speculator = None
         self.speculator = speculator
         self.spec_k = spec_k
         self.waiting: list[Sequence] = []
@@ -459,11 +457,24 @@ class Engine:
         séquence avec son propre décalage absolu, la machinerie même dont le
         cache de préfixe avait besoin.
         """
+        hyb = self.est_hybride
+        if hyb:
+            # hybrides : une séquence, sous graphe seulement (les états
+            # récurrents reviennent en arrière par l'historique des tampons
+            # fixes) ; forme fixe k+1 pour ne capturer qu'un graphe de plus
+            if len(decodable) != 1 or self.graphs is None or not self.graphs.enabled:
+                return self._plain_decode(decodable)
+            self.graphs.max_ql = self.spec_k + 1
         proposals: dict[int, Proposal] = {}
         for seq in decodable:
             budget = max(0, seq.params.max_tokens - len(seq.output_ids) - 1)
             k = min(self.spec_k, budget)
             prop = self.speculator.propose(seq, k) if k > 0 else Proposal([])
+            if hyb:
+                if not len(prop) or k < self.spec_k:
+                    return self._plain_decode(decodable)
+                if len(prop) < k:
+                    prop = Proposal(list(prop.tokens) + [prop.tokens[-1]] * (k - len(prop)))
             # Une proposition qui dépasserait la limite de contexte est rognée
             # plutôt qu'abandonnée : une spéculation plus courte paie encore.
             room = self.max_model_len - seq.length - 1
@@ -482,6 +493,8 @@ class Engine:
         batch = self._build_spec_batch(decodable, proposals)
         flat = self.graphs.run(batch) if self.graphs is not None else None
         if flat is None:
+            if hyb:
+                return self._plain_decode(decodable)
             flat = self.model(batch, logits_positions=batch.all_token_indices())
 
         outputs: list[GenerationOutput] = []
@@ -492,6 +505,8 @@ class Engine:
             rows = flat[cursor:cursor + width]
             cursor += width
             tokens, n_acc = verify_proposal(rows, prop, seq.params)
+            if hyb and n_acc + 1 < width:
+                self.graphs.rollback_hybrid(n_acc + 1)
             self.stats.proposed_tokens += len(prop)
             self.stats.accepted_tokens += n_acc
             self.stats.decode_tokens += len(tokens)
@@ -665,6 +680,13 @@ class Engine:
             for _ in self.generate(ids, SamplingParams(max_tokens=2,
                                                        temperature=0.0)):
                 pass
+            if self.est_hybride and self.speculator is not None:
+                # motif répété : le proposeur n-gramme spécule dès le
+                # premier pas, d'où la capture du graphe de forme k+1
+                ids = ([5, 6, 7, 8] * (L // 4))[:L - 2]
+                for _ in self.generate(ids, SamplingParams(max_tokens=self.spec_k + 2,
+                                                           temperature=0.0)):
+                    pass
             L *= 2
         return self.graphs.captures - avant
 

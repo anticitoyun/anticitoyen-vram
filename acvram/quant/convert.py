@@ -288,6 +288,91 @@ def _adapt_hf(source: Iterator[tuple[str, torch.Tensor]], spec
     if mt == "muse_glimmer":
         yield from _adapt_muse(source, spec)
         return
+    if mt == "nemotron_h":
+        # noms HF (backbone.layers.N.mixer.*) → noms acvram ; A = −exp(A_log)
+        # (convention GGUF ssm_a), conv1d [d,1,L] → [d,L]. Les GGUF passent
+        # ici sans être touchés (déjà nommés).
+        mamba = ("in_proj", "out_proj", "conv1d", "A_log", "D", "dt_bias", "norm")
+        n_layers = int(spec.num_hidden_layers)
+        ignores = 0
+        for name, t in source:
+            if name.startswith("backbone.layers."):
+                _, _, idx, rest = name.split(".", 3)
+                if int(idx) >= n_layers:
+                    ignores += 1
+                    continue
+                pre = f"model.layers.{idx}."
+                if rest == "norm.weight":
+                    yield pre + "input_layernorm.weight", t
+                elif rest.startswith("mixer."):
+                    sub = rest[len("mixer."):]
+                    tete = sub.split(".")[0]
+                    if tete in mamba:
+                        if tete == "A_log":
+                            yield pre + "mamba.A.weight", (-torch.exp(t.to(torch.float32)))
+                        elif tete == "conv1d" and sub.endswith("weight"):
+                            yield pre + "mamba.conv1d.weight", t.reshape(t.shape[0], -1)
+                        elif tete in ("D", "dt_bias"):
+                            yield pre + f"mamba.{tete}.weight", t.reshape(-1)
+                        else:
+                            yield pre + "mamba." + sub, t
+                    elif tete in ("q_proj", "k_proj", "v_proj", "o_proj"):
+                        yield pre + "self_attn." + sub, t
+                    else:
+                        yield pre + "mlp." + sub.replace("shared_experts.", "shared_expert."), t
+                else:
+                    yield pre + rest, t
+            elif name == "backbone.embeddings.weight":
+                yield "model.embed_tokens.weight", t
+            elif name == "backbone.norm_f.weight":
+                yield "model.norm.weight", t
+            elif name.startswith("mtp."):
+                ignores += 1
+            else:
+                yield name, t
+        if ignores:
+            print(f"  nemotron_h : {ignores} tenseurs MTP ignorés")
+        return
+    if mt in ("lfm2", "lfm2_moe"):
+        # noms HF Lfm2 : operator_norm/ffn_norm, feed_forward.w1/w3/w2,
+        # self_attn.out_proj, q/k_layernorm, embedding_norm, expert_bias
+        renames = (("feed_forward.experts.", "mlp.experts."), ("feed_forward.gate.weight", "mlp.gate.weight"),
+                   ("feed_forward.expert_bias", "mlp.gate.e_score_correction_bias"),
+                   ("feed_forward.w1.", "mlp.gate_proj."), ("feed_forward.w3.", "mlp.up_proj."),
+                   ("feed_forward.w2.", "mlp.down_proj."), ("operator_norm.", "input_layernorm."),
+                   ("ffn_norm.", "post_attention_layernorm."), ("self_attn.out_proj.", "self_attn.o_proj."),
+                   ("self_attn.q_layernorm.", "self_attn.q_norm."), ("self_attn.k_layernorm.", "self_attn.k_norm."),
+                   ("model.embedding_norm.", "model.norm."))
+        for name, t in source:
+            for a, b in renames:
+                name = name.replace(a, b)
+            if ".mlp.experts." in name:
+                name = name.replace(".w1.", ".gate_proj.").replace(".w3.", ".up_proj.").replace(".w2.", ".down_proj.")
+            if name.endswith("conv.conv.weight") and t.dim() == 3:
+                t = t.reshape(t.shape[0], -1)
+            yield name, t
+        return
+    if mt == "ernie4_5_moe":
+        nh, nkv = spec.num_attention_heads, spec.num_key_value_heads
+
+        def _depermute(t: torch.Tensor, n_head: int) -> torch.Tensor:
+            # lignes par tête [p0a, p0b, p1a, p1b, …] (RoPE entrelacé HF)
+            # → [a…, b…] (moitiés, notre RotaryEmbedding)
+            r, c = t.shape
+            return t.reshape(n_head, r // n_head // 2, 2, c).transpose(1, 2).reshape(r, c)
+
+        for name, t in source:
+            if name.endswith("mlp.moe_statics.e_score_correction_bias"):
+                yield name.replace("moe_statics.", "gate."), t.reshape(-1)
+            elif ".mlp.shared_experts." in name:
+                yield name.replace("mlp.shared_experts.", "mlp.shared_expert."), t
+            elif name.endswith("self_attn.q_proj.weight"):
+                yield name, _depermute(t, nh)
+            elif name.endswith("self_attn.k_proj.weight"):
+                yield name, _depermute(t, nkv)
+            else:
+                yield name, t
+        return
     if mt == "starcoder2":
         for name, t in source:
             yield name.replace("mlp.c_fc.", "mlp.up_proj.").replace("mlp.c_proj.", "mlp.down_proj."), t
@@ -324,6 +409,11 @@ def _iter_checkpoint(path: str) -> Iterator[tuple[str, torch.Tensor]]:
     from .exl3 import EXL3Checkpoint, is_exl3
     if is_exl3(path):
         yield from EXL3Checkpoint(path).iter_tensors()
+        return
+
+    from .hfquant import HFQuantCheckpoint, is_hfquant
+    if is_hfquant(path):
+        yield from HFQuantCheckpoint(path).iter_tensors()
         return
 
     index_path = os.path.join(path, "model.safetensors.index.json")
@@ -645,6 +735,13 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     return report
 
 
+_TEKKEN_CHAT = (
+    "{{ bos_token }}{% for m in messages %}{% if m['role'] == 'system' %}"
+    "[SYSTEM_PROMPT]{{ m['content'] }}[/SYSTEM_PROMPT]{% elif m['role'] == 'user' %}"
+    "[INST]{{ m['content'] }}[/INST]{% else %}{{ m['content'] }}{{ eos_token }}"
+    "{% endif %}{% endfor %}")
+
+
 def _copy_tokenizer(src: str, dst: str) -> None:
     import shutil
     for fn in ("tokenizer.json", "tokenizer_config.json", "tokenizer.model",
@@ -653,3 +750,17 @@ def _copy_tokenizer(src: str, dst: str) -> None:
         p = os.path.join(src, fn)
         if os.path.isfile(p):
             shutil.copy2(p, os.path.join(dst, fn))
+    tekken = os.path.join(src, "tekken.json")
+    if os.path.isfile(tekken) and not os.path.isfile(os.path.join(src, "tokenizer.json")):
+        # Mistral « tekken » seul (Devstral, Small 3.x) : tokenizer HF
+        # reconstruit, gabarit v7-tekken ([SYSTEM_PROMPT]/[INST])
+        from transformers.integrations.mistral import convert_tekken_tokenizer
+        tok = convert_tekken_tokenizer(tekken)
+        tok.chat_template = _TEKKEN_CHAT
+        tok.save_pretrained(dst)
+        try:                                    # regex de pré-tokenisation corrigée
+            from transformers import AutoTokenizer
+            AutoTokenizer.from_pretrained(dst, fix_mistral_regex=True).save_pretrained(dst)
+        except TypeError:
+            pass
+        print("  tokenizer reconstruit depuis tekken.json")

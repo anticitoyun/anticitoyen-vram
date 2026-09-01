@@ -51,6 +51,8 @@ MAX_GRAPHS = 16
 
 
 class GraphRunner:
+    max_ql = 1          # > 1 : lots de vérification spéculative sur hybrides
+
     """Capture paresseuse et rejeu des pas de décodage purs."""
 
     def __init__(self, model, max_model_len: int) -> None:
@@ -136,7 +138,7 @@ class GraphRunner:
         trace = bool(os.environ.get("ACVRAM_TRACE_STEPS"))
         t0 = time.perf_counter()
         if self.hybrid_layers:
-            if b != 1 or ql != 1 or batch.gdn_store is None:
+            if b != 1 or batch.gdn_store is None or ql > self.max_ql:
                 return None                  # une séquence par graphe
             lb = -(-batch.seq_lens[0] // MLA_BUCKET) * MLA_BUCKET
             self._bind_hybrid(batch, lb)
@@ -185,8 +187,16 @@ class GraphRunner:
             layer.static_bind(sid, store, self.max_model_len + MLA_BUCKET,
                               m.dtype)
             layer.static_bucket = lb
+            if self.max_ql > 1:
+                layer.ensure_hist(self.max_ql)
 
     # -- tampons ---------------------------------------------------------
+    def rollback_hybrid(self, n_consumed: int) -> None:
+        """Après une vérification spéculative partiellement rejetée : l'état
+        de chaque couche hybride revient au dernier jeton consommé."""
+        for layer in self.hybrid_layers:
+            layer.rollback(n_consumed)
+
     def _embed(self, batch: ForwardBatch) -> torch.Tensor:
         """Le plongement, hors graphe, sur l'appareil où réside la table."""
         m = self.model

@@ -233,6 +233,7 @@ _ARCH_ALIASES = {
     "FalconH1ForCausalLM": "llama",
     "Starcoder2ForCausalLM": "llama",
     "MuseGlimmerForConditionalGeneration": "llama",
+    "Ernie4_5_MoeForCausalLM": "llama",
     "Lfm2MoeForCausalLM": "moe",
     "Gemma4ForCausalLM": "llama",
     "Gemma4ForConditionalGeneration": "llama",
@@ -277,6 +278,37 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
     rp_gen = cfg.get("rope_parameters") or {}
     if "rope_theta" not in cfg and isinstance(rp_gen, dict) and rp_gen.get("rope_theta"):
         cfg = {**cfg, "rope_theta": rp_gen["rope_theta"]}
+    if cfg.get("model_type") == "gemma4_unified_text":
+        cfg = {**cfg, "model_type": "gemma4_text"}     # même modèle texte
+    if cfg.get("model_type") == "nemotron_h" and cfg.get("hybrid_override_pattern"):
+        # point de contrôle HF (bf16 ou EXL3) : motif M/E/-/* → types de
+        # couches, mêmes conventions que la synthèse GGUF (attention sans
+        # RoPE, MLP ReLU², routage sigmoïde + biais, experts partagés)
+        motif = str(cfg["hybrid_override_pattern"])
+        kinds = {"M": "mamba", "E": "moe", "-": "mlp", "*": "full_attention"}
+        cfg = {**cfg,
+               "layer_types": [kinds[c] for c in motif[:int(cfg["num_hidden_layers"])]],
+               "attention_rope": False, "hidden_act": "relu2",
+               "rms_norm_eps": cfg.get("norm_eps") or cfg.get("layer_norm_epsilon") or 1e-5,
+               "num_experts": cfg.get("n_routed_experts") or 0,
+               "shared_expert_intermediate_size":
+                   int(cfg.get("moe_shared_expert_intermediate_size") or 0) * int(cfg.get("n_shared_experts") or 0),
+               "router_scoring": "sigmoid", "first_k_dense_replace": 0}
+    if cfg.get("model_type") in ("lfm2", "lfm2_moe") and "norm_eps" in cfg:
+        cfg = {**cfg, "rms_norm_eps": cfg["norm_eps"],
+               "first_k_dense_replace": cfg.get("num_dense_layers") or 0,
+               "router_scoring": "sigmoid"}
+    if cfg.get("model_type") == "ernie4_5_moe":
+        # MoE ERNIE : top-k sur softmax + biais de correction (sélection
+        # seule), renormalisation, experts partagés fusionnés en un MLP,
+        # première couche dense ; RoPE entrelacé → q/k dé-permutés à la
+        # conversion (comme les GGUF llama)
+        cfg = {**cfg, "num_experts": cfg.get("moe_num_experts"),
+               "num_experts_per_tok": cfg.get("moe_k"),
+               "shared_expert_intermediate_size":
+                   int(cfg.get("moe_intermediate_size") or 0) * int(cfg.get("moe_num_shared_experts") or 0),
+               "first_k_dense_replace": cfg.get("moe_layer_start_index") or 0,
+               "scoring_func": "softmax", "norm_topk_prob": True}
     if cfg.get("model_type") in ("muse_glimmer", "muse_glimmer_text"):
         # attention à porte de sortie (gate_proj fusionné dans q_proj à la
         # conversion), q/k normalisés sans poids (facteur 3.87 replié dans

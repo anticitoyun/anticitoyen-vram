@@ -131,15 +131,30 @@ class GGUFFile:
         for d in shape:
             n *= d
         if ttype not in _BLOCK:
-            raise ValueError(f"{name} : type ggml {ttype} non gere "
-                             f"(F32/F16/BF16, Q4_0/1, Q5_0/1, Q8_0, "
-                             f"Q4_K/Q5_K/Q6_K, IQ4_XS)")
+            return self._load_gguf_py(name, shape, ttype, offset, n)
         bbytes, bweights = _BLOCK[ttype]
         nblocks = n // bweights
         raw = np.memmap(self.path, dtype=np.uint8, mode="r",
                         offset=offset, shape=(nblocks * bbytes,))
         out = _DEQUANT[ttype](raw.reshape(nblocks, bbytes))
         return torch.from_numpy(np.ascontiguousarray(out)).reshape(shape)
+
+    def _load_gguf_py(self, name: str, shape: list[int], ttype: int,
+                      offset: int, n: int) -> torch.Tensor:
+        """Types à grille (IQ1/IQ2/IQ3, TQ…) : déquantification par le
+        gguf-py de llama.cpp — la référence elle-même, tables comprises."""
+        try:
+            from gguf.constants import GGML_QUANT_SIZES, GGMLQuantizationType
+            from gguf.quants import dequantize
+        except ImportError as e:
+            raise ValueError(f"{name} : type ggml {ttype} non gere sans gguf-py "
+                             f"(pip install llama.cpp/gguf-py)") from e
+        qtype = GGMLQuantizationType(ttype)
+        block_size, type_size = GGML_QUANT_SIZES[qtype]
+        nbytes = n // block_size * type_size
+        raw = np.memmap(self.path, dtype=np.uint8, mode="r", offset=offset, shape=(nbytes,))
+        out = dequantize(np.asarray(raw).reshape(tuple(shape[:-1]) + (shape[-1] // block_size * type_size,)), qtype)
+        return torch.from_numpy(np.ascontiguousarray(out, dtype=np.float32)).reshape(shape)
 
     def iter_tensors(self) -> Iterator[tuple[str, torch.Tensor]]:
         """Tenseurs sous leurs noms Hugging Face, experts MoE éclatés."""

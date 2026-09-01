@@ -660,6 +660,10 @@ class DecoderLayerGDN(nn.Module):
         self.post_attention_layernorm = post_norm
         self.device = device
         self.mlp_device = device
+        # spéculation : états photographiés après chaque jeton du lot
+        # vérifié, pour revenir à celui du dernier jeton accepté
+        self.static_hist: Optional[dict] = None
+        self.static_hist_len = 0
 
     def forward(self, x: torch.Tensor, batch: ForwardBatch,
                 cache=None) -> torch.Tensor:
@@ -717,15 +721,45 @@ class DecoderLayerGDN(nn.Module):
                      seq_lens: torch.Tensor, max_pos: int,
                      cache, q_len: int = 1) -> torch.Tensor:
         h = self.input_layernorm(x)
-        la = self.linear_attn
-        if hasattr(la, "rank"):
-            y = la.decode_static(h, self.static, self.static_bucket)
-        else:
-            y = la.decode_static(h, self.static)
+        y = self._la_decode(h, q_len)
         x = x + y.to(x.dtype)
         if self.mlp is None:
             return x
         return x + self.mlp(self.post_attention_layernorm(x))
+
+    def _la_decode(self, h: torch.Tensor, q_len: int) -> torch.Tensor:
+        """Attention linéaire sur les tampons fixes ; ``q_len`` > 1 (lot de
+        vérification spéculative) déroule les jetons un à un et photographie
+        l'état après chacun dans ``static_hist``."""
+        la = self.linear_attn
+        if hasattr(la, "rank"):
+            un = lambda t: la.decode_static(t, self.static, self.static_bucket)
+        else:
+            un = lambda t: la.decode_static(t, self.static)
+        if q_len == 1:
+            return un(h)
+        hist = self.ensure_hist(q_len)
+        ys = []
+        for j in range(q_len):
+            ys.append(un(h[j:j + 1]))
+            for k, v in hist.items():
+                v[j].copy_(self.static[k])
+        return torch.cat(ys, dim=0)
+
+    def ensure_hist(self, q_len: int) -> dict:
+        """Historique alloué une fois pour toutes (les graphes capturés y
+        écrivent) : le cache latent MLA en est exclu, sa longueur suffit."""
+        if self.static_hist is None or self.static_hist_len < q_len:
+            self.static_hist = {
+                k: torch.zeros((q_len,) + tuple(v.shape), dtype=v.dtype, device=v.device)
+                for k, v in self.static.items() if k not in ("cache", "scores")}
+            self.static_hist_len = q_len
+        return self.static_hist
+
+    def rollback(self, n_consumed: int) -> None:
+        """Ramène l'état au ``n_consumed``-ième jeton du dernier lot vérifié."""
+        for k, v in self.static_hist.items():
+            self.static[k].copy_(v[n_consumed - 1])
 
     def prefetch(self) -> None:
         pass
@@ -834,7 +868,7 @@ class DecoderLayerParallel(DecoderLayerGDN):
         h = self.input_layernorm(x)
         a = self.self_attn.decode_fixed(h, positions, slots, block_tables,
                                         seq_lens, max_pos, cache, q_len)
-        m = self.linear_attn.decode_static(h, self.static)
+        m = self._la_decode(h, q_len)
         x = x + a + m.to(x.dtype)
         return x + self.mlp(self.post_attention_layernorm(x))
 
