@@ -131,6 +131,7 @@ SENSITIVE_SUFFIXES = (
     "layernorm.weight", "norm.weight", "_norm.weight",
     "conv1d.weight", "a_log.weight", "dt_bias.weight",
     "mlp.gate.weight",            # routeur MoE : minuscule et décisif
+    "shared_expert_gate.weight",  # porte de l'expert partagé : 1 ligne
     "embed_tokens.weight",
 )
 

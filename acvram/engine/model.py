@@ -320,12 +320,15 @@ class MoEBlock(nn.Module):
 
     def __init__(self, router: QuantLinear, experts: list[MLP], top_k: int,
                  shared: Optional[MLP] = None,
-                 norm_topk_prob: bool = True) -> None:
+                 norm_topk_prob: bool = True,
+                 shared_gate: Optional[torch.Tensor] = None) -> None:
         super().__init__()
         self.router = router
         self.experts = nn.ModuleList(experts)
         self.top_k = top_k
         self.shared = shared
+        # porte sigmoïde de l'expert partagé (Qwen3-Next) : vecteur [1, d]
+        self.shared_gate = shared_gate
         self.norm_topk_prob = norm_topk_prob
         self._stack_state = "?"                # ? | oui | non
         self._stacks = None
@@ -426,7 +429,7 @@ class MoEBlock(nn.Module):
             if self._stack_state == "oui":
                 y = self._forward_grouped(x, topw, topi)
                 if self.shared is not None:
-                    y = y + self.shared(x)
+                    y = y + self._shared_out(x)
                 return y
 
         out = torch.zeros_like(x)
@@ -441,8 +444,14 @@ class MoEBlock(nn.Module):
             y = self.experts[e](x[tok])
             out.index_add_(0, tok, y * flat_weight[sel].unsqueeze(-1))
         if self.shared is not None:
-            out = out + self.shared(x)
+            out = out + self._shared_out(x)
         return out
+
+    def _shared_out(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.shared(x)
+        if self.shared_gate is not None:
+            y = y * torch.sigmoid(x @ self.shared_gate.t())
+        return y
 
     def prefetch(self) -> None:
         for expert in self.experts:

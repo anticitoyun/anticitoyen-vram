@@ -145,6 +145,10 @@ class GGUFFile:
         """Tenseurs sous leurs noms Hugging Face, experts MoE éclatés."""
         gdn = self.arch() in ("qwen35", "qwen35moe", "qwen3next")
         detile = self.arch() in ("qwen35", "qwen35moe")
+        # couches MTP (nextn) en fin de pile : ignorées entièrement
+        nextn = int(self.kv.get(f"{self.arch()}.nextn_predict_layers", 0) or 0)
+        premiere_mtp = (int(self.kv.get(f"{self.arch()}.block_count", 0))
+                        - nextn) if nextn else -1
 
         def _detile(t: torch.Tensor, dim: int, nk: int, nvpk: int,
                     hd: int) -> torch.Tensor:
@@ -170,10 +174,15 @@ class GGUFFile:
             nvpk = nv // nk
 
         for gname in self.tensors:
+            if premiere_mtp >= 0 and gname.startswith("blk."):
+                if int(gname.split(".", 2)[1]) >= premiere_mtp:
+                    continue
             hname = _map_name(gname, gdn)
             if hname is None:
                 continue
             t = self.load(gname)
+            if hname.endswith("shared_expert_gate.weight") and t.dim() == 1:
+                t = t.reshape(1, -1)      # vecteur GGUF -> Linear(d, 1)
             if detile and ".linear_attn." in hname:
                 if hname.endswith("qkv.weight"):
                     kd = nk * dk
@@ -215,7 +224,7 @@ class GGUFFile:
 
     def check_executable(self) -> None:
         a = self.arch()
-        if a == "qwen35" and os.environ.get("ACVRAM_GDN"):
+        if a in ("qwen35", "qwen35moe") and os.environ.get("ACVRAM_GDN"):
             return                        # chemin Gated DeltaNet (expérimental)
         if a in self.UNSUPPORTED or any(".ssm_" in n for n in self.tensors):
             raise ValueError(
@@ -268,8 +277,12 @@ class GGUFFile:
             if g("expert_shared_feed_forward_length"):
                 cfg["shared_expert_intermediate_size"] = int(
                     g("expert_shared_feed_forward_length"))
-        if a == "qwen35":
+        if a in ("qwen35", "qwen35moe"):
             interval = int(g("full_attention_interval", 4))
+            # les couches MTP (nextn) sont stockées en fin de pile : le modèle
+            # principal s'arrête avant elles
+            nextn = int(g("nextn_predict_layers", 0))
+            cfg["num_hidden_layers"] -= nextn
             nl = cfg["num_hidden_layers"]
             cfg["model_type"] = "qwen3_next"
             cfg["layer_types"] = [
@@ -398,6 +411,7 @@ _LAYER = {
     "ffn_gate": "mlp.gate_proj", "ffn_up": "mlp.up_proj",
     "ffn_down": "mlp.down_proj",
     "ffn_gate_inp": "mlp.gate",
+    "ffn_gate_inp_shexp": "mlp.shared_expert_gate",
     "ffn_gate_shexp": "mlp.shared_expert.gate_proj",
     "ffn_up_shexp": "mlp.shared_expert.up_proj",
     "ffn_down_shexp": "mlp.shared_expert.down_proj",

@@ -172,6 +172,33 @@ def load_model(path: str, plan: Optional[Plan] = None,
             return None if w is None else RMSNorm(w.to(dtype).to(d),
                                                   spec.rms_norm_eps)
 
+        def faire_mlp() -> torch.nn.Module:
+            if manifest["tensors"].get(p + "mlp.gate.weight") is None:
+                return MLP(mlin("mlp.gate_proj.weight"),
+                           mlin("mlp.up_proj.weight"),
+                           mlin("mlp.down_proj.weight"))
+            router = mlin("mlp.gate.weight")
+            experts = []
+            e = 0
+            while manifest["tensors"].get(p + f"mlp.experts.{e}.gate_proj.weight"):
+                experts.append(MLP(
+                    mlin(f"mlp.experts.{e}.gate_proj.weight"),
+                    mlin(f"mlp.experts.{e}.up_proj.weight"),
+                    mlin(f"mlp.experts.{e}.down_proj.weight")))
+                e += 1
+            shared = None
+            shared_gate = None
+            if manifest["tensors"].get(p + "mlp.shared_expert.gate_proj.weight"):
+                shared = MLP(
+                    mlin("mlp.shared_expert.gate_proj.weight"),
+                    mlin("mlp.shared_expert.up_proj.weight"),
+                    mlin("mlp.shared_expert.down_proj.weight"))
+                if manifest["tensors"].get(p + "mlp.shared_expert_gate.weight"):
+                    shared_gate = reader.get(
+                        p + "mlp.shared_expert_gate.weight").to(dtype).to(d)
+            return MoEBlock(router, experts, spec.num_experts_per_tok or 2,
+                            shared, shared_gate=shared_gate)
+
         est_gdn = bool(spec.layer_types) and \
             spec.layer_types[i] == "linear_attention"
         if est_gdn:
@@ -195,15 +222,13 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 head_k_dim=spec.linear_key_head_dim,
                 head_v_dim=spec.linear_value_head_dim,
                 eps=spec.rms_norm_eps).to(d)
-            mlp = MLP(mlin("mlp.gate_proj.weight"),
-                      mlin("mlp.up_proj.weight"),
-                      mlin("mlp.down_proj.weight"))
+            mlp_gdn = faire_mlp()
             in_norm = RMSNorm(reader.get(p + "input_layernorm.weight"
                                          ).to(dtype).to(d), spec.rms_norm_eps)
             post_norm = RMSNorm(
                 reader.get(p + "post_attention_layernorm.weight"
                            ).to(dtype).to(d), spec.rms_norm_eps)
-            layers.append(DecoderLayerGDN(i, gdn, mlp, in_norm, post_norm, d))
+            layers.append(DecoderLayerGDN(i, gdn, mlp_gdn, in_norm, post_norm, d))
             continue
 
         attn = Attention(
@@ -217,28 +242,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
             norm_opt("self_attn.k_norm.weight"),
             output_gate=spec.attn_output_gate)
 
-        if manifest["tensors"].get(p + "mlp.gate.weight") is not None:
-            router = mlin("mlp.gate.weight")
-            experts = []
-            e = 0
-            while manifest["tensors"].get(p + f"mlp.experts.{e}.gate_proj.weight"):
-                experts.append(MLP(
-                    mlin(f"mlp.experts.{e}.gate_proj.weight"),
-                    mlin(f"mlp.experts.{e}.up_proj.weight"),
-                    mlin(f"mlp.experts.{e}.down_proj.weight")))
-                e += 1
-            shared = None
-            if manifest["tensors"].get(p + "mlp.shared_expert.gate_proj.weight"):
-                shared = MLP(
-                    mlin("mlp.shared_expert.gate_proj.weight"),
-                    mlin("mlp.shared_expert.up_proj.weight"),
-                    mlin("mlp.shared_expert.down_proj.weight"))
-            mlp: torch.nn.Module = MoEBlock(
-                router, experts, spec.num_experts_per_tok or 2, shared)
-        else:
-            mlp = MLP(mlin("mlp.gate_proj.weight"),
-                      mlin("mlp.up_proj.weight"),
-                      mlin("mlp.down_proj.weight"))
+        mlp: torch.nn.Module = faire_mlp()
 
         in_norm = RMSNorm(reader.get(p + "input_layernorm.weight").to(dtype).to(d),
                           spec.rms_norm_eps)
