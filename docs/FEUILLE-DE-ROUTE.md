@@ -275,3 +275,13 @@ FP4 sur elle aurait éteint le chemin pour les deux cartes.
 | 5 | conversions en lot | fait : 6 nouveaux modèles valides (parc acvram = 14) ; 31 refus SSM attendus ; 5 conversions mutilées détectées → garde-fou de complétude + refus des archs non traduites. |
 | 6 | Gated DeltaNet | cœur mathématique validé contre transformers (prefill < 1e-4, continuité décodage < 1e-3) ; reste mapping GGUF → loader → états par séquence (docs/CHANTIER-GDN.md). |
 | 7 | étage RAM du KV | fait : HostKVPool, spill à l'éviction, remontée à l'admission, --host-kv-gib. |
+
+## Investigation TabbyAPI denses 24-31B (1er sept. 2026)
+
+Les 12-19 t/s des denses EXL3 sur TabbyAPI ne sont **pas un bug de
+configuration** : reproduits sur GPU libre, chargement propre, 5090 seule
+(cydonia 6bpw : 16,2 t/s). Cause : le décodage trellis EXL3 est borné par le
+calcul, pas la bande passante — ~290 Go/s effectifs (16 % du pic 5090), et
+6bpw aggrave. Les MoE A3B y échappent (3 Go actifs → 91-96 t/s). Remède :
+servir les denses par acvram (cydonia : 35 t/s en AWQ safetensors, 26 depuis
+l'EXL3 6bpw) ou llama.cpp ; garder TabbyAPI pour les MoE et les petits.
