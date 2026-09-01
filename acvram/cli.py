@@ -376,6 +376,16 @@ def cmd_serve(args: argparse.Namespace) -> int:
                     host_kv_gib=args.host_kv_gib)
     if engine.graphs is not None:
         print("  graphes CUDA : actifs (decodage)")
+    # Le tas est énorme après le chargement (manifeste, tokenizer, modules) :
+    # une collecte de génération 2 le parcourt entier — plus de 100 ms toutes
+    # les quelques dizaines de pas. Geler ces objets les sort du parcours.
+    if os.environ.get("ACVRAM_GC_FREEZE", "1") != "0":
+        import gc
+        gc.collect()
+        gc.freeze()
+        # et l'on espace les collectes : le pas de décodage crée peu d'objets
+        # cycliques, inutile de balayer toutes les 700 allocations
+        gc.set_threshold(50000, 20, 20)
     print(f"  charge en {time.time() - t0:.1f} s, "
           f"{_h(loaded.model.nbytes)} de poids")
     print(f"  blocs KV : {engine.allocator.num_blocks} "

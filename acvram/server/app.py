@@ -11,6 +11,7 @@ en flux de partager un seul pipeline réparti sur deux GPU et la mémoire vive.
 from __future__ import annotations
 
 import asyncio
+import os
 import json
 import threading
 import time
@@ -75,17 +76,43 @@ class EngineService:
             self._thread.join(timeout=5)
 
     def _run(self) -> None:
+        trace = bool(os.environ.get("ACVRAM_TRACE_STEPS"))
+        durees: list[float] = []
+        if trace:
+            import gc
+            debut = {}
+
+            def _gc_cb(phase: str, info: dict) -> None:
+                if phase == "start":
+                    debut["t"] = time.perf_counter()
+                else:
+                    d = (time.perf_counter() - debut.get("t", time.perf_counter())) * 1000
+                    if d > 5:
+                        print(f"[gc] gen{info.get('generation')} {d:.1f} ms "
+                              f"({info.get('collected')} objets)", flush=True)
+            gc.callbacks.append(_gc_cb)
         while not self._stop.is_set():
             if self.engine.idle:
                 time.sleep(0.002)
                 continue
             try:
+                t0 = time.perf_counter()
                 outputs = self.engine.step()
+                if trace:
+                    durees.append((time.perf_counter() - t0) * 1000)
+                    if len(durees) >= 100:
+                        durees.sort()
+                        print(f"[pas] med {durees[50]:.1f} p90 {durees[90]:.1f} "
+                              f"max {durees[-1]:.1f} ms", flush=True)
+                        durees.clear()
             except Exception as exc:                 # noqa: BLE001
                 self._broadcast_error(exc)
                 continue
+            t1 = time.perf_counter()
             for out in outputs:
                 self._deliver(out)
+            if trace and (time.perf_counter() - t1) * 1000 > 2:
+                print(f"[livraison] {(time.perf_counter() - t1)*1000:.1f} ms", flush=True)
 
     def _deliver(self, out: GenerationOutput) -> None:
         with self._lock:
