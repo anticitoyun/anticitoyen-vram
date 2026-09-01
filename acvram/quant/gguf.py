@@ -278,7 +278,7 @@ class GGUFFile:
     # mutilé qui répond du charabia — le pire des échecs, le silencieux.
     UNSUPPORTED = ("kimi-linear", "qwen35", "qwen35moe", "qwen3next",
                    "nemotron_h", "nemotron_h_moe", "falcon-h1", "falcon_h1",
-                   "lfm2", "lfm2moe", "mamba", "jamba", "granitehybrid")
+                   "mamba", "jamba", "granitehybrid")
     # Architectures transformeurs mais aux blocs différents des nôtres
     # (softcap, laurel, attention partagée...) : à mapper avant de convertir.
     UNTRANSLATED = ("glm4", "glm4moe", "glm4_moe", "gemma3",
@@ -376,6 +376,18 @@ class GGUFFile:
             cfg["attn_output_gate"] = True
             cfg["gdn_a_log_negexp"] = True       # convention du convertisseur llama.cpp
 
+        if a in ("lfm2", "lfm2moe"):
+            cfg["model_type"] = "lfm2_moe" if a == "lfm2moe" else "lfm2"
+            cfg["architectures"] = ["Lfm2MoeForCausalLM" if a == "lfm2moe" else "Lfm2ForCausalLM"]
+            hkv = self.kv.get(f"{a}.attention.head_count_kv") or []
+            cfg["layer_types"] = ["conv" if int(n) == 0 else "full_attention" for n in hkv]
+            cfg["num_key_value_heads"] = int(max(hkv)) if hkv else heads
+            cfg["conv_L_cache"] = int(g("shortconv.l_cache", 3))
+            cfg["first_k_dense_replace"] = int(g("leading_dense_block_count", 0))
+            fn = int(g("expert_gating_func", 0) or 0)
+            cfg["router_scoring"] = "sigmoid" if fn == 2 else "softmax"
+            cfg["norm_topk_prob"] = bool(g("expert_weights_norm", False))
+            cfg["routed_scaling_factor"] = float(g("expert_weights_scale", 1.0) or 1.0)
         if a == "deepseek2":
             cfg["model_type"] = "deepseek_v2"
             cfg["architectures"] = ["DeepseekV2ForCausalLM"]
@@ -583,6 +595,7 @@ class GGUFFile:
 
 _DIRECT = {
     "token_embd.weight": "model.embed_tokens.weight",
+    "token_embd_norm.weight": "model.norm.weight",      # lfm2 : norme finale
     "output.weight": "lm_head.weight",
     "output_norm.weight": "model.norm.weight",
 }
@@ -636,6 +649,8 @@ _LAYER = {
     "attn_q": "self_attn.q_proj", "attn_k": "self_attn.k_proj",
     "attn_v": "self_attn.v_proj", "attn_output": "self_attn.o_proj",
     "attn_q_norm": "self_attn.q_norm", "attn_k_norm": "self_attn.k_norm",
+    "shortconv.in_proj": "conv.in_proj", "shortconv.conv": "conv.conv",
+    "shortconv.out_proj": "conv.out_proj",
     "attn_norm": "input_layernorm", "ffn_norm": "post_attention_layernorm",
     "ffn_gate": "mlp.gate_proj", "ffn_up": "mlp.up_proj",
     "ffn_down": "mlp.down_proj",

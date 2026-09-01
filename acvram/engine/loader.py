@@ -258,6 +258,19 @@ def load_model(path: str, plan: Optional[Plan] = None,
                     num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
             continue
 
+        if spec.model_type in ("lfm2", "lfm2_moe") and spec.layer_types[i] == "conv":
+            from .lfm2 import LFM2ShortConv
+            bloc = LFM2ShortConv(
+                in_proj=lin("conv.in_proj.weight", False),
+                out_proj=lin("conv.out_proj.weight", False),
+                conv_weight=reader.get(p + "conv.conv.weight").to(torch.float32).to(d),
+                dim=spec.hidden_size).to(d)
+            mlp_c = faire_mlp()
+            in_norm = RMSNorm(reader.get(p + "input_layernorm.weight").to(dtype).to(d), spec.rms_norm_eps)
+            post_norm = RMSNorm(reader.get(p + "post_attention_layernorm.weight").to(dtype).to(d), spec.rms_norm_eps)
+            layers.append(DecoderLayerGDN(i, bloc, mlp_c, in_norm, post_norm, d))
+            continue
+
         est_kimi = spec.model_type in ("kimi_linear", "deepseek_v2", "deepseek_v3", "glm4_moe")
         if est_kimi:
             petit = lambda suffix: reader.get(p + suffix).to(torch.float32).to(d)

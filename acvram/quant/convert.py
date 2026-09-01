@@ -131,6 +131,7 @@ SENSITIVE_SUFFIXES = (
     "layernorm.weight", "norm.weight", "_norm.weight",
     "conv1d.weight", "a_log.weight", "dt_bias.weight",
     "conv1d_q.weight", "conv1d_k.weight", "conv1d_v.weight",
+    "conv.conv.weight",           # noyau court LFM2 [d, L]
     ".a.weight",                  # -exp(A_log) de KDA (kimi-linear)
     "e_score_correction_bias",
     "k_b_proj.weight", "v_b_proj.weight",   # absorptions MLA [H, r, d] : 3D, petits
@@ -538,7 +539,9 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     # couche attendue par la spécification a bien ses projections.
     attendus = []
     for i in range(spec.num_layers):
-        if spec.layer_types and spec.layer_types[i] == "linear_attention":
+        if spec.layer_types and spec.layer_types[i] == "conv":
+            attendus.append(f"model.layers.{i}.conv.in_proj.weight")
+        elif spec.layer_types and spec.layer_types[i] == "linear_attention":
             if spec.model_type == "kimi_linear":
                 attendus.append(f"model.layers.{i}.linear_attn.q_proj.weight")
                 attendus.append(f"model.layers.{i}.linear_attn.conv1d_q.weight")
