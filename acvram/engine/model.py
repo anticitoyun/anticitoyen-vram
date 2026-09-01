@@ -425,7 +425,14 @@ class MoEBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         t, h = x.shape
-        logits = self.router(x.to(torch.float32))
+        # le routeur est un petit poids en clair : on garde sa copie fp32
+        # plutôt que de la reconvertir à chaque pas
+        w32 = getattr(self, "_router_w32", None)
+        if w32 is None and hasattr(self.router.qweight, "weight"):
+            w32 = self.router.qweight.weight.to(torch.float32)
+            self._router_w32 = w32
+        logits = (F.linear(x.to(torch.float32), w32) if w32 is not None
+                  else self.router(x.to(torch.float32)))
         if self.scoring == "sigmoid":
             scores = torch.sigmoid(logits)
             sel = scores if self.score_bias is None else scores + self.score_bias

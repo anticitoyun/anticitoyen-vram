@@ -181,6 +181,11 @@ class RMSNorm(nn.Module):
         # On accumule la variance en fp32 : avec des poids sur 4 bits, les
         # activations sont déjà bruitées, et une réduction en demi-précision sur
         # 8192 canaux ajoute de l'erreur pour un gain de vitesse dérisoire.
+        if dtype == torch.bfloat16 and x.is_cuda \
+                and self.weight.dtype == torch.bfloat16:
+            ext = kernels.get_extension()
+            if ext is not None and hasattr(ext, "rmsnorm_bf16"):
+                return ext.rmsnorm_bf16(x, self.weight, self.eps)   # 1 lancement
         x32 = x.to(torch.float32)
         var = x32.pow(2).mean(-1, keepdim=True)
         x32 = x32 * torch.rsqrt(var + self.eps)

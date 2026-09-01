@@ -154,13 +154,47 @@ __global__ void nvfp4_dequant_kernel(
 }
 
 // y[n, m] = sum_k W[m, k] * x[n, k]
-template <int ROWS>
+
+// Chargement de n activations (n multiple de 8) en float, depuis float ou
+// bf16 : lire l'activation en bf16 épargne la conversion préalable et la
+// moitié du trafic L1/L2 sur le vecteur partagé par tous les blocs.
+template <typename XT, int NX>
+__device__ __forceinline__ void load_xs(const XT *__restrict__ p, float *xs) {
+    if constexpr (sizeof(XT) == 4) {
+        const float4 *x4 = reinterpret_cast<const float4 *>(p);
+        #pragma unroll
+        for (int c = 0; c < NX / 4; ++c) {
+            const float4 v = x4[c];
+            xs[c * 4 + 0] = v.x; xs[c * 4 + 1] = v.y;
+            xs[c * 4 + 2] = v.z; xs[c * 4 + 3] = v.w;
+        }
+    } else {
+        const uint4 *x8 = reinterpret_cast<const uint4 *>(p);
+        #pragma unroll
+        for (int c = 0; c < NX / 8; ++c) {
+            const uint4 v = x8[c];
+            const unsigned int w[4] = {v.x, v.y, v.z, v.w};
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                const __nv_bfloat162 b2 = *reinterpret_cast<const __nv_bfloat162 *>(&w[j]);
+                const float2 f = __bfloat1622float2(b2);
+                xs[c * 8 + 2 * j] = f.x; xs[c * 8 + 2 * j + 1] = f.y;
+            }
+        }
+    }
+}
+template <typename YT>
+__device__ __forceinline__ void store_y(YT *p, float v) {
+    if constexpr (sizeof(YT) == 4) *p = v; else *p = __float2bfloat16(v);
+}
+
+template <int ROWS, typename XT, typename YT>
 __global__ void nvfp4_gemv_kernel(
     const unsigned char *__restrict__ qw,
     const unsigned char *__restrict__ bscale,
     const float gscale,
-    const float *__restrict__ x,              // [N, K]
-    float *__restrict__ y,                    // [N, M]
+    const XT *__restrict__ x,                 // [N, K]
+    YT *__restrict__ y,                       // [N, M]
     int M, int K, int N, int k_splits) {
     extern __shared__ float smem[];
     const int nwarps = (blockDim.x + WARP - 1) / WARP;
@@ -174,7 +208,7 @@ __global__ void nvfp4_gemv_kernel(
     const long half_k = K >> 1;
 
     for (int n = 0; n < N; ++n) {
-        const float *xn = x + (long)n * K;
+        const XT *xn = x + (long)n * K;
         float acc[ROWS];
         #pragma unroll
         for (int r = 0; r < ROWS; ++r) acc[r] = 0.f;
@@ -189,14 +223,7 @@ __global__ void nvfp4_gemv_kernel(
         const int hi_p = min(npairs, lo_p + per_split_p);
         for (int i = lo_p + threadIdx.x; i < hi_p; i += blockDim.x) {
             float xs[2 * WEIGHTS_PER_LOAD];
-            const float4 *x4 = reinterpret_cast<const float4 *>(
-                xn + (long)i * 2 * WEIGHTS_PER_LOAD);
-            #pragma unroll
-            for (int c = 0; c < 2 * WEIGHTS_PER_LOAD / 4; ++c) {
-                const float4 v = x4[c];
-                xs[c * 4 + 0] = v.x; xs[c * 4 + 1] = v.y;
-                xs[c * 4 + 2] = v.z; xs[c * 4 + 3] = v.w;
-            }
+            load_xs<XT, 2 * WEIGHTS_PER_LOAD>(xn + (long)i * 2 * WEIGHTS_PER_LOAD, xs);
             #pragma unroll
             for (int r = 0; r < ROWS; ++r) {
                 const int row = row0 + r;
@@ -229,8 +256,8 @@ __global__ void nvfp4_gemv_kernel(
             for (int r = 0; r < ROWS; ++r) {
                 const int row = row0 + r;
                 if (row >= M) continue;
-                if (k_splits == 1) y[(long)n * M + row] = acc[r];
-                else atomicAdd(&y[(long)n * M + row], acc[r]);
+                if (k_splits == 1) store_y(y + (long)n * M + row, acc[r]);
+                else atomicAdd(reinterpret_cast<float *>(y) + (long)n * M + row, acc[r]);
             }
         }
         __syncthreads();
@@ -278,13 +305,13 @@ __global__ void int4_dequant_kernel(
     }
 }
 
-template <int ROWS>
+template <int ROWS, typename XT = float, typename YT = float>
 __global__ void int4_gemv_kernel(
     const unsigned char *__restrict__ qw,
     const __half *__restrict__ scales,
     const unsigned char *__restrict__ zeros,
-    const float *__restrict__ x,
-    float *__restrict__ y,
+    const XT *__restrict__ x,
+    YT *__restrict__ y,
     int M, int K, int N, int group, int k_splits) {
     extern __shared__ float smem[];
     const int nwarps = (blockDim.x + WARP - 1) / WARP;
@@ -300,7 +327,7 @@ __global__ void int4_gemv_kernel(
     const long half_k = K >> 1;
 
     for (int n = 0; n < N; ++n) {
-        const float *xn = x + (long)n * K;
+        const XT *xn = x + (long)n * K;
         float acc[ROWS];
         #pragma unroll
         for (int r = 0; r < ROWS; ++r) acc[r] = 0.f;
@@ -338,8 +365,8 @@ __global__ void int4_gemv_kernel(
             for (int r = 0; r < ROWS; ++r) {
                 const int row = row0 + r;
                 if (row >= M) continue;
-                if (k_splits == 1) y[(long)n * M + row] = acc[r];
-                else atomicAdd(&y[(long)n * M + row], acc[r]);
+                if (k_splits == 1) store_y(y + (long)n * M + row, acc[r]);
+                else atomicAdd(reinterpret_cast<float *>(y) + (long)n * M + row, acc[r]);
             }
         }
         __syncthreads();
@@ -382,13 +409,13 @@ __global__ void int8_dequant_kernel(
     }
 }
 
-template <int ROWS>
+template <int ROWS, typename XT, typename YT>
 __global__ void int8_gemv_kernel(
     const unsigned char *__restrict__ qw,
     const __half *__restrict__ scales,
     const unsigned char *__restrict__ zeros,
-    const float *__restrict__ x,
-    float *__restrict__ y,
+    const XT *__restrict__ x,
+    YT *__restrict__ y,
     int M, int K, int N, int group, int k_splits) {
     extern __shared__ float smem[];
     const int nwarps = (blockDim.x + WARP - 1) / WARP;
@@ -402,21 +429,14 @@ __global__ void int8_gemv_kernel(
     const int hi = min(nloads, lo + per_split);
 
     for (int n = 0; n < N; ++n) {
-        const float *xn = x + (long)n * K;
+        const XT *xn = x + (long)n * K;
         float acc[ROWS];
         #pragma unroll
         for (int r = 0; r < ROWS; ++r) acc[r] = 0.f;
 
         for (int i = lo + threadIdx.x; i < hi; i += blockDim.x) {
             float xs[WEIGHTS_PER_LOAD];
-            const float4 *x4 = reinterpret_cast<const float4 *>(
-                xn + (long)i * WEIGHTS_PER_LOAD);
-            #pragma unroll
-            for (int c = 0; c < WEIGHTS_PER_LOAD / 4; ++c) {
-                const float4 v = x4[c];
-                xs[c * 4 + 0] = v.x; xs[c * 4 + 1] = v.y;
-                xs[c * 4 + 2] = v.z; xs[c * 4 + 3] = v.w;
-            }
+            load_xs<XT, WEIGHTS_PER_LOAD>(xn + (long)i * WEIGHTS_PER_LOAD, xs);
             const int g = (i * WEIGHTS_PER_LOAD) / group;
             #pragma unroll
             for (int r = 0; r < ROWS; ++r) {
@@ -443,8 +463,8 @@ __global__ void int8_gemv_kernel(
             for (int r = 0; r < ROWS; ++r) {
                 const int row = row0 + r;
                 if (row >= M) continue;
-                if (k_splits == 1) y[(long)n * M + row] = acc[r];
-                else atomicAdd(&y[(long)n * M + row], acc[r]);
+                if (k_splits == 1) store_y(y + (long)n * M + row, acc[r]);
+                else atomicAdd(reinterpret_cast<float *>(y) + (long)n * M + row, acc[r]);
             }
         }
         __syncthreads();
@@ -861,12 +881,15 @@ torch::Tensor nvfp4_gemv(torch::Tensor qweight, torch::Tensor block_scale,
     CHECK_CONTIG(qweight); CHECK_CONTIG(block_scale);
     TORCH_CHECK(K % 16 == 0, "le NVFP4 exige K divisible par 16");
     auto xc = x.dim() == 1 ? x.reshape({1, -1}) : x;
-    xc = xc.to(torch::kFloat).contiguous();
     const int M = qweight.size(0);
-    const int N = xc.size(0);
     const int threads = threads_for_pairs(K);
     const int nwarps = (threads + 31) / 32;
     const int splits = splits_for(M, (int)K, (int)qweight.get_device());
+    // Activation bf16 lue telle quelle, sortie bf16 : zéro conversion autour
+    // du noyau (le décodage en enchaîne des centaines par pas).
+    const bool bf = xc.scalar_type() == torch::kBFloat16 && splits == 1;
+    xc = (bf ? xc : xc.to(torch::kFloat)).contiguous();
+    const int N = xc.size(0);
     auto out = splits == 1 ? torch::empty({N, M}, xc.options())
                            : torch::zeros({N, M}, xc.options());
     auto stream = at::cuda::getCurrentCUDAStream();
@@ -874,11 +897,21 @@ torch::Tensor nvfp4_gemv(torch::Tensor qweight, torch::Tensor block_scale,
     // tranche d'activation : la pression de registres l'emporte, mesure plus
     // lent sur toutes les formes. Quatre lignes restent l'optimum ici.
     dim3 grid((M + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK, splits);
-    nvfp4_gemv_kernel<ROWS_PER_BLOCK>
-        <<<grid, threads, ROWS_PER_BLOCK * nwarps * sizeof(float), stream>>>(
-            qweight.data_ptr<unsigned char>(),
-            block_scale.data_ptr<unsigned char>(), (float)global_scale,
-            xc.data_ptr<float>(), out.data_ptr<float>(), M, (int)K, N, splits);
+    const size_t shm = ROWS_PER_BLOCK * nwarps * sizeof(float);
+    if (bf) {
+        nvfp4_gemv_kernel<ROWS_PER_BLOCK, __nv_bfloat16, __nv_bfloat16>
+            <<<grid, threads, shm, stream>>>(
+                qweight.data_ptr<unsigned char>(),
+                block_scale.data_ptr<unsigned char>(), (float)global_scale,
+                reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr()),
+                reinterpret_cast<__nv_bfloat16 *>(out.data_ptr()), M, (int)K, N, 1);
+    } else {
+        nvfp4_gemv_kernel<ROWS_PER_BLOCK, float, float>
+            <<<grid, threads, shm, stream>>>(
+                qweight.data_ptr<unsigned char>(),
+                block_scale.data_ptr<unsigned char>(), (float)global_scale,
+                xc.data_ptr<float>(), out.data_ptr<float>(), M, (int)K, N, splits);
+    }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return x.dim() == 1 ? out.squeeze(0) : out;
 }
@@ -935,7 +968,7 @@ torch::Tensor int4_gemv(torch::Tensor qweight, torch::Tensor scales,
                            : torch::zeros({N, M}, xc.options());
     dim3 grid((M + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK, splits);
     auto stream = at::cuda::getCurrentCUDAStream();
-    int4_gemv_kernel<ROWS_PER_BLOCK>
+    int4_gemv_kernel<ROWS_PER_BLOCK, float, float>
         <<<grid, threads, ROWS_PER_BLOCK * nwarps * sizeof(float), stream>>>(
             qweight.data_ptr<unsigned char>(),
             reinterpret_cast<const __half *>(scales.data_ptr()),
@@ -989,22 +1022,34 @@ torch::Tensor int8_gemv(torch::Tensor qweight, torch::Tensor scales,
     TORCH_CHECK(K % group == 0, "K doit etre divisible par la taille de groupe");
     TORCH_CHECK(group % 16 == 0, "la taille de groupe doit etre un multiple de 16");
     auto xc = x.dim() == 1 ? x.reshape({1, -1}) : x;
-    xc = xc.to(torch::kFloat).contiguous();
     const int M = qweight.size(0);
-    const int N = xc.size(0);
     const int threads = threads_for(K);
     const int nwarps = (threads + 31) / 32;
     const int splits = splits_for(M, K, (int)qweight.get_device());
+    const bool bf = xc.scalar_type() == torch::kBFloat16 && splits == 1;
+    xc = (bf ? xc : xc.to(torch::kFloat)).contiguous();
+    const int N = xc.size(0);
     auto out = splits == 1 ? torch::empty({N, M}, xc.options())
                            : torch::zeros({N, M}, xc.options());
     dim3 grid((M + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK, splits);
     auto stream = at::cuda::getCurrentCUDAStream();
-    int8_gemv_kernel<ROWS_PER_BLOCK>
-        <<<grid, threads, ROWS_PER_BLOCK * nwarps * sizeof(float), stream>>>(
-            qweight.data_ptr<unsigned char>(),
-            reinterpret_cast<const __half *>(scales.data_ptr()),
-            zeros.data_ptr<unsigned char>(), xc.data_ptr<float>(),
-            out.data_ptr<float>(), M, K, N, (int)group, splits);
+    const size_t shm = ROWS_PER_BLOCK * nwarps * sizeof(float);
+    if (bf) {
+        int8_gemv_kernel<ROWS_PER_BLOCK, __nv_bfloat16, __nv_bfloat16>
+            <<<grid, threads, shm, stream>>>(
+                qweight.data_ptr<unsigned char>(),
+                reinterpret_cast<const __half *>(scales.data_ptr()),
+                zeros.data_ptr<unsigned char>(),
+                reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr()),
+                reinterpret_cast<__nv_bfloat16 *>(out.data_ptr()), M, K, N, (int)group, 1);
+    } else {
+        int8_gemv_kernel<ROWS_PER_BLOCK, float, float>
+            <<<grid, threads, shm, stream>>>(
+                qweight.data_ptr<unsigned char>(),
+                reinterpret_cast<const __half *>(scales.data_ptr()),
+                zeros.data_ptr<unsigned char>(), xc.data_ptr<float>(),
+                out.data_ptr<float>(), M, K, N, (int)group, splits);
+    }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return x.dim() == 1 ? out.squeeze(0) : out;
 }
@@ -1316,6 +1361,50 @@ torch::Tensor mla_decode(torch::Tensor q_eff, torch::Tensor cache,
     return o;
 }
 
+
+// RMSNorm fusionnée (bf16 -> bf16, variance en fp32) : un bloc par ligne.
+// Même arithmétique que la version torch : x normalisé arrondi en bf16, puis
+// produit bf16 par le poids — bit-identique.
+__global__ void rmsnorm_bf16_kernel(const __nv_bfloat16 *__restrict__ x,
+                                    const __nv_bfloat16 *__restrict__ w,
+                                    __nv_bfloat16 *__restrict__ y,
+                                    int H, float eps) {
+    __shared__ float red[32];
+    const __nv_bfloat16 *xr = x + (size_t)blockIdx.x * H;
+    __nv_bfloat16 *yr = y + (size_t)blockIdx.x * H;
+    float ss = 0.f;
+    for (int i = threadIdx.x; i < H; i += blockDim.x) {
+        const float v = __bfloat162float(xr[i]); ss += v * v;
+    }
+    for (int o = 16; o > 0; o >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, o);
+    if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = ss;
+    __syncthreads();
+    ss = 0.f;
+    for (int k = 0; k < (int)(blockDim.x >> 5); ++k) ss += red[k];
+    const float rs = rsqrtf(ss / (float)H + eps);
+    for (int i = threadIdx.x; i < H; i += blockDim.x) {
+        const float n = __bfloat162float(__float2bfloat16(__bfloat162float(xr[i]) * rs));
+        yr[i] = __float2bfloat16(n * __bfloat162float(w[i]));
+    }
+}
+
+torch::Tensor rmsnorm_bf16(torch::Tensor x, torch::Tensor w, double eps) {
+    CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(x);
+    TORCH_CHECK(x.scalar_type() == torch::kBFloat16 && w.scalar_type() == torch::kBFloat16,
+                "rmsnorm_bf16 : bf16 attendu");
+    auto xc = x.contiguous();
+    const int H = xc.size(-1);
+    const long R = xc.numel() / H;
+    auto y = torch::empty_like(xc);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    rmsnorm_bf16_kernel<<<(unsigned)R, 256, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr()),
+        reinterpret_cast<const __nv_bfloat16 *>(w.contiguous().data_ptr()),
+        reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), H, (float)eps);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return y;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("nvfp4_dequant", &nvfp4_dequant, "NVFP4 -> matrice dense");
     m.def("nvfp4_gemv", &nvfp4_gemv, "NVFP4 : dequantification + produit fusionnes");
@@ -1327,6 +1416,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "NVFP4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
     m.def("int4_gemv_grouped", &int4_gemv_grouped,
           "INT4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
+    m.def("rmsnorm_bf16", &rmsnorm_bf16, "RMSNorm bf16 fusionnee (variance fp32)");
     m.def("kda_decode", &kda_decode, "KDA : pas de decodage fusionne (une sequence)");
     m.def("mla_decode", &mla_decode, "MLA absorbee : scores + softmax + lecture latente");
     m.def("paged_attention", &paged_attention,
