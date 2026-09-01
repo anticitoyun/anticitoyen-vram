@@ -225,6 +225,7 @@ _ARCH_ALIASES = {
     "GraniteForCausalLM": "llama",
     "Lfm2ForCausalLM": "llama",
     "NemotronHForCausalLM": "llama",
+    "FalconH1ForCausalLM": "llama",
     "Lfm2MoeForCausalLM": "moe",
     "Gemma4ForCausalLM": "llama",
     "Gemma4ForConditionalGeneration": "llama",
@@ -309,8 +310,7 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         if cfg.get("rotary_dim") is None and cfg.get("partial_rotary_factor"):
             hd = int(cfg.get("head_dim") or cfg["hidden_size"] // cfg["num_attention_heads"])
             cfg = {**cfg, "rotary_dim": int(hd * float(cfg["partial_rotary_factor"]))}
-    elif (mt in ("kimi_linear",
-               "falcon_h1", "mamba", "mamba2", "jamba")
+    elif (mt in ("kimi_linear", "mamba", "mamba2", "jamba")
             or "linear_attn" in json.dumps(cfg.get("layer_types", ""))):
         raise ValueError(
             f"architecture « {archs[0]} » (model_type={mt}) : recurrence "

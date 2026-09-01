@@ -279,7 +279,6 @@ class GGUFFile:
     # (SSM, Gated DeltaNet, KDA). Les convertir quand même produirait un modèle
     # mutilé qui répond du charabia — le pire des échecs, le silencieux.
     UNSUPPORTED = ("kimi-linear", "qwen35", "qwen35moe", "qwen3next",
-                   "falcon-h1", "falcon_h1",
                    "mamba", "jamba", "granitehybrid")
     # Architectures transformeurs mais aux blocs différents des nôtres
     # (softcap, laurel, attention partagée...) : à mapper avant de convertir.
@@ -290,7 +289,7 @@ class GGUFFile:
     def check_executable(self) -> None:
         a = self.arch()
         if a in ("qwen35", "qwen35moe", "qwen3next", "kimi-linear",
-                 "nemotron_h", "nemotron_h_moe") \
+                 "nemotron_h", "nemotron_h_moe", "falcon-h1") \
                 and os.environ.get("ACVRAM_GDN"):
             return                        # récurrences linéaires (expérimental)
         if a in self.UNSUPPORTED or any(".ssm_" in n for n in self.tensors):
@@ -380,6 +379,16 @@ class GGUFFile:
             cfg["attn_output_gate"] = True
             cfg["gdn_a_log_negexp"] = True       # convention du convertisseur llama.cpp
 
+        if a == "falcon-h1":
+            cfg["model_type"] = "falcon_h1"
+            cfg["architectures"] = ["FalconH1ForCausalLM"]
+            cfg["layer_types"] = ["parallel"] * cfg["num_hidden_layers"]
+            cfg["head_dim"] = int(g("attention.key_length", cfg["hidden_size"] // heads))
+            inner = int(g("ssm.inner_size")); H = int(g("ssm.time_step_rank"))
+            cfg["mamba_num_heads"] = H; cfg["mamba_head_dim"] = inner // H
+            cfg["n_groups"] = int(g("ssm.group_count", 1))
+            cfg["ssm_state_size"] = int(g("ssm.state_size", 128))
+            cfg["conv_kernel"] = int(g("ssm.conv_kernel", 4))
         if a in ("nemotron_h", "nemotron_h_moe"):
             cfg["model_type"] = "nemotron_h"
             cfg["architectures"] = ["NemotronHForCausalLM"]
@@ -716,6 +725,8 @@ def _map_name(g: str, gdn: bool = False,
         return f"model.layers.{idx}.mamba.A.weight"          # nemotron_h, sans suffixe
     if kimi_recurrent is None and rest == "ssm_d":
         return f"model.layers.{idx}.mamba.D.weight"
+    if rest == "ffn_norm":                       # falcon-h1 : sans suffixe
+        return f"model.layers.{idx}.post_attention_layernorm.weight"
     if kimi_recurrent is None and stem == "ssm_dt":
         return f"model.layers.{idx}.mamba.dt_bias.weight"       # rangé en .bias dans le GGUF
     if kimi_recurrent is not None:

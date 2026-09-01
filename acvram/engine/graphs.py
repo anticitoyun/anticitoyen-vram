@@ -103,8 +103,7 @@ class GraphRunner:
             if isinstance(mod, QuantLinear) and mod.streamed is not None:
                 return False                 # les adresses changent en vol
         pleines = [i for i, l in enumerate(m.layers)
-                   if not isinstance(l, DecoderLayerGDN)
-                   and getattr(l, "self_attn", None) is not None]
+                   if getattr(l, "self_attn", None) is not None]
         if any(i not in m.caches for i in pleines):
             return False
         if any(m.caches[i].k.device != next(iter(devs)) for i in pleines):

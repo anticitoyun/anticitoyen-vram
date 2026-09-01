@@ -543,6 +543,11 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     for i in range(spec.num_layers):
         if spec.layer_types and spec.layer_types[i] == "conv":
             attendus.append(f"model.layers.{i}.conv.in_proj.weight")
+        elif spec.layer_types and spec.layer_types[i] == "parallel":
+            attendus.append(f"model.layers.{i}.mamba.in_proj.weight")
+            attendus.append(f"model.layers.{i}.self_attn.q_proj.weight")
+            attendus.append(f"model.layers.{i}.mlp.gate_proj.weight")
+            continue
         elif spec.layer_types and spec.layer_types[i] in ("mamba", "mlp", "moe"):
             attendus.append(f"model.layers.{i}." + {
                 "mamba": "mamba.in_proj.weight", "mlp": "mlp.up_proj.weight",

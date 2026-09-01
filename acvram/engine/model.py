@@ -797,6 +797,48 @@ class DecoderLayer(nn.Module):
                 m.prefetch()
 
 
+class DecoderLayerParallel(DecoderLayerGDN):
+    """Falcon-H1 : attention ET Mamba2 sur la même entrée normée, sommées."""
+
+    def __init__(self, index: int, attn: "Attention", mamba: nn.Module,
+                 mlp: nn.Module, input_norm: "RMSNorm", post_norm: "RMSNorm",
+                 device: torch.device) -> None:
+        super().__init__(index, mamba, mlp, input_norm, post_norm, device)
+        self.self_attn = attn
+
+    def forward(self, x: torch.Tensor, batch: ForwardBatch,
+                cache=None) -> torch.Tensor:
+        h = self.input_layernorm(x)
+        a = self.self_attn(h, batch, cache)
+        store = batch.gdn_store.setdefault(self.index, {}) \
+            if batch.gdn_store is not None else {}
+        sorties = []
+        start = 0
+        for i, ql in enumerate(batch.query_lens):
+            sid = batch.seq_ids[i] if batch.seq_ids else i
+            etat = store.get(sid)
+            if etat is _STATIC:
+                etat = self.linear_attn.static_export(self.static)
+                self.static_owner = None
+            y, etat = self.linear_attn(h[start:start + ql], etat)
+            store[sid] = etat
+            sorties.append(y)
+            start += ql
+        x = x + a + torch.cat(sorties).to(x.dtype)
+        return x + self.mlp(self.post_attention_layernorm(x))
+
+    def decode_fixed(self, x: torch.Tensor, positions: torch.Tensor,
+                     slots: torch.Tensor, block_tables: torch.Tensor,
+                     seq_lens: torch.Tensor, max_pos: int,
+                     cache, q_len: int = 1) -> torch.Tensor:
+        h = self.input_layernorm(x)
+        a = self.self_attn.decode_fixed(h, positions, slots, block_tables,
+                                        seq_lens, max_pos, cache, q_len)
+        m = self.linear_attn.decode_static(h, self.static)
+        x = x + a + m.to(x.dtype)
+        return x + self.mlp(self.post_attention_layernorm(x))
+
+
 class DecoderLayerGemma(nn.Module):
     """Bloc Gemma 4 : normes avant ET après l'attention et le MLP, puis un
     scalaire de sortie par couche (layer_scalar)."""

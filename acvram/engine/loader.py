@@ -25,7 +25,7 @@ from ..quant.nvfp4 import NVFP4Tensor
 from .config import ModelSpec
 from .layers import QuantLinear, RMSNorm, RotaryEmbedding
 from .model import (ACVRamModel, Attention, DecoderLayer, DecoderLayerGDN,
-                    DecoderLayerGemma, MLP, MLP2, MoEBlock)
+                    DecoderLayerGemma, DecoderLayerParallel, MLP, MLP2, MoEBlock)
 
 __all__ = ["LoadedModel", "load_model"]
 
@@ -256,6 +256,34 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 caches[i] = PagedKVCache(KVCacheConfig(
                     num_layers=1, num_kv_heads=nkv, head_dim=hd,
                     num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
+            continue
+
+        if spec.model_type == "falcon_h1":
+            from .mamba2 import Mamba2Mixer
+            petit = lambda suffix: reader.get(p + suffix).to(torch.float32).to(d)
+            cb = petit("mamba.conv1d.bias") if manifest["tensors"].get(p + "mamba.conv1d.bias") else None
+            mamba = Mamba2Mixer(
+                in_proj=lin("mamba.in_proj.weight", False), out_proj=lin("mamba.out_proj.weight", False),
+                conv_weight=petit("mamba.conv1d.weight"), conv_bias=cb,
+                dt_bias=petit("mamba.dt_bias.weight"), A=petit("mamba.A.weight"),
+                D=petit("mamba.D.weight"), norm_weight=petit("mamba.norm.weight"),
+                num_heads=spec.mamba_num_heads, head_dim=spec.mamba_head_dim,
+                n_groups=spec.mamba_n_groups, state_size=spec.mamba_state_size,
+                eps=spec.rms_norm_eps).to(d)
+            attn = Attention(spec, lin("self_attn.q_proj.weight", streamed_attn),
+                             lin("self_attn.k_proj.weight", streamed_attn),
+                             lin("self_attn.v_proj.weight", streamed_attn),
+                             lin("self_attn.o_proj.weight", streamed_attn), rope)
+            mlp_f = faire_mlp()
+            in_norm = RMSNorm(reader.get(p + "input_layernorm.weight").to(dtype).to(d), spec.rms_norm_eps)
+            post_norm = RMSNorm(reader.get(p + "post_attention_layernorm.weight").to(dtype).to(d), spec.rms_norm_eps)
+            layers.append(DecoderLayerParallel(i, attn, mamba, mlp_f, in_norm, post_norm, d))
+            n_blocks = kv_blocks.get(lp.exec_device, 0)
+            if n_blocks:
+                kv_fmt = next((t.kv_format for t in plan.tiers if t.name == lp.exec_device), "int8")
+                caches[i] = PagedKVCache(KVCacheConfig(
+                    num_layers=1, num_kv_heads=spec.num_key_value_heads,
+                    head_dim=spec.head_dim, num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
             continue
 
         if spec.model_type == "nemotron_h":
