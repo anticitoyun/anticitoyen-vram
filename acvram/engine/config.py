@@ -93,6 +93,11 @@ class ModelSpec:
     linear_conv_kernel_dim: int = 4
     rotary_dim: Optional[int] = None      # RoPE partiel (None = tête entière)
     attn_output_gate: bool = False
+    # granite : multiplicateurs scalaires (attention, plongement, résidu, logits)
+    attention_multiplier: Optional[float] = None
+    embedding_multiplier: float = 1.0
+    residual_multiplier: float = 1.0
+    logits_scaling: float = 1.0
     # kimi-linear : KDA + MLA + routeur DeepSeek
     model_type: str = ""
     kv_lora_rank: int = 0
@@ -196,6 +201,7 @@ _ARCH_ALIASES = {
     "GemmaForCausalLM": "llama",
     "Gemma2ForCausalLM": "llama",
     "Phi3ForCausalLM": "llama",
+    "GraniteForCausalLM": "llama",
     # vision-langage (partie texte seule)
     "Qwen2VLForConditionalGeneration": "llama",
     "Qwen2_5_VLForConditionalGeneration": "llama",
@@ -304,6 +310,11 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         rotary_dim=cfg.get("rotary_dim"),
         attn_output_gate=bool(cfg.get("attn_output_gate")),
         model_type=mt,
+        attention_multiplier=(float(cfg["attention_multiplier"])
+                              if cfg.get("attention_multiplier") else None),
+        embedding_multiplier=float(cfg.get("embedding_multiplier") or 1.0),
+        residual_multiplier=float(cfg.get("residual_multiplier") or 1.0),
+        logits_scaling=float(cfg.get("logits_scaling") or 1.0),
         kv_lora_rank=int(cfg.get("kv_lora_rank") or 0),
         qk_rope_head_dim=int(cfg.get("qk_rope_head_dim") or 0),
         qk_nope_head_dim=int(cfg.get("qk_nope_head_dim") or 0),

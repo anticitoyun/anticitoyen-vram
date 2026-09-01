@@ -317,7 +317,9 @@ def load_model(path: str, plan: Optional[Plan] = None,
             reader.get(p + "post_attention_layernorm.weight").to(dtype).to(d),
             spec.rms_norm_eps)
 
-        layers.append(DecoderLayer(i, attn, mlp, in_norm, post_norm, d, mlp_dev))
+        couche = DecoderLayer(i, attn, mlp, in_norm, post_norm, d, mlp_dev)
+        couche.residual_multiplier = spec.residual_multiplier
+        layers.append(couche)
 
         n_blocks = kv_blocks.get(lp.exec_device, 0)
         if n_blocks:

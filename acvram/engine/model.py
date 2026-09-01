@@ -138,7 +138,7 @@ class Attention(nn.Module):
         self.n_kv_heads = spec.num_key_value_heads
         self.head_dim = spec.head_dim
         self.n_rep = self.n_heads // max(1, self.n_kv_heads)
-        self.scale = self.head_dim ** -0.5
+        self.scale = spec.attention_multiplier or self.head_dim ** -0.5
         self.rope = rope
 
     def forward(self, x: torch.Tensor, batch: ForwardBatch,
@@ -678,10 +678,13 @@ class DecoderLayer(nn.Module):
         # moins coûteux de les y calculer que de les copier par le PCIe — voir
         # PlannerOptions.host_exec.
         self.mlp_device = mlp_device or device
+        self.residual_multiplier = 1.0        # granite : résidu atténué
 
     def forward(self, x: torch.Tensor, batch: ForwardBatch,
                 cache: Optional[PagedKVCache]) -> torch.Tensor:
-        x = x + self.self_attn(self.input_layernorm(x), batch, cache)
+        r = self.residual_multiplier
+        a = self.self_attn(self.input_layernorm(x), batch, cache)
+        x = x + (a if r == 1.0 else a * r)
         h = self.post_attention_layernorm(x)
         if self.mlp_device != self.device:
             # Seul l'état caché traverse le bus : [jetons, dimension], quelques
@@ -689,16 +692,19 @@ class DecoderLayer(nn.Module):
             y = self.mlp(h.to(self.mlp_device)).to(x.device, non_blocking=True)
         else:
             y = self.mlp(h)
-        return x + y
+        return x + (y if r == 1.0 else y * r)
 
     def decode_fixed(self, x: torch.Tensor, positions: torch.Tensor,
                      slots: torch.Tensor, block_tables: torch.Tensor,
                      seq_lens: torch.Tensor, max_pos: int,
                      cache: PagedKVCache, q_len: int = 1) -> torch.Tensor:
-        x = x + self.self_attn.decode_fixed(self.input_layernorm(x), positions,
-                                            slots, block_tables, seq_lens,
-                                            max_pos, cache, q_len)
-        return x + self.mlp(self.post_attention_layernorm(x))
+        r = self.residual_multiplier
+        a = self.self_attn.decode_fixed(self.input_layernorm(x), positions,
+                                        slots, block_tables, seq_lens,
+                                        max_pos, cache, q_len)
+        x = x + (a if r == 1.0 else a * r)
+        y = self.mlp(self.post_attention_layernorm(x))
+        return x + (y if r == 1.0 else y * r)
 
     def prefetch(self) -> None:
         for m in self.modules():
@@ -735,6 +741,8 @@ class ACVRamModel(nn.Module):
         """
         idx = batch.tokens.to(self.embed_tokens.device)
         x = F.embedding(idx, self.embed_tokens).to(self.dtype)
+        if self.spec.embedding_multiplier != 1.0:
+            x = x * self.spec.embedding_multiplier
 
         current = None
         for i, layer in enumerate(self.layers):
@@ -761,7 +769,9 @@ class ACVRamModel(nn.Module):
         x = x[idx.to(x.device)]
         head_dev = getattr(self.lm_head.qweight, "qweight", None)
         target = head_dev.device if head_dev is not None else x.device
-        return self.lm_head(x.to(target))
+        logits = self.lm_head(x.to(target))
+        return logits if self.spec.logits_scaling == 1.0 \
+            else logits / self.spec.logits_scaling
 
     def decode_fixed(self, x: torch.Tensor, positions: torch.Tensor,
                      slots: torch.Tensor, block_tables: torch.Tensor,
@@ -777,7 +787,9 @@ class ACVRamModel(nn.Module):
             x = layer.decode_fixed(x, positions, slots, block_tables,
                                    seq_lens, max_pos, self.caches.get(i), q_len)
         x = self.norm(x)
-        return self.lm_head(x)
+        logits = self.lm_head(x)
+        return logits if self.spec.logits_scaling == 1.0 \
+            else logits / self.spec.logits_scaling
 
     @property
     def nbytes(self) -> int:

@@ -190,7 +190,8 @@ class GraphRunner:
         """Le plongement, hors graphe, sur l'appareil où réside la table."""
         m = self.model
         idx = batch.tokens.to(m.embed_tokens.device)
-        return torch.nn.functional.embedding(idx, m.embed_tokens).to(m.dtype)
+        x = torch.nn.functional.embedding(idx, m.embed_tokens).to(m.dtype)
+        return x if m.spec.embedding_multiplier == 1.0 else x * m.spec.embedding_multiplier
 
     def _fill(self, entry: dict, batch: ForwardBatch) -> None:
         b, _ql, nblk = entry["key"][:3]

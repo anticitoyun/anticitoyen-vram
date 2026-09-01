@@ -177,6 +177,22 @@ class GGUFFile:
             dk = int(self.kv.get(f"{a}.ssm.state_size", 128))
             nvpk = nv // nk
 
+        # Le convertisseur llama.cpp de la famille llama (LlamaModel, dont
+        # Mistral et Granite héritent) permute q et k vers la disposition
+        # RoPE entrelacée de Meta ; la référence HF (et nous) travaillent en
+        # demi-rotation : on défait la permutation à la lecture.
+        permute = self.arch() in ("llama", "granite")
+        if permute:
+            a = self.arch()
+            p_nh = int(self.kv.get(f"{a}.attention.head_count"))
+            p_nkv = int(self.kv.get(f"{a}.attention.head_count_kv", p_nh))
+
+        def _depermute(t: torch.Tensor, n_head: int) -> torch.Tensor:
+            forme = t.shape
+            hd = forme[0] // n_head
+            return (t.reshape(n_head, hd // 2, 2, *forme[1:])
+                    .transpose(1, 2).reshape(*forme).contiguous())
+
         phi3 = self.arch() == "phi3"
         if phi3:
             a = self.arch()
@@ -216,6 +232,10 @@ class GGUFFile:
                     t = torch.cat([t[:qk], v])
                 elif hname.endswith("out.weight"):
                     t = _detile(t, 1, nk, nvpk, dv)
+            if permute and hname.endswith(("self_attn.q_proj.weight", "self_attn.q_proj.bias")):
+                t = _depermute(t, p_nh)
+            elif permute and hname.endswith(("self_attn.k_proj.weight", "self_attn.k_proj.bias")):
+                t = _depermute(t, p_nkv)
             if phi3 and hname.endswith("self_attn.qkv_proj.weight"):
                 # Phi-3/4 : q, k, v fusionnés [q (nh·hd) ; k (nkv·hd) ; v (nkv·hd)]
                 q, k, v = torch.split(t, [nh * hd, nkv * hd, nkv * hd], dim=0)
@@ -250,7 +270,7 @@ class GGUFFile:
     # Architectures transformeurs mais aux blocs différents des nôtres
     # (softcap, laurel, attention partagée...) : à mapper avant de convertir.
     UNTRANSLATED = ("glm4", "glm4moe", "glm4_moe", "gemma4", "gemma3",
-                    "gemma3n", "chatglm", "granite", "internlm2",
+                    "gemma3n", "chatglm", "internlm2",
                     "starcoder2", "kat", "deci", "olmoe")
 
     def check_executable(self) -> None:
@@ -286,6 +306,7 @@ class GGUFFile:
                    # un qwen2/qwen3 ; en texte pur les trois axes du mrope
                    # portent la même position, soit un RoPE ordinaire
                    "phi3": "Phi3ForCausalLM",
+                   "granite": "GraniteForCausalLM",
                    "qwen2vl": "Qwen2ForCausalLM",
                    "qwen3vl": "Qwen3ForCausalLM",
                    "qwen3vlmoe": "Qwen3MoeForCausalLM"}
@@ -342,6 +363,12 @@ class GGUFFile:
             cfg["attn_output_gate"] = True
             cfg["gdn_a_log_negexp"] = True       # convention du convertisseur llama.cpp
 
+        if a == "granite":
+            # multiplicateurs Granite (llama sinon)
+            if g("attention.scale"): cfg["attention_multiplier"] = float(g("attention.scale"))
+            if g("embedding_scale"): cfg["embedding_multiplier"] = float(g("embedding_scale"))
+            if g("residual_scale"): cfg["residual_multiplier"] = float(g("residual_scale"))
+            if g("logit_scale"): cfg["logits_scaling"] = float(g("logit_scale"))
         if a == "kimi-linear":
             hkv = self.kv.get("kimi-linear.attention.head_count_kv") or []
             cfg["model_type"] = "kimi_linear"
