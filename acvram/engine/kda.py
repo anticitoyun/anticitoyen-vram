@@ -67,6 +67,33 @@ class KimiDeltaAttention(nn.Module):
         self.kernel = conv_q.shape[-1]
         self.eps = eps
 
+    # -- empilement des projections (moins de lancements au décodage) -------
+    def fuse_projections(self) -> bool:
+        """Empile q/k/v et f_a/g_a en deux QuantLinear quand leurs poids sont
+        des INT8Tensor de même géométrie : 9 GEMV -> 6 par pas."""
+        from ..quant.formats import INT8Tensor
+        from .layers import QuantLinear
+
+        def pile(lins):
+            ts = [getattr(l, "qweight", None) for l in lins]
+            if not all(isinstance(t, INT8Tensor) for t in ts):
+                return None
+            if len({(t.qweight.shape[1], t.group_size) for t in ts}) != 1:
+                return None
+            if any(l.bias is not None or l.scaler is not None
+                   or l.streamed is not None for l in lins):
+                return None
+            t = INT8Tensor(torch.cat([t.qweight for t in ts]).contiguous(),
+                           torch.cat([t.scales for t in ts]).contiguous(),
+                           torch.cat([t.zeros for t in ts]).contiguous(),
+                           ts[0].group_size,
+                           (sum(t.shape[0] for t in ts), ts[0].shape[1]))
+            return QuantLinear(t)
+
+        self.qkv_proj = pile([self.q_proj, self.k_proj, self.v_proj])
+        self.fa_ga = pile([self.f_a, self.g_a])      # même entrée x : empilables
+        return self.qkv_proj is not None
+
     def _conv(self, x: torch.Tensor, w: torch.Tensor,
               state: Optional[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """Conv1d causale depthwise + SiLU ; rend (sortie [t, d_inner], état)."""
@@ -154,11 +181,24 @@ class KimiDeltaAttention(nn.Module):
             # noyau fusionné : convs, normalisations, portes, récurrence,
             # norme de sortie — un seul lancement après les projections
             bf = torch.bfloat16
-            xq = self.q_proj(x).to(bf).reshape(-1)
-            xk = self.k_proj(x).to(bf).reshape(-1)
-            xv = self.v_proj(x).to(bf).reshape(-1)
-            g1_pre = self.f_b(self.f_a(x)).to(bf).reshape(-1)
-            g2 = self.g_b(self.g_a(x)).to(bf).reshape(-1)
+            if getattr(self, "qkv_proj", None) is not None:
+                xqkv = self.qkv_proj(x).to(bf).reshape(-1)
+                xq, xk, xv = xqkv.split(self.d_inner)
+                xq, xk, xv = xq.contiguous(), xk.contiguous(), xv.contiguous()
+            else:
+                xq = self.q_proj(x).to(bf).reshape(-1)
+                xk = self.k_proj(x).to(bf).reshape(-1)
+                xv = self.v_proj(x).to(bf).reshape(-1)
+            if getattr(self, "fa_ga", None) is not None:
+                low = self.fa_ga(x)                       # [1, 2*r]
+                r = low.shape[-1] // 2
+                # f_b ne voit que f_a(x), g_b que g_a(x) : deux GEMV sur les
+                # moitiés (l'empilement [f_b;g_b] exigerait la même entrée)
+                g1_pre = self.f_b(low[:, :r]).to(bf).reshape(-1)
+                g2 = self.g_b(low[:, r:]).to(bf).reshape(-1)
+            else:
+                g1_pre = self.f_b(self.f_a(x)).to(bf).reshape(-1)
+                g2 = self.g_b(self.g_a(x)).to(bf).reshape(-1)
             beta_pre = self.beta_proj(x).to(bf).reshape(-1)
             y = ext.kda_decode(xq, xk, xv, g1_pre, g2, beta_pre,
                                self.conv_q, self.conv_k, self.conv_v,

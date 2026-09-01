@@ -375,7 +375,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
                     enable_cuda_graphs=not args.no_cuda_graphs,
                     host_kv_gib=args.host_kv_gib)
     if engine.graphs is not None:
-        print("  graphes CUDA : actifs (decodage)")
+        n = engine.warm_graphs(int(os.environ.get("ACVRAM_WARM_GRAPHS", "2048")))
+        print(f"  graphes CUDA : actifs (decodage), {n} godets capturés d'avance")
     # Le tas est énorme après le chargement (manifeste, tokenizer, modules) :
     # une collecte de génération 2 le parcourt entier — plus de 100 ms toutes
     # les quelques dizaines de pas. Geler ces objets les sort du parcours.

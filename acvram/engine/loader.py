@@ -231,6 +231,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
                     num_heads=spec.linear_num_value_heads,
                     head_dim=spec.linear_value_head_dim,
                     eps=spec.rms_norm_eps).to(d)
+                bloc.fuse_projections()
             else:
                 from .mla import MLAttention
                 bloc = MLAttention(

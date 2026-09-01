@@ -183,6 +183,11 @@ class Engine:
         n_blocks = min((c.cfg.num_blocks for c in self.model.caches.values()),
                        default=1024)
         self.allocator = BlockAllocator(n_blocks, enable_prefix_cache)
+        # Les hybrides ne vérifient pas encore q_len > 1 à formes fixes : une
+        # proposition n-gram y coûte une passe eager (≈3× le pas) pour un gain
+        # incertain. Pas de spéculation sur eux tant que ce chemin manque.
+        if self.est_hybride and speculator is not None:
+            speculator = None
         self.speculator = speculator
         self.spec_k = spec_k
         self.waiting: list[Sequence] = []
@@ -398,11 +403,18 @@ class Engine:
                 outputs += self._speculative_decode(decodable)
             else:
                 outputs += self._plain_decode(decodable)
-            self.stats.decode_seconds += time.perf_counter() - t0
+            t1 = time.perf_counter()
+            self.stats.decode_seconds += t1 - t0
             self.stats.spec_steps += 1
             for seq in decodable:
                 if not seq.finished:
                     self._register_complete_blocks(seq)
+            if os.environ.get("ACVRAM_TRACE_STEPS"):
+                t2 = time.perf_counter()
+                if (t2 - t0) * 1000 > 15:
+                    print(f"[pas-lent] decode {(t1-t0)*1000:.1f} registre "
+                          f"{(t2-t1)*1000:.1f} ms len={decodable[0].length}",
+                          flush=True)
 
         self.stats.steps += 1
         self.stats.running = len(self.running)
@@ -411,18 +423,32 @@ class Engine:
         return outputs
 
     def _plain_decode(self, decodable: list[Sequence]) -> list[GenerationOutput]:
+        trace = os.environ.get("ACVRAM_TRACE_STEPS")
+        tg = time.perf_counter()
         for seq in decodable:
             if not self._grow(seq):
                 self._finish(seq, "length")
         decodable = [s for s in decodable if not s.finished]
         if not decodable:
             return []
+        t0 = time.perf_counter()
         batch = self._build_batch(decodable, prefill=False)
+        t1 = time.perf_counter()
         logits = self.graphs.run(batch) if self.graphs is not None else None
+        voie = "graphe"
         if logits is None:
             logits = self.model(batch)
+            voie = "eager"
+        t2 = time.perf_counter()
         self.stats.decode_tokens += len(decodable)
-        return self._emit(logits, decodable)
+        outs = self._emit(logits, decodable)
+        if trace:
+            t3 = time.perf_counter()
+            if (t3 - tg) * 1000 > 12:
+                print(f"[pas-lent] {voie} grow {(t0-tg)*1000:.1f} batch "
+                      f"{(t1-t0)*1000:.1f} avant {(t2-t1)*1000:.1f} emit "
+                      f"{(t3-t2)*1000:.1f} ms len={decodable[0].length}", flush=True)
+        return outs
 
     def _speculative_decode(self, decodable: list[Sequence]
                             ) -> list[GenerationOutput]:
@@ -622,6 +648,25 @@ class Engine:
                     yield out
             if not self.running and not self.waiting:
                 break
+
+    def warm_graphs(self, max_len: int = 2048) -> int:
+        """Capture d'avance les graphes de décodage des godets jusqu'à
+        ``max_len`` jetons : une capture coûte 40 à 130 ms, mieux vaut la
+        payer au démarrage qu'au milieu d'une réponse. Rend le nombre de
+        captures faites."""
+        if self.graphs is None:
+            return 0
+        avant = self.graphs.captures
+        L = 128
+        while L <= min(max_len, self.max_model_len - 4):
+            # longueur choisie pour que prefill + 2 jetons restent dans le
+            # godet de L/16 blocs (puissance de deux)
+            ids = [1] * (L - 2)
+            for _ in self.generate(ids, SamplingParams(max_tokens=2,
+                                                       temperature=0.0)):
+                pass
+            L *= 2
+        return self.graphs.captures - avant
 
     @property
     def idle(self) -> bool:
