@@ -545,6 +545,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             else:
                 attendus.append(f"model.layers.{i}.linear_attn.qkv.weight")
                 attendus.append(f"model.layers.{i}.linear_attn.conv1d.weight")
+        elif spec.q_lora_rank:
+            attendus.append(f"model.layers.{i}.self_attn.q_a_proj.weight")
         else:
             attendus.append(f"model.layers.{i}.self_attn.q_proj.weight")
         if spec.is_moe and i >= spec.first_k_dense_replace:

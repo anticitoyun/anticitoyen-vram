@@ -111,6 +111,8 @@ class ModelSpec:
     # kimi-linear : KDA + MLA + routeur DeepSeek
     model_type: str = ""
     kv_lora_rank: int = 0
+    q_lora_rank: int = 0
+    mla_rope: bool = False                # RoPE sur la partie pe (DeepSeek), pas Kimi
     qk_rope_head_dim: int = 0
     qk_nope_head_dim: int = 0
     v_head_dim: int = 0
@@ -285,6 +287,10 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
     # qwen3_next est désormais exécutable (couches Gated DeltaNet) quand la
     # configuration porte nos champs layer_types/linear_* ; les autres
     # hybrides restent refusés.
+    if mt in ("deepseek_v2", "deepseek_v3", "glm4_moe") and cfg.get("kv_lora_rank"):
+        cfg = {**cfg, "mla_rope": True,
+               "layer_types": cfg.get("layer_types") or
+               ["full_attention"] * int(cfg.get("num_hidden_layers", 0))}
     if mt in ("qwen3_next", "kimi_linear", "qwen3_5", "qwen3_5_text",
               "qwen3_5_moe", "qwen3_5_moe_text") \
             and cfg.get("linear_num_value_heads"):
@@ -346,6 +352,8 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         residual_multiplier=float(cfg.get("residual_multiplier") or 1.0),
         logits_scaling=float(cfg.get("logits_scaling") or 1.0),
         kv_lora_rank=int(cfg.get("kv_lora_rank") or 0),
+        q_lora_rank=int(cfg.get("q_lora_rank") or 0),
+        mla_rope=bool(cfg.get("mla_rope")),
         qk_rope_head_dim=int(cfg.get("qk_rope_head_dim") or 0),
         qk_nope_head_dim=int(cfg.get("qk_nope_head_dim") or 0),
         v_head_dim=int(cfg.get("v_head_dim") or 0),

@@ -41,9 +41,18 @@ class MLAttention(nn.Module):
                  v_b: torch.Tensor,                # [heads, v_dim, kv_lora_rank]
                  num_heads: int, qk_nope: int, qk_rope: int,
                  kv_lora_rank: int, v_dim: int,
-                 eps: float = 1e-6) -> None:
+                 eps: float = 1e-6,
+                 q_a_proj: Optional[nn.Module] = None,
+                 q_a_norm: Optional[torch.Tensor] = None,
+                 q_b_proj: Optional[nn.Module] = None,
+                 rope: Optional[nn.Module] = None) -> None:
         super().__init__()
         self.q_proj, self.kv_a_proj, self.o_proj = q_proj, kv_a_proj, o_proj
+        # DeepSeek-V2/GLM : q en bas rang (q_b(norm(q_a(x)))) et RoPE sur la
+        # partie pe de q et de k (Kimi : ni l'un ni l'autre)
+        self.q_a_proj, self.q_b_proj = q_a_proj, q_b_proj
+        self.q_a_norm = nn.Parameter(q_a_norm, requires_grad=False) if q_a_norm is not None else None
+        self.rope_emb = rope
         self.kv_a_norm = nn.Parameter(kv_a_norm, requires_grad=False)
         self.k_b = nn.Parameter(k_b, requires_grad=False)
         self.v_b = nn.Parameter(v_b, requires_grad=False)
@@ -53,16 +62,49 @@ class MLAttention(nn.Module):
         self.scale = (qk_nope + qk_rope) ** -0.5
         self.eps = eps
 
+    def _q(self, x: torch.Tensor) -> torch.Tensor:
+        if self.q_a_proj is None:
+            return self.q_proj(x)
+        a = self.q_a_proj(x)
+        a32 = a.to(torch.float32)
+        a = (a32 * torch.rsqrt(a32.pow(2).mean(-1, keepdim=True) + self.eps)
+             ).to(x.dtype) * self.q_a_norm
+        return self.q_b_proj(a)
+
+    def _rope(self, q_pe: torch.Tensor, k_pe: torch.Tensor,
+              positions: torch.Tensor, max_pos: int):
+        """RoPE (demi-rotation) sur les parties pe : q_pe [t, nh, r], k_pe [t, r]."""
+        if self.rope_emb is None:
+            return q_pe, k_pe
+        # DeepSeek-V2/GLM : RoPE de type « norm » (paires adjacentes 2i, 2i+1),
+        # pas la demi-rotation NEOX — llama.cpp le range hors LLAMA_ROPE_TYPE_NEOX
+        cos, sin = self.rope_emb(positions, q_pe.device, q_pe.dtype, max_pos=max_pos)
+        half = cos.shape[-1] // 2
+        c = cos[..., :half].unsqueeze(1)                       # [t, 1, r/2]
+        s = sin[..., :half].unsqueeze(1)
+
+        def tourner(x: torch.Tensor) -> torch.Tensor:
+            x2 = x.reshape(*x.shape[:-1], half, 2)
+            x0, x1 = x2[..., 0], x2[..., 1]
+            y0 = x0 * c - x1 * s
+            y1 = x0 * s + x1 * c
+            return torch.stack((y0, y1), dim=-1).reshape(x.shape)
+        return tourner(q_pe), tourner(k_pe.unsqueeze(1)).squeeze(1)
+
     def forward(self, x: torch.Tensor,
                 cache: Optional[torch.Tensor] = None
                 ) -> tuple[torch.Tensor, torch.Tensor]:
         """``x`` vaut [t, hidden] pour UNE séquence ; rend (y, cache latent)."""
         t = x.shape[0]
-        q = self.q_proj(x).reshape(t, self.nh, self.nope + self.rope)
+        q = self._q(x).reshape(t, self.nh, self.nope + self.rope)
         q_nope, q_pe = q.split([self.nope, self.rope], dim=-1)
 
         kvp = self.kv_a_proj(x)                               # [t, rank+rope]
         c, k_pe = kvp.split([self.rank, self.rope], dim=-1)
+        if self.rope_emb is not None:
+            passe0 = 0 if cache is None else cache.shape[0]
+            pos = torch.arange(passe0, passe0 + t, device=x.device)
+            q_pe, k_pe = self._rope(q_pe, k_pe, pos, passe0 + t + 1)
         c32 = c.to(torch.float32)
         c = (c32 * torch.rsqrt(c32.pow(2).mean(-1, keepdim=True) + self.eps)
              ).to(x.dtype) * self.kv_a_norm
@@ -117,6 +159,9 @@ class MLAttention(nn.Module):
 
     def fuse_projections(self) -> bool:
         from .layers import stack_int8_linears
+        if self.q_a_proj is not None:
+            self.q_kv = None
+            return False
         self.q_kv = stack_int8_linears([self.q_proj, self.kv_a_proj])
         return self.q_kv is not None
 
@@ -155,9 +200,13 @@ class MLAttention(nn.Module):
             q = qkv[:, :nq].reshape(1, self.nh, self.nope + self.rope)
             kvp = qkv[:, nq:]
         else:
-            q = self.q_proj(x).reshape(1, self.nh, self.nope + self.rope)
+            q = self._q(x).reshape(1, self.nh, self.nope + self.rope)
             kvp = self.kv_a_proj(x)
         q_nope, q_pe = q.split([self.nope, self.rope], dim=-1)
+        if self.rope_emb is not None:
+            c0, k_pe0 = kvp.split([self.rank, self.rope], dim=-1)
+            q_pe, k_pe0 = self._rope(q_pe, k_pe0, st["len"].view(1), bucket + 1)
+            kvp = torch.cat([c0, k_pe0], dim=-1)
         c, k_pe = kvp.split([self.rank, self.rope], dim=-1)
         c32 = c.to(torch.float32)
         c = (c32 * torch.rsqrt(c32.pow(2).mean(-1, keepdim=True) + self.eps)

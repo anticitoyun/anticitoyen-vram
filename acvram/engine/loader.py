@@ -258,7 +258,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
                     num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
             continue
 
-        est_kimi = spec.model_type == "kimi_linear"
+        est_kimi = spec.model_type in ("kimi_linear", "deepseek_v2", "deepseek_v3", "glm4_moe")
         if est_kimi:
             petit = lambda suffix: reader.get(p + suffix).to(torch.float32).to(d)
             petit16 = lambda suffix: reader.get(p + suffix).to(dtype).to(d)
@@ -286,8 +286,20 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 bloc.fuse_projections()
             else:
                 from .mla import MLAttention
+                q_lora = manifest["tensors"].get(p + "self_attn.q_a_proj.weight") is not None
+                rope_mla = None
+                if spec.mla_rope:
+                    if "rope_mla_partage" not in dir():
+                        rope_mla_partage = RotaryEmbedding(
+                            spec.qk_rope_head_dim, spec.max_position_embeddings,
+                            spec.rope_theta, spec.rope_scaling, d, dtype)
+                    rope_mla = rope_mla_partage
                 bloc = MLAttention(
-                    q_proj=lin("self_attn.q_proj.weight", False),
+                    q_proj=None if q_lora else lin("self_attn.q_proj.weight", False),
+                    q_a_proj=lin("self_attn.q_a_proj.weight", False) if q_lora else None,
+                    q_a_norm=petit16("self_attn.q_a_layernorm.weight") if q_lora else None,
+                    q_b_proj=lin("self_attn.q_b_proj.weight", False) if q_lora else None,
+                    rope=rope_mla,
                     kv_a_proj=lin("self_attn.kv_a_proj_with_mqa.weight", False),
                     o_proj=lin("self_attn.o_proj.weight", False),
                     kv_a_norm=petit16("self_attn.kv_a_layernorm.weight"),

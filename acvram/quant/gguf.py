@@ -149,6 +149,8 @@ class GGUFFile:
         if self.arch() == "kimi-linear":
             hkv = self.kv.get("kimi-linear.attention.head_count_kv") or []
             kimi_rec = {i for i, n in enumerate(hkv) if int(n) == 0}
+        elif self.arch() == "deepseek2":
+            kimi_rec = set()                  # toutes les couches sont MLA
         # couches MTP (nextn) en fin de pile : ignorées entièrement
         nextn = int(self.kv.get(f"{self.arch()}.nextn_predict_layers", 0) or 0)
         premiere_mtp = (int(self.kv.get(f"{self.arch()}.block_count", 0))
@@ -367,6 +369,27 @@ class GGUFFile:
             cfg["attn_output_gate"] = True
             cfg["gdn_a_log_negexp"] = True       # convention du convertisseur llama.cpp
 
+        if a == "deepseek2":
+            cfg["model_type"] = "deepseek_v2"
+            cfg["architectures"] = ["DeepseekV2ForCausalLM"]
+            cfg.pop("head_dim", None)
+            nl = cfg["num_hidden_layers"]
+            cfg["layer_types"] = ["full_attention"] * nl
+            cfg["kv_lora_rank"] = int(g("attention.kv_lora_rank", 512))
+            cfg["q_lora_rank"] = int(g("attention.q_lora_rank", 0) or 0)
+            cfg["qk_rope_head_dim"] = int(g("rope.dimension_count", 64))
+            cfg["qk_nope_head_dim"] = int(g("attention.key_length_mla", 192)) - cfg["qk_rope_head_dim"]
+            cfg["v_head_dim"] = int(g("attention.value_length_mla", 128))
+            cfg["mla_rope"] = True
+            cfg["first_k_dense_replace"] = int(g("leading_dense_block_count", 0))
+            cfg["routed_scaling_factor"] = float(g("expert_weights_scale", 1.0))
+            cfg["norm_topk_prob"] = bool(g("expert_weights_norm", False))
+            fn = int(g("expert_gating_func", 0) or 0)
+            if fn == 0:                       # heuristique llama.cpp : GLM 4.7
+                fn = 2 if (nl in (47, 48) and cfg["vocab_size"] == 154880) else 1
+            cfg["router_scoring"] = "sigmoid" if fn == 2 else "softmax"
+            cfg["shared_expert_intermediate_size"] = int(
+                g("expert_shared_feed_forward_length", cfg.get("moe_intermediate_size", 0)) or 0)
         if a == "gemma4":
             cfg["model_type"] = "gemma4_text"
             hkv = self.kv.get(f"{a}.attention.head_count_kv") or []
@@ -589,6 +612,8 @@ _LAYER_KDA = {
 }
 _LAYER_MLA = {
     "attn_q": "self_attn.q_proj",
+    "attn_q_a": "self_attn.q_a_proj", "attn_q_a_norm": "self_attn.q_a_layernorm",
+    "attn_q_b": "self_attn.q_b_proj",
     "attn_kv_a_mqa": "self_attn.kv_a_proj_with_mqa",
     "attn_kv_a_norm": "self_attn.kv_a_layernorm",
     "attn_k_b": "self_attn.k_b_proj", "attn_v_b": "self_attn.v_b_proj",
