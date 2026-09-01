@@ -196,6 +196,13 @@ _ARCH_ALIASES = {
     "GemmaForCausalLM": "llama",
     "Gemma2ForCausalLM": "llama",
     "Phi3ForCausalLM": "llama",
+    # vision-langage (partie texte seule)
+    "Qwen2VLForConditionalGeneration": "llama",
+    "Qwen2_5_VLForConditionalGeneration": "llama",
+    "Qwen3VLForConditionalGeneration": "llama",
+    "Qwen3VLMoeForConditionalGeneration": "moe",
+    "Qwen3_5ForConditionalGeneration": "llama",
+    "Qwen3_5MoeForConditionalGeneration": "moe",
 }
 
 

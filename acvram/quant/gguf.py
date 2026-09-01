@@ -259,12 +259,19 @@ class GGUFFile:
                    "qwen2moe": "Qwen2MoeForCausalLM",
                    "qwen3moe": "Qwen3MoeForCausalLM",
                    "mistral": "MistralForCausalLM",
-                   "gemma2": "Gemma2ForCausalLM"}
+                   "gemma2": "Gemma2ForCausalLM",
+                   # vision-langage servis en texte seul : la partie texte est
+                   # un qwen2/qwen3 ; en texte pur les trois axes du mrope
+                   # portent la même position, soit un RoPE ordinaire
+                   "qwen2vl": "Qwen2ForCausalLM",
+                   "qwen3vl": "Qwen3ForCausalLM",
+                   "qwen3vlmoe": "Qwen3MoeForCausalLM"}
+        vl = {"qwen2vl": "qwen2", "qwen3vl": "qwen3", "qwen3vlmoe": "qwen3_moe"}
         heads = int(g("attention.head_count", 32))
         tokens = self.kv.get("tokenizer.ggml.tokens") or []
         cfg = {
             "architectures": [archmap.get(a, "LlamaForCausalLM")],
-            "model_type": a,
+            "model_type": vl.get(a, a),
             "hidden_size": int(g("embedding_length", 4096)),
             "intermediate_size": int(g("feed_forward_length", 11008)),
             "num_hidden_layers": int(g("block_count", 32)),
