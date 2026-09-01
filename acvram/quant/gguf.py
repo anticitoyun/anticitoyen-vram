@@ -143,11 +143,53 @@ class GGUFFile:
 
     def iter_tensors(self) -> Iterator[tuple[str, torch.Tensor]]:
         """Tenseurs sous leurs noms Hugging Face, experts MoE éclatés."""
+        gdn = self.arch() in ("qwen35", "qwen35moe", "qwen3next")
+        detile = self.arch() in ("qwen35", "qwen35moe")
+
+        def _detile(t: torch.Tensor, dim: int, nk: int, nvpk: int,
+                    hd: int) -> torch.Tensor:
+            """Ordre « tiled » de ggml -> ordre groupé de la référence.
+
+            Le convertisseur Qwen3.5 réordonne les têtes V pour le broadcast
+            de ggml : [G0v0, G1v0, ..., G0v1, ...]. La référence transformers
+            — et notre moteur — attendent l'ordre groupé par tête K.
+            """
+            forme = list(t.shape)
+            neuf = forme[:dim] + [nvpk, nk, hd] + forme[dim + 1:]
+            t = t.reshape(*neuf)
+            perm = list(range(len(neuf)))
+            perm[dim], perm[dim + 1] = perm[dim + 1], perm[dim]
+            return t.permute(*perm).contiguous().reshape(*forme)
+
+        if detile:
+            a = self.arch()
+            nk = int(self.kv.get(f"{a}.ssm.group_count", 16))
+            nv = int(self.kv.get(f"{a}.ssm.time_step_rank", 32))
+            dv = int(self.kv.get(f"{a}.ssm.inner_size", 4096)) // nv
+            dk = int(self.kv.get(f"{a}.ssm.state_size", 128))
+            nvpk = nv // nk
+
         for gname in self.tensors:
-            hname = _map_name(gname)
+            hname = _map_name(gname, gdn)
             if hname is None:
                 continue
             t = self.load(gname)
+            if detile and ".linear_attn." in hname:
+                if hname.endswith("qkv.weight"):
+                    kd = nk * dk
+                    v = _detile(t[2 * kd:], 0, nk, nvpk, dv)
+                    t = torch.cat([t[:2 * kd], v])
+                elif hname.endswith("gate.weight"):
+                    t = _detile(t, 0, nk, nvpk, dv)
+                elif hname.endswith(("alpha.weight", "beta.weight",
+                                     "dt_bias.weight", "a_log.weight")):
+                    t = _detile(t, 0, nk, nvpk, 1)
+                elif hname.endswith("conv1d.weight"):
+                    qk = 2 * nk * dk
+                    v = _detile(t[qk:], 0, nk, nvpk, dv)
+                    t = torch.cat([t[:qk], v])
+                elif hname.endswith("out.weight"):
+                    t = _detile(t, 1, nk, nvpk, dv)
             if hname.endswith("__exps__"):
                 stem = hname[: -len("__exps__")]
                 for e in range(t.shape[0]):
@@ -173,6 +215,8 @@ class GGUFFile:
 
     def check_executable(self) -> None:
         a = self.arch()
+        if a == "qwen35" and os.environ.get("ACVRAM_GDN"):
+            return                        # chemin Gated DeltaNet (expérimental)
         if a in self.UNSUPPORTED or any(".ssm_" in n for n in self.tensors):
             raise ValueError(
                 f"architecture « {a} » : hybride à récurrence linéaire "
@@ -224,6 +268,23 @@ class GGUFFile:
             if g("expert_shared_feed_forward_length"):
                 cfg["shared_expert_intermediate_size"] = int(
                     g("expert_shared_feed_forward_length"))
+        if a == "qwen35":
+            interval = int(g("full_attention_interval", 4))
+            nl = cfg["num_hidden_layers"]
+            cfg["model_type"] = "qwen3_next"
+            cfg["layer_types"] = [
+                "full_attention" if (i + 1) % interval == 0
+                else "linear_attention" for i in range(nl)]
+            cfg["linear_num_value_heads"] = int(g("ssm.time_step_rank", 32))
+            cfg["linear_num_key_heads"] = int(g("ssm.group_count", 16))
+            cfg["linear_key_head_dim"] = int(g("ssm.state_size", 128))
+            cfg["linear_value_head_dim"] = (
+                int(g("ssm.inner_size", 4096))
+                // int(g("ssm.time_step_rank", 32)))
+            cfg["linear_conv_kernel_dim"] = int(g("ssm.conv_kernel", 4))
+            cfg["rotary_dim"] = int(g("rope.dimension_count", 0)) or None
+            cfg["attn_output_gate"] = True
+
         bos = self.kv.get("tokenizer.ggml.bos_token_id")
         eos = self.kv.get("tokenizer.ggml.eos_token_id")
         if bos is not None:
@@ -312,6 +373,23 @@ _DIRECT = {
     "output_norm.weight": "model.norm.weight",
 }
 
+# Couches à récurrence linéaire (qwen35 / qwen3-next) : la projection qkv de
+# la partie linéaire reste fusionnée (le module la découpe en plat), le gate
+# et les projections a/b sont séparés, les petits tenseurs d'état passent en
+# clair. `attn_gate` sert aussi aux couches d'attention pleines (porte de
+# sortie) — même nom GGUF, rôle choisi par le type de couche au chargement.
+_LAYER_GDN = {
+    "attn_qkv": "linear_attn.qkv",
+    "attn_gate": "linear_attn.gate",
+    "ssm_alpha": "linear_attn.alpha",
+    "ssm_beta": "linear_attn.beta",
+    "ssm_out": "linear_attn.out",
+    "ssm_conv1d": "linear_attn.conv1d",
+    "ssm_norm": "linear_attn.norm",
+    "attn_norm": "input_layernorm",
+    "post_attention_norm": "post_attention_layernorm",
+}
+
 _LAYER = {
     "attn_q": "self_attn.q_proj", "attn_k": "self_attn.k_proj",
     "attn_v": "self_attn.v_proj", "attn_output": "self_attn.o_proj",
@@ -330,13 +408,21 @@ _EXPS = {"ffn_gate_exps": "mlp.experts.{e}.gate_proj",
          "ffn_down_exps": "mlp.experts.{e}.down_proj"}
 
 
-def _map_name(g: str) -> Optional[str]:
+def _map_name(g: str, gdn: bool = False) -> Optional[str]:
     if g in _DIRECT:
         return _DIRECT[g]
     if not g.startswith("blk."):
         return None                        # rope_freqs et autres auxiliaires
     _, idx, rest = g.split(".", 2)
     stem, _, kind = rest.rpartition(".")   # "attn_q", "weight"|"bias"
+    if gdn:
+        if rest == "ssm_a":                # A_log — seul tenseur SANS suffixe
+            return f"model.layers.{idx}.linear_attn.a_log.weight"
+        if stem == "ssm_dt":               # dt_bias, range en .bias
+            return f"model.layers.{idx}.linear_attn.dt_bias.weight"
+        if stem in _LAYER_GDN:
+            return f"model.layers.{idx}.{_LAYER_GDN[stem]}.{kind}"
+        # les couches d'attention pleines retombent sur le mapping classique
     if stem in _LAYER:
         return f"model.layers.{idx}.{_LAYER[stem]}.{kind}"
     if stem in _EXPS:

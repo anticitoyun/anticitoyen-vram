@@ -129,6 +129,7 @@ PROMOTE = {"int4_awq": "int8", "nvfp4": "int8", "int8": "bf16"}
 
 SENSITIVE_SUFFIXES = (
     "layernorm.weight", "norm.weight", "_norm.weight",
+    "conv1d.weight", "a_log.weight", "dt_bias.weight",
     "mlp.gate.weight",            # routeur MoE : minuscule et décisif
     "embed_tokens.weight",
 )
@@ -491,7 +492,11 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     # couche attendue par la spécification a bien ses projections.
     attendus = []
     for i in range(spec.num_layers):
-        attendus.append(f"model.layers.{i}.self_attn.q_proj.weight")
+        if spec.layer_types and spec.layer_types[i] == "linear_attention":
+            attendus.append(f"model.layers.{i}.linear_attn.qkv.weight")
+            attendus.append(f"model.layers.{i}.linear_attn.conv1d.weight")
+        else:
+            attendus.append(f"model.layers.{i}.self_attn.q_proj.weight")
         if spec.is_moe and i >= spec.first_k_dense_replace:
             attendus.append(f"model.layers.{i}.mlp.experts.0.gate_proj.weight")
         else:

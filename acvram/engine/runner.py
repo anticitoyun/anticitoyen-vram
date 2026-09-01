@@ -172,6 +172,14 @@ class Engine:
         self.max_batch_size = max_batch_size
         self.max_model_len = max_model_len
 
+        # Hybrides à récurrence linéaire : l'état GDN vit par séquence, hors
+        # du cache paginé ; le cache de préfixe n'aurait pas de sens (les
+        # blocs KV ne suffisent pas à restaurer l'état), on le coupe.
+        self.est_hybride = bool(getattr(self.spec, "layer_types", None))
+        if self.est_hybride:
+            enable_prefix_cache = False
+        self.gdn_states: dict = {}
+
         n_blocks = min((c.cfg.num_blocks for c in self.model.caches.values()),
                        default=1024)
         self.allocator = BlockAllocator(n_blocks, enable_prefix_cache)
@@ -195,6 +203,8 @@ class Engine:
             self.allocator.spill_cb = _deverser
 
         self.graphs = None
+        if self.est_hybride:
+            enable_cuda_graphs = False
         if enable_cuda_graphs:
             from .graphs import GraphRunner
             gr = GraphRunner(self.model, max_model_len)
@@ -320,6 +330,8 @@ class Engine:
         seq.finish_reason = reason
         if seq.blocks:
             self.allocator.free(seq.blocks)
+            for etats in self.gdn_states.values():
+                etats.pop(seq.id, None)
             seq.blocks = []
         if seq in self.running:
             self.running.remove(seq)
@@ -359,7 +371,8 @@ class Engine:
             seq_lens=seq_lens, query_lens=query_lens,
             block_tables=block_tables,
             slot_mapping=torch.tensor(slots, dtype=torch.long),
-            is_prefill=prefill)
+            is_prefill=prefill,
+            seq_ids=[s.id for s in seqs], gdn_store=self.gdn_states)
 
     # -- the step --------------------------------------------------------
     def step(self) -> list[GenerationOutput]:
@@ -501,7 +514,8 @@ class Engine:
             seq_lens=seq_lens, query_lens=query_lens,
             block_tables=block_tables,
             slot_mapping=torch.tensor(slots, dtype=torch.long),
-            is_prefill=False)
+            is_prefill=False,
+            seq_ids=[s.id for s in seqs], gdn_store=self.gdn_states)
 
     def _append(self, seq: Sequence, tokens: list[int]) -> GenerationOutput:
         """Ajoute plusieurs jetons acceptés, en s'arrêtant au premier qui termine."""

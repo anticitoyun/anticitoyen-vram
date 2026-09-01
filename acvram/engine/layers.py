@@ -263,6 +263,14 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 def apply_rope(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor,
                sin: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    if cos.shape[-1] < q.shape[-1]:
+        # RoPE partiel (qwen3-next : 64 dims tournées sur 256) : la tranche
+        # au-delà passe telle quelle.
+        d = cos.shape[-1]
+        q1, q2 = q[..., :d], q[..., d:]
+        k1, k2 = k[..., :d], k[..., d:]
+        q1, k1 = apply_rope(q1, k1, cos, sin)
+        return torch.cat([q1, q2], dim=-1), torch.cat([k1, k2], dim=-1)
     """``q`` et ``k`` valent [jetons, têtes, dim] ; cos et sin valent [jetons, dim]."""
     cos = cos.unsqueeze(1).to(q.dtype)
     sin = sin.unsqueeze(1).to(q.dtype)

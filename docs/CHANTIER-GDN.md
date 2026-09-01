@@ -41,3 +41,30 @@ Hyperparamètres (métadonnées GGUF) : `ssm.inner_size`=4096 (value_dim),
 5. Attention des couches pleines : gate de sortie + mrope par sections.
 6. Vérification : logits couche à couche contre transformers (tiny synthétique
    au format qwen3_next), puis jetons greedy contre llama.cpp sur le 4B réel.
+
+
+## RÉSOLU — 2 septembre 2026
+
+Le 4B « kimi » (qwen35/Gated DeltaNet) génère **jeton pour jeton la même
+sortie que llama.cpp** sur les mêmes ids, et sert un chat cohérent en NVFP4
+(34 jetons/s). Trois conventions du convertisseur llama.cpp faisaient toute
+la différence — aucune n'est documentée ailleurs que dans son code :
+
+1. `ssm_a` stocke **−exp(A_log)**, pas A_log : inversé au chargement
+   (`log(−ssm_a)`).
+2. Les têtes V sont réordonnées « **tiled** » pour le broadcast ggml — dans la
+   partie V de `attn_qkv`, `attn_gate`, `ssm_alpha`, `ssm_beta`,
+   `ssm_dt.bias`, `ssm_a`, la partie V des canaux de `ssm_conv1d`, et les
+   colonnes de `ssm_out`. Dé-tiling appliqué à la conversion (gguf.py),
+   aller-retour testé.
+3. Les poids de RMSNorm zéro-centrés portent déjà le **+1** dans le GGUF
+   (sauf `ssm_norm`) : notre RMSNorm ×w est la bonne, telle quelle.
+
+Leçon de méthode : l'oracle transformers reconstruit depuis le GGUF portait
+les mêmes hypothèses fausses que le moteur — il validait nos erreurs. Seul
+llama.cpp, exécuteur indépendant du même fichier, a permis de trancher, et la
+bissection couche à couche a localisé chaque écart.
+
+Restent : qwen35moe (Ornith — GDN + MoE + MTP `nextn`, mapping expert à
+compléter), kimi-linear (KDA, autre récurrence). Le flag ACVRAM_GDN=1 protège
+la conversion qwen35 tant que la couverture n'est pas élargie.

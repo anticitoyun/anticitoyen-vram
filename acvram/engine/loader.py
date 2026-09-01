@@ -24,7 +24,8 @@ from ..quant.int4 import INT4Tensor
 from ..quant.nvfp4 import NVFP4Tensor
 from .config import ModelSpec
 from .layers import QuantLinear, RMSNorm, RotaryEmbedding
-from .model import ACVRamModel, Attention, DecoderLayer, MLP, MoEBlock
+from .model import (ACVRamModel, Attention, DecoderLayer, DecoderLayerGDN,
+                    MLP, MoEBlock)
 
 __all__ = ["LoadedModel", "load_model"]
 
@@ -132,7 +133,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
         else torch.device("cpu")
     embed = embed.to(embed_dev)
 
-    rope = RotaryEmbedding(spec.head_dim, spec.max_position_embeddings,
+    rope = RotaryEmbedding(spec.rotary_dim or spec.head_dim,
+                           spec.max_position_embeddings,
                            spec.rope_theta, spec.rope_scaling)
 
     layers: list[DecoderLayer] = []
@@ -170,6 +172,40 @@ def load_model(path: str, plan: Optional[Plan] = None,
             return None if w is None else RMSNorm(w.to(dtype).to(d),
                                                   spec.rms_norm_eps)
 
+        est_gdn = bool(spec.layer_types) and \
+            spec.layer_types[i] == "linear_attention"
+        if est_gdn:
+            from .gdn import GatedDeltaNet
+            petit = lambda suffix: reader.get(p + suffix).to(torch.float32).to(d)
+            gdn = GatedDeltaNet(
+                qkv=lin("linear_attn.qkv.weight", False),
+                gate=lin("linear_attn.gate.weight", False),
+                alpha=lin("linear_attn.alpha.weight", False),
+                beta=lin("linear_attn.beta.weight", False),
+                out=lin("linear_attn.out.weight", False),
+                conv_weight=petit("linear_attn.conv1d.weight"),
+                dt_bias=petit("linear_attn.dt_bias.weight"),
+                # le convertisseur GGUF stocke -exp(A_log), pas A_log :
+                # on inverse pour retrouver le paramètre de la référence
+                a_log=torch.log(torch.clamp(
+                    -petit("linear_attn.a_log.weight"), min=1e-12)),
+                norm_weight=petit("linear_attn.norm.weight"),
+                num_k_heads=spec.linear_num_key_heads,
+                num_v_heads=spec.linear_num_value_heads,
+                head_k_dim=spec.linear_key_head_dim,
+                head_v_dim=spec.linear_value_head_dim,
+                eps=spec.rms_norm_eps).to(d)
+            mlp = MLP(mlin("mlp.gate_proj.weight"),
+                      mlin("mlp.up_proj.weight"),
+                      mlin("mlp.down_proj.weight"))
+            in_norm = RMSNorm(reader.get(p + "input_layernorm.weight"
+                                         ).to(dtype).to(d), spec.rms_norm_eps)
+            post_norm = RMSNorm(
+                reader.get(p + "post_attention_layernorm.weight"
+                           ).to(dtype).to(d), spec.rms_norm_eps)
+            layers.append(DecoderLayerGDN(i, gdn, mlp, in_norm, post_norm, d))
+            continue
+
         attn = Attention(
             spec,
             lin("self_attn.q_proj.weight", streamed_attn),
@@ -178,7 +214,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
             lin("self_attn.o_proj.weight", streamed_attn),
             rope,
             norm_opt("self_attn.q_norm.weight"),
-            norm_opt("self_attn.k_norm.weight"))
+            norm_opt("self_attn.k_norm.weight"),
+            output_gate=spec.attn_output_gate)
 
         if manifest["tensors"].get(p + "mlp.gate.weight") is not None:
             router = mlin("mlp.gate.weight")

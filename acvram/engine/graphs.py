@@ -69,6 +69,8 @@ class GraphRunner:
         if not torch.cuda.is_available():
             return False
         m = self.model
+        if getattr(m.spec, "layer_types", None):
+            return False                  # recurrence a etats : eager
         devs = {l.device for l in m.layers} | {l.mlp_device for l in m.layers}
         devs.add(m.norm.weight.device)
         head = getattr(m.lm_head.qweight, "qweight", None)

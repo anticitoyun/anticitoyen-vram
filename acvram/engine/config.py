@@ -83,6 +83,16 @@ class ModelSpec:
     # reponse.
     eos_token_id: list[int] = field(default_factory=list)
     bos_token_id: Optional[int] = None
+    # Hybrides à récurrence linéaire (qwen3-next) : type de chaque couche et
+    # géométrie de la partie Gated DeltaNet. Vide = transformeur pur.
+    layer_types: list[str] = field(default_factory=list)
+    linear_num_value_heads: int = 0
+    linear_num_key_heads: int = 0
+    linear_key_head_dim: int = 0
+    linear_value_head_dim: int = 0
+    linear_conv_kernel_dim: int = 4
+    rotary_dim: Optional[int] = None      # RoPE partiel (None = tête entière)
+    attn_output_gate: bool = False
     layers: list[LayerSpec] = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
@@ -229,7 +239,12 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
 
     archs = cfg.get("architectures") or ["LlamaForCausalLM"]
     mt = str(cfg.get("model_type", ""))
-    if (mt in ("kimi_linear", "qwen3_5", "qwen3_5_moe", "nemotron_h",
+    # qwen3_next est désormais exécutable (couches Gated DeltaNet) quand la
+    # configuration porte nos champs layer_types/linear_* ; les autres
+    # hybrides restent refusés.
+    if mt == "qwen3_next" and cfg.get("linear_num_value_heads"):
+        pass
+    elif (mt in ("kimi_linear", "qwen3_5", "qwen3_5_moe", "nemotron_h",
                "falcon_h1", "lfm2_moe", "mamba", "mamba2", "jamba")
             or "linear_attn" in json.dumps(cfg.get("layer_types", ""))):
         raise ValueError(
@@ -261,6 +276,14 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         shared_expert_intermediate_size=cfg.get("shared_expert_intermediate_size", 0),
         first_k_dense_replace=cfg.get("first_k_dense_replace", 0),
         torch_dtype=str(cfg.get("torch_dtype", "bfloat16")),
+        layer_types=list(cfg.get("layer_types") or []),
+        linear_num_value_heads=int(cfg.get("linear_num_value_heads") or 0),
+        linear_num_key_heads=int(cfg.get("linear_num_key_heads") or 0),
+        linear_key_head_dim=int(cfg.get("linear_key_head_dim") or 0),
+        linear_value_head_dim=int(cfg.get("linear_value_head_dim") or 0),
+        linear_conv_kernel_dim=int(cfg.get("linear_conv_kernel_dim") or 4),
+        rotary_dim=cfg.get("rotary_dim"),
+        attn_output_gate=bool(cfg.get("attn_output_gate")),
         eos_token_id=_as_id_list(cfg.get("eos_token_id")),
         bos_token_id=(cfg.get("bos_token_id")
                       if isinstance(cfg.get("bos_token_id"), int) else None),

@@ -80,8 +80,10 @@ class GatedDeltaNet(nn.Module):
         t = x.shape[0]
         decode = (t == 1 and state is not None)
 
-        qkv = self.qkv(x)                                   # [t, conv_dim]
-        z = self.gate(x)                                    # [t, value_dim]
+        # toute la récurrence se calcule en float32 : la règle delta cumule
+        # des produits d'état où le bfloat16 dérive vite
+        qkv = self.qkv(x).to(torch.float32)                 # [t, conv_dim]
+        z = self.gate(x).to(torch.float32)                  # [t, value_dim]
         b = self.beta_proj(x).to(torch.float32)             # [t, nv]
         a = self.alpha(x).to(torch.float32)                 # [t, nv]
 
@@ -119,4 +121,4 @@ class GatedDeltaNet(nn.Module):
         core = core.reshape(-1, self.dv)
         y = self._norm_gated(core, z.reshape(-1, self.dv))
         y = y.reshape(t, self.value_dim)
-        return self.out_proj(y), (new_conv_state, s_new)
+        return self.out_proj(y.to(x.dtype)), (new_conv_state, s_new)

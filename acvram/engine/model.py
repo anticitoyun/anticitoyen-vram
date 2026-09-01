@@ -50,6 +50,8 @@ class ForwardBatch:
     block_tables: list[torch.Tensor]
     slot_mapping: torch.Tensor        # [total_tokens]
     is_prefill: bool
+    seq_ids: list[int] = None         # identités des séquences (états GDN)
+    gdn_store: dict = None            # {layer_idx: {seq_id: état récurrent}}
 
     @property
     def batch_size(self) -> int:
@@ -120,9 +122,13 @@ class Attention(nn.Module):
     def __init__(self, spec: ModelSpec, q: QuantLinear, k: QuantLinear,
                  v: QuantLinear, o: QuantLinear, rope: RotaryEmbedding,
                  q_norm: Optional[nn.Module] = None,
-                 k_norm: Optional[nn.Module] = None) -> None:
+                 k_norm: Optional[nn.Module] = None,
+                 output_gate: bool = False) -> None:
         super().__init__()
         self.q_proj, self.k_proj, self.v_proj, self.o_proj = q, k, v, o
+        # qwen3-next : q_proj sort, par tête, [q | porte] ; la sortie de
+        # l'attention est multipliée par sigmoïde(porte) avant o_proj.
+        self.output_gate = output_gate
         # Qwen3, Gemma 3 et Olmo 2 normalisent Q et K par tete, avant la RoPE.
         # L'ordre compte : normaliser apres ferait tourner un vecteur puis
         # ecraserait sa norme, ce que le modele n'a pas appris.
@@ -137,7 +143,16 @@ class Attention(nn.Module):
     def forward(self, x: torch.Tensor, batch: ForwardBatch,
                 cache: Optional[PagedKVCache]) -> torch.Tensor:
         t = x.shape[0]
-        q = self.q_proj(x).view(t, self.n_heads, self.head_dim)
+        gate = None
+        if self.output_gate:
+            # par tête : [q_h | porte_h] — l'ordre du point de contrôle HF,
+            # conservé par le convertisseur GGUF (vérifié : l'ordre plat
+            # dégénère immédiatement, celui-ci non)
+            qg = self.q_proj(x).view(t, self.n_heads, 2 * self.head_dim)
+            q, gate = qg[..., :self.head_dim].contiguous(), \
+                qg[..., self.head_dim:]
+        else:
+            q = self.q_proj(x).view(t, self.n_heads, self.head_dim)
         k = self.k_proj(x).view(t, self.n_kv_heads, self.head_dim)
         v = self.v_proj(x).view(t, self.n_kv_heads, self.head_dim)
 
@@ -154,8 +169,8 @@ class Attention(nn.Module):
             cache.write(batch.slots_on(x.device), k, v)
 
         if batch.is_decode:
-            return self._decode(q, k, v, batch, cache, t)
-        return self._prefill(q, k, v, batch, cache, t)
+            return self._decode(q, k, v, batch, cache, t, gate)
+        return self._prefill(q, k, v, batch, cache, t, gate)
 
     def decode_fixed(self, x: torch.Tensor, positions: torch.Tensor,
                      slots: torch.Tensor, block_tables: torch.Tensor,
@@ -195,8 +210,14 @@ class Attention(nn.Module):
         out = out.to(x.dtype)
         return self.o_proj(out.reshape(b, self.n_heads * self.head_dim))
 
+    def _gated(self, out: torch.Tensor, gate, t: int) -> torch.Tensor:
+        if gate is not None:
+            out = out * torch.sigmoid(gate.reshape(out.shape))
+        return out
+
     def _prefill(self, q, k, v, batch: ForwardBatch,
-                 cache: Optional[PagedKVCache], t: int) -> torch.Tensor:
+                 cache: Optional[PagedKVCache], t: int,
+                 gate=None) -> torch.Tensor:
         out = torch.empty_like(q)
         start = 0
         for i, qlen in enumerate(batch.query_lens):
@@ -219,13 +240,15 @@ class Attention(nn.Module):
             out[start:end] = attention(q[start:end], kk, vv, True, self.scale,
                                        q_offset=offset)
             start = end
+        out = self._gated(out, gate, t)
         return self.o_proj(out.reshape(t, self.n_heads * self.head_dim))
 
     def _decode(self, q, k, v, batch: ForwardBatch,
-                cache: Optional[PagedKVCache], t: int) -> torch.Tensor:
+                cache: Optional[PagedKVCache], t: int,
+                gate=None) -> torch.Tensor:
         """Décodage, et vérification spéculative, pour tout le lot d'un coup."""
         if cache is None:
-            return self._prefill(q, k, v, batch, cache, t)
+            return self._prefill(q, k, v, batch, cache, t, gate)
 
         if all(ql == 1 for ql in batch.query_lens):
             # Décodage pur : le chemin à formes fixes, celui-là même que le
@@ -238,7 +261,7 @@ class Attention(nn.Module):
                 kk, vv = cache.gather_fixed(tables, q.dtype)
                 out = decode_attention_fixed(q, kk, vv, lens, self.n_rep,
                                              self.scale)
-            out = out.to(q.dtype)
+            out = self._gated(out.to(q.dtype), gate, t)
             return self.o_proj(out.reshape(t, self.n_heads * self.head_dim))
 
         # Vérification spéculative : plusieurs positions de requête par
@@ -252,7 +275,7 @@ class Attention(nn.Module):
             out = kernels.paged_attention(q, cache, tables, lens,
                                           self.n_rep, self.scale, q_len=ql)
             if out is not None:
-                out = out.to(q.dtype)
+                out = self._gated(out.to(q.dtype), gate, t)
                 return self.o_proj(out.reshape(t, self.n_heads * self.head_dim))
 
         keys, values = [], []
@@ -272,6 +295,7 @@ class Attention(nn.Module):
                 repeat_kv(values[i], self.n_rep), True, self.scale,
                 q_offset=offset)
             start = end
+        out = self._gated(out, gate, t)
         return self.o_proj(out.reshape(t, self.n_heads * self.head_dim))
 
 
@@ -424,6 +448,45 @@ class MoEBlock(nn.Module):
         for expert in self.experts:
             for lin in (expert.gate_proj, expert.up_proj, expert.down_proj):
                 lin.prefetch()
+
+
+class DecoderLayerGDN(nn.Module):
+    """Bloc à récurrence linéaire : Gated DeltaNet à la place de l'attention.
+
+    L'état (convolution + matrice delta) vit par séquence dans
+    ``batch.gdn_store[index]`` — porté par le moteur, hors du cache paginé.
+    """
+
+    def __init__(self, index: int, gdn: nn.Module, mlp: nn.Module,
+                 input_norm: "RMSNorm", post_norm: "RMSNorm",
+                 device: torch.device) -> None:
+        super().__init__()
+        self.index = index
+        self.linear_attn = gdn
+        self.mlp = mlp
+        self.input_layernorm = input_norm
+        self.post_attention_layernorm = post_norm
+        self.device = device
+        self.mlp_device = device
+
+    def forward(self, x: torch.Tensor, batch: ForwardBatch,
+                cache=None) -> torch.Tensor:
+        h = self.input_layernorm(x)
+        store = batch.gdn_store.setdefault(self.index, {}) \
+            if batch.gdn_store is not None else {}
+        sorties = []
+        start = 0
+        for i, ql in enumerate(batch.query_lens):
+            sid = batch.seq_ids[i] if batch.seq_ids else i
+            y, etat = self.linear_attn(h[start:start + ql], store.get(sid))
+            store[sid] = etat
+            sorties.append(y)
+            start += ql
+        x = x + torch.cat(sorties).to(x.dtype)
+        return x + self.mlp(self.post_attention_layernorm(x))
+
+    def prefetch(self) -> None:
+        pass
 
 
 class DecoderLayer(nn.Module):

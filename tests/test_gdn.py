@@ -112,3 +112,31 @@ def test_decode_continuity():
         y_nous = torch.cat(sorties)
     err = (y_nous - y_ref).abs().max().item()
     assert err < 1e-3, f"décodage à état : écart {err:.2e}"
+
+
+def test_detile_inverse_du_convertisseur():
+    """Notre dé-tiling inverse exactement le réordonnancement du convertisseur
+    llama.cpp (têtes V « tiled » pour le broadcast ggml)."""
+    torch.manual_seed(0)
+    nk, nvpk, hd = 4, 2, 8
+
+    def reorder(t, dim):                  # la transformation du convertisseur
+        forme = list(t.shape)
+        neuf = forme[:dim] + [nk, nvpk, hd] + forme[dim + 1:]
+        t = t.reshape(*neuf)
+        perm = list(range(len(neuf)))
+        perm[dim], perm[dim + 1] = perm[dim + 1], perm[dim]
+        return t.permute(*perm).contiguous().reshape(*forme)
+
+    def detile(t, dim):                   # la nôtre (gguf.py)
+        forme = list(t.shape)
+        neuf = forme[:dim] + [nvpk, nk, hd] + forme[dim + 1:]
+        t = t.reshape(*neuf)
+        perm = list(range(len(neuf)))
+        perm[dim], perm[dim + 1] = perm[dim + 1], perm[dim]
+        return t.permute(*perm).contiguous().reshape(*forme)
+
+    w = torch.randn(nk * nvpk * hd, 13)
+    assert torch.equal(detile(reorder(w, 0), 0), w)
+    w2 = torch.randn(13, nk * nvpk * hd)
+    assert torch.equal(detile(reorder(w2, 1), 1), w2)
