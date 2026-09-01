@@ -207,3 +207,10 @@ en cause, avec 21,6 Go occupés sur 32 (les piles d'experts doublent
 transitoirement la mémoire à la construction, l'allocateur est près de sa
 limite). Piste : construire les piles avant le placement du cache KV, ou
 libérer explicitement les tenseurs d'origine.
+
+4. **Plongement CPU en mmap** (tous les modèles : le plan place la table sur
+   CPU) : `reader.get(...).to(bf16)` ne copie rien, la table reste un mmap du
+   safetensors sur le disque SATA — chaque jeton dont la ligne n'est pas en
+   cache de pages coûtait 90-150 ms de lecture disque dans `_fill`. Copie
+   contiguë en RAM épinglée au chargement : Ornith 48-89 → **100 t/s**
+   stable (p99 10,7 ms). C'était la cause de l'« instabilité » ci-dessus.
