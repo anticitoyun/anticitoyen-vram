@@ -419,6 +419,46 @@ class MoEBlock(nn.Module):
         return kernels.int4_gemv_grouped(x32, qw, sc, zr, expert_ids,
                                          token_ids, k, gsz)[:, :m]
 
+    # -- prefill : GEMM groupées sur les jetons triés par expert -------------
+    def _pile_bf16(self, pile) -> Optional[torch.Tensor]:
+        """La pile d'experts d'une projection déquantifiée en bf16 [E, M, K]
+        (transitoire : ~850 Mo par projection pour 180 experts de 1024x2304)."""
+        if pile[0] != "nvfp4":
+            return None
+        _, qw, bs, gs, k, m = pile
+        E, M = qw.shape[0], qw.shape[1]
+        from ..quant.formats import NVFP4Tensor
+        plat = NVFP4Tensor.__new__(NVFP4Tensor)
+        plat.qweight = qw.view(E * M, -1)
+        plat.block_scale = bs.view(E * M, -1)
+        plat.global_scale = torch.ones((), dtype=torch.float32, device=qw.device)
+        plat.padded_in = k
+        plat.shape = (E * M, k)
+        w = kernels.nvfp4_dequant(plat, torch.bfloat16).view(E, M, k)
+        w.mul_(gs.to(torch.bfloat16).view(E, 1, 1))
+        return w[:, :m, :]
+
+    def _forward_prefill_grouped(self, x, topw, topi) -> Optional[torch.Tensor]:
+        if not hasattr(torch, "_grouped_mm") or self._stacks is None:
+            return None
+        pg, pu, pd = (self._stacks[n] for n in ("gate_proj", "up_proj", "down_proj"))
+        if any(p[0] != "nvfp4" for p in (pg, pu, pd)):
+            return None
+        t, k = topi.shape
+        E = pg[1].shape[0]
+        flat_e = topi.reshape(-1).to(torch.int64)
+        flat_t = torch.arange(t, device=x.device).repeat_interleave(k)
+        ordre = torch.argsort(flat_e, stable=True)
+        offs = torch.cumsum(torch.bincount(flat_e, minlength=E), 0).to(torch.int32)
+        xs = x[flat_t[ordre]].to(torch.bfloat16).contiguous()        # [G, H]
+        wg = self._pile_bf16(pg); g = torch._grouped_mm(xs, wg.transpose(1, 2), offs=offs); del wg
+        wu = self._pile_bf16(pu); u = torch._grouped_mm(xs, wu.transpose(1, 2), offs=offs); del wu
+        act = (F.silu(g.to(torch.float32)) * u.to(torch.float32)).to(torch.bfloat16)
+        wd = self._pile_bf16(pd); d = torch._grouped_mm(act, wd.transpose(1, 2), offs=offs); del wd
+        d = d.to(torch.float32) * topw.reshape(-1)[ordre].to(torch.float32).unsqueeze(-1)
+        inv = torch.empty_like(ordre); inv[ordre] = torch.arange(ordre.numel(), device=x.device)
+        return d[inv].view(t, k, -1).sum(dim=1).to(x.dtype)
+
     def _forward_grouped(self, x, topw, topi):
         t = x.shape[0]
         eid = topi.reshape(-1).to(torch.int32)
@@ -486,14 +526,18 @@ class MoEBlock(nn.Module):
         # le nombre d'experts touchés. La boucle par expert reste le chemin des
         # grands lots de prefill (le regroupement par expert y redevient
         # rentable) et le repli des piles hétérogènes.
-        if x.is_cuda and t <= _MOE_GROUPED_MAX and self._stack_state != "non":
+        if x.is_cuda and self._stack_state != "non":
             if self._stack_state == "?":
                 self._stack_state = "oui" if self._try_build_stacks() else "non"
             if self._stack_state == "oui":
-                y = self._forward_grouped(x, topw, topi)
-                if self.shared is not None:
-                    y = y + self._shared_out(x)
-                return y
+                if t <= _MOE_GROUPED_MAX:
+                    y = self._forward_grouped(x, topw, topi)
+                else:
+                    y = self._forward_prefill_grouped(x, topw, topi)
+                if y is not None:
+                    if self.shared is not None:
+                        y = y + self._shared_out(x)
+                    return y
 
         out = torch.zeros_like(x)
         # On regroupe les jetons par expert, pour que chaque expert fasse un
@@ -526,7 +570,7 @@ class MoEBlock(nn.Module):
 # (jeton, expert) par tranche de grille) à la boucle par expert : la boucle
 # coûte ~0,6 ms par expert visité, la GEMV groupée relit les poids de
 # l'expert pour chaque jeton — croisement mesuré vers quelques milliers.
-_MOE_GROUPED_MAX = int(os.environ.get("ACVRAM_MOE_GROUPED_MAX", "4096"))
+_MOE_GROUPED_MAX = int(os.environ.get("ACVRAM_MOE_GROUPED_MAX", "32"))
 
 # Marque, dans le magasin d'états, une séquence dont l'état réside dans les
 # tampons fixes d'une couche (chemin graphes) plutôt qu'en tuple fonctionnel.
