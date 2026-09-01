@@ -65,6 +65,25 @@ les mêmes hypothèses fausses que le moteur — il validait nos erreurs. Seul
 llama.cpp, exécuteur indépendant du même fichier, a permis de trancher, et la
 bissection couche à couche a localisé chaque écart.
 
-Restent : qwen35moe (Ornith — GDN + MoE + MTP `nextn`, mapping expert à
-compléter), kimi-linear (KDA, autre récurrence). Le flag ACVRAM_GDN=1 protège
-la conversion qwen35 tant que la couverture n'est pas élargie.
+## qwen35moe (Ornith-1.0-35B-A3B) — 1er septembre 2026
+
+Étendu et validé. Trois ajouts suffisaient :
+
+1. `ffn_gate_inp_shexp` → `mlp.shared_expert_gate` : porte sigmoïde de
+   l'expert partagé (vecteur GGUF [d] remis en Linear(d,1)), appliquée
+   `y_partagé × sigmoid(x·g)` dans MoEBlock. Jamais quantifiée.
+2. Couches MTP (`nextn_predict_layers`) : stockées en **fin de pile**
+   (blk.40 porte à la fois attention pleine, experts et les tenseurs
+   `nextn.*`) — la couche entière est ignorée à la conversion et retranchée
+   de `num_hidden_layers`.
+3. Les couches GDN peuvent porter un MoE : construction MLP/MoE factorisée
+   dans le loader (`faire_mlp`).
+
+Vérification : 7 premiers jetons greedy identiques à llama.cpp
+(`' Paris. Paris is a city of'`), puis divergence sur un quasi-ex-æquo —
+attendue : llama.cpp exécute l'IQ4_XS, acvram le NVFP4 reconverti, et le
+routage à 256 experts amplifie les écarts d'arrondi. Les deux suites sont
+grammaticales et factuelles. Alias : `acvram-ornith-35b-kimi`.
+
+Reste : kimi-linear (KDA, autre récurrence). Le flag ACVRAM_GDN=1 protège
+les conversions qwen35/qwen35moe tant que la couverture KDA n'existe pas.
