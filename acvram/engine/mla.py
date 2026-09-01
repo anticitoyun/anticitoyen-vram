@@ -18,7 +18,10 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-__all__ = ["MLAttention"]
+__all__ = ["MLAttention", "MLA_BUCKET"]
+
+# Godet de longueur du cache latent : partagé avec le chemin des graphes.
+MLA_BUCKET = 1024
 
 
 class MLAttention(nn.Module):
@@ -63,18 +66,79 @@ class MLAttention(nn.Module):
         cache = k_new if cache is None else torch.cat([cache, k_new], dim=0)
         total = cache.shape[0]
 
-        scores = torch.einsum('thr,sr->ths', q_eff.to(torch.float32),
-                              cache.to(torch.float32)) * self.scale
-        if t > 1:                                             # masque causal
+        if t == 1:
+            # Décodage : même formulation en godet que ``decode_static`` (le
+            # chemin des graphes), pour que les deux arrondissent pareil —
+            # une GEMM sur N colonnes n'accumule pas comme sur 1024.
+            bucket = -(-total // MLA_BUCKET) * MLA_BUCKET
+            C = torch.zeros(bucket, cache.shape[1], dtype=cache.dtype,
+                            device=cache.device)
+            C[:total] = cache
+            pos = torch.arange(bucket, device=x.device)
+            masque = pos > (total - 1)
+        else:
+            C = cache
             passe = total - t
             pos_q = torch.arange(t, device=x.device).unsqueeze(-1) + passe
             pos_k = torch.arange(total, device=x.device)
-            scores = scores.masked_fill(
-                pos_k > pos_q.unsqueeze(1), float('-inf'))
+            masque = pos_k > pos_q.unsqueeze(1)               # causal
+        scores = torch.einsum('thr,sr->ths', q_eff.to(torch.float32),
+                              C.to(torch.float32)) * self.scale
+        scores = scores.masked_fill(masque, float('-inf'))
         probs = scores.softmax(dim=-1)
 
         o_lat = torch.einsum('ths,sr->thr', probs,
-                             cache[:, :self.rank].to(torch.float32))
+                             C[:, :self.rank].to(torch.float32))
         y = torch.einsum('hvr,thr->thv', self.v_b.to(torch.float32), o_lat)
         y = y.reshape(t, self.nh * self.dv).to(x.dtype)
         return self.o_proj(y), cache
+
+    # -- chemin à formes fixes (graphes CUDA) --------------------------------
+    def new_static(self, device: torch.device, max_len: int,
+                   dtype: torch.dtype) -> dict:
+        return {"cache": torch.zeros(max_len, self.rank + self.rope,
+                                     dtype=dtype, device=device),
+                "len": torch.zeros((), dtype=torch.long, device=device)}
+
+    @staticmethod
+    def static_load(st: dict, etat) -> None:
+        if etat is None:
+            st["len"].zero_()
+            return
+        n = etat.shape[0]
+        st["cache"][:n].copy_(etat)
+        st["len"].fill_(n)
+
+    @staticmethod
+    def static_export(st: dict):
+        n = int(st["len"].item())
+        return st["cache"][:n].clone()
+
+    def decode_static(self, x: torch.Tensor, st: dict, bucket: int
+                      ) -> torch.Tensor:
+        """Un jeton, une séquence ; attention sur ``cache[:bucket]`` masquée
+        au-delà de ``len`` ; écrit le latent à la ligne ``len`` puis avance."""
+        # mêmes formulations que ``forward`` (t = 1), pour arrondir pareil
+        q = self.q_proj(x).reshape(1, self.nh, self.nope + self.rope)
+        q_nope, q_pe = q.split([self.nope, self.rope], dim=-1)
+        kvp = self.kv_a_proj(x)
+        c, k_pe = kvp.split([self.rank, self.rope], dim=-1)
+        c32 = c.to(torch.float32)
+        c = (c32 * torch.rsqrt(c32.pow(2).mean(-1, keepdim=True) + self.eps)
+             ).to(x.dtype) * self.kv_a_norm
+        q_abs = torch.einsum('hrn,thn->thr', self.k_b.to(x.dtype), q_nope)
+        q_eff = torch.cat([q_abs, q_pe], dim=-1)             # [1, nh, rank+rope]
+        k_new = torch.cat([c, k_pe], dim=-1)                 # [1, rank+rope]
+        cache = st["cache"]
+        cache.index_copy_(0, st["len"].view(1), k_new)
+        C = cache[:bucket]
+        scores = torch.einsum('thr,sr->ths', q_eff.to(torch.float32),
+                              C.to(torch.float32)) * self.scale
+        pos = torch.arange(bucket, device=x.device)
+        scores = scores.masked_fill(pos > st["len"], float('-inf'))
+        probs = scores.softmax(dim=-1)
+        o_lat = torch.einsum('ths,sr->thr', probs,
+                             C[:, :self.rank].to(torch.float32))
+        y = torch.einsum('hvr,thr->thv', self.v_b.to(torch.float32), o_lat)
+        st["len"].add_(1)
+        return self.o_proj(y.reshape(1, self.nh * self.dv).to(x.dtype))

@@ -203,8 +203,6 @@ class Engine:
             self.allocator.spill_cb = _deverser
 
         self.graphs = None
-        if self.est_hybride:
-            enable_cuda_graphs = False
         if enable_cuda_graphs:
             from .graphs import GraphRunner
             gr = GraphRunner(self.model, max_model_len)

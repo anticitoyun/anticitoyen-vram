@@ -37,7 +37,9 @@ import torch
 
 from ..memory.kvcache import BLOCK_SIZE, bucket_blocks
 from .layers import QuantLinear
-from .model import ForwardBatch, MoEBlock
+from .model import DecoderLayerGDN, ForwardBatch, MoEBlock
+
+from .mla import MLA_BUCKET     # un graphe par palier de cache latent
 
 __all__ = ["GraphRunner"]
 
@@ -57,6 +59,7 @@ class GraphRunner:
         self.graphs: dict[tuple[int, int], dict] = {}
         self._pool = None
         self.paged_ok = False
+        self.hybrid_layers: list = []
         self.enabled = self._eligible()
         self.replays = 0
         self.captures = 0
@@ -69,8 +72,14 @@ class GraphRunner:
         if not torch.cuda.is_available():
             return False
         m = self.model
-        if getattr(m.spec, "layer_types", None):
-            return False                  # recurrence a etats : eager
+        # Hybrides à états (GDN/KDA/MLA) : capturés par couche via des
+        # tampons fixes, une séquence par graphe (b = 1, q_len = 1).
+        self.hybrid_layers = [l for l in m.layers
+                              if isinstance(l, DecoderLayerGDN)]
+        if self.hybrid_layers and any(
+                not hasattr(l.linear_attn, "decode_static")
+                for l in self.hybrid_layers):
+            return False
         devs = {l.device for l in m.layers} | {l.mlp_device for l in m.layers}
         devs.add(m.norm.weight.device)
         head = getattr(m.lm_head.qweight, "qweight", None)
@@ -92,14 +101,15 @@ class GraphRunner:
                     return False             # pile heterogene : eager
             if isinstance(mod, QuantLinear) and mod.streamed is not None:
                 return False                 # les adresses changent en vol
-        if len(m.caches) != len(m.layers):
+        pleines = [i for i, l in enumerate(m.layers)
+                   if not isinstance(l, DecoderLayerGDN)]
+        if any(i not in m.caches for i in pleines):
             return False
-        if any(m.caches[i].k.device != next(iter(devs))
-               for i in range(len(m.layers))):
+        if any(m.caches[i].k.device != next(iter(devs)) for i in pleines):
             return False
         self.device = next(iter(devs))
         from .. import kernels
-        c0 = m.caches.get(0)
+        c0 = m.caches.get(pleines[0]) if pleines else None
         self.paged_ok = (c0 is not None and c0.k_scale is not None
                          and c0.cfg.dtype == "int8"
                          and m.spec.head_dim in (32, 64, 128, 256)
@@ -120,7 +130,13 @@ class GraphRunner:
         nblk = bucket_blocks(max(t.shape[0] for t in batch.block_tables))
         if nblk * BLOCK_SIZE > self.max_model_len + BLOCK_SIZE:
             nblk = bucket_blocks((self.max_model_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
-        key = (b, ql, nblk)
+        lb = 0
+        if self.hybrid_layers:
+            if b != 1 or ql != 1 or batch.gdn_store is None:
+                return None                  # une séquence par graphe
+            lb = -(-batch.seq_lens[0] // MLA_BUCKET) * MLA_BUCKET
+            self._bind_hybrid(batch, lb)
+        key = (b, ql, nblk, lb)
         self._last_key = key
 
         entry = self.graphs.get(key)
@@ -133,9 +149,23 @@ class GraphRunner:
             return entry["out"].clone()
 
         self._fill(entry, batch)
-        entry["graph"].replay()
+        if "step" in entry:                  # ACVRAM_GRAPHS_EAGER : sans capture
+            with torch.inference_mode():
+                entry["out"] = entry["step"]()
+        else:
+            entry["graph"].replay()
         self.replays += 1
         return entry["out"].clone()
+
+    # -- hybrides ----------------------------------------------------------
+    def _bind_hybrid(self, batch: ForwardBatch, lb: int) -> None:
+        sid = batch.seq_ids[0] if batch.seq_ids else 0
+        m = self.model
+        for layer in self.hybrid_layers:
+            store = batch.gdn_store.setdefault(layer.index, {})
+            layer.static_bind(sid, store, self.max_model_len + MLA_BUCKET,
+                              m.dtype)
+            layer.static_bucket = lb
 
     # -- tampons ---------------------------------------------------------
     def _embed(self, batch: ForwardBatch) -> torch.Tensor:
@@ -145,7 +175,7 @@ class GraphRunner:
         return torch.nn.functional.embedding(idx, m.embed_tokens).to(m.dtype)
 
     def _fill(self, entry: dict, batch: ForwardBatch) -> None:
-        b, _ql, nblk = entry["key"]
+        b, _ql, nblk = entry["key"][:3]
         entry["x"].copy_(self._embed(batch).to(self.device), non_blocking=True)
         entry["positions"].copy_(batch.positions, non_blocking=True)
         entry["slots"].copy_(batch.slot_mapping, non_blocking=True)
@@ -163,7 +193,7 @@ class GraphRunner:
         d = self.device
         h = m.spec.hidden_size
         entry = {
-            "key": (b, ql, nblk),
+            "key": (b, ql, nblk, self._last_key[3] if self._last_key else 0),
             "ql": ql,
             "x": torch.zeros(b * ql, h, dtype=m.dtype, device=d),
             "positions": torch.zeros(b * ql, dtype=torch.long, device=d),
@@ -177,8 +207,9 @@ class GraphRunner:
         # Le cache RoPE doit exister a sa taille finale avant la capture :
         # une extension pendant un rejeu pointerait un tenseur abandonne.
         for layer in m.layers:
-            layer.self_attn.rope(entry["positions"], d, m.dtype,
-                                 max_pos=self.max_model_len + 1)
+            if hasattr(layer, "self_attn"):
+                layer.self_attn.rope(entry["positions"], d, m.dtype,
+                                     max_pos=self.max_model_len + 1)
 
         def step() -> torch.Tensor:
             return m.decode_fixed(entry["x"], entry["positions"],
@@ -188,7 +219,20 @@ class GraphRunner:
         # Echauffement sur un flux annexe (exige par la capture), puis capture.
         # Les ecritures KV de ces passes sont identiques a celle du pas reel :
         # les rejouer n'ajoute rien, n'efface rien.
+        if os.environ.get("ACVRAM_GRAPHS_EAGER"):
+            # Débogage : le chemin à formes fixes, exécuté sans capture.
+            entry["step"] = step
+            with torch.inference_mode():
+                entry["out"] = step()
+            self.captures += 1
+            return entry
+
+        # Les états récurrents ne sont pas idempotents : l'échauffement et le
+        # rejeu de capture les feraient avancer trois fois pour un jeton.
+        # On les photographie avant, on les restaure avant le vrai rejeu.
         torch.cuda.synchronize(d)
+        instantane = [(l, l.linear_attn.static_export(l.static))
+                      for l in self.hybrid_layers]
         side = torch.cuda.Stream(d)
         side.wait_stream(torch.cuda.current_stream(d))
         with torch.cuda.stream(side):
@@ -208,5 +252,8 @@ class GraphRunner:
                     entry["out"] = step()
         entry["graph"] = graph
         self.captures += 1
+        for l, e in instantane:
+            l.linear_attn.static_load(l.static, e)
+        torch.cuda.synchronize(d)
         graph.replay()                       # la capture n'execute pas : rejouer
         return entry

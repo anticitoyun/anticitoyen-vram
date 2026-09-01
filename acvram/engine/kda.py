@@ -114,3 +114,55 @@ class KimiDeltaAttention(nn.Module):
         y = (normed * torch.sigmoid(g2)).reshape(t, self.d_inner)
         return (self.out_proj(y.to(x.dtype)),
                 (new_cq, new_ck, new_cv, S))
+
+    # -- chemin à formes fixes (graphes CUDA) --------------------------------
+    def new_static(self, device: torch.device) -> dict:
+        k1 = self.kernel - 1
+        z = lambda *f: torch.zeros(*f, dtype=torch.float32, device=device)
+        return {"cq": z(self.d_inner, k1), "ck": z(self.d_inner, k1),
+                "cv": z(self.d_inner, k1), "S": z(self.nh, self.d, self.d)}
+
+    @staticmethod
+    def static_load(st: dict, etat) -> None:
+        if etat is None:
+            for v in st.values():
+                v.zero_()
+            return
+        cq, ck, cv, S = etat
+        st["cq"].copy_(cq); st["ck"].copy_(ck); st["cv"].copy_(cv)
+        st["S"].copy_(S)
+
+    @staticmethod
+    def static_export(st: dict) -> tuple:
+        return (st["cq"].clone(), st["ck"].clone(), st["cv"].clone(),
+                st["S"].clone())
+
+    def decode_static(self, x: torch.Tensor, st: dict) -> torch.Tensor:
+        """Un jeton, une séquence, états mis à jour EN PLACE dans ``st``."""
+        def conv(xp, w, buf):
+            # mêmes noyaux que le chemin fonctionnel (cuDNN, même forme) :
+            # les deux chemins doivent arrondir pareil
+            seq = torch.cat([buf, xp.t()], dim=-1)          # [d_inner, k]
+            y = F.conv1d(seq.unsqueeze(0), w.unsqueeze(1), groups=self.d_inner)
+            buf.copy_(seq[:, 1:])
+            return F.silu(y[0, :, 0])
+        q = conv(self.q_proj(x).float(), self.conv_q, st["cq"])
+        k = conv(self.k_proj(x).float(), self.conv_k, st["ck"])
+        v = conv(self.v_proj(x).float(), self.conv_v, st["cv"])
+        q = self._l2norm(q.view(self.nh, self.d)) * (self.d ** -0.5)
+        k = self._l2norm(k.view(self.nh, self.d))
+        v = v.view(self.nh, self.d)
+        g1 = F.softplus(self.f_b(self.f_a(x)).float()[0] + self.dt_bias)
+        g1 = g1.view(self.nh, self.d) * self.a.view(self.nh, 1)
+        beta = torch.sigmoid(self.beta_proj(x).float()[0])   # [nh]
+        S = st["S"]
+        S.mul_(torch.exp(g1).unsqueeze(-2))                   # axe clé
+        pred = torch.einsum('hij,hj->hi', S, k)
+        d = beta.unsqueeze(-1) * (v - pred)
+        S.add_(d.unsqueeze(-1) * k.unsqueeze(-2))          # mul puis add, comme forward
+        o = torch.einsum('hij,hj->hi', S, q)
+        var = o.pow(2).mean(-1, keepdim=True)
+        normed = o * torch.rsqrt(var + self.eps) * self.norm_weight.float()
+        g2 = self.g_b(self.g_a(x)).float()[0].view(self.nh, self.d)
+        y = (normed * torch.sigmoid(g2)).reshape(1, self.d_inner)
+        return self.out_proj(y.to(x.dtype))

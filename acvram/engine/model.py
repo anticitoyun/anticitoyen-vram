@@ -475,6 +475,11 @@ class MoEBlock(nn.Module):
                 lin.prefetch()
 
 
+# Marque, dans le magasin d'états, une séquence dont l'état réside dans les
+# tampons fixes d'une couche (chemin graphes) plutôt qu'en tuple fonctionnel.
+_STATIC = object()
+
+
 class DecoderLayerGDN(nn.Module):
     """Bloc à récurrence linéaire : Gated DeltaNet à la place de l'attention.
 
@@ -503,11 +508,57 @@ class DecoderLayerGDN(nn.Module):
         start = 0
         for i, ql in enumerate(batch.query_lens):
             sid = batch.seq_ids[i] if batch.seq_ids else i
-            y, etat = self.linear_attn(h[start:start + ql], store.get(sid))
+            etat = store.get(sid)
+            if etat is _STATIC:               # l'état vit dans les tampons fixes
+                etat = self.linear_attn.static_export(self.static)
+                self.static_owner = None
+            y, etat = self.linear_attn(h[start:start + ql], etat)
             store[sid] = etat
             sorties.append(y)
             start += ql
         x = x + torch.cat(sorties).to(x.dtype)
+        return x + self.mlp(self.post_attention_layernorm(x))
+
+    # -- chemin à formes fixes (graphes CUDA), une séquence ----------------
+    static: Optional[dict] = None
+    static_owner: Optional[int] = None
+    static_bucket: int = 0
+
+    def static_bind(self, sid: int, store: dict, max_len: int,
+                    dtype: torch.dtype) -> None:
+        """Amène l'état de ``sid`` dans les tampons fixes de la couche.
+
+        L'état du propriétaire précédent est exporté vers le magasin s'il y
+        vit encore ; celui de ``sid`` est chargé (ou remis à zéro). Le magasin
+        note alors que l'état de ``sid`` réside dans les tampons.
+        """
+        la = self.linear_attn
+        if self.static is None:
+            if hasattr(la, "rank"):           # MLA : cache latent borné
+                self.static = la.new_static(self.device, max_len, dtype)
+            else:
+                self.static = la.new_static(self.device)
+        if self.static_owner == sid and store.get(sid) is _STATIC:
+            return
+        prev = self.static_owner
+        if prev is not None and prev != sid and store.get(prev) is _STATIC:
+            store[prev] = la.static_export(self.static)
+        etat = store.get(sid)
+        la.static_load(self.static, None if etat is _STATIC else etat)
+        store[sid] = _STATIC
+        self.static_owner = sid
+
+    def decode_fixed(self, x: torch.Tensor, positions: torch.Tensor,
+                     slots: torch.Tensor, block_tables: torch.Tensor,
+                     seq_lens: torch.Tensor, max_pos: int,
+                     cache, q_len: int = 1) -> torch.Tensor:
+        h = self.input_layernorm(x)
+        la = self.linear_attn
+        if hasattr(la, "rank"):
+            y = la.decode_static(h, self.static, self.static_bucket)
+        else:
+            y = la.decode_static(h, self.static)
+        x = x + y.to(x.dtype)
         return x + self.mlp(self.post_attention_layernorm(x))
 
     def prefetch(self) -> None:
@@ -627,7 +678,7 @@ class ACVRamModel(nn.Module):
         """
         for i, layer in enumerate(self.layers):
             x = layer.decode_fixed(x, positions, slots, block_tables,
-                                   seq_lens, max_pos, self.caches[i], q_len)
+                                   seq_lens, max_pos, self.caches.get(i), q_len)
         x = self.norm(x)
         return self.lm_head(x)
 
