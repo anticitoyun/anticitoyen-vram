@@ -110,6 +110,9 @@ class ModelSpec:
     mamba_state_size: int = 128
     mamba_conv_kernel: int = 4
     attention_rope: bool = True
+    # starcoder2 : normes LayerNorm (biais), MLP non gaté GELU avec biais
+    norm_type: str = "rms_norm"
+    mlp_gated: bool = True
     # lfm2 : longueur du noyau de la conv courte
     conv_L_cache: int = 3
     # granite : multiplicateurs scalaires (attention, plongement, résidu, logits)
@@ -226,6 +229,7 @@ _ARCH_ALIASES = {
     "Lfm2ForCausalLM": "llama",
     "NemotronHForCausalLM": "llama",
     "FalconH1ForCausalLM": "llama",
+    "Starcoder2ForCausalLM": "llama",
     "Lfm2MoeForCausalLM": "moe",
     "Gemma4ForCausalLM": "llama",
     "Gemma4ForConditionalGeneration": "llama",
@@ -329,7 +333,7 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         num_key_value_heads=cfg.get("num_key_value_heads", n_heads),
         vocab_size=cfg.get("vocab_size", 32000),
         max_position_embeddings=cfg.get("max_position_embeddings", 4096),
-        rms_norm_eps=cfg.get("rms_norm_eps", 1e-5),
+        rms_norm_eps=cfg.get("rms_norm_eps", cfg.get("norm_epsilon", 1e-5)),
         rope_theta=cfg.get("rope_theta", 10000.0),
         rope_scaling=cfg.get("rope_scaling"),
         tie_word_embeddings=cfg.get("tie_word_embeddings", False),
@@ -356,6 +360,8 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         mamba_state_size=int(cfg.get("ssm_state_size") or cfg.get("mamba_state_size") or 128),
         mamba_conv_kernel=int(cfg.get("conv_kernel") or cfg.get("mamba_conv_kernel") or 4),
         attention_rope=bool(cfg.get("attention_rope", True)),
+        norm_type=str(cfg.get("norm_type") or "rms_norm"),
+        mlp_gated=bool(cfg.get("mlp_gated", cfg.get("model_type") != "starcoder2")),
         conv_L_cache=int(cfg.get("conv_L_cache") or 3),
         sliding_window=int(cfg.get("sliding_window") or 0),
         global_head_dim=int(cfg.get("global_head_dim") or 0),

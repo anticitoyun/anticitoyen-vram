@@ -136,6 +136,7 @@ SENSITIVE_SUFFIXES = (
     "mamba.D.weight", "mamba.dt_bias.weight", "mamba.norm.weight",
     ".a.weight",                  # -exp(A_log) de KDA (kimi-linear)
     "e_score_correction_bias",
+    "layernorm.bias", "norm.bias",
     "k_b_proj.weight", "v_b_proj.weight",   # absorptions MLA [H, r, d] : 3D, petits
     "mlp.gate.weight",            # routeur MoE : minuscule et décisif
     "shared_expert_gate.weight",  # porte de l'expert partagé : 1 ligne
@@ -250,6 +251,10 @@ _NORMES_ZERO_CENTREES = ("input_layernorm.weight", "post_attention_layernorm.wei
 def _adapt_hf(source: Iterator[tuple[str, torch.Tensor]], spec
               ) -> Iterator[tuple[str, torch.Tensor]]:
     mt = str(getattr(spec, "model_type", "") or spec.raw.get("model_type", ""))
+    if mt == "starcoder2":
+        for name, t in source:
+            yield name.replace("mlp.c_fc.", "mlp.up_proj.").replace("mlp.c_proj.", "mlp.down_proj."), t
+        return
     if mt not in _QWEN35_HF or spec.raw.get("gdn_a_log_negexp"):
         yield from source
         return
@@ -566,6 +571,9 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             attendus.append(f"model.layers.{i}.self_attn.q_proj.weight")
         if spec.model_type == "nemotron_h":
             continue                        # couche d'attention seule, sans MLP
+        if not spec.mlp_gated:
+            attendus.append(f"model.layers.{i}.mlp.up_proj.weight")
+            continue
         if spec.is_moe and i >= spec.first_k_dense_replace:
             attendus.append(f"model.layers.{i}.mlp.experts.0.gate_proj.weight")
         else:

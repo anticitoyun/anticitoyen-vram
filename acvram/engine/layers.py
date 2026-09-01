@@ -192,6 +192,23 @@ class RMSNorm(nn.Module):
         return (x32.to(dtype) * self.weight.to(dtype))
 
 
+class LayerNorm(nn.Module):
+    """LayerNorm classique (moyenne centrée, biais) — starcoder2."""
+
+    def __init__(self, weight: torch.Tensor, bias: Optional[torch.Tensor],
+                 eps: float = 1e-5) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(weight, requires_grad=False)
+        self.bias = nn.Parameter(bias, requires_grad=False) if bias is not None else None
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x32 = x.to(torch.float32)
+        y = F.layer_norm(x32, (x32.shape[-1],), self.weight.to(torch.float32),
+                         None if self.bias is None else self.bias.to(torch.float32), self.eps)
+        return y.to(x.dtype)
+
+
 class RotaryEmbedding(nn.Module):
     """RoPE, avec les variantes de mise à l'échelle que les modèles actuels embarquent."""
 

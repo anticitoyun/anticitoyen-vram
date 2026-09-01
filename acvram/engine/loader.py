@@ -258,6 +258,30 @@ def load_model(path: str, plan: Optional[Plan] = None,
                     num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
             continue
 
+        if spec.model_type == "starcoder2":
+            from .layers import LayerNorm
+            ln = lambda suffix: LayerNorm(
+                reader.get(p + suffix + ".weight").to(dtype).to(d),
+                reader.get(p + suffix + ".bias").to(dtype).to(d) if reader.has(p + suffix + ".bias") else None,
+                spec.rms_norm_eps)
+            attn = Attention(spec, lin("self_attn.q_proj.weight", streamed_attn),
+                             lin("self_attn.k_proj.weight", streamed_attn),
+                             lin("self_attn.v_proj.weight", streamed_attn),
+                             lin("self_attn.o_proj.weight", streamed_attn), rope,
+                             window=spec.sliding_window)
+            mlp_s = MLP2(mlin("mlp.up_proj.weight"), mlin("mlp.down_proj.weight"),
+                         spec.hidden_activation)
+            couche = DecoderLayer(i, attn, mlp_s, ln("input_layernorm"),
+                                  ln("post_attention_layernorm"), d, mlp_dev)
+            layers.append(couche)
+            n_blocks = kv_blocks.get(lp.exec_device, 0)
+            if n_blocks:
+                kv_fmt = next((t.kv_format for t in plan.tiers if t.name == lp.exec_device), "int8")
+                caches[i] = PagedKVCache(KVCacheConfig(
+                    num_layers=1, num_kv_heads=spec.num_key_value_heads,
+                    head_dim=spec.head_dim, num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
+            continue
+
         if spec.model_type == "falcon_h1":
             from .mamba2 import Mamba2Mixer
             petit = lambda suffix: reader.get(p + suffix).to(torch.float32).to(d)
@@ -494,8 +518,14 @@ def load_model(path: str, plan: Optional[Plan] = None,
 
     head_dev = dev(plan.lm_head_device) if plan.lm_head_device != "cpu" \
         else torch.device("cpu")
-    norm = RMSNorm(reader.get("model.norm.weight").to(dtype).to(head_dev),
-                   spec.rms_norm_eps)
+    if spec.model_type == "starcoder2":
+        from .layers import LayerNorm
+        norm = LayerNorm(reader.get("model.norm.weight").to(dtype).to(head_dev),
+                         reader.get("model.norm.bias").to(dtype).to(head_dev)
+                         if reader.has("model.norm.bias") else None, spec.rms_norm_eps)
+    else:
+        norm = RMSNorm(reader.get("model.norm.weight").to(dtype).to(head_dev),
+                       spec.rms_norm_eps)
     if manifest["tensors"].get("lm_head.weight"):
         lm_head = _linear("lm_head.weight", manifest, reader,
                           group_size).to_device(head_dev)
