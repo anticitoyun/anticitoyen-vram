@@ -223,6 +223,8 @@ class GGUFFile:
                 yield base + "beta.weight", t[:nv_].contiguous()
                 yield base + "alpha.weight", t[nv_:].contiguous()
                 continue
+            if hname.endswith(("mamba.norm.weight", "mamba.A.weight", "mamba.D.weight")):
+                t = t.reshape(-1)
             if kimi_rec is not None:
                 if ".conv1d_" in hname:   # [d_inner, 1, k] -> [d_inner, k]
                     t = t.reshape(t.shape[0], t.shape[-1])
@@ -277,7 +279,7 @@ class GGUFFile:
     # (SSM, Gated DeltaNet, KDA). Les convertir quand même produirait un modèle
     # mutilé qui répond du charabia — le pire des échecs, le silencieux.
     UNSUPPORTED = ("kimi-linear", "qwen35", "qwen35moe", "qwen3next",
-                   "nemotron_h", "nemotron_h_moe", "falcon-h1", "falcon_h1",
+                   "falcon-h1", "falcon_h1",
                    "mamba", "jamba", "granitehybrid")
     # Architectures transformeurs mais aux blocs différents des nôtres
     # (softcap, laurel, attention partagée...) : à mapper avant de convertir.
@@ -287,9 +289,10 @@ class GGUFFile:
 
     def check_executable(self) -> None:
         a = self.arch()
-        if a in ("qwen35", "qwen35moe", "qwen3next", "kimi-linear") \
+        if a in ("qwen35", "qwen35moe", "qwen3next", "kimi-linear",
+                 "nemotron_h", "nemotron_h_moe") \
                 and os.environ.get("ACVRAM_GDN"):
-            return                        # chemin Gated DeltaNet (expérimental)
+            return                        # récurrences linéaires (expérimental)
         if a in self.UNSUPPORTED or any(".ssm_" in n for n in self.tensors):
             raise ValueError(
                 f"architecture « {a} » : hybride à récurrence linéaire "
@@ -330,7 +333,8 @@ class GGUFFile:
             "architectures": [archmap.get(a, "LlamaForCausalLM")],
             "model_type": vl.get(a, a),
             "hidden_size": int(g("embedding_length", 4096)),
-            "intermediate_size": int(g("feed_forward_length", 11008)),
+            "intermediate_size": (lambda v: int(max(v)) if isinstance(v, list) else int(v))(
+                g("feed_forward_length", 11008)),
             "num_hidden_layers": int(g("block_count", 32)),
             "num_attention_heads": heads,
             # head_count_kv peut être une liste (hybrides) : prendre le max
@@ -376,6 +380,31 @@ class GGUFFile:
             cfg["attn_output_gate"] = True
             cfg["gdn_a_log_negexp"] = True       # convention du convertisseur llama.cpp
 
+        if a in ("nemotron_h", "nemotron_h_moe"):
+            cfg["model_type"] = "nemotron_h"
+            cfg["architectures"] = ["NemotronHForCausalLM"]
+            hkv = self.kv.get(f"{a}.attention.head_count_kv") or []
+            kinds = []
+            for i in range(cfg["num_hidden_layers"]):
+                st = {n.split(".", 2)[2] for n in self.tensors if n.startswith(f"blk.{i}.")}
+                kinds.append("mamba" if "ssm_in.weight" in st else
+                             ("full_attention" if "attn_q.weight" in st else
+                              ("moe" if "ffn_gate_inp.weight" in st else "mlp")))
+            cfg["layer_types"] = kinds
+            cfg["num_key_value_heads"] = int(max(hkv)) if hkv else heads
+            cfg["head_dim"] = int(g("attention.key_length", cfg["hidden_size"] // heads))
+            cfg["attention_rope"] = False
+            inner = int(g("ssm.inner_size")); H = int(g("ssm.time_step_rank"))
+            cfg["mamba_num_heads"] = H; cfg["mamba_head_dim"] = inner // H
+            cfg["n_groups"] = int(g("ssm.group_count", 1))
+            cfg["ssm_state_size"] = int(g("ssm.state_size", 128))
+            cfg["conv_kernel"] = int(g("ssm.conv_kernel", 4))
+            cfg["hidden_act"] = "relu2"
+            cfg["first_k_dense_replace"] = 0
+            if g("expert_count"):
+                cfg["router_scoring"] = "sigmoid"
+                cfg["norm_topk_prob"] = bool(g("expert_weights_norm", True))
+                cfg["routed_scaling_factor"] = float(g("expert_weights_scale", 1.0) or 1.0)
         if a in ("lfm2", "lfm2moe"):
             cfg["model_type"] = "lfm2_moe" if a == "lfm2moe" else "lfm2"
             cfg["architectures"] = ["Lfm2MoeForCausalLM" if a == "lfm2moe" else "Lfm2ForCausalLM"]
@@ -649,6 +678,9 @@ _LAYER = {
     "attn_q": "self_attn.q_proj", "attn_k": "self_attn.k_proj",
     "attn_v": "self_attn.v_proj", "attn_output": "self_attn.o_proj",
     "attn_q_norm": "self_attn.q_norm", "attn_k_norm": "self_attn.k_norm",
+    "ssm_in": "mamba.in_proj", "ssm_out": "mamba.out_proj",
+    "ssm_conv1d": "mamba.conv1d", "ssm_norm": "mamba.norm",
+    "ssm_d": "mamba.D", "ssm_dt": "mamba.dt_bias",
     "shortconv.in_proj": "conv.in_proj", "shortconv.conv": "conv.conv",
     "shortconv.out_proj": "conv.out_proj",
     "attn_norm": "input_layernorm", "ffn_norm": "post_attention_layernorm",
@@ -680,6 +712,12 @@ def _map_name(g: str, gdn: bool = False,
             return f"model.layers.{idx}.self_attn.qkv_proj.{kind}"
         if stem == "ffn_up":
             return f"model.layers.{idx}.mlp.gate_up_proj.{kind}"
+    if kimi_recurrent is None and rest == "ssm_a":
+        return f"model.layers.{idx}.mamba.A.weight"          # nemotron_h, sans suffixe
+    if kimi_recurrent is None and rest == "ssm_d":
+        return f"model.layers.{idx}.mamba.D.weight"
+    if kimi_recurrent is None and stem == "ssm_dt":
+        return f"model.layers.{idx}.mamba.dt_bias.weight"       # rangé en .bias dans le GGUF
     if kimi_recurrent is not None:
         if rest == "ssm_a":
             return f"model.layers.{idx}.linear_attn.a.weight"

@@ -182,9 +182,10 @@ class Attention(nn.Module):
         if self.k_norm is not None:
             k = self.k_norm(k)
 
-        cos, sin = self.rope(batch.positions_on(x.device), x.device, x.dtype,
-                             max_pos=max(batch.seq_lens))
-        q, k = apply_rope(q, k, cos, sin)
+        if self.rope is not None:
+            cos, sin = self.rope(batch.positions_on(x.device), x.device, x.dtype,
+                                 max_pos=max(batch.seq_lens))
+            q, k = apply_rope(q, k, cos, sin)
 
         if cache is not None:
             cache.write(batch.slots_on(x.device), k, v)
@@ -220,8 +221,9 @@ class Attention(nn.Module):
             q = self.q_norm(q)
         if self.k_norm is not None:
             k = self.k_norm(k)
-        cos, sin = self.rope(positions, x.device, x.dtype, max_pos=max_pos)
-        q, k = apply_rope(q, k, cos, sin)
+        if self.rope is not None:
+            cos, sin = self.rope(positions, x.device, x.dtype, max_pos=max_pos)
+            q, k = apply_rope(q, k, cos, sin)
         cache.write(slots, k, v)
         out = kernels.paged_attention(q, cache, block_tables, seq_lens,
                                       self.n_rep, self.scale, q_len=q_len,
@@ -358,6 +360,25 @@ class MLP(nn.Module):
         return self.down_proj(self._act(self.gate_proj(x)) * self.up_proj(x))
 
 
+class MLP2(nn.Module):
+    """MLP sans porte (Nemotron-H) : down(act(up(x))), act = ReLU² ou GELU."""
+
+    def __init__(self, up: QuantLinear, down: QuantLinear, act: str = "relu2") -> None:
+        super().__init__()
+        self.up_proj, self.down_proj = up, down
+        self.act = act
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.up_proj(x)
+        if self.act == "relu2":
+            h = F.relu(h); h = h * h
+        elif self.act.startswith("gelu"):
+            h = F.gelu(h, approximate="tanh")
+        else:
+            h = F.silu(h)
+        return self.down_proj(h)
+
+
 class MoEBlock(nn.Module):
     """Mélange d'experts creux.
 
@@ -397,6 +418,10 @@ class MoEBlock(nn.Module):
     # puis chaque expert reçoit une *vue* de la pile — la mémoire n'est pas
     # doublée, et la boucle par expert du prefill continue de marcher.
     # ------------------------------------------------------------------
+    def _noms_experts(self) -> tuple:
+        return ("gate_proj", "up_proj", "down_proj") if hasattr(self.experts[0], "gate_proj") \
+            else ("up_proj", "down_proj")
+
     def _try_build_stacks(self) -> bool:
         from ..quant.int4 import INT4Tensor
         from ..quant.nvfp4 import NVFP4Tensor
@@ -433,7 +458,7 @@ class MoEBlock(nn.Module):
             return None
 
         piles = {}
-        for nom in ("gate_proj", "up_proj", "down_proj"):
+        for nom in self._noms_experts():
             pile = one([getattr(e, nom) for e in self.experts])
             if pile is None:
                 return False
@@ -472,6 +497,8 @@ class MoEBlock(nn.Module):
     def _forward_prefill_grouped(self, x, topw, topi) -> Optional[torch.Tensor]:
         if not hasattr(torch, "_grouped_mm") or self._stacks is None:
             return None
+        if "gate_proj" not in self._stacks:
+            return None                                # experts sans porte : boucle
         pg, pu, pd = (self._stacks[n] for n in ("gate_proj", "up_proj", "down_proj"))
         if any(p[0] != "nvfp4" for p in (pg, pu, pd)):
             return None
@@ -495,6 +522,13 @@ class MoEBlock(nn.Module):
         eid = topi.reshape(-1).to(torch.int32)
         tok = torch.arange(t, device=x.device,
                            dtype=torch.int32).repeat_interleave(self.top_k)
+        if "gate_proj" not in self._stacks:            # experts sans porte (ReLU²)
+            u = self._grouped(x.to(torch.float32), self._stacks["up_proj"], eid, tok)
+            act = F.relu(u); act = act * act
+            seq = torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
+            d = self._grouped(act, self._stacks["down_proj"], eid, seq)
+            d = d * topw.reshape(-1, 1).to(d.dtype)
+            return d.view(t, self.top_k, -1).sum(dim=1).to(x.dtype)
         pg, pu = self._stacks["gate_proj"], self._stacks["up_proj"]
         ext = kernels.get_extension()
         if (pg[0] == "nvfp4" and pu[0] == "nvfp4" and ext is not None
@@ -645,6 +679,8 @@ class DecoderLayerGDN(nn.Module):
             sorties.append(y)
             start += ql
         x = x + torch.cat(sorties).to(x.dtype)
+        if self.mlp is None:
+            return x
         return x + self.mlp(self.post_attention_layernorm(x))
 
     # -- chemin à formes fixes (graphes CUDA), une séquence ----------------
@@ -687,6 +723,8 @@ class DecoderLayerGDN(nn.Module):
         else:
             y = la.decode_static(h, self.static)
         x = x + y.to(x.dtype)
+        if self.mlp is None:
+            return x
         return x + self.mlp(self.post_attention_layernorm(x))
 
     def prefetch(self) -> None:
@@ -714,8 +752,13 @@ class DecoderLayer(nn.Module):
     def forward(self, x: torch.Tensor, batch: ForwardBatch,
                 cache: Optional[PagedKVCache]) -> torch.Tensor:
         r = self.residual_multiplier
+        if self.self_attn is None:                     # couche MLP seule (Nemotron-H)
+            y = self.mlp(self.input_layernorm(x))
+            return x + (y if r == 1.0 else y * r)
         a = self.self_attn(self.input_layernorm(x), batch, cache)
         x = x + (a if r == 1.0 else a * r)
+        if self.mlp is None:                           # couche d'attention seule
+            return x
         h = self.post_attention_layernorm(x)
         if self.mlp_device != self.device:
             # Seul l'état caché traverse le bus : [jetons, dimension], quelques
@@ -730,10 +773,15 @@ class DecoderLayer(nn.Module):
                      seq_lens: torch.Tensor, max_pos: int,
                      cache: PagedKVCache, q_len: int = 1) -> torch.Tensor:
         r = self.residual_multiplier
+        if self.self_attn is None:
+            y = self.mlp(self.input_layernorm(x))
+            return x + (y if r == 1.0 else y * r)
         a = self.self_attn.decode_fixed(self.input_layernorm(x), positions,
                                         slots, block_tables, seq_lens,
                                         max_pos, cache, q_len)
         x = x + (a if r == 1.0 else a * r)
+        if self.mlp is None:
+            return x
         y = self.mlp(self.post_attention_layernorm(x))
         return x + (y if r == 1.0 else y * r)
 

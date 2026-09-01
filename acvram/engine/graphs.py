@@ -103,7 +103,8 @@ class GraphRunner:
             if isinstance(mod, QuantLinear) and mod.streamed is not None:
                 return False                 # les adresses changent en vol
         pleines = [i for i, l in enumerate(m.layers)
-                   if not isinstance(l, DecoderLayerGDN)]
+                   if not isinstance(l, DecoderLayerGDN)
+                   and getattr(l, "self_attn", None) is not None]
         if any(i not in m.caches for i in pleines):
             return False
         if any(m.caches[i].k.device != next(iter(devs)) for i in pleines):
@@ -227,7 +228,7 @@ class GraphRunner:
         # Le cache RoPE doit exister a sa taille finale avant la capture :
         # une extension pendant un rejeu pointerait un tenseur abandonne.
         for layer in m.layers:
-            if hasattr(layer, "self_attn"):
+            if getattr(layer, "self_attn", None) is not None and layer.self_attn.rope is not None:
                 layer.self_attn.rope(entry["positions"], d, m.dtype,
                                      max_pos=self.max_model_len + 1)
 

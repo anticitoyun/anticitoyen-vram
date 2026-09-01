@@ -132,6 +132,8 @@ SENSITIVE_SUFFIXES = (
     "conv1d.weight", "a_log.weight", "dt_bias.weight",
     "conv1d_q.weight", "conv1d_k.weight", "conv1d_v.weight",
     "conv.conv.weight",           # noyau court LFM2 [d, L]
+    "mamba.conv1d.weight", "mamba.conv1d.bias", "mamba.A.weight",
+    "mamba.D.weight", "mamba.dt_bias.weight", "mamba.norm.weight",
     ".a.weight",                  # -exp(A_log) de KDA (kimi-linear)
     "e_score_correction_bias",
     "k_b_proj.weight", "v_b_proj.weight",   # absorptions MLA [H, r, d] : 3D, petits
@@ -541,6 +543,11 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     for i in range(spec.num_layers):
         if spec.layer_types and spec.layer_types[i] == "conv":
             attendus.append(f"model.layers.{i}.conv.in_proj.weight")
+        elif spec.layer_types and spec.layer_types[i] in ("mamba", "mlp", "moe"):
+            attendus.append(f"model.layers.{i}." + {
+                "mamba": "mamba.in_proj.weight", "mlp": "mlp.up_proj.weight",
+                "moe": "mlp.experts.0.up_proj.weight"}[spec.layer_types[i]])
+            continue
         elif spec.layer_types and spec.layer_types[i] == "linear_attention":
             if spec.model_type == "kimi_linear":
                 attendus.append(f"model.layers.{i}.linear_attn.q_proj.weight")
@@ -552,6 +559,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             attendus.append(f"model.layers.{i}.self_attn.q_a_proj.weight")
         else:
             attendus.append(f"model.layers.{i}.self_attn.q_proj.weight")
+        if spec.model_type == "nemotron_h":
+            continue                        # couche d'attention seule, sans MLP
         if spec.is_moe and i >= spec.first_k_dense_replace:
             attendus.append(f"model.layers.{i}.mlp.experts.0.gate_proj.weight")
         else:

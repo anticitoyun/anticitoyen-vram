@@ -103,6 +103,13 @@ class ModelSpec:
     final_logit_softcapping: float = 0.0
     hidden_activation: str = "silu"
     attention_k_eq_v: bool = False
+    # nemotron_h : Mamba2 (SSD) + attention sans RoPE + MLP ReLU²
+    mamba_num_heads: int = 0
+    mamba_head_dim: int = 0
+    mamba_n_groups: int = 1
+    mamba_state_size: int = 128
+    mamba_conv_kernel: int = 4
+    attention_rope: bool = True
     # lfm2 : longueur du noyau de la conv courte
     conv_L_cache: int = 3
     # granite : multiplicateurs scalaires (attention, plongement, résidu, logits)
@@ -217,6 +224,7 @@ _ARCH_ALIASES = {
     "Phi3ForCausalLM": "llama",
     "GraniteForCausalLM": "llama",
     "Lfm2ForCausalLM": "llama",
+    "NemotronHForCausalLM": "llama",
     "Lfm2MoeForCausalLM": "moe",
     "Gemma4ForCausalLM": "llama",
     "Gemma4ForConditionalGeneration": "llama",
@@ -301,7 +309,7 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         if cfg.get("rotary_dim") is None and cfg.get("partial_rotary_factor"):
             hd = int(cfg.get("head_dim") or cfg["hidden_size"] // cfg["num_attention_heads"])
             cfg = {**cfg, "rotary_dim": int(hd * float(cfg["partial_rotary_factor"]))}
-    elif (mt in ("kimi_linear", "nemotron_h",
+    elif (mt in ("kimi_linear",
                "falcon_h1", "mamba", "mamba2", "jamba")
             or "linear_attn" in json.dumps(cfg.get("layer_types", ""))):
         raise ValueError(
@@ -342,6 +350,12 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         rotary_dim=cfg.get("rotary_dim"),
         attn_output_gate=bool(cfg.get("attn_output_gate")),
         model_type=mt,
+        mamba_num_heads=int(cfg.get("mamba_num_heads") or 0),
+        mamba_head_dim=int(cfg.get("mamba_head_dim") or 0),
+        mamba_n_groups=int(cfg.get("n_groups") or cfg.get("mamba_n_groups") or 1),
+        mamba_state_size=int(cfg.get("ssm_state_size") or cfg.get("mamba_state_size") or 128),
+        mamba_conv_kernel=int(cfg.get("conv_kernel") or cfg.get("mamba_conv_kernel") or 4),
+        attention_rope=bool(cfg.get("attention_rope", True)),
         conv_L_cache=int(cfg.get("conv_L_cache") or 3),
         sliding_window=int(cfg.get("sliding_window") or 0),
         global_head_dim=int(cfg.get("global_head_dim") or 0),

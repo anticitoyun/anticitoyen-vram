@@ -25,7 +25,7 @@ from ..quant.nvfp4 import NVFP4Tensor
 from .config import ModelSpec
 from .layers import QuantLinear, RMSNorm, RotaryEmbedding
 from .model import (ACVRamModel, Attention, DecoderLayer, DecoderLayerGDN,
-                    DecoderLayerGemma, MLP, MoEBlock)
+                    DecoderLayerGemma, MLP, MLP2, MoEBlock)
 
 __all__ = ["LoadedModel", "load_model"]
 
@@ -256,6 +256,63 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 caches[i] = PagedKVCache(KVCacheConfig(
                     num_layers=1, num_kv_heads=nkv, head_dim=hd,
                     num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
+            continue
+
+        if spec.model_type == "nemotron_h":
+            kind = spec.layer_types[i]
+            in_norm = RMSNorm(reader.get(p + "input_layernorm.weight").to(dtype).to(d), spec.rms_norm_eps)
+            if kind == "mamba":
+                from .mamba2 import Mamba2Mixer
+                petit = lambda suffix: reader.get(p + suffix).to(torch.float32).to(d)
+                cb = petit("mamba.conv1d.bias") if manifest["tensors"].get(p + "mamba.conv1d.bias") else None
+                bloc = Mamba2Mixer(
+                    in_proj=lin("mamba.in_proj.weight", False),
+                    out_proj=lin("mamba.out_proj.weight", False),
+                    conv_weight=petit("mamba.conv1d.weight"), conv_bias=cb,
+                    dt_bias=petit("mamba.dt_bias.weight"), A=petit("mamba.A.weight"),
+                    D=petit("mamba.D.weight"), norm_weight=petit("mamba.norm.weight"),
+                    num_heads=spec.mamba_num_heads, head_dim=spec.mamba_head_dim,
+                    n_groups=spec.mamba_n_groups, state_size=spec.mamba_state_size,
+                    eps=spec.rms_norm_eps).to(d)
+                layers.append(DecoderLayerGDN(i, bloc, None, in_norm, None, d))
+                continue
+            if kind in ("mlp", "moe"):
+                if kind == "mlp":
+                    mlp_n = MLP2(mlin("mlp.up_proj.weight"), mlin("mlp.down_proj.weight"), "relu2")
+                else:
+                    router = mlin("mlp.gate.weight"); experts = []; e = 0
+                    while manifest["tensors"].get(p + f"mlp.experts.{e}.up_proj.weight"):
+                        experts.append(MLP2(mlin(f"mlp.experts.{e}.up_proj.weight"),
+                                            mlin(f"mlp.experts.{e}.down_proj.weight"), "relu2"))
+                        e += 1
+                    shared = None
+                    if manifest["tensors"].get(p + "mlp.shared_expert.up_proj.weight"):
+                        shared = MLP2(mlin("mlp.shared_expert.up_proj.weight"),
+                                      mlin("mlp.shared_expert.down_proj.weight"), "relu2")
+                    bias = None
+                    if manifest["tensors"].get(p + "mlp.gate.e_score_correction_bias"):
+                        bias = reader.get(p + "mlp.gate.e_score_correction_bias").float().to(d)
+                    mlp_n = MoEBlock(router, experts, spec.num_experts_per_tok or 2, shared,
+                                     norm_topk_prob=bool(spec.raw.get("norm_topk_prob", True)),
+                                     scoring=spec.router_scoring, score_bias=bias,
+                                     routed_scale=spec.routed_scaling_factor)
+                couche = DecoderLayer(i, None, mlp_n, in_norm, None, d, d)
+                layers.append(couche)
+                continue
+            # attention (sans RoPE), cache paginé
+            attn = Attention(spec, lin("self_attn.q_proj.weight", streamed_attn),
+                             lin("self_attn.k_proj.weight", streamed_attn),
+                             lin("self_attn.v_proj.weight", streamed_attn),
+                             lin("self_attn.o_proj.weight", streamed_attn),
+                             None if not spec.attention_rope else rope)
+            couche = DecoderLayer(i, attn, None, in_norm, None, d, d)
+            layers.append(couche)
+            n_blocks = kv_blocks.get(lp.exec_device, 0)
+            if n_blocks:
+                kv_fmt = next((t.kv_format for t in plan.tiers if t.name == lp.exec_device), "int8")
+                caches[i] = PagedKVCache(KVCacheConfig(
+                    num_layers=1, num_kv_heads=spec.num_key_value_heads,
+                    head_dim=spec.head_dim, num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
             continue
 
         if spec.model_type in ("lfm2", "lfm2_moe") and spec.layer_types[i] == "conv":
