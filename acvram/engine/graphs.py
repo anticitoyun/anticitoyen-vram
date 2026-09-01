@@ -31,6 +31,7 @@ les poids streamés (le préchargement change les adresses).
 from __future__ import annotations
 
 import os
+import time
 from typing import Optional
 
 import torch
@@ -131,6 +132,8 @@ class GraphRunner:
         if nblk * BLOCK_SIZE > self.max_model_len + BLOCK_SIZE:
             nblk = bucket_blocks((self.max_model_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
         lb = 0
+        trace = bool(os.environ.get("ACVRAM_TRACE_STEPS"))
+        t0 = time.perf_counter()
         if self.hybrid_layers:
             if b != 1 or ql != 1 or batch.gdn_store is None:
                 return None                  # une séquence par graphe
@@ -138,24 +141,39 @@ class GraphRunner:
             self._bind_hybrid(batch, lb)
         key = (b, ql, nblk, lb)
         self._last_key = key
+        t1 = time.perf_counter()
 
         entry = self.graphs.get(key)
         if entry is None:
             if len(self.graphs) >= MAX_GRAPHS:
+                if trace:
+                    print(f"[graphe] limite {MAX_GRAPHS} atteinte, clé {key} : eager",
+                          flush=True)
                 return None
             entry = self._capture(b, ql, nblk, batch)
             self.graphs[key] = entry
             self.replays += 1                # la capture rejoue deja une fois
+            if trace:
+                print(f"[graphe] capture clé {key} : "
+                      f"{(time.perf_counter()-t1)*1000:.1f} ms", flush=True)
             return entry["out"].clone()
 
         self._fill(entry, batch)
+        t2 = time.perf_counter()
         if "step" in entry:                  # ACVRAM_GRAPHS_EAGER : sans capture
             with torch.inference_mode():
                 entry["out"] = entry["step"]()
         else:
             entry["graph"].replay()
         self.replays += 1
-        return entry["out"].clone()
+        out = entry["out"].clone()
+        if trace:
+            t3 = time.perf_counter()
+            if (t3 - t0) * 1000 > 20:
+                print(f"[graphe-lent] bind {(t1-t0)*1000:.1f} fill "
+                      f"{(t2-t1)*1000:.1f} replay {(t3-t2)*1000:.1f} ms clé {key}",
+                      flush=True)
+        return out
 
     # -- hybrides ----------------------------------------------------------
     def _bind_hybrid(self, batch: ForwardBatch, lb: int) -> None:

@@ -132,6 +132,12 @@ def load_model(path: str, plan: Optional[Plan] = None,
     embed_dev = dev(plan.embed_device) if plan.embed_device != "cpu" \
         else torch.device("cpu")
     embed = embed.to(embed_dev)
+    if embed_dev.type == "cpu":
+        # Sans copie, la table reste un mmap du fichier safetensors : chaque
+        # jeton nouveau touche une page non chargée — une lecture disque de
+        # 100 ms au milieu du décodage. Résidente en RAM épinglée, elle se
+        # collecte en microsecondes et se copie sans étape intermédiaire.
+        embed = embed.contiguous().clone().pin_memory()
 
     rope = RotaryEmbedding(spec.rotary_dim or spec.head_dim,
                            spec.max_position_embeddings,
