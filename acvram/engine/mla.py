@@ -86,11 +86,24 @@ class MLAttention(nn.Module):
             pos = torch.arange(bucket, device=x.device)
             masque = pos > (total - 1)
         else:
-            C = cache
+            # prefill : par tranches de requêtes, sinon les scores
+            # [t, nh, total] fp32 pèsent des gigaoctets (2 Go à 4k jetons)
             passe = total - t
-            pos_q = torch.arange(t, device=x.device).unsqueeze(-1) + passe
+            C32 = cache.to(torch.float32)
+            V32 = C32[:, :self.rank]
             pos_k = torch.arange(total, device=x.device)
-            masque = pos_k > pos_q.unsqueeze(1)               # causal
+            morceaux = []
+            for d0 in range(0, t, 256):
+                d1 = min(t, d0 + 256)
+                sc = torch.einsum('thr,sr->ths', q_eff[d0:d1].to(torch.float32),
+                                  C32) * self.scale
+                pos_q = torch.arange(d0, d1, device=x.device).unsqueeze(-1) + passe
+                sc = sc.masked_fill(pos_k > pos_q.unsqueeze(1), float('-inf'))
+                morceaux.append(torch.einsum('ths,sr->thr', sc.softmax(dim=-1), V32))
+            o_lat = torch.cat(morceaux)
+            y = torch.einsum('hvr,thr->thv', self.v_b.to(torch.float32), o_lat)
+            y = y.reshape(t, self.nh * self.dv).to(x.dtype)
+            return self.o_proj(y), cache
         scores = torch.einsum('thr,sr->ths', q_eff.to(torch.float32),
                               C.to(torch.float32)) * self.scale
         scores = scores.masked_fill(masque, float('-inf'))

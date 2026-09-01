@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -485,7 +486,7 @@ class MoEBlock(nn.Module):
         # le nombre d'experts touchés. La boucle par expert reste le chemin des
         # grands lots de prefill (le regroupement par expert y redevient
         # rentable) et le repli des piles hétérogènes.
-        if x.is_cuda and t <= 8 and self._stack_state != "non":
+        if x.is_cuda and t <= _MOE_GROUPED_MAX and self._stack_state != "non":
             if self._stack_state == "?":
                 self._stack_state = "oui" if self._try_build_stacks() else "non"
             if self._stack_state == "oui":
@@ -520,6 +521,12 @@ class MoEBlock(nn.Module):
             for lin in (expert.gate_proj, expert.up_proj, expert.down_proj):
                 lin.prefetch()
 
+
+# Jetons au-delà desquels le MoE repasse de la GEMV groupée (une paire
+# (jeton, expert) par tranche de grille) à la boucle par expert : la boucle
+# coûte ~0,6 ms par expert visité, la GEMV groupée relit les poids de
+# l'expert pour chaque jeton — croisement mesuré vers quelques milliers.
+_MOE_GROUPED_MAX = int(os.environ.get("ACVRAM_MOE_GROUPED_MAX", "4096"))
 
 # Marque, dans le magasin d'états, une séquence dont l'état réside dans les
 # tampons fixes d'une couche (chemin graphes) plutôt qu'en tuple fonctionnel.

@@ -28,6 +28,18 @@ import torch.nn.functional as F
 __all__ = ["KimiDeltaAttention"]
 
 
+def _chunk_kda():
+    """Le noyau par blocs de fla pour le prefill, si disponible et permis."""
+    import os
+    if os.environ.get("ACVRAM_KDA_CHUNK", "1") == "0":
+        return None
+    try:
+        from fla.ops.kda import chunk_kda
+        return chunk_kda
+    except ImportError:
+        return None
+
+
 def _extension():
     """L'extension CUDA si elle porte le noyau KDA (et si on ne l'a pas coupée)."""
     import os
@@ -106,8 +118,10 @@ class KimiDeltaAttention(nn.Module):
         k, new_ck = self._conv(self.k_proj(x).to(torch.float32), self.conv_k.float(), ck)
         v, new_cv = self._conv(self.v_proj(x).to(torch.float32), self.conv_v.float(), cv)
 
-        q = self._l2norm(q.reshape(t, self.nh, self.d))
-        k = self._l2norm(k.reshape(t, self.nh, self.d))
+        q_raw = q.reshape(t, self.nh, self.d)
+        k_raw = k.reshape(t, self.nh, self.d)
+        q = self._l2norm(q_raw)
+        k = self._l2norm(k_raw)
         v = v.reshape(t, self.nh, self.d)
         q = q * (self.d ** -0.5)
 
@@ -117,14 +131,26 @@ class KimiDeltaAttention(nn.Module):
 
         S = s_prev if s_prev is not None else torch.zeros(
             self.nh, self.d, self.d, dtype=torch.float32, device=x.device)
-        sorties = torch.empty(t, self.nh, self.d,
-                              dtype=torch.float32, device=x.device)
-        for i in range(t):
-            S = S * torch.exp(g1[i]).unsqueeze(-2)            # décroissance (axe clé)
-            pred = torch.einsum('hij,hj->hi', S, k[i])
-            d = beta[i].unsqueeze(-1) * (v[i] - pred)
-            S = S + d.unsqueeze(-1) * k[i].unsqueeze(-2)
-            sorties[i] = torch.einsum('hij,hj->hi', S, q[i])
+        chunk = _chunk_kda() if (t > 1 and x.is_cuda) else None
+        if chunk is not None:
+            # prefill : noyau Triton par blocs de fla (même mathématique que
+            # la boucle ; l'état fla est [K, V], le nôtre [V, K])
+            core, S_fin = chunk(
+                q_raw.unsqueeze(0), k_raw.unsqueeze(0), v.unsqueeze(0),
+                g=g1.unsqueeze(0), beta=beta.unsqueeze(0),
+                initial_state=S.transpose(-1, -2).contiguous().unsqueeze(0),
+                output_final_state=True, use_qk_l2norm_in_kernel=True)
+            sorties = core[0].to(torch.float32)
+            S = S_fin[0].transpose(-1, -2).contiguous().to(torch.float32)
+        else:
+          sorties = torch.empty(t, self.nh, self.d,
+                                dtype=torch.float32, device=x.device)
+          for i in range(t):
+              S = S * torch.exp(g1[i]).unsqueeze(-2)          # décroissance (axe clé)
+              pred = torch.einsum('hij,hj->hi', S, k[i])
+              d = beta[i].unsqueeze(-1) * (v[i] - pred)
+              S = S + d.unsqueeze(-1) * k[i].unsqueeze(-2)
+              sorties[i] = torch.einsum('hij,hj->hi', S, q[i])
 
         # RMSNorm par tête × porte sigmoïde g2
         var = sorties.pow(2).mean(-1, keepdim=True)
