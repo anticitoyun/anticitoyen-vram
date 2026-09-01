@@ -162,9 +162,14 @@ class GGUFFile:
     # Architectures que le moteur ne sait PAS exécuter : récurrences linéaires
     # (SSM, Gated DeltaNet, KDA). Les convertir quand même produirait un modèle
     # mutilé qui répond du charabia — le pire des échecs, le silencieux.
-    UNSUPPORTED = ("kimi-linear", "qwen35", "qwen35moe", "nemotron_h",
-                   "falcon-h1", "falcon_h1", "lfm2", "lfm2moe", "mamba",
-                   "jamba", "granitehybrid")
+    UNSUPPORTED = ("kimi-linear", "qwen35", "qwen35moe", "qwen3next",
+                   "nemotron_h", "nemotron_h_moe", "falcon-h1", "falcon_h1",
+                   "lfm2", "lfm2moe", "mamba", "jamba", "granitehybrid")
+    # Architectures transformeurs mais aux blocs différents des nôtres
+    # (softcap, laurel, attention partagée...) : à mapper avant de convertir.
+    UNTRANSLATED = ("glm4", "glm4moe", "glm4_moe", "gemma4", "gemma3",
+                    "gemma3n", "chatglm", "granite", "internlm2", "phi3",
+                    "starcoder2", "kat", "deci", "olmoe")
 
     def check_executable(self) -> None:
         a = self.arch()
@@ -174,6 +179,11 @@ class GGUFFile:
                 f"(couches SSM/DeltaNet) — le moteur acvram est un "
                 f"transformeur pur et ne peut pas l'exécuter. La convertir "
                 f"produirait un modèle mutilé. Non converti.")
+        if a in self.UNTRANSLATED:
+            raise ValueError(
+                f"architecture GGUF « {a} » : pas encore traduite vers le "
+                f"moteur acvram (blocs différents du transformeur llama). "
+                f"Non convertie plutôt que mutilée.")
 
     def hf_config(self) -> dict:
         a = self.arch()

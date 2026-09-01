@@ -485,6 +485,24 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                     "before": round(c["metrics_base"]["out_snr_db"], 2),
                     "after": round(met["out_snr_db"], 2)})
 
+    # Un point de contrôle dont l'architecture n'est pas vraiment comprise
+    # (noms de tenseurs non traduits) produirait un modèle mutilé qui échoue
+    # au chargement — ou pire, qui répond du charabia. Vérifier que chaque
+    # couche attendue par la spécification a bien ses projections.
+    attendus = []
+    for i in range(spec.num_layers):
+        attendus.append(f"model.layers.{i}.self_attn.q_proj.weight")
+        if spec.is_moe and i >= spec.first_k_dense_replace:
+            attendus.append(f"model.layers.{i}.mlp.experts.0.gate_proj.weight")
+        else:
+            attendus.append(f"model.layers.{i}.mlp.gate_proj.weight")
+    manquants = [n for n in attendus if n not in manifest["tensors"]]
+    if manquants:
+        raise ValueError(
+            f"conversion incomplète : {len(manquants)} tenseurs attendus "
+            f"absents (premier : {manquants[0]}). L'architecture de la source "
+            f"n'est probablement pas prise en charge — rien n'est écrit.")
+
     if not opts.dry_run:
         writer.flush()
         manifest["weight_map"] = writer.weight_map
