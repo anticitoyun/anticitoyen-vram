@@ -188,7 +188,12 @@ class Attention(nn.Module):
         repli déquantifier-puis-SDPA ne connaît que q_len = 1).
         """
         b = x.shape[0]
-        q = self.q_proj(x).view(b, self.n_heads, self.head_dim)
+        gate = None
+        if self.output_gate:                 # porte fusionnée dans q (qwen35)
+            qg = self.q_proj(x).view(b, self.n_heads, 2 * self.head_dim)
+            q, gate = qg[..., :self.head_dim].contiguous(), qg[..., self.head_dim:]
+        else:
+            q = self.q_proj(x).view(b, self.n_heads, self.head_dim)
         k = self.k_proj(x).view(b, self.n_kv_heads, self.head_dim)
         v = self.v_proj(x).view(b, self.n_kv_heads, self.head_dim)
         if self.q_norm is not None:
@@ -207,7 +212,7 @@ class Attention(nn.Module):
             kk, vv = cache.gather_fixed(block_tables, q.dtype)
             out = decode_attention_fixed(q, kk, vv, seq_lens, self.n_rep,
                                          self.scale)
-        out = out.to(x.dtype)
+        out = self._gated(out.to(x.dtype), gate, b)
         return self.o_proj(out.reshape(b, self.n_heads * self.head_dim))
 
     def _gated(self, out: torch.Tensor, gate, t: int) -> torch.Tensor:

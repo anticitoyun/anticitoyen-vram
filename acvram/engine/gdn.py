@@ -122,3 +122,30 @@ class GatedDeltaNet(nn.Module):
         y = self._norm_gated(core, z.reshape(-1, self.dv))
         y = y.reshape(t, self.value_dim)
         return self.out_proj(y.to(x.dtype)), (new_conv_state, s_new)
+
+    # -- chemin à formes fixes (graphes CUDA) --------------------------------
+    # La règle delta de référence est déjà à formes fixes pour t = 1 : on la
+    # rejoue telle quelle et l'on recopie ses sorties dans les tampons fixes
+    # — même mathématique, mêmes noyaux, donc mêmes arrondis que ``forward``.
+    def new_static(self, device: torch.device) -> dict:
+        return {"conv": torch.zeros(self.conv_dim, self.kernel - 1,
+                                    dtype=torch.float32, device=device),
+                "S": torch.zeros(1, self.nv, self.dk, self.dv,
+                                 dtype=torch.float32, device=device)}
+
+    @staticmethod
+    def static_load(st: dict, etat) -> None:
+        if etat is None:
+            st["conv"].zero_(); st["S"].zero_()
+            return
+        st["conv"].copy_(etat[0]); st["S"].copy_(etat[1])
+
+    @staticmethod
+    def static_export(st: dict) -> tuple:
+        return (st["conv"].clone(), st["S"].clone())
+
+    def decode_static(self, x: torch.Tensor, st: dict) -> torch.Tensor:
+        y, (conv, S) = self.forward(x, (st["conv"], st["S"]))
+        st["conv"].copy_(conv)
+        st["S"].copy_(S.to(torch.float32))
+        return y
