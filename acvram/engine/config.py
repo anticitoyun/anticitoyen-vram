@@ -110,6 +110,8 @@ class ModelSpec:
     mamba_state_size: int = 128
     mamba_conv_kernel: int = 4
     attention_rope: bool = True
+    # muse_glimmer : epsilon des normes post (1e-8)
+    post_norm_eps: float = 0.0
     # starcoder2 : normes LayerNorm (biais), MLP non gaté GELU avec biais
     norm_type: str = "rms_norm"
     mlp_gated: bool = True
@@ -230,6 +232,7 @@ _ARCH_ALIASES = {
     "NemotronHForCausalLM": "llama",
     "FalconH1ForCausalLM": "llama",
     "Starcoder2ForCausalLM": "llama",
+    "MuseGlimmerForConditionalGeneration": "llama",
     "Lfm2MoeForCausalLM": "moe",
     "Gemma4ForCausalLM": "llama",
     "Gemma4ForConditionalGeneration": "llama",
@@ -271,6 +274,16 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
     # Certaines configurations imbriquent le modèle de langage (modèles visuels).
     if "text_config" in cfg and "hidden_size" not in cfg:
         cfg = {**cfg, **cfg["text_config"]}
+    rp_gen = cfg.get("rope_parameters") or {}
+    if "rope_theta" not in cfg and isinstance(rp_gen, dict) and rp_gen.get("rope_theta"):
+        cfg = {**cfg, "rope_theta": rp_gen["rope_theta"]}
+    if cfg.get("model_type") in ("muse_glimmer", "muse_glimmer_text"):
+        # attention à porte de sortie (gate_proj fusionné dans q_proj à la
+        # conversion), q/k normalisés sans poids (facteur 3.87 replié dans
+        # q_norm), logits × output_multiplier puis softcap
+        cfg = {**cfg, "attn_output_gate": True, "model_type": "muse_glimmer",
+               "hidden_activation": cfg.get("hidden_activation") or "silu",
+               "logits_scaling": 1.0 / float(cfg.get("output_multiplier") or 1.0)}
 
     # generation_config.json fait autorite sur les jetons d'arret : Qwen y
     # declare <|im_end|>, absent du eos_token_id de config.json sur certains
@@ -360,6 +373,7 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         mamba_state_size=int(cfg.get("ssm_state_size") or cfg.get("mamba_state_size") or 128),
         mamba_conv_kernel=int(cfg.get("conv_kernel") or cfg.get("mamba_conv_kernel") or 4),
         attention_rope=bool(cfg.get("attention_rope", True)),
+        post_norm_eps=float(cfg.get("post_norm_eps") or 0.0),
         norm_type=str(cfg.get("norm_type") or "rms_norm"),
         mlp_gated=bool(cfg.get("mlp_gated", cfg.get("model_type") != "starcoder2")),
         conv_L_cache=int(cfg.get("conv_L_cache") or 3),

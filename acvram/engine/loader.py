@@ -258,6 +258,33 @@ def load_model(path: str, plan: Optional[Plan] = None,
                     num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
             continue
 
+        if spec.model_type == "muse_glimmer":
+            local = spec.layer_types[i] == "sliding_attention"
+            attn = Attention(spec, lin("self_attn.q_proj.weight", streamed_attn),
+                             lin("self_attn.k_proj.weight", streamed_attn),
+                             lin("self_attn.v_proj.weight", streamed_attn),
+                             lin("self_attn.o_proj.weight", streamed_attn), rope,
+                             norm_opt("self_attn.q_norm.weight"),
+                             norm_opt("self_attn.k_norm.weight"),
+                             window=spec.sliding_window if local else 0,
+                             output_gate=True)
+            mlp_g = MLP(mlin("mlp.gate_proj.weight"), mlin("mlp.up_proj.weight"),
+                        mlin("mlp.down_proj.weight"), act=spec.hidden_activation)
+            eps_post = spec.post_norm_eps or spec.rms_norm_eps
+            n4 = lambda suffix, e: RMSNorm(reader.get(p + suffix).to(dtype).to(d), e)
+            layers.append(DecoderLayerGemma(
+                i, attn, mlp_g, n4("input_layernorm.weight", spec.rms_norm_eps),
+                n4("post_attention_layernorm.weight", eps_post),
+                n4("pre_feedforward_layernorm.weight", spec.rms_norm_eps),
+                n4("post_feedforward_layernorm.weight", eps_post), None, d))
+            n_blocks = kv_blocks.get(lp.exec_device, 0)
+            if n_blocks:
+                kv_fmt = next((t.kv_format for t in plan.tiers if t.name == lp.exec_device), "int8")
+                caches[i] = PagedKVCache(KVCacheConfig(
+                    num_layers=1, num_kv_heads=spec.num_key_value_heads,
+                    head_dim=spec.head_dim, num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
+            continue
+
         if spec.model_type == "starcoder2":
             from .layers import LayerNorm
             ln = lambda suffix: LayerNorm(

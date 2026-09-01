@@ -248,9 +248,46 @@ _NORMES_ZERO_CENTREES = ("input_layernorm.weight", "post_attention_layernorm.wei
                          "model.norm.weight")
 
 
+def _adapt_muse(source: Iterator[tuple[str, torch.Tensor]], spec
+                ) -> Iterator[tuple[str, torch.Tensor]]:
+    """Muse-Glimmer : normes centrées (+1), plongement normalisé par ligne,
+    gate_proj fusionné par tête dans q_proj ([q_h | porte_h]), q_norm/k_norm
+    synthétisés (sans poids, facteur qk_scale_factor replié dans q_norm)."""
+    nh, hd = spec.num_attention_heads, spec.head_dim
+    qk = float(spec.raw.get("qk_scale_factor") or 3.87)
+    eps = float(spec.rms_norm_eps)
+    en_attente: dict[str, dict[str, torch.Tensor]] = {}
+    for name, t in source:
+        name = name.replace("model.language_model.", "model.")
+        if name.endswith(("input_layernorm.weight", "post_attention_layernorm.weight",
+                          "pre_feedforward_layernorm.weight", "post_feedforward_layernorm.weight")):
+            yield name, (t.to(torch.float32) + 1.0).to(t.dtype)
+            continue
+        if name == "model.embed_tokens.weight":
+            e = t.to(torch.float32)
+            yield name, (e * torch.rsqrt(e.pow(2).mean(-1, keepdim=True) + eps)).to(t.dtype)
+            continue
+        if name.endswith(("self_attn.q_proj.weight", "self_attn.gate_proj.weight")):
+            pref = name.rsplit("self_attn.", 1)[0] + "self_attn."
+            lot = en_attente.setdefault(pref, {})
+            lot["q" if name.endswith("q_proj.weight") else "g"] = t
+            if len(lot) == 2:
+                q, g = lot.pop("q"), lot.pop("g"); del en_attente[pref]
+                fused = torch.cat((q.view(nh, hd, -1), g.view(nh, hd, -1)), dim=1)
+                yield pref + "q_proj.weight", fused.reshape(nh * 2 * hd, -1).contiguous()
+                yield pref + "q_norm.weight", torch.full((hd,), qk, dtype=t.dtype)
+                yield pref + "k_norm.weight", torch.ones(hd, dtype=t.dtype)
+            continue
+        yield name, t
+    assert not en_attente, f"q_proj/gate_proj dépareillés : {list(en_attente)}"
+
+
 def _adapt_hf(source: Iterator[tuple[str, torch.Tensor]], spec
               ) -> Iterator[tuple[str, torch.Tensor]]:
     mt = str(getattr(spec, "model_type", "") or spec.raw.get("model_type", ""))
+    if mt == "muse_glimmer":
+        yield from _adapt_muse(source, spec)
+        return
     if mt == "starcoder2":
         for name, t in source:
             yield name.replace("mlp.c_fc.", "mlp.up_proj.").replace("mlp.c_proj.", "mlp.down_proj."), t
