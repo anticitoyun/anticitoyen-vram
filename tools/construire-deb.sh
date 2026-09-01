@@ -48,7 +48,13 @@ if [ ! -x "$VENV/bin/acvram" ]; then
         fi
     fi
     pip install --quiet --index-url "$INDEX" torch
-    pip install --quiet "$SRC"
+    # /usr/share est en lecture seule : construire depuis une copie, sinon
+    # setuptools échoue en voulant y écrire acvram.egg-info
+    COPIE="$BASE/src"
+    rm -rf "$COPIE"
+    cp -r "$SRC" "$COPIE"
+    pip install --quiet "$COPIE"
+    rm -rf "$COPIE"
     echo "acvram : prêt. « acvram doctor » pour vérifier."
 fi
 exec "$VENV/bin/acvram" "$@"
