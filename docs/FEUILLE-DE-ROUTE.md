@@ -285,3 +285,35 @@ calcul, pas la bande passante — ~290 Go/s effectifs (16 % du pic 5090), et
 6bpw aggrave. Les MoE A3B y échappent (3 Go actifs → 91-96 t/s). Remède :
 servir les denses par acvram (cydonia : 35 t/s en AWQ safetensors, 26 depuis
 l'EXL3 6bpw) ou llama.cpp ; garder TabbyAPI pour les MoE et les petits.
+
+## 2 septembre 2026 — tout le parc, puis les pistes 1 à 7
+
+Règle de la campagne : chaque changement monte la version (pyproject +
+`acvram/__init__.py`), commit, push.
+
+| version | contenu | validation |
+|---|---|---|
+| 0.4.2 | starcoder2 (LayerNorm avec biais, MLP GELU non gaté, fenêtre 4096) | chat cohérent |
+| 0.4.3 | Muse-Glimmer 30B (EXL3) : normes centrées +1, plongement RMS-normalisé par ligne, `gate_proj` fusionné par tête dans `q_proj` (chemin `output_gate`), q/k normalisés ×3,87, fenêtres 2048, logits × 0,196 puis softcap 20 | chat cohérent |
+| 0.4.4 | `acvram/quant/hfquant.py` : AWQ gemm, compressed-tensors `pack-quantized` (sym/asym) et `nvfp4-pack-quantized`, modelopt NVFP4, déquantifiés en bf16 à la volée puis requantifiés par nos soins | Dolphin (asym), code-qwen3-32b (nvfp4) |
+| 0.4.5 | ERNIE-4.5-MoE : softmax + biais de sélection, experts partagés fusionnés, RoPE entrelacé → q/k dé-permutés à la conversion | en cours |
+| 0.4.6 | types GGUF à grille (IQ1/IQ2/IQ3, TQ) par le `gguf-py` de llama.cpp | LFM2.5 IQ3_M cohérent |
+| 0.4.7 | Nemotron-H et LFM2/LFM2-MoE depuis HF/EXL3 (`backbone.layers.N.mixer.*`, `feed_forward.w1/w3/w2`), gemma4_unified, tokenizer reconstruit depuis `tekken.json` | LFM2 EXL3 cohérent |
+| 0.4.8 | **piste 1 : spéculation n-gram sur les hybrides sous graphes** — le lot de vérification (forme fixe k+1) déroule les jetons un à un dans les tampons fixes et photographie l'état après chacun ; retour au dernier accepté | 4B kimi : greedy identique 96/96 ; prose 110 → 153 t/s, liste 108 → 132, code 109 → 98 (acceptation 0,52) |
+| 0.4.9 | corrections de 0.4.4 : ordre AWQ inverse `[0,4,1,5,2,6,3,7]`, décalage +8 de compressed-tensors (pas de complément à deux), modelopt fp4 empaqueté (`weight` u8 + `weight_scale_2`) | reconversions en file |
+| 0.4.10 | **piste 4 : lots b>1 sous graphes pour les hybrides** — un créneau de tampons fixes par séquence, attention linéaire déroulée par créneau, GEMV partagées (`ACVRAM_HYBRID_SLOTS`, 4) | identique au décodage seul ; 104 t/s seul → 122 (b=2) / 149 (b=3-4) agrégés |
+| 0.4.11 | gemma4 HF/EXL3 : normes +1 à la conversion ; nemotron HF `num_layers` ; garde GGUF `ACVRAM_GDN` active par défaut (`=0` pour refuser) | en cours |
+
+Pistes restantes :
+
+* **5 — précision KDA** : `chunk_kda` reçoit déjà des entrées fp32 ; mesuré
+  contre une récurrence fp64 sur 1 024 jetons : 1,6e-3 relatif (7,5e-3 en
+  bf16), 0,50 ms contre 0,60. Le reste vient des `tl.dot` bf16 internes de
+  fla : pas de gain sans patcher fla. Rien à changer.
+* **6 — prefill Qwen3-Coder** : profil en file (`prof-prefill.py`, 4 096 jetons).
+* **7 — .deb** : à reconstruire une fois 0.4.11 validée.
+
+Pièges de la campagne : un listing de dossiers tronqué à 48 caractères donne
+des chemins faux ; un chat lancé pendant qu'on patche importe l'ancien
+`model.py` (signature `static_bind`) — retester après tout patch ; deux
+conversions concurrentes vers le même dossier mêlent leurs manifestes.
