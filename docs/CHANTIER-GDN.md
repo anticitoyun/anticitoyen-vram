@@ -150,3 +150,19 @@ mur — le pas était noyé dans les lancements, pas dans le calcul.
 
 `ACVRAM_GRAPHS_EAGER=1` exécute le chemin fixe sans capture ;
 `ACVRAM_HYBRID_KERNELS=0` rétablit le chemin torch des couches hybrides.
+
+### Bilan — 1er septembre 2026, 13 h 45
+
+| modèle | avant | moteur (graphe) | serveur (flux HTTP) |
+|---|---|---|---|
+| kimi-linear 35B (KDA+MLA) | 39 t/s | **135** | 54 |
+| Agents 4B kimi (GDN) | 49 | **125** | 84 |
+| Ornith 35B (GDN+MoE) | 25 | **108** | 68 |
+| Qwen3-14B (dense, non hybride) | 36 | — | 44 |
+| Qwen3-Coder-30B-A3B (MoE) | 49 | — | 72 |
+
+Les modèles classiques profitent aussi des GEMV bf16 et de la RMSNorm
+fusionnée (+20-45 %). L'écart moteur/serveur est le coût du prefill du
+gabarit de chat, du flux SSE et du tokenizer par jeton — chantier suivant.
+Restent côté pas de décodage (7,4 ms) : le MoE groupé (2 ms, 40 % de la bande
+passante sur K=1024/2304) et l'empilement des projections KDA (9 → 5 GEMV).
