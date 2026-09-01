@@ -753,7 +753,11 @@ class DecoderLayer(nn.Module):
                 cache: Optional[PagedKVCache]) -> torch.Tensor:
         r = self.residual_multiplier
         if self.self_attn is None:                     # couche MLP seule (Nemotron-H)
-            y = self.mlp(self.input_layernorm(x))
+            h = self.input_layernorm(x)
+            if self.mlp_device != self.device:
+                y = self.mlp(h.to(self.mlp_device)).to(x.device, non_blocking=True)
+            else:
+                y = self.mlp(h)
             return x + (y if r == 1.0 else y * r)
         a = self.self_attn(self.input_layernorm(x), batch, cache)
         x = x + (a if r == 1.0 else a * r)
@@ -774,7 +778,9 @@ class DecoderLayer(nn.Module):
                      cache: PagedKVCache, q_len: int = 1) -> torch.Tensor:
         r = self.residual_multiplier
         if self.self_attn is None:
-            y = self.mlp(self.input_layernorm(x))
+            h = self.input_layernorm(x)
+            y = self.mlp(h.to(self.mlp_device)).to(x.device) if self.mlp_device != self.device \
+                else self.mlp(h)
             return x + (y if r == 1.0 else y * r)
         a = self.self_attn.decode_fixed(self.input_layernorm(x), positions,
                                         slots, block_tables, seq_lens,

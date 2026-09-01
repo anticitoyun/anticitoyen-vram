@@ -296,7 +296,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
                                      norm_topk_prob=bool(spec.raw.get("norm_topk_prob", True)),
                                      scoring=spec.router_scoring, score_bias=bias,
                                      routed_scale=spec.routed_scaling_factor)
-                couche = DecoderLayer(i, None, mlp_n, in_norm, None, d, d)
+                couche = DecoderLayer(i, None, mlp_n, in_norm, None, d, mlp_dev)
                 layers.append(couche)
                 continue
             # attention (sans RoPE), cache paginé
