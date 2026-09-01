@@ -310,6 +310,7 @@ class GGUFFile:
             cfg["linear_conv_kernel_dim"] = int(g("ssm.conv_kernel", 4))
             cfg["rotary_dim"] = int(g("rope.dimension_count", 0)) or None
             cfg["attn_output_gate"] = True
+            cfg["gdn_a_log_negexp"] = True       # convention du convertisseur llama.cpp
 
         if a == "kimi-linear":
             hkv = self.kv.get("kimi-linear.attention.head_count_kv") or []

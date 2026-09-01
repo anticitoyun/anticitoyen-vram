@@ -224,6 +224,47 @@ def _resolve_quant_device(choice: str) -> torch.device:
 # --------------------------------------------------------------------------
 
 
+# Familles HF dont les couches à récurrence portent d'autres noms que notre
+# manifeste (celui-ci a été fixé sur le GGUF de Qwen3.5) : renommage, normes
+# zéro-centrées remises en (1 + w), conv1d aplatie, tours visuelle et MTP
+# ignorées. Les conversions GGUF n'y passent pas (déjà dans nos conventions).
+_QWEN35_HF = ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text",
+              "qwen3_next")
+_QWEN35_RENOMMAGE = {
+    "linear_attn.in_proj_qkv": "linear_attn.qkv",
+    "linear_attn.in_proj_z": "linear_attn.gate",
+    "linear_attn.in_proj_a": "linear_attn.alpha",
+    "linear_attn.in_proj_b": "linear_attn.beta",
+    "linear_attn.out_proj": "linear_attn.out",
+    "linear_attn.A_log": "linear_attn.a_log.weight",
+    "linear_attn.dt_bias": "linear_attn.dt_bias.weight",
+}
+_NORMES_ZERO_CENTREES = ("input_layernorm.weight", "post_attention_layernorm.weight",
+                         "self_attn.q_norm.weight", "self_attn.k_norm.weight",
+                         "model.norm.weight")
+
+
+def _adapt_hf(source: Iterator[tuple[str, torch.Tensor]], spec
+              ) -> Iterator[tuple[str, torch.Tensor]]:
+    mt = str(getattr(spec, "model_type", "") or spec.raw.get("model_type", ""))
+    if mt not in _QWEN35_HF or spec.raw.get("gdn_a_log_negexp"):
+        yield from source
+        return
+    for name, t in source:
+        name = name.replace("model.language_model.", "model.")
+        if name.startswith(("model.visual", "visual.", "mtp.", "model.mtp")):
+            continue
+        for src, dst in _QWEN35_RENOMMAGE.items():
+            if src in name:
+                name = name.replace(src, dst)
+                break
+        if name.endswith("linear_attn.conv1d.weight") and t.dim() == 3:
+            t = t.reshape(t.shape[0], t.shape[-1])
+        if name.endswith(_NORMES_ZERO_CENTREES):
+            t = t.to(torch.float32) + 1.0        # (1 + w) de la référence
+        yield name, t
+
+
 def _iter_checkpoint(path: str) -> Iterator[tuple[str, torch.Tensor]]:
     """Lit les tenseurs d'un point de contrôle safetensors ou GGUF."""
     from safetensors import safe_open
@@ -329,7 +370,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     keys = []
     budget_candidats: list[dict] = []
 
-    for name, tensor in _iter_checkpoint(model_path):
+    for name, tensor in _adapt_hf(_iter_checkpoint(model_path), spec):
         report.tensors += 1
         report.in_bytes += tensor.numel() * tensor.element_size()
         fmt = router.format_for(name)

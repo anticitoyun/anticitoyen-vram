@@ -250,9 +250,13 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
     # qwen3_next est désormais exécutable (couches Gated DeltaNet) quand la
     # configuration porte nos champs layer_types/linear_* ; les autres
     # hybrides restent refusés.
-    if mt in ("qwen3_next", "kimi_linear") and cfg.get("linear_num_value_heads"):
-        pass
-    elif (mt in ("kimi_linear", "qwen3_5", "qwen3_5_moe", "nemotron_h",
+    if mt in ("qwen3_next", "kimi_linear", "qwen3_5", "qwen3_5_text",
+              "qwen3_5_moe", "qwen3_5_moe_text") \
+            and cfg.get("linear_num_value_heads"):
+        if cfg.get("rotary_dim") is None and cfg.get("partial_rotary_factor"):
+            hd = int(cfg.get("head_dim") or cfg["hidden_size"] // cfg["num_attention_heads"])
+            cfg = {**cfg, "rotary_dim": int(hd * float(cfg["partial_rotary_factor"]))}
+    elif (mt in ("kimi_linear", "nemotron_h",
                "falcon_h1", "lfm2_moe", "mamba", "mamba2", "jamba")
             or "linear_attn" in json.dumps(cfg.get("layer_types", ""))):
         raise ValueError(

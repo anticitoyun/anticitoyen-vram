@@ -277,10 +277,12 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 out=lin("linear_attn.out.weight", False),
                 conv_weight=petit("linear_attn.conv1d.weight"),
                 dt_bias=petit("linear_attn.dt_bias.weight"),
-                # le convertisseur GGUF stocke -exp(A_log), pas A_log :
-                # on inverse pour retrouver le paramètre de la référence
-                a_log=torch.log(torch.clamp(
-                    -petit("linear_attn.a_log.weight"), min=1e-12)),
+                # le convertisseur GGUF stocke -exp(A_log) (drapeau
+                # gdn_a_log_negexp) ; les sources HF portent A_log tel quel
+                a_log=(torch.log(torch.clamp(
+                    -petit("linear_attn.a_log.weight"), min=1e-12))
+                       if spec.raw.get("gdn_a_log_negexp")
+                       else petit("linear_attn.a_log.weight")),
                 norm_weight=petit("linear_attn.norm.weight"),
                 num_k_heads=spec.linear_num_key_heads,
                 num_v_heads=spec.linear_num_value_heads,
