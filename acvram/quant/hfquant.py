@@ -143,10 +143,27 @@ class HFQuantCheckpoint:
 
     def iter_tensors(self) -> Iterator[tuple[str, torch.Tensor]]:
         dev = "cuda:0" if torch.cuda.is_available() else "cpu"
+        # les compagnons (scales, qzeros, weight_scale…) peuvent vivre dans un
+        # autre fragment que le poids : index global clé → fichier
+        index_path = os.path.join(self.path, "model.safetensors.index.json")
+        ou: dict[str, str] = {}
+        if os.path.isfile(index_path):
+            with open(index_path, "r", encoding="utf-8") as f:
+                ou = dict(json.load(f)["weight_map"])
+        poignees: dict[str, object] = {}
+
+        def lire(fh_courant, k: str) -> torch.Tensor:
+            f = ou.get(k)
+            if f is None or f == fn:
+                return fh_courant.get_tensor(k)
+            if f not in poignees:
+                poignees[f] = safe_open(os.path.join(self.path, f), framework="pt", device="cpu")
+            return poignees[f].get_tensor(k)
+
         for fn in self._files():
             with safe_open(os.path.join(self.path, fn), framework="pt", device="cpu") as fh:
                 keys = list(fh.keys())
-                have = set(keys)
+                have = set(keys) | set(ou)
                 for key in keys:
                     base, _, suffix = key.rpartition(".")
                     if self.method == "awq":
@@ -155,8 +172,8 @@ class HFQuantCheckpoint:
                         if suffix == "qweight":
                             yield base + ".weight", self._awq(
                                 fh.get_tensor(key).to(dev),
-                                fh.get_tensor(base + ".qzeros").to(dev),
-                                fh.get_tensor(base + ".scales").to(dev)).cpu()
+                                lire(fh, base + ".qzeros").to(dev),
+                                lire(fh, base + ".scales").to(dev)).cpu()
                             continue
                     elif self.method == "compressed-tensors":
                         if suffix in ("weight_scale", "weight_zero_point", "weight_shape",
@@ -165,17 +182,17 @@ class HFQuantCheckpoint:
                             continue
                         if suffix == "weight_packed":
                             packed = fh.get_tensor(key).to(dev)
-                            scale = fh.get_tensor(base + ".weight_scale").to(dev)
+                            scale = lire(fh, base + ".weight_scale").to(dev)
                             if self.format == "nvfp4-pack-quantized":
                                 t = self._ct_nvfp4(packed, scale,
-                                                   fh.get_tensor(base + ".weight_global_scale"))
+                                                   lire(fh, base + ".weight_global_scale"))
                             else:
                                 zp = base + ".weight_zero_point"
                                 shp = base + ".weight_shape"
                                 t = self._ct_int4(
                                     packed, scale,
-                                    fh.get_tensor(zp).to(dev) if zp in have else None,
-                                    fh.get_tensor(shp) if shp in have else None)
+                                    lire(fh, zp).to(dev) if zp in have else None,
+                                    lire(fh, shp) if shp in have else None)
                             yield base + ".weight", t.cpu()
                             continue
                     elif self.method == "modelopt":
@@ -186,8 +203,8 @@ class HFQuantCheckpoint:
                             t = fh.get_tensor(key)
                             if t.dtype == torch.uint8:      # fp4 empaqueté [out, in/2]
                                 yield key, self._modelopt_nvfp4(
-                                    t.to(dev), fh.get_tensor(base + ".weight_scale").to(dev),
-                                    fh.get_tensor(base + ".weight_scale_2")).cpu()
+                                    t.to(dev), lire(fh, base + ".weight_scale").to(dev),
+                                    lire(fh, base + ".weight_scale_2")).cpu()
                                 continue
                             yield key, t                    # bf16 (couche gardée en clair)
                             continue

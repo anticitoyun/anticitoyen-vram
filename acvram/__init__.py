@@ -16,6 +16,6 @@ La surface publique est la ligne de commande (`acvram`) et le serveur
 compatible avec l'API OpenAI.
 """
 
-__version__ = "0.4.19"
+__version__ = "0.4.22"
 
 __all__ = ["__version__"]

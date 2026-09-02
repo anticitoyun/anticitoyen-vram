@@ -353,6 +353,11 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         cfg = {**cfg, "mla_rope": True,
                "layer_types": cfg.get("layer_types") or
                ["full_attention"] * int(cfg.get("num_hidden_layers", 0))}
+        if not cfg.get("shared_expert_intermediate_size") and cfg.get("n_shared_experts"):
+            # point de contrôle HF : experts partagés fusionnés en un MLP
+            cfg = {**cfg, "shared_expert_intermediate_size":
+                   int(cfg.get("moe_intermediate_size") or 0) * int(cfg["n_shared_experts"]),
+                   "router_scoring": cfg.get("router_scoring") or cfg.get("scoring_func") or "softmax"}
     if mt in ("qwen3_next", "kimi_linear", "qwen3_5", "qwen3_5_text",
               "qwen3_5_moe", "qwen3_5_moe_text") \
             and cfg.get("linear_num_value_heads"):

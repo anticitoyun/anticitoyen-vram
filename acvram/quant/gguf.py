@@ -292,7 +292,13 @@ class GGUFFile:
             if hname.endswith("__exps__"):
                 stem = hname[: -len("__exps__")]
                 for e in range(t.shape[0]):
-                    yield stem.replace("{e}", str(e)), t[e]
+                    nom_e = stem.replace("{e}", str(e))
+                    if nom_e.endswith("gate_up_proj.weight"):     # gemma4 : gate puis up
+                        g_, u_ = torch.chunk(t[e], 2, dim=0)
+                        yield nom_e.replace("gate_up_proj", "gate_proj"), g_
+                        yield nom_e.replace("gate_up_proj", "up_proj"), u_
+                    else:
+                        yield nom_e, t[e]
             else:
                 yield hname, t
 
@@ -498,6 +504,11 @@ class GGUFFile:
                 n.endswith("attn_v.weight") and int(n.split(".")[1]) in globales
                 for n in self.tensors)
             cfg["embedding_multiplier"] = float(cfg["hidden_size"]) ** 0.5
+            if int(g("expert_count", 0) or 0):      # 26B-A4B : MoE en parallèle du MLP dense
+                cfg["num_experts"] = int(g("expert_count"))
+                cfg["num_experts_per_tok"] = int(g("expert_used_count", 8))
+                cfg["moe_intermediate_size"] = int(g("expert_feed_forward_length", 0))
+                cfg["gemma_moe"] = True
             cfg["attention_multiplier"] = 1.0
         if a == "granite":
             # multiplicateurs Granite (llama sinon)
@@ -709,6 +720,9 @@ _LAYER = {
     "post_attention_norm": "post_attention_layernorm",
     "post_ffw_norm": "post_feedforward_layernorm",
     "layer_output_scale": "layer_scalar",
+    "post_ffw_norm_1": "post_feedforward_layernorm_1",     # gemma4 MoE
+    "post_ffw_norm_2": "post_feedforward_layernorm_2",
+    "pre_ffw_norm_2": "pre_feedforward_layernorm_2",
     "attn_q": "self_attn.q_proj", "attn_k": "self_attn.k_proj",
     "attn_v": "self_attn.v_proj", "attn_output": "self_attn.o_proj",
     "attn_q_norm": "self_attn.q_norm", "attn_k_norm": "self_attn.k_norm",
@@ -727,7 +741,8 @@ _LAYER = {
     "ffn_down_shexp": "mlp.shared_expert.down_proj",
 }
 
-_EXPS = {"ffn_gate_exps": "mlp.experts.{e}.gate_proj",
+_EXPS = {"ffn_gate_up_exps": "mlp.experts.{e}.gate_up_proj",   # gemma4 : [E, 2·inter, h]
+         "ffn_gate_exps": "mlp.experts.{e}.gate_proj",
          "ffn_up_exps": "mlp.experts.{e}.up_proj",
          "ffn_down_exps": "mlp.experts.{e}.down_proj"}
 
@@ -746,6 +761,10 @@ def _map_name(g: str, gdn: bool = False,
             return f"model.layers.{idx}.self_attn.qkv_proj.{kind}"
         if stem == "ffn_up":
             return f"model.layers.{idx}.mlp.gate_up_proj.{kind}"
+    if stem == "ffn_gate_inp" and kind == "scale":       # gemma4 : échelle du routeur [h]
+        return f"model.layers.{idx}.mlp.router_scale.weight"
+    if stem == "ffn_down_exps" and kind == "scale":      # gemma4 : échelle par expert [E]
+        return f"model.layers.{idx}.mlp.per_expert_scale.weight"
     if kimi_recurrent is None and rest == "ssm_a" and not gdn:
         return f"model.layers.{idx}.mamba.A.weight"          # nemotron_h, sans suffixe
     if kimi_recurrent is None and rest == "ssm_d" and not gdn:

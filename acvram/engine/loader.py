@@ -24,7 +24,7 @@ from ..quant.int4 import INT4Tensor
 from ..quant.nvfp4 import NVFP4Tensor
 from .config import ModelSpec
 from .layers import QuantLinear, RMSNorm, RotaryEmbedding
-from .model import (ACVRamModel, Attention, DecoderLayer, DecoderLayerGDN,
+from .model import (ACVRamModel, Attention, DecoderLayer, DecoderLayerGDN, MoEBlockGemma,
                     DecoderLayerGemma, DecoderLayerParallel, MLP, MLP2, MoEBlock)
 
 __all__ = ["LoadedModel", "load_model"]
@@ -244,11 +244,30 @@ def load_model(path: str, plan: Optional[Plan] = None,
             out_scale = None
             if manifest["tensors"].get(p + "layer_scalar.weight") is not None:
                 out_scale = reader.get(p + "layer_scalar.weight").to(torch.float32).to(d).reshape(-1)[0]
+            moe = n1 = n2 = p2 = None
+            if manifest["tensors"].get(p + "mlp.gate.weight") is not None:
+                experts = []
+                e = 0
+                while manifest["tensors"].get(p + f"mlp.experts.{e}.gate_proj.weight"):
+                    experts.append(MLP(mlin(f"mlp.experts.{e}.gate_proj.weight"),
+                                       mlin(f"mlp.experts.{e}.up_proj.weight"),
+                                       mlin(f"mlp.experts.{e}.down_proj.weight"),
+                                       act=spec.hidden_activation))
+                    e += 1
+                moe = MoEBlockGemma(
+                    mlin("mlp.gate.weight"), experts, spec.num_experts_per_tok or 8,
+                    reader.get(p + "mlp.router_scale.weight").to(torch.float32).to(mlp_dev),
+                    reader.get(p + "mlp.per_expert_scale.weight").to(torch.float32).to(mlp_dev),
+                    spec.rms_norm_eps)
+                n1 = n4("post_feedforward_layernorm_1.weight")
+                n2 = n4("post_feedforward_layernorm_2.weight")
+                p2 = n4("pre_feedforward_layernorm_2.weight")
             layers.append(DecoderLayerGemma(
                 i, attn, mlp_g, n4("input_layernorm.weight"),
                 n4("post_attention_layernorm.weight"),
                 n4("pre_feedforward_layernorm.weight"),
-                n4("post_feedforward_layernorm.weight"), out_scale, d))
+                n4("post_feedforward_layernorm.weight"), out_scale, d,
+                moe=moe, post_ffn_norm_1=n1, post_ffn_norm_2=n2, pre_ffn_norm_2=p2))
             n_blocks = kv_blocks.get(lp.exec_device, 0)
             if n_blocks:
                 kv_fmt = next((t.kv_format for t in plan.tiers

@@ -564,16 +564,18 @@ class MoEBlock(nn.Module):
         # l'autre.
         return d.view(t, self.top_k, -1).sum(dim=1).to(x.dtype)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        t, h = x.shape
+    def _router_logits(self, x32: torch.Tensor) -> torch.Tensor:
         # le routeur est un petit poids en clair : on garde sa copie fp32
         # plutôt que de la reconvertir à chaque pas
         w32 = getattr(self, "_router_w32", None)
         if w32 is None and hasattr(self.router.qweight, "weight"):
             w32 = self.router.qweight.weight.to(torch.float32)
             self._router_w32 = w32
-        logits = (F.linear(x.to(torch.float32), w32) if w32 is not None
-                  else self.router(x.to(torch.float32)))
+        return F.linear(x32, w32) if w32 is not None else self.router(x32)
+
+    def _route(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Poids et indices des top-k experts par jeton."""
+        logits = self._router_logits(x.to(torch.float32))
         ext = kernels.get_extension() if x.is_cuda else None
         if (ext is not None and hasattr(ext, "moe_route")
                 and logits.shape[-1] <= 1024 and self.top_k <= 32):
@@ -597,6 +599,11 @@ class MoEBlock(nn.Module):
                 topw = topw / topw.sum(dim=-1, keepdim=True)
             if self.routed_scale != 1.0:
                 topw = topw * self.routed_scale
+        return topw, topi
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        t, h = x.shape
+        topw, topi = self._route(x)
         topw = topw.to(x.dtype)
 
         # Chemin groupé : trois lancements pour toute la couche, quel que soit
@@ -916,6 +923,30 @@ class DecoderLayerParallel(DecoderLayerGDN):
         return self._mlp(x)
 
 
+class MoEBlockGemma(MoEBlock):
+    """MoE de Gemma 4 (26B-A4B) : routeur sur x normalisé (RMS sans poids)
+    × échelle × h^-½, softmax, top-k sans renormalisation, poids × échelle
+    par expert ; experts GELU-tanh, d'où pas de pile/noyau groupé (SiLU)."""
+
+    def __init__(self, router: QuantLinear, experts: list, top_k: int,
+                 router_scale: torch.Tensor, per_expert_scale: torch.Tensor,
+                 eps: float) -> None:
+        super().__init__(router, experts, top_k, None, norm_topk_prob=False)
+        self.router_scale = router_scale.to(torch.float32)
+        self.per_expert_scale = per_expert_scale.to(torch.float32).reshape(-1)
+        self.eps = eps
+        self.root = float(router_scale.numel()) ** -0.5
+        self._stack_state = "non"
+
+    def _route(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        x32 = x.to(torch.float32)
+        xr = x32 * torch.rsqrt(x32.pow(2).mean(-1, keepdim=True) + self.eps)
+        xr = xr * self.router_scale * self.root
+        probs = F.softmax(self._router_logits(xr), dim=-1)
+        topw, topi = torch.topk(probs, self.top_k, dim=-1)
+        return topw * self.per_expert_scale[topi], topi
+
+
 class DecoderLayerGemma(nn.Module):
     """Bloc Gemma 4 : normes avant ET après l'attention et le MLP, puis un
     scalaire de sortie par couche (layer_scalar)."""
@@ -923,7 +954,11 @@ class DecoderLayerGemma(nn.Module):
     def __init__(self, index: int, attn: Attention, mlp: nn.Module,
                  input_norm: RMSNorm, post_attn_norm: RMSNorm,
                  pre_ffn_norm: RMSNorm, post_ffn_norm: RMSNorm,
-                 out_scale: Optional[torch.Tensor], device: torch.device) -> None:
+                 out_scale: Optional[torch.Tensor], device: torch.device,
+                 moe: Optional[nn.Module] = None,
+                 post_ffn_norm_1: Optional[RMSNorm] = None,
+                 post_ffn_norm_2: Optional[RMSNorm] = None,
+                 pre_ffn_norm_2: Optional[RMSNorm] = None) -> None:
         super().__init__()
         self.index = index
         self.self_attn = attn
@@ -933,6 +968,12 @@ class DecoderLayerGemma(nn.Module):
         self.pre_feedforward_layernorm = pre_ffn_norm
         self.post_feedforward_layernorm = post_ffn_norm
         self.out_scale = out_scale
+        # 26B-A4B : MoE en parallèle du MLP dense, chacun avec sa norme de
+        # sortie, sommés avant post_feedforward_layernorm
+        self.moe = moe
+        self.post_feedforward_layernorm_1 = post_ffn_norm_1
+        self.post_feedforward_layernorm_2 = post_ffn_norm_2
+        self.pre_feedforward_layernorm_2 = pre_ffn_norm_2
         self.device = device
         self.mlp_device = device
         self.residual_multiplier = 1.0
@@ -940,6 +981,9 @@ class DecoderLayerGemma(nn.Module):
     def _reste(self, x: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
         x = x + self.post_attention_layernorm(a)
         y = self.mlp(self.pre_feedforward_layernorm(x))
+        if self.moe is not None:
+            y = self.post_feedforward_layernorm_1(y) + self.post_feedforward_layernorm_2(
+                self.moe(self.pre_feedforward_layernorm_2(x)))
         x = x + self.post_feedforward_layernorm(y)
         if self.out_scale is not None:
             x = x * self.out_scale.to(x.dtype)

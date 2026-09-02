@@ -137,6 +137,7 @@ SENSITIVE_SUFFIXES = (
     ".a.weight",                  # -exp(A_log) de KDA (kimi-linear)
     "e_score_correction_bias",
     "layernorm.bias", "norm.bias",
+    "router_scale.weight", "per_expert_scale.weight",
     "k_b_proj.weight", "v_b_proj.weight",   # absorptions MLA [H, r, d] : 3D, petits
     "mlp.gate.weight",            # routeur MoE : minuscule et décisif
     "shared_expert_gate.weight",  # porte de l'expert partagé : 1 ligne
@@ -285,6 +286,15 @@ def _adapt_muse(source: Iterator[tuple[str, torch.Tensor]], spec
 def _adapt_hf(source: Iterator[tuple[str, torch.Tensor]], spec
               ) -> Iterator[tuple[str, torch.Tensor]]:
     mt = str(getattr(spec, "model_type", "") or spec.raw.get("model_type", ""))
+
+    def _texte_seul(src):
+        # enrobages multimodaux HF : le modèle de langue vit sous
+        # model.language_model., la tour visuelle n'est pas servie
+        for n, t in src:
+            if n.startswith(("model.visual.", "visual.", "model.vision_tower.", "model.audio_tower.")):
+                continue
+            yield n.replace("model.language_model.", "model."), t
+    source = _texte_seul(source)
     if mt == "muse_glimmer":
         yield from _adapt_muse(source, spec)
         return
@@ -387,6 +397,21 @@ def _adapt_hf(source: Iterator[tuple[str, torch.Tensor]], spec
             if name.endswith("conv.conv.weight") and t.dim() == 3:
                 t = t.reshape(t.shape[0], -1)
             yield name, t
+        return
+    if mt in ("deepseek_v2", "deepseek_v3", "glm4_moe") and int(getattr(spec, "kv_lora_rank", 0) or 0):
+        # HF : kv_b_proj [nh·(nope+v), rank] scindé en k_b [nh, rank, nope] et
+        # v_b [nh, v, rank] (convention du convertisseur llama.cpp, attendue
+        # par le loader) ; experts partagés sous mlp.shared_expert
+        nh, nope, vd, rank = (int(spec.num_attention_heads), int(spec.qk_nope_head_dim),
+                              int(spec.v_head_dim), int(spec.kv_lora_rank))
+        for name, t in source:
+            if name.endswith("self_attn.kv_b_proj.weight"):
+                kv = t.reshape(nh, nope + vd, rank)
+                base = name[: -len("kv_b_proj.weight")]
+                yield base + "k_b_proj.weight", kv[:, :nope, :].transpose(1, 2).contiguous()
+                yield base + "v_b_proj.weight", kv[:, nope:, :].contiguous()
+            else:
+                yield name.replace("mlp.shared_experts.", "mlp.shared_expert."), t
         return
     if mt == "ernie4_5_moe":
         nh, nkv = spec.num_attention_heads, spec.num_key_value_heads
