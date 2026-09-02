@@ -339,3 +339,28 @@ Pièges de la campagne : un listing de dossiers tronqué à 48 caractères donne
 des chemins faux ; un chat lancé pendant qu'on patche importe l'ancien
 `model.py` (signature `static_bind`) — retester après tout patch ; deux
 conversions concurrentes vers le même dossier mêlent leurs manifestes.
+
+## 2 septembre 2026, après-midi — tout le parc converti (0.4.20 → 0.4.24)
+
+| version | contenu | validation |
+|---|---|---|
+| 0.4.20 | Gemma 4 26B-A4B : MoE en parallèle du MLP dense (`MoEBlockGemma` : routeur sur x normalisé × échelle × h^-½, softmax, top-k sans renormalisation, échelle par expert ; `ffn_gate_up_exps` scindé ; normes `post_ffw_1/2`, `pre_ffw_2`) | gemma-4-26B-A4B ultra et APEX : « Paris » |
+| 0.4.21 | `hfquant` : compagnons (scales, qzeros, weight_scale…) lus dans le bon fragment ; préfixe `model.language_model.` retiré pour tout HF, tour visuelle ignorée | Qwen3-30B AWQ, Qwen3-VL-30B AWQ |
+| 0.4.22 | DeepSeek-V2/V3 depuis HF : `kv_b_proj` scindé en k_b/v_b (convention llama.cpp), experts partagés, `scoring_func` | — |
+| 0.4.23 | RoPE **YaRN** (rampe beta_fast/beta_slow, échelle d'attention × mscale²), top-k non renormalisé quand `norm_topk_prob` est faux | DeepSeek-Coder-V2-Lite : « Paris » |
+| 0.4.24 | placement réajusté au chargement d'après les tailles réelles du manifeste (les promotions int8 ajoutaient ~10 Gio à un 70B) avec 2 Gio de marge | Hermes-4-70B, DeepSeek-R1-Llama-70B, Llama-3.3-70B : « Paris » (MLP partiellement en RAM, ~7 t/s) |
+
+Campagne de conversion : 58 sources restantes (GGUF, EXL3, AWQ, vLLM, HF)
+→ **58 converties et validées en chat** après reprises (mmproj pris pour le
+modèle, MoE Gemma 4, fragments AWQ, YaRN, 70B). Parc acvram : 110
+conversions, 107 alias dans les menus ; `.deb` 0.4.24.
+
+Déplacements vers le 980 PRO (`/media/anticitoyenlm/2TO_2023_980PRO1/Modeles`,
+liens symboliques aux anciens emplacements) : 8 familles non-acvram, puis 51
+sources converties ; 4To : 1,4 To libres, 980 PRO : 25 Go libres.
+
+Incident : le déplacement par modèle a traversé un lien de famille
+(`models/` déjà déplacée) — rsync sur lui-même puis `rm -rf` : la source HF de
+DeepSeek-Coder-V2-Lite a été détruite, retéléchargée (30 Go) et reconvertie.
+Garde ajoutée : jamais de déplacement si la source est un lien ou déjà sous
+la destination.
