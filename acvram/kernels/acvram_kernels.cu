@@ -127,11 +127,19 @@ __device__ __forceinline__ void block_reduce_rows(float (&acc)[ROWS],
 // NVFP4
 // -------------------------------------------------------------------------
 
+// Une ligne par bloc ; chaque fil déquantifie 16 poids (un uint2) et les
+// écrit d'un coup (deux uint4 en 16 bits, quatre en fp32) : les écritures
+// scalaires coûtaient 8 transactions par warp au lieu d'une. ``gscale_rows``
+// (optionnel) donne une échelle par groupe de ``rows_per_group`` lignes —
+// la pile d'experts d'un MoE, dont l'échelle globale diffère par expert —
+// ce qui épargne une passe de multiplication sur la sortie.
 template <typename T>
 __global__ void nvfp4_dequant_kernel(
     const unsigned char *__restrict__ qw,     // [M, K/2]
     const unsigned char *__restrict__ bscale, // [M, K/16] raw E4M3 bytes
     const float gscale,
+    const float *__restrict__ gscale_rows,    // nullptr ou [M / rows_per_group]
+    const int rows_per_group,
     T *__restrict__ out,                      // [M, K]
     int M, int K) {
     const long row = blockIdx.x;
@@ -140,18 +148,25 @@ __global__ void nvfp4_dequant_kernel(
     const uint2 *qrow = reinterpret_cast<const uint2 *>(qw + row * (long)(K >> 1));
     const unsigned char *srow = bscale + row * (long)nloads;
     T *orow = out + row * (long)K;
+    const float g = gscale_rows ? gscale_rows[row / rows_per_group] : gscale;
 
     for (int i = threadIdx.x; i < nloads; i += blockDim.x) {
         const uint2 p = qrow[i];
-        const float s = e4m3_to_float(srow[i]) * gscale;
+        const float s = e4m3_to_float(srow[i]) * g;
         const int base = i * WEIGHTS_PER_LOAD;
+        __align__(16) T tmp[WEIGHTS_PER_LOAD];
         #pragma unroll
         for (int j = 0; j < WEIGHTS_PER_LOAD; ++j) {
             const unsigned int c = nibble(p, j);
             float v = kE2M1[c & 7u] * s;
             if (c & 8u) v = -v;
-            orow[base + j] = from_float<T>(v);
+            tmp[j] = from_float<T>(v);
         }
+        const uint4 *src = reinterpret_cast<const uint4 *>(tmp);
+        uint4 *dst = reinterpret_cast<uint4 *>(orow + base);
+        #pragma unroll
+        for (int q = 0; q < (int)(WEIGHTS_PER_LOAD * sizeof(T) / 16); ++q)
+            dst[q] = src[q];
     }
 }
 
@@ -847,7 +862,9 @@ int splits_for(int M, int K, int device) {
 
 torch::Tensor nvfp4_dequant(torch::Tensor qweight, torch::Tensor block_scale,
                             double global_scale, int64_t K,
-                            c10::ScalarType dtype) {
+                            c10::ScalarType dtype,
+                            c10::optional<torch::Tensor> gscale_rows,
+                            int64_t rows_per_group) {
     CHECK_CUDA(qweight); CHECK_CUDA(block_scale);
     ACVRAM_DEVICE_GUARD(qweight);
     CHECK_CONTIG(qweight); CHECK_CONTIG(block_scale);
@@ -858,18 +875,27 @@ torch::Tensor nvfp4_dequant(torch::Tensor qweight, torch::Tensor block_scale,
     const int threads = threads_for(K);
     const auto *qw = qweight.data_ptr<unsigned char>();
     const auto *bs = block_scale.data_ptr<unsigned char>();
+    const float *gr = nullptr;
+    if (gscale_rows.has_value()) {
+        CHECK_CUDA(*gscale_rows); CHECK_CONTIG(*gscale_rows);
+        TORCH_CHECK(gscale_rows->scalar_type() == torch::kFloat, "gscale_rows doit etre fp32");
+        TORCH_CHECK(rows_per_group > 0 && gscale_rows->numel() * rows_per_group >= M,
+                    "gscale_rows trop court");
+        gr = gscale_rows->data_ptr<float>();
+    }
+    const int rpg = (int)std::max<int64_t>(rows_per_group, 1);
 
     if (dtype == torch::kBFloat16) {
         nvfp4_dequant_kernel<__nv_bfloat16><<<M, threads, 0, stream>>>(
-            qw, bs, (float)global_scale,
+            qw, bs, (float)global_scale, gr, rpg,
             reinterpret_cast<__nv_bfloat16 *>(out.data_ptr()), M, (int)K);
     } else if (dtype == torch::kHalf) {
         nvfp4_dequant_kernel<__half><<<M, threads, 0, stream>>>(
-            qw, bs, (float)global_scale,
+            qw, bs, (float)global_scale, gr, rpg,
             reinterpret_cast<__half *>(out.data_ptr()), M, (int)K);
     } else if (dtype == torch::kFloat) {
         nvfp4_dequant_kernel<float><<<M, threads, 0, stream>>>(
-            qw, bs, (float)global_scale, out.data_ptr<float>(), M, (int)K);
+            qw, bs, (float)global_scale, gr, rpg, out.data_ptr<float>(), M, (int)K);
     } else {
         TORCH_CHECK(false, "nvfp4_dequant : type de sortie non gere");
     }
@@ -1704,7 +1730,10 @@ std::vector<torch::Tensor> moe_route(torch::Tensor logits, torch::Tensor bias,
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("nvfp4_dequant", &nvfp4_dequant, "NVFP4 -> matrice dense");
+    m.def("nvfp4_dequant", &nvfp4_dequant, "NVFP4 -> matrice dense",
+          py::arg("qweight"), py::arg("block_scale"), py::arg("global_scale"),
+          py::arg("K"), py::arg("dtype"), py::arg("gscale_rows") = py::none(),
+          py::arg("rows_per_group") = 1);
     m.def("nvfp4_gemv", &nvfp4_gemv, "NVFP4 : dequantification + produit fusionnes");
     m.def("int4_dequant", &int4_dequant, "INT4 affine par groupes -> matrice dense");
     m.def("int4_gemv", &int4_gemv, "INT4 : dequantification + produit fusionnes");

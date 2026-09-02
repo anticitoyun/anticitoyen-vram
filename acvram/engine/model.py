@@ -490,8 +490,11 @@ class MoEBlock(nn.Module):
         plat.global_scale = torch.ones((), dtype=torch.float32, device=qw.device)
         plat.padded_in = k
         plat.shape = (E * M, k)
-        w = kernels.nvfp4_dequant(plat, torch.bfloat16).view(E, M, k)
-        w.mul_(gs.to(torch.bfloat16).view(E, 1, 1))
+        # échelle globale par expert appliquée dans le noyau (une passe de
+        # moins sur ~30 Go de bf16 au prefill d'un 30B)
+        w = kernels.nvfp4_dequant(plat, torch.bfloat16,
+                                  gscale_rows=gs.reshape(-1).to(torch.float32),
+                                  rows_per_group=M).view(E, M, k)
         return w[:, :m, :]
 
     def _forward_prefill_grouped(self, x, topw, topi) -> Optional[torch.Tensor]:

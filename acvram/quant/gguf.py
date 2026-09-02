@@ -305,7 +305,7 @@ class GGUFFile:
         a = self.arch()
         if a in ("qwen35", "qwen35moe", "qwen3next", "kimi-linear",
                  "nemotron_h", "nemotron_h_moe", "falcon-h1") \
-                and os.environ.get("ACVRAM_GDN"):
+                and os.environ.get("ACVRAM_GDN", "1") != "0":
             return                        # récurrences linéaires (expérimental)
         if a in self.UNSUPPORTED or any(".ssm_" in n for n in self.tensors):
             raise ValueError(

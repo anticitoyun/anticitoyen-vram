@@ -288,14 +288,51 @@ def _adapt_hf(source: Iterator[tuple[str, torch.Tensor]], spec
     if mt == "muse_glimmer":
         yield from _adapt_muse(source, spec)
         return
+    if mt in ("gemma4", "gemma4_text"):
+        # HF/EXL3 : normes centrées sur zéro (1 + w) ; le loader attend la
+        # convention GGUF (poids déjà +1)
+        for name, t in source:
+            if name.endswith("norm.weight"):
+                t = (t.to(torch.float32) + 1.0).to(t.dtype)
+            elif name.endswith(".layer_scalar"):      # HF : sans suffixe .weight
+                name += ".weight"
+            yield name, t
+        return
     if mt == "nemotron_h":
         # noms HF (backbone.layers.N.mixer.*) → noms acvram ; A = −exp(A_log)
         # (convention GGUF ssm_a), conv1d [d,1,L] → [d,L]. Les GGUF passent
         # ici sans être touchés (déjà nommés).
         mamba = ("in_proj", "out_proj", "conv1d", "A_log", "D", "dt_bias", "norm")
-        n_layers = int(spec.num_hidden_layers)
+        n_layers = int(spec.num_layers)
         ignores = 0
+        # EXL3 rembourre les deux dimensions à un multiple de 128 (in_proj
+        # 10304 → 10368, experts 1856 → 1920) : on rogne aux tailles du modèle
+        inner = int(spec.mamba_num_heads) * int(spec.mamba_head_dim)
+        n_in_proj = 2 * inner + 2 * int(spec.mamba_n_groups) * int(spec.mamba_state_size) \
+            + int(spec.mamba_num_heads)
+        moe_i = int(spec.moe_intermediate_size or spec.intermediate_size or 0)
+        shared_i = int(spec.shared_expert_intermediate_size or 0)
+        dense_i = int(spec.intermediate_size or 0)
+
+        def rogner(t: torch.Tensor, rows: int = 0, cols: int = 0) -> torch.Tensor:
+            if rows and t.shape[0] > rows:
+                t = t[:rows]
+            if cols and t.dim() == 2 and t.shape[1] > cols:
+                t = t[:, :cols]
+            return t.contiguous()
+
         for name, t in source:
+            if name.endswith(".weight") and t.dim() == 2:
+                if name.endswith("mixer.in_proj.weight"):
+                    t = rogner(t, rows=n_in_proj)
+                elif name.endswith("mixer.out_proj.weight"):
+                    t = rogner(t, cols=inner)
+                elif ".mixer.experts." in name:
+                    t = rogner(t, rows=moe_i) if name.endswith("up_proj.weight") else rogner(t, cols=moe_i)
+                elif ".mixer.shared_experts." in name:
+                    t = rogner(t, rows=shared_i) if name.endswith("up_proj.weight") else rogner(t, cols=shared_i)
+                elif name.endswith(("mixer.up_proj.weight", "mixer.down_proj.weight")):
+                    t = rogner(t, rows=dense_i) if name.endswith("up_proj.weight") else rogner(t, cols=dense_i)
             if name.startswith("backbone.layers."):
                 _, _, idx, rest = name.split(".", 3)
                 if int(idx) >= n_layers:

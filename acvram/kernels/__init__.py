@@ -211,15 +211,26 @@ def kernels_available() -> bool:
 # --------------------------------------------------------------------------
 
 
-def nvfp4_dequant(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
+def nvfp4_dequant(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16,
+                  gscale_rows: Optional[torch.Tensor] = None,
+                  rows_per_group: int = 1) -> torch.Tensor:
+    """``gscale_rows`` [M / rows_per_group] (fp32) : une échelle globale par
+    groupe de lignes (pile d'experts), à la place de ``t.global_scale``."""
     ext = get_extension()
     if ext is None or not t.qweight.is_cuda:
-        return dequantize_nvfp4(t, dtype)
+        out = dequantize_nvfp4(t, dtype)
+        if gscale_rows is not None:
+            out = out.view(-1, rows_per_group, out.shape[-1]) \
+                * (gscale_rows.to(out.dtype) / float(t.global_scale_float())).view(-1, 1, 1)
+            out = out.reshape(-1, out.shape[-1])
+        return out
     out = ext.nvfp4_dequant(
         t.qweight.contiguous(),
         t.block_scale.view(torch.uint8).contiguous(),
         t.global_scale_float(),
-        t.padded_in, dtype)
+        t.padded_in, dtype,
+        None if gscale_rows is None else gscale_rows.to(torch.float32).contiguous(),
+        int(rows_per_group))
     return out[:, : t.shape[-1]] if t.padded_in != t.shape[-1] else out
 
 
