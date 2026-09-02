@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import functools
 import os
+import time
 import re
 import shutil
 import sys
@@ -155,6 +156,26 @@ def build_info() -> dict:
     }
 
 
+def _purger_verrou(cache: str, age_max: float = 300.0) -> None:
+    """torch.utils.cpp_extension pose un fichier ``lock`` (FileBaton) le temps
+    de compiler et l'attend indéfiniment s'il existe déjà. Un processus tué
+    pendant une compilation le laisse derrière lui : tout chargement suivant
+    restait alors en veille sans un mot. Un verrou plus vieux que
+    ``age_max`` secondes est réputé orphelin et retiré."""
+    verrou = os.path.join(cache, "lock")
+    try:
+        age = time.time() - os.path.getmtime(verrou)
+    except OSError:
+        return
+    if age > age_max:
+        try:
+            os.remove(verrou)
+            print(f"[acvram] verrou de compilation orphelin retiré ({age:.0f} s) : {verrou}",
+                  file=sys.stderr)
+        except OSError:
+            pass
+
+
 def get_extension():
     """Compile une fois, puis rend le module d'extension, ou None."""
     global _EXT, _TRIED, _ERROR
@@ -187,6 +208,7 @@ def get_extension():
         here = os.path.dirname(os.path.abspath(__file__))
         cache = os.path.expanduser("~/.cache/acvram/kernels")
         os.makedirs(cache, exist_ok=True)
+        _purger_verrou(cache)
         _EXT = load(
             name="acvram_kernels",
             sources=[os.path.join(here, "acvram_kernels.cu")],
