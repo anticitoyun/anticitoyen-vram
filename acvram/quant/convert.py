@@ -289,12 +289,11 @@ def _adapt_hf(source: Iterator[tuple[str, torch.Tensor]], spec
         yield from _adapt_muse(source, spec)
         return
     if mt in ("gemma4", "gemma4_text"):
-        # HF/EXL3 : normes centrées sur zéro (1 + w) ; le loader attend la
-        # convention GGUF (poids déjà +1)
+        # HF/EXL3 : Gemma4RMSNorm multiplie par w tel quel (pas de 1 + w,
+        # contrairement à Gemma 3) et le convertisseur llama.cpp ne décale
+        # rien non plus (norm_shift = 0) : les normes passent intactes
         for name, t in source:
-            if name.endswith("norm.weight"):
-                t = (t.to(torch.float32) + 1.0).to(t.dtype)
-            elif name.endswith(".layer_scalar"):      # HF : sans suffixe .weight
+            if name.endswith(".layer_scalar"):        # HF : sans suffixe .weight
                 name += ".weight"
             yield name, t
         return
