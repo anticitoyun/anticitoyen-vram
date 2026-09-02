@@ -613,6 +613,74 @@ def _kv_blocks_per_device(plan: Plan, spec: ModelSpec,
     return out
 
 
+def _octets_reels(manifest: dict) -> tuple[dict, dict, int, int]:
+    """Octets réels par couche (attention, MLP) d'après les formats du
+    manifeste : le plan a été calculé avec le format nominal (nvfp4), mais
+    la conversion promeut en int8 les tenseurs sous le plancher de SNR — un
+    70B y gagne une dizaine de Gio que le plan ignore, d'où des OOM au
+    chargement."""
+    attn: dict = {}; mlp: dict = {}; embed = 0; head = 0
+    for nom, e in manifest["tensors"].items():
+        if not isinstance(e, dict):
+            continue
+        shape = e.get("shape") or []
+        n = 1
+        for x in shape:
+            n *= int(x)
+        bpw = float(e.get("bpw") or (16.0 if e.get("format") in ("bf16", "fp16", None) else 4.5))
+        octets = int(n * bpw / 8)
+        if nom.startswith("model.layers."):
+            i = int(nom.split(".")[2])
+            if ".mlp." in nom:
+                mlp[i] = mlp.get(i, 0) + octets
+            else:
+                attn[i] = attn.get(i, 0) + octets
+        elif nom.startswith("model.embed_tokens"):
+            embed += octets
+        elif nom.startswith("lm_head"):
+            head += octets
+    return attn, mlp, embed, head
+
+
+def _reajuster_plan(plan: Plan, manifest: dict) -> None:
+    """Fait descendre en RAM hôte les MLP des dernières couches d'un GPU
+    dont les poids réels dépassent la capacité de l'étage."""
+    attn, mlp, embed, head = _octets_reels(manifest)
+    for t in plan.tiers:
+        if t.kind != "gpu":
+            continue
+        dev = t.name
+        for l in plan.layers:
+            l.attn_bytes = attn.get(l.index, l.attn_bytes)
+            l.mlp_bytes = mlp.get(l.index, l.mlp_bytes)
+        def utilise() -> int:
+            u = int((plan.kv_budget or {}).get(dev, 0))
+            u += embed if plan.embed_device == dev else 0
+            u += head if plan.lm_head_device == dev else 0
+            for l in plan.layers:
+                u += l.attn_bytes if l.attn_storage == dev else 0
+                u += l.mlp_bytes if l.mlp_storage == dev else 0
+            return u
+        # marge pour le contexte CUDA, les activations et les piles d'experts :
+        # la capacité de l'étage est déjà nette des réserves du plan, mais un
+        # 70B chargé à 99 % tombait encore en OOM à l'allocation du KV
+        marge = max(2 * 2**30, int(0.07 * t.capacity))
+        deplacees = 0
+        while utilise() > t.capacity - marge:
+            cand = [l for l in plan.layers if l.mlp_storage == dev]
+            if not cand:
+                break
+            l = cand[-1]
+            l.mlp_storage = "cpu"
+            if hasattr(l, "mlp_exec"):
+                l.mlp_exec = "cpu"
+            deplacees += 1
+        if deplacees:
+            print(f"[acvram] plan réajusté : {deplacees} MLP de plus en RAM hôte sur {dev} "
+                  f"(poids réels {utilise() / 2**30:.1f} Gio pour {t.capacity / 2**30:.1f} Gio)",
+                  flush=True)
+
+
 def _plan_from_manifest(manifest: dict) -> Plan:
     from ..memory.tiering import LayerPlacement, Plan as _Plan, Tier
     d = manifest["plan"]
@@ -624,6 +692,7 @@ def _plan_from_manifest(manifest: dict) -> Plan:
                    for l in d["layers"]]
     plan.embed_device = d["embed_device"]
     plan.lm_head_device = d["lm_head_device"]
+    _reajuster_plan(plan, manifest)
     plan.kv_budget = d.get("kv_budget", {})
     plan.kv_bytes_per_token = d.get("kv_bytes_per_token", 0)
     plan.kv_max_tokens = d.get("kv_max_tokens", 0)
