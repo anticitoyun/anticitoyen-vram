@@ -323,7 +323,12 @@ Pistes restantes :
   contre une récurrence fp64 sur 1 024 jetons : 1,6e-3 relatif (7,5e-3 en
   bf16), 0,50 ms contre 0,60. Le reste vient des `tl.dot` bf16 internes de
   fla : pas de gain sans patcher fla. Rien à changer.
-* **6 — prefill Qwen3-Coder** : fait (0.4.12). Reste au profil : 18 672 `aten::mm` (242 ms) à identifier.
+* **6 — prefill Qwen3-Coder** : fait (0.4.12). Les 18 672 `aten::mm` (242 ms)
+  sont la décomposition interne de `torch._grouped_mm` sur cette version de
+  torch (384 par couche = 128 experts × 3 projections ; aucune trame acvram
+  dans leurs piles d'appel) : ~29 TFLOP en 242 ms, soit 60 % du pic bf16 —
+  pas de gain bon marché. Prochain palier : une GEMM groupée CUTLASS ou
+  directement en NVFP4 (sans déquantification) pour les experts.
 * **7 — .deb** : `acvram_0.4.16_amd64.deb` construit.
 
 Pièges de la campagne : un listing de dossiers tronqué à 48 caractères donne

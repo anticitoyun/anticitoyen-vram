@@ -458,11 +458,20 @@ class MoEBlock(nn.Module):
             return None
 
         piles = {}
-        for nom in self._noms_experts():
-            pile = one([getattr(e, nom) for e in self.experts])
-            if pile is None:
-                return False
-            piles[nom] = pile
+        try:
+            for nom in self._noms_experts():
+                pile = one([getattr(e, nom) for e in self.experts])
+                if pile is None:
+                    return False
+                piles[nom] = pile
+        except torch.OutOfMemoryError:
+            # la pile d'une projection double transitoirement sa mémoire ;
+            # un modèle qui remplit la carte (80B) reste sur la boucle par
+            # expert plutôt que de mourir ici
+            torch.cuda.empty_cache()
+            print("[acvram] piles d'experts : mémoire GPU insuffisante, boucle par expert",
+                  flush=True)
+            return False
         self._stacks = piles
         return True
 
