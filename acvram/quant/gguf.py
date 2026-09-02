@@ -211,6 +211,14 @@ class GGUFFile:
                     .transpose(1, 2).reshape(*forme).contiguous())
 
         phi3 = self.arch() == "phi3"
+        # Gemma 4 : Gemma4RMSNorm multiplie par w tel quel (q_norm ≈ 1) ; les
+        # GGUF issus d'un convertisseur qui décalait encore les normes de +1
+        # (héritage Gemma 3) se reconnaissent à un attn_q_norm proche de 2
+        gemma_shift = False
+        if self.arch() == "gemma4" and "blk.0.attn_q_norm.weight" in self.tensors:
+            gemma_shift = float(self.load("blk.0.attn_q_norm.weight").float().mean()) > 1.5
+            if gemma_shift:
+                print("  gemma4 : normes décalées de +1 dans ce GGUF, ramenées à w")
         if phi3:
             a = self.arch()
             nh = int(self.kv.get(f"{a}.attention.head_count"))
@@ -229,6 +237,8 @@ class GGUFFile:
                 # chez Gemma, ffn_norm précède le MLP (post_attention_norm existe à part)
                 hname = hname.replace("post_attention_layernorm", "pre_feedforward_layernorm")
             t = self.load(gname)
+            if gemma_shift and gname.endswith("norm.weight"):
+                t = t.to(torch.float32) - 1.0
             if hname.endswith("shared_expert_gate.weight") and t.dim() == 1:
                 t = t.reshape(1, -1)      # vecteur GGUF -> Linear(d, 1)
             if hname.endswith("linear_attn.ba.weight"):
@@ -736,9 +746,9 @@ def _map_name(g: str, gdn: bool = False,
             return f"model.layers.{idx}.self_attn.qkv_proj.{kind}"
         if stem == "ffn_up":
             return f"model.layers.{idx}.mlp.gate_up_proj.{kind}"
-    if kimi_recurrent is None and rest == "ssm_a":
+    if kimi_recurrent is None and rest == "ssm_a" and not gdn:
         return f"model.layers.{idx}.mamba.A.weight"          # nemotron_h, sans suffixe
-    if kimi_recurrent is None and rest == "ssm_d":
+    if kimi_recurrent is None and rest == "ssm_d" and not gdn:
         return f"model.layers.{idx}.mamba.D.weight"
     if rest == "ffn_norm":                       # falcon-h1 : sans suffixe
         return f"model.layers.{idx}.post_attention_layernorm.weight"
