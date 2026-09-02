@@ -370,7 +370,9 @@ def load_model(path: str, plan: Optional[Plan] = None,
                                       mlin("mlp.shared_expert.down_proj.weight"), "relu2")
                     bias = None
                     if manifest["tensors"].get(p + "mlp.gate.e_score_correction_bias"):
-                        bias = reader.get(p + "mlp.gate.e_score_correction_bias").float().to(d)
+                        # le routage vit avec les experts (RAM hôte si le plan
+                        # les y a mis) : même appareil que les scores
+                        bias = reader.get(p + "mlp.gate.e_score_correction_bias").float().to(mlp_dev)
                     mlp_n = MoEBlock(router, experts, spec.num_experts_per_tok or 2, shared,
                                      norm_topk_prob=bool(spec.raw.get("norm_topk_prob", True)),
                                      scoring=spec.router_scoring, score_bias=bias,
