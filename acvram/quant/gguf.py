@@ -742,7 +742,7 @@ def _map_name(g: str, gdn: bool = False,
         return f"model.layers.{idx}.mamba.D.weight"
     if rest == "ffn_norm":                       # falcon-h1 : sans suffixe
         return f"model.layers.{idx}.post_attention_layernorm.weight"
-    if kimi_recurrent is None and stem == "ssm_dt":
+    if kimi_recurrent is None and stem == "ssm_dt" and not gdn:
         return f"model.layers.{idx}.mamba.dt_bias.weight"       # rangé en .bias dans le GGUF
     if kimi_recurrent is not None:
         if rest == "ssm_a":
