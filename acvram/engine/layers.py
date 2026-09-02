@@ -245,6 +245,19 @@ class RotaryEmbedding(nn.Module):
             base = self.base * (factor ** (dim / (dim - 2)))
             return 1.0 / (base ** (torch.arange(0, dim, 2, device=device,
                                                 dtype=torch.float32) / dim))
+        if rtype in ("yarn",):
+            # YaRN (DeepSeek-V2/V3) : interpolation des basses fréquences,
+            # extrapolation des hautes, rampe entre beta_fast et beta_slow
+            import math
+            factor = max(factor, 1.0)
+            orig = float(self.scaling.get("original_max_position_embeddings") or 4096)
+            bf = float(self.scaling.get("beta_fast", 32)); bs = float(self.scaling.get("beta_slow", 1))
+            def corr(nrot: float) -> float:
+                return (dim * math.log(orig / (nrot * 2 * math.pi))) / (2 * math.log(self.base))
+            low = max(math.floor(corr(bf)), 0); high = min(math.ceil(corr(bs)), dim - 1)
+            rampe = (torch.arange(dim // 2, device=device, dtype=torch.float32) - low) / max(high - low, 0.001)
+            masque = 1.0 - rampe.clamp(0.0, 1.0)      # 1 = extrapolé (hautes fréquences)
+            return (inv / factor) * (1.0 - masque) + inv * masque
         if rtype in ("llama3",):
             low = float(self.scaling.get("low_freq_factor", 1.0))
             high = float(self.scaling.get("high_freq_factor", 4.0))

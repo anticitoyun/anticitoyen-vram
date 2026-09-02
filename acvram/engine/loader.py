@@ -209,6 +209,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
                     p + "mlp.gate.e_score_correction_bias").float().to(mlp_dev)
             return MoEBlock(router, experts, spec.num_experts_per_tok or 2,
                             shared, shared_gate=shared_gate,
+                            norm_topk_prob=bool(spec.raw.get("norm_topk_prob", True)),
                             scoring=spec.router_scoring,
                             score_bias=score_bias,
                             routed_scale=spec.routed_scaling_factor)
@@ -481,6 +482,14 @@ def load_model(path: str, plan: Optional[Plan] = None,
                     kv_lora_rank=spec.kv_lora_rank,
                     v_dim=spec.v_head_dim,
                     eps=spec.rms_norm_eps).to(d)
+                rs = spec.rope_scaling or {}
+                if str(rs.get("rope_type") or rs.get("type") or "") == "yarn":
+                    # YaRN : la sortie d'attention est rescalée par mscale² (DeepSeek)
+                    import math as _m
+                    msc = float(rs.get("mscale_all_dim") or rs.get("mscale") or 0.0)
+                    fac = float(rs.get("factor") or 1.0)
+                    if msc and fac > 1.0:
+                        bloc.scale = bloc.scale * (0.1 * msc * _m.log(fac) + 1.0) ** 2
                 bloc.fuse_projections()
             mlp_kimi = faire_mlp()
             in_norm = RMSNorm(reader.get(p + "input_layernorm.weight"
