@@ -302,7 +302,20 @@ Règle de la campagne : chaque changement monte la version (pyproject +
 | 0.4.8 | **piste 1 : spéculation n-gram sur les hybrides sous graphes** — le lot de vérification (forme fixe k+1) déroule les jetons un à un dans les tampons fixes et photographie l'état après chacun ; retour au dernier accepté | 4B kimi : greedy identique 96/96 ; prose 110 → 153 t/s, liste 108 → 132, code 109 → 98 (acceptation 0,52) |
 | 0.4.9 | corrections de 0.4.4 : ordre AWQ inverse `[0,4,1,5,2,6,3,7]`, décalage +8 de compressed-tensors (pas de complément à deux), modelopt fp4 empaqueté (`weight` u8 + `weight_scale_2`) | reconversions en file |
 | 0.4.10 | **piste 4 : lots b>1 sous graphes pour les hybrides** — un créneau de tampons fixes par séquence, attention linéaire déroulée par créneau, GEMV partagées (`ACVRAM_HYBRID_SLOTS`, 4) | identique au décodage seul ; 104 t/s seul → 122 (b=2) / 149 (b=3-4) agrégés |
-| 0.4.11 | gemma4 HF/EXL3 : normes +1 à la conversion ; nemotron HF `num_layers` ; garde GGUF `ACVRAM_GDN` active par défaut (`=0` pour refuser) | en cours |
+| 0.4.11 | gemma4 HF/EXL3 (`layer_scalar` renommé) ; Nemotron-H HF : `num_layers`, rognage des tenseurs rembourrés à 128 par EXL3 ; garde GGUF `ACVRAM_GDN` active par défaut (`=0` pour refuser) | Nemotron-Nano-9B bf16 HF cohérent |
+| 0.4.12 | **piste 6** : `nvfp4_dequant_kernel` écrit 16 poids d'un coup et applique l'échelle globale par expert (124 → 1 200 Go/s, identique bit à bit) | prefill Qwen3-Coder-30B 4 096 jetons : 3 619 → **6 420 j/s** (déquantification 581 → 63 ms) |
+| 0.4.13 | biais de routage MoE sur l'appareil des experts (experts en RAM hôte) | Lightning heretic EXL3 cohérent |
+| 0.4.14 / 0.4.16 | `ssm_dt`, `ssm_a`, `ssm_d` des GGUF qwen3next masqués par les mappings Nemotron (régression 0.4.0) | conversion Coder-Next 80B en cours |
+| 0.4.15 | gemma4 HF/EXL3 : normes **intactes** — `Gemma4RMSNorm` multiplie par w (pas 1 + w comme Gemma 3), et le convertisseur llama.cpp gemma4 a `norm_shift = 0` ; le +1 de 0.4.11 doublait les normes | gemma-4-12B abliterated EXL3, Artemis 31B : « Paris » |
+| 0.4.16 | GGUF gemma4 issus d'un vieux convertisseur (normes +1, `attn_q_norm` ≈ 2) reconnus et ramenés à w | gemma-4-12B heretic GGUF : « Paris » |
+
+Le paquet `acvram_0.4.16_amd64.deb` est construit (`sudo dpkg -i` à faire).
+
+Leçon de la campagne gemma4 : deux conversions du même modèle par deux
+chemins (GGUF sain contre EXL3 faux) comparées tenseur par tenseur ont
+désigné la cause en une mesure (`q_norm` 1,02 contre 2,03, cosinus 1) là où
+les hypothèses (GQA 16:1, cache des couches globales, RoPE proportionnel,
+`layer_scalar`) avaient toutes été vérifiées sans rien trouver.
 
 Pistes restantes :
 
@@ -310,8 +323,8 @@ Pistes restantes :
   contre une récurrence fp64 sur 1 024 jetons : 1,6e-3 relatif (7,5e-3 en
   bf16), 0,50 ms contre 0,60. Le reste vient des `tl.dot` bf16 internes de
   fla : pas de gain sans patcher fla. Rien à changer.
-* **6 — prefill Qwen3-Coder** : profil en file (`prof-prefill.py`, 4 096 jetons).
-* **7 — .deb** : à reconstruire une fois 0.4.11 validée.
+* **6 — prefill Qwen3-Coder** : fait (0.4.12). Reste au profil : 18 672 `aten::mm` (242 ms) à identifier.
+* **7 — .deb** : `acvram_0.4.16_amd64.deb` construit.
 
 Pièges de la campagne : un listing de dossiers tronqué à 48 caractères donne
 des chemins faux ; un chat lancé pendant qu'on patche importe l'ancien
