@@ -202,11 +202,11 @@ def load_model(path: str, plan: Optional[Plan] = None,
                     mlin("mlp.shared_expert.down_proj.weight"))
                 if manifest["tensors"].get(p + "mlp.shared_expert_gate.weight"):
                     shared_gate = reader.get(
-                        p + "mlp.shared_expert_gate.weight").to(dtype).to(d)
+                        p + "mlp.shared_expert_gate.weight").to(dtype).to(mlp_dev)
             score_bias = None
             if manifest["tensors"].get(p + "mlp.gate.e_score_correction_bias"):
                 score_bias = reader.get(
-                    p + "mlp.gate.e_score_correction_bias").float().to(d)
+                    p + "mlp.gate.e_score_correction_bias").float().to(mlp_dev)
             return MoEBlock(router, experts, spec.num_experts_per_tok or 2,
                             shared, shared_gate=shared_gate,
                             scoring=spec.router_scoring,
@@ -353,7 +353,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
                     num_heads=spec.mamba_num_heads, head_dim=spec.mamba_head_dim,
                     n_groups=spec.mamba_n_groups, state_size=spec.mamba_state_size,
                     eps=spec.rms_norm_eps).to(d)
-                layers.append(DecoderLayerGDN(i, bloc, None, in_norm, None, d))
+                layers.append(DecoderLayerGDN(i, bloc, None, in_norm, None, d, mlp_device=mlp_dev))
                 continue
             if kind in ("mlp", "moe"):
                 if kind == "mlp":
@@ -406,7 +406,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
             mlp_c = faire_mlp()
             in_norm = RMSNorm(reader.get(p + "input_layernorm.weight").to(dtype).to(d), spec.rms_norm_eps)
             post_norm = RMSNorm(reader.get(p + "post_attention_layernorm.weight").to(dtype).to(d), spec.rms_norm_eps)
-            layers.append(DecoderLayerGDN(i, bloc, mlp_c, in_norm, post_norm, d))
+            layers.append(DecoderLayerGDN(i, bloc, mlp_c, in_norm, post_norm, d, mlp_device=mlp_dev))
             continue
 
         est_kimi = spec.model_type in ("kimi_linear", "deepseek_v2", "deepseek_v3", "glm4_moe")
@@ -470,7 +470,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 reader.get(p + "post_attention_layernorm.weight"
                            ).to(dtype).to(d), spec.rms_norm_eps)
             layers.append(DecoderLayerGDN(i, bloc, mlp_kimi,
-                                          in_norm, post_norm, d))
+                                          in_norm, post_norm, d, mlp_device=mlp_dev))
             continue
 
         est_gdn = bool(spec.layer_types) and \
@@ -504,7 +504,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
             post_norm = RMSNorm(
                 reader.get(p + "post_attention_layernorm.weight"
                            ).to(dtype).to(d), spec.rms_norm_eps)
-            layers.append(DecoderLayerGDN(i, gdn, mlp_gdn, in_norm, post_norm, d))
+            layers.append(DecoderLayerGDN(i, gdn, mlp_gdn, in_norm, post_norm, d, mlp_device=mlp_dev))
             continue
 
         attn = Attention(

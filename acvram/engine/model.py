@@ -663,7 +663,8 @@ class DecoderLayerGDN(nn.Module):
 
     def __init__(self, index: int, gdn: nn.Module, mlp: nn.Module,
                  input_norm: "RMSNorm", post_norm: "RMSNorm",
-                 device: torch.device) -> None:
+                 device: torch.device,
+                 mlp_device: Optional[torch.device] = None) -> None:
         super().__init__()
         self.index = index
         self.linear_attn = gdn
@@ -671,7 +672,7 @@ class DecoderLayerGDN(nn.Module):
         self.input_layernorm = input_norm
         self.post_attention_layernorm = post_norm
         self.device = device
-        self.mlp_device = device
+        self.mlp_device = mlp_device or device   # experts en RAM hôte : autre appareil
         # spéculation : états photographiés après chaque jeton du lot
         # vérifié, pour revenir à celui du dernier jeton accepté
         self.static_hist: Optional[dict] = None
@@ -699,7 +700,7 @@ class DecoderLayerGDN(nn.Module):
         x = x + torch.cat(sorties).to(x.dtype)
         if self.mlp is None:
             return x
-        return x + self.mlp(self.post_attention_layernorm(x))
+        return self._mlp(x)
 
     # -- chemin à formes fixes (graphes CUDA), une séquence ----------------
     static_bucket: int = 0
@@ -759,7 +760,7 @@ class DecoderLayerGDN(nn.Module):
         x = x + y.to(x.dtype)
         if self.mlp is None:
             return x
-        return x + self.mlp(self.post_attention_layernorm(x))
+        return self._mlp(x)
 
     def _la_decode(self, h: torch.Tensor, q_len: int) -> torch.Tensor:
         """Attention linéaire sur les tampons fixes ; ``q_len`` > 1 (lot de
@@ -797,6 +798,12 @@ class DecoderLayerGDN(nn.Module):
         """Ramène l'état au ``n_consumed``-ième jeton du dernier lot vérifié."""
         for k, v in self.static_hist.items():
             self.static[k].copy_(v[n_consumed - 1])
+
+    def _mlp(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.post_attention_layernorm(x)
+        if self.mlp_device != self.device:
+            return x + self.mlp(h.to(self.mlp_device)).to(x.device, non_blocking=True)
+        return x + self.mlp(h)
 
     def prefetch(self) -> None:
         pass
@@ -895,7 +902,7 @@ class DecoderLayerParallel(DecoderLayerGDN):
             sorties.append(y)
             start += ql
         x = x + a + torch.cat(sorties).to(x.dtype)
-        return x + self.mlp(self.post_attention_layernorm(x))
+        return self._mlp(x)
 
     def decode_fixed(self, x: torch.Tensor, positions: torch.Tensor,
                      slots: torch.Tensor, block_tables: torch.Tensor,
@@ -906,7 +913,7 @@ class DecoderLayerParallel(DecoderLayerGDN):
                                         seq_lens, max_pos, cache, q_len)
         m = self._la_decode(h, q_len)
         x = x + a + m.to(x.dtype)
-        return x + self.mlp(self.post_attention_layernorm(x))
+        return self._mlp(x)
 
 
 class DecoderLayerGemma(nn.Module):
