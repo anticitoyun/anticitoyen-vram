@@ -308,8 +308,12 @@ Règle de la campagne : chaque changement monte la version (pyproject +
 | 0.4.14 / 0.4.16 | `ssm_dt`, `ssm_a`, `ssm_d` des GGUF qwen3next masqués par les mappings Nemotron (régression 0.4.0) | conversion Coder-Next 80B en cours |
 | 0.4.15 | gemma4 HF/EXL3 : normes **intactes** — `Gemma4RMSNorm` multiplie par w (pas 1 + w comme Gemma 3), et le convertisseur llama.cpp gemma4 a `norm_shift = 0` ; le +1 de 0.4.11 doublait les normes | gemma-4-12B abliterated EXL3, Artemis 31B : « Paris » |
 | 0.4.16 | GGUF gemma4 issus d'un vieux convertisseur (normes +1, `attn_q_norm` ≈ 2) reconnus et ramenés à w | gemma-4-12B heretic GGUF : « Paris » |
+| 0.4.17 | verrou de compilation JIT orphelin (`~/.cache/acvram/kernels/lock`, FileBaton de torch) retiré au chargement : un processus tué en pleine compilation figeait ensuite tout moteur en veille | diagnostiqué par `faulthandler` + SIGUSR1 |
+| 0.4.18 | piles d'experts : repli sur la boucle par expert si la mémoire GPU manque | 80B |
+| 0.4.19 | couches hybrides avec MLP/MoE en RAM hôte (activation transférée, porte partagée et biais de score chez les experts) | Qwen3-Coder-Next 80B-A3B (GGUF Q3_K_S) : « Paris », ~7 t/s en eager, experts en RAM |
 
-Le paquet `acvram_0.4.16_amd64.deb` est construit (`sudo dpkg -i` à faire).
+Le paquet `acvram_0.4.16_amd64.deb` est construit (`sudo dpkg -i` à faire) ;
+à reconstruire en 0.4.19 (`tools/construire-deb.sh`).
 
 Leçon de la campagne gemma4 : deux conversions du même modèle par deux
 chemins (GGUF sain contre EXL3 faux) comparées tenseur par tenseur ont
