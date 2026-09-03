@@ -651,8 +651,13 @@ def _reajuster_plan(plan: Plan, manifest: dict) -> None:
             continue
         dev = t.name
         for l in plan.layers:
+            # une couche décrite par le manifeste mais sans tenseur « .mlp. »
+            # n'a réellement pas de MLP (bloc Mamba2/GDN pur) : garder sa
+            # taille nominale gonflait le plan de dizaines de Gio et exilait
+            # en RAM hôte des experts qui tenaient sur la carte
+            decrite = l.index in attn
             l.attn_bytes = attn.get(l.index, l.attn_bytes)
-            l.mlp_bytes = mlp.get(l.index, l.mlp_bytes)
+            l.mlp_bytes = mlp.get(l.index, 0 if decrite else l.mlp_bytes)
         def utilise() -> int:
             u = int((plan.kv_budget or {}).get(dev, 0))
             u += embed if plan.embed_device == dev else 0
