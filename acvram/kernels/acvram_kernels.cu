@@ -1180,8 +1180,17 @@ __global__ void nvfp4_gemv_grouped_warp_kernel(
     }
 }
 
+__device__ __forceinline__ float acv_act(float v, int act) {
+    // 0 : SiLU (Qwen, DeepSeek…) ; 1 : GELU-tanh (Gemma 4)
+    if (act == 1) {
+        const float c = 0.7978845608028654f;
+        return 0.5f * v * (1.f + tanhf(c * (v + 0.044715f * v * v * v)));
+    }
+    return v / (1.f + __expf(-v));
+}
+
 // gate et up fusionnés : mêmes (expert, ligne), même activation ; la sortie
-// est déjà SiLU(gate) · up — trois lancements et deux tenseurs en moins.
+// est déjà act(gate) · up — trois lancements et deux tenseurs en moins.
 template <typename XT, int RPW>
 __global__ void nvfp4_gemv_grouped_gateup_kernel(
     const unsigned char *__restrict__ qg, const unsigned char *__restrict__ bg,
@@ -1189,7 +1198,7 @@ __global__ void nvfp4_gemv_grouped_gateup_kernel(
     const unsigned char *__restrict__ qu, const unsigned char *__restrict__ bu,
     const float *__restrict__ gsu,
     const int *__restrict__ expert_ids, const int *__restrict__ token_ids,
-    const XT *__restrict__ x, float *__restrict__ y, int M, int K) {
+    const XT *__restrict__ x, float *__restrict__ y, int M, int K, int act) {
     extern __shared__ float xs_sh[];
     const int g = blockIdx.y, e = expert_ids[g];
     charger_x_sh<XT>(x + (long)token_ids[g] * K, xs_sh, K);
@@ -1207,7 +1216,7 @@ __global__ void nvfp4_gemv_grouped_gateup_kernel(
         const float au = nvfp4_row_dot_warp(
             reinterpret_cast<const uint4 *>(qu + off * half_k), bu + off * nloads,
             gsu[e], xs_sh, nloads >> 1, lane);
-        if (lane == 0) y[(long)g * M + row] = ag / (1.f + __expf(-ag)) * au;
+        if (lane == 0) y[(long)g * M + row] = acv_act(ag, act) * au;
     }
 }
 
@@ -1215,7 +1224,7 @@ torch::Tensor nvfp4_gemv_grouped_gateup(
         torch::Tensor qg, torch::Tensor bg, torch::Tensor gsg,
         torch::Tensor qu, torch::Tensor bu, torch::Tensor gsu,
         torch::Tensor expert_ids, torch::Tensor token_ids,
-        torch::Tensor x, int64_t K) {
+        torch::Tensor x, int64_t K, int64_t act) {
     CHECK_CUDA(qg); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(qg);
     CHECK_CONTIG(qg); CHECK_CONTIG(qu); CHECK_CONTIG(bg); CHECK_CONTIG(bu);
     TORCH_CHECK(K % 32 == 0 && (size_t)K * sizeof(float) <= 48 * 1024,
@@ -1232,7 +1241,7 @@ torch::Tensor nvfp4_gemv_grouped_gateup(
     #define GU_L(XT, R, PX) nvfp4_gemv_grouped_gateup_kernel<XT, R><<<grid, GW_WARPS * WARP, shm, stream>>>( \
         qg.data_ptr<unsigned char>(), bg.data_ptr<unsigned char>(), gsg.data_ptr<float>(), \
         qu.data_ptr<unsigned char>(), bu.data_ptr<unsigned char>(), gsu.data_ptr<float>(), \
-        expert_ids.data_ptr<int>(), token_ids.data_ptr<int>(), PX, out.data_ptr<float>(), M, (int)K)
+        expert_ids.data_ptr<int>(), token_ids.data_ptr<int>(), PX, out.data_ptr<float>(), M, (int)K, (int)act)
     if (bf) { GU_LAUNCH(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
     else { GU_LAUNCH(float, xc.data_ptr<float>()); }
     #undef GU_LAUNCH
@@ -1742,7 +1751,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("nvfp4_gemv_grouped", &nvfp4_gemv_grouped,
           "NVFP4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
     m.def("nvfp4_gemv_grouped_gateup", &nvfp4_gemv_grouped_gateup,
-          "MoE NVFP4 : gate et up fusionnes, sortie SiLU(gate)*up");
+          py::arg("qg"), py::arg("bg"), py::arg("gsg"), py::arg("qu"), py::arg("bu"),
+          py::arg("gsu"), py::arg("expert_ids"), py::arg("token_ids"), py::arg("x"),
+          py::arg("K"), py::arg("act") = 0,
+          "MoE NVFP4 : gate et up fusionnes, sortie act(gate)*up (act 0=SiLU, 1=GELU-tanh)");
     m.def("int4_gemv_grouped", &int4_gemv_grouped,
           "INT4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
     m.def("moe_route", &moe_route, "routage MoE : scores, biais, top-k, poids");

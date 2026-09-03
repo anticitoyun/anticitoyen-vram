@@ -411,6 +411,15 @@ class MoEBlock(nn.Module):
         self.routed_scale = routed_scale
         self._stack_state = "?"                # ? | oui | non
         self._stacks = None
+        # activation des experts : le chemin groupé la reproduit (SiLU par
+        # défaut, GELU-tanh pour Gemma 4)
+        a = getattr(experts[0], "act", "silu") if experts else "silu"
+        self.act = "gelu_tanh" if str(a).startswith("gelu") else "silu"
+
+    def _act(self, g: torch.Tensor) -> torch.Tensor:
+        if self.act == "gelu_tanh":
+            return F.gelu(g, approximate="tanh")
+        return F.silu(g)
 
     # ------------------------------------------------------------------
     # Pile d'experts pour le chemin groupé. Les qweight/échelles de tous les
@@ -523,7 +532,7 @@ class MoEBlock(nn.Module):
         xs = x[flat_t[ordre]].to(torch.bfloat16).contiguous()        # [G, H]
         wg = self._pile_bf16(pg); g = torch._grouped_mm(xs, wg.transpose(1, 2), offs=offs); del wg
         wu = self._pile_bf16(pu); u = torch._grouped_mm(xs, wu.transpose(1, 2), offs=offs); del wu
-        act = (F.silu(g.to(torch.float32)) * u.to(torch.float32)).to(torch.bfloat16)
+        act = (self._act(g.to(torch.float32)) * u.to(torch.float32)).to(torch.bfloat16)
         wd = self._pile_bf16(pd); d = torch._grouped_mm(act, wd.transpose(1, 2), offs=offs); del wd
         d = d.to(torch.float32) * topw.reshape(-1)[ordre].to(torch.float32).unsqueeze(-1)
         inv = torch.empty_like(ordre); inv[ordre] = torch.arange(ordre.numel(), device=x.device)
@@ -549,12 +558,13 @@ class MoEBlock(nn.Module):
             # gate, up et SiLU·up en un lancement, activation bf16 lue telle quelle
             act = ext.nvfp4_gemv_grouped_gateup(
                 pg[1], pg[2], pg[3], pu[1], pu[2], pu[3], eid, tok,
-                x.contiguous(), pg[4])[:, :pg[5]]
+                x.contiguous(), pg[4],
+                1 if self.act == "gelu_tanh" else 0)[:, :pg[5]]
         else:
             x32 = x.to(torch.float32)
             g = self._grouped(x32, pg, eid, tok)
             u = self._grouped(x32, pu, eid, tok)
-            act = F.silu(g) * u                 # [G, I] fp32
+            act = self._act(g) * u              # [G, I] fp32
         seq = torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
         d = self._grouped(act, self._stacks["down_proj"], eid, seq)
         d = d * topw.reshape(-1, 1).to(d.dtype)
@@ -926,7 +936,7 @@ class DecoderLayerParallel(DecoderLayerGDN):
 class MoEBlockGemma(MoEBlock):
     """MoE de Gemma 4 (26B-A4B) : routeur sur x normalisé (RMS sans poids)
     × échelle × h^-½, softmax, top-k sans renormalisation, poids × échelle
-    par expert ; experts GELU-tanh, d'où pas de pile/noyau groupé (SiLU)."""
+    par expert ; experts GELU-tanh, reproduite par le chemin groupé."""
 
     def __init__(self, router: QuantLinear, experts: list, top_k: int,
                  router_scale: torch.Tensor, per_expert_scale: torch.Tensor,
@@ -936,7 +946,6 @@ class MoEBlockGemma(MoEBlock):
         self.per_expert_scale = per_expert_scale.to(torch.float32).reshape(-1)
         self.eps = eps
         self.root = float(router_scale.numel()) ** -0.5
-        self._stack_state = "non"
 
     def _route(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         x32 = x.to(torch.float32)
