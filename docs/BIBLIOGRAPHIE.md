@@ -161,10 +161,12 @@ Piste à rouvrir avec cet article en main.
 Ordonnancement des invites, réutilisation du cache KV entre requêtes partageant
 un préfixe, appels d'outils, charges de travail d'agents.
 
-**Chez nous** : la mise en cache de préfixe est absente de notre serveur. Avec
-les menus `kimi-modeles` et `claude-modeles`, l'amorce système est identique
-d'une requête à l'autre — le prefill la recalcule à chaque fois. Gain probable
-sans toucher aux noyaux.
+**Chez nous** : la mise en cache de préfixe **existe déjà**
+(`BlockAllocator(n_blocks, enable_prefix_cache)`, active par défaut) — elle est
+seulement coupée sur les hybrides à récurrence linéaire, où les blocs KV ne
+suffisent pas à restaurer l'état GDN. Ce qui manque en revanche, c'est
+l'ordonnancement *entre requêtes* décrit ici : nous réutilisons un préfixe,
+nous n'ordonnançons pas les requêtes pour maximiser cette réutilisation.
 
 ## 12. KernelSight-LM
 *A Kernel-Level LLM Inference Simulator* —
@@ -213,7 +215,7 @@ transpose à la conversion.
 3. **Le choix des échelles** (5, 7) : notre plancher de SNR est empirique et
    uniforme ; deux articles donnent de quoi le raisonner et probablement de
    quoi convertir plus de couches en NVFP4 — donc éviter la RAM hôte.
-4. **La mise en cache de préfixe** (11) : absente, alors que nos clients
-   envoient la même amorce système à chaque requête.
+4. **L'ordonnancement des requêtes** (11) : le cache de préfixe existe, mais
+   rien n'ordonne les requêtes pour en tirer parti.
 5. **La séparation prefill/decode** (10) : la bonne façon d'exploiter deux
    cartes dissemblables, là où le pipeline bi-GPU a échoué.
