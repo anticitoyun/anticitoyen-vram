@@ -364,3 +364,34 @@ Incident : le déplacement par modèle a traversé un lien de famille
 DeepSeek-Coder-V2-Lite a été détruite, retéléchargée (30 Go) et reconvertie.
 Garde ajoutée : jamais de déplacement si la source est un lien ou déjà sous
 la destination.
+
+## 3 septembre 2026 — comparatif des quatre moteurs, sur le même parc
+
+Banc identique pour tous : un prompt unique, 200 jetons, deux mesures dont la
+meilleure est retenue, serveur démarré et arrêté entre chaque couple
+(`scratchpad/banc-4moteurs.py`). 104 couples mesurés sur les **48 modèles
+servis par plusieurs moteurs**.
+
+| moteur | modèles gagnés | médiane | terrain |
+|---|---|---|---|
+| llama.cpp | 33 | 147 t/s | MoE (Coder-30B 234, LFM2.5 543, Gemma-4-26B-A4B 161) et denses 27-31B (42-54) |
+| acvram | 10 | 41 t/s | denses EXL3 6 bpw (Cydonia 41, Muse-Glimmer 31, Skyfall 27), petits modèles (Coder-3B 94) |
+| vLLM | 3 | 197 t/s | AWQ MoE (Thinking 204, VL-30B 192, erotic 183) |
+| TabbyAPI | 2 | 19 t/s | Qwen3.5-4B 137, Coder-30B EXL3 90 |
+
+Ce que le banc apprend sur acvram, chiffres à l'appui :
+
+* **le MoE est notre faiblesse** : Coder-30B 88 contre 234, Gemma-4-26B-A4B 18
+  contre 161 (routage Gemma en boucle par expert), Nemotron-Lightning EXL3 3,1
+  contre 195 (le plan met les experts en RAM hôte alors que le GGUF Q4 tient) ;
+* **les denses EXL3 sont notre force** : deux à trois fois TabbyAPI, dont le
+  décodage trellis est borné calcul ;
+* **l'AWQ MoE appartient à vLLM** (batch continu + noyaux Marlin).
+
+Décisions prises : les menus ne gardent qu'un moteur par modèle (celui qui
+gagne), 53 alias retirés, 898 Gio de fichiers devenus inutiles déplacés dans
+`<disque>/Modeles/a_supprimer/`. Sauvegardes `~/.kimi-code/*.avant-tri-*`.
+
+Deux correctifs sortis du banc : `llamacpp-serveur` ne suivait pas les liens
+symboliques (`find` sans `-L`), et un modèle qui remplit la carte faisait
+échouer la capture de graphe CUDA au lieu de basculer en eager (v0.4.25).
