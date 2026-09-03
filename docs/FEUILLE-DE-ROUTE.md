@@ -395,3 +395,64 @@ gagne), 53 alias retirés, 898 Gio de fichiers devenus inutiles déplacés dans
 Deux correctifs sortis du banc : `llamacpp-serveur` ne suivait pas les liens
 symboliques (`find` sans `-L`), et un modèle qui remplit la carte faisait
 échouer la capture de graphe CUDA au lieu de basculer en eager (v0.4.25).
+
+## 3 septembre 2026 — le MoE rattrapé : v0.4.26 à v0.4.28
+
+Les trois faiblesses relevées par le comparatif se sont révélées être trois
+bogues distincts, pas une limite d'architecture.
+
+### Routage Gemma sur le chemin groupé (v0.4.26)
+
+`MoEBlockGemma` forçait `_stack_state = "non"` : le noyau gate-up fusionné
+codait SiLU en dur, or les experts de Gemma 4 sont en GELU-tanh. Toute la
+couche retombait donc sur la boucle par expert. L'activation devient un
+argument du noyau (`acv_act(v, act)`, 0 = SiLU, 1 = GELU-tanh) et un attribut
+du bloc, déduit de `experts[0].act` ; les trois chemins (noyau fusionné, GEMV
+groupée, prefill) la partagent.
+
+### GEMM groupée NVFP4 au prefill (v0.4.27)
+
+Le prefill matérialisait la pile d'experts en bf16 (`_pile_bf16`) avant
+`torch._grouped_mm` : trois passes de plusieurs gigaoctets par couche, la
+déquantification dominant le calcul utile d'un facteur six. `nvfp4_gemm_grouped`
+garde les poids en 4 bits : chaque bloc déquantifie une tuile 64×64 en mémoire
+partagée et la consomme aussitôt en tensor cores (`wmma` bf16 16×16×16). Les
+jetons arrivent triés par expert ; l'hôte transmet, par tuile de 16 jetons,
+(expert, premier jeton, compte). Repli conservé (`ACVRAM_PREFILL_DEQUANT`).
+
+Banc synthétique 128 experts 768×2048, 1024 jetons top-8 : **3,11 ms → 1,19 ms**
+(×2,6), pic de 3,6 Gio supprimé, cosinus 1,000000 contre la référence.
+
+### Le plan comptait des MLP fantômes (v0.4.28)
+
+`_octets_reels` ne trouve aucun tenseur `.mlp.` pour un bloc Mamba2/GDN pur.
+Le réajustement gardait alors la taille **nominale** de la couche : 29,6 Gio
+imaginaires sur Nemotron-Lightning, d'où 22 MLP réels exilés en RAM hôte alors
+que le modèle entier tient sur la carte. Une couche décrite par le manifeste
+sans tenseur de MLP en compte désormais zéro. `_reajuster_plan` sait de plus
+**remonter** en VRAM (le plan est figé à la conversion et ne savait que
+descendre) ; échappement par `ACVRAM_PLAN_FIGE`.
+
+Nemotron-Lightning : 22 MLP en RAM hôte → 0, poids réels 27,6 → 17,2 Gio pour
+30,1 de carte. Non-régression vérifiée : DeepSeek-R1-70B descend toujours
+35 MLP en RAM hôte.
+
+### Résultat (banc direct, 128 jetons, RTX 5090)
+
+| modèle | avant | après | meilleur rival |
+|---|---|---|---|
+| Nemotron-Lightning-30B EXL3 | 3,1 | **158** | llama.cpp 195 |
+| Gemma-4-26B-A4B | 18 | **87** | llama.cpp 161 |
+| Qwen3-Coder-30B-A3B | 88 | **99** | llama.cpp 234 |
+| LFM2.5-8B-A1B | 208 | **244** | llama.cpp 543 |
+| Cydonia-24B EXL3 | 41 | **47** | TabbyAPI 16 |
+
+Le tri des menus du 2 septembre a été **annulé sur demande** : les 53 alias
+retirés sont rétablis (270 alias, dont 3 conversions acvram jusque-là hors
+menus), les dossiers sortis de `a_supprimer` sont revenus dans leur famille
+avec leurs liens. Les correctifs postérieurs au tri (alias à points illisibles
+en TOML) ont été réappliqués après restauration.
+
+Reste à combler contre llama.cpp : Coder-30B (99 contre 234) et LFM2.5
+(244 contre 543) — le décodage MoE y est encore borné par la GEMV groupée à
+une paire (jeton, expert) par tranche de grille.
