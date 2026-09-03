@@ -18,7 +18,7 @@ import sys
 import time
 from typing import Optional
 
-__version__ = "0.2.0"
+__version__ = "0.4.25"
 
 
 def _tty() -> bool:

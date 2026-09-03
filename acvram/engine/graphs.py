@@ -155,7 +155,19 @@ class GraphRunner:
                     print(f"[graphe] limite {MAX_GRAPHS} atteinte, clé {key} : eager",
                           flush=True)
                 return None
-            entry = self._capture(b, ql, nblk, batch)
+            try:
+                entry = self._capture(b, ql, nblk, batch)
+            except (torch.OutOfMemoryError, torch.AcceleratorError, RuntimeError) as e:
+                # capture impossible faute de VRAM (modèle qui remplit la carte) :
+                # le décodage continue en eager plutôt que de tuer le serveur
+                if "out of memory" not in str(e).lower():
+                    raise
+                self.enabled = False
+                self.graphs.clear()
+                torch.cuda.empty_cache()
+                print("[acvram] graphes CUDA désactivés : mémoire insuffisante "
+                      "pour la capture, décodage en eager", flush=True)
+                return None
             self.graphs[key] = entry
             self.replays += 1                # la capture rejoue deja une fois
             if trace:
