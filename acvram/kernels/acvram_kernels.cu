@@ -1266,7 +1266,8 @@ torch::Tensor nvfp4_gemv_grouped_gateup(
 namespace wmma = nvcuda::wmma;
 
 constexpr int GG_BM = 64;      // lignes de sortie par bloc (4 warps x 16)
-constexpr int GG_BT = 16;      // jetons par tuile
+constexpr int GG_BT = 16;      // jetons par tuile (fragments de 16)
+constexpr int GG_TT = GG_BT / 16;
 constexpr int GG_KB = 64;      // profondeur traitée par itération
 constexpr int GG_LDX = GG_KB + 8;
 constexpr int GG_LDW = GG_KB + 8;
@@ -1294,8 +1295,9 @@ __global__ void nvfp4_gemm_grouped_kernel(
     const long half_k = (long)K >> 1;
     const int nblk = K >> 4;
 
-    wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
-    wmma::fill_fragment(acc, 0.f);
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[GG_TT];
+    #pragma unroll
+    for (int j = 0; j < GG_TT; ++j) wmma::fill_fragment(acc[j], 0.f);
 
     const int lrow = tid >> 1, moitie = tid & 1;   // 128 fils : 2 par ligne
     const int wcol0 = moitie * 32;
@@ -1331,13 +1333,19 @@ __global__ void nvfp4_gemm_grouped_kernel(
         for (int kk = 0; kk < GG_KB; kk += 16) {
             wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> a;
             wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> b;
-            wmma::load_matrix_sync(a, xs + kk, GG_LDX);
             wmma::load_matrix_sync(b, ws + (warp * 16) * GG_LDW + kk, GG_LDW);
-            wmma::mma_sync(acc, a, b, acc);
+            #pragma unroll
+            for (int j = 0; j < GG_TT; ++j) {
+                wmma::load_matrix_sync(a, xs + (j * 16) * GG_LDX + kk, GG_LDX);
+                wmma::mma_sync(acc[j], a, b, acc[j]);
+            }
         }
         __syncthreads();
     }
-    wmma::store_matrix_sync(ys + warp * 16, acc, GG_BM, wmma::mem_row_major);
+    #pragma unroll
+    for (int j = 0; j < GG_TT; ++j)
+        wmma::store_matrix_sync(ys + (j * 16) * GG_BM + warp * 16, acc[j], GG_BM,
+                                wmma::mem_row_major);
     __syncthreads();
     for (int i = tid; i < GG_BT * GG_BM; i += blockDim.x) {
         const int j = i / GG_BM, n = i - j * GG_BM;

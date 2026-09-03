@@ -420,8 +420,23 @@ partagée et la consomme aussitôt en tensor cores (`wmma` bf16 16×16×16). Les
 jetons arrivent triés par expert ; l'hôte transmet, par tuile de 16 jetons,
 (expert, premier jeton, compte). Repli conservé (`ACVRAM_PREFILL_DEQUANT`).
 
-Banc synthétique 128 experts 768×2048, 1024 jetons top-8 : **3,11 ms → 1,19 ms**
-(×2,6), pic de 3,6 Gio supprimé, cosinus 1,000000 contre la référence.
+Banc synthétique 128 experts 768×2048, 1024 jetons top-8 : 1,56 ms → **1,17 ms**
+(×1,33), pic de 3,6 Gio supprimé, cosinus 1,000000 contre la référence.
+
+Le noyau relit cependant les poids d'un expert une fois par tuile de 16 jetons,
+là où la déquantification les écrit une seule fois quel que soit le lot : il ne
+gagne que tant que les experts reçoivent peu de jetons. Prefill mesuré sur
+Qwen3-Coder-30B (jetons par expert entre parenthèses) :
+
+| prompt | déquantification | GEMM groupée |
+|---|---|---|
+| 512 j (32) | 2 384 j/s | **3 159 j/s** |
+| 1024 j (64) | 3 900 j/s | **4 093 j/s** |
+| 2048 j (128) | **6 180 j/s** | 4 618 j/s |
+
+D'où une bascule sur le nombre moyen de jetons par expert, seuil 64
+(`ACVRAM_MOE_GEMM_MAX`). Prefill de bout en bout : 512 j 3 393 j/s,
+1024 j 4 114 j/s, 4096 j **8 200 j/s** (référence du 2 septembre : 6 420).
 
 ### Le plan comptait des MLP fantômes (v0.4.28)
 

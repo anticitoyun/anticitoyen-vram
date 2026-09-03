@@ -548,8 +548,15 @@ class MoEBlock(nn.Module):
         if any(p[0] != "nvfp4" for p in (pg, pu, pd)):
             return None
         ext = kernels.get_extension()
+        # La GEMM groupée relit les poids d'un expert une fois par tuile de
+        # 16 jetons ; la déquantification, elle, les écrit puis les relit en
+        # bf16 une seule fois quel que soit le lot. Le premier gagne tant que
+        # les experts reçoivent peu de jetons — croisement mesuré entre 64
+        # et 128 sur Qwen3-Coder-30B (512 j : +33 %, 1024 j : +5 %, 2048 j : -25 %).
+        par_expert = topi.numel() / max(1, pg[1].shape[0])
         direct = (ext is not None and hasattr(ext, "nvfp4_gemm_grouped")
                   and not os.environ.get("ACVRAM_PREFILL_DEQUANT")
+                  and par_expert <= _MOE_GEMM_MAX
                   and pg[4] % 64 == 0 and pd[4] % 64 == 0)
         if not direct and not hasattr(torch, "_grouped_mm"):
             return None
@@ -710,6 +717,10 @@ class MoEBlock(nn.Module):
 # coûte ~0,6 ms par expert visité, la GEMV groupée relit les poids de
 # l'expert pour chaque jeton — croisement mesuré vers quelques milliers.
 _MOE_GROUPED_MAX = int(os.environ.get("ACVRAM_MOE_GROUPED_MAX", "32"))
+
+# Jetons par expert au-delà desquels le prefill repasse de la GEMM groupée
+# NVFP4 à la déquantification en bf16 suivie de torch._grouped_mm.
+_MOE_GEMM_MAX = float(os.environ.get("ACVRAM_MOE_GEMM_MAX", "64"))
 
 # Marque, dans le magasin d'états, une séquence dont l'état réside dans les
 # tampons fixes d'une couche (chemin graphes) plutôt qu'en tuple fonctionnel.
