@@ -159,7 +159,7 @@ continue de tomber : il n'y a plus rien à gagner.
 | 375 W | 59,0 t/s | 7198 j/s | 279 | 212 |
 | 325 W | 59,0 | 7116 | 276 | 213 |
 | **275 W** (réglage actuel) | 57,4 (−2,7 %) | 6760 (−6 %) | 251 | 229 |
-| 250 W | *point optimal estimé* | | | |
+| 250 W | 55,9 (−5,3 %) | 6499 (−10 %) | 235 | 238 |
 | 225 W | 53,8 (−8,8 %) | 6094 (−15 %) | 214 | 252 |
 | 175 W | 46,5 (−21 %) | **4097 (−43 %)** | 174 | 267 |
 
@@ -172,7 +172,7 @@ s'effondre bien plus vite que le décodage — c'est lui qui a besoin des cœurs
 | carte | limite | pourquoi |
 |---|---|---|
 | RTX 5090 | **400 W** (plancher) | la limite ne mord jamais ; rien à gagner plus haut, impossible de descendre |
-| RTX 3080 Ti | **275 W**, ou 250 W | 275 coûte 2,7 % de décodage contre 375 ; 250 W serait le meilleur compromis jetons/kJ sans casser le prefill |
+| RTX 3080 Ti | **275 W** — garder | 275 coûte 2,7 % de décodage contre 375 W. Le point 250 W, mesuré ensuite, rend 238 j/kJ contre 227 : 5 % d'efficacité pour 2,5 % de débit et 4 % de prefill en moins. Le gain ne vaut pas le réglage ; 275 W reste le bon choix |
 
 Le verrouillage de fréquence est **hors banc** : il fausse toute comparaison de
 t/s. Ne l'utiliser que pour une campagne d'efficacité énergétique, et remettre
