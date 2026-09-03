@@ -704,7 +704,7 @@ __global__ void int4_gemv_grouped_kernel(
 constexpr int PA_CHUNK = 512;
 constexpr int PA_WARPS = 4;
 
-template <int D, typename QT>
+template <int D, typename QT, typename OT>
 __global__ void paged_attn_partial_kernel(
     const QT *__restrict__ q,             // [B*QL, HQ, D]
     const signed char *__restrict__ kc,   // [NB, 16, HKV, D]
@@ -716,6 +716,7 @@ __global__ void paged_attn_partial_kernel(
     float *__restrict__ part,             // [B*QL, HQ, C, D]  acc non normalisé
     float *__restrict__ part_m,           // [B*QL, HQ, C]
     float *__restrict__ part_l,           // [B*QL, HQ, C]
+    OT *__restrict__ sortie,              // [B*QL, HQ, D] si C == 1, sinon nul
     int HQ, int HKV, int N, int C, int QL, float scale, int window) {
     // La vérification spéculative pose QL positions de requête par séquence :
     // la requête qi (0..QL-1) ne voit que les seq_len-QL+1+qi premières
@@ -808,6 +809,19 @@ __global__ void paged_attn_partial_kernel(
         part_l[out_off] = lg;
     }
     __syncthreads();
+    // Une seule tranche (contexte plus court que PA_CHUNK) : la réduction se
+    // résume à diviser par la somme des poids, autant l'écrire ici et éviter
+    // un second lancement par couche.
+    if (C == 1 && sortie != nullptr) {
+        const float lg = part_l[out_off];
+        for (int d = threadIdx.x; d < D; d += blockDim.x) {
+            float a = 0.f;
+            #pragma unroll
+            for (int w = 0; w < PA_WARPS; ++w) a += sacc[w][d] * scorr[w];
+            sortie[out_off * D + d] = from_float<OT>(a / lg);
+        }
+        return;
+    }
     for (int d = threadIdx.x; d < D; d += blockDim.x) {
         float a = 0.f;
         #pragma unroll
@@ -1797,15 +1811,16 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
     const int threads = PA_WARPS * WARP;
 
     #define PA_LAUNCH_T(DD, QT, OT, PQ, PO) do { \
-        paged_attn_partial_kernel<DD, QT><<<g1, threads, 0, stream>>>( \
+        paged_attn_partial_kernel<DD, QT, OT><<<g1, threads, 0, stream>>>( \
             PQ, kc.data_ptr<signed char>(), \
             reinterpret_cast<const __half *>(ks.data_ptr()), \
             vc.data_ptr<signed char>(), \
             reinterpret_cast<const __half *>(vs.data_ptr()), \
             tables.data_ptr<long>(), seq_lens.data_ptr<long>(), \
             part.data_ptr<float>(), pm.data_ptr<float>(), \
-            pl.data_ptr<float>(), HQ, (int)hkv, N, C, (int)q_len, \
-            (float)scale, (int)window); \
+            pl.data_ptr<float>(), (C == 1 ? (PO) : nullptr), \
+            HQ, (int)hkv, N, C, (int)q_len, (float)scale, (int)window); \
+        if (C > 1) \
         paged_attn_reduce_kernel<DD, OT><<<g2, 128, 0, stream>>>( \
             part.data_ptr<float>(), pm.data_ptr<float>(), \
             pl.data_ptr<float>(), PO, HQ, C); } while (0)

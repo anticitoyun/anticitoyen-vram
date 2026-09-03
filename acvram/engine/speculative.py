@@ -254,22 +254,29 @@ class DraftModelProposer:
         probs: list[torch.Tensor] = []
         cur = ids[-1]
         pos = len(ids) - 1
+        # En glouton, la vérification n'a pas besoin des probabilités du
+        # brouillon (q_x vaut 1) : ni softmax sur 152 000 entrées, ni pile de
+        # k x vocabulaire flottants à chaque pas.
+        glouton = self.temperature <= 0
         for _ in range(k):
             if not self._ensure_blocks(st, pos + 2):
                 break
             batch = self._batch(st, [cur], pos, prefill=False)
-            logits = self.model(batch)[0].to(torch.float32)
-            p = torch.softmax(logits / max(self.temperature, 1e-5), dim=-1)
-            tok = int(p.argmax()) if self.temperature <= 0 else \
-                int(torch.multinomial(p, 1))
+            logits = self.model(batch)[0]
+            if glouton:
+                tok = int(logits.argmax())
+            else:
+                p = torch.softmax(logits.to(torch.float32)
+                                  / max(self.temperature, 1e-5), dim=-1)
+                tok = int(torch.multinomial(p, 1))
+                probs.append(p)
             tokens.append(tok)
-            probs.append(p)
             pos += 1
             st.length = pos
             cur = tok
         if not tokens:
             return Proposal([])
-        return Proposal(tokens, torch.stack(probs))
+        return Proposal(tokens, None if glouton else torch.stack(probs))
 
     def commit(self, seq: Any, accepted: list[int]) -> None:
         # Un rejet laisse dans le cache du brouillon des jetons que la cible
