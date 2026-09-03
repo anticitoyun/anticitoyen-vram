@@ -173,6 +173,11 @@ class TensorRouter:
         if name.startswith("lm_head"):
             return (self.opts.lm_head_format
                     or self._layer_fmt.get(self.spec.num_layers - 1, "int4_awq"))
+        if ".mtp." in name or name.startswith("model.mtp."):
+            # La tête de prédiction multi-jetons est un bloc de transformeur de
+            # plus : elle suit le format de la dernière couche, pas le bf16 des
+            # tenseurs hors couches.
+            return self._layer_fmt.get(self.spec.num_layers - 1, "int4_awq")
         idx = self.layer_index(name)
         if idx is None:
             return "bf16"
@@ -443,7 +448,7 @@ def _adapt_hf(source: Iterator[tuple[str, torch.Tensor]], spec
         return
     for name, t in source:
         name = name.replace("model.language_model.", "model.")
-        if name.startswith(("model.visual", "visual.", "mtp.", "model.mtp")):
+        if name.startswith(("model.visual", "visual.")):
             continue
         for src, dst in _QWEN35_RENOMMAGE.items():
             if src in name:

@@ -228,7 +228,24 @@ class GGUFFile:
 
         for gname in self.tensors:
             if premiere_mtp >= 0 and gname.startswith("blk."):
-                if int(gname.split(".", 2)[1]) >= premiere_mtp:
+                idx = int(gname.split(".", 2)[1])
+                if idx >= premiere_mtp:
+                    # Couche de prédiction multi-jetons. Elle porte un bloc de
+                    # transformeur complet plus quatre tenseurs propres
+                    # (eh_proj, enorm, hnorm, shared_head_norm) ; on la range
+                    # sous ``model.mtp.<n>`` au lieu de la jeter, pour servir
+                    # de brouillon spéculatif — un dixième du coût d'un modèle
+                    # brouillon séparé.
+                    mtp_i = idx - premiere_mtp
+                    reste = gname.split(".", 2)[2]
+                    if reste.startswith("nextn."):
+                        yield f"model.mtp.{mtp_i}.{reste[6:]}", self.load(gname)
+                        continue
+                    sous = _map_name(f"blk.0.{reste}", gdn, kimi_rec, phi3)
+                    if sous is None:
+                        continue
+                    sous = sous.replace("model.layers.0.", "")
+                    yield f"model.mtp.{mtp_i}.{sous}", self.load(gname)
                     continue
             hname = _map_name(gname, gdn, kimi_rec, phi3)
             if hname is None:

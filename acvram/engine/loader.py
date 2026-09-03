@@ -593,10 +593,75 @@ def load_model(path: str, plan: Optional[Plan] = None,
         # plongements partagés avec la sortie
         lm_head = QuantLinear(PlainTensor(embed.to(head_dev),
                                           tuple(embed.shape), "bf16"))
+    tetes_mtp = _charger_mtp(manifest, reader, spec, plan, group_size, dtype,
+                             head_dev, rope, kv_blocks)
     reader.close()
 
     model = ACVRamModel(spec, embed, layers, norm, lm_head, caches, dtype)
+    if tetes_mtp:
+        model.mtp = tetes_mtp[0]
+        print(f"[acvram] tête de prédiction multi-jetons chargée "
+              f"({len(tetes_mtp)} disponible(s))")
     return LoadedModel(model, spec, plan, manifest, path)
+
+
+def _charger_mtp(manifest: dict, reader: "_ShardReader", spec: ModelSpec,
+                 plan: Plan, group_size: int, dtype: torch.dtype,
+                 device: torch.device, rope, kv_blocks: dict[str, int]) -> list:
+    """Construit les têtes ``nextn`` que la conversion a conservées.
+
+    Absentes de la plupart des modèles ; leur absence n'est pas une erreur. Une
+    tête coûte un bloc de transformeur — sur un 27B de soixante-quatre couches,
+    un soixante-quatrième du modèle — et sert de brouillon spéculatif.
+    """
+    from .mtp import MTPHead, cles_mtp
+
+    indices = cles_mtp(manifest)
+    if not indices or os.environ.get("ACVRAM_MTP") == "non":
+        return []
+
+    tetes = []
+    for n in indices:
+        p = f"model.mtp.{n}."
+
+        def lin(suffix: str):
+            m = _linear(p + suffix, manifest, reader, group_size)
+            return None if m is None else m.to_device(device)
+
+        def norme(suffix: str):
+            cle = p + suffix
+            if not reader.has(cle):
+                return None
+            return RMSNorm(reader.get(cle).to(dtype).to(device),
+                           spec.rms_norm_eps)
+
+        q, k, v, o = (lin("self_attn.q_proj.weight"), lin("self_attn.k_proj.weight"),
+                      lin("self_attn.v_proj.weight"), lin("self_attn.o_proj.weight"))
+        eh = lin("eh_proj.weight")
+        in_norm, post_norm = norme("input_layernorm.weight"), norme("post_attention_layernorm.weight")
+        enorm, hnorm = norme("enorm.weight"), norme("hnorm.weight")
+        fin = norme("shared_head_norm.weight") or norme("norm.weight")
+        gate, up, down = (lin("mlp.gate_proj.weight"), lin("mlp.up_proj.weight"),
+                          lin("mlp.down_proj.weight"))
+        if None in (q, k, v, o, eh, in_norm, post_norm, enorm, hnorm, fin,
+                    gate, up, down):
+            print(f"[acvram] tête MTP {n} incomplète, ignorée")
+            continue
+
+        attn = Attention(spec, q, k, v, o, rope,
+                         q_norm=norme("self_attn.q_norm.weight"),
+                         k_norm=norme("self_attn.k_norm.weight"),
+                         output_gate=spec.attn_output_gate)
+        mlp = MLP(gate, up, down, spec.hidden_activation)
+        couche = DecoderLayer(spec.num_layers + n, attn, mlp, in_norm,
+                              post_norm, device)
+        n_blocks = max(64, kv_blocks.get(str(device), 512) // 16)
+        cache = PagedKVCache(KVCacheConfig(
+            num_layers=1, num_kv_heads=spec.num_key_value_heads,
+            head_dim=spec.head_dim, num_blocks=n_blocks,
+            dtype="int8", device=str(device)))
+        tetes.append(MTPHead(couche, enorm, hnorm, eh, fin, cache, device))
+    return tetes
 
 
 def _kv_blocks_per_device(plan: Plan, spec: ModelSpec,
