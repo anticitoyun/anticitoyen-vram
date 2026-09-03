@@ -567,10 +567,13 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 head_dim=spec.head_dim, num_blocks=n_blocks,
                 dtype=kv_fmt, device=str(d)))
 
-    # projections gate/up des MLP INT8 (denses, experts partagés) empilées
+    # projections INT8 empilées : gate/up des MLP (denses, experts partagés)
+    # et q/k/v de l'attention — une GEMV au lieu de deux ou trois par couche
     for layer in layers:
         for m in layer.modules():
             if isinstance(m, MLP) and m.gate_proj.qweight.__class__.__name__ == "INT8Tensor":
+                m.fuse()
+            elif isinstance(m, Attention):
                 m.fuse()
 
     head_dev = dev(plan.lm_head_device) if plan.lm_head_device != "cpu" \

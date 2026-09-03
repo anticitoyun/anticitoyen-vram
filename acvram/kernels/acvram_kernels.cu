@@ -1093,6 +1093,11 @@ torch::Tensor int8_gemv(torch::Tensor qweight, torch::Tensor scales,
 // boucle. Le noyau à 4 lignes par bloc restait latent sur ces formes
 // (2 chargements par fil puis une réduction de bloc).
 
+constexpr int XSH_GRP = 32;
+constexpr int XSH_PAS = XSH_GRP + 1;
+
+__device__ __forceinline__ int xsh_taille(int K) { return K + (K >> 5); }
+
 // Produit d'une ligne NVFP4 par l'activation en mémoire partagée, un warp
 // par ligne, deux uint4 en vol par voie (déroulage ×2 : les deux
 // chargements partent avant le premier calcul).
@@ -1107,8 +1112,8 @@ __device__ __forceinline__ float nvfp4_row_dot_warp(
         const unsigned char bB0 = brow[2 * (i + WARP)], bB1 = brow[2 * (i + WARP) + 1];
         const unsigned int wA[4] = {pA.x, pA.y, pA.z, pA.w};
         const unsigned int wB[4] = {pB.x, pB.y, pB.z, pB.w};
-        const float *xA = xs_sh + (long)i * 2 * WEIGHTS_PER_LOAD;
-        const float *xB = xs_sh + (long)(i + WARP) * 2 * WEIGHTS_PER_LOAD;
+        const float *xA = xs_sh + (long)i * XSH_PAS;
+        const float *xB = xs_sh + (long)(i + WARP) * XSH_PAS;
         float a0 = 0.f, a1 = 0.f, c0 = 0.f, c1 = 0.f;
         #pragma unroll
         for (int b = 0; b < 8; ++b) {
@@ -1128,7 +1133,7 @@ __device__ __forceinline__ float nvfp4_row_dot_warp(
         const uint4 p4 = wrow[i];
         const float s0 = e4m3_to_float(brow[2 * i]) * gscale;
         const float s1 = e4m3_to_float(brow[2 * i + 1]) * gscale;
-        const float *xp = xs_sh + (long)i * 2 * WEIGHTS_PER_LOAD;
+        const float *xp = xs_sh + (long)i * XSH_PAS;
         const unsigned int words[4] = {p4.x, p4.y, p4.z, p4.w};
         float part0 = 0.f, part1 = 0.f;
         #pragma unroll
@@ -1144,11 +1149,17 @@ __device__ __forceinline__ float nvfp4_row_dot_warp(
     return acc;
 }
 
+// Le produit ligne-activation fait lire à la voie « l » les 32 flottants
+// [l*32, l*32+32) : rangés à plat, ils tombent tous dans la même banque de
+// mémoire partagée et le warp sérialise en 32 accès. Un flottant de bourrage
+// tous les 32 décale chaque voie d'une banque — l'accès redevient un seul
+// cycle. Indice décalé de « i » : i + (i >> 5).
 template <typename XT>
 __device__ __forceinline__ void charger_x_sh(const XT *__restrict__ xn, float *xs_sh, int K) {
     for (int i = threadIdx.x; i < K; i += blockDim.x) {
-        if constexpr (sizeof(XT) == 4) xs_sh[i] = xn[i];
-        else xs_sh[i] = __bfloat162float(xn[i]);
+        const int d = i + (i >> 5);
+        if constexpr (sizeof(XT) == 4) xs_sh[d] = xn[i];
+        else xs_sh[d] = __bfloat162float(xn[i]);
     }
     __syncthreads();
 }
@@ -1228,15 +1239,15 @@ torch::Tensor nvfp4_gemv_grouped_gateup(
         torch::Tensor x, int64_t K, int64_t act) {
     CHECK_CUDA(qg); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(qg);
     CHECK_CONTIG(qg); CHECK_CONTIG(qu); CHECK_CONTIG(bg); CHECK_CONTIG(bu);
-    TORCH_CHECK(K % 32 == 0 && (size_t)K * sizeof(float) <= 48 * 1024,
-                "gate-up fusionne : K multiple de 32 et <= 12288");
+    TORCH_CHECK(K % 32 == 0 && (size_t)(K + K / 32) * sizeof(float) <= 48 * 1024,
+                "gate-up fusionne : K multiple de 32 et <= 11904");
     const int M = qg.size(1), G = expert_ids.size(0);
     const bool bf = x.scalar_type() == torch::kBFloat16;
     auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
     auto out = torch::empty({G, M}, xc.options().dtype(torch::kFloat));
     static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 1;
     dim3 grid((M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
-    const size_t shm = (size_t)K * sizeof(float);
+    const size_t shm = (size_t)(K + K / 32) * sizeof(float);
     auto stream = at::cuda::getCurrentCUDAStream();
     #define GU_LAUNCH(XT, PX) do { if (rpw == 1) GU_L(XT, 1, PX); else if (rpw == 2) GU_L(XT, 2, PX); else GU_L(XT, 4, PX); } while (0)
     #define GU_L(XT, R, PX) nvfp4_gemv_grouped_gateup_kernel<XT, R><<<grid, GW_WARPS * WARP, shm, stream>>>( \
@@ -1390,13 +1401,13 @@ torch::Tensor nvfp4_gemv_grouped(torch::Tensor qw, torch::Tensor bscale,
     const int G = expert_ids.size(0);
     auto stream = at::cuda::getCurrentCUDAStream();
     static const bool ancien = std::getenv("ACVRAM_GROUPED_OLD") != nullptr;
-    if (!ancien && (size_t)K * sizeof(float) <= 48 * 1024) {
+    if (!ancien && (size_t)(K + K / 32) * sizeof(float) <= 48 * 1024) {
         const bool bf = x.scalar_type() == torch::kBFloat16;
         auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
         auto out = torch::empty({G, M}, xc.options().dtype(torch::kFloat));
         static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 1;
         dim3 grid((M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
-        const size_t shm = (size_t)K * sizeof(float);
+        const size_t shm = (size_t)(K + K / 32) * sizeof(float);
         #define GWK(XT, PX) do { \
             if (rpw == 1) nvfp4_gemv_grouped_warp_kernel<XT, 1><<<grid, GW_WARPS * WARP, shm, stream>>>(qw.data_ptr<unsigned char>(), bscale.data_ptr<unsigned char>(), gscales.data_ptr<float>(), expert_ids.data_ptr<int>(), token_ids.data_ptr<int>(), PX, out.data_ptr<float>(), M, (int)K); \
             else if (rpw == 2) nvfp4_gemv_grouped_warp_kernel<XT, 2><<<grid, GW_WARPS * WARP, shm, stream>>>(qw.data_ptr<unsigned char>(), bscale.data_ptr<unsigned char>(), gscales.data_ptr<float>(), expert_ids.data_ptr<int>(), token_ids.data_ptr<int>(), PX, out.data_ptr<float>(), M, (int)K); \

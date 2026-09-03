@@ -152,30 +152,56 @@ class Attention(nn.Module):
         self.k_eq_v = k_eq_v
         self.window = window
         self.rope = rope
+        # Déclaré ici et pas au niveau de la classe : un attribut de classe
+        # masque le module enregistré par nn.Module.__setattr__, et la
+        # projection empilée resterait invisible (self.qkv_proj toujours None).
+        self.qkv_proj = None
+        self.qkv_tailles = ()
 
-    def _kv(self, x: torch.Tensor, t: int):
-        k = self.k_proj(x).view(t, self.n_kv_heads, self.head_dim)
-        v = k if self.k_eq_v else self.v_proj(x).view(t, self.n_kv_heads, self.head_dim)
-        if self.v_norm_eps is not None:
-            v32 = v.to(torch.float32)
-            v = (v32 * torch.rsqrt(v32.pow(2).mean(-1, keepdim=True)
-                                   + self.v_norm_eps)).to(x.dtype)
-        return k, v
+    # q, k et v lisent la même entrée : au décodage, trois GEMV dont deux
+    # minuscules (têtes KV groupées) coûtent plus que la seule grande qui
+    # les contient toutes.
+    def fuse(self) -> bool:
+        from .layers import stack_int8_linears
+        lins = [self.q_proj, self.k_proj] + ([] if self.k_eq_v else [self.v_proj])
+        if any(l is None for l in lins):
+            return False
+        self.qkv_proj = stack_int8_linears(lins)
+        if self.qkv_proj is None:
+            return False
+        self.qkv_tailles = tuple(l.qweight.shape[0] for l in lins)
+        return True
 
-    def forward(self, x: torch.Tensor, batch: ForwardBatch,
-                cache: Optional[PagedKVCache]) -> torch.Tensor:
-        t = x.shape[0]
+    def _proj(self, x: torch.Tensor, t: int):
+        """q, k, v (et la porte de sortie) : une GEMV empilée si possible."""
+        if self.qkv_proj is not None and t <= 8:
+            p = torch.split(self.qkv_proj(x), self.qkv_tailles, dim=-1)
+            qr, kr = p[0], p[1]
+            vr = kr if self.k_eq_v else p[2]
+        else:
+            qr, kr = self.q_proj(x), self.k_proj(x)
+            vr = kr if self.k_eq_v else self.v_proj(x)
         gate = None
         if self.output_gate:
             # par tête : [q_h | porte_h] — l'ordre du point de contrôle HF,
             # conservé par le convertisseur GGUF (vérifié : l'ordre plat
             # dégénère immédiatement, celui-ci non)
-            qg = self.q_proj(x).view(t, self.n_heads, 2 * self.head_dim)
-            q, gate = qg[..., :self.head_dim].contiguous(), \
-                qg[..., self.head_dim:]
+            qg = qr.view(t, self.n_heads, 2 * self.head_dim)
+            q, gate = qg[..., :self.head_dim].contiguous(), qg[..., self.head_dim:]
         else:
-            q = self.q_proj(x).view(t, self.n_heads, self.head_dim)
-        k, v = self._kv(x, t)
+            q = qr.view(t, self.n_heads, self.head_dim)
+        k = kr.view(t, self.n_kv_heads, self.head_dim)
+        v = k if self.k_eq_v else vr.view(t, self.n_kv_heads, self.head_dim)
+        if self.v_norm_eps is not None:
+            v32 = v.to(torch.float32)
+            v = (v32 * torch.rsqrt(v32.pow(2).mean(-1, keepdim=True)
+                                   + self.v_norm_eps)).to(x.dtype)
+        return q, k, v, gate
+
+    def forward(self, x: torch.Tensor, batch: ForwardBatch,
+                cache: Optional[PagedKVCache]) -> torch.Tensor:
+        t = x.shape[0]
+        q, k, v, gate = self._proj(x, t)
 
         if self.q_norm is not None:
             q = self.q_norm(q)
@@ -210,13 +236,7 @@ class Attention(nn.Module):
         repli déquantifier-puis-SDPA ne connaît que q_len = 1).
         """
         b = x.shape[0]
-        gate = None
-        if self.output_gate:                 # porte fusionnée dans q (qwen35)
-            qg = self.q_proj(x).view(b, self.n_heads, 2 * self.head_dim)
-            q, gate = qg[..., :self.head_dim].contiguous(), qg[..., self.head_dim:]
-        else:
-            q = self.q_proj(x).view(b, self.n_heads, self.head_dim)
-        k, v = self._kv(x, b)
+        q, k, v, gate = self._proj(x, b)
         if self.q_norm is not None:
             q = self.q_norm(q)
         if self.k_norm is not None:
@@ -335,6 +355,7 @@ class MLP(nn.Module):
         super().__init__()
         self.gate_proj, self.up_proj, self.down_proj = gate, up, down
         self.act = act
+        self.gate_up = None       # attribut d'instance : voir Attention.fuse
 
     def _act(self, g: torch.Tensor) -> torch.Tensor:
         if self.act in ("gelu_pytorch_tanh", "gelu_tanh"):
@@ -342,8 +363,6 @@ class MLP(nn.Module):
         if self.act == "gelu":
             return F.gelu(g)
         return F.silu(g)
-
-    gate_up: Optional[nn.Module] = None
 
     def fuse(self) -> bool:
         """gate et up lisent la même entrée : une GEMV INT8 empilée au lieu
