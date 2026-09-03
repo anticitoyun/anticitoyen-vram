@@ -366,15 +366,31 @@ def int8_dequant(t: INT8Tensor, dtype: torch.dtype = torch.float16) -> torch.Ten
     return out[:, :k] if out.shape[1] != k else out
 
 
+_INT8_GEMV_MAX = int(os.environ.get("ACVRAM_INT8_GEMV_MAX", "80"))
+
+
 def int8_matmul(x: torch.Tensor, t: INT8Tensor,
-                gemv_threshold: int = 8) -> torch.Tensor:
+                gemv_threshold: int = 0) -> torch.Tensor:
     """``x @ W.T`` avec W stocké en INT8 affine par groupes.
 
     Sans ce chemin, les tenseurs promus en INT8 par la conversion — quelques
     pour cent du modèle, choisis précisément parce qu'ils sont sensibles —
     étaient rematérialisés en 16 bits par PyTorch à chaque jeton, et dominaient
     le temps de décodage entier.
+
+    Le seuil de bascule vaut ``ACVRAM_INT8_GEMV_MAX`` (80 par défaut). Le noyau
+    GEMV traite N activations par lecture de poids et relit W une fois par
+    tranche de 8 ; la déquantification, elle, lit W, écrit W en 16 bits et le
+    relit — un coût fixe, indépendant du nombre de jetons. Mesuré sur un
+    tenseur 5120x5120 par groupes de 128 : le GEMV gagne jusqu'à 64 jetons
+    (0,409 ms contre 0,561), les deux se croisent vers 88, et la
+    déquantification l'emporte ensuite (256 jetons : 0,617 contre 1,632).
+    Le seuil précédent était de 8 : tout prefill interactif — une invite
+    courte — payait la déquantification complète des 128 tenseurs INT8 d'un
+    27B, soit une centaine de millisecondes pour vingt jetons.
     """
+    if gemv_threshold <= 0:
+        gemv_threshold = _INT8_GEMV_MAX
     ext = get_extension()
     orig_shape = x.shape
     xf = x.reshape(-1, x.shape[-1])
