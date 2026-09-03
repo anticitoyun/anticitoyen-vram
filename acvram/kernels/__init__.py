@@ -514,7 +514,7 @@ def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
     if d not in (32, 64, 128, 256, 512):
         return None
     return ext.paged_attention(
-        q.to(torch.float32).contiguous(), cache.k, cache.k_scale,
+        q.contiguous(), cache.k, cache.k_scale,
         cache.v, cache.v_scale, tables.contiguous(),
         seq_lens.contiguous(), cache.cfg.num_kv_heads, float(scale),
         int(q_len), int(window))

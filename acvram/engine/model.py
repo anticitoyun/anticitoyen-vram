@@ -652,25 +652,36 @@ class MoEBlock(nn.Module):
             act = self._act(g) * u              # [G, I] fp32
         seq = torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
         d = self._grouped(act, self._stacks["down_proj"], eid, seq)
-        d = d * topw.reshape(-1, 1).to(d.dtype)
         # Chaque jeton possède exactement top_k lignes contiguës : une somme
         # sur cet axe remplace l'index_add_ atomique — déterministe, plus
         # rapide, et rejouable dans un graphe CUDA sans écart d'un rejeu à
-        # l'autre.
+        # l'autre. Pondération, somme et conversion tiennent en un lancement.
+        if (ext is not None and hasattr(ext, "moe_reduce")
+                and d.dtype == torch.float32 and x.dtype == torch.bfloat16):
+            tw = topw.reshape(-1)
+            if tw.dtype != torch.float32:
+                tw = tw.to(torch.float32)
+            return ext.moe_reduce(d.contiguous(), tw.contiguous(), self.top_k)
+        d = d * topw.reshape(-1, 1).to(d.dtype)
         return d.view(t, self.top_k, -1).sum(dim=1).to(x.dtype)
 
-    def _router_logits(self, x32: torch.Tensor) -> torch.Tensor:
-        # le routeur est un petit poids en clair : on garde sa copie fp32
-        # plutôt que de la reconvertir à chaque pas
-        w32 = getattr(self, "_router_w32", None)
-        if w32 is None and hasattr(self.router.qweight, "weight"):
-            w32 = self.router.qweight.weight.to(torch.float32)
-            self._router_w32 = w32
-        return F.linear(x32, w32) if w32 is not None else self.router(x32)
+    def _router_logits(self, x: torch.Tensor) -> torch.Tensor:
+        # Le routeur est un petit poids en clair : sa copie est gardée dans le
+        # type de l'entrée. En bf16 le produit accumule quand même en fp32
+        # (cuBLAS) mais évite de convertir l'état caché à chaque couche.
+        cache = getattr(self, "_router_w", None)
+        if cache is None:
+            cache = {}
+            self._router_w = cache
+        w = cache.get(x.dtype)
+        if w is None and hasattr(self.router.qweight, "weight"):
+            w = self.router.qweight.weight.to(x.dtype)
+            cache[x.dtype] = w
+        return F.linear(x, w) if w is not None else self.router(x)
 
     def _route(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Poids et indices des top-k experts par jeton."""
-        logits = self._router_logits(x.to(torch.float32))
+        logits = self._router_logits(x)
         ext = kernels.get_extension() if x.is_cuda else None
         if (ext is not None and hasattr(ext, "moe_route")
                 and logits.shape[-1] <= 1024 and self.top_k <= 32):
@@ -698,8 +709,10 @@ class MoEBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         t, h = x.shape
+        # topw reste en fp32 : il sort du routage ainsi et y retourne pour la
+        # réduction pondérée ; l'aller-retour en bf16 coûtait deux copies par
+        # couche pour rien
         topw, topi = self._route(x)
-        topw = topw.to(x.dtype)
 
         # Chemin groupé : trois lancements pour toute la couche, quel que soit
         # le nombre d'experts touchés. La boucle par expert reste le chemin des
@@ -975,6 +988,23 @@ class DecoderLayer(nn.Module):
         y = self.mlp(h)
         return x + (y if r == 1.0 else y * r)
 
+    def decode_fixed_res(self, x: torch.Tensor, delta: Optional[torch.Tensor],
+                         positions: torch.Tensor, slots: torch.Tensor,
+                         block_tables: torch.Tensor, seq_lens: torch.Tensor,
+                         max_pos: int, cache: PagedKVCache, q_len: int = 1):
+        """Pas de décodage à résidu différé : reçoit (x, delta) et rend
+        (x, delta). La somme résiduelle de la couche précédente est absorbée
+        par la première normalisation — un lancement de moins par couche."""
+        r = self.residual_multiplier
+        if delta is None:
+            h = self.input_layernorm(x)
+        else:
+            x, h = add_norm(x, delta, self.input_layernorm, r)
+        a = self.self_attn.decode_fixed(h, positions, slots, block_tables,
+                                        seq_lens, max_pos, cache, q_len)
+        x, h2 = add_norm(x, a, self.post_attention_layernorm, r)
+        return x, self.mlp(h2)
+
     def prefetch(self) -> None:
         for m in self.modules():
             if isinstance(m, QuantLinear) and m.streamed is not None:
@@ -1184,11 +1214,33 @@ class ACVRamModel(nn.Module):
         périphérique des couches : l'indexation de la table de plongement vit
         hors du graphe, sur l'appareil où elle réside.
         """
+        if self._res_differe():
+            delta = None
+            for i, layer in enumerate(self.layers):
+                x, delta = layer.decode_fixed_res(
+                    x, delta, positions, slots, block_tables, seq_lens,
+                    max_pos, self.caches.get(i), q_len)
+            x, h = add_norm(x, delta, self.norm,
+                            self.layers[-1].residual_multiplier)
+            return self._logits_finaux(self.lm_head(h))
         for i, layer in enumerate(self.layers):
             x = layer.decode_fixed(x, positions, slots, block_tables,
                                    seq_lens, max_pos, self.caches.get(i), q_len)
         x = self.norm(x)
         return self._logits_finaux(self.lm_head(x))
+
+    def _res_differe(self) -> bool:
+        """Le chemin à résidu différé n'est pris que si toutes les couches
+        sont des blocs attention+MLP ordinaires — les hybrides et Gemma 4 ont
+        leurs propres enchaînements de normes."""
+        v = getattr(self, "_res_ok", None)
+        if v is None:
+            v = all(type(l) is DecoderLayer and l.self_attn is not None
+                    and l.mlp is not None and l.mlp_device == l.device
+                    and hasattr(l, "decode_fixed_res") for l in self.layers) \
+                and type(self.norm).__name__ == "RMSNorm"
+            self._res_ok = v
+        return v
 
     @property
     def nbytes(self) -> int:

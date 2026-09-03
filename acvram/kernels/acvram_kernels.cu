@@ -66,6 +66,12 @@ __device__ __forceinline__ float e4m3_to_float(unsigned char bits) {
     return __half2float(*reinterpret_cast<__half *>(&h));
 }
 
+template <typename QT> __device__ __forceinline__ float to_float_q(QT v);
+template <> __device__ __forceinline__ float to_float_q<float>(float v) { return v; }
+template <> __device__ __forceinline__ float to_float_q<__nv_bfloat16>(__nv_bfloat16 v) {
+    return __bfloat162float(v);
+}
+
 template <typename T> __device__ __forceinline__ T from_float(float x);
 template <> __device__ __forceinline__ float from_float<float>(float x) { return x; }
 template <> __device__ __forceinline__ __half from_float<__half>(float x) {
@@ -698,9 +704,9 @@ __global__ void int4_gemv_grouped_kernel(
 constexpr int PA_CHUNK = 512;
 constexpr int PA_WARPS = 4;
 
-template <int D>
+template <int D, typename QT>
 __global__ void paged_attn_partial_kernel(
-    const float *__restrict__ q,          // [B*QL, HQ, D]
+    const QT *__restrict__ q,             // [B*QL, HQ, D]
     const signed char *__restrict__ kc,   // [NB, 16, HKV, D]
     const __half *__restrict__ ks,        // [NB, 16, HKV]
     const signed char *__restrict__ vc,
@@ -743,7 +749,7 @@ __global__ void paged_attn_partial_kernel(
     __shared__ float sm[PA_WARPS], sl[PA_WARPS], scorr[PA_WARPS];
     __shared__ float sacc[PA_WARPS][D];
     for (int d = threadIdx.x; d < D; d += blockDim.x)
-        sq[d] = q[((long)bq * HQ + h) * D + d] * scale;
+        sq[d] = to_float_q<QT>(q[((long)bq * HQ + h) * D + d]) * scale;
     __syncthreads();
 
     float m = -INFINITY, l = 0.f;
@@ -810,12 +816,12 @@ __global__ void paged_attn_partial_kernel(
     }
 }
 
-template <int D>
+template <int D, typename OT>
 __global__ void paged_attn_reduce_kernel(
     const float *__restrict__ part,       // [B, HQ, C, D]
     const float *__restrict__ part_m,
     const float *__restrict__ part_l,
-    float *__restrict__ out,              // [B, HQ, D]
+    OT *__restrict__ out,                 // [B, HQ, D]
     int HQ, int C) {
     const int b = blockIdx.x;
     const int h = blockIdx.y;
@@ -841,7 +847,7 @@ __global__ void paged_attn_reduce_kernel(
         float a = 0.f;
         for (int c = 0; c < C; ++c)
             a += part[(base * C + c) * D + d] * s_corr[c];
-        out[base * D + d] = a / s_l;
+        out[base * D + d] = from_float<OT>(a / s_l);
     }
 }
 
@@ -1636,6 +1642,38 @@ void kv_write_int8(torch::Tensor k, torch::Tensor v, torch::Tensor slots,
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+
+// Réduction pondérée du MoE : les top_k lignes d'un jeton, multipliées par
+// leur poids de routage et sommées. Le chemin PyTorch demandait une
+// multiplication, une réduction et une conversion — trois lancements par
+// couche pour quelques kilooctets.
+__global__ void moe_reduce_kernel(const float *__restrict__ d,
+                                  const float *__restrict__ topw,
+                                  __nv_bfloat16 *__restrict__ y,
+                                  int M, int k) {
+    const int t = blockIdx.y;
+    const int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col >= M) return;
+    float s = 0.f;
+    for (int e = 0; e < k; ++e)
+        s += topw[t * k + e] * d[((long)t * k + e) * M + col];
+    y[(long)t * M + col] = __float2bfloat16(s);
+}
+
+torch::Tensor moe_reduce(torch::Tensor d, torch::Tensor topw, int64_t k) {
+    CHECK_CUDA(d); ACVRAM_DEVICE_GUARD(d);
+    CHECK_CONTIG(d); CHECK_CONTIG(topw);
+    TORCH_CHECK(d.scalar_type() == torch::kFloat, "moe_reduce : sorties fp32");
+    const int M = d.size(1), T = d.size(0) / (int)k;
+    auto y = torch::empty({T, M}, d.options().dtype(torch::kBFloat16));
+    dim3 grid((M + 255) / 256, T);
+    moe_reduce_kernel<<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+        d.data_ptr<float>(), topw.data_ptr<float>(),
+        reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), M, (int)k);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return y;
+}
+
 torch::Tensor nvfp4_gemv_grouped(torch::Tensor qw, torch::Tensor bscale,
                                  torch::Tensor gscales,
                                  torch::Tensor expert_ids,
@@ -1748,18 +1786,19 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
                 "dimension de tete non instanciee : ", D);
     const int C = (N * 16 + PA_CHUNK - 1) / PA_CHUNK;
     TORCH_CHECK(C <= 256, "contexte au-dela de 256 tranches");
-    auto opts = q.options();
-    auto part = torch::empty({BQ, HQ, C, D}, opts);
-    auto pm = torch::empty({BQ, HQ, C}, opts);
-    auto pl = torch::empty({BQ, HQ, C}, opts);
-    auto out = torch::empty({BQ, HQ, D}, opts);
+    const bool qbf = q.scalar_type() == torch::kBFloat16;
+    auto f32 = q.options().dtype(torch::kFloat);
+    auto part = torch::empty({BQ, HQ, C, D}, f32);
+    auto pm = torch::empty({BQ, HQ, C}, f32);
+    auto pl = torch::empty({BQ, HQ, C}, f32);
+    auto out = torch::empty({BQ, HQ, D}, q.options());
     auto stream = at::cuda::getCurrentCUDAStream();
     dim3 g1(BQ, HQ, C), g2(BQ, HQ);
     const int threads = PA_WARPS * WARP;
 
-    #define PA_LAUNCH(DD) \
-        paged_attn_partial_kernel<DD><<<g1, threads, 0, stream>>>( \
-            q.data_ptr<float>(), kc.data_ptr<signed char>(), \
+    #define PA_LAUNCH_T(DD, QT, OT, PQ, PO) do { \
+        paged_attn_partial_kernel<DD, QT><<<g1, threads, 0, stream>>>( \
+            PQ, kc.data_ptr<signed char>(), \
             reinterpret_cast<const __half *>(ks.data_ptr()), \
             vc.data_ptr<signed char>(), \
             reinterpret_cast<const __half *>(vs.data_ptr()), \
@@ -1767,9 +1806,17 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
             part.data_ptr<float>(), pm.data_ptr<float>(), \
             pl.data_ptr<float>(), HQ, (int)hkv, N, C, (int)q_len, \
             (float)scale, (int)window); \
-        paged_attn_reduce_kernel<DD><<<g2, 128, 0, stream>>>( \
+        paged_attn_reduce_kernel<DD, OT><<<g2, 128, 0, stream>>>( \
             part.data_ptr<float>(), pm.data_ptr<float>(), \
-            pl.data_ptr<float>(), out.data_ptr<float>(), HQ, C)
+            pl.data_ptr<float>(), PO, HQ, C); } while (0)
+    // q et la sortie gardent le type de l'appelant : les convertir coûtait
+    // deux copies par couche, pour un tenseur de quelques kilooctets.
+    #define PA_LAUNCH(DD) do { \
+        if (qbf) PA_LAUNCH_T(DD, __nv_bfloat16, __nv_bfloat16, \
+            reinterpret_cast<const __nv_bfloat16 *>(q.data_ptr()), \
+            reinterpret_cast<__nv_bfloat16 *>(out.data_ptr())); \
+        else PA_LAUNCH_T(DD, float, float, q.data_ptr<float>(), \
+            out.data_ptr<float>()); } while (0)
 
     if (D == 32) { PA_LAUNCH(32); }
     else if (D == 64) { PA_LAUNCH(64); }
@@ -1777,6 +1824,7 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
     else if (D == 256) { PA_LAUNCH(256); }
     else { PA_LAUNCH(512); }
     #undef PA_LAUNCH
+    #undef PA_LAUNCH_T
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return out;
 }
@@ -2187,6 +2235,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("wq") = c10::optional<torch::Tensor>(),
           py::arg("wk") = c10::optional<torch::Tensor>(),
           py::arg("eps") = 1e-6);
+    m.def("moe_reduce", &moe_reduce,
+          "MoE : ponderation et somme des top_k sorties d'un jeton");
     m.def("moe_route", &moe_route, "routage MoE : scores, biais, top-k, poids");
     m.def("rmsnorm_bf16", &rmsnorm_bf16,
           "RMSNorm bf16 fusionnee (variance fp32), residu optionnel",
