@@ -586,3 +586,58 @@ qui subsistent.
 Le rebanc au protocole du comparatif (serveur démarré et arrêté par modèle) n'a
 pu être mené qu'un modèle : **agents-a1-4b-kimi 43,7 → 50,5 t/s**. Il reste à
 faire sur les 33 couples pour actualiser le tableau des quatre moteurs.
+
+## 3 septembre 2026, soir — les deux derniers lancements : v0.4.36 et v0.4.37
+
+Huit pistes avaient été listées après le profilage du décodage ; deux ont tenu
+la mesure, six ont été écartées **sur mesure** — ce qui vaut d'être écrit, parce
+que chacune paraissait évidente sur le papier.
+
+### v0.4.36 — le RMSNorm tournait avec un bloc de 256 fils, quelle que soit la
+largeur
+
+`rmsnorm_bf16_kernel` réduisait sur 256 fils, du 8B au 70B. Sur un modèle à
+`H = 5120`, chaque fil traitait 20 éléments et la réduction en arbre se payait
+sur une seule chaîne de warps. Le bloc est désormais choisi selon la largeur :
+
+```c
+const int th = H >= 2048 ? 1024 : (H >= 1024 ? 512 : 256);
+```
+
+Qwen3-Coder-30B-A3B : **172 → 183,7 t/s** (banc direct, 128 jetons, 5090).
+Commit `cd23f02`.
+
+### v0.4.37 — l'attention paginée lançait deux noyaux pour une seule tranche
+
+`paged_attn_partial_kernel` écrivait toujours des accumulateurs partiels, puis
+`paged_attn_reduce_kernel` les normalisait — même quand le contexte tient dans
+une seule tranche (`PA_CHUNK = 512`), c'est-à-dire dans l'immense majorité des
+pas de décodage courants. Le noyau partiel écrit maintenant directement la
+sortie normalisée quand `C == 1`, et le second lancement disparaît. Le brouillon
+spéculatif est passé au même régime : choix glouton, sans softmax ni tenseur de
+probabilités.
+
+**183,7 → 184,9 t/s**, texte identique sur un contrôle de 700 jetons.
+Commit `757f3e6`.
+
+### Les six pistes écartées
+
+| piste | attendu | mesuré |
+|---|---|---|
+| attention en NVFP4 (poids q/k/v/o) | moins d'octets lus | 184,9 → 173,5 : `nvfp4_gemv` plafonne à 767 Go/s contre 1780 pour `int8_gemv` |
+| produit `__half2` dans le noyau NVFP4 | deux e2m1 par instruction | 832 Go/s, inchangé — le noyau est lié à la lecture, pas au calcul |
+| noyau gate-up « large » (une tuile par bloc) | une passe de poids | 831 → 594 Go/s, pression de registres |
+| routage MoE fusionné en un bloc | un lancement de moins | 157 → 115 t/s : un seul bloc pour 1 Mo de logits |
+| MoE down fusionné | 8× moins de blocs | 121 → 119 t/s |
+| GEMV INT8 par warp | moins de synchronisations | 1797 → 1411 Go/s |
+
+La leçon des deux journées tient en une ligne : **au décodage, ce qui coûte
+n'est presque jamais l'arithmétique** — c'est le nombre de lancements, la
+largeur des lectures, et la pression de registres. Une piste qui réduit les
+FLOPs sans réduire les octets lus ne gagne rien.
+
+### Ménage
+
+Le modèle d'essai `Qwen3-Coder-30B-A3B-snr15` (17 Gio), converti pour mesurer
+le plancher de SNR à 15 dB, a été supprimé : la conversion de référence tient
+la qualité et le débit.
