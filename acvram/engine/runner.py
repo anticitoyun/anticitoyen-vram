@@ -489,6 +489,10 @@ class Engine:
         decodable = [s for s in decodable if not s.finished]
         if not decodable:
             return []
+        # Proposeur en veille (rendement trop faible) : le pas spéculatif à
+        # largeur 1 ne ferait qu'ajouter du travail Python.
+        if all(not len(proposals[s.id]) for s in decodable):
+            return self._plain_decode(decodable)
 
         batch = self._build_spec_batch(decodable, proposals)
         flat = self.graphs.run(batch) if self.graphs is not None else None

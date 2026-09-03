@@ -206,7 +206,11 @@ __device__ __forceinline__ void store_y(YT *p, float v) {
     if constexpr (sizeof(YT) == 4) *p = v; else *p = __float2bfloat16(v);
 }
 
-template <int ROWS, typename XT, typename YT>
+// NV activations par lecture de poids : la matrice quantifiée est le tenseur
+// cher, l'activation tient en registres. Boucler sur N à l'extérieur relisait
+// tout le poids par jeton, ce qui rendait la vérification spéculative et les
+// lots plus coûteux qu'autant de pas séparés.
+template <int ROWS, int NV, typename XT, typename YT>
 __global__ void nvfp4_gemv_kernel(
     const unsigned char *__restrict__ qw,
     const unsigned char *__restrict__ bscale,
@@ -220,62 +224,68 @@ __global__ void nvfp4_gemv_kernel(
     if (row0 >= M) return;
     const int nloads = K / WEIGHTS_PER_LOAD;
     const int split = blockIdx.y;
-    const int per_split = (nloads + k_splits - 1) / k_splits;
-    const int lo = split * per_split;
-    const int hi = min(nloads, lo + per_split);
     const long half_k = K >> 1;
 
-    for (int n = 0; n < N; ++n) {
-        const XT *xn = x + (long)n * K;
-        float acc[ROWS];
+    float acc[ROWS][NV];
+    #pragma unroll
+    for (int r = 0; r < ROWS; ++r)
         #pragma unroll
-        for (int r = 0; r < ROWS; ++r) acc[r] = 0.f;
+        for (int n = 0; n < NV; ++n) acc[r][n] = 0.f;
 
-        // Deux blocs de 16 par itération : un uint4 charge 32 poids d'un
-        // coup, soit une transaction de 16 octets par fil — la 5090 n'attei-
-        // gnait qu'un quart de sa bande passante avec des lectures de 8.
-        // Le découpage se fait en paires de blocs, jamais au milieu d'une.
-        const int npairs = nloads >> 1;
-        const int per_split_p = (npairs + k_splits - 1) / k_splits;
-        const int lo_p = split * per_split_p;
-        const int hi_p = min(npairs, lo_p + per_split_p);
-        for (int i = lo_p + threadIdx.x; i < hi_p; i += blockDim.x) {
-            float xs[2 * WEIGHTS_PER_LOAD];
-            load_xs<XT, 2 * WEIGHTS_PER_LOAD>(xn + (long)i * 2 * WEIGHTS_PER_LOAD, xs);
+    // Deux blocs de 16 par itération : un uint4 charge 32 poids d'un coup,
+    // soit une transaction de 16 octets par fil — la 5090 n'atteignait qu'un
+    // quart de sa bande passante avec des lectures de 8. Le découpage se fait
+    // en paires de blocs, jamais au milieu d'une.
+    const int npairs = nloads >> 1;
+    const int per_split_p = (npairs + k_splits - 1) / k_splits;
+    const int lo_p = split * per_split_p;
+    const int hi_p = min(npairs, lo_p + per_split_p);
+    for (int i = lo_p + threadIdx.x; i < hi_p; i += blockDim.x) {
+        float xs[NV][2 * WEIGHTS_PER_LOAD];
+        #pragma unroll
+        for (int n = 0; n < NV; ++n)
+            load_xs<XT, 2 * WEIGHTS_PER_LOAD>(
+                x + (long)n * K + (long)i * 2 * WEIGHTS_PER_LOAD, xs[n]);
+        #pragma unroll
+        for (int r = 0; r < ROWS; ++r) {
+            const int row = row0 + r;
+            if (row >= M) continue;
+            const uint4 p4 = reinterpret_cast<const uint4 *>(qw + (long)row * half_k)[i];
+            const float s0 = e4m3_to_float(bscale[(long)row * nloads + 2 * i]) * gscale;
+            const float s1 = e4m3_to_float(bscale[(long)row * nloads + 2 * i + 1]) * gscale;
+            const unsigned int words[4] = {p4.x, p4.y, p4.z, p4.w};
+            float p0[NV], p1[NV];
             #pragma unroll
-            for (int r = 0; r < ROWS; ++r) {
-                const int row = row0 + r;
-                if (row >= M) continue;
-                const uint4 p4 = reinterpret_cast<const uint4 *>(
-                    qw + (long)row * half_k)[i];
-                const float s0 = e4m3_to_float(bscale[(long)row * nloads + 2 * i])
-                                 * gscale;
-                const float s1 = e4m3_to_float(bscale[(long)row * nloads + 2 * i + 1])
-                                 * gscale;
-                const unsigned int words[4] = {p4.x, p4.y, p4.z, p4.w};
-                float part0 = 0.f, part1 = 0.f;
+            for (int n = 0; n < NV; ++n) { p0[n] = 0.f; p1[n] = 0.f; }
+            #pragma unroll
+            for (int b = 0; b < 8; ++b) {
+                const float2 v0 = e2m1_pair((words[b >> 2] >> ((b & 3) * 8)) & 0xFFu);
+                const float2 v1 = e2m1_pair((words[2 + (b >> 2)] >> ((b & 3) * 8)) & 0xFFu);
                 #pragma unroll
-                for (int b = 0; b < 8; ++b) {
-                    const unsigned int w0 = words[b >> 2];
-                    const float2 v0 = e2m1_pair((w0 >> ((b & 3) * 8)) & 0xFFu);
-                    part0 += v0.x * xs[2 * b] + v0.y * xs[2 * b + 1];
-                    const unsigned int w1 = words[2 + (b >> 2)];
-                    const float2 v1 = e2m1_pair((w1 >> ((b & 3) * 8)) & 0xFFu);
-                    part1 += v1.x * xs[WEIGHTS_PER_LOAD + 2 * b]
-                           + v1.y * xs[WEIGHTS_PER_LOAD + 2 * b + 1];
+                for (int n = 0; n < NV; ++n) {
+                    p0[n] += v0.x * xs[n][2 * b] + v0.y * xs[n][2 * b + 1];
+                    p1[n] += v1.x * xs[n][WEIGHTS_PER_LOAD + 2 * b]
+                           + v1.y * xs[n][WEIGHTS_PER_LOAD + 2 * b + 1];
                 }
-                acc[r] += part0 * s0 + part1 * s1;
             }
+            #pragma unroll
+            for (int n = 0; n < NV; ++n) acc[r][n] += p0[n] * s0 + p1[n] * s1;
         }
+    }
 
-        block_reduce_rows<ROWS>(acc, smem, nwarps);
+    #pragma unroll
+    for (int n = 0; n < NV; ++n) {
+        float a[ROWS];
+        #pragma unroll
+        for (int r = 0; r < ROWS; ++r) a[r] = acc[r][n];
+        block_reduce_rows<ROWS>(a, smem, nwarps);
         if (threadIdx.x == 0) {
             #pragma unroll
             for (int r = 0; r < ROWS; ++r) {
                 const int row = row0 + r;
                 if (row >= M) continue;
-                if (k_splits == 1) store_y(y + (long)n * M + row, acc[r]);
-                else atomicAdd(reinterpret_cast<float *>(y) + (long)n * M + row, acc[r]);
+                if (k_splits == 1) store_y(y + (long)n * M + row, a[r]);
+                else atomicAdd(reinterpret_cast<float *>(y) + (long)n * M + row, a[r]);
             }
         }
         __syncthreads();
@@ -427,7 +437,13 @@ __global__ void int8_dequant_kernel(
     }
 }
 
-template <int ROWS, typename XT, typename YT>
+// N activations par lecture de poids. Le noyau d'origine bouclait sur les
+// lignes d'activation à l'extérieur et relisait la matrice entière pour
+// chacune : un pas de vérification spéculative à cinq jetons coûtait cinq
+// fois le trafic d'un pas simple, et la spéculation ne pouvait jamais payer.
+// Ici le poids est lu une fois et sert aux N activations, gardées en
+// registres.
+template <int ROWS, int NV, typename XT, typename YT>
 __global__ void int8_gemv_kernel(
     const unsigned char *__restrict__ qw,
     const __half *__restrict__ scales,
@@ -446,43 +462,57 @@ __global__ void int8_gemv_kernel(
     const int lo = split * per_split;
     const int hi = min(nloads, lo + per_split);
 
-    for (int n = 0; n < N; ++n) {
-        const XT *xn = x + (long)n * K;
-        float acc[ROWS];
+    float acc[ROWS][NV];
+    #pragma unroll
+    for (int r = 0; r < ROWS; ++r)
         #pragma unroll
-        for (int r = 0; r < ROWS; ++r) acc[r] = 0.f;
+        for (int n = 0; n < NV; ++n) acc[r][n] = 0.f;
 
-        for (int i = lo + threadIdx.x; i < hi; i += blockDim.x) {
-            float xs[WEIGHTS_PER_LOAD];
-            load_xs<XT, WEIGHTS_PER_LOAD>(xn + (long)i * WEIGHTS_PER_LOAD, xs);
-            const int g = (i * WEIGHTS_PER_LOAD) / group;
+    for (int i = lo + threadIdx.x; i < hi; i += blockDim.x) {
+        // Les N activations sont chargées une fois par lecture de poids : le
+        // poids est le tenseur cher, l'activation tient en registres.
+        float xs[NV][WEIGHTS_PER_LOAD];
+        #pragma unroll
+        for (int n = 0; n < NV; ++n)
+            load_xs<XT, WEIGHTS_PER_LOAD>(
+                x + (long)n * K + (long)i * WEIGHTS_PER_LOAD, xs[n]);
+        const int g = (i * WEIGHTS_PER_LOAD) / group;
+        #pragma unroll
+        for (int r = 0; r < ROWS; ++r) {
+            const int row = row0 + r;
+            if (row >= M) continue;
+            const uint4 p = reinterpret_cast<const uint4 *>(qw + (long)row * K)[i];
+            const float s = __half2float(scales[(long)row * ng + g]);
+            const float z = static_cast<float>(zeros[(long)row * ng + g]);
+            const unsigned int words[4] = {p.x, p.y, p.z, p.w};
+            float part[NV];
             #pragma unroll
-            for (int r = 0; r < ROWS; ++r) {
-                const int row = row0 + r;
-                if (row >= M) continue;
-                const uint4 p = reinterpret_cast<const uint4 *>(
-                    qw + (long)row * K)[i];
-                const float s = __half2float(scales[(long)row * ng + g]);
-                const float z = static_cast<float>(zeros[(long)row * ng + g]);
-                const unsigned int words[4] = {p.x, p.y, p.z, p.w};
-                float part = 0.f;
+            for (int n = 0; n < NV; ++n) part[n] = 0.f;
+            #pragma unroll
+            for (int j = 0; j < WEIGHTS_PER_LOAD; ++j) {
+                const float v =
+                    static_cast<float>((words[j >> 2] >> ((j & 3) * 8)) & 0xFFu) - z;
                 #pragma unroll
-                for (int j = 0; j < WEIGHTS_PER_LOAD; ++j) {
-                    const unsigned int b = (words[j >> 2] >> ((j & 3) * 8)) & 0xFFu;
-                    part += (static_cast<float>(b) - z) * xs[j];
-                }
-                acc[r] += part * s;
+                for (int n = 0; n < NV; ++n) part[n] += v * xs[n][j];
             }
+            #pragma unroll
+            for (int n = 0; n < NV; ++n) acc[r][n] += part[n] * s;
         }
+    }
 
-        block_reduce_rows<ROWS>(acc, smem, nwarps);
+    #pragma unroll
+    for (int n = 0; n < NV; ++n) {
+        float a[ROWS];
+        #pragma unroll
+        for (int r = 0; r < ROWS; ++r) a[r] = acc[r][n];
+        block_reduce_rows<ROWS>(a, smem, nwarps);
         if (threadIdx.x == 0) {
             #pragma unroll
             for (int r = 0; r < ROWS; ++r) {
                 const int row = row0 + r;
                 if (row >= M) continue;
-                if (k_splits == 1) store_y(y + (long)n * M + row, acc[r]);
-                else atomicAdd(reinterpret_cast<float *>(y) + (long)n * M + row, acc[r]);
+                if (k_splits == 1) store_y(y + (long)n * M + row, a[r]);
+                else atomicAdd(reinterpret_cast<float *>(y) + (long)n * M + row, a[r]);
             }
         }
         __syncthreads();
@@ -928,20 +958,34 @@ torch::Tensor nvfp4_gemv(torch::Tensor qweight, torch::Tensor block_scale,
     // lent sur toutes les formes. Quatre lignes restent l'optimum ici.
     dim3 grid((M + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK, splits);
     const size_t shm = ROWS_PER_BLOCK * nwarps * sizeof(float);
-    if (bf) {
-        nvfp4_gemv_kernel<ROWS_PER_BLOCK, __nv_bfloat16, __nv_bfloat16>
-            <<<grid, threads, shm, stream>>>(
-                qweight.data_ptr<unsigned char>(),
-                block_scale.data_ptr<unsigned char>(), (float)global_scale,
-                reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr()),
-                reinterpret_cast<__nv_bfloat16 *>(out.data_ptr()), M, (int)K, N, 1);
-    } else {
-        nvfp4_gemv_kernel<ROWS_PER_BLOCK, float, float>
-            <<<grid, threads, shm, stream>>>(
-                qweight.data_ptr<unsigned char>(),
-                block_scale.data_ptr<unsigned char>(), (float)global_scale,
-                xc.data_ptr<float>(), out.data_ptr<float>(), M, (int)K, N, splits);
+    #define F4G(NV, XT, YT, PX, PY, SP) nvfp4_gemv_kernel<ROWS_PER_BLOCK, NV, XT, YT> \
+        <<<grid, threads, shm, stream>>>( \
+            qweight.data_ptr<unsigned char>(), \
+            block_scale.data_ptr<unsigned char>(), (float)global_scale, \
+            PX, PY, M, (int)K, n_, SP)
+    #define F4G_N(XT, YT, PX, PY, SP) do { \
+        switch (n_) { \
+        case 1: F4G(1, XT, YT, PX, PY, SP); break; \
+        case 2: F4G(2, XT, YT, PX, PY, SP); break; \
+        case 3: F4G(3, XT, YT, PX, PY, SP); break; \
+        case 4: F4G(4, XT, YT, PX, PY, SP); break; \
+        case 5: F4G(5, XT, YT, PX, PY, SP); break; \
+        case 6: F4G(6, XT, YT, PX, PY, SP); break; \
+        case 7: F4G(7, XT, YT, PX, PY, SP); break; \
+        default: F4G(8, XT, YT, PX, PY, SP); break; } } while (0)
+    for (int base = 0; base < N; base += 8) {
+        const int n_ = min(8, N - base);
+        if (bf) {
+            F4G_N(__nv_bfloat16, __nv_bfloat16,
+                  reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr()) + (long)base * K,
+                  reinterpret_cast<__nv_bfloat16 *>(out.data_ptr()) + (long)base * M, 1);
+        } else {
+            F4G_N(float, float, xc.data_ptr<float>() + (long)base * K,
+                  out.data_ptr<float>() + (long)base * M, splits);
+        }
     }
+    #undef F4G
+    #undef F4G_N
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return x.dim() == 1 ? out.squeeze(0) : out;
 }
@@ -1065,22 +1109,37 @@ torch::Tensor int8_gemv(torch::Tensor qweight, torch::Tensor scales,
     dim3 grid((M + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK, splits);
     auto stream = at::cuda::getCurrentCUDAStream();
     const size_t shm = ROWS_PER_BLOCK * nwarps * sizeof(float);
-    if (bf) {
-        int8_gemv_kernel<ROWS_PER_BLOCK, __nv_bfloat16, __nv_bfloat16>
-            <<<grid, threads, shm, stream>>>(
-                qweight.data_ptr<unsigned char>(),
-                reinterpret_cast<const __half *>(scales.data_ptr()),
-                zeros.data_ptr<unsigned char>(),
-                reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr()),
-                reinterpret_cast<__nv_bfloat16 *>(out.data_ptr()), M, K, N, (int)group, 1);
-    } else {
-        int8_gemv_kernel<ROWS_PER_BLOCK, float, float>
-            <<<grid, threads, shm, stream>>>(
-                qweight.data_ptr<unsigned char>(),
-                reinterpret_cast<const __half *>(scales.data_ptr()),
-                zeros.data_ptr<unsigned char>(), xc.data_ptr<float>(),
-                out.data_ptr<float>(), M, K, N, (int)group, splits);
+    // NV : nombre d'activations traitées par lecture de poids, arrondi à la
+    // puissance de deux supérieure (les lignes en trop sont ignorées).
+    #define I8G(NV, XT, YT, PX, PY, SP) int8_gemv_kernel<ROWS_PER_BLOCK, NV, XT, YT> \
+        <<<grid, threads, shm, stream>>>( \
+            qweight.data_ptr<unsigned char>(), \
+            reinterpret_cast<const __half *>(scales.data_ptr()), \
+            zeros.data_ptr<unsigned char>(), PX, PY, M, K, N, (int)group, SP)
+    #define I8G_N(XT, YT, PX, PY, SP) do { \
+        switch (N) { \
+        case 1: I8G(1, XT, YT, PX, PY, SP); break; \
+        case 2: I8G(2, XT, YT, PX, PY, SP); break; \
+        case 3: I8G(3, XT, YT, PX, PY, SP); break; \
+        case 4: I8G(4, XT, YT, PX, PY, SP); break; \
+        case 5: I8G(5, XT, YT, PX, PY, SP); break; \
+        case 6: I8G(6, XT, YT, PX, PY, SP); break; \
+        case 7: I8G(7, XT, YT, PX, PY, SP); break; \
+        default: I8G(8, XT, YT, PX, PY, SP); break; } } while (0)
+    const int Ntot = N;
+    for (int base = 0; base < Ntot; base += 8) {
+        const int N = min(8, Ntot - base);      // masque volontaire pour I8G_N
+        if (bf) {
+            I8G_N(__nv_bfloat16, __nv_bfloat16,
+                  reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr()) + (long)base * K,
+                  reinterpret_cast<__nv_bfloat16 *>(out.data_ptr()) + (long)base * M, 1);
+        } else {
+            I8G_N(float, float, xc.data_ptr<float>() + (long)base * K,
+                  out.data_ptr<float>() + (long)base * M, splits);
+        }
     }
+    #undef I8G
+    #undef I8G_N
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return x.dim() == 1 ? out.squeeze(0) : out;
 }

@@ -76,40 +76,91 @@ class NGramProposer:
     Cherche du n-gramme le plus long au plus court : une correspondance longue
     est plus rare mais bien plus souvent juste, si bien qu'essayer 4 avant 2
     coûte un balayage de plus et relève sensiblement le taux d'acceptation.
+
+    L'index des n-grammes est tenu à jour au fil de l'eau, une entrée par
+    jeton et par longueur : proposer coûte alors trois consultations de
+    dictionnaire. Le balayage arrière d'une fenêtre de 4096 jetons, en Python
+    pur et à chaque pas, coûtait à lui seul près d'un dixième du débit — plus
+    que la spéculation ne rapportait sur du texte non répétitif.
     """
 
     name = "ngram"
 
     def __init__(self, max_ngram: int = 4, min_ngram: int = 2,
-                 max_window: int = 4096) -> None:
+                 max_window: int = 4096, adaptatif: bool = True,
+                 seuil: float = 0.15, fenetre: int = 24,
+                 pause: int = 64) -> None:
         self.max_ngram = max_ngram
         self.min_ngram = min_ngram
         self.max_window = max_window
+        # Une proposition rejetée n'est pas gratuite : le pas de vérification
+        # coûte quelques pour cent de plus qu'un pas simple. Le proposeur
+        # surveille son rendement et se met en veille quand il gagne moins de
+        # « seuil » jeton par pas, en réessayant périodiquement.
+        self.adaptatif = adaptatif
+        self.seuil = seuil
+        self.fenetre = fenetre
+        self.pause = pause
+        self._etat: dict[Any, dict] = {}
+
+    def _cle(self, seq: Any):
+        return seq.id if hasattr(seq, "id") else id(seq)
+
+    def _st(self, seq: Any) -> dict:
+        st = self._etat.get(self._cle(seq))
+        if st is None:
+            st = {"index": {n: {} for n in range(self.min_ngram, self.max_ngram + 1)},
+                  "vus": {n: 0 for n in range(self.min_ngram, self.max_ngram + 1)},
+                  "pas": 0, "gain": 0, "veille": 0}
+            self._etat[self._cle(seq)] = st
+        return st
+
+    def _indexer(self, st: dict, ids) -> None:
+        """Enregistre les n-grammes qui se terminent avant le suffixe courant."""
+        L = len(ids)
+        for n in range(self.min_ngram, self.max_ngram + 1):
+            d = st["index"][n]
+            j = st["vus"][n]
+            fin = L - n                      # le suffixe courant n'est pas indexé
+            while j < fin:
+                d[tuple(ids[j:j + n])] = j + n
+                j += 1
+            st["vus"][n] = max(j, 0)
 
     def propose(self, seq: Any, k: int) -> Proposal:
         ids = seq.all_ids
-        if len(ids) < self.min_ngram + 1:
+        if len(ids) < self.min_ngram + 1 or k <= 0:
             return Proposal([])
-        window = ids[-self.max_window:]
-        base = len(ids) - len(window)
-        for n in range(min(self.max_ngram, len(window) - 1), self.min_ngram - 1, -1):
-            suffix = window[-n:]
-            # On remonte à la recherche de l'occurrence antérieure la plus récente.
-            for start in range(len(window) - n - 1, -1, -1):
-                if window[start:start + n] != suffix:
-                    continue
-                nxt = window[start + n:start + n + k]
-                if nxt:
-                    return Proposal(list(nxt))
-                break
-        del base
+        st = self._st(seq)
+        self._indexer(st, ids)
+        if self.adaptatif:
+            if st["veille"] > 0:
+                st["veille"] -= 1
+                return Proposal([])
+            # le pas est compté ici : un pas sans proposition pèse aussi dans
+            # le rendement, et c'est le cas le plus fréquent en prose
+            st["pas"] += 1
+            if st["pas"] >= self.fenetre:
+                if st["gain"] / st["pas"] < self.seuil:
+                    st["veille"] = self.pause
+                st["pas"] = st["gain"] = 0
+        for n in range(min(self.max_ngram, len(ids) - 1), self.min_ngram - 1, -1):
+            p = st["index"][n].get(tuple(ids[-n:]))
+            if p is None:
+                continue
+            nxt = ids[p:p + k]
+            if nxt:
+                return Proposal(list(nxt))
         return Proposal([])
 
     def commit(self, seq: Any, accepted: list[int]) -> None:
-        return
+        if not self.adaptatif:
+            return
+        st = self._st(seq)
+        st["gain"] += max(0, len(accepted) - 1)
 
     def release(self, seq: Any) -> None:
-        return
+        self._etat.pop(self._cle(seq), None)
 
 
 # --------------------------------------------------------------------------
