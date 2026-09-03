@@ -1388,6 +1388,64 @@ torch::Tensor nvfp4_gemm_grouped(torch::Tensor qw, torch::Tensor bscale,
     return y;
 }
 
+
+// --------------------------------------------------------------------------
+// RoPE en place : q et k tournés d'un seul lancement.
+//
+// En PyTorch la même chose coûte, par couche, deux tranches, deux négations,
+// deux concaténations et quatre produits — une dizaine de petits noyaux dont
+// aucun ne fait de calcul utile au-delà d'une multiplication par jeton.
+// Les « d » premières dimensions tournent (RoPE partiel de qwen3-next), le
+// reste passe tel quel.
+// --------------------------------------------------------------------------
+__global__ void rope_inplace_kernel(__nv_bfloat16 *__restrict__ q,
+                                    __nv_bfloat16 *__restrict__ k,
+                                    const float *__restrict__ cosv,
+                                    const float *__restrict__ sinv,
+                                    const long *__restrict__ pos,
+                                    int Hq, int Hk, int Dq, int Dk, int d) {
+    const int t = blockIdx.x, h = blockIdx.y;
+    const int demi = d >> 1;
+    __nv_bfloat16 *base = (h < Hq) ? q + ((long)t * Hq + h) * Dq
+                                   : k + ((long)t * Hk + (h - Hq)) * Dk;
+    // Les tables complètes sont passées telles quelles : indexer ici épargne
+    // deux index_select et deux conversions par couche.
+    const long ligne = (pos != nullptr) ? pos[t] : (long)t;
+    const float *c = cosv + ligne * d, *s = sinv + ligne * d;
+    for (int i = threadIdx.x; i < demi; i += blockDim.x) {
+        const float a = __bfloat162float(base[i]);
+        const float b = __bfloat162float(base[i + demi]);
+        base[i] = __float2bfloat16(a * c[i] - b * s[i]);
+        base[i + demi] = __float2bfloat16(b * c[i + demi] + a * s[i + demi]);
+    }
+}
+
+void rope_inplace_pos(torch::Tensor q, torch::Tensor k, torch::Tensor cosv,
+                      torch::Tensor sinv, c10::optional<torch::Tensor> pos) {
+    CHECK_CUDA(q); CHECK_CUDA(k); ACVRAM_DEVICE_GUARD(q);
+    CHECK_CONTIG(q); CHECK_CONTIG(k); CHECK_CONTIG(cosv); CHECK_CONTIG(sinv);
+    TORCH_CHECK(q.dim() == 3 && k.dim() == 3, "rope : [jetons, tetes, dim]");
+    TORCH_CHECK(q.scalar_type() == torch::kBFloat16
+                && k.scalar_type() == torch::kBFloat16, "rope : bf16");
+    TORCH_CHECK(cosv.scalar_type() == torch::kFloat, "rope : cos/sin en fp32");
+    const int T = q.size(0), Hq = q.size(1), Dq = q.size(2);
+    const int Hk = k.size(1), Dk = k.size(2), d = cosv.size(-1);
+    TORCH_CHECK(d % 2 == 0 && d <= Dq && d <= Dk, "rope : dimension tournee invalide");
+    const long *ppos = nullptr;
+    if (pos.has_value()) {
+        TORCH_CHECK(pos->scalar_type() == torch::kLong, "rope : positions int64");
+        TORCH_CHECK(pos->numel() == T, "rope : une position par jeton");
+        ppos = pos->data_ptr<long>();
+    }
+    dim3 grid(T, Hq + Hk);
+    const int th = std::min(256, ((d / 2) + 31) / 32 * 32);
+    rope_inplace_kernel<<<grid, th, 0, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<__nv_bfloat16 *>(q.data_ptr()),
+        reinterpret_cast<__nv_bfloat16 *>(k.data_ptr()),
+        cosv.data_ptr<float>(), sinv.data_ptr<float>(), ppos, Hq, Hk, Dq, Dk, d);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 torch::Tensor nvfp4_gemv_grouped(torch::Tensor qw, torch::Tensor bscale,
                                  torch::Tensor gscales,
                                  torch::Tensor expert_ids,
@@ -1897,6 +1955,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "MoE NVFP4 : GEMM groupee sur tuiles de jetons, poids lus en 4 bits");
     m.def("int4_gemv_grouped", &int4_gemv_grouped,
           "INT4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
+    m.def("rope_inplace", &rope_inplace_pos, "RoPE en place sur q et k",
+          py::arg("q"), py::arg("k"), py::arg("cos"), py::arg("sin"),
+          py::arg("positions") = c10::optional<torch::Tensor>());
     m.def("moe_route", &moe_route, "routage MoE : scores, biais, top-k, poids");
     m.def("rmsnorm_bf16", &rmsnorm_bf16, "RMSNorm bf16 fusionnee (variance fp32)");
     m.def("kda_decode", &kda_decode, "KDA : pas de decodage fusionne (une sequence)");

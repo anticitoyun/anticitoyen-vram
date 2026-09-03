@@ -283,6 +283,17 @@ class RotaryEmbedding(nn.Module):
         self._sin = emb.sin().to(dtype)
         self._cache_len = n
 
+    def tables32(self, max_pos: int, device):
+        """Tables cos/sin complètes en fp32, pour le noyau fusionné : lui
+        indexe par position, ce qui épargne deux index_select et deux
+        conversions par couche et par jeton."""
+        self._ensure(max_pos, device, self._dtype)
+        c32 = getattr(self, "_cos32", None)
+        if c32 is None or c32.shape[0] != self._cos.shape[0] or c32.device != device:
+            self._cos32 = self._cos.to(torch.float32).contiguous()
+            self._sin32 = self._sin.to(torch.float32).contiguous()
+        return self._cos32, self._sin32
+
     def forward(self, positions: torch.Tensor, device, dtype,
                 max_pos: Optional[int] = None
                 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -302,8 +313,43 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x[..., half:], x[..., :half]), dim=-1)
 
 
+def rope_fusee(q: torch.Tensor, k: torch.Tensor, rope, positions: torch.Tensor,
+               max_pos: int):
+    """RoPE en un lancement, tables indexées dans le noyau. None si inéligible."""
+    from .. import kernels as _k
+    ext = _k.get_extension()
+    if (ext is None or not hasattr(ext, "rope_inplace") or not q.is_cuda
+            or q.dtype != torch.bfloat16 or k.dtype != torch.bfloat16
+            or q.dim() != 3 or k.dim() != 3):
+        return None
+    cos32, sin32 = rope.tables32(max_pos, q.device)
+    d = cos32.shape[-1]
+    if d % 2 or d > q.shape[-1] or d > k.shape[-1]:
+        return None
+    qc = q if q.is_contiguous() else q.contiguous()
+    kc = k if k.is_contiguous() else k.contiguous()
+    pos = positions if positions.dtype == torch.int64 else positions.to(torch.int64)
+    ext.rope_inplace(qc, kc, cos32, sin32, pos)
+    return qc, kc
+
+
 def apply_rope(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor,
                sin: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    # Chemin fusionné : un lancement au lieu d'une dizaine de petits noyaux
+    # (tranches, négations, concaténations, produits) qui ne font qu'une
+    # multiplication par élément. Le RoPE partiel est géré par le noyau, qui
+    # ne touche que les cos.shape[-1] premières dimensions.
+    from .. import kernels as _k
+    ext = _k.get_extension()
+    if (ext is not None and hasattr(ext, "rope_inplace") and q.is_cuda
+            and q.dtype == torch.bfloat16 and k.dtype == torch.bfloat16
+            and q.dim() == 3 and k.dim() == 3 and cos.dim() == 2
+            and cos.shape[0] == q.shape[0] and cos.shape[-1] % 2 == 0
+            and cos.shape[-1] <= q.shape[-1] and cos.shape[-1] <= k.shape[-1]):
+        qc = q if q.is_contiguous() else q.contiguous()
+        kc = k if k.is_contiguous() else k.contiguous()
+        ext.rope_inplace(qc, kc, cos.float().contiguous(), sin.float().contiguous())
+        return qc, kc
     if cos.shape[-1] < q.shape[-1]:
         # RoPE partiel (qwen3-next : 64 dims tournées sur 256) : la tranche
         # au-delà passe telle quelle.

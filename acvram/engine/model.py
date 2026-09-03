@@ -27,7 +27,7 @@ import torch.nn.functional as F
 from .. import kernels
 from ..memory.kvcache import PagedKVCache, bucket_blocks
 from .config import ModelSpec
-from .layers import (QuantLinear, RMSNorm, RotaryEmbedding, apply_rope,
+from .layers import (QuantLinear, RMSNorm, RotaryEmbedding, apply_rope, rope_fusee,
                      attention, batched_decode_attention,
                      decode_attention_fixed, repeat_kv)
 
@@ -209,9 +209,14 @@ class Attention(nn.Module):
             k = self.k_norm(k)
 
         if self.rope is not None:
-            cos, sin = self.rope(batch.positions_on(x.device), x.device, x.dtype,
-                                 max_pos=max(batch.seq_lens))
-            q, k = apply_rope(q, k, cos, sin)
+            pos = batch.positions_on(x.device)
+            mx = max(batch.seq_lens)
+            r = rope_fusee(q, k, self.rope, pos, mx)
+            if r is not None:
+                q, k = r
+            else:
+                cos, sin = self.rope(pos, x.device, x.dtype, max_pos=mx)
+                q, k = apply_rope(q, k, cos, sin)
 
         if cache is not None:
             cache.write(batch.slots_on(x.device), k, v)
@@ -242,8 +247,12 @@ class Attention(nn.Module):
         if self.k_norm is not None:
             k = self.k_norm(k)
         if self.rope is not None:
-            cos, sin = self.rope(positions, x.device, x.dtype, max_pos=max_pos)
-            q, k = apply_rope(q, k, cos, sin)
+            r = rope_fusee(q, k, self.rope, positions, max_pos)
+            if r is not None:
+                q, k = r
+            else:
+                cos, sin = self.rope(positions, x.device, x.dtype, max_pos=max_pos)
+                q, k = apply_rope(q, k, cos, sin)
         cache.write(slots, k, v)
         out = kernels.paged_attention(q, cache, block_tables, seq_lens,
                                       self.n_rep, self.scale, q_len=q_len,
