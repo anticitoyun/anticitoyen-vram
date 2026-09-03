@@ -471,3 +471,118 @@ en TOML) ont été réappliqués après restauration.
 Reste à combler contre llama.cpp : Coder-30B (99 contre 234) et LFM2.5
 (244 contre 543) — le décodage MoE y est encore borné par la GEMV groupée à
 une paire (jeton, expert) par tranche de grille.
+
+## 3 septembre 2026, après-midi — le décodage : v0.4.30 à v0.4.35
+
+Le profil d'un pas de décodage (Qwen3-Coder-30B, 48 couches, un jeton)
+montrait 10,5 ms dont un tiers seulement dans les produits matriciels. Le
+reste partait en petits noyaux : environ vingt-cinq lancements par couche,
+chacun payant quelques microsecondes de rampe pour quelques kilooctets. Sur ce
+terrain, supprimer un lancement vaut autant qu'accélérer une GEMV.
+
+### Conflits de banques en mémoire partagée (v0.4.30)
+
+Le produit ligne-activation fait lire à la voie « l » les 32 flottants
+`[l*32, l*32+32)` : rangés à plat, ils tombent tous dans la même banque et le
+warp sérialisait en 32 accès. Un flottant de bourrage tous les 32 décale
+chaque voie d'une banque. Noyau MoE gate-up mesuré seul : **516 → 832 Go/s**.
+
+La même version empile q, k et v en une GEMV (deux des trois étaient minuscules
+à cause des têtes KV groupées) et corrige un défaut plus ancien : `gate_up` et
+`qkv_proj` étaient déclarés en attributs de **classe**, ce qui masque le module
+enregistré par `nn.Module.__setattr__` — `self.gate_up` restait `None` et la
+fusion gate/up n'avait jamais servi depuis son introduction.
+
+### RoPE et normes de tête fusionnées (v0.4.31, v0.4.32)
+
+Le chemin PyTorch coûtait, par couche, deux `index_select` sur les tables
+cos/sin, deux tranches, deux négations, deux concaténations et quatre
+produits. `rope_inplace` tourne q et k en place en un lancement, reçoit les
+tables complètes plus les positions — l'indexation se fait dans le noyau — et
+applique au passage les normes RMS par tête : une tête tient dans un bloc, sa
+somme des carrés ne coûte qu'une réduction. Le noyau suit aussi le pas de q et
+k, tranches de la projection empilée, ce qui évite deux copies.
+
+### L'écriture du cache KV (v0.4.32)
+
+Le gisement le plus lourd, invisible dans le profil par noyau parce qu'il était
+éparpillé : l'écriture du cache quantifié enchaînait, **par couche et pour
+chacun de k et v**, un abs, un amax, deux conversions, une division, un round,
+un clamp, une conversion de sortie puis la dispersion. `kv_write_int8` fait
+tout en un lancement, un bloc par (jeton, tête). Échelles identiques à la
+référence, quantification identique à une unité près sur 3 valeurs sur 8704.
+
+**121 → 157 t/s** sur Qwen3-Coder-30B.
+
+### N activations par lecture de poids (v0.4.33)
+
+Les noyaux GEMV bouclaient sur les lignes d'activation à l'extérieur et
+relisaient toute la matrice pour chacune. Un pas de vérification spéculative à
+cinq jetons coûtait donc cinq fois le trafic d'un pas simple, un lot de huit
+requêtes huit fois — la spéculation et les lots ne pouvaient pas payer. Le
+poids est désormais lu une fois et sert aux N activations, gardées en
+registres ; NV est instancié exactement de 1 à 8, au-delà on passe par
+tranches.
+
+| | avant | après |
+|---|---|---|
+| INT8 5120×2048, N=5 | 5,0× le coût de N=1 | **2,4×** |
+| N=8 | 8,0× | **3,5×** |
+
+Débit agrégé Qwen3-Coder-30B : b=1 163 t/s, b=2 249, b=4 392, **b=8 509**.
+
+Le proposeur n-gram tient aussi son index au fil de l'eau (une entrée par jeton
+et par longueur) au lieu de balayer 4096 jetons en Python à chaque pas, et
+surveille son rendement : en dessous de 0,15 jeton gagné par pas il se met en
+veille et réessaie périodiquement. Prose 136 → 145 t/s, code 111 → 126.
+
+### Quatre lancements de moins par couche (v0.4.34, v0.4.35)
+
+`moe_reduce` (pondération, somme des top_k et conversion en un) ; le poids du
+routeur gardé dans le type de l'entrée ; `topw` en fp32 de bout en bout —
+l'aller-retour bf16 coûtait deux copies ; l'attention paginée acceptant q en
+bf16 et rendant du bf16 ; le résidu différé entre couches, absorbé par la
+normalisation d'entrée de la suivante.
+
+Régression attrapée par la série de non-régression : `topw` restant en fp32,
+`index_add_` de la boucle de repli refusait une source d'un autre type que la
+destination et Nemotron-Lightning plantait au premier jeton (v0.4.35).
+
+### Ce qui a été essayé et rejeté sur mesure
+
+* **Noyau gate-up « large »** (R lignes par warp, lectures groupées pour tenir
+  plus d'octets en vol) : 831 → 594 Go/s à R=4, la pression de registres coûte
+  plus que le gain de latence.
+* **Routage MoE fusionné** (produit du routeur dans le noyau de top-k) :
+  157 → 115 t/s — avec un seul jeton la grille tombe à **un bloc** pour lire un
+  mégaoctet de poids, là où cuBLAS occupe toute la carte.
+* **Projection MoE down fusionnée** (pondération et somme dans le noyau) :
+  121 → 119 t/s, huit fois moins de blocs.
+* **GEMV INT8 « un warp par ligne »** : 1797 → 1411 Go/s, le noyau historique
+  est déjà au plafond sur ces formes.
+* **Spéculation n-gram non adaptative** : coûte 5 à 16 % sur du texte peu
+  répétitif, d'où la veille automatique.
+
+Effet de bord instructif : 4 Ko de mémoire partagée ajoutés au noyau de
+routage, **même inutilisés**, coûtaient 7 % de débit.
+
+### Résultat (banc direct, 128 jetons, RTX 5090)
+
+| modèle | 2 septembre | 3 septembre | meilleur rival |
+|---|---|---|---|
+| Nemotron-Lightning-30B EXL3 | 3,1 | **158** | llama.cpp 195 |
+| Gemma-4-26B-A4B | 18 | **111** | llama.cpp 161 |
+| Qwen3-Coder-30B-A3B | 88 | **166-172** | llama.cpp 234 |
+| LFM2.5-8B-A1B | 208 | **270-297** | llama.cpp 543 |
+| GLM-4.7-Flash | 33 | **86** | llama.cpp 167 |
+| Cydonia-24B EXL3 | 41 | **52** | TabbyAPI 16 |
+| Skyfall-31B EXL3 | 27 | **39** | TabbyAPI 17 |
+
+Le pas de décodage est passé de 10,5 à 6,2 ms, et la part des produits
+matriciels d'un tiers à plus de la moitié : ce qui reste à gagner est
+désormais dans les GEMV elles-mêmes, ou dans la suppression des lancements
+qui subsistent.
+
+Le rebanc au protocole du comparatif (serveur démarré et arrêté par modèle) n'a
+pu être mené qu'un modèle : **agents-a1-4b-kimi 43,7 → 50,5 t/s**. Il reste à
+faire sur les 33 couples pour actualiser le tableau des quatre moteurs.
