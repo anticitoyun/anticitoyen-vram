@@ -131,10 +131,14 @@ s'installe en `.deb` et tourne dans un venv.
 | nvidia-smi | <https://docs.nvidia.com/deploy/nvidia-smi/> | **utilisé** — la source de vérité pour VRAM, horloges, puissance, température |
 | LACT | <https://github.com/ilya-zlobintsev/LACT> | à évaluer (courbes et limites) |
 
-Point relevé au reboot du 3 septembre : le **mode persistance est désactivé**
-sur les deux cartes ; les horloges partent de 225 MHz et il faut deux à trois
-tours de banc avant le plateau. À prendre en compte dans tout protocole de
-mesure — d'où les 7 tours de `banc-direct.py`, meilleur retenu.
+Deux points relevés au reboot du 3 septembre, à connaître avant toute mesure :
+
+- le **mode persistance est désactivé** sur les deux cartes ; les horloges
+  partent de 225 MHz et il faut deux à trois tours de banc avant le plateau —
+  d'où les 7 tours de `banc-direct.py`, meilleur retenu ;
+- les deux cartes sont **bridées en puissance** : 5090 à **400 W** (défaut 600,
+  plancher réglable 400) et 3080 Ti à **275 W** (défaut 350). Tous nos chiffres
+  sont mesurés ainsi. Voir `MATERIEL.md`.
 
 ## Profilage
 

@@ -91,13 +91,29 @@ sudo sysctl -w vm.nr_hugepages=8192      # 16 Go en pages de 2 Mo
 
 ## Alimentation et températures
 
-La 5090 Astral LC OC approchera les 600 W en prefill soutenu. Une limite posée
-par `nvidia-smi -pl` coûte moins de débit que ne le fait un étranglement
-thermique, et le décodage, limité par la mémoire, s'en aperçoit à peine.
+**Ce poste tourne bridé, et c'est délibéré** :
+
+| carte | limite posée | par défaut | plage réglable |
+|---|---|---|---|
+| RTX 5090 | **400 W** | 600 W | 400 à 600 W (le plancher est à 400) |
+| RTX 3080 Ti | **275 W** | 350 W | 100 à 375 W |
+
+La 5090 Astral LC OC approcherait les 600 W en prefill soutenu sans cela. Une
+limite posée par `nvidia-smi -pl` coûte moins de débit que ne le fait un
+étranglement thermique, et le **décodage, limité par la bande passante
+mémoire, ne s'en aperçoit presque pas** : les 400 W ne mordent qu'au prefill et
+sur les GEMM denses. Tous les chiffres de la feuille de route sont mesurés dans
+cet état — ce ne sont pas des chiffres de carte à pleine puissance.
 
 ```bash
-sudo nvidia-smi -i 0 -pl 500
+sudo nvidia-smi -i 0 -pl 400      # 5090, plancher constructeur
+sudo nvidia-smi -i 1 -pl 275      # 3080 Ti
+nvidia-smi --query-gpu=power.limit,power.default_limit --format=csv
 ```
+
+Le bridage n'est **pas** persistant au redémarrage (le mode persistance est lui
+aussi désactivé) : à vérifier après chaque reboot avant toute campagne de
+mesure.
 
 Ne bridez **pas** les fréquences mémoire de la 5090 : le débit de décodage est
 proportionnel à la bande passante GDDR7, qui est tout l'intérêt de cette carte

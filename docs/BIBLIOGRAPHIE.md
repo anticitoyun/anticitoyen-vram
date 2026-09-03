@@ -203,8 +203,11 @@ transpose à la conversion.
 ## Ce que la liste dit de nos angles morts
 
 1. **L'énergie.** Trois de ces articles mesurent des joules par jeton ; nous ne
-   mesurons que des jetons par seconde. Sur une carte à 575 W, c'est la moitié
-   de l'histoire qui manque.
+   mesurons que des jetons par seconde. Ce poste tourne déjà bridé — 5090 à
+   **400 W** (au lieu de 600), 3080 Ti à **275 W** (au lieu de 350) — donc le
+   compromis puissance/débit est déjà choisi, mais jamais mesuré : nous ignorons
+   ce que ces 200 W en moins coûtent réellement en jetons par seconde, et où se
+   trouve le point d'inflexion.
 2. **La parcimonie d'activation** (6) : le seul levier proposé qui réduise les
    **octets lus**, notre mur réel.
 3. **Le choix des échelles** (5, 7) : notre plancher de SNR est empirique et
