@@ -381,3 +381,151 @@ def make_proposer(kind: str, **kwargs: Any) -> Optional[Proposer]:
                                      if k in ("loaded", "temperature",
                                               "max_model_len")})
     raise ValueError(f"unknown speculator {kind!r}; use ngram, draft or none")
+
+
+# --------------------------------------------------------------------------
+# tête de prédiction multi-jetons
+# --------------------------------------------------------------------------
+
+
+class MTPProposer:
+    """Brouillon tiré de la couche ``nextn`` du modèle lui-même.
+
+    Un modèle brouillon séparé coûte un modèle entier : mesuré ici, le débit
+    tombait de 152 à 30 t/s malgré 78 % d'acceptation. La tête MTP, elle, est
+    un unique bloc de transformeur — un soixante-quatrième d'un 27B — et elle a
+    été entraînée avec le modèle, sur son propre état caché.
+
+    Elle ne sert qu'au décodage d'une séquence à la fois : l'état caché de la
+    cible est repris dans un tampon unique, sans mémoire de l'ordre des
+    séquences d'un lot. C'est le cas interactif, celui où la latence compte.
+    """
+
+    name = "mtp"
+
+    def __init__(self, model: Any, temperature: float = 0.0,
+                 max_model_len: int = 8192) -> None:
+        from ..memory.kvcache import BLOCK_SIZE, BlockAllocator
+
+        self.model = model
+        self.tete = model.mtp
+        self.temperature = temperature
+        self.max_model_len = max_model_len
+        self.block_size = BLOCK_SIZE
+        self.allocator = BlockAllocator(self.tete.cache.cfg.num_blocks,
+                                        enable_prefix_cache=False)
+        self.state: dict[int, _DraftState] = {}
+        self._ligne = 0            # ligne du dernier lot vérifié à reprendre
+
+    def _ensure_blocks(self, st: _DraftState, needed_tokens: int) -> bool:
+        need = (needed_tokens + self.block_size - 1) // self.block_size
+        if need <= len(st.blocks):
+            return True
+        extra = need - len(st.blocks)
+        if self.allocator.num_free < extra:
+            return False
+        st.blocks.extend(self.allocator.allocate(extra))
+        return True
+
+    def _batch(self, st: _DraftState, tokens: list[int], start: int):
+        from .model import ForwardBatch
+        slots = [st.blocks[(start + i) // self.block_size] * self.block_size
+                 + (start + i) % self.block_size for i in range(len(tokens))]
+        return ForwardBatch(
+            tokens=torch.tensor(tokens, dtype=torch.long),
+            positions=torch.arange(start, start + len(tokens), dtype=torch.long),
+            seq_lens=[start + len(tokens)], query_lens=[len(tokens)],
+            block_tables=[torch.tensor(st.blocks, dtype=torch.long)],
+            slot_mapping=torch.tensor(slots, dtype=torch.long),
+            is_prefill=False)
+
+    def _hidden_cible(self) -> Optional[torch.Tensor]:
+        """État caché de la cible pour le dernier jeton *retenu*.
+
+        Le pas de vérification traite le jeton réel puis les propositions ; les
+        états cachés en ressortent tous. Prendre la dernière ligne reviendrait à
+        se fier à l'état d'un jeton que la cible vient peut-être de rejeter — la
+        tête partait alors d'un contexte imaginaire, et l'acceptation tombait de
+        50 % (mesuré en teacher forcing) à 11 %.
+        """
+        h = getattr(self.model, "_mtp_hidden", None)
+        if h is None or h.numel() == 0:
+            return None
+        h = h.reshape(-1, h.shape[-1])
+        i = min(self._ligne, h.shape[0] - 1)
+        return h[i:i + 1]
+
+    def _amorcer(self, seq: Any, st: _DraftState) -> bool:
+        """Remplit le cache de la tête avec le contexte de l'invite.
+
+        Sans cela la tête n'a qu'un jeton d'historique et son attention ne voit
+        rien : mesuré, le taux d'acceptation tombait à 14 %. Le prefill d'une
+        couche unique coûte un soixante-quatrième de celui du modèle.
+        """
+        hs = getattr(self.model, "_mtp_prefill", None)
+        ids = seq.all_ids
+        if hs is None or hs.shape[0] < len(ids) - 1:
+            return False
+        n = len(ids) - 1
+        if not self._ensure_blocks(st, n + 8):
+            return False
+        emb = self.model.embed_tokens
+        toks = torch.tensor(ids[1:n + 1], dtype=torch.long, device=emb.device)
+        e = torch.nn.functional.embedding(toks, emb)
+        self.tete(e.to(hs.dtype), hs[:n], self._batch(st, ids[1:n + 1], 0))
+        st.length = n
+        return True
+
+    def propose(self, seq: Any, k: int) -> Proposal:
+        ids = seq.all_ids
+        if len(ids) > self.max_model_len:
+            return Proposal([])
+        h = self._hidden_cible()
+        if h is None:
+            return Proposal([])                        # avant le premier pas
+        st = self.state.setdefault(seq.id, _DraftState())
+        if st.length == 0 and len(ids) > 2 and not self._amorcer(seq, st):
+            return Proposal([])
+        st.length = min(st.length, len(ids) - 1)
+
+        emb = self.model.embed_tokens
+        tete, lm = self.tete, self.model.lm_head
+        glouton = self.temperature <= 0
+        tokens: list[int] = []
+        probs: list[torch.Tensor] = []
+        cur, pos = ids[-1], len(ids) - 1
+        for _ in range(k):
+            if not self._ensure_blocks(st, pos + 2):
+                break
+            e = torch.nn.functional.embedding(
+                torch.tensor([cur], dtype=torch.long, device=emb.device), emb)
+            sortie = tete(e.to(h.dtype), h, self._batch(st, [cur], pos))
+            logits = lm(sortie.to(lm.qweight.qweight.device
+                                  if hasattr(lm.qweight, "qweight")
+                                  else sortie.device))[0]
+            if glouton:
+                tok = int(logits.argmax())
+            else:
+                p = torch.softmax(logits.to(torch.float32)
+                                  / max(self.temperature, 1e-5), dim=-1)
+                tok = int(torch.multinomial(p, 1))
+                probs.append(p)
+            tokens.append(tok)
+            h = sortie[-1:]                            # la tête se relit
+            cur, pos = tok, pos + 1
+            st.length = pos
+        if not tokens:
+            return Proposal([])
+        return Proposal(tokens, None if glouton else torch.stack(probs))
+
+    def commit(self, seq: Any, accepted: list[int]) -> None:
+        self._ligne = len(accepted)
+        st = self.state.get(seq.id)
+        if st is not None:
+            st.length = min(st.length, len(seq.all_ids) - 1)
+
+    def release(self, seq: Any) -> None:
+        self._ligne = 0
+        st = self.state.pop(seq.id, None)
+        if st is not None and st.blocks:
+            self.allocator.free(st.blocks)

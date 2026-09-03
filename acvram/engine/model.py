@@ -1151,6 +1151,14 @@ class ACVRamModel(nn.Module):
         self.lm_head = lm_head
         self.caches = caches
         self.dtype = dtype
+        # Tête de prédiction multi-jetons, quand le modèle en porte une : le
+        # chargeur la pose ici. Le brouillon spéculatif a besoin de l'état
+        # caché normalisé du dernier jeton ; on le recopie dans un tampon
+        # statique pour que la capture du graphe de décodage l'emporte avec
+        # elle — une affectation Python, elle, ne serait pas rejouée.
+        self.mtp = None
+        self._mtp_hidden: Optional[torch.Tensor] = None
+        self._mtp_prefill: Optional[torch.Tensor] = None
 
     @torch.inference_mode()
     def forward(self, batch: ForwardBatch, return_hidden: bool = False,
@@ -1180,9 +1188,19 @@ class ACVRamModel(nn.Module):
                 self.layers[i + 1].prefetch()
             x = layer(x, batch, self.caches.get(i))
 
+        brut = x
         x = self.norm(x.to(self.norm.weight.device))
         if return_hidden:
             return x
+        if self.mtp is not None:
+            brut = brut.to(x.device)     # la tête MTP lit l'état AVANT la norme finale
+            if batch.is_prefill:
+                # Le brouillon MTP a besoin du contexte entier pour amorcer son
+                # propre cache : au prefill on garde tous les etats, pas
+                # seulement celui du dernier jeton.
+                self._mtp_prefill = brut.detach()
+            self._garder_hidden(brut[(batch.last_token_indices() if logits_positions
+                                      is None else logits_positions).to(brut.device)])
         # La vérification spéculative et la perplexité ont toutes deux besoin
         # de logits ailleurs qu'à la position finale : les lignes qui atteignent
         # lm_head sont donc un paramètre. Cela compte, car lm_head est le plus
@@ -1222,12 +1240,29 @@ class ACVRamModel(nn.Module):
                     max_pos, self.caches.get(i), q_len)
             x, h = add_norm(x, delta, self.norm,
                             self.layers[-1].residual_multiplier)
+            if self.mtp is not None:
+                self._garder_hidden(x)
             return self._logits_finaux(self.lm_head(h))
         for i, layer in enumerate(self.layers):
             x = layer.decode_fixed(x, positions, slots, block_tables,
                                    seq_lens, max_pos, self.caches.get(i), q_len)
+        if self.mtp is not None:
+            self._garder_hidden(x)
         x = self.norm(x)
         return self._logits_finaux(self.lm_head(x))
+
+    def _garder_hidden(self, h: torch.Tensor) -> None:
+        """Recopie l'état caché normalisé dans un tampon stable.
+
+        Une copie, et non une référence : sous graphe CUDA le tenseur source
+        est réécrit à chaque rejeu, et une affectation Python ne serait jouée
+        qu'à la capture."""
+        b = self._mtp_hidden
+        if b is None or b.shape != h.shape or b.dtype != h.dtype \
+                or b.device != h.device:
+            self._mtp_hidden = h.detach().clone()
+            return
+        b.copy_(h.detach())
 
     def _res_differe(self) -> bool:
         """Le chemin à résidu différé n'est pris que si toutes les couches

@@ -56,6 +56,8 @@ class MTPHead(nn.Module):
         """
         e = self.enorm(embeds.to(self.device))
         h = self.hnorm(hidden.to(self.device))
+        # Plongement d'abord, état caché ensuite : l'ordre inverse donne zéro
+        # jeton accepté, celui-ci en donne la moitié en forçage enseignant.
         x = self.eh_proj(torch.cat([e, h], dim=-1))
         x = self.layer(x, batch, self.cache)
         return self.final_norm(x)

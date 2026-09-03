@@ -354,6 +354,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
                         device_override=args.device)
     tokenizer = load_tokenizer(args.model)
     speculator = None
+    if args.speculative == "auto":
+        # La tete du modele si elle existe, le n-gramme sinon.
+        args.speculative = "mtp" if getattr(loaded.model, "mtp", None) is not None \
+            else "ngram"
     if args.speculative == "ngram":
         from .engine.speculative import NGramProposer
         speculator = NGramProposer()
@@ -367,6 +371,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
         speculator = DraftModelProposer(draft, max_model_len=args.max_model_len)
         print(f"  modele brouillon : {args.draft_model} "
               f"({_h(draft.model.nbytes)})")
+    elif args.speculative == "mtp":
+        if getattr(loaded.model, "mtp", None) is None:
+            print(red("--speculative mtp : ce modele n'a pas de tete nextn"))
+            return 2
+        from .engine.speculative import MTPProposer
+        speculator = MTPProposer(loaded.model, max_model_len=args.max_model_len)
+        print("  brouillon : tete de prediction multi-jetons du modele")
 
     engine = Engine(loaded, tokenizer, max_batch_size=args.max_batch,
                     max_model_len=args.max_model_len,
@@ -546,7 +557,7 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--fp16", action="store_true",
                     help="calcule en float16 au lieu de bfloat16")
     sv.add_argument("--log-level", default="info")
-    sv.add_argument("--speculative", choices=["none", "ngram", "draft"],
+    sv.add_argument("--speculative", choices=["none", "ngram", "draft", "mtp", "auto"],
                     default="ngram",
                     help="ngram ne coute rien et paie quand la sortie recopie "
                          "l'entree ; draft exige --draft-model")
