@@ -27,7 +27,8 @@ import torch.nn.functional as F
 from .. import kernels
 from ..memory.kvcache import PagedKVCache, bucket_blocks
 from .config import ModelSpec
-from .layers import (QuantLinear, RMSNorm, RotaryEmbedding, apply_rope, rope_fusee,
+from .layers import (QuantLinear, RMSNorm, RotaryEmbedding, add_norm, apply_rope,
+                     rope_fusee,
                      attention, batched_decode_attention,
                      decode_attention_fixed, repeat_kv)
 
@@ -203,18 +204,19 @@ class Attention(nn.Module):
         t = x.shape[0]
         q, k, v, gate = self._proj(x, t)
 
-        if self.q_norm is not None:
-            q = self.q_norm(q)
-        if self.k_norm is not None:
-            k = self.k_norm(k)
-
+        r = None
         if self.rope is not None:
             pos = batch.positions_on(x.device)
             mx = max(batch.seq_lens)
-            r = rope_fusee(q, k, self.rope, pos, mx)
-            if r is not None:
-                q, k = r
-            else:
+            r = rope_fusee(q, k, self.rope, pos, mx, self.q_norm, self.k_norm)
+        if r is not None:
+            q, k = r                       # normes par tête comprises
+        else:
+            if self.q_norm is not None:
+                q = self.q_norm(q)
+            if self.k_norm is not None:
+                k = self.k_norm(k)
+            if self.rope is not None:
                 cos, sin = self.rope(pos, x.device, x.dtype, max_pos=mx)
                 q, k = apply_rope(q, k, cos, sin)
 
@@ -242,15 +244,18 @@ class Attention(nn.Module):
         """
         b = x.shape[0]
         q, k, v, gate = self._proj(x, b)
-        if self.q_norm is not None:
-            q = self.q_norm(q)
-        if self.k_norm is not None:
-            k = self.k_norm(k)
+        r = None
         if self.rope is not None:
-            r = rope_fusee(q, k, self.rope, positions, max_pos)
-            if r is not None:
-                q, k = r
-            else:
+            r = rope_fusee(q, k, self.rope, positions, max_pos,
+                           self.q_norm, self.k_norm)
+        if r is not None:
+            q, k = r                       # normes par tête comprises
+        else:
+            if self.q_norm is not None:
+                q = self.q_norm(q)
+            if self.k_norm is not None:
+                k = self.k_norm(k)
+            if self.rope is not None:
                 cos, sin = self.rope(positions, x.device, x.dtype, max_pos=max_pos)
                 q, k = apply_rope(q, k, cos, sin)
         cache.write(slots, k, v)
@@ -620,6 +625,7 @@ class MoEBlock(nn.Module):
 
     def _forward_grouped(self, x, topw, topi):
         t = x.shape[0]
+        ext = kernels.get_extension()
         eid = topi.reshape(-1).to(torch.int32)
         tok = torch.arange(t, device=x.device,
                            dtype=torch.int32).repeat_interleave(self.top_k)
@@ -631,7 +637,6 @@ class MoEBlock(nn.Module):
             d = d * topw.reshape(-1, 1).to(d.dtype)
             return d.view(t, self.top_k, -1).sum(dim=1).to(x.dtype)
         pg, pu = self._stacks["gate_proj"], self._stacks["up_proj"]
-        ext = kernels.get_extension()
         if (pg[0] == "nvfp4" and pu[0] == "nvfp4" and ext is not None
                 and hasattr(ext, "nvfp4_gemv_grouped_gateup")
                 and pg[4] * 4 <= 48 * 1024):
@@ -939,10 +944,10 @@ class DecoderLayer(nn.Module):
                 y = self.mlp(h)
             return x + (y if r == 1.0 else y * r)
         a = self.self_attn(self.input_layernorm(x), batch, cache)
-        x = x + (a if r == 1.0 else a * r)
         if self.mlp is None:                           # couche d'attention seule
-            return x
-        h = self.post_attention_layernorm(x)
+            return x + (a if r == 1.0 else a * r)
+        # somme résiduelle et normalisation en un lancement
+        x, h = add_norm(x, a, self.post_attention_layernorm, r)
         if self.mlp_device != self.device:
             # Seul l'état caché traverse le bus : [jetons, dimension], quelques
             # kilooctets par jeton décodé face à des gigaoctets de poids.
@@ -964,10 +969,10 @@ class DecoderLayer(nn.Module):
         a = self.self_attn.decode_fixed(self.input_layernorm(x), positions,
                                         slots, block_tables, seq_lens,
                                         max_pos, cache, q_len)
-        x = x + (a if r == 1.0 else a * r)
         if self.mlp is None:
-            return x
-        y = self.mlp(self.post_attention_layernorm(x))
+            return x + (a if r == 1.0 else a * r)
+        x, h = add_norm(x, a, self.post_attention_layernorm, r)
+        y = self.mlp(h)
         return x + (y if r == 1.0 else y * r)
 
     def prefetch(self) -> None:

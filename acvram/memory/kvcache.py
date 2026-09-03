@@ -374,9 +374,25 @@ class PagedKVCache:
         décalage`` du jeton ``i`` ; la calculer du côté de l'ordonnanceur garde
         ici une unique dispersion vectorisée au lieu d'une boucle par séquence.
         """
+        bs = self.cfg.block_size
+        # Chemin fusionné : amax, quantification et dispersion en un noyau.
+        # Le chemin PyTorch demandait une vingtaine de lancements par couche
+        # sur des tenseurs de quelques centaines de valeurs.
+        if (self.cfg.quantized and self.cfg.dtype == "int8" and k.is_cuda
+                and k.dtype == torch.bfloat16 and v.dtype == torch.bfloat16
+                and self.k_scale is not None):
+            from ..kernels import get_extension
+            ext = get_extension()
+            if ext is not None and hasattr(ext, "kv_write_int8"):
+                sm = slot_mapping if slot_mapping.dtype == torch.int64 \
+                    else slot_mapping.to(torch.int64)
+                ext.kv_write_int8(k, v, sm, self.k.view(-1, *self.k.shape[2:]),
+                                  self.v.view(-1, *self.v.shape[2:]),
+                                  self.k_scale.view(-1, self.k_scale.shape[-1]),
+                                  self.v_scale.view(-1, self.v_scale.shape[-1]), bs)
+                return
         kq, ks = self._quantize(k)
         vq, vs = self._quantize(v)
-        bs = self.cfg.block_size
         blk = torch.div(slot_mapping, bs, rounding_mode="floor")
         off = slot_mapping % bs
         self.k[blk, off] = kq

@@ -1164,7 +1164,9 @@ __device__ __forceinline__ void charger_x_sh(const XT *__restrict__ xn, float *x
     __syncthreads();
 }
 
-constexpr int GW_WARPS = 8;
+#ifndef GW_WARPS
+#define GW_WARPS 8
+#endif
 // RPW lignes par warp, en boucle : l'activation n'est chargée qu'une fois
 // par bloc pour GW_WARPS*RPW lignes (sinon son trafic L2 égale celui des
 // poids sur ces petites projections).
@@ -1403,28 +1405,75 @@ __global__ void rope_inplace_kernel(__nv_bfloat16 *__restrict__ q,
                                     const float *__restrict__ cosv,
                                     const float *__restrict__ sinv,
                                     const long *__restrict__ pos,
-                                    int Hq, int Hk, int Dq, int Dk, int d) {
-    const int t = blockIdx.x, h = blockIdx.y;
-    const int demi = d >> 1;
-    __nv_bfloat16 *base = (h < Hq) ? q + ((long)t * Hq + h) * Dq
-                                   : k + ((long)t * Hk + (h - Hq)) * Dk;
+                                    const __nv_bfloat16 *__restrict__ wq,
+                                    const __nv_bfloat16 *__restrict__ wk,
+                                    float eps,
+                                    int Hq, int Hk, int Dq, int Dk, int d,
+                                    long ldq, long ldk) {
+    const int t = blockIdx.x, h = blockIdx.y, tid = threadIdx.x;
+    const bool est_q = h < Hq;
+    // ldq/ldk : pas entre deux jetons. q et k sont souvent des tranches d'une
+    // projection empilée — les traiter en place évite deux copies par couche.
+    __nv_bfloat16 *base = est_q ? q + (long)t * ldq + (long)h * Dq
+                                : k + (long)t * ldk + (long)(h - Hq) * Dk;
+    const int D = est_q ? Dq : Dk;
+    const __nv_bfloat16 *w = est_q ? wq : wk;
     // Les tables complètes sont passées telles quelles : indexer ici épargne
     // deux index_select et deux conversions par couche.
     const long ligne = (pos != nullptr) ? pos[t] : (long)t;
     const float *c = cosv + ligne * d, *s = sinv + ligne * d;
-    for (int i = threadIdx.x; i < demi; i += blockDim.x) {
-        const float a = __bfloat162float(base[i]);
-        const float b = __bfloat162float(base[i + demi]);
+
+    // Normalisation RMS par tête (Qwen3, Gemma), fusionnée : la tête tient
+    // dans un bloc, sa somme des carrés ne coûte donc qu'une réduction.
+    __shared__ float red[32];
+    float inv = 1.f;
+    if (w != nullptr) {
+        float somme = 0.f;
+        for (int i = tid; i < D; i += blockDim.x) {
+            const float v = __bfloat162float(base[i]);
+            somme += v * v;
+        }
+        for (int o = 16; o > 0; o >>= 1) somme += __shfl_xor_sync(0xffffffffu, somme, o);
+        const int nw = (blockDim.x + 31) >> 5;
+        if ((tid & 31) == 0) red[tid >> 5] = somme;
+        __syncthreads();
+        if (tid == 0) {
+            float tot = 0.f;
+            for (int i = 0; i < nw; ++i) tot += red[i];
+            red[0] = rsqrtf(tot / (float)D + eps);
+        }
+        __syncthreads();
+        inv = red[0];
+    }
+
+    const int demi = d >> 1;
+    for (int i = tid; i < demi; i += blockDim.x) {
+        float a = __bfloat162float(base[i]) * inv;
+        float b = __bfloat162float(base[i + demi]) * inv;
+        if (w != nullptr) {
+            a *= __bfloat162float(w[i]);
+            b *= __bfloat162float(w[i + demi]);
+        }
         base[i] = __float2bfloat16(a * c[i] - b * s[i]);
         base[i + demi] = __float2bfloat16(b * c[i + demi] + a * s[i + demi]);
     }
+    // RoPE partiel : la queue non tournée est seulement normalisée
+    if (w != nullptr)
+        for (int i = d + tid; i < D; i += blockDim.x)
+            base[i] = __float2bfloat16(__bfloat162float(base[i]) * inv
+                                       * __bfloat162float(w[i]));
 }
 
 void rope_inplace_pos(torch::Tensor q, torch::Tensor k, torch::Tensor cosv,
-                      torch::Tensor sinv, c10::optional<torch::Tensor> pos) {
+                      torch::Tensor sinv, c10::optional<torch::Tensor> pos,
+                      c10::optional<torch::Tensor> wq,
+                      c10::optional<torch::Tensor> wk, double eps) {
     CHECK_CUDA(q); CHECK_CUDA(k); ACVRAM_DEVICE_GUARD(q);
-    CHECK_CONTIG(q); CHECK_CONTIG(k); CHECK_CONTIG(cosv); CHECK_CONTIG(sinv);
+    CHECK_CONTIG(cosv); CHECK_CONTIG(sinv);
     TORCH_CHECK(q.dim() == 3 && k.dim() == 3, "rope : [jetons, tetes, dim]");
+    TORCH_CHECK(q.stride(2) == 1 && k.stride(2) == 1
+                && q.stride(1) == q.size(2) && k.stride(1) == k.size(2),
+                "rope : tetes contigues exigees");
     TORCH_CHECK(q.scalar_type() == torch::kBFloat16
                 && k.scalar_type() == torch::kBFloat16, "rope : bf16");
     TORCH_CHECK(cosv.scalar_type() == torch::kFloat, "rope : cos/sin en fp32");
@@ -1437,12 +1486,94 @@ void rope_inplace_pos(torch::Tensor q, torch::Tensor k, torch::Tensor cosv,
         TORCH_CHECK(pos->numel() == T, "rope : une position par jeton");
         ppos = pos->data_ptr<long>();
     }
+    const __nv_bfloat16 *pwq = nullptr, *pwk = nullptr;
+    if (wq.has_value())
+        pwq = reinterpret_cast<const __nv_bfloat16 *>(wq->contiguous().data_ptr());
+    if (wk.has_value())
+        pwk = reinterpret_cast<const __nv_bfloat16 *>(wk->contiguous().data_ptr());
     dim3 grid(T, Hq + Hk);
-    const int th = std::min(256, ((d / 2) + 31) / 32 * 32);
+    const int th = std::min(256, (std::max(Dq, Dk) + 31) / 32 * 32);
     rope_inplace_kernel<<<grid, th, 0, at::cuda::getCurrentCUDAStream()>>>(
         reinterpret_cast<__nv_bfloat16 *>(q.data_ptr()),
         reinterpret_cast<__nv_bfloat16 *>(k.data_ptr()),
-        cosv.data_ptr<float>(), sinv.data_ptr<float>(), ppos, Hq, Hk, Dq, Dk, d);
+        cosv.data_ptr<float>(), sinv.data_ptr<float>(), ppos, pwq, pwk,
+        (float)eps, Hq, Hk, Dq, Dk, d, q.stride(0), k.stride(0));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+
+
+
+// --------------------------------------------------------------------------
+// Écriture du cache KV quantifié en INT8, en un seul lancement.
+//
+// Le chemin PyTorch enchaînait, par couche et pour chacun de k et v : un abs,
+// un amax, deux conversions, une division, un round, un clamp, une conversion
+// de sortie, puis la dispersion — une vingtaine de noyaux sur des tenseurs de
+// quelques centaines de valeurs, où seule la latence de lancement compte.
+// Ici un bloc porte une tête d'un jeton : il calcule son amax, quantifie et
+// écrit à l'emplacement voulu.
+// --------------------------------------------------------------------------
+__global__ void kv_write_int8_kernel(
+    const __nv_bfloat16 *__restrict__ k, const __nv_bfloat16 *__restrict__ v,
+    const long *__restrict__ slots, signed char *__restrict__ kc,
+    signed char *__restrict__ vc, __half *__restrict__ ks, __half *__restrict__ vs,
+    int H, int D, int bs) {
+    __shared__ float red[8];
+    const int t = blockIdx.x, h = blockIdx.y;
+    const long slot = slots[t];
+    if (slot < 0) return;
+    const long pos = (slot / bs) * bs + (slot % bs);   // index à plat [bloc, offset]
+    #pragma unroll 1
+    for (int quel = 0; quel < 2; ++quel) {
+        const __nv_bfloat16 *src = (quel ? v : k) + ((long)t * H + h) * D;
+        float amax = 0.f;
+        for (int i = threadIdx.x; i < D; i += blockDim.x)
+            amax = fmaxf(amax, fabsf(__bfloat162float(src[i])));
+        for (int o = 16; o > 0; o >>= 1)
+            amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+        const int nw = (blockDim.x + 31) >> 5;
+        if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = amax;
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            float m = 0.f;
+            for (int i = 0; i < nw; ++i) m = fmaxf(m, red[i]);
+            red[0] = fmaxf(m / 127.f, 1e-8f);
+        }
+        __syncthreads();
+        const float sc = red[0], inv = 1.f / sc;
+        signed char *dst = (quel ? vc : kc) + (pos * H + h) * D;
+        for (int i = threadIdx.x; i < D; i += blockDim.x) {
+            const int q = __float2int_rn(__bfloat162float(src[i]) * inv);
+            dst[i] = (signed char)max(-127, min(127, q));
+        }
+        if (threadIdx.x == 0)
+            (quel ? vs : ks)[pos * H + h] = __float2half(sc);
+        __syncthreads();
+    }
+}
+
+void kv_write_int8(torch::Tensor k, torch::Tensor v, torch::Tensor slots,
+                   torch::Tensor kc, torch::Tensor vc,
+                   torch::Tensor ks, torch::Tensor vs, int64_t bs) {
+    CHECK_CUDA(k); ACVRAM_DEVICE_GUARD(k);
+    TORCH_CHECK(k.scalar_type() == torch::kBFloat16 && v.scalar_type() == torch::kBFloat16,
+                "cache KV : k et v en bf16");
+    TORCH_CHECK(kc.scalar_type() == torch::kChar && vc.scalar_type() == torch::kChar,
+                "cache KV : stockage int8");
+    TORCH_CHECK(slots.scalar_type() == torch::kLong, "cache KV : emplacements int64");
+    auto kk = k.contiguous(), vv = v.contiguous();
+    const int T = kk.size(0), H = kk.size(1), D = kk.size(2);
+    dim3 grid(T, H);
+    const int th = std::min(256, (D + 31) / 32 * 32);
+    kv_write_int8_kernel<<<grid, th, 0, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const __nv_bfloat16 *>(kk.data_ptr()),
+        reinterpret_cast<const __nv_bfloat16 *>(vv.data_ptr()),
+        slots.contiguous().data_ptr<long>(),
+        reinterpret_cast<signed char *>(kc.data_ptr()),
+        reinterpret_cast<signed char *>(vc.data_ptr()),
+        reinterpret_cast<__half *>(ks.data_ptr()),
+        reinterpret_cast<__half *>(vs.data_ptr()), H, D, (int)bs);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -1796,13 +1927,28 @@ torch::Tensor mla_decode(torch::Tensor q_eff, torch::Tensor cache,
 // RMSNorm fusionnée (bf16 -> bf16, variance en fp32) : un bloc par ligne.
 // Même arithmétique que la version torch : x normalisé arrondi en bf16, puis
 // produit bf16 par le poids — bit-identique.
+// ``res`` (optionnel) est le résidu à ajouter avant de normaliser : la somme
+// part dans ``xn`` — le résidu de la couche suivante — et sa normalisation
+// dans ``y``. Un lancement au lieu de deux, sur des tenseurs de quelques
+// kilooctets où la latence pèse plus que le calcul.
 __global__ void rmsnorm_bf16_kernel(const __nv_bfloat16 *__restrict__ x,
                                     const __nv_bfloat16 *__restrict__ w,
                                     __nv_bfloat16 *__restrict__ y,
-                                    int H, float eps) {
+                                    const __nv_bfloat16 *__restrict__ res,
+                                    __nv_bfloat16 *__restrict__ xn,
+                                    float mult, int H, float eps) {
     __shared__ float red[32];
     const __nv_bfloat16 *xr = x + (size_t)blockIdx.x * H;
     __nv_bfloat16 *yr = y + (size_t)blockIdx.x * H;
+    if (res != nullptr) {
+        const __nv_bfloat16 *rr = res + (size_t)blockIdx.x * H;
+        __nv_bfloat16 *nr = xn + (size_t)blockIdx.x * H;
+        for (int i = threadIdx.x; i < H; i += blockDim.x)
+            nr[i] = __float2bfloat16(__bfloat162float(rr[i])
+                                     + mult * __bfloat162float(xr[i]));
+        __syncthreads();
+        xr = nr;
+    }
     float ss = 0.f;
     for (int i = threadIdx.x; i < H; i += blockDim.x) {
         const float v = __bfloat162float(xr[i]); ss += v * v;
@@ -1819,7 +1965,9 @@ __global__ void rmsnorm_bf16_kernel(const __nv_bfloat16 *__restrict__ x,
     }
 }
 
-torch::Tensor rmsnorm_bf16(torch::Tensor x, torch::Tensor w, double eps) {
+std::vector<torch::Tensor> rmsnorm_bf16(torch::Tensor x, torch::Tensor w, double eps,
+                                        c10::optional<torch::Tensor> res,
+                                        double mult) {
     CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(x);
     TORCH_CHECK(x.scalar_type() == torch::kBFloat16 && w.scalar_type() == torch::kBFloat16,
                 "rmsnorm_bf16 : bf16 attendu");
@@ -1827,13 +1975,30 @@ torch::Tensor rmsnorm_bf16(torch::Tensor x, torch::Tensor w, double eps) {
     const int H = xc.size(-1);
     const long R = xc.numel() / H;
     auto y = torch::empty_like(xc);
-    auto stream = at::cuda::getCurrentCUDAStream();
-    rmsnorm_bf16_kernel<<<(unsigned)R, 256, 0, stream>>>(
+    torch::Tensor xn;
+    const __nv_bfloat16 *pres = nullptr;
+    __nv_bfloat16 *pxn = nullptr;
+    if (res.has_value()) {
+        auto rc = res->contiguous();
+        TORCH_CHECK(rc.numel() == xc.numel(), "rmsnorm_bf16 : residu de meme taille");
+        xn = torch::empty_like(xc);
+        pres = reinterpret_cast<const __nv_bfloat16 *>(rc.data_ptr());
+        pxn = reinterpret_cast<__nv_bfloat16 *>(xn.data_ptr());
+        rmsnorm_bf16_kernel<<<(unsigned)R, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+            reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16 *>(w.contiguous().data_ptr()),
+            reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), pres, pxn,
+            (float)mult, H, (float)eps);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+        return {y, xn};
+    }
+    rmsnorm_bf16_kernel<<<(unsigned)R, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
         reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr()),
         reinterpret_cast<const __nv_bfloat16 *>(w.contiguous().data_ptr()),
-        reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), H, (float)eps);
+        reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), nullptr, nullptr,
+        1.f, H, (float)eps);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
-    return y;
+    return {y};
 }
 
 
@@ -1955,11 +2120,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "MoE NVFP4 : GEMM groupee sur tuiles de jetons, poids lus en 4 bits");
     m.def("int4_gemv_grouped", &int4_gemv_grouped,
           "INT4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
+    m.def("kv_write_int8", &kv_write_int8,
+          "Cache KV : quantification INT8 et dispersion en un lancement");
     m.def("rope_inplace", &rope_inplace_pos, "RoPE en place sur q et k",
           py::arg("q"), py::arg("k"), py::arg("cos"), py::arg("sin"),
-          py::arg("positions") = c10::optional<torch::Tensor>());
+          py::arg("positions") = c10::optional<torch::Tensor>(),
+          py::arg("wq") = c10::optional<torch::Tensor>(),
+          py::arg("wk") = c10::optional<torch::Tensor>(),
+          py::arg("eps") = 1e-6);
     m.def("moe_route", &moe_route, "routage MoE : scores, biais, top-k, poids");
-    m.def("rmsnorm_bf16", &rmsnorm_bf16, "RMSNorm bf16 fusionnee (variance fp32)");
+    m.def("rmsnorm_bf16", &rmsnorm_bf16,
+          "RMSNorm bf16 fusionnee (variance fp32), residu optionnel",
+          py::arg("x"), py::arg("w"), py::arg("eps"),
+          py::arg("residu") = c10::optional<torch::Tensor>(),
+          py::arg("mult") = 1.0);
     m.def("kda_decode", &kda_decode, "KDA : pas de decodage fusionne (une sequence)");
     m.def("mla_decode", &mla_decode, "MLA absorbee : scores + softmax + lecture latente");
     m.def("paged_attention", &paged_attention,

@@ -185,11 +185,26 @@ class RMSNorm(nn.Module):
                 and self.weight.dtype == torch.bfloat16:
             ext = kernels.get_extension()
             if ext is not None and hasattr(ext, "rmsnorm_bf16"):
-                return ext.rmsnorm_bf16(x, self.weight, self.eps)   # 1 lancement
+                return ext.rmsnorm_bf16(x, self.weight, self.eps)[0]  # 1 lancement
         x32 = x.to(torch.float32)
         var = x32.pow(2).mean(-1, keepdim=True)
         x32 = x32 * torch.rsqrt(var + self.eps)
         return (x32.to(dtype) * self.weight.to(dtype))
+
+
+def add_norm(residu: torch.Tensor, y: torch.Tensor, norme, mult: float = 1.0):
+    """``x = residu + mult*y`` puis ``norme(x)``, en un lancement.
+
+    Renvoie (x, normalisé). Repli PyTorch si le noyau manque."""
+    if (type(norme).__name__ == "RMSNorm" and residu.is_cuda
+            and residu.dtype == torch.bfloat16 and y.dtype == torch.bfloat16
+            and norme.weight.dtype == torch.bfloat16):
+        ext = kernels.get_extension()
+        if ext is not None and hasattr(ext, "rmsnorm_bf16"):
+            h, x = ext.rmsnorm_bf16(y, norme.weight, norme.eps, residu, mult)
+            return x, h
+    x = residu + (y if mult == 1.0 else y * mult)
+    return x, norme(x)
 
 
 class LayerNorm(nn.Module):
@@ -314,22 +329,43 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def rope_fusee(q: torch.Tensor, k: torch.Tensor, rope, positions: torch.Tensor,
-               max_pos: int):
-    """RoPE en un lancement, tables indexées dans le noyau. None si inéligible."""
+               max_pos: int, q_norm=None, k_norm=None):
+    """Normalisation par tête et RoPE en un lancement, tables indexées dans le
+    noyau. None si inéligible — l'appelant applique alors le chemin PyTorch,
+    normalisations comprises."""
     from .. import kernels as _k
     ext = _k.get_extension()
     if (ext is None or not hasattr(ext, "rope_inplace") or not q.is_cuda
             or q.dtype != torch.bfloat16 or k.dtype != torch.bfloat16
             or q.dim() != 3 or k.dim() != 3):
         return None
+    # les deux normes doivent être des RMSNorm bf16 de la taille d'une tête,
+    # et partager epsilon (elles le font toujours dans les modèles servis)
+    normes = [n for n in (q_norm, k_norm) if n is not None]
+    if any(type(n).__name__ != "RMSNorm" or n.weight.dtype != torch.bfloat16
+           for n in normes):
+        return None
+    if q_norm is not None and q_norm.weight.shape[-1] != q.shape[-1]:
+        return None
+    if k_norm is not None and k_norm.weight.shape[-1] != k.shape[-1]:
+        return None
+    if len(normes) == 2 and abs(q_norm.eps - k_norm.eps) > 1e-12:
+        return None
     cos32, sin32 = rope.tables32(max_pos, q.device)
     d = cos32.shape[-1]
     if d % 2 or d > q.shape[-1] or d > k.shape[-1]:
         return None
-    qc = q if q.is_contiguous() else q.contiguous()
-    kc = k if k.is_contiguous() else k.contiguous()
+    # tranches d'une projection empilée : le noyau suit leur pas, pas de copie
+    if q.stride(2) != 1 or q.stride(1) != q.shape[2]:
+        q = q.contiguous()
+    if k.stride(2) != 1 or k.stride(1) != k.shape[2]:
+        k = k.contiguous()
+    qc, kc = q, k
     pos = positions if positions.dtype == torch.int64 else positions.to(torch.int64)
-    ext.rope_inplace(qc, kc, cos32, sin32, pos)
+    ext.rope_inplace(qc, kc, cos32, sin32, pos,
+                     None if q_norm is None else q_norm.weight,
+                     None if k_norm is None else k_norm.weight,
+                     normes[0].eps if normes else 1e-6)
     return qc, kc
 
 

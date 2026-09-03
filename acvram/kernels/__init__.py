@@ -212,7 +212,10 @@ def get_extension():
         _EXT = load(
             name="acvram_kernels",
             sources=[os.path.join(here, "acvram_kernels.cu")],
-            extra_cuda_cflags=["-O3", "--use_fast_math", "-lineinfo"] + _arch_flags(),
+            extra_cuda_cflags=["-O3", "--use_fast_math", "-lineinfo"]
+            + ([f"-DGW_WARPS={os.environ['ACVRAM_GW_WARPS']}"]
+               if os.environ.get("ACVRAM_GW_WARPS") else [])
+            + _arch_flags(),
             extra_cflags=["-O3"],
             build_directory=cache,
             verbose=bool(os.environ.get("ACVRAM_VERBOSE_BUILD")),
