@@ -60,10 +60,30 @@ constexpr int WEIGHTS_PER_LOAD = 16;      // one uint2
 // Magnitudes E2M1, indexées par le champ de magnitude sur 3 bits.
 __constant__ float kE2M1[8] = {0.f, 0.5f, 1.f, 1.5f, 2.f, 3.f, 4.f, 6.f};
 
+// Les conversions FP8 et FP4 n'ont d'instruction materielle qu'a partir de
+// sm_89 (e4m3) et sm_100 (e2m1). En dessous, l'intrinseque du toolkit part en
+// emulation logicielle : mesure sur une RTX 3080 Ti (sm_86), nvfp4_gemv
+// tombait a 144 Go/s pour un plafond de carte a 770. Les deux versions
+// arithmetiques ci-dessous tiennent entierement en registres.
 __device__ __forceinline__ float e4m3_to_float(unsigned char bits) {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 890
     __nv_fp8_storage_t s = static_cast<__nv_fp8_storage_t>(bits);
     __half_raw h = __nv_cvt_fp8_to_halfraw(s, __NV_E4M3);
     return __half2float(*reinterpret_cast<__half *>(&h));
+#else
+    const unsigned int u = bits;
+    const unsigned int e = (u >> 3) & 0xFu, m = u & 7u;
+    float v;
+    if (e == 0u) {
+        v = (float)m * 0.001953125f;              // 2^-9, domaine sous-normal
+    } else if (e == 15u && m == 7u) {
+        v = __int_as_float(0x7fc00000);           // E4M3FN : seul motif NaN
+    } else {
+        const unsigned int w = ((e + 120u) << 23) | (m << 20);
+        v = __int_as_float((int)w);
+    }
+    return (u & 0x80u) ? -v : v;
+#endif
 }
 
 template <typename QT> __device__ __forceinline__ float to_float_q(QT v);
@@ -93,10 +113,25 @@ __device__ __forceinline__ unsigned int nibble(const uint2 &p, int j) {
 // table en __constant__ qu'elle remplace se serialisait des que les fils d'un
 // warp lisaient des entrees differentes, c'est-a-dire toujours.
 __device__ __forceinline__ float2 e2m1_pair(unsigned char byte) {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 1000
     const __half2_raw h2 = __nv_cvt_fp4x2_to_halfraw2(
         static_cast<__nv_fp4x2_storage_t>(byte), __NV_E2M1);
     const __half2 hv = *reinterpret_cast<const __half2 *>(&h2);
     return __half22float2(hv);
+#else
+    // Les huit magnitudes E2M1 (0, 0,5, 1, 1,5, 2, 3, 4, 6) sont toutes des
+    // multiples d'un demi : 0, 1, 2, 3, 4, 6, 8, 12 tiennent chacune sur un
+    // quartet, donc la table entiere tient dans une constante 32 bits, lue par
+    // decalage. Une table en memoire constante serait serialisee huit fois par
+    // warp, l'index differant d'un fil a l'autre.
+    const unsigned int L = 0xC8643210u;
+    const unsigned int a = byte & 0xFu, b = (byte >> 4) & 0xFu;
+    float x = 0.5f * (float)((L >> (4u * (a & 7u))) & 0xFu);
+    float y = 0.5f * (float)((L >> (4u * (b & 7u))) & 0xFu);
+    if (a & 8u) x = -x;
+    if (b & 8u) y = -y;
+    return make_float2(x, y);
+#endif
 }
 
 __device__ __forceinline__ float warp_reduce(float v) {
@@ -165,7 +200,7 @@ __global__ void nvfp4_dequant_kernel(
         #pragma unroll
         for (int j = 0; j < WEIGHTS_PER_LOAD; ++j) {
             const unsigned int c = nibble(p, j);
-            float v = kE2M1[c & 7u] * s;
+            float v = 0.5f * (float)((0xC8643210u >> (4u * (c & 7u))) & 0xFu) * s;
             if (c & 8u) v = -v;
             tmp[j] = from_float<T>(v);
         }
