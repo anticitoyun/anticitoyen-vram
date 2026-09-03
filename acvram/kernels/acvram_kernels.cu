@@ -49,6 +49,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cuda_fp4.h>
+#include <mma.h>
 
 namespace {
 
@@ -1250,6 +1251,124 @@ torch::Tensor nvfp4_gemv_grouped_gateup(
     return out;
 }
 
+
+// --------------------------------------------------------------------------
+// GEMM groupée NVFP4 : les experts d'une couche MoE, poids lus en 4 bits.
+//
+// Le chemin de prefill matérialisait la pile d'experts en bf16 (trois passes
+// de plusieurs gigaoctets par couche) avant d'appeler torch._grouped_mm. Ici
+// les poids ne sortent jamais des 4 bits : chaque bloc déquantifie une tuile
+// 64x64 en mémoire partagée et la consomme immédiatement en tensor cores.
+//
+// Les jetons arrivent triés par expert. L'hôte découpe chaque expert en
+// tuiles de BT jetons et transmet, par tuile, (expert, premier jeton, compte).
+// --------------------------------------------------------------------------
+namespace wmma = nvcuda::wmma;
+
+constexpr int GG_BM = 64;      // lignes de sortie par bloc (4 warps x 16)
+constexpr int GG_BT = 16;      // jetons par tuile
+constexpr int GG_KB = 64;      // profondeur traitée par itération
+constexpr int GG_LDX = GG_KB + 8;
+constexpr int GG_LDW = GG_KB + 8;
+
+__device__ __forceinline__ float fp4_val(unsigned char nib) {
+    const float m = kE2M1[nib & 7];
+    return (nib & 8) ? -m : m;
+}
+
+__global__ void nvfp4_gemm_grouped_kernel(
+    const unsigned char *__restrict__ qw, const unsigned char *__restrict__ bscale,
+    const float *__restrict__ gscales, const __nv_bfloat16 *__restrict__ x,
+    const int *__restrict__ tile_e, const int *__restrict__ tile_t0,
+    const int *__restrict__ tile_n, __nv_bfloat16 *__restrict__ y,
+    int M, int K) {
+    __shared__ __nv_bfloat16 xs[GG_BT * GG_LDX];
+    __shared__ __nv_bfloat16 ws[GG_BM * GG_LDW];
+    __shared__ float ys[GG_BT * GG_BM];
+
+    const int tile = blockIdx.y;
+    const int e = tile_e[tile], t0 = tile_t0[tile], nt = tile_n[tile];
+    const int row0 = blockIdx.x * GG_BM;
+    const int tid = threadIdx.x, warp = tid >> 5;
+    const float gscale = gscales[e];
+    const long half_k = (long)K >> 1;
+    const int nblk = K >> 4;
+
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
+    wmma::fill_fragment(acc, 0.f);
+
+    const int lrow = tid >> 1, moitie = tid & 1;   // 128 fils : 2 par ligne
+    const int wcol0 = moitie * 32;
+    const int grow_ok = (row0 + lrow) < M;
+    const long grow = (long)e * M + min(row0 + lrow, M - 1);
+
+    for (int k0 = 0; k0 < K; k0 += GG_KB) {
+        // --- activations [BT, KB] ---------------------------------------
+        for (int i = tid; i < GG_BT * GG_KB; i += blockDim.x) {
+            const int j = i / GG_KB, c = i - j * GG_KB;
+            xs[j * GG_LDX + c] = (j < nt) ? x[(long)(t0 + j) * K + k0 + c]
+                                          : __float2bfloat16(0.f);
+        }
+        // --- poids [BM, KB] déquantifiés ---------------------------------
+        {
+            const uint4 pk = *reinterpret_cast<const uint4 *>(
+                qw + grow * half_k + ((k0 + wcol0) >> 1));
+            const unsigned char *sc = bscale + grow * nblk + ((k0 + wcol0) >> 4);
+            const float s0 = e4m3_to_float(sc[0]) * gscale;
+            const float s1 = e4m3_to_float(sc[1]) * gscale;
+            const unsigned char *o = reinterpret_cast<const unsigned char *>(&pk);
+            __nv_bfloat16 *dst = ws + lrow * GG_LDW + wcol0;
+            #pragma unroll
+            for (int i = 0; i < 32; ++i) {
+                const unsigned char b = o[i >> 1];
+                const unsigned char nib = (i & 1) ? (b >> 4) : (b & 0xF);
+                const float v = grow_ok ? fp4_val(nib) * (i < 16 ? s0 : s1) : 0.f;
+                dst[i] = __float2bfloat16(v);
+            }
+        }
+        __syncthreads();
+        #pragma unroll
+        for (int kk = 0; kk < GG_KB; kk += 16) {
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> a;
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> b;
+            wmma::load_matrix_sync(a, xs + kk, GG_LDX);
+            wmma::load_matrix_sync(b, ws + (warp * 16) * GG_LDW + kk, GG_LDW);
+            wmma::mma_sync(acc, a, b, acc);
+        }
+        __syncthreads();
+    }
+    wmma::store_matrix_sync(ys + warp * 16, acc, GG_BM, wmma::mem_row_major);
+    __syncthreads();
+    for (int i = tid; i < GG_BT * GG_BM; i += blockDim.x) {
+        const int j = i / GG_BM, n = i - j * GG_BM;
+        if (j < nt && row0 + n < M)
+            y[(long)(t0 + j) * M + row0 + n] = __float2bfloat16(ys[i]);
+    }
+}
+
+torch::Tensor nvfp4_gemm_grouped(torch::Tensor qw, torch::Tensor bscale,
+                                 torch::Tensor gscales, torch::Tensor x,
+                                 torch::Tensor tile_e, torch::Tensor tile_t0,
+                                 torch::Tensor tile_n, int64_t K) {
+    CHECK_CUDA(qw); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(qw);
+    CHECK_CONTIG(qw); CHECK_CONTIG(bscale); CHECK_CONTIG(x);
+    TORCH_CHECK(K % GG_KB == 0, "GEMM groupee : K multiple de 64");
+    TORCH_CHECK(x.scalar_type() == torch::kBFloat16, "GEMM groupee : activations bf16");
+    const int M = qw.size(1), G = x.size(0), T = tile_e.size(0);
+    auto y = torch::zeros({G, M}, x.options());
+    if (T == 0) return y;
+    dim3 grid((M + GG_BM - 1) / GG_BM, T);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    nvfp4_gemm_grouped_kernel<<<grid, 128, 0, stream>>>(
+        qw.data_ptr<unsigned char>(), bscale.data_ptr<unsigned char>(),
+        gscales.data_ptr<float>(),
+        reinterpret_cast<const __nv_bfloat16 *>(x.data_ptr()),
+        tile_e.data_ptr<int>(), tile_t0.data_ptr<int>(), tile_n.data_ptr<int>(),
+        reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), M, (int)K);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return y;
+}
+
 torch::Tensor nvfp4_gemv_grouped(torch::Tensor qw, torch::Tensor bscale,
                                  torch::Tensor gscales,
                                  torch::Tensor expert_ids,
@@ -1755,6 +1874,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("gsu"), py::arg("expert_ids"), py::arg("token_ids"), py::arg("x"),
           py::arg("K"), py::arg("act") = 0,
           "MoE NVFP4 : gate et up fusionnes, sortie act(gate)*up (act 0=SiLU, 1=GELU-tanh)");
+    m.def("nvfp4_gemm_grouped", &nvfp4_gemm_grouped,
+          "MoE NVFP4 : GEMM groupee sur tuiles de jetons, poids lus en 4 bits");
     m.def("int4_gemv_grouped", &int4_gemv_grouped,
           "INT4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
     m.def("moe_route", &moe_route, "routage MoE : scores, biais, top-k, poids");

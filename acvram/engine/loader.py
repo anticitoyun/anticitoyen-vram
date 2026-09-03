@@ -679,6 +679,32 @@ def _reajuster_plan(plan: Plan, manifest: dict) -> None:
             print(f"[acvram] plan réajusté : {deplacees} MLP de plus en RAM hôte sur {dev} "
                   f"(poids réels {utilise() / 2**30:.1f} Gio pour {t.capacity / 2**30:.1f} Gio)",
                   flush=True)
+            continue
+        # Symétrique de la descente. Le plan est figé au moment de la
+        # conversion, avec le format nominal et la machine d'alors ; les
+        # poids réels sont souvent plus compacts (nvfp4 à 4,5 bpw là où le
+        # plan comptait 6). Une couche laissée en RAM hôte y coûte un aller
+        # PCIe par jeton : dès qu'elle tient sur la carte, elle y remonte.
+        if os.environ.get("ACVRAM_PLAN_FIGE"):
+            continue
+        remontees = 0
+        for l in plan.layers:
+            if l.exec_device != dev:
+                continue
+            if l.attn_storage == "cpu" and utilise() + l.attn_bytes <= t.capacity - marge:
+                l.attn_storage = dev
+            if l.mlp_storage != "cpu":
+                continue
+            if utilise() + l.mlp_bytes > t.capacity - marge:
+                continue
+            l.mlp_storage = dev
+            if hasattr(l, "mlp_exec"):
+                l.mlp_exec = "gpu"
+            remontees += 1
+        if remontees:
+            print(f"[acvram] plan réajusté : {remontees} MLP remontés en VRAM sur {dev} "
+                  f"(poids réels {utilise() / 2**30:.1f} Gio pour {t.capacity / 2**30:.1f} Gio)",
+                  flush=True)
 
 
 def _plan_from_manifest(manifest: dict) -> Plan:

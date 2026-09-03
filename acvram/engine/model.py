@@ -515,25 +515,70 @@ class MoEBlock(nn.Module):
                                   rows_per_group=M).view(E, M, k)
         return w[:, :m, :]
 
+    @staticmethod
+    def _tuiles(cnt: torch.Tensor, bt: int = 16):
+        """Découpe chaque expert en tuiles de ``bt`` jetons consécutifs.
+
+        Renvoie (expert, premier jeton, compte) par tuile — la grille du noyau
+        de GEMM groupée, qui ne connaît qu'un expert par bloc."""
+        dev = cnt.device
+        starts = torch.cumsum(cnt, 0) - cnt
+        ntiles = (cnt + bt - 1) // bt
+        tot = int(ntiles.sum())
+        if tot == 0:
+            vide = torch.zeros(0, dtype=torch.int32, device=dev)
+            return vide, vide, vide
+        tile_e = torch.repeat_interleave(
+            torch.arange(cnt.numel(), device=dev), ntiles)
+        base = torch.cumsum(ntiles, 0) - ntiles
+        idx = torch.arange(tot, device=dev) - torch.repeat_interleave(base, ntiles)
+        t0 = starts[tile_e] + idx * bt
+        n = torch.clamp(cnt[tile_e] - idx * bt, max=bt)
+        return (tile_e.to(torch.int32), t0.to(torch.int32), n.to(torch.int32))
+
+    def _gemm(self, pile, xs, tiles):
+        _, qw, bs, gs, k, m = pile
+        return kernels.get_extension().nvfp4_gemm_grouped(
+            qw, bs, gs, xs, tiles[0], tiles[1], tiles[2], k)[:, :m]
+
     def _forward_prefill_grouped(self, x, topw, topi) -> Optional[torch.Tensor]:
-        if not hasattr(torch, "_grouped_mm") or self._stacks is None:
-            return None
-        if "gate_proj" not in self._stacks:
+        if self._stacks is None or "gate_proj" not in self._stacks:
             return None                                # experts sans porte : boucle
         pg, pu, pd = (self._stacks[n] for n in ("gate_proj", "up_proj", "down_proj"))
         if any(p[0] != "nvfp4" for p in (pg, pu, pd)):
+            return None
+        ext = kernels.get_extension()
+        direct = (ext is not None and hasattr(ext, "nvfp4_gemm_grouped")
+                  and not os.environ.get("ACVRAM_PREFILL_DEQUANT")
+                  and pg[4] % 64 == 0 and pd[4] % 64 == 0)
+        if not direct and not hasattr(torch, "_grouped_mm"):
             return None
         t, k = topi.shape
         E = pg[1].shape[0]
         flat_e = topi.reshape(-1).to(torch.int64)
         flat_t = torch.arange(t, device=x.device).repeat_interleave(k)
         ordre = torch.argsort(flat_e, stable=True)
-        offs = torch.cumsum(torch.bincount(flat_e, minlength=E), 0).to(torch.int32)
+        cnt = torch.bincount(flat_e, minlength=E)
         xs = x[flat_t[ordre]].to(torch.bfloat16).contiguous()        # [G, H]
-        wg = self._pile_bf16(pg); g = torch._grouped_mm(xs, wg.transpose(1, 2), offs=offs); del wg
-        wu = self._pile_bf16(pu); u = torch._grouped_mm(xs, wu.transpose(1, 2), offs=offs); del wu
-        act = (self._act(g.to(torch.float32)) * u.to(torch.float32)).to(torch.bfloat16)
-        wd = self._pile_bf16(pd); d = torch._grouped_mm(act, wd.transpose(1, 2), offs=offs); del wd
+        if direct:
+            # les poids restent en 4 bits : plus de pile bf16 intermédiaire
+            # (trois passes de plusieurs Gio par couche en moins)
+            tiles = self._tuiles(cnt)
+            if xs.shape[1] != pg[4]:                   # entrée rembourrée
+                xs = F.pad(xs, (0, pg[4] - xs.shape[1])).contiguous()
+            g = self._gemm(pg, xs, tiles)
+            u = self._gemm(pu, xs, tiles)
+            act = (self._act(g.to(torch.float32))
+                   * u.to(torch.float32)).to(torch.bfloat16)
+            if act.shape[1] != pd[4]:
+                act = F.pad(act, (0, pd[4] - act.shape[1]))
+            d = self._gemm(pd, act.contiguous(), tiles)
+        else:
+            offs = torch.cumsum(cnt, 0).to(torch.int32)
+            wg = self._pile_bf16(pg); g = torch._grouped_mm(xs, wg.transpose(1, 2), offs=offs); del wg
+            wu = self._pile_bf16(pu); u = torch._grouped_mm(xs, wu.transpose(1, 2), offs=offs); del wu
+            act = (self._act(g.to(torch.float32)) * u.to(torch.float32)).to(torch.bfloat16)
+            wd = self._pile_bf16(pd); d = torch._grouped_mm(act, wd.transpose(1, 2), offs=offs); del wd
         d = d.to(torch.float32) * topw.reshape(-1)[ordre].to(torch.float32).unsqueeze(-1)
         inv = torch.empty_like(ordre); inv[ordre] = torch.arange(ordre.numel(), device=x.device)
         return d[inv].view(t, k, -1).sum(dim=1).to(x.dtype)
