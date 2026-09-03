@@ -735,7 +735,7 @@ class MoEBlock(nn.Module):
         # On regroupe les jetons par expert, pour que chaque expert fasse un
         # seul produit matriciel par lot au lieu d'un par jeton.
         flat_expert = topi.reshape(-1)
-        flat_weight = topw.reshape(-1)
+        flat_weight = topw.reshape(-1).to(x.dtype)   # topw est en fp32
         flat_token = torch.arange(t, device=x.device).repeat_interleave(self.top_k)
         for e in flat_expert.unique().tolist():
             sel = flat_expert == e
