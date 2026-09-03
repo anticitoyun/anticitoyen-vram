@@ -115,6 +115,69 @@ Le bridage n'est **pas** persistant au redémarrage (le mode persistance est lui
 aussi désactivé) : à vérifier après chaque reboot avant toute campagne de
 mesure.
 
+### Ce que la limite coûte vraiment — mesuré le 3 septembre 2026
+
+Balayage à modèle chargé une seule fois, limite changée à chaud, trois tours
+de décodage et deux de prefill par point, meilleur retenu ; puissance tirée
+échantillonnée pendant la mesure.
+
+**RTX 5090 — la limite de 400 W ne mord jamais.**
+
+| limite | Qwen3-Coder-30B (MoE) | dense 27B Q6_K | puissance tirée, crête |
+|---|---|---|---|
+| 400 W | 180,2 t/s | 36,6 t/s | 238 W (MoE) · 332 W (dense) |
+| 500 W | 180,6 | 36,8 | 175 W · 338 W |
+| 600 W | 180,8 | 36,8 | 212 W · 340 W |
+
+De 400 à 600 W : **+0,3 % sur le MoE, +0,5 % sur le dense** — dans le bruit de
+mesure. La carte ne demande jamais plus de ~340 W, prefill compris. Les 200 W
+retirés ne coûtent rien, et 400 W est de toute façon le plancher réglable.
+
+**Le levier utile sur la 5090 n'est pas la puissance mais la fréquence.**
+Verrouillage par `nvidia-smi -lgc 0,<MHz>`, même protocole :
+
+| fréquence | dense 27B | W | jetons/kJ | MoE 30B | prefill MoE |
+|---|---|---|---|---|---|
+| 3135 (libre) | 37,1 t/s | 352 | 105 | 184,4 t/s | 8824 j/s |
+| 2700 | — | — | — | 175,7 (−4,7 %) | 8631 |
+| 2400 | 35,2 (−5 %) | 268 (−24 %) | **131 (+25 %)** | 163,8 (−11 %) | 8271 |
+| 2100 | 33,3 (−10 %) | 246 | 136 | 153,6 (−17 %) | 7810 |
+| 1800 | 31,0 (−16 %) | 224 | 138 | 140,9 (−24 %) | 7225 |
+| 1500 | 27,6 (−26 %) | 202 | 137 | — | — |
+
+Deux enseignements. Le **genou dépend de la charge** : un dense, limité par la
+bande passante, accepte 2400 MHz pour 5 % de débit et un quart de la puissance ;
+un MoE, qui lit peu de poids par jeton et paie surtout des lancements de
+noyaux, perd déjà 11 % au même réglage — son genou est vers 2700 MHz.
+Et sous 2100 MHz, l'efficacité **plafonne** (136-138 j/kJ) pendant que le débit
+continue de tomber : il n'y a plus rien à gagner.
+
+**RTX 3080 Ti — là, la limite mord.** Qwen3-4B, décodage et prefill :
+
+| limite | décodage | prefill | W tirés | jetons/kJ |
+|---|---|---|---|---|
+| 375 W | 59,0 t/s | 7198 j/s | 279 | 212 |
+| 325 W | 59,0 | 7116 | 276 | 213 |
+| **275 W** (réglage actuel) | 57,4 (−2,7 %) | 6760 (−6 %) | 251 | 229 |
+| 250 W | *point optimal estimé* | | | |
+| 225 W | 53,8 (−8,8 %) | 6094 (−15 %) | 214 | 252 |
+| 175 W | 46,5 (−21 %) | **4097 (−43 %)** | 174 | 267 |
+
+Au-dessus de 325 W la carte ne demande rien de plus (~280 W tirés) : les
+50 derniers watts de la plage sont inutiles. En dessous de 225 W le prefill
+s'effondre bien plus vite que le décodage — c'est lui qui a besoin des cœurs.
+
+### Réglages retenus
+
+| carte | limite | pourquoi |
+|---|---|---|
+| RTX 5090 | **400 W** (plancher) | la limite ne mord jamais ; rien à gagner plus haut, impossible de descendre |
+| RTX 3080 Ti | **275 W**, ou 250 W | 275 coûte 2,7 % de décodage contre 375 ; 250 W serait le meilleur compromis jetons/kJ sans casser le prefill |
+
+Le verrouillage de fréquence est **hors banc** : il fausse toute comparaison de
+t/s. Ne l'utiliser que pour une campagne d'efficacité énergétique, et remettre
+`nvidia-smi -i 0 -rgc` ensuite.
+
 Ne bridez **pas** les fréquences mémoire de la 5090 : le débit de décodage est
 proportionnel à la bande passante GDDR7, qui est tout l'intérêt de cette carte
 ici.

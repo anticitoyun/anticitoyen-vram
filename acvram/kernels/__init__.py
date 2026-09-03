@@ -199,9 +199,11 @@ def get_extension():
         warnings.warn(_ERROR)
         return None
 
-    # nvcc doit savoir emettre pour la plus haute architecture presente.
-    _ensure_cuda_home(_MIN_CUDA_FOR_SM120 if any(c >= (12, 0) for c in caps)
-                      else (11, 0))
+    # Le source inclut ``cuda_fp4.h``, qui n'existe qu'a partir de CUDA 12.8 :
+    # l'exigence ne depend pas de l'architecture visee. Un poste dont le nvcc
+    # systeme est plus ancien (Mint 22.3 livre CUDA 12.0) compilait sans
+    # broncher pour sm_86 et echouait sur l'en-tete manquant.
+    _ensure_cuda_home(_MIN_CUDA_FOR_SM120)
 
     try:
         from torch.utils.cpp_extension import load
