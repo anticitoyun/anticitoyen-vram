@@ -2082,6 +2082,9 @@ std::vector<torch::Tensor> rmsnorm_bf16(torch::Tensor x, torch::Tensor w, double
     const int H = xc.size(-1);
     const long R = xc.numel() / H;
     auto y = torch::empty_like(xc);
+    // Un bloc par ligne : à H = 2048 il ne reste que 256 fils pour 2048
+    // éléments. Élargir le bloc raccourcit la réduction, seul coût réel ici.
+    const int th = H >= 2048 ? 1024 : (H >= 1024 ? 512 : 256);
     torch::Tensor xn;
     const __nv_bfloat16 *pres = nullptr;
     __nv_bfloat16 *pxn = nullptr;
@@ -2091,7 +2094,7 @@ std::vector<torch::Tensor> rmsnorm_bf16(torch::Tensor x, torch::Tensor w, double
         xn = torch::empty_like(xc);
         pres = reinterpret_cast<const __nv_bfloat16 *>(rc.data_ptr());
         pxn = reinterpret_cast<__nv_bfloat16 *>(xn.data_ptr());
-        rmsnorm_bf16_kernel<<<(unsigned)R, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+        rmsnorm_bf16_kernel<<<(unsigned)R, th, 0, at::cuda::getCurrentCUDAStream()>>>(
             reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr()),
             reinterpret_cast<const __nv_bfloat16 *>(w.contiguous().data_ptr()),
             reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), pres, pxn,
@@ -2099,7 +2102,7 @@ std::vector<torch::Tensor> rmsnorm_bf16(torch::Tensor x, torch::Tensor w, double
         C10_CUDA_KERNEL_LAUNCH_CHECK();
         return {y, xn};
     }
-    rmsnorm_bf16_kernel<<<(unsigned)R, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+    rmsnorm_bf16_kernel<<<(unsigned)R, th, 0, at::cuda::getCurrentCUDAStream()>>>(
         reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr()),
         reinterpret_cast<const __nv_bfloat16 *>(w.contiguous().data_ptr()),
         reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), nullptr, nullptr,
