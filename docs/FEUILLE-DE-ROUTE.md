@@ -1053,3 +1053,54 @@ avait déjà été corrigé pour la compilation des noyaux en v0.4.45, il restai
 `tests/test_improvements.py::test_first_generation_matches_the_next_ones` fixe
 l'invariant : trois générations successives, sorties identiques, chemin FP4
 toujours debout à la fin. Le test échoue sur le code d'avant.
+
+## 4 septembre 2026, fin de journée — le parc rebancé après sm_120f et le repli FP4
+
+Trente-huit modèles, même protocole que le matin (sept tours, meilleur retenu,
+128 jetons, 5090 à 400 W), puissance échantillonnée à 50 ms pendant les tours.
+Résultats bruts dans `rebanc-04sept-soir.tsv`, à comparer à `rebanc-04sept.tsv`.
+
+**Gain médian +6,8 %, jusqu'à +15,2 %.** Aucun modèle n'échoue.
+
+| famille | matin | soir | | W tirés | jetons/kJ |
+|---|---|---|---|---|---|
+| MoE 30B (AWQ, GGUF, EXL3) | 170-177 | **181-189** | +6,5 % | 242→176 | 704→**1036** |
+| MoE 35B | 131-141 | **147** | +4,5 % | 200→155 | 700→**940** |
+| denses 9B | 107 | **113** | +5,5 % | 288→210 | 375→**535** |
+| MoE 42-47B GLM | 61-85 | **64-90** | +5,4 % | 183→180 | 334→356 |
+| **denses 27B** | 37,3-38,9 | **41,3-44,8** | **+10 à +15 %** | 314→262 | 120→**160** |
+| denses 31-32B | 33,5-34,9 | **35,5-38,1** | +6 à +9 % | 346→301 | 98→**122** |
+
+Trois enseignements.
+
+**Les denses gagnent le plus**, ce qui était attendu : ce sont eux qui décodent
+le plus de poids NVFP4 par jeton, donc eux qui payaient le plus cher l'émulation
+logicielle de la conversion E2M1. Le plateau des denses 27B passe de ~37,5 à
+~41,4 t/s — onze modèles d'origines et de quantifications différentes, toujours
+aussi serrés, mais quatre tokens par seconde plus haut.
+
+**Le prefill est transfiguré.** TTFT médian **166 → 107 ms**, et sur les MoE la
+chute est spectaculaire : 176 → 36 ms pour Qwen3-Coder-30B, 256 → 48 ms pour
+agentworld-35B. C'est le correctif v0.4.47 : passé la première requête, vingt
+GEMM de prefill sur vingt-neuf retombaient sur les noyaux fusionnés. Les denses
+27B, eux, voient leur TTFT *monter* (166 → 233 ms) — ils n'ont presque aucune
+GEMM éligible aux tensor cores FP4 et paient désormais la garde de forme.
+À regarder.
+
+**L'énergie baisse partout, et beaucoup.** Un MoE de 30 milliards rend
+maintenant **1036 jetons par kilojoule** contre 704 le matin, en tirant 176 W au
+lieu de 242. Le record du parc est à **1411 jetons/kJ** (huihui-qwen3.6-35B, pour
+60 W). Le rapport entre le meilleur et le pire reste de douze, mais tout le
+monde a monté. Moins d'instructions entières par poids décodé, c'est
+directement moins de watts.
+
+### Deux mesures écartées
+
+`gemma-4-26b-a4b-heretic-apex-i-quality` et
+`gemma-4-26b-a4b-it-ultra-uncensored-heretic-q4-k-xl` sortent à 53,4 et
+53,6 t/s contre 124 et 123 le matin. Ce n'est pas une régression : le journal
+porte pour ces deux modèles, et pour eux seuls, `graphes CUDA désactivés :
+mémoire insuffisante pour la capture, décodage en eager`. Un serveur
+d'embeddings occupait 4,2 Gio de la carte pendant la mesure, et ces deux
+modèles sont ceux qui passent le plus près du plafond. Les chiffres du matin
+sont conservés dans les notes du menu ; la mesure est à refaire carte libre.
