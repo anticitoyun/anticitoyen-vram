@@ -1083,10 +1083,16 @@ différents, toujours aussi serrés, mais quatre jetons par seconde plus haut.
 **Le prefill des MoE est transfiguré.** TTFT de 176 à 36 ms sur
 Qwen3-Coder-30B, de 256 à 47 sur agentworld-35B, de 118 à 39 sur Gemma-4-26B.
 C'est le correctif v0.4.47 : passé la première requête, vingt GEMM de prefill
-sur vingt-neuf retombaient sur les noyaux fusionnés. Les denses 27B, eux, voient
-leur TTFT *monter* (166 → 235 ms) : ils n'ont presque aucune GEMM éligible aux
-tensor cores FP4 et paient désormais la garde de forme sans rien gagner en
-retour. À regarder.
+sur vingt-neuf retombaient sur les noyaux fusionnés.
+
+Les denses 27B, eux, affichent un TTFT en hausse (166 → 235 ms) — mais c'est le
+protocole du matin qui était en cause, pas le code. À protocole identique, sur
+qwen3.8-27B-UD, le code du 4 septembre matin donne 37,4 t/s et **237 ms**, le
+code d'aujourd'hui 41,5 t/s et **235 ms** : le débit monte de 11 %, le TTFT ne
+bouge pas. Le chemin W4A4 des tensor cores FP4 est d'ailleurs trois fois
+meilleur que le W4A8 sur ce prefill — 224,7 ms contre 686,0 en retirant le
+backend `fp4-tensorcores` du registre. La garde de forme de v0.4.47 ne coûte
+rien à personne.
 
 **L'énergie baisse partout.** Médiane du parc **354 → 420 jetons par
 kilojoule**. Un MoE de 30 milliards rend maintenant **1032 jetons/kJ** contre
