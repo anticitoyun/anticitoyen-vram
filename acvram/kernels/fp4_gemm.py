@@ -26,6 +26,8 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+import warnings
+
 import torch
 
 from ..quant.nvfp4 import BLOCK, NVFP4Tensor
@@ -131,6 +133,13 @@ def nvfp4_mm_tensorcore(x: torch.Tensor, t: NVFP4Tensor) -> Optional[torch.Tenso
     """
     if not fp4_mm_available():
         return None
+    # ``torch._scaled_mm`` veut une dimension contractée multiple de 16 octets,
+    # soit 32 poids FP4. Une couche qui ne s'y plie pas — 688 colonnes, donc
+    # 344 octets — n'est pas un défaut du chemin : c'est une forme qu'il ne sait
+    # pas prendre. La refuser ici, et non par l'exception plus bas, évite qu'une
+    # seule couche atypique n'éteigne les tensor cores pour tout le modèle.
+    if t.padded_in % 32 or t.qweight.shape[-1] % 16:
+        return None
     from ..quant.nvfp4 import quantize_nvfp4
 
     orig = x.shape
@@ -147,10 +156,17 @@ def nvfp4_mm_tensorcore(x: torch.Tensor, t: NVFP4Tensor) -> Optional[torch.Tenso
             out_dtype=torch.bfloat16)
         out = out * (xq.global_scale.to(out.device) * t.global_scale.to(out.device))
         return out.to(x.dtype).reshape(*orig[:-1], t.shape[0])
-    except Exception:                                 # noqa: BLE001
+    except Exception as exc:                          # noqa: BLE001
+        # Extinction globale : elle ne doit plus concerner qu'une panne du
+        # chemin lui-même, les formes étant écartées plus haut. Elle change le
+        # résultat de toutes les couches suivantes, donc elle s'annonce — le
+        # repli silencieux avait fait diverger la première requête d'un
+        # processus de toutes les suivantes.
         global _OK, _REASON
         _OK = False
-        _REASON = "la sonde FP4 a reussi mais un appel reel a echoue"
+        _REASON = f"la sonde FP4 a reussi mais un appel reel a echoue : {exc}"
+        warnings.warn(f"acvram : chemin FP4 tensor cores eteint apres un echec "
+                      f"reel, repli sur les noyaux fusionnes ({exc})")
         return None
 
 

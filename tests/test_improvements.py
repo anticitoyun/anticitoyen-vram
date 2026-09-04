@@ -411,3 +411,40 @@ def test_host_kv_pool_roundtrip(converted):
     assert ref == again, "la remontee depuis l'hote a change la sortie"
     if e.host_kv is not None and e.allocator.evictions > 0:
         assert e.host_kv.spills > 0, "aucun bloc n'est descendu a l'hote"
+
+
+# --------------------------------------------------------------------------
+# le chemin FP4 tensor cores ne s'éteint plus sur une forme qu'il ne prend pas
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not torch.cuda.is_available()
+                    or torch.cuda.get_device_capability(0) < (10, 0),
+                    reason="tensor cores FP4 : sm_100 ou plus")
+def test_first_generation_matches_the_next_ones(converted):
+    """La première génération d'un processus rend la même chose que les suivantes.
+
+    Une couche dont la dimension contractée n'est pas un multiple de 32 poids
+    FP4 fait échouer ``torch._scaled_mm``. L'exception éteignait le chemin FP4
+    globalement et sans un mot : les quelques GEMM déjà servies l'avaient été
+    sur les tensor cores, toutes les suivantes — et toutes les requêtes
+    ultérieures du processus — repassaient par les noyaux fusionnés. La
+    première réponse d'un serveur différait donc de toutes les autres.
+    """
+    import acvram.kernels.fp4_gemm as fp4
+
+    fp4._OK, fp4._PROBED = False, False       # repartir d'une sonde neuve
+    assert fp4.fp4_mm_available()
+    loaded = load_model(converted, dtype=torch.bfloat16, device_override="cuda:0")
+    prompt = [7, 3, 9, 1, 4, 8, 2, 5] * 5
+    sorties = []
+    for _ in range(3):
+        e = Engine(loaded, None, max_batch_size=1, max_model_len=256,
+                   enable_cuda_graphs=False)
+        sorties.append([t for o in e.generate(prompt,
+                                              SamplingParams(temperature=0.0,
+                                                             max_tokens=6))
+                        for t in o.token_ids])
+    assert sorties[0] == sorties[1] == sorties[2], \
+        "la premiere generation diverge des suivantes"
+    assert fp4._OK, "une forme refusee a eteint le chemin FP4 tensor cores"

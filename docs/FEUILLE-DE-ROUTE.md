@@ -1003,3 +1003,53 @@ d'unité entière — la première fois qu'il bouge.
 
 Le gain sur `int8_gemv`, qui ne décode aucun quartet, vient de `e4m3_to_float` :
 les échelles de bloc passaient par le même mécanisme d'émulation.
+
+## 4 septembre 2026, soir — v0.4.47 : la première réponse n'est plus la seule de son espèce
+
+En lançant la suite complète après le passage à `sm_120f`, un test échouait :
+`test_speculative_generation_under_graphs`, qui affirme qu'à température nulle
+la spéculation rend la même sortie que le décodage ordinaire. Le premier réflexe
+— accuser le changement d'architecture — était faux : le test échouait déjà, et
+sa cause n'était pas la spéculation.
+
+En inversant l'ordre des deux exécutions comparées, le motif est apparu : ce
+n'est pas la spéculation qui diverge, c'est **la première génération d'un
+processus** qui diffère de toutes les suivantes. Le test la mettait simplement en
+premier. Le cache de préfixe, soupçonné ensuite, n'y était pour rien non plus :
+lui aussi n'était incriminé que par l'ordre des essais.
+
+Un relevé couche par couche a placé la divergence dès `layers.0.self_attn.q_proj`
+— entrée identique, sortie écartée de 0,12 — donc dans la multiplication
+elle-même. Le journal des backends a donné le reste : le chemin
+`fp4-tensorcores` servait **5** GEMM à la première passe, puis **aucune** à
+toutes les suivantes.
+
+`nvfp4_mm_tensorcore` entoure son `torch._scaled_mm` d'un `except Exception` qui
+pose `_OK = False` — extinction **globale, définitive et muette** du chemin FP4.
+Or l'exception venait d'une seule couche du modèle : 688 colonnes, soit 344
+octets empaquetés, et `_scaled_mm` exige une dimension contractée multiple de
+16 octets. Une forme que le chemin ne sait pas prendre éteignait donc les tensor
+cores pour *toutes* les autres, pour le reste de la vie du processus.
+
+Deux conséquences, l'une de justesse et l'autre de vitesse :
+
+* la première requête d'un serveur répondait par un autre chemin numérique que
+  les suivantes — à température nulle, un jeton différent ;
+* passé cette première requête, **vingt GEMM de prefill par passe** sur les
+  vingt-neuf du modèle retombaient sur les noyaux fusionnés.
+
+La forme est désormais écartée **avant** l'appel, là où elle doit l'être :
+`padded_in % 32` ou `qweight.shape[-1] % 16` rendent `None`, poliment, et le
+backend suivant prend le relais. L'extinction globale ne concerne plus qu'une
+panne réelle du chemin, et elle s'annonce par un avertissement — le repli muet
+avait déjà été corrigé pour la compilation des noyaux en v0.4.45, il restait ici.
+
+| par passe de prefill, modèle témoin | avant | après |
+|---|---|---|
+| GEMM servies sur tensor cores FP4, 1re passe | 5 | **20** |
+| GEMM servies sur tensor cores FP4, passes suivantes | 0 | **20** |
+| formes refusées | — | 688 seulement |
+
+`tests/test_improvements.py::test_first_generation_matches_the_next_ones` fixe
+l'invariant : trois générations successives, sorties identiques, chemin FP4
+toujours debout à la fin. Le test échoue sur le code d'avant.
