@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from typing import Any, Optional
 
 import torch
@@ -63,6 +64,34 @@ class LoadedModel:
         self.plan = plan
         self.manifest = manifest
         self.path = path
+
+
+_noyaux_signales = False
+
+
+def _avertir_noyaux() -> None:
+    """Dit franchement quand les noyaux CUDA manquent.
+
+    Le repli sur les implémentations de référence divise le débit par un ordre
+    de grandeur, et il ne se signalait que par un ``warnings.warn`` noyé dans
+    la sortie du chargement. Une compilation qui échoue — un nvcc trop ancien,
+    un en-tête absent — passait ainsi inaperçue pendant des semaines.
+    """
+    global _noyaux_signales
+    if _noyaux_signales or not torch.cuda.is_available():
+        return
+    _noyaux_signales = True
+    from ..kernels import build_info
+    info = build_info()
+    if info.get("available"):
+        return
+    raison = (info.get("error") or "raison inconnue").strip().splitlines()
+    print("\n[acvram] ATTENTION : les noyaux CUDA ne sont PAS disponibles.",
+          file=sys.stderr)
+    print("[acvram] le moteur tourne sur les implementations de reference, "
+          "environ dix fois plus lentes.", file=sys.stderr)
+    print(f"[acvram] cause : {raison[0][:300]}", file=sys.stderr)
+    print("[acvram] verifiez `python -m acvram doctor`.\n", file=sys.stderr)
 
 
 def _build_quant(entry: dict, name: str, reader: _ShardReader,
@@ -121,6 +150,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
                         if k in ModelSpec.__dataclass_fields__})
     if plan is None:
         plan = _plan_from_manifest(manifest)
+    _avertir_noyaux()
     reader = _ShardReader(path, manifest["weight_map"])
     group_size = manifest.get("options", {}).get("group_size", 128)
 
