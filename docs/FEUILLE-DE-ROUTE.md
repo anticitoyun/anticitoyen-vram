@@ -901,3 +901,53 @@ réserve à l'administrateur. Le déblocage est un paramètre de module et donc 
 redémarrage — la marche à suivre est dans `MATERIEL.md`. En attendant, `nsys`
 suffit à compter les noyaux et à voir où va le temps, mais pas à savoir ce qui
 plafonne un noyau donné.
+
+## 4 septembre 2026 — le parc rebancé, et l'énergie enfin mesurée
+
+Trente-huit modèles, protocole du banc direct (sept tours, meilleur retenu,
+128 jetons), cartes à leurs limites habituelles — 5090 à 400 W. Pour la
+première fois la puissance réellement tirée est échantillonnée pendant la
+mesure, ce qui donne la colonne qui manquait à tous les tableaux précédents.
+Résultats bruts dans `rebanc-04sept.tsv`. Aucun échec, aucune régression.
+
+### Ce que les correctifs ont rapporté
+
+| modèle | 3 sept | 4 sept | |
+|---|---|---|---|
+| ornith-1.5-35B-A3B | 101,5 | **140,8** | +39 % |
+| huihui-qwen3.6-35B-A3B abliterated | 63,4 | **80,2** | +26 % |
+| qwen3-30B-A3B-thinking AWQ | 146,6 | **177,1** | +21 % |
+| kat-coder-v2.5-dev | 122,1 | **140,6** | +15 % |
+| qwen3.6-35B-A3B uncensored | 117,3 | **131,5** | +12 % |
+| les vingt denses 27-32B | ~36,7 | ~37,5 | +2 % |
+
+Les gains à deux chiffres sont tous des MoE, et ils viennent du seuil INT8 :
+leurs tenseurs promus étaient déquantifiés en entier à chaque passe.
+
+### Trois régimes, et un écart d'énergie de neuf pour un
+
+| famille | t/s | W tirés | jetons/kJ |
+|---|---|---|---|
+| MoE 30B (AWQ, GGUF, EXL3) | 170-177 | 220-242 | 700-800 |
+| MoE 35B | 131-141 | 193-202 | 680-712 |
+| MoE 26B Gemma | 123-124 | 237 | 519-523 |
+| denses 9B | 107 | 285-288 | 373-378 |
+| MoE 42-47B GLM | 61-85 | 182-183 | 334-465 |
+| **denses 27-32B** | **33-39** | **311-346** | **97-124** |
+
+Le fait le plus net de ce tableau n'est pas le débit mais l'énergie. Un MoE de
+30 milliards de paramètres rend **800 jetons par kilojoule** ; un dense de
+27 milliards en rend **120**. Le rapport est de sept, et il monte à **neuf**
+entre le meilleur (huihui-qwen3.6-35B à 880 jetons/kJ, pour 91 W seulement) et
+le pire (gemma-4-31B et awaxis-31B à 97, pour 341 W).
+
+Deux causes se cumulent : un MoE lit une fraction de ses poids par jeton, donc
+il va quatre fois plus vite ; et il sollicite moins la mémoire, donc il tire
+150 W de moins. Le débit et la consommation vont dans le même sens, ce qui
+double l'écart.
+
+Vingt denses 27B mesurés entre **37,3 et 38,9 t/s**, pour 311 à 325 W et 119 à
+124 jetons/kJ — d'origines, de quantifications et de formats différents
+(Q4_K_M, Q5_K_M, Q6_K, EXL3 5 bpw). À ce point de régularité, ce n'est plus le
+modèle qu'on mesure mais la bande passante GDDR7 : la seule façon de déplacer
+ce plateau est de lire moins d'octets.
