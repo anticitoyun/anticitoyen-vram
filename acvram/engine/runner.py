@@ -330,6 +330,12 @@ class Engine:
             self.speculator.release(seq)
         seq.finish_reason = reason
         if seq.blocks:
+            # Publier avant de rendre les blocs : une requête qui s'arrête au
+            # premier jeton voyait son invite entierement perdue, puisque
+            # `_register_complete_blocks` s'execute apres `_emit` et ne trouvait
+            # plus aucun bloc. Les invites courtes — un systeme partage, une
+            # question breve — ne peuplaient donc jamais le cache de prefixe.
+            self._register_complete_blocks(seq)
             self.allocator.free(seq.blocks)
             for etats in self.gdn_states.values():
                 etats.pop(seq.id, None)
