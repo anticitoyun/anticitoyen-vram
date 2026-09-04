@@ -261,8 +261,16 @@ def nvfp4_dequant(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16,
     return out[:, : t.shape[-1]] if t.padded_in != t.shape[-1] else out
 
 
+# Contrairement au seuil INT8, celui-ci est bien placé : le chemin W4A8 ne
+# matérialise pas le poids entier à chaque appel. Balayé sur un dense de 27B,
+# le TTFT d'une invite de 16 jetons vaut 194,7 ms à 8, 202,8 à 32, 265,1 à 64 et
+# 283,1 à 128 — monter le seuil ne fait que perdre. La variable reste comme
+# échappement.
+_NVFP4_GEMV_MAX = int(os.environ.get("ACVRAM_NVFP4_GEMV_MAX", "8"))
+
+
 def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
-                 gemv_threshold: int = 8) -> torch.Tensor:
+                 gemv_threshold: int = 0) -> torch.Tensor:
     """``x @ W.T`` avec W stocké en NVFP4.
 
     En dessous de ``gemv_threshold`` lignes, le chemin fusionné l'emporte : les
@@ -276,6 +284,8 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
         # copier vers le GPU ou de les étendre d'abord en 16 bits.
         return nvfp4_matmul_cpu(x, t)
 
+    if gemv_threshold <= 0:
+        gemv_threshold = _NVFP4_GEMV_MAX
     ext = get_extension()
     orig_shape = x.shape
     xf = x.reshape(-1, x.shape[-1])
