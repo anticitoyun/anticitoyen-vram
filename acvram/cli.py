@@ -247,8 +247,13 @@ def cmd_convert(args: argparse.Namespace) -> int:
     spec = load_model_spec(args.model, args.name)
     if not args.out:
         base = os.environ.get("ACVRAM_MODELS_DIR")
-        if not base and os.path.isdir("/mnt/4TO_SATACMR_2022/Modeles"):
-            base = "/mnt/4TO_SATACMR_2022/Modeles/models_acvram"
+        # Les convertis vivent sur le SSD : ils se chargent à chaque lancement,
+        # alors qu'un original ne se lit qu'à la conversion. Le HDD garde un
+        # lien de compatibilité vers ce même dossier.
+        for candidat in ("/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram",
+                         "/mnt/4TO_SATACMR_2022/Modeles/models_acvram"):
+            if not base and os.path.isdir(candidat):
+                base = candidat
         if not base:
             print(red("aucun repertoire de sortie : passez -o, ou posez "
                       "ACVRAM_MODELS_DIR"))
@@ -514,9 +519,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_plan_args(cv)
     cv.add_argument("-o", "--out",
                     help="repertoire de sortie (defaut : "
-                         "$ACVRAM_MODELS_DIR/<nom> ou "
-                         "/mnt/4TO_SATACMR_2022/Modeles/models_acvram/<nom> "
-                         "si ce volume existe)")
+                         "$ACVRAM_MODELS_DIR/<nom>, sinon models_acvram/<nom> "
+                         "sur le SSD 2TO_2023_980PRO1, sinon sur le HDD "
+                         "4TO_SATACMR_2022)")
     cv.add_argument("--no-awq", action="store_true",
                     help="simple arrondi au plus proche, sans mise a l'echelle AWQ")
     cv.add_argument("--hadamard", choices=["auto", "always", "never"],

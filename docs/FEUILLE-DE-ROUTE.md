@@ -1252,3 +1252,26 @@ l'ancien comportement pour qui préfère l'inverse.
 Les modèles déjà convertis gardent leurs promotions : le changement ne vaut que
 pour les conversions à venir. Le parc de 38 modèles ne récupère les 10,6 % qu'en
 étant reconverti.
+
+## v0.4.51 — les convertis sur le SSD, les originaux sur le HDD (4 septembre)
+
+Le parc était rangé à l'envers : les originaux (GGUF, EXL3, AWQ, HF) occupaient
+physiquement le SSD NVMe de 2 To, plein à 99 %, et le HDD CMR de 4 To ne les
+voyait qu'à travers 79 liens symboliques, tandis que les 103 modèles convertis
+— ceux qui se chargent à chaque lancement — dormaient sur le HDD.
+
+Réorganisation, 3,1 Tio déplacés par `scratchpad/migrer.py` (copie dans un
+`.X.partiel`, vérification des octets et du nombre de fichiers, échange, puis
+suppression de la source ; files entrelacées selon l'espace libre) :
+
+* `/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram` — les convertis,
+  seuls occupants du SSD ; c'est aussi là que `acvram convert` écrit par défaut.
+* `/mnt/4TO_SATACMR_2022/Modeles/<catégorie>` — tous les originaux, en vrais
+  dossiers ; plus aucun lien vers le SSD. Toutes les configurations passaient
+  déjà par ces chemins : rien n'a changé pour elles.
+* `/mnt/4TO_SATACMR_2022/Modeles/models_acvram` — un lien vers le SSD, pour les
+  scripts qui gardent l'ancien chemin.
+
+Une conversion lit donc l'original sur le HDD (lecture séquentielle, ce que
+sait faire un CMR) et écrit le converti sur le SSD ; un lancement ne touche
+que le SSD.

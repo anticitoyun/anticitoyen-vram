@@ -35,7 +35,9 @@ a été conservée.
   noyaux exigent la machine cible.
 * Sur la machine cible depuis le 31 août : noyaux compilés (sm_120 + sm_86),
   graphes CUDA au décodage, sources GGUF, Qwen3-14B servi à 27 jetons/s.
-  Modèles convertis sous /mnt/4TO_SATACMR_2022/Modeles/models_acvram/.
+  Modèles convertis sous /media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram/
+  (SSD ; le HDD /mnt/4TO_SATACMR_2022/Modeles garde les originaux et un lien
+  models_acvram vers le SSD).
 * Le dépôt est sur `https://outils.nuages.noho.st/gitlab/anticitoyen/anticitoyen-vram`
   (privé).
 * Développé sur un portable i5-3230M / GT 740M / pilote 470 : **aucun code CUDA
