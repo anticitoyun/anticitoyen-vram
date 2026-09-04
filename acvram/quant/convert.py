@@ -59,6 +59,14 @@ class ConversionOptions:
     snr_floor: float = 25.0           # dB de rapport signal/bruit en sortie de
                                       # couche sous lequel un tenseur est promu
     max_promotions: float = 0.15      # part maximale de tenseurs promus
+    # Prix plafond d'une promotion, en mébioctets ajoutés (0 = pas de plafond).
+    # Le quota ci-dessus compte des tenseurs ; or une porte de 0,1 Mio et une
+    # projection MLP de 39 Mio gagnent le même nombre de décibels en montant
+    # d'un barreau. À quota par tenseurs, l'ordre de rencontre décide, et les
+    # projections épuisent le budget avant que les portes soient vues. Un
+    # plafond de prix trie par ce qui compte vraiment : les octets relus à
+    # chaque jeton.
+    promotion_cout_max_mib: float = 0.0
     # Budget d'octets pour l'affectation par sac à dos (0 = mécanisme classique
     # de plancher SNR). Avec un budget, chaque tenseur promouvable est mesuré
     # dans les deux formats, puis les promotions sont choisies par gain de SNR
@@ -126,6 +134,18 @@ def _h(n: float) -> str:
 # 8 bits sur les quelques pour cent de tenseurs qui en ont besoin coûte une
 # fraction de bit par poids sur l'ensemble.
 PROMOTE = {"int4_awq": "int8", "nvfp4": "int8", "int8": "bf16"}
+
+# Largeur nominale de chaque format, bits par poids échelles comprises. Sert à
+# chiffrer le prix d'une promotion avant de la calculer : la mesurer d'abord
+# reviendrait à quantifier deux fois tous les tenseurs du modèle.
+BPW_NOMINAL = {"bf16": 16.0, "fp16": 16.0, "int8": 8.25,
+               "nvfp4": 4.5, "int4_awq": 4.25}
+
+
+def cout_promotion_mib(numel: int, base: str, cible: str) -> float:
+    """Mébioctets qu'ajoute le passage de ``base`` à ``cible``."""
+    ecart = BPW_NOMINAL.get(cible, 16.0) - BPW_NOMINAL.get(base, 16.0)
+    return numel * ecart / 8 / 1048576
 
 SENSITIVE_SUFFIXES = (
     "layernorm.weight", "norm.weight", "_norm.weight",
@@ -637,6 +657,9 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 and opts.mixed_precision != "off"
                 and metrics["out_snr_db"] < opts.snr_floor
                 and fmt in PROMOTE
+                and (not opts.promotion_cout_max_mib
+                     or cout_promotion_mib(tensor.numel(), fmt, PROMOTE[fmt])
+                     <= opts.promotion_cout_max_mib)
                 and len(report.promotions) < opts.max_promotions * max(1, len(keys) + 1)):
             wider = PROMOTE[fmt]
             q2, s2, m2 = _quantize_on(

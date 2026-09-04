@@ -1184,3 +1184,60 @@ entier — 1,45 Gio d'un coup sur cette table, ce qui ne tenait pas à côté du
 modèle sur la 3080 Ti : la quantification se fait par paquets de 8 192 lignes,
 bit pour bit identique puisque les échelles sont par ligne. Réglage par
 `ACVRAM_TETE_LIEE` (`int8` par défaut, `bf16` pour revenir en arrière).
+
+## v0.4.49 — le prix des promotions, et pourquoi il ne suffit pas (4 septembre)
+
+Le décodage dense est limité par la bande passante : 79 % du temps part dans les
+deux GEMV, et le noyau lit déjà la mémoire à 74,6 % du pic. Les instructions ne
+rendent plus rien — il faut lire moins d'octets. Le plus gros poste évitable est
+la précision mixte : sur `Huihui-Qwen3.8-27B-abliterated-Q5_K`, le plancher de
+25 dB promeut 130 tenseurs en int8, soit 2 821 Mio, 32 % des octets relus à
+chaque jeton.
+
+Trois planchers mesurés à code identique, 8 192 jetons de contexte, corpus
+d'évaluation de 16 383 jetons :
+
+| plancher | taille  | t/s  | jetons/kJ | perplexité |
+|----------|---------|------|-----------|------------|
+| 25 dB    | 18,50 Gio | 41,8 | 162 | **42,591** |
+| 22 dB    | 18,50 Gio | 41,8 | 162 | idem 25 dB |
+| 0 (aucun)| 16,02 Gio | **46,2** | **189** | 43,447 |
+
+Le plancher à 22 dB donne exactement le même modèle que 25 : en NVFP4 le rapport
+signal/bruit de sortie est **quasi constant, 20,1 à 20,7 dB sur les 505 tenseurs
+quantifiables**. Le plancher n'est donc pas un réglage continu mais un
+interrupteur : au-dessus de 21 dB il promeut tout ce que le quota autorise,
+en dessous il ne promeut rien.
+
+### Le prix, pas le mérite
+
+Le gain d'une promotion est lui aussi constant — 21,4 à 24,2 dB pour tout le
+monde. Ce qui varie, c'est le prix : 0,1 Mio pour une porte `linear_attn.alpha`,
+39 Mio pour un `mlp.up_proj`, 559 Mio pour le `lm_head`. Le rendement en
+décibels par mébioctet varie donc d'un facteur **4 921**. Or `max_promotions`
+compte des *tenseurs*, pas des octets : le quota s'épuise dans l'ordre de
+rencontre, et les projections MLP le consomment avant que les 96 portes
+`alpha`/`beta` — 10 Mio à elles toutes — soient seulement vues.
+
+D'où `--promotion-cout-max`, un prix plafond en mébioctets ajoutés
+(`promotion_cout_max_mib`, 0 = sans plafond, comportement inchangé). Le prix se
+chiffre avant de quantifier, par la largeur nominale des formats
+(`BPW_NOMINAL`) : le mesurer exigerait de quantifier deux fois tout le modèle.
+
+### Résultat négatif, et il compte
+
+`--promotion-cout-max 1` produit exactement la variante espérée : 96 promotions,
+uniquement des portes, **16,04 Gio** — la taille de « sans promotions » — et
+**47,3 t/s**. Sa perplexité est de **43,747**, c'est-à-dire *au niveau de
+l'absence de promotions* (43,447), pas à celui du plancher plein (42,591).
+
+Les portes ne sont donc pas le siège de la perte. Les 2,0 % de perplexité que
+paie « sans promotions » sont portés par le volume des poids, pas par un petit
+sous-ensemble critique — et le SNR par tenseur, mesuré couche à couche, ne
+prédit pas l'effet sur la sortie du modèle. Un critère de promotion utile devra
+mesurer la sensibilité de la *sortie* à chaque tenseur, pas la fidélité du
+tenseur à lui-même. C'est le chantier suivant, pas un réglage.
+
+L'arbitrage, lui, reste entier et appartient à l'utilisateur : `--snr-floor 25`
+pour la qualité, `--snr-floor 0` pour 13,4 % de mémoire et 10,6 % de débit en
+plus. Le défaut ne change pas.

@@ -311,6 +311,41 @@ def test_promotion_stays_within_its_cap(tiny_checkpoint, target_rig, tmp_path):
     assert len(r.promotions) <= 0.15 * r.tensors + 1
 
 
+def test_promotion_cost_ceiling_spares_the_big_tensors(tiny_checkpoint,
+                                                       target_rig, tmp_path):
+    """Un plafond de prix ne doit laisser passer que les tenseurs bon marché."""
+    from acvram.engine.config import load_model_spec
+    from acvram.memory.tiering import PlannerOptions, auto_plan
+    from acvram.quant.convert import (ConversionOptions, PROMOTE,
+                                      convert_checkpoint, cout_promotion_mib)
+
+    spec = load_model_spec(tiny_checkpoint, "tiny")
+    plan, _ = auto_plan(spec, target_rig, PlannerOptions(max_model_len=512))
+
+    def promus(plafond):
+        r = convert_checkpoint(tiny_checkpoint, plan,
+                               ConversionOptions(out_dir=str(tmp_path / f"c{plafond}"),
+                                                 mixed_precision="auto",
+                                                 snr_floor=999.0,
+                                                 promotion_cout_max_mib=plafond,
+                                                 dry_run=True), spec=spec)
+        return r
+
+    plein = promus(0.0)
+    assert plein.promotions, "le cas temoin doit promouvoir quelque chose"
+    prix = [cout_promotion_mib(
+        # les formes ne figurent pas dans le rapport : le prix se relit du
+        # manifeste par le format d'origine, seul un ordre de grandeur importe
+        1, p["from"], p["to"]) for p in plein.promotions]
+    assert all(x > 0 for x in prix)
+
+    # un plafond nul en pratique n'autorise plus rien
+    assert promus(1e-9).promotions == []
+    # et le prix se chiffre bien dans le sens attendu
+    assert (cout_promotion_mib(5120 * 17408, "nvfp4", PROMOTE["nvfp4"])
+            > cout_promotion_mib(5120, "nvfp4", PROMOTE["nvfp4"]) * 1000)
+
+
 # --------------------------------------------------------------------------
 # evaluation
 # --------------------------------------------------------------------------
