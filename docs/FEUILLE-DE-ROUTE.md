@@ -1117,3 +1117,70 @@ exige — a été **retiré** : mesuré à 129,9 contre 130,0, il n'apportait ri
 n'aurait ajouté qu'une limite arbitraire. Deux autres écarts isolés
 (qwen3.5-35B à 126 au lieu de 147, qwen3.5-9B à 99 au lieu de 114) ont disparu
 à la remesure : une charge concurrente passait pendant leur tour.
+
+## 4 septembre 2026 — la 3080 Ti mise à l'épreuve, et v0.4.48
+
+La seconde carte n'avait jamais servi acvram : jusqu'au 3 septembre elle ne
+compilait aucun noyau (le nvcc système, en 12.0, ne fournit pas `cuda_fp4.h`,
+corrigé en v0.4.38) et retombait sans le dire sur les implémentations de
+référence. Le bogue corrigé, la comparaison honnête devenait possible.
+
+### Le banc, cartes et modèle nommés
+
+RTX 3080 Ti (GPU 1), **275 W**, 12,3 Gio dont 5,2 occupés en permanence par le
+llama-server du port 8081 — laissé intact, il fait partie du décor. Modèle
+`Qwen3-4B-Instruct-2507`, servi par les deux moteurs : en GGUF Q4_K_M pour
+llama.cpp, converti en NVFP4 pour acvram. Sept requêtes identiques, meilleure
+retenue, 128 jetons.
+
+| moteur (3080 Ti, 275 W) | t/s | W tirés | jetons/kJ |
+|---|---|---|---|
+| llama.cpp, Vulkan, KV q4_0, flash-attn | **170,1** | 216 | 787 |
+| acvram, CUDA, NVFP4, KV int8 | 121,7 | 257 | 474 |
+
+acvram tient **72 %** du débit de llama.cpp sur cette carte, en tirant 19 % de
+plus. L'écart est réel et il n'a rien d'infamant pour une carte Ampere : sm_86
+n'a ni tensor cores FP4 ni l'instruction de conversion E2M1 — le gain de
+v0.4.46 ne s'y applique pas, le décodage des quartets s'y fait en registres.
+llama.cpp, lui, y est chez lui depuis des années et son cache KV en q4_0 lit
+deux fois moins que notre int8.
+
+Ce que la 3080 Ti apporte au poste est donc clair : elle n'est pas un second
+moteur acvram, elle est une carte d'appoint où llama.cpp sert mieux. Le port
+8081 garde sa raison d'être.
+
+### Ce que le profil de la 3080 Ti a révélé — et qui vaut pour les deux cartes
+
+`nsys` sur le décodage montre `nvfp4_gemv_kernel` à 55 %, `int8_gemv_kernel` à
+14 %, et un troisième larron inattendu : **`gemv2T_kernel_val`, 10 % du temps,
+130 instances — exactement une par passe — à 900 µs chacune.** C'est la
+projection de sortie.
+
+Qwen3-4B partage sa table de plongements entre l'entrée et la sortie. À
+l'entrée, c'est un *gather* d'une ligne ; à la sortie, une projection qui relit
+**la matrice entière à chaque jeton** : 152 000 × 2 560 en bf16, soit 742 Mio,
+**24 % de tous les octets lus par jeton**, pour une seule couche. Le
+convertisseur laisse ce tenseur en bf16 — il n'est pas dans une couche, et
+l'option `--lm-head-format` ne l'atteint pas puisqu'il ne s'appelle pas
+`lm_head.weight`.
+
+La projection prend désormais une **copie quantifiée** de la table, la table
+restant en bf16 pour le gather. 741 → 379 Mio relus par jeton.
+
+| | 3080 Ti | 5090 |
+|---|---|---|
+| tête liée en bf16 | 115,4 t/s | 160,1 t/s |
+| tête liée en **int8** | **121,7** (+5,5 %) | **170,2** (+6,3 %) |
+| jetons/kJ | 450 → 475 | 722 → 779 |
+
+**La qualité ne bouge pas** : perplexité 25,138 en bf16, 25,109 en int8. Dix
+modèles du parc sur quarante partagent leurs plongements, et aucun n'a besoin
+d'être reconverti — la quantification se fait au chargement.
+
+Deux précautions. La copie s'ajoute à la table au lieu de la remplacer, donc le
+chargement exige le double de sa taille en mémoire libre, sans quoi il garde le
+bf16 et le dit. Et les quantifieurs passent par une copie float32 du tenseur
+entier — 1,45 Gio d'un coup sur cette table, ce qui ne tenait pas à côté du
+modèle sur la 3080 Ti : la quantification se fait par paquets de 8 192 lignes,
+bit pour bit identique puisque les échelles sont par ligne. Réglage par
+`ACVRAM_TETE_LIEE` (`int8` par défaut, `bf16` pour revenir en arrière).

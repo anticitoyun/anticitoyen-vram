@@ -620,9 +620,15 @@ def load_model(path: str, plan: Optional[Plan] = None,
         lm_head = _linear("lm_head.weight", manifest, reader,
                           group_size).to_device(head_dev)
     else:
-        # plongements partagés avec la sortie
-        lm_head = QuantLinear(PlainTensor(embed.to(head_dev),
-                                          tuple(embed.shape), "bf16"))
+        # Plongements partagés avec la sortie. La table sert deux fois et pas de
+        # la même façon : à l'entrée c'est un *gather* d'une ligne, à la sortie
+        # une projection qui relit la matrice entière **à chaque jeton**. Sur
+        # Qwen3-4B ce sont 742 Mio, soit 24 % des octets lus par jeton pour une
+        # seule couche — mesuré à 900 µs par passe sur la 3080 Ti, dix pour cent
+        # du temps de décodage. La table reste en bf16 pour le gather ; la
+        # projection en prend une copie quantifiée, qui coûte de la place mais
+        # divise sa lecture par deux (int8) ou par trois et demi (nvfp4).
+        lm_head = QuantLinear(_tete_liee(embed.to(head_dev)))
     tetes_mtp = _charger_mtp(manifest, reader, spec, plan, group_size, dtype,
                              head_dev, rope, kv_blocks)
     reader.close()
@@ -692,6 +698,69 @@ def _charger_mtp(manifest: dict, reader: "_ShardReader", spec: ModelSpec,
             dtype="int8", device=str(device)))
         tetes.append(MTPHead(couche, enorm, hnorm, eh, fin, cache, device))
     return tetes
+
+
+# Format de la projection de sortie quand elle partage la table des
+# plongements : « bf16 » ne quantifie rien, « int8 » ou « nvfp4 » prennent une
+# copie quantifiée pour la sortie seule.
+_TETE_LIEE = os.environ.get("ACVRAM_TETE_LIEE", "int8").lower()
+
+
+def _par_tranches(w: torch.Tensor, quant, fmt: str, lignes: int = 8192) -> Any:
+    """Quantifie un très gros tenseur par paquets de lignes.
+
+    Les quantifieurs passent par une copie float32 du tenseur entier : sur une
+    table de plongements de 152 000 lignes, ce sont 1,45 Gio d'un coup, qui ne
+    tiennent pas toujours à côté du modèle déjà chargé. Les lignes sont
+    indépendantes — l'échelle est par ligne et par groupe — donc les traiter par
+    paquets donne bit pour bit le même résultat pour un pic borné.
+    """
+    from ..quant.formats import INT8Tensor
+    from ..quant.nvfp4 import NVFP4Tensor
+    morceaux = [quant(w[i:i + lignes]) for i in range(0, w.shape[0], lignes)]
+    if len(morceaux) == 1:
+        return morceaux[0]
+    if fmt == "int8":
+        return INT8Tensor(
+            torch.cat([m.qweight for m in morceaux]),
+            torch.cat([m.scales for m in morceaux]),
+            torch.cat([m.zeros for m in morceaux]),
+            morceaux[0].group_size, tuple(w.shape))
+    # NVFP4 : l'échelle globale est propre à chaque paquet, on garde la plus
+    # grande et on ne peut pas recoller sans requantifier — on refuse plutôt
+    # que de rendre un tenseur faux.
+    raise RuntimeError("nvfp4 par tranches : échelles globales incompatibles")
+
+
+def _tete_liee(embed: torch.Tensor) -> Any:
+    """Le poids de la projection de sortie tirée d'une table partagée."""
+    plein = PlainTensor(embed, tuple(embed.shape), "bf16")
+    if _TETE_LIEE == "bf16" or not embed.is_cuda:
+        return plein
+    # La copie quantifiée s'ajoute à la table, elle ne la remplace pas : le
+    # gather d'entrée a toujours besoin des poids en 16 bits. Sur un modèle qui
+    # remplit déjà la carte, mieux vaut le débit qu'on a qu'un OOM au
+    # chargement — on exige le double de la copie en mémoire libre.
+    libre = torch.cuda.mem_get_info(embed.device)[0]
+    besoin = embed.numel() * (1 if _TETE_LIEE == "int8" else 0.6)
+    if libre < 2 * besoin:
+        print(f"[acvram] tête liée laissée en bf16 : {libre / 2**20:.0f} Mio "
+              f"libres, il en faudrait {2 * besoin / 2**20:.0f}",
+              file=sys.stderr, flush=True)
+        return plein
+    try:
+        if _TETE_LIEE == "nvfp4":
+            from ..quant.nvfp4 import quantize_nvfp4
+            return _par_tranches(embed, lambda t: quantize_nvfp4(t), "nvfp4")
+        if _TETE_LIEE == "int8":
+            from ..quant.formats import _quantize_int8
+            return _par_tranches(embed, lambda t: _quantize_int8(t, 128), "int8")
+    except Exception as exc:                      # noqa: BLE001
+        # Quantifier la tête est un gain de débit, jamais une condition de
+        # chargement : un échec se dit et se replie sur la table bf16.
+        print(f"[acvram] tête liée laissée en bf16 ({type(exc).__name__}: {exc})",
+              file=sys.stderr, flush=True)
+    return plein
 
 
 def _kv_blocks_per_device(plan: Plan, spec: ModelSpec,
