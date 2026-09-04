@@ -641,3 +641,184 @@ FLOPs sans réduire les octets lus ne gagne rien.
 Le modèle d'essai `Qwen3-Coder-30B-A3B-snr15` (17 Gio), converti pour mesurer
 le plancher de SNR à 15 dB, a été supprimé : la conversion de référence tient
 la qualité et le débit.
+
+## Nuit du 3 au 4 septembre 2026 — huit pistes passées au banc : v0.4.38 à v0.4.43
+
+Les pistes ouvertes par la bibliographie et le profilage ont toutes été
+instruites. Trois ont donné un gain, trois se sont fermées sur mesure, deux
+restent ouvertes mais hors de portée sans réentraînement. Le fait marquant :
+**les trois gains sont des bogues, pas des optimisations** — du code qui ne
+faisait pas ce qu'il annonçait.
+
+### v0.4.38 — la 3080 Ti ne compilait aucun noyau
+
+`_ensure_cuda_home` n'exigeait CUDA 12.8 que si une carte Blackwell était
+visible. Avec `CUDA_VISIBLE_DEVICES=1`, il retenait le `nvcc` **système en
+12.0**, qui n'a pas `cuda_fp4.h` — que notre source inclut inconditionnellement.
+La compilation échouait, un avertissement passait inaperçu, et acvram tournait
+sur ses noyaux de référence en Python. L'exigence est celle du source, pas de
+l'architecture visée.
+
+### v0.4.39 — le prefill court déquantifiait tout le modèle
+
+Nsight Systems, sur un dense de 27B : `int8_dequant_kernel`, **11 % du temps
+GPU, 127 instances**, 803 µs en moyenne. Le modèle porte exactement **128
+tenseurs INT8** — un par tenseur, une fois par prefill. `int8_matmul` basculait
+sur « déquantifier le tenseur entier puis `F.linear` » dès **huit** jetons.
+
+Croisement mesuré sur un tenseur 5120×5120 par groupes de 128 :
+
+| jetons | GEMV multi-N | déquantification + linear |
+|---|---|---|
+| 8 | 0,053 ms | 0,565 ms |
+| 64 | 0,409 | 0,561 |
+| **88** | *croisement* | |
+| 256 | 1,632 | 0,617 |
+
+Seuil porté à 80 (`ACVRAM_INT8_GEMV_MAX`). Temps jusqu'au premier jeton :
+
+| invite | avant | après |
+|---|---|---|
+| 16 jetons | 286,8 ms | **193,9** (−32 %) |
+| 32 | 285,1 | **211,3** (−26 %) |
+| 64 | 285,5 | **245,2** (−14 %) |
+| ≥ 128 | inchangé | inchangé |
+
+Le plateau parfaitement plat à 285 ms pour toute invite de 16 à 128 jetons
+était le coût fixe de la déquantification, indépendant du travail réel.
+
+### v0.4.42 — hors Blackwell, le NVFP4 passait par l'émulation
+
+Sur la 3080 Ti enfin capable de compiler, le micro-banc a montré l'anomalie
+d'un coup : `int8_gemv` à **777 Go/s** (le plafond de la carte est à 770),
+`nvfp4_gemv` à **144**. Les intrinsèques `__nv_cvt_fp4x2_to_halfraw2` et
+`__nv_cvt_fp8_to_halfraw` n'ont d'instruction matérielle qu'à partir de sm_100
+et sm_89 ; en dessous, le toolkit part en émulation logicielle — appelée seize
+fois par lecture de poids et par ligne.
+
+Remplacées par un décodage en registres. Les huit magnitudes E2M1 (0, 0,5, 1,
+1,5, 2, 3, 4, 6) sont toutes des multiples d'un demi : 0, 1, 2, 3, 4, 6, 8, 12
+tiennent chacune sur un quartet, donc la table entière est la constante
+`0xC8643210`, lue par décalage. Une table en mémoire constante aurait été
+sérialisée huit fois par warp, l'index différant d'un fil à l'autre. L'e4m3 se
+reconstruit par assemblage de bits, cas sous-normal et unique motif NaN de
+l'E4M3FN compris.
+
+| | avant | après |
+|---|---|---|
+| `nvfp4_gemv` (3080 Ti) | 144 Go/s | **446 Go/s** |
+| Qwen3-4B | 57,2 t/s | **110,2** (+93 %) |
+| Qwen2.5-Coder-3B | 75,0 t/s | **122,5** (+63 %) |
+| Qwen3-4B sur 5090 | 132,2 t/s | 132,0 — inchangé |
+
+Justesse vérifiée au bit près entre l'intrinsèque de la 5090 et l'arithmétique
+de la 3080 Ti : mêmes somme et norme, motifs NaN inclus. Le correctif vaut pour
+toute carte antérieure à Blackwell. Pour situer, le `llama-server` du port 8081
+fait 168,6 t/s sur le même Qwen3-4B, mais en Q4_K_M (2,5 Gio) contre nos
+3,7 Gio : à octets égaux, la parité est atteinte.
+
+### v0.4.43 — le cache de préfixe ne publiait jamais rien
+
+`_finish` vidait `seq.blocks` **avant** que `_register_complete_blocks` ne soit
+appelé, quelques lignes plus loin. Une requête qui s'arrête au premier jeton ne
+publiait donc rien du tout, et toute séquence perdait ses blocs non encore
+publiés. Compteur à l'appui : `publiés = 0` après trois requêtes partageant une
+amorce de 361 jetons. La publication a lieu désormais avant la restitution.
+
+| requête (amorce commune de 361 jetons) | avant | après |
+|---|---|---|
+| 1 | 416,7 ms | 416,7 ms |
+| 2 | 123,3 | 123,3 |
+| 3 | 121,6 | **45,1** |
+
+704 jetons d'invite servis par le cache au lieu de zéro. Sorties identiques
+avec et sans cache, vérifié sur deux requêtes complètes. Sur les hybrides à
+récurrence linéaire le cache reste coupé — les blocs KV n'y suffisent pas à
+restaurer l'état GDN.
+
+### v0.4.40 et v0.4.41 — la tête MTP, livrée mais pas rentable
+
+Les couches `nextn` étaient jetées à la conversion (`continue` dans `gguf.py`,
+filtre sur `mtp.` dans `convert.py`). Elles sont désormais conservées sous
+`model.mtp.<n>`, quantifiées au format de la dernière couche, chargées en
+`MTPHead` (enorm, hnorm, eh_proj, bloc de transformeur, shared_head_norm) avec
+son propre cache, et exposées par `--speculative mtp` / `auto`.
+
+Deux points établis par la mesure. En **forçage enseignant**, la tête prédit
+correctement le jeton *suivant le suivant* dans **50 %** des cas : elle est
+saine et correctement branchée — l'ordre `[plongement ; état caché]` donne ces
+50 %, l'ordre inverse donne **zéro**. Et l'état à reprendre après un pas
+spéculatif est celui du dernier jeton **accepté**, pas la dernière ligne du lot.
+
+Mais dans la boucle réelle, l'acceptation plafonne à 13,5 % et le débit tombe
+de 37,6 à 21,6 t/s. Deux causes :
+
+- **le cache de la tête se pollue** : les positions écrites pendant le
+  brouillonnage le sont avec les états produits par la tête elle-même ; une fois
+  les jetons acceptés, ces écritures restent et l'attention lit un contexte qui
+  n'est pas celui de la cible ;
+- **le surcoût par jeton brouillon dépasse la tête** : chaque proposition
+  construit un lot en Python, hors graphe CUDA, et traverse **`lm_head` en
+  entier** — le plus gros produit matriciel du modèle, environ 1,4 couche à lui
+  seul. La tête coûte donc près de 2,4 couches par jeton brouillon, pas une.
+
+Rentabiliser le MTP demande un chemin à formes fixes avec graphe pour la tête,
+et un `lm_head` restreint aux candidats plausibles. Livré, testé, **non activé
+par défaut**.
+
+### Trois pistes fermées sur mesure
+
+**H-Scale — affiner les échelles NVFP4 : rien à prendre.** Le SNR de sortie ne
+bouge pas de ±0,01 dB quand l'échelle globale varie de 0,6 à 1,5 fois sa valeur
+nominale ; il reste collé à 20,45 dB. Les échelles par bloc de 16 sont exactes
+et absorbent tout : le 20,45 dB est le **plancher intrinsèque de l'e2m1**, pas
+un défaut de réglage. La rotation de Hadamard n'apporte pas davantage — gain
+médian **−0,02 dB** sur seize tenseurs réels, ce qui confirme le choix déjà en
+place de la réserver à l'INT4 par groupes de 128.
+
+**GEMM groupée du prefill MoE : le seuil est déjà au bon endroit.** Trois voies
+comparées, 32 experts, K = 2048, M = 768 :
+
+| jetons/expert | noyau maison | bf16 + `_grouped_mm` | `_scaled_mm` par expert |
+|---|---|---|---|
+| 16 | **0,11 ms** | 0,31 | 10,54 |
+| 64 | **0,29** | 0,36 | 10,81 |
+| 128 | 0,57 | **0,40** | 10,35 |
+| 512 | 2,06 | **0,64** | 10,31 |
+
+Le croisement tombe entre 64 et 128 jetons par expert — exactement le seuil
+`ACVRAM_MOE_GEMM_MAX` retenu le 3 septembre. La voie CUTLASS par expert
+(`torch._scaled_mm` en boucle) est vingt fois plus lente : trente-deux
+lancements et autant de quantifications d'activation.
+
+**Parcimonie d'activation : réelle, mais inexploitable telle quelle.** Sur un
+dense de 27B, la part des canaux intermédiaires du MLP sous un seuil du maximum :
+
+| seuil | canaux concernés |
+|---|---|
+| 0,1 % | 14,4 % |
+| 1 % | **56,5 %** |
+| 5 % | 91,6 % |
+
+Et la qualité tient : à 1 %, la sortie reste cohérente et fidèle ; à 5 %, elle
+dégénère en répétitions. Il y aurait donc 56 % de la lecture de `down_proj` à
+économiser. Mais la parcimonie est **purement contextuelle** : la part des
+canaux faibles pour au moins 90 % des jetons est de **0,98 %** en moyenne, et
+de **0 %** en médiane. Aucun élagage statique, aucun réordonnancement ne
+groupera ces canaux — et sans regroupement, sauter des canaux isolés détruit la
+coalescence des lectures. C'est exactement le problème que SharQ et DejaVu
+résolvent par un prédicteur appris ; hors de portée sans réentraînement.
+
+### Ce que la campagne apprend
+
+Le profilage a d'abord démenti l'hypothèse de départ. Sur la 5090,
+`nvfp4_gemv` atteint **1206 Go/s** sur une forme réelle, quand la lecture pure
+d'un tenseur par `torch.sum` plafonne à **1071** : les noyaux ne sont pas le
+problème. Vérifié au passage que ce plafond ne tient pas au bridage — à 600 W
+la lecture pure donne 1072 Go/s, à l'identique.
+
+Les trois gains de la nuit viennent tous du même endroit : **du code qui
+n'exécutait pas le chemin qu'il annonçait**. Un seuil de bascule laissé à sa
+valeur de mise au point, une compilation qui échouait en silence, une
+publication faite après une libération. Aucun n'aurait été trouvé sans mesurer
+ce que la machine fait réellement, plutôt que ce que le code dit qu'elle fait.
