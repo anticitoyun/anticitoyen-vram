@@ -951,3 +951,55 @@ Vingt denses 27B mesurés entre **37,3 et 38,9 t/s**, pour 311 à 325 W et 119 �
 (Q4_K_M, Q5_K_M, Q6_K, EXL3 5 bpw). À ce point de régularité, ce n'est plus le
 modèle qu'on mesure mais la bande passante GDDR7 : la seule façon de déplacer
 ce plateau est de lire moins d'octets.
+
+## 4 septembre 2026, soir — v0.4.46 : le décodage FP4 se faisait en logiciel
+
+Nsight Compute, débloqué le jour même par le paramètre de module, a renvoyé du
+`nvfp4_gemv_kernel` un verdict que `nsys` ne pouvait pas donner : **le noyau est
+limité par le calcul, pas par la mémoire** — 64,9 % de débit SM contre 47,1 %
+de DRAM, et un pipeline **ALU saturé à 42,3 %**, soit le double du FMA. Un GEMV
+qui passe son temps dans l'unité entière n'a rien à faire de la bande passante.
+
+Le désassemblage a nommé le coupable. Dans la boucle interne, pour 4 096
+instructions : **835 LOP3, 392 SHF, 193 PRMT, 128 SEL**. Aucune conversion
+matérielle. Or `e2m1_pair` appelle bien `__nv_cvt_fp4x2_to_halfraw2`, l'
+intrinsèque prévu pour cela, sous la garde `__CUDA_ARCH__ >= 1000`.
+
+La garde était insuffisante. `cuda_fp8.h` n'émet l'instruction
+`cvt.rn.f16x2.e2m1x2` que si `__CUDA_ARCH_FAMILY_SPECIFIC__` est défini — ce que
+nvcc ne fait **que** pour les cibles à suffixe, `sm_120f` ou `sm_120a`. Compilé
+en `sm_120` générique, comme nous le faisions, l'intrinsèque retombe
+silencieusement sur une émulation : le quartet est promu en E2M3, puis converti
+en half par arithmétique entière. Vingt-cinq instructions par paire de poids,
+appliquées à **chaque poids de chaque tenseur NVFP4 à chaque jeton**.
+
+`_arch_flags` demande désormais la forme *family-specific* pour toute capacité
+supérieure ou égale à 10.0. Le repli PTX reste générique — une famille ne se
+compile pas en PTX portable. Échappement par `ACVRAM_ARCH_FAMILY=0`.
+
+| au désassemblage | sm_120 | sm_120f |
+|---|---|---|
+| LOP3 | 835 | **0** |
+| PRMT | 193 | **0** |
+| SEL | 128 | **0** |
+| SHF | 392 | 63 |
+
+| micro-banc (5090, tenseur en L2) | sm_120 | sm_120f | |
+|---|---|---|---|
+| `nvfp4_gemv` 17408×5120 | 42,55 µs | **21,43 µs** | ×1,99 |
+| `int8_gemv` 5120×5120 | 13,17 µs | 11,81 µs | ×1,12 |
+
+| banc direct, 128 jetons | sm_120 | sm_120f | |
+|---|---|---|---|
+| qwen36-27b-heretic-exl3 (dense) | 38,9 | **43,4** | +11,6 % |
+| artemis-31b-exl3 (dense) | 36,7 | **39,7** | +8,2 % |
+| gemma4-12b-heretic-gguf | 68,9 | **72,5** | +5,2 % |
+
+Les sorties sont **identiques bit à bit** entre les deux compilations : la
+conversion E2M1 vers half est exacte des deux côtés, seul le nombre
+d'instructions change. Le plateau des denses, tenu pour une limite de bande
+passante GDDR7 depuis le 3 septembre, était donc pour une part une limite
+d'unité entière — la première fois qu'il bouge.
+
+Le gain sur `int8_gemv`, qui ne décode aucun quartet, vient de `e4m3_to_float` :
+les échelles de bloc passaient par le même mécanisme d'émulation.

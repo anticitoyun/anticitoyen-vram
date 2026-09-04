@@ -45,22 +45,49 @@ _ERROR: str = ""
 _MIN_CUDA_FOR_SM120 = (12, 8)
 
 
-def _arch_flags() -> list[str]:
-    """Émet du code pour exactement les architectures présentes, plus un repli PTX."""
+# Le suffixe « f » (family-specific) est apparu avec CUDA 12.9.
+_MIN_CUDA_FOR_FAMILY = (12, 9)
+
+
+def _arch_flags(nvcc_ver: tuple[int, int] | None = None) -> list[str]:
+    """Émet du code pour exactement les architectures présentes, plus un repli PTX.
+
+    Les cibles ``sm_100`` et au-delà sont demandées sous leur forme
+    *family-specific* (``sm_120f``) et non générique. Ce n'est pas un détail de
+    portabilité : ``cuda_fp8.h`` ne définit ``__CUDA_ARCH_FAMILY_SPECIFIC__``
+    que dans ce mode, et sans lui ``__nv_cvt_fp4x2_to_halfraw2`` — la
+    conversion E2M1 vers half2 qui décode *chaque poids* d'un modèle NVFP4 —
+    retombe sur une émulation arithmetique de vingt-cinq instructions par paire
+    de poids, au lieu de l'unique ``cvt.rn.f16x2.e2m1x2`` du materiel. Mesuré
+    au desassemblage : 11 LOP3, 6 IMAD, 4 IADD, 2 PRMT, 2 SEL et 1 SHF
+    disparaissent d'un coup. Une cible « f » reste compatible avec toute la
+    famille (sm_121, sm_128...), contrairement au suffixe « a ».
+    """
     archs: set[tuple[int, int]] = set()
     if torch.cuda.is_available():
         for i in range(torch.cuda.device_count()):
             archs.add(torch.cuda.get_device_capability(i))
     if not archs:
         archs = {(8, 6), (12, 0)}
+    if nvcc_ver is None:
+        nvcc_ver = _nvcc_version(_nvcc_path())
+    family = (nvcc_ver >= _MIN_CUDA_FOR_FAMILY
+              and os.environ.get("ACVRAM_ARCH_FAMILY", "1") != "0")
     flags: list[str] = []
     for major, minor in sorted(archs):
         cc = f"{major}{minor}"
-        flags += [f"-gencode=arch=compute_{cc},code=sm_{cc}"]
+        suf = "f" if family and major >= 10 else ""
+        flags += [f"-gencode=arch=compute_{cc}{suf},code=sm_{cc}{suf}"]
+    # Le repli PTX reste générique : une famille ne se compile pas en PTX portable.
     highest = max(archs)
     flags += [f"-gencode=arch=compute_{highest[0]}{highest[1]},"
               f"code=compute_{highest[0]}{highest[1]}"]
     return flags
+
+
+def _nvcc_path() -> str:
+    home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    return os.path.join(home, "bin", "nvcc") if home else (shutil.which("nvcc") or "")
 
 
 def _cuda_version() -> tuple[int, int]:
