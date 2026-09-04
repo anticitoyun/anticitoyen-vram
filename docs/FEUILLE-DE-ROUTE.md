@@ -822,3 +822,82 @@ n'exécutait pas le chemin qu'il annonçait**. Un seuil de bascule laissé à sa
 valeur de mise au point, une compilation qui échouait en silence, une
 publication faite après une libération. Aucun n'aurait été trouvé sans mesurer
 ce que la machine fait réellement, plutôt que ce que le code dit qu'elle fait.
+
+## 4 septembre 2026 — la seconde salve : v0.4.44 et v0.4.45
+
+### v0.4.44 — le cache de préfixe atteint enfin les hybrides
+
+Le cache était coupé net dès qu'un modèle portait des couches à récurrence
+linéaire — Qwen3.5, 3.6 et 3.8, Nemotron-Lightning, Kimi-Linear, LFM2, soit une
+grande part du parc. La raison était juste : les blocs KV ne suffisent pas à
+reprendre une invite, puisque l'état récurrent vit hors du cache paginé.
+
+Cet état est désormais **photographié** aux frontières régulières du prefill,
+en RAM hôte épinglée. Sur un 27B, ce sont 48 couches récurrentes et 149,6 Mio
+par instantané : un tuple par couche, la fenêtre de convolution (10240 × 3) et
+la matrice delta (48 × 128 × 128), en fp32. Trois instantanés sont conservés,
+en éviction par ancienneté (`ACVRAM_INSTA_PAS`, `ACVRAM_INSTA_MAX`).
+
+Le prefill se coupe une fois, à la plus grande frontière multiple du pas
+(256 jetons par défaut) strictement intérieure à l'invite. Ce choix ne dépend
+que de la longueur de l'invite : deux requêtes partageant une amorce tombent sur
+la même frontière tant qu'elles restent dans la même tranche. À l'admission,
+l'appariement des blocs KV est **plafonné** à la frontière dont on tient
+l'instantané, et un appariement partiel est rejeté en bloc — état et clés
+doivent coïncider exactement, sinon on repart de l'invite entière.
+
+| amorce partagée | sans instantané | avec |
+|---|---|---|
+| 601 jetons | 381,5 ms | **300 ms** (−21 %) |
+| 1 681 jetons | 788,2 ms | **309 ms** (−61 %) |
+
+L'épinglage de la mémoire hôte compte : sans lui, la prise d'instantané faisait
+passer la première requête de 3 152 à 7 457 ms ; avec, elle coûte 6 %. Le
+découpage du prefill en deux passes change l'ordre des calculs récurrents, donc
+la sortie diverge légèrement après quelques dizaines de jetons — au même titre
+qu'un changement de taille de lot, et sans perte de cohérence vérifiée sur deux
+requêtes complètes.
+
+### v0.4.45 — le repli silencieux ne l'est plus
+
+Le correctif du 3 septembre sur la 3080 Ti avait révélé le vrai danger : quand
+la compilation des noyaux échoue, acvram bascule sur ses implémentations de
+référence, dix fois plus lentes, et ne le signale que par un `warnings.warn`
+noyé dans la sortie de chargement. Le chargement d'un modèle vérifie désormais
+`build_info()` et écrit un avertissement franc sur la sortie d'erreur, avec la
+cause et le renvoi à `python -m acvram doctor`.
+
+Dans le même commit, le sampler glouton cesse de matérialiser tout le
+vocabulaire : `log p(choisi)` se calcule en `logit − logsumexp`, une réduction
+au lieu d'un `log_softmax` complet de 152 000 entrées suivi d'un `gather` d'une
+seule case ; et le `clone()` des logits, qui n'existe que pour les pénalités
+écrivant en place, n'a plus lieu quand aucune pénalité n'est demandée. Gain non
+mesurable sur le débit (176,4 contre 176,6 t/s) — le code est simplement plus
+juste.
+
+### Deux pistes de plus fermées sur mesure
+
+**Précision mixte intra-tenseur : le bruit est réparti, pas concentré.** Si
+l'erreur de quantification NVFP4 tenait dans quelques canaux de sortie, il
+suffirait de promouvoir ces lignes-là en INT8 au lieu du tenseur entier — les
+128 tenseurs promus d'un 27B coûtent 22 % du temps de décodage pour 15 % des
+tenseurs. Mesuré sur huit tenseurs réels, la part des lignes portant la moitié
+du bruit va de **34,7 % à 48,2 %**, et il en faut 68 à 79 % pour en porter 80 %.
+La distribution est quasi uniforme — ce qui est cohérent avec le plancher
+intrinsèque de l'e2m1 constaté la veille. Promouvoir la moitié des lignes pour
+enlever la moitié du bruit ne vaut pas mieux que promouvoir le tenseur.
+
+**Le seuil de bascule NVFP4, lui, est au bon endroit.** Le jumeau du bogue INT8
+corrigé la veille a été balayé sur un dense de 27B : TTFT d'une invite de 16
+jetons à **194,7 ms** avec le seuil à 8, 202,8 à 32, 265,1 à 64, 283,1 à 128.
+Le chemin W4A8 ne matérialise pas le poids entier à chaque appel, contrairement
+à la déquantification INT8 ; monter le seuil ne fait que perdre. Rendu réglable
+(`ACVRAM_NVFP4_GEMV_MAX`) et commenté, valeur inchangée.
+
+### Nsight Compute reste hors d'atteinte
+
+`ncu` refuse les compteurs matériels (`ERR_NVGPUCTRPERM`) : le pilote les
+réserve à l'administrateur. Le déblocage est un paramètre de module et donc un
+redémarrage — la marche à suivre est dans `MATERIEL.md`. En attendant, `nsys`
+suffit à compter les noyaux et à voir où va le temps, mais pas à savoir ce qui
+plafonne un noyau donné.
