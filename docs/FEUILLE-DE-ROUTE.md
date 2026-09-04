@@ -1241,3 +1241,14 @@ tenseur à lui-même. C'est le chantier suivant, pas un réglage.
 L'arbitrage, lui, reste entier et appartient à l'utilisateur : `--snr-floor 25`
 pour la qualité, `--snr-floor 0` pour 13,4 % de mémoire et 10,6 % de débit en
 plus. Le défaut ne change pas.
+
+## v0.4.50 — le plancher de SNR passe à zéro par défaut (4 septembre)
+
+Arbitrage tranché : `snr_floor` vaut **0**, plus aucune promotion par défaut.
+Le décodage est limité par la bande passante, et 2,0 % de perplexité se paient
+moins cher que 13,4 % de mémoire et 10,6 % de débit. `--snr-floor 25` rétablit
+l'ancien comportement pour qui préfère l'inverse.
+
+Les modèles déjà convertis gardent leurs promotions : le changement ne vaut que
+pour les conversions à venir. Le parc de 38 modèles ne récupère les 10,6 % qu'en
+étant reconverti.

@@ -169,13 +169,19 @@ parce que ce dernier écrit d'abord une copie 32 bits de toute la matrice.
 Sur Mistral-Large-123B, l'estimation du planificateur passe de 1,35 à
 2,42 jetons/s.
 
-### Précision mixte (`--mixed-precision auto`)
+### Précision mixte (`--snr-floor`, éteinte par défaut)
 
 Le convertisseur mesure le rapport signal/bruit en sortie de couche pour chaque
-tenseur et promeut vers un format plus large ceux qui tombent sous
-`--snr-floor`, dans la limite de 15 % des tenseurs. Dépenser 8 bits sur les
-quelques pour cent qui en ont besoin coûte une fraction de bit par poids sur
-l'ensemble.
+tenseur et peut promouvoir vers un format plus large ceux qui tombent sous
+`--snr-floor`, dans la limite de 15 % des tenseurs et d'un prix plafond
+(`--promotion-cout-max`, en mébioctets ajoutés).
+
+Le plancher vaut **zéro par défaut** : rien n'est promu. Le décodage est limité
+par la bande passante mémoire, et la mesure sur `Huihui-Qwen3.8-27B` tranche —
+un plancher de 25 dB coûte 13,4 % de mémoire et 10,6 % de débit (18,50 Gio et
+41,8 t/s contre 16,02 et 46,2) pour 2,0 % de perplexité (42,591 contre 43,447,
+corpus de 16 383 jetons). `--snr-floor 25` rétablit l'ancien comportement quand
+la qualité prime sur la vitesse.
 
 ### Et `acvram eval`
 

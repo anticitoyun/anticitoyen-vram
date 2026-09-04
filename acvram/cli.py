@@ -547,8 +547,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "(auto, cpu, cuda:0 ...)")
     cv.add_argument("--mixed-precision", choices=["auto", "off"], default="auto",
                     help="promeut vers un format plus large les tenseurs mal quantifies")
-    cv.add_argument("--snr-floor", type=float, default=25.0,
-                    help="SNR en sortie de couche (dB) sous lequel un tenseur est promu")
+    cv.add_argument("--snr-floor", type=float, default=0.0,
+                    help="SNR en sortie de couche (dB) sous lequel un tenseur est "
+                         "promu ; 0 (defaut) ne promeut rien. Mesure sur un 27B : "
+                         "25 dB coute 13,4 %% de memoire et 10,6 %% de debit pour "
+                         "2,0 %% de perplexite")
     cv.set_defaults(func=cmd_convert)
 
     sv = sub.add_parser("serve", help="lance le serveur compatible OpenAI")

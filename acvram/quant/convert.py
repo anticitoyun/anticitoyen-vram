@@ -56,8 +56,12 @@ class ConversionOptions:
     quant_device: str = "auto"
     dry_run: bool = False
     mixed_precision: str = "auto"     # auto | off
-    snr_floor: float = 25.0           # dB de rapport signal/bruit en sortie de
-                                      # couche sous lequel un tenseur est promu
+    # dB de rapport signal/bruit en sortie de couche sous lequel un tenseur est
+    # promu d'un barreau. Zéro, donc rien : le décodage est limité par la bande
+    # passante, et sur un 27B les promotions coûtaient 13,4 % de mémoire et
+    # 10,6 % de débit pour 2,0 % de perplexité. Le mécanisme reste entier,
+    # `--snr-floor 25` rétablit l'ancien comportement.
+    snr_floor: float = 0.0
     max_promotions: float = 0.15      # part maximale de tenseurs promus
     # Prix plafond d'une promotion, en mébioctets ajoutés (0 = pas de plafond).
     # Le quota ci-dessus compte des tenseurs ; or une porte de 0,1 Mio et une
