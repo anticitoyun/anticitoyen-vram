@@ -253,3 +253,20 @@ acvram bench --what kernels          # confirme que l'extension compile et va vi
 acvram plan ~/modeles/Qwen3-32B      # le plan correspond-il au tableau ci-dessus
 pytest -q                            # le chemin de référence doit passer
 ```
+
+## Compteurs de performance GPU (Nsight Compute)
+
+`ncu` refuse de lire les compteurs matériels tant que le pilote les réserve à
+l'administrateur : `ERR_NVGPUCTRPERM`. Le déblocage est un paramètre de module,
+donc un redémarrage :
+
+```bash
+echo 'options nvidia NVreg_RestrictProfilingToAdminUsers=0' \
+  | sudo tee /etc/modprobe.d/nvidia-profilage.conf
+sudo update-initramfs -u && sudo reboot
+```
+
+Sans cela, seul `nsys` (chronologie des lancements) fonctionne — il suffit pour
+compter les noyaux et voir où va le temps, mais pas pour connaître l'occupation,
+la pression de registres ni les conflits de banques, qui sont précisément ce qui
+décide de nos noyaux.
