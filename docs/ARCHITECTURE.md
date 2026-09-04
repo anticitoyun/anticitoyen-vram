@@ -156,6 +156,37 @@ Un bloc est toujours retenu lors d'une correspondance : une requête dont
 l'invite est entièrement en cache a tout de même besoin d'un jeton à faire
 traverser le modèle, sans quoi il n'y a rien pour produire des logits.
 
+La publication a lieu **avant** que les blocs ne soient rendus. L'ordre inverse
+— celui d'origine — faisait que `_finish` vidait `seq.blocks` quelques lignes
+avant que `_register_complete_blocks` ne cherche à publier : le cache ne
+recevait jamais rien, et la réserve de cache KV en mémoire hôte, alimentée par
+l'éviction des blocs identifiables, restait inutilisée.
+
+### Hybrides à récurrence linéaire
+
+Les blocs KV ne suffisent pas à reprendre une invite sur un modèle dont
+certaines couches portent un état récurrent : cet état vit hors du cache
+paginé, dans `Engine.gdn_states`. Le cache y était donc simplement coupé.
+
+Il repose désormais sur des **instantanés** de cet état, pris aux frontières
+régulières du prefill et rangés en mémoire hôte épinglée. Sur un 27B, un
+instantané pèse 150 Mio pour quarante-huit couches ; trois sont conservés, en
+éviction par ancienneté.
+
+Le prefill se coupe une fois, à la plus grande frontière multiple du pas
+d'instantané strictement intérieure à l'invite. Ce choix ne dépend que de la
+longueur de l'invite, donc deux requêtes partageant une amorce tombent sur la
+même frontière tant qu'elles restent dans la même tranche.
+
+À l'admission, l'appariement des blocs est **plafonné** à la frontière dont on
+tient l'instantané, et un appariement partiel est rejeté en entier : l'état
+récurrent et les clés doivent décrire exactement la même position, faute de quoi
+la reprise produirait des logits fondés sur deux histoires différentes.
+
+Le découpage du prefill change l'ordre des calculs récurrents ; la sortie
+diverge donc légèrement d'un prefill monolithique, au même titre qu'un
+changement de taille de lot.
+
 ## Décodage spéculatif
 
 `engine/speculative.py`. Le lot de vérification est `[dernier jeton produit] +
@@ -173,6 +204,30 @@ L'acceptation suit la règle de rejet standard. Pour un propositeur sans
 distribution (les n-grammes), q est une masse de Dirac sur la proposition : la
 probabilité d'acceptation vaut donc `p(x)`, et un rejet rééchantillonne dans `p`
 privé de ce jeton — ce qui est exact, et non une approximation.
+
+### Trois brouillons
+
+- **n-grammes** (défaut) : ne coûte rien et paie quand la sortie recopie
+  l'entrée. Adaptatif — il se met en pause quand le gain retombe.
+- **modèle brouillon** : un modèle entier, avec son propre cache paginé.
+  Mesuré ici, il fait tomber le débit de 152 à 30 t/s malgré 78 % d'acceptation
+  sur du code : le brouillon coûte trop cher pour ce qu'il rapporte.
+- **tête MTP** (`engine/mtp.py`) : la couche `nextn` que portent Qwen3.5 et
+  suivants, DeepSeek compris, et que la conversion jetait. Elle mélange le
+  plongement du jeton émis et l'état caché de la position précédente, puis
+  applique un bloc de transformeur :
+
+  ```
+  h' = eh_proj( [ enorm(plongement(t)) ; hnorm(h) ] )
+  logits = lm_head( shared_head_norm( bloc(h') ) )
+  ```
+
+  L'ordre de la concaténation n'est pas indifférent : plongement d'abord donne
+  50 % de prédictions justes en forçage enseignant, l'ordre inverse en donne
+  zéro. Cette tête est un soixante-quatrième d'un 27B — mais elle n'est pas
+  rentable en l'état : son cache se pollue de ses propres états au fil du
+  brouillonnage, et chaque jeton proposé traverse `lm_head` en entier, hors
+  graphe CUDA. Disponible par `--speculative mtp`, non activée par défaut.
 
 ## L'étage hôte comme appareil de calcul
 
