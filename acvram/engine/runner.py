@@ -20,6 +20,7 @@ import json
 import os
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, Optional
 
@@ -176,9 +177,16 @@ class Engine:
         # du cache paginé ; le cache de préfixe n'aurait pas de sens (les
         # blocs KV ne suffisent pas à restaurer l'état), on le coupe.
         self.est_hybride = bool(getattr(self.spec, "layer_types", None))
-        if self.est_hybride:
-            enable_prefix_cache = False
         self.gdn_states: dict = {}
+        # Hybrides à récurrence linéaire : les blocs KV ne suffisent pas à
+        # reprendre une invite, l'état récurrent vit hors du cache paginé. On
+        # le photographie donc aux frontières régulières du prefill, en RAM
+        # hôte épinglée (150 Mio pour les quarante-huit couches d'un 27B), et
+        # un préfixe n'est repris que jusqu'à la frontière dont on tient
+        # l'instantané.
+        self._pas_insta = int(os.environ.get("ACVRAM_INSTA_PAS", "256"))
+        self._max_insta = int(os.environ.get("ACVRAM_INSTA_MAX", "3"))
+        self._insta: "OrderedDict[int, list]" = OrderedDict()
 
         n_blocks = min((c.cfg.num_blocks for c in self.model.caches.values()),
                        default=1024)
@@ -273,7 +281,23 @@ class Engine:
                 # traverser le modèle.
                 hashes = BlockAllocator.block_hashes(seq.prompt_ids, BLOCK_SIZE)
                 limit = max(0, (len(seq.prompt_ids) - 1) // BLOCK_SIZE)
+                # Sur un hybride, les blocs KV ne valent que si l'état récurrent
+                # de la même frontière est disponible : on plafonne l'appariement
+                # à la plus grande frontière photographiée.
+                insta_f = 0
+                if self.est_hybride:
+                    insta_f = self._frontiere_disponible(seq, limit * BLOCK_SIZE)
+                    limit = insta_f // BLOCK_SIZE
                 matched = self.allocator.match_prefix(hashes, limit=limit)
+                if self.est_hybride:
+                    if len(matched) * BLOCK_SIZE != insta_f or insta_f == 0:
+                        # Appariement partiel : l'état et les clés ne
+                        # coincideraient pas, on repart de l'invite entiere.
+                        if matched:
+                            self.allocator.free(matched)
+                        matched = []
+                    else:
+                        self._reprendre_insta_a(seq, insta_f)
                 # L'étage hôte prolonge la suite : chaque bloc suivant présent
                 # en RAM remonte dans un bloc VRAM fraîchement alloué.
                 if self.host_kv is not None:
@@ -296,6 +320,94 @@ class Engine:
                 self.running.append(seq)
                 admitted.append(seq)
         return admitted
+
+    # -- instantanés d'état récurrent -------------------------------------
+    def _frontiere_insta(self, seq: Sequence) -> Optional[int]:
+        """Position où couper le prefill pour photographier l'état, ou None.
+
+        Un multiple du pas d'instantané, strictement à l'intérieur de l'invite
+        et au-delà de ce que le cache a déjà servi. Le choix ne dépend que de la
+        longueur de l'invite : deux requêtes partageant une amorce tombent sur
+        la même frontière tant qu'elles restent dans la même tranche.
+        """
+        if not self.est_hybride or not self.allocator.enable_prefix_cache:
+            return None
+        pas = self._pas_insta
+        n = len(seq.prompt_ids)
+        f = ((n - 1) // pas) * pas
+        if f < pas or f <= seq.cached_len or f % BLOCK_SIZE:
+            return None
+        return f
+
+    @staticmethod
+    def _vers_hote(etat):
+        if torch.is_tensor(etat):
+            # Mémoire épinglée : la restitution est un transfert asynchrone de
+            # 150 Mio, deux fois plus rapide qu'en mémoire paginable.
+            h = torch.empty_like(etat, device="cpu", pin_memory=True)
+            h.copy_(etat.detach(), non_blocking=False)
+            return h
+        if isinstance(etat, (tuple, list)):
+            return type(etat)(Engine._vers_hote(x) for x in etat)
+        if isinstance(etat, dict):
+            return {k: Engine._vers_hote(v) for k, v in etat.items()}
+        return etat
+
+    @staticmethod
+    def _vers_gpu(etat, ref):
+        if torch.is_tensor(etat):
+            dev = ref.device if torch.is_tensor(ref) else torch.device("cuda")
+            return etat.to(dev, copy=True, non_blocking=True)
+        if isinstance(etat, (tuple, list)):
+            return type(etat)(Engine._vers_gpu(x, ref) for x in etat)
+        if isinstance(etat, dict):
+            return {k: Engine._vers_gpu(v, ref) for k, v in etat.items()}
+        return etat
+
+    def _cle_insta(self, ids: list[int], jusqu_a: int) -> int:
+        return hash(tuple(ids[:jusqu_a]))
+
+    def _photographier(self, seq: Sequence, coupe: int) -> None:
+        """Range l'état récurrent de toutes les couches, pris à ``coupe``."""
+        instant = []
+        for idx, par_seq in self.gdn_states.items():
+            etat = par_seq.get(seq.id)
+            if etat is None:
+                continue
+            instant.append((idx, self._vers_hote(etat)))
+        if not instant:
+            return
+        cle = self._cle_insta(seq.prompt_ids, coupe)
+        self._insta[cle] = instant
+        self._insta.move_to_end(cle)
+        while len(self._insta) > self._max_insta:
+            self._insta.popitem(last=False)
+
+    def _frontiere_disponible(self, seq: Sequence, plafond: int) -> int:
+        """Plus grande frontière photographiée pour cette invite, sous
+        ``plafond`` jetons. Zéro si aucune."""
+        if not self._insta:
+            return 0
+        pas = self._pas_insta
+        f = (min(plafond, len(seq.prompt_ids) - 1) // pas) * pas
+        while f >= pas:
+            if self._cle_insta(seq.prompt_ids, f) in self._insta:
+                return f
+            f -= pas
+        return 0
+
+    def _reprendre_insta_a(self, seq: Sequence, f: int) -> None:
+        """Restaure l'état récurrent photographié à la frontière ``f``."""
+        cle = self._cle_insta(seq.prompt_ids, f)
+        instant = self._insta.get(cle)
+        if instant is None:
+            return
+        for idx, etat in instant:
+            par_seq = self.gdn_states.setdefault(idx, {})
+            ref = next(iter(par_seq.values()), None)
+            par_seq[seq.id] = self._vers_gpu(etat, ref)
+        self._insta.move_to_end(cle)
+        self.stats.kv_refills += 1
 
     def _register_complete_blocks(self, seq: Sequence) -> None:
         """Publie les blocs désormais pleins, pour que des requêtes ultérieures les
@@ -346,7 +458,8 @@ class Engine:
             self.waiting.remove(seq)
 
     # -- batch construction ----------------------------------------------
-    def _build_batch(self, seqs: list[Sequence], prefill: bool) -> ForwardBatch:
+    def _build_batch(self, seqs: list[Sequence], prefill: bool,
+                     limite: Optional[int] = None) -> ForwardBatch:
         tokens: list[int] = []
         positions: list[int] = []
         slots: list[int] = []
@@ -357,7 +470,7 @@ class Engine:
         for seq in seqs:
             if prefill:
                 # On saute ce que le cache de préfixe détient déjà.
-                ids = seq.prompt_ids[seq.cached_len:]
+                ids = seq.prompt_ids[seq.cached_len:limite]
                 start = seq.cached_len
             else:
                 ids = [seq.output_ids[-1]] if seq.output_ids else [seq.prompt_ids[-1]]
@@ -392,6 +505,14 @@ class Engine:
         # les séquences en cours.
         for seq in new:
             t0 = time.perf_counter()
+            coupe = self._frontiere_insta(seq)
+            if coupe is not None:
+                # Première passe jusqu'à la frontière, instantané, puis le
+                # reste : le point de reprise est ainsi le même d'une requête à
+                # l'autre tant que l'invite partage ses premiers jetons.
+                self.model(self._build_batch([seq], prefill=True, limite=coupe))
+                self._photographier(seq, coupe)
+                seq.cached_len = coupe
             batch = self._build_batch([seq], prefill=True)
             logits = self.model(batch)
             self.stats.prefill_seconds += time.perf_counter() - t0
