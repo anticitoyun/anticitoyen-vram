@@ -51,50 +51,41 @@ MAX_GRAPHS = 16
 
 
 def _empreinte_adresses(runner, entry: dict) -> dict:
-    """Adresse de chaque tenseur qu'un graphe peut avoir figée : les tampons
-    du godet, les poids et tampons du modèle, et tout tenseur accroché aux
-    couches (états récurrents, historiques, caches KV, caches RoPE). Sert au
+    """Adresse et taille de chaque tenseur qu'un graphe peut avoir figées :
+    tampons du godet, puis tout tenseur atteignable depuis le modèle par ses
+    attributs, sous-modules, listes et dictionnaires (états récurrents,
+    historiques, caches KV, caches RoPE, piles d'experts, poids). Sert au
     débogage (``ACVRAM_TRACE_PTRS``) : un tenseur dont l'adresse change entre
     la capture et un rejeu est un accès fantôme assuré."""
     out = {}
     for k, v in entry.items():
         if torch.is_tensor(v):
-            out[f"entry.{k}"] = v.data_ptr()
-    m = runner.model
-    for n, t in list(m.named_parameters()) + list(m.named_buffers()):
-        out[f"model.{n}"] = t.data_ptr()
+            out[f"entry.{k}"] = (v.data_ptr(), v.numel() * v.element_size())
+    vu = set()
 
     def visiter(obj, chemin, prof):
-        if prof > 3 or obj is None:
+        if obj is None or prof > 14 or id(obj) in vu:
             return
         if torch.is_tensor(obj):
-            out[chemin] = obj.data_ptr(); return
+            out[chemin] = (obj.data_ptr(), obj.numel() * obj.element_size()); return
+        if isinstance(obj, (str, bytes, int, float, bool, type)):
+            return
+        vu.add(id(obj))
         if isinstance(obj, dict):
             for k, v in obj.items():
                 visiter(v, f"{chemin}[{k}]", prof + 1)
-            return
-        if isinstance(obj, (list, tuple)):
+        elif isinstance(obj, (list, tuple)):
             for i, v in enumerate(obj):
                 visiter(v, f"{chemin}[{i}]", prof + 1)
-            return
-        if hasattr(obj, "__dict__") and not isinstance(obj, torch.nn.Parameter):
+        elif hasattr(obj, "__dict__"):
             for k, v in vars(obj).items():
-                if k.startswith("_parameters") or k.startswith("_buffers") or k == "_modules":
+                if k in ("_backward_hooks", "_forward_hooks", "_forward_pre_hooks",
+                         "_state_dict_hooks", "_load_state_dict_pre_hooks", "training"):
                     continue
-                if torch.is_tensor(v) or isinstance(v, (dict, list, tuple)) or \
-                        (hasattr(v, "__dict__") and not isinstance(v, torch.nn.Module)):
-                    visiter(v, f"{chemin}.{k}", prof + 1)
-    for i, layer in enumerate(m.layers):
-        for nom in ("statics", "static_hist", "static_owners"):
-            visiter(getattr(layer, nom, None), f"layers[{i}].{nom}", 1)
-        for sous in ("self_attn", "linear_attn"):
-            so = getattr(layer, sous, None)
-            if so is not None:
-                for k, v in vars(so).items():
-                    if k in ("_parameters", "_buffers", "_modules"):
-                        continue
-                    visiter(v, f"layers[{i}].{sous}.{k}", 1)
+                visiter(v, f"{chemin}.{k}", prof + 1)
+    visiter(runner.model, "model", 0)
     return out
+
 
 
 class GraphRunner:
@@ -317,12 +308,15 @@ class GraphRunner:
         self._fill(entry, batch)
         max_pos = min(self.max_model_len + 1, nblk * BLOCK_SIZE + 1)
 
-        # Le cache RoPE doit exister a sa taille finale avant la capture :
-        # une extension pendant un rejeu pointerait un tenseur abandonne.
-        for layer in m.layers:
-            if getattr(layer, "self_attn", None) is not None and layer.self_attn.rope is not None:
-                layer.self_attn.rope(entry["positions"], d, m.dtype,
-                                     max_pos=self.max_model_len + 1)
+        # Tout cache RoPE doit exister à sa taille finale avant la capture :
+        # étendu ensuite, il laisserait aux graphes déjà capturés l'adresse
+        # d'un tenseur abandonné. Toutes les RoPE du modèle sont concernées,
+        # pas seulement celles de l'attention : la RoPE du chemin MLA s'étend
+        # au godet courant (jusqu'à max_model_len arrondi au MLA_BUCKET).
+        from .layers import RotaryEmbedding
+        for mod in m.modules():
+            if isinstance(mod, RotaryEmbedding):
+                mod.reserver(self.max_model_len + MLA_BUCKET + 1, d, m.dtype)
 
         def step() -> torch.Tensor:
             return m.decode_fixed(entry["x"], entry["positions"],

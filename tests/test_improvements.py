@@ -483,3 +483,53 @@ def test_first_generation_matches_the_next_ones(converted):
     assert sorties[0] == sorties[1] == sorties[2], \
         "la premiere generation diverge des suivantes"
     assert fp4._OK, "une forme refusee a eteint le chemin FP4 tensor cores"
+
+
+# --------------------------------------------------------------------------
+# tenseurs figés par un graphe CUDA
+# --------------------------------------------------------------------------
+
+
+def test_rope_ne_se_realloue_pas_sous_capture():
+    """Un cache RoPE étendu pendant une capture laisserait au graphe une
+    adresse morte (GLM-4.7-Flash, 5/09/2026) : c'est refusé net."""
+    import pytest
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA")
+    from acvram.engine.layers import RotaryEmbedding
+    rope = RotaryEmbedding(64, 4096)
+    d = torch.device("cuda")
+    pos = torch.arange(8, device=d)
+    rope(pos, d, torch.float32, max_pos=512)          # 1024 lignes (plancher)
+    rope.reserver(2048, d, torch.float32)             # hors capture : autorisé
+    assert rope._cache_len >= 2048
+    g = torch.cuda.CUDAGraph()
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        rope(pos, d, torch.float32, max_pos=2048)     # échauffement
+    torch.cuda.current_stream().wait_stream(s)
+    with pytest.raises(RuntimeError, match="capture"):
+        with torch.cuda.graph(g):
+            rope(pos, d, torch.float32, max_pos=8192)  # extension sous capture
+
+
+def test_tampon_mtp_reserve_et_stable():
+    """Le tampon de l'état caché MTP est réservé une fois, plus large que le
+    pas, et ne bouge plus ; seules ses n premières lignes datent du pas."""
+    from acvram.engine.model import ACVRamModel
+    class Faux:
+        _mtp_hidden = None
+        _mtp_hidden_n = 0
+        MTP_HIDDEN_LIGNES = ACVRamModel.MTP_HIDDEN_LIGNES
+        reserver_hidden = ACVRamModel.reserver_hidden
+        _garder_hidden = ACVRamModel._garder_hidden
+    m = Faux()
+    h5 = torch.randn(5, 32)
+    m._garder_hidden(h5)
+    buf = m._mtp_hidden
+    assert buf.shape == (ACVRamModel.MTP_HIDDEN_LIGNES, 32) and m._mtp_hidden_n == 5
+    h1 = torch.randn(1, 32)
+    m._garder_hidden(h1)
+    assert m._mtp_hidden is buf, "le tampon a été réalloué"
+    assert m._mtp_hidden_n == 1 and torch.equal(buf[0], h1[0]) and torch.equal(buf[1], h5[1])

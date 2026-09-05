@@ -291,6 +291,16 @@ class RotaryEmbedding(nn.Module):
         if self._cos is not None and seq_len <= self._cache_len \
                 and self._cos.device == device:
             return
+        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+            # Un graphe capturé garde l'adresse des tables : les remplacer
+            # pendant une capture — ou après, pour un graphe déjà capturé —
+            # laisse ce graphe lire une page morte. Vu sur GLM-4.7-Flash (RoPE
+            # du chemin MLA étendue de 1025 à 2049 lignes entre deux godets
+            # précapturés). Le moteur réserve la taille finale avant toute
+            # capture ; arriver ici est une erreur de programmation.
+            raise RuntimeError(f"cache RoPE étendu à {seq_len} pendant une capture de "
+                               f"graphe (réservé : {self._cache_len}) — appeler "
+                               f"reserver() avant la capture")
         n = max(seq_len, 1024)
         t = torch.arange(n, device=device, dtype=torch.float32)
         freqs = torch.outer(t, self.inv_freq.to(device))
@@ -299,6 +309,13 @@ class RotaryEmbedding(nn.Module):
         self._sin = emb.sin().to(dtype)
         self._cache_len = n
 
+    def reserver(self, max_pos: int, device, dtype) -> None:
+        """Amène les tables à leur taille finale, hors de toute capture, pour
+        qu'aucun graphe n'ait à les étendre."""
+        self._ensure(max_pos, device, dtype)
+        if getattr(self, "_cos32", None) is not None:
+            self.tables32(max_pos, device)
+
     def tables32(self, max_pos: int, device):
         """Tables cos/sin complètes en fp32, pour le noyau fusionné : lui
         indexe par position, ce qui épargne deux index_select et deux
@@ -306,6 +323,9 @@ class RotaryEmbedding(nn.Module):
         self._ensure(max_pos, device, self._dtype)
         c32 = getattr(self, "_cos32", None)
         if c32 is None or c32.shape[0] != self._cos.shape[0] or c32.device != device:
+            if c32 is not None and torch.cuda.is_current_stream_capturing():
+                raise RuntimeError("tables RoPE fp32 réallouées pendant une capture de "
+                                   "graphe — appeler reserver() avant la capture")
             if os.environ.get("ACVRAM_TRACE_PTRS"):
                 print(f"[rope32] (ré)allocation des tables fp32 : {None if c32 is None else tuple(c32.shape)}"
                       f" -> {tuple(self._cos.shape)} (max_pos demandé {max_pos}), pendant une capture : "
