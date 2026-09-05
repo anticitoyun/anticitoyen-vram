@@ -195,6 +195,14 @@ def attendre(moteur, secondes):
 
 
 def demarrer(moteur, dossier, ctx):
+    """Lance le moteur et rend le temps de chargement, lanceur compris (les
+    lanceurs attendent eux-mêmes le port avant de rendre la main)."""
+    t0 = time.time()
+    _demarrer(moteur, dossier, ctx)
+    return time.time() - t0
+
+
+def _demarrer(moteur, dossier, ctx):
     arreter_tout_sauf(moteur)
     env = dict(os.environ)
     if moteur == "acvram":
@@ -202,17 +210,17 @@ def demarrer(moteur, dossier, ctx):
         env["CTX"] = str(ctx)
         subprocess.run([os.path.join(BIN, "acvram-serveur"), dossier], env=env,
                        capture_output=True, text=True, timeout=900)
-        return attendre("acvram", 900)
+        attendre("acvram", 900); return
     if moteur == "llamacpp":
         arreter("llamacpp")
         subprocess.run([os.path.join(BIN, "llamacpp-serveur"), dossier, str(ctx)], env=env,
                        capture_output=True, text=True, timeout=900)
-        return attendre("llamacpp", 900)
+        attendre("llamacpp", 900); return
     if moteur == "vllm":
         arreter("vllm")
         subprocess.run([os.path.join(BIN, "vllm-serveur"), dossier, str(ctx)], env=env,
                        capture_output=True, text=True, timeout=1800)
-        return attendre("vllm", 1800)
+        attendre("vllm", 1800); return
     if moteur == "tabby":
         if not pret("tabby"):
             env.update({"CUDA_VISIBLE_DEVICES": "0", "CUDA_DEVICE_ORDER": "PCI_BUS_ID"})
@@ -220,12 +228,11 @@ def demarrer(moteur, dossier, ctx):
                              env=env, stdout=open(os.path.join(TABBY_DIR, "tabby.log"), "a"),
                              stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
             attendre("tabby", 180)
-        t0 = time.time()
         r = http(5000, "/v1/model/load", cle_tabby(True),
                  {"model_name": os.path.basename(dossier), "max_seq_len": ctx,
                   "cache_mode": "Q8"}, delai=900, methode="POST")
         r.read()
-        return time.time() - t0
+        return
     raise ValueError(moteur)
 
 
