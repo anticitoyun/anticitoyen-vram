@@ -440,4 +440,72 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
                       if isinstance(cfg.get("bos_token_id"), int) else None),
         raw=cfg,
     )
+    _affiner_couches(spec, path)
     return spec
+
+
+def _affiner_couches(spec: ModelSpec, path: str) -> None:
+    """Recompte les paramètres par couche depuis les tenseurs réels du modèle.
+
+    ``_build_layer`` déduit la taille d'une couche de la configuration, en
+    supposant que toutes se ressemblent : une attention plus un MLP, MoE au-delà
+    de ``first_k_dense_replace``. Les architectures hybrides démentent cette
+    supposition — Nemotron-H alterne 23 couches Mamba sans MLP, 23 couches MoE
+    sans attention et 6 couches d'attention pure, et le compte analytique
+    donnait 103 milliards de paramètres pour un modèle qui en a 31,6. Le
+    planificateur croyait alors devoir exiler 27 Gio en mémoire vive, étalait
+    le modèle sur les deux cartes, et le décodage tombait à 26 jetons/s contre
+    170 pour llama.cpp (mesuré le 5 septembre 2026).
+
+    Quand le répertoire est un modèle déjà converti, son manifeste donne la
+    forme exacte de chaque tenseur : on s'en sert. C'est juste pour toute
+    architecture, présente ou à venir, sans rien deviner.
+    """
+    manifeste = os.path.join(path, "acvram_manifest.json")
+    if path.endswith(".json") or not os.path.isfile(manifeste):
+        return
+    try:
+        with open(manifeste, "r", encoding="utf-8") as fh:
+            tenseurs = json.load(fh)["tensors"]
+    except Exception:                                  # noqa: BLE001
+        return
+    attn: dict[int, int] = {}
+    mlp: dict[int, int] = {}
+    norm: dict[int, int] = {}
+    partage: dict[int, int] = {}
+    experts: dict[int, set] = {}
+    for nom, e in tenseurs.items():
+        if not nom.startswith("model.layers.") or not isinstance(e, dict):
+            continue
+        forme = e.get("shape") or []
+        n = 1
+        for x in forme:
+            n *= int(x)
+        try:
+            i = int(nom.split(".")[2])
+        except ValueError:
+            continue
+        if "norm" in nom.rsplit(".", 2)[-2:][0] or nom.endswith("norm.weight"):
+            norm[i] = norm.get(i, 0) + n
+        elif ".mlp." in nom or ".feed_forward." in nom:
+            mlp[i] = mlp.get(i, 0) + n
+            if ".experts." in nom:
+                experts.setdefault(i, set()).add(nom.split(".experts.")[1].split(".")[0])
+            else:
+                partage[i] = partage.get(i, 0) + n      # routeur et expert partagé
+        else:
+            attn[i] = attn.get(i, 0) + n
+    if not attn and not mlp:
+        return
+    couches = []
+    for l in spec.layers:
+        i = l.index
+        if i not in attn and i not in mlp:
+            couches.append(l)                           # couche absente : on garde l'estimation
+            continue
+        n_ex = len(experts.get(i, ()))
+        couches.append(LayerSpec(i, attn.get(i, 0), mlp.get(i, 0), norm.get(i, l.norm_params),
+                                 n_ex > 0, n_ex,
+                                 min(l.n_experts_active, n_ex) if n_ex else 0,
+                                 partage.get(i, 0)))
+    spec.layers = couches

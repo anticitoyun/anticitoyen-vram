@@ -544,3 +544,73 @@ def test_logits_tronques_au_vocabulaire():
     logits = torch.zeros(3, 12); logits[:, 11] = 99.0        # la colonne fantôme domine
     out = ACVRamModel._logits_finaux(faux, logits)
     assert out.shape == (3, 10) and int(out.argmax(-1)[0]) < 10
+
+
+def test_couches_comptees_depuis_les_tenseurs(tmp_path):
+    """Une architecture hybride ne se déduit pas de la configuration : Nemotron-H
+    alterne des couches Mamba sans MLP et des couches MoE sans attention, et le
+    compte analytique triplait sa taille (5/09/2026)."""
+    import json
+    from acvram.engine.config import load_model_spec
+    h, inter, n_ex = 64, 32, 4
+    cfg = {"architectures": ["LlamaForCausalLM"], "hidden_size": h, "intermediate_size": inter,
+           "moe_intermediate_size": inter, "num_hidden_layers": 4, "num_attention_heads": 4,
+           "num_key_value_heads": 2, "vocab_size": 128, "num_experts": n_ex,
+           "num_experts_per_tok": 2, "rms_norm_eps": 1e-5}
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    analytique = load_model_spec(str(tmp_path))
+    # le manifeste dit la vérité : couches 0 et 2 en MoE, 1 et 3 en attention seule
+    t = {}
+    for i in (0, 2):
+        for e in range(n_ex):
+            for proj in ("gate_proj", "up_proj", "down_proj"):
+                t[f"model.layers.{i}.mlp.experts.{e}.{proj}.weight"] = {"shape": [inter, h]}
+    for i in (1, 3):
+        for proj in ("q_proj", "o_proj"):
+            t[f"model.layers.{i}.self_attn.{proj}.weight"] = {"shape": [h, h]}
+    (tmp_path / "acvram_manifest.json").write_text(json.dumps({"tensors": t}))
+    reel = load_model_spec(str(tmp_path))
+    assert reel.total_params < analytique.total_params, "le recomptage doit corriger à la baisse"
+    assert sum(1 for l in reel.layers if l.is_moe) == 2, "seules les couches à experts sont MoE"
+    assert reel.layers[1].mlp_params == 0, "une couche d'attention pure n'a pas de MLP"
+    attendu = 2 * n_ex * 3 * inter * h + 2 * 2 * h * h
+    assert abs(sum(l.total_params - l.norm_params for l in reel.layers) - attendu) < h
+
+
+def test_plan_rapatrie_sur_une_carte():
+    """Un modèle étalé sur deux cartes alors qu'il tient sur la première y
+    revient au chargement : chaque frontière coûte un aller-retour par jeton."""
+    from acvram.engine.loader import _rapatrier_sur_une_carte
+    from acvram.memory.tiering import LayerPlacement, Plan, Tier
+    G = 2 ** 30
+    def plan_deux_cartes(octets_par_couche, n=8):
+        p = Plan(model="essai")
+        p.tiers = [Tier(name="cuda:0", kind="gpu", device_index=0, capacity=30 * G,
+                        weight_format="nvfp4", kv_format="int8",
+                        read_bandwidth=1790.0, link_bandwidth=25.0),
+                   Tier(name="cuda:1", kind="gpu", device_index=1, capacity=11 * G,
+                        weight_format="nvfp4", kv_format="int8",
+                        read_bandwidth=912.0, link_bandwidth=25.0)]
+        p.layers = [LayerPlacement(index=i, exec_device="cuda:0" if i < n // 2 else "cuda:1",
+                                   attn_storage="cuda:0" if i < n // 2 else "cuda:1",
+                                   mlp_storage="cuda:0" if i < n // 2 else "cuda:1",
+                                   fmt="nvfp4", attn_bytes=octets_par_couche // 4,
+                                   mlp_bytes=octets_par_couche - octets_par_couche // 4,
+                                   mlp_active_bytes=octets_par_couche // 8)
+                    for i in range(n)]
+        p.kv_budget = {"cuda:0": G, "cuda:1": G // 2}
+        p.lm_head_device = "cuda:0"
+        return p
+    attn = {i: G // 4 for i in range(8)}
+    mlp = {i: G - G // 4 for i in range(8)}
+    # 8 Gio de poids : tiennent largement sur la première carte
+    p = plan_deux_cartes(G)
+    _rapatrier_sur_une_carte(p, attn, mlp, 0, 0)
+    assert {l.exec_device for l in p.layers} == {"cuda:0"}
+    assert list(p.kv_budget) == ["cuda:0"] and p.kv_budget["cuda:0"] == G + G // 2
+    # 4 Gio par couche, soit 32 Gio : ne tiennent pas, la répartition reste
+    gros_a = {i: G for i in range(8)}
+    gros_m = {i: 3 * G for i in range(8)}
+    p2 = plan_deux_cartes(4 * G)
+    _rapatrier_sur_une_carte(p2, gros_a, gros_m, 0, 0)
+    assert {l.exec_device for l in p2.layers} == {"cuda:0", "cuda:1"}

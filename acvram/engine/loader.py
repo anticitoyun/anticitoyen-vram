@@ -922,6 +922,58 @@ def _reajuster_plan(plan: Plan, manifest: dict) -> None:
             print(f"[acvram] plan réajusté : {remontees} MLP remontés en VRAM sur {dev} "
                   f"(poids réels {utilise() / 2**30:.1f} Gio pour {t.capacity / 2**30:.1f} Gio)",
                   flush=True)
+    _rapatrier_sur_une_carte(plan, attn, mlp, embed, head)
+
+
+def _rapatrier_sur_une_carte(plan: Plan, attn: dict, mlp: dict,
+                             embed: int, head: int) -> None:
+    """Ramène tout le modèle sur la première carte quand il y tient.
+
+    Le plan est figé à la conversion, avec le compte de paramètres d'alors.
+    Pour les architectures hybrides, ce compte a longtemps triplé la taille
+    réelle (Nemotron-H : 103 milliards annoncés pour 31,6), et le planificateur
+    étalait sur deux cartes un modèle qui tenait sur une. Chaque frontière
+    franchie coûte un aller-retour d'état caché par jeton, et la carte
+    d'appoint est trois fois plus lente : mesuré le 5 septembre 2026,
+    26 jetons/s au lieu de 170.
+
+    Les octets réels sont connus ici : si la première carte les porte, avec son
+    budget KV et la marge, les couches de la seconde y reviennent. Échappement
+    par ``ACVRAM_PLAN_FIGE``.
+    """
+    if os.environ.get("ACVRAM_PLAN_FIGE"):
+        return
+    gpus = [t for t in plan.tiers if t.kind == "gpu"]
+    if len(gpus) < 2:
+        return
+    occupes = {l.exec_device for l in plan.layers} & {t.name for t in gpus}
+    if len(occupes) < 2:
+        return
+    principal = gpus[0]
+    if any(l.attn_storage == "cpu" or l.mlp_storage == "cpu" for l in plan.layers):
+        return                          # déjà à l'étroit : ne pas empirer
+    besoin = embed if plan.embed_device == principal.name else 0
+    besoin += head
+    for l in plan.layers:
+        besoin += attn.get(l.index, l.attn_bytes) + mlp.get(l.index, l.mlp_bytes)
+    besoin += sum(int(v) for v in (plan.kv_budget or {}).values())
+    marge = max(2 * 2**30, int(0.07 * principal.capacity))
+    if besoin > principal.capacity - marge:
+        return
+    for l in plan.layers:
+        l.exec_device = principal.name
+        l.attn_storage = principal.name
+        l.mlp_storage = principal.name
+        if hasattr(l, "mlp_exec"):
+            l.mlp_exec = "gpu"
+    plan.lm_head_device = principal.name
+    if plan.embed_device in {t.name for t in gpus}:
+        plan.embed_device = principal.name
+    plan.kv_budget = {principal.name: sum(int(v) for v in (plan.kv_budget or {}).values())}
+    plan.stage_ranges = {principal.name: (0, len(plan.layers) - 1)}
+    print(f"[acvram] plan réajusté : tout le modèle rapatrié sur {principal.name} "
+          f"({besoin / 2**30:.1f} Gio pour {principal.capacity / 2**30:.1f} Gio) — "
+          f"une frontière de moins par jeton", flush=True)
 
 
 def _plan_from_manifest(manifest: dict) -> Plan:
