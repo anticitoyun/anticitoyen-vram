@@ -1579,3 +1579,34 @@ déjà les 128 d'un coup.
 Sept tests fixent l'invariant, dont l'égalité au bit près de la GEMV empilée
 sur GPU (`tests/test_fusion_nvfp4.py`), et `ACVRAM_FUSION_NVFP4=0` rend le
 chemin d'avant pour toute mesure ultérieure.
+
+## 5 septembre 2026, nuit — deux résultats négatifs sur GLM-4.7 (mesurés, écartés)
+
+`GLM-4.7-Flash` rend 98 t/s là où llama.cpp en donne 163. Le profil différentiel
+désigne d'abord le processeur : 11,9 ms d'hôte par jeton contre 9,8 ms de GPU,
+dont **9 ms dans neuf `cudaMemcpyAsync`**. Ces copies partent bien de mémoire
+paginée, où `non_blocking=True` ne veut rien dire.
+
+Les faire transiter par des tampons hôtes épinglés persistants — deux jeux
+alternés, table de blocs assemblée côté hôte puis transmise d'un bloc — n'a rien
+donné, et pire :
+
+| modèle | copies paginées | tampons épinglés |
+|---|---|---|
+| GLM-4.7-Flash | 98,4 t/s | 98,0 t/s |
+| GLM-4.7-Grande-42B | 71,0 t/s | 72,0 t/s |
+| Qwen3-Coder-30B-A3B | 201,0 t/s | **174,6 t/s** |
+
+Treize pour cent de perte sur le modèle le plus rapide : la copie hôte vers hôte
+ajoutée coûte plus que ce que l'épinglage fait gagner, et les 9 ms du profil
+étaient de l'attente du GPU comptée à l'appelant, pas un coût d'hôte. Le
+changement est retiré. Leçon à retenir : sur un profil PyTorch, un
+`cudaMemcpyAsync` cher se lit comme une synchronisation, pas comme un transfert.
+
+Ce que le profil dit vraiment, lui, tient dans le décompte des lancements :
+**environ 1 740 noyaux par jeton**, dont 283 `nvfp4_gemv` — six par couche sur
+47 — et quelque 1 080 noyaux élémentaires, soit 23 par couche. À deux
+microsecondes de latence chacun, le seul fait de les lancer explique les 9,8 ms
+de GPU. Un `cudaGraphLaunch` à 3,4 ms par jeton dit la même chose autrement :
+son coût suit le nombre de nœuds du graphe. C'est là qu'est le gisement, pas
+dans les transferts.
