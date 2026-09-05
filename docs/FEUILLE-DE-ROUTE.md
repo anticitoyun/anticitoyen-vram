@@ -1305,3 +1305,76 @@ davantage.
 
 Le comparatif des quatre moteurs (`outils/banc-4moteurs.py`, 134 couples sur
 67 modèles) est relancé sur ce parc.
+
+## 5 septembre 2026 — onze modèles muets au comparatif : trois causes, une méthode (v0.4.53 à v0.4.55)
+
+Le comparatif des quatre moteurs (`outils/banc-4moteurs.py`, 134 couples sur
+67 modèles) a d'abord donné 11 échecs sur 67 côté acvram, tous avec le même
+symptôme : réponse vide, puis `CUDA error: an illegal memory access`. Jamais
+hors serveur (`banc1.py` passait sur les mêmes modèles), jamais dans les deux
+cents premiers jetons.
+
+### La chasse
+
+* **Cerner.** Prefill sain (5 jetons OK sur le prompt long), crash entre 120 et
+  180 jetons générés ; indépendant du gabarit de chat, du cache de préfixe, de
+  l'allocateur (segments extensibles, sans cache), de cuDNN, des noyaux
+  hybrides, des GEMM de prefill, d'un workspace cuBLAS explicite. Dépendant de
+  la **précapture des godets** (`ACVRAM_WARM_GRAPHS=0` guérit) et du **rejeu**
+  (`ACVRAM_GRAPHS_EAGER=1`, mêmes formes sans capture, guérit). Le godet
+  capturé à la demande est sain ; le même godet capturé pendant la précapture
+  est mort.
+* **Reproduire court.** `ACVRAM_WARM_GRAPHS=256`, prompt de 4 jetons, 300
+  jetons : crash au premier rejeu du godet précapturé, à chaque fois.
+* **Nommer le noyau.** `compute-sanitizer` est inutilisable ici : pas de PTX
+  dans un binaire `sm_120f`, et la faute vient d'un noyau du pilote. `cuda-gdb
+  -batch` (l'option `set cuda memcheck` n'existe plus en CUDA 13) arrête sur
+  l'exception matérielle même dans un graphe rejoué : `memcpy32_post`, grille
+  50 × 256 — soit 51 200 octets, 5 lignes × 5120 × bf16.
+* **Trouver le tenseur.** Nouvel outil de diagnostic, `ACVRAM_TRACE_PTRS` :
+  à la capture, `_empreinte_adresses` relève l'adresse de **tout** tenseur
+  atteignable depuis le modèle (28 519 sur GLM-4.7-Flash) ; à chaque rejeu, il
+  compare. Ceux qui ont bougé sont la cause. Une première version qui excluait
+  les sous-modules ne voyait rien : la leçon vaut d'être notée.
+
+### Les trois causes
+
+1. **Le tampon de l'état caché MTP** (`_garder_hidden`) était alloué par
+   `clone()` à la forme du pas : 5 lignes dans un graphe de vérification
+   spéculative, 1 ligne au pas suivant, donc **réalloué** entre les deux. Le
+   graphe spéculatif précapturé gardait l'adresse de l'ancien, rendu au pool.
+   Corrigé : tampon réservé avant capture (`reserver_hidden`, 16 lignes au
+   moins), écriture dans `buf[:n]`, le moteur pose `n` à chaque pas — un rejeu
+   ne joue aucune affectation Python — et la tête ne lit que ces lignes. Effet
+   collatéral probable : la tête MTP lisait un état périmé entre deux captures,
+   ce qui peut expliquer son taux d'acceptation décevant (v0.4.40).
+2. **La RoPE du chemin MLA** (`linear_attn.rope_emb`) s'étend au godet
+   courant, `bucket + 1` : 1025 lignes au premier godet précapturé, 2049 puis
+   3073 aux suivants. `_capture` ne pré-étendait que la RoPE de `self_attn`.
+   Sur GLM-4.7-Flash, le graphe lisait des tables mortes, le routeur MoE
+   recevait du bruit et la GEMV groupée des experts plantait sur des indices
+   aberrants — c'est elle que cuda-gdb nommait ; l'empreinte a désigné
+   `_cos`/`_sin`, seuls tenseurs sur 28 519 à avoir bougé. Corrigé : toute
+   `RotaryEmbedding` du modèle est réservée à `max_model_len + MLA_BUCKET + 1`
+   avant capture, et `_ensure` comme `tables32` refusent de réallouer sous
+   capture.
+3. **La tête de sortie rembourrée** (muse-glimmer-30b : 202 048 jetons,
+   202 112 lignes) : vers le 250e jeton une colonne de rembourrage gagnait
+   l'argmax et le plongement suivant tombait hors table (`IndexError`).
+   Corrigé : `_logits_finaux` coupe au vocabulaire.
+
+Et un artefact du banc : à 260 t/s, `urllib` lit 200 jetons dans un seul
+bloc de 8 Kio, tous horodatés pareil — débit « infini ». Lecture non
+bufferisée désormais, et le flux `completions` renvoie enfin son `usage`.
+
+### La règle
+
+Sous graphes CUDA, **toute allocation paresseuse est un fantôme en puissance**
+— un `clone()` à la forme du pas, un cache étendu à la demande, une pile
+construite à la première passe. Réserver à la taille finale avant la capture,
+refuser la réallocation sous capture, et laisser `ACVRAM_TRACE_PTRS` armé au
+premier doute : il désigne le coupable en un rejeu.
+
+Le budget KV est par ailleurs borné par la VRAM réellement libre au
+chargement (`_borner_kv_par_la_vram`, marge 1,5 Gio ou 5 %) : le budget du
+manifeste raisonne sur des tailles nominales et laissait parfois 50 Mio.

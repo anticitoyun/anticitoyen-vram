@@ -345,7 +345,9 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
 
         if req.stream:
             return StreamingResponse(
-                _stream_completion(service, request_id, q, model_name),
+                _stream_completion(service, request_id, q, model_name,
+                                   len(prompt_ids),
+                                   bool((req.stream_options or {}).get("include_usage"))),
                 media_type="text/event-stream")
 
         text, reason, n_out = "", "stop", 0
@@ -472,7 +474,8 @@ async def _stream_chat(service: EngineService, request_id: str,
 
 
 async def _stream_completion(service: EngineService, request_id: str,
-                             q: asyncio.Queue, model: str) -> AsyncIterator[str]:
+                             q: asyncio.Queue, model: str, prompt_tokens: int = 0,
+                             include_usage: bool = False) -> AsyncIterator[str]:
     cid = new_id("cmpl")
     try:
         async for out in service.collect(request_id, q):
@@ -481,6 +484,11 @@ async def _stream_completion(service: EngineService, request_id: str,
                 choices=[CompletionChoice(
                     text=out.text_delta,
                     finish_reason=out.finish_reason if out.finished else None)])
+            if out.finished and include_usage:
+                # même contrat que le flux de chat : l'usage sur le dernier morceau
+                resp.usage = Usage(prompt_tokens=prompt_tokens,
+                                   completion_tokens=out.completion_tokens,
+                                   total_tokens=prompt_tokens + out.completion_tokens)
             yield f"data: {resp.model_dump_json(exclude_none=True)}\n\n"
     except Exception as exc:                          # noqa: BLE001
         err = ErrorResponse.make(str(exc), "server_error")
