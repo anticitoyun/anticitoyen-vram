@@ -1275,3 +1275,33 @@ suppression de la source ; files entrelacées selon l'espace libre) :
 Une conversion lit donc l'original sur le HDD (lecture séquentielle, ce que
 sait faire un CMR) et écrit le converti sur le SSD ; un lancement ne touche
 que le SSD.
+
+## v0.4.52 — le parc reconverti sans promotions (nuit du 4 au 5 septembre)
+
+Les 38 modèles des menus ont été reconvertis avec `snr_floor = 0`
+(`outils/reconvertir-sans-promotion.py` : conversion dans un `.neuf` voisin,
+vérification du manifeste, échange — l'ancien modèle reste servi jusqu'au
+dernier instant). Sources lues sur le HDD, sorties écrites sur le SSD.
+
+| famille | exemple | avant → après | gain |
+|---|---|---|---|
+| denses 27-32B | Qwen3.8-27B | 18,51 → 16,03 Gio | −13,4 % |
+| denses 31-32B (VL, gemma) | Qwen3-VL-32B | 21,50 → 18,21 Gio | −15,3 % |
+| denses 9B | Qwen3.5-9B | 7,31 → 6,06 Gio | −17,1 % |
+| MoE 35B-A3B | Qwen3.5-35B-A3B | 19,72 → 18,91 Gio | −4,1 % |
+| MoE 30B AWQ | Qwen3-30B-A3B | 16,98 → 16,46 Gio | −3,1 % |
+
+Total : **684 → 625 Gio (−8,6 %)**. Les MoE gagnent peu : leurs experts
+n'étaient déjà jamais promus. Ornith-1.5-35B-A3B **grossit** de 3,6 % : sa
+source porte des couches MTP que l'ancien convertisseur jetait et que le
+nouveau conserve (v0.4.40) — plus lourdes que les 0,83 Gio de promotions
+retirées, mais elles rendent le brouillon spéculatif possible.
+
+Un piège du même ordre a coûté une demi-nuit : la vérification exigeait le
+même nombre de tenseurs qu'avant, et refusait donc tout modèle dont les
+couches MTP étaient désormais conservées (866 tenseurs contre 851). Corrigé :
+le nouveau doit contenir tous les anciens, sans promotion, et peut en avoir
+davantage.
+
+Le comparatif des quatre moteurs (`outils/banc-4moteurs.py`, 134 couples sur
+67 modèles) est relancé sur ce parc.
