@@ -50,6 +50,53 @@ __all__ = ["GraphRunner"]
 MAX_GRAPHS = 16
 
 
+def _empreinte_adresses(runner, entry: dict) -> dict:
+    """Adresse de chaque tenseur qu'un graphe peut avoir figée : les tampons
+    du godet, les poids et tampons du modèle, et tout tenseur accroché aux
+    couches (états récurrents, historiques, caches KV, caches RoPE). Sert au
+    débogage (``ACVRAM_TRACE_PTRS``) : un tenseur dont l'adresse change entre
+    la capture et un rejeu est un accès fantôme assuré."""
+    out = {}
+    for k, v in entry.items():
+        if torch.is_tensor(v):
+            out[f"entry.{k}"] = v.data_ptr()
+    m = runner.model
+    for n, t in list(m.named_parameters()) + list(m.named_buffers()):
+        out[f"model.{n}"] = t.data_ptr()
+
+    def visiter(obj, chemin, prof):
+        if prof > 3 or obj is None:
+            return
+        if torch.is_tensor(obj):
+            out[chemin] = obj.data_ptr(); return
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                visiter(v, f"{chemin}[{k}]", prof + 1)
+            return
+        if isinstance(obj, (list, tuple)):
+            for i, v in enumerate(obj):
+                visiter(v, f"{chemin}[{i}]", prof + 1)
+            return
+        if hasattr(obj, "__dict__") and not isinstance(obj, torch.nn.Parameter):
+            for k, v in vars(obj).items():
+                if k.startswith("_parameters") or k.startswith("_buffers") or k == "_modules":
+                    continue
+                if torch.is_tensor(v) or isinstance(v, (dict, list, tuple)) or \
+                        (hasattr(v, "__dict__") and not isinstance(v, torch.nn.Module)):
+                    visiter(v, f"{chemin}.{k}", prof + 1)
+    for i, layer in enumerate(m.layers):
+        for nom in ("statics", "static_hist", "static_owners"):
+            visiter(getattr(layer, nom, None), f"layers[{i}].{nom}", 1)
+        for sous in ("self_attn", "linear_attn"):
+            so = getattr(layer, sous, None)
+            if so is not None:
+                for k, v in vars(so).items():
+                    if k in ("_parameters", "_buffers", "_modules"):
+                        continue
+                    visiter(v, f"layers[{i}].{sous}.{k}", 1)
+    return out
+
+
 class GraphRunner:
     max_ql = 1          # > 1 : lots de vérification spéculative sur hybrides
     max_slots = int(os.environ.get("ACVRAM_HYBRID_SLOTS", "4"))   # séquences par graphe
@@ -169,6 +216,9 @@ class GraphRunner:
                       "pour la capture, décodage en eager", flush=True)
                 return None
             self.graphs[key] = entry
+            if os.environ.get("ACVRAM_TRACE_PTRS"):
+                entry["ptrs"] = _empreinte_adresses(self, entry)
+                entry["ne"] = self.replays
             self.replays += 1                # la capture rejoue deja une fois
             if trace:
                 print(f"[graphe] capture clé {key} : "
@@ -181,7 +231,18 @@ class GraphRunner:
             with torch.inference_mode():
                 entry["out"] = entry["step"]()
         else:
+            if "ptrs" in entry:
+                print(f"[graphe-REJEU] clé {key} capturée au rejeu n°{entry.get('ne', '?')}, "
+                      f"rejeu n°{self.replays}, {len(entry['ptrs'])} adresses surveillées", flush=True)
+                actuel = _empreinte_adresses(self, entry)
+                bouge = [k for k, v in entry["ptrs"].items() if actuel.get(k) != v]
+                if bouge:
+                    print(f"[graphe-ADRESSES] clé {key} : {len(bouge)} tenseur(s) ont "
+                          f"changé d'adresse depuis la capture : {bouge[:12]}", flush=True)
+                    entry["ptrs"] = actuel
             entry["graph"].replay()
+            if "ptrs" in entry:
+                torch.cuda.synchronize(self.device)   # débogage : faute attribuée au bon rejeu
         self.replays += 1
         out = entry["out"].clone()
         if trace:
@@ -231,6 +292,13 @@ class GraphRunner:
         tables.zero_()
         for i, t in enumerate(batch.block_tables):
             tables[i, : t.shape[0]].copy_(t, non_blocking=True)
+        if os.environ.get("ACVRAM_TRACE_PTRS"):
+            sl = batch.slot_mapping.tolist(); po = batch.positions.tolist()
+            print(f"[graphe-FORMES] clé {entry['key']} seq_lens={batch.seq_lens} "
+                  f"blocs={[int(t.shape[0]) for t in batch.block_tables]} "
+                  f"tables_max={[int(t.max()) for t in batch.block_tables]} "
+                  f"slots={min(sl)}..{max(sl)} positions={min(po)}..{max(po)} "
+                  f"nblk={nblk} q_len={_ql}", flush=True)
 
     def _capture(self, b: int, ql: int, nblk: int,
                  batch: ForwardBatch) -> dict:
@@ -286,6 +354,10 @@ class GraphRunner:
                     step()
         torch.cuda.current_stream(d).wait_stream(side)
 
+        # Le tampon de l'état caché MTP doit exister à sa capacité finale avant
+        # la capture : alloué pendant, il appartiendrait au pool du graphe.
+        if getattr(m, "mtp", None) is not None:
+            m.reserver_hidden(b * ql, entry["x"])
         graph = torch.cuda.CUDAGraph()
         with torch.inference_mode():
             if self._pool is None:

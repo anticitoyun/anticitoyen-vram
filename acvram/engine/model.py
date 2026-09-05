@@ -907,6 +907,10 @@ class DecoderLayerGDN(nn.Module):
         """Historique alloué une fois pour toutes (les graphes capturés y
         écrivent) : le cache latent MLA en est exclu, sa longueur suffit."""
         if self.static_hist is None or self.static_hist_len < q_len:
+            if os.environ.get("ACVRAM_TRACE_PTRS"):
+                print(f"[hist] couche {self.index} : allocation de static_hist({q_len}), "
+                      f"ancien={self.static_hist_len}, pendant une capture : "
+                      f"{torch.cuda.is_current_stream_capturing()}", flush=True)
             self.static_hist = {
                 k: torch.zeros((q_len,) + tuple(v.shape), dtype=v.dtype, device=v.device)
                 for k, v in self.static.items() if k not in ("cache", "scores")}
@@ -1158,6 +1162,7 @@ class ACVRamModel(nn.Module):
         # elle — une affectation Python, elle, ne serait pas rejouée.
         self.mtp = None
         self._mtp_hidden: Optional[torch.Tensor] = None
+        self._mtp_hidden_n: int = 0
         self._mtp_prefill: Optional[torch.Tensor] = None
 
     @torch.inference_mode()
@@ -1251,18 +1256,49 @@ class ACVRamModel(nn.Module):
         x = self.norm(x)
         return self._logits_finaux(self.lm_head(x))
 
-    def _garder_hidden(self, h: torch.Tensor) -> None:
-        """Recopie l'état caché normalisé dans un tampon stable.
+    # Lignes réservées d'avance pour l'état caché que lit la tête MTP : un lot
+    # de vérification spéculative en pose k+1 par séquence.
+    MTP_HIDDEN_LIGNES = 16
 
-        Une copie, et non une référence : sous graphe CUDA le tenseur source
-        est réécrit à chaque rejeu, et une affectation Python ne serait jouée
-        qu'à la capture."""
-        b = self._mtp_hidden
-        if b is None or b.shape != h.shape or b.dtype != h.dtype \
-                or b.device != h.device:
-            self._mtp_hidden = h.detach().clone()
+    def reserver_hidden(self, lignes: int, h: Optional[torch.Tensor] = None) -> None:
+        """Réserve, hors de toute capture, le tampon où ``_garder_hidden``
+        recopie l'état caché. Le tampon ne bouge plus ensuite.
+
+        Il a été alloué à la volée, par ``clone()``, à la forme du pas courant :
+        capturé dans un graphe de vérification (5 lignes), puis réalloué par le
+        pas suivant (1 ligne), il laissait au graphe l'adresse d'un tenseur
+        rendu au pool — le rejeu écrivait dans une page morte (``memcpy32_post``,
+        Warp MMU Fault, reproduit sur Qwen3.8-27B le 5/09/2026), et le brouillon
+        MTP lisait entre-temps un état périmé."""
+        ref = h if h is not None else self._mtp_hidden
+        if ref is None:
             return
-        b.copy_(h.detach())
+        cap = max(lignes, self.MTP_HIDDEN_LIGNES)
+        b = self._mtp_hidden
+        if (b is not None and b.shape[0] >= cap and b.shape[1:] == ref.shape[1:]
+                and b.dtype == ref.dtype and b.device == ref.device):
+            return
+        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("tampon MTP réservé pendant une capture de graphe : "
+                               "appeler reserver_hidden() avant la capture")
+        self._mtp_hidden = torch.zeros((cap,) + tuple(ref.shape[1:]),
+                                       dtype=ref.dtype, device=ref.device)
+
+    def _garder_hidden(self, h: torch.Tensor) -> None:
+        """Recopie l'état caché normalisé dans les ``n`` premières lignes du
+        tampon réservé. Une copie, et non une référence : sous graphe CUDA le
+        tenseur source est réécrit à chaque rejeu, et une affectation Python ne
+        serait jouée qu'à la capture. Le nombre de lignes valides est posé par
+        le moteur (``_mtp_hidden_n``), lui aussi hors graphe."""
+        h = h.detach()
+        n = h.shape[0]
+        b = self._mtp_hidden
+        if b is None or b.shape[0] < n or b.shape[1:] != h.shape[1:] \
+                or b.dtype != h.dtype or b.device != h.device:
+            self.reserver_hidden(n, h)
+            b = self._mtp_hidden
+        b[:n].copy_(h)
+        self._mtp_hidden_n = n
 
     def _res_differe(self) -> bool:
         """Le chemin à résidu différé n'est pris que si toutes les couches

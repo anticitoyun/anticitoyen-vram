@@ -451,7 +451,10 @@ class MTPProposer:
         h = getattr(self.model, "_mtp_hidden", None)
         if h is None or h.numel() == 0:
             return None
-        h = h.reshape(-1, h.shape[-1])
+        # Le tampon est réservé plus large que le pas : seules les ``n``
+        # premières lignes datent de ce pas (``n`` posé par le moteur).
+        n = getattr(self.model, "_mtp_hidden_n", 0) or h.shape[0]
+        h = h[:n].reshape(-1, h.shape[-1])
         i = min(self._ligne, h.shape[0] - 1)
         return h[i:i + 1]
 

@@ -564,6 +564,7 @@ class Engine:
         if logits is None:
             logits = self.model(batch)
             voie = "eager"
+        self.model._mtp_hidden_n = len(decodable)     # un rejeu ne pose rien en Python
         t2 = time.perf_counter()
         self.stats.decode_tokens += len(decodable)
         outs = self._emit(logits, decodable)
@@ -627,6 +628,7 @@ class Engine:
             if hyb:
                 return self._plain_decode(decodable)
             flat = self.model(batch, logits_positions=batch.all_token_indices())
+        self.model._mtp_hidden_n = int(flat.shape[0])  # un rejeu ne pose rien en Python
 
         outputs: list[GenerationOutput] = []
         cursor = 0
@@ -807,11 +809,11 @@ class Engine:
         while L <= min(max_len, self.max_model_len - 4):
             # longueur choisie pour que prefill + 2 jetons restent dans le
             # godet de L/16 blocs (puissance de deux)
-            ids = [1] * (L - 2)
-            for _ in self.generate(ids, SamplingParams(max_tokens=2,
-                                                       temperature=0.0)):
+            for _ in self.generate([1] * (L - 2), SamplingParams(max_tokens=2,
+                                                                 temperature=0.0)):
                 pass
-            if self.est_hybride and self.speculator is not None:
+            if (self.est_hybride and self.speculator is not None
+                    and os.environ.get("ACVRAM_WARM_SPEC", "1") != "0"):
                 # motif répété : le proposeur n-gramme spécule dès le
                 # premier pas, d'où la capture du graphe de forme k+1
                 ids = ([5, 6, 7, 8] * (L // 4))[:L - 2]

@@ -176,6 +176,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
 
     layers: list[DecoderLayer] = []
     caches: dict[int, PagedKVCache] = {}
+    _borner_kv_par_la_vram(plan, manifest, dev)
     kv_blocks = _kv_blocks_per_device(plan, spec, max_model_len)
 
     for lp in plan.layers:
@@ -761,6 +762,50 @@ def _tete_liee(embed: torch.Tensor) -> Any:
         print(f"[acvram] tête liée laissée en bf16 ({type(exc).__name__}: {exc})",
               file=sys.stderr, flush=True)
     return plein
+
+
+# Ce que la carte doit garder hors poids et hors KV : contexte CUDA, activations
+# du prefill, graphes capturés, tampons de spéculation. Mesuré sur la 5090 : la
+# capture des graphes échoue dès que moins de ~1 Gio reste libre.
+_KV_MARGE_MIN = 1536 * 2**20
+_KV_MARGE_PART = 0.05
+
+
+def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev) -> None:
+    """Borne le budget KV de chaque GPU par ce qu'il a réellement de libre.
+
+    Le budget du manifeste vient du planificateur, qui raisonne sur des tailles
+    nominales et une capacité de plaque signalétique. Sur la carte, ce sont les
+    poids réels qui comptent, plus tout ce que le plan ne voit pas. Résultat
+    observé avant ce garde-fou : 50 Mio libres après le chargement d'un
+    35B-A3B, capture des graphes CUDA impossible, décodage dégradé. Ici, le
+    budget est ramené à ``libre − poids réels − marge`` quand il le dépasse.
+    """
+    if not torch.cuda.is_available() or not plan.kv_budget:
+        return
+    attn, mlp, embed, head = _octets_reels(manifest)
+    for t in plan.tiers:
+        if t.kind != "gpu" or t.name not in plan.kv_budget:
+            continue
+        try:
+            d = dev(t.name)
+            libre, capacite = torch.cuda.mem_get_info(d)
+        except Exception:                       # noqa: BLE001
+            continue
+        poids = (embed if plan.embed_device == t.name else 0) \
+            + (head if plan.lm_head_device == t.name else 0)
+        for l in plan.layers:
+            poids += attn.get(l.index, l.attn_bytes) if l.attn_storage == t.name else 0
+            poids += mlp.get(l.index, l.mlp_bytes) if l.mlp_storage == t.name else 0
+        marge = max(_KV_MARGE_MIN, int(_KV_MARGE_PART * capacite))
+        borne = libre - poids - marge
+        budget = int(plan.kv_budget[t.name])
+        if borne < budget:
+            plan.kv_budget[t.name] = max(0, borne)
+            print(f"[acvram] budget KV de {t.name} borné par la VRAM libre : "
+                  f"{budget / 2**30:.2f} → {max(0, borne) / 2**30:.2f} Gio "
+                  f"(libre {libre / 2**30:.1f}, poids {poids / 2**30:.1f}, "
+                  f"marge {marge / 2**30:.1f})", file=sys.stderr)
 
 
 def _kv_blocks_per_device(plan: Plan, spec: ModelSpec,

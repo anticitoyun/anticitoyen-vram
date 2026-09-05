@@ -15,6 +15,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Optional
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -305,6 +306,10 @@ class RotaryEmbedding(nn.Module):
         self._ensure(max_pos, device, self._dtype)
         c32 = getattr(self, "_cos32", None)
         if c32 is None or c32.shape[0] != self._cos.shape[0] or c32.device != device:
+            if os.environ.get("ACVRAM_TRACE_PTRS"):
+                print(f"[rope32] (ré)allocation des tables fp32 : {None if c32 is None else tuple(c32.shape)}"
+                      f" -> {tuple(self._cos.shape)} (max_pos demandé {max_pos}), pendant une capture : "
+                      f"{torch.cuda.is_current_stream_capturing()}", flush=True)
             self._cos32 = self._cos.to(torch.float32).contiguous()
             self._sin32 = self._sin.to(torch.float32).contiguous()
         return self._cos32, self._sin32
