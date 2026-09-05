@@ -1456,3 +1456,38 @@ Reste, par ordre de poids : les hybrides à experts (GLM-4.7 à −45 %, MLA plu
 MoE), les MoE ordinaires (−15 %), les denses (−12 %) — et un modèle qui
 déborde vraiment en mémoire vive, Qwen3-Coder-Next à 10 t/s contre 152, où
 c'est le chemin d'exécution hôte qu'il faudra revoir, pas le placement.
+
+## 5 septembre 2026, nuit — le godet MLA : cinq modèles, +7 % (v0.4.61)
+
+Gisement suivant du comparatif : les hybrides à experts, GLM-4.7 en tête à
+−45 %. Le diagnostic écarte d'emblée les causes de la veille — comptage juste
+(29,9 G réels contre 29,9 comptés), plan sain, experts tous en NVFP4, piles
+construites sur les 46 couches. Le profil différentiel (20 puis 60 jetons, la
+différence isole le décodage) donne 10,9 ms de GPU par jeton, dont **2,6 ms
+pour `mla_scores` et `mla_reduce`** — premier poste après les GEMV.
+
+L'attention MLA balaie tout le godet de cache latent, pas seulement les
+positions écrites. À godet fixe de 1024, une séquence de 264 jetons en payait
+quatre fois trop. Un godet fixe et fin coûterait à l'inverse un graphe par
+palier : 256 pour un contexte de 32 768, bien au-delà des seize qu'on capture.
+
+Des **paliers doublants** depuis 128 tiennent les deux bouts — une courte
+séquence ne lit que ce qu'il lui faut, le contexte entier ne demande que neuf
+paliers :
+
+| modèle | godet fixe | paliers | gain |
+|---|---|---|---|
+| GLM-4.7-Flash-Uncensored | 90,8 t/s | 98,4 | +8,4 % |
+| GLM-4.7-Flash | 90,6 | 97,9 | +8,1 % |
+| GLM-4.7-Grande-42B | 64,9 | 69,6 | +7,2 % |
+| DeepSeek-Coder-V2-Lite | 163,2 | 174,3 | +6,8 % |
+| Kimi-Linear-35B | 187,3 | 192,1 | +2,6 % |
+
+Sur une réponse de mille jetons, GLM tient 80,9 t/s avec dix godets capturés :
+les paliers suivent sans faire exploser le nombre de graphes.
+`ACVRAM_MLA_BUCKET` règle le plancher.
+
+Le profil désigne le chantier suivant, plus lourd : **environ 1600 lancements
+de noyaux par jeton** — 330 GEMV et 939 opérations élémentaires — au point
+qu'un seul `cudaGraphLaunch` coûte 2 ms. Le chemin MLA enchaîne trop
+d'opérations PyTorch non fusionnées.
