@@ -123,6 +123,10 @@ class NVFP4Tensor:
     global_scale: torch.Tensor
     shape: tuple[int, ...]
     padded_in: int
+    # Échelle globale par ligne de sortie, posée seulement sur un tenseur
+    # empilé (q, k et v en un) : chaque segment garde la sienne, sans le
+    # réarrondi qu'imposerait une échelle commune.
+    global_scale_rows: Optional[torch.Tensor] = None
 
     format = "nvfp4"
 

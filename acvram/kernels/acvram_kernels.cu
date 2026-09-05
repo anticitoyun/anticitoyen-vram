@@ -255,14 +255,20 @@ template <int ROWS, int NV, typename XT, typename YT>
 __global__ void nvfp4_gemv_kernel(
     const unsigned char *__restrict__ qw,
     const unsigned char *__restrict__ bscale,
-    const float gscale,
+    const float gscale_unique,
     const XT *__restrict__ x,                 // [N, K]
     YT *__restrict__ y,                       // [N, M]
-    int M, int K, int N, int k_splits) {
+    int M, int K, int N, int k_splits,
+    // Échelle globale par ligne de sortie, ou nullptr. Sert aux projections
+    // empilées : q, k et v partagent leur entrée mais pas leur échelle
+    // globale, et trois GEMV coûtent trois fois la latence d'une seule. Les
+    // segments étant alignés sur ROWS, une lecture par bloc suffit.
+    const float *__restrict__ gscale_rows) {
     extern __shared__ float smem[];
     const int nwarps = (blockDim.x + WARP - 1) / WARP;
     const int row0 = blockIdx.x * ROWS;
     if (row0 >= M) return;
+    const float gscale = gscale_rows ? gscale_rows[row0] : gscale_unique;
     const int nloads = K / WEIGHTS_PER_LOAD;
     const int split = blockIdx.y;
     const long half_k = K >> 1;
@@ -990,7 +996,8 @@ torch::Tensor nvfp4_dequant(torch::Tensor qweight, torch::Tensor block_scale,
 }
 
 torch::Tensor nvfp4_gemv(torch::Tensor qweight, torch::Tensor block_scale,
-                         double global_scale, torch::Tensor x, int64_t K) {
+                         double global_scale, torch::Tensor x, int64_t K,
+                         c10::optional<torch::Tensor> global_scale_rows) {
     CHECK_CUDA(qweight); CHECK_CUDA(x);
     ACVRAM_DEVICE_GUARD(qweight);
     CHECK_CONTIG(qweight); CHECK_CONTIG(block_scale);
@@ -1007,6 +1014,14 @@ torch::Tensor nvfp4_gemv(torch::Tensor qweight, torch::Tensor block_scale,
     const int N = xc.size(0);
     auto out = splits == 1 ? torch::empty({N, M}, xc.options())
                            : torch::zeros({N, M}, xc.options());
+    const float *gs_rows = nullptr;
+    torch::Tensor gsr_c;
+    if (global_scale_rows.has_value() && global_scale_rows->defined()) {
+        gsr_c = global_scale_rows->contiguous();
+        TORCH_CHECK(gsr_c.scalar_type() == torch::kFloat && gsr_c.numel() == M,
+                    "global_scale_rows doit etre un float32 de M elements");
+        gs_rows = gsr_c.data_ptr<float>();
+    }
     auto stream = at::cuda::getCurrentCUDAStream();
     // Huit lignes par bloc ont ete essayees pour reutiliser davantage la
     // tranche d'activation : la pression de registres l'emporte, mesure plus
@@ -1017,7 +1032,7 @@ torch::Tensor nvfp4_gemv(torch::Tensor qweight, torch::Tensor block_scale,
         <<<grid, threads, shm, stream>>>( \
             qweight.data_ptr<unsigned char>(), \
             block_scale.data_ptr<unsigned char>(), (float)global_scale, \
-            PX, PY, M, (int)K, n_, SP)
+            PX, PY, M, (int)K, n_, SP, gs_rows)
     #define F4G_N(XT, YT, PX, PY, SP) do { \
         switch (n_) { \
         case 1: F4G(1, XT, YT, PX, PY, SP); break; \
@@ -2264,7 +2279,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("qweight"), py::arg("block_scale"), py::arg("global_scale"),
           py::arg("K"), py::arg("dtype"), py::arg("gscale_rows") = py::none(),
           py::arg("rows_per_group") = 1);
-    m.def("nvfp4_gemv", &nvfp4_gemv, "NVFP4 : dequantification + produit fusionnes");
+    m.def("nvfp4_gemv", &nvfp4_gemv, "NVFP4 : dequantification + produit fusionnes",
+          py::arg("qweight"), py::arg("block_scale"), py::arg("global_scale"),
+          py::arg("x"), py::arg("K"), py::arg("global_scale_rows") = c10::nullopt);
     m.def("int4_dequant", &int4_dequant, "INT4 affine par groupes -> matrice dense");
     m.def("int4_gemv", &int4_gemv, "INT4 : dequantification + produit fusionnes");
     m.def("int8_dequant", &int8_dequant, "INT8 affine par groupes -> matrice dense");

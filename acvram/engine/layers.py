@@ -561,6 +561,61 @@ def repeat_kv_batched(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     return x.unsqueeze(3).expand(b, s, h, n_rep, d).reshape(b, s, h * n_rep, d)
 
 
+# Hauteur de bloc du noyau nvfp4_gemv (ROWS_PER_BLOCK dans le .cu).
+ROWS_PAR_BLOC = 4
+
+
+def stack_nvfp4_linears(lins: list) -> Optional["QuantLinear"]:
+    """Empile des QuantLinear NVFP4 de même entrée en un seul.
+
+    Trois projections q, k et v lisent la même activation mais lancent trois
+    GEMV, chacune payant sa latence : mesuré sur Qwen3-Coder-30B, 28,6 µs à
+    trois contre 9,6 une fois empilées, soit 0,9 ms par jeton sur 48 couches.
+    Leurs échelles globales diffèrent et les ramener à une seule les ferait
+    passer par un arrondi e4m3 à 6 % — le noyau accepte donc une échelle par
+    ligne de sortie, que chaque segment garde intacte.
+    """
+    import os
+    if os.environ.get("ACVRAM_FUSION_NVFP4") == "0":     # témoin de mesure
+        return None
+    from ..quant.nvfp4 import NVFP4Tensor
+    ts = [getattr(l, "qweight", None) for l in lins]
+    if not all(isinstance(t, NVFP4Tensor) for t in ts):
+        return None
+    if len({(t.padded_in, t.qweight.shape[1], t.block_scale.shape[1]) for t in ts}) != 1:
+        return None
+    if any(l.bias is not None or l.scaler is not None or l.streamed is not None
+           for l in lins):
+        return None
+    if any(getattr(t, "global_scale_rows", None) is not None for t in ts):
+        return None                       # déjà empilé : on n'empile pas deux fois
+    # Le noyau lit l'échelle de la première ligne de chaque bloc : les segments
+    # doivent commencer sur un multiple de la hauteur de bloc.
+    if any(t.qweight.shape[0] % ROWS_PAR_BLOC for t in ts[:-1]):
+        return None
+    lignes = torch.cat([
+        torch.full((t.qweight.shape[0],), t.global_scale_float(),
+                   dtype=torch.float32, device=t.qweight.device) for t in ts])
+    fus = NVFP4Tensor(
+        torch.cat([t.qweight for t in ts]).contiguous(),
+        torch.cat([t.block_scale for t in ts]).contiguous(),
+        ts[0].global_scale,
+        (sum(t.shape[0] for t in ts), ts[0].shape[1]),
+        ts[0].padded_in,
+        global_scale_rows=lignes.contiguous())
+    # Les originaux deviennent des vues de la pile : le prefill continue de les
+    # appeler séparément, mais plus un octet de VRAM n'est dupliqué — sur un
+    # dense de 27 milliards de paramètres, gate et up recopiés coûteraient
+    # plusieurs gibioctets pour rien.
+    d = 0
+    for l, t in zip(lins, ts):
+        n = t.qweight.shape[0]
+        l.qweight = NVFP4Tensor(fus.qweight[d:d + n], fus.block_scale[d:d + n],
+                                t.global_scale, t.shape, t.padded_in)
+        d += n
+    return QuantLinear(fus)
+
+
 def stack_int8_linears(lins: list) -> Optional["QuantLinear"]:
     """Empile des QuantLinear INT8 de même entrée en un seul (lignes
     concaténées) : une GEMV au lieu de n au décodage. None si inapplicable."""

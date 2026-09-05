@@ -1510,3 +1510,72 @@ paramètres ne tiendra sur cette carte qu'en dessous de trois bits par poids ;
 c'est un format à écrire, pas un chemin à corriger. En attendant, le
 comparatif doit se lire ainsi : sur ce modèle, la comparaison oppose deux
 densités autant que deux moteurs.
+
+## 5 septembre 2026, nuit — une GEMV au lieu de trois : les projections NVFP4 empilées (v0.4.62)
+
+Le profil différentiel de `Qwen3-Coder-30B` accusait le lancement des noyaux
+plutôt que le calcul : 5,25 ms de GPU par jeton, dont 1,41 ms de `nvfp4_gemv`
+répartis sur **193 appels par jeton**, soit quatre par couche. Trois d'entre
+eux sont q, k et v, qui lisent tous la même activation. Le chemin INT8 les
+empilait depuis longtemps ; le chemin NVFP4, non.
+
+Micro-banc, une couche de 48 :
+
+| | temps |
+|---|---|
+| trois GEMV séparées | 28,6 µs |
+| une GEMV empilée | 9,6 µs |
+
+Soit 0,91 ms par jeton sur 48 couches, 17 % du temps GPU.
+
+### L'obstacle : trois échelles globales, pas une
+
+Un tenseur NVFP4 porte une échelle scalaire par-dessus ses échelles de bloc.
+Celles de q, k et v diffèrent d'un facteur deux (1,29e-4, 5,75e-5, 7,78e-5) et
+les ramener à une valeur commune ferait passer les deux autres par un arrondi
+e4m3 — 6 % d'erreur relative, pour une optimisation censée ne rien changer.
+
+Le noyau accepte donc désormais une **échelle par ligne de sortie**
+(`global_scale_rows`), lue une fois par bloc de `ROWS_PER_BLOCK = 4` lignes ;
+l'empilement refuse tout segment qui ne commence pas sur un multiple de cette
+hauteur, faute de quoi une ligne emprunterait l'échelle de sa voisine. Chaque
+segment garde ainsi exactement les bits qu'il avait : la sortie fusionnée est
+**identique à la concaténation des trois séparées**, écart maximal 0,000e+00,
+et le texte généré ne change pas d'un caractère.
+
+### Pas un octet de plus en mémoire
+
+Le prefill continue d'appeler les projections une à une. Les conserver telles
+quelles à côté de la pile doublerait leurs poids ; sur un dense de 27 milliards
+de paramètres, gate et up recopiés coûteraient plusieurs gibioctets. Après
+l'empilement, chaque original devient donc une **vue** de la pile — un découpage
+sur la dimension de sortie, contigu par construction, sans copie.
+
+### Ce que ça donne
+
+| modèle | sans fusion | avec fusion | écart | VRAM |
+|---|---|---|---|---|
+| Qwen3-Coder-30B-A3B (MoE, 3 G actifs) | 185,3 t/s | 200,9 t/s | **+8,4 %** | 21 577 → 21 657 MiB |
+| gemma-4-26B-A4B (MoE, 4 G actifs) | 98,9 t/s | 100,3 t/s | +1,4 % | 18 819 → 19 003 MiB |
+| Qwen3.8-27B (dense) | 38,5 t/s | 39,5 t/s | +2,6 % | 18 393 → 18 377 MiB |
+
+Le gain va d'abord aux modèles dont le décodage est borné par le lancement des
+noyaux, c'est-à-dire ceux qui lisent peu de poids par jeton : `Coder-30B` en
+active trois milliards et gagne 8,4 %, le dense de 27 milliards reste borné par
+la bande passante mémoire et n'en tire que 2,6 %. Les 80 à 184 MiB d'écart de
+mémoire sont le cache de l'allocateur après les concaténations, pas des poids
+dupliqués — l'empreinte réelle ne bouge pas, et le dense en rend même 16.
+
+### Une fusion qui n'atteignait que le tiers de sa cible
+
+La première mesure ne donnait rien sur deux modèles sur trois. Cause : le
+chargeur ne fusionnait gate et up que si le MLP était en INT8 —
+`m.gate_proj.qweight.__class__.__name__ == "INT8Tensor"` — condition écrite du
+temps où seul l'INT8 savait s'empiler, et jamais relue. Seule l'attention
+profitait donc du nouveau chemin. Les experts d'un mélange en restent exclus,
+eux, et pour une bonne raison : ils passent par le chemin groupé, qui empile
+déjà les 128 d'un coup.
+
+Sept tests fixent l'invariant, dont l'égalité au bit près de la GEMV empilée
+sur GPU (`tests/test_fusion_nvfp4.py`), et `ACVRAM_FUSION_NVFP4=0` rend le
+chemin d'avant pour toute mesure ultérieure.

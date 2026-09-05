@@ -323,10 +323,12 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
         # 32 — jamais vu sur un vrai modele — prend le chemin dequantifie.
         if t.padded_in != xf.shape[-1]:
             xf = torch.nn.functional.pad(xf, (0, t.padded_in - xf.shape[-1]))
+        gsr = getattr(t, "global_scale_rows", None)
         y = ext.nvfp4_gemv(
             t.qweight.contiguous(),
             t.block_scale.view(torch.uint8).contiguous(),
-            t.global_scale_float(), xf.contiguous(), t.padded_in)
+            1.0 if gsr is not None else t.global_scale_float(),
+            xf.contiguous(), t.padded_in, gsr)
         return y.to(x.dtype).reshape(*orig_shape[:-1], t.shape[0])
 
     # Prefill. Par défaut, W4A8 : activation FP8 (≈2 % d'erreur contre ≈9,5 %

@@ -598,11 +598,16 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 head_dim=spec.head_dim, num_blocks=n_blocks,
                 dtype=kv_fmt, device=str(d)))
 
-    # projections INT8 empilées : gate/up des MLP (denses, experts partagés)
-    # et q/k/v de l'attention — une GEMV au lieu de deux ou trois par couche
+    # Projections empilées : gate/up des MLP (denses, experts partagés) et
+    # q/k/v de l'attention — une GEMV au lieu de deux ou trois par couche.
+    # Les experts d'un MoE en sont exclus : ils passent par le chemin groupé,
+    # qui empile déjà les 128 experts, et les fusionner un à un doublerait
+    # leurs poids sans rien accélérer.
     for layer in layers:
+        experts = {id(e) for m in layer.modules() if isinstance(m, MoEBlock)
+                   for e in m.experts}
         for m in layer.modules():
-            if isinstance(m, MLP) and m.gate_proj.qweight.__class__.__name__ == "INT8Tensor":
+            if isinstance(m, MLP) and id(m) not in experts:
                 m.fuse()
             elif isinstance(m, Attention):
                 m.fuse()
