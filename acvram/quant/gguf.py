@@ -607,11 +607,17 @@ class GGUFFile:
         ttypes = self.kv.get("tokenizer.ggml.token_type") or []
         if model == "gpt2" and tokens and merges:
             vocab = {t: i for i, t in enumerate(tokens)}
-            added = [{"id": i, "content": t, "special": True,
+            # Types GGUF : 3 = CONTROL, 4 = USER_DEFINED. Les deux doivent
+            # rester insécables. Ne garder que le 3, comme ici jusqu'à la
+            # v0.4.63, découpait « <think> » de GLM-4.7 en « < », « think »,
+            # « > » : le modèle recevait un préfixe de conversation corrompu et
+            # répondait par une cascade de balises vides. Le chemin
+            # SentencePiece prenait déjà les deux types.
+            added = [{"id": i, "content": t, "special": ttypes[i] == 3,
                       "single_word": False, "lstrip": False,
                       "rstrip": False, "normalized": False}
                      for i, t in enumerate(tokens)
-                     if i < len(ttypes) and ttypes[i] == 3]
+                     if i < len(ttypes) and ttypes[i] in (3, 4)]
             tok = {
                 "version": "1.0",
                 "added_tokens": added,

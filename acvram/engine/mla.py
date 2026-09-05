@@ -15,10 +15,10 @@ from __future__ import annotations
 
 from typing import Optional
 
+import os
+
 import torch
 import torch.nn as nn
-
-import os
 
 __all__ = ["MLAttention", "MLA_BUCKET", "godet_mla"]
 
@@ -104,14 +104,29 @@ class MLAttention(nn.Module):
         prem = self.q_proj(x) if self.q_a_proj is None else self.q_a_proj(x)
         return prem, self.kv_a_proj(x)
 
+    def _norme(self, t: torch.Tensor, poids: torch.Tensor) -> torch.Tensor:
+        """RMSNorm : un lancement quand le noyau est là, sept sinon.
+
+        La formulation PyTorch — conversion, carré, moyenne, racine inverse,
+        deux multiplications, reconversion — coûte sept noyaux pour une poignée
+        de milliers d'éléments. Sur 47 couches et deux normalisations par
+        couche, c'est plus de la moitié des noyaux élémentaires d'un jeton.
+        """
+        ext = _extension() if t.is_cuda else None
+        if os.environ.get("ACVRAM_MLA_NORME_NOYAU") == "0":   # témoin de mesure
+            ext = None
+        if (ext is not None and hasattr(ext, "rmsnorm_bf16")
+                and t.dtype == torch.bfloat16 and poids.dtype == torch.bfloat16):
+            return ext.rmsnorm_bf16(t, poids, self.eps)[0]
+        t32 = t.to(torch.float32)
+        return (t32 * torch.rsqrt(t32.pow(2).mean(-1, keepdim=True) + self.eps)
+                ).to(t.dtype) * poids
+
     def _q_depuis(self, prem: torch.Tensor) -> torch.Tensor:
         """De la sortie de la première projection au q complet."""
         if self.q_a_proj is None:
             return prem
-        a32 = prem.to(torch.float32)
-        a = (a32 * torch.rsqrt(a32.pow(2).mean(-1, keepdim=True) + self.eps)
-             ).to(prem.dtype) * self.q_a_norm
-        return self.q_b_proj(a)
+        return self.q_b_proj(self._norme(prem, self.q_a_norm))
 
     def _q(self, x: torch.Tensor) -> torch.Tensor:
         return self._q_depuis(self._proj_entree(x)[0])
@@ -134,7 +149,11 @@ class MLAttention(nn.Module):
             y0 = x0 * c - x1 * s
             y1 = x0 * s + x1 * c
             return torch.stack((y0, y1), dim=-1).reshape(x.shape)
-        return tourner(q_pe), tourner(k_pe.unsqueeze(1)).squeeze(1)
+        # q et k tournent ensemble : la rotation est point à point et ne
+        # dépend pas du nombre de têtes, si bien que les traiter d'un bloc
+        # rend exactement les mêmes bits pour moitié moins de lancements.
+        ensemble = tourner(torch.cat([q_pe, k_pe.unsqueeze(1)], dim=1))
+        return ensemble[:, :-1], ensemble[:, -1]
 
     def forward(self, x: torch.Tensor,
                 cache: Optional[torch.Tensor] = None
@@ -149,9 +168,7 @@ class MLAttention(nn.Module):
             passe0 = 0 if cache is None else cache.shape[0]
             pos = torch.arange(passe0, passe0 + t, device=x.device)
             q_pe, k_pe = self._rope(q_pe, k_pe, pos, passe0 + t + 1)
-        c32 = c.to(torch.float32)
-        c = (c32 * torch.rsqrt(c32.pow(2).mean(-1, keepdim=True) + self.eps)
-             ).to(x.dtype) * self.kv_a_norm
+        c = self._norme(c, self.kv_a_norm)
 
         # q absorbé : [t, nh, rank] = k_b [nh, rank, nope] @ q_nope [t, nh, nope]
         q_abs = torch.einsum('hrn,thn->thr', self.k_b.to(x.dtype), q_nope)
@@ -261,9 +278,7 @@ class MLAttention(nn.Module):
             q_pe, k_pe0 = self._rope(q_pe, k_pe0, st["len"].view(1), bucket + 1)
             kvp = torch.cat([c0, k_pe0], dim=-1)
         c, k_pe = kvp.split([self.rank, self.rope], dim=-1)
-        c32 = c.to(torch.float32)
-        c = (c32 * torch.rsqrt(c32.pow(2).mean(-1, keepdim=True) + self.eps)
-             ).to(x.dtype) * self.kv_a_norm
+        c = self._norme(c, self.kv_a_norm)
         q_abs = torch.einsum('hrn,thn->thr', self.k_b.to(x.dtype), q_nope)
         q_eff = torch.cat([q_abs, q_pe], dim=-1)             # [1, nh, rank+rope]
         k_new = torch.cat([c, k_pe], dim=-1)                 # [1, rank+rope]

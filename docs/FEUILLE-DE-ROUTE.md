@@ -1641,3 +1641,75 @@ Texte identique dans les deux cas. La mesure porte deux fois le même code, à
 Reste, sur ces modèles, l'essentiel du décompte : environ 1 080 noyaux
 élémentaires par jeton, 23 par couche. C'est le prochain gisement, et il ne se
 prendra pas par des empilements mais par des noyaux fusionnés.
+
+## 5 septembre 2026, nuit — un type de jeton oublié, trente-cinq modèles atteints (v0.4.64)
+
+Cherchant à vérifier qu'une optimisation ne changeait pas le texte, on a
+découvert que le texte était déjà faux. `GLM-4.7-Flash` interrogé en
+conversation répondait par une cascade de balises vides — `</arg_value>`, puis
+`<think></think>` jusqu'à la limite de jetons.
+
+Le gabarit rendait bien `[gMASK]<sop><|user|>…<|assistant|><think>`, mais
+l'encodeur en tirait `…, 154828, 27, 26779, 29` : `<`, `think`, `>` en trois
+jetons ordinaires au lieu du 154841 qui existe pourtant dans le vocabulaire.
+
+### La cause
+
+Le GGUF classe ses jetons par type : 3 pour les jetons de contrôle, 4 pour ceux
+que l'auteur du modèle a définis. La conversion ne rendait insécables que les
+premiers :
+
+```python
+if i < len(ttypes) and ttypes[i] == 3
+```
+
+Le chemin SentencePiece, lui, prenait déjà les deux (`in (3, 4)`) — la
+divergence entre les deux chemins était l'indice, et personne ne l'avait vue.
+Sur GLM, `<think>`, `</think>` et les neuf balises d'appel d'outil sont toutes
+de type 4.
+
+### La portée
+
+**Trente-cinq modèles convertis** portaient un vocabulaire incomplet, dont
+`Huihui-Qwen3.6-35B-A3B-abliterated`, l'un des deux que le comparatif du jour
+notait comme muets sous gabarit de conversation. Il répond depuis :
+
+> La capitale de la France est **Paris**. C'est la ville la plus peuplée du
+> pays et son centre politique, culturel et économique.
+
+Tous les modèles Qwen3 du parc perdaient `<tool_call>` et `<tool_response>` :
+la mention « agent-ok » de leurs fiches était optimiste.
+
+`outils/reparer-jetons.py` répare un modèle déjà converti sans toucher un seul
+poids — le GGUF d'origine porte les types, seul le `tokenizer.json` est à
+réécrire, et l'ancien est gardé en `.avant-jetons`.
+
+### Ce qui reste
+
+`GLM-4.7-Flash` va mieux sans être guéri : le préfixe est correct, mais le
+modèle répète `</think>`. C'est un autre défaut, à chercher ailleurs que dans
+le vocabulaire.
+
+## v0.4.64 — la normalisation de l'attention latente passe au noyau
+
+Sept noyaux élémentaires — conversion, carré, moyenne, racine inverse, deux
+multiplications, reconversion — deux fois par couche et quarante-sept couches.
+Le noyau `rmsnorm_bf16`, qui sert déjà toutes les autres normalisations du
+modèle, fait le même calcul en un lancement. Et q comme k tournent désormais
+d'un seul bloc, la rotation étant point à point.
+
+| modèle | v0.4.63 | v0.4.64 |
+|---|---|---|
+| GLM-4.7-Flash-Uncensored-Heretic | 103,4 t/s | 113,4 t/s (+9,7 %) |
+| GLM-4.7-Grande-Heretic-42B | 74,3 t/s | 83,1 t/s (+11,8 %) |
+
+Une honnêteté s'impose sur l'exactitude. Un premier test sur quatre lignes de
+tirage avait conclu à l'égalité au bit près ; sur trente et un millions de
+valeurs, l'écart est de six par million, toujours d'un seul cran de la grille
+bfloat16. Le noyau reproduit fidèlement les arrondis intermédiaires mais somme
+les carrés dans un autre ordre, et sa réduction par échange de warp donne
+parfois un dernier bit différent. Aucune des deux sommes n'est plus vraie que
+l'autre, et c'est déjà le noyau qui sert partout ailleurs. Le test dit
+maintenant ce qui est garanti — un écart borné à un cran sur moins d'un
+dix-millième des valeurs — plutôt qu'une égalité que quatre lignes avaient fait
+croire.
