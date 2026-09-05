@@ -1433,3 +1433,26 @@ La leçon dépasse ce modèle : un planificateur qui devine la taille d'une
 couche se trompera sur toute architecture qui sort du moule, et l'erreur ne se
 voit pas — elle se lit dans un débit trois fois trop bas, six mois plus tard.
 Les formes sont dans les fichiers ; il suffit de les lire.
+
+### Le parc remis d'aplomb
+
+Les sept modèles dont le plan figé était dégradé par l'ancien comptage ont été
+repassés (`scratchpad/reconv-nemotron.py`, un modèle n'est remplacé qu'après
+vérification que son nouveau plan tient sur une carte sans mémoire vive) :
+cinq Nemotron en GGUF, deux en EXL3 — ces derniers ont d'abord été refusés par
+la garde, le temps d'apprendre à lire les treillis d'exllamav3 (v0.4.59).
+
+| modèle | avant | après | le meilleur des autres |
+|---|---|---|---|
+| Nemotron-Lightning Q6_K | 26,4 t/s | **196,4** | llama.cpp 195,4 |
+| Nemotron-Lightning exl3-6bpw | 26,0 | **200,3** | TabbyAPI 170,1 |
+| NVIDIA-Nemotron-3-Nano-30B | — | **200,7** | — |
+
+Plus aucun modèle du parc n'a de plan dégradé. Au tableau du comparatif,
+acvram passe de 34 à **36 modèles gagnés sur 68**, et la famille hybride-MoE
+de onze modèles perdants à neuf, d'un écart médian de −45 % à −31 %.
+
+Reste, par ordre de poids : les hybrides à experts (GLM-4.7 à −45 %, MLA plus
+MoE), les MoE ordinaires (−15 %), les denses (−12 %) — et un modèle qui
+déborde vraiment en mémoire vive, Qwen3-Coder-Next à 10 t/s contre 152, où
+c'est le chemin d'exécution hôte qu'il faudra revoir, pas le placement.
