@@ -304,6 +304,9 @@ def generer(moteur):
                     ev = json.loads(brut)
                 except Exception:
                     continue
+                if ev.get("error"):
+                    e = ev["error"]
+                    raise RuntimeError("serveur : " + str(e.get("message", e) if isinstance(e, dict) else e)[:160])
                 if ev.get("usage"):
                     usage = ev["usage"]
                 for ch in ev.get("choices") or []:
