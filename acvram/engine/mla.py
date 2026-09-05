@@ -83,15 +83,38 @@ class MLAttention(nn.Module):
         self.rank, self.dv = kv_lora_rank, v_dim
         self.scale = (qk_nope + qk_rope) ** -0.5
         self.eps = eps
+        self.q_kv = None            # q_proj et kv_a_proj empilées
+        self.qa_kv = None           # q_a_proj et kv_a_proj empilées (bas rang)
+        self.q_a_taille = 0
+
+    def _proj_entree(self, x: torch.Tensor):
+        """Première projection de q et latent kv : une GEMV quand les deux
+        lisent la même entrée, deux sinon.
+
+        C'est le cas de toutes les variantes DeepSeek-V2 et GLM : ``q_a_proj``
+        et ``kv_a_proj`` partent l'une comme l'autre de l'état caché.
+        """
+        if self.qa_kv is not None:
+            g = self.qa_kv(x)
+            return g[:, :self.q_a_taille], g[:, self.q_a_taille:]
+        if self.q_kv is not None:
+            g = self.q_kv(x)
+            nq = self.nh * (self.nope + self.rope)
+            return g[:, :nq], g[:, nq:]
+        prem = self.q_proj(x) if self.q_a_proj is None else self.q_a_proj(x)
+        return prem, self.kv_a_proj(x)
+
+    def _q_depuis(self, prem: torch.Tensor) -> torch.Tensor:
+        """De la sortie de la première projection au q complet."""
+        if self.q_a_proj is None:
+            return prem
+        a32 = prem.to(torch.float32)
+        a = (a32 * torch.rsqrt(a32.pow(2).mean(-1, keepdim=True) + self.eps)
+             ).to(prem.dtype) * self.q_a_norm
+        return self.q_b_proj(a)
 
     def _q(self, x: torch.Tensor) -> torch.Tensor:
-        if self.q_a_proj is None:
-            return self.q_proj(x)
-        a = self.q_a_proj(x)
-        a32 = a.to(torch.float32)
-        a = (a32 * torch.rsqrt(a32.pow(2).mean(-1, keepdim=True) + self.eps)
-             ).to(x.dtype) * self.q_a_norm
-        return self.q_b_proj(a)
+        return self._q_depuis(self._proj_entree(x)[0])
 
     def _rope(self, q_pe: torch.Tensor, k_pe: torch.Tensor,
               positions: torch.Tensor, max_pos: int):
@@ -118,10 +141,9 @@ class MLAttention(nn.Module):
                 ) -> tuple[torch.Tensor, torch.Tensor]:
         """``x`` vaut [t, hidden] pour UNE séquence ; rend (y, cache latent)."""
         t = x.shape[0]
-        q = self._q(x).reshape(t, self.nh, self.nope + self.rope)
+        prem, kvp = self._proj_entree(x)                      # kvp [t, rank+rope]
+        q = self._q_depuis(prem).reshape(t, self.nh, self.nope + self.rope)
         q_nope, q_pe = q.split([self.nope, self.rope], dim=-1)
-
-        kvp = self.kv_a_proj(x)                               # [t, rank+rope]
         c, k_pe = kvp.split([self.rank, self.rope], dim=-1)
         if self.rope_emb is not None:
             passe0 = 0 if cache is None else cache.shape[0]
@@ -180,11 +202,26 @@ class MLAttention(nn.Module):
         return self.o_proj(y), cache
 
     def fuse_projections(self) -> bool:
-        from .layers import stack_int8_linears
+        """Une GEMV au lieu de deux à l'entrée de l'attention.
+
+        Les modèles à q de bas rang (DeepSeek-V2, GLM-4.x) étaient exclus :
+        seule la paire ``q_proj``/``kv_a_proj`` était traitée, et en INT8
+        seulement. Or sur GLM-4.7-Flash, ``q_a_proj`` [768, 2048] et
+        ``kv_a_proj`` [576, 2048] lisent toutes deux l'état caché — 47 couches
+        qui lançaient chacune une GEMV de trop.
+        """
+        from .layers import stack_int8_linears, stack_nvfp4_linears
+
+        def empiler(lins):
+            return stack_int8_linears(lins) or stack_nvfp4_linears(lins)
+
+        self.q_kv = self.qa_kv = None
         if self.q_a_proj is not None:
-            self.q_kv = None
-            return False
-        self.q_kv = stack_int8_linears([self.q_proj, self.kv_a_proj])
+            self.qa_kv = empiler([self.q_a_proj, self.kv_a_proj])
+            if self.qa_kv is not None:
+                self.q_a_taille = int(self.q_a_proj.qweight.shape[0])
+            return self.qa_kv is not None
+        self.q_kv = empiler([self.q_proj, self.kv_a_proj])
         return self.q_kv is not None
 
     # -- chemin à formes fixes (graphes CUDA) --------------------------------
@@ -216,14 +253,8 @@ class MLAttention(nn.Module):
         """Un jeton, une séquence ; attention sur ``cache[:bucket]`` masquée
         au-delà de ``len`` ; écrit le latent à la ligne ``len`` puis avance."""
         # mêmes formulations que ``forward`` (t = 1), pour arrondir pareil
-        if getattr(self, "q_kv", None) is not None:
-            qkv = self.q_kv(x)
-            nq = self.nh * (self.nope + self.rope)
-            q = qkv[:, :nq].reshape(1, self.nh, self.nope + self.rope)
-            kvp = qkv[:, nq:]
-        else:
-            q = self._q(x).reshape(1, self.nh, self.nope + self.rope)
-            kvp = self.kv_a_proj(x)
+        prem, kvp = self._proj_entree(x)
+        q = self._q_depuis(prem).reshape(1, self.nh, self.nope + self.rope)
         q_nope, q_pe = q.split([self.nope, self.rope], dim=-1)
         if self.rope_emb is not None:
             c0, k_pe0 = kvp.split([self.rank, self.rope], dim=-1)

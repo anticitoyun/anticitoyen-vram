@@ -1610,3 +1610,34 @@ microsecondes de latence chacun, le seul fait de les lancer explique les 9,8 ms
 de GPU. Un `cudaGraphLaunch` à 3,4 ms par jeton dit la même chose autrement :
 son coût suit le nombre de nœuds du graphe. C'est là qu'est le gisement, pas
 dans les transferts.
+
+## 5 septembre 2026, nuit — l'attention latente lançait une GEMV de trop (v0.4.63)
+
+Suite du décompte précédent : sur `GLM-4.7-Flash`, six multiplications par
+couche et 47 couches. L'une d'elles n'avait pas à exister. `q_a_proj`
+[768, 2048] et `kv_a_proj` [576, 2048] lisent toutes deux l'état caché, comme
+dans toutes les variantes DeepSeek-V2 et GLM, et `fuse_projections` les
+écartait explicitement :
+
+```python
+if self.q_a_proj is not None:
+    self.q_kv = None
+    return False
+```
+
+Le code ne savait empiler que la paire `q_proj`/`kv_a_proj` des modèles sans q
+de bas rang, et seulement en INT8. Les deux restrictions tombent : la paire
+empilée est choisie selon l'architecture, et l'empilement passe par l'INT8 puis
+par le NVFP4 de la v0.4.62.
+
+| modèle | avant | après |
+|---|---|---|
+| GLM-4.7-Flash-Uncensored-Heretic | 98,4 t/s | 103,4 t/s (+5,1 %) |
+| GLM-4.7-Grande-Heretic-42B | 71,0 t/s | 74,3 t/s (+4,6 %) |
+
+Texte identique dans les deux cas. La mesure porte deux fois le même code, à
+0,1 % près : le bruit est bien plus petit que l'écart.
+
+Reste, sur ces modèles, l'essentiel du décompte : environ 1 080 noyaux
+élémentaires par jeton, 23 par couche. C'est le prochain gisement, et il ne se
+prendra pas par des empilements mais par des noyaux fusionnés.
