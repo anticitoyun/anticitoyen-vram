@@ -319,9 +319,15 @@ def generer(moteur):
                         n += 1
     if premier is None:
         raise RuntimeError("aucun jeton reçu")
+    morceaux = n
     if usage and usage.get("completion_tokens"):
         n = usage["completion_tokens"]
-    return n, premier - t0, max(dernier - premier, 1e-6), w.moyenne
+    if morceaux < 2 or dernier - premier < 1e-3:
+        # tout est arrivé d'un bloc : pas de flux jeton par jeton, le débit
+        # ne peut se mesurer que sur la durée totale, premier jeton compris
+        raise RuntimeError(f"pas de flux jeton par jeton ({morceaux} morceau(x) "
+                           f"pour {n} jetons)")
+    return n, premier - t0, dernier - premier, w.moyenne
 
 
 def mesurer(moteur):
