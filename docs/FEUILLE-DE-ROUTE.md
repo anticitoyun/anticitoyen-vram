@@ -1491,3 +1491,22 @@ Le profil désigne le chantier suivant, plus lourd : **environ 1600 lancements
 de noyaux par jeton** — 330 GEMV et 939 opérations élémentaires — au point
 qu'un seul `cudaGraphLaunch` coûte 2 ms. Le chemin MLA enchaîne trop
 d'opérations PyTorch non fusionnées.
+
+### Qwen3-Coder-Next : ce n'est pas le chemin, c'est la densité
+
+Le pire écart restant du comparatif — 10 jetons/s contre 152 — n'est pas un
+défaut d'exécution. Les trois stratégies de débordement donnent la même chose
+(défaut 10,4 t/s, calcul sur processeur 9,0, plan figé 9,3) : le mode
+automatique choisissait déjà la meilleure.
+
+Ce qui diffère, c'est le volume. llama.cpp sert un **Q3_K_S de 32,2 Gio**,
+soit 3,25 bits par poids ; notre conversion NVFP4 en fait **43,1 Gio**, soit
+4,64 bits. Sur une carte de 30 Gio utiles, les deux débordent — mais eux de
+deux gigaoctets, nous de treize, ce qui exile seize couches d'experts sur
+quarante-huit.
+
+Aucun réglage ne rattrapera 40 % de bits en plus. Un modèle de 80 milliards de
+paramètres ne tiendra sur cette carte qu'en dessous de trois bits par poids ;
+c'est un format à écrire, pas un chemin à corriger. En attendant, le
+comparatif doit se lire ainsi : sur ce modèle, la comparaison oppose deux
+densités autant que deux moteurs.
