@@ -18,10 +18,32 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-__all__ = ["MLAttention", "MLA_BUCKET"]
+import os
+
+__all__ = ["MLAttention", "MLA_BUCKET", "godet_mla"]
 
 # Godet de longueur du cache latent : partagé avec le chemin des graphes.
-MLA_BUCKET = 1024
+# L'attention MLA balaie tout le godet, pas seulement les positions écrites :
+# à 1024, une séquence de 264 jetons en paie quatre fois trop. Un godet plus
+# fin coûte davantage de graphes capturés (un par palier), mais chaque pas
+# lit moins. Réglable pour mesurer l'arbitrage.
+MLA_BUCKET = int(os.environ.get("ACVRAM_MLA_BUCKET", "128"))
+
+
+def godet_mla(longueur: int) -> int:
+    """Palier de cache latent couvrant ``longueur``, en puissances de deux.
+
+    L'attention MLA balaie tout le godet, pas seulement les positions écrites :
+    à godet fixe de 1024, une séquence de 264 jetons payait quatre fois trop.
+    Un godet fixe et fin coûterait en revanche un graphe par palier — 256
+    paliers pour un contexte de 32 768, bien au-delà de ce qu'on capture. Des
+    paliers doublants tiennent les deux bouts : une courte séquence ne lit que
+    ce qu'il lui faut, et le contexte entier ne demande que neuf paliers.
+    """
+    n = MLA_BUCKET
+    while n < longueur:
+        n *= 2
+    return n
 
 
 def _extension():
@@ -121,7 +143,7 @@ class MLAttention(nn.Module):
             # Décodage : même formulation en godet que ``decode_static`` (le
             # chemin des graphes), pour que les deux arrondissent pareil —
             # une GEMM sur N colonnes n'accumule pas comme sur 1024.
-            bucket = -(-total // MLA_BUCKET) * MLA_BUCKET
+            bucket = godet_mla(total)
             C = torch.zeros(bucket, cache.shape[1], dtype=cache.dtype,
                             device=cache.device)
             C[:total] = cache

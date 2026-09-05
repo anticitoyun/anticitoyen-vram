@@ -40,7 +40,7 @@ from ..memory.kvcache import BLOCK_SIZE, bucket_blocks
 from .layers import QuantLinear
 from .model import DecoderLayerGDN, ForwardBatch, MoEBlock
 
-from .mla import MLA_BUCKET     # un graphe par palier de cache latent
+from .mla import MLA_BUCKET, godet_mla   # un graphe par palier de cache latent
 
 __all__ = ["GraphRunner"]
 
@@ -180,7 +180,7 @@ class GraphRunner:
             if (batch.gdn_store is None or ql > self.max_ql
                     or (b > 1 and ql != 1) or b > self.max_slots):
                 return None                  # spéculation : une séquence
-            lb = -(-max(batch.seq_lens) // MLA_BUCKET) * MLA_BUCKET
+            lb = godet_mla(max(batch.seq_lens))
             self._bind_hybrid(batch, lb)
         key = (b, ql, nblk, lb)
         self._last_key = key
@@ -251,7 +251,7 @@ class GraphRunner:
         for layer in self.hybrid_layers:
             store = batch.gdn_store.setdefault(layer.index, {})
             for slot, sid in enumerate(sids):
-                layer.static_bind(slot, sid, store, self.max_model_len + MLA_BUCKET,
+                layer.static_bind(slot, sid, store, godet_mla(self.max_model_len) + MLA_BUCKET,
                                   m.dtype)
             layer.static_bucket = lb
             if self.max_ql > 1:
@@ -316,7 +316,7 @@ class GraphRunner:
         from .layers import RotaryEmbedding
         for mod in m.modules():
             if isinstance(mod, RotaryEmbedding):
-                mod.reserver(self.max_model_len + MLA_BUCKET + 1, d, m.dtype)
+                mod.reserver(godet_mla(self.max_model_len) + MLA_BUCKET + 1, d, m.dtype)
 
         def step() -> torch.Tensor:
             return m.decode_fixed(entry["x"], entry["positions"],

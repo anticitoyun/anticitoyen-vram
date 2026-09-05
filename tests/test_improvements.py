@@ -667,3 +667,18 @@ def test_formes_exl3_reconstituees():
     assert f["model.layers.1.mlp.experts.3.up_proj.weight"] == [1856, 2688]
     assert f["model.embeddings.weight"] == [131072, 2688]
     assert not any("trellis" in k or "suh" in k for k in f)
+
+
+def test_godet_mla_double():
+    """Des paliers doublants : une courte séquence ne balaie pas 1024 positions,
+    et un contexte de 32 768 ne demande que neuf paliers."""
+    from acvram.engine.mla import godet_mla, MLA_BUCKET
+    assert godet_mla(1) == MLA_BUCKET
+    assert godet_mla(264) == 512 if MLA_BUCKET <= 512 else godet_mla(264) >= 264
+    assert godet_mla(1024) == 1024 and godet_mla(1025) == 2048
+    paliers = set()
+    n = 1
+    while n <= 32768:
+        paliers.add(godet_mla(n)); n *= 2
+    assert len(paliers) <= 10, paliers
+    assert all(godet_mla(v) >= v for v in (1, 63, 100, 5000, 32768))
