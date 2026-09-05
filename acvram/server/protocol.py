@@ -98,6 +98,9 @@ class CompletionRequest(_SamplingFields):
     echo: bool = False
     suffix: Optional[str] = None
     best_of: Optional[int] = None
+    # Même option que côté chat : {"include_usage": true} fait porter le
+    # décompte de jetons par le dernier morceau du flux.
+    stream_options: Optional[dict[str, Any]] = None
 
 
 class ChoiceMessage(BaseModel):

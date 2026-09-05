@@ -444,6 +444,79 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
     return spec
 
 
+def _formes_du_point_de_controle(path: str) -> dict:
+    """Nom et forme de chaque tenseur, sans charger un seul poids.
+
+    Trois sources, par ordre de préférence : le manifeste d'un modèle déjà
+    converti, l'en-tête d'un fichier GGUF, les en-têtes des fragments
+    safetensors d'un dépôt Hugging Face. Tous trois portent les formes en
+    clair, à quelques kilooctets de lecture.
+    """
+    if path.endswith(".json"):
+        return {}
+    manifeste = os.path.join(path, "acvram_manifest.json")
+    if os.path.isfile(manifeste):
+        try:
+            with open(manifeste, "r", encoding="utf-8") as fh:
+                t = json.load(fh)["tensors"]
+            return {n: e["shape"] for n, e in t.items()
+                    if isinstance(e, dict) and e.get("shape")}
+        except Exception:                              # noqa: BLE001
+            return {}
+    if os.path.isfile(path) or not os.path.isdir(path):
+        try:
+            from ..quant.gguf import GGUFFile, is_gguf
+            if not is_gguf(path):
+                return {}
+            g = GGUFFile(path)
+        except Exception:                              # noqa: BLE001
+            return {}
+        # Les noms de llama.cpp (« blk.3.ffn_up_exps.weight ») ne ressemblent pas
+        # à ceux de Hugging Face, et les experts y sont empilés en un tenseur
+        # [E, ...] par projection. On traduit ce qu'il faut pour peser une
+        # couche : sa famille et le nombre de paramètres qu'elle porte.
+        formes: dict = {}
+        for nom, info in g.tensors.items():
+            dims = list(info[0])
+            if not nom.startswith("blk."):
+                continue
+            morceaux = nom.split(".", 2)
+            if len(morceaux) < 3:
+                continue
+            idx, reste = morceaux[1], morceaux[2]
+            if "_exps" in reste:
+                # [E, sortie, entrée] : une entrée par expert, pour que le
+                # compte des experts et leur taille soient tous deux justes
+                e = dims[0] if len(dims) == 3 else 1
+                par_expert = dims[1:] if len(dims) == 3 else dims
+                proj = reste.split(".")[0].replace("ffn_", "").replace("_exps", "")
+                for k in range(int(e)):
+                    formes[f"model.layers.{idx}.mlp.experts.{k}.{proj}_proj.weight"] = par_expert
+            elif reste.startswith("ffn_"):
+                formes[f"model.layers.{idx}.mlp.{reste}"] = dims
+            elif "norm" in reste:
+                formes[f"model.layers.{idx}.{reste}"] = dims
+            else:
+                formes[f"model.layers.{idx}.self_attn.{reste}"] = dims
+        return formes
+    formes: dict = {}
+    try:
+        import struct
+        fragments = sorted(f for f in os.listdir(path) if f.endswith(".safetensors"))
+        for f in fragments:
+            with open(os.path.join(path, f), "rb") as fh:
+                taille = struct.unpack("<Q", fh.read(8))[0]
+                if taille > 200 * 1024 * 1024:         # en-tête aberrant
+                    return {}
+                entete = json.loads(fh.read(taille))
+            for n, e in entete.items():
+                if n != "__metadata__" and isinstance(e, dict) and e.get("shape"):
+                    formes[n] = e["shape"]
+    except Exception:                                  # noqa: BLE001
+        return {}
+    return formes
+
+
 def _affiner_couches(spec: ModelSpec, path: str) -> None:
     """Recompte les paramètres par couche depuis les tenseurs réels du modèle.
 
@@ -461,23 +534,17 @@ def _affiner_couches(spec: ModelSpec, path: str) -> None:
     forme exacte de chaque tenseur : on s'en sert. C'est juste pour toute
     architecture, présente ou à venir, sans rien deviner.
     """
-    manifeste = os.path.join(path, "acvram_manifest.json")
-    if path.endswith(".json") or not os.path.isfile(manifeste):
-        return
-    try:
-        with open(manifeste, "r", encoding="utf-8") as fh:
-            tenseurs = json.load(fh)["tensors"]
-    except Exception:                                  # noqa: BLE001
+    tenseurs = _formes_du_point_de_controle(path)
+    if not tenseurs:
         return
     attn: dict[int, int] = {}
     mlp: dict[int, int] = {}
     norm: dict[int, int] = {}
     partage: dict[int, int] = {}
     experts: dict[int, set] = {}
-    for nom, e in tenseurs.items():
-        if not nom.startswith("model.layers.") or not isinstance(e, dict):
+    for nom, forme in tenseurs.items():
+        if not nom.startswith("model.layers."):
             continue
-        forme = e.get("shape") or []
         n = 1
         for x in forme:
             n *= int(x)

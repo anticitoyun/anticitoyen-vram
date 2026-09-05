@@ -614,3 +614,36 @@ def test_plan_rapatrie_sur_une_carte():
     p2 = plan_deux_cartes(4 * G)
     _rapatrier_sur_une_carte(p2, gros_a, gros_m, 0, 0)
     assert {l.exec_device for l in p2.layers} == {"cuda:0", "cuda:1"}
+
+
+def test_flux_completions_sans_stream_options():
+    """Un flux /v1/completions sans stream_options ne doit pas lever : le champ
+    manquait au schéma et tout appel en streaming tombait en 500 (v0.4.56)."""
+    from acvram.server.protocol import CompletionRequest
+    r = CompletionRequest(model="x", prompt="bonjour", stream=True)
+    assert r.stream_options is None
+    r2 = CompletionRequest(model="x", prompt="bonjour", stream=True,
+                           stream_options={"include_usage": True})
+    assert r2.stream_options["include_usage"] is True
+
+
+def test_formes_lues_dans_les_entetes(tmp_path):
+    """Les formes se lisent dans un manifeste, un en-tête GGUF ou des en-têtes
+    safetensors — sans charger un poids."""
+    import json, struct
+    from acvram.engine.config import _formes_du_point_de_controle
+    # safetensors : deux fragments
+    for i, noms in enumerate((["model.layers.0.self_attn.q_proj.weight"],
+                              ["model.layers.1.mlp.up_proj.weight"])):
+        entete = {n: {"dtype": "BF16", "shape": [8, 4], "data_offsets": [0, 64]} for n in noms}
+        brut = json.dumps(entete).encode()
+        (tmp_path / f"model-0000{i}.safetensors").write_bytes(
+            struct.pack("<Q", len(brut)) + brut + b"\0" * 64)
+    formes = _formes_du_point_de_controle(str(tmp_path))
+    assert formes == {"model.layers.0.self_attn.q_proj.weight": [8, 4],
+                      "model.layers.1.mlp.up_proj.weight": [8, 4]}
+    # un manifeste présent l'emporte
+    (tmp_path / "acvram_manifest.json").write_text(json.dumps(
+        {"tensors": {"model.layers.0.self_attn.q_proj.weight": {"shape": [2, 2]}}}))
+    assert _formes_du_point_de_controle(str(tmp_path)) == {
+        "model.layers.0.self_attn.q_proj.weight": [2, 2]}

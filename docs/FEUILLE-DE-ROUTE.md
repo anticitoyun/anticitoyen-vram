@@ -1378,3 +1378,58 @@ premier doute : il désigne le coupable en un rejeu.
 Le budget KV est par ailleurs borné par la VRAM réellement libre au
 chargement (`_borner_kv_par_la_vram`, marge 1,5 Gio ou 5 %) : le budget du
 manifeste raisonne sur des tailles nominales et laissait parfois 50 Mio.
+
+## 5 septembre 2026, soir — le pire écart du comparatif : 26 → 196 t/s (v0.4.57, v0.4.58)
+
+Le comparatif du jour donnait à acvram 34 modèles gagnés sur 68, mais deux
+effondrements : Nemotron-Lightning-30B à 26 jetons/s contre 195 pour
+llama.cpp. La médiane d'écart valait **+0 % en mono-carte et −84 % en
+multi-cartes** — deux modèles seulement étaient étalés sur les deux GPU, et
+c'étaient deux des trois pires.
+
+### Une seule cause, quatre conséquences
+
+`_build_layer` déduisait la taille d'une couche de la configuration, en
+supposant que toutes se ressemblent : une attention plus un MLP, MoE au-delà
+de `first_k_dense_replace`. Nemotron-H dément cette supposition — il alterne
+23 couches Mamba sans MLP, 23 couches MoE sans attention et 6 couches
+d'attention pure. Le compte annonçait **103 milliards de paramètres pour 31,6
+réels**, sur six modèles du parc. La suite s'enchaîne :
+
+1. le planificateur croit devoir exiler 27 Gio en mémoire vive et prend les
+   deux cartes ;
+2. les 14 dernières couches, attribuées à la 3080 Ti, sont **quantifiées en
+   int4_awq** — sm_86 n'a pas de FP4 ;
+3. sept couches MoE se retrouvent donc avec des experts int4 à échelles AWQ,
+   que `_try_build_stacks` refuse d'empiler ;
+4. elles retombent sur la boucle par expert : 142 indexations booléennes par
+   jeton, chacune une synchronisation. Le profil dit tout — **619 ms de CPU
+   pour 165 ms de GPU**, et la carte à 87 W.
+
+### Les correctifs
+
+Les paramètres se comptent désormais sur les tenseurs réels
+(`_formes_du_point_de_controle` + `_affiner_couches`), lus dans le manifeste
+d'un modèle converti, l'en-tête d'un GGUF (noms de llama.cpp traduits, experts
+empilés dépliés) ou les en-têtes des fragments safetensors : quelques
+kilooctets, aucun poids chargé. Plus aucun écart au-delà de 15 % sur les 110
+modèles du parc, contre neuf avant.
+
+Et au chargement, un plan figé qui étale sur deux cartes un modèle tenant sur
+la première le rapatrie (`_rapatrier_sur_une_carte`, échappement
+`ACVRAM_PLAN_FIGE`) — les modèles déjà convertis y gagnent sans reconversion.
+
+| | avant | rapatriement seul | reconverti |
+|---|---|---|---|
+| débit | 26,4 t/s | 27,1 | **196,4** |
+| puissance | 87 W | 87 | 141 |
+| jetons/kJ | 249 | 310 | **1388** |
+| plan | 38/14 couches, 15 en RAM hôte | 52 sur une carte | 52, tout NVFP4 |
+
+llama.cpp fait 195,4 t/s à 214 W sur le même modèle : à débit égal, acvram
+consomme **34 % de moins** (1388 jetons/kJ contre 913).
+
+La leçon dépasse ce modèle : un planificateur qui devine la taille d'une
+couche se trompera sur toute architecture qui sort du moule, et l'erreur ne se
+voit pas — elle se lit dans un débit trois fois trop bas, six mois plus tard.
+Les formes sont dans les fichiers ; il suffit de les lire.
