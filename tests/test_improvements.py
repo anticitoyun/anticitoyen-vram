@@ -647,3 +647,23 @@ def test_formes_lues_dans_les_entetes(tmp_path):
         {"tensors": {"model.layers.0.self_attn.q_proj.weight": {"shape": [2, 2]}}}))
     assert _formes_du_point_de_controle(str(tmp_path)) == {
         "model.layers.0.self_attn.q_proj.weight": [2, 2]}
+
+
+def test_formes_exl3_reconstituees():
+    """EXL3 range des treillis, pas des matrices : suh donne l'entrée, svh la
+    sortie, et les noms suivent backbone/mixer au lieu de model/self_attn."""
+    from acvram.engine.config import _traduire_exl3
+    brut = {
+        "backbone.layers.0.mixer.q_proj.suh": [2688],
+        "backbone.layers.0.mixer.q_proj.svh": [4096],
+        "backbone.layers.0.mixer.q_proj.trellis": [168, 648, 128],
+        "backbone.layers.1.mixer.experts.3.up_proj.suh": [2688],
+        "backbone.layers.1.mixer.experts.3.up_proj.svh": [1856],
+        "backbone.embeddings.weight": [131072, 2688],
+        "backbone.layers.0.mixer.q_proj.svh_orpheline": [1],
+    }
+    f = _traduire_exl3(brut)
+    assert f["model.layers.0.self_attn.q_proj.weight"] == [4096, 2688]
+    assert f["model.layers.1.mlp.experts.3.up_proj.weight"] == [1856, 2688]
+    assert f["model.embeddings.weight"] == [131072, 2688]
+    assert not any("trellis" in k or "suh" in k for k in f)

@@ -499,7 +499,7 @@ def _formes_du_point_de_controle(path: str) -> dict:
             else:
                 formes[f"model.layers.{idx}.self_attn.{reste}"] = dims
         return formes
-    formes: dict = {}
+    brut: dict = {}
     try:
         import struct
         fragments = sorted(f for f in os.listdir(path) if f.endswith(".safetensors"))
@@ -511,9 +511,36 @@ def _formes_du_point_de_controle(path: str) -> dict:
                 entete = json.loads(fh.read(taille))
             for n, e in entete.items():
                 if n != "__metadata__" and isinstance(e, dict) and e.get("shape"):
-                    formes[n] = e["shape"]
+                    brut[n] = e["shape"]
     except Exception:                                  # noqa: BLE001
         return {}
+    return _traduire_exl3(brut) if any(n.endswith(".suh") for n in brut) else brut
+
+
+def _traduire_exl3(brut: dict) -> dict:
+    """Rend les formes logiques d'un dépôt exllamav3.
+
+    EXL3 ne range pas des matrices mais des treillis : ``…suh`` porte la
+    dimension d'entrée, ``…svh`` la sortie, ``…trellis`` les poids compressés.
+    Le produit des deux premières donne le nombre de paramètres de la
+    projection. Les noms suivent aussi une autre convention — ``backbone``
+    pour ``model``, ``mixer`` pour l'attention ou le bloc à experts.
+    """
+    formes: dict = {}
+    for nom, forme in brut.items():
+        if nom.endswith(".suh"):
+            base = nom[:-4]
+            sortie = brut.get(base + ".svh")
+            if not sortie:
+                continue
+            logique = base.replace("backbone.", "model.")
+            if ".mixer.experts." in logique or ".mixer.shared_experts" in logique:
+                logique = logique.replace(".mixer.", ".mlp.")
+            elif ".mixer." in logique:
+                logique = logique.replace(".mixer.", ".self_attn.")
+            formes[logique + ".weight"] = [int(sortie[0]), int(forme[0])]
+        elif len(forme) == 2 and nom.endswith(".weight"):
+            formes[nom.replace("backbone.", "model.")] = forme
     return formes
 
 
