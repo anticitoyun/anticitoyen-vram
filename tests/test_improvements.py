@@ -533,3 +533,14 @@ def test_tampon_mtp_reserve_et_stable():
     m._garder_hidden(h1)
     assert m._mtp_hidden is buf, "le tampon a été réalloué"
     assert m._mtp_hidden_n == 1 and torch.equal(buf[0], h1[0]) and torch.equal(buf[1], h5[1])
+
+
+def test_logits_tronques_au_vocabulaire():
+    """Les colonnes de rembourrage de la tête ne peuvent pas être échantillonnées."""
+    from types import SimpleNamespace
+    from acvram.engine.model import ACVRamModel
+    faux = SimpleNamespace(spec=SimpleNamespace(vocab_size=10, logits_scaling=1.0,
+                                                final_logit_softcapping=0.0))
+    logits = torch.zeros(3, 12); logits[:, 11] = 99.0        # la colonne fantôme domine
+    out = ACVRamModel._logits_finaux(faux, logits)
+    assert out.shape == (3, 10) and int(out.argmax(-1)[0]) < 10

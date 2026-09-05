@@ -294,7 +294,23 @@ def generer(moteur):
         n = 0
         usage = None
         with urllib.request.urlopen(req, timeout=600) as r:
-            for ligne in r:
+            # Lecture non bufferisée : ``for ligne in r`` attend un bloc de
+            # 8 Kio, et un moteur à 260 t/s y fait tenir 200 jetons d'un coup
+            # — tous horodatés pareil, débit infini. read1 rend ce qui est là.
+            reste = b""
+            def lignes():
+                nonlocal reste
+                while True:
+                    bloc = r.read1(65536)
+                    if not bloc:
+                        if reste:
+                            yield reste
+                        return
+                    reste += bloc
+                    while b"\n" in reste:
+                        l, reste = reste.split(b"\n", 1)
+                        yield l
+            for ligne in lignes():
                 if not ligne.startswith(b"data:"):
                     continue
                 brut = ligne[5:].strip()

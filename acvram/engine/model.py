@@ -1220,6 +1220,14 @@ class ACVRamModel(nn.Module):
         return self._logits_finaux(logits)
 
     def _logits_finaux(self, logits: torch.Tensor) -> torch.Tensor:
+        # La tête de sortie est rembourrée à un multiple de 64 lignes pour ses
+        # noyaux ; ces colonnes n'ont pas de jeton et ne doivent jamais gagner
+        # l'argmax — sur muse-glimmer-30b (202 048 jetons, tête de 202 112)
+        # l'une d'elles sortait vers le 250e jeton et faisait tomber le
+        # plongement suivant sur un indice hors table.
+        v = self.spec.vocab_size
+        if v and logits.shape[-1] > v:
+            logits = logits[..., :v]
         if self.spec.logits_scaling != 1.0:
             logits = logits / self.spec.logits_scaling
         c = self.spec.final_logit_softcapping
