@@ -1007,19 +1007,30 @@ def _replanifier(manifest: dict, spec: "ModelSpec") -> "Plan | None":
     figees = {t["name"] for t in d.get("tiers", []) if t.get("kind") == "gpu"}
     try:
         from ..hardware.detect import detect_rig
-        from ..memory.tiering import PlannerOptions, auto_plan
+        from ..memory.tiering import (PlannerOptions, auto_plan,
+                                      empreinte_planificateur)
         rig = detect_rig()
         presentes = {f"cuda:{g.index}" for g in rig.gpus}
-        if figees == presentes or not presentes:
+        # Deux raisons de replanifier, et il faut les deux : le matériel a
+        # changé, ou le planificateur a changé. Sans la seconde, la prochaine
+        # correction du modèle de coût laisserait tous les manifestes périmés
+        # en silence, et le défaut se redécouvrirait par un modèle vingt fois
+        # trop lent et une soirée perdue.
+        empreinte = d.get("empreinte_planificateur")
+        a_jour = empreinte == empreinte_planificateur()
+        if not presentes or (figees == presentes and a_jour):
             return None
+        motif = ("les cartes ont changé" if figees != presentes
+                 else "le planificateur a changé depuis la conversion")
         ctx = max(2048, int(d.get("kv_max_tokens") or 0) or 8192)
         neuf, _ = auto_plan(spec, rig, PlannerOptions(max_model_len=ctx))
     except Exception as e:                                   # pragma: no cover
         print(f"[acvram] replanification impossible ({e}) ; plan du manifeste "
               f"conservé", flush=True)
         return None
-    print(f"[acvram] le plan du manifeste connaissait {sorted(figees) or 'aucun GPU'}, "
-          f"cette machine a {sorted(presentes)} : plan recalculé", flush=True)
+    print(f"[acvram] plan recalculé : {motif} "
+          f"(manifeste {sorted(figees) or 'aucun GPU'}, machine {sorted(presentes)})",
+          flush=True)
     return neuf
 
 

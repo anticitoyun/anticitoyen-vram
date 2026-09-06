@@ -41,6 +41,28 @@ from ..engine.config import ModelSpec
 from ..hardware.detect import Rig
 from ..quant.formats import bits_per_weight
 
+_EMPREINTE: Optional[str] = None
+
+
+def empreinte_planificateur() -> str:
+    """Identifie la version du planificateur qui a produit un plan.
+
+    Le plan est écrit une fois à la conversion et relu tel quel au chargement.
+    Comparer le matériel ne suffit pas à savoir s'il est périmé : une correction
+    du planificateur change les plans sans qu'aucune carte ne bouge, et les
+    manifestes redeviennent faux en silence. On empreinte donc le code qui
+    décide — placement, modèle de coût, choix de configuration — et le chargeur
+    replanifie dès que l'empreinte diffère.
+    """
+    global _EMPREINTE
+    if _EMPREINTE is None:
+        import hashlib
+        import inspect
+        src = "".join(inspect.getsource(f)
+                      for f in (plan_placement, _estimate, auto_plan))
+        _EMPREINTE = hashlib.sha256(src.encode()).hexdigest()[:16]
+    return _EMPREINTE
+
 __all__ = ["Tier", "LayerPlacement", "Plan", "PlannerOptions", "plan_placement"]
 
 MB = 1024 ** 2
@@ -193,6 +215,7 @@ class Plan:
             "est_bytes_per_token": self.est_bytes_per_token,
             "overflowed": self.overflowed,
             "warnings": self.warnings,
+            "empreinte_planificateur": empreinte_planificateur(),
         }
 
     def device_of_layer(self, i: int) -> str:

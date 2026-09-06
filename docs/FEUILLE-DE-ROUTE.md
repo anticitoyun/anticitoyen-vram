@@ -2088,3 +2088,29 @@ Les deux divergences sont des désaccords sur le nombre de cartes, donc toutes
 deux déjà couvertes par la règle conservatrice. Replanifier systématiquement
 changerait exactement les mêmes deux modèles. Il n'y a donc rien à reconvertir,
 et aucune décision à prendre : la règle en place attrape la totalité des cas.
+
+## v0.4.70 — une empreinte du planificateur dans le manifeste
+
+Le constat « 109 plans figés sur 111 sont déjà ceux d'aujourd'hui » est vrai
+aujourd'hui et cesse de l'être à la prochaine correction du planificateur. La
+garde de la v0.4.68 se déclenche sur un désaccord de **matériel** ; or une
+correction du modèle de coût change les plans sans qu'aucune carte ne bouge.
+La garde ne verrait rien, les 111 manifestes redeviendraient périmés en
+silence, et le défaut se redécouvrirait par le même chemin : un modèle vingt
+fois trop lent et une soirée pour comprendre pourquoi.
+
+`empreinte_planificateur()` hache le code qui décide — `plan_placement`,
+`_estimate`, `auto_plan` — et l'écrit dans le plan du manifeste. Le chargeur
+replanifie si le matériel a changé **ou** si l'empreinte diffère, et dit lequel
+des deux motifs s'applique. Les manifestes existants n'ont pas d'empreinte,
+donc ils replanifient tous : sans risque, puisque 109 d'entre eux rendent le
+même plan, et les 2 autres sont ceux qu'on voulait corriger.
+
+### Protocole de la mesure à venir
+
+La matrice à quatre cases se mesure **en encadrant la série par deux mesures de
+la même case de référence**, au début et à la fin. Une machine qui vient de
+compiler deux ROM met du temps à retrouver des caches et des fréquences
+stables ; sans cet encadrement, une partie de l'écart entre la première et la
+dernière case ne serait que du réchauffement. Si les deux mesures de référence
+diffèrent de plus de quelques pour cent, aucune des quatre cases ne vaut rien.
