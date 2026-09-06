@@ -1872,3 +1872,111 @@ exactement à la vitesse du texte, et c'est bien pour cela qu'un débit seul ne
 prouve rien. La colonne `apercu` du banc existe pour ça. `NEO-CODE` n'a pas
 démarré en quinze minutes pendant cette passe — un convertisseur zombie de la
 reconversion avortée saturait la carte — et sera remesuré après la reconversion.
+
+## 7 septembre 2026, nuit — le planificateur croyait le processeur plus rapide qu'une carte graphique (v0.4.67)
+
+Le comparatif du 6 septembre donnait acvram à parité avec llama.cpp : sur les
+34 modèles mesurés par les deux moteurs, avec au moins 150 jetons, le ratio
+médian est de 0,97 et acvram gagne sur 15. La moyenne ne disait donc rien, et
+tout l'écart restant tenait dans la queue. Un seul modèle en portait
+l'essentiel : Qwen3-Coder-Next en Q3_K_S, 10,3 jetons par seconde contre
+155,1. Facteur quinze.
+
+### Deux fausses pistes, écartées par les données
+
+La première était le format. Q3_K_S est un K-quant, et l'on pouvait croire
+qu'il n'avait pas de chemin de lecture chez nous. Les débits médians par
+famille l'écartent : Q4_K sur dix-huit modèles à 0,89, Q5_K sur neuf à 1,14,
+Q6_K sur deux à 1,14, et un format trois bits, IQ3_M, à 368 jetons par seconde.
+Réserve d'honnêteté : Q3_K n'a qu'un représentant dans tout le parc, et c'est
+le modèle en cause ; format et modèle restent confondus.
+
+La seconde était le débordement, et c'était la mienne. Le converti pèse
+44 gigaoctets pour 33 de source — NVFP4 fait 4,5 bits par poids là où la
+source en fait 3,4, donc convertir ce modèle le fait grossir d'un tiers — et
+le plan exilait 14,11 Gio en mémoire hôte, soit 34 % des poids. Explication
+séduisante, et fausse : un Qwen3.5 de 4 milliards a **42 %** de ses poids en
+RAM hôte et rend 200 jetons par seconde. L'erreur du planificateur, tracée
+contre le taux d'exil, est plate : 3,38× entre 2 et 6 % d'exil, 2,38× entre 6
+et 15 %, 2,41× au-delà de 15 %. La proportion n'explique rien.
+
+### La cause
+
+Trois lignes de `acvram/memory/tiering.py` :
+
+```
+144:  host_compute_gb_s: float = 70.0    # DDR5 streaming reads, measured by bench
+459:  lp.mlp_exec = "cpu" if opts.host_compute_gb_s > link else "gpu"
+521:  seconds += active / (opts.host_compute_gb_s * 1e9)
+```
+
+Soixante-dix gigaoctets par seconde est un débit de lecture séquentielle en
+DDR5. Ligne 521 il chiffre un produit de matrices NVFP4 qui doit déballer de
+l'E2M1 sans instruction native et reconstruire les échelles par bloc : ce
+n'est pas une lecture, c'est du calcul dense. Ce n'est pas une constante mal
+calibrée, c'est la mauvaise grandeur — aucune valeur de débit mémoire ne
+représentera jamais le coût de ce noyau.
+
+Ligne 459, la même constante décide *où l'on calcule*. Soixante-dix étant
+supérieur aux 18,7 du bus, tout perceptron exilé était calculé sur le
+processeur. Sur ce modèle, **77 % du temps prédit tombait dans cette branche**,
+la moins bien estimée de toutes.
+
+Le pire est ailleurs. La sélection de configuration classait les candidats sur
+`est_decode_tok_s`, donc sur cette estimation, et le manifeste porte :
+
+```
+"cuda:1 laisse oisif a dessein : le modele tient sans lui, et ajouter
+ une tranche plus lente au pipeline couterait du debit."
+```
+
+Le modèle ne tenait pas sans elle. Quatorze gibioctets de perceptrons sont
+partis sur le processeur pendant que **les 12 Gio de la 3080 Ti dormaient**.
+Une constante fausse a fait croire le processeur plus rapide qu'une carte
+graphique, et a choisi le plus lent des trois chemins en écrivant que c'était
+délibéré.
+
+### Ce qui change
+
+* `host_gemm_gb_s`, nouvelle option, vaut `None` par défaut : le débit de
+  calcul hôte n'a jamais été mesuré. Tant qu'il ne l'est pas, `host_exec=auto`
+  ne choisit plus le processeur — on ne s'engage pas sur un chemin dont on
+  ignore le coût, alors que le transfert vers le GPU est borné par le bus.
+* La sélection de configuration écarte d'abord l'exil de poids de couche,
+  et n'optimise le débit estimé qu'ensuite. Les plongements, qui vivent
+  toujours en RAM, ne comptent pas comme un exil.
+* L'avertissement sur une carte oisive dit désormais la vérité quand des poids
+  sont en RAM hôte, au lieu d'affirmer que le modèle tient sans elle.
+
+Nouveau plan de Coder-Next : la 3080 Ti prend les couches 35 à 47, 9,5 Gio ;
+les poids en RAM hôte tombent de **14,11 Gio sur 16 couches calculées par le
+processeur à 3,9 Gio sur 4 couches transférées au GPU**. Aucun changement sur
+les modèles qui tenaient déjà : Nemotron-Lightning Q6 et GLM-4.7-Grande
+laissent toujours la seconde carte oisive, avec l'ancien libellé, et n'ont que
+leurs plongements en RAM.
+
+### Ce qui n'est pas mesuré, et doit l'être
+
+Le gain réel. Rien n'a pu être mesuré cette nuit : la machine compilait deux
+ROM à trente-deux fils, charge moyenne 130. Trois mesures attendent :
+
+1. Chronométrer une seule couche processeur, prédite à 0,3 ms. Si elle tient
+   en 0,3 ms, toute cette analyse tombe.
+2. L'occupation réelle du bus pendant le décodage, avant le correctif, pour
+   avoir un point de comparaison — pas la puissance : 70 W sur une carte
+   bridée à 400 dit l'attente, pas la saturation.
+3. Coder-Next rebancé.
+
+### Un défaut plus large, découvert en chemin
+
+Le planificateur n'avait jamais été confronté à une mesure. Sur les 61 modèles
+du parc, sa prédiction est optimiste d'un facteur 2,4 à 3,4. En écart absolu,
+hors Coder-Next : 6,26 ms par jeton en médiane, avec une pente de +2,46 ms par
+doublement de taille. Ce n'est donc ni un plancher fixe pur ni un pur défaut
+de débit ; les deux termes coexistent. Environ 3 ms de plancher aux petites
+tailles, plus une composante croissante qui accuse les 1792 Go/s de plaque
+retenus pour une carte bridée à 400 W et qu'aucun noyau réel n'atteint.
+
+Un biais presque uniforme ne change pas l'ordre des candidats, ce qui explique
+que personne ne l'ait vu. Mais celui-ci n'était pas uniforme : il a basculé un
+arbitrage serré, et c'est exactement ce qui a coûté la 3080 Ti.

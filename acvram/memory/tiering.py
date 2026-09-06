@@ -142,6 +142,12 @@ class PlannerOptions:
     gpus: Optional[str] = None            # "auto" | "all" | "0" | "0,1"
     host_exec: str = "auto"               # auto | stream | cpu
     host_compute_gb_s: float = 70.0       # DDR5 streaming reads, measured by bench
+    # Débit RÉEL d'un produit de matrices déquantifiant sur processeur. Ce
+    # n'est PAS le débit de lecture ci-dessus : un GEMM NVFP4 doit déballer de
+    # l'E2M1 sans instruction native et reconstruire les échelles par bloc,
+    # ce que ne mesure aucune lecture séquentielle. None = jamais mesuré, et
+    # dans ce cas on refuse de choisir le chemin processeur (voir _placer).
+    host_gemm_gb_s: Optional[float] = None
 
 
 @dataclass
@@ -456,7 +462,16 @@ def plan_placement(spec: ModelSpec, rig: Rig,
         else:
             link = next((t.link_bandwidth for t in tiers
                          if t.name == lp.exec_device), 25.0)
-            lp.mlp_exec = "cpu" if opts.host_compute_gb_s > link else "gpu"
+            taux = opts.host_gemm_gb_s
+            if taux is None:
+                # Jamais mesuré. On ne choisit pas un chemin dont on ignore le
+                # coût : le transfert vers le GPU est borné par le bus, donc
+                # prévisible, alors que le calcul hôte ne l'est pas. Comparer
+                # ici un débit de lecture DDR à une largeur de bus revenait à
+                # croire le processeur plus rapide qu'une carte graphique.
+                lp.mlp_exec = "gpu"
+            else:
+                lp.mlp_exec = "cpu" if taux > link else "gpu"
 
     # ---- 6. cache d'experts fréquents -------------------------------------
     # La VRAM qui subsiste devient un cache LRU pour les experts restés en
@@ -518,7 +533,10 @@ def _estimate(spec: ModelSpec, plan: Plan, tiers: list[Tier],
             # Calculé sur place : limité par la bande passante DDR, plus un
             # état caché qui traverse le bus dans chaque sens — quelques
             # kilooctets, donc du bruit.
-            seconds += active / (opts.host_compute_gb_s * 1e9)
+            # Chiffrer ce GEMM avec un débit de lecture était une erreur de
+            # grandeur, pas de calibrage : le coût est dans le déballage.
+            taux = opts.host_gemm_gb_s or opts.host_compute_gb_s
+            seconds += active / (taux * 1e9)
             bytes_read += active
         elif lp.mlp_storage == "cpu":
             from_cache = active * lp.cached_expert_fraction
@@ -642,14 +660,46 @@ def auto_plan(spec: ModelSpec, rig: Rig,
             f"Options : --host-fraction 0.95, un modele plus petit, ou plus de RAM.")
         return p, trials
 
-    best_plan, best_rec = max(candidates, key=lambda pr: pr[1]["decode_tok_s"])
+    # Classement des configurations. Le débit estimé seul ne suffit pas : il
+    # a déjà choisi, sur Qwen3-Coder-Next, de laisser une carte de 12 Gio
+    # oisive pendant que 14 Gio de perceptrons partaient sur le processeur.
+    # Un poids exilé en RAM vive est deux ordres de grandeur sous n'importe
+    # quel GPU, quelle que soit la confiance qu'on accorde à l'estimation ;
+    # on écarte donc d'abord l'exil, on optimise le débit ensuite.
+    # On ne compte que les poids de couches : la table de plongements vit
+    # toujours en RAM par construction, et n'est qu'une collecte d'une ligne
+    # par jeton.
+    def _exil(p) -> int:
+        n = 0
+        for lp in p.layers:
+            if lp.mlp_storage == "cpu":
+                n += lp.mlp_bytes
+            if lp.attn_storage == "cpu":
+                n += lp.attn_bytes
+        return n
+
+    def _rang(pr):
+        p, rec = pr
+        exil = _exil(p) / max(1, p.total_weight_bytes)
+        if exil <= 0.0:
+            return (1, 0.0, rec["decode_tok_s"])
+        return (0, -exil, rec["decode_tok_s"])
+
+    best_plan, best_rec = max(candidates, key=_rang)
     if best_rec["gpus"] < n_gpus:
         idle = [f"cuda:{g.index}" for g in
                 sorted(rig.gpus, key=lambda g: -g.vram_bandwidth_gbps)[best_rec["gpus"]:]]
-        best_plan.warnings.append(
-            f"{', '.join(idle)} laisse oisif a dessein : le modele tient sans lui, "
-            f"et ajouter une tranche plus lente au pipeline couterait du debit. "
-            f"Servez-vous-en pour un second modele, ou forcez avec --gpus all.")
+        exile = _exil(best_plan)
+        if exile > 0:
+            best_plan.warnings.append(
+                f"{', '.join(idle)} reste oisif alors que {_h(exile)} de poids "
+                f"sont en RAM hote : aucune configuration testee ne faisait "
+                f"mieux, mais ce plan est suspect. Forcez --gpus all et comparez.")
+        else:
+            best_plan.warnings.append(
+                f"{', '.join(idle)} laisse oisif a dessein : le modele tient sans lui, "
+                f"et ajouter une tranche plus lente au pipeline couterait du debit. "
+                f"Servez-vous-en pour un second modele, ou forcez avec --gpus all.")
     if verbose:
         best_plan.warnings.append(
             f"retenu {best_rec['gpus']} GPU, kv_fraction={best_rec['kv_fraction']} "

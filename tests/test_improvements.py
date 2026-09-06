@@ -258,11 +258,29 @@ def test_planner_picks_cpu_execution_when_ddr_beats_the_link(tmp_path,
 
     stream, _ = auto_plan(spec, target_rig,
                           PlannerOptions(max_model_len=8192, host_exec="stream"))
+    assert all(l.mlp_exec == "gpu" for l in stream.layers)
+
+    # Sans mesure du débit de calcul hôte, « auto » ne doit PAS choisir le
+    # processeur. Le comparer au bus par un débit de lecture DDR est une
+    # erreur de grandeur : elle a fait croire le processeur plus rapide
+    # qu'une carte graphique et envoyé 14 Gio de perceptrons sur le chemin
+    # le plus lent des trois, sur Qwen3-Coder-Next.
     auto, _ = auto_plan(spec, target_rig,
                         PlannerOptions(max_model_len=8192, host_exec="auto"))
-    assert any(l.mlp_exec == "cpu" for l in auto.layers)
-    assert all(l.mlp_exec == "gpu" for l in stream.layers)
-    assert auto.est_decode_tok_s > stream.est_decode_tok_s
+    assert all(l.mlp_exec == "gpu" for l in auto.layers)
+
+    # Avec un débit mesuré supérieur au bus, le mécanisme reste disponible.
+    mesure, _ = auto_plan(spec, target_rig,
+                          PlannerOptions(max_model_len=8192, host_exec="auto",
+                                         host_gemm_gb_s=70.0))
+    assert any(l.mlp_exec == "cpu" for l in mesure.layers)
+
+    # Et un débit mesuré réaliste pour un GEMM qui déballe de l'E2M1 le
+    # laisse sur la carte.
+    lent, _ = auto_plan(spec, target_rig,
+                        PlannerOptions(max_model_len=8192, host_exec="auto",
+                                       host_gemm_gb_s=3.5))
+    assert all(l.mlp_exec == "gpu" for l in lent.layers)
 
 
 # --------------------------------------------------------------------------
