@@ -131,6 +131,9 @@ def nvfp4_mm_tensorcore(x: torch.Tensor, t: NVFP4Tensor) -> Optional[torch.Tenso
     d'erreur réelle, amortie sur un grand lot mais pas sur un unique jeton
     décodé. C'est à l'appelant de trancher.
     """
+    if getattr(t, "global_scale_rows", None) is not None:
+        return None     # pile à une échelle par segment : seul le GEMV et la
+                        # déquantification la lisent (GLM-4.7, 6/09/2026)
     if not fp4_mm_available():
         return None
     # ``torch._scaled_mm`` veut une dimension contractée multiple de 16 octets,
@@ -186,6 +189,9 @@ _F8_MAX = 448.0
 
 def nvfp4_mm_w4a8(x: torch.Tensor, t: NVFP4Tensor) -> Optional[torch.Tensor]:
     """``x @ W.T`` en FP8×FP8 rowwise, ou None si indisponible."""
+    if getattr(t, "global_scale_rows", None) is not None:
+        return None     # pile à une échelle par segment : seul le GEMV et la
+                        # déquantification la lisent (GLM-4.7, 6/09/2026)
     if not torch.cuda.is_available():
         return None
     if torch.cuda.get_device_capability(x.device) < (8, 9):

@@ -1812,3 +1812,49 @@ du plancher à zéro.
 `outils/reparer-jetons.py` retrouve désormais un GGUF dont le nom ne
 correspond pas exactement au dossier converti : quatre modèles de plus réparés,
 dont `Ornith-1.0-35B` et `Falcon-H1R-7B` (198 jetons perdus).
+
+## 6 septembre 2026, aube — la v0.4.63 avait cassé l'attention latente (v0.4.66)
+
+Le charabia de GLM-4.7 en conversation, poursuivi toute la nuit, n'avait rien à
+voir avec la conversation. **Tout prefill de dix jetons ou plus** rendait
+« de de de de », quel que soit le texte. Un `git worktree` sur la v0.4.62 l'a
+tranché en trois minutes : treize et trente-deux jetons y donnent du texte
+sain. Le coupable est donc la v0.4.63, la mienne.
+
+### La cause
+
+La v0.4.63 fait passer la pile `q_a_proj`/`kv_a_proj` dans
+`MLAttention._proj_entree` sans condition sur le nombre de jetons. Une pile
+porte une échelle globale par ligne (`global_scale_rows`, v0.4.62), que seul
+le noyau GEMV lit. Au-delà de huit jetons, le backend `fp4-tensorcores`
+(priorité 110) et le chemin W4A8 prennent `t.global_scale` — celle du premier
+segment — pour toute la pile : le latent kv sortait à une échelle fausse d'un
+facteur quarante. L'attention et le MLP étaient protégés par un
+`if … and t <= 8` que je n'avais pas reproduit.
+
+### Le correctif
+
+Les deux chemins tensor cores déclinent une pile (`return None`) ; le
+dispatch la déquantifie alors avec son échelle par ligne, exacte au bit près,
+avant un produit bfloat16. Un test couvre désormais n ∈ {1, 4, 8, 9, 16, 64} :
+au bit près contre les GEMV séparées sous huit jetons, contre un produit
+bfloat16 exact au-delà.
+
+### Deux pièges de diagnostic, à retenir
+
+- **Un détecteur qui ment.** Mon critère de charabia (`len(set(texte)) <= 2`)
+  jugeait « de de de de » acceptable. J'ai conclu que le texte ordinaire
+  passait à toutes les longueurs et cherché quatre heures du côté des jetons
+  de conversation, du vocabulaire, du routage, de la GEMM groupée et du cache.
+  Un test de texte affiche le texte, il ne rend pas un booléen.
+- **Une référence approximative.** Le premier test de la pile la comparait aux
+  projections séparées, qui passent elles-mêmes par les tensor cores FP4 à
+  2–9,5 % d'erreur : la pile corrigée, exacte, y paraissait fausse à 90 %.
+  L'étalon d'un chemin de prefill est un produit bfloat16, pas un autre chemin
+  de prefill.
+
+### Conséquence sur le comparatif 20260906
+
+Les trois GLM y ont été mesurés en charabia : 112, 80 et 107 t/s de « de de
+de ». Ces trois lignes sont refaites ci-dessous, et le banc apprend au passage
+à écrire un aperçu du texte produit à côté du débit.

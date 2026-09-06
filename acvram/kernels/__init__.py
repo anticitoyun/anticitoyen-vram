@@ -331,6 +331,19 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
             xf.contiguous(), t.padded_in, gsr)
         return y.to(x.dtype).reshape(*orig_shape[:-1], t.shape[0])
 
+    gsr = getattr(t, "global_scale_rows", None)
+    if gsr is not None:
+        # Pile à une échelle globale par segment (q, k, v ou q_a, kv_a
+        # empilés) : seul le noyau GEMV la lit. Les chemins tensor cores
+        # ci-dessous prennent ``t.global_scale``, celle du premier segment,
+        # pour toute la pile — sur GLM-4.7 le latent kv en sortait à la
+        # mauvaise échelle dès que le prefill dépassait huit jetons, et le
+        # modèle répondait « de de de de ». La déquantification, elle, sait
+        # appliquer une échelle par ligne.
+        w = nvfp4_dequant(t, x.dtype if x.dtype != torch.float32 else torch.bfloat16,
+                          gscale_rows=gsr, rows_per_group=1)
+        return torch.nn.functional.linear(x, w.to(x.dtype))
+
     # Prefill. Par défaut, W4A8 : activation FP8 (≈2 % d'erreur contre ≈9,5 %
     # en FP4) sur les tensor cores FP8. ACVRAM_PREFILL=a4 rend le chemin FP4
     # pur (le plus rapide, le moins précis) ; =bf16 force le repli.

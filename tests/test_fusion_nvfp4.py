@@ -102,3 +102,40 @@ def test_gemv_empilee_identique_sur_gpu():
     fus = stack_nvfp4_linears(lins)
     assert fus is not None
     assert torch.equal(fus(x), separe)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="noyau CUDA requis")
+@pytest.mark.parametrize("n", [1, 4, 8, 9, 16, 64])
+def test_pile_juste_a_tout_nombre_de_jetons(n):
+    """La pile doit rendre la même chose que les projections séparées, que le
+    lot passe par la GEMV (n ≤ 8) ou par les chemins de prefill (n > 8).
+
+    Le 6 septembre 2026, GLM-4.7 répondait « de de de de » à tout prompt de dix
+    jetons ou plus : les chemins de prefill prenaient l'échelle du premier
+    segment pour toute la pile q_a/kv_a."""
+    from acvram.kernels import get_extension
+    if not hasattr(get_extension(), "nvfp4_gemv"):
+        pytest.skip("extension sans nvfp4_gemv")
+    dev = torch.device("cuda")
+    lins = [_lin(768, 2048, 1.0, 11), _lin(576, 2048, 40.0, 12)]   # q_a, kv_a de GLM
+    for l in lins:
+        l.qweight = l.qweight.to(dev)
+    g = torch.Generator(device="cuda").manual_seed(n)
+    x = torch.randn(n, 2048, device=dev, dtype=torch.bfloat16, generator=g)
+    # Référence exacte en bf16 : au-delà de huit jetons, les projections
+    # séparées passent par les tensor cores FP4 (2 à 9,5 % d'erreur, c'est
+    # leur prix) et ne peuvent pas servir d'étalon.
+    from acvram.quant.nvfp4 import dequantize_nvfp4
+    wref = torch.cat([dequantize_nvfp4(l.qweight, torch.bfloat16) for l in lins])
+    separe = torch.nn.functional.linear(x, wref).float()
+    fus = stack_nvfp4_linears(lins)
+    obtenu = fus(x)
+    if n <= 8:
+        # GEMV : la pile doit rendre exactement les bits des GEMV séparées
+        assert torch.equal(obtenu, torch.cat([l(x) for l in lins], dim=-1))
+        return
+    obtenu = obtenu.float()
+    ecart = (obtenu - separe).abs()
+    tol = separe.abs() * 2 ** -6 + 1e-2
+    assert (ecart <= tol).float().mean().item() > 0.999, \
+        f"n={n} : {int((ecart > tol).sum())} valeurs hors tolérance, max {ecart.max().item():.3e}"
