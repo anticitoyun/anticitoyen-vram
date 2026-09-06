@@ -2049,3 +2049,21 @@ d'experts (60 Mio lus) serait donc classé derrière un plan qui exilerait
 2 Gio de poids denses (2 Gio lus), trente fois plus cher. À corriger en
 comptant `mlp_active_bytes * (1 - cached_expert_fraction)` — après la mesure,
 pas avant.
+
+## v0.4.69 — de quoi mesurer les deux correctifs séparément
+
+Les v0.4.67 et v0.4.68 sont empilées et aucune n'est mesurée. Les mesurer
+ensemble ne dirait pas laquelle agit. Deux témoins d'environnement rendent
+chaque moitié débrayable, et donnent une matrice à quatre cases que l'on peut
+parcourir dans la même session, sur la même machine au repos :
+
+| témoins | cartes | couches exilées | calculées CPU | stocké | actif/jeton |
+|---|---|---|---|---|---|
+| aucun (corrigé) | 2 | 10 | **0** | 8,49 Gio | 164 Mio |
+| `ACVRAM_MLP_HOTE_CPU=1` | 2 | 10 | 6 | 8,49 Gio | 164 Mio |
+| `ACVRAM_SANS_REPLAN=1` | 1 | 18 | 16 | 15,28 Gio | 335 Mio |
+| les deux | 1 | 18 | 18 | 15,28 Gio | 335 Mio |
+
+La troisième ligne reproduit exactement la condition du banc du 6 septembre,
+qui a rendu 10,3 jetons par seconde. `ACVRAM_PLAN_FIGE` désactive aussi la
+replanification, pour rester cohérent avec son nom.

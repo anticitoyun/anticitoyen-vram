@@ -901,7 +901,8 @@ def _reajuster_plan(plan: Plan, manifest: dict) -> None:
             # à 10,3 jetons par seconde. Tant que le débit de calcul hôte
             # n'est pas mesuré (host_gemm_gb_s), les poids traversent le bus.
             if hasattr(l, "mlp_exec"):
-                l.mlp_exec = "gpu"
+                l.mlp_exec = ("cpu" if os.environ.get("ACVRAM_MLP_HOTE_CPU")
+                              else "gpu")
             deplacees += 1
         if deplacees:
             print(f"[acvram] plan réajusté : {deplacees} MLP de plus en RAM hôte sur {dev} "
@@ -1000,6 +1001,8 @@ def _replanifier(manifest: dict, spec: "ModelSpec") -> "Plan | None":
     On ne rejoue que si les cartes ont changé : sinon le plan figé fait foi, et
     les mesures du parc restent comparables.
     """
+    if os.environ.get("ACVRAM_PLAN_FIGE") or os.environ.get("ACVRAM_SANS_REPLAN"):
+        return None
     d = manifest["plan"]
     figees = {t["name"] for t in d.get("tiers", []) if t.get("kind") == "gpu"}
     try:
