@@ -185,12 +185,35 @@ def arreter_tout_sauf(moteur):
             arreter(m)
 
 
+MOTIFS = {"acvram": "acvram serve", "llamacpp": f"llama-server", "vllm": "vllm"}
+
+
+def tuer_orphelin(moteur, age_max):
+    """Un serveur qui n'a pas ouvert son port au timeout n'a pas de PID de
+    port : ``arreter()`` ne le voit pas, il continue à charger et fait manquer
+    de mémoire les modèles suivants (NEO-CODE, 6/09/2026). On le cherche par
+    son motif de commande et son âge, jamais par ``pkill -f``, et jamais le
+    llama-server permanent du port 8081."""
+    motif = MOTIFS.get(moteur)
+    if not motif:
+        return
+    ps = subprocess.run(["ps", "-eo", "pid,etimes,args"], capture_output=True, text=True).stdout
+    for l in ps.splitlines()[1:]:
+        c = l.split(None, 2)
+        if len(c) < 3 or motif not in c[2] or str(PORT_INTERDIT) in c[2]:
+            continue
+        if int(c[1]) <= age_max + 60:
+            log(f"           serveur {moteur} orphelin (PID {c[0]}, {c[1]} s) : tué")
+            subprocess.run(["kill", c[0]])
+
+
 def attendre(moteur, secondes):
     t0 = time.time()
     while time.time() - t0 < secondes:
         if pret(moteur):
             return time.time() - t0
         time.sleep(2)
+    tuer_orphelin(moteur, secondes)
     raise RuntimeError(f"{moteur} n'a pas démarré en {secondes} s")
 
 
