@@ -2114,3 +2114,29 @@ compiler deux ROM met du temps à retrouver des caches et des fréquences
 stables ; sans cet encadrement, une partie de l'écart entre la première et la
 dernière case ne serait que du réchauffement. Si les deux mesures de référence
 diffèrent de plus de quelques pour cent, aucune des quatre cases ne vaut rien.
+
+## v0.4.71 — l'empreinte du planificateur retirée : elle ne servait à rien
+
+L'empreinte de la v0.4.70 supposait qu'une replanification coûtait cher. Personne
+ne l'avait mesuré. Mesure faite :
+
+| opération | coût |
+|---|---|
+| `auto_plan` sur Coder-Next, 48 couches | 5,1 ms |
+| `auto_plan` sur un modèle moyen | 2,1 ms |
+| `detect_rig` | 73,2 ms |
+| **replanification complète au chargement** | **148 ms** (Coder-Next), 54 ms (petit modèle) |
+
+Contre un chargement qui lit quarante-quatre gigaoctets sur disque, c'est
+gratuit. L'empreinte coûtait à elle seule 1,86 ms, soit plus du tiers d'une
+replanification, pour éviter une replanification.
+
+Elle est donc retirée, et le plan est **toujours** recalculé au chargement à
+partir du matériel constaté. On supprime avec elle sa maintenance et la question
+« ai-je bien haché toutes les fonctions dont le plan dépend ? », dont on
+découvre la mauvaise réponse six mois plus tard, par le même chemin qu'ici.
+`ACVRAM_PLAN_FIGE` et `ACVRAM_SANS_REPLAN` gardent l'ancien comportement pour
+reproduire une mesure ancienne.
+
+C'est la même leçon que `host_compute_gb_s` : un mécanisme dont personne n'a
+vérifié qu'il servait à quelque chose finit par coûter plus que ce qu'il évite.
