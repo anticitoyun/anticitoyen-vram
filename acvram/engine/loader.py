@@ -149,7 +149,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
     spec = ModelSpec(**{k: v for k, v in manifest["model"].items()
                         if k in ModelSpec.__dataclass_fields__})
     if plan is None:
-        plan = _plan_from_manifest(manifest)
+        plan = _plan_from_manifest(manifest, spec)
     _avertir_noyaux()
     reader = _ShardReader(path, manifest["weight_map"])
     group_size = manifest.get("options", {}).get("group_size", 128)
@@ -894,8 +894,14 @@ def _reajuster_plan(plan: Plan, manifest: dict) -> None:
                 break
             l = cand[-1]
             l.mlp_storage = "cpu"
+            # Descendre un MLP en RAM dit où il est STOCKÉ, pas où il est
+            # CALCULÉ. Forcer ici le calcul sur processeur défaisait la
+            # décision du planificateur à chaque chargement : c'est ce chemin
+            # qui a mis seize couches de Qwen3-Coder-Next sur le processeur,
+            # à 10,3 jetons par seconde. Tant que le débit de calcul hôte
+            # n'est pas mesuré (host_gemm_gb_s), les poids traversent le bus.
             if hasattr(l, "mlp_exec"):
-                l.mlp_exec = "cpu"
+                l.mlp_exec = "gpu"
             deplacees += 1
         if deplacees:
             print(f"[acvram] plan réajusté : {deplacees} MLP de plus en RAM hôte sur {dev} "
@@ -981,9 +987,47 @@ def _rapatrier_sur_une_carte(plan: Plan, attn: dict, mlp: dict,
           f"une frontière de moins par jeton", flush=True)
 
 
-def _plan_from_manifest(manifest: dict) -> Plan:
+def _replanifier(manifest: dict, spec: "ModelSpec") -> "Plan | None":
+    """Rejoue le planificateur quand le plan figé au manifeste ne décrit plus
+    cette machine.
+
+    Le plan est écrit une fois pour toutes à la conversion, et `_reajuster_plan`
+    ne sait que faire *descendre* des MLP en RAM hôte : aucune amélioration du
+    planificateur n'atteint jamais un modèle déjà converti. Le 7 septembre 2026,
+    Qwen3-Coder-Next tournait à 10,3 jetons par seconde sur un plan qui ignorait
+    la seconde carte et calculait seize couches sur le processeur, alors que le
+    planificateur du jour recrutait les deux cartes et n'en exilait que quatre.
+    On ne rejoue que si les cartes ont changé : sinon le plan figé fait foi, et
+    les mesures du parc restent comparables.
+    """
+    d = manifest["plan"]
+    figees = {t["name"] for t in d.get("tiers", []) if t.get("kind") == "gpu"}
+    try:
+        from ..hardware.detect import detect_rig
+        from ..memory.tiering import PlannerOptions, auto_plan
+        rig = detect_rig()
+        presentes = {f"cuda:{g.index}" for g in rig.gpus}
+        if figees == presentes or not presentes:
+            return None
+        ctx = max(2048, int(d.get("kv_max_tokens") or 0) or 8192)
+        neuf, _ = auto_plan(spec, rig, PlannerOptions(max_model_len=ctx))
+    except Exception as e:                                   # pragma: no cover
+        print(f"[acvram] replanification impossible ({e}) ; plan du manifeste "
+              f"conservé", flush=True)
+        return None
+    print(f"[acvram] le plan du manifeste connaissait {sorted(figees) or 'aucun GPU'}, "
+          f"cette machine a {sorted(presentes)} : plan recalculé", flush=True)
+    return neuf
+
+
+def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None) -> Plan:
     from ..memory.tiering import LayerPlacement, Plan as _Plan, Tier
     d = manifest["plan"]
+    if spec is not None:
+        neuf = _replanifier(manifest, spec)
+        if neuf is not None:
+            _reajuster_plan(neuf, manifest)
+            return neuf
     plan = _Plan(model=d["model"])
     plan.tiers = [Tier(**t) for t in d["tiers"]]
     plan.layers = [LayerPlacement(**{k: v for k, v in l.items()

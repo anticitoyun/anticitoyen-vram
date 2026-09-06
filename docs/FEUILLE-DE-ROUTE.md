@@ -1980,3 +1980,72 @@ retenus pour une carte bridée à 400 W et qu'aucun noyau réel n'atteint.
 Un biais presque uniforme ne change pas l'ordre des candidats, ce qui explique
 que personne ne l'ait vu. Mais celui-ci n'était pas uniforme : il a basculé un
 arbitrage serré, et c'est exactement ce qui a coûté la 3080 Ti.
+
+## 7 septembre 2026, nuit — correction de la section précédente, et les deux vraies causes (v0.4.68)
+
+La section v0.4.67 attribue au correctif un effet qu'il n'a pas. Je l'ai
+écrite en comparant le plan que rend le code d'aujourd'hui au plan **stocké
+dans le manifeste**, et j'en ai conclu que le correctif recrutait la 3080 Ti.
+Une comparaison stricte le dément : `git worktree` sur 6b15c32, même script,
+mêmes options, les 111 modèles du parc replanifiés par les deux versions.
+
+| | avant (6b15c32) | après (v0.4.67) |
+|---|---|---|
+| modèles dont le plan change | — | **1 sur 111** |
+| Coder-Next, cartes | cuda:0 + cuda:1 | cuda:0 + cuda:1 |
+| Coder-Next, poids exilés | 3,32 Gio | 3,32 Gio |
+| **Coder-Next, couches calculées par le processeur** | **4** | **0** |
+
+Identique aux contextes 8192 et 32768. Le code d'avant recrutait donc déjà les
+deux cartes. Le seul effet réel de la v0.4.67 est de retirer quatre couches de
+la branche processeur — utile, mais bien moins que ce que j'avais écrit.
+
+### Alors d'où venait le plan à une carte et seize couches processeur ?
+
+Du manifeste, écrit à la conversion et jamais rejoué. `_plan_from_manifest`
+reconstruisait le plan **verbatim**, étages compris, et `_reajuster_plan` ne
+sait que faire descendre des MLP, jamais remonter. Aucune amélioration du
+planificateur n'atteignait un modèle déjà converti — et il y en a 111.
+
+### Et une seconde cause, dans le chargeur, qui défaisait le correctif
+
+`_reajuster_plan` contenait :
+
+```python
+l.mlp_storage = "cpu"
+if hasattr(l, "mlp_exec"):
+    l.mlp_exec = "cpu"      # <-- ici
+```
+
+Descendre un perceptron en RAM dit où il est **stocké**, pas où il est
+**calculé**. Cette ligne forçait le calcul sur processeur à chaque
+chargement, écrasant la décision du planificateur. C'est elle, et non le
+planificateur, qui a mis seize couches de Coder-Next sur le processeur au
+banc du 6 septembre. Le correctif de la v0.4.67 aurait été défait ici.
+
+### Ce qui change en v0.4.68
+
+* `_replanifier` : quand les cartes du plan figé ne sont pas celles de la
+  machine, le planificateur est rejoué, puis réajusté sur les octets réels.
+  Sinon le plan figé fait foi, pour que les mesures du parc restent
+  comparables.
+* Un MLP descendu en RAM garde `mlp_exec = "gpu"` : ses poids traversent le
+  bus tant que le débit de calcul hôte n'est pas mesuré.
+
+Plan effectif de Coder-Next au chargement, désormais : les deux cartes, dix
+couches exilées, **aucune calculée sur le processeur**, 8,49 Gio stockés en
+RAM mais seulement **164 Mio actifs par jeton** — soit 8,8 ms sur un bus à
+18,7 Go/s, donc un plafond de bus vers 114 jetons par seconde, contre 10,3
+mesurés avant. 151 tests passent.
+
+### Toujours pas mesuré
+
+Le gain reste inconnu : la machine compile encore. Et une remarque de
+relecture, retenue et non appliquée : la fonction de rang de la v0.4.67
+compte les octets **stockés**, alors que le coût se paie en octets **lus par
+jeton**. Sur ce modèle le rapport est de quarante-cinq — 40,6 Gio de
+perceptrons stockés pour 0,896 Gio actif. Un plan qui exilerait 3 Gio
+d'experts (60 Mio lus) serait donc classé derrière un plan qui exilerait
+2 Gio de poids denses (2 Gio lus), trente fois plus cher. À corriger en
+comptant `mlp_active_bytes * (1 - cached_expert_fraction)` — après la mesure,
+pas avant.
