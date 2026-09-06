@@ -290,6 +290,7 @@ def generer(moteur):
         req.add_header("Authorization", f"Bearer {CLES[moteur]}")
     with Watt() as w:
         t0 = time.time()
+        texte: list[str] = []
         premier = dernier = None
         n = 0
         usage = None
@@ -328,6 +329,7 @@ def generer(moteur):
                 for ch in ev.get("choices") or []:
                     delta = ch.get("delta") or {}
                     if delta.get("content") or delta.get("reasoning_content"):
+                        texte.append(delta.get("content") or delta.get("reasoning_content") or "")
                         maintenant = time.time()
                         if premier is None:
                             premier = maintenant
@@ -343,19 +345,22 @@ def generer(moteur):
         # ne peut se mesurer que sur la durée totale, premier jeton compris
         raise RuntimeError(f"pas de flux jeton par jeton ({morceaux} morceau(x) "
                            f"pour {n} jetons)")
-    return n, premier - t0, dernier - premier, w.moyenne
+    return n, premier - t0, dernier - premier, w.moyenne, "".join(texte)
 
 
 def mesurer(moteur):
     meilleur = None
     for _ in range(MESURES):
-        n, ttft, dt, watts = generer(moteur)
+        n, ttft, dt, watts, txt = generer(moteur)
         tps = (n - 1) / dt if n > 1 else 0.0
         if meilleur is None or tps > meilleur[0]:
-            meilleur = (tps, ttft, watts, n)
-    tps, ttft, watts, n = meilleur
+            meilleur = (tps, ttft, watts, n, txt)
+    tps, ttft, watts, n, txt = meilleur
     jkj = tps / watts * 1000 if watts else 0.0
-    return tps, ttft, watts, jkj, n
+    # Un aperçu du texte à côté du débit : 481 t/s de « de de de » sur quatre
+    # jetons se lisaient comme un record tant qu'on ne voyait pas le texte.
+    apercu = " ".join(txt.split())[:70]
+    return tps, ttft, watts, jkj, n, apercu
 
 
 # --------------------------------------------------------------------------
@@ -396,7 +401,7 @@ def main():
                 faits.add((c[0], c[1]))
     else:
         with open(a.sortie, "w") as f:
-            f.write("modele\tmoteur\talias\tctx\tt_s\tttft_ms\tW\tj_kJ\tjetons\tchargement_s\tetat\n")
+            f.write("modele\tmoteur\talias\tctx\tt_s\tttft_ms\tW\tj_kJ\tjetons\tchargement_s\tetat\tapercu\n")
 
     # par moteur, pour ne pas relancer un serveur lourd à chaque modèle
     for m in moteurs:
@@ -405,10 +410,10 @@ def main():
                 continue
             log(f"{m:9s} {nom}")
             print(f"           cible : {d}", flush=True)
-            etat, tps, ttft, watts, jkj, n, charge = "ok", 0, 0, 0, 0, 0, 0
+            etat, tps, ttft, watts, jkj, n, charge, apercu = "ok", 0, 0, 0, 0, 0, 0, ""
             try:
                 charge = demarrer(m, d, ctx)
-                tps, ttft, watts, jkj, n = mesurer(m)
+                tps, ttft, watts, jkj, n, apercu = mesurer(m)
                 log(f"           {tps:.1f} t/s, TTFT {ttft*1000:.0f} ms, {watts:.0f} W, "
                     f"{jkj:.0f} j/kJ, chargé en {charge:.0f} s")
             except Exception as exc:                       # noqa: BLE001
@@ -416,7 +421,7 @@ def main():
                 log(f"           ÉCHEC {etat}")
             with open(a.sortie, "a") as f:
                 f.write(f"{nom}\t{m}\t{alias}\t{ctx}\t{tps:.1f}\t{ttft*1000:.0f}\t{watts:.0f}\t"
-                        f"{jkj:.0f}\t{n}\t{charge:.0f}\t{etat}\n")
+                        f"{jkj:.0f}\t{n}\t{charge:.0f}\t{etat}\t{apercu}\n")
         arreter(m)
     log("TERMINÉ")
 

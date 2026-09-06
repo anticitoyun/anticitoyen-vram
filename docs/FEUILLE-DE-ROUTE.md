@@ -1858,3 +1858,17 @@ bfloat16 exact au-delà.
 Les trois GLM y ont été mesurés en charabia : 112, 80 et 107 t/s de « de de
 de ». Ces trois lignes sont refaites ci-dessous, et le banc apprend au passage
 à écrire un aperçu du texte produit à côté du débit.
+
+### Les lignes GLM refaites (7 h 06)
+
+| modèle | débit | aperçu du texte produit |
+|---|---|---|
+| GLM-4.7-Flash-Uncensored-Heretic | 111,7 t/s | « 1. Analyze the Request: Topic: Virtual Memory in a… » |
+| GLM-4.7-Grande-Heretic-42B | 80,1 t/s | « 1. Analyze the Request: Topic: Virtual memory (VM)… » |
+| Huihui-Kimi-Linear-REAP-35B | 192,9 t/s | « La mémoire virtuelle est un mécanisme fondamental… » |
+
+Les débits sont ceux de la veille au dixième près : le charabia se générait
+exactement à la vitesse du texte, et c'est bien pour cela qu'un débit seul ne
+prouve rien. La colonne `apercu` du banc existe pour ça. `NEO-CODE` n'a pas
+démarré en quinze minutes pendant cette passe — un convertisseur zombie de la
+reconversion avortée saturait la carte — et sera remesuré après la reconversion.

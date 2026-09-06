@@ -5,7 +5,11 @@ Artemis-31B-v1.1-exl3-4.00bpw	acvram	acvram-artemis-31b-exl3	8192	39.4	289	278	1
 Cydonia-Magnum-Diamond-24B-EXL3-6.0bpw	acvram	acvram-Cydonia-Magnum-Diamond-24B-EXL3-6-0bpw	8192	56.1	145	284	197	200	26	ok
 Dolphin-Mistral-24B-Venice-AWQ	acvram	acvram-dolphin-venice-24b	8192	55.7	141	290	192	200	26	ok
 G4-MeroMero-31B-uncensored-heretic-exl3-6.00bpw	acvram	acvram-g4-meromero-31b-uncensored-heretic-exl3-6-00bpw	8192	40.1	287	284	141	200	39	ok
+GLM-4.7-Flash-Heretic-NEO-CODE-Q5_K_M	acvram	acvram-glm-4-7-flash	8192	107.4	110	188	571	200	32	ok
+GLM-4.7-Flash-Uncensored-Heretic-Q5_K_M	acvram	acvram-glm-4-7-flash-uncensored-heretic-q5-k-m	8192	112.1	278	157	713	200	32	ok
+GLM-4.7-Grande-Heretic-42B-Q4_K_M	acvram	acvram-glm-4-7-grande-heretic-42b-q4-k-m	8192	80.3	279	167	480	200	42	ok
 Gemma-4-Gembrain-31B-uncensored-heretic-EXL3-6.0bpw	acvram	acvram-gemma-4-gembrain-31b-uncensored-heretic-exl3-6-0bpw	8192	39.8	289	283	141	200	40	ok
+Huihui-Kimi-Linear-REAP-35B-A3B-abl-Q4_K_M	acvram	acvram-kimi-linear-35b	8192	192.7	103	205	938	200	38	ok
 Huihui-Nex-N2-mini-abliterated-Q4_K_M	acvram	acvram-huihui-nex-n2-mini-abliterated-q4-k-m	8192	226.8	215	148	1534	200	42	ok
 Huihui-Qwen3.6-35B-A3B-Opus-abl-Q4_K_M	acvram	acvram-huihui-qwen3-6-35b-a3b-opus-abl-q4-k-m	8192	300.3	217	137	2185	200	44	ok
 Huihui-Qwen3.6-35B-A3B-abliterated-Q4_K_M	acvram	acvram-huihui-qwen3-6-35b-a3b-abliterated-q4-k-m	8192	158.3	216	105	1511	40	42	ok
@@ -127,7 +131,3 @@ Qwen3.8-27B-exl3-6.00bpw	tabby	tabby-qwen38-27b-normal	8192	42.5	286	261	163	199
 Qwen3.8-27B-heretic-ara-exl3-5.0bpw	tabby	tabby-qwen38-27b-ara	8192	46.5	213	298	156	199	191	ok
 Skyfall-31B-v4.2-heretic-exl3-4.0bpw	tabby	tabby-skyfall-31b	8192	49.6	173	245	202	199	139	ok
 gemma-4-12B-it-abliterated-uncensored-exl3-4bpw	tabby	tabby-gemma4-12b-abl	8192	88.1	100	267	330	199	70	ok
-GLM-4.7-Flash-Heretic-NEO-CODE-Q5_K_M	acvram	acvram-glm-4-7-flash	8192	0.0	0	0	0	0	0	erreur: acvram n'a pas démarré en 900 s	
-GLM-4.7-Flash-Uncensored-Heretic-Q5_K_M	acvram	acvram-glm-4-7-flash-uncensored-heretic-q5-k-m	8192	111.7	192	171	654	200	30	ok	1. **Analyze the Request:** * **Topic:** Virtual Memory in a modern Op
-GLM-4.7-Grande-Heretic-42B-Q4_K_M	acvram	acvram-glm-4-7-grande-heretic-42b-q4-k-m	8192	80.1	394	134	599	200	44	ok	1. **Analyze the Request:** * **Topic:** Virtual memory (VM) in modern
-Huihui-Kimi-Linear-REAP-35B-A3B-abl-Q4_K_M	acvram	acvram-kimi-linear-35b	8192	192.9	102	194	996	200	37	ok	La mémoire virtuelle est un mécanisme fondamental dans les systèmes d’
