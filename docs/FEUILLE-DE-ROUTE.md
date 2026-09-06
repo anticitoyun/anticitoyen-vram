@@ -1713,3 +1713,102 @@ l'autre, et c'est déjà le noyau qui sert partout ailleurs. Le test dit
 maintenant ce qui est garanti — un écart borné à un cran sur moins d'un
 dix-millième des valeurs — plutôt qu'une égalité que quatre lignes avaient fait
 croire.
+
+## 6 septembre 2026 — comparatif 20260906, appels d'outils, et ce que le banc ne voyait pas (v0.4.65)
+
+### Le comparatif refait
+
+Même protocole que la veille, 132 couples sur 66 modèles, quatre moteurs, une
+nuit de mesures après quatre versions d'acvram.
+
+| moteur | modèles gagnés | médiane t/s | médiane j/kJ | chargement médian |
+|---|---|---|---|---|
+| acvram | 33 | 107 | 492 | 35 s |
+| llama.cpp | 24 | 155 | 717 | 195 s |
+| vLLM | 5 | 190 | 1064 | 137 s |
+| TabbyAPI | 4 | 57 | 237 | 163 s |
+
+La médiane d'acvram passe de 89 à 107 t/s. llama.cpp n'a pas bougé (+0,4 % de
+médiane sur 39 modèles communs), ce qui fait de lui un bon étalon : les écarts
+sont bien les nôtres. Vingt-six modèles gagnent plus de 5 %, dont les cinq à
+attention latente (GLM-4.7-Flash 89 → 112, Grande 63 → 80) et les Nemotron
+Lightning (+19 %). L'écart médian des hybrides à experts, le pire poste, passe
+de −31 % à −19 %.
+
+### Ce que le banc ne voyait pas
+
+Neuf modèles reculent, et ils ont tous un point commun : leur vocabulaire a été
+réparé la veille (v0.4.64). Le banc note le nombre de jetons produits, et il
+suffit de le lire :
+
+| modèle | 5/09 | 6/09 |
+|---|---|---|
+| KAT-Coder-V2.5-Dev | 481 t/s sur **4 jetons** | 165 t/s sur 118 jetons |
+| Qwen3.6-35B-A3B-APEX | 477 t/s sur **4 jetons** | échec |
+
+Un modèle qui produit quatre jetons puis s'arrête n'a pas de débit. Les 481 t/s
+de la veille étaient la vitesse d'une réponse vide, et les « régressions » de
+Qwen3.5-35B (234 → 154) ou Qwen3.8-27B-UD (66 → 50) sont du même ordre : hier
+du texte dégénéré que la spéculation par n-grammes acceptait par paquets,
+aujourd'hui du texte. Le comparatif de la veille surestimait acvram sur les
+modèles au vocabulaire cassé ; celui-ci est le premier qu'on peut lire sans
+astérisque. Leçon pour le banc : une mesure sur moins de 150 jetons ne vaut
+rien, et la spéculation par n-grammes doit être notée à côté du débit.
+
+### Les appels d'outils n'existaient pas
+
+Étape 5 de la liste : « revalider agent-ok ». Quatre modèles Qwen3, un outil
+`meteo`, une question sur Lyon. Aucun n'a rendu d'appel : `Qwen3-Coder-30B`
+expliquait poliment qu'il n'avait pas accès à la météo. Le serveur acceptait le
+champ `tools` et ne le transmettait à rien.
+
+Trois pièces manquaient :
+- les outils et les messages complets (`tool_calls`, `tool_call_id`, `name`)
+  passent au gabarit Jinja, qui sait les rendre — c'est lui qui décrit les
+  outils au modèle, dans le format que ce modèle a appris ;
+- la sortie est relue : `<tool_call>{json}</tool_call>` (Qwen3, Nemotron,
+  Hermes, KAT) et le XML de Qwen3-Coder
+  (`<function=nom><parameter=clé>valeur</parameter></function>`) deviennent des
+  `tool_calls` au format OpenAI, avec `finish_reason: "tool_calls"` ; un bloc
+  dont le JSON ne se lit pas reste dans le texte, mieux vaut un appel manqué
+  qu'un appel inventé ;
+- en flux, tout ce qui suit un `<tool_call>` est retenu et rendu à la fin en
+  un seul delta structuré, et un `<` isolé attend quelques caractères le temps
+  de savoir s'il ouvre la balise.
+
+Après quoi `Qwen3.8-27B-UD` rend `meteo {"ville": "Lyon"}` et
+`Qwen3-Coder-30B` produit son XML. Dans le même mouvement, `chat_template_kwargs`
+atteint le gabarit, comme chez vLLM et llama.cpp : `{"enable_thinking": false}`
+coupe la réflexion d'un Qwen3.
+
+### Deux familles qui déraillent sur les prompts longs
+
+`Qwen3.6-35B-A3B-APEX` termine après deux jetons sur le prompt du banc et répond
+correctement à une question courte ; `Huihui-Qwen3.6-35B-A3B` s'arrête à
+quarante jetons au banc et répond « user » dès que la description des outils
+allonge le prompt. Les deux sont des hybrides à état récurrent. `GLM-4.7-Flash`,
+à attention latente, déraille dès treize jetons quand le préfixe contient les
+jetons de conversation, alors que llama.cpp raisonne sur le même préfixe.
+
+Ce qui est établi pour GLM : poids fidèles (cosinus 0,995 sur toute la tête,
+plongement exact), routage identique à llama.cpp jusqu'au biais de sélection,
+noyau de GEMM groupée juste sur les neuf cas d'un nouveau test — tuiles
+partielles comprises — et même charabia avec le repli en bfloat16. Ni les
+graphes, ni le cache de préfixe, ni le vocabulaire. Reste le calcul de
+l'attention latente elle-même au prefill, et pour Qwen3.6 le prefill des
+couches à état : c'est le prochain chantier, et il commence par une
+comparaison des logits contre llama.cpp, préfixe par préfixe.
+
+### Le parc garde 59 modèles aux anciennes promotions
+
+Le profil de `LFM2.5-8B-A1B` (étape 3 : 362 t/s contre 542) montre 47 appels
+par jeton d'une GEMV **INT8** — le modèle a été converti avec le plancher de
+SNR à 25 et garde 56 tenseurs promus. Il n'est pas seul : 59 modèles du parc
+sont dans ce cas, dont `Ornith-1.0-35B` (309 tenseurs), `Kimi-Linear` (271) et
+`Qwen3-Coder-30B-A3B` (193). La reconversion de la veille ne couvrait que les
+38 alias du menu d'alors. Les reconvertir est la suite logique de la décision
+du plancher à zéro.
+
+`outils/reparer-jetons.py` retrouve désormais un GGUF dont le nom ne
+correspond pas exactement au dossier converti : quatre modèles de plus réparés,
+dont `Ornith-1.0-35B` et `Falcon-H1R-7B` (198 jetons perdus).

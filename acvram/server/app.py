@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from ..engine.runner import Engine, GenerationOutput
 from ..engine.sampler import SamplingParams
 from .chat import Tokenizer, render_chat
+from .chat import extraire_appels, messages_pour_gabarit
 from .protocol import (ChatChoice, ChatCompletionChunk, ChatCompletionRequest,
                        ChatCompletionResponse, ChoiceMessage, ChunkChoice,
                        CompletionChoice, CompletionRequest, CompletionResponse,
@@ -217,8 +218,11 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
     # -- chat -------------------------------------------------------------
     @app.post("/v1/chat/completions")
     async def chat_completions(req: ChatCompletionRequest, raw: Request):
-        messages = [{"role": m.role, "content": m.text()} for m in req.messages]
-        prompt = render_chat(tokenizer, messages, req.add_generation_prompt)
+        messages = messages_pour_gabarit(req.messages)
+        extra = dict(req.chat_template_kwargs or {})
+        if req.tools:
+            extra["tools"] = req.tools          # les gabarits HF les rendent eux-mêmes
+        prompt = render_chat(tokenizer, messages, req.add_generation_prompt, extra)
         prompt_ids = _encode(tokenizer, prompt)
         params = _params_from(req, 512)
         request_id, q = await service.submit(prompt_ids, params)
@@ -226,7 +230,8 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
         if req.stream:
             return StreamingResponse(
                 _stream_chat(service, request_id, q, model_name, len(prompt_ids),
-                             bool((req.stream_options or {}).get("include_usage"))),
+                             bool((req.stream_options or {}).get("include_usage")),
+                             bool(req.tools)),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -238,8 +243,8 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                 reason = out.finish_reason or "stop"
         return ChatCompletionResponse(
             model=model_name,
-            choices=[ChatChoice(message=ChoiceMessage(content=text),
-                                finish_reason=reason)],
+            choices=[ChatChoice(message=_message_finale(text, bool(req.tools)),
+                                finish_reason=_raison_finale(text, reason, bool(req.tools)))],
             usage=Usage(prompt_tokens=len(prompt_ids), completion_tokens=n_out,
                         total_tokens=len(prompt_ids) + n_out))
 
@@ -439,9 +444,21 @@ def _embed_once(engine: Engine, ids: list[int]) -> list[float]:
         engine.allocator.free(blocks)
 
 
+def _message_finale(text: str, outils: bool) -> ChoiceMessage:
+    if outils:
+        reste, appels = extraire_appels(text)
+        if appels:
+            return ChoiceMessage(content=reste or None, tool_calls=appels)
+    return ChoiceMessage(content=text)
+
+
+def _raison_finale(text: str, reason: str, outils: bool) -> str:
+    return "tool_calls" if outils and extraire_appels(text)[1] else reason
+
+
 async def _stream_chat(service: EngineService, request_id: str,
                        q: asyncio.Queue, model: str, prompt_tokens: int,
-                       include_usage: bool) -> AsyncIterator[str]:
+                       include_usage: bool, outils: bool = False) -> AsyncIterator[str]:
     cid = new_id("chatcmpl")
     first = ChatCompletionChunk(
         id=cid, model=model,
@@ -449,19 +466,52 @@ async def _stream_chat(service: EngineService, request_id: str,
     yield f"data: {first.model_dump_json(exclude_none=True)}\n\n"
 
     n_out = 0
+    # Avec des outils, tout ce qui suit un « <tool_call> » est retenu et rendu
+    # à la fin en appels structurés ; un « < » isolé attend un peu, le temps
+    # de savoir s'il ouvre la balise.
+    total, pend, retenu = "", "", False
     try:
         async for out in service.collect(request_id, q):
             n_out = out.completion_tokens
             if out.text_delta:
-                chunk = ChatCompletionChunk(
-                    id=cid, model=model,
-                    choices=[ChunkChoice(delta=DeltaMessage(content=out.text_delta))])
-                yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+                total += out.text_delta
+                if not outils:
+                    delta = out.text_delta
+                elif retenu:
+                    delta = ""
+                else:
+                    pend += out.text_delta
+                    if "<tool_call>" in pend:
+                        retenu = True
+                        delta, pend = pend[:pend.index("<tool_call>")], ""
+                    elif "<" in pend and len(pend) < 64:
+                        delta = ""
+                    else:
+                        delta, pend = pend, ""
+                if delta:
+                    chunk = ChatCompletionChunk(
+                        id=cid, model=model,
+                        choices=[ChunkChoice(delta=DeltaMessage(content=delta))])
+                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
             if out.finished:
+                raison = out.finish_reason or "stop"
+                if outils:
+                    reste, appels = extraire_appels(total)
+                    if appels:
+                        chunk = ChatCompletionChunk(
+                            id=cid, model=model,
+                            choices=[ChunkChoice(delta=DeltaMessage(tool_calls=[
+                                {"index": i, **a} for i, a in enumerate(appels)]))])
+                        yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+                        raison = "tool_calls"
+                    elif pend:
+                        chunk = ChatCompletionChunk(
+                            id=cid, model=model,
+                            choices=[ChunkChoice(delta=DeltaMessage(content=pend))])
+                        yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
                 done = ChatCompletionChunk(
                     id=cid, model=model,
-                    choices=[ChunkChoice(delta=DeltaMessage(),
-                                         finish_reason=out.finish_reason or "stop")])
+                    choices=[ChunkChoice(delta=DeltaMessage(), finish_reason=raison)])
                 if include_usage:
                     done.usage = Usage(prompt_tokens=prompt_tokens,
                                        completion_tokens=n_out,

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Optional
 
 __all__ = ["Tokenizer", "load_tokenizer", "render_chat"]
@@ -52,16 +53,17 @@ class Tokenizer:
         return bos or ""
 
     # -- chat -------------------------------------------------------------
-    def apply_chat_template(self, messages: list[dict], add_generation_prompt: bool
-                            ) -> str:
+    def apply_chat_template(self, messages: list[dict], add_generation_prompt: bool,
+                            extra: Optional[dict] = None) -> str:
         if self.template:
             try:
-                return self._render_jinja(messages, add_generation_prompt)
+                return self._render_jinja(messages, add_generation_prompt, extra)
             except Exception:                        # noqa: BLE001
                 pass
         return _chatml(messages, add_generation_prompt)
 
-    def _render_jinja(self, messages: list[dict], add_generation_prompt: bool) -> str:
+    def _render_jinja(self, messages: list[dict], add_generation_prompt: bool,
+                      extra: Optional[dict] = None) -> str:
         if self._env is None:
             from jinja2 import Environment
             from jinja2.exceptions import TemplateError
@@ -82,6 +84,9 @@ class Tokenizer:
                if isinstance(v, (str, int, float, bool))
                and k not in ("messages", "add_generation_prompt",
                              "bos_token", "eos_token")},
+            # les variables de la requête priment sur celles de la config
+            **{k: v for k, v in (extra or {}).items()
+               if k not in ("messages", "add_generation_prompt")},
         )
 
 
@@ -131,7 +136,74 @@ def load_tokenizer(path: str) -> Optional[Tokenizer]:
 
 
 def render_chat(tokenizer: Optional[Tokenizer], messages: list[dict],
-                add_generation_prompt: bool = True) -> str:
+                add_generation_prompt: bool = True,
+                extra: Optional[dict] = None) -> str:
     if tokenizer is None:
         return _chatml(messages, add_generation_prompt)
-    return tokenizer.apply_chat_template(messages, add_generation_prompt)
+    return tokenizer.apply_chat_template(messages, add_generation_prompt, extra)
+
+
+# -- appels d'outils ---------------------------------------------------------
+_APPEL = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
+# Qwen3-Coder : <tool_call><function=nom><parameter=clé>valeur</parameter>…</function></tool_call>
+_APPEL_XML = re.compile(r"<tool_call>\s*<function=([^>\s]+)>(.*?)</function>\s*</tool_call>", re.S)
+_PARAM_XML = re.compile(r"<parameter=([^>\s]+)>(.*?)</parameter>", re.S)
+
+
+def _valeur(v: str):
+    """Une valeur de paramètre XML : nombre, booléen, JSON ou texte tel quel."""
+    v = v.strip()
+    for essai in (v, v.lower()):
+        if essai in ("true", "false", "null"):
+            return {"true": True, "false": False, "null": None}[essai]
+    try:
+        return json.loads(v)
+    except (json.JSONDecodeError, ValueError):
+        return v
+
+
+def messages_pour_gabarit(messages: list) -> list[dict]:
+    """Les messages tels que les gabarits HF les attendent : rôle et texte,
+    plus ``name``, ``tool_calls`` et ``tool_call_id`` quand ils existent —
+    sans eux un second tour d'outil ne se rend pas."""
+    out = []
+    for m in messages:
+        d = {"role": m.role, "content": m.text()}
+        for k in ("name", "tool_calls", "tool_call_id"):
+            v = getattr(m, k, None)
+            if v is not None:
+                d[k] = v
+        out.append(d)
+    return out
+
+
+def extraire_appels(texte: str) -> tuple[str, list[dict]]:
+    """Sépare les ``<tool_call>{json}</tool_call>`` du texte (Qwen3, Nemotron,
+    Hermes, KAT…). Rend (texte restant, appels au format OpenAI).
+
+    Un bloc dont le JSON ne se lit pas reste dans le texte : mieux vaut un
+    appel manqué qu'un appel inventé."""
+    trouves = []                                     # (début, fin, nom, args)
+    for m in _APPEL.finditer(texte):
+        try:
+            obj = json.loads(m.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj.get("name"), str):
+            trouves.append((m.start(), m.end(), obj["name"],
+                            obj.get("arguments", obj.get("parameters", {}))))
+    for m in _APPEL_XML.finditer(texte):
+        params = {k: _valeur(v) for k, v in _PARAM_XML.findall(m.group(2))}
+        trouves.append((m.start(), m.end(), m.group(1), params))
+    trouves.sort()
+    appels, garder, pos = [], [], 0
+    for debut, fin, nom, args in trouves:
+        if not isinstance(args, str):
+            args = json.dumps(args, ensure_ascii=False)
+        appels.append({"id": f"call_{len(appels)}_{abs(hash(texte[debut:fin])) % 10**8:08d}",
+                       "type": "function",
+                       "function": {"name": nom, "arguments": args}})
+        garder.append(texte[pos:debut]); pos = fin
+    garder.append(texte[pos:])
+    reste = "".join(garder).strip() if appels else texte
+    return reste, appels

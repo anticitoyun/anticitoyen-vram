@@ -162,3 +162,84 @@ def test_anthropic_messages_route(client):
     assert noms[0] == "message_start"
     assert "content_block_delta" in noms
     assert noms[-1] == "message_stop"
+
+
+def test_chat_template_kwargs_atteint_le_gabarit():
+    """{"enable_thinking": false} doit parvenir au gabarit Jinja, comme chez
+    vLLM et llama.cpp — sans quoi un Qwen3 réfléchit toujours, et un modèle
+    qui répond vide en mode réflexion n'a aucun recours."""
+    from acvram.server.chat import Tokenizer, render_chat
+    tmpl = ("{% for m in messages %}<|{{ m.role }}|>{{ m.content }}{% endfor %}"
+            "{% if add_generation_prompt %}<|assistant|>"
+            "{% if enable_thinking is defined and not enable_thinking %}<think></think>"
+            "{% else %}<think>{% endif %}{% endif %}")
+    tk = Tokenizer(backend=None, config={}, template=tmpl, template_source="test")
+    msgs = [{"role": "user", "content": "Bonjour"}]
+    assert render_chat(tk, msgs, True).endswith("<|assistant|><think>")
+    assert render_chat(tk, msgs, True, {"enable_thinking": False}).endswith("<think></think>")
+    assert render_chat(tk, msgs, True, {"enable_thinking": True}).endswith("<|assistant|><think>")
+
+
+def test_chat_template_kwargs_dans_la_requete():
+    from acvram.server.protocol import ChatCompletionRequest
+    r = ChatCompletionRequest(model="x", messages=[{"role": "user", "content": "a"}],
+                              chat_template_kwargs={"enable_thinking": False})
+    assert r.chat_template_kwargs == {"enable_thinking": False}
+
+
+def test_extraire_appels_qwen():
+    from acvram.server.chat import extraire_appels
+    txt = ('Je regarde.\n<tool_call>\n{"name": "meteo", "arguments": {"ville": "Lyon"}}\n</tool_call>')
+    reste, appels = extraire_appels(txt)
+    assert reste == "Je regarde."
+    assert len(appels) == 1 and appels[0]["type"] == "function"
+    assert appels[0]["function"]["name"] == "meteo"
+    assert appels[0]["function"]["arguments"] == '{"ville": "Lyon"}'
+
+
+def test_extraire_appels_json_casse_reste_du_texte():
+    from acvram.server.chat import extraire_appels
+    txt = "<tool_call>{pas du json}</tool_call>"
+    assert extraire_appels(txt) == (txt, [])
+
+
+def test_extraire_appels_plusieurs():
+    from acvram.server.chat import extraire_appels
+    txt = ('<tool_call>{"name": "a", "arguments": {}}</tool_call>'
+           '<tool_call>{"name": "b", "arguments": {"x": 1}}</tool_call>')
+    reste, appels = extraire_appels(txt)
+    assert reste == "" and [a["function"]["name"] for a in appels] == ["a", "b"]
+    assert appels[0]["id"] != appels[1]["id"]
+
+
+def test_outils_rendus_par_le_gabarit():
+    """``tools`` doit atteindre le gabarit : c'est lui qui les décrit au modèle."""
+    from acvram.server.chat import Tokenizer, render_chat
+    tmpl = ("{% if tools %}<|tools|>{% for t in tools %}{{ t.function.name }};{% endfor %}{% endif %}"
+            "{% for m in messages %}<|{{ m.role }}|>{{ m.content }}{% endfor %}")
+    tk = Tokenizer(backend=None, config={}, template=tmpl, template_source="test")
+    outils = [{"type": "function", "function": {"name": "meteo", "parameters": {}}}]
+    r = render_chat(tk, [{"role": "user", "content": "?"}], True, {"tools": outils})
+    assert r.startswith("<|tools|>meteo;")
+
+
+def test_messages_pour_gabarit_garde_les_champs_outil():
+    from acvram.server.chat import messages_pour_gabarit
+    from acvram.server.protocol import ChatMessage
+    ms = [ChatMessage(role="assistant", content=None,
+                      tool_calls=[{"id": "c1", "type": "function",
+                                   "function": {"name": "meteo", "arguments": "{}"}}]),
+          ChatMessage(role="tool", content="12 °C", tool_call_id="c1", name="meteo")]
+    d = messages_pour_gabarit(ms)
+    assert d[0]["tool_calls"][0]["function"]["name"] == "meteo" and d[0]["content"] == ""
+    assert d[1] == {"role": "tool", "content": "12 °C", "name": "meteo", "tool_call_id": "c1"}
+
+
+def test_extraire_appels_xml_qwen3_coder():
+    from acvram.server.chat import extraire_appels
+    txt = ("<tool_call>\n<function=meteo>\n<parameter=ville>\nLyon\n</parameter>\n"
+           "<parameter=jours>\n3\n</parameter>\n</function>\n</tool_call>")
+    reste, appels = extraire_appels(txt)
+    assert reste == "" and appels[0]["function"]["name"] == "meteo"
+    import json
+    assert json.loads(appels[0]["function"]["arguments"]) == {"ville": "Lyon", "jours": 3}

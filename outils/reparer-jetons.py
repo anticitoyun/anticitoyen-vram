@@ -27,10 +27,20 @@ SIMULER = "--simuler" in sys.argv
 
 
 def gguf_de(nom: str):
-    """Le premier .gguf du dossier source de même nom, s'il existe."""
+    """Le premier .gguf du dossier source de même nom — ou, à défaut, du seul
+    dossier source dont le nom contient celui du converti (« Ornith-1.0-35B-kimi »
+    a été converti depuis « Ornith-1.0-35B-Heretic-kimi-IQ4_XS »)."""
     d = os.path.join(SOURCES, nom)
     if not os.path.isdir(d):
-        return None
+        base = nom.lower().replace("-", "").replace("_", "").replace(".", "")
+        cands = [c for c in os.listdir(SOURCES)
+                 if os.path.isdir(os.path.join(SOURCES, c))
+                 and all(m in c.lower().replace("-", "").replace("_", "").replace(".", "")
+                         for m in base.split("kimi")[:1])
+                 and base.replace("kimi", "") in c.lower().replace("-", "").replace("_", "").replace(".", "").replace("heretic", "").replace("iq4xs", "").replace("kimi", "")]
+        if len(cands) != 1:
+            return None
+        d = os.path.join(SOURCES, cands[0])
     for f in sorted(os.listdir(d)):
         if f.endswith(".gguf") and "-of-" not in f or f.endswith("00001-of-00002.gguf"):
             return os.path.join(d, f)

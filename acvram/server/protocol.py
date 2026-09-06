@@ -90,6 +90,9 @@ class ChatCompletionRequest(_SamplingFields):
     response_format: Optional[dict[str, Any]] = None
     stream_options: Optional[dict[str, Any]] = None
     add_generation_prompt: bool = True
+    # Variables passées au gabarit Jinja, comme chez vLLM et llama.cpp :
+    # {"enable_thinking": false} coupe la réflexion d'un Qwen3.
+    chat_template_kwargs: Optional[dict[str, Any]] = None
 
 
 class CompletionRequest(_SamplingFields):
@@ -105,7 +108,8 @@ class CompletionRequest(_SamplingFields):
 
 class ChoiceMessage(BaseModel):
     role: str = "assistant"
-    content: str = ""
+    content: Optional[str] = ""
+    tool_calls: Optional[list[dict[str, Any]]] = None
 
 
 class ChatChoice(BaseModel):
@@ -127,6 +131,7 @@ class ChatCompletionResponse(BaseModel):
 class DeltaMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
+    tool_calls: Optional[list[dict[str, Any]]] = None
 
 
 class ChunkChoice(BaseModel):
