@@ -2067,3 +2067,24 @@ parcourir dans la même session, sur la même machine au repos :
 La troisième ligne reproduit exactement la condition du banc du 6 septembre,
 qui a rendu 10,3 jetons par seconde. `ACVRAM_PLAN_FIGE` désactive aussi la
 replanification, pour rester cohérent avec son nom.
+
+### Combien de plans figés sont réellement périmés : deux sur cent onze
+
+La replanification de la v0.4.68 ne se déclenche que si les cartes du plan figé
+ne sont pas celles de la machine. Objection légitime : faut-il replanifier
+systématiquement, au risque de changer le comportement de modèles qui marchent,
+ou reconvertir le parc, au prix de plusieurs heures de GPU et de disque ?
+
+La question se tranche par la mesure plutôt que par le jugement. Plan figé de
+chaque manifeste comparé au plan que rend le planificateur d'aujourd'hui, sur
+les 111 modèles du parc :
+
+* **109 plans figés sont déjà identiques** à celui d'aujourd'hui ;
+* 2 diffèrent : Qwen3-Coder-Next (une carte au lieu de deux, seize couches
+  processeur au lieu d'aucune) et `qwen3b-pipeline` (deux cartes au lieu d'une,
+  aucun exil ni avant ni après).
+
+Les deux divergences sont des désaccords sur le nombre de cartes, donc toutes
+deux déjà couvertes par la règle conservatrice. Replanifier systématiquement
+changerait exactement les mêmes deux modèles. Il n'y a donc rien à reconvertir,
+et aucune décision à prendre : la règle en place attrape la totalité des cas.
