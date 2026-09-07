@@ -277,7 +277,13 @@ def build_tiers(rig: Rig, opts: PlannerOptions) -> list[Tier]:
         caps = g.caps
         fmt = opts.force_format or (caps.weight_format if caps else "int4_awq")
         kvf = caps.kv_format if caps else "int8"
-        usable = int((g.total_mem - opts.reserve_per_gpu) * (1 - FRAGMENTATION_MARGIN))
+        # Planifier sur la mémoire LIBRE, pas totale. Le 8/09/2026, le plan
+        # recalculé de Qwen3-Coder-Next donnait 8 Gio de poids à la 3080 Ti
+        # « de 10,9 Gio » alors que le llama-server permanent y tenait déjà
+        # 5,1 Gio : OOM au chargement, deux cases de mesure perdues. Le
+        # chargeur bornait bien le cache KV sur la VRAM libre, mais après que
+        # le plan avait déjà distribué les poids.
+        usable = int((g.free_mem - opts.reserve_per_gpu) * (1 - FRAGMENTATION_MARGIN))
         tiers.append(Tier(
             name=f"cuda:{g.index}", kind="gpu", device_index=g.index,
             capacity=max(0, usable), weight_format=fmt, kv_format=kvf,
