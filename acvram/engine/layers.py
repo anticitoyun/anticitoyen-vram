@@ -22,7 +22,7 @@ import torch.nn.functional as F
 
 from .. import kernels
 from ..quant.calibrate import ChannelScaler
-from ..quant.formats import PlainTensor, dequantize
+from ..quant.formats import INT8Tensor, PlainTensor, dequantize
 from ..quant.int4 import INT4Tensor
 from ..quant.nvfp4 import NVFP4Tensor
 
@@ -43,13 +43,16 @@ class StreamedWeight:
     """
 
     def __init__(self, host_tensors: dict[str, torch.Tensor], device: torch.device,
-                 n_buffers: int = 2) -> None:
+                 n_buffers: int = 2, pool: "Optional[ExpertPool]" = None) -> None:
         self.host = {k: (v.pin_memory() if not v.is_pinned() else v)
                      for k, v in host_tensors.items()}
         self.device = device
-        self.stream = torch.cuda.Stream(device=device) if device.type == "cuda" else None
+        self.pool = pool
+        self.stream = (pool.stream if pool is not None else
+                       torch.cuda.Stream(device=device) if device.type == "cuda" else None)
         self._buffers: list[dict[str, torch.Tensor]] = []
         self._events: list[Any] = []
+        self._libres: list[Any] = []
         self._slot = 0
         self.n_buffers = n_buffers
 
@@ -62,15 +65,30 @@ class StreamedWeight:
                 for k, v in self.host.items()})
             self._events.append(
                 torch.cuda.Event() if self.device.type == "cuda" else None)
+            self._libres.append(
+                torch.cuda.Event() if self.device.type == "cuda" else None)
+        if self.stream is not None:
+            # L'allocation est ordonnée sur le flux courant : le bloc rendu par
+            # l'allocateur peut encore être lu par un noyau de ce flux (une
+            # temporaire de la couche précédente). Écrire dessus depuis le
+            # flux annexe sans attendre corrompait cette lecture — c'est la
+            # course qui faisait planter Qwen3-Coder-Next au premier prompt
+            # long, et que CUDA_LAUNCH_BLOCKING masquait.
+            alloue = torch.cuda.Event()
+            alloue.record(torch.cuda.current_stream(self.device))
+            alloue.wait(self.stream)
 
     def prefetch(self) -> int:
         """Lance la copie vers le tampon suivant ; rend son emplacement."""
         if self.device.type != "cuda":
             return 0
+        if self.pool is not None:
+            return self.pool.copier(self.host)
         self._ensure()
         slot = self._slot
         self._slot = (self._slot + 1) % self.n_buffers
         with torch.cuda.stream(self.stream):
+            self._libres[slot].wait(self.stream)      # le calcul précédent a fini de lire
             for k, dst in self._buffers[slot].items():
                 dst.copy_(self.host[k], non_blocking=True)
             self._events[slot].record(self.stream)
@@ -79,12 +97,113 @@ class StreamedWeight:
     def wait(self, slot: int) -> dict[str, torch.Tensor]:
         if self.device.type != "cuda":
             return self.host
+        if self.pool is not None:
+            return self.pool.attendre(slot)
         self._events[slot].wait(torch.cuda.current_stream(self.device))
         return self._buffers[slot]
+
+    def release(self, slot: int) -> None:
+        """Après le calcul : l'emplacement peut être réécrit."""
+        if self.device.type != "cuda":
+            return
+        if self.pool is not None:
+            self.pool.liberer(slot)
+        elif self._libres:
+            self._libres[slot].record(torch.cuda.current_stream(self.device))
 
     @property
     def nbytes(self) -> int:
         return sum(t.numel() * t.element_size() for t in self.host.values())
+
+
+class ExpertPool:
+    """Tampons GPU partagés par tous les experts exilés d'une même couche.
+
+    Le double tampon de `StreamedWeight` convient à un poids dense : deux
+    copies d'un seul tenseur. Appliqué à un mélange de 512 experts, il
+    allouait deux copies de *chaque* expert dès le premier préchargement —
+    deux fois la couche entière sur la carte, par couche exilée. Sur
+    Qwen3-Coder-Next cela dépassait la 5090 à la première requête.
+
+    Ici la couche possède `n_slots` jeux de tampons par disposition (gate et
+    up d'un côté, down de l'autre) ; dix experts routés par jeton n'en
+    occupent jamais plus. Un emplacement est réécrit seulement après que le
+    calcul qui le lisait a été enregistré comme fini sur le flux de calcul.
+    Rien n'est préchargé d'avance : on ne connaît les experts à copier
+    qu'après le routage.
+    """
+
+    def __init__(self, device: torch.device, n_slots: int) -> None:
+        self.device = device
+        self.n_slots = max(2, n_slots)
+        self.stream = torch.cuda.Stream(device=device) if device.type == "cuda" else None
+        self._par_disposition: dict[tuple, dict] = {}
+        self._slots: list[tuple[tuple, int]] = []      # slot global -> (disposition, index)
+
+    @staticmethod
+    def _disposition(host: dict[str, torch.Tensor]) -> tuple:
+        return tuple((k, tuple(v.shape), v.dtype) for k, v in sorted(host.items()))
+
+    def _jeu(self, host: dict[str, torch.Tensor]) -> dict:
+        d = self._disposition(host)
+        jeu = self._par_disposition.get(d)
+        if jeu is None:
+            jeu = {
+                "tampons": [{k: torch.empty_like(v, device=self.device)
+                             for k, v in host.items()} for _ in range(self.n_slots)],
+                "pret": [torch.cuda.Event() for _ in range(self.n_slots)],
+                "libre": [torch.cuda.Event() for _ in range(self.n_slots)],
+                "prochain": 0,
+                "base": len(self._slots),
+            }
+            for i in range(self.n_slots):
+                self._slots.append((d, i))
+            self._par_disposition[d] = jeu
+            if self.stream is not None:
+                alloue = torch.cuda.Event()
+                alloue.record(torch.cuda.current_stream(self.device))
+                alloue.wait(self.stream)
+        return jeu
+
+    # ACVRAM_POOL_SYNC=1 : copies sur le flux de calcul, sans flux annexe ni
+    # événement. Témoin de diagnostic : si une course disparaît avec lui, elle
+    # est dans l'ordonnancement ci-dessous.
+    SYNC = bool(os.environ.get("ACVRAM_POOL_SYNC"))
+
+    def copier(self, host: dict[str, torch.Tensor]) -> int:
+        jeu = self._jeu(host)
+        i = jeu["prochain"]
+        jeu["prochain"] = (i + 1) % self.n_slots
+        if self.SYNC:
+            for k, dst in jeu["tampons"][i].items():
+                dst.copy_(host[k], non_blocking=True)
+            return jeu["base"] + i
+        with torch.cuda.stream(self.stream):
+            # ne pas écraser un emplacement qu'un calcul lit encore
+            jeu["libre"][i].wait(self.stream)
+            for k, dst in jeu["tampons"][i].items():
+                dst.copy_(host[k], non_blocking=True)
+            jeu["pret"][i].record(self.stream)
+        return jeu["base"] + i
+
+    def attendre(self, slot: int) -> dict[str, torch.Tensor]:
+        d, i = self._slots[slot]
+        jeu = self._par_disposition[d]
+        if not self.SYNC:
+            jeu["pret"][i].wait(torch.cuda.current_stream(self.device))
+        return jeu["tampons"][i]
+
+    def liberer(self, slot: int) -> None:
+        if self.SYNC:
+            return
+        d, i = self._slots[slot]
+        self._par_disposition[d]["libre"][i].record(torch.cuda.current_stream(self.device))
+
+    @property
+    def nbytes(self) -> int:
+        return sum(t.numel() * t.element_size()
+                   for jeu in self._par_disposition.values()
+                   for tampons in jeu["tampons"] for t in tampons.values())
 
 
 class QuantLinear(nn.Module):
@@ -110,10 +229,11 @@ class QuantLinear(nn.Module):
         self._pending_slot: Optional[int] = None
 
     # -- placement -------------------------------------------------------
-    def to_device(self, device: torch.device, streamed: bool = False) -> "QuantLinear":
+    def to_device(self, device: torch.device, streamed: bool = False,
+                  pool: "Optional[ExpertPool]" = None) -> "QuantLinear":
         if streamed:
             self.streamed = StreamedWeight(
-                dict(self.qweight.state_dict()), device)
+                dict(self.qweight.state_dict()), device, pool=pool)
         else:
             self.qweight = self.qweight.to(device)
             if self.bias is not None:
@@ -123,26 +243,33 @@ class QuantLinear(nn.Module):
         return self
 
     def prefetch(self) -> None:
-        if self.streamed is not None:
+        # Un poids d'un pool n'est jamais préchargé d'avance : on ne sait
+        # quels experts serviront qu'après le routage, et précharger les 512
+        # d'une couche remplissait la carte.
+        if os.environ.get("ACVRAM_SANS_PRECHARGE"):
+            return                       # diagnostic : tout se copie à la demande
+        if self.streamed is not None and self.streamed.pool is None:
             self._pending_slot = self.streamed.prefetch()
 
     # -- forward ---------------------------------------------------------
-    def _resolved_weight(self) -> Any:
+    def _resolved_weight(self) -> tuple[Any, Optional[int]]:
         if self.streamed is None:
-            return self.qweight
+            return self.qweight, None
         slot = self._pending_slot if self._pending_slot is not None \
             else self.streamed.prefetch()
         tensors = self.streamed.wait(slot)
         self._pending_slot = None
-        return _rehydrate(self.qweight, tensors)
+        return _rehydrate(self.qweight, tensors), slot
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.scaler is not None and not self.scaler.is_identity:
             x = self.scaler.apply(x)
-        w = self._resolved_weight()
+        w, slot = self._resolved_weight()
         # Le registre choisit le backend par (format, peripherique) ; voir
         # kernels/backends.py. Un acces de dictionnaire memoise, rien de plus.
         y = kernels.matmul(x, w)
+        if slot is not None:
+            self.streamed.release(slot)
         if self.bias is not None:
             y = y + self.bias.to(y.dtype)
         return y
@@ -168,6 +295,12 @@ def _rehydrate(template: Any, tensors: dict[str, torch.Tensor]) -> Any:
                           template.group_size, template.shape, template.padded_in)
     if isinstance(template, PlainTensor):
         return PlainTensor(tensors["weight"], template.shape, template.format)
+    if isinstance(template, INT8Tensor):
+        # Les tenseurs promus en 8 bits (experts partagés, attention linéaire)
+        # suivent le perceptron exilé : sans cette branche, le premier
+        # perceptron transféré d'un MoE plantait la requête.
+        return INT8Tensor(tensors["qweight"], tensors["scales"], tensors["zeros"],
+                          template.group_size, template.shape)
     raise TypeError(f"impossible de reconstruire {type(template)!r}")
 
 

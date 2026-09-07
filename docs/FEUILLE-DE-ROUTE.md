@@ -2140,3 +2140,44 @@ reproduire une mesure ancienne.
 
 C'est la même leçon que `host_compute_gb_s` : un mécanisme dont personne n'a
 vérifié qu'il servait à quelque chose finit par coûter plus que ce qu'il évite.
+
+## 7 septembre 2026, aube — le chemin « exilé, calculé sur la carte » n'avait jamais tourné (v0.4.73)
+
+Onze mesures de référence dans la nuit, toutes entre 9,7 et 10,5 jetons par
+seconde sur Coder-Next : le banc reproduit le 10,3 du 6 septembre. Les cases
+corrigées, elles, ont échoué six fois à six endroits différents, chacun un
+défaut du chemin « poids stocké en RAM hôte, calculé sur la carte », qui
+existait dans le planificateur et n'avait jamais été exécuté sur un modèle
+réel puisque le chargeur forçait toujours le calcul processeur.
+
+| n° | défaut | correction |
+|---|---|---|
+| 1 | le chargeur forçait `mlp_exec = "cpu"` (v0.4.68) | garde `gpu` |
+| 2 | capacité d'étage sur la mémoire totale, 5,1 Gio de llama-server ignorés (v0.4.72) | mémoire libre |
+| 3 | le routeur, lu à cru par `MoEBlock`, restait sur le processeur | routeur résident |
+| 4 | `_rehydrate` ignorait INT8, format des experts partagés | branche ajoutée |
+| 5 | double tampon par expert : deux copies de la couche entière sur la carte | `ExpertPool` par couche, dimensionné pour les experts routés |
+| 6 | course : le flux annexe écrivait un bloc alloué sur le flux courant sans attendre | événement d'allocation et de libération |
+
+Le sixième est établi par bisection sur le serveur, à conditions du banc :
+lancements CUDA bloquants → succès ; synchronisation après chaque couche →
+succès, 10,0 t/s ; préchargement d'avance désactivé → succès, 10,0 t/s ;
+copies du pool sur le flux de calcul → échec ; sans graphes → échec. La
+correction de la course est écrite ; **les tests unitaires passent, l'essai
+serveur n'a pas été refait dessus** (pause demandée). Repli prouvé :
+`ACVRAM_SANS_PRECHARGE=1`.
+
+Test à sec de la couche 32 exilée sur pool : 17 Mio sur la carte au lieu de
+0,88 Gio, écart 5·10⁻⁴ sur une amplitude de 0,12, 3,1 ms par jeton. Mais les
+deux cases qui marchent rendent 10,0 t/s, soit la référence, alors que 18
+couches à 3,1 ms ajoutées aux 97 ms de la référence donneraient 6,5. Le
+chiffre à sec est le cas le plus défavorable, pas le coût courant, et deux
+chemins très différents rendant le même débit disent que le goulot est
+ailleurs. Mesure suivante, en service : faire varier le nombre de couches
+exilées, 0, 9, 18, même prompt, références de part et d'autre.
+
+Ajouts de diagnostic : le serveur journalise la pile de ses erreurs ;
+`ACVRAM_POOL_SYNC`, `ACVRAM_SANS_PRECHARGE`, `ACVRAM_SYNC_COUCHES`.
+Notés, non traités : l'échec FP4 tensor cores sur la 3080 Ti éteint le chemin
+pour toutes les cartes ; 39 Gio de RSS avec les experts épinglés ; la
+fonction de rang compte les octets stockés, pas lus.

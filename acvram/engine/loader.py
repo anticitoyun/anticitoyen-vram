@@ -24,7 +24,7 @@ from ..quant.formats import INT8Tensor, PlainTensor
 from ..quant.int4 import INT4Tensor
 from ..quant.nvfp4 import NVFP4Tensor
 from .config import ModelSpec
-from .layers import QuantLinear, RMSNorm, RotaryEmbedding
+from .layers import ExpertPool, QuantLinear, RMSNorm, RotaryEmbedding
 from .model import (ACVRamModel, Attention, DecoderLayer, DecoderLayerGDN, MoEBlockGemma,
                     DecoderLayerGemma, DecoderLayerParallel, MLP, MLP2, MoEBlock)
 
@@ -204,6 +204,30 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 raise KeyError(f"tenseur manquant {p + suffix}")
             return m.to_device(mlp_dev, streamed=streamed_mlp)
 
+        # Les experts d'une couche exilée partagent un pool de tampons GPU
+        # dimensionné pour les experts routés d'un jeton, au lieu de deux
+        # copies privées chacun (voir ExpertPool).
+        pool = (ExpertPool(mlp_dev, (spec.num_experts_per_tok or 2) + 1)
+                if streamed_mlp else None)
+
+        def elin(suffix: str) -> QuantLinear:
+            m = _linear(p + suffix, manifest, reader, group_size)
+            if m is None:
+                raise KeyError(f"tenseur manquant {p + suffix}")
+            return m.to_device(mlp_dev, streamed=streamed_mlp, pool=pool)
+
+        def routeur(suffix: str) -> QuantLinear:
+            # Le routeur pèse quelques mégaoctets et MoEBlock lit son poids
+            # brut (`router.qweight.weight`) sans passer par le mécanisme de
+            # transfert : un routeur « streamed » laissait ce poids sur le
+            # processeur et faisait planter la première requête d'un
+            # perceptron exilé (« mat2 is on cpu »). Il reste résident, là où
+            # s'exécute le perceptron.
+            m = _linear(p + suffix, manifest, reader, group_size)
+            if m is None:
+                raise KeyError(f"tenseur manquant {p + suffix}")
+            return m.to_device(mlp_dev, streamed=False)
+
         def norm_opt(suffix: str) -> Optional[RMSNorm]:
             """RMSNorm facultative — absente des modeles sans QK-norm."""
             w = reader.get(p + suffix) if p + suffix in manifest["tensors"] else None
@@ -215,14 +239,14 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 return MLP(mlin("mlp.gate_proj.weight"),
                            mlin("mlp.up_proj.weight"),
                            mlin("mlp.down_proj.weight"))
-            router = mlin("mlp.gate.weight")
+            router = routeur("mlp.gate.weight")
             experts = []
             e = 0
             while manifest["tensors"].get(p + f"mlp.experts.{e}.gate_proj.weight"):
                 experts.append(MLP(
-                    mlin(f"mlp.experts.{e}.gate_proj.weight"),
-                    mlin(f"mlp.experts.{e}.up_proj.weight"),
-                    mlin(f"mlp.experts.{e}.down_proj.weight")))
+                    elin(f"mlp.experts.{e}.gate_proj.weight"),
+                    elin(f"mlp.experts.{e}.up_proj.weight"),
+                    elin(f"mlp.experts.{e}.down_proj.weight")))
                 e += 1
             shared = None
             shared_gate = None
@@ -281,13 +305,13 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 experts = []
                 e = 0
                 while manifest["tensors"].get(p + f"mlp.experts.{e}.gate_proj.weight"):
-                    experts.append(MLP(mlin(f"mlp.experts.{e}.gate_proj.weight"),
-                                       mlin(f"mlp.experts.{e}.up_proj.weight"),
-                                       mlin(f"mlp.experts.{e}.down_proj.weight"),
+                    experts.append(MLP(elin(f"mlp.experts.{e}.gate_proj.weight"),
+                                       elin(f"mlp.experts.{e}.up_proj.weight"),
+                                       elin(f"mlp.experts.{e}.down_proj.weight"),
                                        act=spec.hidden_activation))
                     e += 1
                 moe = MoEBlockGemma(
-                    mlin("mlp.gate.weight"), experts, spec.num_experts_per_tok or 8,
+                    routeur("mlp.gate.weight"), experts, spec.num_experts_per_tok or 8,
                     reader.get(p + "mlp.router_scale.weight").to(torch.float32).to(mlp_dev),
                     reader.get(p + "mlp.per_expert_scale.weight").to(torch.float32).to(mlp_dev),
                     spec.rms_norm_eps)
@@ -410,10 +434,10 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 if kind == "mlp":
                     mlp_n = MLP2(mlin("mlp.up_proj.weight"), mlin("mlp.down_proj.weight"), "relu2")
                 else:
-                    router = mlin("mlp.gate.weight"); experts = []; e = 0
+                    router = routeur("mlp.gate.weight"); experts = []; e = 0
                     while manifest["tensors"].get(p + f"mlp.experts.{e}.up_proj.weight"):
-                        experts.append(MLP2(mlin(f"mlp.experts.{e}.up_proj.weight"),
-                                            mlin(f"mlp.experts.{e}.down_proj.weight"), "relu2"))
+                        experts.append(MLP2(elin(f"mlp.experts.{e}.up_proj.weight"),
+                                            elin(f"mlp.experts.{e}.down_proj.weight"), "relu2"))
                         e += 1
                     shared = None
                     if manifest["tensors"].get(p + "mlp.shared_expert.up_proj.weight"):

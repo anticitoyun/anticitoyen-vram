@@ -415,6 +415,9 @@ class MLP2(nn.Module):
         return self.down_proj(h)
 
 
+_SYNC_COUCHES = bool(os.environ.get("ACVRAM_SYNC_COUCHES"))
+
+
 class MoEBlock(nn.Module):
     """Mélange d'experts creux.
 
@@ -756,9 +759,13 @@ class MoEBlock(nn.Module):
         return y
 
     def prefetch(self) -> None:
-        for expert in self.experts:
-            for lin in (expert.gate_proj, expert.up_proj, expert.down_proj):
-                lin.prefetch()
+        # Seul l'expert partagé sert à chaque jeton et peut être préchargé.
+        # Les experts routés ne se connaissent qu'après le routage : leur
+        # QuantLinear, sur un pool, ignore de toute façon le préchargement.
+        if self.shared is not None and not os.environ.get("ACVRAM_SANS_PRECHARGE"):
+            for lin in self.shared.modules():
+                if isinstance(lin, QuantLinear):
+                    lin.prefetch()
 
 
 # Jetons au-delà desquels le MoE repasse de la GEMV groupée (une paire
@@ -1195,6 +1202,15 @@ class ACVRamModel(nn.Module):
             if i + 1 < len(self.layers):
                 self.layers[i + 1].prefetch()
             x = layer(x, batch, self.caches.get(i))
+            if _SYNC_COUCHES:
+                # Diagnostic : une faute CUDA asynchrone remonte au premier
+                # point de synchronisation, loin de son origine. Synchroniser
+                # après chaque couche la fait remonter avec le bon index.
+                try:
+                    torch.cuda.synchronize(layer.device)
+                except Exception as exc:
+                    raise RuntimeError(f"faute CUDA après la couche {i} "
+                                       f"({type(layer).__name__} sur {layer.device}) : {exc}") from exc
 
         brut = x
         x = self.norm(x.to(self.norm.weight.device))

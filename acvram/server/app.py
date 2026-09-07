@@ -518,6 +518,10 @@ async def _stream_chat(service: EngineService, request_id: str,
                                        total_tokens=prompt_tokens + n_out)
                 yield f"data: {done.model_dump_json(exclude_none=True)}\n\n"
     except Exception as exc:                          # noqa: BLE001
+        # Le message seul ne dit pas d'où vient une erreur CUDA : sans la
+        # pile, quatre séries de banc ont été perdues le 7/09 à deviner.
+        import traceback
+        traceback.print_exc()
         err = ErrorResponse.make(str(exc), "server_error")
         yield f"data: {json.dumps(err.model_dump())}\n\n"
     yield "data: [DONE]\n\n"
@@ -541,6 +545,10 @@ async def _stream_completion(service: EngineService, request_id: str,
                                    total_tokens=prompt_tokens + out.completion_tokens)
             yield f"data: {resp.model_dump_json(exclude_none=True)}\n\n"
     except Exception as exc:                          # noqa: BLE001
+        # Le message seul ne dit pas d'où vient une erreur CUDA : sans la
+        # pile, quatre séries de banc ont été perdues le 7/09 à deviner.
+        import traceback
+        traceback.print_exc()
         err = ErrorResponse.make(str(exc), "server_error")
         yield f"data: {json.dumps(err.model_dump())}\n\n"
     yield "data: [DONE]\n\n"
