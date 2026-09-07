@@ -219,3 +219,101 @@ transpose à la conversion.
    rien n'ordonne les requêtes pour en tirer parti.
 5. **La séparation prefill/decode** (10) : la bonne façon d'exploiter deux
    cartes dissemblables, là où le pipeline bi-GPU a échoué.
+
+---
+
+# Deuxième relevé — 7 septembre 2026
+
+Fait après la nuit du 6 au 7, qui a mis au jour six défauts du chemin
+« poids en RAM hôte, calculé sur la carte » et un planificateur optimiste
+d'un facteur 2,4 à 3,4 sur tout le parc. Axes retenus ici : FP4 et NVFP4,
+choix des échelles, cache de clés-valeurs et de préfixe.
+
+Règle appliquée : un article ne compte que si l'on peut nommer le fichier
+qu'il toucherait et la mesure qui dirait s'il marche. Les chiffres viennent
+de la section expérimentale, jamais du résumé. Ce qui n'a pas été lu est dit
+comme tel.
+
+**Contraintes qui rendent un chiffre comparable ou non.** Les cartes sont
+bridées, 400 W et 275 W ; aucun débit publié à pleine puissance ne se compare
+à nos références. Lot de un, une requête à la fois. Deux cartes dissemblables,
+la 5090 avec les instructions FP4 natives, la 3080 Ti sans. Modèle de travail :
+80 milliards de paramètres dont 3,2 actifs, 512 experts, 10 routés — rapport
+octets stockés sur octets lus par jeton de 45, contre quelques unités dans la
+littérature sur 8 ou 64 experts.
+
+## 15. Microbenchmarking NVIDIA's Blackwell Architecture
+
+`arXiv:2512.02189` — retenu, avec une réserve de transposition.
+
+Mesure les cœurs tensoriels de Blackwell précision par précision. FP4 atteint
+7702,5 TFLOPS, soit **96,3 % du pic théorique** ; FP8 3851,4 TFLOPS, 96,3 %
+aussi. La latence ne varie que de 1,27 fois entre FP64 et FP4, 11,2 à 14,2
+cycles, alors que le débit varie de 177 fois : le débit vient de la largeur
+du chemin de données, pas d'un pipeline plus profond.
+
+Sa phrase utile est une conclusion négative : « avec 96 à 99 % du pic
+théorique sur toutes les précisions, les cœurs tensoriels ne sont pas le
+goulot ; **la bande passante mémoire et le coût de lancement des noyaux** le
+sont ». C'est exactement la forme de l'erreur de notre planificateur, mesurée
+la nuit dernière : un plancher fixe d'environ 3 ms par jeton plus une
+composante croissante avec la taille.
+
+**Réserve** : tout est mesuré sur B200, carte de centre de données, pas sur
+une 5090. Aucun chiffre de bande passante mémoire atteinte contre plaque n'y
+figure pour une carte grand public, et c'est précisément le chiffre qui nous
+manque. L'article ne remplace donc pas la mesure ; il dit seulement que
+chercher du côté des lancements et de la mémoire est la bonne direction.
+
+**Ce qu'on en fait** : rien dans le code. Il justifie de mesurer nous-mêmes
+la bande passante effective de la 5090 bridée à 400 W, au lieu des 1792 Go/s
+de plaque que `acvram/memory/tiering.py` retient encore.
+
+## 16. ScaleSweep — initialisation des échelles de bloc NVFP4
+
+`arXiv:2606.07618` — retenu, et c'est le seul des trois qui touche notre code.
+
+NVFP4 associe un format E2M1 à une échelle FP8 par bloc de 16 et une échelle
+globale par tenseur. ScaleSweep dérive des bornes inférieure et supérieure
+pour l'échelle de bloc optimale sous deux objectifs, puis balaie l'espace des
+motifs de bits FP8 dans ce voisinage seulement.
+
+Résultats de la section expérimentale : sous quantification poids et
+activations, le taux de récupération monte à **99,50 % sur Qwen3-8B** ; avec
+le cache de clés-valeurs quantifié, **1 à 2 points de récupération** gagnés
+selon les modèles, sur RTN comme sur GPTQ. L'écart aux échelles FP32
+optimales reste **sous 10 %** dans presque tous les cas, contre les méthodes
+AbsMax et 4/6.
+
+La conclusion dit que la méthode « n'introduit qu'un coût négligeable à
+l'inférence » : c'est une méthode de **quantification**, pas d'exécution.
+
+**Ce qu'on en fait** : `acvram/quant/nvfp4.py`, au choix de l'échelle de bloc
+à la conversion. **Mesure qui dirait si ça marche** : reconvertir un modèle
+témoin et comparer la perplexité par `acvram eval`, à débit inchangé
+puisqu'aucun noyau ne bouge. C'est l'angle mort « choix des échelles » du
+premier relevé, avec cette fois une méthode chiffrée.
+
+**Non lu** : le corps de la démonstration des bornes, et l'annexe E.
+
+## 17. MixFP4 — blocs FP4 ou INT4 selon leur distribution
+
+`arXiv:2605.31035` — **écarté**, malgré des résultats de précision réels.
+
+Constat de départ juste, et qui vaut d'être noté : dans un même tenseur,
+quelques valeurs aberrantes coexistent avec de larges régions plates, et un
+seul dictionnaire 4 bits ne convient pas aux deux. D'où un choix de format
+par bloc, exponentiel pour les blocs à aberrations, uniforme pour les blocs
+plats.
+
+Perplexité WikiText mesurée, utile comme point de comparaison même si l'on
+n'adopte rien : sur Qwen3-8B, BF16 12,21, **NVFP4 12,74**, NVINT4 12,73,
+4/6 12,56. Sur Llama-3.1-8B, BF16 7,33, NVFP4 8,26. Voilà ce que coûte NVFP4
+sur des modèles publics, à comparer un jour à nos propres écarts.
+
+**Pourquoi écarté**, et c'est dit par les auteurs : le prototype est une
+simulation PyTorch, et « la latence et le débit d'un noyau natif pour MixFP4
+dépendent d'un support matériel et d'un travail de noyau hors du champ de cet
+article ». Les 3,1 % de surcoût en surface et 1,5 % en puissance sont une
+**synthèse en 28 nm**, pas une mesure sur silicium existant. Rien de tout
+cela ne s'exécute sur une 5090.
