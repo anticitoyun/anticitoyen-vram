@@ -2181,3 +2181,43 @@ Ajouts de diagnostic : le serveur journalise la pile de ses erreurs ;
 Notés, non traités : l'échec FP4 tensor cores sur la 3080 Ti éteint le chemin
 pour toutes les cartes ; 39 Gio de RSS avec les experts épinglés ; la
 fonction de rang compte les octets stockés, pas lus.
+
+## 7 septembre 2026 — ce que la bibliographie a condamné dans notre propre code
+
+Second relevé fait le 7 (voir `docs/BIBLIOGRAPHIE.md`, fiches 15 à 26). Deux
+conséquences directes pour le code, et deux mesures que personne n'a publiées.
+
+**Un chiffre qui arbitre et qui n'a jamais été mesuré.** `tiering.py` calcule
+`cached_expert_fraction` comme le rapport entre la VRAM restante et les octets
+d'experts exilés, multiplié par 1,3 « pour le biais de routage », plafonné à 1.
+Sur Qwen3-Coder-Next il vaut **2,9 %**, et `_estimate` s'en sert pour décider
+d'un placement. L'article `arXiv:2608.07911` montre qu'un taux de succès annoncé
+de 37,99 % s'explique à 96 % par la seule fragmentation de capacité, que l'ordre
+de rejeu d'une trace déplace l'écart à l'optimum de 44,9 à 30,8 points, et
+qu'une relecture incohérente gonfle les politiques de récence de 27 à 29 %.
+Notre 2,9 % n'est donc pas un taux de succès : c'est un vœu avec une décimale,
+et il pèse sur un arbitrage. À mesurer avant d'écrire le cache d'experts que la
+feuille de route promet depuis le début.
+
+**Le lien PCIe est en huit voies, pas seize.** Vérifié le 7 dans
+`/sys/bus/pci/devices` : la 5090 est capable de 32 GT/s et la 3080 Ti de 16,
+mais les deux sont négociées à **x8**. La génération lue au repos vaut 1, par
+économie d'énergie. La topologie mesurée donne 18,7 Go/s vers la 5090 et 11,4
+vers la 3080 Ti, soit 59 et 72 % du théorique. Ce point-là est mesuré et le
+code le lit correctement ; les 1792 Go/s de bande passante mémoire, eux,
+restent une valeur de plaque jamais confrontée.
+
+**Deux mesures que le relevé ne trouve chez personne.** Le taux de succès d'un
+cache d'experts pour 512 experts routés 10 — la littérature s'arrête à 64, 128
+ou 256, où le rapport entre octets stockés et octets lus par jeton est de
+quelques unités contre 45 chez nous. Et l'énergie par jeton sur des cartes
+bridées : les mesures publiées sont sur H100, H200 ou une 4060 Ti à pleine
+puissance. Le banc a déjà les colonnes W et j/kJ.
+
+**Et une convergence à retenir.** `arXiv:2512.02189` mesure les cœurs
+tensoriels de Blackwell à 96-99 % du pic et conclut que le goulot est la bande
+passante et le lancement des noyaux ; `arXiv:2608.21240` mesure l'autre bout et
+trouve 73 à 88 % du temps par couche dans le transfert des experts. Deux angles
+opposés, une même réponse : ce n'est pas le calcul. C'est ce que la nuit du 6 au
+7 avait montré autrement — le planificateur se trompait sur un débit et sur un
+plancher, jamais sur un noyau.
