@@ -1049,6 +1049,39 @@ def _replanifier(manifest: dict, spec: "ModelSpec") -> "Plan | None":
     return neuf
 
 
+def _forcer_exil(plan: Plan, n_voulu: int) -> None:
+    """Porte le nombre de couches à perceptron exilé à ``n_voulu``.
+
+    Instrument de mesure, pas de production : il sert à tracer le coût réel
+    d'une couche exilée *en service*, en faisant varier leur nombre à modèle,
+    plan et prompt identiques. On ne peut qu'exiler davantage — remonter des
+    poids sur une carte déjà pleine ferait déborder la VRAM — donc la courbe
+    se lit à partir du minimum imposé par la capacité.
+    """
+    exilees = [l for l in plan.layers if l.mlp_storage == "cpu"]
+    if n_voulu <= len(exilees):
+        print(f"[acvram] ACVRAM_EXIL_COUCHES={n_voulu} ignoré : {len(exilees)} "
+              f"couches sont déjà exilées et on ne peut pas les remonter",
+              flush=True)
+        return
+    candidates = [l for l in plan.layers if l.mlp_storage != "cpu"]
+    for l in candidates[len(candidates) - (n_voulu - len(exilees)):]:
+        l.mlp_storage = "cpu"
+        if hasattr(l, "mlp_exec"):
+            l.mlp_exec = "gpu"
+    print(f"[acvram] mesure : {n_voulu} couches à perceptron exilé "
+          f"(minimum imposé par la capacité : {len(exilees)})", flush=True)
+
+
+def _exil_demande(plan: Plan) -> None:
+    n = os.environ.get("ACVRAM_EXIL_COUCHES")
+    if n:
+        try:
+            _forcer_exil(plan, int(n))
+        except ValueError:
+            pass
+
+
 def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None) -> Plan:
     from ..memory.tiering import LayerPlacement, Plan as _Plan, Tier
     d = manifest["plan"]
@@ -1056,6 +1089,7 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None) -> Plan
         neuf = _replanifier(manifest, spec)
         if neuf is not None:
             _reajuster_plan(neuf, manifest)
+            _exil_demande(neuf)
             return neuf
     plan = _Plan(model=d["model"])
     plan.tiers = [Tier(**t) for t in d["tiers"]]
@@ -1066,6 +1100,7 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None) -> Plan
     plan.embed_device = d["embed_device"]
     plan.lm_head_device = d["lm_head_device"]
     _reajuster_plan(plan, manifest)
+    _exil_demande(plan)
     plan.kv_budget = d.get("kv_budget", {})
     plan.kv_bytes_per_token = d.get("kv_bytes_per_token", 0)
     plan.kv_max_tokens = d.get("kv_max_tokens", 0)
