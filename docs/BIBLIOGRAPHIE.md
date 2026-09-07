@@ -317,3 +317,155 @@ dépendent d'un support matériel et d'un travail de noyau hors du champ de cet
 article ». Les 3,1 % de surcoût en surface et 1,5 % en puissance sont une
 **synthèse en 28 nm**, pas une mesure sur silicium existant. Rien de tout
 cela ne s'exécute sur une 5090.
+
+## Vérification de matériel, faite avant de transposer ces chiffres
+
+`nvidia-smi` et `/sys/bus/pci` donnent, sur ce poste : les deux cartes sont
+négociées en **x8**, pas en x16. La 5090 monte à 32 GT/s (PCIe 5.0), la
+3080 Ti à 16 GT/s (PCIe 4.0). La génération lue au repos vaut 1 : c'est
+l'économie d'énergie, pas le lien réel.
+
+La topologie mesurée par `acvram bench --what topology`, dans
+`~/.config/acvram/acvram-topology.json`, fait autorité et donne **par carte** :
+
+| carte | hôte → carte | carte → hôte | lien physique |
+|---|---|---|---|
+| RTX 5090 | 18,7 Go/s | 21,2 Go/s | PCIe 5.0 x8, 31,5 Go/s théoriques |
+| RTX 3080 Ti | 11,4 Go/s | 12,6 Go/s | PCIe 4.0 x8, 15,8 Go/s théoriques |
+
+Soit 59 et 72 % du théorique. Ce point est vérifié et non estimé, contrairement
+aux 1792 Go/s de bande passante mémoire, qui restent une valeur de plaque.
+
+## 18. SPICE — préchargement spéculatif d'experts
+
+`arXiv:2608.21240` — retenu, et c'est la réponse à la question que je ne savais
+pas chiffrer.
+
+Mesuré sur **RTX 5090 avec 128 Go de DDR5**, plus une 4060 et une troisième
+carte. Le chiffre : **le chargement des experts occupe 73 à 88 % de la latence
+par couche, le calcul 12 à 27 %**, sur DeepSeek-V2-Lite et Qwen2-57B-A14B.
+Jusqu'à 3,12× sur le temps par jeton de sortie. Ils dérivent la profondeur
+d'anticipation minimale pour cacher le transfert et la rendent adaptative,
+la confiance de prédiction variant d'une couche à l'autre.
+
+**Transposition, deux réserves.** Leur banc est en PCIe 4.0 x8 ; le nôtre est
+en 5.0 x8, mesuré à 18,7 Go/s contre environ 13 chez eux, donc la part du
+transfert serait un peu moindre ici. Et ils routent 6 experts sur 64 ou 160,
+nous 10 sur 512 : le rapport octets stockés sur octets lus n'est pas le même.
+Leur lot n'est pas indiqué et n'a pas été vérifié comme unitaire.
+
+**Ce qu'on en fait** : `acvram/memory/tiering.py` et le pool par couche. La
+courbe 0, 9, 18 couches exilées reste à tracer chez nous, mais on sait
+désormais quoi attendre.
+
+## 19. Évaluation reproductible des caches d'experts MoE
+
+`arXiv:2608.07911` — retenu, et **à lire avant d'écrire le cache d'experts**
+que la feuille de route promet depuis longtemps.
+
+Ce n'est pas une méthode, c'est le banc qui explique pourquoi les taux publiés
+mentent. Trois résultats. Une relecture de trace incohérente **gonfle les
+politiques de récence de 27 à 29 %** et laisse celles de fréquence à 4 %, ce
+qui inverse leur classement. Sur Qwen3-30B-A3B, un taux annoncé de 37,99 %
+s'explique à **96 % par la fragmentation de capacité** : l'expert le plus
+routé ne pèse que 2,7 fois le moins routé, la distribution est plate. Enfin,
+permuter l'ordre temporel d'un même flux fait passer l'écart à l'optimum hors
+ligne de 44,9 à 30,8 %.
+
+**Ce qu'on en fait** : la méthode de mesure, avant tout code. `tiering.py`
+réserve déjà `expert_cache_bytes` et annonce un taux de succès que rien ne
+mesure — sur Coder-Next il vaut 2,9 %, calculé comme un simple rapport de
+capacité majoré de 1,3. Cet article dit que ce genre de chiffre ne veut rien
+dire tant que la trace n'est pas rejouée dans l'ordre.
+
+## 20. Cache-Aware Joint Router Adaptation
+
+`arXiv:2609.04895` — **écarté pour la méthode, retenu pour l'ordre de grandeur.**
+
+Taux de succès dur de **93,04 %** contre 90,62 %, soit 1,15 à 18 points de
+mieux que le meilleur préchargement, et 4,6 à 53 % de trafic en moins. Mais
+c'est obtenu en post-entraînant le routeur, quatre époques : hors périmètre,
+nous ne réentraînons rien.
+
+Il donne quand même le plafond à viser : un cache d'experts bien fait atteint
+environ 90 % sur un modèle à 128 experts routés 8. **Personne dans le relevé
+ne donne le chiffre pour 512 experts routés 10**, ce qui est notre cas.
+
+## 21. FreeToken — service MoE sur matériel grand public
+
+`arXiv:2608.16157` — retenu, **code public**, et c'est notre problème exact.
+
+Sur DeepSeek-V4-Flash, 6 experts sur 256 par couche, 13 milliards de
+paramètres actifs sur 284, les auteurs écrivent que le tout « tient dans les
+32 Go d'une RTX 5090 ». Leur politique partage chaque défaut de cache entre le
+remplissage du cache GPU et **l'exécution directe sur processeur**, selon la
+bande passante réellement soutenue — c'est notre chemin « stocké en RAM,
+calculé là où ça coûte le moins », mais piloté par la mesure au lieu d'un plan
+figé et d'une constante fausse.
+
+**Réserve** : le débit exact sur 5090 est dans une figure qui n'a pas été lue
+en texte.
+
+## 22. SAEM — gestion d'experts par étape de raisonnement
+
+`arXiv:2608.21614` — retenu pour une raison de régime.
+
+1,33× de débit moyen, 1,54× quand la calibration correspond, sur
+Qwen3-30B-A3B, et surtout **en lot unitaire explicitement mesuré**, avec une
+section dédiée. C'est le seul du relevé à mesurer notre régime au lieu de le
+supposer.
+
+## 23. DraftExpert — auto-spéculation et préchargement
+
+`arXiv:2607.24434` — retenu pour un chiffre, pas pour la méthode.
+
+1,45× sur le décodage, mesuré sur 4090. Le chiffre à garder pour notre pool :
+le gain du brouillon tombe de **4,7× en top-1 à 2,7× en top-2 et 2,0× en
+top-3**. Élargir la prédiction coûte vite — argument direct contre un pool
+généreusement dimensionné.
+
+## 24 et 25. Énergie par jeton
+
+`arXiv:2608.28044` (H100/H200) : de 7,46 à 0,72 J par jeton selon la longueur
+de sortie, et le gain du lot 16 sur le lot 1 tombe de 6,31× à 1,17× quand le
+contexte passe de 512 à 4096 jetons. Les mélanges d'experts amplifient l'effet.
+
+`arXiv:2608.00008` : le seul sur du matériel grand public, une 4060 Ti sous
+Ollama, modèles de 1 à 7 milliards ; le 7B consomme 4,4 fois plus par jeton
+que le plus sobre. Travail préliminaire, et loin de nos 80 milliards.
+
+**Conclusion de l'axe** : personne ne mesure notre régime. Une mesure d'énergie
+par jeton sur deux cartes bridées à 400 et 275 W serait, à la connaissance du
+relevé, la première publiée dans ces conditions. Nous avons déjà la colonne
+dans le banc.
+
+## 26. Parcimonie contextuelle par SVD
+
+`arXiv:2603.14110` — retenu sous réserve de nature.
+
+Prédicteurs de parcimonie sans entraînement dédié, mesurés sur **RTX 3090** :
+à 90 % de parcimonie des perceptrons, 1,8× sur le décodage de bout en bout, et
+**jusqu'à 11,69× en configuration processeur/carte déchargée** — c'est le
+chiffre qui nous concerne, puisqu'un exil n'aurait plus à ramener que les
+neurones actifs.
+
+**Réserve dirimante pour nous** : ce sont des modèles denses rendus
+parcimonieux, pas des mélanges d'experts. Chez nous la parcimonie est déjà
+dans le routage, et le gain ne s'additionne pas.
+
+## Écartés du second relevé
+
+* `arXiv:2608.01536` Celty — noyau creux 2,8× sur cuBLAS, mais l'essentiel du
+  gain vient d'un cœur SIMT co-conçu : matériel hypothétique.
+* `arXiv:2609.03079` LeanStream — mobile, modèles de 7 milliards.
+* `arXiv:2608.08081` RotaryQuant — 120 milliards dans 32 Go à 9-19 jetons par
+  seconde, mais par quantification du cache à la volée : hors périmètre.
+
+## Ce que les deux relevés disent ensemble
+
+Deux articles, deux angles opposés, une même réponse. Le microbenchmark
+Blackwell mesure les cœurs tensoriels à 96-99 % du pic et conclut que le goulot
+est ailleurs. SPICE mesure l'autre côté et trouve 73 à 88 % du temps dans le
+transfert des experts. **Ce n'est pas le calcul.** C'est cohérent avec la nuit
+du 6 au 7 : le planificateur d'acvram se trompait sur un débit et sur un
+plancher, jamais sur un noyau.
