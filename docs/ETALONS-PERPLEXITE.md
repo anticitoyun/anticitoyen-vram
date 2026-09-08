@@ -146,6 +146,24 @@ Conditions communes : llama.cpp e34f042, `wiki.test.raw`
 sha256 `173c87a5…7dd08`, stride = n_ctx, n_ctx/2 positions notées par fenêtre,
 `-ngl 999`, RTX 5090.
 
+**Ces étalons sont insensibles au régime de puissance, au mode persistant et au
+démarrage à froid.** Une perplexité est une fonction déterministe des poids et
+des jetons : aucune grandeur temporelle n'y entre. Le premier passage d'une
+mesure peut coûter une seconde de plus, cela ne change ni la log-vraisemblance
+d'une position ni sa moyenne.
+Preuve, et non affirmation : deux exécutions indépendantes du même modèle, à des
+heures différentes et dans des états de machine différents, l'une avec
+`--chunks 64` et l'autre sans, rendent **`[64] 29,5004` à la quatrième
+décimale**. Un coût de démarrage qui entrerait dans le chiffre les aurait fait
+diverger.
+**Conséquence pratique** : ces chiffres restent comparables à toute mesure
+future, quel que soit le bridage des cartes ou l'état du mode persistant. C'est
+ce qui sépare définitivement le dossier **qualité**, intact, du dossier
+**performance**, à refaire à chaque changement de régime — où il faut au
+contraire jeter le premier passage, et **dire lequel des deux coûts on jette**,
+puisqu'un banc qui exclut le temps de première réponse du débit cache la moitié
+du surcoût sans le signaler.
+
 ## Le format q3n, avant / après
 
 | état | perplexité | rapport à 9,1831 | conditions |
