@@ -116,8 +116,14 @@ def test_table_symetrique():
         valider_table_q3n((-1, -0.5, 0.3, -0.3, 0, 0.5, 1, 1))    # non triée
     with pytest.raises(ValueError):
         valider_table_q3n((-0.9, -0.5, -0.3, 0, 0.3, 0.5, 0.9, 0.9))  # bornes
+    # L'asymétrie est ADMISE depuis l'arbitrage du 8/09 au soir : bornes ±1
+    # aux deux extrémités, c'est elles qui interdisent l'écrêtage.
+    assert valider_table_q3n((-1, -0.724, -0.4796, -0.2379,
+                              0, 0.2488, 0.569, 1)) is not None
     with pytest.raises(ValueError):
-        valider_table_q3n((-1, -0.5, -0.3, 0, 0.2, 0.5, 1, 1))    # asymétrie
+        valider_table_q3n((-1, -0.5, -0.5, 0, 0.2, 0.5, 0.9, 1))  # plateau interne
+    with pytest.raises(ValueError):
+        valider_table_q3n((-1, -0.5, 0, 0, 0.2, 0.5, 0.9, 1))     # deux zéros
 
 
 def test_erreur_symetrique_entre_signes():

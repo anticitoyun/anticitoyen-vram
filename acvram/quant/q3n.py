@@ -44,23 +44,27 @@ TABLE_Q3N_LLOYD_CODER_NEXT = (-1.0, -0.5699, -0.2491, 0.0,
 def valider_table_q3n(table) -> tuple:
     """Une table de manifeste porte ce qu'on y a écrit ; on vérifie tout.
 
-    Huit entrées, croissantes (le doublon final des tables à sept niveaux est
-    admis), symétriques à 1e-6 près sur les niveaux distincts, bornes ±1.
-    Une table non triée rendrait ``bucketize`` incohérent avec le dépaquetage
-    et personne ne le verrait avant la perplexité.
+    L'invariant, arbitré le 8/09 au soir par l'auteur de la spécification :
+    huit entrées ; bornes ±1 EXACTES (c'est elles qui interdisent
+    l'écrêtage — la symétrie de la première spec n'en était qu'une façon
+    commode, réfutée par la mesure : la table asymétrique à zéro est mieux
+    centrée en sortie que la symétrique d'origine) ; croissance strictement
+    monotone, sauf l'égalité admise entre les deux dernières entrées quand
+    la table n'a que sept niveaux logiques ; au plus un zéro. Ni symétrie
+    ni parité. Une table non triée rendrait ``bucketize`` incohérent avec
+    le dépaquetage et personne ne le verrait avant la perplexité.
     """
     t = tuple(float(v) for v in table)
     if len(t) != 8:
         raise ValueError(f"table q3n : 8 entrées attendues, {len(t)} reçues")
-    for a, b in zip(t, t[1:]):
-        if b < a:
-            raise ValueError(f"table q3n non croissante : {a} puis {b}")
-    niveaux = sorted(set(t))
-    if abs(niveaux[0] + 1.0) > 1e-6 or abs(niveaux[-1] - 1.0) > 1e-6:
-        raise ValueError(f"table q3n : bornes ±1 attendues, {niveaux[0]}..{niveaux[-1]}")
-    for v in niveaux:
-        if not any(abs(v + w) <= 1e-6 for w in niveaux):
-            raise ValueError(f"table q3n asymétrique : {v} sans opposé")
+    if abs(t[0] + 1.0) > 1e-6 or abs(t[-1] - 1.0) > 1e-6:
+        raise ValueError(f"table q3n : bornes ±1 attendues, {t[0]}..{t[-1]}")
+    for i, (a, b) in enumerate(zip(t, t[1:])):
+        if b < a or (b == a and i != 6):
+            raise ValueError(f"table q3n non strictement croissante : "
+                             f"{a} puis {b} (position {i})")
+    if sum(1 for v in t if v == 0.0) > 1:
+        raise ValueError("table q3n : au plus un zéro")
     return t
 
 BLOC_DEFAUT = 32          # 3,25 bits/poids ; 16 (3,5 bpw) reste ouvert :
