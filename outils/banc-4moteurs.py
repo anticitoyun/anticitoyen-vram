@@ -35,7 +35,18 @@ PROMPT = ("Explique en détail, en français et en plusieurs paragraphes, commen
           "pages, tables de pages, TLB, défauts de page, et ce qui se passe quand "
           "la mémoire physique est pleine.")
 MAX_TOKENS = 200
-MESURES = 2
+# Trois passages et non deux : avec deux, la « dispersion » publiee est un
+# ecart entre deux nombres, dont on ne peut rien conclure. Avec trois, elle
+# devient un ecart-type utilisable, et le critere « l'ecart annonce doit valoir
+# au moins trois fois la dispersion » a un sens. Le prix est une serie une fois
+# et demie plus longue ; pour les grandes series on reduit le nombre de
+# modeles, jamais la rigueur par modele. Decision du 8 septembre 2026.
+#
+# Le PREMIER passage est froid — allocateur, noyaux compiles a la volee, carte
+# a temperature de repos. On publie le meilleur des trois, ce qui l'ecarte de
+# fait ; sa valeur reste comptee dans la dispersion, et c'est voulu : elle dit
+# aussi ce que coute le demarrage a froid.
+MESURES = 3
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from energie import Energie, repos            # noqa: E402
@@ -380,6 +391,13 @@ def mesurer(moteur):
     dispersion = (100 * statistics.pstdev(debits) / statistics.mean(debits)
                   if len(debits) > 1 and statistics.mean(debits) else 0.0)
     r = e.resume()
+    # La dispersion n'invalide pas par elle-meme : elle invalide un ECART
+    # annonce plus petit qu'elle. Le banc ne connait pas l'ecart qu'on lui
+    # fera dire, il signale donc, il ne tranche pas.
+    if dispersion > 5.0:
+        avert = f"dispersion des {len(debits)} passages : {dispersion:.1f} %"
+        r["invalidations"] = (avert if r["invalidations"] == "aucune"
+                              else r["invalidations"] + " ; " + avert)
     energie = {
         "J": round(joules, 1), "J_net": round(joules_net, 1),
         "W_repos": round(base.moyenne, 1), "jkj_net": round(jkj_net, 1),
