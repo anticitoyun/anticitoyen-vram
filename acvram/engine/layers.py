@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import os
+import time
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -55,18 +57,44 @@ class PoolHote:
 
     ALIGNEMENT = 256
 
-    def __init__(self, octets: int, plancher: int = 64 * 2 ** 20) -> None:
+    def __init__(self, octets: int, plancher: int = 64 * 2 ** 20,
+                 bloc_max: int = 2 ** 30, souffle: float = 0.0) -> None:
+        """`bloc_max` plafonne la taille d'UNE demande, `souffle` l'espace dans
+        le temps. Les deux lissent la pression, mais par des mécanismes
+        différents et il ne faut pas les changer ensemble.
+
+        Le 8/09/2026, réserver 33,76 Gio en un bloc de 32 a fait tuer le
+        chargement par la garde : trois secondes pendant lesquelles aucune
+        tâche de la machine n'avançait. Les mêmes octets pris en 11 550
+        morceaux sur soixante-dix secondes ne produisaient aucune pression —
+        `MemoryPeak` 70,5 Gio sans pression contre 57,2 Gio avec.
+
+        **Hypothèse retenue, et une seule est active par défaut** : c'est la
+        TAILLE de la demande qui pèse, pas sa cadence. Pour trouver 32 Gio
+        épinglables d'un coup, le noyau doit réclamer 32 Gio d'un coup —
+        éviction de cache, voire swap — et cette réclamation est synchrone :
+        tout le reste attend pendant ce temps. `bloc_max` à 1 Gio divise donc
+        chaque réclamation par 32, en gardant toutes les tailles à des
+        puissances de 2, donc le surcoût toujours nul.
+
+        `souffle` (secondes entre deux blocs) reste à **zéro par défaut** :
+        c'est l'hypothèse concurrente, et l'activer en même temps que
+        `bloc_max` rendrait impossible de dire laquelle a agi. À mesurer
+        séparément si le plafonnement ne suffit pas.
+        """
         self.blocs: list[torch.Tensor] = []
         self._curseurs: list[int] = []
         reste = int(octets)
         while reste >= plancher:
-            taille = 1 << (reste.bit_length() - 1)      # plus grande 2^k <= reste
+            taille = min(1 << (reste.bit_length() - 1), bloc_max)
             while taille >= plancher:
                 try:
                     self.blocs.append(
                         torch.empty(taille, dtype=torch.uint8).pin_memory())
                     self._curseurs.append(0)
                     reste -= taille
+                    if souffle > 0:
+                        time.sleep(souffle)
                     break
                 except (RuntimeError, MemoryError):
                     taille >>= 1                        # bissection
