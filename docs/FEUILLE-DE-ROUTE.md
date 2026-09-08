@@ -2487,3 +2487,33 @@ des deux cartes n'approche son plafond (76 W sur 400, 102 sur 275), donc ce
 régime n'est pas celui des cartes contraintes ; la 3080 Ti consomme plus que
 la 5090 en transférant quatre fois moins ; et le repos pèse 45 % de la
 fenêtre, ce qui rend le choix brut/net décisif et oblige à l'annoncer.
+
+## 8 septembre 2026, matin — v0.4.79 : le chemin direct mesuré en service, +31 %
+
+Série de trois cases sur `652741c`, arbre propre, mêmes conditions que toute
+la nuit, texte identique mot pour mot dans les trois :
+
+| case | décodage, 199 jetons | débit | processeur du serveur |
+|---|---|---|---|
+| chemin direct | 14 868 ms | **13,4 t/s** | 19 s |
+| chemin par masques (échappement) | 19 380 ms | 10,3 t/s | 24 s |
+| chemin direct, contre-mesure | 14 689 ms | **13,5 t/s** | 19 s |
+
+Les deux cases directes se recoupent à 0,7 %. Sur ce modèle, le pire du parc,
+le débit passe de 10,3 (comparatif du 6) à 13,5 jetons par seconde : **+31 %**,
+en trois changements mesurés un à un — copie contiguë (+5 %), et chemin direct
+du décodage MoE (+26 %) qui remplace, à un jeton, les masques par expert et
+leurs trente et une synchronisations hôte par couche par une seule.
+
+Fusionnés dans la même version : l'énergie NVML au banc (branche poste1,
+`7e386eb`) — lecture du compteur par ctypes, colonnes J, J_net, W_repos,
+j_kJ_net, bridages et invalidations calculées, l'ancienne classe Watt retirée
+(elle lançait un nvidia-smi toutes les 200 ms sur la machine qu'elle mesurait
+et ne voyait que la carte 0) — et la trace de routage rejouable (branche
+poste2, `3865418`) : `ACVRAM_TRACE_ROUTAGE=/chemin`, 22 ns par appel éteinte,
+rejeu par `taux_de_succes()` sous deux politiques. Aucune trace encore prise
+sur un vrai modèle. 153 tests.
+
+Reste ouvert, dit d'avance : le chemin par masques garde le lot > 1 et le
+prefill ; la décision « trois passages au banc » (dispersion contre temps de
+série) ; et la prise de la première trace réelle.
