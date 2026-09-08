@@ -355,3 +355,97 @@ d'accumulation, type de RoPE, dimension de tête, découpage de la tête de sort
 frontière de morceau, chemin d'évaluation contre chemin de service. Ce qui
 reste est un fait établi sans cause identifiée, et c'est là que le travail
 reprend.
+
+---
+
+# Décomposition de l'écart résiduel
+
+Après le correctif du drapeau perdu au transport, il reste 0,3994 nat entre le
+NVFP4 et l'étalon. Décomposition par témoins mesurés, chacun dans le cadrage des
+584 fenêtres.
+
+| terme | mesure | valeur |
+|---|---|---|
+| (a) opération de requantification | Q3_K_S → **Q3_K_S**, llama.cpp | **0,0000 nat** |
+| (b) changement de grille vers plus fin | Q3_K_S → **Q4_K_S**, llama.cpp | **0,0291 nat** (+3,0 %) |
+| (c) biais d'instrument, **dense** | phi-4 int8 contre 6,5988 | 0,0461 nat |
+| **(d) résidu** | par soustraction | **0,3243 nat (+38,3 %)** |
+
+**Le témoin (a) vaut exactement zéro** : 9,1831 ± 0,07301 des deux côtés, à la
+quatrième décimale. Déquantifier puis requantifier sur la même grille ne coûte
+rien — et, au passage, `llama-quantize --allow-requantize` est **idempotent** sur
+ce format, ce qui valide toute la chaîne de mesure de la journée sur deux
+fichiers produits à des heures différentes.
+
+**Le résidu est réel** : le seuil de significativité est 0,01 nat, on est trente
+fois au-dessus. **81 % de l'écart reste inexpliqué.** Et le témoin (b) joue
+*contre* cette conclusion plutôt que pour : un coût de format plus élevé
+réduirait le résidu d'autant.
+
+Ce que (d) contient, sans hiérarchie établie : tout ce que la chaîne de
+conversion fait en plus d'un changement de grille (recherche d'échelles par
+canal, rotation de Hadamard, filet de promotions, mélange de formats dans le même
+dossier) **et** le biais d'instrument sur architecture **hybride**, jamais
+mesuré — (c) vaut pour un dense. Pour absorber 0,324 nat, ce dernier devrait
+valoir sept fois le biais dense.
+
+---
+
+# Échelle contre table : ce qui domine sous 3,25 bits
+
+arXiv:2605.24011 affirme que sous quatre bits **le choix de l'échelle domine
+celui de la table**. Vérifié sur nos poids, 144 tenseurs d'un tirage disjoint de
+tous les précédents, 3,25 bits par poids pour toutes les combinaisons.
+
+| table | échelle | SNR médian | gain | pire | % qui perdent |
+|---|---|---|---|---|---|
+| spécification | amax (actuelle) | 13,33 | — | — | — |
+| spécification | grille optimisée | 15,48 | +2,14 | +1,50 | 0,0 |
+| spécification | grille pondérée par la magnitude | 15,16 | +1,81 | +0,88 | 0,0 |
+| **Lloyd** | amax | **16,71** | **+3,42** | +3,36 | 0,0 |
+| **Lloyd** | **grille optimisée** | **17,64** | **+4,34** | +4,22 | 0,0 |
+| Lloyd | grille pondérée | 17,53 | +4,23 | +4,09 | 0,0 |
+
+**L'affirmation est fausse sur nos poids : la table domine l'échelle**, +3,42 dB
+contre +2,14. La pondération par la magnitude — le cœur de leur méthode — est
+même légèrement *pire* que la recherche simple.
+
+Deux résultats exploitables malgré tout : les deux leviers **s'additionnent**
+presque parfaitement (+3,42 puis +0,92, total +4,34), et **aucune combinaison ne
+fait perdre un seul tenseur** sur 144.
+
+Réserve de protocole : la recherche d'échelle balaie une grille de facteurs
+autour de l'amax et retient le meilleur par bloc ; un ajustement analytique
+ferait mieux. Il faudrait qu'il double pour renverser l'ordre.
+
+Leçon générale, et c'est la même que pour la table à niveau zéro : **un résultat
+publié vaut pour la distribution et le régime qui l'ont produit.** Ici 2,6 bits
+sur un modèle vision-langage-action contre 3,25 bits sur du texte — le mécanisme
+ne s'est pas transporté.
+
+---
+
+# Énergie par jeton : une comparaison qu'il ne faut pas faire
+
+Ce document a un temps opposé nos 17,4 J/jeton bruts à une « valeur typique de
+1,8 J ». **Cette valeur typique n'existe pas** : la littérature de mesure donne
+0,003 à 1 J par jeton selon le couple modèle-carte, soit trois ordres de
+grandeur. Trois facteurs dominent et n'étaient pas contrôlés :
+
+- **le lot.** Un même modèle passe de 0,209 J/jeton à lot 128 à 0,151 à lot 512.
+  Nos mesures sont à **lot 1**, le pire cas absolu : toute la puissance statique
+  se répartit sur un seul jeton. Or le moteur accepte 16 requêtes simultanées par
+  défaut — **c'était un choix de protocole, pas une limite** ;
+- **les paramètres actifs, non totaux.** Un MoE coûte 3,56 fois moins par jeton
+  qu'un dense de même taille totale ;
+- **la puissance statique gaspillée** quand l'occupation est faible — exactement
+  le profil mesuré ici, cartes inoccupées une seconde sur deux.
+
+On ne peut donc affirmer ni que ce moteur est dix fois trop cher, ni qu'il est
+bon. **Un joule par jeton ne veut rien dire sans son lot, ses paramètres actifs
+et son taux d'occupation** : c'est la condition à remplir avant toute
+publication, et elle vaut aussi pour lire les chiffres des autres.
+
+Sur la méthode elle-même, une inquiétude est levée : le GPU porte 78,7 à 92,5 %
+de l'énergie totale du nœud, donc une mesure au compteur NVML ne biaise pas le
+résultat d'un facteur qui compte ici.
