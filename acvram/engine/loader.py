@@ -154,6 +154,41 @@ def load_model(path: str, plan: Optional[Plan] = None,
 
     spec = ModelSpec(**{k: v for k, v in manifest["model"].items()
                         if k in ModelSpec.__dataclass_fields__})
+    # `ModelSpec.to_dict()` ne serialise pas `raw`, et le manifeste ne porte
+    # donc AUCUNE des cles brutes de la configuration. Or le chargeur en lit
+    # certaines — `gdn_a_log_negexp` decide si `a_log` doit etre retransforme,
+    # et sans lui la decroissance des couches recurrentes est calculee sur un
+    # facteur deja transforme : **onze pour cent d'ecart au lieu d'un**, mesure
+    # le 8/09/2026 contre llama.cpp sur la couche 0 (a_log charge a -0,3379,
+    # la valeur du disque, la ou -1,085 etait attendu).
+    #
+    # Le piege qui m'a fait rétracter a tort ce diagnostic le matin meme :
+    # `load_model_spec(dossier)` lit `config.json` et porte bien le drapeau,
+    # tandis que `load_model` reconstruit le spec depuis le MANIFESTE. Verifier
+    # l'un ne dit rien de l'autre. On complete donc `raw` depuis la
+    # configuration, ce qui repare aussi les modeles deja convertis.
+    # Les manifestes recents portent les cles utiles (CLES_BRUTES_UTILES) ; les
+    # anciens non. On complete depuis la configuration, et l'on DIT quand on ne
+    # peut pas — servir en silence un modele dont on ignore la convention est
+    # exactement ce qui a coute la journee du 8/09.
+    manquantes = [c for c in ModelSpec.CLES_BRUTES_UTILES
+                  if c not in manifest["model"]]
+    if manquantes:
+        chemin_cfg = os.path.join(path, "config.json")
+        if os.path.isfile(chemin_cfg):
+            try:
+                with open(chemin_cfg, "r", encoding="utf-8") as fh:
+                    spec.raw = json.load(fh)
+            except Exception as e:                       # pragma: no cover
+                print(f"[acvram] config.json illisible ({e}) : les conventions "
+                      f"{manquantes} sont inconnues, le modele peut etre servi "
+                      f"faux sans erreur", flush=True)
+        else:
+            print(f"[acvram] ni le manifeste ni config.json ne portent "
+                  f"{manquantes} : conventions inconnues, le modele peut etre "
+                  f"servi faux sans erreur", flush=True)
+    else:
+        spec.raw = {c: manifest["model"][c] for c in ModelSpec.CLES_BRUTES_UTILES}
     if plan is None:
         plan = _plan_from_manifest(manifest, spec)
     _avertir_noyaux()
