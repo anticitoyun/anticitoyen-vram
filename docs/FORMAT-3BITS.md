@@ -14,7 +14,10 @@ rien. Il faut un format qui tienne réellement sous quatre bits par poids.
 
 Rapport signal sur bruit, un million de poids, deux distributions : gaussienne,
 et à queue lourde — celle qu'ont les couches de mélange d'experts, où quelques
-poids valent beaucoup plus que la médiane. Échelle stockée en FP8 e4m3, arrondie
+poids valent beaucoup plus que la médiane. La queue lourde est une gaussienne
+modulée par une lognormale de **paramètre σ = 0,5**. Il faut le dire, parce que
+c'est une queue *modérée* et que le résultat en dépend fortement : voir plus
+bas. Échelle stockée en FP8 e4m3, arrondie
 comme elle le sera réellement.
 
 Toutes les mesures passent par le **vrai chemin** : l'échelle est arrondie en
@@ -52,6 +55,29 @@ donnait un meilleur rapport que le bloc de 16**, ce qui est impossible — un bl
 plus grand partage une échelle entre plus de poids et ne peut que perdre. La
 table symétrique rétablit l'ordre attendu et gagne 1,7 dB en gaussien, 2,6 sur
 la queue lourde.
+
+### Combien la queue pèse
+
+Le chiffre annoncé pour la queue lourde vaut pour σ = 0,5, et rien au-delà. En
+faisant varier σ sur la même graine :
+
+| σ | bloc 32 | bloc 16 | écart |
+|---|---|---|---|
+| 0 (gaussien) | 14,99 dB | 15,84 dB | 0,85 dB |
+| **0,5 (le chiffre de ce document)** | **13,55 dB** | **15,03 dB** | **1,48 dB** |
+| 1,0 | 9,49 dB | 12,06 dB | 2,57 dB |
+| 1,5 | 6,67 dB | 9,58 dB | 2,91 dB |
+
+**Deux choses en découlent, et elles vont dans le même sens.** Le format perd
+vite quand la queue s'alourdit : à σ = 1,0 on est à 9,5 dB, c'est-à-dire dans
+le régime où le bruit commence à compter. Et l'écart entre les deux tailles de
+bloc se creuse au lieu de se refermer — 0,85 dB en gaussien, 2,91 dB à σ = 1,5.
+
+Autrement dit, **plus les experts réels ont une queue lourde, plus le bloc de
+16 devient le bon choix**, et moins le quart de bit économisé se défend. Une
+mesure de la lourdeur de queue sur de vrais poids d'experts tranche donc
+l'arbitrage sans qu'il faille attendre une perplexité complète : c'est le
+premier chiffre à prendre.
 
 ## Le format retenu
 
@@ -166,6 +192,6 @@ def q3n_gemv(x: torch.Tensor, t: Q3NTensor) -> torch.Tensor:
 - **Le débit du noyau.** Un format qui divise la mémoire par deux et le débit
   par trois ne sert à rien. À mesurer contre le chemin quatre bits existant.
 - **Le comportement des experts réels.** Les distributions testées sont
-  synthétiques. Une mesure sur les poids d'un vrai expert peut déplacer le choix
-  entre bloc 16 et bloc 32, et c'est la première chose à refaire quand un modèle
-  trois bits sera sous la main.
+  synthétiques, et le tableau de sensibilité ci-dessus montre qu'un σ mal deviné
+  déplace le résultat de plusieurs décibels. C'est la première chose à refaire
+  quand un modèle trois bits sera sous la main.
