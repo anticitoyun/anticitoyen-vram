@@ -142,6 +142,19 @@ class PlannerOptions:
     pin_attention: bool = True            # keep attention off the host tier
     gpus: Optional[str] = None            # "auto" | "all" | "0" | "0,1"
     host_exec: str = "auto"               # auto | stream | cpu
+    # Coût fixe d'un transfert d'expert vers la carte, en microsecondes.
+    #
+    # NON MESURÉ. Zéro par défaut : le modèle reste alors celui d'avant, faux
+    # mais connu — il est optimiste d'un facteur 2,4 à 3,4 avec un plancher
+    # d'environ 3 ms par jeton qu'aucun terme en octets ne peut produire.
+    # Une constante inventée le rendrait faux ET crédible, ce qui est pire.
+    #
+    # Pour la mesurer : chronométrer un transfert d'expert sur trois tailles
+    # écartées d'un facteur quatre. L'ordonnée à l'origine est cette valeur ;
+    # la pente doit retrouver la bande passante du lien. Si l'ordonnée est
+    # nulle, le plancher vient d'ailleurs — réveil de carte ou synchronisation
+    # par couche — et ce terme n'est pas le bon.
+    transfer_fixed_us: float = 0.0
     host_compute_gb_s: float = 70.0       # DDR5 streaming reads, measured by bench
     # Débit RÉEL d'un produit de matrices déquantifiant sur processeur. Ce
     # n'est PAS le débit de lecture ci-dessus : un GEMM NVFP4 doit déballer de
@@ -496,10 +509,26 @@ def plan_placement(spec: ModelSpec, rig: Rig,
         host_expert_bytes = sum(lp.mlp_bytes for lp in host_moe)
         if host_expert_bytes:
             raw = cache_total / host_expert_bytes
-            # Léger biais de routage : les experts fréquents sont touchés plus
-            # souvent que leur part. Plafonné à 1, pour ne jamais annoncer plus
-            # qu'un taux de succès complet.
-            hit = min(1.0, raw * 1.3)
+            # Rapport de CAPACITE, sans majoration.
+            #
+            # Il portait un facteur 1,3 au titre d'un « biais de routage » : les
+            # experts frequents seraient touches plus souvent que leur part.
+            # C'est plausible et ce n'est pas mesure — aucun taux de succes reel
+            # n'a jamais ete releve sur ce parc. Un facteur invente qui majore
+            # rend le plan optimiste : il annonce moins d'octets traversant le
+            # lien qu'il n'en passera.
+            #
+            # Sans mesure, on prend la BORNE HAUTE du cout, c'est-a-dire la
+            # borne basse du taux de succes. Un plan choisi sur une borne haute
+            # est au pire trop prudent ; choisi sur une estimation majoree, il
+            # est au mieux chanceux.
+            #
+            # Ce que cela ne change PAS : le choix du plan. cached_expert_fraction
+            # n'entre que dans _estimate, donc dans decode_tok_s, donc dans le
+            # troisieme critere de _rang — celui qui ne departage que les plans
+            # SANS exil, ou cette fraction vaut zero. La correction porte sur le
+            # debit annonce, pas sur la decision.
+            hit = min(1.0, raw)
             for lp in host_moe:
                 lp.cached_expert_fraction = hit
 
@@ -550,7 +579,27 @@ def _estimate(spec: ModelSpec, plan: Plan, tiers: list[Tier],
             from_host = active - from_cache
             t_copy = from_host / (t.link_bandwidth * 1e9)
             t_math = active / (t.read_bandwidth * 1e9)
-            seconds += max(t_copy, t_math)      # le préchargement recouvre le calcul
+            # Cout FIXE par transfert d'expert, en plus des octets.
+            #
+            # Une copie d'expert n'est pas un flux continu : c'est une suite de
+            # copies discretes, chacune payant sa latence de bus et sa
+            # synchronisation. Le modele n'avait que des termes en octets, et
+            # aucun terme en octets ne peut produire un plancher constant.
+            #
+            # Ce qui a mis ce terme en evidence : le modele est optimiste d'un
+            # facteur 2,4 a 3,4 sur soixante et un modeles mesures une fois
+            # chacun, avec un plancher d'environ 3 ms par jeton et une pente
+            # d'environ 2,5 ms par doublement de taille. Un plancher constant
+            # demande un terme constant ; une pente logarithmique suit le
+            # NOMBRE de blocs transferes, pas leur volume.
+            #
+            # LA VALEUR CI-DESSOUS N'EST PAS MESUREE. Elle est posee pour que
+            # la structure existe et que la courbe en cours la fixe. Elle vaut
+            # zero par defaut : un modele sans ce terme est faux mais connu,
+            # tandis qu'un modele portant une constante inventee serait faux et
+            # credible. La regler par PlannerOptions.transfer_fixed_us.
+            n_transferts = max(1, int(from_host // (4 * MB)) + (1 if from_host else 0))
+            seconds += max(t_copy, t_math) + n_transferts * opts.transfer_fixed_us * 1e-6
             bytes_read += int(from_host)
         else:
             seconds += active / (t.read_bandwidth * 1e9)

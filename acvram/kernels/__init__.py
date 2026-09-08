@@ -477,7 +477,9 @@ def _cuda_ok(dev: torch.device) -> bool:
 
 
 def _sm100_ok(dev: torch.device) -> bool:
-    return (fp4_mm_available()
+    # La carte est passee a fp4_mm_available : une extinction survenue sur une
+    # capacite donnee ne doit valoir que pour elle.
+    return (fp4_mm_available(dev)
             and torch.cuda.get_device_capability(dev) >= (10, 0))
 
 

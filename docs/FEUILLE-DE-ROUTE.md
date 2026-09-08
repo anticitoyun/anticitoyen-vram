@@ -4,6 +4,71 @@
 extension de mémoire GPU fonctionnelle et livrait un module noyau qui se
 contentait d'afficher les nombres passés en paramètres.
 
+## 8 septembre 2026 — trois défauts corrigés par lecture, aucun mesuré ici
+
+Corrections écrites après lecture du code, sans exécution sur les cartes : une
+courbe de mesure y tournait. Ce qui est mesuré et ce qui ne l'est pas est dit
+pour chacune.
+
+### L'extinction du chemin FP4 était globale, elle est par capacité de carte
+
+`fp4_gemm.py`. Un échec d'appel réel posait `_OK = False` pour tout le
+processus. Sur une machine à cartes inégales, un échec survenu sur celle qui n'a
+pas les tensor cores FP4 privait aussi celle qui les a. Le repli restait correct,
+mais le gain était perdu.
+
+L'état est désormais rangé par **capacité** `(major, minor)` et non par index de
+carte : renuméroter avec `CUDA_VISIBLE_DEVICES` attribuerait sinon l'état à la
+mauvaise. `fp4_mm_available(device)` accepte la carte, et l'appelant la passe.
+
+Une **garde préventive** est posée en tête de `nvfp4_mm_tensorcore` : une carte
+sous sm_100 n'atteint plus l'appel réel. Mieux vaut ne pas essayer que d'essayer,
+échouer, et réparer les dégâts de l'échec.
+
+Ce qui reste **global à dessein** : les échecs indépendants de la carte — type
+`float4_e2m1fn_x2` absent, `_scaled_mm` absent, désactivation par
+l'environnement. Les rendre par carte multiplierait le coût de sonde sans rien
+changer au verdict.
+
+**Ce qui n'a pas été vérifié** : le comportement sur deux cartes de capacités
+différentes en conditions réelles. La correction est écrite, pas éprouvée.
+
+### La fraction d'experts en cache n'est plus majorée d'un facteur inventé
+
+`tiering.py`. Le rapport capacité sur octets hôtes était multiplié par 1,3 au
+titre d'un « biais de routage » plausible et **jamais mesuré**. Un facteur
+inventé qui majore rend le plan optimiste : il annonce moins d'octets traversant
+le lien qu'il n'en passera. Sans mesure, on prend la borne haute du coût.
+
+**Ce que cette correction ne change pas, et il faut le dire** : le choix du plan.
+`cached_expert_fraction` n'entre que dans `_estimate`, donc dans
+`decode_tok_s`, donc dans le troisième critère de `_rang` — celui qui ne
+départage que les plans **sans exil**, où cette fraction vaut zéro. Elle corrige
+le débit annoncé, pas la décision.
+
+### Le modèle de coût n'avait aucun terme constant
+
+`_estimate` ne comptait que des octets. Or il est optimiste d'un facteur 2,4 à
+3,4 sur soixante et un modèles, avec un **plancher d'environ 3 ms par jeton**
+qu'aucun terme en octets ne peut produire, et une pente d'environ 2,5 ms par
+doublement de taille — qui suit le nombre de blocs transférés, pas leur volume.
+
+Un coût fixe par transfert d'expert est ajouté, réglable par
+`PlannerOptions.transfer_fixed_us`.
+
+**Sa valeur est zéro et n'est pas mesurée.** Le modèle reste donc celui d'avant,
+faux mais connu. Une constante inventée le rendrait faux **et** crédible, ce qui
+est pire. Pour la fixer : chronométrer un transfert d'expert sur trois tailles
+écartées d'un facteur quatre ; l'ordonnée à l'origine est la valeur, la pente
+doit retrouver la bande passante du lien. Si l'ordonnée est nulle, le plancher
+vient d'ailleurs — réveil de carte ou synchronisation par couche — et ce terme
+n'est pas le bon.
+
+**Sur la mesure qui motive tout cela** : les soixante et un modèles ont été
+mesurés une fois chacun. La dispersion entre répétitions n'est connue que sur un
+seul, à environ 4 %. Un facteur constant sur des cartes très différentes est soit
+une vraie loi, soit un artefact commun aux deux mesures.
+
 ## Fait depuis la version 0.1.0
 
 | | ce que ça fait | vérifié par |

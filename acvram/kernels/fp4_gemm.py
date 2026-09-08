@@ -39,6 +39,32 @@ _OK = False
 _REASON = "not probed"
 _IMPL = ""
 
+# Extinction par CAPACITE de carte, et non globale.
+#
+# L'echec d'un appel reel eteignait le chemin FP4 pour tout le processus. Sur
+# une machine a cartes inegales — une Blackwell et une Ampere, par exemple —
+# un echec survenu sur celle qui n'a pas les tensor cores FP4 privait aussi
+# l'autre, qui les a. Le repli restait correct, mais il coutait le gain sur la
+# carte capable.
+#
+# La cle est la CAPACITE (major, minor), pas l'index du peripherique : un
+# changement de CUDA_VISIBLE_DEVICES renumerote les cartes, et un etat range
+# par index se retrouverait attribue a la mauvaise.
+#
+# Ce qui reste GLOBAL, a dessein : les echecs qui ne dependent pas de la carte
+# — type float4_e2m1fn_x2 absent, _scaled_mm absent, desactivation par
+# l'environnement. Les rendre par carte multiplierait le cout de sonde sans
+# rien changer au verdict.
+_ETEINT_PAR_CAPACITE: dict[tuple[int, int], str] = {}
+
+
+def _capacite(dev) -> tuple[int, int]:
+    """Capacite de calcul de la carte visee, ou (0, 0) hors CUDA."""
+    try:
+        return tuple(torch.cuda.get_device_capability(dev))
+    except Exception:                                 # noqa: BLE001
+        return (0, 0)
+
 
 def _swizzle_scales(bs: torch.Tensor) -> torch.Tensor:
     """Les échelles de bloc dans la disposition « tuilée » qu'exige cuBLAS.
@@ -110,15 +136,27 @@ def _probe() -> None:
         _OK = False
 
 
-def fp4_mm_available() -> bool:
+def fp4_mm_available(device=None) -> bool:
+    """Le chemin FP4 est-il utilisable, pour CETTE carte.
+
+    Sans argument, la question porte sur le processus : la sonde a-t-elle
+    reussi quelque part. Avec un peripherique, elle porte aussi sur les
+    extinctions locales survenues sur des cartes de meme capacite.
+    """
     _probe()
-    return _OK
+    if not _OK:
+        return False
+    if device is None:
+        return True
+    return _capacite(device) not in _ETEINT_PAR_CAPACITE
 
 
 def fp4_mm_info() -> dict:
     _probe()
     return {"available": _OK, "impl": _IMPL, "reason": _REASON,
-            "torch": torch.__version__}
+            "torch": torch.__version__,
+            "eteint_par_capacite": {f"sm_{a}{b}": r
+                                    for (a, b), r in _ETEINT_PAR_CAPACITE.items()}}
 
 
 def nvfp4_mm_tensorcore(x: torch.Tensor, t: NVFP4Tensor) -> Optional[torch.Tensor]:
@@ -134,7 +172,9 @@ def nvfp4_mm_tensorcore(x: torch.Tensor, t: NVFP4Tensor) -> Optional[torch.Tenso
     if getattr(t, "global_scale_rows", None) is not None:
         return None     # pile à une échelle par segment : seul le GEMV et la
                         # déquantification la lisent (GLM-4.7, 6/09/2026)
-    if not fp4_mm_available():
+    # La carte est passee : sans elle, une extinction survenue sur une autre
+    # capacite serait ignoree ici, et la correction ne servirait a rien.
+    if not fp4_mm_available(x.device):
         return None
     # ``torch._scaled_mm`` veut une dimension contractée multiple de 16 octets,
     # soit 32 poids FP4. Une couche qui ne s'y plie pas — 688 colonnes, donc
@@ -142,6 +182,15 @@ def nvfp4_mm_tensorcore(x: torch.Tensor, t: NVFP4Tensor) -> Optional[torch.Tenso
     # pas prendre. La refuser ici, et non par l'exception plus bas, évite qu'une
     # seule couche atypique n'éteigne les tensor cores pour tout le modèle.
     if t.padded_in % 32 or t.qweight.shape[-1] % 16:
+        return None
+    # Garde par carte, AVANT toute tentative.
+    #
+    # Les tensor cores FP4 exigent sm_100. Sans ce test, une carte plus
+    # ancienne atteignait l'appel reel, echouait, et eteignait le chemin — pour
+    # elle et, avant la correction du 8 septembre 2026, pour toutes les autres.
+    # Mieux vaut ne pas essayer que d'essayer, echouer, et devoir reparer les
+    # degats de l'echec.
+    if _capacite(x.device) < (10, 0):
         return None
     from ..quant.nvfp4 import quantize_nvfp4
 
@@ -165,11 +214,12 @@ def nvfp4_mm_tensorcore(x: torch.Tensor, t: NVFP4Tensor) -> Optional[torch.Tenso
         # résultat de toutes les couches suivantes, donc elle s'annonce — le
         # repli silencieux avait fait diverger la première requête d'un
         # processus de toutes les suivantes.
-        global _OK, _REASON
-        _OK = False
-        _REASON = f"la sonde FP4 a reussi mais un appel reel a echoue : {exc}"
-        warnings.warn(f"acvram : chemin FP4 tensor cores eteint apres un echec "
-                      f"reel, repli sur les noyaux fusionnes ({exc})")
+        cap = _capacite(x.device)
+        _ETEINT_PAR_CAPACITE[cap] = (
+            f"la sonde FP4 a reussi mais un appel reel a echoue : {exc}")
+        warnings.warn(f"acvram : chemin FP4 tensor cores eteint pour sm_{cap[0]}{cap[1]} "
+                      f"apres un echec reel, repli sur les noyaux fusionnes ({exc}). "
+                      f"Les cartes d'une autre capacite le gardent.")
         return None
 
 
