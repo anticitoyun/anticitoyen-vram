@@ -147,7 +147,7 @@ PROMOTE = {"int4_awq": "int8", "nvfp4": "int8", "int8": "bf16"}
 # Largeur nominale de chaque format, bits par poids échelles comprises. Sert à
 # chiffrer le prix d'une promotion avant de la calculer : la mesurer d'abord
 # reviendrait à quantifier deux fois tous les tenseurs du modèle.
-BPW_NOMINAL = {"bf16": 16.0, "fp16": 16.0, "int8": 8.25,
+BPW_NOMINAL = {"bf16": 16.0, "fp16": 16.0, "int8": 8.25, "q3n": 3.25,
                "nvfp4": 4.5, "int4_awq": 4.25}
 
 
@@ -609,10 +609,10 @@ def garde_grossissement(octets_source: int, total_params: int,
     raise ValueError(
         msg + ". Refusée : le surplus serait exilé en RAM hôte et coûterait "
         "plus cher que les instructions natives ne rapportent (Coder-Next, "
-        "7-8/09/2026 : facteur 15 au décodage). Aucun format d'acvram ne "
-        "descend aujourd'hui sous 4,25 bits/poids ; servez la source par un "
-        "moteur GGUF, ou passez --autoriser-grossissement en connaissance "
-        "de cause.")
+        "7-8/09/2026 : facteur 15 au décodage). Issues : le format q3n, "
+        "3,25 bits/poids, quantiles 3 bits (perplexité à vérifier) ; servir "
+        "la source par un moteur GGUF ; ou --autoriser-grossissement en "
+        "connaissance de cause.")
 
 def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                        spec: Optional[ModelSpec] = None,
