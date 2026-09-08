@@ -2771,3 +2771,33 @@ Ordre maintenu : le dossier A (divergence des chemins de décodage, en
 cours) passe avant tout changement de table — tant qu'il est ouvert,
 aucun SNR ne prédit une perplexité. Étalon de perplexité en cours :
 llama.cpp sur le GGUF Q3_K_S source, wiki.test.raw, contexte 512.
+
+## 8 septembre 2026 — le dossier A se referme, l'étalon de perplexité est posé
+
+* **La « divergence des chemins de décodage » n'était pas un bug** : mêmes
+  poids, même routage, seul l'ordre d'accumulation bf16 différait —
+  5,7e-3 d'écart relatif par couche, 0 exact en fp32 (mesure du 8/09,
+  branche poste2). Sur un modèle sain cet écart ne change pas le mot ; à
+  perplexité dégradée, l'argmax n'est plus porté par le signal et deux
+  ordres de sommation donnent deux charabias différents — « loi,loi » et
+  « URT » étaient deux tirages du même bruit. Les deux chemins accumulent
+  désormais en float32 (écart à la référence 6,58e-3 → 5,13e-3). Le seul
+  dossier restant est le format : la table sans zéro sur les blocs creux.
+* **Le harnais de perplexité mentait d'un facteur quinze.** llama.cpp sur
+  le GGUF Q3_K_S source : **9,1831 ± 0,073** (wiki.test.raw, sha256
+  173c87a5…, 1 290 590 octets ; 584 fenêtres de 512 disjointes, 256
+  positions notées par fenêtre, binaire e34f042). Le « 137 » d'acvram sur
+  le NVFP4 sain venait du corpus interne de 283 jetons noté depuis la
+  position zéro — les premières positions coûtent une dizaine de nats à
+  n'importe quel modèle. Correctif : --min-context (fusionné), éval
+  comparable = wiki.test.raw, fenêtre 512, stride 512, min_context 256,
+  après vérification du compte de jetons des deux tokeniseurs.
+* Au passage : CUDA_VISIBLE_DEVICES réparé (detect_rig interrogeait
+  nvidia-smi qui l'ignore ; renumérotation à la manière de CUDA), la
+  machine se partage désormais carte par carte ; et sept échecs de tests
+  graphes/MoE observés pendant qu'une mesure occupait la 5090 étaient de
+  la contention GPU, pas une régression — leçon : la suite complète ne se
+  juge que carte libre.
+* Mesures en attente : perplexité q3n comparable (à l'étalon 9,18, en
+  séquentiel après le contrôle NVFP4), Lloyd-Max stratifié 288+288
+  tenseurs disjoints (table unique ou par tenseur).
