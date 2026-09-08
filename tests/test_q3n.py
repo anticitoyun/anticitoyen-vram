@@ -416,3 +416,66 @@ def test_noyau_sur_des_poids_degeneres(cas):
     ecart = (obtenu.to(torch.float32) - attendu).abs().max().item()
     echelle = max(attendu.abs().max().item(), 1e-6)
     assert ecart <= 1e-2 * echelle, f"{cas} : écart {ecart:.3e} pour {echelle:.3e}"
+
+
+# --------------------------------------------------------------------------
+# Le défaut que la partie B ne pouvait pas voir
+# --------------------------------------------------------------------------
+#
+# Un noyau peut passer toute la partie B et rester inutilisable : il suffit
+# qu'il synchronise. Les tests d'équivalence appellent le noyau seul, hors
+# capture, et une synchronisation y est invisible. Ces deux tests-ci la
+# rendent visible.
+
+def test_echelle_globale_lue_une_seule_fois():
+    """``.item()`` sur un tenseur CUDA synchronise le flux à chaque GEMV.
+
+    Ce n'est pas une hypothèse : NVFP4 a rencontré le même piège sur ce dépôt,
+    et ce seul appel pesait 62 % du temps de décodage au profil. Q3NTensor
+    doit exposer le même accès mémorisé côté hôte.
+    """
+    t = quantize_q3n(_poids(16, 64, graine=19))
+    assert hasattr(t, "global_scale_float"), \
+        "Q3NTensor doit exposer global_scale_float(), comme NVFP4Tensor"
+    v = t.global_scale_float()
+    assert isinstance(v, float)
+    assert v == pytest.approx(float(t.global_scale.item()))
+
+    # Le second appel ne doit plus toucher au tenseur : on le remplace par un
+    # objet qui hurle si on le lit.
+    class Piege:
+        def item(self):
+            raise AssertionError("global_scale relu : la valeur n'est pas mémorisée")
+    t.global_scale = Piege()
+    assert t.global_scale_float() == pytest.approx(v)
+
+
+@SANS_CARTE
+def test_noyau_capturable_dans_un_graphe_cuda():
+    """acvram capture ses graphes ; un noyau qui synchronise n'y entre pas.
+
+    C'est le test qui manquait à la partie B : l'équivalence numérique ne dit
+    rien de la capturabilité, et un noyau juste mais non capturable retire au
+    décodage le gain pour lequel les graphes existent.
+    """
+    dev = torch.device("cuda:0")
+    noyau = _noyau()
+    t = _sur_carte(_poids(32, 256, graine=20), 32, dev)
+    x = torch.randn(1, 256, device=dev)
+
+    noyau.q3n_gemv_fused(x, t)          # réchauffe : allocations hors capture
+    torch.cuda.synchronize()
+    flux = torch.cuda.Stream()
+    flux.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(flux):
+        for _ in range(3):
+            noyau.q3n_gemv_fused(x, t)
+    torch.cuda.current_stream().wait_stream(flux)
+
+    graphe = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graphe):
+        sortie = noyau.q3n_gemv_fused(x, t)
+    graphe.replay()
+    torch.cuda.synchronize()
+    snr = _snr_db(_reference_gemv(x, t), sortie.to(torch.float32))
+    assert snr >= 35.0, f"graphe rejoué : {snr:.1f} dB"

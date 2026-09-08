@@ -56,6 +56,24 @@ class Q3NTensor:
             n *= d
         return self.nbytes * 8 / max(1, n)
 
+    def global_scale_float(self) -> float:
+        """Le scalaire d'échelle, mémorisé côté hôte.
+
+        Copié sur ``NVFP4Tensor.global_scale_float`` et pour la même raison,
+        déjà mesurée sur ce dépôt : relire ce tenseur par ``.item()`` à chaque
+        GEMV synchronise le flux CUDA, et ce seul appel pesait 62 % du temps de
+        décodage au profil NVFP4. L'échelle globale ne change plus après la
+        quantification ; elle se lit une fois.
+
+        Une synchronisation ici a un second effet, plus silencieux : elle rend
+        le noyau **incapturable dans un graphe CUDA**, et acvram en capture.
+        """
+        gs = self.__dict__.get("_gs_f")
+        if gs is None:
+            gs = float(self.global_scale.item())
+            self.__dict__["_gs_f"] = gs
+        return gs
+
     def to(self, device, non_blocking: bool = False) -> "Q3NTensor":
         return Q3NTensor(self.qweight.to(device, non_blocking=non_blocking),
                          self.block_scale.to(device, non_blocking=non_blocking),

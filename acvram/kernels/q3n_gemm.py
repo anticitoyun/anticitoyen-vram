@@ -32,5 +32,5 @@ def q3n_gemv_fused(x: torch.Tensor, t: Q3NTensor) -> Optional[torch.Tensor]:
         return None
     ext = get_extension()
     return ext.q3n_gemv(t.qweight, t.block_scale.view(torch.uint8),
-                        t.global_scale.to(t.qweight.device), x,
+                        t.global_scale_float(), x,
                         t.shape[1], t.block)
