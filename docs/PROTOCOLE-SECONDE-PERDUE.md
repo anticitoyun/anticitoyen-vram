@@ -69,8 +69,26 @@ Une seconde perdue se mesure en millisecondes. À ce débit de remontée, le
 système en fabrique une sans que le moteur y soit pour rien — et le protocole
 ci-dessous désignerait un candidat innocent.
 
-    vmstat 1 3     # colonne si (swap-in) : doit être à zéro
-    # si elle ne l'est pas, NE PAS MESURER — attendre, ou dire pourquoi
+    vmstat 1 3 | awk 'NR>3 {print $7}'   # colonne si, lignes 2 et 3 SEULEMENT
+    # une valeur non nulle : NE PAS MESURER — attendre, ou dire pourquoi
+
+**La première ligne de `vmstat` est un piège, et c'est le même piège que celui
+que cette section dénonce.** Elle ne donne pas l'instantané : elle donne la
+**moyenne depuis le démarrage de la machine**. Vérifié après le retour au calme,
+swap vidé, charge à 1,6 :
+
+    ligne 1 : si=10847     <- moyenne depuis le boot, contient les 8 Go d'il y a une heure
+    ligne 2 : si=0         <- l'instantané
+    ligne 3 : si=0
+
+Un contrôle qui lit la ligne 1 refuserait de mesurer sur une machine parfaitement
+calme, **et continuerait de refuser jusqu'au prochain redémarrage** — le compteur
+cumulé ne redescend jamais. La garde deviendrait alors la première chose qu'on
+désactive parce qu'elle « se trompe toujours », ce qui est la pire fin possible
+pour une garde. Lire les lignes 2 et suivantes, jamais la première.
+
+Relever `si` une seconde fois **après** la mesure : si le swap a repris pendant,
+le temps mesuré est à écarter, pas à interpréter.
 
 C'est la même forme que les autres pièges du dossier : un indicateur **voisin**
 de celui qu'on croit lire. La mémoire disponible mesure ce qui reste à donner ;
