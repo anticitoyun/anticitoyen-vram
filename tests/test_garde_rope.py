@@ -34,12 +34,26 @@ def test_les_dispositions_verifiees_passent(arch):
     _garde_rope_sections(arch, [16, 24, 24, 0])
 
 
+def test_qwen35_passe_car_sa_disposition_a_ete_verifiee():
+    """Entrelace, mais equivalent a NEOX en texte pur — donc pas de refus.
+
+    Le garde-fou avait d'abord ete pose en croyant l'inverse. La verification
+    dans les deux sources a montre que l'entrelacement ne permute pas les
+    frequences et que llama.cpp diffuse la meme position sur les quatre axes
+    pour un lot de jetons. Un garde-fou doit refleter ce qu'on sait : le
+    laisser refuser un modele sain sur une hypothese tombee serait pire que
+    de ne pas l'avoir pose.
+    """
+    _garde_rope_sections("qwen35", [11, 11, 10, 0])
+    _garde_rope_sections("qwen35moe", [11, 11, 10, 0])
+
+
 def test_une_architecture_inconnue_est_refusee():
     """Et le message doit dire quoi faire, pas seulement que c'est refuse."""
     with pytest.raises(ValueError) as e:
-        _garde_rope_sections("qwen35", [11, 11, 10, 0])
+        _garde_rope_sections("archi-de-demain", [16, 16, 16, 16])
     msg = str(e.value)
-    assert "qwen35" in msg and "[11, 11, 10, 0]" in msg
+    assert "archi-de-demain" in msg and "[16, 16, 16, 16]" in msg
     assert "IMROPE" in msg, "le nom de la disposition manquante n'est pas dit"
     assert "_ROPE_SECTIONS_CONTIGUES" in msg, "l'issue n'est pas nommee"
     assert "se degrade avec la longueur" in msg, \

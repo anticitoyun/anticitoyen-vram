@@ -60,7 +60,23 @@ def is_gguf(path: str) -> bool:
 # laquelle des deux dispositions elle emploie. Une demi-journee a ete perdue
 # sur un modele servi faux en silence ; un dossier qu'on ne sait pas servir se
 # conserve, il ne se sert pas.
-_ROPE_SECTIONS_CONTIGUES = {"qwen2vl", "qwen3vl", "qwen3vlmoe"}
+_ROPE_SECTIONS_CONTIGUES = {
+    "qwen2vl", "qwen3vl", "qwen3vlmoe",
+    # qwen35 : sections [11, 11, 10, 0] et RoPE ENTRELACE chez llama.cpp
+    # (`LLAMA_ROPE_TYPE_IMROPE`). Verifie le 8/09/2026 dans les deux sources,
+    # et le raccourci tient quand meme, pour deux raisons qui doivent aller
+    # ensemble :
+    #  - `ggml-cpu/ops.cpp` : l'entrelacement ne change ni l'ordre ni la
+    #    valeur des frequences ; le selecteur ne choisit que QUEL axe de
+    #    position fournit l'angle ;
+    #  - `llama-batch.cpp:712-719` : pour un lot de JETONS, la meme position
+    #    est diffusee sur les quatre axes (`src_off = batch.token ? 0 : ...`).
+    # Les quatre axes portant la meme position et les frequences etant
+    # inchangees, IMROPE se reduit exactement a NEOX. **En texte pur
+    # seulement** : le jour ou l'on servira des images a ce modele, les axes
+    # porteront des positions differentes et il faudra l'implementer.
+    "qwen35", "qwen35moe",
+}
 
 
 def _garde_rope_sections(arch: str, sections) -> None:
