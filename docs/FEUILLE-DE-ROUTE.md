@@ -2560,3 +2560,40 @@ sur un vrai modèle. 153 tests.
 Reste ouvert, dit d'avance : le chemin par masques garde le lot > 1 et le
 prefill ; la décision « trois passages au banc » (dispersion contre temps de
 série) ; et la prise de la première trace réelle.
+
+## 8 septembre 2026, 07:55 — premier comparatif énergétique instrumenté
+
+Trois passages par case, énergie du même passage que le débit publié, ligne de
+base après chaque case, invalidations calculées par le banc lui-même
+(`docs/comparatif-energie-20260908.tsv`).
+
+| modèle | moteur | t/s | j/kJ net | W | dispersion |
+|---|---|---|---|---|---|
+| Huihui-35B-A3B-Opus | **acvram** | **293,9** | **2 073** | 184 | 21,3 % ⚠ |
+| Huihui-35B-A3B-Opus | llamacpp | 208,5 | 1 218 | 171 | 5,2 % ⚠ |
+| Huihui-35B-A3B-abl | **acvram** | 159,2 | 946 | 130 | 26,0 % ⚠ |
+| Huihui-35B-A3B-abl | llamacpp | **208,4** | **1 161** | 174 | 5,5 % ⚠ |
+| Coder-Next Q3_K_S | acvram | 13,4 | 428 | 184 | 1,3 % |
+| Coder-Next Q3_K_S | **llamacpp** | **154,5** | **867** | 271 | 1,0 % |
+| Qwen3.8-27B Q6_K | **acvram** | **61,7** | **276** | 270 | 5,2 % ⚠🔌 |
+| Qwen3.8-27B Q6_K | llamacpp | 42,3 | 154 | 348 | 12,8 % ⚠🔌 |
+| Qwen3.8-27B exl3 | **acvram** | **49,4** | **219** | 271 | 4,9 % 🔌 |
+| Qwen3.8-27B exl3 | tabby | 46,7 | 179 | 311 | 0,3 % 🔌 |
+
+Ce que la première lecture donne, avant contradiction :
+
+* **acvram gagne trois appariements sur quatre, en débit ET en jetons par
+  kilojoule nets** — le dense Q6 à +46 % de débit et +79 % d'efficacité sur
+  llama.cpp, l'exl3 devant Tabby sur les deux axes.
+* **Le bridage en puissance existe bel et bien** : sur le dense 27B, les cas
+  marqués 🔌 ont touché le plafond logiciel — llama.cpp à 348 W. L'hypothèse
+  d'hier « jamais bridées en décodage » ne valait que pour le MoE exilé ; le
+  comparatif devra publier le régime par cas, pas par machine.
+* Les deux cases Huihui d'acvram dispersent à 21 et 26 % : la spéculation par
+  n-grammes rend le débit dépendant du texte produit. À traiter avant de
+  publier ce chiffre — c'est l'avertissement du banc qui le dit, comme prévu.
+* Coder-Next reste perdu 11 fois : c'est le modèle 3 bits, la garde de
+  conversion refuse désormais de le faire grossir, et le format ~3,5 bits
+  (spécification de la nuit, quantiles 3 bits à 3,25 bpw, table symétrique)
+  est la voie. Le SNR de la spécification bat les entiers 3,5 bits à taille
+  moindre ; perplexité et choix du bloc restent à mesurer.
