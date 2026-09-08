@@ -249,15 +249,36 @@ def memoire_libre():
         return []
 
 
-def ram_hote_libre_mio():
-    """RAM hote reellement disponible (MemAvailable), en Mio."""
+def _meminfo(champ):
     try:
         for l in open("/proc/meminfo", encoding="utf-8"):
-            if l.startswith("MemAvailable:"):
+            if l.startswith(champ + ":"):
                 return int(l.split()[1]) // 1024
     except OSError:
         pass
     return 0
+
+
+def ram_hote_libre_mio():
+    """RAM hote reellement disponible (MemAvailable), en Mio."""
+    return _meminfo("MemAvailable")
+
+
+def ram_verrouillee_mio():
+    """Memoire que le noyau ne peut ni evincer ni swapper, en Mio.
+
+    `Unevictable` et non `Mlocked` : releve d'poste1 le 8/09/2026 sur cette
+    machine, au repos, sans rien charger — Unevictable 960 664 kio contre
+    Mlocked 132. `Mlocked` ne compte que le mlock() classique ; la memoire
+    epinglee par le pilote CUDA ne passe pas par la. Diagnostiquer avec lui
+    ferait lire « rien n'est verrouille » sur des dizaines de gigaoctets qui
+    le sont.
+    """
+    return _meminfo("Unevictable")
+
+
+def ram_totale_mio():
+    return _meminfo("MemTotal")
 
 
 def poids_mio(dossier):
@@ -307,7 +328,8 @@ class MemoireInsuffisante(RuntimeError):
 
 
 def verifier_place(dossier, libre_vram, ram_libre=None, reserve_mio=8192,
-                   part_tampons=0.20):
+                   part_tampons=0.20, verrouille_mio=None, total_mio=None,
+                   reserve_systeme_mio=16384):
     """Refuse de charger ce qui ne tiendrait pas en RAM hote.
 
     Attendre que la memoire cesse de bouger ne suffit pas : le 8 septembre
@@ -341,6 +363,26 @@ def verifier_place(dossier, libre_vram, ram_libre=None, reserve_mio=8192,
             f"{poids} Mio de poids, {sum(libre_vram)} Mio de VRAM libre : "
             f"{exil} Mio partiraient en RAM hôte, soit {besoin} Mio avec les "
             f"tampons et la réserve, pour {ram} Mio disponibles. "
+            f"Chargement refusé (--forcer-exil pour passer outre).")
+
+    # Second test, et il ne fait PAS double emploi avec le premier. Les poids
+    # exiles vivent en memoire EPINGLEE : le noyau ne peut ni les evincer ni
+    # les swapper, donc il chasse tout le reste — le 8/09/2026, le bureau et
+    # le navigateur sont partis en swap et la machine est devenue inutilisable
+    # alors que `free` annoncait 83 Go disponibles.
+    #
+    # `MemAvailable` repond a « puis-je prendre cela maintenant » ; il ne dit
+    # rien de ce qui restera au systeme APRES. Un chargement peut passer le
+    # premier test et porter le total verrouille a un niveau ou le reste de la
+    # machine n'a plus de quoi vivre. On borne donc aussi le verrouillage
+    # total, rapporte a la RAM du systeme et non a ce qui est libre.
+    verrouille = ram_verrouillee_mio() if verrouille_mio is None else verrouille_mio
+    total = ram_totale_mio() if total_mio is None else total_mio
+    if total and verrouille + exil > total - reserve_systeme_mio:
+        raise MemoireInsuffisante(
+            f"{verrouille} Mio déjà verrouillés + {exil} Mio à épingler = "
+            f"{verrouille + exil} Mio sur {total} Mio de RAM totale, il ne "
+            f"resterait pas {reserve_systeme_mio} Mio au reste du système. "
             f"Chargement refusé (--forcer-exil pour passer outre).")
 
 
