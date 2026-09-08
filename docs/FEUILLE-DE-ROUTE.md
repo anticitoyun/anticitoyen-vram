@@ -2613,3 +2613,32 @@ moins trois fois la dispersion maximale du pairage :
   (spécification de la nuit, quantiles 3 bits à 3,25 bpw, table symétrique)
   est la voie. Le SNR de la spécification bat les entiers 3,5 bits à taille
   moindre ; perplexité et choix du bloc restent à mesurer.
+
+## 8 septembre 2026 — v0.4.86-88 : le format Q3N de bout en bout, à trois
+
+Chronologie d'une après-midi : spécification (quantiles 3 bits, table
+symétrique, échelle FP8 par bloc, 3,25 bits/poids — et la première version de
+la table, asymétrique à la NF4, écartée parce qu'un bloc de 32 y battait un
+bloc de 16, ce qui est impossible) ; implémentation Python et intégration aux
+formats, à la garde de grossissement et à la bascule automatique des sources
+3 bits ; noyau CUDA `q3n_gemv` ; plan de test adversarial écrit avant de voir
+le noyau, que le noyau traverse entier ; contrat public `q3n_gemm` **sans
+plancher de capacité** — Q3N n'a besoin d'aucun cœur tensoriel, la 3080 Ti y
+a droit, et c'est écrit pour que personne ne l'ajoute par mimétisme du miroir
+FP4. 227 tests.
+
+**Précision d'honnêteté sur l'équivalence du noyau.** « Au bit près » était
+trop dit : l'écart mesuré contre la référence par déquantification, en
+float32, va de 1,2e-7 à 4,8e-7 absolu sur des amplitudes de 0,4 à 3,7 — soit
+l'ordre de quelques ulps, ce qu'on attend de deux ordres d'accumulation
+différents, pas une égalité binaire. La validation qui reste due, sur les
+poids réels une fois la conversion finie : référence en float64, formes
+réelles, écart maximal et quadratique moyen publiés, compte des valeurs
+saturées. Une égalité au bit près sur formes réelles serait un signal à
+inspecter, pas un succès.
+
+**Ce qui décidera du bloc 16 contre 32** : la lourdeur de queue des vrais
+poids d'experts. Sur lognormale, l'écart entre blocs passe de 0,85 dB (sigma
+nul) à 2,91 dB (sigma 1,5) — plus la queue est lourde, plus le bloc de 16
+gagne et moins le quart de bit se défend. Mesure au harnais processeur sur le
+dossier converti, avant toute perplexité.
