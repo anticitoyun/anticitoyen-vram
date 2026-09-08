@@ -63,15 +63,29 @@ class StreamedWeight:
 
     def __init__(self, host_tensors: dict[str, torch.Tensor], device: torch.device,
                  n_buffers: int = 2, pool: "Optional[ExpertPool]" = None) -> None:
-        self.host = {k: (v.pin_memory() if not v.is_pinned() else v)
-                     for k, v in host_tensors.items()}
         # Un seul tampon épinglé contigu par poids : la copie hôte→carte se
         # fait en UN lancement au lieu d'un par tenseur (trois pour NVFP4 :
         # qweight, block_scale, global_scale). La courbe du 8/09 a montré un
         # transfert borné par la latence des copies, pas par le débit du bus —
         # 5,7 Go/s effectifs sur 18,7 —, avec quatre-vingt-dix copies par
         # couche exilée. Le dictionnaire `host` reste la vue par clé.
-        self.plat, self.decoupe = _emballer(self.host)
+        #
+        # Les tenseurs source sont passés TELS QUELS, paginables. Ils l'étaient
+        # épinglés un à un avant l'emballage, et c'était inutile deux fois : la
+        # copie vers `plat` est CPU→CPU (`_emballer`), elle n'exige rien de sa
+        # source ; et seul `plat` sert au DMA.
+        #
+        # Inutile, mais pas gratuit. L'allocateur hôte épinglé de PyTorch ne
+        # rend JAMAIS au système ce qu'il a pris : il le garde en cache pour
+        # réemploi. Chaque tenseur épinglé ici, aussitôt déréférencé par le
+        # `_decouper` plus bas, restait donc verrouillé pour la vie du
+        # processus, invisible à `Unevictable` comme à `Mlocked` — seul
+        # `nr_foll_pin_acquired − nr_foll_pin_released` de /proc/vmstat le
+        # voyait. Mesure du 8/09/2026 sur le témoin MoE, 30 couches exilées :
+        # 46 Gio réellement épinglés pour 33,75 attendus, soit ~12 Gio de
+        # résidu que le correctif précédent n'avait pas touchés — il avait
+        # supprimé la double RÉFÉRENCE, pas la double ÉPINGLURE.
+        self.plat, self.decoupe = _emballer(host_tensors)
         # `host` redevient ce que la ligne au-dessus annonce : des VUES sur le
         # tampon plat. Il en était une COPIE épinglée indépendante, du même
         # contenu, gardée vivante pour deux usages qui n'ont besoin ni de copie
