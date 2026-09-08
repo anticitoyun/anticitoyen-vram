@@ -490,13 +490,28 @@ def _gemv_or_none(fn):
     return call
 
 
+def q3n_matmul(x, w):
+    """GEMV Q3N fusionné ; None si l'extension manque (repli référence)."""
+    ext = get_extension()
+    if ext is None or not hasattr(ext, "q3n_gemv"):
+        return None
+    return ext.q3n_gemv(w.qweight, w.block_scale.view(torch.uint8),
+                        w.global_scale.to(w.qweight.device), x,
+                        w.shape[1], w.block)
+
+
+def q3n_dequant(w, dt):
+    from ..quant.q3n import dequantize_q3n
+    return dequantize_q3n(w, dt)
+
+
 _bk.register(_bk.Backend(
-    name="cuda-fusionne", formats=("nvfp4", "int4_awq", "int8"),
+    name="cuda-fusionne", formats=("nvfp4", "int4_awq", "int8", "q3n"),
     device_type="cuda", priority=100, available=_cuda_ok,
     matmul=lambda x, w: {"nvfp4": nvfp4_matmul, "int4_awq": int4_matmul,
-                         "int8": int8_matmul}[w.format](x, w),
+                         "int8": int8_matmul, "q3n": q3n_matmul}[w.format](x, w),
     dequant=lambda w, dt: {"nvfp4": nvfp4_dequant, "int4_awq": int4_dequant,
-                           "int8": int8_dequant}[w.format](w, dt),
+                           "int8": int8_dequant, "q3n": q3n_dequant}[w.format](w, dt),
     note="dequantification + GEMV fusionnes, acvram_kernels.cu"))
 
 _bk.register(_bk.Backend(

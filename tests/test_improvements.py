@@ -840,3 +840,27 @@ def test_une_source_3_bits_bascule_les_etages_sur_q3n():
     with pytest.raises(ValueError) as e:
         garde_grossissement(int(n * 2.5 / 8), n, 3.25, False)
     assert "q3n" in str(e.value)
+
+
+def test_q3n_gemv_noyau_egale_la_reference():
+    """Le noyau CUDA q3n_gemv égale la référence par déquantification, au
+    bit près en float32, à la précision bf16 sinon — formes variées, blocs
+    16 et 32, M non multiple de 4. Sauté sans carte ou sans extension."""
+    import pytest
+    import torch
+    if not torch.cuda.is_available():
+        pytest.skip("pas de carte")
+    from acvram import kernels
+    ext = kernels.get_extension()
+    if ext is None or not hasattr(ext, "q3n_gemv"):
+        pytest.skip("extension sans q3n_gemv")
+    from acvram.quant.q3n import dequantize_q3n, quantize_q3n
+    g = torch.Generator().manual_seed(1)
+    for (M, K, B) in [(64, 512, 32), (96, 512, 16), (5, 256, 32)]:
+        t = quantize_q3n(torch.randn(M, K, generator=g) * 0.02, block=B)
+        tc = t.to("cuda:0")
+        x = torch.randn(2, K, generator=g).cuda()
+        y = ext.q3n_gemv(tc.qweight, tc.block_scale.view(torch.uint8),
+                         tc.global_scale.cuda(), x, K, B)
+        ref = x @ dequantize_q3n(t, torch.float32).cuda().t()
+        assert (y - ref).abs().max().item() < 1e-5
