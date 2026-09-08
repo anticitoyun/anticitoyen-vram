@@ -2500,10 +2500,14 @@ la nuit, texte identique mot pour mot dans les trois :
 | chemin direct, contre-mesure | 14 689 ms | **13,5 t/s** | 19 s |
 
 Les deux cases directes se recoupent à 0,7 %. Sur ce modèle, le pire du parc,
-le débit passe de 10,3 (comparatif du 6) à 13,5 jetons par seconde : **+31 %**,
-en trois changements mesurés un à un — copie contiguë (+5 %), et chemin direct
-du décodage MoE (+26 %) qui remplace, à un jeton, les masques par expert et
-leurs trente et une synchronisations hôte par couche par une seule.
+le débit passe de 10,3 (comparatif du 6) à 13,5 jetons par seconde :
+**ensemble, +31 %**, un passage par case — l'écart est grand devant le
+recoupement de 0,7 %, mais c'est un intervalle qu'une série à trois passages
+donnera, pas un point. La décomposition — copie contiguë environ +5, chemin
+direct environ +26, celui-ci remplaçant à un jeton les masques par expert et
+leurs trente et une synchronisations hôte par couche — est **plausible, pas
+mesurée** : les deux gains viennent de fenêtres différentes et leur
+additivité n'a pas de case témoin « contiguë sans direct ».
 
 Fusionnés dans la même version : l'énergie NVML au banc (branche poste1,
 `7e386eb`) — lecture du compteur par ctypes, colonnes J, J_net, W_repos,
