@@ -72,6 +72,17 @@ class StreamedWeight:
         # 5,7 Go/s effectifs sur 18,7 —, avec quatre-vingt-dix copies par
         # couche exilée. Le dictionnaire `host` reste la vue par clé.
         self.plat, self.decoupe = _emballer(self.host)
+        # `host` redevient ce que la ligne au-dessus annonce : des VUES sur le
+        # tampon plat. Il en était une COPIE épinglée indépendante, du même
+        # contenu, gardée vivante pour deux usages qui n'ont besoin ni de copie
+        # ni d'épinglage — le repli sans GPU et `nbytes`. Le transfert, lui,
+        # part de `plat`.
+        # La mémoire épinglée n'est ni évinçable ni swappable : la doubler
+        # doublait ce que le noyau doit chasser ailleurs. Sur un MoE de 30
+        # milliards à 30 couches exilées, c'était 67,5 Gio verrouillés au lieu
+        # de 33,75 sur 93,98 de RAM — la machine devenait inutilisable, souris
+        # comprise, et `memory.peak` de la session a touché 89,42 Gio.
+        self.host = _decouper(self.plat, self.decoupe)
         self.device = device
         self.pool = pool
         self.stream = (pool.stream if pool is not None else
@@ -139,7 +150,22 @@ class StreamedWeight:
 
     @property
     def nbytes(self) -> int:
+        """Taille des POIDS. C'est ce que l'affichage appelle « poids » et ce
+        qui divise les temps pour donner des Go/s : elle ne doit pas compter le
+        rembourrage."""
         return sum(t.numel() * t.element_size() for t in self.host.values())
+
+    @property
+    def octets_verrouilles(self) -> int:
+        """Mémoire hôte réellement RÉSERVÉE et épinglée, rembourrage compris.
+
+        Distincte de `nbytes` : `_emballer` aligne chaque tenseur sur 256
+        octets, d'autant plus visible que les tenseurs sont petits et nombreux
+        — trois par poids en NVFP4. Les confondre donnerait un nom à deux
+        propriétés ; `nbytes` sous-estimerait ce que la machine subit, et
+        `octets_verrouilles` mentirait sur ce qu'est un poids.
+        """
+        return self.plat.numel()
 
 
 class ExpertPool:
