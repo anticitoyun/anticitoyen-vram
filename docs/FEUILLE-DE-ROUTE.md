@@ -2843,3 +2843,31 @@ règle : diff des manifestes TENSEUR PAR TENSEUR avant d'attribuer un écart
 Leçon de méthode, payée trois fois aujourd'hui : ce qui n'est pas imprimé
 à côté du chiffre finit par être supposé faux — le cadrage, le snr_floor,
 les formats réels. acvram eval imprimera les formats du modèle évalué.
+
+## 8 septembre 2026, 12:10 — verdict : la récurrence GDN d'acvram diverge avec la longueur
+
+Balayage à trois fenêtres, deux modèles int8 partout, mêmes corpus/cadrage
+des deux côtés (étalons llama.cpp de la session de mesure, cibles écrites
+d'avance) :
+
+  fenêtre   phi-4 dense (acvram/llama)     12B hybride (acvram/llama)
+    128      9,592 / 9,1320  = +5,0 %      113,42 / 52,577 = ×2,16
+    512      6,911 / 6,5988  = +4,7 %      129,19 / 31,692 = ×4,08
+   2048      5,984 / 5,8406  = +2,45 %     221,91 / 24,080 = ×9,21
+
+* Le dense porte un biais de forward de +2,5 à +5 % (les bornes de
+  notation, fenêtres et agrégation sont IDENTIQUES à llama.cpp, vérifié
+  dans perplexity.cpp e34f042 — audit de la nuit ; le +4,7 % n'est pas de
+  la comptabilité). À séparer du coût int8 par un phi-4 bf16 pur (en file).
+* L'hybride DIVERGE : l'écart double à chaque quadruplement de fenêtre, et
+  la perplexité acvram EMPIRE avec le contexte (113→129→222) là où le
+  modèle réel s'améliore (53→32→24). Le défaut est cumulatif au fil des
+  pas de la récurrence linear_attn — pas le format (int8 44 dB), pas le
+  chemin de service (1,7e-3), pas le magasin d'états entre fenêtres
+  (réinitialisé), pas la cohérence bloc/pas-à-pas (4,2e-4) : la DYNAMIQUE
+  elle-même (décroissance, portes, convolution) s'écarte de la référence
+  et l'erreur se compose.
+* Conséquence maintenue : toutes les perplexités acvram sur hybrides sont
+  invalidées (858 q3n, 137 NVFP4, 7,233 nemo). Et l'URT/13,5 t/s de
+  Coder-Next tournait sur cette même récurrence : la correction peut
+  changer aussi la qualité de génération, pas seulement l'éval.
