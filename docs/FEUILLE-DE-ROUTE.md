@@ -3099,3 +3099,40 @@ est juste. Candidat précis, à vérifier en premier : llama.cpp normalise
 explicitement q et k après la convolution causale (`ggml_l2_norm` avec
 l'epsilon du modèle, qwen35.cpp:318-321) là où acvram délègue au noyau
 par `use_qk_l2norm_in_kernel=True` (gdn.py:120).
+
+### Addendum, 18 h 30 — CAUSE RACINE confirmée : le drapeau `gdn_a_log_negexp` n'atteint pas le moteur
+
+La « fausse cause racine » rétractée à 13 h était en réalité vraie, et
+c'est la rétractation qui était fausse. Preuve prise dans le moteur
+chargé, pas dans le source (session OnePlus), et vérifiée
+indépendamment ici sur les deux dossiers convertis :
+
+  `config.json`                     gdn_a_log_negexp = **True**
+  `acvram_manifest.json` → model    **ABSENT**
+
+Or `load_model` reconstruit la spec depuis le MANIFESTE (`loader.py:155`)
+et `ModelSpec.to_dict()` ne sérialise pas `raw` — la branche
+d'inversion de `loader.py:595` ne s'exécute donc jamais en service. Le
+facteur de décroissance est pris tel quel puis retransformé par
+`−exp()` dans gdn.py : deux à cent fois trop fort. Mesuré au chargement :
+`a_log` min −0,3379 / max −0,0038, identique au disque, là où la valeur
+inversée vaudrait −5,5609 / −1,0850.
+
+Effet sur la couche 0, entrée exacte de llama.cpp : sortie de la GDN
+1,109e−01 → **1,124e−02** (÷10), sortie de couche 1,089e−01 →
+**2,177e−02** (÷5), et les normes concordent enfin (291,4 contre 292,5,
+il manquait 8 % d'énergie). Cela explique exactement le profil mesuré
+une heure plus tôt — 1 % sur les attentions pleines, 11-40 % sur les
+linéaires, seules porteuses d'un `a_log` — et la constance du facteur
+global.
+
+**Toutes les perplexités hybrides de la journée sont à refaire**, et le
+vrai q3n est probablement très en dessous de 209. Correctif : `load_model`
+complète `spec.raw` depuis `config.json` quand le manifeste ne le porte
+pas — répare les modèles DÉJÀ convertis, sans reconversion.
+
+Leçon, symétrique de celle du matin : **vérifier un objet ne dit rien
+d'un autre**. La rétractation reposait sur `load_model_spec(dossier).raw`,
+que le chargeur n'utilise pas ; lire le code ne remplace pas mesurer ce
+qu'il produit. Le relevé qui contenait déjà la réponse — « clés gdn dans
+manifest[model] : aucune » — était sous nos yeux depuis le matin.
