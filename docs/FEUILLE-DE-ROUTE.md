@@ -2910,32 +2910,28 @@ traitement sur les trois axes qui peuvent mentir (type, theta, dims).
   sur modèle entier) — borné, documenté, à ne jamais soustraire d'un
   chiffre mesuré à une autre fenêtre.
 
-## 8 septembre 2026, 13:10 — CAUSE RACINE : le facteur de décroissance GDN transformé deux fois
+## 8 septembre 2026, 13:10 — fausse cause racine, rétractée en vingt minutes
 
-Le convertisseur GGUF amont stocke déjà `−exp(A_log)`
-(convert_hf_to_gguf.py:8095) et llama.cpp le consomme tel quel ; gdn.py
-recalculait `−exp(a_log)` — une seconde transformation. Décroissance 2 à
-100 fois trop forte, état récurrent écrasé, erreur composée à chaque
-position : la perplexité EMPIRAIT avec le contexte. Preuve sur la couche 0
-réelle contre la référence llama.cpp (dump par couche, ligne de base
-Q5↔Q8 0,998+) : chemin actuel cos 0,9966 avec erreur croissante ×1,59 ;
-`a_log` pris tel quel : cos 0,99995, erreur PLATE — le résidu de 1,1 %
-est le bruit de quantification, mesuré non croissant. Le drapeau
-`gdn_a_log_negexp` existait dans le lecteur GGUF (qwen35/qwen3next) et
-n'avait jamais été branché au moteur.
+Une alerte « le facteur de décroissance GDN est transformé deux fois »
+(le GGUF stocke −exp(A_log), gdn.py réappliquerait −exp) a été démontrée
+FAUSSE par son autrice avant qu'aucun code ne change : le drapeau
+`gdn_a_log_negexp` est lu, branché (loader.py:595-598 inverse la valeur
+stockée quand il est vrai, aller-retour vérifié au bit près) et True dans
+les config des modèles convertis — c'était le montage du test isolé qui
+sautait l'inversion du chargeur. Vérifié indépendamment ici avant de
+rétracter. Ce qui reste VRAI de cette séquence : la couche 0 réelle
+d'acvram est à 1,1 % de llama.cpp, PLATE en position (le coût attendu de
+deux quantifications différentes) — la couche linéaire est saine sur
+toute la ligne ; un bruit de poids ne croît pas en position (mesuré,
+0,95×) ; et le cumul par blocs égale le pas-à-pas (6,9e-05). Le défaut du
+12B témoin reste SANS cause identifiée (les cosinus par couche d'un run
+réel se dégradent progressivement entre couches GDN quand la ligne de
+base Q5↔Q8 reste plate — fait mesuré, inexpliqué). Le dossier Coder-Next,
+lui, n'a jamais dépendu de cette alerte : son éval « avant » (q3n sans
+filet, cadrage propre) est relancée telle quelle.
 
-Coder-Next est contaminé (a_log tout négatif au manifeste, min −304) :
-l'URT du matin, le ppl 5,6 M, le 858 q3n, le 137 NVFP4, la trace de
-cosinus qui décrochait dès la couche 3 — tout en découle, et les
-planchers int8 v0.4.93-94 (attention, lm_head) étaient des pansements à
-réexaminer après correctif : ils coûtent peut-être des bits pour rien.
-Les poids convertis sont SAINS (copiés tels quels) : correctif moteur
-seul, aucune reconversion requise. Chemin de validation : essai court sur
-le dossier q3n existant (URT → texte attendu), perplexité q3n contre
-l'étalon 9,1831, remesure NVFP4, 12B témoin contre 31,69/24,08.
-
-L'instrument qui a nommé le composant quand toutes les hypothèses
-ciblées étaient mortes : la comparaison par couche ET par position contre
-llama.cpp, avec ligne de base de bruit de quantification — les chutes de
-cosinus toutes entre couches GDN, l'attention pleine qui REMONTE le
-signal, une déviation déjà présente à la couche 0 et croissante en t.
+Leçon, la troisième du même jour pour les montages : un montage à moitié
+réparé donne un chiffre PLAUSIBLE — la bonne forme, le bon ordre de
+grandeur, la signature attendue — et le plausible est ce qui échappe au
+contrôle. Chaque montage s'éprouve après CHAQUE réparation, pas
+seulement à la première.
