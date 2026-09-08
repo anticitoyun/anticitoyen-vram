@@ -894,3 +894,18 @@ def test_la_bascule_q3n_change_les_couches_pas_seulement_les_etages(tmp_path):
     r = TensorRouter(spec, plan, ConversionOptions(out_dir=str(tmp_path)))
     assert r.format_for("model.layers.0.mlp.gate_proj.weight") == "q3n"
     assert r.format_for("model.layers.3.self_attn.q_proj.weight") == "q3n"
+
+
+def test_q3n_traverse_le_chemin_generique_de_quantification():
+    """8/09, seconde panne de la journée sur le même thème : le format était
+    routé mais pas quantifiable — quantize() levait « format inconnu » après
+    une heure de conversion. Le chemin générique complet est verrouillé :
+    registre, quantification, déquantification, octets estimés."""
+    import torch
+    from acvram.quant.formats import (dequantize, estimate_bytes, get_format,
+                                      quantize)
+    w = torch.randn(16, 64) * 0.02
+    t = quantize(w, "q3n")
+    assert t.format == "q3n" and get_format("q3n").bpw == 3.25
+    assert dequantize(t, torch.float32).shape == w.shape
+    assert abs(estimate_bytes(80_000_000_000, "q3n") / 2**30 - 30.3) < 0.3

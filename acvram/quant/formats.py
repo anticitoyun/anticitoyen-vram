@@ -75,6 +75,8 @@ class FormatSpec:
     def bits_per_weight(self, in_features: int, group_size: Optional[int] = None) -> float:
         if self.name == "nvfp4":
             return 4.0 + 8.0 / 16.0
+        if self.name == "q3n":
+            return 3.0 + 8.0 / 32.0
         if self.name == "int4_awq":
             g = group_size or 128
             return 4.0 + 16.0 / g + 4.0 / g
@@ -102,6 +104,13 @@ FORMATS: dict[str, FormatSpec] = {
         quantize=None, dequantize=None,
         compute_dtype=torch.float16,
         description="uint8 affine par groupes de 128, repli pour couches sensibles",
+    ),
+    "q3n": FormatSpec(
+        name="q3n", bpw=3.25, min_sm=75,
+        quantize=None, dequantize=None,     # chemins dans quant/q3n.py,
+        compute_dtype=torch.bfloat16,       # branchés par quantize()/dequantize()
+        description="quantiles 3 bits + échelle de bloc FP8 E4M3 (32), "
+                    "le seul format sous la source d'un GGUF 3 bits",
     ),
     "bf16": FormatSpec(
         name="bf16", bpw=16.0, min_sm=80,
@@ -143,6 +152,9 @@ def quantize(weight: torch.Tensor, fmt: str, group_size: Optional[int] = None,
         return spec.quantize(weight, group_size=group_size or 128, **kwargs)
     if fmt == "int8":
         return _quantize_int8(weight, group_size or 128)
+    if fmt == "q3n":
+        from .q3n import quantize_q3n
+        return quantize_q3n(weight)
     if fmt in ("bf16", "fp16"):
         dtype = torch.bfloat16 if fmt == "bf16" else torch.float16
         return PlainTensor(weight.detach().to(dtype), tuple(weight.shape), fmt)
