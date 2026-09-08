@@ -69,6 +69,10 @@ class EvalResult:
     bits_per_weight: float = 0.0
     formats: dict[str, int] = field(default_factory=dict)
     avertissement: str = ""
+    # Le cadrage voyage avec le chiffre : sans lui, « 7,23 » et « 137 » ont
+    # l'air de decrire le meme objet.
+    min_context: int = 0
+    window: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -82,6 +86,8 @@ class EvalResult:
             "bits_per_weight": round(self.bits_per_weight, 3),
             "formats": self.formats,
             "avertissement": self.avertissement,
+            "min_context": self.min_context,
+            "window": self.window,
             "par_contexte": {str(k): {"ppl": round(math.exp(min(v[0] / v[1], 60.0)), 4),
                                       "jetons": v[1]}
                              for k, v in sorted(self.par_contexte.items()) if v[1]},
@@ -138,7 +144,8 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
         raise ValueError("corpus trop court pour être évalué")
 
     model = loaded.model
-    result = EvalResult(model=os.path.basename(os.path.abspath(model_dir)))
+    result = EvalResult(model=os.path.basename(os.path.abspath(model_dir)),
+                        min_context=min_context, window=window)
     result.weights_bytes = model.nbytes
     n_params = loaded.spec.total_params
     result.bits_per_weight = (result.weights_bytes * 8 / n_params) if n_params else 0.0
@@ -244,8 +251,14 @@ def render(results: list[EvalResult]) -> str:
     if not results:
         return "aucun resultat"
     width = max(len(r.model) for r in results)
-    lines = [f"  {'modele':<{width}}  {'ppl':>9}  {'bpp':>6}  {'taille':>10}  "
-             f"{'jetons':>8}"]
+    cadres = {(r.window, r.min_context) for r in results}
+    lines = []
+    if len(cadres) == 1:
+        w, mc = next(iter(cadres))
+        lines.append(f"  cadrage : fenetre {w}, contexte minimal {mc} jeton(s)")
+        lines.append("")
+    lines.append(f"  {'modele':<{width}}  {'ppl':>9}  {'bpp':>6}  {'taille':>10}  "
+                 f"{'jetons':>8}")
     best = min(r.perplexity for r in results)
     for r in results:
         delta = "" if r.perplexity == best else f"  (+{100*(r.perplexity/best-1):.1f}%)"
@@ -262,7 +275,13 @@ def render(results: list[EvalResult]) -> str:
             lines.append(f"  {r.model} par contexte disponible :")
             for bas, (som, n) in sorted(r.par_contexte.items()):
                 if n:
-                    lines.append(f"    a partir de {bas:>4} jetons  "
+                    # La borne affichee est celle de la tranche ET du
+                    # min_context : une tranche 128-512 filtree a 256 ne
+                    # contient que des positions a 256 jetons ou plus, et
+                    # l'annoncer « a partir de 128 » decrirait un objet plus
+                    # facile que celui qu'on a mesure.
+                    reel = max(bas, r.min_context)
+                    lines.append(f"    a partir de {reel:>4} jetons  "
                                  f"ppl {math.exp(min(som / n, 60.0)):9.3f}  "
                                  f"sur {n:5d} positions")
     return "\n".join(lines)
