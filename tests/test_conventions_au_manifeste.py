@@ -125,3 +125,43 @@ def test_l_indice_oriente_mais_ne_decide_pas():
 
     assert isinstance(indice_origine(["LlamaForCausalLM"]), str)
     assert isinstance(indice_origine(None), str)
+
+
+# ---------------------------------------------------------------------------
+# La perplexite cumulative : comparer deux moteurs au meme nombre de fenetres.
+
+def test_les_jalons_du_cumul_sont_des_puissances_de_deux():
+    """Pour qu'une mesure courte et une longue partagent des points communs.
+
+    Le 8/09, un chiffre mesure sur seize fenetres a failli etre compare a un
+    etalon sur 584 : le debut du wikitext n'est pas representatif (le cumul
+    llama.cpp va de 8,33 a la 16e fenetre a 9,18 a la 584e). Sans jalons
+    partages, deux mesures de longueurs differentes ne se comparent pas.
+    """
+    from acvram.evaluate import _JALONS
+
+    assert _JALONS == tuple(sorted(_JALONS))
+    for n in _JALONS:
+        assert n & (n - 1) == 0, f"{n} n'est pas une puissance de deux"
+
+
+def test_le_cumul_voyage_avec_le_resultat():
+    """Dans le JSON, pas seulement a l'ecran — un chiffre se recopie sans son
+    ecran, et le cumul est ce qui rend deux mesures comparables."""
+    from acvram.evaluate import EvalResult
+
+    r = EvalResult(model="essai", perplexity=15.361, tokens=148920,
+                   window=512, min_context=256,
+                   cumul={16: 12.5, 64: 14.2, 512: 15.3})
+    d = r.to_dict()
+    assert d["cumul"] == {"16": 12.5, "64": 14.2, "512": 15.3}
+
+
+def test_le_cumul_s_affiche_dans_l_ordre():
+    from acvram.evaluate import EvalResult, render
+
+    sortie = render([EvalResult(model="essai", perplexity=15.4, tokens=1000,
+                                window=512, min_context=256,
+                                cumul={64: 14.2, 16: 12.5})])
+    assert "apres   16 fenetres" in sortie
+    assert sortie.index("apres   16") < sortie.index("apres   64")

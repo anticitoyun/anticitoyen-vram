@@ -69,6 +69,13 @@ class EvalResult:
     bits_per_weight: float = 0.0
     formats: dict[str, int] = field(default_factory=dict)
     avertissement: str = ""
+    # Perplexite CUMULATIVE apres n fenetres, aux jalons de `_JALONS`. Le
+    # chiffre final ne dit pas comment il s'est forme : le wikitext oscille de
+    # 6,8 a 9,2 avant de se stabiliser, et un biais d'instrument peut dependre
+    # de la longueur de contexte — croissant sur une famille d'architecture,
+    # decroissant sur une autre. Comparer deux moteurs au meme nombre de
+    # fenetres exige de connaitre ce cumul ; llama.cpp le rend, acvram non.
+    cumul: dict[int, float] = field(default_factory=dict)
     # Le cadrage voyage avec le chiffre : sans lui, « 7,23 » et « 137 » ont
     # l'air de decrire le meme objet.
     min_context: int = 0
@@ -86,6 +93,7 @@ class EvalResult:
             "bits_per_weight": round(self.bits_per_weight, 3),
             "formats": self.formats,
             "avertissement": self.avertissement,
+            "cumul": {str(k): round(v, 4) for k, v in sorted(self.cumul.items())},
             "min_context": self.min_context,
             "window": self.window,
             "par_contexte": {str(k): {"ppl": round(math.exp(min(v[0] / v[1], 60.0)), 4),
@@ -93,6 +101,10 @@ class EvalResult:
                              for k, v in sorted(self.par_contexte.items()) if v[1]},
         }
 
+
+# Jalons du cumul : puissances de deux jusqu'au corpus entier. Choisis pour
+# qu'une mesure courte et une mesure longue partagent des points de comparaison.
+_JALONS = (16, 32, 64, 128, 256, 512)
 
 # Sous ce nombre de positions notees, le resultat porte un avertissement.
 # Choisi comme l'ordre de grandeur en dessous duquel l'ecart-type de la
@@ -204,6 +216,9 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
                 result.par_contexte[bas] = (som + float(pertes[i0:i1].sum()),
                                             n_pos + i1 - i0)
         result.windows += 1
+        if result.windows in _JALONS and counted:
+            result.cumul[result.windows] = math.exp(
+                min(total_nll / counted, 60.0))
         if progress:
             progress(w + 1, n_windows)
         if start + window >= len(ids):
@@ -282,6 +297,12 @@ def render(results: list[EvalResult]) -> str:
     for a in sorted(avertis):
         lines.append("")
         lines.append(f"  ATTENTION : {a}")
+    for r in results:
+        if r.cumul:
+            lines.append("")
+            lines.append(f"  {r.model}, perplexite cumulative :")
+            for n, v in sorted(r.cumul.items()):
+                lines.append(f"    apres {n:4d} fenetres  {v:9.4f}")
     for r in results:
         if r.par_contexte:
             lines.append("")
