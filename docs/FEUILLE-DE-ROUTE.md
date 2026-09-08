@@ -2997,3 +2997,45 @@ qui diverge). Si A[-1]=B[-1] mais A[i]≠B[i] : le chemin d'évaluation
 multi-positions des hybrides est le défaut, toutes les perplexités
 hybrides sont à refaire après correctif, et le vrai q3n est peut-être
 bien sous 209.
+
+### Addendum, 16 h — l'évaluation est innocentée, le service est touché
+
+Perplexité par le chemin de GÉNÉRATION (décodage pas à pas, cache KV et
+magasin d'états persistants, jetons du corpus forcés) contre le chemin
+d'ÉVALUATION (préremplissage multi-positions), MÊMES 512 jetons, même
+min_context 256, une seule exécution, q3n avec filet :
+
+  A préremplissage  108,159   B décodage pas à pas  121,666   (255 positions)
+
+Les deux concordent — l'écart de 12 % est du même ordre que l'incertitude
+d'échantillonnage (≈6 % par chiffre à 255 positions) et que les arrondis
+bf16 entre chemins (2e-2, mesurés). **Le paradoxe « perplexité 193 mais
+texte cohérent » n'est donc pas un défaut d'instrument : le service
+calcule bien ce que l'évaluation mesure.** La priorité du projet est
+confirmée : la dégradation est réelle en service.
+
+Contrôle de représentativité, exigé et payant : A vaut **108 sur ce
+sous-ensemble contre 209 sur les 584 fenêtres** — le début du corpus
+n'est pas représentatif (facteur ~2), tout essai court reste interne à
+lui-même et ne se relie pas au chiffre global.
+
+Suspects éliminés ce soir, tous par la mesure : prefill multi-positions
+(causalement correct, 0,000e+00), divergence éval/génération (concordance
+aux arrondis, témoin dense DANS le montage — et l'hybride diverge MOINS
+que le dense), amplification récurrente de l'erreur de poids (composition
+en √N des deux côtés, rapport constant 2,3), hypersensibilité
+architecturale comme explication (mesurée à 6,1× sur perturbation
+modérée, mais 26× trop petite ET saturante — les hybrides SE
+requantifient, +11,9 % au pire chez llama.cpp : la demande de 160 Go bf16
+à l'utilisateur est épargnée).
+
+Sous-produit réutilisable : **une couche récurrente est 2,3 fois plus
+sensible à une perturbation de poids qu'un perceptron de même largeur** —
+critère de placement pour le planificateur, et justification rétrospective
+du plancher int8 de la v0.4.94.
+
+Question restante, unique et nette : pourquoi acvram dégrade-t-il d'un
+ordre de grandeur par rapport à llama.cpp sur le même modèle, en service
+comme en évaluation, alors que chaque composant testé isolément est sain.
+Voie retenue : comparer les LOGITS (toutes nos comparaisons opposent
+acvram à acvram, sauf la perplexité qui est l'agrégat final).
