@@ -2364,3 +2364,26 @@ Ce que la courbe ne dit pas : le gain de ne pas faire grossir le modèle à la
 conversion. Les 18 couches exilées viennent des 4,5 bits par poids de NVFP4
 contre 3,4 à la source ; à taille égale, aucune ne le serait, et le plafond
 de 21 jetons par seconde deviendrait le débit.
+
+## 8 septembre 2026, matin — v0.4.77 : fusions, et la fenêtre du bus
+
+Fusion des branches de travail : granularité des transferts dérivée de
+`n_experts_active` au lieu d'être supposée (0.4.76), copie contiguë des poids
+exilés — un poids NVFP4 voyageait en trois tenseurs, 1 620 copies par jeton
+sur 18 couches, désormais une par poids — et horodatages `[mesure]` du premier
+et du dernier jeton de chaque requête sur la sortie du serveur, pour borner
+les fenêtres d'instrument sans messagerie.
+
+La fenêtre du bus pendant un décodage réel de 400 jetons, alignée à la
+seconde sur les horodatages du client : **479 Mio par jeton, 4,9 Gio/s
+cumulés, par salves** — la carte 0 alterne 6,9 Gio/s et zéro, la carte 1 est
+muette dix secondes sur vingt et une — sur des liens mesurés à 18,7 et 11,4.
+**18 % du lien utilisé : la borne n'est pas le débit.** 290 ko par copie si
+le compte de 1 728 tient, dans la fourchette prévue. Réserve écrite : la
+fenêtre n'a couvert que 56 % du décodage, la première moitié.
+
+La copie contiguë ne gagne que 7 % à sec (2,88 ms contre 3,11 par couche) :
+diviser les lancements par trois ne suffit pas, le coût est dans la
+sérialisation des salves, pas dans le nombre de copies. Prochaine cible : le
+recouvrement — les copies de la couche N pendant l'attention de N, et les
+deux cartes en même temps.
