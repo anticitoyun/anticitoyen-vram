@@ -120,3 +120,77 @@ converti sans filet de promotion pendant que son comparant en avait un — ont l
 même forme : **le défaut n'était pas le calcul, mais le silence du calcul sur ce
 qu'il ne savait pas faire.** Un outil qui rend un nombre là où il devrait
 refuser coûte plus cher qu'un outil qui tombe en panne.
+
+---
+
+# Bilan : avant / après, et ce qui reste non mesuré
+
+Table tenue à jour au fil des mesures. **Une case vide est marquée « non
+mesuré », jamais laissée absente** : une ligne manquante se lit comme un oubli,
+une case marquée se lit comme un travail à faire.
+
+## Les étalons de référence (llama.cpp, tous mesurés)
+
+| modèle | rôle | n_ctx | fenêtres | perplexité |
+|---|---|---|---|---|
+| Qwen3-Coder-Next **Q3_K_S** | source de q3n, **la cible** | 512 | 584 | 9,1831 ± 0,0730 |
+| Qwen3.6-12B Q5_K_M | témoin hybride | 128 | 2321 | 52,5769 ± 0,4729 |
+| | | 512 | 580 | 31,6919 ± 0,2652 |
+| | | 2048 | 145 | 24,0799 ± 0,1918 |
+| phi-4 Q4_K_M | témoin dense | 128 | 2260 | 9,1320 ± 0,0651 |
+| | | 512 | 565 | 6,5988 ± 0,0414 |
+| | | 2048 | 141 | 5,8406 ± 0,0353 |
+| phi-4 **Q8_0** requantifié | coût d'une requantification 8 bits | 512 | 565 | 6,5974 ± 0,0414 |
+
+Conditions communes : llama.cpp e34f042, `wiki.test.raw`
+sha256 `173c87a5…7dd08`, stride = n_ctx, n_ctx/2 positions notées par fenêtre,
+`-ngl 999`, RTX 5090.
+
+## Le format q3n, avant / après
+
+| état | perplexité | rapport à 9,1831 | conditions |
+|---|---|---|---|
+| q3n **sans filet** (`snr_floor` 0, aucune promotion) | 1005,838 | ×110 | 584 fenêtres, 148 920 positions, contexte minimal 256 |
+| q3n **avec filet** (`snr_floor` 25) | *non mesuré* | — | reconversion en cours |
+| q3n avec filet **et** table Lloyd | *non mesuré* | — | table garée tant que le filet n'a pas rendu son chiffre |
+| NVFP4, mêmes conditions | *non mesuré* | — | témoin de format, sert à annuler tout défaut moteur commun |
+
+**Aucun de ces chiffres n'est une perplexité du format q3n**, et ils ne doivent
+pas être écrits ainsi. Ils sont mesurés par le harnais acvram ; l'étalon vient
+de llama.cpp. Deux réserves les grèvent, et elles sont de nature différente :
+
+**1. Le biais d'instrument, mesuré, non constant.** Sur un modèle dense, format
+à 44 dB, sans récurrence : +5,0 % à 128, +4,7 % à 512, +2,45 % à 2048. La part
+revenant à la requantification est nulle (le Q8_0 ci-dessus le prouve). Ce biais
+ne doit jamais être soustrait d'un chiffre mesuré à une autre fenêtre que celle
+où il a été établi.
+
+**2. Un fait sans cause, sur les architectures hybrides.** Sur le témoin 12B,
+les sorties de couche d'acvram s'écartent de celles de llama.cpp de façon
+croissante avec la profondeur — cosinus 0,997 à la couche 0, 0,660 à la couche
+18 — et la dégradation se concentre entre couches **GDN**, les couches
+d'attention pleine n'étant pas touchées. Mais la même couche prise **isolément**
+est saine, avec un écart plat. Le fait est donc établi en assemblage et sans
+cause identifiée. Rien ne prouve à ce jour que `qwen3next` — l'architecture de
+Coder-Next, hybride elle aussi — le partage ; rien ne prouve le contraire.
+
+Conséquence pratique : **la distance d'un chiffre q3n à 9,1831 n'est pas
+attribuable au format** tant que ce fait n'est pas expliqué. La **différence
+entre deux formats mesurés dans les mêmes conditions** l'est, elle, parce
+qu'un défaut moteur commun s'y annule. C'est pourquoi le NVFP4 figure dans la
+table : il n'est pas un chiffre de plus, c'est ce qui rend les autres lisibles.
+
+## Sur la table Lloyd, si elle est un jour retenue
+
+Son gain mesuré — +3,43 dB en moyenne sur 288 tenseurs disjoints, aucun tenseur
+perdant — vaut pour **requantifier un modèle déjà quantifié avec une grille
+contenant un zéro**. C'est le cas de Coder-Next, dont la source est un GGUF
+Q3_K_S. **Elle est inutile sur un modèle bf16 : son gain vient des zéros exacts
+de la grille source, pas d'une propriété du format.** Mesuré sur
+DeepSeek-Coder-V2-Lite en bf16 d'origine, où la table de la spécification gagne :
+14,79 contre 14,22 dB.
+
+Et un décibel de SNR de poids ne prédit aucune perplexité. C'est la mesure
+avant/après, sur le même corpus et dans le même cadrage, qui décidera — ou qui
+dira que le gain ne se voit pas en sortie, ce qui devra être écrit aussi
+franchement que le gain lui-même.
