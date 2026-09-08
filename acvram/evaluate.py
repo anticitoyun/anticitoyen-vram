@@ -68,6 +68,11 @@ class EvalResult:
     weights_bytes: int = 0
     bits_per_weight: float = 0.0
     formats: dict[str, int] = field(default_factory=dict)
+    avertissement: str = ""
+    # Le cadrage voyage avec le chiffre : sans lui, « 7,23 » et « 137 » ont
+    # l'air de decrire le meme objet.
+    min_context: int = 0
+    window: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -80,11 +85,19 @@ class EvalResult:
             "weights_bytes": self.weights_bytes,
             "bits_per_weight": round(self.bits_per_weight, 3),
             "formats": self.formats,
+            "avertissement": self.avertissement,
+            "min_context": self.min_context,
+            "window": self.window,
             "par_contexte": {str(k): {"ppl": round(math.exp(min(v[0] / v[1], 60.0)), 4),
                                       "jetons": v[1]}
                              for k, v in sorted(self.par_contexte.items()) if v[1]},
         }
 
+
+# Sous ce nombre de positions notees, le resultat porte un avertissement.
+# Choisi comme l'ordre de grandeur en dessous duquel l'ecart-type de la
+# moyenne des log-vraisemblances depasse l'ecart typique entre deux formats.
+_POSITIONS_MINIMALES = 512
 
 # Bornes des tranches de contexte, en jetons vus par la position notee.
 _TRANCHES = ((0, 8), (8, 32), (32, 128), (128, 512), (512, 0))
@@ -131,7 +144,8 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
         raise ValueError("corpus trop court pour être évalué")
 
     model = loaded.model
-    result = EvalResult(model=os.path.basename(os.path.abspath(model_dir)))
+    result = EvalResult(model=os.path.basename(os.path.abspath(model_dir)),
+                        min_context=min_context, window=window)
     result.weights_bytes = model.nbytes
     n_params = loaded.spec.total_params
     result.bits_per_weight = (result.weights_bytes * 8 / n_params) if n_params else 0.0
@@ -196,6 +210,31 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
             break
 
     result.tokens = counted
+    if counted == 0:
+        raise ValueError(
+            f"aucune position notee : le corpus fait {len(ids)} jetons et "
+            f"min_context={min_context} les ecarte toutes. Allonger le corpus "
+            f"ou baisser min_context.")
+    # Un chiffre tire de trop peu de positions n'est pas un chiffre : sa
+    # variance depasse l'ecart qu'on veut mesurer. Le corpus interne fait 283
+    # jetons ; note comme llama.cpp (fenetre 512, min_context 256) il n'en
+    # laisserait que vingt-six. Trois sessions ont interprete deux jours durant
+    # un 137 obtenu sur 282 positions notees des le premier jeton — l'avertir
+    # est le minimum, et il voyage avec le resultat, pas seulement a l'ecran.
+    if counted < _POSITIONS_MINIMALES:
+        result.avertissement = (
+            f"{counted} positions notees seulement (moins de "
+            f"{_POSITIONS_MINIMALES}) : la variance de ce chiffre depasse "
+            f"probablement les ecarts entre formats. Corpus plus long requis.")
+    if min_context == 0 and len(ids) < window:
+        note = (f"corpus de {len(ids)} jetons plus court que la fenetre de "
+                f"{window}, note des la premiere position ({counted} positions "
+                f"notees) : les jetons sans contexte dominent la moyenne. "
+                f"Comparer a llama.cpp demande --min-context {window // 2}, "
+                f"qui ne laisserait ici que "
+                f"{max(0, len(ids) - 1 - window // 2)} positions.")
+        result.avertissement = (result.avertissement + " " + note
+                                if result.avertissement else note)
     result.nll = total_nll / max(1, counted)
     result.perplexity = math.exp(min(result.nll, 60.0))
     result.seconds = time.time() - t0
@@ -212,12 +251,37 @@ def render(results: list[EvalResult]) -> str:
     if not results:
         return "aucun resultat"
     width = max(len(r.model) for r in results)
-    lines = [f"  {'modele':<{width}}  {'ppl':>9}  {'bpp':>6}  {'taille':>10}  "
-             f"{'jetons':>8}"]
+    cadres = {(r.window, r.min_context) for r in results}
+    lines = []
+    if len(cadres) == 1:
+        w, mc = next(iter(cadres))
+        lines.append(f"  cadrage : fenetre {w}, contexte minimal {mc} jeton(s)")
+        lines.append("")
+    lines.append(f"  {'modele':<{width}}  {'ppl':>9}  {'bpp':>6}  {'taille':>10}  "
+                 f"{'jetons':>8}")
     best = min(r.perplexity for r in results)
     for r in results:
         delta = "" if r.perplexity == best else f"  (+{100*(r.perplexity/best-1):.1f}%)"
         lines.append(f"  {r.model:<{width}}  {r.perplexity:9.3f}  "
                      f"{r.bits_per_weight:6.2f}  {r.weights_bytes/2**20:8.1f}Mio  "
                      f"{r.tokens:8d}{delta}")
+    avertis = {r.avertissement for r in results if r.avertissement}
+    for a in sorted(avertis):
+        lines.append("")
+        lines.append(f"  ATTENTION : {a}")
+    for r in results:
+        if r.par_contexte:
+            lines.append("")
+            lines.append(f"  {r.model} par contexte disponible :")
+            for bas, (som, n) in sorted(r.par_contexte.items()):
+                if n:
+                    # La borne affichee est celle de la tranche ET du
+                    # min_context : une tranche 128-512 filtree a 256 ne
+                    # contient que des positions a 256 jetons ou plus, et
+                    # l'annoncer « a partir de 128 » decrirait un objet plus
+                    # facile que celui qu'on a mesure.
+                    reel = max(bas, r.min_context)
+                    lines.append(f"    a partir de {reel:>4} jetons  "
+                                 f"ppl {math.exp(min(som / n, 60.0)):9.3f}  "
+                                 f"sur {n:5d} positions")
     return "\n".join(lines)
