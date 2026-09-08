@@ -3136,3 +3136,50 @@ d'un autre**. La rétractation reposait sur `load_model_spec(dossier).raw`,
 que le chargeur n'utilise pas ; lire le code ne remplace pas mesurer ce
 qu'il produit. Le relevé qui contenait déjà la réponse — « clés gdn dans
 manifest[model] : aucune » — était sous nos yeux depuis le matin.
+
+### 8 septembre, 17 h 20 — après correctif : le coût réel du format, enfin mesuré
+
+Mêmes 584 fenêtres, 148 920 positions notées, wiki.test.raw, cadrage
+512/512/min_context 256 pour tous.
+
+  étalon llama.cpp, Q3_K_S source            9,1831 ± 0,073
+  acvram NVFP4  (4,5 bpw)                   **13,692**   +0,398 nat
+  acvram q3n    (3,25 bpw)                  **15,361**   +0,514 nat
+  → **coût propre du format q3n : +0,115 nat, +12,2 % pour −25 % d'octets**
+
+Avant le correctif, les mêmes dossiers rendaient 193,6 et 209,0 : le
+facteur 21-24 qui masquait tout est tombé à 1,5-1,7. Et l'essai court
+rend du français correct là où il produisait « URTURTURT ».
+
+**Contrôle par l'immobilité, plus convaincant que le gain** : phi-4
+dense rend **6,911 avant ET après** le correctif, au millième près — un
+modèle sans `a_log` ne devait pas bouger, il n'a pas bougé ; de même les
+couches d'attention pleine sont inchangées au chiffre près dans la mesure
+par couche. Un correctif se prouve autant par ce qu'il laisse intact.
+
+Biais d'instrument, MESURÉ et non estimé : phi-4 int8 6,911 contre 6,5988
+= **+0,0461 nat (+4,73 %)** sur dense, au même cadrage.
+
+Décomposition en cours des 0,398 nat du NVFP4 :
+  0,398 = coût de l'opération de requantification + biais d'instrument
+          (0,0461) + coût de grille propre au NVFP4 + résidu
+Le troisième terme avait été posé à zéro par erreur — 4,5 bits depuis 3,4
+reste un changement de grille et coûte quelque chose. Témoins en cours
+(session de mesure) : Q3_K_S → Q3_K_S (opération seule) et Q3_K_S →
+Q4_K_S (opération + grille plus fine). Réserve posée d'avance : rien ne
+garantit que ces termes s'additionnent linéairement en log-vraisemblance ;
+une somme juste à 2 % conclurait, une somme fausse de 20 % mettrait
+peut-être en cause l'additivité plutôt qu'un terme manquant.
+
+**Comment lire le +12,2 %** : c'est un arbitrage, pas une victoire. Sur
+un modèle qui tient en mémoire, personne ne paiera 12 % de qualité pour
+un quart d'octets ; sur un modèle exilé, ce quart décide de ce qui reste
+en VRAM et de ce qui traverse le bus — poste qui gouverne le débit
+(5,7 Go/s effectifs sur 18,7, 479-541 Mio par jeton). **q3n se justifie
+par le tiering, pas dans l'absolu.** La mesure qui trancherait vraiment,
+et que personne n'a faite : à mémoire constante, q3n avec moins de
+couches exilées contre NVFP4 avec davantage d'exil — les 12,2 % de
+perplexité contre les jetons par seconde et les joules que l'exil évité
+fait gagner. Réserve qui voyage avec le chiffre : il vaut pour une
+requantification depuis une grille contenant un zéro, et ne se transporte
+pas à des poids bf16.
