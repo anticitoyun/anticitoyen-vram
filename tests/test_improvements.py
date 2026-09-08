@@ -893,7 +893,11 @@ def test_la_bascule_q3n_change_les_couches_pas_seulement_les_etages(tmp_path):
             lp.fmt = "q3n"
     r = TensorRouter(spec, plan, ConversionOptions(out_dir=str(tmp_path)))
     assert r.format_for("model.layers.0.mlp.gate_proj.weight") == "q3n"
-    assert r.format_for("model.layers.3.self_attn.q_proj.weight") == "q3n"
+    # v0.4.94 : l'attention ne descend plus sous int8 quand la cible est
+    # q3n (trace du 8/09 : effondrement du cosinus dès la première attention
+    # pleine en q3n). La bascule atteint bien le routeur — c'est l'objet de
+    # ce test — mais le plancher la borne sur les projections d'attention.
+    assert r.format_for("model.layers.3.self_attn.q_proj.weight") == "int8"
 
 
 def test_q3n_traverse_le_chemin_generique_de_quantification():
