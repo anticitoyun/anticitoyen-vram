@@ -46,6 +46,12 @@ MAX_TOKENS = 200
 # a temperature de repos. On publie le meilleur des trois, ce qui l'ecarte de
 # fait ; sa valeur reste comptee dans la dispersion, et c'est voulu : elle dit
 # aussi ce que coute le demarrage a froid.
+# Nombre de passages par couple. Trois suffit pour un ecart-type utilisable ;
+# CINQ est exige par la serie determinisme (docs/SERIE-DETERMINISME.md) parce
+# qu'avec trois, un premier passage froid et deux passages proches donnent la
+# meme image qu'une bimodalite, et on ne les distingue pas. Paramétrable par
+# `--passages` : on ne reduit jamais la rigueur par modele, on reduit le nombre
+# de modeles.
 MESURES = 3
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -440,14 +446,20 @@ def mesurer(moteur):
 # boucle
 # --------------------------------------------------------------------------
 def main():
+    global MESURES
     ap = argparse.ArgumentParser()
     ap.add_argument("--moteurs", default="acvram,llamacpp,vllm,tabby")
     ap.add_argument("--modeles", default="", help="motif (regex) sur le nom du modèle")
     ap.add_argument("--ctx", type=int, default=8192)
     ap.add_argument("--tous", action="store_true", help="aussi les modèles servis par un seul moteur")
     ap.add_argument("--sortie", default=time.strftime("comparatif-%Y%m%d.tsv"))
+    ap.add_argument("--passages", type=int, default=MESURES,
+                    help="passages par couple (3 par defaut ; 5 pour la serie "
+                         "determinisme, qui distingue un passage froid d'une "
+                         "bimodalite)")
     ap.add_argument("--simuler", action="store_true")
     a = ap.parse_args()
+    MESURES = a.passages
     moteurs = a.moteurs.split(",")
 
     table = parc()
