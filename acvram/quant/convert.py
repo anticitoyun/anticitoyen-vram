@@ -147,7 +147,11 @@ def _h(n: float) -> str:
 # plutôt que d'entraîner tout le modèle vers un format plus large : dépenser
 # 8 bits sur les quelques pour cent de tenseurs qui en ont besoin coûte une
 # fraction de bit par poids sur l'ensemble.
-PROMOTE = {"int4_awq": "int8", "nvfp4": "int8", "int8": "bf16"}
+# q3n promeut vers int8 comme nvfp4 : sans cette entrée, la reconversion
+# « à filet égal » du 8/09 (snr_floor 25) a rendu un manifeste STRICTEMENT
+# identique au sans-filet — zéro promotion, en silence, options.snr_floor
+# pourtant à 25. Un filet qui ignore un format doit le dire, pas se taire.
+PROMOTE = {"int4_awq": "int8", "nvfp4": "int8", "q3n": "int8", "int8": "bf16"}
 
 # Largeur nominale de chaque format, bits par poids échelles comprises. Sert à
 # chiffrer le prix d'une promotion avant de la calculer : la mesurer d'abord

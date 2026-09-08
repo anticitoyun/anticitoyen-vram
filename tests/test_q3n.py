@@ -537,3 +537,17 @@ def test_rehydrate_transporte_la_table():
                        "block_scale": t.block_scale.clone().view(torch.uint8),
                        "global_scale": t.global_scale.clone()})
     assert r.table == TABLE_Q3N_LLOYD_CODER_NEXT
+
+
+def test_q3n_est_promouvable_par_le_filet():
+    """8/09 : la reconversion « à filet égal » (snr_floor 25) a rendu un
+    manifeste identique au sans-filet — q3n manquait à PROMOTE et le filet
+    l'ignorait en silence. Tout format quantifié servi par le convertisseur
+    doit avoir une issue de promotion."""
+    from acvram.quant.convert import PROMOTE
+    from acvram.quant.formats import FORMATS
+    for fmt in FORMATS:
+        if fmt in ("bf16", "fp16"):
+            continue
+        assert fmt in PROMOTE, f"{fmt} sans issue de promotion : le filet snr_floor l'ignore en silence"
+    assert PROMOTE["q3n"] == "int8"
