@@ -764,6 +764,13 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         if fmt == "q3n":
             entry["block"] = qt.block
             entry["table"] = list(qt.table)
+            # Le critère de choix de table n'est PAS le creux : c'est le taux
+            # de zéros EXACTS de la source (contrôle bf16 du 8/09 : à creux
+            # égal, seul un poids nul profite d'un niveau zéro — une source
+            # bf16 en a 0 %, un GGUF à grille avec zéro ~21 %). Mesuré ici et
+            # écrit à côté du choix, pour que la règle soit vérifiable.
+            entry["taux_zeros_source"] = round(
+                float((tensor == 0).float().mean()), 4)
             # Sceau : lie la table aux octets réellement écrits. Un manifeste
             # régénéré sans reconversion ferait lire d'anciens poids avec une
             # nouvelle table, silencieusement — le pire mode de défaillance.
