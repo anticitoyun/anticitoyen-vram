@@ -2980,3 +2980,20 @@ recouvrement transfert/calcul (bus à 5,7/18,7 Go/s, cartes muettes une
 seconde sur deux), transfert en format compact, et l'axe jetons/kJ que
 personne ne publie (104 j/kJ net déjà mesurés au compteur, cartes
 bridées 400/275 W).
+
+### Addendum du soir — la piste n°1 du mode commun est nommée et testable
+
+La fourchette « 30-90 après table » est RETIRÉE par son autrice : la table
+ne peut agir que sur les 0,077 nats qui séparent les formats, pas sur les
+3,05 communs. Et le paradoxe (ppl 193 au harnais, texte cohérent en
+génération) est requalifié en MESURE : deux faits incompatibles sur le
+même modèle décrivent deux CHEMINS — la génération ne consomme que la
+dernière position de chaque passe, l'évaluation les consomme toutes
+(`logits_positions=all_token_indices`). Test décisif en cours (session
+OnePlus) : logits d'un prefill unique multi-positions (A) contre décodage
+pas-à-pas par le chemin réel de génération (B), 32 jetons, témoin dense
+phi-4 DANS le montage (A et B doivent y coïncider, sinon c'est le montage
+qui diverge). Si A[-1]=B[-1] mais A[i]≠B[i] : le chemin d'évaluation
+multi-positions des hybrides est le défaut, toutes les perplexités
+hybrides sont à refaire après correctif, et le vrai q3n est peut-être
+bien sous 209.
