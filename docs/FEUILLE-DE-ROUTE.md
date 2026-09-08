@@ -3303,3 +3303,133 @@ exil, transport d'experts) qui ne sont pas couverts par ce témoin.
    **ce que la chaîne de conversion fait en plus** sur les gros modèles :
    échelles par canal, Hadamard, promotions, formats mélangés. C'est la
    seule piste qui reste, et elle se décompose étape par étape.
+
+### 8 septembre, 18 h 15 — un second défaut de convention : la normalisation des poids d'experts
+
+Même mécanisme que l'`a_log` du matin : une convention absente du
+fichier, un défaut choisi par nous, la vraie valeur codée en dur chez
+llama.cpp.
+
+  `lfm2.cpp:32` et `qwen3next.cpp:483` : `build_moe_ffn(..., norm_w = **true**, ...)`
+  GGUF LFM2.5 et Coder-Next : **aucune clé `expert_weights_norm`**
+  `gguf.py:528` (branche lfm2moe) : `bool(g("expert_weights_norm", **False**))`
+
+Avec un routage à quatre experts, des poids non normalisés somment à une
+valeur arbitraire au lieu de 1 : la sortie du bloc part à une échelle
+fausse ET variable selon le jeton.
+
+**Mesuré** sur LFM2.5-8B-A1B converti en bf16 PUR (aucune quantification,
+modèle résident, 146 717 positions) :
+
+  llama.cpp Q4_K_M                    **33,148 ± 0,321**
+  acvram, normalisation absente       **110,350**   (×3,33)
+  acvram, normalisation forcée        **58,815**   (×1,77)
+  → le défaut vaut **0,629 nat, facteur 1,88** — et il reste **+77 %**
+
+**Audit complet du routage contre llama.cpp**, fait champ par champ
+plutôt que supposé :
+* **scoring** : `qwen3moe.cpp:89` et `qwen3next.cpp:476` codent
+  `GATING_FUNC_TYPE_SOFTMAX` **en dur**, sans lire le fichier — notre
+  défaut `softmax` est juste. La règle « clé absente donc sigmoïde » que
+  j'allais généraliser est fausse pour nos familles : llama.cpp ne force
+  le sigmoïde que pour AFMOE, MISTRAL4, GLM4_MOE, GLM_DSA et STEP35.
+* **échelle** : `llama-graph.cpp:1413` — `if (w_scale != 0.0f && w_scale
+  != 1.0f)`, donc leur défaut 0,0 et le nôtre 1,0 sont tous deux neutres.
+* **normalisation** : le seul écart réel, confirmé pour lfm2moe ET
+  qwen3next.
+
+**Ce qui reste** : les +77 % de LFM2.5 après correction. Le modèle est
+hybride (`shortconv.l_cache = 3`), et la table des témoins garde sa
+forme — les quatre modèles fautifs sont hybrides, le seul propre
+(Qwen3-0.6B, transformeur classique) sort à +0,27 %. Le défaut de
+normalisation était réel mais partiel : il masquait la piste hybride, il
+ne la remplace pas. Témoin décisif en cours : `Qwen3-Coder-30B-A3B`, un
+MoE en architecture Qwen3 classique — ni convolution, ni récurrence, et
+routage vérifié identique des deux côtés.
+
+Contrôle de plausibilité qui a servi : `gemma-4-31B` rend **4452** de
+perplexité chez llama.cpp — modèle inutilisable comme témoin, écarté
+avant d'avoir mesuré quoi que ce soit avec.
+
+### 8 septembre, 18 h 30 — deux faits d'instrumentation qui qualifient tous nos débits
+
+**1. Le régime de puissance a changé ce soir, et la colonne du banc le
+date.** `plafond_W` (somme des deux cartes, `energie.py:213`) donne
+l'horodatage : lignes de 18h15-18h20 à **775 W** (500 + 275), lignes
+après 18h26 à **875 W** (500 + 375), comparatif du 3 septembre à
+**675 W** (400 + 275). La 5090 était donc déjà à 500 W avant la série du
+soir, et la 3080 Ti est passée de 275 à 375 W pendant ou juste après —
+mon constat « changé avant aujourd'hui » était faux, ma vérification
+était simplement postérieure au changement.
+Règle : lire `power.limit` AU MOMENT de la mesure et l'écrire à côté du
+chiffre ; deux séries de régimes différents ne se comparent pas en
+énergie. **Le comparatif du 3 septembre est à refaire pour deux raisons
+indépendantes** : son régime (400/275) n'existe plus, et il tournait en
+spéculation `ngram` sans que ce soit un choix — le lanceur ne passe
+jamais `--speculative` et le défaut de `cli.py:585` est `ngram`, donc le
+mode `mtp` n'a jamais été mesuré, y compris sur les modèles dont nous
+chargeons et quantifions la tête MTP.
+
+**2. Le débit était TIRÉ AU SORT à chaque changement de modèle.**
+`arreter()` n'attendait que la fermeture du port plus trois secondes ; le
+serveur précédent rendait son port **sans avoir rendu sa mémoire**, et le
+planificateur du suivant calculait son placement sur ce qui restait.
+Preuve involontaire (session OnePlus) : deux entrées de parc pointant le
+même dossier sous le même alias ont rendu **15,8 puis 152,2 t/s** —
+facteur 9,6, textes différents ; au journal, le premier chargement exilait
+5 puis 6 MLP de plus en RAM hôte, le second aucun.
+Correctif : `attendre_memoire()` (attend que la mémoire cesse de bouger,
+écrit la mémoire libre à côté de la ligne) et `t_s_passages` (les débits
+dans l'ordre — min et max ne disent pas LEQUEL s'écarte, et un passage
+froid a la même signature qu'une bimodalité).
+**Portée** : toute mesure de débit prise juste après un changement de
+modèle a pu l'être sur un plan dégradé, sans aucun signal. Cela peut
+expliquer une part de la dispersion de 21-26 % qui a motivé toute la
+série de déterminisme.
+
+À faire après la série en cours : activer le **mode persistant**
+(`nvidia-smi -pm 1`, actuellement désactivé sur les deux cartes), avec
+mesure de dispersion avant et après sur le même modèle — il évite le
+déchargement du contexte GPU entre deux processus et devrait réduire la
+latence de démarrage et stabiliser les horloges.
+
+### 8 septembre, 18 h 40 — un dévoreur de mémoire expliquait nos morts au hasard
+
+`tokensave sync` avalait la mémoire vive à **25 Mo par seconde** et pesait
+**14,25 Go** à son arrêt ; la machine est passée de 67 à **81 Go
+disponibles**. Il saturait les 93 Go et le système tuait tout ce qui
+demandait de la mémoire — évaluations, étalons, suites de tests, chez les
+trois sessions, y compris quand la machine paraissait calme.
+
+**Ce que ça réécrit** : plusieurs échecs attribués à la contention entre
+nos mesures, ou au cache de pages laissé par une lecture massive, avaient
+en réalité cette cause unique. L'hypothèse du cache de pages était
+plausible et donnée comme telle ; elle est probablement fausse. Le
+processus fautif était invisible parce qu'il ne portait aucun nom
+évocateur et ne figurait dans aucune liste de suspects — chercher un
+coupable parmi ceux qu'on surveille laisse passer celui qu'on ne
+surveille pas.
+
+**Mode persistant activé** sur les deux cartes (il était désactivé). Il
+supprime le déchargement du contexte GPU entre deux processus, donc une
+source de latence variable qu'on soupçonnait sans pouvoir la nommer.
+
+**Trois régimes de mesure désormais**, à écrire à côté de tout chiffre :
+675 W · 875 W · 875 W avec persistance. Et une distinction qui sauve la
+moitié du travail :
+* **invalidé** — tout ce qui se mesure en watts, joules ou secondes :
+  17,4 J/jeton, 104 jetons/kJ, les débits, les temps de première réponse,
+  le profil du bus ;
+* **intact** — **toutes les perplexités** et tous les SNR de format. Une
+  perplexité est un calcul déterministe sur des poids fixes : le plafond
+  de puissance et la persistance changent le temps qu'elle met à sortir,
+  pas sa valeur. L'étalon 9,7380 et la table des témoins restent valides.
+
+Le dossier **qualité** est donc préservé, le dossier **performance** est
+à refaire. La série de déterminisme, écrite le matin et jamais exécutée
+faute de machine calme, devient possible pour la première fois : les
+trois obstacles (dévoreur de mémoire, contexte GPU déchargé, construction
+de ROM concurrente) sont tombés ensemble. Prédiction écrite d'avance : si
+la persistance était la cause principale, la dispersion passe sous 10 %
+et le premier passage cesse d'être aberrant ; si elle reste à 20 %, il
+faut chercher dans l'ordonnancement ou l'allocateur.
