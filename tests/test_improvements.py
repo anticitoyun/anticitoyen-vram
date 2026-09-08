@@ -796,3 +796,31 @@ def test_la_conversion_refuse_de_faire_grossir():
     assert m and "autoris" in m
     # sans information sur la source : ne bloque pas
     assert garde_grossissement(0, n, 4.5, False) is None
+
+
+def test_q3n_empaquetage_et_numerique():
+    """Format Q3N (spécification du 8/09) : aller-retour d'empaquetage exact,
+    table symétrique, SNR conforme aux mesures de la spécification, et le
+    GEMV de référence égale la déquantification. 3,25 bits/poids au bloc 32."""
+    import math
+    import torch
+    from acvram.quant.q3n import (TABLE_Q3N, Q3NTensor, depaqueter_q3,
+                                  dequantize_q3n, empaqueter_q3, q3n_gemv,
+                                  quantize_q3n)
+    assert all(abs(a + b) < 1e-9 for a, b in zip(TABLE_Q3N, reversed(TABLE_Q3N)))
+    g = torch.Generator().manual_seed(0)
+    q = torch.randint(0, 8, (64, 256), generator=g)
+    assert torch.equal(depaqueter_q3(empaqueter_q3(q), 256), q)
+    for bloc, snr_min in ((32, 14.0), (16, 14.8)):
+        w = torch.randn(128, 512, generator=g) * 0.02
+        t = quantize_q3n(w, block=bloc)
+        assert isinstance(t, Q3NTensor)
+        assert abs(t.bits_per_weight - (3 + 8 / bloc)) < 0.15
+        wh = dequantize_q3n(t, torch.float32)
+        snr = 10 * math.log10(w.pow(2).mean().item()
+                              / (w - wh).pow(2).mean().item())
+        assert snr > snr_min, f"bloc {bloc} : {snr:.2f} dB"
+    x = torch.randn(3, 512, generator=g, dtype=torch.float32).bfloat16()
+    y = q3n_gemv(x, t)
+    attendu = x @ dequantize_q3n(t, torch.bfloat16).t()
+    assert torch.allclose(y.float(), attendu.float(), atol=1e-2)

@@ -334,6 +334,11 @@ def _rehydrate(template: Any, tensors: dict[str, torch.Tensor]) -> Any:
         # perceptron transféré d'un MoE plantait la requête.
         return INT8Tensor(tensors["qweight"], tensors["scales"], tensors["zeros"],
                           template.group_size, template.shape)
+    from ..quant.q3n import Q3NTensor
+    if isinstance(template, Q3NTensor):
+        return Q3NTensor(tensors["qweight"],
+                         tensors["block_scale"].view(torch.float8_e4m3fn),
+                         tensors["global_scale"], template.block, template.shape)
     raise TypeError(f"impossible de reconstruire {type(template)!r}")
 
 

@@ -528,7 +528,7 @@ def _ref_matmul(x, w):
 for _dev in ("cuda", "cpu"):
     _bk.register(_bk.Backend(
         name=f"reference-{_dev}",
-        formats=("nvfp4", "int4_awq", "int8", "bf16", "fp16", "plain"),
+        formats=("nvfp4", "int4_awq", "int8", "bf16", "fp16", "plain", "q3n"),
         device_type=_dev, priority=0, available=lambda d: True,
         matmul=_ref_matmul,
         dequant=lambda w, dt: _dequantize_ref(w, dt),
