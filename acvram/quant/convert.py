@@ -637,9 +637,19 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
               f"les étages GPU passent de leur format nominal "
               f"({bpw_cible:.2f} b/p) à q3n (3,25) pour ne pas grossir — "
               f"perplexité à vérifier par `acvram eval`", flush=True)
+        gpus = {t.name for t in plan.tiers if t.kind == "gpu"}
         for t in plan.tiers:
             if t.kind == "gpu":
                 t.weight_format = "q3n"
+        # Le routeur lit le format PAR COUCHE (lp.fmt), pas celui des étages :
+        # la première bascule, qui ne changeait que les étages, a produit un
+        # dossier de 42 Go entièrement en nvfp4/int4 malgré son propre message
+        # « les étages passent à q3n » — l'intention était annoncée, le
+        # résultat non vérifié. D'où aussi la vérification d'issue en fin de
+        # conversion, sur les octets réellement écrits.
+        for lp in plan.layers:
+            if getattr(lp, "fmt", None) and lp.exec_device in gpus | {"cpu"}:
+                lp.fmt = "q3n"
         bpw_cible = BPW_NOMINAL["q3n"]
     avert = garde_grossissement(octets_src, n_params,
                                 bpw_cible, opts.autoriser_grossissement)
@@ -893,6 +903,13 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     report.mean_out_snr_db = sum(snrs) / len(snrs) if snrs else 0.0
     report.worst_layers = sorted(per_layer, key=lambda d: d["out_snr_db"])
     report.seconds = time.time() - t0
+    if (report.in_bytes and report.out_bytes > report.in_bytes * 1.02
+            and not opts.autoriser_grossissement):
+        raise ValueError(
+            f"issue de conversion : {report.out_bytes / 2**30:.1f} Gio écrits "
+            f"pour {report.in_bytes / 2**30:.1f} Gio de source — la garde "
+            f"d'intention a été contournée quelque part ; le dossier est "
+            f"conservé pour inspection mais NE DOIT PAS être servi.")
     return report
 
 

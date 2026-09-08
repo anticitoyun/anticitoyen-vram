@@ -864,3 +864,33 @@ def test_q3n_gemv_noyau_egale_la_reference():
                          tc.global_scale.cuda(), x, K, B)
         ref = x @ dequantize_q3n(t, torch.float32).cuda().t()
         assert (y - ref).abs().max().item() < 1e-5
+
+
+def test_la_bascule_q3n_change_les_couches_pas_seulement_les_etages(tmp_path):
+    """8/09 : la première bascule ne changeait que tiers[].weight_format alors
+    que le routeur lit lp.fmt par couche — 42 Go écrits en nvfp4 sous un
+    message annonçant q3n. La bascule doit atteindre le routeur, et l'issue
+    (octets écrits) est vérifiée en fin de conversion."""
+    import json
+    from acvram.engine.config import load_model_spec
+    from acvram.memory.tiering import PlannerOptions, auto_plan
+    from acvram.quant.convert import ConversionOptions, TensorRouter
+    from acvram.hardware.detect import detect_rig
+    d = tmp_path / "m"; d.mkdir()
+    json.dump({"architectures": ["LlamaForCausalLM"], "hidden_size": 256,
+               "intermediate_size": 512, "num_hidden_layers": 4,
+               "num_attention_heads": 8, "num_key_value_heads": 8,
+               "vocab_size": 512}, open(d / "config.json", "w"))
+    spec = load_model_spec(str(d), "m")
+    plan, _ = auto_plan(spec, detect_rig(), PlannerOptions(max_model_len=256))
+    # rejoue la bascule telle que convert_checkpoint l'applique
+    gpus = {t.name for t in plan.tiers if t.kind == "gpu"}
+    for t in plan.tiers:
+        if t.kind == "gpu":
+            t.weight_format = "q3n"
+    for lp in plan.layers:
+        if getattr(lp, "fmt", None) and lp.exec_device in gpus | {"cpu"}:
+            lp.fmt = "q3n"
+    r = TensorRouter(spec, plan, ConversionOptions(out_dir=str(tmp_path)))
+    assert r.format_for("model.layers.0.mlp.gate_proj.weight") == "q3n"
+    assert r.format_for("model.layers.3.self_attn.q_proj.weight") == "q3n"
