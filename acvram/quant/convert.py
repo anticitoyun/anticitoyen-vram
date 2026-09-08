@@ -197,6 +197,14 @@ class TensorRouter:
         """Le format d'un tenseur est celui de l'appareil où sa couche s'exécute."""
         if self.opts.keep_sensitive_16bit and name.endswith(SENSITIVE_SUFFIXES):
             return "bf16"
+        if ".linear_attn." in name and self._fmt_brut(name) == "q3n":
+            # Plancher int8 pour les projections de l'attention linéaire (GDN,
+            # KDA) : leur récurrence amplifie l'erreur de poids à chaque pas.
+            # La conversion NVFP4 de Coder-Next les avait déjà promues en int8
+            # (35 couches sur 36) ; à 3,25 bits le modèle du 8/09 produisait
+            # « URTURTURT » dès le premier jeton, perplexité pire que
+            # l'uniforme.
+            return "int8"
         if name.endswith(".bias"):
             return "bf16"
         if name.startswith("lm_head"):
@@ -211,6 +219,10 @@ class TensorRouter:
         if idx is None:
             return "bf16"
         return self._layer_fmt.get(idx, "int4_awq")
+
+    def _fmt_brut(self, name: str) -> str:
+        idx = self.layer_index(name)
+        return self._layer_fmt.get(idx, "int4_awq") if idx is not None else "bf16"
 
     def wants_hadamard(self, name: str, fmt: str) -> bool:
         mode = self.opts.use_hadamard

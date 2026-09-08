@@ -934,3 +934,28 @@ def test_le_chargeur_reconstruit_un_tenseur_q3n(tmp_path):
     assert t2.format == "q3n"
     assert torch.equal(dequantize_q3n(t2, torch.float32).cpu(),
                        dequantize_q3n(t, torch.float32))
+
+
+def test_les_projections_gdn_ne_descendent_pas_sous_int8(tmp_path):
+    """8/09 : tout le modèle en q3n rendait « URTURTURT » — l'attention
+    linéaire amplifie l'erreur de poids à chaque pas de sa récurrence, et la
+    conversion NVFP4 saine promouvait déjà ces projections en int8. Plancher
+    verrouillé au routeur."""
+    import json
+    from acvram.engine.config import load_model_spec
+    from acvram.hardware.detect import detect_rig
+    from acvram.memory.tiering import PlannerOptions, auto_plan
+    from acvram.quant.convert import ConversionOptions, TensorRouter
+    d = tmp_path / "m"; d.mkdir()
+    json.dump({"architectures": ["LlamaForCausalLM"], "hidden_size": 256,
+               "intermediate_size": 512, "num_hidden_layers": 2,
+               "num_attention_heads": 8, "num_key_value_heads": 8,
+               "vocab_size": 512}, open(d / "config.json", "w"))
+    spec = load_model_spec(str(d), "m")
+    plan, _ = auto_plan(spec, detect_rig(), PlannerOptions(max_model_len=256))
+    for lp in plan.layers:
+        lp.fmt = "q3n"
+    r = TensorRouter(spec, plan, ConversionOptions(out_dir=str(tmp_path)))
+    assert r.format_for("model.layers.1.linear_attn.alpha.weight") == "int8"
+    assert r.format_for("model.layers.1.linear_attn.qkv.weight") == "int8"
+    assert r.format_for("model.layers.1.mlp.experts.0.up_proj.weight") == "q3n"
