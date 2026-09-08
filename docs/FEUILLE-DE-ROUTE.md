@@ -4,6 +4,45 @@
 extension de mémoire GPU fonctionnelle et livrait un module noyau qui se
 contentait d'afficher les nombres passés en paramètres.
 
+## 8 septembre 2026 — les joules à côté des secondes
+
+Le planificateur optimisait des **secondes**. L'objectif posé est double :
+vitesse et jetons par kilojoule. Un plan peut être plus rapide et plus cher en
+énergie, et rien ne le disait.
+
+Le cas est mesuré : à débit égal à 5 % près, le chemin processeur coûte 183
+secondes de temps processeur pour 200 jetons contre 25 par le bus. Sept fois
+plus, **invisible pour le compteur de la carte**, qui ne voit que ce qu'elle
+consomme elle-même. `_estimate` comptait la même durée pour les deux.
+
+`Plan` porte désormais `est_joules_par_jeton` et `est_jetons_par_kj`, calculés
+de trois sources : les cartes pendant la durée du jeton, pondérées par la part
+de leur limite de puissance réellement atteinte ; les cartes alimentées qui ne
+portent rien ; et le temps processeur, qui est le terme que le modèle en
+secondes ne voyait pas.
+
+**Ils valent `None` tant que les constantes ne sont pas mesurées**, et les trois
+sont à zéro. Rendre None quand on ne sait pas vaut mieux qu'un chiffre
+crédible : celui-ci servirait à choisir un plan. C'est la troisième fois de la
+journée qu'une structure est posée sans sa valeur, après le coût fixe par
+transfert et le nombre de copies.
+
+**Une réserve à lever avant de renseigner quoi que ce soit.** Les 183 secondes
+sont `utime + stime` du processus, donc du temps processeur réellement
+consommé — mais **une attente active y compte en plein alors qu'elle consomme
+peu**. Si le chemin processeur attend le bus en tournant, une part de ces 183
+secondes n'est pas de l'énergie. Comparer `utime` et `stime` séparément, ou
+passer au wattmètre de prise, tranche la question. Tant qu'elle ne l'est pas,
+on ne sait pas si le terme doit compter des secondes de calcul ou des octets
+déplacés.
+
+Le chiffre restera de toute façon une **borne basse** : mémoire vive,
+ventilateurs et carte mère ne sont pas modélisés.
+
+Ordre de grandeur avec des valeurs plausibles, pour montrer l'enjeu et non pour
+le trancher : 10 J par jeton tout sur carte contre 118 avec un MLP sur
+processeur, soit un rapport de onze à débit égal.
+
 ## 8 septembre 2026 — la trace de routage, avant tout cache d'experts
 
 **Le chiffre qui manque à tout le monde.** Aucun taux de succès mesuré n'existe
