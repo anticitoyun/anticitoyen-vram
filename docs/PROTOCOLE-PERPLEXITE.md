@@ -70,6 +70,34 @@ Trois règles qui vont avec :
    et coût de conversion — c'est une borne supérieure, et une borne supérieure
    suffit à décider si le sujet existe.
 
+## Les bornes sont identiques a celles de llama.cpp — verifie sur la source
+
+Question posee et refermee le 8 septembre : le harnais note-t-il les memes
+positions que la reference ? **Oui, position par position.** La verification
+porte sur `tools/perplexity/perplexity.cpp` de llama.cpp e34f042.
+
+| | llama.cpp | acvram |
+|---|---|---|
+| premiere position | `first = n_ctx/2` = 256 | `first_new = min_context` = 256 |
+| nombre notes | `n_ctx - 1 - first` = **255** | `logits[:-1][256:]` = **255** |
+| logits utilises | 256 a 510 | 256 a 510 |
+| jetons predits | **257 a 511** | **257 a 511** |
+| fenetre partielle | jamais (`tokens.size() / n_ctx`, division entiere) | ecartee par `first_new >= logits.shape[0]` |
+| agregation | `nll /= count` puis `exp` | `total_nll / counted` puis `exp` |
+
+Le piege : on lit `first = n_ctx/2` et on en deduit 256 positions notees a
+partir du jeton 256. C'est faux deux fois — `n_ctx - 1 - first` en donne 255,
+et la cible est `tokens[i+1]`, decalee d'un. Les deux erreurs se compensent
+exactement avec le `logits[:-1]` et le `first_new` du harnais.
+
+Verification independante du compte : phi-4 rend 144 075 positions, soit
+565 x 255, et l'etalon llama.cpp annonce 565 fenetres.
+
+**Consequence : un ecart entre les deux outils ne vient pas de la
+comptabilite.** Il vient du forward, ou du cout reel de la requantification —
+et une seule mesure les separe : le meme modele converti en bf16 pur, sans
+aucune quantification, evalue au meme cadrage.
+
 ## Un chiffre juste peut porter une description fausse
 
 Le 8 septembre, trois fois dans la même journée, un chiffre exact a été
@@ -81,7 +109,14 @@ accompagné d'une description qui aurait fait conclure de travers :
   portait sur son début ;
 - une tranche de contexte étiquetée « à partir de 128 jetons » alors que le
   filtre en imposait 256 — donc annonçant un objet plus facile que celui qui
-  avait été mesuré.
+  avait été mesuré ;
+- un modèle demandé en int8 et sorti avec ses 72 projections de perceptron en
+  q3n, dans un dossier nommé « témoin-int8 », la bascule ayant été annoncée
+  dans un journal détaché que personne n'a lu ;
+- un écart de bornes de notation calculé exactement — et sur une prémisse
+  inventée, alors que la source de référence était sur le disque à la version
+  exacte. Cinq minutes d'arithmétique juste sur une lecture qui n'avait pas
+  eu lieu.
 
 Les trois chiffres étaient bons. C'est ce qui les entourait qui était faux, et
 aucun des trois n'aurait été rattrapé par une vérification du calcul.
