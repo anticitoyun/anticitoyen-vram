@@ -79,10 +79,45 @@ mesure de la lourdeur de queue sur de vrais poids d'experts tranche donc
 l'arbitrage sans qu'il faille attendre une perplexité complète : c'est le
 premier chiffre à prendre.
 
+### Ce que les vrais poids ont répondu
+
+Mesuré le 8 septembre sur les experts de Coder-Next, 60 tenseurs de la couche
+12, par `outils/mesurer-queue-experts.py` :
+
+| | bloc 32 | bloc 16 | écart |
+|---|---|---|---|
+| poids réels | 13,65 dB | 15,02 dB | **1,36 dB** |
+
+**σ inter-blocs mesuré : 0,03. La queue des experts est quasi gaussienne.**
+C'est le contraire de ce que la prudence suggérait, et cela tranche l'arbitrage
+dans le sens du bloc de 32 : à σ ≈ 0 le tableau ci-dessus annonce 0,85 dB, on
+en mesure 1,36, et non les 2,5 à 3 dB qui auraient justifié le quart de bit.
+
+Deux précautions sur ce chiffre, toutes deux importantes.
+
+**σ ne se mesure pas sur les poids individuels de cette source.** Une première
+estimation, par `Var(log|w|) − π²/8`, rendait zéro partout — en contradiction
+avec un SNR qui correspondait à σ ≈ 0,5. Elle avait tort : la source est déjà
+en NVFP4, ses poids ne prennent que huit amplitudes par bloc et un cinquième
+vaut exactement zéro. Cette variance mesurait la grille du format source, pas
+la queue du modèle. L'amplitude maximale par bloc, portée par l'échelle FP8,
+survit à la quantification : c'est sur elle que σ se lit, et c'est aussi ce que
+q3n voit.
+
+**Ce SNR compare deux grilles de quantification, pas q3n aux poids d'origine.**
+Il n'existe aucune source bf16 de ce modèle sur le disque ; la conversion q3n
+part du NVFP4, donc quantifie une seconde fois. L'écart *entre tailles de bloc*
+reste lisible — les deux subissent la même source — mais aucune conclusion sur
+la **table** ne peut venir de là. Une table à zéro exact y gagne 3,8 dB, ce qui
+n'est qu'un alignement sur la grille source : sur des poids continus elle en
+perd 1,3, et 21 % de zéros injectés dans un gaussien n'en rendent que 0,4.
+
 ## Le format retenu
 
-**Quantiles normaux 3 bits, échelle FP8 e4m3 par bloc. Bloc de 32 par défaut,
-3,25 bits par poids — mais l'arbitrage est serré et n'est pas tranché ici.**
+**Quantiles normaux 3 bits, échelle FP8 e4m3 par bloc, blocs de 32. 3,25 bits
+par poids.** L'arbitrage, laissé ouvert dans une première version, est tranché
+par la mesure ci-dessus : la queue des experts réels est quasi gaussienne et
+l'écart vaut 1,36 dB. Le bloc de 32 reste le bon choix.
 
 Le bloc de 16 coûte 0,25 bit de plus et rend 0,85 dB en gaussien, **1,48 dB sur
 la queue lourde** — et c'est la queue lourde qui décrit les experts. Une table

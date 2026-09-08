@@ -2341,7 +2341,7 @@ __global__ void q3n_gemv_kernel(
 }
 
 torch::Tensor q3n_gemv_cuda(torch::Tensor qweight, torch::Tensor block_scale,
-                            torch::Tensor global_scale, torch::Tensor x,
+                            double global_scale, torch::Tensor x,
                             int64_t K, int64_t B) {
     CHECK_CUDA(qweight); CHECK_CUDA(x);
     ACVRAM_DEVICE_GUARD(qweight);
@@ -2354,7 +2354,11 @@ torch::Tensor q3n_gemv_cuda(torch::Tensor qweight, torch::Tensor block_scale,
     xc = (bf ? xc : xc.to(torch::kFloat)).contiguous();
     const int N = xc.size(0);
     auto out = torch::empty({N, M}, xc.options());
-    const float g = global_scale.to(torch::kFloat).item<float>();
+    // Scalaire hote, jamais un tenseur : .item() sur un tenseur CUDA
+    // synchronise le flux a chaque GEMV — 62 % du temps de decodage au profil
+    // NVFP4, et une capture de graphe CUDA impossible. Meme signature que
+    // nvfp4_gemv, pour la meme raison.
+    const float g = (float)global_scale;
     auto stream = at::cuda::getCurrentCUDAStream();
     constexpr int ROWS = 4;
     const int threads = 128;
