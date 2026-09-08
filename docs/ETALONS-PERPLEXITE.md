@@ -213,6 +213,48 @@ entre deux formats mesurés dans les mêmes conditions** l'est, elle, parce
 qu'un défaut moteur commun s'y annule. C'est pourquoi le NVFP4 figure dans la
 table : il n'est pas un chiffre de plus, c'est ce qui rend les autres lisibles.
 
+## L'hypersensibilité des architectures hybrides : mesurée, et insuffisante
+
+Hypothèse posée pour expliquer les 3,05 nats sans supposer aucun défaut : une
+récurrence peut être **exacte** et **hypersensible** à la fois — un juge qui
+prouve « mêmes poids → même sortie » ne prouve jamais « poids légèrement
+différents → sortie proche ». Testée en requantifiant les deux témoins par la
+même chaîne, et en mesurant avec le même instrument.
+
+| format | hybride 12B | dégradation | phi-4 dense | dégradation | rapport |
+|---|---|---|---|---|---|
+| étalon | 31,6919 | — | 6,5988 | — | — |
+| Q4_K_S | 32,6334 | **+2,97 %** | 6,6311 | **+0,49 %** | **6,1×** |
+| Q3_K_S | 35,4686 | +11,92 % | 7,0475 | +6,80 % | 1,8× |
+
+**L'hypersensibilité est réelle et chiffrée pour la première fois** : à
+perturbation modérée, l'architecture hybride est **six fois** plus sensible que
+la dense. C'est un résultat en soi.
+
+**Elle n'explique pas l'écart.** La pire requantification que llama.cpp sache
+infliger à ce modèle coûte +11,9 % ; l'int8 d'acvram, à 44 dB, est une
+perturbation **plus fine** et coûte +308 %. Il manque un facteur **26**. Une
+perturbation plus petite ne peut pas produire un effet vingt-six fois plus
+grand — et l'effet **sature** quand la perturbation grossit (le rapport tombe de
+6,1 à 1,8), au lieu de s'emballer comme il le faudrait.
+
+Deux conséquences :
+- **les hybrides se requantifient** : +11,9 % pour passer à 3,4 bits est un coût
+  normal. La conclusion « il faut partir des poids d'origine en bf16 » tombe ;
+- **l'excès de 3,05 nats reste sans cause**, et toutes les explications par le
+  format ou par la perturbation des poids sont désormais éliminées par la mesure
+  — le filet (réparé), le format q3n (8 %), la sensibilité architecturale (12 %
+  au pire). Ce qui reste est au moteur.
+
+Réserves à garder avec ces chiffres : requantifier depuis un Q5_K_M est une
+double quantification, donc ces dégradations sont **majorées** — ce qui joue en
+faveur de l'hypothèse, pourtant réfutée. Et les grilles de llama.cpp ne
+dégradent pas exactement les mêmes tenseurs qu'un int8 de groupe 128.
+
+Ce test chiffre au passage une confusion de ce document : l'étalon 9,1831 porte
+sur les poids **d'origine**, quand les mesures acvram portent sur des
+**requantifications**. La confusion existe donc bien — et elle vaut au plus 12 %.
+
 ## Ce qu'il reste à mesurer, par ordre de ce que ça rapporte
 
 1. **Trancher évaluation contre génération.** Mesurer la perplexité en mode
