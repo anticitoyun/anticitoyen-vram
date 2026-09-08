@@ -2801,3 +2801,38 @@ llama.cpp sur le GGUF Q3_K_S source, wiki.test.raw, contexte 512.
 * Mesures en attente : perplexité q3n comparable (à l'étalon 9,18, en
   séquentiel après le contrôle NVFP4), Lloyd-Max stratifié 288+288
   tenseurs disjoints (table unique ou par tenseur).
+
+## 8 septembre 2026, midi — l'étalonnage inter-instruments attrape un bug de harnais
+
+Protocole (session de mesure) : même corpus wiki.test.raw (sha256
+173c87a5…), mêmes fenêtres de 512 disjointes, positions notées à partir de
+256 jetons de contexte, llama.cpp d'un côté, acvram eval de l'autre, sur
+deux témoins convertis en int8 partout (--autoriser-grossissement — la
+garde anti-grossissement avait silencieusement basculé le premier témoin
+en q3n : dossier nommé « int8 », MLP à 14,9 dB ; attrapé au manifeste,
+règle : diff des manifestes TENSEUR PAR TENSEUR avant d'attribuer un écart
+à un format).
+
+* phi-4 (dense) : acvram 6,911 contre llama.cpp 6,5988 ± 0,041 — +4,7 %,
+  dont le coût réel de la requantification Q4_K_M→int8, non séparé. Les
+  deux instruments s'accordent sur du dense.
+* Qwen3.6-12B (hybride GDN) : acvram 129,185 contre 31,6919 ± 0,265 —
+  facteur 4,1. Or les tenseurs sont à ~44 dB (vérifiés) et le chemin de
+  service int8 est innocenté sur tenseurs réels (écart 1,7e-3 contre un
+  produit dense, l'arrondi bf16). Le défaut est lié à l'architecture
+  HYBRIDE, pas au format ni au noyau.
+* Piste désignée (en cours de confirmation) : le magasin d'états
+  récurrents des couches linear_attn n'est pas réinitialisé entre les
+  fenêtres d'évaluation — le cache KV repart à zéro à chaque fenêtre, pas
+  l'état GDN ; l'état de la fenêtre N fuit dans la N+1. Test : après
+  correctif, l'éval 12B doit tomber de 129 vers ~32.
+* Conséquence : toutes les perplexités mesurées sur des hybrides par
+  acvram eval (858 q3n, 137 NVFP4 de Coder-Next) sont invalidées jusqu'au
+  correctif. L'écart q3n/NVFP4 devra être remesuré après : correctif
+  d'état + égalisation du filet (reconversion q3n avec snr_floor 25 —
+  l'ancienne avait snr_floor 0, AUCUNE promotion, 143 shared_expert sans
+  filet sur le chemin de 100 % des jetons).
+
+Leçon de méthode, payée trois fois aujourd'hui : ce qui n'est pas imprimé
+à côté du chiffre finit par être supposé faux — le cadrage, le snr_floor,
+les formats réels. acvram eval imprimera les formats du modèle évalué.
