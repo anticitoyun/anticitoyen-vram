@@ -3392,3 +3392,44 @@ série de déterminisme.
 mesure de dispersion avant et après sur le même modèle — il évite le
 déchargement du contexte GPU entre deux processus et devrait réduire la
 latence de démarrage et stabiliser les horloges.
+
+### 8 septembre, 18 h 40 — un dévoreur de mémoire expliquait nos morts au hasard
+
+`tokensave sync` avalait la mémoire vive à **25 Mo par seconde** et pesait
+**14,25 Go** à son arrêt ; la machine est passée de 67 à **81 Go
+disponibles**. Il saturait les 93 Go et le système tuait tout ce qui
+demandait de la mémoire — évaluations, étalons, suites de tests, chez les
+trois sessions, y compris quand la machine paraissait calme.
+
+**Ce que ça réécrit** : plusieurs échecs attribués à la contention entre
+nos mesures, ou au cache de pages laissé par une lecture massive, avaient
+en réalité cette cause unique. L'hypothèse du cache de pages était
+plausible et donnée comme telle ; elle est probablement fausse. Le
+processus fautif était invisible parce qu'il ne portait aucun nom
+évocateur et ne figurait dans aucune liste de suspects — chercher un
+coupable parmi ceux qu'on surveille laisse passer celui qu'on ne
+surveille pas.
+
+**Mode persistant activé** sur les deux cartes (il était désactivé). Il
+supprime le déchargement du contexte GPU entre deux processus, donc une
+source de latence variable qu'on soupçonnait sans pouvoir la nommer.
+
+**Trois régimes de mesure désormais**, à écrire à côté de tout chiffre :
+675 W · 875 W · 875 W avec persistance. Et une distinction qui sauve la
+moitié du travail :
+* **invalidé** — tout ce qui se mesure en watts, joules ou secondes :
+  17,4 J/jeton, 104 jetons/kJ, les débits, les temps de première réponse,
+  le profil du bus ;
+* **intact** — **toutes les perplexités** et tous les SNR de format. Une
+  perplexité est un calcul déterministe sur des poids fixes : le plafond
+  de puissance et la persistance changent le temps qu'elle met à sortir,
+  pas sa valeur. L'étalon 9,7380 et la table des témoins restent valides.
+
+Le dossier **qualité** est donc préservé, le dossier **performance** est
+à refaire. La série de déterminisme, écrite le matin et jamais exécutée
+faute de machine calme, devient possible pour la première fois : les
+trois obstacles (dévoreur de mémoire, contexte GPU déchargé, construction
+de ROM concurrente) sont tombés ensemble. Prédiction écrite d'avance : si
+la persistance était la cause principale, la dispersion passe sous 10 %
+et le premier passage cesse d'être aberrant ; si elle reste à 20 %, il
+faut chercher dans l'ordonnancement ou l'allocateur.
