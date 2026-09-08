@@ -743,3 +743,32 @@ def test_trace_routage_numerote_les_jetons_par_passage(tmp_path, monkeypatch):
     assert r["demandes"] == 16
     assert r["succes"] == 8          # second passage : tout est en cache
     importlib.reload(t)
+
+
+def test_energie_s_abstient_sans_constantes():
+    """Sans constantes mesurées, le plan ne prétend pas connaître les joules."""
+    from acvram.memory.tiering import PlannerOptions, Plan
+    o = PlannerOptions()
+    assert o.watts_processeur == 0.0
+    assert o.fraction_puissance_decodage == 0.0
+    p = Plan(model="essai")
+    assert p.est_joules_par_jeton is None
+    assert p.est_jetons_par_kj is None
+    d = p.to_dict()
+    assert d["est_joules_par_jeton"] is None
+    assert d["est_jetons_par_kj"] is None
+
+
+def test_energie_compte_le_processeur_a_part():
+    """Le terme distingue deux plans que le modèle en secondes confond.
+
+    À débit égal, un MLP exécuté sur processeur coûte beaucoup plus de joules
+    qu'un transfert par le bus — 183 s de temps processeur pour 200 jetons
+    contre 25 s, mesuré le 8 septembre 2026. Le modèle en secondes ne voit pas
+    cette différence ; celui en joules doit la voir.
+    """
+    duree = 0.074
+    watts_carte, fraction, watts_proc = 400.0, 0.35, 120.0
+    j_carte = watts_carte * fraction * duree
+    j_avec_proc = j_carte + 0.9 * watts_proc
+    assert j_avec_proc > 5 * j_carte

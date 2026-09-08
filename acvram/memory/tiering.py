@@ -75,6 +75,10 @@ class Tier:
     read_bandwidth: float        # GB/s when the weights are resident here
     link_bandwidth: float        # GB/s host -> this device
     sm: int = 0
+    # Limite de puissance de la carte, en watts, telle que le pilote la
+    # declare. Zero quand elle est inconnue : le calcul d'energie s'abstient
+    # alors plutot que de supposer.
+    power_limit_w: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -155,6 +159,34 @@ class PlannerOptions:
     # nulle, le plancher vient d'ailleurs — réveil de carte ou synchronisation
     # par couche — et ce terme n'est pas le bon.
     transfer_fixed_us: float = 0.0
+    # --- second objectif : les joules -------------------------------------
+    #
+    # Le planificateur optimise des SECONDES. L'objectif pose est double :
+    # vitesse ET jetons par kilojoule. Un plan peut etre plus rapide et plus
+    # cher en energie — c'est le cas du chemin processeur, mesure le
+    # 8 septembre 2026 a 183 s de temps processeur pour 200 jetons contre 25 s
+    # par le bus, a debit egal a 5 % pres. Sept fois plus, et invisible pour le
+    # compteur de la carte, qui ne voit que ce qu'elle consomme elle-meme.
+    #
+    # Les trois valeurs ci-dessous sont a ZERO : sans elles le calcul d'energie
+    # s'abstient et rend None, ce qui est honnete. Une valeur inventee rendrait
+    # un chiffre de joules credible et faux, et le planificateur choisirait
+    # dessus.
+    #
+    # RESERVE SUR LA MESURE QUI LES MOTIVE, a lever avant de les renseigner :
+    # les 183 s sont utime+stime du processus, donc du temps processeur
+    # reellement consomme — mais une ATTENTE ACTIVE y compte en plein alors
+    # qu'elle consomme peu. Si le chemin processeur attend le bus en tournant,
+    # une part de ces 183 s n'est pas de l'energie. Comparer utime et stime
+    # separement, ou passer au wattmetre de prise, tranche la question. Tant
+    # qu'elle ne l'est pas, on ne sait pas si le terme doit compter des
+    # secondes de calcul ou des octets deplaces.
+    watts_processeur: float = 0.0     # a la charge, tous cœurs occupes
+    watts_carte_au_repos: float = 0.0  # carte alimentee, sans calcul
+    # Part de la limite de puissance reellement atteinte pendant un decodage.
+    # Le decodage est borne par la memoire, pas par le calcul : une carte n'y
+    # tire jamais sa limite. Zero = inconnu, donc pas de calcul.
+    fraction_puissance_decodage: float = 0.0
     host_compute_gb_s: float = 70.0       # DDR5 streaming reads, measured by bench
     # Débit RÉEL d'un produit de matrices déquantifiant sur processeur. Ce
     # n'est PAS le débit de lecture ci-dessus : un GEMM NVFP4 doit déballer de
@@ -185,6 +217,10 @@ class Plan:
     est_decode_tok_s: float = 0.0
     est_prefill_tok_s: float = 0.0
     est_bytes_per_token: int = 0
+    # Second objectif. None quand les constantes d'energie ne sont pas
+    # renseignees : le planificateur ne doit pas croire savoir.
+    est_joules_par_jeton: Optional[float] = None
+    est_jetons_par_kj: Optional[float] = None
     total_weight_bytes: int = 0
     bytes_per_tier: dict[str, int] = field(default_factory=dict)
 
@@ -205,6 +241,10 @@ class Plan:
             "est_decode_tok_s": round(self.est_decode_tok_s, 2),
             "est_prefill_tok_s": round(self.est_prefill_tok_s, 1),
             "est_bytes_per_token": self.est_bytes_per_token,
+            "est_joules_par_jeton": (round(self.est_joules_par_jeton, 3)
+                                     if self.est_joules_par_jeton else None),
+            "est_jetons_par_kj": (round(self.est_jetons_par_kj, 1)
+                                  if self.est_jetons_par_kj else None),
             "overflowed": self.overflowed,
             "warnings": self.warnings,
         }
@@ -303,6 +343,7 @@ def build_tiers(rig: Rig, opts: PlannerOptions) -> list[Tier]:
             read_bandwidth=g.vram_bandwidth_gbps,
             link_bandwidth=g.host_link_gbps,
             sm=caps.sm if caps else 0,
+            power_limit_w=getattr(g, "power_limit_w", 0.0) or 0.0,
         ))
     if opts.allow_host_tier:
         avail = rig.host.available or rig.host.total
@@ -654,6 +695,50 @@ def _estimate(spec: ModelSpec, plan: Plan, tiers: list[Tier],
     seconds += crossings * 60e-6
     plan.est_bytes_per_token = bytes_read
     plan.est_decode_tok_s = 1.0 / seconds if seconds > 0 else 0.0
+
+    # --- second objectif : les joules par jeton ---------------------------
+    #
+    # Trois sources, et le calcul S'ABSTIENT si l'une des constantes manque.
+    # Rendre None quand on ne sait pas vaut mieux qu'un chiffre credible :
+    # celui-ci servirait a choisir un plan.
+    #
+    #   1. les cartes, pendant la duree du jeton. Le decodage est borne par la
+    #      memoire, pas par le calcul : une carte n'y tire pas sa limite de
+    #      puissance, d'ou fraction_puissance_decodage. La valeur au repos
+    #      compte pour les cartes qui ne portent rien mais restent alimentees ;
+    #   2. le processeur, pour la part de la couche qui s'execute dessus. C'est
+    #      le terme que le modele en secondes ne voit pas : il compte la meme
+    #      duree qu'un transfert par le bus, alors qu'il occupe des cœurs ;
+    #   3. rien d'autre. La memoire vive, les ventilateurs et la carte mere ne
+    #      sont pas modelises, et le chiffre est donc une BORNE BASSE.
+    if (opts.watts_processeur > 0 and opts.fraction_puissance_decodage > 0
+            and seconds > 0):
+        j_cartes = 0.0
+        for t in tiers:
+            if t.kind != "gpu" or t.power_limit_w <= 0:
+                continue
+            porte = any(lp.exec_device == t.name for lp in plan.layers)
+            if porte:
+                j_cartes += (t.power_limit_w * opts.fraction_puissance_decodage
+                             * seconds)
+            elif opts.watts_carte_au_repos > 0:
+                j_cartes += opts.watts_carte_au_repos * seconds
+        # Le temps processeur n'est pas la duree du jeton : c'est la somme des
+        # tranches ou des cœurs travaillent vraiment, et elle peut depasser la
+        # duree si plusieurs cœurs tournent.
+        sec_proc = 0.0
+        for lp in plan.layers:
+            t = by_name.get(lp.exec_device)
+            if t is None or t.kind != "gpu":
+                sec_proc += (lp.attn_bytes + lp.mlp_active_bytes) / (70.0 * 1e9)
+            elif lp.mlp_storage == "cpu" and lp.mlp_exec == "cpu":
+                taux = opts.host_gemm_gb_s or opts.host_compute_gb_s
+                sec_proc += lp.mlp_active_bytes / (taux * 1e9)
+        j_proc = sec_proc * opts.watts_processeur
+        total = j_cartes + j_proc
+        if total > 0:
+            plan.est_joules_par_jeton = total
+            plan.est_jetons_par_kj = 1000.0 / total
 
     # prefill : limité par le calcul, et les poids d'une couche transférée sont
     # lus une fois pour tout le lot au lieu d'une fois par jeton
