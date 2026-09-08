@@ -49,6 +49,33 @@ dans la même soirée ; il figure ici pour ne pas l'être une troisième.
    noyau qu'au premier appel de ce noyau (`CUDA_MODULE_LOADING=LAZY`, défaut
    depuis CUDA 11.7).
 
+## Précondition : la mémoire disponible ne dit pas qu'une machine est calme
+
+**À vérifier avant chaque mesure de ce protocole, et avant toute mesure de
+temps en général.**
+
+Le 8 septembre au soir, `free` annonçait **83 Go disponibles** au moment précis
+où la machine était paralysée — souris et affichage compris. La charge était de
+28,8 avec le processeur à **96 % d'inactivité** : elle n'attendait pas le calcul,
+elle attendait le disque. `vmstat` donnait **17 800 blocs par seconde de
+swap-in** : 8 Go chassés en mémoire d'échange une heure plus tôt par un
+processus depuis longtemps mort, et qui remontaient.
+
+Aucune de nos sessions n'allouait quoi que ce soit à cet instant. **La règle des
+trois accords couvre ce que nous faisons ; elle ne couvre pas l'état laissé par
+ce que nous avons fait une heure avant.**
+
+Une seconde perdue se mesure en millisecondes. À ce débit de remontée, le
+système en fabrique une sans que le moteur y soit pour rien — et le protocole
+ci-dessous désignerait un candidat innocent.
+
+    vmstat 1 3     # colonne si (swap-in) : doit être à zéro
+    # si elle ne l'est pas, NE PAS MESURER — attendre, ou dire pourquoi
+
+C'est la même forme que les autres pièges du dossier : un indicateur **voisin**
+de celui qu'on croit lire. La mémoire disponible mesure ce qui reste à donner ;
+elle ne dit rien de ce que le système est en train de reprendre.
+
 ## Les mesures, et ce que chacune élimine
 
 Chacune isole **un** candidat en le rendant impossible ou en le déplaçant, sans
