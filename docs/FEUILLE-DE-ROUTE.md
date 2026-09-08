@@ -4,6 +4,40 @@
 extension de mémoire GPU fonctionnelle et livrait un module noyau qui se
 contentait d'afficher les nombres passés en paramètres.
 
+## 8 septembre 2026 — ma lecture réfutée sur l'ampleur, et le compte dérivé
+
+**Le test que j'avais proposé s'est retourné contre moi, et c'est son intérêt.**
+J'avais écrit : diviser les copies par trois doit faire tomber la pente d'un
+tiers, sinon mon terme est faux. Mesuré : 3,11 ms deviennent 2,88, là où ma
+lecture prédisait 2,07 et où une domination des latences aurait donné 1,04.
+
+De ces deux points, à volume inchangé :
+
+| Part | Valeur | Fraction |
+|---|---|---|
+| Latences fixes | 0,345 ms | 11 % |
+| Le reste | 2,765 ms | 89 % |
+
+Le reste correspond à 6,5 Go/s sur un bus mesuré à 18,7. **L'essentiel du coût
+n'est donc ni la latence par transfert ni le débit nominal**, et il reste à
+nommer : débit effectif plus bas, ou synchronisation par expert que le nombre
+de copies ne change pas. Le terme constant existe, il ne domine pas.
+
+`transfer_fixed_us` reste à **zéro** malgré ces deux points : ils viennent d'un
+seul modèle et d'une seule couche. En tirer une constante générale serait
+refaire l'erreur qu'on venait de corriger deux fois.
+
+**Le nombre de copies par expert était faux deux fois, il n'est plus écrit.**
+D'abord des blocs de 4 Mo, soit cinq copies — facteur dix-huit. Puis trois
+copies par expert — facteur trois. Le vrai compte est neuf : trois projections,
+et trois tenseurs par poids NVFP4 copiés un par un.
+
+Il est désormais **dérivé de la classe** par
+`NVFP4Tensor.transferts_par_poids()`, qui compte ses champs de type tenseur.
+Quand les trois tenseurs voyageront dans un seul tampon épinglé, le compte
+suivra tout seul. Une constante écrite ailleurs serait restée fausse en
+silence — c'est arrivé deux fois en une heure.
+
 ## 8 septembre 2026 — le nombre de transferts, corrigé par la mesure
 
 La courbe du 8 septembre a tranché deux choses sur le terme constant ajouté en
