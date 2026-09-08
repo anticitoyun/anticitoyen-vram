@@ -2729,3 +2729,45 @@ Rappel de méthode qui a coûté une reconversion : la première hypothèse
 (GDN seule) était plausible, confirmée par un indice réel (l'ancienne
 conversion), et fausse quand même — c'est la trace par couche, pas
 l'indice, qui a montré la vraie frontière.
+
+## 8 septembre 2026 — dossier B instruit : la table sans zéro crée de l'énergie sur les blocs creux
+
+Mesure float64 sur les vingt pires tenseurs du manifeste (session de mesure,
+8/09, processeur seul). Les deux mécanismes candidats départagés :
+
+* **Échelle FP8 subnormale ou nulle : réfuté deux fois.** Les échelles à
+  zéro (jusqu'à 44,4 % des blocs) recopient des blocs source déjà vides —
+  énergie perdue 0,00 % partout, SNR inchangé à 0,01 dB en les ignorant.
+  Les subnormaux portent au plus 8,8 % de l'énergie, SNR propre pas pire
+  que les blocs normaux. Un clamp ne gagnerait rien de mesurable.
+* **Table sans zéro : confirmé, c'est tout l'écart.** Le plus petit niveau
+  (0,1025 × échelle) reconstruit chaque poids nul à ±0,1025 × amax du
+  bloc : sur un bloc creux c'est de l'énergie créée, qui se compose couche
+  après couche — la décroissance progressive du cosinus depuis la
+  couche 7. Vingt pires : 85–95 % de creux ; tenseurs à 13,3 dB : 21 %.
+  Dans un même tenseur sain : blocs denses 13,49 dB, blocs creux 8,60.
+* **Fait inattendu : les tenseurs cassés sont des experts quasi morts.**
+  97,37 % de zéros exacts dans la source pour le pire (couche 46), 90–95 %
+  pour les suivants, contre 20,73 % pour un expert sain. Les 67 down_proj
+  sous 10 dB sont des experts vides bruités — propriété du modèle
+  exploitable un jour par le planificateur.
+* **Remède mesuré, pas prédit** : table à niveau zéro, même bloc 32, même
+  échelle, 3,25 bpw inchangés — +9,6 à +16,7 dB sur les cassés, et bloc 32
+  à zéro bat bloc 16 sans zéro (3,50 bpw) sur toute la colonne. Contrôles :
+  le gain tient quand on neutralise les zéros exacts de la source
+  (+16,0 au lieu de +16,7) ; sur du synthétique dense il PERD ~0,8 dB
+  (gaussienne, laplace) et gagne fort sur queue lourde (+8,4 student t=2,
+  +12,4 avec aberrants). Sur les tenseurs sains réels, +0,95 dB dont
+  +0,41 seulement une fois la source neutralisée.
+* **Décision qui en découle — et sa limite** : pas de changement global de
+  table ; une table PAR TENSEUR choisie sur le creux mesuré à la
+  conversion (deux tables, un bit d'en-tête, zéro coût de débit). La
+  variante symétrique du niveau zéro reste à mesurer avant de graver — la
+  table gagnante actuelle est asymétrique et la spécification du 8/09 a
+  banni l'asymétrie pour une raison qui ne s'applique pas ici (±1,0
+  présent des deux côtés), à confirmer par la mesure, pas par l'argument.
+
+Ordre maintenu : le dossier A (divergence des chemins de décodage, en
+cours) passe avant tout changement de table — tant qu'il est ouvert,
+aucun SNR ne prédit une perplexité. Étalon de perplexité en cours :
+llama.cpp sur le GGUF Q3_K_S source, wiki.test.raw, contexte 512.
