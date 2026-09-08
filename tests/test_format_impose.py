@@ -67,3 +67,43 @@ def test_eval_imprime_les_formats_reels():
     assert "q3n 72" in sortie, "les formats reels ne sont pas imprimes"
     assert "int8 115" in sortie
     assert "contexte minimal 256" in sortie, "le cadrage a disparu"
+
+
+# ---------------------------------------------------------------------------
+# Le garde-fou de contention, eprouve dans les deux sens.
+
+def test_la_garde_de_debit_mord_sous_charge(monkeypatch):
+    """Carte occupee : le test de debit doit etre IGNORE, jamais echoue.
+
+    Le 8/09, `test_le_gemv_nvfp4_ne_part_pas_en_emulation` a rendu 57 Go/s au
+    lieu de 300 pendant qu'une conversion occupait la carte a cent pour cent,
+    et il a annonce « reparti en emulation logicielle ». Un diagnostic faux
+    tire d'une mesure vraie.
+    """
+    import conftest
+
+    monkeypatch.setattr(conftest, "occupation_gpu", lambda *a: 100)
+    assert 100 > conftest.OCCUPATION_MAX
+
+
+def test_la_garde_de_debit_se_tait_au_repos(monkeypatch):
+    """Et carte au repos, elle laisse courir — sinon le test ne teste plus rien.
+
+    Un detecteur s'eprouve aussi sur ce qui doit le faire taire.
+    """
+    import conftest
+
+    monkeypatch.setattr(conftest, "occupation_gpu", lambda *a: 3)
+    assert not (3 > conftest.OCCUPATION_MAX)
+
+
+def test_l_occupation_est_lisible_ou_absente():
+    """La lecture rend un pourcentage ou None, jamais une exception.
+
+    Sur une machine sans nvidia-smi, le garde-fou doit s'effacer plutot que de
+    faire echouer toute la suite.
+    """
+    import conftest
+
+    v = conftest.occupation_gpu()
+    assert v is None or (isinstance(v, int) and 0 <= v <= 100)

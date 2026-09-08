@@ -102,6 +102,7 @@ def test_les_magnitudes_e2m1_tiennent_dans_la_constante():
     assert obtenu == attendu
 
 
+@pytest.mark.debit_requis
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="exige un GPU")
 def test_le_gemv_nvfp4_ne_part_pas_en_emulation():
     """Sur toute carte, le noyau NVFP4 doit rester du même ordre que le noyau
