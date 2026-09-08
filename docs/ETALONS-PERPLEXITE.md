@@ -62,6 +62,20 @@ Deux exécutions indépendantes rendent `[64] 29,5004` à la quatrième décimal
 llama.cpp est déterministe sur ce chemin, l'incertitude publiée est bien de
 l'échantillonnage du corpus.
 
+**Dette de preuve, à mon débit.** Ce chiffre est consigné ici et dans
+`VALIDATION-FORMAT-Q3N.md` au moment de la mesure, avec son incertitude — ce
+n'est pas un souvenir. Mais **les journaux des deux exécutions ne sont plus
+produisibles** : ils étaient dans le worktree `/tmp`, qui ne survit pas à un
+redémarrage. La conclusion que ce chiffre porte est la plus structurante du
+dossier — c'est elle qui sépare la qualité, intacte, de la performance, à
+refaire à chaque changement de régime. Elle repose donc sur une **trace
+secondaire**.
+
+À refaire une fois, journaux conservés hors de `/tmp` : deux minutes de mesure
+qui soldent une dette portant sur tout le reste. En attendant, ne pas présenter
+cette insensibilité comme reproductible — elle est **consignée**, ce qui n'est
+pas la même chose.
+
 ## Le biais d'instrument, et pourquoi il fallait le mesurer
 
 Comparer un chiffre produit par acvram à un étalon produit par llama.cpp est une
