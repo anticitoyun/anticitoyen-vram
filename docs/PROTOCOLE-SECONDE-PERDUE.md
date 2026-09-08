@@ -21,6 +21,15 @@ jeton.
 
 ## Ce qui est déjà éliminé, et par quoi
 
+### Coïncidence de valeur n'est pas identité de mécanisme
+
+Les allocations qui échouent pendant une évaluation font **20 971 520 octets**,
+exactement la taille des godets de capture de graphes. La déduction « c'est donc
+la capture » est fausse : `acvram eval` ne capture aucun graphe. 20 Mio est la
+taille de bloc de l'allocateur, et les deux mécanismes la partagent sans se
+ressembler. Ce raisonnement par ressemblance de chiffres a été démonté deux fois
+dans la même soirée ; il figure ici pour ne pas l'être une troisième.
+
 | candidat | éliminé par |
 |---|---|
 | compilation CUDA (PTX → SASS) | `~/.nv/ComputeCache` : 680 Mo, **rien écrit depuis le 24 août** |
@@ -50,6 +59,12 @@ les suivantes coûtent une exécution chacune.
 
 Une variable d'environnement, aucune modification de code. Force le pilote à
 charger tous les modules au démarrage du contexte au lieu du premier appel.
+
+**À lancer sur le chemin `serve`, pas sur `eval`.** `acvram eval` appelle
+`load_model` directement (`evaluate.py:148`) et n'instancie aucun `Runner` : il
+ne capture pas de graphes et ne sert pas de requêtes. Une M1 exécutée là
+conclurait « sans effet » pour une raison qui n'a rien à voir avec le candidat
+testé.
 
 - **la seconde disparaît du premier préremplissage et réapparaît au démarrage du
   serveur** → c'est le chargement différé des modules. Rien à corriger dans le
