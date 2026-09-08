@@ -59,6 +59,11 @@ class EvalResult:
     nll: float = 0.0
     tokens: int = 0
     windows: int = 0
+    # Perplexite par tranche de contexte : {jetons de contexte disponibles au
+    # minimum: (somme des nll, positions)}. Un modele sain coute une dizaine de
+    # nats sur son premier jeton et moins de deux au millieme ; melanger les
+    # deux dans une moyenne rend un chiffre qui ne decrit aucun regime.
+    par_contexte: dict[int, tuple[float, int]] = field(default_factory=dict)
     seconds: float = 0.0
     weights_bytes: int = 0
     bits_per_weight: float = 0.0
@@ -75,7 +80,14 @@ class EvalResult:
             "weights_bytes": self.weights_bytes,
             "bits_per_weight": round(self.bits_per_weight, 3),
             "formats": self.formats,
+            "par_contexte": {str(k): {"ppl": round(math.exp(min(v[0] / v[1], 60.0)), 4),
+                                      "jetons": v[1]}
+                             for k, v in sorted(self.par_contexte.items()) if v[1]},
         }
+
+
+# Bornes des tranches de contexte, en jetons vus par la position notee.
+_TRANCHES = ((0, 8), (8, 32), (32, 128), (128, 512), (512, 0))
 
 
 def _load_corpus(path: Optional[str]) -> str:
@@ -89,9 +101,19 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
                window: int = 512, stride: int = 256,
                max_tokens: int = 8192, device: Optional[str] = None,
                dtype: torch.dtype = torch.bfloat16,
-               progress: Optional[Callable[[int, int], None]] = None
-               ) -> EvalResult:
-    """Perplexité par fenêtre glissante sur un modèle converti."""
+               progress: Optional[Callable[[int, int], None]] = None,
+               min_context: int = 0) -> EvalResult:
+    """Perplexité par fenêtre glissante sur un modèle converti.
+
+    ``min_context`` écarte du décompte les positions qui ont moins de tant de
+    jetons devant elles. Un jeton prédit sans contexte coûte une dizaine de
+    nats quel que soit le modèle : sur un corpus court, ces quelques positions
+    portent l'essentiel de la moyenne et la perplexité obtenue ne mesure plus
+    le modèle mais la longueur du corpus. llama.cpp ne note pour cette raison
+    que la seconde moitié de chaque fenêtre. La valeur par défaut reste zéro
+    pour que les mesures déjà publiées restent comparables ; toute comparaison
+    de formats devrait passer au moins 64.
+    """
     from .engine.loader import load_model
     from .engine.model import ForwardBatch
     from .memory.kvcache import BLOCK_SIZE, BlockAllocator
@@ -146,12 +168,27 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
         # première fois, afin qu'un jeton ne soit jamais compté deux fois avec
         # des quantités de contexte différentes.
         first_new = 0 if start == 0 else max(0, (window - stride) - 1)
+        # Le logit d'indice i predit le jeton i+1 en ayant vu i+1 jetons.
+        first_new = max(first_new, min_context)
         if first_new >= logits.shape[0]:
             break
         nll = torch.nn.functional.cross_entropy(
             logits[first_new:], targets[first_new:], reduction="sum")
         total_nll += float(nll)
         counted += int(targets[first_new:].numel())
+        # Le meme cout, reparti par quantite de contexte disponible : c'est ce
+        # qui dit si un chiffre eleve vient du modele ou des premieres
+        # positions. Sans ce detail, un corpus de 283 jetons et un corpus de
+        # 100 000 rendent deux nombres qu'on croit comparables.
+        pertes = torch.nn.functional.cross_entropy(
+            logits[first_new:], targets[first_new:], reduction="none")
+        for k, (bas, haut) in enumerate(_TRANCHES):
+            i0 = max(0, bas - first_new)
+            i1 = min(pertes.shape[0], haut - first_new) if haut else pertes.shape[0]
+            if i1 > i0:
+                som, n_pos = result.par_contexte.get(bas, (0.0, 0))
+                result.par_contexte[bas] = (som + float(pertes[i0:i1].sum()),
+                                            n_pos + i1 - i0)
         result.windows += 1
         if progress:
             progress(w + 1, n_windows)

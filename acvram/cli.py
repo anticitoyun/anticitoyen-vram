@@ -438,7 +438,8 @@ def cmd_eval(args: argparse.Namespace) -> int:
             _progress(f"  {os.path.basename(_p)}: window {done}/{total}")
         results.append(perplexity(
             path, args.corpus, window=args.window, stride=args.stride,
-            max_tokens=args.max_tokens, device=args.device, progress=prog))
+            max_tokens=args.max_tokens, device=args.device, progress=prog,
+            min_context=args.min_context))
         _progress_done()
     results.sort(key=lambda r: r.perplexity)
     if args.json:
@@ -601,6 +602,9 @@ def build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--window", type=int, default=512)
     ev.add_argument("--stride", type=int, default=256)
     ev.add_argument("--max-tokens", type=int, default=8192)
+    ev.add_argument("--min-context", type=int, default=0,
+                    help="n'note que les positions ayant au moins tant de "
+                         "jetons de contexte (0 = tout, comme avant)")
     ev.add_argument("--device", help="impose un appareil")
     ev.add_argument("--json", action="store_true")
     ev.set_defaults(func=cmd_eval)
