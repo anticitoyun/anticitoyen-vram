@@ -3007,9 +3007,13 @@ min_context 256, une seule exécution, q3n avec filet :
 
   A préremplissage  108,159   B décodage pas à pas  121,666   (255 positions)
 
-Les deux concordent — l'écart de 12 % est du même ordre que l'incertitude
-d'échantillonnage (≈6 % par chiffre à 255 positions) et que les arrondis
-bf16 entre chemins (2e-2, mesurés). **Le paradoxe « perplexité 193 mais
+Les deux chemins donnent le même ORDRE, ce qui suffit à écarter
+l'évaluation comme cause du facteur vingt. Mais **B est 12,5 % pire que
+A, et ce n'est pas un arrondi** : les écarts de logits entre chemins
+valent 1,4e-02, l'incertitude d'échantillonnage ≈6 % par chiffre. Le
+service reste donc dégradé PAR RAPPORT à l'évaluation, d'un montant
+mesuré et sans cause — fait supplémentaire, à ne pas ranger sous
+« les deux concordent ». **Le paradoxe « perplexité 193 mais
 texte cohérent » n'est donc pas un défaut d'instrument : le service
 calcule bien ce que l'évaluation mesure.** La priorité du projet est
 confirmée : la dégradation est réelle en service.
