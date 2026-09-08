@@ -126,3 +126,24 @@ def converted_qknorm(tiny_checkpoint_qknorm, target_rig, tmp_path_factory):
     convert_checkpoint(tiny_checkpoint_qknorm, plan,
                        ConversionOptions(out_dir=out), spec=spec)
     return out
+
+
+@pytest.fixture(autouse=True)
+def _carte_disponible(request):
+    """Une carte saturée par une mesure en cours rend « ignoré », pas « échec ».
+
+    Le 8/09, sept tests graphes/MoE ont échoué pendant qu'une perplexité
+    occupait la 5090 : graphes non capturés (OOM silencieux), pile d'experts
+    refusée faute de place. Trois sessions se partagent la machine ; une carte
+    occupée est l'état normal. Un test qui exige de la VRAM la vérifie avant
+    de courir — le seuil couvre le modèle-jouet, ses graphes et la marge de
+    capture.
+    """
+    if not any(m.name == "gpu_requis" for m in request.node.iter_markers()):
+        return
+    if not torch.cuda.is_available():
+        pytest.skip("pas de carte CUDA")
+    libre, _ = torch.cuda.mem_get_info()
+    if libre < 4 << 30:
+        pytest.skip(f"carte occupée : {libre / (1 << 30):.1f} Gio libres, "
+                    "4 requis — mesure en cours ailleurs ?")
