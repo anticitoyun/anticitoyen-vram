@@ -111,11 +111,26 @@ def _build_quant(entry: dict, name: str, reader: _ShardReader,
         return INT8Tensor(sd["qweight"], sd["scales"], sd["zeros"],
                           entry.get("group_size", group_size), shape)
     if fmt == "q3n":
-        from ..quant.q3n import BLOC_DEFAUT, Q3NTensor
+        from ..quant.q3n import (BLOC_DEFAUT, TABLE_Q3N, Q3NTensor,
+                                 valider_table_q3n)
+        table = entry.get("table")
+        table = valider_table_q3n(table) if table is not None else TABLE_Q3N
+        sceau = entry.get("sceau")
+        if sceau is not None:
+            import hashlib as _h
+            reel = _h.sha256(
+                sd["qweight"].flatten()[:64].cpu().numpy().tobytes()
+                + repr([float(v) for v in table]).encode()).hexdigest()[:16]
+            if reel != sceau:
+                raise ValueError(
+                    f"{name} : le sceau table/poids ne correspond pas — "
+                    "manifeste régénéré sans reconversion ? Le modèle ne "
+                    "doit pas être servi avec cette table.")
         return Q3NTensor(sd["qweight"],
                          sd["block_scale"].view(torch.float8_e4m3fn),
                          sd["global_scale"],
-                         entry.get("block", BLOC_DEFAUT), shape)
+                         entry.get("block", BLOC_DEFAUT), shape,
+                         "q3n", table)
     if fmt in ("bf16", "fp16"):
         return PlainTensor(sd["weight"], shape, fmt)
     raise KeyError(f"unknown format {fmt!r} for {name}")

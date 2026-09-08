@@ -320,6 +320,8 @@ def cmd_convert(args: argparse.Namespace) -> int:
         out_dir=args.out, awq=use_awq, use_hadamard=args.hadamard,
         group_size=args.group_size, n_grid=args.grid,
         lm_head_format=args.lm_head_format, dry_run=args.dry_run,
+        q3n_table=(tuple(float(v) for v in args.q3n_table.split(","))
+                   if args.q3n_table else None),
         mixed_precision=args.mixed_precision, snr_floor=args.snr_floor,
         autoriser_grossissement=args.autoriser_grossissement,
         quant_device=args.quant_device, bits_budget_gib=args.bits_budget,
@@ -532,6 +534,9 @@ def build_parser() -> argparse.ArgumentParser:
     cv.add_argument("--grid", type=int, default=20,
                     help="finesse de la grille de recherche AWQ")
     cv.add_argument("--lm-head-format", help="format de la projection de sortie")
+    cv.add_argument("--q3n-table", help=("niveaux q3n de ce modèle, huit "
+                    "flottants séparés par des virgules (symétriques, bornes "
+                    "±1) ; défaut : table de la spécification"))
     cv.add_argument("--dry-run", action="store_true",
                     help="rapporte tailles et erreurs sans ecrire de fragments")
     cv.add_argument("--force", action="store_true",

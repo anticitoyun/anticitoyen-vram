@@ -2284,19 +2284,28 @@ std::vector<torch::Tensor> moe_route(torch::Tensor logits, torch::Tensor bias,
 // microbanc decidera des optimisations (chargements 12 octets, k_splits).
 // --------------------------------------------------------------------------
 
-__constant__ float TABLE_Q3N_C[8] = {
-    -1.0000f, -0.5783f, -0.3186f, -0.1025f,
-     0.1025f,  0.3186f,  0.5783f,  1.0000f};
-
+// La table de niveaux arrive en argument (elle vit dans le manifeste depuis
+// la table Lloyd-Max par modele) et se lit depuis la memoire PARTAGEE : la
+// version __constant__ se serialisait des que les fils d'un warp lisaient
+// des entrees differentes — le piege deja documente sur la table NVFP4 plus
+// haut — et un symbole global serait un etat partage entre deux modeles
+// charges avec deux tables. Huit entrees physiques toujours : le masque & 7u
+// garantit l'index, la huitieme repete la septieme quand il n'y a que sept
+// niveaux logiques.
 template <int ROWS, typename XT, typename YT>
 __global__ void q3n_gemv_kernel(
     const unsigned char *__restrict__ qw,     // [M, K*3/8]
     const unsigned char *__restrict__ bscale, // fp8 e4m3 [M, K/B]
     const float gscale,
+    const float *__restrict__ table,          // [8] niveaux
     const XT *__restrict__ x,                 // [N, K]
     YT *__restrict__ y,                       // [N, M]
     int M, int K, int N, int B) {
     extern __shared__ float smem[];
+    float *tab = smem;            // 8 niveaux
+    float *red = smem + 8;        // zone de reduction
+    if (threadIdx.x < 8) tab[threadIdx.x] = table[threadIdx.x];
+    __syncthreads();
     const int nwarps = (blockDim.x + WARP - 1) / WARP;
     const int row0 = blockIdx.x * ROWS;
     if (row0 >= M) return;
@@ -2325,11 +2334,11 @@ __global__ void q3n_gemv_kernel(
                 float somme = 0.f;
                 #pragma unroll
                 for (int j = 0; j < 8; ++j)
-                    somme += TABLE_Q3N_C[(mot >> (3 * j)) & 7u] * xs[j];
+                    somme += tab[(mot >> (3 * j)) & 7u] * xs[j];
                 acc[r] += somme * es;
             }
         }
-        block_reduce_rows<ROWS>(acc, smem, nwarps);
+        block_reduce_rows<ROWS>(acc, red, nwarps);
         if (threadIdx.x == 0) {
             #pragma unroll
             for (int r = 0; r < ROWS; ++r)
@@ -2341,9 +2350,12 @@ __global__ void q3n_gemv_kernel(
 }
 
 torch::Tensor q3n_gemv_cuda(torch::Tensor qweight, torch::Tensor block_scale,
-                            double global_scale, torch::Tensor x,
-                            int64_t K, int64_t B) {
-    CHECK_CUDA(qweight); CHECK_CUDA(x);
+                            double global_scale, torch::Tensor table,
+                            torch::Tensor x, int64_t K, int64_t B) {
+    CHECK_CUDA(qweight); CHECK_CUDA(x); CHECK_CUDA(table);
+    CHECK_CONTIG(table);
+    TORCH_CHECK(table.numel() == 8 && table.scalar_type() == torch::kFloat,
+                "q3n : table de 8 flottants attendue");
     ACVRAM_DEVICE_GUARD(qweight);
     CHECK_CONTIG(qweight); CHECK_CONTIG(block_scale);
     TORCH_CHECK(K % 8 == 0 && B % 8 == 0 && K % B == 0,
@@ -2364,19 +2376,20 @@ torch::Tensor q3n_gemv_cuda(torch::Tensor qweight, torch::Tensor block_scale,
     const int threads = 128;
     const int nwarps = (threads + 31) / 32;
     dim3 grid((M + ROWS - 1) / ROWS);
-    const size_t shm = ROWS * nwarps * sizeof(float);
+    const size_t shm = (8 + ROWS * nwarps) * sizeof(float);
     if (bf) {
         q3n_gemv_kernel<ROWS, __nv_bfloat16, __nv_bfloat16>
             <<<grid, threads, shm, stream>>>(
             qweight.data_ptr<unsigned char>(),
             block_scale.data_ptr<unsigned char>(), g,
+            table.data_ptr<float>(),
             reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr()),
             reinterpret_cast<__nv_bfloat16 *>(out.data_ptr()),
             M, (int)K, N, (int)B);
     } else {
         q3n_gemv_kernel<ROWS, float, float><<<grid, threads, shm, stream>>>(
             qweight.data_ptr<unsigned char>(),
-            block_scale.data_ptr<unsigned char>(), g,
+            block_scale.data_ptr<unsigned char>(), g, table.data_ptr<float>(),
             xc.data_ptr<float>(), out.data_ptr<float>(), M, (int)K, N, (int)B);
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -2393,7 +2406,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("q3n_gemv", &q3n_gemv_cuda,
           "Q3N : quantiles 3 bits, dequantification + produit fusionnes",
           py::arg("qweight"), py::arg("block_scale"), py::arg("global_scale"),
-          py::arg("x"), py::arg("K"), py::arg("B"));
+          py::arg("table"), py::arg("x"), py::arg("K"), py::arg("B"));
     m.def("nvfp4_gemv", &nvfp4_gemv, "NVFP4 : dequantification + produit fusionnes",
           py::arg("qweight"), py::arg("block_scale"), py::arg("global_scale"),
           py::arg("x"), py::arg("K"), py::arg("global_scale_rows") = c10::nullopt);

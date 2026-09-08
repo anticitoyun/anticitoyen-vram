@@ -26,9 +26,42 @@ from typing import Optional
 
 import torch
 
-# Table figée par la spécification ; jamais recalculée.
+# Table de la spécification d'origine — le REPLI des manifestes qui ne
+# déclarent pas la leur. Depuis le 8/09 au soir, la table vit dans le
+# manifeste, ajustée par modèle (Lloyd-Max sur échantillon stratifié) ; la
+# symétrie et les bornes ±1 sont invariantes, les niveaux ne le sont pas.
 TABLE_Q3N = (-1.0000, -0.5783, -0.3186, -0.1025,
              0.1025, 0.3186, 0.5783, 1.0000)
+
+# Table Lloyd-Max stratifiée de Qwen3-Coder-Next (mesure du 8/09 : +1,73 dB
+# moyen, zéro perdant sur 288 tenseurs d'évaluation disjoints). Sept niveaux
+# logiques, huit entrées physiques — le masque & 7 du dépaquetage exige un
+# index toujours valide, la huitième répète la septième.
+TABLE_Q3N_LLOYD_CODER_NEXT = (-1.0, -0.5699, -0.2491, 0.0,
+                              0.2491, 0.5699, 1.0, 1.0)
+
+
+def valider_table_q3n(table) -> tuple:
+    """Une table de manifeste porte ce qu'on y a écrit ; on vérifie tout.
+
+    Huit entrées, croissantes (le doublon final des tables à sept niveaux est
+    admis), symétriques à 1e-6 près sur les niveaux distincts, bornes ±1.
+    Une table non triée rendrait ``bucketize`` incohérent avec le dépaquetage
+    et personne ne le verrait avant la perplexité.
+    """
+    t = tuple(float(v) for v in table)
+    if len(t) != 8:
+        raise ValueError(f"table q3n : 8 entrées attendues, {len(t)} reçues")
+    for a, b in zip(t, t[1:]):
+        if b < a:
+            raise ValueError(f"table q3n non croissante : {a} puis {b}")
+    niveaux = sorted(set(t))
+    if abs(niveaux[0] + 1.0) > 1e-6 or abs(niveaux[-1] - 1.0) > 1e-6:
+        raise ValueError(f"table q3n : bornes ±1 attendues, {niveaux[0]}..{niveaux[-1]}")
+    for v in niveaux:
+        if not any(abs(v + w) <= 1e-6 for w in niveaux):
+            raise ValueError(f"table q3n asymétrique : {v} sans opposé")
+    return t
 
 BLOC_DEFAUT = 32          # 3,25 bits/poids ; 16 (3,5 bpw) reste ouvert :
                           # +1,48 dB sur la queue lourde, choix à trancher
@@ -43,6 +76,10 @@ class Q3NTensor:
     block: int
     shape: tuple[int, ...]
     format: str = "q3n"
+    # La table ne va PAS dans state_dict : identique pour tout le modèle,
+    # elle suit le gabarit dans _rehydrate (comme block et shape) au lieu de
+    # traverser _emballer/_decouper à chaque transfert d'expert.
+    table: tuple = TABLE_Q3N
 
     @property
     def nbytes(self) -> int:
@@ -78,16 +115,24 @@ class Q3NTensor:
         return Q3NTensor(self.qweight.to(device, non_blocking=non_blocking),
                          self.block_scale.to(device, non_blocking=non_blocking),
                          self.global_scale.to(device, non_blocking=non_blocking),
-                         self.block, self.shape)
+                         self.block, self.shape, self.format, self.table)
+
+    def table_gpu(self, device) -> torch.Tensor:
+        """La table en float32 sur ``device``, mémorisée — un tenseur de 32
+        octets par modèle et par carte, jamais recréé par appel (une
+        allocation par GEMV serait un fantôme dans une capture de graphe)."""
+        cache = self.__dict__.setdefault("_tables_gpu", {})
+        cle = str(device)
+        t = cache.get(cle)
+        if t is None:
+            t = torch.tensor(self.table, device=device, dtype=torch.float32)
+            cache[cle] = t
+        return t
 
     def state_dict(self, prefix: str = "") -> dict[str, torch.Tensor]:
         return {f"{prefix}qweight": self.qweight,
                 f"{prefix}block_scale": self.block_scale,
                 f"{prefix}global_scale": self.global_scale}
-
-
-def _table(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    return torch.tensor(TABLE_Q3N, device=device, dtype=dtype)
 
 
 def empaqueter_q3(q: torch.Tensor) -> torch.Tensor:
@@ -110,7 +155,8 @@ def depaqueter_q3(octets: torch.Tensor, n: int) -> torch.Tensor:
     return vals.reshape(*octets.shape[:-1], -1)[..., :n]
 
 
-def quantize_q3n(w: torch.Tensor, block: int = BLOC_DEFAUT) -> Q3NTensor:
+def quantize_q3n(w: torch.Tensor, block: int = BLOC_DEFAUT,
+                 table=None) -> Q3NTensor:
     """Quantifie ``w`` [sortie, entrée] ; l'entrée doit être multiple du bloc.
 
     L'échelle de bloc est arrondie en FP8 **avant** la quantification, comme
@@ -125,18 +171,23 @@ def quantize_q3n(w: torch.Tensor, block: int = BLOC_DEFAUT) -> Q3NTensor:
     bs = (blocs.abs().amax(dim=-1) / g).to(torch.float8_e4m3fn)
     echelle = (bs.to(torch.float32) * g).clamp(min=1e-12)
     reduit = blocs / echelle.unsqueeze(-1)
-    table = _table(w.device, torch.float32)
-    bornes = (table[1:] + table[:-1]) / 2
+    tab = valider_table_q3n(table) if table is not None else TABLE_Q3N
+    # bucketize sur les niveaux DISTINCTS : une table à sept niveaux (doublon
+    # final) ne produit alors jamais le code 7, mais le dépaquetage le lirait
+    # sans danger — huit entrées physiques toujours.
+    niveaux = sorted(set(tab))
+    tn = torch.tensor(niveaux, device=w.device, dtype=torch.float32)
+    bornes = (tn[1:] + tn[:-1]) / 2
     q = torch.bucketize(reduit.reshape(sortie, entree), bornes)
     return Q3NTensor(empaqueter_q3(q), bs, g.reshape(()),
-                     block, (sortie, entree))
+                     block, (sortie, entree), "q3n", tab)
 
 
 def dequantize_q3n(t: Q3NTensor, out_dtype: torch.dtype = torch.bfloat16
                    ) -> torch.Tensor:
     sortie, entree = t.shape
     q = depaqueter_q3(t.qweight, entree)
-    table = _table(t.qweight.device, torch.float32)
+    table = torch.tensor(t.table, device=t.qweight.device, dtype=torch.float32)
     vals = table[q.long()].reshape(sortie, entree // t.block, t.block)
     echelle = t.block_scale.to(torch.float32) * t.global_scale.to(t.qweight.device)
     return (vals * echelle.unsqueeze(-1)).reshape(sortie, entree).to(out_dtype)

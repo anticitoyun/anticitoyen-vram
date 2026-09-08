@@ -100,8 +100,24 @@ def test_table_symetrique():
             f"niveaux {i} et {7 - i} non opposés"
     assert max(TABLE_Q3N) == pytest.approx(1.0), \
         "le plus grand niveau doit valoir l'échelle, sinon le maximum est écrêté"
-    assert 0.0 not in TABLE_Q3N, \
-        "pas de zéro exact : avec huit niveaux la symétrie vaut plus qu'un zéro"
+    # L'hypothèse « pas de zéro exact » de la spécification d'origine a été
+    # réfutée par la mesure du 8/09 (+1,73 dB pour sept niveaux symétriques
+    # avec zéro) : la table du manifeste PEUT porter un zéro. La contrainte
+    # qui reste est structurelle : huit entrées, symétrie, bornes ±1 — et
+    # c'est valider_table_q3n qui la fait respecter sur toute table lue.
+    from acvram.quant.q3n import (TABLE_Q3N_LLOYD_CODER_NEXT,
+                                  valider_table_q3n)
+    assert valider_table_q3n(TABLE_Q3N) == TABLE_Q3N
+    assert valider_table_q3n(TABLE_Q3N_LLOYD_CODER_NEXT) \
+        == TABLE_Q3N_LLOYD_CODER_NEXT
+    with pytest.raises(ValueError):
+        valider_table_q3n((-1, -0.5, -0.3, 0, 0.3, 0.5, 1))       # 7 entrées
+    with pytest.raises(ValueError):
+        valider_table_q3n((-1, -0.5, 0.3, -0.3, 0, 0.5, 1, 1))    # non triée
+    with pytest.raises(ValueError):
+        valider_table_q3n((-0.9, -0.5, -0.3, 0, 0.3, 0.5, 0.9, 0.9))  # bornes
+    with pytest.raises(ValueError):
+        valider_table_q3n((-1, -0.5, -0.3, 0, 0.2, 0.5, 1, 1))    # asymétrie
 
 
 def test_erreur_symetrique_entre_signes():
@@ -479,3 +495,39 @@ def test_noyau_capturable_dans_un_graphe_cuda():
     torch.cuda.synchronize()
     snr = _snr_db(_reference_gemv(x, t), sortie.to(torch.float32))
     assert snr >= 35.0, f"graphe rejoué : {snr:.1f} dB"
+
+
+def test_table_du_manifeste_traverse_tout():
+    """La table Lloyd d'un modèle doit produire EXACTEMENT ses niveaux à la
+    déquantification, et l'aller-retour disque (manifeste sans table = repli
+    spécification) doit rester intact."""
+    from acvram.quant.q3n import (TABLE_Q3N, TABLE_Q3N_LLOYD_CODER_NEXT,
+                                  dequantize_q3n, quantize_q3n)
+    torch.manual_seed(3)
+    w = torch.randn(16, 64) * 0.02
+    t = quantize_q3n(w, table=TABLE_Q3N_LLOYD_CODER_NEXT)
+    assert t.table == TABLE_Q3N_LLOYD_CODER_NEXT
+    deq = dequantize_q3n(t, torch.float32)
+    echelle = t.block_scale.to(torch.float32) * float(t.global_scale)
+    reduit = (deq.reshape(16, -1, t.block)
+              / echelle.clamp(min=1e-12).unsqueeze(-1)).reshape(-1)
+    niveaux = torch.tensor(sorted(set(TABLE_Q3N_LLOYD_CODER_NEXT)))
+    dmin = (reduit.unsqueeze(1) - niveaux.unsqueeze(0)).abs().min(dim=1).values
+    assert float(dmin[echelle.reshape(-1).repeat_interleave(t.block) > 1e-12]
+                 .max()) < 1e-5, "une valeur reconstruite hors des niveaux"
+    # zéro exact reconstruit exactement
+    assert (deq == 0).float().mean() > 0.05
+    # repli : un tenseur sans table garde la spécification
+    t2 = quantize_q3n(w)
+    assert t2.table == TABLE_Q3N
+
+
+def test_rehydrate_transporte_la_table():
+    from acvram.engine.layers import _rehydrate
+    from acvram.quant.q3n import TABLE_Q3N_LLOYD_CODER_NEXT, quantize_q3n
+    torch.manual_seed(4)
+    t = quantize_q3n(torch.randn(8, 32), table=TABLE_Q3N_LLOYD_CODER_NEXT)
+    r = _rehydrate(t, {"qweight": t.qweight.clone(),
+                       "block_scale": t.block_scale.clone().view(torch.uint8),
+                       "global_scale": t.global_scale.clone()})
+    assert r.table == TABLE_Q3N_LLOYD_CODER_NEXT
