@@ -2878,11 +2878,18 @@ Le « défaut hybride » du balayage n'était pas dans le harnais ni dans la
 récurrence : le témoin Qwen3.6-12B est un **qwen35**, dont le GGUF déclare
 `rope.dimension_sections = [11, 11, 10, 0]` et que llama.cpp sert en
 LLAMA_ROPE_TYPE_**IMROPE** (M-RoPE entrelacé) — acvram lui appliquait un
-NEOX standard : affectation fréquence→paire permutée par rapport à
-l'entraînement, angles relatifs faux, erreur croissante avec l'écart de
-position, attention pleine seulement. Les trois signatures du balayage
-(×2,16 → ×4,08 → ×9,21 ; GDN exacte au juge extérieur jusqu'à t=2048 ;
-dense propre) s'expliquent d'un coup. Vérifié dans les DEUX GGUF (session
+NEOX standard. RECTIFICATION une heure plus tard, à la lecture de
+ggml (ops.cpp:5639) : l'entrelacement IMROPE choisit l'AXE de position
+par paire mais les fréquences avancent uniformément — en texte pur, si
+les quatre flux de positions sont égaux, IMROPE ≡ NEOX et ce diagnostic
+ne tient QUE si llama.cpp alimente des positions non égales pour qwen35
+en texte (vérification en cours sur le graphe, avec un candidat de
+repli : attention.key_length = 256 là où hidden/têtes donnerait 213 —
+le head_dim ne se déduit pas, il se lit). Les signatures du balayage
+(×2,16 → ×4,08 → ×9,21 ; GDN exacte jusqu'à t=2048 ; dense propre)
+restent des faits ; leur cause au sein de l'attention pleine du qwen35
+reste À PROUVER, l'outil de dump par couche est prêt si l'hypothèse
+RoPE tombe. Vérifié dans les DEUX GGUF (session
 de mesure) : Coder-Next (`qwen3next`) ne porte AUCUNE section, freq_base
 5e6 et rotary_dim 64 correctement lus — son RoPE NEOX est le bon
 traitement sur les trois axes qui peuvent mentir (type, theta, dims).
