@@ -281,3 +281,77 @@ Et un décibel de SNR de poids ne prédit aucune perplexité. C'est la mesure
 avant/après, sur le même corpus et dans le même cadrage, qui décidera — ou qui
 dira que le gain ne se voit pas en sortie, ce qui devra être écrit aussi
 franchement que le gain lui-même.
+
+---
+
+# Résolution : d'où viennent les 3 nats
+
+Le dossier ouvert le matin — « q3n dégrade le modèle » — se referme le soir sur
+une cause qui n'a rien à voir avec le format.
+
+## La référence au grain de la position
+
+Les logits complets de llama.cpp sur les 512 premiers jetons, toutes positions
+(par défaut le graphe n'élabore que la dernière : il faut demander les logits à
+chaque position du lot). Contrôle avant usage : perplexité recalculée depuis ces
+logits **5,0467** contre **5,0411** rendu par `llama-perplexity` sur la même
+fenêtre — 0,1 % d'écart.
+
+| poste, positions 256-511 | llama.cpp | acvram |
+|---|---|---|
+| NLL médiane | **0,258** | 3,58 |
+| NLL moyenne | 1,619 | 4,684 |
+| part portée par les 10 % pires | **48,4 %** | 29,6 % |
+| top-1 | **63,2 %** | 32,2 % |
+| corrélation NLL / identifiant du jeton | 0,163 | 0,434 |
+
+## Deux lectures renversées par ces chiffres
+
+**La queue n'était pas le symptôme — elle était plus légère du côté malade.**
+48,4 % du coût sur un dixième des positions chez le moteur sain, contre 29,6 %.
+Un moteur sain *concentre* son coût sur les positions réellement difficiles ;
+celui-ci l'étale. Chercher des accidents localisés était donc chercher à
+l'envers.
+
+**Le défaut frappe les positions FACILES.** Médiane 0,258 contre 3,58 : un
+facteur quatorze là où la référence est quasi certaine. Ventilé par quartile de
+difficulté de la référence, l'écart vaut +1,66 nat sur le quartile trivial puis
+environ +3 nats partout ailleurs — **à peu près constant quelle que soit la
+difficulté**. Sur une position où la référence est certaine à 99,9 %, le moteur
+tombe à 19 %.
+
+Un écart indépendant de la difficulté est la signature d'un **bruit ajouté aux
+logits**, non d'une erreur sélective.
+
+## La chaîne causale
+
+Raccordée à la mesure par couche : les couches d'attention **linéaire**
+contribuent 11 à 40 % d'erreur quand les couches d'attention pleine restent à
+1 %.
+
+    couches linéaires bruitées → activations bruitées → logits bruités
+    → même le trivial devient incertain → perplexité ×20
+    mais l'argmax reste souvent juste → texte plausible
+
+Le paradoxe qui a résisté toute la journée — un modèle qui génère du texte
+cohérent avec une perplexité de 200 — est expliqué sans contradiction.
+
+## Ce que le dossier laisse établi
+
+- le format q3n coûte **8 %** de perplexité pour 1,25 bit de moins par poids ;
+- le filet de promotion valait un facteur **4,8** et était le vrai sujet côté
+  conversion ;
+- **97,5 %** de l'écart à l'étalon est au moteur, dans les couches d'attention
+  linéaire, et non dans les formats ;
+- l'hypersensibilité des architectures hybrides à la perturbation des poids est
+  réelle (**6,1×** le dense) mais vingt-six fois trop petite pour expliquer quoi
+  que ce soit ici.
+
+## Ce qui reste non mesuré
+
+Le mécanisme précis dans les couches linéaires. Toutes les causes candidates ont
+été éliminées une à une par la mesure — précision réduite, transport, ordre
+d'accumulation, type de RoPE, dimension de tête, découpage de la tête de sortie,
+frontière de morceau, chemin d'évaluation contre chemin de service. Ce qui
+reste est un fait établi sans cause identifiée, et c'est là que le travail
+reprend.
