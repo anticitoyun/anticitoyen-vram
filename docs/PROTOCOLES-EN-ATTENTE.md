@@ -59,13 +59,34 @@ lanceur porte cette variable depuis le 8 septembre, neutre par défaut.
 
 **Modèle.** Un modèle qui **a** une tête MTP — à vérifier avant, pas pendant.
 
-**Le contrôle qui décide si la mesure existe.** `cli.py:386` refuse
-`--speculative mtp` sur un modèle sans tête `nextn`. Si ce refus passe
-inaperçu, le serveur retombe sur son défaut et **on mesure `ngram` contre
-`ngram`** : deux chiffres identiques, la conclusion « la spéculation ne change
-rien », et elle serait fausse. **Le journal doit annoncer le mode réellement
-actif à chaque chargement**, et le protocole s'arrête si l'annonce manque.
-C'est le même piège que `ACVRAM_EXIL_COUCHES` ignoré, à un autre endroit.
+**Le contrôle que j'avais écrit visait un piège qui n'existe pas.** J'avais
+prévu que `mtp` puisse être refusé en silence et qu'on mesure alors `ngram`
+contre `ngram`. C'est faux, et poste1 l'a relevé : `cli.py:381-384` fait
+`return 2` — **le serveur ne démarre pas du tout**. Il n'y aurait donc aucune
+mesure, pas une mesure trompeuse. Un contrôle qui cherche un piège absent est
+pire que pas de contrôle : il rassure.
+
+Vérifié dans le code : le mode qui substitue en silence est **`auto`**
+(lignes 367-369), mais il **réassigne** `args.speculative` avant que le journal
+ne l'imprime (ligne 416). L'annonce est donc fidèle, y compris derrière `auto`.
+
+**Le vrai risque est la variable unique, et il est dans `k`.** `--spec-k` vaut
+**4 par défaut pour tous les modes** (ligne 592). Or `k` est le nombre de
+jetons proposés par pas, et le `k` optimal diffère par nature : un n-gramme
+propose mal et loin, une tête MTP propose bien et court. Une comparaison à `k`
+fixe ne dit donc pas lequel est meilleur — elle dit **lequel est meilleur à
+k=4**, et publier l'un pour l'autre serait transporter une conclusion hors de
+ses conditions, le piège central de ce dossier.
+
+**Le contrôle, proposé par poste1 et retenu** : le journal porte déjà
+`speculation : <mode>, k=<n>` (ligne 416-417). Les deux lignes des deux
+mesures **ne doivent différer que par le mot du mode**. Si `k` diffère, la
+mesure n'existe pas. Vérifiable sur la sortie, sans instrumentation.
+
+**Extension à faire si `mtp` gagne** : refaire les deux modes à `k` = 2 et 8.
+Si `ngram` l'emporte à un autre `k`, la conclusion n'est pas « `mtp` est
+meilleur » mais « chacun a son `k` », et c'est le réglage qu'il faut publier,
+pas le vainqueur.
 
 **Grandeurs relevées.** `t_s_passages` et `ttft_passages` — les deux, parce que
 la spéculation agit sur la génération et non sur le préremplissage : un gain
@@ -75,7 +96,7 @@ qui apparaîtrait aussi dans le TTFT désignerait autre chose qu'elle.
 systématiquement plus lent, et la dispersion tombe de ~10 % à moins de 0,6 %
 quand on l'écarte.
 
-**Prédiction écrite d'avance.** `mtp` doit être plus rapide que `ngram` sur du
+**Prédiction écrite d'avance, à k=4.** `mtp` doit être plus rapide que `ngram` sur du
 texte qui ne recopie pas son entrée, et l'écart doit être plus grand que la
 dispersion sans le premier passage — sans quoi il ne conclut rien. Si `mtp` est
 plus **lent**, la tête MTP que nous transportons depuis toujours est un coût
