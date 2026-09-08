@@ -558,3 +558,87 @@ en FP32), le troisième conteste la stratégie même du préchargement sur
 laquelle repose notre chantier « recouvrement ». Aucun ne se transpose
 sans mesure : tous portent sur du matériel ou des tailles de bloc
 différents des nôtres.
+
+## Relevés croisés des trois sessions — 8 septembre 2026, soir
+
+Domaines répartis : hybrides et récurrence (session OnePlus, fiches dans
+`docs/VEILLE-HYBRIDES.md`), quantification et mesure (session de mesure),
+exil et matériel (ici).
+
+### 33. AAAC — dictionnaires adaptatifs conscients des activations (arXiv:2605.08692)
+
+Deux petites tables apprises par couche (64 octets), chaque groupe
+choisissant celle qui minimise l'erreur **pondérée par les activations**,
+le choix encodé dans le **bit de signe inutilisé** de l'échelle du
+groupe : **zéro octet de surcoût**. Calibration 3 à 30 minutes.
+Ce que ça dit de notre table par manifeste : bonne direction, mauvais
+grain (le modèle au lieu du groupe) et mauvais critère (statistique des
+poids au lieu de l'erreur en sortie) — la même différence qu'entre un SNR
+de poids et une perplexité. Et le code sur huit inutilisé de notre table
+à sept niveaux est en fait un **canal libre** : deux tables sélectionnables
+par groupe y tiendraient, à 3,25 bits par poids inchangés.
+
+### 34. ActQuant — l'échelle domine la table (arXiv:2605.24011)
+
+« Le choix de l'ÉCHELLE, et non la conception de la table, domine sous
+quatre bits. » Ablation à ~2,6 bits : naïf 4,5 % de réussite, **+ échelle
+pondérée par la magnitude : 57,7 %** — l'échelle vaut treize fois le
+reste de leur pile.
+**Nous avons optimisé le mauvais paramètre toute la journée.** Notre
+échelle est `amax(bloc) / amax(tenseur)` arrondie en FP8 : la plus naïve
+possible, fixée par la valeur la moins représentative du bloc. Réserve :
+leur mesure porte sur un modèle vision-langage-action à 2,6 bits, le
+mécanisme se transpose, l'amplitude non. Mesure qui tranche, en float64
+sans carte : à table identique, échelle actuelle contre échelle
+optimisée sur une grille autour d'amax, sur les 288 tenseurs
+d'évaluation disjoints. **Si le gain dépasse les +3,43 dB de la table,
+l'ordre des priorités s'inverse et rien ne se grave avant.**
+
+### 35. L'axe énergie n'est plus vide — correction (arXiv:2605.11733 et suivants)
+
+Un article de position demande désormais que les travaux d'inférence
+rapportent joules/jeton, la contrainte active, la puissance corrigée du
+PUE et le débit corrigé de l'utilisation ; plus arXiv:2601.22076 « Where
+Do the Joules Go? », 2607.26571 (estimation analytique), 2608.25096
+(énergie selon la longueur de contexte). L'axe reste bon mais il a des
+**conventions naissantes** : s'y conformer plutôt qu'inventer un format.
+**Alerte qui conditionne toute communication** : la littérature situe le
+coût typique autour de **1,8 J par jeton** ; nous mesurons **17,4 J brut,
+9,6 net** — dix fois plus. Un modèle de 80 milliards de paramètres exilé
+sur des cartes grand public bridées contre des services optimisés en
+centre de données n'est pas comparable tel quel, mais **tant que l'écart
+n'est pas décomposé, publier nos jetons/kJ nous exposerait à être
+comparés à des chiffres qui ne mesurent pas la même chose** — le piège
+inter-instruments transposé à la publication.
+
+### 36. La divergence entre moteurs est documentée (arXiv:2605.19537)
+
+Cinq moteurs contre `transformers` : jusqu'à **16,3 points d'écart** sur
+GSM8K, DeepSeek R1 à 78,1 % chez transformers contre 61,7 % chez Ollama,
+écart persistant en échantillonnage stochastique — donc au niveau des
+logits. **Un chiffre de qualité mesuré sur un seul moteur décrit le
+couple modèle-moteur, pas le modèle.** Valide la journée entière et la
+généralise : rejouer l'étalon externe à chaque changement de MOTEUR, pas
+seulement de format.
+
+### 37. Contradiction non tranchée sur la propagation de l'erreur
+
+arXiv:2504.09629 annonce une croissance **exponentielle** de l'erreur de
+quantification avec la profondeur ; notre mesure du soir donne **√N**
+(1,87e−03 à 5,50e−03 de 1 à 8 couches, ×2,93 pour ×8, √8 = 2,83), témoin
+dense identique. Les deux ne parlent probablement pas du même objet — eux
+quantifient séquentiellement, chaque couche absorbant l'erreur de la
+précédente ; nous perturbons indépendamment avec résiduel. **Non
+vérifié**, et la mesure qui trancherait est écrite plutôt que
+l'explication qui arrange.
+
+### Convergence des trois relevés sur une décision
+
+arXiv:2609.04098 (4 bits sur GDN égale BF16) et notre mesure du 2,3×
+disent la même chose par deux voies : la sensibilité des couches
+récurrentes existe mais **ne s'amplifie pas avec la profondeur**. Les
+planchers int8 des v0.4.93-94, posés le matin contre un symptôme dont la
+cause réelle a été trouvée le soir, sont donc à retirer — et c'est
+mesurable maintenant que le moteur est sain. Aucun travail publié ne
+compare une couche récurrente à un perceptron de même largeur : notre
+2,3× semble sans équivalent.
