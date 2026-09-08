@@ -151,9 +151,42 @@ sha256 `173c87a5…7dd08`, stride = n_ctx, n_ctx/2 positions notées par fenêtr
 | état | perplexité | rapport à 9,1831 | conditions |
 |---|---|---|---|
 | q3n **sans filet** (`snr_floor` 0, aucune promotion) | 1005,838 | ×110 | 584 fenêtres, 148 920 positions, contexte minimal 256 |
-| q3n **avec filet** (`snr_floor` 25) | *non mesuré* | — | reconversion en cours |
-| q3n avec filet **et** table Lloyd | *non mesuré* | — | table garée tant que le filet n'a pas rendu son chiffre |
-| NVFP4, mêmes conditions | *non mesuré* | — | témoin de format, sert à annuler tout défaut moteur commun |
+| q3n **avec filet** (`snr_floor` 25) | **209,036** | ×22,8 | idem, 144 tenseurs promus en int8 |
+| **NVFP4** (4,5 bits), mêmes conditions | **193,621** | ×21,1 | idem — le témoin qui rend les autres lisibles |
+| q3n avec filet **et** table Lloyd | *non mesuré* | — | ne peut agir que sur les 0,077 nats propres au format |
+
+### Décomposition, en nats — c'est elle qui conclut
+
+| poste | nats | lecture |
+|---|---|---|
+| gain du filet (`snr_floor` 0 → 25) | **−1,571** | facteur 4,81 sur la perplexité. Le filet est le résultat principal du dossier côté format. |
+| écart de format restant, q3n − NVFP4 | **+0,077** | +8,0 % relatif, pour **1,25 bit de moins par poids** |
+| excès commun aux deux formats | **+3,049** | facteur 21,1 sur l'étalon. **97,5 % de l'écart total.** |
+
+**Ce que ces trois lignes établissent, et qui renverse le dossier.**
+
+1. **Le filet était le défaut principal.** Une conversion sans plancher de SNR
+   laissait 143 `shared_expert` — sur le chemin de 100 % des jetons, à chacune
+   des 48 couches — en 3,25 bits là où le NVFP4 les protégeait en int8. Le
+   corriger vaut un facteur 4,8. Ce n'était pas un réglage, c'était le sujet.
+
+2. **Le format q3n tient sa promesse.** À 3,25 bits contre 4,5, il lit 27,8 %
+   d'octets en moins et coûte **8 % de perplexité**. L'incertitude
+   d'échantillonnage sur 148 920 positions vaut environ 0,5 %, donc l'écart est
+   réel — mais il est petit, et c'est la bonne nouvelle : le format n'est pas le
+   problème.
+
+3. **Le poste dominant n'est pas le format, il est au moteur.** L'excès commun
+   aux deux formats — 3,05 nats, facteur 21 — ne peut venir ni de q3n ni de
+   NVFP4 puisqu'il leur est commun. C'est le « fait sans cause » des
+   architectures hybrides, mesuré cette fois sur `qwen3next` et non plus
+   soupçonné sur un témoin. **Il pèse 97,5 % de l'écart à l'étalon.**
+
+Et un fait qui oriente sa recherche : le NVFP4 **génère du texte cohérent en
+usage réel** avec une perplexité de harnais de 193. Une perplexité de 193
+signifierait un modèle inutilisable ; le modèle ne l'est pas. Le défaut est donc
+probablement dans le chemin d'**évaluation ou de préremplissage** sur les
+hybrides, et non dans la génération.
 
 **Aucun de ces chiffres n'est une perplexité du format q3n**, et ils ne doivent
 pas être écrits ainsi. Ils sont mesurés par le harnais acvram ; l'étalon vient
@@ -179,6 +212,18 @@ attribuable au format** tant que ce fait n'est pas expliqué. La **différence
 entre deux formats mesurés dans les mêmes conditions** l'est, elle, parce
 qu'un défaut moteur commun s'y annule. C'est pourquoi le NVFP4 figure dans la
 table : il n'est pas un chiffre de plus, c'est ce qui rend les autres lisibles.
+
+## Ce qu'il reste à mesurer, par ordre de ce que ça rapporte
+
+1. **Trancher évaluation contre génération.** Mesurer la perplexité en mode
+   génération — jeton par jeton avec le cache, comme en usage réel — au lieu du
+   préremplissage par fenêtres. Si elle s'effondre vers l'étalon, le défaut est
+   dans le chemin d'éval et les 3,05 nats ne concernent pas le service. Si elle
+   reste haute, le service est bien touché et c'est la priorité du projet. Un
+   seul essai départage, et il conditionne tout le reste.
+2. Le biais d'instrument sur architecture hybride, non borné à ce jour : les
+   +4,7 % mesurés valent sur un modèle dense.
+3. La table Lloyd, qui ne peut agir que sur les 0,077 nats propres au format.
 
 ## Sur la table Lloyd, si elle est un jour retenue
 
