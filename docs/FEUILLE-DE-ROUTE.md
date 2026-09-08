@@ -2580,18 +2580,34 @@ base après chaque case, invalidations calculées par le banc lui-même
 | Qwen3.8-27B exl3 | **acvram** | **49,4** | **219** | 271 | 4,9 % 🔌 |
 | Qwen3.8-27B exl3 | tabby | 46,7 | 179 | 311 | 0,3 % 🔌 |
 
-Ce que la première lecture donne, avant contradiction :
+Ce que la contradiction a laissé debout — critère : l'écart doit valoir au
+moins trois fois la dispersion maximale du pairage :
 
-* **acvram gagne trois appariements sur quatre, en débit ET en jetons par
-  kilojoule nets** — le dense Q6 à +46 % de débit et +79 % d'efficacité sur
-  llama.cpp, l'exl3 devant Tabby sur les deux axes.
+* **Cinq appariements, pas quatre** — le premier décompte omettait Coder-Next,
+  c'est-à-dire la pire défaite, et l'omission est consignée ici parce qu'elle
+  est le genre d'erreur qui ne pardonne pas en publication.
+* **Établis** : Qwen3.8-27B Q6, acvram +46 % de débit et +79 % d'efficacité
+  (rapport écart/dispersion 3,6) ; exl3 contre Tabby, +5,8 % (rapport 19) ;
+  et la défaite Coder-Next, −91 % (rapport 70).
+* **Non conclusifs** : les deux Huihui, dispersions de 21,3 et 26,0 % pour des
+  écarts de +41 et −24 % — rapports 1,9 et 0,9, aucun chiffre publiable quelle
+  que soit la statistique. La médiane et l'étendue remplaceront le meilleur
+  des trois, qui favorise le moteur le plus bruyant.
 * **Le bridage en puissance existe bel et bien** : sur le dense 27B, les cas
   marqués 🔌 ont touché le plafond logiciel — llama.cpp à 348 W. L'hypothèse
   d'hier « jamais bridées en décodage » ne valait que pour le MoE exilé ; le
   comparatif devra publier le régime par cas, pas par machine.
-* Les deux cases Huihui d'acvram dispersent à 21 et 26 % : la spéculation par
-  n-grammes rend le débit dépendant du texte produit. À traiter avant de
-  publier ce chiffre — c'est l'avertissement du banc qui le dit, comme prévu.
+* Les deux cases Huihui d'acvram dispersent à 21 et 26 %, et l'explication
+  facile — la spéculation dépendrait du texte — ne tient pas : à température
+  zéro le texte sort identique, donc les n-grammes aussi. Ou bien le chemin
+  n'est pas déterministe sur ces modèles, défaut à part entière, ou bien la
+  variation vient d'ailleurs, froid, cache, ordonnancement. Le contrôle le
+  moins cher : une empreinte du texte par passage dans le TSV, qui dira
+  lequel sans relancer de série.
+* Coder-Next, onze fois plus lent mais seulement deux fois moins efficace :
+  la carte consomme peu pendant qu'elle est lente. L'énergie perdue est dans
+  l'attente, pas dans le travail — la chaîne sérialisée vue au profil du bus,
+  chiffrée cette fois en joules. Argument de plus pour le recouvrement.
 * Coder-Next reste perdu 11 fois : c'est le modèle 3 bits, la garde de
   conversion refuse désormais de le faire grossir, et le format ~3,5 bits
   (spécification de la nuit, quantiles 3 bits à 3,25 bpw, table symétrique)
