@@ -53,6 +53,7 @@ MAX_TOKENS = 200
 # `--passages` : on ne reduit jamais la rigueur par modele, on reduit le nombre
 # de modeles.
 MESURES = 3
+FORCER_EXIL = False
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from energie import Energie, repos            # noqa: E402
@@ -237,9 +238,122 @@ def attendre(moteur, secondes):
     raise RuntimeError(f"{moteur} n'a pas démarré en {secondes} s")
 
 
+def memoire_libre():
+    """Memoire libre par carte, en Mio, dans l'ordre des index physiques."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10).stdout
+        return [int(l.strip()) for l in out.splitlines() if l.strip()]
+    except Exception:
+        return []
+
+
+def ram_hote_libre_mio():
+    """RAM hote reellement disponible (MemAvailable), en Mio."""
+    try:
+        for l in open("/proc/meminfo", encoding="utf-8"):
+            if l.startswith("MemAvailable:"):
+                return int(l.split()[1]) // 1024
+    except OSError:
+        pass
+    return 0
+
+
+def poids_mio(dossier):
+    """Taille des poids sur disque, en Mio. 0 si on ne sait pas."""
+    total = 0
+    try:
+        for rep, _, fichiers in os.walk(dossier):
+            for f in fichiers:
+                if f.endswith((".safetensors", ".gguf", ".bin")):
+                    try:
+                        total += os.path.getsize(os.path.join(rep, f))
+                    except OSError:
+                        pass
+    except OSError:
+        return 0
+    return total // (1024 * 1024)
+
+
+def attendre_memoire(secondes=90, marge=200):
+    """Attend que la memoire des cartes cesse de bouger avant de charger.
+
+    Mesure du 8 septembre 2026 : le MEME modele, charge deux fois de suite
+    sous le meme alias, a rendu 15,8 puis 152,2 t/s — facteur 9,6. Le journal
+    du serveur donne la cause : au premier chargement le plan exilait 5 puis 6
+    MLP de plus en RAM hote (« poids reels 8.7 Gio pour 11.1 Gio »), au second
+    aucun. Le serveur precedent n'avait pas fini de rendre sa memoire quand le
+    suivant a calcule son plan. Le port etait ferme, la memoire non.
+
+    Sans cette attente, le placement — donc le debit — est tire au sort a
+    chaque chargement, et aucune comparaison entre modeles ne veut rien dire.
+    """
+    precedent = None
+    t0 = time.time()
+    while time.time() - t0 < secondes:
+        libre = memoire_libre()
+        if not libre:
+            return []
+        if precedent and all(abs(a - b) <= marge for a, b in zip(libre, precedent)):
+            return libre
+        precedent = libre
+        time.sleep(3)
+    return memoire_libre()
+
+
+class MemoireInsuffisante(RuntimeError):
+    pass
+
+
+def verifier_place(dossier, libre_vram, ram_libre=None, reserve_mio=8192,
+                   part_tampons=0.20):
+    """Refuse de charger ce qui ne tiendrait pas en RAM hote.
+
+    Attendre que la memoire cesse de bouger ne suffit pas : le 8 septembre
+    2026 la garde a rendu la main sur 1951 Mio de VRAM libre — stables — et
+    un modele de 44 Gio a ete charge quand meme. Ce qui ne tient pas dans la
+    VRAM part en RAM hote ; la RAM a sature et la machine a redemarre,
+    emportant le worktree et les mesures en cours. Attendre la STABILITE
+    n'est pas verifier la DISPONIBILITE.
+
+    Ce qui est mesure : le poids sur disque, la VRAM libre, MemAvailable au
+    moment du chargement. Ce qui ne l'est PAS : les deux constantes.
+    `reserve_mio` (8 Gio pour le reste du systeme) et `part_tampons` (20 % du
+    poids pour le cache KV, les tampons et les copies de chargement) sont des
+    choix d'ingenierie, pas des mesures. Ce qui les etablirait : relever le
+    MemAvailable MINIMUM pendant un chargement dont l'exil est connu, sur
+    trois tailles de modele — la difference avec l'exil donne les tampons, et
+    le plancher tolerable donne la reserve. Tant que cette mesure n'est pas
+    faite, ces deux chiffres sont prudents et arbitraires, et le refus qu'ils
+    provoquent doit pouvoir etre leve : c'est le role de --forcer-exil.
+    """
+    poids = poids_mio(dossier)
+    if not poids or not libre_vram:
+        return
+    exil = poids - sum(libre_vram)
+    if exil <= 0:
+        return
+    ram = ram_hote_libre_mio() if ram_libre is None else ram_libre
+    besoin = exil + int(part_tampons * poids) + reserve_mio
+    if ram and besoin > ram:
+        raise MemoireInsuffisante(
+            f"{poids} Mio de poids, {sum(libre_vram)} Mio de VRAM libre : "
+            f"{exil} Mio partiraient en RAM hôte, soit {besoin} Mio avec les "
+            f"tampons et la réserve, pour {ram} Mio disponibles. "
+            f"Chargement refusé (--forcer-exil pour passer outre).")
+
+
 def demarrer(moteur, dossier, ctx):
     """Lance le moteur et rend le temps de chargement, lanceur compris (les
     lanceurs attendent eux-mêmes le port avant de rendre la main)."""
+    libre = attendre_memoire()
+    if libre:
+        log("           mémoire libre avant chargement : "
+            + " / ".join(f"{m} Mio" for m in libre)
+            + f" ; RAM hôte {ram_hote_libre_mio()} Mio")
+    if not FORCER_EXIL:
+        verifier_place(dossier, libre)
     t0 = time.time()
     _demarrer(moteur, dossier, ctx)
     return time.time() - t0
@@ -435,6 +549,12 @@ def mesurer(moteur):
         "t_s_min": round(etendue[0], 1), "t_s_max": round(etendue[1], 1),
         "empreintes": ",".join(empreintes),
         "textes_identiques": "oui" if textes_identiques else "NON",
+        # Les debits DANS L'ORDRE d'execution. min/max disent qu'un passage
+        # s'ecarte, pas LEQUEL : un premier passage froid et une bimodalite
+        # rendent le meme min, le meme max et la meme dispersion. Sans
+        # l'ordre, la table de decision de docs/SERIE-DETERMINISME.md ne peut
+        # pas etre appliquee (mesure du 8 septembre 2026).
+        "t_s_passages": ",".join(f"{d:.1f}" for d in debits),
     }
     # Un aperçu du texte à côté du débit : 481 t/s de « de de de » sur quatre
     # jetons se lisaient comme un record tant qu'on ne voyait pas le texte.
@@ -457,9 +577,15 @@ def main():
                     help="passages par couple (3 par defaut ; 5 pour la serie "
                          "determinisme, qui distingue un passage froid d'une "
                          "bimodalite)")
+    ap.add_argument("--forcer-exil", action="store_true",
+                    help="charge meme si les poids ne tiennent pas en RAM hote "
+                         "(le 8 septembre 2026, ce cas a fait redemarrer la "
+                         "machine et perdu les mesures en cours)")
     ap.add_argument("--simuler", action="store_true")
     a = ap.parse_args()
     MESURES = a.passages
+    global FORCER_EXIL
+    FORCER_EXIL = a.forcer_exil
     moteurs = a.moteurs.split(",")
 
     table = parc()
@@ -488,7 +614,7 @@ def main():
         with open(a.sortie, "w") as f:
             f.write("modele\tmoteur\talias\tctx\tt_s\tttft_ms\tW\tj_kJ\tjetons\tchargement_s\tetat\tapercu\t"
                     "J\tJ_net\tW_repos\tj_kJ_net\tplafond_W\thorloge_min\thorloge_max\ttemp_max\t"
-                    "bridages\tdispersion_pct\tt_s_min\tt_s_max\tempreintes\ttextes_identiques\t"
+                    "bridages\tdispersion_pct\tt_s_min\tt_s_max\tt_s_passages\tempreintes\ttextes_identiques\t"
                     "invalidations\n")
 
     # par moteur, pour ne pas relancer un serveur lourd à chaque modèle
@@ -519,7 +645,8 @@ def main():
                         f"{v('J', 0)}\t{v('J_net', 0)}\t{v('W_repos', 0)}\t{v('jkj_net', 0)}\t"
                         f"{v('plafond_W', 0)}\t{v('horloge_min', -1)}\t{v('horloge_max', -1)}\t"
                         f"{v('temp_max', -1)}\t{v('bridages', '?')}\t{v('dispersion_pct', 0)}\t"
-                        f"{v('t_s_min', 0)}\t{v('t_s_max', 0)}\t{v('empreintes', '?')}\t"
+                        f"{v('t_s_min', 0)}\t{v('t_s_max', 0)}\t{v('t_s_passages', '?')}\t"
+                        f"{v('empreintes', '?')}\t"
                         f"{v('textes_identiques', '?')}\t{v('invalidations', '?')}\n")
         arreter(m)
     log("TERMINÉ")
