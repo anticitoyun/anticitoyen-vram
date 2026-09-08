@@ -3043,3 +3043,59 @@ ordre de grandeur par rapport à llama.cpp sur le même modèle, en service
 comme en évaluation, alors que chaque composant testé isolément est sain.
 Voie retenue : comparer les LOGITS (toutes nos comparaisons opposent
 acvram à acvram, sauf la perplexité qui est l'agrégat final).
+
+### Addendum, 18 h — le composant est nommé : les couches d'attention linéaire
+
+Deux mesures indépendantes convergent et ferment la chasse.
+
+**Par couche** (session OnePlus), chaque couche alimentée avec l'entrée
+EXACTE de llama.cpp — donc sans propagation d'erreur — sur les neuf
+premières couches du 12B :
+
+  attention pleine (couches 3, 7)      1,0 à 1,3 %   cos 1,00048
+  attention linéaire (0-2, 4-6, 8)     10,9 à 40,2 % cos 0,918 à 0,996
+
+Un facteur 10 à 40 entre les deux familles, mêmes poids, même passe, même
+perceptron à experts — ce qui innocente le MoE, l'attention pleine, le
+RoPE et le harnais d'un seul coup, et explique la constance du facteur
+global : la proportion de couches linéaires est elle-même constante.
+
+**Par position** (ici), NLL d'acvram contre celles de llama.cpp sur les
+mêmes 255 positions notées, ventilées par difficulté de la référence :
+
+  quartile de difficulté   référence   acvram   écart
+    1 (trivial)              0,001      1,662   +1,66
+    2                        0,085      3,197   +3,11
+    3                        0,978      4,333   +3,36
+    4 (difficile)            5,410      8,479   +3,07
+
+Le fait décisif est le premier quartile : **là où la référence est
+certaine à 99,9 %, acvram tombe à 19 %**. L'écart est ensuite à peu près
+constant (~3 nats) — signature d'un bruit ajouté aux logits, pas d'une
+erreur sélective. Corrélation position par position 0,59 : nos positions
+difficiles ne sont qu'à moitié les siennes.
+
+Deux lectures antérieures sont donc RENVERSÉES, et il faut le dire :
+la queue d'acvram (29,6 % du coût sur 10 % des positions) est plus
+LÉGÈRE que celle du moteur sain (48,4 %) — ce n'était pas un symptôme
+mais l'inverse ; et le top-1 sain vaut 63,2 %, pas les 35-40 % supposés,
+donc notre 32,2 % est bien plus loin d'un modèle sain qu'estimé.
+Enfin la corrélation NLL/identifiant vaut 0,434 chez nous contre 0,163 en
+référence — à surveiller, mais probablement un effet indirect de la
+difficulté.
+
+**Chaîne causale complète** : les couches d'attention linéaire produisent
+11 à 40 % d'erreur → les activations finales sont bruitées → les logits
+le sont → même les prédictions triviales deviennent incertaines →
+perplexité ×20 alors que l'argmax reste souvent correct (32 % de top-1),
+d'où du texte plausible. Le paradoxe de la journée est résolu.
+
+Point structurant pour la suite : `gdn.py` n'utilise QUE les fonctions de
+référence de `transformers`. Valider notre couche contre `transformers`
+revenait donc à la comparer à elle-même — le test ne pouvait pas échouer.
+L'écart mesuré oppose en réalité **transformers à llama.cpp** sur cette
+architecture, et la question devient : laquelle des deux implémentations
+est juste. Candidat précis, à vérifier en premier : llama.cpp normalise
+explicitement q et k après la convolution causale (`ggml_l2_norm` avec
+l'epsilon du modèle, qwen35.cpp:318-321) là où acvram délègue au noyau
+par `use_qk_l2norm_in_kernel=True` (gdn.py:120).
