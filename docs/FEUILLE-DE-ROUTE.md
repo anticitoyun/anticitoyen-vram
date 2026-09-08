@@ -2813,9 +2813,16 @@ en q3n : dossier nommé « int8 », MLP à 14,9 dB ; attrapé au manifeste,
 règle : diff des manifestes TENSEUR PAR TENSEUR avant d'attribuer un écart
 à un format).
 
-* phi-4 (dense) : acvram 6,911 contre llama.cpp 6,5988 ± 0,041 — +4,7 %,
-  dont le coût réel de la requantification Q4_K_M→int8, non séparé. Les
-  deux instruments s'accordent sur du dense.
+* phi-4 (dense) : acvram 6,911 contre llama.cpp 6,5988 ± 0,041 — écart de
+  +4,7 %, soit sept fois et demie l'incertitude d'échantillonnage (±0,63 %)
+  et plus du double du seuil de 2 % : il est réel et NON EXPLIQUÉ. Une part
+  inconnue revient à la requantification Q4_K_M→int8, le reste à
+  l'instrument ; une mesure de séparation est en cours (Q8_0 par
+  llama-quantize, même instrument des deux côtés — l'attente écrite
+  d'avance : un int8 à ~44 dB coûte d'ordinaire bien moins de 1 % de
+  perplexité, il resterait alors 3-4 % de biais d'instrument à documenter,
+  petit devant le facteur 4,1 des hybrides mais dangereux le jour où il
+  s'additionnera à un gain de format de 5 %).
 * Qwen3.6-12B (hybride GDN) : acvram 129,185 contre 31,6919 ± 0,265 —
   facteur 4,1. Or les tenseurs sont à ~44 dB (vérifiés) et le chemin de
   service int8 est innocenté sur tenseurs réels (écart 1,7e-3 contre un
