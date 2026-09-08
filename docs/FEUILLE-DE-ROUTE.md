@@ -3350,3 +3350,45 @@ routage vérifié identique des deux côtés.
 Contrôle de plausibilité qui a servi : `gemma-4-31B` rend **4452** de
 perplexité chez llama.cpp — modèle inutilisable comme témoin, écarté
 avant d'avoir mesuré quoi que ce soit avec.
+
+### 8 septembre, 18 h 30 — deux faits d'instrumentation qui qualifient tous nos débits
+
+**1. Le régime de puissance a changé ce soir, et la colonne du banc le
+date.** `plafond_W` (somme des deux cartes, `energie.py:213`) donne
+l'horodatage : lignes de 18h15-18h20 à **775 W** (500 + 275), lignes
+après 18h26 à **875 W** (500 + 375), comparatif du 3 septembre à
+**675 W** (400 + 275). La 5090 était donc déjà à 500 W avant la série du
+soir, et la 3080 Ti est passée de 275 à 375 W pendant ou juste après —
+mon constat « changé avant aujourd'hui » était faux, ma vérification
+était simplement postérieure au changement.
+Règle : lire `power.limit` AU MOMENT de la mesure et l'écrire à côté du
+chiffre ; deux séries de régimes différents ne se comparent pas en
+énergie. **Le comparatif du 3 septembre est à refaire pour deux raisons
+indépendantes** : son régime (400/275) n'existe plus, et il tournait en
+spéculation `ngram` sans que ce soit un choix — le lanceur ne passe
+jamais `--speculative` et le défaut de `cli.py:585` est `ngram`, donc le
+mode `mtp` n'a jamais été mesuré, y compris sur les modèles dont nous
+chargeons et quantifions la tête MTP.
+
+**2. Le débit était TIRÉ AU SORT à chaque changement de modèle.**
+`arreter()` n'attendait que la fermeture du port plus trois secondes ; le
+serveur précédent rendait son port **sans avoir rendu sa mémoire**, et le
+planificateur du suivant calculait son placement sur ce qui restait.
+Preuve involontaire (session OnePlus) : deux entrées de parc pointant le
+même dossier sous le même alias ont rendu **15,8 puis 152,2 t/s** —
+facteur 9,6, textes différents ; au journal, le premier chargement exilait
+5 puis 6 MLP de plus en RAM hôte, le second aucun.
+Correctif : `attendre_memoire()` (attend que la mémoire cesse de bouger,
+écrit la mémoire libre à côté de la ligne) et `t_s_passages` (les débits
+dans l'ordre — min et max ne disent pas LEQUEL s'écarte, et un passage
+froid a la même signature qu'une bimodalité).
+**Portée** : toute mesure de débit prise juste après un changement de
+modèle a pu l'être sur un plan dégradé, sans aucun signal. Cela peut
+expliquer une part de la dispersion de 21-26 % qui a motivé toute la
+série de déterminisme.
+
+À faire après la série en cours : activer le **mode persistant**
+(`nvidia-smi -pm 1`, actuellement désactivé sur les deux cartes), avec
+mesure de dispersion avant et après sur le même modèle — il évite le
+déchargement du contexte GPU entre deux processus et devrait réduire la
+latence de démarrage et stabiliser les horloges.
