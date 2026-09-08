@@ -62,6 +62,11 @@ class ConversionOptions:
     # 10,6 % de débit pour 2,0 % de perplexité. Le mécanisme reste entier,
     # `--snr-floor 25` rétablit l'ancien comportement.
     snr_floor: float = 0.0
+    # Autorise une conversion qui produit un modèle PLUS GROS que sa source.
+    # Refusée par défaut depuis le 8/09/2026 : convertir un GGUF de 3,4 bits
+    # par poids vers NVFP4 (4,5) a fait grossir Qwen3-Coder-Next d'un tiers,
+    # créé 14 Gio d'exil en RAM hôte et coûté un facteur quinze au décodage.
+    autoriser_grossissement: bool = False
     max_promotions: float = 0.15      # part maximale de tenseurs promus
     # Prix plafond d'une promotion, en mébioctets ajoutés (0 = pas de plafond).
     # Le quota ci-dessus compte des tenseurs ; or une porte de 0,1 Mio et une
@@ -569,6 +574,46 @@ class ShardWriter:
 # --------------------------------------------------------------------------
 
 
+def octets_du_modele(model_path: str) -> int:
+    """Octets des poids de la source : fichiers gguf ou safetensors du dossier."""
+    import glob
+    p = model_path if os.path.isdir(model_path) else os.path.dirname(model_path) or "."
+    fichiers = [f for motif in ("*.gguf", "*.safetensors", "*.bin")
+                for f in glob.glob(os.path.join(p, motif))]
+    return sum(os.path.getsize(f) for f in fichiers)
+
+
+def garde_grossissement(octets_source: int, total_params: int,
+                        bpw_cible: float, autorise: bool) -> Optional[str]:
+    """Refuse une conversion qui ferait grossir le modèle.
+
+    Rend un message d'avertissement à journaliser si la conversion grossit
+    mais est autorisée ; rend None si elle ne grossit pas ; lève sinon.
+    Le critère n'est pas « le format est plus large » mais « le résultat sera
+    plus gros que la source » — payer de la place pour des instructions
+    natives est un bon échange tant qu'on en a (fiche 17 du relevé biblio) ;
+    ici on chiffre précisément ce qui sera payé.
+    """
+    if not octets_source or not total_params:
+        return None
+    bpw_source = octets_source * 8 / total_params
+    if bpw_cible <= bpw_source * 1.02:      # 2 % de jeu : en-têtes, échelles
+        return None
+    octets_cible = int(total_params * bpw_cible / 8)
+    msg = (f"la conversion ferait GROSSIR le modèle : source "
+           f"{octets_source / 2**30:.1f} Gio ({bpw_source:.2f} bits/poids), "
+           f"cible {octets_cible / 2**30:.1f} Gio ({bpw_cible:.2f} bits/poids), "
+           f"+{(octets_cible / octets_source - 1) * 100:.0f} %")
+    if autorise:
+        return msg + " — autorisée par --autoriser-grossissement"
+    raise ValueError(
+        msg + ". Refusée : le surplus serait exilé en RAM hôte et coûterait "
+        "plus cher que les instructions natives ne rapportent (Coder-Next, "
+        "7-8/09/2026 : facteur 15 au décodage). Aucun format d'acvram ne "
+        "descend aujourd'hui sous 4,25 bits/poids ; servez la source par un "
+        "moteur GGUF, ou passez --autoriser-grossissement en connaissance "
+        "de cause.")
+
 def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                        spec: Optional[ModelSpec] = None,
                        stats: Optional[dict[str, ActStats]] = None,
@@ -577,6 +622,13 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     """Quantifie chaque tenseur dans le format qu'attend son appareil de destination."""
     t0 = time.time()
     spec = spec or load_model_spec(model_path)
+    bpw_cible = max((BPW_NOMINAL.get(t.weight_format, 4.5)
+                     for t in plan.tiers if t.kind == "gpu"), default=4.5)
+    avert = garde_grossissement(octets_du_modele(model_path),
+                                getattr(spec, "total_params", 0) or 0,
+                                bpw_cible, opts.autoriser_grossissement)
+    if avert:
+        print(f"[acvram] {avert}", flush=True)
     router = TensorRouter(spec, plan, opts)
     report = ConversionReport(model=spec.name)
     writer = ShardWriter(opts.out_dir)
