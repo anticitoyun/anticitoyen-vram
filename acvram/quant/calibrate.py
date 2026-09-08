@@ -236,6 +236,7 @@ def quantize_with_calibration(
     use_hadamard: bool = False,
     use_awq: bool = True,
     n_grid: int = 20,
+    table=None,
 ) -> tuple[Any, ChannelScaler, dict]:
     """Chaîne complète par couche : tourner, mettre à l'échelle, quantifier.
 
@@ -264,7 +265,8 @@ def quantize_with_calibration(
 
     w_eff = w * scaler.scale.to(torch.float32).unsqueeze(0) \
         if scaler.scale is not None else w
-    qt = formats.quantize(w_eff, fmt, group_size=group_size)
+    qt = formats.quantize(w_eff, fmt, group_size=group_size,
+                          **({"table": table} if fmt == "q3n" else {}))
 
     deq = formats.dequantize(qt, torch.float32)
     if scaler.scale is not None:

@@ -154,7 +154,7 @@ def quantize(weight: torch.Tensor, fmt: str, group_size: Optional[int] = None,
         return _quantize_int8(weight, group_size or 128)
     if fmt == "q3n":
         from .q3n import quantize_q3n
-        return quantize_q3n(weight)
+        return quantize_q3n(weight, table=kwargs.get("table"))
     if fmt in ("bf16", "fp16"):
         dtype = torch.bfloat16 if fmt == "bf16" else torch.float16
         return PlainTensor(weight.detach().to(dtype), tuple(weight.shape), fmt)

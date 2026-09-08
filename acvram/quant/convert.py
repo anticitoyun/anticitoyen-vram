@@ -47,6 +47,11 @@ class ConversionOptions:
     group_size: int = 128
     keep_sensitive_16bit: bool = True  # normalisations, routeur, plongements
     lm_head_format: Optional[str] = None
+    # Table de niveaux q3n de CE modèle (huit flottants, symétrique, bornes
+    # ±1) — écrite dans chaque entrée q3n du manifeste. None : TABLE_Q3N de
+    # la spécification. Les niveaux s'ajustent par modèle (Lloyd-Max sur
+    # échantillon stratifié) ; voir docs/FORMAT-3BITS.md du 8/09 au soir.
+    q3n_table: Optional[tuple] = None
     n_grid: int = 20
     device: str = "cuda:0"
     # Appareil sur lequel se fait la recherche AWQ et la quantification. Elle
@@ -717,7 +722,18 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             use_hadamard=router.wants_hadamard(name, fmt),
             use_awq=opts.awq,
             n_grid=opts.n_grid,
+            table=opts.q3n_table if fmt == "q3n" else None,
         )
+        if fmt == "q3n":
+            entry["block"] = qt.block
+            entry["table"] = list(qt.table)
+            # Sceau : lie la table aux octets réellement écrits. Un manifeste
+            # régénéré sans reconversion ferait lire d'anciens poids avec une
+            # nouvelle table, silencieusement — le pire mode de défaillance.
+            import hashlib as _h
+            entry["sceau"] = _h.sha256(
+                qt.qweight.flatten()[:64].cpu().numpy().tobytes()
+                + repr(list(qt.table)).encode()).hexdigest()[:16]
 
         # Précision mixte, deux régimes : plancher SNR classique (défaut,
         # plafonné), ou budget global (bits_budget_gib > 0) où les deux

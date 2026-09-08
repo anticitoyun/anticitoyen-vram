@@ -496,7 +496,8 @@ def q3n_matmul(x, w):
     if ext is None or not hasattr(ext, "q3n_gemv"):
         return None
     return ext.q3n_gemv(w.qweight, w.block_scale.view(torch.uint8),
-                        w.global_scale.to(w.qweight.device), x,
+                        w.global_scale.to(w.qweight.device),
+                        w.table_gpu(w.qweight.device), x,
                         w.shape[1], w.block)
 
 
