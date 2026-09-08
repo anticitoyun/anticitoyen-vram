@@ -3183,3 +3183,45 @@ perplexité contre les jetons par seconde et les joules que l'exil évité
 fait gagner. Réserve qui voyage avec le chiffre : il vaut pour une
 requantification depuis une grille contenant un zéro, et ne se transporte
 pas à des poids bf16.
+
+### 8 septembre, 18 h — décomposition des 0,399 nat : 81 % restent inexpliqués
+
+Témoins mesurés par la session de mesure, mêmes 584 fenêtres, même
+cadrage, chaîne llama.cpp validée idempotente au passage :
+
+  (a) opération de requantification (Q3_K_S → Q3_K_S)   **0,0000 nat**
+      identité à la quatrième décimale : déquantifier puis requantifier
+      sur la même grille ne coûte rien
+  (b) changement de grille vers plus fin (→ Q4_K_S)     **0,0291 nat** (+3,0 %)
+  (c) biais d'instrument, mesuré sur DENSE (phi-4)      **0,0461 nat** (+4,73 %)
+  ————————————————————————————————————————————————————————————————
+  écart NVFP4 − étalon                                   0,3994 nat
+  **(d) résidu = 0,324 nat, soit +38,3 % — 81 % de l'écart**
+
+Le seuil de réalité était 0,01 nat : on est trente fois au-dessus. Le
+résidu est réel.
+
+**Ce que (d) contient, et qui n'est pas forcément un défaut** : tout ce
+que notre chaîne de conversion fait EN PLUS d'un changement de grille —
+recherche d'échelles par canal (AWQ), rotation de Hadamard, filet de
+promotions, mélange de formats dans un même dossier — plus le biais
+d'instrument sur architecture HYBRIDE, jamais mesuré (le (c) ci-dessus
+vaut pour du dense). Pour absorber les 0,324 à lui seul, ce biais devrait
+valoir sept fois le biais dense : possible mais peu probable, il restera
+sans doute quelque chose.
+
+Réserves du témoin (b), à garder avec le chiffre : il mesure ce que
+llama.cpp paie pour changer de grille, pas ce que NVFP4 paie chez nous
+(grilles et structures différentes) ; c'est une borne. Mais elle joue
+CONTRE l'hypothèse d'un gros résidu — si le vrai coût de format était
+plus élevé, le résidu diminuerait d'autant. Qu'il reste 0,324 malgré une
+borne basse est donc un argument solide.
+
+**Suite décidée** : (1) mesure du biais sur hybride — le 12B témoin
+contre les étalons 31,6919 (c=512) et 24,0799 (c=2048), seul terme
+pouvant encore absorber une part importante sans hypothèse ; (2) si le
+résidu survit, le décomposer par ce que fait notre conversion —
+convertir le même modèle SANS AWQ, SANS Hadamard, SANS promotions, et
+mesurer chaque variante. Chacune est censée AMÉLIORER la qualité ; si
+l'une la dégrade, le fil est tenu. Quatre conversions, quatre mesures,
+chaque terme isolé au lieu d'être deviné.
