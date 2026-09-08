@@ -110,6 +110,12 @@ def _build_quant(entry: dict, name: str, reader: _ShardReader,
     if fmt == "int8":
         return INT8Tensor(sd["qweight"], sd["scales"], sd["zeros"],
                           entry.get("group_size", group_size), shape)
+    if fmt == "q3n":
+        from ..quant.q3n import BLOC_DEFAUT, Q3NTensor
+        return Q3NTensor(sd["qweight"],
+                         sd["block_scale"].view(torch.float8_e4m3fn),
+                         sd["global_scale"],
+                         entry.get("block", BLOC_DEFAUT), shape)
     if fmt in ("bf16", "fp16"):
         return PlainTensor(sd["weight"], shape, fmt)
     raise KeyError(f"unknown format {fmt!r} for {name}")

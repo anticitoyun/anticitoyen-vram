@@ -909,3 +909,28 @@ def test_q3n_traverse_le_chemin_generique_de_quantification():
     assert t.format == "q3n" and get_format("q3n").bpw == 3.25
     assert dequantize(t, torch.float32).shape == w.shape
     assert abs(estimate_bytes(80_000_000_000, "q3n") / 2**30 - 30.3) < 0.3
+
+
+def test_le_chargeur_reconstruit_un_tenseur_q3n(tmp_path):
+    """Troisième panne du 8/09, même thème, troisième porte : quantifiable et
+    routé mais pas RECHARGEABLE — _build_quant levait « unknown format » au
+    premier tenseur du modèle converti. Aller-retour disque complet verrouillé."""
+    import torch
+    from safetensors.torch import save_file
+    from acvram.engine.loader import _ShardReader, _build_quant
+    from acvram.quant.q3n import dequantize_q3n, quantize_q3n
+    w = torch.randn(8, 64) * 0.02
+    t = quantize_q3n(w)
+    save_file({"a.qweight": t.qweight,
+               "a.block_scale": t.block_scale.view(torch.uint8),
+               "a.global_scale": t.global_scale.reshape(1)},
+              str(tmp_path / "acvram-00000.safetensors"))
+    reader = _ShardReader(str(tmp_path),
+                          {k: "acvram-00000.safetensors"
+                           for k in ("a.qweight", "a.block_scale", "a.global_scale")})
+    entry = {"format": "q3n", "shape": [8, 64], "block": 32,
+             "keys": ["a.qweight", "a.block_scale", "a.global_scale"]}
+    t2 = _build_quant(entry, "a", reader, 128)
+    assert t2.format == "q3n"
+    assert torch.equal(dequantize_q3n(t2, torch.float32).cpu(),
+                       dequantize_q3n(t, torch.float32))
