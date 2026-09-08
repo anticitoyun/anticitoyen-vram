@@ -700,3 +700,46 @@ def test_godet_mla_double():
         paliers.add(godet_mla(n)); n *= 2
     assert len(paliers) <= 10, paliers
     assert all(godet_mla(v) >= v for v in (1, 63, 100, 5000, 32768))
+
+
+def test_trace_routage_eteinte_ne_coute_rien(tmp_path, monkeypatch):
+    """Hors trace, la fonction sort sur un test de booléen."""
+    import importlib
+    monkeypatch.delenv("ACVRAM_TRACE_ROUTAGE", raising=False)
+    from acvram.memory import trace_routage as t
+    importlib.reload(t)
+    assert t.actif() is False
+    # Un objet sans .detach() : si noter() le touchait, ce serait une erreur.
+    t.noter(0, object())
+
+
+def test_trace_routage_numerote_les_jetons_par_passage(tmp_path, monkeypatch):
+    """Toutes les couches d'un passage portent les MÊMES numéros de jeton.
+
+    Une première version repartait du compteur cumulé à chaque couche : la
+    couche 1 numérotait 3, 4, 5 les jetons que la couche 0 appelait 0, 1, 2.
+    Un rejeu y aurait vu deux fois plus de trafic qu'il n'en passe.
+    """
+    import importlib
+    import torch
+    journal = tmp_path / "trace.txt"
+    monkeypatch.setenv("ACVRAM_TRACE_ROUTAGE", str(journal))
+    from acvram.memory import trace_routage as t
+    importlib.reload(t)
+    assert t.actif() is True
+    for _ in range(2):                      # deux passages
+        for couche in (0, 1):               # deux couches
+            t.noter(couche, torch.tensor([[1, 2], [3, 4]]))
+    t.fermer()
+
+    lu = list(t.relire(str(journal)))
+    assert len(lu) == 8
+    # Les deux couches d'un même passage voient les mêmes jetons.
+    c0 = [j for j, c, _ in lu if c == 0]
+    c1 = [j for j, c, _ in lu if c == 1]
+    assert c0 == c1 == [0, 1, 2, 3]
+    # Le rejeu compte les demandes réelles, pas les couches.
+    r = t.taux_de_succes(str(journal), capacite=99)
+    assert r["demandes"] == 16
+    assert r["succes"] == 8          # second passage : tout est en cache
+    importlib.reload(t)
