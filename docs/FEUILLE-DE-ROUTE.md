@@ -3260,3 +3260,46 @@ de décomposition (convertir sans calibration, sans Hadamard, sans
 promotions, mesurer chaque variante) devrait donc s'appliquer **à phi-4
 d'abord** : modèle plus petit, mesure plus rapide, et l'écart inexpliqué
 y est proportionnellement plus grand.
+
+### 8 septembre, 18 h 05 — le biais d'instrument pur est nul
+
+Témoin choisi pour ne rien mêler : **Qwen3-0.6B-Q8_0**, dense, minuscule,
+source déjà en huit bits — converti en **bf16 PUR** (310 tenseurs, tous
+bf16, aucune quantification), donc ni perte de format ni changement de
+grille à démêler.
+
+  llama.cpp sur le GGUF Q8_0    **21,9438 ± 0,192**
+  acvram bf16 pur               **22,0040**   (148 920 positions)
+  écart                         **+0,0027 nat, +0,27 %**
+
+Sous le seuil de réalité de 0,01 nat : **le calcul de perplexité d'acvram
+et celui de llama.cpp donnent le même nombre** quand aucune
+quantification n'intervient. L'hypothèse d'un défaut d'instrument, ouverte
+le matin, est fermée.
+
+**Portée exacte, à ne pas dépasser** : ce qui est établi, c'est que le
+calcul de perplexité lui-même est juste sur un DENSE non quantifié de
+0,6 milliard de paramètres. Ce n'est pas « acvram n'a pas de biais » : un
+MoE de 80 milliards servi en tiering emprunte d'autres chemins (routage,
+exil, transport d'experts) qui ne sont pas couverts par ce témoin.
+
+**Deux conséquences.**
+1. **Le terme (c) était surestimé d'un facteur dix-sept** : le biais pur
+   vaut 5,9 % du 0,0461 nat retenu. Les +4,73 % de phi-4 ne sont donc pas
+   un biais mais le **coût de la requantification Q4_K_M → int8**, ce qui
+   recoupe les +3,0 % mesurés pour Q3_K_S → Q4_K_S par une voie
+   totalement indépendante — deux chemins, même ordre de grandeur.
+   Note de méthode : la conversion de référence de phi-4 n'avait NI
+   calibration, NI Hadamard, NI promotions (lu au manifeste avant de
+   lancer quoi que ce soit) — quatre conversions épargnées et une
+   prédiction réfutée sans mesure.
+2. **Le résidu de Coder-Next s'aggrave** :
+   0,3994 = (a) 0,000 + (c) **0,003** + coût de grille ≈ 0,029 +
+   **(d) ≈ 0,367 nat, soit +44 % et 92 % de l'écart total.**
+   Mais il s'aggrave dans la bonne direction : ce n'est ni l'instrument,
+   ni l'opération de requantification, ni le changement de grille. Restent
+   deux différences avec ce témoin — l'**architecture hybride** (le 12B de
+   poste2 la départage : +0,76 % et −0,31 %, donc elle n'explique rien) et
+   **ce que la chaîne de conversion fait en plus** sur les gros modèles :
+   échelles par canal, Hadamard, promotions, formats mélangés. C'est la
+   seule piste qui reste, et elle se décompose étape par étape.
