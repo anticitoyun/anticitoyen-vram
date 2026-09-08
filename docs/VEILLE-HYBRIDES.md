@@ -113,6 +113,55 @@ portée, et sans intérêt tant que nous n'entraînons pas.
 
 ---
 
+## 5. Veille elargie hors arXiv — ce qu'elle donne et ce qu'elle ne donne pas
+
+**MOSAIC n'est pas adapte a ce domaine.** L'agregateur installe pour la veille
+multi-sources rend du hors-sujet sur nos requetes (batteries, psychiatrie,
+pollen pour une recherche sur l'attention lineaire) et ne trouve pas les
+identifiants arXiv — `similar 2504.09629` echoue. Il n'a pas non plus de
+commande `gaps`. Il agrege OpenAlex et Europe PMC, qui couvrent mal les
+preprints d'apprentissage automatique. **A ne pas utiliser pour ce champ** ;
+les recherches ciblees par moteur restent superieures.
+
+**Le chiffre qui ferme definitivement DeltaLog pour nous.** Leur gain
+bout-en-bout, dans leur regime le plus favorable — lots de 64 a 256 sur H200 —
+vaut **1,08 a 1,20 fois**. Ils invoquent explicitement la loi d'Amdahl : le
+gain est borne par la part du temps passee dans la mise a jour de l'etat. A lot
+1, cette part est plus petite encore. Huit a vingt pour cent dans le meilleur
+cas d'autrui n'est pas un argument pour reecrire notre chemin de decodage.
+
+**La validation d'implementations numeriques est une tradition etablie, et nous
+l'avons reinventee aujourd'hui sans le savoir.** Le genie logiciel numerique
+pratique depuis longtemps ce que nous avons bricole en une journee :
+
+- **une reference en precision superieure** — la bibliotheque MPFR sert d'etalon
+  a arrondi correct, et les implementations industrielles se valident en
+  comparant leurs sorties aux siennes. C'est exactement ce que nous avons fait
+  en mesurant en float64 contre le service en bfloat16 ;
+- **une verification a deux couches** — d'abord une comparaison bit-a-bit
+  contre un modele de reference, puis une validation applicative contre une
+  reference FP32 avec erreur quadratique et metriques de stabilite. C'est
+  precisement notre couple *contribution par couche* / *perplexite contre
+  etalon*, decouvert par tatonnement le 8 septembre ;
+- **des outils dedies** (Encapsulated Error, ACM Algorithm 1029) pour evaluer
+  la precision atteinte plutot que de l'estimer.
+
+**Ce qu'il faut en retenir pour le projet** : cette litterature a un vocabulaire
+et des methodes pour ce que nous appelons « comparer a une reference
+exterieure ». Avant de rebatir un banc de validation, il vaut la peine d'aller
+y chercher les protocoles — c'est du temps gagne sur des problemes deja resolus
+ailleurs.
+
+**Et une resolution probable de la contradiction de la section 3.** L'analyse
+numerique classique connait les deux regimes que nous opposions : une somme
+d'erreurs **independantes** croit en racine de n (marche aleatoire), une borne
+**deterministe** de pire cas croit en n. Notre mesure en racine de N decrit donc
+le premier regime, et la croissance « exponentielle » annoncee par 2504.09629
+decrit vraisemblablement une quantification sequentielle ou chaque couche
+amplifie l'erreur recue — un troisieme regime, distinct des deux precedents.
+**A verifier plutot qu'a supposer**, mais l'hypothese est maintenant nommee et
+elle est classique.
+
 ## Sources
 
 - [DeltaLog: Deferred Materialization of Recurrent States for Linear Attention Decoding](https://arxiv.org/html/2608.15533)
@@ -124,3 +173,8 @@ portée, et sans intérêt tant que nous n'entraînons pas.
 - [Gated DeltaNet-2: Decoupling Erase and Write in Linear Attention](https://arxiv.org/pdf/2605.22791)
 - [Kaczmarz Linear Attention](https://arxiv.org/abs/2605.08587)
 - [Erase-then-Delta Attention](https://arxiv.org/pdf/2606.26560)
+- [KVBuffer: IO-aware Serving for Linear Attention](https://arxiv.org/pdf/2605.19049)
+- [When Good Enough Is Optimal: Matrix Inversion Approximation for Quantized Gated DeltaNet](https://arxiv.org/pdf/2606.06034)
+- [Enhancing linear attention with residual learning (OpenReview)](https://openreview.net/forum?id=dy6tnQMeyI)
+- [A precision- and range-independent tool for testing floating-point arithmetic](https://dl.acm.org/doi/10.1145/382043.382404)
+- [Algorithm 1029: Encapsulated Error, a Direct Approach to Evaluate Floating-Point Accuracy](https://dl.acm.org/doi/fullHtml/10.1145/3549205)
