@@ -21,7 +21,7 @@ dans ~/.config/ia-secrets.env et dans api_tokens.yml de TabbyAPI.
 
 Reprenable : les couples déjà présents dans le TSV de sortie sont sautés.
 """
-import argparse, json, os, re, statistics, subprocess, sys, threading, time, tomllib, urllib.request
+import argparse, hashlib, json, os, re, statistics, subprocess, sys, threading, time, tomllib, urllib.request
 
 KIMI = os.path.expanduser("~/.kimi-code")
 BIN = os.path.expanduser("~/.local/bin")
@@ -365,7 +365,7 @@ def generer(moteur):
 
 
 def mesurer(moteur):
-    """Débit et énergie du MÊME passage, puis la ligne de base après lui.
+    """Débit MÉDIAN et énergie du MÊME passage, puis la ligne de base après lui.
 
     L'énergie ne se moyenne pas entre passages : elle vient du passage dont on
     publie le débit, sinon les deux colonnes décrivent deux exécutions
@@ -373,15 +373,31 @@ def mesurer(moteur):
     elle dérive, et la dérive se retrouve attribuée au moteur mesuré — c'est
     ce qui avait fait croire à une décroissance de coût le 7 septembre 2026.
     """
-    meilleur = None
-    debits = []
+    passages = []
     for _ in range(MESURES):
         n, ttft, dt, e, txt = generer(moteur)
         tps = (n - 1) / dt if n > 1 else 0.0
-        debits.append(tps)
-        if meilleur is None or tps > meilleur[0]:
-            meilleur = (tps, ttft, e, n, txt, dt)
-    tps, ttft, e, n, txt, dt = meilleur
+        passages.append((tps, ttft, e, n, txt, dt))
+    debits = [p[0] for p in passages]
+
+    # Le passage PUBLIE est celui de debit median, plus celui de debit
+    # maximal. « Le meilleur des trois » est un estimateur biaise : il
+    # favorise le moteur le plus bruyant. Mesure du 8 septembre 2026 :
+    # sur un couple a 21,3 % de dispersion contre 5,2 en face, le meilleur
+    # donnait la victoire au plus instable. Le maximum reste publie a part,
+    # il n'est simplement plus ce qu'on compare.
+    ordonnes = sorted(passages, key=lambda x: x[0])
+    tps, ttft, e, n, txt, dt = ordonnes[len(ordonnes) // 2]
+    etendue = (min(debits), max(debits))
+
+    # Empreinte du texte de CHAQUE passage. A temperature zero, le meme
+    # prompt doit rendre le meme texte : si les empreintes different, le
+    # chemin n'est pas deterministe, et c'est un defaut a part entiere —
+    # plus important que le debit qu'on etait venu mesurer. Si elles sont
+    # identiques, une dispersion de debit ne peut pas venir du texte, et il
+    # faut la chercher ailleurs (passage froid, cache, ordonnancement).
+    empreintes = [hashlib.sha256(p[4].encode()).hexdigest()[:8] for p in passages]
+    textes_identiques = len(set(empreintes)) == 1
     watts = e.moyenne
     base = repos(secondes=min(max(dt, 5.0), 30.0))
     joules = e.joules
@@ -394,10 +410,15 @@ def mesurer(moteur):
     # La dispersion n'invalide pas par elle-meme : elle invalide un ECART
     # annonce plus petit qu'elle. Le banc ne connait pas l'ecart qu'on lui
     # fera dire, il signale donc, il ne tranche pas.
+    def signaler(quoi):
+        r["invalidations"] = (quoi if r["invalidations"] == "aucune"
+                              else r["invalidations"] + " ; " + quoi)
+
     if dispersion > 5.0:
-        avert = f"dispersion des {len(debits)} passages : {dispersion:.1f} %"
-        r["invalidations"] = (avert if r["invalidations"] == "aucune"
-                              else r["invalidations"] + " ; " + avert)
+        signaler(f"dispersion des {len(debits)} passages : {dispersion:.1f} %")
+    if not textes_identiques:
+        signaler("temperature zero mais textes differents entre passages : "
+                 + ",".join(empreintes))
     energie = {
         "J": round(joules, 1), "J_net": round(joules_net, 1),
         "W_repos": round(base.moyenne, 1), "jkj_net": round(jkj_net, 1),
@@ -405,6 +426,9 @@ def mesurer(moteur):
         "horloge_max": r["horloge_max"], "temp_max": r["temp_max"],
         "bridages": r["bridages"], "invalidations": r["invalidations"],
         "dispersion_pct": round(dispersion, 1),
+        "t_s_min": round(etendue[0], 1), "t_s_max": round(etendue[1], 1),
+        "empreintes": ",".join(empreintes),
+        "textes_identiques": "oui" if textes_identiques else "NON",
     }
     # Un aperçu du texte à côté du débit : 481 t/s de « de de de » sur quatre
     # jetons se lisaient comme un record tant qu'on ne voyait pas le texte.
@@ -452,7 +476,8 @@ def main():
         with open(a.sortie, "w") as f:
             f.write("modele\tmoteur\talias\tctx\tt_s\tttft_ms\tW\tj_kJ\tjetons\tchargement_s\tetat\tapercu\t"
                     "J\tJ_net\tW_repos\tj_kJ_net\tplafond_W\thorloge_min\thorloge_max\ttemp_max\t"
-                    "bridages\tdispersion_pct\tinvalidations\n")
+                    "bridages\tdispersion_pct\tt_s_min\tt_s_max\tempreintes\ttextes_identiques\t"
+                    "invalidations\n")
 
     # par moteur, pour ne pas relancer un serveur lourd à chaque modèle
     for m in moteurs:
@@ -466,7 +491,8 @@ def main():
             try:
                 charge = demarrer(m, d, ctx)
                 tps, ttft, watts, jkj, n, apercu, energie = mesurer(m)
-                log(f"           {tps:.1f} t/s, TTFT {ttft*1000:.0f} ms, {watts:.0f} W, "
+                log(f"           {tps:.1f} t/s (médiane ; {energie['t_s_min']}-{energie['t_s_max']}), "
+                    f"TTFT {ttft*1000:.0f} ms, {watts:.0f} W, "
                     f"{jkj:.0f} j/kJ brut, {energie['jkj_net']:.0f} net, chargé en {charge:.0f} s")
                 if energie["invalidations"] != "aucune":
                     log(f"           MESURE INVALIDE : {energie['invalidations']}")
@@ -481,7 +507,8 @@ def main():
                         f"{v('J', 0)}\t{v('J_net', 0)}\t{v('W_repos', 0)}\t{v('jkj_net', 0)}\t"
                         f"{v('plafond_W', 0)}\t{v('horloge_min', -1)}\t{v('horloge_max', -1)}\t"
                         f"{v('temp_max', -1)}\t{v('bridages', '?')}\t{v('dispersion_pct', 0)}\t"
-                        f"{v('invalidations', '?')}\n")
+                        f"{v('t_s_min', 0)}\t{v('t_s_max', 0)}\t{v('empreintes', '?')}\t"
+                        f"{v('textes_identiques', '?')}\t{v('invalidations', '?')}\n")
         arreter(m)
     log("TERMINÉ")
 
