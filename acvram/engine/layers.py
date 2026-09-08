@@ -274,6 +274,16 @@ class QuantLinear(nn.Module):
         if self.streamed is not None and self.streamed.pool is None:
             self._pending_slot = self.streamed.prefetch()
 
+    def precharger(self) -> None:
+        """Préchargement volontaire, pool compris — pour un expert dont le
+        routage vient de désigner qu'il servira. Lancer toutes les copies
+        d'une couche avant le premier calcul les met en file sur le flux de
+        copie, qui prend de l'avance pendant que les GEMV s'exécutent : c'est
+        le recouvrement que le profil du 8/09 montrait absent (bus muet
+        pendant le calcul, calcul muet pendant le bus)."""
+        if self.streamed is not None and self._pending_slot is None:
+            self._pending_slot = self.streamed.prefetch()
+
     # -- forward ---------------------------------------------------------
     def _resolved_weight(self) -> tuple[Any, Optional[int]]:
         if self.streamed is None:

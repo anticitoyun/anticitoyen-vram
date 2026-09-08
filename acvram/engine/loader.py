@@ -207,7 +207,14 @@ def load_model(path: str, plan: Optional[Plan] = None,
         # Les experts d'une couche exilée partagent un pool de tampons GPU
         # dimensionné pour les experts routés d'un jeton, au lieu de deux
         # copies privées chacun (voir ExpertPool).
-        pool = (ExpertPool(mlp_dev, (spec.num_experts_per_tok or 2) + 1)
+        # Deux fois les experts routés, plus marge : le chemin direct de
+        # décodage lance TOUTES les copies d'une couche avant le premier
+        # calcul, et gate et up partagent la même disposition — vingt copies
+        # en vol pour dix experts. Avec topk+1 emplacements, la onzième copie
+        # réécrivait un emplacement que le GEMV du jeton courant n'avait pas
+        # encore lu (l'événement « libre » venait du jeton précédent) :
+        # écart de 4e-2 au lieu de 5e-4 au test à sec du 8/09.
+        pool = (ExpertPool(mlp_dev, 2 * (spec.num_experts_per_tok or 2) + 2)
                 if streamed_mlp else None)
 
         def elin(suffix: str) -> QuantLinear:

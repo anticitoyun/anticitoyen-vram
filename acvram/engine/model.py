@@ -737,6 +737,26 @@ class MoEBlock(nn.Module):
                         y = y + self._shared_out(x)
                     return y
 
+        if t == 1 and not os.environ.get("ACVRAM_MOE_DECODE_MASQUES"):
+            # Décodage, un jeton : les masques par expert (nonzero, index)
+            # coûtaient une trentaine de synchronisations hôte par couche —
+            # le profil du 8/09 y voyait 2,7 ms de processeur pour 1,2 ms de
+            # carte. Une seule synchronisation (la liste des experts routés),
+            # toutes les copies lancées d'abord, puis les GEMV.
+            ids = topi.reshape(-1).tolist()          # unique synchronisation
+            poids = topw.reshape(-1).to(x.dtype)
+            for e in ids:
+                exp = self.experts[e]
+                for lin in (getattr(exp, "gate_proj", None), exp.up_proj, exp.down_proj):
+                    if lin is not None:
+                        lin.precharger()
+            out = torch.zeros_like(x)
+            for j, e in enumerate(ids):
+                out += self.experts[e](x) * poids[j]
+            if self.shared is not None:
+                out = out + self._shared_out(x)
+            return out
+
         out = torch.zeros_like(x)
         # On regroupe les jetons par expert, pour que chaque expert fasse un
         # seul produit matriciel par lot au lieu d'un par jeton.
