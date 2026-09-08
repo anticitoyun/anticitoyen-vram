@@ -624,8 +624,24 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     spec = spec or load_model_spec(model_path)
     bpw_cible = max((BPW_NOMINAL.get(t.weight_format, 4.5)
                      for t in plan.tiers if t.kind == "gpu"), default=4.5)
-    avert = garde_grossissement(octets_du_modele(model_path),
-                                getattr(spec, "total_params", 0) or 0,
+    octets_src = octets_du_modele(model_path)
+    n_params = getattr(spec, "total_params", 0) or 0
+    if (octets_src and n_params and not opts.autoriser_grossissement
+            and bpw_cible > octets_src * 8 / n_params * 1.02):
+        # Plutôt que refuser d'emblée : basculer les étages GPU sur le format
+        # le plus compact du dépôt, q3n (3,25 bits/poids). Si même lui grossit
+        # la source, la garde ci-dessous refusera avec les issues restantes.
+        # La bascule s'annonce parce qu'elle change la qualité : la perplexité
+        # de q3n n'est validée sur aucun vrai modèle à ce jour (8/09/2026).
+        print(f"[acvram] source à {octets_src * 8 / n_params:.2f} bits/poids : "
+              f"les étages GPU passent de leur format nominal "
+              f"({bpw_cible:.2f} b/p) à q3n (3,25) pour ne pas grossir — "
+              f"perplexité à vérifier par `acvram eval`", flush=True)
+        for t in plan.tiers:
+            if t.kind == "gpu":
+                t.weight_format = "q3n"
+        bpw_cible = BPW_NOMINAL["q3n"]
+    avert = garde_grossissement(octets_src, n_params,
                                 bpw_cible, opts.autoriser_grossissement)
     if avert:
         print(f"[acvram] {avert}", flush=True)
