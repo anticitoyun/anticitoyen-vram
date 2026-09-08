@@ -3225,3 +3225,38 @@ convertir le même modèle SANS AWQ, SANS Hadamard, SANS promotions, et
 mesurer chaque variante. Chacune est censée AMÉLIORER la qualité ; si
 l'une la dégrade, le fil est tenu. Quatre conversions, quatre mesures,
 chaque terme isolé au lieu d'être deviné.
+
+### 8 septembre, 19 h — le témoin hybride est guéri, le résidu survit entier
+
+Après correctif, 12B témoin int8, corpus entier, contrôle d'`a_log`
+chargé conforme (−5,5609 / −1,0850) :
+
+  fenêtre 512, contexte 256    acvram **31,933** contre 31,6919 → **+0,76 %**
+  fenêtre 2048, contexte 1024  acvram **24,005** contre 24,0799 → **−0,31 %**
+
+Ce modèle rendait **129,185 et 221,914** le matin : les facteurs 4,08 et
+9,21 ont entièrement disparu, et le second écart est **négatif** —
+acvram fait très légèrement mieux que llama.cpp. Le « fait sans cause »
+qui a lancé la chasse n'existe plus.
+
+**Avertissement retiré par son autrice** : la « dépendance du biais à la
+longueur de contexte » venait de seize fenêtres non comparables ; sur le
+corpus entier l'écart décroît légèrement, comme le biais dense, et les
+deux valeurs sont trop petites pour en tirer une loi. La décomposition
+n'a pas besoin de cette limite. Le cumul intermédiaire montre pourquoi :
+24,05 après 16 fenêtres, 23,82 après 32, 22,79 après 64, 24,14 après
+128 — **6 % d'oscillation**, largement de quoi fabriquer une fausse loi.
+
+**Conséquence sur la décomposition, et elle ne va pas dans le sens
+espéré** : le biais d'instrument sur HYBRIDE vaut environ zéro. Il ne
+peut absorber aucune part des 0,324 nat de résidu, qui survit entier.
+
+**Et la question qui se retourne** : si le biais est nul sur hybride,
+pourquoi vaut-il **+4,73 % sur DENSE** (phi-4 : 6,911 contre 6,5988) ?
+Une architecture plus simple s'écarte six fois plus qu'une architecture
+compliquée. Cette anomalie semblait négligeable à côté du facteur vingt ;
+elle ne l'est plus, et c'est peut-être elle qui porte le résidu. Le plan
+de décomposition (convertir sans calibration, sans Hadamard, sans
+promotions, mesurer chaque variante) devrait donc s'appliquer **à phi-4
+d'abord** : modèle plus petit, mesure plus rapide, et l'écart inexpliqué
+y est proportionnellement plus grand.
