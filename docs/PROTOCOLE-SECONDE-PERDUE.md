@@ -120,6 +120,33 @@ refuser le lancement avant la lecture du premier octet.
 Une garde qui ne sait dire non qu'après avoir vu le mal est en retard d'une
 mesure.
 
+### Quel compteur, et lesquels mentent
+
+Trois candidats, et deux d'entre eux ne répondent pas à la question posée.
+Tranché **sans rien charger**, sur `/proc/meminfo` de cette machine :
+
+    Unevictable:      960 664 kB
+    Mlocked:              132 kB
+
+- **`VmSwap`** (`/proc/<pid>/status`) mesure ce qui a *été chassé* : un effet
+  indirect, qui dépend de la pression exercée au même moment par le reste de la
+  machine. Sur une machine calme il reste à zéro **avec ou sans correctif** — un
+  succès apparent obtenu sans rien mesurer.
+- **`Mlocked`** ne compte que le `mlock()` classique. Il est ici aveugle à
+  **99,99 %** de ce qui est déjà verrouillé. Pris comme contrôle, il resterait
+  plat pendant que 33 Gio s'épinglent.
+- **`Unevictable`** compte les pages non évincibles quel que soit le mécanisme
+  qui les a rendues telles, CUDA compris. **C'est lui qui décide.**
+
+`VmLck` reste utile pour l'**attribution par processus**, que `Unevictable` ne
+donne pas : `Unevictable` décide, `VmLck` explique. Et s'il reste à zéro pendant
+que `Unevictable` monte, cela ne dit pas que rien n'est verrouillé — cela dit que
+CUDA n'épingle pas par `mlock()`. Ne pas renverser la conclusion à ce moment-là.
+
+Relever **avant chargement, après chargement, après déchargement**. Le retour à
+la valeur initiale au déchargement est ce qui prouve qu'on mesure bien son propre
+effet : sans lui, une dérive du système passe pour le correctif.
+
 C'est la même forme que les autres pièges du dossier : un indicateur **voisin**
 de celui qu'on croit lire. La mémoire disponible mesure ce qui reste à donner ;
 elle ne dit rien de ce que le système est en train de reprendre.
