@@ -2681,3 +2681,51 @@ d'équivalence ne voient pas : `q3n_gemv_cuda` lisait l'échelle globale par
 62 % du temps de décodage au profil d'époque, et un noyau incapturable en
 graphe CUDA. Corrigé par la même mémorisation côté hôte ; deux tests
 verrouillent la classe entière, dont un qui capture réellement un graphe.
+
+## 8 septembre 2026 — v0.4.93-94 : la panne URT disséquée, deux dossiers restants
+
+Le modèle tout-q3n produisait « URTURTURT » (perplexité 5,6 M, pire que
+l'uniforme). La chasse, dans l'ordre des innocentements : noyau et
+répartiteur (équivalence sur tenseurs réels), poids sur disque (cosinus
+0,95–0,98 contre le NVFP4 sain, classe par classe), noyau encore à
+151 936 lignes (argmax identique à la référence sur le lm_head réel),
+transport des experts (aller-retour bit à bit, audit du 8/09 sur la branche
+poste2). L'outil qui a tranché : la trace de cosinus des activations contre
+le modèle NVFP4 sain, même invite, couche par couche.
+
+* v0.4.93 : plancher int8 sur `linear_attn.*` — insuffisant, URT encore.
+* La trace montre alors 0,99 sur les couches GDN et un effondrement à 0,57
+  dès la couche 3, première attention pleine (q/k/v/o en q3n). v0.4.94
+  étend le plancher à `self_attn.*` et `lm_head`. Coût : +229 tenseurs
+  int8, dossier stable à 32 Go (contre 296,8 équivalent bf16).
+* Après reconversion : prefill sain («  Paris. »), plus de falaise — mais
+  une décroissance PROGRESSIVE du cosinus (0,97 à la couche 7, 0,48 à la
+  13, bruit dès la 15) : un bruit de format qui se compose, réparti sur les
+  experts q3n.
+
+Deux dossiers ouverts, instruits en parallèle :
+
+* **(A) divergence des chemins de décodage** — les deux chemins dégénèrent
+  différemment (« loi,loi » direct t==1, « URT » masqué) alors que le
+  prefill est sain et que la copie des experts est innocentée. Défaut de
+  code. L'audit du pool a par ailleurs trouvé un débordement silencieux
+  possible (curseur modulo sans état par emplacement, repli top_k
+  incohérent 2 vs 8) : garde-fou et correctif fusionnés (9cf1a15), sans
+  preuve que ce fût LE bug.
+* **(B) bruit de prefill** — perplexité acvram 858 contre 137 pour le
+  NVFP4 sain sur le même harnais (harnais lui-même douteux : corpus
+  interne de 282 jetons, fenêtres de 512 qui coupent l'état de la
+  récurrence GDN — les deux chiffres ne valent que par leur écart,
+  ~1,8 nat/jeton). Les SNR du manifeste sont un PLANCHER (90 % des
+  73 872 tenseurs dans 0,10 dB autour de 13,33) : ils mesurent le couple
+  de grilles Q3_K_S→q3n, pas les poids. 67 des 68 tenseurs < 10 dB sont
+  des down_proj d'experts des couches hautes. Deux mécanismes candidats en
+  cours de mesure float64 : échelle de bloc FP8 e4m3 subnormale ou nulle
+  sur tenseur à aberrant global ; table sans zéro qui reconstruit les
+  blocs creux à ±0,1025 × amax. Correctifs esquissés selon le verdict :
+  clamp d'échelle (une ligne) ou table/bloc à rediscuter.
+
+Rappel de méthode qui a coûté une reconversion : la première hypothèse
+(GDN seule) était plausible, confirmée par un indice réel (l'ancienne
+conversion), et fausse quand même — c'est la trace par couche, pas
+l'indice, qui a montré la vraie frontière.
