@@ -2286,3 +2286,52 @@ trouve 73 à 88 % du temps par couche dans le transfert des experts. Deux angles
 opposés, une même réponse : ce n'est pas le calcul. C'est ce que la nuit du 6 au
 7 avait montré autrement — le planificateur se trompait sur un débit et sur un
 plancher, jamais sur un noyau.
+
+## 8 septembre 2026, 06:20 — la courbe des couches exilées, en service
+
+Cinq cases sur l'arbre figé `17f5566`, même prompt du banc, 200 jetons à
+température zéro, serveur relancé entre les cases, deux références en
+encadrement. Texte identique mot pour mot dans les cinq cases. Les deux
+références se recoupent à 0,2 %.
+
+| case | décodage, 199 jetons | débit | premier jeton | processeur du serveur |
+|---|---|---|---|---|
+| référence a, 18 couches calculées sur le processeur | 19 801 ms | 10,1 t/s | 6 273 ms | **183 s** |
+| 18 couches exilées, transférées par le bus | 20 919 ms | 9,5 t/s | 4 835 ms | 25 s |
+| 27 couches exilées | 26 585 ms | 7,5 t/s | 5 432 ms | 32 s |
+| 36 couches exilées | 33 035 ms | 6,0 t/s | 10 515 ms | 42 s |
+| référence b | 19 769 ms | 10,1 t/s | 7 346 ms | **182 s** |
+
+Trois choses que la courbe établit, et une qu'elle réfute.
+
+**La pente existe dès 27, elle est régulière : 3,2 ms par couche exilée et
+par jeton** entre 18 et 27, 3,6 entre 27 et 36. Le chiffre à sec de la
+veille, 3,1 ms sur une couche isolée, était donc le coût courant et non le
+cas défavorable. L'hypothèse « plateau puis falaise » est réfutée.
+
+**Les deux chemins coûtent la même chose par couche.** Le calcul sur
+processeur revient à 2,9 ms par couche et par jeton, le transfert par le bus
+à 3,2. C'est pourquoi les deux références et la case 18 rendent le même
+débit : non parce que l'exil serait gratuit, mais parce que ses deux formes
+se valent. À 18 couches, l'exil pèse **58 ms sur les 105 ms du jeton**, plus
+de la moitié. Le reste, 30 couches résidentes et l'attention, vaut 47 ms,
+soit un plafond de 21 jetons par seconde si rien n'était exilé.
+
+**Le processeur, lui, n'est pas équivalent.** 183 secondes de temps
+processeur contre 25 pour le même travail, sept fois plus, invisibles pour
+le compteur d'énergie de la carte. C'est le point 8 du protocole d'énergie
+sous sa forme la plus brutale : un moteur qui calcule sur le processeur paraît
+sobre à NVML et ne l'est pas. Pour l'objectif d'efficacité énergétique, le
+chemin par le bus est déjà le bon, à débit égal.
+
+**Le transfert est borné par la latence, pas par le débit.** 18,4 Mio par
+couche en 3,2 ms font 5,7 Go/s effectifs sur un bus mesuré à 18,7 : trente
+copies séparées par couche, dix experts fois trois tenseurs, chacune payant
+son lancement. Une seule copie contiguë par expert, ou par couche, est la
+prochaine mesure — et c'est le terme constant que poste2 a posé dans le modèle
+de coût, dont l'ordonnée à l'origine est maintenant chiffrable.
+
+Ce que la courbe ne dit pas : le gain de ne pas faire grossir le modèle à la
+conversion. Les 18 couches exilées viennent des 4,5 bits par poids de NVFP4
+contre 3,4 à la source ; à taille égale, aucune ne le serait, et le plafond
+de 21 jetons par seconde deviendrait le débit.
