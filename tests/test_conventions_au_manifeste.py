@@ -84,3 +84,44 @@ def test_le_manifeste_dun_modele_converti_porte_la_convention(tmp_path):
     assert relu["model"]["gdn_a_log_negexp"] is True, \
         "la convention n'a pas traverse le manifeste"
     assert reconstruit.name == "essai"
+
+
+# ---------------------------------------------------------------------------
+# L'indice d'origine, quand aucune convention n'est declaree.
+
+@pytest.mark.parametrize("archs,attendu", [
+    (["Qwen3_5ForConditionalGeneration"], "HF"),
+    (["Qwen3_5TextModel"], "HF"),
+    (["LlamaForCausalLM"], "GGUF"),
+    ([], "indetermine"),
+    (None, "indetermine"),
+    (["QuelqueChoseDInconnu"], "indetermine"),
+])
+def test_l_indice_d_origine(archs, attendu):
+    """L'architecture declaree oriente la lecture de `a_log`.
+
+    Le signe ne departage rien — la transformation est quasi involutive sur la
+    plage reelle — donc c'est l'origine qui parle. `LlamaForCausalLM` seul est
+    ce que notre lecteur GGUF fabrique pour ce qu'il ne reconnait pas.
+    """
+    from acvram.engine.loader import indice_origine
+
+    texte = indice_origine(archs)
+    if attendu == "HF":
+        assert "HF" in texte and "pas d'inversion" in texte
+    elif attendu == "GGUF":
+        assert "GGUF" in texte and "inversion" in texte
+    else:
+        assert "indeterminee" in texte
+
+
+def test_l_indice_oriente_mais_ne_decide_pas():
+    """Il rend une phrase, jamais un booleen : c'est la mesure qui tranche.
+
+    Un garde-fou qui choisirait la convention a partir d'un indice donnerait
+    la fausse assurance qu'un controle de vraisemblance donnerait aussi.
+    """
+    from acvram.engine.loader import indice_origine
+
+    assert isinstance(indice_origine(["LlamaForCausalLM"]), str)
+    assert isinstance(indice_origine(None), str)

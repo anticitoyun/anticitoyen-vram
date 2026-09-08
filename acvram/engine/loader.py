@@ -144,6 +144,31 @@ def _linear(name: str, manifest: dict, reader: _ShardReader,
     return QuantLinear(q, bias, scaler, entry["shape"][0], entry["shape"][1])
 
 
+def indice_origine(architectures) -> str:
+    """Ce que l'architecture declaree dit de la convention de `a_log`.
+
+    `a_log` porte soit log(A) (sources HF), soit deja -A (convertisseur GGUF).
+    **Le signe ne departage rien** : sur les modeles reels, log(A) et -A
+    tombent tous deux dans les negatifs, et la plage [-5,6, -1,1] est justement
+    ce que l'inversion produit a partir de [-0,34, -0,004]. La transformation
+    est quasi involutive sur cette plage : aucun controle de vraisemblance ne
+    peut trancher, et un seuil donnerait une fausse assurance.
+
+    Ce qui tranche est l'ORIGINE. Une architecture HF authentique
+    (`Qwen3_5ForConditionalGeneration`, `...ForCausalLM` d'une famille connue)
+    porte log(A). Un dossier issu d'un GGUF porte l'architecture que notre
+    propre lecteur fabrique — `LlamaForCausalLM` — et la convention inverse.
+    L'indice est rendu tel quel : il oriente, il ne decide pas.
+    """
+    archs = [str(a) for a in (architectures or [])]
+    if any("ForConditionalGeneration" in a or "Qwen3_5" in a for a in archs):
+        return "source HF probable, a_log = log(A), pas d'inversion"
+    if archs == ["LlamaForCausalLM"]:
+        return ("architecture generique, typique d'un dossier issu d'un GGUF "
+                "— l'inversion est probablement necessaire")
+    return "origine indeterminee"
+
+
 def load_model(path: str, plan: Optional[Plan] = None,
                dtype: torch.dtype = torch.bfloat16,
                max_model_len: Optional[int] = None,
@@ -188,7 +213,29 @@ def load_model(path: str, plan: Optional[Plan] = None,
                   f"{manquantes} : conventions inconnues, le modele peut etre "
                   f"servi faux sans erreur", flush=True)
     else:
-        spec.raw = {c: manifest["model"][c] for c in ModelSpec.CLES_BRUTES_UTILES}
+        spec.raw = {c: manifest["model"][c]
+                    for c in ModelSpec.CLES_BRUTES_UTILES
+                    if c in manifest["model"]}
+    if (spec.layer_types and "linear_attention" in spec.layer_types
+            and "gdn_a_log_negexp" not in (spec.raw or {})
+            and "gdn_a_log_negexp" not in manifest["model"]):
+        # `a_log` porte soit log(A) (sources HF), soit deja -A (convertisseur
+        # GGUF). **Le signe ne departage rien** : sur les modeles reels, log(A)
+        # et -A tombent tous deux dans les negatifs, et la plage [-5,6, -1,1]
+        # est justement ce que l'inversion produit a partir de [-0,34, -0,004].
+        # Les deux lectures sont numeriquement plausibles ; aucun controle de
+        # vraisemblance ne peut trancher.
+        #
+        # Ce qui tranche est la SOURCE : une architecture HF authentique
+        # (Qwen3_5ForConditionalGeneration...) porte log(A) ; un dossier issu
+        # d'un GGUF porte l'architecture que le lecteur fabrique
+        # (LlamaForCausalLM) et la convention inverse. On le dit plutot que de
+        # choisir en silence — un modele servi avec la mauvaise convention a
+        # une decroissance jusqu'a cent fois trop forte et ne le signale pas.
+        print(f"[acvram] couches recurrentes sans convention declaree pour "
+              f"a_log ({indice_origine((spec.raw or {}).get('architectures'))})"
+              f" : verifier une sortie de couche contre une reference avant de "
+              f"servir ce modele", flush=True)
     if plan is None:
         plan = _plan_from_manifest(manifest, spec)
     _avertir_noyaux()
