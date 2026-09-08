@@ -2653,3 +2653,31 @@ poids d'experts. Sur lognormale, l'écart entre blocs passe de 0,85 dB (sigma
 nul) à 2,91 dB (sigma 1,5) — plus la queue est lourde, plus le bloc de 16
 gagne et moins le quart de bit se défend. Mesure au harnais processeur sur le
 dossier converti, avant toute perplexité.
+
+## 8 septembre 2026 — le bloc 32 confirmé sur poids réels, et la question de la source
+
+Mesure sur 60 tenseurs d'experts réels de Coder-Next (`outils/
+mesurer-queue-experts.py`, processeur seul) : la queue est **quasi
+gaussienne**, sigma inter-blocs 0,03, et l'écart bloc 16 contre 32 vaut
+1,36 dB — pas les 2,5 à 3 qui auraient justifié le quart de bit. **Le bloc 32
+reste**, pas de reconversion. Deux pièges évités en chemin, consignés dans le
+commit de mesure : un estimateur de sigma qui lisait la grille de la source
+au lieu de la queue du modèle, et une table à zéro exact qui gagnait 3,8 dB —
+par alignement sur la grille source uniquement, elle perd 1,3 dB sur du
+continu ; la table ne change pas.
+
+**La question qui pèse plus que la taille de bloc : la source.** Il n'existe
+aucun bf16 de ce modèle sur disque — seulement le GGUF Q3_K_S et notre NVFP4.
+Toute conversion q3n est donc une **seconde quantification** d'une grille
+déjà 3 ou 4 bits, et la qualité absolue du format ne peut pas se mesurer
+ainsi. La perplexité du dossier en cours en donnera l'effet net contre
+llama.cpp qui, lui, sert la source telle quelle ; si elle décroche, la vraie
+issue est de retélécharger la source bf16 (~160 Go) et de convertir depuis
+elle — décision de ressources qui appartient à l'utilisateur.
+
+Et un défaut d'exécution attrapé en relecture, la classe que les tests
+d'équivalence ne voient pas : `q3n_gemv_cuda` lisait l'échelle globale par
+`.item()` sur un tenseur CUDA à chaque appel — le piège documenté de NVFP4,
+62 % du temps de décodage au profil d'époque, et un noyau incapturable en
+graphe CUDA. Corrigé par la même mémorisation côté hôte ; deux tests
+verrouillent la classe entière, dont un qui capture réellement un graphe.
