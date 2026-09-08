@@ -1025,12 +1025,27 @@ def _reajuster_plan(plan: Plan, manifest: dict) -> None:
                 u += l.attn_bytes if l.attn_storage == dev else 0
                 u += l.mlp_bytes if l.mlp_storage == dev else 0
             return u
+        # La capacité de l'étage est celle qu'avait la machine le jour de la
+        # conversion. Elle ne dit rien de ce que la carte a de libre à cet
+        # instant : un serveur qui vient de rendre son port n'a pas encore
+        # rendu sa mémoire, et le plan suivant se calcule alors sur des restes
+        # qu'il croit disponibles. Le même modèle chargé deux fois de suite a
+        # ainsi rendu 15,8 puis 152,2 jetons par seconde. On borne donc par ce
+        # qui est réellement libre, mesuré ici.
+        capacite = t.capacity
+        try:
+            # `dev` est ici la chaîne du device, pas la fonction du module :
+            # elle est masquée par la variable locale au-dessus.
+            libre = torch.cuda.mem_get_info(torch.device(t.name))[0]
+            capacite = min(capacite, libre)
+        except Exception:                           # noqa: BLE001
+            pass
         # marge pour le contexte CUDA, les activations et les piles d'experts :
         # la capacité de l'étage est déjà nette des réserves du plan, mais un
         # 70B chargé à 99 % tombait encore en OOM à l'allocation du KV
-        marge = max(2 * 2**30, int(0.07 * t.capacity))
+        marge = max(2 * 2**30, int(0.07 * capacite))
         deplacees = 0
-        while utilise() > t.capacity - marge:
+        while utilise() > capacite - marge:
             cand = [l for l in plan.layers if l.mlp_storage == dev]
             if not cand:
                 break
@@ -1048,7 +1063,7 @@ def _reajuster_plan(plan: Plan, manifest: dict) -> None:
             deplacees += 1
         if deplacees:
             print(f"[acvram] plan réajusté : {deplacees} MLP de plus en RAM hôte sur {dev} "
-                  f"(poids réels {utilise() / 2**30:.1f} Gio pour {t.capacity / 2**30:.1f} Gio)",
+                  f"(poids réels {utilise() / 2**30:.1f} Gio pour {capacite / 2**30:.1f} Gio libres)",
                   flush=True)
             continue
         # Symétrique de la descente. Le plan est figé au moment de la
@@ -1062,11 +1077,11 @@ def _reajuster_plan(plan: Plan, manifest: dict) -> None:
         for l in plan.layers:
             if l.exec_device != dev:
                 continue
-            if l.attn_storage == "cpu" and utilise() + l.attn_bytes <= t.capacity - marge:
+            if l.attn_storage == "cpu" and utilise() + l.attn_bytes <= capacite - marge:
                 l.attn_storage = dev
             if l.mlp_storage != "cpu":
                 continue
-            if utilise() + l.mlp_bytes > t.capacity - marge:
+            if utilise() + l.mlp_bytes > capacite - marge:
                 continue
             l.mlp_storage = dev
             if hasattr(l, "mlp_exec"):
@@ -1074,7 +1089,7 @@ def _reajuster_plan(plan: Plan, manifest: dict) -> None:
             remontees += 1
         if remontees:
             print(f"[acvram] plan réajusté : {remontees} MLP remontés en VRAM sur {dev} "
-                  f"(poids réels {utilise() / 2**30:.1f} Gio pour {t.capacity / 2**30:.1f} Gio)",
+                  f"(poids réels {utilise() / 2**30:.1f} Gio pour {capacite / 2**30:.1f} Gio libres)",
                   flush=True)
     _rapatrier_sur_une_carte(plan, attn, mlp, embed, head)
 
