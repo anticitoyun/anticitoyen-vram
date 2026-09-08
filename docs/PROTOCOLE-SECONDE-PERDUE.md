@@ -135,13 +135,36 @@ Tranché **sans rien charger**, sur `/proc/meminfo` de cette machine :
 - **`Mlocked`** ne compte que le `mlock()` classique. Il est ici aveugle à
   **99,99 %** de ce qui est déjà verrouillé. Pris comme contrôle, il resterait
   plat pendant que 33 Gio s'épinglent.
-- **`Unevictable`** compte les pages non évincibles quel que soit le mécanisme
-  qui les a rendues telles, CUDA compris. **C'est lui qui décide.**
+- **`Unevictable`** compte les pages non évincibles — mais **seulement celles
+  que `mlock()` ou `SHM_LOCK` ont marquées comme telles.**
 
-`VmLck` reste utile pour l'**attribution par processus**, que `Unevictable` ne
-donne pas : `Unevictable` décide, `VmLck` explique. Et s'il reste à zéro pendant
-que `Unevictable` monte, cela ne dit pas que rien n'est verrouillé — cela dit que
-CUDA n'épingle pas par `mlock()`. Ne pas renverser la conclusion à ce moment-là.
+> **RECTIFIÉ le 8/09 à 21 h, par la mesure, contre ce que j'avais écrit ici.**
+> J'avais conclu que `Unevictable` voyait l'épinglage « quel que soit le
+> mécanisme, CUDA compris », et que « c'est lui qui décide ». **C'est faux.** Il
+> est resté à **0,00 pendant que 46 Gio étaient épinglés** par le moteur.
+>
+> L'épinglage CUDA passe par `pin_user_pages()` (**FOLL_PIN**) : le noyau laisse
+> ces pages sur leur liste d'origine et les saute à la réclamation **sans les
+> marquer non-évincibles**. `Unevictable`, `Mlocked` et `VmLck` y sont donc
+> aveugles **par construction**, tous les trois.
+>
+> **Le compteur qui décide est `nr_foll_pin_acquired − nr_foll_pin_released`**
+> dans `/proc/vmstat` (× 4096 octets), trouvé par poste2. Validé par concordance :
+> `shmem` 46,0 Gio = `foll_pin` net 46,0 Gio, deux chemins indépendants.
+>
+> **Comment je me suis trompée, parce que c'est la partie utile.** J'ai éprouvé
+> le compteur que je **rejetais** — le relevé `Mlocked 132 kB` contre
+> `Unevictable 960 664 kB` — et jamais celui que je **retenais**. Ce relevé
+> prouvait que `Mlocked` était aveugle ; il ne prouvait rien sur ce que
+> `Unevictable` voit de *notre* charge. J'avais moi-même posé le préalable
+> « vérifier qu'il réagit du tout au chargement d'un modèle exilé », je l'ai fait
+> inscrire dans le patch de chef, **et je ne l'ai pas appliqué à ma propre
+> proposition.**
+>
+> **Règle qui en sort** : celle qui propose un contrôle est la moins bien placée
+> pour l'éprouver. Un contrôle proposé doit être testé par quelqu'un d'autre —
+> non par défiance, mais parce qu'on teste ce dont on doute et qu'on ne doute pas
+> de ce qu'on vient de proposer.
 
 Relever **avant chargement, après chargement, après déchargement**. Le retour à
 la valeur initiale au déchargement est ce qui prouve qu'on mesure bien son propre
