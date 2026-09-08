@@ -265,6 +265,19 @@ def render(results: list[EvalResult]) -> str:
         lines.append(f"  {r.model:<{width}}  {r.perplexity:9.3f}  "
                      f"{r.bits_per_weight:6.2f}  {r.weights_bytes/2**20:8.1f}Mio  "
                      f"{r.tokens:8d}{delta}")
+    # Les formats REELS du modele evalue, a cote du chiffre. Le 8/09/2026 un
+    # dossier nomme « temoin-int8 » avait ses 72 projections de perceptron en
+    # q3n a 3,25 bits : la garde anti-grossissement les avait basculees, en
+    # l'annoncant dans un journal detache que personne n'a lu. La perplexite
+    # qui en est sortie a fait chercher un biais d'instrument une demi-journee.
+    # Ce qui n'est pas imprime a cote du chiffre finit par etre suppose.
+    for r in results:
+        if r.formats:
+            detail = ", ".join(f"{f} {n}" for f, n in
+                               sorted(r.formats.items(), key=lambda x: -x[1]))
+            lines.append(f"  {r.model} : {detail}")
+    if any(r.formats for r in results):
+        lines.append("")
     avertis = {r.avertissement for r in results if r.avertissement}
     for a in sorted(avertis):
         lines.append("")

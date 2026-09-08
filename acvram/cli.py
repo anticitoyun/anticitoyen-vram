@@ -323,7 +323,8 @@ def cmd_convert(args: argparse.Namespace) -> int:
         mixed_precision=args.mixed_precision, snr_floor=args.snr_floor,
         autoriser_grossissement=args.autoriser_grossissement,
         quant_device=args.quant_device, bits_budget_gib=args.bits_budget,
-        promotion_cout_max_mib=args.promotion_cout_max)
+        promotion_cout_max_mib=args.promotion_cout_max,
+        format_impose=args.format)
 
     last = [0.0]
 

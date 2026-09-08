@@ -67,6 +67,17 @@ class ConversionOptions:
     # par poids vers NVFP4 (4,5) a fait grossir Qwen3-Coder-Next d'un tiers,
     # créé 14 Gio d'exil en RAM hôte et coûté un facteur quinze au décodage.
     autoriser_grossissement: bool = False
+    # Format reclame explicitement en ligne de commande (`--format int8`), par
+    # opposition au format nominal choisi par la politique de placement. La
+    # distinction commande le comportement de la garde anti-grossissement : une
+    # politique peut choisir a la place de l'utilisateur, elle ne doit pas
+    # ecraser son choix explicite. Le 8/09/2026, un temoin demande en int8 est
+    # sorti avec ses MLP en q3n a 3,25 bits — SNR de 14,9 dB contre 44 pour le
+    # reste du modele — et le dossier s'appelait « temoin-int8 ». La bascule
+    # etait annoncee a l'ecran, dans un journal detache que personne n'a lu, et
+    # la mesure qui en est sortie a fait chercher un biais d'instrument pendant
+    # une demi-journee.
+    format_impose: Optional[str] = None
     max_promotions: float = 0.15      # part maximale de tenseurs promus
     # Prix plafond d'une promotion, en mébioctets ajoutés (0 = pas de plafond).
     # Le quota ci-dessus compte des tenseurs ; or une porte de 0,1 Mio et une
@@ -643,8 +654,22 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                      for t in plan.tiers if t.kind == "gpu"), default=4.5)
     octets_src = octets_du_modele(model_path)
     n_params = getattr(spec, "total_params", 0) or 0
-    if (octets_src and n_params and not opts.autoriser_grossissement
-            and bpw_cible > octets_src * 8 / n_params * 1.02):
+    bpw_cible_nominal = next((t.weight_format for t in plan.tiers
+                              if t.kind == "gpu"), None)
+    bascule_faite = False
+    bpw_src = (octets_src * 8 / n_params) if (octets_src and n_params) else 0.0
+    grossirait = bool(octets_src and n_params
+                      and not opts.autoriser_grossissement
+                      and bpw_cible > bpw_src * 1.02)
+    if grossirait and opts.format_impose:
+        # Choix explicite de l'utilisateur : on refuse, on n'arrange pas.
+        raise ValueError(
+            f"--format {opts.format_impose} ({bpw_cible:.2f} bits/poids) ferait "
+            f"grossir une source a {bpw_src:.2f} bits/poids. Refuse plutot que "
+            f"bascule en silence : relancez avec --autoriser-grossissement pour "
+            f"l'obtenir vraiment, ou sans --format pour laisser la politique "
+            f"choisir un format compact.")
+    if grossirait:
         # Plutôt que refuser d'emblée : basculer les étages GPU sur le format
         # le plus compact du dépôt, q3n (3,25 bits/poids). Si même lui grossit
         # la source, la garde ci-dessous refusera avec les issues restantes.
@@ -668,6 +693,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             if getattr(lp, "fmt", None) and lp.exec_device in gpus | {"cpu"}:
                 lp.fmt = "q3n"
         bpw_cible = BPW_NOMINAL["q3n"]
+        bascule_faite = True
+        bpw_cible_nominal = "q3n"
     avert = garde_grossissement(octets_src, n_params,
                                 bpw_cible, opts.autoriser_grossissement)
     if avert:
@@ -680,6 +707,16 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         "model": spec.to_dict(),
         "plan": plan.to_dict(),
         "options": asdict(opts),
+        # Ce qui a ete demande et ce qui est sorti, cote a cote et toujours,
+        # meme quand ils coincident. Un manifeste qui ne porte que le resultat
+        # laisse croire qu'il a ete voulu.
+        "formats_nominaux": {
+            "demande": opts.format_impose,
+            "obtenu": bpw_cible_nominal,
+            "bits_par_poids_source": round(bpw_src, 3) if bpw_src else None,
+            "bits_par_poids_cible": round(bpw_cible, 3),
+            "bascule_anti_grossissement": bool(bascule_faite),
+        },
         "tensors": {},
     }
 
