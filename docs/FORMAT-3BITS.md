@@ -273,3 +273,27 @@ inutilisé est de la capacité laissée sur la table — la mesure dit que ce
 gaspillage rapporte quand même, pas qu'aucune table à huit niveaux ne ferait
 mieux. Un SNR de poids ne prédit pas une perplexité : la décision finale
 appartient à l'éval avant/après sur le même cadrage.
+
+### Arbitrage du même soir — la symétrie tombe, l'invariant reste
+
+L'auteur de la spécification relâche la symétrie : la règle d'origine
+interdisait l'asymétrie alors qu'elle voulait interdire l'ÉCRÊTAGE, et ce
+sont les bornes ±1 aux deux extrémités qui l'empêchent. Vérification faite
+avant l'accord, pas sur parole : le biais d'une table asymétrique (erreur
+non centrée, qui se somme linéairement sur K là où un bruit croît en
+racine de K, invisible dans un SNR de tenseur) existe — 260 fois celui de
+la table d'origine — mais ne se matérialise pas en sortie ; sur un
+down_proj alimenté par ses vraies activations, la part d'erreur portée par
+la moyenne vaut 0,002 pour la table à huit niveaux avec zéro contre 0,010
+pour la table d'origine. L'invariant du validateur : huit entrées, bornes
+±1 exactes, croissance strictement monotone (égalité admise entre les deux
+dernières entrées seulement), au plus un zéro.
+
+Et la mise en garde qui justifie la table PAR MODÈLE, mesurée sur tenseur
+dense gaussien : les tables à zéro y PERDENT (13,62 à 14,52 dB contre
+15,00 pour la table d'origine). Le « zéro perdant sur 288 » est une
+propriété des tenseurs de CE modèle — creux ou à queue lourde —, pas des
+tables à zéro. **Une table q3n vaut pour la distribution sur laquelle elle
+a été ajustée, et pour aucune autre** ; graver ces niveaux comme constante
+universelle serait l'erreur inverse de celle que la première spécification
+a commise.
