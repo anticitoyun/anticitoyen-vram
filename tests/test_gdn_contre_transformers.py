@@ -80,13 +80,20 @@ def _paire(dev):
 
 
 @CUDA
-@pytest.mark.parametrize("t", [1, 2, 8, 32, 64, 128])
+@pytest.mark.parametrize("t", [1, 2, 8, 32, 64, 128, 513, 1024, 2048])
 def test_la_couche_reproduit_transformers(t):
     """Meme entree, memes poids : les deux sorties doivent coincider.
 
     Jusqu'a 32 jetons c'est exact au bit pres. Au-dela, la regle par blocs de
     transformers (chunk_size 64) reordonne ses sommes et l'ecart passe a
     quelques 1e-5 — l'arrondi de son propre decoupage, pas une divergence.
+
+    Le balayage va jusqu'a 2048 et non 512 : la perplexite du modele hybride
+    REMONTE au-dela de ~512 positions de contexte, et huit blocs de 64 font
+    justement 512. Mesure le 8/09/2026 — il ne se passe rien a cette frontiere.
+    Profil par tranche de 128 positions sur t=2048 : mediane 3,5e-7 de bout en
+    bout, sans tendance, sans saut. La couche ne derive pas avec la longueur,
+    et la cassure de la perplexite vient d'ailleurs.
     """
     dev = torch.device("cuda:0")
     cfg, ref, notre = _paire(dev)
