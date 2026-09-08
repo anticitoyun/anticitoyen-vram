@@ -4,6 +4,35 @@
 extension de mémoire GPU fonctionnelle et livrait un module noyau qui se
 contentait d'afficher les nombres passés en paramètres.
 
+## 8 septembre 2026 — le nombre de transferts, corrigé par la mesure
+
+La courbe du 8 septembre a tranché deux choses sur le terme constant ajouté en
+0.4.75.
+
+**Le terme existe.** Une couche exilée transfère 18,4 Mio en 3,2 ms, soit
+5,7 Go/s effectifs sur un bus mesuré à 18,7 Go/s. Le transfert est borné par la
+latence, pas par le débit. La pente est régulière — 3,2 ms par couche entre 18
+et 27 couches exilées, 3,6 entre 27 et 36 — sans plateau. Cinq cases sur le même
+état, références se recoupant à 0,2 %.
+
+**Sa valeur reste inconnue.** La courbe ne sépare pas le coût fixe par transfert
+du coût par octet : les deux croissent ensemble avec le nombre de couches. Il
+faut pour cela chronométrer un transfert d'expert sur trois tailles écartées
+d'un facteur quatre. `transfer_fixed_us` reste donc à zéro.
+
+**Le nombre de transferts, lui, était faux d'un facteur six.** La première
+version supposait des blocs de 4 Mo, soit cinq copies par couche. Le relevé en
+montre **trente** : dix experts routés, trois tenseurs chacun, environ 0,6 Mio
+par copie. Le compte est désormais dérivé de `n_experts_active` du modèle et non
+supposé, avec le nombre de tenseurs par expert en constante nommée — vraie des
+piles vues jusqu'ici, fausse le jour où l'une en aura quatre.
+
+**Un chiffre qui déplace l'objectif énergétique**, relevé au passage et qui
+n'entre pas encore dans le modèle : à débit égal à 5 % près, le chemin
+processeur coûte 183 secondes de temps processeur pour 200 jetons contre 25 par
+le bus. Sept fois plus, et invisible pour le compteur de la carte — qui ne voit
+que ce qu'elle consomme elle-même.
+
 ## 8 septembre 2026 — trois défauts corrigés par lecture, aucun mesuré ici
 
 Corrections écrites après lecture du code, sans exécution sur les cartes : une

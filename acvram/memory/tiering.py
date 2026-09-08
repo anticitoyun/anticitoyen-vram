@@ -593,12 +593,36 @@ def _estimate(spec: ModelSpec, plan: Plan, tiers: list[Tier],
             # demande un terme constant ; une pente logarithmique suit le
             # NOMBRE de blocs transferes, pas leur volume.
             #
-            # LA VALEUR CI-DESSOUS N'EST PAS MESUREE. Elle est posee pour que
-            # la structure existe et que la courbe en cours la fixe. Elle vaut
-            # zero par defaut : un modele sans ce terme est faux mais connu,
-            # tandis qu'un modele portant une constante inventee serait faux et
-            # credible. La regler par PlannerOptions.transfer_fixed_us.
-            n_transferts = max(1, int(from_host // (4 * MB)) + (1 if from_host else 0))
+            # LA VALEUR DU COUT FIXE N'EST TOUJOURS PAS MESUREE. La courbe du
+            # 8 septembre 2026 confirme qu'il EXISTE — une couche exilee
+            # transfere 18,4 Mio en 3,2 ms, soit 5,7 Go/s effectifs sur un bus
+            # mesure a 18,7 : le transfert est borne par la latence, pas par le
+            # debit — mais elle ne separe pas le cout fixe du cout par octet.
+            # Il faut pour cela chronometrer un transfert sur trois tailles
+            # ecartees d'un facteur quatre. Zero par defaut jusque-la : un
+            # modele sans ce terme est faux mais connu, tandis qu'un modele
+            # portant une constante inventee serait faux et credible.
+            #
+            # LE NOMBRE DE TRANSFERTS, lui, est mesure. Une couche a melange
+            # d'experts en copie UN PAR TENSEUR ET PAR EXPERT ROUTE : releve du
+            # 8 septembre, dix experts fois trois tenseurs, trente copies par
+            # couche d'environ 0,6 Mio chacune. Une premiere version supposait
+            # des blocs de 4 Mo, soit cinq copies la ou il y en a trente — six
+            # fois trop peu, et le terme aurait ete sous-estime d'autant.
+            #
+            # Le compte est derive du modele et non fige : un modele a un autre
+            # nombre d'experts actifs ou de tenseurs par expert donnerait un
+            # autre chiffre. TENSEURS_PAR_EXPERT reste une constante
+            # d'architecture — porte, montee, descente — vraie des piles vues
+            # jusqu'ici et fausse le jour ou l'une en aura quatre.
+            TENSEURS_PAR_EXPERT = 3
+            couche = spec.layers[lp.index]
+            actifs = getattr(couche, "n_experts_active", 0) or 0
+            if actifs:
+                n_transferts = actifs * TENSEURS_PAR_EXPERT
+            else:
+                # Couche dense exilee : une copie par tenseur de MLP.
+                n_transferts = TENSEURS_PAR_EXPERT
             seconds += max(t_copy, t_math) + n_transferts * opts.transfer_fixed_us * 1e-6
             bytes_read += int(from_host)
         else:
