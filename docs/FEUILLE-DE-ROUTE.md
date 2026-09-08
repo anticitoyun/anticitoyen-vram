@@ -3303,3 +3303,50 @@ exil, transport d'experts) qui ne sont pas couverts par ce témoin.
    **ce que la chaîne de conversion fait en plus** sur les gros modèles :
    échelles par canal, Hadamard, promotions, formats mélangés. C'est la
    seule piste qui reste, et elle se décompose étape par étape.
+
+### 8 septembre, 18 h 15 — un second défaut de convention : la normalisation des poids d'experts
+
+Même mécanisme que l'`a_log` du matin : une convention absente du
+fichier, un défaut choisi par nous, la vraie valeur codée en dur chez
+llama.cpp.
+
+  `lfm2.cpp:32` et `qwen3next.cpp:483` : `build_moe_ffn(..., norm_w = **true**, ...)`
+  GGUF LFM2.5 et Coder-Next : **aucune clé `expert_weights_norm`**
+  `gguf.py:528` (branche lfm2moe) : `bool(g("expert_weights_norm", **False**))`
+
+Avec un routage à quatre experts, des poids non normalisés somment à une
+valeur arbitraire au lieu de 1 : la sortie du bloc part à une échelle
+fausse ET variable selon le jeton.
+
+**Mesuré** sur LFM2.5-8B-A1B converti en bf16 PUR (aucune quantification,
+modèle résident, 146 717 positions) :
+
+  llama.cpp Q4_K_M                    **33,148 ± 0,321**
+  acvram, normalisation absente       **110,350**   (×3,33)
+  acvram, normalisation forcée        **58,815**   (×1,77)
+  → le défaut vaut **0,629 nat, facteur 1,88** — et il reste **+77 %**
+
+**Audit complet du routage contre llama.cpp**, fait champ par champ
+plutôt que supposé :
+* **scoring** : `qwen3moe.cpp:89` et `qwen3next.cpp:476` codent
+  `GATING_FUNC_TYPE_SOFTMAX` **en dur**, sans lire le fichier — notre
+  défaut `softmax` est juste. La règle « clé absente donc sigmoïde » que
+  j'allais généraliser est fausse pour nos familles : llama.cpp ne force
+  le sigmoïde que pour AFMOE, MISTRAL4, GLM4_MOE, GLM_DSA et STEP35.
+* **échelle** : `llama-graph.cpp:1413` — `if (w_scale != 0.0f && w_scale
+  != 1.0f)`, donc leur défaut 0,0 et le nôtre 1,0 sont tous deux neutres.
+* **normalisation** : le seul écart réel, confirmé pour lfm2moe ET
+  qwen3next.
+
+**Ce qui reste** : les +77 % de LFM2.5 après correction. Le modèle est
+hybride (`shortconv.l_cache = 3`), et la table des témoins garde sa
+forme — les quatre modèles fautifs sont hybrides, le seul propre
+(Qwen3-0.6B, transformeur classique) sort à +0,27 %. Le défaut de
+normalisation était réel mais partiel : il masquait la piste hybride, il
+ne la remplace pas. Témoin décisif en cours : `Qwen3-Coder-30B-A3B`, un
+MoE en architecture Qwen3 classique — ni convolution, ni récurrence, et
+routage vérifié identique des deux côtés.
+
+Contrôle de plausibilité qui a servi : `gemma-4-31B` rend **4452** de
+perplexité chez llama.cpp — modèle inutilisable comme témoin, écarté
+avant d'avoir mesuré quoi que ce soit avec.
