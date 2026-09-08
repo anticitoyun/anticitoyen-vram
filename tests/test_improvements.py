@@ -958,4 +958,11 @@ def test_les_projections_gdn_ne_descendent_pas_sous_int8(tmp_path):
     r = TensorRouter(spec, plan, ConversionOptions(out_dir=str(tmp_path)))
     assert r.format_for("model.layers.1.linear_attn.alpha.weight") == "int8"
     assert r.format_for("model.layers.1.linear_attn.qkv.weight") == "int8"
+    # 8/09, second constat : le plancher GDN seul n'a pas suffi — cosinus
+    # contre le modèle sain à 0,99 sur les couches GDN puis effondrement dès
+    # la première attention pleine (q/k/v/o en q3n). Toute l'attention et la
+    # tête de sortie restent au moins en int8 sous q3n.
+    assert r.format_for("model.layers.1.self_attn.q_proj.weight") == "int8"
+    assert r.format_for("model.layers.1.self_attn.o_proj.weight") == "int8"
+    assert r.format_for("lm_head.weight") == "int8"
     assert r.format_for("model.layers.1.mlp.experts.0.up_proj.weight") == "q3n"

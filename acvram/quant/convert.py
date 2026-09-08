@@ -197,19 +197,24 @@ class TensorRouter:
         """Le format d'un tenseur est celui de l'appareil où sa couche s'exécute."""
         if self.opts.keep_sensitive_16bit and name.endswith(SENSITIVE_SUFFIXES):
             return "bf16"
-        if ".linear_attn." in name and self._fmt_brut(name) == "q3n":
-            # Plancher int8 pour les projections de l'attention linéaire (GDN,
-            # KDA) : leur récurrence amplifie l'erreur de poids à chaque pas.
-            # La conversion NVFP4 de Coder-Next les avait déjà promues en int8
-            # (35 couches sur 36) ; à 3,25 bits le modèle du 8/09 produisait
-            # « URTURTURT » dès le premier jeton, perplexité pire que
-            # l'uniforme.
+        if ((".linear_attn." in name or ".self_attn." in name)
+                and self._fmt_brut(name) == "q3n"):
+            # Plancher int8 pour TOUTE l'attention et la tête de sortie quand
+            # la cible est q3n. La conversion NVFP4 saine de Coder-Next les
+            # avait toutes en int8 ; le plancher restreint à la seule GDN
+            # (v0.4.93) n'a pas suffi : trace du 8/09, cosinus contre le
+            # modèle sain à 0,99 sur les couches GDN puis 0,57 dès la
+            # première attention pleine (couche 3, q/k/v/o en q3n) et bruit
+            # ensuite. À 3,25 bits, l'erreur sur q/k traverse le softmax.
             return "int8"
         if name.endswith(".bias"):
             return "bf16"
         if name.startswith("lm_head"):
-            return (self.opts.lm_head_format
-                    or self._layer_fmt.get(self.spec.num_layers - 1, "int4_awq"))
+            fmt = (self.opts.lm_head_format
+                   or self._layer_fmt.get(self.spec.num_layers - 1, "int4_awq"))
+            # Même plancher que l'attention : la tête projette sur 151 936
+            # classes, à 3,25 bits ses logits ne classent plus.
+            return "int8" if fmt == "q3n" else fmt
         if ".mtp." in name or name.startswith("model.mtp."):
             # La tête de prédiction multi-jetons est un bloc de transformeur de
             # plus : elle suit le format de la dernière couche, pas le bf16 des
