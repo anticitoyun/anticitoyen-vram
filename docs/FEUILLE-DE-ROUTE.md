@@ -2871,3 +2871,34 @@ d'avance) :
   invalidées (858 q3n, 137 NVFP4, 7,233 nemo). Et l'URT/13,5 t/s de
   Coder-Next tournait sur cette même récurrence : la correction peut
   changer aussi la qualité de génération, pas seulement l'éval.
+
+## 8 septembre 2026, 12:30 — le témoin hybride était une architecture servie faux en silence
+
+Le « défaut hybride » du balayage n'était pas dans le harnais ni dans la
+récurrence : le témoin Qwen3.6-12B est un **qwen35**, dont le GGUF déclare
+`rope.dimension_sections = [11, 11, 10, 0]` et que llama.cpp sert en
+LLAMA_ROPE_TYPE_**IMROPE** (M-RoPE entrelacé) — acvram lui appliquait un
+NEOX standard : affectation fréquence→paire permutée par rapport à
+l'entraînement, angles relatifs faux, erreur croissante avec l'écart de
+position, attention pleine seulement. Les trois signatures du balayage
+(×2,16 → ×4,08 → ×9,21 ; GDN exacte au juge extérieur jusqu'à t=2048 ;
+dense propre) s'expliquent d'un coup. Vérifié dans les DEUX GGUF (session
+de mesure) : Coder-Next (`qwen3next`) ne porte AUCUNE section, freq_base
+5e6 et rotary_dim 64 correctement lus — son RoPE NEOX est le bon
+traitement sur les trois axes qui peuvent mentir (type, theta, dims).
+
+* Ce qui se referme : le harnais est utilisable sur qwen3next ; le 858
+  q3n / 137 NVFP4 de Coder-Next ne sont plus suspects d'un défaut de
+  moteur — ils restent incomparables entre eux par le FILET asymétrique
+  (snr_floor 0 contre 25). Reconversion snr_floor 25 + éval 584 fenêtres
+  en cours ; l'écart à l'étalon 9,1831 sera ENFIN le coût du format.
+* Ce qui s'ouvre : implémenter l'IMROPE (les qwen35 du parc sont
+  aujourd'hui servis faux en silence) avec validation par juge extérieur ;
+  et le garde-fou immédiat — une architecture dont le type de RoPE n'est
+  pas reconnu se REFUSE à la conversion et au chargement. La leçon de la
+  journée, formulée par la session de mesure : le défaut n'était pas le
+  calcul mais le silence du calcul sur ce qu'il ne savait pas faire.
+* Biais d'instrument résiduel sur dense : +2,5 à +5 %, décroissant avec la
+  fenêtre, non expliqué (décomposition noyaux/précision infaisable en OOM
+  sur modèle entier) — borné, documenté, à ne jamais soustraire d'un
+  chiffre mesuré à une autre fenêtre.
