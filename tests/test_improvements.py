@@ -772,3 +772,27 @@ def test_energie_compte_le_processeur_a_part():
     j_carte = watts_carte * fraction * duree
     j_avec_proc = j_carte + 0.9 * watts_proc
     assert j_avec_proc > 5 * j_carte
+
+
+def test_la_conversion_refuse_de_faire_grossir():
+    """8/09/2026 : un GGUF de 3,4 bits/poids converti en NVFP4 (4,5) grossit
+    d'un tiers, déborde la carte et coûte un facteur quinze au décodage. La
+    conversion refuse désormais, sauf autorisation explicite qui journalise."""
+    import pytest
+    from acvram.quant.convert import garde_grossissement
+    n = 80_000_000_000
+    src_33g = int(n * 3.4 / 8)
+    # source déjà plus large que la cible : rien à dire
+    assert garde_grossissement(int(n * 6.5 / 8), n, 4.5, False) is None
+    # marge de 2 % : une cible à peine plus large passe
+    assert garde_grossissement(int(n * 4.47 / 8), n, 4.5, False) is None
+    # grossissement réel : refus par défaut, avec les trois grandeurs
+    with pytest.raises(ValueError) as e:
+        garde_grossissement(src_33g, n, 4.5, False)
+    for morceau in ("GROSSIR", "3.40", "4.50", "+32 %"):
+        assert morceau in str(e.value)
+    # autorisé : un avertissement, pas une exception
+    m = garde_grossissement(src_33g, n, 4.5, True)
+    assert m and "autoris" in m
+    # sans information sur la source : ne bloque pas
+    assert garde_grossissement(0, n, 4.5, False) is None

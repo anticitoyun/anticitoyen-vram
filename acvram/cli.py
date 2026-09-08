@@ -321,6 +321,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         group_size=args.group_size, n_grid=args.grid,
         lm_head_format=args.lm_head_format, dry_run=args.dry_run,
         mixed_precision=args.mixed_precision, snr_floor=args.snr_floor,
+        autoriser_grossissement=args.autoriser_grossissement,
         quant_device=args.quant_device, bits_budget_gib=args.bits_budget,
         promotion_cout_max_mib=args.promotion_cout_max)
 
@@ -552,6 +553,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "(auto, cpu, cuda:0 ...)")
     cv.add_argument("--mixed-precision", choices=["auto", "off"], default="auto",
                     help="promeut vers un format plus large les tenseurs mal quantifies")
+    cv.add_argument("--autoriser-grossissement", action="store_true",
+                    help="autorise une conversion plus grosse que sa source "
+                         "(refusée par défaut depuis le 8/09/2026)")
     cv.add_argument("--snr-floor", type=float, default=0.0,
                     help="SNR en sortie de couche (dB) sous lequel un tenseur est "
                          "promu ; 0 (defaut) ne promeut rien. Mesure sur un 27B : "
