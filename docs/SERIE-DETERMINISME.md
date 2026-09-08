@@ -156,3 +156,47 @@ la RAM libre descend sous ~52 Gio, ce qui était vraisemblablement le cas, sans
 que ce soit établi. La mesure qui trancherait : relever le MemAvailable
 **minimum** pendant un chargement dont l'exil est connu, sur trois tailles de
 modèle.
+
+## Limite de l'avant/après du mode persistant, trouvée après coup
+
+L'avant/après annoncé — dispersion 10,7 → 8,7 % et 10,2 → 8,3 %, coût du froid
+de ~25 % à ~20 % — **ne compare pas un seul facteur.** La machine a redémarré
+à 18h36:01, entre la série d'avant (18h23-18h25) et celle d'après
+(18h54-18h57). Au moins deux autres choses ont bougé dans l'intervalle : le
+cache de pages du noyau, vide au premier lancement d'après reprise, et l'état
+des cartes. Et pour le premier modèle seulement, le plafond de puissance est
+passé de 775 à 875 W ; les deux autres étaient déjà à 875 des deux côtés.
+
+Le verdict — la persistance retire une part du froid sans l'expliquer — n'est
+pas renversé : un gain partiel reste partiel quel que soit le reste. Mais la
+propriété qui faisait la force de la mesure, « un seul facteur change », est
+fausse, et le chiffre d'un cinquième ne doit pas être cité comme s'il était
+isolé. À refaire dans une seule session, persistance activée puis désactivée,
+si le chiffre doit servir à décider.
+
+## Le froid n'est ni de la compilation ni du chargement
+
+Deux explications ont été avancées puis écartées par les faits.
+
+**Ce n'est pas de la compilation** : `~/.nv/ComputeCache` n'a pas été écrit
+depuis le 24 août et `~/.triton/cache` pas depuis 13h07, alors que les séries
+courent de 18h25 à 19h. Rien n'a été compilé pendant les mesures.
+
+**Ce n'est pas du chargement non plus** — lecture des caches, initialisation
+du contexte, allocation de l'arène. Les cinq passages sont cinq requêtes au
+**même processus déjà démarré** : quand le premier passage commence, tout cela
+est fait depuis longtemps.
+
+**Le candidat qui reste est la capture des graphes CUDA**, paresseuse : elle a
+lieu à la première requête qui rencontre chaque forme, coûte une exécution de
+traçage, n'écrit rien sur le disque — ce qui explique les dates figées des
+caches — et ne se paie qu'une fois, d'où le plateau plat dès le deuxième
+passage. La mesure des segments extensibles l'appuie déjà sans avoir été faite
+pour ça : quand la capture échoue, le premier passage cesse d'être aberrant
+(45,6 · 48,1 · 47,9 · 48,1 · 47,7) et la dispersion tombe à 0,4 %. Voir
+`docs/SEGMENTS-EXTENSIBLES.md`.
+
+Si cela se confirme avec `--no-cuda-graphs`, le froid ne se supprime pas mais
+se **déplace** : capturer au démarrage du serveur plutôt qu'à la première
+requête le retire du chemin de service, ce qui est exactement ce qu'on veut
+d'un serveur.
