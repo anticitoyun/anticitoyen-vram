@@ -31,6 +31,98 @@ __all__ = ["QuantLinear", "StreamedWeight", "RMSNorm", "RotaryEmbedding",
            "batched_decode_attention", "causal_mask"]
 
 
+class PoolHote:
+    """Arène de mémoire hôte épinglée où les tampons plats sont découpés.
+
+    L'allocateur hôte de PyTorch arrondit toute demande à la puissance de 2
+    supérieure — à toutes les échelles. Nos experts pèsent exactement 3,00 Mio
+    (768 x 2048 en bf16) et en coûtent 4 : +33,3 % sur toute la mémoire
+    verrouillée, soit 46,01 Gio mesurés pour 33,76 de poids réels. Mesuré le
+    8/09/2026 sur 200 allocations — sur une seule, un surcoût fixe de première
+    allocation donne un facteur 3,9 qui n'est pas le régime.
+
+    Une arène dont la taille EST une puissance de 2 ne paie rien (facteur
+    1,000 relevé à 2, 4, 512 et 1024 Mio), et une vue prise dedans est
+    elle-même épinglée. Grossir les tampons ne suffirait pas : un tampon par
+    couche ferait 1152 Mio, arrondis à 2048, soit +77,8 % — le pire point de
+    l'échelle. C'est l'alignement qui compte, pas la taille.
+
+    Les blocs sont demandés par puissances de 2 décroissantes, avec bissection
+    quand l'allocation échoue : le surcoût reste nul à chaque étape, et une
+    machine trop chargée dégrade en blocs plus petits au lieu de tuer le
+    chargement entier — ce qu'une arène unique ferait.
+    """
+
+    ALIGNEMENT = 256
+
+    def __init__(self, octets: int, plancher: int = 64 * 2 ** 20) -> None:
+        self.blocs: list[torch.Tensor] = []
+        self._curseurs: list[int] = []
+        reste = int(octets)
+        while reste >= plancher:
+            taille = 1 << (reste.bit_length() - 1)      # plus grande 2^k <= reste
+            while taille >= plancher:
+                try:
+                    self.blocs.append(
+                        torch.empty(taille, dtype=torch.uint8).pin_memory())
+                    self._curseurs.append(0)
+                    reste -= taille
+                    break
+                except (RuntimeError, MemoryError):
+                    taille >>= 1                        # bissection
+            else:
+                break                                   # même le plancher échoue
+
+    @property
+    def octets(self) -> int:
+        return sum(b.numel() for b in self.blocs)
+
+    def tranche(self, n: int) -> "Optional[torch.Tensor]":
+        """Une vue de n octets, ou None s'il ne reste pas la place.
+
+        Une tranche ne chevauche jamais deux blocs : elle tient entière dans
+        l'un d'eux, sinon on essaie le suivant.
+        """
+        besoin = (n + self.ALIGNEMENT - 1) // self.ALIGNEMENT * self.ALIGNEMENT
+        for i, bloc in enumerate(self.blocs):
+            debut = self._curseurs[i]
+            if debut + besoin <= bloc.numel():
+                self._curseurs[i] = debut + besoin
+                return bloc[debut:debut + n]
+        return None
+
+
+_POOL: "Optional[PoolHote]" = None
+
+
+def reserver_pool(octets: int) -> "Optional[PoolHote]":
+    """Réserve l'arène. À appeler APRÈS le calcul du plan, jamais avant.
+
+    Avant le plan, la taille exilée n'est pas connue : un pool dimensionné là
+    serait un chiffre deviné.
+    """
+    global _POOL
+    _POOL = PoolHote(octets) if octets > 0 else None
+    return _POOL
+
+
+def liberer_pool() -> None:
+    """Rend l'arène entière.
+
+    C'est le seul moment où la mémoire épinglée revient au système :
+    l'allocateur hôte de PyTorch ne rend jamais ce qu'il a pris, et 11 550
+    tampons individuels ne peuvent donc pas être rendus. Une arène, si.
+    """
+    global _POOL
+    _POOL = None
+    if hasattr(torch._C, "_host_emptyCache"):
+        torch._C._host_emptyCache()
+
+
+def _tranche_pool(n: int) -> "Optional[torch.Tensor]":
+    return _POOL.tranche(n) if _POOL is not None else None
+
+
 def _emballer(host: dict[str, torch.Tensor]):
     """Copie les tenseurs dans un tampon uint8 épinglé contigu ; rend le
     tampon et la découpe ``{clé: (décalage, forme, dtype)}``, décalages
@@ -41,7 +133,9 @@ def _emballer(host: dict[str, torch.Tensor]):
         n = v.numel() * v.element_size()
         decoupe[k] = (off, tuple(v.shape), v.dtype, n)
         off += (n + 255) // 256 * 256
-    plat = torch.empty(max(off, 1), dtype=torch.uint8).pin_memory()
+    plat = _tranche_pool(max(off, 1))
+    if plat is None:
+        plat = torch.empty(max(off, 1), dtype=torch.uint8).pin_memory()
     for k, (o, forme, dt, n) in decoupe.items():
         plat[o:o + n].view(dt).view(forme).copy_(host[k])
     return plat, decoupe

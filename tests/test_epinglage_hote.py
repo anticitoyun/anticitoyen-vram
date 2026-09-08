@@ -94,3 +94,51 @@ def test_l_epinglage_ne_s_accumule_pas_d_un_chargement_a_l_autre():
         f"réservé {apres_1} puis {apres_2} : le résidu épinglé s'accumule "
         f"d'un chargement à l'autre — problème de service, pas de mesure")
     assert sw2.plat.is_pinned()
+
+
+@besoin_carte
+def test_le_pool_supprime_l_arrondi_a_la_puissance_de_2():
+    """Des tampons de 3 Mio coûtent 4 Mio chacun ; découpés dans une arène, 3.
+
+    L'allocateur hôte arrondit chaque demande à la puissance de 2 supérieure.
+    Nos experts font exactement 3,00 Mio, donc +33,3 % sur toute la mémoire
+    verrouillée. Une arène dont la taille est une somme de puissances de 2 ne
+    paie rien, et les tranches qu'on y prend restent épinglées.
+    """
+    from acvram.engine.layers import liberer_pool, reserver_pool
+
+    n, mio = 64, 3
+    utile = n * mio * 1024 * 1024          # 192 Mio = 128 + 64, exact
+
+    def construire():
+        return [StreamedWeight(_poids(n_tenseurs=1, mio=mio), torch.device("cpu"))
+                for _ in range(n)]
+
+    liberer_pool()
+    avant = _epingle()
+    sws = construire()
+    sans_pool = _epingle() - avant
+    del sws
+    torch._C._host_emptyCache()
+
+    avant = _epingle()
+    pool = reserver_pool(utile)
+    sws = construire()
+    avec_pool = _epingle() - avant
+    tranche_epinglee = sws[0].plat.is_pinned()
+    del sws
+    liberer_pool()
+
+    assert pool is not None and pool.octets == utile, (
+        f"l'arène devait faire {utile} octets, elle fait "
+        f"{pool.octets if pool else 0} — la décomposition en puissances de 2 a échoué")
+    assert tranche_epinglee, "une tranche prise dans l'arène doit rester épinglée"
+    # Un surcoût FIXE d'environ 3,3 Mio accompagne la première allocation, quelle
+    # que soit la taille : mesuré 3,2 / 3,5 / 3,3 Mio pour n = 64 / 128 / 256.
+    # Il ne croît pas avec l'arène, donc il est négligeable à l'échelle réelle
+    # (33,76 Gio) et ne doit pas faire échouer le test à petite échelle.
+    assert avec_pool <= utile + 16 * 1024 * 1024, (
+        f"avec arène : {avec_pool} octets épinglés pour {utile} utiles")
+    assert avec_pool < sans_pool * 0.85, (
+        f"sans arène {sans_pool}, avec arène {avec_pool} : le gain attendu est "
+        f"d'un quart, il n'est pas là")
