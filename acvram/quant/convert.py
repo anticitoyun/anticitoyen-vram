@@ -47,6 +47,11 @@ class ConversionOptions:
     group_size: int = 128
     keep_sensitive_16bit: bool = True  # normalisations, routeur, plongements
     lm_head_format: Optional[str] = None
+    # Table de niveaux q3n de CE modèle (huit flottants, symétrique, bornes
+    # ±1) — écrite dans chaque entrée q3n du manifeste. None : TABLE_Q3N de
+    # la spécification. Les niveaux s'ajustent par modèle (Lloyd-Max sur
+    # échantillon stratifié) ; voir docs/FORMAT-3BITS.md du 8/09 au soir.
+    q3n_table: Optional[tuple] = None
     n_grid: int = 20
     device: str = "cuda:0"
     # Appareil sur lequel se fait la recherche AWQ et la quantification. Elle
@@ -142,7 +147,11 @@ def _h(n: float) -> str:
 # plutôt que d'entraîner tout le modèle vers un format plus large : dépenser
 # 8 bits sur les quelques pour cent de tenseurs qui en ont besoin coûte une
 # fraction de bit par poids sur l'ensemble.
-PROMOTE = {"int4_awq": "int8", "nvfp4": "int8", "int8": "bf16"}
+# q3n promeut vers int8 comme nvfp4 : sans cette entrée, la reconversion
+# « à filet égal » du 8/09 (snr_floor 25) a rendu un manifeste STRICTEMENT
+# identique au sans-filet — zéro promotion, en silence, options.snr_floor
+# pourtant à 25. Un filet qui ignore un format doit le dire, pas se taire.
+PROMOTE = {"int4_awq": "int8", "nvfp4": "int8", "q3n": "int8", "int8": "bf16"}
 
 # Largeur nominale de chaque format, bits par poids échelles comprises. Sert à
 # chiffrer le prix d'une promotion avant de la calculer : la mesurer d'abord
@@ -717,7 +726,25 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             use_hadamard=router.wants_hadamard(name, fmt),
             use_awq=opts.awq,
             n_grid=opts.n_grid,
+            table=opts.q3n_table if fmt == "q3n" else None,
         )
+        if fmt == "q3n":
+            entry["block"] = qt.block
+            entry["table"] = list(qt.table)
+            # Le critère de choix de table n'est PAS le creux : c'est le taux
+            # de zéros EXACTS de la source (contrôle bf16 du 8/09 : à creux
+            # égal, seul un poids nul profite d'un niveau zéro — une source
+            # bf16 en a 0 %, un GGUF à grille avec zéro ~21 %). Mesuré ici et
+            # écrit à côté du choix, pour que la règle soit vérifiable.
+            entry["taux_zeros_source"] = round(
+                float((tensor == 0).float().mean()), 4)
+            # Sceau : lie la table aux octets réellement écrits. Un manifeste
+            # régénéré sans reconversion ferait lire d'anciens poids avec une
+            # nouvelle table, silencieusement — le pire mode de défaillance.
+            import hashlib as _h
+            entry["sceau"] = _h.sha256(
+                qt.qweight.flatten()[:64].cpu().numpy().tobytes()
+                + repr(list(qt.table)).encode()).hexdigest()[:16]
 
         # Précision mixte, deux régimes : plancher SNR classique (défaut,
         # plafonné), ou budget global (bits_budget_gib > 0) où les deux

@@ -355,9 +355,12 @@ def _rehydrate(template: Any, tensors: dict[str, torch.Tensor]) -> Any:
                           template.group_size, template.shape)
     from ..quant.q3n import Q3NTensor
     if isinstance(template, Q3NTensor):
+        # La table suit le gabarit, comme block et shape : identique pour tout
+        # le modèle, elle n'a rien à faire dans les tampons transférés.
         return Q3NTensor(tensors["qweight"],
                          tensors["block_scale"].view(torch.float8_e4m3fn),
-                         tensors["global_scale"], template.block, template.shape)
+                         tensors["global_scale"], template.block,
+                         template.shape, template.format, template.table)
     raise TypeError(f"impossible de reconstruire {type(template)!r}")
 
 
