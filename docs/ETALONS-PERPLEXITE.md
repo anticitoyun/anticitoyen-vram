@@ -71,10 +71,15 @@ dossier — c'est elle qui sépare la qualité, intacte, de la performance, à
 refaire à chaque changement de régime. Elle repose donc sur une **trace
 secondaire**.
 
-À refaire une fois, journaux conservés hors de `/tmp` : deux minutes de mesure
-qui soldent une dette portant sur tout le reste. En attendant, ne pas présenter
-cette insensibilité comme reproductible — elle est **consignée**, ce qui n'est
-pas la même chose.
+**SOLDÉE le 8/09 à 21h51.** Relance à l'identique — même build `e34f042`, même
+corpus (1 290 590 o, sha `173c87a5…`), mêmes conditions — après redémarrage et
+dans un état de machine franchement différent :
+
+    [64] 29.5004     Final estimate: PPL = 29.5004 +/- 0.72123
+
+Reproduit à la quatrième décimale, incertitude comprise. Journal conservé **hors
+de `/tmp`** : `acvram-memoire/journaux/etalon-29-5004.log`. L'insensibilité au
+régime n'est plus seulement consignée, elle est **reproduite**.
 
 ## Le biais d'instrument, et pourquoi il fallait le mesurer
 
