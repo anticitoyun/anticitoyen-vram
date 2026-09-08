@@ -157,6 +157,9 @@ def dequantize(t: Any, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         return dequantize_int4(t, dtype or torch.float16)
     if fmt == "int8":
         return _dequantize_int8(t, dtype or torch.float16)
+    if fmt == "q3n":
+        from .q3n import dequantize_q3n
+        return dequantize_q3n(t, dtype or torch.bfloat16)
     if isinstance(t, PlainTensor):
         return t.weight.to(dtype) if dtype else t.weight
     if isinstance(t, torch.Tensor):
