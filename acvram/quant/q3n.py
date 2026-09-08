@@ -22,6 +22,7 @@ vrai modèle n'est pas encore mesurée**, ni le débit du chemin de calcul.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 
@@ -123,12 +124,21 @@ def dequantize_q3n(t: Q3NTensor, out_dtype: torch.dtype = torch.bfloat16
     return (vals * echelle.unsqueeze(-1)).reshape(sortie, entree).to(out_dtype)
 
 
-def q3n_gemv(x: torch.Tensor, t: Q3NTensor) -> torch.Tensor:
+def q3n_gemv(x: torch.Tensor, t: Q3NTensor) -> Optional[torch.Tensor]:
     """``x @ W.T`` par déquantification — chemin de référence.
 
     Un noyau fusionné (déquantification en mémoire partagée, comme la GEMM
     groupée NVFP4) viendra le remplacer ; ce chemin-ci ferme la marche et fixe
     la numérique que le noyau devra égaler.
+
+    Rend ``None`` sur une forme qui ne convient pas, jamais une exception : le
+    planificateur essaie un chemin puis retombe sur le suivant, et une
+    exception ici fait tomber la requête entière au lieu de replier. Même
+    contrat que ``nvfp4_mm_tensorcore``.
     """
+    if x.dim() not in (1, 2):
+        return None
+    if x.shape[-1] != t.shape[1]:
+        return None
     dt = x.dtype if x.dtype != torch.float32 else torch.bfloat16
     return torch.nn.functional.linear(x, dequantize_q3n(t, dt).to(x.dtype))
