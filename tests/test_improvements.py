@@ -824,3 +824,19 @@ def test_q3n_empaquetage_et_numerique():
     y = q3n_gemv(x, t)
     attendu = x @ dequantize_q3n(t, torch.bfloat16).t()
     assert torch.allclose(y.float(), attendu.float(), atol=1e-2)
+
+
+def test_une_source_3_bits_bascule_les_etages_sur_q3n():
+    """8/09/2026 : plutôt que refuser une source 3 bits, la conversion bascule
+    les étages GPU sur q3n (3,25 b/p) et l'annonce ; elle ne refuse plus que
+    si même q3n grossirait la source."""
+    from acvram.quant.convert import BPW_NOMINAL, garde_grossissement
+    assert BPW_NOMINAL["q3n"] == 3.25
+    n = 80_000_000_000
+    # Q3_K_S à 3,4 b/p : q3n (3,25) ne grossit pas -> aucun refus
+    assert garde_grossissement(int(n * 3.4 / 8), n, 3.25, False) is None
+    # source à 2,5 b/p : même q3n grossit -> refus, qui nomme q3n en issue
+    import pytest
+    with pytest.raises(ValueError) as e:
+        garde_grossissement(int(n * 2.5 / 8), n, 3.25, False)
+    assert "q3n" in str(e.value)
