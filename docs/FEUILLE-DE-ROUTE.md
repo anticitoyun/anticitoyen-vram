@@ -4,6 +4,75 @@
 extension de mémoire GPU fonctionnelle et livrait un module noyau qui se
 contentait d'afficher les nombres passés en paramètres.
 
+## 8 septembre 2026 — la trace de routage, avant tout cache d'experts
+
+**Le chiffre qui manque à tout le monde.** Aucun taux de succès mesuré n'existe
+pour une pile à 512 experts routés 10. `cached_expert_fraction` est un rapport
+de capacité, c'est-à-dire le taux qu'on obtiendrait si le routage était
+uniforme — or il ne l'est pas, et c'est toute la raison d'être d'un cache.
+
+`acvram/memory/trace_routage.py` journalise, pour chaque jeton et chaque
+couche, les experts choisis, **dans l'ordre d'émission**. L'ordre porte
+l'information : savoir qu'un expert est demandé 8 % du temps ne dit pas s'il
+l'est en rafale ou dispersé, et ces deux régimes ne donnent pas le même taux.
+
+Activé par `ACVRAM_TRACE_ROUTAGE=/chemin`. Éteint, il coûte **22 ns par appel**,
+un test de booléen : la fonction sort avant de toucher aux tenseurs. Allumé, il
+synchronise — assumé, une trace d'ordre ne peut pas faire autrement, et elle
+n'est jamais active en service.
+
+`taux_de_succes()` rejoue la trace à travers un cache de capacité donnée, en
+politique du moins récemment servi ou du moins fréquemment servi. **Les deux
+sont fournies parce que le choix n'est pas évident** : un routage en rafale
+favorise la première, des experts chauds stables la seconde. La trace
+tranchera, pas nous.
+
+**Un défaut trouvé en l'essayant**, et qui aurait faussé tout rejeu : la
+première version repartait du compteur cumulé à chaque couche, si bien que la
+couche 1 numérotait 3, 4, 5 les jetons que la couche 0 appelait 0, 1, 2. Les
+mêmes jetons sous deux noms, et un rejeu qui aurait cru voir deux fois plus de
+trafic qu'il n'en passe. La base est désormais figée au premier appel d'un
+passage. Deux tests le vérifient, dont un sur la numérotation elle-même.
+
+L'index de couche descend depuis `DecoderLayer`, seul endroit qui le connaisse,
+plutôt que par les trois sites de construction du bloc. Il vaut -1 si personne
+ne l'a posé : une trace pleine de -1 se voit, une trace qui invente des numéros
+non.
+
+## 8 septembre 2026 — ma lecture réfutée sur l'ampleur, et le compte dérivé
+
+**Le test que j'avais proposé s'est retourné contre moi, et c'est son intérêt.**
+J'avais écrit : diviser les copies par trois doit faire tomber la pente d'un
+tiers, sinon mon terme est faux. Mesuré : 3,11 ms deviennent 2,88, là où ma
+lecture prédisait 2,07 et où une domination des latences aurait donné 1,04.
+
+De ces deux points, à volume inchangé :
+
+| Part | Valeur | Fraction |
+|---|---|---|
+| Latences fixes | 0,345 ms | 11 % |
+| Le reste | 2,765 ms | 89 % |
+
+Le reste correspond à 6,5 Go/s sur un bus mesuré à 18,7. **L'essentiel du coût
+n'est donc ni la latence par transfert ni le débit nominal**, et il reste à
+nommer : débit effectif plus bas, ou synchronisation par expert que le nombre
+de copies ne change pas. Le terme constant existe, il ne domine pas.
+
+`transfer_fixed_us` reste à **zéro** malgré ces deux points : ils viennent d'un
+seul modèle et d'une seule couche. En tirer une constante générale serait
+refaire l'erreur qu'on venait de corriger deux fois.
+
+**Le nombre de copies par expert était faux deux fois, il n'est plus écrit.**
+D'abord des blocs de 4 Mo, soit cinq copies — facteur dix-huit. Puis trois
+copies par expert — facteur trois. Le vrai compte est neuf : trois projections,
+et trois tenseurs par poids NVFP4 copiés un par un.
+
+Il est désormais **dérivé de la classe** par
+`NVFP4Tensor.transferts_par_poids()`, qui compte ses champs de type tenseur.
+Quand les trois tenseurs voyageront dans un seul tampon épinglé, le compte
+suivra tout seul. Une constante écrite ailleurs serait restée fausse en
+silence — c'est arrivé deux fois en une heure.
+
 ## 8 septembre 2026 — le nombre de transferts, corrigé par la mesure
 
 La courbe du 8 septembre a tranché deux choses sur le terme constant ajouté en

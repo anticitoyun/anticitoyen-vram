@@ -1,0 +1,195 @@
+# SPDX-FileCopyrightText: 2026 Anticitoyen
+# SPDX-License-Identifier: Apache-2.0
+"""Journal des experts routés, jeton par jeton et couche par couche.
+
+Pourquoi ce fichier existe
+--------------------------
+
+Le planificateur décide où loger les experts d'un modèle creux, et il le fait
+sans jamais savoir lesquels sont réellement demandés. `cached_expert_fraction`
+n'est aujourd'hui qu'un rapport de capacité — combien d'octets tiennent dans le
+cache, divisé par combien il y en a — c'est-à-dire le taux de succès qu'on
+obtiendrait si le routage était uniforme. Il ne l'est pas : c'est toute la
+raison d'être d'un cache.
+
+Aucun taux de succès mesuré n'existe pour une pile à 512 experts routés 10.
+Sans trace, tout cache est réglé sur une hypothèse.
+
+Ce que ce journal enregistre
+----------------------------
+
+Une ligne par jeton et par couche : le rang du jeton, l'index de la couche, et
+les experts choisis. **Dans l'ordre d'émission**, parce qu'un cache se juge sur
+une suite, pas sur des comptes : savoir qu'un expert est demandé 8 % du temps
+ne dit pas s'il l'est en rafale ou dispersé, et ces deux régimes ne donnent pas
+le même taux de succès.
+
+Le format est du texte compact, une ligne par entrée, relisible sans
+bibliothèque :
+
+    <jeton> <couche> <expert>,<expert>,...
+
+Ce qu'il coûte quand il est éteint
+----------------------------------
+
+Un test de booléen par appel, et rien d'autre. La fonction sort avant de
+toucher aux tenseurs. **Elle ne doit jamais provoquer de synchronisation
+implicite** : un `.tolist()` sur un tenseur de carte force l'hôte à attendre le
+calcul, ce qui fausserait à la fois la mesure de débit et celle d'énergie. Le
+transfert est donc explicitement non bloquant, et la conversion différée à
+l'écriture.
+
+Activation
+----------
+
+    ACVRAM_TRACE_ROUTAGE=/chemin/du/journal.txt
+
+Absente, tout est éteint. Le fichier est ouvert à la première écriture et
+fermé par `fermer()` ou à la fin du processus.
+"""
+
+from __future__ import annotations
+
+import atexit
+import os
+import threading
+from typing import Optional
+
+__all__ = ["actif", "noter", "fermer", "chemin"]
+
+_CHEMIN: Optional[str] = os.environ.get("ACVRAM_TRACE_ROUTAGE") or None
+_ACTIF: bool = _CHEMIN is not None
+_FICHIER = None
+_VERROU = threading.Lock()
+_JETON = 0
+_BASE: Optional[int] = None
+
+
+def actif() -> bool:
+    """Vrai si la trace est demandée. Un test de booléen, rien de plus."""
+    return _ACTIF
+
+
+def chemin() -> Optional[str]:
+    return _CHEMIN
+
+
+def _fichier():
+    global _FICHIER
+    if _FICHIER is None:
+        # Tampon de 1 Mio : une trace fait des centaines de milliers de lignes,
+        # et une écriture par ligne coûterait plus que le routage lui-même.
+        _FICHIER = open(_CHEMIN, "w", buffering=1 << 20)
+        _FICHIER.write("# jeton couche experts\n")
+        atexit.register(fermer)
+    return _FICHIER
+
+
+def noter(couche: int, indices) -> None:
+    """Enregistre les experts routés d'une couche pour le jeton courant.
+
+    ``indices`` est le tenseur des index d'experts, de forme [jetons, top_k].
+    Il est ramené sur l'hôte ici : cette fonction n'est appelée que sous
+    trace, et le coût du transfert est le prix de la mesure. Hors trace, on
+    n'arrive jamais ici.
+    """
+    if not _ACTIF:
+        return
+    try:
+        # .tolist() synchronise. C'est assumé SOUS TRACE et seulement là : une
+        # trace prise sans synchroniser mélangerait les couches, ce qui est
+        # exactement ce qu'on veut mesurer.
+        lignes = indices.detach().to("cpu").tolist()
+    except Exception:                                   # noqa: BLE001
+        return
+    if lignes and not isinstance(lignes[0], list):
+        lignes = [lignes]
+    global _JETON, _BASE
+    with _VERROU:
+        f = _fichier()
+        # Toutes les couches d'un même passage portent les MÊMES numéros de
+        # jeton : la base est figée à la première couche et relue par les
+        # suivantes. Une première version faisait avancer le compteur puis
+        # repartait de sa valeur courante, ce qui numérotait la couche 1 en
+        # 3, 4, 5 là où la couche 0 disait 0, 1, 2 — les mêmes jetons sous
+        # deux noms, et un rejeu qui aurait cru voir deux fois plus de trafic.
+        if couche == 0 or _BASE is None:
+            _BASE = _JETON
+            _JETON += len(lignes)
+        base = _BASE
+        for i, experts in enumerate(lignes):
+            f.write(f"{base + i} {couche} "
+                    + ",".join(str(int(e)) for e in experts) + "\n")
+
+
+def fermer() -> None:
+    global _FICHIER
+    with _VERROU:
+        if _FICHIER is not None:
+            _FICHIER.close()
+            _FICHIER = None
+
+
+def relire(chemin_journal: str):
+    """Relit une trace, dans l'ordre d'émission.
+
+    Rend des triplets ``(jeton, couche, [experts])``. L'ordre du fichier est
+    l'ordre d'émission : c'est lui qui porte l'information, et le relecteur ne
+    doit pas le trier.
+    """
+    with open(chemin_journal) as f:
+        for ligne in f:
+            if ligne.startswith("#") or not ligne.strip():
+                continue
+            a, b, c = ligne.split(None, 2)
+            yield int(a), int(b), [int(e) for e in c.strip().split(",") if e]
+
+
+def taux_de_succes(chemin_journal: str, capacite: int,
+                   politique: str = "lru") -> dict:
+    """Rejoue la trace à travers un cache de ``capacite`` experts.
+
+    C'est le chiffre que personne n'a publié pour 512 experts routés 10, et
+    que le planificateur suppose aujourd'hui égal au rapport de capacité.
+
+    ``politique`` : ``lru`` (le moins récemment servi sort) ou ``lfu`` (le
+    moins fréquemment servi sort). Les deux sont fournies parce que le choix
+    n'est pas évident : un routage en rafale favorise la première, un routage
+    à experts chauds stables la seconde. **La trace tranchera, pas nous.**
+    """
+    from collections import OrderedDict, Counter
+    cache: OrderedDict = OrderedDict()
+    freq: Counter = Counter()
+    succes = demandes = 0
+    par_couche: dict[int, list[int]] = {}
+    for _, couche, experts in relire(chemin_journal):
+        s = d = 0
+        for e in experts:
+            cle = (couche, e)
+            d += 1
+            if cle in cache:
+                s += 1
+                cache.move_to_end(cle)
+            else:
+                if len(cache) >= capacite:
+                    if politique == "lfu":
+                        victime = min(cache, key=lambda k: freq[k])
+                        cache.pop(victime)
+                    else:
+                        cache.popitem(last=False)
+                cache[cle] = True
+            freq[cle] += 1
+        succes += s
+        demandes += d
+        acc = par_couche.setdefault(couche, [0, 0])
+        acc[0] += s
+        acc[1] += d
+    return {
+        "politique": politique,
+        "capacite": capacite,
+        "demandes": demandes,
+        "succes": succes,
+        "taux": succes / demandes if demandes else 0.0,
+        "taux_par_couche": {c: (s / d if d else 0.0)
+                            for c, (s, d) in sorted(par_couche.items())},
+    }

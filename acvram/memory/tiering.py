@@ -593,29 +593,48 @@ def _estimate(spec: ModelSpec, plan: Plan, tiers: list[Tier],
             # demande un terme constant ; une pente logarithmique suit le
             # NOMBRE de blocs transferes, pas leur volume.
             #
-            # LA VALEUR DU COUT FIXE N'EST TOUJOURS PAS MESUREE. La courbe du
-            # 8 septembre 2026 confirme qu'il EXISTE — une couche exilee
-            # transfere 18,4 Mio en 3,2 ms, soit 5,7 Go/s effectifs sur un bus
-            # mesure a 18,7 : le transfert est borne par la latence, pas par le
-            # debit — mais elle ne separe pas le cout fixe du cout par octet.
-            # Il faut pour cela chronometrer un transfert sur trois tailles
-            # ecartees d'un facteur quatre. Zero par defaut jusque-la : un
-            # modele sans ce terme est faux mais connu, tandis qu'un modele
-            # portant une constante inventee serait faux et credible.
+            # LE COUT FIXE EXISTE MAIS IL NE DOMINE PAS, et c'est une mesure
+            # qui l'a etabli contre la lecture qui avait propose ce terme.
             #
-            # LE NOMBRE DE TRANSFERTS, lui, est mesure. Une couche a melange
-            # d'experts en copie UN PAR TENSEUR ET PAR EXPERT ROUTE : releve du
-            # 8 septembre, dix experts fois trois tenseurs, trente copies par
-            # couche d'environ 0,6 Mio chacune. Une premiere version supposait
-            # des blocs de 4 Mo, soit cinq copies la ou il y en a trente — six
-            # fois trop peu, et le terme aurait ete sous-estime d'autant.
+            # Diviser par trois le nombre de copies, a volume inchange, fait
+            # passer une couche de 3,11 a 2,88 ms. Si les latences fixes
+            # dominaient, on serait tombe vers 1,04 ; la lecture predisait 2,07.
+            # De ces deux points : latences fixes 0,345 ms, soit ONZE POUR CENT
+            # du total ; le reste, 2,765 ms, correspond a 6,5 Go/s sur un bus
+            # mesure a 18,7.
             #
-            # Le compte est derive du modele et non fige : un modele a un autre
-            # nombre d'experts actifs ou de tenseurs par expert donnerait un
-            # autre chiffre. TENSEURS_PAR_EXPERT reste une constante
-            # d'architecture — porte, montee, descente — vraie des piles vues
-            # jusqu'ici et fausse le jour ou l'une en aura quatre.
-            TENSEURS_PAR_EXPERT = 3
+            # Donc l'essentiel du cout n'est ni la latence par transfert ni le
+            # debit nominal. Il reste a nommer : debit effectif reellement plus
+            # bas, ou synchronisation par expert que le nombre de copies ne
+            # change pas.
+            #
+            # transfer_fixed_us reste a ZERO malgre ces deux points. Ils
+            # viennent d'un seul modele et d'une seule couche ; en tirer une
+            # constante generale serait refaire l'erreur qu'on vient de
+            # corriger deux fois sur le nombre de copies.
+            #
+            # LE NOMBRE DE TRANSFERTS, corrige deux fois par la mesure.
+            #
+            # Un expert route coute NEUF copies sur l'arbre actuel : trois
+            # projections — porte, montee, descente — et trois tenseurs par
+            # projection, un poids NVFP4 etant fait de qweight, des echelles de
+            # bloc et de l'echelle globale, copies un par un. Dix experts
+            # routes font donc quatre-vingt-dix copies par couche exilee.
+            #
+            # Deux versions fausses avant celle-ci : des blocs de 4 Mo, soit
+            # cinq copies (facteur dix-huit trop peu), puis trois copies par
+            # expert (facteur trois). Chaque correction venait d'un relevé, pas
+            # d'un raisonnement.
+            #
+            # Ce nombre TOMBE A TROIS quand les trois tenseurs d'un poids
+            # voyagent dans un seul tampon epingle. Il n'est donc PAS ecrit ici
+            # : NVFP4Tensor.transferts_par_poids() le compte sur la classe
+            # elle-meme, et suivra cette optimisation sans qu'on y revienne.
+            # Deux valeurs ecrites en dur ont deja ete fausses, d'un facteur
+            # dix-huit puis trois.
+            from ..quant.nvfp4 import NVFP4Tensor
+            PROJECTIONS = 3          # porte, montee, descente
+            TENSEURS_PAR_EXPERT = PROJECTIONS * NVFP4Tensor.transferts_par_poids()
             couche = spec.layers[lp.index]
             actifs = getattr(couche, "n_experts_active", 0) or 0
             if actifs:

@@ -158,6 +158,24 @@ class NVFP4Tensor:
             n *= d
         return self.nbytes * 8 / max(1, n)
 
+    @classmethod
+    def transferts_par_poids(cls) -> int:
+        """Nombre de copies distinctes qu'un poids coute pour changer de memoire.
+
+        Compte les champs qui sont des tenseurs, par introspection de la
+        dataclasse : c'est exactement ce que ``to()`` deplace, un appel par
+        champ. Trois aujourd'hui — qweight, echelles de bloc, echelle globale.
+
+        Cette methode existe pour que le planificateur n'ecrive pas ce nombre
+        en dur. Il l'a fait deux fois et s'est trompe deux fois, d'un facteur
+        dix-huit puis trois ; et le jour ou les trois tenseurs voyageront dans
+        un seul tampon epingle, une constante ecrite ailleurs resterait fausse
+        en silence. Ici elle suit la classe.
+        """
+        import dataclasses
+        return sum(1 for f in dataclasses.fields(cls)
+                   if f.type in ("torch.Tensor", torch.Tensor))
+
     def to(self, device, non_blocking: bool = False) -> "NVFP4Tensor":
         return NVFP4Tensor(
             qweight=self.qweight.to(device, non_blocking=non_blocking),

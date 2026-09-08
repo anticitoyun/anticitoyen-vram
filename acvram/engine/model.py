@@ -25,6 +25,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .. import kernels
+from ..memory import trace_routage as _trace_routage
 from ..memory.kvcache import PagedKVCache, bucket_blocks
 from .config import ModelSpec
 from .layers import (QuantLinear, RMSNorm, RotaryEmbedding, add_norm, apply_rope,
@@ -450,6 +451,10 @@ class MoEBlock(nn.Module):
         self.routed_scale = routed_scale
         self._stack_state = "?"                # ? | oui | non
         self._stacks = None
+        # Index de la couche, pose par le chargeur. -1 quand personne ne l'a
+        # pose : la trace de routage l'ecrit tel quel plutot que d'inventer un
+        # numero, et une trace pleine de -1 se voit tout de suite.
+        self.index_couche = -1
         # activation des experts : le chemin groupé la reproduit (SiLU par
         # défaut, GELU-tanh pour Gemma 4)
         a = getattr(experts[0], "act", "silu") if experts else "silu"
@@ -711,6 +716,11 @@ class MoEBlock(nn.Module):
                 topw = topw / topw.sum(dim=-1, keepdim=True)
             if self.routed_scale != 1.0:
                 topw = topw * self.routed_scale
+        # Trace de routage : un test de booleen quand elle est eteinte, et le
+        # module ne touche a rien de plus. Sous trace, elle synchronise — c'est
+        # le prix d'une mesure d'ordre, et elle n'est jamais active en service.
+        if _trace_routage.actif():
+            _trace_routage.noter(self.index_couche, topi)
         return topw, topi
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -818,6 +828,12 @@ class DecoderLayerGDN(nn.Module):
         self.index = index
         self.linear_attn = gdn
         self.mlp = mlp
+        # L'index descend jusqu'au bloc d'experts : lui seul sait quels
+        # experts il route, et la trace a besoin de savoir DE QUELLE COUCHE.
+        # Pose ici, au seul endroit qui connaisse l'index, plutot qu'aux trois
+        # sites de construction du bloc.
+        if hasattr(mlp, "index_couche"):
+            mlp.index_couche = index
         self.input_layernorm = input_norm
         self.post_attention_layernorm = post_norm
         self.device = device
@@ -970,6 +986,12 @@ class DecoderLayer(nn.Module):
         self.index = index
         self.self_attn = attn
         self.mlp = mlp
+        # L'index descend jusqu'au bloc d'experts : lui seul sait quels
+        # experts il route, et la trace a besoin de savoir DE QUELLE COUCHE.
+        # Pose ici, au seul endroit qui connaisse l'index, plutot qu'aux trois
+        # sites de construction du bloc.
+        if hasattr(mlp, "index_couche"):
+            mlp.index_couche = index
         self.input_layernorm = input_norm
         self.post_attention_layernorm = post_norm
         self.device = device
