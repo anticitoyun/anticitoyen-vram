@@ -2637,6 +2637,17 @@ réelles, écart maximal et quadratique moyen publiés, compte des valeurs
 saturées. Une égalité au bit près sur formes réelles serait un signal à
 inspecter, pas un succès.
 
+**Deux validations distinctes, une seule faite.** L'écart en 1e-7 valide
+l'arithmétique du GEMV — il calcule bien le produit demandé — et ne dit rien
+de ce que le format coûte au modèle : la même référence part des mêmes poids
+déquantifiés. La validation de **format** — q3n contre poids d'origine,
+couche par couche, erreur relative attendue de l'ordre du pour cent (15 dB de
+SNR ≈ 18 % d'erreur quadratique relative sur les distributions de la
+spécification), distribution des écarts et valeurs aberrantes — reste due sur
+les poids réels, et se confirme à la perplexité. Un q3n rapide et exact
+arithmétiquement peut rendre un modèle plus bête sans que le comparatif de
+débit le voie jamais.
+
 **Ce qui décidera du bloc 16 contre 32** : la lourdeur de queue des vrais
 poids d'experts. Sur lognormale, l'écart entre blocs passe de 0,85 dB (sigma
 nul) à 2,91 dB (sigma 1,5) — plus la queue est lourde, plus le bloc de 16
