@@ -113,10 +113,17 @@ llama.cpp e34f042, `-c 512`, stride 512, 256 positions notées par fenêtre
 |---|---|---|
 | Qwen3-Coder-Next-heretic **Q3_K_S** (la source de q3n) | 584 | **9,1831 ± 0,073** |
 | le même, cumul intermédiaire | 64 | 8,5236 |
-| Qwen3.6-12B-IQ-Q5_K_M (témoin d'instrument) | 584 | **31,6919 ± 0,265** |
+| Qwen3.6-12B-IQ-Q5_K_M (témoin d'instrument) | 580 | **31,6919 ± 0,265** |
+| phi-4-Q4_K_M (témoin dense) | 565 | **6,5988 ± 0,041** |
 | le même, cumul intermédiaire | 64 | 29,5004 ± 0,721 |
 
-Deux règles qui se déduisent de ces chiffres :
+Le nombre de fenêtres est propre au **tokeniseur du modèle**, jamais au corpus :
+584 pour Coder-Next, 580 pour le 12B, 565 pour phi-4, sur le même fichier.
+Comptes exacts par `llama-tokenize` : 297 193 jetons pour le 12B, 289 305 pour
+phi-4. Un compte de fenêtres qui ne correspond pas est le contrôle de
+tokenisation le plus court qui existe.
+
+Trois règles qui se déduisent de ces chiffres :
 
 1. **Une éval restreinte à N fenêtres se compare au cumul à la fenêtre N**, jamais
    au chiffre final. Le cumul oscille — 32,4 puis 26,2 puis 29,5 puis 31,7 sur le
@@ -124,6 +131,17 @@ Deux règles qui se déduisent de ces chiffres :
 2. **64 fenêtres ne suffisent pas à trancher un biais de 2 %** : l'incertitude y
    vaut ±2,4 %, plus grande que le seuil. Il faut le fichier entier, où elle
    tombe à ±0,84 %.
+3. **Un chiffre ne se recopie pas sans son étiquette.** Trois erreurs le même
+   jour, toutes de la même forme — une valeur mesurée juste, transportée avec une
+   légende fausse : un compte d'octets lu dans un `ls` et écrit comme s'il avait
+   été mesuré ; une cible établie sur 584 fenêtres appliquée à une mesure sur 64 ;
+   un nombre de fenêtres transporté d'un modèle à l'autre, jusque dans le nom du
+   fichier de journal. Aucune n'était une erreur de mesure, et c'est ce qui les
+   rend dangereuses : le chiffre résiste à la relecture, sa légende non. La parade
+   est la même que le sceau posé sur les tables q3n — **un chiffre voyage avec ce
+   qui l'a produit** : modèle, corpus et son empreinte, découpage, nombre de
+   fenêtres, incertitude. Une ligne de tableau sans ces champs n'est pas une
+   mesure, c'est un souvenir.
 
 Deux exécutions indépendantes rendent `[64] 29,5004` à la quatrième décimale :
 llama.cpp est déterministe sur ce chemin, et l'incertitude publiée est bien de
