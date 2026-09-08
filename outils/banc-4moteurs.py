@@ -555,6 +555,14 @@ def mesurer(moteur):
         # l'ordre, la table de decision de docs/SERIE-DETERMINISME.md ne peut
         # pas etre appliquee (mesure du 8 septembre 2026).
         "t_s_passages": ",".join(f"{d:.1f}" for d in debits),
+        # Le temps au premier jeton DE CHAQUE passage. Le debit dit que le
+        # premier passage coute ; le TTFT dit ou il coute. Si le premier TTFT
+        # est seul eleve, le prix est paye avant la generation — lecture des
+        # caches, allocation de l'arene, initialisation du contexte — et un
+        # prechargement le supprimerait au lieu de le subir. Releve du
+        # 8 septembre 2026 : ni ~/.nv/ComputeCache ni ~/.triton/cache n'ont
+        # ete ecrits pendant les series, donc ce n'est PAS de la compilation.
+        "ttft_passages": ",".join(f"{p[1] * 1000:.0f}" for p in passages),
     }
     # Un aperçu du texte à côté du débit : 481 t/s de « de de de » sur quatre
     # jetons se lisaient comme un record tant qu'on ne voyait pas le texte.
@@ -614,7 +622,8 @@ def main():
         with open(a.sortie, "w") as f:
             f.write("modele\tmoteur\talias\tctx\tt_s\tttft_ms\tW\tj_kJ\tjetons\tchargement_s\tetat\tapercu\t"
                     "J\tJ_net\tW_repos\tj_kJ_net\tplafond_W\thorloge_min\thorloge_max\ttemp_max\t"
-                    "bridages\tdispersion_pct\tt_s_min\tt_s_max\tt_s_passages\tempreintes\ttextes_identiques\t"
+                    "bridages\tdispersion_pct\tt_s_min\tt_s_max\tt_s_passages\tttft_passages\t"
+                    "empreintes\ttextes_identiques\t"
                     "invalidations\n")
 
     # par moteur, pour ne pas relancer un serveur lourd à chaque modèle
@@ -646,6 +655,7 @@ def main():
                         f"{v('plafond_W', 0)}\t{v('horloge_min', -1)}\t{v('horloge_max', -1)}\t"
                         f"{v('temp_max', -1)}\t{v('bridages', '?')}\t{v('dispersion_pct', 0)}\t"
                         f"{v('t_s_min', 0)}\t{v('t_s_max', 0)}\t{v('t_s_passages', '?')}\t"
+                        f"{v('ttft_passages', '?')}\t"
                         f"{v('empreintes', '?')}\t"
                         f"{v('textes_identiques', '?')}\t{v('invalidations', '?')}\n")
         arreter(m)
