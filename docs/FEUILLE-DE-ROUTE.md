@@ -2935,3 +2935,48 @@ réparé donne un chiffre PLAUSIBLE — la bonne forme, le bon ordre de
 grandeur, la signature attendue — et le plausible est ce qui échappe au
 contrôle. Chaque montage s'éprouve après CHAQUE réparation, pas
 seulement à la première.
+
+## 8 septembre 2026, 15:15 — BILAN de la série Q3N : le format est innocenté, le moteur est désigné
+
+Quatre chiffres, même corpus (wiki.test.raw, sha256 173c87a5…), même
+cadrage (584 fenêtres de 512 disjointes, 148 920 positions notées à
+min_context 256), même harnais :
+
+  étalon llama.cpp, GGUF Q3_K_S source     9,1831 ± 0,073
+  q3n v0.4.94, SANS filet (snr_floor 0)    1005,838
+  q3n v0.4.95, filet réel (144 promus)     209,036
+  NVFP4 (snr_floor 25, ancien dossier)     193,621
+
+* **Le filet vaut 1,57 nats** (×4,8) : les 144 shared_expert promus int8
+  étaient le premier poste. PROMOTE ignorait q3n en silence (corrigé
+  v0.4.95, test au registre : tout format quantifié a une issue).
+* **Le format ne coûte que 0,077 nats** (+8 % relatif) : q3n à 3,25 bits
+  contre NVFP4 à 4,5, à filet égal, mêmes conditions — 25 % d'octets en
+  moins pour 8 % de perplexité relative en plus. C'est le chiffre que la
+  journée cherchait, et il est favorable au format.
+* **L'excès dominant (3,05 nats) est COMMUN aux deux formats** : le
+  « fait sans cause » des hybrides est partagé par qwen3next, mesuré sur
+  le dossier — au moteur ou au harnais sur cette architecture, pas au
+  format. Paradoxe directeur pour la suite : le NVFP4 à ppl 193 au
+  harnais génère du texte cohérent en usage réel — le défaut penche vers
+  le chemin d'évaluation/prefill des hybrides, pas la génération.
+* Prédictions écrites d'avance et leurs verdicts (session OnePlus) :
+  « après » prédit 25-70 centre 40, mesuré 209 — modèle du bruit blanc
+  des routés réfuté par son autrice : l'erreur de la table sans zéro est
+  un BIAIS CORRÉLÉ entre experts (énergie créée, même géométrie partout),
+  qui s'additionne au lieu de se moyenner ; sa prédiction dérivée pour la
+  table à niveau zéro (30-90) est bornée par le mode commun (~179 tant
+  qu'il n'est pas expliqué). « Ça ne descendra pas à 9,18 » : tenu.
+
+Suite, dans l'ordre convenu à trois : (1) expliquer le mode commun des
+hybrides (dump par couche sur Coder-Next, chemin d'éval vs génération) ;
+(2) table à niveau zéro par manifeste (mécanique v0.4.95 prête et
+scellée, valeurs d'poste1 en attente de ce préalable) ; (3) le programme
+performance sur le créneau du modèle exilé — distribution du routage
+(l'outil de trace n'a jamais pris de trace réelle), banc comparatif
+reproductible (la dispersion 21-26 % est un préalable), cache d'experts
+(promis par tiering.py, absent du moteur, VRAM réservée perdue),
+recouvrement transfert/calcul (bus à 5,7/18,7 Go/s, cartes muettes une
+seconde sur deux), transfert en format compact, et l'axe jetons/kJ que
+personne ne publie (104 j/kJ net déjà mesurés au compteur, cartes
+bridées 400/275 W).
