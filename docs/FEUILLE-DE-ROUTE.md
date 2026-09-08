@@ -2387,3 +2387,34 @@ diviser les lancements par trois ne suffit pas, le coût est dans la
 sérialisation des salves, pas dans le nombre de copies. Prochaine cible : le
 recouvrement — les copies de la couche N pendant l'attention de N, et les
 deux cartes en même temps.
+
+## 8 septembre 2026 — seconde fenêtre : la copie contiguë mesurée en service, et la première énergie
+
+Fenêtre entièrement couverte, segment découpé sur les lignes `[mesure]` du
+serveur, 40 s, 400 jetons.
+
+**Le débit passe de 9,5 à 9,99 jetons par seconde** : +5 % pour trois fois
+moins de copies. La prédiction « borné par la latence des copies » tombe —
+elle exigeait 15,4. La prédiction « rien ne bouge » tombe aussi : le bus
+transporte 541 Mio par jeton contre 479 mesurés hier, mais la fenêtre d'hier
+ne couvrait que 56 % du décodage, sa première moitié : les deux fenêtres ne se
+comparent pas entre elles, seuls les débits en jetons se comparent. Ce qui
+borne est la **sérialisation de la chaîne** — routage, copie, calcul, expert
+après expert — et le profil le montre mieux que toute moyenne : la 3080 Ti a
+le bus à moins de 50 Mo/s treize secondes sur quarante pendant que le décodage
+attend, avec des plages entières à 7 Mo/s. **Cible unique : recouvrir.**
+
+**Première mesure d'énergie du protocole**, bornée par les horodatages
+journalisés, ligne de base de même durée immédiatement après :
+
+| | décodage | repos après |
+|---|---|---|
+| RTX 5090 | 76,2 W, 2 970 J, 38 °C, SM 2 745-2 842 MHz | 27,2 W |
+| RTX 3080 Ti | 102,5 W, 3 997 J, 34-35 °C, SM 1 755-2 010 MHz | 52,8 W |
+
+400 jetons : 6 967 J bruts, 3 847 nets, soit **17,4 J/jeton brut, 9,6 net** —
+57 et 104 jetons par kilojoule. Trois faits à porter au comparatif : aucune
+des deux cartes n'approche son plafond (76 W sur 400, 102 sur 275), donc ce
+régime n'est pas celui des cartes contraintes ; la 3080 Ti consomme plus que
+la 5090 en transférant quatre fois moins ; et le repos pèse 45 % de la
+fenêtre, ce qui rend le choix brut/net décisif et oblige à l'annoncer.
