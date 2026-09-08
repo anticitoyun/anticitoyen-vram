@@ -220,7 +220,15 @@ def load_model(path: str, plan: Optional[Plan] = None,
         # réécrivait un emplacement que le GEMV du jeton courant n'avait pas
         # encore lu (l'événement « libre » venait du jeton précédent) :
         # écart de 4e-2 au lieu de 5e-4 au test à sec du 8/09.
-        pool = (ExpertPool(mlp_dev, 2 * (spec.num_experts_per_tok or 2) + 2)
+        # Le repli doit etre celui du bloc, jamais plus petit. Il valait 2 ici
+        # et 8 la (`MoEBlock(..., spec.num_experts_per_tok or 8)`) : sur un
+        # modele dont la configuration ne porte pas le nombre d'experts par
+        # jeton, le bloc en routait huit et le pool n'avait que six
+        # emplacements pour les seize copies d'entree. Depuis le 8/09/2026 le
+        # pool refuse bruyamment d'ecraser un emplacement en vol au lieu de
+        # rendre les octets d'un autre expert ; il faut encore qu'il en ait
+        # assez.
+        pool = (ExpertPool(mlp_dev, 2 * (spec.num_experts_per_tok or 8) + 2)
                 if streamed_mlp else None)
 
         def elin(suffix: str) -> QuantLinear:

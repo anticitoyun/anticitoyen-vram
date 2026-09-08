@@ -180,6 +180,10 @@ class ExpertPool:
                 "tampons": [_decouper(pl, decoupe) for pl in plats],
                 "pret": [torch.cuda.Event() for _ in range(self.n_slots)],
                 "libre": [torch.cuda.Event() for _ in range(self.n_slots)],
+                # Un emplacement distribue et pas encore rendu ne doit jamais
+                # etre reecrit. L'evenement `libre` ne le protege pas : tant
+                # qu'il n'a jamais ete enregistre, l'attendre ne fait rien.
+                "distribue": [False] * self.n_slots,
                 "prochain": 0,
                 "base": len(self._slots),
             }
@@ -200,6 +204,19 @@ class ExpertPool:
     def copier(self, plat: torch.Tensor, decoupe: dict) -> int:
         jeu = self._jeu(plat, decoupe)
         i = jeu["prochain"]
+        if jeu["distribue"][i]:
+            # Tous les emplacements de cette disposition sont en vol. Continuer
+            # ecraserait les octets d'un expert qu'un calcul n'a pas encore lu,
+            # et le calcul lirait alors un autre expert — sans erreur, sans
+            # trace, avec pour seul symptome une sortie qui degenere. Mesure du
+            # 8/09/2026 : dix experts pour quatre emplacements, l'echelle
+            # globale relue appartenait a un autre expert.
+            raise RuntimeError(
+                f"ExpertPool sature : {self.n_slots} emplacements, tous "
+                f"distribues et non rendus pour cette disposition. Augmenter "
+                f"n_slots (2 x experts_par_jeton + 2) ou liberer avant de "
+                f"copier.")
+        jeu["distribue"][i] = True
         jeu["prochain"] = (i + 1) % self.n_slots
         if self.SYNC:
             jeu["plats"][i].copy_(plat, non_blocking=True)
@@ -219,10 +236,12 @@ class ExpertPool:
         return jeu["tampons"][i]
 
     def liberer(self, slot: int) -> None:
+        d, i = self._slots[slot]
+        jeu = self._par_disposition[d]
+        jeu["distribue"][i] = False
         if self.SYNC:
             return
-        d, i = self._slots[slot]
-        self._par_disposition[d]["libre"][i].record(torch.cuda.current_stream(self.device))
+        jeu["libre"][i].record(torch.cuda.current_stream(self.device))
 
     @property
     def nbytes(self) -> int:
