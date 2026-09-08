@@ -467,3 +467,52 @@ publication, et elle vaut aussi pour lire les chiffres des autres.
 Sur la méthode elle-même, une inquiétude est levée : le GPU porte 78,7 à 92,5 %
 de l'énergie totale du nœud, donc une mesure au compteur NVML ne biaise pas le
 résultat d'un facteur qui compte ici.
+
+
+---
+
+# Le transport d'experts ne change pas un chiffre
+
+Mesuré le 8 septembre 2026 au soir, sur `lfm-8b-a1b-bf16`, protocole figé et
+prédictions écrites avant la mesure.
+
+| passe | couches exilées | perplexité | positions | durée |
+|---|---|---|---|---|
+| A₁ | 0 (placement naturel) | **58,815** | 146 717 | 82 s |
+| A₂ | 0, exécution identique | **58,815** | 146 717 | 61 s |
+| B | **12**, seul `mlp_storage`/`mlp_exec` change | **58,815** | 146 717 | **257 s** |
+
+**Les trois chiffres sont identiques.** Les deux prédictions sont vérifiées : la
+perplexité est reproductible d'une exécution à l'autre, et elle ne bouge pas
+quand douze couches passent en mémoire hôte. La troisième issue prévue — un
+écart de l'ordre de 5e-3 dû à un changement d'ordre d'accumulation — ne s'est
+pas présentée, donc pas de départage en fp32 à faire.
+
+**Et la quatrième colonne dit ce que les trois premières taisent** : la même
+passe met **257 s contre 61 et 82**, un facteur trois à quatre. L'exil s'est donc
+bel et bien produit — **il se voit dans le temps et pas dans le chiffre**. C'est
+la séparation qualité/performance mesurée au lieu d'être postulée : douze couches
+sur le PCIe coûtent un facteur quatre en temps et **zéro en qualité**.
+
+**Le contrôle qui rend la mesure valide**, exigé avant le lancement et présent au
+journal : `mesure : 12 couches à perceptron exilé (minimum imposé par la
+capacité : 0)`. Sans cette ligne, B aurait pu être une troisième exécution de A —
+égalité prédite, conclusion « transport innocent », et deux fois la même mesure.
+Aucune passe n'a émis `plan réajusté`, et la VRAM libre était identique aux trois
+chargements.
+
+## Ce que ça change dans la table des témoins
+
+Les cases **« MoE résident »** et **« MoE exilé »** n'en font plus qu'une : un
+modèle partiellement exilé se mesure et s'interprète **sans réserve sur le
+transport**. La réserve posée sur le témoin `qwen3-coder-30b-bf16` — 26 couches
+sur 48 en mémoire hôte, puis un exil forcé à 30 pour contourner la fragmentation
+— est nommée mais **n'affaiblit plus son chiffre**.
+
+## Ce que ça n'établit pas
+
+Que ce soit vrai de **toute** architecture. `lfm-8b-a1b` est hybride à
+convolutions courtes : l'invariance porte sur **son** chemin d'experts, pas sur
+un GDN ni sur une attention latente. Transporter ce résultat aux autres
+architectures serait la faute commise sept fois dans la même journée — un
+résultat vrai, appliqué hors de ses conditions.
