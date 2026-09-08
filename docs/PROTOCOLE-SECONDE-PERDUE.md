@@ -151,6 +151,55 @@ C'est la même forme que les autres pièges du dossier : un indicateur **voisin*
 de celui qu'on croit lire. La mémoire disponible mesure ce qui reste à donner ;
 elle ne dit rien de ce que le système est en train de reprendre.
 
+### Borner la mesure, et pas seulement la refuser
+
+Les gardes ci-dessus disent « ne commence pas si ça ne tient pas ». Elles ne
+disent rien quand elles se sont trompées — et le 8 septembre elles se sont
+trompées : le témoin a passé les préconditions puis paralysé la machine.
+
+**La contrainte posée par l'utilisateur est qu'un test ne bloque JAMAIS le PC.**
+Elle ne se satisfait pas d'une précondition, seulement d'un mécanisme qui borne
+pendant l'exécution. Le contrôleur mémoire est délégué à la session utilisateur
+(`cgroup.controllers` : `cpu memory pids`), donc sans `sudo` :
+
+    systemd-run --user --scope --unit=<nom> \
+        -p MemoryMax=24G -p MemorySwapMax=0 -- <la mesure>
+
+**`MemorySwapMax=0` n'est pas facultatif — éprouvé, et le résultat est le
+contraire de l'intuition.** Avec `MemoryMax=200M` seul, un programme d'essai a
+alloué **4 Go sans broncher** : le noyau tient la borne de RAM en poussant le
+surplus **en mémoire d'échange**. Une borne mémoire naïve *fabrique* donc
+exactement le phénomène qu'on veut éviter. Les deux paramètres ensemble : mort
+immédiate, sans sortie.
+
+La victime devient toujours la mesure, jamais le bureau. Une mesure tuée se
+relance ; une session utilisateur perdue, non.
+
+**Borne d'accident, pas rationnement.** Le plafond doit être haut : il existe
+pour rendre l'accident impossible, pas pour économiser. Une borne serrée sur un
+processus qui a besoin de davantage ne le rend pas économe, elle le tue à chaque
+redémarrage, à la même étape. Et `MemoryHigh` est à proscrire ici : au-delà, le
+noyau n'arrête pas, il **étrangle** — un processus qui ne meurt pas et ne répond
+plus est plus difficile à diagnostiquer qu'une mort franche.
+
+**Réserve non levée** : rien ne prouve encore que la mémoire **épinglée par
+CUDA** soit comptée par le contrôleur. Si elle lui échappe, la borne ne protège
+pas de notre cas précis. S'éprouve en chargeant un modèle exilé sous une borne
+délibérément trop basse : s'il ne meurt pas, on le sait avant d'en avoir besoin.
+
+### `memory.peak` : sur le scope du test, jamais sur une slice partagée
+
+`memory.peak` existe sur ce noyau et donne le **pic historique** du cgroup —
+monotone, il ne redescend jamais. Relevé à l'instant sur `user@1000.service` :
+
+    96 015 753 216 octets = 89,4 Gio     (sur 93,98 Gio de RAM)
+
+C'est la trace chiffrée de la saturation du soir, et c'est aussi le piège : lu
+sur une slice partagée, ce compteur mêle toutes les sessions et toute l'histoire
+depuis le démarrage. Il n'a de sens que **sur un scope créé pour la mesure**,
+où son pic est celui de la mesure et de rien d'autre. Encore un indicateur qui
+porte le bon nom au mauvais endroit.
+
 ## Les mesures, et ce que chacune élimine
 
 Chacune isole **un** candidat en le rendant impossible ou en le déplaçant, sans
