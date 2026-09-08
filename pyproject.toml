@@ -39,4 +39,7 @@ acvram = ["kernels/*.cu", "kernels/*.cuh", "kernels/*.cpp", "config/*.yaml"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
-markers = ["gpu_requis: exige une carte CUDA avec au moins 4 Gio libres (sinon ignore)"]
+markers = [
+    "gpu_requis: exige une carte CUDA avec au moins 4 Gio libres (sinon ignore)",
+    "debit_requis: mesure un debit — exige une carte au repos (sinon ignore)",
+]

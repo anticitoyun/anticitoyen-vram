@@ -337,7 +337,25 @@ class QuantLinear(nn.Module):
 
 
 def _rehydrate(template: Any, tensors: dict[str, torch.Tensor]) -> Any:
-    """Reconstruit un objet tenseur quantifié autour de tampons GPU fraîchement copiés."""
+    """Reconstruit un objet tenseur quantifié autour de tampons GPU fraîchement copiés.
+
+    L'echelle globale memoisee du modele est RECOPIEE depuis le template. Sans
+    cela, chaque transfert d'expert rend un objet neuf dont le cache est vide,
+    et le premier GEMV le relit par `.item()` : une synchronisation du flux
+    CUDA par expert et par couche, la ou la memoisation existe justement pour
+    l'eviter — ce meme appel pesait 62 % du temps de decodage au profil NVFP4,
+    et une synchronisation rend le noyau incapturable dans un graphe. La valeur
+    est identique par construction : le tampon GPU est la copie du tenseur hote
+    que le template decrit.
+    """
+    objet = _rehydrate_brut(template, tensors)
+    gs = template.__dict__.get("_gs_f")
+    if gs is not None:
+        objet.__dict__["_gs_f"] = gs
+    return objet
+
+
+def _rehydrate_brut(template: Any, tensors: dict[str, torch.Tensor]) -> Any:
     if isinstance(template, NVFP4Tensor):
         return NVFP4Tensor(
             tensors["qweight"], tensors["block_scale"].view(torch.float8_e4m3fn),

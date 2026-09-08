@@ -144,3 +144,49 @@ def test_couche_moe_entiere_dans_les_clous():
         _identiques(u, _rehydrate(u, fu.wait(su)))
         _identiques(d, _rehydrate(d, fd.wait(sd)))
         fg.release(sg); fu.release(su); fd.release(sd)
+
+
+@CUDA
+def test_l_echelle_memoisee_survit_au_transfert():
+    """Un expert transfere ne doit pas relire son echelle globale par `.item()`.
+
+    `global_scale_float()` memoise le scalaire parce que le relire synchronise
+    le flux CUDA — cet appel pesait 62 % du temps de decodage au profil NVFP4,
+    et une synchronisation rend le noyau incapturable dans un graphe. Mais
+    `_rehydrate` construit un objet NEUF a chaque transfert : sans propagation
+    du cache, la memoisation est annulee a chaque copie d'expert, soit une
+    synchronisation par expert et par couche.
+
+    La valeur est identique par construction — le tampon GPU est la copie du
+    tenseur hote que le template decrit.
+    """
+    from acvram.engine.layers import StreamedWeight
+
+    dev = torch.device("cuda:0")
+    t = _expert()
+    attendu = t.global_scale_float()          # remplit le cache du template
+    assert "_gs_f" in t.__dict__
+
+    sw = StreamedWeight(t.state_dict(), dev)
+    slot = sw.prefetch()
+    rebati = _rehydrate(t, sw.wait(slot))
+    sw.release(slot)
+
+    assert "_gs_f" in rebati.__dict__, \
+        "cache perdu : le prochain GEMV synchronisera le flux"
+    assert rebati.__dict__["_gs_f"] == attendu
+
+
+def test_un_template_sans_cache_ne_fabrique_rien():
+    """Et si le template n'a jamais lu son echelle, on n'invente pas de valeur.
+
+    Un garde-fou qui remplit un cache avec autre chose que la vraie valeur
+    serait pire que pas de cache du tout.
+    """
+    t = _expert()
+    assert "_gs_f" not in t.__dict__          # jamais lu
+    plat, decoupe = _emballer(t.state_dict())
+    rebati = _rehydrate(t, _decouper(plat, decoupe))
+    assert "_gs_f" not in rebati.__dict__
+    # et la lecture reste correcte quand elle a lieu
+    assert rebati.global_scale_float() == t.global_scale_float()

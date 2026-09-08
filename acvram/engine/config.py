@@ -205,10 +205,21 @@ class ModelSpec:
                 f"h={self.hidden_size}, {b:.1f} G parametres "
                 f"({a:.1f} G actifs par jeton){moe}")
 
+    # Cles de `raw` que le CHARGEUR consulte : elles doivent survivre a la
+    # conversion, sinon le manifeste ne transporte pas ce que le chargeur
+    # attend et la branche correspondante ne s'execute jamais en service.
+    # Le 8/09/2026, `gdn_a_log_negexp` manquait ainsi au manifeste : le facteur
+    # de decroissance des couches recurrentes etait transforme deux fois, pour
+    # onze pour cent d'ecart au lieu d'un contre llama.cpp.
+    CLES_BRUTES_UTILES = ("gdn_a_log_negexp",)
+
     def to_dict(self) -> dict:
         d = asdict(self)
-        d.pop("raw", None)
+        brut = d.pop("raw", None) or {}
         d.pop("layers", None)
+        for cle in self.CLES_BRUTES_UTILES:
+            if cle in brut:
+                d[cle] = brut[cle]
         d["total_params"] = self.total_params
         d["active_params"] = self.active_params
         return d

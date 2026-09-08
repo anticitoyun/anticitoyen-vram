@@ -43,6 +43,58 @@ def is_gguf(path: str) -> bool:
         return True
     return os.path.isdir(path) and bool(find_gguf(path))
 
+# Architectures dont les sections de RoPE sont CONTIGUES : en texte pur les
+# trois axes portent la meme position, les frequences ne sont pas permutees, et
+# le resultat est celui d'un RoPE ordinaire. Le raccourci y est demontre.
+#
+# Il ne l'est PAS pour l'entrelacement (IMROPE, `LLAMA_ROPE_TYPE_IMROPE` chez
+# llama.cpp) : la, les frequences sont permutees entre paires de dimensions, et
+# meme a positions egales le resultat differe d'un NEOX standard. L'ecart croit
+# avec la distance entre positions, ce qui donne une sortie correcte au debut
+# puis de plus en plus fausse — mesure le 8/09/2026 sur un qwen35, dont les
+# sections valent [11, 11, 10, 0] : perplexite qui REMONTE avec le contexte
+# (85 a 128 jetons, 173 a 512) la ou un modele dense descend proprement.
+#
+# La liste est BLANCHE a dessein : une architecture inconnue portant des
+# sections non triviales est refusee jusqu'a ce que quelqu'un ait verifie
+# laquelle des deux dispositions elle emploie. Une demi-journee a ete perdue
+# sur un modele servi faux en silence ; un dossier qu'on ne sait pas servir se
+# conserve, il ne se sert pas.
+_ROPE_SECTIONS_CONTIGUES = {
+    "qwen2vl", "qwen3vl", "qwen3vlmoe",
+    # qwen35 : sections [11, 11, 10, 0] et RoPE ENTRELACE chez llama.cpp
+    # (`LLAMA_ROPE_TYPE_IMROPE`). Verifie le 8/09/2026 dans les deux sources,
+    # et le raccourci tient quand meme, pour deux raisons qui doivent aller
+    # ensemble :
+    #  - `ggml-cpu/ops.cpp` : l'entrelacement ne change ni l'ordre ni la
+    #    valeur des frequences ; le selecteur ne choisit que QUEL axe de
+    #    position fournit l'angle ;
+    #  - `llama-batch.cpp:712-719` : pour un lot de JETONS, la meme position
+    #    est diffusee sur les quatre axes (`src_off = batch.token ? 0 : ...`).
+    # Les quatre axes portant la meme position et les frequences etant
+    # inchangees, IMROPE se reduit exactement a NEOX. **En texte pur
+    # seulement** : le jour ou l'on servira des images a ce modele, les axes
+    # porteront des positions differentes et il faudra l'implementer.
+    "qwen35", "qwen35moe",
+}
+
+
+def _garde_rope_sections(arch: str, sections) -> None:
+    if not sections or arch in _ROPE_SECTIONS_CONTIGUES:
+        return
+    utiles = [int(x) for x in sections if int(x) > 0]
+    if len(utiles) <= 1:
+        return                     # une seule section : RoPE ordinaire
+    raise ValueError(
+        f"architecture {arch!r} : rope.dimension_sections = {list(sections)}, "
+        f"soit un RoPE multi-axes dont acvram ne connait pas la disposition. "
+        f"Si les sections sont contigues, l'ajouter a "
+        f"_ROPE_SECTIONS_CONTIGUES apres verification ; si elles sont "
+        f"entrelacees (IMROPE), il faut l'implementer. Servir ce modele avec "
+        f"un NEOX standard rend une sortie qui se degrade avec la longueur du "
+        f"contexte, sans erreur.")
+
+
 
 def find_gguf(path: str) -> Optional[str]:
     """Le fichier .gguf d'un répertoire.
@@ -374,6 +426,7 @@ class GGUFFile:
                    "qwen3vl": "Qwen3ForCausalLM",
                    "qwen3vlmoe": "Qwen3MoeForCausalLM"}
         vl = {"qwen2vl": "qwen2", "qwen3vl": "qwen3", "qwen3vlmoe": "qwen3_moe"}
+        _garde_rope_sections(a, g("rope.dimension_sections"))
         heads = int(g("attention.head_count", 32))
         tokens = self.kv.get("tokenizer.ggml.tokens") or []
         cfg = {
