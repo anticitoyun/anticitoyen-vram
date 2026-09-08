@@ -21,7 +21,7 @@ dans ~/.config/ia-secrets.env et dans api_tokens.yml de TabbyAPI.
 
 Reprenable : les couples déjà présents dans le TSV de sortie sont sautés.
 """
-import argparse, json, os, re, subprocess, sys, threading, time, tomllib, urllib.request
+import argparse, json, os, re, statistics, subprocess, sys, threading, time, tomllib, urllib.request
 
 KIMI = os.path.expanduser("~/.kimi-code")
 BIN = os.path.expanduser("~/.local/bin")
@@ -36,6 +36,9 @@ PROMPT = ("Explique en détail, en français et en plusieurs paragraphes, commen
           "la mémoire physique est pleine.")
 MAX_TOKENS = 200
 MESURES = 2
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from energie import Energie, repos            # noqa: E402
 
 
 def log(msg):
@@ -262,33 +265,12 @@ def _demarrer(moteur, dossier, ctx):
 # --------------------------------------------------------------------------
 # mesure
 # --------------------------------------------------------------------------
-class Watt:
-    """Échantillonne la puissance de la carte 0 pendant la génération."""
-    def __init__(self, gpu=0):
-        self.gpu, self.v, self.stop = gpu, [], False
-
-    def __enter__(self):
-        def boucle():
-            while not self.stop:
-                try:
-                    o = subprocess.run(["nvidia-smi", "-i", str(self.gpu), "--query-gpu=power.draw",
-                                        "--format=csv,noheader,nounits"],
-                                       capture_output=True, text=True, timeout=2).stdout
-                    self.v.append(float(o.strip()))
-                except Exception:
-                    pass
-                time.sleep(0.2)
-        self.t = threading.Thread(target=boucle, daemon=True)
-        self.t.start()
-        return self
-
-    def __exit__(self, *a):
-        self.stop = True
-        self.t.join(timeout=3)
-
-    @property
-    def moyenne(self):
-        return sum(self.v) / len(self.v) if self.v else 0.0
+# L'ancienne classe Watt est retiree : elle lancait un sous-processus
+# nvidia-smi toutes les 200 ms — sur la machine qu'elle mesurait — pour
+# moyenner des echantillons de puissance sur la seule carte 0. Trois defauts,
+# tous corriges dans outils/energie.py : le cout de la mesure, la moyenne qui
+# n'est pas une energie, et une carte lue sur deux alors qu'un modele exile
+# travaille sur les deux. Mesure du 8 septembre 2026 a l'appui.
 
 
 def modele_servi(moteur):
@@ -300,7 +282,7 @@ def modele_servi(moteur):
 
 
 def generer(moteur):
-    """Une génération en streaming : (jetons, ttft_s, duree_decodage_s, W)."""
+    """Une génération en streaming : (jetons, ttft_s, duree_decodage_s, Energie, texte)."""
     port = PORTS[moteur]
     corps = {"model": modele_servi(moteur) or "x",
              "messages": [{"role": "user", "content": PROMPT}],
@@ -311,7 +293,7 @@ def generer(moteur):
     req.add_header("Content-Type", "application/json")
     if CLES[moteur]:
         req.add_header("Authorization", f"Bearer {CLES[moteur]}")
-    with Watt() as w:
+    with Energie() as w:
         t0 = time.time()
         texte: list[str] = []
         premier = dernier = None
@@ -368,22 +350,48 @@ def generer(moteur):
         # ne peut se mesurer que sur la durée totale, premier jeton compris
         raise RuntimeError(f"pas de flux jeton par jeton ({morceaux} morceau(x) "
                            f"pour {n} jetons)")
-    return n, premier - t0, dernier - premier, w.moyenne, "".join(texte)
+    return n, premier - t0, dernier - premier, w, "".join(texte)
 
 
 def mesurer(moteur):
+    """Débit et énergie du MÊME passage, puis la ligne de base après lui.
+
+    L'énergie ne se moyenne pas entre passages : elle vient du passage dont on
+    publie le débit, sinon les deux colonnes décrivent deux exécutions
+    différentes. Et la ligne de base se prend APRÈS : prise une fois au début,
+    elle dérive, et la dérive se retrouve attribuée au moteur mesuré — c'est
+    ce qui avait fait croire à une décroissance de coût le 7 septembre 2026.
+    """
     meilleur = None
+    debits = []
     for _ in range(MESURES):
-        n, ttft, dt, watts, txt = generer(moteur)
+        n, ttft, dt, e, txt = generer(moteur)
         tps = (n - 1) / dt if n > 1 else 0.0
+        debits.append(tps)
         if meilleur is None or tps > meilleur[0]:
-            meilleur = (tps, ttft, watts, n, txt)
-    tps, ttft, watts, n, txt = meilleur
+            meilleur = (tps, ttft, e, n, txt, dt)
+    tps, ttft, e, n, txt, dt = meilleur
+    watts = e.moyenne
+    base = repos(secondes=min(max(dt, 5.0), 30.0))
+    joules = e.joules
+    joules_net = max(joules - base.moyenne * e.duree, 0.0)
     jkj = tps / watts * 1000 if watts else 0.0
+    jkj_net = n / joules_net * 1000 if joules_net else 0.0
+    dispersion = (100 * statistics.pstdev(debits) / statistics.mean(debits)
+                  if len(debits) > 1 and statistics.mean(debits) else 0.0)
+    r = e.resume()
+    energie = {
+        "J": round(joules, 1), "J_net": round(joules_net, 1),
+        "W_repos": round(base.moyenne, 1), "jkj_net": round(jkj_net, 1),
+        "plafond_W": r["plafond_w"], "horloge_min": r["horloge_min"],
+        "horloge_max": r["horloge_max"], "temp_max": r["temp_max"],
+        "bridages": r["bridages"], "invalidations": r["invalidations"],
+        "dispersion_pct": round(dispersion, 1),
+    }
     # Un aperçu du texte à côté du débit : 481 t/s de « de de de » sur quatre
     # jetons se lisaient comme un record tant qu'on ne voyait pas le texte.
     apercu = " ".join(txt.split())[:70]
-    return tps, ttft, watts, jkj, n, apercu
+    return tps, ttft, watts, jkj, n, apercu, energie
 
 
 # --------------------------------------------------------------------------
@@ -424,7 +432,9 @@ def main():
                 faits.add((c[0], c[1]))
     else:
         with open(a.sortie, "w") as f:
-            f.write("modele\tmoteur\talias\tctx\tt_s\tttft_ms\tW\tj_kJ\tjetons\tchargement_s\tetat\tapercu\n")
+            f.write("modele\tmoteur\talias\tctx\tt_s\tttft_ms\tW\tj_kJ\tjetons\tchargement_s\tetat\tapercu\t"
+                    "J\tJ_net\tW_repos\tj_kJ_net\tplafond_W\thorloge_min\thorloge_max\ttemp_max\t"
+                    "bridages\tdispersion_pct\tinvalidations\n")
 
     # par moteur, pour ne pas relancer un serveur lourd à chaque modèle
     for m in moteurs:
@@ -434,17 +444,26 @@ def main():
             log(f"{m:9s} {nom}")
             print(f"           cible : {d}", flush=True)
             etat, tps, ttft, watts, jkj, n, charge, apercu = "ok", 0, 0, 0, 0, 0, 0, ""
+            energie = {}
             try:
                 charge = demarrer(m, d, ctx)
-                tps, ttft, watts, jkj, n, apercu = mesurer(m)
+                tps, ttft, watts, jkj, n, apercu, energie = mesurer(m)
                 log(f"           {tps:.1f} t/s, TTFT {ttft*1000:.0f} ms, {watts:.0f} W, "
-                    f"{jkj:.0f} j/kJ, chargé en {charge:.0f} s")
+                    f"{jkj:.0f} j/kJ brut, {energie['jkj_net']:.0f} net, chargé en {charge:.0f} s")
+                if energie["invalidations"] != "aucune":
+                    log(f"           MESURE INVALIDE : {energie['invalidations']}")
             except Exception as exc:                       # noqa: BLE001
                 etat = f"erreur: {str(exc)[:120]}"
                 log(f"           ÉCHEC {etat}")
             with open(a.sortie, "a") as f:
+                def v(cle, defaut=""):
+                    return energie.get(cle, defaut)
                 f.write(f"{nom}\t{m}\t{alias}\t{ctx}\t{tps:.1f}\t{ttft*1000:.0f}\t{watts:.0f}\t"
-                        f"{jkj:.0f}\t{n}\t{charge:.0f}\t{etat}\t{apercu}\n")
+                        f"{jkj:.0f}\t{n}\t{charge:.0f}\t{etat}\t{apercu}\t"
+                        f"{v('J', 0)}\t{v('J_net', 0)}\t{v('W_repos', 0)}\t{v('jkj_net', 0)}\t"
+                        f"{v('plafond_W', 0)}\t{v('horloge_min', -1)}\t{v('horloge_max', -1)}\t"
+                        f"{v('temp_max', -1)}\t{v('bridages', '?')}\t{v('dispersion_pct', 0)}\t"
+                        f"{v('invalidations', '?')}\n")
         arreter(m)
     log("TERMINÉ")
 
