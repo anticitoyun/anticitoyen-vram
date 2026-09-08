@@ -90,6 +90,36 @@ pour une garde. Lire les lignes 2 et suivantes, jamais la première.
 Relever `si` une seconde fois **après** la mesure : si le swap a repris pendant,
 le temps mesuré est à écarter, pas à interpréter.
 
+### La mesure fabrique sa propre pression : garde de faisabilité, calculée avant
+
+Le relevé ci-dessus vérifie l'état **d'avant**. Il ne protège pas du cas où c'est
+la mesure elle-même qui rend la machine inutilisable — arrivé le soir même : le
+témoin bf16 a repoussé **4,9 Go en mémoire d'échange** en quelques minutes, et a
+été arrêté par l'utilisateur.
+
+Le mécanisme n'est pas la taille du modèle : c'est que les poids exilés sont
+**épinglés** (`StreamedWeight`, `engine/layers.py:44,66-67`), pour que la copie
+vers la carte reste asynchrone. La mémoire épinglée est **verrouillée en RAM par
+construction** : le noyau ne peut ni l'évincer ni l'écrire en mémoire d'échange.
+Les 4,9 Go swappés n'étaient donc pas nos poids — c'était **tout ce qu'ils ont
+chassé** : navigateur, bureau, sessions.
+
+Conséquence pour la garde : l'épinglage ne consomme pas seulement de la RAM, il
+**retire au noyau sa marge de manœuvre**, cache de page compris. D'où le remède
+qui a fonctionné (`swapoff -a && swapon -a`) et celui qui n'aurait rien donné
+(attendre).
+
+Cette garde-là se calcule **sans rien lancer**, dès l'écriture du protocole :
+
+    octets épinglés prévus  contre  RAM libre − ce que le système doit garder
+
+Le manifeste donne le premier terme (1,125 Gio par MLP × couches exilées =
+33,75 Gio à 30 couches), `free` le second. Ces deux chiffres suffisaient à
+refuser le lancement avant la lecture du premier octet.
+
+Une garde qui ne sait dire non qu'après avoir vu le mal est en retard d'une
+mesure.
+
 C'est la même forme que les autres pièges du dossier : un indicateur **voisin**
 de celui qu'on croit lire. La mémoire disponible mesure ce qui reste à donner ;
 elle ne dit rien de ce que le système est en train de reprendre.
