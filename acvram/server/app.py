@@ -470,9 +470,18 @@ async def _stream_chat(service: EngineService, request_id: str,
     # à la fin en appels structurés ; un « < » isolé attend un peu, le temps
     # de savoir s'il ouvre la balise.
     total, pend, retenu = "", "", False
+    premier_jeton = None
     try:
         async for out in service.collect(request_id, q):
             n_out = out.completion_tokens
+            if out.text_delta and premier_jeton is None:
+                # Journalisé pour les mesures d'énergie et de bus : la fenêtre
+                # d'un instrument extérieur se borne sur ces deux instants,
+                # sans messagerie ni horloge partagée (protocole du 8/09).
+                import datetime as _dt
+                premier_jeton = _dt.datetime.now()
+                print(f"[mesure] {cid} premier jeton "
+                      f"{premier_jeton.strftime('%H:%M:%S.%f')[:-3]}", flush=True)
             if out.text_delta:
                 total += out.text_delta
                 if not outils:
@@ -524,6 +533,11 @@ async def _stream_chat(service: EngineService, request_id: str,
         traceback.print_exc()
         err = ErrorResponse.make(str(exc), "server_error")
         yield f"data: {json.dumps(err.model_dump())}\n\n"
+    if premier_jeton is not None:
+        import datetime as _dt
+        print(f"[mesure] {cid} dernier jeton "
+              f"{_dt.datetime.now().strftime('%H:%M:%S.%f')[:-3]} "
+              f"({n_out} jetons)", flush=True)
     yield "data: [DONE]\n\n"
 
 

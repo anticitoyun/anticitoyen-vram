@@ -31,6 +31,25 @@ __all__ = ["QuantLinear", "StreamedWeight", "RMSNorm", "RotaryEmbedding",
            "batched_decode_attention", "causal_mask"]
 
 
+def _emballer(host: dict[str, torch.Tensor]):
+    """Copie les tenseurs dans un tampon uint8 épinglé contigu ; rend le
+    tampon et la découpe ``{clé: (décalage, forme, dtype)}``, décalages
+    alignés sur 256 octets pour les copies et les vues."""
+    decoupe = {}; off = 0
+    for k in sorted(host):
+        v = host[k]
+        n = v.numel() * v.element_size()
+        decoupe[k] = (off, tuple(v.shape), v.dtype, n)
+        off += (n + 255) // 256 * 256
+    plat = torch.empty(max(off, 1), dtype=torch.uint8).pin_memory()
+    for k, (o, forme, dt, n) in decoupe.items():
+        plat[o:o + n].view(dt).view(forme).copy_(host[k])
+    return plat, decoupe
+
+
+def _decouper(plat: torch.Tensor, decoupe: dict) -> dict[str, torch.Tensor]:
+    return {k: plat[o:o + n].view(dt).view(forme) for k, (o, forme, dt, n) in decoupe.items()}
+
 class StreamedWeight:
     """Un poids qui vit en mémoire hôte épinglée et ne visite le GPU qu'à la demande.
 
@@ -46,6 +65,13 @@ class StreamedWeight:
                  n_buffers: int = 2, pool: "Optional[ExpertPool]" = None) -> None:
         self.host = {k: (v.pin_memory() if not v.is_pinned() else v)
                      for k, v in host_tensors.items()}
+        # Un seul tampon épinglé contigu par poids : la copie hôte→carte se
+        # fait en UN lancement au lieu d'un par tenseur (trois pour NVFP4 :
+        # qweight, block_scale, global_scale). La courbe du 8/09 a montré un
+        # transfert borné par la latence des copies, pas par le débit du bus —
+        # 5,7 Go/s effectifs sur 18,7 —, avec quatre-vingt-dix copies par
+        # couche exilée. Le dictionnaire `host` reste la vue par clé.
+        self.plat, self.decoupe = _emballer(self.host)
         self.device = device
         self.pool = pool
         self.stream = (pool.stream if pool is not None else
@@ -59,10 +85,11 @@ class StreamedWeight:
     def _ensure(self) -> None:
         if self._buffers:
             return
+        self._plats = []
         for _ in range(self.n_buffers):
-            self._buffers.append({
-                k: torch.empty_like(v, device=self.device)
-                for k, v in self.host.items()})
+            plat = torch.empty_like(self.plat, device=self.device)
+            self._plats.append(plat)
+            self._buffers.append(_decouper(plat, self.decoupe))
             self._events.append(
                 torch.cuda.Event() if self.device.type == "cuda" else None)
             self._libres.append(
@@ -83,14 +110,13 @@ class StreamedWeight:
         if self.device.type != "cuda":
             return 0
         if self.pool is not None:
-            return self.pool.copier(self.host)
+            return self.pool.copier(self.plat, self.decoupe)
         self._ensure()
         slot = self._slot
         self._slot = (self._slot + 1) % self.n_buffers
         with torch.cuda.stream(self.stream):
             self._libres[slot].wait(self.stream)      # le calcul précédent a fini de lire
-            for k, dst in self._buffers[slot].items():
-                dst.copy_(self.host[k], non_blocking=True)
+            self._plats[slot].copy_(self.plat, non_blocking=True)   # une seule copie
             self._events[slot].record(self.stream)
         return slot
 
@@ -141,16 +167,17 @@ class ExpertPool:
         self._slots: list[tuple[tuple, int]] = []      # slot global -> (disposition, index)
 
     @staticmethod
-    def _disposition(host: dict[str, torch.Tensor]) -> tuple:
-        return tuple((k, tuple(v.shape), v.dtype) for k, v in sorted(host.items()))
+    def _disposition(decoupe: dict, nbytes: int) -> tuple:
+        return (nbytes,) + tuple((k, o, forme, dt, n) for k, (o, forme, dt, n) in sorted(decoupe.items()))
 
-    def _jeu(self, host: dict[str, torch.Tensor]) -> dict:
-        d = self._disposition(host)
+    def _jeu(self, plat: torch.Tensor, decoupe: dict) -> dict:
+        d = self._disposition(decoupe, plat.numel())
         jeu = self._par_disposition.get(d)
         if jeu is None:
+            plats = [torch.empty_like(plat, device=self.device) for _ in range(self.n_slots)]
             jeu = {
-                "tampons": [{k: torch.empty_like(v, device=self.device)
-                             for k, v in host.items()} for _ in range(self.n_slots)],
+                "plats": plats,
+                "tampons": [_decouper(pl, decoupe) for pl in plats],
                 "pret": [torch.cuda.Event() for _ in range(self.n_slots)],
                 "libre": [torch.cuda.Event() for _ in range(self.n_slots)],
                 "prochain": 0,
@@ -170,19 +197,17 @@ class ExpertPool:
     # est dans l'ordonnancement ci-dessous.
     SYNC = bool(os.environ.get("ACVRAM_POOL_SYNC"))
 
-    def copier(self, host: dict[str, torch.Tensor]) -> int:
-        jeu = self._jeu(host)
+    def copier(self, plat: torch.Tensor, decoupe: dict) -> int:
+        jeu = self._jeu(plat, decoupe)
         i = jeu["prochain"]
         jeu["prochain"] = (i + 1) % self.n_slots
         if self.SYNC:
-            for k, dst in jeu["tampons"][i].items():
-                dst.copy_(host[k], non_blocking=True)
+            jeu["plats"][i].copy_(plat, non_blocking=True)
             return jeu["base"] + i
         with torch.cuda.stream(self.stream):
             # ne pas écraser un emplacement qu'un calcul lit encore
             jeu["libre"][i].wait(self.stream)
-            for k, dst in jeu["tampons"][i].items():
-                dst.copy_(host[k], non_blocking=True)
+            jeu["plats"][i].copy_(plat, non_blocking=True)      # une seule copie
             jeu["pret"][i].record(self.stream)
         return jeu["base"] + i
 
@@ -201,9 +226,7 @@ class ExpertPool:
 
     @property
     def nbytes(self) -> int:
-        return sum(t.numel() * t.element_size()
-                   for jeu in self._par_disposition.values()
-                   for tampons in jeu["tampons"] for t in tampons.values())
+        return sum(pl.numel() for jeu in self._par_disposition.values() for pl in jeu["plats"])
 
 
 class QuantLinear(nn.Module):
