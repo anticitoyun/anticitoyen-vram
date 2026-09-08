@@ -187,6 +187,59 @@ CUDA** soit comptée par le contrôleur. Si elle lui échappe, la borne ne prot�
 pas de notre cas précis. S'éprouve en chargeant un modèle exilé sous une borne
 délibérément trop basse : s'il ne meurt pas, on le sait avant d'en avoir besoin.
 
+### Ce que le premier kill sous borne a appris
+
+La borne a fonctionné : le noyau a écrit `constraint=CONSTRAINT_MEMCG`,
+`oom_memcg=…temoin-moe`. **La machine a survécu, c'est le test qui est mort** —
+ce qui est exactement le contrat. Décomposition du kill, `MemoryMax` à 45 Gio :
+
+    anon-rss    0,57 Gio
+    file-rss   26,86 Gio   pages fichier
+    shmem-rss  44,11 Gio   mémoire partagée
+    TOTAL      71,54 Gio
+
+**`file-rss` établit directement que la source des poids est un mmap** — ces
+pages ne peuvent être que des pages fichier. Le raisonnement par capacité est
+corroboré par un relevé du noyau.
+
+**Trois pièges dans la lecture de ce rapport, tous rencontrés :**
+
+**`shmem-rss` n'est pas « verrouillé ».** Le cgroup sépare explicitement les deux
+champs dans `memory.stat` (`shmem` et `unevictable`). Conclure de l'un sur
+l'autre, c'est reprendre le compteur voisin. La question « la mémoire épinglée
+par CUDA est-elle comptée par le contrôleur » **reste ouverte** ; seul
+`unevictable` du scope y répondra.
+
+**`MemorySwapMax=0` rend le shmem irréductible.** Le shmem n'a pas de fichier où
+retomber : il n'est récupérable **que** par le swap. L'interdire rend donc tout
+le shmem impossible à libérer, et le kill s'explique entièrement **sans** invoquer
+d'épinglage. Ce n'est pas une raison de retirer le paramètre — il empêche la
+fabrication de swap, qui est le mal qu'on évite — mais il **change le sens du
+plafond** et doit être écrit à côté de lui.
+
+**Un total relevé à la mort est une borne inférieure, jamais un besoin.** Le
+processus a été tué **en cours de chargement** : il n'avait pas fini. Le besoin
+réel est ≥ 71,54 Gio, d'un écart inconnu. Choisir le plafond suivant sur ce
+chiffre le ferait tuer de nouveau.
+
+**À relever pendant la mesure, et pas seulement avant et après** : `memory.stat`
+du scope, champs `anon`, `file`, `shmem`, `unevictable`. Quatre lignes qui
+répondent aux trois pièges ci-dessus.
+
+### Un chien de garde se vérifie par ses battements, pas par son armement
+
+La garde de ce lancement a écrit `GARDE ARMEE` puis `GARDE LEVEE` **dans la même
+seconde**, avant que le scope surveillé n'existe : `systemctl is-active` sur une
+unité pas encore créée rend faux, et la boucle n'a jamais été entrée. **Aucun
+battement n'a été écrit, et personne ne l'a remarqué** — la ligne d'armement
+avait été vérifiée, pas les battements.
+
+**Un contrôle qui n'a jamais tourné est indiscernable d'un contrôle qui n'a rien
+trouvé.** C'est la forme générale du `Mlocked` resté plat : **l'absence de signal
+lue comme un signal d'absence**. Tout garde-fou de ce dossier doit donc écrire
+un battement daté, et son absence doit invalider la mesure au même titre qu'une
+alarme.
+
 ### `memory.peak` : sur le scope du test, jamais sur une slice partagée
 
 `memory.peak` existe sur ce noyau et donne le **pic historique** du cgroup —
