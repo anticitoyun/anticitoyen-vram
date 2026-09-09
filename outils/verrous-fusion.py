@@ -19,6 +19,7 @@ sous-ensemble defini par les termes qu'elle leve.
 import collections
 import json
 import os
+import re
 import sys
 
 import torch
@@ -113,6 +114,74 @@ def verrous(dossier):
     return out
 
 
+def _experts_presents(ts, c, proj):
+    """Indices d experts presents pour cette couche et cette projection,
+    decouverts depuis les cles du manifeste -- jamais devines depuis un
+    compte d experts lu ailleurs (config.json peut mentir ou differer du
+    checkpoint reellement converti)."""
+    motif = re.compile(rf"^model\.layers\.{c}\.mlp\.experts\.(\d+)\.{proj}_proj\.weight$")
+    return sorted(int(mo.group(1)) for k in ts
+                  for mo in (motif.match(k),) if mo)
+
+
+def verrous_experts(dossier):
+    """Un enregistrement par (couche, projection) pour le STACKING inter-experts.
+
+    Ceci n est PAS le meme axe que `verrous()` : un MoE ne fusionne jamais
+    gate+up d un meme expert. loader.py l exclut explicitement de
+    Attention/MLP.fuse() -- "les experts d un MoE en sont exclus : ils
+    passent par le chemin groupe, qui empile deja les 128 experts, et les
+    fusionner un a un doublerait leurs poids sans rien accelerer". Le vrai
+    mecanisme (MoEBlock._try_build_stacks) empile les E experts d UNE SEULE
+    projection a la fois -- gate, up et down chacun leur pile, INDEPENDANTES :
+    un `down` heterogene entre experts n empeche pas `gate` de s empiler.
+
+    Les verrous de `_try_build_stacks`, lus dans le code, evalues EN UNE
+    PASSE comme le reste de ce script :
+      - format homogene entre experts ET empilable (memes empileurs que
+        qkv/gate_up, voir EMPILABLES ci-dessus) ;
+      - shape et group_size identiques entre experts (une pile est un
+        tenseur [E, ...], elle n accepte pas des membres de tailles
+        differentes) ;
+      - scaler d entree identite : ni rotation Hadamard (`hadamard_block`)
+        ni echelle de canal AWQ (`has_act_scale`) sur AUCUN expert -- le
+        code refuse au moindre scaler actif, meme si tous les experts
+        partageraient la meme echelle (contrairement a l echelle qkv/gate_up,
+        qui peut etre COMMUNE) ;
+      - aucun expert de la couche en flux (mlp_storage cpu dans le plan) :
+        un expert exile vers l hote n a pas de pile GPU a rejoindre.
+    """
+    p = os.path.join(dossier, "acvram_manifest.json")
+    m = json.load(open(p))
+    ts = m["tensors"]
+    plan = m.get("plan", m)
+    layers_plan = {lp.get("index"): lp for lp in plan.get("layers", [])}
+    out = []
+    for c in range(400):
+        for proj in ("gate", "up", "down"):
+            experts = _experts_presents(ts, c, proj)
+            if not experts:
+                continue
+            cles = [f"model.layers.{c}.mlp.experts.{e}.{proj}_proj.weight"
+                    for e in experts]
+            fmts = {str(ts[k].get("format")) for k in cles}
+            shapes = {tuple(ts[k].get("shape", [])) for k in cles}
+            gsz = {ts[k].get("group_size") for k in cles}
+            hads = {ts[k].get("hadamard_block") or 0 for k in cles}
+            has_scale = {bool(ts[k].get("has_act_scale")) for k in cles}
+            lp = layers_plan.get(c, {})
+            out.append({
+                "couche": c, "genre": f"stack_{proj}", "n_experts": len(experts),
+                "format_ok": len(fmts) == 1 and fmts <= EMPILABLES,
+                "format_sans_empileur": len(fmts) == 1 and not fmts <= EMPILABLES,
+                "taille_ok": len(shapes) == 1 and len(gsz) == 1,
+                "scaler_identite": hads == {0} and has_scale == {False},
+                "streamed": lp.get("mlp_storage") == "cpu",
+                "formats": sorted(fmts),
+            })
+    return out
+
+
 def main(argv):
     cibles = argv[1:] or sorted(os.listdir(A))
     total = collections.Counter()
@@ -158,6 +227,67 @@ def main(argv):
     print("dont DEUX membres partagent un format empilable : un groupe dont les")
     print("echelles different reste refuse quel que soit son format, et un gate_up")
     print("n'a que deux membres, donc pas de voie partielle.")
+
+    # Axe SEPARE : le stacking inter-experts d'un MoE. Ne s'ajoute ni ne
+    # retranche rien au compte ci-dessus -- qkv et gate_up ne voient jamais
+    # les experts (loader.py les exclut de fuse()), ce nouvel axe ne voit
+    # qu'eux. Un modele sans MoE y contribue zero ligne, pas un zero compte.
+    print("\n" + "=" * 55)
+    print("STACKING INTER-EXPERTS (axe separe, n'entre pas dans le TOTAL ci-dessus)")
+    print("=" * 55)
+    total_exp = collections.Counter()
+    par_voie_exp = collections.Counter()
+    controle = collections.Counter()          # (modele, couche) -> nb de genres vus
+    for nom in cibles:
+        d = os.path.join(A, nom)
+        if not os.path.isfile(os.path.join(d, "acvram_manifest.json")):
+            continue
+        try:
+            ge = verrous_experts(d)
+        except Exception as e:                          # noqa: BLE001
+            print(f"  {nom} : illisible pour les experts ({str(e)[:40]})", file=sys.stderr)
+            continue
+        vues = collections.Counter()
+        for g in ge:
+            total_exp["groupes"] += 1
+            vues[g["couche"]] += 1
+            libre = (g["format_ok"] and g["taille_ok"]
+                      and g["scaler_identite"] and not g["streamed"])
+            if libre:
+                par_voie_exp["empilent deja"] += 1
+                continue
+            if g["format_sans_empileur"]:
+                par_voie_exp["homogene SANS empileur (int4_awq, q3n)"] += 1
+            elif not g["taille_ok"]:
+                par_voie_exp["bloque par TAILLE (shape ou group_size)"] += 1
+            elif g["streamed"]:
+                par_voie_exp["bloque : experts en flux (mlp_storage cpu)"] += 1
+            elif not g["scaler_identite"]:
+                par_voie_exp["bloque par SCALER (hadamard ou echelle AWQ)"] += 1
+            else:
+                par_voie_exp["bloque par FORMAT"] += 1
+        # Controle : chaque couche MoE doit rendre 3 genres (gate, up, down)
+        # SUR UNE ARCHITECTURE SwiGLU, ou 2 (up, down) sur une architecture
+        # sans porte separee (hidden_act relu2 : Nemotron/DeepSeek-style,
+        # aucun gate_proj par expert -- verifie sur config.json, 6 modeles
+        # du parc). Jamais E ni 3*E : ce serait le signe que les experts ont
+        # ete remis en unite de groupe au lieu d'etre l'assiette d'un groupe.
+        for couche, n in vues.items():
+            if n not in (2, 3):
+                controle[f"{nom} couche {couche} : {n} genres (attendu 2 ou 3)"] += 1
+    if total_exp["groupes"]:
+        te = total_exp["groupes"]
+        for k, n in par_voie_exp.most_common():
+            print(f"{k:45s} {n:8d} {100*n/te:6.1f} %")
+        print(f"{'TOTAL (genres gate/up/down, PAS des experts)':45s} {te:8d}")
+    else:
+        print("Aucun MoE avec experts nommes model.layers.N.mlp.experts.E.* trouve.")
+    if controle:
+        print(f"\nCONTROLE VIOLE sur {len(controle)} (modele, couche) :", file=sys.stderr)
+        for k in list(controle)[:20]:
+            print(f"  {k}", file=sys.stderr)
+    else:
+        print("\nControle OK : chaque couche MoE rend exactement 3 genres (gate/up/down).")
 
 
 if __name__ == "__main__":
