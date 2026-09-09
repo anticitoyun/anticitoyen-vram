@@ -143,3 +143,44 @@ def test_sans_biais_la_pile_n_en_porte_pas():
     lins = [_lin_biais(64, 128, 38, False), _lin_biais(64, 128, 39, False)]
     pile = stack_nvfp4_linears(lins)
     assert pile is not None and pile.bias is None
+
+
+# --- la meme regle pour int8 : deux fonctions voisines divergeaient ---------
+
+def _lin_int8(sortie, entree, graine, avec_biais=False):
+    import torch
+
+    from acvram.quant.formats import _quantize_int8
+    g = torch.Generator().manual_seed(graine)
+    w = (torch.randn(sortie, entree, generator=g) * 0.02).to(torch.bfloat16)
+    l = QuantLinear(_quantize_int8(w, 128))
+    if avec_biais:
+        l.bias = torch.randn(sortie, generator=g, dtype=torch.bfloat16)
+    return l
+
+
+def test_int8_avec_biais_fusionne_comme_nvfp4():
+    """`stack_int8_linears` refusait les biais quand `stack_nvfp4_linears` les
+    accepte, avec la meme justification ecrite 150 lignes plus haut. Qwen2.5
+    porte un biais sur q, k et v : AUCUN groupe tout-int8 n'y fusionnait."""
+    from acvram.engine.layers import stack_int8_linears
+
+    lins = [_lin_int8(64, 128, 51, True), _lin_int8(64, 128, 52, True)]
+    attendu = torch.cat([l.bias for l in lins]).clone()
+    pile = stack_int8_linears(lins)
+    assert pile is not None, "int8 refuse encore les biais"
+    assert pile.bias is not None and torch.equal(pile.bias, attendu)
+
+
+def test_int8_sans_biais_fusionne_toujours():
+    from acvram.engine.layers import stack_int8_linears
+
+    pile = stack_int8_linears([_lin_int8(64, 128, 53), _lin_int8(64, 128, 54)])
+    assert pile is not None and pile.bias is None
+
+
+def test_int8_avec_biais_partiel_refuse():
+    from acvram.engine.layers import stack_int8_linears
+
+    assert stack_int8_linears([_lin_int8(64, 128, 55, True),
+                               _lin_int8(64, 128, 56, False)]) is None
