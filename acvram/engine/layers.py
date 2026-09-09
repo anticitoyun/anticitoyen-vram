@@ -938,6 +938,26 @@ def repeat_kv_batched(x: torch.Tensor, n_rep: int) -> torch.Tensor:
 ROWS_PAR_BLOC = 4
 
 
+# Chaque refus de fusion se comptait a zero : la fonction rendait None et
+# personne ne savait si les piles avaient ete construites. Le 9/09/2026, une
+# session a du envisager de compter les noyaux sous `ncu` pour repondre a
+# « les fusions s appliquent-elles au nvfp4 ? » — une question que le code
+# pouvait dire lui-meme. Une absence n est un resultat que si l instrument
+# pouvait rendre autre chose.
+_REFUS_FUSION: dict[str, int] = {}
+
+
+def _refus_fusion(raison: str) -> None:
+    """Enregistre pourquoi une fusion NVFP4 n a pas eu lieu, et rend None."""
+    _REFUS_FUSION[raison] = _REFUS_FUSION.get(raison, 0) + 1
+    return None
+
+
+def bilan_fusion_nvfp4() -> dict[str, int]:
+    """Refus par raison depuis le chargement. Vide = aucune fusion refusee."""
+    return dict(_REFUS_FUSION)
+
+
 def stack_nvfp4_linears(lins: list) -> Optional["QuantLinear"]:
     """Empile des QuantLinear NVFP4 de même entrée en un seul.
 
@@ -950,22 +970,22 @@ def stack_nvfp4_linears(lins: list) -> Optional["QuantLinear"]:
     """
     import os
     if os.environ.get("ACVRAM_FUSION_NVFP4") == "0":     # témoin de mesure
-        return None
+        return _refus_fusion("temoin ACVRAM_FUSION_NVFP4=0")
     from ..quant.nvfp4 import NVFP4Tensor
     ts = [getattr(l, "qweight", None) for l in lins]
     if not all(isinstance(t, NVFP4Tensor) for t in ts):
-        return None
+        return _refus_fusion("un des poids n est pas NVFP4")
     if len({(t.padded_in, t.qweight.shape[1], t.block_scale.shape[1]) for t in ts}) != 1:
-        return None
+        return _refus_fusion("entrees de tailles differentes")
     if any(l.bias is not None or l.scaler is not None or l.streamed is not None
            for l in lins):
-        return None
+        return _refus_fusion("biais, scaler ou poids en flux")
     if any(getattr(t, "global_scale_rows", None) is not None for t in ts):
-        return None                       # déjà empilé : on n'empile pas deux fois
+        return _refus_fusion("deja empile")
     # Le noyau lit l'échelle de la première ligne de chaque bloc : les segments
     # doivent commencer sur un multiple de la hauteur de bloc.
     if any(t.qweight.shape[0] % ROWS_PAR_BLOC for t in ts[:-1]):
-        return None
+        return _refus_fusion(f"segment non multiple de {ROWS_PAR_BLOC} lignes")
     lignes = torch.cat([
         torch.full((t.qweight.shape[0],), t.global_scale_float(),
                    dtype=torch.float32, device=t.qweight.device) for t in ts])
