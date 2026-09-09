@@ -232,6 +232,12 @@ Même TTFT, moteur au repos puis en plein décodage, douze mesures chacun :
 
     repos    mediane 60,9 ms   charge   mediane 62,3 ms   ecart +1,4 ms
 
+> **Ces deux valeurs absolues sont en RÉGIME DÉGRADÉ** (un MLP exilé, voir la
+> rectification ci-dessus) : en régime sain le TTFT vaut environ 45 ms. **Ne
+> pas les citer comme chiffres de TTFT.** La *comparaison* entre elles reste
+> valide — les deux sont prises dans le même régime, sur le même serveur, à
+> quelques secondes d'intervalle — et c'est elle seule qui réfute le GIL.
+
 Épreuve choisie **parce qu'elle ne dépend d'aucun profileur** : `py-spy` montre
 où le code *est*, pas où il *attend*, et `record` exclut les threads inactifs
 par défaut — un thread bloqué sur le GIL lui paraît inactif.
