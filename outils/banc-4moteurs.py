@@ -643,7 +643,14 @@ def mesurer(moteur):
     # identiques, une dispersion de debit ne peut pas venir du texte, et il
     # faut la chercher ailleurs (passage froid, cache, ordonnancement).
     empreintes = [hashlib.sha256(p.texte.encode()).hexdigest()[:8] for p in passages]
-    textes_identiques = len(set(empreintes)) == 1
+    # Le controle doit porter sur les MEMES donnees que la mesure qu'il garde.
+    # Le debit publie ecarte le premier passage ; le compter ici invalidait la
+    # campagne sur une passe dont personne ne se sert. Le 9/09, les deux
+    # moteurs ont diverge au premier passage et a lui seul (acvram
+    # e0e0c3e9 puis 036bb29d x4 ; llamacpp b1171ed9 puis 7dc6fe3e x4) — la
+    # selection d'algorithme cuBLAS au premier appel suffit a faire basculer
+    # un argmax serre. Les empreintes restent TOUTES publiees.
+    textes_identiques = len(set(empreintes[1:])) == 1
     watts = e.moyenne
     base = repos(secondes=min(max(dt, 5.0), 30.0))
     joules = e.joules
