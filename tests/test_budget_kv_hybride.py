@@ -128,3 +128,37 @@ def test_les_quadratiques_restent_a_zero_apres_l_ajout():
         s = _spec(layer_types=lt) if lt else _spec()
         assert s.etat_recurrent_bytes(16) == 0, f"provision non nulle sur {lt}"
         assert s.couches_recurrentes == 0
+
+
+# --- attention a latent compresse (MLA) ------------------------------------
+
+MLA = dict(kv_lora_rank=512, qk_rope_head_dim=64)
+
+
+def test_mla_stocke_sans_paginer():
+    """La distinction qui décide : une couche MLA garde un cache par jeton
+    mais `loader.py` ne l'enregistre jamais dans `a_allouer` — sa branche fait
+    `continue` avant. Elle STOCKE sans PAGINER."""
+    s = _spec(layer_types=["full_attention"] * 32, **MLA)
+    assert s.est_mla
+    assert s.couches_avec_kv == 32, "elles gardent bien un cache"
+    assert not any(s.couche_a_kv(i) for i in range(32)), \
+        "mais aucune n'alloue de bloc pagine"
+
+
+def test_le_budget_mla_suit_le_latent_et_non_les_tetes():
+    """Mesuré sur le parc, la formule à requêtes groupées se trompait de 0,28
+    à 7,78 selon le modèle — deux sens opposés, donc pas un réglage."""
+    s = _spec(num_key_value_heads=4, layer_types=["full_attention"] * 47, **MLA)
+    attendu = (512 + 64) * 2 * 47
+    assert s.kv_bytes_per_token(8) == attendu
+    sans_mla = _spec(num_key_value_heads=4, layer_types=["full_attention"] * 47)
+    assert s.kv_bytes_per_token(8) != sans_mla.kv_bytes_per_token(8)
+
+
+def test_un_modele_sans_latent_garde_la_formule_groupee():
+    """Contrôle : la détection ne doit pas déborder sur les 110 autres."""
+    s = _spec(layer_types=["full_attention"] * 32)
+    assert not s.est_mla
+    assert s.kv_bytes_per_token(8) == _spec().kv_bytes_per_token(8)
+    assert all(s.couche_a_kv(i) for i in range(32))

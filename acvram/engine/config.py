@@ -219,8 +219,28 @@ class ModelSpec:
             return self.num_layers
         return sum(1 for t in self.layer_types if t in _TYPES_AVEC_KV)
 
+    @property
+    def est_mla(self) -> bool:
+        """Attention à latent compressé (DeepSeek, GLM-4.x, Kimi).
+
+        Le critère est la compression elle-même, pas le `model_type` : une
+        architecture nouvelle qui compresse son KV se reconnaîtra sans qu'on
+        ait à l'ajouter à une liste.
+        """
+        return self.kv_lora_rank > 0
+
     def couche_a_kv(self, index: int) -> bool:
-        """La couche ``index`` alloue-t-elle un cache KV ? Voir `couches_avec_kv`."""
+        """La couche ``index`` alloue-t-elle un cache PAGINÉ ?
+
+        Distinct de `couches_avec_kv`, et la nuance décide : une couche MLA
+        garde bien un cache par jeton, mais un latent contigu que
+        `loader.py` n'enregistre jamais dans `a_allouer` — sa branche fait
+        `continue` avant. Elle STOCKE sans PAGINER. Confondre les deux, c'est
+        soit diviser les blocs par des couches qui n'en prennent aucun, soit
+        ne rien budgéter pour ce qu'elles gardent vraiment.
+        """
+        if self.est_mla:
+            return False
         if not self.layer_types or index >= len(self.layer_types):
             return True
         return self.layer_types[index] in _TYPES_AVEC_KV
@@ -246,11 +266,28 @@ class ModelSpec:
         return sorted({t for t in (self.layer_types or []) if t not in connus})
 
     def kv_bytes_per_token(self, kv_bits: int = 8) -> int:
-        """Octets de cache KV pour un jeton, sur les couches QUI EN ONT UN.
+        """Octets de cache pour un jeton, sur les couches QUI EN GARDENT UN.
 
         L'attention à requêtes groupées est déjà prise en compte : seules
         ``num_key_value_heads`` têtes sont stockées.
+
+        Une attention à latent compressé ne garde NI K NI V par tête : elle
+        garde le latent ``[rang + rope]``, en 16 bits, hors du système paginé.
+        Lui appliquer la formule à requêtes groupées se trompait dans les deux
+        sens selon le modèle, et pas d'un peu — mesuré sur le parc, le rapport
+        entre le vrai coût et celui qu'on budgétait va de **0,28 à 7,78** :
+
+            DeepSeek-Coder-V2-Lite   0,28   on reservait 3,6 fois trop
+            GLM-4.7-Flash            5,54   on reservait 5,5 fois trop peu
+            GLM-4.7-Grande-42B       5,54
+            Kimi-Linear-35B          7,78   on reservait 7,8 fois trop peu
+
+        Un biais aurait été un réglage ; deux sens opposés sont une formule
+        qui ne décrit pas l'objet.
         """
+        if self.est_mla:
+            latent = (self.kv_lora_rank + self.qk_rope_head_dim) * 2
+            return int(latent * self.couches_avec_kv)
         per_layer = 2 * self.num_key_value_heads * self.head_dim * kv_bits / 8
         # échelles groupées du KV quantifié : un fp16 par tête, par jeton, par kv
         overhead = 0.0 if kv_bits >= 16 else 2 * self.num_key_value_heads * 2
