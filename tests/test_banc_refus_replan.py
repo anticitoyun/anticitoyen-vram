@@ -96,3 +96,44 @@ def test_l_exil_force_invalide_l_estimation():
     assert sum(1 for l in p.layers if l.mlp_storage == "cpu") == 4
     assert p.est_decode_tok_s == 0.0, "un debit prevu perime reste lisible"
     assert getattr(p, "estimation_perimee", None), "la raison doit etre dite"
+
+
+def test_refus_quand_la_generation_s_interrompt(monkeypatch):
+    """Un EOS des le premier jeton faisait publier un debit de demarrage.
+
+    Sur nemotron-lightning-heretic, l'invite artificielle du banc ([1] repete)
+    faisait emettre un EOS immediat : UN jeton produit sur 256 demandes, et le
+    banc annoncait 2,85 jetons/s la ou le serveur en rend 211. `SamplingParams`
+    n'a ni `ignore_eos` ni `min_tokens` — on refuse donc de publier plutot que
+    de mesurer autre chose que ce qui a ete demande.
+    """
+    from acvram import bench as b
+
+    class _Stats:
+        def to_dict(self):
+            return {"decode_seconds": 1.0, "decode_tokens": 1}
+
+    class _Eng:
+        stats = _Stats()
+        graphs = None
+
+        def __init__(self, *a, **k):
+            pass
+
+        def generate(self, *a, **k):
+            yield 1                     # UN seul jeton, puis EOS
+
+    class _Plan:
+        est_decode_tok_s = 687.6
+
+    class _Charge:
+        plan = _Plan()
+        model = type("M", (), {"nbytes": 2**30})()
+
+    monkeypatch.setattr("acvram.engine.loader.load_model",
+                        lambda *a, **k: _Charge())
+    monkeypatch.setattr("acvram.engine.runner.Engine", _Eng)
+    d = b.bench_decode("/inexistant", n_tokens=256)
+    assert "refus" in d, "un debit calcule sur 1 jeton a ete publie"
+    assert d["generated"] == 1
+    assert "decode_tok_s" not in d

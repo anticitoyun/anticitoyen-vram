@@ -392,6 +392,25 @@ def bench_decode(model_dir: str, n_tokens: int = 256,
         murs.append(mur)
         produits = p
 
+    # LE DEFAUT PAR DEFAUT EST LE REFUS. Le modele peut emettre un EOS des le
+    # premier jeton — l'invite du banc est artificielle ([1] repete) et rien ne
+    # l'en empeche : `SamplingParams` n'a ni `ignore_eos` ni `min_tokens`. Le
+    # banc divisait alors UN jeton par le temps total et publiait 2,85 jetons/s
+    # sur un modele qui en rend 211 par le serveur. Ce chiffre-la ne ressemble
+    # pas a une erreur, il ressemble a un modele lent : il a servi de cause a
+    # traiter pendant des jours. On ne publie pas un debit calcule sur autre
+    # chose que ce qui a ete demande.
+    if produits < n_tokens:
+        return {
+            "model": model_dir,
+            "refus": (f"generation interrompue a {produits} jetons sur "
+                      f"{n_tokens} demandes (EOS emis par le modele) : le "
+                      f"debit porterait sur le demarrage, pas sur le "
+                      f"decodage."),
+            "load_seconds": round(load_s, 1),
+            "generated": produits,
+        }
+
     if taux:
         taux.sort()
         median = taux[len(taux) // 2]
