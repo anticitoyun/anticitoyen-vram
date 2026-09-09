@@ -238,10 +238,25 @@ class Energie:
             elif e1 == e0:
                 raisons.append(f"carte {i} : le compteur d'énergie n'a pas avancé")
         for i, avant in self.pids_debut.items():
-            apres = self.pids_fin.get(i, ())
+            # `.get(i, ())` faisait passer une carte ABSENTE du releve de fin
+            # pour une carte SANS PROCESSUS. Quand `avant` etait vide aussi,
+            # les deux tuples etaient egaux et la fenetre etait declaree
+            # valide — alors que le releve manquait. Une absence lue comme un
+            # resultat, la faute que ce module est cense attraper.
+            if i not in self.pids_fin:
+                raisons.append(f"carte {i} : aucun releve de processus en fin "
+                               f"de fenetre — la carte a disparu du recensement")
+                continue
+            apres = self.pids_fin[i]
             if avant != apres:
                 raisons.append(f"carte {i} : les processus ont changé "
                                f"({list(avant)} -> {list(apres)})")
+        # Une carte APPARUE en cours de fenetre n'etait pas regardee non plus :
+        # la boucle ne parcourt que les cles du debut.
+        for i in self.pids_fin:
+            if i not in self.pids_debut:
+                raisons.append(f"carte {i} : apparue en cours de fenetre, "
+                               f"absente du recensement initial")
         if self.bridages:
             raisons.append("bridage pendant la fenêtre : " + ", ".join(sorted(self.bridages)))
         return raisons
