@@ -476,7 +476,24 @@ def plan_placement(spec: ModelSpec, rig: Rig,
     else:
         plan.lm_head_device = "cpu"
         used["cpu"] = used.get("cpu", 0.0) + head_bytes
-    plan.embed_device = "cpu" if host_tier else fastest
+    # L'etage hote EXISTE des que `allow_host_tier` est vrai — son defaut —,
+    # meme quand rien n'y est exile. Tester son existence mettait donc la table
+    # de plongements cote hote SYSTEMATIQUEMENT, y compris sur un modele qui
+    # tient entierement sur la carte. Le releve du 9/09 sur
+    # Qwen2.5-Coder-14B-bf16-pur : 0 couche exilee, et `embed_device: cpu`.
+    #
+    # Cout : le gather s'execute cote hote et le vecteur repart vers la carte,
+    # soit DEUX traversees PCIe par jeton (latence, pas volume : la table ne
+    # fournit qu'une ligne de 10 Kio). Et face a llama.cpp qui met la table sur
+    # la carte avec `-ngl 999`, c'est une asymetrie de placement qui se lit
+    # comme une difference de moteur.
+    #
+    # On teste desormais LA PLACE, comme `lm_head_device` deux lignes plus haut
+    # — les deux champs decidaient la meme chose par deux logiques opposees.
+    if gpu_tiers and remaining[fastest] > embed_bytes:
+        plan.embed_device = fastest
+    else:
+        plan.embed_device = "cpu"
     if plan.embed_device != "cpu":
         remaining[plan.embed_device] -= embed_bytes
         used[plan.embed_device] += embed_bytes
