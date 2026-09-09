@@ -77,3 +77,28 @@ Prendre 20,45 ms pour un temps vrai serait une faute.
 **Le seul test qui vaudra** : écrire le SwiGLU fusionné et le mesurer au banc,
 hors `ncu`. Gain attendu si les deux postes tombent : ~1,1 ms sur 20,45, soit
 **5,4 %**.
+
+
+## Ce que la fusion a rendu, mesuré (9 septembre, après-midi)
+
+    Qwen2.5-Coder-14B   avec graphes   34,38 -> 35,28 pas/s   +2,60 %
+    phi4-bf16-pur       sans graphes   34,08 -> 34,78 pas/s   +2,06 %
+
+**Le gain ne dépend pas des graphes CUDA.** Sur `phi4`, un MLP exilé les
+désactive tous, et la fusion rapporte quand même : le coût de frontière qu'elle
+supprime est un coût **GPU**, pas le coût CPU de lancement que les graphes
+effacent déjà.
+
+**Sur phi4, 39 MLP fusionnés sur 40** — celui de la couche 39 est en flux depuis
+la RAM hôte, donc refusé. C'est exactement le module que le message de refus des
+graphes désigne : deux mécanismes indépendants pointent le même, sans avoir été
+coordonnés.
+
+**Réserve : la dispersion est plus grande sans graphes.** 34,50 / 34,78 / 34,93
+contre 35,27 / 35,28 / 35,28 sur Qwen. L'écart entre passes (1,2 %) est du même
+ordre que le gain (2,06 %) — la médiane de trois passes alternées tient, la
+deuxième décimale non.
+
+**Limite de portée, déclarée** : la fusion est éprouvée sur **deux denses à
+têtes groupées**, rien d'autre. Le parc n'a pas d'autre bf16 qui tienne sur la
+carte (57 et 44 Gio pour les suivants). Ce chiffre vaut pour cette famille.
