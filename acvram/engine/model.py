@@ -164,11 +164,13 @@ class Attention(nn.Module):
     # minuscules (têtes KV groupées) coûtent plus que la seule grande qui
     # les contient toutes.
     def fuse(self) -> bool:
-        from .layers import stack_int8_linears, stack_nvfp4_linears
+        from .layers import (stack_int8_linears, stack_nvfp4_linears,
+                             stack_plain_linears)
         lins = [self.q_proj, self.k_proj] + ([] if self.k_eq_v else [self.v_proj])
         if any(l is None for l in lins):
             return False
-        self.qkv_proj = stack_int8_linears(lins) or stack_nvfp4_linears(lins)
+        self.qkv_proj = (stack_int8_linears(lins) or stack_nvfp4_linears(lins)
+                         or stack_plain_linears(lins))
         if self.qkv_proj is None:
             return False
         self.qkv_tailles = tuple(l.qweight.shape[0] for l in lins)
@@ -384,9 +386,11 @@ class MLP(nn.Module):
 
         Les NVFP4 ont chacun leur échelle globale ; le noyau en accepte une par
         ligne de sortie, ce qui les empile sans réarrondi (v0.4.62)."""
-        from .layers import stack_int8_linears, stack_nvfp4_linears
+        from .layers import (stack_int8_linears, stack_nvfp4_linears,
+                             stack_plain_linears)
         paire = [self.gate_proj, self.up_proj]
-        self.gate_up = stack_int8_linears(paire) or stack_nvfp4_linears(paire)
+        self.gate_up = (stack_int8_linears(paire) or stack_nvfp4_linears(paire)
+                        or stack_plain_linears(paire))
         return self.gate_up is not None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
