@@ -72,3 +72,55 @@ TTFT en **deux lignes**, froid et régime.
 « Publiable » ne veut pas dire publié. Cette campagne produit un résultat
 **défendable** ; toute publication reste soumise à l'autorisation explicite de
 l'utilisateur.
+
+---
+
+# RECTIFICATION, avant toute mesure
+
+**La prédiction de +18,4 % ci-dessus est fausse, et elle reste écrite pour que
+l'erreur soit visible.** Elle compose trois facteurs qui **ne s'appliquent pas
+au même modèle**.
+
+Vérifié par poste2 en chargeant les deux :
+
+    bf16-pur   scalers actifs 0     tenseurs nvfp4 0    fusions 44 MLP + 48 attentions
+    nvfp4      scalers actifs 336   tout en nvfp4       fusions 0 (96 refus)
+
+* **sur le bf16**, la fusion opère — mais le double tampon vit dans
+  `nvfp4_gemv`, sans un seul tenseur nvfp4 à toucher, et le cache d'échelle
+  n'a **aucun scaler** à mettre en cache. **Seul le premier facteur
+  s'applique** ;
+* **sur le nvfp4**, le double tampon et le cache opèrent — mais la fusion est
+  refusée sur les 96 groupes. **Seuls les deux derniers s'appliquent.**
+
+**Aucun modèle ne porte les trois.** Le +18,4 % ne décrit aucune construction
+mesurable.
+
+## Prédiction corrigée
+
+    modele bf16-pur    decodage  +2,6 %                     (fusion seule)
+    modele nvfp4       decodage  1,069 x 1,0791 = +15,3 %   (tampon x cache)
+    modele bf16-pur    prefill   +4,23 % sur le TTFT        (ligne separee)
+
+**La règle de lecture reste entière** — elle s'applique à deux compositions au
+lieu d'une. Et la paire suspecte qu'elle nomme, double tampon et cache
+d'échelle, est **exactement** celle qui reste composée : le test à une
+variable garde tout son sens si le nvfp4 déçoit.
+
+## Ce que l'erreur enseigne
+
+Composer multiplicativement était le bon geste ; **vérifier qu'un modèle porte
+tous les facteurs ne l'était pas moins, et personne ne l'a fait.** Une
+composition n'a de sens que sur une population où chaque terme s'applique. Ici
+deux populations disjointes ont été traitées comme une seule parce que les
+quatre correctifs venaient de la même journée.
+
+*L'erreur va vers la conclusion bienvenue* : +18,4 % était le plus beau chiffre
+disponible, et c'est celui qui n'a pas été vérifié.
+
+## Condition d'exécution, ajoutée
+
+Le chargement bf16 refuse les graphes à 32k de contexte — *poids en flux depuis
+la RAM hôte*, 44 MLP fusionnés sur 48. **Le bf16 se mesure à 8192 ou 16384 de
+contexte**, apparié des deux côtés, et la fenêtre retenue se déclare dans le
+tableau.
