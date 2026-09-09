@@ -72,3 +72,49 @@ def test_l_avertissement_ne_se_declenche_pas_sur_un_seul_modele():
     src = inspect.getsource(cli.cmd_eval)
     assert "if len(args.models) > 1:" in src, \
         "la garde doit etre conditionnelle, pas systematique"
+
+
+# --- la configuration effective sort avec le resultat -----------------------
+
+def test_le_corpus_et_son_sha_sortent_avec_le_resultat():
+    """Un chiffre qui peut sortir SEUL sera compare a tort."""
+    src = inspect.getsource(cli.cmd_eval)
+    assert "sha256:" in src, "le sha du corpus n est pas imprime"
+    assert "mem_get_info" in src, "la VRAM libre au chargement n est pas dite"
+
+
+def test_la_liste_des_variables_lues_ne_derive_pas():
+    """Le 9/09, MAXTOK=65536 a ete pose dans l environnement d une mesure que
+    rien ne lisait : elle s est arretee a 16 fenetres au lieu de 128, sans
+    aucun signe. Une variable posee qui ne va nulle part est une consigne
+    silencieusement ignoree.
+
+    Cette epreuve verifie que la liste suit le code — sinon la garde
+    signalerait comme inconnue une variable devenue valide."""
+    import glob
+    import pathlib
+    import re
+
+    racine = pathlib.Path(cli.__file__).resolve().parent
+    reelles = set()
+    for f in glob.glob(str(racine / "**" / "*.py"), recursive=True):
+        reelles |= set(re.findall(r"ACVRAM_[A-Z0-9_]+",
+                                  open(f, errors="ignore").read()))
+    # la liste elle-meme contient les noms : on retire ce que le fichier declare
+    manquantes = reelles - set(cli.VARIABLES_LUES)
+    assert not manquantes, f"variables lues mais absentes de la liste : {sorted(manquantes)}"
+
+
+def test_la_garde_tire_sur_une_variable_inconnue(capsys, monkeypatch):
+    """Sans ce controle, un silence ne se distingue pas d un detecteur muet."""
+    monkeypatch.setenv("ACVRAM_CETTE_VARIABLE_N_EXISTE_PAS", "1")
+    cli._avertir_variables_inconnues()
+    sortie = capsys.readouterr().out
+    assert "ACVRAM_CETTE_VARIABLE_N_EXISTE_PAS" in sortie
+
+
+def test_la_garde_se_tait_sur_une_variable_valide(capsys, monkeypatch):
+    """Une garde qui crie sur du valide cesse d etre lue."""
+    monkeypatch.setenv("ACVRAM_PLAN_FIGE", "1")
+    cli._avertir_variables_inconnues()
+    assert "ACVRAM_PLAN_FIGE" not in capsys.readouterr().out

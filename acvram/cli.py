@@ -22,6 +22,75 @@ from typing import Optional
 __version__ = "0.4.25"
 
 
+
+# Variables d'environnement que le code lit REELLEMENT. Le 9/09/2026,
+# `MAXTOK=65536` a ete pose dans l'environnement d'une mesure de perplexite
+# que rien ne lisait : la mesure s'est arretee a 16 fenetres au lieu de 128,
+# sans que rien ne le signale. Une variable posee qui ne va nulle part est
+# une consigne silencieusement ignoree.
+#
+# Cette liste se met a jour avec le code ; une epreuve verifie qu'elle ne
+# derive pas.
+VARIABLES_LUES = {
+    "ACVRAM_ALLOC_EXTENSIBLE",
+    "ACVRAM_ARCH_FAMILY",
+    "ACVRAM_CUDA_HOME",
+    "ACVRAM_DISABLE_CPU_KERNELS",
+    "ACVRAM_DISABLE_CUDA_GRAPHS",
+    "ACVRAM_DISABLE_FP4_GEMM",
+    "ACVRAM_DISABLE_KERNELS",
+    "ACVRAM_DISABLE_PAGED_ATTN",
+    "ACVRAM_EXIL_COUCHES",
+    "ACVRAM_FUSION_NVFP4",
+    "ACVRAM_GC_FREEZE",
+    "ACVRAM_GDN",
+    "ACVRAM_GRAPHES_MUETS",
+    "ACVRAM_GRAPHS_EAGER",
+    "ACVRAM_GW_WARPS",
+    "ACVRAM_HYBRID_KERNELS",
+    "ACVRAM_HYBRID_SLOTS",
+    "ACVRAM_INSTA_MAX",
+    "ACVRAM_INSTA_PAS",
+    "ACVRAM_INT8_GEMV_MAX",
+    "ACVRAM_KDA_CHUNK",
+    "ACVRAM_MAMBA_CHUNK",
+    "ACVRAM_MLA_BUCKET",
+    "ACVRAM_MLA_NORME_NOYAU",
+    "ACVRAM_MLP_HOTE_CPU",
+    "ACVRAM_MODELS_DIR",
+    "ACVRAM_MOE_DECODE_MASQUES",
+    "ACVRAM_MOE_GEMM_MAX",
+    "ACVRAM_MOE_GROUPED_MAX",
+    "ACVRAM_MTP",
+    "ACVRAM_NVFP4_GEMV_MAX",
+    "ACVRAM_PLAN_FIGE",
+    "ACVRAM_POOL_SYNC",
+    "ACVRAM_PREFILL",
+    "ACVRAM_PREFILL_DEQUANT",
+    "ACVRAM_SANS_FUSION_BF16",
+    "ACVRAM_SANS_PRECHARGE",
+    "ACVRAM_SANS_REPLAN",
+    "ACVRAM_SEUIL_FUSION",
+    "ACVRAM_SYNC_COUCHES",
+    "ACVRAM_TETE_LIEE",
+    "ACVRAM_TRACEBACK",
+    "ACVRAM_TRACE_PTRS",
+    "ACVRAM_TRACE_ROUTAGE",
+    "ACVRAM_TRACE_STEPS",
+    "ACVRAM_VERBOSE_BUILD",
+    "ACVRAM_WARM_GRAPHS",
+    "ACVRAM_WARM_SPEC",
+}
+
+
+def _avertir_variables_inconnues() -> None:
+    """Signale toute ACVRAM_* posee que le code ne lit pas."""
+    inconnues = sorted(v for v in os.environ
+                       if v.startswith("ACVRAM_") and v not in VARIABLES_LUES)
+    if inconnues:
+        print(red("  variables ignorees (le code ne les lit nulle part) : "
+                  + ", ".join(inconnues)), flush=True)
+
 def _tty() -> bool:
     """Une barre de progression a sa place sur un terminal, pas dans un tube ni un journal."""
     return sys.stderr.isatty() and not os.environ.get("NO_COLOR")
@@ -453,8 +522,30 @@ def cmd_eval(args: argparse.Namespace) -> int:
     # perplexite ne se compare qu'a une autre prise au meme cadrage, et rien
     # dans le nombre publie ne dit lequel a servi. Imprime avant la mesure,
     # il part dans le journal meme si la sortie est redirigee.
+    # Un chiffre qui peut sortir SEUL sera compare a tort. Deux defauts du
+    # 9/09 en sont la preuve : min_context a 0 sans avertissement, et un plan
+    # degrade rendant un nombre d'allure normale. Dans les deux cas le chiffre
+    # voyageait sans ses conditions. La parade generique n'est pas de garder
+    # chaque cas, c'est que la configuration EFFECTIVE sorte a cote du
+    # resultat — cadrage, corpus et son sha, VRAM libre au chargement.
+    _avertir_variables_inconnues()
+    sha = "?"
+    try:
+        import hashlib
+        h = hashlib.sha256()
+        with open(args.corpus, "rb") as fh:
+            for bloc in iter(lambda: fh.read(1 << 20), b""):
+                h.update(bloc)
+        sha = h.hexdigest()[:12]
+    except OSError:
+        pass
     print(f"  cadrage : min_context={args.min_context} window={args.window} "
           f"stride={args.stride} max_tokens={args.max_tokens}", flush=True)
+    print(f"  corpus  : {os.path.basename(args.corpus)} sha256:{sha}", flush=True)
+    if torch.cuda.is_available():
+        libre, total = torch.cuda.mem_get_info()
+        print(f"  carte   : {libre / 2**30:.2f} Gio libres sur "
+              f"{total / 2**30:.2f}", flush=True)
     if not args.min_context:
         # La garde de `evaluate` n'avertit que si le corpus est plus court que
         # la fenetre — jamais sur wiki.test.raw (1,29 Mo). Sans ce message,
