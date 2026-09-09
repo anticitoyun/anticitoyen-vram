@@ -1,30 +1,53 @@
 """Micro-banc GEMV bf16, préparé sur demande de chef (9/09), NON EXÉCUTÉ —
 la 5090 est à poste2. À lancer une fois la carte rendue.
 
+Corrigé après revue de poste2 (`acvram-memoire/revue/metriques-ncu.md`) :
+mes métriques et mon diagnostic d'interpréteur étaient faux, voir ci-dessous.
+
+**Portée revue à la baisse, à dire honnêtement** : poste2 a mesuré le vrai
+trafic DRAM du témoin (nominal, 26,09 Gio/pas contre 26,06 théoriques,
+coalescence 32,0 o/secteur — les activations de 10 Kio ne quittent jamais
+le L2). Mon écart de conception gate/up séparés (voir poste4.md) **ne
+coûte donc PAS d'énergie** — c'est une latence de lancement, pas un trafic
+DRAM manqué. **Ce banc ne parle plus que des 2,3 % de débit**, pas des
+8,5 % d'énergie : ne pas lui faire dire ce qu'il ne mesure pas.
+
 Compare, à forme identique (hidden 5120, un jeton, bf16), le chemin réel
 d'acvram (`torch.nn.functional.linear`, ce que `PlainTensor`/`QuantLinear`
 appellent pour un poids non quantifié — voir poste4.md §"Chemin de lecture
-des poids") contre un GEMV minimal écrit à la main (Triton, un bloc par
-ligne de sortie, réduction en registres — même idée structurelle que
+des poids") contre un GEMV minimal écrit à la main (Triton, un programme
+par ligne de sortie, réduction en registres — même idée structurelle que
 `mmvf.cu` de llama.cpp, sans en être une traduction).
 
-Usage prévu, SOUS LES MÊMES INSTRUMENTS QUE poste2 (à aligner avec elle avant
-de conclure quoi que ce soit — cf. sa demande « mêmes options, sinon les
-deux mesures ne se parlent pas ») :
+**Un seul interpréteur possible, l'autre n'a ni torch ni triton** (vérifié
+par poste2 ET par moi, pas supposé) : `anticitoyen-vram/.venv/bin/python`.
+Mon message précédent disait l'inverse — inversion corrigée ici.
+
+Usage prévu, SOUS LES MÊMES INSTRUMENTS QUE poste2 :
 
     # temps seul, sanity check avant tout profilage lourd :
-    python3 microbanc_gemv_bf16.py
+    anticitoyen-vram/.venv/bin/python microbanc_gemv_bf16.py
 
-    # trafic DRAM réel, sous ncu (métriques standard à confirmer/aligner
-    # avec celles de poste2 — placeholders ci-dessous) :
-    ncu --metrics dram__bytes_read.sum,dram__bytes_write.sum,\
-dram__throughput.avg.pct_of_peak_sustained_elapsed \
-        --kernel-name-base demangled \
-        python3 microbanc_gemv_bf16.py --ncu
+    # trafic DRAM réel, sous ncu — noms de métriques de
+    # acvram-memoire/revue/metriques-ncu.md, PAS ceux (faux, `n/a` sur
+    # Blackwell) de ma première version :
+    ncu --metrics dram__bytes_op_read.sum,dram__bytes_op_write.sum,\
+dram__sectors_op_read.sum,dram__bytes.sum \
+        --nvtx --nvtx-include "pas/" \
+        anticitoyen-vram/.venv/bin/python microbanc_gemv_bf16.py --ncu
+
+Lire le CSV avec `scratchpad/lire-ncu.py` de poste2 (les deux pièges de
+lecture — en-tête noyé dans la sortie, grands nombres à espaces — y sont
+déjà traités ; ne pas réécrire un parseur naïf).
+
+Fréquences GPU : **jamais** sous `ncu`, qui fige les horloges. Séparément,
+`nvidia-smi dmon`, hors profilage.
 
 `--ncu` réduit à UN seul passage par variante (ncu réinstrumente déjà
 chaque lancement de noyau ; empiler 5 passages ne fait que multiplier le
-temps de capture sans rien ajouter à la mesure).
+temps de capture) et marque la plage utile par NVTX (trois passes de
+chauffe hors plage — la première capture les graphes et remplit les
+caches, disqualifiante pour un relevé DRAM).
 """
 import argparse
 import time
@@ -72,15 +95,25 @@ if _TRITON:
         return y
 
 
-def bench(fn, *args, passages=PASSAGES):
+def bench(fn, *args, passages=PASSAGES, chauffe=3, nvtx_nom=None):
+    # Chauffe HORS plage NVTX : sous ncu, la premiere execution capture les
+    # graphes et remplit les caches — melangee a la mesure, elle fausse le
+    # trafic DRAM (regle de poste2, metriques-ncu.md).
+    for _ in range(chauffe):
+        fn(*args)
     torch.cuda.synchronize()
     temps = []
     for i in range(passages):
+        if nvtx_nom:
+            torch.cuda.nvtx.range_push(nvtx_nom)
         t0 = time.perf_counter()
         out = fn(*args)
         torch.cuda.synchronize()
         temps.append(time.perf_counter() - t0)
-    # le premier jeté : coût unique déjà établi ailleurs dans le dossier
+        if nvtx_nom:
+            torch.cuda.nvtx.range_pop()
+    # le premier jeté (en plus de la chauffe) : coût unique deja etabli
+    # ailleurs dans le dossier
     utiles = temps[1:] if len(temps) > 1 else temps
     return out, temps, sum(utiles) / len(utiles)
 
@@ -107,12 +140,13 @@ def main():
     print(f"forme : hidden={a.hidden}, un jeton, bf16, {passages} passage(s)")
 
     y1, t1, moy1 = bench(lambda: torch.nn.functional.linear(x, w),
-                         passages=passages)
+                         passages=passages, nvtx_nom="pas/flinear")
     print(f"F.linear (chemin acvram reel)      : {moy1*1e6:8.1f} us/appel  "
           f"passages={['%.1f'%(t*1e6) for t in t1]}")
 
     if _TRITON:
-        y2, t2, moy2 = bench(lambda: gemv_triton(x, w), passages=passages)
+        y2, t2, moy2 = bench(lambda: gemv_triton(x, w), passages=passages,
+                             nvtx_nom="pas/triton")
         print(f"GEMV Triton (bloc par ligne)        : {moy2*1e6:8.1f} us/appel  "
               f"passages={['%.1f'%(t*1e6) for t in t2]}")
         ecart = (y1.float() - y2).abs()
@@ -123,9 +157,10 @@ def main():
         if not a.ncu:
             print(f"rapport temps F.linear / Triton : {moy1/moy2:.2f}x")
     else:
-        print("triton absent de cet interpreteur — installer dans le venv "
-              "acvram avant de lancer, ou lancer avec le python qui a "
-              "triton 3.7.1 (verifie le 9/09, hors venv acvram)")
+        print("triton absent de cet interpreteur — relancer avec "
+              "anticitoyen-vram/.venv/bin/python (le seul qui porte torch "
+              "et triton, cf. metriques-ncu.md ; l'interpreteur systeme "
+              "n'a ni l'un ni l'autre)")
 
 
 if __name__ == "__main__":
