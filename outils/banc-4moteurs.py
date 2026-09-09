@@ -21,6 +21,7 @@ dans ~/.config/ia-secrets.env et dans api_tokens.yml de TabbyAPI.
 
 Reprenable : les couples déjà présents dans le TSV de sortie sont sautés.
 """
+from collections import namedtuple
 import argparse, hashlib, json, os, re, statistics, subprocess, sys, threading, time, tomllib, urllib.request
 
 KIMI = os.path.expanduser("~/.kimi-code")
@@ -597,6 +598,16 @@ def generer(moteur):
     return n, premier - t0, dernier - premier, w, "".join(texte), morceaux, source
 
 
+# Un passage nomme, et non un tuple positionnel. Le 9/09/2026, ajouter deux
+# colonnes a `passages.append` a casse `tps, ttft, e, n, txt, dt = ordonnes[...]`
+# — « too many values to unpack » — et la campagne a rendu deux lignes a
+# `t_s 0.0`. Des lignes qui existent et ne valent rien : pire qu'un fichier
+# vide, un lecteur presse y voit une campagne faite. Avec des champs nommes,
+# ajouter une colonne ne peut plus casser une lecture.
+Passage = namedtuple("Passage",
+                     "tps ttft energie jetons texte duree morceaux source")
+
+
 def mesurer(moteur):
     """Débit MÉDIAN et énergie du MÊME passage, puis la ligne de base après lui.
 
@@ -610,8 +621,8 @@ def mesurer(moteur):
     for _ in range(MESURES):
         n, ttft, dt, e, txt, morceaux, source = generer(moteur)
         tps = (n - 1) / dt if n > 1 else 0.0
-        passages.append((tps, ttft, e, n, txt, dt, morceaux, source))
-    debits = [p[0] for p in passages]
+        passages.append(Passage(tps, ttft, e, n, txt, dt, morceaux, source))
+    debits = [p.tps for p in passages]
 
     # Le passage PUBLIE est celui de debit median, plus celui de debit
     # maximal. « Le meilleur des trois » est un estimateur biaise : il
@@ -619,8 +630,10 @@ def mesurer(moteur):
     # sur un couple a 21,3 % de dispersion contre 5,2 en face, le meilleur
     # donnait la victoire au plus instable. Le maximum reste publie a part,
     # il n'est simplement plus ce qu'on compare.
-    ordonnes = sorted(passages, key=lambda x: x[0])
-    tps, ttft, e, n, txt, dt = ordonnes[len(ordonnes) // 2]
+    ordonnes = sorted(passages, key=lambda x: x.tps)
+    median = ordonnes[len(ordonnes) // 2]
+    tps, ttft, e, n, txt, dt = (median.tps, median.ttft, median.energie,
+                                median.jetons, median.texte, median.duree)
     etendue = (min(debits), max(debits))
 
     # Empreinte du texte de CHAQUE passage. A temperature zero, le meme
@@ -629,7 +642,7 @@ def mesurer(moteur):
     # plus important que le debit qu'on etait venu mesurer. Si elles sont
     # identiques, une dispersion de debit ne peut pas venir du texte, et il
     # faut la chercher ailleurs (passage froid, cache, ordonnancement).
-    empreintes = [hashlib.sha256(p[4].encode()).hexdigest()[:8] for p in passages]
+    empreintes = [hashlib.sha256(p.texte.encode()).hexdigest()[:8] for p in passages]
     textes_identiques = len(set(empreintes)) == 1
     watts = e.moyenne
     base = repos(secondes=min(max(dt, 5.0), 30.0))
@@ -675,16 +688,16 @@ def mesurer(moteur):
         # prechargement le supprimerait au lieu de le subir. Releve du
         # 8 septembre 2026 : ni ~/.nv/ComputeCache ni ~/.triton/cache n'ont
         # ete ecrits pendant les series, donc ce n'est PAS de la compilation.
-        "ttft_passages": ",".join(f"{p[1] * 1000:.0f}" for p in passages),
+        "ttft_passages": ",".join(f"{p.ttft * 1000:.0f}" for p in passages),
         # Les deux comptages, pour que « jetons par seconde » veuille dire la
         # meme chose d'un moteur a l'autre.
         "jetons_moteur": n,
-        "jetons_flux": ",".join(str(p[6]) for p in passages),
+        "jetons_flux": ",".join(str(p.morceaux) for p in passages),
         # D'où vient le nombre publié. Un moteur qui n'annonce pas d'`usage`
         # laisse le banc compter, et alors « jetons_moteur » porterait un nom
         # menteur : c'est le nôtre. Deux moteurs de provenance différente dans
         # le même tableau ne comparent pas la même grandeur.
-        "jetons_source": passages[0][7],
+        "jetons_source": passages[0].source,
         "binaire": binaire_servant(moteur),
         "ctx_servi": ctx_servant(moteur),
     }
@@ -754,6 +767,7 @@ def main():
             sys.exit(2)
 
     faits = set()
+    reussies = echouees = 0
     if os.path.exists(a.sortie):
         for l in open(a.sortie):
             c = l.rstrip("\n").split("\t")
@@ -788,6 +802,10 @@ def main():
             except Exception as exc:                       # noqa: BLE001
                 etat = f"erreur: {str(exc)[:120]}"
                 log(f"           ÉCHEC {etat}")
+            if etat.startswith("erreur"):
+                echouees += 1
+            else:
+                reussies += 1
             with open(a.sortie, "a") as f:
                 def v(cle, defaut=""):
                     return energie.get(cle, defaut)
@@ -803,7 +821,16 @@ def main():
                         f"{v('empreintes', '?')}\t"
                         f"{v('textes_identiques', '?')}\t{v('invalidations', '?')}\n")
         arreter(m)
-    log("TERMINÉ")
+    log(f"TERMINÉ — {reussies} mesure(s) valide(s), {echouees} échec(s)")
+    # Trois campagnes de suite ont fini en code 0 sans une seule mesure, le
+    # 9/09/2026 : garde inconditionnelle, TSV vide, puis lignes a t_s 0.0. Le
+    # code de sortie ne portait aucune information et il a cesse d'etre lu.
+    # Une campagne qui ne mesure rien doit echouer, sinon un enchainement la
+    # prend pour un succes — et des lignes qui existent sans rien valoir sont
+    # pires qu'un fichier vide.
+    if reussies == 0:
+        log("  AUCUNE mesure valide : la campagne n'a rien produit")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

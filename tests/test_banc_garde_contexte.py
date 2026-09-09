@@ -69,3 +69,42 @@ def test_des_contextes_egaux_laissent_la_campagne_partir(tmp_path):
     assert sortie.value.code == _PASSEE, (
         f"la garde a arrêté une campagne valide (code {sortie.value.code}) : "
         f"elle détruit ce qu'elle protège")
+
+
+def _banc_qui_mesure(resultat_ou_erreur):
+    """Un banc dont les serveurs demarrent et dont `mesurer` fait ce qu'on veut."""
+    spec = importlib.util.spec_from_file_location("banc_mesure", _BANC)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    m.demarrer = lambda *_a, **_k: 1.0
+    m.arreter = lambda *_a, **_k: None
+    m.arreter_tout_sauf = lambda *_a, **_k: None
+    m.modele_servi = lambda *_a, **_k: "x"
+    if isinstance(resultat_ou_erreur, Exception):
+        def mesurer(*_a, **_k):
+            raise resultat_ou_erreur
+    else:
+        def mesurer(*_a, **_k):
+            return resultat_ou_erreur
+    m.mesurer = mesurer
+    return m
+
+
+def test_une_campagne_sans_aucune_mesure_echoue(tmp_path):
+    """Trois campagnes de suite ont fini en code 0 sans mesurer quoi que ce soit."""
+    m = _banc_qui_mesure(RuntimeError("too many values to unpack"))
+    with pytest.raises(SystemExit) as sortie:
+        _lancer(m, 8192, 8192, str(tmp_path / "vide.tsv"))
+    assert sortie.value.code == 1, \
+        "une campagne qui ne mesure rien doit echouer, pas rendre 0"
+
+
+def test_une_campagne_qui_mesure_ne_signale_pas_d_echec(tmp_path):
+    """L'autre sens : la garde ne doit pas condamner une campagne valide."""
+    # Le faux resultat doit etre COMPLET : un dict d'energie ampute declenche
+    # une KeyError attrapee par le banc, donc le chemin d'erreur — et le test
+    # aurait mesure l'inverse de ce qu'il annonce.
+    m = _banc_qui_mesure((12.5, 0.1, 200.0, 60.0, 200, "texte",
+                          {"invalidations": "aucune", "t_s_min": 12.0,
+                           "t_s_max": 13.0, "jkj_net": 55.0}))
+    _lancer(m, 8192, 8192, str(tmp_path / "plein.tsv"))   # ne doit pas lever
