@@ -40,6 +40,9 @@
 // le vérifie face au chemin PyTorch.
 
 #include <torch/extension.h>
+#include <tuple>
+#include <array>
+#include <map>
 #include <cstdlib>
 #include <vector>
 #include <ATen/cuda/CUDAContext.h>
@@ -790,6 +793,18 @@ __global__ void int4_gemv_grouped_kernel(
 // godet de blocs : le chemin se rejoue tel quel dans un graphe CUDA.
 // -------------------------------------------------------------------------
 
+// EMPREINTE DU SOURCE, posee par le lanceur Python (-DACVRAM_SRC_HASH).
+// Elle doit se retrouver DANS le binaire : c'est le seul controle qui prouve
+// que le .so compile bien ce fichier-ci. Comparer les horodatages ne prouve
+// rien — ccache reecrit le .so avec un contenu ancien, donc sa date est bonne
+// et son contenu perime. Un ENTIER, pas une chaine : l'echappement des
+// guillemets ne survivait pas jusqu'a nvcc et le controle refusait TOUT.
+#ifndef ACVRAM_SRC_HASH
+#define ACVRAM_SRC_HASH 0ULL
+#endif
+extern "C" __attribute__((used)) const unsigned long long acvram_src_hash
+    = ACVRAM_SRC_HASH;
+
 constexpr int PA_CHUNK = 512;
 constexpr int PA_WARPS = 4;
 
@@ -806,7 +821,9 @@ __global__ void paged_attn_partial_kernel(
     float *__restrict__ part_m,           // [B*QL, HQ, C]
     float *__restrict__ part_l,           // [B*QL, HQ, C]
     OT *__restrict__ sortie,              // [B*QL, HQ, D] si C == 1, sinon nul
-    int HQ, int HKV, int N, int C, int QL, float scale, int window) {
+    int HQ, int HKV, int N, int C, int QL, float scale, int window,
+    int chunk) {          // le noyau et le lanceur DOIVENT decouper pareil
+
     // La vérification spéculative pose QL positions de requête par séquence :
     // la requête qi (0..QL-1) ne voit que les seq_len-QL+1+qi premières
     // positions — causalité oblige. QL=1 redonne le décodage ordinaire.
@@ -818,14 +835,14 @@ __global__ void paged_attn_partial_kernel(
     const int hkv = h / (HQ / HKV);
     const long slen = seq_lens[b] - (QL - 1) + qi;
     const long lo = window > 0 ? max(0L, slen - (long)window) : 0L;   // fenêtre glissante
-    const long start = max((long)c * PA_CHUNK, lo);
+    const long start = max((long)c * chunk, lo);
     const long out_off = ((long)bq * HQ + h) * C + c;
 
     const int lane = threadIdx.x % WARP;
     const int wid = threadIdx.x / WARP;
     constexpr int PER_LANE = D / WARP;
 
-    if (start >= slen || start >= (long)(c + 1) * PA_CHUNK) {
+    if (start >= slen || start >= (long)(c + 1) * chunk) {
         if (threadIdx.x == 0) {
             part_m[out_off] = -INFINITY;
             part_l[out_off] = 0.f;
@@ -847,7 +864,7 @@ __global__ void paged_attn_partial_kernel(
     #pragma unroll
     for (int i = 0; i < PER_LANE; ++i) acc[i] = 0.f;
 
-    const long end = min(slen, (long)(c + 1) * PA_CHUNK);
+    const long end = min(slen, (long)(c + 1) * chunk);
     for (long t = start + wid; t < end; t += PA_WARPS) {
         const long blk = tables[(long)b * N + (t >> 4)];
         const long cell = (blk * 16 + (t & 15)) * HKV + hkv;
@@ -1894,15 +1911,51 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
     const int HQ = q.size(1);
     const int D = q.size(2);
     const int N = tables.size(1);
+    // TAILLE DE TRANCHE A L'EXECUTION. C'etait `constexpr PA_CHUNK` : une
+    // constante compilee ne peut porter une formule qui depend du nombre de SM
+    // et du contexte reel, et elle oblige a recompiler pour l'explorer — neuf
+    // minutes par valeur, avec le risque verifie que la recompilation n'ait pas
+    // lieu du tout. Le defaut reproduit exactement l'ancien comportement.
+    int chunk = PA_CHUNK;
+    if (const char *v = std::getenv("ACVRAM_PA_CHUNK")) {
+        int demande = atoi(v);
+        if (demande >= 16) chunk = demande;
+    }
     TORCH_CHECK(D == 32 || D == 64 || D == 128 || D == 256 || D == 512,
                 "dimension de tete non instanciee : ", D);
-    const int C = (N * 16 + PA_CHUNK - 1) / PA_CHUNK;
-    TORCH_CHECK(C <= 256, "contexte au-dela de 256 tranches");
+    const int C = (N * 16 + chunk - 1) / chunk;
+    TORCH_CHECK(C <= 256, "contexte au-dela de 256 tranches (chunk=", chunk,
+                ", blocs=", N, ")");
     const bool qbf = q.scalar_type() == torch::kBFloat16;
     auto f32 = q.options().dtype(torch::kFloat);
-    auto part = torch::empty({BQ, HQ, C, D}, f32);
-    auto pm = torch::empty({BQ, HQ, C}, f32);
-    auto pl = torch::empty({BQ, HQ, C}, f32);
+    // TAMPONS REUTILISES. Le noyau porte 46,5 us de cout FIXE — 94 % de sa
+    // duree — qui ne depend ni du travail, ni du nombre de blocs (grille x8 :
+    // aucun effet), ni du nombre de noyaux lances. Reste ce qui ENTOURE le
+    // lancement. Chaque tampon est ECRIT avant d'etre lu, y compris par la
+    // sortie anticipee qui pose -INFINITY et 0.
+    static bool sans_cache = [] {
+        const char *v = std::getenv("ACVRAM_PAGED_ALLOC");
+        return v && v[0] == '1';
+    }();
+    torch::Tensor part, pm, pl;
+    if (sans_cache) {
+        part = torch::empty({BQ, HQ, C, D}, f32);
+        pm = torch::empty({BQ, HQ, C}, f32);
+        pl = torch::empty({BQ, HQ, C}, f32);
+    } else {
+        static std::map<std::tuple<int, int, int, int, int>,
+                        std::array<torch::Tensor, 3>> cache_t;
+        auto cle = std::make_tuple(BQ, HQ, C, D, (int)q.device().index());
+        auto it = cache_t.find(cle);
+        if (it == cache_t.end()) {
+            it = cache_t.emplace(cle, std::array<torch::Tensor, 3>{
+                torch::empty({BQ, HQ, C, D}, f32),
+                torch::empty({BQ, HQ, C}, f32),
+                torch::empty({BQ, HQ, C}, f32)}).first;
+        }
+        part = it->second[0]; pm = it->second[1]; pl = it->second[2];
+    }
+    // `out` reste FRAIS : il est RENDU a l'appelant.
     auto out = torch::empty({BQ, HQ, D}, q.options());
     auto stream = at::cuda::getCurrentCUDAStream();
     dim3 g1(BQ, HQ, C), g2(BQ, HQ);
@@ -1917,7 +1970,8 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
             tables.data_ptr<long>(), seq_lens.data_ptr<long>(), \
             part.data_ptr<float>(), pm.data_ptr<float>(), \
             pl.data_ptr<float>(), (C == 1 ? (PO) : nullptr), \
-            HQ, (int)hkv, N, C, (int)q_len, (float)scale, (int)window); \
+            HQ, (int)hkv, N, C, (int)q_len, (float)scale, (int)window, \
+            chunk); \
         if (C > 1) \
         paged_attn_reduce_kernel<DD, OT><<<g2, 128, 0, stream>>>( \
             part.data_ptr<float>(), pm.data_ptr<float>(), \

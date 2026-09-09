@@ -12,6 +12,7 @@ sans compilateur, et la suite de tests peut vérifier les noyaux face à lui.
 from __future__ import annotations
 
 import functools
+import hashlib
 import os
 import time
 import re
@@ -252,10 +253,25 @@ def get_extension():
         cache = os.path.expanduser("~/.cache/acvram/kernels")
         os.makedirs(cache, exist_ok=True)
         _purger_verrou(cache)
+        # EMPREINTE DU SOURCE, injectee comme option de compilation.
+        # `ccache` enveloppe nvcc (build.ninja) et son hachage ne distingue pas
+        # toujours deux versions du code *device* : le 9/09/2026 une
+        # modification du .cu a rendu un binaire compile en 191 ms qui ne la
+        # contenait pas, tout en etant PLUS RECENT que la source. Quatre
+        # valeurs d'un parametre ont ainsi donne quatre fois le meme chiffre —
+        # le meme binaire — et la conclusion qu'on allait en tirer etait fausse.
+        # Une option qui CHANGE avec le contenu interdit structurellement a
+        # ccache de rendre un objet perime, sans le desactiver ni perdre son
+        # benefice sur les compilations legitimes.
+        src = os.path.join(here, "acvram_kernels.cu")
+        with open(src, "rb") as fh:
+            _SRC_HASH = hashlib.sha256(fh.read()).hexdigest()[:16]
+        _SRC_U64 = int(_SRC_HASH, 16)          # entier : aucun guillemet a echapper
         _EXT = load(
             name="acvram_kernels",
-            sources=[os.path.join(here, "acvram_kernels.cu")],
-            extra_cuda_cflags=["-O3", "--use_fast_math", "-lineinfo"]
+            sources=[src],
+            extra_cuda_cflags=["-O3", "--use_fast_math", "-lineinfo",
+                               f"-DACVRAM_SRC_HASH={_SRC_U64}ULL"]
             + ([f"-DGW_WARPS={os.environ['ACVRAM_GW_WARPS']}"]
                if os.environ.get("ACVRAM_GW_WARPS") else [])
             + _arch_flags(),
@@ -263,6 +279,25 @@ def get_extension():
             build_directory=cache,
             verbose=bool(os.environ.get("ACVRAM_VERBOSE_BUILD")),
         )
+        # LE BINAIRE PORTE-T-IL BIEN CE SOURCE ? Une fois, au chargement,
+        # jamais dans le chemin chaud. Comparer les horodatages ne prouve
+        # rien : ccache reecrit le .so, donc sa date est bonne et son contenu
+        # ancien. Seul le CONTENU repond.
+        so = os.path.join(cache, "acvram_kernels.so")
+        try:
+            with open(so, "rb") as fh:
+                # l'entier est ecrit en little-endian dans le binaire
+                porte = _SRC_U64.to_bytes(8, "little") in fh.read()
+        except OSError:
+            porte = True                       # pas de .so a inspecter : on n'accuse pas
+        if not porte:
+            _ERROR = (f"le binaire {so} ne porte pas l'empreinte du source "
+                      f"({_SRC_HASH}) : il a ete servi par un cache de "
+                      f"compilation et NE CONTIENT PAS vos modifications. "
+                      f"Videz {cache} ou relancez avec CCACHE_DISABLE=1.")
+            warnings.warn(f"acvram : {_ERROR}")
+            _EXT = None
+            return None
     except Exception as exc:                      # noqa: BLE001 — signaler, pas planter
         _ERROR = f"{type(exc).__name__}: {exc}"
         _EXT = None
