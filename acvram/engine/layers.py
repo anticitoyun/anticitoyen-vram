@@ -989,6 +989,57 @@ def stack_nvfp4_linears(lins: list) -> Optional["QuantLinear"]:
     return QuantLinear(fus)
 
 
+def stack_plain_linears(lins: list) -> Optional["QuantLinear"]:
+    """Empile des poids bf16 de même entrée en un seul, SANS les dupliquer.
+
+    Les modèles bf16 purs ne passaient par aucune des deux fusions existantes
+    (int8, nvfp4) : ni q/k/v ni gate/up n'y étaient empilés, soit **sept GEMV
+    par couche** au décodage là où llama.cpp en lance six (mesuré le 9 septembre
+    2026 sous ncu : 337 noyaux GEMV par pas contre 289).
+
+    Empiler naïvement doublerait les poids concernés — q, k, v, gate et up font
+    environ 70 % d'un modèle dense, soit 13,6 Gio de copie sur Qwen2.5-14B, que
+    la carte n'a pas. Les originaux sont donc **remplacés par des vues** dans
+    l'empilement : ``narrow`` sur la dimension 0 d'un tenseur contigu reste
+    contigu, le chemin de prefill continue de fonctionner, et il ne survit
+    qu'une seule copie des poids. Le pic transitoire est celui d'une couche.
+    """
+    from ..quant.formats import PlainTensor
+    # Echappement : sert a mesurer le gain de la fusion sur la meme binaire, et
+    # a comparer les jetons emis avec et sans elle. Sans interrupteur, l'A/B
+    # demanderait deux versions du code -- et comparerait autre chose.
+    if os.environ.get("ACVRAM_SANS_FUSION_BF16"):
+        return None
+    ts = [getattr(l, "qweight", None) for l in lins]
+    if not all(isinstance(t, PlainTensor) for t in ts):
+        return None
+    if len({t.weight.shape[1] for t in ts}) != 1:
+        return None
+    if len({(t.weight.dtype, str(t.weight.device)) for t in ts}) != 1:
+        return None
+    if any(l.scaler is not None or l.streamed is not None for l in lins):
+        return None
+    # Les biais s'empilent comme les poids -- Qwen2.5 en porte sur q, k et v, et
+    # les refuser laissait ses 48 attentions sur le chemin a trois GEMV. Tout ou
+    # rien : un empilement partiel decalerait les lignes de sortie.
+    biais = [l.bias for l in lins]
+    if any(b is not None for b in biais) and any(b is None for b in biais):
+        return None
+    plat = torch.cat([t.weight for t in ts]).contiguous()
+    pbiais = None
+    if biais[0] is not None:
+        pbiais = torch.cat([b for b in biais]).contiguous()
+    off = 0
+    for l, t in zip(lins, ts):
+        n = t.weight.shape[0]
+        l.qweight = PlainTensor(plat.narrow(0, off, n), t.shape, t.format)
+        if pbiais is not None:
+            l.bias = pbiais.narrow(0, off, n)
+        off += n
+    return QuantLinear(PlainTensor(plat, tuple(plat.shape), ts[0].format),
+                       bias=pbiais)
+
+
 def stack_int8_linears(lins: list) -> Optional["QuantLinear"]:
     """Empile des QuantLinear INT8 de même entrée en un seul (lignes
     concaténées) : une GEMV au lieu de n au décodage. None si inapplicable."""

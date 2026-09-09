@@ -279,6 +279,9 @@ def load_model(path: str, plan: Optional[Plan] = None,
 
     layers: list[DecoderLayer] = []
     caches: dict[int, PagedKVCache] = {}
+    # Caches KV differes : voir la fusion des projections plus bas, qui a
+    # besoin de place libre au moment ou elle concatene.
+    a_allouer: list = []
     _borner_kv_par_la_vram(plan, manifest, dev)
     kv_blocks = _kv_blocks_per_device(plan, spec, max_model_len)
 
@@ -758,16 +761,25 @@ def load_model(path: str, plan: Optional[Plan] = None,
         if n_blocks:
             kv_fmt = next((t.kv_format for t in plan.tiers
                            if t.name == lp.exec_device), "int8")
-            caches[i] = PagedKVCache(KVCacheConfig(
+            a_allouer.append((i, KVCacheConfig(
                 num_layers=1, num_kv_heads=spec.num_key_value_heads,
                 head_dim=spec.head_dim, num_blocks=n_blocks,
-                dtype=kv_fmt, device=str(d)))
+                dtype=kv_fmt, device=str(d))))
 
     # Projections empilées : gate/up des MLP (denses, experts partagés) et
     # q/k/v de l'attention — une GEMV au lieu de deux ou trois par couche.
     # Les experts d'un MoE en sont exclus : ils passent par le chemin groupé,
     # qui empile déjà les 128 experts, et les fusionner un à un doublerait
     # leurs poids sans rien accélérer.
+    #
+    # AVANT l'allocation des caches KV, et ce n'est pas cosmétique :
+    # l'empilement alloue le tenseur concaténé avant de libérer les deux
+    # sources, soit un pic de la taille d'une paire (283 Mio sur Qwen2.5-14B).
+    # Le budget KV remplit la carte jusqu'à la marge — 119 Mio libres après
+    # chargement — et l'allocateur devait purger son cache à chaque couche pour
+    # trouver la place : il y parvenait, en laissant la trace
+    # « memory allocation failed with OOM » à chaque paire, et en fragmentant.
+    # Ici la fusion se fait pendant que le budget KV est encore libre.
     for layer in layers:
         experts = {id(e) for m in layer.modules() if isinstance(m, MoEBlock)
                    for e in m.experts}
@@ -776,6 +788,9 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 m.fuse()
             elif isinstance(m, Attention):
                 m.fuse()
+
+    for i, cfg in a_allouer:
+        caches[i] = PagedKVCache(cfg)
 
     head_dev = dev(plan.lm_head_device) if plan.lm_head_device != "cpu" \
         else torch.device("cpu")
