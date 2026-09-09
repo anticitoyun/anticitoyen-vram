@@ -101,3 +101,86 @@ Le couple à fabriquer : `Qwen3-0.6B`, même source GGUF, converti en nvfp4
 (existe) et en bf16 (à produire). Écart attendu **connu de signe** — le bf16
 doit être meilleur, le nvfp4 étant une approximation du même modèle. Deux
 chiffres identiques sur ce couple signifieraient un instrument aveugle.
+
+## Ce que chaque mesure exerce — la ligne qui manquait
+
+Un correctif n'est pas éprouvé parce qu'il est présent dans l'arbre : il faut
+que la mesure **emprunte son chemin**. Sans cette ligne, « la classe A ne
+change pas la perplexité » se lit comme une affirmation sur six correctifs
+alors qu'elle en couvre trois.
+
+    revision   fichier                    exerce par une eval de converti ?
+    f543e9d    acvram_kernels.cu          oui   noyau gemv nvfp4
+    eb4c099    engine/layers.py           oui   fusion nvfp4
+    670db7f    quant/calibrate.py         oui   cache d echelle au chargement
+    095b5ef    engine/layers.py           oui   36 groupes a biais empiles
+    04d0da7    quant/convert.py           NON   chemin de conversion
+    225aa5f    quant/calibrate.py         NON   chemin de conversion
+    f380b62    kernels/cpu.py, nvfp4.py   NON   chemin d execution CPU
+
+**Les deux « NON » de conversion** ne sont pas une lacune du protocole : un
+modèle déjà converti ne peut pas les exercer. `225aa5f` porte sur
+`search_channel_scales` et `state_dict` — son propre message le dit, « les
+modèles déjà convertis restent en fp16, le lecteur prend le dtype qu'il
+trouve ». Les éprouver demande de **reconvertir**, pas de réévaluer.
+
+**Le « NON » de `f380b62` est d'une autre nature, et il vaut d'être connu :
+aucun réglage de mesure n'atteint ce chemin sur une carte qui a de la place.**
+`ACVRAM_EXIL_COUCHES` pose `mlp_storage="cpu"` mais réaffirme
+`mlp_exec="gpu"` (loader.py:1252) : les poids passent en RAM hôte, le calcul
+reste sur la carte, et `int4_matmul_cpu` n'est jamais appelée.
+`ACVRAM_MLP_HOTE_CPU` n'agit que dans le réajustement sous contrainte de VRAM
+(loader.py:1110), qui ne se déclenche pas quand la carte n'est pas pleine. Le
+chemin n'est donc atteignable qu'en **saturant réellement la VRAM**.
+
+## Le classement de 095b5ef était faux : c'est de la classe A
+
+Le protocole le rangeait en B au titre de l'ordre des sommes. **L'observable
+dit autre chose.** Une sonde sur le modèle, avant et après le correctif :
+
+    avant 095b5ef   72 groupes fusionnes, dont 36 a biais
+    apres 095b5ef   72 groupes fusionnes, dont 36 a biais
+
+Le correctif ne change pas **ce qui est fusionné** mais **où le biais est
+rangé** : une concaténation, puis des vues `narrow` portant les mêmes valeurs.
+La disposition mémoire change, l'arithmétique non — donc classe A.
+
+Mesuré en conséquence : perplexité 9,928 des deux côtés, et 0 amorce sur 12
+change à l'empreinte.
+
+## L'empreinte de generation : ce qu'elle prouve, et ce qu'elle ne prouve pas
+
+12 amorces disjointes, 128 jetons, greedy, un serveur neuf par passage — le
+serveur en place est **toujours tué d'abord**, faute de quoi `acvram-serveur`
+sort en `exit 0` sur un modèle déjà servi et l'empreinte porterait sur le code
+précédent.
+
+Éprouvée dans les deux sens avant de servir :
+
+    temoin NEGATIF   0 amorce sur 12 differe entre deux processus du meme code
+    temoin POSITIF   2 amorces sur 12 different quand ACVRAM_FUSION_NVFP4=0
+
+**Sensibilité mesurée : 17 %.** Un texte ne bouge que si deux candidats se
+croisent. **L'empreinte prouve qu'un changement a eu lieu ; son immobilité ne
+prouve pas l'identité** et ne doit jamais être lue dans ce sens. Quand elle ne
+bouge pas, c'est une sonde d'état — ici le compte des fusions — qui dit si le
+chemin a seulement été emprunté.
+
+Deux gardes ont servi pendant cette campagne, et toutes deux ont attrapé une
+erreur avant la mesure, pas après :
+
+* `ACVRAM_SEUIL_FUSION` est un **plafond** (`t <= SEUIL_FUSION`) : le lever
+  active la fusion au lieu de la couper, et au décodage `t=1` la franchissait
+  déjà. Le premier témoin positif ne testait rien — il rendait l'empreinte de
+  référence, à l'identique.
+* `pbiais` existait **déjà 4 fois** dans le code d'avant `095b5ef` : pris comme
+  motif de garde, il aurait approuvé l'état qu'il devait refuser. Le motif
+  retenu compte 1 avant et 3 après, et la garde compare au **nombre exact**.
+
+## Un champ que l'API annonce sans le produire
+
+`logprobs` et `top_logprobs` sont déclarés dans `server/protocol.py:72` et ne
+sont jamais remplis : une complétion avec `"logprobs": 5` rend `null`. Ils
+auraient donné une empreinte bien plus fine que le texte — toute différence de
+bit apparaît dans les décimales d'une log-probabilité, là où un jeton ne
+bascule qu'au croisement. Signalé, non corrigé.
