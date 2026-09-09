@@ -651,6 +651,85 @@ def garde_grossissement(octets_source: int, total_params: int,
         "la source par un moteur GGUF ; ou --autoriser-grossissement en "
         "connaissance de cause.")
 
+# Octets par poids REELS, echelles de bloc comprises : NVFP4 coute 4 bits de
+# poids plus une echelle e4m3 par bloc de 16, soit 4,5 bits et non 4.
+_OCTETS_PAR_POIDS = {"bf16": 2.0, "fp16": 2.0, "int8": 1.0625,
+                     "nvfp4": 0.5625, "int4_awq": 0.5625, "q3n": 0.40625}
+
+
+def _diagnostic_fusion(tensors: dict) -> dict:
+    """Ce qui empeche chaque groupe q/k/v et gate/up de fusionner, et ce que
+    coûterait de le lever. **Consigne, ne decide pas.**
+
+    La fusion exige que toutes les projections d'un groupe partagent leur
+    format et leur bloc de Hadamard. Le convertisseur choisit pourtant un
+    format PAR TENSEUR — le plancher de SNR promeut sans regarder les voisins
+    du groupe. D'ou des groupes melant nvfp4, int8 et int4_awq, refuses a la
+    fusion pour cette seule raison.
+
+    Uniformiser aurait un prix que le mot « gratuit » cachait : promouvoir un
+    tenseur de nvfp4 vers int8 DOUBLE ses octets, et sur un decodage lie a la
+    memoire ces octets se paient a chaque pas. Mesure le 9/09/2026 sur trois
+    modeles : le marche est bon sur l'un (+43 us/pas) et mauvais sur les deux
+    autres (-539 et -553 us/pas). **Le signe depend de la largeur, donc la
+    decision est par groupe et jamais uniforme.**
+
+    Ce champ n'applique aucune regle : il accumule les octets qu'une promotion
+    coûterait, pour que la decision devienne possible le jour ou le gain de
+    fusion sera MESURE sur un modele reel. Il manque aujourd'hui son autre
+    terme — les microsecondes gagnees ne sont qu'une borne prise sur un seul
+    modele, a une seule forme, sur une courbe dentelee. Figer ce terme dans le
+    convertisseur le rendrait invisible et durable : un poids converti ne se
+    relit pas pour savoir d'ou venait sa constante.
+    """
+    import collections
+    import re
+
+    groupes = collections.defaultdict(list)
+    for nom in tensors:
+        m = re.match(r"(.*\.layers\.\d+)\.(self_attn\.[qkv]|mlp\.(?:gate|up))_proj\.weight$",
+                     nom)
+        if m:
+            groupes[(m.group(1), "qkv" if "attn" in m.group(2) else "gate_up")].append(nom)
+
+    mixtes = []
+    for (prefixe, genre), noms in sorted(groupes.items()):
+        attendu = 3 if genre == "qkv" else 2
+        if len(noms) != attendu:
+            continue
+        fmts = {str(tensors[n].get("format")) for n in noms}
+        hads = {tensors[n].get("hadamard_block") or 0 for n in noms}
+        if len(fmts) == 1 and len(hads) == 1:
+            continue
+        octets = 0
+        if len(fmts) > 1:
+            cible = max(fmts, key=lambda f: _OCTETS_PAR_POIDS.get(f, 2.0))
+            for n in noms:
+                cnt = 1
+                for d in (tensors[n].get("shape") or []):
+                    cnt *= d
+                octets += cnt * (_OCTETS_PAR_POIDS.get(cible, 2.0)
+                                 - _OCTETS_PAR_POIDS.get(str(tensors[n].get("format")), 2.0))
+        mixtes.append({
+            "groupe": f"{prefixe}.{genre}",
+            "formats": sorted(fmts),
+            "hadamard_blocks": sorted(hads),
+            "octets_si_uniformise": int(octets),
+        })
+
+    total = sum(g["octets_si_uniformise"] for g in mixtes)
+    return {
+        "groupes_totaux": len(groupes),
+        "groupes_non_fusionnables": len(mixtes),
+        "octets_ajoutes_si_uniformise": total,
+        # Le cout se calcule ; le GAIN ne l'est pas ici, et c'est voulu : il
+        # demande une mesure de fusion sur un modele reel. Sans lui, aucun
+        # arbitrage n'est possible et aucun n'est applique.
+        "gain_microsecondes": None,
+        "detail": mixtes[:64],
+    }
+
+
 def _octets_du_checkpoint(chemin: str) -> int:
     """Somme des poids du checkpoint source, pour reconnaitre une source
     renommee ou deplacee. La taille seule ne PROUVE pas l identite — deux
@@ -990,6 +1069,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             f"conversion incomplète : {len(manquants)} tenseurs attendus "
             f"absents (premier : {manquants[0]}). L'architecture de la source "
             f"n'est probablement pas prise en charge — rien n'est écrit.")
+
+    manifest["diagnostic_fusion"] = _diagnostic_fusion(manifest["tensors"])
 
     if not opts.dry_run:
         writer.flush()
