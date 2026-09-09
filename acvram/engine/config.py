@@ -55,6 +55,15 @@ class LayerSpec:
         return self.active_params / max(1, self.total_params)
 
 
+# Types de couche qui allouent un cache KV, et ceux qui portent un état
+# récurrent. Les deux listes vivent ici, à côté du budget qui les utilise :
+# une règle écrite deux fois finit par diverger, comme `stack_int8_linears` et
+# `stack_nvfp4_linears` ont divergé sur le biais jusqu'au 9/09/2026.
+_TYPES_AVEC_KV = frozenset({
+    "full_attention", "sliding_attention", "attention", "parallel"})
+_TYPES_RECURRENTS = frozenset({"linear_attention"})
+
+
 @dataclass
 class ModelSpec:
     name: str
@@ -185,8 +194,44 @@ class ModelSpec:
     def is_moe(self) -> bool:
         return self.num_experts > 0
 
+    @property
+    def couches_avec_kv(self) -> int:
+        """Couches qui allouent un cache KV — pas toutes, sur un hybride.
+
+        Une couche à attention linéaire ou à SSM porte un état de taille FIXE,
+        pas un cache qui croît avec le contexte : `loader.py` ne lui alloue
+        aucun `PagedKVCache`. La compter dans le budget KV le surestime d'un
+        facteur 4 à 14 sur les 53 hybrides du parc.
+
+        Énumération POSITIVE et non soustraction, parce que deux pièges
+        guettent : `sliding_attention` a bien un cache, et `moe`/`mlp` sont des
+        types de couche sans attention du tout — compter « tout sauf les
+        linéaires » donnait 29 couches à cache sur Nemotron là où il y en a 6.
+        Vérifié sur le parc : 65 modèles d'accord, aucun en désaccord.
+
+        Sans `layer_types`, le repli sur `num_layers` n'est pas seulement
+        prudent, il est EXACT : les 49 manifestes qui n'en portent pas sont
+        tous purement quadratiques.
+        """
+        if not self.layer_types:
+            return self.num_layers
+        return sum(1 for t in self.layer_types if t in _TYPES_AVEC_KV)
+
+    def couche_a_kv(self, index: int) -> bool:
+        """La couche ``index`` alloue-t-elle un cache KV ? Voir `couches_avec_kv`."""
+        if not self.layer_types or index >= len(self.layer_types):
+            return True
+        return self.layer_types[index] in _TYPES_AVEC_KV
+
+    @property
+    def couches_recurrentes(self) -> int:
+        """Couches à attention linéaire, qui portent un état récurrent."""
+        if not self.layer_types:
+            return 0
+        return sum(1 for t in self.layer_types if t in _TYPES_RECURRENTS)
+
     def kv_bytes_per_token(self, kv_bits: int = 8) -> int:
-        """Octets de cache KV pour un jeton, toutes couches confondues.
+        """Octets de cache KV pour un jeton, sur les couches QUI EN ONT UN.
 
         L'attention à requêtes groupées est déjà prise en compte : seules
         ``num_key_value_heads`` têtes sont stockées.
@@ -194,7 +239,33 @@ class ModelSpec:
         per_layer = 2 * self.num_key_value_heads * self.head_dim * kv_bits / 8
         # échelles groupées du KV quantifié : un fp16 par tête, par jeton, par kv
         overhead = 0.0 if kv_bits >= 16 else 2 * self.num_key_value_heads * 2
-        return int((per_layer + overhead) * self.num_layers)
+        return int((per_layer + overhead) * self.couches_avec_kv)
+
+    def etat_recurrent_bytes(self, max_batch: int = 16) -> int:
+        """Octets d'état récurrent à provisionner, toutes couches linéaires.
+
+        Cet état vit sur la carte, une copie PAR SÉQUENCE (`gdn_states` du
+        runner), et il n'était budgété nulle part : `kda.py` l'alloue à la
+        volée dans le forward. La surestimation du cache KV lui servait de
+        provision de fait — deux erreurs de sens opposé qui se compensaient par
+        accident. Corriger `couches_avec_kv` sans provisionner ici déplacerait
+        le défaut au lieu de le lever.
+
+        La formule suit `KDA.new_static`, qui est le chemin à formes fixes :
+        trois états de convolution de ``kernel - 1`` pas, plus la matrice
+        d'état ``[têtes, d, d]``, le tout en float32. Mesuré sur le parc :
+        2304 Mio à seize séquences sur un Qwen3.8-27B, contre 1854 Mio de
+        budget KV entier — ces modèles allouent déjà hors budget dès que la
+        concurrence monte.
+        """
+        n = self.couches_recurrentes
+        if not n or not self.linear_num_value_heads:
+            return 0
+        nh, d = self.linear_num_value_heads, self.linear_value_head_dim
+        d_inner = nh * d
+        k1 = max(0, self.linear_conv_kernel_dim - 1)
+        par_couche = (3 * d_inner * k1 + nh * d * d) * 4
+        return par_couche * n * max(1, max_batch)
 
     def summary(self) -> str:
         b = self.total_params / 1e9

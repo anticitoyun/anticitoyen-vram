@@ -459,9 +459,16 @@ class Engine:
             # question breve — ne peuplaient donc jamais le cache de prefixe.
             self._register_complete_blocks(seq)
             self.allocator.free(seq.blocks)
-            for etats in self.gdn_states.values():
-                etats.pop(seq.id, None)
             seq.blocks = []
+        # HORS du bloc ci-dessus : l'état récurrent n'a aucun rapport avec le
+        # fait que la séquence détienne encore des blocs KV. Les deux étaient
+        # liés, si bien qu'un `_finish` appelé sur une séquence déjà libérée —
+        # annulation tardive, second appel — laissait son état sur la carte.
+        # Cela ne fuyait probablement pas aujourd'hui, un état ne naissant
+        # qu'au forward et un forward exigeant des blocs ; mais c'était vrai
+        # par l'état du moteur, pas par construction.
+        for etats in self.gdn_states.values():
+            etats.pop(seq.id, None)
         if seq in self.running:
             self.running.remove(seq)
         if seq in self.waiting:

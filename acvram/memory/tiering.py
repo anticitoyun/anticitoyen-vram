@@ -206,6 +206,9 @@ class Plan:
     kv_bytes_per_token: int = 0
     kv_budget: dict[str, int] = field(default_factory=dict)
     kv_max_tokens: int = 0
+    # Etat recurrent des couches lineaires : sur la carte, une copie par
+    # sequence, et budgete nulle part avant le 9/09/2026.
+    etat_recurrent_bytes: int = 0
     expert_cache_bytes: dict[str, int] = field(default_factory=dict)
     stage_ranges: dict[str, tuple[int, int]] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
@@ -234,6 +237,7 @@ class Plan:
             "kv_bytes_per_token": self.kv_bytes_per_token,
             "kv_budget": self.kv_budget,
             "kv_max_tokens": self.kv_max_tokens,
+            "etat_recurrent_bytes": self.etat_recurrent_bytes,
             "expert_cache_bytes": self.expert_cache_bytes,
             "stage_ranges": {k: list(v) for k, v in self.stage_ranges.items()},
             "total_weight_bytes": self.total_weight_bytes,
@@ -389,6 +393,22 @@ def plan_placement(spec: ModelSpec, rig: Rig,
         gpu_tiers = []
 
     remaining = {t.name: float(t.capacity) for t in tiers}
+
+    # ---- 0. etat recurrent des couches lineaires -------------------------
+    # AVANT le cache KV, parce qu'il n'est pas negociable : `kda.py` l'alloue
+    # dans le forward, une copie par sequence, et rien ne l'en empeche si la
+    # place manque. Le budget KV, lui, se borne. Ce poste n'etait budgete
+    # NULLE PART : la surestimation du KV — qui comptait toutes les couches au
+    # lieu des seules couches a cache — lui servait de provision de fait.
+    # Corriger cette surestimation sans reserver ici deplacerait le defaut.
+    # Sur les dix-sept Qwen3.x-27B du parc, 2304 Mio a seize sequences contre
+    # 1854 Mio de budget KV entier : ils allouaient deja hors budget.
+    etat_rec = spec.etat_recurrent_bytes(opts.max_concurrent_seqs)
+    plan.etat_recurrent_bytes = etat_rec
+    if gpu_tiers and etat_rec:
+        pool_e = sum(remaining[t.name] for t in gpu_tiers)
+        for t in gpu_tiers:
+            remaining[t.name] -= etat_rec * remaining[t.name] / max(1.0, pool_e)
 
     # ---- 1. cache KV -----------------------------------------------------
     kv_per_tok = spec.kv_bytes_per_token(opts.kv_bits)
