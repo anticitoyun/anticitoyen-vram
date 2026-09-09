@@ -102,3 +102,68 @@ deuxième décimale non.
 **Limite de portée, déclarée** : la fusion est éprouvée sur **deux denses à
 têtes groupées**, rien d'autre. Le parc n'a pas d'autre bf16 qui tienne sur la
 carte (57 et 44 Gio pour les suivants). Ce chiffre vaut pour cette famille.
+
+## Le TTFT : un coût fixe de 44 ms dans le forward de prefill
+
+Mesuré le 9 septembre 2026, `Qwen2.5-Coder-14B-bf16-pur`, serveur lancé sous
+`py-spy` (`ptrace_scope = 1` interdit l'attachement à un processus existant),
+prompts tirés au hasard pour que le cache de préfixe ne serve rien, première
+requête jetée.
+
+    chez chef   44,8 ms de forward pour 171 jetons
+    chez poste2    44,2 ms de forward pour  36 jetons
+
+**Cinq fois moins de jetons, le même temps : ce n'est pas du calcul, c'est un
+coût par appel.** Et le TTFT complet de llama.cpp vaut **33 ms** — **notre seul
+coût fixe de forward dépasse leur chaîne entière**.
+
+    TTFT median      60,9 ms
+    forward          44,2 ms   73 %
+    hors forward     16,6 ms   27 %
+
+Cette répartition est l'inverse de celle mesurée sur des prompts plus longs
+(29 % de forward pour un TTFT de 152 ms). Les deux mesures ne se contredisent
+pas — le forward est le même, c'est **l'enveloppe** qui varie d'un dispositif à
+l'autre. Ce qui la fait varier n'est pas isolé : à éclaircir avant de publier un
+chiffre d'enveloppe.
+
+### La contention du GIL est réfutée
+
+Même TTFT, moteur au repos puis en plein décodage, douze mesures chacun :
+
+    repos    mediane 60,9 ms   min 52,9   max 67,9
+    charge   mediane 62,3 ms   min 57,4   max 76,3
+    ecart    +1,4 ms (+2,4 %) — dans la dispersion
+
+Épreuve choisie **parce qu'elle ne dépend d'aucun profileur** : `py-spy`
+échantillonne les piles, donc il montre où le code *est*, pas où il *attend*.
+Un thread bloqué sur le GIL lui paraît inactif — et `record` exclut les threads
+inactifs par défaut, ce qui rendait le dispositif aveugle à l'attente par
+construction. `--idle` corrige la collecte ; la mesure au repos contre en
+charge se passe de l'instrument.
+
+### Où va le coût fixe
+
+Sur 32 314 échantillons de service retenus (3 691 de chargement et 5 092 hors
+catégorie, comptés et annoncés) :
+
+    17,87 %  _prefill        (model.py:295)   boucle Python par sequence
+     3,41 %  _ref_matmul     (kernels:554)    le GEMM lui-meme
+     3,22 %  pin             (kvcache.py:423)
+     2,77 %  _emit           (runner.py:741)
+     1,09 %  attention  +  0,91 % causal_mask
+     1,38 %  jinja2 _compile + tokeniter
+
+`_prefill` est une boucle par séquence qui appelle `repeat_kv`, `causal_mask` et
+`attention` — un lancement chacun par couche, pour 36 jetons. **Même forme que
+le défaut de décodage que la fusion a corrigé, sur un chemin qu'elle ne touche
+pas.**
+
+### Un faux défaut, réfuté avant d'être rapporté
+
+`attention()` semblait construire un masque explicite à chaque prefill, ce qui
+écarte FlashAttention au profit d'un chemin lent. **`causal_mask` rend `None`
+quand `q_offset == 0` et `q_len == kv_len`** : le prefill standard prend donc
+bien le chemin rapide. Le défaut n'existe que **lorsque le cache de préfixe a
+servi quelque chose** (offset > 0) — cas réel, mais absent des mesures à
+prompts aléatoires. Piste, pas trouvaille.
