@@ -620,7 +620,7 @@ def mesurer(moteur):
     # donnait la victoire au plus instable. Le maximum reste publie a part,
     # il n'est simplement plus ce qu'on compare.
     ordonnes = sorted(passages, key=lambda x: x[0])
-    tps, ttft, e, n, txt, dt = ordonnes[len(ordonnes) // 2]
+    tps, ttft, e, n, txt, dt = ordonnes[len(ordonnes) // 2][:6]
     etendue = (min(debits), max(debits))
 
     # Empreinte du texte de CHAQUE passage. A temperature zero, le meme
