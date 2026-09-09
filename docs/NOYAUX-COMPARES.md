@@ -287,3 +287,48 @@ sur le GEMM.**
 
 **Le GEMM n'est donc pas la cible.** poste4 l'avait établi par le noyau (son
 GEMV Triton est 1,6× plus lent que `F.linear`), on le retrouve par la forme.
+
+## Le temps mort réel : 2,1 %, pas 32 %
+
+Trace `nsys` — qui n'exécute rien deux fois —, 200 pas, graphes actifs et
+vérifiés, noyaux **bornés à la plage NVTX** et sommés en **union d'intervalles**
+(deux noyaux qui se recouvrent occupent le GPU une fois, pas deux) :
+
+    plage « pas »        28,748 ms par pas
+    noyaux dans la plage    549,3 par pas      (544 attendus)
+    temps GPU reel       28,140 ms par pas
+    TEMPS MORT            0,608 ms par pas  ->  2,1 %
+    occupation reelle                          97,9 %
+
+    ce que ncu annoncait  9,0 ms  ->  32 %     (facteur 14,8)
+
+**Le gisement de temps mort n'existe pas.** Même réduit à zéro, il rendrait
+**+2,2 %** — et il faudrait supprimer tout l'espace entre 549 lancements.
+
+26,09 Gio de poids lus en 28,14 ms font **995 Go/s effectifs**, 55,6 % du pic
+théorique. Le décodage est mémoire-borné, à 98 % d'occupation : ce qui limite
+est la bande passante, pas l'ordonnancement.
+
+### Quatre défauts d'instrument traversés pour ce chiffre
+
+1. **`--capture-range=nvtx` n'écrit rien** — « No reports were generated »
+   alors que les pas avaient tourné. Tracer tout, filtrer au dépouillement.
+2. **`nsys` trace un graphe CUDA « comme un tout » par défaut** : 6 099 noyaux
+   comptés pour 200 pas qui en lancent 108 800. **Symétrique exact du défaut de
+   `ncu`** — l'un sérialise les nœuds, l'autre ne les voit pas.
+   `--cuda-graph-trace=node`.
+3. **`nsys stats` somme toute l'exécution**, chargement et prefill compris,
+   quand la plage ne couvre que les pas mesurés : 103,7 % d'occupation, un
+   numérateur plus large que son dénominateur. Requête SQL bornée aux temps de
+   la plage.
+4. **`nsys stats … >/dev/null 2>&1`** — les CSV n'ont pas été réécrits, le
+   dépouillement a lu ceux de la trace précédente et rendu **97,4 % de temps
+   mort** sans que rien ne le signale. *Masquer la sortie de l'outil, c'est
+   masquer ce qu'il avait à dire.* Le dépouillement refuse désormais si les CSV
+   sont antérieurs à la trace.
+
+### Ce qu'il reste comme cible sur le décodage
+
+Rien. Trafic nominal, coalescence parfaite, L2 meilleur que le leur, occupation
+à 98 %, fusion appliquée. **Pour gagner encore sur ce chemin il faut lire moins
+d'octets — donc quantifier davantage, pas mieux ordonnancer.**
