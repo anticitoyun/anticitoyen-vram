@@ -407,7 +407,10 @@ def _demarrer(moteur, dossier, ctx):
     if moteur == "acvram":
         arreter("acvram")
         env["CTX"] = str(ctx)
-        subprocess.run([os.path.join(BIN, "acvram-serveur"), dossier], env=env,
+        # ET en argument : une variable d'environnement peut etre ecrasee par
+        # le lanceur, un argument non. Le 9/09/2026 `CTX="${2:-}"` ecrasait
+        # l'environnement par un argument absent et retombait sur 32768.
+        subprocess.run([os.path.join(BIN, "acvram-serveur"), dossier, str(ctx)], env=env,
                        capture_output=True, text=True, timeout=900)
         attendre("acvram", 900); return
     if moteur == "llamacpp":
@@ -462,6 +465,40 @@ def binaire_servant(moteur) -> str:
         return os.readlink(f"/proc/{pid}/exe")
     except OSError:
         return "?"
+
+
+_CLES_CTX = ("--max-model-len", "--ctx-size", "--ctx")
+
+
+def ctx_servant(moteur) -> str:
+    """Le contexte REELLEMENT demande au serveur, lu dans /proc/<pid>/cmdline.
+
+    Le banc dit ce qu'il veut ; le lanceur le transmet ou non. Le 9/09/2026,
+    `acvram-serveur` ecrasait la variable d'environnement CTX par un argument
+    absent (`CTX="${2:-}"`) et retombait sur son defaut de 32768 : le banc
+    croyait 8192, le serveur tournait a 32768, et la colonne `ctx` publiait
+    l'intention du banc. Sur un modele de 27,5 Gio, cela suffit a forcer un
+    exil — puis a le mesurer comme un defaut d'architecture.
+
+    La garde qui compare les contextes des COUPLES ne pouvait pas l'attraper :
+    elle compare ce que le banc demande, tous deux a 8192. Il faut demander au
+    processus, pas a soi-meme.
+    """
+    pid = pid_port(PORTS[moteur])
+    if not pid:
+        return "?"
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            args = fh.read().decode(errors="replace").split("\x00")
+    except OSError:
+        return "?"
+    for i, arg in enumerate(args):
+        if arg in _CLES_CTX and i + 1 < len(args):
+            return args[i + 1]
+        for cle in _CLES_CTX:
+            if arg.startswith(cle + "="):
+                return arg.split("=", 1)[1]
+    return "?"
 
 
 def modele_servi(moteur):
@@ -649,6 +686,7 @@ def mesurer(moteur):
         # le même tableau ne comparent pas la même grandeur.
         "jetons_source": passages[0][7],
         "binaire": binaire_servant(moteur),
+        "ctx_servi": ctx_servant(moteur),
     }
     # Un aperçu du texte à côté du débit : 481 t/s de « de de de » sur quatre
     # jetons se lisaient comme un record tant qu'on ne voyait pas le texte.
@@ -723,7 +761,7 @@ def main():
             f.write("modele\tmoteur\talias\tctx\tt_s\tttft_ms\tW\tj_kJ\tjetons\tchargement_s\tetat\tapercu\t"
                     "J\tJ_net\tW_repos\tj_kJ_net\tplafond_W\thorloge_min\thorloge_max\ttemp_max\t"
                     "bridages\tdispersion_pct\tt_s_min\tt_s_max\tt_s_passages\tttft_passages\t"
-                    "jetons_moteur\tjetons_flux\tjetons_source\tbinaire\t"
+                    "jetons_moteur\tjetons_flux\tjetons_source\tbinaire\tctx_servi\t"
                     "empreintes\ttextes_identiques\t"
                     "invalidations\n")
 
@@ -758,7 +796,7 @@ def main():
                         f"{v('t_s_min', 0)}\t{v('t_s_max', 0)}\t{v('t_s_passages', '?')}\t"
                         f"{v('ttft_passages', '?')}\t"
                         f"{v('jetons_moteur', '?')}\t{v('jetons_flux', '?')}\t"
-                        f"{v('jetons_source', '?')}\t{v('binaire', '?')}\t"
+                        f"{v('jetons_source', '?')}\t{v('binaire', '?')}\t{v('ctx_servi', '?')}\t"
                         f"{v('empreintes', '?')}\t"
                         f"{v('textes_identiques', '?')}\t{v('invalidations', '?')}\n")
         arreter(m)
