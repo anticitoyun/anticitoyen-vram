@@ -46,12 +46,16 @@ __all__ = ["Attention", "MLP", "MoEBlock", "DecoderLayer", "ACVRamModel",
 #
 # L'ancien seuil valait 8, ce qui excluait tout preremplissage reel : le prompt
 # du banc fait 88 jetons. Gain mesure sur le forward complet, meme chargement,
-# graphes actifs, aucun poids en flux (Qwen2.5-Coder-14B, 9 septembre 2026) :
+# graphes actifs, aucun poids en flux (Qwen2.5-Coder-14B, 9 septembre 2026).
+# DOUZE tailles, parce qu'un point unique se serait cite comme un gain general
+# alors que la courbe est dentelee :
 #
-#      36 jetons  29,99 -> 29,15 ms   +2,78 %
-#      88         32,26 -> 30,93      +4,10 %
-#     171         36,77 -> 35,23      +4,18 %
-#     256         46,29 -> 44,69      +3,46 %
+#      16 jetons  +6,18 %      128  +4,44 %      200  +3,25 %
+#      36         +2,58        160  +5,05        224  +3,37
+#      64         +2,61        171  +4,29        240  +3,42
+#      88         +4,23        ---               256  +3,51
+#
+# Plage : +2,58 % a +6,18 %, positif partout, mediane ~+3,8 %.
 #
 # AU-DELA, LE GAIN N'EST PLUS MONOTONE, et ce n'est pas du bruit : trois series
 # independantes donnent les memes valeurs a 0,04 ms pres. Sur les GEMM nus,
