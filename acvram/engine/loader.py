@@ -282,6 +282,29 @@ def load_model(path: str, plan: Optional[Plan] = None,
     _borner_kv_par_la_vram(plan, manifest, dev)
     kv_blocks = _kv_blocks_per_device(plan, spec, max_model_len)
 
+    # Arène épinglée pour les poids exilés, dimensionnée ICI parce que le plan
+    # vient d'être arrêté : avant lui, la taille exilée n'est pas connue et le
+    # pool serait un chiffre deviné.
+    #
+    # Pourquoi une arène plutôt que `pin_memory()` par poids : l'allocateur
+    # hôte de PyTorch arrondit chaque allocation à la PUISSANCE DE 2 supérieure.
+    # Nos tenseurs d'experts font 3,00 Mio (768 x 2048 en bf16) et sont donc
+    # arrondis à 4 — mesuré le 8/09/2026, facteur 1,333 en régime asymptotique,
+    # soit 46,01 Gio épinglés là où les poids en pèsent 33,76. Une arène dont
+    # la taille est une puissance de 2 ne paie rien, et une vue prise dedans
+    # est elle-même épinglée. Gain mesuré sur trois tailles : ~25 %.
+    _attn_r, _mlp_r, _embed_r, _head_r = _octets_reels(manifest)
+    _exiles = sum(_mlp_r.get(l.index, l.mlp_bytes)
+                  for l in plan.layers if l.mlp_storage == "cpu")
+    _exiles += sum(_attn_r.get(l.index, l.attn_bytes)
+                   for l in plan.layers if l.attn_storage == "cpu")
+    if _exiles > 0:
+        from .layers import reserver_pool
+        _pool_hote = reserver_pool(_exiles)
+        if _pool_hote is not None:
+            print(f"[acvram] arène épinglée : {_exiles / 2**30:.2f} Gio réservés "
+                  f"pour les poids exilés", flush=True)
+
     for lp in plan.layers:
         i = lp.index
         p = f"model.layers.{i}."
