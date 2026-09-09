@@ -632,8 +632,22 @@ def mesurer(moteur):
     # il n'est simplement plus ce qu'on compare.
     ordonnes = sorted(passages, key=lambda x: x.tps)
     median = ordonnes[len(ordonnes) // 2]
-    tps, ttft, e, n, txt, dt = (median.tps, median.ttft, median.energie,
-                                median.jetons, median.texte, median.duree)
+    tps, e, n, txt, dt = (median.tps, median.energie,
+                          median.jetons, median.texte, median.duree)
+    # Le TTFT ne suit PAS le passage de debit median : ce passage peut etre le
+    # premier, qui est froid par construction, et le TTFT publie devient alors
+    # celui d'une passe que la mesure ecarte par ailleurs.
+    #
+    # Le 9/09 ce defaut a inverse une conclusion : llama.cpp publiait 125 ms
+    # (passages 125,45,33,33,33) contre nos 73, et nous avons cru gagner de
+    # 41,6 %. Leur TTFT de REGIME est 33 ms — nous sommes deux fois plus lents.
+    # Le meme moteur, une heure plus tot, publiait 39 ms sur les memes donnees :
+    # le chiffre dependait de QUEL passage se trouvait etre median en debit.
+    #
+    # On publie donc la mediane des TTFT HORS premier passage, comme pour la
+    # dispersion du debit — meme regle, memes donnees.
+    _ttfts = sorted(p.ttft for p in passages[1:]) or [median.ttft]
+    ttft = _ttfts[len(_ttfts) // 2]
     etendue = (min(debits), max(debits))
 
     # Empreinte du texte de CHAQUE passage. A temperature zero, le meme
