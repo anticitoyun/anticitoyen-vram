@@ -99,3 +99,47 @@ def test_scaler_actif_chez_l_un_seulement_refuse():
     e = torch.rand(5120) + 0.5
     assert stack_nvfp4_linears([_lin_scaler(64, 5120, 21, e),
                                 _lin_scaler(64, 5120, 22, None)]) is None
+
+
+# --- les biais s empilent aussi ---------------------------------------------
+
+def _lin_biais(sortie, entree, graine, avec=True):
+    l = _lin(sortie, entree, graine)
+    if avec:
+        g = torch.Generator().manual_seed(graine + 100)
+        l.bias = torch.randn(sortie, generator=g, dtype=torch.bfloat16)
+    return l
+
+
+def test_les_biais_ne_bloquent_plus_et_sont_empiles():
+    """q/k/v de Qwen2.5 portent un biais : 48 attentions etaient refusees pour
+    cela seul, alors qu un biais s applique a la SORTIE et se concatene."""
+    lins = [_lin_biais(5120, 5120, 31), _lin_biais(1024, 5120, 32),
+            _lin_biais(1024, 5120, 33)]
+    attendu = torch.cat([l.bias for l in lins]).clone()
+    pile = stack_nvfp4_linears(lins)
+    assert pile is not None, f"refuse : {bilan_fusion_nvfp4()}"
+    assert pile.bias is not None and pile.bias.shape[0] == 5120 + 1024 + 1024
+    assert torch.equal(pile.bias, attendu), "le biais empile n est pas la concatenation"
+
+
+def test_les_originaux_deviennent_des_vues_du_biais():
+    """Aucun octet duplique : comme pour les poids."""
+    lins = [_lin_biais(64, 128, 34), _lin_biais(64, 128, 35)]
+    pile = stack_nvfp4_linears(lins)
+    assert pile is not None
+    assert lins[0].bias.data_ptr() == pile.bias.data_ptr()
+
+
+def test_un_biais_sur_une_partie_du_groupe_refuse():
+    """Melanger avec et sans biais n a pas de sens : la garde reste."""
+    avant = bilan_fusion_nvfp4().get("biais present sur une partie du groupe", 0)
+    assert stack_nvfp4_linears([_lin_biais(64, 128, 36, True),
+                                _lin_biais(64, 128, 37, False)]) is None
+    assert bilan_fusion_nvfp4()["biais present sur une partie du groupe"] == avant + 1
+
+
+def test_sans_biais_la_pile_n_en_porte_pas():
+    lins = [_lin_biais(64, 128, 38, False), _lin_biais(64, 128, 39, False)]
+    pile = stack_nvfp4_linears(lins)
+    assert pile is not None and pile.bias is None
