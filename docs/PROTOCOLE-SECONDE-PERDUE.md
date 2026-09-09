@@ -397,3 +397,65 @@ en vol.
 **Ne pas dépenser quatre mesures à expliquer un phénomène avant d'avoir vérifié
 qu'il existe encore.** C'est la forme la plus coûteuse du transport hors
 conditions : non pas transporter une conclusion, mais transporter la **question**.
+
+## CLOS — 9/09 : l'étape zéro a répondu, et les quatre mesures sont sans objet
+
+**Réponse obtenue sans rien lancer** : les cinq TTFT étaient déjà dans le TSV de
+la campagne comparative.
+
+    acvram    146, 75, 75, 75, 75 ms   passage 1 = 146   regime = 75,0   +71 ms
+    llamacpp  110, 39, 39, 33, 33 ms   passage 1 = 110   regime = 36,0   +74 ms
+
+**La seconde perdue vaut 71 ms.** De 1000 ms contre 181 le 8 au soir à 146 contre
+75 sur machine assainie : **facteur 14**. Le phénomène qu'allaient expliquer M1 à
+M4 était très majoritairement l'attelage 5090 + 3080 Ti et le `sync` tokensave
+en vol.
+
+**Et le fait qui clôt le dossier : le surcoût est symétrique en absolu.** +71 ms
+chez nous, **+74 ms chez llama.cpp**. Deux moteurs sans code commun payent le même
+prix au premier préremplissage.
+
+### Pourquoi « sans objet » est presque juste, et ce qu'il faut écrire à la place
+
+Le protocole enquêtait sur un surcoût **propre à acvram**. La symétrie montre
+qu'il n'y en a pas. Mais dire « sans objet » suggérerait que le phénomène était
+imaginaire, et ce serait faux :
+
+* **candidats 2 et 3** (mise en service des poids exilés, premier passage sur les
+  experts) : **exclus par la symétrie** — llama.cpp n'a ni exil ni experts ici, et
+  paie le même surcoût ;
+* **candidats 1 et 4** (allocation du cache KV, chargement différé des modules
+  CUDA) : **n'ont jamais été propres à acvram**. Un surcoût partagé de ~72 ms est
+  exactement ce qu'ils prédisent, avec la sélection d'algorithme au premier appel.
+
+**Formulation juste : le phénomène est réel, partagé, et trop petit pour compter.**
+72 ms payés une fois par démarrage de serveur ne méritent pas quatre mesures. Ce
+n'est pas une erreur de diagnostic corrigée, c'est un ordre de grandeur qui a
+changé de trois décimales une fois l'environnement assaini.
+
+**Valeur conservée pour plus tard** : si quelqu'un revoit un jour un premier
+préremplissage à 1000 ms, il saura que **72 ms est le plancher** et que tout le
+reste est de l'environnement — pas du moteur.
+
+### Absolu ou relatif : la même donnée, deux conclusions opposées
+
+    surcout absolu    acvram +71 ms    llamacpp +74 ms    -> ils sont un peu pires
+    surcout relatif   acvram +95 %     llamacpp +206 %    -> ils sont deux fois pires
+
+Même mesure, verdicts contraires, parce que leur régime est deux fois plus rapide.
+**La forme se choisit d'après la décision qu'elle sert**, et le choix se déclare :
+
+* *l'utilisateur attend-il plus longtemps ?* → **absolu**, en millisecondes ;
+* *quelle part de sa propre performance le moteur perd-il ?* → **relatif**.
+
+Publier l'une sans dire qu'on a écarté l'autre est un choix silencieux — et nous
+savons ce que valent ceux-là.
+
+### Une réserve sur le régime de llama.cpp
+
+Leurs cinq TTFT sont `110, 39, 39, 33, 33` : **la série descend encore au
+cinquième passage**, là où la nôtre est plate à 75 dès le second. Leur « régime »
+à 36,0 est donc une moyenne sur une série **non stabilisée**. Sur une série plus
+longue leur régime pourrait descendre encore, et l'écart de TTFT se creuser.
+6 ms sur 33 peut n'être que la granularité du chronomètre — **non mesuré**, à ne
+pas conclure dans un sens ni dans l'autre.
