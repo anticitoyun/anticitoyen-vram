@@ -64,10 +64,32 @@ comme celui du modèle. Le dtype réel est fp16 — vérifié sur les objets cha
 de précision est de **3 bits de mantisse, pas 16**, et l'arbitrage « diviser en
 fp32 » se pose dans des termes bien plus modestes.
 
+## Conditions de la mesure, et ce qui ne se soustrait pas
+
+    +7,91 % : mediane de 5 passages de 200 pas, apres 3 de rodage
+              Qwen2.5-Coder-14B-pur-nvfp4, graphes actifs, aucun poids en flux
+              temoin ACVRAM_SCALER_SANS_CACHE, avec garde verifiant qu'il coupe
+              (dispersion non relevee — a fournir a la reprise)
+
+**Les deux termes du +7,91 % viennent de la même série**, donc le gain tient.
+**Mais il ne se soustrait pas des mesures antérieures** :
+
+    76,82 pas/s (13,02 ms)   AVEC chauffe de 180 s
+    80,26 pas/s (12,46 ms)   SANS chauffe, temoin coupe
+    86,61 pas/s (11,55 ms)   SANS chauffe, cache actif
+
+La dérive thermique vaut jusqu'à 8,78 W entre carte froide et palier, et elle
+se traduit en débit. **Comparer 13,02 à 11,55 mêlerait le correctif et le
+régime thermique.**
+
 ## Ce qui reste
 
-Sur les 2,45 ms de surcoût nvfp4, **0,91 est pris, 1,54 reste inexpliqué** — et
-ne se répartit pas entre les causes trouvées. Les 384 divisions restantes en
+**Le budget de 2,45 ms est périmé par ce correctif et doit être re-dérivé.**
+Une soustraction naïve donnerait 1,38 ms d'inexpliqué, mais elle mêlerait deux
+régimes thermiques : le chiffre est **indicatif, pas établi**, et le dossier
+doit porter *« budget à re-dériver »* plutôt qu'un nombre. La mesure juste est
+une reprise du nvfp4 corrigé **avec chauffe**, dans les conditions de la
+référence. Les 384 divisions restantes en
 sont le premier suspect, mais **replier l'échelle dans les poids est proscrit** :
 le poids a été quantifié *après* mise à l'échelle, le replier après coup
 quantifierait autre chose que ce qui a été optimisé.
