@@ -116,3 +116,38 @@ Leur moyenne de puissance portait alors sur un régime partiellement **oisif** �
 d'où des débits de 560 pas/s, qui auraient pu passer pour une découverte plutôt
 que pour un défaut de garde. Compter les pas réellement faits, et rejeter le
 passage sinon.
+
+## La limite de puissance n'a aucune prise sur notre régime
+
+Mesuré le 9 septembre 2026, RTX 5090 :
+
+    limite 500 W    plancher reglable 400 W    defaut 600 W
+
+    GEMM 8192 bf16 (calcul pur)   moyenne 477,6 W   max 510,1 W   56 degC
+    decodage au palier            moyenne ~317 W                  54 degC
+    lecture memoire soutenue      moyenne 274,0 W                 44 degC
+
+**Le décodage tire 317 W au plus, et le plancher réglable est 400 W :
+`nvidia-smi -pl` ne peut rien écrêter sur notre régime**, quelle que soit la
+valeur choisie. Le décodage est mémoire-borné.
+
+**Un GEMM dense, lui, tire 478 W** — la limite y aurait prise. Mais le prefill
+est bref devant le décodage dans une génération, et c'est le décodage qui porte
+l'énergie.
+
+**Ce qui agirait sur notre charge est le sous-voltage** — la courbe
+tension/fréquence, qui réduit la consommation à fréquence égale même quand la
+carte n'est pas limitée en puissance. Ce n'est pas une commande : sous Linux,
+`nvidia-settings` demande X11 et les outils tiers touchent des interfaces non
+supportées.
+
+**Méthode, à garder** : la conclusion « la carte n'atteint jamais le plancher »
+allait être écrite à partir du seul décodage. Elle était vraie pour ce régime et
+fausse comme énoncé général — le GEMM dense la réfute. **Une réfutation tirée
+d'un seul régime ne vaut que pour lui.**
+
+**Réserve sur le protocole de chauffe** : le palier de 317 W a été mesuré sur du
+**décodage pur**. Le prefill chauffe davantage (56 °C contre 54 pour une durée
+bien plus courte). Une chauffe qui reproduit le régime réel — prefills compris —
+est donc nécessaire ; celle du banc le fait, parce qu'elle appelle la même
+fonction que la mesure.
