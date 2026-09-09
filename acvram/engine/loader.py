@@ -789,6 +789,17 @@ def load_model(path: str, plan: Optional[Plan] = None,
             elif isinstance(m, Attention):
                 m.fuse()
 
+    # Chaque empilement alloue son tenseur concatene avant de liberer les deux
+    # sources : 0,355 Gio de pic par fusion, 95 fois. Les blocs liberes restent
+    # dans le cache de l'allocateur, a des tailles qui ne correspondent plus a
+    # ce qu'on demandera ensuite -- 2,49 Gio reserves non alloues apres
+    # chargement, et 0,64 Gio seulement de VRAM libre. Le banc, qui dimensionne
+    # ses caches plus largement que le chargement nu, tombait alors en OOM sur
+    # une demande de 2 Mio. Rendre ces blocs au pilote avant d'allouer les
+    # caches KV recupere 0,92 Gio, sans rien changer a ce qui est alloue.
+    if torch.cuda.is_available() and a_allouer:
+        torch.cuda.empty_cache()
+
     for i, cfg in a_allouer:
         caches[i] = PagedKVCache(cfg)
 
