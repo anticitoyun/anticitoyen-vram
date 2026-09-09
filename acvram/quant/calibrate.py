@@ -164,6 +164,9 @@ class ChannelScaler:
 
         Numériquement identique : c'est la même conversion, faite une fois.
         """
+        import os
+        if os.environ.get("ACVRAM_SCALER_SANS_CACHE") == "1":
+            return self.scale.to(dtype)        # temoin de mesure
         cache = self.__dict__.get("_cache_dtype")
         if cache is None:
             cache = {}
