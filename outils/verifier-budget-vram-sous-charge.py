@@ -71,28 +71,46 @@ def _autres_processus() -> list[str]:
 
 
 class Guetteur(threading.Thread):
-    """Echantillonne la VRAM pendant que le moteur travaille.
+    """Echantillonne la VRAM DEPUIS UN AUTRE PROCESSUS, et ce n est pas un detail.
 
-    `torch.cuda.max_memory_allocated` ne suffirait pas : il ignore ce que
-    l'allocateur garde en reserve et tout ce qui est pris hors de lui. Seul
-    `mem_get_info` dit ce qui manque vraiment aux autres.
+    La premiere version appelait `torch.cuda.mem_get_info` toutes les 20 ms
+    depuis un thread du meme processus. Un appel CUDA concurrent INVALIDE une
+    capture de graphe en cours : le moteur echouait par
+    `cudaErrorStreamCaptureInvalidated` des que plusieurs sequences
+    demarraient ensemble. L instrument cassait la mesure qu il devait prendre.
+
+    `nvidia-smi` s execute hors du contexte CUDA du moteur, donc il n y touche
+    pas. Il coute une cinquantaine de millisecondes par releve — assez fin
+    pour un pic qui dure le temps d un decodage, et sans effet sur lui.
     """
 
-    def __init__(self, periode: float = 0.02) -> None:
+    def __init__(self, periode: float = 0.05) -> None:
         super().__init__(daemon=True)
         self.periode = periode
         self.pic = 0
-        self._stop = threading.Event()
+        self._fin = threading.Event()
+
+    @staticmethod
+    def _lire() -> int:
+        import subprocess
+        try:
+            s = subprocess.run(
+                ["nvidia-smi", "-i", "0", "--query-gpu=memory.used",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=10).stdout.strip()
+            return int(float(s.splitlines()[0])) * 2**20
+        except Exception:                                   # noqa: BLE001
+            return 0
 
     def run(self) -> None:
-        while not self._stop.is_set():
-            self.pic = max(self.pic, _vram_prise())
+        while not self._fin.is_set():
+            self.pic = max(self.pic, self._lire())
             time.sleep(self.periode)
 
     def arreter(self) -> int:
-        self._stop.set()
-        self.join(timeout=2.0)
-        return max(self.pic, _vram_prise())
+        self._fin.set()
+        self.join(timeout=3.0)
+        return max(self.pic, self._lire())
 
 
 def mesurer(chemin: str, max_model_len: int, n_seqs: int,
@@ -103,13 +121,20 @@ def mesurer(chemin: str, max_model_len: int, n_seqs: int,
 
     gc.collect()
     torch.cuda.empty_cache()
-    avant = _vram_prise()
+    avant = Guetteur._lire()
 
     charge = load_model(chemin, max_model_len=max_model_len)
     moteur = Engine(charge, None, max_batch_size=n_seqs,
                     max_model_len=max_model_len)
+    # Prechauffer les graphes comme le fait le serveur : sans cela, la capture
+    # se declenche au milieu du premier pas et echoue par
+    # `cudaErrorStreamCaptureInvalidated` des que plusieurs sequences allouent
+    # ensemble. Le sauter ne mesurerait pas le regime de production — et les
+    # graphes retiennent de la VRAM, donc c est bien du poste mesure.
+    if moteur.graphs is not None:
+        moteur.warm_graphs(max_model_len)
     torch.cuda.synchronize()
-    apres_chargement = _vram_prise()
+    apres_chargement = Guetteur._lire()
 
     # Invites distinctes : des sequences identiques partageraient leurs blocs
     # par le cache de prefixe, et N sequences ne couteraient que la place d une.
