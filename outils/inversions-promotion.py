@@ -47,13 +47,20 @@ def _snr_avant(entree):
     """Le SNR du tenseur AVANT toute promotion, ou None si indisponible.
 
     Un tenseur non promu n'a jamais ete promu : son `out_snr_db` EST son
-    avant. Un tenseur promu porte `promoted_from` et doit fournir `before` ;
-    sans cette cle, il n'y a pas de reponse, et rendre `out_snr_db` a sa
-    place serait rendre le SNR d'un autre format.
+    avant. Un tenseur promu porte `promoted_from` et doit fournir son SNR
+    d'avant ; sans cette cle, il n'y a pas de reponse, et rendre `out_snr_db`
+    a sa place serait rendre le SNR d'un autre format.
+
+    La cle s'appelle `snr_db_source` et non `before` : elle se lit en regard
+    de `promoted_from`, qui nomme le format dans lequel elle a ete prise,
+    comme `snr_db` se lit en regard de `format`. `before` disait QUAND, pas
+    DANS QUOI — or c'est le format qui manquait le jour ou 44,4 dB ont ete
+    compares a 20,5. Aucun manifeste ne portait l'une ni l'autre : il n'y a
+    rien a menager.
     """
     if "promoted_from" not in entree:
         return entree.get("out_snr_db", entree.get("snr_db"))
-    return entree.get("before")
+    return entree.get("snr_db_source")
 
 
 def inversions(dossier, unite="tenseur"):
