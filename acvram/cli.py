@@ -447,6 +447,22 @@ def cmd_eval(args: argparse.Namespace) -> int:
     import torch
 
     from .evaluate import perplexity, render
+
+    # Le cadrage se declare TOUJOURS, avec le corpus et la fenetre : une
+    # perplexite ne se compare qu'a une autre prise au meme cadrage, et rien
+    # dans le nombre publie ne dit lequel a servi. Imprime avant la mesure,
+    # il part dans le journal meme si la sortie est redirigee.
+    print(f"  cadrage : min_context={args.min_context} window={args.window} "
+          f"stride={args.stride} max_tokens={args.max_tokens}", flush=True)
+    if not args.min_context:
+        # La garde de `evaluate` n'avertit que si le corpus est plus court que
+        # la fenetre — jamais sur wiki.test.raw (1,29 Mo). Sans ce message,
+        # oublier le cadrage donne un chiffre faux d'un facteur proche de 2
+        # (9,525 contre 7,233 au protocole) sans le moindre signe.
+        print(red("  min_context=0 : les premieres positions sont notees avec "
+                  "un contexte quasi vide. Ce chiffre N'EST PAS comparable a "
+                  "une mesure cadree — le protocole impose --min-context 256."),
+              flush=True)
     results = []
     for path in args.models:
         def prog(done: int, total: int, _p: str = path) -> None:
@@ -620,9 +636,16 @@ def build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--window", type=int, default=512)
     ev.add_argument("--stride", type=int, default=256)
     ev.add_argument("--max-tokens", type=int, default=8192)
+    # DEFAUT 0 CONSERVE, mais il ne passe plus en silence. Une perplexite a
+    # min_context 0 n'est PAS comparable a une perplexite cadree : sur
+    # wiki.test.raw la table du protocole donne 9,525 contre 7,233, un facteur
+    # proche de 2. Le seul garde-fou existant n'avertit que si le corpus est
+    # plus court que la fenetre — ce qui n'arrive jamais sur ce corpus de
+    # 1,29 Mo. La barriere reposait donc sur la memoire de l'operateur.
     ev.add_argument("--min-context", type=int, default=0,
                     help="n'note que les positions ayant au moins tant de "
-                         "jetons de contexte (0 = tout, comme avant)")
+                         "jetons de contexte (0 = tout, NON COMPARABLE a une "
+                         "mesure cadree ; le protocole impose 256)")
     ev.add_argument("--device", help="impose un appareil")
     ev.add_argument("--json", action="store_true")
     ev.set_defaults(func=cmd_eval)
