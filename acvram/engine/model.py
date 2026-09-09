@@ -229,10 +229,14 @@ class Attention(nn.Module):
         # quelle que soit la petite — mesure a 0,01 us pres.
         if len(lins) < 3:
             return False
+        from .layers import explorer_sans_compter
         meilleures, meilleur_cout = None, None
+        # Les trois tentatives ne sont pas trois refus : sans ce silence, le
+        # bilan compterait 240 refus la ou il y a 80 groupes.
         for i, j in ((0, 1), (0, 2), (1, 2)):
             paire = [lins[i], lins[j]]
-            pile = _empiler(paire)
+            with explorer_sans_compter():
+                pile = _empiler(paire)
             if pile is None:
                 continue
             cout = paire[0].qweight.shape[0] + paire[1].qweight.shape[0]

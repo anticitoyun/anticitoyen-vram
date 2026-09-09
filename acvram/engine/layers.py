@@ -979,9 +979,33 @@ def _scaler_commun(lins: list):
     return True, tete                           # tous egaux : la pile le porte
 
 
+# Pendant l'exploration des paires de la fusion PARTIELLE, trois tentatives
+# ont lieu par groupe. Les compter toutes ferait dire au bilan « 240 refus »
+# la ou il y a 80 groupes — l'unite du compteur changerait selon le chemin,
+# et un lecteur y verrait un nombre de groupes. Le compteur se tait donc
+# pendant l'exploration ; seul le verdict du groupe est enregistre.
+_EXPLORATION = False
+
+
+def explorer_sans_compter():
+    """Contexte ou les refus ne sont pas comptes — voir `_EXPLORATION`."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _ctx():
+        global _EXPLORATION
+        avant, _EXPLORATION = _EXPLORATION, True
+        try:
+            yield
+        finally:
+            _EXPLORATION = avant
+    return _ctx()
+
+
 def _refus_fusion(raison: str) -> None:
     """Enregistre pourquoi une fusion NVFP4 n a pas eu lieu, et rend None."""
-    _REFUS_FUSION[raison] = _REFUS_FUSION.get(raison, 0) + 1
+    if not _EXPLORATION:
+        _REFUS_FUSION[raison] = _REFUS_FUSION.get(raison, 0) + 1
     return None
 
 
