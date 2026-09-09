@@ -657,6 +657,40 @@ _OCTETS_PAR_POIDS = {"bf16": 2.0, "fp16": 2.0, "int8": 1.0625,
                      "nvfp4": 0.5625, "int4_awq": 0.5625, "q3n": 0.40625}
 
 
+def _verifier_formats_declares(manifest: dict, weight_map: dict) -> None:
+    """Le format declare doit correspondre a ce qui est REELLEMENT ecrit.
+
+    Le 9/09/2026, `Ornith-1.5-35B` declarait `format: nvfp4` sur trois blobs
+    d'experts groupes du module MTP qui n'ont jamais ete quantifies : leur cle
+    physique est directe, sans `.qweight` ni `.block_scale`, et leur dtype reel
+    est F16. L'ecart valait 1,158 Gio a lui seul — 5,85 % du modele — et tout
+    calcul de taille fonde sur le manifeste s'en trouvait faux.
+
+    Un format declare qui ne correspond pas au stockage est pire qu'un format
+    absent : il fait croire qu'on sait. Cette garde AVERTIT sans bloquer — la
+    conversion a reussi, seul le manifeste est inexact — mais elle nomme les
+    tenseurs, ce qui suffit a ne plus les compter de travers.
+    """
+    quantifies = {"nvfp4", "int8", "int4_awq", "q3n"}
+    suspects = []
+    for nom, entree in manifest.get("tensors", {}).items():
+        fmt = str(entree.get("format"))
+        if fmt not in quantifies:
+            continue
+        # un tenseur quantifie s'ecrit en plusieurs morceaux ; une cle directe
+        # signifie que le tenseur est passe tel quel
+        morceaux = any(f"{nom}.{suffixe}" in weight_map
+                       for suffixe in ("qweight", "block_scale", "scales"))
+        if not morceaux and nom in weight_map:
+            suspects.append((nom, fmt))
+    if suspects:
+        print(f"[acvram] {len(suspects)} tenseur(s) declares quantifies mais "
+              f"ecrits en direct — le manifeste surestime leur compression :",
+              flush=True)
+        for nom, fmt in suspects[:6]:
+            print(f"           {nom} (declare {fmt})", flush=True)
+
+
 def _diagnostic_fusion(tensors: dict) -> dict:
     """Ce qui empeche chaque groupe q/k/v et gate/up de fusionner, et ce que
     coûterait de le lever. **Consigne, ne decide pas.**
@@ -1071,6 +1105,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             f"n'est probablement pas prise en charge — rien n'est écrit.")
 
     manifest["diagnostic_fusion"] = _diagnostic_fusion(manifest["tensors"])
+    if not opts.dry_run:
+        _verifier_formats_declares(manifest, writer.weight_map)
 
     if not opts.dry_run:
         writer.flush()
