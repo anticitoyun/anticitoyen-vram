@@ -136,7 +136,13 @@ def int4_matmul_cpu(x: torch.Tensor, t: INT4Tensor) -> torch.Tensor:
 
 def nvfp4_matmul_cpu(x: torch.Tensor, t: NVFP4Tensor) -> torch.Tensor:
     lib = get_cpu_lib()
-    if lib is None or t.qweight.is_cuda:
+    # Le noyau CPU ne prend qu'UNE echelle globale : il ne sait pas lire
+    # `global_scale_rows`, que la fusion pose pour garder l'echelle propre a
+    # chaque projection empilee. Lui donner `t.global_scale` sur un tenseur
+    # fusionne rendait des nombres faux — facteur constant de 1,1216 mesure le
+    # 9/09/2026 sur la projection k. Le repli dequantifie, lui, les lit.
+    if (lib is None or t.qweight.is_cuda
+            or getattr(t, "global_scale_rows", None) is not None):
         return torch.nn.functional.linear(x, dequantize_nvfp4(t, x.dtype))
     xf, orig, n = _prep(x, t.padded_in)
     m = t.qweight.shape[0]
