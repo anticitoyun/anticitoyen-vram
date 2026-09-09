@@ -108,3 +108,58 @@ def test_une_campagne_qui_mesure_ne_signale_pas_d_echec(tmp_path):
                           {"invalidations": "aucune", "t_s_min": 12.0,
                            "t_s_max": 13.0, "jkj_net": 55.0}))
     _lancer(m, 8192, 8192, str(tmp_path / "plein.tsv"))   # ne doit pas lever
+
+
+# --- le compteur de validité, et ce qu'il comptait vraiment ------------------
+
+_MESURE_OK = (12.5, 0.1, 200.0, 60.0, 200, "texte",
+              {"invalidations": "aucune", "t_s_min": 12.0, "t_s_max": 13.0,
+               "jkj_net": 55.0})
+_MESURE_INVALIDE = (12.5, 0.1, 200.0, 60.0, 200, "texte",
+                    {"invalidations": "bridage pendant la fenêtre : puissance",
+                     "t_s_min": 12.0, "t_s_max": 13.0, "jkj_net": 55.0})
+
+
+def test_une_campagne_entierement_invalidee_echoue(tmp_path):
+    """Le défaut du 9/09/2026 : « 2 mesure(s) valide(s) » annoncées alors que
+    la seule mesure portait « MESURE INVALIDE : bridage ».
+
+    Le compteur incrémentait `reussies` dès qu'aucune exception n'était levée —
+    **l'absence d'exception, propriété voisine de la validité.** Et la garde
+    `reussies == 0` ne pouvait pas voir le défaut : elle protégeait du cas
+    ABSENT, pas du cas FAUX. Le commentaire écrit juste à côté disait pourtant
+    « des lignes qui existent sans rien valoir sont pires qu'un fichier vide ».
+    """
+    m = _banc_qui_mesure(_MESURE_INVALIDE)
+    with pytest.raises(SystemExit) as sortie:
+        _lancer(m, 8192, 8192, str(tmp_path / "invalide.tsv"))
+    assert sortie.value.code == 1, \
+        "une campagne dont toutes les mesures sont invalidees doit echouer"
+
+
+def test_une_mesure_valide_laisse_partir(tmp_path):
+    """L'autre sens, sans quoi le test précédent passerait sur un banc qui
+    échoue toujours."""
+    m = _banc_qui_mesure(_MESURE_OK)
+    _lancer(m, 8192, 8192, str(tmp_path / "ok.tsv"))       # ne doit pas lever
+
+
+def test_la_reprise_ne_saute_pas_une_ligne_invalidee(tmp_path):
+    """Une mesure ratée était réputée faite : elle ne repartait jamais.
+
+    L'épreuve porte sur la conséquence — la ligne est-elle REMESURÉE — et non
+    sur le contenu du filtre.
+    """
+    tsv = tmp_path / "reprise.tsv"
+    m = _banc_qui_mesure(_MESURE_INVALIDE)
+    with pytest.raises(SystemExit):
+        _lancer(m, 8192, 8192, str(tsv))
+    avant = sum(1 for l in open(tsv) if l.startswith("M\t"))
+    assert avant >= 1, "la premiere campagne doit avoir ecrit sa ligne"
+
+    # Seconde campagne sur le même fichier : la ligne invalidée doit repartir.
+    m2 = _banc_qui_mesure(_MESURE_OK)
+    _lancer(m2, 8192, 8192, str(tsv))
+    apres = sum(1 for l in open(tsv) if l.startswith("M\t"))
+    assert apres > avant, \
+        "une ligne invalidee doit etre remesuree, pas sautee comme 'faite'"
