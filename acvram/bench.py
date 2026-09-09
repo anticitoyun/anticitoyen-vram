@@ -331,8 +331,19 @@ def bench_decode(model_dir: str, n_tokens: int = 256,
     from .engine.runner import Engine
     from .engine.sampler import SamplingParams
 
+    # UNE seule borne de contexte, passee au chargeur ET au moteur. Le chargeur
+    # dimensionne le cache KV a la CHARGE : sans `max_model_len`, il le taille
+    # pour le contexte complet declare par le modele et prend tout ce que la
+    # carte a de libre — la capture des graphes n'a alors plus de place et le
+    # banc part en OOM a 10 Mio pres, la ou le serveur passe. Le serveur, lui,
+    # a toujours passe la valeur (cli.py:446) ; le banc ne l'avait jamais recue.
+    # Un banc qui echoue la ou la production reussit ne mesure pas la
+    # production : il fait croire qu'un modele ne tient pas.
+    contexte = prompt_len + n_tokens + 16
+
     t0 = time.time()
-    loaded = load_model(model_dir, dtype=torch.bfloat16)
+    loaded = load_model(model_dir, dtype=torch.bfloat16,
+                        max_model_len=contexte)
     load_s = time.time() - t0
 
     # Refus, pas avertissement : quand les cartes du manifeste ne sont pas
@@ -352,7 +363,7 @@ def bench_decode(model_dir: str, n_tokens: int = 256,
         }
 
     engine = Engine(loaded, None, max_batch_size=1,
-                    max_model_len=prompt_len + n_tokens + 16)
+                    max_model_len=contexte)
     prompt = [1] * prompt_len
     params = SamplingParams(temperature=0.0, max_tokens=n_tokens)
 
@@ -395,10 +406,21 @@ def bench_decode(model_dir: str, n_tokens: int = 256,
         dispersion = float("nan")
         source = "temps de bout en bout (decode_seconds indisponible)"
 
+    # L'etat de la carte se lit AVEC le chiffre : une mesure prise sur une
+    # carte occupee ne dit rien du modele. Le 9/09 le meme banc a rendu 2,88
+    # puis 211 jetons/s selon le voisinage, et un chiffre transporte sans son
+    # etat a servi de cause a traiter pendant des jours.
+    try:
+        libre, total = torch.cuda.mem_get_info(0)
+    except Exception:                        # noqa: BLE001 — une sonde ne plante pas
+        libre = total = 0
+
     return {
         "model": model_dir,
         "load_seconds": round(load_s, 1),
         "weights_bytes": loaded.model.nbytes,
+        "vram_free_bytes_after_load": libre,
+        "vram_total_bytes": total,
         "prompt_len": prompt_len,
         "generated": produits,
         "warmups": chauffe,
