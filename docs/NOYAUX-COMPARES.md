@@ -241,3 +241,49 @@ Même TTFT, moteur au repos puis en plein décodage, douze mesures chacun :
 Épreuve choisie **parce qu'elle ne dépend d'aucun profileur** : `py-spy` montre
 où le code *est*, pas où il *attend*, et `record` exclut les threads inactifs
 par défaut — un thread bloqué sur le GIL lui paraît inactif.
+
+## Le GEMM n'est pas la cible : il fait 85 à 94 % du forward
+
+Mesuré sans charger de modèle — les formes exactes d'une couche de
+`Qwen2.5-Coder-14B`, `F.linear` nu, comparé au forward réel :
+
+    jetons   forward   GEMM nu    reste   part GEMM
+         1     26,45     22,53     3,92     85,2 %
+        16     31,08     26,06     5,02     83,8 %
+        64     30,35     25,35     5,00     83,5 %
+       128     32,86     29,46     3,40     89,7 %
+       256     45,94     41,38     4,56     90,1 %
+       512     84,78     79,72     5,06     94,0 %
+
+**Tout ce que notre moteur ajoute au-dessus de cuBLAS — attention, normes,
+rope, boucle Python — coûte 4 à 5 ms, quel que soit le nombre de jetons.**
+C'est donc un coût par appel, pas un coût de calcul.
+
+### Nous sommes à 65 % du pic, pas à 17 %
+
+    48 couches x 171 jetons  =  4,52 TFLOP
+    GEMM nu 33,06 ms   ->  137 TFLOP/s   (pic bf16 5090 : ~210)
+    forward 37,3 ms    ->  121 TFLOP/s
+
+Le chiffre de 17 % qui circulait était calculé sur le **TTFT complet** : il
+comptait le plancher mémoire, l'enveloppe HTTP, le gabarit et la tokenisation
+comme du calcul.
+
+Ce qui limite le GEMM n'est pas notre usage mais **la taille du lot** — le même
+appel rend 2,4 TFLOP/s à 1 jeton, 65 à 36, 137 à 171, 175 à 512. La carte ne se
+remplit qu'avec les jetons.
+
+### Une convergence qui n'en était pas une
+
+Deux mesures donnaient un facteur ~2,2 par des chemins « indépendants » — coût
+par jeton d'un côté, TFLOP/s de l'autre. **Elles comparaient deux grandeurs
+différentes** : l'une incluait l'enveloppe, l'autre non. La convergence était
+une coïncidence, et elle avait été présentée comme une confirmation mutuelle.
+
+À 171 jetons, notre GEMM seul coûte 33 ms — le TTFT **complet** de llama.cpp en
+vaut 33. Or ce GEMM lit 26,09 Gio, soit 25 ms à la bande passante observée :
+**ils font leur prefill entier à peu près au plancher mémoire, et nous aussi
+sur le GEMM.**
+
+**Le GEMM n'est donc pas la cible.** poste4 l'avait établi par le noyau (son
+GEMV Triton est 1,6× plus lent que `F.linear`), on le retrouve par la forme.
