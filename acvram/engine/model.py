@@ -396,6 +396,16 @@ class MLP(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.gate_up is not None and x.shape[0] <= 8:
             gu = self.gate_up(x)
+            # SiLU et le produit sont deux lancements elementaires pour un
+            # travail derisoire : sur un pas de decodage, la latence de
+            # lancement pese plus que le calcul. Le noyau fusionne les fait en
+            # un seul, avec l'arrondi intermediaire de torch pour que la sortie
+            # reste identique. Le repli couvre gelu et l'absence d'extension.
+            if self.act == "silu" and gu.is_cuda and gu.dtype == torch.bfloat16:
+                from .. import kernels
+                ext = kernels.get_extension()
+                if ext is not None and hasattr(ext, "swiglu_bf16"):
+                    return self.down_proj(ext.swiglu_bf16(gu))
             g, u = gu.split(gu.shape[-1] // 2, dim=-1)
             return self.down_proj(self._act(g) * u)
         return self.down_proj(self._act(self.gate_proj(x)) * self.up_proj(x))

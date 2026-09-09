@@ -56,13 +56,27 @@ def test_les_originaux_calculent_encore_juste():
     assert torch.equal(b(x), av_b)
 
 
-@pytest.mark.parametrize("casse", ["biais", "entrees_differentes", "non_bf16"])
+def test_empile_aussi_les_biais():
+    """Qwen2.5 porte un biais sur q, k et v : les refuser laissait ses 48
+    attentions sur le chemin a trois GEMV, et la garde de la mesure l'a
+    attrape -- 0 attention fusionnee sur 48."""
+    a, b = plain(16, 8, 1), plain(16, 8, 2)
+    a.bias = torch.randn(16).to(torch.bfloat16)
+    b.bias = torch.randn(16).to(torch.bfloat16)
+    x = torch.randn(3, 8).to(torch.bfloat16)
+    attendu = torch.cat([a(x), b(x)], dim=-1)
+    empile = stack_plain_linears([a, b])
+    assert empile is not None
+    assert torch.equal(empile(x), attendu)
+
+
+@pytest.mark.parametrize("casse", ["biais_partiel", "entrees_differentes", "non_bf16"])
 def test_refuse_ce_qu_il_ne_sait_pas_faire(casse):
     """Le défaut par défaut est le refus : chaque cas non couvert rend None,
     et le moteur garde le chemin séparé plutôt qu'un résultat faux."""
     a, b = plain(16, 8, 1), plain(16, 8, 2)
-    if casse == "biais":
-        b.bias = torch.zeros(16, dtype=torch.bfloat16)
+    if casse == "biais_partiel":
+        b.bias = torch.zeros(16, dtype=torch.bfloat16)   # a n'en a pas
     elif casse == "entrees_differentes":
         b = plain(16, 12, 2)
     else:
@@ -70,3 +84,45 @@ def test_refuse_ce_qu_il_ne_sait_pas_faire(casse):
         b.qweight = INT8Tensor(torch.zeros(16, 8, dtype=torch.int8),
                                torch.ones(16, 1), torch.zeros(16, 1), 8, (16, 8))
     assert stack_plain_linears([a, b]) is None
+
+
+# --- le noyau fusionné ------------------------------------------------------
+
+def _ext_swiglu():
+    """L'extension, ou None. On vérifie qu'elle porte bien le symbole : une
+    extension présente mais compilée avant ce noyau répondrait à `is not None`
+    et échouerait à l'appel."""
+    if not torch.cuda.is_available():
+        return None
+    from acvram import kernels
+    ext = kernels.get_extension()
+    return ext if ext is not None and hasattr(ext, "swiglu_bf16") else None
+
+
+@pytest.mark.skipif(_ext_swiglu() is None,
+                    reason="extension CUDA sans swiglu_bf16 (ou pas de GPU)")
+def test_swiglu_identique_a_torch_au_bit_pres():
+    """Le noyau doit rendre exactement ce que rendait le chemin en deux
+    lancements — arrondi intermédiaire compris. Calculer d'un trait en float
+    serait plus exact, donc faux : d'autres jetons sortiraient."""
+    ext = _ext_swiglu()
+    g = torch.randn(3, 64, device="cuda").to(torch.bfloat16)
+    u = torch.randn(3, 64, device="cuda").to(torch.bfloat16)
+    gu = torch.cat([g, u], dim=-1).contiguous()
+    attendu = torch.nn.functional.silu(g) * u
+    assert torch.equal(ext.swiglu_bf16(gu), attendu)
+
+
+@pytest.mark.skipif(_ext_swiglu() is None,
+                    reason="extension CUDA sans swiglu_bf16 (ou pas de GPU)")
+def test_swiglu_sur_valeurs_extremes():
+    """Les grandes amplitudes sont là où un exp() approché diverge : c'est le
+    cas qui distingue une équivalence réelle d'une équivalence sur du bruit
+    centré."""
+    ext = _ext_swiglu()
+    vals = torch.tensor([-60., -8., -1e-3, 0., 1e-3, 8., 60.], device="cuda")
+    g = vals.repeat(2, 1).to(torch.bfloat16)
+    u = vals.flip(0).repeat(2, 1).to(torch.bfloat16)
+    gu = torch.cat([g, u], dim=-1).contiguous()
+    attendu = torch.nn.functional.silu(g) * u
+    assert torch.equal(ext.swiglu_bf16(gu), attendu)

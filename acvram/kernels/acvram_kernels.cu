@@ -2398,7 +2398,59 @@ torch::Tensor q3n_gemv_cuda(torch::Tensor qweight, torch::Tensor block_scale,
     return out.reshape(forme).to(x.dtype());
 }
 
+// ============================================================================
+// SwiGLU fusionne : act(gate) * up en un lancement, sur la sortie empilee.
+//
+// Le chemin dense bf16 lancait deux noyaux elementaires par couche -- le SiLU
+// puis le produit -- soit ~96 lancements par pas la ou llama.cpp n'en a aucun
+// (leur mmvf.cu les fusionne dans la GEMV). Mesure du 9 septembre 2026 sous
+// ncu sur Qwen2.5-Coder-14B : 251 noyaux elementaires par pas chez nous contre
+// 2 chez eux, pour 0,54 ms.
+//
+// L'ARITHMETIQUE EST CELLE DE TORCH, ET C'EST UNE CONTRAINTE, PAS UN DETAIL.
+// torch calcule le SiLU en float et *arrondit en bf16*, puis relit ce bf16
+// pour le produit, qu'il arrondit a nouveau. Calculer d'un trait en float
+// donnerait un resultat plus exact -- et different, donc d'autres jetons. Une
+// optimisation qui change la sortie est un bogue : on reproduit l'arrondi
+// intermediaire tel quel.
+__global__ void swiglu_bf16_kernel(const __nv_bfloat16 *__restrict__ gu,
+                                   __nv_bfloat16 *__restrict__ y,
+                                   int I, long n) {
+    const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const long ligne = i / I, col = i % I;
+    const float g = __bfloat162float(gu[ligne * 2 * I + col]);
+    const float u = __bfloat162float(gu[ligne * 2 * I + I + col]);
+    const float s = g / (1.f + __expf(-g));           // SiLU, comme torch
+    const float sb = __bfloat162float(__float2bfloat16(s));   // arrondi rendu
+    y[i] = __float2bfloat16(sb * u);
+}
+
+torch::Tensor swiglu_bf16(torch::Tensor gu) {
+    CHECK_CUDA(gu); ACVRAM_DEVICE_GUARD(gu);
+    TORCH_CHECK(gu.scalar_type() == torch::kBFloat16, "swiglu_bf16 : bf16 attendu");
+    auto c = gu.contiguous();
+    const int deux_i = c.size(-1);
+    TORCH_CHECK(deux_i % 2 == 0, "swiglu_bf16 : derniere dimension paire attendue");
+    const int I = deux_i / 2;
+    auto tailles = c.sizes().vec();
+    tailles.back() = I;
+    auto y = torch::empty(tailles, c.options());
+    const long n = y.numel();
+    const int th = 256;
+    swiglu_bf16_kernel<<<(unsigned)((n + th - 1) / th), th, 0,
+                         at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const __nv_bfloat16 *>(c.data_ptr()),
+        reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), I, n);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return y;
+}
+
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("swiglu_bf16", &swiglu_bf16,
+          "SwiGLU fusionne sur une sortie gate/up empilee : SiLU(gate) * up",
+          py::arg("gu"));
     m.def("nvfp4_dequant", &nvfp4_dequant, "NVFP4 -> matrice dense",
           py::arg("qweight"), py::arg("block_scale"), py::arg("global_scale"),
           py::arg("K"), py::arg("dtype"), py::arg("gscale_rows") = py::none(),
