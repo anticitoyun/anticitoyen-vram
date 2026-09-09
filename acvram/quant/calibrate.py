@@ -187,9 +187,26 @@ class ChannelScaler:
         )
 
     def state_dict(self, prefix: str = "") -> dict[str, torch.Tensor]:
+        """L'échelle part en float32, quel que soit son dtype de calcul.
+
+        Elle était écrite en fp16, dont l'exposant ne couvre que 5 bits : sur
+        Qwen2.5-Coder-14B les échelles vont de 8,9e-4 à 4,0e+2, soit une marge
+        de x164 au plafond mais seulement **x15 au plancher** des dénormaux
+        (6,1e-5). Un modèle dont les échelles seraient quinze fois plus petites
+        y tomberait — et ce ne serait plus une perte de précision mais des
+        valeurs fausses, sans que rien ne le signale.
+
+        Un garde attraperait ce défaut ; le float32 supprime la classe. Le coût
+        est nul des deux côtés : ~4 Mo par modèle sur disque, et zéro à
+        l'exécution puisque l'échelle est convertie une seule fois au
+        chargement, au dtype des activations.
+
+        Les modèles déjà convertis restent en fp16 et se chargent sans
+        changement : le lecteur prend le dtype qu'il trouve.
+        """
         out: dict[str, torch.Tensor] = {}
         if self.scale is not None:
-            out[f"{prefix}act_scale"] = self.scale
+            out[f"{prefix}act_scale"] = self.scale.to(torch.float32)
         return out
 
 
@@ -256,8 +273,19 @@ def search_channel_scales(
     identity = torch.ones_like(best_scale)
     if torch.allclose(best_scale, identity, atol=1e-3):
         best_scale = None
+    # L'échelle reste en float32. Elle était rabattue en fp16 ici, dont
+    # l'exposant ne couvre que 5 bits : sous 6,1e-5 les valeurs deviennent
+    # dénormales, sous ~6e-8 elles deviennent NULLES. Sur Qwen2.5-Coder-14B la
+    # plus petite vaut 8,9e-4, soit une marge de x15 seulement — un modèle aux
+    # échelles quinze fois plus petites aurait été écrêté en silence, et une
+    # échelle nulle ne dégrade pas la sortie, elle la détruit.
+    #
+    # Écrire du float32 au manifeste ne suffisait pas : la valeur était déjà
+    # perdue ICI, à la recherche. Le coût est un vecteur de quelques milliers
+    # de valeurs par tenseur, et zéro à l'exécution depuis que l'échelle est
+    # convertie une seule fois au chargement.
     return ChannelScaler(
-        best_scale.to(torch.float16) if best_scale is not None else None
+        best_scale.to(torch.float32) if best_scale is not None else None
     ), best_err
 
 

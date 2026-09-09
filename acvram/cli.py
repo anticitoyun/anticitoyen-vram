@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import sys
@@ -20,6 +21,75 @@ from typing import Optional
 
 __version__ = "0.4.25"
 
+
+
+# Variables d'environnement que le code lit REELLEMENT. Le 9/09/2026,
+# `MAXTOK=65536` a ete pose dans l'environnement d'une mesure de perplexite
+# que rien ne lisait : la mesure s'est arretee a 16 fenetres au lieu de 128,
+# sans que rien ne le signale. Une variable posee qui ne va nulle part est
+# une consigne silencieusement ignoree.
+#
+# Cette liste se met a jour avec le code ; une epreuve verifie qu'elle ne
+# derive pas.
+VARIABLES_LUES = {
+    "ACVRAM_ALLOC_EXTENSIBLE",
+    "ACVRAM_ARCH_FAMILY",
+    "ACVRAM_CUDA_HOME",
+    "ACVRAM_DISABLE_CPU_KERNELS",
+    "ACVRAM_DISABLE_CUDA_GRAPHS",
+    "ACVRAM_DISABLE_FP4_GEMM",
+    "ACVRAM_DISABLE_KERNELS",
+    "ACVRAM_DISABLE_PAGED_ATTN",
+    "ACVRAM_EXIL_COUCHES",
+    "ACVRAM_FUSION_NVFP4",
+    "ACVRAM_GC_FREEZE",
+    "ACVRAM_GDN",
+    "ACVRAM_GRAPHES_MUETS",
+    "ACVRAM_GRAPHS_EAGER",
+    "ACVRAM_GW_WARPS",
+    "ACVRAM_HYBRID_KERNELS",
+    "ACVRAM_HYBRID_SLOTS",
+    "ACVRAM_INSTA_MAX",
+    "ACVRAM_INSTA_PAS",
+    "ACVRAM_INT8_GEMV_MAX",
+    "ACVRAM_KDA_CHUNK",
+    "ACVRAM_MAMBA_CHUNK",
+    "ACVRAM_MLA_BUCKET",
+    "ACVRAM_MLA_NORME_NOYAU",
+    "ACVRAM_MLP_HOTE_CPU",
+    "ACVRAM_MODELS_DIR",
+    "ACVRAM_MOE_DECODE_MASQUES",
+    "ACVRAM_MOE_GEMM_MAX",
+    "ACVRAM_MOE_GROUPED_MAX",
+    "ACVRAM_MTP",
+    "ACVRAM_NVFP4_GEMV_MAX",
+    "ACVRAM_PLAN_FIGE",
+    "ACVRAM_POOL_SYNC",
+    "ACVRAM_PREFILL",
+    "ACVRAM_PREFILL_DEQUANT",
+    "ACVRAM_SANS_FUSION_BF16",
+    "ACVRAM_SANS_PRECHARGE",
+    "ACVRAM_SANS_REPLAN",
+    "ACVRAM_SEUIL_FUSION",
+    "ACVRAM_SYNC_COUCHES",
+    "ACVRAM_TETE_LIEE",
+    "ACVRAM_TRACEBACK",
+    "ACVRAM_TRACE_PTRS",
+    "ACVRAM_TRACE_ROUTAGE",
+    "ACVRAM_TRACE_STEPS",
+    "ACVRAM_VERBOSE_BUILD",
+    "ACVRAM_WARM_GRAPHS",
+    "ACVRAM_WARM_SPEC",
+}
+
+
+def _avertir_variables_inconnues() -> None:
+    """Signale toute ACVRAM_* posee que le code ne lit pas."""
+    inconnues = sorted(v for v in os.environ
+                       if v.startswith("ACVRAM_") and v not in VARIABLES_LUES)
+    if inconnues:
+        print(red("  variables ignorees (le code ne les lit nulle part) : "
+                  + ", ".join(inconnues)), flush=True)
 
 def _tty() -> bool:
     """Une barre de progression a sa place sur un terminal, pas dans un tube ni un journal."""
@@ -246,17 +316,29 @@ def cmd_convert(args: argparse.Namespace) -> int:
     rig = detect_rig(args.profile)
     spec = load_model_spec(args.model, args.name)
     if not args.out:
+        # Les chemins de la machine de developpement etaient codes ici en
+        # dur, avec le nom d'utilisateur dedans : ils partaient tels quels
+        # dans le paquet .deb, chez quiconque l'installe. Le repli se lit
+        # desormais dans un fichier de configuration, absent par defaut.
         base = os.environ.get("ACVRAM_MODELS_DIR")
-        # Les convertis vivent sur le SSD : ils se chargent à chaque lancement,
-        # alors qu'un original ne se lit qu'à la conversion. Le HDD garde un
-        # lien de compatibilité vers ce même dossier.
-        for candidat in ("/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram",
-                         "/mnt/4TO_SATACMR_2022/Modeles/models_acvram"):
-            if not base and os.path.isdir(candidat):
-                base = candidat
         if not base:
-            print(red("aucun repertoire de sortie : passez -o, ou posez "
-                      "ACVRAM_MODELS_DIR"))
+            conf = os.path.join(
+                os.environ.get("XDG_CONFIG_HOME",
+                               os.path.expanduser("~/.config")),
+                "acvram", "modeles")
+            try:
+                with open(conf) as f:
+                    for ligne in f:
+                        ligne = ligne.strip()
+                        if ligne and not ligne.startswith("#") and os.path.isdir(ligne):
+                            base = ligne
+                            break
+            except OSError:
+                pass
+        if not base:
+            print(red("aucun repertoire de sortie : passez -o, posez "
+                      "ACVRAM_MODELS_DIR, ou ecrivez un chemin par ligne "
+                      f"dans {conf}"))
             return 2
         args.out = os.path.join(base, spec.name.replace("/", "--"))
         print(f"  sortie : {args.out}")
@@ -435,8 +517,63 @@ def cmd_eval(args: argparse.Namespace) -> int:
     import torch
 
     from .evaluate import perplexity, render
+
+    # Le cadrage se declare TOUJOURS, avec le corpus et la fenetre : une
+    # perplexite ne se compare qu'a une autre prise au meme cadrage, et rien
+    # dans le nombre publie ne dit lequel a servi. Imprime avant la mesure,
+    # il part dans le journal meme si la sortie est redirigee.
+    # Un chiffre qui peut sortir SEUL sera compare a tort. Deux defauts du
+    # 9/09 en sont la preuve : min_context a 0 sans avertissement, et un plan
+    # degrade rendant un nombre d'allure normale. Dans les deux cas le chiffre
+    # voyageait sans ses conditions. La parade generique n'est pas de garder
+    # chaque cas, c'est que la configuration EFFECTIVE sorte a cote du
+    # resultat — cadrage, corpus et son sha, VRAM libre au chargement.
+    _avertir_variables_inconnues()
+    sha = "?"
+    try:
+        import hashlib
+        h = hashlib.sha256()
+        with open(args.corpus, "rb") as fh:
+            for bloc in iter(lambda: fh.read(1 << 20), b""):
+                h.update(bloc)
+        sha = h.hexdigest()[:12]
+    except OSError:
+        pass
+    print(f"  cadrage : min_context={args.min_context} window={args.window} "
+          f"stride={args.stride} max_tokens={args.max_tokens}", flush=True)
+    print(f"  corpus  : {os.path.basename(args.corpus)} sha256:{sha}", flush=True)
+    if torch.cuda.is_available():
+        libre, total = torch.cuda.mem_get_info()
+        print(f"  carte   : {libre / 2**30:.2f} Gio libres sur "
+              f"{total / 2**30:.2f}", flush=True)
+    if not args.min_context:
+        # La garde de `evaluate` n'avertit que si le corpus est plus court que
+        # la fenetre — jamais sur wiki.test.raw (1,29 Mo). Sans ce message,
+        # oublier le cadrage donne un chiffre faux d'un facteur proche de 2
+        # (9,525 contre 7,233 au protocole) sans le moindre signe.
+        print(red("  min_context=0 : les premieres positions sont notees avec "
+                  "un contexte quasi vide. Ce chiffre N'EST PAS comparable a "
+                  "une mesure cadree — le protocole impose --min-context 256."),
+              flush=True)
+    # Les modeles se chargeaient l'un apres l'autre dans le MEME processus sans
+    # que le precedent soit libere. Le 9/09/2026, une barriere de qualite a
+    # mesure un nvfp4 puis charge un bf16 par-dessus :
+    #   plan reajuste : 32 MLP de plus en RAM hote (15,9 Gio pour 18,1 libres)
+    #   OutOfMemoryError : 111,88 MiB libres sur 31,36 Gio
+    # Le second modele est donc mesure EN REGIME DEGRADE, ou pas du tout — et
+    # une perplexite prise sur un plan degrade n'est comparable a rien.
+    #
+    # Liberer entre deux ne suffit pas a garantir un plan identique : le
+    # cache de l'allocateur et la fragmentation survivent. Un modele par
+    # PROCESSUS reste la seule mesure propre, et c'est ce que dit
+    # l'avertissement.
+    if len(args.models) > 1:
+        print(red(f"  {len(args.models)} modeles dans un seul processus : le "
+                  f"plan du second depend de ce que le premier a laisse. "
+                  f"Pour une mesure comparable, un appel par modele."),
+              flush=True)
     results = []
-    for path in args.models:
+    for i, path in enumerate(args.models):
         def prog(done: int, total: int, _p: str = path) -> None:
             _progress(f"  {os.path.basename(_p)}: window {done}/{total}")
         results.append(perplexity(
@@ -444,6 +581,11 @@ def cmd_eval(args: argparse.Namespace) -> int:
             max_tokens=args.max_tokens, device=args.device, progress=prog,
             min_context=args.min_context))
         _progress_done()
+        if i + 1 < len(args.models):
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
     results.sort(key=lambda r: r.perplexity)
     if args.json:
         print(json.dumps([r.to_dict() for r in results], indent=2))
@@ -608,9 +750,16 @@ def build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--window", type=int, default=512)
     ev.add_argument("--stride", type=int, default=256)
     ev.add_argument("--max-tokens", type=int, default=8192)
+    # DEFAUT 0 CONSERVE, mais il ne passe plus en silence. Une perplexite a
+    # min_context 0 n'est PAS comparable a une perplexite cadree : sur
+    # wiki.test.raw la table du protocole donne 9,525 contre 7,233, un facteur
+    # proche de 2. Le seul garde-fou existant n'avertit que si le corpus est
+    # plus court que la fenetre — ce qui n'arrive jamais sur ce corpus de
+    # 1,29 Mo. La barriere reposait donc sur la memoire de l'operateur.
     ev.add_argument("--min-context", type=int, default=0,
                     help="n'note que les positions ayant au moins tant de "
-                         "jetons de contexte (0 = tout, comme avant)")
+                         "jetons de contexte (0 = tout, NON COMPARABLE a une "
+                         "mesure cadree ; le protocole impose 256)")
     ev.add_argument("--device", help="impose un appareil")
     ev.add_argument("--json", action="store_true")
     ev.set_defaults(func=cmd_eval)
