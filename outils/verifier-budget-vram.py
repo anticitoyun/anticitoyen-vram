@@ -65,8 +65,47 @@ def _exiger_une_seule_carte() -> None:
             f"sans le dire.")
 
 
-def _attendre_carte_libre(seuil_mio: int = 512, patience_s: int = 180) -> None:
-    """Attend la libération RÉELLE, jamais un délai fixe.
+def _autres_processus() -> list[str]:
+    """Processus de calcul sur la carte visible, LE NÔTRE EXCLU.
+
+    Compter les OCTETS pris ne distingue pas un voisin au travail de notre
+    propre contexte CUDA, qui pèse à lui seul un demi-gibioctet dès que torch
+    s'initialise. La première version de cette garde refusait de mesurer sur
+    « 521 Mio pris » alors que la carte était à 15 Mio et que les 521 étaient
+    les siens : elle lisait sa propre présence comme celle d'un autre.
+
+    Ce qu'on veut savoir n'est pas « combien est pris » mais « quelqu'un
+    d'autre travaille-t-il ici », et cette question se pose aux processus.
+    """
+    import subprocess
+    moi = str(os.getpid())
+    # `-i 0` : SANS lui, nvidia-smi liste les processus de TOUTES les cartes, et
+    # la garde refusait de mesurer sur la 5090 libre parce qu'un service
+    # permanent occupe la 3080 Ti. Troisieme fois de la journee qu'un controle
+    # lit la propriete voisine de celle qui decide — ici « un processus GPU
+    # existe » au lieu de « un processus occupe MA carte ».
+    #
+    # `-i 0` designe la carte PHYSIQUE 0 : nvidia-smi ignore
+    # CUDA_VISIBLE_DEVICES, c'est donc bien la 5090 meme sous epinglage.
+    try:
+        sortie = subprocess.run(
+            ["nvidia-smi", "-i", "0", "--query-compute-apps=pid,used_memory",
+             "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=20).stdout
+    except Exception:                                       # noqa: BLE001
+        return []                                           # pas d'avis : pas d'alarme
+    autres = []
+    for ligne in sortie.splitlines():
+        if not ligne.strip():
+            continue
+        pid = ligne.split(",")[0].strip()
+        if pid and pid != moi:
+            autres.append(ligne.strip())
+    return autres
+
+
+def _attendre_carte_libre(patience_s: int = 180) -> None:
+    """Attend que les AUTRES processus rendent la carte, jamais un délai fixe.
 
     Un `sleep` calibré sur une observation passée ne garantit rien : le
     voisin rend sa VRAM quand il la rend. Constaté le 9/09/2026, une manche de
@@ -76,13 +115,13 @@ def _attendre_carte_libre(seuil_mio: int = 512, patience_s: int = 180) -> None:
     import time
     debut = time.monotonic()
     while True:
-        pris = _vram_prise() / 2**20
-        if pris <= seuil_mio:
+        autres = _autres_processus()
+        if not autres:
             return
         if time.monotonic() - debut > patience_s:
             raise SystemExit(
-                f"carte toujours occupee apres {patience_s} s ({pris:.0f} Mio "
-                f"pris) : quelqu'un travaille dessus, ne mesurez pas par-dessus.")
+                f"carte toujours occupee apres {patience_s} s : {autres} — "
+                f"quelqu'un travaille dessus, ne mesurez pas par-dessus.")
         time.sleep(2)
 
 
@@ -123,6 +162,13 @@ def main(argv):
     ap.add_argument("--max-model-len", type=int, default=4096)
     ap.add_argument("--tolerance", type=float, default=5.0,
                     help="ecart tolere en %% de la VRAM annoncee")
+    ap.add_argument("--role", choices=[r for r, _ in CIBLES],
+                    help="ne mesurer qu'un role. Enchainer les trois dans un "
+                         "seul processus a fait tuer la tache pour pression "
+                         "memoire : lire un modele de 17 Gio remplit le cache "
+                         "de pages, et trois lectures d'affilee ne le rendent "
+                         "pas assez vite. Un modele par lancement, le plus "
+                         "petit d'abord.")
     ns = ap.parse_args(argv[1:])
 
     if not torch.cuda.is_available():
@@ -135,6 +181,8 @@ def main(argv):
     print(f"{'role':<20}{'modele':<26}{'annonce':>9}{'reel':>9}"
           f"{'ecart':>9}{'':>3}verdict")
     for role, nom in CIBLES:
+        if ns.role and role != ns.role:
+            continue
         chemin = os.path.join(A, nom)
         if not os.path.isdir(chemin):
             print(f"{role:<20}{nom[:24]:<26}   ABSENT DU DISQUE")
