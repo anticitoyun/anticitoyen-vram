@@ -69,3 +69,35 @@ cinq passages plausibles, +0,9 % annoncé là où le vrai gain valait +6,9 %.
 
 **Vérification de l'état du dispositif avant chaque mesure**, par une propriété
 observable du binaire, pas par la confiance dans la commande qui l'a produit.
+
+
+## Ce que la carte borne : les bf16 de 14B ne s'étalonnent pas contre eux-mêmes
+
+Première exécution, `Qwen2.5-Coder-14B-pur-bf16` :
+
+    carte 30,85 Gio libres sur 31,36 au depart
+    plan reajuste : 5 MLP de plus en RAM hote (27,3 Gio pour 29,6 libres)
+    arene epinglee : 1,98 Gio
+    OutOfMemoryError : 55,88 Mio libres, il manquait 136 Mio
+
+**Ce n'est pas un incident, c'est une borne.** Un bf16 de cette taille exile
+déjà cinq MLP au chargement et ne laisse pas de quoi évaluer. **La classe de
+modèles que cette barrière peut étalonner contre leur propre bf16 s'arrête donc
+en dessous de 14 milliards de paramètres sur cette carte.**
+
+Conséquence pratique : le témoin positif se fabrique sur un modèle **petit**,
+converti deux fois depuis la même source.
+
+## État de la barrière au 9 septembre 2026, 20 h
+
+    temoin NEGATIF   PASSE   nvfp4 deux fois : 7,270 et 7,270, deux processus
+    temoin POSITIF   ABSENT  le bf16 de 14B ne tient pas a l'evaluation
+
+**La barrière a la reproductibilité et n'a pas la sensibilité.** Les deux sont
+nécessaires ; seule la première est acquise. **Statut : suspendue faute de
+témoin**, et non « passée ».
+
+Le couple à fabriquer : `Qwen3-0.6B`, même source GGUF, converti en nvfp4
+(existe) et en bf16 (à produire). Écart attendu **connu de signe** — le bf16
+doit être meilleur, le nvfp4 étant une approximation du même modèle. Deux
+chiffres identiques sur ce couple signifieraient un instrument aveugle.
