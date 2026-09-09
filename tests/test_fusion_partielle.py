@@ -66,3 +66,47 @@ def test_le_partiel_ne_s_applique_pas_quand_k_egale_v():
     """Avec k_eq_v il n'y a que deux projections : rien a partitionner."""
     src = inspect.getsource(model.Attention.fuse)
     assert "if len(lins) < 3:" in src, "aucune garde sur le nombre de projections"
+
+
+# --- le compteur de refus garde la meme unite -------------------------------
+
+def test_l_exploration_des_paires_ne_compte_pas_trois_refus():
+    """Le 9/09/2026, une mesure a rendu « 240 refus » la ou il y a 80 groupes :
+    la fusion partielle essaie TROIS paires par groupe bloque, et chaque echec
+    etait compte. L'unite du compteur changeait selon le chemin — un lecteur y
+    voyait un nombre de groupes."""
+    import torch
+
+    from acvram.engine.layers import (bilan_fusion_nvfp4, explorer_sans_compter,
+                                      stack_nvfp4_linears)
+    from acvram.quant.nvfp4 import quantize_nvfp4
+    from acvram.engine.layers import QuantLinear
+
+    def lin(sortie, entree, graine):
+        g = torch.Generator().manual_seed(graine)
+        w = (torch.randn(sortie, entree, generator=g) * 0.02).to(torch.bfloat16)
+        return QuantLinear(quantize_nvfp4(w))
+
+    avant = sum(bilan_fusion_nvfp4().values())
+    with explorer_sans_compter():
+        for _ in range(3):
+            stack_nvfp4_linears([lin(64, 128, 1), lin(64, 256, 2)])   # refus
+    assert sum(bilan_fusion_nvfp4().values()) == avant, \
+        "les tentatives d'exploration sont comptees comme des refus de groupe"
+
+
+def test_hors_exploration_le_refus_est_bien_compte():
+    """Le silence ne doit pas fuir hors du contexte."""
+    import torch
+
+    from acvram.engine.layers import bilan_fusion_nvfp4, stack_nvfp4_linears, QuantLinear
+    from acvram.quant.nvfp4 import quantize_nvfp4
+
+    def lin(sortie, entree, graine):
+        g = torch.Generator().manual_seed(graine)
+        return QuantLinear(quantize_nvfp4(
+            (torch.randn(sortie, entree, generator=g) * 0.02).to(torch.bfloat16)))
+
+    avant = sum(bilan_fusion_nvfp4().values())
+    stack_nvfp4_linears([lin(64, 128, 3), lin(64, 256, 4)])
+    assert sum(bilan_fusion_nvfp4().values()) == avant + 1
