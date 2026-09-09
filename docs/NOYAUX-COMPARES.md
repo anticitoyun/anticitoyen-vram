@@ -1,5 +1,11 @@
 # Où passe le temps GPU : acvram contre llama.cpp, noyau par noyau
 
+> **Note de renommage (9 septembre 2026)** : le modèle témoin cité ici sous
+> `Qwen2.5-Coder-14B-bf16-pur` a été renommé **`Qwen2.5-Coder-14B-pur-bf16`**
+> lors du rangement de `models_acvram`. Contenu identique ; seul le chemin
+> change. Les chiffres publiés sous l'ancien nom restent valides.
+
+
 Mesuré le 9 septembre 2026 sur RTX 5090, `Qwen2.5-Coder-14B-bf16-pur`, les deux
 moteurs sous `ncu` avec les mêmes métriques.
 

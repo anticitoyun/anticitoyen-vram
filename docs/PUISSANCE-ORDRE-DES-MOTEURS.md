@@ -1,5 +1,11 @@
 # La dérive thermique biaise l'ordre des moteurs
 
+> **Note de renommage (9 septembre 2026)** : le modèle témoin cité ici sous
+> `Qwen2.5-Coder-14B-bf16-pur` a été renommé **`Qwen2.5-Coder-14B-pur-bf16`**
+> lors du rangement de `models_acvram`. Contenu identique ; seul le chemin
+> change. Les chiffres publiés sous l'ancien nom restent valides.
+
+
 Mesuré le 9 septembre 2026, RTX 5090, `Qwen2.5-Coder-14B-bf16-pur`. Douze
 passages **identiques** de 200 pas de décodage, un seul chargement, graphes
 actifs, aucun poids en flux, puissance échantillonnée à 50 Hz par `pynvml`.
