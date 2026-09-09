@@ -651,6 +651,22 @@ def garde_grossissement(octets_source: int, total_params: int,
         "la source par un moteur GGUF ; ou --autoriser-grossissement en "
         "connaissance de cause.")
 
+def _octets_du_checkpoint(chemin: str) -> int:
+    """Somme des poids du checkpoint source, pour reconnaitre une source
+    renommee ou deplacee. La taille seule ne PROUVE pas l identite — deux
+    modeles de meme architecture et meme format pesent pareil — mais elle
+    suffit a signaler qu on n a pas la bonne."""
+    total = 0
+    for r, _, fs in os.walk(chemin):
+        for f in fs:
+            if f.endswith((".safetensors", ".bin", ".gguf")):
+                try:
+                    total += os.path.getsize(os.path.join(r, f))
+                except OSError:
+                    pass
+    return total
+
+
 def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                        spec: Optional[ModelSpec] = None,
                        stats: Optional[dict[str, ActStats]] = None,
@@ -716,6 +732,17 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         "model": spec.to_dict(),
         "plan": plan.to_dict(),
         "options": asdict(opts),
+        # D ou vient ce modele. Le manifeste portait out_dir et jamais
+        # l entree : le 9/09/2026, retrouver la source du temoin bf16 a
+        # demande de comparer ses tenseurs bit a bit a un candidat, faute de
+        # pouvoir la lire. Un couple a une variable exige la meme origine ;
+        # sans cette cle, on ne peut pas garantir qu on mesure deux formats
+        # plutot que deux modeles.
+        "source": {
+            "chemin": os.path.abspath(model_path),
+            "nom": os.path.basename(os.path.abspath(model_path)),
+            "octets": _octets_du_checkpoint(model_path),
+        },
         # Ce qui a ete demande et ce qui est sorti, cote a cote et toujours,
         # meme quand ils coincident. Un manifeste qui ne porte que le resultat
         # laisse croire qu'il a ete voulu.

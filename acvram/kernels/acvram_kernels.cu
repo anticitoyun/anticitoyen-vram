@@ -287,7 +287,55 @@ __global__ void nvfp4_gemv_kernel(
     const int per_split_p = (npairs + k_splits - 1) / k_splits;
     const int lo_p = split * per_split_p;
     const int hi_p = min(npairs, lo_p + per_split_p);
-    for (int i = lo_p + threadIdx.x; i < hi_p; i += blockDim.x) {
+
+    // Double tampon sur la dimension K. La boucle lisait le poids puis le
+    // consommait aussitot : chaque iteration payait la latence DRAM en entier,
+    // et le fil restait bloque sur `long_scoreboard`. Les lectures de
+    // l'iteration suivante sont maintenant emises AVANT le calcul de la
+    // courante, qui les recouvre.
+    //
+    // Mesure du 9/09/2026 sur Qwen2.5-Coder-14B en decodage : notre GEMV
+    // atteignait 770 Go/s contre 991 pour cuBLAS en bf16, soit 78 %. L'ecart
+    // etait pire sur les PETITES matrices (0,62 sur o_proj) que sur les
+    // grandes (0,85 sur gate/up) — signature d'une latence mal masquee, pas
+    // d'une mauvaise coalescence, qui penaliserait uniformement.
+    //
+    // L'arithmetique est inchangee : memes valeurs, meme ordre
+    // d'accumulation. Seul le moment des lectures change.
+    uint4 pre_p4[ROWS];
+    float pre_s0[ROWS], pre_s1[ROWS];
+    int i = lo_p + threadIdx.x;
+    bool vif = i < hi_p;
+    if (vif) {
+        #pragma unroll
+        for (int r = 0; r < ROWS; ++r) {
+            const int row = row0 + r;
+            if (row >= M) continue;
+            pre_p4[r] = reinterpret_cast<const uint4 *>(qw + (long)row * half_k)[i];
+            pre_s0[r] = e4m3_to_float(bscale[(long)row * nloads + 2 * i]) * gscale;
+            pre_s1[r] = e4m3_to_float(bscale[(long)row * nloads + 2 * i + 1]) * gscale;
+        }
+    }
+    for (; i < hi_p; i += blockDim.x) {
+        // ce qui a ete precharge sert maintenant
+        uint4 cur_p4[ROWS];
+        float cur_s0[ROWS], cur_s1[ROWS];
+        #pragma unroll
+        for (int r = 0; r < ROWS; ++r) {
+            cur_p4[r] = pre_p4[r]; cur_s0[r] = pre_s0[r]; cur_s1[r] = pre_s1[r];
+        }
+        // les lectures suivantes partent avant le calcul, jamais apres
+        const int isuiv = i + blockDim.x;
+        if (isuiv < hi_p) {
+            #pragma unroll
+            for (int r = 0; r < ROWS; ++r) {
+                const int row = row0 + r;
+                if (row >= M) continue;
+                pre_p4[r] = reinterpret_cast<const uint4 *>(qw + (long)row * half_k)[isuiv];
+                pre_s0[r] = e4m3_to_float(bscale[(long)row * nloads + 2 * isuiv]) * gscale;
+                pre_s1[r] = e4m3_to_float(bscale[(long)row * nloads + 2 * isuiv + 1]) * gscale;
+            }
+        }
         float xs[NV][2 * WEIGHTS_PER_LOAD];
         #pragma unroll
         for (int n = 0; n < NV; ++n)
@@ -297,9 +345,9 @@ __global__ void nvfp4_gemv_kernel(
         for (int r = 0; r < ROWS; ++r) {
             const int row = row0 + r;
             if (row >= M) continue;
-            const uint4 p4 = reinterpret_cast<const uint4 *>(qw + (long)row * half_k)[i];
-            const float s0 = e4m3_to_float(bscale[(long)row * nloads + 2 * i]) * gscale;
-            const float s1 = e4m3_to_float(bscale[(long)row * nloads + 2 * i + 1]) * gscale;
+            const uint4 p4 = cur_p4[r];
+            const float s0 = cur_s0[r];
+            const float s1 = cur_s1[r];
             const unsigned int words[4] = {p4.x, p4.y, p4.z, p4.w};
             float p0[NV], p1[NV];
             #pragma unroll
