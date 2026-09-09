@@ -13,6 +13,14 @@ derrière des tailles égales.
 import pytest
 import torch
 
+@pytest.fixture(autouse=True)
+def _voie_partielle_active(monkeypatch):
+    """La voie 2+1 est COUPEE par defaut depuis la mesure de poste2 (-12,16 %).
+    Ces epreuves portent sur sa justesse, pas sur son activation : elles
+    l'allument explicitement. Le jour ou elle sera reactivee par defaut, ce
+    reglage deviendra inutile sans rien casser."""
+    monkeypatch.setenv("ACVRAM_FUSION_PARTIELLE", "1")
+
 from acvram.engine.layers import QuantLinear
 from acvram.engine.model import Attention
 from acvram.quant import formats
