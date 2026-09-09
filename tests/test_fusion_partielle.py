@@ -21,23 +21,71 @@ mecanisme et non une simple regle descriptive.
 """
 import inspect
 
+import pytest
+
 from acvram.engine import model
 
 
-def test_la_fusion_partielle_choisit_la_paire_la_moins_couteuse():
-    """Pas 'deux quelconques' : celle dont la somme des lignes est minimale."""
-    src = inspect.getsource(model.Attention.fuse)
-    assert "qkv_partiel" in src, "aucune fusion partielle"
-    i = src.index("for i, j in ((0, 1), (0, 2), (1, 2))")
-    bloc = src[i:i + 600]
-    assert "shape[0] + " in bloc, "le cout n'est pas la somme des lignes"
-    assert "cout < meilleur_cout" in bloc, "la paire minimale n'est pas retenue"
+@pytest.fixture(autouse=True)
+def _voie_partielle_active(monkeypatch):
+    """La voie 2+1 est COUPEE par defaut depuis la mesure de poste2
+    (-12,16 % sur qwen25-coder-14b). Ces epreuves portent sur sa justesse,
+    pas sur son activation : elles l'allument explicitement."""
+    monkeypatch.setenv("ACVRAM_FUSION_PARTIELLE", "1")
 
 
-def test_les_trois_paires_sont_essayees():
-    """Une seule paire essayee laisserait passer des groupes empilables."""
-    src = inspect.getsource(model.Attention.fuse)
-    assert "((0, 1), (0, 2), (1, 2))" in src, "les trois paires ne sont pas essayees"
+def _attention_trois_formats(formats_qkv):
+    """Une Attention dont q, k et v ont des TAILLES differentes : une
+    permutation des indices ne peut pas se cacher derriere une symetrie."""
+    import torch
+
+    from acvram.engine.config import ModelSpec
+    from acvram.engine.layers import QuantLinear
+    from acvram.quant import formats
+
+    def _lin(sortie, entree, fmt, graine):
+        torch.manual_seed(graine)
+        w = torch.randn(sortie, entree, dtype=torch.float32) * 0.02
+        return QuantLinear(formats.quantize(w, fmt, group_size=128))
+
+    spec = ModelSpec(name="t", architecture="llama", hidden_size=256,
+                     intermediate_size=512, num_layers=1,
+                     num_attention_heads=8, num_key_value_heads=2,
+                     vocab_size=32, max_position_embeddings=64)
+    fq, fk, fv = formats_qkv
+    return model.Attention(spec, _lin(256, 256, fq, 1), _lin(64, 256, fk, 2),
+                           _lin(64, 256, fv, 3), _lin(256, 256, fq, 4),
+                           rope=None)
+
+
+def test_la_paire_retenue_est_celle_du_format_majoritaire():
+    """Non pas 'la moins couteuse' : la SEULE possible.
+
+    L'ancienne epreuve lisait le texte de `fuse` et exigeait d'y trouver une
+    comparaison de couts. Elle etait juste sur le code et fausse sur le
+    monde : un groupe a trois membres et deux formats n'offre JAMAIS deux
+    paires empilables, puisque deux membres ne s'empilent que s'ils ont le
+    meme format. Le tri par cout ne s'exerce donc jamais, et la mesure qui le
+    justifiait — k+v a 57 % contre q+k a 49 % — decrivait un choix que le
+    moteur n'a pas a faire. Ce que le code doit garantir est plus simple et
+    verifiable : la paire retenue est celle du format majoritaire, et le
+    membre laisse seul est le minoritaire.
+    """
+    att = _attention_trois_formats(("int8", "nvfp4", "nvfp4"))
+    assert att.fuse() is True
+    assert att.qkv_proj is None, "le total ne devrait pas etre possible"
+    _, (i, j), reste, _ = att.qkv_partiel
+    assert (i, j) == (1, 2), f"paire retenue {(i, j)} au lieu de k+v"
+    assert reste == 0, f"membre isole {reste} au lieu de q"
+
+
+def test_le_membre_isole_suit_le_format_minoritaire():
+    """Meme groupe, minoritaire deplace : la paire suit, sans regle ecrite
+    ailleurs que dans les formats."""
+    att = _attention_trois_formats(("nvfp4", "int8", "nvfp4"))
+    assert att.fuse() is True
+    _, (i, j), reste, _ = att.qkv_partiel
+    assert (i, j) == (0, 2) and reste == 1
 
 
 def test_la_fusion_totale_reste_prioritaire():

@@ -29,6 +29,12 @@ OCTETS = {"nvfp4": .5625, "int4_awq": .5625, "int8": 1.0625,
           "bf16": 2.0, "fp16": 2.0, "q3n": .40625}
 GROUPES = {"qkv": ("self_attn", ["q", "k", "v"]),
            "gate_up": ("mlp", ["gate", "up"])}
+# `fuse()` n essaie QUE trois empileurs : int8, nvfp4, plain (bf16/fp16).
+# int4_awq et q3n n en ont aucun — un groupe parfaitement homogene dans ces
+# formats ne fusionne JAMAIS. Compter l homogeneite comme une liberte, c est
+# lire la propriete voisine de celle qui decide. Releve par poste4 sur la
+# vraie `Attention.fuse()` : 135 groupes du parc, tous int4_awq.
+EMPILABLES = {"nvfp4", "int8", "bf16", "fp16"}
 
 
 def _echelles_egales(dossier, wm, cles):
@@ -65,22 +71,40 @@ def verrous(dossier):
             cles = [f"model.layers.{c}.{sous}.{n}_proj.weight" for n in noms]
             if not all(k in ts for k in cles):
                 continue
-            fmts = {str(ts[k].get("format")) for k in cles}
+            fmts_liste = [str(ts[k].get("format")) for k in cles]
+            fmts = set(fmts_liste)
             hads = {ts[k].get("hadamard_block") or 0 for k in cles}
             biais = [k.replace(".weight", ".bias") in wm for k in cles]
+            # Gardes communes aux DEUX empileurs, absentes de la premiere
+            # version de ce script : meme largeur d entree et meme group_size.
+            # Les omettre majore l assiette, exactement comme le biais la
+            # majorait tant que `stack_int8_linears` le refusait (22f08b8).
+            entrees = {tuple(ts[k].get("shape", [0, 0])[1:]) for k in cles}
+            gsz = {ts[k].get("group_size") for k in cles}
             ech_ok, ech_presentes = _echelles_egales(dossier, wm, cles)
             out.append({
                 "couche": c, "genre": genre,
-                "format_ok": len(fmts) == 1,
+                "format_ok": len(fmts) == 1 and fmts <= EMPILABLES,
+                "format_sans_empileur": len(fmts) == 1 and not fmts <= EMPILABLES,
                 "hadamard_ok": len(hads) == 1,
                 "biais_ok": len(set(biais)) == 1,      # tous ou aucun
+                "taille_ok": len(entrees) == 1 and len(gsz) == 1,
                 "echelle_ok": ech_ok,
                 "echelles_presentes": ech_presentes,
                 "formats": sorted(fmts),
+                # La voie 2+1 ne sauve un groupe heterogene que si DEUX de ses
+                # trois membres partagent un format qui a un empileur. Un
+                # gate_up n a que deux membres : il n a pas de voie partielle.
+                "partiel_possible": (
+                    len(cles) == 3
+                    and any(fmts_liste.count(f) >= 2 and f in EMPILABLES
+                            for f in fmts)),
             })
-        if not any(f"model.layers.{c}.self_attn.q_proj.weight" in ts
-                   for _ in (0,)):
-            break
+    # PAS d arret anticipe : une couche sans attention pleine ne signale pas
+    # la fin du modele. Sur les architectures hybrides (attention lineaire ou
+    # GDN alternee) la couche 0 en est depourvue, et l ancien `break` arretait
+    # tout des la premiere : 1977 groupes manquants sur 42 modeles, les
+    # Qwen3.x-27B comptes 1 groupe au lieu de 80. Trouve par poste4.
     return out
 
 
@@ -100,15 +124,22 @@ def main(argv):
         for g in gs:
             total["groupes"] += 1
             libres = (g["format_ok"] and g["hadamard_ok"]
-                      and g["biais_ok"] and g["echelle_ok"])
+                      and g["biais_ok"] and g["echelle_ok"]
+                      and g["taille_ok"])
             if libres:
                 par_voie["fusionnent deja"] += 1
                 continue
             # quelle voie leverait CE groupe, sans rien approximer ?
-            if not g["echelle_ok"]:
+            if g["format_sans_empileur"]:
+                par_voie["homogene SANS empileur (int4_awq, q3n)"] += 1
+            elif not g["taille_ok"]:
+                par_voie["bloque par TAILLE (entree ou group_size)"] += 1
+            elif not g["echelle_ok"]:
                 par_voie["bloque par ECHELLE (table AWQ)"] += 1
             elif not g["format_ok"]:
-                par_voie["bloque par FORMAT seul (voie 2+1)"] += 1
+                par_voie["bloque par FORMAT, voie 2+1 possible" if
+                         g["partiel_possible"] else
+                         "bloque par FORMAT, rien a sauver"] += 1
             elif not g["hadamard_ok"]:
                 par_voie["bloque par HADAMARD"] += 1
             else:
@@ -118,8 +149,10 @@ def main(argv):
     for k, n in par_voie.most_common():
         print(f"{k:38s} {n:8d} {100*n/t:6.1f} %")
     print(f"{'TOTAL':38s} {t:8d}")
-    print("\nLa voie 2+1 ne s'applique qu'aux groupes bloques par le FORMAT SEUL :")
-    print("un groupe dont les echelles different reste refuse quel que soit son format.")
+    print("\nLa voie 2+1 ne s'applique qu'aux groupes bloques par le FORMAT SEUL,")
+    print("dont DEUX membres partagent un format empilable : un groupe dont les")
+    print("echelles different reste refuse quel que soit son format, et un gate_up")
+    print("n'a que deux membres, donc pas de voie partielle.")
 
 
 if __name__ == "__main__":

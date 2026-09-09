@@ -1178,12 +1178,31 @@ def stack_int8_linears(lins: list) -> Optional["QuantLinear"]:
         return None
     if len({(t.qweight.shape[1], t.group_size) for t in ts}) != 1:
         return None
-    if any(l.bias is not None or l.scaler is not None or l.streamed is not None
-           for l in lins):
+    if any(l.streamed is not None for l in lins):
+        return None
+    # Un biais s'applique a la SORTIE : le concatener sur l'axe 0 est exact,
+    # exactement comme les lignes de poids. Le refuser ici coutait TOUS les
+    # groupes tout-int8 des modeles a biais — Qwen2.5 en porte sur q, k et v —
+    # alors que `stack_nvfp4_linears` les accepte depuis ce matin avec la meme
+    # justification, 150 lignes plus haut. Deux fonctions voisines, deux
+    # regles opposees sur le meme objet : releve par poste4 en dressant la
+    # table de verite des quatre cas (int8/nvfp4 x avec/sans biais).
+    biais = [l.bias for l in lins]
+    if any((b is None) != (biais[0] is None) for b in biais):
+        return None
+    ok_scaler, scaler_pile = _scaler_commun(lins)
+    if not ok_scaler:
         return None
     t = INT8Tensor(torch.cat([t.qweight for t in ts]).contiguous(),
                    torch.cat([t.scales for t in ts]).contiguous(),
                    torch.cat([t.zeros for t in ts]).contiguous(),
                    ts[0].group_size,
                    (sum(t.shape[0] for t in ts), ts[0].shape[1]))
-    return QuantLinear(t)
+    pbiais = torch.cat(biais) if biais[0] is not None else None
+    if pbiais is not None:
+        # Les originaux deviennent des vues, comme pour les poids : le prefill
+        # continue de les appeler separement sans dupliquer un octet.
+        o = 0
+        for l, b in zip(lins, biais):
+            l.bias = pbiais.narrow(0, o, b.shape[0]); o += b.shape[0]
+    return QuantLinear(t, bias=pbiais, scaler=scaler_pile)

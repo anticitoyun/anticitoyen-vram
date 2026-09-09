@@ -229,22 +229,42 @@ class Attention(nn.Module):
         # quelle que soit la petite — mesure a 0,01 us pres.
         if len(lins) < 3:
             return False
-        from .layers import explorer_sans_compter
-        meilleures, meilleur_cout = None, None
-        # Les trois tentatives ne sont pas trois refus : sans ce silence, le
-        # bilan compterait 240 refus la ou il y a 80 groupes.
-        for i, j in ((0, 1), (0, 2), (1, 2)):
-            paire = [lins[i], lins[j]]
-            with explorer_sans_compter():
-                pile = _empiler(paire)
-            if pile is None:
-                continue
-            cout = paire[0].qweight.shape[0] + paire[1].qweight.shape[0]
-            if meilleur_cout is None or cout < meilleur_cout:
-                meilleures, meilleur_cout = ((i, j), pile), cout
-        if meilleures is None:
+        # MESUREE A -12,16 % PAR poste2 le 9/09/2026 sur qwen25-coder-14b :
+        # 82,15 pas/s sans fusion partielle contre 72,16 avec, seuil de
+        # detection 0,51 %. Le premier passage vaut encore 81,72 puis tout
+        # bascule a 72 et y reste — une bascule, pas une dispersion. Tant que
+        # le decrochage n'est pas explique ET remesure, cette voie ne sert
+        # personne par defaut. L'equivalence numerique, elle, tenait : 48
+        # jetons identiques. Le chemin est juste, il est couteux.
+        if os.environ.get("ACVRAM_FUSION_PARTIELLE", "0") != "1":
             return False
-        (i, j), pile = meilleures
+        from .layers import explorer_sans_compter
+        # UNE SEULE PILE CONSTRUITE. La version d'avant en batissait jusqu'a
+        # TROIS par groupe et en jetait deux — mais `_empiler` ne se contente
+        # pas de rendre une pile : il REECRIT le `qweight` de chaque
+        # projection en une vue de cette pile. Apres trois essais, lins[0]
+        # etait une vue de la pile du dernier essai pendant que la pile
+        # retenue etait celle d'un essai precedent : deux tampons vivants la
+        # ou un suffit, jamais liberes puisque toujours references. Les
+        # valeurs restaient exactes — d'ou les 48 jetons identiques — et
+        # seule la vitesse payait. Premier suspect du -12,16 %.
+        #
+        # Le cout est connu SANS construire : c'est la somme des lignes.
+        # On trie donc les paires par cout croissant et on s'arrete a la
+        # PREMIERE qui s'empile.
+        paires = sorted(((0, 1), (0, 2), (1, 2)),
+                        key=lambda ij: (lins[ij[0]].qweight.shape[0]
+                                        + lins[ij[1]].qweight.shape[0]))
+        pile = None
+        # Les tentatives ne sont pas des refus : sans ce silence, le bilan
+        # compterait 240 refus la ou il y a 80 groupes.
+        for i, j in paires:
+            with explorer_sans_compter():
+                pile = _empiler([lins[i], lins[j]])
+            if pile is not None:
+                break
+        if pile is None:
+            return False
         reste = [k for k in range(3) if k not in (i, j)][0]
         self.qkv_partiel = (pile, (i, j), reste,
                             (lins[i].qweight.shape[0], lins[j].qweight.shape[0]))
