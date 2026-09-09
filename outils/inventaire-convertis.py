@@ -39,7 +39,15 @@ for nom in sorted(os.listdir(A)):
             sh = t.get("shape") or []
             n = 1
             for x in sh: n *= x
-            n *= {"bf16":2,"fp16":2,"int8":1,"nvfp4":0.5,"int4_awq":0.5}.get(str(f),2)
+            # Un format par blocs ne coute pas que ses bits de poids : NVFP4
+            # ajoute une echelle e4m3 par bloc de 16, soit 4,5 bits par poids
+            # et non 4. Compter 0,5 sous-estimait le nvfp4 de 12,5 % et faisait
+            # passer des modeles nvfp4 pour des modeles a dominante int8 ou
+            # bf16. Verifie le 9/09/2026 contre la taille des safetensors :
+            # 8,781 Gio calcules contre 8,785 mesures, soit 0,05 % d ecart,
+            # la ou l ancien compte donnait 7,967.
+            n *= {"bf16": 2, "fp16": 2, "int8": 1.0625,
+                  "nvfp4": 0.5625, "int4_awq": 0.5625}.get(str(f), 2)
         par[str(f)] += int(n)
     if not par: print(f"{nom}\t?\t\t{tot/2**30:.2f}\t\t?\t{sig(d)}"); continue
     T = sum(par.values())
