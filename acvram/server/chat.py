@@ -72,9 +72,25 @@ class Tokenizer:
                 raise TemplateError(msg)
 
             self._env = Environment(trim_blocks=True, lstrip_blocks=True)
+            self._templates: dict[str, object] = {}
             self._env.globals["raise_exception"] = raise_exception
             self._env.policies["json.dumps_kwargs"] = {"ensure_ascii": False}
-        tmpl = self._env.from_string(self.template)
+        # Le Template COMPILE est mis en cache, pas seulement l'Environment.
+        # Mesure du 9/09 sur le gabarit de Qwen2.5 (2507 caracteres) :
+        #     from_string (compilation)  3,975 ms
+        #     render seul                0,007 ms   -> facteur 570
+        # Recompiler a chaque requete coutait donc 3,975 ms, soit 3,7 % des
+        # 108 ms hors forward du TTFT. llama.cpp compile UNE FOIS au chargement
+        # (common_chat_templates_init, common/chat.cpp:591) et ne reparse
+        # jamais ensuite.
+        #
+        # Le cache est indexe par le TEXTE du gabarit : une requete qui fournit
+        # le sien (parametre `chat_template`) ne se voit pas servir celui d'une
+        # autre, et un modele recharge avec un gabarit different recompile.
+        tmpl = self._templates.get(self.template)
+        if tmpl is None:
+            tmpl = self._env.from_string(self.template)
+            self._templates[self.template] = tmpl
         return tmpl.render(
             messages=messages,
             add_generation_prompt=add_generation_prompt,
