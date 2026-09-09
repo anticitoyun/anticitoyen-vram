@@ -332,3 +332,54 @@ est la bande passante, pas l'ordonnancement.
 Rien. Trafic nominal, coalescence parfaite, L2 meilleur que le leur, occupation
 à 98 %, fusion appliquée. **Pour gagner encore sur ce chemin il faut lire moins
 d'octets — donc quantifier davantage, pas mieux ordonnancer.**
+
+## Ce que les noyaux maison rapportent, chiffré
+
+Mesuré aux formes d'une couche de `Qwen2.5-Coder-14B`, 88 jetons, sur 48
+couches — chaque noyau maison contre son équivalent PyTorch :
+
+    rmsnorm   maison 0,97 ms   PyTorch naif 3,52 ms   facteur 3,6
+    swiglu    maison 0,53 ms   PyTorch naif 0,83 ms   facteur 1,6
+
+**C'est la première fois que ce gain est chiffré** plutôt que supposé. Il est
+apparu par accident : une première version du dispositif réimplémentait ces
+opérations en PyTorch *pour pouvoir les mesurer*, et donnait un résidu de
+7,98 ms — **le double du réel**. L'erreur était de mesurer une implémentation
+que le moteur n'exécute pas ; en la corrigeant, la comparaison est restée.
+
+## Le résidu de prefill, décomposé
+
+À 88 jetons, hors GEMM :
+
+    attention SDPA          1,82 ms   36 %
+    rope                    0,98 ms   19 %   [dispositif naif : ncu donne 0,12]
+    rmsnorm maison          0,97 ms   19 %
+    residuel                0,77 ms   15 %   [deja fusionne dans rmsnorm_bf16]
+    swiglu maison           0,53 ms   10 %
+    TOTAL                   5,07 ms
+
+**L'attention domine**, et elle passe déjà par FlashAttention (`is_causal=True`,
+sans masque explicite). Les deux lignes marquées sont surestimées par le
+dispositif : le résidu réel est sous 4 ms et encore plus concentré sur
+l'attention.
+
+**Non affiné davantage** : mesurer au dixième un poste de 4 ms sur un forward de
+31 coûterait plus que ce qu'il rapporterait, et les deux corrections connues
+vont dans le sens qui réduit la cible.
+
+## État des deux chemins chauds, au 9 septembre 2026
+
+|  | décodage | prefill |
+|---|---|---|
+| trafic | nominal (+0,12 % du théorique) | — |
+| coalescence | 32,0 o/secteur, parfaite | — |
+| L2 / DRAM | 1,035 (llama.cpp : 1,089) | — |
+| occupation GPU | **97,9 %** | — |
+| bande passante | 995 Go/s, 55,6 % du pic | — |
+| GEMM | — | 137 TFLOP/s, **65 % du pic** |
+| hors GEMM | — | < 4 ms sur 31, dominé par l'attention |
+| fusion | +2,60 % | +2,6 à +6,2 % |
+
+**Les deux chemins sont près de leur plancher matériel.** Les gains restants ne
+sont pas dans l'exécution mais dans **ce qu'on demande à la machine de lire** —
+donc dans le format des poids, ce qui touche la qualité.
