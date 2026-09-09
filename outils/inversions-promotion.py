@@ -22,8 +22,9 @@ DEUX PRECAUTIONS, et la premiere a deja fait une victime.
    `out_snr_db` d'un tenseur reste en nvfp4 compare deux formats en croyant
    comparer deux merites : 44,4 dB contre 20,5 dB de mediane sur 36 modeles,
    parfaitement regulier, et parfaitement vide de sens. Ce script exige donc
-   la cle `before` (le SNR d'AVANT promotion) et REFUSE de conclure sans
-   elle, au lieu de se rabattre sur celle qui est presente.
+   la cle `snr_db_source` (le SNR d'AVANT, pris dans le format que nomme
+   `promoted_from`) et REFUSE de conclure sans elle, au lieu de se rabattre
+   sur celle qui est presente.
 
 2. L'UNITE DU TEMOIN SUIT LA POLITIQUE DU TRI. Si la promotion est decidee
    par groupe — clé = SNR du pire membre, tout ou rien — alors un tenseur
@@ -152,7 +153,7 @@ def main(argv):
 
     print(f"{'modele':46s} {'inversions':>11s} {'promus':>7s} {'epargnes':>9s}")
     for nom, inv, np_, ne, sa in lignes:
-        v = "SANS `before`" if inv is None else f"{inv:11d}"
+        v = "SANS snr_db_source" if inv is None else f"{inv:11d}"
         print(f"{nom[:46]:46s} {v:>11s} {np_:7d} {ne:9d}")
     if cumul["promus"]:
         print(f"\ncumul  inversions {cumul['inversions']}  promus "
@@ -167,8 +168,10 @@ def main(argv):
         print(f"\n{muets} modeles ne peuvent PAS repondre : leurs tenseurs promus")
         print("ne portent pas le SNR d'avant promotion. Ce n'est pas zero")
         print("inversion, c'est une absence de mesure — l'instrument ne pouvait")
-        print("rien rendre d'autre. Reconvertir, ou poser la cle `before` que")
-        print("`report.promotions` contient deja.")
+        print("rien rendre d'autre. Reconvertir avec un acvram qui pose la")
+        print("cle `snr_db_source` — convert.py l'ecrit au moment de la")
+        print("promotion, depuis le `before` que `report.promotions` portait")
+        print("deja sans le publier.")
 
 
 if __name__ == "__main__":
