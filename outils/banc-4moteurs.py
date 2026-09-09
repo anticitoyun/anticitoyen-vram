@@ -748,7 +748,10 @@ def main():
             log(f"  ATTENTION {nom[:40]} : contextes differents selon le "
                 f"moteur ({', '.join(f'{m}={c}' for m, c in sorted(ctxs.items()))})"
                 f" — les debits ne sont PAS comparables")
-        return
+            # sys.exit et non return : un appelant doit pouvoir distinguer
+            # « rien a mesurer » d'un refus. Un return silencieux rendait le
+            # code 0 avec un TSV vide — un succes qui ne mesure rien.
+            sys.exit(2)
 
     faits = set()
     if os.path.exists(a.sortie):
