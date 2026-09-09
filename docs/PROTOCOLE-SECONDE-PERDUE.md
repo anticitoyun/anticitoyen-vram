@@ -354,3 +354,46 @@ Rien du surcoût **pendant** la génération (−7,5 % avec graphes, −3,2 % sa
 qui est un second coût, mesuré par le débit et non par le temps de première
 réponse. Il faudra un protocole distinct : ne pas transporter les conclusions de
 celui-ci vers celui-là.
+
+## Étape zéro, ajoutée le 9/09 : le phénomène existe-t-il encore ?
+
+**À exécuter AVANT M1, et le protocole ne se lance pas si elle échoue.**
+
+Ce document a été écrit le 8 septembre au soir. Depuis, trois choses ont changé
+dans les conditions de toutes les mesures qui l'ont nourri :
+
+* **`acvram-serveur` n'épinglait pas la carte** — seul des trois lanceurs.
+  `_replanifier` recrutait alors les deux cartes, et une mesure prise là est un
+  attelage 5090 + 3080 Ti, pas une 5090 ;
+* **le `sync` tokensave** montait à 20 Gio et évinçait le cache de pages pendant
+  les mesures ;
+* **`ACVRAM_PLAN_FIGE`** n'était pas posé, donc le plan dépendait de la machine
+  au moment du chargement.
+
+**Conséquence sur ce document même, et il faut la dire avant de s'en servir.**
+
+Le fait qu'il enquête — *« le premier préremplissage coûte environ une seconde de
+plus »*, 1000 ms contre 181 ms — est un **relevé de temps**, pris dans ces
+conditions-là. **Il se peut que la seconde perdue soit un artefact de l'attelage**
+et non un comportement du moteur.
+
+Et une des quatre éliminations en dépend : la ligne « capture des graphes »
+s'appuie pour moitié sur *« le coût est plus lourd sans graphes »*, qui est une
+**comparaison de durées**. Les trois autres éliminations reposent sur des
+horodatages de cache ou sur la structure du banc — elles survivent.
+
+**Étape zéro : refaire le relevé du temps de première réponse**, avec et sans
+graphes, sur une machine désormais épinglée (`cartes=0`), à plan figé
+(`plan_fige=1`), sans spéculation (`speculation=none`) et sans `sync` tokensave
+en vol.
+
+* **la seconde est toujours là** → le protocole part, et M1 à M4 gardent leur
+  sens ; la ligne « capture des graphes » est à revérifier avant de s'y fier ;
+* **elle a disparu ou fondu** → **il n'y a plus rien à expliquer**, les quatre
+  mesures sont sans objet, et le fait à consigner est que le phénomène était
+  l'attelage. Quatre mesures économisées, et une explication qu'on aurait
+  cherchée pour rien.
+
+**Ne pas dépenser quatre mesures à expliquer un phénomène avant d'avoir vérifié
+qu'il existe encore.** C'est la forme la plus coûteuse du transport hors
+conditions : non pas transporter une conclusion, mais transporter la **question**.
