@@ -657,6 +657,40 @@ _OCTETS_PAR_POIDS = {"bf16": 2.0, "fp16": 2.0, "int8": 1.0625,
                      "nvfp4": 0.5625, "int4_awq": 0.5625, "q3n": 0.40625}
 
 
+def _verifier_formats_declares(manifest: dict, weight_map: dict) -> None:
+    """Le format declare doit correspondre a ce qui est REELLEMENT ecrit.
+
+    Le 9/09/2026, `Ornith-1.5-35B` declarait `format: nvfp4` sur trois blobs
+    d'experts groupes du module MTP qui n'ont jamais ete quantifies : leur cle
+    physique est directe, sans `.qweight` ni `.block_scale`, et leur dtype reel
+    est F16. L'ecart valait 1,158 Gio a lui seul — 5,85 % du modele — et tout
+    calcul de taille fonde sur le manifeste s'en trouvait faux.
+
+    Un format declare qui ne correspond pas au stockage est pire qu'un format
+    absent : il fait croire qu'on sait. Cette garde AVERTIT sans bloquer — la
+    conversion a reussi, seul le manifeste est inexact — mais elle nomme les
+    tenseurs, ce qui suffit a ne plus les compter de travers.
+    """
+    quantifies = {"nvfp4", "int8", "int4_awq", "q3n"}
+    suspects = []
+    for nom, entree in manifest.get("tensors", {}).items():
+        fmt = str(entree.get("format"))
+        if fmt not in quantifies:
+            continue
+        # un tenseur quantifie s'ecrit en plusieurs morceaux ; une cle directe
+        # signifie que le tenseur est passe tel quel
+        morceaux = any(f"{nom}.{suffixe}" in weight_map
+                       for suffixe in ("qweight", "block_scale", "scales"))
+        if not morceaux and nom in weight_map:
+            suspects.append((nom, fmt))
+    if suspects:
+        print(f"[acvram] {len(suspects)} tenseur(s) declares quantifies mais "
+              f"ecrits en direct — le manifeste surestime leur compression :",
+              flush=True)
+        for nom, fmt in suspects[:6]:
+            print(f"           {nom} (declare {fmt})", flush=True)
+
+
 def _diagnostic_fusion(tensors: dict) -> dict:
     """Ce qui empeche chaque groupe q/k/v et gate/up de fusionner, et ce que
     coûterait de le lever. **Consigne, ne decide pas.**
@@ -944,6 +978,12 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 fmt, qt, scaler, metrics = wider, q2, s2, m2
                 entry["format"] = fmt
                 entry["promoted_from"] = report.promotions[-1]["from"]
+        # Le SNR de CHAQUE tenseur, promu ou non. Sans lui on ne peut pas
+        # repondre a la question qui juge le quota : existe-t-il un tenseur
+        # NON promu dont le SNR est pire que celui d'un promu ? Si oui, le
+        # quota n'est pas un critere de qualite mais un ordre de parcours.
+        if "out_snr_db" in metrics:
+            entry["snr_db"] = round(float(metrics["out_snr_db"]), 3)
         sd = qt.state_dict(prefix=f"{name}.")
         sd.update(scaler.state_dict(prefix=f"{name}."))
         # Les fragments s'ecrivent depuis la memoire hote : on redescend ce que
@@ -1070,7 +1110,28 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             f"absents (premier : {manquants[0]}). L'architecture de la source "
             f"n'est probablement pas prise en charge — rien n'est écrit.")
 
+    # MEME denominateur que la condition l.966 — `keys`, pas `attendus`.
+    # Les deux listes ne recensent pas la meme chose et le plafond calcule sur
+    # la mauvaise donnerait un seuil de saturation faux.
+    plafond = opts.max_promotions * max(1, len(keys) + 1)
+    if report.promotions and len(report.promotions) >= plafond - 1:
+        # QUOTA SATURE. A partir de cet instant, ce n'est plus le SNR qui
+        # decide d'une promotion mais l'ORDRE DE PARCOURS du checkpoint : deux
+        # tenseurs de SNR identique recoivent des sorts opposes selon leur
+        # position. Mesure le 9/09/2026 : 27 modeles du parc sur 110 saturent
+        # a l'unite pres, et sur l'un d'eux AUCUN des 48 groupes q/k/v n'a ses
+        # trois membres promus quand 31 en ont exactement un — la signature
+        # d'un regulateur de debit, pas d'une difficulte de couche.
+        print(f"[acvram] quota de promotions SATURE : {len(report.promotions)} "
+              f"sur un plafond de {plafond:.0f}. Au-dela du plafond, l'ordre de "
+              f"parcours a decide a la place du SNR — les promotions ne sont "
+              f"plus triees par besoin. Relever --max-promotions ou trier en "
+              f"deux passes.", flush=True)
+        manifest["quota_promotions_sature"] = True
+
     manifest["diagnostic_fusion"] = _diagnostic_fusion(manifest["tensors"])
+    if not opts.dry_run:
+        _verifier_formats_declares(manifest, writer.weight_map)
 
     if not opts.dry_run:
         writer.flush()
