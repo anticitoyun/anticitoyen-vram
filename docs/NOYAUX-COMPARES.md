@@ -103,7 +103,13 @@ deuxième décimale non.
 têtes groupées**, rien d'autre. Le parc n'a pas d'autre bf16 qui tienne sur la
 carte (57 et 44 Gio pour les suivants). Ce chiffre vaut pour cette famille.
 
-## Le TTFT : un coût fixe de 44 ms dans le forward de prefill
+## Le TTFT : ce que le prefill coûte vraiment
+
+> **Rectification.** La première version de cette section concluait à un « coût
+> fixe de 44 ms » dans le forward de prefill. **C'était un artefact de régime**,
+> corrigé plus bas : les deux mesures qui l'ont produit tournaient sur un
+> chargement où un MLP était exilé en RAM hôte. Le chiffre nominal est 25 ms
+> par appel, et c'est le plancher mémoire, pas un défaut.
 
 Mesuré le 9 septembre 2026, `Qwen2.5-Coder-14B-bf16-pur`, serveur lancé sous
 `py-spy` (`ptrace_scope = 1` interdit l'attachement à un processus existant),
@@ -167,3 +173,65 @@ quand `q_offset == 0` et `q_len == kv_len`** : le prefill standard prend donc
 bien le chemin rapide. Le défaut n'existe que **lorsque le cache de préfixe a
 servi quelque chose** (offset > 0) — cas réel, mais absent des mesures à
 prompts aléatoires. Piste, pas trouvaille.
+
+
+## Rectification : l'exil d'un MLP est non déterministe
+
+Le **même modèle sur la même carte avec le même code** donne deux régimes selon
+ce qui tournait juste avant :
+
+    un MLP exile en RAM hote   prefill d'1 jeton : 42,16 ms
+    aucun exil                 prefill d'1 jeton : 26,45 ms   (-37 %)
+
+`_reajuster_plan` décide selon la VRAM libre **au moment du chargement**. Un
+poids exilé traverse le PCIe à chaque pas **et** désactive les graphes CUDA des
+quarante-huit couches. Les deux mesures qui ont produit le « coût fixe de
+44 ms » sont tombées dans le mauvais régime — le message d'exil était à
+l'écran, il n'a pas été lu comme une invalidation.
+
+**Toute mesure qui ne contrôle pas l'exil est suspecte.** La courbe refuse
+désormais de rendre un chiffre s'il reste un poids en flux.
+
+### La courbe, en régime sain
+
+    jetons      1      4     16     64    128    256    512
+    forward  26,45  28,79  31,08  30,35  32,86  45,94  84,78 ms
+
+    cout par appel   24,97 ms       cout par jeton   0,1075 ms
+
+**Les 25 ms par appel sont le plancher mémoire** : lire 26,09 Gio de poids à
+1 122 Go/s effectifs. Ce n'est pas un défaut, et **llama.cpp les paie aussi** —
+aucun moteur ne fait un forward sans lire les poids.
+
+### L'écart réel : le coût par jeton
+
+    nous       171 jetons -> 43,35 ms, dont 25 de poids -> 18,4 ms
+                                                  0,1076 ms par jeton
+    llama.cpp  TTFT complet 33 ms, dont ~25 de poids -> ~8 ms pour TOUT
+                                                  ~0,047 ms par jeton au plus
+
+**Environ deux fois leur coût par jeton**, ce qui recoupe les TFLOP/s mesurés
+indépendamment (35,4 contre 78,4, facteur 2,2). C'est un défaut de **débit de
+calcul en prefill**, pas de latence.
+
+### Le surcoût du chemin prefill est nul
+
+Même chargement, un jeton par chaque chemin :
+
+    prefill  d'un jeton   41,98 ms
+    decodage d'un jeton   42,14 ms      ecart -0,16 ms
+
+Ils lisent les mêmes 26,09 Gio ; le chemin n'ajoute rien. **La piste « la boucle
+Python de `_prefill` coûte cinq fois le GEMM » était fausse** : elle comparait
+17,87 % (un englobant de profil) à 3,41 % (une feuille) — deux grandeurs qui ne
+se comparent pas.
+
+### La contention du GIL est réfutée
+
+Même TTFT, moteur au repos puis en plein décodage, douze mesures chacun :
+
+    repos    mediane 60,9 ms   charge   mediane 62,3 ms   ecart +1,4 ms
+
+Épreuve choisie **parce qu'elle ne dépend d'aucun profileur** : `py-spy` montre
+où le code *est*, pas où il *attend*, et `record` exclut les threads inactifs
+par défaut — un thread bloqué sur le GIL lui paraît inactif.
