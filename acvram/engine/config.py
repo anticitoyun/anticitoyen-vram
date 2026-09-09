@@ -61,7 +61,9 @@ class LayerSpec:
 # `stack_nvfp4_linears` ont divergé sur le biais jusqu'au 9/09/2026.
 _TYPES_AVEC_KV = frozenset({
     "full_attention", "sliding_attention", "attention", "parallel"})
-_TYPES_RECURRENTS = frozenset({"linear_attention"})
+_TYPES_RECURRENTS = frozenset({"linear_attention", "mamba", "conv"})
+# Ni cache KV ni état récurrent : ce sont des types de MLP, pas d'attention.
+_TYPES_SANS_ETAT = frozenset({"moe", "mlp"})
 
 
 @dataclass
@@ -225,10 +227,23 @@ class ModelSpec:
 
     @property
     def couches_recurrentes(self) -> int:
-        """Couches à attention linéaire, qui portent un état récurrent."""
+        """Couches qui portent un état récurrent — linéaire, SSM ou convolution."""
         if not self.layer_types:
             return 0
         return sum(1 for t in self.layer_types if t in _TYPES_RECURRENTS)
+
+    @property
+    def types_de_couche_inconnus(self) -> list[str]:
+        """Types présents que ni le budget KV ni la provision ne savent traiter.
+
+        Un type inconnu ne doit pas provisionner zéro EN SILENCE : c'est
+        exactement ainsi que l'état des couches `mamba` et `conv` est resté
+        hors budget, et le silence a valu un commit à reprendre. Une
+        architecture neuve doit se signaler d'elle-même, pas attendre qu'un
+        déficit de VRAM la révèle.
+        """
+        connus = _TYPES_AVEC_KV | _TYPES_RECURRENTS | _TYPES_SANS_ETAT
+        return sorted({t for t in (self.layer_types or []) if t not in connus})
 
     def kv_bytes_per_token(self, kv_bits: int = 8) -> int:
         """Octets de cache KV pour un jeton, sur les couches QUI EN ONT UN.
@@ -251,21 +266,60 @@ class ModelSpec:
         accident. Corriger `couches_avec_kv` sans provisionner ici déplacerait
         le défaut au lieu de le lever.
 
-        La formule suit `KDA.new_static`, qui est le chemin à formes fixes :
-        trois états de convolution de ``kernel - 1`` pas, plus la matrice
-        d'état ``[têtes, d, d]``, le tout en float32. Mesuré sur le parc :
-        2304 Mio à seize séquences sur un Qwen3.8-27B, contre 1854 Mio de
-        budget KV entier — ces modèles allouent déjà hors budget dès que la
-        concurrence monte.
+        Les formules suivent les `new_static` de chaque famille, qui sont les
+        chemins à formes fixes, et il y en a QUATRE — pas une :
+
+            kda.py      conv x3 + S[têtes, d, d]        `linear_attention`
+            gdn.py      conv    + S[1, nv, dk, dv]      `linear_attention`
+            mamba2.py   conv    + h[H, N, P]            `mamba`
+            lfm2.py     conv seule                      `conv`
+
+        KDA et GDN partagent le type `linear_attention`, `model_type` les
+        départage — mais leurs états coïncident sur le poste qui domine
+        (``nv·dk·dv`` contre ``têtes·d²``, égaux ici puisque dk = dv = d), et
+        la convolution de KDA majore celle de GDN. Une seule formule couvre
+        donc les deux, du bon côté.
+
+        Ne provisionner que `linear_attention`, comme le faisait la première
+        version, laissait onze modèles à découvert — dont `Nemotron-Nano-9B`
+        et ses 2,11 Gio d'état mamba à seize séquences, pour 1,68 Gio de
+        budget KV rendus : la correction y creusait un déficit au lieu de le
+        combler. Chercher `new_static` dans tout le moteur coûtait une
+        commande ; s'en tenir au fichier qu'on m'avait montré a coûté un
+        commit.
+
+        Mesuré sur le parc : 2304 Mio à seize séquences sur un Qwen3.8-27B,
+        contre 1854 Mio de budget KV entier — ces modèles allouaient déjà hors
+        budget dès que la concurrence monte.
         """
-        n = self.couches_recurrentes
-        if not n or not self.linear_num_value_heads:
+        if not self.layer_types:
             return 0
-        nh, d = self.linear_num_value_heads, self.linear_value_head_dim
-        d_inner = nh * d
-        k1 = max(0, self.linear_conv_kernel_dim - 1)
-        par_couche = (3 * d_inner * k1 + nh * d * d) * 4
-        return par_couche * n * max(1, max_batch)
+        seq = max(1, max_batch)
+        total = 0
+
+        n_lin = sum(1 for t in self.layer_types if t == "linear_attention")
+        if n_lin and self.linear_num_value_heads:
+            nh, d = self.linear_num_value_heads, self.linear_value_head_dim
+            k1 = max(0, self.linear_conv_kernel_dim - 1)
+            total += (3 * nh * d * k1 + nh * d * d) * 4 * n_lin
+
+        n_mamba = sum(1 for t in self.layer_types if t == "mamba")
+        if n_mamba and self.mamba_num_heads:
+            H, P = self.mamba_num_heads, self.mamba_head_dim
+            N, G = self.mamba_state_size, self.mamba_n_groups
+            k1 = max(0, self.mamba_conv_kernel - 1)
+            conv_dim = H * P + 2 * G * N
+            total += (conv_dim * k1 + H * N * P) * 4 * n_mamba
+
+        n_conv = sum(1 for t in self.layer_types if t == "conv")
+        if n_conv:
+            # LFM2 : convolution courte seule, sur `self.dim` canaux, que la
+            # configuration n'expose pas séparément — `hidden_size` en est la
+            # borne, et majorer une provision est le bon sens de l'erreur.
+            k1 = max(0, self.mamba_conv_kernel - 1)
+            total += self.hidden_size * k1 * 4 * n_conv
+
+        return total * seq
 
     def summary(self) -> str:
         b = self.total_params / 1e9

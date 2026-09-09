@@ -62,10 +62,17 @@ def test_sliding_attention_a_un_cache():
 
 def test_moe_et_mlp_ne_sont_pas_des_couches_d_attention():
     """Second piège : compter « tout sauf les linéaires » donnait 29 couches à
-    cache sur Nemotron là où il y en a 6."""
+    cache sur Nemotron là où il y en a 6.
+
+    La seconde assertion disait « mamba n'est pas linear_attention » et
+    passait : elle encodait le défaut au lieu de le prévenir. Un `mamba` ne
+    porte pas de cache KV, mais il porte bien un état récurrent — les deux
+    questions sont distinctes et la première ne répond pas à la seconde.
+    """
     s = _spec(layer_types=(["mamba"] * 20 + ["moe"] * 6 + ["full_attention"] * 6))
-    assert s.couches_avec_kv == 6
-    assert s.couches_recurrentes == 0, "mamba n'est pas linear_attention"
+    assert s.couches_avec_kv == 6, "seules les 6 full_attention ont un cache"
+    assert s.couches_recurrentes == 20, "les 20 mamba portent un etat"
+    assert not any(s.couche_a_kv(i) for i in range(20))
 
 
 def test_l_etat_recurrent_suit_new_static_et_la_concurrence():
@@ -89,3 +96,35 @@ def test_la_provision_depasse_le_budget_kv_des_27b():
               linear_conv_kernel_dim=4)
     assert s.etat_recurrent_bytes(16) / 2**20 > 1854, \
         "moins que le budget KV d'un 27B : la mesure du 9/09 disait le contraire"
+
+
+def test_mamba_et_conv_sont_provisionnes():
+    """Onze modèles du parc étaient à découvert : la première version ne
+    provisionnait que `linear_attention`, alors que quatre familles portent un
+    état. `Nemotron-Nano-9B` y perdait 2,11 Gio pour 1,68 Gio de KV rendus."""
+    s = _spec(num_layers=56, layer_types=(["mamba"] * 27 + ["mlp"] * 25
+                                          + ["full_attention"] * 4),
+              mamba_num_heads=128, mamba_head_dim=80, mamba_state_size=128,
+              mamba_n_groups=8, mamba_conv_kernel=4)
+    assert s.couches_avec_kv == 4
+    assert s.couches_recurrentes == 27
+    assert s.etat_recurrent_bytes(16) > 2 * 2**30, \
+        "l'etat mamba de Nemotron-Nano-9B vaut 2,11 Gio a seize sequences"
+
+
+def test_un_type_inconnu_se_signale():
+    """Provisionner zéro en silence est le défaut qui a valu un commit à
+    reprendre : une architecture neuve doit se dénoncer."""
+    assert _spec(layer_types=["full_attention"] * 32).types_de_couche_inconnus == []
+    assert _spec(layer_types=["mamba", "retention", "full_attention"]
+                 ).types_de_couche_inconnus == ["retention"]
+
+
+def test_les_quadratiques_restent_a_zero_apres_l_ajout():
+    """Contrôle : ajouter mamba et conv ne doit pas faire déborder la
+    détection sur les 61 modèles purement quadratiques du parc."""
+    for lt in (None, ["full_attention"] * 32, ["sliding_attention"] * 32,
+               ["full_attention"] * 16 + ["moe"] * 16):
+        s = _spec(layer_types=lt) if lt else _spec()
+        assert s.etat_recurrent_bytes(16) == 0, f"provision non nulle sur {lt}"
+        assert s.couches_recurrentes == 0

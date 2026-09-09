@@ -403,6 +403,12 @@ def plan_placement(spec: ModelSpec, rig: Rig,
     # Corriger cette surestimation sans reserver ici deplacerait le defaut.
     # Sur les dix-sept Qwen3.x-27B du parc, 2304 Mio a seize sequences contre
     # 1854 Mio de budget KV entier : ils allouaient deja hors budget.
+    inconnus = spec.types_de_couche_inconnus
+    if inconnus:
+        plan.warnings.append(
+            f"types de couche non budgetes : {', '.join(inconnus)} — leur "
+            f"etat eventuel n'est provisionne NULLE PART. Provisionner zero "
+            f"en silence est le defaut corrige le 9/09/2026 sur mamba et conv.")
     etat_rec = spec.etat_recurrent_bytes(opts.max_concurrent_seqs)
     plan.etat_recurrent_bytes = etat_rec
     if gpu_tiers and etat_rec:
