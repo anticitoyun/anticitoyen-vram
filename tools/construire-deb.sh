@@ -22,11 +22,27 @@ cp -r acvram pyproject.toml install.sh README.md LICENSE "$PKG/usr/share/acvram/
 # et FEUILLE-DE-ROUTE.md y porte le chemin et le nom d'utilisateur de la
 # machine de developpement. Seuls les documents utiles a qui installe sont
 # copies, et jamais un .tsv ni un .txt de mesure.
-for d in docs/*.md; do
-    case "$(basename "$d")" in
-        FEUILLE-DE-ROUTE.md|REPRISE.md|CHANTIER-*) continue ;;
-    esac
-    install -m 644 "$d" "$PKG/usr/share/doc/acvram/"
+# LISTE BLANCHE, jamais une liste noire. La liste noire precedente
+# (FEUILLE-DE-ROUTE, REPRISE, CHANTIER-*) laissait passer les documents de
+# TRAVAIL : PROTOCOLES-EN-ATTENTE.md porte trois noms de sessions internes,
+# PREDICTION-CAMPAGNE-9SEPT.md en porte un, FUSIONS-LIBRES-PARC.md cite le
+# chemin du parc de modeles. Rien de secret, mais rien qui concerne qui
+# installe le paquet — et une liste noire oublie toujours le document ecrit
+# apres elle.
+#
+# N'ajouter ici qu'un document destine a L'UTILISATEUR du paquet, pas a nous.
+DOCS_PUBLIQUES="
+ARCHITECTURE.md
+MATERIEL.md
+FORMAT-3BITS.md
+PROTOCOLE-ENERGIE.md
+PROTOCOLE-PERPLEXITE.md
+REFERENCES.md
+BIBLIOGRAPHIE.md
+"
+for nom in $DOCS_PUBLIQUES; do
+    [ -f "docs/$nom" ] || continue
+    install -m 644 "docs/$nom" "$PKG/usr/share/doc/acvram/"
 done
 find "$PKG" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 

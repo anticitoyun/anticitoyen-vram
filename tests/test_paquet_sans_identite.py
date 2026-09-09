@@ -55,11 +55,30 @@ def test_le_detecteur_sait_tirer():
         assert not SUSPECTS.search(innocent), f"faux positif sur {innocent}"
 
 
-def test_le_paquet_ne_copie_pas_les_mesures_internes():
-    """docs/ embarquait 8 fichiers de mesure — comparatifs, rebancs, releves
-    de repetabilite. Le script ne doit copier que des .md, et jamais la
-    feuille de route qui porte le chemin de la machine."""
+def test_le_paquet_copie_les_docs_par_LISTE_BLANCHE():
+    """Une liste noire oublie toujours le document ecrit apres elle.
+    La precedente laissait passer PROTOCOLES-EN-ATTENTE.md (trois noms de
+    sessions internes), PREDICTION-CAMPAGNE-9SEPT.md (un) et
+    FUSIONS-LIBRES-PARC.md (le chemin du parc)."""
     src = (RACINE / "tools" / "construire-deb.sh").read_text()
     assert "cp -r docs" not in src, "docs/ est encore copie en entier"
-    assert "docs/*.md" in src, "la copie selective des .md a disparu"
-    assert "FEUILLE-DE-ROUTE.md" in src, "la feuille de route n est plus exclue"
+    assert "DOCS_PUBLIQUES" in src, "la liste blanche a disparu"
+    assert "docs/*.md" not in src, "un glob copie encore tous les .md"
+
+
+def test_aucun_nom_de_session_dans_les_docs_publiees():
+    """Les noms de travail des sessions ne concernent pas qui installe."""
+    import re
+    src = (RACINE / "tools" / "construire-deb.sh").read_text()
+    bloc = re.search(r'DOCS_PUBLIQUES="\n(.*?)"', src, re.S)
+    assert bloc, "liste blanche illisible"
+    motif = re.compile(r"poste2|Oc[eé]ane|poste4|poste8|poste3|anticitoyenlm")
+    fautes = []
+    for nom in bloc.group(1).split():
+        f = RACINE / "docs" / nom
+        if not f.is_file():
+            continue
+        for n, ligne in enumerate(f.read_text(errors="ignore").splitlines(), 1):
+            if motif.search(ligne):
+                fautes.append(f"{nom}:{n}")
+    assert not fautes, "noms internes dans un document publie : " + ", ".join(fautes)
