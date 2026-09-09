@@ -109,9 +109,12 @@ def test_refus_quand_la_generation_s_interrompt(monkeypatch):
     """
     from acvram import bench as b
 
+    etat = {"p": 0, "d": 0.0, "n": 0}
+
     class _Stats:
         def to_dict(self):
-            return {"decode_seconds": 1.0, "decode_tokens": 1}
+            return {"decode_seconds": etat["d"], "decode_tokens": etat["n"],
+                    "prefill_tokens": etat["p"], "cached_prompt_tokens": 0}
 
     class _Eng:
         stats = _Stats()
@@ -121,6 +124,11 @@ def test_refus_quand_la_generation_s_interrompt(monkeypatch):
             pass
 
         def generate(self, *a, **k):
+            # L'invite est prefillee EN ENTIER : seule la generation
+            # s'interrompt, sans quoi l'autre garde parlerait a sa place.
+            etat["p"] += 128
+            etat["n"] += 1
+            etat["d"] += 0.001
             yield 1                     # UN seul jeton, puis EOS
 
     class _Plan:
@@ -129,11 +137,61 @@ def test_refus_quand_la_generation_s_interrompt(monkeypatch):
     class _Charge:
         plan = _Plan()
         model = type("M", (), {"nbytes": 2**30})()
+        spec = type("S", (), {"vocab_size": 32000})()
 
     monkeypatch.setattr("acvram.engine.loader.load_model",
                         lambda *a, **k: _Charge())
     monkeypatch.setattr("acvram.engine.runner.Engine", _Eng)
-    d = b.bench_decode("/inexistant", n_tokens=256)
+    d = b.bench_decode("/inexistant", n_tokens=256, prompt_len=128)
     assert "refus" in d, "un debit calcule sur 1 jeton a ete publie"
     assert d["generated"] == 1
+    assert "decode_tok_s" not in d
+
+
+def test_refus_quand_le_cache_de_prefixe_sert_l_invite(monkeypatch):
+    """Une invite repetee fait prefiller 16 jetons sur 512.
+
+    Le debit publie devient celui du reliquat, insensible a la taille du
+    prompt — c'est ainsi qu'un « plateau de prefill a 560 j/s » a ete mesure
+    et rapporte, alors que le vrai debit vaut 3 485 j/s a 512 jetons et 6 049
+    a 2048. Le moteur exposait pourtant `cached_prompt_tokens` depuis
+    toujours : la source pouvait parler, personne ne l'interrogeait.
+    """
+    from acvram import bench as b
+
+    etat = {"p": 0, "c": 0, "d": 0.0, "n": 0}
+
+    class _Stats:
+        def to_dict(self):
+            return {"decode_seconds": etat["d"], "decode_tokens": etat["n"],
+                    "prefill_tokens": etat["p"],
+                    "cached_prompt_tokens": etat["c"]}
+
+    class _Eng:
+        stats = _Stats()
+        graphs = None
+
+        def __init__(self, *a, **k):
+            pass
+
+        def generate(self, *a, **k):
+            etat["p"] += 16          # 16 jetons prefilles...
+            etat["c"] += 112         # ...112 servis par le cache
+            for _ in range(256):
+                etat["n"] += 1
+                etat["d"] += 0.001
+                yield 1
+
+    class _Charge:
+        plan = type("P", (), {"est_decode_tok_s": 687.6})()
+        model = type("M", (), {"nbytes": 2 ** 30})()
+        spec = type("S", (), {"vocab_size": 32000})()
+
+    monkeypatch.setattr("acvram.engine.loader.load_model",
+                        lambda *a, **k: _Charge())
+    monkeypatch.setattr("acvram.engine.runner.Engine", _Eng)
+    d = b.bench_decode("/inexistant", n_tokens=256, prompt_len=128)
+    assert "refus" in d, "un debit a ete publie sur un prefill de 16/128"
+    assert d["prefill_tokens_reels"] == 16
+    assert d["prefill_tokens_caches"] == 112
     assert "decode_tok_s" not in d

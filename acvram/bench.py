@@ -364,29 +364,49 @@ def bench_decode(model_dir: str, n_tokens: int = 256,
 
     engine = Engine(loaded, None, max_batch_size=1,
                     max_model_len=contexte)
-    prompt = [1] * prompt_len
-    params = SamplingParams(temperature=0.0, max_tokens=n_tokens)
 
-    def un_passage():
+    # UNE INVITE DIFFERENTE PAR ITERATION. Repeter la meme fait servir l'invite
+    # par le cache de prefixe des le second passage : le banc ne prefille alors
+    # plus rien, et un comparatif voit la branche B consommer le cache que la
+    # branche A vient de peupler — un ecart en faveur de la seconde, quel que
+    # soit le correctif mesure. C'est le `git stash` transpose au cache.
+    vocab = getattr(getattr(loaded, "spec", None), "vocab_size", 0) or 32000
+
+    def _invite(k: int) -> list:
+        return [(k * 104729 + i * 7919) % (vocab - 100) + 10
+                for i in range(prompt_len)]
+
+    params = SamplingParams(temperature=0.0, max_tokens=n_tokens)
+    _traite = {"prefill": 0, "cache": 0}
+
+    def un_passage(k: int):
         avant = engine.stats.to_dict()
         d0 = avant.get("decode_seconds", 0.0) or 0.0
         n0 = avant.get("decode_tokens", 0) or 0
+        p0 = avant.get("prefill_tokens", 0) or 0
+        c0 = avant.get("cached_prompt_tokens", 0) or 0
         mur0 = time.time()
-        produits = sum(1 for _ in engine.generate(prompt, params))
+        produits = sum(1 for _ in engine.generate(_invite(k), params))
         mur = time.time() - mur0
         apres = engine.stats.to_dict()
         dt = (apres.get("decode_seconds", 0.0) or 0.0) - d0
         dn = (apres.get("decode_tokens", 0) or 0) - n0
+        # CE QUI A ETE REELLEMENT TRAITE, a cote de ce qui a ete demande.
+        # Une invite repetee fait compter 16 jetons prefilles sur 512 : le
+        # debit publie devient celui d'un prefill de 16 jetons, insensible a
+        # la taille du prompt. Une seule ligne le montre.
+        _traite["prefill"] = (apres.get("prefill_tokens", 0) or 0) - p0
+        _traite["cache"] = (apres.get("cached_prompt_tokens", 0) or 0) - c0
         # Le défaut par défaut est le refus : un compteur qui ne bouge pas
         # n'est pas une mesure de zéro, c'est une source qui ne parle pas.
         taux = dn / dt if dt > 0 and dn > 0 else None
         return taux, produits, mur
 
-    for _ in range(chauffe):
-        un_passage()
+    for k in range(chauffe):
+        un_passage(k)
     taux, murs, produits = [], [], 0
-    for _ in range(repetitions):
-        t, p, mur = un_passage()
+    for k in range(repetitions):
+        t, p, mur = un_passage(chauffe + k)
         if t is not None:
             taux.append(t)
         murs.append(mur)
@@ -400,6 +420,21 @@ def bench_decode(model_dir: str, n_tokens: int = 256,
     # pas a une erreur, il ressemble a un modele lent : il a servi de cause a
     # traiter pendant des jours. On ne publie pas un debit calcule sur autre
     # chose que ce qui a ete demande.
+    # Un prefill qui ne traite qu'une fraction de l'invite ne mesure pas ce
+    # qu'on croit : le debit devient celui du reliquat. Le seuil est large —
+    # on ne refuse que l'ecart massif, pas quelques jetons de bloc.
+    if _traite["prefill"] < prompt_len // 2:
+        return {
+            "model": model_dir,
+            "refus": (f"prefill de {_traite['prefill']} jetons sur "
+                      f"{prompt_len} demandes ({_traite['cache']} servis par "
+                      f"le cache de prefixe) : le debit porterait sur le "
+                      f"reliquat, pas sur l'invite."),
+            "load_seconds": round(load_s, 1),
+            "prefill_tokens_reels": _traite["prefill"],
+            "prefill_tokens_caches": _traite["cache"],
+        }
+
     if produits < n_tokens:
         return {
             "model": model_dir,
@@ -442,6 +477,9 @@ def bench_decode(model_dir: str, n_tokens: int = 256,
         "vram_total_bytes": total,
         "prompt_len": prompt_len,
         "generated": produits,
+        "prefill_tokens_demandes": prompt_len,
+        "prefill_tokens_reels": _traite["prefill"],
+        "prefill_tokens_caches": _traite["cache"],
         "warmups": chauffe,
         "repetitions": repetitions,
         "wall_seconds": round(sum(murs) / len(murs), 2) if murs else 0.0,
@@ -573,6 +611,12 @@ def run_benchmarks(args: argparse.Namespace) -> int:
         if d.get("decode_source", "").startswith("temps de bout"):
             print(f"  ATTENTION     {d['decode_source']} : ce chiffre inclut "
                   f"le prefill et la capture des graphes")
+        # Ce qui a ete REELLEMENT traite, a cote de ce qui a ete demande.
+        if d.get("prefill_tokens_demandes"):
+            print(f"  invite        {d['prefill_tokens_reels']}/"
+                  f"{d['prefill_tokens_demandes']} jetons prefilles"
+                  + (f", {d['prefill_tokens_caches']} servis par le cache"
+                     if d.get("prefill_tokens_caches") else ""))
         print(f"  chargement    {d['load_seconds']} s")
         # Le banc laissait les deux cartes visibles quand le serveur les epingle
         # depuis e5cafc0 : le planificateur recrutait la seconde et le debit
