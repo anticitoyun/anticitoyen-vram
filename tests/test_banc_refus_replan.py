@@ -68,3 +68,31 @@ def test_le_refus_se_laisse_forcer_explicitement(monkeypatch):
 def test_la_sonde_de_cartes_ne_plante_jamais():
     """Une sonde qui leve fait echouer la mesure qu'elle devait proteger."""
     assert bench._plusieurs_cartes() in (True, False)
+
+
+def test_l_exil_force_invalide_l_estimation():
+    """`_forcer_exil` deplace des MLP APRES que l'estimation a ete posee.
+
+    Le plan annoncait 687,6 jetons/s pour un debit reel de 24,0 a seize
+    couches exilees — un facteur 28,7. L'estimateur, lui, voit le placement
+    (624,8 -> 30,1 quand la VRAM simulee tombe a 4,8 Gio) : c'est bien
+    l'estimation figee qui ment, pas le modele de cout.
+    """
+    from acvram.engine.loader import _forcer_exil
+
+    class _Couche:
+        def __init__(self):
+            self.mlp_storage = "gpu"
+            self.mlp_exec = "gpu"
+
+    class _Plan:
+        def __init__(self):
+            self.layers = [_Couche() for _ in range(8)]
+            self.est_decode_tok_s = 687.6
+            self.est_bytes_per_token = 1_745_879_040
+
+    p = _Plan()
+    _forcer_exil(p, 4)
+    assert sum(1 for l in p.layers if l.mlp_storage == "cpu") == 4
+    assert p.est_decode_tok_s == 0.0, "un debit prevu perime reste lisible"
+    assert getattr(p, "estimation_perimee", None), "la raison doit etre dite"

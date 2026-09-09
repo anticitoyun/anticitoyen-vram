@@ -1261,6 +1261,22 @@ def _forcer_exil(plan: Plan, n_voulu: int) -> None:
             l.mlp_exec = "gpu"
     print(f"[acvram] mesure : {n_voulu} couches à perceptron exilé "
           f"(minimum imposé par la capacité : {len(exilees)})", flush=True)
+    # L'estimation a été calculée AVANT ce déplacement et ne le reflète plus.
+    # Mesuré sur Agents-A1-4B : le plan continuait d'annoncer 687,6 jetons/s
+    # pour un débit réel de 24,0 à seize couches exilées — un facteur 28,7.
+    # Le planificateur, lui, VOIT le placement (624,8 -> 30,1 quand la VRAM
+    # simulée tombe à 4,8 Gio) : le défaut est ici, pas dans l'estimateur.
+    # « Rendre None quand on ne sait pas vaut mieux qu'un chiffre crédible :
+    # celui-ci servirait à choisir un plan » (tiering.py) — on applique la
+    # règle du fichier voisin plutôt que de garder un nombre faux.
+    plan.est_decode_tok_s = 0.0
+    plan.est_bytes_per_token = 0
+    try:
+        plan.estimation_perimee = (
+            f"exil force a {n_voulu} couches apres l'estimation ; "
+            f"le debit prevu ne vaut plus rien pour ce plan")
+    except Exception:                        # noqa: BLE001 — une trace ne plante pas
+        pass
 
 
 def _exil_demande(plan: Plan) -> None:
