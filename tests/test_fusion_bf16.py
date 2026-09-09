@@ -126,3 +126,18 @@ def test_swiglu_sur_valeurs_extremes():
     gu = torch.cat([g, u], dim=-1).contiguous()
     attendu = torch.nn.functional.silu(g) * u
     assert torch.equal(ext.swiglu_bf16(gu), attendu)
+
+
+@pytest.mark.skipif(_ext_swiglu() is None,
+                    reason="extension CUDA sans swiglu_bf16 (ou pas de GPU)")
+@pytest.mark.parametrize("lot", [1, 8, 88, 171, 512])
+def test_swiglu_sur_lot_large(lot):
+    """Le noyau a été écrit et éprouvé pour le décodage — une ligne à la fois.
+    Avant de l'employer au préremplissage il faut le voir juste sur un lot, et
+    pas seulement supposer qu'il travaille par élément."""
+    ext = _ext_swiglu()
+    g = torch.randn(lot, 256, device="cuda").to(torch.bfloat16)
+    u = torch.randn(lot, 256, device="cuda").to(torch.bfloat16)
+    gu = torch.cat([g, u], dim=-1).contiguous()
+    attendu = torch.nn.functional.silu(g) * u
+    assert torch.equal(ext.swiglu_bf16(gu), attendu)
