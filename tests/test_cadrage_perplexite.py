@@ -39,3 +39,36 @@ def test_le_defaut_reste_zero_et_l_aide_le_dit():
     assert "default=0" in bloc, "le defaut a change : les mesures d avant ne sont plus comparables"
     assert "NON COMPARABLE" in bloc, "l aide ne dit pas que 0 n est pas comparable"
     assert "256" in bloc, "l aide ne nomme pas la valeur du protocole"
+
+
+# --- plusieurs modeles dans un processus -----------------------------------
+
+def test_plusieurs_modeles_dans_un_processus_sont_signales():
+    """Le 9/09 : une barriere de qualite a mesure un nvfp4 puis charge un
+    bf16 par-dessus — 32 MLP de plus en RAM hote, puis OutOfMemoryError avec
+    111,88 MiB libres sur 31,36 Gio. Le second modele etait mesure en regime
+    degrade, et une perplexite prise sur un plan degrade n est comparable a
+    rien."""
+    src = inspect.getsource(cli.cmd_eval)
+    assert "len(args.models) > 1" in src, "aucune garde sur le multi-modeles"
+    i = src.index("len(args.models) > 1")
+    bloc = src[i:i + 400]
+    assert "un appel par modele" in bloc, \
+        "le message ne dit pas quoi faire a la place"
+
+
+def test_la_memoire_est_liberee_entre_deux_modeles():
+    """Liberer ne garantit pas un plan identique — le cache de l allocateur
+    et la fragmentation survivent — mais ne pas liberer garantit l inverse."""
+    src = inspect.getsource(cli.cmd_eval)
+    assert "empty_cache" in src, "la VRAM n est pas rendue entre deux modeles"
+    assert "gc.collect" in src, "les references Python ne sont pas laches"
+    # la liberation doit venir APRES la mesure, pas avant
+    assert src.index("results.append") < src.index("empty_cache")
+
+
+def test_l_avertissement_ne_se_declenche_pas_sur_un_seul_modele():
+    """Une garde qui crie toujours cesse d etre lue."""
+    src = inspect.getsource(cli.cmd_eval)
+    assert "if len(args.models) > 1:" in src, \
+        "la garde doit etre conditionnelle, pas systematique"

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import sys
@@ -463,8 +464,25 @@ def cmd_eval(args: argparse.Namespace) -> int:
                   "un contexte quasi vide. Ce chiffre N'EST PAS comparable a "
                   "une mesure cadree — le protocole impose --min-context 256."),
               flush=True)
+    # Les modeles se chargeaient l'un apres l'autre dans le MEME processus sans
+    # que le precedent soit libere. Le 9/09/2026, une barriere de qualite a
+    # mesure un nvfp4 puis charge un bf16 par-dessus :
+    #   plan reajuste : 32 MLP de plus en RAM hote (15,9 Gio pour 18,1 libres)
+    #   OutOfMemoryError : 111,88 MiB libres sur 31,36 Gio
+    # Le second modele est donc mesure EN REGIME DEGRADE, ou pas du tout — et
+    # une perplexite prise sur un plan degrade n'est comparable a rien.
+    #
+    # Liberer entre deux ne suffit pas a garantir un plan identique : le
+    # cache de l'allocateur et la fragmentation survivent. Un modele par
+    # PROCESSUS reste la seule mesure propre, et c'est ce que dit
+    # l'avertissement.
+    if len(args.models) > 1:
+        print(red(f"  {len(args.models)} modeles dans un seul processus : le "
+                  f"plan du second depend de ce que le premier a laisse. "
+                  f"Pour une mesure comparable, un appel par modele."),
+              flush=True)
     results = []
-    for path in args.models:
+    for i, path in enumerate(args.models):
         def prog(done: int, total: int, _p: str = path) -> None:
             _progress(f"  {os.path.basename(_p)}: window {done}/{total}")
         results.append(perplexity(
@@ -472,6 +490,11 @@ def cmd_eval(args: argparse.Namespace) -> int:
             max_tokens=args.max_tokens, device=args.device, progress=prog,
             min_context=args.min_context))
         _progress_done()
+        if i + 1 < len(args.models):
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
     results.sort(key=lambda r: r.perplexity)
     if args.json:
         print(json.dumps([r.to_dict() for r in results], indent=2))
