@@ -71,8 +71,22 @@ def _arch_flags(nvcc_ver: tuple[int, int] | None = None) -> list[str]:
         archs = {(8, 6), (12, 0)}
     if nvcc_ver is None:
         nvcc_ver = _nvcc_version(_nvcc_path())
-    family = (nvcc_ver >= _MIN_CUDA_FOR_FAMILY
-              and os.environ.get("ACVRAM_ARCH_FAMILY", "1") != "0")
+    demande = os.environ.get("ACVRAM_ARCH_FAMILY", "1") != "0"
+    family = nvcc_ver >= _MIN_CUDA_FOR_FAMILY and demande
+    if demande and not family and any(major >= 10 for major, _ in archs):
+        # Sans la forme famille, la conversion E2M1 redevient une émulation de
+        # vingt-cinq instructions par paire de poids — et rien ne le disait.
+        # Le 9/09/2026 nous avons cru cette perte réelle pendant une heure : le
+        # binaire était bon, mais aucun message n'aurait signalé qu'il ne
+        # l'était pas. La marge est d'UNE version — le seuil est 12.9 et le
+        # toolkit du virtualenv fournit 13.0 ; qu'il disparaisse et la perte
+        # revient en silence.
+        warnings.warn(
+            f"FP4 materiel indisponible : nvcc {nvcc_ver[0]}.{nvcc_ver[1]} < "
+            f"{_MIN_CUDA_FOR_FAMILY[0]}.{_MIN_CUDA_FOR_FAMILY[1]}, donc "
+            f"sm_120f n'est pas demande et la conversion E2M1 retombe sur "
+            f"vingt-cinq instructions par paire de poids au lieu d'une. "
+            f"Posez ACVRAM_CUDA_HOME sur un toolkit 12.9 ou plus recent.")
     flags: list[str] = []
     for major, minor in sorted(archs):
         cc = f"{major}{minor}"
