@@ -102,16 +102,36 @@ class GraphRunner:
         self._pool = None
         self.paged_ok = False
         self.hybrid_layers: list = []
-        self.enabled = self._eligible()
         self.replays = 0
         self.captures = 0
         self._last_key: Optional[tuple[int, int]] = None
+        # Posée AVANT _eligible, qui la remplit : l'initialiser après
+        # l'effacerait à chaque fois, et le message aurait annoncé
+        # « raison non nommée » pour tous les cas nommés.
+        self.raison = ""
+        self.enabled = self._eligible()
+        if not self.enabled and not os.environ.get("ACVRAM_GRAPHES_MUETS"):
+            print(f"[acvram] graphes CUDA désactivés : "
+                  f"{self.raison or 'raison non nommée'}", flush=True)
 
     # -- éligibilité -----------------------------------------------------
     def _eligible(self) -> bool:
+        """Vrai si les graphes sont capturables, et ``self.raison`` dit pourquoi
+        pas sinon.
+
+        Un refus n'annonçait rien. Sur un hybride cela coûte 11,9 % de débit
+        (mesuré le 9 septembre 2026 : 44,28 contre 49,53 pas/s) et le moteur
+        servait sans qu'aucune ligne ne le signale — le banc mesurait un moteur
+        diminué en croyant mesurer le moteur. Un exil d'un seul MLP de 0,51 Gio
+        suffit à faire basculer les quarante couches. La raison est donc
+        conservée et affichée : une désactivation silencieuse se lit comme une
+        absence de problème.
+        """
         if os.environ.get("ACVRAM_DISABLE_CUDA_GRAPHS"):
+            self.raison = "demandé par ACVRAM_DISABLE_CUDA_GRAPHS"
             return False
         if not torch.cuda.is_available():
+            self.raison = "pas de GPU"
             return False
         m = self.model
         # Hybrides à états (GDN/KDA/MLA) : capturés par couche via des
@@ -121,12 +141,15 @@ class GraphRunner:
         if self.hybrid_layers and any(
                 not hasattr(l.linear_attn, "decode_static")
                 for l in self.hybrid_layers):
+            self.raison = "couche hybride sans chemin à formes fixes"
             return False
         devs = {l.device for l in m.layers} | {l.mlp_device for l in m.layers}
         devs.add(m.norm.weight.device)
         head = getattr(m.lm_head.qweight, "qweight", None)
         devs.add(head.device if head is not None else m.norm.weight.device)
         if len(devs) != 1 or next(iter(devs)).type != "cuda":
+            self.raison = ("modèle réparti sur "
+                           + ", ".join(sorted(str(d) for d in devs)))
             return False                     # pipeline multi-appareils : eager
         for mod in m.modules():
             if isinstance(mod, MoEBlock):
@@ -140,12 +163,20 @@ class GraphRunner:
                         mod._stack_state = ("oui" if mod._try_build_stacks()
                                             else "non")
                 if mod._stack_state != "oui":
+                    self.raison = "pile d'experts hétérogène"
                     return False             # pile heterogene : eager
             if isinstance(mod, QuantLinear) and mod.streamed is not None:
+                # Le cas le plus couteux et le moins visible : il suffit d'un
+                # poids exile en RAM hote pour que TOUT le modele passe en
+                # eager. On nomme lequel.
+                self.raison = (f"poids en flux depuis la RAM hôte "
+                               f"({self._nom_du_module(mod)}) — un seul suffit "
+                               f"à désactiver les graphes de tout le modèle")
                 return False                 # les adresses changent en vol
         pleines = [i for i, l in enumerate(m.layers)
                    if getattr(l, "self_attn", None) is not None]
         if any(i not in m.caches for i in pleines):
+            self.raison = "couche pleine sans cache KV"
             return False
         if any(m.caches[i].k.device != next(iter(devs)) for i in pleines):
             return False
@@ -158,6 +189,12 @@ class GraphRunner:
                                  for i in pleines)
                          and kernels.get_extension() is not None)
         return True
+
+    def _nom_du_module(self, cible) -> str:
+        for nom, mod in self.model.named_modules():
+            if mod is cible:
+                return nom
+        return "module inconnu"
 
     # -- exécution -------------------------------------------------------
     def run(self, batch: ForwardBatch) -> Optional[torch.Tensor]:

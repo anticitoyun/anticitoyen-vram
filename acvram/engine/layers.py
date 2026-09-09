@@ -1025,18 +1025,54 @@ def stack_plain_linears(lins: list) -> Optional["QuantLinear"]:
     biais = [l.bias for l in lins]
     if any(b is not None for b in biais) and any(b is None for b in biais):
         return None
-    plat = torch.cat([t.weight for t in ts]).contiguous()
-    pbiais = None
-    if biais[0] is not None:
-        pbiais = torch.cat([b for b in biais]).contiguous()
+    # ORDRE DES ALLOCATIONS : liberer AVANT d'allouer, pas l'inverse.
+    #
+    # `torch.cat` alloue le tenseur concatene pendant que les deux sources
+    # vivent encore : 0,355 Gio de pic par fusion, 95 fois sur un 14B. Les
+    # blocs liberes ensuite retombent dans le cache de l'allocateur, entrelaces
+    # avec des blocs vivants, donc irrecuperables par `empty_cache` -- 1,28 Gio
+    # de reserve non alloue restaient apres purge, et le banc, qui dimensionne
+    # ses caches plus largement que le chargement nu, tombait en OOM sur une
+    # demande de 2 Mio.
+    #
+    # On passe donc par la RAM hote pour les gros tenseurs : descendre, liberer
+    # la VRAM, allouer le concatene, remonter. Le pic VRAM devient NUL -- le
+    # bloc libere est exactement celui que l'allocateur reutilise -- au prix
+    # d'un aller-retour PCIe au chargement. Les petits (q/k/v) passent par
+    # `cat` : leur pic ne fragmente pas et le transfert coute plus qu'il ne
+    # rapporte.
+    SEUIL_HOTE = 64 * 2 ** 20
+    octets = sum(t.weight.numel() * t.weight.element_size() for t in ts)
+
+    def _concatener(tenseurs):
+        if octets < SEUIL_HOTE or not tenseurs[0].is_cuda:
+            return torch.cat(tenseurs)
+        hote = [x.to("cpu", copy=True) for x in tenseurs]
+        dev, dt = tenseurs[0].device, tenseurs[0].dtype
+        formes = [x.shape for x in tenseurs]
+        del tenseurs[:]                      # plus aucune reference VRAM ici
+        for l, t in zip(lins, ts):
+            t.weight = None
+            l.qweight = None
+        plein = torch.empty((sum(f[0] for f in formes),) + tuple(formes[0][1:]),
+                            dtype=dt, device=dev)
+        o = 0
+        for x, f in zip(hote, formes):
+            plein.narrow(0, o, f[0]).copy_(x)
+            o += f[0]
+        return plein
+
+    poids_src = [t.weight for t in ts]
+    formes_src = [(t.weight.shape[0], t.shape, t.format) for t in ts]
+    plat = _concatener(poids_src)
+    pbiais = torch.cat(biais) if biais[0] is not None else None
     off = 0
-    for l, t in zip(lins, ts):
-        n = t.weight.shape[0]
-        l.qweight = PlainTensor(plat.narrow(0, off, n), t.shape, t.format)
+    for l, (n, forme, fmt) in zip(lins, formes_src):
+        l.qweight = PlainTensor(plat.narrow(0, off, n), forme, fmt)
         if pbiais is not None:
             l.bias = pbiais.narrow(0, off, n)
         off += n
-    return QuantLinear(PlainTensor(plat, tuple(plat.shape), ts[0].format),
+    return QuantLinear(PlainTensor(plat, tuple(plat.shape), formes_src[0][2]),
                        bias=pbiais)
 
 
