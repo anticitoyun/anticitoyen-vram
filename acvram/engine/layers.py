@@ -1009,8 +1009,13 @@ def stack_nvfp4_linears(lins: list) -> Optional["QuantLinear"]:
         return _refus_fusion("un des poids n est pas NVFP4")
     if len({(t.padded_in, t.qweight.shape[1], t.block_scale.shape[1]) for t in ts}) != 1:
         return _refus_fusion("entrees de tailles differentes")
-    if any(l.bias is not None for l in lins):
-        return _refus_fusion("biais")
+    # Un biais s applique a la SORTIE : le concatener sur l axe 0 est exact,
+    # exactement comme les lignes de poids. Les refuser coutait les 48
+    # attentions de Qwen2.5 — q, k et v y portent un biais — soit 96 GEMV par
+    # pas, alors que `stack_plain_linears` les empile deja en bf16.
+    biais = [l.bias for l in lins]
+    if any((b is None) != (biais[0] is None) for b in biais):
+        return _refus_fusion("biais present sur une partie du groupe")
     if any(l.streamed is not None for l in lins):
         return _refus_fusion("poids en flux")
     ok_scaler, scaler_pile = _scaler_commun(lins)
@@ -1042,7 +1047,15 @@ def stack_nvfp4_linears(lins: list) -> Optional["QuantLinear"]:
         l.qweight = NVFP4Tensor(fus.qweight[d:d + n], fus.block_scale[d:d + n],
                                 t.global_scale, t.shape, t.padded_in)
         d += n
-    return QuantLinear(fus, scaler=scaler_pile)
+    pbiais = torch.cat(biais) if biais[0] is not None else None
+    if pbiais is not None:
+        # Les originaux deviennent des vues du biais empile, comme les poids :
+        # le prefill continue de les appeler separement sans qu un octet soit
+        # duplique.
+        o = 0
+        for l, b in zip(lins, biais):
+            l.bias = pbiais.narrow(0, o, b.shape[0]); o += b.shape[0]
+    return QuantLinear(fus, bias=pbiais, scaler=scaler_pile)
 
 
 def stack_plain_linears(lins: list) -> Optional["QuantLinear"]:
