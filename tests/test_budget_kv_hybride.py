@@ -162,3 +162,25 @@ def test_un_modele_sans_latent_garde_la_formule_groupee():
     assert not s.est_mla
     assert s.kv_bytes_per_token(8) == _spec().kv_bytes_per_token(8)
     assert all(s.couche_a_kv(i) for i in range(32))
+
+
+# --- tete liee : un poste que rien ne comptait -----------------------------
+
+def test_la_tete_liee_est_comptee():
+    """`lm_head_params` vaut ZERO quand la tete est liee — aucun tenseur
+    `lm_head` n'existe. Mais le chargeur fabrique une copie quantifiee de la
+    table d'embedding, qui S'AJOUTE sans remplacer, et qui occupe la carte."""
+    lie = _spec(tie_word_embeddings=True, vocab_size=151936, hidden_size=2560)
+    assert lie.lm_head_params == 0, "aucun tenseur lm_head sur un modele lie"
+    assert lie.tete_liee_bytes(128) > 0, "et pourtant la copie existe"
+    # ~0,369 Gio sur Qwen3-4B, mesure le 9/09/2026
+    assert 0.35 < lie.tete_liee_bytes(128) / 2**30 < 0.39
+
+
+def test_une_tete_separee_ne_double_pas():
+    """Controle : sur un modele NON lie, la tete est deja comptee par
+    `lm_head_params`. La compter deux fois surestimerait les poids et
+    reserverait pour rien."""
+    s = _spec(tie_word_embeddings=False, vocab_size=151936, hidden_size=2560)
+    assert s.lm_head_params > 0
+    assert s.tete_liee_bytes(128) == 0, "pas de copie liee a ajouter ici"

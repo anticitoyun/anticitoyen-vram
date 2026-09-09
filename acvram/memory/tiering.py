@@ -494,7 +494,12 @@ def plan_placement(spec: ModelSpec, rig: Rig,
     embed_bytes = spec.embed_params * 2
     fastest = gpu_tiers[0].name if gpu_tiers else "cpu"
     head_fmt = gpu_tiers[0].weight_format if gpu_tiers else "int4_awq"
-    head_bytes = _bytes(spec.lm_head_params, head_fmt, opts.group_size)
+    # `lm_head_params` vaut ZERO quand la tete est liee — il n existe alors
+    # aucun tenseur `lm_head`. Mais le chargeur fabrique quand meme une copie
+    # quantifiee de la table d embedding pour la projection, et elle occupe la
+    # carte : la compter ici est un rattrapage de comptage, pas une provision.
+    head_bytes = (_bytes(spec.lm_head_params, head_fmt, opts.group_size)
+                  + spec.tete_liee_bytes(opts.group_size))
     if gpu_tiers and remaining[fastest] > head_bytes:
         plan.lm_head_device = fastest
         remaining[fastest] -= head_bytes

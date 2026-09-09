@@ -182,6 +182,38 @@ class ModelSpec:
     def lm_head_params(self) -> int:
         return 0 if self.tie_word_embeddings else self.vocab_size * self.hidden_size
 
+    def tete_liee_bytes(self, group_size: int = 128) -> int:
+        """Octets de la copie quantifiée d'une tête LIÉE, que rien ne comptait.
+
+        Quand ``tie_word_embeddings`` est vrai, il n'existe aucun tenseur
+        `lm_head` : `lm_head_params` vaut zéro et `_octets_reels` ne trouve
+        rien à compter. Mais `_tete_liee` (`loader.py`) fabrique au chargement
+        une copie INT8 de la table d'embedding — la projection lit une matrice
+        entière à chaque jeton, et la lire en 16 bits coûterait le double —
+        et cette copie **s'ajoute** à la table sans la remplacer, le gather
+        d'entrée ayant toujours besoin des 16 bits.
+
+        Le plan sous-estimait donc les poids d'autant : 0,369 Gio sur un
+        Qwen3-4B, mesuré le 9/09/2026. Et la conséquence dépassait le
+        comptage — `_borner_kv_par_la_vram` calcule ``libre − poids − marge``
+        avec ce même total : sous-estimer les poids lui faisait autoriser un
+        budget KV trop grand, donc **manger la marge qu'il est chargé de
+        protéger**, celle-là même qui doit garder la place d'une capture de
+        graphes CUDA.
+
+        Le format retenu est l'INT8 par défaut de `_TETE_LIEE`. Un réglage
+        contraire — `bf16`, ou le repli automatique quand la carte est trop
+        pleine — rend ce compte majorant, ce qui est le bon sens de l'erreur
+        pour une provision.
+        """
+        if not self.tie_word_embeddings:
+            return 0
+        n = self.vocab_size * self.hidden_size
+        g = max(1, group_size)
+        echelles = self.vocab_size * (self.hidden_size // g) * 2      # fp16
+        zeros = self.vocab_size * (self.hidden_size // g + 1) // 2    # uint4 packés
+        return n + echelles + zeros
+
     @property
     def total_params(self) -> int:
         return (self.embed_params + self.lm_head_params + self.hidden_size

@@ -1062,6 +1062,20 @@ def _octets_reels(manifest: dict) -> tuple[dict, dict, int, int]:
             embed += octets
         elif nom.startswith("lm_head"):
             head += octets
+    # Tête LIÉE : aucun tenseur `lm_head` au manifeste, et pourtant
+    # `_tete_liee` en fabrique une copie quantifiée au chargement. La compter
+    # ici n'est pas une precaution : `_borner_kv_par_la_vram` calcule
+    # `libre − poids − marge` a partir de ce total, si bien que l'omettre lui
+    # faisait autoriser un budget KV trop grand — donc MANGER LA MARGE qu'il
+    # existe pour proteger, celle qui garde la place d'une capture de graphes.
+    mo = manifest.get("model") or {}
+    if mo.get("tie_word_embeddings") and mo.get("vocab_size") and mo.get("hidden_size"):
+        from .config import ModelSpec
+        champs = {k: v for k, v in mo.items() if k in ModelSpec.__dataclass_fields__}
+        try:
+            head += ModelSpec(**champs).tete_liee_bytes()
+        except Exception:                                   # noqa: BLE001
+            pass
     return attn, mlp, embed, head
 
 
