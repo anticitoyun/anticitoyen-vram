@@ -630,24 +630,38 @@ def mesurer(moteur):
     # sur un couple a 21,3 % de dispersion contre 5,2 en face, le meilleur
     # donnait la victoire au plus instable. Le maximum reste publie a part,
     # il n'est simplement plus ce qu'on compare.
-    ordonnes = sorted(passages, key=lambda x: x.tps)
+    # UNE SEULE definition du regime, pour TOUTES les colonnes publiees.
+    #
+    # Avant le 8/09 le banc publiait « le meilleur des trois », ce qui ecartait
+    # le passage froid DE FAIT. Le passage au median a supprime cet ecartement
+    # sans que personne ne le remarque — et toute colonne suivant le passage
+    # median s'est mise a pouvoir publier la passe froide.
+    #
+    # Le 9/09, le cas s'est produit : llama.cpp a publie TTFT 125 ms
+    # (passages 125,45,33,33,33), donc le passage median EN DEBIT etait le
+    # premier. Les watts, les joules et les jetons/kJ de cette ligne venaient
+    # donc eux aussi de la passe froide. Une conclusion a ete inversee sur le
+    # TTFT (« +41,6 % en notre faveur » au lieu de -121 %), et l'energie —
+    # l'objectif du projet — etait touchee par le meme defaut sans qu'on le
+    # voie, parce que les DEUX bras du comparatif le subissaient egalement.
+    #
+    # La classe du defaut est « quelle passe publie-t-on ». On la traite en
+    # une fois plutot qu'en corrigeant les colonnes une a une.
+    regime = passages[1:] or passages
+    ordonnes = sorted(regime, key=lambda x: x.tps)
     median = ordonnes[len(ordonnes) // 2]
     tps, e, n, txt, dt = (median.tps, median.energie,
                           median.jetons, median.texte, median.duree)
-    # Le TTFT ne suit PAS le passage de debit median : ce passage peut etre le
-    # premier, qui est froid par construction, et le TTFT publie devient alors
-    # celui d'une passe que la mesure ecarte par ailleurs.
-    #
-    # Le 9/09 ce defaut a inverse une conclusion : llama.cpp publiait 125 ms
-    # (passages 125,45,33,33,33) contre nos 73, et nous avons cru gagner de
-    # 41,6 %. Leur TTFT de REGIME est 33 ms — nous sommes deux fois plus lents.
-    # Le meme moteur, une heure plus tot, publiait 39 ms sur les memes donnees :
-    # le chiffre dependait de QUEL passage se trouvait etre median en debit.
-    #
-    # On publie donc la mediane des TTFT HORS premier passage, comme pour la
-    # dispersion du debit — meme regle, memes donnees.
-    _ttfts = sorted(p.ttft for p in passages[1:]) or [median.ttft]
+    # Le TTFT a sa propre mediane : le passage le plus representatif en debit
+    # ne l'est pas forcement en latence de premier jeton.
+    _ttfts = sorted(p.ttft for p in regime)
     ttft = _ttfts[len(_ttfts) // 2]
+    # Le TTFT du passage FROID est publie a part : il n'est pas du bruit, c'est
+    # ce que paie la premiere requete d'un utilisateur. Deux chiffres vrais
+    # dans deux conditions, comme le x2,7 des graphes et sa borne sur un dense.
+    ttft_froid = passages[0].ttft
+    # `debits` couvre TOUS les passages, froid compris : la dispersion reste
+    # conservatrice, et c'est voulu. Le median, lui, ne porte que le regime.
     etendue = (min(debits), max(debits))
 
     # Empreinte du texte de CHAQUE passage. A temperature zero, le meme
@@ -664,7 +678,9 @@ def mesurer(moteur):
     # e0e0c3e9 puis 036bb29d x4 ; llamacpp b1171ed9 puis 7dc6fe3e x4) — la
     # selection d'algorithme cuBLAS au premier appel suffit a faire basculer
     # un argmax serre. Les empreintes restent TOUTES publiees.
-    textes_identiques = len(set(empreintes[1:])) == 1
+    # Meme perimetre que le median publie : `regime`, pas un decoupage a part.
+    textes_identiques = len({hashlib.sha256(p.texte.encode()).hexdigest()[:8]
+                             for p in regime}) == 1
     watts = e.moyenne
     base = repos(secondes=min(max(dt, 5.0), 30.0))
     joules = e.joules
@@ -710,6 +726,10 @@ def mesurer(moteur):
         # 8 septembre 2026 : ni ~/.nv/ComputeCache ni ~/.triton/cache n'ont
         # ete ecrits pendant les series, donc ce n'est PAS de la compilation.
         "ttft_passages": ",".join(f"{p.ttft * 1000:.0f}" for p in passages),
+        # Le TTFT de la premiere requete, publie A COTE du regime : les deux
+        # sont vrais, dans deux conditions. Ne publier que le regime commet
+        # l'erreur symetrique de celle qu'on vient de reparer.
+        "ttft_froid_ms": round(ttft_froid * 1000),
         # Les deux comptages, pour que « jetons par seconde » veuille dire la
         # meme chose d'un moteur a l'autre.
         "jetons_moteur": n,
@@ -798,7 +818,7 @@ def main():
         with open(a.sortie, "w") as f:
             f.write("modele\tmoteur\talias\tctx\tt_s\tttft_ms\tW\tj_kJ\tjetons\tchargement_s\tetat\tapercu\t"
                     "J\tJ_net\tW_repos\tj_kJ_net\tplafond_W\thorloge_min\thorloge_max\ttemp_max\t"
-                    "bridages\tdispersion_pct\tt_s_min\tt_s_max\tt_s_passages\tttft_passages\t"
+                    "ttft_froid_ms\tbridages\tdispersion_pct\tt_s_min\tt_s_max\tt_s_passages\tttft_passages\t"
                     "jetons_moteur\tjetons_flux\tjetons_source\tbinaire\tctx_servi\t"
                     "empreintes\ttextes_identiques\t"
                     "invalidations\n")
@@ -834,7 +854,8 @@ def main():
                         f"{jkj:.0f}\t{n}\t{charge:.0f}\t{etat}\t{apercu}\t"
                         f"{v('J', 0)}\t{v('J_net', 0)}\t{v('W_repos', 0)}\t{v('jkj_net', 0)}\t"
                         f"{v('plafond_W', 0)}\t{v('horloge_min', -1)}\t{v('horloge_max', -1)}\t"
-                        f"{v('temp_max', -1)}\t{v('bridages', '?')}\t{v('dispersion_pct', 0)}\t"
+                        f"{v('temp_max', -1)}\t{v('ttft_froid_ms', -1)}\t"
+                        f"{v('bridages', '?')}\t{v('dispersion_pct', 0)}\t"
                         f"{v('t_s_min', 0)}\t{v('t_s_max', 0)}\t{v('t_s_passages', '?')}\t"
                         f"{v('ttft_passages', '?')}\t"
                         f"{v('jetons_moteur', '?')}\t{v('jetons_flux', '?')}\t"
