@@ -30,11 +30,26 @@ jamais servir sur un autre.
 Numériquement identique **par construction** : c'est la même conversion, faite
 une fois.
 
+## PORTÉE : 8 modèles sur 110
+
+**Ce correctif ne rend quelque chose que là où il y a des échelles à
+convertir.** Sur les 102 modèles du parc qui n'en portent aucune, il n'a rien à
+mettre en cache : **gain nul**.
+
+    modeles portant au moins une act_scale : 8 sur 110  (7 %)
+    modele mesure : Qwen2.5-Coder-14B-pur-nvfp4, 336 act_scale — le MAXIMUM du parc
+
+**Le chiffre ci-dessous vaut donc sur 7 % des modèles, et il a été mesuré sur
+celui où il est maximal.** Ce n'est pas une diminution du résultat — le
+correctif reste juste et gratuit — c'est sa portée, et elle doit accompagner le
+nombre partout où il est cité.
+
 ## Le gain, mesuré hors profileur
 
     sans cache   80,26 pas/s   12,46 ms par pas
     avec cache   86,61 pas/s   11,55 ms
     gain         +7,91 %        0,91 ms
+                 sur les modeles portant des act_scale (8 sur 110), nul ailleurs
 
     48 jetons identiques en greedy
     temoin ACVRAM_SCALER_SANS_CACHE, avec garde verifiant qu il coupe
