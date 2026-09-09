@@ -528,8 +528,10 @@ def generer(moteur):
     # les jetons. Un moteur qui groupe plusieurs jetons par événement creuse
     # l'écart sans qu'aucune tokenisation ne diffère. Un écart non nul
     # appelle donc un examen, il ne prouve rien à lui seul.
+    source = "flux"
     if usage and usage.get("completion_tokens"):
         n = usage["completion_tokens"]
+        source = "moteur"
     if morceaux < 2 or dernier - premier < 1e-3:
         # Le débit se mesure entre le premier et le dernier jeton ; sans flux
         # jeton par jeton, cette durée n'existe pas. On REFUSE la mesure au
@@ -537,7 +539,7 @@ def generer(moteur):
         # définition du débit dans le même tableau, sans marque dans la ligne.
         raise RuntimeError(f"pas de flux jeton par jeton ({morceaux} morceau(x) "
                            f"pour {n} jetons)")
-    return n, premier - t0, dernier - premier, w, "".join(texte), morceaux
+    return n, premier - t0, dernier - premier, w, "".join(texte), morceaux, source
 
 
 def mesurer(moteur):
@@ -551,9 +553,9 @@ def mesurer(moteur):
     """
     passages = []
     for _ in range(MESURES):
-        n, ttft, dt, e, txt, morceaux = generer(moteur)
+        n, ttft, dt, e, txt, morceaux, source = generer(moteur)
         tps = (n - 1) / dt if n > 1 else 0.0
-        passages.append((tps, ttft, e, n, txt, dt, morceaux))
+        passages.append((tps, ttft, e, n, txt, dt, morceaux, source))
     debits = [p[0] for p in passages]
 
     # Le passage PUBLIE est celui de debit median, plus celui de debit
@@ -623,6 +625,11 @@ def mesurer(moteur):
         # meme chose d'un moteur a l'autre.
         "jetons_moteur": n,
         "jetons_flux": ",".join(str(p[6]) for p in passages),
+        # D'où vient le nombre publié. Un moteur qui n'annonce pas d'`usage`
+        # laisse le banc compter, et alors « jetons_moteur » porterait un nom
+        # menteur : c'est le nôtre. Deux moteurs de provenance différente dans
+        # le même tableau ne comparent pas la même grandeur.
+        "jetons_source": passages[0][7],
     }
     # Un aperçu du texte à côté du débit : 481 t/s de « de de de » sur quatre
     # jetons se lisaient comme un record tant qu'on ne voyait pas le texte.
@@ -683,7 +690,7 @@ def main():
             f.write("modele\tmoteur\talias\tctx\tt_s\tttft_ms\tW\tj_kJ\tjetons\tchargement_s\tetat\tapercu\t"
                     "J\tJ_net\tW_repos\tj_kJ_net\tplafond_W\thorloge_min\thorloge_max\ttemp_max\t"
                     "bridages\tdispersion_pct\tt_s_min\tt_s_max\tt_s_passages\tttft_passages\t"
-                    "jetons_moteur\tjetons_flux\t"
+                    "jetons_moteur\tjetons_flux\tjetons_source\t"
                     "empreintes\ttextes_identiques\t"
                     "invalidations\n")
 
@@ -718,6 +725,7 @@ def main():
                         f"{v('t_s_min', 0)}\t{v('t_s_max', 0)}\t{v('t_s_passages', '?')}\t"
                         f"{v('ttft_passages', '?')}\t"
                         f"{v('jetons_moteur', '?')}\t{v('jetons_flux', '?')}\t"
+                        f"{v('jetons_source', '?')}\t"
                         f"{v('empreintes', '?')}\t"
                         f"{v('textes_identiques', '?')}\t{v('invalidations', '?')}\n")
         arreter(m)
