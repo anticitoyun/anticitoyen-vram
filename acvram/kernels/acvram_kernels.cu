@@ -822,7 +822,13 @@ __global__ void paged_attn_partial_kernel(
     float *__restrict__ part_l,           // [B*QL, HQ, C]
     OT *__restrict__ sortie,              // [B*QL, HQ, D] si C == 1, sinon nul
     int HQ, int HKV, int N, int C, int QL, float scale, int window,
-    int chunk) {          // le noyau et le lanceur DOIVENT decouper pareil
+    int chunk,            // le noyau et le lanceur DOIVENT decouper pareil
+    int etape) {          // BISECTION : sortir plus ou moins tot du noyau.
+                          // 0 indices · 1 +chargement de q · 2 +boucle
+                          // principale · 3 tout (comportement normal).
+                          // Les sorties neutres sont ECRITES a chaque etape,
+                          // sinon le compilateur supprime le noyau entier et
+                          // l'on mesure un lancement vide.
 
     // La vérification spéculative pose QL positions de requête par séquence :
     // la requête qi (0..QL-1) ne voit que les seq_len-QL+1+qi premières
@@ -852,6 +858,13 @@ __global__ void paged_attn_partial_kernel(
         return;
     }
 
+    if (etape < 1) {
+        if (threadIdx.x == 0) { part_m[out_off] = -INFINITY; part_l[out_off] = 0.f; }
+        for (int d = threadIdx.x; d < D; d += blockDim.x)
+            part[out_off * D + d] = 0.f;
+        return;
+    }
+
     __shared__ float sq[D];
     __shared__ float sm[PA_WARPS], sl[PA_WARPS], scorr[PA_WARPS];
     __shared__ float sacc[PA_WARPS][D];
@@ -862,6 +875,14 @@ __global__ void paged_attn_partial_kernel(
     float m = -INFINITY, l = 0.f;
     float acc[PER_LANE];
     #pragma unroll
+    if (etape < 2) {
+        // q est charge et synchronise ; on sort avant la boucle principale.
+        if (threadIdx.x == 0) { part_m[out_off] = sq[0]; part_l[out_off] = 0.f; }
+        for (int d = threadIdx.x; d < D; d += blockDim.x)
+            part[out_off * D + d] = sq[d];   // depend de sq : rien n'est supprime
+        return;
+    }
+
     for (int i = 0; i < PER_LANE; ++i) acc[i] = 0.f;
 
     const long end = min(slen, (long)(c + 1) * chunk);
@@ -899,6 +920,17 @@ __global__ void paged_attn_partial_kernel(
     for (int i = 0; i < PER_LANE; ++i)
         sacc[wid][lane * PER_LANE + i] = acc[i];
     __syncthreads();
+
+    if (etape < 3) {
+        // La boucle principale a tourne ; on sort AVANT la reduction
+        // inter-warps. On ecrit depuis sm/sq pour que rien ne soit supprime :
+        // sans dependance aux resultats, le compilateur retirerait la boucle
+        // et l'on mesurerait un noyau vide.
+        if (threadIdx.x == 0) { part_m[out_off] = sm[0]; part_l[out_off] = sl[0]; }
+        for (int d = threadIdx.x; d < D; d += blockDim.x)
+            part[out_off * D + d] = sq[d];
+        return;
+    }
 
     if (threadIdx.x == 0) {
         float mg = -INFINITY;
@@ -1921,6 +1953,14 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
         int demande = atoi(v);
         if (demande >= 16) chunk = demande;
     }
+    // BISECTION : ACVRAM_PA_ETAPE < 3 sort du noyau plus tot. Le resultat est
+    // alors FAUX par construction — c'est un instrument de diagnostic, jamais
+    // un chemin de production. Defaut 3 = comportement normal.
+    int etape = 3;
+    if (const char *v = std::getenv("ACVRAM_PA_ETAPE")) {
+        int d = atoi(v);
+        if (d >= 0 && d < 3) etape = d;
+    }
     TORCH_CHECK(D == 32 || D == 64 || D == 128 || D == 256 || D == 512,
                 "dimension de tete non instanciee : ", D);
     const int C = (N * 16 + chunk - 1) / chunk;
@@ -1971,7 +2011,7 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
             part.data_ptr<float>(), pm.data_ptr<float>(), \
             pl.data_ptr<float>(), (C == 1 ? (PO) : nullptr), \
             HQ, (int)hkv, N, C, (int)q_len, (float)scale, (int)window, \
-            chunk); \
+            chunk, etape); \
         if (C > 1) \
         paged_attn_reduce_kernel<DD, OT><<<g2, 128, 0, stream>>>( \
             part.data_ptr<float>(), pm.data_ptr<float>(), \
