@@ -978,6 +978,12 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 fmt, qt, scaler, metrics = wider, q2, s2, m2
                 entry["format"] = fmt
                 entry["promoted_from"] = report.promotions[-1]["from"]
+        # Le SNR de CHAQUE tenseur, promu ou non. Sans lui on ne peut pas
+        # repondre a la question qui juge le quota : existe-t-il un tenseur
+        # NON promu dont le SNR est pire que celui d'un promu ? Si oui, le
+        # quota n'est pas un critere de qualite mais un ordre de parcours.
+        if "out_snr_db" in metrics:
+            entry["snr_db"] = round(float(metrics["out_snr_db"]), 3)
         sd = qt.state_dict(prefix=f"{name}.")
         sd.update(scaler.state_dict(prefix=f"{name}."))
         # Les fragments s'ecrivent depuis la memoire hote : on redescend ce que
@@ -1103,6 +1109,25 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             f"conversion incomplète : {len(manquants)} tenseurs attendus "
             f"absents (premier : {manquants[0]}). L'architecture de la source "
             f"n'est probablement pas prise en charge — rien n'est écrit.")
+
+    # MEME denominateur que la condition l.966 — `keys`, pas `attendus`.
+    # Les deux listes ne recensent pas la meme chose et le plafond calcule sur
+    # la mauvaise donnerait un seuil de saturation faux.
+    plafond = opts.max_promotions * max(1, len(keys) + 1)
+    if report.promotions and len(report.promotions) >= plafond - 1:
+        # QUOTA SATURE. A partir de cet instant, ce n'est plus le SNR qui
+        # decide d'une promotion mais l'ORDRE DE PARCOURS du checkpoint : deux
+        # tenseurs de SNR identique recoivent des sorts opposes selon leur
+        # position. Mesure le 9/09/2026 : 27 modeles du parc sur 110 saturent
+        # a l'unite pres, et sur l'un d'eux AUCUN des 48 groupes q/k/v n'a ses
+        # trois membres promus quand 31 en ont exactement un — la signature
+        # d'un regulateur de debit, pas d'une difficulte de couche.
+        print(f"[acvram] quota de promotions SATURE : {len(report.promotions)} "
+              f"sur un plafond de {plafond:.0f}. Au-dela du plafond, l'ordre de "
+              f"parcours a decide a la place du SNR — les promotions ne sont "
+              f"plus triees par besoin. Relever --max-promotions ou trier en "
+              f"deux passes.", flush=True)
+        manifest["quota_promotions_sature"] = True
 
     manifest["diagnostic_fusion"] = _diagnostic_fusion(manifest["tensors"])
     if not opts.dry_run:
