@@ -947,6 +947,38 @@ ROWS_PAR_BLOC = 4
 _REFUS_FUSION: dict[str, int] = {}
 
 
+def _scaler_commun(lins: list):
+    """Rend (utilisable, scaler a porter par la pile).
+
+    Un scaler s applique a l ENTREE. Des projections d un meme groupe lisent
+    la meme entree : si leurs scalers sont identiques — a fortiori s ils sont
+    tous l identite — la pile peut porter ce scaler unique et le resultat est
+    exactement celui des appels separes.
+
+    La fusion refusait sur `l.scaler is not None`, c est-a-dire sur
+    l EXISTENCE de l objet, alors que l execution teste son CONTENU
+    (`not self.scaler.is_identity`, forward l.479). Un scaler identite —
+    scale None et hadamard_block 0, ce qu une conversion sans calibration
+    produit pour TOUS les tenseurs — bloquait donc les 96 fusions d un modele
+    qui n avait aucune mise a l echelle a concilier.
+    """
+    scs = [getattr(l, "scaler", None) for l in lins]
+    vifs = [s for s in scs if s is not None and not s.is_identity]
+    if not vifs:
+        return True, None                      # tous identite : rien a porter
+    if len(vifs) != len(scs):
+        return False, None                     # certains actifs, d autres non
+    tete = vifs[0]
+    for s in vifs[1:]:
+        if s.hadamard_block != tete.hadamard_block:
+            return False, None
+        if (s.scale is None) != (tete.scale is None):
+            return False, None
+        if s.scale is not None and not torch.equal(s.scale, tete.scale):
+            return False, None
+    return True, tete                           # tous egaux : la pile le porte
+
+
 def _refus_fusion(raison: str) -> None:
     """Enregistre pourquoi une fusion NVFP4 n a pas eu lieu, et rend None."""
     _REFUS_FUSION[raison] = _REFUS_FUSION.get(raison, 0) + 1
@@ -977,9 +1009,13 @@ def stack_nvfp4_linears(lins: list) -> Optional["QuantLinear"]:
         return _refus_fusion("un des poids n est pas NVFP4")
     if len({(t.padded_in, t.qweight.shape[1], t.block_scale.shape[1]) for t in ts}) != 1:
         return _refus_fusion("entrees de tailles differentes")
-    if any(l.bias is not None or l.scaler is not None or l.streamed is not None
-           for l in lins):
-        return _refus_fusion("biais, scaler ou poids en flux")
+    if any(l.bias is not None for l in lins):
+        return _refus_fusion("biais")
+    if any(l.streamed is not None for l in lins):
+        return _refus_fusion("poids en flux")
+    ok_scaler, scaler_pile = _scaler_commun(lins)
+    if not ok_scaler:
+        return _refus_fusion("scalers differents entre projections")
     if any(getattr(t, "global_scale_rows", None) is not None for t in ts):
         return _refus_fusion("deja empile")
     # Le noyau lit l'échelle de la première ligne de chaque bloc : les segments
@@ -1006,7 +1042,7 @@ def stack_nvfp4_linears(lins: list) -> Optional["QuantLinear"]:
         l.qweight = NVFP4Tensor(fus.qweight[d:d + n], fus.block_scale[d:d + n],
                                 t.global_scale, t.shape, t.padded_in)
         d += n
-    return QuantLinear(fus)
+    return QuantLinear(fus, scaler=scaler_pile)
 
 
 def stack_plain_linears(lins: list) -> Optional["QuantLinear"]:
