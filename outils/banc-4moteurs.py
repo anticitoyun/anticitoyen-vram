@@ -748,7 +748,7 @@ def main():
             log(f"  ATTENTION {nom[:40]} : contextes differents selon le "
                 f"moteur ({', '.join(f'{m}={c}' for m, c in sorted(ctxs.items()))})"
                 f" — les debits ne sont PAS comparables")
-        return
+            return
 
     faits = set()
     if os.path.exists(a.sortie):
