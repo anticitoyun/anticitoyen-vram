@@ -112,6 +112,16 @@ class EngineStats:
             "decode_tokens": self.decode_tokens,
             "decode_tok_s": round(self.decode_tok_s, 2),
             "prefill_tok_s": round(self.prefill_tok_s, 1),
+            # Les temps cumulés, pas seulement les taux. Un taux est une
+            # moyenne depuis le démarrage : il ne dit rien d'UNE requête, et
+            # deux relevés successifs ne s'en soustraient pas. Les cumuls, si —
+            # c'est la seule façon de mesurer le forward d'une requête sans
+            # instrumenter le moteur. Leur absence a coûté deux mesures : l'une
+            # a divisé un delta de jetons par le taux global et obtenu un
+            # forward supérieur au TTFT, l'autre a lu la clé manquante comme un
+            # zéro et conclu « 0,0 ms pour 39 410 jetons ».
+            "prefill_seconds": round(self.prefill_seconds, 6),
+            "decode_seconds": round(self.decode_seconds, 6),
             "running": self.running, "waiting": self.waiting,
             "kv_blocks_free": self.kv_blocks_free,
             "kv_blocks_total": self.kv_blocks_total,

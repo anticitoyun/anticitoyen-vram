@@ -37,7 +37,38 @@ __all__ = ["Attention", "MLP", "MoEBlock", "DecoderLayer", "ACVRamModel",
            "ForwardBatch"]
 
 
+# Au-dela de ce nombre de jetons, on cesse d'empiler les projections.
+#
+# La fusion remplace deux ou trois GEMM par un seul. Elle gagne quand ils sont
+# trop PETITS pour occuper la carte -- au decodage, k et v font 1024 lignes
+# pour UNE ligne d'entree. Le vide qu'elle comble se resorbe quand le lot
+# grandit.
+#
+# L'ancien seuil valait 8, ce qui excluait tout preremplissage reel : le prompt
+# du banc fait 88 jetons. Gain mesure sur le forward complet, meme chargement,
+# graphes actifs, aucun poids en flux (Qwen2.5-Coder-14B, 9 septembre 2026) :
+#
+#      36 jetons  29,99 -> 29,15 ms   +2,78 %
+#      88         32,26 -> 30,93      +4,10 %
+#     171         36,77 -> 35,23      +4,18 %
+#     256         46,29 -> 44,69      +3,46 %
+#
+# AU-DELA, LE GAIN N'EST PLUS MONOTONE, et ce n'est pas du bruit : trois series
+# independantes donnent les memes valeurs a 0,04 ms pres. Sur les GEMM nus,
+# 48 couches : +1,1 ms a 256, -3,3 a 320, +1,1 a 384, +2,3 a 448, -1,3 a 512.
+# cuBLAS choisit un autre noyau selon la taille exacte, et la forme empilee
+# tombe parfois du mauvais cote. Le point de bascule depend aussi du modele --
+# mesure sur trois geometries, il varie et disparait quand `intermediate`
+# grandit.
+#
+# 256 est donc une borne PRUDENTE, pas un optimum : en dessous le gain est
+# stable et mesure, au-dela il faudrait le mesurer par modele et par taille.
+# `ACVRAM_SEUIL_FUSION` permet de l'explorer sans toucher au code.
+SEUIL_FUSION = int(os.environ.get("ACVRAM_SEUIL_FUSION", "256"))
+
+
 @dataclass
+
 class ForwardBatch:
     """Une étape de travail, prefill ou décodage.
 
@@ -178,7 +209,7 @@ class Attention(nn.Module):
 
     def _proj(self, x: torch.Tensor, t: int):
         """q, k, v (et la porte de sortie) : une GEMV empilée si possible."""
-        if self.qkv_proj is not None and t <= 8:
+        if self.qkv_proj is not None and t <= SEUIL_FUSION:
             p = torch.split(self.qkv_proj(x), self.qkv_tailles, dim=-1)
             qr, kr = p[0], p[1]
             vr = kr if self.k_eq_v else p[2]
@@ -394,7 +425,7 @@ class MLP(nn.Module):
         return self.gate_up is not None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.gate_up is not None and x.shape[0] <= 8:
+        if self.gate_up is not None and x.shape[0] <= SEUIL_FUSION:
             gu = self.gate_up(x)
             # SiLU et le produit sont deux lancements elementaires pour un
             # travail derisoire : sur un pas de decodage, la latence de
