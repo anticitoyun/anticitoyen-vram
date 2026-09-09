@@ -299,9 +299,32 @@ def bench_kernels(shapes: Optional[list[tuple[int, int]]] = None,
     return out
 
 
-def bench_decode(model_dir: str, n_tokens: int = 64,
-                 prompt_len: int = 128) -> dict:
-    """Débit de décodage de bout en bout sur le vrai modèle, le nombre qui compte."""
+def _plusieurs_cartes() -> bool:
+    """Plus d'une carte visible ? Le banc mesurait sans le dire."""
+    try:
+        import torch
+        return torch.cuda.is_available() and torch.cuda.device_count() > 1
+    except Exception:                     # noqa: BLE001 — une sonde ne plante pas
+        return False
+
+
+def bench_decode(model_dir: str, n_tokens: int = 256,
+                 prompt_len: int = 128, chauffe: int = 2,
+                 repetitions: int = 5) -> dict:
+    """Débit de décodage de bout en bout, **sans le coût du premier passage**.
+
+    Le chronomètre englobait préfill, allocation et capture des graphes CUDA sur
+    64 jetons : le coût fixe dominait la mesure. Sur Agents-A1-4B il annonçait
+    **20,0 jetons/s** là où le décodage vaut **174** — un facteur 8,7, et le
+    plan en prévoyait 687. Un banc qui publie un débit huit fois trop bas
+    fabrique un chiffre faux pour qui le lit de bonne foi.
+
+    On chauffe, puis on lit `stats.decode_seconds`, que le moteur sépare du
+    préfill, et l'on rend la **médiane** de plusieurs passages avec leur
+    dispersion : un banc qui ne dit pas sa dispersion ne dit pas si son écart
+    existe. Le temps de bout en bout reste rendu à part, il répond à une autre
+    question.
+    """
     import torch
 
     from .engine.loader import load_model
@@ -311,24 +334,79 @@ def bench_decode(model_dir: str, n_tokens: int = 64,
     t0 = time.time()
     loaded = load_model(model_dir, dtype=torch.bfloat16)
     load_s = time.time() - t0
+
+    # Refus, pas avertissement : quand les cartes du manifeste ne sont pas
+    # celles de la machine, le plan est rejoue et le debit mesure ne porte plus
+    # sur la configuration demandee. Publier ce chiffre le ferait lire comme
+    # celui de la carte annoncee — epingler avec CUDA_VISIBLE_DEVICES.
+    replan = getattr(loaded.plan, "replanifie_cartes", None)
+    if replan and not os.environ.get("ACVRAM_BANC_ACCEPTE_REPLAN"):
+        return {
+            "model": model_dir,
+            "refus": (f"plan rejoue : cartes du manifeste {replan[0]}, "
+                      f"machine {replan[1]}. Le debit ne porterait pas sur la "
+                      f"configuration demandee. Epingler avec "
+                      f"CUDA_VISIBLE_DEVICES, ou forcer avec "
+                      f"ACVRAM_BANC_ACCEPTE_REPLAN=1."),
+            "load_seconds": round(load_s, 1),
+        }
+
     engine = Engine(loaded, None, max_batch_size=1,
                     max_model_len=prompt_len + n_tokens + 16)
     prompt = [1] * prompt_len
     params = SamplingParams(temperature=0.0, max_tokens=n_tokens)
 
-    t0 = time.time()
-    produced = 0
-    for out in engine.generate(prompt, params):
-        produced += 1
-    elapsed = time.time() - t0
+    def un_passage():
+        avant = engine.stats.to_dict()
+        d0 = avant.get("decode_seconds", 0.0) or 0.0
+        n0 = avant.get("decode_tokens", 0) or 0
+        mur0 = time.time()
+        produits = sum(1 for _ in engine.generate(prompt, params))
+        mur = time.time() - mur0
+        apres = engine.stats.to_dict()
+        dt = (apres.get("decode_seconds", 0.0) or 0.0) - d0
+        dn = (apres.get("decode_tokens", 0) or 0) - n0
+        # Le défaut par défaut est le refus : un compteur qui ne bouge pas
+        # n'est pas une mesure de zéro, c'est une source qui ne parle pas.
+        taux = dn / dt if dt > 0 and dn > 0 else None
+        return taux, produits, mur
+
+    for _ in range(chauffe):
+        un_passage()
+    taux, murs, produits = [], [], 0
+    for _ in range(repetitions):
+        t, p, mur = un_passage()
+        if t is not None:
+            taux.append(t)
+        murs.append(mur)
+        produits = p
+
+    if taux:
+        taux.sort()
+        median = taux[len(taux) // 2]
+        dispersion = (taux[-1] - taux[0]) / median * 100.0
+        source = "stats.decode_seconds"
+    else:
+        # `decode_seconds` absent d'un moteur plus ancien : on retombe sur le
+        # temps de bout en bout, et on le DIT — sans quoi le chiffre du repli
+        # se lirait comme celui de la mesure.
+        mur = sum(murs) / len(murs) if murs else 0.0
+        median = produits / mur if mur else 0.0
+        dispersion = float("nan")
+        source = "temps de bout en bout (decode_seconds indisponible)"
+
     return {
         "model": model_dir,
         "load_seconds": round(load_s, 1),
         "weights_bytes": loaded.model.nbytes,
         "prompt_len": prompt_len,
-        "generated": produced,
-        "wall_seconds": round(elapsed, 2),
-        "decode_tok_s": round(produced / elapsed, 2) if elapsed else 0.0,
+        "generated": produits,
+        "warmups": chauffe,
+        "repetitions": repetitions,
+        "wall_seconds": round(sum(murs) / len(murs), 2) if murs else 0.0,
+        "decode_tok_s": round(median, 2),
+        "decode_spread_pct": round(dispersion, 2) if dispersion == dispersion else None,
+        "decode_source": source,
         "engine": engine.stats.to_dict(),
         "planned_decode_tok_s": loaded.plan.est_decode_tok_s,
     }
@@ -440,9 +518,28 @@ def run_benchmarks(args: argparse.Namespace) -> int:
     if results.get("decode"):
         d = results["decode"]
         print()
-        print(f"  decodage      {d['decode_tok_s']} jetons/s mesures, "
+        if d.get("refus"):
+            print(f"  decodage      REFUS : {d['refus']}")
+            return
+        disp = d.get("decode_spread_pct")
+        disp_txt = f", dispersion {disp:.2f} %" if disp is not None else ""
+        print(f"  decodage      {d['decode_tok_s']} jetons/s mesures "
+              f"(mediane de {d.get('repetitions', 1)} apres "
+              f"{d.get('warmups', 0)} de chauffe{disp_txt}), "
               f"{d['planned_decode_tok_s']} prevus")
+        # La source du chiffre se lit avec lui : le repli de bout en bout
+        # inclut le premier passage et n'est pas comparable au decodage.
+        if d.get("decode_source", "").startswith("temps de bout"):
+            print(f"  ATTENTION     {d['decode_source']} : ce chiffre inclut "
+                  f"le prefill et la capture des graphes")
         print(f"  chargement    {d['load_seconds']} s")
+        # Le banc laissait les deux cartes visibles quand le serveur les epingle
+        # depuis e5cafc0 : le planificateur recrutait la seconde et le debit
+        # mesure n'etait pas celui de la carte annoncee.
+        if _plusieurs_cartes() and "CUDA_VISIBLE_DEVICES" not in os.environ:
+            print("  ATTENTION     plusieurs cartes visibles et aucun epinglage : "
+                  "le plan a pu en recruter une seconde. Relancer avec "
+                  "CUDA_VISIBLE_DEVICES=0 pour mesurer une carte seule.")
     if not results:
         print("rien a mesurer (aucun peripherique CUDA, et aucun modele fourni)")
     return 0

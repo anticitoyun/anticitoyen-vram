@@ -1228,6 +1228,14 @@ def _replanifier(manifest: dict, spec: "ModelSpec") -> "Plan | None":
         print(f"[acvram] plan recalculé : les cartes ont changé "
               f"(manifeste {sorted(figees) or 'aucun GPU'}, "
               f"machine {sorted(presentes)})", flush=True)
+        # Un avertissement n'arrête rien. Le banc doit pouvoir REFUSER de
+        # publier un débit dans ce cas : le chiffre ne porte plus sur la
+        # configuration demandée mais sur celle que le planificateur a
+        # choisie. On laisse donc une trace lisible sur le plan lui-même.
+        try:
+            neuf.replanifie_cartes = (sorted(figees), sorted(presentes))
+        except Exception:                    # noqa: BLE001 — une trace ne plante pas
+            pass
     return neuf
 
 
