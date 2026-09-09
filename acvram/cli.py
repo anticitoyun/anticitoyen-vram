@@ -406,6 +406,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         q3n_table=(tuple(float(v) for v in args.q3n_table.split(","))
                    if args.q3n_table else None),
         mixed_precision=args.mixed_precision, snr_floor=args.snr_floor,
+        max_promotions=args.max_promotions,
         autoriser_grossissement=args.autoriser_grossissement,
         quant_device=args.quant_device, bits_budget_gib=args.bits_budget,
         promotion_cout_max_mib=args.promotion_cout_max,
@@ -706,6 +707,15 @@ def build_parser() -> argparse.ArgumentParser:
     cv.add_argument("--autoriser-grossissement", action="store_true",
                     help="autorise une conversion plus grosse que sa source "
                          "(refusée par défaut depuis le 8/09/2026)")
+    cv.add_argument("--max-promotions", type=float, default=0.15,
+                    metavar="PART",
+                    help="part maximale de tenseurs promus (0,15 par defaut). "
+                         "Le message de saturation conseillait de relever "
+                         "cette option, qui n'existait pas : le plafond etait "
+                         "atteint sur 27 modeles du parc sur 110, et au-dela "
+                         "c'est l'ordre de parcours qui decide a la place du "
+                         "SNR (5333 inversions mesurees sur Agents-A1-4B). "
+                         "1.0 ne borne plus rien")
     cv.add_argument("--snr-floor", type=float, default=0.0,
                     help="SNR en sortie de couche (dB) sous lequel un tenseur est "
                          "promu ; 0 (defaut) ne promeut rien. Mesure sur un 27B : "
