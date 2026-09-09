@@ -446,6 +446,24 @@ def _demarrer(moteur, dossier, ctx):
 # travaille sur les deux. Mesure du 8 septembre 2026 a l'appui.
 
 
+def binaire_servant(moteur) -> str:
+    """Le binaire REELLEMENT en train de servir, lu dans /proc.
+
+    Le lanceur dit ce qu'il croit lancer ; `/proc/<pid>/exe` dit ce qui tourne.
+    Le 9/09/2026 la machine portait DEUX llama.cpp — celui du depot et celui
+    empaquete par Jan — et le banc lancait le second pendant qu'on verifiait
+    les options du premier. Un comparatif qui ne dit pas a quel concurrent il
+    se compare ne compare rien.
+    """
+    pid = pid_port(PORTS[moteur])
+    if not pid:
+        return "?"
+    try:
+        return os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        return "?"
+
+
 def modele_servi(moteur):
     try:
         d = json.load(http(PORTS[moteur], "/v1/models", CLES[moteur], delai=5))
@@ -630,6 +648,7 @@ def mesurer(moteur):
         # menteur : c'est le nôtre. Deux moteurs de provenance différente dans
         # le même tableau ne comparent pas la même grandeur.
         "jetons_source": passages[0][7],
+        "binaire": binaire_servant(moteur),
     }
     # Un aperçu du texte à côté du débit : 481 t/s de « de de de » sur quatre
     # jetons se lisaient comme un record tant qu'on ne voyait pas le texte.
@@ -677,6 +696,20 @@ def main():
     if a.simuler:
         for nom, m, alias, d, ctx in couples:
             print(f"  {nom[:48]:48s} {m:9s} {alias[:34]:34s} ctx {ctx}")
+
+    # Le contexte effectif est `min(ctx du parc, --ctx)` : un moteur dont le
+    # modele est converti a 4096 sera plafonne la, pendant que l'autre reste a
+    # 8192. La colonne `ctx` le publie depuis toujours, mais publier n'est pas
+    # avertir — et deux debits pris a des contextes differents ne se comparent
+    # pas. 9/09/2026 : le cas a failli passer sur Qwen2.5-Coder-14B.
+    par_modele = {}
+    for nom, m, _alias, _d, ctx in couples:
+        par_modele.setdefault(nom, {})[m] = ctx
+    for nom, ctxs in sorted(par_modele.items()):
+        if len(set(ctxs.values())) > 1:
+            log(f"  ATTENTION {nom[:40]} : contextes differents selon le "
+                f"moteur ({', '.join(f'{m}={c}' for m, c in sorted(ctxs.items()))})"
+                f" — les debits ne sont PAS comparables")
         return
 
     faits = set()
@@ -690,7 +723,7 @@ def main():
             f.write("modele\tmoteur\talias\tctx\tt_s\tttft_ms\tW\tj_kJ\tjetons\tchargement_s\tetat\tapercu\t"
                     "J\tJ_net\tW_repos\tj_kJ_net\tplafond_W\thorloge_min\thorloge_max\ttemp_max\t"
                     "bridages\tdispersion_pct\tt_s_min\tt_s_max\tt_s_passages\tttft_passages\t"
-                    "jetons_moteur\tjetons_flux\tjetons_source\t"
+                    "jetons_moteur\tjetons_flux\tjetons_source\tbinaire\t"
                     "empreintes\ttextes_identiques\t"
                     "invalidations\n")
 
@@ -725,7 +758,7 @@ def main():
                         f"{v('t_s_min', 0)}\t{v('t_s_max', 0)}\t{v('t_s_passages', '?')}\t"
                         f"{v('ttft_passages', '?')}\t"
                         f"{v('jetons_moteur', '?')}\t{v('jetons_flux', '?')}\t"
-                        f"{v('jetons_source', '?')}\t"
+                        f"{v('jetons_source', '?')}\t{v('binaire', '?')}\t"
                         f"{v('empreintes', '?')}\t"
                         f"{v('textes_identiques', '?')}\t{v('invalidations', '?')}\n")
         arreter(m)
