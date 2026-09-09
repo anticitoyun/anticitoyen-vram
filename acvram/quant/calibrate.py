@@ -143,10 +143,40 @@ class ChannelScaler:
         if self.hadamard_block:
             x = hadamard_transform(x, block=self.hadamard_block)
         if self.scale is not None:
-            x = x / self.scale.to(x.dtype)
+            x = x / self._au_dtype(x.dtype)
         return x
 
+    def _au_dtype(self, dtype: torch.dtype) -> torch.Tensor:
+        """L'échelle au dtype demandé, convertie UNE FOIS.
+
+        ``self.scale.to(x.dtype)`` s'exécutait à chaque appel de chaque
+        projection. Les échelles sont stockées en fp16 et les activations sont
+        en bf16 : la conversion est réelle, pas un no-op, et elle lance un
+        noyau. Compté sous ncu sur Qwen2.5-Coder-14B en nvfp4 : **337
+        `unrolled_elementwise` par pas — exactement sept projections par couche
+        sur quarante-huit, plus la tête**. Le bf16, qui n'a pas d'échelle, n'en
+        lance aucun.
+
+        Le cache est par dtype et non unique : rien ne garantit qu'un modèle
+        n'exécute qu'en un seul type, et convertir au placement supposerait de
+        connaître le dtype d'exécution au moment du placement — ce que
+        ``to(device)`` ne sait pas.
+
+        Numériquement identique : c'est la même conversion, faite une fois.
+        """
+        cache = self.__dict__.get("_cache_dtype")
+        if cache is None:
+            cache = {}
+            object.__setattr__(self, "_cache_dtype", cache)
+        s = cache.get(dtype)
+        if s is None:
+            s = self.scale.to(dtype)
+            cache[dtype] = s
+        return s
+
     def to(self, device, non_blocking: bool = False) -> "ChannelScaler":
+        # Un nouvel objet, donc un cache neuf : une echelle mise en cache pour
+        # cuda:0 ne doit jamais servir sur cuda:1.
         return ChannelScaler(
             self.scale.to(device, non_blocking=non_blocking)
             if self.scale is not None else None,
