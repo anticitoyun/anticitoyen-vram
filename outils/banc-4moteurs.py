@@ -608,6 +608,33 @@ Passage = namedtuple("Passage",
                      "tps ttft energie jetons texte duree morceaux source")
 
 
+def _temperature() -> int:
+    """Temperature de la carte mesuree, pour prouver le palier au lieu de le
+    supposer. Sans elle, « les deux moteurs etaient chauds » est une intention."""
+    try:
+        o = subprocess.run(["nvidia-smi", "-i", os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
+                            "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=10)
+        return int(o.stdout.strip().splitlines()[0])
+    except Exception:                            # noqa: BLE001
+        return -1
+
+
+def _dispersion_rel(v: list[float]) -> float:
+    """Etendue rapportee a la mediane, en %, sur les FLOTTANTS.
+
+    Calculer une dispersion sur la chaine publiee mesure le pas d'arrondi et
+    non la grandeur : sur 35 t/s a une decimale, ce pas vaut 0,286 %, et deux
+    sigma tires de la chaine (0,164 % et 0,000 %) ne decrivaient que
+    l'affichage.
+    """
+    v = [x for x in v if x]
+    if len(v) < 2:
+        return 0.0
+    med = sorted(v)[len(v) // 2]
+    return (max(v) - min(v)) / med * 100 if med else 0.0
+
+
 def mesurer(moteur):
     """Débit MÉDIAN et énergie du MÊME passage, puis la ligne de base après lui.
 
@@ -617,6 +644,39 @@ def mesurer(moteur):
     elle dérive, et la dérive se retrouve attribuée au moteur mesuré — c'est
     ce qui avait fait croire à une décroissance de coût le 7 septembre 2026.
     """
+    # ---- CHAUFFE : amener la carte a son palier thermique AVANT de mesurer
+    #
+    # Mesure du 9/09 sur 45 passages identiques : la puissance derive de
+    # 308,61 W (49 degC) a un palier de 317,39 W (54 degC), soit **8,78 W**.
+    # Ce n'est ni lineaire ni polynomial — c'est une chauffe exponentielle
+    # amortie, atteinte vers le passage 30, environ trois minutes.
+    #
+    # POURQUOI CELA COMPTE PLUS QU'UNE CORRECTION DE SECOND ORDRE : une
+    # campagne mesure un moteur PUIS l'autre. Le premier demarre froid, le
+    # second est deja chaud. Nos campagnes attribuent **14 W** d'ecart aux
+    # moteurs ; jusqu'a **8 W** peuvent etre thermiques. Plus de la moitie.
+    #
+    # Le contrebalancement `A B B A` avait ete envisage : il annule un biais
+    # LINEAIRE, pas une exponentielle amortie, et il coute deux chargements de
+    # plus. La chauffe traite la CAUSE au lieu de compenser l'effet.
+    #
+    # Au palier, l'etendue tombe a 0,45 W sur douze passages : un ecart de 1 W
+    # entre moteurs deviendrait mesurable.
+    #
+    # RESERVE : ce palier vaut pour CE modele, CE debit, CETTE temperature
+    # ambiante. Un modele plus gourmand chauffera plus haut et plus longtemps.
+    chauffe = float(os.environ.get("ACVRAM_CHAUFFE_S", "180"))
+    t_avant = _temperature()
+    if chauffe > 0:
+        log(f"           chauffe {chauffe:.0f} s (carte a {t_avant} degC)")
+        fin = time.time() + chauffe
+        while time.time() < fin:
+            try:
+                generer(moteur)
+            except Exception:                    # noqa: BLE001
+                break
+        log(f"           chauffe finie : {_temperature()} degC")
+
     passages = []
     for _ in range(MESURES):
         n, ttft, dt, e, txt, morceaux, source = generer(moteur)
@@ -709,6 +769,16 @@ def mesurer(moteur):
         "horloge_max": r["horloge_max"], "temp_max": r["temp_max"],
         "bridages": r["bridages"], "invalidations": r["invalidations"],
         "dispersion_pct": round(dispersion, 1),
+        # Dispersion des WATTS, calculee sur les flottants comme celle du
+        # debit — arrondie seulement a l'affichage, et a DEUX decimales.
+        # C'est elle qui decide si un ecart d'energie est resoluble : le debit
+        # ne borne la dispersion de `jkj` que PAR LE BAS (jkj = tps / watts),
+        # donc un debit parfaitement stable est compatible avec une puissance
+        # tres bruyante. Sans cette colonne la question reste indecidable.
+        "temp_avant": t_avant, "temp_apres": _temperature(),
+        "dispersion_W_pct": round(_dispersion_rel([
+            p.energie.get("watts", 0.0) if isinstance(p.energie, dict) else 0.0
+            for p in regime]), 2),
         "t_s_min": round(etendue[0], 1), "t_s_max": round(etendue[1], 1),
         "empreintes": ",".join(empreintes),
         "textes_identiques": "oui" if textes_identiques else "NON",
@@ -718,6 +788,27 @@ def mesurer(moteur):
         # l'ordre, la table de decision de docs/SERIE-DETERMINISME.md ne peut
         # pas etre appliquee (mesure du 8 septembre 2026).
         "t_s_passages": ",".join(f"{d:.1f}" for d in debits),
+        # Les watts et l'energie de CHAQUE passage, a deux decimales.
+        #
+        # Au singulier, une colonne ne peut pas etre mise a l'epreuve : le banc
+        # ne publiait qu'un `W`, celui du passage median, et la question « le
+        # -4,7 % d'energie est-il resoluble ? » etait donc indecidable sur les
+        # donnees publiees.
+        #
+        # LA PRECISION EST LA RAISON D'ETRE DE CES COLONNES. A l'entier, un
+        # jkj de 128 est quantifie a 0,78 % — un tiers du seuil de 2,4 %
+        # qu'elles existent pour eprouver. Elles naitraient incapables de
+        # repondre a la question qui les motive. Meme piege que `t_s_passages`
+        # a une decimale : sur 35 t/s, le pas d'arrondi vaut 0,286 %, et deux
+        # sigma calcules dessus (0,164 % et 0,000 %) ne mesuraient que
+        # l'affichage.
+        "W_passages": ",".join(f"{p.energie.get('watts', 0):.2f}"
+                               if isinstance(p.energie, dict) else "0.00"
+                               for p in regime),
+        "jkj_passages": ",".join(
+            f"{(p.jetons / (p.energie.get('J', 0) or 1) * 1000):.2f}"
+            if isinstance(p.energie, dict) and p.energie.get("J") else "0.00"
+            for p in regime),
         # Le temps au premier jeton DE CHAQUE passage. Le debit dit que le
         # premier passage coute ; le TTFT dit ou il coute. Si le premier TTFT
         # est seul eleve, le prix est paye avant la generation — lecture des
@@ -818,7 +909,7 @@ def main():
         with open(a.sortie, "w") as f:
             f.write("modele\tmoteur\talias\tctx\tt_s\tttft_ms\tW\tj_kJ\tjetons\tchargement_s\tetat\tapercu\t"
                     "J\tJ_net\tW_repos\tj_kJ_net\tplafond_W\thorloge_min\thorloge_max\ttemp_max\t"
-                    "ttft_froid_ms\tbridages\tdispersion_pct\tt_s_min\tt_s_max\tt_s_passages\tttft_passages\t"
+                    "W_passages\tjkj_passages\tdispersion_W_pct\ttemp_avant\ttemp_apres\tttft_froid_ms\tbridages\tdispersion_pct\tt_s_min\tt_s_max\tt_s_passages\tttft_passages\t"
                     "jetons_moteur\tjetons_flux\tjetons_source\tbinaire\tctx_servi\t"
                     "empreintes\ttextes_identiques\t"
                     "invalidations\n")
@@ -854,7 +945,10 @@ def main():
                         f"{jkj:.0f}\t{n}\t{charge:.0f}\t{etat}\t{apercu}\t"
                         f"{v('J', 0)}\t{v('J_net', 0)}\t{v('W_repos', 0)}\t{v('jkj_net', 0)}\t"
                         f"{v('plafond_W', 0)}\t{v('horloge_min', -1)}\t{v('horloge_max', -1)}\t"
-                        f"{v('temp_max', -1)}\t{v('ttft_froid_ms', -1)}\t"
+                        f"{v('temp_max', -1)}\t{v('W_passages', '?')}\t"
+                        f"{v('jkj_passages', '?')}\t{v('dispersion_W_pct', -1)}\t"
+                        f"{v('temp_avant', -1)}\t{v('temp_apres', -1)}\t"
+                        f"{v('ttft_froid_ms', -1)}\t"
                         f"{v('bridages', '?')}\t{v('dispersion_pct', 0)}\t"
                         f"{v('t_s_min', 0)}\t{v('t_s_max', 0)}\t{v('t_s_passages', '?')}\t"
                         f"{v('ttft_passages', '?')}\t"
