@@ -30,11 +30,16 @@ OCTETS = {"nvfp4": .5625, "int4_awq": .5625, "int8": 1.0625,
 GROUPES = {"qkv": ("self_attn", ["q", "k", "v"]),
            "gate_up": ("mlp", ["gate", "up"])}
 # `fuse()` n essaie QUE trois empileurs : int8, nvfp4, plain (bf16/fp16).
-# int4_awq et q3n n en ont aucun — un groupe parfaitement homogene dans ces
-# formats ne fusionne JAMAIS. Compter l homogeneite comme une liberte, c est
-# lire la propriete voisine de celle qui decide. Releve par poste4 sur la
-# vraie `Attention.fuse()` : 135 groupes du parc, tous int4_awq.
-EMPILABLES = {"nvfp4", "int8", "bf16", "fp16"}
+# q3n n en a aucun — un groupe parfaitement homogene en q3n ne fusionne
+# JAMAIS. Compter l homogeneite comme une liberte, c est lire la propriete
+# voisine de celle qui decide.
+#
+# int4_awq en a un depuis `stack_int4_awq_linears` : ses `scales` sont deja
+# `[out, in//group]`, une echelle par ligne de sortie, si bien que la
+# concatenation sur l axe 0 est exacte sans rien introduire — la ou NVFP4,
+# porteur d une echelle globale scalaire, avait eu besoin de
+# `global_scale_rows`. Les 135 groupes releves fusionnent depuis.
+EMPILABLES = {"nvfp4", "int8", "int4_awq", "bf16", "fp16"}
 
 
 def _echelles_egales(dossier, wm, cles):
