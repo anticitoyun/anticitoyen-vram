@@ -29,6 +29,7 @@ prise — dit ici plutôt qu'ignoré.
 from __future__ import annotations
 
 import ctypes
+import os
 import threading
 import time
 
@@ -60,13 +61,25 @@ class _Nvml:
             raise NvmlAbsent("initialisation refusée")
         n = ctypes.c_uint()
         self.l.nvmlDeviceGetCount_v2(ctypes.byref(n))
+        # NVML IGNORE CUDA_VISIBLE_DEVICES (etabli le 8/09). Sans ce filtre,
+        # toute mesure agrege les cartes que la campagne n'utilise pas : le
+        # 9/09, `plafond_W` valait 875 W — soit 500 (5090) + 375 (3080 Ti) —,
+        # la puissance publiee incluait les services permanents de la 3080 Ti,
+        # et un drapeau de bridage venait de la carte qui ne participait pas.
+        # L'energie par jeton, qui EST l'objectif du projet, etait donc fausse.
+        visibles = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+        garder = None
+        if visibles:
+            garder = {int(x) for x in visibles.split(",") if x.strip().isdigit()}
         self.cartes = []
         for i in range(n.value):
+            if garder is not None and i not in garder:
+                continue
             h = ctypes.c_void_p()
             if self.l.nvmlDeviceGetHandleByIndex_v2(i, ctypes.byref(h)) == 0:
                 self.cartes.append((i, h))
         if not self.cartes:
-            raise NvmlAbsent("aucune carte")
+            raise NvmlAbsent(f"aucune carte (CUDA_VISIBLE_DEVICES={visibles!r})")
 
     def _u32(self, fn, h, *a) -> int:
         v = ctypes.c_uint()

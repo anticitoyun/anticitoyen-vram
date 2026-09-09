@@ -608,6 +608,33 @@ Passage = namedtuple("Passage",
                      "tps ttft energie jetons texte duree morceaux source")
 
 
+def _temperature() -> int:
+    """Temperature de la carte mesuree, pour prouver le palier au lieu de le
+    supposer. Sans elle, « les deux moteurs etaient chauds » est une intention."""
+    try:
+        o = subprocess.run(["nvidia-smi", "-i", os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
+                            "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=10)
+        return int(o.stdout.strip().splitlines()[0])
+    except Exception:                            # noqa: BLE001
+        return -1
+
+
+def _dispersion_rel(v: list[float]) -> float:
+    """Etendue rapportee a la mediane, en %, sur les FLOTTANTS.
+
+    Calculer une dispersion sur la chaine publiee mesure le pas d'arrondi et
+    non la grandeur : sur 35 t/s a une decimale, ce pas vaut 0,286 %, et deux
+    sigma tires de la chaine (0,164 % et 0,000 %) ne decrivaient que
+    l'affichage.
+    """
+    v = [x for x in v if x]
+    if len(v) < 2:
+        return 0.0
+    med = sorted(v)[len(v) // 2]
+    return (max(v) - min(v)) / med * 100 if med else 0.0
+
+
 def mesurer(moteur):
     """Débit MÉDIAN et énergie du MÊME passage, puis la ligne de base après lui.
 
@@ -617,6 +644,39 @@ def mesurer(moteur):
     elle dérive, et la dérive se retrouve attribuée au moteur mesuré — c'est
     ce qui avait fait croire à une décroissance de coût le 7 septembre 2026.
     """
+    # ---- CHAUFFE : amener la carte a son palier thermique AVANT de mesurer
+    #
+    # Mesure du 9/09 sur 45 passages identiques : la puissance derive de
+    # 308,61 W (49 degC) a un palier de 317,39 W (54 degC), soit **8,78 W**.
+    # Ce n'est ni lineaire ni polynomial — c'est une chauffe exponentielle
+    # amortie, atteinte vers le passage 30, environ trois minutes.
+    #
+    # POURQUOI CELA COMPTE PLUS QU'UNE CORRECTION DE SECOND ORDRE : une
+    # campagne mesure un moteur PUIS l'autre. Le premier demarre froid, le
+    # second est deja chaud. Nos campagnes attribuent **14 W** d'ecart aux
+    # moteurs ; jusqu'a **8 W** peuvent etre thermiques. Plus de la moitie.
+    #
+    # Le contrebalancement `A B B A` avait ete envisage : il annule un biais
+    # LINEAIRE, pas une exponentielle amortie, et il coute deux chargements de
+    # plus. La chauffe traite la CAUSE au lieu de compenser l'effet.
+    #
+    # Au palier, l'etendue tombe a 0,45 W sur douze passages : un ecart de 1 W
+    # entre moteurs deviendrait mesurable.
+    #
+    # RESERVE : ce palier vaut pour CE modele, CE debit, CETTE temperature
+    # ambiante. Un modele plus gourmand chauffera plus haut et plus longtemps.
+    chauffe = float(os.environ.get("ACVRAM_CHAUFFE_S", "180"))
+    t_avant = _temperature()
+    if chauffe > 0:
+        log(f"           chauffe {chauffe:.0f} s (carte a {t_avant} degC)")
+        fin = time.time() + chauffe
+        while time.time() < fin:
+            try:
+                generer(moteur)
+            except Exception:                    # noqa: BLE001
+                break
+        log(f"           chauffe finie : {_temperature()} degC")
+
     passages = []
     for _ in range(MESURES):
         n, ttft, dt, e, txt, morceaux, source = generer(moteur)
@@ -630,10 +690,38 @@ def mesurer(moteur):
     # sur un couple a 21,3 % de dispersion contre 5,2 en face, le meilleur
     # donnait la victoire au plus instable. Le maximum reste publie a part,
     # il n'est simplement plus ce qu'on compare.
-    ordonnes = sorted(passages, key=lambda x: x.tps)
+    # UNE SEULE definition du regime, pour TOUTES les colonnes publiees.
+    #
+    # Avant le 8/09 le banc publiait « le meilleur des trois », ce qui ecartait
+    # le passage froid DE FAIT. Le passage au median a supprime cet ecartement
+    # sans que personne ne le remarque — et toute colonne suivant le passage
+    # median s'est mise a pouvoir publier la passe froide.
+    #
+    # Le 9/09, le cas s'est produit : llama.cpp a publie TTFT 125 ms
+    # (passages 125,45,33,33,33), donc le passage median EN DEBIT etait le
+    # premier. Les watts, les joules et les jetons/kJ de cette ligne venaient
+    # donc eux aussi de la passe froide. Une conclusion a ete inversee sur le
+    # TTFT (« +41,6 % en notre faveur » au lieu de -121 %), et l'energie —
+    # l'objectif du projet — etait touchee par le meme defaut sans qu'on le
+    # voie, parce que les DEUX bras du comparatif le subissaient egalement.
+    #
+    # La classe du defaut est « quelle passe publie-t-on ». On la traite en
+    # une fois plutot qu'en corrigeant les colonnes une a une.
+    regime = passages[1:] or passages
+    ordonnes = sorted(regime, key=lambda x: x.tps)
     median = ordonnes[len(ordonnes) // 2]
-    tps, ttft, e, n, txt, dt = (median.tps, median.ttft, median.energie,
-                                median.jetons, median.texte, median.duree)
+    tps, e, n, txt, dt = (median.tps, median.energie,
+                          median.jetons, median.texte, median.duree)
+    # Le TTFT a sa propre mediane : le passage le plus representatif en debit
+    # ne l'est pas forcement en latence de premier jeton.
+    _ttfts = sorted(p.ttft for p in regime)
+    ttft = _ttfts[len(_ttfts) // 2]
+    # Le TTFT du passage FROID est publie a part : il n'est pas du bruit, c'est
+    # ce que paie la premiere requete d'un utilisateur. Deux chiffres vrais
+    # dans deux conditions, comme le x2,7 des graphes et sa borne sur un dense.
+    ttft_froid = passages[0].ttft
+    # `debits` couvre TOUS les passages, froid compris : la dispersion reste
+    # conservatrice, et c'est voulu. Le median, lui, ne porte que le regime.
     etendue = (min(debits), max(debits))
 
     # Empreinte du texte de CHAQUE passage. A temperature zero, le meme
@@ -643,7 +731,16 @@ def mesurer(moteur):
     # identiques, une dispersion de debit ne peut pas venir du texte, et il
     # faut la chercher ailleurs (passage froid, cache, ordonnancement).
     empreintes = [hashlib.sha256(p.texte.encode()).hexdigest()[:8] for p in passages]
-    textes_identiques = len(set(empreintes)) == 1
+    # Le controle doit porter sur les MEMES donnees que la mesure qu'il garde.
+    # Le debit publie ecarte le premier passage ; le compter ici invalidait la
+    # campagne sur une passe dont personne ne se sert. Le 9/09, les deux
+    # moteurs ont diverge au premier passage et a lui seul (acvram
+    # e0e0c3e9 puis 036bb29d x4 ; llamacpp b1171ed9 puis 7dc6fe3e x4) — la
+    # selection d'algorithme cuBLAS au premier appel suffit a faire basculer
+    # un argmax serre. Les empreintes restent TOUTES publiees.
+    # Meme perimetre que le median publie : `regime`, pas un decoupage a part.
+    textes_identiques = len({hashlib.sha256(p.texte.encode()).hexdigest()[:8]
+                             for p in regime}) == 1
     watts = e.moyenne
     base = repos(secondes=min(max(dt, 5.0), 30.0))
     joules = e.joules
@@ -672,6 +769,16 @@ def mesurer(moteur):
         "horloge_max": r["horloge_max"], "temp_max": r["temp_max"],
         "bridages": r["bridages"], "invalidations": r["invalidations"],
         "dispersion_pct": round(dispersion, 1),
+        # Dispersion des WATTS, calculee sur les flottants comme celle du
+        # debit — arrondie seulement a l'affichage, et a DEUX decimales.
+        # C'est elle qui decide si un ecart d'energie est resoluble : le debit
+        # ne borne la dispersion de `jkj` que PAR LE BAS (jkj = tps / watts),
+        # donc un debit parfaitement stable est compatible avec une puissance
+        # tres bruyante. Sans cette colonne la question reste indecidable.
+        "temp_avant": t_avant, "temp_apres": _temperature(),
+        "dispersion_W_pct": round(_dispersion_rel([
+            p.energie.get("watts", 0.0) if isinstance(p.energie, dict) else 0.0
+            for p in regime]), 2),
         "t_s_min": round(etendue[0], 1), "t_s_max": round(etendue[1], 1),
         "empreintes": ",".join(empreintes),
         "textes_identiques": "oui" if textes_identiques else "NON",
@@ -681,6 +788,27 @@ def mesurer(moteur):
         # l'ordre, la table de decision de docs/SERIE-DETERMINISME.md ne peut
         # pas etre appliquee (mesure du 8 septembre 2026).
         "t_s_passages": ",".join(f"{d:.1f}" for d in debits),
+        # Les watts et l'energie de CHAQUE passage, a deux decimales.
+        #
+        # Au singulier, une colonne ne peut pas etre mise a l'epreuve : le banc
+        # ne publiait qu'un `W`, celui du passage median, et la question « le
+        # -4,7 % d'energie est-il resoluble ? » etait donc indecidable sur les
+        # donnees publiees.
+        #
+        # LA PRECISION EST LA RAISON D'ETRE DE CES COLONNES. A l'entier, un
+        # jkj de 128 est quantifie a 0,78 % — un tiers du seuil de 2,4 %
+        # qu'elles existent pour eprouver. Elles naitraient incapables de
+        # repondre a la question qui les motive. Meme piege que `t_s_passages`
+        # a une decimale : sur 35 t/s, le pas d'arrondi vaut 0,286 %, et deux
+        # sigma calcules dessus (0,164 % et 0,000 %) ne mesuraient que
+        # l'affichage.
+        "W_passages": ",".join(f"{p.energie.get('watts', 0):.2f}"
+                               if isinstance(p.energie, dict) else "0.00"
+                               for p in regime),
+        "jkj_passages": ",".join(
+            f"{(p.jetons / (p.energie.get('J', 0) or 1) * 1000):.2f}"
+            if isinstance(p.energie, dict) and p.energie.get("J") else "0.00"
+            for p in regime),
         # Le temps au premier jeton DE CHAQUE passage. Le debit dit que le
         # premier passage coute ; le TTFT dit ou il coute. Si le premier TTFT
         # est seul eleve, le prix est paye avant la generation — lecture des
@@ -689,6 +817,10 @@ def mesurer(moteur):
         # 8 septembre 2026 : ni ~/.nv/ComputeCache ni ~/.triton/cache n'ont
         # ete ecrits pendant les series, donc ce n'est PAS de la compilation.
         "ttft_passages": ",".join(f"{p.ttft * 1000:.0f}" for p in passages),
+        # Le TTFT de la premiere requete, publie A COTE du regime : les deux
+        # sont vrais, dans deux conditions. Ne publier que le regime commet
+        # l'erreur symetrique de celle qu'on vient de reparer.
+        "ttft_froid_ms": round(ttft_froid * 1000),
         # Les deux comptages, pour que « jetons par seconde » veuille dire la
         # meme chose d'un moteur a l'autre.
         "jetons_moteur": n,
@@ -767,17 +899,34 @@ def main():
             sys.exit(2)
 
     faits = set()
-    reussies = echouees = 0
+    reussies = echouees = invalides = 0
     if os.path.exists(a.sortie):
+        entete = None
         for l in open(a.sortie):
             c = l.rstrip("\n").split("\t")
-            if len(c) >= 2 and not l.startswith("modele\t"):
-                faits.add((c[0], c[1]))
+            if l.startswith("modele\t"):
+                entete = c
+                continue
+            if len(c) < 2:
+                continue
+            # Une reprise ne doit sauter que ce qui a ABOUTI. Une ligne en
+            # erreur ou invalidee etait comptee comme faite : la mesure ne
+            # repartait jamais, et le TSV gardait sa ligne sans valeur.
+            def col(nom):
+                if not entete or nom not in entete:
+                    return ""
+                i = entete.index(nom)
+                return c[i] if i < len(c) else ""
+            if col("etat") != "ok":
+                continue
+            if col("invalidations") not in ("", "aucune", "?"):
+                continue
+            faits.add((c[0], c[1]))
     else:
         with open(a.sortie, "w") as f:
             f.write("modele\tmoteur\talias\tctx\tt_s\tttft_ms\tW\tj_kJ\tjetons\tchargement_s\tetat\tapercu\t"
                     "J\tJ_net\tW_repos\tj_kJ_net\tplafond_W\thorloge_min\thorloge_max\ttemp_max\t"
-                    "bridages\tdispersion_pct\tt_s_min\tt_s_max\tt_s_passages\tttft_passages\t"
+                    "W_passages\tjkj_passages\tdispersion_W_pct\ttemp_avant\ttemp_apres\tttft_froid_ms\tbridages\tdispersion_pct\tt_s_min\tt_s_max\tt_s_passages\tttft_passages\t"
                     "jetons_moteur\tjetons_flux\tjetons_source\tbinaire\tctx_servi\t"
                     "empreintes\ttextes_identiques\t"
                     "invalidations\n")
@@ -804,6 +953,12 @@ def main():
                 log(f"           ÉCHEC {etat}")
             if etat.startswith("erreur"):
                 echouees += 1
+            elif energie.get("invalidations", "aucune") != "aucune":
+                # « valide » comptait « n'a pas leve d'exception ». Une mesure
+                # invalidee par le bridage etait annoncee valide, et la garde
+                # reussies==0 ne pouvait pas la voir : elle protegeait du cas
+                # absent, pas du cas faux.
+                invalides += 1
             else:
                 reussies += 1
             with open(a.sortie, "a") as f:
@@ -813,7 +968,11 @@ def main():
                         f"{jkj:.0f}\t{n}\t{charge:.0f}\t{etat}\t{apercu}\t"
                         f"{v('J', 0)}\t{v('J_net', 0)}\t{v('W_repos', 0)}\t{v('jkj_net', 0)}\t"
                         f"{v('plafond_W', 0)}\t{v('horloge_min', -1)}\t{v('horloge_max', -1)}\t"
-                        f"{v('temp_max', -1)}\t{v('bridages', '?')}\t{v('dispersion_pct', 0)}\t"
+                        f"{v('temp_max', -1)}\t{v('W_passages', '?')}\t"
+                        f"{v('jkj_passages', '?')}\t{v('dispersion_W_pct', -1)}\t"
+                        f"{v('temp_avant', -1)}\t{v('temp_apres', -1)}\t"
+                        f"{v('ttft_froid_ms', -1)}\t"
+                        f"{v('bridages', '?')}\t{v('dispersion_pct', 0)}\t"
                         f"{v('t_s_min', 0)}\t{v('t_s_max', 0)}\t{v('t_s_passages', '?')}\t"
                         f"{v('ttft_passages', '?')}\t"
                         f"{v('jetons_moteur', '?')}\t{v('jetons_flux', '?')}\t"
@@ -821,7 +980,8 @@ def main():
                         f"{v('empreintes', '?')}\t"
                         f"{v('textes_identiques', '?')}\t{v('invalidations', '?')}\n")
         arreter(m)
-    log(f"TERMINÉ — {reussies} mesure(s) valide(s), {echouees} échec(s)")
+    log(f"TERMINÉ — {reussies} mesure(s) valide(s), "
+        f"{invalides} invalidée(s), {echouees} échec(s)")
     # Trois campagnes de suite ont fini en code 0 sans une seule mesure, le
     # 9/09/2026 : garde inconditionnelle, TSV vide, puis lignes a t_s 0.0. Le
     # code de sortie ne portait aucune information et il a cesse d'etre lu.
