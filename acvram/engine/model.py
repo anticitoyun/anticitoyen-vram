@@ -225,7 +225,7 @@ class Attention(nn.Module):
         # quelle que soit la petite — mesure a 0,01 us pres.
         if len(lins) < 3:
             return False
-        # MESUREE A -12,16 % PAR poste2 le 9/09/2026 sur qwen25-coder-14b :
+        # MESUREE A -12,16 % le 9/09/2026 sur qwen25-coder-14b :
         # 82,15 pas/s sans fusion partielle contre 72,16 avec, seuil de
         # detection 0,51 %. Le premier passage vaut encore 81,72 puis tout
         # bascule a 72 et y reste — une bascule, pas une dispersion. Tant que

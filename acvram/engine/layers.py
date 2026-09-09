@@ -1185,7 +1185,7 @@ def stack_int8_linears(lins: list) -> Optional["QuantLinear"]:
     # groupes tout-int8 des modeles a biais — Qwen2.5 en porte sur q, k et v —
     # alors que `stack_nvfp4_linears` les accepte depuis ce matin avec la meme
     # justification, 150 lignes plus haut. Deux fonctions voisines, deux
-    # regles opposees sur le meme objet : releve par poste4 en dressant la
+    # regles opposees sur le meme objet : releve en dressant la
     # table de verite des quatre cas (int8/nvfp4 x avec/sans biais).
     biais = [l.bias for l in lins]
     if any((b is None) != (biais[0] is None) for b in biais):

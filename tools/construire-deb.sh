@@ -46,6 +46,20 @@ for nom in $DOCS_PUBLIQUES; do
 done
 find "$PKG" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 
+# ---- controle de contenu ---------------------------------------------------
+# La liste blanche choisit les FICHIERS ; elle ne dit rien de ce qu'ils
+# CONTIENNENT. Le premier paquet construit apres elle portait encore deux noms
+# de sessions de travail internes, dans des commentaires de `layers.py` et de
+# `model.py` — deux fichiers de code que personne n'aurait pense a relire pour
+# cela. Un motif trouve arrete la construction : mieux vaut ne pas livrer que
+# livrer ce qu'on n'a pas relu.
+MOTIFS_INTERDITS='anticitoyenlm|/home/[a-z]+/Bureau|9c9efa0|234ead47'
+if trouve=$(grep -rlniE "$MOTIFS_INTERDITS" "$PKG" 2>/dev/null); then
+    echo "REFUS : le paquet contient un motif interdit." >&2
+    grep -rniE "$MOTIFS_INTERDITS" "$PKG" 2>/dev/null | sed "s|$PKG||" | head -20 >&2
+    exit 1
+fi
+
 # ---- lanceur ---------------------------------------------------------------
 cat > "$PKG/usr/bin/acvram" <<'LANCEUR'
 #!/usr/bin/env bash
