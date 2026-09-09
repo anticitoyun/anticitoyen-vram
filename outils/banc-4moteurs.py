@@ -899,12 +899,29 @@ def main():
             sys.exit(2)
 
     faits = set()
-    reussies = echouees = 0
+    reussies = echouees = invalides = 0
     if os.path.exists(a.sortie):
+        entete = None
         for l in open(a.sortie):
             c = l.rstrip("\n").split("\t")
-            if len(c) >= 2 and not l.startswith("modele\t"):
-                faits.add((c[0], c[1]))
+            if l.startswith("modele\t"):
+                entete = c
+                continue
+            if len(c) < 2:
+                continue
+            # Une reprise ne doit sauter que ce qui a ABOUTI. Une ligne en
+            # erreur ou invalidee etait comptee comme faite : la mesure ne
+            # repartait jamais, et le TSV gardait sa ligne sans valeur.
+            def col(nom):
+                if not entete or nom not in entete:
+                    return ""
+                i = entete.index(nom)
+                return c[i] if i < len(c) else ""
+            if col("etat") != "ok":
+                continue
+            if col("invalidations") not in ("", "aucune", "?"):
+                continue
+            faits.add((c[0], c[1]))
     else:
         with open(a.sortie, "w") as f:
             f.write("modele\tmoteur\talias\tctx\tt_s\tttft_ms\tW\tj_kJ\tjetons\tchargement_s\tetat\tapercu\t"
@@ -936,6 +953,12 @@ def main():
                 log(f"           ÉCHEC {etat}")
             if etat.startswith("erreur"):
                 echouees += 1
+            elif energie.get("invalidations", "aucune") != "aucune":
+                # « valide » comptait « n'a pas leve d'exception ». Une mesure
+                # invalidee par le bridage etait annoncee valide, et la garde
+                # reussies==0 ne pouvait pas la voir : elle protegeait du cas
+                # absent, pas du cas faux.
+                invalides += 1
             else:
                 reussies += 1
             with open(a.sortie, "a") as f:
@@ -957,7 +980,8 @@ def main():
                         f"{v('empreintes', '?')}\t"
                         f"{v('textes_identiques', '?')}\t{v('invalidations', '?')}\n")
         arreter(m)
-    log(f"TERMINÉ — {reussies} mesure(s) valide(s), {echouees} échec(s)")
+    log(f"TERMINÉ — {reussies} mesure(s) valide(s), "
+        f"{invalides} invalidée(s), {echouees} échec(s)")
     # Trois campagnes de suite ont fini en code 0 sans une seule mesure, le
     # 9/09/2026 : garde inconditionnelle, TSV vide, puis lignes a t_s 0.0. Le
     # code de sortie ne portait aucune information et il a cesse d'etre lu.
