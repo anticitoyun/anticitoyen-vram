@@ -30,7 +30,53 @@ donc le second est mesuré chaud.** Le biais va toujours à son détriment. Comm
 acvram passe en premier depuis le début, **notre avantage énergétique publié est
 un plancher, pas un plafond.**
 
-## Alterner ne corrige rien
+## La dérive plafonne : trois minutes de chauffe suffisent
+
+Quarante-cinq passages, même dispositif :
+
+    passage    W      degC    ecart au palier
+          1   308,61    49      -8,78
+          6   310,92    50      -6,47
+         12   313,62    52      -3,77
+         21   315,63    53      -1,76
+         30   317,52    54      +0,13     <- palier
+         45   317,48    54      +0,09
+
+    palier 317,39 W — les douze derniers passages tiennent dans 0,45 W
+
+**Ce n'est ni linéaire ni polynomial : c'est une chauffe exponentielle amortie,
+et elle atteint son palier.**
+
+    a moins de 2,0 W du palier   passage 21   ~2 min de charge
+    a moins de 1,0 W             passage 28   ~3 min
+    a moins de 0,5 W             passage 30   ~3 min
+
+**Trois minutes de décodage à vide avant chaque moteur, et le biais tombe sous
+0,5 W** — sans chargement supplémentaire, sans séquence à retenir, et en
+traitant la cause au lieu de la compenser.
+
+**L'amplitude totale est de 8,78 W**, entre le premier passage et le palier. Nos
+campagnes attribuent 14 W d'écart aux moteurs : **si le premier démarre froid et
+le second à chaud, jusqu'à 8 W des 14 sont thermiques.** Ce n'est pas une
+correction de second ordre, c'est possiblement le terme principal.
+
+**Au palier, l'étendue tombe à 0,45 W** : un écart de 14 W vaut alors trente
+fois la dispersion, et même 1 W serait mesurable.
+
+### Protocole retenu
+
+    3 minutes de decodage a vide AVANT chaque moteur mesure
+    relever la temperature au debut ET a la fin de chaque moteur
+    -> le tableau porte la preuve que les deux etaient au meme palier
+
+Réserves : ce palier vaut pour **ce modèle, ce débit, cette température
+ambiante** — un modèle plus gourmand chauffera plus haut et plus longtemps.
+
+## Les plans d'ordre, et pourquoi ils ne servent plus
+
+Ce qui suit reste vrai et a été vérifié, mais **la chauffe traite la cause**, ce
+que ces plans ne font que compenser — et ils ne compensent qu'un biais
+*polynomial*, ce qu'une exponentielle amortie n'est pas.
 
 Le biais est proportionnel à l'écart des **barycentres temporels** des deux
 moteurs. Moments d'ordre 1 et 2 des positions, écart B − A :
@@ -51,7 +97,7 @@ chargements de plus que l'actuel — environ une minute par moteur, pas dix.
 
 **Doubler `ABBA` n'ajoute aucun ordre** et dégrade l'ordre 3 (de −9 à −21). Pour
 annuler le terme quadratique il faut **inverser** la seconde moitié : la
-séquence de Thue-Morse `A B B A B A A B`.
+séquence de Thue-Morse `A B B A B A A B`, vérifiée nulle aux ordres 1 et 2.
 
 ## Limite, à déclarer plutôt qu'à cacher
 
