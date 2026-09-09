@@ -246,17 +246,29 @@ def cmd_convert(args: argparse.Namespace) -> int:
     rig = detect_rig(args.profile)
     spec = load_model_spec(args.model, args.name)
     if not args.out:
+        # Les chemins de la machine de developpement etaient codes ici en
+        # dur, avec le nom d'utilisateur dedans : ils partaient tels quels
+        # dans le paquet .deb, chez quiconque l'installe. Le repli se lit
+        # desormais dans un fichier de configuration, absent par defaut.
         base = os.environ.get("ACVRAM_MODELS_DIR")
-        # Les convertis vivent sur le SSD : ils se chargent à chaque lancement,
-        # alors qu'un original ne se lit qu'à la conversion. Le HDD garde un
-        # lien de compatibilité vers ce même dossier.
-        for candidat in ("/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram",
-                         "/mnt/4TO_SATACMR_2022/Modeles/models_acvram"):
-            if not base and os.path.isdir(candidat):
-                base = candidat
         if not base:
-            print(red("aucun repertoire de sortie : passez -o, ou posez "
-                      "ACVRAM_MODELS_DIR"))
+            conf = os.path.join(
+                os.environ.get("XDG_CONFIG_HOME",
+                               os.path.expanduser("~/.config")),
+                "acvram", "modeles")
+            try:
+                with open(conf) as f:
+                    for ligne in f:
+                        ligne = ligne.strip()
+                        if ligne and not ligne.startswith("#") and os.path.isdir(ligne):
+                            base = ligne
+                            break
+            except OSError:
+                pass
+        if not base:
+            print(red("aucun repertoire de sortie : passez -o, posez "
+                      "ACVRAM_MODELS_DIR, ou ecrivez un chemin par ligne "
+                      f"dans {conf}"))
             return 2
         args.out = os.path.join(base, spec.name.replace("/", "--"))
         print(f"  sortie : {args.out}")

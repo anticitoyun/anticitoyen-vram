@@ -17,7 +17,17 @@ PKG="$STAGE/acvram_${VERSION}_amd64"
 install -d "$PKG/usr/share/acvram" "$PKG/usr/bin" "$PKG/DEBIAN" \
            "$PKG/usr/share/doc/acvram"
 cp -r acvram pyproject.toml install.sh README.md LICENSE "$PKG/usr/share/acvram/"
-cp -r docs "$PKG/usr/share/doc/acvram/"
+# docs/ contenait 8 fichiers de mesure INTERNE — comparatifs, rebancs,
+# releves de repetabilite — qui n'ont rien a faire dans un paquet distribue,
+# et FEUILLE-DE-ROUTE.md y porte le chemin et le nom d'utilisateur de la
+# machine de developpement. Seuls les documents utiles a qui installe sont
+# copies, et jamais un .tsv ni un .txt de mesure.
+for d in docs/*.md; do
+    case "$(basename "$d")" in
+        FEUILLE-DE-ROUTE.md|REPRISE.md|CHANTIER-*) continue ;;
+    esac
+    install -m 644 "$d" "$PKG/usr/share/doc/acvram/"
+done
 find "$PKG" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 
 # ---- lanceur ---------------------------------------------------------------
