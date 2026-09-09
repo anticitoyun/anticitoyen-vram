@@ -442,8 +442,25 @@ class MLP(nn.Module):
                 if ext is not None and hasattr(ext, "swiglu_bf16"):
                     return self.down_proj(ext.swiglu_bf16(gu))
             g, u = gu.split(gu.shape[-1] // 2, dim=-1)
-            return self.down_proj(self._act(g) * u)
-        return self.down_proj(self._act(self.gate_proj(x)) * self.up_proj(x))
+            return self.down_proj(self._fusionner(g, u))
+        return self.down_proj(self._fusionner(self.gate_proj(x),
+                                              self.up_proj(x)))
+
+    def _fusionner(self, g: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+        """SiLU(g) * u en un lancement quand le noyau est la.
+
+        Le chemin non fusionne payait silu PUIS produit -- deux noyaux par
+        couche -- alors que le chemin fusionne n'en payait qu'un. Or le nvfp4
+        n'empile pas ses projections (echelles d'activation differentes) : il
+        prenait donc systematiquement le chemin a deux noyaux. Mesure sous ncu :
+        48 `silu_kernel` par pas cote nvfp4, zero cote bf16 fusionne.
+        """
+        if self.act == "silu" and g.is_cuda and g.dtype == torch.bfloat16:
+            from .. import kernels
+            ext = kernels.get_extension()
+            if ext is not None and hasattr(ext, "swiglu2_bf16"):
+                return ext.swiglu2_bf16(g, u)
+        return self._act(g) * u
 
 
 class MLP2(nn.Module):

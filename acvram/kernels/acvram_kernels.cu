@@ -2474,6 +2474,46 @@ __global__ void swiglu_bf16_kernel(const __nv_bfloat16 *__restrict__ gu,
     y[i] = __float2bfloat16(sb * u);
 }
 
+// Variante a DEUX entrees separees : meme calcul, mais sans exiger que gate et
+// up soient contigus dans un seul tenseur.
+//
+// swiglu_bf16 n'etait atteignable que par la branche fusionnee, qui exige que
+// gate/up soient empiles. Le nvfp4 ne fusionne pas -- ses echelles d'activation
+// different entre projections -- et payait donc silu PUIS produit, deux noyaux
+// par couche la ou le bf16 fusionne n'en paie qu'un. Mesure sous ncu :
+// 48 `silu_kernel` par pas cote nvfp4, zero cote bf16.
+__global__ void swiglu2_bf16_kernel(const __nv_bfloat16 *__restrict__ g,
+                                    const __nv_bfloat16 *__restrict__ u,
+                                    __nv_bfloat16 *__restrict__ y, long n) {
+    const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float gv = __bfloat162float(g[i]);
+    const float uv = __bfloat162float(u[i]);
+    const float s = gv / (1.f + __expf(-gv));                  // SiLU, comme torch
+    const float sb = __bfloat162float(__float2bfloat16(s));    // arrondi rendu
+    y[i] = __float2bfloat16(sb * uv);
+}
+
+torch::Tensor swiglu2_bf16(torch::Tensor g, torch::Tensor u) {
+    CHECK_CUDA(g); ACVRAM_DEVICE_GUARD(g);
+    TORCH_CHECK(g.scalar_type() == torch::kBFloat16 &&
+                u.scalar_type() == torch::kBFloat16,
+                "swiglu2_bf16 : bf16 attendu");
+    TORCH_CHECK(g.sizes() == u.sizes(), "swiglu2_bf16 : memes formes attendues");
+    auto gc = g.contiguous(), uc = u.contiguous();
+    auto y = torch::empty_like(gc);
+    const long n = y.numel();
+    const int th = 256;
+    swiglu2_bf16_kernel<<<(unsigned)((n + th - 1) / th), th, 0,
+                          at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const __nv_bfloat16 *>(gc.data_ptr()),
+        reinterpret_cast<const __nv_bfloat16 *>(uc.data_ptr()),
+        reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), n);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return y;
+}
+
+
 torch::Tensor swiglu_bf16(torch::Tensor gu) {
     CHECK_CUDA(gu); ACVRAM_DEVICE_GUARD(gu);
     TORCH_CHECK(gu.scalar_type() == torch::kBFloat16, "swiglu_bf16 : bf16 attendu");
@@ -2496,6 +2536,9 @@ torch::Tensor swiglu_bf16(torch::Tensor gu) {
 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("swiglu2_bf16", &swiglu2_bf16,
+          "SwiGLU sur gate et up separes : SiLU(gate) * up",
+          py::arg("g"), py::arg("u"));
     m.def("swiglu_bf16", &swiglu_bf16,
           "SwiGLU fusionne sur une sortie gate/up empilee : SiLU(gate) * up",
           py::arg("gu"));

@@ -141,3 +141,50 @@ def test_swiglu_sur_lot_large(lot):
     gu = torch.cat([g, u], dim=-1).contiguous()
     attendu = torch.nn.functional.silu(g) * u
     assert torch.equal(ext.swiglu_bf16(gu), attendu)
+
+
+# --- le SwiGLU à deux entrées, pour le chemin NON fusionné -------------------
+
+def _ext_swiglu2():
+    if not torch.cuda.is_available():
+        return None
+    from acvram import kernels
+    ext = kernels.get_extension()
+    return ext if ext is not None and hasattr(ext, "swiglu2_bf16") else None
+
+
+@pytest.mark.skipif(_ext_swiglu2() is None,
+                    reason="extension CUDA sans swiglu2_bf16 (ou pas de GPU)")
+@pytest.mark.parametrize("lot", [1, 8, 88, 512])
+def test_swiglu2_identique_a_torch(lot):
+    """Le chemin non fusionné payait silu PUIS produit. Le noyau à deux entrées
+    doit rendre exactement la même chose — arrondi intermédiaire compris."""
+    ext = _ext_swiglu2()
+    g = torch.randn(lot, 256, device="cuda").to(torch.bfloat16)
+    u = torch.randn(lot, 256, device="cuda").to(torch.bfloat16)
+    assert torch.equal(ext.swiglu2_bf16(g, u),
+                       torch.nn.functional.silu(g) * u)
+
+
+@pytest.mark.skipif(_ext_swiglu2() is None,
+                    reason="extension CUDA sans swiglu2_bf16 (ou pas de GPU)")
+def test_swiglu2_et_swiglu_empile_concordent():
+    """Les deux chemins doivent rendre la même chose, sans quoi un modèle
+    changerait de sortie selon qu'il fusionne ou non."""
+    ext = _ext_swiglu2()
+    g = torch.randn(4, 128, device="cuda").to(torch.bfloat16)
+    u = torch.randn(4, 128, device="cuda").to(torch.bfloat16)
+    gu = torch.cat([g, u], dim=-1).contiguous()
+    assert torch.equal(ext.swiglu2_bf16(g, u), ext.swiglu_bf16(gu))
+
+
+@pytest.mark.skipif(_ext_swiglu2() is None,
+                    reason="extension CUDA sans swiglu2_bf16 (ou pas de GPU)")
+def test_swiglu2_sur_valeurs_extremes():
+    """Là où un exp() approché divergerait."""
+    ext = _ext_swiglu2()
+    v = torch.tensor([-60., -8., -1e-3, 0., 1e-3, 8., 60.], device="cuda")
+    g = v.repeat(2, 1).to(torch.bfloat16)
+    u = v.flip(0).repeat(2, 1).to(torch.bfloat16)
+    assert torch.equal(ext.swiglu2_bf16(g, u),
+                       torch.nn.functional.silu(g) * u)
