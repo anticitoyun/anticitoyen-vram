@@ -39,6 +39,11 @@ VARIABLES_LUES = {
     "ACVRAM_MLA_BATCH",
     "ACVRAM_MLA_DEBUG_ECART",
     "ACVRAM_MLA_EAGER_TORCH",
+    # Bras du banc a trois bras de l'attention paginee. Lu par le noyau, donc
+    # il DOIT etre declare ici : la garde l'a signale comme inconnu, ce qui est
+    # exactement son role — une variable posee qui ne va nulle part est une
+    # consigne silencieusement ignoree.
+    "ACVRAM_PA_ARM",
     "ACVRAM_SCALER_SANS_CACHE",
     # ACVRAM_SRC_HASH n'est PAS une variable d'environnement : c'est une option
     # de compilation (-D) portant le sha du .cu. Elle figure ici parce que
