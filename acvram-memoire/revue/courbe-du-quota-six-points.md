@@ -107,3 +107,35 @@ Ce que cela change pour le chantier `alpha` : le gain est **plus grand sur les
 dossiers les moins promus** — donc sur les modèles serrés en mémoire, ceux où le
 débit compte le plus. C'est favorable, et c'est l'inverse de ce que j'aurais
 supposé.
+
+## Le témoin plafond ferme la réserve de mécanisme
+
+Mesuré par poste4, et les 128 octets d'écart qu'elle attribuait au bruit sont
+maintenant **nommés** :
+
+```
+                       fichiers        en-tetes      donnees        tenseurs
+tout-int8 (format)   7 029 266 352     116 656   7 029 149 696        996
+plafond (sac a dos)  7 029 266 480     116 784   7 029 149 696        996
+ecart                       +128           +128            0            0
+```
+
+**Les octets de données sont identiques à l'octet**, et les 996 clefs de
+tenseurs sont les mêmes. Les 128 octets vivent entièrement dans les en-têtes
+safetensors, et leur cause est un **découpage de fragments différent** — 600/396
+tenseurs contre 639/357 — qui change la longueur des décalages écrits en JSON :
+
+```
+int8      70 584 + 46 056 + 16 o de prefixes = 116 656
+plafond   75 008 + 41 760 + 16               = 116 784
+```
+
+Aucun `__metadata__` d'aucun côté. **Ce n'est donc pas « probablement du
+bruit » : c'est une frontière de fragment, et le contenu est le même.**
+
+**Conséquence : ma seconde hypothèse tombe.** Le sac à dos à budget égal au
+plafond et la conversion par format produisent le **même dossier**. Les deux
+mécanismes convergent quand le budget les y force, donc mon plafond de référence
+et un point de budget ne diffèrent pas par leur mécanisme. Si la perplexité
+confirme 5,4144, la courbe est homogène sur toute sa longueur et **l'inversion
+d'ordre du glouton est établie sans réserve de mécanisme**.
