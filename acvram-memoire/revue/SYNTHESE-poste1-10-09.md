@@ -305,6 +305,10 @@ Kog, qui est sur AMD MI300X.
 20,04    bits/poids « en bf16 »               ->  aucune source, mon arithmetique
 +0,9163  desaccord SNR contre perplexite      ->  presque tautologique, les deux
                                                   cles derivent des memes nombres
++0,9931  « l agregat qui predit la PPL »       ->  retire : un temoin BETE (les
+                                                  octets du dossier) atteint
+                                                  +0,9771, marge 0,016 sur six
+                                                  points ORDONNES par budget
 6,4 %    « de VRAM reprise » comme argument   ->  0 bascule de placement sur 18 modeles
 100x     etalement de l'echelle de sortie     ->  2,1x entre les quartiles 25 et 95
                                                   (le 98,7x tient a UN tenseur)
@@ -341,13 +345,34 @@ somme des erreurs ABSOLUES (approchees)                  +0,9539
 QUADRATURE des erreurs absolues                          +0,9931
 ```
 
-**La quadrature suit la perplexité mieux que les deux autres**, ce qui est
-cohérent avec une erreur qui se propage. Mais six points ne distinguent pas des
-écarts fins, et les trois agrégats dérivent des mêmes `out_snr_db` : ce test
-peut **écarter** un agrégat qui ne suit pas, il ne peut pas couronner le
-meilleur des trois. Et il ne teste **pas** l'additivité elle-même — pour cela il
-faudrait comparer la perplexité d'un ensemble de promotions à la somme de celles
-de chaque promotion seule.
+**Et le témoin bête retire ce résultat.** Troisième réserve de chef, la plus
+gênante : **les six points sont ordonnés par budget**, donc toute grandeur
+monotone en le budget corrélera au-dessus de +0,9. Passé dans le même calcul :
+
+```
+                                               correlation avec la PPL mesuree
+TEMOIN BETE : nombre de tenseurs promus                  +0,9597
+TEMOIN BETE : octets du dossier                          +0,9771
+TEMOIN BETE : le RANG seul (1,2,3...)                    -0,9759
+
+meilleur agregat  +0,9931   contre   meilleur temoin bete  +0,9771
+marge                                                     +0,0161
+```
+
+**Les octets du dossier n'ont aucun contenu prédictif et arrivent presque au
+même niveau.** Une marge de 0,016 sur six points ordonnés ne distingue rien :
+**le +0,9931 est retiré comme démonstration.** La corrélation mesure la
+monotonie commune au budget.
+
+Mon premier seuil de verdict était à 0,01, ce qui m'aurait laissé conclure
+« pas de la pure monotonie » avec 0,016 de marge — **un seuil qui laisse passer
+sa propre thèse de peu n'est pas un seuil.** Porté à 0,05.
+
+**Ce qui survit, et rien de plus** : l'ordre `rel < abs < quad` va dans le sens
+de l'argument de propagation sans le soutenir. Le trancher demande des points
+**non ordonnés** — plusieurs dossiers au **même** budget avec des clés
+différentes, ce que les bras A/B produisent précisément. Et le test ne mesure
+toujours **pas** l'additivité.
 
 ---
 

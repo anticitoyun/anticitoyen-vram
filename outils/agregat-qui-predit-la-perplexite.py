@@ -70,8 +70,21 @@ def main() -> int:
             print(f"  {nom:26s} aucun tenseur avec out_snr_db — dossier "
                   f"produit avant l'ajout du champ")
             continue
+        # TEMOINS VOLONTAIREMENT BETES. Troisieme reserve de chef, et la
+        # plus genante : les six points sont ORDONNES PAR BUDGET, donc
+        # perplexite et somme d'erreurs decroissent toutes deux avec lui.
+        # N'importe quelle grandeur monotone en le budget correlera au-dessus
+        # de +0,9 — la correlation mesurerait alors une MONOTONIE COMMUNE et
+        # non un pouvoir predictif. Ces temoins le disent : s'ils correlent
+        # aussi bien que les agregats, les agregats n'ont rien demontre.
+        n_int8 = sum(1 for v in t.values() if v.get("format") == "int8")
+        octets_dossier = sum(
+            (BASE / nom).glob("*.safetensors") and
+            f.stat().st_size for f in (BASE / nom).glob("*.safetensors"))
         lignes.append({"nom": nom, "ppl": ppl, "n": n, "rel": s_rel,
-                       "abs": s_abs, "quad": s_quad ** 0.5})
+                       "abs": s_abs, "quad": s_quad ** 0.5,
+                       "bete_promus": -n_int8, "bete_octets": -octets_dossier,
+                       "bete_rang": 0})
     if len(lignes) < 4:
         print(f"ECHEC / CAUSE: seulement {len(lignes)} dossiers exploitables "
               f"sur {len(POINTS)} — pas assez pour correler / "
@@ -85,11 +98,50 @@ def main() -> int:
               f"{l['rel']:12.4f} {l['abs']:12.2f} {l['quad']:12.2f}")
     print()
     ppl = [l["ppl"] for l in lignes]
+    # le rang pur : 1, 2, 3... c'est la MONOTONIE SEULE, sans aucun contenu
+    for i, l in enumerate(sorted(lignes, key=lambda l: l["bete_promus"])):
+        l["bete_rang"] = -(i + 1)
     for cle, etiq in (("rel", "somme des erreurs RELATIVES"),
                       ("abs", "somme des erreurs ABSOLUES (approchees)"),
                       ("quad", "QUADRATURE des erreurs absolues")):
         r = pearson([l[cle] for l in lignes], ppl)
-        print(f"  correlation avec la perplexite mesuree — {etiq:42s} {r:+.4f}")
+        print(f"  agregat  {etiq:44s} {r:+.4f}")
+    print()
+    for cle, etiq in (("bete_promus", "TEMOIN BETE : nombre de tenseurs promus"),
+                      ("bete_octets", "TEMOIN BETE : octets du dossier"),
+                      ("bete_rang", "TEMOIN BETE : le RANG seul (1,2,3...)")):
+        r = pearson([l[cle] for l in lignes], ppl)
+        print(f"  temoin   {etiq:44s} {r:+.4f}")
+    meilleur_bete = max(abs(pearson([l[c] for l in lignes], ppl))
+                        for c in ("bete_promus", "bete_octets", "bete_rang"))
+    meilleur_agr = max(abs(pearson([l[c] for l in lignes], ppl))
+                       for c in ("rel", "abs", "quad"))
+    print(f"\n  meilleur agregat {meilleur_agr:+.4f} contre meilleur temoin "
+          f"bete {meilleur_bete:+.4f}")
+    # SEUIL EXIGEANT, et il faut qu'il le soit : sur six points ordonnes par
+    # budget, une marge de quelques centiemes ne distingue rien. Mon premier
+    # seuil etait a 0,01 et il m'aurait laisse conclure « pas de la pure
+    # monotonie » avec une marge de 0,016 — c'est-a-dire me donner raison de
+    # justesse contre un temoin qui n'a AUCUN contenu. Un seuil qui laisse
+    # passer sa propre these de peu n'est pas un seuil.
+    if meilleur_bete >= meilleur_agr - 0.05:
+        print(f"  VERDICT : le meilleur temoin BETE atteint {meilleur_bete:+.4f} "
+              f"pour une marge de\n  seulement {meilleur_agr - meilleur_bete:+.4f}. "
+              f"Sur six points ORDONNES PAR BUDGET, cela ne distingue\n  rien : "
+              f"les octets du dossier n'ont AUCUN contenu predictif et arrivent "
+              f"presque\n  au meme niveau. LA CORRELATION MESURE LA MONOTONIE "
+              f"COMMUNE.\n\n  LE +0,9931 EST RETIRE COMME DEMONSTRATION. Ce qui "
+              f"survit, et rien de plus : l'ordre\n  rel < abs < quad va dans le "
+              f"sens de l'argument de propagation, sans le\n  soutenir. Le "
+              f"trancher demande des points NON ordonnes — plusieurs dossiers "
+              f"au\n  MEME budget avec des cles differentes, ce que les bras "
+              f"A/B produisent.")
+    else:
+        print(f"  VERDICT : les agregats depassent le meilleur temoin bete de "
+              f"{meilleur_agr - meilleur_bete:+.4f}.\n  L'ecart est faible sur "
+              f"six points ordonnes ; il ne suffit pas a couronner un agregat, "
+              f"mais\n  il n'est pas nul, donc les agregats ne sont pas de la "
+              f"pure monotonie.")
     print(f"\n  ({len(lignes)} points ; une correlation sur {len(lignes)} "
           f"points ne distingue pas des ecarts fins,\n   et les trois agregats "
           f"derivent des memes out_snr_db — ils ne sont pas independants.)")
