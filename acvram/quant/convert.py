@@ -164,16 +164,30 @@ def _h(n: float) -> str:
 # pourtant à 25. Un filet qui ignore un format doit le dire, pas se taire.
 PROMOTE = {"int4_awq": "int8", "nvfp4": "int8", "q3n": "int8", "int8": "bf16"}
 
-# Largeur nominale de chaque format, bits par poids échelles comprises. Sert à
+# Largeur nominale d'un format, bits par poids échelles comprises. Sert à
 # chiffrer le prix d'une promotion avant de la calculer : la mesurer d'abord
 # reviendrait à quantifier deux fois tous les tenseurs du modèle.
-BPW_NOMINAL = {"bf16": 16.0, "fp16": 16.0, "int8": 8.25, "q3n": 3.25,
-               "nvfp4": 4.5, "int4_awq": 4.25}
+#
+# Ce chiffre-ci est celui qui DECIDE : il alimente `bpw_cible`, donc le budget
+# mémoire, donc l'exil d'une couche — qui coûte 61 à 70 % du débit. Il était
+# écrit en dur dans un dictionnaire, TROISIEME copie de la même grandeur après
+# `FormatSpec.bpw` et `FormatSpec.bits_per_weight()`, et il en divergeait :
+# int8 8,25 contre 8,1875 réels à groupe 128, int4_awq 4,25 contre 4,15625.
+# Surtout, la valeur en dur ignorait `--group-size` : à groupe 32 l'int8 réel
+# vaut 8,75 et la constante 8,25 SOUS-estimait le budget de 5,7 % (401 Mio sur
+# 6,74e9 poids) — le sens dangereux, celui qui fait croire qu'un modèle tient.
+# Une seule source désormais : quant/formats.py, à la taille de groupe réelle.
+def bpw_nominal(fmt: str, group_size: int = 128) -> float:
+    try:
+        return formats.bits_per_weight(fmt, group_size=group_size)
+    except KeyError:
+        return 16.0
 
 
-def cout_promotion_mib(numel: int, base: str, cible: str) -> float:
+def cout_promotion_mib(numel: int, base: str, cible: str,
+                       group_size: int = 128) -> float:
     """Mébioctets qu'ajoute le passage de ``base`` à ``cible``."""
-    ecart = BPW_NOMINAL.get(cible, 16.0) - BPW_NOMINAL.get(base, 16.0)
+    ecart = bpw_nominal(cible, group_size) - bpw_nominal(base, group_size)
     return numel * ecart / 8 / 1048576
 
 SENSITIVE_SUFFIXES = (
@@ -800,7 +814,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     """Quantifie chaque tenseur dans le format qu'attend son appareil de destination."""
     t0 = time.time()
     spec = spec or load_model_spec(model_path)
-    bpw_cible = max((BPW_NOMINAL.get(t.weight_format, 4.5)
+    bpw_cible = max((bpw_nominal(t.weight_format, opts.group_size)
                      for t in plan.tiers if t.kind == "gpu"), default=4.5)
     octets_src = octets_du_modele(model_path)
     n_params = getattr(spec, "total_params", 0) or 0
@@ -842,7 +856,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         for lp in plan.layers:
             if getattr(lp, "fmt", None) and lp.exec_device in gpus | {"cpu"}:
                 lp.fmt = "q3n"
-        bpw_cible = BPW_NOMINAL["q3n"]
+        bpw_cible = bpw_nominal("q3n", opts.group_size)
         bascule_faite = True
         bpw_cible_nominal = "q3n"
     avert = garde_grossissement(octets_src, n_params,
@@ -973,7 +987,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 and metrics["out_snr_db"] < opts.snr_floor
                 and fmt in PROMOTE
                 and (not opts.promotion_cout_max_mib
-                     or cout_promotion_mib(tensor.numel(), fmt, PROMOTE[fmt])
+                     or cout_promotion_mib(tensor.numel(), fmt, PROMOTE[fmt],
+                                           opts.group_size)
                      <= opts.promotion_cout_max_mib)
                 and len(report.promotions) < opts.max_promotions * max(1, len(keys) + 1)):
             wider = PROMOTE[fmt]

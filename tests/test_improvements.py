@@ -381,7 +381,7 @@ def test_perplexity_runs_and_is_finite(converted, tiny_checkpoint):
                    device="cpu", dtype=torch.float32)
     assert math.isfinite(r.perplexity)
     assert r.tokens > 0
-    assert r.bits_per_weight > 0
+    assert r.bits_par_poids_en_memoire > 0
 
 
 def test_bits_budget_knapsack(tiny_checkpoint, target_rig, tmp_path_factory):

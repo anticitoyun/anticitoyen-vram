@@ -66,7 +66,12 @@ class EvalResult:
     par_contexte: dict[int, tuple[float, int]] = field(default_factory=dict)
     seconds: float = 0.0
     weights_bytes: int = 0
-    bits_per_weight: float = 0.0
+    # Nom explicite : ce chiffre est nbytes/params APRES chargement, donc il
+    # depend du dtype de chargement (26,99 en fp32, 20,04 en bf16 pour un meme
+    # dossier fp16 a 16,00 bits sur disque) et il inclut caches et tampons.
+    # Indicatif seulement. La densite qui DECIDE est analytique :
+    # quant/formats.py:bits_per_weight(fmt, group_size).
+    bits_par_poids_en_memoire: float = 0.0
     formats: dict[str, int] = field(default_factory=dict)
     avertissement: str = ""
     # Perplexite CUMULATIVE apres n fenetres, aux jalons de `_JALONS`. Le
@@ -90,7 +95,7 @@ class EvalResult:
             "windows": self.windows,
             "seconds": round(self.seconds, 2),
             "weights_bytes": self.weights_bytes,
-            "bits_per_weight": round(self.bits_per_weight, 3),
+            "bits_par_poids_en_memoire": round(self.bits_par_poids_en_memoire, 3),
             "formats": self.formats,
             "avertissement": self.avertissement,
             "cumul": {str(k): round(v, 4) for k, v in sorted(self.cumul.items())},
@@ -162,7 +167,8 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
                         min_context=min_context, window=window)
     result.weights_bytes = model.nbytes
     n_params = loaded.spec.total_params
-    result.bits_per_weight = (result.weights_bytes * 8 / n_params) if n_params else 0.0
+    result.bits_par_poids_en_memoire = ((result.weights_bytes * 8 / n_params)
+                                       if n_params else 0.0)
     for entry in loaded.manifest.get("tensors", {}).values():
         f = entry.get("format", "?")
         result.formats[f] = result.formats.get(f, 0) + 1
@@ -334,7 +340,7 @@ def render(results: list[EvalResult]) -> str:
     for r in results:
         delta = "" if r.perplexity == best else f"  (+{100*(r.perplexity/best-1):.1f}%)"
         lines.append(f"  {r.model:<{width}}  {r.perplexity:9.3f}  "
-                     f"{r.bits_per_weight:6.2f}  {r.weights_bytes/2**20:8.1f}Mio  "
+                     f"{r.bits_par_poids_en_memoire:6.2f}  {r.weights_bytes/2**20:8.1f}Mio  "
                      f"{r.tokens:8d}{delta}")
     # Les formats REELS du modele evalue, a cote du chiffre. Le 8/09/2026 un
     # dossier nomme « temoin-int8 » avait ses 72 projections de perceptron en
