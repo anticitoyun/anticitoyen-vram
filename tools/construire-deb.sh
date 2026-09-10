@@ -15,7 +15,9 @@ PKG="$STAGE/acvram_${VERSION}_amd64"
 
 # ---- code ------------------------------------------------------------------
 install -d "$PKG/usr/share/acvram" "$PKG/usr/bin" "$PKG/DEBIAN" \
-           "$PKG/usr/share/doc/acvram"
+           "$PKG/usr/share/doc/acvram" \
+           "$PKG/usr/share/applications" \
+           "$PKG/usr/share/icons/hicolor/scalable/apps"
 cp -r acvram pyproject.toml install.sh README.md LICENSE "$PKG/usr/share/acvram/"
 # docs/ contenait 8 fichiers de mesure INTERNE — comparatifs, rebancs,
 # releves de repetabilite — qui n'ont rien a faire dans un paquet distribue,
@@ -124,6 +126,21 @@ exec "$VENV/bin/acvram" "$@"
 LANCEUR
 chmod 755 "$PKG/usr/bin/acvram"
 
+# ---- bureau : entree de menu, icone, lanceur de console --------------------
+# Le paquet s'installait sans rien de visible. Un utilisateur qui vient de
+# faire `dpkg -i` n'a aucun moyen de savoir que quelque chose est installe :
+# pas d'icone, pas d'entree de menu, et un serveur qui ne repond qu'a des
+# clients OpenAI donc muet tant qu'on ne le sollicite pas.
+#
+# L'entree de menu n'appelle PAS `acvram serve` : celui-ci exige un repertoire
+# de modele et il n'y a pas de defaut raisonnable. Elle appelle un lanceur qui
+# cherche un serveur deja en marche et ouvre sa console ; s'il n'en trouve
+# aucun, il dit quoi taper au lieu de deviner un modele.
+install -m 755 packaging/acvram-console "$PKG/usr/bin/acvram-console"
+install -m 644 packaging/acvram.desktop "$PKG/usr/share/applications/acvram.desktop"
+install -m 644 packaging/acvram.svg \
+        "$PKG/usr/share/icons/hicolor/scalable/apps/acvram.svg"
+
 # ---- métadonnées -----------------------------------------------------------
 cat > "$PKG/DEBIAN/control" <<CTRL
 Package: acvram
@@ -131,7 +148,7 @@ Version: $VERSION
 Section: science
 Priority: optional
 Architecture: amd64
-Depends: python3 (>= 3.10), python3-venv, python3-pip, ca-certificates
+Depends: python3 (>= 3.10), python3-venv, python3-pip, ca-certificates, curl
 Recommends: nvidia-driver-575 | nvidia-driver-580 | nvidia-driver-595
 Maintainer: Anticitoyen <anticitoyen@users.noreply.gitlab.com>
 Homepage: https://outils.nuages.noho.st/gitlab/anticitoyen/anticitoyen-vram
@@ -144,6 +161,18 @@ Description: serveur d'inférence LLM pour GPU hétérogènes (NVFP4 + INT4)
  L'environnement Python (torch inclus) s'amorce au premier lancement dans
  ~/.local/share/acvram ; le paquet lui-même reste léger.
 CTRL
+
+cat > "$PKG/DEBIAN/postinst" <<'POSTINST'
+#!/bin/sh
+set -e
+# Sans ces deux rafraichissements, l'entree de menu et l'icone n'apparaissent
+# qu'a la prochaine ouverture de session : l'utilisateur conclut a tort que le
+# paquet n'a rien installe.
+[ -x /usr/bin/update-desktop-database ] && update-desktop-database -q /usr/share/applications || true
+[ -x /usr/bin/gtk-update-icon-cache ] && gtk-update-icon-cache -qf /usr/share/icons/hicolor || true
+exit 0
+POSTINST
+chmod 755 "$PKG/DEBIAN/postinst"
 
 dpkg-deb --build --root-owner-group "$PKG" >/dev/null
 mv "$PKG.deb" .

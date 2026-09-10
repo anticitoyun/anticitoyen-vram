@@ -19,8 +19,10 @@ from typing import Any, AsyncIterator, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
+from .. import __version__
+from .console import PAGE
 from ..engine.runner import Engine, GenerationOutput
 from ..engine.sampler import SamplingParams
 from .chat import Tokenizer, render_chat
@@ -193,6 +195,15 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
     async def _shutdown() -> None:
         service.stop()
 
+    # -- console ----------------------------------------------------------
+    # Le paquet s'installait sans rien de visible : ni entree de menu, ni
+    # icone, ni page. Un serveur qui ne repond qu'a des clients OpenAI est
+    # muet pour qui vient de l'installer et veut verifier qu'il tourne.
+    # La console ne recalcule rien : elle affiche ce que /metrics rend.
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    async def console() -> str:
+        return PAGE
+
     # -- introspection ----------------------------------------------------
     @app.get("/health")
     async def health() -> dict:
@@ -200,7 +211,11 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
 
     @app.get("/metrics")
     async def metrics() -> dict:
-        return {"engine": engine.stats.to_dict(), **app.state.info}
+        # `version` sert a la console, qui l'affiche en tete : sans elle on ne
+        # sait pas quelle version repond, et deux versions ont deja coexiste
+        # sur cette machine (paquet 0.5.0, venv 0.2.0).
+        return {"engine": engine.stats.to_dict(),
+                "version": __version__, **app.state.info}
 
     @app.get("/v1/models")
     async def list_models() -> ModelList:
