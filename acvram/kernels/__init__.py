@@ -235,7 +235,13 @@ def get_extension():
     try:
         from torch.utils.cpp_extension import load
         here = os.path.dirname(os.path.abspath(__file__))
-        cache = os.path.expanduser("~/.cache/acvram/kernels")
+        # Le repertoire de compilation est PARTAGE par tous les worktrees et le
+        # nom du module est fixe : deux sessions dont les sources diffferent
+        # s'ecrasent mutuellement le .so, 9 minutes a chaque bascule, et l'une
+        # peut profiler le noyau de l'autre. ACVRAM_KERNEL_CACHE isole une
+        # session qui modifie le .cu pendant qu'une autre mesure.
+        cache = os.path.expanduser(os.environ.get("ACVRAM_KERNEL_CACHE")
+                                   or "~/.cache/acvram/kernels")
         os.makedirs(cache, exist_ok=True)
         _purger_verrou(cache)
         _EXT = load(

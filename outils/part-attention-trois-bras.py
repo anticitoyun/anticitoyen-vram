@@ -69,7 +69,18 @@ def mesurer(bras: str, modele: str) -> dict:
         pas.append((time.perf_counter() - t) * 1000.0)
     ordonnes = sorted(pas[1:]) or sorted(pas)     # le premier passage est froid
     n = len(ordonnes)
-    return {"bras": bras, "pas_executes": len(pas), "n_retenus": n,
+    import hashlib
+    import re as _re
+    from acvram.kernels import get_extension
+    src = os.path.join(os.path.dirname(
+        os.path.abspath(sys.modules["acvram.kernels"].__file__)),
+        "acvram_kernels.cu")
+    chunk = _re.search(r"PA_CHUNK\s*=\s*(\d+)", open(src).read()).group(1)
+    so = getattr(get_extension(), "__file__", "") or ""
+    emp = (hashlib.sha256(open(so, "rb").read()).hexdigest()[:12]
+           if so and os.path.exists(so) else "inconnu")
+    return {"bras": bras, "pa_chunk": int(chunk), "so": so, "empreinte_so": emp,
+            "pas_executes": len(pas), "n_retenus": n,
             "median_ms": ordonnes[n // 2],
             "p10_ms": ordonnes[max(0, int(0.10 * n))],
             "p90_ms": ordonnes[min(n - 1, int(0.90 * n))],

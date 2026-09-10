@@ -794,6 +794,12 @@ __global__ void paged_attn_partial_kernel(
     // produits — le trafic memoire de arm=0 sans son calcul.
     // Les trois bras sont le meme binaire : aucun ecart de compilation entre eux.
     if (arm != 0) {
+        // La reduction passe par la memoire partagee et non par le seul
+        // __shfl : si D < blockDim (D = 32 ou 64), les warps dont aucun thread
+        // n'ecrit la sortie verraient leur `s` inutilise, et le compilateur
+        // eliminerait leurs lectures — le bras C lirait moins que le bras A,
+        // silencieusement. Ici tous les warps sont consommes quel que soit D.
+        __shared__ float sred[PA_WARPS];
         float s = 0.f;
         if (arm == 2) {
             const long fin = min(slen, (long)(c + 1) * PA_CHUNK);
@@ -812,6 +818,12 @@ __global__ void paged_attn_partial_kernel(
             for (int off = WARP / 2; off > 0; off >>= 1)
                 s += __shfl_down_sync(0xffffffffu, s, off);
         }
+        if (lane == 0) sred[wid] = s;
+        __syncthreads();          // la sortie anticipee ci-dessus est uniforme
+                                  // par bloc : tout le bloc arrive ici ou aucun
+        s = 0.f;
+        #pragma unroll
+        for (int w = 0; w < PA_WARPS; ++w) s += sred[w];
         // Meme empreinte d'ecriture que le noyau reel : ni elimine, ni
         // avantage par une sortie plus petite.
         if (threadIdx.x == 0) { part_m[out_off] = s; part_l[out_off] = 1.f; }
