@@ -536,26 +536,48 @@ class Engine:
         new = self._admit()
         outputs: list[GenerationOutput] = []
 
-        # On précalcule les séquences nouvellement admises une par une. Mêler
-        # une longue invite à un lot de décodage bloquerait derrière elle toutes
-        # les séquences en cours.
-        for seq in new:
+        # Lot groupé : un seul prefill pour toutes les séquences de `new` au
+        # lieu d'un par séquence. `input_layernorm` et le MoE
+        # (DecoderLayerGDN.forward) s'appliquent déjà sur le lot entier, hors
+        # de toute boucle par séquence ; seule MLAttention y reste bouclée
+        # (mla.py) — le gain est donc complet sur un modèle dense, partiel sur
+        # un hybride MLA. Garde conservatrice : seulement si AUCUNE séquence
+        # n'a de frontière instantanée à geler (`_frontiere_insta`), sinon la
+        # photographie par séquence (longueur d'invite différente d'une
+        # requête à l'autre) rendrait le lot incohérent — repli inchangé.
+        if new and os.environ.get("ACVRAM_PREFILL_BATCH") != "0" \
+                and all(self._frontiere_insta(s) is None for s in new):
             t0 = time.perf_counter()
-            coupe = self._frontiere_insta(seq)
-            if coupe is not None:
-                # Première passe jusqu'à la frontière, instantané, puis le
-                # reste : le point de reprise est ainsi le même d'une requête à
-                # l'autre tant que l'invite partage ses premiers jetons.
-                self.model(self._build_batch([seq], prefill=True, limite=coupe))
-                self._photographier(seq, coupe)
-                seq.cached_len = coupe
-            batch = self._build_batch([seq], prefill=True)
+            batch = self._build_batch(new, prefill=True)
             logits = self.model(batch)
             self.stats.prefill_seconds += time.perf_counter() - t0
-            self.stats.prefill_tokens += len(seq.prompt_ids) - seq.cached_len
-            seq.prefilled = True
-            outputs += self._emit(logits, [seq])
-            self._register_complete_blocks(seq)
+            self.stats.prefill_tokens += sum(len(s.prompt_ids) - s.cached_len for s in new)
+            for seq in new:
+                seq.prefilled = True
+            outputs += self._emit(logits, new)
+            for seq in new:
+                self._register_complete_blocks(seq)
+        else:
+            # On précalcule les séquences nouvellement admises une par une.
+            # Mêler une longue invite à un lot de décodage bloquerait derrière
+            # elle toutes les séquences en cours.
+            for seq in new:
+                t0 = time.perf_counter()
+                coupe = self._frontiere_insta(seq)
+                if coupe is not None:
+                    # Première passe jusqu'à la frontière, instantané, puis le
+                    # reste : le point de reprise est ainsi le même d'une requête à
+                    # l'autre tant que l'invite partage ses premiers jetons.
+                    self.model(self._build_batch([seq], prefill=True, limite=coupe))
+                    self._photographier(seq, coupe)
+                    seq.cached_len = coupe
+                batch = self._build_batch([seq], prefill=True)
+                logits = self.model(batch)
+                self.stats.prefill_seconds += time.perf_counter() - t0
+                self.stats.prefill_tokens += len(seq.prompt_ids) - seq.cached_len
+                seq.prefilled = True
+                outputs += self._emit(logits, [seq])
+                self._register_complete_blocks(seq)
 
         decodable = [s for s in self.running if s.prefilled and not s.finished]
         if decodable:
