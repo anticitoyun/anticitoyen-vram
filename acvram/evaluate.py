@@ -148,8 +148,10 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
     loaded = load_model(model_dir, dtype=dtype, device_override=device)
     tokenizer = load_tokenizer(model_dir)
     if tokenizer is None:
-        raise ValueError(f"pas de tokenizer.json dans {model_dir} ; la perplexité "
-                         f"en a besoin pour bâtir le flux de jetons")
+        from .server.chat import pourquoi_pas_de_tokenizer
+        raison = pourquoi_pas_de_tokenizer(model_dir) or "cause inconnue"
+        raise ValueError(f"la perplexité a besoin d'un tokenizer et n'en a "
+                         f"pas : {raison}")
 
     ids = tokenizer.encode(_load_corpus(corpus_path))[:max_tokens]
     if len(ids) < 16:
@@ -224,6 +226,38 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
         if start + window >= len(ids):
             break
 
+    # LE PROTOCOLE DIT « SEGMENTS DISJOINTS » QUAND stride == window, et il
+    # n'a pas besoin d'un autre mode : first_new vaut alors max(0, -1) = 0,
+    # donc chaque segment est contigu au precedent, sans recouvrement, et
+    # toutes ses positions sont notees une fois. C'est le protocole employe
+    # par la litterature de quantification pour la perplexite WikiText-2 —
+    # concatener le split, decouper en segments de 2048, moyenner la NLL.
+    # A appeler ainsi : perplexity(m, corpus_path=..., window=2048,
+    # stride=2048, min_context=0).
+    #
+    # ET LE COMPTE SE VERIFIE, sans quoi rien ne garantit qu'on note ce qu'on
+    # croit. En mode disjoint chaque jeton sauf le premier est predit
+    # exactement une fois, donc `counted` doit valoir len(ids) - 1 aux
+    # segments tronques pres. Un ecart signale un recouvrement ou un oubli, et
+    # se lirait sinon comme une perplexite legerement differente — la pire
+    # forme de defaut, celle qui ne se voit pas.
+    if stride == window and min_context == 0:
+        attendu = len(ids) - 1
+        reste = attendu % window
+        # le dernier segment est ignore s'il ne contient pas deux jetons
+        if reste == 1:
+            attendu -= 1
+        if counted != attendu:
+            # `avertissement` et non une liste : c'est le champ que porte
+            # EvalResult. Un garde-fou qui leve AttributeError au moment
+            # d'alerter ne garde rien — mon premier jet ecrivait dans
+            # result.warnings, qui n'existe pas.
+            manque = (f"mode disjoint : {counted} positions notees pour "
+                      f"{attendu} attendues sur {len(ids)} jetons — un jeton "
+                      "est compte deux fois ou pas du tout, et la perplexite "
+                      "ne porte pas sur le corpus annonce")
+            result.avertissement = (result.avertissement + " | " + manque
+                                    if result.avertissement else manque)
     result.tokens = counted
     if counted == 0:
         raise ValueError(
