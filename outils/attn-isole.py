@@ -48,11 +48,29 @@ M.kernels.paged_attention = sonde
 
 etape = os.environ.get("ACVRAM_PA_ETAPE", "3")
 chunk = os.environ.get("ACVRAM_PA_CHUNK", "512")
+# L'ETAPE REDUITE NE DOIT PAS ALIMENTER LE MOTEUR. A l'etape 0 le noyau sort
+# avant d'ecrire `out` — qui, quand C == 1, est rendu tel quel a l'appelant :
+# un `torch::empty` jamais initialise. Laisser le moteur GENERER dans cet etat
+# lui fait consommer de la memoire non initialisee couche apres couche, et la
+# generation finit en acces memoire illegal — observe deux fois, une fois dans
+# la capture de graphe, une fois dans un matmul. La bisection est un instrument
+# de mesure, pas un mode de fonctionnement : on genere en etape 3, et on ne
+# bascule que pour les appels CHRONOMETRES.
+# Le noyau relit getenv A CHAQUE APPEL (pas de static), donc la bascule depuis
+# Python suffit — verifie dans acvram_kernels.cu.
+os.environ.pop("ACVRAM_PA_ETAPE", None)          # generation : noyau complet
+
+def bascule(v):
+    if v == "3":
+        os.environ.pop("ACVRAM_PA_ETAPE", None)
+    else:
+        os.environ["ACVRAM_PA_ETAPE"] = v
 print(f"# etape={etape} chunk={chunk} · un appel isole, evenements CUDA, "
       f"mediane de {N_MESURES}")
 
 for lm in LMOTS:
     captures.clear()
+    bascule("3")                  # la generation qui suit doit etre correcte
     d = (7 * 4001) % max(1, len(MOTS) - lm - 50)
     # `hash()` sur str est SALE PAR PROCESSUS : deux executions ne
     # construiraient pas la meme invite, donc ne toucheraient pas les memes
@@ -74,6 +92,7 @@ for lm in LMOTS:
     # atomique. Une colonne « grille » reconstruite en Python dirait ce qui a
     # ete DEMANDE et corroborerait une fausse refutation ; ceci dit ce qui a
     # TOURNE. Le compteur est remis a zero, un appel, puis relu.
+    bascule(etape)                # a partir d'ici seulement, l'etape mesuree
     parts = None
     if etape == "0" and hasattr(kernels.get_extension(), "paged_attn_participants"):
         ext = kernels.get_extension()

@@ -23,10 +23,23 @@
 set -u
 S="$(cd "$(dirname "$0")" && pwd)"
 R="$(dirname "$S")"
-PY="$R/.venv/bin/python"
+# Le worktree n'a pas de venv : l'interpreteur est celui du depot principal.
+# MAIS son acvram installe pointe sur LE DEPOT PRINCIPAL — sans PYTHONPATH on
+# mesurerait un autre code que celui qu'on vient d'ecrire, et le controle
+# d'empreinte du .so ne le verrait pas : le .cu de l'autre arbre est coherent
+# avec son propre binaire. On execute le code, pas l'artefact.
+PY=~/Bureau/Claude/anticitoyen-vram/.venv/bin/python
+export PYTHONPATH="$R${PYTHONPATH:+:$PYTHONPATH}"
+[ -x "$PY" ] || { echo "ARRET : interpreteur introuvable ($PY)"; exit 3; }
 M=/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram/Qwen3-Coder-30B-A3B-Instruct-srcQ4_K_M-nvfp4
 SORTIE="${SORTIE:-/tmp/poste2-49us}"
 LIMITE=1800          # aucune mesure ne tient le PC plus de 30 min
+# UNE SEULE CARTE VISIBLE. Sans cela le moteur voit deux cartes la ou le
+# manifeste en decrit une, RECALCULE le plan, et repartit autrement : premiere
+# tentative -> OOM a 80 Mo libres sur 33,6 Go, puis acces memoire illegal dans
+# la capture de graphe. Un plan recalcule ne mesure pas ce que le manifeste
+# decrit, et c'est verifie apres coup ligne 1 de chaque sortie.
+export CUDA_VISIBLE_DEVICES=0
 mkdir -p "$SORTIE"
 
 dire() {   # chaque mesure previent A LA FIN DE LA MESURE, pas a la fin du lot
@@ -59,6 +72,13 @@ mesure() {   # mesure <nom> <etape> <chunk> <contextes>
     tail -5 "$f"
     return 1
   fi
+  # Le plan doit etre celui du manifeste. Recalcule = autre repartition, donc
+  # autre mesure — et c'est ainsi que la premiere tentative a fini en OOM.
+  if grep -q 'plan recalcul' "$f"; then
+    dire "REFUS sur $1 : plan recalcule, la mesure ne porte pas sur la repartition du manifeste"
+    grep -m1 'plan recalcul' "$f"
+    return 1
+  fi
   grep -v '^RESULTAT' "$f" | tail -3
   dire "termine : $1 (etape $2, chunk $3)"
 }
@@ -66,14 +86,29 @@ mesure() {   # mesure <nom> <etape> <chunk> <contextes>
 # ---- 1. empreinte ---------------------------------------------------------
 libre
 dire "1/4 empreinte du binaire (compilation possible, ~9 min)"
-"$PY" - <<'EOF' || { echo "ARRET : le .so ne porte pas le sha du .cu"; exit 1; }
+# Deux causes d'echec, deux messages : un arret qui accuse l'empreinte alors
+# que l'interpreteur manquait envoie chercher au mauvais endroit. Code 4 =
+# l'arbre importe n'est pas le notre ; 5 = empreinte absente.
+"$PY" - "$R" <<'EOF'
 import sys
+attendu = sys.argv[1]
+import acvram
 from acvram import kernels
+if not acvram.__file__.startswith(attendu):
+    print(f"MAUVAIS ARBRE : acvram importe depuis {acvram.__file__}, "
+          f"pas depuis {attendu}"); sys.exit(4)
 e = kernels.get_extension()
 if e is None:
-    print("REFUS :", getattr(kernels, "_ERROR", "extension indisponible")); sys.exit(1)
-print("empreinte : le binaire porte bien le source")
+    print("EMPREINTE :", getattr(kernels, "_ERROR", "extension indisponible")); sys.exit(5)
+print(f"arbre {acvram.__file__} · le binaire porte bien le source")
 EOF
+c=$?
+case $c in
+  0) ;;
+  4) dire "ARRET : le code mesure ne serait pas celui du worktree"; exit 4 ;;
+  5) dire "ARRET : le binaire ne porte pas le sha du .cu (cache de compilation)"; exit 5 ;;
+  *) dire "ARRET : l'etape d'empreinte a echoue (code $c)"; exit $c ;;
+esac
 dire "termine : empreinte verifiee"
 
 # ---- 2. temoin du montage -------------------------------------------------
