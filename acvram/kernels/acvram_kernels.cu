@@ -811,6 +811,13 @@ __global__ void int4_gemv_grouped_kernel(
 // compte se relit cote hote. Aucune chronometrie.
 __device__ unsigned long long acvram_pa_participants = 0ULL;
 
+// TEMOIN DU TAMPON. Le remede a une fuite doit se verifier autrement que par
+// la lecture du code : ceci rend les octets effectivement retenus par les
+// tampons partiels. Apres un balayage de longueurs, il doit se stabiliser au
+// pire cas vu et ne plus bouger — la ou l'ancien cache croissait a chaque
+// nouvelle forme.
+unsigned long long acvram_pa_tampon_octets = 0ULL;
+
 unsigned long long paged_attn_participants(bool remettre_a_zero) {
     unsigned long long n = 0ULL;
     cudaMemcpyFromSymbol(&n, acvram_pa_participants, sizeof(n));
@@ -2061,17 +2068,38 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
         pm = torch::empty({BQ, HQ, C}, f32);
         pl = torch::empty({BQ, HQ, C}, f32);
     } else {
-        static std::map<std::tuple<int, int, int, int, int>,
-                        std::array<torch::Tensor, 3>> cache_t;
-        auto cle = std::make_tuple(BQ, HQ, C, D, (int)q.device().index());
-        auto it = cache_t.find(cle);
-        if (it == cache_t.end()) {
-            it = cache_t.emplace(cle, std::array<torch::Tensor, 3>{
-                torch::empty({BQ, HQ, C, D}, f32),
-                torch::empty({BQ, HQ, C}, f32),
-                torch::empty({BQ, HQ, C}, f32)}).first;
+        // UN SEUL TAMPON, GARDE AU PIRE CAS VU. C'etait un std::map indexe par
+        // (BQ, HQ, C, D, device) et JAMAIS VIDE : une entree definitive par
+        // forme rencontree. UN `static std::map` JAMAIS VIDE EST UNE FUITE QUI
+        // ATTEND SON DECLENCHEUR — celui-ci dormait a 2,2 Mo depuis toujours
+        // parce que `chunk` valait 512 et que C ne prenait que 16 valeurs. La
+        // tranche adaptative l'a reveille a 135 Mo sans toucher a une ligne de
+        // son code : C = ceil(N/4) prend 128 valeurs. Le cache n'etait pas
+        // faux, il etait a la merci d'un changement ailleurs.
+        // Le noyau recoit des pointeurs bruts et calcule ses index a partir de
+        // C : un tampon PLUS GRAND que necessaire convient, seule la capacite
+        // compte. On garde donc le maximum vu, et rien de plus. Au pire cas
+        // legal (C = 256, HQ = 32, D = 128, BQ = 1) : 4,2 Mo pour `part`,
+        // 32 Kio pour les deux autres — a comparer aux 135 Mo cumules.
+        static torch::Tensor tp, tm, tl;
+        static long cap_part = 0, cap_pml = 0;
+        static int dev_cache = -2;
+        const long besoin_part = (long)BQ * HQ * C * D;
+        const long besoin_pml = (long)BQ * HQ * C;
+        const int dev = (int)q.device().index();
+        if (dev != dev_cache) {          // changer de carte invalide tout
+            cap_part = cap_pml = 0; dev_cache = dev;
         }
-        part = it->second[0]; pm = it->second[1]; pl = it->second[2];
+        if (cap_part < besoin_part) {
+            tp = torch::empty({besoin_part}, f32); cap_part = besoin_part;
+        }
+        if (cap_pml < besoin_pml) {
+            tm = torch::empty({besoin_pml}, f32);
+            tl = torch::empty({besoin_pml}, f32);
+            cap_pml = besoin_pml;
+        }
+        acvram_pa_tampon_octets = (unsigned long long)(cap_part + 2 * cap_pml) * 4ULL;
+        part = tp; pm = tm; pl = tl;
     }
     // `out` reste FRAIS : il est RENDU a l'appelant.
     auto out = torch::empty({BQ, HQ, D}, q.options());
@@ -2709,6 +2737,10 @@ torch::Tensor swiglu_bf16(torch::Tensor gu) {
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // Controle positif du harnais : echelle de travail connue d'avance.
+    m.def("paged_attn_tampon_octets",
+          [] { return acvram_pa_tampon_octets; },
+          "octets retenus par les tampons partiels — doit se stabiliser au "
+          "pire cas vu, et non croitre a chaque nouvelle forme");
     m.def("paged_attn_participants", &paged_attn_participants,
           "nombre de blocs ayant reellement tourne a l'etape 0 (observe, pas "
           "reconstruit)", py::arg("remettre_a_zero") = true);
