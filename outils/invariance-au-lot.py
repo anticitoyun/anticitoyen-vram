@@ -36,6 +36,24 @@ A PA_CHUNK = 512, les trois premiers godets donnent tous C = 1 : aucun
 decoupage, donc aucune sensibilite attendue. Le premier ecart possible est
 entre le godet 32 (C=1) et le godet 64 (C=2).
 
+DOMAINE DE VALIDITE DE CE TEST — ecrit avec lui, parce que mes deux modeles
+refutes aujourd'hui etaient justes sur la forme et faux sur leur domaine. Ce
+banc ne conclut RIEN si l'une de ces trois conditions manque :
+
+  (a) le moteur est repetable a configuration fixe. serie-determinisme.sh le
+      verifie pour des passages IDENTIQUES, mais pas dans ce montage-ci : d'ou
+      le bras A2 ci-dessous. Sans lui, un ecart observe pourrait venir du bruit
+      d'execution et non du lot, et l'instrument ne saurait pas distinguer sa
+      propre instabilite de l'effet cherche — le defaut du temoin a cache nul
+      de ce matin, ou A et B rendaient 0 tous les deux.
+  (b) le godet CHANGE reellement entre les deux lots. Si les deux lots tombent
+      dans le meme godet, N est identique, C est identique, et « rien ne
+      bouge » ne prouve rien : le test n'aurait alors pu conclure que dans un
+      sens. Le banc AFFICHE les deux N et refuse de conclure s'ils sont egaux.
+  (c) la requete courte n'est pas servie depuis le cache de prefixe de la
+      longue. Les deux invites sont tirees de graines differentes, donc sans
+      prefixe commun.
+
 QUATRE CASES, et elles decident (le reglage se choisit par ACVRAM_PA_CHUNK
 quand le noyau le lit, sinon par recompilation) :
 
@@ -122,8 +140,14 @@ def niveau2(modele: str, avec_long: bool) -> dict:
         e.add_request(inv_long, SamplingParams(temperature=0.0, max_tokens=32))
     while not s_court.finished and len(s_court.output_ids) < 32:
         e.step()
+    # LE N EFFECTIF, la grandeur qui decide : c'est lui que le lot deplace.
+    dec = [s for s in e.running if not s.finished]
+    n_blocs = None
+    if dec:
+        b = e._build_batch(dec, prefill=False)
+        n_blocs = int(b.fixed_decode_views(torch.device("cuda:0"))[0].shape[1])
     return {"avec_long": avec_long, "jetons": list(s_court.output_ids),
-            "n_jetons": len(s_court.output_ids)}
+            "n_jetons": len(s_court.output_ids), "n_blocs": n_blocs}
 
 
 def main() -> int:
@@ -160,7 +184,23 @@ def main() -> int:
 
     print("\nNIVEAU 2 — le moteur, meme invite seule puis accompagnee")
     seul = lance("--niveau", "2")
+    seul2 = lance("--niveau", "2")          # A2 : temoin de repetabilite
+    if seul["jetons"] != seul2["jetons"]:
+        print("ARRET : la meme invite servie DEUX FOIS SEULE ne rend pas la "
+              "meme sortie. Le montage n'est pas repetable, donc un ecart "
+              "avec le lot ne serait pas attribuable au lot. Rien n'est "
+              "conclu.", file=sys.stderr)
+        return 3
+    print("  temoin de repetabilite : deux passages seuls identiques")
     accompagne = lance("--niveau", "2", "--avec-long")
+    if accompagne.get("n_blocs") == seul.get("n_blocs"):
+        print(f"ARRET : les deux lots donnent le MEME godet "
+              f"(N = {seul.get('n_blocs')} blocs). Le test n'a pas franchi la "
+              "frontiere qu'il devait franchir : « rien ne bouge » ne "
+              "prouverait rien. Augmentez LONG.", file=sys.stderr)
+        return 4
+    print(f"  godets franchis : N = {seul.get('n_blocs')} blocs seule, "
+          f"{accompagne.get('n_blocs')} accompagnee")
     memes = seul["jetons"] == accompagne["jetons"]
     prem = next((i for i, (x, y) in enumerate(
         zip(seul["jetons"], accompagne["jetons"])) if x != y), None)
@@ -171,12 +211,15 @@ def main() -> int:
         print(f"    seule       {seul['jetons'][:12]}")
         print(f"    accompagnee {accompagne['jetons'][:12]}")
 
-    verdict = ("aucun effet mesurable : propriete theorique, a documenter"
+    verdict = ("aucun effet mesurable, ET le test POUVAIT conclure "
+               "(repetabilite verifiee, godets franchis) : propriete "
+               "theorique, a documenter"
                if all(c["identique_au_bit"] for c in n1["comparaisons"])
                and memes else
                "effet mesure : la sortie depend des voisines de lot")
     print(f"\nVERDICT : {verdict}")
-    json.dump({"niveau1": n1, "seul": seul, "accompagne": accompagne,
+    json.dump({"niveau1": n1, "seul": seul, "seul2": seul2,
+               "accompagne": accompagne,
                "jetons_identiques": memes, "verdict": verdict},
               open(a.sortie, "w"), indent=1)
     print(f"TERMINE — releve dans {a.sortie}")
