@@ -1,6 +1,6 @@
 # Témoin verrous-fusion — 2026-09-10
 # Commit : 26fbc94
-# Modèles : 120
+# Modèles : 114
 # Racines déclarées par outils/parc.py :
 #   - /media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram (114 modèles)
 #   - /mnt/AI_GENERATOR/Modeles_acvram (6 modèles)
@@ -95,7 +95,6 @@ QwenPaw-Flash-9B-heretic-srcQ4_K_L-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/M
 Skyfall-31B-v4.2-heretic-srcexl3_4_0bpw-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	108	108	0	0	0	2026-09-06	?
 ThinkingCap-Qwen3.6-27B-heretic-srcQ4_K_M-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	80	80	0	0	0	2026-09-05	?
 ariel-alloy-v1-24b-heretic-srcq4_k_m-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	80	80	0	0	0	2026-09-06	?
-artemis-31b-exl3	/mnt/AI_GENERATOR/Modeles_acvram	110	71	20	19	0	2026-09-02	?
 artemis-31b-srcexl3-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	110	110	0	0	0	2026-09-05	?
 code-qwen3-32b-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	128	128	0	0	0	2026-09-06	?
 coder-30b-srcawq-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	48	48	0	0	0	2026-09-02	?
@@ -106,21 +105,16 @@ ernie-21b-a3b-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	
 gemma-4-26B-A4B-heretic-APEX-I-Quality-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	55	55	0	0	0	2026-09-05	?
 gemma-4-26B-A4B-it-ultra-uncensored-heretic-srcQ4_K_XL-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	55	55	0	0	0	2026-09-05	?
 gemma-4-31B-it-uncensored-heretic-srcQ4_K_M-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	110	110	0	0	0	2026-09-05	?
-gemma4-12b-abliterated-exl3	/mnt/AI_GENERATOR/Modeles_acvram	88	60	17	11	0	2026-09-02	?
-gemma4-12b-heretic-gguf	/mnt/AI_GENERATOR/Modeles_acvram	88	43	21	24	0	2026-09-02	?
 granite-4.1-30b-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	128	70	30	28	0	2026-09-01	?
 lfm25-8b-a1b-srcexl3-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	8	8	0	0	0	2026-09-02	?
 lfm25-8b-a1b-srciq3m-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	8	6	0	2	0	2026-09-02	?
 muse-glimmer-30b-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	104	48	39	17	0	2026-09-01	?
-nemo-12b-thinking-exl3	/mnt/AI_GENERATOR/Modeles_acvram	80	45	24	11	0	2026-09-02	?
 nemotron-lightning-heretic-srcexl3-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	6	6	0	0	0	2026-09-05	?
 nemotron-nano-9b-abliterated-int8	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	4	2	2	0	0	2026-09-02	?
 phi-4-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	80	80	0	0	0	2026-09-06	?
 poe-8b-glm5-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	72	47	14	11	0	2026-09-02	?
 qwen25-coder-14b-srcexl3-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	96	46	40	10	0	2026-09-02	?
-qwen3-coder-next-80b	/mnt/AI_GENERATOR/Modeles_acvram	12	12	0	0	0	2026-09-02	?
 qwen35-9b-abliterated-srcexl3-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	40	26	5	9	0	2026-09-02	?
-qwen36-27b-heretic-exl3	/mnt/AI_GENERATOR/Modeles_acvram	80	80	0	0	0	2026-09-05	?
 qwen36-27b-heretic-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	80	80	0	0	0	2026-09-05	?
 qwen36-35b-a3b-opus-nvfp4	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	10	10	0	0	0	2026-09-02	?
 starcoder2-15b-int8	/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram	40	9	31	0	0	2026-09-01	?
