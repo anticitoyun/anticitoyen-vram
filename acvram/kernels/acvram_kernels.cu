@@ -2008,10 +2008,28 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
     // et du contexte reel, et elle oblige a recompiler pour l'explorer — neuf
     // minutes par valeur, avec le risque verifie que la recompilation n'ait pas
     // lieu du tout. Le defaut reproduit exactement l'ancien comportement.
+    // TRANCHE ADAPTATIVE. Mesure du 10/09, contexte 3007, un appel isole :
+    //     chunk   64  128  256  512  1024  2048
+    //     total   25   32   46   79   144   279  us
+    // Le temps DOUBLE quand la tranche double : le noyau est serialise sur la
+    // longueur de tranche, donc le total vaut le temps d'UNE tranche et
+    // decouper davantage le reduit d'autant. 512 etait le pire reglage
+    // atteignable parmi ceux mesures.
+    // On ne peut pas pour autant poser 64 en constante : le nombre de tranches
+    // C = ceil(N*16 / chunk) est borne a 256, donc 64 cesserait d'etre legal
+    // vers 16 k jetons. La regle prend LA PLUS PETITE TRANCHE QUI RESTE DANS LA
+    // BORNE, et la borne est ensuite VERIFIEE, pas supposee (TORCH_CHECK plus
+    // bas). 64 est le plancher parce que c'est la plus petite valeur MESUREE :
+    // 32 et 16 pourraient etre meilleurs, ils n'ont pas ete essayes, et on ne
+    // reglera pas un defaut par une extrapolation.
     int chunk = PA_CHUNK;
     if (const char *v = std::getenv("ACVRAM_PA_CHUNK")) {
         int demande = atoi(v);
-        if (demande >= 16) chunk = demande;
+        if (demande >= 16) chunk = demande;   // priorite a la main de l'operateur
+    } else {
+        const int mini = (N * 16 + 255) / 256;   // en deca, C depasserait 256
+        chunk = 64;
+        while (chunk < mini) chunk <<= 1;
     }
     // BISECTION : ACVRAM_PA_ETAPE < 3 sort du noyau plus tot. Le resultat est
     // alors FAUX par construction — c'est un instrument de diagnostic, jamais

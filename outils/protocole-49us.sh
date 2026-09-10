@@ -53,9 +53,14 @@ dire() {   # chaque mesure previent A LA FIN DE LA MESURE, pas a la fin du lot
 # Rejouee avant CHAQUE mesure, pas au seul demarrage : c'est ce qui la separe
 # d'une formalite d'ouverture.
 libre() {
-  "$S/carte-libre.sh" 2>"$SORTIE/carte-occupee.txt" && return 0
-  dire "REFUS : $(cat "$SORTIE/carte-occupee.txt")"
-  exit 1
+  "$S/carte-libre.sh" 2>"$SORTIE/carte-occupee.txt"
+  case $? in
+    0) return 0 ;;
+    # Compilation : la carte est libre. Nos temps viennent d'evenements CUDA,
+    # donc une charge processeur ne les deplace pas — on passe, en le disant.
+    2) dire "note : $(cat "$SORTIE/carte-occupee.txt")" ; return 0 ;;
+    *) dire "REFUS : $(cat "$SORTIE/carte-occupee.txt")" ; exit 1 ;;
+  esac
 }
 
 # med / p10 / p90 de la ligne machine du premier contexte

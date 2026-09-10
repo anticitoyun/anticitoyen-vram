@@ -1,6 +1,12 @@
 #!/bin/bash
 # La carte 0 est-elle prenable ? Contrat, pour tout le circuit :
 #     code 0  -> prenable        code 1 -> occupee, stderr dit PAR QUI
+#     code 2  -> compilation en cours : LA CARTE EST LIBRE, le processeur est
+#                charge. Ni libre ni pris — un troisieme etat, parce que nvcc
+#                et ninja ne prennent pas la carte et ne doivent pas bloquer une
+#                mesure, mais fausseraient un chiffre sensible au CPU. A
+#                l'appelant de decider : `outils/carte-libre.sh; case $? in ...`
+#                Une mesure GPU pure peut passer ; un banc de bout en bout non.
 # Aucune sortie sur stdout quand c'est libre : appelable en tete de script.
 #     outils/carte-libre.sh || exit 1
 #
@@ -70,4 +76,22 @@ while read -r pid reste; do
     echo "carte 0 : une mesure demarre sans avoir encore alloue, PID $pid — $(echo "$reste" | cut -c1-120)" >&2
     exit 1; }
 done < <(pgrep -af "$MOTIF" 2>/dev/null)
+
+# TROISIEME ETAT. Une compilation est cherchee EN DERNIER, apres que la carte a
+# ete declaree libre : c'est une information, pas un refus. La distinction
+# compte — classer nvcc avec les mesures aurait fait attendre une compilation
+# de 9 minutes qui ne prend pas la carte, et une garde qui fait attendre pour
+# rien est une garde qu'on finit par sauter.
+# Le motif est ancre sur le NOM DU BINAIRE : un shell dont la ligne de commande
+# se contente de MENTIONNER nvcc n'est pas une compilation. Et on ecarte les
+# siens, comme partout ailleurs ici.
+comp=0
+while read -r pid _; do
+  [ -n "${pid:-}" ] || continue
+  mien "$pid" || comp=$((comp + 1))
+done < <(pgrep -af '(^|/)(nvcc|cicc|ptxas|cudafe\+\+|ninja)( |$)' 2>/dev/null)
+if [ "$comp" -gt 0 ]; then
+  echo "carte 0 libre, mais $comp processus de compilation en cours : le processeur est charge" >&2
+  exit 2
+fi
 exit 0

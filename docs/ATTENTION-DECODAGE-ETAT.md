@@ -214,3 +214,93 @@ principe pré-inscrit, jamais une préférence formée après avoir vu les nombr
 * plancher mesuré **aux bornes du balayage réel**, puisque l'étape 0 est
   rejouée pour chaque valeur de `ACVRAM_PA_CHUNK` ;
 * participation **observée** par atomique, jamais reconstruite.
+
+## Le résultat du 10/09 : le noyau est sérialisé sur la longueur de tranche
+
+Protocole `outils/protocole-49us.sh`, 12 mesures, ordre imposé respecté.
+
+### Le témoin a séparé — le montage est valide
+
+    etape 0 (indices)   10,08 us [9,73 - 10,59]
+    etape 3 (complet)   55,46 us [54,82 - 56,54]     -> SEPARE
+
+Facteur 5,4, là où l'ancien montage rendait 49,5 des deux côtés. **Le plancher
+du harnais vaut ~10 µs, pas 46,5.** Le balayage `K` de `banc_fma` reste inutile :
+la bisection a prouvé d'elle-même qu'elle pouvait rendre deux valeurs.
+
+### La bisection : tout le coût est dans la boucle principale
+
+    etape          ctx 357    ctx 3007
+    0 indices       10,05       10,88
+    1 + q charge    10,08       10,98
+    2 + boucle      55,20       78,46
+    3 + reduction   55,39       78,72
+
+Le saut est entre 1 et 2, et il **dépend du travail** (+23 µs de 357 à 3007).
+La réduction finale coûte 0,2 µs : rien. Les « 94 % indépendants du travail »
+sont morts pour de bon.
+
+### La grille : le temps double quand la tranche double
+
+Contexte 3007, étape 0 rejouée à chaque valeur.
+
+    chunk      C   e0(us)   e3(us)  travail   participants
+       64     64    15,36    25,47    10,11   1504/1504 = utiles
+      128     32    11,52    31,58    20,06    768/ 768 = utiles
+      256     16    11,55    45,92    34,37    384/ 384 = utiles
+      512      8    11,81    78,72    66,91    192/ 192 = utiles
+     1024      4    11,62   144,45   132,83     96/  96 = utiles
+     2048      2    11,36   279,36   268,00     64/  64 = utiles
+
+**Le total vaut le temps d'UNE tranche.** Découper davantage le réduit d'autant :
+`chunk=64` coûte 25,47 µs contre 78,72 en production, soit **×3,1 sur un noyau
+qui pèse 49,5 % du temps GPU**.
+
+### Ce que l'égalité voulait dire : ni l'une ni l'autre des deux issues
+
+Le plancher est **plat à ~11,5 µs sur un facteur 12 de grille** (64 → 768
+blocs), puis monte à 15,36 µs à 1504 blocs. Les deux issues écrites d'avance
+étaient trop tranchées : le plancher est dans le chemin commun Python → C++ →
+pilote, **plus** une composante d'occupation qui n'apparaît qu'au-delà de
+~768 blocs. Seule une mesure à plusieurs grilles pouvait le dire — une seule
+valeur aurait donné l'une des deux réponses fausses.
+
+### Le contrôle qui se trompait dans le sens de la prudence
+
+Le compteur de participation comparait aux tranches **demandées** par la
+capacité de la table (`32·C`), pas aux tranches **utiles** du contexte réel.
+Il aurait affiché « GRILLE INERTE » à cinq valeurs de `chunk` sur six et fait
+jeter tout le balayage. Recalculé sur `ceil(seq_len/chunk)`, il est exact
+partout. **Un contrôle peut se tromper dans le sens de la prudence, et c'est le
+sens dans lequel personne ne va vérifier.**
+
+## Ce qui est attendu au moteur — ÉCRIT AVANT LA MESURE
+
+La tranche adaptative prend la plus petite tranche qui garde `C ≤ 256`, la
+borne étant ensuite vérifiée et non supposée. 64 est le plancher parce que
+c'est la plus petite valeur **mesurée** : 32 et 16 n'ont pas été essayés.
+
+    N*16 jetons    chunk choisi   C
+        512            64          8
+       8192            64        128
+      16384            64        256
+      32768           128        256
+      65536           256        256
+
+**Prédiction** : noyau ×3,1 sur un poste à 49,5 % du temps GPU donne
+`1/(0,505 + 0,495/3,1) ≈ 1,50`, soit **+50 % de débit de décodage**.
+
+Ce que chaque issue voudra dire, posé d'avance :
+
+    ~ +50 %          le gain se transporte, le modele d Amdahl tient
+    nettement moins  le temps gagne est REPRIS AILLEURS, et il faudra dire ou
+                     avant d annoncer quoi que ce soit
+    ~ 0 %            le noyau n est pas sur le chemin critique du pas — donc
+                     les 49,5 % du profileur mesurent autre chose que ce que
+                     l on croit, et c est ce chiffre-la qu il faut reprendre
+
+**Deux réserves écrites d'avance, elles aussi.** La grille n'a été balayée qu'à
+**un seul contexte** (3007) : le gain à contexte court est attendu mais non
+mesuré, et le banc doit couvrir les deux. Et un découpage qui change **change
+l'ordre des sommes** : la barrière de qualité est obligatoire avant toute
+annonce, témoin négatif compris.

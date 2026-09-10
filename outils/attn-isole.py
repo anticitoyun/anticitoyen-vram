@@ -22,6 +22,18 @@ LE TEMOIN EST LA BISECTION ELLE-MEME
     montage est encore faux et RIEN de ce qu'il mesure ne vaut.
 """
 import os, sys, time, zlib, torch
+
+# UNE SEULE CARTE VISIBLE, VERIFIE AVANT TOUT CHARGEMENT (position suggeree par
+# poste4, et elle a raison : un refus AVANT chargement couvre mieux qu'un
+# filtre sur la sortie, parce qu'il ne reste rien a interpreter). Avec deux
+# cartes visibles la ou le manifeste en decrit une, le moteur RECALCULE le plan
+# et repartit autrement : OOM a 80 Mo libres sur 33,6 Go, puis acces memoire
+# illegal. Le cas dangereux n'est pas ce crash, c'est l'execution qui ne sature
+# pas et rend des chiffres credibles sur une autre repartition.
+if torch.cuda.device_count() != 1:
+    raise SystemExit(f"REFUS : {torch.cuda.device_count()} cartes visibles, "
+                     f"CUDA_VISIBLE_DEVICES=0 obligatoire")
+
 from acvram.engine.loader import load_model
 from acvram.engine.runner import Engine
 from acvram.engine.sampler import SamplingParams
@@ -116,13 +128,26 @@ for lm in LMOTS:
     temps.sort()
     med = temps[len(temps) // 2]
     p10, p90 = temps[len(temps) // 10], temps[-1 - len(temps) // 10]
-    att = 32 * C_demande
+    # TRANCHES UTILES, PAS TRANCHES DEMANDEES. C est calcule sur la CAPACITE de
+    # la table (N*16 jetons), pas sur le contexte reel : les tranches au-dela de
+    # seq_len sortent en tete de noyau, legitimement, sans marquer. Comparer a
+    # 32*C aurait affiche « GRILLE INERTE » a cinq valeurs de chunk sur six et
+    # fait jeter tout le balayage. Un controle peut se tromper DANS LE SENS DE
+    # LA PRUDENCE — et c'est le sens ou personne ne va verifier.
+    C_utile = (n_ctx + ch - 1) // ch
+    if q.dim() < 3:
+        print(f"{lm:5d} REFUS : forme de q inattendue {tuple(q.shape)}, "
+              f"le nombre de tetes ne se DEDUIT pas — on ne devine pas un "
+              f"denominateur de controle")
+        continue
+    HQ = q.shape[1]
+    att = HQ * C_utile
     if parts is None:
         obs = "participants non observes (etape != 0)"
     elif parts == att:
-        obs = f"participants {parts} = grille demandee"
+        obs = f"participants {parts} = {HQ}x{C_utile} tranches utiles"
     else:
-        obs = f"participants {parts} < grille demandee {att} — GRILLE INERTE"
+        obs = f"participants {parts} < {att} utiles ({HQ}x{C_utile}) — GRILLE INERTE"
     print(f"{lm:5d} mots · contexte {n_ctx:5d} · table {n_blocs:4d} blocs · "
           f"C demande {C_demande:3d} · GPU {med:7.2f} us "
           f"[{p10:6.2f} – {p90:6.2f}] · {obs}")
