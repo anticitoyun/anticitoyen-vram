@@ -1422,7 +1422,50 @@ class ACVRamModel(nn.Module):
         x = x[idx.to(x.device)]
         head_dev = getattr(self.lm_head.qweight, "qweight", None)
         target = head_dev.device if head_dev is not None else x.device
-        logits = self.lm_head(x.to(target))
+        # LES LOGITS SE PRODUISENT EN FP32, ET C'EST L'ENTREE QU'ON CONVERTIT.
+        # Le dtype de sortie des noyaux suit celui de x — nvfp4_gemv fait
+        # `out = torch::empty({N, M}, xc.options())` — donc passer x en float
+        # bascule le produit sur le chemin float de bout en bout. Convertir la
+        # SORTIE ne restaurerait rien : la perte est dans l'accumulation, pas
+        # dans un arrondi final.
+        #
+        # Ce que l'arrondi bf16 coutait, mesure sur quatre pas de GLM-4.7 :
+        # logits centres sur 95,6 avec une amplitude de 23, donc dans
+        # l'intervalle [64, 128) ou le pas bf16 vaut 0,5 — QUARANTE-CINQ
+        # niveaux distincts pour 151 936 jetons, et une marge top1-top2 de un
+        # a deux ULP.
+        #
+        # Et l'erreur n'est pas seulement du bruit. logsumexp est convexe,
+        # donc par Jensen l'arrondi introduit un BIAIS de 1/2 sigma^2
+        # (1 - somme p^2) qui NE DECROIT PAS avec la longueur du corpus :
+        # verifie par simulation, 0,009875 nat mesure contre 0,010410 predit,
+        # soit +1,05 % sur la perplexite. Le bruit, lui, decroit en 1/racine(N)
+        # et vaut 0,09 % sur nos etalons de 148 920 jetons.
+        #
+        # Le biais depend du PAS, donc de la magnitude des logits, donc du
+        # modele : 1,05 % sur GLM-4.7 contre 0,001 % sur un modele centre sur
+        # zero, un rapport de 1024. C'est donc un biais SYSTEMATIQUE ENTRE
+        # MODELES, qui fausse exactement les comparaisons de perplexite que
+        # nous faisons. En fp32 pres de 116 le pas tombe a 7,6e-06 et le biais
+        # a 2,4e-12 nat : la question ne se pose plus.
+        #
+        # Le cout est nul : l'etat cache fait quelques milliers d'elements, et
+        # le vecteur de sortie 151 936 flottants, soit 594 Kio par jeton.
+        # ACVRAM_LOGITS_BF16=1 retablit l'ancien comportement : il rend le
+        # correctif MESURABLE par A/B sans recompiler, et sert de repli si le
+        # cout en temps s'averait sensible. Un correctif qu'on ne peut pas
+        # comparer a son absence n'est pas evaluable.
+        _bf16 = os.environ.get("ACVRAM_LOGITS_BF16") == "1"
+        logits = self.lm_head(x.to(target) if _bf16
+                              else x.to(target, dtype=torch.float32))
+        if logits.dtype != torch.float32:
+            # Un noyau qui rend autre chose que ce qu'on lui a donne annule le
+            # correctif en silence. On le dit une fois plutot que de le taire.
+            if not getattr(self, "_dit_logits_dtype", False):
+                self._dit_logits_dtype = True
+                print(f"[acvram] les logits sortent en {logits.dtype} malgre "
+                      "une entree fp32 : le noyau de la tete impose son type, "
+                      "et le gain de resolution n'est pas acquis.", flush=True)
         return self._logits_finaux(logits)
 
     def _logits_finaux(self, logits: torch.Tensor) -> torch.Tensor:
