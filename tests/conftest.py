@@ -3,6 +3,7 @@ import os
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 
 @pytest.fixture(scope="session")
@@ -195,3 +196,28 @@ def _carte_au_repos(request):
     if occupation is not None and occupation > OCCUPATION_MAX:
         pytest.skip(f"carte a {occupation} % d'occupation — un debit mesure "
                     f"pendant le travail d'autrui ne dit rien du code teste")
+
+
+# Seuil de KL entre deux jeux de logits : nos propres mesures du 10/09
+# donnent 1,9e-4 a 7,0e-3 nats pour un changement d'ordre d'accumulation
+# legitime (noyau fusionne vs torch, decodage batche vs par sequence), et
+# 0,8 a 5,0 nats pour un vrai defaut de traitement par lot. `torch.equal`
+# ne discriminait plus rien depuis que graphe et eager peuvent emprunter
+# des chemins numeriquement differents mais tous deux corrects (fusion de
+# noyau, batching) : le KL, qui pese chaque composante par sa probabilite
+# plutot que de comparer bit a bit, reste discriminant entre les deux
+# regimes. Le seuil est pose a 1e-2, un ordre de grandeur au-dessus du
+# plus grand ecart legitime mesure et deux ordres en dessous du plus petit
+# defaut reel observe.
+KL_LOGITS_MAX = 1e-2
+
+
+def assert_logits_proches(a: torch.Tensor, b: torch.Tensor, msg: str = "",
+                          seuil: float = KL_LOGITS_MAX) -> None:
+    """Remplace un ``torch.equal`` devenu aveugle : compare deux jeux de
+    logits par KL plutot que bit a bit. Voir ``KL_LOGITS_MAX`` pour l'origine
+    du seuil."""
+    pa = F.log_softmax(a.double().reshape(-1, a.shape[-1]), dim=-1)
+    pb = F.softmax(b.double().reshape(-1, b.shape[-1]), dim=-1)
+    kl = F.kl_div(pa, pb, reduction="batchmean").item()
+    assert kl < seuil, f"{msg} (KL={kl:.4e}, seuil={seuil:.4e})"
