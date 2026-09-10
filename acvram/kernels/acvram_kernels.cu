@@ -803,6 +803,24 @@ __global__ void int4_gemv_grouped_kernel(
 // C'est ce qui manquait quand un montage a rendu ~49,5 us pour un noyau qui
 // ecrit trois flottants et sort : nous n'avions aucun moyen de savoir que
 // c'etait le plancher de l'instrument et non le cout du noyau.
+// COMPTEUR DE PARTICIPATION. La colonne « grille » d'un script Python est
+// RECONSTRUITE depuis le parametre demande : elle dit ce qui a ete demande,
+// jamais ce qui a tourne. Si le noyau borne ou recalcule son decoupage, elle
+// afficherait 2048 pendant que 32 blocs travaillent — et corroborerait la
+// fausse refutation au lieu de la denoncer. Ici chaque bloc s'annonce, et le
+// compte se relit cote hote. Aucune chronometrie.
+__device__ unsigned long long acvram_pa_participants = 0ULL;
+
+unsigned long long paged_attn_participants(bool remettre_a_zero) {
+    unsigned long long n = 0ULL;
+    cudaMemcpyFromSymbol(&n, acvram_pa_participants, sizeof(n));
+    if (remettre_a_zero) {
+        const unsigned long long z = 0ULL;
+        cudaMemcpyToSymbol(acvram_pa_participants, &z, sizeof(z));
+    }
+    return n;
+}
+
 __global__ void banc_fma_kernel(float *__restrict__ sortie, int K) {
     float a = (float)(threadIdx.x + 1) * 1e-3f;
     const float b = 1.0000001f, c = 1e-7f;
@@ -898,7 +916,10 @@ __global__ void paged_attn_partial_kernel(
         // marquees se relit cote hote. participants == grille -> les blocs
         // tournent ; participants < grille -> le lancement est en cause et
         // rien n'a jamais ete teste.
-        if (threadIdx.x == 0) { part_m[out_off] = 1.f; part_l[out_off] = 0.f; }
+        if (threadIdx.x == 0) {
+            part_m[out_off] = 1.f; part_l[out_off] = 0.f;
+            atomicAdd(&acvram_pa_participants, 1ULL);   // ce bloc a tourne
+        }
         for (int d = threadIdx.x; d < D; d += blockDim.x)
             part[out_off * D + d] = 0.f;
         return;
@@ -2670,6 +2691,9 @@ torch::Tensor swiglu_bf16(torch::Tensor gu) {
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // Controle positif du harnais : echelle de travail connue d'avance.
+    m.def("paged_attn_participants", &paged_attn_participants,
+          "nombre de blocs ayant reellement tourne a l'etape 0 (observe, pas "
+          "reconstruit)", py::arg("remettre_a_zero") = true);
     m.def("banc_fma", &banc_fma,
           "K FMA chainees, grille imposee — chiffre le plancher de l'instrument",
           py::arg("gx"), py::arg("gy"), py::arg("gz"),

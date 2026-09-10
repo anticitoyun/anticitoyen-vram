@@ -21,7 +21,7 @@ LE TEMOIN EST LA BISECTION ELLE-MEME
     couter BEAUCOUP MOINS que l'etape 3. S'il rend encore le meme temps, le
     montage est encore faux et RIEN de ce qu'il mesure ne vaut.
 """
-import os, sys, time, torch
+import os, sys, time, zlib, torch
 from acvram.engine.loader import load_model
 from acvram.engine.runner import Engine
 from acvram.engine.sampler import SamplingParams
@@ -54,7 +54,10 @@ print(f"# etape={etape} chunk={chunk} · un appel isole, evenements CUDA, "
 for lm in LMOTS:
     captures.clear()
     d = (7 * 4001) % max(1, len(MOTS) - lm - 50)
-    prompt = [(abs(hash(w)) % 150000) + 10 for w in MOTS[d:d + lm]]
+    # `hash()` sur str est SALE PAR PROCESSUS : deux executions ne
+    # construiraient pas la meme invite, donc ne toucheraient pas les memes
+    # blocs de cache — au moment precis ou l'on rejoue pour comparer.
+    prompt = [(zlib.crc32(w.encode()) % 150000) + 10 for w in MOTS[d:d + lm]]
     for _ in eng.generate(prompt, par):
         pass
     if not captures:
@@ -64,9 +67,21 @@ for lm in LMOTS:
     n_ctx = int(seq_lens.max().item())
     n_blocs = int(tables.shape[1])
     ch = int(chunk)
-    C = (n_blocs * 16 + ch - 1) // ch
+    C_demande = (n_blocs * 16 + ch - 1) // ch   # DEMANDE, pas observe
     appel = lambda: vrai(q, cache, tables, seq_lens, n_rep, scale,
                          q_len=q_len, window=window)
+    # PARTICIPATION OBSERVEE : a l'etape 0 chaque bloc s'annonce par un
+    # atomique. Une colonne « grille » reconstruite en Python dirait ce qui a
+    # ete DEMANDE et corroborerait une fausse refutation ; ceci dit ce qui a
+    # TOURNE. Le compteur est remis a zero, un appel, puis relu.
+    parts = None
+    if etape == "0" and hasattr(kernels.get_extension(), "paged_attn_participants"):
+        ext = kernels.get_extension()
+        ext.paged_attn_participants(True)          # remise a zero
+        appel()
+        torch.cuda.synchronize()
+        parts = ext.paged_attn_participants(True)
+
     for _ in range(20):
         appel()
     torch.cuda.synchronize()
@@ -82,6 +97,13 @@ for lm in LMOTS:
     temps.sort()
     med = temps[len(temps) // 2]
     p10, p90 = temps[len(temps) // 10], temps[-1 - len(temps) // 10]
+    att = 32 * C_demande
+    if parts is None:
+        obs = "participants non observes (etape != 0)"
+    elif parts == att:
+        obs = f"participants {parts} = grille demandee"
+    else:
+        obs = f"participants {parts} < grille demandee {att} — GRILLE INERTE"
     print(f"{lm:5d} mots · contexte {n_ctx:5d} · table {n_blocs:4d} blocs · "
-          f"C={C:3d} · grille {32 * C:5d} blocs · "
-          f"GPU {med:7.2f} us  [{p10:6.2f} – {p90:6.2f}]")
+          f"C demande {C_demande:3d} · GPU {med:7.2f} us "
+          f"[{p10:6.2f} – {p90:6.2f}] · {obs}")
