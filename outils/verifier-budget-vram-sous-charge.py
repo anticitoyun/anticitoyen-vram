@@ -148,6 +148,13 @@ def mesurer(chemin: str, max_model_len: int, n_seqs: int,
     gc.collect()
     torch.cuda.empty_cache()
     avant = Guetteur._lire()
+    # LOCALISER le pic, au lieu de l attribuer. `_try_build_stacks` empile les
+    # experts par `torch.stack(...)` et ne libere les anciens stockages
+    # qu apres : « la pile d une projection double transitoirement sa memoire »
+    # (model.py:612). Reste a savoir OU ce doublement tombe — a la construction
+    # du moteur, a l echauffement des graphes, ou dans la boucle. Trois relevés
+    # repondent ; une explication n aurait fait que deplacer la question.
+    torch.cuda.reset_peak_memory_stats()
 
     charge = load_model(chemin, max_model_len=max_model_len)
     moteur = Engine(charge, None, max_batch_size=n_seqs,
@@ -158,9 +165,12 @@ def mesurer(chemin: str, max_model_len: int, n_seqs: int,
     # `cudaErrorStreamCaptureInvalidated` des que plusieurs sequences allouent
     # ensemble. Le sauter ne mesurerait pas le regime de production — et les
     # graphes retiennent de la VRAM, donc c est bien du poste mesure.
+    torch.cuda.synchronize()
+    vivant_moteur = torch.cuda.max_memory_allocated()
     if moteur.graphs is not None and not sans_graphes:
         moteur.warm_graphs(max_model_len)
     torch.cuda.synchronize()
+    vivant_warm = torch.cuda.max_memory_allocated()
     apres_chargement = Guetteur._lire()
 
     # Invites distinctes : des sequences identiques partageraient leurs blocs
@@ -225,6 +235,8 @@ def mesurer(chemin: str, max_model_len: int, n_seqs: int,
         "hote_dispo": dispo_h,
         "n_graphes": n_graphes,
         "vivant": vivant,
+        "vivant_moteur": vivant_moteur,
+        "vivant_warm": vivant_warm,
         "reserve": reserve,
         "sans_graphes": sans_graphes,
     }
@@ -285,6 +297,9 @@ def main(argv):
              ('actifs, %d vivants' % r['n_graphes']) if r['graphes']
              else 'INACTIFS'}"
           + (f" ({r['raison_graphes']})" if not r['graphes'] else ""))
+    print(f"  ou naît le pic : moteur {r['vivant_moteur']/g:.2f} G   "
+          f"echauffement {r['vivant_warm']/g:.2f} G   "
+          f"boucle {r['vivant']/g:.2f} G")
     print(f"  decomposition du pic : vivant {r['vivant']/g:.2f} G   "
           f"fragmentation {(r['reserve']-r['vivant'])/g:+.2f} G   "
           f"hors torch {(r['pic']-r['reserve'])/g:+.2f} G")
