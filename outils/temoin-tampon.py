@@ -36,12 +36,15 @@ def sonde(q, cache, tables, seq_lens, n_rep, scale, q_len=1, window=0):
 M.kernels.paged_attention = sonde
 
 vus = []
+derniere = None
 for lm in [200, 400, 700, 1100, 1600, 2200, 3000, 3800, 300, 3000]:
     captures.clear()
     d = (7 * 4001 + lm) % max(1, len(MOTS) - lm - 50)
     prompt = [(zlib.crc32(w.encode()) % 150000) + 10 for w in MOTS[d:d + lm]]
     for _ in eng.generate(prompt, SamplingParams(temperature=0.0, max_tokens=4)):
         pass
+    if captures:
+        derniere = captures[0]
     o = ext.paged_attn_tampon_octets()
     nb = int(captures[0][2].shape[1]) if captures else -1
     vus.append(o)
@@ -53,7 +56,13 @@ print(f"# maximum retenu : {max(vus)/1e6:.3f} Mo "
       f"(ancien cache cumule : 135,3 Mo)")
 
 # LE TEMPS N'A PAS BOUGE ? Meme protocole que le balayage : etape 3, chunk 64.
-q, cache, tables, seq_lens, n_rep, scale, q_len, window = captures[0]
+# `captures` peut etre VIDE : un pas rejoue par un graphe CUDA n'appelle pas la
+# sonde Python — c'est ce que disent les lignes « table -1 » ci-dessus. On
+# garde donc la derniere capture REELLE au lieu de supposer qu'il y en a une.
+if not derniere:
+    raise SystemExit("REFUS : aucun appel n'a traverse la sonde, rien a "
+                     "chronometrer (tous les pas rejoues par graphe)")
+q, cache, tables, seq_lens, n_rep, scale, q_len, window = derniere
 appel = lambda: vrai(q, cache, tables, seq_lens, n_rep, scale, q_len=q_len, window=window)
 os.environ["ACVRAM_PA_CHUNK"] = "64"
 for _ in range(20):
