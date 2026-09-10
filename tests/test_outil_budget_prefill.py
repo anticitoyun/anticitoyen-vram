@@ -11,11 +11,28 @@ contrôle « la variable est-elle seulement lue » — une consigne posée qui n
 va nulle part est un balayage muet, arrivé le 9/09 avec MAXTOK=65536.
 """
 import importlib.util
+import os
 import pathlib
 
 import pytest
 
 _OUTIL = pathlib.Path(__file__).resolve().parents[1] / "outils" / "budget-prefill.py"
+
+
+@pytest.fixture(autouse=True)
+def _pas_de_fuite_d_environnement(monkeypatch):
+    """Le script POSE `ACVRAM_BUDGET_JETONS` lui-même, avant d'importer le
+    moteur — c'est voulu là-bas, la variable est lue à l'import.
+
+    Mais l'appeler depuis un essai la laisse posée dans le processus pytest,
+    donc dans TOUS les essais qui suivent. Relevé par sonde : la suite se
+    terminait avec `ACVRAM_BUDGET_JETONS=0` posée alors qu'elle ne l'était
+    pas au départ. À zéro c'était sans effet ; le défaut, lui, ne l'est pas —
+    un essai qui laisse un état derrière lui rend la suite dépendante de son
+    ordre, et le suivant ne teste plus ce qu'il croit tester.
+    """
+    monkeypatch.setenv("ACVRAM_BUDGET_JETONS",
+                       os.environ.get("ACVRAM_BUDGET_JETONS", "0"))
 
 
 def _charger():
