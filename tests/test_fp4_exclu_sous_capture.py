@@ -21,11 +21,25 @@ import torch
 from acvram.kernels import backends as _bk
 
 
-def _backend_fp4():
-    for b in _bk._REGISTRY:
-        if b.name == "fp4-tensorcores":
-            return b
-    pytest.skip("backend fp4-tensorcores absent du registre")
+def test_le_backend_fp4_n_est_plus_enregistre():
+    """Depuis le 10/09/2026 il n'est plus au registre : mesure ABBA, il PERD a
+    toutes les longueurs testees — 8,7 % a 192 jetons de prefill, 11,6 % a
+    4 096, c'est-a-dire dans le regime pour lequel il avait ete ecrit — et
+    x3,28 de debit en decodage concurrent une fois ecarte.
+
+    Ce test remplace les deux qui verifiaient son exclusion sous capture : un
+    chemin retire du registre n'a plus besoin d'etre exclu, et deux tests qui
+    se contentaient de `skip` auraient laisse croire qu'ils veillaient encore.
+    """
+    assert "fp4-tensorcores" not in {b.name for b in _bk._REGISTRY}
+
+
+def test_la_fonction_reste_joignable():
+    """Le code d'une experience ratee vaut d'etre conserve : `nvfp4_mm_tensorcore`
+    doit rester appelable pour qu'on puisse la remesurer le jour ou un
+    `torch._scaled_mm` plus rapide arrivera."""
+    from acvram.kernels import nvfp4_mm_tensorcore
+    assert callable(nvfp4_mm_tensorcore)
 
 
 class _Faux:
@@ -36,22 +50,6 @@ class _Faux:
         return self
 
 
-def test_le_backend_fp4_se_retire_sous_capture(monkeypatch):
-    """Le correctif : douze rangées ne suffisent plus, il faut aussi être
-    hors capture. Sans quoi la capture est invalidée avant d'exister."""
-    b = _backend_fp4()
-    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
-    assert b.matmul(_Faux(12), object()) is None, \
-        "sous capture, le chemin cuBLASLt doit etre ecarte quel que soit le lot"
-
-
-def test_huit_rangees_restent_ecartees_hors_capture(monkeypatch):
-    """Contrôle : le seuil de lot n'a pas été supprimé, seulement complété.
-    Huit rangées ne prennent pas ce chemin — c'est pourquoi la manche à huit
-    séquences réussissait."""
-    b = _backend_fp4()
-    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
-    assert b.matmul(_Faux(8), object()) is None, "8 > 8 est faux"
 
 
 def test_l_echec_sous_capture_n_eteint_pas_le_processus(monkeypatch):

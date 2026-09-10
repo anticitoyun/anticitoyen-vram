@@ -690,32 +690,44 @@ _bk.register(_bk.Backend(
                            "int8": int8_dequant, "q3n": q3n_dequant}[w.format](w, dt),
     note="dequantification + GEMV fusionnes, acvram_kernels.cu"))
 
-_bk.register(_bk.Backend(
-    name="fp4-tensorcores", formats=("nvfp4",), device_type="cuda",
-    priority=110, available=_sm100_ok,
-    # EXCLU PENDANT UNE CAPTURE DE GRAPHE, et pas au-dela d'un lot.
-    #
-    # `torch._scaled_mm` passe par cuBLASLt, dont le premier appel sur un flux
-    # interroge une heuristique et reserve un espace de travail : une operation
-    # interdite pendant `cudaStreamCapture`. L'echauffement de `graphs.py` ne
-    # l'immunise pas, il tourne sur le flux annexe `side`.
-    #
-    # Mesure du 10/09/2026 sur Qwen3-4B-nvfp4 : huit sequences capturent un
-    # graphe et servent ; douze franchissent le seuil `> 8` en DECODAGE, donc
-    # a l'interieur de la capture, et rendent `captures = 0` avec 23,46 Gio
-    # libres — l'echec precede toute capture. La condition porte donc sur
-    # l'etat de capture et non sur un seuil de lot : un seuil se deplacerait
-    # au prochain changement de `max_batch_size` et le defaut reviendrait
-    # ailleurs. Le prefill, lui, n'est jamais capture : il garde ce chemin.
-    # La garde par capacité est répétée ici : un échec réel dans
-    # nvfp4_mm_tensorcore éteint son chemin globalement, et il ne faut pas
-    # qu'un appel parti sur une carte sans FP4 le fasse pour toutes.
-    matmul=lambda x, w: (nvfp4_mm_tensorcore(x, w)
-                         if (x.reshape(-1, x.shape[-1]).shape[0] > 8
-                             and not torch.cuda.is_current_stream_capturing()
-                             and torch.cuda.get_device_capability(x.device)
-                             >= (10, 0)) else None),
-    note="prefill W4A4 via torch._scaled_mm, sm_100+ ; jamais sous capture"))
+# LE BACKEND `fp4-tensorcores` N'EST PLUS ENREGISTRE — mesure du 10/09/2026.
+#
+# `nvfp4_mm_tensorcore` reste ci-dessus, appelable et testable : le code d'une
+# experience ratee vaut d'etre conserve, son inscription au registre non. Ce qui
+# suit est la raison, pour que personne ne le reinscrive dans six mois.
+#
+# Duel bout en bout, ABBA, un bras par processus, sur Qwen3-4B-nvfp4 (5090).
+# Prefill seul, une sequence, graphes coupes — le seul regime ou ce chemin
+# etait pris :
+#
+#     invite   ttft avec   ttft sans   il PERD de
+#       192      324,0       295,8        8,7 %
+#       512      310,8       305,8        1,6 %
+#      2048      371,9       367,4        1,2 %
+#      4096      528,1       466,9       11,6 %
+#
+#     ABBA a 4096 :  avec 520,8 / 520,0    sans 466,2 / 465,3
+#     dispersion intra-bras 0,8 ms — l'ecart vaut SOIXANTE fois la dispersion.
+#
+# **Il perd dans le regime pour lequel il avait ete ecrit** : sa note disait
+# « prefill W4A4 », et a 4 096 jetons de prefill il coute +11,6 % de TTFT.
+#
+# En decodage concurrent il etait pire encore : a douze sequences, graphes
+# coupes, l'ecarter rend x3,28 de debit et -55 % de TTFT — et le texte produit
+# differe, le chemin ecarte etant aussi le plus juste (le GEMV rend 55,6 dB
+# contre le poids reellement stocke, la ou ce chemin quantifie l'ACTIVATION en
+# FP4, ~9,5 % d'erreur).
+#
+# Pourquoi il ne pouvait pas gagner, et pourquoi un balayage etroit le cachait :
+# ses 385 us mesures « a plat » de 1 a 32 lignes etaient un plateau de FRAIS
+# FIXES dans un domaine trop etroit pour voir la pente. La quantification de
+# l'activation en FP4 est un travail PROPORTIONNEL a n : un cout fixe s'amortit,
+# un cout proportionnel jamais.
+#
+# Il avait aussi fallu l'exclure explicitement de la capture de graphe pour que
+# celle-ci survive. Un chemin qu'on doit interdire la ou l'on veut aller, et qui
+# perd la ou il est permis, n'a pas d'endroit ou il est le bon.
+
 
 _bk.register(_bk.Backend(
     name="cpu-avx2", formats=("nvfp4", "int4_awq"), device_type="cpu",
