@@ -77,3 +77,55 @@ d'écrire que le retard est devenu une avance. **C'est faux : le duel du 9/09
 était à UNE séquence**, le mode concurrent n'existant pas avant aujourd'hui.
 Ce qui se compare à son chiffre est le bras à une séquence, et **il est
 indécidable**.
+
+---
+
+# Reprise du 10/09, apres le batching du prefill (`b862e84`)
+
+**Même protocole, à l'identique.** Même modèle, même source des deux côtés,
+même cache, spéculation coupée, ABBA, même invite, même corpus
+(`173c87a53759e020`), même binaire adverse.
+
+    b = 12      débit agrégé   disp     TTFT mur   jetons/kJ   W médian
+    acvram        444,69      37,4 %     0,747 s     1835       242,3
+    llamacpp      226,97       1,8 %     0,734 s      896       253,3
+    llamacpp      227,23       1,5 %     0,730 s      944       240,7
+    acvram        488,54      26,2 %     0,734 s     1700       287,3
+
+    débit    ×2,05 brut   →  ×1,96 corrigé du biais de taille
+    TTFT     ×1,01         →  ÉGALITÉ
+    énergie  ×1,92 brut   →  ×1,83 corrigé
+
+## Le TTFT a basculé, et c'était le seul axe perdant
+
+    ce matin   1,465 s contre 0,642 s   →  ×2,28 pour EUX
+    maintenant 0,741 s contre 0,732 s   →  ×1,01, égalité
+
+**Nous ne sommes plus derrière sur aucun des trois axes.**
+
+**Mais l'amélioration n'est pas toute à nous, et il faut le dire :** notre TTFT
+a été divisé par **1,98**, et **le leur a augmenté de 14 %** (0,642 → 0,732).
+Deux mouvements dans le même sens, et je ne peux pas expliquer le second.
+
+## Ce qui interdit de comparer les valeurs ABSOLUES à celles de ce matin
+
+**La carte n'était pas dans le même état.** Watts médians : 242-287 W dans
+cette manche contre **461-480 W ce matin**. Le débit de décodage a lui aussi
+baissé des deux côtés — 466 contre 578 chez nous, 227 contre 302 chez eux.
+
+**Les RAPPORTS restent valides** : ils sont mesurés dans la même manche ABBA,
+les deux bras ayant subi le même état. **Les valeurs absolues, non.** C'est
+pourquoi le TTFT « ×1,98 d'amélioration » est à lire avec précaution : le
+rapport TTFT de cette manche (1,01) est solide, le facteur d'amélioration
+inter-manches l'est moins.
+
+Le saut de l'énergie — ×1,43 ce matin, ×1,92 ici — relève de la même réserve.
+**Un rapport intra-manche ne se compare à un autre rapport intra-manche que si
+les deux manches sont dans le même état**, et elles ne le sont pas.
+
+## Ce qui n'a pas bougé
+
+Notre **dispersion** reste de 26 à 37 % contre 1,5 à 1,8 % chez eux —
+**vingt fois leur variabilité**, comme ce matin. Le batching du prefill ne l'a
+pas touchée, ce qui est cohérent : les deux candidats nommés (`MAX_GRAPHS = 16`
+sans éviction, seuil des créneaux à 4) sont du côté du décodage.

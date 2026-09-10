@@ -100,6 +100,12 @@ if CONC > 1:
         "decode_disp_pct": round(disp(debits), 2),
         "ttft_mur_s": round(med(ttfts), 3),
         "essais": len(debits),
+        # LES VALEURS DANS L ORDRE, pas seulement la mediane et l etendue :
+        # une dispersion ne dit pas si le debit DERIVE au fil des essais ou
+        # s il SAUTE. La premiere signature designe l histoire de la session
+        # (cles de graphe retenues a vie), la seconde un bruit.
+        "debits_dans_l_ordre": [round(x, 1) for x in debits],
+        "ttft_dans_l_ordre": [round(x, 3) for x in ttfts],
         "watts_median": round(med(w), 1) if w else None,
         "jetons_par_kJ": round(1000 / pj) if pj else None,
     }))
