@@ -392,10 +392,48 @@ def nvfp4_dequant(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16,
 
 
 # Contrairement au seuil INT8, celui-ci est bien placé : le chemin W4A8 ne
-# matérialise pas le poids entier à chaque appel. Balayé sur un dense de 27B,
-# le TTFT d'une invite de 16 jetons vaut 194,7 ms à 8, 202,8 à 32, 265,1 à 64 et
-# 283,1 à 128 — monter le seuil ne fait que perdre. La variable reste comme
-# échappement.
+# matérialise pas le poids entier à chaque appel.
+#
+# Le seuil a valu 8 jusqu'au 10/09/2026, sur ce balayage : « dense de 27B, TTFT
+# d'une invite de 16 jetons, 194,7 ms à 8, 202,8 à 32, 265,1 à 64 » — une
+# mesure à UNE séquence, où le décodage ne franchit jamais le seuil. Elle ne
+# disait donc rien du seul régime où il décide : la CONCURRENCE.
+#
+# Mesuré le 10/09/2026, Qwen3-4B-nvfp4, 5090, ABBA, une valeur par processus
+# (le seuil est lu à l'import) :
+#
+#     seuil   TTFT ms        pas/s      régime
+#       8     993,6 1002,9   18,94      12 séquences
+#      32     901,6  899,2   53,70      12 séquences   ×2,84 en débit
+#       8     289,5  287,7   228,6      1 séquence
+#      32     227,9  224,4   228,4      1 séquence     -21 % de TTFT
+#
+# Sur un second modèle, dense de 31B à une séquence, 8 rend 446,5 et 463,5 ms
+# contre 420,8 et 444,1 à 32 : l'écart y est SOUS la dispersion des bras, donc
+# non conclusif — mais jamais en défaveur de 32.
+#
+# Et la justesse va dans le même sens, ce que personne n'avait mesuré : contre
+# le poids RÉELLEMENT stocké, le GEMV rend 55,6 dB là où le chemin W4A8 rend
+# 27,9 — +27,8 dB. Au-dessus de huit lignes on payait donc une erreur quatre
+# fois plus grande sans l'avoir choisie.
+#
+# 32 serait retenu plutôt que plus haut : le croisement mesuré sur six formes
+# du parc va de 40 à plus de 64, et un seuil sous le plus petit croisement ne
+# peut pas perdre sur une forme non balayée.
+#
+# LE SEUIL RESTE POURTANT A 8, et la raison n'est pas technique : une autre
+# session chargeait un modèle sur la même carte pendant ces manches — son
+# processus est mort en OOM à 3,56 Mio libres. La garde de carte est un
+# INSTANTANE, pas une réservation : consultée à quelques secondes d'écart, elle
+# a répondu « libre » aux deux, et elle avait raison les deux fois. Les chiffres
+# ci-dessus se reproduisent à 0,1 % sur le débit (18,94 puis 18,94 puis 18,94 ;
+# 53,70 puis 53,70 puis 53,62) et à 10 % sur le TTFT — donc l'ordre de grandeur
+# tiendra probablement. « Probablement » ne change pas une constante que le
+# planificateur consulte pour tout le parc.
+#
+# A refaire sous le verrou `flock` que le circuit adopte, meme protocole. La
+# variable reste comme échappement, et `ACVRAM_NVFP4_GEMV_MAX=32` donne le
+# comportement mesuré ici.
 _NVFP4_GEMV_MAX = int(os.environ.get("ACVRAM_NVFP4_GEMV_MAX", "8"))
 
 
