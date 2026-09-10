@@ -33,6 +33,14 @@ __version__ = "0.4.25"
 # derive pas.
 VARIABLES_LUES = {
     "ACVRAM_ALLOC_EXTENSIBLE",
+    "ACVRAM_BANC_ACCEPTE_REPLAN",
+    "ACVRAM_KERNEL_CACHE",
+    "ACVRAM_SCALER_SANS_CACHE",
+    # ACVRAM_SRC_HASH n'est PAS une variable d'environnement : c'est une option
+    # de compilation (-D) portant le sha du .cu. Elle figure ici parce que
+    # l'epreuve la reconnait au motif ACVRAM_[A-Z0-9_]+ dans le source, et
+    # qu'une liste incomplete fait echouer la garde — pas parce qu'on la lit.
+    "ACVRAM_SRC_HASH",
     "ACVRAM_ARCH_FAMILY",
     "ACVRAM_CUDA_HOME",
     "ACVRAM_DISABLE_CPU_KERNELS",
