@@ -75,6 +75,18 @@ class Sequence:
         return len(self.prompt_ids) + len(self.output_ids)
 
     @property
+    def longueur_ecrite(self) -> int:
+        """Jetons dont les clés et valeurs sont réellement dans le cache.
+
+        `length` compte l'invite ENTIERE des l'admission, avant tout passage
+        en avant. Publier des blocs sur cette longueur pendant un prefill
+        decoupe livrerait a une requete ulterieure des cles jamais ecrites —
+        exactement ce que la garde « uniquement des blocs complets » de
+        `_register_complete_blocks` cherche a empecher.
+        """
+        return self.length if self.prefilled else self.prefill_len
+
+    @property
     def all_ids(self) -> list[int]:
         return self.prompt_ids + self.output_ids
 
@@ -476,7 +488,7 @@ class Engine:
         # lire SEIZE elements, a chaque pas et pour chaque sequence. `length`
         # donne la meme longueur sans rien recopier, et `_tranche` ne touche
         # que les seize jetons du bloc.
-        n_full = min(seq.length // BLOCK_SIZE, len(seq.blocks))
+        n_full = min(seq.longueur_ecrite // BLOCK_SIZE, len(seq.blocks))
         while len(seq.hashes) < n_full:
             i = len(seq.hashes)
             prev = seq.hashes[-1] if seq.hashes else 0
@@ -523,6 +535,21 @@ class Engine:
             self.waiting.remove(seq)
 
     # -- batch construction ----------------------------------------------
+    def _budget_jetons(self) -> int:
+        """Plafond de jetons d'invite par séquence et par pas — 0 = illimité.
+
+        Coupé par défaut : a zero, le moteur se comporte au jeton pres comme
+        avant. Actif, il découpe le prefill d'une longue invite en tranches
+        et REND LA MAIN entre chaque, au lieu de faire attendre toutes les
+        séquences en cours derriere elle. Le découpage existait deja
+        (`_build_batch(..., limite=)`) mais chainait ses passes dans le meme
+        pas : il découpait le calcul sans découper la latence.
+        """
+        try:
+            return max(0, int(os.environ.get("ACVRAM_BUDGET_JETONS", "0")))
+        except ValueError:
+            return 0
+
     def _decodables(self) -> list[Sequence]:
         """Les séquences prêtes à décoder — un seul endroit qui le décide.
 
@@ -543,8 +570,11 @@ class Engine:
         for seq in seqs:
             if prefill:
                 # On saute ce que le cache de préfixe détient déjà.
-                ids = seq.prompt_ids[seq.cached_len:limite]
-                start = seq.cached_len
+                # `prefill_len` et non `cached_len` : identiques tant que le
+                # prefill n'est pas decoupe, distincts des qu'il l'est. La
+                # borne `limite` est une borne de FIN, absolue.
+                ids = seq.prompt_ids[seq.prefill_len:limite]
+                start = seq.prefill_len
             else:
                 ids = [seq.output_ids[-1]] if seq.output_ids else [seq.prompt_ids[-1]]
                 start = seq.length - 1
@@ -584,7 +614,16 @@ class Engine:
         # n'a de frontière instantanée à geler (`_frontiere_insta`), sinon la
         # photographie par séquence (longueur d'invite différente d'une
         # requête à l'autre) rendrait le lot incohérent — repli inchangé.
-        if new and os.environ.get("ACVRAM_PREFILL_BATCH") != "0" \
+        budget = self._budget_jetons()
+        a_prefiller = list(new)
+        if budget:
+            # Les inachevees d'un pas precedent reprennent AVANT les nouvelles :
+            # sinon une arrivee continue les affamerait indefiniment.
+            a_prefiller = [s for s in self.running
+                           if not s.prefilled and not s.finished
+                           and s not in new] + a_prefiller
+
+        if new and not budget and os.environ.get("ACVRAM_PREFILL_BATCH") != "0" \
                 and all(self._frontiere_insta(s) is None for s in new):
             t0 = time.perf_counter()
             batch = self._build_batch(new, prefill=True)
@@ -600,9 +639,13 @@ class Engine:
             # On précalcule les séquences nouvellement admises une par une.
             # Mêler une longue invite à un lot de décodage bloquerait derrière
             # elle toutes les séquences en cours.
-            for seq in new:
+            for seq in a_prefiller:
                 t0 = time.perf_counter()
-                coupe = self._frontiere_insta(seq)
+                debut = seq.prefill_len
+                # La frontiere ne se gele qu'au tout premier passage de la
+                # sequence : une tranche suivante est deja au-dela.
+                coupe = (self._frontiere_insta(seq)
+                         if seq.prefill_len == seq.cached_len else None)
                 if coupe is not None:
                     # Première passe jusqu'à la frontière, instantané, puis le
                     # reste : le point de reprise est ainsi le même d'une requête à
@@ -611,12 +654,23 @@ class Engine:
                     self._photographier(seq, coupe)
                     seq.cached_len = coupe
                     seq.prefill_len = coupe
-                batch = self._build_batch([seq], prefill=True)
+                fin = len(seq.prompt_ids)
+                if budget:
+                    fin = min(fin, seq.prefill_len + budget)
+                batch = self._build_batch(
+                    [seq], prefill=True,
+                    limite=fin if fin < len(seq.prompt_ids) else None)
                 logits = self.model(batch)
                 self.stats.prefill_seconds += time.perf_counter() - t0
-                self.stats.prefill_tokens += len(seq.prompt_ids) - seq.cached_len
-                seq.prefill_len = len(seq.prompt_ids)
-                outputs += self._emit(logits, [seq])
+                # Compte depuis `debut`, releve AVANT la passe de frontiere :
+                # l'ancienne formule partait de `cached_len` deja avance a la
+                # coupe, et perdait donc la premiere moitie sur un hybride.
+                self.stats.prefill_tokens += fin - debut
+                seq.prefill_len = fin
+                # Une tranche intermediaire ne produit pas de jeton : ses
+                # logits ne sont pas ceux du dernier jeton de l'invite.
+                if seq.prefilled:
+                    outputs += self._emit(logits, [seq])
                 self._register_complete_blocks(seq)
 
         decodable = self._decodables()
