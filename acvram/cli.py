@@ -48,6 +48,7 @@ VARIABLES_LUES = {
     # exactement son role — une variable posee qui ne va nulle part est une
     # consigne silencieusement ignoree.
     "ACVRAM_PA_ARM",
+    "ACVRAM_PREFILL_BATCH",
     # Echappement de mesure de la fusion, pour les QUATRE empileurs.
     # ACVRAM_SANS_FUSION_BF16 ne coupait que le chemin bf16 : le gain de la
     # fusion n'etait donc mesurable qu'en bf16, et c'est ainsi qu'un +2,60 %
