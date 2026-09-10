@@ -34,12 +34,28 @@ def pytest_runtest_call(item):
     if apres > avant:
         _residu.append((item.nodeid, apres - avant))
 
+_collectes = []
+
+def pytest_collection_modifyitems(session, config, items):
+    _collectes.extend(i.nodeid for i in items)
+
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
     if not _alloc:
         return
     t = terminalreporter
     touche = {k: v for k, v in _alloc.items() if v[0] > 0}
     t.write_sep("=", "qui touche la carte (mesure, pas suppose)")
+    # COMBIEN AI-JE VU ? Un test qui saute, echoue a l import ou n est pas
+    # collecte ne traverse pas le hookwrapper — et son absence du tableau se
+    # lit comme « ne touche pas la carte ». Un instrument doit dire ce qu il
+    # n a pas vu, sinon son silence passe pour une observation.
+    manques = [k for k in _collectes if k not in _alloc]
+    t.write_line(f"{len(_alloc)} tests traverses sur {len(_collectes)} collectes")
+    if manques:
+        t.write_line(f"NON VUS par ce greffon ({len(manques)}) — leur absence "
+                     f"du tableau ne veut PAS dire qu'ils ne touchent pas la carte :")
+        for k in manques[:10]:
+            t.write_line(f"    {k}")
     t.write_line(f"{len(touche)} tests sur {len(_alloc)} ont alloue sur la carte")
     for k, (pic, _) in sorted(touche.items(), key=lambda x: -x[1][0])[:15]:
         t.write_line(f"  {pic/(1<<20):9.1f} Mio de pic   {k}")

@@ -68,7 +68,27 @@ fin = time.time() + a.duree
 arret = {"v": False}
 signal.signal(signal.SIGTERM, lambda *_: arret.__setitem__("v", True))
 signal.signal(signal.SIGINT, lambda *_: arret.__setitem__("v", True))
+# CE QUE LA CHARGE FAIT VRAIMENT. Regler une fraction de calcul ne garantit
+# pas de la produire : une charge qui vise 70 % et en produit 30 rendrait les
+# verdicts « resiste » sans valeur, et rien ne le dirait. On mesure donc
+# l occupation reelle et on la publie a cote de la consigne.
+def _occupation():
+    import subprocess
+    try:
+        return int(subprocess.run(
+            ["nvidia-smi", "-i", "0", "--query-gpu=utilization.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5).stdout.strip())
+    except Exception:
+        return None
+
+_releves, _prochain = [], time.time() + 5
 while time.time() < fin and not arret["v"]:
+    if time.time() >= _prochain:
+        u = _occupation()
+        if u is not None:
+            _releves.append(u)
+        _prochain = time.time() + 5
     t0 = time.time()
     if a.calcul > 0:
         for _ in range(20):
@@ -77,4 +97,13 @@ while time.time() < fin and not arret["v"]:
     dt = time.time() - t0
     if a.calcul < 1.0 and dt > 0:
         time.sleep(dt * (1 - a.calcul) / max(a.calcul, 1e-3))
+if _releves:
+    _releves.sort()
+    med = _releves[len(_releves) // 2]
+    print(f"occupation REELLE : mediane {med} % sur {len(_releves)} releves "
+          f"(consigne {a.calcul:.0%}) · min {_releves[0]} max {_releves[-1]}",
+          flush=True)
+else:
+    print("occupation REELLE : non relevee — le verdict ne dit rien du calcul",
+          flush=True)
 print("charge retiree", flush=True)
