@@ -91,19 +91,38 @@ sudo sysctl -w vm.nr_hugepages=8192      # 16 Go en pages de 2 Mo
 
 ## Alimentation et températures
 
-**Ce poste tourne bridé, et c'est délibéré** :
+**Ce poste tourne bridé, et c'est délibéré — mais la limite POSÉE dérive dans
+le temps, elle n'est pas un fait permanent.** Relevé le 8/09/2026 (posé) puis
+re-relevé le 10/09/2026 (constaté, sans action de personne d'identifié) :
 
-| carte | limite posée | par défaut | plage réglable |
-|---|---|---|---|
-| RTX 5090 | **400 W** | 600 W | 400 à 600 W (le plancher est à 400) |
-| RTX 3080 Ti | **275 W** | 350 W | 100 à 375 W |
+| carte | posé le 8/09 | **constaté le 10/09** | par défaut (usine) | plage réglable |
+|---|---|---|---|---|
+| RTX 5090 | 400 W | **500 W** | 600 W | 400 à 600 W (le plancher est à 400) |
+| RTX 3080 Ti | 275 W | **375 W** (son plafond réglable) | 350 W | 100 à 375 W |
 
-La 5090 Astral LC OC approcherait les 600 W en prefill soutenu sans cela. Une
-limite posée par `nvidia-smi -pl` coûte moins de débit que ne le fait un
-étranglement thermique, et le **décodage, limité par la bande passante
-mémoire, ne s'en aperçoit presque pas** : les 400 W ne mordent qu'au prefill et
-sur les GEMM denses. Tous les chiffres de la feuille de route sont mesurés dans
-cet état — ce ne sont pas des chiffres de carte à pleine puissance.
+**Le bridage n'est pas persistant au redémarrage** (déjà noté ci-dessous,
+confirmé être la cause probable de la dérive) : un reboot ramène chaque carte
+à SA limite d'usine (600/350), pas au réglage documenté ici — la 3080 Ti à
+375 W n'est même pas au défaut usine (350), quelqu'un ou quelque chose l'a
+réglée au-dessus depuis. **Aucune campagne ne doit supposer un bridage
+"documenté" sans le vérifier au moment même de mesurer.**
+
+**Ce qui reste vrai malgré la dérive** : les chiffres de jetons/kJ de ce
+document et de `FEUILLE-DE-ROUTE.md` sont calculés à partir de la puissance
+**mesurée** (colonne « W tirés », échantillonnée pendant la mesure), pas de la
+limite posée — vérifié par recalcul direct sur plusieurs lignes le 10/09/2026.
+Le balayage ci-dessous (3/09) l'établit lui-même : de 400 à 600 W sur la 5090,
+le tirage réel ne dépasse jamais ~340 W, la limite ne mordait donc déjà pas au
+moment de la mesure. **La dérive du réglage ne rend donc pas ces chiffres
+faux**, mais elle rend fausse l'affirmation « tous nos chiffres sont mesurés à
+400 W/275 W » si on la lit comme une limite qui aurait pu mordre — elle ne
+mordait pas, quelle que soit sa valeur exacte dans la plage testée.
+
+**Règle qui en sort, pour toute mesure future** : un chiffre de jetons/kJ doit
+toujours porter la puissance **tirée mesurée**, jamais la limite posée seule —
+et la limite posée doit être relevée à l'instant de la mesure
+(`nvidia-smi --query-gpu=power.limit --format=csv`), jamais supposée d'après
+ce document.
 
 ```bash
 sudo nvidia-smi -i 0 -pl 400      # 5090, plancher constructeur

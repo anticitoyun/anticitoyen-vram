@@ -206,6 +206,16 @@ def mesurer(chemin: str, max_model_len: int, n_seqs: int,
     pic = guetteur.arreter()
     vivant = torch.cuda.max_memory_allocated()
     reserve = torch.cuda.max_memory_reserved()
+    # `max_memory_reserved` et `max_memory_allocated` sont DEUX MAXIMA
+    # INDEPENDANTS : leur difference combine des valeurs atteintes a des
+    # instants differents et ne mesure donc pas une fragmentation. Le champ qui
+    # la mesure vraiment est `inactive_split_bytes` — les octets pris dans des
+    # blocs decoupes et inutilisables. On publie aussi les courants au MEME
+    # instant synchronise, seuls comparables entre eux.
+    st = torch.cuda.memory_stats()
+    fragm = st.get("inactive_split_bytes.all.peak", 0)
+    res_cur = st.get("reserved_bytes.all.current", 0)
+    all_cur = st.get("allocated_bytes.all.current", 0)
 
     from acvram.engine.layers import QuantLinear
     exiles = sum(1 for m_ in charge.model.modules()
@@ -238,6 +248,9 @@ def mesurer(chemin: str, max_model_len: int, n_seqs: int,
         "vivant_moteur": vivant_moteur,
         "vivant_warm": vivant_warm,
         "reserve": reserve,
+        "fragm_reelle": fragm,
+        "res_cur": res_cur,
+        "all_cur": all_cur,
         "sans_graphes": sans_graphes,
     }
     del moteur, charge
@@ -303,6 +316,9 @@ def main(argv):
     print(f"  decomposition du pic : vivant {r['vivant']/g:.2f} G   "
           f"fragmentation {(r['reserve']-r['vivant'])/g:+.2f} G   "
           f"hors torch {(r['pic']-r['reserve'])/g:+.2f} G")
+    print(f"  fragmentation REELLE (inactive_split, pic) {r['fragm_reelle']/g:.2f} G"
+          f"   —   courants au meme instant : reserve {r['res_cur']/g:.2f} G "
+          f"alloue {r['all_cur']/g:.2f} G   ecart {(r['res_cur']-r['all_cur'])/g:.2f} G")
     print(f"  hote : MemFree {r['hote_libre']/2**20:.1f} G   "
           f"MemAvailable {r['hote_dispo']/2**20:.1f} G")
     if r["exiles"] or (not r["graphes"] and not r["sans_graphes"]):
