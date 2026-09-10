@@ -742,6 +742,18 @@ __global__ void int4_gemv_grouped_kernel(
 // godet de blocs : le chemin se rejoue tel quel dans un graphe CUDA.
 // -------------------------------------------------------------------------
 
+// EMPREINTE DU SOURCE, posee par le lanceur Python (-DACVRAM_SRC_HASH).
+// Elle doit se retrouver DANS le binaire : c'est le seul controle qui prouve
+// que le .so compile bien ce fichier-ci. Comparer les horodatages ne prouve
+// rien — ccache reecrit le .so avec un contenu ancien, donc sa date est bonne
+// et son contenu perime. Un ENTIER, pas une chaine : l'echappement des
+// guillemets ne survivait pas jusqu'a nvcc et le controle refusait TOUT.
+#ifndef ACVRAM_SRC_HASH
+#define ACVRAM_SRC_HASH 0ULL
+#endif
+extern "C" __attribute__((used)) const unsigned long long acvram_src_hash
+    = ACVRAM_SRC_HASH;
+
 constexpr int PA_CHUNK = 512;
 constexpr int PA_WARPS = 4;
 
