@@ -124,6 +124,32 @@ def mesurer(bras: str, modele: str) -> dict:
             "premier_ms": pas[0]}
 
 
+def rendre_le_cache(modele: str) -> int:
+    """Rend au systeme le page cache des poids qu'on vient de lire.
+
+    Lire 27,5 Gio remplit le page cache ; MemAvailable reste haut mais MemFree
+    s'effondre, et le superviseur tue sur MemFree. Six bras enchaines, c'est
+    six fois la meme lecture. On ne contourne pas le garde-fou : on retire la
+    pression qui le declenche.
+    """
+    rendus = 0
+    for racine, _, fichiers in os.walk(os.path.realpath(modele)):
+        for f in fichiers:
+            if not f.endswith((".safetensors", ".bin", ".gguf")):
+                continue
+            chemin = os.path.join(racine, f)
+            try:
+                fd = os.open(chemin, os.O_RDONLY)
+                try:
+                    os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                    rendus += 1
+                finally:
+                    os.close(fd)
+            except OSError:
+                pass
+    return rendus
+
+
 def pilote(modele: str, sortie: str) -> int:
     # Le changement qui doit casser : un bras inconnu leve, donc le .so charge
     # contient bien ce code. Sans ce controle, une mesure sur l'ancien binaire
@@ -152,9 +178,11 @@ def pilote(modele: str, sortie: str) -> int:
             return 1
         d = json.loads(r.stdout.strip().splitlines()[-1])
         releves.append(d)
+        n_rendus = rendre_le_cache(modele)      # avant le bras suivant
         print(f"  {i}/{len(ORDRE)} bras {bras} : {d['median_ms']:7.3f} ms "
               f"[{d['p10_ms']:.3f} – {d['p90_ms']:.3f}] sur {d['n_retenus']} "
-              f"pas, {time.time() - t0:.0f} s")
+              f"pas, {time.time() - t0:.0f} s, "
+              f"{n_rendus} fichiers rendus au cache")
 
     emp = {b: [d["jetons"] for d in releves if d["bras"] == b] for b in "ABC"}
     if len({e[0] for e in emp.values()}) != 3:
