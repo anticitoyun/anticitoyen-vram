@@ -163,6 +163,19 @@ def mesurer(chemin: str, max_model_len: int, n_seqs: int,
         ids = [(i * 7919 + j * 31 + 11) % 30000 + 1 for j in range(invite)]
         moteur.add_request(ids, params, request_id=f"r{i}")
 
+    # LE BRAS QUI SEPARE les deux candidats restants pour les ~1,8 Gio.
+    #
+    # `pic` est un chiffre du PILOTE : il contient tout. Trois compteurs de
+    # l allocateur le decomposent exactement, et ils ne coutent rien :
+    #   vivant        = max_memory_allocated : les tenseurs reellement detenus
+    #                   (poids + KV + intermediaires en cours)
+    #   fragmentation = max_memory_reserved - max_memory_allocated : ce que
+    #                   l allocateur garde au pilote sans le preter
+    #   hors_torch    = pic - max_memory_reserved : contexte CUDA et tout ce
+    #                   que PyTorch ne compte pas
+    # Sans cette decomposition on ne peut qu ATTRIBUER l ecart ; avec elle on
+    # le lit. C est la difference entre une hypothese et une mesure.
+    torch.cuda.reset_peak_memory_stats()
     guetteur = Guetteur()
     guetteur.start()
     pas = 0
@@ -173,6 +186,8 @@ def mesurer(chemin: str, max_model_len: int, n_seqs: int,
             break
     torch.cuda.synchronize()
     pic = guetteur.arreter()
+    vivant = torch.cuda.max_memory_allocated()
+    reserve = torch.cuda.max_memory_reserved()
 
     from acvram.engine.layers import QuantLinear
     exiles = sum(1 for m_ in charge.model.modules()
@@ -201,6 +216,8 @@ def mesurer(chemin: str, max_model_len: int, n_seqs: int,
         "hote_libre": libre_h,
         "hote_dispo": dispo_h,
         "n_graphes": n_graphes,
+        "vivant": vivant,
+        "reserve": reserve,
         "sans_graphes": sans_graphes,
     }
     del moteur, charge
@@ -260,6 +277,9 @@ def main(argv):
              ('actifs, %d vivants' % r['n_graphes']) if r['graphes']
              else 'INACTIFS'}"
           + (f" ({r['raison_graphes']})" if not r['graphes'] else ""))
+    print(f"  decomposition du pic : vivant {r['vivant']/g:.2f} G   "
+          f"fragmentation {(r['reserve']-r['vivant'])/g:+.2f} G   "
+          f"hors torch {(r['pic']-r['reserve'])/g:+.2f} G")
     print(f"  hote : MemFree {r['hote_libre']/2**20:.1f} G   "
           f"MemAvailable {r['hote_dispo']/2**20:.1f} G")
     if r["exiles"] or (not r["graphes"] and not r["sans_graphes"]):
