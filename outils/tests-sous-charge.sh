@@ -12,6 +12,13 @@ S="$(cd "$(dirname "$0")" && pwd)"; R="$(dirname "$S")"
 PY=~/Bureau/Claude/anticitoyen-vram/.venv/bin/python
 export PYTHONPATH="$R" CUDA_VISIBLE_DEVICES=0
 N=${N:-5}; GIO=${GIO:-20}; CALCUL=${CALCUL:-0.5}
+# DEUX EXEMPLAIRES DU MEME TRAVAIL, ET LA DUREE PUBLIEE. Une manche unique est
+# INDECIDABLE : sans jumelle, rien ne peut accuser une anomalie ni la
+# disculper. Mes deux premiers bras n en avaient qu un chacun — un RESISTE 5/5
+# isole ne dit rien. Regle etablie par claude-f2 le 10/09 sur 47,42/47,35
+# contre 60,85/67,56 : c est la comparaison des jumelles qui accuse, un fichier
+# seul a 60,85 n aurait rien dit.
+EXEMPLAIRES=${EXEMPLAIRES:-2}
 TMP=$(mktemp)
 CIBLES=${CIBLES:-"tests/test_calibration.py tests/test_fusion_nvfp4.py"}
 
@@ -68,17 +75,30 @@ fi
 printf '%-42s %8s %8s  %s\n' cible sans avec verdict
 for c in $CIBLES; do
   read -r se ss <<<"${sans[$c]}"
-  read -r ae as <<<"$(joue "$c")"
+  # EXEMPLAIRES du meme travail : on joue le bras plusieurs fois et on publie
+  # chaque exemplaire avec sa duree. Deux exemplaires qui divergent accusent
+  # la manche ; un exemplaire seul ne peut rien dire.
+  ae=0; as=0
+  for ex in $(seq 1 $EXEMPLAIRES); do
+    d0=$(date +%s)
+    read -r e s2 <<<"$(joue "$c")"
+    printf '  exemplaire %d/%d : %s echecs, %s sauts, %s s\n' \
+      "$ex" "$EXEMPLAIRES" "$e" "$s2" "$(( $(date +%s) - d0 ))"
+    ae=$((ae + e)); as=$((as + s2))
+  done
+  # TOTAL, pas N : modifier N dans la boucle le multiplierait a chaque cible,
+  # et la deuxieme cible serait comparee a un denominateur faux.
+  TOTAL=$((N * EXEMPLAIRES))
   if [ "$se" -gt 0 ]; then
     v="ECARTE : echoue deja $se/$N SANS charge — test casse, pas fragile"
   elif [ "$as" -gt 0 ]; then
-    v="ECARTE : a SAUTE $as/$N sous charge — un test qui saute n a pas resiste"
+    v="ECARTE : a SAUTE $as/$TOTAL sous charge — un test qui saute n a pas resiste"
   elif [ "$ae" -eq 0 ]; then
-    v="RESISTE $N/$N"
-  elif [ "$ae" -eq "$N" ]; then
-    v="FRAGILE systematique $N/$N"
+    v="RESISTE $TOTAL/$TOTAL sur $EXEMPLAIRES exemplaires"
+  elif [ "$ae" -eq "$TOTAL" ]; then
+    v="FRAGILE systematique $TOTAL/$TOTAL"
   else
-    v="FRAGILE intermittent $ae/$N"
+    v="FRAGILE intermittent $ae/$TOTAL"
   fi
-  printf '%-40s %5s/%d %5s/%d  %s\n' "$c" "$se" "$N" "$ae" "$N" "$v"
+  printf '%-40s %5s/%d %5s/%d  %s\n' "$c" "$se" "$N" "$ae" "$TOTAL" "$v"
 done
