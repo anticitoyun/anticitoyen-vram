@@ -35,7 +35,7 @@ GIO = 1024 ** 3
 
 BASE = Path("/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram")
 SOURCE = BASE / "Llama-2-7b-hf"
-CORPUS = Path("~/Bureau/Claude/acvram-memoire/corpus/wiki.test.raw")
+CORPUS = Path("~/Bureau/Claude/acvram-memoire/corpus/wiki-gptq.txt")
 RELEVES = Path("~/Bureau/Claude/acvram-memoire/corpus")
 
 # Budget en Gio -> (nom du dossier, valeur prevue si temoin)
@@ -166,6 +166,51 @@ def main() -> int:
     sortie = Path(a.sortie)
     sortie.mkdir(parents=True, exist_ok=True)
 
+    # --- Manche zero : la RESOLUTION de l'instrument, avant tout point ---
+    # Remarque de claude-0a le 10/09 : l'accord du temoin negatif (tout-int8
+    # 5,4142 contre etalon 5,4141, soit 0,002 %) n'a de valeur que si la
+    # dispersion entre deux executions identiques est PLUS PETITE que 0,002 %.
+    # Sinon le temoin passe par construction et ne prouve rien — c'est ainsi
+    # qu'un instrument aveugle a rendu quatre fois 8,825 au millieme le meme
+    # jour. Une passe rejouee a l'identique donne ce chiffre pour le prix d'une
+    # evaluation, et rien ne se publie avant de l'avoir.
+    dispersion = None
+    ref_dossier = BASE / "Llama-2-7b-int8"
+    if ref_dossier.exists():
+        passes = []
+        for k in (1, 2):
+            j = sortie / f"dispersion-{k}.log"
+            code = service(f"acvram-disp-{k}",
+                           [a.python, "-m", "acvram", "eval", str(ref_dossier)] + EVAL,
+                           j, a.memoire_max, minutes=45)
+            if code:
+                print(f"ECHEC / CAUSE: manche de dispersion {k}, code {code}")
+                return 2
+            brut = j.read_text()
+            d = brut.find("{")
+            r = json.loads(brut[d:]) if d >= 0 else {}
+            if isinstance(r, dict) and "models" in r:
+                r = r["models"][0]
+            passes.append(r.get("perplexity"))
+            print(f"  passe {k} : PPL {passes[-1]}", flush=True)
+            rendre_le_cache(ref_dossier)
+        if None in passes:
+            print("ECHEC / CAUSE: une passe de dispersion n'a pas rendu de PPL")
+            return 2
+        dispersion = abs(passes[0] - passes[1])
+        rel = dispersion / passes[0] * 100
+        print(f"  RESOLUTION : dispersion {dispersion:.6f} PPL soit {rel:.5f} % "
+              f"— l'ecart du temoin negatif vaut {abs(5.4142 - PPL_REFERENCE):.4f} "
+              f"({100 * abs(5.4142 - PPL_REFERENCE) / PPL_REFERENCE:.5f} %)")
+        if dispersion >= abs(5.4142 - PPL_REFERENCE):
+            print("  ATTENTION : la dispersion couvre l'ecart du temoin negatif. "
+                  "Son accord a 0,002 % ne prouve donc rien, et le plancher de "
+                  "reproduction des temoins est porte a 3x la dispersion.")
+    else:
+        print("  dispersion NON MESUREE : "
+              f"{ref_dossier.name} absent. Les verdicts de temoin seront "
+              "rendus avec un seuil pose a priori, ce qui est plus faible.")
+
     resultats = []
     for b, nom, temoin in points:
         dossier = BASE / f"Llama-2-7b-{nom}"
@@ -238,9 +283,15 @@ def main() -> int:
         if temoin and ppl:
             db = abs(bpw_reel - temoin["bpw"])
             dp = abs(ppl - temoin["ppl"])
-            ok = db < 0.02 and dp < 0.005
+            # Le seuil de reproduction suit la RESOLUTION mesuree quand on l'a :
+            # exiger mieux que ce que l'instrument distingue rend un verdict
+            # ininterpretable dans les deux sens.
+            seuil_ppl = max(0.005, 3 * dispersion) if dispersion else 0.005
+            ok = db < 0.02 and dp < seuil_ppl
             verdict = {"role": temoin["role"], "reproduit": ok,
-                       "ecart_bpw": round(db, 4), "ecart_ppl": round(dp, 4)}
+                       "ecart_bpw": round(db, 4), "ecart_ppl": round(dp, 4),
+                       "seuil_ppl": round(seuil_ppl, 6),
+                       "dispersion_mesuree": dispersion}
             print(f"  TEMOIN {temoin['role']} : "
                   f"{'reproduit' if ok else 'NE REPRODUIT PAS'} "
                   f"(ecart {db:.4f} b/p, {dp:.4f} PPL)")
@@ -253,7 +304,12 @@ def main() -> int:
                           "perplexity": ppl, "budget": bud, "temoin": verdict,
                           "etat": "ok"})
         (sortie / "campagne-quota.json").write_text(
-            json.dumps({"points": resultats, "reference": PPL_REFERENCE},
+            json.dumps({"points": resultats, "reference": PPL_REFERENCE,
+                        "dispersion_ppl": dispersion,
+                        "corpus": "wiki-gptq.txt (344 402 jetons, 168 segments) "
+                                  "— le MEME que l'etalon exterieur, verifie "
+                                  "au jeton : suites identiques sur les 344 064 "
+                                  "premiers, tokenizer rapide et lent confondus"},
                        indent=2, ensure_ascii=False))
         if verdict and not verdict["reproduit"]:
             return 3

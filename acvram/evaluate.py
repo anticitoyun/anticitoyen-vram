@@ -15,6 +15,7 @@ quantités de contexte différentes.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -73,6 +74,16 @@ class EvalResult:
     # quant/formats.py:bits_per_weight(fmt, group_size).
     bits_par_poids_en_memoire: float = 0.0
     nbytes_detail: dict = field(default_factory=dict)
+    # Un releve de perplexite qui ne dit pas SUR QUOI il porte ne peut plus
+    # etre compare ensuite. Le 10/09, trois releves archives ont oblige a une
+    # reconstitution arithmetique (168 x 2047 = 343 896 positions notables ne
+    # sont possibles qu'avec >= 344 064 jetons, donc avec wiki-gptq.txt et pas
+    # wiki.test.raw, qui n'en rend que 335 688) pour savoir si notre chaine et
+    # l'etalon exterieur parlaient du meme texte. Ils en parlaient, mais rien
+    # dans les fichiers ne le disait.
+    corpus_chemin: str = ""
+    corpus_octets: int = 0
+    corpus_sha256: str = ""
     formats: dict[str, int] = field(default_factory=dict)
     avertissement: str = ""
     # Perplexite CUMULATIVE apres n fenetres, aux jalons de `_JALONS`. Le
@@ -98,6 +109,9 @@ class EvalResult:
             "weights_bytes": self.weights_bytes,
             "bits_par_poids_en_memoire": round(self.bits_par_poids_en_memoire, 3),
             "nbytes_detail": self.nbytes_detail,
+            "corpus_chemin": self.corpus_chemin,
+            "corpus_octets": self.corpus_octets,
+            "corpus_sha256": self.corpus_sha256,
             "formats": self.formats,
             "avertissement": self.avertissement,
             "cumul": {str(k): round(v, 4) for k, v in sorted(self.cumul.items())},
@@ -160,13 +174,24 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
         raise ValueError(f"la perplexité a besoin d'un tokenizer et n'en a "
                          f"pas : {raison}")
 
-    ids = tokenizer.encode(_load_corpus(corpus_path))[:max_tokens]
+    texte = _load_corpus(corpus_path)
+    ids = tokenizer.encode(texte)[:max_tokens]
     if len(ids) < 16:
         raise ValueError("corpus trop court pour être évalué")
 
     model = loaded.model
     result = EvalResult(model=os.path.basename(os.path.abspath(model_dir)),
                         min_context=min_context, window=window)
+    if corpus_path and os.path.isfile(corpus_path):
+        result.corpus_chemin = os.path.abspath(corpus_path)
+        result.corpus_octets = os.path.getsize(corpus_path)
+        result.corpus_sha256 = hashlib.sha256(
+            open(corpus_path, "rb").read()).hexdigest()[:24]
+    else:
+        result.corpus_chemin = "(corpus par defaut, integre)"
+        result.corpus_octets = len(texte.encode("utf-8"))
+        result.corpus_sha256 = hashlib.sha256(
+            texte.encode("utf-8")).hexdigest()[:24]
     result.weights_bytes = model.nbytes
     # Le champ ci-dessus a une valeur PREVUE, tiree du manifeste : embedding au
     # dtype de chargement + somme des tenseurs quantifies. Elle a rendu « faux »
