@@ -111,7 +111,7 @@ Priority: optional
 Architecture: amd64
 Depends: python3 (>= 3.10), python3-venv, python3-pip, ca-certificates
 Recommends: nvidia-driver-575 | nvidia-driver-580 | nvidia-driver-595
-Maintainer: Anticitoyen <nuagesnohost@mastodon.nuages.noho.st>
+Maintainer: Anticitoyen <anticitoyen@users.noreply.gitlab.com>
 Homepage: https://outils.nuages.noho.st/gitlab/anticitoyen/anticitoyen-vram
 Description: serveur d'inférence LLM pour GPU hétérogènes (NVFP4 + INT4)
  Serveur d'inférence compatible OpenAI qui donne à chaque GPU le format de
