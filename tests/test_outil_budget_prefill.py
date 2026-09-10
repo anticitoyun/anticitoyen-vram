@@ -37,9 +37,9 @@ def _args(converted, budget, regime):
 def test_le_montage_tient_dans_les_quatre_cases(converted, regime, budget, capsys):
     assert _charger().main(_args(converted, budget, regime)) == 0
     ligne = capsys.readouterr().out.strip().splitlines()[-1].split("\t")
-    assert len(ligne) == 13, "la ligne ne suit plus son en-tete"
+    assert len(ligne) == 14, "la ligne ne suit plus son en-tete"
     assert int(ligne[0]) == budget and ligne[1] == regime
-    passes = int(ligne[4])
+    passes = int(ligne[5])
     assert passes == (1 if budget == 0 else 7), \
         f"200 jetons par tranches de {budget} : {passes} passes"
 
@@ -58,4 +58,16 @@ def test_le_regime_charge_fait_bien_decoder_les_voisines(converted, capsys):
     """Sans quoi le seul régime qui peut conclure ne mesurerait rien."""
     assert _charger().main(_args(converted, 32, "charge")) == 0
     ligne = capsys.readouterr().out.strip().splitlines()[-1].split("\t")
-    assert int(ligne[5]) > 0, "aucune voisine n'a produit pendant le prefill"
+    assert int(ligne[6]) > 0, "aucune voisine n'a produit pendant le prefill"
+
+
+def test_des_places_de_graphes_non_prises_arretent_la_manche(converted, monkeypatch):
+    """`MAX_GRAPHS` est lu À L'IMPORT : posé après, il ne fait rien, en
+    silence. Le bras se comparerait alors à lui-même. Le contrôle interroge
+    le MODULE, pas l'environnement — c'est la seule façon de le savoir
+    avant la mesure plutôt qu'après, en constatant que les bras diffèrent."""
+    from acvram.engine import graphs
+    mod = _charger()
+    monkeypatch.setenv("ACVRAM_MAX_GRAPHS", str(graphs.MAX_GRAPHS + 48))
+    with pytest.raises(SystemExit, match="places de graphes non prises"):
+        mod.main(_args(converted, 0, "seule"))

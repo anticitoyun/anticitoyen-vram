@@ -19,6 +19,28 @@ UNE VALEUR PAR PROCESSUS. Balayer plusieurs budgets dans un même processus
 fragmenterait la carte pour les suivants : le classement trouvé serait
 l'artefact du balayage.
 
+LE REGIME APPARTIENT AU RESULTAT
+-------------------------------
+La manche se court avec ACVRAM_MAX_GRAPHS=64 dans LES DEUX bras, pour
+retirer du bruit des deux cotes a la fois. Le resultat s appelle donc
+« gain du budget de jetons, A 64 PLACES DE GRAPHES » — et il NE SE
+TRANSPORTE PAS au produit, dont le defaut est 16.
+
+Ce n est pas une precaution de style : a 16 places, un prefill decoupe
+rencontre PLUS de formes (plus de valeurs de `b` et de `nblk`), donc met
+plus de pression sur un cache deja sature — sans eviction. Le decoupage
+peut etre gagnant a 64 et perdant a 16, par un mecanisme qui n a rien a
+voir avec le budget.
+
+**SI LE DEFAUT DU PRODUIT RESTE A 16, CETTE MANCHE EST A REFAIRE A 16
+AVANT DE POSER UNE VALEUR DE BUDGET PAR DEFAUT.** Ecrit d avance pour
+n avoir pas a trancher plus tard entre un chiffre commode et un chiffre
+applicable.
+
+La colonne `places_graphes` porte la valeur REELLEMENT vue par le module,
+pas celle qu on croit avoir posee : `MAX_GRAPHS` est lu A L IMPORT, et une
+variable posee apres ne fait rien, EN SILENCE.
+
 CE QUE CE SCRIPT NE MESURE PAS, dit ici plutôt qu'insinué : le nombre de
 lancements de noyaux par pas. `passes_prefill` en est le témoin indirect —
 il compte les pas qu'a demandés le prefill, pas les noyaux qu'ils ont lancés.
@@ -90,6 +112,15 @@ def main(argv):
     lu = moteur._budget_jetons()
     if lu != ns.budget:
         raise SystemExit(f"budget non lu par le moteur : {lu} != {ns.budget}")
+    # Meme controle pour les places de graphes, mais il ne peut PAS se faire
+    # apres coup : lu a l import, il faut interroger le module et non
+    # l environnement. Un bras qui differe de l autre prouverait la prise
+    # a posteriori — une preuve n est pas un controle.
+    from acvram.engine import graphs as _graphes
+    places = _graphes.MAX_GRAPHS
+    voulu = os.environ.get("ACVRAM_MAX_GRAPHS")
+    if voulu is not None and int(voulu) != places:
+        raise SystemExit(f"places de graphes non prises : {places} != {voulu}")
 
     vocab = charge.spec.vocab_size
     court = SamplingParams(temperature=0.0, max_tokens=ns.max_tokens)
@@ -136,18 +167,18 @@ def main(argv):
     # le découpage rachète. En régime `seule` il vaut zéro par construction,
     # et la colonne le dit au lieu de laisser croire à une mesure ratée.
     par_kj = (produits / j * 1000) if j > 0 else -1.0
-    print(f"{ns.budget}\t{ns.regime}\t{ns.invite}\t"
+    print(f"{ns.budget}\t{ns.regime}\t{places}\t{ns.invite}\t"
           f"{latence*1000:.1f}\t{passes}\t{produits}\t{produits/latence:.2f}\t"
           f"{j:.1f}\t{par_kj:.1f}\t{r['watts']:.0f}\t{r['temp_max']}\t"
           f"{r['bridages']}\t{r['invalidations']}")
     print(f"[fini] budget={ns.budget} regime={ns.regime} "
-          f"latence_prefill={latence*1000:.0f} ms passes={passes} "
+          f"places={places} latence_prefill={latence*1000:.0f} ms passes={passes} "
           f"voisines={produits} jetons", file=sys.stderr)
     return 0
 
 
 if __name__ == "__main__":
-    print("budget\tregime\tinvite\tlatence_prefill_ms\tpasses_prefill\t"
+    print("budget\tregime\tplaces_graphes\tinvite\tlatence_prefill_ms\tpasses_prefill\t"
           "jetons_voisines\tjetons_s_voisines\tjoules\tjetons_par_kJ\twatts\t"
           "temp_max\tbridages\tinvalidations", file=sys.stderr)
     sys.exit(main(sys.argv))

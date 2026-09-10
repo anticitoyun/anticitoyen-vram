@@ -19,6 +19,12 @@
 # 3. ABBA, pas A puis B. La derive thermique vaut +3 W en douze passages et
 #    biaise l'ordre ; alterner simplement ne la corrige pas, ABBA si.
 #
+# LE RESULTAT APPARTIENT AU REGIME 64. Il ne se transporte pas au produit,
+# dont le defaut est 16 — a 16 places un prefill decoupe rencontre plus de
+# formes et pese sur un cache deja sature, sans eviction : le decoupage peut
+# etre gagnant a 64 et perdant a 16. SI LE DEFAUT RESTE A 16, CETTE MANCHE
+# EST A REFAIRE A 16 AVANT DE POSER UN BUDGET PAR DEFAUT.
+#
 # LE REGIME QUI DECIDE EST `charge`. `seule` ne peut que montrer une perte —
 # c'est le prix du decoupage. Si le prix depasse ce que `charge` rachete, le
 # defaut RESTE 0.
