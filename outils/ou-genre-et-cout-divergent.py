@@ -5,7 +5,19 @@ coûte 7,38 Mio, toute projection de MLP au moins 19,82. Le confondant est
 STRUCTUREL — attention 4096x4096, MLP 11008x4096 — donc il se casse sur un
 modèle où une projection d'attention est aussi grosse qu'une du MLP.
 
-Le rapport qui décide est intermediate_size / hidden_size :
+LA CONDITION EXACTE, et ce n'est PAS `intermediate_size < hidden_size` :
+
+    num_attention_heads x head_dim  >=  intermediate_size
+
+La reformulation par `hidden_size` suppose `nh x head_dim == hidden_size`, ce
+qui est FAUX pour 42 des 92 denses du parc — jusqu'a un facteur 2,0
+(Qwen3-0.6B : hidden 1024, nh x hd 2048). Il y a donc DEUX routes pour casser
+le confondant, pas une : rétrécir le MLP, ou ÉLARGIR l'attention au-dela de
+`hidden_size`. La seconde existe et elle est courante ; elle ne suffit
+simplement pas — le meilleur dense du parc atteint 0,6667, soit un facteur 1,5
+du seuil.
+
+Le rapport indicatif reste intermediate_size / hidden_size :
     > 1  le MLP domine, genre et coût confondus (cas Llama-2 : 2,6875)
     ~ 1  ils s'égalisent, le confondant se casse
     < 1  l'attention domine, l'ordre par coût s'INVERSE contre l'ordre par
@@ -117,6 +129,21 @@ for d in lignes[-3:]:
     print(f"{d['modele'][:46]:46s}{d['rapport']:13.4f}{d['att_max_mio']:8.2f} "
           f"{d['mlp_min_mio']:8.2f} {'oui' if d['moe'] else '':>5s}")
 
+print()
+# LA MARGE, et non seulement le compte. « Aucun » sans distance au seuil laisse
+# croire a une impossibilite ; le meilleur dense est a un facteur 1,5, ce qui
+# est une architecture non attestee, pas une architecture interdite.
+_den = [d for d in lignes if not d["moe"]]
+if _den:
+    _best = max(_den, key=lambda d: d["mlp_min_mio"] and
+                d["att_max_mio"] / d["mlp_min_mio"])
+    _r = _best["att_max_mio"] / _best["mlp_min_mio"]
+    print(f"MARGE DU MEILLEUR DENSE : {_best['modele'][:40]} atteint "
+          f"att/mlp = {_r:.4f}, soit un facteur {1 / _r:.2f} du seuil de 1,0. "
+          f"Llama-2 est a {7.38 / 19.82:.4f}, facteur {19.82 / 7.38:.2f}.")
+    print("  Une architecture dense qui casserait le confondant n'est donc pas")
+    print("  INTERDITE, elle est NON ATTESTEE — la nuance change ce qu'on peut")
+    print("  ecrire : « aucun dans ce parc de 92 », pas « aucune dense au monde ».")
 print()
 print(f"CONFONDANT CASSE (une projection d'attention >= la plus petite du MLP) : "
       f"{len(casse)} modeles sur {len(lignes)}")

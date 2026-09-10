@@ -57,13 +57,57 @@ de **genre différent**. Il n'en existe pas d'utile :
 séparables, à aucun niveau de regroupement.** Ce n'est pas un manque d'ingéniosité :
 c'est une propriété du modèle.
 
+## La généralisation proposée, et pourquoi je ne l'écris pas telle quelle
+
+chef propose d'écrire *« le confondant est indissociable dans toute
+architecture dense »* plutôt que *« le parc n'en contient pas »*, au motif qu'un
+`intermediate_size` inférieur à `hidden_size` n'existe pas. **Sa conclusion tient
+pour le parc, son critère est faux, et sa marge est plus courte qu'il ne le
+pense.**
+
+**La condition exacte n'est pas `intermediate_size < hidden_size`** — elle est :
+
+```
+num_attention_heads x head_dim  >=  intermediate_size
+```
+
+La reformulation par `hidden_size` suppose `nh × head_dim == hidden_size`.
+**C'est faux pour 42 des 92 denses du parc**, jusqu'à un facteur 2,0 :
+
+```
+Qwen3-0.6B    hidden 1024   nh x hd 2048   ratio 2,000   condition 0,6667
+Agents-4B     hidden 2560   nh x hd 4096   ratio 1,600   condition 0,4444
+```
+
+Il y a donc **deux routes** pour casser le confondant, pas une : rétrécir le
+MLP, ou **élargir l'attention au-delà de `hidden_size`**. La seconde existe et
+elle est courante — elle ne suffit simplement pas.
+
+**Et la marge compte.** Le meilleur dense du parc atteint `att/mlp = 0,6667`,
+soit **un facteur 1,50 du seuil**, contre 2,69 pour Llama-2. Une architecture
+dense à `nh × hd = 2 × hidden` et `intermediate = 2 × hidden` casserait le
+confondant, et elle n'a rien d'absurde : c'est Qwen3-0.6B avec un MLP à ×2 au
+lieu de ×3.
+
+**Donc j'écris « aucun dans ce parc de 92, le plus proche à un facteur 1,50 » et
+non « aucune architecture dense au monde ».** Un échantillon de 92 avec un
+quasi-succès ne porte pas une impossibilité universelle, et l'argument « il n'y
+aurait aucune raison de l'écrire » est un argument, pas une mesure. La
+différence est opérationnelle : sous sa formulation il n'y a rien à chercher,
+sous celle-ci il y a une condition précise à passer au crible d'un catalogue.
+
 ## Ce qui reste faisable
 
 1. **Le bras `o_proj` contre `v_proj`** — 29 contre 29, coût identique à
    l'octet, mêmes couches. Il ne sépare pas genre et coût, mais il teste le
-   mécanisme résiduel de chef, qui est l'explication *physique* candidate.
-2. **Un dense à MLP étroit qu'il faudrait acquérir.** Le parc n'en a aucun ;
-   c'est le chiffre à retenir avant de proposer une conversion.
-3. **La paire `genre` / `cout_decroissant` sur Llama-2 reste utile comme
-   contrôle de cohérence** : elles doivent rendre le même ensemble. Si elles
-   divergent, c'est une faute de code, pas un résultat.
+   mécanisme résiduel, qui est l'explication *physique* candidate. **Et il est
+   unique** : aucun autre appariement du modèle n'isole un mécanisme du prix et
+   du genre à la fois. S'il ne tranche pas, rien ne tranchera, et ce sera un
+   résultat à écrire tel quel.
+2. **Un dense vérifiant `nh × head_dim ≥ intermediate_size`.** Le parc n'en a
+   pas ; la condition est écrite, testable sur n'importe quel `config.json`, et
+   l'outil la calcule. Ce n'est pas une acquisition à proposer — c'est un
+   critère à garder sous la main.
+3. **La paire `genre` / `cout_decroissant` sur Llama-2 reste un contrôle de
+   cohérence** : elles doivent rendre le même ensemble. Si elles divergent ici,
+   c'est une faute de code, pas un résultat.
