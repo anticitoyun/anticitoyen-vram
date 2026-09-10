@@ -66,11 +66,15 @@ PLAFOND_CHEMINS = 323
 # corrige sur `main` (variable d'environnement) et la fusion l'a apporte ici.
 # L'exemption ne servait plus, le test l'a dit, elle est retiree.
 #
-# 10/09 22h — `acvram-memoire/chef.md` entre : le carnet de `1c` porte un
-# chemin de scratchpad avec numero de session. C'est SON carnet, pas le mien,
-# et une session ne corrige pas le carnet d'une autre a l'extinction. Signale a
-# lui. A RETIRER des qu'il l'a nettoye — le test le reclamera.
-EXEMPTES_SESSION = {"acvram-memoire/chef.md"}
+# 10/09 22h — `acvram-memoire/chef.md` est entre puis SORTI dans la meme
+# demi-heure : signale a `1c`, nettoye par lui, exemption retiree. C'est le
+# cycle que l'exemption datee est faite pour produire — exempter par nom rend
+# la dette visible, et la dette se paie.
+#
+# La liste est VIDE, et c'est un etat legitime : le test verifie qu'aucune
+# exemption ne survit a son motif, donc une liste vide est le seul etat
+# stable.
+EXEMPTES_SESSION: set[str] = set()
 
 
 def _suivis():
