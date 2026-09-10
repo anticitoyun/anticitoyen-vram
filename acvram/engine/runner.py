@@ -83,6 +83,17 @@ class GenerationOutput:
 @dataclass
 class EngineStats:
     steps: int = 0
+    # Combien de pas ont contenu un prefill. `steps` les compte tous ; ce
+    # champ isole ceux qui ont porte un forward de prefill EN PLUS du
+    # decodage. Le prefill n'est pas decoupe (pas de chunked prefill), donc
+    # sa duree entiere s'ajoute a la latence de toutes les sequences deja en
+    # cours a ce pas-la : un pas mixte est structurellement plus long qu'un
+    # pas de decodage pur, et leur proportion explique une part de la
+    # dispersion du temps par jeton. Expose par /metrics pour qu'une mesure
+    # faite DEHORS du process serveur puisse l'apparier avec ses essais lents
+    # — sans lui, seule une mesure in-process voyait le compteur, et les deux
+    # bras d'une campagne n'etaient pas instrumentes pareil.
+    pas_avec_prefill: int = 0
     prefill_tokens: int = 0
     decode_tokens: int = 0
     prefill_seconds: float = 0.0
@@ -108,6 +119,7 @@ class EngineStats:
     def to_dict(self) -> dict:
         return {
             "steps": self.steps,
+            "pas_avec_prefill": self.pas_avec_prefill,
             "prefill_tokens": self.prefill_tokens,
             "decode_tokens": self.decode_tokens,
             "decode_tok_s": round(self.decode_tok_s, 2),
@@ -534,6 +546,8 @@ class Engine:
     def step(self) -> list[GenerationOutput]:
         """Exécute une passe avant et rend ce qu'elle a produit."""
         new = self._admit()
+        if new:
+            self.stats.pas_avec_prefill += 1
         outputs: list[GenerationOutput] = []
 
         # Lot groupé : un seul prefill pour toutes les séquences de `new` au
