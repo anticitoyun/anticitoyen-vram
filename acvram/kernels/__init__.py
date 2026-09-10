@@ -282,7 +282,30 @@ def get_extension():
         # benefice sur les compilations legitimes.
         src = os.path.join(here, "acvram_kernels.cu")
         with open(src, "rb") as fh:
-            _SRC_HASH = hashlib.sha256(fh.read()).hexdigest()[:16]
+            _SRC_OCTETS = fh.read()
+        _SRC_HASH = hashlib.sha256(_SRC_OCTETS).hexdigest()[:16]
+        # LE CONTROLE EST-IL SEULEMENT APPLICABLE ? L'absence du marqueur dans
+        # le .so a DEUX causes : un binaire perime, ou un source qui n'en porte
+        # pas. Ne proposer que la premiere l'a fait accuser a tort, et le
+        # controle a coute deux compilations a une autre session avec un
+        # message qui designait la mauvaise piste — le dispositif s'etait
+        # transporte a moitie, le marqueur etant dans le .cu et le controle
+        # dans ce fichier. Un controle qui ne peut pas s'appliquer doit LE
+        # DIRE, jamais conclure. Marqueur et controle voyagent ensemble.
+        # ...ET LE DIRE AVANT DE COMPILER. Place apres le `load()`, ce refus
+        # aurait coute neuf minutes de nvcc pour annoncer que rien ne pouvait
+        # les satisfaire. Un controle inapplicable se declare tout de suite.
+        if b"acvram_src_hash" not in _SRC_OCTETS:
+            _ERROR = (f"le source {src} ne contient pas la variable "
+                      f"`acvram_src_hash` : le controle d'empreinte est "
+                      f"INAPPLICABLE sur cet arbre, aucun binaire ne pourra le "
+                      f"satisfaire — et rien ici ne permet d'accuser un cache "
+                      f"de compilation. Reportez le bloc `extern \"C\" ... "
+                      f"acvram_src_hash = ACVRAM_SRC_HASH` dans le .cu, ou "
+                      f"reprenez la version du noyau qui va avec ce controle.")
+            warnings.warn(f"acvram : {_ERROR}")
+            _EXT = None
+            return None
         _SRC_U64 = int(_SRC_HASH, 16)          # entier : aucun guillemet a echapper
         _EXT = load(
             name="acvram_kernels",
@@ -320,9 +343,12 @@ def get_extension():
             porte = True                       # pas de .so a inspecter : on n'accuse pas
         if not porte:
             _ERROR = (f"le binaire {so} ne porte pas l'empreinte du source "
-                      f"({_SRC_HASH}) : il a ete servi par un cache de "
-                      f"compilation et NE CONTIENT PAS vos modifications. "
-                      f"Videz {cache} ou relancez avec CCACHE_DISABLE=1.")
+                      f"({_SRC_HASH}) alors que ce source PORTE bien un "
+                      f"marqueur : le .so ne contient pas vos modifications. "
+                      f"Videz {cache} — `CCACHE_DISABLE=1` seul ne suffit "
+                      f"pas, il n'entre pas dans la ligne de commande que "
+                      f"ninja compare, donc ninja voit son .so a jour et ne "
+                      f"recompile rien.")
             warnings.warn(f"acvram : {_ERROR}")
             _EXT = None
             return None
