@@ -35,7 +35,7 @@ import sys
 import time
 
 # Conditions du tableau conteste (ETABLI.md:1527, :2278).
-CTX, GENERES = 1024, 200                    # surcharges par --ctx / --generes
+CTX, GENERES, BQ = 1024, 200, 1          # surcharges par --ctx / --generes / --bq
 SEUIL_PCT_GPU = 5.24
 T_GPU_MS, T_MURAL_MS = 28.140, 28.748
 PREDICTION_C_MOINS_B_MS = 0.097
@@ -68,7 +68,8 @@ def mesurer(bras: str, modele: str) -> dict:
               "70 % du debit : ce chiffre ne mesure pas ce qu'on croit et ne "
               "doit pas pouvoir etre publie par megarde.", file=sys.stderr)
         sys.exit(2)
-    moteur = Engine(charge, None, max_batch_size=1, max_model_len=CTX + 32)
+    moteur = Engine(charge, None, max_batch_size=max(1, BQ),
+                    max_model_len=CTX + 32)
     # LES GRAPHES SONT-ILS ACTIFS ? Un pas sans graphe paie ses lancements un
     # par un : il ne mesure pas le meme moteur. Meme garde que l'exil.
     graphes = moteur.graphs is not None and getattr(moteur.graphs, "enabled",
@@ -81,13 +82,21 @@ def mesurer(bras: str, modele: str) -> dict:
     # Sans ignore_eos, une fin de sequence au premier jeton rendrait un pas
     # mesure sur un seul passage. On publie le compte REELLEMENT execute.
     moteur._eos = set()
-    invite = [random.Random(1234).randrange(10, 150000)
-              for _ in range(CTX - GENERES)]      # ni jeton constant (cache de
-                                                  # prefixe) ni hash() (sale)
-    seq = moteur.add_request(invite, SamplingParams(temperature=0.0,
-                                                    max_tokens=GENERES))
+    # ni jeton constant (cache de prefixe) ni hash() (sale d'un processus a
+    # l'autre) : graine fixe, invite differente par sequence.
+    # LE LOT. La grille du noyau est (BQ, HQ, C) : BQ=1 est un cas
+    # PARTICULIER, et le service reel tourne a douze sequences (x2,84 en
+    # debit mesure). Une invite differente par sequence, sinon le cache de
+    # prefixe les fusionnerait et BQ ne serait qu'une apparence.
+    seqs = []
+    for i in range(BQ):
+        inv = [random.Random(1234 + i).randrange(10, 150000)
+               for _ in range(CTX - GENERES)]
+        seqs.append(moteur.add_request(
+            inv, SamplingParams(temperature=0.0, max_tokens=GENERES)))
+    seq = seqs[0]
     pas = []
-    while not seq.finished and len(pas) < GENERES:
+    while any(not s.finished for s in seqs) and len(pas) < GENERES:
         t = time.perf_counter()
         moteur.step()
         pas.append((time.perf_counter() - t) * 1000.0)
@@ -137,6 +146,7 @@ def mesurer(bras: str, modele: str) -> dict:
             "pa_warps": os.environ.get("ACVRAM_PA_WARPS", "defaut"),
             "couches": len(charge.plan.layers), "exilees": 0,
             "jetons": empreinte_jetons, "n_jetons": len(seq.output_ids),
+            "bq": BQ, "seqs_finies": sum(1 for s in seqs if s.finished),
             "pas_executes": len(pas), "n_retenus": n,
             "median_ms": ordonnes[n // 2],
             "p10_ms": ordonnes[max(0, int(0.10 * n))],
@@ -192,7 +202,8 @@ def pilote(modele: str, sortie: str) -> int:
         t0 = time.time()
         r = subprocess.run([sys.executable, __file__, "--bras", bras,
                             "--modele", modele, "--json",
-                            "--ctx", str(CTX), "--generes", str(GENERES)],
+                            "--ctx", str(CTX), "--generes", str(GENERES),
+                            "--bq", str(BQ)],
                            env=env,
                            capture_output=True, text=True, timeout=900)
         if r.returncode != 0:
@@ -286,17 +297,20 @@ if __name__ == "__main__":
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--sortie", default="/tmp/part-attention-trois-bras.json")
     ap.add_argument("--ctx", type=int, default=CTX)
+    ap.add_argument("--bq", type=int, default=1,
+                    help="sequences concurrentes ; la grille est (BQ, HQ, C) "
+                         "et BQ=1 est un cas particulier")
     ap.add_argument("--generes", type=int, default=GENERES)
     ap.add_argument("--ordre", default="A,B,C,C,B,A",
                     help="bras a mesurer, dans l'ordre ; A,B,B,A suffit pour "
                          "une campagne qui ne cherche que p")
     a = ap.parse_args()
-    CTX, GENERES = a.ctx, a.generes
+    CTX, GENERES, BQ = a.ctx, a.generes, a.bq
     ORDRE = [b.strip() for b in a.ordre.split(",")]
     if CTX <= GENERES:
         ap.error(f"--ctx {CTX} doit depasser --generes {GENERES} : l'invite "
                  "serait vide ou negative")
-    globals()["CTX"], globals()["GENERES"] = CTX, GENERES
+    globals()["CTX"], globals()["GENERES"], globals()["BQ"] = CTX, GENERES, BQ
     globals()["ORDRE"] = ORDRE
     if a.bras:
         d = mesurer(a.bras, a.modele)
