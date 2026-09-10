@@ -28,7 +28,42 @@ MON PLANCHER DE 9,65 us N'EST PAS TRANSPORTABLE ICI, et c'est dit d'avance :
 il a ete mesure autour d'UN appel isole, evenements CUDA compris, sur un noyau
 qui ecrit 128 flottants par bloc. Ni le meme noyau, ni le meme regime.
 """
-import sys, torch
+import os, sys, torch
+# LE VERROU EST DANS L OUTIL, PLUS DANS MON HABITUDE. Je lancais ces scripts
+# SOUS carte.sh — ce qui protege quand j y pense, et pas quand quelqu un
+# d autre les lance directement. Une habitude ne survit ni a la fatigue ni a
+# un autre operateur : c est ce que charge-gpu.py a cesse d etre le 10/09, au
+# prix de six manches perdues par une autre session.
+def _verrou_tenu() -> bool:
+    _c = (os.environ.get("CUDA_VISIBLE_DEVICES", "") or "0").split(",")[0]
+    if not _c.isdigit():
+        _c = "0"
+    info = os.environ.get("ACVRAM_VERROU", f"/tmp/acvram-carte-{_c}.lock") + ".qui"
+    try:
+        with open(info) as fh:
+            tenant = int(fh.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return False
+    p = os.getpid()
+    for _ in range(40):
+        if p == tenant:
+            return True
+        try:
+            with open(f"/proc/{p}/stat") as fh:
+                p = int(fh.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            return False
+        if p <= 1:
+            return False
+    return False
+
+if not _verrou_tenu() and os.environ.get("ACVRAM_SANS_VERROU") != "1":
+    raise SystemExit(
+        "REFUS : le verrou de carte n'est pas tenu par un de mes ancetres.\n"
+        "    outils/carte.sh " + " ".join(sys.argv[:1]) + " ...\n"
+        "  Une mesure lancee sans verrou peut tourner pendant celle d'une "
+        "autre session, et aucun des deux resultats ne vaudra.")
+
 if torch.cuda.device_count() != 1:
     raise SystemExit("REFUS : une seule carte doit etre visible")
 from acvram import kernels

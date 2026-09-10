@@ -22,7 +22,12 @@ def _verrou_tenu() -> bool:
     On ne repare pas cela par une consigne : un outil dont le metier est de
     gener ne doit pas POUVOIR etre lance a la main par distraction.
     """
-    info = os.environ.get("ACVRAM_VERROU", "/tmp/acvram-carte-0.lock") + ".qui"
+    # Meme derivation que carte.sh : le verrou nomme la carte SERVIE.
+    _c = (os.environ.get("CUDA_VISIBLE_DEVICES", "") or "0").split(",")[0]
+    if not _c.isdigit():
+        _c = "0"
+    info = os.environ.get("ACVRAM_VERROU",
+                          f"/tmp/acvram-carte-{_c}.lock") + ".qui"
     try:
         with open(info) as fh:
             tenant = int(fh.read().split()[0])

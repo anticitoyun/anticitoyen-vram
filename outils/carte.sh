@@ -20,7 +20,21 @@
 #   3. le verrou meurt avec le processus, y compris tue par le superviseur —
 #      c'est `flock` sur un descripteur qui le garantit, pas un fichier temoin.
 set -u
-VERROU=${ACVRAM_VERROU:-/tmp/acvram-carte-0.lock}
+# LE VERROU NOMME LA CARTE REELLEMENT SERVIE, pas une constante. Le defaut
+# etait `carte-0` quelle que soit la carte, et AUCUN script du depot ne le
+# surchargeait : une mesure sur la 3080 Ti verrouillait la 5090 qu elle
+# n utilisait pas et laissait libre celle qu elle occupait. La garde n etait
+# pas fausse — elle protegeait autre chose que ce qu on croyait, et rien ne le
+# disait puisqu elle fonctionnait. Elle produisait meme la panne INVERSE de
+# celle qu elle previent : deux sessions sur deux cartes se bloquaient, deux
+# sessions sur la meme carte passaient.
+# CUDA_VISIBLE_DEVICES est ce que le processus servira effectivement ; on prend
+# son PREMIER index, qui est celui que le moteur appelle cuda:0.
+_carte=${CUDA_VISIBLE_DEVICES%%,*}
+case "${_carte:-0}" in
+  ''|*[!0-9]*) _carte=0 ;;          # vide ou non numerique : la carte 0
+esac
+VERROU=${ACVRAM_VERROU:-/tmp/acvram-carte-$_carte.lock}
 INFO="$VERROU.qui"
 ATTENTE=${ACVRAM_ATTENTE:-1800}
 NOM=${ACVRAM_NOM:-$(basename "${1:-mesure}")}
