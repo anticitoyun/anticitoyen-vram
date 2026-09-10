@@ -75,7 +75,10 @@ SRC="/usr/share/acvram"
 # aucun effet — dpkg annoncait 0.3.0 pendant que `acvram --version` rendait
 # 0.2.0. Un defaut muet : rien ne casse, la mise a jour ne fait simplement rien.
 VERSION_SRC=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$SRC/acvram/__init__.py" 2>/dev/null || true)
-VERSION_VENV=$("$VENV/bin/python" -c 'import acvram;print(acvram.__version__)' 2>/dev/null || true)
+# -I isole l interpreteur : sans lui, un `acvram` lance depuis un arbre de
+# developpement importe le paquet du REPERTOIRE COURANT et non celui du venv,
+# les deux versions paraissent egales, et la mise a jour ne se declenche pas.
+VERSION_VENV=$("$VENV/bin/python" -I -c 'import acvram;print(acvram.__version__)' 2>/dev/null || true)
 
 if [ -x "$VENV/bin/acvram" ] && [ -n "$VERSION_SRC" ] \
    && [ "$VERSION_SRC" != "$VERSION_VENV" ]; then
