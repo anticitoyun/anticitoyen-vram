@@ -473,3 +473,62 @@ rejouée à chaque valeur permet.
 
 **64 est l'optimum des sept valeurs essayées**, et ce n'est plus un plancher
 d'ignorance : les deux valeurs en dessous ont été mesurées et perdent.
+
+## Le « plancher » n'est pas un plancher : il est expliqué, et c'est du travail
+
+Trois mesures, chacune écartant une cause, dans cet ordre.
+
+### 1. Ce n'est pas le lancement — `banc_fma`, à travail par bloc constant
+
+    170 -> 4080 blocs     7,1 us        PLAT sur un facteur 24
+    5440 blocs            8,74 us
+    8160 blocs           10,75 us
+    multiples de SM (1x, 2x, 4x), +/-2 blocs : aucune marche
+
+**Ni vagues ni débit de distribution.** L'hypothèse des vagues prédisait des
+marches au franchissement de la capacité résidente : il n'y en a aucune. Le
+lancement de 1504 blocs coûte 7,1 µs, là où l'étape 0 en coûte 15,3 **au même
+nombre de blocs**. La différence n'est donc pas dans le lancement.
+
+*(C'est `banc_fma` qui a tranché — le noyau gardé « pour le cas d'échec » et
+retiré du protocole. Il a servi à un cas nominal que personne n'avait prévu.)*
+
+### 2. Ce n'est pas mon compteur — hypothèse à moi, réfutée par moi
+
+L'étape 0 fait un `atomicAdd` par bloc **sur une adresse unique** : tous les
+blocs frappent la même case, le L2 les sérialise, et le coût croît avec leur
+nombre. La forme était la bonne, l'amplitude non :
+
+    chunk 64  (1504 blocs)   15,23 allume  /  15,30 eteint   0, dans le bruit
+    chunk 16  (6016 blocs)   34,30 allume  /  32,26 eteint   2,04 us, soit 6 %
+
+**0,34 ns par bloc.** Il fallait en expliquer 18 µs. Le compteur est disculpé —
+et il ne pouvait l'être que parce qu'on peut désormais l'éteindre
+(`ACVRAM_PA_SANS_COMPTEUR=1`). **Un instrument qui ne peut pas être éteint ne
+peut pas être disculpé.**
+
+### 3. Ce que c'est : l'écriture des tampons partiels
+
+    plancher = 9,65 us + 3,76 ns par bloc
+
+    1504 blocs   mesure 15,30   modele 15,30   ecart 0,0 %
+    3008 blocs   mesure 21,47   modele 20,95   ecart 2,4 %
+    6016 blocs   mesure 32,26   modele 32,26   ecart 0,0 %
+
+Le terme fixe (9,65 µs) est du même ordre que le lancement mesuré par
+`banc_fma` (7,1 µs). Le terme par bloc correspond aux **512 octets** que chaque
+bloc écrit dans `part[]` (128 flottants) : 3,76 ns pour 512 octets font
+**136 Go/s effectifs**, un débit d'écriture dispersée plausible.
+
+**Il n'y a donc plus de mystère matériel.** Ce que nous appelions « plancher »
+depuis hier est, pour les deux tiers, **du travail réel** : écrire les
+résultats partiels. Et cela a une conséquence directe sur le réglage :
+
+> **Diviser la tranche par deux double le nombre de blocs, donc double les
+> octets de partiels écrits.** C'est ce terme qui remonte quand `chunk`
+> descend, et c'est lui — pas une capacité, pas un ordonnanceur — qui fait
+> perdre 32 et 16.
+
+Le modèle additif posé plus haut se referme : `travail(chunk)` sature en
+dessous de 64, tandis que le second terme, mal nommé « plancher », **croît
+avec le nombre de blocs parce qu'il écrit un partiel par bloc**.

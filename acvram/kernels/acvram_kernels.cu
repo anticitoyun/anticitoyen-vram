@@ -881,7 +881,8 @@ __global__ void paged_attn_partial_kernel(
     OT *__restrict__ sortie,              // [B*QL, HQ, D] si C == 1, sinon nul
     int HQ, int HKV, int N, int C, int QL, float scale, int window,
     int chunk,            // le noyau et le lanceur DOIVENT decouper pareil
-    int etape) {          // BISECTION : sortir plus ou moins tot du noyau.
+    int etape,            // BISECTION : sortir plus ou moins tot du noyau.
+    bool compter) {       // marqueur de participation : instrument payant
                           // 0 indices · 1 +chargement de q · 2 +boucle
                           // principale · 3 tout (comportement normal).
                           // Les sorties neutres sont ECRITES a chaque etape,
@@ -923,8 +924,20 @@ __global__ void paged_attn_partial_kernel(
         // marquees se relit cote hote. participants == grille -> les blocs
         // tournent ; participants < grille -> le lancement est en cause et
         // rien n'a jamais ete teste.
+        // L'ATOMIQUE EST UN INSTRUMENT, ET IL SE PAIE. Tous les blocs frappent
+        // LA MEME adresse : le L2 les serialise, et le cout croit avec le
+        // nombre de blocs — exactement la forme que nous attribuions au
+        // « plancher du lancement ». banc_fma, a travail par bloc constant,
+        // rend 7,1 us de 170 a 4080 blocs sans une marche : le lancement ne
+        // coute rien sur cette plage. Donc ce que l'etape 0 mesurait en plus
+        // (15,36 us a 1504 blocs) etait en partie CE COMPTEUR.
+        // On le rend donc coupable : pose ACVRAM_PA_SANS_COMPTEUR=1 et la
+        // participation n'est plus observee, mais le temps est celui du noyau
+        // seul. Un instrument qui ne peut pas etre eteint ne peut pas etre
+        // disculpe.
         if (threadIdx.x == 0) {
             part_m[out_off] = 1.f; part_l[out_off] = 0.f;
+            if (compter)
             atomicAdd(&acvram_pa_participants, 1ULL);   // ce bloc a tourne
         }
         for (int d = threadIdx.x; d < D; d += blockDim.x)
@@ -2041,6 +2054,11 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
     // BISECTION : ACVRAM_PA_ETAPE < 3 sort du noyau plus tot. Le resultat est
     // alors FAUX par construction — c'est un instrument de diagnostic, jamais
     // un chemin de production. Defaut 3 = comportement normal.
+    // Le compteur de participation coute un atomique par bloc sur une adresse
+    // unique : mesurable, donc extinguible.
+    bool compter = true;
+    if (const char *v = std::getenv("ACVRAM_PA_SANS_COMPTEUR"))
+        compter = !(v[0] == '1');
     int etape = 3;
     if (const char *v = std::getenv("ACVRAM_PA_ETAPE")) {
         int d = atoi(v);
@@ -2126,7 +2144,7 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
             part.data_ptr<float>(), pm.data_ptr<float>(), \
             pl.data_ptr<float>(), (C == 1 ? (PO) : nullptr), \
             HQ, (int)hkv, N, C, (int)q_len, (float)scale, (int)window, \
-            chunk, etape); \
+            chunk, etape, compter); \
         if (C > 1) \
         paged_attn_reduce_kernel<DD, OT><<<g2, 128, 0, stream>>>( \
             part.data_ptr<float>(), pm.data_ptr<float>(), \
