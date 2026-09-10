@@ -43,6 +43,14 @@ class ConversionOptions:
     calib_tokens: int = 128
     calib_seqs: int = 16
     use_hadamard: str = "auto"        # auto | always | never
+    # Conserve l'erreur des 21 valeurs de la grille AWQ pour chaque tenseur, au
+    # lieu du seul minimum. Sert a calculer le prix d'un exposant COMMUN a un
+    # groupe empilable : `gate` et `up` lisent la meme entree mais chacun
+    # choisit son exposant, et `_scaler_commun` refuse la fusion par
+    # `torch.equal` — 5 empilements sur 64 sur Llama-2-7b-int8, pour +0,19 % la
+    # ou une couverture complete vaudrait +2,43 %. Coute ~170 flottants par
+    # tenseur au manifeste, rien a l'execution ; hors campagne, laisser a faux.
+    garder_grille: bool = False
     awq: bool = True
     group_size: int = 128
     keep_sensitive_16bit: bool = True  # normalisations, routeur, plongements
@@ -928,7 +936,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             group_size=opts.group_size,
             use_hadamard=router.wants_hadamard(name, fmt),
             use_awq=opts.awq,
-            n_grid=opts.n_grid,
+            n_grid=opts.n_grid, garder_grille=opts.garder_grille,
             table=opts.q3n_table if fmt == "q3n" else None,
         )
         if fmt == "q3n":
@@ -965,7 +973,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 qdev, tensor, wider, st,
                 group_size=opts.group_size,
                 use_hadamard=router.wants_hadamard(name, wider),
-                use_awq=opts.awq, n_grid=opts.n_grid)
+                use_awq=opts.awq, n_grid=opts.n_grid,
+                garder_grille=opts.garder_grille)
             if m2["out_snr_db"] > metrics["out_snr_db"] + 0.5:
                 sd2 = q2.state_dict(prefix=f"{name}.")
                 sd2.update(s2.state_dict(prefix=f"{name}."))
@@ -996,7 +1005,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 qdev, tensor, wider, st,
                 group_size=opts.group_size,
                 use_hadamard=router.wants_hadamard(name, wider),
-                use_awq=opts.awq, n_grid=opts.n_grid)
+                use_awq=opts.awq, n_grid=opts.n_grid,
+                garder_grille=opts.garder_grille)
             if m2["out_snr_db"] > metrics["out_snr_db"] + 1.0:
                 report.promotions.append({
                     "name": name, "from": fmt, "to": wider,
@@ -1053,6 +1063,9 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             "has_act_scale": scaler.scale is not None,
             "bpw": round(metrics["bpw"], 3),
             "out_snr_db": round(metrics["out_snr_db"], 2),
+                **({"erreurs_grille": metrics["erreurs_grille"],
+                    "alpha_retenu": metrics["alpha_retenu"]}
+                   if "erreurs_grille" in metrics else {}),
         })
         report.per_format[fmt] = report.per_format.get(fmt, 0) + qt.nbytes
         manifest["tensors"][name] = entry
@@ -1115,7 +1128,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             snrs.append(met["out_snr_db"])
             per_layer.append({"name": name,
                               **{k: round(v, 2) if isinstance(v, float) else v
-                                 for k, v in met.items()}})
+                                 for k, v in met.items()
+                                 if k != "erreurs_grille"}})
             if not opts.dry_run:
                 for k, v in sd.items():
                     writer.add(k, v)
@@ -1127,6 +1141,9 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 "has_act_scale": c["has_act_scale"],
                 "bpw": round(met["bpw"], 3),
                 "out_snr_db": round(met["out_snr_db"], 2),
+                **({"erreurs_grille": met["erreurs_grille"],
+                    "alpha_retenu": met["alpha_retenu"]}
+                   if "erreurs_grille" in met else {}),
             })
             octets = sum(v.numel() * v.element_size() for v in sd.values())
             report.per_format[fmt] = report.per_format.get(fmt, 0) + octets

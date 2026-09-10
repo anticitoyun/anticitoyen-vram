@@ -432,6 +432,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         max_promotions=args.max_promotions,
         autoriser_grossissement=args.autoriser_grossissement,
         quant_device=args.quant_device, bits_budget_gib=args.bits_budget,
+        garder_grille=args.grille_erreurs,
         promotion_cout_max_mib=args.promotion_cout_max,
         format_impose=args.format)
 
@@ -729,6 +730,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="prix plafond d'une promotion, en Mio ajoutes "
                          "(0 = aucun) : ecarte les gros tenseurs, dont la "
                          "promotion coute des octets relus a chaque jeton")
+    cv.add_argument("--grille-erreurs", action="store_true",
+                    help="conserve l'erreur des 21 valeurs de la grille AWQ "
+                         "par tenseur, au manifeste : sert a calculer le prix "
+                         "d'un exposant commun a un groupe empilable, sans "
+                         "reconvertir")
     cv.add_argument("--bits-budget", type=float, default=0.0,
                     help="budget total de poids en Gio : les promotions sont "
                          "choisies par gain de SNR par octet (sac a dos), au "

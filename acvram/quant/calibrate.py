@@ -227,6 +227,7 @@ def search_channel_scales(
     group_size: Optional[int] = None,
     n_grid: int = 20,
     calib_x: Optional[torch.Tensor] = None,
+    journal: Optional[dict] = None,
 ) -> tuple[ChannelScaler, float]:
     """Recherche AWQ sur grille de l'échelle par canal.
 
@@ -257,6 +258,14 @@ def search_channel_scales(
 
     best_err = float("inf")
     best_scale: Optional[torch.Tensor] = None
+    # `journal` conserve l'erreur des n_grid+1 valeurs, pas seulement le
+    # minimum. Sans elles, le prix d'un exposant COMMUN a un groupe empilable
+    # n'est pas calculable : `gate` et `up` lisent la meme entree mais chacun
+    # choisit son exposant, et `_scaler_commun` refuse par `torch.equal` — 5
+    # empilements sur 64 sur Llama-2-7b-int8, mesures le 10/09, pour un gain de
+    # +0,19 % la ou une couverture complete vaudrait +2,43 %. Le prix se lit
+    # dans ces erreurs, sans une conversion de plus.
+    grille: list[float] = []
 
     for i in range(n_grid + 1):
         alpha = i / n_grid
@@ -266,10 +275,14 @@ def search_channel_scales(
         wq = _quant_dequant(w * s.unsqueeze(0), fmt, group_size)
         y = (x / s) @ wq.t()
         err = ((y - y_ref).norm() / ref_norm).item()
+        grille.append(err)
         if err < best_err:
             best_err, best_scale = err, s.clone()
 
     assert best_scale is not None
+    if journal is not None:
+        journal["erreurs_grille"] = [round(e, 8) for e in grille]
+        journal["alpha_retenu"] = round(grille.index(best_err) / n_grid, 4)
     identity = torch.ones_like(best_scale)
     if torch.allclose(best_scale, identity, atol=1e-3):
         best_scale = None
@@ -297,6 +310,7 @@ def quantize_with_calibration(
     use_hadamard: bool = False,
     use_awq: bool = True,
     n_grid: int = 20,
+    garder_grille: bool = False,
     table=None,
 ) -> tuple[Any, ChannelScaler, dict]:
     """Chaîne complète par couche : tourner, mettre à l'échelle, quantifier.
@@ -320,8 +334,10 @@ def quantize_with_calibration(
             had_block = 0
 
     scaler = ChannelScaler(None, had_block)
+    journal: Optional[dict] = {} if garder_grille else None
     if use_awq:
-        found, _ = search_channel_scales(w, stats, fmt, group_size, n_grid)
+        found, _ = search_channel_scales(w, stats, fmt, group_size, n_grid,
+                                         journal=journal)
         scaler = ChannelScaler(found.scale, had_block)
 
     w_eff = w * scaler.scale.to(torch.float32).unsqueeze(0) \
@@ -361,4 +377,6 @@ def quantize_with_calibration(
         "awq": scaler.scale is not None,
         "bpw": getattr(qt, "bits_per_weight", 16.0),
     }
+    if journal:
+        metrics.update(journal)
     return qt, scaler, metrics

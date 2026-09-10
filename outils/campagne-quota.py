@@ -34,6 +34,7 @@ P_POIDS = 6_738_417_664          # poids comptes dans le manifeste des etalons
 GIO = 1024 ** 3
 
 CARTE = Path(__file__).resolve().parent / "carte.sh"
+RACINE_OUTILS = Path(__file__).resolve().parent
 BASE = Path("/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram")
 SOURCE = BASE / "Llama-2-7b-hf"
 # Corpus PARTAGE, pas dans un worktree : claude-0a l'a cherche et ne l'a pas
@@ -321,8 +322,17 @@ def main() -> int:
         if not dossier.exists():
             code = service(
                 f"acvram-conv-{nom}",
+                # --grille-erreurs : les 21 erreurs de la grille AWQ par
+                # tenseur, au manifeste. Decision du circuit le 10/09 — les
+                # deux chantiers demandent des conversions, donc le prix d'un
+                # exposant COMMUN a un groupe empilable tombe en prime, sur
+                # sept modeles au lieu d'un, sans une conversion de plus. Et
+                # cela repond mieux que la question initiale : ce prix depend
+                # du modele et de sa calibration, un seul point ne dirait pas
+                # s'il est stable.
                 [a.python, "-m", "acvram", "convert", str(SOURCE),
-                 "--out", str(dossier), "--bits-budget", str(b)],
+                 "--out", str(dossier), "--bits-budget", str(b),
+                 "--grille-erreurs"],
                 sortie / f"conv-{nom}.log", a.memoire_max, minutes=90)
             if code:
                 print(f"  ECHEC / CAUSE: conversion code {code}, "
@@ -355,6 +365,18 @@ def main() -> int:
             resultats.append({"budget_gib": b, "etat": "sous le plancher",
                               "bpw": bpw_reel, "budget": bud})
             continue
+
+        # Le prix de l'alpha commun, lu au manifeste du point qu'on vient de
+        # convertir. Aucun GPU : c'est de l'arithmetique sur des erreurs deja
+        # calculees.
+        prix = subprocess.run(
+            [a.python, str(RACINE_OUTILS / "prix-alpha-commun.py"),
+             str(dossier / "acvram_manifest.json")],
+            capture_output=True, text=True)
+        (sortie / f"prix-alpha-{nom}.txt").write_text(prix.stdout + prix.stderr)
+        recup = [l for l in prix.stdout.splitlines() if "RECUPERABLES" in l]
+        print(f"  prix alpha commun : {recup[0].strip() if recup else 'non calculable'}",
+              flush=True)
 
         rendre = rendre_le_cache(dossier)
         print(f"  cache page rendu : {rendre / 2**20:.0f} Mio", flush=True)
