@@ -25,10 +25,29 @@ feu vert du matin supposait.
 
 Et c'est le vrai résultat. Décomposé par tenseur :
 
+**Dans l'unité qui décide, et c'est une rectification** : un sac à dos ordonne
+par gain **par octet**, pas par tenseur. J'avais publié « facteur seize » en
+milli-PPL par *tenseur* — grandeur qui invite exactement la question que
+personne n'avait posée : et si les derniers tenseurs étaient simplement plus
+gros ? Relevé par chef, converti, et l'inversion tient — mais le facteur
+global vaut **5,4 et non 16**.
+
 ```
-172 -> 198 promus   26 tenseurs   0,6415 bits   0,0207 PPL   30,99 bits/PPL   0,796 milli-PPL/tenseur
-198 -> 225 promus   27 tenseurs   0,7133 bits   0,0774 PPL    9,22 bits/PPL   2,867 milli-PPL/tenseur
+segment              n    bits   milli-PPL   /tenseur   bits/tens   milli-PPL PAR BIT
+  0 ->   6  (poste4) 6  0,0551      1,10      0,183     0,00918          19,96
+172 -> 198  (poste1) 26  0,6415     20,70      0,796     0,02467          32,27
+198 -> 225  (poste1) 27  0,7133     77,40      2,867     0,02642         108,51
+
+facteur sur toute la course, par TENSEUR    15,64x   <- ce que j'avais publie
+facteur sur toute la course, par BIT         5,44x   <- l'unite qui decide
+dernier contre precedent, par BIT            3,36x
 ```
+
+**La réserve que personne n'avait posée est donc levée** : les 27 derniers sont
+**1,071 fois plus gros** et rendent **3,6 fois plus** de perplexité. Si le
+rapport de tailles avait valu 3,6 au lieu de 1,07, il n'y aurait eu aucune
+inversion et le résultat serait tombé. Il tient — dans la bonne unité, et de
+moins loin que ce que mon premier chiffre laissait croire.
 
 **Les 27 tenseurs que le sac à dos refuse en dernier rendent 3,7 fois plus de
 perplexité par tenseur que les 26 qu'il accepte juste avant.** L'ordre du
