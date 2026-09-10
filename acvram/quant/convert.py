@@ -1218,10 +1218,19 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         manifest["budget"] = {
             # Le sens de l'ordre est ECRIT au manifeste : un dossier produit
             # par le bras inverse doit etre reconnaissable sans son journal.
-            "ordre_glouton": {"base_croissant": "snr_de_base_croissant_sans_cout",
-                              "snr": "snr_par_octet_decroissant",
-                              "erreur": "erreur_evitee_par_octet_decroissante",
-                              "inverse": "snr_par_octet_croissant"}[_mode],
+            # Un mode absent de cette table levait un KeyError APRES toute la
+            # conversion — des minutes de calcul perdues sur une faute de
+            # frappe, et pire : le mode `absolu` ajoute plus haut n'y figurait
+            # pas. La table doit couvrir exactement les modes acceptes par la
+            # garde de _mode ; un repli explicite vaut mieux qu'une exception
+            # tardive, et il porte le nom du mode pour rester lisible.
+            "ordre_glouton": {
+                "base_croissant": "snr_de_base_croissant_sans_cout",
+                "snr": "snr_par_octet_decroissant",
+                "erreur": "erreur_evitee_par_octet_decroissante",
+                "absolu": "erreur_absolue_evitee_par_octet_decroissante",
+                "inverse": "snr_par_octet_croissant",
+            }.get(_mode, f"mode_{_mode}_sans_description"),
             "demande_gib": opts.bits_budget_gib,
             "plancher_gib": round(plancher_octets / 1024 ** 3, 4),
             "plafond_gib": round((plancher_octets + cout_total) / 1024 ** 3, 4),
