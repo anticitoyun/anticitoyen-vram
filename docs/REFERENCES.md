@@ -136,9 +136,16 @@ Deux points relevés au reboot du 3 septembre, à connaître avant toute mesure 
 - le **mode persistance est désactivé** sur les deux cartes ; les horloges
   partent de 225 MHz et il faut deux à trois tours de banc avant le plateau —
   d'où les 7 tours de `banc-direct.py`, meilleur retenu ;
-- les deux cartes sont **bridées en puissance** : 5090 à **400 W** (défaut 600,
-  plancher réglable 400) et 3080 Ti à **275 W** (défaut 350). Tous nos chiffres
-  sont mesurés ainsi. Voir `MATERIEL.md`.
+- les deux cartes sont bridées en puissance, mais **le réglage dérive dans le
+  temps** (pas persistant au redémarrage) — posé à 400 W/275 W le 8/09/2026,
+  constaté à **500 W/375 W le 10/09/2026** sans qu'on sache qui ou quoi l'a
+  changé. **Toujours relever la limite en vigueur au moment de mesurer**
+  (`nvidia-smi --query-gpu=power.limit --format=csv`), jamais la supposer
+  d'après cette page. Nos jetons/kJ sont calculés depuis la puissance
+  **tirée mesurée**, pas depuis la limite posée — voir `MATERIEL.md`, qui
+  établit aussi que la limite ne mordait pas dans la plage testée le 3/09,
+  donc la dérive ne rend pas les anciens chiffres faux, seulement l'idée
+  qu'un bridage documenté reste valable sans revérification.
 
 ## Profilage
 
