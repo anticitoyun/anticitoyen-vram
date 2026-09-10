@@ -793,6 +793,39 @@ __global__ void int4_gemv_grouped_kernel(
 // godet de blocs : le chemin se rejoue tel quel dans un graphe CUDA.
 // -------------------------------------------------------------------------
 
+// CONTROLE POSITIF DU HARNAIS DE MESURE (poste1, 10/09/2026).
+// Un instrument ne rend un resultat que s'il pouvait en rendre un autre. On lui
+// donne donc une difference CONNUE D'AVANCE et grande : K iterations de FMA
+// CHAINEES — chacune depend de la precedente, donc ni eliminees par le
+// compilateur ni recouvertes par l'ordonnanceur.
+//   - le temps doit devenir lineaire en K des que le travail depasse le plancher
+//   - LE COUDE CHIFFRE LE PLANCHER, sans aucune hypothese sur sa cause
+// C'est ce qui manquait quand un montage a rendu ~49,5 us pour un noyau qui
+// ecrit trois flottants et sort : nous n'avions aucun moyen de savoir que
+// c'etait le plancher de l'instrument et non le cout du noyau.
+__global__ void banc_fma_kernel(float *__restrict__ sortie, int K) {
+    float a = (float)(threadIdx.x + 1) * 1e-3f;
+    const float b = 1.0000001f, c = 1e-7f;
+    #pragma unroll 1
+    for (int i = 0; i < K; ++i) a = fmaf(a, b, c);   // chainee : a depend de a
+    if (threadIdx.x == 0)
+        sortie[blockIdx.z * gridDim.y * gridDim.x
+               + blockIdx.y * gridDim.x + blockIdx.x] = a;
+}
+
+torch::Tensor banc_fma(int64_t gx, int64_t gy, int64_t gz,
+                       int64_t threads, int64_t K) {
+    auto opt = torch::TensorOptions().dtype(torch::kFloat)
+                   .device(torch::kCUDA, c10::cuda::current_device());
+    auto out = torch::empty({(long)(gx * gy * gz)}, opt);
+    dim3 g((unsigned)gx, (unsigned)gy, (unsigned)gz);
+    banc_fma_kernel<<<g, (unsigned)threads, 0,
+                      at::cuda::getCurrentCUDAStream()>>>(
+        out.data_ptr<float>(), (int)K);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
 // EMPREINTE DU SOURCE, posee par le lanceur Python (-DACVRAM_SRC_HASH).
 // Elle doit se retrouver DANS le binaire : c'est le seul controle qui prouve
 // que le .so compile bien ce fichier-ci. Comparer les horodatages ne prouve
@@ -859,7 +892,13 @@ __global__ void paged_attn_partial_kernel(
     }
 
     if (etape < 1) {
-        if (threadIdx.x == 0) { part_m[out_off] = -INFINITY; part_l[out_off] = 0.f; }
+        // MARQUEUR DE PARTICIPATION : un temps plat ne distingue pas « noyau
+        // insensible au parallelisme » de « grille inerte ». On observe donc
+        // QUI A TOURNE : chaque bloc marque sa case, et le compte des cases
+        // marquees se relit cote hote. participants == grille -> les blocs
+        // tournent ; participants < grille -> le lancement est en cause et
+        // rien n'a jamais ete teste.
+        if (threadIdx.x == 0) { part_m[out_off] = 1.f; part_l[out_off] = 0.f; }
         for (int d = threadIdx.x; d < D; d += blockDim.x)
             part[out_off * D + d] = 0.f;
         return;
@@ -2630,6 +2669,11 @@ torch::Tensor swiglu_bf16(torch::Tensor gu) {
 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    // Controle positif du harnais : echelle de travail connue d'avance.
+    m.def("banc_fma", &banc_fma,
+          "K FMA chainees, grille imposee — chiffre le plancher de l'instrument",
+          py::arg("gx"), py::arg("gy"), py::arg("gz"),
+          py::arg("threads"), py::arg("K"));
     m.def("swiglu2_bf16", &swiglu2_bf16,
           "SwiGLU sur gate et up separes : SiLU(gate) * up",
           py::arg("g"), py::arg("u"));

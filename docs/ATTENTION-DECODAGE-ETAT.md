@@ -99,3 +99,58 @@ réfuté par la bisection ; celui-ci est validé par elle, avant toute lecture.
 **La grille vient en dernier et pas avant** : c'est elle qui a produit la
 fausse réfutation de la sous-parallélisation, et elle ne voudra dire quelque
 chose que sur un montage dont le témoin a parlé.
+
+## Le plancher du harnais (10/09) — et une cause à ne pas retenir
+
+**La disqualification est plus large qu'annoncé** (poste1) : le montage rendait
+~49,5 µs **quel que soit le noyau**, donc les « 46,5 µs de coût fixe, 94 % de
+la durée » ne sont pas une propriété du noyau — **un plancher est par
+construction indépendant du travail, et c'est exactement ce que la
+décomposition a mesuré.** La pente `28,0 + 0,0234·n` retourne en « non
+mesuré ». Ce qui survit : les 49,5 % du temps GPU, pris au profileur sur
+exécution réelle — autre instrument, autre population.
+
+### La cause proposée ne tient pas, et il faut le savoir avant de « corriger »
+
+Le diagnostic était « sans doute une synchronisation par appel », avec pour
+correctif : événements autour du lot, une seule synchronisation, division par
+le nombre d'appels. **Vérification faite dans le code, les deux montages
+fautifs le faisaient déjà** :
+
+    e0.record(); for _ in range(300): appel(); e1.record()
+    torch.cuda.synchronize(); us = e0.elapsed_time(e1)*1000/300
+
+**Le correctif était donc déjà en place, et l'appliquer n'aurait rien changé —
+on aurait remesuré le même plancher en croyant l'avoir supprimé.** La cause
+reste inconnue.
+
+### Ce qui rend cela sans importance : on chiffre le plancher au lieu de le déduire
+
+`outils/plancher-harnais.py`. K itérations de FMA **chaînées** (chacune dépend
+de la précédente : ni éliminées, ni recouvertes), même grille, même harnais,
+`K = 1 … 100 000`. Le temps devient linéaire en K dès que le travail dépasse le
+plancher, et **le coude donne le plancher en microsecondes, sans hypothèse sur
+sa cause.** C'est ce qui manquait : nous n'avions aucun moyen de savoir que
+49,5 µs était le plancher et non le noyau.
+
+L'échelle est appliquée aux **deux** harnais — lot amorti et appel isolé — pour
+**retenir celui dont le plancher est le plus bas au lieu de le supposer.**
+
+### Le critère de participation ne se lit pas dans un temps
+
+Un temps plat est compatible avec « noyau insensible au parallélisme » **et**
+avec « grille inerte ». On observe donc qui a tourné : à l'étape 0, chaque bloc
+écrit un marqueur dans sa case de `part_m`, et le compte des cases marquées se
+relit côté hôte.
+
+    participants == grille, temps varie   -> mecanisme vivant
+    participants == grille, temps plat    -> refute pour de bon
+    participants <  grille                -> GRILLE INERTE : le lancement est
+                                             en cause, rien n'a ete teste
+    participants <  grille, temps varie   -> contradiction, instrument en cause
+
+### Règle qui vaut désormais pour tout micro-banc
+
+**Aucun temps par noyau ne se publie sans le plancher de son harnais, mesuré
+par le cas vide, à côté de lui.** Un temps sous ~5 fois ce plancher se publie
+comme « sous le plancher de l'instrument », jamais comme une valeur.
