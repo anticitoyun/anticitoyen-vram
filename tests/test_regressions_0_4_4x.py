@@ -77,14 +77,37 @@ def test_le_seuil_int8_reste_au_croisement_mesure():
         "le croisement est à 88 jetons")
 
 
-def test_le_seuil_nvfp4_reste_bas():
-    """Celui-ci, à l'inverse, est bien placé : le chemin W4A8 ne matérialise
-    pas le poids entier, et le TTFT se dégrade dès qu'on monte le seuil."""
+def test_le_seuil_nvfp4_vaut_la_valeur_mesuree():
+    """Le seuil NVFP4 vaut 32 depuis `824d2fd`, et sa raison a change de signe.
+
+    Ce test defendait `<= 16` en affirmant que « monter au-dela de 8 degrade le
+    temps jusqu'au premier jeton ». La mesure du 10/09 sous verrou de carte
+    (douze bras, ABBA, une valeur par processus, chaque bras deux fois) dit
+    l'inverse :
+
+        Qwen3-4B    12 seq, debit   18,93 p/s -> 53,66   x2,84
+        Qwen3-4B    12 seq, TTFT    1017 ms   ->  925    -9,4 %
+        Qwen3-4B     1 seq, TTFT     289 ms   ->  228    -21,3 %
+        AWAXIS-31B   1 seq, TTFT     464 ms   ->  434     -6,5 %
+        les deux     1 seq, decode  neutre (temoin : n=1 ne franchit
+                                     le seuil d'aucun cote)
+
+    Dispersion intra-bras au plus 8 ms : chaque ecart vaut 4 a 200 fois cette
+    dispersion. L'ancienne mesure qui posait le 8 etait a UNE sequence, regime
+    ou le decodage ne franchit jamais le seuil — elle ne disait rien du seul cas
+    ou la constante decide, et elle est infirmee jusque dans son propre regime.
+
+    Ce que ce test defend donc maintenant : la valeur mesuree, et le fait qu'on
+    ne remonte pas au-dela SANS MESURE. La borne haute est 32 parce que 64 n'a
+    jamais ete mesure, pas parce que 64 serait mauvais.
+    """
     from acvram.kernels import _NVFP4_GEMV_MAX
 
-    assert _NVFP4_GEMV_MAX <= 16, (
-        f"seuil NVFP4 à {_NVFP4_GEMV_MAX} : mesuré, monter au-delà de 8 "
-        "dégrade le temps jusqu'au premier jeton")
+    assert _NVFP4_GEMV_MAX == 32, (
+        f"seuil NVFP4 a {_NVFP4_GEMV_MAX} : la seule valeur mesuree est 32 "
+        "(824d2fd, x2,84 en debit et -21,3 % de TTFT contre 8). Redescendre "
+        "vers 8 annule un gain mesure ; monter vers 64 n'a jamais ete mesure. "
+        "Changer cette constante demande une manche, pas une intuition.")
 
 
 # --------------------------------------------------------------------------
