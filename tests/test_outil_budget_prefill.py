@@ -1,0 +1,61 @@
+"""Rodage de l'instrument qui décidera du budget de prefill, sur processeur.
+
+« L'instrument avant la mesure » : le script ne sera lancé sur carte qu'une
+fois, quand poste3 l'aura rendue, et une erreur de montage y coûterait la
+manche. On l'exécute donc ici de bout en bout sur un converti minuscule —
+les CHIFFRES qu'il rend alors n'ont aucune valeur, seul le montage est
+éprouvé.
+
+Ce que ce rodage attrape et qu'une relecture ne peut pas attraper : le
+contrôle « la variable est-elle seulement lue » — une consigne posée qui ne
+va nulle part est un balayage muet, arrivé le 9/09 avec MAXTOK=65536.
+"""
+import importlib.util
+import pathlib
+
+import pytest
+
+_OUTIL = pathlib.Path(__file__).resolve().parents[1] / "outils" / "budget-prefill.py"
+
+
+def _charger():
+    spec = importlib.util.spec_from_file_location("budget_prefill", _OUTIL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _args(converted, budget, regime):
+    return ["budget-prefill.py", "--processeur", converted,
+            "--budget", str(budget), "--regime", regime,
+            "--invite", "200", "--max-model-len", "512",
+            "--concurrence", "2", "--max-tokens", "16"]
+
+
+@pytest.mark.parametrize("regime", ["seule", "charge"])
+@pytest.mark.parametrize("budget", [0, 32])
+def test_le_montage_tient_dans_les_quatre_cases(converted, regime, budget, capsys):
+    assert _charger().main(_args(converted, budget, regime)) == 0
+    ligne = capsys.readouterr().out.strip().splitlines()[-1].split("\t")
+    assert len(ligne) == 13, "la ligne ne suit plus son en-tete"
+    assert int(ligne[0]) == budget and ligne[1] == regime
+    passes = int(ligne[4])
+    assert passes == (1 if budget == 0 else 7), \
+        f"200 jetons par tranches de {budget} : {passes} passes"
+
+
+def test_un_budget_non_lu_arrete_la_manche(converted, monkeypatch, capsys):
+    """Le contrôle qui compte : si le moteur cessait de lire la variable, la
+    manche rendrait des chiffres plausibles pour un réglage inexistant."""
+    mod = _charger()
+    import acvram.engine.runner as runner
+    monkeypatch.setattr(runner.Engine, "_budget_jetons", lambda self: 0)
+    with pytest.raises(SystemExit, match="budget non lu"):
+        mod.main(_args(converted, 32, "seule"))
+
+
+def test_le_regime_charge_fait_bien_decoder_les_voisines(converted, capsys):
+    """Sans quoi le seul régime qui peut conclure ne mesurerait rien."""
+    assert _charger().main(_args(converted, 32, "charge")) == 0
+    ligne = capsys.readouterr().out.strip().splitlines()[-1].split("\t")
+    assert int(ligne[5]) > 0, "aucune voisine n'a produit pendant le prefill"
