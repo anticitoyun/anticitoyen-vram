@@ -12,6 +12,7 @@ S="$(cd "$(dirname "$0")" && pwd)"; R="$(dirname "$S")"
 PY=~/Bureau/Claude/anticitoyen-vram/.venv/bin/python
 export PYTHONPATH="$R" CUDA_VISIBLE_DEVICES=0
 N=${N:-5}; GIO=${GIO:-20}; CALCUL=${CALCUL:-0.5}
+TMP=$(mktemp)
 CIBLES=${CIBLES:-"tests/test_calibration.py tests/test_fusion_nvfp4.py"}
 
 joue() {   # joue <cible> -> "<echecs> <sauts>" sur N manches
@@ -36,11 +37,33 @@ for c in $CIBLES; do sans[$c]="$(joue "$c")"; done
 # session voit un PID etranger qui alloue et cherche un intrus : six manches
 # perdues le 10/09. `charge-gpu.py` refuse desormais de demarrer sans, donc
 # cette ligne n est pas une precaution mais la seule facon de le lancer.
-ACVRAM_NOM=CHARGE-DELIBEREE "$S/carte.sh" \
-  $PY -u "$S/charge-gpu.py" --gio "$GIO" --calcul "$CALCUL" --duree 3600 &
+ACVRAM_NOM=CHARGE-DELIBEREE setsid "$S/carte.sh" \
+  $PY -u "$S/charge-gpu.py" --gio "$GIO" --calcul "$CALCUL" --duree 3600 \
+  > "$TMP" 2>&1 &
 CH=$!
-trap 'kill $CH 2>/dev/null' EXIT
-sleep 8
+# TUER LE GROUPE, PAS L ENFANT. carte.sh est l enfant, charge-gpu.py le
+# PETIT-FILS : un kill sur le premier laissait le second occuper 10 Gio pendant
+# la manche suivante — constate, et c est ce qui a fait echouer la charge du
+# bras a 27 Gio en OOM.
+trap 'kill -- -$CH 2>/dev/null; kill $CH 2>/dev/null' EXIT
+sleep 10
+
+# LA CHARGE A-T-ELLE VRAIMENT PRIS ? Sans ce controle, le tableau conclut
+# « RESISTE » sur une charge qui a echoue — exactement le defaut que ce
+# harnais est cense debusquer chez les autres. Constate le 10/09 : la charge
+# de 27 Gio est morte en OOM et le verdict RESISTE 5/5 a ete rendu quand meme.
+if ! grep -q '^charge : ' "$TMP"; then
+  echo "REFUS : la charge n a pas demarre — rien a conclure sur la contention"
+  sed -n '1,6p' "$TMP"
+  exit 4
+fi
+grep '^charge : ' "$TMP"
+PRIS=$(nvidia-smi -i 0 --query-gpu=memory.used --format=csv,noheader,nounits)
+MINI=$(python3 -c "print(int($GIO*1024*0.8))")
+if [ "$PRIS" -lt "$MINI" ]; then
+  echo "REFUS : $PRIS Mio pris pour $GIO Gio demandes — la charge n est pas celle annoncee"
+  exit 4
+fi
 
 printf '%-42s %8s %8s  %s\n' cible sans avec verdict
 for c in $CIBLES; do
