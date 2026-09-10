@@ -283,18 +283,37 @@ def get_extension():
         src = os.path.join(here, "acvram_kernels.cu")
         with open(src, "rb") as fh:
             _SRC_OCTETS = fh.read()
-        # LES FLAGS FONT PARTIE DU SOURCE. Hacher le seul contenu du fichier
-        # laisse ouvert le defaut que ce controle croit fermer : un parametre
-        # passe par -D ne change pas le fichier, donc plusieurs valeurs
-        # donnent le MEME ACVRAM_SRC_HASH, donc ccache peut rendre le meme
-        # objet, et plusieurs reglages rendent le meme chiffre — un temps plat
-        # qui se lit « le reglage n'a pas d'effet » et refute a tort une
-        # prediction juste. ACVRAM_GW_WARPS est deja dans ce cas. On hache
-        # donc le couple (contenu, flags qui varient).
-        _flags_var = ([f"-DGW_WARPS={os.environ['ACVRAM_GW_WARPS']}"]
-                      if os.environ.get("ACVRAM_GW_WARPS") else [])
+        # TOUT CE QUI ENTRE DANS LA CONSTRUCTION ENTRE DANS LE HASH. Hacher le
+        # seul contenu du fichier laissait ouvert le defaut que ce controle
+        # croit fermer : ce qui ne passe pas par le fichier ne change pas le
+        # hash, donc plusieurs constructions differentes portent la meme
+        # empreinte, donc ccache peut rendre le meme objet — et plusieurs
+        # reglages rendent le meme chiffre. Le resultat est un temps plat, qui
+        # se lit « le reglage n'a pas d'effet » et refute a tort une prediction
+        # juste. C'est un faux negatif : un tel defaut ne peut pas FABRIQUER un
+        # gain, il ne peut qu'en EFFACER un.
+        #
+        # DEUX chemins y echappaient, pas un :
+        #   ACVRAM_GW_WARPS   -> -DGW_WARPS=n, qui sert le MoE groupe ;
+        #   ACVRAM_ARCH_FAMILY et les cartes visibles -> _arch_flags(), dont
+        #   l'effet est majeur : sans le mode family-specific, la conversion
+        #   E2M1 retombe sur vingt-cinq instructions d'emulation par paire de
+        #   poids. Deux binaires que tout separe en performance portaient donc
+        #   la meme empreinte.
+        #
+        # On ne les enumere plus : on hache LA LISTE COMPLETE des drapeaux
+        # effectivement passes au compilateur. Tout ajout futur y entre de
+        # lui-meme, et le controle cesse d'etre partiel. Une empreinte
+        # partielle est pire que pas d'empreinte, parce qu'elle rassure.
+        _flags_cuda = (["-O3", "--use_fast_math", "-lineinfo"]
+                       + ([f"-DGW_WARPS={os.environ['ACVRAM_GW_WARPS']}"]
+                          if os.environ.get("ACVRAM_GW_WARPS") else [])
+                       + _arch_flags())
+        _flags_c = ["-O3"]
         _SRC_HASH = hashlib.sha256(
-            _SRC_OCTETS + "\x00".join(sorted(_flags_var)).encode()
+            _SRC_OCTETS
+            + b"\x00FLAGS\x00"
+            + "\x00".join(_flags_cuda + _flags_c).encode()
         ).hexdigest()[:16]
         # LE CONTROLE EST-IL SEULEMENT APPLICABLE ? L'absence du marqueur dans
         # le .so a DEUX causes : un binaire perime, ou un source qui n'en porte
@@ -322,11 +341,9 @@ def get_extension():
         _EXT = load(
             name="acvram_kernels",
             sources=[src],
-            extra_cuda_cflags=["-O3", "--use_fast_math", "-lineinfo",
-                               f"-DACVRAM_SRC_HASH={_SRC_U64}ULL"]
-            + _flags_var
-            + _arch_flags(),
-            extra_cflags=["-O3"],
+            # la meme liste que celle qui a ete hachee, plus l'empreinte
+            extra_cuda_cflags=_flags_cuda + [f"-DACVRAM_SRC_HASH={_SRC_U64}ULL"],
+            extra_cflags=_flags_c,
             build_directory=cache,
             verbose=bool(os.environ.get("ACVRAM_VERBOSE_BUILD")),
         )
