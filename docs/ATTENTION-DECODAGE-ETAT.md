@@ -154,3 +154,39 @@ relit côté hôte.
 **Aucun temps par noyau ne se publie sans le plancher de son harnais, mesuré
 par le cas vide, à côté de lui.** Un temps sous ~5 fois ce plancher se publie
 comme « sous le plancher de l'instrument », jamais comme une valeur.
+
+## Ce que l'égalité voudra dire — écrit AVANT la mesure
+
+Le plancher (étape 0) est rejoué **à chaque valeur de grille**. Deux issues, et
+**les deux sont des renseignements** :
+
+    plancher qui VARIE avec la grille
+      -> il est dans le lancement des blocs ; la grille agit sur quelque chose,
+         et la sous-parallelisation redevient testable par difference
+
+    plancher IDENTIQUE a toutes les grilles
+      -> il n'est PAS dans le lancement des blocs. Il est dans le chemin commun
+         a tous les appels : Python -> C++ -> pilote. C'est le PREMIER
+         renseignement sur la cause inconnue, et il vaut plus que le choix d'un
+         harnais.
+
+**Cette phrase est écrite d'avance exprès.** Sans elle, une égalité se lirait
+« le test n'a rien donné » — la faute commise quatre fois le 9/09, où une
+absence de variation a été prise tantôt pour une réfutation, tantôt pour un
+échec, jamais pour ce qu'elle disait.
+
+### Règle de départage, pré-inscrite
+
+Si deux protocoles rendent des planchers **non distinguables** — écart inférieur
+à leur dispersion combinée —, **on ne choisit pas par la mesure**. On garde
+l'**appel isolé**, pour une raison posée d'avance et indépendante des chiffres :
+c'est le seul des deux qui **ne peut pas** masquer un effet de file, et la file
+est le mode de défaillance effectivement observé. Un départage doit être un
+principe pré-inscrit, jamais une préférence formée après avoir vu les nombres.
+
+### Ce qui est déjà satisfait dans `outils/attn-isole.py`
+
+* dispersion publiée avec chaque valeur : médiane de 51, p10 et p90 ;
+* plancher mesuré **aux bornes du balayage réel**, puisque l'étape 0 est
+  rejouée pour chaque valeur de `ACVRAM_PA_CHUNK` ;
+* participation **observée** par atomique, jamais reconstruite.
