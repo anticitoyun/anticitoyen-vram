@@ -1,0 +1,152 @@
+"""Le crochet garde le paquet, pas le dépôt.
+
+`test_paquet_sans_identite.py` ne lit que ce que `construire-deb.sh` copie :
+`acvram/`, `pyproject.toml`, `install.sh`, `README.md`, `LICENSE`. Tout ce qui
+vit dans `outils/`, `tests/`, `docs/` ou `acvram-memoire/` est donc hors de sa
+portée — et c'est là que `outils/mesure-gemv-nvfp4.py` portait un chemin de
+scratchpad avec identifiant de session, dans un fichier suivi et poussé.
+
+Ce fichier étend la portée au dépôt entier, avec **trois classes de gravité**
+plutôt qu'une, parce qu'elles n'ont pas le même remède :
+
+  identifiant de session   REFUS. Ce n'est pas un chemin de travail, c'est un
+                           déchet : il ne resert à personne, il ne se retrouve
+                           jamais, et il nomme une session.
+  courriel                 REFUS.
+  chemin absolu nommé      CLIQUET. Toléré sur le miroir privé, mais compté :
+                           le plafond ne peut que descendre. Le défaut n'est
+                           pas la vie privée ici, c'est qu'un outil au chemin
+                           codé en dur NE TOURNE POUR PERSONNE D'AUTRE.
+"""
+import pathlib
+import re
+import subprocess
+
+RACINE = pathlib.Path(__file__).resolve().parent.parent
+GARDES = {"tests/test_paquet_sans_identite.py", "tests/test_depot_sans_identite.py"}
+
+# Un chemin absolu vers un home ou un montage nommé par utilisateur.
+CHEMIN = re.compile(r"/home/[A-Za-z][A-Za-z0-9_-]+"
+                    r"|/media/[A-Za-z][A-Za-z0-9_-]+/")
+
+# UN IDENTIFIANT DE SESSION, PAS UN UUID QUELCONQUE. Première version : tout
+# UUID. Elle accusait `.beads/metadata.json`, qui porte légitimement
+# l'identifiant de sa propre base. Le motif exige donc le contexte qui fait la
+# session — un répertoire de session, ou le préfixe `session_`.
+SESSION = re.compile(
+    r"session_[0-9A-Za-z]{12,}"
+    r"|/tmp/claude-\d+/"
+    r"|cc-socks"
+    r"|/tmp/[^\s'\"]*/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+# `user@1000.service` est une unité systemd, pas une adresse : le domaine d'une
+# adresse ne commence pas par un chiffre et son TLD n'est pas `service`. Cette
+# règle a retiré cinq faux positifs sur cinq.
+COURRIEL = re.compile(
+    r"[A-Za-z0-9._%+-]+@(?!\d)[A-Za-z0-9.-]+\.(?!service\b)[A-Za-z]{2,}")
+COURRIEL_TOLERE = ("noreply", "example")
+
+# CLIQUET. Mesuré le 10/09/2026 sur 309 fichiers suivis. Il ne monte pas : un
+# nouvel outil lit son chemin dans une variable d'environnement ou n'entre pas.
+PLAFOND_CHEMINS = 299
+
+# EXEMPTION NOMMEE ET DATEE, jamais muette. `outils/mesure-gemv-nvfp4.py` est
+# corrigé sur la branche `1c` (variable d'environnement) et pas encore fusionné
+# ici ; reproduire le correctif sur cette branche ferait un conflit sur le même
+# fichier. À RETIRER À LA FUSION — et le test le dira, puisqu'il vérifie que
+# l'exemption sert encore.
+EXEMPTES_SESSION = {"outils/mesure-gemv-nvfp4.py"}
+
+
+def _suivis():
+    # `git ls-files`, PAS `git ls-tree HEAD`. La premiere version lisait le
+    # COMMIT : un fichier ajoute a l'index mais pas encore commite n'etait pas
+    # vu, donc le garde ne pouvait refuser une fuite qu'APRES son entree dans
+    # l'histoire — c'est-a-dire trop tard, l'histoire ne se reecrivant pas.
+    # Verifie par un temoin ajoute a l'index : il passait. `ls-files` liste
+    # l'index et lit l'arbre de travail, donc il mord des `git add`.
+    out = subprocess.run(["git", "ls-files"],
+                         cwd=RACINE, capture_output=True, text=True)
+    for nom in out.stdout.split("\n"):
+        nom = nom.strip()
+        if not nom or nom in GARDES:
+            continue
+        p = RACINE / nom
+        if p.is_file():
+            yield nom, p
+
+
+def _trouve(motif, tolere=()):
+    trouves = {}
+    for nom, p in _suivis():
+        try:
+            texte = p.read_text(errors="ignore")
+        except Exception:
+            continue
+        hits = [h for h in motif.findall(texte)
+                if not any(t in str(h) for t in tolere)]
+        if hits:
+            trouves[nom] = hits
+    return trouves
+
+
+def test_aucun_identifiant_de_session_dans_le_depot():
+    trouves = _trouve(SESSION)
+    fautes = {k: v for k, v in trouves.items() if k not in EXEMPTES_SESSION}
+    assert not fautes, (
+        "identifiants de session dans des fichiers suivis :\n  "
+        + "\n  ".join(f"{k} -> {v[:3]}" for k, v in fautes.items()))
+    # UNE EXEMPTION QUI NE SERT PLUS DOIT DISPARAITRE, sinon elle couvre un
+    # jour une faute qu'on croit couverte par autre chose.
+    inutiles = EXEMPTES_SESSION - set(trouves)
+    assert not inutiles, (
+        f"exemptions devenues inutiles, a retirer de EXEMPTES_SESSION : "
+        f"{sorted(inutiles)}")
+
+
+def test_aucun_courriel_dans_le_depot():
+    trouves = _trouve(COURRIEL, COURRIEL_TOLERE)
+    assert not trouves, ("courriels dans des fichiers suivis :\n  "
+                         + "\n  ".join(f"{k} -> {v[:3]}"
+                                       for k, v in trouves.items()))
+
+
+def test_le_cliquet_des_chemins_absolus_ne_monte_pas():
+    trouves = _trouve(CHEMIN)
+    total = sum(len(v) for v in trouves.values())
+    assert total <= PLAFOND_CHEMINS, (
+        f"{total} chemins absolus nommes pour un plafond de "
+        f"{PLAFOND_CHEMINS}. Un outil au chemin code en dur ne tourne pour "
+        f"personne d'autre : lire le chemin dans une variable "
+        f"d'environnement.\n  "
+        + "\n  ".join(f"{k} -> {len(v)}"
+                      for k, v in sorted(trouves.items(),
+                                         key=lambda t: -len(t[1]))[:8]))
+    # LE PLAFOND DOIT SUIVRE LA BAISSE, sinon il autorise une remontee
+    # silencieuse jusqu'a l'ancienne valeur.
+    assert total >= PLAFOND_CHEMINS - 20, (
+        f"{total} chemins contre un plafond de {PLAFOND_CHEMINS} : abaisser "
+        f"PLAFOND_CHEMINS a {total}, sinon le cliquet laisse remonter.")
+
+
+def test_les_trois_detecteurs_savent_tirer():
+    """Sans ce controle, « aucune faute » ne se distingue pas d'un motif
+    aveugle. Et les temoins NEGATIFS sont la seconde moitie : mes deux
+    premieres versions accusaient `.beads/metadata.json` (un UUID de base) et
+    `user@1000.service` (une unite systemd)."""
+    for t in ("/tmp/claude-1000/x", "session_01ABCDEFGHIJKL",
+              "/run/user/1000/cc-socks/1.sock",
+              "/tmp/scratch/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"):
+        assert SESSION.search(t), f"temoin de session non vu : {t}"
+    for t in ("55584380-41e2-4176-863f-0f1b584d0592", "sessions", "claude-1c"):
+        assert not SESSION.search(t), f"faux positif de session : {t}"
+
+    for t in ("quelquun@courriel.fr", "a.b+c@sous.domaine.com"):
+        assert COURRIEL.search(t), f"temoin de courriel non vu : {t}"
+    for t in ("user@1000.service", "acvram@1000.service"):
+        assert not COURRIEL.search(t), f"faux positif de courriel : {t}"
+
+    for t in ("/home/quelquun/x", "/media/quelquun/DISQUE/y"):
+        assert CHEMIN.search(t), f"temoin de chemin non vu : {t}"
+    for t in ("/usr/share/acvram", "/tmp/x", "/mnt/data"):
+        assert not CHEMIN.search(t), f"faux positif de chemin : {t}"
