@@ -34,8 +34,17 @@ presque rien, et n'a plus de place pour ceux qui rendent.
 
 **L'ordre inverse n'est pas un candidat.** C'était un instrument, et il a fait
 son travail : il mesure ce que l'ordre vaut, il ne propose pas de le remplacer
-par son contraire. Un ordre optimal reste à chercher, et l'écart A−B en donne
-la **borne** — au moins 0,0436 PPL est récupérable par le seul choix de la clé.
+par son contraire.
+
+**Et ce n'est pas une BORNE — j'avais écrit le mot faux.** Un ordre inverse est
+un ordre parmi 225 !, choisi parce qu'il est **facile à nommer**, pas parce
+qu'il majore quoi que ce soit. Correction de chef, et elle décide de la
+suite : l'inverse établit qu'**au moins 56,3 % du retard au plafond étaient
+récupérables par le seul ordre** — un **plancher** sur le gain accessible, pas
+un plafond. Rien n'interdit qu'un meilleur ordre en récupère 80 %.
+
+Le mot importait : avec « borne », le jour où une clé rend 0,0300 nous aurions
+conclu « presque tout récupéré » sans avoir la moindre idée de ce qui restait.
 
 ## La clé qui a un argument, et le test qui la distingue
 
