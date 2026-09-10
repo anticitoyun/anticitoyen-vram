@@ -12,6 +12,7 @@ sans compilateur, et la suite de tests peut vérifier les noyaux face à lui.
 from __future__ import annotations
 
 import functools
+import hashlib
 import os
 import time
 import re
@@ -40,6 +41,9 @@ __all__ = ["get_extension", "kernels_available", "build_info", "matmul",
 _EXT: Optional[Any] = None
 _TRIED = False
 _ERROR: str = ""
+_SO_HASH: str = ""          # sha256 du .so effectivement charge : a joindre
+_SO_PATH: str = ""          # a tout releve, car une empreinte .cu/.so prouve
+                            # la coherence, jamais l identite de l arbre
 
 # Blackwell exige CUDA 12.8 ou plus récent ; rien de plus ancien ne sait émettre du sm_120.
 _MIN_CUDA_FOR_SM120 = (12, 8)
@@ -71,8 +75,22 @@ def _arch_flags(nvcc_ver: tuple[int, int] | None = None) -> list[str]:
         archs = {(8, 6), (12, 0)}
     if nvcc_ver is None:
         nvcc_ver = _nvcc_version(_nvcc_path())
-    family = (nvcc_ver >= _MIN_CUDA_FOR_FAMILY
-              and os.environ.get("ACVRAM_ARCH_FAMILY", "1") != "0")
+    demande = os.environ.get("ACVRAM_ARCH_FAMILY", "1") != "0"
+    family = nvcc_ver >= _MIN_CUDA_FOR_FAMILY and demande
+    if demande and not family and any(major >= 10 for major, _ in archs):
+        # Sans la forme famille, la conversion E2M1 redevient une émulation de
+        # vingt-cinq instructions par paire de poids — et rien ne le disait.
+        # Le 9/09/2026 nous avons cru cette perte réelle pendant une heure : le
+        # binaire était bon, mais aucun message n'aurait signalé qu'il ne
+        # l'était pas. La marge est d'UNE version — le seuil est 12.9 et le
+        # toolkit du virtualenv fournit 13.0 ; qu'il disparaisse et la perte
+        # revient en silence.
+        warnings.warn(
+            f"FP4 materiel indisponible : nvcc {nvcc_ver[0]}.{nvcc_ver[1]} < "
+            f"{_MIN_CUDA_FOR_FAMILY[0]}.{_MIN_CUDA_FOR_FAMILY[1]}, donc "
+            f"sm_120f n'est pas demande et la conversion E2M1 retombe sur "
+            f"vingt-cinq instructions par paire de poids au lieu d'une. "
+            f"Posez ACVRAM_CUDA_HOME sur un toolkit 12.9 ou plus recent.")
     flags: list[str] = []
     for major, minor in sorted(archs):
         cc = f"{major}{minor}"
@@ -235,19 +253,42 @@ def get_extension():
     try:
         from torch.utils.cpp_extension import load
         here = os.path.dirname(os.path.abspath(__file__))
-        # Le repertoire de compilation est PARTAGE par tous les worktrees et le
-        # nom du module est fixe : deux sessions dont les sources diffferent
-        # s'ecrasent mutuellement le .so, 9 minutes a chaque bascule, et l'une
-        # peut profiler le noyau de l'autre. ACVRAM_KERNEL_CACHE isole une
-        # session qui modifie le .cu pendant qu'une autre mesure.
-        cache = os.path.expanduser(os.environ.get("ACVRAM_KERNEL_CACHE")
-                                   or "~/.cache/acvram/kernels")
+        # UN REPERTOIRE DE COMPILATION PAR ARBRE. Le defaut etait partage par
+        # les quatre worktrees, sous un nom de module fixe : deux sessions dont
+        # les sources different s'ecrasent le meme .so, et _purger_verrou()
+        # retire le verrou d'une compilation qui n'est pas la sienne. Le
+        # symptome est exactement celui qu'on avait attribue a ccache — un
+        # binaire coherent avec un source qui n'est pas le votre, une date
+        # rassurante, aucune erreur. Les deux mecanismes existent ; celui-ci
+        # etait invisible.
+        # La cle est le chemin du paquet : deux arbres ne peuvent plus se
+        # rencontrer, et un meme arbre garde son cache d'une fois sur l'autre.
+        cache = os.environ.get("ACVRAM_KERNEL_CACHE")
+        if not cache:
+            _cle = hashlib.sha256(
+                os.path.realpath(here).encode()).hexdigest()[:12]
+            cache = os.path.expanduser(f"~/.cache/acvram/kernels-{_cle}")
         os.makedirs(cache, exist_ok=True)
         _purger_verrou(cache)
+        # EMPREINTE DU SOURCE, injectee comme option de compilation.
+        # `ccache` enveloppe nvcc (build.ninja) et son hachage ne distingue pas
+        # toujours deux versions du code *device* : le 9/09/2026 une
+        # modification du .cu a rendu un binaire compile en 191 ms qui ne la
+        # contenait pas, tout en etant PLUS RECENT que la source. Quatre
+        # valeurs d'un parametre ont ainsi donne quatre fois le meme chiffre —
+        # le meme binaire — et la conclusion qu'on allait en tirer etait fausse.
+        # Une option qui CHANGE avec le contenu interdit structurellement a
+        # ccache de rendre un objet perime, sans le desactiver ni perdre son
+        # benefice sur les compilations legitimes.
+        src = os.path.join(here, "acvram_kernels.cu")
+        with open(src, "rb") as fh:
+            _SRC_HASH = hashlib.sha256(fh.read()).hexdigest()[:16]
+        _SRC_U64 = int(_SRC_HASH, 16)          # entier : aucun guillemet a echapper
         _EXT = load(
             name="acvram_kernels",
-            sources=[os.path.join(here, "acvram_kernels.cu")],
-            extra_cuda_cflags=["-O3", "--use_fast_math", "-lineinfo"]
+            sources=[src],
+            extra_cuda_cflags=["-O3", "--use_fast_math", "-lineinfo",
+                               f"-DACVRAM_SRC_HASH={_SRC_U64}ULL"]
             + ([f"-DGW_WARPS={os.environ['ACVRAM_GW_WARPS']}"]
                if os.environ.get("ACVRAM_GW_WARPS") else [])
             + _arch_flags(),
@@ -255,6 +296,36 @@ def get_extension():
             build_directory=cache,
             verbose=bool(os.environ.get("ACVRAM_VERBOSE_BUILD")),
         )
+        # LE BINAIRE PORTE-T-IL BIEN CE SOURCE ? Une fois, au chargement,
+        # jamais dans le chemin chaud. Comparer les horodatages ne prouve
+        # rien : ccache reecrit le .so, donc sa date est bonne et son contenu
+        # ancien. Seul le CONTENU repond.
+        so = os.path.join(cache, "acvram_kernels.so")
+        try:
+            with open(so, "rb") as fh:
+                octets = fh.read()
+                # l'entier est ecrit en little-endian dans le binaire
+                porte = _SRC_U64.to_bytes(8, "little") in octets
+            # EMPREINTE DU BINAIRE LUI-MEME, a joindre a tout releve. Le
+            # controle ci-dessus prouve que le .so est COHERENT avec un .cu ;
+            # il ne peut pas voir que le couple entier vient d'un autre arbre —
+            # demontre le 10/09, ou PYTHONPATH manquant faisait mesurer le
+            # depot principal avec son propre binaire, parfaitement coherent.
+            # Une empreinte prouve la coherence, pas l'identite : c'est le sha
+            # du .so, joint au chiffre, qui identifie ce qui a tourne.
+            global _SO_HASH, _SO_PATH
+            _SO_HASH = hashlib.sha256(octets).hexdigest()[:16]
+            _SO_PATH = so
+        except OSError:
+            porte = True                       # pas de .so a inspecter : on n'accuse pas
+        if not porte:
+            _ERROR = (f"le binaire {so} ne porte pas l'empreinte du source "
+                      f"({_SRC_HASH}) : il a ete servi par un cache de "
+                      f"compilation et NE CONTIENT PAS vos modifications. "
+                      f"Videz {cache} ou relancez avec CCACHE_DISABLE=1.")
+            warnings.warn(f"acvram : {_ERROR}")
+            _EXT = None
+            return None
     except Exception as exc:                      # noqa: BLE001 — signaler, pas planter
         _ERROR = f"{type(exc).__name__}: {exc}"
         _EXT = None
@@ -502,7 +573,8 @@ def q3n_matmul(x, w):
     if ext is None or not hasattr(ext, "q3n_gemv"):
         return None
     return ext.q3n_gemv(w.qweight, w.block_scale.view(torch.uint8),
-                        w.global_scale.to(w.qweight.device), x,
+                        w.global_scale.to(w.qweight.device),
+                        w.table_gpu(w.qweight.device), x,
                         w.shape[1], w.block)
 
 
