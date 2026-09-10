@@ -628,6 +628,12 @@ class Engine:
             t0 = time.perf_counter()
             batch = self._build_batch(new, prefill=True)
             logits = self.model(batch)
+            if os.environ.get("ACVRAM_CHRONO_SYNC"):
+                # Instrumentation temporaire (poste3, mandat chef) : sans
+                # synchronisation, `self.model(batch)` est un lancement
+                # asynchrone -- ce chrono mesurait potentiellement le
+                # lancement, pas l'execution. Sous garde d'env, cf graphs.py.
+                torch.cuda.synchronize()
             self.stats.prefill_seconds += time.perf_counter() - t0
             self.stats.prefill_tokens += sum(len(s.prompt_ids) - s.cached_len for s in new)
             for seq in new:
@@ -661,6 +667,8 @@ class Engine:
                     [seq], prefill=True,
                     limite=fin if fin < len(seq.prompt_ids) else None)
                 logits = self.model(batch)
+                if os.environ.get("ACVRAM_CHRONO_SYNC"):
+                    torch.cuda.synchronize()
                 self.stats.prefill_seconds += time.perf_counter() - t0
                 # Compte depuis `debut`, releve AVANT la passe de frontiere :
                 # l'ancienne formule partait de `cached_len` deja avance a la
@@ -720,12 +728,15 @@ class Engine:
         t2 = time.perf_counter()
         self.stats.decode_tokens += len(decodable)
         outs = self._emit(logits, decodable)
-        if trace:
-            t3 = time.perf_counter()
-            if (t3 - tg) * 1000 > 12:
-                print(f"[pas-lent] {voie} grow {(t0-tg)*1000:.1f} batch "
-                      f"{(t1-t0)*1000:.1f} avant {(t2-t1)*1000:.1f} emit "
-                      f"{(t3-t2)*1000:.1f} ms len={decodable[0].length}", flush=True)
+        t3 = time.perf_counter()
+        getattr(self, "temps_pas_total", None) is None and setattr(self, "temps_pas_total", [])
+        getattr(self, "temps_pas_voie", None) is None and setattr(self, "temps_pas_voie", [])
+        self.temps_pas_total.append((t3 - tg) * 1000)
+        self.temps_pas_voie.append(voie)
+        if trace and (t3 - tg) * 1000 > 12:
+            print(f"[pas-lent] {voie} grow {(t0-tg)*1000:.1f} batch "
+                  f"{(t1-t0)*1000:.1f} avant {(t2-t1)*1000:.1f} emit "
+                  f"{(t3-t2)*1000:.1f} ms len={decodable[0].length}", flush=True)
         return outs
 
     def _speculative_decode(self, decodable: list[Sequence]
