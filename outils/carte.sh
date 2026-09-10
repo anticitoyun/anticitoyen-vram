@@ -41,8 +41,16 @@ esac
 # pas — on CONSTATE apres coup ce qu'on ne pouvait pas garantir avant, comme le
 # sha du .so. Un debit se publie avec l'etat de la carte, comme une energie
 # avec sa limite de puissance.
+# CE QU'ON RELEVE : les PLAFONDS imposes, jamais les frequences instantanees.
+# Premier essai fait avec clocks.sm : il s'est declenche a TOUS les coups, la
+# carte passant de 225 a 2992 MHz simplement en sortant de veille. Un garde-fou
+# qui crie a chaque mesure est un garde-fou qu'on desactive. `-lgc`, `-lmc` et
+# `-pl` agissent sur les plafonds — c'est donc eux qui distinguent un reglage
+# impose d'une montee en regime normale.
+# (clocks.applications.graphics est deprecie sur ce pilote et rend un message
+# a la place d'un nombre : il est exclu exprès.)
 etat_carte() {
-  nvidia-smi -i 0 --query-gpu=clocks.sm,clocks.mem,power.limit \
+  nvidia-smi -i 0 --query-gpu=clocks.max.sm,clocks.max.mem,power.limit \
              --format=csv,noheader,nounits 2>/dev/null | tr -d ' '
 }
 [ $# -ge 1 ] || { echo "usage: carte.sh <commande...>" >&2; exit 64; }
