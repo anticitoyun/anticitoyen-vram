@@ -96,7 +96,16 @@ EVAL = ["--corpus", str(CORPUS), "--window", "2048", "--stride", "2048",
 
 
 def gio(x: float) -> str:
-    return f"{x:.3f} Gio"
+    """UNE convention d'affichage, quatre decimales.
+
+    Le script affichait « plafond 6,547 Gio » a trois decimales et listait le
+    meme budget « 6.5465 » a quatre : le meme nombre vu par deux conventions,
+    et quelqu'un qui compare les deux se demande lequel est faux. Aucun des
+    deux. Releve par claude-f2 le 10/09, en meme temps que ma propre erreur —
+    j'avais ecrit 6,5464 dans un message, en TRONQUANT la ou le script
+    ARRONDIT. Le code etait juste ; c'est ma prose qui l'etait pas.
+    """
+    return f"{x:.4f} Gio"
 
 
 def bits(octets: int) -> float:
@@ -283,14 +292,14 @@ def main() -> int:
     print(f"  source   {SOURCE}")
     print(f"  corpus   {CORPUS.name} ({CORPUS.stat().st_size} o)")
     print(f"  etalon   reference exterieure PPL {PPL_REFERENCE}")
-    print(f"  plancher {gio(3_983_834_740 / GIO)} (tout-nvfp4, "
-          f"{bits(3_983_834_740):.4f} b/p)")
-    print(f"  plafond  {gio(7_029_266_352 / GIO)} (tout-int8, "
-          f"{bits(7_029_266_352):.4f} b/p)")
+    print(f"  plancher {gio(PLANCHER_GIO)} (tout-nvfp4, "
+          f"{bits(PLANCHER_OCTETS):.4f} b/p)")
+    print(f"  plafond  {gio(PLAFOND_GIO)} (tout-int8, "
+          f"{bits(PLAFOND_OCTETS):.4f} b/p)")
     for b, nom, temoin in points:
         marque = f"   <- {temoin['role']}, prevu {temoin['bpw']} b/p "\
                  f"et PPL {temoin['ppl']}" if temoin else ""
-        print(f"  {b:5.2f} Gio  {nom}{marque}")
+        print(f"  {gio(b)}  {nom}{marque}")
     if not a.pour_de_vrai:
         print("\nPLAN SEULEMENT. Rien n'a tourne. "
               "Relancer avec --pour-de-vrai une fois l'accord des sessions obtenu.")
