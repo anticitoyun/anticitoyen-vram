@@ -127,3 +127,45 @@ il n'y a aucune ligne à lire. Le cas 4 n'a été trouvé que parce qu'une
 mesure — le +50,7 % du prefill découpé — a demandé une explication. **Un
 inventaire ne peut rendre que des mécanismes arrêtés ; les dimensions
 absentes se découvrent par la mesure.**
+
+## 5. `carte.sh` : `TYPE` a deux valeurs pour trois usages — JAMAIS POSÉ
+
+`carte.sh:34` : `TYPE=${ACVRAM_TYPE:-mesure}`, qui refuse tout sauf
+`mesure` ou `etat`.
+
+    mesure    duree bornee, exclusivite necessaire, on attend derriere
+    etat      instantane
+    service   PERMANENT — la console, llama-server 8081, embeddings 8082,
+              reranker 8083
+
+**Le service n'a pas de valeur qui le décrive, donc il se déclare
+`mesure`** — et paraît alors être une manche qui ne finit jamais. Un
+arrivant ne peut pas distinguer « attends, ça va se libérer » de « n'attends
+pas, c'est permanent ».
+
+Forme : **jamais posé**, pas arrêté. `TYPE` a été écrit quand il n'y avait
+que des mesures. Le remède est un ajout — un type `service` qui journalise
+et apparaît dans `qui_tient`, mais **qu'un arrivant sait ne pas devoir
+attendre** — pas une extension.
+
+Constaté le 10/09 à 21h20 : la 3080 Ti tenue depuis 43 minutes par
+`chef-console-gui`, déclarée `mesure`, **et c'était voulu**.
+
+## 6. Le verrou disait le présent, jamais le passé — POSÉ le 10/09
+
+`carte.sh:125-126` écrivait `$INFO` par `>` et le supprimait au `trap EXIT`.
+Le fichier répondait à « qui tient la carte MAINTENANT », jamais à « qui la
+tenait à 17h53 » — **aucun `>>` dans tout le fichier.**
+
+La question s'est posée parce que deux journaux jumeaux du chantier quota,
+datés 17:53 et 17:54, portaient une étendue de 10,4 % là où la paire de
+16:18 en portait 0,15 % : **une occupation non identifiée, dont le verrou ne
+gardait aucune trace.**
+
+Journal `>>` posé le 10/09 : une ligne par prise, une par restitution avec
+la durée tenue.
+
+**La règle que l'incident a produite :** *une mesure doit publier sa durée
+ET exister en au moins deux exemplaires du même travail. Une seule des deux
+conditions laisse l'indécidable intact.* Corollaire : **un témoin unique
+n'est pas un témoin.**
