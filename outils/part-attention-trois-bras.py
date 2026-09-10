@@ -35,7 +35,7 @@ import sys
 import time
 
 # Conditions du tableau conteste (ETABLI.md:1527, :2278).
-CTX, GENERES = 1024, 200
+CTX, GENERES = 1024, 200                    # surcharges par --ctx / --generes
 SEUIL_PCT_GPU = 5.24
 T_GPU_MS, T_MURAL_MS = 28.140, 28.748
 PREDICTION_C_MOINS_B_MS = 0.097
@@ -171,7 +171,9 @@ def pilote(modele: str, sortie: str) -> int:
                    ACVRAM_PA_ARM_SORTIE_FAUSSE="1")
         t0 = time.time()
         r = subprocess.run([sys.executable, __file__, "--bras", bras,
-                            "--modele", modele, "--json"], env=env,
+                            "--modele", modele, "--json",
+                            "--ctx", str(CTX), "--generes", str(GENERES)],
+                           env=env,
                            capture_output=True, text=True, timeout=900)
         if r.returncode != 0:
             print(f"ECHEC bras {bras} :\n{r.stderr[-2000:]}", file=sys.stderr)
@@ -184,8 +186,9 @@ def pilote(modele: str, sortie: str) -> int:
               f"pas, {time.time() - t0:.0f} s, "
               f"{n_rendus} fichiers rendus au cache")
 
-    emp = {b: [d["jetons"] for d in releves if d["bras"] == b] for b in "ABC"}
-    if len({e[0] for e in emp.values()}) != 3:
+    bras_vus = sorted({d["bras"] for d in releves})
+    emp = {b: [d["jetons"] for d in releves if d["bras"] == b] for b in bras_vus}
+    if len({e[0] for e in emp.values()}) != len(bras_vus):
         print("ARRET : les trois bras ne produisent pas trois sorties "
               f"distinctes ({emp}) — l'interrupteur n'a pas agi sur au moins "
               "un bras, et « aucun effet » se lirait comme un resultat. "
@@ -200,31 +203,39 @@ def pilote(modele: str, sortie: str) -> int:
             return 4
     print("temoin : trois sorties distinctes, chaque bras reproductible")
     med = {b: sorted(d["median_ms"] for d in releves if d["bras"] == b)
-           for b in "ABC"}
-    a, bb, c = (m[len(m) // 2] for m in (med["A"], med["B"], med["C"]))
+           for b in bras_vus}
+    a, bb = (med["A"][len(med["A"]) // 2], med["B"][len(med["B"]) // 2])
+    if "C" in med:
+        c = med["C"][len(med["C"]) // 2]
+    else:                       # campagne qui ne cherche que p : C non mesure
+        c = float("nan")
     p_ms, kv_ms, calc_ms = a - bb, c - bb, a - c
     lignes = [
         "",
         f"A (reel)   {a:7.3f} ms     B (plancher) {bb:7.3f} ms"
         f"     C (KV lu) {c:7.3f} ms",
-        f"  ecart entre les deux occurrences de chaque bras : "
-        f"A {abs(med['A'][0] - med['A'][-1]):.3f}  "
-        f"B {abs(med['B'][0] - med['B'][-1]):.3f}  "
-        f"C {abs(med['C'][0] - med['C'][-1]):.3f} ms",
+        "  ecart entre les occurrences de chaque bras : " + "  ".join(
+            f"{b} {abs(med[b][0] - med[b][-1]):.3f}" for b in bras_vus) + " ms",
         "",
-        f"C - B  lecture du KV      {kv_ms:7.3f} ms   "
+        (f"C - B  lecture du KV      {kv_ms:7.3f} ms   "
         f"predit {PREDICTION_C_MOINS_B_MS:.3f} ms   "
         f"ecart x{kv_ms / PREDICTION_C_MOINS_B_MS:.2f}"
-        if kv_ms > 0 else f"C - B  {kv_ms:7.3f} ms  NEGATIF : montage invalide",
-        f"A - C  calcul de l'attention {calc_ms:7.3f} ms",
+         if kv_ms > 0 else f"C - B  {kv_ms:7.3f} ms  NEGATIF : montage invalide")
+        if "C" in med else "C - B  non mesure (bras C absent de --ordre)",
+        f"A - C  calcul de l'attention {calc_ms:7.3f} ms"
+        if "C" in med else "",
+        # LE DENOMINATEUR EST CELUI QU'ON MESURE. Diviser par les 28,140 ms
+        # du tableau etait un denominateur EMPRUNTE : mon pas valait 33,286.
         f"A - B  p                  {p_ms:7.3f} ms = "
-        f"{100 * p_ms / T_GPU_MS:.3f} % du GPU (28,140 ms) = "
-        f"{100 * p_ms / T_MURAL_MS:.3f} % du mural (28,748 ms)",
+        f"{100 * p_ms / a:.3f} % de MON pas ({a:.3f} ms)",
+        f"       pour comparaison, et sous l'hypothese NON VERIFIEE que le "
+        f"noyau coute pareil dans le moteur du tableau : "
+        f"{100 * p_ms / T_GPU_MS:.3f} % de ses 28,140 ms",
         "",
         f"seuil inscrit d'avance : {SEUIL_PCT_GPU} % du GPU = "
         f"{SEUIL_PCT_GPU * T_GPU_MS / 100:.3f} ms",
     ]
-    pct = 100 * p_ms / T_GPU_MS
+    pct = 100 * p_ms / a          # sur le pas mesure, pas sur celui du tableau
     if pct > SEUIL_PCT_GPU:
         lignes.append("ISSUE 3 : la conclusion d'ETABLI.md:2476 TOMBE par "
                       "contradiction — les GEMM exigeraient plus que 1050 Go/s.")
@@ -254,7 +265,19 @@ if __name__ == "__main__":
     ap.add_argument("--bras", choices=["A", "B", "C", "9"])
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--sortie", default="/tmp/part-attention-trois-bras.json")
+    ap.add_argument("--ctx", type=int, default=CTX)
+    ap.add_argument("--generes", type=int, default=GENERES)
+    ap.add_argument("--ordre", default="A,B,C,C,B,A",
+                    help="bras a mesurer, dans l'ordre ; A,B,B,A suffit pour "
+                         "une campagne qui ne cherche que p")
     a = ap.parse_args()
+    CTX, GENERES = a.ctx, a.generes
+    ORDRE = [b.strip() for b in a.ordre.split(",")]
+    if CTX <= GENERES:
+        ap.error(f"--ctx {CTX} doit depasser --generes {GENERES} : l'invite "
+                 "serait vide ou negative")
+    globals()["CTX"], globals()["GENERES"] = CTX, GENERES
+    globals()["ORDRE"] = ORDRE
     if a.bras:
         d = mesurer(a.bras, a.modele)
         print(json.dumps(d) if a.json else d)
