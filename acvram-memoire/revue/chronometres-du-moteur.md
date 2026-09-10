@@ -36,6 +36,10 @@ son nom.** `emit` n'est pas 148 ms d'échantillonnage : c'est du travail GPU mal
 | `runner.py:628-631` `prefill_seconds` | **non** — `_emit` est ligne 635 | **faux** |
 | `runner.py:643-664` `prefill_seconds` | **non** — ferme après `self.model()` | **faux** |
 | `graphs.py` `bind`/`fill`/`replay` | **non** — rien entre les bornes | **faux** |
+| `runner.py:711/713/720` `t0..t2` | **non** — batch, `graphs.run` | **faux**, jamais publié |
+| `runner.py:724` `t3` | oui, après `_emit` | juste |
+| `graphs.py:241/297/317` | **non** | **faux** |
+| `bench.py:388-390` « mur » | oui — `generate()` consommé par un `sum(1 for _ in …)` | juste, mais englobe le chargement |
 | `app.py` (7 sites) | sans objet — latence HTTP, CPU pur | légitime |
 
 **`decode_seconds` et `prefill_seconds` sont dans le même fichier, publiées par
@@ -88,3 +92,26 @@ seulement là où il a fait mal.**
 est aussi une faute de mesure*. Sans suivre le chemin jusqu'à `.tolist()`, les
 deux gains principaux de la journée auraient été retirés par excès de prudence.
 **La prudence n'est pas une méthode ; suivre le chemin en est une.**
+
+
+## Trois choses que la table dit et que la liste ne disait pas
+
+**1. Le jumeau a lui-même un jumeau.** Le prefill découpé (`runner.py:643-664`)
+répète la même faute vingt lignes plus bas, sur la même statistique. **Ce ne sont
+pas deux erreurs : c'est une erreur dupliquée avec le code.**
+
+**2. Quatre des treize sites ne servent qu'aux messages de diagnostic**
+(`[pas-lent]`, `[graphe-lent]`, sous `ACVRAM_TRACE_STEPS`). Ils sont faux, et
+**leur fausseté est plus pernicieuse que celle des statistiques** : ce sont
+précisément les nombres qu'on lit quand on cherche pourquoi c'est lent. **Un
+instrument de diagnostic faux envoie chercher au mauvais endroit** — c'est ce qui
+s'est passé ce soir avec « avant < 1 ms, emit 120-148 ms ».
+
+**3. `decode_seconds` est juste par accident de position, pas par conception.**
+Sa validité dépend d'un `.tolist()` situé dans `_emit`, qu'une refonte pourrait
+déplacer sans que personne fasse le lien. **Le remède honnête est donc un
+`synchronize()` explicite plutôt qu'une dépendance tacite à un transfert** : il
+dit ce qu'il fait.
+
+**Le remède, partout, tient en un mot : fermer la fenêtre APRÈS le retour vers
+l'hôte.**
