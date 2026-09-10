@@ -297,6 +297,58 @@ Kog, qui est sur AMD MI300X.
   fausse ; la correction « c'est duckduckgo qui est bloqué » l'était aussi. **La
   règle tient : réessayer**, trois tentatives donnent 87 %.
 
+### Chiffres RETIRÉS, à ne pas laisser survivre
+
+```
+15,64x   facteur de rendement du sac a dos    ->  5,44x   (etait par TENSEUR,
+                                                            l'unite est l'OCTET)
+20,04    bits/poids « en bf16 »               ->  aucune source, mon arithmetique
++0,9163  desaccord SNR contre perplexite      ->  presque tautologique, les deux
+                                                  cles derivent des memes nombres
+6,4 %    « de VRAM reprise » comme argument   ->  0 bascule de placement sur 18 modeles
+100x     etalement de l'echelle de sortie     ->  2,1x entre les quartiles 25 et 95
+                                                  (le 98,7x tient a UN tenseur)
++2,60 %  gain de la fusion, transporte        ->  +0,19 % sur un int8 calibre
+9,500    densite analytique de l'int8         ->  8,1875 a groupe 128
+```
+
+Le `100x` était une illustration de mécanisme présentée comme une estimation
+d'ampleur ; elle a circulé dans trois messages du soir. **Le mécanisme reste
+vrai** — et il est même plus intéressant que le facteur : le biais n'est pas
+dispersé, il est **structurel**.
+
+```
+gate/up/down   123 a 131      les MLP
+q/k             96 a  97
+v/o                 65        deux fois moins
+```
+
+**La clé relative sur-promeut systématiquement les projections d'attention par
+rapport aux MLP, d'un facteur deux, par construction.** Un biais orienté sur
+225 tenseurs se cumule là où du bruit s'annulerait.
+
+### Et l'agrégat qui suit la perplexité mesurée
+
+Un sac à dos glouton suppose que l'objectif est **additif**. Aucune de nos clés
+ne l'est : les décibels ne s'additionnent pas, un rapport ne s'additionne pas
+entre tenseurs, et une erreur absolue s'additionne en **quadrature**. Testé
+contre la seule vérité dont nous disposons — six perplexités mesurées :
+
+```
+                                              correlation avec la PPL mesuree
+somme des erreurs RELATIVES                              +0,9223
+somme des erreurs ABSOLUES (approchees)                  +0,9539
+QUADRATURE des erreurs absolues                          +0,9931
+```
+
+**La quadrature suit la perplexité mieux que les deux autres**, ce qui est
+cohérent avec une erreur qui se propage. Mais six points ne distinguent pas des
+écarts fins, et les trois agrégats dérivent des mêmes `out_snr_db` : ce test
+peut **écarter** un agrégat qui ne suit pas, il ne peut pas couronner le
+meilleur des trois. Et il ne teste **pas** l'additivité elle-même — pour cela il
+faudrait comparer la perplexité d'un ensemble de promotions à la somme de celles
+de chaque promotion seule.
+
 ---
 
 ## 10. LES RÈGLES QUI SORTENT DE LA JOURNÉE
