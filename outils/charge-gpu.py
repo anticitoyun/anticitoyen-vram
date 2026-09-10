@@ -10,6 +10,37 @@ meme. La charge s'annonce sur stdout et se retire proprement a l'arret.
 """
 import argparse, os, signal, sys, time, torch
 
+def _verrou_tenu() -> bool:
+    """Un de mes ancetres tient-il le verrou de carte ?
+
+    CET OUTIL EST LE SEUL DU CIRCUIT DONT LE METIER EST D OCCUPER LA CARTE, et
+    c est precisement celui qu on ne pense pas a proteger : il ne mesure rien,
+    donc il ne ressemble pas a une manche, donc le reflexe du verrou ne se
+    declenche pas. Le 10/09 a 19h41 il a tourne pendant la campagne d une autre
+    session, qui a perdu six manches a chercher un intrus — et l en-tete de ce
+    fichier promettait pourtant une charge « connue ».
+    On ne repare pas cela par une consigne : un outil dont le metier est de
+    gener ne doit pas POUVOIR etre lance a la main par distraction.
+    """
+    info = os.environ.get("ACVRAM_VERROU", "/tmp/acvram-carte-0.lock") + ".qui"
+    try:
+        with open(info) as fh:
+            tenant = int(fh.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return False
+    p = os.getpid()
+    for _ in range(40):                     # remonter mes ancetres
+        if p == tenant:
+            return True
+        try:
+            with open(f"/proc/{p}/stat") as fh:
+                p = int(fh.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            return False
+        if p <= 1:
+            return False
+    return False
+
 p = argparse.ArgumentParser()
 p.add_argument("--gio", type=float, default=20.0)
 p.add_argument("--calcul", type=float, default=0.5)
@@ -17,6 +48,13 @@ p.add_argument("--duree", type=float, default=600.0)
 a = p.parse_args()
 if not torch.cuda.is_available():
     raise SystemExit("REFUS : pas de carte")
+if not _verrou_tenu() and os.environ.get("ACVRAM_CHARGE_SANS_VERROU") != "1":
+    raise SystemExit(
+        "REFUS : le verrou de carte n'est pas tenu par un de mes ancetres.\n"
+        "  Lancez-moi SOUS le verrou, et dites que la charge est voulue :\n"
+        "    ACVRAM_NOM=CHARGE-DELIBEREE outils/carte.sh <votre commande>\n"
+        "  Sans cela une autre session cherchera un intrus pendant vingt\n"
+        "  minutes — c'est arrive le 10/09 a 19h41, six manches perdues.")
 
 n = int(a.gio * (1 << 30) / 4)
 bloc = torch.empty(n, dtype=torch.float32, device="cuda")
