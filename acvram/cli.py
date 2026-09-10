@@ -54,6 +54,11 @@ VARIABLES_LUES = {
     # mesure la ou 100 % des groupes fusionnent a ete transporte sur un int8
     # ou 7,8 % seulement fusionnent.
     "ACVRAM_SANS_FUSION",
+    # Renverse le signe de l'ordre du glouton budgetaire, RIEN D'AUTRE. Sert a
+    # eprouver si le critere (gain de SNR par octet) est bien oriente pour un
+    # objectif de perplexite : si oui le bras inverse est nettement pire, si non
+    # il est meilleur ou equivalent. Instrument de mesure, pas reglage.
+    "ACVRAM_ORDRE_SAC_INVERSE",
     "ACVRAM_SCALER_SANS_CACHE",
     # ACVRAM_SRC_HASH n'est PAS une variable d'environnement : c'est une option
     # de compilation (-D) portant le sha du .cu. Elle figure ici parce que

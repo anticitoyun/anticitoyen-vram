@@ -156,3 +156,37 @@ def test_l_echappement_coupe_les_quatre_empileurs(monkeypatch):
     monkeypatch.delenv("ACVRAM_SANS_FUSION")
     monkeypatch.setenv("ACVRAM_SANS_FUSION_BF16", "1")
     assert stack_plain_linears(_qlp()) is None
+
+
+def test_l_ordre_du_sac_a_dos_se_renverse(monkeypatch):
+    """L'echappement doit renverser l'ordre du glouton, et RIEN d'autre.
+
+    La courbe du quota du 10/09 montre que les 27 tenseurs refuses en dernier
+    par le sac a dos rendent 3,6 fois plus de perplexite par tenseur que les 26
+    acceptes juste avant : le critere `-gain_db / cout` est peut-etre mal
+    oriente pour un objectif de perplexite. L'eprouver demande deux bras issus
+    du MEME code a un signe pres — sans quoi on comparerait deux mecanismes.
+    """
+    import os
+
+    # On reproduit exactement la cle de tri du glouton, sans conversion : c'est
+    # elle qu'on eprouve, pas le sac a dos entier.
+    def cle(env: bool):
+        monkeypatch.delenv("ACVRAM_ORDRE_SAC_INVERSE", raising=False)
+        if env:
+            monkeypatch.setenv("ACVRAM_ORDRE_SAC_INVERSE", "1")
+        signe = -1.0 if not os.environ.get("ACVRAM_ORDRE_SAC_INVERSE") else 1.0
+        cands = [{"nom": "cher_peu_utile", "gain_db": 1.0, "cout": 100.0},
+                 {"nom": "bon_marche_utile", "gain_db": 10.0, "cout": 10.0},
+                 {"nom": "moyen", "gain_db": 5.0, "cout": 50.0}]
+        return [c["nom"] for c in
+                sorted(cands, key=lambda c: signe * c["gain_db"] / c["cout"])]
+
+    normal = cle(False)
+    inverse = cle(True)
+    assert normal[0] == "bon_marche_utile", \
+        "l'ordre normal doit prendre le meilleur gain par octet d'abord"
+    assert inverse[0] == "cher_peu_utile", \
+        "l'ordre inverse doit prendre le pire d'abord"
+    assert normal == list(reversed(inverse)), \
+        "l'echappement doit renverser l'ordre, pas le permuter autrement"

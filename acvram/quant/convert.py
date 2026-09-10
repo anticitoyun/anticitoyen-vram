@@ -1078,7 +1078,27 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         reste = opts.bits_budget_gib * 1024 ** 3 - deja
         # par gain de SNR par octet, decroissant — le glouton du sac a dos
         # fractionnaire, optimal a un tenseur pres
-        ordre = sorted(budget_candidats, key=lambda c: -c["gain_db"] / c["cout"])
+        # ORDRE DU GLOUTON, et un echappement pour l'EPROUVER.
+        #
+        # Le critere est le gain de SNR par octet. Or ce qui decide est la
+        # perplexite par octet, et la courbe du quota du 10/09 montre que les
+        # deux ne coincident pas sur la queue : les 27 tenseurs refuses en
+        # dernier rendent 2,867 milli-PPL chacun contre 0,796 pour les 26
+        # acceptes juste avant, soit 3,6 fois plus.
+        #
+        # ACVRAM_ORDRE_SAC_INVERSE renverse le signe, RIEN D'AUTRE : meme sac a
+        # dos, meme budget, meme plancher, meme format. Si le critere est bien
+        # oriente, le bras inverse doit etre nettement PIRE ; s'il est mal
+        # oriente sur la queue, il sera meilleur ou equivalent. Un controle qui
+        # ne peut pas confirmer l'hypothese par construction, puisque les deux
+        # bras sortent du meme code a un signe pres.
+        #
+        # L'ordre inverse n'est PAS un candidat : c'est un instrument. Un ordre
+        # optimal se cherchera ensuite, et l'ecart entre les deux bras donne la
+        # borne de ce que l'ordre vaut, quel qu'il soit.
+        _signe = -1.0 if not os.environ.get("ACVRAM_ORDRE_SAC_INVERSE") else 1.0
+        ordre = sorted(budget_candidats,
+                       key=lambda c: _signe * c["gain_db"] / c["cout"])
         # Le budget est un budget de DOSSIER : `deja` compte le plancher, c'est
         # a dire tout ce qui n'est pas promouvable (part 16 bits, echelles
         # d'activation) plus chaque candidat dans son format de base. Deux
@@ -1108,6 +1128,11 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                   f"inemployes, aucun candidat restant ne tient dedans "
                   f"({len(promus)}/{len(budget_candidats)} promus).", flush=True)
         manifest["budget"] = {
+            # Le sens de l'ordre est ECRIT au manifeste : un dossier produit
+            # par le bras inverse doit etre reconnaissable sans son journal.
+            "ordre_glouton": ("snr_par_octet_croissant"
+                              if os.environ.get("ACVRAM_ORDRE_SAC_INVERSE")
+                              else "snr_par_octet_decroissant"),
             "demande_gib": opts.bits_budget_gib,
             "plancher_gib": round(plancher_octets / 1024 ** 3, 4),
             "plafond_gib": round((plancher_octets + cout_total) / 1024 ** 3, 4),

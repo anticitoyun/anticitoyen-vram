@@ -50,7 +50,33 @@ plafond n'est pas un point de budget mais un changement de format, produit par
 le mécanisme de plancher SNR et non par le sac à dos. Les 27 tenseurs qu'il
 promeut ne sont peut-être pas exactement ceux que le glouton a refusés.
 
-**Le témoin plafond de poste4 tranche exactement cela** : une conversion à
+## Et l'inversion se teste directement, sans témoin
+
+Proposition de chef, meilleure que mon attente : à **budget constant**, même
+sac à dos, même plancher, même format, deux bras qui ne diffèrent que par le
+**signe** de la clé de tri.
+
+```
+budget 6,00 Gio
+  bras A   ordre = -gain_db / cout     l'ordre actuel
+  bras B   ordre = +gain_db / cout     le meme code, un signe
+```
+
+Si le critère est bien orienté, **B doit être nettement pire que A**. S'il est
+mal orienté sur la queue, B sera meilleur ou équivalent — et ce serait la
+démonstration, sans qu'aucune comparaison de **mécanisme** n'intervienne. Le
+contrôle ne peut donc pas confirmer l'hypothèse par construction, ce qui est
+exactement ce qui manquait à ma comparaison avec le plafond.
+
+L'écart A−B donne au passage la **borne** de ce que l'ordre vaut, quel que soit
+l'ordre optimal. Et l'ordre inverse n'est pas un candidat : c'est un instrument.
+
+`ACVRAM_ORDRE_SAC_INVERSE` renverse le signe et rien d'autre, le sens est
+inscrit au manifeste (`budget.ordre_glouton`) pour qu'un dossier produit par le
+bras inverse soit reconnaissable sans son journal, et une épreuve CPU vérifie
+que l'échappement renverse bien l'ordre au lieu de le permuter autrement.
+
+**Le témoin plafond de poste4 reste utile pour autre chose** : il tranche : une conversion à
 `--bits-budget 6.55` passe par le sac à dos et promeut tout, ou presque. Si elle
 retrouve 5,4144, la comparaison est homogène et l'inversion d'ordre est établie.
 Si elle trouve nettement plus haut, alors c'est le mécanisme qui diffère et non
@@ -59,11 +85,16 @@ résultat qu'elle est seule à pouvoir valider.**
 
 ## Et l'alpha récupérable décroît avec le nombre de promus
 
+**Deux colonnes, pas une** — remarque de chef, et elle est juste : une colonne
+unique fait croire à une série là où les deux dernières lignes ne mesurent pas
+la même grandeur.
+
 ```
-110/225 promus  ->  45/64 recuperables sous 2 %
-147/225         ->  40/64
-198/225         ->  38/64
-225/225         ->   5/64 qui fusionnent DEJA (grandeur differente)
+promus      recuperables sous 2 %   fusionnent deja
+110/225            45/64                   —
+147/225            40/64                   —
+198/225            38/64                   —
+225/225 (tout-int8)   —                   5/64
 ```
 
 Trois points monotones : **plus il y a de tenseurs promus en int8, moins il y a
