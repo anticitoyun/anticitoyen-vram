@@ -87,6 +87,22 @@ qui_tient() {
   fi
 }
 
+# DOUBLE PRISE : le verrou est deja tenu PAR NOUS, plus haut dans la meme
+# chaine. Le 10/09/2026, une campagne enveloppee de carte.sh lancait des
+# services qui prenaient carte.sh a leur tour : le bras interieur a attendu
+# 1800 s le verrou que son propre ancetre tenait, puis a abandonne. Ce n'est
+# pas une collision entre sessions, c'est un interblocage avec soi-meme, et
+# aucune attente ne le resout. Un descripteur herite ne peut pas etre repris
+# par `flock -n`, donc le detecter par marqueur est la seule voie.
+if [ -n "${ACVRAM_CARTE_TENUE:-}" ]; then
+    echo "carte.sh : REFUS — la carte est DEJA tenue par cette chaine" >&2
+    echo "  (PID ${ACVRAM_CARTE_TENUE:-?}, plus haut dans la meme arborescence)." >&2
+    echo "  Un seul carte.sh, et c'est le PLUS INTERIEUR qui doit l'avoir :" >&2
+    echo "  celui qui execute reellement la mesure. Retirer l'enveloppe" >&2
+    echo "  exterieure — attendre ici serait attendre son propre ancetre." >&2
+    exit 66
+fi
+export ACVRAM_CARTE_TENUE=$$
 exec 9>"$VERROU" || { echo "carte.sh : $VERROU inaccessible" >&2; exit 65; }
 if ! flock -n 9; then
   echo "carte occupee par $(qui_tient) — attente (max ${ATTENTE} s)" >&2
