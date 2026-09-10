@@ -173,7 +173,15 @@ def _flags_variables() -> list[str]:
     flags = []
     for var, macro, valides in (
             ("ACVRAM_GW_WARPS", "GW_WARPS", None),
-            ("ACVRAM_PA_WARPS", "PA_WARPS", (1, 2, 4, 8, 16, 32)),
+            # 32 est REFUSE, et pas par le materiel : l'instanciation D=512 du
+            # noyau demande alors 68 096 octets de memoire partagee contre
+            # 49 152 admis statiquement (ptxas : « uses too much shared data »).
+            # Notre modele est en D=128, ou 32 warps tiendraient — c'est donc
+            # une instanciation NON UTILISEE qui borne le parametre. Plafonner
+            # les warps par instanciation le leverait ; tant que ce n'est pas
+            # fait, le domaine annonce doit etre le domaine REEL, sinon la
+            # validation accepte une valeur que la compilation refuse.
+            ("ACVRAM_PA_WARPS", "PA_WARPS", (1, 2, 4, 8, 16)),
     ):
         v = os.environ.get(var)
         if not v:
