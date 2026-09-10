@@ -19,7 +19,11 @@ import sys
 import time
 from typing import Optional
 
-__version__ = "0.4.25"
+# La version a UNE seule source, acvram/__init__.py. Elle etait ici en dur et
+# a derive : le paquet installe le 10/09/2026 annoncait 0.5.0 par dpkg, 0.3.0
+# par acvram.__version__ et 0.2.0 par `acvram --version` — trois copies, trois
+# valeurs, et celle que l utilisateur voit etait la plus ancienne des trois.
+from . import __version__            # noqa: E402  (source unique de verite)
 
 
 
