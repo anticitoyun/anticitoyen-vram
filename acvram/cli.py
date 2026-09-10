@@ -35,6 +35,9 @@ VARIABLES_LUES = {
     "ACVRAM_ALLOC_EXTENSIBLE",
     "ACVRAM_BANC_ACCEPTE_REPLAN",
     "ACVRAM_KERNEL_CACHE",
+    "ACVRAM_LOGITS_BF16",
+    "ACVRAM_MLA_DEBUG_ECART",
+    "ACVRAM_MLA_EAGER_TORCH",
     "ACVRAM_SCALER_SANS_CACHE",
     # ACVRAM_SRC_HASH n'est PAS une variable d'environnement : c'est une option
     # de compilation (-D) portant le sha du .cu. Elle figure ici parce que

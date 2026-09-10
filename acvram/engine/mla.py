@@ -186,6 +186,37 @@ class MLAttention(nn.Module):
             C = torch.zeros(bucket, cache.shape[1], dtype=cache.dtype,
                             device=cache.device)
             C[:total] = cache
+            # Hors créneau (b > ACVRAM_HYBRID_SLOTS), ce chemin servait tout
+            # le decodage en torch pur alors que `decode_static` a le meme
+            # godet et emprunte deja le noyau fusionne — verifie equivalent
+            # au bruit d'arrondi pres (test unitaire, total=1..5, len inclusif).
+            ext = _extension() if x.is_cuda else None
+            if os.environ.get("ACVRAM_MLA_EAGER_TORCH") == "1":
+                ext = None
+            if ext is not None:
+                len_t = torch.tensor(total - 1, dtype=torch.long, device=x.device)
+                scores_buf = torch.zeros(self.nh, bucket, dtype=torch.float32,
+                                         device=x.device)
+                o_lat = ext.mla_decode(q_eff.to(torch.float32)[0].contiguous(),
+                                       C, len_t, scores_buf, bucket,
+                                       self.rank, self.scale)          # [nh, rank]
+                if os.environ.get("ACVRAM_MLA_DEBUG_ECART"):
+                    pos_dbg = torch.arange(bucket, device=x.device)
+                    masque_dbg = pos_dbg > (total - 1)
+                    sc_dbg = torch.einsum('thr,sr->ths', q_eff.to(torch.float32),
+                                          C.to(torch.float32)) * self.scale
+                    sc_dbg = sc_dbg.masked_fill(masque_dbg, float('-inf'))
+                    probs_dbg = sc_dbg.softmax(dim=-1)
+                    o_lat_torch = torch.einsum('ths,sr->thr', probs_dbg,
+                                               C[:, :self.rank].to(torch.float32))[0]
+                    ecart = (o_lat - o_lat_torch).abs()
+                    print(f"[debug-ecart] total={total} bucket={bucket} "
+                          f"abs_max={ecart.max().item():.4e} "
+                          f"abs_med={ecart.median().item():.4e} "
+                          f"o_lat_norm={o_lat.norm().item():.4e}", flush=True)
+                y = torch.einsum('hvr,hr->hv', self.v_b.to(torch.float32), o_lat)
+                y = y.reshape(t, self.nh * self.dv).to(x.dtype)
+                return self.o_proj(y), cache
             pos = torch.arange(bucket, device=x.device)
             masque = pos > (total - 1)
         else:
