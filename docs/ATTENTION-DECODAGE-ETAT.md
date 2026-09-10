@@ -96,6 +96,12 @@ réfuté par la bisection ; celui-ci est validé par elle, avant toute lecture.
     3. bisection complete, deux contextes
     4. grille (ACVRAM_PA_CHUNK), sur un montage enfin valide
 
+Cet ordre est **exécuté**, pas rappelé : `outils/protocole-49us.sh`. Le témoin
+y est une garde bloquante — verdict `PLAT`, sortie 2, aucune ligne suivante
+n'est lue. Chaque mesure prévient à sa fin (pas seulement à la fin du lot),
+refuse de démarrer si la carte n'est pas libre, et passe par `timeout` : aucune
+mesure ne peut retenir la machine.
+
 **La grille vient en dernier et pas avant** : c'est elle qui a produit la
 fausse réfutation de la sous-parallélisation, et elle ne voudra dire quelque
 chose que sur un montage dont le témoin a parlé.
@@ -126,15 +132,32 @@ reste inconnue.
 
 ### Ce qui rend cela sans importance : on chiffre le plancher au lieu de le déduire
 
-`outils/plancher-harnais.py`. K itérations de FMA **chaînées** (chacune dépend
-de la précédente : ni éliminées, ni recouvertes), même grille, même harnais,
-`K = 1 … 100 000`. Le temps devient linéaire en K dès que le travail dépasse le
-plancher, et **le coude donne le plancher en microsecondes, sans hypothèse sur
-sa cause.** C'est ce qui manquait : nous n'avions aucun moyen de savoir que
-49,5 µs était le plancher et non le noyau.
+Le plancher est chiffré **par l'étape 0 elle-même**, rejouée aux bornes du
+balayage réel : un noyau qui écrit trois flottants et sort ne mesure rien
+d'autre que le harnais.
 
-L'échelle est appliquée aux **deux** harnais — lot amorti et appel isolé — pour
-**retenir celui dont le plancher est le plus bas au lieu de le supposer.**
+**Le balayage `K` de `banc_fma` a été retiré** (`dbac2d1`) : il chiffrait le
+même plancher avec une **autre** configuration de lancement, donc un plancher
+qui n'était pas celui du noyau mesuré. Le noyau `banc_fma_kernel` reste dans le
+`.cu`, inutilisé et sans coût ; seul le script serait à réécrire.
+
+**Il redevient nécessaire dans un seul cas, et ce cas est écrit d'avance :**
+
+    etape 0 << etape 3   -> le montage a rendu DEUX valeurs differentes : il a
+                            prouve DE LUI-MEME qu'il peut rendre autre chose.
+                            La bisection EST le controle positif. K inutile.
+
+    etape 0 ~= etape 3   -> montage encore faux, arret sans rien lire. C'est LA
+                            que K devient necessaire : il faut alors une echelle
+                            de travail CONNUE pour savoir si l'instrument est
+                            aveugle ou si le noyau est vide.
+
+`banc_fma` est donc l'outil du **cas d'échec**, pas du cas nominal. Le seuil du
+témoin est inscrit dans `outils/protocole-49us.sh` avant toute mesure : séparé
+si la médiane de l'étape 0 est sous 70 % de celle de l'étape 3 **et** que
+l'écart dépasse les dispersions cumulées. Deux conditions, parce que la seconde
+seule laisserait passer une séparation minuscule mais régulière, et la première
+seule un écart franc noyé dans le bruit.
 
 ### Le critère de participation ne se lit pas dans un temps
 

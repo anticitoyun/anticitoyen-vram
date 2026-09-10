@@ -107,3 +107,11 @@ for lm in LMOTS:
     print(f"{lm:5d} mots · contexte {n_ctx:5d} · table {n_blocs:4d} blocs · "
           f"C demande {C_demande:3d} · GPU {med:7.2f} us "
           f"[{p10:6.2f} – {p90:6.2f}] · {obs}")
+    # Ligne machine, pour que l'orchestrateur n'ait pas a decouper la ligne
+    # humaine : un separateur qui change casserait le TEMOIN sans le dire, et
+    # un temoin casse se lit « pas de separation » — donc « arret », donc un
+    # resultat inverse. Champs : lm etape chunk n_ctx n_blocs C med p10 p90
+    # participants attendus.
+    print("RESULTAT\t%d\t%s\t%s\t%d\t%d\t%d\t%.3f\t%.3f\t%.3f\t%s\t%d"
+          % (lm, etape, chunk, n_ctx, n_blocs, C_demande, med, p10, p90,
+             "NA" if parts is None else parts, att), flush=True)
