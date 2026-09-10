@@ -87,8 +87,14 @@ def main(argv):
     dt = time.perf_counter() - t1
     debit_pas = pas / dt if dt else 0.0
 
+    # « graphes actifs » ne dit PAS qu ils ont servi : `graphs.run` rend None
+    # et retombe en eager sur longueurs mixtes, sur cle inconnue au-dela de
+    # MAX_GRAPHS, ou apres un echec de capture. Le seul chiffre qui tranche est
+    # le nombre de REJEUX rapporte au nombre de pas.
+    rej = getattr(g_, "replays", 0) if g_ is not None else 0
+    cap = getattr(g_, "captures", 0) if g_ is not None else 0
     print(f"{seuil}\t{ttft:.1f}\t{debit_pas:.2f}\t{pas}\t{jetons}\t"
-          f"{exiles}\t{'oui' if graphes else 'NON'}")
+          f"{exiles}\t{'oui' if graphes else 'NON'}\t{rej}/{pas}\t{cap}")
     return 0
 
 
