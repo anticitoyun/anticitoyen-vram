@@ -1131,10 +1131,31 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         _mode = os.environ.get("ACVRAM_ORDRE_SAC", "snr").strip().lower()
         if os.environ.get("ACVRAM_ORDRE_SAC_INVERSE"):
             _mode = "inverse"
-        if _mode not in ("snr", "erreur", "inverse", "absolu", "base_croissant"):
+        # ACVRAM_LISTE_PROMUS : promouvoir EXACTEMENT une liste de noms, sans
+        # ordre et sans budget. Ce n'est plus un sac a dos — c'est le seul
+        # moyen de monter un bras qui isole un groupe de tenseurs choisi
+        # ailleurs (bras X et Y du 10/09). Le fichier prime sur toute autre
+        # valeur d'ACVRAM_ORDRE_SAC : deux consignes contradictoires doivent
+        # lever, jamais laisser deviner laquelle a gagne.
+        _liste_chemin = os.environ.get("ACVRAM_LISTE_PROMUS", "").strip()
+        if _liste_chemin:
+            _demande = os.environ.get("ACVRAM_ORDRE_SAC", "").strip().lower()
+            if _demande and _demande != "liste":
+                raise ValueError(
+                    f"ACVRAM_LISTE_PROMUS={_liste_chemin!r} et "
+                    f"ACVRAM_ORDRE_SAC={_demande!r} sont contradictoires : une "
+                    f"liste explicite n'a pas d'ordre. Retirer l'une des deux.")
+            _mode = "liste"
+        elif _mode == "liste":
+            raise ValueError(
+                "ACVRAM_ORDRE_SAC=liste exige ACVRAM_LISTE_PROMUS=<fichier>. "
+                "Sans liste, le mode ne promouvrait rien et le dossier "
+                "ressemblerait a une conversion au format de base.")
+        if _mode not in ("snr", "erreur", "inverse", "absolu",
+                         "base_croissant", "liste"):
             raise ValueError(
                 f"ACVRAM_ORDRE_SAC={_mode!r} inconnu ; attendu snr, erreur, "
-                f"absolu, base_croissant ou inverse. Un mode inconnu qui "
+                f"absolu, base_croissant, liste ou inverse. Un mode inconnu qui "
                 f"retomberait en silence sur le defaut ferait mesurer autre "
                 f"chose que ce qui est demande.")
 
@@ -1186,7 +1207,51 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             signe = 1.0 if _mode == "inverse" else -1.0
             return signe * c["gain_db"] / c["cout"]
 
-        ordre = sorted(budget_candidats, key=_cle)
+        # LA LISTE EXPLICITE COURT-CIRCUITE L'ORDRE ET LE BUDGET.
+        _liste_noms, _liste_sha = None, None
+        if _mode == "liste":
+            import hashlib
+            with open(_liste_chemin, "rb") as fh:
+                _brut = fh.read()
+            _liste_sha = hashlib.sha256(_brut).hexdigest()
+            _txt = _brut.decode("utf-8")
+            try:
+                _charge = json.loads(_txt)
+            except json.JSONDecodeError:
+                _charge = [l.strip() for l in _txt.splitlines() if l.strip()]
+            if isinstance(_charge, dict):
+                # un fichier de groupes porte plusieurs listes ; il faut dire
+                # laquelle, sinon le choix serait fait par l'ordre des cles
+                _cle_liste = os.environ.get("ACVRAM_LISTE_CLE", "").strip()
+                if _cle_liste not in _charge:
+                    raise ValueError(
+                        f"{_liste_chemin} contient plusieurs listes "
+                        f"({sorted(_charge)}) ; poser ACVRAM_LISTE_CLE pour "
+                        f"dire laquelle. Sans elle le bras serait choisi par "
+                        f"l'ordre des cles du fichier.")
+                _charge = _charge[_cle_liste]
+                _liste_sha = hashlib.sha256(
+                    (_liste_sha + ":" + _cle_liste).encode()).hexdigest()
+            _liste_noms = list(dict.fromkeys(_charge))
+            if not _liste_noms:
+                raise ValueError(f"{_liste_chemin} ne contient aucun nom.")
+            # TROISIEME GARDE (chef) : une liste figee qui se desynchronise
+            # du parc promouvrait moins que prevu EN SILENCE, et le compte de
+            # promus ne le dirait pas — on attendrait 76 et on en aurait 74
+            # sans savoir lesquels. Deux absences distinctes, deux messages :
+            # absent du modele, ou present mais non promouvable.
+            _dispo = {c["name"] for c in budget_candidats}
+            _hors = [n for n in _liste_noms if n not in _dispo]
+            if _hors:
+                raise ValueError(
+                    f"REFUS : {len(_hors)} des {len(_liste_noms)} noms de "
+                    f"{_liste_chemin} ne sont pas des candidats promouvables "
+                    f"de ce modele, dont {_hors[:3]}. Une liste qui ne "
+                    f"s'applique plus au parc promouvrait moins que demande "
+                    f"sans que le compte de promus le dise.")
+            ordre = [c for c in budget_candidats if c["name"] in set(_liste_noms)]
+        else:
+            ordre = sorted(budget_candidats, key=_cle)
         # Le budget est un budget de DOSSIER : `deja` compte le plancher, c'est
         # a dire tout ce qui n'est pas promouvable (part 16 bits, echelles
         # d'activation) plus chaque candidat dans son format de base. Deux
@@ -1200,11 +1265,19 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         budget_octets = opts.bits_budget_gib * 1024 ** 3
         promus = set()
         for c in ordre:
-            if c["cout"] <= reste:
+            if _mode == "liste":
+                # budget IGNORE : c'est la definition du mode. Le cout est
+                # quand meme retire pour que `depense_gib` reste vrai, et il
+                # peut passer negatif — on l'annonce plus bas.
+                promus.add(c["name"])
+                reste -= c["cout"]
+            elif c["cout"] <= reste:
                 promus.add(c["name"])
                 reste -= c["cout"]
         cout_total = sum(c["cout"] for c in budget_candidats)
-        if reste < 0:
+        if _mode == "liste":
+            pass  # ni plancher ni budget : les deux messages seraient faux
+        elif reste < 0:
             print(f"[acvram] budget de {opts.bits_budget_gib:.3f} Gio SOUS le "
                   f"plancher de {plancher_octets / 1024 ** 3:.3f} Gio : aucune "
                   f"promotion possible, le dossier sortira au format de base. "
@@ -1230,6 +1303,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 "erreur": "erreur_evitee_par_octet_decroissante",
                 "absolu": "erreur_absolue_evitee_par_octet_decroissante",
                 "inverse": "snr_par_octet_croissant",
+                "liste": "liste_explicite_sans_ordre_ni_budget",
             }.get(_mode, f"mode_{_mode}_sans_description"),
             "demande_gib": opts.bits_budget_gib,
             "plancher_gib": round(plancher_octets / 1024 ** 3, 4),
@@ -1241,6 +1315,23 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             "promus": len(promus),
             "candidats": len(budget_candidats),
         }
+        if _mode == "liste":
+            # SANS LE SHA, DEUX BRAS NOMMES X NE SONT PAS COMPARABLES. Le
+            # dossier doit porter la trace de ce qui l'a produit : nous avons
+            # perdu une manche le 10/09 parce qu'un dossier ne la portait pas.
+            manifest["budget"].update({
+                "liste_chemin": _liste_chemin,
+                "liste_cle": os.environ.get("ACVRAM_LISTE_CLE", "") or None,
+                "liste_sha256": _liste_sha,
+                "liste_noms": len(_liste_noms),
+                "budget_ignore": True,
+            })
+            if len(promus) != len(_liste_noms):
+                raise AssertionError(
+                    f"{len(promus)} promus pour {len(_liste_noms)} noms "
+                    f"demandes — la garde de liste aurait du lever avant.")
+            print(f"[acvram] mode liste : {len(promus)} tenseurs promus, "
+                  f"budget ignore, liste sha256 {_liste_sha[:12]}", flush=True)
         for c in budget_candidats:
             name = c["name"]
             large = name in promus

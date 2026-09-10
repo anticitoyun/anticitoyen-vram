@@ -6,6 +6,7 @@ vitesse.
 """
 
 import math
+import pathlib
 import os
 import shutil
 import tempfile
@@ -987,3 +988,93 @@ def test_les_projections_gdn_ne_descendent_pas_sous_int8(tmp_path):
     assert r.format_for("model.layers.1.self_attn.o_proj.weight") == "int8"
     assert r.format_for("lm_head.weight") == "int8"
     assert r.format_for("model.layers.1.mlp.experts.0.up_proj.weight") == "q3n"
+
+
+def test_mode_liste_explicite(tiny_checkpoint, target_rig, tmp_path_factory,
+                              monkeypatch):
+    """Le mode liste promeut EXACTEMENT la liste, ignore le budget, et refuse
+    un nom absent.
+
+    Trois gardes, éprouvées séparément parce qu'une liste figée qui se
+    désynchronise du parc promouvrait moins que demandé en silence : le compte
+    de promus ne le dirait pas, on attendrait 76 et on en aurait 74 sans savoir
+    lesquels.
+    """
+    import json
+
+    from acvram.engine.config import load_model_spec
+    from acvram.memory.tiering import PlannerOptions, auto_plan
+    from acvram.quant.convert import ConversionOptions, convert_checkpoint
+
+    spec = load_model_spec(tiny_checkpoint, "tiny")
+    plan, _ = auto_plan(spec, target_rig,
+                        PlannerOptions(max_model_len=512, max_concurrent_seqs=2))
+
+    def convertir(budget, **env):
+        out = str(tmp_path_factory.mktemp("liste"))
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        try:
+            # nettoyage en `finally` : les cas 4 à 7 LÈVENT, et une variable
+            # laissée en place contaminerait le cas suivant — c'est ce qui a
+            # fait passer le cas 5 pour bon au premier essai.
+            r = convert_checkpoint(tiny_checkpoint, plan,
+                                   ConversionOptions(out_dir=out,
+                                                     bits_budget_gib=budget),
+                                   spec=spec)
+        finally:
+            for k in env:
+                monkeypatch.delenv(k, raising=False)
+        return out, r
+
+    # 1. le parc promouvable, lu sur une conversion à budget large
+    _, ref = convertir(1.0)
+    noms = sorted(p["name"] for p in ref.promotions)
+    assert len(noms) >= 2, "pas assez de candidats pour éprouver le mode liste"
+    choisis = noms[:2]
+
+    d = tmp_path_factory.mktemp("listes")
+    f_ok = d / "x.json"
+    f_ok.write_text(json.dumps({"X": choisis, "Y": noms[2:3]}))
+
+    # 2. la liste est promue EXACTEMENT, et le budget est ignoré : 1 Mio de
+    #    budget ne laisserait passer aucun tenseur sous le glouton.
+    out, r = convertir(0.001, ACVRAM_LISTE_PROMUS=str(f_ok),
+                       ACVRAM_LISTE_CLE="X")
+    obtenus = sorted(p["name"] for p in r.promotions)
+    assert obtenus == sorted(choisis), \
+        f"promus {obtenus} au lieu de {sorted(choisis)}"
+
+    m = json.loads((pathlib.Path(out) / "acvram_manifest.json").read_text())
+    b = m["budget"]
+    assert b["ordre_glouton"] == "liste_explicite_sans_ordre_ni_budget"
+    assert b["budget_ignore"] is True
+    assert b["liste_noms"] == len(choisis)
+    assert b["liste_cle"] == "X"
+    assert len(b["liste_sha256"]) == 64, "le sha de la liste manque au manifeste"
+
+    # 3. deux clés du même fichier donnent deux sha DIFFÉRENTS — sans quoi deux
+    #    bras nommés X et Y seraient indistinguables dans leur manifeste.
+    out_y, _ = convertir(0.001, ACVRAM_LISTE_PROMUS=str(f_ok),
+                         ACVRAM_LISTE_CLE="Y")
+    m_y = json.loads((pathlib.Path(out_y) / "acvram_manifest.json").read_text())
+    assert m_y["budget"]["liste_sha256"] != b["liste_sha256"]
+
+    # 4. LA GARDE : un nom absent du parc fait LEVER, il ne promeut pas moins
+    f_ko = d / "ko.json"
+    f_ko.write_text(json.dumps({"X": choisis + ["model.inexistant.weight"]}))
+    with pytest.raises(ValueError, match="ne sont pas des candidats"):
+        convertir(0.001, ACVRAM_LISTE_PROMUS=str(f_ko), ACVRAM_LISTE_CLE="X")
+
+    # 5. un fichier à plusieurs listes sans clé refuse, au lieu de choisir
+    with pytest.raises(ValueError, match="plusieurs listes"):
+        convertir(0.001, ACVRAM_LISTE_PROMUS=str(f_ok))
+
+    # 6. deux consignes contradictoires lèvent
+    with pytest.raises(ValueError, match="contradictoires"):
+        convertir(0.001, ACVRAM_LISTE_PROMUS=str(f_ok), ACVRAM_LISTE_CLE="X",
+                  ACVRAM_ORDRE_SAC="erreur")
+
+    # 7. le mode réclamé sans fichier lève aussi
+    with pytest.raises(ValueError, match="exige ACVRAM_LISTE_PROMUS"):
+        convertir(0.001, ACVRAM_ORDRE_SAC="liste")
