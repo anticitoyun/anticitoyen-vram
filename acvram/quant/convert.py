@@ -1096,9 +1096,51 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         # L'ordre inverse n'est PAS un candidat : c'est un instrument. Un ordre
         # optimal se cherchera ensuite, et l'ecart entre les deux bras donne la
         # borne de ce que l'ordre vaut, quel qu'il soit.
-        _signe = -1.0 if not os.environ.get("ACVRAM_ORDRE_SAC_INVERSE") else 1.0
-        ordre = sorted(budget_candidats,
-                       key=lambda c: _signe * c["gain_db"] / c["cout"])
+        # TROIS CLES, et le defaut ne change pas : un A/B est en cours de
+        # jugement sur `snr`, et deplacer le defaut sous lui l'invaliderait.
+        #
+        # `snr`    : gain de decibels par octet — la cle historique.
+        # `erreur` : erreur de sortie EVITEE par octet, 10^(-snr/20) applique
+        #            aux DEUX SNR avant la soustraction. Ce n'est donc PAS une
+        #            transformation monotone de la cle `snr` : a ecart de
+        #            decibels egal, un tenseur a faible SNR de base evite dix
+        #            fois plus d'erreur qu'un tenseur a fort SNR de base.
+        #
+        #                A   SNR 20 -> 30 dB   erreur 0,1000 -> 0,0316   gain 0,0684
+        #                B   SNR 40 -> 50 dB   erreur 0,0100 -> 0,0032   gain 0,0068
+        #
+        #            La cle en decibels les classe ex aequo ; la cle en erreur
+        #            place A dix fois devant B. Argument de chef, VERIFIE sur
+        #            nos donnees : correlation -0,66 entre le SNR de base et le
+        #            deplacement de rang, et 20,8 dB de SNR de base moyen pour
+        #            les tenseurs qui montent contre 29,7 pour ceux qui
+        #            descendent. Le reordonnancement est concentre en TETE du
+        #            classement — 90 % de desaccord au top-10, 3 % au top-100 —
+        #            c'est-a-dire la ou le glouton puise en premier.
+        # `inverse`: le signe renverse, INSTRUMENT et non candidat.
+        #
+        # NI L'UNE NI L'AUTRE N'EST LA PERPLEXITE. La cle `erreur` est un
+        # meilleur substitut, fonde, pas une mesure : trancher demanderait un
+        # DL par tenseur sur une perte de calibration, une passe avant par
+        # tenseur et par format.
+        _mode = os.environ.get("ACVRAM_ORDRE_SAC", "snr").strip().lower()
+        if os.environ.get("ACVRAM_ORDRE_SAC_INVERSE"):
+            _mode = "inverse"
+        if _mode not in ("snr", "erreur", "inverse"):
+            raise ValueError(
+                f"ACVRAM_ORDRE_SAC={_mode!r} inconnu ; attendu snr, erreur ou "
+                f"inverse. Un mode inconnu qui retomberait en silence sur le "
+                f"defaut ferait mesurer autre chose que ce qui est demande.")
+
+        def _cle(c):
+            if _mode == "erreur":
+                gagne = (10.0 ** (-(c["metrics_base"]["out_snr_db"]) / 20.0)
+                         - 10.0 ** (-(c["metrics"]["out_snr_db"]) / 20.0))
+                return -gagne / c["cout"]
+            signe = 1.0 if _mode == "inverse" else -1.0
+            return signe * c["gain_db"] / c["cout"]
+
+        ordre = sorted(budget_candidats, key=_cle)
         # Le budget est un budget de DOSSIER : `deja` compte le plancher, c'est
         # a dire tout ce qui n'est pas promouvable (part 16 bits, echelles
         # d'activation) plus chaque candidat dans son format de base. Deux
@@ -1130,9 +1172,9 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         manifest["budget"] = {
             # Le sens de l'ordre est ECRIT au manifeste : un dossier produit
             # par le bras inverse doit etre reconnaissable sans son journal.
-            "ordre_glouton": ("snr_par_octet_croissant"
-                              if os.environ.get("ACVRAM_ORDRE_SAC_INVERSE")
-                              else "snr_par_octet_decroissant"),
+            "ordre_glouton": {"snr": "snr_par_octet_decroissant",
+                              "erreur": "erreur_evitee_par_octet_decroissante",
+                              "inverse": "snr_par_octet_croissant"}[_mode],
             "demande_gib": opts.bits_budget_gib,
             "plancher_gib": round(plancher_octets / 1024 ** 3, 4),
             "plafond_gib": round((plancher_octets + cout_total) / 1024 ** 3, 4),

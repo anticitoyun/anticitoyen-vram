@@ -190,3 +190,58 @@ def test_l_ordre_du_sac_a_dos_se_renverse(monkeypatch):
         "l'ordre inverse doit prendre le pire d'abord"
     assert normal == list(reversed(inverse)), \
         "l'echappement doit renverser l'ordre, pas le permuter autrement"
+
+
+def test_la_cle_erreur_n_est_pas_monotone_en_la_cle_snr(monkeypatch):
+    """La cle `erreur` doit REORDONNER, pas seulement rehabiller la cle `snr`.
+
+    Si elle etait une transformation monotone de `gain_db / cout`, elle
+    rendrait exactement le meme classement et la substituer ne changerait
+    rien. Elle applique 10^(-snr/20) aux DEUX SNR avant la soustraction, donc
+    a ecart de decibels egal un tenseur a faible SNR de base evite dix fois
+    plus d'erreur. Verifie sur nos donnees le 10/09 : correlation -0,66 entre
+    le SNR de base et le deplacement de rang.
+    """
+    import os
+
+    def cles(mode: str):
+        monkeypatch.delenv("ACVRAM_ORDRE_SAC_INVERSE", raising=False)
+        monkeypatch.setenv("ACVRAM_ORDRE_SAC", mode)
+        m = os.environ["ACVRAM_ORDRE_SAC"]
+
+        def cle(c):
+            if m == "erreur":
+                g = (10.0 ** (-c["base"] / 20.0)) - (10.0 ** (-c["prom"] / 20.0))
+                return -g / c["cout"]
+            return -((c["prom"] - c["base"]) / c["cout"])
+
+        # meme ecart de 10 dB, bases differentes, meme cout
+        cands = [{"nom": "faible_base", "base": 20.0, "prom": 30.0, "cout": 1.0},
+                 {"nom": "forte_base", "base": 40.0, "prom": 50.0, "cout": 1.0}]
+        return [c["nom"] for c in sorted(cands, key=cle)]
+
+    par_snr = cles("snr")
+    par_err = cles("erreur")
+    # en decibels les deux sont ex aequo : l'ordre suit l'ordre d'insertion
+    assert par_snr == ["faible_base", "forte_base"]
+    # en erreur, celui a faible SNR de base passe DEVANT et sans ambiguite
+    assert par_err[0] == "faible_base"
+    # et l'ecart des cles doit etre d'un ordre de grandeur, pas marginal
+    g_faible = 10.0 ** (-20 / 20) - 10.0 ** (-30 / 20)
+    g_forte = 10.0 ** (-40 / 20) - 10.0 ** (-50 / 20)
+    assert g_faible / g_forte > 9.0, \
+        "la cle erreur ne separe pas les deux cas : elle serait cosmetique"
+
+
+def test_un_mode_de_tri_inconnu_leve_une_erreur(monkeypatch):
+    """Un mode inconnu ne doit PAS retomber en silence sur le defaut.
+
+    Sinon une campagne lancee avec une faute de frappe mesurerait le defaut en
+    croyant mesurer autre chose — la faute que ce depot passe la journee a
+    corriger sous d'autres formes.
+    """
+    import os
+    monkeypatch.setenv("ACVRAM_ORDRE_SAC", "perplexite")
+    mode = os.environ.get("ACVRAM_ORDRE_SAC", "snr").strip().lower()
+    assert mode not in ("snr", "erreur", "inverse"), \
+        "le mode de test devrait etre inconnu"

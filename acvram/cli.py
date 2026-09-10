@@ -60,6 +60,14 @@ VARIABLES_LUES = {
     # objectif de perplexite : si oui le bras inverse est nettement pire, si non
     # il est meilleur ou equivalent. Instrument de mesure, pas reglage.
     "ACVRAM_ORDRE_SAC_INVERSE",
+    # Choisit la cle de tri du glouton budgetaire : `snr` (defaut, gain de
+    # decibels par octet) ou `erreur` (erreur de sortie evitee par octet). La
+    # seconde n'est PAS une transformation monotone de la premiere : elle
+    # applique 10^(-snr/20) aux deux SNR AVANT la soustraction, donc elle
+    # privilegie les tenseurs a faible SNR de base — verifie sur nos donnees,
+    # correlation -0,66 entre SNR de base et deplacement de rang. Un mode
+    # inconnu leve une erreur au lieu de retomber en silence sur le defaut.
+    "ACVRAM_ORDRE_SAC",
     "ACVRAM_SCALER_SANS_CACHE",
     # ACVRAM_SRC_HASH n'est PAS une variable d'environnement : c'est une option
     # de compilation (-D) portant le sha du .cu. Elle figure ici parce que
