@@ -15,6 +15,7 @@ A=/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram/Qwen3-Coder-30B-A3
 PY=~/Bureau/Claude/anticitoyen-vram/.venv/bin/python
 CLE=llamacpp-9c1f4c1e6f2a4d0f
 ESSAIS=7
+CONC=${CONC:-1}
 
 libre() {
   u=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 0)
@@ -35,17 +36,25 @@ manche_llama() {
     curl -s -m 2 -H "Authorization: Bearer $CLE" http://127.0.0.1:8080/health 2>/dev/null | grep -q ok && break
     sleep 2
   done
+  # Le BINAIRE doit se declarer. Le 170 contre 122 t/s de la 3080 Ti reste
+  # indecidable faute de savoir quelles architectures son build portait :
+  # un chiffre dont on ne peut plus retrouver les conditions est perdu.
+  if [ -z "${INFO_PUBLIEE:-}" ]; then
+    echo "binaire llama.cpp : $(curl -s -m 5 -H "Authorization: Bearer $CLE" \
+      http://127.0.0.1:8080/props 2>/dev/null | head -c 400 | tr -d "\n")"
+    INFO_PUBLIEE=1
+  fi
   printf 'llamacpp\t'
-  $PY "$S/duel2.py" http://127.0.0.1:8080/v1/chat/completions "$CLE" \
-      "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf" $ESSAIS
+  $PY "$S/duel-moteurs.py" http://127.0.0.1:8080/v1/chat/completions "$CLE" \
+      "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf" $ESSAIS $CONC
   tuer
 }
 manche_acvram() {
   libre
   SPECULATIF=none acvram-serveur "$A" 8192 >/dev/null 2>&1
   printf 'acvram  \t'
-  $PY "$S/duel2.py" http://127.0.0.1:8090/v1/chat/completions x \
-      "Qwen3-Coder-30B-A3B-Instruct-srcQ4_K_M-nvfp4" $ESSAIS
+  $PY "$S/duel-moteurs.py" http://127.0.0.1:8090/v1/chat/completions x \
+      "Qwen3-Coder-30B-A3B-Instruct-srcQ4_K_M-nvfp4" $ESSAIS $CONC
   tuer
 }
 
@@ -58,4 +67,6 @@ manche_acvram
 manche_llama
 manche_llama
 manche_acvram
+echo "corpus : /mnt/AI_GENERATOR/corpus/wiki.test.raw  sha256 $(sha256sum /mnt/AI_GENERATOR/corpus/wiki.test.raw | cut -c1-16)  invite ~350 mots de texte reel, extrait different par essai, MEME invite des deux cotes"
+echo "carte  : $(nvidia-smi -i 0 --query-gpu=clocks.sm,clocks.mem,power.limit --format=csv,noheader)"
 echo "FIN-DUEL2"

@@ -996,6 +996,26 @@ class DecoderLayerGDN(nn.Module):
         h = self.input_layernorm(x)
         store = batch.gdn_store.setdefault(self.index, {}) \
             if batch.gdn_store is not None else {}
+        la = self.linear_attn
+        # Lot hors créneau, décodage pur : les projections/RoPE/normes ne
+        # dépendent que de x, un seul appel pour les b séquences au lieu de
+        # b — seul ext.mla_decode a encore besoin du cache, par séquence.
+        # Conservateur : au moindre doute (créneau actif, prefill mélangé,
+        # noyau absent), la boucle inchangée ci-dessous.
+        if (hasattr(la, "rank") and batch.gdn_store is not None
+                and all(ql == 1 for ql in batch.query_lens)
+                and la.peut_batcher_decode(h)):
+            sids = [batch.seq_ids[i] if batch.seq_ids else i
+                   for i in range(len(batch.query_lens))]
+            etats = [store.get(sid) for sid in sids]
+            if not any(e is _STATIC for e in etats):
+                y, etats_new = la.forward_batch(h, etats)
+                for sid, e in zip(sids, etats_new):
+                    store[sid] = e
+                x = x + y.to(x.dtype)
+                if self.mlp is None:
+                    return x
+                return self._mlp(x)
         sorties = []
         start = 0
         for i, ql in enumerate(batch.query_lens):
@@ -1422,7 +1442,50 @@ class ACVRamModel(nn.Module):
         x = x[idx.to(x.device)]
         head_dev = getattr(self.lm_head.qweight, "qweight", None)
         target = head_dev.device if head_dev is not None else x.device
-        logits = self.lm_head(x.to(target))
+        # LES LOGITS SE PRODUISENT EN FP32, ET C'EST L'ENTREE QU'ON CONVERTIT.
+        # Le dtype de sortie des noyaux suit celui de x — nvfp4_gemv fait
+        # `out = torch::empty({N, M}, xc.options())` — donc passer x en float
+        # bascule le produit sur le chemin float de bout en bout. Convertir la
+        # SORTIE ne restaurerait rien : la perte est dans l'accumulation, pas
+        # dans un arrondi final.
+        #
+        # Ce que l'arrondi bf16 coutait, mesure sur quatre pas de GLM-4.7 :
+        # logits centres sur 95,6 avec une amplitude de 23, donc dans
+        # l'intervalle [64, 128) ou le pas bf16 vaut 0,5 — QUARANTE-CINQ
+        # niveaux distincts pour 151 936 jetons, et une marge top1-top2 de un
+        # a deux ULP.
+        #
+        # Et l'erreur n'est pas seulement du bruit. logsumexp est convexe,
+        # donc par Jensen l'arrondi introduit un BIAIS de 1/2 sigma^2
+        # (1 - somme p^2) qui NE DECROIT PAS avec la longueur du corpus :
+        # verifie par simulation, 0,009875 nat mesure contre 0,010410 predit,
+        # soit +1,05 % sur la perplexite. Le bruit, lui, decroit en 1/racine(N)
+        # et vaut 0,09 % sur nos etalons de 148 920 jetons.
+        #
+        # Le biais depend du PAS, donc de la magnitude des logits, donc du
+        # modele : 1,05 % sur GLM-4.7 contre 0,001 % sur un modele centre sur
+        # zero, un rapport de 1024. C'est donc un biais SYSTEMATIQUE ENTRE
+        # MODELES, qui fausse exactement les comparaisons de perplexite que
+        # nous faisons. En fp32 pres de 116 le pas tombe a 7,6e-06 et le biais
+        # a 2,4e-12 nat : la question ne se pose plus.
+        #
+        # Le cout est nul : l'etat cache fait quelques milliers d'elements, et
+        # le vecteur de sortie 151 936 flottants, soit 594 Kio par jeton.
+        # ACVRAM_LOGITS_BF16=1 retablit l'ancien comportement : il rend le
+        # correctif MESURABLE par A/B sans recompiler, et sert de repli si le
+        # cout en temps s'averait sensible. Un correctif qu'on ne peut pas
+        # comparer a son absence n'est pas evaluable.
+        _bf16 = os.environ.get("ACVRAM_LOGITS_BF16") == "1"
+        logits = self.lm_head(x.to(target) if _bf16
+                              else x.to(target, dtype=torch.float32))
+        if logits.dtype != torch.float32:
+            # Un noyau qui rend autre chose que ce qu'on lui a donne annule le
+            # correctif en silence. On le dit une fois plutot que de le taire.
+            if not getattr(self, "_dit_logits_dtype", False):
+                self._dit_logits_dtype = True
+                print(f"[acvram] les logits sortent en {logits.dtype} malgre "
+                      "une entree fp32 : le noyau de la tete impose son type, "
+                      "et le gain de resolution n'est pas acquis.", flush=True)
         return self._logits_finaux(logits)
 
     def _logits_finaux(self, logits: torch.Tensor) -> torch.Tensor:
@@ -1534,3 +1597,112 @@ class ACVRamModel(nn.Module):
             if isinstance(m, QuantLinear):
                 total += m.nbytes
         return total
+
+    def nbytes_detail(self) -> dict:
+        """Decompose `nbytes` pour que l'ecart a la prevision se NOMME.
+
+        Le 10/09/2026, la prevision statique tiree des manifestes (embedding au
+        dtype de chargement + somme des `QuantLinear.nbytes`) a donne 15,9994
+        bits/poids pour Llama-2-7b-fp16pur quand le releve d'evaluation en
+        portait 26,987 — un facteur 1,687. Meme forme pour les deux dossiers
+        quantifies, mais a 10,3 % seulement (8,3391 prevu contre 9,198 releve ;
+        4,7235 contre 5,215). Un ecart qui n'est pas proportionnel aux octets
+        stockes : ce n'est donc pas une erreur de densite.
+
+        Cette decomposition teste l'hypothese de tete : un meme objet de poids
+        compte plusieurs fois, parce que `modules()` le rencontre sous
+        plusieurs `QuantLinear` (projections fusionnees exposees aussi comme
+        tranches, tete liee a l'embedding). `vus_plusieurs_fois` rend le compte
+        exact des octets comptes en double ; s'il est nul, l'hypothese tombe et
+        `par_classe` dit ou les octets sont reellement.
+        """
+        vus: dict[int, dict] = {}
+        par_classe: dict[str, int] = {}
+        n_ql = 0
+        for nom, m in self.named_modules():
+            if not isinstance(m, QuantLinear):
+                continue
+            n_ql += 1
+            q = m.qweight
+            o = getattr(q, "nbytes", 0)
+            fmt = getattr(q, "format", type(q).__name__)
+            par_classe[fmt] = par_classe.get(fmt, 0) + o
+            e = vus.setdefault(id(q), {"octets": o, "fmt": fmt, "noms": []})
+            e["noms"].append(nom)
+        double = sum(e["octets"] * (len(e["noms"]) - 1) for e in vus.values())
+        # Le compte par IDENTITE D'OBJET a rendu 0 a la premiere mesure
+        # (230 QuantLinear, 230 objets distincts) : l'hypothese « un meme objet
+        # rencontre plusieurs fois » est morte. Il reste 461 455 360 octets
+        # au-dessus de la somme des tenseurs du DISQUE (7 223 386 112 mesures
+        # contre 6 761 930 752 attendus pour l'int8 de Llama-2-7B), et le
+        # detecteur ne pouvait pas les voir : deux objets DISTINCTS portant des
+        # octets equivalents — une projection fusionnee materialisee a cote de
+        # ses tranches — s'accordent avec « 0 objet vu deux fois ».
+        #
+        # D'ou ce second compte, par NOM et par forme : il attribue les octets
+        # a des tenseurs nommes, donc il peut nommer les 461 Mo au lieu de les
+        # constater. Note au passage : 230 QuantLinear pour 225 tenseurs
+        # stockes au manifeste — cinq de plus, et 461 455 360 / 5 = 92 291 072,
+        # soit exactement la taille d'un gate_up fusionne en int8. C'est une
+        # PISTE, pas une explication : elle attend ce releve pour etre nommee.
+        # OCTETS REELLEMENT ALLOUES, par stockage unique. `nbytes` somme des
+        # `numel()` : une VUE y compte ses elements comme si elle possedait ses
+        # octets. Or les quatre empileurs remplacent les originaux par des
+        # tranches de la pile — c'est le but — donc `nbytes` compte deux fois
+        # tout ce qui est fusionne.
+        #
+        # C'est ce qui explique ENTIEREMENT l'ecart que je cherchais depuis ce
+        # matin. Llama-2-7b-fp16pur, tout PlainTensor en bf16 :
+        #
+        #   base (embed + 257 denses)          13 476 302 848
+        #   vues q, k, v                        3 221 225 472
+        #   vues gate, up                       5 771 362 304
+        #   embed compte une seconde fois         262 144 000
+        #   PREVU                              22 731 034 624
+        #   MESURE                             22 731 030 528   ecart 4 096 o
+        #
+        # Les 4 096 octets restants sont les 2 048 parametres que le manifeste
+        # compte en trop (6 738 417 664 contre 6 738 415 616 reels). Il n'y a
+        # donc plus rien d'inexplique dans le 26,987 bits/poids : ce n'etait ni
+        # un cache, ni un tampon, ni un doublon accidentel — c'etait l'unite de
+        # mesure.
+        vus_stockage: dict[int, int] = {}
+        for nom, m in self.named_modules():
+            if not isinstance(m, QuantLinear):
+                continue
+            q = m.qweight
+            for champ in ("qweight", "weight", "scales", "zeros",
+                          "block_scale", "global_scale_rows"):
+                t = getattr(q, champ, None)
+                if t is None or not hasattr(t, "untyped_storage"):
+                    continue
+                st = t.untyped_storage()
+                vus_stockage[st.data_ptr()] = st.nbytes()
+        st_emb = self.embed_tokens.untyped_storage()
+        vus_stockage[st_emb.data_ptr()] = st_emb.nbytes()
+        octets_stockage = sum(vus_stockage.values())
+
+        par_forme: dict[str, int] = {}
+        for e in vus.values():
+            for nom in e["noms"]:
+                par_forme[nom] = e["octets"]
+        gros = sorted(par_forme.items(), key=lambda kv: -kv[1])[:12]
+        emb = self.embed_tokens.numel() * self.embed_tokens.element_size()
+        return {
+            "total": self.nbytes,
+            "embed_tokens": emb,
+            "embed_dtype": str(self.embed_tokens.dtype),
+            "quantlinear": n_ql,
+            "objets_distincts": len(vus),
+            "octets_comptes_en_double": double,
+            "total_sans_doubles": emb + sum(e["octets"] for e in vus.values()),
+            "par_format": par_classe,
+            "vus_plusieurs_fois": [
+                {"octets": e["octets"], "fmt": e["fmt"], "noms": e["noms"]}
+                for e in vus.values() if len(e["noms"]) > 1],
+            "octets_stockage_uniques": octets_stockage,
+            "stockages_distincts": len(vus_stockage),
+            "octets_dupliques_par_les_vues": self.nbytes - octets_stockage,
+            "douze_plus_gros": [{"nom": n, "octets": o} for n, o in gros],
+            "octets_par_nom_total": sum(par_forme.values()),
+        }

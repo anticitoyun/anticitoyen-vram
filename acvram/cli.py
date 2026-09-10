@@ -19,7 +19,11 @@ import sys
 import time
 from typing import Optional
 
-__version__ = "0.4.25"
+# La version a UNE seule source, acvram/__init__.py. Elle etait ici en dur et
+# a derive : le paquet installe le 10/09/2026 annoncait 0.5.0 par dpkg, 0.3.0
+# par acvram.__version__ et 0.2.0 par `acvram --version` — trois copies, trois
+# valeurs, et celle que l utilisateur voit etait la plus ancienne des trois.
+from . import __version__            # noqa: E402  (source unique de verite)
 
 
 
@@ -31,10 +35,46 @@ __version__ = "0.4.25"
 #
 # Cette liste se met a jour avec le code ; une epreuve verifie qu'elle ne
 # derive pas.
+#
+# Tu viens d'ecrire `os.environ.get("ACVRAM_...")` ailleurs dans le depot ?
+# Ajoute le nom ici avant de committer -- cinq variables l'ont deja oublie
+# le 10/09, la garde ne les a signalees qu'apres coup, jamais au moment ou
+# elles ont ete ecrites.
 VARIABLES_LUES = {
     "ACVRAM_ALLOC_EXTENSIBLE",
     "ACVRAM_BANC_ACCEPTE_REPLAN",
     "ACVRAM_KERNEL_CACHE",
+    "ACVRAM_LOGITS_BF16",
+    "ACVRAM_MAX_GRAPHS",
+    "ACVRAM_MLA_BATCH",
+    "ACVRAM_MLA_DEBUG_ECART",
+    "ACVRAM_MLA_EAGER_TORCH",
+    # Bras du banc a trois bras de l'attention paginee. Lu par le noyau, donc
+    # il DOIT etre declare ici : la garde l'a signale comme inconnu, ce qui est
+    # exactement son role — une variable posee qui ne va nulle part est une
+    # consigne silencieusement ignoree.
+    "ACVRAM_PA_ARM",
+    "ACVRAM_PREFILL_BATCH",
+    "ACVRAM_BUDGET_JETONS",
+    # Echappement de mesure de la fusion, pour les QUATRE empileurs.
+    # ACVRAM_SANS_FUSION_BF16 ne coupait que le chemin bf16 : le gain de la
+    # fusion n'etait donc mesurable qu'en bf16, et c'est ainsi qu'un +2,60 %
+    # mesure la ou 100 % des groupes fusionnent a ete transporte sur un int8
+    # ou 7,8 % seulement fusionnent.
+    "ACVRAM_SANS_FUSION",
+    # Renverse le signe de l'ordre du glouton budgetaire, RIEN D'AUTRE. Sert a
+    # eprouver si le critere (gain de SNR par octet) est bien oriente pour un
+    # objectif de perplexite : si oui le bras inverse est nettement pire, si non
+    # il est meilleur ou equivalent. Instrument de mesure, pas reglage.
+    "ACVRAM_ORDRE_SAC_INVERSE",
+    # Choisit la cle de tri du glouton budgetaire : `snr` (defaut, gain de
+    # decibels par octet) ou `erreur` (erreur de sortie evitee par octet). La
+    # seconde n'est PAS une transformation monotone de la premiere : elle
+    # applique 10^(-snr/20) aux deux SNR AVANT la soustraction, donc elle
+    # privilegie les tenseurs a faible SNR de base — verifie sur nos donnees,
+    # correlation -0,66 entre SNR de base et deplacement de rang. Un mode
+    # inconnu leve une erreur au lieu de retomber en silence sur le defaut.
+    "ACVRAM_ORDRE_SAC",
     "ACVRAM_SCALER_SANS_CACHE",
     # ACVRAM_SRC_HASH n'est PAS une variable d'environnement : c'est une option
     # de compilation (-D) portant le sha du .cu. Elle figure ici parce que
@@ -417,6 +457,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         max_promotions=args.max_promotions,
         autoriser_grossissement=args.autoriser_grossissement,
         quant_device=args.quant_device, bits_budget_gib=args.bits_budget,
+        garder_grille=args.grille_erreurs,
         promotion_cout_max_mib=args.promotion_cout_max,
         format_impose=args.format)
 
@@ -561,10 +602,21 @@ def cmd_eval(args: argparse.Namespace) -> int:
         # la fenetre — jamais sur wiki.test.raw (1,29 Mo). Sans ce message,
         # oublier le cadrage donne un chiffre faux d'un facteur proche de 2
         # (9,525 contre 7,233 au protocole) sans le moindre signe.
+        # Precision du 10/09 : il y a DEUX protocoles, et ce message n'en
+        # nommait qu'un. Dire « le protocole » envoie chercher un defaut la ou
+        # il n'y en a pas — meme famille que la divergence corpus reperee le
+        # meme jour entre docs/BARRIERE-QUALITE-PROTOCOLE.md et la chaine de
+        # l'etalon. Un avertissement doit nommer CE QU'IL INVALIDE.
         print(red("  min_context=0 : les premieres positions sont notees avec "
-                  "un contexte quasi vide. Ce chiffre N'EST PAS comparable a "
-                  "une mesure cadree — le protocole impose --min-context 256."),
-              flush=True)
+                  "un contexte quasi vide."), flush=True)
+        print(red("    non comparable a la barriere de qualite de noyau, qui "
+                  "impose --min-context 256 --window 512 --stride 512 sur "
+                  "wiki.test.raw ;"), flush=True)
+        print(red("    COMPARABLE en revanche a l'etalon exterieur "
+                  "transformers/GPTQ, qui note des segments disjoints de 2048 "
+                  "sans contexte reporte — c'est meme le seul cadrage qui lui "
+                  "corresponde (--window 2048 --stride 2048 --min-context 0 "
+                  "sur wiki-gptq.txt, reference 5,4141)."), flush=True)
     # Les modeles se chargeaient l'un apres l'autre dans le MEME processus sans
     # que le precedent soit libere. Le 9/09/2026, une barriere de qualite a
     # mesure un nvfp4 puis charge un bf16 par-dessus :
@@ -703,6 +755,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="prix plafond d'une promotion, en Mio ajoutes "
                          "(0 = aucun) : ecarte les gros tenseurs, dont la "
                          "promotion coute des octets relus a chaque jeton")
+    cv.add_argument("--grille-erreurs", action="store_true",
+                    help="conserve l'erreur des 21 valeurs de la grille AWQ "
+                         "par tenseur, au manifeste : sert a calculer le prix "
+                         "d'un exposant commun a un groupe empilable, sans "
+                         "reconvertir")
     cv.add_argument("--bits-budget", type=float, default=0.0,
                     help="budget total de poids en Gio : les promotions sont "
                          "choisies par gain de SNR par octet (sac a dos), au "

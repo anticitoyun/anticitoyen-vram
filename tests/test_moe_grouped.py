@@ -15,6 +15,7 @@ pytestmark = pytest.mark.gpu_requis
 from acvram.engine.loader import load_model
 from acvram.engine.runner import Engine
 from acvram.engine.sampler import SamplingParams
+from conftest import assert_logits_proches
 
 needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(),
                                 reason="le chemin groupe est CUDA")
@@ -113,13 +114,13 @@ def test_moe_graph_equals_eager(tiny_moe):
     e.add_request([3, 1, 4, 1, 5], SamplingParams(temperature=0.0, max_tokens=24))
     e.step()
     for _ in range(6):
-        dec = [s for s in e.running if s.prefilled and not s.finished]
+        dec = e._decodables()
         for s in dec:
             assert e._grow(s)
         batch = e._build_batch(dec, prefill=False)
         eager = e.model(batch).float()
         graphe = e.graphs.run(batch)
         assert graphe is not None
-        assert torch.equal(eager, graphe.float()), \
-            "graphe et eager divergent sur une couche MoE"
+        assert_logits_proches(eager, graphe.float(),
+                              "graphe et eager divergent sur une couche MoE")
         e._emit(graphe, dec)

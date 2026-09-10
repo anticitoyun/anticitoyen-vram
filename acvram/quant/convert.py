@@ -43,6 +43,14 @@ class ConversionOptions:
     calib_tokens: int = 128
     calib_seqs: int = 16
     use_hadamard: str = "auto"        # auto | always | never
+    # Conserve l'erreur des 21 valeurs de la grille AWQ pour chaque tenseur, au
+    # lieu du seul minimum. Sert a calculer le prix d'un exposant COMMUN a un
+    # groupe empilable : `gate` et `up` lisent la meme entree mais chacun
+    # choisit son exposant, et `_scaler_commun` refuse la fusion par
+    # `torch.equal` — 5 empilements sur 64 sur Llama-2-7b-int8, pour +0,19 % la
+    # ou une couverture complete vaudrait +2,43 %. Coute ~170 flottants par
+    # tenseur au manifeste, rien a l'execution ; hors campagne, laisser a faux.
+    garder_grille: bool = False
     awq: bool = True
     group_size: int = 128
     keep_sensitive_16bit: bool = True  # normalisations, routeur, plongements
@@ -164,16 +172,30 @@ def _h(n: float) -> str:
 # pourtant à 25. Un filet qui ignore un format doit le dire, pas se taire.
 PROMOTE = {"int4_awq": "int8", "nvfp4": "int8", "q3n": "int8", "int8": "bf16"}
 
-# Largeur nominale de chaque format, bits par poids échelles comprises. Sert à
+# Largeur nominale d'un format, bits par poids échelles comprises. Sert à
 # chiffrer le prix d'une promotion avant de la calculer : la mesurer d'abord
 # reviendrait à quantifier deux fois tous les tenseurs du modèle.
-BPW_NOMINAL = {"bf16": 16.0, "fp16": 16.0, "int8": 8.25, "q3n": 3.25,
-               "nvfp4": 4.5, "int4_awq": 4.25}
+#
+# Ce chiffre-ci est celui qui DECIDE : il alimente `bpw_cible`, donc le budget
+# mémoire, donc l'exil d'une couche — qui coûte 61 à 70 % du débit. Il était
+# écrit en dur dans un dictionnaire, TROISIEME copie de la même grandeur après
+# `FormatSpec.bpw` et `FormatSpec.bits_per_weight()`, et il en divergeait :
+# int8 8,25 contre 8,1875 réels à groupe 128, int4_awq 4,25 contre 4,15625.
+# Surtout, la valeur en dur ignorait `--group-size` : à groupe 32 l'int8 réel
+# vaut 8,75 et la constante 8,25 SOUS-estimait le budget de 5,7 % (401 Mio sur
+# 6,74e9 poids) — le sens dangereux, celui qui fait croire qu'un modèle tient.
+# Une seule source désormais : quant/formats.py, à la taille de groupe réelle.
+def bpw_nominal(fmt: str, group_size: int = 128) -> float:
+    try:
+        return formats.bits_per_weight(fmt, group_size=group_size)
+    except KeyError:
+        return 16.0
 
 
-def cout_promotion_mib(numel: int, base: str, cible: str) -> float:
+def cout_promotion_mib(numel: int, base: str, cible: str,
+                       group_size: int = 128) -> float:
     """Mébioctets qu'ajoute le passage de ``base`` à ``cible``."""
-    ecart = BPW_NOMINAL.get(cible, 16.0) - BPW_NOMINAL.get(base, 16.0)
+    ecart = bpw_nominal(cible, group_size) - bpw_nominal(base, group_size)
     return numel * ecart / 8 / 1048576
 
 SENSITIVE_SUFFIXES = (
@@ -216,7 +238,19 @@ class TensorRouter:
     def format_for(self, name: str) -> str:
         """Le format d'un tenseur est celui de l'appareil où sa couche s'exécute."""
         if self.opts.keep_sensitive_16bit and name.endswith(SENSITIVE_SUFFIXES):
-            return "bf16"
+            # LE FORMAT 16 BITS DEMANDE, PAS bf16 EN DUR. Cette regle protege
+            # les tenseurs sensibles de la quantification : pour un modele en
+            # nvfp4 ou int4, rendre bf16 est une PROMOTION et l'intention est
+            # respectee. Mais quand `--format fp16` est demande, la meme ligne
+            # DEGRADE — sept bits de mantisse au lieu de dix — et le fait en
+            # silence sur les plongements, c'est-a-dire sur l'ENTREE du modele,
+            # dont la troncature se propage dans toutes les couches.
+            #
+            # Constate le 10/09 en convertissant Llama-2-7b avec --format fp16
+            # pour servir d'etalon : 257 tenseurs en fp16 et 66 en bf16, dont
+            # model.embed_tokens.weight. Un etalon dont l'entree est tronquee
+            # n'est plus l'original, et l'ecart serait allé au compte du moteur.
+            return ("fp16" if self.opts.format_impose == "fp16" else "bf16")
         if ((".linear_attn." in name or ".self_attn." in name)
                 and self._fmt_brut(name) == "q3n"):
             # Plancher int8 pour TOUTE l'attention et la tête de sortie quand
@@ -788,7 +822,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     """Quantifie chaque tenseur dans le format qu'attend son appareil de destination."""
     t0 = time.time()
     spec = spec or load_model_spec(model_path)
-    bpw_cible = max((BPW_NOMINAL.get(t.weight_format, 4.5)
+    bpw_cible = max((bpw_nominal(t.weight_format, opts.group_size)
                      for t in plan.tiers if t.kind == "gpu"), default=4.5)
     octets_src = octets_du_modele(model_path)
     n_params = getattr(spec, "total_params", 0) or 0
@@ -830,7 +864,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         for lp in plan.layers:
             if getattr(lp, "fmt", None) and lp.exec_device in gpus | {"cpu"}:
                 lp.fmt = "q3n"
-        bpw_cible = BPW_NOMINAL["q3n"]
+        bpw_cible = bpw_nominal("q3n", opts.group_size)
         bascule_faite = True
         bpw_cible_nominal = "q3n"
     avert = garde_grossissement(octets_src, n_params,
@@ -902,7 +936,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             group_size=opts.group_size,
             use_hadamard=router.wants_hadamard(name, fmt),
             use_awq=opts.awq,
-            n_grid=opts.n_grid,
+            n_grid=opts.n_grid, garder_grille=opts.garder_grille,
             table=opts.q3n_table if fmt == "q3n" else None,
         )
         if fmt == "q3n":
@@ -939,7 +973,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 qdev, tensor, wider, st,
                 group_size=opts.group_size,
                 use_hadamard=router.wants_hadamard(name, wider),
-                use_awq=opts.awq, n_grid=opts.n_grid)
+                use_awq=opts.awq, n_grid=opts.n_grid,
+                garder_grille=opts.garder_grille)
             if m2["out_snr_db"] > metrics["out_snr_db"] + 0.5:
                 sd2 = q2.state_dict(prefix=f"{name}.")
                 sd2.update(s2.state_dict(prefix=f"{name}."))
@@ -961,7 +996,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 and metrics["out_snr_db"] < opts.snr_floor
                 and fmt in PROMOTE
                 and (not opts.promotion_cout_max_mib
-                     or cout_promotion_mib(tensor.numel(), fmt, PROMOTE[fmt])
+                     or cout_promotion_mib(tensor.numel(), fmt, PROMOTE[fmt],
+                                           opts.group_size)
                      <= opts.promotion_cout_max_mib)
                 and len(report.promotions) < opts.max_promotions * max(1, len(keys) + 1)):
             wider = PROMOTE[fmt]
@@ -969,7 +1005,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 qdev, tensor, wider, st,
                 group_size=opts.group_size,
                 use_hadamard=router.wants_hadamard(name, wider),
-                use_awq=opts.awq, n_grid=opts.n_grid)
+                use_awq=opts.awq, n_grid=opts.n_grid,
+                garder_grille=opts.garder_grille)
             if m2["out_snr_db"] > metrics["out_snr_db"] + 1.0:
                 report.promotions.append({
                     "name": name, "from": fmt, "to": wider,
@@ -1026,6 +1063,14 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             "has_act_scale": scaler.scale is not None,
             "bpw": round(metrics["bpw"], 3),
             "out_snr_db": round(metrics["out_snr_db"], 2),
+            # L'echelle de sortie, sans laquelle le SNR ne se compare pas d'un
+            # tenseur a l'autre. Publiee pour qu'une analyse posterieure au
+            # manifeste puisse reconstituer l'erreur absolue sans reconvertir.
+                **({"out_ref_norm": round(float(metrics["out_ref_norm"]), 6)}
+                   if "out_ref_norm" in metrics else {}),
+                **({"erreurs_grille": metrics["erreurs_grille"],
+                    "alpha_retenu": metrics["alpha_retenu"]}
+                   if "erreurs_grille" in metrics else {}),
         })
         report.per_format[fmt] = report.per_format.get(fmt, 0) + qt.nbytes
         manifest["tensors"][name] = entry
@@ -1038,12 +1083,164 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         reste = opts.bits_budget_gib * 1024 ** 3 - deja
         # par gain de SNR par octet, decroissant — le glouton du sac a dos
         # fractionnaire, optimal a un tenseur pres
-        ordre = sorted(budget_candidats, key=lambda c: -c["gain_db"] / c["cout"])
+        # ORDRE DU GLOUTON, et un echappement pour l'EPROUVER.
+        #
+        # Le critere est le gain de SNR par octet. Or ce qui decide est la
+        # perplexite par octet, et la courbe du quota du 10/09 montre que les
+        # deux ne coincident pas sur la queue : les 27 tenseurs refuses en
+        # dernier rendent 2,867 milli-PPL chacun contre 0,796 pour les 26
+        # acceptes juste avant, soit 3,6 fois plus.
+        #
+        # ACVRAM_ORDRE_SAC_INVERSE renverse le signe, RIEN D'AUTRE : meme sac a
+        # dos, meme budget, meme plancher, meme format. Si le critere est bien
+        # oriente, le bras inverse doit etre nettement PIRE ; s'il est mal
+        # oriente sur la queue, il sera meilleur ou equivalent. Un controle qui
+        # ne peut pas confirmer l'hypothese par construction, puisque les deux
+        # bras sortent du meme code a un signe pres.
+        #
+        # L'ordre inverse n'est PAS un candidat : c'est un instrument. Un ordre
+        # optimal se cherchera ensuite, et l'ecart entre les deux bras donne la
+        # borne de ce que l'ordre vaut, quel qu'il soit.
+        # TROIS CLES, et le defaut ne change pas : un A/B est en cours de
+        # jugement sur `snr`, et deplacer le defaut sous lui l'invaliderait.
+        #
+        # `snr`    : gain de decibels par octet — la cle historique.
+        # `erreur` : erreur de sortie EVITEE par octet, 10^(-snr/20) applique
+        #            aux DEUX SNR avant la soustraction. Ce n'est donc PAS une
+        #            transformation monotone de la cle `snr` : a ecart de
+        #            decibels egal, un tenseur a faible SNR de base evite dix
+        #            fois plus d'erreur qu'un tenseur a fort SNR de base.
+        #
+        #                A   SNR 20 -> 30 dB   erreur 0,1000 -> 0,0316   gain 0,0684
+        #                B   SNR 40 -> 50 dB   erreur 0,0100 -> 0,0032   gain 0,0068
+        #
+        #            La cle en decibels les classe ex aequo ; la cle en erreur
+        #            place A dix fois devant B. Argument de chef, VERIFIE sur
+        #            nos donnees : correlation -0,66 entre le SNR de base et le
+        #            deplacement de rang, et 20,8 dB de SNR de base moyen pour
+        #            les tenseurs qui montent contre 29,7 pour ceux qui
+        #            descendent. Le reordonnancement est concentre en TETE du
+        #            classement — 90 % de desaccord au top-10, 3 % au top-100 —
+        #            c'est-a-dire la ou le glouton puise en premier.
+        # `inverse`: le signe renverse, INSTRUMENT et non candidat.
+        #
+        # NI L'UNE NI L'AUTRE N'EST LA PERPLEXITE. La cle `erreur` est un
+        # meilleur substitut, fonde, pas une mesure : trancher demanderait un
+        # DL par tenseur sur une perte de calibration, une passe avant par
+        # tenseur et par format.
+        _mode = os.environ.get("ACVRAM_ORDRE_SAC", "snr").strip().lower()
+        if os.environ.get("ACVRAM_ORDRE_SAC_INVERSE"):
+            _mode = "inverse"
+        if _mode not in ("snr", "erreur", "inverse", "absolu", "base_croissant"):
+            raise ValueError(
+                f"ACVRAM_ORDRE_SAC={_mode!r} inconnu ; attendu snr, erreur, "
+                f"absolu, base_croissant ou inverse. Un mode inconnu qui "
+                f"retomberait en silence sur le defaut ferait mesurer autre "
+                f"chose que ce qui est demande.")
+
+        def _abs_err(m):
+            """Erreur ABSOLUE en sortie de couche, en unites de sortie.
+
+            `out_snr_db` et `out_rel_err` sont des RAPPORTS : le denominateur
+            ||y_ref|| y disparait. C'est le bon chiffre pour juger un tenseur
+            contre lui-meme, et le mauvais pour en classer deux l'un contre
+            l'autre — ce que fait precisement ce sac a dos. Ce qui se propage
+            jusqu'a la perte est l'erreur absolue ; deux tenseurs a 20 et 30 dB
+            dont les sorties valent 1 et 100 portent 0,1 et 3,16 d'erreur, et
+            le classement en decibels met le plus nuisible en second.
+
+            Repli sur l'erreur relative quand `out_ref_norm` est absent — un
+            manifeste produit avant l'ajout du champ. Le repli est SIGNALE par
+            l'absence du champ, pas silencieux : `absolu` degenere alors en
+            `erreur`, ce qui est exactement l'ancien comportement.
+            """
+            ech = m.get("out_ref_norm")
+            if "out_abs_err" in m:
+                return float(m["out_abs_err"])
+            rel = 10.0 ** (-(m["out_snr_db"]) / 20.0)
+            return rel * float(ech) if ech else rel
+
+        def _cle(c):
+            if _mode == "base_croissant":
+                # BRAS TEMOIN, construit AVANT la mesure qu'il doit departager.
+                #
+                # Si une cle raffinee ameliore la perplexite, deux explications
+                # restent en lice : la cle est un meilleur critere, ou bien
+                # elle promeut simplement les tenseurs les plus mal quantifies.
+                # Ce bras isole la seconde : il trie par SNR de base croissant
+                # en IGNORANT le cout, donc il fait « les mal quantifies
+                # d'abord » et rien de plus.
+                #
+                # Nomme par chef avant la mesure, et construit tout de suite
+                # sur son insistance : un bras nomme mais non construit
+                # s'expose a etre ecrit APRES avoir vu le resultat, et un bras
+                # qui existe avant la mesure ne peut pas etre ajuste par elle.
+                return c["metrics_base"]["out_snr_db"]
+            if _mode == "absolu":
+                gagne = (_abs_err(c["metrics_base"]) - _abs_err(c["metrics"]))
+                return -gagne / c["cout"]
+            if _mode == "erreur":
+                gagne = (10.0 ** (-(c["metrics_base"]["out_snr_db"]) / 20.0)
+                         - 10.0 ** (-(c["metrics"]["out_snr_db"]) / 20.0))
+                return -gagne / c["cout"]
+            signe = 1.0 if _mode == "inverse" else -1.0
+            return signe * c["gain_db"] / c["cout"]
+
+        ordre = sorted(budget_candidats, key=_cle)
+        # Le budget est un budget de DOSSIER : `deja` compte le plancher, c'est
+        # a dire tout ce qui n'est pas promouvable (part 16 bits, echelles
+        # d'activation) plus chaque candidat dans son format de base. Deux
+        # issues muettes existaient, et toutes deux fabriquent un faux point de
+        # courbe : un budget SOUS le plancher promeut zero tenseur et rend un
+        # dossier identique a une conversion sans budget, et un budget qui
+        # reste inemploye rend un dossier moins large que demande. Dans les
+        # deux cas le dossier porte un budget dans son nom et une autre
+        # grandeur dans ses octets. On l'annonce, et on l'ecrit au manifeste.
+        plancher_octets = deja
+        budget_octets = opts.bits_budget_gib * 1024 ** 3
         promus = set()
         for c in ordre:
             if c["cout"] <= reste:
                 promus.add(c["name"])
                 reste -= c["cout"]
+        cout_total = sum(c["cout"] for c in budget_candidats)
+        if reste < 0:
+            print(f"[acvram] budget de {opts.bits_budget_gib:.3f} Gio SOUS le "
+                  f"plancher de {plancher_octets / 1024 ** 3:.3f} Gio : aucune "
+                  f"promotion possible, le dossier sortira au format de base. "
+                  f"Le plus petit budget qui promeut quelque chose est "
+                  f"{(plancher_octets + min(c['cout'] for c in budget_candidats)) / 1024 ** 3:.3f} Gio.",
+                  flush=True)
+        elif promus and reste > 0 and len(promus) < len(budget_candidats):
+            print(f"[acvram] budget non epuise : {reste / 2 ** 20:.1f} Mio "
+                  f"inemployes, aucun candidat restant ne tient dedans "
+                  f"({len(promus)}/{len(budget_candidats)} promus).", flush=True)
+        manifest["budget"] = {
+            # Le sens de l'ordre est ECRIT au manifeste : un dossier produit
+            # par le bras inverse doit etre reconnaissable sans son journal.
+            # Un mode absent de cette table levait un KeyError APRES toute la
+            # conversion — des minutes de calcul perdues sur une faute de
+            # frappe, et pire : le mode `absolu` ajoute plus haut n'y figurait
+            # pas. La table doit couvrir exactement les modes acceptes par la
+            # garde de _mode ; un repli explicite vaut mieux qu'une exception
+            # tardive, et il porte le nom du mode pour rester lisible.
+            "ordre_glouton": {
+                "base_croissant": "snr_de_base_croissant_sans_cout",
+                "snr": "snr_par_octet_decroissant",
+                "erreur": "erreur_evitee_par_octet_decroissante",
+                "absolu": "erreur_absolue_evitee_par_octet_decroissante",
+                "inverse": "snr_par_octet_croissant",
+            }.get(_mode, f"mode_{_mode}_sans_description"),
+            "demande_gib": opts.bits_budget_gib,
+            "plancher_gib": round(plancher_octets / 1024 ** 3, 4),
+            "plafond_gib": round((plancher_octets + cout_total) / 1024 ** 3, 4),
+            "depense_gib": round((budget_octets - max(reste, 0)) / 1024 ** 3, 4)
+                           if reste >= 0 else round(plancher_octets / 1024 ** 3, 4),
+            "restant_mio": round(max(reste, 0) / 2 ** 20, 1),
+            "sous_le_plancher": reste < 0,
+            "promus": len(promus),
+            "candidats": len(budget_candidats),
+        }
         for c in budget_candidats:
             name = c["name"]
             large = name in promus
@@ -1054,7 +1251,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             snrs.append(met["out_snr_db"])
             per_layer.append({"name": name,
                               **{k: round(v, 2) if isinstance(v, float) else v
-                                 for k, v in met.items()}})
+                                 for k, v in met.items()
+                                 if k != "erreurs_grille"}})
             if not opts.dry_run:
                 for k, v in sd.items():
                     writer.add(k, v)
@@ -1066,6 +1264,9 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 "has_act_scale": c["has_act_scale"],
                 "bpw": round(met["bpw"], 3),
                 "out_snr_db": round(met["out_snr_db"], 2),
+                **({"erreurs_grille": met["erreurs_grille"],
+                    "alpha_retenu": met["alpha_retenu"]}
+                   if "erreurs_grille" in met else {}),
             })
             octets = sum(v.numel() * v.element_size() for v in sd.values())
             report.per_format[fmt] = report.per_format.get(fmt, 0) + octets

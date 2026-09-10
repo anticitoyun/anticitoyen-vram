@@ -381,7 +381,7 @@ def test_perplexity_runs_and_is_finite(converted, tiny_checkpoint):
                    device="cpu", dtype=torch.float32)
     assert math.isfinite(r.perplexity)
     assert r.tokens > 0
-    assert r.bits_per_weight > 0
+    assert r.bits_par_poids_en_memoire > 0
 
 
 def test_bits_budget_knapsack(tiny_checkpoint, target_rig, tmp_path_factory):
@@ -830,8 +830,14 @@ def test_une_source_3_bits_bascule_les_etages_sur_q3n():
     """8/09/2026 : plutôt que refuser une source 3 bits, la conversion bascule
     les étages GPU sur q3n (3,25 b/p) et l'annonce ; elle ne refuse plus que
     si même q3n grossirait la source."""
-    from acvram.quant.convert import BPW_NOMINAL, garde_grossissement
-    assert BPW_NOMINAL["q3n"] == 3.25
+    from acvram.quant.convert import bpw_nominal, garde_grossissement
+    # BPW_NOMINAL, dictionnaire ecrit en dur, a ete remplace le 10/09 par
+    # bpw_nominal(fmt, group_size) qui delegue a quant/formats.py : il en etait
+    # la troisieme copie divergente et il ignorait --group-size.
+    assert bpw_nominal("q3n") == 3.25
+    assert bpw_nominal("q3n", 32) == 3.25          # q3n ne depend pas du groupe
+    assert bpw_nominal("int8", 128) == 8.1875      # celui-ci en depend
+    assert bpw_nominal("int8", 32) == 8.75
     n = 80_000_000_000
     # Q3_K_S à 3,4 b/p : q3n (3,25) ne grossit pas -> aucun refus
     assert garde_grossissement(int(n * 3.4 / 8), n, 3.25, False) is None

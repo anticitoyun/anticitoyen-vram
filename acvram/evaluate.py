@@ -15,6 +15,7 @@ quantités de contexte différentes.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -66,7 +67,23 @@ class EvalResult:
     par_contexte: dict[int, tuple[float, int]] = field(default_factory=dict)
     seconds: float = 0.0
     weights_bytes: int = 0
-    bits_per_weight: float = 0.0
+    # Nom explicite : ce chiffre est nbytes/params APRES chargement, donc il
+    # depend du dtype de chargement (26,99 en fp32, 20,04 en bf16 pour un meme
+    # dossier fp16 a 16,00 bits sur disque) et il inclut caches et tampons.
+    # Indicatif seulement. La densite qui DECIDE est analytique :
+    # quant/formats.py:bits_per_weight(fmt, group_size).
+    bits_par_poids_en_memoire: float = 0.0
+    nbytes_detail: dict = field(default_factory=dict)
+    # Un releve de perplexite qui ne dit pas SUR QUOI il porte ne peut plus
+    # etre compare ensuite. Le 10/09, trois releves archives ont oblige a une
+    # reconstitution arithmetique (168 x 2047 = 343 896 positions notables ne
+    # sont possibles qu'avec >= 344 064 jetons, donc avec wiki-gptq.txt et pas
+    # wiki.test.raw, qui n'en rend que 335 688) pour savoir si notre chaine et
+    # l'etalon exterieur parlaient du meme texte. Ils en parlaient, mais rien
+    # dans les fichiers ne le disait.
+    corpus_chemin: str = ""
+    corpus_octets: int = 0
+    corpus_sha256: str = ""
     formats: dict[str, int] = field(default_factory=dict)
     avertissement: str = ""
     # Perplexite CUMULATIVE apres n fenetres, aux jalons de `_JALONS`. Le
@@ -90,7 +107,11 @@ class EvalResult:
             "windows": self.windows,
             "seconds": round(self.seconds, 2),
             "weights_bytes": self.weights_bytes,
-            "bits_per_weight": round(self.bits_per_weight, 3),
+            "bits_par_poids_en_memoire": round(self.bits_par_poids_en_memoire, 3),
+            "nbytes_detail": self.nbytes_detail,
+            "corpus_chemin": self.corpus_chemin,
+            "corpus_octets": self.corpus_octets,
+            "corpus_sha256": self.corpus_sha256,
             "formats": self.formats,
             "avertissement": self.avertissement,
             "cumul": {str(k): round(v, 4) for k, v in sorted(self.cumul.items())},
@@ -148,19 +169,44 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
     loaded = load_model(model_dir, dtype=dtype, device_override=device)
     tokenizer = load_tokenizer(model_dir)
     if tokenizer is None:
-        raise ValueError(f"pas de tokenizer.json dans {model_dir} ; la perplexité "
-                         f"en a besoin pour bâtir le flux de jetons")
+        from .server.chat import pourquoi_pas_de_tokenizer
+        raison = pourquoi_pas_de_tokenizer(model_dir) or "cause inconnue"
+        raise ValueError(f"la perplexité a besoin d'un tokenizer et n'en a "
+                         f"pas : {raison}")
 
-    ids = tokenizer.encode(_load_corpus(corpus_path))[:max_tokens]
+    texte = _load_corpus(corpus_path)
+    ids = tokenizer.encode(texte)[:max_tokens]
     if len(ids) < 16:
         raise ValueError("corpus trop court pour être évalué")
 
     model = loaded.model
     result = EvalResult(model=os.path.basename(os.path.abspath(model_dir)),
                         min_context=min_context, window=window)
+    if corpus_path and os.path.isfile(corpus_path):
+        result.corpus_chemin = os.path.abspath(corpus_path)
+        result.corpus_octets = os.path.getsize(corpus_path)
+        result.corpus_sha256 = hashlib.sha256(
+            open(corpus_path, "rb").read()).hexdigest()[:24]
+    else:
+        result.corpus_chemin = "(corpus par defaut, integre)"
+        result.corpus_octets = len(texte.encode("utf-8"))
+        result.corpus_sha256 = hashlib.sha256(
+            texte.encode("utf-8")).hexdigest()[:24]
     result.weights_bytes = model.nbytes
+    # INDICATIF, jamais diviseur : voir la mise en garde de bench.py. Les
+    # octets reellement alloues sont dans nbytes_detail.octets_stockage_uniques.
+    # Le champ ci-dessus a une valeur PREVUE, tiree du manifeste : embedding au
+    # dtype de chargement + somme des tenseurs quantifies. Elle a rendu « faux »
+    # des son premier usage (15,9994 prevu contre 26,987 releve sur
+    # Llama-2-7b-fp16pur). Le detail est joint au releve pour que le prochain
+    # chargement nomme l'ecart au lieu de le reconstater.
+    try:
+        result.nbytes_detail = model.nbytes_detail()
+    except Exception as e:                    # noqa: BLE001
+        result.nbytes_detail = {"erreur": f"{type(e).__name__}: {e}"}
     n_params = loaded.spec.total_params
-    result.bits_per_weight = (result.weights_bytes * 8 / n_params) if n_params else 0.0
+    result.bits_par_poids_en_memoire = ((result.weights_bytes * 8 / n_params)
+                                       if n_params else 0.0)
     for entry in loaded.manifest.get("tensors", {}).values():
         f = entry.get("format", "?")
         result.formats[f] = result.formats.get(f, 0) + 1
@@ -224,6 +270,60 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
         if start + window >= len(ids):
             break
 
+    # LE PROTOCOLE DIT « SEGMENTS DISJOINTS » QUAND stride == window, et il
+    # n'a pas besoin d'un autre mode : first_new vaut alors max(0, -1) = 0,
+    # donc chaque segment est contigu au precedent, sans recouvrement, et
+    # toutes ses positions sont notees une fois. C'est le protocole employe
+    # par la litterature de quantification pour la perplexite WikiText-2 —
+    # concatener le split, decouper en segments de 2048, moyenner la NLL.
+    # A appeler ainsi : perplexity(m, corpus_path=..., window=2048,
+    # stride=2048, min_context=0).
+    #
+    # ET LE COMPTE SE VERIFIE, sans quoi rien ne garantit qu'on note ce qu'on
+    # croit. En mode disjoint chaque jeton sauf le premier est predit
+    # exactement une fois, donc `counted` doit valoir len(ids) - 1 aux
+    # segments tronques pres. Un ecart signale un recouvrement ou un oubli, et
+    # se lirait sinon comme une perplexite legerement differente — la pire
+    # forme de defaut, celle qui ne se voit pas.
+    if stride == window and min_context == 0:
+        # L'INVARIANT N'EST PAS len(ids) - 1, ET MON PREMIER JET L'A ECRIT.
+        # En segments disjoints chaque forward est independant : le premier
+        # jeton d'un segment n'a aucun predecesseur, donc il n'est PAS predit.
+        # `logits[:-1]` contre `chunk[1:]` note WINDOW - 1 positions par
+        # segment, pas window. L'invariant est donc nsamples x (window - 1) —
+        # 168 x 2047 = 343 896 sur wikitext-2 — et non len(ids) - 1 = 344 063.
+        # Ecrit autrement, il aurait averti A TORT sur un protocole correct,
+        # et l'avertissement aurait envoye chercher un defaut inexistant.
+        #
+        # C'est aussi ce qui montre que notre cadrage est celui de GPTQ : leur
+        # nll_i vaut loss_i x 2048 avec loss_i moyennee sur 2047, puis divise
+        # par nsamples x 2048 — le facteur 2048/2047 s'annule et il reste la
+        # moyenne exacte sur nsamples x 2047. Aucune convention a corriger.
+        # LA FORMULE SUIT LA BOUCLE, ET DEUX VERSIONS S'Y SONT TROMPEES.
+        # La boucle parcourt `range(0, len(ids) - 1, stride)` : le nombre de
+        # segments est donc le PLAFOND de (len(ids) - 1) / window, pas son
+        # plancher — sur 344 064 jetons cela fait 168 segments et non 167, et
+        # 343 896 positions notables et non 341 849. Chacune de mes deux
+        # premieres versions a donc averti A TORT sur un protocole correct,
+        # et un garde-fou qui crie toujours est un garde-fou qu'on desactive.
+        # Verifie contre la mesure : 168 x 2047 = 343 896, exactement ce que
+        # le compteur rend sur wikitext-2 tronque a 344 064 jetons.
+        debuts = range(0, max(0, len(ids) - 1), window)
+        attendu = sum(min(window, len(ids) - d) - 1 for d in debuts
+                      if min(window, len(ids) - d) >= 2)
+        if counted != attendu:
+            # `avertissement` et non une liste : c'est le champ que porte
+            # EvalResult. Un garde-fou qui leve AttributeError au moment
+            # d'alerter ne garde rien — mon premier jet ecrivait dans
+            # result.warnings, qui n'existe pas.
+            manque = (f"mode disjoint : {counted} positions notees pour "
+                      f"{attendu} attendues ({len(debuts)} segments, "
+                      f"{window - 1} positions notables chacun sur {len(ids)} "
+                      "jetons) — un jeton est compte deux fois ou pas du "
+                      "tout, et la perplexite ne porte pas sur le corpus "
+                      "annonce")
+            result.avertissement = (result.avertissement + " | " + manque
+                                    if result.avertissement else manque)
     result.tokens = counted
     if counted == 0:
         raise ValueError(
@@ -278,7 +378,7 @@ def render(results: list[EvalResult]) -> str:
     for r in results:
         delta = "" if r.perplexity == best else f"  (+{100*(r.perplexity/best-1):.1f}%)"
         lines.append(f"  {r.model:<{width}}  {r.perplexity:9.3f}  "
-                     f"{r.bits_per_weight:6.2f}  {r.weights_bytes/2**20:8.1f}Mio  "
+                     f"{r.bits_par_poids_en_memoire:6.2f}  {r.weights_bytes/2**20:8.1f}Mio  "
                      f"{r.tokens:8d}{delta}")
     # Les formats REELS du modele evalue, a cote du chiffre. Le 8/09/2026 un
     # dossier nomme « temoin-int8 » avait ses 72 projections de perceptron en

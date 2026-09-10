@@ -1,13 +1,18 @@
 """Le rejeu en graphe CUDA doit être invisible dans la sortie.
 
 L'invariant s'énonce précisément : *au sein d'un même moteur*, le pas capturé
-rend exactement les logits que le chemin eager rend sur le même état. C'est ce
-que ces tests affirment, pas à pas, y compris en traversant une frontière de
-godet. Comparer deux moteurs séparés par l'argmax ne teste rien de tel : sur un
-modèle-jouet aux logits quasi plats, cuBLAS et SDPA choisissent leurs
-algorithmes selon l'état du contexte, et l'argmax devient une loterie
-d'epsilon — le chemin eager seul n'est déjà pas reproductible d'un processus à
-l'autre à ce grain-là.
+rend les mêmes logits que le chemin eager sur le même état. Comparer deux
+moteurs séparés par l'argmax ne teste rien de tel : sur un modèle-jouet aux
+logits quasi plats, cuBLAS et SDPA choisissent leurs algorithmes selon l'état
+du contexte, et l'argmax devient une loterie d'epsilon — le chemin eager seul
+n'est déjà pas reproductible d'un processus à l'autre à ce grain-là.
+
+« Les mêmes », pas « les mêmes bits » : depuis que le chemin eager peut lui
+aussi emprunter le noyau fusionné ou batcher plusieurs séquences (10/09),
+graphe et eager sont deux ordres de calcul légitimement différents, chacun
+capable de produire un résultat correct sans reproduire l'autre au bit près.
+`assert_logits_proches` (conftest) compare par KL plutôt que par
+`torch.equal` — voir `KL_LOGITS_MAX` pour la justification du seuil.
 """
 
 import pytest
@@ -18,6 +23,7 @@ pytestmark = pytest.mark.gpu_requis
 from acvram.engine.loader import load_model
 from acvram.engine.runner import Engine
 from acvram.engine.sampler import SamplingParams
+from conftest import assert_logits_proches
 
 needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(),
                                 reason="pas de peripherique CUDA")
@@ -39,7 +45,7 @@ def _prefill(e, prompt, max_tokens=32):
 
 def _decode_both(e):
     """Un pas de décodage : logits eager puis logits du graphe, même état."""
-    dec = [s for s in e.running if s.prefilled and not s.finished]
+    dec = e._decodables()
     for s in dec:
         assert e._grow(s)
     batch = e._build_batch(dec, prefill=False)
@@ -56,8 +62,8 @@ def test_graph_logits_equal_eager(converted):
     _prefill(e, [7, 3, 9, 1, 4, 8, 2, 5] * 4)
     for _ in range(4):                       # capture au 1er pas, rejeux ensuite
         eager, graphe, batch, dec = _decode_both(e)
-        assert torch.equal(eager, graphe), \
-            "le graphe et l'eager divergent sur le meme etat"
+        assert_logits_proches(eager, graphe,
+                              "le graphe et l'eager divergent sur le meme etat")
         e._emit(graphe, dec)
     assert e.graphs.captures == 1
     assert e.graphs.replays >= 4
@@ -71,7 +77,8 @@ def test_graph_across_bucket_boundary(converted):
     seen = set()
     for _ in range(30):                                # traverse 128 jetons
         eager, graphe, batch, dec = _decode_both(e)
-        assert torch.equal(eager, graphe)
+        assert_logits_proches(eager, graphe,
+                              "le graphe et l'eager divergent apres la frontiere de godet")
         seen.add(e.graphs._last_key)
         e._emit(graphe, dec)
     assert len(seen) >= 2, "la frontiere de godet n'a pas change de graphe"
@@ -84,7 +91,8 @@ def test_graph_qknorm_model(converted_qknorm):
     e = _engine(converted_qknorm)
     _prefill(e, [5, 9, 2, 7, 1, 8, 3, 6])
     eager, graphe, _, _ = _decode_both(e)
-    assert torch.equal(eager, graphe)
+    assert_logits_proches(eager, graphe,
+                          "le graphe et l'eager divergent (modele qknorm)")
 
 
 @needs_cuda
@@ -194,8 +202,8 @@ def test_graph_speculative_step_equals_eager(converted):
     eager = e.model(batch, logits_positions=batch.all_token_indices()).float()
     graphe = e.graphs.run(batch)
     assert graphe is not None, "pas de graphe pour le pas speculatif"
-    assert torch.equal(eager, graphe.float()), \
-        "pas speculatif : graphe et eager divergent"
+    assert_logits_proches(eager, graphe.float(),
+                          "pas speculatif : graphe et eager divergent")
 
 
 @needs_cuda

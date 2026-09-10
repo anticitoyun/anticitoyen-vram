@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import re
 from typing import Any, Optional
 
@@ -114,6 +115,29 @@ def _chatml(messages: list[dict], add_generation_prompt: bool) -> str:
     if add_generation_prompt:
         out.append("<|im_start|>assistant\n")
     return "".join(out)
+
+
+def pourquoi_pas_de_tokenizer(path: str) -> Optional[str]:
+    """La raison pour laquelle ``load_tokenizer`` rendrait ``None``, ou None.
+
+    DEUX CAUSES, ET UN SEUL RETOUR. `load_tokenizer` rend `None` quand le
+    paquet `tokenizers` manque ET quand le fichier manque ; ses appelants
+    n'annoncaient que la seconde. Le 10/09 cette confusion a coute deux manches
+    et une conclusion fausse transmise au circuit — « aucune perplexite n'est
+    mesurable sur les convertis issus de GGUF » — alors que les fichiers
+    etaient la et que seul l'interpreteur employe n'avait pas le paquet. Un
+    message a cause unique fait chercher la ou il n'y a rien.
+    """
+    try:
+        import tokenizers                                  # noqa: F401
+    except ImportError:
+        return ("le paquet Python `tokenizers` n'est pas installe dans cet "
+                f"interpreteur ({sys.executable}) ; le projet utilise "
+                "`.venv/bin/python`, qui le porte")
+    tok_path = os.path.join(path, "tokenizer.json")
+    if not os.path.isfile(tok_path):
+        return f"pas de fichier tokenizer.json dans {path}"
+    return None
 
 
 def load_tokenizer(path: str) -> Optional[Tokenizer]:

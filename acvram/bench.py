@@ -472,7 +472,19 @@ def bench_decode(model_dir: str, n_tokens: int = 256,
     return {
         "model": model_dir,
         "load_seconds": round(load_s, 1),
+        # `nbytes` somme des numel() : une VUE de fusion y compte ses octets
+        # comme si elle les possedait, et les quatre empileurs remplacent les
+        # originaux par des tranches de la pile. Surestimation MESUREE le
+        # 10/09 : x1,38 sur un bf16, x1,066 sur un int8, x1,071 sur un modele a
+        # quatre formats. Ce champ est donc INDICATIF et ne doit jamais diviser
+        # un temps : verifie, aucun Go/s du depot ne le fait — les Go/s de
+        # `bench_gemv` divisent `q.nbytes` d'un tenseur fraichement quantifie
+        # qui possede son stockage, et `outils/mesure-gemv-nvfp4.py` calcule ses
+        # octets analytiquement depuis la forme. Les octets reellement alloues
+        # sont dans `weights_bytes_stockage`.
         "weights_bytes": loaded.model.nbytes,
+        "weights_bytes_stockage":
+            loaded.model.nbytes_detail()["octets_stockage_uniques"],
         "vram_free_bytes_after_load": libre,
         "vram_total_bytes": total,
         "prompt_len": prompt_len,

@@ -33,6 +33,7 @@ cp -r acvram pyproject.toml install.sh README.md LICENSE "$PKG/usr/share/acvram/
 # N'ajouter ici qu'un document destine a L'UTILISATEUR du paquet, pas a nous.
 DOCS_PUBLIQUES="
 ARCHITECTURE.md
+BRANCHER-UN-CLIENT.md
 MATERIEL.md
 FORMAT-3BITS.md
 PROTOCOLE-ENERGIE.md
@@ -68,6 +69,28 @@ set -euo pipefail
 BASE="${ACVRAM_HOME:-$HOME/.local/share/acvram}"
 VENV="$BASE/venv"
 SRC="/usr/share/acvram"
+
+# La version qui compte est celle du venv, pas celle du paquet : le lanceur
+# ne verifiait QUE l'existence du venv, donc une mise a jour du .deb n'avait
+# aucun effet — dpkg annoncait 0.3.0 pendant que `acvram --version` rendait
+# 0.2.0. Un defaut muet : rien ne casse, la mise a jour ne fait simplement rien.
+VERSION_SRC=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$SRC/acvram/__init__.py" 2>/dev/null || true)
+# -I isole l interpreteur : sans lui, un `acvram` lance depuis un arbre de
+# developpement importe le paquet du REPERTOIRE COURANT et non celui du venv,
+# les deux versions paraissent egales, et la mise a jour ne se declenche pas.
+VERSION_VENV=$("$VENV/bin/python" -I -c 'import acvram;print(acvram.__version__)' 2>/dev/null || true)
+
+if [ -x "$VENV/bin/acvram" ] && [ -n "$VERSION_SRC" ] \
+   && [ "$VERSION_SRC" != "$VERSION_VENV" ]; then
+    echo "acvram : $VERSION_VENV installe, $VERSION_SRC disponible — mise a jour"
+    # torch n'est pas retelecharge : seul le paquet acvram est reinstalle.
+    COPIE="$BASE/src"
+    rm -rf "$COPIE"
+    cp -r "$SRC" "$COPIE"
+    "$VENV/bin/pip" install --quiet --no-deps --force-reinstall "$COPIE"
+    rm -rf "$COPIE"
+    echo "acvram : a jour en $VERSION_SRC."
+fi
 
 if [ ! -x "$VENV/bin/acvram" ]; then
     echo "acvram : premier lancement, préparation de l'environnement dans $VENV"
@@ -110,7 +133,7 @@ Priority: optional
 Architecture: amd64
 Depends: python3 (>= 3.10), python3-venv, python3-pip, ca-certificates
 Recommends: nvidia-driver-575 | nvidia-driver-580 | nvidia-driver-595
-Maintainer: Anticitoyen <anticitoyen@users.noreply.github.com>
+Maintainer: Anticitoyen <anticitoyen@users.noreply.gitlab.com>
 Homepage: https://outils.nuages.noho.st/gitlab/anticitoyen/anticitoyen-vram
 Description: serveur d'inférence LLM pour GPU hétérogènes (NVFP4 + INT4)
  Serveur d'inférence compatible OpenAI qui donne à chaque GPU le format de

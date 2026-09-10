@@ -50,15 +50,41 @@ class Sequence:
     arrival: float = field(default_factory=time.time)
     first_token_at: float = 0.0
     cumulative_logprob: float = 0.0
-    prefilled: bool = False
+    prefill_len: int = 0                # jetons d'invite DEJA passes en avant
     cached_len: int = 0                 # jetons d'invite servis par le cache de préfixe
     hashes: list[int] = field(default_factory=list)
     n_accepted: int = 0                 # jetons spéculatifs acceptés
     n_proposed: int = 0
 
     @property
+    def prefilled(self) -> bool:
+        """Vrai quand toute l'invite est passée en avant.
+
+        La progression a son champ à elle. On serait tenté de la lire dans
+        `cached_len`, qui est juste à côté et qui avance bien lors d'une
+        reprise partielle — mais `cached_len` répond à « combien le cache m'a
+        évité », pas à « où j'en suis », et il est faux dans les deux sens :
+        il vaut encore son origine après un prefill entier, et il porte déjà
+        sa valeur finale AVANT tout passage en avant quand le préfixe est
+        servi par le cache.
+        """
+        return self.prefill_len >= len(self.prompt_ids)
+
+    @property
     def length(self) -> int:
         return len(self.prompt_ids) + len(self.output_ids)
+
+    @property
+    def longueur_ecrite(self) -> int:
+        """Jetons dont les clés et valeurs sont réellement dans le cache.
+
+        `length` compte l'invite ENTIERE des l'admission, avant tout passage
+        en avant. Publier des blocs sur cette longueur pendant un prefill
+        decoupe livrerait a une requete ulterieure des cles jamais ecrites —
+        exactement ce que la garde « uniquement des blocs complets » de
+        `_register_complete_blocks` cherche a empecher.
+        """
+        return self.length if self.prefilled else self.prefill_len
 
     @property
     def all_ids(self) -> list[int]:
@@ -83,6 +109,17 @@ class GenerationOutput:
 @dataclass
 class EngineStats:
     steps: int = 0
+    # Combien de pas ont contenu un prefill. `steps` les compte tous ; ce
+    # champ isole ceux qui ont porte un forward de prefill EN PLUS du
+    # decodage. Le prefill n'est pas decoupe (pas de chunked prefill), donc
+    # sa duree entiere s'ajoute a la latence de toutes les sequences deja en
+    # cours a ce pas-la : un pas mixte est structurellement plus long qu'un
+    # pas de decodage pur, et leur proportion explique une part de la
+    # dispersion du temps par jeton. Expose par /metrics pour qu'une mesure
+    # faite DEHORS du process serveur puisse l'apparier avec ses essais lents
+    # — sans lui, seule une mesure in-process voyait le compteur, et les deux
+    # bras d'une campagne n'etaient pas instrumentes pareil.
+    pas_avec_prefill: int = 0
     prefill_tokens: int = 0
     decode_tokens: int = 0
     prefill_seconds: float = 0.0
@@ -108,6 +145,7 @@ class EngineStats:
     def to_dict(self) -> dict:
         return {
             "steps": self.steps,
+            "pas_avec_prefill": self.pas_avec_prefill,
             "prefill_tokens": self.prefill_tokens,
             "decode_tokens": self.decode_tokens,
             "decode_tok_s": round(self.decode_tok_s, 2),
@@ -339,6 +377,9 @@ class Engine:
                         self.stats.kv_refills += 1
                 seq.blocks = list(matched)
                 seq.cached_len = len(matched) * BLOCK_SIZE
+                # Le cache dispense de recalculer ces jetons : la progression
+                # du prefill part de là, elle ne part pas de zéro.
+                seq.prefill_len = seq.cached_len
                 seq.hashes = list(hashes[:len(matched)])
                 seq.blocks.extend(self.allocator.allocate(need - len(matched)))
                 self.stats.cached_prompt_tokens += seq.cached_len
@@ -447,7 +488,7 @@ class Engine:
         # lire SEIZE elements, a chaque pas et pour chaque sequence. `length`
         # donne la meme longueur sans rien recopier, et `_tranche` ne touche
         # que les seize jetons du bloc.
-        n_full = min(seq.length // BLOCK_SIZE, len(seq.blocks))
+        n_full = min(seq.longueur_ecrite // BLOCK_SIZE, len(seq.blocks))
         while len(seq.hashes) < n_full:
             i = len(seq.hashes)
             prev = seq.hashes[-1] if seq.hashes else 0
@@ -494,6 +535,29 @@ class Engine:
             self.waiting.remove(seq)
 
     # -- batch construction ----------------------------------------------
+    def _budget_jetons(self) -> int:
+        """Plafond de jetons d'invite par séquence et par pas — 0 = illimité.
+
+        Coupé par défaut : a zero, le moteur se comporte au jeton pres comme
+        avant. Actif, il découpe le prefill d'une longue invite en tranches
+        et REND LA MAIN entre chaque, au lieu de faire attendre toutes les
+        séquences en cours derriere elle. Le découpage existait deja
+        (`_build_batch(..., limite=)`) mais chainait ses passes dans le meme
+        pas : il découpait le calcul sans découper la latence.
+        """
+        try:
+            return max(0, int(os.environ.get("ACVRAM_BUDGET_JETONS", "0")))
+        except ValueError:
+            return 0
+
+    def _decodables(self) -> list[Sequence]:
+        """Les séquences prêtes à décoder — un seul endroit qui le décide.
+
+        Les essais recopiaient ce prédicat au lieu de l'appeler : ils
+        auraient continué à passer en éprouvant l'ancienne notion.
+        """
+        return [s for s in self.running if s.prefilled and not s.finished]
+
     def _build_batch(self, seqs: list[Sequence], prefill: bool,
                      limite: Optional[int] = None) -> ForwardBatch:
         tokens: list[int] = []
@@ -506,8 +570,11 @@ class Engine:
         for seq in seqs:
             if prefill:
                 # On saute ce que le cache de préfixe détient déjà.
-                ids = seq.prompt_ids[seq.cached_len:limite]
-                start = seq.cached_len
+                # `prefill_len` et non `cached_len` : identiques tant que le
+                # prefill n'est pas decoupe, distincts des qu'il l'est. La
+                # borne `limite` est une borne de FIN, absolue.
+                ids = seq.prompt_ids[seq.prefill_len:limite]
+                start = seq.prefill_len
             else:
                 ids = [seq.output_ids[-1]] if seq.output_ids else [seq.prompt_ids[-1]]
                 start = seq.length - 1
@@ -534,30 +601,79 @@ class Engine:
     def step(self) -> list[GenerationOutput]:
         """Exécute une passe avant et rend ce qu'elle a produit."""
         new = self._admit()
+        if new:
+            self.stats.pas_avec_prefill += 1
         outputs: list[GenerationOutput] = []
 
-        # On précalcule les séquences nouvellement admises une par une. Mêler
-        # une longue invite à un lot de décodage bloquerait derrière elle toutes
-        # les séquences en cours.
-        for seq in new:
+        # Lot groupé : un seul prefill pour toutes les séquences de `new` au
+        # lieu d'un par séquence. `input_layernorm` et le MoE
+        # (DecoderLayerGDN.forward) s'appliquent déjà sur le lot entier, hors
+        # de toute boucle par séquence ; seule MLAttention y reste bouclée
+        # (mla.py) — le gain est donc complet sur un modèle dense, partiel sur
+        # un hybride MLA. Garde conservatrice : seulement si AUCUNE séquence
+        # n'a de frontière instantanée à geler (`_frontiere_insta`), sinon la
+        # photographie par séquence (longueur d'invite différente d'une
+        # requête à l'autre) rendrait le lot incohérent — repli inchangé.
+        budget = self._budget_jetons()
+        a_prefiller = list(new)
+        if budget:
+            # Les inachevees d'un pas precedent reprennent AVANT les nouvelles :
+            # sinon une arrivee continue les affamerait indefiniment.
+            a_prefiller = [s for s in self.running
+                           if not s.prefilled and not s.finished
+                           and s not in new] + a_prefiller
+
+        if new and not budget and os.environ.get("ACVRAM_PREFILL_BATCH") != "0" \
+                and all(self._frontiere_insta(s) is None for s in new):
             t0 = time.perf_counter()
-            coupe = self._frontiere_insta(seq)
-            if coupe is not None:
-                # Première passe jusqu'à la frontière, instantané, puis le
-                # reste : le point de reprise est ainsi le même d'une requête à
-                # l'autre tant que l'invite partage ses premiers jetons.
-                self.model(self._build_batch([seq], prefill=True, limite=coupe))
-                self._photographier(seq, coupe)
-                seq.cached_len = coupe
-            batch = self._build_batch([seq], prefill=True)
+            batch = self._build_batch(new, prefill=True)
             logits = self.model(batch)
             self.stats.prefill_seconds += time.perf_counter() - t0
-            self.stats.prefill_tokens += len(seq.prompt_ids) - seq.cached_len
-            seq.prefilled = True
-            outputs += self._emit(logits, [seq])
-            self._register_complete_blocks(seq)
+            self.stats.prefill_tokens += sum(len(s.prompt_ids) - s.cached_len for s in new)
+            for seq in new:
+                seq.prefill_len = len(seq.prompt_ids)
+            outputs += self._emit(logits, new)
+            for seq in new:
+                self._register_complete_blocks(seq)
+        else:
+            # On précalcule les séquences nouvellement admises une par une.
+            # Mêler une longue invite à un lot de décodage bloquerait derrière
+            # elle toutes les séquences en cours.
+            for seq in a_prefiller:
+                t0 = time.perf_counter()
+                debut = seq.prefill_len
+                # La frontiere ne se gele qu'au tout premier passage de la
+                # sequence : une tranche suivante est deja au-dela.
+                coupe = (self._frontiere_insta(seq)
+                         if seq.prefill_len == seq.cached_len else None)
+                if coupe is not None:
+                    # Première passe jusqu'à la frontière, instantané, puis le
+                    # reste : le point de reprise est ainsi le même d'une requête à
+                    # l'autre tant que l'invite partage ses premiers jetons.
+                    self.model(self._build_batch([seq], prefill=True, limite=coupe))
+                    self._photographier(seq, coupe)
+                    seq.cached_len = coupe
+                    seq.prefill_len = coupe
+                fin = len(seq.prompt_ids)
+                if budget:
+                    fin = min(fin, seq.prefill_len + budget)
+                batch = self._build_batch(
+                    [seq], prefill=True,
+                    limite=fin if fin < len(seq.prompt_ids) else None)
+                logits = self.model(batch)
+                self.stats.prefill_seconds += time.perf_counter() - t0
+                # Compte depuis `debut`, releve AVANT la passe de frontiere :
+                # l'ancienne formule partait de `cached_len` deja avance a la
+                # coupe, et perdait donc la premiere moitie sur un hybride.
+                self.stats.prefill_tokens += fin - debut
+                seq.prefill_len = fin
+                # Une tranche intermediaire ne produit pas de jeton : ses
+                # logits ne sont pas ceux du dernier jeton de l'invite.
+                if seq.prefilled:
+                    outputs += self._emit(logits, [seq])
+                self._register_complete_blocks(seq)
 
-        decodable = [s for s in self.running if s.prefilled and not s.finished]
+        decodable = self._decodables()
         if decodable:
             t0 = time.perf_counter()
             if self.speculator is not None:
@@ -815,6 +931,7 @@ class Engine:
         span = max(8, n_new + 4)
         window = seq.output_ids[-span:]
         prev = seq.output_ids[-span:-n_new] if n_new else seq.output_ids[-span:]
+        self._refuser_si_attention_amputee()
         try:
             full = tok.decode(window)
             head = tok.decode(prev) if prev else ""
@@ -822,7 +939,21 @@ class Engine:
             return ""
         return full[len(head):] if full.startswith(head) else full
 
+    @staticmethod
+    def _refuser_si_attention_amputee() -> None:
+        """Les bras B et C d'ACVRAM_PA_ARM amputent l'attention paginee : la
+        sortie du modele est fausse. Elle ne doit pas pouvoir etre lue, sinon
+        elle deviendra le prochain chiffre plausible qui se transporte."""
+        bras = os.environ.get("ACVRAM_PA_ARM", "A")
+        if bras and bras[0] != "A":
+            raise RuntimeError(
+                f"ACVRAM_PA_ARM={bras} : l'attention paginee est amputee, la "
+                "sortie est FAUSSE et le decodage du texte est refuse. Ce bras "
+                "ne sert qu'a chronometrer le pas."
+            )
+
     def _decode_all(self, seq: Sequence) -> str:
+        self._refuser_si_attention_amputee()
         try:
             return self.tokenizer.decode(seq.output_ids)
         except Exception:                            # noqa: BLE001

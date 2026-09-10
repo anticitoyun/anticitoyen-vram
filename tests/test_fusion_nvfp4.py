@@ -116,26 +116,76 @@ def test_pile_juste_a_tout_nombre_de_jetons(n):
     from acvram.kernels import get_extension
     if not hasattr(get_extension(), "nvfp4_gemv"):
         pytest.skip("extension sans nvfp4_gemv")
+    from acvram.kernels import _NVFP4_GEMV_MAX
     dev = torch.device("cuda")
     lins = [_lin(768, 2048, 1.0, 11), _lin(576, 2048, 40.0, 12)]   # q_a, kv_a de GLM
     for l in lins:
         l.qweight = l.qweight.to(dev)
     g = torch.Generator(device="cuda").manual_seed(n)
     x = torch.randn(n, 2048, device=dev, dtype=torch.bfloat16, generator=g)
-    # Référence exacte en bf16 : au-delà de huit jetons, les projections
-    # séparées passent par les tensor cores FP4 (2 à 9,5 % d'erreur, c'est
-    # leur prix) et ne peuvent pas servir d'étalon.
     from acvram.quant.nvfp4 import dequantize_nvfp4
     wref = torch.cat([dequantize_nvfp4(l.qweight, torch.bfloat16) for l in lins])
-    separe = torch.nn.functional.linear(x, wref).float()
+    exact = torch.nn.functional.linear(x, wref).float()
     fus = stack_nvfp4_linears(lins)
     obtenu = fus(x)
-    if n <= 8:
-        # GEMV : la pile doit rendre exactement les bits des GEMV séparées
-        assert torch.equal(obtenu, torch.cat([l(x) for l in lins], dim=-1))
-        return
+
+    # DEUX criteres, et ce que chacun peut rendre faux est ecrit ici.
+    #
+    # 1. Plancher de SNR DECLARE contre la reference bf16, par bloc de sortie,
+    #    a TOUT n. Rend faux si le chemin de la pile applique la mauvaise
+    #    echelle a un bloc — le defaut de GLM-4.7 du 6/09. Verifie : en
+    #    sabotant le chemin de la pile (echelle de q_a imposee au bloc kv_a),
+    #    les six valeurs de n rendent 0,22 dB et echouent, 6/6.
+    # 2. Egalite bit a bit avec les projections separees, dans le regime GEMV
+    #    seulement. Le critere etait ecrit « n <= 8 » quand le seuil valait 8 ;
+    #    il suit maintenant la constante, sans quoi il se decale a chaque
+    #    mesure du seuil — c'est ce decalage qui a fait echouer ce test a n = 9
+    #    et 16 quand le seuil est passe a 32 le 10/09 (824d2fd), sur le chemin
+    #    DEVENU LE PLUS JUSTE des deux : la tolerance par element de 2**-6
+    #    etait calibree pour la route de la pile au-dela du seuil, pas pour la
+    #    GEMV, qui rend 50 dB la ou la tolerance exige 1,56 %.
+    #
+    # CE QU'AUCUN DES DEUX NE PEUT RENDRE FAUX, et il faut le savoir : une
+    # echelle fausse dans la DONNEE. La reference `exact` est construite en
+    # dequantifiant les memes objets ; si `global_scale` est corrompu, la
+    # reference l'est identiquement et le SNR reste a 50 dB. Verifie aussi :
+    # 0/6. Le critere 2 y est aveugle pour la meme raison — la pile et les
+    # GEMV separees lisent la meme echelle fausse et s'accordent en etant
+    # toutes deux fausses. Ces deux criteres controlent le CHEMIN, pas la
+    # donnee ; ce qui garde la donnee est le SNR par tenseur ecrit au manifeste
+    # a la conversion.
+    #
+    # Plancher pose sur la PILE, mesure du 10/09 sur cette configuration :
+    #
+    #     n      pile q_a   pile kv_a   noyaux separes   chemin sabote
+    #     16       51,1        50,4          49,3            0,22
+    #     32       51,1        50,4          49,3              —
+    #     64      333,1       365,2          28,3            0,22
+    #    128      333,1       365,1          28,2              —
+    #
+    # La pile deroule vers bf16 au-dela du seuil, d'ou ses 333 dB ; les noyaux
+    # separes y paient 28 dB par les tensor cores FP4, soit ~4 % RMS — le prix
+    # annonce du format, pas un defaut, et c'est pourquoi le plancher porte sur
+    # la pile et non sur eux. 20 dB laisse 30 dB de marge au pire regime mesure.
     obtenu = obtenu.float()
-    ecart = (obtenu - separe).abs()
-    tol = separe.abs() * 2 ** -6 + 1e-2
-    assert (ecart <= tol).float().mean().item() > 0.999, \
-        f"n={n} : {int((ecart > tol).sum())} valeurs hors tolérance, max {ecart.max().item():.3e}"
+    PLANCHER_DB = 20.0
+    debut = 0
+    for i, largeur in enumerate((768, 576)):
+        a_ = obtenu[:, debut:debut + largeur]
+        b_ = exact[:, debut:debut + largeur]
+        bruit = (a_ - b_).pow(2).mean()
+        snr = 10 * torch.log10(b_.pow(2).mean() / bruit.clamp(min=1e-30)).item()
+        assert snr >= PLANCHER_DB, (
+            f"n={n}, bloc {i} ({largeur} sorties) : SNR de la pile "
+            f"{snr:.2f} dB sous le plancher declare de {PLANCHER_DB} dB. "
+            f"Attendu ~50 dB sous le seuil GEMV, ~333 dB au-dela. Une chute "
+            f"a ce point signe une echelle prise au mauvais bloc — le defaut "
+            f"de GLM-4.7 du 6/09, qui rend 0,22 dB et que la comparaison "
+            f"pile/separees ne voit PAS puisque les deux lisent la meme "
+            f"echelle fausse.")
+        debut += largeur
+
+    if n <= _NVFP4_GEMV_MAX:
+        # En plus du plancher : la fusion ne doit rien changer aux bits que
+        # rendent les GEMV separees.
+        assert torch.equal(fus(x), torch.cat([l(x) for l in lins], dim=-1))

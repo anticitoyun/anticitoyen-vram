@@ -44,10 +44,27 @@ from .mla import MLA_BUCKET, godet_mla   # un graphe par palier de cache latent
 
 __all__ = ["GraphRunner"]
 
-# Au-delà, les godets les moins récents ne sont plus capturés : chaque graphe
-# retient sa mémoire d'activations, et un serveur qui voit trente formes de
-# lot différentes est un serveur de lots — le prefill y domine de toute façon.
-MAX_GRAPHS = 16
+# Plafond du NOMBRE TOTAL de graphes captures. Chaque graphe retient sa memoire
+# d'activations, d'ou un plafond ; mais il faut lire ce qu'il fait vraiment.
+#
+# LE COMMENTAIRE PRECEDENT DISAIT « les godets les moins recents ne sont plus
+# captures », ce qui decrit une eviction LRU. IL N'Y EN A AUCUNE. Une fois les
+# seize places prises, toute forme nouvelle est refusee DEFINITIVEMENT et
+# repasse en eager, quelle que soit la frequence a laquelle elle revient. Les
+# seize premieres formes rencontrees gardent leur place pour la vie du
+# serveur, meme si elles ne reviennent jamais.
+#
+# La cle etant (b, ql, nblk, lb), le nombre de formes croit avec la variete
+# des tailles de lot ET des longueurs de contexte : un lot de douze qui se
+# vide sequence par sequence parcourt a lui seul douze valeurs de b. Seize
+# places se remplissent donc en quelques tours, et les refus qui suivent
+# dependent du texte genere — c'est-a-dire qu'ils varient d'un essai a
+# l'autre. Piste mesuree le 10/09 pour notre dispersion de 26 a 37 % contre
+# 1,5 a 1,8 % chez llama.cpp.
+#
+# Configurable pour pouvoir mesurer ce que coute ce plafond, sans le deplacer
+# par defaut : le defaut reste 16, et une campagne qui le bouge doit le dire.
+MAX_GRAPHS = int(os.environ.get("ACVRAM_MAX_GRAPHS", "16"))
 
 
 def _empreinte_adresses(runner, entry: dict) -> dict:
@@ -232,24 +249,39 @@ class GraphRunner:
                 return None
             try:
                 entry = self._capture(b, ql, nblk, batch)
-            except (torch.OutOfMemoryError, torch.AcceleratorError, RuntimeError) as e:
-                # capture impossible faute de VRAM (modèle qui remplit la carte) :
-                # le décodage continue en eager plutôt que de tuer le serveur
-                if "out of memory" not in str(e).lower():
-                    raise
+            except Exception as e:                        # noqa: BLE001
+                # UNE CAPTURE QUI ECHOUE NE DOIT PAS TUER LE SERVEUR, quelle
+                # qu'en soit la cause. Le filtre precedent ne relachait que
+                # l'OOM, reconnu au TEXTE du message : toute autre defaillance
+                # etait relevee et arretait le moteur. Mesure du 10/09 :
+                # cudaErrorStreamCaptureInvalidated a neuf sequences arretait
+                # `acvram serve` au lieu de le degrader — une panne la ou le
+                # commentaire promettait une degradation.
+                #
+                # ET LA CAUSE EST JOURNALISEE, jamais tue : un echec de capture
+                # silencieux est precisement ce qui nous a coute la journee. On
+                # imprime le type et le message, puis on replie en eager.
+                # UNE SEULE FOIS PAR SESSION : `enabled` passant a False, on
+                # ne repasse normalement pas ici — mais si un jour un chemin
+                # reessaie, un serveur qui refuse la capture a chaque pas
+                # noierait sa propre sortie. Le drapeau coute un attribut.
+                self.raison = f"{type(e).__name__}: {str(e).splitlines()[0][:160]}"
+                # NOMMER L'ALLOCATEUR quand il est en cause, apport de main a
+                # ne pas perdre : les segments extensibles sont en tension avec
+                # la capture, qui exige des adresses figees. Sans cette
+                # mention, une capture perdue sous ACVRAM_ALLOC_EXTENSIBLE ne
+                # se lit que comme un manque de VRAM.
+                extensible = "expandable_segments" in os.environ.get(
+                    "PYTORCH_CUDA_ALLOC_CONF", "")
+                if not getattr(self, "_dit_raison", False):
+                    self._dit_raison = True
+                    print(f"[acvram] graphes CUDA desactives, decodage en eager "
+                          f"— capture impossible : {self.raison}"
+                          + (" (allocateur a segments extensibles actif)"
+                             if extensible else ""), flush=True)
                 self.enabled = False
                 self.graphs.clear()
                 torch.cuda.empty_cache()
-                # Nommer l'allocateur dans le message : les segments
-                # extensibles sont en tension avec la capture, qui exige des
-                # adresses figées. Sans cette mention, une capture perdue sous
-                # ACVRAM_ALLOC_EXTENSIBLE ne se lit que comme un manque de VRAM.
-                extensible = "expandable_segments" in os.environ.get(
-                    "PYTORCH_CUDA_ALLOC_CONF", "")
-                print("[acvram] graphes CUDA désactivés : mémoire insuffisante "
-                      "pour la capture, décodage en eager"
-                      + (" (allocateur à segments extensibles actif)"
-                         if extensible else ""), flush=True)
                 return None
             self.graphs[key] = entry
             if os.environ.get("ACVRAM_TRACE_PTRS"):

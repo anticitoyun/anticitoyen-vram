@@ -947,6 +947,23 @@ ROWS_PAR_BLOC = 4
 _REFUS_FUSION: dict[str, int] = {}
 
 
+def _sans_fusion() -> bool:
+    """Echappement de MESURE, commun aux quatre empileurs.
+
+    `ACVRAM_SANS_FUSION_BF16` n'existait que pour `stack_plain_linears` : le
+    gain de la fusion etait donc mesurable en bf16 et NULLE PART AILLEURS. D'ou
+    le +2,60 % du 9/09, mesure en bf16 pur — ou 100 % des groupes fusionnent —
+    et transporte a tort sur un int8 calibre, ou `_scaler_commun` n'en accepte
+    que 7,8 % (5 groupes sur 64 sur Llama-2-7b-int8, parce que la recherche AWQ
+    choisit un exposant `alpha` par tenseur).
+
+    Sans interrupteur, l'A/B demanderait deux versions du code — et comparerait
+    autre chose que la fusion.
+    """
+    return bool(os.environ.get("ACVRAM_SANS_FUSION")
+                or os.environ.get("ACVRAM_SANS_FUSION_BF16"))
+
+
 def _scaler_commun(lins: list):
     """Rend (utilisable, scaler a porter par la pile).
 
@@ -1028,6 +1045,8 @@ def stack_nvfp4_linears(lins: list) -> Optional["QuantLinear"]:
     if os.environ.get("ACVRAM_FUSION_NVFP4") == "0":     # témoin de mesure
         return _refus_fusion("temoin ACVRAM_FUSION_NVFP4=0")
     from ..quant.nvfp4 import NVFP4Tensor
+    if _sans_fusion():
+        return None
     ts = [getattr(l, "qweight", None) for l in lins]
     if not all(isinstance(t, NVFP4Tensor) for t in ts):
         return _refus_fusion("un des poids n est pas NVFP4")
@@ -1101,7 +1120,7 @@ def stack_plain_linears(lins: list) -> Optional["QuantLinear"]:
     # Echappement : sert a mesurer le gain de la fusion sur la meme binaire, et
     # a comparer les jetons emis avec et sans elle. Sans interrupteur, l'A/B
     # demanderait deux versions du code -- et comparerait autre chose.
-    if os.environ.get("ACVRAM_SANS_FUSION_BF16"):
+    if _sans_fusion():
         return None
     ts = [getattr(l, "qweight", None) for l in lins]
     if not all(isinstance(t, PlainTensor) for t in ts):
@@ -1173,6 +1192,8 @@ def stack_int8_linears(lins: list) -> Optional["QuantLinear"]:
     """Empile des QuantLinear INT8 de même entrée en un seul (lignes
     concaténées) : une GEMV au lieu de n au décodage. None si inapplicable."""
     from ..quant.formats import INT8Tensor
+    if _sans_fusion():
+        return None
     ts = [getattr(l, "qweight", None) for l in lins]
     if not all(isinstance(t, INT8Tensor) for t in ts):
         return None
@@ -1198,10 +1219,28 @@ def stack_int8_linears(lins: list) -> Optional["QuantLinear"]:
                    torch.cat([t.zeros for t in ts]).contiguous(),
                    ts[0].group_size,
                    (sum(t.shape[0] for t in ts), ts[0].shape[1]))
+    # LES ORIGINAUX DEVIENNENT DES VUES DE LA PILE. Le commentaire ci-dessous
+    # affirmait « comme pour les poids » alors que seul le BIAIS etait repointe :
+    # les poids restaient dupliques, et le `forward` garde les deux chemins
+    # (fusion sous SEUIL_FUSION, projections separees au-dela), donc les deux
+    # copies survivaient au chargement. Mesure du 10/09 sur Llama-2-7b-int8 :
+    # model.nbytes rendait 7 223 386 112 octets pour 6 761 930 752 sur disque,
+    # soit 461 455 360 de trop — exactement 5 x 92 291 072, la taille de cinq
+    # gate_up fusionnes. 6,4 % de VRAM pour +2,6 % de debit, sur la grandeur
+    # meme qui declenche l'exil d'une couche (61 a 70 % du debit).
+    #
+    # La disposition le permettait depuis toujours : `cat` sur l'axe 0 rend un
+    # tenseur contigu dont chaque tranche `[d:d+n]` est contigue elle aussi.
+    # `stack_plain_linears` et `stack_nvfp4_linears` le faisaient deja, avec
+    # l'argument ecrit ; seuls int8 et int4_awq ne l'avaient pas.
+    d = 0
+    for l, src in zip(lins, ts):
+        n = src.qweight.shape[0]
+        l.qweight = INT8Tensor(t.qweight[d:d + n], t.scales[d:d + n],
+                               t.zeros[d:d + n], src.group_size, src.shape)
+        d += n
     pbiais = torch.cat(biais) if biais[0] is not None else None
     if pbiais is not None:
-        # Les originaux deviennent des vues, comme pour les poids : le prefill
-        # continue de les appeler separement sans dupliquer un octet.
         o = 0
         for l, b in zip(lins, biais):
             l.bias = pbiais.narrow(0, o, b.shape[0]); o += b.shape[0]
@@ -1226,6 +1265,8 @@ def stack_int4_awq_linears(lins: list) -> Optional["QuantLinear"]:
     lancements par pas de decodage.
     """
     from ..quant.int4 import INT4Tensor
+    if _sans_fusion():
+        return None
     ts = [getattr(l, "qweight", None) for l in lins]
     if not all(isinstance(t, INT4Tensor) for t in ts):
         return _refus_fusion("un des poids n est pas INT4-AWQ")
@@ -1248,6 +1289,15 @@ def stack_int4_awq_linears(lins: list) -> Optional["QuantLinear"]:
                    ts[0].group_size,
                    (sum(t.shape[0] for t in ts), ts[0].shape[1]),
                    ts[0].padded_in)
+    # Vues, meme raison qu'en int8 ci-dessous : le prefill continue d'appeler
+    # les projections separement, sans qu'un octet soit duplique.
+    d = 0
+    for l, src in zip(lins, ts):
+        n = src.qweight.shape[0]
+        l.qweight = INT4Tensor(t.qweight[d:d + n], t.scales[d:d + n],
+                               t.zeros[d:d + n], src.group_size, src.shape,
+                               src.padded_in)
+        d += n
     pbiais = torch.cat(biais) if biais[0] is not None else None
     if pbiais is not None:
         o = 0
