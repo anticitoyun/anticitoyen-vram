@@ -22,9 +22,9 @@ Regles du projet appliquees ici :
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -33,9 +33,19 @@ from pathlib import Path
 P_POIDS = 6_738_417_664          # poids comptes dans le manifeste des etalons
 GIO = 1024 ** 3
 
+CARTE = Path(__file__).resolve().parent / "carte.sh"
 BASE = Path("/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram")
 SOURCE = BASE / "Llama-2-7b-hf"
-CORPUS = Path("~/Bureau/Claude/acvram-memoire/corpus/wiki-gptq.txt")
+# Corpus PARTAGE, pas dans un worktree : claude-0a l'a cherche et ne l'a pas
+# trouve, parce qu'il ne vivait que dans mon arbre et n'etait pas suivi par git.
+# Deux campagnes qui ne lisent pas le meme fichier ne sont pas sur la meme
+# courbe, et ce defaut-la ne se voit qu'a la fin.
+CORPUS = Path("/mnt/AI_GENERATOR/corpus/wiki-gptq.txt")
+CORPUS_SHA = "e52922746ad09bac73b0dba32b2987c0d7924da14337dcd43c1d9113a9f6d0ae"
+# Pour memoire, le brut de llama.cpp — PAS celui de l'etalon exterieur :
+#   wiki.test.raw  173c87a53759e0201f33e0ccf978e510c2042d7f2cb78229d9a50d79b9e7dd08
+#   335 688 jetons, 163 segments, PPL de reference 5,5625 (contre 5,4141)
+# L'ecart de 2,67 % entre les deux corpus serait attribue aux bits.
 RELEVES = Path("~/Bureau/Claude/acvram-memoire/corpus")
 
 # Budget en Gio -> (nom du dossier, valeur prevue si temoin)
@@ -95,10 +105,17 @@ def service(nom: str, argv: list[str], journal: Path, memoire_max: str,
            "--setenv=ACVRAM_CUDA_HOME=/usr/local/cuda-13.2",
            f"--setenv=ACVRAM_KERNEL_CACHE={os.environ.get('ACVRAM_KERNEL_CACHE', '')}",
            "/bin/bash", "-c",
+           # carte.sh A L'INTERIEUR du service, jamais autour — precaution de
+           # claude-0a, et son garde refuse maintenant activement l'inverse :
+           # enveloppant systemd-run, le premier verrou est relache des que le
+           # travail est parti et un second concurrent obtient la carte sur un
+           # service encore actif. C'est ainsi que deux mesures ont charge en
+           # meme temps le 10/09 a 11h05, l'une morte en OOM et l'autre rendant
+           # un chiffre que rien ne signalait comme faux.
            # le code de sortie part dans la sentinelle : le service peut mourir
            # sans que la commande ait parle
-           f"{' '.join(map(repr_sh, argv))} > {journal!s} 2>&1; "
-           f"echo $? > {sentinelle!s}"]
+           f"{repr_sh(str(CARTE))} {' '.join(map(repr_sh, argv))} "
+           f"> {journal!s} 2>&1; echo $? > {sentinelle!s}"]
     subprocess.run(cmd, check=True)
     t0 = time.time()
     dernier = 0.0
@@ -163,6 +180,19 @@ def main() -> int:
     if not SOURCE.exists():
         print(f"ECHEC / CAUSE: source absente {SOURCE}")
         return 2
+    # Le sha du corpus se VERIFIE, il ne se suppose pas.
+    if not CORPUS.exists():
+        print(f"ECHEC / CAUSE: corpus absent {CORPUS}. Il se reconstruit par "
+              f"outils/etalon-ppl-transformers.py (\"\\n\\n\".join du split "
+              f"test de wikitext-2-raw-v1).")
+        return 2
+    sha = hashlib.sha256(CORPUS.read_bytes()).hexdigest()
+    if sha != CORPUS_SHA:
+        print(f"ECHEC / CAUSE: corpus {CORPUS.name} de sha {sha[:16]} au lieu "
+              f"de {CORPUS_SHA[:16]}. Un corpus different rend une perplexite "
+              f"differente sans que rien ne le signale.")
+        return 2
+    print(f"  corpus verifie : sha {sha[:16]}")
     sortie = Path(a.sortie)
     sortie.mkdir(parents=True, exist_ok=True)
 
@@ -175,7 +205,15 @@ def main() -> int:
     # jour. Une passe rejouee a l'identique donne ce chiffre pour le prix d'une
     # evaluation, et rien ne se publie avant de l'avoir.
     dispersion = None
-    ref_dossier = BASE / "Llama-2-7b-int8"
+    # Precision de claude-f2 : la dispersion se prend SUR LE POINT qu'on
+    # comparera, pas sur un autre — la reproductibilite n'a aucune raison
+    # d'etre la meme a 3,75 et a 6,55 Gio. Quand la campagne ne porte qu'un
+    # temoin, on la mesure sur le dossier deja converti qui lui correspond ;
+    # sinon sur le plafond, le plus exigeant des deux (son ecart a l'etalon
+    # est de 0,002 %, celui du plancher de 3,6 %).
+    ref_dossier = BASE / ("Llama-2-7b-nvfp4"
+                          if points and points[0][0] < 4.0 and len(points) == 1
+                          else "Llama-2-7b-int8")
     if ref_dossier.exists():
         passes = []
         for k in (1, 2):
