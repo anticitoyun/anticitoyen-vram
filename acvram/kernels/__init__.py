@@ -162,6 +162,36 @@ def _venv_cuda_home() -> Optional[str]:
     return None
 
 
+def _flags_variables() -> list[str]:
+    """Flags -D derives de l'environnement, valides AVANT toute compilation.
+
+    Hors du try de get_extension() a dessein : la, une ValueError serait
+    avalee et rendrait un repli silencieux sur les noyaux de reference — une
+    valeur hors domaine passerait pour « les noyaux ne sont pas disponibles ».
+    Un refus doit refuser.
+    """
+    flags = []
+    for var, macro, valides in (
+            ("ACVRAM_GW_WARPS", "GW_WARPS", None),
+            ("ACVRAM_PA_WARPS", "PA_WARPS", (1, 2, 4, 8, 16, 32)),
+    ):
+        v = os.environ.get(var)
+        if not v:
+            continue
+        if valides is not None:
+            try:
+                n = int(v)
+            except ValueError:
+                n = -1
+            if n not in valides:
+                raise ValueError(
+                    f"{var}={v} : valeurs admises {list(valides)}. Une valeur "
+                    "hors domaine est refusee — c'est ce refus qui prouve que "
+                    "le code charge contient bien cette validation.")
+        flags.append(f"-D{macro}={v}")
+    return flags
+
+
 def _ensure_cuda_home(need: tuple[int, int]) -> None:
     """Choisit un nvcc capable d'émettre pour ``need``, sans rien exiger du système.
 
@@ -249,6 +279,7 @@ def get_extension():
     # systeme est plus ancien (Mint 22.3 livre CUDA 12.0) compilait sans
     # broncher pour sm_86 et echouait sur l'en-tete manquant.
     _ensure_cuda_home(_MIN_CUDA_FOR_SM120)
+    _flags_var = _flags_variables()        # leve AVANT le try : voir sa docstring
 
     try:
         from torch.utils.cpp_extension import load
@@ -281,16 +312,24 @@ def get_extension():
         # ccache de rendre un objet perime, sans le desactiver ni perdre son
         # benefice sur les compilations legitimes.
         src = os.path.join(here, "acvram_kernels.cu")
+        # LES FLAGS FONT PARTIE DU SOURCE. Hacher le seul contenu du fichier
+        # laissait ouvert le defaut qu'on croyait ferme : un parametre passe
+        # par -D ne change pas le fichier, donc quatre valeurs donnaient le
+        # meme ACVRAM_SRC_HASH, donc ccache pouvait rendre le meme objet et
+        # quatre reglages rendaient quatre fois le meme chiffre. GW_WARPS
+        # etait deja dans ce cas, PA_WARPS l'aurait ete. On hache donc le
+        # couple (contenu, flags qui varient).
         with open(src, "rb") as fh:
-            _SRC_HASH = hashlib.sha256(fh.read()).hexdigest()[:16]
+            _SRC_HASH = hashlib.sha256(
+                fh.read() + "\x00".join(sorted(_flags_var)).encode()
+            ).hexdigest()[:16]
         _SRC_U64 = int(_SRC_HASH, 16)          # entier : aucun guillemet a echapper
         _EXT = load(
             name="acvram_kernels",
             sources=[src],
             extra_cuda_cflags=["-O3", "--use_fast_math", "-lineinfo",
                                f"-DACVRAM_SRC_HASH={_SRC_U64}ULL"]
-            + ([f"-DGW_WARPS={os.environ['ACVRAM_GW_WARPS']}"]
-               if os.environ.get("ACVRAM_GW_WARPS") else [])
+            + _flags_var
             + _arch_flags(),
             extra_cflags=["-O3"],
             build_directory=cache,

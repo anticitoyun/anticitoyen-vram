@@ -755,7 +755,20 @@ extern "C" __attribute__((used)) const unsigned long long acvram_src_hash
     = ACVRAM_SRC_HASH;
 
 constexpr int PA_CHUNK = 512;
-constexpr int PA_WARPS = 4;
+// Warps par bloc du noyau d'attention. Parametrable a la COMPILATION, parce
+// que sacc[PA_WARPS][D] est une declaration de memoire partagee : la valeur
+// doit etre connue de nvcc. Elle ne change ni le reduce, ni le nombre de
+// lancements, ni la memoire de travail — a la difference de PA_CHUNK.
+#ifndef PA_WARPS
+#define PA_WARPS 4
+#endif
+static_assert(PA_WARPS >= 1 && PA_WARPS <= 32,
+              "PA_WARPS hors domaine : 32 warps font 1024 threads, le plafond "
+              "materiel d'un bloc.");
+static_assert((PA_WARPS & (PA_WARPS - 1)) == 0,
+              "PA_WARPS doit etre une puissance de 2 : la repartition des "
+              "positions t += PA_WARPS reste alors reguliere sur les tranches "
+              "en puissance de 2 de PA_CHUNK.");
 
 template <int D, typename QT, typename OT>
 __global__ void paged_attn_partial_kernel(
