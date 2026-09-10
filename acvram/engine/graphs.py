@@ -249,26 +249,22 @@ class GraphRunner:
                 # reessaie, un serveur qui refuse la capture a chaque pas
                 # noierait sa propre sortie. Le drapeau coute un attribut.
                 self.raison = f"{type(e).__name__}: {str(e).splitlines()[0][:160]}"
+                # NOMMER L'ALLOCATEUR quand il est en cause, apport de main a
+                # ne pas perdre : les segments extensibles sont en tension avec
+                # la capture, qui exige des adresses figees. Sans cette
+                # mention, une capture perdue sous ACVRAM_ALLOC_EXTENSIBLE ne
+                # se lit que comme un manque de VRAM.
+                extensible = "expandable_segments" in os.environ.get(
+                    "PYTORCH_CUDA_ALLOC_CONF", "")
                 if not getattr(self, "_dit_raison", False):
                     self._dit_raison = True
                     print(f"[acvram] graphes CUDA desactives, decodage en eager "
-                          f"— capture impossible : {self.raison}", flush=True)
+                          f"— capture impossible : {self.raison}"
+                          + (" (allocateur a segments extensibles actif)"
+                             if extensible else ""), flush=True)
                 self.enabled = False
                 self.graphs.clear()
                 torch.cuda.empty_cache()
-<<<<<<< HEAD
-=======
-                # Nommer l'allocateur dans le message : les segments
-                # extensibles sont en tension avec la capture, qui exige des
-                # adresses figées. Sans cette mention, une capture perdue sous
-                # ACVRAM_ALLOC_EXTENSIBLE ne se lit que comme un manque de VRAM.
-                extensible = "expandable_segments" in os.environ.get(
-                    "PYTORCH_CUDA_ALLOC_CONF", "")
-                print("[acvram] graphes CUDA désactivés : mémoire insuffisante "
-                      "pour la capture, décodage en eager"
-                      + (" (allocateur à segments extensibles actif)"
-                         if extensible else ""), flush=True)
->>>>>>> origin/main
                 return None
             self.graphs[key] = entry
             if os.environ.get("ACVRAM_TRACE_PTRS"):
