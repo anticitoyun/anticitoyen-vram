@@ -44,6 +44,12 @@ VARIABLES_LUES = {
     # exactement son role — une variable posee qui ne va nulle part est une
     # consigne silencieusement ignoree.
     "ACVRAM_PA_ARM",
+    # Echappement de mesure de la fusion, pour les QUATRE empileurs.
+    # ACVRAM_SANS_FUSION_BF16 ne coupait que le chemin bf16 : le gain de la
+    # fusion n'etait donc mesurable qu'en bf16, et c'est ainsi qu'un +2,60 %
+    # mesure la ou 100 % des groupes fusionnent a ete transporte sur un int8
+    # ou 7,8 % seulement fusionnent.
+    "ACVRAM_SANS_FUSION",
     "ACVRAM_SCALER_SANS_CACHE",
     # ACVRAM_SRC_HASH n'est PAS une variable d'environnement : c'est une option
     # de compilation (-D) portant le sha du .cu. Elle figure ici parce que

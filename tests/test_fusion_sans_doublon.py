@@ -104,3 +104,55 @@ def test_bf16_partageait_deja_le_stockage():
     base = pile.qweight.weight.untyped_storage().data_ptr()
     assert la.qweight.weight.untyped_storage().data_ptr() == base
     assert lb.qweight.weight.untyped_storage().data_ptr() == base
+
+
+def test_l_echappement_coupe_les_quatre_empileurs(monkeypatch):
+    """ACVRAM_SANS_FUSION doit couper les QUATRE, pas seulement le bf16.
+
+    `ACVRAM_SANS_FUSION_BF16` n'existait que pour `stack_plain_linears` : le
+    gain de la fusion etait donc mesurable en bf16 et nulle part ailleurs, et
+    c'est ainsi qu'un +2,60 % mesure la ou 100 % des groupes fusionnent a ete
+    transporte sur un int8 ou 7,8 % seulement fusionnent. Un A/B sans
+    interrupteur demanderait deux versions du code, et comparerait autre chose.
+    """
+    from acvram.engine.layers import (stack_int4_awq_linears,
+                                      stack_int8_linears,
+                                      stack_nvfp4_linears,
+                                      stack_plain_linears)
+
+    def _ql8():
+        a, b = _int8(64, 256), _int8(32, 256)
+        return [QuantLinear(a, out_features=64, in_features=256),
+                QuantLinear(b, out_features=32, in_features=256)]
+
+    def _ql4():
+        a, b = _int4(64, 256), _int4(32, 256)
+        return [QuantLinear(a, out_features=64, in_features=256),
+                QuantLinear(b, out_features=32, in_features=256)]
+
+    def _qlp():
+        f = lambda n: PlainTensor(torch.randn(n, 256, dtype=torch.bfloat16),
+                                  (n, 256), "bf16")
+        return [QuantLinear(f(64), out_features=64, in_features=256),
+                QuantLinear(f(32), out_features=32, in_features=256)]
+
+    # Sans l'echappement : les trois chemins eprouvables ici aboutissent.
+    monkeypatch.delenv("ACVRAM_SANS_FUSION", raising=False)
+    monkeypatch.delenv("ACVRAM_SANS_FUSION_BF16", raising=False)
+    assert stack_int8_linears(_ql8()) is not None
+    assert stack_int4_awq_linears(_ql4()) is not None
+    assert stack_plain_linears(_qlp()) is not None
+
+    # Avec : aucun. C'est le « changement qui doit casser » — si l'un des
+    # quatre revenait non nul, l'A/B mesurerait un bras qui fusionne encore.
+    monkeypatch.setenv("ACVRAM_SANS_FUSION", "1")
+    assert stack_int8_linears(_ql8()) is None
+    assert stack_int4_awq_linears(_ql4()) is None
+    assert stack_plain_linears(_qlp()) is None
+    assert stack_nvfp4_linears(_ql8()) is None      # refus par format ET par garde
+
+    # L'ancien nom continue de couper le bf16, pour ne pas invalider un A/B
+    # deja lance avec lui.
+    monkeypatch.delenv("ACVRAM_SANS_FUSION")
+    monkeypatch.setenv("ACVRAM_SANS_FUSION_BF16", "1")
+    assert stack_plain_linears(_qlp()) is None

@@ -947,6 +947,23 @@ ROWS_PAR_BLOC = 4
 _REFUS_FUSION: dict[str, int] = {}
 
 
+def _sans_fusion() -> bool:
+    """Echappement de MESURE, commun aux quatre empileurs.
+
+    `ACVRAM_SANS_FUSION_BF16` n'existait que pour `stack_plain_linears` : le
+    gain de la fusion etait donc mesurable en bf16 et NULLE PART AILLEURS. D'ou
+    le +2,60 % du 9/09, mesure en bf16 pur — ou 100 % des groupes fusionnent —
+    et transporte a tort sur un int8 calibre, ou `_scaler_commun` n'en accepte
+    que 7,8 % (5 groupes sur 64 sur Llama-2-7b-int8, parce que la recherche AWQ
+    choisit un exposant `alpha` par tenseur).
+
+    Sans interrupteur, l'A/B demanderait deux versions du code — et comparerait
+    autre chose que la fusion.
+    """
+    return bool(os.environ.get("ACVRAM_SANS_FUSION")
+                or os.environ.get("ACVRAM_SANS_FUSION_BF16"))
+
+
 def _scaler_commun(lins: list):
     """Rend (utilisable, scaler a porter par la pile).
 
@@ -1028,6 +1045,8 @@ def stack_nvfp4_linears(lins: list) -> Optional["QuantLinear"]:
     if os.environ.get("ACVRAM_FUSION_NVFP4") == "0":     # témoin de mesure
         return _refus_fusion("temoin ACVRAM_FUSION_NVFP4=0")
     from ..quant.nvfp4 import NVFP4Tensor
+    if _sans_fusion():
+        return None
     ts = [getattr(l, "qweight", None) for l in lins]
     if not all(isinstance(t, NVFP4Tensor) for t in ts):
         return _refus_fusion("un des poids n est pas NVFP4")
@@ -1101,7 +1120,7 @@ def stack_plain_linears(lins: list) -> Optional["QuantLinear"]:
     # Echappement : sert a mesurer le gain de la fusion sur la meme binaire, et
     # a comparer les jetons emis avec et sans elle. Sans interrupteur, l'A/B
     # demanderait deux versions du code -- et comparerait autre chose.
-    if os.environ.get("ACVRAM_SANS_FUSION_BF16"):
+    if _sans_fusion():
         return None
     ts = [getattr(l, "qweight", None) for l in lins]
     if not all(isinstance(t, PlainTensor) for t in ts):
@@ -1173,6 +1192,8 @@ def stack_int8_linears(lins: list) -> Optional["QuantLinear"]:
     """Empile des QuantLinear INT8 de même entrée en un seul (lignes
     concaténées) : une GEMV au lieu de n au décodage. None si inapplicable."""
     from ..quant.formats import INT8Tensor
+    if _sans_fusion():
+        return None
     ts = [getattr(l, "qweight", None) for l in lins]
     if not all(isinstance(t, INT8Tensor) for t in ts):
         return None
@@ -1244,6 +1265,8 @@ def stack_int4_awq_linears(lins: list) -> Optional["QuantLinear"]:
     lancements par pas de decodage.
     """
     from ..quant.int4 import INT4Tensor
+    if _sans_fusion():
+        return None
     ts = [getattr(l, "qweight", None) for l in lins]
     if not all(isinstance(t, INT4Tensor) for t in ts):
         return _refus_fusion("un des poids n est pas INT4-AWQ")
