@@ -62,6 +62,20 @@ def _apply_penalties(logits: torch.Tensor, history: list[list[int]],
     return logits
 
 
+def besoin_historique(params) -> bool:
+    """L historique des jetons deja produits est-il LU par l echantillonnage ?
+
+    Il ne l est que hors du chemin glouton : les penalites de repetition et de
+    presence sont les seules a le consulter. L exposer ici plutot que de le
+    tester chez l appelant evite que les deux conditions divergent — celle de
+    `sample` et celle qui decide de CONSTRUIRE l historique. Un historique
+    construit puis jamais lu coute une concatenation par sequence et par pas,
+    proportionnelle au contexte total : a 4000 jetons c est un travail qui
+    grandit a chaque jeton produit, pour rien.
+    """
+    return not all(p.greedy for p in params)
+
+
 def sample(logits: torch.Tensor, params: list[SamplingParams],
            history: Optional[list[list[int]]] = None,
            generator: Optional[torch.Generator] = None
@@ -80,7 +94,7 @@ def sample(logits: torch.Tensor, params: list[SamplingParams],
     # general fait un tri, deux softmax et un tirage multinomial sur tout le
     # vocabulaire — plusieurs millisecondes par pas que le decodage a
     # temperature nulle payait pour rien.
-    if all(p.greedy for p in params):
+    if not besoin_historique(params):
         tokens = logits.argmax(dim=-1)
         # log p(choisi) = logit - logsumexp : une passe de réduction, là où
         # log_softmax matérialisait tout le vocabulaire avant d'en lire une

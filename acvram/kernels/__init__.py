@@ -621,14 +621,29 @@ _bk.register(_bk.Backend(
 _bk.register(_bk.Backend(
     name="fp4-tensorcores", formats=("nvfp4",), device_type="cuda",
     priority=110, available=_sm100_ok,
+    # EXCLU PENDANT UNE CAPTURE DE GRAPHE, et pas au-dela d'un lot.
+    #
+    # `torch._scaled_mm` passe par cuBLASLt, dont le premier appel sur un flux
+    # interroge une heuristique et reserve un espace de travail : une operation
+    # interdite pendant `cudaStreamCapture`. L'echauffement de `graphs.py` ne
+    # l'immunise pas, il tourne sur le flux annexe `side`.
+    #
+    # Mesure du 10/09/2026 sur Qwen3-4B-nvfp4 : huit sequences capturent un
+    # graphe et servent ; douze franchissent le seuil `> 8` en DECODAGE, donc
+    # a l'interieur de la capture, et rendent `captures = 0` avec 23,46 Gio
+    # libres — l'echec precede toute capture. La condition porte donc sur
+    # l'etat de capture et non sur un seuil de lot : un seuil se deplacerait
+    # au prochain changement de `max_batch_size` et le defaut reviendrait
+    # ailleurs. Le prefill, lui, n'est jamais capture : il garde ce chemin.
     # La garde par capacité est répétée ici : un échec réel dans
     # nvfp4_mm_tensorcore éteint son chemin globalement, et il ne faut pas
     # qu'un appel parti sur une carte sans FP4 le fasse pour toutes.
     matmul=lambda x, w: (nvfp4_mm_tensorcore(x, w)
                          if (x.reshape(-1, x.shape[-1]).shape[0] > 8
+                             and not torch.cuda.is_current_stream_capturing()
                              and torch.cuda.get_device_capability(x.device)
                              >= (10, 0)) else None),
-    note="prefill W4A4 via torch._scaled_mm, sm_100+"))
+    note="prefill W4A4 via torch._scaled_mm, sm_100+ ; jamais sous capture"))
 
 _bk.register(_bk.Backend(
     name="cpu-avx2", formats=("nvfp4", "int4_awq"), device_type="cpu",

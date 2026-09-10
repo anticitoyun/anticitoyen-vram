@@ -200,14 +200,14 @@ class Attention(nn.Module):
     # les contient toutes.
     def fuse(self) -> bool:
         from .layers import (stack_int8_linears, stack_nvfp4_linears,
-                             stack_plain_linears)
+                             stack_int4_awq_linears, stack_plain_linears)
         lins = [self.q_proj, self.k_proj] + ([] if self.k_eq_v else [self.v_proj])
         if any(l is None for l in lins):
             return False
 
         def _empiler(sous):
             return (stack_int8_linears(sous) or stack_nvfp4_linears(sous)
-                    or stack_plain_linears(sous))
+                    or stack_int4_awq_linears(sous) or stack_plain_linears(sous))
 
         self.qkv_proj = _empiler(lins)
         if self.qkv_proj is not None:
@@ -229,7 +229,7 @@ class Attention(nn.Module):
         # quelle que soit la petite — mesure a 0,01 us pres.
         if len(lins) < 3:
             return False
-        # MESUREE A -12,16 % PAR poste2 le 9/09/2026 sur qwen25-coder-14b :
+        # MESUREE A -12,16 % le 9/09/2026 sur qwen25-coder-14b :
         # 82,15 pas/s sans fusion partielle contre 72,16 avec, seuil de
         # detection 0,51 %. Le premier passage vaut encore 81,72 puis tout
         # bascule a 72 et y reste — une bascule, pas une dispersion. Tant que
@@ -489,9 +489,10 @@ class MLP(nn.Module):
         Les NVFP4 ont chacun leur échelle globale ; le noyau en accepte une par
         ligne de sortie, ce qui les empile sans réarrondi (v0.4.62)."""
         from .layers import (stack_int8_linears, stack_nvfp4_linears,
-                             stack_plain_linears)
+                             stack_int4_awq_linears, stack_plain_linears)
         paire = [self.gate_proj, self.up_proj]
         self.gate_up = (stack_int8_linears(paire) or stack_nvfp4_linears(paire)
+                        or stack_int4_awq_linears(paire)
                         or stack_plain_linears(paire))
         return self.gate_up is not None
 

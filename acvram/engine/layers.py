@@ -1185,7 +1185,7 @@ def stack_int8_linears(lins: list) -> Optional["QuantLinear"]:
     # groupes tout-int8 des modeles a biais — Qwen2.5 en porte sur q, k et v —
     # alors que `stack_nvfp4_linears` les accepte depuis ce matin avec la meme
     # justification, 150 lignes plus haut. Deux fonctions voisines, deux
-    # regles opposees sur le meme objet : releve par poste4 en dressant la
+    # regles opposees sur le meme objet : releve en dressant la
     # table de verite des quatre cas (int8/nvfp4 x avec/sans biais).
     biais = [l.bias for l in lins]
     if any((b is None) != (biais[0] is None) for b in biais):
@@ -1202,6 +1202,54 @@ def stack_int8_linears(lins: list) -> Optional["QuantLinear"]:
     if pbiais is not None:
         # Les originaux deviennent des vues, comme pour les poids : le prefill
         # continue de les appeler separement sans dupliquer un octet.
+        o = 0
+        for l, b in zip(lins, biais):
+            l.bias = pbiais.narrow(0, o, b.shape[0]); o += b.shape[0]
+    return QuantLinear(t, bias=pbiais, scaler=scaler_pile)
+
+
+def stack_int4_awq_linears(lins: list) -> Optional["QuantLinear"]:
+    """Empile des QuantLinear INT4-AWQ de meme entree en un seul.
+
+    Le format n'a PAS eu besoin de l'equivalent de `global_scale_rows` :
+    `INT4Tensor.scales` est deja `[out, in//group]`, une echelle par ligne de
+    sortie et par groupe. Il n'y a donc aucune echelle globale a concilier
+    entre les segments, et la concatenation sur l'axe 0 est exacte — le
+    packing uint4 de `qweight` et de `zeros` porte sur l'axe 1, jamais entre
+    deux lignes de sortie. Mesure du 9/09/2026 sur (256|64|64) x 256 : une
+    pile contre trois appels separes, ecart 0,000e+00, sur GPU comme sur
+    processeur.
+
+    Sans cette fonction, `fuse()` n'essayait qu'int8, nvfp4 et bf16 : 135
+    groupes du parc, parfaitement homogenes en int4_awq, restaient decoupes
+    en GEMV separees faute d'empileur — 64 q/k/v et 71 gate/up, soit 199
+    lancements par pas de decodage.
+    """
+    from ..quant.int4 import INT4Tensor
+    ts = [getattr(l, "qweight", None) for l in lins]
+    if not all(isinstance(t, INT4Tensor) for t in ts):
+        return _refus_fusion("un des poids n est pas INT4-AWQ")
+    # `padded_in` en plus de l'entree et du groupe : deux tenseurs de meme
+    # entree logique peuvent avoir ete rembourres differemment, et le noyau
+    # lit la largeur rembourree.
+    if len({(t.padded_in, t.qweight.shape[1], t.group_size) for t in ts}) != 1:
+        return _refus_fusion("entrees de tailles differentes")
+    if any(l.streamed is not None for l in lins):
+        return _refus_fusion("poids en flux")
+    biais = [l.bias for l in lins]
+    if any((b is None) != (biais[0] is None) for b in biais):
+        return _refus_fusion("biais present sur une partie du groupe")
+    ok_scaler, scaler_pile = _scaler_commun(lins)
+    if not ok_scaler:
+        return _refus_fusion("scalers differents entre projections")
+    t = INT4Tensor(torch.cat([t.qweight for t in ts]).contiguous(),
+                   torch.cat([t.scales for t in ts]).contiguous(),
+                   torch.cat([t.zeros for t in ts]).contiguous(),
+                   ts[0].group_size,
+                   (sum(t.shape[0] for t in ts), ts[0].shape[1]),
+                   ts[0].padded_in)
+    pbiais = torch.cat(biais) if biais[0] is not None else None
+    if pbiais is not None:
         o = 0
         for l, b in zip(lins, biais):
             l.bias = pbiais.narrow(0, o, b.shape[0]); o += b.shape[0]

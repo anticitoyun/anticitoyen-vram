@@ -1006,10 +1006,25 @@ def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev) -> None:
 
 def _kv_blocks_per_device(plan: Plan, spec: ModelSpec,
                           max_model_len: Optional[int]) -> dict[str, int]:
-    """Répartit le budget KV de chaque appareil en blocs, partagés entre ses couches."""
+    """Répartit le budget KV de chaque appareil en blocs, partagés entre ses couches.
+
+    Seules les couches QUI ALLOUENT un cache entrent au dénominateur : plus
+    bas, `a_allouer.append` n'est appelé que sur le chemin de l'attention
+    pleine, si bien qu'une couche linéaire ou SSM comptée ici réduisait le
+    nombre de blocs sans jamais en consommer un seul. Sur les 53 hybrides du
+    parc, le diviseur était 4 à 14 fois trop grand — 16 656 jetons de contexte
+    sur `Nemotron-Nano-9B` là où le même budget en permet 233 296.
+
+    ``max_model_len`` n'est pas utilisé, et ce n'est pas un oubli : le nombre
+    de blocs sort du budget du plan, pas de la longueur demandée. Mesuré le
+    9/09/2026, borner par la longueur ne libérerait rien — le budget alloué
+    est déjà INFÉRIEUR à ce que seize séquences de 4096 jetons réclament.
+    """
     out: dict[str, int] = {}
     layers_on = {}
     for lp in plan.layers:
+        if not spec.couche_a_kv(lp.index):
+            continue
         layers_on[lp.exec_device] = layers_on.get(lp.exec_device, 0) + 1
     for dev, budget in plan.kv_budget.items():
         n_layers = max(1, layers_on.get(dev, 1))
@@ -1047,6 +1062,20 @@ def _octets_reels(manifest: dict) -> tuple[dict, dict, int, int]:
             embed += octets
         elif nom.startswith("lm_head"):
             head += octets
+    # Tête LIÉE : aucun tenseur `lm_head` au manifeste, et pourtant
+    # `_tete_liee` en fabrique une copie quantifiée au chargement. La compter
+    # ici n'est pas une precaution : `_borner_kv_par_la_vram` calcule
+    # `libre − poids − marge` a partir de ce total, si bien que l'omettre lui
+    # faisait autoriser un budget KV trop grand — donc MANGER LA MARGE qu'il
+    # existe pour proteger, celle qui garde la place d'une capture de graphes.
+    mo = manifest.get("model") or {}
+    if mo.get("tie_word_embeddings") and mo.get("vocab_size") and mo.get("hidden_size"):
+        from .config import ModelSpec
+        champs = {k: v for k, v in mo.items() if k in ModelSpec.__dataclass_fields__}
+        try:
+            head += ModelSpec(**champs).tete_liee_bytes()
+        except Exception:                                   # noqa: BLE001
+            pass
     return attn, mlp, embed, head
 
 

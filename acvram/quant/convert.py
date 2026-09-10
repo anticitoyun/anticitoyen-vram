@@ -978,6 +978,17 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 fmt, qt, scaler, metrics = wider, q2, s2, m2
                 entry["format"] = fmt
                 entry["promoted_from"] = report.promotions[-1]["from"]
+                # Le SNR d'AVANT, celui pris dans `promoted_from`. Sans lui,
+                # `snr_db` d'un promu est celui du format d'arrivee, et le
+                # comparer a celui d'un non-promu compare deux FORMATS en
+                # croyant comparer deux merites : sur 36 modeles a plancher
+                # actif, les promus sortaient a 44,4 dB de mediane contre 20,4
+                # aux epargnes, regularite si nette qu'elle passait pour un
+                # resultat — c'etait l'ecart int8/nvfp4, rien d'autre.
+                # Regle qui en decoule : un SNR se publie TOUJOURS avec le
+                # format dans lequel il a ete pris. Ici `snr_db` va avec
+                # `format`, `snr_db_source` avec `promoted_from`.
+                entry["snr_db_source"] = report.promotions[-1]["before"]
         # Le SNR de CHAQUE tenseur, promu ou non. Sans lui on ne peut pas
         # repondre a la question qui juge le quota : existe-t-il un tenseur
         # NON promu dont le SNR est pire que celui d'un promu ? Si oui, le

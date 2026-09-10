@@ -29,9 +29,9 @@ pas viser `sm_120`, c'est bien celui du venv qui compile nos noyaux.
 | LM Studio | <https://lmstudio.ai/> · [doc](https://lmstudio.ai/docs/app) | à évaluer — s'appuie sur llama.cpp, GGUF, CUDA, MCP, API OpenAI |
 | NVIDIA × LM Studio (Blackwell) | <https://blogs.nvidia.com/blog/rtx-ai-garage-lmstudio-llamacpp-blackwell/> | à évaluer |
 
-Ce poste utilise ses propres menus (`kimi-modeles`, `claude-modeles`) plutôt
-qu'un cockpit ; LM Studio reste intéressant comme cible de comparaison et
-parce que [PAIR](VEILLE-EXTERIEURE.md) ne pilote que lui et Ollama.
+acvram s'utilise par sa ligne de commande et son serveur, sans cockpit ;
+LM Studio reste intéressant comme cible de comparaison, et parce que
+[PAIR](VEILLE-EXTERIEURE.md) ne pilote que lui et Ollama.
 
 ## Moteurs d'inférence
 
