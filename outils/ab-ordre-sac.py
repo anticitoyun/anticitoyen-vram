@@ -180,7 +180,7 @@ def un_bras(etiquette: str, inverse: bool, sortie: Path, python: str,
         return {"bras": etiquette, "echec": True, "ordre": bud.get("ordre_glouton")}
     # LE CHAMP EST ECRIT CONDITIONNEL (convert.py:1069) : un tenseur dont la
     # calibration ne produit pas out_ref_norm passerait SANS, en silence. On le
-    # COMPTE au lieu de le supposer — remarque de claude-f2.
+    # COMPTE au lieu de le supposer — remarque de f2.
     avec_ech = sum(1 for v in m.get("tensors", {}).values()
                    if "out_ref_norm" in v)
     tot_t = len(m.get("tensors", {}))

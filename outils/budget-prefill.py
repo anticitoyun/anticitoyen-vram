@@ -10,6 +10,11 @@ aux séquences DÉJÀ EN COURS. **Un seul des deux régimes peut donc conclure.*
     charge   la même invite pendant que N séquences décodent. Mesure ce que
              le découpage RACHÈTE : les jetons que les N produisent pendant
              que l'invite se précalcule. C'est le régime qui décide.
+    lot      N invites préfillées ENSEMBLE. Un coût fixe par passe — s'il
+             existe — est alors partagé par les N, donc le surcoût par jeton
+             doit être divisé par N. C'est le régime de charge réelle, où
+             les prefills arrivent groupés, et il peut PRÉCISER le verdict
+             rendu en `seule` sans le contredire.
 
 GARDE-FOU POSÉ AVANT LA MESURE : si le prix relevé en `seule` dépasse ce que
 `charge` rachète, **le défaut reste 0** et on l'écrit. Un budget est
@@ -69,7 +74,9 @@ def main(argv):
     ap.add_argument("--modele", default="Qwen3-4B-srcgguf-nvfp4")
     ap.add_argument("--budget", type=int, required=True,
                     help="ACVRAM_BUDGET_JETONS ; 0 = comportement actuel")
-    ap.add_argument("--regime", choices=("seule", "charge"), required=True)
+    ap.add_argument("--regime", choices=("seule", "charge", "lot"), required=True)
+    ap.add_argument("--lot", type=int, default=12,
+                    help="nombre d invites prefillees ensemble, regime `lot`")
     ap.add_argument("--invite", type=int, default=8192)
     ap.add_argument("--concurrence", type=int, default=12,
                     help="sequences deja en decodage, regime `charge`")
@@ -102,7 +109,7 @@ def main(argv):
     else:
         charge = load_model(os.path.join(A, ns.modele),
                             max_model_len=ns.max_model_len)
-    n_lot = ns.concurrence + 1 if ns.regime == "charge" else 1
+    n_lot = {"charge": ns.concurrence + 1, "lot": ns.lot}.get(ns.regime, 1)
     moteur = Engine(charge, None, max_batch_size=n_lot,
                     max_model_len=ns.max_model_len)
 
@@ -136,9 +143,19 @@ def main(argv):
         for _ in range(4):
             moteur.step()
 
-    longue = moteur.add_request(_invite(ns.invite, 11, vocab),
-                                SamplingParams(temperature=0.0, max_tokens=8),
-                                request_id="L")
+    p8 = SamplingParams(temperature=0.0, max_tokens=8)
+    if ns.regime == "lot":
+        # Toutes admises au meme pas : c est ce qui fait partager le cout
+        # fixe. Des invites DIFFERENTES entre elles, sinon le cache de
+        # prefixe servirait les suivantes et il n y aurait qu un prefill.
+        groupe = [moteur.add_request(_invite(ns.invite, 101 + 13 * i, vocab),
+                                     p8, request_id=f"L{i}")
+                  for i in range(ns.lot)]
+        longue = groupe[-1]
+    else:
+        longue = moteur.add_request(_invite(ns.invite, 11, vocab), p8,
+                                    request_id="L")
+        groupe = [longue]
     produits0 = sum(len(s.output_ids) for s in voisines)
     passes = 0
     class _SansCarte:
@@ -153,7 +170,7 @@ def main(argv):
         torch.cuda.synchronize()
     with (_SansCarte() if ns.processeur else Energie(periode=0.2)) as e:
         t0 = time.perf_counter()
-        while not longue.prefilled:
+        while not all(s_.prefilled for s_ in groupe):
             moteur.step()
             passes += 1
         if not ns.processeur:
@@ -167,7 +184,11 @@ def main(argv):
     # le découpage rachète. En régime `seule` il vaut zéro par construction,
     # et la colonne le dit au lieu de laisser croire à une mesure ratée.
     par_kj = (produits / j * 1000) if j > 0 else -1.0
-    print(f"{ns.budget}\t{ns.regime}\t{places}\t{ns.invite}\t"
+    # `jetons_prefilles` : ce qui a REELLEMENT ete passe en avant, pas ce
+    # qui a ete demande. En `lot` il vaut N x invite, et l energie par jeton
+    # ne se compare qu a travers lui.
+    prefilles = sum(len(s_.prompt_ids) for s_ in groupe)
+    print(f"{ns.budget}\t{ns.regime}\t{places}\t{prefilles}\t"
           f"{latence*1000:.1f}\t{passes}\t{produits}\t{produits/latence:.2f}\t"
           f"{j:.1f}\t{par_kj:.1f}\t{r['watts']:.0f}\t{r['temp_max']}\t"
           f"{r['bridages']}\t{r['invalidations']}")
@@ -178,7 +199,7 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    print("budget\tregime\tplaces_graphes\tinvite\tlatence_prefill_ms\tpasses_prefill\t"
+    print("budget\tregime\tplaces_graphes\tjetons_prefilles\tlatence_prefill_ms\tpasses_prefill\t"
           "jetons_voisines\tjetons_s_voisines\tjoules\tjetons_par_kJ\twatts\t"
           "temp_max\tbridages\tinvalidations", file=sys.stderr)
     sys.exit(main(sys.argv))

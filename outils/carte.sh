@@ -59,7 +59,7 @@ etat_carte() {
 # commande doit etre CELLE QUI TRAVAILLE. Un lanceur qui rend la main des que
 # le travail est parti (systemd-run, setsid, nohup &, at) fait relacher le
 # verrou pendant que la mesure tourne encore : on obtient exactement le cas que
-# ce verrou vise, PLUS une fausse assurance. Trouve et verifie par claude-c6
+# ce verrou vise, PLUS une fausse assurance. Trouve et verifie par c6
 # dans les deux sens : enveloppant systemd-run, le second obtient la carte
 # service actif ; carte.sh A L'INTERIEUR du service, le second est refuse.
 # Le service detache n'est pas une coquetterie : c'est la voie obligee pour
@@ -123,7 +123,27 @@ if ! flock -n 9; then
   echo "carte obtenue apres $(( $(date +%s) - debut )) s" >&2
 fi
 printf '%s %s %s %s\n' "$$" "$(date +%s)" "$NOM" "$TYPE" > "$INFO"
-trap 'rm -f "$INFO"' EXIT
+
+# DEUX FICHIERS, DEUX QUESTIONS DIFFERENTES — ET LA SECONDE N'AVAIT PAS DE
+# REPONSE JUSQU'AU 10/09.
+#
+# $INFO repond a « QUI TIENT LA CARTE MAINTENANT » : ecrit par `>`, efface par
+# le trap. C'est ce qu'il faut pour qu'un arrivant sache qui attendre.
+#
+# $JOURNAL repond a « QUI LA TENAIT A 17H53 », et rien n'y repondait. Le
+# 10/09, deux mesures jumelles ont montre 10,4 % d'ecart la ou une autre paire
+# du meme travail en montrait 0,15 % : une contention averee, une heure
+# connue, et AUCUN MOYEN DE SAVOIR QUI. Les manches de cette tranche horaire
+# sont restees INDECIDABLES — ni repechables ni condamnables, le pire etat
+# pour un resultat.
+#
+# Ce n'est pas un mecanisme arrete a une dimension : il n'y avait rien a
+# etendre, la dimension « historique » n'avait jamais ete posee. `>>`, jamais
+# efface, une ligne par prise et une par restitution avec la duree tenue.
+JOURNAL="$VERROU.journal"
+_pris=$(date +%s)
+printf '%s prise   %-8s %-32s %s\n' "$(date +%FT%T)" "$$" "$NOM" "$TYPE" >> "$JOURNAL" 2>/dev/null || true
+trap 'rm -f "$INFO"; printf "%s rendue  %-8s %-32s %s tenue=%ss\n" "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "$(( $(date +%s) - _pris ))" >> "$JOURNAL" 2>/dev/null || true' EXIT
 AVANT=$(etat_carte)
 # `9>&-` FERME LE DESCRIPTEUR POUR LA COMMANDE SEULE. Sans lui, l'enfant en
 # herite et `flock` ne tombe que quand TOUS les descripteurs sont fermes : tuer
