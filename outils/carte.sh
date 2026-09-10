@@ -41,12 +41,18 @@ exec 9>"$VERROU" || { echo "carte.sh : $VERROU inaccessible" >&2; exit 65; }
 if ! flock -n 9; then
   echo "carte occupee par $(qui_tient) — attente (max ${ATTENTE} s)" >&2
   debut=$(date +%s)
-  while ! flock -w 30 9; do
-    ecoule=$(( $(date +%s) - debut ))
-    [ "$ecoule" -lt "$ATTENTE" ] || {
-      echo "ABANDON apres ${ecoule} s : carte toujours tenue par $(qui_tient)" >&2
+  while :; do
+    # LE PAS D'ATTENTE NE DOIT PAS DEPASSER CE QUI RESTE. Avec un `flock -w 30`
+    # fixe, une borne plus courte que 30 s n'etait jamais atteinte : le pressé
+    # obtenait le verrou au lieu d'abandonner. Trouve en eprouvant l'abandon,
+    # qui est justement le cas qu'on ne rencontre jamais par hasard.
+    reste=$(( ATTENTE - ($(date +%s) - debut) ))
+    [ "$reste" -gt 0 ] || {
+      echo "ABANDON apres $(( $(date +%s) - debut )) s : carte toujours tenue par $(qui_tient)" >&2
       exit 3; }
-    echo "  ... $ecoule s, toujours $(qui_tient)" >&2
+    pas=$(( reste < 30 ? reste : 30 ))
+    flock -w "$pas" 9 && break
+    echo "  ... $(( $(date +%s) - debut )) s, toujours $(qui_tient)" >&2
   done
   echo "carte obtenue apres $(( $(date +%s) - debut )) s" >&2
 fi
