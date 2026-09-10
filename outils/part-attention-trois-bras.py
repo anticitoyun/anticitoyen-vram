@@ -80,6 +80,15 @@ def mesurer(bras: str, modele: str) -> dict:
         t = time.perf_counter()
         moteur.step()
         pas.append((time.perf_counter() - t) * 1000.0)
+    # TEMOIN QUE LE BRAS A REELLEMENT PRIS, propre a CETTE mesure. Les bras B
+    # et C amputent l'attention : les jetons produits DOIVENT differer de ceux
+    # du bras A. Une empreinte identique signifie que l'interrupteur n'a pas
+    # agi — et « aucun effet » se lirait comme un resultat. Le controle
+    # ACVRAM_PA_ARM=9 prouve que le code est dans le binaire ; celui-ci prouve
+    # qu'il a agi pendant ce passage-ci.
+    import hashlib as _h
+    empreinte_jetons = _h.sha256(
+        ",".join(map(str, seq.output_ids)).encode()).hexdigest()[:12]
     ordonnes = sorted(pas[1:]) or sorted(pas)     # le premier passage est froid
     n = len(ordonnes)
     import hashlib
@@ -88,12 +97,26 @@ def mesurer(bras: str, modele: str) -> dict:
     src = os.path.join(os.path.dirname(
         os.path.abspath(sys.modules["acvram.kernels"].__file__)),
         "acvram_kernels.cu")
-    chunk = _re.search(r"PA_CHUNK\s*=\s*(\d+)", open(src).read()).group(1)
+    _src = open(src).read()
+    # UNE TRANCHE ADAPTATIVE NE DOIT PAS PASSER POUR CELLE DU TABLEAU. Si le
+    # source lit la tranche dans l'environnement, la valeur doit etre POSEE :
+    # sinon un bras A « par defaut » mesurerait le decoupage adaptatif en
+    # croyant mesurer le moteur d'ETABLI.md. Poser ACVRAM_PA_CHUNK sur un
+    # binaire qui l'ignore serait la faute symetrique — une fausse assurance —
+    # donc on verifie le SOURCE, pas la variable.
+    if "ACVRAM_PA_CHUNK" in _src and not os.environ.get("ACVRAM_PA_CHUNK"):
+        raise RuntimeError(
+            "ce noyau lit la tranche dans l'environnement et ACVRAM_PA_CHUNK "
+            "n'est pas posee : le bras A porterait sur le decoupage adaptatif "
+            "et non sur celui du tableau. Posez ACVRAM_PA_CHUNK=512.")
+    chunk = os.environ.get("ACVRAM_PA_CHUNK") or _re.search(
+        r"PA_CHUNK\s*=\s*(\d+)", _src).group(1)
     so = getattr(get_extension(), "__file__", "") or ""
     emp = (hashlib.sha256(open(so, "rb").read()).hexdigest()[:12]
            if so and os.path.exists(so) else "inconnu")
     return {"bras": bras, "pa_chunk": int(chunk), "so": so, "empreinte_so": emp,
             "couches": len(charge.plan.layers), "exilees": 0,
+            "jetons": empreinte_jetons, "n_jetons": len(seq.output_ids),
             "pas_executes": len(pas), "n_retenus": n,
             "median_ms": ordonnes[n // 2],
             "p10_ms": ordonnes[max(0, int(0.10 * n))],
@@ -133,6 +156,21 @@ def pilote(modele: str, sortie: str) -> int:
               f"[{d['p10_ms']:.3f} – {d['p90_ms']:.3f}] sur {d['n_retenus']} "
               f"pas, {time.time() - t0:.0f} s")
 
+    emp = {b: [d["jetons"] for d in releves if d["bras"] == b] for b in "ABC"}
+    if len({e[0] for e in emp.values()}) != 3:
+        print("ARRET : les trois bras ne produisent pas trois sorties "
+              f"distinctes ({emp}) — l'interrupteur n'a pas agi sur au moins "
+              "un bras, et « aucun effet » se lirait comme un resultat. "
+              "Rien n'est calcule.", file=sys.stderr)
+        return 3
+    for b, e in emp.items():
+        if len(set(e)) != 1:
+            print(f"ARRET : le bras {b} n'a pas produit deux fois la meme "
+                  f"sortie ({e}) — le moteur n'est pas deterministe a "
+                  "temperature 0, la comparaison des medianes ne tient pas.",
+                  file=sys.stderr)
+            return 4
+    print("temoin : trois sorties distinctes, chaque bras reproductible")
     med = {b: sorted(d["median_ms"] for d in releves if d["bras"] == b)
            for b in "ABC"}
     a, bb, c = (m[len(m) // 2] for m in (med["A"], med["B"], med["C"]))
