@@ -996,6 +996,26 @@ class DecoderLayerGDN(nn.Module):
         h = self.input_layernorm(x)
         store = batch.gdn_store.setdefault(self.index, {}) \
             if batch.gdn_store is not None else {}
+        la = self.linear_attn
+        # Lot hors créneau, décodage pur : les projections/RoPE/normes ne
+        # dépendent que de x, un seul appel pour les b séquences au lieu de
+        # b — seul ext.mla_decode a encore besoin du cache, par séquence.
+        # Conservateur : au moindre doute (créneau actif, prefill mélangé,
+        # noyau absent), la boucle inchangée ci-dessous.
+        if (hasattr(la, "rank") and batch.gdn_store is not None
+                and all(ql == 1 for ql in batch.query_lens)
+                and la.peut_batcher_decode(h)):
+            sids = [batch.seq_ids[i] if batch.seq_ids else i
+                   for i in range(len(batch.query_lens))]
+            etats = [store.get(sid) for sid in sids]
+            if not any(e is _STATIC for e in etats):
+                y, etats_new = la.forward_batch(h, etats)
+                for sid, e in zip(sids, etats_new):
+                    store[sid] = e
+                x = x + y.to(x.dtype)
+                if self.mlp is None:
+                    return x
+                return self._mlp(x)
         sorties = []
         start = 0
         for i, ql in enumerate(batch.query_lens):
