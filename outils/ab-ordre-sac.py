@@ -55,6 +55,26 @@ EVAL = ["--corpus", str(CORPUS), "--window", "2048", "--stride", "2048",
         "--max-tokens", "344064", "--min-context", "0", "--json"]
 
 
+def mon_unite() -> str:
+    """L'unite systemd qui contient CE processus, ou une chaine vide.
+
+    Le garde des orphelins comptait le PILOTE lui-meme parmi les services
+    vivants et refusait de demarrer — un garde qui accuse son operateur, et qui
+    rendait impossible le detachement du pilote, c'est-a-dire la protection
+    meme qu'il devait servir. Il faut donc s'exclure, et le seul moyen fiable
+    est de lire son propre cgroup : `systemd-run --unit=X` place le processus
+    dans `X.service`, et rien dans l'environnement ne le dit.
+    """
+    try:
+        for ligne in open("/proc/self/cgroup", encoding="utf-8"):
+            for morceau in ligne.strip().split("/"):
+                if morceau.endswith(".service"):
+                    return morceau
+    except OSError:
+        pass
+    return ""
+
+
 def rendre_le_cache(d: Path) -> None:
     for f in sorted(d.glob("*.safetensors")):
         fd = os.open(f, os.O_RDONLY)
@@ -177,7 +197,7 @@ def main() -> int:
     restes = [m for m in subprocess.run(
         ["systemctl", "--user", "list-units", "acvram*", "--no-legend",
          "--plain"], capture_output=True, text=True).stdout.split()
-        if m.endswith(".service")]
+        if m.endswith(".service") and m != mon_unite()]
     if restes:
         print(f"ECHEC / CAUSE: services acvram vivants : {restes[:3]} / "
               f"SUITE: systemctl --user stop <unite>")
