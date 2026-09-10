@@ -33,9 +33,35 @@ dire() {   # chaque mesure previent A LA FIN DE LA MESURE, pas a la fin du lot
   echo "[$(date +%H:%M:%S)] $*"
   notify-send -a acvram "protocole 49us" "$*" 2>/dev/null || true
 }
+# LA MEMOIRE LIBRE EST UN ETAT, PAS UNE RESERVATION. Une sonde lancee mais pas
+# encore allouee laisse la carte a 16 Mio : le seul critere VRAM aurait donc
+# autorise un demarrage EN MEME TEMPS qu'elle — deux chargements simultanes,
+# une mesure faussee pour les deux, ou un OOM sur carte fragmentee. On regarde
+# donc aussi QUI A L'INTENTION d'y aller.
+mien() {   # ce PID descend-il de ce script ? (sinon on s'interdirait nous-memes)
+  local p=$1
+  while [ "$p" -gt 1 ]; do
+    [ "$p" = "$$" ] && return 0
+    p=$(awk '{print $4}' "/proc/$p/stat" 2>/dev/null) || return 1
+    [ -n "$p" ] || return 1
+  done
+  return 1
+}
 libre() {
   u=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 0)
   [ "$u" -lt 800 ] || { dire "REFUS : carte non libre ($u Mio) — je ne prends pas la place d'une autre session"; exit 1; }
+  # calculs deja en cours, et intentions annoncees mais pas encore allouees
+  # -i 0 OBLIGATOIRE : sans lui, le llama-server permanent du port 8081, qui
+  # tourne sur l'AUTRE carte, ferait refuser toutes les mesures pour toujours.
+  for pid in $(nvidia-smi -i 0 --query-compute-apps=pid --format=csv,noheader 2>/dev/null); do
+    mien "$pid" || { dire "REFUS : calcul GPU en cours (PID $pid)"; exit 1; }
+  done
+  # Motif ancre sur LE DEPOT, pas sur des mots-cles : « profil » attrapait
+  # variety, le fond d'ecran du bureau, et refusait toute mesure a jamais.
+  while read -r pid reste; do
+    [ -n "${pid:-}" ] || continue
+    mien "$pid" || { dire "REFUS : une mesure demarre sans avoir encore alloue — PID $pid : $reste"; exit 1; }
+  done < <(pgrep -af 'python.*(outils/|acvram)' 2>/dev/null)
 }
 # med / p10 / p90 de la ligne machine du premier contexte
 champ() { awk -F'\t' -v c="$2" '$1=="RESULTAT"{print $c; exit}' "$1"; }
