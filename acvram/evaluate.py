@@ -255,16 +255,26 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
         # nll_i vaut loss_i x 2048 avec loss_i moyennee sur 2047, puis divise
         # par nsamples x 2048 — le facteur 2048/2047 s'annule et il reste la
         # moyenne exacte sur nsamples x 2047. Aucune convention a corriger.
-        nsamples = max(0, (len(ids) - 1) // window)
-        attendu = nsamples * (window - 1)
+        # LA FORMULE SUIT LA BOUCLE, ET DEUX VERSIONS S'Y SONT TROMPEES.
+        # La boucle parcourt `range(0, len(ids) - 1, stride)` : le nombre de
+        # segments est donc le PLAFOND de (len(ids) - 1) / window, pas son
+        # plancher — sur 344 064 jetons cela fait 168 segments et non 167, et
+        # 343 896 positions notables et non 341 849. Chacune de mes deux
+        # premieres versions a donc averti A TORT sur un protocole correct,
+        # et un garde-fou qui crie toujours est un garde-fou qu'on desactive.
+        # Verifie contre la mesure : 168 x 2047 = 343 896, exactement ce que
+        # le compteur rend sur wikitext-2 tronque a 344 064 jetons.
+        debuts = range(0, max(0, len(ids) - 1), window)
+        attendu = sum(min(window, len(ids) - d) - 1 for d in debuts
+                      if min(window, len(ids) - d) >= 2)
         if counted != attendu:
             # `avertissement` et non une liste : c'est le champ que porte
             # EvalResult. Un garde-fou qui leve AttributeError au moment
             # d'alerter ne garde rien — mon premier jet ecrivait dans
             # result.warnings, qui n'existe pas.
             manque = (f"mode disjoint : {counted} positions notees pour "
-                      f"{attendu} attendues ({nsamples} segments de "
-                      f"{window - 1} positions notables sur {len(ids)} "
+                      f"{attendu} attendues ({len(debuts)} segments, "
+                      f"{window - 1} positions notables chacun sur {len(ids)} "
                       "jetons) — un jeton est compte deux fois ou pas du "
                       "tout, et la perplexite ne porte pas sur le corpus "
                       "annonce")
