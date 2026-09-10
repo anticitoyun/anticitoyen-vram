@@ -4,7 +4,7 @@
 Six budgets entre le plancher tout-nvfp4 et le plafond tout-int8 de
 Llama-2-7B. DEUX des six sont des TEMOINS a valeur prevue : le budget du
 plancher doit reproduire le dossier tout-nvfp4 (4,7296 bits/poids, PPL
-5,6102) et celui du plafond le dossier tout-int8 (8,3452, PPL 5,4142). Si un
+5,6102) et celui du plafond le dossier tout-int8 (8,3452, PPL 5,4144). Si un
 temoin ne reproduit pas sa valeur, la campagne est invalide AVANT d'avoir
 publie un point — c'est le seul ordre acceptable.
 
@@ -49,18 +49,47 @@ CORPUS_SHA = "e52922746ad09bac73b0dba32b2987c0d7924da14337dcd43c1d9113a9f6d0ae"
 # L'ecart de 2,67 % entre les deux corpus serait attribue aux bits.
 RELEVES = Path("~/Bureau/Claude/acvram-memoire/corpus")
 
+# LE PLANCHER EST UNE VALEUR CALCULEE, PAS UN CHIFFRE ROND.
+#
+# Le temoin plancher portait 3,75 Gio quand le plancher reel vaut 3,7102 — donc
+# 40,7 Mio DE PLUS que le plancher. Le sac a dos a promu six tenseurs, le
+# dossier est sorti a 4,7848 bits/poids au lieu de 4,7297, et le garde a
+# declare une non-reproduction. Le garde avait raison ; c'est la CIBLE qui
+# etait fausse. On demandait au temoin de reproduire le plancher avec 40 Mio
+# de plus que le plancher — un denominateur emprunte, dans le temoin cense
+# valider les autres. Releve par claude-f2 le 10/09.
+#
+# Le script CONNAISSAIT le plancher : il l'imprime. Il ne l'utilisait pas.
+PLANCHER_OCTETS = 3_983_834_740        # tout-nvfp4 mesure, safetensors seuls
+PLAFOND_OCTETS = 7_029_266_352         # tout-int8 mesure
+PLANCHER_GIO = PLANCHER_OCTETS / GIO
+PLAFOND_GIO = PLAFOND_OCTETS / GIO
+
 # Budget en Gio -> (nom du dossier, valeur prevue si temoin)
 POINTS = [
-    (3.75, "quota-3g75", {"bpw": 4.7296, "ppl": 5.6102, "role": "temoin plancher"}),
+    (round(PLANCHER_GIO, 4), "quota-plancher",
+     {"bpw": 4.7297, "ppl": 5.6102, "promus_attendus": 0,
+      "role": "temoin plancher (budget EGAL au plancher : zero promotion "
+              "attendue, donc le dossier doit etre celui du tout-nvfp4)"}),
     (4.50, "quota-4g50", None),
     (5.00, "quota-5g00", None),
     (5.50, "quota-5g50", None),
     (6.00, "quota-6g00", None),
-    (6.55, "quota-6g55", {"bpw": 8.3452, "ppl": 5.4142, "role": "temoin plafond"}),
+    (round(PLAFOND_GIO, 4), "quota-plafond",
+     {"bpw": 8.3452, "ppl": 5.4144, "role": "temoin plafond (budget EGAL au "
+      "plafond : tout doit etre promu, et le dossier doit valoir le tout-int8 "
+      "— c'est ce point qui dira si l'ordre du glouton est mal oriente, ou si "
+      "mon plafond de reference differait par son MECANISME)"}),
 ]
 
 # Etalon exterieur, mesure par transformers sans rien importer d'acvram.
 PPL_REFERENCE = 5.4141
+# Perplexite du tout-int8 SUR LE BINAIRE COURANT. Elle valait 5,4142 dans les
+# releves archives ; le binaire a change le 10/09 et elle vaut 5,4144, mesure
+# deux fois a six decimales identiques. Ce n'est pas du bruit — la dispersion
+# de l'instrument est nulle — c'est un delta de code, et c'est pourquoi la
+# constante doit vivre ici et non recopiee dans trois messages.
+PPL_PLAFOND = 5.4144
 
 EVAL = ["--corpus", str(CORPUS), "--window", "2048", "--stride", "2048",
         "--max-tokens", "344064", "--min-context", "0", "--json"]
@@ -255,7 +284,7 @@ def main() -> int:
 
     # --- Manche zero : la RESOLUTION de l'instrument, avant tout point ---
     # Remarque de claude-0a le 10/09 : l'accord du temoin negatif (tout-int8
-    # 5,4142 contre etalon 5,4141, soit 0,002 %) n'a de valeur que si la
+    # 5,4144 contre etalon 5,4141, soit 0,0055 %) n'a de valeur que si la
     # dispersion entre deux executions identiques est PLUS PETITE que 0,002 %.
     # Sinon le temoin passe par construction et ne prouve rien — c'est ainsi
     # qu'un instrument aveugle a rendu quatre fois 8,825 au millieme le meme
@@ -295,9 +324,9 @@ def main() -> int:
         dispersion = abs(passes[0] - passes[1])
         rel = dispersion / passes[0] * 100
         print(f"  RESOLUTION : dispersion {dispersion:.6f} PPL soit {rel:.5f} % "
-              f"— l'ecart du temoin negatif vaut {abs(5.4142 - PPL_REFERENCE):.4f} "
-              f"({100 * abs(5.4142 - PPL_REFERENCE) / PPL_REFERENCE:.5f} %)")
-        if dispersion >= abs(5.4142 - PPL_REFERENCE):
+              f"— l'ecart du temoin negatif vaut {abs(PPL_PLAFOND - PPL_REFERENCE):.4f} "
+              f"({100 * abs(PPL_PLAFOND - PPL_REFERENCE) / PPL_REFERENCE:.5f} %)")
+        if dispersion >= abs(PPL_PLAFOND - PPL_REFERENCE):
             print("  ATTENTION : la dispersion couvre l'ecart du temoin negatif. "
                   "Son accord a 0,002 % ne prouve donc rien, et le plancher de "
                   "reproduction des temoins est porte a 3x la dispersion.")
@@ -415,6 +444,18 @@ def main() -> int:
             # ininterpretable dans les deux sens.
             seuil_ppl = max(0.005, 3 * dispersion) if dispersion else 0.005
             ok = db < 0.02 and dp < seuil_ppl
+            # Un temoin peut exiger un nombre de promotions : le plancher n'en
+            # attend AUCUNE, puisque son budget vaut exactement le plancher.
+            # Sans cette verification, un budget legerement au-dessus promeut
+            # quelques tenseurs et le temoin echoue en accusant la mesure au
+            # lieu de sa propre cible — c'est ce qui s'est produit le 10/09
+            # avec 3,75 Gio pour un plancher a 3,7102.
+            attendus = temoin.get("promus_attendus")
+            if attendus is not None and bud["promus"] != attendus:
+                print(f"  MANCHE SANS OBJET : {bud['promus']} promotions pour "
+                      f"{attendus} attendues. Le budget de ce temoin n'est pas "
+                      f"celui de sa cible — corriger la CIBLE, pas la mesure.")
+                ok = False
             verdict = {"role": temoin["role"], "reproduit": ok,
                        "ecart_bpw": round(db, 4), "ecart_ppl": round(dp, 4),
                        "seuil_ppl": round(seuil_ppl, 6),
