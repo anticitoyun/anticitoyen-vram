@@ -323,3 +323,89 @@ la marge sur ce noyau au-delà de ×3,1.
 mesuré, et le banc doit couvrir les deux. Et un découpage qui change **change
 l'ordre des sommes** : la barrière de qualité est obligatoire avant toute
 annonce, témoin négatif compris.
+
+## La validation moteur : le gain se transporte, et au-delà
+
+ABBA au niveau du **processus** (voir plus bas pourquoi), quatre bras par
+contexte, `b0c1c0b`, binaire `46b9760dd521cc5b`.
+
+    350 mots    A 512   120,65 / 120,86 j/s    noyau 71,52 / 71,62 us
+                B auto  227,45 / 226,97 j/s    noyau 19,14 / 18,98 us   +88,0 %
+    3000 mots   A 512   105,69 / 105,72 j/s    noyau 78,72 / 78,85 us
+                B auto  216,10 / 216,06 j/s    noyau 25,86 / 25,54 us  +104,4 %
+
+Les deux passages de chaque bras se reproduisent à 0,2 %, l'ordre de passage ne
+déplace rien, et le témoin noyau retrouve **exactement** les valeurs du
+balayage isolé (25,47 et 78,72 µs).
+
+### Le banc qui rendait +0,1 % portait un gain de +88 %
+
+Première version : les deux bras alternaient **dans le même processus**, pour
+qu'aucune différence de chargement ne s'y glisse. Or le décodage passe par un
+**graphe CUDA capturé une fois**, et un graphe enregistre la grille
+`dim3 g1(BQ, HQ, C)` au moment de la capture. Changer `ACVRAM_PA_CHUNK` ensuite
+ne rejoue pas un nouveau lancement : il rejoue celui qui a été capturé.
+
+**Le montage choisi pour éliminer une différence parasite avait éliminé la
+différence étudiée.** Résultat : +0,1 % aux deux contextes, avec une étendue de
+0,2 % sur le bras inerte contre 7,1 % sur l'autre — la signature d'un bras qui
+n'a jamais tourné, lisible seulement si on la cherche.
+
+Sans le témoin noyau ajouté ensuite, la seule lecture possible était « le gain
+ne se transporte pas » : un résultat nul crédible, publié de bonne foi, sur un
+poste qui **double** le débit. **Dix lignes de témoin contre un chantier
+abandonné à tort.**
+
+### Ce que le gain implique — et ce qu'il ne permet PAS de conclure
+
+Le gain dépasse la prédiction de +50 %. **Un gain au-dessus demande la même
+explication qu'un gain en dessous**, et les 49,5 % du profileur deviennent le
+suspect.
+
+**La conversion du gain en part d'attention est retirée.** L'équation d'Amdahl
+attribuerait tout le gain à l'accélération du noyau, alors que passer de 512 à
+64 multiplie aussi `C` par huit — donc le nombre de lancements et le
+parallélisme. Et le facteur employé dépend d'un choix de dénominateur non
+discuté : rapport des temps mesurés (3,04) ou rapport des **travaux**, plancher
+déduit (66,91 / 10,11 = 6,6), qui donne 57 % au lieu de 76 %. Trois grandeurs
+changent, l'équation en résout une. **Le chiffre viendra d'une mesure directe,
+pas d'une inversion de formule.**
+
+## La barrière de qualité : trois instruments avant d'en trouver un valide
+
+### 1. `acvram eval` — aveugle à ce qu'il devait tester
+
+Quatre passes, quatre fois **8,825** au millième. Ce n'était pas la neutralité :
+`evaluate.py:189` appelle `model(batch, ...)`, le **forward dense**, qui
+n'appelle jamais `paged_attention`. Une barrière aveugle à ce qu'elle teste rend
+toujours « conforme ».
+
+### 2. La comparaison de trajectoires — ne peut pas trancher
+
+À température 0, les 128 jetons sont identiques à 350 mots, et divergent **au
+jeton 24** à 3000. Deux implémentations également correctes divergent en
+génération gloutonne : l'arrondi s'amplifie de façon chaotique. Ni preuve de
+neutralité, ni preuve de dégradation.
+
+*(Premier essai jeté : l'invite était faite d'identifiants `crc32`. Acceptable
+pour un débit — le coût d'un pas ne dépend pas du sens — mais sur du charabia le
+modèle part en répétition, et deux boucles dégénérées divergent entre candidats
+quasi équiprobables sans rien dire du noyau.)*
+
+### 3. La distance à l'attention dense — celle qui tranche
+
+Comparer les deux découpages **entre eux** ne dit pas lequel est juste. Seul un
+tiers qui ne partage pas leur défaut peut arbitrer : `decode_attention_fixed`,
+qui ne découpe rien.
+
+    350 mots    dense <-> 512  5,025485e-03    dense <-> adaptatif  5,025486e-03
+                ecart entre les deux decoupages  4,54e-05  =  0,90 % de l'ecart
+                deja accepte par la quantification du cache
+    3000 mots   dense <-> 512  7,771520e-03    dense <-> adaptatif  7,771520e-03
+                ecart entre les deux decoupages  3,60e-05  =  0,46 %
+
+**Les deux découpages sont à la même distance de la référence** (sept chiffres
+identiques à 3000). L'écart entre eux vaut moins de 1 % de l'erreur que la
+quantification int8 du cache fait déjà subir. **Classe B, sans dégradation
+mesurable** : le noyau est par ailleurs déterministe — deux appels identiques
+rendent le bit exact.
