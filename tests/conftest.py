@@ -221,3 +221,167 @@ def assert_logits_proches(a: torch.Tensor, b: torch.Tensor, msg: str = "",
     pb = F.softmax(b.double().reshape(-1, b.shape[-1]), dim=-1)
     kl = F.kl_div(pa, pb, reduction="batchmean").item()
     assert kl < seuil, f"{msg} (KL={kl:.4e}, seuil={seuil:.4e})"
+
+
+# ---------------------------------------------------------------------------
+# LE VERROU DE CARTE, PRIS PAR LA SESSION PYTEST ENTIERE
+#
+# Le 10/09/2026 a 20:09:48, `pytest tests/ -q` a tourne 127,57 s pendant une
+# manche de mesure sur la 5090 et a pollue quatre tours sur quinze. Une suite
+# qui alloue des gigaoctets et capture des graphes CUDA est un TEST DE CARTE,
+# quel que soit son nom.
+#
+# Trois remedes, et deux sont mauvais :
+#
+#   sauter les tests GPU quand la carte est prise
+#       -> la couverture tombe EN SILENCE, et precisement quand la machine est
+#          chargee, c'est-a-dire quand les tests de contention comptent le plus.
+#          Un garde qui cesse de pouvoir rendre « faux » au pire moment.
+#   un verrou par test
+#       -> dix-neuf fichiers attendent chacun leur tour, la suite devient
+#          impraticable et personne ne la lance plus.
+#   un verrou pour la SESSION pytest
+#       -> UNE attente, couverture complete. C'est celui-ci.
+#
+# Meme fichier de verrou que `outils/carte.sh` (`/tmp/acvram-carte-0.lock`,
+# surchargeable par ACVRAM_VERROU), donc la suite et les mesures s'excluent
+# reellement au lieu de s'exclure chacune de son cote.
+_VERROUS = []
+
+
+def _gpu_demande(config):
+    """La suite touche-t-elle la carte ? Oui des qu'un GPU est visible et que
+    rien ne l'interdit. On ne cherche PAS a deviner quels tests allouent : le
+    seul qui n'alloue pas est celui qu'on n'a pas encore ecrit, et se tromper
+    dans ce sens rend le verrou inutile."""
+    if os.environ.get("ACVRAM_TESTS_SANS_VERROU"):
+        return False
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except Exception:
+        return False
+
+
+def _chemins_de_verrou():
+    """LE VERROU EST PAR CARTE, ET LE DEFAUT DE `carte.sh` NE L'EST PAS.
+
+    `carte.sh` prend `/tmp/acvram-carte-0.lock` sauf si ACVRAM_VERROU est pose
+    a la main. Vu le 10/09 a 20h24 : une session mesurant sur la 3080 Ti avait
+    pense a poser `ACVRAM_VERROU=/tmp/acvram-carte-1.lock` — la justesse
+    dependait de sa memoire. Ma premiere version de ce verrou codait `-0` en
+    dur : une suite lancee avec `CUDA_VISIBLE_DEVICES=1` aurait bloque la carte
+    qu'elle n'emploie pas ET laisse sans protection celle qu'elle emploie.
+    Faux dans les deux sens a la fois.
+
+    On derive donc du parc VISIBLE, un verrou par carte, dans un ordre FIXE :
+    deux sessions qui verrouillent deux cartes en ordres opposes se
+    bloqueraient mutuellement.
+    """
+    force = os.environ.get("ACVRAM_VERROU")
+    if force:
+        return [force]
+    vis = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if vis:
+        # un UUID n'est pas un index : on ne le traduit pas, on le garde tel
+        # quel dans le nom, ce qui reste exclusif entre deux sessions qui
+        # nomment la carte de la meme facon.
+        ids = sorted(x.strip().replace("/", "_") for x in vis.split(",")
+                     if x.strip())
+    else:
+        try:
+            import torch
+            ids = [str(i) for i in range(torch.cuda.device_count())]
+        except Exception:
+            ids = ["0"]
+    return [f"/tmp/acvram-carte-{i}.lock" for i in ids]
+
+
+def pytest_configure(config):
+    """Le verrou de carte, pris par la SESSION pytest entiere.
+
+    Le 10/09/2026 a 20:09:48, la suite a tourne 127,57 s pendant une manche de
+    mesure sur la 5090 et a pollue quatre tours sur quinze. Une suite qui
+    alloue des gigaoctets et capture des graphes CUDA est un TEST DE CARTE,
+    quel que soit son nom.
+
+    Trois remedes, et deux sont mauvais :
+
+      sauter les tests GPU quand la carte est prise
+          -> la couverture tombe EN SILENCE, et precisement quand la machine
+             est chargee, c'est-a-dire quand les tests de contention comptent
+             le plus. Un garde qui cesse de pouvoir rendre « faux » au pire
+             moment.
+      un verrou par test
+          -> dix-neuf fichiers attendent chacun leur tour, la suite devient
+             impraticable et personne ne la lance plus.
+      un verrou pour la SESSION pytest
+          -> UNE attente, couverture complete. C'est celui-ci.
+    """
+    if not _gpu_demande(config):
+        return
+
+    # REFUS DE DOUBLE PRISE, repris de carte.sh (code 66) : un descripteur
+    # herite ne peut pas etre repris par `flock -n`, donc attendre ici serait
+    # attendre son propre ancetre. Un pytest lance SOUS carte.sh ne reprend
+    # donc pas le verrou — il l'a deja.
+    if os.environ.get("ACVRAM_CARTE_TENUE"):
+        print(f"\n[tests] carte deja tenue par le PID "
+              f"{os.environ['ACVRAM_CARTE_TENUE']} plus haut dans la meme "
+              f"arborescence — la suite ne reprend pas le verrou.", flush=True)
+        return
+
+    import fcntl
+    import time
+    attente = float(os.environ.get("ACVRAM_TESTS_ATTENTE", "1800"))
+    chemins = _chemins_de_verrou()
+    debut = time.monotonic()
+    dernier_dit = -60.0
+    for chemin in chemins:
+        fd = open(chemin, "a+")
+        while True:
+            try:
+                fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                ecoule = time.monotonic() - debut
+                if ecoule >= attente:
+                    fd.close()
+                    _relacher()
+                    # ABANDON EXPLICITE, jamais un saut silencieux : la suite
+                    # n'a pas tourne, et ca doit se voir comme un REFUS.
+                    # `UsageError` et non `RuntimeError` : la seconde sort en
+                    # INTERNALERROR avec une pile de pluggy, donc se lit comme
+                    # un plantage alors que c'est une decision — et un refus
+                    # qui ressemble a un bug sera contourne, pas respecte.
+                    raise pytest.UsageError(
+                        f"carte tenue par un autre depuis {ecoule:.0f} s "
+                        f"({chemin}) : la suite ne demarre pas. Attendre, ou "
+                        f"poser ACVRAM_TESTS_SANS_VERROU=1 en sachant que la "
+                        f"mesure voisine sera polluee.")
+                if ecoule - dernier_dit >= 60.0:
+                    dernier_dit = ecoule
+                    print(f"[tests] {chemin} occupe, attente {ecoule:.0f} s "
+                          f"/ {attente:.0f} s", flush=True)
+                time.sleep(2.0)
+        _VERROUS.append(fd)
+    # marqueur d'ancetre, pour qu'un carte.sh lance DEPUIS un test refuse au
+    # lieu d'attendre le verrou que cette session tient deja
+    os.environ["ACVRAM_CARTE_TENUE"] = str(os.getpid())
+    print(f"\n[tests] carte obtenue apres {time.monotonic() - debut:.1f} s "
+          f"({', '.join(chemins)})", flush=True)
+
+
+def _relacher():
+    while _VERROUS:
+        try:
+            _VERROUS.pop().close()   # fermer relache le flock
+        except Exception:
+            pass
+    os.environ.pop("ACVRAM_CARTE_TENUE", None)
+
+
+def pytest_unconfigure(config):
+    if _VERROUS:
+        _relacher()
+        print("[tests] carte relachee", flush=True)
