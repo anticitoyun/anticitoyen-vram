@@ -51,7 +51,10 @@ def main() -> int:
     a = ap.parse_args()
 
     dt = getattr(torch, a.dtype)
-    tok = AutoTokenizer.from_pretrained(a.modele, use_fast=True)
+    # use_fast=False : c'est le tokenizer que GPTQ emploie (datautils.py:16),
+    # et le lent ne segmente pas toujours comme le rapide. Un etalon se compare
+    # a ce qui est publie, donc jusqu'au choix du tokenizer.
+    tok = AutoTokenizer.from_pretrained(a.modele, use_fast=False)
     t0 = time.time()
     mod = AutoModelForCausalLM.from_pretrained(a.modele, dtype=dt,
                                                device_map="cuda:0")
@@ -60,11 +63,28 @@ def main() -> int:
           flush=True)
 
     brut = open(a.corpus, encoding="utf-8").read()
-    variantes = {
-        "fichier-brut": brut,
-        "lignes-jointes-nn": "\n\n".join(
-            l for l in brut.split("\n")),
-    }
+
+    # BRAS A — LE TEXTE DE GPTQ, RECONSTRUIT ET VERIFIE. Leur datautils.py fait
+    # `"\n\n".join(load_dataset('wikitext','wikitext-2-raw-v1',split='test')
+    # ['text'])`. Le paquet `datasets` n'est pas dans le venv, donc je
+    # reconstruis le texte depuis le fichier brut — mais je ne le SUPPOSE pas :
+    # les elements du dataset wikitext sont les lignes du fichier AVEC leur
+    # saut final, et le split test en compte 4 358. Si notre fichier n'en donne
+    # pas autant, la reconstruction est fausse et le bras A est refuse.
+    lignes = brut.split("\n")
+    elements = [l + "\n" for l in lignes[:-1]] if lignes[-1] == "" else \
+               [l + "\n" for l in lignes]
+    if len(elements) != 4358:
+        print(f"BRAS A REFUSE : {len(elements)} elements reconstruits pour "
+              "4 358 attendus dans le split test de wikitext-2-raw-v1. La "
+              "reconstruction ne reproduit pas le dataset, et le comparer a "
+              "une valeur GPTQ n'aurait aucun sens.", file=sys.stderr)
+        variantes = {"llamacpp-fichier-brut": brut}
+    else:
+        variantes = {
+            "gptq-elements-joints": "\n\n".join(elements),
+            "llamacpp-fichier-brut": brut,
+        }
 
     releves = []
     for nom, texte in variantes.items():
