@@ -1063,6 +1063,11 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             "has_act_scale": scaler.scale is not None,
             "bpw": round(metrics["bpw"], 3),
             "out_snr_db": round(metrics["out_snr_db"], 2),
+            # L'echelle de sortie, sans laquelle le SNR ne se compare pas d'un
+            # tenseur a l'autre. Publiee pour qu'une analyse posterieure au
+            # manifeste puisse reconstituer l'erreur absolue sans reconvertir.
+                **({"out_ref_norm": round(float(metrics["out_ref_norm"]), 6)}
+                   if "out_ref_norm" in metrics else {}),
                 **({"erreurs_grille": metrics["erreurs_grille"],
                     "alpha_retenu": metrics["alpha_retenu"]}
                    if "erreurs_grille" in metrics else {}),
@@ -1126,13 +1131,39 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         _mode = os.environ.get("ACVRAM_ORDRE_SAC", "snr").strip().lower()
         if os.environ.get("ACVRAM_ORDRE_SAC_INVERSE"):
             _mode = "inverse"
-        if _mode not in ("snr", "erreur", "inverse"):
+        if _mode not in ("snr", "erreur", "inverse", "absolu"):
             raise ValueError(
-                f"ACVRAM_ORDRE_SAC={_mode!r} inconnu ; attendu snr, erreur ou "
-                f"inverse. Un mode inconnu qui retomberait en silence sur le "
-                f"defaut ferait mesurer autre chose que ce qui est demande.")
+                f"ACVRAM_ORDRE_SAC={_mode!r} inconnu ; attendu snr, erreur, "
+                f"absolu ou inverse. Un mode inconnu qui retomberait en silence "
+                f"sur le defaut ferait mesurer autre chose que ce qui est "
+                f"demande.")
+
+        def _abs_err(m):
+            """Erreur ABSOLUE en sortie de couche, en unites de sortie.
+
+            `out_snr_db` et `out_rel_err` sont des RAPPORTS : le denominateur
+            ||y_ref|| y disparait. C'est le bon chiffre pour juger un tenseur
+            contre lui-meme, et le mauvais pour en classer deux l'un contre
+            l'autre — ce que fait precisement ce sac a dos. Ce qui se propage
+            jusqu'a la perte est l'erreur absolue ; deux tenseurs a 20 et 30 dB
+            dont les sorties valent 1 et 100 portent 0,1 et 3,16 d'erreur, et
+            le classement en decibels met le plus nuisible en second.
+
+            Repli sur l'erreur relative quand `out_ref_norm` est absent — un
+            manifeste produit avant l'ajout du champ. Le repli est SIGNALE par
+            l'absence du champ, pas silencieux : `absolu` degenere alors en
+            `erreur`, ce qui est exactement l'ancien comportement.
+            """
+            ech = m.get("out_ref_norm")
+            if "out_abs_err" in m:
+                return float(m["out_abs_err"])
+            rel = 10.0 ** (-(m["out_snr_db"]) / 20.0)
+            return rel * float(ech) if ech else rel
 
         def _cle(c):
+            if _mode == "absolu":
+                gagne = (_abs_err(c["metrics_base"]) - _abs_err(c["metrics"]))
+                return -gagne / c["cout"]
             if _mode == "erreur":
                 gagne = (10.0 ** (-(c["metrics_base"]["out_snr_db"]) / 20.0)
                          - 10.0 ** (-(c["metrics"]["out_snr_db"]) / 20.0))
