@@ -62,3 +62,61 @@ contention** — la carte est là, elle est simplement prise.
 ce matin et cet après-midi l'étaient sur machine calme, sauf mention contraire.
 Ce qui est faux, c'est de présenter le nombre sans son contexte — et je l'ai
 fait une dizaine de fois aujourd'hui.
+
+---
+
+## CE QUI N'EST PAS ÉTABLI, et c'est le morceau qui manquait
+
+**Nous accusons deux tests sur la foi de deux échecs observés.** Relevé par
+chef, et c'est la bonne objection : deux observations ne font pas une
+fragilité établie, et **sérialiser la suite entière pour une fragilité non
+prouvée serait payer un prix réel contre un défaut supposé.**
+
+Ce qui est observé :
+
+```
+17h55  test_awq_does_not_degrade_the_model_end_to_end   ECHEC pendant « poste3-slots8 »
+15h50  test_le_gemv_nvfp4_ne_part_pas_en_emulation      ECHEC pendant mon A/B d'ordre
+       les deux repassent seules
+```
+
+Ce qui n'est **pas** observé : que ces échecs soient **reproductibles**, ni
+qu'ils soient **causés** par la contention plutôt que corrélés avec elle. Une
+coïncidence deux fois de suite reste une coïncidence tant qu'on ne la provoque
+pas.
+
+### Le protocole qui l'établirait, ou le réfuterait
+
+**Faire tomber les tests exprès, sous une charge GPU connue.** Trois conditions,
+et la troisième est celle qui décide :
+
+```
+1. machine calme, carte a 16 Mio          les deux tests doivent PASSER
+2. charge GPU connue et tenue             les deux doivent ECHOUER, a volonte
+3. la meme charge, tests sous carte.sh    les deux doivent PASSER a nouveau
+```
+
+La charge doit être **connue et reproductible** — pas « une autre session
+tournait », mais un occupant délibéré dont on choisit les octets. Un simple
+allocateur qui réserve N gibioctets et les tient suffit, et il vaut mieux qu'un
+modèle : on choisit N, donc on peut chercher le **seuil** à partir duquel chaque
+test tombe. Ce seuil est le vrai résultat : il dit si le test est fragile ou
+simplement gourmand.
+
+**Et si un test qu'on croit fragile résiste, c'est un résultat aussi** — il
+sort de la liste, et la sérialisation coûte moins.
+
+### Ce que la condition 2 doit distinguer
+
+Les deux échecs n'ont **pas le même mécanisme**, donc le seuil ne sera
+probablement pas le même :
+
+```
+test_awq...      charge un modele reel     tombe quand la VRAM libre manque
+test_le_gemv...  demande get_extension()   tombe si le contexte CUDA echoue
+```
+
+Le second peut tomber pour une raison qui n'est pas la mémoire — compilation,
+cache de noyaux, contexte. **Le confondre avec le premier ferait attribuer à la
+mémoire un défaut de contexte**, et le correctif par verrou marcherait sans
+qu'on sache pourquoi.
