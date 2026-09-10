@@ -366,12 +366,28 @@ def quantize_with_calibration(
     x = torch.diag(probe.to(w.device))
     y_ref = x @ w.t()
     y_q = x @ deq.t()
-    out_err = ((y_q - y_ref).norm() / y_ref.norm().clamp(min=1e-12)).item()
+    # `out_err` est une erreur RELATIVE : le denominateur `||y_ref||` disparait
+    # dans le rapport. C'est le bon chiffre pour juger un tenseur CONTRE
+    # LUI-MEME — « ce format le degrade-t-il plus que cet autre ? » — et le
+    # mauvais pour classer DEUX TENSEURS l'un contre l'autre, ce que fait le sac
+    # a dos budgetaire. Deux tenseurs a 20 dB et 30 dB dont les sorties valent
+    # 1 et 100 portent des erreurs absolues de 0,1 et 3,16 : le second nuit
+    # trente fois plus et le classement par decibels le met second.
+    #
+    # Ce qui se propage jusqu'a la perte est l'erreur ABSOLUE. Elle est deja
+    # calculee ici — c'est le numerateur — et jetee. On la garde, avec l'echelle
+    # qui la rend interpretable. Aucun chemin existant ne change : les deux
+    # champs sont ajoutes, aucun n'est remplace.
+    out_abs_err = (y_q - y_ref).norm().item()
+    out_ref_norm = y_ref.norm().clamp(min=1e-12).item()
+    out_err = out_abs_err / out_ref_norm
 
     metrics = {
         "w_rel_err": w_err,
         "w_snr_db": 20 * math.log10(1.0 / max(w_err, 1e-12)),
         "out_rel_err": out_err,
+        "out_abs_err": out_abs_err,
+        "out_ref_norm": out_ref_norm,
         "out_snr_db": 20 * math.log10(1.0 / max(out_err, 1e-12)),
         "hadamard_block": had_block,
         "awq": scaler.scale is not None,
