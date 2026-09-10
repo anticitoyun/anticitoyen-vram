@@ -283,7 +283,19 @@ def get_extension():
         src = os.path.join(here, "acvram_kernels.cu")
         with open(src, "rb") as fh:
             _SRC_OCTETS = fh.read()
-        _SRC_HASH = hashlib.sha256(_SRC_OCTETS).hexdigest()[:16]
+        # LES FLAGS FONT PARTIE DU SOURCE. Hacher le seul contenu du fichier
+        # laisse ouvert le defaut que ce controle croit fermer : un parametre
+        # passe par -D ne change pas le fichier, donc plusieurs valeurs
+        # donnent le MEME ACVRAM_SRC_HASH, donc ccache peut rendre le meme
+        # objet, et plusieurs reglages rendent le meme chiffre — un temps plat
+        # qui se lit « le reglage n'a pas d'effet » et refute a tort une
+        # prediction juste. ACVRAM_GW_WARPS est deja dans ce cas. On hache
+        # donc le couple (contenu, flags qui varient).
+        _flags_var = ([f"-DGW_WARPS={os.environ['ACVRAM_GW_WARPS']}"]
+                      if os.environ.get("ACVRAM_GW_WARPS") else [])
+        _SRC_HASH = hashlib.sha256(
+            _SRC_OCTETS + "\x00".join(sorted(_flags_var)).encode()
+        ).hexdigest()[:16]
         # LE CONTROLE EST-IL SEULEMENT APPLICABLE ? L'absence du marqueur dans
         # le .so a DEUX causes : un binaire perime, ou un source qui n'en porte
         # pas. Ne proposer que la premiere l'a fait accuser a tort, et le
@@ -312,8 +324,7 @@ def get_extension():
             sources=[src],
             extra_cuda_cflags=["-O3", "--use_fast_math", "-lineinfo",
                                f"-DACVRAM_SRC_HASH={_SRC_U64}ULL"]
-            + ([f"-DGW_WARPS={os.environ['ACVRAM_GW_WARPS']}"]
-               if os.environ.get("ACVRAM_GW_WARPS") else [])
+            + _flags_var
             + _arch_flags(),
             extra_cflags=["-O3"],
             build_directory=cache,
