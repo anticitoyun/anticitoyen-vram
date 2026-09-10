@@ -44,10 +44,27 @@ from .mla import MLA_BUCKET, godet_mla   # un graphe par palier de cache latent
 
 __all__ = ["GraphRunner"]
 
-# Au-delà, les godets les moins récents ne sont plus capturés : chaque graphe
-# retient sa mémoire d'activations, et un serveur qui voit trente formes de
-# lot différentes est un serveur de lots — le prefill y domine de toute façon.
-MAX_GRAPHS = 16
+# Plafond du NOMBRE TOTAL de graphes captures. Chaque graphe retient sa memoire
+# d'activations, d'ou un plafond ; mais il faut lire ce qu'il fait vraiment.
+#
+# LE COMMENTAIRE PRECEDENT DISAIT « les godets les moins recents ne sont plus
+# captures », ce qui decrit une eviction LRU. IL N'Y EN A AUCUNE. Une fois les
+# seize places prises, toute forme nouvelle est refusee DEFINITIVEMENT et
+# repasse en eager, quelle que soit la frequence a laquelle elle revient. Les
+# seize premieres formes rencontrees gardent leur place pour la vie du
+# serveur, meme si elles ne reviennent jamais.
+#
+# La cle etant (b, ql, nblk, lb), le nombre de formes croit avec la variete
+# des tailles de lot ET des longueurs de contexte : un lot de douze qui se
+# vide sequence par sequence parcourt a lui seul douze valeurs de b. Seize
+# places se remplissent donc en quelques tours, et les refus qui suivent
+# dependent du texte genere — c'est-a-dire qu'ils varient d'un essai a
+# l'autre. Piste mesuree le 10/09 pour notre dispersion de 26 a 37 % contre
+# 1,5 a 1,8 % chez llama.cpp.
+#
+# Configurable pour pouvoir mesurer ce que coute ce plafond, sans le deplacer
+# par defaut : le defaut reste 16, et une campagne qui le bouge doit le dire.
+MAX_GRAPHS = int(os.environ.get("ACVRAM_MAX_GRAPHS", "16"))
 
 
 def _empreinte_adresses(runner, entry: dict) -> dict:

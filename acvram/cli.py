@@ -45,6 +45,7 @@ VARIABLES_LUES = {
     "ACVRAM_BANC_ACCEPTE_REPLAN",
     "ACVRAM_KERNEL_CACHE",
     "ACVRAM_LOGITS_BF16",
+    "ACVRAM_MAX_GRAPHS",
     "ACVRAM_MLA_BATCH",
     "ACVRAM_MLA_DEBUG_ECART",
     "ACVRAM_MLA_EAGER_TORCH",
@@ -54,6 +55,7 @@ VARIABLES_LUES = {
     # consigne silencieusement ignoree.
     "ACVRAM_PA_ARM",
     "ACVRAM_PREFILL_BATCH",
+    "ACVRAM_BUDGET_JETONS",
     # Echappement de mesure de la fusion, pour les QUATRE empileurs.
     # ACVRAM_SANS_FUSION_BF16 ne coupait que le chemin bf16 : le gain de la
     # fusion n'etait donc mesurable qu'en bf16, et c'est ainsi qu'un +2,60 %

@@ -45,7 +45,7 @@ def _prefill(e, prompt, max_tokens=32):
 
 def _decode_both(e):
     """Un pas de décodage : logits eager puis logits du graphe, même état."""
-    dec = [s for s in e.running if s.prefilled and not s.finished]
+    dec = e._decodables()
     for s in dec:
         assert e._grow(s)
     batch = e._build_batch(dec, prefill=False)

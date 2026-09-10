@@ -114,7 +114,7 @@ def test_moe_graph_equals_eager(tiny_moe):
     e.add_request([3, 1, 4, 1, 5], SamplingParams(temperature=0.0, max_tokens=24))
     e.step()
     for _ in range(6):
-        dec = [s for s in e.running if s.prefilled and not s.finished]
+        dec = e._decodables()
         for s in dec:
             assert e._grow(s)
         batch = e._build_batch(dec, prefill=False)

@@ -440,10 +440,33 @@ def main() -> int:
              "corpus": str(CORPUS), "corpus_sha": CORPUS_SHA}, indent=2))
         return 0
 
+    # LE NOM DU DOSSIER PORTE LE MODE D'ORDRE, et c'est structurel.
+    #
+    # Le 10/09 au soir, une manche entiere a ete perdue : le dossier
+    # `Llama-2-7b-quota-6g00` existait deja, converti en mode `snr`, et la
+    # branche « dossier deja present, conversion sautee » l'a reutilise pour
+    # une campagne lancee avec ACVRAM_ORDRE_SAC=erreur. La variable n'a jamais
+    # servi — il n'y a pas eu de conversion a ordonner — et la campagne a
+    # remesure le bras precedent en silence. Seul le compte de promus (198,
+    # valeur annoncee d'avance comme signal d'alarme) l'a revele.
+    #
+    # Le defaut n'etait pas dans le cache : il etait dans le NOM. Trois modes
+    # produisent trois dossiers differents ; leur donner un seul nom les fait
+    # se confondre, et aucune vigilance ne repare cela durablement. Le mode
+    # par defaut garde le nom historique pour ne pas orpheliner les dossiers
+    # deja produits ; tout autre mode porte son suffixe.
+    _ordre = os.environ.get("ACVRAM_ORDRE_SAC", "snr").strip().lower()
+    if os.environ.get("ACVRAM_ORDRE_SAC_INVERSE"):
+        _ordre = "inverse"
+    _suffixe = "" if _ordre == "snr" else f"-{_ordre}"
+    if _suffixe:
+        print(f"[campagne] ordre du sac a dos : {_ordre} — les dossiers "
+              f"porteront le suffixe « {_suffixe} »", flush=True)
+
     resultats = []
     for b, nom, temoin in points:
-        dossier = BASE / f"Llama-2-7b-{nom}"
-        print(f"\n=== {nom} — budget {gio(b)}", flush=True)
+        dossier = BASE / f"Llama-2-7b-{nom}{_suffixe}"
+        print(f"\n=== {nom} — budget {gio(b)} — ordre {_ordre}", flush=True)
 
         if not dossier.exists():
             code = service(
@@ -467,7 +490,36 @@ def main() -> int:
                                   "code": code})
                 continue
         else:
-            print("  dossier deja present, conversion sautee")
+            # Un dossier reutilise doit prouver qu'il a ete produit par le
+            # mode demande. Le manifeste porte `ordre_glouton` depuis le
+            # 10/09 ; un dossier plus ancien ne l'a pas, et son absence ne
+            # prouve rien — elle est donc signalee comme telle et non lue
+            # comme un accord.
+            _bud = lire_budget(dossier) or {}
+            _vu = _bud.get("ordre_glouton")
+            _attendu = {"base_croissant": "snr_de_base_croissant_sans_cout",
+                        "snr": "snr_par_octet_decroissant",
+                        "erreur": "erreur_evitee_par_octet_decroissante",
+                        "absolu": "erreur_absolue_evitee_par_octet_decroissante",
+                        "inverse": "snr_par_octet_croissant"}.get(_ordre)
+            if _vu is None:
+                print(f"  dossier deja present, conversion sautee — mais son "
+                      f"manifeste ne porte PAS d'ordre_glouton : rien ne "
+                      f"prouve qu'il vient du mode « {_ordre} ». Supprimez-le "
+                      f"ou renommez-le si vous mesurez un mode precis.")
+            elif _attendu and _vu != _attendu:
+                print(f"  ECHEC / CAUSE: dossier deja present mais produit "
+                      f"avec ordre_glouton={_vu!r}, alors que la campagne "
+                      f"demande {_attendu!r} ({_ordre}).")
+                print(f"  SUITE: supprimer {dossier} ou lancer avec un autre "
+                      f"ACVRAM_ORDRE_SAC.")
+                resultats.append({"budget_gib": b,
+                                  "etat": "dossier d'un autre ordre",
+                                  "ordre_vu": _vu, "ordre_demande": _ordre})
+                continue
+            else:
+                print(f"  dossier deja present, conversion sautee "
+                      f"(ordre_glouton={_vu})")
 
         bud = lire_budget(dossier)
         oct_reels = octets_safetensors(dossier)
