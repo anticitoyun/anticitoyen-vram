@@ -35,6 +35,11 @@ from . import __version__            # noqa: E402  (source unique de verite)
 #
 # Cette liste se met a jour avec le code ; une epreuve verifie qu'elle ne
 # derive pas.
+#
+# Tu viens d'ecrire `os.environ.get("ACVRAM_...")` ailleurs dans le depot ?
+# Ajoute le nom ici avant de committer -- cinq variables l'ont deja oublie
+# le 10/09, la garde ne les a signalees qu'apres coup, jamais au moment ou
+# elles ont ete ecrites.
 VARIABLES_LUES = {
     "ACVRAM_ALLOC_EXTENSIBLE",
     "ACVRAM_BANC_ACCEPTE_REPLAN",
