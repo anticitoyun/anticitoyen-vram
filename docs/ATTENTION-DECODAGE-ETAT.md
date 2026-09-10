@@ -62,3 +62,40 @@ pages, ou une boucle bornée par une capacité plutôt que par l'occupation
 réelle. Cela expliquerait à la fois un temps indépendant du travail et une
 insensibilité à la grille, chaque bloc refaisant le même balayage. **La
 bisection le désignera immédiatement, une fois le protocole réparé.**
+
+## Le protocole de reprise (écrit le 10/09, avant toute mesure)
+
+`outils/attn-isole.py`. **Un seul appel entre deux événements CUDA, puis
+synchronisation.**
+
+Pourquoi cela corrige le défaut : les événements mesurent le temps GPU **entre
+les marqueurs**, donc la synchronisation qui suit n'entre pas dans
+l'intervalle — contrairement à un chronomètre mur, où elle ajoutait ~9 µs par
+appel et nous avait déjà coûté une mesure. Et comme un seul appel est en vol,
+**aucune file ne se forme** : plus de sérialisation artificielle.
+
+**Ce qui ne suffisait pas** : passer `ACVRAM_PAGED_ALLOC=1` pour retrouver des
+`torch::empty` par appel ne change rien — l'allocateur CUDA de PyTorch rend le
+**même bloc** à chaque fois, donc les appels écriraient encore au même endroit.
+Ce n'est pas l'allocation qu'il fallait séparer, c'est la file.
+
+### Le témoin est la bisection elle-même
+
+    ACVRAM_PA_ETAPE=0   indices + trois flottants ecrits, retour
+    ACVRAM_PA_ETAPE=3   noyau complet
+
+**L'étape 0 doit coûter beaucoup moins que l'étape 3.** Si les deux rendent le
+même temps, le montage est encore faux et **rien de ce qu'il mesure ne vaut** —
+c'est exactement ce qui a disqualifié le précédent. Le montage précédent était
+réfuté par la bisection ; celui-ci est validé par elle, avant toute lecture.
+
+### Ordre imposé
+
+    1. empreinte : le .so porte-t-il le sha du .cu ? (ccache ment par la date)
+    2. temoin du montage : etape 0 contre etape 3
+    3. bisection complete, deux contextes
+    4. grille (ACVRAM_PA_CHUNK), sur un montage enfin valide
+
+**La grille vient en dernier et pas avant** : c'est elle qui a produit la
+fausse réfutation de la sous-parallélisation, et elle ne voudra dire quelque
+chose que sur un montage dont le témoin a parlé.
