@@ -53,6 +53,19 @@ def mesurer(bras: str, modele: str) -> dict:
     from acvram.engine.sampler import SamplingParams
 
     charge = load_model(modele, dtype=torch.bfloat16)
+    # LE PLAN EST-IL CELUI DU TABLEAU ? La campagne d'ETABLI.md declare « 0
+    # couche exilee ». Si une autre session tient de la VRAM au moment du
+    # chargement, le plan exile — et l'exil d'une seule couche coute 70 % du
+    # debit. Six chargements seraient perdus sur un `p` qui ne porte pas sur
+    # le meme moteur. On refuse AVANT de mesurer, pas apres.
+    exiles = [c.index for c in charge.plan.layers
+              if "cpu" in (c.attn_storage, c.mlp_storage) or c.mlp_exec == "cpu"]
+    if exiles:
+        raise RuntimeError(
+            f"{len(exiles)} couche(s) exilee(s) sur {len(charge.plan.layers)} "
+            f"(indices {exiles[:8]}{'...' if len(exiles) > 8 else ''}) : le "
+            "tableau d'ETABLI.md porte sur 0 couche exilee. Liberez la VRAM "
+            "et relancez — mesurer ici donnerait un p sur un autre moteur.")
     moteur = Engine(charge, None, max_batch_size=1, max_model_len=CTX + 32)
     # Sans ignore_eos, une fin de sequence au premier jeton rendrait un pas
     # mesure sur un seul passage. On publie le compte REELLEMENT execute.
@@ -80,6 +93,7 @@ def mesurer(bras: str, modele: str) -> dict:
     emp = (hashlib.sha256(open(so, "rb").read()).hexdigest()[:12]
            if so and os.path.exists(so) else "inconnu")
     return {"bras": bras, "pa_chunk": int(chunk), "so": so, "empreinte_so": emp,
+            "couches": len(charge.plan.layers), "exilees": 0,
             "pas_executes": len(pas), "n_retenus": n,
             "median_ms": ordonnes[n // 2],
             "p10_ms": ordonnes[max(0, int(0.10 * n))],
