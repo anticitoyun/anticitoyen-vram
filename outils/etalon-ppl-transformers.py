@@ -56,8 +56,11 @@ def main() -> int:
     # a ce qui est publie, donc jusqu'au choix du tokenizer.
     tok = AutoTokenizer.from_pretrained(a.modele, use_fast=False)
     t0 = time.time()
-    mod = AutoModelForCausalLM.from_pretrained(a.modele, dtype=dt,
-                                               device_map="cuda:0")
+    # PAS de device_map : il exige le paquet `accelerate`, absent du venv, et
+    # echoue avec un message qui parle de tp_plan et de set_default_device —
+    # trois pistes pour une dependance manquante. Le .to() fait la meme chose
+    # sans dependance, au prix d'un passage en RAM hote au chargement.
+    mod = AutoModelForCausalLM.from_pretrained(a.modele, dtype=dt).to("cuda:0")
     mod.eval()
     print(f"charge en {time.time() - t0:.0f} s, dtype {next(mod.parameters()).dtype}",
           flush=True)
