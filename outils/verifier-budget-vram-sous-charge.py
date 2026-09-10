@@ -132,7 +132,7 @@ def _memoire_hote() -> tuple[int, int]:
 
 
 def mesurer(chemin: str, max_model_len: int, n_seqs: int,
-            n_jetons: int, invite: int) -> dict:
+            n_jetons: int, invite: int, sans_graphes: bool = False) -> dict:
     from acvram.engine.loader import load_model
     from acvram.engine.runner import Engine
     from acvram.engine.sampler import SamplingParams
@@ -143,13 +143,14 @@ def mesurer(chemin: str, max_model_len: int, n_seqs: int,
 
     charge = load_model(chemin, max_model_len=max_model_len)
     moteur = Engine(charge, None, max_batch_size=n_seqs,
-                    max_model_len=max_model_len)
+                    max_model_len=max_model_len,
+                    enable_cuda_graphs=not sans_graphes)
     # Prechauffer les graphes comme le fait le serveur : sans cela, la capture
     # se declenche au milieu du premier pas et echoue par
     # `cudaErrorStreamCaptureInvalidated` des que plusieurs sequences allouent
     # ensemble. Le sauter ne mesurerait pas le regime de production — et les
     # graphes retiennent de la VRAM, donc c est bien du poste mesure.
-    if moteur.graphs is not None:
+    if moteur.graphs is not None and not sans_graphes:
         moteur.warm_graphs(max_model_len)
     torch.cuda.synchronize()
     apres_chargement = Guetteur._lire()
@@ -180,6 +181,7 @@ def mesurer(chemin: str, max_model_len: int, n_seqs: int,
     graphes_actifs = bool(getattr(g_, "enabled", False))
     raison_graphes = (getattr(g_, "raison", "") or "")[:80]
     libre_h, dispo_h = _memoire_hote()
+    n_graphes = len(getattr(g_, "graphs", {}) or {}) if g_ is not None else 0
 
     plan = charge.plan
     annonce = (plan.total_weight_bytes + sum(plan.kv_budget.values())
@@ -198,6 +200,8 @@ def mesurer(chemin: str, max_model_len: int, n_seqs: int,
         "raison_graphes": raison_graphes,
         "hote_libre": libre_h,
         "hote_dispo": dispo_h,
+        "n_graphes": n_graphes,
+        "sans_graphes": sans_graphes,
     }
     del moteur, charge
     gc.collect()
@@ -217,6 +221,9 @@ def main(argv):
                          "multiplie l etat recurrent")
     ap.add_argument("--jetons", type=int, default=64)
     ap.add_argument("--invite", type=int, default=256)
+    ap.add_argument("--sans-graphes", action="store_true",
+                    help="le bras qui discrimine : l ecart annonce/pic est-il "
+                         "la reserve des graphes CUDA, ou l aire de travail ?")
     ns = ap.parse_args(argv[1:])
 
     if not torch.cuda.is_available():
@@ -231,7 +238,7 @@ def main(argv):
 
     nom = dict(CIBLES)[ns.role]
     r = mesurer(os.path.join(A, nom), ns.max_model_len, ns.seqs,
-                ns.jetons, ns.invite)
+                ns.jetons, ns.invite, ns.sans_graphes)
     g = 2**30
     pc = 100 * (r["pic"] - r["annonce"]) / max(1, r["annonce"])
     verdict = ("conforme" if abs(pc) <= 5 else
@@ -240,16 +247,22 @@ def main(argv):
     print(f"  annonce au plan  {r['annonce']/g:6.2f} G   "
           f"(poids {r['poids']/g:.2f}  kv {r['kv']/g:.2f}  etat {r['etat']/g:.2f})")
     print(f"  apres chargement {r['chargement']/g:6.2f} G")
-    print(f"  PIC sous charge  {r['pic']/g:6.2f} G   {pc:+.1f} %   {verdict}")
+    # Un pourcentage deplace le coupable vers le plus petit denominateur :
+    # +39,0 % et +9,9 % etaient le MEME 1,4 Gio sur deux modeles differant d un
+    # facteur 5,3 en poids. La valeur absolue se publie a cote, toujours.
+    print(f"  PIC sous charge  {r['pic']/g:6.2f} G   "
+          f"{(r['pic']-r['annonce'])/g:+.2f} G   {pc:+.1f} %   {verdict}")
     print(f"  ce que la charge ajoute : "
           f"{(r['pic'] - r['chargement'])/g:+.2f} G")
     # CONTROLES publies A COTE du verdict, jamais a sa place.
     print(f"  MLP exiles {r['exiles']}   graphes "
-          f"{'actifs' if r['graphes'] else 'INACTIFS'}"
+          f"{'coupes (bras temoin)' if r['sans_graphes'] else
+             ('actifs, %d vivants' % r['n_graphes']) if r['graphes']
+             else 'INACTIFS'}"
           + (f" ({r['raison_graphes']})" if not r['graphes'] else ""))
     print(f"  hote : MemFree {r['hote_libre']/2**20:.1f} G   "
           f"MemAvailable {r['hote_dispo']/2**20:.1f} G")
-    if r["exiles"] or not r["graphes"]:
+    if r["exiles"] or (not r["graphes"] and not r["sans_graphes"]):
         print("  MANCHE SANS OBJET : un MLP exile ou des graphes inactifs "
               "changent le regime — ce chiffre ne mesure pas le budget KV.")
         return 2
