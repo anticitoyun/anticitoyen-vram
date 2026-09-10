@@ -679,7 +679,12 @@ _bk.register(_bk.Backend(
 
 _bk.register(_bk.Backend(
     name="fp4-tensorcores", formats=("nvfp4",), device_type="cuda",
-    priority=110, available=_sm100_ok,
+    priority=110,
+    # Echappement, sur le modele de `ACVRAM_DISABLE_PAGED_ATTN` : ce chemin
+    # doit pouvoir etre ecarte SANS toucher au code, sinon le duel qui decide
+    # de son sort compare deux binaires au lieu de deux chemins.
+    available=lambda d: (not os.environ.get("ACVRAM_DISABLE_FP4_TC")
+                         and _sm100_ok(d)),
     # EXCLU PENDANT UNE CAPTURE DE GRAPHE, et pas au-dela d'un lot.
     #
     # `torch._scaled_mm` passe par cuBLASLt, dont le premier appel sur un flux

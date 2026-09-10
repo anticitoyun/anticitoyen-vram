@@ -39,6 +39,8 @@ def main(argv):
     ap.add_argument("--invite", type=int, default=16)
     ap.add_argument("--jetons", type=int, default=64)
     ap.add_argument("--max-model-len", type=int, default=4096)
+    ap.add_argument("--sans-graphes", action="store_true",
+                    help="le seul regime ou le backend 110 est pris")
     ns = ap.parse_args(argv[1:])
 
     if torch.cuda.device_count() != 1:
@@ -57,7 +59,8 @@ def main(argv):
 
     charge = load_model(os.path.join(A, ns.modele), max_model_len=ns.max_model_len)
     moteur = Engine(charge, None, max_batch_size=ns.seqs,
-                    max_model_len=ns.max_model_len)
+                    max_model_len=ns.max_model_len,
+                    enable_cuda_graphs=not ns.sans_graphes)
     exiles = sum(1 for m in charge.model.modules()
                  if isinstance(m, QuantLinear) and m.streamed is not None)
     g_ = getattr(moteur, "graphs", None)
@@ -77,9 +80,12 @@ def main(argv):
     # Decodage : on compte les JETONS REELLEMENT PRODUITS, pas les pas demandes.
     t1 = time.perf_counter()
     pas = jetons = 0
+    ids_produits = []
     while moteur.running or moteur.waiting:
         sorties = moteur.step()
         pas += 1
+        for s_ in (sorties or []):
+            ids_produits.extend(list(getattr(s_, "token_ids", ()) or ()))
         jetons += sum(len(getattr(s, "token_ids", ()) or ()) for s in (sorties or []))
         if pas > ns.jetons + ns.invite + 16:
             break
@@ -93,8 +99,14 @@ def main(argv):
     # le nombre de REJEUX rapporte au nombre de pas.
     rej = getattr(g_, "replays", 0) if g_ is not None else 0
     cap = getattr(g_, "captures", 0) if g_ is not None else 0
+    # Le TEXTE, pas seulement le debit : un chemin plus rapide qui repond
+    # autre chose n a pas gagne. Empreinte des jetons reellement produits.
+    import hashlib
+    sig = (hashlib.sha256(repr(ids_produits).encode()).hexdigest()[:12]
+           if ids_produits else "-")
     print(f"{seuil}\t{ttft:.1f}\t{debit_pas:.2f}\t{pas}\t{jetons}\t"
-          f"{exiles}\t{'oui' if graphes else 'NON'}\t{rej}/{pas}\t{cap}")
+          f"{exiles}\t{'oui' if graphes else 'NON'}\t{rej}/{pas}\t{cap}\t{sig}\t"
+          f"{os.environ.get('ACVRAM_DISABLE_FP4_TC','') and 'sans110' or 'avec110'}")
     return 0
 
 
