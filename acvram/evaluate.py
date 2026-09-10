@@ -242,20 +242,32 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
     # se lirait sinon comme une perplexite legerement differente — la pire
     # forme de defaut, celle qui ne se voit pas.
     if stride == window and min_context == 0:
-        attendu = len(ids) - 1
-        reste = attendu % window
-        # le dernier segment est ignore s'il ne contient pas deux jetons
-        if reste == 1:
-            attendu -= 1
+        # L'INVARIANT N'EST PAS len(ids) - 1, ET MON PREMIER JET L'A ECRIT.
+        # En segments disjoints chaque forward est independant : le premier
+        # jeton d'un segment n'a aucun predecesseur, donc il n'est PAS predit.
+        # `logits[:-1]` contre `chunk[1:]` note WINDOW - 1 positions par
+        # segment, pas window. L'invariant est donc nsamples x (window - 1) —
+        # 168 x 2047 = 343 896 sur wikitext-2 — et non len(ids) - 1 = 344 063.
+        # Ecrit autrement, il aurait averti A TORT sur un protocole correct,
+        # et l'avertissement aurait envoye chercher un defaut inexistant.
+        #
+        # C'est aussi ce qui montre que notre cadrage est celui de GPTQ : leur
+        # nll_i vaut loss_i x 2048 avec loss_i moyennee sur 2047, puis divise
+        # par nsamples x 2048 — le facteur 2048/2047 s'annule et il reste la
+        # moyenne exacte sur nsamples x 2047. Aucune convention a corriger.
+        nsamples = max(0, (len(ids) - 1) // window)
+        attendu = nsamples * (window - 1)
         if counted != attendu:
             # `avertissement` et non une liste : c'est le champ que porte
             # EvalResult. Un garde-fou qui leve AttributeError au moment
             # d'alerter ne garde rien — mon premier jet ecrivait dans
             # result.warnings, qui n'existe pas.
             manque = (f"mode disjoint : {counted} positions notees pour "
-                      f"{attendu} attendues sur {len(ids)} jetons — un jeton "
-                      "est compte deux fois ou pas du tout, et la perplexite "
-                      "ne porte pas sur le corpus annonce")
+                      f"{attendu} attendues ({nsamples} segments de "
+                      f"{window - 1} positions notables sur {len(ids)} "
+                      "jetons) — un jeton est compte deux fois ou pas du "
+                      "tout, et la perplexite ne porte pas sur le corpus "
+                      "annonce")
             result.avertissement = (result.avertissement + " | " + manque
                                     if result.avertissement else manque)
     result.tokens = counted
