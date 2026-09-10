@@ -99,7 +99,8 @@ réfuté par la bisection ; celui-ci est validé par elle, avant toute lecture.
 Cet ordre est **exécuté**, pas rappelé : `outils/protocole-49us.sh`. Le témoin
 y est une garde bloquante — verdict `PLAT`, sortie 2, aucune ligne suivante
 n'est lue. Chaque mesure prévient à sa fin (pas seulement à la fin du lot),
-refuse de démarrer si la carte n'est pas libre, et passe par `timeout` : aucune
+refuse de démarrer si la carte n'est pas prenable (`outils/carte-libre.sh`,
+partagé avec tout le circuit), et passe par `timeout` : aucune
 mesure ne peut retenir la machine.
 
 **La grille vient en dernier et pas avant** : c'est elle qui a produit la
