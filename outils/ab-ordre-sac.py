@@ -67,9 +67,16 @@ def mon_unite() -> str:
     """
     try:
         for ligne in open("/proc/self/cgroup", encoding="utf-8"):
-            for morceau in ligne.strip().split("/"):
-                if morceau.endswith(".service"):
-                    return morceau
+            # LE DERNIER segment, pas le premier. Le chemin vaut
+            #   /user.slice/user-1000.slice/user@1000.service/app.slice/X.service
+            # et le premier segment en « .service » est `user@1000.service` —
+            # jamais l'unite. Ma premiere version renvoyait donc toujours le
+            # gestionnaire de session, le garde ne s'excluait jamais, et il
+            # refusait le lancement une seconde fois apres avoir ete corrige.
+            morceaux = [m for m in ligne.strip().split("/")
+                        if m.endswith(".service")]
+            if morceaux:
+                return morceaux[-1]
     except OSError:
         pass
     return ""
