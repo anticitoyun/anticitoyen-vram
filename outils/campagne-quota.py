@@ -37,7 +37,7 @@ CARTE = Path(__file__).resolve().parent / "carte.sh"
 RACINE_OUTILS = Path(__file__).resolve().parent
 BASE = Path("/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram")
 SOURCE = BASE / "Llama-2-7b-hf"
-# Corpus PARTAGE, pas dans un worktree : claude-0a l'a cherche et ne l'a pas
+# Corpus PARTAGE, pas dans un worktree : 0a l'a cherche et ne l'a pas
 # trouve, parce qu'il ne vivait que dans mon arbre et n'etait pas suivi par git.
 # Deux campagnes qui ne lisent pas le meme fichier ne sont pas sur la meme
 # courbe, et ce defaut-la ne se voit qu'a la fin.
@@ -57,7 +57,7 @@ RELEVES = Path("~/Bureau/Claude/acvram-memoire/corpus")
 # declare une non-reproduction. Le garde avait raison ; c'est la CIBLE qui
 # etait fausse. On demandait au temoin de reproduire le plancher avec 40 Mio
 # de plus que le plancher — un denominateur emprunte, dans le temoin cense
-# valider les autres. Releve par claude-f2 le 10/09.
+# valider les autres. Releve par f2 le 10/09.
 #
 # Le script CONNAISSAIT le plancher : il l'imprime. Il ne l'utilisait pas.
 PLANCHER_OCTETS = 3_983_834_740        # tout-nvfp4 mesure, safetensors seuls
@@ -128,7 +128,7 @@ def gio(x: float) -> str:
     Le script affichait « plafond 6,547 Gio » a trois decimales et listait le
     meme budget « 6.5465 » a quatre : le meme nombre vu par deux conventions,
     et quelqu'un qui compare les deux se demande lequel est faux. Aucun des
-    deux. Releve par claude-f2 le 10/09, en meme temps que ma propre erreur —
+    deux. Releve par f2 le 10/09, en meme temps que ma propre erreur —
     j'avais ecrit 6,5464 dans un message, en TRONQUANT la ou le script
     ARRONDIT. Le code etait juste ; c'est ma prose qui l'etait pas.
     """
@@ -174,7 +174,7 @@ def service(nom: str, argv: list[str], journal: Path, memoire_max: str,
            "--setenv=ACVRAM_CUDA_HOME=/usr/local/cuda-13.2",
            f"--setenv=ACVRAM_KERNEL_CACHE={os.environ.get('ACVRAM_KERNEL_CACHE', '')}",
            "/bin/bash", "-c",
-           # CHIEN DE GARDE SUR LE PILOTE. Releve par claude-f2 le 10/09 : le
+           # CHIEN DE GARDE SUR LE PILOTE. Releve par f2 le 10/09 : le
            # superviseur du harnais a tue son PILOTE (MemFree 10,1 Go alors que
            # MemAvailable valait 85,6) et les bras detaches ont SURVECU — un
            # acvram-disp-1.service encore vivant, tenant la carte pour une
@@ -186,7 +186,7 @@ def service(nom: str, argv: list[str], journal: Path, memoire_max: str,
            # pilote est tue par SIGKILL — ce qu'un `trap` ou un atexit ne
            # couvrirait pas.
            # carte.sh A L'INTERIEUR du service, jamais autour — precaution de
-           # claude-0a, et son garde refuse maintenant activement l'inverse :
+           # 0a, et son garde refuse maintenant activement l'inverse :
            # enveloppant systemd-run, le premier verrou est relache des que le
            # travail est parti et un second concurrent obtient la carte sur un
            # service encore actif. C'est ainsi que deux mesures ont charge en
@@ -367,7 +367,7 @@ def main() -> int:
     sortie.mkdir(parents=True, exist_ok=True)
 
     # --- Manche zero : la RESOLUTION de l'instrument, avant tout point ---
-    # Remarque de claude-0a le 10/09 : l'accord du temoin negatif (tout-int8
+    # Remarque de 0a le 10/09 : l'accord du temoin negatif (tout-int8
     # 5,4144 contre etalon 5,4141, soit 0,0055 %) n'a de valeur que si la
     # dispersion entre deux executions identiques est PLUS PETITE que 0,002 %.
     # Sinon le temoin passe par construction et ne prouve rien — c'est ainsi
@@ -378,7 +378,7 @@ def main() -> int:
     # points. Le 10/09, 75,7 Go de cache page ont fait tuer un pilote — et ce
     # n'est pas un point qui les avait remplis, c'est la manche de DISPERSION,
     # avant le premier point. Une campagne lancee sur une machine deja chaude
-    # meurt donc avant d'avoir rien mesure. Releve par claude-f2, qui n'a pas
+    # meurt donc avant d'avoir rien mesure. Releve par f2, qui n'a pas
     # pu attribuer son cache a sa propre manche : il est partage.
     rendu = 0
     for d in BASE.glob("Llama-2-7b-*"):
@@ -388,7 +388,7 @@ def main() -> int:
           flush=True)
 
     dispersion = None
-    # Precision de claude-f2 : la dispersion se prend SUR LE POINT qu'on
+    # Precision de f2 : la dispersion se prend SUR LE POINT qu'on
     # comparera, pas sur un autre — la reproductibilite n'a aucune raison
     # d'etre la meme a 3,75 et a 6,55 Gio. Quand la campagne ne porte qu'un
     # temoin, on la mesure sur le dossier deja converti qui lui correspond ;

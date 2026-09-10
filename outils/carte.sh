@@ -59,7 +59,7 @@ etat_carte() {
 # commande doit etre CELLE QUI TRAVAILLE. Un lanceur qui rend la main des que
 # le travail est parti (systemd-run, setsid, nohup &, at) fait relacher le
 # verrou pendant que la mesure tourne encore : on obtient exactement le cas que
-# ce verrou vise, PLUS une fausse assurance. Trouve et verifie par claude-c6
+# ce verrou vise, PLUS une fausse assurance. Trouve et verifie par c6
 # dans les deux sens : enveloppant systemd-run, le second obtient la carte
 # service actif ; carte.sh A L'INTERIEUR du service, le second est refuse.
 # Le service detache n'est pas une coquetterie : c'est la voie obligee pour
