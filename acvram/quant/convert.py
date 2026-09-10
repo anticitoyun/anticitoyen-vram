@@ -1066,11 +1066,45 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         # par gain de SNR par octet, decroissant — le glouton du sac a dos
         # fractionnaire, optimal a un tenseur pres
         ordre = sorted(budget_candidats, key=lambda c: -c["gain_db"] / c["cout"])
+        # Le budget est un budget de DOSSIER : `deja` compte le plancher, c'est
+        # a dire tout ce qui n'est pas promouvable (part 16 bits, echelles
+        # d'activation) plus chaque candidat dans son format de base. Deux
+        # issues muettes existaient, et toutes deux fabriquent un faux point de
+        # courbe : un budget SOUS le plancher promeut zero tenseur et rend un
+        # dossier identique a une conversion sans budget, et un budget qui
+        # reste inemploye rend un dossier moins large que demande. Dans les
+        # deux cas le dossier porte un budget dans son nom et une autre
+        # grandeur dans ses octets. On l'annonce, et on l'ecrit au manifeste.
+        plancher_octets = deja
+        budget_octets = opts.bits_budget_gib * 1024 ** 3
         promus = set()
         for c in ordre:
             if c["cout"] <= reste:
                 promus.add(c["name"])
                 reste -= c["cout"]
+        cout_total = sum(c["cout"] for c in budget_candidats)
+        if reste < 0:
+            print(f"[acvram] budget de {opts.bits_budget_gib:.3f} Gio SOUS le "
+                  f"plancher de {plancher_octets / 1024 ** 3:.3f} Gio : aucune "
+                  f"promotion possible, le dossier sortira au format de base. "
+                  f"Le plus petit budget qui promeut quelque chose est "
+                  f"{(plancher_octets + min(c['cout'] for c in budget_candidats)) / 1024 ** 3:.3f} Gio.",
+                  flush=True)
+        elif promus and reste > 0 and len(promus) < len(budget_candidats):
+            print(f"[acvram] budget non epuise : {reste / 2 ** 20:.1f} Mio "
+                  f"inemployes, aucun candidat restant ne tient dedans "
+                  f"({len(promus)}/{len(budget_candidats)} promus).", flush=True)
+        manifest["budget"] = {
+            "demande_gib": opts.bits_budget_gib,
+            "plancher_gib": round(plancher_octets / 1024 ** 3, 4),
+            "plafond_gib": round((plancher_octets + cout_total) / 1024 ** 3, 4),
+            "depense_gib": round((budget_octets - max(reste, 0)) / 1024 ** 3, 4)
+                           if reste >= 0 else round(plancher_octets / 1024 ** 3, 4),
+            "restant_mio": round(max(reste, 0) / 2 ** 20, 1),
+            "sous_le_plancher": reste < 0,
+            "promus": len(promus),
+            "candidats": len(budget_candidats),
+        }
         for c in budget_candidats:
             name = c["name"]
             large = name in promus

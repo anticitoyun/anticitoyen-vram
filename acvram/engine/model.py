@@ -1577,3 +1577,50 @@ class ACVRamModel(nn.Module):
             if isinstance(m, QuantLinear):
                 total += m.nbytes
         return total
+
+    def nbytes_detail(self) -> dict:
+        """Decompose `nbytes` pour que l'ecart a la prevision se NOMME.
+
+        Le 10/09/2026, la prevision statique tiree des manifestes (embedding au
+        dtype de chargement + somme des `QuantLinear.nbytes`) a donne 15,9994
+        bits/poids pour Llama-2-7b-fp16pur quand le releve d'evaluation en
+        portait 26,987 — un facteur 1,687. Meme forme pour les deux dossiers
+        quantifies, mais a 10,3 % seulement (8,3391 prevu contre 9,198 releve ;
+        4,7235 contre 5,215). Un ecart qui n'est pas proportionnel aux octets
+        stockes : ce n'est donc pas une erreur de densite.
+
+        Cette decomposition teste l'hypothese de tete : un meme objet de poids
+        compte plusieurs fois, parce que `modules()` le rencontre sous
+        plusieurs `QuantLinear` (projections fusionnees exposees aussi comme
+        tranches, tete liee a l'embedding). `vus_plusieurs_fois` rend le compte
+        exact des octets comptes en double ; s'il est nul, l'hypothese tombe et
+        `par_classe` dit ou les octets sont reellement.
+        """
+        vus: dict[int, dict] = {}
+        par_classe: dict[str, int] = {}
+        n_ql = 0
+        for nom, m in self.named_modules():
+            if not isinstance(m, QuantLinear):
+                continue
+            n_ql += 1
+            q = m.qweight
+            o = getattr(q, "nbytes", 0)
+            fmt = getattr(q, "format", type(q).__name__)
+            par_classe[fmt] = par_classe.get(fmt, 0) + o
+            e = vus.setdefault(id(q), {"octets": o, "fmt": fmt, "noms": []})
+            e["noms"].append(nom)
+        double = sum(e["octets"] * (len(e["noms"]) - 1) for e in vus.values())
+        emb = self.embed_tokens.numel() * self.embed_tokens.element_size()
+        return {
+            "total": self.nbytes,
+            "embed_tokens": emb,
+            "embed_dtype": str(self.embed_tokens.dtype),
+            "quantlinear": n_ql,
+            "objets_distincts": len(vus),
+            "octets_comptes_en_double": double,
+            "total_sans_doubles": emb + sum(e["octets"] for e in vus.values()),
+            "par_format": par_classe,
+            "vus_plusieurs_fois": [
+                {"octets": e["octets"], "fmt": e["fmt"], "noms": e["noms"]}
+                for e in vus.values() if len(e["noms"]) > 1],
+        }

@@ -72,6 +72,7 @@ class EvalResult:
     # Indicatif seulement. La densite qui DECIDE est analytique :
     # quant/formats.py:bits_per_weight(fmt, group_size).
     bits_par_poids_en_memoire: float = 0.0
+    nbytes_detail: dict = field(default_factory=dict)
     formats: dict[str, int] = field(default_factory=dict)
     avertissement: str = ""
     # Perplexite CUMULATIVE apres n fenetres, aux jalons de `_JALONS`. Le
@@ -96,6 +97,7 @@ class EvalResult:
             "seconds": round(self.seconds, 2),
             "weights_bytes": self.weights_bytes,
             "bits_par_poids_en_memoire": round(self.bits_par_poids_en_memoire, 3),
+            "nbytes_detail": self.nbytes_detail,
             "formats": self.formats,
             "avertissement": self.avertissement,
             "cumul": {str(k): round(v, 4) for k, v in sorted(self.cumul.items())},
@@ -166,6 +168,15 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
     result = EvalResult(model=os.path.basename(os.path.abspath(model_dir)),
                         min_context=min_context, window=window)
     result.weights_bytes = model.nbytes
+    # Le champ ci-dessus a une valeur PREVUE, tiree du manifeste : embedding au
+    # dtype de chargement + somme des tenseurs quantifies. Elle a rendu « faux »
+    # des son premier usage (15,9994 prevu contre 26,987 releve sur
+    # Llama-2-7b-fp16pur). Le detail est joint au releve pour que le prochain
+    # chargement nomme l'ecart au lieu de le reconstater.
+    try:
+        result.nbytes_detail = model.nbytes_detail()
+    except Exception as e:                    # noqa: BLE001
+        result.nbytes_detail = {"erreur": f"{type(e).__name__}: {e}"}
     n_params = loaded.spec.total_params
     result.bits_par_poids_en_memoire = ((result.weights_bytes * 8 / n_params)
                                        if n_params else 0.0)
