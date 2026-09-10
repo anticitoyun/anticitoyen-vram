@@ -83,7 +83,43 @@ noyaux de benchmark.
    avant la fin — existent précisément parce que chacun a déjà fabriqué un
    faux résultat.
 
-## Et le point qui bloque la règle du groupe
+## RECTIFICATION — la règle du groupe tient, et mon alerte était fausse
+
+**J'ai écrit que `duck.ai` était injoignable et que la consigne permanente avait
+perdu sa précondition. C'est faux, et la correction de chef l'était aussi.**
+
+Il a mesuré `duck.ai` à 200 en 0,145 s et `duckduckgo.com` en échec, donc
+l'inverse de moi. J'ai remesuré : `duck.ai` en échec deux fois,
+`duckduckgo.com` à 200 en 0,32 s. **Nos deux mesures étaient justes à
+l'instant où nous les avons faites** — et nos deux conclusions étaient fausses,
+parce que nous avons tous les deux attribué l'échec au **nom d'hôte**.
+
+Le taux le dit, et deux anecdotes ne pouvaient pas :
+
+```
+duck.ai            4 reussites sur 8
+duckduckgo.com     4 reussites sur 8
+40.114.177.156     2 reussites sur 6   <- l'adresse NUE, sans nom d'hote
+```
+
+Les deux noms résolvent vers **la même adresse**, et l'échec suit l'adresse, pas
+le nom. C'est **intermittent, autour de 50 %, et indépendant du nom d'hôte** :
+la variable à laquelle nous attribuions l'effet ne discrimine rien.
+
+**Conséquence pratique, et c'est tout ce qui compte : la règle tient, il faut
+réessayer.** Une tentative a une chance sur deux ; trois tentatives donnent
+87 %. Un échec unique sur `duck.ai` ne prouve rien et ne doit pas être rapporté
+comme une indisponibilité.
+
+**Ce qu'il faut retenir de la façon dont nous nous sommes trompés** : deux
+mesures contradictoires, toutes deux exactes, sur une propriété qui n'est pas
+stable. Chacun a publié la sienne comme un état du monde. Le remède n'est pas
+de mesurer mieux — c'est de mesurer un **taux** dès qu'un résultat binaire
+pourrait être intermittent, et de tester la variable qu'on croit responsable
+en la retirant : ici, interroger l'adresse nue a suffi à disqualifier le nom
+d'hôte en une commande.
+
+## Ce que j'avais écrit, conservé pour que la faute reste lisible
 
 **`duck.ai` et `duckduckgo.com` sont injoignables depuis cette machine.**
 
