@@ -61,12 +61,23 @@ def mesurer(bras: str, modele: str) -> dict:
     exiles = [c.index for c in charge.plan.layers
               if "cpu" in (c.attn_storage, c.mlp_storage) or c.mlp_exec == "cpu"]
     if exiles:
-        raise RuntimeError(
-            f"{len(exiles)} couche(s) exilee(s) sur {len(charge.plan.layers)} "
-            f"(indices {exiles[:8]}{'...' if len(exiles) > 8 else ''}) : le "
-            "tableau d'ETABLI.md porte sur 0 couche exilee. Liberez la VRAM "
-            "et relancez — mesurer ici donnerait un p sur un autre moteur.")
+        print(f"MANCHE SANS OBJET : {len(exiles)} couche(s) exilee(s) sur "
+              f"{len(charge.plan.layers)} (indices {exiles[:8]}"
+              f"{'...' if len(exiles) > 8 else ''}). Le tableau d'ETABLI.md "
+              "porte sur 0 couche exilee, et l'exil d'une seule couche coute "
+              "70 % du debit : ce chiffre ne mesure pas ce qu'on croit et ne "
+              "doit pas pouvoir etre publie par megarde.", file=sys.stderr)
+        sys.exit(2)
     moteur = Engine(charge, None, max_batch_size=1, max_model_len=CTX + 32)
+    # LES GRAPHES SONT-ILS ACTIFS ? Un pas sans graphe paie ses lancements un
+    # par un : il ne mesure pas le meme moteur. Meme garde que l'exil.
+    graphes = moteur.graphs is not None and getattr(moteur.graphs, "enabled",
+                                                    False)
+    if not graphes:
+        print("MANCHE SANS OBJET : les graphes CUDA sont inactifs. Un pas sans "
+              "graphe paie ses lancements un par un et ne mesure pas le moteur "
+              "du tableau.", file=sys.stderr)
+        sys.exit(2)
     # Sans ignore_eos, une fin de sequence au premier jeton rendrait un pas
     # mesure sur un seul passage. On publie le compte REELLEMENT execute.
     moteur._eos = set()
@@ -114,7 +125,16 @@ def mesurer(bras: str, modele: str) -> dict:
     so = getattr(get_extension(), "__file__", "") or ""
     emp = (hashlib.sha256(open(so, "rb").read()).hexdigest()[:12]
            if so and os.path.exists(so) else "inconnu")
+    # L'ANNONCE DU PLAN, relevee a cote de chaque bras. poste4 a mesure
+    # qu'elle sous-provisionne de 1,39 Gio sur un modele quadratique, et poste3
+    # qu'un plan bascule sur 123 Mio : l'annonce se trompe de onze fois la
+    # marge qui decide. Si un chargement exile ou desactive les graphes, ce
+    # releve dira que ce n'est pas la mesure qui est en cause.
+    _annonce = getattr(charge.plan, "est_decode_tok_s", None)
     return {"bras": bras, "pa_chunk": int(chunk), "so": so, "empreinte_so": emp,
+            "graphes": graphes, "captures": getattr(moteur.graphs, "captures", -1),
+            "plan_est_decode_tok_s": _annonce,
+            "pa_warps": os.environ.get("ACVRAM_PA_WARPS", "defaut"),
             "couches": len(charge.plan.layers), "exilees": 0,
             "jetons": empreinte_jetons, "n_jetons": len(seq.output_ids),
             "pas_executes": len(pas), "n_retenus": n,

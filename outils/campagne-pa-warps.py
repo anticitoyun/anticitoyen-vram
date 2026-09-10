@@ -67,15 +67,29 @@ def main() -> int:
                  "--ctx", str(ctx), "--generes", str(min(200, ctx // 2)),
                  "--ordre", "A,B,B,A"],
                 env=env, timeout=3600)
+            if r.returncode == 2:
+                print(f"MANCHE SANS OBJET a PA_WARPS={w} ctx={ctx} : plan "
+                      "degrade (exil ou graphes inactifs). La campagne "
+                      "s'arrete — un point manquant vaut mieux qu'un point "
+                      "faux.", file=sys.stderr)
+                return 2
             if r.returncode != 0:
                 print(f"ECHEC a PA_WARPS={w} ctx={ctx} (code {r.returncode})",
                       file=sys.stderr)
                 return 1
             d = json.load(open(out))
             emp = d["releves"][0]["empreinte_so"]
+            r0 = d["releves"][0]
             releves.append({"warps": w, "ctx": ctx, "p_ms": d["p_ms"],
-                            "pas_ms": d["releves"][0]["median_ms"],
-                            "empreinte_so": emp})
+                            "pas_ms": r0["median_ms"], "empreinte_so": emp,
+                            "graphes": r0.get("graphes"),
+                            "captures": r0.get("captures"),
+                            "plan_est_decode_tok_s":
+                                r0.get("plan_est_decode_tok_s")})
+            print(f"   -> p {d['p_ms']:.3f} ms, pas {r0['median_ms']:.3f} ms, "
+                  f"empreinte {emp}, graphes {r0.get('graphes')} "
+                  f"({r0.get('captures')} captures), plan annonce "
+                  f"{r0.get('plan_est_decode_tok_s')}", flush=True)
             empreintes.setdefault(w, set()).add(emp)
 
     # LE CONTROLE QUI EMPECHE LE RESULTAT LE PLUS INSIDIEUX. Un parametre passe
