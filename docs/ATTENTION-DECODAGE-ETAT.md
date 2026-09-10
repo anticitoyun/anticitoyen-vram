@@ -441,3 +441,35 @@ contextes courts n'a d'intérêt que si le gain y est net.
 **Et la marge est réelle** : à 3007 jetons le noyau reste à **8,6 fois sa borne
 mémoire** après le gain (25,47 µs contre 2,96 µs pour relire 3,10 Mo à
 1050 Go/s). Ce qui limite n'est donc toujours pas la bande passante.
+
+## Le balayage 32/16 : 64 n'est plus un plancher d'ignorance
+
+Contexte 3000, étape 0 rejouée à chaque valeur, `64` **encadrant** le balayage.
+
+    chunk         plancher   total    travail    contre 64
+    64  (debut)     15,36     25,66    10,30        —
+    32              21,47     31,78    10,31     +23,9 %
+    16              33,73     41,86     8,13     +63,1 %
+    64  (fin)       15,36     25,57    10,21      -0,35 %
+
+**Le `64` de fermeture rend 15,36 µs comme celui d'ouverture** — dérive nulle
+sur le plancher, 0,35 % sur le total. Les trois valeurs se comparent.
+
+**Prédiction vérifiée sur l'issue, réfutée sur le mécanisme.** J'attendais une
+perte, et il y a bien perte aux deux valeurs. Mais je l'expliquais par un
+plancher qui rattrape un travail décroissant ; or **le travail ne décroît
+plus** : 10,30 µs à 64, 10,31 à 32 — identique au centième.
+
+**La proportionnalité cesse en dessous de 64.** De 128 à 2048 le temps doublait
+avec la tranche ; à 32 une tranche ne fournit plus assez de travail pour
+occuper un bloc, et seul le plancher continue de croître — il double de 64 à 16
+(15,36 → 33,73) pendant que le travail stagne.
+
+Le modèle additif `plancher(blocs) + travail(chunk)` tient donc ; c'est son
+second terme qui **sature**. Un modèle juste sur la forme et faux sur le
+domaine de validité rend la bonne réponse pour la mauvaise raison — ce qui ne
+se voit que si l'on mesure les deux termes séparément, et c'est ce que l'étape 0
+rejouée à chaque valeur permet.
+
+**64 est l'optimum des sept valeurs essayées**, et ce n'est plus un plancher
+d'ignorance : les deux valeurs en dessous ont été mesurées et perdent.
