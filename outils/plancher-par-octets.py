@@ -16,9 +16,20 @@ Et si le plancher a ete mesure sur le noyau temoin qui ecrit TROIS FLOATS par
 bloc, l'attribution est refutee par un facteur 43 : 12 o / 3,76 ns = 3,2 Go/s,
 qu'aucune carte n'atteint.
 
-LE TEST, ET IL EST GRATUIT. paged_attn_partial est instancie pour cinq valeurs
-de D, donc cinq tailles d'ecriture par bloc. Si le terme par bloc est bien
-l'ecriture, il doit suivre PROPORTIONNELLEMENT :
+LE TEST. Deux voies, et la seconde est meilleure — c'est poste2 qui l'a
+indiquee, en signalant que banc_fma n'ecrivait qu'un flottant par bloc.
+
+  VOIE A, celle que j'avais ecrite : les cinq instanciations D de
+  paged_attn_partial, donc cinq tailles d'ecriture. Defaut REEL, que j'avais
+  moi-meme inscrit dans le domaine de validite : D change aussi la memoire
+  partagee, l'occupation et le travail par warp — TROIS choses a la fois.
+
+  VOIE B, retenue : banc_fma avec un parametre `flottants`. Le travail par
+  bloc, la grille, les threads, l'occupation restent identiques ; SEULS LES
+  OCTETS ECRITS BOUGENT. C'est le test propre, et la voie A ne sert plus que
+  de controle sur le vrai noyau.
+
+Si le terme par bloc est bien l'ecriture, il doit suivre PROPORTIONNELLEMENT :
 
     D     octets/bloc    terme attendu
      32       128          0,94 ns
@@ -68,8 +79,50 @@ def blocs_residents(D: int, pa_warps: int = 4, reg: int = 40) -> int:
                SMEM_SM // max(1, smem), 32)
 
 
+def mesurer_b(flottants: int, grilles: list[int]) -> dict:
+    """VOIE B : banc_fma, seuls les octets ecrits par bloc varient."""
+    import torch
+    from acvram import kernels
+    ext = kernels.get_extension()
+    if ext is None:
+        raise RuntimeError("extension indisponible")
+    if not hasattr(ext, "banc_fma"):
+        raise RuntimeError("ce binaire ne porte pas banc_fma")
+    pts = []
+    for blocs in grilles:
+        gy = 32
+        gz = max(1, blocs // (gy * 1))
+        appel = lambda: ext.banc_fma(1, gy, gz, 128, 1, flottants)
+        for _ in range(5):
+            appel()
+        torch.cuda.synchronize()
+        temps = []
+        for _ in range(N_MESURES):
+            e0, e1 = torch.cuda.Event(True), torch.cuda.Event(True)
+            e0.record(); appel(); e1.record()
+            torch.cuda.synchronize()
+            temps.append(e0.elapsed_time(e1) * 1000.0)
+        temps.sort()
+        pts.append({"blocs": gy * gz, "us": temps[len(temps) // 2],
+                    "p10": temps[int(0.10 * len(temps))],
+                    "p90": temps[int(0.90 * len(temps))]})
+    return {"voie": "B", "flottants": flottants,
+            "octets_par_bloc": flottants * 4, **_ajuster(pts)}
+
+
+def _ajuster(pts: list) -> dict:
+    xs = [p["blocs"] for p in pts]
+    ys = [p["us"] for p in pts]
+    n = len(xs)
+    mx, my = sum(xs) / n, sum(ys) / n
+    den = sum((x - mx) ** 2 for x in xs)
+    b = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den if den else 0.0
+    return {"points": pts, "intercept_us": my - b * mx,
+            "ns_par_bloc": b * 1000.0}
+
+
 def mesurer(D: int, grilles: list[int]) -> dict:
-    """Temps du noyau pour plusieurs nombres de blocs, a D fixe."""
+    """VOIE A, controle sur le vrai noyau : cinq instanciations D."""
     import torch
     from acvram import kernels
     ext = kernels.get_extension()
@@ -106,17 +159,8 @@ def mesurer(D: int, grilles: list[int]) -> dict:
         pts.append({"blocs": BQ * HQ, "us": temps[len(temps) // 2],
                     "p10": temps[int(0.10 * len(temps))],
                     "p90": temps[int(0.90 * len(temps))]})
-    # ajustement affine t = a + b x blocs, par moindres carres
-    xs = [p["blocs"] for p in pts]
-    ys = [p["us"] for p in pts]
-    n = len(xs)
-    mx, my = sum(xs) / n, sum(ys) / n
-    den = sum((x - mx) ** 2 for x in xs)
-    b = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den if den else 0.0
-    a = my - b * mx
-    return {"D": D, "octets_par_bloc": D * 4, "points": pts,
-            "intercept_us": a, "ns_par_bloc": b * 1000.0,
-            "blocs_residents": SM * blocs_residents(D)}
+    return {"voie": "A", "D": D, "octets_par_bloc": D * 4,
+            "blocs_residents": SM * blocs_residents(D), **_ajuster(pts)}
 
 
 def main() -> int:
@@ -124,31 +168,42 @@ def main() -> int:
     ap.add_argument("--dims", default="32,64,128,256,512")
     ap.add_argument("--grilles", default="80,160,320,640,1280")
     ap.add_argument("--un-point", type=int)
+    ap.add_argument("--voie", choices=("A", "B"), default="B")
+    ap.add_argument("--flottants", default="32,64,128,256,512",
+                    help="voie B : flottants ecrits par bloc")
     ap.add_argument("--sortie", default="/tmp/plancher-par-octets.json")
     a = ap.parse_args()
     grilles = [int(g) for g in a.grilles.split(",")]
 
     if a.un_point:
-        print(json.dumps(mesurer(a.un_point, grilles)))
+        print(json.dumps(mesurer(a.un_point, grilles) if a.voie == "A"
+                         else mesurer_b(a.un_point, grilles)))
         return 0
 
     import subprocess
     releves = []
-    for D in [int(x) for x in a.dims.split(",")]:
+    valeurs = ([int(x) for x in a.dims.split(",")] if a.voie == "A"
+               else [int(x) for x in a.flottants.split(",")])
+    print(f"VOIE {a.voie} — "
+          + ("cinq instanciations D du vrai noyau (controle)" if a.voie == "A"
+             else "banc_fma, seuls les octets ecrits varient"))
+    for D in valeurs:
         r = subprocess.run([sys.executable, __file__, "--un-point", str(D),
-                            "--grilles", a.grilles], capture_output=True,
-                           text=True, timeout=1800)
+                            "--grilles", a.grilles, "--voie", a.voie],
+                           capture_output=True, text=True, timeout=1800)
         if r.returncode != 0:
             print(f"ECHEC a D={D} :\n{r.stderr[-1200:]}", file=sys.stderr)
             return 1
         d = json.loads(r.stdout.strip().splitlines()[-1])
         releves.append(d)
-        print(f"  D={D:>3} ({d['octets_par_bloc']:>4} o/bloc) : "
+        print(f"  {'D' if a.voie == 'A' else 'flottants'}={D:>3} "
+              f"({d['octets_par_bloc']:>4} o/bloc) : "
               f"plancher {d['intercept_us']:6.2f} us + "
               f"{d['ns_par_bloc']:6.2f} ns/bloc   "
-              f"({d['blocs_residents']} blocs residents)", flush=True)
+              + (f"   ({d['blocs_residents']} blocs residents)"
+                 if 'blocs_residents' in d else ""), flush=True)
 
-    ref = next((d for d in releves if d["D"] == 128), releves[0])
+    ref = next((d for d in releves if d["octets_par_bloc"] == 512), releves[0])
     print(f"\n{'D':>4} {'o/bloc':>7} {'ns/bloc':>9} {'attendu':>9} {'ecart':>8}"
           f" {'residents':>10}")
     verdict_suit = True
@@ -157,11 +212,11 @@ def main() -> int:
         ecart = (d["ns_par_bloc"] / att - 1) * 100 if att else float("nan")
         if abs(ecart) > 20:
             verdict_suit = False
-        print(f"{d['D']:>4} {d['octets_par_bloc']:>7} {d['ns_par_bloc']:>9.2f} "
+        print(f"{d.get('D', d.get('flottants')):>4} {d['octets_par_bloc']:>7} {d['ns_par_bloc']:>9.2f} "
               f"{att:>9.2f} {ecart:>7.1f} % {d['blocs_residents']:>10}")
 
     # l'occupation a-t-elle change ? sans quoi l'ecart n'est pas attribuable
-    res = {d["blocs_residents"] for d in releves}
+    res = {d.get("blocs_residents", 0) for d in releves}
     if len(res) > 1:
         print(f"\nRESERVE : les blocs residents varient sur la plage ({sorted(res)}) "
               "— un ecart n'est alors pas attribuable a la seule ecriture, D "

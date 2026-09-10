@@ -742,6 +742,42 @@ __global__ void int4_gemv_grouped_kernel(
 // godet de blocs : le chemin se rejoue tel quel dans un graphe CUDA.
 // -------------------------------------------------------------------------
 
+// SEUL AJOUT a la version de poste2 : `flottants`, le nombre de flottants
+// ecrits par bloc. Il transforme ce banc en instrument capable de trancher
+// l'attribution du terme par bloc : faire varier les OCTETS en laissant tout
+// le reste identique. Le detour par les cinq instanciations D de
+// paged_attn_partial ne le permettait pas — D change aussi la memoire
+// partagee, l'occupation et le travail par warp, donc trois choses a la fois.
+// Ici une seule bouge.
+__global__ void banc_fma_kernel(float *__restrict__ sortie, int K,
+                                int flottants) {
+    float a = (float)(threadIdx.x + 1) * 1e-3f;
+    const float b = 1.0000001f, c = 1e-7f;
+    #pragma unroll 1
+    for (int i = 0; i < K; ++i) a = fmaf(a, b, c);   // chainee : a depend de a
+    const long bloc = blockIdx.z * gridDim.y * gridDim.x
+                    + blockIdx.y * gridDim.x + blockIdx.x;
+    // Ecriture CONTIGUE par bloc et coalescee dans le bloc : c'est la forme de
+    // l'ecriture de part[], et c'est elle qu'on veut chiffrer.
+    for (int i = threadIdx.x; i < flottants; i += blockDim.x)
+        sortie[bloc * (long)flottants + i] = a;
+}
+
+torch::Tensor banc_fma(int64_t gx, int64_t gy, int64_t gz,
+                       int64_t threads, int64_t K, int64_t flottants) {
+    TORCH_CHECK(flottants >= 1, "banc_fma : flottants doit valoir au moins 1 "
+                "(un bloc qui n'ecrit rien serait eliminable)");
+    auto opt = torch::TensorOptions().dtype(torch::kFloat)
+                   .device(torch::kCUDA, c10::cuda::current_device());
+    auto out = torch::empty({(long)(gx * gy * gz * flottants)}, opt);
+    dim3 g((unsigned)gx, (unsigned)gy, (unsigned)gz);
+    banc_fma_kernel<<<g, (unsigned)threads, 0,
+                      at::cuda::getCurrentCUDAStream()>>>(
+        out.data_ptr<float>(), (int)K, (int)flottants);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
 // EMPREINTE DU SOURCE, posee par le lanceur Python (-DACVRAM_SRC_HASH).
 // Elle doit se retrouver DANS le binaire : c'est le seul controle qui prouve
 // que le .so compile bien ce fichier-ci. Comparer les horodatages ne prouve
@@ -2517,6 +2553,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("mult") = 1.0);
     m.def("kda_decode", &kda_decode, "KDA : pas de decodage fusionne (une sequence)");
     m.def("mla_decode", &mla_decode, "MLA absorbee : scores + softmax + lecture latente");
+    m.def("banc_fma", &banc_fma,
+          "K FMA chainees, grille imposee — chiffre le plancher de l'instrument",
+          py::arg("gx"), py::arg("gy"), py::arg("gz"),
+          py::arg("threads"), py::arg("K"), py::arg("flottants") = 1);
     m.def("paged_attention", &paged_attention,
           "attention de decodage fusionnee sur cache KV int8 pagine");
 }
