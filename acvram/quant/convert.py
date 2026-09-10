@@ -1264,6 +1264,16 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 "has_act_scale": c["has_act_scale"],
                 "bpw": round(met["bpw"], 3),
                 "out_snr_db": round(met["out_snr_db"], 2),
+                # DEUXIEME SITE D'ECRITURE, et c'est celui que prend le SAC A
+                # DOS. `out_ref_norm` n'etait ajoute qu'au site 1065, sur le
+                # chemin du plancher SNR — donc une conversion BUDGETAIRE ne
+                # portait jamais l'echelle. Constate le 10/09 : 0 tenseur sur
+                # 323 dans un dossier converti APRES l'ajout du champ, et
+                # c'est le garde de sortie du bras qui l'a dit, pas une
+                # relecture. Meme classe de defaut que `erreurs_grille`, qu'il
+                # avait fallu ajouter aux DEUX sites.
+                **({"out_ref_norm": round(float(met["out_ref_norm"]), 6)}
+                   if "out_ref_norm" in met else {}),
                 **({"erreurs_grille": met["erreurs_grille"],
                     "alpha_retenu": met["alpha_retenu"]}
                    if "erreurs_grille" in met else {}),
