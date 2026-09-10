@@ -47,6 +47,11 @@ class ConversionOptions:
     group_size: int = 128
     keep_sensitive_16bit: bool = True  # normalisations, routeur, plongements
     lm_head_format: Optional[str] = None
+    # Table de niveaux q3n de CE modèle (huit flottants, symétrique, bornes
+    # ±1) — écrite dans chaque entrée q3n du manifeste. None : TABLE_Q3N de
+    # la spécification. Les niveaux s'ajustent par modèle (Lloyd-Max sur
+    # échantillon stratifié) ; voir docs/FORMAT-3BITS.md du 8/09 au soir.
+    q3n_table: Optional[tuple] = None
     n_grid: int = 20
     device: str = "cuda:0"
     # Appareil sur lequel se fait la recherche AWQ et la quantification. Elle
@@ -67,6 +72,17 @@ class ConversionOptions:
     # par poids vers NVFP4 (4,5) a fait grossir Qwen3-Coder-Next d'un tiers,
     # créé 14 Gio d'exil en RAM hôte et coûté un facteur quinze au décodage.
     autoriser_grossissement: bool = False
+    # Format reclame explicitement en ligne de commande (`--format int8`), par
+    # opposition au format nominal choisi par la politique de placement. La
+    # distinction commande le comportement de la garde anti-grossissement : une
+    # politique peut choisir a la place de l'utilisateur, elle ne doit pas
+    # ecraser son choix explicite. Le 8/09/2026, un temoin demande en int8 est
+    # sorti avec ses MLP en q3n a 3,25 bits — SNR de 14,9 dB contre 44 pour le
+    # reste du modele — et le dossier s'appelait « temoin-int8 ». La bascule
+    # etait annoncee a l'ecran, dans un journal detache que personne n'a lu, et
+    # la mesure qui en est sortie a fait chercher un biais d'instrument pendant
+    # une demi-journee.
+    format_impose: Optional[str] = None
     max_promotions: float = 0.15      # part maximale de tenseurs promus
     # Prix plafond d'une promotion, en mébioctets ajoutés (0 = pas de plafond).
     # Le quota ci-dessus compte des tenseurs ; or une porte de 0,1 Mio et une
@@ -142,7 +158,11 @@ def _h(n: float) -> str:
 # plutôt que d'entraîner tout le modèle vers un format plus large : dépenser
 # 8 bits sur les quelques pour cent de tenseurs qui en ont besoin coûte une
 # fraction de bit par poids sur l'ensemble.
-PROMOTE = {"int4_awq": "int8", "nvfp4": "int8", "int8": "bf16"}
+# q3n promeut vers int8 comme nvfp4 : sans cette entrée, la reconversion
+# « à filet égal » du 8/09 (snr_floor 25) a rendu un manifeste STRICTEMENT
+# identique au sans-filet — zéro promotion, en silence, options.snr_floor
+# pourtant à 25. Un filet qui ignore un format doit le dire, pas se taire.
+PROMOTE = {"int4_awq": "int8", "nvfp4": "int8", "q3n": "int8", "int8": "bf16"}
 
 # Largeur nominale de chaque format, bits par poids échelles comprises. Sert à
 # chiffrer le prix d'une promotion avant de la calculer : la mesurer d'abord
@@ -631,6 +651,135 @@ def garde_grossissement(octets_source: int, total_params: int,
         "la source par un moteur GGUF ; ou --autoriser-grossissement en "
         "connaissance de cause.")
 
+# Octets par poids REELS, echelles de bloc comprises : NVFP4 coute 4 bits de
+# poids plus une echelle e4m3 par bloc de 16, soit 4,5 bits et non 4.
+_OCTETS_PAR_POIDS = {"bf16": 2.0, "fp16": 2.0, "int8": 1.0625,
+                     "nvfp4": 0.5625, "int4_awq": 0.5625, "q3n": 0.40625}
+
+
+def _verifier_formats_declares(manifest: dict, weight_map: dict) -> None:
+    """Le format declare doit correspondre a ce qui est REELLEMENT ecrit.
+
+    Le 9/09/2026, `Ornith-1.5-35B` declarait `format: nvfp4` sur trois blobs
+    d'experts groupes du module MTP qui n'ont jamais ete quantifies : leur cle
+    physique est directe, sans `.qweight` ni `.block_scale`, et leur dtype reel
+    est F16. L'ecart valait 1,158 Gio a lui seul — 5,85 % du modele — et tout
+    calcul de taille fonde sur le manifeste s'en trouvait faux.
+
+    Un format declare qui ne correspond pas au stockage est pire qu'un format
+    absent : il fait croire qu'on sait. Cette garde AVERTIT sans bloquer — la
+    conversion a reussi, seul le manifeste est inexact — mais elle nomme les
+    tenseurs, ce qui suffit a ne plus les compter de travers.
+    """
+    quantifies = {"nvfp4", "int8", "int4_awq", "q3n"}
+    suspects = []
+    for nom, entree in manifest.get("tensors", {}).items():
+        fmt = str(entree.get("format"))
+        if fmt not in quantifies:
+            continue
+        # un tenseur quantifie s'ecrit en plusieurs morceaux ; une cle directe
+        # signifie que le tenseur est passe tel quel
+        morceaux = any(f"{nom}.{suffixe}" in weight_map
+                       for suffixe in ("qweight", "block_scale", "scales"))
+        if not morceaux and nom in weight_map:
+            suspects.append((nom, fmt))
+    if suspects:
+        print(f"[acvram] {len(suspects)} tenseur(s) declares quantifies mais "
+              f"ecrits en direct — le manifeste surestime leur compression :",
+              flush=True)
+        for nom, fmt in suspects[:6]:
+            print(f"           {nom} (declare {fmt})", flush=True)
+
+
+def _diagnostic_fusion(tensors: dict) -> dict:
+    """Ce qui empeche chaque groupe q/k/v et gate/up de fusionner, et ce que
+    coûterait de le lever. **Consigne, ne decide pas.**
+
+    La fusion exige que toutes les projections d'un groupe partagent leur
+    format et leur bloc de Hadamard. Le convertisseur choisit pourtant un
+    format PAR TENSEUR — le plancher de SNR promeut sans regarder les voisins
+    du groupe. D'ou des groupes melant nvfp4, int8 et int4_awq, refuses a la
+    fusion pour cette seule raison.
+
+    Uniformiser aurait un prix que le mot « gratuit » cachait : promouvoir un
+    tenseur de nvfp4 vers int8 DOUBLE ses octets, et sur un decodage lie a la
+    memoire ces octets se paient a chaque pas. Mesure le 9/09/2026 sur trois
+    modeles : le marche est bon sur l'un (+43 us/pas) et mauvais sur les deux
+    autres (-539 et -553 us/pas). **Le signe depend de la largeur, donc la
+    decision est par groupe et jamais uniforme.**
+
+    Ce champ n'applique aucune regle : il accumule les octets qu'une promotion
+    coûterait, pour que la decision devienne possible le jour ou le gain de
+    fusion sera MESURE sur un modele reel. Il manque aujourd'hui son autre
+    terme — les microsecondes gagnees ne sont qu'une borne prise sur un seul
+    modele, a une seule forme, sur une courbe dentelee. Figer ce terme dans le
+    convertisseur le rendrait invisible et durable : un poids converti ne se
+    relit pas pour savoir d'ou venait sa constante.
+    """
+    import collections
+    import re
+
+    groupes = collections.defaultdict(list)
+    for nom in tensors:
+        m = re.match(r"(.*\.layers\.\d+)\.(self_attn\.[qkv]|mlp\.(?:gate|up))_proj\.weight$",
+                     nom)
+        if m:
+            groupes[(m.group(1), "qkv" if "attn" in m.group(2) else "gate_up")].append(nom)
+
+    mixtes = []
+    for (prefixe, genre), noms in sorted(groupes.items()):
+        attendu = 3 if genre == "qkv" else 2
+        if len(noms) != attendu:
+            continue
+        fmts = {str(tensors[n].get("format")) for n in noms}
+        hads = {tensors[n].get("hadamard_block") or 0 for n in noms}
+        if len(fmts) == 1 and len(hads) == 1:
+            continue
+        octets = 0
+        if len(fmts) > 1:
+            cible = max(fmts, key=lambda f: _OCTETS_PAR_POIDS.get(f, 2.0))
+            for n in noms:
+                cnt = 1
+                for d in (tensors[n].get("shape") or []):
+                    cnt *= d
+                octets += cnt * (_OCTETS_PAR_POIDS.get(cible, 2.0)
+                                 - _OCTETS_PAR_POIDS.get(str(tensors[n].get("format")), 2.0))
+        mixtes.append({
+            "groupe": f"{prefixe}.{genre}",
+            "formats": sorted(fmts),
+            "hadamard_blocks": sorted(hads),
+            "octets_si_uniformise": int(octets),
+        })
+
+    total = sum(g["octets_si_uniformise"] for g in mixtes)
+    return {
+        "groupes_totaux": len(groupes),
+        "groupes_non_fusionnables": len(mixtes),
+        "octets_ajoutes_si_uniformise": total,
+        # Le cout se calcule ; le GAIN ne l'est pas ici, et c'est voulu : il
+        # demande une mesure de fusion sur un modele reel. Sans lui, aucun
+        # arbitrage n'est possible et aucun n'est applique.
+        "gain_microsecondes": None,
+        "detail": mixtes[:64],
+    }
+
+
+def _octets_du_checkpoint(chemin: str) -> int:
+    """Somme des poids du checkpoint source, pour reconnaitre une source
+    renommee ou deplacee. La taille seule ne PROUVE pas l identite — deux
+    modeles de meme architecture et meme format pesent pareil — mais elle
+    suffit a signaler qu on n a pas la bonne."""
+    total = 0
+    for r, _, fs in os.walk(chemin):
+        for f in fs:
+            if f.endswith((".safetensors", ".bin", ".gguf")):
+                try:
+                    total += os.path.getsize(os.path.join(r, f))
+                except OSError:
+                    pass
+    return total
+
+
 def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                        spec: Optional[ModelSpec] = None,
                        stats: Optional[dict[str, ActStats]] = None,
@@ -643,8 +792,22 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                      for t in plan.tiers if t.kind == "gpu"), default=4.5)
     octets_src = octets_du_modele(model_path)
     n_params = getattr(spec, "total_params", 0) or 0
-    if (octets_src and n_params and not opts.autoriser_grossissement
-            and bpw_cible > octets_src * 8 / n_params * 1.02):
+    bpw_cible_nominal = next((t.weight_format for t in plan.tiers
+                              if t.kind == "gpu"), None)
+    bascule_faite = False
+    bpw_src = (octets_src * 8 / n_params) if (octets_src and n_params) else 0.0
+    grossirait = bool(octets_src and n_params
+                      and not opts.autoriser_grossissement
+                      and bpw_cible > bpw_src * 1.02)
+    if grossirait and opts.format_impose:
+        # Choix explicite de l'utilisateur : on refuse, on n'arrange pas.
+        raise ValueError(
+            f"--format {opts.format_impose} ({bpw_cible:.2f} bits/poids) ferait "
+            f"grossir une source a {bpw_src:.2f} bits/poids. Refuse plutot que "
+            f"bascule en silence : relancez avec --autoriser-grossissement pour "
+            f"l'obtenir vraiment, ou sans --format pour laisser la politique "
+            f"choisir un format compact.")
+    if grossirait:
         # Plutôt que refuser d'emblée : basculer les étages GPU sur le format
         # le plus compact du dépôt, q3n (3,25 bits/poids). Si même lui grossit
         # la source, la garde ci-dessous refusera avec les issues restantes.
@@ -668,6 +831,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             if getattr(lp, "fmt", None) and lp.exec_device in gpus | {"cpu"}:
                 lp.fmt = "q3n"
         bpw_cible = BPW_NOMINAL["q3n"]
+        bascule_faite = True
+        bpw_cible_nominal = "q3n"
     avert = garde_grossissement(octets_src, n_params,
                                 bpw_cible, opts.autoriser_grossissement)
     if avert:
@@ -680,6 +845,27 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         "model": spec.to_dict(),
         "plan": plan.to_dict(),
         "options": asdict(opts),
+        # D ou vient ce modele. Le manifeste portait out_dir et jamais
+        # l entree : le 9/09/2026, retrouver la source du temoin bf16 a
+        # demande de comparer ses tenseurs bit a bit a un candidat, faute de
+        # pouvoir la lire. Un couple a une variable exige la meme origine ;
+        # sans cette cle, on ne peut pas garantir qu on mesure deux formats
+        # plutot que deux modeles.
+        "source": {
+            "chemin": os.path.abspath(model_path),
+            "nom": os.path.basename(os.path.abspath(model_path)),
+            "octets": _octets_du_checkpoint(model_path),
+        },
+        # Ce qui a ete demande et ce qui est sorti, cote a cote et toujours,
+        # meme quand ils coincident. Un manifeste qui ne porte que le resultat
+        # laisse croire qu'il a ete voulu.
+        "formats_nominaux": {
+            "demande": opts.format_impose,
+            "obtenu": bpw_cible_nominal,
+            "bits_par_poids_source": round(bpw_src, 3) if bpw_src else None,
+            "bits_par_poids_cible": round(bpw_cible, 3),
+            "bascule_anti_grossissement": bool(bascule_faite),
+        },
         "tensors": {},
     }
 
@@ -717,7 +903,25 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             use_hadamard=router.wants_hadamard(name, fmt),
             use_awq=opts.awq,
             n_grid=opts.n_grid,
+            table=opts.q3n_table if fmt == "q3n" else None,
         )
+        if fmt == "q3n":
+            entry["block"] = qt.block
+            entry["table"] = list(qt.table)
+            # Le critère de choix de table n'est PAS le creux : c'est le taux
+            # de zéros EXACTS de la source (contrôle bf16 du 8/09 : à creux
+            # égal, seul un poids nul profite d'un niveau zéro — une source
+            # bf16 en a 0 %, un GGUF à grille avec zéro ~21 %). Mesuré ici et
+            # écrit à côté du choix, pour que la règle soit vérifiable.
+            entry["taux_zeros_source"] = round(
+                float((tensor == 0).float().mean()), 4)
+            # Sceau : lie la table aux octets réellement écrits. Un manifeste
+            # régénéré sans reconversion ferait lire d'anciens poids avec une
+            # nouvelle table, silencieusement — le pire mode de défaillance.
+            import hashlib as _h
+            entry["sceau"] = _h.sha256(
+                qt.qweight.flatten()[:64].cpu().numpy().tobytes()
+                + repr(list(qt.table)).encode()).hexdigest()[:16]
 
         # Précision mixte, deux régimes : plancher SNR classique (défaut,
         # plafonné), ou budget global (bits_budget_gib > 0) où les deux
@@ -774,6 +978,23 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 fmt, qt, scaler, metrics = wider, q2, s2, m2
                 entry["format"] = fmt
                 entry["promoted_from"] = report.promotions[-1]["from"]
+                # Le SNR d'AVANT, celui pris dans `promoted_from`. Sans lui,
+                # `snr_db` d'un promu est celui du format d'arrivee, et le
+                # comparer a celui d'un non-promu compare deux FORMATS en
+                # croyant comparer deux merites : sur 36 modeles a plancher
+                # actif, les promus sortaient a 44,4 dB de mediane contre 20,4
+                # aux epargnes, regularite si nette qu'elle passait pour un
+                # resultat — c'etait l'ecart int8/nvfp4, rien d'autre.
+                # Regle qui en decoule : un SNR se publie TOUJOURS avec le
+                # format dans lequel il a ete pris. Ici `snr_db` va avec
+                # `format`, `snr_db_source` avec `promoted_from`.
+                entry["snr_db_source"] = report.promotions[-1]["before"]
+        # Le SNR de CHAQUE tenseur, promu ou non. Sans lui on ne peut pas
+        # repondre a la question qui juge le quota : existe-t-il un tenseur
+        # NON promu dont le SNR est pire que celui d'un promu ? Si oui, le
+        # quota n'est pas un critere de qualite mais un ordre de parcours.
+        if "out_snr_db" in metrics:
+            entry["snr_db"] = round(float(metrics["out_snr_db"]), 3)
         sd = qt.state_dict(prefix=f"{name}.")
         sd.update(scaler.state_dict(prefix=f"{name}."))
         # Les fragments s'ecrivent depuis la memoire hote : on redescend ce que
@@ -899,6 +1120,29 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             f"conversion incomplète : {len(manquants)} tenseurs attendus "
             f"absents (premier : {manquants[0]}). L'architecture de la source "
             f"n'est probablement pas prise en charge — rien n'est écrit.")
+
+    # MEME denominateur que la condition l.966 — `keys`, pas `attendus`.
+    # Les deux listes ne recensent pas la meme chose et le plafond calcule sur
+    # la mauvaise donnerait un seuil de saturation faux.
+    plafond = opts.max_promotions * max(1, len(keys) + 1)
+    if report.promotions and len(report.promotions) >= plafond - 1:
+        # QUOTA SATURE. A partir de cet instant, ce n'est plus le SNR qui
+        # decide d'une promotion mais l'ORDRE DE PARCOURS du checkpoint : deux
+        # tenseurs de SNR identique recoivent des sorts opposes selon leur
+        # position. Mesure le 9/09/2026 : 27 modeles du parc sur 110 saturent
+        # a l'unite pres, et sur l'un d'eux AUCUN des 48 groupes q/k/v n'a ses
+        # trois membres promus quand 31 en ont exactement un — la signature
+        # d'un regulateur de debit, pas d'une difficulte de couche.
+        print(f"[acvram] quota de promotions SATURE : {len(report.promotions)} "
+              f"sur un plafond de {plafond:.0f}. Au-dela du plafond, l'ordre de "
+              f"parcours a decide a la place du SNR — les promotions ne sont "
+              f"plus triees par besoin. Relever --max-promotions ou trier en "
+              f"deux passes.", flush=True)
+        manifest["quota_promotions_sature"] = True
+
+    manifest["diagnostic_fusion"] = _diagnostic_fusion(manifest["tensors"])
+    if not opts.dry_run:
+        _verifier_formats_declares(manifest, writer.weight_map)
 
     if not opts.dry_run:
         writer.flush()

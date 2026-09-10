@@ -162,44 +162,6 @@ def _venv_cuda_home() -> Optional[str]:
     return None
 
 
-def _flags_variables() -> list[str]:
-    """Flags -D derives de l'environnement, valides AVANT toute compilation.
-
-    Hors du try de get_extension() a dessein : la, une ValueError serait
-    avalee et rendrait un repli silencieux sur les noyaux de reference — une
-    valeur hors domaine passerait pour « les noyaux ne sont pas disponibles ».
-    Un refus doit refuser.
-    """
-    flags = []
-    for var, macro, valides in (
-            ("ACVRAM_GW_WARPS", "GW_WARPS", None),
-            # 32 est REFUSE, et pas par le materiel : l'instanciation D=512 du
-            # noyau demande alors 68 096 octets de memoire partagee contre
-            # 49 152 admis statiquement (ptxas : « uses too much shared data »).
-            # Notre modele est en D=128, ou 32 warps tiendraient — c'est donc
-            # une instanciation NON UTILISEE qui borne le parametre. Plafonner
-            # les warps par instanciation le leverait ; tant que ce n'est pas
-            # fait, le domaine annonce doit etre le domaine REEL, sinon la
-            # validation accepte une valeur que la compilation refuse.
-            ("ACVRAM_PA_WARPS", "PA_WARPS", (1, 2, 4, 8, 16)),
-    ):
-        v = os.environ.get(var)
-        if not v:
-            continue
-        if valides is not None:
-            try:
-                n = int(v)
-            except ValueError:
-                n = -1
-            if n not in valides:
-                raise ValueError(
-                    f"{var}={v} : valeurs admises {list(valides)}. Une valeur "
-                    "hors domaine est refusee — c'est ce refus qui prouve que "
-                    "le code charge contient bien cette validation.")
-        flags.append(f"-D{macro}={v}")
-    return flags
-
-
 def _ensure_cuda_home(need: tuple[int, int]) -> None:
     """Choisit un nvcc capable d'émettre pour ``need``, sans rien exiger du système.
 
@@ -287,7 +249,6 @@ def get_extension():
     # systeme est plus ancien (Mint 22.3 livre CUDA 12.0) compilait sans
     # broncher pour sm_86 et echouait sur l'en-tete manquant.
     _ensure_cuda_home(_MIN_CUDA_FOR_SM120)
-    _flags_var = _flags_variables()        # leve AVANT le try : voir sa docstring
 
     try:
         from torch.utils.cpp_extension import load
@@ -320,17 +281,43 @@ def get_extension():
         # ccache de rendre un objet perime, sans le desactiver ni perdre son
         # benefice sur les compilations legitimes.
         src = os.path.join(here, "acvram_kernels.cu")
-        # LES FLAGS FONT PARTIE DU SOURCE. Hacher le seul contenu du fichier
-        # laissait ouvert le defaut qu'on croyait ferme : un parametre passe
-        # par -D ne change pas le fichier, donc quatre valeurs donnaient le
-        # meme ACVRAM_SRC_HASH, donc ccache pouvait rendre le meme objet et
-        # quatre reglages rendaient quatre fois le meme chiffre. GW_WARPS
-        # etait deja dans ce cas, PA_WARPS l'aurait ete. On hache donc le
-        # couple (contenu, flags qui varient).
         with open(src, "rb") as fh:
-            _SRC_HASH = hashlib.sha256(
-                fh.read() + "\x00".join(sorted(_flags_var)).encode()
-            ).hexdigest()[:16]
+            _SRC_OCTETS = fh.read()
+        # LES FLAGS FONT PARTIE DU SOURCE. Hacher le seul contenu du fichier
+        # laisse ouvert le defaut que ce controle croit fermer : un parametre
+        # passe par -D ne change pas le fichier, donc plusieurs valeurs
+        # donnent le MEME ACVRAM_SRC_HASH, donc ccache peut rendre le meme
+        # objet, et plusieurs reglages rendent le meme chiffre — un temps plat
+        # qui se lit « le reglage n'a pas d'effet » et refute a tort une
+        # prediction juste. ACVRAM_GW_WARPS est deja dans ce cas. On hache
+        # donc le couple (contenu, flags qui varient).
+        _flags_var = ([f"-DGW_WARPS={os.environ['ACVRAM_GW_WARPS']}"]
+                      if os.environ.get("ACVRAM_GW_WARPS") else [])
+        _SRC_HASH = hashlib.sha256(
+            _SRC_OCTETS + "\x00".join(sorted(_flags_var)).encode()
+        ).hexdigest()[:16]
+        # LE CONTROLE EST-IL SEULEMENT APPLICABLE ? L'absence du marqueur dans
+        # le .so a DEUX causes : un binaire perime, ou un source qui n'en porte
+        # pas. Ne proposer que la premiere l'a fait accuser a tort, et le
+        # controle a coute deux compilations a une autre session avec un
+        # message qui designait la mauvaise piste — le dispositif s'etait
+        # transporte a moitie, le marqueur etant dans le .cu et le controle
+        # dans ce fichier. Un controle qui ne peut pas s'appliquer doit LE
+        # DIRE, jamais conclure. Marqueur et controle voyagent ensemble.
+        # ...ET LE DIRE AVANT DE COMPILER. Place apres le `load()`, ce refus
+        # aurait coute neuf minutes de nvcc pour annoncer que rien ne pouvait
+        # les satisfaire. Un controle inapplicable se declare tout de suite.
+        if b"acvram_src_hash" not in _SRC_OCTETS:
+            _ERROR = (f"le source {src} ne contient pas la variable "
+                      f"`acvram_src_hash` : le controle d'empreinte est "
+                      f"INAPPLICABLE sur cet arbre, aucun binaire ne pourra le "
+                      f"satisfaire — et rien ici ne permet d'accuser un cache "
+                      f"de compilation. Reportez le bloc `extern \"C\" ... "
+                      f"acvram_src_hash = ACVRAM_SRC_HASH` dans le .cu, ou "
+                      f"reprenez la version du noyau qui va avec ce controle.")
+            warnings.warn(f"acvram : {_ERROR}")
+            _EXT = None
+            return None
         _SRC_U64 = int(_SRC_HASH, 16)          # entier : aucun guillemet a echapper
         _EXT = load(
             name="acvram_kernels",
@@ -367,9 +354,12 @@ def get_extension():
             porte = True                       # pas de .so a inspecter : on n'accuse pas
         if not porte:
             _ERROR = (f"le binaire {so} ne porte pas l'empreinte du source "
-                      f"({_SRC_HASH}) : il a ete servi par un cache de "
-                      f"compilation et NE CONTIENT PAS vos modifications. "
-                      f"Videz {cache} ou relancez avec CCACHE_DISABLE=1.")
+                      f"({_SRC_HASH}) alors que ce source PORTE bien un "
+                      f"marqueur : le .so ne contient pas vos modifications. "
+                      f"Videz {cache} — `CCACHE_DISABLE=1` seul ne suffit "
+                      f"pas, il n'entre pas dans la ligne de commande que "
+                      f"ninja compare, donc ninja voit son .so a jour et ne "
+                      f"recompile rien.")
             warnings.warn(f"acvram : {_ERROR}")
             _EXT = None
             return None
@@ -413,11 +403,42 @@ def nvfp4_dequant(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16,
 
 
 # Contrairement au seuil INT8, celui-ci est bien placé : le chemin W4A8 ne
-# matérialise pas le poids entier à chaque appel. Balayé sur un dense de 27B,
-# le TTFT d'une invite de 16 jetons vaut 194,7 ms à 8, 202,8 à 32, 265,1 à 64 et
-# 283,1 à 128 — monter le seuil ne fait que perdre. La variable reste comme
-# échappement.
-_NVFP4_GEMV_MAX = int(os.environ.get("ACVRAM_NVFP4_GEMV_MAX", "8"))
+# matérialise pas le poids entier à chaque appel.
+#
+# Le seuil a valu 8 jusqu'au 10/09/2026, sur ce balayage : « dense de 27B, TTFT
+# d'une invite de 16 jetons, 194,7 ms à 8, 202,8 à 32, 265,1 à 64 » — une
+# mesure à UNE séquence, où le décodage ne franchit jamais le seuil. Elle ne
+# disait donc rien du seul régime où il décide : la CONCURRENCE. Les deux
+# mesures ne se contredisaient pas, elles ne parlaient pas du même monde.
+#
+# Refait le 10/09/2026 sous verrou de carte (`outils/carte.sh` — une première
+# campagne avait été jetée : une autre session chargeait en même temps, et
+# c'est le bras SURVIVANT, pas celui mort en OOM, qui rendait un chiffre que
+# rien ne signalait comme faux). ABBA, une valeur par processus, le seuil étant
+# lu à l'import. Chaque bras deux fois ; la dispersion INTRA-bras est donnée
+# pour que l'écart se lise contre elle.
+#
+#   modele      regime            seuil 8          seuil 32        ecart
+#   Qwen3-4B    12 seq, debit   18,93 18,93 p/s  53,67 53,65     x2,84
+#   Qwen3-4B    12 seq, TTFT    1021,2 1013,1 ms  924,6  926,3    -9,4 %
+#   Qwen3-4B     1 seq, TTFT     288,7  289,9     227,1  229,1   -21,3 %
+#   Qwen3-4B     1 seq, decode  227,11 227,00 p/s 227,41 226,59    nul
+#   AWAXIS-31B   1 seq, TTFT     464,0  463,0     433,2  434,6    -6,5 %
+#   AWAXIS-31B   1 seq, decode   47,42  47,32     47,40  47,45     nul
+#
+# Dispersion intra-bras : au plus 8 ms et 0,1 pas/s. Chaque ecart vaut 4 a 200
+# fois cette dispersion. A une sequence le decodage ne franchit pas le seuil,
+# des deux cotes : sa neutralite est le TEMOIN de la manche.
+#
+# Et la justesse va dans le meme sens, ce que personne n'avait mesure : contre
+# le poids REELLEMENT stocke, le GEMV rend 55,6 dB la ou le chemin W4A8 rend
+# 27,9 — +27,8 dB. Au-dessus de huit lignes on payait donc une erreur quatre
+# fois plus grande sans l'avoir choisie.
+#
+# 32 plutôt que plus haut : le croisement mesuré sur six formes du parc va de
+# 40 à plus de 64, et un seuil sous le plus petit croisement ne peut pas perdre
+# sur une forme non balayée. La variable reste comme échappement.
+_NVFP4_GEMV_MAX = int(os.environ.get("ACVRAM_NVFP4_GEMV_MAX", "32"))
 
 
 def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
@@ -642,15 +663,20 @@ _bk.register(_bk.Backend(
 _bk.register(_bk.Backend(
     name="fp4-tensorcores", formats=("nvfp4",), device_type="cuda",
     priority=110, available=_sm100_ok,
-    # JAMAIS SOUS CAPTURE. Repris de main : ce chemin tourne sur un flux
-    # annexe, ce qui invalide une capture de graphe en cours. Mesure du
-    # 10/09 sur Qwen3-4B-nvfp4 : huit sequences capturent et servent, neuf
-    # franchissent le seuil `> 8` EN DECODAGE, donc a l'interieur de la
-    # capture — cudaErrorStreamCaptureInvalidated, et l'echec precede toute
-    # capture. La condition porte sur l'etat de capture et non sur un seuil
-    # de lot : un seuil se deplacerait au prochain changement de
-    # max_batch_size et le defaut reviendrait ailleurs. Le prefill, lui,
-    # n'est jamais capture : il garde ce chemin.
+    # EXCLU PENDANT UNE CAPTURE DE GRAPHE, et pas au-dela d'un lot.
+    #
+    # `torch._scaled_mm` passe par cuBLASLt, dont le premier appel sur un flux
+    # interroge une heuristique et reserve un espace de travail : une operation
+    # interdite pendant `cudaStreamCapture`. L'echauffement de `graphs.py` ne
+    # l'immunise pas, il tourne sur le flux annexe `side`.
+    #
+    # Mesure du 10/09/2026 sur Qwen3-4B-nvfp4 : huit sequences capturent un
+    # graphe et servent ; douze franchissent le seuil `> 8` en DECODAGE, donc
+    # a l'interieur de la capture, et rendent `captures = 0` avec 23,46 Gio
+    # libres — l'echec precede toute capture. La condition porte donc sur
+    # l'etat de capture et non sur un seuil de lot : un seuil se deplacerait
+    # au prochain changement de `max_batch_size` et le defaut reviendrait
+    # ailleurs. Le prefill, lui, n'est jamais capture : il garde ce chemin.
     # La garde par capacité est répétée ici : un échec réel dans
     # nvfp4_mm_tensorcore éteint son chemin globalement, et il ne faut pas
     # qu'un appel parti sur une carte sans FP4 le fasse pour toutes.

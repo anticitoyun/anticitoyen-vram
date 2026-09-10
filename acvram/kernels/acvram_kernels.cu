@@ -40,6 +40,9 @@
 // le vérifie face au chemin PyTorch.
 
 #include <torch/extension.h>
+#include <tuple>
+#include <array>
+#include <map>
 #include <cstdlib>
 #include <vector>
 #include <ATen/cuda/CUDAContext.h>
@@ -287,7 +290,55 @@ __global__ void nvfp4_gemv_kernel(
     const int per_split_p = (npairs + k_splits - 1) / k_splits;
     const int lo_p = split * per_split_p;
     const int hi_p = min(npairs, lo_p + per_split_p);
-    for (int i = lo_p + threadIdx.x; i < hi_p; i += blockDim.x) {
+
+    // Double tampon sur la dimension K. La boucle lisait le poids puis le
+    // consommait aussitot : chaque iteration payait la latence DRAM en entier,
+    // et le fil restait bloque sur `long_scoreboard`. Les lectures de
+    // l'iteration suivante sont maintenant emises AVANT le calcul de la
+    // courante, qui les recouvre.
+    //
+    // Mesure du 9/09/2026 sur Qwen2.5-Coder-14B en decodage : notre GEMV
+    // atteignait 770 Go/s contre 991 pour cuBLAS en bf16, soit 78 %. L'ecart
+    // etait pire sur les PETITES matrices (0,62 sur o_proj) que sur les
+    // grandes (0,85 sur gate/up) — signature d'une latence mal masquee, pas
+    // d'une mauvaise coalescence, qui penaliserait uniformement.
+    //
+    // L'arithmetique est inchangee : memes valeurs, meme ordre
+    // d'accumulation. Seul le moment des lectures change.
+    uint4 pre_p4[ROWS];
+    float pre_s0[ROWS], pre_s1[ROWS];
+    int i = lo_p + threadIdx.x;
+    bool vif = i < hi_p;
+    if (vif) {
+        #pragma unroll
+        for (int r = 0; r < ROWS; ++r) {
+            const int row = row0 + r;
+            if (row >= M) continue;
+            pre_p4[r] = reinterpret_cast<const uint4 *>(qw + (long)row * half_k)[i];
+            pre_s0[r] = e4m3_to_float(bscale[(long)row * nloads + 2 * i]) * gscale;
+            pre_s1[r] = e4m3_to_float(bscale[(long)row * nloads + 2 * i + 1]) * gscale;
+        }
+    }
+    for (; i < hi_p; i += blockDim.x) {
+        // ce qui a ete precharge sert maintenant
+        uint4 cur_p4[ROWS];
+        float cur_s0[ROWS], cur_s1[ROWS];
+        #pragma unroll
+        for (int r = 0; r < ROWS; ++r) {
+            cur_p4[r] = pre_p4[r]; cur_s0[r] = pre_s0[r]; cur_s1[r] = pre_s1[r];
+        }
+        // les lectures suivantes partent avant le calcul, jamais apres
+        const int isuiv = i + blockDim.x;
+        if (isuiv < hi_p) {
+            #pragma unroll
+            for (int r = 0; r < ROWS; ++r) {
+                const int row = row0 + r;
+                if (row >= M) continue;
+                pre_p4[r] = reinterpret_cast<const uint4 *>(qw + (long)row * half_k)[isuiv];
+                pre_s0[r] = e4m3_to_float(bscale[(long)row * nloads + 2 * isuiv]) * gscale;
+                pre_s1[r] = e4m3_to_float(bscale[(long)row * nloads + 2 * isuiv + 1]) * gscale;
+            }
+        }
         float xs[NV][2 * WEIGHTS_PER_LOAD];
         #pragma unroll
         for (int n = 0; n < NV; ++n)
@@ -297,9 +348,9 @@ __global__ void nvfp4_gemv_kernel(
         for (int r = 0; r < ROWS; ++r) {
             const int row = row0 + r;
             if (row >= M) continue;
-            const uint4 p4 = reinterpret_cast<const uint4 *>(qw + (long)row * half_k)[i];
-            const float s0 = e4m3_to_float(bscale[(long)row * nloads + 2 * i]) * gscale;
-            const float s1 = e4m3_to_float(bscale[(long)row * nloads + 2 * i + 1]) * gscale;
+            const uint4 p4 = cur_p4[r];
+            const float s0 = cur_s0[r];
+            const float s1 = cur_s1[r];
             const unsigned int words[4] = {p4.x, p4.y, p4.z, p4.w};
             float p0[NV], p1[NV];
             #pragma unroll
@@ -742,38 +793,60 @@ __global__ void int4_gemv_grouped_kernel(
 // godet de blocs : le chemin se rejoue tel quel dans un graphe CUDA.
 // -------------------------------------------------------------------------
 
-// SEUL AJOUT a la version de poste2 : `flottants`, le nombre de flottants
-// ecrits par bloc. Il transforme ce banc en instrument capable de trancher
-// l'attribution du terme par bloc : faire varier les OCTETS en laissant tout
-// le reste identique. Le detour par les cinq instanciations D de
-// paged_attn_partial ne le permettait pas — D change aussi la memoire
-// partagee, l'occupation et le travail par warp, donc trois choses a la fois.
-// Ici une seule bouge.
-__global__ void banc_fma_kernel(float *__restrict__ sortie, int K,
-                                int flottants) {
+// CONTROLE POSITIF DU HARNAIS DE MESURE (poste1, 10/09/2026).
+// Un instrument ne rend un resultat que s'il pouvait en rendre un autre. On lui
+// donne donc une difference CONNUE D'AVANCE et grande : K iterations de FMA
+// CHAINEES — chacune depend de la precedente, donc ni eliminees par le
+// compilateur ni recouvertes par l'ordonnanceur.
+//   - le temps doit devenir lineaire en K des que le travail depasse le plancher
+//   - LE COUDE CHIFFRE LE PLANCHER, sans aucune hypothese sur sa cause
+// C'est ce qui manquait quand un montage a rendu ~49,5 us pour un noyau qui
+// ecrit trois flottants et sort : nous n'avions aucun moyen de savoir que
+// c'etait le plancher de l'instrument et non le cout du noyau.
+// COMPTEUR DE PARTICIPATION. La colonne « grille » d'un script Python est
+// RECONSTRUITE depuis le parametre demande : elle dit ce qui a ete demande,
+// jamais ce qui a tourne. Si le noyau borne ou recalcule son decoupage, elle
+// afficherait 2048 pendant que 32 blocs travaillent — et corroborerait la
+// fausse refutation au lieu de la denoncer. Ici chaque bloc s'annonce, et le
+// compte se relit cote hote. Aucune chronometrie.
+__device__ unsigned long long acvram_pa_participants = 0ULL;
+
+// TEMOIN DU TAMPON. Le remede a une fuite doit se verifier autrement que par
+// la lecture du code : ceci rend les octets effectivement retenus par les
+// tampons partiels. Apres un balayage de longueurs, il doit se stabiliser au
+// pire cas vu et ne plus bouger — la ou l'ancien cache croissait a chaque
+// nouvelle forme.
+unsigned long long acvram_pa_tampon_octets = 0ULL;
+
+unsigned long long paged_attn_participants(bool remettre_a_zero) {
+    unsigned long long n = 0ULL;
+    cudaMemcpyFromSymbol(&n, acvram_pa_participants, sizeof(n));
+    if (remettre_a_zero) {
+        const unsigned long long z = 0ULL;
+        cudaMemcpyToSymbol(acvram_pa_participants, &z, sizeof(z));
+    }
+    return n;
+}
+
+__global__ void banc_fma_kernel(float *__restrict__ sortie, int K) {
     float a = (float)(threadIdx.x + 1) * 1e-3f;
     const float b = 1.0000001f, c = 1e-7f;
     #pragma unroll 1
     for (int i = 0; i < K; ++i) a = fmaf(a, b, c);   // chainee : a depend de a
-    const long bloc = blockIdx.z * gridDim.y * gridDim.x
-                    + blockIdx.y * gridDim.x + blockIdx.x;
-    // Ecriture CONTIGUE par bloc et coalescee dans le bloc : c'est la forme de
-    // l'ecriture de part[], et c'est elle qu'on veut chiffrer.
-    for (int i = threadIdx.x; i < flottants; i += blockDim.x)
-        sortie[bloc * (long)flottants + i] = a;
+    if (threadIdx.x == 0)
+        sortie[blockIdx.z * gridDim.y * gridDim.x
+               + blockIdx.y * gridDim.x + blockIdx.x] = a;
 }
 
 torch::Tensor banc_fma(int64_t gx, int64_t gy, int64_t gz,
-                       int64_t threads, int64_t K, int64_t flottants) {
-    TORCH_CHECK(flottants >= 1, "banc_fma : flottants doit valoir au moins 1 "
-                "(un bloc qui n'ecrit rien serait eliminable)");
+                       int64_t threads, int64_t K) {
     auto opt = torch::TensorOptions().dtype(torch::kFloat)
                    .device(torch::kCUDA, c10::cuda::current_device());
-    auto out = torch::empty({(long)(gx * gy * gz * flottants)}, opt);
+    auto out = torch::empty({(long)(gx * gy * gz)}, opt);
     dim3 g((unsigned)gx, (unsigned)gy, (unsigned)gz);
     banc_fma_kernel<<<g, (unsigned)threads, 0,
                       at::cuda::getCurrentCUDAStream()>>>(
-        out.data_ptr<float>(), (int)K, (int)flottants);
+        out.data_ptr<float>(), (int)K);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return out;
 }
@@ -791,20 +864,7 @@ extern "C" __attribute__((used)) const unsigned long long acvram_src_hash
     = ACVRAM_SRC_HASH;
 
 constexpr int PA_CHUNK = 512;
-// Warps par bloc du noyau d'attention. Parametrable a la COMPILATION, parce
-// que sacc[PA_WARPS][D] est une declaration de memoire partagee : la valeur
-// doit etre connue de nvcc. Elle ne change ni le reduce, ni le nombre de
-// lancements, ni la memoire de travail — a la difference de PA_CHUNK.
-#ifndef PA_WARPS
-#define PA_WARPS 4
-#endif
-static_assert(PA_WARPS >= 1 && PA_WARPS <= 32,
-              "PA_WARPS hors domaine : 32 warps font 1024 threads, le plafond "
-              "materiel d'un bloc.");
-static_assert((PA_WARPS & (PA_WARPS - 1)) == 0,
-              "PA_WARPS doit etre une puissance de 2 : la repartition des "
-              "positions t += PA_WARPS reste alors reguliere sur les tranches "
-              "en puissance de 2 de PA_CHUNK.");
+constexpr int PA_WARPS = 4;
 
 template <int D, typename QT, typename OT>
 __global__ void paged_attn_partial_kernel(
@@ -820,7 +880,15 @@ __global__ void paged_attn_partial_kernel(
     float *__restrict__ part_l,           // [B*QL, HQ, C]
     OT *__restrict__ sortie,              // [B*QL, HQ, D] si C == 1, sinon nul
     int HQ, int HKV, int N, int C, int QL, float scale, int window,
-    int arm) {
+    int chunk,            // le noyau et le lanceur DOIVENT decouper pareil
+    int etape,            // BISECTION : sortir plus ou moins tot du noyau.
+    bool compter) {       // marqueur de participation : instrument payant
+                          // 0 indices · 1 +chargement de q · 2 +boucle
+                          // principale · 3 tout (comportement normal).
+                          // Les sorties neutres sont ECRITES a chaque etape,
+                          // sinon le compilateur supprime le noyau entier et
+                          // l'on mesure un lancement vide.
+
     // La vérification spéculative pose QL positions de requête par séquence :
     // la requête qi (0..QL-1) ne voit que les seq_len-QL+1+qi premières
     // positions — causalité oblige. QL=1 redonne le décodage ordinaire.
@@ -832,14 +900,14 @@ __global__ void paged_attn_partial_kernel(
     const int hkv = h / (HQ / HKV);
     const long slen = seq_lens[b] - (QL - 1) + qi;
     const long lo = window > 0 ? max(0L, slen - (long)window) : 0L;   // fenêtre glissante
-    const long start = max((long)c * PA_CHUNK, lo);
+    const long start = max((long)c * chunk, lo);
     const long out_off = ((long)bq * HQ + h) * C + c;
 
     const int lane = threadIdx.x % WARP;
     const int wid = threadIdx.x / WARP;
     constexpr int PER_LANE = D / WARP;
 
-    if (start >= slen || start >= (long)(c + 1) * PA_CHUNK) {
+    if (start >= slen || start >= (long)(c + 1) * chunk) {
         if (threadIdx.x == 0) {
             part_m[out_off] = -INFINITY;
             part_l[out_off] = 0.f;
@@ -849,50 +917,31 @@ __global__ void paged_attn_partial_kernel(
         return;
     }
 
-    // Bras de mesure (ACVRAM_PA_ARM). arm=0 : le noyau reel, boucle intacte.
-    // arm=1 : rien n'est lu — le PLANCHER du montage (lancement + ecritures).
-    // arm=2 : le KV est lu selon le MEME parcours, sans le softmax ni les
-    // produits — le trafic memoire de arm=0 sans son calcul.
-    // Les trois bras sont le meme binaire : aucun ecart de compilation entre eux.
-    if (arm != 0) {
-        // La reduction passe par la memoire partagee et non par le seul
-        // __shfl : si D < blockDim (D = 32 ou 64), les warps dont aucun thread
-        // n'ecrit la sortie verraient leur `s` inutilise, et le compilateur
-        // eliminerait leurs lectures — le bras C lirait moins que le bras A,
-        // silencieusement. Ici tous les warps sont consommes quel que soit D.
-        __shared__ float sred[PA_WARPS];
-        float s = 0.f;
-        if (arm == 2) {
-            const long fin = min(slen, (long)(c + 1) * PA_CHUNK);
-            for (long t = start + wid; t < fin; t += PA_WARPS) {
-                const long blk = tables[(long)b * N + (t >> 4)];
-                const long cell = (blk * 16 + (t & 15)) * HKV + hkv;
-                const signed char *kp = kc + cell * D;
-                const signed char *vp = vc + cell * D;
-                #pragma unroll
-                for (int i = 0; i < PER_LANE; ++i)
-                    s += static_cast<float>(kp[lane * PER_LANE + i])
-                       + static_cast<float>(vp[lane * PER_LANE + i]);
-                s += __half2float(ks[cell]) + __half2float(vs[cell]);
-            }
-            #pragma unroll
-            for (int off = WARP / 2; off > 0; off >>= 1)
-                s += __shfl_down_sync(0xffffffffu, s, off);
+    if (etape < 1) {
+        // MARQUEUR DE PARTICIPATION : un temps plat ne distingue pas « noyau
+        // insensible au parallelisme » de « grille inerte ». On observe donc
+        // QUI A TOURNE : chaque bloc marque sa case, et le compte des cases
+        // marquees se relit cote hote. participants == grille -> les blocs
+        // tournent ; participants < grille -> le lancement est en cause et
+        // rien n'a jamais ete teste.
+        // L'ATOMIQUE EST UN INSTRUMENT, ET IL SE PAIE. Tous les blocs frappent
+        // LA MEME adresse : le L2 les serialise, et le cout croit avec le
+        // nombre de blocs — exactement la forme que nous attribuions au
+        // « plancher du lancement ». banc_fma, a travail par bloc constant,
+        // rend 7,1 us de 170 a 4080 blocs sans une marche : le lancement ne
+        // coute rien sur cette plage. Donc ce que l'etape 0 mesurait en plus
+        // (15,36 us a 1504 blocs) etait en partie CE COMPTEUR.
+        // On le rend donc coupable : pose ACVRAM_PA_SANS_COMPTEUR=1 et la
+        // participation n'est plus observee, mais le temps est celui du noyau
+        // seul. Un instrument qui ne peut pas etre eteint ne peut pas etre
+        // disculpe.
+        if (threadIdx.x == 0) {
+            part_m[out_off] = 1.f; part_l[out_off] = 0.f;
+            if (compter)
+            atomicAdd(&acvram_pa_participants, 1ULL);   // ce bloc a tourne
         }
-        if (lane == 0) sred[wid] = s;
-        __syncthreads();          // la sortie anticipee ci-dessus est uniforme
-                                  // par bloc : tout le bloc arrive ici ou aucun
-        s = 0.f;
-        #pragma unroll
-        for (int w = 0; w < PA_WARPS; ++w) s += sred[w];
-        // Meme empreinte d'ecriture que le noyau reel : ni elimine, ni
-        // avantage par une sortie plus petite.
-        if (threadIdx.x == 0) { part_m[out_off] = s; part_l[out_off] = 1.f; }
         for (int d = threadIdx.x; d < D; d += blockDim.x)
-            part[out_off * D + d] = s;
-        if (C == 1 && sortie != nullptr)
-            for (int d = threadIdx.x; d < D; d += blockDim.x)
-                sortie[out_off * D + d] = from_float<OT>(s);
+            part[out_off * D + d] = 0.f;
         return;
     }
 
@@ -906,9 +955,17 @@ __global__ void paged_attn_partial_kernel(
     float m = -INFINITY, l = 0.f;
     float acc[PER_LANE];
     #pragma unroll
+    if (etape < 2) {
+        // q est charge et synchronise ; on sort avant la boucle principale.
+        if (threadIdx.x == 0) { part_m[out_off] = sq[0]; part_l[out_off] = 0.f; }
+        for (int d = threadIdx.x; d < D; d += blockDim.x)
+            part[out_off * D + d] = sq[d];   // depend de sq : rien n'est supprime
+        return;
+    }
+
     for (int i = 0; i < PER_LANE; ++i) acc[i] = 0.f;
 
-    const long end = min(slen, (long)(c + 1) * PA_CHUNK);
+    const long end = min(slen, (long)(c + 1) * chunk);
     for (long t = start + wid; t < end; t += PA_WARPS) {
         const long blk = tables[(long)b * N + (t >> 4)];
         const long cell = (blk * 16 + (t & 15)) * HKV + hkv;
@@ -943,6 +1000,17 @@ __global__ void paged_attn_partial_kernel(
     for (int i = 0; i < PER_LANE; ++i)
         sacc[wid][lane * PER_LANE + i] = acc[i];
     __syncthreads();
+
+    if (etape < 3) {
+        // La boucle principale a tourne ; on sort AVANT la reduction
+        // inter-warps. On ecrit depuis sm/sq pour que rien ne soit supprime :
+        // sans dependance aux resultats, le compilateur retirerait la boucle
+        // et l'on mesurerait un noyau vide.
+        if (threadIdx.x == 0) { part_m[out_off] = sm[0]; part_l[out_off] = sl[0]; }
+        for (int d = threadIdx.x; d < D; d += blockDim.x)
+            part[out_off * D + d] = sq[d];
+        return;
+    }
 
     if (threadIdx.x == 0) {
         float mg = -INFINITY;
@@ -1955,28 +2023,112 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
     const int HQ = q.size(1);
     const int D = q.size(2);
     const int N = tables.size(1);
+    // TAILLE DE TRANCHE A L'EXECUTION. C'etait `constexpr PA_CHUNK` : une
+    // constante compilee ne peut porter une formule qui depend du nombre de SM
+    // et du contexte reel, et elle oblige a recompiler pour l'explorer — neuf
+    // minutes par valeur, avec le risque verifie que la recompilation n'ait pas
+    // lieu du tout. Le defaut reproduit exactement l'ancien comportement.
+    // TRANCHE ADAPTATIVE. Mesure du 10/09, contexte 3007, un appel isole :
+    //     chunk   64  128  256  512  1024  2048
+    //     total   25   32   46   79   144   279  us
+    // Le temps DOUBLE quand la tranche double : le noyau est serialise sur la
+    // longueur de tranche, donc le total vaut le temps d'UNE tranche et
+    // decouper davantage le reduit d'autant. 512 etait le pire reglage
+    // atteignable parmi ceux mesures.
+    // On ne peut pas pour autant poser 64 en constante : le nombre de tranches
+    // C = ceil(N*16 / chunk) est borne a 256, donc 64 cesserait d'etre legal
+    // vers 16 k jetons. La regle prend LA PLUS PETITE TRANCHE QUI RESTE DANS LA
+    // BORNE, et la borne est ensuite VERIFIEE, pas supposee (TORCH_CHECK plus
+    // bas). 64 est le plancher parce que c'est la plus petite valeur MESUREE :
+    // 32 et 16 pourraient etre meilleurs, ils n'ont pas ete essayes, et on ne
+    // reglera pas un defaut par une extrapolation.
+    int chunk = PA_CHUNK;
+    if (const char *v = std::getenv("ACVRAM_PA_CHUNK")) {
+        int demande = atoi(v);
+        if (demande >= 16) chunk = demande;   // priorite a la main de l'operateur
+    } else {
+        const int mini = (N * 16 + 255) / 256;   // en deca, C depasserait 256
+        chunk = 64;
+        while (chunk < mini) chunk <<= 1;
+    }
+    // BISECTION : ACVRAM_PA_ETAPE < 3 sort du noyau plus tot. Le resultat est
+    // alors FAUX par construction — c'est un instrument de diagnostic, jamais
+    // un chemin de production. Defaut 3 = comportement normal.
+    // Le compteur de participation coute un atomique par bloc sur une adresse
+    // unique : mesurable, donc extinguible.
+    bool compter = true;
+    if (const char *v = std::getenv("ACVRAM_PA_SANS_COMPTEUR"))
+        compter = !(v[0] == '1');
+    int etape = 3;
+    if (const char *v = std::getenv("ACVRAM_PA_ETAPE")) {
+        int d = atoi(v);
+        if (d >= 0 && d < 3) etape = d;
+    }
     TORCH_CHECK(D == 32 || D == 64 || D == 128 || D == 256 || D == 512,
                 "dimension de tete non instanciee : ", D);
-    const int C = (N * 16 + PA_CHUNK - 1) / PA_CHUNK;
-    TORCH_CHECK(C <= 256, "contexte au-dela de 256 tranches");
-    static const int pa_arm = [] {
-        const char *v = std::getenv("ACVRAM_PA_ARM");
-        if (v == nullptr) return 0;
-        const int a = (v[0] == 'A') ? 0 : (v[0] == 'B') ? 1 : (v[0] == 'C') ? 2 : -1;
-        TORCH_CHECK(a >= 0, "ACVRAM_PA_ARM doit valoir A, B ou C (recu : ", v,
-                    "). Un bras inconnu est refuse : c'est ce refus qui prouve "
-                    "que le binaire charge contient bien ce code.");
-        TORCH_CHECK(a == 0 || std::getenv("ACVRAM_PA_ARM_SORTIE_FAUSSE") != nullptr,
-                    "les bras B et C amputent l'attention : la sortie du modele "
-                    "est FAUSSE et ne doit pas etre publiee. Poser "
-                    "ACVRAM_PA_ARM_SORTIE_FAUSSE=1 pour le reconnaitre.");
-        return a;
-    }();
+    const int C = (N * 16 + chunk - 1) / chunk;
+    TORCH_CHECK(C <= 256, "contexte au-dela de 256 tranches (chunk=", chunk,
+                ", blocs=", N, ")");
     const bool qbf = q.scalar_type() == torch::kBFloat16;
     auto f32 = q.options().dtype(torch::kFloat);
-    auto part = torch::empty({BQ, HQ, C, D}, f32);
-    auto pm = torch::empty({BQ, HQ, C}, f32);
-    auto pl = torch::empty({BQ, HQ, C}, f32);
+    // TAMPONS REUTILISES. Le noyau porte 46,5 us de cout FIXE — 94 % de sa
+    // duree — qui ne depend ni du travail, ni du nombre de blocs (grille x8 :
+    // aucun effet), ni du nombre de noyaux lances. Reste ce qui ENTOURE le
+    // lancement. Chaque tampon est ECRIT avant d'etre lu, y compris par la
+    // sortie anticipee qui pose -INFINITY et 0.
+    static bool sans_cache = [] {
+        const char *v = std::getenv("ACVRAM_PAGED_ALLOC");
+        return v && v[0] == '1';
+    }();
+    torch::Tensor part, pm, pl;
+    if (sans_cache) {
+        part = torch::empty({BQ, HQ, C, D}, f32);
+        pm = torch::empty({BQ, HQ, C}, f32);
+        pl = torch::empty({BQ, HQ, C}, f32);
+    } else {
+        // UN SEUL TAMPON, GARDE AU PIRE CAS VU. C'etait un std::map indexe par
+        // (BQ, HQ, C, D, device) et JAMAIS VIDE : une entree definitive par
+        // forme rencontree. UN `static std::map` JAMAIS VIDE EST UNE FUITE QUI
+        // ATTEND SON DECLENCHEUR — celui-ci dormait a 2,2 Mo depuis toujours
+        // parce que `chunk` valait 512 et que C ne prenait que 16 valeurs. La
+        // tranche adaptative l'a reveille a 135 Mo sans toucher a une ligne de
+        // son code : C = ceil(N/4) prend 128 valeurs. Le cache n'etait pas
+        // faux, il etait a la merci d'un changement ailleurs.
+        // Le noyau recoit des pointeurs bruts et calcule ses index a partir de
+        // C : un tampon PLUS GRAND que necessaire convient, seule la capacite
+        // compte. On garde donc le maximum vu, et rien de plus. Au pire cas
+        // legal (C = 256, HQ = 32, D = 128, BQ = 1) : 4,2 Mo pour `part`,
+        // 32 Kio pour les deux autres — a comparer aux 135 Mo cumules.
+        // ON N'AGRANDIT JAMAIS UN TAMPON DEJA UTILISE : UN GRAPHE CUDA EN A
+        // CAPTURE L'ADRESSE. Un tampon unique agrandi au besoin semblait la
+        // bonne reponse — il stabilisait bien la memoire a 1,07 Mo — puis la
+        // neuvieme longueur a rendu un acces memoire illegal : la
+        // reallocation avait libere l'adresse que des graphes deja captures
+        // rejouaient. L'ancien cache par forme ne realloue jamais une forme
+        // vue : c'etait sa qualite cachee, et sa fuite venait du NOMBRE de
+        // formes, pas du principe.
+        // On garde donc un cache, mais indexe sur C ARRONDI A LA PUISSANCE DE
+        // 2 : 9 tailles possibles (1..256) au lieu de 128 valeurs distinctes,
+        // chacune allouee une fois et jamais deplacee. Cumul au pire :
+        // (1+2+...+256) = 511 unites, soit 8,4 Mo contre 135.
+        int Cb = 1;
+        while (Cb < C) Cb <<= 1;
+        static std::map<std::tuple<int, int, int, int, int>,
+                        std::array<torch::Tensor, 3>> cache_t;
+        static unsigned long long octets_caches = 0ULL;
+        auto cle = std::make_tuple(BQ, HQ, Cb, D, (int)q.device().index());
+        auto it = cache_t.find(cle);
+        if (it == cache_t.end()) {
+            it = cache_t.emplace(cle, std::array<torch::Tensor, 3>{
+                torch::empty({BQ, HQ, Cb, D}, f32),
+                torch::empty({BQ, HQ, Cb}, f32),
+                torch::empty({BQ, HQ, Cb}, f32)}).first;
+            octets_caches += (unsigned long long)BQ * HQ * Cb * (D + 2) * 4ULL;
+        }
+        acvram_pa_tampon_octets = octets_caches;
+        part = it->second[0]; pm = it->second[1]; pl = it->second[2];
+    }
+    // `out` reste FRAIS : il est RENDU a l'appelant.
     auto out = torch::empty({BQ, HQ, D}, q.options());
     auto stream = at::cuda::getCurrentCUDAStream();
     dim3 g1(BQ, HQ, C), g2(BQ, HQ);
@@ -1992,7 +2144,7 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
             part.data_ptr<float>(), pm.data_ptr<float>(), \
             pl.data_ptr<float>(), (C == 1 ? (PO) : nullptr), \
             HQ, (int)hkv, N, C, (int)q_len, (float)scale, (int)window, \
-            pa_arm); \
+            chunk, etape, compter); \
         if (C > 1) \
         paged_attn_reduce_kernel<DD, OT><<<g2, 128, 0, stream>>>( \
             part.data_ptr<float>(), pm.data_ptr<float>(), \
@@ -2407,19 +2559,28 @@ std::vector<torch::Tensor> moe_route(torch::Tensor logits, torch::Tensor bias,
 // microbanc decidera des optimisations (chargements 12 octets, k_splits).
 // --------------------------------------------------------------------------
 
-__constant__ float TABLE_Q3N_C[8] = {
-    -1.0000f, -0.5783f, -0.3186f, -0.1025f,
-     0.1025f,  0.3186f,  0.5783f,  1.0000f};
-
+// La table de niveaux arrive en argument (elle vit dans le manifeste depuis
+// la table Lloyd-Max par modele) et se lit depuis la memoire PARTAGEE : la
+// version __constant__ se serialisait des que les fils d'un warp lisaient
+// des entrees differentes — le piege deja documente sur la table NVFP4 plus
+// haut — et un symbole global serait un etat partage entre deux modeles
+// charges avec deux tables. Huit entrees physiques toujours : le masque & 7u
+// garantit l'index, la huitieme repete la septieme quand il n'y a que sept
+// niveaux logiques.
 template <int ROWS, typename XT, typename YT>
 __global__ void q3n_gemv_kernel(
     const unsigned char *__restrict__ qw,     // [M, K*3/8]
     const unsigned char *__restrict__ bscale, // fp8 e4m3 [M, K/B]
     const float gscale,
+    const float *__restrict__ table,          // [8] niveaux
     const XT *__restrict__ x,                 // [N, K]
     YT *__restrict__ y,                       // [N, M]
     int M, int K, int N, int B) {
     extern __shared__ float smem[];
+    float *tab = smem;            // 8 niveaux
+    float *red = smem + 8;        // zone de reduction
+    if (threadIdx.x < 8) tab[threadIdx.x] = table[threadIdx.x];
+    __syncthreads();
     const int nwarps = (blockDim.x + WARP - 1) / WARP;
     const int row0 = blockIdx.x * ROWS;
     if (row0 >= M) return;
@@ -2448,11 +2609,11 @@ __global__ void q3n_gemv_kernel(
                 float somme = 0.f;
                 #pragma unroll
                 for (int j = 0; j < 8; ++j)
-                    somme += TABLE_Q3N_C[(mot >> (3 * j)) & 7u] * xs[j];
+                    somme += tab[(mot >> (3 * j)) & 7u] * xs[j];
                 acc[r] += somme * es;
             }
         }
-        block_reduce_rows<ROWS>(acc, smem, nwarps);
+        block_reduce_rows<ROWS>(acc, red, nwarps);
         if (threadIdx.x == 0) {
             #pragma unroll
             for (int r = 0; r < ROWS; ++r)
@@ -2464,9 +2625,12 @@ __global__ void q3n_gemv_kernel(
 }
 
 torch::Tensor q3n_gemv_cuda(torch::Tensor qweight, torch::Tensor block_scale,
-                            double global_scale, torch::Tensor x,
-                            int64_t K, int64_t B) {
-    CHECK_CUDA(qweight); CHECK_CUDA(x);
+                            double global_scale, torch::Tensor table,
+                            torch::Tensor x, int64_t K, int64_t B) {
+    CHECK_CUDA(qweight); CHECK_CUDA(x); CHECK_CUDA(table);
+    CHECK_CONTIG(table);
+    TORCH_CHECK(table.numel() == 8 && table.scalar_type() == torch::kFloat,
+                "q3n : table de 8 flottants attendue");
     ACVRAM_DEVICE_GUARD(qweight);
     CHECK_CONTIG(qweight); CHECK_CONTIG(block_scale);
     TORCH_CHECK(K % 8 == 0 && B % 8 == 0 && K % B == 0,
@@ -2487,19 +2651,20 @@ torch::Tensor q3n_gemv_cuda(torch::Tensor qweight, torch::Tensor block_scale,
     const int threads = 128;
     const int nwarps = (threads + 31) / 32;
     dim3 grid((M + ROWS - 1) / ROWS);
-    const size_t shm = ROWS * nwarps * sizeof(float);
+    const size_t shm = (8 + ROWS * nwarps) * sizeof(float);
     if (bf) {
         q3n_gemv_kernel<ROWS, __nv_bfloat16, __nv_bfloat16>
             <<<grid, threads, shm, stream>>>(
             qweight.data_ptr<unsigned char>(),
             block_scale.data_ptr<unsigned char>(), g,
+            table.data_ptr<float>(),
             reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr()),
             reinterpret_cast<__nv_bfloat16 *>(out.data_ptr()),
             M, (int)K, N, (int)B);
     } else {
         q3n_gemv_kernel<ROWS, float, float><<<grid, threads, shm, stream>>>(
             qweight.data_ptr<unsigned char>(),
-            block_scale.data_ptr<unsigned char>(), g,
+            block_scale.data_ptr<unsigned char>(), g, table.data_ptr<float>(),
             xc.data_ptr<float>(), out.data_ptr<float>(), M, (int)K, N, (int)B);
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -2508,7 +2673,114 @@ torch::Tensor q3n_gemv_cuda(torch::Tensor qweight, torch::Tensor block_scale,
     return out.reshape(forme).to(x.dtype());
 }
 
+// ============================================================================
+// SwiGLU fusionne : act(gate) * up en un lancement, sur la sortie empilee.
+//
+// Le chemin dense bf16 lancait deux noyaux elementaires par couche -- le SiLU
+// puis le produit -- soit ~96 lancements par pas la ou llama.cpp n'en a aucun
+// (leur mmvf.cu les fusionne dans la GEMV). Mesure du 9 septembre 2026 sous
+// ncu sur Qwen2.5-Coder-14B : 251 noyaux elementaires par pas chez nous contre
+// 2 chez eux, pour 0,54 ms.
+//
+// L'ARITHMETIQUE EST CELLE DE TORCH, ET C'EST UNE CONTRAINTE, PAS UN DETAIL.
+// torch calcule le SiLU en float et *arrondit en bf16*, puis relit ce bf16
+// pour le produit, qu'il arrondit a nouveau. Calculer d'un trait en float
+// donnerait un resultat plus exact -- et different, donc d'autres jetons. Une
+// optimisation qui change la sortie est un bogue : on reproduit l'arrondi
+// intermediaire tel quel.
+__global__ void swiglu_bf16_kernel(const __nv_bfloat16 *__restrict__ gu,
+                                   __nv_bfloat16 *__restrict__ y,
+                                   int I, long n) {
+    const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const long ligne = i / I, col = i % I;
+    const float g = __bfloat162float(gu[ligne * 2 * I + col]);
+    const float u = __bfloat162float(gu[ligne * 2 * I + I + col]);
+    const float s = g / (1.f + __expf(-g));           // SiLU, comme torch
+    const float sb = __bfloat162float(__float2bfloat16(s));   // arrondi rendu
+    y[i] = __float2bfloat16(sb * u);
+}
+
+// Variante a DEUX entrees separees : meme calcul, mais sans exiger que gate et
+// up soient contigus dans un seul tenseur.
+//
+// swiglu_bf16 n'etait atteignable que par la branche fusionnee, qui exige que
+// gate/up soient empiles. Le nvfp4 ne fusionne pas -- ses echelles d'activation
+// different entre projections -- et payait donc silu PUIS produit, deux noyaux
+// par couche la ou le bf16 fusionne n'en paie qu'un. Mesure sous ncu :
+// 48 `silu_kernel` par pas cote nvfp4, zero cote bf16.
+__global__ void swiglu2_bf16_kernel(const __nv_bfloat16 *__restrict__ g,
+                                    const __nv_bfloat16 *__restrict__ u,
+                                    __nv_bfloat16 *__restrict__ y, long n) {
+    const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float gv = __bfloat162float(g[i]);
+    const float uv = __bfloat162float(u[i]);
+    const float s = gv / (1.f + __expf(-gv));                  // SiLU, comme torch
+    const float sb = __bfloat162float(__float2bfloat16(s));    // arrondi rendu
+    y[i] = __float2bfloat16(sb * uv);
+}
+
+torch::Tensor swiglu2_bf16(torch::Tensor g, torch::Tensor u) {
+    CHECK_CUDA(g); ACVRAM_DEVICE_GUARD(g);
+    TORCH_CHECK(g.scalar_type() == torch::kBFloat16 &&
+                u.scalar_type() == torch::kBFloat16,
+                "swiglu2_bf16 : bf16 attendu");
+    TORCH_CHECK(g.sizes() == u.sizes(), "swiglu2_bf16 : memes formes attendues");
+    auto gc = g.contiguous(), uc = u.contiguous();
+    auto y = torch::empty_like(gc);
+    const long n = y.numel();
+    const int th = 256;
+    swiglu2_bf16_kernel<<<(unsigned)((n + th - 1) / th), th, 0,
+                          at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const __nv_bfloat16 *>(gc.data_ptr()),
+        reinterpret_cast<const __nv_bfloat16 *>(uc.data_ptr()),
+        reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), n);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return y;
+}
+
+
+torch::Tensor swiglu_bf16(torch::Tensor gu) {
+    CHECK_CUDA(gu); ACVRAM_DEVICE_GUARD(gu);
+    TORCH_CHECK(gu.scalar_type() == torch::kBFloat16, "swiglu_bf16 : bf16 attendu");
+    auto c = gu.contiguous();
+    const int deux_i = c.size(-1);
+    TORCH_CHECK(deux_i % 2 == 0, "swiglu_bf16 : derniere dimension paire attendue");
+    const int I = deux_i / 2;
+    auto tailles = c.sizes().vec();
+    tailles.back() = I;
+    auto y = torch::empty(tailles, c.options());
+    const long n = y.numel();
+    const int th = 256;
+    swiglu_bf16_kernel<<<(unsigned)((n + th - 1) / th), th, 0,
+                         at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const __nv_bfloat16 *>(c.data_ptr()),
+        reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), I, n);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return y;
+}
+
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    // Controle positif du harnais : echelle de travail connue d'avance.
+    m.def("paged_attn_tampon_octets",
+          [] { return acvram_pa_tampon_octets; },
+          "octets retenus par les tampons partiels — doit se stabiliser au "
+          "pire cas vu, et non croitre a chaque nouvelle forme");
+    m.def("paged_attn_participants", &paged_attn_participants,
+          "nombre de blocs ayant reellement tourne a l'etape 0 (observe, pas "
+          "reconstruit)", py::arg("remettre_a_zero") = true);
+    m.def("banc_fma", &banc_fma,
+          "K FMA chainees, grille imposee — chiffre le plancher de l'instrument",
+          py::arg("gx"), py::arg("gy"), py::arg("gz"),
+          py::arg("threads"), py::arg("K"));
+    m.def("swiglu2_bf16", &swiglu2_bf16,
+          "SwiGLU sur gate et up separes : SiLU(gate) * up",
+          py::arg("g"), py::arg("u"));
+    m.def("swiglu_bf16", &swiglu_bf16,
+          "SwiGLU fusionne sur une sortie gate/up empilee : SiLU(gate) * up",
+          py::arg("gu"));
     m.def("nvfp4_dequant", &nvfp4_dequant, "NVFP4 -> matrice dense",
           py::arg("qweight"), py::arg("block_scale"), py::arg("global_scale"),
           py::arg("K"), py::arg("dtype"), py::arg("gscale_rows") = py::none(),
@@ -2516,7 +2788,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("q3n_gemv", &q3n_gemv_cuda,
           "Q3N : quantiles 3 bits, dequantification + produit fusionnes",
           py::arg("qweight"), py::arg("block_scale"), py::arg("global_scale"),
-          py::arg("x"), py::arg("K"), py::arg("B"));
+          py::arg("table"), py::arg("x"), py::arg("K"), py::arg("B"));
     m.def("nvfp4_gemv", &nvfp4_gemv, "NVFP4 : dequantification + produit fusionnes",
           py::arg("qweight"), py::arg("block_scale"), py::arg("global_scale"),
           py::arg("x"), py::arg("K"), py::arg("global_scale_rows") = c10::nullopt);
@@ -2553,10 +2825,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("mult") = 1.0);
     m.def("kda_decode", &kda_decode, "KDA : pas de decodage fusionne (une sequence)");
     m.def("mla_decode", &mla_decode, "MLA absorbee : scores + softmax + lecture latente");
-    m.def("banc_fma", &banc_fma,
-          "K FMA chainees, grille imposee — chiffre le plancher de l'instrument",
-          py::arg("gx"), py::arg("gy"), py::arg("gz"),
-          py::arg("threads"), py::arg("K"), py::arg("flottants") = 1);
     m.def("paged_attention", &paged_attention,
           "attention de decodage fusionnee sur cache KV int8 pagine");
 }

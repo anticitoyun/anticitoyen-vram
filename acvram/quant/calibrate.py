@@ -143,10 +143,43 @@ class ChannelScaler:
         if self.hadamard_block:
             x = hadamard_transform(x, block=self.hadamard_block)
         if self.scale is not None:
-            x = x / self.scale.to(x.dtype)
+            x = x / self._au_dtype(x.dtype)
         return x
 
+    def _au_dtype(self, dtype: torch.dtype) -> torch.Tensor:
+        """L'échelle au dtype demandé, convertie UNE FOIS.
+
+        ``self.scale.to(x.dtype)`` s'exécutait à chaque appel de chaque
+        projection. Les échelles sont stockées en fp16 et les activations sont
+        en bf16 : la conversion est réelle, pas un no-op, et elle lance un
+        noyau. Compté sous ncu sur Qwen2.5-Coder-14B en nvfp4 : **337
+        `unrolled_elementwise` par pas — exactement sept projections par couche
+        sur quarante-huit, plus la tête**. Le bf16, qui n'a pas d'échelle, n'en
+        lance aucun.
+
+        Le cache est par dtype et non unique : rien ne garantit qu'un modèle
+        n'exécute qu'en un seul type, et convertir au placement supposerait de
+        connaître le dtype d'exécution au moment du placement — ce que
+        ``to(device)`` ne sait pas.
+
+        Numériquement identique : c'est la même conversion, faite une fois.
+        """
+        import os
+        if os.environ.get("ACVRAM_SCALER_SANS_CACHE") == "1":
+            return self.scale.to(dtype)        # temoin de mesure
+        cache = self.__dict__.get("_cache_dtype")
+        if cache is None:
+            cache = {}
+            object.__setattr__(self, "_cache_dtype", cache)
+        s = cache.get(dtype)
+        if s is None:
+            s = self.scale.to(dtype)
+            cache[dtype] = s
+        return s
+
     def to(self, device, non_blocking: bool = False) -> "ChannelScaler":
+        # Un nouvel objet, donc un cache neuf : une echelle mise en cache pour
+        # cuda:0 ne doit jamais servir sur cuda:1.
         return ChannelScaler(
             self.scale.to(device, non_blocking=non_blocking)
             if self.scale is not None else None,
@@ -154,9 +187,26 @@ class ChannelScaler:
         )
 
     def state_dict(self, prefix: str = "") -> dict[str, torch.Tensor]:
+        """L'échelle part en float32, quel que soit son dtype de calcul.
+
+        Elle était écrite en fp16, dont l'exposant ne couvre que 5 bits : sur
+        Qwen2.5-Coder-14B les échelles vont de 8,9e-4 à 4,0e+2, soit une marge
+        de x164 au plafond mais seulement **x15 au plancher** des dénormaux
+        (6,1e-5). Un modèle dont les échelles seraient quinze fois plus petites
+        y tomberait — et ce ne serait plus une perte de précision mais des
+        valeurs fausses, sans que rien ne le signale.
+
+        Un garde attraperait ce défaut ; le float32 supprime la classe. Le coût
+        est nul des deux côtés : ~4 Mo par modèle sur disque, et zéro à
+        l'exécution puisque l'échelle est convertie une seule fois au
+        chargement, au dtype des activations.
+
+        Les modèles déjà convertis restent en fp16 et se chargent sans
+        changement : le lecteur prend le dtype qu'il trouve.
+        """
         out: dict[str, torch.Tensor] = {}
         if self.scale is not None:
-            out[f"{prefix}act_scale"] = self.scale
+            out[f"{prefix}act_scale"] = self.scale.to(torch.float32)
         return out
 
 
@@ -223,8 +273,19 @@ def search_channel_scales(
     identity = torch.ones_like(best_scale)
     if torch.allclose(best_scale, identity, atol=1e-3):
         best_scale = None
+    # L'échelle reste en float32. Elle était rabattue en fp16 ici, dont
+    # l'exposant ne couvre que 5 bits : sous 6,1e-5 les valeurs deviennent
+    # dénormales, sous ~6e-8 elles deviennent NULLES. Sur Qwen2.5-Coder-14B la
+    # plus petite vaut 8,9e-4, soit une marge de x15 seulement — un modèle aux
+    # échelles quinze fois plus petites aurait été écrêté en silence, et une
+    # échelle nulle ne dégrade pas la sortie, elle la détruit.
+    #
+    # Écrire du float32 au manifeste ne suffisait pas : la valeur était déjà
+    # perdue ICI, à la recherche. Le coût est un vecteur de quelques milliers
+    # de valeurs par tenseur, et zéro à l'exécution depuis que l'échelle est
+    # convertie une seule fois au chargement.
     return ChannelScaler(
-        best_scale.to(torch.float16) if best_scale is not None else None
+        best_scale.to(torch.float32) if best_scale is not None else None
     ), best_err
 
 
@@ -236,6 +297,7 @@ def quantize_with_calibration(
     use_hadamard: bool = False,
     use_awq: bool = True,
     n_grid: int = 20,
+    table=None,
 ) -> tuple[Any, ChannelScaler, dict]:
     """Chaîne complète par couche : tourner, mettre à l'échelle, quantifier.
 
@@ -264,7 +326,8 @@ def quantize_with_calibration(
 
     w_eff = w * scaler.scale.to(torch.float32).unsqueeze(0) \
         if scaler.scale is not None else w
-    qt = formats.quantize(w_eff, fmt, group_size=group_size)
+    qt = formats.quantize(w_eff, fmt, group_size=group_size,
+                          **({"table": table} if fmt == "q3n" else {}))
 
     deq = formats.dequantize(qt, torch.float32)
     if scaler.scale is not None:

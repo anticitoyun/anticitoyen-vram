@@ -21,6 +21,7 @@ dans ~/.config/ia-secrets.env et dans api_tokens.yml de TabbyAPI.
 
 Reprenable : les couples déjà présents dans le TSV de sortie sont sautés.
 """
+from collections import namedtuple
 import argparse, hashlib, json, os, re, statistics, subprocess, sys, threading, time, tomllib, urllib.request
 
 KIMI = os.path.expanduser("~/.kimi-code")
@@ -46,7 +47,14 @@ MAX_TOKENS = 200
 # a temperature de repos. On publie le meilleur des trois, ce qui l'ecarte de
 # fait ; sa valeur reste comptee dans la dispersion, et c'est voulu : elle dit
 # aussi ce que coute le demarrage a froid.
+# Nombre de passages par couple. Trois suffit pour un ecart-type utilisable ;
+# CINQ est exige par la serie determinisme (docs/SERIE-DETERMINISME.md) parce
+# qu'avec trois, un premier passage froid et deux passages proches donnent la
+# meme image qu'une bimodalite, et on ne les distingue pas. Paramétrable par
+# `--passages` : on ne reduit jamais la rigueur par modele, on reduit le nombre
+# de modeles.
 MESURES = 3
+FORCER_EXIL = False
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from energie import Energie, repos            # noqa: E402
@@ -231,9 +239,164 @@ def attendre(moteur, secondes):
     raise RuntimeError(f"{moteur} n'a pas démarré en {secondes} s")
 
 
+def memoire_libre():
+    """Memoire libre par carte, en Mio, dans l'ordre des index physiques."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10).stdout
+        return [int(l.strip()) for l in out.splitlines() if l.strip()]
+    except Exception:
+        return []
+
+
+def _meminfo(champ):
+    try:
+        for l in open("/proc/meminfo", encoding="utf-8"):
+            if l.startswith(champ + ":"):
+                return int(l.split()[1]) // 1024
+    except OSError:
+        pass
+    return 0
+
+
+def ram_hote_libre_mio():
+    """RAM hote reellement disponible (MemAvailable), en Mio."""
+    return _meminfo("MemAvailable")
+
+
+def ram_verrouillee_mio():
+    """Memoire que le noyau ne peut ni evincer ni swapper, en Mio.
+
+    `Unevictable` et non `Mlocked` : releve d'poste1 le 8/09/2026 sur cette
+    machine, au repos, sans rien charger — Unevictable 960 664 kio contre
+    Mlocked 132. `Mlocked` ne compte que le mlock() classique ; la memoire
+    epinglee par le pilote CUDA ne passe pas par la. Diagnostiquer avec lui
+    ferait lire « rien n'est verrouille » sur des dizaines de gigaoctets qui
+    le sont.
+    """
+    return _meminfo("Unevictable")
+
+
+def ram_totale_mio():
+    return _meminfo("MemTotal")
+
+
+def poids_mio(dossier):
+    """Taille des poids sur disque, en Mio. 0 si on ne sait pas."""
+    total = 0
+    try:
+        for rep, _, fichiers in os.walk(dossier):
+            for f in fichiers:
+                if f.endswith((".safetensors", ".gguf", ".bin")):
+                    try:
+                        total += os.path.getsize(os.path.join(rep, f))
+                    except OSError:
+                        pass
+    except OSError:
+        return 0
+    return total // (1024 * 1024)
+
+
+def attendre_memoire(secondes=90, marge=200):
+    """Attend que la memoire des cartes cesse de bouger avant de charger.
+
+    Mesure du 8 septembre 2026 : le MEME modele, charge deux fois de suite
+    sous le meme alias, a rendu 15,8 puis 152,2 t/s — facteur 9,6. Le journal
+    du serveur donne la cause : au premier chargement le plan exilait 5 puis 6
+    MLP de plus en RAM hote (« poids reels 8.7 Gio pour 11.1 Gio »), au second
+    aucun. Le serveur precedent n'avait pas fini de rendre sa memoire quand le
+    suivant a calcule son plan. Le port etait ferme, la memoire non.
+
+    Sans cette attente, le placement — donc le debit — est tire au sort a
+    chaque chargement, et aucune comparaison entre modeles ne veut rien dire.
+    """
+    precedent = None
+    t0 = time.time()
+    while time.time() - t0 < secondes:
+        libre = memoire_libre()
+        if not libre:
+            return []
+        if precedent and all(abs(a - b) <= marge for a, b in zip(libre, precedent)):
+            return libre
+        precedent = libre
+        time.sleep(3)
+    return memoire_libre()
+
+
+class MemoireInsuffisante(RuntimeError):
+    pass
+
+
+def verifier_place(dossier, libre_vram, ram_libre=None, reserve_mio=8192,
+                   part_tampons=0.20, verrouille_mio=None, total_mio=None,
+                   reserve_systeme_mio=16384):
+    """Refuse de charger ce qui ne tiendrait pas en RAM hote.
+
+    Attendre que la memoire cesse de bouger ne suffit pas : le 8 septembre
+    2026 la garde a rendu la main sur 1951 Mio de VRAM libre — stables — et
+    un modele de 44 Gio a ete charge quand meme. Ce qui ne tient pas dans la
+    VRAM part en RAM hote ; la RAM a sature et la machine a redemarre,
+    emportant le worktree et les mesures en cours. Attendre la STABILITE
+    n'est pas verifier la DISPONIBILITE.
+
+    Ce qui est mesure : le poids sur disque, la VRAM libre, MemAvailable au
+    moment du chargement. Ce qui ne l'est PAS : les deux constantes.
+    `reserve_mio` (8 Gio pour le reste du systeme) et `part_tampons` (20 % du
+    poids pour le cache KV, les tampons et les copies de chargement) sont des
+    choix d'ingenierie, pas des mesures. Ce qui les etablirait : relever le
+    MemAvailable MINIMUM pendant un chargement dont l'exil est connu, sur
+    trois tailles de modele — la difference avec l'exil donne les tampons, et
+    le plancher tolerable donne la reserve. Tant que cette mesure n'est pas
+    faite, ces deux chiffres sont prudents et arbitraires, et le refus qu'ils
+    provoquent doit pouvoir etre leve : c'est le role de --forcer-exil.
+    """
+    poids = poids_mio(dossier)
+    if not poids or not libre_vram:
+        return
+    exil = poids - sum(libre_vram)
+    if exil <= 0:
+        return
+    ram = ram_hote_libre_mio() if ram_libre is None else ram_libre
+    besoin = exil + int(part_tampons * poids) + reserve_mio
+    if ram and besoin > ram:
+        raise MemoireInsuffisante(
+            f"{poids} Mio de poids, {sum(libre_vram)} Mio de VRAM libre : "
+            f"{exil} Mio partiraient en RAM hôte, soit {besoin} Mio avec les "
+            f"tampons et la réserve, pour {ram} Mio disponibles. "
+            f"Chargement refusé (--forcer-exil pour passer outre).")
+
+    # Second test, et il ne fait PAS double emploi avec le premier. Les poids
+    # exiles vivent en memoire EPINGLEE : le noyau ne peut ni les evincer ni
+    # les swapper, donc il chasse tout le reste — le 8/09/2026, le bureau et
+    # le navigateur sont partis en swap et la machine est devenue inutilisable
+    # alors que `free` annoncait 83 Go disponibles.
+    #
+    # `MemAvailable` repond a « puis-je prendre cela maintenant » ; il ne dit
+    # rien de ce qui restera au systeme APRES. Un chargement peut passer le
+    # premier test et porter le total verrouille a un niveau ou le reste de la
+    # machine n'a plus de quoi vivre. On borne donc aussi le verrouillage
+    # total, rapporte a la RAM du systeme et non a ce qui est libre.
+    verrouille = ram_verrouillee_mio() if verrouille_mio is None else verrouille_mio
+    total = ram_totale_mio() if total_mio is None else total_mio
+    if total and verrouille + exil > total - reserve_systeme_mio:
+        raise MemoireInsuffisante(
+            f"{verrouille} Mio déjà verrouillés + {exil} Mio à épingler = "
+            f"{verrouille + exil} Mio sur {total} Mio de RAM totale, il ne "
+            f"resterait pas {reserve_systeme_mio} Mio au reste du système. "
+            f"Chargement refusé (--forcer-exil pour passer outre).")
+
+
 def demarrer(moteur, dossier, ctx):
     """Lance le moteur et rend le temps de chargement, lanceur compris (les
     lanceurs attendent eux-mêmes le port avant de rendre la main)."""
+    libre = attendre_memoire()
+    if libre:
+        log("           mémoire libre avant chargement : "
+            + " / ".join(f"{m} Mio" for m in libre)
+            + f" ; RAM hôte {ram_hote_libre_mio()} Mio")
+    if not FORCER_EXIL:
+        verifier_place(dossier, libre)
     t0 = time.time()
     _demarrer(moteur, dossier, ctx)
     return time.time() - t0
@@ -245,7 +408,10 @@ def _demarrer(moteur, dossier, ctx):
     if moteur == "acvram":
         arreter("acvram")
         env["CTX"] = str(ctx)
-        subprocess.run([os.path.join(BIN, "acvram-serveur"), dossier], env=env,
+        # ET en argument : une variable d'environnement peut etre ecrasee par
+        # le lanceur, un argument non. Le 9/09/2026 `CTX="${2:-}"` ecrasait
+        # l'environnement par un argument absent et retombait sur 32768.
+        subprocess.run([os.path.join(BIN, "acvram-serveur"), dossier, str(ctx)], env=env,
                        capture_output=True, text=True, timeout=900)
         attendre("acvram", 900); return
     if moteur == "llamacpp":
@@ -282,6 +448,58 @@ def _demarrer(moteur, dossier, ctx):
 # tous corriges dans outils/energie.py : le cout de la mesure, la moyenne qui
 # n'est pas une energie, et une carte lue sur deux alors qu'un modele exile
 # travaille sur les deux. Mesure du 8 septembre 2026 a l'appui.
+
+
+def binaire_servant(moteur) -> str:
+    """Le binaire REELLEMENT en train de servir, lu dans /proc.
+
+    Le lanceur dit ce qu'il croit lancer ; `/proc/<pid>/exe` dit ce qui tourne.
+    Le 9/09/2026 la machine portait DEUX llama.cpp — celui du depot et celui
+    empaquete par Jan — et le banc lancait le second pendant qu'on verifiait
+    les options du premier. Un comparatif qui ne dit pas a quel concurrent il
+    se compare ne compare rien.
+    """
+    pid = pid_port(PORTS[moteur])
+    if not pid:
+        return "?"
+    try:
+        return os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        return "?"
+
+
+_CLES_CTX = ("--max-model-len", "--ctx-size", "--ctx")
+
+
+def ctx_servant(moteur) -> str:
+    """Le contexte REELLEMENT demande au serveur, lu dans /proc/<pid>/cmdline.
+
+    Le banc dit ce qu'il veut ; le lanceur le transmet ou non. Le 9/09/2026,
+    `acvram-serveur` ecrasait la variable d'environnement CTX par un argument
+    absent (`CTX="${2:-}"`) et retombait sur son defaut de 32768 : le banc
+    croyait 8192, le serveur tournait a 32768, et la colonne `ctx` publiait
+    l'intention du banc. Sur un modele de 27,5 Gio, cela suffit a forcer un
+    exil — puis a le mesurer comme un defaut d'architecture.
+
+    La garde qui compare les contextes des COUPLES ne pouvait pas l'attraper :
+    elle compare ce que le banc demande, tous deux a 8192. Il faut demander au
+    processus, pas a soi-meme.
+    """
+    pid = pid_port(PORTS[moteur])
+    if not pid:
+        return "?"
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            args = fh.read().decode(errors="replace").split("\x00")
+    except OSError:
+        return "?"
+    for i, arg in enumerate(args):
+        if arg in _CLES_CTX and i + 1 < len(args):
+            return args[i + 1]
+        for cle in _CLES_CTX:
+            if arg.startswith(cle + "="):
+                return arg.split("=", 1)[1]
+    return "?"
 
 
 def modele_servi(moteur):
@@ -354,14 +572,67 @@ def generer(moteur):
     if premier is None:
         raise RuntimeError("aucun jeton reçu")
     morceaux = n
+    # Le banc a compté les morceaux du flux ; le moteur, lui, annonce SON
+    # nombre de jetons. On garde le sien pour le débit — c'est la grandeur que
+    # l'utilisateur reçoit — mais on garde AUSSI le nôtre, parce que le débit
+    # comparé entre deux moteurs suppose qu'ils comptent pareil, et rien ne le
+    # garantit : jeton de fin, jetons spéciaux, tokenizers différents sur le
+    # même texte. Publier les deux, c'est établir cette égalité au lieu de
+    # l'espérer.
+    #
+    # Réserve d'interprétation : `morceaux` compte les ÉVÉNEMENTS du flux, pas
+    # les jetons. Un moteur qui groupe plusieurs jetons par événement creuse
+    # l'écart sans qu'aucune tokenisation ne diffère. Un écart non nul
+    # appelle donc un examen, il ne prouve rien à lui seul.
+    source = "flux"
     if usage and usage.get("completion_tokens"):
         n = usage["completion_tokens"]
+        source = "moteur"
     if morceaux < 2 or dernier - premier < 1e-3:
-        # tout est arrivé d'un bloc : pas de flux jeton par jeton, le débit
-        # ne peut se mesurer que sur la durée totale, premier jeton compris
+        # Le débit se mesure entre le premier et le dernier jeton ; sans flux
+        # jeton par jeton, cette durée n'existe pas. On REFUSE la mesure au
+        # lieu de la recalculer sur la durée totale : ce serait une seconde
+        # définition du débit dans le même tableau, sans marque dans la ligne.
         raise RuntimeError(f"pas de flux jeton par jeton ({morceaux} morceau(x) "
                            f"pour {n} jetons)")
-    return n, premier - t0, dernier - premier, w, "".join(texte)
+    return n, premier - t0, dernier - premier, w, "".join(texte), morceaux, source
+
+
+# Un passage nomme, et non un tuple positionnel. Le 9/09/2026, ajouter deux
+# colonnes a `passages.append` a casse `tps, ttft, e, n, txt, dt = ordonnes[...]`
+# — « too many values to unpack » — et la campagne a rendu deux lignes a
+# `t_s 0.0`. Des lignes qui existent et ne valent rien : pire qu'un fichier
+# vide, un lecteur presse y voit une campagne faite. Avec des champs nommes,
+# ajouter une colonne ne peut plus casser une lecture.
+Passage = namedtuple("Passage",
+                     "tps ttft energie jetons texte duree morceaux source")
+
+
+def _temperature() -> int:
+    """Temperature de la carte mesuree, pour prouver le palier au lieu de le
+    supposer. Sans elle, « les deux moteurs etaient chauds » est une intention."""
+    try:
+        o = subprocess.run(["nvidia-smi", "-i", os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
+                            "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=10)
+        return int(o.stdout.strip().splitlines()[0])
+    except Exception:                            # noqa: BLE001
+        return -1
+
+
+def _dispersion_rel(v: list[float]) -> float:
+    """Etendue rapportee a la mediane, en %, sur les FLOTTANTS.
+
+    Calculer une dispersion sur la chaine publiee mesure le pas d'arrondi et
+    non la grandeur : sur 35 t/s a une decimale, ce pas vaut 0,286 %, et deux
+    sigma tires de la chaine (0,164 % et 0,000 %) ne decrivaient que
+    l'affichage.
+    """
+    v = [x for x in v if x]
+    if len(v) < 2:
+        return 0.0
+    med = sorted(v)[len(v) // 2]
+    return (max(v) - min(v)) / med * 100 if med else 0.0
 
 
 def mesurer(moteur):
@@ -373,12 +644,45 @@ def mesurer(moteur):
     elle dérive, et la dérive se retrouve attribuée au moteur mesuré — c'est
     ce qui avait fait croire à une décroissance de coût le 7 septembre 2026.
     """
+    # ---- CHAUFFE : amener la carte a son palier thermique AVANT de mesurer
+    #
+    # Mesure du 9/09 sur 45 passages identiques : la puissance derive de
+    # 308,61 W (49 degC) a un palier de 317,39 W (54 degC), soit **8,78 W**.
+    # Ce n'est ni lineaire ni polynomial — c'est une chauffe exponentielle
+    # amortie, atteinte vers le passage 30, environ trois minutes.
+    #
+    # POURQUOI CELA COMPTE PLUS QU'UNE CORRECTION DE SECOND ORDRE : une
+    # campagne mesure un moteur PUIS l'autre. Le premier demarre froid, le
+    # second est deja chaud. Nos campagnes attribuent **14 W** d'ecart aux
+    # moteurs ; jusqu'a **8 W** peuvent etre thermiques. Plus de la moitie.
+    #
+    # Le contrebalancement `A B B A` avait ete envisage : il annule un biais
+    # LINEAIRE, pas une exponentielle amortie, et il coute deux chargements de
+    # plus. La chauffe traite la CAUSE au lieu de compenser l'effet.
+    #
+    # Au palier, l'etendue tombe a 0,45 W sur douze passages : un ecart de 1 W
+    # entre moteurs deviendrait mesurable.
+    #
+    # RESERVE : ce palier vaut pour CE modele, CE debit, CETTE temperature
+    # ambiante. Un modele plus gourmand chauffera plus haut et plus longtemps.
+    chauffe = float(os.environ.get("ACVRAM_CHAUFFE_S", "180"))
+    t_avant = _temperature()
+    if chauffe > 0:
+        log(f"           chauffe {chauffe:.0f} s (carte a {t_avant} degC)")
+        fin = time.time() + chauffe
+        while time.time() < fin:
+            try:
+                generer(moteur)
+            except Exception:                    # noqa: BLE001
+                break
+        log(f"           chauffe finie : {_temperature()} degC")
+
     passages = []
     for _ in range(MESURES):
-        n, ttft, dt, e, txt = generer(moteur)
+        n, ttft, dt, e, txt, morceaux, source = generer(moteur)
         tps = (n - 1) / dt if n > 1 else 0.0
-        passages.append((tps, ttft, e, n, txt, dt))
-    debits = [p[0] for p in passages]
+        passages.append(Passage(tps, ttft, e, n, txt, dt, morceaux, source))
+    debits = [p.tps for p in passages]
 
     # Le passage PUBLIE est celui de debit median, plus celui de debit
     # maximal. « Le meilleur des trois » est un estimateur biaise : il
@@ -386,8 +690,38 @@ def mesurer(moteur):
     # sur un couple a 21,3 % de dispersion contre 5,2 en face, le meilleur
     # donnait la victoire au plus instable. Le maximum reste publie a part,
     # il n'est simplement plus ce qu'on compare.
-    ordonnes = sorted(passages, key=lambda x: x[0])
-    tps, ttft, e, n, txt, dt = ordonnes[len(ordonnes) // 2]
+    # UNE SEULE definition du regime, pour TOUTES les colonnes publiees.
+    #
+    # Avant le 8/09 le banc publiait « le meilleur des trois », ce qui ecartait
+    # le passage froid DE FAIT. Le passage au median a supprime cet ecartement
+    # sans que personne ne le remarque — et toute colonne suivant le passage
+    # median s'est mise a pouvoir publier la passe froide.
+    #
+    # Le 9/09, le cas s'est produit : llama.cpp a publie TTFT 125 ms
+    # (passages 125,45,33,33,33), donc le passage median EN DEBIT etait le
+    # premier. Les watts, les joules et les jetons/kJ de cette ligne venaient
+    # donc eux aussi de la passe froide. Une conclusion a ete inversee sur le
+    # TTFT (« +41,6 % en notre faveur » au lieu de -121 %), et l'energie —
+    # l'objectif du projet — etait touchee par le meme defaut sans qu'on le
+    # voie, parce que les DEUX bras du comparatif le subissaient egalement.
+    #
+    # La classe du defaut est « quelle passe publie-t-on ». On la traite en
+    # une fois plutot qu'en corrigeant les colonnes une a une.
+    regime = passages[1:] or passages
+    ordonnes = sorted(regime, key=lambda x: x.tps)
+    median = ordonnes[len(ordonnes) // 2]
+    tps, e, n, txt, dt = (median.tps, median.energie,
+                          median.jetons, median.texte, median.duree)
+    # Le TTFT a sa propre mediane : le passage le plus representatif en debit
+    # ne l'est pas forcement en latence de premier jeton.
+    _ttfts = sorted(p.ttft for p in regime)
+    ttft = _ttfts[len(_ttfts) // 2]
+    # Le TTFT du passage FROID est publie a part : il n'est pas du bruit, c'est
+    # ce que paie la premiere requete d'un utilisateur. Deux chiffres vrais
+    # dans deux conditions, comme le x2,7 des graphes et sa borne sur un dense.
+    ttft_froid = passages[0].ttft
+    # `debits` couvre TOUS les passages, froid compris : la dispersion reste
+    # conservatrice, et c'est voulu. Le median, lui, ne porte que le regime.
     etendue = (min(debits), max(debits))
 
     # Empreinte du texte de CHAQUE passage. A temperature zero, le meme
@@ -396,8 +730,17 @@ def mesurer(moteur):
     # plus important que le debit qu'on etait venu mesurer. Si elles sont
     # identiques, une dispersion de debit ne peut pas venir du texte, et il
     # faut la chercher ailleurs (passage froid, cache, ordonnancement).
-    empreintes = [hashlib.sha256(p[4].encode()).hexdigest()[:8] for p in passages]
-    textes_identiques = len(set(empreintes)) == 1
+    empreintes = [hashlib.sha256(p.texte.encode()).hexdigest()[:8] for p in passages]
+    # Le controle doit porter sur les MEMES donnees que la mesure qu'il garde.
+    # Le debit publie ecarte le premier passage ; le compter ici invalidait la
+    # campagne sur une passe dont personne ne se sert. Le 9/09, les deux
+    # moteurs ont diverge au premier passage et a lui seul (acvram
+    # e0e0c3e9 puis 036bb29d x4 ; llamacpp b1171ed9 puis 7dc6fe3e x4) — la
+    # selection d'algorithme cuBLAS au premier appel suffit a faire basculer
+    # un argmax serre. Les empreintes restent TOUTES publiees.
+    # Meme perimetre que le median publie : `regime`, pas un decoupage a part.
+    textes_identiques = len({hashlib.sha256(p.texte.encode()).hexdigest()[:8]
+                             for p in regime}) == 1
     watts = e.moyenne
     base = repos(secondes=min(max(dt, 5.0), 30.0))
     joules = e.joules
@@ -426,9 +769,69 @@ def mesurer(moteur):
         "horloge_max": r["horloge_max"], "temp_max": r["temp_max"],
         "bridages": r["bridages"], "invalidations": r["invalidations"],
         "dispersion_pct": round(dispersion, 1),
+        # Dispersion des WATTS, calculee sur les flottants comme celle du
+        # debit — arrondie seulement a l'affichage, et a DEUX decimales.
+        # C'est elle qui decide si un ecart d'energie est resoluble : le debit
+        # ne borne la dispersion de `jkj` que PAR LE BAS (jkj = tps / watts),
+        # donc un debit parfaitement stable est compatible avec une puissance
+        # tres bruyante. Sans cette colonne la question reste indecidable.
+        "temp_avant": t_avant, "temp_apres": _temperature(),
+        "dispersion_W_pct": round(_dispersion_rel([
+            p.energie.get("watts", 0.0) if isinstance(p.energie, dict) else 0.0
+            for p in regime]), 2),
         "t_s_min": round(etendue[0], 1), "t_s_max": round(etendue[1], 1),
         "empreintes": ",".join(empreintes),
         "textes_identiques": "oui" if textes_identiques else "NON",
+        # Les debits DANS L'ORDRE d'execution. min/max disent qu'un passage
+        # s'ecarte, pas LEQUEL : un premier passage froid et une bimodalite
+        # rendent le meme min, le meme max et la meme dispersion. Sans
+        # l'ordre, la table de decision de docs/SERIE-DETERMINISME.md ne peut
+        # pas etre appliquee (mesure du 8 septembre 2026).
+        "t_s_passages": ",".join(f"{d:.1f}" for d in debits),
+        # Les watts et l'energie de CHAQUE passage, a deux decimales.
+        #
+        # Au singulier, une colonne ne peut pas etre mise a l'epreuve : le banc
+        # ne publiait qu'un `W`, celui du passage median, et la question « le
+        # -4,7 % d'energie est-il resoluble ? » etait donc indecidable sur les
+        # donnees publiees.
+        #
+        # LA PRECISION EST LA RAISON D'ETRE DE CES COLONNES. A l'entier, un
+        # jkj de 128 est quantifie a 0,78 % — un tiers du seuil de 2,4 %
+        # qu'elles existent pour eprouver. Elles naitraient incapables de
+        # repondre a la question qui les motive. Meme piege que `t_s_passages`
+        # a une decimale : sur 35 t/s, le pas d'arrondi vaut 0,286 %, et deux
+        # sigma calcules dessus (0,164 % et 0,000 %) ne mesuraient que
+        # l'affichage.
+        "W_passages": ",".join(f"{p.energie.get('watts', 0):.2f}"
+                               if isinstance(p.energie, dict) else "0.00"
+                               for p in regime),
+        "jkj_passages": ",".join(
+            f"{(p.jetons / (p.energie.get('J', 0) or 1) * 1000):.2f}"
+            if isinstance(p.energie, dict) and p.energie.get("J") else "0.00"
+            for p in regime),
+        # Le temps au premier jeton DE CHAQUE passage. Le debit dit que le
+        # premier passage coute ; le TTFT dit ou il coute. Si le premier TTFT
+        # est seul eleve, le prix est paye avant la generation — lecture des
+        # caches, allocation de l'arene, initialisation du contexte — et un
+        # prechargement le supprimerait au lieu de le subir. Releve du
+        # 8 septembre 2026 : ni ~/.nv/ComputeCache ni ~/.triton/cache n'ont
+        # ete ecrits pendant les series, donc ce n'est PAS de la compilation.
+        "ttft_passages": ",".join(f"{p.ttft * 1000:.0f}" for p in passages),
+        # Le TTFT de la premiere requete, publie A COTE du regime : les deux
+        # sont vrais, dans deux conditions. Ne publier que le regime commet
+        # l'erreur symetrique de celle qu'on vient de reparer.
+        "ttft_froid_ms": round(ttft_froid * 1000),
+        # Les deux comptages, pour que « jetons par seconde » veuille dire la
+        # meme chose d'un moteur a l'autre.
+        "jetons_moteur": n,
+        "jetons_flux": ",".join(str(p.morceaux) for p in passages),
+        # D'où vient le nombre publié. Un moteur qui n'annonce pas d'`usage`
+        # laisse le banc compter, et alors « jetons_moteur » porterait un nom
+        # menteur : c'est le nôtre. Deux moteurs de provenance différente dans
+        # le même tableau ne comparent pas la même grandeur.
+        "jetons_source": passages[0].source,
+        "binaire": binaire_servant(moteur),
+        "ctx_servi": ctx_servant(moteur),
     }
     # Un aperçu du texte à côté du débit : 481 t/s de « de de de » sur quatre
     # jetons se lisaient comme un record tant qu'on ne voyait pas le texte.
@@ -440,14 +843,26 @@ def mesurer(moteur):
 # boucle
 # --------------------------------------------------------------------------
 def main():
+    global MESURES
     ap = argparse.ArgumentParser()
     ap.add_argument("--moteurs", default="acvram,llamacpp,vllm,tabby")
     ap.add_argument("--modeles", default="", help="motif (regex) sur le nom du modèle")
     ap.add_argument("--ctx", type=int, default=8192)
     ap.add_argument("--tous", action="store_true", help="aussi les modèles servis par un seul moteur")
     ap.add_argument("--sortie", default=time.strftime("comparatif-%Y%m%d.tsv"))
+    ap.add_argument("--passages", type=int, default=MESURES,
+                    help="passages par couple (3 par defaut ; 5 pour la serie "
+                         "determinisme, qui distingue un passage froid d'une "
+                         "bimodalite)")
+    ap.add_argument("--forcer-exil", action="store_true",
+                    help="charge meme si les poids ne tiennent pas en RAM hote "
+                         "(le 8 septembre 2026, ce cas a fait redemarrer la "
+                         "machine et perdu les mesures en cours)")
     ap.add_argument("--simuler", action="store_true")
     a = ap.parse_args()
+    MESURES = a.passages
+    global FORCER_EXIL
+    FORCER_EXIL = a.forcer_exil
     moteurs = a.moteurs.split(",")
 
     table = parc()
@@ -464,19 +879,56 @@ def main():
     if a.simuler:
         for nom, m, alias, d, ctx in couples:
             print(f"  {nom[:48]:48s} {m:9s} {alias[:34]:34s} ctx {ctx}")
-        return
+
+    # Le contexte effectif est `min(ctx du parc, --ctx)` : un moteur dont le
+    # modele est converti a 4096 sera plafonne la, pendant que l'autre reste a
+    # 8192. La colonne `ctx` le publie depuis toujours, mais publier n'est pas
+    # avertir — et deux debits pris a des contextes differents ne se comparent
+    # pas. 9/09/2026 : le cas a failli passer sur Qwen2.5-Coder-14B.
+    par_modele = {}
+    for nom, m, _alias, _d, ctx in couples:
+        par_modele.setdefault(nom, {})[m] = ctx
+    for nom, ctxs in sorted(par_modele.items()):
+        if len(set(ctxs.values())) > 1:
+            log(f"  ATTENTION {nom[:40]} : contextes differents selon le "
+                f"moteur ({', '.join(f'{m}={c}' for m, c in sorted(ctxs.items()))})"
+                f" — les debits ne sont PAS comparables")
+            # sys.exit et non return : un appelant doit pouvoir distinguer
+            # « rien a mesurer » d'un refus. Un return silencieux rendait le
+            # code 0 avec un TSV vide — un succes qui ne mesure rien.
+            sys.exit(2)
 
     faits = set()
+    reussies = echouees = invalides = 0
     if os.path.exists(a.sortie):
+        entete = None
         for l in open(a.sortie):
             c = l.rstrip("\n").split("\t")
-            if len(c) >= 2 and not l.startswith("modele\t"):
-                faits.add((c[0], c[1]))
+            if l.startswith("modele\t"):
+                entete = c
+                continue
+            if len(c) < 2:
+                continue
+            # Une reprise ne doit sauter que ce qui a ABOUTI. Une ligne en
+            # erreur ou invalidee etait comptee comme faite : la mesure ne
+            # repartait jamais, et le TSV gardait sa ligne sans valeur.
+            def col(nom):
+                if not entete or nom not in entete:
+                    return ""
+                i = entete.index(nom)
+                return c[i] if i < len(c) else ""
+            if col("etat") != "ok":
+                continue
+            if col("invalidations") not in ("", "aucune", "?"):
+                continue
+            faits.add((c[0], c[1]))
     else:
         with open(a.sortie, "w") as f:
             f.write("modele\tmoteur\talias\tctx\tt_s\tttft_ms\tW\tj_kJ\tjetons\tchargement_s\tetat\tapercu\t"
                     "J\tJ_net\tW_repos\tj_kJ_net\tplafond_W\thorloge_min\thorloge_max\ttemp_max\t"
-                    "bridages\tdispersion_pct\tt_s_min\tt_s_max\tempreintes\ttextes_identiques\t"
+                    "W_passages\tjkj_passages\tdispersion_W_pct\ttemp_avant\ttemp_apres\tttft_froid_ms\tbridages\tdispersion_pct\tt_s_min\tt_s_max\tt_s_passages\tttft_passages\t"
+                    "jetons_moteur\tjetons_flux\tjetons_source\tbinaire\tctx_servi\t"
+                    "empreintes\ttextes_identiques\t"
                     "invalidations\n")
 
     # par moteur, pour ne pas relancer un serveur lourd à chaque modèle
@@ -499,6 +951,16 @@ def main():
             except Exception as exc:                       # noqa: BLE001
                 etat = f"erreur: {str(exc)[:120]}"
                 log(f"           ÉCHEC {etat}")
+            if etat.startswith("erreur"):
+                echouees += 1
+            elif energie.get("invalidations", "aucune") != "aucune":
+                # « valide » comptait « n'a pas leve d'exception ». Une mesure
+                # invalidee par le bridage etait annoncee valide, et la garde
+                # reussies==0 ne pouvait pas la voir : elle protegeait du cas
+                # absent, pas du cas faux.
+                invalides += 1
+            else:
+                reussies += 1
             with open(a.sortie, "a") as f:
                 def v(cle, defaut=""):
                     return energie.get(cle, defaut)
@@ -506,11 +968,29 @@ def main():
                         f"{jkj:.0f}\t{n}\t{charge:.0f}\t{etat}\t{apercu}\t"
                         f"{v('J', 0)}\t{v('J_net', 0)}\t{v('W_repos', 0)}\t{v('jkj_net', 0)}\t"
                         f"{v('plafond_W', 0)}\t{v('horloge_min', -1)}\t{v('horloge_max', -1)}\t"
-                        f"{v('temp_max', -1)}\t{v('bridages', '?')}\t{v('dispersion_pct', 0)}\t"
-                        f"{v('t_s_min', 0)}\t{v('t_s_max', 0)}\t{v('empreintes', '?')}\t"
+                        f"{v('temp_max', -1)}\t{v('W_passages', '?')}\t"
+                        f"{v('jkj_passages', '?')}\t{v('dispersion_W_pct', -1)}\t"
+                        f"{v('temp_avant', -1)}\t{v('temp_apres', -1)}\t"
+                        f"{v('ttft_froid_ms', -1)}\t"
+                        f"{v('bridages', '?')}\t{v('dispersion_pct', 0)}\t"
+                        f"{v('t_s_min', 0)}\t{v('t_s_max', 0)}\t{v('t_s_passages', '?')}\t"
+                        f"{v('ttft_passages', '?')}\t"
+                        f"{v('jetons_moteur', '?')}\t{v('jetons_flux', '?')}\t"
+                        f"{v('jetons_source', '?')}\t{v('binaire', '?')}\t{v('ctx_servi', '?')}\t"
+                        f"{v('empreintes', '?')}\t"
                         f"{v('textes_identiques', '?')}\t{v('invalidations', '?')}\n")
         arreter(m)
-    log("TERMINÉ")
+    log(f"TERMINÉ — {reussies} mesure(s) valide(s), "
+        f"{invalides} invalidée(s), {echouees} échec(s)")
+    # Trois campagnes de suite ont fini en code 0 sans une seule mesure, le
+    # 9/09/2026 : garde inconditionnelle, TSV vide, puis lignes a t_s 0.0. Le
+    # code de sortie ne portait aucune information et il a cesse d'etre lu.
+    # Une campagne qui ne mesure rien doit echouer, sinon un enchainement la
+    # prend pour un succes — et des lignes qui existent sans rien valoir sont
+    # pires qu'un fichier vide.
+    if reussies == 0:
+        log("  AUCUNE mesure valide : la campagne n'a rien produit")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

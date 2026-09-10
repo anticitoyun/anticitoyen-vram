@@ -29,7 +29,7 @@ import torch
 from ..memory.kvcache import BLOCK_SIZE, BlockAllocator
 from .loader import LoadedModel
 from .model import ForwardBatch
-from .sampler import SamplingParams, sample
+from .sampler import SamplingParams, besoin_historique, sample
 from .speculative import Proposal, verify_proposal
 
 __all__ = ["Sequence", "GenerationOutput", "Engine", "EngineStats"]
@@ -112,6 +112,16 @@ class EngineStats:
             "decode_tokens": self.decode_tokens,
             "decode_tok_s": round(self.decode_tok_s, 2),
             "prefill_tok_s": round(self.prefill_tok_s, 1),
+            # Les temps cumulés, pas seulement les taux. Un taux est une
+            # moyenne depuis le démarrage : il ne dit rien d'UNE requête, et
+            # deux relevés successifs ne s'en soustraient pas. Les cumuls, si —
+            # c'est la seule façon de mesurer le forward d'une requête sans
+            # instrumenter le moteur. Leur absence a coûté deux mesures : l'une
+            # a divisé un delta de jetons par le taux global et obtenu un
+            # forward supérieur au TTFT, l'autre a lu la clé manquante comme un
+            # zéro et conclu « 0,0 ms pour 39 410 jetons ».
+            "prefill_seconds": round(self.prefill_seconds, 6),
+            "decode_seconds": round(self.decode_seconds, 6),
             "running": self.running, "waiting": self.waiting,
             "kv_blocks_free": self.kv_blocks_free,
             "kv_blocks_total": self.kv_blocks_total,
@@ -155,6 +165,22 @@ def _trim_at_stop(joined: str, delta: str,
         return delta, False
     prev = len(joined) - len(delta)
     return (joined[prev:cut] if cut > prev else ""), True
+
+
+
+def _tranche(seq, a: int, b: int) -> tuple:
+    """Les jetons [a, b) d une sequence, sans concatener prompt et sortie.
+
+    Rend exactement `tuple(seq.all_ids[a:b])`, en ne touchant que les elements
+    demandes. Une tranche a cheval sur la frontiere prend des deux cotes.
+    """
+    p = seq.prompt_ids
+    n = len(p)
+    if b <= n:
+        return tuple(p[a:b])
+    if a >= n:
+        return tuple(seq.output_ids[a - n:b - n])
+    return tuple(p[a:]) + tuple(seq.output_ids[:b - n])
 
 
 class Engine:
@@ -417,12 +443,15 @@ class Engine:
         hachage nommant un contenu qu'il ne porte pas encore, livrerait à une
         requête ultérieure des clés et des valeurs jamais écrites.
         """
-        ids = seq.all_ids
-        n_full = min(len(ids) // BLOCK_SIZE, len(seq.blocks))
+        # Pas de `seq.all_ids` ici : il concatene tout le contexte pour n en
+        # lire SEIZE elements, a chaque pas et pour chaque sequence. `length`
+        # donne la meme longueur sans rien recopier, et `_tranche` ne touche
+        # que les seize jetons du bloc.
+        n_full = min(seq.length // BLOCK_SIZE, len(seq.blocks))
         while len(seq.hashes) < n_full:
             i = len(seq.hashes)
             prev = seq.hashes[-1] if seq.hashes else 0
-            span = tuple(ids[i * BLOCK_SIZE:(i + 1) * BLOCK_SIZE])
+            span = _tranche(seq, i * BLOCK_SIZE, (i + 1) * BLOCK_SIZE)
             h = hash((prev, span))
             seq.hashes.append(h)
             self.allocator.register(seq.blocks[i], h)
@@ -449,9 +478,16 @@ class Engine:
             # question breve — ne peuplaient donc jamais le cache de prefixe.
             self._register_complete_blocks(seq)
             self.allocator.free(seq.blocks)
-            for etats in self.gdn_states.values():
-                etats.pop(seq.id, None)
             seq.blocks = []
+        # HORS du bloc ci-dessus : l'état récurrent n'a aucun rapport avec le
+        # fait que la séquence détienne encore des blocs KV. Les deux étaient
+        # liés, si bien qu'un `_finish` appelé sur une séquence déjà libérée —
+        # annulation tardive, second appel — laissait son état sur la carte.
+        # Cela ne fuyait probablement pas aujourd'hui, un état ne naissant
+        # qu'au forward et un forward exigeant des blocs ; mais c'était vrai
+        # par l'état du moteur, pas par construction.
+        for etats in self.gdn_states.values():
+            etats.pop(seq.id, None)
         if seq in self.running:
             self.running.remove(seq)
         if seq in self.waiting:
@@ -725,7 +761,14 @@ class Engine:
     def _emit(self, logits: torch.Tensor,
               seqs: list[Sequence]) -> list[GenerationOutput]:
         params = [s.params for s in seqs]
-        history = [s.all_ids for s in seqs]
+        # `all_ids` CONCATENE prompt et sortie : une liste neuve de la taille
+        # du contexte entier, a chaque pas et pour chaque sequence. En
+        # decodage glouton sans penalites — le cas courant — `sample` rend son
+        # argmax AVANT de la lire, et ce travail proportionnel au contexte
+        # etait entierement perdu. La condition vit dans `sampler` pour que
+        # celle qui construit et celle qui lit ne puissent pas diverger.
+        history = ([s.all_ids for s in seqs] if besoin_historique(params)
+                   else [() for _ in seqs])
         tokens, logprobs = sample(logits, params, history)
         out = []
         for seq, tok, lp in zip(seqs, tokens.tolist(), logprobs.tolist()):

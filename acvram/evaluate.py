@@ -59,10 +59,27 @@ class EvalResult:
     nll: float = 0.0
     tokens: int = 0
     windows: int = 0
+    # Perplexite par tranche de contexte : {jetons de contexte disponibles au
+    # minimum: (somme des nll, positions)}. Un modele sain coute une dizaine de
+    # nats sur son premier jeton et moins de deux au millieme ; melanger les
+    # deux dans une moyenne rend un chiffre qui ne decrit aucun regime.
+    par_contexte: dict[int, tuple[float, int]] = field(default_factory=dict)
     seconds: float = 0.0
     weights_bytes: int = 0
     bits_per_weight: float = 0.0
     formats: dict[str, int] = field(default_factory=dict)
+    avertissement: str = ""
+    # Perplexite CUMULATIVE apres n fenetres, aux jalons de `_JALONS`. Le
+    # chiffre final ne dit pas comment il s'est forme : le wikitext oscille de
+    # 6,8 a 9,2 avant de se stabiliser, et un biais d'instrument peut dependre
+    # de la longueur de contexte — croissant sur une famille d'architecture,
+    # decroissant sur une autre. Comparer deux moteurs au meme nombre de
+    # fenetres exige de connaitre ce cumul ; llama.cpp le rend, acvram non.
+    cumul: dict[int, float] = field(default_factory=dict)
+    # Le cadrage voyage avec le chiffre : sans lui, « 7,23 » et « 137 » ont
+    # l'air de decrire le meme objet.
+    min_context: int = 0
+    window: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -75,7 +92,27 @@ class EvalResult:
             "weights_bytes": self.weights_bytes,
             "bits_per_weight": round(self.bits_per_weight, 3),
             "formats": self.formats,
+            "avertissement": self.avertissement,
+            "cumul": {str(k): round(v, 4) for k, v in sorted(self.cumul.items())},
+            "min_context": self.min_context,
+            "window": self.window,
+            "par_contexte": {str(k): {"ppl": round(math.exp(min(v[0] / v[1], 60.0)), 4),
+                                      "jetons": v[1]}
+                             for k, v in sorted(self.par_contexte.items()) if v[1]},
         }
+
+
+# Jalons du cumul : puissances de deux jusqu'au corpus entier. Choisis pour
+# qu'une mesure courte et une mesure longue partagent des points de comparaison.
+_JALONS = (16, 32, 64, 128, 256, 512)
+
+# Sous ce nombre de positions notees, le resultat porte un avertissement.
+# Choisi comme l'ordre de grandeur en dessous duquel l'ecart-type de la
+# moyenne des log-vraisemblances depasse l'ecart typique entre deux formats.
+_POSITIONS_MINIMALES = 512
+
+# Bornes des tranches de contexte, en jetons vus par la position notee.
+_TRANCHES = ((0, 8), (8, 32), (32, 128), (128, 512), (512, 0))
 
 
 def _load_corpus(path: Optional[str]) -> str:
@@ -89,9 +126,19 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
                window: int = 512, stride: int = 256,
                max_tokens: int = 8192, device: Optional[str] = None,
                dtype: torch.dtype = torch.bfloat16,
-               progress: Optional[Callable[[int, int], None]] = None
-               ) -> EvalResult:
-    """Perplexité par fenêtre glissante sur un modèle converti."""
+               progress: Optional[Callable[[int, int], None]] = None,
+               min_context: int = 0) -> EvalResult:
+    """Perplexité par fenêtre glissante sur un modèle converti.
+
+    ``min_context`` écarte du décompte les positions qui ont moins de tant de
+    jetons devant elles. Un jeton prédit sans contexte coûte une dizaine de
+    nats quel que soit le modèle : sur un corpus court, ces quelques positions
+    portent l'essentiel de la moyenne et la perplexité obtenue ne mesure plus
+    le modèle mais la longueur du corpus. llama.cpp ne note pour cette raison
+    que la seconde moitié de chaque fenêtre. La valeur par défaut reste zéro
+    pour que les mesures déjà publiées restent comparables ; toute comparaison
+    de formats devrait passer au moins 64.
+    """
     from .engine.loader import load_model
     from .engine.model import ForwardBatch
     from .memory.kvcache import BLOCK_SIZE, BlockAllocator
@@ -109,7 +156,8 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
         raise ValueError("corpus trop court pour être évalué")
 
     model = loaded.model
-    result = EvalResult(model=os.path.basename(os.path.abspath(model_dir)))
+    result = EvalResult(model=os.path.basename(os.path.abspath(model_dir)),
+                        min_context=min_context, window=window)
     result.weights_bytes = model.nbytes
     n_params = loaded.spec.total_params
     result.bits_per_weight = (result.weights_bytes * 8 / n_params) if n_params else 0.0
@@ -146,19 +194,62 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
         # première fois, afin qu'un jeton ne soit jamais compté deux fois avec
         # des quantités de contexte différentes.
         first_new = 0 if start == 0 else max(0, (window - stride) - 1)
+        # Le logit d'indice i predit le jeton i+1 en ayant vu i+1 jetons.
+        first_new = max(first_new, min_context)
         if first_new >= logits.shape[0]:
             break
         nll = torch.nn.functional.cross_entropy(
             logits[first_new:], targets[first_new:], reduction="sum")
         total_nll += float(nll)
         counted += int(targets[first_new:].numel())
+        # Le meme cout, reparti par quantite de contexte disponible : c'est ce
+        # qui dit si un chiffre eleve vient du modele ou des premieres
+        # positions. Sans ce detail, un corpus de 283 jetons et un corpus de
+        # 100 000 rendent deux nombres qu'on croit comparables.
+        pertes = torch.nn.functional.cross_entropy(
+            logits[first_new:], targets[first_new:], reduction="none")
+        for k, (bas, haut) in enumerate(_TRANCHES):
+            i0 = max(0, bas - first_new)
+            i1 = min(pertes.shape[0], haut - first_new) if haut else pertes.shape[0]
+            if i1 > i0:
+                som, n_pos = result.par_contexte.get(bas, (0.0, 0))
+                result.par_contexte[bas] = (som + float(pertes[i0:i1].sum()),
+                                            n_pos + i1 - i0)
         result.windows += 1
+        if result.windows in _JALONS and counted:
+            result.cumul[result.windows] = math.exp(
+                min(total_nll / counted, 60.0))
         if progress:
             progress(w + 1, n_windows)
         if start + window >= len(ids):
             break
 
     result.tokens = counted
+    if counted == 0:
+        raise ValueError(
+            f"aucune position notee : le corpus fait {len(ids)} jetons et "
+            f"min_context={min_context} les ecarte toutes. Allonger le corpus "
+            f"ou baisser min_context.")
+    # Un chiffre tire de trop peu de positions n'est pas un chiffre : sa
+    # variance depasse l'ecart qu'on veut mesurer. Le corpus interne fait 283
+    # jetons ; note comme llama.cpp (fenetre 512, min_context 256) il n'en
+    # laisserait que vingt-six. Trois sessions ont interprete deux jours durant
+    # un 137 obtenu sur 282 positions notees des le premier jeton — l'avertir
+    # est le minimum, et il voyage avec le resultat, pas seulement a l'ecran.
+    if counted < _POSITIONS_MINIMALES:
+        result.avertissement = (
+            f"{counted} positions notees seulement (moins de "
+            f"{_POSITIONS_MINIMALES}) : la variance de ce chiffre depasse "
+            f"probablement les ecarts entre formats. Corpus plus long requis.")
+    if min_context == 0 and len(ids) < window:
+        note = (f"corpus de {len(ids)} jetons plus court que la fenetre de "
+                f"{window}, note des la premiere position ({counted} positions "
+                f"notees) : les jetons sans contexte dominent la moyenne. "
+                f"Comparer a llama.cpp demande --min-context {window // 2}, "
+                f"qui ne laisserait ici que "
+                f"{max(0, len(ids) - 1 - window // 2)} positions.")
+        result.avertissement = (result.avertissement + " " + note
+                                if result.avertissement else note)
     result.nll = total_nll / max(1, counted)
     result.perplexity = math.exp(min(result.nll, 60.0))
     result.seconds = time.time() - t0
@@ -175,12 +266,56 @@ def render(results: list[EvalResult]) -> str:
     if not results:
         return "aucun resultat"
     width = max(len(r.model) for r in results)
-    lines = [f"  {'modele':<{width}}  {'ppl':>9}  {'bpp':>6}  {'taille':>10}  "
-             f"{'jetons':>8}"]
+    cadres = {(r.window, r.min_context) for r in results}
+    lines = []
+    if len(cadres) == 1:
+        w, mc = next(iter(cadres))
+        lines.append(f"  cadrage : fenetre {w}, contexte minimal {mc} jeton(s)")
+        lines.append("")
+    lines.append(f"  {'modele':<{width}}  {'ppl':>9}  {'bpp':>6}  {'taille':>10}  "
+                 f"{'jetons':>8}")
     best = min(r.perplexity for r in results)
     for r in results:
         delta = "" if r.perplexity == best else f"  (+{100*(r.perplexity/best-1):.1f}%)"
         lines.append(f"  {r.model:<{width}}  {r.perplexity:9.3f}  "
                      f"{r.bits_per_weight:6.2f}  {r.weights_bytes/2**20:8.1f}Mio  "
                      f"{r.tokens:8d}{delta}")
+    # Les formats REELS du modele evalue, a cote du chiffre. Le 8/09/2026 un
+    # dossier nomme « temoin-int8 » avait ses 72 projections de perceptron en
+    # q3n a 3,25 bits : la garde anti-grossissement les avait basculees, en
+    # l'annoncant dans un journal detache que personne n'a lu. La perplexite
+    # qui en est sortie a fait chercher un biais d'instrument une demi-journee.
+    # Ce qui n'est pas imprime a cote du chiffre finit par etre suppose.
+    for r in results:
+        if r.formats:
+            detail = ", ".join(f"{f} {n}" for f, n in
+                               sorted(r.formats.items(), key=lambda x: -x[1]))
+            lines.append(f"  {r.model} : {detail}")
+    if any(r.formats for r in results):
+        lines.append("")
+    avertis = {r.avertissement for r in results if r.avertissement}
+    for a in sorted(avertis):
+        lines.append("")
+        lines.append(f"  ATTENTION : {a}")
+    for r in results:
+        if r.cumul:
+            lines.append("")
+            lines.append(f"  {r.model}, perplexite cumulative :")
+            for n, v in sorted(r.cumul.items()):
+                lines.append(f"    apres {n:4d} fenetres  {v:9.4f}")
+    for r in results:
+        if r.par_contexte:
+            lines.append("")
+            lines.append(f"  {r.model} par contexte disponible :")
+            for bas, (som, n) in sorted(r.par_contexte.items()):
+                if n:
+                    # La borne affichee est celle de la tranche ET du
+                    # min_context : une tranche 128-512 filtree a 256 ne
+                    # contient que des positions a 256 jetons ou plus, et
+                    # l'annoncer « a partir de 128 » decrirait un objet plus
+                    # facile que celui qu'on a mesure.
+                    reel = max(bas, r.min_context)
+                    lines.append(f"    a partir de {reel:>4} jetons  "
+                                 f"ppl {math.exp(min(som / n, 60.0)):9.3f}  "
+                                 f"sur {n:5d} positions")
     return "\n".join(lines)

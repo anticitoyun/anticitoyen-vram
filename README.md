@@ -240,7 +240,7 @@ Deux constats issus de ces mesures ont changé les valeurs par défaut :
 * [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — comment les pièces s'assemblent
 * [`docs/MATERIEL.md`](docs/MATERIEL.md) — régler cette machine précise
 * [`docs/FEUILLE-DE-ROUTE.md`](docs/FEUILLE-DE-ROUTE.md) — **ce qui n'est pas fait**, à lire en premier
-* [`CLAUDE.md`](CLAUDE.md) — repères pour travailler sur le code avec Claude
+* [`CONVENTIONS.md`](CONVENTIONS.md) — conventions de travail sur le code (langue, style, contrôles avant de pousser)
 
 ## État
 

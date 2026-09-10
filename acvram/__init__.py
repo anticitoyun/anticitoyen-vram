@@ -16,6 +16,32 @@ La surface publique est la ligne de commande (`acvram`) et le serveur
 compatible avec l'API OpenAI.
 """
 
-__version__ = "0.4.94"
+__version__ = "0.4.96"
+
+# Segments extensibles de l'allocateur CUDA, sur demande seulement. Posé ici
+# parce que la variable n'est lue qu'une fois, à la première allocation, avant
+# que le moindre import ne crée le contexte CUDA.
+#
+# Pourquoi c'est utile : le planificateur remplit la carte à quelques pour cent
+# près, et avec l'allocateur par blocs la mémoire rendue par un tenseur
+# intermédiaire reste prisonnière du bloc où elle a été prise. Un chargement a
+# échoué sur les 20 derniers Mio d'un modèle de 30 milliards alors que 2,55 Gio
+# étaient réservés et inutilisés — de la fragmentation, pas un manque de place.
+#
+# Pourquoi ce n'est pas le défaut : le réglage est expérimental chez PyTorch, et
+# un allocateur qui étend ses segments est en tension avec la capture de graphes
+# CUDA, qui exige des adresses figées — nous capturons des graphes par défaut
+# (`graphs.py`). vLLM et TensorRT-LLM rapportent des échecs d'initialisation
+# dans cette combinaison, le contournement documenté chez le second étant de
+# désactiver les graphes. Tant que la capture n'a pas été éprouvée sous ce
+# réglage sur nos deux cartes, le défaut reste l'allocateur par blocs : la
+# fragmentation coûte un chargement, une capture perdue coûte le débit de
+# toutes les requêtes.
+#
+# `ACVRAM_ALLOC_EXTENSIBLE=1` l'active.
+import os as _os
+
+if _os.environ.get("ACVRAM_ALLOC_EXTENSIBLE"):
+    _os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 __all__ = ["__version__"]

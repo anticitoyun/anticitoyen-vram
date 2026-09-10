@@ -323,3 +323,212 @@ la marge sur ce noyau au-delà de ×3,1.
 mesuré, et le banc doit couvrir les deux. Et un découpage qui change **change
 l'ordre des sommes** : la barrière de qualité est obligatoire avant toute
 annonce, témoin négatif compris.
+
+## La validation moteur : le gain se transporte, et au-delà
+
+ABBA au niveau du **processus** (voir plus bas pourquoi), quatre bras par
+contexte, `b0c1c0b`, binaire `46b9760dd521cc5b`.
+
+    350 mots    A 512   120,65 / 120,86 j/s    noyau 71,52 / 71,62 us
+                B auto  227,45 / 226,97 j/s    noyau 19,14 / 18,98 us   +88,0 %
+    3000 mots   A 512   105,69 / 105,72 j/s    noyau 78,72 / 78,85 us
+                B auto  216,10 / 216,06 j/s    noyau 25,86 / 25,54 us  +104,4 %
+
+Les deux passages de chaque bras se reproduisent à 0,2 %, l'ordre de passage ne
+déplace rien, et le témoin noyau retrouve **exactement** les valeurs du
+balayage isolé (25,47 et 78,72 µs).
+
+### Le banc qui rendait +0,1 % portait un gain de +88 %
+
+Première version : les deux bras alternaient **dans le même processus**, pour
+qu'aucune différence de chargement ne s'y glisse. Or le décodage passe par un
+**graphe CUDA capturé une fois**, et un graphe enregistre la grille
+`dim3 g1(BQ, HQ, C)` au moment de la capture. Changer `ACVRAM_PA_CHUNK` ensuite
+ne rejoue pas un nouveau lancement : il rejoue celui qui a été capturé.
+
+**Le montage choisi pour éliminer une différence parasite avait éliminé la
+différence étudiée.** Résultat : +0,1 % aux deux contextes, avec une étendue de
+0,2 % sur le bras inerte contre 7,1 % sur l'autre — la signature d'un bras qui
+n'a jamais tourné, lisible seulement si on la cherche.
+
+Sans le témoin noyau ajouté ensuite, la seule lecture possible était « le gain
+ne se transporte pas » : un résultat nul crédible, publié de bonne foi, sur un
+poste qui **double** le débit. **Dix lignes de témoin contre un chantier
+abandonné à tort.**
+
+### Ce que le gain implique — et ce qu'il ne permet PAS de conclure
+
+Le gain dépasse la prédiction de +50 %. **Un gain au-dessus demande la même
+explication qu'un gain en dessous**, et les 49,5 % du profileur deviennent le
+suspect.
+
+**La conversion du gain en part d'attention est retirée.** L'équation d'Amdahl
+attribuerait tout le gain à l'accélération du noyau, alors que passer de 512 à
+64 multiplie aussi `C` par huit — donc le nombre de lancements et le
+parallélisme. Et le facteur employé dépend d'un choix de dénominateur non
+discuté : rapport des temps mesurés (3,04) ou rapport des **travaux**, plancher
+déduit (66,91 / 10,11 = 6,6), qui donne 57 % au lieu de 76 %. Trois grandeurs
+changent, l'équation en résout une. **Le chiffre viendra d'une mesure directe,
+pas d'une inversion de formule.**
+
+## La barrière de qualité : trois instruments avant d'en trouver un valide
+
+### 1. `acvram eval` — aveugle à ce qu'il devait tester
+
+Quatre passes, quatre fois **8,825** au millième. Ce n'était pas la neutralité :
+`evaluate.py:189` appelle `model(batch, ...)`, le **forward dense**, qui
+n'appelle jamais `paged_attention`. Une barrière aveugle à ce qu'elle teste rend
+toujours « conforme ».
+
+### 2. La comparaison de trajectoires — ne peut pas trancher
+
+À température 0, les 128 jetons sont identiques à 350 mots, et divergent **au
+jeton 24** à 3000. Deux implémentations également correctes divergent en
+génération gloutonne : l'arrondi s'amplifie de façon chaotique. Ni preuve de
+neutralité, ni preuve de dégradation.
+
+*(Premier essai jeté : l'invite était faite d'identifiants `crc32`. Acceptable
+pour un débit — le coût d'un pas ne dépend pas du sens — mais sur du charabia le
+modèle part en répétition, et deux boucles dégénérées divergent entre candidats
+quasi équiprobables sans rien dire du noyau.)*
+
+### 3. La distance à l'attention dense — celle qui tranche
+
+Comparer les deux découpages **entre eux** ne dit pas lequel est juste. Seul un
+tiers qui ne partage pas leur défaut peut arbitrer : `decode_attention_fixed`,
+qui ne découpe rien.
+
+    350 mots    dense <-> 512  5,025485e-03    dense <-> adaptatif  5,025486e-03
+                ecart entre les deux decoupages  4,54e-05  =  0,90 % de l'ecart
+                deja accepte par la quantification du cache
+    3000 mots   dense <-> 512  7,771520e-03    dense <-> adaptatif  7,771520e-03
+                ecart entre les deux decoupages  3,60e-05  =  0,46 %
+
+**Les deux découpages sont à la même distance de la référence** (sept chiffres
+identiques à 3000). L'écart entre eux vaut moins de 1 % de l'erreur que la
+quantification int8 du cache fait déjà subir. **Classe B, sans dégradation
+mesurable** : le noyau est par ailleurs déterministe — deux appels identiques
+rendent le bit exact.
+
+## Ce qui reste à mesurer, avec sa prédiction écrite d'avance
+
+**64 est un plancher d'ignorance, pas un optimum** : c'est la plus petite
+valeur essayée. 32 et 16 n'ont jamais tourné, et on ne règle pas un défaut par
+extrapolation.
+
+Le modèle que les six points existants suggèrent — à vérifier, pas à croire :
+
+    total(chunk) = plancher(nombre de blocs) + travail(chunk)
+
+Le travail est proportionnel à la tranche (mesuré : il double quand elle
+double). Le plancher croît avec le nombre de blocs, mais **seulement au-delà de
+~768** : plat à 11,5 µs de 64 à 768 blocs, puis 15,36 µs à 1504.
+
+    chunk 64    1504 blocs   plancher 15,36   travail 10,11   total 25,47 (mesure)
+    chunk 32    3008 blocs   plancher   ?     travail  ~5     total  ?
+    chunk 16    6016 blocs   plancher   ?     travail ~2,5    total  ?
+
+**Prédiction** : le travail économisé (~5 µs de 64 à 32) est du même ordre que
+la croissance du plancher observée en doublant les blocs (~3,8 µs de 768 à
+1504). **On attend donc un gain nul ou faible à 32, et une perte à 16.** Si 32
+gagne nettement plus de 5 µs, le modèle additif est faux et c'est lui qu'il
+faudra reprendre — pas le réglage.
+
+**Contrainte à ne pas oublier** : `C ≤ 256` limite `chunk=32` aux contextes
+sous 8 k jetons et `chunk=16` sous 4 k. Un réglage qui ne vaut que pour les
+contextes courts n'a d'intérêt que si le gain y est net.
+
+**Et la marge est réelle** : à 3007 jetons le noyau reste à **8,6 fois sa borne
+mémoire** après le gain (25,47 µs contre 2,96 µs pour relire 3,10 Mo à
+1050 Go/s). Ce qui limite n'est donc toujours pas la bande passante.
+
+## Le balayage 32/16 : 64 n'est plus un plancher d'ignorance
+
+Contexte 3000, étape 0 rejouée à chaque valeur, `64` **encadrant** le balayage.
+
+    chunk         plancher   total    travail    contre 64
+    64  (debut)     15,36     25,66    10,30        —
+    32              21,47     31,78    10,31     +23,9 %
+    16              33,73     41,86     8,13     +63,1 %
+    64  (fin)       15,36     25,57    10,21      -0,35 %
+
+**Le `64` de fermeture rend 15,36 µs comme celui d'ouverture** — dérive nulle
+sur le plancher, 0,35 % sur le total. Les trois valeurs se comparent.
+
+**Prédiction vérifiée sur l'issue, réfutée sur le mécanisme.** J'attendais une
+perte, et il y a bien perte aux deux valeurs. Mais je l'expliquais par un
+plancher qui rattrape un travail décroissant ; or **le travail ne décroît
+plus** : 10,30 µs à 64, 10,31 à 32 — identique au centième.
+
+**La proportionnalité cesse en dessous de 64.** De 128 à 2048 le temps doublait
+avec la tranche ; à 32 une tranche ne fournit plus assez de travail pour
+occuper un bloc, et seul le plancher continue de croître — il double de 64 à 16
+(15,36 → 33,73) pendant que le travail stagne.
+
+Le modèle additif `plancher(blocs) + travail(chunk)` tient donc ; c'est son
+second terme qui **sature**. Un modèle juste sur la forme et faux sur le
+domaine de validité rend la bonne réponse pour la mauvaise raison — ce qui ne
+se voit que si l'on mesure les deux termes séparément, et c'est ce que l'étape 0
+rejouée à chaque valeur permet.
+
+**64 est l'optimum des sept valeurs essayées**, et ce n'est plus un plancher
+d'ignorance : les deux valeurs en dessous ont été mesurées et perdent.
+
+## Le « plancher » n'est pas un plancher : il est expliqué, et c'est du travail
+
+Trois mesures, chacune écartant une cause, dans cet ordre.
+
+### 1. Ce n'est pas le lancement — `banc_fma`, à travail par bloc constant
+
+    170 -> 4080 blocs     7,1 us        PLAT sur un facteur 24
+    5440 blocs            8,74 us
+    8160 blocs           10,75 us
+    multiples de SM (1x, 2x, 4x), +/-2 blocs : aucune marche
+
+**Ni vagues ni débit de distribution.** L'hypothèse des vagues prédisait des
+marches au franchissement de la capacité résidente : il n'y en a aucune. Le
+lancement de 1504 blocs coûte 7,1 µs, là où l'étape 0 en coûte 15,3 **au même
+nombre de blocs**. La différence n'est donc pas dans le lancement.
+
+*(C'est `banc_fma` qui a tranché — le noyau gardé « pour le cas d'échec » et
+retiré du protocole. Il a servi à un cas nominal que personne n'avait prévu.)*
+
+### 2. Ce n'est pas mon compteur — hypothèse à moi, réfutée par moi
+
+L'étape 0 fait un `atomicAdd` par bloc **sur une adresse unique** : tous les
+blocs frappent la même case, le L2 les sérialise, et le coût croît avec leur
+nombre. La forme était la bonne, l'amplitude non :
+
+    chunk 64  (1504 blocs)   15,23 allume  /  15,30 eteint   0, dans le bruit
+    chunk 16  (6016 blocs)   34,30 allume  /  32,26 eteint   2,04 us, soit 6 %
+
+**0,34 ns par bloc.** Il fallait en expliquer 18 µs. Le compteur est disculpé —
+et il ne pouvait l'être que parce qu'on peut désormais l'éteindre
+(`ACVRAM_PA_SANS_COMPTEUR=1`). **Un instrument qui ne peut pas être éteint ne
+peut pas être disculpé.**
+
+### 3. Ce que c'est : l'écriture des tampons partiels
+
+    plancher = 9,65 us + 3,76 ns par bloc
+
+    1504 blocs   mesure 15,30   modele 15,30   ecart 0,0 %
+    3008 blocs   mesure 21,47   modele 20,95   ecart 2,4 %
+    6016 blocs   mesure 32,26   modele 32,26   ecart 0,0 %
+
+Le terme fixe (9,65 µs) est du même ordre que le lancement mesuré par
+`banc_fma` (7,1 µs). Le terme par bloc correspond aux **512 octets** que chaque
+bloc écrit dans `part[]` (128 flottants) : 3,76 ns pour 512 octets font
+**136 Go/s effectifs**, un débit d'écriture dispersée plausible.
+
+**Il n'y a donc plus de mystère matériel.** Ce que nous appelions « plancher »
+depuis hier est, pour les deux tiers, **du travail réel** : écrire les
+résultats partiels. Et cela a une conséquence directe sur le réglage :
+
+> **Diviser la tranche par deux double le nombre de blocs, donc double les
+> octets de partiels écrits.** C'est ce terme qui remonte quand `chunk`
+> descend, et c'est lui — pas une capacité, pas un ordonnanceur — qui fait
+> perdre 32 et 16.
+
+Le modèle additif posé plus haut se referme : `travail(chunk)` sature en
+dessous de 64, tandis que le second terme, mal nommé « plancher », **croît
+avec le nombre de blocs parce qu'il écrit un partiel par bloc**.

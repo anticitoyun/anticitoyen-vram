@@ -111,11 +111,26 @@ def _build_quant(entry: dict, name: str, reader: _ShardReader,
         return INT8Tensor(sd["qweight"], sd["scales"], sd["zeros"],
                           entry.get("group_size", group_size), shape)
     if fmt == "q3n":
-        from ..quant.q3n import BLOC_DEFAUT, Q3NTensor
+        from ..quant.q3n import (BLOC_DEFAUT, TABLE_Q3N, Q3NTensor,
+                                 valider_table_q3n)
+        table = entry.get("table")
+        table = valider_table_q3n(table) if table is not None else TABLE_Q3N
+        sceau = entry.get("sceau")
+        if sceau is not None:
+            import hashlib as _h
+            reel = _h.sha256(
+                sd["qweight"].flatten()[:64].cpu().numpy().tobytes()
+                + repr([float(v) for v in table]).encode()).hexdigest()[:16]
+            if reel != sceau:
+                raise ValueError(
+                    f"{name} : le sceau table/poids ne correspond pas — "
+                    "manifeste régénéré sans reconversion ? Le modèle ne "
+                    "doit pas être servi avec cette table.")
         return Q3NTensor(sd["qweight"],
                          sd["block_scale"].view(torch.float8_e4m3fn),
                          sd["global_scale"],
-                         entry.get("block", BLOC_DEFAUT), shape)
+                         entry.get("block", BLOC_DEFAUT), shape,
+                         "q3n", table)
     if fmt in ("bf16", "fp16"):
         return PlainTensor(sd["weight"], shape, fmt)
     raise KeyError(f"unknown format {fmt!r} for {name}")
@@ -144,6 +159,31 @@ def _linear(name: str, manifest: dict, reader: _ShardReader,
     return QuantLinear(q, bias, scaler, entry["shape"][0], entry["shape"][1])
 
 
+def indice_origine(architectures) -> str:
+    """Ce que l'architecture declaree dit de la convention de `a_log`.
+
+    `a_log` porte soit log(A) (sources HF), soit deja -A (convertisseur GGUF).
+    **Le signe ne departage rien** : sur les modeles reels, log(A) et -A
+    tombent tous deux dans les negatifs, et la plage [-5,6, -1,1] est justement
+    ce que l'inversion produit a partir de [-0,34, -0,004]. La transformation
+    est quasi involutive sur cette plage : aucun controle de vraisemblance ne
+    peut trancher, et un seuil donnerait une fausse assurance.
+
+    Ce qui tranche est l'ORIGINE. Une architecture HF authentique
+    (`Qwen3_5ForConditionalGeneration`, `...ForCausalLM` d'une famille connue)
+    porte log(A). Un dossier issu d'un GGUF porte l'architecture que notre
+    propre lecteur fabrique — `LlamaForCausalLM` — et la convention inverse.
+    L'indice est rendu tel quel : il oriente, il ne decide pas.
+    """
+    archs = [str(a) for a in (architectures or [])]
+    if any("ForConditionalGeneration" in a or "Qwen3_5" in a for a in archs):
+        return "source HF probable, a_log = log(A), pas d'inversion"
+    if archs == ["LlamaForCausalLM"]:
+        return ("architecture generique, typique d'un dossier issu d'un GGUF "
+                "— l'inversion est probablement necessaire")
+    return "origine indeterminee"
+
+
 def load_model(path: str, plan: Optional[Plan] = None,
                dtype: torch.dtype = torch.bfloat16,
                max_model_len: Optional[int] = None,
@@ -154,8 +194,65 @@ def load_model(path: str, plan: Optional[Plan] = None,
 
     spec = ModelSpec(**{k: v for k, v in manifest["model"].items()
                         if k in ModelSpec.__dataclass_fields__})
+    # `ModelSpec.to_dict()` ne serialise pas `raw`, et le manifeste ne porte
+    # donc AUCUNE des cles brutes de la configuration. Or le chargeur en lit
+    # certaines — `gdn_a_log_negexp` decide si `a_log` doit etre retransforme,
+    # et sans lui la decroissance des couches recurrentes est calculee sur un
+    # facteur deja transforme : **onze pour cent d'ecart au lieu d'un**, mesure
+    # le 8/09/2026 contre llama.cpp sur la couche 0 (a_log charge a -0,3379,
+    # la valeur du disque, la ou -1,085 etait attendu).
+    #
+    # Le piege qui m'a fait rétracter a tort ce diagnostic le matin meme :
+    # `load_model_spec(dossier)` lit `config.json` et porte bien le drapeau,
+    # tandis que `load_model` reconstruit le spec depuis le MANIFESTE. Verifier
+    # l'un ne dit rien de l'autre. On complete donc `raw` depuis la
+    # configuration, ce qui repare aussi les modeles deja convertis.
+    # Les manifestes recents portent les cles utiles (CLES_BRUTES_UTILES) ; les
+    # anciens non. On complete depuis la configuration, et l'on DIT quand on ne
+    # peut pas — servir en silence un modele dont on ignore la convention est
+    # exactement ce qui a coute la journee du 8/09.
+    manquantes = [c for c in ModelSpec.CLES_BRUTES_UTILES
+                  if c not in manifest["model"]]
+    if manquantes:
+        chemin_cfg = os.path.join(path, "config.json")
+        if os.path.isfile(chemin_cfg):
+            try:
+                with open(chemin_cfg, "r", encoding="utf-8") as fh:
+                    spec.raw = json.load(fh)
+            except Exception as e:                       # pragma: no cover
+                print(f"[acvram] config.json illisible ({e}) : les conventions "
+                      f"{manquantes} sont inconnues, le modele peut etre servi "
+                      f"faux sans erreur", flush=True)
+        else:
+            print(f"[acvram] ni le manifeste ni config.json ne portent "
+                  f"{manquantes} : conventions inconnues, le modele peut etre "
+                  f"servi faux sans erreur", flush=True)
+    else:
+        spec.raw = {c: manifest["model"][c]
+                    for c in ModelSpec.CLES_BRUTES_UTILES
+                    if c in manifest["model"]}
+    if (spec.layer_types and "linear_attention" in spec.layer_types
+            and "gdn_a_log_negexp" not in (spec.raw or {})
+            and "gdn_a_log_negexp" not in manifest["model"]):
+        # `a_log` porte soit log(A) (sources HF), soit deja -A (convertisseur
+        # GGUF). **Le signe ne departage rien** : sur les modeles reels, log(A)
+        # et -A tombent tous deux dans les negatifs, et la plage [-5,6, -1,1]
+        # est justement ce que l'inversion produit a partir de [-0,34, -0,004].
+        # Les deux lectures sont numeriquement plausibles ; aucun controle de
+        # vraisemblance ne peut trancher.
+        #
+        # Ce qui tranche est la SOURCE : une architecture HF authentique
+        # (Qwen3_5ForConditionalGeneration...) porte log(A) ; un dossier issu
+        # d'un GGUF porte l'architecture que le lecteur fabrique
+        # (LlamaForCausalLM) et la convention inverse. On le dit plutot que de
+        # choisir en silence — un modele servi avec la mauvaise convention a
+        # une decroissance jusqu'a cent fois trop forte et ne le signale pas.
+        print(f"[acvram] couches recurrentes sans convention declaree pour "
+              f"a_log ({indice_origine((spec.raw or {}).get('architectures'))})"
+              f" : verifier une sortie de couche contre une reference avant de "
+              f"servir ce modele", flush=True)
     if plan is None:
-        plan = _plan_from_manifest(manifest, spec)
+        plan = _plan_from_manifest(manifest, spec, max_model_len=max_model_len)
     _avertir_noyaux()
     reader = _ShardReader(path, manifest["weight_map"])
     group_size = manifest.get("options", {}).get("group_size", 128)
@@ -182,8 +279,34 @@ def load_model(path: str, plan: Optional[Plan] = None,
 
     layers: list[DecoderLayer] = []
     caches: dict[int, PagedKVCache] = {}
+    # Caches KV differes : voir la fusion des projections plus bas, qui a
+    # besoin de place libre au moment ou elle concatene.
+    a_allouer: list = []
     _borner_kv_par_la_vram(plan, manifest, dev)
     kv_blocks = _kv_blocks_per_device(plan, spec, max_model_len)
+
+    # Arène épinglée pour les poids exilés, dimensionnée ICI parce que le plan
+    # vient d'être arrêté : avant lui, la taille exilée n'est pas connue et le
+    # pool serait un chiffre deviné.
+    #
+    # Pourquoi une arène plutôt que `pin_memory()` par poids : l'allocateur
+    # hôte de PyTorch arrondit chaque allocation à la PUISSANCE DE 2 supérieure.
+    # Nos tenseurs d'experts font 3,00 Mio (768 x 2048 en bf16) et sont donc
+    # arrondis à 4 — mesuré le 8/09/2026, facteur 1,333 en régime asymptotique,
+    # soit 46,01 Gio épinglés là où les poids en pèsent 33,76. Une arène dont
+    # la taille est une puissance de 2 ne paie rien, et une vue prise dedans
+    # est elle-même épinglée. Gain mesuré sur trois tailles : ~25 %.
+    _attn_r, _mlp_r, _embed_r, _head_r = _octets_reels(manifest)
+    _exiles = sum(_mlp_r.get(l.index, l.mlp_bytes)
+                  for l in plan.layers if l.mlp_storage == "cpu")
+    _exiles += sum(_attn_r.get(l.index, l.attn_bytes)
+                   for l in plan.layers if l.attn_storage == "cpu")
+    if _exiles > 0:
+        from .layers import reserver_pool
+        _pool_hote = reserver_pool(_exiles)
+        if _pool_hote is not None:
+            print(f"[acvram] arène épinglée : {_exiles / 2**30:.2f} Gio réservés "
+                  f"pour les poids exilés", flush=True)
 
     for lp in plan.layers:
         i = lp.index
@@ -220,7 +343,15 @@ def load_model(path: str, plan: Optional[Plan] = None,
         # réécrivait un emplacement que le GEMV du jeton courant n'avait pas
         # encore lu (l'événement « libre » venait du jeton précédent) :
         # écart de 4e-2 au lieu de 5e-4 au test à sec du 8/09.
-        pool = (ExpertPool(mlp_dev, 2 * (spec.num_experts_per_tok or 2) + 2)
+        # Le repli doit etre celui du bloc, jamais plus petit. Il valait 2 ici
+        # et 8 la (`MoEBlock(..., spec.num_experts_per_tok or 8)`) : sur un
+        # modele dont la configuration ne porte pas le nombre d'experts par
+        # jeton, le bloc en routait huit et le pool n'avait que six
+        # emplacements pour les seize copies d'entree. Depuis le 8/09/2026 le
+        # pool refuse bruyamment d'ecraser un emplacement en vol au lieu de
+        # rendre les octets d'un autre expert ; il faut encore qu'il en ait
+        # assez.
+        pool = (ExpertPool(mlp_dev, 2 * (spec.num_experts_per_tok or 8) + 2)
                 if streamed_mlp else None)
 
         def elin(suffix: str) -> QuantLinear:
@@ -630,16 +761,25 @@ def load_model(path: str, plan: Optional[Plan] = None,
         if n_blocks:
             kv_fmt = next((t.kv_format for t in plan.tiers
                            if t.name == lp.exec_device), "int8")
-            caches[i] = PagedKVCache(KVCacheConfig(
+            a_allouer.append((i, KVCacheConfig(
                 num_layers=1, num_kv_heads=spec.num_key_value_heads,
                 head_dim=spec.head_dim, num_blocks=n_blocks,
-                dtype=kv_fmt, device=str(d)))
+                dtype=kv_fmt, device=str(d))))
 
     # Projections empilées : gate/up des MLP (denses, experts partagés) et
     # q/k/v de l'attention — une GEMV au lieu de deux ou trois par couche.
     # Les experts d'un MoE en sont exclus : ils passent par le chemin groupé,
     # qui empile déjà les 128 experts, et les fusionner un à un doublerait
     # leurs poids sans rien accélérer.
+    #
+    # AVANT l'allocation des caches KV, et ce n'est pas cosmétique :
+    # l'empilement alloue le tenseur concaténé avant de libérer les deux
+    # sources, soit un pic de la taille d'une paire (283 Mio sur Qwen2.5-14B).
+    # Le budget KV remplit la carte jusqu'à la marge — 119 Mio libres après
+    # chargement — et l'allocateur devait purger son cache à chaque couche pour
+    # trouver la place : il y parvenait, en laissant la trace
+    # « memory allocation failed with OOM » à chaque paire, et en fragmentant.
+    # Ici la fusion se fait pendant que le budget KV est encore libre.
     for layer in layers:
         experts = {id(e) for m in layer.modules() if isinstance(m, MoEBlock)
                    for e in m.experts}
@@ -648,6 +788,20 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 m.fuse()
             elif isinstance(m, Attention):
                 m.fuse()
+
+    # Chaque empilement alloue son tenseur concatene avant de liberer les deux
+    # sources : 0,355 Gio de pic par fusion, 95 fois. Les blocs liberes restent
+    # dans le cache de l'allocateur, a des tailles qui ne correspondent plus a
+    # ce qu'on demandera ensuite -- 2,49 Gio reserves non alloues apres
+    # chargement, et 0,64 Gio seulement de VRAM libre. Le banc, qui dimensionne
+    # ses caches plus largement que le chargement nu, tombait alors en OOM sur
+    # une demande de 2 Mio. Rendre ces blocs au pilote avant d'allouer les
+    # caches KV recupere 0,92 Gio, sans rien changer a ce qui est alloue.
+    if torch.cuda.is_available() and a_allouer:
+        torch.cuda.empty_cache()
+
+    for i, cfg in a_allouer:
+        caches[i] = PagedKVCache(cfg)
 
     head_dev = dev(plan.lm_head_device) if plan.lm_head_device != "cpu" \
         else torch.device("cpu")
@@ -852,10 +1006,25 @@ def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev) -> None:
 
 def _kv_blocks_per_device(plan: Plan, spec: ModelSpec,
                           max_model_len: Optional[int]) -> dict[str, int]:
-    """Répartit le budget KV de chaque appareil en blocs, partagés entre ses couches."""
+    """Répartit le budget KV de chaque appareil en blocs, partagés entre ses couches.
+
+    Seules les couches QUI ALLOUENT un cache entrent au dénominateur : plus
+    bas, `a_allouer.append` n'est appelé que sur le chemin de l'attention
+    pleine, si bien qu'une couche linéaire ou SSM comptée ici réduisait le
+    nombre de blocs sans jamais en consommer un seul. Sur les 53 hybrides du
+    parc, le diviseur était 4 à 14 fois trop grand — 16 656 jetons de contexte
+    sur `Nemotron-Nano-9B` là où le même budget en permet 233 296.
+
+    ``max_model_len`` n'est pas utilisé, et ce n'est pas un oubli : le nombre
+    de blocs sort du budget du plan, pas de la longueur demandée. Mesuré le
+    9/09/2026, borner par la longueur ne libérerait rien — le budget alloué
+    est déjà INFÉRIEUR à ce que seize séquences de 4096 jetons réclament.
+    """
     out: dict[str, int] = {}
     layers_on = {}
     for lp in plan.layers:
+        if not spec.couche_a_kv(lp.index):
+            continue
         layers_on[lp.exec_device] = layers_on.get(lp.exec_device, 0) + 1
     for dev, budget in plan.kv_budget.items():
         n_layers = max(1, layers_on.get(dev, 1))
@@ -893,6 +1062,20 @@ def _octets_reels(manifest: dict) -> tuple[dict, dict, int, int]:
             embed += octets
         elif nom.startswith("lm_head"):
             head += octets
+    # Tête LIÉE : aucun tenseur `lm_head` au manifeste, et pourtant
+    # `_tete_liee` en fabrique une copie quantifiée au chargement. La compter
+    # ici n'est pas une precaution : `_borner_kv_par_la_vram` calcule
+    # `libre − poids − marge` a partir de ce total, si bien que l'omettre lui
+    # faisait autoriser un budget KV trop grand — donc MANGER LA MARGE qu'il
+    # existe pour proteger, celle qui garde la place d'une capture de graphes.
+    mo = manifest.get("model") or {}
+    if mo.get("tie_word_embeddings") and mo.get("vocab_size") and mo.get("hidden_size"):
+        from .config import ModelSpec
+        champs = {k: v for k, v in mo.items() if k in ModelSpec.__dataclass_fields__}
+        try:
+            head += ModelSpec(**champs).tete_liee_bytes()
+        except Exception:                                   # noqa: BLE001
+            pass
     return attn, mlp, embed, head
 
 
@@ -920,12 +1103,42 @@ def _reajuster_plan(plan: Plan, manifest: dict) -> None:
                 u += l.attn_bytes if l.attn_storage == dev else 0
                 u += l.mlp_bytes if l.mlp_storage == dev else 0
             return u
+        # La capacité de l'étage est celle qu'avait la machine le jour de la
+        # conversion. Elle ne dit rien de ce que la carte a de libre à cet
+        # instant : un serveur qui vient de rendre son port n'a pas encore
+        # rendu sa mémoire, et le plan suivant se calcule alors sur des restes
+        # qu'il croit disponibles. Le même modèle chargé deux fois de suite a
+        # ainsi rendu 15,8 puis 152,2 jetons par seconde. On borne donc par ce
+        # qui est réellement libre, mesuré ici.
+        capacite = t.capacity
+        try:
+            # `dev` est ici la chaîne du device, pas la fonction du module :
+            # elle est masquée par la variable locale au-dessus.
+            libre = torch.cuda.mem_get_info(torch.device(t.name))[0]
+            # ATTENTION : ce `min` compare deux nombres de nature différente,
+            # pas deux mesures interchangeables. `t.capacity` sort de
+            # `build_tiers()` (tiering.py) DÉJÀ NET d'une réserve (800 Mio de
+            # contexte CUDA + 3 % de fragmentation) et mesuré plus tôt dans le
+            # chargement, avant la compilation JIT des noyaux. `libre` ici est
+            # une lecture BRUTE de `mem_get_info`, prise plus tard, sans aucune
+            # réserve soustraite. Le plus petit des deux n'est donc pas
+            # forcément "le plus à jour" : selon le moment et l'état de la
+            # carte, l'un ou l'autre peut gagner sans que ce soit un signe de
+            # fraîcheur. Ne pas remplacer par `capacite = libre` : ça
+            # supprimerait la réserve de `build_tiers()` (capture de graphes,
+            # fragmentation) sans la réintroduire, sur une carte où l'OOM
+            # survient à quelques dizaines de Mio libres. Un correctif propre
+            # comparerait des bases homogènes : `min(t.capacity, libre - la
+            # même réserve)`, pas l'un brut contre l'autre net.
+            capacite = min(capacite, libre)
+        except Exception:                           # noqa: BLE001
+            pass
         # marge pour le contexte CUDA, les activations et les piles d'experts :
         # la capacité de l'étage est déjà nette des réserves du plan, mais un
         # 70B chargé à 99 % tombait encore en OOM à l'allocation du KV
-        marge = max(2 * 2**30, int(0.07 * t.capacity))
+        marge = max(2 * 2**30, int(0.07 * capacite))
         deplacees = 0
-        while utilise() > t.capacity - marge:
+        while utilise() > capacite - marge:
             cand = [l for l in plan.layers if l.mlp_storage == dev]
             if not cand:
                 break
@@ -943,7 +1156,7 @@ def _reajuster_plan(plan: Plan, manifest: dict) -> None:
             deplacees += 1
         if deplacees:
             print(f"[acvram] plan réajusté : {deplacees} MLP de plus en RAM hôte sur {dev} "
-                  f"(poids réels {utilise() / 2**30:.1f} Gio pour {t.capacity / 2**30:.1f} Gio)",
+                  f"(poids réels {utilise() / 2**30:.1f} Gio pour {capacite / 2**30:.1f} Gio libres)",
                   flush=True)
             continue
         # Symétrique de la descente. Le plan est figé au moment de la
@@ -957,11 +1170,11 @@ def _reajuster_plan(plan: Plan, manifest: dict) -> None:
         for l in plan.layers:
             if l.exec_device != dev:
                 continue
-            if l.attn_storage == "cpu" and utilise() + l.attn_bytes <= t.capacity - marge:
+            if l.attn_storage == "cpu" and utilise() + l.attn_bytes <= capacite - marge:
                 l.attn_storage = dev
             if l.mlp_storage != "cpu":
                 continue
-            if utilise() + l.mlp_bytes > t.capacity - marge:
+            if utilise() + l.mlp_bytes > capacite - marge:
                 continue
             l.mlp_storage = dev
             if hasattr(l, "mlp_exec"):
@@ -969,7 +1182,7 @@ def _reajuster_plan(plan: Plan, manifest: dict) -> None:
             remontees += 1
         if remontees:
             print(f"[acvram] plan réajusté : {remontees} MLP remontés en VRAM sur {dev} "
-                  f"(poids réels {utilise() / 2**30:.1f} Gio pour {t.capacity / 2**30:.1f} Gio)",
+                  f"(poids réels {utilise() / 2**30:.1f} Gio pour {capacite / 2**30:.1f} Gio libres)",
                   flush=True)
     _rapatrier_sur_une_carte(plan, attn, mlp, embed, head)
 
@@ -1025,18 +1238,34 @@ def _rapatrier_sur_une_carte(plan: Plan, attn: dict, mlp: dict,
           f"une frontière de moins par jeton", flush=True)
 
 
-def _replanifier(manifest: dict, spec: "ModelSpec") -> "Plan | None":
-    """Rejoue le planificateur quand le plan figé au manifeste ne décrit plus
-    cette machine.
+def _replanifier(manifest: dict, spec: "ModelSpec",
+                 max_model_len: Optional[int] = None) -> "Plan | None":
+    """Rejoue TOUJOURS le planificateur avec l'état actuel de la machine.
 
     Le plan est écrit une fois pour toutes à la conversion, et `_reajuster_plan`
     ne sait que faire *descendre* des MLP en RAM hôte : aucune amélioration du
-    planificateur n'atteint jamais un modèle déjà converti. Le 7 septembre 2026,
-    Qwen3-Coder-Next tournait à 10,3 jetons par seconde sur un plan qui ignorait
-    la seconde carte et calculait seize couches sur le processeur, alors que le
-    planificateur du jour recrutait les deux cartes et n'en exilait que quatre.
-    On ne rejoue que si les cartes ont changé : sinon le plan figé fait foi, et
-    les mesures du parc restent comparables.
+    planificateur n'atteint jamais un modèle déjà converti si on se contente du
+    plan figé. Le 7 septembre 2026, Qwen3-Coder-Next tournait à 10,3 jetons par
+    seconde sur un plan qui ignorait la seconde carte et calculait seize
+    couches sur le processeur, alors que le planificateur du jour recrutait les
+    deux cartes et n'en exilait que quatre. **On rejoue donc sans condition**
+    (sauf `ACVRAM_PLAN_FIGE`/`ACVRAM_SANS_REPLAN`) — le test `figees !=
+    presentes` ci-dessous ne décide PAS s'il faut rejouer, seulement s'il faut
+    le signaler : un rejeu silencieux sur la même liste de cartes est la
+    normale, pas une exception. (Corrigé le 10/09/2026 : ce docstring disait
+    l'inverse pendant que le code faisait déjà ceci — deux heures perdues à
+    chercher pourquoi un plan « figé » changeait entre deux chargements.)
+
+    ``max_model_len`` : quand l'appelant l'annonce explicitement, on le CROIT
+    et on dimensionne le cache KV pour ce contexte précis, pas pour un chiffre
+    par défaut. Une mesure sur 1 024 jetons n'a aucune raison de réserver de la
+    VRAM pour 4 096 ou 8 192 — c'est de la place prise aux poids pour un besoin
+    qui n'existe pas, et c'est ce qui pousse au sacrifice le plus cher connu
+    ici (une couche exilée coûte 70 % du débit). Quand l'appelant ne dit rien
+    (``None``), le comportement précédent est conservé à l'identique : un
+    serveur qui ne connaît pas encore la taille de ses requêtes doit continuer
+    à dimensionner pour le pire cas plausible, pas pour un contexte court par
+    défaut.
     """
     if os.environ.get("ACVRAM_PLAN_FIGE") or os.environ.get("ACVRAM_SANS_REPLAN"):
         return None
@@ -1049,7 +1278,8 @@ def _replanifier(manifest: dict, spec: "ModelSpec") -> "Plan | None":
         presentes = {f"cuda:{g.index}" for g in rig.gpus}
         if not presentes:
             return None
-        ctx = max(2048, int(d.get("kv_max_tokens") or 0) or 8192)
+        ctx = (max_model_len if max_model_len
+               else max(2048, int(d.get("kv_max_tokens") or 0) or 8192))
         neuf, _ = auto_plan(spec, rig, PlannerOptions(max_model_len=ctx))
     except Exception as e:                                   # pragma: no cover
         print(f"[acvram] replanification impossible ({e}) ; plan du manifeste "
@@ -1059,6 +1289,14 @@ def _replanifier(manifest: dict, spec: "ModelSpec") -> "Plan | None":
         print(f"[acvram] plan recalculé : les cartes ont changé "
               f"(manifeste {sorted(figees) or 'aucun GPU'}, "
               f"machine {sorted(presentes)})", flush=True)
+        # Un avertissement n'arrête rien. Le banc doit pouvoir REFUSER de
+        # publier un débit dans ce cas : le chiffre ne porte plus sur la
+        # configuration demandée mais sur celle que le planificateur a
+        # choisie. On laisse donc une trace lisible sur le plan lui-même.
+        try:
+            neuf.replanifie_cartes = (sorted(figees), sorted(presentes))
+        except Exception:                    # noqa: BLE001 — une trace ne plante pas
+            pass
     return neuf
 
 
@@ -1084,6 +1322,22 @@ def _forcer_exil(plan: Plan, n_voulu: int) -> None:
             l.mlp_exec = "gpu"
     print(f"[acvram] mesure : {n_voulu} couches à perceptron exilé "
           f"(minimum imposé par la capacité : {len(exilees)})", flush=True)
+    # L'estimation a été calculée AVANT ce déplacement et ne le reflète plus.
+    # Mesuré sur Agents-A1-4B : le plan continuait d'annoncer 687,6 jetons/s
+    # pour un débit réel de 24,0 à seize couches exilées — un facteur 28,7.
+    # Le planificateur, lui, VOIT le placement (624,8 -> 30,1 quand la VRAM
+    # simulée tombe à 4,8 Gio) : le défaut est ici, pas dans l'estimateur.
+    # « Rendre None quand on ne sait pas vaut mieux qu'un chiffre crédible :
+    # celui-ci servirait à choisir un plan » (tiering.py) — on applique la
+    # règle du fichier voisin plutôt que de garder un nombre faux.
+    plan.est_decode_tok_s = 0.0
+    plan.est_bytes_per_token = 0
+    try:
+        plan.estimation_perimee = (
+            f"exil force a {n_voulu} couches apres l'estimation ; "
+            f"le debit prevu ne vaut plus rien pour ce plan")
+    except Exception:                        # noqa: BLE001 — une trace ne plante pas
+        pass
 
 
 def _exil_demande(plan: Plan) -> None:
@@ -1095,11 +1349,12 @@ def _exil_demande(plan: Plan) -> None:
             pass
 
 
-def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None) -> Plan:
+def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
+                        max_model_len: Optional[int] = None) -> Plan:
     from ..memory.tiering import LayerPlacement, Plan as _Plan, Tier
     d = manifest["plan"]
     if spec is not None:
-        neuf = _replanifier(manifest, spec)
+        neuf = _replanifier(manifest, spec, max_model_len=max_model_len)
         if neuf is not None:
             _reajuster_plan(neuf, manifest)
             _exil_demande(neuf)

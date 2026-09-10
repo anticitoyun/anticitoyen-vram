@@ -126,3 +126,72 @@ def converted_qknorm(tiny_checkpoint_qknorm, target_rig, tmp_path_factory):
     convert_checkpoint(tiny_checkpoint_qknorm, plan,
                        ConversionOptions(out_dir=out), spec=spec)
     return out
+
+
+@pytest.fixture(autouse=True)
+def _carte_disponible(request):
+    """Une carte saturée par une mesure en cours rend « ignoré », pas « échec ».
+
+    Le 8/09, sept tests graphes/MoE ont échoué pendant qu'une perplexité
+    occupait la 5090 : graphes non capturés (OOM silencieux), pile d'experts
+    refusée faute de place. Trois sessions se partagent la machine ; une carte
+    occupée est l'état normal. Un test qui exige de la VRAM la vérifie avant
+    de courir — le seuil couvre le modèle-jouet, ses graphes et la marge de
+    capture.
+    """
+    if not any(m.name == "gpu_requis" for m in request.node.iter_markers()):
+        return
+    if not torch.cuda.is_available():
+        pytest.skip("pas de carte CUDA")
+    libre, _ = torch.cuda.mem_get_info()
+    if libre < 4 << 30:
+        pytest.skip(f"carte occupée : {libre / (1 << 30):.1f} Gio libres, "
+                    "4 requis — mesure en cours ailleurs ?")
+
+
+# Au-dela de cette occupation, un debit mesure n'est plus celui du code teste.
+OCCUPATION_MAX = 50
+
+
+def occupation_gpu(index: "int | None" = None) -> "int | None":
+    """Occupation de la carte courante en pour cent, ou None si indisponible.
+
+    Separee de la fixture pour etre eprouvee : un garde-fou qu'on ne peut pas
+    faire mordre a la demande n'est pas un garde-fou.
+    """
+    import subprocess
+    if index is None:
+        index = torch.cuda.current_device() if torch.cuda.is_available() else 0
+    try:
+        lignes = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5).stdout.strip().split("\n")
+        return int(lignes[index].strip())
+    except Exception:
+        return None                 # pas de nvidia-smi : on laisse courir
+
+
+@pytest.fixture(autouse=True)
+def _carte_au_repos(request):
+    """Un test de DEBIT exige une carte au repos, pas seulement de la place.
+
+    La garde ci-dessus regarde la memoire libre. Un debit ne s'effondre pas
+    par manque de place mais par partage des multiprocesseurs : le 8/09,
+    `test_le_gemv_nvfp4_ne_part_pas_en_emulation` a rendu 57 Go/s au lieu de
+    300 avec huit gigaoctets libres et une conversion voisine a cent pour cent
+    d'occupation. Le test annoncait « reparti en emulation logicielle » — un
+    diagnostic faux tire d'une mesure vraie, exactement ce que cette journee a
+    produit trois fois ailleurs.
+
+    On mesure donc l'instrument avant la mesure : si la carte travaille deja
+    pour quelqu'un d'autre, le chiffre ne dira rien du code teste.
+    """
+    if not any(m.name == "debit_requis" for m in request.node.iter_markers()):
+        return
+    if not torch.cuda.is_available():
+        pytest.skip("pas de carte CUDA")
+    occupation = occupation_gpu()
+    if occupation is not None and occupation > OCCUPATION_MAX:
+        pytest.skip(f"carte a {occupation} % d'occupation — un debit mesure "
+                    f"pendant le travail d'autrui ne dit rien du code teste")

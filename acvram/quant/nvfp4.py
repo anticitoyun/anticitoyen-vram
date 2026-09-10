@@ -278,7 +278,16 @@ def dequantize_nvfp4(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16) -> tor
     vals = torch.where(neg, -vals, vals)
     block = k // t.block_scale.shape[-1]
     vals = vals.view(out_f, k // block, block)
-    scale = t.block_scale.to(torch.float32) * t.global_scale.to(torch.float32)
+    # `global_scale_rows` porte une echelle globale PAR LIGNE DE SORTIE : la
+    # fusion l'y pose parce que q, k et v gardent chacune la leur, et que les
+    # ramener a une seule les ferait passer par un arrondi e4m3 a 6 %.
+    # L'ignorer ici rendait des nombres FAUX sur tout tenseur fusionne
+    # dequantifie — chemin CPU, ou repli quand l'extension manque. Mesure du
+    # 9/09/2026 : facteur d'echelle constant de 1,1216 sur la projection k.
+    gsr = getattr(t, "global_scale_rows", None)
+    gs = (gsr.to(torch.float32).view(-1, 1) if gsr is not None
+          else t.global_scale.to(torch.float32))
+    scale = t.block_scale.to(torch.float32) * gs
     out = vals * scale.unsqueeze(-1)
     out = out.reshape(out_f, k)
     if k != t.shape[-1]:

@@ -13,6 +13,8 @@ l'autre à ce grain-là.
 import pytest
 import torch
 
+pytestmark = pytest.mark.gpu_requis
+
 from acvram.engine.loader import load_model
 from acvram.engine.runner import Engine
 from acvram.engine.sampler import SamplingParams

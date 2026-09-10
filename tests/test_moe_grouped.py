@@ -10,6 +10,8 @@ import json
 import pytest
 import torch
 
+pytestmark = pytest.mark.gpu_requis
+
 from acvram.engine.loader import load_model
 from acvram.engine.runner import Engine
 from acvram.engine.sampler import SamplingParams

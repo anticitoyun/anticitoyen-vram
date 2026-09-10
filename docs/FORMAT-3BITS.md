@@ -230,3 +230,70 @@ def q3n_gemv(x: torch.Tensor, t: Q3NTensor) -> torch.Tensor:
   synthétiques, et le tableau de sensibilité ci-dessus montre qu'un σ mal deviné
   déplace le résultat de plusieurs décibels. C'est la première chose à refaire
   quand un modèle trois bits sera sous la main.
+
+## 8 septembre 2026, soir — la table quitte la spécification pour le manifeste
+
+L'hypothèse « à huit niveaux, la symétrie vaut plus qu'un zéro » est réfutée
+par la mesure (session de mesure, 8/09) : sur 288 tenseurs d'évaluation
+disjoints des 288 d'ajustement, sept niveaux symétriques AVEC zéro gagnent
++1,73 dB en moyenne, zéro perdant, déciles dans 0,05 dB — et une table à
+huit niveaux symétriques SANS zéro, même réajustée au mieux, reste loin
+derrière : c'était le zéro qui manquait, pas le placement. Sur les blocs
+creux (85-95 % des poids sous un huitième de l'amax du bloc), le plus petit
+niveau non nul reconstruisait chaque poids nul à ±0,1025 × amax — de
+l'énergie créée, qui se compose couche après couche.
+
+Ce qui change :
+
+* **La table vit dans le manifeste**, par modèle (champ `table` de chaque
+  entrée q3n, huit flottants). Les niveaux s'ajustent par modèle — Lloyd-Max
+  sur un échantillon stratifié (couches × projections), évalué sur un
+  échantillon disjoint. `TABLE_Q3N` de la spécification d'origine reste le
+  repli des manifestes qui ne déclarent pas la leur.
+* **Invariants structurels**, vérifiés à toute lecture (`valider_table_q3n`) :
+  huit entrées physiques (le masque & 7 du dépaquetage exige un index
+  toujours valide — une table à sept niveaux répète le dernier), croissance,
+  bornes ±1 exactes (aucun écrêtage), symétrie. La symétrie est un invariant
+  DE LA SPÉCIFICATION, pas de la structure : une table asymétrique avec zéro
+  (quatre négatifs, zéro, trois positifs) est à l'étude — l'argument est que
+  la règle de symétrie visait l'écrêtage de NF4 et que ±1 présent des deux
+  côtés l'écarte — et son adoption relâcherait ce seul contrôle.
+* **Un sceau lie la table aux poids** : sha256 des 64 premiers octets du
+  qweight et de la table, dans chaque entrée, vérifié au chargement. Un
+  manifeste régénéré sans reconversion refuse de servir.
+* **Le noyau reçoit la table en argument** et la lit depuis la mémoire
+  partagée — la version `__constant__` se sérialisait dès que les fils d'un
+  warp lisaient des entrées différentes, c'est-à-dire toujours.
+
+Questions ouvertes, à trancher par la mesure : les VALEURS définitives des
+niveaux (passe stratifiée à trois tables en cours — sept symétriques avec
+zéro, huit libres avec zéro, huit symétriques sans zéro) ; l'asymétrie
+(arbitrage de l'auteur de la spécification) ; et le fait qu'un code sur huit
+inutilisé est de la capacité laissée sur la table — la mesure dit que ce
+gaspillage rapporte quand même, pas qu'aucune table à huit niveaux ne ferait
+mieux. Un SNR de poids ne prédit pas une perplexité : la décision finale
+appartient à l'éval avant/après sur le même cadrage.
+
+### Arbitrage du même soir — la symétrie tombe, l'invariant reste
+
+L'auteur de la spécification relâche la symétrie : la règle d'origine
+interdisait l'asymétrie alors qu'elle voulait interdire l'ÉCRÊTAGE, et ce
+sont les bornes ±1 aux deux extrémités qui l'empêchent. Vérification faite
+avant l'accord, pas sur parole : le biais d'une table asymétrique (erreur
+non centrée, qui se somme linéairement sur K là où un bruit croît en
+racine de K, invisible dans un SNR de tenseur) existe — 260 fois celui de
+la table d'origine — mais ne se matérialise pas en sortie ; sur un
+down_proj alimenté par ses vraies activations, la part d'erreur portée par
+la moyenne vaut 0,002 pour la table à huit niveaux avec zéro contre 0,010
+pour la table d'origine. L'invariant du validateur : huit entrées, bornes
+±1 exactes, croissance strictement monotone (égalité admise entre les deux
+dernières entrées seulement), au plus un zéro.
+
+Et la mise en garde qui justifie la table PAR MODÈLE, mesurée sur tenseur
+dense gaussien : les tables à zéro y PERDENT (13,62 à 14,52 dB contre
+15,00 pour la table d'origine). Le « zéro perdant sur 288 » est une
+propriété des tenseurs de CE modèle — creux ou à queue lourde —, pas des
+tables à zéro. **Une table q3n vaut pour la distribution sur laquelle elle
+a été ajustée, et pour aucune autre** ; graver ces niveaux comme constante
+universelle serait l'erreur inverse de celle que la première spécification
+a commise.

@@ -2681,3 +2681,755 @@ d'équivalence ne voient pas : `q3n_gemv_cuda` lisait l'échelle globale par
 62 % du temps de décodage au profil d'époque, et un noyau incapturable en
 graphe CUDA. Corrigé par la même mémorisation côté hôte ; deux tests
 verrouillent la classe entière, dont un qui capture réellement un graphe.
+
+## 8 septembre 2026 — v0.4.93-94 : la panne URT disséquée, deux dossiers restants
+
+Le modèle tout-q3n produisait « URTURTURT » (perplexité 5,6 M, pire que
+l'uniforme). La chasse, dans l'ordre des innocentements : noyau et
+répartiteur (équivalence sur tenseurs réels), poids sur disque (cosinus
+0,95–0,98 contre le NVFP4 sain, classe par classe), noyau encore à
+151 936 lignes (argmax identique à la référence sur le lm_head réel),
+transport des experts (aller-retour bit à bit, audit du 8/09 sur la branche
+poste2). L'outil qui a tranché : la trace de cosinus des activations contre
+le modèle NVFP4 sain, même invite, couche par couche.
+
+* v0.4.93 : plancher int8 sur `linear_attn.*` — insuffisant, URT encore.
+* La trace montre alors 0,99 sur les couches GDN et un effondrement à 0,57
+  dès la couche 3, première attention pleine (q/k/v/o en q3n). v0.4.94
+  étend le plancher à `self_attn.*` et `lm_head`. Coût : +229 tenseurs
+  int8, dossier stable à 32 Go (contre 296,8 équivalent bf16).
+* Après reconversion : prefill sain («  Paris. »), plus de falaise — mais
+  une décroissance PROGRESSIVE du cosinus (0,97 à la couche 7, 0,48 à la
+  13, bruit dès la 15) : un bruit de format qui se compose, réparti sur les
+  experts q3n.
+
+Deux dossiers ouverts, instruits en parallèle :
+
+* **(A) divergence des chemins de décodage** — les deux chemins dégénèrent
+  différemment (« loi,loi » direct t==1, « URT » masqué) alors que le
+  prefill est sain et que la copie des experts est innocentée. Défaut de
+  code. L'audit du pool a par ailleurs trouvé un débordement silencieux
+  possible (curseur modulo sans état par emplacement, repli top_k
+  incohérent 2 vs 8) : garde-fou et correctif fusionnés (9cf1a15), sans
+  preuve que ce fût LE bug.
+* **(B) bruit de prefill** — perplexité acvram 858 contre 137 pour le
+  NVFP4 sain sur le même harnais (harnais lui-même douteux : corpus
+  interne de 282 jetons, fenêtres de 512 qui coupent l'état de la
+  récurrence GDN — les deux chiffres ne valent que par leur écart,
+  ~1,8 nat/jeton). Les SNR du manifeste sont un PLANCHER (90 % des
+  73 872 tenseurs dans 0,10 dB autour de 13,33) : ils mesurent le couple
+  de grilles Q3_K_S→q3n, pas les poids. 67 des 68 tenseurs < 10 dB sont
+  des down_proj d'experts des couches hautes. Deux mécanismes candidats en
+  cours de mesure float64 : échelle de bloc FP8 e4m3 subnormale ou nulle
+  sur tenseur à aberrant global ; table sans zéro qui reconstruit les
+  blocs creux à ±0,1025 × amax. Correctifs esquissés selon le verdict :
+  clamp d'échelle (une ligne) ou table/bloc à rediscuter.
+
+Rappel de méthode qui a coûté une reconversion : la première hypothèse
+(GDN seule) était plausible, confirmée par un indice réel (l'ancienne
+conversion), et fausse quand même — c'est la trace par couche, pas
+l'indice, qui a montré la vraie frontière.
+
+## 8 septembre 2026 — dossier B instruit : la table sans zéro crée de l'énergie sur les blocs creux
+
+Mesure float64 sur les vingt pires tenseurs du manifeste (session de mesure,
+8/09, processeur seul). Les deux mécanismes candidats départagés :
+
+* **Échelle FP8 subnormale ou nulle : réfuté deux fois.** Les échelles à
+  zéro (jusqu'à 44,4 % des blocs) recopient des blocs source déjà vides —
+  énergie perdue 0,00 % partout, SNR inchangé à 0,01 dB en les ignorant.
+  Les subnormaux portent au plus 8,8 % de l'énergie, SNR propre pas pire
+  que les blocs normaux. Un clamp ne gagnerait rien de mesurable.
+* **Table sans zéro : confirmé, c'est tout l'écart.** Le plus petit niveau
+  (0,1025 × échelle) reconstruit chaque poids nul à ±0,1025 × amax du
+  bloc : sur un bloc creux c'est de l'énergie créée, qui se compose couche
+  après couche — la décroissance progressive du cosinus depuis la
+  couche 7. Vingt pires : 85–95 % de creux ; tenseurs à 13,3 dB : 21 %.
+  Dans un même tenseur sain : blocs denses 13,49 dB, blocs creux 8,60.
+* **Fait inattendu : les tenseurs cassés sont des experts quasi morts.**
+  97,37 % de zéros exacts dans la source pour le pire (couche 46), 90–95 %
+  pour les suivants, contre 20,73 % pour un expert sain. Les 67 down_proj
+  sous 10 dB sont des experts vides bruités — propriété du modèle
+  exploitable un jour par le planificateur.
+* **Remède mesuré, pas prédit** : table à niveau zéro, même bloc 32, même
+  échelle, 3,25 bpw inchangés — +9,6 à +16,7 dB sur les cassés, et bloc 32
+  à zéro bat bloc 16 sans zéro (3,50 bpw) sur toute la colonne. Contrôles :
+  le gain tient quand on neutralise les zéros exacts de la source
+  (+16,0 au lieu de +16,7) ; sur du synthétique dense il PERD ~0,8 dB
+  (gaussienne, laplace) et gagne fort sur queue lourde (+8,4 student t=2,
+  +12,4 avec aberrants). Sur les tenseurs sains réels, +0,95 dB dont
+  +0,41 seulement une fois la source neutralisée.
+* **Décision qui en découle — et sa limite** : pas de changement global de
+  table ; une table PAR TENSEUR choisie sur le creux mesuré à la
+  conversion (deux tables, un bit d'en-tête, zéro coût de débit). La
+  variante symétrique du niveau zéro reste à mesurer avant de graver — la
+  table gagnante actuelle est asymétrique et la spécification du 8/09 a
+  banni l'asymétrie pour une raison qui ne s'applique pas ici (±1,0
+  présent des deux côtés), à confirmer par la mesure, pas par l'argument.
+
+Ordre maintenu : le dossier A (divergence des chemins de décodage, en
+cours) passe avant tout changement de table — tant qu'il est ouvert,
+aucun SNR ne prédit une perplexité. Étalon de perplexité en cours :
+llama.cpp sur le GGUF Q3_K_S source, wiki.test.raw, contexte 512.
+
+## 8 septembre 2026 — le dossier A se referme, l'étalon de perplexité est posé
+
+* **La « divergence des chemins de décodage » n'était pas un bug** : mêmes
+  poids, même routage, seul l'ordre d'accumulation bf16 différait —
+  5,7e-3 d'écart relatif par couche, 0 exact en fp32 (mesure du 8/09,
+  branche poste2). Sur un modèle sain cet écart ne change pas le mot ; à
+  perplexité dégradée, l'argmax n'est plus porté par le signal et deux
+  ordres de sommation donnent deux charabias différents — « loi,loi » et
+  « URT » étaient deux tirages du même bruit. Les deux chemins accumulent
+  désormais en float32 (écart à la référence 6,58e-3 → 5,13e-3). Le seul
+  dossier restant est le format : la table sans zéro sur les blocs creux.
+* **Le harnais de perplexité mentait d'un facteur quinze.** llama.cpp sur
+  le GGUF Q3_K_S source : **9,1831 ± 0,073** (wiki.test.raw, sha256
+  173c87a5…, 1 290 590 octets ; 584 fenêtres de 512 disjointes, 256
+  positions notées par fenêtre, binaire e34f042). Le « 137 » d'acvram sur
+  le NVFP4 sain venait du corpus interne de 283 jetons noté depuis la
+  position zéro — les premières positions coûtent une dizaine de nats à
+  n'importe quel modèle. Correctif : --min-context (fusionné), éval
+  comparable = wiki.test.raw, fenêtre 512, stride 512, min_context 256,
+  après vérification du compte de jetons des deux tokeniseurs.
+* Au passage : CUDA_VISIBLE_DEVICES réparé (detect_rig interrogeait
+  nvidia-smi qui l'ignore ; renumérotation à la manière de CUDA), la
+  machine se partage désormais carte par carte ; et sept échecs de tests
+  graphes/MoE observés pendant qu'une mesure occupait la 5090 étaient de
+  la contention GPU, pas une régression — leçon : la suite complète ne se
+  juge que carte libre.
+* Mesures en attente : perplexité q3n comparable (à l'étalon 9,18, en
+  séquentiel après le contrôle NVFP4), Lloyd-Max stratifié 288+288
+  tenseurs disjoints (table unique ou par tenseur).
+
+## 8 septembre 2026, midi — l'étalonnage inter-instruments attrape un bug de harnais
+
+Protocole (session de mesure) : même corpus wiki.test.raw (sha256
+173c87a5…), mêmes fenêtres de 512 disjointes, positions notées à partir de
+256 jetons de contexte, llama.cpp d'un côté, acvram eval de l'autre, sur
+deux témoins convertis en int8 partout (--autoriser-grossissement — la
+garde anti-grossissement avait silencieusement basculé le premier témoin
+en q3n : dossier nommé « int8 », MLP à 14,9 dB ; attrapé au manifeste,
+règle : diff des manifestes TENSEUR PAR TENSEUR avant d'attribuer un écart
+à un format).
+
+* phi-4 (dense) : acvram 6,911 contre llama.cpp 6,5988 ± 0,041 — écart de
+  +4,7 %, soit sept fois et demie l'incertitude d'échantillonnage (±0,63 %)
+  et plus du double du seuil de 2 % : il est réel et NON EXPLIQUÉ. Une part
+  inconnue revient à la requantification Q4_K_M→int8, le reste à
+  l'instrument ; une mesure de séparation est en cours (Q8_0 par
+  llama-quantize, même instrument des deux côtés — l'attente écrite
+  d'avance : un int8 à ~44 dB coûte d'ordinaire bien moins de 1 % de
+  perplexité, il resterait alors 3-4 % de biais d'instrument à documenter,
+  petit devant le facteur 4,1 des hybrides mais dangereux le jour où il
+  s'additionnera à un gain de format de 5 %).
+* Qwen3.6-12B (hybride GDN) : acvram 129,185 contre 31,6919 ± 0,265 —
+  facteur 4,1. Or les tenseurs sont à ~44 dB (vérifiés) et le chemin de
+  service int8 est innocenté sur tenseurs réels (écart 1,7e-3 contre un
+  produit dense, l'arrondi bf16). Le défaut est lié à l'architecture
+  HYBRIDE, pas au format ni au noyau.
+* Piste désignée (en cours de confirmation) : le magasin d'états
+  récurrents des couches linear_attn n'est pas réinitialisé entre les
+  fenêtres d'évaluation — le cache KV repart à zéro à chaque fenêtre, pas
+  l'état GDN ; l'état de la fenêtre N fuit dans la N+1. Test : après
+  correctif, l'éval 12B doit tomber de 129 vers ~32.
+* Conséquence : toutes les perplexités mesurées sur des hybrides par
+  acvram eval (858 q3n, 137 NVFP4 de Coder-Next) sont invalidées jusqu'au
+  correctif. L'écart q3n/NVFP4 devra être remesuré après : correctif
+  d'état + égalisation du filet (reconversion q3n avec snr_floor 25 —
+  l'ancienne avait snr_floor 0, AUCUNE promotion, 143 shared_expert sans
+  filet sur le chemin de 100 % des jetons).
+
+Leçon de méthode, payée trois fois aujourd'hui : ce qui n'est pas imprimé
+à côté du chiffre finit par être supposé faux — le cadrage, le snr_floor,
+les formats réels. acvram eval imprimera les formats du modèle évalué.
+
+## 8 septembre 2026, 12:10 — verdict : la récurrence GDN d'acvram diverge avec la longueur
+
+Balayage à trois fenêtres, deux modèles int8 partout, mêmes corpus/cadrage
+des deux côtés (étalons llama.cpp de la session de mesure, cibles écrites
+d'avance) :
+
+  fenêtre   phi-4 dense (acvram/llama)     12B hybride (acvram/llama)
+    128      9,592 / 9,1320  = +5,0 %      113,42 / 52,577 = ×2,16
+    512      6,911 / 6,5988  = +4,7 %      129,19 / 31,692 = ×4,08
+   2048      5,984 / 5,8406  = +2,45 %     221,91 / 24,080 = ×9,21
+
+* Le dense porte un biais de forward de +2,5 à +5 % (les bornes de
+  notation, fenêtres et agrégation sont IDENTIQUES à llama.cpp, vérifié
+  dans perplexity.cpp e34f042 — audit de la nuit ; le +4,7 % n'est pas de
+  la comptabilité). À séparer du coût int8 par un phi-4 bf16 pur (en file).
+* L'hybride DIVERGE : l'écart double à chaque quadruplement de fenêtre, et
+  la perplexité acvram EMPIRE avec le contexte (113→129→222) là où le
+  modèle réel s'améliore (53→32→24). Le défaut est cumulatif au fil des
+  pas de la récurrence linear_attn — pas le format (int8 44 dB), pas le
+  chemin de service (1,7e-3), pas le magasin d'états entre fenêtres
+  (réinitialisé), pas la cohérence bloc/pas-à-pas (4,2e-4) : la DYNAMIQUE
+  elle-même (décroissance, portes, convolution) s'écarte de la référence
+  et l'erreur se compose.
+* Conséquence maintenue : toutes les perplexités acvram sur hybrides sont
+  invalidées (858 q3n, 137 NVFP4, 7,233 nemo). Et l'URT/13,5 t/s de
+  Coder-Next tournait sur cette même récurrence : la correction peut
+  changer aussi la qualité de génération, pas seulement l'éval.
+
+## 8 septembre 2026, 12:30 — le témoin hybride était une architecture servie faux en silence
+
+Le « défaut hybride » du balayage n'était pas dans le harnais ni dans la
+récurrence : le témoin Qwen3.6-12B est un **qwen35**, dont le GGUF déclare
+`rope.dimension_sections = [11, 11, 10, 0]` et que llama.cpp sert en
+LLAMA_ROPE_TYPE_**IMROPE** (M-RoPE entrelacé) — acvram lui appliquait un
+NEOX standard. RECTIFICATION une heure plus tard, à la lecture de
+ggml (ops.cpp:5639) : l'entrelacement IMROPE choisit l'AXE de position
+par paire mais les fréquences avancent uniformément — en texte pur, si
+les quatre flux de positions sont égaux, IMROPE ≡ NEOX et ce diagnostic
+ne tient QUE si llama.cpp alimente des positions non égales pour qwen35
+en texte (vérification en cours sur le graphe, avec un candidat de
+repli : attention.key_length = 256 là où hidden/têtes donnerait 213 —
+le head_dim ne se déduit pas, il se lit). Les signatures du balayage
+(×2,16 → ×4,08 → ×9,21 ; GDN exacte jusqu'à t=2048 ; dense propre)
+restent des faits ; leur cause au sein de l'attention pleine du qwen35
+reste À PROUVER, l'outil de dump par couche est prêt si l'hypothèse
+RoPE tombe. Vérifié dans les DEUX GGUF (session
+de mesure) : Coder-Next (`qwen3next`) ne porte AUCUNE section, freq_base
+5e6 et rotary_dim 64 correctement lus — son RoPE NEOX est le bon
+traitement sur les trois axes qui peuvent mentir (type, theta, dims).
+
+* Ce qui se referme : le harnais est utilisable sur qwen3next ; le 858
+  q3n / 137 NVFP4 de Coder-Next ne sont plus suspects d'un défaut de
+  moteur — ils restent incomparables entre eux par le FILET asymétrique
+  (snr_floor 0 contre 25). Reconversion snr_floor 25 + éval 584 fenêtres
+  en cours ; l'écart à l'étalon 9,1831 sera ENFIN le coût du format.
+* Ce qui s'ouvre : implémenter l'IMROPE (les qwen35 du parc sont
+  aujourd'hui servis faux en silence) avec validation par juge extérieur ;
+  et le garde-fou immédiat — une architecture dont le type de RoPE n'est
+  pas reconnu se REFUSE à la conversion et au chargement. La leçon de la
+  journée, formulée par la session de mesure : le défaut n'était pas le
+  calcul mais le silence du calcul sur ce qu'il ne savait pas faire.
+* Biais d'instrument résiduel sur dense : +2,5 à +5 %, décroissant avec la
+  fenêtre, non expliqué (décomposition noyaux/précision infaisable en OOM
+  sur modèle entier) — borné, documenté, à ne jamais soustraire d'un
+  chiffre mesuré à une autre fenêtre.
+
+## 8 septembre 2026, 13:10 — fausse cause racine, rétractée en vingt minutes
+
+Une alerte « le facteur de décroissance GDN est transformé deux fois »
+(le GGUF stocke −exp(A_log), gdn.py réappliquerait −exp) a été démontrée
+FAUSSE par son autrice avant qu'aucun code ne change : le drapeau
+`gdn_a_log_negexp` est lu, branché (loader.py:595-598 inverse la valeur
+stockée quand il est vrai, aller-retour vérifié au bit près) et True dans
+les config des modèles convertis — c'était le montage du test isolé qui
+sautait l'inversion du chargeur. Vérifié indépendamment ici avant de
+rétracter. Ce qui reste VRAI de cette séquence : la couche 0 réelle
+d'acvram est à 1,1 % de llama.cpp, PLATE en position (le coût attendu de
+deux quantifications différentes) — la couche linéaire est saine sur
+toute la ligne ; un bruit de poids ne croît pas en position (mesuré,
+0,95×) ; et le cumul par blocs égale le pas-à-pas (6,9e-05). Le défaut du
+12B témoin reste SANS cause identifiée (les cosinus par couche d'un run
+réel se dégradent progressivement entre couches GDN quand la ligne de
+base Q5↔Q8 reste plate — fait mesuré, inexpliqué). Le dossier Coder-Next,
+lui, n'a jamais dépendu de cette alerte : son éval « avant » (q3n sans
+filet, cadrage propre) est relancée telle quelle.
+
+Leçon, la troisième du même jour pour les montages : un montage à moitié
+réparé donne un chiffre PLAUSIBLE — la bonne forme, le bon ordre de
+grandeur, la signature attendue — et le plausible est ce qui échappe au
+contrôle. Chaque montage s'éprouve après CHAQUE réparation, pas
+seulement à la première.
+
+## 8 septembre 2026, 15:15 — BILAN de la série Q3N : le format est innocenté, le moteur est désigné
+
+Quatre chiffres, même corpus (wiki.test.raw, sha256 173c87a5…), même
+cadrage (584 fenêtres de 512 disjointes, 148 920 positions notées à
+min_context 256), même harnais :
+
+  étalon llama.cpp, GGUF Q3_K_S source     9,1831 ± 0,073
+  q3n v0.4.94, SANS filet (snr_floor 0)    1005,838
+  q3n v0.4.95, filet réel (144 promus)     209,036
+  NVFP4 (snr_floor 25, ancien dossier)     193,621
+
+* **Le filet vaut 1,57 nats** (×4,8) : les 144 shared_expert promus int8
+  étaient le premier poste. PROMOTE ignorait q3n en silence (corrigé
+  v0.4.95, test au registre : tout format quantifié a une issue).
+* **Le format ne coûte que 0,077 nats** (+8 % relatif) : q3n à 3,25 bits
+  contre NVFP4 à 4,5, à filet égal, mêmes conditions — 25 % d'octets en
+  moins pour 8 % de perplexité relative en plus. C'est le chiffre que la
+  journée cherchait, et il est favorable au format.
+* **L'excès dominant (3,05 nats) est COMMUN aux deux formats** : le
+  « fait sans cause » des hybrides est partagé par qwen3next, mesuré sur
+  le dossier — au moteur ou au harnais sur cette architecture, pas au
+  format. Paradoxe directeur pour la suite : le NVFP4 à ppl 193 au
+  harnais génère du texte cohérent en usage réel — le défaut penche vers
+  le chemin d'évaluation/prefill des hybrides, pas la génération.
+* Prédictions écrites d'avance et leurs verdicts (session OnePlus) :
+  « après » prédit 25-70 centre 40, mesuré 209 — modèle du bruit blanc
+  des routés réfuté par son autrice : l'erreur de la table sans zéro est
+  un BIAIS CORRÉLÉ entre experts (énergie créée, même géométrie partout),
+  qui s'additionne au lieu de se moyenner ; sa prédiction dérivée pour la
+  table à niveau zéro (30-90) est bornée par le mode commun (~179 tant
+  qu'il n'est pas expliqué). « Ça ne descendra pas à 9,18 » : tenu.
+
+Suite, dans l'ordre convenu à trois : (1) expliquer le mode commun des
+hybrides (dump par couche sur Coder-Next, chemin d'éval vs génération) ;
+(2) table à niveau zéro par manifeste (mécanique v0.4.95 prête et
+scellée, valeurs d'poste1 en attente de ce préalable) ; (3) le programme
+performance sur le créneau du modèle exilé — distribution du routage
+(l'outil de trace n'a jamais pris de trace réelle), banc comparatif
+reproductible (la dispersion 21-26 % est un préalable), cache d'experts
+(promis par tiering.py, absent du moteur, VRAM réservée perdue),
+recouvrement transfert/calcul (bus à 5,7/18,7 Go/s, cartes muettes une
+seconde sur deux), transfert en format compact, et l'axe jetons/kJ que
+personne ne publie (104 j/kJ net déjà mesurés au compteur, cartes
+bridées 400/275 W).
+
+### Addendum du soir — la piste n°1 du mode commun est nommée et testable
+
+La fourchette « 30-90 après table » est RETIRÉE par son autrice : la table
+ne peut agir que sur les 0,077 nats qui séparent les formats, pas sur les
+3,05 communs. Et le paradoxe (ppl 193 au harnais, texte cohérent en
+génération) est requalifié en MESURE : deux faits incompatibles sur le
+même modèle décrivent deux CHEMINS — la génération ne consomme que la
+dernière position de chaque passe, l'évaluation les consomme toutes
+(`logits_positions=all_token_indices`). Test décisif en cours (session
+OnePlus) : logits d'un prefill unique multi-positions (A) contre décodage
+pas-à-pas par le chemin réel de génération (B), 32 jetons, témoin dense
+phi-4 DANS le montage (A et B doivent y coïncider, sinon c'est le montage
+qui diverge). Si A[-1]=B[-1] mais A[i]≠B[i] : le chemin d'évaluation
+multi-positions des hybrides est le défaut, toutes les perplexités
+hybrides sont à refaire après correctif, et le vrai q3n est peut-être
+bien sous 209.
+
+### Addendum, 16 h — l'évaluation est innocentée, le service est touché
+
+Perplexité par le chemin de GÉNÉRATION (décodage pas à pas, cache KV et
+magasin d'états persistants, jetons du corpus forcés) contre le chemin
+d'ÉVALUATION (préremplissage multi-positions), MÊMES 512 jetons, même
+min_context 256, une seule exécution, q3n avec filet :
+
+  A préremplissage  108,159   B décodage pas à pas  121,666   (255 positions)
+
+Les deux chemins donnent le même ORDRE, ce qui suffit à écarter
+l'évaluation comme cause du facteur vingt. Mais **B est 12,5 % pire que
+A, et ce n'est pas un arrondi** : les écarts de logits entre chemins
+valent 1,4e-02, l'incertitude d'échantillonnage ≈6 % par chiffre. Le
+service reste donc dégradé PAR RAPPORT à l'évaluation, d'un montant
+mesuré et sans cause — fait supplémentaire, à ne pas ranger sous
+« les deux concordent ». **Le paradoxe « perplexité 193 mais
+texte cohérent » n'est donc pas un défaut d'instrument : le service
+calcule bien ce que l'évaluation mesure.** La priorité du projet est
+confirmée : la dégradation est réelle en service.
+
+Contrôle de représentativité, exigé et payant : A vaut **108 sur ce
+sous-ensemble contre 209 sur les 584 fenêtres** — le début du corpus
+n'est pas représentatif (facteur ~2), tout essai court reste interne à
+lui-même et ne se relie pas au chiffre global.
+
+Suspects éliminés ce soir, tous par la mesure : prefill multi-positions
+(causalement correct, 0,000e+00), divergence éval/génération (concordance
+aux arrondis, témoin dense DANS le montage — et l'hybride diverge MOINS
+que le dense), amplification récurrente de l'erreur de poids (composition
+en √N des deux côtés, rapport constant 2,3), hypersensibilité
+architecturale comme explication (mesurée à 6,1× sur perturbation
+modérée, mais 26× trop petite ET saturante — les hybrides SE
+requantifient, +11,9 % au pire chez llama.cpp : la demande de 160 Go bf16
+à l'utilisateur est épargnée).
+
+Sous-produit réutilisable : **une couche récurrente est 2,3 fois plus
+sensible à une perturbation de poids qu'un perceptron de même largeur** —
+critère de placement pour le planificateur, et justification rétrospective
+du plancher int8 de la v0.4.94.
+
+Question restante, unique et nette : pourquoi acvram dégrade-t-il d'un
+ordre de grandeur par rapport à llama.cpp sur le même modèle, en service
+comme en évaluation, alors que chaque composant testé isolément est sain.
+Voie retenue : comparer les LOGITS (toutes nos comparaisons opposent
+acvram à acvram, sauf la perplexité qui est l'agrégat final).
+
+### Addendum, 18 h — le composant est nommé : les couches d'attention linéaire
+
+Deux mesures indépendantes convergent et ferment la chasse.
+
+**Par couche** (session OnePlus), chaque couche alimentée avec l'entrée
+EXACTE de llama.cpp — donc sans propagation d'erreur — sur les neuf
+premières couches du 12B :
+
+  attention pleine (couches 3, 7)      1,0 à 1,3 %   cos 1,00048
+  attention linéaire (0-2, 4-6, 8)     10,9 à 40,2 % cos 0,918 à 0,996
+
+Un facteur 10 à 40 entre les deux familles, mêmes poids, même passe, même
+perceptron à experts — ce qui innocente le MoE, l'attention pleine, le
+RoPE et le harnais d'un seul coup, et explique la constance du facteur
+global : la proportion de couches linéaires est elle-même constante.
+
+**Par position** (ici), NLL d'acvram contre celles de llama.cpp sur les
+mêmes 255 positions notées, ventilées par difficulté de la référence :
+
+  quartile de difficulté   référence   acvram   écart
+    1 (trivial)              0,001      1,662   +1,66
+    2                        0,085      3,197   +3,11
+    3                        0,978      4,333   +3,36
+    4 (difficile)            5,410      8,479   +3,07
+
+Le fait décisif est le premier quartile : **là où la référence est
+certaine à 99,9 %, acvram tombe à 19 %**. L'écart est ensuite à peu près
+constant (~3 nats) — signature d'un bruit ajouté aux logits, pas d'une
+erreur sélective. Corrélation position par position 0,59 : nos positions
+difficiles ne sont qu'à moitié les siennes.
+
+Deux lectures antérieures sont donc RENVERSÉES, et il faut le dire :
+la queue d'acvram (29,6 % du coût sur 10 % des positions) est plus
+LÉGÈRE que celle du moteur sain (48,4 %) — ce n'était pas un symptôme
+mais l'inverse ; et le top-1 sain vaut 63,2 %, pas les 35-40 % supposés,
+donc notre 32,2 % est bien plus loin d'un modèle sain qu'estimé.
+Enfin la corrélation NLL/identifiant vaut 0,434 chez nous contre 0,163 en
+référence — à surveiller, mais probablement un effet indirect de la
+difficulté.
+
+**Chaîne causale complète** : les couches d'attention linéaire produisent
+11 à 40 % d'erreur → les activations finales sont bruitées → les logits
+le sont → même les prédictions triviales deviennent incertaines →
+perplexité ×20 alors que l'argmax reste souvent correct (32 % de top-1),
+d'où du texte plausible. Le paradoxe de la journée est résolu.
+
+Point structurant pour la suite : `gdn.py` n'utilise QUE les fonctions de
+référence de `transformers`. Valider notre couche contre `transformers`
+revenait donc à la comparer à elle-même — le test ne pouvait pas échouer.
+L'écart mesuré oppose en réalité **transformers à llama.cpp** sur cette
+architecture, et la question devient : laquelle des deux implémentations
+est juste. Candidat précis, à vérifier en premier : llama.cpp normalise
+explicitement q et k après la convolution causale (`ggml_l2_norm` avec
+l'epsilon du modèle, qwen35.cpp:318-321) là où acvram délègue au noyau
+par `use_qk_l2norm_in_kernel=True` (gdn.py:120).
+
+### Addendum, 18 h 30 — CAUSE RACINE confirmée : le drapeau `gdn_a_log_negexp` n'atteint pas le moteur
+
+La « fausse cause racine » rétractée à 13 h était en réalité vraie, et
+c'est la rétractation qui était fausse. Preuve prise dans le moteur
+chargé, pas dans le source (session OnePlus), et vérifiée
+indépendamment ici sur les deux dossiers convertis :
+
+  `config.json`                     gdn_a_log_negexp = **True**
+  `acvram_manifest.json` → model    **ABSENT**
+
+Or `load_model` reconstruit la spec depuis le MANIFESTE (`loader.py:155`)
+et `ModelSpec.to_dict()` ne sérialise pas `raw` — la branche
+d'inversion de `loader.py:595` ne s'exécute donc jamais en service. Le
+facteur de décroissance est pris tel quel puis retransformé par
+`−exp()` dans gdn.py : deux à cent fois trop fort. Mesuré au chargement :
+`a_log` min −0,3379 / max −0,0038, identique au disque, là où la valeur
+inversée vaudrait −5,5609 / −1,0850.
+
+Effet sur la couche 0, entrée exacte de llama.cpp : sortie de la GDN
+1,109e−01 → **1,124e−02** (÷10), sortie de couche 1,089e−01 →
+**2,177e−02** (÷5), et les normes concordent enfin (291,4 contre 292,5,
+il manquait 8 % d'énergie). Cela explique exactement le profil mesuré
+une heure plus tôt — 1 % sur les attentions pleines, 11-40 % sur les
+linéaires, seules porteuses d'un `a_log` — et la constance du facteur
+global.
+
+**Toutes les perplexités hybrides de la journée sont à refaire**, et le
+vrai q3n est probablement très en dessous de 209. Correctif : `load_model`
+complète `spec.raw` depuis `config.json` quand le manifeste ne le porte
+pas — répare les modèles DÉJÀ convertis, sans reconversion.
+
+Leçon, symétrique de celle du matin : **vérifier un objet ne dit rien
+d'un autre**. La rétractation reposait sur `load_model_spec(dossier).raw`,
+que le chargeur n'utilise pas ; lire le code ne remplace pas mesurer ce
+qu'il produit. Le relevé qui contenait déjà la réponse — « clés gdn dans
+manifest[model] : aucune » — était sous nos yeux depuis le matin.
+
+### 8 septembre, 17 h 20 — après correctif : le coût réel du format, enfin mesuré
+
+Mêmes 584 fenêtres, 148 920 positions notées, wiki.test.raw, cadrage
+512/512/min_context 256 pour tous.
+
+  étalon llama.cpp, Q3_K_S source            9,1831 ± 0,073
+  acvram NVFP4  (4,5 bpw)                   **13,692**   +0,398 nat
+  acvram q3n    (3,25 bpw)                  **15,361**   +0,514 nat
+  → **coût propre du format q3n : +0,115 nat, +12,2 % pour −25 % d'octets**
+
+Avant le correctif, les mêmes dossiers rendaient 193,6 et 209,0 : le
+facteur 21-24 qui masquait tout est tombé à 1,5-1,7. Et l'essai court
+rend du français correct là où il produisait « URTURTURT ».
+
+**Contrôle par l'immobilité, plus convaincant que le gain** : phi-4
+dense rend **6,911 avant ET après** le correctif, au millième près — un
+modèle sans `a_log` ne devait pas bouger, il n'a pas bougé ; de même les
+couches d'attention pleine sont inchangées au chiffre près dans la mesure
+par couche. Un correctif se prouve autant par ce qu'il laisse intact.
+
+Biais d'instrument, MESURÉ et non estimé : phi-4 int8 6,911 contre 6,5988
+= **+0,0461 nat (+4,73 %)** sur dense, au même cadrage.
+
+Décomposition en cours des 0,398 nat du NVFP4 :
+  0,398 = coût de l'opération de requantification + biais d'instrument
+          (0,0461) + coût de grille propre au NVFP4 + résidu
+Le troisième terme avait été posé à zéro par erreur — 4,5 bits depuis 3,4
+reste un changement de grille et coûte quelque chose. Témoins en cours
+(session de mesure) : Q3_K_S → Q3_K_S (opération seule) et Q3_K_S →
+Q4_K_S (opération + grille plus fine). Réserve posée d'avance : rien ne
+garantit que ces termes s'additionnent linéairement en log-vraisemblance ;
+une somme juste à 2 % conclurait, une somme fausse de 20 % mettrait
+peut-être en cause l'additivité plutôt qu'un terme manquant.
+
+**Comment lire le +12,2 %** : c'est un arbitrage, pas une victoire. Sur
+un modèle qui tient en mémoire, personne ne paiera 12 % de qualité pour
+un quart d'octets ; sur un modèle exilé, ce quart décide de ce qui reste
+en VRAM et de ce qui traverse le bus — poste qui gouverne le débit
+(5,7 Go/s effectifs sur 18,7, 479-541 Mio par jeton). **q3n se justifie
+par le tiering, pas dans l'absolu.** La mesure qui trancherait vraiment,
+et que personne n'a faite : à mémoire constante, q3n avec moins de
+couches exilées contre NVFP4 avec davantage d'exil — les 12,2 % de
+perplexité contre les jetons par seconde et les joules que l'exil évité
+fait gagner. Réserve qui voyage avec le chiffre : il vaut pour une
+requantification depuis une grille contenant un zéro, et ne se transporte
+pas à des poids bf16.
+
+### 8 septembre, 18 h — décomposition des 0,399 nat : 81 % restent inexpliqués
+
+Témoins mesurés par la session de mesure, mêmes 584 fenêtres, même
+cadrage, chaîne llama.cpp validée idempotente au passage :
+
+  (a) opération de requantification (Q3_K_S → Q3_K_S)   **0,0000 nat**
+      identité à la quatrième décimale : déquantifier puis requantifier
+      sur la même grille ne coûte rien
+  (b) changement de grille vers plus fin (→ Q4_K_S)     **0,0291 nat** (+3,0 %)
+  (c) biais d'instrument, mesuré sur DENSE (phi-4)      **0,0461 nat** (+4,73 %)
+  ————————————————————————————————————————————————————————————————
+  écart NVFP4 − étalon                                   0,3994 nat
+  **(d) résidu = 0,324 nat, soit +38,3 % — 81 % de l'écart**
+
+Le seuil de réalité était 0,01 nat : on est trente fois au-dessus. Le
+résidu est réel.
+
+**Ce que (d) contient, et qui n'est pas forcément un défaut** : tout ce
+que notre chaîne de conversion fait EN PLUS d'un changement de grille —
+recherche d'échelles par canal (AWQ), rotation de Hadamard, filet de
+promotions, mélange de formats dans un même dossier — plus le biais
+d'instrument sur architecture HYBRIDE, jamais mesuré (le (c) ci-dessus
+vaut pour du dense). Pour absorber les 0,324 à lui seul, ce biais devrait
+valoir sept fois le biais dense : possible mais peu probable, il restera
+sans doute quelque chose.
+
+Réserves du témoin (b), à garder avec le chiffre : il mesure ce que
+llama.cpp paie pour changer de grille, pas ce que NVFP4 paie chez nous
+(grilles et structures différentes) ; c'est une borne. Mais elle joue
+CONTRE l'hypothèse d'un gros résidu — si le vrai coût de format était
+plus élevé, le résidu diminuerait d'autant. Qu'il reste 0,324 malgré une
+borne basse est donc un argument solide.
+
+**Suite décidée** : (1) mesure du biais sur hybride — le 12B témoin
+contre les étalons 31,6919 (c=512) et 24,0799 (c=2048), seul terme
+pouvant encore absorber une part importante sans hypothèse ; (2) si le
+résidu survit, le décomposer par ce que fait notre conversion —
+convertir le même modèle SANS AWQ, SANS Hadamard, SANS promotions, et
+mesurer chaque variante. Chacune est censée AMÉLIORER la qualité ; si
+l'une la dégrade, le fil est tenu. Quatre conversions, quatre mesures,
+chaque terme isolé au lieu d'être deviné.
+
+### 8 septembre, 19 h — le témoin hybride est guéri, le résidu survit entier
+
+Après correctif, 12B témoin int8, corpus entier, contrôle d'`a_log`
+chargé conforme (−5,5609 / −1,0850) :
+
+  fenêtre 512, contexte 256    acvram **31,933** contre 31,6919 → **+0,76 %**
+  fenêtre 2048, contexte 1024  acvram **24,005** contre 24,0799 → **−0,31 %**
+
+Ce modèle rendait **129,185 et 221,914** le matin : les facteurs 4,08 et
+9,21 ont entièrement disparu, et le second écart est **négatif** —
+acvram fait très légèrement mieux que llama.cpp. Le « fait sans cause »
+qui a lancé la chasse n'existe plus.
+
+**Avertissement retiré par son autrice** : la « dépendance du biais à la
+longueur de contexte » venait de seize fenêtres non comparables ; sur le
+corpus entier l'écart décroît légèrement, comme le biais dense, et les
+deux valeurs sont trop petites pour en tirer une loi. La décomposition
+n'a pas besoin de cette limite. Le cumul intermédiaire montre pourquoi :
+24,05 après 16 fenêtres, 23,82 après 32, 22,79 après 64, 24,14 après
+128 — **6 % d'oscillation**, largement de quoi fabriquer une fausse loi.
+
+**Conséquence sur la décomposition, et elle ne va pas dans le sens
+espéré** : le biais d'instrument sur HYBRIDE vaut environ zéro. Il ne
+peut absorber aucune part des 0,324 nat de résidu, qui survit entier.
+
+**Et la question qui se retourne** : si le biais est nul sur hybride,
+pourquoi vaut-il **+4,73 % sur DENSE** (phi-4 : 6,911 contre 6,5988) ?
+Une architecture plus simple s'écarte six fois plus qu'une architecture
+compliquée. Cette anomalie semblait négligeable à côté du facteur vingt ;
+elle ne l'est plus, et c'est peut-être elle qui porte le résidu. Le plan
+de décomposition (convertir sans calibration, sans Hadamard, sans
+promotions, mesurer chaque variante) devrait donc s'appliquer **à phi-4
+d'abord** : modèle plus petit, mesure plus rapide, et l'écart inexpliqué
+y est proportionnellement plus grand.
+
+### 8 septembre, 18 h 05 — le biais d'instrument pur est nul
+
+Témoin choisi pour ne rien mêler : **Qwen3-0.6B-Q8_0**, dense, minuscule,
+source déjà en huit bits — converti en **bf16 PUR** (310 tenseurs, tous
+bf16, aucune quantification), donc ni perte de format ni changement de
+grille à démêler.
+
+  llama.cpp sur le GGUF Q8_0    **21,9438 ± 0,192**
+  acvram bf16 pur               **22,0040**   (148 920 positions)
+  écart                         **+0,0027 nat, +0,27 %**
+
+Sous le seuil de réalité de 0,01 nat : **le calcul de perplexité d'acvram
+et celui de llama.cpp donnent le même nombre** quand aucune
+quantification n'intervient. L'hypothèse d'un défaut d'instrument, ouverte
+le matin, est fermée.
+
+**Portée exacte, à ne pas dépasser** : ce qui est établi, c'est que le
+calcul de perplexité lui-même est juste sur un DENSE non quantifié de
+0,6 milliard de paramètres. Ce n'est pas « acvram n'a pas de biais » : un
+MoE de 80 milliards servi en tiering emprunte d'autres chemins (routage,
+exil, transport d'experts) qui ne sont pas couverts par ce témoin.
+
+**Deux conséquences.**
+1. **Le terme (c) était surestimé d'un facteur dix-sept** : le biais pur
+   vaut 5,9 % du 0,0461 nat retenu. Les +4,73 % de phi-4 ne sont donc pas
+   un biais mais le **coût de la requantification Q4_K_M → int8**, ce qui
+   recoupe les +3,0 % mesurés pour Q3_K_S → Q4_K_S par une voie
+   totalement indépendante — deux chemins, même ordre de grandeur.
+   Note de méthode : la conversion de référence de phi-4 n'avait NI
+   calibration, NI Hadamard, NI promotions (lu au manifeste avant de
+   lancer quoi que ce soit) — quatre conversions épargnées et une
+   prédiction réfutée sans mesure.
+2. **Le résidu de Coder-Next s'aggrave** :
+   0,3994 = (a) 0,000 + (c) **0,003** + coût de grille ≈ 0,029 +
+   **(d) ≈ 0,367 nat, soit +44 % et 92 % de l'écart total.**
+   Mais il s'aggrave dans la bonne direction : ce n'est ni l'instrument,
+   ni l'opération de requantification, ni le changement de grille. Restent
+   deux différences avec ce témoin — l'**architecture hybride** (le 12B de
+   poste2 la départage : +0,76 % et −0,31 %, donc elle n'explique rien) et
+   **ce que la chaîne de conversion fait en plus** sur les gros modèles :
+   échelles par canal, Hadamard, promotions, formats mélangés. C'est la
+   seule piste qui reste, et elle se décompose étape par étape.
+
+### 8 septembre, 18 h 15 — un second défaut de convention : la normalisation des poids d'experts
+
+Même mécanisme que l'`a_log` du matin : une convention absente du
+fichier, un défaut choisi par nous, la vraie valeur codée en dur chez
+llama.cpp.
+
+  `lfm2.cpp:32` et `qwen3next.cpp:483` : `build_moe_ffn(..., norm_w = **true**, ...)`
+  GGUF LFM2.5 et Coder-Next : **aucune clé `expert_weights_norm`**
+  `gguf.py:528` (branche lfm2moe) : `bool(g("expert_weights_norm", **False**))`
+
+Avec un routage à quatre experts, des poids non normalisés somment à une
+valeur arbitraire au lieu de 1 : la sortie du bloc part à une échelle
+fausse ET variable selon le jeton.
+
+**Mesuré** sur LFM2.5-8B-A1B converti en bf16 PUR (aucune quantification,
+modèle résident, 146 717 positions) :
+
+  llama.cpp Q4_K_M                    **33,148 ± 0,321**
+  acvram, normalisation absente       **110,350**   (×3,33)
+  acvram, normalisation forcée        **58,815**   (×1,77)
+  → le défaut vaut **0,629 nat, facteur 1,88** — et il reste **+77 %**
+
+**Audit complet du routage contre llama.cpp**, fait champ par champ
+plutôt que supposé :
+* **scoring** : `qwen3moe.cpp:89` et `qwen3next.cpp:476` codent
+  `GATING_FUNC_TYPE_SOFTMAX` **en dur**, sans lire le fichier — notre
+  défaut `softmax` est juste. La règle « clé absente donc sigmoïde » que
+  j'allais généraliser est fausse pour nos familles : llama.cpp ne force
+  le sigmoïde que pour AFMOE, MISTRAL4, GLM4_MOE, GLM_DSA et STEP35.
+* **échelle** : `llama-graph.cpp:1413` — `if (w_scale != 0.0f && w_scale
+  != 1.0f)`, donc leur défaut 0,0 et le nôtre 1,0 sont tous deux neutres.
+* **normalisation** : le seul écart réel, confirmé pour lfm2moe ET
+  qwen3next.
+
+**Ce qui reste** : les +77 % de LFM2.5 après correction. Le modèle est
+hybride (`shortconv.l_cache = 3`), et la table des témoins garde sa
+forme — les quatre modèles fautifs sont hybrides, le seul propre
+(Qwen3-0.6B, transformeur classique) sort à +0,27 %. Le défaut de
+normalisation était réel mais partiel : il masquait la piste hybride, il
+ne la remplace pas. Témoin décisif en cours : `Qwen3-Coder-30B-A3B`, un
+MoE en architecture Qwen3 classique — ni convolution, ni récurrence, et
+routage vérifié identique des deux côtés.
+
+Contrôle de plausibilité qui a servi : `gemma-4-31B` rend **4452** de
+perplexité chez llama.cpp — modèle inutilisable comme témoin, écarté
+avant d'avoir mesuré quoi que ce soit avec.
+
+### 8 septembre, 18 h 30 — deux faits d'instrumentation qui qualifient tous nos débits
+
+**1. Le régime de puissance a changé ce soir, et la colonne du banc le
+date.** `plafond_W` (somme des deux cartes, `energie.py:213`) donne
+l'horodatage : lignes de 18h15-18h20 à **775 W** (500 + 275), lignes
+après 18h26 à **875 W** (500 + 375), comparatif du 3 septembre à
+**675 W** (400 + 275). La 5090 était donc déjà à 500 W avant la série du
+soir, et la 3080 Ti est passée de 275 à 375 W pendant ou juste après —
+mon constat « changé avant aujourd'hui » était faux, ma vérification
+était simplement postérieure au changement.
+Règle : lire `power.limit` AU MOMENT de la mesure et l'écrire à côté du
+chiffre ; deux séries de régimes différents ne se comparent pas en
+énergie. **Le comparatif du 3 septembre est à refaire pour deux raisons
+indépendantes** : son régime (400/275) n'existe plus, et il tournait en
+spéculation `ngram` sans que ce soit un choix — le lanceur ne passe
+jamais `--speculative` et le défaut de `cli.py:585` est `ngram`, donc le
+mode `mtp` n'a jamais été mesuré, y compris sur les modèles dont nous
+chargeons et quantifions la tête MTP.
+
+**2. Le débit était TIRÉ AU SORT à chaque changement de modèle.**
+`arreter()` n'attendait que la fermeture du port plus trois secondes ; le
+serveur précédent rendait son port **sans avoir rendu sa mémoire**, et le
+planificateur du suivant calculait son placement sur ce qui restait.
+Preuve involontaire (session OnePlus) : deux entrées de parc pointant le
+même dossier sous le même alias ont rendu **15,8 puis 152,2 t/s** —
+facteur 9,6, textes différents ; au journal, le premier chargement exilait
+5 puis 6 MLP de plus en RAM hôte, le second aucun.
+Correctif : `attendre_memoire()` (attend que la mémoire cesse de bouger,
+écrit la mémoire libre à côté de la ligne) et `t_s_passages` (les débits
+dans l'ordre — min et max ne disent pas LEQUEL s'écarte, et un passage
+froid a la même signature qu'une bimodalité).
+**Portée** : toute mesure de débit prise juste après un changement de
+modèle a pu l'être sur un plan dégradé, sans aucun signal. Cela peut
+expliquer une part de la dispersion de 21-26 % qui a motivé toute la
+série de déterminisme.
+
+À faire après la série en cours : activer le **mode persistant**
+(`nvidia-smi -pm 1`, actuellement désactivé sur les deux cartes), avec
+mesure de dispersion avant et après sur le même modèle — il évite le
+déchargement du contexte GPU entre deux processus et devrait réduire la
+latence de démarrage et stabiliser les horloges.
+
+### 8 septembre, 18 h 40 — un dévoreur de mémoire expliquait nos morts au hasard
+
+`tokensave sync` avalait la mémoire vive à **25 Mo par seconde** et pesait
+**14,25 Go** à son arrêt ; la machine est passée de 67 à **81 Go
+disponibles**. Il saturait les 93 Go et le système tuait tout ce qui
+demandait de la mémoire — évaluations, étalons, suites de tests, chez les
+trois sessions, y compris quand la machine paraissait calme.
+
+**Ce que ça réécrit** : plusieurs échecs attribués à la contention entre
+nos mesures, ou au cache de pages laissé par une lecture massive, avaient
+en réalité cette cause unique. L'hypothèse du cache de pages était
+plausible et donnée comme telle ; elle est probablement fausse. Le
+processus fautif était invisible parce qu'il ne portait aucun nom
+évocateur et ne figurait dans aucune liste de suspects — chercher un
+coupable parmi ceux qu'on surveille laisse passer celui qu'on ne
+surveille pas.
+
+**Mode persistant activé** sur les deux cartes (il était désactivé). Il
+supprime le déchargement du contexte GPU entre deux processus, donc une
+source de latence variable qu'on soupçonnait sans pouvoir la nommer.
+
+**Trois régimes de mesure désormais**, à écrire à côté de tout chiffre :
+675 W · 875 W · 875 W avec persistance. Et une distinction qui sauve la
+moitié du travail :
+* **invalidé** — tout ce qui se mesure en watts, joules ou secondes :
+  17,4 J/jeton, 104 jetons/kJ, les débits, les temps de première réponse,
+  le profil du bus ;
+* **intact** — **toutes les perplexités** et tous les SNR de format. Une
+  perplexité est un calcul déterministe sur des poids fixes : le plafond
+  de puissance et la persistance changent le temps qu'elle met à sortir,
+  pas sa valeur. L'étalon 9,7380 et la table des témoins restent valides.
+
+Le dossier **qualité** est donc préservé, le dossier **performance** est
+à refaire. La série de déterminisme, écrite le matin et jamais exécutée
+faute de machine calme, devient possible pour la première fois : les
+trois obstacles (dévoreur de mémoire, contexte GPU déchargé, construction
+de ROM concurrente) sont tombés ensemble. Prédiction écrite d'avance : si
+la persistance était la cause principale, la dispersion passe sous 10 %
+et le premier passage cesse d'être aberrant ; si elle reste à 20 %, il
+faut chercher dans l'ordonnancement ou l'allocateur.

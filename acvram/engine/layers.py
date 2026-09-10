@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import os
+import time
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -31,6 +33,124 @@ __all__ = ["QuantLinear", "StreamedWeight", "RMSNorm", "RotaryEmbedding",
            "batched_decode_attention", "causal_mask"]
 
 
+class PoolHote:
+    """Arène de mémoire hôte épinglée où les tampons plats sont découpés.
+
+    L'allocateur hôte de PyTorch arrondit toute demande à la puissance de 2
+    supérieure — à toutes les échelles. Nos experts pèsent exactement 3,00 Mio
+    (768 x 2048 en bf16) et en coûtent 4 : +33,3 % sur toute la mémoire
+    verrouillée, soit 46,01 Gio mesurés pour 33,76 de poids réels. Mesuré le
+    8/09/2026 sur 200 allocations — sur une seule, un surcoût fixe de première
+    allocation donne un facteur 3,9 qui n'est pas le régime.
+
+    Une arène dont la taille EST une puissance de 2 ne paie rien (facteur
+    1,000 relevé à 2, 4, 512 et 1024 Mio), et une vue prise dedans est
+    elle-même épinglée. Grossir les tampons ne suffirait pas : un tampon par
+    couche ferait 1152 Mio, arrondis à 2048, soit +77,8 % — le pire point de
+    l'échelle. C'est l'alignement qui compte, pas la taille.
+
+    Les blocs sont demandés par puissances de 2 décroissantes, avec bissection
+    quand l'allocation échoue : le surcoût reste nul à chaque étape, et une
+    machine trop chargée dégrade en blocs plus petits au lieu de tuer le
+    chargement entier — ce qu'une arène unique ferait.
+    """
+
+    ALIGNEMENT = 256
+
+    def __init__(self, octets: int, plancher: int = 64 * 2 ** 20,
+                 bloc_max: int = 2 ** 30, souffle: float = 0.0) -> None:
+        """`bloc_max` plafonne la taille d'UNE demande, `souffle` l'espace dans
+        le temps. Les deux lissent la pression, mais par des mécanismes
+        différents et il ne faut pas les changer ensemble.
+
+        Le 8/09/2026, réserver 33,76 Gio en un bloc de 32 a fait tuer le
+        chargement par la garde : trois secondes pendant lesquelles aucune
+        tâche de la machine n'avançait. Les mêmes octets pris en 11 550
+        morceaux sur soixante-dix secondes ne produisaient aucune pression —
+        `MemoryPeak` 70,5 Gio sans pression contre 57,2 Gio avec.
+
+        **Hypothèse retenue, et une seule est active par défaut** : c'est la
+        TAILLE de la demande qui pèse, pas sa cadence. Pour trouver 32 Gio
+        épinglables d'un coup, le noyau doit réclamer 32 Gio d'un coup —
+        éviction de cache, voire swap — et cette réclamation est synchrone :
+        tout le reste attend pendant ce temps. `bloc_max` à 1 Gio divise donc
+        chaque réclamation par 32, en gardant toutes les tailles à des
+        puissances de 2, donc le surcoût toujours nul.
+
+        `souffle` (secondes entre deux blocs) reste à **zéro par défaut** :
+        c'est l'hypothèse concurrente, et l'activer en même temps que
+        `bloc_max` rendrait impossible de dire laquelle a agi. À mesurer
+        séparément si le plafonnement ne suffit pas.
+        """
+        self.blocs: list[torch.Tensor] = []
+        self._curseurs: list[int] = []
+        reste = int(octets)
+        while reste >= plancher:
+            taille = min(1 << (reste.bit_length() - 1), bloc_max)
+            while taille >= plancher:
+                try:
+                    self.blocs.append(
+                        torch.empty(taille, dtype=torch.uint8).pin_memory())
+                    self._curseurs.append(0)
+                    reste -= taille
+                    if souffle > 0:
+                        time.sleep(souffle)
+                    break
+                except (RuntimeError, MemoryError):
+                    taille >>= 1                        # bissection
+            else:
+                break                                   # même le plancher échoue
+
+    @property
+    def octets(self) -> int:
+        return sum(b.numel() for b in self.blocs)
+
+    def tranche(self, n: int) -> "Optional[torch.Tensor]":
+        """Une vue de n octets, ou None s'il ne reste pas la place.
+
+        Une tranche ne chevauche jamais deux blocs : elle tient entière dans
+        l'un d'eux, sinon on essaie le suivant.
+        """
+        besoin = (n + self.ALIGNEMENT - 1) // self.ALIGNEMENT * self.ALIGNEMENT
+        for i, bloc in enumerate(self.blocs):
+            debut = self._curseurs[i]
+            if debut + besoin <= bloc.numel():
+                self._curseurs[i] = debut + besoin
+                return bloc[debut:debut + n]
+        return None
+
+
+_POOL: "Optional[PoolHote]" = None
+
+
+def reserver_pool(octets: int) -> "Optional[PoolHote]":
+    """Réserve l'arène. À appeler APRÈS le calcul du plan, jamais avant.
+
+    Avant le plan, la taille exilée n'est pas connue : un pool dimensionné là
+    serait un chiffre deviné.
+    """
+    global _POOL
+    _POOL = PoolHote(octets) if octets > 0 else None
+    return _POOL
+
+
+def liberer_pool() -> None:
+    """Rend l'arène entière.
+
+    C'est le seul moment où la mémoire épinglée revient au système :
+    l'allocateur hôte de PyTorch ne rend jamais ce qu'il a pris, et 11 550
+    tampons individuels ne peuvent donc pas être rendus. Une arène, si.
+    """
+    global _POOL
+    _POOL = None
+    if hasattr(torch._C, "_host_emptyCache"):
+        torch._C._host_emptyCache()
+
+
+def _tranche_pool(n: int) -> "Optional[torch.Tensor]":
+    return _POOL.tranche(n) if _POOL is not None else None
+
+
 def _emballer(host: dict[str, torch.Tensor]):
     """Copie les tenseurs dans un tampon uint8 épinglé contigu ; rend le
     tampon et la découpe ``{clé: (décalage, forme, dtype)}``, décalages
@@ -41,7 +161,9 @@ def _emballer(host: dict[str, torch.Tensor]):
         n = v.numel() * v.element_size()
         decoupe[k] = (off, tuple(v.shape), v.dtype, n)
         off += (n + 255) // 256 * 256
-    plat = torch.empty(max(off, 1), dtype=torch.uint8).pin_memory()
+    plat = _tranche_pool(max(off, 1))
+    if plat is None:
+        plat = torch.empty(max(off, 1), dtype=torch.uint8).pin_memory()
     for k, (o, forme, dt, n) in decoupe.items():
         plat[o:o + n].view(dt).view(forme).copy_(host[k])
     return plat, decoupe
@@ -63,15 +185,40 @@ class StreamedWeight:
 
     def __init__(self, host_tensors: dict[str, torch.Tensor], device: torch.device,
                  n_buffers: int = 2, pool: "Optional[ExpertPool]" = None) -> None:
-        self.host = {k: (v.pin_memory() if not v.is_pinned() else v)
-                     for k, v in host_tensors.items()}
         # Un seul tampon épinglé contigu par poids : la copie hôte→carte se
         # fait en UN lancement au lieu d'un par tenseur (trois pour NVFP4 :
         # qweight, block_scale, global_scale). La courbe du 8/09 a montré un
         # transfert borné par la latence des copies, pas par le débit du bus —
         # 5,7 Go/s effectifs sur 18,7 —, avec quatre-vingt-dix copies par
         # couche exilée. Le dictionnaire `host` reste la vue par clé.
-        self.plat, self.decoupe = _emballer(self.host)
+        #
+        # Les tenseurs source sont passés TELS QUELS, paginables. Ils l'étaient
+        # épinglés un à un avant l'emballage, et c'était inutile deux fois : la
+        # copie vers `plat` est CPU→CPU (`_emballer`), elle n'exige rien de sa
+        # source ; et seul `plat` sert au DMA.
+        #
+        # Inutile, mais pas gratuit. L'allocateur hôte épinglé de PyTorch ne
+        # rend JAMAIS au système ce qu'il a pris : il le garde en cache pour
+        # réemploi. Chaque tenseur épinglé ici, aussitôt déréférencé par le
+        # `_decouper` plus bas, restait donc verrouillé pour la vie du
+        # processus, invisible à `Unevictable` comme à `Mlocked` — seul
+        # `nr_foll_pin_acquired − nr_foll_pin_released` de /proc/vmstat le
+        # voyait. Mesure du 8/09/2026 sur le témoin MoE, 30 couches exilées :
+        # 46 Gio réellement épinglés pour 33,75 attendus, soit ~12 Gio de
+        # résidu que le correctif précédent n'avait pas touchés — il avait
+        # supprimé la double RÉFÉRENCE, pas la double ÉPINGLURE.
+        self.plat, self.decoupe = _emballer(host_tensors)
+        # `host` redevient ce que la ligne au-dessus annonce : des VUES sur le
+        # tampon plat. Il en était une COPIE épinglée indépendante, du même
+        # contenu, gardée vivante pour deux usages qui n'ont besoin ni de copie
+        # ni d'épinglage — le repli sans GPU et `nbytes`. Le transfert, lui,
+        # part de `plat`.
+        # La mémoire épinglée n'est ni évinçable ni swappable : la doubler
+        # doublait ce que le noyau doit chasser ailleurs. Sur un MoE de 30
+        # milliards à 30 couches exilées, c'était 67,5 Gio verrouillés au lieu
+        # de 33,75 sur 93,98 de RAM — la machine devenait inutilisable, souris
+        # comprise, et `memory.peak` de la session a touché 89,42 Gio.
+        self.host = _decouper(self.plat, self.decoupe)
         self.device = device
         self.pool = pool
         self.stream = (pool.stream if pool is not None else
@@ -139,7 +286,22 @@ class StreamedWeight:
 
     @property
     def nbytes(self) -> int:
+        """Taille des POIDS. C'est ce que l'affichage appelle « poids » et ce
+        qui divise les temps pour donner des Go/s : elle ne doit pas compter le
+        rembourrage."""
         return sum(t.numel() * t.element_size() for t in self.host.values())
+
+    @property
+    def octets_verrouilles(self) -> int:
+        """Mémoire hôte réellement RÉSERVÉE et épinglée, rembourrage compris.
+
+        Distincte de `nbytes` : `_emballer` aligne chaque tenseur sur 256
+        octets, d'autant plus visible que les tenseurs sont petits et nombreux
+        — trois par poids en NVFP4. Les confondre donnerait un nom à deux
+        propriétés ; `nbytes` sous-estimerait ce que la machine subit, et
+        `octets_verrouilles` mentirait sur ce qu'est un poids.
+        """
+        return self.plat.numel()
 
 
 class ExpertPool:
@@ -180,6 +342,10 @@ class ExpertPool:
                 "tampons": [_decouper(pl, decoupe) for pl in plats],
                 "pret": [torch.cuda.Event() for _ in range(self.n_slots)],
                 "libre": [torch.cuda.Event() for _ in range(self.n_slots)],
+                # Un emplacement distribue et pas encore rendu ne doit jamais
+                # etre reecrit. L'evenement `libre` ne le protege pas : tant
+                # qu'il n'a jamais ete enregistre, l'attendre ne fait rien.
+                "distribue": [False] * self.n_slots,
                 "prochain": 0,
                 "base": len(self._slots),
             }
@@ -200,6 +366,19 @@ class ExpertPool:
     def copier(self, plat: torch.Tensor, decoupe: dict) -> int:
         jeu = self._jeu(plat, decoupe)
         i = jeu["prochain"]
+        if jeu["distribue"][i]:
+            # Tous les emplacements de cette disposition sont en vol. Continuer
+            # ecraserait les octets d'un expert qu'un calcul n'a pas encore lu,
+            # et le calcul lirait alors un autre expert — sans erreur, sans
+            # trace, avec pour seul symptome une sortie qui degenere. Mesure du
+            # 8/09/2026 : dix experts pour quatre emplacements, l'echelle
+            # globale relue appartenait a un autre expert.
+            raise RuntimeError(
+                f"ExpertPool sature : {self.n_slots} emplacements, tous "
+                f"distribues et non rendus pour cette disposition. Augmenter "
+                f"n_slots (2 x experts_par_jeton + 2) ou liberer avant de "
+                f"copier.")
+        jeu["distribue"][i] = True
         jeu["prochain"] = (i + 1) % self.n_slots
         if self.SYNC:
             jeu["plats"][i].copy_(plat, non_blocking=True)
@@ -219,10 +398,12 @@ class ExpertPool:
         return jeu["tampons"][i]
 
     def liberer(self, slot: int) -> None:
+        d, i = self._slots[slot]
+        jeu = self._par_disposition[d]
+        jeu["distribue"][i] = False
         if self.SYNC:
             return
-        d, i = self._slots[slot]
-        self._par_disposition[d]["libre"][i].record(torch.cuda.current_stream(self.device))
+        jeu["libre"][i].record(torch.cuda.current_stream(self.device))
 
     @property
     def nbytes(self) -> int:
@@ -318,7 +499,25 @@ class QuantLinear(nn.Module):
 
 
 def _rehydrate(template: Any, tensors: dict[str, torch.Tensor]) -> Any:
-    """Reconstruit un objet tenseur quantifié autour de tampons GPU fraîchement copiés."""
+    """Reconstruit un objet tenseur quantifié autour de tampons GPU fraîchement copiés.
+
+    L'echelle globale memoisee du modele est RECOPIEE depuis le template. Sans
+    cela, chaque transfert d'expert rend un objet neuf dont le cache est vide,
+    et le premier GEMV le relit par `.item()` : une synchronisation du flux
+    CUDA par expert et par couche, la ou la memoisation existe justement pour
+    l'eviter — ce meme appel pesait 62 % du temps de decodage au profil NVFP4,
+    et une synchronisation rend le noyau incapturable dans un graphe. La valeur
+    est identique par construction : le tampon GPU est la copie du tenseur hote
+    que le template decrit.
+    """
+    objet = _rehydrate_brut(template, tensors)
+    gs = template.__dict__.get("_gs_f")
+    if gs is not None:
+        objet.__dict__["_gs_f"] = gs
+    return objet
+
+
+def _rehydrate_brut(template: Any, tensors: dict[str, torch.Tensor]) -> Any:
     if isinstance(template, NVFP4Tensor):
         return NVFP4Tensor(
             tensors["qweight"], tensors["block_scale"].view(torch.float8_e4m3fn),
@@ -336,9 +535,12 @@ def _rehydrate(template: Any, tensors: dict[str, torch.Tensor]) -> Any:
                           template.group_size, template.shape)
     from ..quant.q3n import Q3NTensor
     if isinstance(template, Q3NTensor):
+        # La table suit le gabarit, comme block et shape : identique pour tout
+        # le modèle, elle n'a rien à faire dans les tampons transférés.
         return Q3NTensor(tensors["qweight"],
                          tensors["block_scale"].view(torch.float8_e4m3fn),
-                         tensors["global_scale"], template.block, template.shape)
+                         tensors["global_scale"], template.block,
+                         template.shape, template.format, template.table)
     raise TypeError(f"impossible de reconstruire {type(template)!r}")
 
 
@@ -736,6 +938,82 @@ def repeat_kv_batched(x: torch.Tensor, n_rep: int) -> torch.Tensor:
 ROWS_PAR_BLOC = 4
 
 
+# Chaque refus de fusion se comptait a zero : la fonction rendait None et
+# personne ne savait si les piles avaient ete construites. Le 9/09/2026, une
+# session a du envisager de compter les noyaux sous `ncu` pour repondre a
+# « les fusions s appliquent-elles au nvfp4 ? » — une question que le code
+# pouvait dire lui-meme. Une absence n est un resultat que si l instrument
+# pouvait rendre autre chose.
+_REFUS_FUSION: dict[str, int] = {}
+
+
+def _scaler_commun(lins: list):
+    """Rend (utilisable, scaler a porter par la pile).
+
+    Un scaler s applique a l ENTREE. Des projections d un meme groupe lisent
+    la meme entree : si leurs scalers sont identiques — a fortiori s ils sont
+    tous l identite — la pile peut porter ce scaler unique et le resultat est
+    exactement celui des appels separes.
+
+    La fusion refusait sur `l.scaler is not None`, c est-a-dire sur
+    l EXISTENCE de l objet, alors que l execution teste son CONTENU
+    (`not self.scaler.is_identity`, forward l.479). Un scaler identite —
+    scale None et hadamard_block 0, ce qu une conversion sans calibration
+    produit pour TOUS les tenseurs — bloquait donc les 96 fusions d un modele
+    qui n avait aucune mise a l echelle a concilier.
+    """
+    scs = [getattr(l, "scaler", None) for l in lins]
+    vifs = [s for s in scs if s is not None and not s.is_identity]
+    if not vifs:
+        return True, None                      # tous identite : rien a porter
+    if len(vifs) != len(scs):
+        return False, None                     # certains actifs, d autres non
+    tete = vifs[0]
+    for s in vifs[1:]:
+        if s.hadamard_block != tete.hadamard_block:
+            return False, None
+        if (s.scale is None) != (tete.scale is None):
+            return False, None
+        if s.scale is not None and not torch.equal(s.scale, tete.scale):
+            return False, None
+    return True, tete                           # tous egaux : la pile le porte
+
+
+# Pendant l'exploration des paires de la fusion PARTIELLE, trois tentatives
+# ont lieu par groupe. Les compter toutes ferait dire au bilan « 240 refus »
+# la ou il y a 80 groupes — l'unite du compteur changerait selon le chemin,
+# et un lecteur y verrait un nombre de groupes. Le compteur se tait donc
+# pendant l'exploration ; seul le verdict du groupe est enregistre.
+_EXPLORATION = False
+
+
+def explorer_sans_compter():
+    """Contexte ou les refus ne sont pas comptes — voir `_EXPLORATION`."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _ctx():
+        global _EXPLORATION
+        avant, _EXPLORATION = _EXPLORATION, True
+        try:
+            yield
+        finally:
+            _EXPLORATION = avant
+    return _ctx()
+
+
+def _refus_fusion(raison: str) -> None:
+    """Enregistre pourquoi une fusion NVFP4 n a pas eu lieu, et rend None."""
+    if not _EXPLORATION:
+        _REFUS_FUSION[raison] = _REFUS_FUSION.get(raison, 0) + 1
+    return None
+
+
+def bilan_fusion_nvfp4() -> dict[str, int]:
+    """Refus par raison depuis le chargement. Vide = aucune fusion refusee."""
+    return dict(_REFUS_FUSION)
+
+
 def stack_nvfp4_linears(lins: list) -> Optional["QuantLinear"]:
     """Empile des QuantLinear NVFP4 de même entrée en un seul.
 
@@ -748,22 +1026,31 @@ def stack_nvfp4_linears(lins: list) -> Optional["QuantLinear"]:
     """
     import os
     if os.environ.get("ACVRAM_FUSION_NVFP4") == "0":     # témoin de mesure
-        return None
+        return _refus_fusion("temoin ACVRAM_FUSION_NVFP4=0")
     from ..quant.nvfp4 import NVFP4Tensor
     ts = [getattr(l, "qweight", None) for l in lins]
     if not all(isinstance(t, NVFP4Tensor) for t in ts):
-        return None
+        return _refus_fusion("un des poids n est pas NVFP4")
     if len({(t.padded_in, t.qweight.shape[1], t.block_scale.shape[1]) for t in ts}) != 1:
-        return None
-    if any(l.bias is not None or l.scaler is not None or l.streamed is not None
-           for l in lins):
-        return None
+        return _refus_fusion("entrees de tailles differentes")
+    # Un biais s applique a la SORTIE : le concatener sur l axe 0 est exact,
+    # exactement comme les lignes de poids. Les refuser coutait les 48
+    # attentions de Qwen2.5 — q, k et v y portent un biais — soit 96 GEMV par
+    # pas, alors que `stack_plain_linears` les empile deja en bf16.
+    biais = [l.bias for l in lins]
+    if any((b is None) != (biais[0] is None) for b in biais):
+        return _refus_fusion("biais present sur une partie du groupe")
+    if any(l.streamed is not None for l in lins):
+        return _refus_fusion("poids en flux")
+    ok_scaler, scaler_pile = _scaler_commun(lins)
+    if not ok_scaler:
+        return _refus_fusion("scalers differents entre projections")
     if any(getattr(t, "global_scale_rows", None) is not None for t in ts):
-        return None                       # déjà empilé : on n'empile pas deux fois
+        return _refus_fusion("deja empile")
     # Le noyau lit l'échelle de la première ligne de chaque bloc : les segments
     # doivent commencer sur un multiple de la hauteur de bloc.
     if any(t.qweight.shape[0] % ROWS_PAR_BLOC for t in ts[:-1]):
-        return None
+        return _refus_fusion(f"segment non multiple de {ROWS_PAR_BLOC} lignes")
     lignes = torch.cat([
         torch.full((t.qweight.shape[0],), t.global_scale_float(),
                    dtype=torch.float32, device=t.qweight.device) for t in ts])
@@ -784,7 +1071,102 @@ def stack_nvfp4_linears(lins: list) -> Optional["QuantLinear"]:
         l.qweight = NVFP4Tensor(fus.qweight[d:d + n], fus.block_scale[d:d + n],
                                 t.global_scale, t.shape, t.padded_in)
         d += n
-    return QuantLinear(fus)
+    pbiais = torch.cat(biais) if biais[0] is not None else None
+    if pbiais is not None:
+        # Les originaux deviennent des vues du biais empile, comme les poids :
+        # le prefill continue de les appeler separement sans qu un octet soit
+        # duplique.
+        o = 0
+        for l, b in zip(lins, biais):
+            l.bias = pbiais.narrow(0, o, b.shape[0]); o += b.shape[0]
+    return QuantLinear(fus, bias=pbiais, scaler=scaler_pile)
+
+
+def stack_plain_linears(lins: list) -> Optional["QuantLinear"]:
+    """Empile des poids bf16 de même entrée en un seul, SANS les dupliquer.
+
+    Les modèles bf16 purs ne passaient par aucune des deux fusions existantes
+    (int8, nvfp4) : ni q/k/v ni gate/up n'y étaient empilés, soit **sept GEMV
+    par couche** au décodage là où llama.cpp en lance six (mesuré le 9 septembre
+    2026 sous ncu : 337 noyaux GEMV par pas contre 289).
+
+    Empiler naïvement doublerait les poids concernés — q, k, v, gate et up font
+    environ 70 % d'un modèle dense, soit 13,6 Gio de copie sur Qwen2.5-14B, que
+    la carte n'a pas. Les originaux sont donc **remplacés par des vues** dans
+    l'empilement : ``narrow`` sur la dimension 0 d'un tenseur contigu reste
+    contigu, le chemin de prefill continue de fonctionner, et il ne survit
+    qu'une seule copie des poids. Le pic transitoire est celui d'une couche.
+    """
+    from ..quant.formats import PlainTensor
+    # Echappement : sert a mesurer le gain de la fusion sur la meme binaire, et
+    # a comparer les jetons emis avec et sans elle. Sans interrupteur, l'A/B
+    # demanderait deux versions du code -- et comparerait autre chose.
+    if os.environ.get("ACVRAM_SANS_FUSION_BF16"):
+        return None
+    ts = [getattr(l, "qweight", None) for l in lins]
+    if not all(isinstance(t, PlainTensor) for t in ts):
+        return None
+    if len({t.weight.shape[1] for t in ts}) != 1:
+        return None
+    if len({(t.weight.dtype, str(t.weight.device)) for t in ts}) != 1:
+        return None
+    if any(l.scaler is not None or l.streamed is not None for l in lins):
+        return None
+    # Les biais s'empilent comme les poids -- Qwen2.5 en porte sur q, k et v, et
+    # les refuser laissait ses 48 attentions sur le chemin a trois GEMV. Tout ou
+    # rien : un empilement partiel decalerait les lignes de sortie.
+    biais = [l.bias for l in lins]
+    if any(b is not None for b in biais) and any(b is None for b in biais):
+        return None
+    # ORDRE DES ALLOCATIONS : liberer AVANT d'allouer, pas l'inverse.
+    #
+    # `torch.cat` alloue le tenseur concatene pendant que les deux sources
+    # vivent encore : 0,355 Gio de pic par fusion, 95 fois sur un 14B. Les
+    # blocs liberes ensuite retombent dans le cache de l'allocateur, entrelaces
+    # avec des blocs vivants, donc irrecuperables par `empty_cache` -- 1,28 Gio
+    # de reserve non alloue restaient apres purge, et le banc, qui dimensionne
+    # ses caches plus largement que le chargement nu, tombait en OOM sur une
+    # demande de 2 Mio.
+    #
+    # On passe donc par la RAM hote pour les gros tenseurs : descendre, liberer
+    # la VRAM, allouer le concatene, remonter. Le pic VRAM devient NUL -- le
+    # bloc libere est exactement celui que l'allocateur reutilise -- au prix
+    # d'un aller-retour PCIe au chargement. Les petits (q/k/v) passent par
+    # `cat` : leur pic ne fragmente pas et le transfert coute plus qu'il ne
+    # rapporte.
+    SEUIL_HOTE = 64 * 2 ** 20
+    octets = sum(t.weight.numel() * t.weight.element_size() for t in ts)
+
+    def _concatener(tenseurs):
+        if octets < SEUIL_HOTE or not tenseurs[0].is_cuda:
+            return torch.cat(tenseurs)
+        hote = [x.to("cpu", copy=True) for x in tenseurs]
+        dev, dt = tenseurs[0].device, tenseurs[0].dtype
+        formes = [x.shape for x in tenseurs]
+        del tenseurs[:]                      # plus aucune reference VRAM ici
+        for l, t in zip(lins, ts):
+            t.weight = None
+            l.qweight = None
+        plein = torch.empty((sum(f[0] for f in formes),) + tuple(formes[0][1:]),
+                            dtype=dt, device=dev)
+        o = 0
+        for x, f in zip(hote, formes):
+            plein.narrow(0, o, f[0]).copy_(x)
+            o += f[0]
+        return plein
+
+    poids_src = [t.weight for t in ts]
+    formes_src = [(t.weight.shape[0], t.shape, t.format) for t in ts]
+    plat = _concatener(poids_src)
+    pbiais = torch.cat(biais) if biais[0] is not None else None
+    off = 0
+    for l, (n, forme, fmt) in zip(lins, formes_src):
+        l.qweight = PlainTensor(plat.narrow(0, off, n), forme, fmt)
+        if pbiais is not None:
+            l.bias = pbiais.narrow(0, off, n)
+        off += n
+    return QuantLinear(PlainTensor(plat, tuple(plat.shape), formes_src[0][2]),
+                       bias=pbiais)
 
 
 def stack_int8_linears(lins: list) -> Optional["QuantLinear"]:
@@ -796,12 +1178,79 @@ def stack_int8_linears(lins: list) -> Optional["QuantLinear"]:
         return None
     if len({(t.qweight.shape[1], t.group_size) for t in ts}) != 1:
         return None
-    if any(l.bias is not None or l.scaler is not None or l.streamed is not None
-           for l in lins):
+    if any(l.streamed is not None for l in lins):
+        return None
+    # Un biais s'applique a la SORTIE : le concatener sur l'axe 0 est exact,
+    # exactement comme les lignes de poids. Le refuser ici coutait TOUS les
+    # groupes tout-int8 des modeles a biais — Qwen2.5 en porte sur q, k et v —
+    # alors que `stack_nvfp4_linears` les accepte depuis ce matin avec la meme
+    # justification, 150 lignes plus haut. Deux fonctions voisines, deux
+    # regles opposees sur le meme objet : releve en dressant la
+    # table de verite des quatre cas (int8/nvfp4 x avec/sans biais).
+    biais = [l.bias for l in lins]
+    if any((b is None) != (biais[0] is None) for b in biais):
+        return None
+    ok_scaler, scaler_pile = _scaler_commun(lins)
+    if not ok_scaler:
         return None
     t = INT8Tensor(torch.cat([t.qweight for t in ts]).contiguous(),
                    torch.cat([t.scales for t in ts]).contiguous(),
                    torch.cat([t.zeros for t in ts]).contiguous(),
                    ts[0].group_size,
                    (sum(t.shape[0] for t in ts), ts[0].shape[1]))
-    return QuantLinear(t)
+    pbiais = torch.cat(biais) if biais[0] is not None else None
+    if pbiais is not None:
+        # Les originaux deviennent des vues, comme pour les poids : le prefill
+        # continue de les appeler separement sans dupliquer un octet.
+        o = 0
+        for l, b in zip(lins, biais):
+            l.bias = pbiais.narrow(0, o, b.shape[0]); o += b.shape[0]
+    return QuantLinear(t, bias=pbiais, scaler=scaler_pile)
+
+
+def stack_int4_awq_linears(lins: list) -> Optional["QuantLinear"]:
+    """Empile des QuantLinear INT4-AWQ de meme entree en un seul.
+
+    Le format n'a PAS eu besoin de l'equivalent de `global_scale_rows` :
+    `INT4Tensor.scales` est deja `[out, in//group]`, une echelle par ligne de
+    sortie et par groupe. Il n'y a donc aucune echelle globale a concilier
+    entre les segments, et la concatenation sur l'axe 0 est exacte — le
+    packing uint4 de `qweight` et de `zeros` porte sur l'axe 1, jamais entre
+    deux lignes de sortie. Mesure du 9/09/2026 sur (256|64|64) x 256 : une
+    pile contre trois appels separes, ecart 0,000e+00, sur GPU comme sur
+    processeur.
+
+    Sans cette fonction, `fuse()` n'essayait qu'int8, nvfp4 et bf16 : 135
+    groupes du parc, parfaitement homogenes en int4_awq, restaient decoupes
+    en GEMV separees faute d'empileur — 64 q/k/v et 71 gate/up, soit 199
+    lancements par pas de decodage.
+    """
+    from ..quant.int4 import INT4Tensor
+    ts = [getattr(l, "qweight", None) for l in lins]
+    if not all(isinstance(t, INT4Tensor) for t in ts):
+        return _refus_fusion("un des poids n est pas INT4-AWQ")
+    # `padded_in` en plus de l'entree et du groupe : deux tenseurs de meme
+    # entree logique peuvent avoir ete rembourres differemment, et le noyau
+    # lit la largeur rembourree.
+    if len({(t.padded_in, t.qweight.shape[1], t.group_size) for t in ts}) != 1:
+        return _refus_fusion("entrees de tailles differentes")
+    if any(l.streamed is not None for l in lins):
+        return _refus_fusion("poids en flux")
+    biais = [l.bias for l in lins]
+    if any((b is None) != (biais[0] is None) for b in biais):
+        return _refus_fusion("biais present sur une partie du groupe")
+    ok_scaler, scaler_pile = _scaler_commun(lins)
+    if not ok_scaler:
+        return _refus_fusion("scalers differents entre projections")
+    t = INT4Tensor(torch.cat([t.qweight for t in ts]).contiguous(),
+                   torch.cat([t.scales for t in ts]).contiguous(),
+                   torch.cat([t.zeros for t in ts]).contiguous(),
+                   ts[0].group_size,
+                   (sum(t.shape[0] for t in ts), ts[0].shape[1]),
+                   ts[0].padded_in)
+    pbiais = torch.cat(biais) if biais[0] is not None else None
+    if pbiais is not None:
+        o = 0
+        for l, b in zip(lins, biais):
+            l.bias = pbiais.narrow(0, o, b.shape[0]); o += b.shape[0]
+    return QuantLinear(t, bias=pbiais, scaler=scaler_pile)

@@ -17,8 +17,48 @@ PKG="$STAGE/acvram_${VERSION}_amd64"
 install -d "$PKG/usr/share/acvram" "$PKG/usr/bin" "$PKG/DEBIAN" \
            "$PKG/usr/share/doc/acvram"
 cp -r acvram pyproject.toml install.sh README.md LICENSE "$PKG/usr/share/acvram/"
-cp -r docs "$PKG/usr/share/doc/acvram/"
+# docs/ contenait 8 fichiers de mesure INTERNE — comparatifs, rebancs,
+# releves de repetabilite — qui n'ont rien a faire dans un paquet distribue,
+# et FEUILLE-DE-ROUTE.md y porte le chemin et le nom d'utilisateur de la
+# machine de developpement. Seuls les documents utiles a qui installe sont
+# copies, et jamais un .tsv ni un .txt de mesure.
+# LISTE BLANCHE, jamais une liste noire. La liste noire precedente
+# (FEUILLE-DE-ROUTE, REPRISE, CHANTIER-*) laissait passer les documents de
+# TRAVAIL : PROTOCOLES-EN-ATTENTE.md porte trois noms de sessions internes,
+# PREDICTION-CAMPAGNE-9SEPT.md en porte un, FUSIONS-LIBRES-PARC.md cite le
+# chemin du parc de modeles. Rien de secret, mais rien qui concerne qui
+# installe le paquet — et une liste noire oublie toujours le document ecrit
+# apres elle.
+#
+# N'ajouter ici qu'un document destine a L'UTILISATEUR du paquet, pas a nous.
+DOCS_PUBLIQUES="
+ARCHITECTURE.md
+MATERIEL.md
+FORMAT-3BITS.md
+PROTOCOLE-ENERGIE.md
+PROTOCOLE-PERPLEXITE.md
+REFERENCES.md
+BIBLIOGRAPHIE.md
+"
+for nom in $DOCS_PUBLIQUES; do
+    [ -f "docs/$nom" ] || continue
+    install -m 644 "docs/$nom" "$PKG/usr/share/doc/acvram/"
+done
 find "$PKG" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
+
+# ---- controle de contenu ---------------------------------------------------
+# La liste blanche choisit les FICHIERS ; elle ne dit rien de ce qu'ils
+# CONTIENNENT. Le premier paquet construit apres elle portait encore deux noms
+# de sessions de travail internes, dans des commentaires de `layers.py` et de
+# `model.py` — deux fichiers de code que personne n'aurait pense a relire pour
+# cela. Un motif trouve arrete la construction : mieux vaut ne pas livrer que
+# livrer ce qu'on n'a pas relu.
+MOTIFS_INTERDITS='anticitoyenlm|/home/[a-z]+/Bureau|9c9efa0|234ead47'
+if trouve=$(grep -rlniE "$MOTIFS_INTERDITS" "$PKG" 2>/dev/null); then
+    echo "REFUS : le paquet contient un motif interdit." >&2
+    grep -rniE "$MOTIFS_INTERDITS" "$PKG" 2>/dev/null | sed "s|$PKG||" | head -20 >&2
+    exit 1
+fi
 
 # ---- lanceur ---------------------------------------------------------------
 cat > "$PKG/usr/bin/acvram" <<'LANCEUR'

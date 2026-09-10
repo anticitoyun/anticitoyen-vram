@@ -469,3 +469,176 @@ est ailleurs. SPICE mesure l'autre côté et trouve 73 à 88 % du temps dans le
 transfert des experts. **Ce n'est pas le calcul.** C'est cohérent avec la nuit
 du 6 au 7 : le planificateur d'acvram se trompait sur un débit et sur un
 plancher, jamais sur un noyau.
+
+## Troisième relevé — 8 septembre 2026, après la série Q3N
+
+Recherche ciblée sur les chantiers ouverts par la journée : quantification
+des architectures hybrides, état récurrent, recouvrement transfert/calcul,
+tables de quantiles sous 4 bits.
+
+### 27. Why Gated DeltaNet Survives 4-Bit Quantization (arXiv:2609.04098)
+
+**Le plus directement actionnable, et il contredit notre prudence.**
+Qwen3.8-27B — 48 couches GDN, 16 couches d'attention, c'est-à-dire la
+famille exacte de notre parc. Les quantifications 4 bits communautaires
+laissaient le bloc GDN en 8 ou 16 bits, « surtout ses portes de
+décroissance et d'écriture », sur l'intuition qu'une récurrence accumule
+les erreurs — **exactement le raisonnement qui nous a fait poser les
+planchers int8 des v0.4.93-94**. Les auteurs testent l'intuition et la
+réfutent : NVFP4 W4A4 sur les **496 couches linéaires, GDN comprise**,
+égale BF16 dans le bruit de graine (moyenne −0,52 sur cinq tâches),
+pour le plus petit modèle (17,5 Gio) et le préremplissage le plus rapide
+(+14 à 19 %) de leur comparatif ; l'écart de perplexité à 32K **se
+réduit** avec la position. Mécanisme invoqué : le facteur d'échelle par
+bloc de **16 éléments** de NVFP4 localise les aberrants du flux
+résiduel.
+**Ce que ça change pour nous** : nos planchers int8 sur `linear_attn.*`,
+`self_attn.*` et `lm_head` ont été posés le matin du 8/09 contre un
+symptôme dont la vraie cause (le drapeau `gdn_a_log_negexp` perdu au
+transport) a été trouvée le soir. Ils coûtent donc probablement des bits
+pour rien. Mesure à faire : reconvertir sans plancher, sur le moteur
+corrigé, et comparer. Réserve : notre q3n utilise des blocs de **32**,
+pas 16 — leur mécanisme d'absorption des aberrants ne se transpose pas
+tel quel, et c'est peut-être une raison de mesurer le bloc 16 malgré son
+surcoût de 0,25 bit.
+
+### 28. DAMP — Decay-Aware Mixed-Precision Recurrent-State Quantization (arXiv:2608.27513)
+
+Premiers à étudier la quantification post-entraînement de l'**état
+récurrent** (et non des poids) des modèles à GDN et KDA. Constat qui nous
+concerne directement : ces états sont couramment stockés en **FP32**,
+consomment beaucoup de mémoire, et leurs mises à jour sont **bornées par
+la bande passante mémoire** — elles pèsent donc sur la latence de
+décodage. La quantification uniforme échoue ; il faut tenir compte de la
+décroissance. **C'est notre cas exact** : `kda.py` tient l'état, les
+convolutions causales, les portes et la décroissance en float32.
+Gain attendu double, mémoire et débit, sur le poste qui gouverne le
+décodage.
+
+### 29. DAK — Direct-Access-Enabled GPU Memory Offloading (arXiv:2604.26074)
+
+**Contredit frontalement notre stratégie de préchargement.** Les cadres
+d'exil existants préchargent vers la HBM ; les auteurs montrent que
+donner au GPU un **accès direct** à la mémoire distante fait mieux, en
+atteignant la bande passante agrégée optimale — le préchargement crée de
+la contention HBM, gaspille de la capacité et fabrique des bulles de
+pipeline. Mécanisme : détourner le Tensor Memory Accelerator pour aller
+chercher poids et cache KV directement en mémoire partagée, plus un
+algorithme glouton qui fixe le taux d'exil par opération.
+À confronter à notre mesure : bus à 5,7 Go/s effectifs sur 18,7, cartes
+muettes une seconde sur deux. Le TMA existe sur Blackwell (5090) mais pas
+sur la 3080 Ti — l'asymétrie de notre parc est ici un sujet.
+
+### 30. ChunkFlow — préchargement chunké conscient de la communication (arXiv:2605.11335)
+
+Recouvrement transfert/calcul par morceaux pour l'exil par couches.
+Complémentaire de DAK : ce que l'on peut faire sans TMA.
+
+### 31. Scaled Outer Product (arXiv:2605.14929)
+
+Quantification par couche avec **paires de dictionnaires fixes et
+dynamiques sélectionnées par un bit par bloc**, échelles signées par
+bloc, sélection par cosinus pondéré par les activations, promotion des
+couches sensibles par sac à dos multi-choix. 4,5-6 bits par poids quasi
+sans perte sur matériel à décodage par table.
+Directement parlant pour q3n : nous venons d'implémenter la **table par
+manifeste** ; ce papier fait un cran plus fin, une table par bloc choisie
+par un bit — et il formalise la promotion des couches sensibles, notre
+`snr_floor` réparé du jour.
+
+### 32. Optimal Post-Training Quantization Scales and Where to Find Them (arXiv:2606.10890)
+
+Notre angle mort déclaré du 7/09 (« choix des échelles ») traité de
+front. À lire avant de retoucher la table Lloyd.
+
+**Ce que ce relevé dit de nos priorités** : le premier article remet en
+cause un choix que nous venons de faire par prudence, le deuxième ouvre
+un gisement mémoire et débit que nous n'avions pas vu (l'état récurrent
+en FP32), le troisième conteste la stratégie même du préchargement sur
+laquelle repose notre chantier « recouvrement ». Aucun ne se transpose
+sans mesure : tous portent sur du matériel ou des tailles de bloc
+différents des nôtres.
+
+## Relevés croisés des trois sessions — 8 septembre 2026, soir
+
+Domaines répartis : hybrides et récurrence (session OnePlus, fiches dans
+`docs/VEILLE-HYBRIDES.md`), quantification et mesure (session de mesure),
+exil et matériel (ici).
+
+### 33. AAAC — dictionnaires adaptatifs conscients des activations (arXiv:2605.08692)
+
+Deux petites tables apprises par couche (64 octets), chaque groupe
+choisissant celle qui minimise l'erreur **pondérée par les activations**,
+le choix encodé dans le **bit de signe inutilisé** de l'échelle du
+groupe : **zéro octet de surcoût**. Calibration 3 à 30 minutes.
+Ce que ça dit de notre table par manifeste : bonne direction, mauvais
+grain (le modèle au lieu du groupe) et mauvais critère (statistique des
+poids au lieu de l'erreur en sortie) — la même différence qu'entre un SNR
+de poids et une perplexité. Et le code sur huit inutilisé de notre table
+à sept niveaux est en fait un **canal libre** : deux tables sélectionnables
+par groupe y tiendraient, à 3,25 bits par poids inchangés.
+
+### 34. ActQuant — l'échelle domine la table (arXiv:2605.24011)
+
+« Le choix de l'ÉCHELLE, et non la conception de la table, domine sous
+quatre bits. » Ablation à ~2,6 bits : naïf 4,5 % de réussite, **+ échelle
+pondérée par la magnitude : 57,7 %** — l'échelle vaut treize fois le
+reste de leur pile.
+**Nous avons optimisé le mauvais paramètre toute la journée.** Notre
+échelle est `amax(bloc) / amax(tenseur)` arrondie en FP8 : la plus naïve
+possible, fixée par la valeur la moins représentative du bloc. Réserve :
+leur mesure porte sur un modèle vision-langage-action à 2,6 bits, le
+mécanisme se transpose, l'amplitude non. Mesure qui tranche, en float64
+sans carte : à table identique, échelle actuelle contre échelle
+optimisée sur une grille autour d'amax, sur les 288 tenseurs
+d'évaluation disjoints. **Si le gain dépasse les +3,43 dB de la table,
+l'ordre des priorités s'inverse et rien ne se grave avant.**
+
+### 35. L'axe énergie n'est plus vide — correction (arXiv:2605.11733 et suivants)
+
+Un article de position demande désormais que les travaux d'inférence
+rapportent joules/jeton, la contrainte active, la puissance corrigée du
+PUE et le débit corrigé de l'utilisation ; plus arXiv:2601.22076 « Where
+Do the Joules Go? », 2607.26571 (estimation analytique), 2608.25096
+(énergie selon la longueur de contexte). L'axe reste bon mais il a des
+**conventions naissantes** : s'y conformer plutôt qu'inventer un format.
+**Alerte qui conditionne toute communication** : la littérature situe le
+coût typique autour de **1,8 J par jeton** ; nous mesurons **17,4 J brut,
+9,6 net** — dix fois plus. Un modèle de 80 milliards de paramètres exilé
+sur des cartes grand public bridées contre des services optimisés en
+centre de données n'est pas comparable tel quel, mais **tant que l'écart
+n'est pas décomposé, publier nos jetons/kJ nous exposerait à être
+comparés à des chiffres qui ne mesurent pas la même chose** — le piège
+inter-instruments transposé à la publication.
+
+### 36. La divergence entre moteurs est documentée (arXiv:2605.19537)
+
+Cinq moteurs contre `transformers` : jusqu'à **16,3 points d'écart** sur
+GSM8K, DeepSeek R1 à 78,1 % chez transformers contre 61,7 % chez Ollama,
+écart persistant en échantillonnage stochastique — donc au niveau des
+logits. **Un chiffre de qualité mesuré sur un seul moteur décrit le
+couple modèle-moteur, pas le modèle.** Valide la journée entière et la
+généralise : rejouer l'étalon externe à chaque changement de MOTEUR, pas
+seulement de format.
+
+### 37. Contradiction non tranchée sur la propagation de l'erreur
+
+arXiv:2504.09629 annonce une croissance **exponentielle** de l'erreur de
+quantification avec la profondeur ; notre mesure du soir donne **√N**
+(1,87e−03 à 5,50e−03 de 1 à 8 couches, ×2,93 pour ×8, √8 = 2,83), témoin
+dense identique. Les deux ne parlent probablement pas du même objet — eux
+quantifient séquentiellement, chaque couche absorbant l'erreur de la
+précédente ; nous perturbons indépendamment avec résiduel. **Non
+vérifié**, et la mesure qui trancherait est écrite plutôt que
+l'explication qui arrange.
+
+### Convergence des trois relevés sur une décision
+
+arXiv:2609.04098 (4 bits sur GDN égale BF16) et notre mesure du 2,3×
+disent la même chose par deux voies : la sensibilité des couches
+récurrentes existe mais **ne s'amplifie pas avec la profondeur**. Les
+planchers int8 des v0.4.93-94, posés le matin contre un symptôme dont la
+cause réelle a été trouvée le soir, sont donc à retirer — et c'est
+mesurable maintenant que le moteur est sain. Aucun travail publié ne
+compare une couche récurrente à un perceptron de même largeur : notre
+2,3× semble sans équivalent.

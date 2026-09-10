@@ -37,7 +37,42 @@ __all__ = ["Attention", "MLP", "MoEBlock", "DecoderLayer", "ACVRamModel",
            "ForwardBatch"]
 
 
+# Au-dela de ce nombre de jetons, on cesse d'empiler les projections.
+#
+# La fusion remplace deux ou trois GEMM par un seul. Elle gagne quand ils sont
+# trop PETITS pour occuper la carte -- au decodage, k et v font 1024 lignes
+# pour UNE ligne d'entree. Le vide qu'elle comble se resorbe quand le lot
+# grandit.
+#
+# L'ancien seuil valait 8, ce qui excluait tout preremplissage reel : le prompt
+# du banc fait 88 jetons. Gain mesure sur le forward complet, meme chargement,
+# graphes actifs, aucun poids en flux (Qwen2.5-Coder-14B, 9 septembre 2026).
+# DOUZE tailles, parce qu'un point unique se serait cite comme un gain general
+# alors que la courbe est dentelee :
+#
+#      16 jetons  +6,18 %      128  +4,44 %      200  +3,25 %
+#      36         +2,58        160  +5,05        224  +3,37
+#      64         +2,61        171  +4,29        240  +3,42
+#      88         +4,23        ---               256  +3,51
+#
+# Plage : +2,58 % a +6,18 %, positif partout, mediane ~+3,8 %.
+#
+# AU-DELA, LE GAIN N'EST PLUS MONOTONE, et ce n'est pas du bruit : trois series
+# independantes donnent les memes valeurs a 0,04 ms pres. Sur les GEMM nus,
+# 48 couches : +1,1 ms a 256, -3,3 a 320, +1,1 a 384, +2,3 a 448, -1,3 a 512.
+# cuBLAS choisit un autre noyau selon la taille exacte, et la forme empilee
+# tombe parfois du mauvais cote. Le point de bascule depend aussi du modele --
+# mesure sur trois geometries, il varie et disparait quand `intermediate`
+# grandit.
+#
+# 256 est donc une borne PRUDENTE, pas un optimum : en dessous le gain est
+# stable et mesure, au-dela il faudrait le mesurer par modele et par taille.
+# `ACVRAM_SEUIL_FUSION` permet de l'explorer sans toucher au code.
+SEUIL_FUSION = int(os.environ.get("ACVRAM_SEUIL_FUSION", "256"))
+
+
 @dataclass
+
 class ForwardBatch:
     """Une étape de travail, prefill ou décodage.
 
@@ -164,22 +199,91 @@ class Attention(nn.Module):
     # minuscules (têtes KV groupées) coûtent plus que la seule grande qui
     # les contient toutes.
     def fuse(self) -> bool:
-        from .layers import stack_int8_linears, stack_nvfp4_linears
+        from .layers import (stack_int8_linears, stack_nvfp4_linears,
+                             stack_int4_awq_linears, stack_plain_linears)
         lins = [self.q_proj, self.k_proj] + ([] if self.k_eq_v else [self.v_proj])
         if any(l is None for l in lins):
             return False
-        self.qkv_proj = stack_int8_linears(lins) or stack_nvfp4_linears(lins)
-        if self.qkv_proj is None:
+
+        def _empiler(sous):
+            return (stack_int8_linears(sous) or stack_nvfp4_linears(sous)
+                    or stack_int4_awq_linears(sous) or stack_plain_linears(sous))
+
+        self.qkv_proj = _empiler(lins)
+        if self.qkv_proj is not None:
+            self.qkv_tailles = tuple(l.qweight.shape[0] for l in lins)
+            self.qkv_partiel = None
+            return True
+
+        # FUSION PARTIELLE. Le groupe entier ne s'empile pas — un format
+        # different, une echelle differente — mais un SOUS-ENSEMBLE le peut, et
+        # le gain n'est pas marginal : mesure le 9/09/2026 sur les formes de
+        # Qwen2.5-14B, trois appels valent 27,69 us, un seul 22,06, et une
+        # paire plus un appel isole 24,48 — soit 57 % du gain pour zero octet
+        # et zero changement de qualite.
+        #
+        # L'ordre compte, a contre-sens de l'intuition : le gain vient du
+        # SAUVETAGE DES PETITS noyaux, pas de l'agrandissement du gros.
+        # Empiler les deux plus petites projections en sauve deux (57 %) ;
+        # empiler la grosse avec une petite n'en sauve qu'une (49 %), et cela
+        # quelle que soit la petite — mesure a 0,01 us pres.
+        if len(lins) < 3:
             return False
+        # MESUREE A -12,16 % le 9/09/2026 sur qwen25-coder-14b :
+        # 82,15 pas/s sans fusion partielle contre 72,16 avec, seuil de
+        # detection 0,51 %. Le premier passage vaut encore 81,72 puis tout
+        # bascule a 72 et y reste — une bascule, pas une dispersion. Tant que
+        # le decrochage n'est pas explique ET remesure, cette voie ne sert
+        # personne par defaut. L'equivalence numerique, elle, tenait : 48
+        # jetons identiques. Le chemin est juste, il est couteux.
+        if os.environ.get("ACVRAM_FUSION_PARTIELLE", "0") != "1":
+            return False
+        from .layers import explorer_sans_compter
+        # UNE SEULE PILE CONSTRUITE. La version d'avant en batissait jusqu'a
+        # TROIS par groupe et en jetait deux — mais `_empiler` ne se contente
+        # pas de rendre une pile : il REECRIT le `qweight` de chaque
+        # projection en une vue de cette pile. Apres trois essais, lins[0]
+        # etait une vue de la pile du dernier essai pendant que la pile
+        # retenue etait celle d'un essai precedent : deux tampons vivants la
+        # ou un suffit, jamais liberes puisque toujours references. Les
+        # valeurs restaient exactes — d'ou les 48 jetons identiques — et
+        # seule la vitesse payait. Premier suspect du -12,16 %.
+        #
+        # Le cout est connu SANS construire : c'est la somme des lignes.
+        # On trie donc les paires par cout croissant et on s'arrete a la
+        # PREMIERE qui s'empile.
+        paires = sorted(((0, 1), (0, 2), (1, 2)),
+                        key=lambda ij: (lins[ij[0]].qweight.shape[0]
+                                        + lins[ij[1]].qweight.shape[0]))
+        pile = None
+        # Les tentatives ne sont pas des refus : sans ce silence, le bilan
+        # compterait 240 refus la ou il y a 80 groupes.
+        for i, j in paires:
+            with explorer_sans_compter():
+                pile = _empiler([lins[i], lins[j]])
+            if pile is not None:
+                break
+        if pile is None:
+            return False
+        reste = [k for k in range(3) if k not in (i, j)][0]
+        self.qkv_partiel = (pile, (i, j), reste,
+                            (lins[i].qweight.shape[0], lins[j].qweight.shape[0]))
         self.qkv_tailles = tuple(l.qweight.shape[0] for l in lins)
         return True
 
     def _proj(self, x: torch.Tensor, t: int):
         """q, k, v (et la porte de sortie) : une GEMV empilée si possible."""
-        if self.qkv_proj is not None and t <= 8:
+        if self.qkv_proj is not None and t <= SEUIL_FUSION:
             p = torch.split(self.qkv_proj(x), self.qkv_tailles, dim=-1)
             qr, kr = p[0], p[1]
             vr = kr if self.k_eq_v else p[2]
+        elif getattr(self, "qkv_partiel", None) is not None and t <= SEUIL_FUSION:
+            pile, (i, j), reste, tailles = self.qkv_partiel
+            deux = torch.split(pile(x), tailles, dim=-1)
+            seul = (self.q_proj, self.k_proj, self.v_proj)[reste](x)
+            sorties = [None, None, None]
+            sorties[i], sorties[j], sorties[reste] = deux[0], deux[1], seul
+            qr, kr, vr = sorties
         else:
             qr, kr = self.q_proj(x), self.k_proj(x)
             vr = kr if self.k_eq_v else self.v_proj(x)
@@ -384,17 +488,47 @@ class MLP(nn.Module):
 
         Les NVFP4 ont chacun leur échelle globale ; le noyau en accepte une par
         ligne de sortie, ce qui les empile sans réarrondi (v0.4.62)."""
-        from .layers import stack_int8_linears, stack_nvfp4_linears
+        from .layers import (stack_int8_linears, stack_nvfp4_linears,
+                             stack_int4_awq_linears, stack_plain_linears)
         paire = [self.gate_proj, self.up_proj]
-        self.gate_up = stack_int8_linears(paire) or stack_nvfp4_linears(paire)
+        self.gate_up = (stack_int8_linears(paire) or stack_nvfp4_linears(paire)
+                        or stack_int4_awq_linears(paire)
+                        or stack_plain_linears(paire))
         return self.gate_up is not None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.gate_up is not None and x.shape[0] <= 8:
+        if self.gate_up is not None and x.shape[0] <= SEUIL_FUSION:
             gu = self.gate_up(x)
+            # SiLU et le produit sont deux lancements elementaires pour un
+            # travail derisoire : sur un pas de decodage, la latence de
+            # lancement pese plus que le calcul. Le noyau fusionne les fait en
+            # un seul, avec l'arrondi intermediaire de torch pour que la sortie
+            # reste identique. Le repli couvre gelu et l'absence d'extension.
+            if self.act == "silu" and gu.is_cuda and gu.dtype == torch.bfloat16:
+                from .. import kernels
+                ext = kernels.get_extension()
+                if ext is not None and hasattr(ext, "swiglu_bf16"):
+                    return self.down_proj(ext.swiglu_bf16(gu))
             g, u = gu.split(gu.shape[-1] // 2, dim=-1)
-            return self.down_proj(self._act(g) * u)
-        return self.down_proj(self._act(self.gate_proj(x)) * self.up_proj(x))
+            return self.down_proj(self._fusionner(g, u))
+        return self.down_proj(self._fusionner(self.gate_proj(x),
+                                              self.up_proj(x)))
+
+    def _fusionner(self, g: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+        """SiLU(g) * u en un lancement quand le noyau est la.
+
+        Le chemin non fusionne payait silu PUIS produit -- deux noyaux par
+        couche -- alors que le chemin fusionne n'en payait qu'un. Or le nvfp4
+        n'empile pas ses projections (echelles d'activation differentes) : il
+        prenait donc systematiquement le chemin a deux noyaux. Mesure sous ncu :
+        48 `silu_kernel` par pas cote nvfp4, zero cote bf16 fusionne.
+        """
+        if self.act == "silu" and g.is_cuda and g.dtype == torch.bfloat16:
+            from .. import kernels
+            ext = kernels.get_extension()
+            if ext is not None and hasattr(ext, "swiglu2_bf16"):
+                return ext.swiglu2_bf16(g, u)
+        return self._act(g) * u
 
 
 class MLP2(nn.Module):
@@ -760,14 +894,24 @@ class MoEBlock(nn.Module):
                 for lin in (getattr(exp, "gate_proj", None), exp.up_proj, exp.down_proj):
                     if lin is not None:
                         lin.precharger()
-            out = torch.zeros_like(x)
+            # Accumulateur en float32. Dix termes sommes en bf16 laissent
+            # 5,4e-3 d'ecart relatif rien qu'en changeant leur ordre — mesure
+            # du 8/09/2026, a poids et ponderations identiques ; en float32 le
+            # meme changement d'ordre donne zero exact. C'est ce bruit-la qui
+            # faisait diverger ce chemin de celui par masques, qui somme dans
+            # l'ordre trie de `unique()`. Le cout est un tenseur [t, cache] par
+            # couche, la ou chaque expert en produit deja un.
+            out = torch.zeros(x.shape, device=x.device, dtype=torch.float32)
             for j, e in enumerate(ids):
-                out += self.experts[e](x) * poids[j]
+                out += (self.experts[e](x) * poids[j]).to(torch.float32)
+            out = out.to(x.dtype)
             if self.shared is not None:
                 out = out + self._shared_out(x)
             return out
 
-        out = torch.zeros_like(x)
+        # Meme accumulateur float32 que le chemin direct, et pour la meme
+        # raison : sans lui les deux chemins ne rendent pas le meme vecteur.
+        out = torch.zeros(x.shape, device=x.device, dtype=torch.float32)
         # On regroupe les jetons par expert, pour que chaque expert fasse un
         # seul produit matriciel par lot au lieu d'un par jeton.
         flat_expert = topi.reshape(-1)
@@ -777,7 +921,8 @@ class MoEBlock(nn.Module):
             sel = flat_expert == e
             tok = flat_token[sel]
             y = self.experts[e](x[tok])
-            out.index_add_(0, tok, y * flat_weight[sel].unsqueeze(-1))
+            out.index_add_(0, tok, (y * flat_weight[sel].unsqueeze(-1)).to(torch.float32))
+        out = out.to(x.dtype)
         if self.shared is not None:
             out = out + self._shared_out(x)
         return out

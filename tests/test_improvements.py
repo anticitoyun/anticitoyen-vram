@@ -861,9 +861,20 @@ def test_q3n_gemv_noyau_egale_la_reference():
         tc = t.to("cuda:0")
         x = torch.randn(2, K, generator=g).cuda()
         y = ext.q3n_gemv(tc.qweight, tc.block_scale.view(torch.uint8),
-                         tc.global_scale.cuda(), x, K, B)
+                         tc.global_scale.cuda(), tc.table_gpu("cuda:0"),
+                         x, K, B)
         ref = x @ dequantize_q3n(t, torch.float32).cuda().t()
         assert (y - ref).abs().max().item() < 1e-5
+    # une table de manifeste différente doit changer le résultat du noyau
+    from acvram.quant.q3n import TABLE_Q3N_LLOYD_CODER_NEXT
+    t2 = quantize_q3n(torch.randn(64, 512, generator=g) * 0.02,
+                      table=TABLE_Q3N_LLOYD_CODER_NEXT).to("cuda:0")
+    x = torch.randn(2, 512, generator=g).cuda()
+    y2 = ext.q3n_gemv(t2.qweight, t2.block_scale.view(torch.uint8),
+                      t2.global_scale.cuda(), t2.table_gpu("cuda:0"),
+                      x, 512, t2.block)
+    ref2 = x @ dequantize_q3n(t2.to("cpu"), torch.float32).cuda().t()
+    assert (y2 - ref2).abs().max().item() < 1e-5
 
 
 def test_la_bascule_q3n_change_les_couches_pas_seulement_les_etages(tmp_path):
@@ -893,7 +904,11 @@ def test_la_bascule_q3n_change_les_couches_pas_seulement_les_etages(tmp_path):
             lp.fmt = "q3n"
     r = TensorRouter(spec, plan, ConversionOptions(out_dir=str(tmp_path)))
     assert r.format_for("model.layers.0.mlp.gate_proj.weight") == "q3n"
-    assert r.format_for("model.layers.3.self_attn.q_proj.weight") == "q3n"
+    # v0.4.94 : l'attention ne descend plus sous int8 quand la cible est
+    # q3n (trace du 8/09 : effondrement du cosinus dès la première attention
+    # pleine en q3n). La bascule atteint bien le routeur — c'est l'objet de
+    # ce test — mais le plancher la borne sur les projections d'attention.
+    assert r.format_for("model.layers.3.self_attn.q_proj.weight") == "int8"
 
 
 def test_q3n_traverse_le_chemin_generique_de_quantification():

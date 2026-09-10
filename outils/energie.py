@@ -29,6 +29,7 @@ prise — dit ici plutôt qu'ignoré.
 from __future__ import annotations
 
 import ctypes
+import os
 import threading
 import time
 
@@ -60,13 +61,25 @@ class _Nvml:
             raise NvmlAbsent("initialisation refusée")
         n = ctypes.c_uint()
         self.l.nvmlDeviceGetCount_v2(ctypes.byref(n))
+        # NVML IGNORE CUDA_VISIBLE_DEVICES (etabli le 8/09). Sans ce filtre,
+        # toute mesure agrege les cartes que la campagne n'utilise pas : le
+        # 9/09, `plafond_W` valait 875 W — soit 500 (5090) + 375 (3080 Ti) —,
+        # la puissance publiee incluait les services permanents de la 3080 Ti,
+        # et un drapeau de bridage venait de la carte qui ne participait pas.
+        # L'energie par jeton, qui EST l'objectif du projet, etait donc fausse.
+        visibles = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+        garder = None
+        if visibles:
+            garder = {int(x) for x in visibles.split(",") if x.strip().isdigit()}
         self.cartes = []
         for i in range(n.value):
+            if garder is not None and i not in garder:
+                continue
             h = ctypes.c_void_p()
             if self.l.nvmlDeviceGetHandleByIndex_v2(i, ctypes.byref(h)) == 0:
                 self.cartes.append((i, h))
         if not self.cartes:
-            raise NvmlAbsent("aucune carte")
+            raise NvmlAbsent(f"aucune carte (CUDA_VISIBLE_DEVICES={visibles!r})")
 
     def _u32(self, fn, h, *a) -> int:
         v = ctypes.c_uint()
@@ -225,10 +238,25 @@ class Energie:
             elif e1 == e0:
                 raisons.append(f"carte {i} : le compteur d'énergie n'a pas avancé")
         for i, avant in self.pids_debut.items():
-            apres = self.pids_fin.get(i, ())
+            # `.get(i, ())` faisait passer une carte ABSENTE du releve de fin
+            # pour une carte SANS PROCESSUS. Quand `avant` etait vide aussi,
+            # les deux tuples etaient egaux et la fenetre etait declaree
+            # valide — alors que le releve manquait. Une absence lue comme un
+            # resultat, la faute que ce module est cense attraper.
+            if i not in self.pids_fin:
+                raisons.append(f"carte {i} : aucun releve de processus en fin "
+                               f"de fenetre — la carte a disparu du recensement")
+                continue
+            apres = self.pids_fin[i]
             if avant != apres:
                 raisons.append(f"carte {i} : les processus ont changé "
                                f"({list(avant)} -> {list(apres)})")
+        # Une carte APPARUE en cours de fenetre n'etait pas regardee non plus :
+        # la boucle ne parcourt que les cles du debut.
+        for i in self.pids_fin:
+            if i not in self.pids_debut:
+                raisons.append(f"carte {i} : apparue en cours de fenetre, "
+                               f"absente du recensement initial")
         if self.bridages:
             raisons.append("bridage pendant la fenêtre : " + ", ".join(sorted(self.bridages)))
         return raisons

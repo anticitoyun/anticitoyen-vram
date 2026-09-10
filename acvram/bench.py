@@ -299,36 +299,193 @@ def bench_kernels(shapes: Optional[list[tuple[int, int]]] = None,
     return out
 
 
-def bench_decode(model_dir: str, n_tokens: int = 64,
-                 prompt_len: int = 128) -> dict:
-    """Débit de décodage de bout en bout sur le vrai modèle, le nombre qui compte."""
+def _plusieurs_cartes() -> bool:
+    """Plus d'une carte visible ? Le banc mesurait sans le dire."""
+    try:
+        import torch
+        return torch.cuda.is_available() and torch.cuda.device_count() > 1
+    except Exception:                     # noqa: BLE001 — une sonde ne plante pas
+        return False
+
+
+def bench_decode(model_dir: str, n_tokens: int = 256,
+                 prompt_len: int = 128, chauffe: int = 2,
+                 repetitions: int = 5) -> dict:
+    """Débit de décodage de bout en bout, **sans le coût du premier passage**.
+
+    Le chronomètre englobait préfill, allocation et capture des graphes CUDA sur
+    64 jetons : le coût fixe dominait la mesure. Sur Agents-A1-4B il annonçait
+    **20,0 jetons/s** là où le décodage vaut **174** — un facteur 8,7, et le
+    plan en prévoyait 687. Un banc qui publie un débit huit fois trop bas
+    fabrique un chiffre faux pour qui le lit de bonne foi.
+
+    On chauffe, puis on lit `stats.decode_seconds`, que le moteur sépare du
+    préfill, et l'on rend la **médiane** de plusieurs passages avec leur
+    dispersion : un banc qui ne dit pas sa dispersion ne dit pas si son écart
+    existe. Le temps de bout en bout reste rendu à part, il répond à une autre
+    question.
+    """
     import torch
 
     from .engine.loader import load_model
     from .engine.runner import Engine
     from .engine.sampler import SamplingParams
 
-    t0 = time.time()
-    loaded = load_model(model_dir, dtype=torch.bfloat16)
-    load_s = time.time() - t0
-    engine = Engine(loaded, None, max_batch_size=1,
-                    max_model_len=prompt_len + n_tokens + 16)
-    prompt = [1] * prompt_len
-    params = SamplingParams(temperature=0.0, max_tokens=n_tokens)
+    # UNE seule borne de contexte, passee au chargeur ET au moteur. Le chargeur
+    # dimensionne le cache KV a la CHARGE : sans `max_model_len`, il le taille
+    # pour le contexte complet declare par le modele et prend tout ce que la
+    # carte a de libre — la capture des graphes n'a alors plus de place et le
+    # banc part en OOM a 10 Mio pres, la ou le serveur passe. Le serveur, lui,
+    # a toujours passe la valeur (cli.py:446) ; le banc ne l'avait jamais recue.
+    # Un banc qui echoue la ou la production reussit ne mesure pas la
+    # production : il fait croire qu'un modele ne tient pas.
+    contexte = prompt_len + n_tokens + 16
 
     t0 = time.time()
-    produced = 0
-    for out in engine.generate(prompt, params):
-        produced += 1
-    elapsed = time.time() - t0
+    loaded = load_model(model_dir, dtype=torch.bfloat16,
+                        max_model_len=contexte)
+    load_s = time.time() - t0
+
+    # Refus, pas avertissement : quand les cartes du manifeste ne sont pas
+    # celles de la machine, le plan est rejoue et le debit mesure ne porte plus
+    # sur la configuration demandee. Publier ce chiffre le ferait lire comme
+    # celui de la carte annoncee — epingler avec CUDA_VISIBLE_DEVICES.
+    replan = getattr(loaded.plan, "replanifie_cartes", None)
+    if replan and not os.environ.get("ACVRAM_BANC_ACCEPTE_REPLAN"):
+        return {
+            "model": model_dir,
+            "refus": (f"plan rejoue : cartes du manifeste {replan[0]}, "
+                      f"machine {replan[1]}. Le debit ne porterait pas sur la "
+                      f"configuration demandee. Epingler avec "
+                      f"CUDA_VISIBLE_DEVICES, ou forcer avec "
+                      f"ACVRAM_BANC_ACCEPTE_REPLAN=1."),
+            "load_seconds": round(load_s, 1),
+        }
+
+    engine = Engine(loaded, None, max_batch_size=1,
+                    max_model_len=contexte)
+
+    # UNE INVITE DIFFERENTE PAR ITERATION. Repeter la meme fait servir l'invite
+    # par le cache de prefixe des le second passage : le banc ne prefille alors
+    # plus rien, et un comparatif voit la branche B consommer le cache que la
+    # branche A vient de peupler — un ecart en faveur de la seconde, quel que
+    # soit le correctif mesure. C'est le `git stash` transpose au cache.
+    vocab = getattr(getattr(loaded, "spec", None), "vocab_size", 0) or 32000
+
+    def _invite(k: int) -> list:
+        return [(k * 104729 + i * 7919) % (vocab - 100) + 10
+                for i in range(prompt_len)]
+
+    params = SamplingParams(temperature=0.0, max_tokens=n_tokens)
+    _traite = {"prefill": 0, "cache": 0}
+
+    def un_passage(k: int):
+        avant = engine.stats.to_dict()
+        d0 = avant.get("decode_seconds", 0.0) or 0.0
+        n0 = avant.get("decode_tokens", 0) or 0
+        p0 = avant.get("prefill_tokens", 0) or 0
+        c0 = avant.get("cached_prompt_tokens", 0) or 0
+        mur0 = time.time()
+        produits = sum(1 for _ in engine.generate(_invite(k), params))
+        mur = time.time() - mur0
+        apres = engine.stats.to_dict()
+        dt = (apres.get("decode_seconds", 0.0) or 0.0) - d0
+        dn = (apres.get("decode_tokens", 0) or 0) - n0
+        # CE QUI A ETE REELLEMENT TRAITE, a cote de ce qui a ete demande.
+        # Une invite repetee fait compter 16 jetons prefilles sur 512 : le
+        # debit publie devient celui d'un prefill de 16 jetons, insensible a
+        # la taille du prompt. Une seule ligne le montre.
+        _traite["prefill"] = (apres.get("prefill_tokens", 0) or 0) - p0
+        _traite["cache"] = (apres.get("cached_prompt_tokens", 0) or 0) - c0
+        # Le défaut par défaut est le refus : un compteur qui ne bouge pas
+        # n'est pas une mesure de zéro, c'est une source qui ne parle pas.
+        taux = dn / dt if dt > 0 and dn > 0 else None
+        return taux, produits, mur
+
+    for k in range(chauffe):
+        un_passage(k)
+    taux, murs, produits = [], [], 0
+    for k in range(repetitions):
+        t, p, mur = un_passage(chauffe + k)
+        if t is not None:
+            taux.append(t)
+        murs.append(mur)
+        produits = p
+
+    # LE DEFAUT PAR DEFAUT EST LE REFUS. Le modele peut emettre un EOS des le
+    # premier jeton — l'invite du banc est artificielle ([1] repete) et rien ne
+    # l'en empeche : `SamplingParams` n'a ni `ignore_eos` ni `min_tokens`. Le
+    # banc divisait alors UN jeton par le temps total et publiait 2,85 jetons/s
+    # sur un modele qui en rend 211 par le serveur. Ce chiffre-la ne ressemble
+    # pas a une erreur, il ressemble a un modele lent : il a servi de cause a
+    # traiter pendant des jours. On ne publie pas un debit calcule sur autre
+    # chose que ce qui a ete demande.
+    # Un prefill qui ne traite qu'une fraction de l'invite ne mesure pas ce
+    # qu'on croit : le debit devient celui du reliquat. Le seuil est large —
+    # on ne refuse que l'ecart massif, pas quelques jetons de bloc.
+    if _traite["prefill"] < prompt_len // 2:
+        return {
+            "model": model_dir,
+            "refus": (f"prefill de {_traite['prefill']} jetons sur "
+                      f"{prompt_len} demandes ({_traite['cache']} servis par "
+                      f"le cache de prefixe) : le debit porterait sur le "
+                      f"reliquat, pas sur l'invite."),
+            "load_seconds": round(load_s, 1),
+            "prefill_tokens_reels": _traite["prefill"],
+            "prefill_tokens_caches": _traite["cache"],
+        }
+
+    if produits < n_tokens:
+        return {
+            "model": model_dir,
+            "refus": (f"generation interrompue a {produits} jetons sur "
+                      f"{n_tokens} demandes (EOS emis par le modele) : le "
+                      f"debit porterait sur le demarrage, pas sur le "
+                      f"decodage."),
+            "load_seconds": round(load_s, 1),
+            "generated": produits,
+        }
+
+    if taux:
+        taux.sort()
+        median = taux[len(taux) // 2]
+        dispersion = (taux[-1] - taux[0]) / median * 100.0
+        source = "stats.decode_seconds"
+    else:
+        # `decode_seconds` absent d'un moteur plus ancien : on retombe sur le
+        # temps de bout en bout, et on le DIT — sans quoi le chiffre du repli
+        # se lirait comme celui de la mesure.
+        mur = sum(murs) / len(murs) if murs else 0.0
+        median = produits / mur if mur else 0.0
+        dispersion = float("nan")
+        source = "temps de bout en bout (decode_seconds indisponible)"
+
+    # L'etat de la carte se lit AVEC le chiffre : une mesure prise sur une
+    # carte occupee ne dit rien du modele. Le 9/09 le meme banc a rendu 2,88
+    # puis 211 jetons/s selon le voisinage, et un chiffre transporte sans son
+    # etat a servi de cause a traiter pendant des jours.
+    try:
+        libre, total = torch.cuda.mem_get_info(0)
+    except Exception:                        # noqa: BLE001 — une sonde ne plante pas
+        libre = total = 0
+
     return {
         "model": model_dir,
         "load_seconds": round(load_s, 1),
         "weights_bytes": loaded.model.nbytes,
+        "vram_free_bytes_after_load": libre,
+        "vram_total_bytes": total,
         "prompt_len": prompt_len,
-        "generated": produced,
-        "wall_seconds": round(elapsed, 2),
-        "decode_tok_s": round(produced / elapsed, 2) if elapsed else 0.0,
+        "generated": produits,
+        "prefill_tokens_demandes": prompt_len,
+        "prefill_tokens_reels": _traite["prefill"],
+        "prefill_tokens_caches": _traite["cache"],
+        "warmups": chauffe,
+        "repetitions": repetitions,
+        "wall_seconds": round(sum(murs) / len(murs), 2) if murs else 0.0,
+        "decode_tok_s": round(median, 2),
+        "decode_spread_pct": round(dispersion, 2) if dispersion == dispersion else None,
+        "decode_source": source,
         "engine": engine.stats.to_dict(),
         "planned_decode_tok_s": loaded.plan.est_decode_tok_s,
     }
@@ -440,9 +597,34 @@ def run_benchmarks(args: argparse.Namespace) -> int:
     if results.get("decode"):
         d = results["decode"]
         print()
-        print(f"  decodage      {d['decode_tok_s']} jetons/s mesures, "
+        if d.get("refus"):
+            print(f"  decodage      REFUS : {d['refus']}")
+            return
+        disp = d.get("decode_spread_pct")
+        disp_txt = f", dispersion {disp:.2f} %" if disp is not None else ""
+        print(f"  decodage      {d['decode_tok_s']} jetons/s mesures "
+              f"(mediane de {d.get('repetitions', 1)} apres "
+              f"{d.get('warmups', 0)} de chauffe{disp_txt}), "
               f"{d['planned_decode_tok_s']} prevus")
+        # La source du chiffre se lit avec lui : le repli de bout en bout
+        # inclut le premier passage et n'est pas comparable au decodage.
+        if d.get("decode_source", "").startswith("temps de bout"):
+            print(f"  ATTENTION     {d['decode_source']} : ce chiffre inclut "
+                  f"le prefill et la capture des graphes")
+        # Ce qui a ete REELLEMENT traite, a cote de ce qui a ete demande.
+        if d.get("prefill_tokens_demandes"):
+            print(f"  invite        {d['prefill_tokens_reels']}/"
+                  f"{d['prefill_tokens_demandes']} jetons prefilles"
+                  + (f", {d['prefill_tokens_caches']} servis par le cache"
+                     if d.get("prefill_tokens_caches") else ""))
         print(f"  chargement    {d['load_seconds']} s")
+        # Le banc laissait les deux cartes visibles quand le serveur les epingle
+        # depuis e5cafc0 : le planificateur recrutait la seconde et le debit
+        # mesure n'etait pas celui de la carte annoncee.
+        if _plusieurs_cartes() and "CUDA_VISIBLE_DEVICES" not in os.environ:
+            print("  ATTENTION     plusieurs cartes visibles et aucun epinglage : "
+                  "le plan a pu en recruter une seconde. Relancer avec "
+                  "CUDA_VISIBLE_DEVICES=0 pour mesurer une carte seule.")
     if not results:
         print("rien a mesurer (aucun peripherique CUDA, et aucun modele fourni)")
     return 0

@@ -21,7 +21,7 @@ import platform
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from typing import Optional
 
 __all__ = [
@@ -518,6 +518,45 @@ def _probe_distro() -> str:
 # --------------------------------------------------------------------------
 
 
+def _filtrer_visibles(gpus: list[Gpu]) -> list[Gpu]:
+    """Ne garde que les cartes que CUDA_VISIBLE_DEVICES laisse voir, reindexees.
+
+    nvidia-smi ignore cette variable : il enumere toujours le materiel entier.
+    Le planificateur batissait donc un plan qui nommait « cuda:1 » pendant que
+    le processus n'avait qu'une carte, et le chargement tombait sur « invalid
+    device ordinal ». Le 8/09/2026, trois sessions se partageaient la machine
+    et restreindre acvram a une carte etait le seul moyen de ne pas marcher sur
+    la mesure d'une autre : c'est exactement le cas ou la variable sert.
+
+    Les ordinaux sont **renumerotes** : la carte physique 1 devient cuda:0 pour
+    un processus qui ne voit qu'elle, comme le fait CUDA lui-meme. Garder
+    l'index physique produirait un plan juste sur le papier et faux a
+    l'execution.
+    """
+    brut = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if brut is None or not gpus:
+        return gpus
+    if brut.strip() == "":
+        return []                       # variable vide : aucune carte visible
+    par_index = {g.index: g for g in gpus}
+    par_uuid = {g.uuid: g for g in gpus if g.uuid}
+    gardees: list[Gpu] = []
+    for jeton in (j.strip() for j in brut.split(",")):
+        if not jeton:
+            continue
+        g = par_uuid.get(jeton)
+        if g is None:
+            try:
+                g = par_index.get(int(jeton))
+            except ValueError:
+                g = None
+        if g is None:
+            # CUDA s'arrete au premier identifiant invalide et ignore la suite.
+            break
+        gardees.append(replace(g, index=len(gardees)))
+    return gardees
+
+
 def detect_rig(profile: Optional[str] = None) -> Rig:
     """Détecte la machine locale, ou charge un profil déclaré.
 
@@ -535,6 +574,7 @@ def detect_rig(profile: Optional[str] = None) -> Rig:
     if not gpus:
         gpus, cuda = _probe_gpus_torch()
         rig.source = "torch" if gpus else "none"
+    gpus = _filtrer_visibles(gpus)
     rig.gpus = gpus
     rig.driver_version = driver
     rig.cuda_version = _probe_cuda_version()

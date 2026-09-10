@@ -55,6 +55,17 @@ class LayerSpec:
         return self.active_params / max(1, self.total_params)
 
 
+# Types de couche qui allouent un cache KV, et ceux qui portent un état
+# récurrent. Les deux listes vivent ici, à côté du budget qui les utilise :
+# une règle écrite deux fois finit par diverger, comme `stack_int8_linears` et
+# `stack_nvfp4_linears` ont divergé sur le biais jusqu'au 9/09/2026.
+_TYPES_AVEC_KV = frozenset({
+    "full_attention", "sliding_attention", "attention", "parallel"})
+_TYPES_RECURRENTS = frozenset({"linear_attention", "mamba", "conv"})
+# Ni cache KV ni état récurrent : ce sont des types de MLP, pas d'attention.
+_TYPES_SANS_ETAT = frozenset({"moe", "mlp"})
+
+
 @dataclass
 class ModelSpec:
     name: str
@@ -171,6 +182,38 @@ class ModelSpec:
     def lm_head_params(self) -> int:
         return 0 if self.tie_word_embeddings else self.vocab_size * self.hidden_size
 
+    def tete_liee_bytes(self, group_size: int = 128) -> int:
+        """Octets de la copie quantifiée d'une tête LIÉE, que rien ne comptait.
+
+        Quand ``tie_word_embeddings`` est vrai, il n'existe aucun tenseur
+        `lm_head` : `lm_head_params` vaut zéro et `_octets_reels` ne trouve
+        rien à compter. Mais `_tete_liee` (`loader.py`) fabrique au chargement
+        une copie INT8 de la table d'embedding — la projection lit une matrice
+        entière à chaque jeton, et la lire en 16 bits coûterait le double —
+        et cette copie **s'ajoute** à la table sans la remplacer, le gather
+        d'entrée ayant toujours besoin des 16 bits.
+
+        Le plan sous-estimait donc les poids d'autant : 0,369 Gio sur un
+        Qwen3-4B, mesuré le 9/09/2026. Et la conséquence dépassait le
+        comptage — `_borner_kv_par_la_vram` calcule ``libre − poids − marge``
+        avec ce même total : sous-estimer les poids lui faisait autoriser un
+        budget KV trop grand, donc **manger la marge qu'il est chargé de
+        protéger**, celle-là même qui doit garder la place d'une capture de
+        graphes CUDA.
+
+        Le format retenu est l'INT8 par défaut de `_TETE_LIEE`. Un réglage
+        contraire — `bf16`, ou le repli automatique quand la carte est trop
+        pleine — rend ce compte majorant, ce qui est le bon sens de l'erreur
+        pour une provision.
+        """
+        if not self.tie_word_embeddings:
+            return 0
+        n = self.vocab_size * self.hidden_size
+        g = max(1, group_size)
+        echelles = self.vocab_size * (self.hidden_size // g) * 2      # fp16
+        zeros = self.vocab_size * (self.hidden_size // g + 1) // 2    # uint4 packés
+        return n + echelles + zeros
+
     @property
     def total_params(self) -> int:
         return (self.embed_params + self.lm_head_params + self.hidden_size
@@ -185,16 +228,167 @@ class ModelSpec:
     def is_moe(self) -> bool:
         return self.num_experts > 0
 
+    @property
+    def couches_avec_kv(self) -> int:
+        """Couches qui allouent un cache KV — pas toutes, sur un hybride.
+
+        Une couche à attention linéaire ou à SSM porte un état de taille FIXE,
+        pas un cache qui croît avec le contexte : `loader.py` ne lui alloue
+        aucun `PagedKVCache`. La compter dans le budget KV le surestime d'un
+        facteur 4 à 14 sur les 53 hybrides du parc.
+
+        Énumération POSITIVE et non soustraction, parce que deux pièges
+        guettent : `sliding_attention` a bien un cache, et `moe`/`mlp` sont des
+        types de couche sans attention du tout — compter « tout sauf les
+        linéaires » donnait 29 couches à cache sur Nemotron là où il y en a 6.
+        Vérifié sur le parc : 65 modèles d'accord, aucun en désaccord.
+
+        Sans `layer_types`, le repli sur `num_layers` n'est pas seulement
+        prudent, il est EXACT : les 49 manifestes qui n'en portent pas sont
+        tous purement quadratiques.
+        """
+        if not self.layer_types:
+            return self.num_layers
+        return sum(1 for t in self.layer_types if t in _TYPES_AVEC_KV)
+
+    @property
+    def est_mla(self) -> bool:
+        """Attention à latent compressé (DeepSeek, GLM-4.x, Kimi).
+
+        Le critère est la compression elle-même, pas le `model_type` : une
+        architecture nouvelle qui compresse son KV se reconnaîtra sans qu'on
+        ait à l'ajouter à une liste.
+        """
+        return self.kv_lora_rank > 0
+
+    def couche_a_kv(self, index: int) -> bool:
+        """La couche ``index`` alloue-t-elle un cache PAGINÉ ?
+
+        Distinct de `couches_avec_kv`, et la nuance décide : une couche MLA
+        garde bien un cache par jeton, mais un latent contigu que
+        `loader.py` n'enregistre jamais dans `a_allouer` — sa branche fait
+        `continue` avant. Elle STOCKE sans PAGINER. Confondre les deux, c'est
+        soit diviser les blocs par des couches qui n'en prennent aucun, soit
+        ne rien budgéter pour ce qu'elles gardent vraiment.
+        """
+        if self.est_mla:
+            return False
+        if not self.layer_types or index >= len(self.layer_types):
+            return True
+        return self.layer_types[index] in _TYPES_AVEC_KV
+
+    @property
+    def couches_recurrentes(self) -> int:
+        """Couches qui portent un état récurrent — linéaire, SSM ou convolution."""
+        if not self.layer_types:
+            return 0
+        return sum(1 for t in self.layer_types if t in _TYPES_RECURRENTS)
+
+    @property
+    def types_de_couche_inconnus(self) -> list[str]:
+        """Types présents que ni le budget KV ni la provision ne savent traiter.
+
+        Un type inconnu ne doit pas provisionner zéro EN SILENCE : c'est
+        exactement ainsi que l'état des couches `mamba` et `conv` est resté
+        hors budget, et le silence a valu un commit à reprendre. Une
+        architecture neuve doit se signaler d'elle-même, pas attendre qu'un
+        déficit de VRAM la révèle.
+        """
+        connus = _TYPES_AVEC_KV | _TYPES_RECURRENTS | _TYPES_SANS_ETAT
+        return sorted({t for t in (self.layer_types or []) if t not in connus})
+
     def kv_bytes_per_token(self, kv_bits: int = 8) -> int:
-        """Octets de cache KV pour un jeton, toutes couches confondues.
+        """Octets de cache pour un jeton, sur les couches QUI EN GARDENT UN.
 
         L'attention à requêtes groupées est déjà prise en compte : seules
         ``num_key_value_heads`` têtes sont stockées.
+
+        Une attention à latent compressé ne garde NI K NI V par tête : elle
+        garde le latent ``[rang + rope]``, en 16 bits, hors du système paginé.
+        Lui appliquer la formule à requêtes groupées se trompait dans les deux
+        sens selon le modèle, et pas d'un peu — mesuré sur le parc, le rapport
+        entre le vrai coût et celui qu'on budgétait va de **0,28 à 7,78** :
+
+            DeepSeek-Coder-V2-Lite   0,28   on reservait 3,6 fois trop
+            GLM-4.7-Flash            5,54   on reservait 5,5 fois trop peu
+            GLM-4.7-Grande-42B       5,54
+            Kimi-Linear-35B          7,78   on reservait 7,8 fois trop peu
+
+        Un biais aurait été un réglage ; deux sens opposés sont une formule
+        qui ne décrit pas l'objet.
         """
+        if self.est_mla:
+            latent = (self.kv_lora_rank + self.qk_rope_head_dim) * 2
+            return int(latent * self.couches_avec_kv)
         per_layer = 2 * self.num_key_value_heads * self.head_dim * kv_bits / 8
         # échelles groupées du KV quantifié : un fp16 par tête, par jeton, par kv
         overhead = 0.0 if kv_bits >= 16 else 2 * self.num_key_value_heads * 2
-        return int((per_layer + overhead) * self.num_layers)
+        return int((per_layer + overhead) * self.couches_avec_kv)
+
+    def etat_recurrent_bytes(self, max_batch: int = 16) -> int:
+        """Octets d'état récurrent à provisionner, toutes couches linéaires.
+
+        Cet état vit sur la carte, une copie PAR SÉQUENCE (`gdn_states` du
+        runner), et il n'était budgété nulle part : `kda.py` l'alloue à la
+        volée dans le forward. La surestimation du cache KV lui servait de
+        provision de fait — deux erreurs de sens opposé qui se compensaient par
+        accident. Corriger `couches_avec_kv` sans provisionner ici déplacerait
+        le défaut au lieu de le lever.
+
+        Les formules suivent les `new_static` de chaque famille, qui sont les
+        chemins à formes fixes, et il y en a QUATRE — pas une :
+
+            kda.py      conv x3 + S[têtes, d, d]        `linear_attention`
+            gdn.py      conv    + S[1, nv, dk, dv]      `linear_attention`
+            mamba2.py   conv    + h[H, N, P]            `mamba`
+            lfm2.py     conv seule                      `conv`
+
+        KDA et GDN partagent le type `linear_attention`, `model_type` les
+        départage — mais leurs états coïncident sur le poste qui domine
+        (``nv·dk·dv`` contre ``têtes·d²``, égaux ici puisque dk = dv = d), et
+        la convolution de KDA majore celle de GDN. Une seule formule couvre
+        donc les deux, du bon côté.
+
+        Ne provisionner que `linear_attention`, comme le faisait la première
+        version, laissait onze modèles à découvert — dont `Nemotron-Nano-9B`
+        et ses 2,11 Gio d'état mamba à seize séquences, pour 1,68 Gio de
+        budget KV rendus : la correction y creusait un déficit au lieu de le
+        combler. Chercher `new_static` dans tout le moteur coûtait une
+        commande ; s'en tenir au fichier qu'on m'avait montré a coûté un
+        commit.
+
+        Mesuré sur le parc : 2304 Mio à seize séquences sur un Qwen3.8-27B,
+        contre 1854 Mio de budget KV entier — ces modèles allouaient déjà hors
+        budget dès que la concurrence monte.
+        """
+        if not self.layer_types:
+            return 0
+        seq = max(1, max_batch)
+        total = 0
+
+        n_lin = sum(1 for t in self.layer_types if t == "linear_attention")
+        if n_lin and self.linear_num_value_heads:
+            nh, d = self.linear_num_value_heads, self.linear_value_head_dim
+            k1 = max(0, self.linear_conv_kernel_dim - 1)
+            total += (3 * nh * d * k1 + nh * d * d) * 4 * n_lin
+
+        n_mamba = sum(1 for t in self.layer_types if t == "mamba")
+        if n_mamba and self.mamba_num_heads:
+            H, P = self.mamba_num_heads, self.mamba_head_dim
+            N, G = self.mamba_state_size, self.mamba_n_groups
+            k1 = max(0, self.mamba_conv_kernel - 1)
+            conv_dim = H * P + 2 * G * N
+            total += (conv_dim * k1 + H * N * P) * 4 * n_mamba
+
+        n_conv = sum(1 for t in self.layer_types if t == "conv")
+        if n_conv:
+            # LFM2 : convolution courte seule, sur `self.dim` canaux, que la
+            # configuration n'expose pas séparément — `hidden_size` en est la
+            # borne, et majorer une provision est le bon sens de l'erreur.
+            k1 = max(0, self.mamba_conv_kernel - 1)
+            total += self.hidden_size * k1 * 4 * n_conv
+
+        return total * seq
 
     def summary(self) -> str:
         b = self.total_params / 1e9
@@ -205,10 +399,21 @@ class ModelSpec:
                 f"h={self.hidden_size}, {b:.1f} G parametres "
                 f"({a:.1f} G actifs par jeton){moe}")
 
+    # Cles de `raw` que le CHARGEUR consulte : elles doivent survivre a la
+    # conversion, sinon le manifeste ne transporte pas ce que le chargeur
+    # attend et la branche correspondante ne s'execute jamais en service.
+    # Le 8/09/2026, `gdn_a_log_negexp` manquait ainsi au manifeste : le facteur
+    # de decroissance des couches recurrentes etait transforme deux fois, pour
+    # onze pour cent d'ecart au lieu d'un contre llama.cpp.
+    CLES_BRUTES_UTILES = ("gdn_a_log_negexp",)
+
     def to_dict(self) -> dict:
         d = asdict(self)
-        d.pop("raw", None)
+        brut = d.pop("raw", None) or {}
         d.pop("layers", None)
+        for cle in self.CLES_BRUTES_UTILES:
+            if cle in brut:
+                d[cle] = brut[cle]
         d["total_params"] = self.total_params
         d["active_params"] = self.active_params
         return d
