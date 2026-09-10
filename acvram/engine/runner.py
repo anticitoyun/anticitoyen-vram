@@ -50,11 +50,25 @@ class Sequence:
     arrival: float = field(default_factory=time.time)
     first_token_at: float = 0.0
     cumulative_logprob: float = 0.0
-    prefilled: bool = False
+    prefill_len: int = 0                # jetons d'invite DEJA passes en avant
     cached_len: int = 0                 # jetons d'invite servis par le cache de préfixe
     hashes: list[int] = field(default_factory=list)
     n_accepted: int = 0                 # jetons spéculatifs acceptés
     n_proposed: int = 0
+
+    @property
+    def prefilled(self) -> bool:
+        """Vrai quand toute l'invite est passée en avant.
+
+        La progression a son champ à elle. On serait tenté de la lire dans
+        `cached_len`, qui est juste à côté et qui avance bien lors d'une
+        reprise partielle — mais `cached_len` répond à « combien le cache m'a
+        évité », pas à « où j'en suis », et il est faux dans les deux sens :
+        il vaut encore son origine après un prefill entier, et il porte déjà
+        sa valeur finale AVANT tout passage en avant quand le préfixe est
+        servi par le cache.
+        """
+        return self.prefill_len >= len(self.prompt_ids)
 
     @property
     def length(self) -> int:
@@ -351,6 +365,9 @@ class Engine:
                         self.stats.kv_refills += 1
                 seq.blocks = list(matched)
                 seq.cached_len = len(matched) * BLOCK_SIZE
+                # Le cache dispense de recalculer ces jetons : la progression
+                # du prefill part de là, elle ne part pas de zéro.
+                seq.prefill_len = seq.cached_len
                 seq.hashes = list(hashes[:len(matched)])
                 seq.blocks.extend(self.allocator.allocate(need - len(matched)))
                 self.stats.cached_prompt_tokens += seq.cached_len
@@ -506,6 +523,14 @@ class Engine:
             self.waiting.remove(seq)
 
     # -- batch construction ----------------------------------------------
+    def _decodables(self) -> list[Sequence]:
+        """Les séquences prêtes à décoder — un seul endroit qui le décide.
+
+        Les essais recopiaient ce prédicat au lieu de l'appeler : ils
+        auraient continué à passer en éprouvant l'ancienne notion.
+        """
+        return [s for s in self.running if s.prefilled and not s.finished]
+
     def _build_batch(self, seqs: list[Sequence], prefill: bool,
                      limite: Optional[int] = None) -> ForwardBatch:
         tokens: list[int] = []
@@ -567,7 +592,7 @@ class Engine:
             self.stats.prefill_seconds += time.perf_counter() - t0
             self.stats.prefill_tokens += sum(len(s.prompt_ids) - s.cached_len for s in new)
             for seq in new:
-                seq.prefilled = True
+                seq.prefill_len = len(seq.prompt_ids)
             outputs += self._emit(logits, new)
             for seq in new:
                 self._register_complete_blocks(seq)
@@ -585,15 +610,16 @@ class Engine:
                     self.model(self._build_batch([seq], prefill=True, limite=coupe))
                     self._photographier(seq, coupe)
                     seq.cached_len = coupe
+                    seq.prefill_len = coupe
                 batch = self._build_batch([seq], prefill=True)
                 logits = self.model(batch)
                 self.stats.prefill_seconds += time.perf_counter() - t0
                 self.stats.prefill_tokens += len(seq.prompt_ids) - seq.cached_len
-                seq.prefilled = True
+                seq.prefill_len = len(seq.prompt_ids)
                 outputs += self._emit(logits, [seq])
                 self._register_complete_blocks(seq)
 
-        decodable = [s for s in self.running if s.prefilled and not s.finished]
+        decodable = self._decodables()
         if decodable:
             t0 = time.perf_counter()
             if self.speculator is not None:
