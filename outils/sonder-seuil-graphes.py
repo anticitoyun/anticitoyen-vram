@@ -58,6 +58,20 @@ def main(argv):
     torch.cuda.synchronize()
     libre_apres_chargement, _ = torch.cuda.mem_get_info(0)
 
+    # CONTROLE OBLIGATOIRE, ajoute le 10/09 apres la mesure de poste3 : un plan
+    # qui exile un seul MLP en RAM hote desactive TOUS les graphes CUDA
+    # (`graphs.py::_eligible`, « poids en flux depuis la RAM hote »). La manche
+    # rendrait alors `captures = 0` pour une raison qui n a rien a voir avec ce
+    # qu on mesure — et ressemblerait a une refutation du correctif. On releve
+    # donc l exil et la raison d eligibilite A COTE du verdict, et une manche
+    # qui exile ne dit rien.
+    from acvram.engine.layers import QuantLinear
+    exiles = sum(1 for m_ in charge.model.modules()
+                 if isinstance(m_, QuantLinear) and m_.streamed is not None)
+    g_ = getattr(moteur, "graphs", None)
+    actifs = bool(getattr(g_, "enabled", False))
+    raison = (getattr(g_, "raison", "") or "").replace("\t", " ")[:80]
+
     params = SamplingParams(temperature=0.0, max_tokens=8)
     for i in range(ns.seqs):
         ids = [(i * 7919 + j * 31 + 11) % 30000 + 1 for j in range(ns.invite)]
@@ -86,14 +100,20 @@ def main(argv):
             if not moteur.running and not moteur.waiting:
                 break
     except Exception as exc:                                # noqa: BLE001
-        verdict, detail = "ECHEC", type(exc).__name__
+        # Le NOM de l exception ne dit pas quelle operation est interdite : le
+        # message, si. Le retenir a coute une manche le 10/09.
+        import traceback
+        traceback.print_exc()
+        verdict = "ECHEC"
+        detail = f"{type(exc).__name__}: {str(exc).splitlines()[0][:160]}"
     libre_fin, _ = torch.cuda.mem_get_info(0)
     captures, vivants = _etat_graphes()
 
     print(f"{ns.seqs}\t{'sans' if ns.sans_graphes else 'avec'}\t"
           f"{libre0/g:.2f}\t{libre_apres_chargement/g:.2f}\t"
           f"{libre_avant_pas/g:.2f}\t{libre_fin/g:.2f}\t"
-          f"{captures}\t{vivants}\t{verdict}\t{detail}")
+          f"{captures}\t{vivants}\t{exiles}\t{'oui' if actifs else 'non'}\t"
+          f"{verdict}\t{detail}\t{raison}")
     del moteur, charge
     gc.collect()
     torch.cuda.empty_cache()
@@ -101,6 +121,7 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    print("seqs\tgraphes\tlibre_depart\tapres_chargt\tavant_pas\tfin\tcaptures\tvivants\tverdict\tdetail",
+    print("seqs\tgraphes\tlibre_depart\tapres_chargt\tavant_pas\tfin\tcaptures"
+          "\tvivants\texiles\tactifs\tverdict\tdetail\traison",
           file=sys.stderr)
     sys.exit(main(sys.argv))

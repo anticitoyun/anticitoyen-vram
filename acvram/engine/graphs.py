@@ -363,6 +363,23 @@ class GraphRunner:
             if isinstance(mod, RotaryEmbedding):
                 mod.reserver(godet_mla(self.max_model_len) + MLA_BUCKET + 1, d, m.dtype)
 
+        # Toute echelle globale NVFP4 doit etre LUE avant la capture.
+        #
+        # `NVFP4Tensor.global_scale_float()` memorise sa valeur dans `_gs_f`,
+        # mais le premier appel fait `.item()` — une synchronisation hote,
+        # `cudaErrorStreamCaptureUnsupported` si elle tombe dans la capture.
+        # Mesure du 10/09/2026 : a douze sequences, `v_proj` franchit le seuil
+        # de lot, prend le chemin W4A8 (`nvfp4_mm_w4a8`), qui dequantifie et
+        # lit cette echelle pour la premiere fois — dans la capture. A huit
+        # sequences le seuil n'est pas franchi, le GEMV ne lit pas cette
+        # valeur la, et la capture reussit. Meme classe que la reservation des
+        # caches RoPE juste au-dessus : ce qui doit exister avant la capture
+        # doit etre FABRIQUE avant elle, pas rencontre pendant.
+        for mod in m.modules():
+            w_ = getattr(mod, "qweight", None)
+            if hasattr(w_, "global_scale_float"):
+                w_.global_scale_float()
+
         def step() -> torch.Tensor:
             return m.decode_fixed(entry["x"], entry["positions"],
                                   entry["slots"], entry["tables"],
