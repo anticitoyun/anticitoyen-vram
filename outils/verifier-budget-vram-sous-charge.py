@@ -113,6 +113,24 @@ class Guetteur(threading.Thread):
         return max(self.pic, self._lire())
 
 
+def _memoire_hote() -> tuple[int, int]:
+    """`MemFree` ET `MemAvailable`, en Kio. Jamais l un sans l autre.
+
+    Mesure d poste1 le 10/09 : le superviseur a tue son banc deux fois alors
+    que la machine avait 83 Go DISPONIBLES. `MemFree` tombait de 1,8 Gio,
+    `Cached` montait d autant, `MemAvailable` ne bougeait pas — la memoire
+    etait pretee au cache de pages, pas consommee. Publier `MemFree` seul,
+    c est lire une propriete voisine de celle qui decide.
+    """
+    d = {}
+    with open("/proc/meminfo") as fh:
+        for ligne in fh:
+            k, _, v = ligne.partition(":")
+            if k in ("MemFree", "MemAvailable"):
+                d[k] = int(v.split()[0])
+    return d.get("MemFree", 0), d.get("MemAvailable", 0)
+
+
 def mesurer(chemin: str, max_model_len: int, n_seqs: int,
             n_jetons: int, invite: int) -> dict:
     from acvram.engine.loader import load_model
@@ -155,6 +173,14 @@ def mesurer(chemin: str, max_model_len: int, n_seqs: int,
     torch.cuda.synchronize()
     pic = guetteur.arreter()
 
+    from acvram.engine.layers import QuantLinear
+    exiles = sum(1 for m_ in charge.model.modules()
+                 if isinstance(m_, QuantLinear) and m_.streamed is not None)
+    g_ = getattr(moteur, "graphs", None)
+    graphes_actifs = bool(getattr(g_, "enabled", False))
+    raison_graphes = (getattr(g_, "raison", "") or "")[:80]
+    libre_h, dispo_h = _memoire_hote()
+
     plan = charge.plan
     annonce = (plan.total_weight_bytes + sum(plan.kv_budget.values())
                + getattr(plan, "etat_recurrent_bytes", 0)
@@ -167,6 +193,11 @@ def mesurer(chemin: str, max_model_len: int, n_seqs: int,
         "poids": plan.total_weight_bytes,
         "kv": sum(plan.kv_budget.values()),
         "etat": getattr(plan, "etat_recurrent_bytes", 0),
+        "exiles": exiles,
+        "graphes": graphes_actifs,
+        "raison_graphes": raison_graphes,
+        "hote_libre": libre_h,
+        "hote_dispo": dispo_h,
     }
     del moteur, charge
     gc.collect()
@@ -212,6 +243,16 @@ def main(argv):
     print(f"  PIC sous charge  {r['pic']/g:6.2f} G   {pc:+.1f} %   {verdict}")
     print(f"  ce que la charge ajoute : "
           f"{(r['pic'] - r['chargement'])/g:+.2f} G")
+    # CONTROLES publies A COTE du verdict, jamais a sa place.
+    print(f"  MLP exiles {r['exiles']}   graphes "
+          f"{'actifs' if r['graphes'] else 'INACTIFS'}"
+          + (f" ({r['raison_graphes']})" if not r['graphes'] else ""))
+    print(f"  hote : MemFree {r['hote_libre']/2**20:.1f} G   "
+          f"MemAvailable {r['hote_dispo']/2**20:.1f} G")
+    if r["exiles"] or not r["graphes"]:
+        print("  MANCHE SANS OBJET : un MLP exile ou des graphes inactifs "
+              "changent le regime — ce chiffre ne mesure pas le budget KV.")
+        return 2
     return 0 if verdict == "conforme" else 1
 
 
