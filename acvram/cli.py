@@ -570,10 +570,21 @@ def cmd_eval(args: argparse.Namespace) -> int:
         # la fenetre — jamais sur wiki.test.raw (1,29 Mo). Sans ce message,
         # oublier le cadrage donne un chiffre faux d'un facteur proche de 2
         # (9,525 contre 7,233 au protocole) sans le moindre signe.
+        # Precision du 10/09 : il y a DEUX protocoles, et ce message n'en
+        # nommait qu'un. Dire « le protocole » envoie chercher un defaut la ou
+        # il n'y en a pas — meme famille que la divergence corpus reperee le
+        # meme jour entre docs/BARRIERE-QUALITE-PROTOCOLE.md et la chaine de
+        # l'etalon. Un avertissement doit nommer CE QU'IL INVALIDE.
         print(red("  min_context=0 : les premieres positions sont notees avec "
-                  "un contexte quasi vide. Ce chiffre N'EST PAS comparable a "
-                  "une mesure cadree — le protocole impose --min-context 256."),
-              flush=True)
+                  "un contexte quasi vide."), flush=True)
+        print(red("    non comparable a la barriere de qualite de noyau, qui "
+                  "impose --min-context 256 --window 512 --stride 512 sur "
+                  "wiki.test.raw ;"), flush=True)
+        print(red("    COMPARABLE en revanche a l'etalon exterieur "
+                  "transformers/GPTQ, qui note des segments disjoints de 2048 "
+                  "sans contexte reporte — c'est meme le seul cadrage qui lui "
+                  "corresponde (--window 2048 --stride 2048 --min-context 0 "
+                  "sur wiki-gptq.txt, reference 5,4141)."), flush=True)
     # Les modeles se chargeaient l'un apres l'autre dans le MEME processus sans
     # que le precedent soit libere. Le 9/09/2026, une barriere de qualite a
     # mesure un nvfp4 puis charge un bf16 par-dessus :

@@ -22,12 +22,26 @@ def test_le_cadrage_est_imprime_avant_la_mesure():
     assert i < j, "le cadrage doit sortir AVANT la mesure, pas apres"
 
 
-def test_min_context_nul_est_signale_comme_non_comparable():
+def test_min_context_nul_dit_ce_qu_il_invalide_ET_ce_qu_il_permet():
+    """Le message disait « le protocole impose --min-context 256 ». Or il y a
+    DEUX protocoles, et min_context=0 est le cadrage JUSTE pour l'un des deux.
+
+    Le 10/09, un avertissement au singulier a envoye chercher un defaut la ou
+    il n'y en avait pas : la barriere de qualite de noyau impose 256, mais
+    l'etalon exterieur transformers/GPTQ note des segments disjoints de 2048
+    sans contexte reporte, et min_context=0 est alors le seul cadrage qui lui
+    corresponde. Un avertissement doit nommer ce qu'il INVALIDE, sinon il
+    invalide aussi ce qu'il autorise."""
     src = inspect.getsource(cli.cmd_eval)
     assert "if not args.min_context" in src, "aucune garde sur min_context=0"
     bloc = src[src.index("if not args.min_context"):]
-    assert "N'EST PAS comparable" in bloc, "le message ne dit pas ce qui est en jeu"
-    assert "256" in bloc, "le message ne donne pas la valeur du protocole"
+    assert "non comparable" in bloc, "le message ne dit pas ce qui est en jeu"
+    assert "256" in bloc, "le message ne donne pas la valeur de la barriere"
+    assert "COMPARABLE" in bloc, \
+        "le message n'indique pas a quoi min_context=0 EST comparable"
+    assert "5,4141" in bloc or "5.4141" in bloc, \
+        "le message ne donne pas la reference de l'etalon exterieur"
+    assert "2048" in bloc, "le message ne donne pas le cadrage de l'etalon"
 
 
 def test_le_defaut_reste_zero_et_l_aide_le_dit():

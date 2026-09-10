@@ -97,7 +97,10 @@ def service(nom: str, argv: list[str], journal: Path, memoire_max: str,
     jamais par le superviseur de la machine."""
     sentinelle = journal.with_suffix(".fini")
     sentinelle.unlink(missing_ok=True)
+    racine = Path(__file__).resolve().parent.parent
     cmd = ["systemd-run", "--user", "--unit", nom, "--collect",
+           f"--property=WorkingDirectory={racine}",
+           f"--setenv=PYTHONPATH={racine}",
            f"--property=MemoryHigh={memoire_max}",
            f"--property=MemoryMax={memoire_max}",
            f"--property=RuntimeMaxSec={minutes * 60}",
@@ -135,6 +138,56 @@ def repr_sh(x: str) -> str:
     return "'" + x.replace("'", "'\\''") + "'"
 
 
+def releve_du_journal(journal: Path) -> dict | None:
+    """Rend l'objet JSON qui porte une perplexite, pas le premier accolade venu.
+
+    Le journal d'`acvram eval` contient d'abord le plan (un objet JSON), puis
+    168 lignes de progression, puis le releve. Un `find("{")` suivi de
+    `json.loads` a donc echoue sur « Extra data: line 46 » — le plan etait lu,
+    le releve jamais atteint.
+    """
+    t = journal.read_text(encoding="utf-8", errors="replace")
+    dec = json.JSONDecoder()
+    i = 0
+    dernier = None
+    while True:
+        d = t.find("{", i)
+        if d < 0:
+            break
+        try:
+            objet, fin = dec.raw_decode(t, d)
+            i = fin
+        except json.JSONDecodeError:
+            i = d + 1
+            continue
+        for c in (objet.get("models", [objet]) if isinstance(objet, dict) else []):
+            if isinstance(c, dict) and "perplexity" in c:
+                dernier = c
+    return dernier
+
+
+def verifier_que_c_est_notre_code(r: dict, journal: Path) -> str | None:
+    """Le releve doit porter les champs ajoutes le 10/09. Sinon ce n'est pas ce
+    code qui a tourne.
+
+    Premiere manche zero : `systemd-run` demarre hors du worktree, donc
+    `python -m acvram` a resolu vers l'acvram INSTALLE et non vers le worktree.
+    Le releve rendu ne portait ni `corpus_sha256` ni `nbytes_detail` — les deux
+    champs ajoutes le jour meme. C'est le temoin : un champ neuf absent prouve
+    que le binaire est l'ancien, et aucun chiffre de cette passe ne vaut.
+    """
+    manquants = [k for k in ("corpus_sha256", "nbytes_detail",
+                             "bits_par_poids_en_memoire") if not r.get(k)]
+    if manquants:
+        return (f"le releve de {journal.name} ne porte pas {manquants} : ce "
+                f"n'est pas le code de ce worktree qui a tourne, mais l'acvram "
+                f"installe. Aucun chiffre de cette passe ne vaut.")
+    if r["corpus_sha256"] != CORPUS_SHA[:24]:
+        return (f"le releve porte le corpus {r['corpus_sha256']} au lieu de "
+                f"{CORPUS_SHA[:24]}")
+    return None
+
+
 def lire_budget(dossier: Path) -> dict | None:
     m = json.loads((dossier / "acvram_manifest.json").read_text())
     return m.get("budget")
@@ -149,13 +202,16 @@ def main() -> int:
     ap.add_argument("--pour-de-vrai", action="store_true",
                     help="sans ce drapeau, imprime le plan et s'arrete")
     ap.add_argument("--points", help="sous-ensemble, ex. 4.50,5.00")
+    ap.add_argument("--dispersion-seule", action="store_true",
+                    help="manche zero seule : mesure la resolution de "
+                         "l'instrument et s'arrete, sans convertir")
     ap.add_argument("--sortie", default=str(RELEVES / "quota"))
     ap.add_argument("--memoire-max", default="40G")
     ap.add_argument("--python", default=sys.executable)
     a = ap.parse_args()
 
-    voulus = None
-    if a.points:
+    voulus = set() if a.dispersion_seule else None
+    if a.points and not a.dispersion_seule:
         voulus = {float(x) for x in a.points.split(",")}
     points = [p for p in POINTS if voulus is None or p[0] in voulus]
 
@@ -224,11 +280,11 @@ def main() -> int:
             if code:
                 print(f"ECHEC / CAUSE: manche de dispersion {k}, code {code}")
                 return 2
-            brut = j.read_text()
-            d = brut.find("{")
-            r = json.loads(brut[d:]) if d >= 0 else {}
-            if isinstance(r, dict) and "models" in r:
-                r = r["models"][0]
+            r = releve_du_journal(j) or {}
+            souci = verifier_que_c_est_notre_code(r, j) if r else "releve absent"
+            if souci:
+                print(f"ECHEC / CAUSE: {souci}")
+                return 2
             passes.append(r.get("perplexity"))
             print(f"  passe {k} : PPL {passes[-1]}", flush=True)
             rendre_le_cache(ref_dossier)
@@ -248,6 +304,14 @@ def main() -> int:
         print("  dispersion NON MESUREE : "
               f"{ref_dossier.name} absent. Les verdicts de temoin seront "
               "rendus avec un seuil pose a priori, ce qui est plus faible.")
+
+    if a.dispersion_seule:
+        print(f"\nFAIT / TESTE: dispersion {dispersion} PPL / "
+              f"RESTE: rien, manche zero seule")
+        (sortie / "dispersion.json").write_text(json.dumps(
+            {"dispersion_ppl": dispersion, "dossier": str(ref_dossier),
+             "corpus": str(CORPUS), "corpus_sha": CORPUS_SHA}, indent=2))
+        return 0
 
     resultats = []
     for b, nom, temoin in points:
@@ -306,11 +370,14 @@ def main() -> int:
             resultats.append({"budget_gib": b, "etat": "eval echouee",
                               "code": code, "bpw": bpw_reel, "budget": bud})
             continue
-        brut = (sortie / f"eval-{nom}.log").read_text()
-        deb = brut.find("{")
-        releve = json.loads(brut[deb:]) if deb >= 0 else {}
-        if isinstance(releve, dict) and "models" in releve:
-            releve = releve["models"][0]
+        jl = sortie / f"eval-{nom}.log"
+        releve = releve_du_journal(jl) or {}
+        souci = verifier_que_c_est_notre_code(releve, jl) if releve else "releve absent"
+        if souci:
+            print(f"  REFUS DE PUBLIER CE POINT : {souci}")
+            resultats.append({"budget_gib": b, "etat": "releve non attribuable",
+                              "cause": souci, "bpw": bpw_reel})
+            continue
         jppl.write_text(json.dumps(releve, indent=2, ensure_ascii=False))
         ppl = releve.get("perplexity")
         print(f"  PPL {ppl}  (reference exterieure {PPL_REFERENCE}, "
