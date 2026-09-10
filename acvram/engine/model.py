@@ -1645,6 +1645,43 @@ class ACVRamModel(nn.Module):
         # stockes au manifeste — cinq de plus, et 461 455 360 / 5 = 92 291 072,
         # soit exactement la taille d'un gate_up fusionne en int8. C'est une
         # PISTE, pas une explication : elle attend ce releve pour etre nommee.
+        # OCTETS REELLEMENT ALLOUES, par stockage unique. `nbytes` somme des
+        # `numel()` : une VUE y compte ses elements comme si elle possedait ses
+        # octets. Or les quatre empileurs remplacent les originaux par des
+        # tranches de la pile — c'est le but — donc `nbytes` compte deux fois
+        # tout ce qui est fusionne.
+        #
+        # C'est ce qui explique ENTIEREMENT l'ecart que je cherchais depuis ce
+        # matin. Llama-2-7b-fp16pur, tout PlainTensor en bf16 :
+        #
+        #   base (embed + 257 denses)          13 476 302 848
+        #   vues q, k, v                        3 221 225 472
+        #   vues gate, up                       5 771 362 304
+        #   embed compte une seconde fois         262 144 000
+        #   PREVU                              22 731 034 624
+        #   MESURE                             22 731 030 528   ecart 4 096 o
+        #
+        # Les 4 096 octets restants sont les 2 048 parametres que le manifeste
+        # compte en trop (6 738 417 664 contre 6 738 415 616 reels). Il n'y a
+        # donc plus rien d'inexplique dans le 26,987 bits/poids : ce n'etait ni
+        # un cache, ni un tampon, ni un doublon accidentel — c'etait l'unite de
+        # mesure.
+        vus_stockage: dict[int, int] = {}
+        for nom, m in self.named_modules():
+            if not isinstance(m, QuantLinear):
+                continue
+            q = m.qweight
+            for champ in ("qweight", "weight", "scales", "zeros",
+                          "block_scale", "global_scale_rows"):
+                t = getattr(q, champ, None)
+                if t is None or not hasattr(t, "untyped_storage"):
+                    continue
+                st = t.untyped_storage()
+                vus_stockage[st.data_ptr()] = st.nbytes()
+        st_emb = self.embed_tokens.untyped_storage()
+        vus_stockage[st_emb.data_ptr()] = st_emb.nbytes()
+        octets_stockage = sum(vus_stockage.values())
+
         par_forme: dict[str, int] = {}
         for e in vus.values():
             for nom in e["noms"]:
@@ -1663,6 +1700,9 @@ class ACVRamModel(nn.Module):
             "vus_plusieurs_fois": [
                 {"octets": e["octets"], "fmt": e["fmt"], "noms": e["noms"]}
                 for e in vus.values() if len(e["noms"]) > 1],
+            "octets_stockage_uniques": octets_stockage,
+            "stockages_distincts": len(vus_stockage),
+            "octets_dupliques_par_les_vues": self.nbytes - octets_stockage,
             "douze_plus_gros": [{"nom": n, "octets": o} for n, o in gros],
             "octets_par_nom_total": sum(par_forme.values()),
         }
