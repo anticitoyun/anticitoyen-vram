@@ -283,15 +283,28 @@ def get_extension():
         src = os.path.join(here, "acvram_kernels.cu")
         with open(src, "rb") as fh:
             _SRC_OCTETS = fh.read()
-        # TOUT CE QUI ENTRE DANS LA CONSTRUCTION ENTRE DANS LE HASH. Hacher le
-        # seul contenu du fichier laissait ouvert le defaut que ce controle
-        # croit fermer : ce qui ne passe pas par le fichier ne change pas le
-        # hash, donc plusieurs constructions differentes portent la meme
-        # empreinte, donc ccache peut rendre le meme objet — et plusieurs
-        # reglages rendent le meme chiffre. Le resultat est un temps plat, qui
-        # se lit « le reglage n'a pas d'effet » et refute a tort une prediction
-        # juste. C'est un faux negatif : un tel defaut ne peut pas FABRIQUER un
-        # gain, il ne peut qu'en EFFACER un.
+        # TOUT CE QUI ENTRE DANS LA CONSTRUCTION ENTRE DANS LE HASH — et voici
+        # exactement contre quoi cela protege, ni plus ni moins.
+        #
+        # CE QUI N'ETAIT PAS LE DEFAUT, verifie plutot que suppose : ccache et
+        # ninja distinguent DEJA les drapeaux. Trois compilations enchainees
+        # dans le meme cache, mesurees le 10/09 :
+        #     CVD=0     62 s  empreinte 403da9739cb9
+        #     CVD=0,1   83 s  empreinte 3eb2234a6864   (reconstruction)
+        #     CVD=0      1 s  empreinte 403da9739cb9   (le premier objet revient)
+        # Le binaire n'est donc JAMAIS croise : la cle de ccache contient la
+        # ligne de commande, et ninja reconstruit quand elle change. Une
+        # premiere version de ce commentaire affirmait le contraire ; elle
+        # sur-estimait le danger, et une explication trop belle est un defaut.
+        #
+        # CE QUI ETAIT LE DEFAUT : le repertoire de compilation ne contient
+        # qu'UN acvram_kernels.so, reecrit a chaque changement de drapeaux.
+        # Deux processus concurrents aux drapeaux differents se le disputent, et
+        # l'un peut charger le binaire construit pour l'autre. Le hash aveugle
+        # aux drapeaux ne pouvait pas le voir : il declarait coherent un .so
+        # construit pour une autre architecture. C'est le controle qui etait
+        # partiel, pas la construction qui etait fausse — et une empreinte
+        # partielle est pire que pas d'empreinte, parce qu'elle rassure.
         #
         # DEUX chemins y echappaient, pas un :
         #   ACVRAM_GW_WARPS   -> -DGW_WARPS=n, qui sert le MoE groupe ;
@@ -679,12 +692,7 @@ _bk.register(_bk.Backend(
 
 _bk.register(_bk.Backend(
     name="fp4-tensorcores", formats=("nvfp4",), device_type="cuda",
-    priority=110,
-    # Echappement, sur le modele de `ACVRAM_DISABLE_PAGED_ATTN` : ce chemin
-    # doit pouvoir etre ecarte SANS toucher au code, sinon le duel qui decide
-    # de son sort compare deux binaires au lieu de deux chemins.
-    available=lambda d: (not os.environ.get("ACVRAM_DISABLE_FP4_TC")
-                         and _sm100_ok(d)),
+    priority=110, available=_sm100_ok,
     # EXCLU PENDANT UNE CAPTURE DE GRAPHE, et pas au-dela d'un lot.
     #
     # `torch._scaled_mm` passe par cuBLASLt, dont le premier appel sur un flux
