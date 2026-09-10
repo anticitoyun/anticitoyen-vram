@@ -397,44 +397,37 @@ def nvfp4_dequant(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16,
 # Le seuil a valu 8 jusqu'au 10/09/2026, sur ce balayage : « dense de 27B, TTFT
 # d'une invite de 16 jetons, 194,7 ms à 8, 202,8 à 32, 265,1 à 64 » — une
 # mesure à UNE séquence, où le décodage ne franchit jamais le seuil. Elle ne
-# disait donc rien du seul régime où il décide : la CONCURRENCE.
+# disait donc rien du seul régime où il décide : la CONCURRENCE. Les deux
+# mesures ne se contredisaient pas, elles ne parlaient pas du même monde.
 #
-# Mesuré le 10/09/2026, Qwen3-4B-nvfp4, 5090, ABBA, une valeur par processus
-# (le seuil est lu à l'import) :
+# Refait le 10/09/2026 sous verrou de carte (`outils/carte.sh` — une première
+# campagne avait été jetée : une autre session chargeait en même temps, et
+# c'est le bras SURVIVANT, pas celui mort en OOM, qui rendait un chiffre que
+# rien ne signalait comme faux). ABBA, une valeur par processus, le seuil étant
+# lu à l'import. Chaque bras deux fois ; la dispersion INTRA-bras est donnée
+# pour que l'écart se lise contre elle.
 #
-#     seuil   TTFT ms        pas/s      régime
-#       8     993,6 1002,9   18,94      12 séquences
-#      32     901,6  899,2   53,70      12 séquences   ×2,84 en débit
-#       8     289,5  287,7   228,6      1 séquence
-#      32     227,9  224,4   228,4      1 séquence     -21 % de TTFT
+#   modele      regime            seuil 8          seuil 32        ecart
+#   Qwen3-4B    12 seq, debit   18,93 18,93 p/s  53,67 53,65     x2,84
+#   Qwen3-4B    12 seq, TTFT    1021,2 1013,1 ms  924,6  926,3    -9,4 %
+#   Qwen3-4B     1 seq, TTFT     288,7  289,9     227,1  229,1   -21,3 %
+#   Qwen3-4B     1 seq, decode  227,11 227,00 p/s 227,41 226,59    nul
+#   AWAXIS-31B   1 seq, TTFT     464,0  463,0     433,2  434,6    -6,5 %
+#   AWAXIS-31B   1 seq, decode   47,42  47,32     47,40  47,45     nul
 #
-# Sur un second modèle, dense de 31B à une séquence, 8 rend 446,5 et 463,5 ms
-# contre 420,8 et 444,1 à 32 : l'écart y est SOUS la dispersion des bras, donc
-# non conclusif — mais jamais en défaveur de 32.
+# Dispersion intra-bras : au plus 8 ms et 0,1 pas/s. Chaque ecart vaut 4 a 200
+# fois cette dispersion. A une sequence le decodage ne franchit pas le seuil,
+# des deux cotes : sa neutralite est le TEMOIN de la manche.
 #
-# Et la justesse va dans le même sens, ce que personne n'avait mesuré : contre
-# le poids RÉELLEMENT stocké, le GEMV rend 55,6 dB là où le chemin W4A8 rend
+# Et la justesse va dans le meme sens, ce que personne n'avait mesure : contre
+# le poids REELLEMENT stocke, le GEMV rend 55,6 dB la ou le chemin W4A8 rend
 # 27,9 — +27,8 dB. Au-dessus de huit lignes on payait donc une erreur quatre
 # fois plus grande sans l'avoir choisie.
 #
-# 32 serait retenu plutôt que plus haut : le croisement mesuré sur six formes
-# du parc va de 40 à plus de 64, et un seuil sous le plus petit croisement ne
-# peut pas perdre sur une forme non balayée.
-#
-# LE SEUIL RESTE POURTANT A 8, et la raison n'est pas technique : une autre
-# session chargeait un modèle sur la même carte pendant ces manches — son
-# processus est mort en OOM à 3,56 Mio libres. La garde de carte est un
-# INSTANTANE, pas une réservation : consultée à quelques secondes d'écart, elle
-# a répondu « libre » aux deux, et elle avait raison les deux fois. Les chiffres
-# ci-dessus se reproduisent à 0,1 % sur le débit (18,94 puis 18,94 puis 18,94 ;
-# 53,70 puis 53,70 puis 53,62) et à 10 % sur le TTFT — donc l'ordre de grandeur
-# tiendra probablement. « Probablement » ne change pas une constante que le
-# planificateur consulte pour tout le parc.
-#
-# A refaire sous le verrou `flock` que le circuit adopte, meme protocole. La
-# variable reste comme échappement, et `ACVRAM_NVFP4_GEMV_MAX=32` donne le
-# comportement mesuré ici.
-_NVFP4_GEMV_MAX = int(os.environ.get("ACVRAM_NVFP4_GEMV_MAX", "8"))
+# 32 plutôt que plus haut : le croisement mesuré sur six formes du parc va de
+# 40 à plus de 64, et un seuil sous le plus petit croisement ne peut pas perdre
+# sur une forme non balayée. La variable reste comme échappement.
+_NVFP4_GEMV_MAX = int(os.environ.get("ACVRAM_NVFP4_GEMV_MAX", "32"))
 
 
 def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
