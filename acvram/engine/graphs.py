@@ -311,14 +311,27 @@ class GraphRunner:
             entry["graph"].replay()
             if "ptrs" in entry:
                 torch.cuda.synchronize(self.device)   # débogage : faute attribuée au bon rejeu
+            elif os.environ.get("ACVRAM_CHRONO_SYNC"):
+                # Instrumentation temporaire (poste3, mandat chef) : sans
+                # synchronisation, .replay() est un lancement asynchrone --
+                # perf_counter() juste apres ne mesure QUE le lancement, pas
+                # l'execution reelle sur le GPU. Sous garde d'env car cette
+                # synchronisation elle-meme serialise le pipeline et FAUSSE
+                # le debit si elle reste active en permanence. Non committe.
+                torch.cuda.synchronize(self.device)
         self.replays += 1
         out = entry["out"].clone()
-        if trace:
-            t3 = time.perf_counter()
-            if (t3 - t0) * 1000 > 20:
-                print(f"[graphe-lent] bind {(t1-t0)*1000:.1f} fill "
-                      f"{(t2-t1)*1000:.1f} replay {(t3-t2)*1000:.1f} ms clé {key}",
-                      flush=True)
+        t3 = time.perf_counter()
+        getattr(self, "temps_bind", None) is None and setattr(self, "temps_bind", [])
+        getattr(self, "temps_fill", None) is None and setattr(self, "temps_fill", [])
+        getattr(self, "temps_replay", None) is None and setattr(self, "temps_replay", [])
+        self.temps_bind.append((t1 - t0) * 1000)
+        self.temps_fill.append((t2 - t1) * 1000)
+        self.temps_replay.append((t3 - t2) * 1000)
+        if trace and (t3 - t0) * 1000 > 20:
+            print(f"[graphe-lent] bind {(t1-t0)*1000:.1f} fill "
+                  f"{(t2-t1)*1000:.1f} replay {(t3-t2)*1000:.1f} ms clé {key}",
+                  flush=True)
         return out
 
     # -- hybrides ----------------------------------------------------------
