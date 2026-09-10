@@ -207,9 +207,15 @@ class GraphRunner:
                 # ET LA CAUSE EST JOURNALISEE, jamais tue : un echec de capture
                 # silencieux est precisement ce qui nous a coute la journee. On
                 # imprime le type et le message, puis on replie en eager.
+                # UNE SEULE FOIS PAR SESSION : `enabled` passant a False, on
+                # ne repasse normalement pas ici — mais si un jour un chemin
+                # reessaie, un serveur qui refuse la capture a chaque pas
+                # noierait sa propre sortie. Le drapeau coute un attribut.
                 self.raison = f"{type(e).__name__}: {str(e).splitlines()[0][:160]}"
-                print(f"[acvram] graphes CUDA desactives, decodage en eager — "
-                      f"capture impossible : {self.raison}", flush=True)
+                if not getattr(self, "_dit_raison", False):
+                    self._dit_raison = True
+                    print(f"[acvram] graphes CUDA desactives, decodage en eager "
+                          f"— capture impossible : {self.raison}", flush=True)
                 self.enabled = False
                 self.graphs.clear()
                 torch.cuda.empty_cache()
