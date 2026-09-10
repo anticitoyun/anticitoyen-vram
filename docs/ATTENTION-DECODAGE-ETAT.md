@@ -409,3 +409,35 @@ identiques à 3000). L'écart entre eux vaut moins de 1 % de l'erreur que la
 quantification int8 du cache fait déjà subir. **Classe B, sans dégradation
 mesurable** : le noyau est par ailleurs déterministe — deux appels identiques
 rendent le bit exact.
+
+## Ce qui reste à mesurer, avec sa prédiction écrite d'avance
+
+**64 est un plancher d'ignorance, pas un optimum** : c'est la plus petite
+valeur essayée. 32 et 16 n'ont jamais tourné, et on ne règle pas un défaut par
+extrapolation.
+
+Le modèle que les six points existants suggèrent — à vérifier, pas à croire :
+
+    total(chunk) = plancher(nombre de blocs) + travail(chunk)
+
+Le travail est proportionnel à la tranche (mesuré : il double quand elle
+double). Le plancher croît avec le nombre de blocs, mais **seulement au-delà de
+~768** : plat à 11,5 µs de 64 à 768 blocs, puis 15,36 µs à 1504.
+
+    chunk 64    1504 blocs   plancher 15,36   travail 10,11   total 25,47 (mesure)
+    chunk 32    3008 blocs   plancher   ?     travail  ~5     total  ?
+    chunk 16    6016 blocs   plancher   ?     travail ~2,5    total  ?
+
+**Prédiction** : le travail économisé (~5 µs de 64 à 32) est du même ordre que
+la croissance du plancher observée en doublant les blocs (~3,8 µs de 768 à
+1504). **On attend donc un gain nul ou faible à 32, et une perte à 16.** Si 32
+gagne nettement plus de 5 µs, le modèle additif est faux et c'est lui qu'il
+faudra reprendre — pas le réglage.
+
+**Contrainte à ne pas oublier** : `C ≤ 256` limite `chunk=32` aux contextes
+sous 8 k jetons et `chunk=16` sous 4 k. Un réglage qui ne vaut que pour les
+contextes courts n'a d'intérêt que si le gain y est net.
+
+**Et la marge est réelle** : à 3007 jetons le noyau reste à **8,6 fois sa borne
+mémoire** après le gain (25,47 µs contre 2,96 µs pour relire 3,10 Mo à
+1050 Go/s). Ce qui limite n'est donc toujours pas la bande passante.
