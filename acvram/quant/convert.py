@@ -1131,12 +1131,12 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         _mode = os.environ.get("ACVRAM_ORDRE_SAC", "snr").strip().lower()
         if os.environ.get("ACVRAM_ORDRE_SAC_INVERSE"):
             _mode = "inverse"
-        if _mode not in ("snr", "erreur", "inverse", "absolu"):
+        if _mode not in ("snr", "erreur", "inverse", "absolu", "base_croissant"):
             raise ValueError(
                 f"ACVRAM_ORDRE_SAC={_mode!r} inconnu ; attendu snr, erreur, "
-                f"absolu ou inverse. Un mode inconnu qui retomberait en silence "
-                f"sur le defaut ferait mesurer autre chose que ce qui est "
-                f"demande.")
+                f"absolu, base_croissant ou inverse. Un mode inconnu qui "
+                f"retomberait en silence sur le defaut ferait mesurer autre "
+                f"chose que ce qui est demande.")
 
         def _abs_err(m):
             """Erreur ABSOLUE en sortie de couche, en unites de sortie.
@@ -1161,6 +1161,21 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             return rel * float(ech) if ech else rel
 
         def _cle(c):
+            if _mode == "base_croissant":
+                # BRAS TEMOIN, construit AVANT la mesure qu'il doit departager.
+                #
+                # Si une cle raffinee ameliore la perplexite, deux explications
+                # restent en lice : la cle est un meilleur critere, ou bien
+                # elle promeut simplement les tenseurs les plus mal quantifies.
+                # Ce bras isole la seconde : il trie par SNR de base croissant
+                # en IGNORANT le cout, donc il fait « les mal quantifies
+                # d'abord » et rien de plus.
+                #
+                # Nomme par chef avant la mesure, et construit tout de suite
+                # sur son insistance : un bras nomme mais non construit
+                # s'expose a etre ecrit APRES avoir vu le resultat, et un bras
+                # qui existe avant la mesure ne peut pas etre ajuste par elle.
+                return c["metrics_base"]["out_snr_db"]
             if _mode == "absolu":
                 gagne = (_abs_err(c["metrics_base"]) - _abs_err(c["metrics"]))
                 return -gagne / c["cout"]
@@ -1203,7 +1218,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         manifest["budget"] = {
             # Le sens de l'ordre est ECRIT au manifeste : un dossier produit
             # par le bras inverse doit etre reconnaissable sans son journal.
-            "ordre_glouton": {"snr": "snr_par_octet_decroissant",
+            "ordre_glouton": {"base_croissant": "snr_de_base_croissant_sans_cout",
+                              "snr": "snr_par_octet_decroissant",
                               "erreur": "erreur_evitee_par_octet_decroissante",
                               "inverse": "snr_par_octet_croissant"}[_mode],
             "demande_gib": opts.bits_budget_gib,
