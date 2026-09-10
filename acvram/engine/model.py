@@ -1630,6 +1630,26 @@ class ACVRamModel(nn.Module):
             e = vus.setdefault(id(q), {"octets": o, "fmt": fmt, "noms": []})
             e["noms"].append(nom)
         double = sum(e["octets"] * (len(e["noms"]) - 1) for e in vus.values())
+        # Le compte par IDENTITE D'OBJET a rendu 0 a la premiere mesure
+        # (230 QuantLinear, 230 objets distincts) : l'hypothese « un meme objet
+        # rencontre plusieurs fois » est morte. Il reste 461 455 360 octets
+        # au-dessus de la somme des tenseurs du DISQUE (7 223 386 112 mesures
+        # contre 6 761 930 752 attendus pour l'int8 de Llama-2-7B), et le
+        # detecteur ne pouvait pas les voir : deux objets DISTINCTS portant des
+        # octets equivalents — une projection fusionnee materialisee a cote de
+        # ses tranches — s'accordent avec « 0 objet vu deux fois ».
+        #
+        # D'ou ce second compte, par NOM et par forme : il attribue les octets
+        # a des tenseurs nommes, donc il peut nommer les 461 Mo au lieu de les
+        # constater. Note au passage : 230 QuantLinear pour 225 tenseurs
+        # stockes au manifeste — cinq de plus, et 461 455 360 / 5 = 92 291 072,
+        # soit exactement la taille d'un gate_up fusionne en int8. C'est une
+        # PISTE, pas une explication : elle attend ce releve pour etre nommee.
+        par_forme: dict[str, int] = {}
+        for e in vus.values():
+            for nom in e["noms"]:
+                par_forme[nom] = e["octets"]
+        gros = sorted(par_forme.items(), key=lambda kv: -kv[1])[:12]
         emb = self.embed_tokens.numel() * self.embed_tokens.element_size()
         return {
             "total": self.nbytes,
@@ -1643,4 +1663,6 @@ class ACVRamModel(nn.Module):
             "vus_plusieurs_fois": [
                 {"octets": e["octets"], "fmt": e["fmt"], "noms": e["noms"]}
                 for e in vus.values() if len(e["noms"]) > 1],
+            "douze_plus_gros": [{"nom": n, "octets": o} for n, o in gros],
+            "octets_par_nom_total": sum(par_forme.values()),
         }
