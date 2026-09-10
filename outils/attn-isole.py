@@ -77,8 +77,15 @@ def bascule(v):
         os.environ.pop("ACVRAM_PA_ETAPE", None)
     else:
         os.environ["ACVRAM_PA_ETAPE"] = v
+# L'EMPREINTE DU BINAIRE EST JOINTE AU RELEVE. Le controle .cu/.so prouve la
+# coherence du couple, jamais son identite : le repertoire de compilation etait
+# partage par les quatre worktrees, donc un .so parfaitement coherent pouvait
+# venir d'une autre session. Un chiffre sans le sha de ce qui l'a produit
+# n'est pas reproductible.
 print(f"# etape={etape} chunk={chunk} · un appel isole, evenements CUDA, "
       f"mediane de {N_MESURES}")
+print(f"# arbre {os.path.dirname(os.path.dirname(os.path.abspath(kernels.__file__)))} "
+      f"· binaire sha {kernels._SO_HASH or 'INCONNU'} · {kernels._SO_PATH or '-'}")
 
 for lm in LMOTS:
     captures.clear()

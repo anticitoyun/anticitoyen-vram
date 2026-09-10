@@ -295,9 +295,28 @@ Ce que chaque issue voudra dire, posé d'avance :
     ~ +50 %          le gain se transporte, le modele d Amdahl tient
     nettement moins  le temps gagne est REPRIS AILLEURS, et il faudra dire ou
                      avant d annoncer quoi que ce soit
-    ~ 0 %            le noyau n est pas sur le chemin critique du pas — donc
-                     les 49,5 % du profileur mesurent autre chose que ce que
-                     l on croit, et c est ce chiffre-la qu il faut reprendre
+    ~ 0 %            DEUX causes possibles, a departager et non a supposer :
+                     (a) le temps gagne est REPRIS par un poste que le noyau
+                         isole ne voyait pas — c est l hypothese a tester EN
+                         PREMIER, car un banc de bout en bout paie ce que
+                         l appel isole ne paie pas ;
+                     (b) seulement si (a) est ecarte : les 49,5 % du profileur
+                         mesurent autre chose que ce que l on croit.
+
+### La borne mémoire dit que le gain n'est pas repris par l'attention elle-même
+
+Qwen3-Coder-30B-A3B, cache int8 : 4 têtes KV × 128 = 512 octets pour K, autant
+pour V, soit ~1032 octets par jeton et par couche (échelles comprises). À 3007
+jetons, une couche relit **3,10 Mo** par pas ; à la borne mesurée de la 5090
+(~1050 Go/s) cela vaut **2,96 µs**.
+
+    noyau a chunk 512    78,72 us    26,6 x la borne memoire
+    noyau a chunk  64    25,47 us     8,6 x la borne memoire
+
+**Même après le gain, le noyau reste à 8,6 fois sa propre borne mémoire.** Le
+temps gagné ne peut donc pas être repris par la bande passante de l'attention :
+si le gain moteur est faible, la cause est ailleurs dans le pas, et il reste de
+la marge sur ce noyau au-delà de ×3,1.
 
 **Deux réserves écrites d'avance, elles aussi.** La grille n'a été balayée qu'à
 **un seul contexte** (3007) : le gain à contexte court est attendu mais non

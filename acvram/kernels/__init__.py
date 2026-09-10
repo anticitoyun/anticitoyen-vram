@@ -41,6 +41,9 @@ __all__ = ["get_extension", "kernels_available", "build_info", "matmul",
 _EXT: Optional[Any] = None
 _TRIED = False
 _ERROR: str = ""
+_SO_HASH: str = ""          # sha256 du .so effectivement charge : a joindre
+_SO_PATH: str = ""          # a tout releve, car une empreinte .cu/.so prouve
+                            # la coherence, jamais l identite de l arbre
 
 # Blackwell exige CUDA 12.8 ou plus récent ; rien de plus ancien ne sait émettre du sm_120.
 _MIN_CUDA_FOR_SM120 = (12, 8)
@@ -250,7 +253,21 @@ def get_extension():
     try:
         from torch.utils.cpp_extension import load
         here = os.path.dirname(os.path.abspath(__file__))
-        cache = os.path.expanduser("~/.cache/acvram/kernels")
+        # UN REPERTOIRE DE COMPILATION PAR ARBRE. Le defaut etait partage par
+        # les quatre worktrees, sous un nom de module fixe : deux sessions dont
+        # les sources different s'ecrasent le meme .so, et _purger_verrou()
+        # retire le verrou d'une compilation qui n'est pas la sienne. Le
+        # symptome est exactement celui qu'on avait attribue a ccache — un
+        # binaire coherent avec un source qui n'est pas le votre, une date
+        # rassurante, aucune erreur. Les deux mecanismes existent ; celui-ci
+        # etait invisible.
+        # La cle est le chemin du paquet : deux arbres ne peuvent plus se
+        # rencontrer, et un meme arbre garde son cache d'une fois sur l'autre.
+        cache = os.environ.get("ACVRAM_KERNEL_CACHE")
+        if not cache:
+            _cle = hashlib.sha256(
+                os.path.realpath(here).encode()).hexdigest()[:12]
+            cache = os.path.expanduser(f"~/.cache/acvram/kernels-{_cle}")
         os.makedirs(cache, exist_ok=True)
         _purger_verrou(cache)
         # EMPREINTE DU SOURCE, injectee comme option de compilation.
@@ -286,8 +303,19 @@ def get_extension():
         so = os.path.join(cache, "acvram_kernels.so")
         try:
             with open(so, "rb") as fh:
+                octets = fh.read()
                 # l'entier est ecrit en little-endian dans le binaire
-                porte = _SRC_U64.to_bytes(8, "little") in fh.read()
+                porte = _SRC_U64.to_bytes(8, "little") in octets
+            # EMPREINTE DU BINAIRE LUI-MEME, a joindre a tout releve. Le
+            # controle ci-dessus prouve que le .so est COHERENT avec un .cu ;
+            # il ne peut pas voir que le couple entier vient d'un autre arbre —
+            # demontre le 10/09, ou PYTHONPATH manquant faisait mesurer le
+            # depot principal avec son propre binaire, parfaitement coherent.
+            # Une empreinte prouve la coherence, pas l'identite : c'est le sha
+            # du .so, joint au chiffre, qui identifie ce qui a tourne.
+            global _SO_HASH, _SO_PATH
+            _SO_HASH = hashlib.sha256(octets).hexdigest()[:16]
+            _SO_PATH = so
         except OSError:
             porte = True                       # pas de .so a inspecter : on n'accuse pas
         if not porte:
