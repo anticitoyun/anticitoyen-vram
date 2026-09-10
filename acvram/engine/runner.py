@@ -772,6 +772,7 @@ class Engine:
         span = max(8, n_new + 4)
         window = seq.output_ids[-span:]
         prev = seq.output_ids[-span:-n_new] if n_new else seq.output_ids[-span:]
+        self._refuser_si_attention_amputee()
         try:
             full = tok.decode(window)
             head = tok.decode(prev) if prev else ""
@@ -779,7 +780,21 @@ class Engine:
             return ""
         return full[len(head):] if full.startswith(head) else full
 
+    @staticmethod
+    def _refuser_si_attention_amputee() -> None:
+        """Les bras B et C d'ACVRAM_PA_ARM amputent l'attention paginee : la
+        sortie du modele est fausse. Elle ne doit pas pouvoir etre lue, sinon
+        elle deviendra le prochain chiffre plausible qui se transporte."""
+        bras = os.environ.get("ACVRAM_PA_ARM", "A")
+        if bras and bras[0] != "A":
+            raise RuntimeError(
+                f"ACVRAM_PA_ARM={bras} : l'attention paginee est amputee, la "
+                "sortie est FAUSSE et le decodage du texte est refuse. Ce bras "
+                "ne sert qu'a chronometrer le pas."
+            )
+
     def _decode_all(self, seq: Sequence) -> str:
+        self._refuser_si_attention_amputee()
         try:
             return self.tokenizer.decode(seq.output_ids)
         except Exception:                            # noqa: BLE001

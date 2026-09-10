@@ -758,7 +758,8 @@ __global__ void paged_attn_partial_kernel(
     float *__restrict__ part_m,           // [B*QL, HQ, C]
     float *__restrict__ part_l,           // [B*QL, HQ, C]
     OT *__restrict__ sortie,              // [B*QL, HQ, D] si C == 1, sinon nul
-    int HQ, int HKV, int N, int C, int QL, float scale, int window) {
+    int HQ, int HKV, int N, int C, int QL, float scale, int window,
+    int arm) {
     // La vérification spéculative pose QL positions de requête par séquence :
     // la requête qi (0..QL-1) ne voit que les seq_len-QL+1+qi premières
     // positions — causalité oblige. QL=1 redonne le décodage ordinaire.
@@ -784,6 +785,41 @@ __global__ void paged_attn_partial_kernel(
         }
         for (int d = threadIdx.x; d < D; d += blockDim.x)
             part[out_off * D + d] = 0.f;
+        return;
+    }
+
+    // Bras de mesure (ACVRAM_PA_ARM). arm=0 : le noyau reel, boucle intacte.
+    // arm=1 : rien n'est lu — le PLANCHER du montage (lancement + ecritures).
+    // arm=2 : le KV est lu selon le MEME parcours, sans le softmax ni les
+    // produits — le trafic memoire de arm=0 sans son calcul.
+    // Les trois bras sont le meme binaire : aucun ecart de compilation entre eux.
+    if (arm != 0) {
+        float s = 0.f;
+        if (arm == 2) {
+            const long fin = min(slen, (long)(c + 1) * PA_CHUNK);
+            for (long t = start + wid; t < fin; t += PA_WARPS) {
+                const long blk = tables[(long)b * N + (t >> 4)];
+                const long cell = (blk * 16 + (t & 15)) * HKV + hkv;
+                const signed char *kp = kc + cell * D;
+                const signed char *vp = vc + cell * D;
+                #pragma unroll
+                for (int i = 0; i < PER_LANE; ++i)
+                    s += static_cast<float>(kp[lane * PER_LANE + i])
+                       + static_cast<float>(vp[lane * PER_LANE + i]);
+                s += __half2float(ks[cell]) + __half2float(vs[cell]);
+            }
+            #pragma unroll
+            for (int off = WARP / 2; off > 0; off >>= 1)
+                s += __shfl_down_sync(0xffffffffu, s, off);
+        }
+        // Meme empreinte d'ecriture que le noyau reel : ni elimine, ni
+        // avantage par une sortie plus petite.
+        if (threadIdx.x == 0) { part_m[out_off] = s; part_l[out_off] = 1.f; }
+        for (int d = threadIdx.x; d < D; d += blockDim.x)
+            part[out_off * D + d] = s;
+        if (C == 1 && sortie != nullptr)
+            for (int d = threadIdx.x; d < D; d += blockDim.x)
+                sortie[out_off * D + d] = from_float<OT>(s);
         return;
     }
 
@@ -1850,6 +1886,19 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
                 "dimension de tete non instanciee : ", D);
     const int C = (N * 16 + PA_CHUNK - 1) / PA_CHUNK;
     TORCH_CHECK(C <= 256, "contexte au-dela de 256 tranches");
+    static const int pa_arm = [] {
+        const char *v = std::getenv("ACVRAM_PA_ARM");
+        if (v == nullptr) return 0;
+        const int a = (v[0] == 'A') ? 0 : (v[0] == 'B') ? 1 : (v[0] == 'C') ? 2 : -1;
+        TORCH_CHECK(a >= 0, "ACVRAM_PA_ARM doit valoir A, B ou C (recu : ", v,
+                    "). Un bras inconnu est refuse : c'est ce refus qui prouve "
+                    "que le binaire charge contient bien ce code.");
+        TORCH_CHECK(a == 0 || std::getenv("ACVRAM_PA_ARM_SORTIE_FAUSSE") != nullptr,
+                    "les bras B et C amputent l'attention : la sortie du modele "
+                    "est FAUSSE et ne doit pas etre publiee. Poser "
+                    "ACVRAM_PA_ARM_SORTIE_FAUSSE=1 pour le reconnaitre.");
+        return a;
+    }();
     const bool qbf = q.scalar_type() == torch::kBFloat16;
     auto f32 = q.options().dtype(torch::kFloat);
     auto part = torch::empty({BQ, HQ, C, D}, f32);
@@ -1869,7 +1918,8 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
             tables.data_ptr<long>(), seq_lens.data_ptr<long>(), \
             part.data_ptr<float>(), pm.data_ptr<float>(), \
             pl.data_ptr<float>(), (C == 1 ? (PO) : nullptr), \
-            HQ, (int)hkv, N, C, (int)q_len, (float)scale, (int)window); \
+            HQ, (int)hkv, N, C, (int)q_len, (float)scale, (int)window, \
+            pa_arm); \
         if (C > 1) \
         paged_attn_reduce_kernel<DD, OT><<<g2, 128, 0, stream>>>( \
             part.data_ptr<float>(), pm.data_ptr<float>(), \
