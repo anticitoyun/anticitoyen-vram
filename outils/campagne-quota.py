@@ -138,6 +138,17 @@ def service(nom: str, argv: list[str], journal: Path, memoire_max: str,
            "--setenv=ACVRAM_CUDA_HOME=/usr/local/cuda-13.2",
            f"--setenv=ACVRAM_KERNEL_CACHE={os.environ.get('ACVRAM_KERNEL_CACHE', '')}",
            "/bin/bash", "-c",
+           # CHIEN DE GARDE SUR LE PILOTE. Releve par claude-f2 le 10/09 : le
+           # superviseur du harnais a tue son PILOTE (MemFree 10,1 Go alors que
+           # MemAvailable valait 85,6) et les bras detaches ont SURVECU — un
+           # acvram-disp-1.service encore vivant, tenant la carte pour une
+           # mesure qui ne menait plus nulle part, et que carte-libre.sh voyait
+           # comme une occupation legitime. Le detachement protege les bras,
+           # pas celui qui les enchaine.
+           #
+           # `kill -0` sur le PID du pilote suffit, et fonctionne meme si le
+           # pilote est tue par SIGKILL — ce qu'un `trap` ou un atexit ne
+           # couvrirait pas.
            # carte.sh A L'INTERIEUR du service, jamais autour — precaution de
            # claude-0a, et son garde refuse maintenant activement l'inverse :
            # enveloppant systemd-run, le premier verrou est relache des que le
@@ -147,6 +158,9 @@ def service(nom: str, argv: list[str], journal: Path, memoire_max: str,
            # un chiffre que rien ne signalait comme faux.
            # le code de sortie part dans la sentinelle : le service peut mourir
            # sans que la commande ait parle
+           f"( while kill -0 {os.getpid()} 2>/dev/null; do sleep 5; done; "
+           f"  echo 'PILOTE MORT : ce bras s arrete, il tenait la carte pour "
+           f"rien' >> {journal!s}; kill -TERM 0 ) & "
            f"{repr_sh(str(CARTE))} {' '.join(map(repr_sh, argv))} "
            f"> {journal!s} 2>&1; echo $? > {sentinelle!s}"]
     subprocess.run(cmd, check=True)
@@ -243,7 +257,26 @@ def main() -> int:
     voulus = set() if a.dispersion_seule else None
     if a.points and not a.dispersion_seule:
         voulus = {float(x) for x in a.points.split(",")}
-    points = [p for p in POINTS if voulus is None or p[0] in voulus]
+    # APPARIEMENT TOLERANT, et un REFUS si une valeur demandee ne correspond a
+    # rien. Depuis que les temoins derivent des octets mesures, leurs budgets
+    # ne sont plus ronds — le plafond vaut 6,5464 et non 6,55. Un
+    # `--points 6.55` ne correspondait alors a AUCUN point et la campagne
+    # tournait sa dispersion puis ne mesurait rien, en silence. Un lancement
+    # qui ne mesure rien doit le DIRE.
+    def _demande(budget: float) -> bool:
+        return voulus is None or any(abs(budget - v) < 0.02 for v in voulus)
+
+    points = [p for p in POINTS if _demande(p[0])]
+    if voulus and not a.dispersion_seule:
+        orphelines = [v for v in voulus
+                      if not any(abs(p[0] - v) < 0.02 for p in POINTS)]
+        if orphelines:
+            print(f"ECHEC / CAUSE: {orphelines} ne correspond a aucun point. "
+                  f"Budgets disponibles : "
+                  f"{[p[0] for p in POINTS]}. / SUITE: relancer avec une de "
+                  f"ces valeurs — les temoins derivent des octets mesures, "
+                  f"leurs budgets ne sont pas ronds.")
+            return 2
 
     print("CAMPAGNE QUOTA — Llama-2-7B, "
           f"{len(points)} point(s) sur {len(POINTS)}")
@@ -262,6 +295,21 @@ def main() -> int:
         print("\nPLAN SEULEMENT. Rien n'a tourne. "
               "Relancer avec --pour-de-vrai une fois l'accord des sessions obtenu.")
         return 0
+
+    # ORPHELINS D'UNE MANCHE MORTE : ils tiennent la carte et ecrivent dans des
+    # journaux que personne ne lira. Les detecter au demarrage plutot que de
+    # les decouvrir par un verrou qui n'arrive jamais.
+    restes = subprocess.run(["systemctl", "--user", "list-units", "acvram*",
+                             "--no-legend", "--plain"],
+                            capture_output=True, text=True).stdout.split()
+    vivants = [m for m in restes if m.endswith(".service")]
+    if vivants:
+        print(f"ECHEC / CAUSE: {len(vivants)} service(s) acvram encore vivant(s) "
+              f"— {', '.join(vivants[:4])}. Ce sont probablement des orphelins "
+              f"d'une manche dont le pilote est mort : ils tiennent la carte "
+              f"pour rien. / SUITE: systemctl --user stop <unite>, puis "
+              f"relancer.")
+        return 2
 
     if not SOURCE.exists():
         print(f"ECHEC / CAUSE: source absente {SOURCE}")
@@ -290,6 +338,19 @@ def main() -> int:
     # qu'un instrument aveugle a rendu quatre fois 8,825 au millieme le meme
     # jour. Une passe rejouee a l'identique donne ce chiffre pour le prix d'une
     # evaluation, et rien ne se publie avant de l'avoir.
+    # LE CACHE SE REND AVANT LA PREMIERE MESURE, pas seulement entre les
+    # points. Le 10/09, 75,7 Go de cache page ont fait tuer un pilote — et ce
+    # n'est pas un point qui les avait remplis, c'est la manche de DISPERSION,
+    # avant le premier point. Une campagne lancee sur une machine deja chaude
+    # meurt donc avant d'avoir rien mesure. Releve par claude-f2, qui n'a pas
+    # pu attribuer son cache a sa propre manche : il est partage.
+    rendu = 0
+    for d in BASE.glob("Llama-2-7b-*"):
+        if d.is_dir():
+            rendu += rendre_le_cache(d)
+    print(f"  cache page rendu AVANT la dispersion : {rendu / 2**20:.0f} Mio",
+          flush=True)
+
     dispersion = None
     # Precision de claude-f2 : la dispersion se prend SUR LE POINT qu'on
     # comparera, pas sur un autre — la reproductibilite n'a aucune raison
