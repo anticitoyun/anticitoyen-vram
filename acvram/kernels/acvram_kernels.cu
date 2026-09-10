@@ -2081,25 +2081,34 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
         // compte. On garde donc le maximum vu, et rien de plus. Au pire cas
         // legal (C = 256, HQ = 32, D = 128, BQ = 1) : 4,2 Mo pour `part`,
         // 32 Kio pour les deux autres — a comparer aux 135 Mo cumules.
-        static torch::Tensor tp, tm, tl;
-        static long cap_part = 0, cap_pml = 0;
-        static int dev_cache = -2;
-        const long besoin_part = (long)BQ * HQ * C * D;
-        const long besoin_pml = (long)BQ * HQ * C;
-        const int dev = (int)q.device().index();
-        if (dev != dev_cache) {          // changer de carte invalide tout
-            cap_part = cap_pml = 0; dev_cache = dev;
+        // ON N'AGRANDIT JAMAIS UN TAMPON DEJA UTILISE : UN GRAPHE CUDA EN A
+        // CAPTURE L'ADRESSE. Un tampon unique agrandi au besoin semblait la
+        // bonne reponse — il stabilisait bien la memoire a 1,07 Mo — puis la
+        // neuvieme longueur a rendu un acces memoire illegal : la
+        // reallocation avait libere l'adresse que des graphes deja captures
+        // rejouaient. L'ancien cache par forme ne realloue jamais une forme
+        // vue : c'etait sa qualite cachee, et sa fuite venait du NOMBRE de
+        // formes, pas du principe.
+        // On garde donc un cache, mais indexe sur C ARRONDI A LA PUISSANCE DE
+        // 2 : 9 tailles possibles (1..256) au lieu de 128 valeurs distinctes,
+        // chacune allouee une fois et jamais deplacee. Cumul au pire :
+        // (1+2+...+256) = 511 unites, soit 8,4 Mo contre 135.
+        int Cb = 1;
+        while (Cb < C) Cb <<= 1;
+        static std::map<std::tuple<int, int, int, int, int>,
+                        std::array<torch::Tensor, 3>> cache_t;
+        static unsigned long long octets_caches = 0ULL;
+        auto cle = std::make_tuple(BQ, HQ, Cb, D, (int)q.device().index());
+        auto it = cache_t.find(cle);
+        if (it == cache_t.end()) {
+            it = cache_t.emplace(cle, std::array<torch::Tensor, 3>{
+                torch::empty({BQ, HQ, Cb, D}, f32),
+                torch::empty({BQ, HQ, Cb}, f32),
+                torch::empty({BQ, HQ, Cb}, f32)}).first;
+            octets_caches += (unsigned long long)BQ * HQ * Cb * (D + 2) * 4ULL;
         }
-        if (cap_part < besoin_part) {
-            tp = torch::empty({besoin_part}, f32); cap_part = besoin_part;
-        }
-        if (cap_pml < besoin_pml) {
-            tm = torch::empty({besoin_pml}, f32);
-            tl = torch::empty({besoin_pml}, f32);
-            cap_pml = besoin_pml;
-        }
-        acvram_pa_tampon_octets = (unsigned long long)(cap_part + 2 * cap_pml) * 4ULL;
-        part = tp; pm = tm; pl = tl;
+        acvram_pa_tampon_octets = octets_caches;
+        part = it->second[0]; pm = it->second[1]; pl = it->second[2];
     }
     // `out` reste FRAIS : il est RENDU a l'appelant.
     auto out = torch::empty({BQ, HQ, D}, q.options());
