@@ -195,16 +195,24 @@ class GraphRunner:
                 return None
             try:
                 entry = self._capture(b, ql, nblk, batch)
-            except (torch.OutOfMemoryError, torch.AcceleratorError, RuntimeError) as e:
-                # capture impossible faute de VRAM (modèle qui remplit la carte) :
-                # le décodage continue en eager plutôt que de tuer le serveur
-                if "out of memory" not in str(e).lower():
-                    raise
+            except Exception as e:                        # noqa: BLE001
+                # UNE CAPTURE QUI ECHOUE NE DOIT PAS TUER LE SERVEUR, quelle
+                # qu'en soit la cause. Le filtre precedent ne relachait que
+                # l'OOM, reconnu au TEXTE du message : toute autre defaillance
+                # etait relevee et arretait le moteur. Mesure du 10/09 :
+                # cudaErrorStreamCaptureInvalidated a neuf sequences arretait
+                # `acvram serve` au lieu de le degrader — une panne la ou le
+                # commentaire promettait une degradation.
+                #
+                # ET LA CAUSE EST JOURNALISEE, jamais tue : un echec de capture
+                # silencieux est precisement ce qui nous a coute la journee. On
+                # imprime le type et le message, puis on replie en eager.
+                self.raison = f"{type(e).__name__}: {str(e).splitlines()[0][:160]}"
+                print(f"[acvram] graphes CUDA desactives, decodage en eager — "
+                      f"capture impossible : {self.raison}", flush=True)
                 self.enabled = False
                 self.graphs.clear()
                 torch.cuda.empty_cache()
-                print("[acvram] graphes CUDA désactivés : mémoire insuffisante "
-                      "pour la capture, décodage en eager", flush=True)
                 return None
             self.graphs[key] = entry
             if os.environ.get("ACVRAM_TRACE_PTRS"):

@@ -642,14 +642,24 @@ _bk.register(_bk.Backend(
 _bk.register(_bk.Backend(
     name="fp4-tensorcores", formats=("nvfp4",), device_type="cuda",
     priority=110, available=_sm100_ok,
+    # JAMAIS SOUS CAPTURE. Repris de main : ce chemin tourne sur un flux
+    # annexe, ce qui invalide une capture de graphe en cours. Mesure du
+    # 10/09 sur Qwen3-4B-nvfp4 : huit sequences capturent et servent, neuf
+    # franchissent le seuil `> 8` EN DECODAGE, donc a l'interieur de la
+    # capture — cudaErrorStreamCaptureInvalidated, et l'echec precede toute
+    # capture. La condition porte sur l'etat de capture et non sur un seuil
+    # de lot : un seuil se deplacerait au prochain changement de
+    # max_batch_size et le defaut reviendrait ailleurs. Le prefill, lui,
+    # n'est jamais capture : il garde ce chemin.
     # La garde par capacité est répétée ici : un échec réel dans
     # nvfp4_mm_tensorcore éteint son chemin globalement, et il ne faut pas
     # qu'un appel parti sur une carte sans FP4 le fasse pour toutes.
     matmul=lambda x, w: (nvfp4_mm_tensorcore(x, w)
                          if (x.reshape(-1, x.shape[-1]).shape[0] > 8
+                             and not torch.cuda.is_current_stream_capturing()
                              and torch.cuda.get_device_capability(x.device)
                              >= (10, 0)) else None),
-    note="prefill W4A4 via torch._scaled_mm, sm_100+"))
+    note="prefill W4A4 via torch._scaled_mm, sm_100+ ; jamais sous capture"))
 
 _bk.register(_bk.Backend(
     name="cpu-avx2", formats=("nvfp4", "int4_awq"), device_type="cpu",
