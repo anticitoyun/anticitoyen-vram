@@ -238,6 +238,12 @@ class GraphRunner:
             self._bind_hybrid(batch, lb)
         key = (b, ql, nblk, lb)
         self._last_key = key
+        # UNE BORNE PAR FRONTIERE, SINON LA DECOMPOSITION RESTE FAUSSE. Un seul
+        # `synchronize` apres le rejeu ferait absorber a `replay` le travail de
+        # `bind` et de `fill` : les trois chronos changeraient de valeur sans
+        # cesser de mentir. Le garde est le meme, eteint par defaut.
+        if trace and os.environ.get("ACVRAM_CHRONO_SYNC"):
+            torch.cuda.synchronize(self.device)
         t1 = time.perf_counter()
 
         entry = self.graphs.get(key)
@@ -294,6 +300,8 @@ class GraphRunner:
             return entry["out"].clone()
 
         self._fill(entry, batch)
+        if trace and os.environ.get("ACVRAM_CHRONO_SYNC"):
+            torch.cuda.synchronize(self.device)
         t2 = time.perf_counter()
         if "step" in entry:                  # ACVRAM_GRAPHS_EAGER : sans capture
             with torch.inference_mode():
