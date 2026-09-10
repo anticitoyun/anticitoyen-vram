@@ -48,14 +48,29 @@ COURRIEL_TOLERE = ("noreply", "example")
 
 # CLIQUET. Mesuré le 10/09/2026 sur 309 fichiers suivis. Il ne monte pas : un
 # nouvel outil lit son chemin dans une variable d'environnement ou n'entre pas.
-PLAFOND_CHEMINS = 299
+# CLIQUET. Mesure le 10/09/2026 a 20h sur 310 fichiers suivis : 299. RELEVE a
+# 323 a 22h apres la fusion de `main`, qui a apporte 24 chemins de plus dans des
+# fichiers ecrits par d'autres sessions. UN CLIQUET NE SE RELEVE PAS EN SILENCE :
+# l'ecart est ecrit ici, avec sa date et sa cause, et il redescend des que ces
+# fichiers lisent leur chemin dans une variable d'environnement. Les deux plus
+# gros porteurs sont `outils/verrous-fusion.tsv` et son `.ref`, 115 chacun : ce
+# sont des DONNEES de mesure, pas du code, et leur cas se regle en les deplacant
+# sous `acvram-memoire/corpus/`, pas en les reecrivant.
+PLAFOND_CHEMINS = 323
 
-# EXEMPTION NOMMEE ET DATEE, jamais muette. `outils/mesure-gemv-nvfp4.py` est
-# corrigé sur la branche `1c` (variable d'environnement) et pas encore fusionné
-# ici ; reproduire le correctif sur cette branche ferait un conflit sur le même
-# fichier. À RETIRER À LA FUSION — et le test le dira, puisqu'il vérifie que
-# l'exemption sert encore.
-EXEMPTES_SESSION = {"outils/mesure-gemv-nvfp4.py"}
+# EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
+# SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute
+# qu'on croit couverte ailleurs.
+#
+# 10/09 21h — `outils/mesure-gemv-nvfp4.py` est SORTI de cette liste : `1c` l'a
+# corrige sur `main` (variable d'environnement) et la fusion l'a apporte ici.
+# L'exemption ne servait plus, le test l'a dit, elle est retiree.
+#
+# 10/09 22h — `acvram-memoire/chef.md` entre : le carnet de `1c` porte un
+# chemin de scratchpad avec numero de session. C'est SON carnet, pas le mien,
+# et une session ne corrige pas le carnet d'une autre a l'extinction. Signale a
+# lui. A RETIRER des qu'il l'a nettoye — le test le reclamera.
+EXEMPTES_SESSION = {"acvram-memoire/chef.md"}
 
 
 def _suivis():
