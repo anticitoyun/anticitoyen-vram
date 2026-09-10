@@ -13,16 +13,21 @@ from __future__ import annotations
 import asyncio
 import os
 import json
+import re
+import signal
+import subprocess
 import threading
+from pathlib import Path
 import time
 from typing import Any, AsyncIterator, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               StreamingResponse)
 
 from .. import __version__
-from .console import PAGE
+from .console import GALERIE, PAGE
 from ..engine.runner import Engine, GenerationOutput
 from ..engine.sampler import SamplingParams
 from .chat import Tokenizer, render_chat
@@ -208,6 +213,528 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
     @app.get("/health")
     async def health() -> dict:
         return {"status": "ok", "model": model_name}
+
+    # -- fonds d'ambiance --------------------------------------------------
+    # Deux images d'agrement, servies par le serveur plutot que codees dans la
+    # page. TROIS RAISONS, et la premiere est un defaut qu'on vient de corriger
+    # ailleurs ce soir :
+    #
+    # 1. un chemin absolu dans un fichier suivi porte un nom d'utilisateur, et
+    #    le crochet de construction du .deb refuse ce motif — le paquet ne se
+    #    construirait plus ;
+    # 2. une image en base64 dans la page ferait grossir une chaine que le
+    #    module garde en memoire pour la vie du serveur ;
+    # 3. la page doit rester utilisable quand aucune image n'est configuree :
+    #    l'absence rend 404, le bouton se desactive, rien ne casse.
+    # Les chemins viennent de l'environnement, puis d'un fichier de reglages
+    # que la console peut ecrire. L'ordre compte : ce que l'utilisateur a
+    # regle DANS l'interface doit survivre au redemarrage, sinon le reglage
+    # n'en est pas un.
+    _REGLAGES = Path.home() / ".config" / "acvram" / "console.json"
+
+    def _charger_fonds() -> dict:
+        d = {"zen": os.environ.get("ACVRAM_FOND_ZEN", ""),
+             "cool": os.environ.get("ACVRAM_FOND_COOL", "")}
+        try:
+            enr = json.loads(_REGLAGES.read_text(encoding="utf-8"))
+            for c in ("zen", "cool"):
+                if enr.get(c):
+                    d[c] = enr[c]
+        except Exception:
+            pass                      # absent ou illisible : les defauts suffisent
+        return d
+
+    _FONDS = _charger_fonds()
+
+    # Extensions servables. LISTE BLANCHE et non liste noire : la console
+    # ecrit un chemin choisi par qui la regarde, et une liste noire oublie
+    # toujours le format ajoute apres elle. Refuser un .jpeg legitime coute
+    # moins qu'ouvrir /etc/shadow parce qu'il n'etait pas dans la liste.
+    _EXT_IMAGE = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                  ".png": "image/png", ".webp": "image/webp",
+                  ".gif": "image/gif", ".avif": "image/avif"}
+
+    @app.get("/fond/{cle}", include_in_schema=False)
+    async def fond(cle: str):
+        chemin = _FONDS.get(cle, "")
+        if not chemin or not os.path.isfile(chemin):
+            raise HTTPException(status_code=404, detail="fond non configure")
+        # Type devine par l'extension : servir une image en octet-stream la
+        # ferait telecharger au lieu de l'afficher.
+        mime = _EXT_IMAGE.get(os.path.splitext(chemin)[1].lower())
+        if mime is None:
+            raise HTTPException(status_code=415, detail="format non servi")
+        return FileResponse(chemin, media_type=mime)
+
+    @app.get("/fonds", include_in_schema=False)
+    async def fonds() -> dict:
+        """Quels fonds sont REELLEMENT servables — pas ceux qui sont declares.
+
+        Une variable posee vers un fichier absent rendrait un bouton actif qui
+        ne montre rien : la page saurait qu'il est configure sans savoir qu'il
+        est introuvable.
+        """
+        return {c: bool(v and os.path.isfile(v)) for c, v in _FONDS.items()}
+
+    # -- materiel ----------------------------------------------------------
+    # DEUX SOURCES, ET ELLES NE VOIENT PAS LA MEME CHOSE.
+    #
+    #   nvidia-smi  ne connait QUE les cartes NVIDIA, mais donne leur etat :
+    #               memoire, occupation, temperature, puissance, lien PCIe.
+    #   lspci       voit TOUTES les cartes, y compris l'iGPU Intel, mais ne
+    #               dit rien de leur charge.
+    #
+    # Une console qui n'interrogerait que la premiere laisserait croire que la
+    # machine n'a que des cartes NVIDIA — l'iGPU disparaitrait de l'inventaire
+    # alors qu'il porte l'affichage. On croise donc les deux, et on dit pour
+    # chaque carte D'OU vient l'information.
+    _CACHE_MAT: dict = {"t": 0.0, "v": None}
+
+    def _lspci_gpu() -> list:
+        try:
+            sortie = subprocess.run(["lspci", "-mm"], capture_output=True,
+                                    text=True, timeout=3).stdout
+        except Exception:                                   # noqa: BLE001
+            return []
+        out = []
+        for ligne in sortie.splitlines():
+            bas = ligne.lower()
+            if not any(k in bas for k in ('"vga compatible controller"',
+                                          '"3d controller"', '"display controller"')):
+                continue
+            # `lspci -mm` rend : ADRESSE "classe" "fabricant" "modele" -rXX ...
+            # Un split sur '" "' laisse la queue collee au modele (les
+            # revisions et le sous-systeme). On coupe au premier guillemet
+            # restant plutot que de decouper plus finement : le reste ne nous
+            # sert pas, et un parseur ambitieux casserait sur la premiere
+            # carte au nom inhabituel.
+            champs = [c.strip('"') for c in ligne.split('" "')]
+            if len(champs) >= 3:
+                adr = champs[0].split()[0]
+                modele = champs[3].split('"')[0].strip() if len(champs) > 3 else ""
+                out.append({"adresse": adr, "fabricant": champs[2],
+                            "modele": modele})
+        return out
+
+    def _nvidia_smi() -> list:
+        champs = ("index,name,memory.total,memory.used,utilization.gpu,"
+                  "temperature.gpu,power.draw,power.limit,"
+                  "pcie.link.width.current,pci.bus_id")
+        try:
+            sortie = subprocess.run(
+                ["nvidia-smi", f"--query-gpu={champs}", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=4).stdout
+        except Exception:                                   # noqa: BLE001
+            return []
+        out = []
+        for ligne in sortie.splitlines():
+            c = [x.strip() for x in ligne.split(",")]
+            if len(c) < 10:
+                continue
+            def f(v, d=0.0):
+                try:
+                    return float(v)
+                except ValueError:
+                    return d
+            out.append({
+                "index": int(f(c[0])), "nom": c[1],
+                "mio_total": f(c[2]), "mio_pris": f(c[3]),
+                "occupation": f(c[4]), "temperature": f(c[5]),
+                "watts": f(c[6]), "watts_max": f(c[7]),
+                "pcie_largeur": c[8],
+                # Le bus_id de nvidia-smi est 00000000:01:00.0, lspci rend
+                # 01:00.0 : la meme carte, un domaine PCI en plus.
+                #
+                # Premiere version : split(":",1)[-1].lstrip("0") — elle
+                # rendait « 1:00.0 » parce que le lstrip mangeait AUSSI le
+                # zero de « 01 ». Le croisement ne trouvait donc jamais, et
+                # chaque carte NVIDIA apparaissait DEUX FOIS : une fois « non
+                # pilotee » via lspci, une fois pilotee via nvidia-smi. Cinq
+                # cartes annoncees pour trois reelles — un inventaire faux qui
+                # avait l air complet.
+                #
+                # On prend les DEUX DERNIERS segments, qui sont bus:slot.fonc.
+                "adresse": ":".join(c[9].split(":")[-2:]).lower(),
+            })
+        return out
+
+    @app.get("/materiel", include_in_schema=False)
+    async def materiel() -> dict:
+        """Toutes les cartes de la machine, pas seulement celles qu'acvram sert.
+
+        Rafraichi au plus une fois par seconde : `nvidia-smi` coute une
+        trentaine de millisecondes, et la console rafraichit plus souvent que
+        cela.
+        """
+        maintenant = time.time()
+        if _CACHE_MAT["v"] is not None and maintenant - _CACHE_MAT["t"] < 1.0:
+            return _CACHE_MAT["v"]
+        nv = _nvidia_smi()
+        pci = _lspci_gpu()
+        par_adresse = {c["adresse"]: c for c in nv}
+        cartes = []
+        for p in pci:
+            a = p["adresse"].lower()
+            n = par_adresse.pop(a, None)
+            nom = (n["nom"] if n else
+                   (p["modele"] or p["fabricant"]).replace("Corporation", "").strip())
+            cartes.append({
+                "adresse": p["adresse"], "nom": nom,
+                "fabricant": p["fabricant"],
+                "pilotee": n is not None,
+                # « pilotee » veut dire : nvidia-smi la voit, donc acvram peut
+                # s'en servir. Une carte presente mais non pilotee n'est pas
+                # une panne — l'iGPU porte l'affichage et c'est tout.
+                **({k: n[k] for k in ("index", "mio_total", "mio_pris",
+                                      "occupation", "temperature", "watts",
+                                      "watts_max", "pcie_largeur")} if n else {}),
+            })
+        # Une carte vue par nvidia-smi et absente de lspci existe quand meme :
+        # ne pas la perdre parce que le croisement a rate.
+        for reste in par_adresse.values():
+            cartes.append({"adresse": reste["adresse"], "nom": reste["nom"],
+                           "fabricant": "NVIDIA", "pilotee": True, **reste})
+        rep = {"cartes": cartes, "servie": os.environ.get("CUDA_VISIBLE_DEVICES", "")}
+        _CACHE_MAT.update(t=maintenant, v=rep)
+        return rep
+
+    # -- moteurs voisins ---------------------------------------------------
+    # QUI D'AUTRE OCCUPE LA CARTE. Une machine de mesure porte souvent trois
+    # ou quatre serveurs d'inference en meme temps, et un voisin qui calcule
+    # pendant qu'on mesure fabrique le resultat. La console doit donc les
+    # montrer — et permettre de les arreter, ce qui est une action
+    # DESTRUCTRICE et se traite comme telle.
+    #
+    # TROIS GARDES, et la deuxieme est la seule qui compte vraiment :
+    #   1. on n'arrete qu'un processus VU SUR LA CARTE. Un PID quelconque
+    #      envoye a cette route ne sera pas tue.
+    #   2. les services PERMANENTS sont proteges par defaut. 8081 (llama-server),
+    #      8082 (embeddings), 8083 (reranker) tournent depuis des semaines et
+    #      les tuer est une panne, pas un nettoyage.
+    #   3. SIGTERM d'abord, jamais SIGKILL : un moteur qui meurt brutalement
+    #      laisse de la VRAM et des fichiers de verrou derriere lui.
+    _PORTS_PERMANENTS = {8081, 8082, 8083}
+
+    _SIGNATURES = [
+        ("llama.cpp", ("llama-server", "llama-cli", "llama-bench", "server.cpp")),
+        ("tabbyAPI", ("tabbyapi", "tabby_api", "tabbyAPI")),
+        ("vLLM", ("vllm.entrypoints", "vllm serve", "-m vllm")),
+        ("SGLang", ("sglang.launch_server", "sglang")),
+        ("Ollama", ("ollama",)),
+        ("TGI", ("text-generation-server", "text_generation_server")),
+        ("ExLlamaV2", ("exllamav2", "exllama")),
+        ("acvram", ("acvram",)),
+        ("PyTorch", ("torchrun", "-m torch")),
+    ]
+
+    def _ports_par_pid() -> dict:
+        """Quels ports TCP ecoute chaque PID — sans quoi on ne peut pas savoir
+        qu'un processus EST un des services permanents."""
+        par_pid: dict[int, set] = {}
+        try:
+            sortie = subprocess.run(["ss", "-tlnp"], capture_output=True,
+                                    text=True, timeout=3).stdout
+        except Exception:                                   # noqa: BLE001
+            return par_pid
+        for ligne in sortie.splitlines()[1:]:
+            m_port = re.search(r":(\d+)\s", ligne)
+            for m_pid in re.finditer(r"pid=(\d+)", ligne):
+                if m_port:
+                    par_pid.setdefault(int(m_pid.group(1)), set()).add(int(m_port.group(1)))
+        return par_pid
+
+    def _moteurs_gpu() -> list:
+        try:
+            sortie = subprocess.run(
+                ["nvidia-smi", "--query-compute-apps=pid,used_memory,gpu_uuid",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=4).stdout
+        except Exception:                                   # noqa: BLE001
+            return []
+        index_par_uuid = {}
+        try:
+            for l in subprocess.run(["nvidia-smi", "--query-gpu=index,uuid",
+                                     "--format=csv,noheader"],
+                                    capture_output=True, text=True,
+                                    timeout=4).stdout.splitlines():
+                i, u = [x.strip() for x in l.split(",", 1)]
+                index_par_uuid[u] = int(i)
+        except Exception:                                   # noqa: BLE001
+            pass
+        ports = _ports_par_pid()
+        moi = os.getpid()
+        out = []
+        for ligne in sortie.splitlines():
+            c = [x.strip() for x in ligne.split(",")]
+            if len(c) < 2:
+                continue
+            pid = int(c[0])
+            try:
+                cmd = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(
+                    "utf-8", "replace").strip()
+                debut = Path(f"/proc/{pid}").stat().st_ctime
+            except Exception:                               # noqa: BLE001
+                cmd, debut = "", 0.0
+            bas = cmd.lower()
+            nom = next((n for n, motifs in _SIGNATURES
+                        if any(m.lower() in bas for m in motifs)), "inconnu")
+            p = sorted(ports.get(pid, ()))
+            out.append({
+                "pid": pid, "mio": float(c[1]),
+                "carte": index_par_uuid.get(c[2] if len(c) > 2 else "", None),
+                "moteur": nom, "commande": cmd[:220], "ports": p,
+                "permanent": any(x in _PORTS_PERMANENTS for x in p),
+                "moi": pid == moi,
+                "secondes": max(0, int(time.time() - debut)) if debut else None,
+            })
+        return out
+
+    @app.get("/moteurs", include_in_schema=False)
+    async def moteurs() -> dict:
+        return {"moteurs": _moteurs_gpu(),
+                "ports_permanents": sorted(_PORTS_PERMANENTS)}
+
+    @app.post("/moteurs/arreter", include_in_schema=False)
+    async def arreter(req: Request) -> dict:
+        corps = await req.json()
+        pid = int(corps.get("pid", 0))
+        force = bool(corps.get("force"))
+        vus = {m["pid"]: m for m in _moteurs_gpu()}
+        cible = vus.get(pid)
+        if cible is None:
+            # Ne jamais tuer un PID que la carte ne montre pas : la route
+            # deviendrait un tueur de processus arbitraire.
+            raise HTTPException(status_code=404,
+                                detail="ce PID n'occupe aucune carte")
+        if cible["moi"]:
+            raise HTTPException(status_code=409,
+                                detail="c'est ce serveur — arretez-le par son terminal")
+        if cible["permanent"] and not force:
+            raise HTTPException(
+                status_code=409,
+                detail=(f"service permanent (ports {cible['ports']}) : "
+                        "confirmez explicitement pour l'arreter"))
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return {"pid": pid, "etat": "deja parti"}
+        except PermissionError:
+            raise HTTPException(status_code=403,
+                                detail="pas le droit d'arreter ce processus")
+        # On ne CONSTATE pas la mort ici : un moteur met plusieurs secondes a
+        # liberer sa VRAM, et repondre « arrete » tout de suite serait une
+        # affirmation non verifiee. La console relit /moteurs.
+        return {"pid": pid, "etat": "SIGTERM envoye",
+                "moteur": cible["moteur"], "mio": cible["mio"]}
+
+    # -- galerie de photos -------------------------------------------------
+    # Un DOSSIER entier, pas deux fichiers. 633 images ici, 585 Mio : la page
+    # ne peut donc pas les porter, elle demande une liste et le serveur sert
+    # chaque fichier a la demande.
+    #
+    # DEUX GARDES, et la premiere est la seule qui protege vraiment :
+    #   1. on ne sert QUE des fichiers dont le chemin reel est SOUS le dossier
+    #      declare. Sans ce test, « ../../etc/passwd » sortirait du dossier —
+    #      et une console locale reste un serveur HTTP.
+    #   2. on ne sert que les extensions de la liste blanche, comme les fonds.
+    _GALERIE_DIR = os.environ.get("ACVRAM_GALERIE_DIR", "")
+
+    def _photos() -> list:
+        d = _GALERIE_DIR
+        if not d or not os.path.isdir(d):
+            return []
+        racine = os.path.realpath(d)
+        out = []
+        try:
+            for nom in sorted(os.listdir(racine)):
+                if os.path.splitext(nom)[1].lower() not in _EXT_IMAGE:
+                    continue
+                chemin = os.path.realpath(os.path.join(racine, nom))
+                # Le realpath resout les liens : un lien vers /etc sortirait
+                # du dossier sans que le nom ne le montre.
+                if not chemin.startswith(racine + os.sep):
+                    continue
+                if os.path.isfile(chemin):
+                    out.append((nom, chemin, os.path.getsize(chemin)))
+        except Exception:                                   # noqa: BLE001
+            return []
+        return out
+
+    # -- parc de modeles ---------------------------------------------------
+    # Quels modeles converti tiennent sur quelle carte. Lu dans les MANIFESTES,
+    # jamais devine depuis les noms : un nom de dossier ne dit ni
+    # l'architecture, ni les octets, ni les parametres actifs — et une
+    # classification par nom nous a deja rendu un modele dense pour un MoE.
+    _PARC_DIR = os.environ.get(
+        "ACVRAM_PARC", str(Path.home() / "Modeles" / "models_acvram"))
+    _CACHE_PARC: dict = {"t": 0.0, "v": None}
+
+    # Marge au-dessus des poids : contexte KV, activations, arene de
+    # l'allocateur. Sans elle, un modele « qui tient a 11,9 sur 12 Gio »
+    # tombe en OOM au premier lot — ce qui est arrive ce soir sur les
+    # creneaux MLA.
+    _MARGE = 1.25
+
+    def _parc() -> list:
+        d = _PARC_DIR
+        if not os.path.isdir(d):
+            return []
+        out = []
+        for nom in sorted(os.listdir(d)):
+            man = os.path.join(d, nom, "acvram_manifest.json")
+            if not os.path.isfile(man):
+                continue
+            try:
+                j = json.loads(Path(man).read_text(encoding="utf-8"))
+            except Exception:                               # noqa: BLE001
+                continue
+            m, plan = j.get("model", {}), j.get("plan", {})
+            octets = plan.get("total_weight_bytes", 0) or 0
+            moe = (m.get("num_experts", 0) or 0) > 0
+            mla = (m.get("kv_lora_rank", 0) or 0) > 0
+            gdn = (m.get("linear_num_value_heads", 0) or 0) > 0
+            genres = [g for g, b in (("MoE", moe), ("MLA", mla), ("GDN", gdn)) if b]
+            fmts = sorted({lp.get("fmt", "?") for lp in plan.get("layers", [])})
+            out.append({
+                "nom": nom, "chemin": os.path.join(d, nom),
+                "gio": round(octets / 1024 ** 3, 2),
+                "gio_requis": round(octets * _MARGE / 1024 ** 3, 2),
+                "genres": genres or ["dense"],
+                "formats": fmts,
+                "params_total": round((m.get("total_params", 0) or 0) / 1e9, 2),
+                "params_actifs": round((m.get("active_params", 0) or 0) / 1e9, 2),
+                "couches": m.get("num_layers", 0),
+                "contexte_max": m.get("max_position_embeddings", 0),
+            })
+        return out
+
+    @app.get("/parc", include_in_schema=False)
+    async def parc() -> dict:
+        maintenant = time.time()
+        if _CACHE_PARC["v"] is not None and maintenant - _CACHE_PARC["t"] < 30:
+            return _CACHE_PARC["v"]
+        modeles = _parc()
+        cartes = [c for c in (await materiel())["cartes"] if c.get("pilotee")]
+        for c in cartes:
+            libre_gio = (c["mio_total"] - c["mio_pris"]) / 1024
+            total_gio = c["mio_total"] / 1024
+            c["compatibles"] = [
+                m["nom"] for m in modeles if m["gio_requis"] <= total_gio]
+            c["compatibles_maintenant"] = [
+                m["nom"] for m in modeles if m["gio_requis"] <= libre_gio]
+        rep = {"dossier": _PARC_DIR, "marge": _MARGE,
+               "modeles": modeles, "cartes": cartes,
+               "servi": {"nom": model_name,
+                         "chemin": getattr(engine.loaded, "path", "")}}
+        _CACHE_PARC.update(t=maintenant, v=rep)
+        return rep
+
+    @app.get("/photos", include_in_schema=False)
+    async def photos() -> dict:
+        p = _photos()
+        return {"dossier": _GALERIE_DIR, "n": len(p),
+                "photos": [{"nom": n, "octets": o} for n, _, o in p]}
+
+    @app.get("/photo/{index}", include_in_schema=False)
+    async def photo(index: int):
+        p = _photos()
+        if not (0 <= index < len(p)):
+            raise HTTPException(status_code=404, detail="hors de la liste")
+        nom, chemin, _ = p[index]
+        # On sert par INDEX et non par nom : aucun nom de fichier fourni par
+        # le client n'atteint le systeme de fichiers, donc aucune traversee
+        # possible, meme si la garde ci-dessus etait un jour affaiblie.
+        return FileResponse(chemin,
+                            media_type=_EXT_IMAGE[os.path.splitext(nom)[1].lower()])
+
+    @app.get("/galerie", response_class=HTMLResponse, include_in_schema=False)
+    async def galerie() -> str:
+        return GALERIE
+
+    @app.get("/reglages", include_in_schema=False)
+    async def lire_reglages() -> dict:
+        return {"fonds": {c: {"chemin": v, "servable": bool(v and os.path.isfile(v))}
+                          for c, v in _FONDS.items()},
+                "fichier": str(_REGLAGES),
+                "extensions": sorted(_EXT_IMAGE)}
+
+    @app.post("/reglages", include_in_schema=False)
+    async def ecrire_reglages(req: Request) -> dict:
+        """Change les chemins d'ambiance depuis la console, et les garde.
+
+        CE QUI EST REFUSE, ET POURQUOI CHAQUE REFUS EXISTE : un chemin qui
+        n'est pas un fichier REGULIER (un tube nomme ou /dev/zero se lirait
+        indefiniment), une extension hors liste blanche (le serveur ne doit
+        pas devenir un lecteur de fichiers arbitraires), et un chemin
+        introuvable (accepter en silence poserait un bouton actif qui ne
+        montre rien — le defaut qu'on a corrige dans la page).
+        """
+        corps = await req.json()
+        nouveaux, refus = {}, {}
+        for cle in ("zen", "cool"):
+            if cle not in corps:
+                continue
+            brut = str(corps[cle] or "").strip()
+            if not brut:                       # vider est un reglage legitime
+                nouveaux[cle] = ""
+                continue
+            chemin = os.path.realpath(os.path.expanduser(brut))
+            if not os.path.isfile(chemin):
+                refus[cle] = "fichier introuvable"
+            elif os.path.splitext(chemin)[1].lower() not in _EXT_IMAGE:
+                refus[cle] = ("extension non servie ; attendu "
+                              + ", ".join(sorted(_EXT_IMAGE)))
+            else:
+                nouveaux[cle] = chemin
+        _FONDS.update(nouveaux)
+        try:
+            _REGLAGES.parent.mkdir(parents=True, exist_ok=True)
+            _REGLAGES.write_text(json.dumps(_FONDS, indent=2, ensure_ascii=False),
+                                 encoding="utf-8")
+            garde = True
+        except Exception as e:                              # noqa: BLE001
+            # Un reglage applique mais non garde doit se DIRE : sinon il
+            # disparait au redemarrage et personne ne sait pourquoi.
+            garde = False
+            refus["_fichier"] = f"non ecrit : {e}"
+        return {"fonds": {c: {"chemin": v, "servable": bool(v and os.path.isfile(v))}
+                          for c, v in _FONDS.items()},
+                "garde": garde, "refus": refus}
+
+    @app.get("/repartition", include_in_schema=False)
+    async def repartition() -> dict:
+        """Le plan de placement, agrege par appareil.
+
+        La console montre OU le travail se fait : quelles couches sur quel
+        etage, dans quel format, et combien d octets y vivent. C est la
+        question que le projet existe pour resoudre — donner a chaque GPU le
+        format que son silicium sait lire — et elle n etait visible nulle part.
+        """
+        plan = engine.loaded.plan
+        par_dev: dict[str, dict] = {}
+        for lp in plan.layers:
+            d = par_dev.setdefault(lp.exec_device, {
+                "couches": 0, "formats": {}, "attn_octets": 0,
+                "mlp_octets": 0, "mlp_hote": 0, "moe": 0})
+            d["couches"] += 1
+            d["formats"][lp.fmt] = d["formats"].get(lp.fmt, 0) + 1
+            d["attn_octets"] += lp.attn_bytes if lp.attn_storage != "cpu" else 0
+            d["mlp_octets"] += lp.mlp_bytes if lp.mlp_storage != "cpu" else 0
+            d["mlp_hote"] += lp.mlp_bytes if lp.mlp_storage == "cpu" else 0
+            d["moe"] += 1 if lp.is_moe else 0
+        return {
+            "modele": plan.model,
+            "appareils": par_dev,
+            "embed": plan.embed_device,
+            "lm_head": plan.lm_head_device,
+            "kv_octets_par_jeton": plan.kv_bytes_per_token,
+            "kv_jetons_max": plan.kv_max_tokens,
+            "etages": [{"nom": t.name, "octets": plan.kv_budget.get(t.name, 0)}
+                       for t in plan.tiers],
+            "estimation_decode_j_s": round(plan.est_decode_tok_s, 1),
+            "estimation_prefill_j_s": round(plan.est_prefill_tok_s, 1),
+            "avertissements": list(plan.warnings),
+        }
 
     @app.get("/metrics")
     async def metrics() -> dict:
