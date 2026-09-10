@@ -92,7 +92,7 @@ def rendre_le_cache(d: Path) -> None:
 
 
 def service(nom: str, argv: list[str], journal: Path, inverse: bool,
-            minutes: int, python: str) -> int:
+            minutes: int, python: str, mode_actif: str = "") -> int:
     sent = journal.with_suffix(".fini")
     sent.unlink(missing_ok=True)
     env = ["--setenv=PYTHONPATH=" + str(RACINE),
@@ -101,6 +101,8 @@ def service(nom: str, argv: list[str], journal: Path, inverse: bool,
            f"--setenv=ACVRAM_KERNEL_CACHE={os.environ.get('ACVRAM_KERNEL_CACHE', '/tmp/poste1-noyaux')}"]
     if inverse:
         env.append("--setenv=ACVRAM_ORDRE_SAC_INVERSE=1")
+    if mode_actif:
+        env.append(f"--setenv=ACVRAM_ORDRE_SAC={mode_actif}")
     cmd = (["systemd-run", "--user", "--unit", nom, "--collect",
             f"--property=WorkingDirectory={RACINE}",
             "--property=MemoryHigh=40G", "--property=MemoryMax=44G",
@@ -140,7 +142,15 @@ def releve(journal: Path) -> dict | None:
     return dernier
 
 
-def un_bras(etiquette: str, inverse: bool, sortie: Path, python: str) -> dict:
+MODES = {"snr": "snr_par_octet_decroissant",
+         "inverse": "snr_par_octet_croissant",
+         "erreur": "erreur_evitee_par_octet_decroissante",
+         "absolu": "erreur_absolue_evitee_par_octet_decroissante",
+         "base_croissant": "snr_de_base_croissant_sans_cout"}
+
+
+def un_bras(etiquette: str, inverse: bool, sortie: Path, python: str,
+            mode: str = "") -> dict:
     dossier = BASE / f"Llama-2-7b-ordre-{etiquette}"
     print(f"\n=== bras {etiquette} : ordre "
           f"{'INVERSE (+gain/cout)' if inverse else 'actuel (-gain/cout)'}",
@@ -150,7 +160,8 @@ def un_bras(etiquette: str, inverse: bool, sortie: Path, python: str) -> dict:
                        [python, "-m", "acvram", "convert", str(SOURCE),
                         "--out", str(dossier), "--bits-budget", str(BUDGET),
                         "--grille-erreurs"],
-                       sortie / f"conv-{etiquette}.log", inverse, 120, python)
+                       sortie / f"conv-{etiquette}.log", inverse, 120, python,
+                       mode_actif=mode)
         if code:
             print(f"  ECHEC conversion, code {code}")
             return {"bras": etiquette, "echec": True}
@@ -160,12 +171,28 @@ def un_bras(etiquette: str, inverse: bool, sortie: Path, python: str) -> dict:
     bud = m.get("budget") or {}
     # TEMOIN DU BRAS : l'ordre employe est ecrit au manifeste. Sans lui, rien
     # ne distinguerait les deux dossiers apres coup.
-    attendu = "snr_par_octet_croissant" if inverse else "snr_par_octet_decroissant"
+    attendu = MODES[mode] if mode else (
+        "snr_par_octet_croissant" if inverse else "snr_par_octet_decroissant")
     if bud.get("ordre_glouton") != attendu:
         print(f"  MANCHE SANS OBJET : le manifeste porte "
               f"{bud.get('ordre_glouton')!r} au lieu de {attendu!r}. "
               f"L'echappement n'a pas pris, ou le dossier vient d'un autre bras.")
         return {"bras": etiquette, "echec": True, "ordre": bud.get("ordre_glouton")}
+    # LE CHAMP EST ECRIT CONDITIONNEL (convert.py:1069) : un tenseur dont la
+    # calibration ne produit pas out_ref_norm passerait SANS, en silence. On le
+    # COMPTE au lieu de le supposer — remarque de claude-f2.
+    avec_ech = sum(1 for v in m.get("tensors", {}).values()
+                   if "out_ref_norm" in v)
+    tot_t = len(m.get("tensors", {}))
+    print(f"  out_ref_norm present sur {avec_ech}/{tot_t} tenseurs", flush=True)
+    if avec_ech == 0:
+        print("  ATTENTION : aucun tenseur ne porte l'echelle. Le code de "
+              "cette conversion precede l'ajout du champ (2082279, 17:51), "
+              "ou la calibration ne la produit pas.", flush=True)
+    elif avec_ech < tot_t:
+        print(f"  ATTENTION : {tot_t - avec_ech} tenseurs sans echelle — la "
+              f"simulation `absolu` les ecartera, et il faut savoir lesquels "
+              f"avant d'en tirer un classement.", flush=True)
     oct_r = sum(f.stat().st_size for f in dossier.glob("*.safetensors"))
     print(f"  octets {oct_r:,}  promus {bud.get('promus')}/{bud.get('candidats')}  "
           f"depense {bud.get('depense_gib')} Gio".replace(",", " "), flush=True)
@@ -192,6 +219,10 @@ def un_bras(etiquette: str, inverse: bool, sortie: Path, python: str) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--python", default=sys.executable)
+    ap.add_argument("--modes", default="",
+                    help="modes a produire, separes par des virgules "
+                         "(snr, inverse, erreur, absolu, base_croissant). "
+                         "Sans cet argument, les deux bras historiques.")
     ap.add_argument("--sortie", default="~/Bureau/Claude/"
                                         "acvram-memoire/corpus/ordre-sac")
     a = ap.parse_args()
@@ -211,8 +242,19 @@ def main() -> int:
         return 2
     print(f"A/B ORDRE DU SAC A DOS — budget {BUDGET} Gio, un signe d'ecart")
     print(f"  prediction : {PPL_PLAFOND} <= PPL(B) < {PPL_BRAS_A_ATTENDU}")
-    res = [un_bras("normal", False, sortie, a.python),
-           un_bras("inverse", True, sortie, a.python)]
+    if a.modes:
+        voulus = [m.strip() for m in a.modes.split(",") if m.strip()]
+        inconnus = [m for m in voulus if m not in MODES]
+        if inconnus:
+            print(f"ECHEC / CAUSE: mode(s) inconnu(s) {inconnus} ; connus "
+                  f"{sorted(MODES)} / SUITE: un mode inconnu ferait mesurer "
+                  f"le defaut en croyant mesurer autre chose")
+            return 2
+        res = [un_bras(m, m == "inverse", sortie, a.python, mode=m)
+               for m in voulus]
+    else:
+        res = [un_bras("normal", False, sortie, a.python),
+               un_bras("inverse", True, sortie, a.python)]
     if any(r.get("echec") for r in res):
         print("\nECHEC / CAUSE: un bras n'a pas rendu / SUITE: voir ci-dessus")
         return 1
