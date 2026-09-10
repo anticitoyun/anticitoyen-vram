@@ -20,12 +20,14 @@ import collections
 import json
 import os
 import re
+import subprocess
 import sys
+from datetime import datetime
 
 import torch
 from safetensors import safe_open
 
-A = "/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram"
+from outils.parc import get_parc_models, _get_configured_roots
 OCTETS = {"nvfp4": .5625, "int4_awq": .5625, "int8": 1.0625,
           "bf16": 2.0, "fp16": 2.0, "q3n": .40625}
 GROUPES = {"qkv": ("self_attn", ["q", "k", "v"]),
@@ -182,12 +184,63 @@ def verrous_experts(dossier):
     return out
 
 
+def _classifier_modele(nom):
+    """Classe un modèle : prod / essai / ?
+    Essai : contient 'temoin' (modèles de mesure), ou 'agents-a1-4b-kimi' (variantes kimi),
+    ou 'qwen2.5-coder-14b-pur' (conversions de test)
+    Sinon : ? (défaut, jamais prod par défaut)
+    """
+    lower_nom = nom.lower()
+    if 'temoin' in lower_nom:
+        return 'essai'
+    if 'agents-a1-4b-kimi' in lower_nom:
+        return 'essai'
+    if 'qwen2.5-coder-14b-pur' in lower_nom:
+        return 'essai'
+    return '?'
+
+
+def _ecrire_temoin(donnees_modeles, output_path='outils/verrous-fusion.tsv'):
+    """Écrit le fichier témoin TSV avec en-tête explicite."""
+    try:
+        commit = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'],
+                                        stderr=subprocess.DEVNULL, text=True).strip()
+    except:
+        commit = 'unknown'
+
+    roots = _get_configured_roots()
+
+    with open(output_path, 'w') as f:
+        f.write(f"# Témoin verrous-fusion — {datetime.now().strftime('%Y-%m-%d')}\n")
+        f.write(f"# Commit : {commit}\n")
+        f.write(f"# Modèles : {len(donnees_modeles)}\n")
+        f.write(f"# Racines déclarées par outils/parc.py :\n")
+        for root in roots:
+            count = len([d for d in os.listdir(root)
+                        if os.path.isdir(os.path.join(root, d))
+                        and os.path.isfile(os.path.join(root, d, 'acvram_manifest.json'))])
+            f.write(f"#   - {root} ({count} modèles)\n")
+        f.write(f"#\n")
+        f.write("nom_modele\tracine\ttotal\tfusionnent\tvoie_2plus1\tsans_recours\techelle\tmanifeste_mtime\ttype\n")
+
+        for row in sorted(donnees_modeles, key=lambda x: x['nom']):
+            f.write(f"{row['nom']}\t{row['racine']}\t{row['total']}\t{row['fusionnent']}\t"
+                   f"{row['voie_2plus1']}\t{row['sans_recours']}\t{row['echelle']}\t"
+                   f"{row['mtime']}\t{row['type']}\n")
+
+
 def main(argv):
-    cibles = argv[1:] or sorted(os.listdir(A))
+    models_with_roots = get_parc_models(single_root_only=False, include_location=True)
+    cibles = argv[1:] or sorted(models_with_roots.keys())
     total = collections.Counter()
     par_voie = collections.Counter()
+    donnees_modeles = []
+
     for nom in cibles:
-        d = os.path.join(A, nom)
+        info = models_with_roots.get(nom)
+        if not info:
+            continue
+        d, root = info
         if not os.path.isfile(os.path.join(d, "acvram_manifest.json")):
             continue
         try:
@@ -195,13 +248,33 @@ def main(argv):
         except Exception as e:                          # noqa: BLE001
             print(f"  {nom} : illisible ({str(e)[:40]})", file=sys.stderr)
             continue
+
+        # Récupérer la mtime du manifeste
+        manifest_path = os.path.join(d, "acvram_manifest.json")
+        mtime = datetime.fromtimestamp(os.path.getmtime(manifest_path)).strftime('%Y-%m-%d')
+
+        # Accumuler les stats pour ce modèle
+        stats_modele = {
+            'nom': nom,
+            'racine': root,
+            'total': 0,
+            'fusionnent': 0,
+            'voie_2plus1': 0,
+            'sans_recours': 0,
+            'echelle': 0,
+            'mtime': mtime,
+            'type': _classifier_modele(nom),
+        }
+
         for g in gs:
             total["groupes"] += 1
+            stats_modele['total'] += 1
             libres = (g["format_ok"] and g["hadamard_ok"]
                       and g["biais_ok"] and g["echelle_ok"]
                       and g["taille_ok"])
             if libres:
                 par_voie["fusionnent deja"] += 1
+                stats_modele['fusionnent'] += 1
                 continue
             # quelle voie leverait CE groupe, sans rien approximer ?
             if g["format_sans_empileur"]:
@@ -210,14 +283,20 @@ def main(argv):
                 par_voie["bloque par TAILLE (entree ou group_size)"] += 1
             elif not g["echelle_ok"]:
                 par_voie["bloque par ECHELLE (table AWQ)"] += 1
+                stats_modele['echelle'] += 1
             elif not g["format_ok"]:
-                par_voie["bloque par FORMAT, voie 2+1 possible" if
-                         g["partiel_possible"] else
-                         "bloque par FORMAT, rien a sauver"] += 1
+                if g["partiel_possible"]:
+                    par_voie["bloque par FORMAT, voie 2+1 possible"] += 1
+                    stats_modele['voie_2plus1'] += 1
+                else:
+                    par_voie["bloque par FORMAT, rien a sauver"] += 1
+                    stats_modele['sans_recours'] += 1
             elif not g["hadamard_ok"]:
                 par_voie["bloque par HADAMARD"] += 1
             else:
                 par_voie["bloque par BIAIS"] += 1
+
+        donnees_modeles.append(stats_modele)
     print(f"{'etat':38s} {'groupes':>8s} {'part':>7s}")
     t = total["groupes"] or 1
     for k, n in par_voie.most_common():
@@ -227,6 +306,9 @@ def main(argv):
     print("dont DEUX membres partagent un format empilable : un groupe dont les")
     print("echelles different reste refuse quel que soit son format, et un gate_up")
     print("n'a que deux membres, donc pas de voie partielle.")
+
+    # Écrire le fichier témoin explicable
+    _ecrire_temoin(donnees_modeles)
 
     # Axe SEPARE : le stacking inter-experts d'un MoE. Ne s'ajoute ni ne
     # retranche rien au compte ci-dessus -- qkv et gate_up ne voient jamais
@@ -239,8 +321,11 @@ def main(argv):
     par_voie_exp = collections.Counter()
     controle = collections.Counter()          # (modele, couche) -> nb de genres vus
     for nom in cibles:
-        d = os.path.join(A, nom)
-        if not os.path.isfile(os.path.join(d, "acvram_manifest.json")):
+        info = models_with_roots.get(nom)
+        if not info:
+            continue
+        d, root = info
+        if not d or not os.path.isfile(os.path.join(d, "acvram_manifest.json")):
             continue
         try:
             ge = verrous_experts(d)

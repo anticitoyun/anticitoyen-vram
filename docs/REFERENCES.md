@@ -147,3 +147,33 @@ Deux points relevés au reboot du 3 septembre, à connaître avant toute mesure 
 | Nsight Systems | <https://developer.nvidia.com/nsight-systems> | **à évaluer, priorité haute** — notre profilage se fait aujourd'hui au chronomètre en Python ; la chronologie des lancements est exactement ce que Nsight Systems montre, et le décodage est justement limité par le **nombre** de lancements |
 | Nsight Compute | <https://developer.nvidia.com/nsight-compute> | **à évaluer** — occupation, pression de registres, conflits de banques : les trois causes qui ont décidé de nos dernières optimisations, mesurées jusqu'ici indirectement |
 | Panorama des outils | <https://developer.nvidia.com/tools-overview> | référence |
+
+## Retours de terrain sur 5090 (lus le 10/09/2026)
+
+| ressource | lien | statut |
+|---|---|---|
+| « Best Local LLM for RTX 5090 » | <https://openclawdc.com/blog/best-local-llm-rtx-5090/> | **ecarte** — page commerciale, chiffres annonces comme *« expected speed »* et non mesures, tout passe par Ollama, **aucune mesure d'energie**, aucune repetition ni dispersion. Explique les debits par « 1792 Go/s de bande passante » alors que nous avons etabli le 10/09 par deux montages independants que le decodage n'est **pas** limite par la bande passante. Seul usage : situer l'attente du public, 45 a 90 j/s selon les modeles. |
+| Retour d'experience 5090, r/LocalLLM | <https://www.reddit.com/r/LocalLLM/comments/1ubkczr/> | **utile pour trois points, pas pour le fil lui-meme** — l'auteur ecrit explicitement « no actual benchmarks ». Ce qui vaut est dans les commentaires, voir ci-dessous. |
+
+**Ce que le fil r/LocalLLM apporte reellement :**
+
+1. **Un concurrent chiffre** : vLLM en conteneur sur une 5090, Qwen3.6 27B MTP en
+   NVFP4, cache KV en FP8 → **160 a 200 j/s a contexte plein** (commentaire
+   `DataGOGO`). Non verifie par nous, mais c'est le seul chiffre de la page qui
+   nomme son moteur, son format et son regime. A confronter a nos mesures.
+2. **Le format du cache KV sur Blackwell.** L'auteur du commentaire soutient que
+   sm_120 accelere materiellement **FP8 et NVFP4**, et conseille BF16 ou **FP8**
+   pour le cache KV en evitant Q8. Notre cache est en **int8 + une echelle fp16
+   par vecteur de 128** (`acvram_kernels.cu:749`). La question est ouverte et
+   n'a jamais ete posee : un cache FP8 supprimerait-il la dequantification ?
+3. **La calibration des NVFP4 publics** : beaucoup de quantifications NVFP4
+   diffusees forcent des couches en FP4 qui ne devraient pas l'etre, ou omettent
+   la calibration post-quantification. Cela rejoint notre travail sur le SNR par
+   tenseur et le quota de promotions — et cela vaut comme mise en garde avant de
+   se comparer a un NVFP4 telecharge.
+
+Deux observations d'usage qui recoupent nos propres mesures du 10/09 : *« Estimated
+Memory Usage isn't always accurate »* (ecart entre annonce et pic, mesure a
+~1,8 Gio chez nous, dont 0,70 de contexte CUDA) et *« Max Concurrent Predictions
+a 1 »* qui libere de la VRAM reservee sans usage (meme famille que le budget KV
+dimensionne pour 4096 jetons quel que soit `max_model_len`).

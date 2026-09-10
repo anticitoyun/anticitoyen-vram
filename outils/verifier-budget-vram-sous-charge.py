@@ -41,6 +41,14 @@ CIBLES = [
     ("hybride", "Nemotron-Nano-9B-int8"),
     ("MLA", "GLM-4.7-Flash-nvfp4"),
     ("temoin quadratique", "Qwen3-4B-srcgguf-nvfp4"),
+    # LE BRAS QUI LEVE UN CONFONDANT, ajoute le 10/09. « Le MLA fragmente trois
+    # fois plus » etait une attribution, pas une mesure : GLM-4.7-Flash est
+    # MLA **et** MoE (64 experts, 4 par jeton), les deux autres cibles ne sont
+    # ni l un ni l autre. Le parc ne contient AUCUN modele MLA sans MoE (0 sur
+    # 120) mais trente MoE sans MLA ; celui-ci pese 16,41 Gio contre 15,79 au
+    # GLM, donc a taille comparable. S il fragmente comme le GLM, la cause est
+    # le routage d experts ; s il fragmente comme le temoin, c est le MLA.
+    ("MoE sans MLA", "Jan-v2-VL-max-srcQ4_K_M-nvfp4"),
 ]
 
 
@@ -113,8 +121,26 @@ class Guetteur(threading.Thread):
         return max(self.pic, self._lire())
 
 
+def _memoire_hote() -> tuple[int, int]:
+    """`MemFree` ET `MemAvailable`, en Kio. Jamais l un sans l autre.
+
+    Mesure d poste1 le 10/09 : le superviseur a tue son banc deux fois alors
+    que la machine avait 83 Go DISPONIBLES. `MemFree` tombait de 1,8 Gio,
+    `Cached` montait d autant, `MemAvailable` ne bougeait pas — la memoire
+    etait pretee au cache de pages, pas consommee. Publier `MemFree` seul,
+    c est lire une propriete voisine de celle qui decide.
+    """
+    d = {}
+    with open("/proc/meminfo") as fh:
+        for ligne in fh:
+            k, _, v = ligne.partition(":")
+            if k in ("MemFree", "MemAvailable"):
+                d[k] = int(v.split()[0])
+    return d.get("MemFree", 0), d.get("MemAvailable", 0)
+
+
 def mesurer(chemin: str, max_model_len: int, n_seqs: int,
-            n_jetons: int, invite: int) -> dict:
+            n_jetons: int, invite: int, sans_graphes: bool = False) -> dict:
     from acvram.engine.loader import load_model
     from acvram.engine.runner import Engine
     from acvram.engine.sampler import SamplingParams
@@ -122,18 +148,29 @@ def mesurer(chemin: str, max_model_len: int, n_seqs: int,
     gc.collect()
     torch.cuda.empty_cache()
     avant = Guetteur._lire()
+    # LOCALISER le pic, au lieu de l attribuer. `_try_build_stacks` empile les
+    # experts par `torch.stack(...)` et ne libere les anciens stockages
+    # qu apres : « la pile d une projection double transitoirement sa memoire »
+    # (model.py:612). Reste a savoir OU ce doublement tombe — a la construction
+    # du moteur, a l echauffement des graphes, ou dans la boucle. Trois relevés
+    # repondent ; une explication n aurait fait que deplacer la question.
+    torch.cuda.reset_peak_memory_stats()
 
     charge = load_model(chemin, max_model_len=max_model_len)
     moteur = Engine(charge, None, max_batch_size=n_seqs,
-                    max_model_len=max_model_len)
+                    max_model_len=max_model_len,
+                    enable_cuda_graphs=not sans_graphes)
     # Prechauffer les graphes comme le fait le serveur : sans cela, la capture
     # se declenche au milieu du premier pas et echoue par
     # `cudaErrorStreamCaptureInvalidated` des que plusieurs sequences allouent
     # ensemble. Le sauter ne mesurerait pas le regime de production — et les
     # graphes retiennent de la VRAM, donc c est bien du poste mesure.
-    if moteur.graphs is not None:
+    torch.cuda.synchronize()
+    vivant_moteur = torch.cuda.max_memory_allocated()
+    if moteur.graphs is not None and not sans_graphes:
         moteur.warm_graphs(max_model_len)
     torch.cuda.synchronize()
+    vivant_warm = torch.cuda.max_memory_allocated()
     apres_chargement = Guetteur._lire()
 
     # Invites distinctes : des sequences identiques partageraient leurs blocs
@@ -144,6 +181,19 @@ def mesurer(chemin: str, max_model_len: int, n_seqs: int,
         ids = [(i * 7919 + j * 31 + 11) % 30000 + 1 for j in range(invite)]
         moteur.add_request(ids, params, request_id=f"r{i}")
 
+    # LE BRAS QUI SEPARE les deux candidats restants pour les ~1,8 Gio.
+    #
+    # `pic` est un chiffre du PILOTE : il contient tout. Trois compteurs de
+    # l allocateur le decomposent exactement, et ils ne coutent rien :
+    #   vivant        = max_memory_allocated : les tenseurs reellement detenus
+    #                   (poids + KV + intermediaires en cours)
+    #   fragmentation = max_memory_reserved - max_memory_allocated : ce que
+    #                   l allocateur garde au pilote sans le preter
+    #   hors_torch    = pic - max_memory_reserved : contexte CUDA et tout ce
+    #                   que PyTorch ne compte pas
+    # Sans cette decomposition on ne peut qu ATTRIBUER l ecart ; avec elle on
+    # le lit. C est la difference entre une hypothese et une mesure.
+    torch.cuda.reset_peak_memory_stats()
     guetteur = Guetteur()
     guetteur.start()
     pas = 0
@@ -154,6 +204,17 @@ def mesurer(chemin: str, max_model_len: int, n_seqs: int,
             break
     torch.cuda.synchronize()
     pic = guetteur.arreter()
+    vivant = torch.cuda.max_memory_allocated()
+    reserve = torch.cuda.max_memory_reserved()
+
+    from acvram.engine.layers import QuantLinear
+    exiles = sum(1 for m_ in charge.model.modules()
+                 if isinstance(m_, QuantLinear) and m_.streamed is not None)
+    g_ = getattr(moteur, "graphs", None)
+    graphes_actifs = bool(getattr(g_, "enabled", False))
+    raison_graphes = (getattr(g_, "raison", "") or "")[:80]
+    libre_h, dispo_h = _memoire_hote()
+    n_graphes = len(getattr(g_, "graphs", {}) or {}) if g_ is not None else 0
 
     plan = charge.plan
     annonce = (plan.total_weight_bytes + sum(plan.kv_budget.values())
@@ -167,6 +228,17 @@ def mesurer(chemin: str, max_model_len: int, n_seqs: int,
         "poids": plan.total_weight_bytes,
         "kv": sum(plan.kv_budget.values()),
         "etat": getattr(plan, "etat_recurrent_bytes", 0),
+        "exiles": exiles,
+        "graphes": graphes_actifs,
+        "raison_graphes": raison_graphes,
+        "hote_libre": libre_h,
+        "hote_dispo": dispo_h,
+        "n_graphes": n_graphes,
+        "vivant": vivant,
+        "vivant_moteur": vivant_moteur,
+        "vivant_warm": vivant_warm,
+        "reserve": reserve,
+        "sans_graphes": sans_graphes,
     }
     del moteur, charge
     gc.collect()
@@ -186,6 +258,9 @@ def main(argv):
                          "multiplie l etat recurrent")
     ap.add_argument("--jetons", type=int, default=64)
     ap.add_argument("--invite", type=int, default=256)
+    ap.add_argument("--sans-graphes", action="store_true",
+                    help="le bras qui discrimine : l ecart annonce/pic est-il "
+                         "la reserve des graphes CUDA, ou l aire de travail ?")
     ns = ap.parse_args(argv[1:])
 
     if not torch.cuda.is_available():
@@ -200,7 +275,7 @@ def main(argv):
 
     nom = dict(CIBLES)[ns.role]
     r = mesurer(os.path.join(A, nom), ns.max_model_len, ns.seqs,
-                ns.jetons, ns.invite)
+                ns.jetons, ns.invite, ns.sans_graphes)
     g = 2**30
     pc = 100 * (r["pic"] - r["annonce"]) / max(1, r["annonce"])
     verdict = ("conforme" if abs(pc) <= 5 else
@@ -209,9 +284,31 @@ def main(argv):
     print(f"  annonce au plan  {r['annonce']/g:6.2f} G   "
           f"(poids {r['poids']/g:.2f}  kv {r['kv']/g:.2f}  etat {r['etat']/g:.2f})")
     print(f"  apres chargement {r['chargement']/g:6.2f} G")
-    print(f"  PIC sous charge  {r['pic']/g:6.2f} G   {pc:+.1f} %   {verdict}")
+    # Un pourcentage deplace le coupable vers le plus petit denominateur :
+    # +39,0 % et +9,9 % etaient le MEME 1,4 Gio sur deux modeles differant d un
+    # facteur 5,3 en poids. La valeur absolue se publie a cote, toujours.
+    print(f"  PIC sous charge  {r['pic']/g:6.2f} G   "
+          f"{(r['pic']-r['annonce'])/g:+.2f} G   {pc:+.1f} %   {verdict}")
     print(f"  ce que la charge ajoute : "
           f"{(r['pic'] - r['chargement'])/g:+.2f} G")
+    # CONTROLES publies A COTE du verdict, jamais a sa place.
+    print(f"  MLP exiles {r['exiles']}   graphes "
+          f"{'coupes (bras temoin)' if r['sans_graphes'] else
+             ('actifs, %d vivants' % r['n_graphes']) if r['graphes']
+             else 'INACTIFS'}"
+          + (f" ({r['raison_graphes']})" if not r['graphes'] else ""))
+    print(f"  ou naît le pic : moteur {r['vivant_moteur']/g:.2f} G   "
+          f"echauffement {r['vivant_warm']/g:.2f} G   "
+          f"boucle {r['vivant']/g:.2f} G")
+    print(f"  decomposition du pic : vivant {r['vivant']/g:.2f} G   "
+          f"fragmentation {(r['reserve']-r['vivant'])/g:+.2f} G   "
+          f"hors torch {(r['pic']-r['reserve'])/g:+.2f} G")
+    print(f"  hote : MemFree {r['hote_libre']/2**20:.1f} G   "
+          f"MemAvailable {r['hote_dispo']/2**20:.1f} G")
+    if r["exiles"] or (not r["graphes"] and not r["sans_graphes"]):
+        print("  MANCHE SANS OBJET : un MLP exile ou des graphes inactifs "
+              "changent le regime — ce chiffre ne mesure pas le budget KV.")
+        return 2
     return 0 if verdict == "conforme" else 1
 
 
