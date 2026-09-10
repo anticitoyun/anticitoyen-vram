@@ -209,6 +209,23 @@ def nvfp4_mm_tensorcore(x: torch.Tensor, t: NVFP4Tensor) -> Optional[torch.Tenso
         out = out * (xq.global_scale.to(out.device) * t.global_scale.to(out.device))
         return out.to(x.dtype).reshape(*orig[:-1], t.shape[0])
     except Exception as exc:                          # noqa: BLE001
+        # Une capture de graphe en cours n'est PAS une panne du chemin.
+        #
+        # Mesuré le 10/09/2026 : à douze séquences concurrentes, le décodage
+        # franchit le seuil de lot, ``torch._scaled_mm`` entre dans la région
+        # de capture, cuBLASLt y interroge son heuristique et réserve son
+        # espace de travail — opération interdite pendant une capture. Le
+        # même appel réussit à huit séquences, et réussit à douze hors
+        # capture : c'est le CONTEXTE qui échoue, pas le chemin.
+        #
+        # Éteindre ici transformait cet accident en état permanent du
+        # processus : un serveur ayant vu une seule fois plus de huit
+        # séquences perdait les tensor cores FP4 pour toutes ses requêtes
+        # suivantes, sans autre trace qu'un avertissement. Et rendre ``None``
+        # laisserait l'appelant bâtir un graphe sur une capture déjà
+        # invalidée. On relaie donc l'erreur telle quelle.
+        if torch.cuda.is_current_stream_capturing():
+            raise
         # Extinction globale : elle ne doit plus concerner qu'une panne du
         # chemin lui-même, les formes étant écartées plus haut. Elle change le
         # résultat de toutes les couches suivantes, donc elle s'annonce — le

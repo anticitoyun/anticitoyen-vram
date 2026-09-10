@@ -12,6 +12,7 @@ sans compilateur, et la suite de tests peut vérifier les noyaux face à lui.
 from __future__ import annotations
 
 import functools
+import hashlib
 import os
 import time
 import re
@@ -40,6 +41,9 @@ __all__ = ["get_extension", "kernels_available", "build_info", "matmul",
 _EXT: Optional[Any] = None
 _TRIED = False
 _ERROR: str = ""
+_SO_HASH: str = ""          # sha256 du .so effectivement charge : a joindre
+_SO_PATH: str = ""          # a tout releve, car une empreinte .cu/.so prouve
+                            # la coherence, jamais l identite de l arbre
 
 # Blackwell exige CUDA 12.8 ou plus récent ; rien de plus ancien ne sait émettre du sm_120.
 _MIN_CUDA_FOR_SM120 = (12, 8)
@@ -249,13 +253,42 @@ def get_extension():
     try:
         from torch.utils.cpp_extension import load
         here = os.path.dirname(os.path.abspath(__file__))
-        cache = os.path.expanduser("~/.cache/acvram/kernels")
+        # UN REPERTOIRE DE COMPILATION PAR ARBRE. Le defaut etait partage par
+        # les quatre worktrees, sous un nom de module fixe : deux sessions dont
+        # les sources different s'ecrasent le meme .so, et _purger_verrou()
+        # retire le verrou d'une compilation qui n'est pas la sienne. Le
+        # symptome est exactement celui qu'on avait attribue a ccache — un
+        # binaire coherent avec un source qui n'est pas le votre, une date
+        # rassurante, aucune erreur. Les deux mecanismes existent ; celui-ci
+        # etait invisible.
+        # La cle est le chemin du paquet : deux arbres ne peuvent plus se
+        # rencontrer, et un meme arbre garde son cache d'une fois sur l'autre.
+        cache = os.environ.get("ACVRAM_KERNEL_CACHE")
+        if not cache:
+            _cle = hashlib.sha256(
+                os.path.realpath(here).encode()).hexdigest()[:12]
+            cache = os.path.expanduser(f"~/.cache/acvram/kernels-{_cle}")
         os.makedirs(cache, exist_ok=True)
         _purger_verrou(cache)
+        # EMPREINTE DU SOURCE, injectee comme option de compilation.
+        # `ccache` enveloppe nvcc (build.ninja) et son hachage ne distingue pas
+        # toujours deux versions du code *device* : le 9/09/2026 une
+        # modification du .cu a rendu un binaire compile en 191 ms qui ne la
+        # contenait pas, tout en etant PLUS RECENT que la source. Quatre
+        # valeurs d'un parametre ont ainsi donne quatre fois le meme chiffre —
+        # le meme binaire — et la conclusion qu'on allait en tirer etait fausse.
+        # Une option qui CHANGE avec le contenu interdit structurellement a
+        # ccache de rendre un objet perime, sans le desactiver ni perdre son
+        # benefice sur les compilations legitimes.
+        src = os.path.join(here, "acvram_kernels.cu")
+        with open(src, "rb") as fh:
+            _SRC_HASH = hashlib.sha256(fh.read()).hexdigest()[:16]
+        _SRC_U64 = int(_SRC_HASH, 16)          # entier : aucun guillemet a echapper
         _EXT = load(
             name="acvram_kernels",
-            sources=[os.path.join(here, "acvram_kernels.cu")],
-            extra_cuda_cflags=["-O3", "--use_fast_math", "-lineinfo"]
+            sources=[src],
+            extra_cuda_cflags=["-O3", "--use_fast_math", "-lineinfo",
+                               f"-DACVRAM_SRC_HASH={_SRC_U64}ULL"]
             + ([f"-DGW_WARPS={os.environ['ACVRAM_GW_WARPS']}"]
                if os.environ.get("ACVRAM_GW_WARPS") else [])
             + _arch_flags(),
@@ -263,6 +296,36 @@ def get_extension():
             build_directory=cache,
             verbose=bool(os.environ.get("ACVRAM_VERBOSE_BUILD")),
         )
+        # LE BINAIRE PORTE-T-IL BIEN CE SOURCE ? Une fois, au chargement,
+        # jamais dans le chemin chaud. Comparer les horodatages ne prouve
+        # rien : ccache reecrit le .so, donc sa date est bonne et son contenu
+        # ancien. Seul le CONTENU repond.
+        so = os.path.join(cache, "acvram_kernels.so")
+        try:
+            with open(so, "rb") as fh:
+                octets = fh.read()
+                # l'entier est ecrit en little-endian dans le binaire
+                porte = _SRC_U64.to_bytes(8, "little") in octets
+            # EMPREINTE DU BINAIRE LUI-MEME, a joindre a tout releve. Le
+            # controle ci-dessus prouve que le .so est COHERENT avec un .cu ;
+            # il ne peut pas voir que le couple entier vient d'un autre arbre —
+            # demontre le 10/09, ou PYTHONPATH manquant faisait mesurer le
+            # depot principal avec son propre binaire, parfaitement coherent.
+            # Une empreinte prouve la coherence, pas l'identite : c'est le sha
+            # du .so, joint au chiffre, qui identifie ce qui a tourne.
+            global _SO_HASH, _SO_PATH
+            _SO_HASH = hashlib.sha256(octets).hexdigest()[:16]
+            _SO_PATH = so
+        except OSError:
+            porte = True                       # pas de .so a inspecter : on n'accuse pas
+        if not porte:
+            _ERROR = (f"le binaire {so} ne porte pas l'empreinte du source "
+                      f"({_SRC_HASH}) : il a ete servi par un cache de "
+                      f"compilation et NE CONTIENT PAS vos modifications. "
+                      f"Videz {cache} ou relancez avec CCACHE_DISABLE=1.")
+            warnings.warn(f"acvram : {_ERROR}")
+            _EXT = None
+            return None
     except Exception as exc:                      # noqa: BLE001 — signaler, pas planter
         _ERROR = f"{type(exc).__name__}: {exc}"
         _EXT = None
@@ -532,14 +595,29 @@ _bk.register(_bk.Backend(
 _bk.register(_bk.Backend(
     name="fp4-tensorcores", formats=("nvfp4",), device_type="cuda",
     priority=110, available=_sm100_ok,
+    # EXCLU PENDANT UNE CAPTURE DE GRAPHE, et pas au-dela d'un lot.
+    #
+    # `torch._scaled_mm` passe par cuBLASLt, dont le premier appel sur un flux
+    # interroge une heuristique et reserve un espace de travail : une operation
+    # interdite pendant `cudaStreamCapture`. L'echauffement de `graphs.py` ne
+    # l'immunise pas, il tourne sur le flux annexe `side`.
+    #
+    # Mesure du 10/09/2026 sur Qwen3-4B-nvfp4 : huit sequences capturent un
+    # graphe et servent ; douze franchissent le seuil `> 8` en DECODAGE, donc
+    # a l'interieur de la capture, et rendent `captures = 0` avec 23,46 Gio
+    # libres — l'echec precede toute capture. La condition porte donc sur
+    # l'etat de capture et non sur un seuil de lot : un seuil se deplacerait
+    # au prochain changement de `max_batch_size` et le defaut reviendrait
+    # ailleurs. Le prefill, lui, n'est jamais capture : il garde ce chemin.
     # La garde par capacité est répétée ici : un échec réel dans
     # nvfp4_mm_tensorcore éteint son chemin globalement, et il ne faut pas
     # qu'un appel parti sur une carte sans FP4 le fasse pour toutes.
     matmul=lambda x, w: (nvfp4_mm_tensorcore(x, w)
                          if (x.reshape(-1, x.shape[-1]).shape[0] > 8
+                             and not torch.cuda.is_current_stream_capturing()
                              and torch.cuda.get_device_capability(x.device)
                              >= (10, 0)) else None),
-    note="prefill W4A4 via torch._scaled_mm, sm_100+"))
+    note="prefill W4A4 via torch._scaled_mm, sm_100+ ; jamais sous capture"))
 
 _bk.register(_bk.Backend(
     name="cpu-avx2", formats=("nvfp4", "int4_awq"), device_type="cpu",
