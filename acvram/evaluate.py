@@ -193,6 +193,8 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
         result.corpus_sha256 = hashlib.sha256(
             texte.encode("utf-8")).hexdigest()[:24]
     result.weights_bytes = model.nbytes
+    # INDICATIF, jamais diviseur : voir la mise en garde de bench.py. Les
+    # octets reellement alloues sont dans nbytes_detail.octets_stockage_uniques.
     # Le champ ci-dessus a une valeur PREVUE, tiree du manifeste : embedding au
     # dtype de chargement + somme des tenseurs quantifies. Elle a rendu « faux »
     # des son premier usage (15,9994 prevu contre 26,987 releve sur
