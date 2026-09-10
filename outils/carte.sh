@@ -24,6 +24,27 @@ VERROU=${ACVRAM_VERROU:-/tmp/acvram-carte-0.lock}
 INFO="$VERROU.qui"
 ATTENTE=${ACVRAM_ATTENTE:-1800}
 NOM=${ACVRAM_NOM:-$(basename "${1:-mesure}")}
+# CE QUE LE VERROU TIENT. Un verrou d'usage exclusif ne voit pas qu'on change
+# l'ETAT de la carte : le 10/09, un balayage de frequence a tourne pendant une
+# campagne qui respectait pourtant le verrou — 53,67 puis 68,75 pas/s sur le
+# meme bras, 28 % d'ecart, parce que l'autre ne PRENAIT pas la carte, il en
+# CHANGEAIT l'horloge. Toute modification d'etat (-lgc, -lmc, -pl, mode de
+# calcul) prend donc le verrou au meme titre qu'une mesure, et le declare :
+# celui qui attend doit savoir s'il attend une manche ou un reglage.
+TYPE=${ACVRAM_TYPE:-mesure}
+case "$TYPE" in
+  mesure|etat) ;;
+  *) echo "carte.sh : ACVRAM_TYPE doit valoir 'mesure' ou 'etat'" >&2; exit 64 ;;
+esac
+
+# ETAT DE LA CARTE, RELEVE AVANT ET APRES. On ne garantit pas qu'il ne changera
+# pas — on CONSTATE apres coup ce qu'on ne pouvait pas garantir avant, comme le
+# sha du .so. Un debit se publie avec l'etat de la carte, comme une energie
+# avec sa limite de puissance.
+etat_carte() {
+  nvidia-smi -i 0 --query-gpu=clocks.sm,clocks.mem,power.limit \
+             --format=csv,noheader,nounits 2>/dev/null | tr -d ' '
+}
 [ $# -ge 1 ] || { echo "usage: carte.sh <commande...>" >&2; exit 64; }
 
 # LE VERROU VIT AUSSI LONGTEMPS QUE LA COMMANDE QU'IL ENVELOPPE — donc cette
@@ -49,9 +70,9 @@ esac
 
 qui_tient() {
   [ -r "$INFO" ] || { echo "detenteur inconnu"; return; }
-  read -r p t n < "$INFO" 2>/dev/null || { echo "detenteur inconnu"; return; }
+  read -r p t n y < "$INFO" 2>/dev/null || { echo "detenteur inconnu"; return; }
   if [ -n "${p:-}" ] && kill -0 "$p" 2>/dev/null; then
-    echo "PID $p ($n) depuis $(( $(date +%s) - t )) s"
+    echo "PID $p ($n, ${y:-?}) depuis $(( $(date +%s) - t )) s"
   else
     # INFO peut survivre a un kill -9 ; le VERROU, lui, est deja libere.
     echo "detenteur disparu (info perimee)"
@@ -77,8 +98,9 @@ if ! flock -n 9; then
   done
   echo "carte obtenue apres $(( $(date +%s) - debut )) s" >&2
 fi
-printf '%s %s %s\n' "$$" "$(date +%s)" "$NOM" > "$INFO"
+printf '%s %s %s %s\n' "$$" "$(date +%s)" "$NOM" "$TYPE" > "$INFO"
 trap 'rm -f "$INFO"' EXIT
+AVANT=$(etat_carte)
 # `9>&-` FERME LE DESCRIPTEUR POUR LA COMMANDE SEULE. Sans lui, l'enfant en
 # herite et `flock` ne tombe que quand TOUS les descripteurs sont fermes : tuer
 # ce script en -9 laissait alors le verrou tenu par son propre enfant, et le
@@ -86,3 +108,16 @@ trap 'rm -f "$INFO"' EXIT
 # fermeture, 25 s d'attente puis echec ; avec, la carte est reprise en 1 s.
 # Le shell garde le verrou, la commande ne l'a jamais.
 "$@" 9>&-
+code=$?
+APRES=$(etat_carte)
+if [ "$TYPE" = mesure ] && [ -n "$AVANT" ] && [ "$AVANT" != "$APRES" ]; then
+  echo "carte.sh : ATTENTION — l'etat de la carte a CHANGE pendant la mesure" >&2
+  echo "  avant : $AVANT" >&2
+  echo "  apres : $APRES" >&2
+  echo "  (clocks.sm, clocks.mem, power.limit) — les valeurs absolues de cette" >&2
+  echo "  manche ne sont pas comparables a une autre. Un rapport ABBA mesure" >&2
+  echo "  dans une manche unique peut rester valide : les deux bras ont subi" >&2
+  echo "  la meme derive. A vous de trancher, en le DISANT." >&2
+  [ "$code" -eq 0 ] && code=9
+fi
+exit $code
