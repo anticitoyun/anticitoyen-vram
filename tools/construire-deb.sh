@@ -33,6 +33,7 @@ cp -r acvram pyproject.toml install.sh README.md LICENSE "$PKG/usr/share/acvram/
 # N'ajouter ici qu'un document destine a L'UTILISATEUR du paquet, pas a nous.
 DOCS_PUBLIQUES="
 ARCHITECTURE.md
+BRANCHER-UN-CLIENT.md
 MATERIEL.md
 FORMAT-3BITS.md
 PROTOCOLE-ENERGIE.md
