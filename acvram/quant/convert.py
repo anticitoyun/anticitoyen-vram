@@ -1151,11 +1151,14 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 "ACVRAM_ORDRE_SAC=liste exige ACVRAM_LISTE_PROMUS=<fichier>. "
                 "Sans liste, le mode ne promouvrait rien et le dossier "
                 "ressemblerait a une conversion au format de base.")
+        _genres_vus: dict[str, int] = {}
         if _mode not in ("snr", "erreur", "inverse", "absolu",
-                         "base_croissant", "liste"):
+                         "base_croissant", "liste", "genre",
+                         "cout_decroissant"):
             raise ValueError(
                 f"ACVRAM_ORDRE_SAC={_mode!r} inconnu ; attendu snr, erreur, "
-                f"absolu, base_croissant, liste ou inverse. Un mode inconnu qui "
+                f"absolu, base_croissant, genre, cout_decroissant, liste "
+                f"ou inverse. Un mode inconnu qui "
                 f"retomberait en silence sur le defaut ferait mesurer autre "
                 f"chose que ce qui est demande.")
 
@@ -1181,7 +1184,67 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             rel = 10.0 ** (-(m["out_snr_db"]) / 20.0)
             return rel * float(ech) if ech else rel
 
+        # DEUX CLES DERIVEES DE L OBSERVATION, ET ELLES SONT INDISSOCIABLES.
+        #
+        # `genre` et `cout_decroissant` sont bâties POUR reproduire le bras B.
+        # Elles ne peuvent donc pas servir a le confirmer : une clé taillée sur
+        # un résultat le reproduit par construction. Ce qui les validerait est
+        # un SECOND modèle — si « promouvoir down_proj puis lm_head » gagne
+        # aussi sur un modèle que nous n'avons pas regardé, ce n'est plus une
+        # description, c'est une loi. Ecrit AVANT de les construire, sur la
+        # demande de chef.
+        #
+        # ET ELLES SONT CONFONDUES SUR LLAMA-2-7B, mesure le 10/09 :
+        #
+        #   genre        n   cout de promotion par tenseur
+        #   lm_head      1   57,62 Mio
+        #   down_proj   24   19,82 Mio
+        #   gate/up      2   19,82 Mio
+        #   q k v o     76    7,38 Mio     <- les quatre au meme cout
+        #
+        #   max de X = 7,38 Mio, min de Y = 19,82 Mio, facteur 2,69, AUCUN
+        #   recouvrement.
+        #
+        # Sur ce modele, « le genre du tenseur » et « le tenseur le plus gros »
+        # designent exactement le meme ensemble : les projections d attention
+        # sont 4096x4096, le MLP est 11008x4096. On ne peut PAS trancher entre
+        # les deux explications ici. Les deux cles existent donc en paire :
+        # elles doivent rendre le MEME ensemble de promus sur Llama-2, et
+        # divergerent sur un modele ou une projection d attention est aussi
+        # grosse qu une projection de MLP (GQA, MLA, tete non liee). Leur
+        # ecart, quand il apparaitra, sera la mesure du confondant.
+        _GENRE_PRIORITE = {
+            # plus petit = promu plus tot. `lm_head` sort dans les logits et
+            # `down_proj` ecrit dans le residuel : leur erreur ne traverse
+            # aucune normalisation qui l absorbe. HYPOTHESE de chef, pas
+            # un fait — et elle predit que `o_proj`, qui ecrit AUSSI dans le
+            # residuel, devrait suivre `down_proj`. Il est dans X, du cote qui
+            # perd. La prediction est donc en attente d un bras o_proj contre
+            # v_proj : meme cout, meme famille, position residuelle opposee.
+            "lm_head": 0, "down_proj": 1, "gate_proj": 2, "up_proj": 2,
+            "o_proj": 3, "v_proj": 4, "q_proj": 5, "k_proj": 5,
+        }
+
+        def _genre(nom):
+            if nom.endswith("lm_head.weight") or nom == "lm_head.weight":
+                return "lm_head"
+            parties = nom.split(".")
+            return parties[-2] if len(parties) > 2 else nom
+
         def _cle(c):
+            if _mode == "genre":
+                # rang du genre, puis cout decroissant a genre egal : un genre
+                # inconnu part en DERNIER (99) au lieu de lever, parce que le
+                # sac a dos doit rester utilisable sur une architecture que
+                # cette table ne connait pas. Le manifeste porte le compte des
+                # genres inconnus rencontres, sinon l ignorance serait muette.
+                g = _genre(c["name"])
+                _genres_vus[g] = _genres_vus.get(g, 0) + 1
+                return (_GENRE_PRIORITE.get(g, 99), -c["cout"])
+            if _mode == "cout_decroissant":
+                # le plus gros d abord, sans un seul decibel. Jumelle de
+                # `genre` sur Llama-2 par construction du modele.
+                return -c["cout"]
             if _mode == "base_croissant":
                 # BRAS TEMOIN, construit AVANT la mesure qu'il doit departager.
                 #
@@ -1304,6 +1367,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 "absolu": "erreur_absolue_evitee_par_octet_decroissante",
                 "inverse": "snr_par_octet_croissant",
                 "liste": "liste_explicite_sans_ordre_ni_budget",
+                "genre": "genre_du_tenseur_DERIVE_de_l_observation",
+                "cout_decroissant": "cout_decroissant_sans_decibel",
             }.get(_mode, f"mode_{_mode}_sans_description"),
             "demande_gib": opts.bits_budget_gib,
             "plancher_gib": round(plancher_octets / 1024 ** 3, 4),
@@ -1314,7 +1379,32 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             "sous_le_plancher": reste < 0,
             "promus": len(promus),
             "candidats": len(budget_candidats),
+            # TEMOIN D'ORDRE. Sans lui, l'ordre du glouton n'est pas
+            # observable depuis le dossier : le seul effet visible est
+            # l'ensemble des promus, et cet ensemble ne suffit pas a le
+            # reconstituer — le glouton SAUTE un candidat trop gros pour le
+            # reste du budget et en prend un moins cher ensuite, donc les
+            # promus ne sont pas un prefixe de l'ordre. Un test qui verifiait
+            # « aucun promu de priorite pire qu'un recale » echouait pour
+            # cette raison, sur un tri pourtant correct.
+            "ordre_20_premiers": [c["name"] for c in ordre[:20]],
+            "cout_20_premiers_mio": [round(c["cout"] / 2 ** 20, 2)
+                                     for c in ordre[:20]],
         }
+        if _mode == "genre":
+            inconnus = {g: n for g, n in _genres_vus.items()
+                        if g not in _GENRE_PRIORITE}
+            manifest["budget"].update({
+                "genre_derive_de_l_observation": True,
+                "genres_vus": dict(sorted(_genres_vus.items())),
+                "genres_inconnus": inconnus,
+            })
+            if inconnus:
+                print(f"[acvram] ordre `genre` : {sum(inconnus.values())} "
+                      f"tenseurs de genre inconnu promus en dernier "
+                      f"({sorted(inconnus)}). La table de priorite a ete "
+                      f"ecrite sur Llama-2 ; sur cette architecture elle est "
+                      f"incomplete.", flush=True)
         if _mode == "liste":
             # SANS LE SHA, DEUX BRAS NOMMES X NE SONT PAS COMPARABLES. Le
             # dossier doit porter la trace de ce qui l'a produit : nous avons
