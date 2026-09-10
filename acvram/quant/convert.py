@@ -216,7 +216,19 @@ class TensorRouter:
     def format_for(self, name: str) -> str:
         """Le format d'un tenseur est celui de l'appareil où sa couche s'exécute."""
         if self.opts.keep_sensitive_16bit and name.endswith(SENSITIVE_SUFFIXES):
-            return "bf16"
+            # LE FORMAT 16 BITS DEMANDE, PAS bf16 EN DUR. Cette regle protege
+            # les tenseurs sensibles de la quantification : pour un modele en
+            # nvfp4 ou int4, rendre bf16 est une PROMOTION et l'intention est
+            # respectee. Mais quand `--format fp16` est demande, la meme ligne
+            # DEGRADE — sept bits de mantisse au lieu de dix — et le fait en
+            # silence sur les plongements, c'est-a-dire sur l'ENTREE du modele,
+            # dont la troncature se propage dans toutes les couches.
+            #
+            # Constate le 10/09 en convertissant Llama-2-7b avec --format fp16
+            # pour servir d'etalon : 257 tenseurs en fp16 et 66 en bf16, dont
+            # model.embed_tokens.weight. Un etalon dont l'entree est tronquee
+            # n'est plus l'original, et l'ecart serait allé au compte du moteur.
+            return ("fp16" if self.opts.format_impose == "fp16" else "bf16")
         if ((".linear_attn." in name or ".self_attn." in name)
                 and self._fmt_brut(name) == "q3n"):
             # Plancher int8 pour TOUTE l'attention et la tête de sortie quand
