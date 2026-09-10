@@ -71,3 +71,19 @@ def test_des_places_de_graphes_non_prises_arretent_la_manche(converted, monkeypa
     monkeypatch.setenv("ACVRAM_MAX_GRAPHS", str(graphs.MAX_GRAPHS + 48))
     with pytest.raises(SystemExit, match="places de graphes non prises"):
         mod.main(_args(converted, 0, "seule"))
+
+
+def test_le_regime_lot_prefille_bien_tout_le_groupe(converted, capsys):
+    """Le régime qui peut préciser le verdict : N invites ensemble, coût fixe
+    partagé. Le piège serait qu'une seule soit réellement préfillée — les
+    autres servies par le cache de préfixe si les invites étaient identiques,
+    ou la boucle s'arrêtant sur la première. La colonne compte donc les
+    jetons RÉELLEMENT passés en avant, pas ceux demandés."""
+    mod = _charger()
+    args = ["budget-prefill.py", "--processeur", converted, "--budget", "0",
+            "--regime", "lot", "--lot", "3", "--invite", "200",
+            "--max-model-len", "512", "--max-tokens", "8"]
+    assert mod.main(args) == 0
+    ligne = capsys.readouterr().out.strip().splitlines()[-1].split("\t")
+    assert ligne[1] == "lot"
+    assert int(ligne[3]) == 600, "trois invites de 200 doivent etre prefillees"
