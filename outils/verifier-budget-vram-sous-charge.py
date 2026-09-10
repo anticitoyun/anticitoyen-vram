@@ -41,6 +41,14 @@ CIBLES = [
     ("hybride", "Nemotron-Nano-9B-int8"),
     ("MLA", "GLM-4.7-Flash-nvfp4"),
     ("temoin quadratique", "Qwen3-4B-srcgguf-nvfp4"),
+    # LE BRAS QUI LEVE UN CONFONDANT, ajoute le 10/09. « Le MLA fragmente trois
+    # fois plus » etait une attribution, pas une mesure : GLM-4.7-Flash est
+    # MLA **et** MoE (64 experts, 4 par jeton), les deux autres cibles ne sont
+    # ni l un ni l autre. Le parc ne contient AUCUN modele MLA sans MoE (0 sur
+    # 120) mais trente MoE sans MLA ; celui-ci pese 16,41 Gio contre 15,79 au
+    # GLM, donc a taille comparable. S il fragmente comme le GLM, la cause est
+    # le routage d experts ; s il fragmente comme le temoin, c est le MLA.
+    ("MoE sans MLA", "Jan-v2-VL-max-srcQ4_K_M-nvfp4"),
 ]
 
 
