@@ -256,19 +256,6 @@ class GraphRunner:
                 self.enabled = False
                 self.graphs.clear()
                 torch.cuda.empty_cache()
-<<<<<<< HEAD
-=======
-                # Nommer l'allocateur dans le message : les segments
-                # extensibles sont en tension avec la capture, qui exige des
-                # adresses figées. Sans cette mention, une capture perdue sous
-                # ACVRAM_ALLOC_EXTENSIBLE ne se lit que comme un manque de VRAM.
-                extensible = "expandable_segments" in os.environ.get(
-                    "PYTORCH_CUDA_ALLOC_CONF", "")
-                print("[acvram] graphes CUDA désactivés : mémoire insuffisante "
-                      "pour la capture, décodage en eager"
-                      + (" (allocateur à segments extensibles actif)"
-                         if extensible else ""), flush=True)
->>>>>>> origin/main
                 return None
             self.graphs[key] = entry
             if os.environ.get("ACVRAM_TRACE_PTRS"):
