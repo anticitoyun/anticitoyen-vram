@@ -252,7 +252,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
               f" : verifier une sortie de couche contre une reference avant de "
               f"servir ce modele", flush=True)
     if plan is None:
-        plan = _plan_from_manifest(manifest, spec)
+        plan = _plan_from_manifest(manifest, spec, max_model_len=max_model_len)
     _avertir_noyaux()
     reader = _ShardReader(path, manifest["weight_map"])
     group_size = manifest.get("options", {}).get("group_size", 128)
@@ -1115,6 +1115,21 @@ def _reajuster_plan(plan: Plan, manifest: dict) -> None:
             # `dev` est ici la chaîne du device, pas la fonction du module :
             # elle est masquée par la variable locale au-dessus.
             libre = torch.cuda.mem_get_info(torch.device(t.name))[0]
+            # ATTENTION : ce `min` compare deux nombres de nature différente,
+            # pas deux mesures interchangeables. `t.capacity` sort de
+            # `build_tiers()` (tiering.py) DÉJÀ NET d'une réserve (800 Mio de
+            # contexte CUDA + 3 % de fragmentation) et mesuré plus tôt dans le
+            # chargement, avant la compilation JIT des noyaux. `libre` ici est
+            # une lecture BRUTE de `mem_get_info`, prise plus tard, sans aucune
+            # réserve soustraite. Le plus petit des deux n'est donc pas
+            # forcément "le plus à jour" : selon le moment et l'état de la
+            # carte, l'un ou l'autre peut gagner sans que ce soit un signe de
+            # fraîcheur. Ne pas remplacer par `capacite = libre` : ça
+            # supprimerait la réserve de `build_tiers()` (capture de graphes,
+            # fragmentation) sans la réintroduire, sur une carte où l'OOM
+            # survient à quelques dizaines de Mio libres. Un correctif propre
+            # comparerait des bases homogènes : `min(t.capacity, libre - la
+            # même réserve)`, pas l'un brut contre l'autre net.
             capacite = min(capacite, libre)
         except Exception:                           # noqa: BLE001
             pass
@@ -1223,18 +1238,34 @@ def _rapatrier_sur_une_carte(plan: Plan, attn: dict, mlp: dict,
           f"une frontière de moins par jeton", flush=True)
 
 
-def _replanifier(manifest: dict, spec: "ModelSpec") -> "Plan | None":
-    """Rejoue le planificateur quand le plan figé au manifeste ne décrit plus
-    cette machine.
+def _replanifier(manifest: dict, spec: "ModelSpec",
+                 max_model_len: Optional[int] = None) -> "Plan | None":
+    """Rejoue TOUJOURS le planificateur avec l'état actuel de la machine.
 
     Le plan est écrit une fois pour toutes à la conversion, et `_reajuster_plan`
     ne sait que faire *descendre* des MLP en RAM hôte : aucune amélioration du
-    planificateur n'atteint jamais un modèle déjà converti. Le 7 septembre 2026,
-    Qwen3-Coder-Next tournait à 10,3 jetons par seconde sur un plan qui ignorait
-    la seconde carte et calculait seize couches sur le processeur, alors que le
-    planificateur du jour recrutait les deux cartes et n'en exilait que quatre.
-    On ne rejoue que si les cartes ont changé : sinon le plan figé fait foi, et
-    les mesures du parc restent comparables.
+    planificateur n'atteint jamais un modèle déjà converti si on se contente du
+    plan figé. Le 7 septembre 2026, Qwen3-Coder-Next tournait à 10,3 jetons par
+    seconde sur un plan qui ignorait la seconde carte et calculait seize
+    couches sur le processeur, alors que le planificateur du jour recrutait les
+    deux cartes et n'en exilait que quatre. **On rejoue donc sans condition**
+    (sauf `ACVRAM_PLAN_FIGE`/`ACVRAM_SANS_REPLAN`) — le test `figees !=
+    presentes` ci-dessous ne décide PAS s'il faut rejouer, seulement s'il faut
+    le signaler : un rejeu silencieux sur la même liste de cartes est la
+    normale, pas une exception. (Corrigé le 10/09/2026 : ce docstring disait
+    l'inverse pendant que le code faisait déjà ceci — deux heures perdues à
+    chercher pourquoi un plan « figé » changeait entre deux chargements.)
+
+    ``max_model_len`` : quand l'appelant l'annonce explicitement, on le CROIT
+    et on dimensionne le cache KV pour ce contexte précis, pas pour un chiffre
+    par défaut. Une mesure sur 1 024 jetons n'a aucune raison de réserver de la
+    VRAM pour 4 096 ou 8 192 — c'est de la place prise aux poids pour un besoin
+    qui n'existe pas, et c'est ce qui pousse au sacrifice le plus cher connu
+    ici (une couche exilée coûte 70 % du débit). Quand l'appelant ne dit rien
+    (``None``), le comportement précédent est conservé à l'identique : un
+    serveur qui ne connaît pas encore la taille de ses requêtes doit continuer
+    à dimensionner pour le pire cas plausible, pas pour un contexte court par
+    défaut.
     """
     if os.environ.get("ACVRAM_PLAN_FIGE") or os.environ.get("ACVRAM_SANS_REPLAN"):
         return None
@@ -1247,7 +1278,8 @@ def _replanifier(manifest: dict, spec: "ModelSpec") -> "Plan | None":
         presentes = {f"cuda:{g.index}" for g in rig.gpus}
         if not presentes:
             return None
-        ctx = max(2048, int(d.get("kv_max_tokens") or 0) or 8192)
+        ctx = (max_model_len if max_model_len
+               else max(2048, int(d.get("kv_max_tokens") or 0) or 8192))
         neuf, _ = auto_plan(spec, rig, PlannerOptions(max_model_len=ctx))
     except Exception as e:                                   # pragma: no cover
         print(f"[acvram] replanification impossible ({e}) ; plan du manifeste "
@@ -1317,11 +1349,12 @@ def _exil_demande(plan: Plan) -> None:
             pass
 
 
-def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None) -> Plan:
+def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
+                        max_model_len: Optional[int] = None) -> Plan:
     from ..memory.tiering import LayerPlacement, Plan as _Plan, Tier
     d = manifest["plan"]
     if spec is not None:
-        neuf = _replanifier(manifest, spec)
+        neuf = _replanifier(manifest, spec, max_model_len=max_model_len)
         if neuf is not None:
             _reajuster_plan(neuf, manifest)
             _exil_demande(neuf)
