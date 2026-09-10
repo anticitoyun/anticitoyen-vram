@@ -391,6 +391,28 @@ class PagedKVCache:
                                   self.k_scale.view(-1, self.k_scale.shape[-1]),
                                   self.v_scale.view(-1, self.v_scale.shape[-1]), bs)
                 return
+        # SENTINELLE : un emplacement NEGATIF designe une ligne de
+        # rembourrage — calculee pour donner au lot une forme reguliere, et
+        # qui ne doit RIEN ecrire. Le noyau CUDA fusionne la porte deja
+        # (`acvram_kernels.cu:1831`, « if (slot < 0) return; ») ; ce chemin de
+        # repli ne la portait pas, et la symetrie n existait donc qu a moitie.
+        #
+        # Sans cette garde l indexation negative de PyTorch REBOUCLE au lieu
+        # d ignorer : avec bs = 16, `-1` donne `blk = -1` et `off = 15`, soit
+        # le DERNIER bloc, decalage 15. L ecriture est reelle, dans un bloc
+        # qui appartient a une autre sequence, et le cache de prefixe la
+        # republie ensuite. Corruption silencieuse, a distance, sans lien
+        # visible avec ce qui l a produite.
+        #
+        # Le repli sert les caches non-int8, le processeur et l absence
+        # d extension : c est la majorite des configurations, ET celle des
+        # essais. Une epreuve d equivalence ecrite sur la foi du seul `.cu`
+        # aurait tourne ici, sur le chemin non garde, et serait passee.
+        if bool((slot_mapping < 0).any()):
+            gardes = slot_mapping >= 0
+            slot_mapping, k, v = slot_mapping[gardes], k[gardes], v[gardes]
+            if slot_mapping.numel() == 0:
+                return
         kq, ks = self._quantize(k)
         vq, vs = self._quantize(v)
         blk = torch.div(slot_mapping, bs, rounding_mode="floor")
