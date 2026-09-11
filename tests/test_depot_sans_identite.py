@@ -61,7 +61,10 @@ COURRIEL_TOLERE = ("noreply", "example")
 # mise a jour du chemin d'ecriture de verrous-fusion.py apres son deplacement
 # sous acvram-memoire/corpus/). Un cliquet monte quand une session le releve
 # avec sa cause et sa date — ecart net +2.
-PLAFOND_CHEMINS = 325
+# 11/09 apres-midi — 328 apres la fusion de `main` : `outils/echelle-de-sortie-
+# approchee.py` apporte 3 chemins codes en dur (venu de `a6`, corrige par lui
+# dans la foulee ; le plafond redescendra a 325 des que ce nettoyage arrive).
+PLAFOND_CHEMINS = 328
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute
