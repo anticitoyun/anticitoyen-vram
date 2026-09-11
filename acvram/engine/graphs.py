@@ -343,12 +343,16 @@ class GraphRunner:
         return out
 
     # -- hybrides ----------------------------------------------------------
+    _SID_REMBOURRAGE = -1
+
     def _bind_hybrid(self, batch: ForwardBatch, lb: int) -> None:
         sids = batch.seq_ids or list(range(batch.batch_size))
         m = self.model
+        n_reel = len(sids)
         for layer in self.hybrid_layers:
             store = batch.gdn_store.setdefault(layer.index, {})
-            for slot, sid in enumerate(sids):
+            for slot in range(batch.batch_size):
+                sid = sids[slot] if slot < n_reel else self._SID_REMBOURRAGE
                 layer.static_bind(slot, sid, store, godet_mla(self.max_model_len) + MLA_BUCKET,
                                   m.dtype)
             layer.static_bucket = lb
