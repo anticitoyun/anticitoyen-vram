@@ -103,6 +103,8 @@ def service(nom: str, argv: list[str], journal: Path, inverse: bool,
         env.append("--setenv=ACVRAM_ORDRE_SAC_INVERSE=1")
     if mode_actif:
         env.append(f"--setenv=ACVRAM_ORDRE_SAC={mode_actif}")
+    if os.environ.get("ACVRAM_MAX_PROMUS"):
+        env.append(f"--setenv=ACVRAM_MAX_PROMUS={os.environ['ACVRAM_MAX_PROMUS']}")
     cmd = (["systemd-run", "--user", "--unit", nom, "--collect",
             f"--property=WorkingDirectory={RACINE}",
             "--property=MemoryHigh=40G", "--property=MemoryMax=44G",
@@ -150,7 +152,11 @@ MODES = {"snr": "snr_par_octet_decroissant",
 
 
 def un_bras(etiquette: str, inverse: bool, sortie: Path, python: str,
-            mode: str = "") -> dict:
+            mode: str = "", suffixe: str = "") -> dict:
+    # `suffixe` distingue une manche a compte impose (n149) des dossiers
+    # budget-fill du meme ordre : sans lui, `if not dossier.exists()`
+    # reutiliserait le dossier a 173/196 promus au lieu de convertir a 149.
+    etiquette = etiquette + suffixe
     dossier = BASE / f"Llama-2-7b-ordre-{etiquette}"
     print(f"\n=== bras {etiquette} : ordre "
           f"{'INVERSE (+gain/cout)' if inverse else 'actuel (-gain/cout)'}",
@@ -225,7 +231,14 @@ def main() -> int:
                          "Sans cet argument, les deux bras historiques.")
     ap.add_argument("--sortie", default="~/Bureau/Claude/"
                                         "acvram-memoire/corpus/ordre-sac")
+    ap.add_argument("--max-promus", type=int, default=0,
+                    help="plafond de COMPTE : promeut les N premiers de "
+                         "l'ordre, budget ignore. Dossiers suffixes -nN.")
     a = ap.parse_args()
+    suffixe = ""
+    if a.max_promus > 0:
+        os.environ["ACVRAM_MAX_PROMUS"] = str(a.max_promus)
+        suffixe = f"-n{a.max_promus}"
     sortie = Path(a.sortie)
     sortie.mkdir(parents=True, exist_ok=True)
     import hashlib
@@ -250,8 +263,8 @@ def main() -> int:
                   f"{sorted(MODES)} / SUITE: un mode inconnu ferait mesurer "
                   f"le defaut en croyant mesurer autre chose")
             return 2
-        res = [un_bras(m, m == "inverse", sortie, a.python, mode=m)
-               for m in voulus]
+        res = [un_bras(m, m == "inverse", sortie, a.python, mode=m,
+                       suffixe=suffixe) for m in voulus]
     else:
         res = [un_bras("normal", False, sortie, a.python),
                un_bras("inverse", True, sortie, a.python)]
