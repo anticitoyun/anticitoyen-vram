@@ -235,7 +235,7 @@ class GraphRunner:
                     or (b > 1 and ql != 1) or b > self.max_slots):
                 return None                  # spéculation : une séquence
             lb = godet_mla(max(batch.seq_lens))
-            self._bind_hybrid(batch, lb)
+            self._bind_hybrid(batch, lb, b_godet=b)
         key = (b, ql, nblk, lb)
         self._last_key = key
         # UNE BORNE PAR FRONTIERE, SINON LA DECOMPOSITION RESTE FAUSSE. Un seul
@@ -345,13 +345,15 @@ class GraphRunner:
     # -- hybrides ----------------------------------------------------------
     _SID_REMBOURRAGE = -1
 
-    def _bind_hybrid(self, batch: ForwardBatch, lb: int) -> None:
+    def _bind_hybrid(self, batch: ForwardBatch, lb: int,
+                     b_godet: int = 0) -> None:
         sids = batch.seq_ids or list(range(batch.batch_size))
+        b = b_godet or len(sids)
         m = self.model
         n_reel = len(sids)
         for layer in self.hybrid_layers:
             store = batch.gdn_store.setdefault(layer.index, {})
-            for slot in range(batch.batch_size):
+            for slot in range(b):
                 sid = sids[slot] if slot < n_reel else self._SID_REMBOURRAGE
                 layer.static_bind(slot, sid, store, godet_mla(self.max_model_len) + MLA_BUCKET,
                                   m.dtype)
