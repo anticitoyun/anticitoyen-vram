@@ -42,28 +42,48 @@ joue() {   # joue <cible> -> "<echecs> <sauts>" sur N manches
 # comme echecs). L'occupation vient de pmon sm % du PID de charge, relevee
 # encadrant chaque manche — sans elle, « charge peut-etre retiree ? » reste
 # une question au lieu d'etre une mesure.
-joue_qualifie() {   # <cible> <pid_charge> → "echecs timeouts sauts sm_min sm_max"
-  local cible=$1 pcharge=$2 e=0 to=0 s=0 sm_min=100 sm_max=0
-  for _ in $(seq 1 $N); do
-    local sm0=$(nvidia-smi pmon -c 1 -i 0 2>/dev/null | awk -v p="$pcharge" '$2==p{print $4}' | head -1)
-    [ -z "${sm0:-}" ] && sm0=0
+joue_qualifie() {   # <cible> <pid_charge> → "echecs timeouts sauts sm_min sm_moy sm_max vif_pct"
+  local cible=$1 pcharge=$2 e=0 to=0 s=0
+  local sm_min=100 sm_max=0 sm_somme=0 sm_n=0 vif_ok=0 vif_tot=0
+  for m in $(seq 1 $N); do
+    local trace=$(mktemp)
+    # Echantillonneur 1 Hz : sm % du PID de charge, vivacite (kill -0). Ecrit
+    # « sm|vif » par ligne. Se termine sur SIGTERM apres la manche.
+    (
+      while kill -0 $$ 2>/dev/null; do
+        local sm=$(nvidia-smi pmon -c 1 -i 0 2>/dev/null | awk -v p="$pcharge" '$2==p{print $4}' | head -1)
+        case "$sm" in ''|*[!0-9]*) sm=0 ;; esac
+        local vif=0; kill -0 "$pcharge" 2>/dev/null && vif=1
+        echo "$sm|$vif" >> "$trace"
+        sleep 1
+      done
+    ) &
+    local sampler=$!
     local out code
     out=$(timeout -k 20 1800 $PY -m pytest -q -rs "$cible" 2>&1)
     code=$?
-    local sm1=$(nvidia-smi pmon -c 1 -i 0 2>/dev/null | awk -v p="$pcharge" '$2==p{print $4}' | head -1)
-    [ -z "${sm1:-}" ] && sm1=0
-    for v in "$sm0" "$sm1"; do
-      case "$v" in ''|*[!0-9]*) continue ;; esac
-      [ "$v" -lt "$sm_min" ] && sm_min=$v
-      [ "$v" -gt "$sm_max" ] && sm_max=$v
-    done
+    kill $sampler 2>/dev/null; wait $sampler 2>/dev/null
+
+    # Aggregation cause + relevés
     case "$code" in
       0)   grep -qE '[0-9]+ skipped' <<<"$out" && s=$((s+1)) ;;
       124) to=$((to+1)) ;;
       *)   e=$((e+1)) ;;
     esac
+    while IFS='|' read -r sm vif; do
+      case "$sm" in ''|*[!0-9]*) continue ;; esac
+      [ "$sm" -lt "$sm_min" ] && sm_min=$sm
+      [ "$sm" -gt "$sm_max" ] && sm_max=$sm
+      sm_somme=$((sm_somme + sm)); sm_n=$((sm_n + 1))
+      vif_tot=$((vif_tot + 1)); [ "$vif" = 1 ] && vif_ok=$((vif_ok + 1))
+    done < "$trace"
+    rm -f "$trace"
   done
-  echo "$e $to $s $sm_min $sm_max"
+  local sm_moy=0
+  [ "$sm_n" -gt 0 ] && sm_moy=$((sm_somme / sm_n))
+  local vif_pct=0
+  [ "$vif_tot" -gt 0 ] && vif_pct=$((vif_ok * 100 / vif_tot))
+  echo "$e $to $s $sm_min $sm_moy $sm_max $vif_pct"
 }
 
 echo "# N=$N par cible · charge $GIO Gio, calcul $CALCUL"
