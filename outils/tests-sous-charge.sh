@@ -94,8 +94,12 @@ for c in $CIBLES; do sans[$c]="$(joue "$c")"; done
 # session voit un PID etranger qui alloue et cherche un intrus : six manches
 # perdues le 10/09. `charge-gpu.py` refuse desormais de demarrer sans, donc
 # cette ligne n est pas une precaution mais la seule facon de le lancer.
+# --duree 86400 (24 h) : les manches lentes de test_calibration.py durent
+# 3600 s sous contention ; 5 manches x 2 exemplaires x 2 cibles depassent
+# largement une charge de 3600 s. Le harnais tue le groupe a la fin (trap),
+# donc la duree n'est pas la borne — c'est le trap qui borne.
 ACVRAM_NOM=CHARGE-DELIBEREE setsid "$S/carte.sh" \
-  $PY -u "$R/outils/gpu/mesure/charge-gpu.py" --gio "$GIO" --calcul "$CALCUL" --duree 3600 \
+  $PY -u "$R/outils/gpu/mesure/charge-gpu.py" --gio "$GIO" --calcul "$CALCUL" --duree 86400 \
   > "$TMP" 2>&1 &
 CH=$!
 # TUER LE GROUPE, PAS L ENFANT. carte.sh est l enfant, charge-gpu.py le
