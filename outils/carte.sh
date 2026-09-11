@@ -30,7 +30,7 @@ set -u
 # sessions sur la meme carte passaient.
 # CUDA_VISIBLE_DEVICES est ce que le processus servira effectivement ; on prend
 # son PREMIER index, qui est celui que le moteur appelle cuda:0.
-_carte=${CUDA_VISIBLE_DEVICES%%,*}
+_cvd=${CUDA_VISIBLE_DEVICES:-0}; _carte=${_cvd%%,*}
 case "${_carte:-0}" in
   ''|*[!0-9]*) _carte=0 ;;          # vide ou non numerique : la carte 0
 esac
