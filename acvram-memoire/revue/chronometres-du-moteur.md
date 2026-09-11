@@ -33,8 +33,8 @@ son nom.** `emit` n'est pas 148 ms d'échantillonnage : c'est du travail GPU mal
 | site | synchronisation dans la fenêtre | verdict |
 |---|---|---|
 | `runner.py:678-684` `decode_seconds` | `_plain_decode` → `_emit` → `.tolist()` | **juste** |
-| `runner.py:628-631` `prefill_seconds` | **non** — `_emit` est ligne 635 | **faux** |
-| `runner.py:643-664` `prefill_seconds` | **non** — ferme après `self.model()` | **faux** |
+| `runner.py:628-631` `prefill_seconds` | lecture : non — **mesure du 11/09 : OUI**, +0,09 % sous sync | **juste** (réhabilitée) |
+| `runner.py:643-664` `prefill_seconds` | idem — mesure du 11/09 | **juste** (réhabilitée) |
 | `graphs.py` `bind`/`fill`/`replay` | **non** — rien entre les bornes | **faux** |
 | `runner.py:711/713/720` `t0..t2` | **non** — batch, `graphs.run` | **faux**, jamais publié |
 | `runner.py:724` `t3` | oui, après `_emit` | juste |
@@ -51,8 +51,10 @@ lignes de position séparent une statistique juste d'une statistique fausse.**
 ```
 TIENNENT   tout chiffre bati sur decode_seconds : les +88 % / +104 % de la
            tranche adaptative, les debits du duel, les pas/s
-A REPRENDRE  TTFT, jetons/s de prefill, et la reference 6 420 j/s du chantier
-           GEMM groupee NVFP4
+TIENNENT   TTFT, jetons/s de prefill, la reference 6 420 j/s — REHABILITES le
+           11/09 : prefill_seconds ne bouge pas sous sync (+0,09 %), donc une
+           synchronisation existait deja dans la fenetre. La lecture disait
+           « faux », la mesure dit « juste ». La mesure tranche.
 FAUSSE     la decomposition bind / fill / replay
 ```
 
@@ -115,3 +117,28 @@ dit ce qu'il fait.
 
 **Le remède, partout, tient en un mot : fermer la fenêtre APRÈS le retour vers
 l'hôte.**
+
+## Mesure du 11/09 — le contrôle `ACVRAM_CHRONO_SYNC` (poste3, 4 bras × 15 tours)
+
+GLM-4.7-42B MLA nvfp4, `slots=12`, `ctx=2048`, 5090.
+
+```
+bras  sync  replay_ms  pas_ms   prefill_s  tok/s
+A1    non    0,017     18,829   0,0732     54,65
+A2    non    0,016     18,819   0,0730     54,76
+B1    oui   18,482     18,791   0,0731     54,69
+B2    oui   18,590     18,879   0,0732     54,60
+```
+
+* **`replay` : 0,016 → 18,5 ms (×1137).** Sans sync on mesurait le lancement.
+  **Le rejeu du graphe est 98 % du pas** ; bind, fill et emit sont négligeables.
+* **`pas_total` : stable à 0,1 %.** Le total encaissait déjà le GPU.
+* **`prefill_seconds` : +0,09 %.** Une synchronisation existait dans la fenêtre
+  que la lecture n'avait pas vue. **Condamnation d'hier annulée.**
+* **Le `synchronize` ne coûte rien de mesurable** (pas_total identique) : le
+  garde peut rester éteint par défaut sans perdre d'information, ou allumé
+  pour les diagnostics sans fausser le total.
+
+**Ce que ça enseigne, une fois de plus : la lecture avait raison sur `graphs.py`
+et tort sur `prefill_seconds`, et rien dans la lecture ne distinguait les deux
+cas.** Les dimensions absentes se découvrent par la mesure.
