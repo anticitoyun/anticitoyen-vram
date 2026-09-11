@@ -14,7 +14,7 @@ constate que l'instrument pouvait rendre autre chose**.
 **Le sha est vérifié avant chaque mesure**, pas supposé. Un corpus différent
 rendrait une perplexité différente sans que rien ne le signale.
 
-> **Précision du 10/09, après une divergence relevée par claude-0a entre ce
+> **Précision du 10/09, après une divergence relevée par 0a entre ce
 > document et la chaîne de mesure.** Ce corpus-ci est le bon POUR CETTE
 > barrière, où le texte ne sert qu'à fabriquer une invite : la comparaison porte
 > sur la sortie du noyau contre l'attention dense sur les mêmes tenseurs, et le

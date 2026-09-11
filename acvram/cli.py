@@ -44,9 +44,15 @@ VARIABLES_LUES = {
     "ACVRAM_ALLOC_EXTENSIBLE",
     "ACVRAM_BANC_ACCEPTE_REPLAN",
     "ACVRAM_KERNEL_CACHE",
+    "ACVRAM_FOND_COOL",
+    "ACVRAM_FOND_ZEN",
+    "ACVRAM_GALERIE_DIR",
     "ACVRAM_LOGITS_BF16",
     "ACVRAM_MAX_GRAPHS",
+    "ACVRAM_PARC",
+    "ACVRAM_VERROU",
     "ACVRAM_MLA_BATCH",
+    "ACVRAM_NOM",
     "ACVRAM_MLA_DEBUG_ECART",
     "ACVRAM_MLA_EAGER_TORCH",
     # Bras du banc a trois bras de l'attention paginee. Lu par le noyau, donc
@@ -75,6 +81,8 @@ VARIABLES_LUES = {
     # correlation -0,66 entre SNR de base et deplacement de rang. Un mode
     # inconnu leve une erreur au lieu de retomber en silence sur le defaut.
     "ACVRAM_ORDRE_SAC",
+    "ACVRAM_LISTE_PROMUS",
+    "ACVRAM_LISTE_CLE",
     "ACVRAM_SCALER_SANS_CACHE",
     # ACVRAM_SRC_HASH n'est PAS une variable d'environnement : c'est une option
     # de compilation (-D) portant le sha du .cu. Elle figure ici parce que
@@ -125,6 +133,7 @@ VARIABLES_LUES = {
     "ACVRAM_TRACEBACK",
     "ACVRAM_TRACE_PTRS",
     "ACVRAM_TRACE_ROUTAGE",
+    "ACVRAM_CHRONO_SYNC",
     "ACVRAM_TRACE_STEPS",
     "ACVRAM_VERBOSE_BUILD",
     "ACVRAM_WARM_GRAPHS",

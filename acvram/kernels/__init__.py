@@ -104,8 +104,24 @@ def _arch_flags(nvcc_ver: tuple[int, int] | None = None) -> list[str]:
 
 
 def _nvcc_path() -> str:
+    """Le nvcc du toolkit, pas celui du PATH.
+
+    Le 11/09/2026, deux sessions ont perdu une heure chacune sur la meme
+    cause : `/usr/bin/nvcc` (paquet Debian, 12.0) precede `/usr/local/cuda/
+    bin/nvcc` (13.2) dans le PATH d'un shell non interactif. L'extension se
+    recompilait sans sm_120f, le noyau nvfp4 rendait None, et le diagnostic
+    lu etait « toolkit trop ancien » — faux, le bon toolkit etait la.
+
+    Ordre : CUDA_HOME explicite, puis le toolkit installe sous /usr/local, et
+    seulement en dernier ce que le PATH propose. Un toolkit present sur le
+    disque vaut mieux qu'un lien de distribution."""
     home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
-    return os.path.join(home, "bin", "nvcc") if home else (shutil.which("nvcc") or "")
+    if home:
+        return os.path.join(home, "bin", "nvcc")
+    for cand in ("/usr/local/cuda/bin/nvcc", "/opt/cuda/bin/nvcc"):
+        if os.path.exists(cand):
+            return cand
+    return shutil.which("nvcc") or ""
 
 
 def _cuda_version() -> tuple[int, int]:

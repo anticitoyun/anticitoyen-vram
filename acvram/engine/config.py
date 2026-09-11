@@ -55,6 +55,7 @@ class LayerSpec:
         return self.active_params / max(1, self.total_params)
 
 
+
 # Types de couche qui allouent un cache KV, et ceux qui portent un état
 # récurrent. Les deux listes vivent ici, à côté du budget qui les utilise :
 # une règle écrite deux fois finit par diverger, comme `stack_int8_linears` et
@@ -88,7 +89,11 @@ class ModelSpec:
     moe_intermediate_size: int = 0
     shared_expert_intermediate_size: int = 0
     first_k_dense_replace: int = 0
-    torch_dtype: str = "bfloat16"
+    # PROVENANCE (11/09) : None = la source ne declare pas le champ.
+    # torch_dtype n est CONSOMME nulle part au runtime (le dtype du KV
+    # cache est calcule de son propre format), donc None y est sans
+    # risque ; il n a d effet que sur ce que le manifeste enregistre.
+    torch_dtype: Optional[str] = None
     # Jetons d'arret. Sans eux le moteur ne s'arrete jamais de lui-meme et
     # rend toujours max_tokens jetons, en repartant en roue libre apres la
     # reponse.
@@ -112,7 +117,10 @@ class ModelSpec:
     rope_theta_swa: float = 0.0
     partial_rotary_factor_full: float = 1.0
     final_logit_softcapping: float = 0.0
-    hidden_activation: str = "silu"
+    # None = source muette. Le repli "silu" vit au point d usage
+    # (propriete mlp_activation ci-dessous), pas ici : ecrire "silu"
+    # par defaut le rendrait indiscernable d un silu mesure.
+    hidden_activation: Optional[str] = None
     attention_k_eq_v: bool = False
     # nemotron_h : Mamba2 (SSD) + attention sans RoPE + MLP ReLU²
     mamba_num_heads: int = 0
@@ -407,6 +415,16 @@ class ModelSpec:
     # onze pour cent d'ecart au lieu d'un contre llama.cpp.
     CLES_BRUTES_UTILES = ("gdn_a_log_negexp",)
 
+    @property
+    def mlp_activation(self) -> str:
+        """Le repli "silu" au POINT D USAGE, pas a l enregistrement.
+
+        `hidden_activation` vaut None quand la source est muette ; le MLP a
+        besoin d une fonction concrete, et silu est la convention d un
+        transformeur. Le manifeste garde None (honnete), le moteur voit silu.
+        """
+        return self.hidden_activation or "silu"
+
     def to_dict(self) -> dict:
         d = asdict(self)
         brut = d.pop("raw", None) or {}
@@ -599,7 +617,8 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         moe_intermediate_size=cfg.get("moe_intermediate_size", 0),
         shared_expert_intermediate_size=cfg.get("shared_expert_intermediate_size", 0),
         first_k_dense_replace=cfg.get("first_k_dense_replace", 0),
-        torch_dtype=str(cfg.get("torch_dtype", "bfloat16")),
+        torch_dtype=(str(cfg["torch_dtype"])
+                     if cfg.get("torch_dtype") is not None else None),
         layer_types=list(cfg.get("layer_types") or []),
         linear_num_value_heads=int(cfg.get("linear_num_value_heads") or 0),
         linear_num_key_heads=int(cfg.get("linear_num_key_heads") or 0),
@@ -625,7 +644,10 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         rope_theta_swa=float(cfg.get("rope_theta_swa") or 0.0),
         partial_rotary_factor_full=float(cfg.get("partial_rotary_factor_full") or 1.0),
         final_logit_softcapping=float(cfg.get("final_logit_softcapping") or 0.0),
-        hidden_activation=str(cfg.get("hidden_activation") or cfg.get("hidden_act") or "silu"),
+        hidden_activation=(str(cfg.get("hidden_activation")
+                               or cfg.get("hidden_act"))
+                           if (cfg.get("hidden_activation")
+                               or cfg.get("hidden_act")) else None),
         attention_k_eq_v=bool(cfg.get("attention_k_eq_v")),
         attention_multiplier=(float(cfg["attention_multiplier"])
                               if cfg.get("attention_multiplier") else None),

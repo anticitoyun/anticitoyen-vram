@@ -439,7 +439,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 v_norm_eps=spec.rms_norm_eps, k_eq_v=not a_v,
                 window=spec.sliding_window if local else 0)
             mlp_g = MLP(mlin("mlp.gate_proj.weight"), mlin("mlp.up_proj.weight"),
-                        mlin("mlp.down_proj.weight"), act=spec.hidden_activation)
+                        mlin("mlp.down_proj.weight"), act=spec.mlp_activation)
             n4 = lambda suffix: RMSNorm(reader.get(p + suffix).to(dtype).to(d), spec.rms_norm_eps)
             out_scale = None
             if manifest["tensors"].get(p + "layer_scalar.weight") is not None:
@@ -452,7 +452,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
                     experts.append(MLP(elin(f"mlp.experts.{e}.gate_proj.weight"),
                                        elin(f"mlp.experts.{e}.up_proj.weight"),
                                        elin(f"mlp.experts.{e}.down_proj.weight"),
-                                       act=spec.hidden_activation))
+                                       act=spec.mlp_activation))
                     e += 1
                 moe = MoEBlockGemma(
                     routeur("mlp.gate.weight"), experts, spec.num_experts_per_tok or 8,
@@ -488,7 +488,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
                              window=spec.sliding_window if local else 0,
                              output_gate=True)
             mlp_g = MLP(mlin("mlp.gate_proj.weight"), mlin("mlp.up_proj.weight"),
-                        mlin("mlp.down_proj.weight"), act=spec.hidden_activation)
+                        mlin("mlp.down_proj.weight"), act=spec.mlp_activation)
             eps_post = spec.post_norm_eps or spec.rms_norm_eps
             n4 = lambda suffix, e: RMSNorm(reader.get(p + suffix).to(dtype).to(d), e)
             layers.append(DecoderLayerGemma(
@@ -516,7 +516,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
                              lin("self_attn.o_proj.weight", streamed_attn), rope,
                              window=spec.sliding_window)
             mlp_s = MLP2(mlin("mlp.up_proj.weight"), mlin("mlp.down_proj.weight"),
-                         spec.hidden_activation)
+                         spec.mlp_activation)
             couche = DecoderLayer(i, attn, mlp_s, ln("input_layernorm"),
                                   ln("post_attention_layernorm"), d, mlp_dev)
             layers.append(couche)
@@ -885,7 +885,7 @@ def _charger_mtp(manifest: dict, reader: "_ShardReader", spec: ModelSpec,
                          q_norm=norme("self_attn.q_norm.weight"),
                          k_norm=norme("self_attn.k_norm.weight"),
                          output_gate=spec.attn_output_gate)
-        mlp = MLP(gate, up, down, spec.hidden_activation)
+        mlp = MLP(gate, up, down, spec.mlp_activation)
         couche = DecoderLayer(spec.num_layers + n, attn, mlp, in_norm,
                               post_norm, device)
         n_blocks = max(64, kv_blocks.get(str(device), 512) // 16)

@@ -6,6 +6,7 @@ vitesse.
 """
 
 import math
+import pathlib
 import os
 import shutil
 import tempfile
@@ -987,3 +988,179 @@ def test_les_projections_gdn_ne_descendent_pas_sous_int8(tmp_path):
     assert r.format_for("model.layers.1.self_attn.o_proj.weight") == "int8"
     assert r.format_for("lm_head.weight") == "int8"
     assert r.format_for("model.layers.1.mlp.experts.0.up_proj.weight") == "q3n"
+
+
+def test_mode_liste_explicite(tiny_checkpoint, target_rig, tmp_path_factory,
+                              monkeypatch):
+    """Le mode liste promeut EXACTEMENT la liste, ignore le budget, et refuse
+    un nom absent.
+
+    Trois gardes, éprouvées séparément parce qu'une liste figée qui se
+    désynchronise du parc promouvrait moins que demandé en silence : le compte
+    de promus ne le dirait pas, on attendrait 76 et on en aurait 74 sans savoir
+    lesquels.
+    """
+    import json
+
+    from acvram.engine.config import load_model_spec
+    from acvram.memory.tiering import PlannerOptions, auto_plan
+    from acvram.quant.convert import ConversionOptions, convert_checkpoint
+
+    spec = load_model_spec(tiny_checkpoint, "tiny")
+    plan, _ = auto_plan(spec, target_rig,
+                        PlannerOptions(max_model_len=512, max_concurrent_seqs=2))
+
+    def convertir(budget, **env):
+        out = str(tmp_path_factory.mktemp("liste"))
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        try:
+            # nettoyage en `finally` : les cas 4 à 7 LÈVENT, et une variable
+            # laissée en place contaminerait le cas suivant — c'est ce qui a
+            # fait passer le cas 5 pour bon au premier essai.
+            r = convert_checkpoint(tiny_checkpoint, plan,
+                                   ConversionOptions(out_dir=out,
+                                                     bits_budget_gib=budget),
+                                   spec=spec)
+        finally:
+            for k in env:
+                monkeypatch.delenv(k, raising=False)
+        return out, r
+
+    # 1. le parc promouvable, lu sur une conversion à budget large
+    _, ref = convertir(1.0)
+    noms = sorted(p["name"] for p in ref.promotions)
+    assert len(noms) >= 2, "pas assez de candidats pour éprouver le mode liste"
+    choisis = noms[:2]
+
+    d = tmp_path_factory.mktemp("listes")
+    f_ok = d / "x.json"
+    f_ok.write_text(json.dumps({"X": choisis, "Y": noms[2:3]}))
+
+    # 2. la liste est promue EXACTEMENT, et le budget est ignoré : 1 Mio de
+    #    budget ne laisserait passer aucun tenseur sous le glouton.
+    out, r = convertir(0.001, ACVRAM_LISTE_PROMUS=str(f_ok),
+                       ACVRAM_LISTE_CLE="X")
+    obtenus = sorted(p["name"] for p in r.promotions)
+    assert obtenus == sorted(choisis), \
+        f"promus {obtenus} au lieu de {sorted(choisis)}"
+
+    m = json.loads((pathlib.Path(out) / "acvram_manifest.json").read_text())
+    b = m["budget"]
+    assert b["ordre_glouton"] == "liste_explicite_sans_ordre_ni_budget"
+    assert b["budget_ignore"] is True
+    assert b["liste_noms"] == len(choisis)
+    assert b["liste_cle"] == "X"
+    assert len(b["liste_sha256"]) == 64, "le sha de la liste manque au manifeste"
+
+    # 3. deux clés du même fichier donnent deux sha DIFFÉRENTS — sans quoi deux
+    #    bras nommés X et Y seraient indistinguables dans leur manifeste.
+    out_y, _ = convertir(0.001, ACVRAM_LISTE_PROMUS=str(f_ok),
+                         ACVRAM_LISTE_CLE="Y")
+    m_y = json.loads((pathlib.Path(out_y) / "acvram_manifest.json").read_text())
+    assert m_y["budget"]["liste_sha256"] != b["liste_sha256"]
+
+    # 4. LA GARDE : un nom absent du parc fait LEVER, il ne promeut pas moins
+    f_ko = d / "ko.json"
+    f_ko.write_text(json.dumps({"X": choisis + ["model.inexistant.weight"]}))
+    with pytest.raises(ValueError, match="ne sont pas des candidats"):
+        convertir(0.001, ACVRAM_LISTE_PROMUS=str(f_ko), ACVRAM_LISTE_CLE="X")
+
+    # 5. un fichier à plusieurs listes sans clé refuse, au lieu de choisir
+    with pytest.raises(ValueError, match="plusieurs listes"):
+        convertir(0.001, ACVRAM_LISTE_PROMUS=str(f_ok))
+
+    # 6. deux consignes contradictoires lèvent
+    with pytest.raises(ValueError, match="contradictoires"):
+        convertir(0.001, ACVRAM_LISTE_PROMUS=str(f_ok), ACVRAM_LISTE_CLE="X",
+                  ACVRAM_ORDRE_SAC="erreur")
+
+    # 7. le mode réclamé sans fichier lève aussi
+    with pytest.raises(ValueError, match="exige ACVRAM_LISTE_PROMUS"):
+        convertir(0.001, ACVRAM_ORDRE_SAC="liste")
+
+
+def test_ordre_genre_et_cout(tiny_checkpoint, target_rig, tmp_path_factory,
+                             monkeypatch):
+    """La clé `genre` promeut par priorité de genre, `cout_decroissant` par
+    taille, et les deux sont DÉRIVÉES de l'observation.
+
+    Elles sont bâties pour reproduire le bras B, donc elles ne peuvent pas le
+    confirmer. Ce test ne juge donc pas leur valeur : il vérifie qu'elles font
+    ce qu'elles annoncent, que le manifeste porte l'aveu de dérivation, et que
+    la table de priorité avoue ce qu'elle ne connaît pas.
+    """
+    import json
+
+    from acvram.engine.config import load_model_spec
+    from acvram.memory.tiering import PlannerOptions, auto_plan
+    from acvram.quant.convert import ConversionOptions, convert_checkpoint
+
+    spec = load_model_spec(tiny_checkpoint, "tiny")
+    plan, _ = auto_plan(spec, target_rig,
+                        PlannerOptions(max_model_len=512, max_concurrent_seqs=2))
+
+    def convertir(budget, mode):
+        out = str(tmp_path_factory.mktemp(f"ordre_{mode}"))
+        monkeypatch.setenv("ACVRAM_ORDRE_SAC", mode)
+        try:
+            r = convert_checkpoint(tiny_checkpoint, plan,
+                                   ConversionOptions(out_dir=out,
+                                                     bits_budget_gib=budget),
+                                   spec=spec)
+        finally:
+            monkeypatch.delenv("ACVRAM_ORDRE_SAC", raising=False)
+        m = json.loads((pathlib.Path(out) / "acvram_manifest.json").read_text())
+        return m, sorted(p["name"] for p in r.promotions)
+
+    PRIO = {"lm_head": 0, "down_proj": 1, "gate_proj": 2, "up_proj": 2,
+            "o_proj": 3, "v_proj": 4, "q_proj": 5, "k_proj": 5}
+
+    def genre(n):
+        p = n.split(".")
+        return "lm_head" if n.endswith("lm_head.weight") else (
+            p[-2] if len(p) > 2 else n)
+
+    # BUDGET QUI MORD VRAIMENT. À 0,02 Gio les 29 candidats passaient tous :
+    # le tri ne décidait rien et le contrôle de priorité plus bas était inerte
+    # — vérifié en inversant la table de priorité, le test passait quand même.
+    # Le budget est donc calé sur le plancher lu au manifeste, plus de quoi
+    # promouvoir une PART des candidats.
+    m_ref, parc = convertir(1.0, "genre")
+    plancher = m_ref["budget"]["plancher_gib"]
+    plafond = m_ref["budget"]["plafond_gib"]
+    budget_serre = plancher + (plafond - plancher) * 0.4
+    assert budget_serre < plafond, "pas de marge pour un budget partiel"
+    m_g, promus_g = convertir(budget_serre, "genre")
+    b = m_g["budget"]
+    assert b["ordre_glouton"] == "genre_du_tenseur_DERIVE_de_l_observation"
+    assert b["genre_derive_de_l_observation"] is True, \
+        "le manifeste doit AVOUER que la clé est dérivée de l'observation"
+    assert b["genres_vus"], "aucun genre recensé"
+    # la table de priorité avoue son ignorance au lieu de la taire
+    assert set(b["genres_inconnus"]) <= set(b["genres_vus"])
+    assert all(g not in PRIO for g in b["genres_inconnus"])
+
+    # LE CONTROLE QUI PEUT RENDRE « FAUX » : l'ORDRE, lu au manifeste.
+    #
+    # Deux essais precedents etaient inertes ou faux. Le premier comparait la
+    # liste des promus a elle-meme triee — vrai de toute liste triee. Le
+    # second exigeait qu'aucun promu ne soit de priorite pire qu'un recale :
+    # il MORDAIT, et il echouait sur un tri correct, parce que le glouton
+    # saute un candidat trop gros pour le reste du budget et prend un moins
+    # cher ensuite. L'ensemble des promus n'est donc pas un prefixe de
+    # l'ordre, et seul l'ordre lui-meme est testable.
+    ordre = m_g["budget"]["ordre_20_premiers"]
+    couts = m_g["budget"]["cout_20_premiers_mio"]
+    assert ordre, "le manifeste ne porte pas le temoin d'ordre"
+    rangs = [(PRIO.get(genre(n), 99), -c) for n, c in zip(ordre, couts)]
+    assert rangs == sorted(rangs), (
+        f"ordre non trie par (priorite de genre, cout decroissant) : "
+        f"{list(zip(ordre, rangs))[:6]}")
+
+    m_c, promus_c = convertir(0.02, "cout_decroissant")
+    assert m_c["budget"]["ordre_glouton"] == "cout_decroissant_sans_decibel"
+
+    # un mode inconnu lève toujours, et le message nomme les deux nouveaux
+    with pytest.raises(ValueError, match="cout_decroissant"):
+        convertir(0.02, "genre_du_tenseur")

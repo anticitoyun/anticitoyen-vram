@@ -1,20 +1,27 @@
-# Crochets versionnés
+# Crochets — copie de référence
 
-Ces fichiers **s'exécutent depuis `~/.claude/hooks/`**, hors du dépôt. La copie
-ici n'est pas active : elle existe pour que le travail survive à la machine.
+**Ces fichiers s'exécutent depuis `~/.claude/hooks/`, hors du dépôt.** Ils n'y
+survivent ni à un redémarrage de machine ni à un changement de poste.
 
-    installer :  cp outils/crochets/13_rtk_comptage_guard.sh ~/.claude/hooks/
+**Signalé le 10/09/2026** : le motif du crochet de comptage venait d'être étendu
+(`shortlog|branch|tag|ls-files`) et corrigé (il bloquait l'écriture d'un fichier
+qui le *cite*, pas seulement la commande qui l'exécute). **Ce travail aurait
+disparu avec la machine, et personne n'aurait su qu'il avait été fait** — il
+aurait été refait à l'identique, ou pas du tout.
 
-`13_rtk_comptage_guard.sh` refuse `rtk git <listage> | <compteur>` sans `-n`
-explicite. Le 10/09, `rtk git log` valait `git log --no-merges -n 50` : il
-plafonnait à 50 **et** retirait les fusions, donc il enlevait aussi des lignes
-du milieu — les 50 rendues couvraient les rangs 1 à 60, sans que rien signale
-les trous. Trois sessions ont publié des comptes faux en croyant se vérifier.
+## Installer
 
-Motif étendu le 10/09 au soir à `shortlog|branch|tag|ls-files|rev-list --all` :
-le nom du fichier promet « comptage rtk » alors que le motif ne visait que
-`git log`. Éprouvé sur sept cas.
+```bash
+cp outils/crochets/*.sh ~/.claude/hooks/ && chmod +x ~/.claude/hooks/*.sh
+```
 
-**Pourquoi cette copie existe** : le crochet vit hors du dépôt, donc son
-extension serait morte avec la machine, et le travail aurait été refait sans
-que personne sache qu'il l'avait déjà été.
+Le crochet doit ensuite être déclaré dans `~/.claude/settings.json`.
+
+## Vérifier qu'une copie n'a pas dérivé
+
+```bash
+diff outils/crochets/13_rtk_comptage_guard.sh ~/.claude/hooks/13_rtk_comptage_guard.sh
+```
+
+**Une différence n'est pas une erreur — c'est une question :** laquelle des deux
+a été corrigée en dernier, et pourquoi personne ne l'a reportée.

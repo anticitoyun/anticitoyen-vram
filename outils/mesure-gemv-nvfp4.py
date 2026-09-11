@@ -8,6 +8,7 @@ Deux precautions apprises aujourd hui :
   - la sortie est enregistree pour comparaison bit a bit : le double tampon
     ne doit RIEN changer aux valeurs, seulement au moment des lectures.
 """
+import os
 import json, sys, time, torch
 from acvram.kernels import get_extension
 from acvram.quant.nvfp4 import quantize_nvfp4
@@ -52,7 +53,10 @@ for nom, M, K in FORMES:
                 "jeux": jeux, "Mio_par_jeu": octets / 2**20}
 
 etq = sys.argv[1] if len(sys.argv) > 1 else "courant"
-S = "/tmp/claude-session/8970dbba-d203-4e89-8394-f62a3c7570d3/scratchpad"
+S = os.environ.get("ACVRAM_SCRATCH", "/tmp/acvram-mesures")
+# Le chemin etait code en dur avec un scratchpad de session : il portait
+# a la fois un nom d utilisateur et une mention de session, dans un
+# fichier suivi. Un chemin de travail se passe par l environnement.
 torch.save(sorties, f"{S}/gemv-sorties-{etq}.pt")
 json.dump(res, open(f"{S}/gemv-debit-{etq}.json", "w"), indent=1)
 for k, v in res.items():

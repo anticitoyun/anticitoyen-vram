@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=acvram
+GenericName=Serveur d'inférence LLM
+GenericName[en]=LLM inference server
+Comment=Console du serveur d'inférence acvram (NVFP4 + INT4, GPU hétérogènes)
+Comment[en]=acvram inference server console
+Exec=acvram-console
+Icon=acvram
+Terminal=false
+Categories=Science;
+Keywords=llm;inference;gpu;nvfp4;int4;quantification;
+StartupNotify=true
