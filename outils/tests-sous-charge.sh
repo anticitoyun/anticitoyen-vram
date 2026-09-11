@@ -132,15 +132,16 @@ for c in $CIBLES; do
   # EXEMPLAIRES du meme travail : deux exemplaires qui divergent accusent la
   # manche ; un exemplaire seul ne peut rien dire. Chaque exemplaire publie
   # cause (echec/timeout) et sm % relevés autour de chaque manche.
-  ae=0; ato=0; as=0; sm_lo=100; sm_hi=0
+  ae=0; ato=0; as=0; sm_lo=100; sm_hi=0; vif_lo=100
   for ex in $(seq 1 $EXEMPLAIRES); do
     d0=$(date +%s)
-    read -r e to s2 lo hi <<<"$(joue_qualifie "$c" "$PCHARGE")"
-    printf '  exemplaire %d/%d : %s echecs, %s timeouts, %s sauts, %s s, sm %s-%s %%\n' \
-      "$ex" "$EXEMPLAIRES" "$e" "$to" "$s2" "$(( $(date +%s) - d0 ))" "$lo" "$hi"
+    read -r e to s2 lo mo hi vif <<<"$(joue_qualifie "$c" "$PCHARGE")"
+    printf '  exemplaire %d/%d : %s echecs, %s timeouts, %s sauts, %s s, sm %s/%s/%s %%, charge vive %s %%\n' \
+      "$ex" "$EXEMPLAIRES" "$e" "$to" "$s2" "$(( $(date +%s) - d0 ))" "$lo" "$mo" "$hi" "$vif"
     ae=$((ae + e)); ato=$((ato + to)); as=$((as + s2))
     [ "$lo" -lt "$sm_lo" ] && sm_lo=$lo
     [ "$hi" -gt "$sm_hi" ] && sm_hi=$hi
+    [ "$vif" -lt "$vif_lo" ] && vif_lo=$vif
   done
   # TOTAL, pas N : modifier N dans la boucle le multiplierait a chaque cible,
   # et la deuxieme cible serait comparee a un denominateur faux.
@@ -153,6 +154,11 @@ for c in $CIBLES; do
     v="ECARTE : echoue deja $se/$N SANS charge — test casse, pas fragile"
   elif [ "$as" -gt 0 ]; then
     v="ECARTE : a SAUTE $as/$TOTAL sous charge — un test qui saute n a pas resiste"
+  # Un exemplaire dont la charge n'a pas vecu tout du long (vif_lo bas) n'a
+  # pas mesure ce qu'on croit : le publier avec la meme etiquette qu'un
+  # exemplaire ou vif=100 refait la faute d'etendue du 11/09.
+  elif [ "$vif_lo" -lt 90 ]; then
+    v="INVALIDE : charge vive $vif_lo % au pire — pas de mesure sous contention"
   elif [ "$ae" -eq 0 ] && [ "$ato" -eq 0 ]; then
     v="RESISTE $TOTAL/$TOTAL sur $EXEMPLAIRES exemplaires, sm ${sm_lo}-${sm_hi} %"
   elif [ "$ae" -eq 0 ] && [ "$ato" -gt 0 ]; then
