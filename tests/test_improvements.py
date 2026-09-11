@@ -1164,3 +1164,49 @@ def test_ordre_genre_et_cout(tiny_checkpoint, target_rig, tmp_path_factory,
     # un mode inconnu lève toujours, et le message nomme les deux nouveaux
     with pytest.raises(ValueError, match="cout_decroissant"):
         convertir(0.02, "genre_du_tenseur")
+
+
+def test_max_promus_fixe_le_compte(tiny_checkpoint, target_rig, tmp_path_factory,
+                                   monkeypatch):
+    """ACVRAM_MAX_PROMUS=N promeut EXACTEMENT les N premiers de l'ordre, budget
+    ignore — l'experience « compte egal » du 11/09.
+    """
+    import json
+
+    from acvram.engine.config import load_model_spec
+    from acvram.memory.tiering import PlannerOptions, auto_plan
+    from acvram.quant.convert import ConversionOptions, convert_checkpoint
+
+    spec = load_model_spec(tiny_checkpoint, "tiny")
+    plan, _ = auto_plan(spec, target_rig,
+                        PlannerOptions(max_model_len=512, max_concurrent_seqs=2))
+
+    def convertir(budget, maxp=None):
+        out = str(tmp_path_factory.mktemp(f"maxp_{maxp}"))
+        if maxp is not None:
+            monkeypatch.setenv("ACVRAM_MAX_PROMUS", str(maxp))
+        try:
+            r = convert_checkpoint(tiny_checkpoint, plan,
+                                   ConversionOptions(out_dir=out,
+                                                     bits_budget_gib=budget),
+                                   spec=spec)
+        finally:
+            monkeypatch.delenv("ACVRAM_MAX_PROMUS", raising=False)
+        m = json.loads((pathlib.Path(out) / "acvram_manifest.json").read_text())
+        return m, len(r.promotions)
+
+    ref, n_ref = convertir(1.0)  # budget large, tout candidat passe
+    cand = ref["budget"]["candidats"]
+    assert cand >= 2, "pas assez de candidats pour l'experience de compte"
+
+    cible = max(1, cand // 2)
+    # budget SERRE : sans le plafond il promeut peu ; avec, il doit ignorer le
+    # budget et promouvoir exactement `cible`.
+    m, n = convertir(0.001, maxp=cible)
+    assert n == cible, f"{n} promus au lieu de {cible} demandes"
+    assert m["budget"]["max_promus_impose"] == cible
+    assert m["budget"]["promus"] == cible
+
+    # demander plus que le parc leve
+    with pytest.raises(ValueError, match="candidats"):
+        convertir(1.0, maxp=cand + 1)

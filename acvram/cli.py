@@ -83,6 +83,7 @@ VARIABLES_LUES = {
     "ACVRAM_ORDRE_SAC",
     "ACVRAM_LISTE_PROMUS",
     "ACVRAM_LISTE_CLE",
+    "ACVRAM_MAX_PROMUS",
     "ACVRAM_SCALER_SANS_CACHE",
     # ACVRAM_SRC_HASH n'est PAS une variable d'environnement : c'est une option
     # de compilation (-D) portant le sha du .cu. Elle figure ici parce que

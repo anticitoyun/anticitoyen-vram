@@ -1327,16 +1327,29 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         plancher_octets = deja
         budget_octets = opts.bits_budget_gib * 1024 ** 3
         promus = set()
-        for c in ordre:
-            if _mode == "liste":
-                # budget IGNORE : c'est la definition du mode. Le cout est
-                # quand meme retire pour que `depense_gib` reste vrai, et il
-                # peut passer negatif — on l'annonce plus bas.
+        # ACVRAM_MAX_PROMUS=N : plafond de COMPTE, budget ignore — promeut
+        # exactement les N premiers de l'ordre. Sert l'experience « compte
+        # egal » (11/09) : a 149 fixe, chaque ordre choisit SES 149, ce qui
+        # isole « quels tenseurs » de « combien ». Absent ou 0 -> remplissage
+        # au budget, comportement normal.
+        _max_promus = int(os.environ.get("ACVRAM_MAX_PROMUS", "0") or "0")
+        if _max_promus > 0:
+            if _max_promus > len(ordre):
+                raise ValueError(
+                    f"ACVRAM_MAX_PROMUS={_max_promus} > {len(ordre)} candidats.")
+            for c in ordre[:_max_promus]:
                 promus.add(c["name"])
                 reste -= c["cout"]
-            elif c["cout"] <= reste:
-                promus.add(c["name"])
-                reste -= c["cout"]
+        else:
+            for c in ordre:
+                if _mode == "liste":
+                    # budget IGNORE : definition du mode. Cout retire pour que
+                    # depense_gib reste vrai ; peut passer negatif (annonce plus bas).
+                    promus.add(c["name"])
+                    reste -= c["cout"]
+                elif c["cout"] <= reste:
+                    promus.add(c["name"])
+                    reste -= c["cout"]
         cout_total = sum(c["cout"] for c in budget_candidats)
         if _mode == "liste":
             pass  # ni plancher ni budget : les deux messages seraient faux
@@ -1379,6 +1392,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             "sous_le_plancher": reste < 0,
             "promus": len(promus),
             "candidats": len(budget_candidats),
+            "max_promus_impose": _max_promus or None,
             # TEMOIN D'ORDRE. Sans lui, l'ordre du glouton n'est pas
             # observable depuis le dossier : le seul effet visible est
             # l'ensemble des promus, et cet ensemble ne suffit pas a le
