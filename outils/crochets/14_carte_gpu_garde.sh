@@ -27,11 +27,15 @@ set -u
 CMD=$(jq -r '.tool_input.command // empty' 2>/dev/null)
 [ -z "$CMD" ] && exit 0
 
-# Cherche l'invocation d'un script dans outils/gpu/. Motif : espace, tiret ou
-# début, suivi de `outils/gpu/<catégorie>/<script>`. On ignore le préfixe
-# éventuel `bash `, `python `, `python3 `, `./`, etc. — c'est le CHEMIN qui
-# porte la classification, pas le lanceur.
-SCRIPT=$(echo "$CMD" | grep -oE '(^|[[:space:]/])outils/gpu/(mesure|service)/[A-Za-z0-9_.-]+' | head -1 | sed 's|.*outils/gpu/|outils/gpu/|')
+# Cherche l'invocation d'un script dans outils/gpu/. Le motif ne matche que si
+# le chemin est en POSITION D'EXÉCUTABLE, jamais dans une chaîne. Sinon, un
+# `sed 's|outils/gpu/mesure/x|...|'` est refusé comme s'il exécutait le script
+# — c'est ce que le crochet 13 faisait sur ses propres mentions dans un
+# heredoc, et c'est la même faille ici. Le chemin est en tête de la commande
+# ou précédé d'un lanceur connu (bash, python, python3, sh, ./), séparé par un
+# espace et suivi soit d'un espace/fin/redirection, jamais d'une apostrophe
+# ou d'un pipe qui trahiraient un usage littéral.
+SCRIPT=$(echo "$CMD" | grep -oE '(^|[[:space:]])(bash|sh|python|python3|\./)?[[:space:]]?(outils/gpu/(mesure|service)/[A-Za-z0-9_.-]+)([[:space:]]|$|<|>|\|)' | head -1 | grep -oE 'outils/gpu/(mesure|service)/[A-Za-z0-9_.-]+')
 [ -z "$SCRIPT" ] && exit 0
 
 CATEGORIE=$(echo "$SCRIPT" | cut -d/ -f3)

@@ -36,6 +36,36 @@ joue() {   # joue <cible> -> "<echecs> <sauts>" sur N manches
   echo "$e $s"
 }
 
+# CAUSE ET OCCUPATION, jamais devinees. Un timeout renvoie code 124, un vrai
+# echec code 1 : les traiter pareil confond « le test dure » avec « le test
+# echoue », faute nommee le 11/09 sur le bras 1 (3 timeouts a 3600 s comptes
+# comme echecs). L'occupation vient de pmon sm % du PID de charge, relevee
+# encadrant chaque manche — sans elle, « charge peut-etre retiree ? » reste
+# une question au lieu d'etre une mesure.
+joue_qualifie() {   # <cible> <pid_charge> → "echecs timeouts sauts sm_min sm_max"
+  local cible=$1 pcharge=$2 e=0 to=0 s=0 sm_min=100 sm_max=0
+  for _ in $(seq 1 $N); do
+    local sm0=$(nvidia-smi pmon -c 1 -i 0 2>/dev/null | awk -v p="$pcharge" '$2==p{print $4}' | head -1)
+    [ -z "${sm0:-}" ] && sm0=0
+    local out code
+    out=$(timeout -k 20 1800 $PY -m pytest -q -rs "$cible" 2>&1)
+    code=$?
+    local sm1=$(nvidia-smi pmon -c 1 -i 0 2>/dev/null | awk -v p="$pcharge" '$2==p{print $4}' | head -1)
+    [ -z "${sm1:-}" ] && sm1=0
+    for v in "$sm0" "$sm1"; do
+      case "$v" in ''|*[!0-9]*) continue ;; esac
+      [ "$v" -lt "$sm_min" ] && sm_min=$v
+      [ "$v" -gt "$sm_max" ] && sm_max=$v
+    done
+    case "$code" in
+      0)   grep -qE '[0-9]+ skipped' <<<"$out" && s=$((s+1)) ;;
+      124) to=$((to+1)) ;;
+      *)   e=$((e+1)) ;;
+    esac
+  done
+  echo "$e $to $s $sm_min $sm_max"
+}
+
 echo "# N=$N par cible · charge $GIO Gio, calcul $CALCUL"
 declare -A sans
 for c in $CIBLES; do sans[$c]="$(joue "$c")"; done
@@ -45,7 +75,7 @@ for c in $CIBLES; do sans[$c]="$(joue "$c")"; done
 # perdues le 10/09. `charge-gpu.py` refuse desormais de demarrer sans, donc
 # cette ligne n est pas une precaution mais la seule facon de le lancer.
 ACVRAM_NOM=CHARGE-DELIBEREE setsid "$S/carte.sh" \
-  $PY -u "$S/charge-gpu.py" --gio "$GIO" --calcul "$CALCUL" --duree 3600 \
+  $PY -u "$R/outils/gpu/mesure/charge-gpu.py" --gio "$GIO" --calcul "$CALCUL" --duree 3600 \
   > "$TMP" 2>&1 &
 CH=$!
 # TUER LE GROUPE, PAS L ENFANT. carte.sh est l enfant, charge-gpu.py le
@@ -72,33 +102,45 @@ if [ "$PRIS" -lt "$MINI" ]; then
   exit 4
 fi
 
-printf '%-42s %8s %8s  %s\n' cible sans avec verdict
+# Trouver le PID de charge-gpu.py pour releve pmon dans la boucle des manches.
+PCHARGE=$(pgrep -f 'charge-gpu\.py' | head -1)
+echo "# PID charge = $PCHARGE"
+
+printf '%-42s %8s %10s  %s\n' cible sans "avec cause" verdict
 for c in $CIBLES; do
   read -r se ss <<<"${sans[$c]}"
-  # EXEMPLAIRES du meme travail : on joue le bras plusieurs fois et on publie
-  # chaque exemplaire avec sa duree. Deux exemplaires qui divergent accusent
-  # la manche ; un exemplaire seul ne peut rien dire.
-  ae=0; as=0
+  # EXEMPLAIRES du meme travail : deux exemplaires qui divergent accusent la
+  # manche ; un exemplaire seul ne peut rien dire. Chaque exemplaire publie
+  # cause (echec/timeout) et sm % relevés autour de chaque manche.
+  ae=0; ato=0; as=0; sm_lo=100; sm_hi=0
   for ex in $(seq 1 $EXEMPLAIRES); do
     d0=$(date +%s)
-    read -r e s2 <<<"$(joue "$c")"
-    printf '  exemplaire %d/%d : %s echecs, %s sauts, %s s\n' \
-      "$ex" "$EXEMPLAIRES" "$e" "$s2" "$(( $(date +%s) - d0 ))"
-    ae=$((ae + e)); as=$((as + s2))
+    read -r e to s2 lo hi <<<"$(joue_qualifie "$c" "$PCHARGE")"
+    printf '  exemplaire %d/%d : %s echecs, %s timeouts, %s sauts, %s s, sm %s-%s %%\n' \
+      "$ex" "$EXEMPLAIRES" "$e" "$to" "$s2" "$(( $(date +%s) - d0 ))" "$lo" "$hi"
+    ae=$((ae + e)); ato=$((ato + to)); as=$((as + s2))
+    [ "$lo" -lt "$sm_lo" ] && sm_lo=$lo
+    [ "$hi" -gt "$sm_hi" ] && sm_hi=$hi
   done
   # TOTAL, pas N : modifier N dans la boucle le multiplierait a chaque cible,
   # et la deuxieme cible serait comparee a un denominateur faux.
   TOTAL=$((N * EXEMPLAIRES))
+  # « lent » et « échoue » sont deux choses différentes. Un timeout dit que le
+  # test a été trop LONG sous contention, un échec qu'il a rendu un mauvais
+  # résultat. Confondre les deux fait dire « fragile » à un test seulement plus
+  # lent — faute nommée le 11/09 sur le bras 1 précédent.
   if [ "$se" -gt 0 ]; then
     v="ECARTE : echoue deja $se/$N SANS charge — test casse, pas fragile"
   elif [ "$as" -gt 0 ]; then
     v="ECARTE : a SAUTE $as/$TOTAL sous charge — un test qui saute n a pas resiste"
-  elif [ "$ae" -eq 0 ]; then
-    v="RESISTE $TOTAL/$TOTAL sur $EXEMPLAIRES exemplaires"
+  elif [ "$ae" -eq 0 ] && [ "$ato" -eq 0 ]; then
+    v="RESISTE $TOTAL/$TOTAL sur $EXEMPLAIRES exemplaires, sm ${sm_lo}-${sm_hi} %"
+  elif [ "$ae" -eq 0 ] && [ "$ato" -gt 0 ]; then
+    v="LENT sous charge : $ato timeouts / $TOTAL, 0 vrai echec, sm ${sm_lo}-${sm_hi} %"
   elif [ "$ae" -eq "$TOTAL" ]; then
-    v="FRAGILE systematique $TOTAL/$TOTAL"
+    v="FRAGILE systematique $TOTAL/$TOTAL, sm ${sm_lo}-${sm_hi} %"
   else
-    v="FRAGILE intermittent $ae/$TOTAL"
+    v="FRAGILE intermittent $ae echecs + $ato timeouts sur $TOTAL, sm ${sm_lo}-${sm_hi} %"
   fi
   printf '%-40s %5s/%d %5s/%d  %s\n' "$c" "$se" "$N" "$ae" "$TOTAL" "$v"
 done
