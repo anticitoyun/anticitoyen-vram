@@ -46,3 +46,7 @@ Trois points + la référence B = quatre PPL à compte égal. n=4, mais ici on n
 cherche pas une corrélation : on compare quatre valeurs à une référence connue.
 Un écart de 0,004+ (l'ordre de grandeur A↔B observé) est bien au-dessus du
 déterminisme de la PPL, donc lisible sur un seul exemplaire.
+
+---
+
+**ISSUE (11/09) : RÉFUTÉE.** base_croissant@149 (5,4463) égale B@149 (5,4482) ; à compte égal la PPL suit les OCTETS dépensés (Pearson −0,992), pas l ordre. Voir `compte-egal-149-resultat.md`.
