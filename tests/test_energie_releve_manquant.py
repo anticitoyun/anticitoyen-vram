@@ -8,12 +8,16 @@ pour valide — alors qu'on n'avait simplement pas regarde.
 C'est l'absence lue comme un resultat, dans le module meme dont le role est
 d'attraper ce qui interdit de conclure.
 """
-import sys, types
+import pathlib, sys, types
+
+# `outils/gpu/mesure/` n'est pas installe : sans la racine du depot dans
+# sys.path, pytest ne trouve pas le namespace package `outils`.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 
 def _fenetre(pids_debut, pids_fin):
     """Une fenetre minimale, sans NVML ni carte."""
-    from outils.energie import Energie  # noqa: PLC0415
+    from outils.gpu.mesure.energie import Energie  # noqa: PLC0415
     f = object.__new__(Energie)
     f.indisponible = None
     f.debut, f.fin = {}, {}

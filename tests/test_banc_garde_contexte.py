@@ -22,7 +22,8 @@ import pytest
 # echouent ; sur la version corrigee, les deux passent. Un test de garde qu'on
 # n'a pas vu echouer sur le defaut qu'il vise n'est pas un test.
 _BANC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                     "outils", os.environ.get("BANC_SOUS_TEST", "banc-4moteurs.py"))
+                     "outils", "gpu", "mesure",
+                     os.environ.get("BANC_SOUS_TEST", "banc-4moteurs.py"))
 
 
 # Le banc attrape les exceptions de `demarrer` et poursuit avec le moteur

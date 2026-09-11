@@ -16,7 +16,7 @@ import pathlib
 
 import pytest
 
-_OUTIL = pathlib.Path(__file__).resolve().parents[1] / "outils" / "budget-prefill.py"
+_OUTIL = pathlib.Path(__file__).resolve().parents[1] / "outils" / "gpu" / "mesure" / "budget-prefill.py"
 
 
 @pytest.fixture(autouse=True)
