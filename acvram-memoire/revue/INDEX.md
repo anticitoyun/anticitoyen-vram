@@ -1,7 +1,12 @@
-# Index — revue/ (54 documents)
+# Index — revue/ (58 documents)
 
 Quatre thèmes : **mesure**, **moteur**, **quantification**, et **protocoles et avis**.
 Un document ambivalent est classé par son chiffre principal.
+
+**Contrôle (absents) :**
+```bash
+for x in $(ls revue/*.md | xargs -n1 basename | grep -v INDEX.md); do grep -q "($x)" revue/INDEX.md || echo "$x"; done
+```
 
 ---
 
@@ -11,6 +16,7 @@ Benchmarks, protocoles, performance, comparatifs, états du jour.
 
 - [Avis de performance par joule](avis-exterieur-performance-par-joule.md) — Réponse externe à la question de poste2 : peut-on consommer moins de joules par jeton qu'llama.cpp
 - [Cadre 2,45 ms inexpliquées](cadre-2450-us-inexpliques.md) — Écrit avant mesure (poste1, 9/09) : prédit 86 % du surcoût en latence de decodage
+- [Chronomètres du moteur](chronometres-du-moteur.md) — 26 chronomètres : `time.perf_counter()` autour de CUDA ne mesure que s'il y a une synchronisation
 - [Capture échoue à neuf séquences](capture-echoue-a-neuf-sequences.md) — 287 ms : au-delà, les graphes CUDA ne capturent plus sans asserts
 - [Contrôle positif grille paged_attn](controle-positif-grille.md) — poste1 10/09 avant mesure : prédit que la grille est sous-parallélisée
 - [Courbe du quota deux points](courbe-du-quota-deux-points.md) — 5,4141 PPL (étalon GPTQ) : la courbe n'est pas plate, le coût par PPL **décroît**
@@ -48,6 +54,7 @@ Optimisations, noyaux, architecture, patches, ordonnancement, fusions.
 - [Prédiction repartition noyaux](prediction-repartition-noyaux.md) — Écrite avant classement : poste4 prédit le classement des 36 486 noyaux
 - [Stream-K paged_attn_partial](stream-k-evaluation-papier.md) — Stream-K supprime les blocs vides, pas l'absence de travail : évaluation théorique
 - [sm_120 formats graphes](sm120-et-graphes-chez-les-concurrents.md) — vLLM utilise sm_120f, impose bf16, et capture les graphes par batch
+- [Comparaison vLLM vs acvram](comparaison-vllm-vs-acvram-ae71862.md) — Cinq mécanismes : vLLM pose un par dimension, acvram en pose plusieurs par cas
 
 ---
 
@@ -61,6 +68,7 @@ Formats, densité, bits, précision, genre de tenseur, compression.
 - [Incohérence bytes_per_tier](incoherence-bytes-per-tier-embed-device.md) — `bytes_per_tier` contredit `device` au manifeste : trouvée en creusant Qwen2.5-Coder-14B
 - [Genre coût structurel](le-confondant-genre-cout-est-structurel.md) — Le confondant genre/coût ne se casse pas : c'est un défaut structurel, pas un calcul
 - [Queue variation genre tenseur](queue-de-variation-et-genre-de-tenseur.md) — La queue de variation révèle le mécanisme : masque la vraie divergence
+- [Question sm_120 formats](question-1-formats-sm120-v2.md) — wgmma/TMA sur RTX 5090 : statut vérifié, priorité haute, wgmma n'existe qu'en Hopper
 
 ---
 
@@ -84,7 +92,8 @@ Protocoles, avis externes, audits, méthodologie, tests d'isolation, recherche.
 - [Revue protocole témoin MoE](revue-poste2-temoin-moe.md) — poste2 8/09 : répond à quatre questions sur le protocole du témoin MoE
 - [Suite non isolée carte](suite-non-isolee-de-la-carte.md) — Deux tests ont échoué pendant qu'une autre session occupait la 5090
 - [Trois avis extérieurs triés](trois-avis-exterieurs-tries.md) — Les trois réponses, triées par ce qui est vérifiable vs conjecturé
+- [Synthèse poste1 10-09](SYNTHESE-poste1-10-09.md) — Consolide onze documents : chaque chiffre porte son régime, ce qui n'est pas mesuré est marqué
 
 ---
 
-**Total : 54 documents — Mesure 17 | Moteur 15 | Quantification 6 | Protocoles 16**
+**Total : 58 documents — Mesure 18 | Moteur 16 | Quantification 7 | Protocoles 17**
