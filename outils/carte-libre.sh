@@ -30,6 +30,17 @@
 # lui-meme des sa deuxieme mesure.
 set -u
 SEUIL_MIO=${SEUIL_MIO:-800}
+# UN INTRUS A DEUX FAÇONS DE NUIRE, et un seuil VRAM n'en voit qu'une. Ce qui
+# a invalidé les six manches du 10/09 au soir, ce n'était pas la VRAM de
+# `charge-gpu.py`, c'était qu'il CALCULAIT. Et l'inverse : un `acvram serve`
+# idle à 1,5 Gio perturbe la mémoire des autres, pas les cycles.
+#   non déclaré ET (mem ≥ SEUIL_INTRUS OU sm > 0)   -> INTRUS
+#   non déclaré ET mem < seuil ET sm = 0            -> bruit du bureau (Steam)
+# Steam : 20 Mio, 0 % sm → bruit. charge-gpu.py : n'importe quelle VRAM, 100 %
+# sm → intrus. acvram serve idle : 1,5 Gio, 0 % sm → intrus quand même (mémoire
+# contendue). Pas de liste blanche : elle gonfle et ne dit jamais POURQUOI un
+# processus est toléré. Le sm% le dit.
+SEUIL_INTRUS_MIO=${SEUIL_INTRUS_MIO:-100}
 MOTIF=${MOTIF:-'python.*(outils/|acvram)'}
 RACINE=${RACINE:-$PPID}          # l'appelant : ses descendants sont « a nous »
 
@@ -60,15 +71,70 @@ mien() {
 
 u=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 0 2>/dev/null) || {
   echo "carte-libre : nvidia-smi muet — on ne conclut pas que c'est libre" >&2; exit 1; }
-if [ "$u" -ge "$SEUIL_MIO" ]; then
-  echo "carte 0 occupee : $u Mio alloues (seuil $SEUIL_MIO)" >&2; exit 1
-fi
+# Le seuil VRAM total (critère 1) intervient APRÈS le nommage des intrus : sinon
+# un intrus non déclaré qui pousse le total au-dessus du seuil fait dire
+# « occupée à N Mio » au lieu de « intrus PID X ». Le refus est correct mais le
+# message envoie chercher au mauvais endroit — c'est exactement ce que ce
+# script existe pour éviter.
+
+# CROISEMENT AVEC TROIS SOURCES. Un verrou seul cache les intrus ; un journal
+# seul se laisse abuser par un service tué en -9. La question est « qui répond
+# de l'occupation ? » — nvidia-smi dit qui occupe, le verrou dit qui mesure, le
+# journal dit qui sert. Un PID GPU présent dans aucun des deux est un INTRUS,
+# et c'est le cas qui a fait mal le 10/09 au soir (2373353, 1,5 Gio non
+# déclarés). Journal formaté : « PID<TAB>UNITE<TAB>DEPUIS<TAB>PORTS » ; un
+# service qui n'y est pas ne compte pas, un PID mort qui y est est purgé
+# silencieusement à la lecture (jamais en écriture, un autre process peut
+# écrire pendant qu'on lit).
+JOURNAL_SERVICES=${JOURNAL_SERVICES:-outils/gpu/journal-services.tsv}
+service_declare() {
+  local pid=$1
+  [ -r "$JOURNAL_SERVICES" ] || return 1
+  awk -v p="$pid" -F'\t' '$1 == p { print $2; found=1 } END { exit !found }' \
+      "$JOURNAL_SERVICES" 2>/dev/null
+}
+
+# DEUX APPELS PARCE QUE `pmon` NE DIT PAS CE QU'ON CROIT. Sa colonne « mem »
+# est le POURCENTAGE de bande passante mémoire (trafic), pas l'occupation en
+# Mio — vérifié le 11/09 sur un intrus statique de 810 Mio qui rendait sm=0
+# mem=0 et passait le critère. Les Mio effectifs viennent de
+# --query-compute-apps=used_memory ; pmon garde le sm% qui est ce qu'on
+# voulait pour la seconde dimension.
+declare -A SM_PCT MEM_MIO
+while read -r ligne; do
+  case "$ligne" in '#'*|'') continue ;; esac
+  set -- $ligne
+  [ "${2:-}" = "-" ] && continue
+  SM_PCT[$2]=${4:-0}    # $4 = sm% (trafic calcul)
+done < <(nvidia-smi pmon -c 1 -i 0 2>/dev/null)
+while IFS=', ' read -r pid mem _; do
+  [ -n "${pid:-}" ] || continue
+  MEM_MIO[$pid]=${mem:-0}
+done < <(nvidia-smi -i 0 --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2>/dev/null)
 
 for pid in $(nvidia-smi -i 0 --query-compute-apps=pid --format=csv,noheader 2>/dev/null); do
-  mien "$pid" || {
-    echo "carte 0 : calcul en cours, PID $pid — $(tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null | cut -c1-120)" >&2
-    exit 1; }
+  mien "$pid" && continue
+  if service_declare "$pid" >/dev/null; then
+    continue          # service déclaré : information, pas refus
+  fi
+  sm=${SM_PCT[$pid]:-0}; mem=${MEM_MIO[$pid]:-0}
+  case "$sm" in ''|*[!0-9]*) sm=0 ;; esac
+  case "$mem" in ''|*[!0-9]*) mem=0 ;; esac
+  if [ "$sm" = 0 ] && [ "$mem" -lt "$SEUIL_INTRUS_MIO" ]; then
+    continue          # bruit du bureau : petit, silencieux, ignoré
+  fi
+  echo "carte 0 : PID $pid non déclaré, ${mem} Mio, ${sm} % sm — $(tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null | cut -c1-100)" >&2
+  echo "  ni verrou (mesure), ni journal (service). Intrus." >&2
+  exit 1
 done
+
+# Seuil VRAM total en DERNIER recours : après les intrus nommés, il attrape
+# les allocations sans processus déclaré (rare mais possible, ex. sonde qui
+# alloue avant que nvidia-smi ne la voie).
+if [ "$u" -ge "$SEUIL_MIO" ]; then
+  echo "carte 0 occupee : $u Mio alloues (seuil $SEUIL_MIO) — aucun intrus nommé" >&2
+  exit 1
+fi
 
 while read -r pid reste; do
   [ -n "${pid:-}" ] || continue
