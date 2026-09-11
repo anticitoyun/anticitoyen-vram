@@ -10,6 +10,7 @@ propriétaire précédent.
 import torch
 import torch.nn as nn
 from acvram.engine.model import DecoderLayerGDN, _STATIC
+from acvram.engine.graphs import bucket_batch
 
 
 # -- simulacre minimal d'attention linéaire ----------------------------------
@@ -185,3 +186,22 @@ def test_casse_si_on_remet_sids():
     assert S_exporte.sum() > 4 * 4, (
         "avec l'ancien code la somme devrait avoir dérivé (2 passes) "
         f"mais vaut {S_exporte.sum()}")
+
+
+# -- tests bucket_batch -----------------------------------------------------
+
+def test_bucket_batch_puissances_de_deux():
+    """bucket_batch arrondit au godet supérieur."""
+    assert bucket_batch(1) == 1
+    assert bucket_batch(2) == 2
+    assert bucket_batch(3) == 4
+    assert bucket_batch(4) == 4
+    assert bucket_batch(5) == 8
+    assert bucket_batch(7) == 8
+    assert bucket_batch(9) == 16
+
+
+def test_bucket_batch_identite_sur_puissance():
+    """Une puissance de deux ne change pas."""
+    for p in [1, 2, 4, 8, 16, 32]:
+        assert bucket_batch(p) == p

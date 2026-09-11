@@ -37,6 +37,14 @@ from typing import Optional
 import torch
 
 from ..memory.kvcache import BLOCK_SIZE, bucket_blocks
+
+
+def bucket_batch(n: int) -> int:
+    """Arrondit un lot au godet supérieur (puissances de deux, minimum 1)."""
+    b = 1
+    while b < n:
+        b <<= 1
+    return b
 from .layers import QuantLinear
 from .model import DecoderLayerGDN, ForwardBatch, MoEBlock
 
@@ -223,7 +231,8 @@ class GraphRunner:
             return None                      # longueurs mixtes : eager
         if ql != 1 and not self.paged_ok:
             return None                      # la verification exige le noyau
-        b = batch.batch_size
+        b_reel = batch.batch_size
+        b = bucket_batch(b_reel)
         nblk = bucket_blocks(max(t.shape[0] for t in batch.block_tables))
         if nblk * BLOCK_SIZE > self.max_model_len + BLOCK_SIZE:
             nblk = bucket_blocks((self.max_model_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
@@ -297,7 +306,8 @@ class GraphRunner:
             if trace:
                 print(f"[graphe] capture clé {key} : "
                       f"{(time.perf_counter()-t1)*1000:.1f} ms", flush=True)
-            return entry["out"].clone()
+            out = entry["out"][:b_reel * ql].clone()
+            return out
 
         self._fill(entry, batch)
         if trace and os.environ.get("ACVRAM_CHRONO_SYNC"):
@@ -328,7 +338,7 @@ class GraphRunner:
                 # le debit si elle reste active en permanence. Non committe.
                 torch.cuda.synchronize(self.device)
         self.replays += 1
-        out = entry["out"].clone()
+        out = entry["out"][:b_reel * ql].clone()
         t3 = time.perf_counter()
         getattr(self, "temps_bind", None) is None and setattr(self, "temps_bind", [])
         getattr(self, "temps_fill", None) is None and setattr(self, "temps_fill", [])
@@ -377,11 +387,25 @@ class GraphRunner:
 
     def _fill(self, entry: dict, batch: ForwardBatch) -> None:
         b, _ql, nblk = entry["key"][:3]
-        entry["x"].copy_(self._embed(batch).to(self.device), non_blocking=True)
-        entry["positions"].copy_(batch.positions, non_blocking=True)
-        entry["slots"].copy_(batch.slot_mapping, non_blocking=True)
-        entry["seq_lens"].copy_(
-            torch.tensor(batch.seq_lens, dtype=torch.long), non_blocking=True)
+        b_reel = batch.batch_size
+        emb = self._embed(batch).to(self.device)
+        if b_reel < b:
+            n_pad = (b - b_reel) * _ql
+            entry["x"].zero_()
+            entry["x"][:b_reel * _ql].copy_(emb, non_blocking=True)
+            entry["positions"].zero_()
+            entry["positions"][:b_reel * _ql].copy_(batch.positions, non_blocking=True)
+            entry["slots"].fill_(-1)
+            entry["slots"][:b_reel * _ql].copy_(batch.slot_mapping, non_blocking=True)
+            sl = torch.zeros(b, dtype=torch.long)
+            sl[:b_reel] = torch.tensor(batch.seq_lens, dtype=torch.long)
+            entry["seq_lens"].copy_(sl, non_blocking=True)
+        else:
+            entry["x"].copy_(emb, non_blocking=True)
+            entry["positions"].copy_(batch.positions, non_blocking=True)
+            entry["slots"].copy_(batch.slot_mapping, non_blocking=True)
+            entry["seq_lens"].copy_(
+                torch.tensor(batch.seq_lens, dtype=torch.long), non_blocking=True)
         # Table completee au godet avec le bloc 0 : lu, dequantifie, masque.
         tables = entry["tables"]
         tables.zero_()
