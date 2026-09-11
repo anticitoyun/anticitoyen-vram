@@ -258,9 +258,18 @@ def main() -> int:
     if any(r.get("echec") for r in res):
         print("\nECHEC / CAUSE: un bras n'a pas rendu / SUITE: voir ci-dessus")
         return 1
+    # UN SEUL MODE (ex. base_croissant) NE FAIT PAS UNE PAIRE A/B. La version
+    # precedente faisait `res[1]` en aveugle et levait IndexError APRES avoir
+    # calcule et sauve la PPL — le resultat etait bon, le tool plantait quand
+    # meme. On imprime chaque bras, et le verdict A/B seulement s'il y a deux
+    # bras a comparer.
+    for r in res:
+        print(f"  bras {r['bras']:16s} PPL {r['ppl']}")
+    if len(res) < 2:
+        (sortie / "ab-ordre.json").write_text(json.dumps(
+            {"bras": res, "etalon": PPL_REFERENCE}, indent=1))
+        return 0
     A, B = res[0]["ppl"], res[1]["ppl"]
-    print(f"\n  bras A, ordre actuel   PPL {A}")
-    print(f"  bras B, ordre inverse  PPL {B}")
     print(f"  ecart B - A            {B - A:+.4f}")
     if B < A - 0.005:
         verdict = ("L'ORDRE EST MAL ORIENTE : le renverser AMELIORE la "
