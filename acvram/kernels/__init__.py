@@ -120,6 +120,12 @@ def _nvcc_path() -> str:
         return os.path.join(home, "bin", "nvcc")
     for cand in ("/usr/local/cuda/bin/nvcc", "/opt/cuda/bin/nvcc"):
         if os.path.exists(cand):
+            # torch.utils.cpp_extension ne lit PAS ce module : il consulte
+            # CUDA_HOME lui-meme, puis le PATH. Sans cette ligne, notre choix
+            # ne vaut que pour notre propre detection, et torch recompile avec
+            # le 12.0 du PATH — constate par f2 le 11/09 apres le correctif
+            # precedent. Poser la variable rend le choix effectif pour les deux.
+            os.environ.setdefault("CUDA_HOME", os.path.dirname(os.path.dirname(cand)))
             return cand
     return shutil.which("nvcc") or ""
 
