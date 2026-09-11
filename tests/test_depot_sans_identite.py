@@ -56,7 +56,15 @@ COURRIEL_TOLERE = ("noreply", "example")
 # gros porteurs sont `outils/verrous-fusion.tsv` et son `.ref`, 115 chacun : ce
 # sont des DONNEES de mesure, pas du code, et leur cas se regle en les deplacant
 # sous `acvram-memoire/corpus/`, pas en les reecrivant.
-PLAFOND_CHEMINS = 323
+# 11/09 — 325 apres le geste 1 de STRUCTURE.md (outils/gpu/mesure/*, +3 chemins
+# codes dans les tests qui doivent nommer le nouveau sous-dossier ; -1 pour la
+# mise a jour du chemin d'ecriture de verrous-fusion.py apres son deplacement
+# sous acvram-memoire/corpus/). Un cliquet monte quand une session le releve
+# avec sa cause et sa date — ecart net +2.
+# 11/09 apres-midi — 328 apres la fusion de `main` : `outils/echelle-de-sortie-
+# approchee.py` apporte 3 chemins codes en dur (venu de `a6`, corrige par lui
+# dans la foulee ; le plafond redescendra a 325 des que ce nettoyage arrive).
+PLAFOND_CHEMINS = 328
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute

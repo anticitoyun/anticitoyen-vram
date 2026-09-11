@@ -358,6 +358,23 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             })
         return out
 
+    # -- capteurs -----------------------------------------------------------
+    # Toutes les puces hwmon, les cartes NVIDIA avec leurs raisons de bridage,
+    # et le systeme (psutil). Cache d'une seconde : hwmon est instantane mais
+    # nvidia-smi coute ~30 ms, et l'interface rafraichit toutes les deux
+    # secondes depuis plusieurs fenetres.
+    _CACHE_CAPT: dict = {"t": 0.0, "v": None}
+
+    @app.get("/capteurs", include_in_schema=False)
+    async def capteurs() -> dict:
+        from . import capteurs as _c
+        maintenant = time.time()
+        if _CACHE_CAPT["v"] is not None and maintenant - _CACHE_CAPT["t"] < 1.0:
+            return _CACHE_CAPT["v"]
+        rep = _c.relever()
+        _CACHE_CAPT.update(t=maintenant, v=rep)
+        return rep
+
     @app.get("/materiel", include_in_schema=False)
     async def materiel() -> dict:
         """Toutes les cartes de la machine, pas seulement celles qu'acvram sert.

@@ -137,6 +137,12 @@ chmod 755 "$PKG/usr/bin/acvram"
 # cherche un serveur deja en marche et ouvre sa console ; s'il n'en trouve
 # aucun, il dit quoi taper au lieu de deviner un modele.
 install -m 755 packaging/acvram-console "$PKG/usr/bin/acvram-console"
+# La fenetre native (GTK + WebKit) : meme page, meme theme, sans navigateur,
+# avec le choix du modele, le demarrage du serveur, le plein ecran, la galerie
+# dans sa fenetre, et une barre d'etat qui lit les capteurs. Elle a besoin de
+# carte.sh pour prendre le verrou de la carte qu'elle sert.
+install -m 755 packaging/acvram-gui "$PKG/usr/bin/acvram-gui"
+install -D -m 755 outils/carte.sh "$PKG/usr/share/acvram/carte.sh"
 install -m 644 packaging/acvram.desktop "$PKG/usr/share/applications/acvram.desktop"
 install -m 644 packaging/acvram.svg \
         "$PKG/usr/share/icons/hicolor/scalable/apps/acvram.svg"
@@ -148,8 +154,8 @@ Version: $VERSION
 Section: science
 Priority: optional
 Architecture: amd64
-Depends: python3 (>= 3.10), python3-venv, python3-pip, ca-certificates, curl
-Recommends: nvidia-driver-575 | nvidia-driver-580 | nvidia-driver-595
+Depends: python3 (>= 3.10), python3-venv, python3-pip, ca-certificates, curl, python3-gi, gir1.2-gtk-3.0, gir1.2-webkit2-4.1, python3-psutil
+Recommends: lm-sensors, nvidia-driver-575 | nvidia-driver-580 | nvidia-driver-595
 Maintainer: Anticitoyen <anticitoyen@users.noreply.gitlab.com>
 Homepage: https://outils.nuages.noho.st/gitlab/anticitoyen/anticitoyen-vram
 Description: serveur d'inférence LLM pour GPU hétérogènes (NVFP4 + INT4)

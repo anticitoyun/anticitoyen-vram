@@ -1,0 +1,365 @@
+#!/usr/bin/env python3
+"""acvram-gui — la console acvram dans une fenêtre native, sans navigateur.
+
+POURQUOI UNE FENÊTRE NATIVE ET NON UN ONGLET. La console web dépend d'un
+navigateur ouvert, de ses onglets, de son bloqueur de fenêtres (la galerie a
+été bloquée en silence par Chromium le 10/09). Une fenêtre à soi n'a aucun de
+ces problèmes, apparaît dans le menu et la barre des tâches sous son nom, et se
+ferme avec la machine.
+
+POURQUOI WEBKIT ET NON DES WIDGETS GTK. La console est du HTML/CSS/JS et
+change souvent ; la refaire en widgets doublerait chaque évolution. WebKit rend
+exactement la même page, dans le même thème rose, avec zéro divergence. La
+fenêtre apporte ce que la page ne peut pas : démarrer et arrêter le serveur,
+choisir le modèle, plein écran, zoom, une seconde fenêtre pour la galerie, et
+une barre d'état qui lit les capteurs même quand la page ne le fait pas.
+
+CE QU'IL FAIT AU DÉMARRAGE. Il cherche un serveur acvram déjà en marche (le
+champ `acvram` de /v1/models — /health ne suffit pas, llama-server le porte
+aussi). S'il en trouve un, il l'ouvre. Sinon il propose de choisir un modèle
+dans le parc et démarre `acvram serve` lui-même, dans un sous-processus qu'il
+arrête à la fermeture. Il ne devine jamais le modèle.
+
+Dépendances Debian : python3-gi, gir1.2-gtk-3.0, gir1.2-webkit2-4.1,
+python3-psutil (facultatif, pour la barre d'état).
+"""
+from __future__ import annotations
+
+import glob
+import json
+import os
+import signal
+import subprocess
+import sys
+import threading
+import urllib.request
+
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("WebKit2", "4.1")
+from gi.repository import GLib, Gtk, WebKit2  # noqa: E402
+
+PORTS = [int(p) for p in os.environ.get("ACVRAM_PORTS", "8000 8081 8080 8765 8766").split()]
+PARC = os.environ.get("ACVRAM_PARC", os.path.expanduser("~/Modeles/models_acvram"))
+PARCS_CONNUS = [PARC, "/mnt/4TO_SATACMR_2022/Modeles/models_acvram",
+                os.path.expanduser("~/models_acvram")]
+PORT_DEFAUT = int(os.environ.get("ACVRAM_PORT", "8765"))
+
+# Le thème de la page, repris pour les écrans natifs (accueil, erreurs) afin
+# que rien ne détonne : mêmes nuances, même police.
+CSS = """
+:root{--fond:#120a10;--carte:#1c1018;--bord:#3b1f30;--texte:#fbe4ee;--texte-2:#c98fae;
+--rose-clair:#f9a8d4;--rose-vif:#ec4899;--rose-nuit:#9d174d;--alerte:#fb7185}
+body{margin:0;background:var(--fond);color:var(--texte);font:14px/1.5 system-ui,sans-serif;padding:28px}
+h1{font-size:22px;color:var(--rose-clair);margin:0 0 6px}
+h2{font-size:15px;color:var(--rose-clair);margin:22px 0 8px}
+.carte{background:var(--carte);border:1px solid var(--bord);border-radius:14px;padding:16px 18px;margin:12px 0}
+.note{color:var(--texte-2);font-size:12px}
+select,button{background:var(--carte);color:var(--texte);border:1px solid var(--bord);border-radius:10px;
+padding:8px 12px;font:inherit}
+select{width:100%;margin:8px 0}
+button{cursor:pointer;background:var(--rose-nuit);border-color:var(--rose-vif)}
+button:hover{background:var(--rose-vif)}
+code{color:var(--rose-clair)}
+.ko{color:var(--alerte)}
+"""
+
+
+def serveur_acvram(port: int) -> bool:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=1) as r:
+            return b'"acvram"' in r.read()
+    except Exception:
+        return False
+
+
+def trouver_serveur() -> int | None:
+    for p in PORTS:
+        if serveur_acvram(p):
+            return p
+    return None
+
+
+def modeles_du_parc() -> list[tuple[str, str]]:
+    """(nom, chemin) pour chaque dossier converti qui porte un manifeste."""
+    vus, out = set(), []
+    for parc in PARCS_CONNUS:
+        for m in sorted(glob.glob(os.path.join(parc, "*", "acvram_manifest.json"))):
+            d = os.path.dirname(m)
+            if d in vus:
+                continue
+            vus.add(d)
+            taille = 0
+            try:
+                for f in os.scandir(d):
+                    if f.is_file():
+                        taille += f.stat().st_size
+            except OSError:
+                pass
+            out.append((f"{os.path.basename(d)}  ({taille / 2**30:.1f} Gio)", d))
+    return out
+
+
+def page_accueil(erreur: str = "") -> str:
+    opts = "".join(f'<option value="{c}">{n}</option>' for n, c in modeles_du_parc())
+    if not opts:
+        opts = '<option disabled>aucun modèle converti trouvé — ACVRAM_PARC ?</option>'
+    cartes = ""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=index,name,memory.total",
+                              "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=3).stdout
+        for l in out.strip().splitlines():
+            i, n, m = [x.strip() for x in l.split(",")]
+            cartes += f'<option value="{i}">{i} · {n} · {int(m) / 1024:.0f} Gio</option>'
+    except Exception:
+        cartes = '<option value="">nvidia-smi indisponible</option>'
+    err = f'<p class="ko">{erreur}</p>' if erreur else ""
+    return f"""<!doctype html><html><head><meta charset="utf-8"><style>{CSS}</style></head><body>
+<h1>acvram</h1>
+<p class="note">Aucun serveur acvram ne répond sur les ports {" ".join(map(str, PORTS))}.
+Choisissez un modèle et une carte : la console s'ouvrira dès que le serveur répond.</p>
+{err}
+<div class="carte">
+  <h2>modèle</h2>
+  <select id="modele">{opts}</select>
+  <h2>carte</h2>
+  <select id="carte">{cartes}</select>
+  <h2>options</h2>
+  <label><input type="checkbox" id="graphes" checked> graphes CUDA</label><br>
+  <label>emplacements (slots) <input type="number" id="slots" value="4" min="1" max="32" style="width:60px"></label><br>
+  <label>contexte max <input type="number" id="ctx" value="8192" min="512" step="512" style="width:90px"></label>
+  <p><button onclick="lancer()">démarrer le serveur</button></p>
+  <p class="note">Le serveur est un sous-processus de cette fenêtre : la fermer l'arrête.
+  Il tourne sous <code>outils/carte.sh</code> quand il est disponible, avec le verrou de la carte choisie.</p>
+</div>
+<script>
+function lancer(){{
+  const m=document.getElementById('modele').value, c=document.getElementById('carte').value;
+  window.webkit.messageHandlers.acvram.postMessage(JSON.stringify({{
+    action:'lancer', modele:m, carte:c, graphes:document.getElementById('graphes').checked,
+    slots:document.getElementById('slots').value, ctx:document.getElementById('ctx').value}}));
+}}
+</script></body></html>"""
+
+
+def page_attente(modele: str) -> str:
+    return f"""<!doctype html><html><head><meta charset="utf-8"><style>{CSS}</style></head><body>
+<h1>acvram</h1><div class="carte"><h2>chargement de <code>{os.path.basename(modele)}</code>…</h2>
+<p class="note" id="j">le journal du serveur défile ci-dessous</p><pre id="log" style="font-size:11px;color:#c98fae;max-height:60vh;overflow:auto"></pre></div>
+</body></html>"""
+
+
+class Fenetre(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="acvram")
+        l, h = (os.environ.get("ACVRAM_GUI_TAILLE", "1280x860").split("x") + ["860"])[:2]
+        self.set_default_size(int(l), int(h))
+        self.set_icon_name("acvram")
+        self.proc: subprocess.Popen | None = None
+        self.port: int | None = None
+        self.galerie: Gtk.Window | None = None
+
+        boite = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.add(boite)
+
+        # Barre d'outils native : ce que la page ne peut pas faire seule.
+        barre = Gtk.HeaderBar(show_close_button=True, title="acvram")
+        self.set_titlebar(barre)
+        for ico, tip, cb in (("view-refresh", "recharger (F5)", self.recharger),
+                             ("view-fullscreen", "plein écran (F11)", self.plein_ecran),
+                             ("zoom-in", "zoom + (Ctrl +)", lambda *_: self.zoom(0.1)),
+                             ("zoom-out", "zoom − (Ctrl −)", lambda *_: self.zoom(-0.1)),
+                             ("image-x-generic", "galerie dans une fenêtre (G)", self.ouvrir_galerie),
+                             ("process-stop", "arrêter le serveur lancé ici", self.arreter_serveur)):
+            b = Gtk.Button.new_from_icon_name(ico, Gtk.IconSize.BUTTON)
+            b.set_tooltip_text(tip)
+            b.connect("clicked", cb)
+            barre.pack_end(b) if ico == "process-stop" else barre.pack_start(b)
+
+        self.web = WebKit2.WebView()
+        reglages = self.web.get_settings()
+        reglages.set_enable_developer_extras(True)
+        reglages.set_enable_javascript(True)
+        # Le pont page → Python : la page d'accueil envoie « lancer ».
+        gest = self.web.get_user_content_manager()
+        gest.register_script_message_handler("acvram")
+        gest.connect("script-message-received::acvram", self.message_page)
+        boite.pack_start(self.web, True, True, 0)
+
+        self.etat = Gtk.Label(xalign=0)
+        self.etat.set_margin_start(10); self.etat.set_margin_end(10)
+        self.etat.set_margin_top(3); self.etat.set_margin_bottom(3)
+        boite.pack_start(self.etat, False, False, 0)
+
+        self.connect("key-press-event", self.touche)
+        self.connect("destroy", self.fermer)
+        GLib.timeout_add_seconds(2, self.rafraichir_etat)
+
+        port = trouver_serveur()
+        if port:
+            self.ouvrir(port)
+        else:
+            self.web.load_html(page_accueil(), "file:///")
+
+    # -- navigation ---------------------------------------------------------
+    def ouvrir(self, port: int):
+        self.port = port
+        self.web.load_uri(f"http://127.0.0.1:{port}/")
+
+    def recharger(self, *_):
+        self.web.reload()
+
+    def plein_ecran(self, *_):
+        if getattr(self, "_fs", False):
+            self.unfullscreen(); self._fs = False
+        else:
+            self.fullscreen(); self._fs = True
+
+    def zoom(self, d: float):
+        self.web.set_zoom_level(max(0.5, min(3.0, self.web.get_zoom_level() + d)))
+
+    def ouvrir_galerie(self, *_):
+        if not self.port:
+            return
+        if self.galerie is None:
+            self.galerie = Gtk.Window(title="acvram — galerie")
+            self.galerie.set_default_size(1100, 800)
+            w = WebKit2.WebView()
+            self.galerie.add(w)
+            self.galerie.connect("destroy", lambda *_: setattr(self, "galerie", None))
+            w.load_uri(f"http://127.0.0.1:{self.port}/galerie")
+            self.galerie.show_all()
+        else:
+            self.galerie.present()
+
+    def touche(self, _w, ev):
+        from gi.repository import Gdk
+        k = Gdk.keyval_name(ev.keyval)
+        ctrl = ev.state & Gdk.ModifierType.CONTROL_MASK
+        if k == "F5": self.recharger()
+        elif k == "F11": self.plein_ecran()
+        elif ctrl and k in ("plus", "equal", "KP_Add"): self.zoom(0.1)
+        elif ctrl and k in ("minus", "KP_Subtract"): self.zoom(-0.1)
+        elif ctrl and k == "0": self.web.set_zoom_level(1.0)
+        elif ctrl and k == "q": self.close()
+        elif k in ("g", "G") and not ctrl: self.ouvrir_galerie()
+        else: return False
+        return True
+
+    # -- serveur ------------------------------------------------------------
+    def message_page(self, _gest, res):
+        try:
+            d = json.loads(res.get_js_value().to_string())
+        except Exception:
+            return
+        if d.get("action") == "lancer":
+            self.lancer_serveur(d)
+
+    def lancer_serveur(self, d: dict):
+        modele = d["modele"]
+        env = dict(os.environ)
+        if d.get("carte", "") != "":
+            env["CUDA_VISIBLE_DEVICES"] = str(d["carte"])
+            env["ACVRAM_VERROU"] = f"/tmp/acvram-carte-{d['carte']}.lock"
+        env["ACVRAM_NOM"] = "acvram-gui"
+        env["ACVRAM_TYPE"] = "mesure"
+        if not d.get("graphes", True):
+            env["ACVRAM_GRAPHS"] = "0"
+        cmd = ["acvram", "serve", modele, "--port", str(PORT_DEFAUT),
+               "--max-slots", str(d.get("slots", 4)),
+               "--max-model-len", str(d.get("ctx", 8192))]
+        carte_sh = os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])), "..", "share", "acvram", "carte.sh")
+        for cand in (carte_sh, "outils/carte.sh", "/usr/share/acvram/carte.sh"):
+            if os.path.exists(cand):
+                cmd = ["bash", cand] + cmd
+                break
+        self.web.load_html(page_attente(modele), "file:///")
+        try:
+            self.proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT, text=True,
+                                         start_new_session=True)
+        except OSError as e:
+            self.web.load_html(page_accueil(f"impossible de lancer acvram : {e}"), "file:///")
+            return
+        threading.Thread(target=self.suivre_journal, daemon=True).start()
+        GLib.timeout_add_seconds(2, self.attendre_serveur)
+
+    def suivre_journal(self):
+        assert self.proc and self.proc.stdout
+        for ligne in self.proc.stdout:
+            l = json.dumps(ligne.rstrip())
+            GLib.idle_add(self.web.run_javascript,
+                          f"(function(){{var p=document.getElementById('log');if(p){{p.textContent+={l}+'\\n';p.scrollTop=p.scrollHeight;}}}})()",
+                          None, None, None)
+
+    def attendre_serveur(self) -> bool:
+        if self.proc and self.proc.poll() is not None:
+            self.web.load_html(page_accueil(
+                f"le serveur s'est arrêté (code {self.proc.returncode}) — voir le journal ci-dessus"), "file:///")
+            self.proc = None
+            return False
+        if serveur_acvram(PORT_DEFAUT):
+            self.ouvrir(PORT_DEFAUT)
+            return False
+        return True
+
+    def arreter_serveur(self, *_):
+        if self.proc and self.proc.poll() is None:
+            os.killpg(self.proc.pid, signal.SIGTERM)
+            try:
+                self.proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                os.killpg(self.proc.pid, signal.SIGKILL)
+        self.proc = None
+        self.port = None
+        self.web.load_html(page_accueil("serveur arrêté."), "file:///")
+
+    # -- barre d'état -------------------------------------------------------
+    def rafraichir_etat(self) -> bool:
+        parts = []
+        try:
+            out = subprocess.run(["nvidia-smi", "--query-gpu=index,temperature.gpu,power.draw,utilization.gpu,memory.used,memory.total",
+                                  "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=2).stdout
+            for l in out.strip().splitlines():
+                i, t, w, u, m, mt = [x.strip() for x in l.split(",")]
+                parts.append(f"GPU{i} {t} °C · {float(w):.0f} W · {u} % · {float(m)/1024:.1f}/{float(mt)/1024:.0f} Gio")
+        except Exception:
+            pass
+        try:
+            import psutil
+            vm = psutil.virtual_memory()
+            parts.append(f"CPU {psutil.cpu_percent():.0f} % · RAM {(vm.total-vm.available)/2**30:.1f}/{vm.total/2**30:.0f} Gio")
+            temps = psutil.sensors_temperatures()
+            for cle in ("coretemp", "k10temp"):
+                if cle in temps and temps[cle]:
+                    parts.append(f"CPU {temps[cle][0].current:.0f} °C")
+                    break
+        except Exception:
+            pass
+        if self.port:
+            parts.append(f"serveur :{self.port}")
+        self.etat.set_markup('<span size="small" foreground="#c98fae">' + "   ·   ".join(parts) + "</span>")
+        return True
+
+    def fermer(self, *_):
+        self.arreter_serveur() if self.proc else None
+        Gtk.main_quit()
+
+
+def main():
+    # Un seul acvram-gui à la fois n'est pas exigé — deux fenêtres sur le même
+    # serveur sont un usage légitime (console + galerie sur deux écrans).
+    f = Fenetre()
+    f.show_all()
+    if "--galerie" in sys.argv[1:]:          # action du menu : la galerie seule
+        if f.port:
+            f.ouvrir_galerie()
+        # sans serveur, la fenêtre principale reste sur l'accueil : on ne peut
+        # pas montrer une galerie que personne ne sert.
+    signal.signal(signal.SIGINT, lambda *_: Gtk.main_quit())
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

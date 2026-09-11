@@ -27,11 +27,21 @@ set -u
 CMD=$(jq -r '.tool_input.command // empty' 2>/dev/null)
 [ -z "$CMD" ] && exit 0
 
-# Cherche l'invocation d'un script dans outils/gpu/. Motif : espace, tiret ou
-# début, suivi de `outils/gpu/<catégorie>/<script>`. On ignore le préfixe
-# éventuel `bash `, `python `, `python3 `, `./`, etc. — c'est le CHEMIN qui
-# porte la classification, pas le lanceur.
-SCRIPT=$(echo "$CMD" | grep -oE '(^|[[:space:]/])outils/gpu/(mesure|service)/[A-Za-z0-9_.-]+' | head -1 | sed 's|.*outils/gpu/|outils/gpu/|')
+# Est-ce une commande qui EXÉCUTE le script, ou un outil qui le manipule comme
+# argument ? La première approximation par regex de position échouait sur
+# `git log -- outils/gpu/mesure/x` — `--` se lit comme un argument, pas comme
+# une exécution. On regarde donc le premier mot de la ligne : seuls quelques
+# lanceurs exécutent réellement leur argument, le reste (git, sed, ls, cat,
+# grep, diff, cp, mv, chmod, echo…) le manipule sans le lancer.
+premier_mot=$(echo "$CMD" | sed 's/^[[:space:]]*//' | awk '{print $1}')
+case "$premier_mot" in
+  bash|sh|python|python3|python3.*|zsh|/*|./*|outils/*)
+    ;;    # lanceur, on continue vers la classification
+  *)
+    exit 0 ;;  # git, sed, ls, ... : le chemin est un argument textuel
+esac
+
+SCRIPT=$(echo "$CMD" | grep -oE 'outils/gpu/(mesure|service)/[A-Za-z0-9_.-]+' | head -1)
 [ -z "$SCRIPT" ] && exit 0
 
 CATEGORIE=$(echo "$SCRIPT" | cut -d/ -f3)

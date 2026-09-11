@@ -43,8 +43,14 @@ print(f"          rapport max/min = {vals.max()/vals.min():.1f}x")
 print(f"          ecart-type / moyenne = {vals.std()/vals.mean():.3f}")
 q=np.percentile(vals,[5,25,50,75,95])
 print(f"          quantiles 5/25/50/75/95 : " + "  ".join(f"{x:.4g}" for x in q))
-json.dump(normes, open("~/Bureau/Claude/acvram-memoire/corpus/normes-poids-source.json","w"))
+# Sortie relative a la racine du depot, pas a un chemin de poste : le fichier
+# pointait vers le dossier acvram-memoire SANS DISTANT (le doublon du 10/09).
+_RACINE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SORTIE = os.environ.get("ACVRAM_NORMES_SORTIE",
+                         os.path.join(_RACINE, "acvram-memoire", "corpus", "normes-poids-source.json"))
+json.dump(normes, open(_SORTIE, "w"))
 print("\npar type de projection :")
+import os
 import re, collections
 par=collections.defaultdict(list)
 for k,v in normes.items():

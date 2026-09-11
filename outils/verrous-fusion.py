@@ -200,7 +200,7 @@ def _classifier_modele(nom):
     return '?'
 
 
-def _ecrire_temoin(donnees_modeles, output_path='outils/verrous-fusion.tsv'):
+def _ecrire_temoin(donnees_modeles, output_path='acvram-memoire/corpus/verrous-fusion.tsv'):
     """Écrit le fichier témoin TSV avec en-tête explicite."""
     try:
         commit = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'],
