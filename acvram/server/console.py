@@ -183,6 +183,26 @@ PAGE = """<!doctype html>
  .gpu .chiffres{display:flex;gap:14px;margin-top:8px;flex-wrap:wrap;
         font-size:12px;color:var(--doux);font-variant-numeric:tabular-nums}
  .gpu .chiffres b{color:var(--rose-clair);font-weight:600}
+ /* capteurs : une carte par puce, une ligne par lecture, jauge coloree par
+    rapport au seuil de la puce quand elle en donne un. */
+ .capteurs{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+ .puce{background:var(--carte);border:1px solid var(--bord);border-radius:12px;padding:12px 14px}
+ .puce h3{margin:0 0 8px;font-size:14px;color:var(--rose-clair)}
+ .lect{display:grid;grid-template-columns:1fr auto;gap:2px 10px;align-items:center;
+   font-size:12px;padding:3px 0;border-bottom:1px dashed var(--bord)}
+ .lect:last-child{border-bottom:none}
+ .lect .e{color:var(--texte-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .lect .v{font-variant-numeric:tabular-nums;color:var(--rose-clair);font-weight:600;text-align:right}
+ .lect .j{grid-column:1/3;height:4px;background:var(--fond);border-radius:2px;overflow:hidden}
+ .lect .j i{display:block;height:100%;background:var(--rose-nuit)}
+ .lect.tiede .j i{background:var(--rose-vif)} .lect.chaud .j i{background:var(--alerte)}
+ .lect.chaud .v{color:var(--alerte)}
+ .bridage{display:inline-block;margin:2px 4px 0 0;padding:1px 8px;border-radius:99px;
+   font-size:11px;border:1px solid var(--alerte);color:var(--alerte)}
+ .systeme{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;margin-bottom:10px}
+ .systeme span b{color:var(--rose-clair)}
+ #capteurs_filtre{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+ #capteurs_filtre label{font-size:12px;color:var(--texte-2);cursor:pointer}
  .mot{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:9px 0;
       border-bottom:1px solid var(--bord)}
  .mot:last-child{border-bottom:none}
@@ -234,6 +254,20 @@ PAGE = """<!doctype html>
     <h2 data-t="h_moteurs">moteurs sur les cartes</h2>
     <div id="moteurs"></div>
     <div class="note" id="moteurs_note"></div>
+  </section>
+
+  <section>
+    <h2 data-t="h_capteurs">capteurs et températures</h2>
+    <div class="systeme" id="systeme"></div>
+    <div id="capteurs_filtre">
+      <label><input type="checkbox" id="f_temp" checked> <span data-t="f_temp">températures</span></label>
+      <label><input type="checkbox" id="f_fan" checked> <span data-t="f_fan">ventilateurs</span></label>
+      <label><input type="checkbox" id="f_in"> <span data-t="f_in">tensions</span></label>
+      <label><input type="checkbox" id="f_power" checked> <span data-t="f_power">puissances</span></label>
+      <label><input type="checkbox" id="f_curr"> <span data-t="f_curr">courants</span></label>
+    </div>
+    <div id="capteurs" class="capteurs"></div>
+    <div class="note" id="capteurs_note"></div>
   </section>
 
   <section>
@@ -833,7 +867,7 @@ document.addEventListener('keydown', ev => {
 const T = {
  fr:{h_parc:'choisir un modèle par carte',l_carte:'carte',l_modele:'modèle compatible',b_copier:'Copier la commande',decodage:'décodage',prefill:'prefill',encours:'en cours / en file',
   kvlibre:'cache KV libre',h_cartes:'cartes graphiques',
-  h_moteurs:'moteurs sur les cartes',h_repart:'répartition du travail',
+  h_moteurs:'moteurs sur les cartes',h_capteurs:'capteurs et températures',f_temp:'températures',f_fan:'ventilateurs',f_in:'tensions',f_power:'puissances',f_curr:'courants',h_repart:'répartition du travail',
   h_taches:'tâches',h_regl:'explications & réglages',h_moteur:'moteur',
   b_distribuer:'Distribuer',b_vider:'Vider',b_enreg:'Enregistrer',
   c_appareil:'appareil',c_couches:'couches',c_formats:'formats',
@@ -848,7 +882,7 @@ const T = {
   e_amb:'<b>Ambiances</b> — touches <code>Z</code> et <code>C</code>, <code>G</code> pour la galerie. Les images sont servies, jamais copiées.'},
  en:{h_parc:'pick a model per card',l_carte:'card',l_modele:'compatible model',b_copier:'Copy the command',decodage:'decode',prefill:'prefill',encours:'running / queued',
   kvlibre:'free KV cache',h_cartes:'graphics cards',
-  h_moteurs:'engines on the cards',h_repart:'work placement',
+  h_moteurs:'engines on the cards',h_capteurs:'sensors and temperatures',f_temp:'temperatures',f_fan:'fans',f_in:'voltages',f_power:'power',f_curr:'currents',h_repart:'work placement',
   h_taches:'tasks',h_regl:'explanations & settings',h_moteur:'engine',
   b_distribuer:'Dispatch',b_vider:'Clear',b_enreg:'Save',
   c_appareil:'device',c_couches:'layers',c_formats:'formats',
@@ -863,7 +897,7 @@ const T = {
   e_amb:'<b>Backdrops</b> — keys <code>Z</code> and <code>C</code>, <code>G</code> for the gallery. Images are served, never copied.'},
  de:{h_parc:'Modell je Karte wählen',l_carte:'Karte',l_modele:'kompatibles Modell',b_copier:'Befehl kopieren',decodage:'Dekodierung',prefill:'Prefill',encours:'laufend / wartend',
   kvlibre:'freier KV-Cache',h_cartes:'Grafikkarten',
-  h_moteurs:'Engines auf den Karten',h_repart:'Arbeitsverteilung',
+  h_moteurs:'Engines auf den Karten',h_capteurs:'Sensoren und Temperaturen',f_temp:'Temperaturen',f_fan:'Lüfter',f_in:'Spannungen',f_power:'Leistung',f_curr:'Ströme',h_repart:'Arbeitsverteilung',
   h_taches:'Aufgaben',h_regl:'Erklärungen & Einstellungen',h_moteur:'Engine',
   b_distribuer:'Verteilen',b_vider:'Leeren',b_enreg:'Speichern',
   c_appareil:'Gerät',c_couches:'Schichten',c_formats:'Formate',
@@ -878,7 +912,7 @@ const T = {
   e_amb:'<b>Hintergründe</b> — Tasten <code>Z</code> und <code>C</code>, <code>G</code> für die Galerie. Bilder werden ausgeliefert, nie kopiert.'},
  es:{h_parc:'elegir un modelo por tarjeta',l_carte:'tarjeta',l_modele:'modelo compatible',b_copier:'Copiar el comando',decodage:'decodificación',prefill:'prefill',encours:'en curso / en cola',
   kvlibre:'caché KV libre',h_cartes:'tarjetas gráficas',
-  h_moteurs:'motores en las tarjetas',h_repart:'reparto del trabajo',
+  h_moteurs:'motores en las tarjetas',h_capteurs:'sensores y temperaturas',f_temp:'temperaturas',f_fan:'ventiladores',f_in:'tensiones',f_power:'potencias',f_curr:'corrientes',h_repart:'reparto del trabajo',
   h_taches:'tareas',h_regl:'explicaciones y ajustes',h_moteur:'motor',
   b_distribuer:'Distribuir',b_vider:'Vaciar',b_enreg:'Guardar',
   c_appareil:'dispositivo',c_couches:'capas',c_formats:'formatos',
@@ -893,7 +927,7 @@ const T = {
   e_amb:'<b>Ambientes</b> — teclas <code>Z</code> y <code>C</code>, <code>G</code> para la galería. Las imágenes se sirven, nunca se copian.'},
  eo:{h_parc:'elekti modelon laŭ karto',l_carte:'karto',l_modele:'kongrua modelo',b_copier:'Kopii la komandon',decodage:'malkodado',prefill:'antaŭplenigo',encours:'kurantaj / atendantaj',
   kvlibre:'libera KV-kaŝmemoro',h_cartes:'grafikaj kartoj',
-  h_moteurs:'motoroj sur la kartoj',h_repart:'disdivido de la laboro',
+  h_moteurs:'motoroj sur la kartoj',h_capteurs:'sensiloj kaj temperaturoj',f_temp:'temperaturoj',f_fan:'ventoliloj',f_in:'tensioj',f_power:'potencoj',f_curr:'kurentoj',h_repart:'disdivido de la laboro',
   h_taches:'taskoj',h_regl:'klarigoj kaj agordoj',h_moteur:'motoro',
   b_distribuer:'Disdoni',b_vider:'Malplenigi',b_enreg:'Konservi',
   c_appareil:'aparato',c_couches:'tavoloj',c_formats:'formatoj',
@@ -932,6 +966,93 @@ traduire(lang0);
 
 charger_reglages();
 charger_parc();
+// -- capteurs --------------------------------------------------------------
+// Tout ce que la machine expose : hwmon (temperatures, ventilateurs, tensions,
+// puissances), les cartes NVIDIA avec leurs RAISONS DE BRIDAGE, et le systeme.
+// La jauge se colore par rapport au seuil que la puce donne (max, crit) ; sans
+// seuil, elle reste neutre — on n invente pas un seuil.
+function classe_seuil(l) {
+  if (l.famille === 'temp') {
+    const ref = l.crit || l.max;
+    if (ref) { if (l.valeur >= ref) return 'chaud'; if (l.valeur >= ref * 0.8) return 'tiede'; }
+    else { if (l.valeur >= 85) return 'chaud'; if (l.valeur >= 70) return 'tiede'; }
+  }
+  if (l.alarme) return 'chaud';
+  return '';
+}
+function largeur_jauge(l) {
+  if (l.famille === 'temp') { const ref = l.crit || l.max || 100; return Math.min(100, 100 * l.valeur / ref); }
+  if (l.famille === 'fan')  return Math.min(100, 100 * l.valeur / 2000);
+  if (l.famille === 'power') return Math.min(100, 100 * l.valeur / (l.max || 1000));
+  return 0;
+}
+function familles_actives() {
+  return ['temp','fan','in','power','curr'].filter(f => $('f_' + f).checked);
+}
+function bloc_gpu(c) {
+  const el = document.createElement('div'); el.className = 'puce';
+  const t = c.temp_gpu || 0, cl = t >= 85 ? 'chaud' : (t >= 70 ? 'tiede' : '');
+  let h = '<h3>GPU ' + c.index + ' · ' + c.nom + '</h3>';
+  h += '<div class="lect ' + cl + '"><span class="e">température GPU</span><span class="v">' + nb(c.temp_gpu,0) + ' °C</span>'
+     + '<span class="j"><i style="width:' + Math.min(100, t) + '%"></i></span></div>';
+  if (c.temp_mem != null) h += '<div class="lect"><span class="e">température mémoire</span><span class="v">' + nb(c.temp_mem,0) + ' °C</span></div>';
+  h += '<div class="lect"><span class="e">ventilateur</span><span class="v">' + nb(c.ventilateur_pct,0) + ' %</span></div>';
+  h += '<div class="lect"><span class="e">puissance</span><span class="v">' + nb(c.watts,0) + ' / ' + nb(c.watts_max,0) + ' W</span>'
+     + '<span class="j"><i style="width:' + (c.watts_max ? 100*c.watts/c.watts_max : 0).toFixed(0) + '%"></i></span></div>';
+  h += '<div class="lect"><span class="e">horloge SM</span><span class="v">' + nb(c.horloge_sm,0) + ' / ' + nb(c.horloge_sm_max,0) + ' MHz</span></div>';
+  h += '<div class="lect"><span class="e">horloge mémoire</span><span class="v">' + nb(c.horloge_mem,0) + ' MHz</span></div>';
+  h += '<div class="lect"><span class="e">occupation calcul / mémoire</span><span class="v">' + nb(c.occupation,0) + ' % / ' + nb(c.occupation_mem,0) + ' %</span></div>';
+  h += '<div class="lect"><span class="e">VRAM</span><span class="v">' + nb(c.mio_pris/1024,1) + ' / ' + nb(c.mio_total/1024,1) + ' Gio</span></div>';
+  h += '<div class="lect"><span class="e">PCIe</span><span class="v">gen ' + nb(c.pcie_gen,0) + ' x' + nb(c.pcie_largeur,0) + '</span></div>';
+  if (c.bridages && c.bridages.length)
+    h += '<div>' + c.bridages.map(b => '<span class="bridage">' + b + '</span>').join('') + '</div>';
+  el.innerHTML = h; return el;
+}
+async function charger_capteurs() {
+  try {
+    const r = await (await fetch('/capteurs')).json();
+    const box = $('capteurs'); box.innerHTML = '';
+    for (const c of r.nvidia || []) box.appendChild(bloc_gpu(c));
+    const fam = familles_actives();
+    let n = 0;
+    for (const p of r.hwmon || []) {
+      const lect = p.lectures.filter(l => fam.includes(l.famille));
+      if (!lect.length) continue;
+      const el = document.createElement('div'); el.className = 'puce';
+      let h = '<h3>' + p.nom + '</h3>';
+      for (const l of lect) {
+        n++;
+        const cl = classe_seuil(l);
+        const seuil = l.crit ? ' · crit ' + nb(l.crit,0) : (l.max ? ' · max ' + nb(l.max,0) : '');
+        h += '<div class="lect ' + cl + '"><span class="e" title="' + l.id + '">' + l.etiquette + '</span>'
+           + '<span class="v">' + nb(l.valeur, l.famille === 'in' ? 3 : (l.famille === 'fan' ? 0 : 1)) + ' ' + l.unite + '</span>';
+        if (l.famille !== 'in' && l.famille !== 'curr')
+          h += '<span class="j" title="' + seuil.replace(' · ','') + '"><i style="width:' + largeur_jauge(l).toFixed(0) + '%"></i></span>';
+        h += '</div>';
+      }
+      el.innerHTML = h; box.appendChild(el);
+    }
+    const s = r.systeme || {};
+    if (s.disponible) {
+      const j = Math.floor(s.depuis / 86400), hh = Math.floor((s.depuis % 86400) / 3600);
+      $('systeme').innerHTML =
+        '<span>CPU <b>' + nb(s.cpu_pct,0) + ' %</b> · ' + nb(s.cpu_mhz,0) + ' MHz</span>'
+      + '<span>charge <b>' + s.charge_1_5_15.join(' / ') + '</b></span>'
+      + '<span>RAM <b>' + nb(s.ram_gio_prise,1) + '</b> / ' + nb(s.ram_gio_total,1) + ' Gio</span>'
+      + '<span>swap <b>' + nb(s.swap_gio_pris,1) + '</b> / ' + nb(s.swap_gio_total,1) + ' Gio</span>'
+      + '<span>processus <b>' + s.processus + '</b></span>'
+      + '<span>allumé depuis <b>' + j + ' j ' + hh + ' h</b></span>'
+      + (s.disques || []).filter(d => d.gio_total > 50).map(d =>
+          '<span title="' + d.dev + '">' + d.montage + ' <b>' + nb(d.pct,0) + ' %</b> de ' + nb(d.gio_total/1024,1) + ' Tio</span>').join('');
+    }
+    $('capteurs_note').textContent = (r.hwmon || []).length + ' puce(s) hwmon, ' + n + ' lecture(s) affichée(s), '
+      + (r.nvidia || []).length + ' GPU NVIDIA — /sys/class/hwmon, nvidia-smi, psutil';
+  } catch (e) { $('capteurs_note').textContent = 'capteurs indisponibles : ' + e.message; }
+}
+for (const f of ['temp','fan','in','power','curr']) $('f_' + f).addEventListener('change', charger_capteurs);
+charger_capteurs();
+setInterval(charger_capteurs, 2000);
+
 charger_cartes();
 charger_moteurs();
 setInterval(charger_cartes, 2000);
