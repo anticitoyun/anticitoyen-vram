@@ -972,3 +972,69 @@ def _gpu_counts(spec: Optional[str], n_gpus: int) -> list[int]:
     if not wanted:
         return [n_gpus]
     return [min(n_gpus, max(wanted) + 1)]
+
+
+# --- coût de l'exil : le geste 1 de ggrun (bead anticitoyen-vram-jt5) ---------
+#
+# `_reajuster_plan` (engine/loader.py) décide d'exiler un MLP en RAM hôte sur le
+# seul axe des OCTETS : il descend des couches tant que les poids résidents
+# dépassent la capacité de l'étage. Or le coût de l'exil est entièrement dans le
+# TEMPS — un facteur 3 à 4 mesuré (docs/TEST-EXIL.md:97-102, +196 s pour douze
+# couches), parce qu'une couche transférée est bornée par le lien PCIe (~26 Go/s
+# gen4x16) et non par la VRAM (~1790 Go/s) : deux ordres de grandeur par octet.
+# Décider sur les octets ne voit pas cette falaise.
+#
+# Cette fonction la chiffre AVANT le chargement, sans carte, à partir des bandes
+# DÉCLARÉES du plan (`Tier.link_bandwidth`, `Tier.read_bandwidth`) : pour chaque
+# MLP exilé, un aller PCIe par jeton coûte `mlp_active_bytes / link_bandwidth` ;
+# on rapporte la somme au plancher d'un pas de décodage SANS exil (chaque poids
+# actif lu une fois en VRAM). Le rapport est le surcoût relatif de l'exil.
+#
+# Elle SIGNALE, elle ne refuse pas : un modèle qui ne tient qu'au prix de l'exil
+# doit tout de même se charger — l'alternative est l'OOM, pas un plan plus
+# rapide. Le signal rend le chiffre qui manquait à la décision sur les octets.
+#
+# Rend None — et non zéro — quand elle ne peut pas chiffrer honnêtement : aucun
+# MLP exilé, ou une bande inconnue (règle : un échec est un résultat, pas un
+# chiffre reconstruit). Un plan sans exil, ou dont le lien est aussi rapide que
+# la VRAM, doit pouvoir rendre « pas de falaise » — c'est ce qui en fait un
+# contrôle et non une alarme qui sonne toujours.
+
+def estimer_cout_exil(plan: "Plan", seuil: float = 0.20) -> Optional[dict]:
+    """Surcoût en temps de l'exil des MLP en RAM hôte, rapporté au pas résident.
+
+    `seuil` est la part du pas de décodage au-delà de laquelle l'exil est une
+    falaise (0,20 par défaut). Rend un dict chiffré, ou None si rien n'est
+    exilé ou si une bande manque pour chiffrer.
+    """
+    tiers = {t.name: t for t in plan.tiers}
+    t_transfert = 0.0        # secondes de PCIe ajoutées par jeton par l'exil
+    t_pas_resident = 0.0     # plancher d'un pas SANS exil (tout lu en VRAM)
+    octets_exiles = 0
+    n_exiles = 0
+    for l in plan.layers:
+        t = tiers.get(l.exec_device)
+        if t is None or t.kind != "gpu":
+            continue          # une couche calculée sur l'hôte n'est pas la
+                              # falaise du streaming : autre modèle de coût
+        if t.read_bandwidth <= 0:
+            return None       # bande VRAM inconnue : on ne chiffre pas
+        t_pas_resident += (l.attn_bytes + l.mlp_active_bytes) / (t.read_bandwidth * 1e9)
+        if l.mlp_storage == "cpu":
+            if t.link_bandwidth <= 0:
+                return None   # lien PCIe inconnu : on ne chiffre pas
+            t_transfert += l.mlp_active_bytes / (t.link_bandwidth * 1e9)
+            octets_exiles += l.mlp_active_bytes
+            n_exiles += 1
+    if n_exiles == 0 or t_pas_resident <= 0:
+        return None
+    ratio = t_transfert / t_pas_resident
+    return {
+        "n_couches_exilees": n_exiles,
+        "octets_exiles": octets_exiles,
+        "t_transfert_s": t_transfert,
+        "t_pas_resident_s": t_pas_resident,
+        "ratio": ratio,
+        "seuil": seuil,
+        "franchit_seuil": ratio > seuil,
+    }

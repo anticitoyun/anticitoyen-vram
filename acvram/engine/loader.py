@@ -1185,6 +1185,36 @@ def _reajuster_plan(plan: Plan, manifest: dict) -> None:
                   f"(poids réels {utilise() / 2**30:.1f} Gio pour {capacite / 2**30:.1f} Gio libres)",
                   flush=True)
     _rapatrier_sur_une_carte(plan, attn, mlp, embed, head)
+    _signaler_cout_exil(plan)
+
+
+def _signaler_cout_exil(plan: Plan) -> None:
+    """Chiffre le surcoût en temps de l'exil décidé sur l'axe des octets.
+
+    `_reajuster_plan` exile pour tenir en capacité (octets) ; l'exil coûte en
+    temps (facteur 3-4, docs/TEST-EXIL.md). Ce signal donne le chiffre qui
+    manquait — voir `estimer_cout_exil` (memory/tiering.py) et le bead
+    anticitoyen-vram-jt5. Il SIGNALE, il ne refuse pas : le plan reste
+    chargeable, sans quoi un modèle qui ne tient qu'au prix de l'exil tomberait
+    en OOM au lieu de tourner plus lentement. Seuil ajustable par
+    `ACVRAM_SEUIL_EXIL` (part du pas, 0,20 par défaut)."""
+    from ..memory.tiering import estimer_cout_exil
+    try:
+        seuil = float(os.environ.get("ACVRAM_SEUIL_EXIL", "0.20"))
+    except ValueError:
+        seuil = 0.20
+    c = estimer_cout_exil(plan, seuil=seuil)
+    if c is None:
+        return
+    msg = (f"exil : {c['n_couches_exilees']} MLP en RAM hôte = "
+           f"{c['t_transfert_s'] * 1e3:.1f} ms/jeton de PCIe, soit "
+           f"{c['ratio'] * 100:.0f} % du pas de décodage résident "
+           f"({c['t_pas_resident_s'] * 1e3:.1f} ms)")
+    plan.warnings.append(msg)
+    if c["franchit_seuil"]:
+        print(f"[acvram] ATTENTION — {msg} ; au-delà du seuil "
+              f"{seuil * 100:.0f} % : falaise de l'exil (docs/TEST-EXIL.md)",
+              flush=True)
 
 
 def _rapatrier_sur_une_carte(plan: Plan, attn: dict, mlp: dict,

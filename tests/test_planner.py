@@ -101,3 +101,89 @@ def test_plan_survives_a_json_round_trip(tmp_path, target_rig):
     spec = _spec(tmp_path, "rt")
     plan, _ = auto_plan(spec, target_rig, PlannerOptions(max_model_len=4096))
     assert json.loads(json.dumps(plan.to_dict()))["model"] == plan.model
+
+
+# --- coût de l'exil : bead anticitoyen-vram-jt5 (geste 1 de ggrun) -----------
+#
+# On construit un plan synthétique plutôt que de passer par auto_plan : le but
+# est de tester la fonction de coût sur des bandes et des octets fixés, pas la
+# planification. Sans carte, sans modèle chargé (le SSD des modèles est
+# injoignable).
+
+from acvram.memory.tiering import (Plan, Tier, LayerPlacement,  # noqa: E402
+                                   estimer_cout_exil)
+from acvram.engine.loader import _signaler_cout_exil  # noqa: E402
+
+_GIB = 2 ** 30
+
+
+def _tier_5090(link_gbps: float = 26.8) -> Tier:
+    # 5090 : VRAM ~1792 Go/s ; lien gen4x16 estimé ~26,8 Go/s (detect.py:200).
+    return Tier(name="cuda:0", kind="gpu", device_index=0, capacity=32 * _GIB,
+                weight_format="nvfp4", kv_format="fp8",
+                read_bandwidth=1792.0, link_bandwidth=link_gbps)
+
+
+def _plan_nemotron(n_exiles: int, link_gbps: float = 26.8) -> Plan:
+    """Approche nemotron-lightning-exl3 : 32 couches, ~0,56 Gio de MLP actif
+    par couche (17,8 Gio / 32), attention menue. `n_exiles` MLP en RAM hôte."""
+    mlp = int(0.556 * _GIB)
+    attn = int(0.05 * _GIB)
+    layers = []
+    for i in range(32):
+        exile = i >= 32 - n_exiles
+        layers.append(LayerPlacement(
+            index=i, exec_device="cuda:0", attn_storage="cuda:0",
+            mlp_storage="cpu" if exile else "cuda:0", fmt="nvfp4",
+            attn_bytes=attn, mlp_bytes=mlp, mlp_active_bytes=mlp))
+    return Plan(model="nemotron-lightning-exl3", tiers=[_tier_5090(link_gbps)],
+                layers=layers)
+
+
+def test_exil_franchit_le_seuil_falaise():
+    # PRÉDICTION SCELLÉE (règle 4), lien gen4x16 estimé 26,8 Go/s, VRAM 1792 :
+    #   T_transfert(1 couche) = 0,556 Gio / 26,8 Go/s ≈ 22,3 ms/jeton
+    #   pas résident (32 couches, 0,606 Gio chacune) ≈ 11,6 ms
+    # Donc UNE seule couche exilée coûte déjà ~1,9× le pas entier : franchit de
+    # très loin le seuil de 20 %. Issue qui me gênerait : le modèle over-
+    # signale si le lien réel est plus rapide — c'est pourquoi la bande est un
+    # paramètre du plan (mesurable), pas une constante, et pourquoi le test
+    # « pas de falaise » ci-dessous vérifie que le signal peut se taire.
+    c = estimer_cout_exil(_plan_nemotron(8))
+    assert c is not None
+    assert c["n_couches_exilees"] == 8
+    assert c["ratio"] > 1.0            # l'exil coûte plus qu'un pas entier
+    assert c["franchit_seuil"]
+    # une couche exilée seule franchit déjà le seuil
+    assert estimer_cout_exil(_plan_nemotron(1))["franchit_seuil"]
+
+
+def test_pas_de_falaise_quand_rien_n_est_exile():
+    # Le contrôle DOIT pouvoir rendre « faux » (règle 5) : aucun MLP exilé →
+    # rien à chiffrer → None, aucun avertissement.
+    plan = _plan_nemotron(0)
+    assert estimer_cout_exil(plan) is None
+    _signaler_cout_exil(plan)
+    assert not any("exil" in w for w in plan.warnings)
+
+
+def test_pas_de_falaise_quand_le_lien_est_rapide():
+    # Même exil, mais un lien aussi rapide que la VRAM (NVLink hypothétique) :
+    # le surcoût tombe sous le seuil. Deuxième preuve que le signal se tait
+    # quand il le doit — sinon ce serait une alarme, pas un contrôle.
+    c = estimer_cout_exil(_plan_nemotron(1, link_gbps=1792.0))
+    assert c is not None and not c["franchit_seuil"]
+    assert c["ratio"] < 0.20
+
+
+def test_bande_inconnue_ne_fabrique_pas_de_chiffre():
+    # Règle 10 : un échec est un résultat. Lien à 0 (inconnu) → None, pas un
+    # zéro trompeur qui dirait « exil gratuit ».
+    plan = _plan_nemotron(4, link_gbps=0.0)
+    assert estimer_cout_exil(plan) is None
+
+
+def test_signal_exil_ecrit_un_avertissement_chiffre():
+    plan = _plan_nemotron(8)
+    _signaler_cout_exil(plan)
+    assert any("exil" in w and "ms/jeton" in w for w in plan.warnings)
