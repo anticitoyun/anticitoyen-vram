@@ -21,7 +21,7 @@ import json
 import sys
 from pathlib import Path
 
-BASE = Path("/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram")
+BASE = Path("/mnt/2TO_2023_980PRO/Modeles/models_acvram")
 
 
 def rendre_le_cache(dossier: Path) -> int:

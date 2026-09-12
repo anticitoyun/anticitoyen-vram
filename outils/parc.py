@@ -13,7 +13,7 @@ from typing import List, Dict, Optional, Tuple
 # Racines du parc, dans l'ordre de priorite. La premiere suit le montage
 # reel du SSD (12/09/2026 : passage Mint→Ubuntu, changement de point de montage).
 PARC_ROOTS = [
-    '/run/media/anticitoyenu/2TO_2023_980PRO/Modeles/models_acvram',
+    '/mnt/2TO_2023_980PRO/Modeles/models_acvram',
     '/mnt/AI_GENERATOR/Modeles_acvram',
 ]
 

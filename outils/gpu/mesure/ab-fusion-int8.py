@@ -34,7 +34,7 @@ import sys
 from pathlib import Path
 
 RACINE = Path(__file__).resolve().parent.parent
-BASE = Path("/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram")
+BASE = Path("/mnt/2TO_2023_980PRO/Modeles/models_acvram")
 PY = "~/Bureau/Claude/anticitoyen-vram/.venv/bin/python"
 
 SONDE = r'''

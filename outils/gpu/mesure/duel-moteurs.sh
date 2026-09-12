@@ -11,7 +11,7 @@
 set -u
 S="$(dirname "$0")"
 G=/mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf
-A=/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram/Qwen3-Coder-30B-A3B-Instruct-srcQ4_K_M-nvfp4
+A=/mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-Instruct-srcQ4_K_M-nvfp4
 PY=~/Bureau/Claude/anticitoyen-vram/.venv/bin/python
 CLE=llamacpp-9c1f4c1e6f2a4d0f
 ESSAIS=7

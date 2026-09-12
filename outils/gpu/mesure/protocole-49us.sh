@@ -31,7 +31,7 @@ R="$(dirname "$S")"
 PY=~/Bureau/Claude/anticitoyen-vram/.venv/bin/python
 export PYTHONPATH="$R${PYTHONPATH:+:$PYTHONPATH}"
 [ -x "$PY" ] || { echo "ARRET : interpreteur introuvable ($PY)"; exit 3; }
-M=/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram/Qwen3-Coder-30B-A3B-Instruct-srcQ4_K_M-nvfp4
+M=/mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-Instruct-srcQ4_K_M-nvfp4
 SORTIE="${SORTIE:-/tmp/poste2-49us}"
 LIMITE=1800          # aucune mesure ne tient le PC plus de 30 min
 # UNE SEULE CARTE VISIBLE. Sans cela le moteur voit deux cartes la ou le

@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 
-A = "/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram"
+A = "/mnt/2TO_2023_980PRO/Modeles/models_acvram"
 
 
 def _snr(ref: torch.Tensor, y: torch.Tensor) -> float:

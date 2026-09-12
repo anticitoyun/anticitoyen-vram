@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from acvram.engine.config import ModelSpec  # noqa: E402
 
 BASE = os.environ.get(
-    "ACVRAM_PARC", "/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram")
+    "ACVRAM_PARC", "/mnt/2TO_2023_980PRO/Modeles/models_acvram")
 
 DEFAUTS = {}
 for ch in dataclasses.fields(ModelSpec):

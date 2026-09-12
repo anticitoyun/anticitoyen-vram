@@ -59,7 +59,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-A = "/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram"
+A = "/mnt/2TO_2023_980PRO/Modeles/models_acvram"
 
 
 def _invite(n, graine, vocab):

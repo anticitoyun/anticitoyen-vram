@@ -7,5 +7,5 @@ variable d\'environnement, sans toucher au code.
 """
 import os
 
-_DEFAUT = "/run/media/anticitoyenu/2TO_2023_980PRO/Modeles/models_acvram"
+_DEFAUT = "/mnt/2TO_2023_980PRO/Modeles/models_acvram"
 MODELES = os.environ.get("ACVRAM_MODELES", _DEFAUT)

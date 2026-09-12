@@ -12,7 +12,7 @@ from acvram.engine.runner import Engine
 from acvram.engine.sampler import SamplingParams
 from acvram.server.chat import load_tokenizer
 from acvram.engine.layers import QuantLinear
-A = "/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram"
+A = "/mnt/2TO_2023_980PRO/Modeles/models_acvram"
 nom, famille = sys.argv[1], sys.argv[2]
 INVITE = "Explique en une phrase ce qu'est la photosynthese."
 try:

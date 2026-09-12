@@ -30,7 +30,7 @@ import sys
 
 import torch
 
-A = "/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram"
+A = "/mnt/2TO_2023_980PRO/Modeles/models_acvram"
 
 
 def main(argv):
