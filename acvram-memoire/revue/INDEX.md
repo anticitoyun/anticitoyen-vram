@@ -1,4 +1,4 @@
-# Index — revue/ (68 documents)
+# Index — revue/ (69 documents)
 
 Quatre thèmes : **mesure**, **moteur**, **quantification**, et **protocoles et avis**.
 Un document ambivalent est classé par son chiffre principal.
@@ -103,7 +103,8 @@ Protocoles, avis externes, audits, méthodologie, tests d'isolation, recherche.
 - [Suite non isolée carte](suite-non-isolee-de-la-carte.md) — Deux tests ont échoué pendant qu'une autre session occupait la 5090
 - [Trois avis extérieurs triés](trois-avis-exterieurs-tries.md) — Les trois réponses, triées par ce qui est vérifiable vs conjecturé
 - [Synthèse poste1 10-09](SYNTHESE-poste1-10-09.md) — Consolide onze documents : chaque chiffre porte son régime, ce qui n'est pas mesuré est marqué
+- [Quel geste aurait prédit l'exil](quel-geste-aurait-predit-l-exil.md) — poste1 12/09 : des trois gestes ggrun, seul `T_transfer` chiffré (axe temps) prédit la falaise ; le loader mesure déjà les octets et exile quand même
 
 ---
 
-**Total : 58 documents — Mesure 18 | Moteur 16 | Quantification 7 | Protocoles 17**
+**Total : 69 documents — Mesure 21 | Moteur 17 | Quantification 12 | Protocoles 19**
