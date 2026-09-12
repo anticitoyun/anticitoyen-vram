@@ -1,4 +1,4 @@
-# Index — revue/ (67 documents)
+# Index — revue/ (68 documents)
 
 Quatre thèmes : **mesure**, **moteur**, **quantification**, et **protocoles et avis**.
 Un document ambivalent est classé par son chiffre principal.
@@ -14,6 +14,7 @@ for x in $(ls revue/*.md | xargs -n1 basename | grep -v INDEX.md); do grep -q "(
 
 Benchmarks, protocoles, performance, comparatifs, états du jour.
 - [Campagne chrono sync 11-09](campagne-chrono-sync-11-09.md) — ACVRAM_CHRONO_SYNC sur GLM-42B, slots=12 : replay = 98 % du pas, prefill_seconds réhabilitée
+- [Prédiction 4 — VRAM slots=4 vs 12](prediction-4-vram-slots.md) — CONFIRMÉE : 25,3301 Gio identique au bit près ; pic au chargement des poids (~25,33 Gio), créneaux MLA négligeables après reset
 - [Comparaison llama.cpp vs acvram](comparaison-llamacpp-vs-acvram-df03399.md) — Cinq mécanismes contre llama.cpp df03399 (poste8)
 
 - [Avis de performance par joule](avis-exterieur-performance-par-joule.md) — Réponse externe à la question de poste2 : peut-on consommer moins de joules par jeton qu'llama.cpp

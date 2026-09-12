@@ -19,8 +19,8 @@ Fichiers : `sync-A1.json`, `sync-A2.json`, `sync-B1.json`, `sync-B2.json` (même
 
 **`prefill_seconds` est réhabilitée : +0,07 ms sous sync (+0,09 %) confirme qu'une synchronisation existait déjà dans la fenêtre (`.tolist()` de `_emit`) ; la condamnation par lecture du 10/09 était fausse, la mesure tranche.**
 
-## Prédiction 4 (non testée ici)
+## Prédiction 4 (verdict séparé)
 
-La question `slots=4 vs slots=12` avec `reset_peak_memory_stats` est distincte
-et non tranchée par ce bras — les 25,33 Gio A/B sont identiques car sync
-n'affecte pas l'allocation. À mesurer séparément (2 exemplaires `slots=4`).
+La question `slots=4 vs slots=12` avec `reset_peak_memory_stats` est tranchée
+dans [`prediction-4-vram-slots.md`](prediction-4-vram-slots.md) : **CONFIRMÉE**,
+25,3301 Gio identique au bit près pour les quatre bras (C1/C2 slots=4, A1/A2 slots=12).
