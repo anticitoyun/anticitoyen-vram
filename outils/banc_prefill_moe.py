@@ -69,7 +69,8 @@ def _prefill_un(e, longueur: int):
 
 
 def _mesurer(e, longueur: int, repetitions: int, chauffe: int = 2):
-    """Médian de ``repetitions`` mesures après ``chauffe`` passes."""
+    """Médian et σ de ``repetitions`` mesures après ``chauffe`` passes."""
+    import math
     for _ in range(chauffe):
         _prefill_un(e, longueur)
     durees = []
@@ -78,7 +79,10 @@ def _mesurer(e, longueur: int, repetitions: int, chauffe: int = 2):
         durees.append(dt)
     durees.sort()
     median = durees[len(durees) // 2]
-    return longueur / median
+    jps = [longueur / d for d in durees]
+    moy = sum(jps) / len(jps)
+    sigma = math.sqrt(sum((x - moy) ** 2 for x in jps) / len(jps))
+    return longueur / median, sigma
 
 
 def main():
@@ -91,8 +95,13 @@ def main():
     p.add_argument("--repetitions", type=int, default=5)
     args = p.parse_args()
 
-    racine = os.environ.get("ACVRAM_MODELES",
-                            "/media/anticitoyenpartage/2TO_2023_980PRO1/modeles-acvram")
+    import importlib.util, pathlib
+    _spec = importlib.util.spec_from_file_location(
+        "racine_modeles",
+        pathlib.Path(__file__).with_name("racine_modeles.py"))
+    _mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    racine = _mod.MODELES
     chemin = os.path.join(racine, args.modele)
     if not os.path.isdir(chemin):
         print(f"ERREUR : {chemin} introuvable (ACVRAM_MODELES={racine})",
@@ -108,21 +117,19 @@ def main():
 
     e, loaded = _charger(chemin)
 
-    print(f"{'L':>6}  {'GEMM grp (j/s)':>14}  {'grouped_mm (j/s)':>16}  {'ratio':>6}")
-    print("-" * 52)
+    print(f"{'L':>6}  {'GEMM grp':>10} {'±σ':>6}  {'grouped_mm':>10} {'±σ':>6}  {'ratio':>6}")
+    print("-" * 60)
 
     for L in longueurs:
-        # chemin 1 : GEMM groupée (noyau CUDA sur poids 4 bits)
         os.environ.pop("ACVRAM_PREFILL_DEQUANT", None)
-        jps_gemm = _mesurer(e, L, args.repetitions)
+        jps_gemm, sg = _mesurer(e, L, args.repetitions)
 
-        # chemin 2 : déquant bf16 + torch._grouped_mm
         os.environ["ACVRAM_PREFILL_DEQUANT"] = "1"
-        jps_gmm = _mesurer(e, L, args.repetitions)
+        jps_gmm, sm = _mesurer(e, L, args.repetitions)
         os.environ.pop("ACVRAM_PREFILL_DEQUANT", None)
 
         ratio = jps_gemm / max(jps_gmm, 1e-9)
-        print(f"{L:>6}  {jps_gemm:>14.0f}  {jps_gmm:>16.0f}  {ratio:>6.2f}x")
+        print(f"{L:>6}  {jps_gemm:>10.0f} {sg:>5.0f}σ  {jps_gmm:>10.0f} {sm:>5.0f}σ  {ratio:>6.2f}x")
 
     print()
     print("référence : 6 420 j/s (Qwen3-Coder-30B, NVFP4, RTX 5090, 512 j)")
