@@ -27,8 +27,8 @@ import argparse, hashlib, json, os, re, statistics, subprocess, sys, threading, 
 KIMI = os.path.expanduser("~/.kimi-code")
 BIN = os.path.expanduser("~/.local/bin")
 SECRETS = os.path.expanduser("~/.config/ia-secrets.env")
-TABBY_DIR = "/mnt/AI_GENERATOR/TabbyAPI"
-VLLM_DIR = "/mnt/AI_GENERATOR/vLLM"
+TABBY_DIR = "/opt/ia/TabbyAPI"
+VLLM_DIR = "/opt/ia/vLLM"
 PORTS = {"acvram": 8090, "llamacpp": 8080, "vllm": 8000, "tabby": 5000}
 PORT_INTERDIT = 8081
 PROMPT = ("Explique en détail, en français et en plusieurs paragraphes, comment "
