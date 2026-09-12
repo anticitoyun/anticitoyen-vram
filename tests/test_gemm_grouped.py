@@ -35,7 +35,7 @@ def _tuiles(cnt, bt=16):
     [15, 17, 1, 33],         # partielles de toutes tailles
     [0, 0, 0, 5],            # un seul expert servi
 ])
-@pytest.mark.parametrize("M,K", [(1536, 2048), (2048, 1536)])
+@pytest.mark.parametrize("M,K", [(1536, 2048), (2048, 1536), (1500, 1536)])
 def test_gemm_groupee_contre_reference(comptes, M, K):
     from acvram.kernels import get_extension
     ext = get_extension()
@@ -67,7 +67,7 @@ def test_gemm_groupee_contre_reference(comptes, M, K):
     [16, 16, 16, 16],
     [15, 17, 1, 33],
 ])
-@pytest.mark.parametrize("M,K", [(1536, 2048), (2048, 1536)])
+@pytest.mark.parametrize("M,K", [(1536, 2048), (2048, 1536), (1500, 1536)])
 def test_noyau_contre_grouped_mm(comptes, M, K):
     """nvfp4_gemm_grouped vs _pile_bf16 + torch._grouped_mm : cosinus > 0,999."""
     if not hasattr(torch, "_grouped_mm"):
