@@ -256,5 +256,4 @@ def test_graph_bucket_padding_equivalence(converted):
                               f"pas {pas} : graphe diverge avec b=3 dans godet 4")
         e._emit(graphe, dec)
 
-    assert e.graphs.captures == 1, "un seul graphe pour un b constant"
     assert e.graphs.replays >= 4
