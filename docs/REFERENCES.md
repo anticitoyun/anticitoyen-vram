@@ -42,6 +42,7 @@ LM Studio reste intéressant comme cible de comparaison, et parce que
 | vLLM | <https://github.com/vllm-project/vllm> · [docs](https://docs.vllm.ai/) | **rival** — port 8000. Continuous batching, PagedAttention, FP8, AWQ |
 | TensorRT-LLM | <https://github.com/NVIDIA/TensorRT-LLM> · [docs](https://nvidia.github.io/TensorRT-LLM/) · [page](https://developer.nvidia.com/tensorrt-llm) | **à évaluer, priorité haute** — noyaux NVIDIA, FP8, **NVFP4**, EAGLE-3, prédiction multi-jetons, optimisations Blackwell. C'est le seul moteur qui vise le même format que nous sur la même carte |
 | SGLang | <https://github.com/sgl-project/sglang> · [docs](https://docs.sglang.ai/) | à évaluer — agents, long contexte, cache KV, MoE |
+| ggrun | <https://github.com/raketenkater/ggrun> · [théorie](https://github.com/raketenkater/ggrun/blob/main/docs/optimizer-theory.md) | **lu le 12/09** — lanceur Go pour llama.cpp : placement MoE multi-GPU/RAM par fonction de coût et inventaire mesuré (VRAM, DRAM, PCIe) ; voir `acvram-memoire/revue/ggrun-lanceur-placement-moe.md` |
 | Ollama | <https://ollama.com/> · [github](https://github.com/ollama/ollama) · [API](https://github.com/ollama/ollama/blob/main/docs/api.md) | à évaluer — surtout pour son **dialecte d'API**, que nos clients pourraient vouloir |
 
 TabbyAPI (port 5000, EXL3) complète ce tableau côté maison ; acvram sert sur

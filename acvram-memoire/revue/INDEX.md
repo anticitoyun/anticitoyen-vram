@@ -1,4 +1,4 @@
-# Index — revue/ (58 documents)
+# Index — revue/ (67 documents)
 
 Quatre thèmes : **mesure**, **moteur**, **quantification**, et **protocoles et avis**.
 Un document ambivalent est classé par son chiffre principal.
@@ -13,6 +13,8 @@ for x in $(ls revue/*.md | xargs -n1 basename | grep -v INDEX.md); do grep -q "(
 ## Mesure
 
 Benchmarks, protocoles, performance, comparatifs, états du jour.
+- [Campagne chrono sync 11-09](campagne-chrono-sync-11-09.md) — ACVRAM_CHRONO_SYNC sur GLM-42B, slots=12 : replay = 98 % du pas, prefill_seconds réhabilitée
+- [Comparaison llama.cpp vs acvram](comparaison-llamacpp-vs-acvram-df03399.md) — Cinq mécanismes contre llama.cpp df03399 (poste8)
 
 - [Avis de performance par joule](avis-exterieur-performance-par-joule.md) — Réponse externe à la question de poste2 : peut-on consommer moins de joules par jeton qu'llama.cpp
 - [Cadre 2,45 ms inexpliquées](cadre-2450-us-inexpliques.md) — Écrit avant mesure (poste1, 9/09) : prédit 86 % du surcoût en latence de decodage
@@ -55,12 +57,18 @@ Optimisations, noyaux, architecture, patches, ordonnancement, fusions.
 - [Stream-K paged_attn_partial](stream-k-evaluation-papier.md) — Stream-K supprime les blocs vides, pas l'absence de travail : évaluation théorique
 - [sm_120 formats graphes](sm120-et-graphes-chez-les-concurrents.md) — vLLM utilise sm_120f, impose bf16, et capture les graphes par batch
 - [Comparaison vLLM vs acvram](comparaison-vllm-vs-acvram-ae71862.md) — Cinq mécanismes : vLLM pose un par dimension, acvram en pose plusieurs par cas
+- [ggrun lanceur placement MoE](ggrun-lanceur-placement-moe.md) — Fonction de coût, preuve d'allocation, inventaire mesuré : ce qu'un lanceur llama.cpp pose et que notre plan ne pose pas
 
 ---
 
 ## Quantification
 
 Formats, densité, bits, précision, genre de tenseur, compression.
+- [Agrégat à budget fixe](agregat-a-budget-fixe.md) — Aucun agrégat par tenseur ne suit la PPL à budget fixe ; la monotonie du quota gonflait les corrélations
+- [base_croissant confondant fermé](base-croissant-confondant-ferme.md) — Bras témoin : trier par SNR de base croissant sans coût ; le confondant « on promeut les mal quantifiés » est fermé
+- [Compte égal 149 prédiction](compte-egal-149-prediction.md) — Scellée avant conversion : « B reste le meilleur à compte égal → l'ordre compte »
+- [Compte égal 149 résultat](compte-egal-149-resultat.md) — Prédiction réfutée ; le confondant a migré vers les octets
+- [Croisement PPL(octets)](croisement-ppl-octets.md) — Deux campagnes croisées contre la courbe du quota : le levier résiduel de l'ordre, mesuré
 
 - [Critère AWQ par groupe](critere-awq-par-groupe.md) — Écrit avant mesure (poste1, 9/09) : AWQ par groupe (fusion q/k/v et gate)
 - [Densité int8 trois copies](densite-int8-trois-copies.md) — L'incohérence venait du calcul de la densité, pas du format int8
@@ -75,6 +83,7 @@ Formats, densité, bits, précision, genre de tenseur, compression.
 ## Protocoles et avis
 
 Protocoles, avis externes, audits, méthodologie, tests d'isolation, recherche.
+- [Provenance champs classe 3](provenance-champs-classe-3.md) — Remède aux écritures inventées : Optional seul ne suffit pas, la provenance doit être portée
 
 - [Alpha partage 59 fusions](alpha-partage-recuperer-59-fusions.md) — Les 59 fusions refusées : un scalaire par tenseur d'un groupe (calibrate.py:222)
 - [Audit lecture complète c6](audit-lecture-complete-c6.md) — poste8 c6 : les informations recherchées ont-elles été **lues** ou juste **comptées**
