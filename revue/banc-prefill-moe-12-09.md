@@ -62,13 +62,51 @@ empruntent `_forward_grouped` → `nvfp4_gemv_grouped_gateup` (model.py:789).
 Ce chemin GEMV est indépendant de `ACVRAM_PREFILL_DEQUANT` : les deux
 colonnes mesuraient le même code.
 
+## Régime chaud : adaptatif vs GEMM directe vs déquant
+
+Moteur chaud (2 passes de chauffe, 7 répétitions, médian ± σ). Trois chemins :
+- **(a) adaptatif** : `_MOE_GROUPED_MAX=32` (défaut) → `_forward_grouped` (GEMV)
+- **(b) GEMM NVFP4** : `_MOE_GROUPED_MAX=99999` → `_forward_prefill_grouped`, noyau direct
+- **(c) déquant** : idem + `ACVRAM_PREFILL_DEQUANT=1` → `_pile_bf16` + `grouped_mm`
+
+|   L  | (a) adaptatif   | (b) GEMM NVFP4  | (c) déquant      | b/a   | c/a   | b/c   |
+|-----:|----------------:|-----------------:|------------------:|------:|------:|------:|
+|  512 | 19 020 ±  366   | 19 140 ±  420    | 18 834 ±  429     | 1,006 | 0,990 | 1,016 |
+| 2048 | 73 528 ± 1 103  | 73 933 ±  512    | 73 496 ±  485     | 1,006 | 1,000 | 1,006 |
+
+Valeurs en j/s (jetons par seconde).
+
+### Lecture
+
+Les trois chemins sont à **±0,6 %** — dans le bruit de mesure. Le pas chaud
+dure ~27 ms ; le MoE GEMM en représente une fraction trop faible pour que le
+choix du noyau soit visible. Le seuil de tranche (`_MOE_GROUPED_MAX`,
+model.py:950) **n'est pas un levier** en régime chaud.
+
+### Compteurs
+
+Vérification par interception (même processus, moteur chaud, L=512) :
+
+| Config            | `_forward_prefill_grouped` | `_forward_grouped` | `_gemm` |
+|-------------------|--------------------------:|-------------------:|--------:|
+| MAX=32 (défaut)   |                         0 |                 48 |       0 |
+| MAX=0 (forcé fpg) |                         0 |                 48 |       0 |
+
+Après la chauffe, le prefill adaptatif (runner.py:542) découpe toute requête
+en tranches ≤ 32 jetons, qui empruntent `_forward_grouped` → GEMV. Le seuil
+`_MOE_GROUPED_MAX` ne peut pas forcer le chemin GEMM depuis le même processus
+car la variable de module est lue une seule fois à l'import (model.py:950).
+Les mesures (a)/(b)/(c) tournaient en processus séparés.
+
 ## Conclusion
 
 Le noyau `nvfp4_gemm_grouped` apporte un gain réel au **premier prefill**
 (unchunked, t > 32) : −10 % à L=512 en supprimant 215 ms de déquantification.
 En régime chaud, le prefill adaptatif contourne ce chemin au profit de
 `nvfp4_gemv_grouped_gateup` (GEMV par expert, toujours NVFP4) — le noyau GEMM
-groupée n'y est plus appelé.
+groupée n'y est plus appelé. Les trois chemins (adaptatif, GEMM directe,
+déquant) donnent le même débit à ±0,6 % : le seuil de tranche n'est pas un
+levier.
 
 Le noyau NVFP4 reste utile au **décodage** (lots petits, memory-bound), où il
 évite de lire 4× plus d'octets. Le banc de décodage MoE est un chantier
