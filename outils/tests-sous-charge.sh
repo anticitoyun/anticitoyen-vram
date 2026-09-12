@@ -9,7 +9,7 @@
 # mesure, c'est un test casse — et il est ecarte du tableau, en le disant.
 set -u
 S="$(cd "$(dirname "$0")" && pwd)"; R="$(dirname "$S")"
-PY=~/Bureau/Claude/anticitoyen-vram/.venv/bin/python
+PY=${ACVRAM_PY:-$R/../../anticitoyen-vram/.venv/bin/python}
 export PYTHONPATH="$R" CUDA_VISIBLE_DEVICES=0
 N=${N:-5}; GIO=${GIO:-20}; CALCUL=${CALCUL:-0.5}
 # DEUX EXEMPLAIRES DU MEME TRAVAIL, ET LA DUREE PUBLIEE. Une manche unique est
