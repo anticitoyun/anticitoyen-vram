@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Réorganise le parc : originaux sur le HDD CMR, convertis acvram sur le SSD.
 
-    SSD  /media/anticitoyenlm/2TO_2023_980PRO1/Modeles   ← models_acvram seul
+    SSD  ${ACVRAM_MODELES}/..                            ← models_acvram seul
     HDD  /mnt/4TO_SATACMR_2022/Modeles                   ← tout le reste
 
 Aujourd'hui les originaux sont physiquement sur le SSD et le HDD les voit par
@@ -18,8 +18,11 @@ selon l'espace libre. Reprenable : ce qui est déjà à destination est sauté.
     migrer.py               exécute
 """
 import os, shutil, subprocess, sys, time
+import sys as _s, pathlib as _p  # noqa: E401
+_s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
+from outils.racine_modeles import MODELES  # noqa: E402
 
-SSD = "/media/anticitoyenlm/2TO_2023_980PRO1/Modeles"
+SSD = str(_p.Path(MODELES).parent)
 HDD = "/mnt/4TO_SATACMR_2022/Modeles"
 ACV = "models_acvram"
 MARGE = 25 * 1024 ** 3          # espace à laisser sur un disque après chaque copie

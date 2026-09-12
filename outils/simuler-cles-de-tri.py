@@ -1,6 +1,9 @@
 import json, math
 from pathlib import Path
-BASE=Path("/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram")
+import sys as _s, pathlib as _p  # noqa: E401
+_s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
+from outils.racine_modeles import MODELES  # noqa: E402
+BASE=Path(MODELES)
 DOS=[(0.0,"Llama-2-7b-nvfp4"),(4.50,"Llama-2-7b-quota-4g50"),(5.00,"Llama-2-7b-quota-5g00"),
      (5.50,"Llama-2-7b-quota-5g50"),(6.00,"Llama-2-7b-quota-6g00"),(6.55,"Llama-2-7b-quota-plafond")]
 GIO=1024**3; BUDGET=6.00

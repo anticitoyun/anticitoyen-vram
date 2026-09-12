@@ -12,7 +12,10 @@ Ecrit aussi le detail par tenseur, pour qu une relecture ne relise pas 13 Go.
 """
 import glob, json, os, struct
 import numpy as np
-BASE=os.environ.get("ACVRAM_MODELES", "/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram")
+import sys as _s, pathlib as _p  # noqa: E401
+_s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
+from outils.racine_modeles import MODELES  # noqa: E402
+BASE=os.environ.get("ACVRAM_MODELES", MODELES)
 CORPUS=os.environ.get("ACVRAM_CORPUS", os.path.expanduser("~/Bureau/Claude/anticitoyen-vram/acvram-memoire/corpus"))
 SRC=os.path.join(BASE,"Llama-2-7b-hf")
 DETAIL=os.path.join(CORPUS, "variation-par-tenseur-x-y.json")

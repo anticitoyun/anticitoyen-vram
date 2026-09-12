@@ -9,8 +9,11 @@ de sources differentes ont des poids differents.
 Ecrit un journal de retour AVANT d agir. --appliquer pour executer.
 """
 import json, os, re, sys, collections
+import sys as _s, pathlib as _p  # noqa: E401
+_s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
+from outils.racine_modeles import MODELES  # noqa: E402
 
-A = "/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram"
+A = MODELES
 TSV = os.path.expanduser("~/.kimi-code/acvram-chemins.tsv")
 JOURNAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "renommages.tsv")
 APPLIQUER = "--appliquer" in sys.argv

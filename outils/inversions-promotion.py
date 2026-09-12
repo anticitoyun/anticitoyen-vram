@@ -39,8 +39,11 @@ import json
 import os
 import re
 import sys
+import sys as _s, pathlib as _p  # noqa: E401
+_s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
+from outils.racine_modeles import MODELES  # noqa: E402
 
-A = "/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram"
+A = MODELES
 RE_GROUPE = re.compile(r"^(model\.layers\.\d+\.(?:self_attn|mlp))\.")
 
 

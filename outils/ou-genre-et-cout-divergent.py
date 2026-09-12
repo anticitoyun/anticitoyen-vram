@@ -27,9 +27,11 @@ Le rapport indicatif reste intermediate_size / hidden_size :
 Ne mesure rien : lit les config.json. Aucune carte, aucun poids.
 """
 import glob, json, os, sys
+import sys as _s, pathlib as _p  # noqa: E401
+_s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
+from outils.racine_modeles import MODELES  # noqa: E402
 
-RACINES = ["/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram",
-           "/media/anticitoyenlm/2TO_2023_980PRO1/Modeles"]
+RACINES = [MODELES, str(_p.Path(MODELES).parent)]
 
 def octets(n_poids, bits_base=4.5, bits_cible=8.1875):
     return n_poids * (bits_cible - bits_base) / 8 / 2 ** 20

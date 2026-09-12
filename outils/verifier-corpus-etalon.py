@@ -2,7 +2,10 @@
 pareil ? Compter n'est pas comparer : on compare les SUITES d'identifiants."""
 from transformers import AutoTokenizer
 from pathlib import Path
-M="/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram/Llama-2-7b-fp16pur"
+import sys as _s, pathlib as _p  # noqa: E401
+_s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
+from outils.racine_modeles import MODELES  # noqa: E402
+M=f"{MODELES}/Llama-2-7b-fp16pur"
 C=Path("~/Bureau/Claude/acvram-memoire/corpus")
 rapide=AutoTokenizer.from_pretrained(M, use_fast=True)
 lent  =AutoTokenizer.from_pretrained(M, use_fast=False)

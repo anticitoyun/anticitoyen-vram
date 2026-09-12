@@ -29,13 +29,16 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import sys as _s, pathlib as _p  # noqa: E401
+_s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
+from outils.racine_modeles import MODELES  # noqa: E402
 
 P_POIDS = 6_738_417_664          # poids comptes dans le manifeste des etalons
 GIO = 1024 ** 3
 
 CARTE = Path(__file__).resolve().parent / "carte.sh"
 RACINE_OUTILS = Path(__file__).resolve().parent
-BASE = Path("/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram")
+BASE = Path(MODELES)
 SOURCE = BASE / "Llama-2-7b-hf"
 # Corpus PARTAGE, pas dans un worktree : 0a l'a cherche et ne l'a pas
 # trouve, parce qu'il ne vivait que dans mon arbre et n'etait pas suivi par git.

@@ -3,8 +3,11 @@
 safetensors (debut/milieu/fin), plus la taille. Discrimine deux modeles de
 meme architecture et meme format, ce que la taille seule ne fait pas."""
 import os, hashlib, sys
+import sys as _s, pathlib as _p  # noqa: E401
+_s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
+from outils.racine_modeles import MODELES  # noqa: E402
 
-A = "/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram"
+A = MODELES
 FEN = 2 << 20
 
 def empreinte(d):

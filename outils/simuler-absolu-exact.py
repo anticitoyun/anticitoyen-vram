@@ -28,8 +28,11 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+import sys as _s, pathlib as _p  # noqa: E401
+_s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
+from outils.racine_modeles import MODELES  # noqa: E402
 
-BASE = Path("/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram")
+BASE = Path(MODELES)
 GIO = 1024 ** 3
 BUDGET = 6.00
 A_PROMUS, A_PPL = 198, 5.4918

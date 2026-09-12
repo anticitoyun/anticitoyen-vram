@@ -64,7 +64,14 @@ COURRIEL_TOLERE = ("noreply", "example")
 # 11/09 apres-midi — 328 apres la fusion de `main` : `outils/echelle-de-sortie-
 # approchee.py` apporte 3 chemins codes en dur (venu de `a6`, corrige par lui
 # dans la foulee ; le plafond redescendra a 325 des que ce nettoyage arrive).
-PLAFOND_CHEMINS = 328
+# 12/09 soir — 310 apres migration ACVRAM_MODELES : 41 references litterales
+# a /media/anticitoyenlm/…/models_acvram dans outils/*.py et *.sh, extraites
+# vers outils/racine_modeles.py (defaut conserve, surcharge par la variable
+# d'environnement). Il reste 4 chemins litteraux : racine_modeles.py (defaut),
+# parc.py (defaut PARC_ROOTS[0]), et deux scripts .sh que bash ne peut pas
+# importer. Cliquet DESCEND et l'ecart PLAFOND-total reste dans la fenetre
+# de 20 exigee par le test de non-remontee.
+PLAFOND_CHEMINS = 310
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute

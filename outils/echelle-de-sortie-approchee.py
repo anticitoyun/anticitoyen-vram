@@ -11,10 +11,13 @@ APPROXIMATION — elle repond a la question qui decide (l'echelle varie-t-elle d
 plusieurs ordres de grandeur ?) et pas au classement exact.
 """
 import glob, json, os, struct, sys
+import sys as _s, pathlib as _p  # noqa: E401
+_s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
+from outils.racine_modeles import MODELES  # noqa: E402
 import numpy as np
-SRC="/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram/Llama-2-7b-hf"
+SRC=f"{MODELES}/Llama-2-7b-hf"
 CIBLE=set()
-m=json.load(open("/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram/Llama-2-7b-quota-6g00/acvram_manifest.json"))
+m=json.load(open(f"{MODELES}/Llama-2-7b-quota-6g00/acvram_manifest.json"))
 for k,v in m["tensors"].items():
     if v["format"] in ("int8","nvfp4"): CIBLE.add(k)
 normes={}

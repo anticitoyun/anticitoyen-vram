@@ -17,11 +17,14 @@ import json
 import os
 import shutil
 import sys
+import sys as _s, pathlib as _p  # noqa: E401
+_s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
+from outils.racine_modeles import MODELES  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from acvram.quant.gguf import GGUFFile        # noqa: E402
 
-CONVERTIS = "/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram"
+CONVERTIS = MODELES
 SOURCES = "/mnt/4TO_SATACMR_2022/Modeles/models_gguf"
 SIMULER = "--simuler" in sys.argv
 

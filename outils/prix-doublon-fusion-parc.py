@@ -7,8 +7,11 @@ Llama-2-7b-int8, 5 fusions sur 32 ont reellement abouti — la borne y vaut donc
 """
 import json, glob, os, re
 from collections import defaultdict
+import sys as _s, pathlib as _p  # noqa: E401
+_s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
+from outils.racine_modeles import MODELES  # noqa: E402
 
-RACINES = ["/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram",
+RACINES = [MODELES,
            "/mnt/AI_GENERATOR/Modeles_acvram"]
 # Seuls int8 et int4_awq dupliquaient : bf16 et nvfp4 repointaient deja en vues.
 TOUCHES = {"int8", "int4_awq"}

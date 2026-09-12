@@ -39,10 +39,13 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+import sys as _s, pathlib as _p  # noqa: E401
+_s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
+from outils.racine_modeles import MODELES  # noqa: E402
 
 RACINE = Path(__file__).resolve().parent.parent
 CARTE = Path(__file__).resolve().parent / "carte.sh"
-BASE = Path("/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram")
+BASE = Path(MODELES)
 SOURCE = BASE / "Llama-2-7b-hf"
 CORPUS = Path("/mnt/AI_GENERATOR/corpus/wiki-gptq.txt")
 CORPUS_SHA = "e52922746ad09bac73b0dba32b2987c0d7924da14337dcd43c1d9113a9f6d0ae"

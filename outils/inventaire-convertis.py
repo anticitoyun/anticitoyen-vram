@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Inventaire acvram pondere par OCTETS (pas par nombre de tenseurs) + doublons."""
 import json, os, collections, hashlib
+import sys as _s, pathlib as _p  # noqa: E401
+_s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
+from outils.racine_modeles import MODELES  # noqa: E402
 
-A = "/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram"
+A = MODELES
 ETIQ = ["q4_k_m","q4_k_xl","q4_k_l","q5_k_m","q5_k_s","q6_k","q8_0","q5_k","q4_k","q3_k_s",
         "iq3m","exl3","awq","bf16","nvfp4","gguf","bpw","q4_k_s","ud-q5_k_m","i1"]
 

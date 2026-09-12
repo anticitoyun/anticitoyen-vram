@@ -14,8 +14,11 @@ sur-interpreterait. Quatre est le minimum utile ; trois serait sous le minimum.
 """
 import json
 from pathlib import Path
+import sys as _s, pathlib as _p  # noqa: E401
+_s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
+from outils.racine_modeles import MODELES  # noqa: E402
 
-BASE = Path("/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram")
+BASE = Path(MODELES)
 ECH = Path("~/Bureau/Claude/acvram-memoire/corpus/"
            "normes-poids-source.json")
 # (dossier, PPL mesuree, budget 6,00 Gio, deux exemplaires pour base_croissant)

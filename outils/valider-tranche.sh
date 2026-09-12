@@ -7,7 +7,7 @@
 set -u
 S="$(cd "$(dirname "$0")" && pwd)"; R="$(dirname "$S")"
 PY=~/Bureau/Claude/anticitoyen-vram/.venv/bin/python
-M=${M:-/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram/Qwen3-Coder-30B-A3B-Instruct-srcQ4_K_M-nvfp4}
+M=${M:-${ACVRAM_MODELES:-/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram}/Qwen3-Coder-30B-A3B-Instruct-srcQ4_K_M-nvfp4}
 SORTIE=${SORTIE:-/tmp/poste2-tranche}; mkdir -p "$SORTIE"
 export PYTHONPATH="$R" CUDA_VISIBLE_DEVICES=0
 LMOTS=${LMOTS:-"350 3000"}; NPASS=${NPASS:-3}
