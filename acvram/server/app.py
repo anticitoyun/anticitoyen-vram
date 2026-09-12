@@ -582,8 +582,10 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
     # jamais devine depuis les noms : un nom de dossier ne dit ni
     # l'architecture, ni les octets, ni les parametres actifs — et une
     # classification par nom nous a deja rendu un modele dense pour un MoE.
-    _PARC_DIR = os.environ.get(
-        "ACVRAM_PARC", str(Path.home() / "Modeles" / "models_acvram"))
+    # ACVRAM_PARC gagne, sinon ACVRAM_MODELES partage avec outils/racine_modeles.py,
+    # sinon le defaut historique ~/Modeles/models_acvram.
+    _PARC_DIR = os.environ.get("ACVRAM_PARC") or os.environ.get(
+        "ACVRAM_MODELES", str(Path.home() / "Modeles" / "models_acvram"))
     _CACHE_PARC: dict = {"t": 0.0, "v": None}
 
     # Marge au-dessus des poids : contexte KV, activations, arene de

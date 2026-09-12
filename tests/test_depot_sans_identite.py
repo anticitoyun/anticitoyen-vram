@@ -71,6 +71,12 @@ COURRIEL_TOLERE = ("noreply", "example")
 # parc.py (defaut PARC_ROOTS[0]), et deux scripts .sh que bash ne peut pas
 # importer. Cliquet DESCEND et l'ecart PLAFOND-total reste dans la fenetre
 # de 20 exigee par le test de non-remontee.
+# 12/09 nuit — defaut _DEFAUT / PARC_ROOTS[0] passe du montage Mint
+# (/media/anticitoyenlm/…) au montage Ubuntu (/run/media/anticitoyenu/…),
+# les 2 .sh suivent, et PY code en dur dans ces 2 .sh est passe en
+# ${ACVRAM_PY:-$R/../../anticitoyen-vram/.venv/bin/python} (relatif au
+# depot, ne monte pas le cliquet). acvram/server/app.py et acvram/cli.py
+# lisent aussi ACVRAM_MODELES en repli — un seul nom d'ancre. Total inchange.
 PLAFOND_CHEMINS = 310
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles

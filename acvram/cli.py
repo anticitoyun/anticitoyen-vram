@@ -50,6 +50,8 @@ VARIABLES_LUES = {
     "ACVRAM_LOGITS_BF16",
     "ACVRAM_MAX_GRAPHS",
     "ACVRAM_PARC",
+    "ACVRAM_MODELES",
+    "ACVRAM_SEUIL_EXIL",
     "ACVRAM_VERROU",
     "ACVRAM_MLA_BATCH",
     "ACVRAM_NOM",
@@ -379,7 +381,9 @@ def cmd_convert(args: argparse.Namespace) -> int:
         # dur, avec le nom d'utilisateur dedans : ils partaient tels quels
         # dans le paquet .deb, chez quiconque l'installe. Le repli se lit
         # desormais dans un fichier de configuration, absent par defaut.
-        base = os.environ.get("ACVRAM_MODELS_DIR")
+        # ACVRAM_MODELS_DIR d'abord (heritage), sinon ACVRAM_MODELES partage
+        # avec outils/racine_modeles.py et acvram/server/app.py.
+        base = os.environ.get("ACVRAM_MODELS_DIR") or os.environ.get("ACVRAM_MODELES")
         if not base:
             conf = os.path.join(
                 os.environ.get("XDG_CONFIG_HOME",

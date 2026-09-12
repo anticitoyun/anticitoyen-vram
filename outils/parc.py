@@ -10,18 +10,24 @@ import json
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
-# Racines du parc, dans l'ordre de priorité
+# Racines du parc, dans l'ordre de priorite. La premiere suit le montage
+# reel du SSD (12/09/2026 : passage Mint→Ubuntu, changement de point de montage).
 PARC_ROOTS = [
-    '/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram',
+    '/run/media/anticitoyenu/2TO_2023_980PRO/Modeles/models_acvram',
     '/mnt/AI_GENERATOR/Modeles_acvram',
 ]
 
-# Peut être surchargé par ACVRAM_PARC_ROOTS (séparées par :)
+# Surcharge par variable d'env, deux formes acceptees :
+#   ACVRAM_PARC_ROOTS  : plusieurs racines separees par ':'
+#   ACVRAM_MODELES     : une seule racine (partage avec racine_modeles.py)
 def _get_configured_roots() -> List[str]:
     """Retourne les racines du parc, avec surcharge possible."""
     env = os.environ.get('ACVRAM_PARC_ROOTS')
     if env:
         return env.split(':')
+    seul = os.environ.get('ACVRAM_MODELES')
+    if seul:
+        return [seul] + PARC_ROOTS[1:]
     return PARC_ROOTS
 
 def _get_single_root() -> str:
