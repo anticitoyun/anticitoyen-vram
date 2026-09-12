@@ -12,10 +12,11 @@ Ecrit aussi le detail par tenseur, pour qu une relecture ne relise pas 13 Go.
 """
 import glob, json, os, struct
 import numpy as np
-BASE="/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram"
+BASE=os.environ.get("ACVRAM_MODELES", "/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram")
+CORPUS=os.environ.get("ACVRAM_CORPUS", os.path.expanduser("~/Bureau/Claude/anticitoyen-vram/acvram-memoire/corpus"))
 SRC=os.path.join(BASE,"Llama-2-7b-hf")
-DETAIL="~/Bureau/Claude/acvram-memoire/corpus/variation-par-tenseur-x-y.json"
-groupes=json.load(open("~/Bureau/Claude/acvram-memoire/corpus/groupes-x-y.json"))
+DETAIL=os.path.join(CORPUS, "variation-par-tenseur-x-y.json")
+groupes=json.load(open(os.path.join(CORPUS, "groupes-x-y.json")))
 X,Y=list(groupes["X_76"]),list(groupes["Y_27"])
 CIBLE=set(X)|set(Y)
 
