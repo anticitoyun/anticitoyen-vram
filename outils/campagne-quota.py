@@ -44,7 +44,7 @@ SOURCE = BASE / "Llama-2-7b-hf"
 # trouve, parce qu'il ne vivait que dans mon arbre et n'etait pas suivi par git.
 # Deux campagnes qui ne lisent pas le meme fichier ne sont pas sur la meme
 # courbe, et ce defaut-la ne se voit qu'a la fin.
-CORPUS = Path("/mnt/AI_GENERATOR/corpus/wiki-gptq.txt")
+CORPUS = Path("/mnt/4TO_SATACMR_2022/Modeles/corpus/wiki-gptq.txt")
 CORPUS_SHA = "e52922746ad09bac73b0dba32b2987c0d7924da14337dcd43c1d9113a9f6d0ae"
 # Pour memoire, le brut de llama.cpp — PAS celui de l'etalon exterieur :
 #   wiki.test.raw  173c87a53759e0201f33e0ccf978e510c2042d7f2cb78229d9a50d79b9e7dd08

@@ -31,7 +31,7 @@ import zlib
 
 chemin = sys.argv[1]
 LMOTS = [int(x) for x in (sys.argv[2] if len(sys.argv) > 2 else "350,3000").split(",")]
-MOTS = open("/mnt/AI_GENERATOR/corpus/wiki.test.raw", encoding="utf-8",
+MOTS = open("/mnt/4TO_SATACMR_2022/Modeles/corpus/wiki.test.raw", encoding="utf-8",
             errors="ignore").read().split()
 L = load_model(chemin, dtype=torch.bfloat16, max_model_len=8192)
 eng = Engine(L, None, max_batch_size=1, max_model_len=8192)

@@ -33,7 +33,7 @@ chemin, lm = sys.argv[1], int(sys.argv[2])
 # QUALITE : sur du charabia le modele part en repetition, et deux boucles
 # degenerees divergent entre candidats quasi equiprobables sans que cela dise
 # quoi que ce soit du noyau. Premiere version faite ainsi, resultat jete.
-TEXTE = open("/mnt/AI_GENERATOR/corpus/wiki.test.raw", encoding="utf-8",
+TEXTE = open("/mnt/4TO_SATACMR_2022/Modeles/corpus/wiki.test.raw", encoding="utf-8",
              errors="ignore").read()
 L = load_model(chemin, dtype=torch.bfloat16, max_model_len=8192)
 eng = Engine(L, None, max_batch_size=1, max_model_len=8192)

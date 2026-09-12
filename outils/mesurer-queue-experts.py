@@ -132,7 +132,7 @@ def charger_experts(chemin: str, combien: int):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("dossier", nargs="?",
-                    default="/mnt/AI_GENERATOR/Modeles_acvram/qwen3-coder-next-80b")
+                    default="/mnt/2TO_2023_980PRO/Modeles/models_acvram/qwen3-coder-next-80b")
     ap.add_argument("--experts", type=int, default=200)
     ap.add_argument("--fichier", type=int, default=3,
                     help="indice du safetensors à échantillonner")

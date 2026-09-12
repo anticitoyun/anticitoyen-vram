@@ -50,7 +50,7 @@ url, cle, modele, n_essais = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv
 # au duel du 9/09 pour rester comparable a son tableau.
 CONC = int(sys.argv[5]) if len(sys.argv) > 5 else 1
 N = 256
-CORPUS = "/mnt/AI_GENERATOR/corpus/wiki.test.raw"
+CORPUS = "/mnt/4TO_SATACMR_2022/Modeles/corpus/wiki.test.raw"
 with open(CORPUS, encoding="utf-8", errors="ignore") as fh:
     TEXTE = fh.read()
 MOTS = TEXTE.split()

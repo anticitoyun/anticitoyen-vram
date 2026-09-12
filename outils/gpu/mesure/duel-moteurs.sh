@@ -67,6 +67,6 @@ manche_acvram
 manche_llama
 manche_llama
 manche_acvram
-echo "corpus : /mnt/AI_GENERATOR/corpus/wiki.test.raw  sha256 $(sha256sum /mnt/AI_GENERATOR/corpus/wiki.test.raw | cut -c1-16)  invite ~350 mots de texte reel, extrait different par essai, MEME invite des deux cotes"
+echo "corpus : /mnt/4TO_SATACMR_2022/Modeles/corpus/wiki.test.raw  sha256 $(sha256sum /mnt/4TO_SATACMR_2022/Modeles/corpus/wiki.test.raw | cut -c1-16)  invite ~350 mots de texte reel, extrait different par essai, MEME invite des deux cotes"
 echo "carte  : $(nvidia-smi -i 0 --query-gpu=clocks.sm,clocks.mem,power.limit --format=csv,noheader)"
 echo "FIN-DUEL2"

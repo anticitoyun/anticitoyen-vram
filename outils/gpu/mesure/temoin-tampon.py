@@ -22,7 +22,7 @@ chemin = sys.argv[1]
 ext = kernels.get_extension()
 if ext is None or not hasattr(ext, "paged_attn_tampon_octets"):
     raise SystemExit("REFUS : le binaire ne porte pas le temoin de tampon")
-MOTS = open("/mnt/AI_GENERATOR/corpus/wiki.test.raw", encoding="utf-8",
+MOTS = open("/mnt/4TO_SATACMR_2022/Modeles/corpus/wiki.test.raw", encoding="utf-8",
             errors="ignore").read().split()
 L = load_model(chemin, dtype=torch.bfloat16, max_model_len=8192)
 eng = Engine(L, None, max_batch_size=1, max_model_len=8192)

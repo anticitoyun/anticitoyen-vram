@@ -12,7 +12,7 @@ _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
 from outils.racine_modeles import MODELES  # noqa: E402
 
 RACINES = [MODELES,
-           "/mnt/AI_GENERATOR/Modeles_acvram"]
+           "/mnt/2TO_2023_980PRO/Modeles/models_acvram"]
 # Seuls int8 et int4_awq dupliquaient : bf16 et nvfp4 repointaient deja en vues.
 TOUCHES = {"int8", "int4_awq"}
 GROUPES = (("gate_proj", "up_proj"), ("q_proj", "k_proj", "v_proj"))
