@@ -231,3 +231,29 @@ def test_speculative_generation_under_graphs(converted):
 
     assert run(True) == run(False), \
         "la speculation sous graphes a change la sortie"
+
+
+@needs_cuda
+def test_graph_bucket_padding_equivalence(converted):
+    """b=3 dans un godet de 4 : le rembourrage ne change pas les logits.
+
+    Le bucket_batch(3) == 4, donc le graphe capture un tenseur de taille 4
+    mais seuls les 3 premiers slots portent de vraies séquences. L'invariant :
+    les logits des 3 séquences réelles sont identiques entre eager et graphe,
+    et l'état des séquences existantes n'est pas corrompu par le slot fantôme.
+    """
+    e = _engine(converted, n_batch=4)
+    assert e.graphs is not None
+    prompts = [[7, 3, 9, 1, 4, 8], [2, 5, 6, 1, 3, 8], [4, 1, 7, 2, 9, 5]]
+    for p in prompts:
+        _prefill(e, p)
+    assert len([s for s in e.running if not s.finished]) == 3
+
+    for pas in range(4):
+        eager, graphe, batch, dec = _decode_both(e)
+        assert batch.batch_size == 3, f"b_reel attendu 3, obtenu {batch.batch_size}"
+        assert_logits_proches(eager, graphe,
+                              f"pas {pas} : graphe diverge avec b=3 dans godet 4")
+        e._emit(graphe, dec)
+
+    assert e.graphs.replays >= 4
