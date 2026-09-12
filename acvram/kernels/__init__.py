@@ -12,6 +12,7 @@ sans compilateur, et la suite de tests peut vérifier les noyaux face à lui.
 from __future__ import annotations
 
 import functools
+import glob
 import hashlib
 import os
 import time
@@ -118,7 +119,10 @@ def _nvcc_path() -> str:
     home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
     if home:
         return os.path.join(home, "bin", "nvcc")
-    for cand in ("/usr/local/cuda/bin/nvcc", "/opt/cuda/bin/nvcc"):
+    # Ubuntu (12/09/2026) installe /usr/local/cuda-13.4 sans lien
+    # /usr/local/cuda : on prend le toolkit versionne le plus recent.
+    versionnes = sorted(glob.glob("/usr/local/cuda-[0-9]*/bin/nvcc"), reverse=True)
+    for cand in ("/usr/local/cuda/bin/nvcc", *versionnes, "/opt/cuda/bin/nvcc"):
         if os.path.exists(cand):
             # torch.utils.cpp_extension ne lit PAS ce module : il consulte
             # CUDA_HOME lui-meme, puis le PATH. Sans cette ligne, notre choix
