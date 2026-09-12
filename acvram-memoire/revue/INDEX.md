@@ -1,4 +1,4 @@
-# Index — revue/ (69 documents)
+# Index — revue/ (70 documents)
 
 Quatre thèmes : **mesure**, **moteur**, **quantification**, et **protocoles et avis**.
 Un document ambivalent est classé par son chiffre principal.
@@ -104,7 +104,8 @@ Protocoles, avis externes, audits, méthodologie, tests d'isolation, recherche.
 - [Trois avis extérieurs triés](trois-avis-exterieurs-tries.md) — Les trois réponses, triées par ce qui est vérifiable vs conjecturé
 - [Synthèse poste1 10-09](SYNTHESE-poste1-10-09.md) — Consolide onze documents : chaque chiffre porte son régime, ce qui n'est pas mesuré est marqué
 - [Quel geste aurait prédit l'exil](quel-geste-aurait-predit-l-exil.md) — poste1 12/09 : des trois gestes ggrun, seul `T_transfer` chiffré (axe temps) prédit la falaise ; le loader mesure déjà les octets et exile quand même
+- [duck.ai placement/T_transfer/sac à dos](duck-poste1-12-09.md) — poste1 12/09 : 6 modèles duck.ai ; 3 avec web concordent (MoEpic, MoE-SpeQ, Fate, PreScope), 2 paramétriques ont inventé leurs refs ; pistes classées gain/coût/vérifiable
 
 ---
 
-**Total : 69 documents — Mesure 21 | Moteur 17 | Quantification 12 | Protocoles 19**
+**Total : 70 documents — Mesure 21 | Moteur 17 | Quantification 12 | Protocoles 20**
