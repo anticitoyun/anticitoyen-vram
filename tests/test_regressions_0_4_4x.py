@@ -19,6 +19,7 @@ from acvram.memory.kvcache import BLOCK_SIZE, BlockAllocator
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="exige un GPU")
 def test_une_sequence_qui_finit_publie_son_prefixe(converted):
     """Une requête qui s'arrête au premier jeton doit tout de même laisser son
     invite dans le cache de préfixe.
@@ -41,6 +42,7 @@ def test_une_sequence_qui_finit_publie_son_prefixe(converted):
         "aucun bloc publié : le cache de préfixe ne se remplira jamais"
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="exige un GPU")
 def test_le_prefixe_publie_est_ensuite_retrouve(converted):
     from acvram.engine.loader import load_model
     from acvram.engine.runner import Engine

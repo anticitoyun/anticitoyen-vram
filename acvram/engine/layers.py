@@ -163,7 +163,8 @@ def _emballer(host: dict[str, torch.Tensor]):
         off += (n + 255) // 256 * 256
     plat = _tranche_pool(max(off, 1))
     if plat is None:
-        plat = torch.empty(max(off, 1), dtype=torch.uint8).pin_memory()
+        t = torch.empty(max(off, 1), dtype=torch.uint8)
+        plat = t.pin_memory() if torch.cuda.is_available() else t
     for k, (o, forme, dt, n) in decoupe.items():
         plat[o:o + n].view(dt).view(forme).copy_(host[k])
     return plat, decoupe

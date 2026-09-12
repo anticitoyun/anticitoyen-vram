@@ -270,7 +270,11 @@ def load_model(path: str, plan: Optional[Plan] = None,
         # jeton nouveau touche une page non chargée — une lecture disque de
         # 100 ms au milieu du décodage. Résidente en RAM épinglée, elle se
         # collecte en microsecondes et se copie sans étape intermédiaire.
-        embed = embed.contiguous().clone().pin_memory()
+        # pin_memory() exige CUDA ; sur processeur pur (tests), on garde la
+        # copie sans épinglage — performance dégradée, justesse identique.
+        embed = embed.contiguous().clone()
+        if torch.cuda.is_available():
+            embed = embed.pin_memory()
 
     rope_gemma = None
     rope = RotaryEmbedding(spec.rotary_dim or spec.head_dim,
