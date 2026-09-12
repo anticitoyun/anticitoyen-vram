@@ -62,6 +62,38 @@ def test_gemm_groupee_contre_reference(comptes, M, K):
         f"{int((ecart > tol).sum())} valeurs hors tolérance, max {ecart.max().item():.3e}"
 
 
+@pytest.mark.parametrize("comptes", [
+    [1, 0, 0, 2],
+    [16, 16, 16, 16],
+    [15, 17, 1, 33],
+])
+@pytest.mark.parametrize("M,K", [(1536, 2048), (2048, 1536)])
+def test_noyau_contre_grouped_mm(comptes, M, K):
+    """nvfp4_gemm_grouped vs _pile_bf16 + torch._grouped_mm : cosinus > 0,999."""
+    if not hasattr(torch, "_grouped_mm"):
+        pytest.skip("torch._grouped_mm absent")
+    from acvram.kernels import get_extension
+    ext = get_extension()
+    if not hasattr(ext, "nvfp4_gemm_grouped"):
+        pytest.skip("extension sans nvfp4_gemm_grouped")
+    E = len(comptes)
+    qw, bs, gs, ref = _pile(E, M, K, 0.05, sum(comptes) + M + 7)
+    cnt = torch.tensor(comptes, device="cuda")
+    G = int(cnt.sum())
+    if G == 0:
+        return
+    g = torch.Generator(device="cuda").manual_seed(G + 42)
+    x = torch.randn(G, K, device="cuda", generator=g).to(torch.bfloat16)
+    te, t0, tn = _tuiles(cnt)
+    y_noyau = ext.nvfp4_gemm_grouped(qw, bs, gs, x, te, t0, tn, K)
+    offs = torch.cumsum(cnt, 0).to(torch.int32)
+    y_ref = torch._grouped_mm(x, ref.transpose(1, 2), offs=offs)
+    cos = torch.nn.functional.cosine_similarity(
+        y_noyau.float(), y_ref.float(), dim=-1)
+    assert cos.min().item() > 0.999, \
+        f"cosinus min {cos.min().item():.6f}, attendu > 0,999"
+
+
 def test_tuiles_couvrent_exactement_les_jetons():
     cnt = torch.tensor([1, 0, 17, 16, 2], device="cuda")
     te, t0, tn = _tuiles(cnt)
