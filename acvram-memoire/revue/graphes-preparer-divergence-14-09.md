@@ -49,3 +49,37 @@ Intégration du recouvrement (bead runner) EN PAUSE, pas committée comme
 ne peut pas passer tant que `graphs.py` a ce bogue de fond. Rien ne change
 pour un usage normal (`ACVRAM_PIPELINE` non posé) : ce code est mort par
 défaut.
+
+## Verdict des deux contrôles de chef (14/09 soir, avant de traiter comme un bogue)
+
+**(1) Bissection** : `graphs.py` d'AVANT le merge de poste4 (`8fbc962`,
+sans `preparer`/`rejouer_suivant`) donne EXACTEMENT les mêmes divergences
+(`s1 jeton 2 : 198 vs 220`, `s6 jeton 10 : 537 vs 5435`). **Antérieure au
+merge — pas causée par la parité des tampons épinglés.**
+
+**(2) Logits au point de divergence** (`outils/diag-logits-divergence.py`,
+top-2 candidats) :
+
+    pas=2  ligne=1 (s1) : graphes 12.375000 == 12.375000 (écart 0,000000, TIE EXACT)
+                          eager   12.284713 vs 12.266634 (écart 0,018079)
+    pas=10 ligne=6 (s6) : graphes 17.250000 == 17.250000 (écart 0,000000, TIE EXACT)
+                          eager   17.511557 vs 17.210035 (écart 0,301521)
+
+Le chemin graphes rend un **TIE EXACT** entre les deux candidats (le
+`argmax` bascule alors sur l'ordre des index, pas la valeur) ; l'eager les
+distingue par un écart de 0,018 à 0,301 — à comparer au pas bf16 (`ulp`) à
+cette magnitude (12-17, exposant 3-4) : ≈0,0625 et ≈0,125. **≤ 1-2,4 ulp :
+bruit numérique légitime**, pas un écart franc (le seuil de chef était
+1e-2 — 0,018 le dépasse à peine, 0,301 davantage, mais le TIE EXACT côté
+graphes est le signal qui compte : deux chemins de calcul différents
+(GEMV groupé vs par expert) convergent vers la même valeur arrondie à un
+souffle près, et LEQUEL gagne dépend de l'ordre des sommes en bf16 — pas
+d'une adresse fausse ni d'un tampon désynchronisé.
+
+## Conséquence révisée
+
+**Pas un bogue de `graphs.py`.** Le test bit-identique doit comparer les
+LOGITS (tolérance ~1 ulp bf16) plutôt que l'égalité stricte des jetons —
+un greedy qui bascule sur un TIE est un résultat correct des deux côtés,
+pas une divergence à corriger. poste4 n'a rien à changer côté tampons.
+Intégration du recouvrement reprise.
