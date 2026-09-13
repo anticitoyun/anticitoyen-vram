@@ -284,11 +284,15 @@ class Engine:
             self.graphs = gr if gr.enabled else None
 
         # REPIN (bead anticitoyen-vram-pds, point 3 — poste7 §4). `_pin` :
-        # {index_couche: set(experts résidents)}, VIDE tant qu'aucune couche
-        # ne route par expert (point (2), pas encore câblé) — REPIN est alors
-        # un no-op de fait, pas un no-op déguisé : `_repin_pass` ne trouve
-        # rien à échanger et ne journalise rien, ce que les tests vérifient.
-        self._pin: dict = {}
+        # {index_couche: set(experts résidents)} — peuplé depuis les couches
+        # que loader.py a placées par expert (`MoEBlock._pin_experts`, point
+        # 1). VIDE si aucune ne l'est encore (comportement d'aujourd'hui,
+        # tout `mlp_storage`) : `_repin_pass` ne trouve alors rien à échanger
+        # et ne journalise rien — un no-op de fait, pas déguisé.
+        from .model import MoEBlock
+        self._pin: dict = {m.index_couche: set(m._pin_experts)
+                          for m in self.model.modules()
+                          if isinstance(m, MoEBlock) and m._pin_experts is not None}
         self._dernier_repin = 0
 
     # -- admission -------------------------------------------------------

@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import torch
 
-from acvram.memory.expert_usage import charger, choisir_residents, sauvegarder
+from acvram.memory.expert_usage import (charger, choisir_residents,
+                                       decider_residents, sauvegarder)
 
 
 # --------------------------------------------------------------------------
@@ -84,3 +85,32 @@ def test_capacite_superieure_au_nombre_d_experts_rend_tout():
 
 def test_dict_vide_est_sous_le_seuil():
     assert choisir_residents({}, capacite=4) is None
+
+
+# --------------------------------------------------------------------------
+# decider_residents — AUTOPIN au chargement, avec repli explicite
+# --------------------------------------------------------------------------
+
+def test_sans_profil_rend_le_defaut_par_indice():
+    residents, source = decider_residents(None, n_experts=8, capacite=3)
+    assert residents == {0, 1, 2}
+    assert source == "defaut"
+
+
+def test_profil_insuffisant_rend_aussi_le_defaut():
+    residents, source = decider_residents({0: 100}, n_experts=8, capacite=3)
+    assert residents == {0, 1, 2}          # 100 < seuil : pas assez d'historique
+    assert source == "defaut"
+
+
+def test_profil_suffisant_rend_l_autopin():
+    compte = {0: 100, 1: 9000, 2: 500, 3: 50}       # total 9650 >= seuil
+    residents, source = decider_residents(compte, n_experts=8, capacite=2)
+    assert residents == {1, 2}
+    assert source == "autopin"
+
+
+def test_defaut_ne_depasse_pas_le_nombre_d_experts():
+    residents, source = decider_residents(None, n_experts=2, capacite=10)
+    assert residents == {0, 1}
+    assert source == "defaut"

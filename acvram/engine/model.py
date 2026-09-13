@@ -596,6 +596,16 @@ class MoEBlock(nn.Module):
         # Histogramme de routage par expert : voir _compter_routage. None tant
         # qu'aucun pas ne l'a réservé (aucun forward encore, ou couche dense).
         self._usage_routage: Optional[torch.Tensor] = None
+        # Placement par expert (bead pds, posé par loader.py) : None = pas de
+        # placement par expert pour cette couche (comportement d'aujourd'hui,
+        # `mlp_storage` seul décide). `_pin_experts` : les ids résidents,
+        # lu par `Engine.__init__` pour peupler `_pin` (REPIN réel).
+        # `_table_qw`/`_table_bscale` : `{"gate_proj"|"up_proj"|"down_proj":
+        # tenseur [E] int64}` — le contrat de `memory/table_adresses.py`,
+        # NVFP4 seulement (voir loader.py).
+        self._pin_experts: Optional[set] = None
+        self._table_qw: Optional[dict] = None
+        self._table_bscale: Optional[dict] = None
 
     def _act(self, g: torch.Tensor) -> torch.Tensor:
         if self.act == "gelu_tanh":

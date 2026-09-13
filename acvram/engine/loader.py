@@ -17,7 +17,9 @@ from typing import Any, Optional
 
 import torch
 
+from ..memory import expert_usage
 from ..memory.kvcache import BLOCK_SIZE, KVCacheConfig, PagedKVCache
+from ..memory.table_adresses import construire_table
 from ..memory.tiering import Plan
 from ..quant.calibrate import ChannelScaler
 from ..quant.formats import INT8Tensor, PlainTensor
@@ -281,6 +283,12 @@ def load_model(path: str, plan: Optional[Plan] = None,
                            spec.max_position_embeddings,
                            spec.rope_theta, spec.rope_scaling)
 
+    # Profil de routage persistant (bead pds, point 1) : lu une seule fois
+    # pour tout le modèle, `None` si aucun n'existe encore — cas normal au
+    # premier chargement, pas une erreur (`expert_usage.charger`).
+    _profil_usage = expert_usage.charger(
+        os.path.join(path, expert_usage.NOM_PROFIL))
+
     layers: list[DecoderLayer] = []
     caches: dict[int, PagedKVCache] = {}
     # Caches KV differes : voir la fusion des projections plus bas, qui a
@@ -355,14 +363,24 @@ def load_model(path: str, plan: Optional[Plan] = None,
         # pool refuse bruyamment d'ecraser un emplacement en vol au lieu de
         # rendre les octets d'un autre expert ; il faut encore qu'il en ait
         # assez.
+        # Un placement PAR EXPERT (bead pds) peut vouloir des experts
+        # streamés même sur une couche autrement résidente (`streamed_mlp`
+        # faux) : le pool doit alors exister aussi, sinon `elin` recevrait
+        # `streamed=True` sans tampon où copier.
+        experts_par_couche = lp.experts_residents is not None
         pool = (ExpertPool(mlp_dev, 2 * (spec.num_experts_per_tok or 8) + 2)
-                if streamed_mlp else None)
+                if streamed_mlp or experts_par_couche else None)
 
-        def elin(suffix: str) -> QuantLinear:
+        def elin(suffix: str, streamed: Optional[bool] = None) -> QuantLinear:
+            # `streamed=None` : comportement d'aujourd'hui, uniforme pour
+            # toute la couche (`streamed_mlp`). Un appelant qui connaît un
+            # placement PAR EXPERT (bead pds, point 1) passe `True`/`False`
+            # explicitement — additif, aucun appel existant ne change.
             m = _linear(p + suffix, manifest, reader, group_size)
             if m is None:
                 raise KeyError(f"tenseur manquant {p + suffix}")
-            return m.to_device(mlp_dev, streamed=streamed_mlp, pool=pool)
+            s = streamed_mlp if streamed is None else streamed
+            return m.to_device(mlp_dev, streamed=s, pool=pool if s else None)
 
         def routeur(suffix: str) -> QuantLinear:
             # Le routeur pèse quelques mégaoctets et MoEBlock lit son poids
@@ -388,14 +406,36 @@ def load_model(path: str, plan: Optional[Plan] = None,
                            mlin("mlp.up_proj.weight"),
                            mlin("mlp.down_proj.weight"))
             router = routeur("mlp.gate.weight")
+
+            # Compte d'abord (aucun tenseur chargé : de simples clés sondées)
+            # pour pouvoir décider un placement PAR EXPERT avant de construire
+            # quoi que ce soit — bead pds, point 1.
+            n_experts = 0
+            while manifest["tensors"].get(
+                    p + f"mlp.experts.{n_experts}.gate_proj.weight"):
+                n_experts += 1
+
+            residents = None
+            if (lp.experts_residents is not None
+                    and 0 < lp.experts_residents < n_experts):
+                profil_couche = (_profil_usage or {}).get(i)
+                residents, source = expert_usage.decider_residents(
+                    profil_couche, n_experts, lp.experts_residents)
+                print(f"[acvram] couche {i} : placement par expert, "
+                      f"{lp.experts_residents}/{n_experts} résidents "
+                      f"({source})", flush=True)
+
             experts = []
-            e = 0
-            while manifest["tensors"].get(p + f"mlp.experts.{e}.gate_proj.weight"):
+            for e in range(n_experts):
+                # `residents is None` : comportement d'aujourd'hui, uniforme
+                # (`elin` retombe sur `streamed_mlp`). Sinon, CHAQUE expert
+                # reçoit une décision explicite — plus de repli implicite une
+                # fois un placement par expert actif pour cette couche.
+                s = None if residents is None else (e not in residents)
                 experts.append(MLP(
-                    elin(f"mlp.experts.{e}.gate_proj.weight"),
-                    elin(f"mlp.experts.{e}.up_proj.weight"),
-                    elin(f"mlp.experts.{e}.down_proj.weight")))
-                e += 1
+                    elin(f"mlp.experts.{e}.gate_proj.weight", streamed=s),
+                    elin(f"mlp.experts.{e}.up_proj.weight", streamed=s),
+                    elin(f"mlp.experts.{e}.down_proj.weight", streamed=s)))
             shared = None
             shared_gate = None
             if manifest["tensors"].get(p + "mlp.shared_expert.gate_proj.weight"):
@@ -410,12 +450,40 @@ def load_model(path: str, plan: Optional[Plan] = None,
             if manifest["tensors"].get(p + "mlp.gate.e_score_correction_bias"):
                 score_bias = reader.get(
                     p + "mlp.gate.e_score_correction_bias").float().to(mlp_dev)
-            return MoEBlock(router, experts, spec.num_experts_per_tok or 2,
+            bloc = MoEBlock(router, experts, spec.num_experts_per_tok or 2,
                             shared, shared_gate=shared_gate,
                             norm_topk_prob=bool(spec.raw.get("norm_topk_prob", True)),
                             scoring=spec.router_scoring,
                             score_bias=score_bias,
                             routed_scale=spec.routed_scaling_factor)
+            if residents is not None:
+                # `_pin_experts` : ce que `Engine.__init__` lit pour peupler
+                # `_pin` (REPIN réel, `memory/repin.py`). La table d'adresses
+                # n'existe que pour NVFP4 (contrat `memory/table_adresses.py`
+                # — `qweight`/`block_scale` y sont spécifiques au format) :
+                # un modèle INT4 obtient le placement par expert (et le repli
+                # correct par `elin`/streamed) mais pas encore la table, que
+                # le noyau de poste4 ne consomme de toute façon que pour
+                # NVFP4 aujourd'hui.
+                bloc._pin_experts = residents
+                if all(isinstance(m.gate_proj.qweight, NVFP4Tensor)
+                      for m in experts):
+                    try:
+                        bloc._table_qw = {}
+                        bloc._table_bscale = {}
+                        for nom in ("gate_proj", "up_proj", "down_proj"):
+                            tq, tb = construire_table(experts, nom, device=d)
+                            bloc._table_qw[nom] = tq
+                            bloc._table_bscale[nom] = tb
+                    except ValueError as exc:
+                        # Une adresse nulle (règle 5 : verifier_table peut
+                        # rendre faux) — un expert n'a encore aucune adresse
+                        # réelle. Pas fatal : le chemin par expert existant
+                        # reste correct sans table, seulement plus lent.
+                        print(f"[acvram] couche {i} : table d'adresses non "
+                              f"construite ({exc}) — repli sur le chemin par "
+                              f"expert existant", flush=True)
+            return bloc
 
         if spec.model_type in ("gemma4", "gemma4_text"):
             if rope_gemma is None:

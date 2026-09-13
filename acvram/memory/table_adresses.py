@@ -50,19 +50,23 @@ pendant un pas de décodage : la capture d'un graphe CUDA fige les adresses
 qu'il a vues, une table qui change de valeur pendant un pas capturé serait
 relue à la prochaine capture, pas au prochain jeton.
 
-À vérifier avant d'écrire le premier octet de noyau (pas supposé) :
-qu'un tenseur `.pin_memory()` de PyTorch (allocateur CUDA par défaut) rend
-bien un pointeur device utilisable via `cudaHostGetDevicePointer` sans
-option d'allocation supplémentaire — dépend de l'UVA et du mappage
-`cudaDeviceMapHost`, pas garanti sans un test dédié. Si non : il faudra une
-petite extension C++ qui alloue avec `cudaHostAllocMapped` explicitement.
+VÉRIFIÉ le 13/09/2026 (`outils/test_uva_pin_memory.py`, sur cette machine) :
+un tenseur `.pin_memory()` de PyTorch, sans flag supplémentaire, rend un
+pointeur device IDENTIQUE à son `data_ptr()` hôte via
+`cudaHostGetDevicePointer` (UVA), et ce pointeur est réellement lisible
+depuis la carte (`cudaMemcpy` aller-retour, contenu identique). Conséquence
+qui simplifie le contrat : `table_qw[e]`/`table_bscale[e]` s'écrivent avec
+`tensor.data_ptr()` directement, résident ou froid, sans appel
+`cudaHostGetDevicePointer` séparé côté Python — l'identité host==device tient
+sur CETTE machine ; un futur portage vers un système sans UVA (rare, aucun
+GPU du parc n'est concerné) devrait refaire ce test avant de s'y fier.
 """
 
 from __future__ import annotations
 
 import torch
 
-__all__ = ["verifier_table"]
+__all__ = ["verifier_table", "construire_table"]
 
 
 def verifier_table(table: torch.Tensor) -> None:
@@ -74,3 +78,30 @@ def verifier_table(table: torch.Tensor) -> None:
         raise ValueError(f"table d'adresses : entrée(s) nulle(s) à l'index "
                          f"{mauvais[:5]}{'…' if len(mauvais) > 5 else ''} — "
                          f"jamais 0, voir la docstring du module")
+
+
+def construire_table(experts: list, projection: str,
+                     device: "torch.device | str" = "cpu"
+                     ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Construit `(table_qw, table_bscale)` pour UNE projection
+    (``"gate_proj"``, ``"up_proj"`` ou ``"down_proj"``) d'une couche MoE.
+
+    `experts` : la liste des `MLP` de la couche, dans l'ordre de leur
+    identifiant d'expert — l'ordre EST le contrat, rien n'accompagne chaque
+    entrée pour dire à quel expert elle appartient. Chaque `getattr(mlp,
+    projection)` est un `QuantLinear` dont `.qweight` est un `NVFP4Tensor`
+    (`quant/nvfp4.py`) : `.qweight.qweight`/`.qweight.block_scale` portent
+    les octets, `.data_ptr()` leur adresse — VRAM si l'expert est résident,
+    hôte épinglé s'il est en cours de streaming, peu importe : l'UVA rend les
+    deux directement lisibles depuis la carte (vérifié,
+    `outils/test_uva_pin_memory.py`, voir la docstring du module).
+
+    Ne construit PAS le placement — le reçoit tel quel via `experts`. Lève
+    (`verifier_table`) si un expert n'a pas encore d'adresse réelle."""
+    qw = torch.tensor([getattr(m, projection).qweight.qweight.data_ptr()
+                       for m in experts], dtype=torch.int64, device=device)
+    bs = torch.tensor([getattr(m, projection).qweight.block_scale.data_ptr()
+                       for m in experts], dtype=torch.int64, device=device)
+    verifier_table(qw)
+    verifier_table(bs)
+    return qw, bs

@@ -29,7 +29,11 @@ from typing import Optional
 import torch
 
 __all__ = ["concentration_top_fraction", "sauvegarder", "charger",
-           "choisir_residents"]
+           "choisir_residents", "decider_residents"]
+
+# Nom du profil persistant dans le dossier d'un modèle converti — le nom
+# porte le geste (bead pds), pas le modèle : un seul fichier par dossier.
+NOM_PROFIL = ".acvram_usage.json"
 
 # AUTOPIN de colibrì (colibri.c:11214-11262, cité dans
 # revue/colibri-lecture-code.md) exige au moins 5000 sélections d'historique
@@ -111,3 +115,25 @@ def choisir_residents(compte_couche: dict, capacite: int,
         return None
     classes = sorted(compte_couche.items(), key=lambda kv: (-kv[1], kv[0]))
     return [e for e, _ in classes[:capacite]]
+
+
+def decider_residents(compte_couche: Optional[dict], n_experts: int,
+                      capacite: int,
+                      seuil_confiance: int = SEUIL_CONFIANCE
+                      ) -> tuple[set, str]:
+    """Décision AU CHARGEMENT, pour UNE couche : quels experts résident en
+    VRAM. Rend `(residents, source)` — `source` distingue explicitement une
+    décision MESURÉE (``"autopin"``, depuis `.acvram_usage`) d'un DÉFAUT
+    (``"defaut"``, les `capacite` premiers indices) : un journal qui dirait
+    seulement les identifiants ne saurait pas si le plan a appris quelque
+    chose ou tiré au sort par ordre d'apparition.
+
+    `compte_couche` : `{expert: compte}` pour CETTE couche (déjà extrait d'un
+    profil chargé par `charger()`), ou `None`/`{}` si aucun profil n'existe
+    encore — cas normal au premier chargement d'un modèle, pas une erreur.
+    """
+    if compte_couche:
+        residents = choisir_residents(compte_couche, capacite, seuil_confiance)
+        if residents is not None:
+            return set(residents), "autopin"
+    return set(range(min(capacite, n_experts))), "defaut"
