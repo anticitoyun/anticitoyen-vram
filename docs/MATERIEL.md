@@ -237,6 +237,16 @@ séquentielle de la DDR, puis désigne le gagnant :
               (--host-exec cpu --host-gb-s 71.4)
 ```
 
+> **Relevé du 13/09/2026 — non applicable tel quel.** Les 52,8 Go/s ci-dessus
+> ont été mesurés avec la 5090 seule en PCIe 5.0 **x16**. Depuis que la 3080 Ti
+> occupe le second port, la Z790 Dark Hero partage le lien en **x8/x8** :
+> `nvidia-smi` montre `pcie.link.width.current = 8` (max 16) sur les deux cartes,
+> et la bande mesurée par poste1 (M0, `acvram-topology.json`) est de
+> **20,9-22,1 Go/s** — le régime des manifestes (18,7). Décision de
+> l'utilisateur : on garde x8/x8 (pas de troisième port, affichage sur l'UHD
+> 770). Tout coût d'exil se chiffre à 21 Go/s ; le levier sous exil est le
+> calcul des ratés sur le processeur (DDR 71 Go/s, insensible au lien).
+
 Réinjectez ce nombre dans la planification : `acvram plan MODELE --host-gb-s
 71.4`. La valeur par défaut de 70 Go/s est une plaque signalétique pour de la
 DDR5-6000 en double canal, et devrait être remplacée par la mesure.
