@@ -1509,6 +1509,39 @@ def _exil_demande(plan: Plan) -> None:
             pass
 
 
+def _forcer_exil_experts(plan: Plan, manifest: dict, fraction: float) -> None:
+    """Pendant de `_forcer_exil`, au grain de l'expert plutôt que de la
+    couche entière : « mesure qui tue » (bead pds, point 4). Même prompt,
+    même modèle, même VRAM libérée dans les deux cas — seul le GRAIN de
+    l'exil change, ce que ce couple de fonctions rend comparable.
+    """
+    n_experts = _compter_experts_manifest(manifest)
+    candidates = [l for l in plan.layers
+                  if l.mlp_storage != "cpu" and n_experts.get(l.index)]
+    for l in candidates:
+        e = n_experts[l.index]
+        l.experts_residents = max(0, e - round(e * fraction))
+    print(f"[acvram] mesure : exil par expert a {fraction:.0%} sur "
+          f"{len(candidates)} couches", flush=True)
+    plan.est_decode_tok_s = 0.0
+    plan.est_bytes_per_token = 0
+    try:
+        plan.estimation_perimee = (
+            f"exil par expert force a {fraction:.0%} apres l'estimation ; "
+            f"le debit prevu ne vaut plus rien pour ce plan")
+    except Exception:                        # noqa: BLE001 — une trace ne plante pas
+        pass
+
+
+def _exil_experts_demande(plan: Plan, manifest: dict) -> None:
+    frac = os.environ.get("ACVRAM_EXIL_EXPERTS_FRACTION")
+    if frac:
+        try:
+            _forcer_exil_experts(plan, manifest, float(frac))
+        except ValueError:
+            pass
+
+
 def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
                         max_model_len: Optional[int] = None) -> Plan:
     from ..memory.tiering import LayerPlacement, Plan as _Plan, Tier
@@ -1518,6 +1551,7 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
         if neuf is not None:
             _reajuster_plan(neuf, manifest, top_k=spec.num_experts_per_tok or 8)
             _exil_demande(neuf)
+            _exil_experts_demande(neuf, manifest)
             return neuf
     plan = _Plan(model=d["model"])
     plan.tiers = [Tier(**t) for t in d["tiers"]]
@@ -1529,6 +1563,7 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
     plan.lm_head_device = d["lm_head_device"]
     _reajuster_plan(plan, manifest)
     _exil_demande(plan)
+    _exil_experts_demande(plan, manifest)
     plan.kv_budget = d.get("kv_budget", {})
     plan.kv_bytes_per_token = d.get("kv_bytes_per_token", 0)
     plan.kv_max_tokens = d.get("kv_max_tokens", 0)

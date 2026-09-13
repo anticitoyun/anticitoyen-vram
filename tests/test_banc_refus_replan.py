@@ -98,6 +98,32 @@ def test_l_exil_force_invalide_l_estimation():
     assert getattr(p, "estimation_perimee", None), "la raison doit etre dite"
 
 
+def test_l_exil_par_expert_invalide_aussi_l_estimation():
+    """Pendant de `_forcer_exil` au grain de l'expert (bead pds, point 4) :
+    même garde — l'estimation figée avant coup ne vaut plus rien après."""
+    from acvram.engine.loader import _forcer_exil_experts
+
+    class _Couche:
+        def __init__(self, index):
+            self.index = index
+            self.mlp_storage = "gpu"
+
+    class _Plan:
+        def __init__(self):
+            self.layers = [_Couche(i) for i in range(4)]
+            self.est_decode_tok_s = 687.6
+
+    manifest = {"tensors": {
+        f"model.layers.{i}.mlp.experts.{e}.gate_proj.weight": None
+        for i in range(4) for e in range(8)
+    }}
+    p = _Plan()
+    _forcer_exil_experts(p, manifest, 0.5)
+    assert all(l.experts_residents == 4 for l in p.layers)
+    assert p.est_decode_tok_s == 0.0, "un debit prevu perime reste lisible"
+    assert getattr(p, "estimation_perimee", None), "la raison doit etre dite"
+
+
 def test_refus_quand_la_generation_s_interrompt(monkeypatch):
     """Un EOS des le premier jeton faisait publier un debit de demarrage.
 
