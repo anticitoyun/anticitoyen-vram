@@ -55,7 +55,8 @@ import os
 import threading
 from typing import Optional
 
-__all__ = ["actif", "noter", "fermer", "chemin"]
+__all__ = ["actif", "noter", "fermer", "chemin", "taux_de_succes",
+           "taux_de_succes_par_couche", "taux_de_succes_pin"]
 
 _CHEMIN: Optional[str] = os.environ.get("ACVRAM_TRACE_ROUTAGE") or None
 _ACTIF: bool = _CHEMIN is not None
@@ -193,3 +194,125 @@ def taux_de_succes(chemin_journal: str, capacite: int,
         "taux_par_couche": {c: (s / d if d else 0.0)
                             for c, (s, d) in sorted(par_couche.items())},
     }
+
+
+def taux_de_succes_par_couche(chemin_journal: str, capacite: int,
+                              politique: str = "lru") -> dict:
+    """Comme `taux_de_succes`, mais un cache de ``capacite`` experts PAR
+    COUCHE — chacune la sienne, pas un pool partagé entre toutes.
+
+    C'est la capacité qui répond à une question de placement (bead jt5,
+    revue/poste7-cache-experts-13-09.md §5, point manquant §3) : « si CETTE
+    couche a C emplacements chauds, quel taux obtient-elle ? », pas « si tout
+    le modèle partage un même réservoir de C·L emplacements ». Les deux ne
+    coïncident pas : une couche à routage concentré et une à routage plat se
+    disputeraient le même pool dans `taux_de_succes`.
+    """
+    from collections import OrderedDict, Counter
+    caches: dict[int, OrderedDict] = {}
+    freqs: dict[int, Counter] = {}
+    succes = demandes = 0
+    par_couche: dict[int, list[int]] = {}
+    for _, couche, experts in relire(chemin_journal):
+        cache = caches.setdefault(couche, OrderedDict())
+        freq = freqs.setdefault(couche, Counter())
+        s = d = 0
+        for e in experts:
+            d += 1
+            if e in cache:
+                s += 1
+                cache.move_to_end(e)
+            else:
+                if len(cache) >= capacite:
+                    if politique == "lfu":
+                        victime = min(cache, key=lambda k: freq[k])
+                        cache.pop(victime)
+                    else:
+                        cache.popitem(last=False)
+                cache[e] = True
+            freq[e] += 1
+        succes += s
+        demandes += d
+        acc = par_couche.setdefault(couche, [0, 0])
+        acc[0] += s
+        acc[1] += d
+    return {
+        "politique": politique,
+        "capacite": capacite,
+        "demandes": demandes,
+        "succes": succes,
+        "taux": succes / demandes if demandes else 0.0,
+        "taux_par_couche": {c: (s / d if d else 0.0)
+                            for c, (s, d) in sorted(par_couche.items())},
+    }
+
+
+def taux_de_succes_pin(chemin_journal: str, capacites: list, entrainement: float = 0.5) -> dict:
+    """Politique PIN : les ``capacite`` experts les plus demandés PAR COUCHE,
+    appris sur la PREMIÈRE fraction ``entrainement`` de la trace (dans l'ordre
+    d'émission des jetons), évalués sur le RESTE — jamais sur la moitié qui
+    l'a appris (poste7 §5 : « jamais sur la moitié qui l'a appris »).
+
+    C'est la politique d'`AUTOPIN` de colibrì (`.coli_usage`, épinglage figé au
+    démarrage) — par opposition à `taux_de_succes_par_couche` qui est la LRU
+    ou LFU de colibrì (`REPIN`, adaptative en cours de service). Un histogramme
+    appris et évalué sur la MÊME moitié dirait « ce cache aurait marché sur les
+    données qui l'ont construit », ce qui est vrai de n'importe quel cache assez
+    grand — pas une mesure, une tautologie.
+
+    Rend ``{capacite: {"taux": ..., "taux_par_couche": {...}}}`` pour chaque
+    capacité de ``capacites`` — une seule lecture d'entraînement et une seule
+    lecture d'évaluation, quel que soit le nombre de capacités demandées.
+    """
+    from collections import Counter
+
+    jeton_min = jeton_max = None
+    for jeton, _, _ in relire(chemin_journal):
+        if jeton_min is None:
+            jeton_min = jeton_max = jeton
+        elif jeton > jeton_max:
+            jeton_max = jeton
+        elif jeton < jeton_min:
+            jeton_min = jeton
+    if jeton_min is None:
+        vide = {"taux": 0.0, "taux_par_couche": {}}
+        return {c: dict(vide) for c in capacites}
+    seuil = jeton_min + (jeton_max - jeton_min) * entrainement
+
+    freq: dict[int, Counter] = {}
+    for jeton, couche, experts in relire(chemin_journal):
+        if jeton > seuil:
+            continue
+        c = freq.setdefault(couche, Counter())
+        for e in experts:
+            c[e] += 1
+
+    pins = {capacite: {couche: {e for e, _ in c.most_common(capacite)}
+                       for couche, c in freq.items()}
+           for capacite in capacites}
+
+    resultats = {capacite: {"succes": 0, "demandes": 0, "par_couche": {}}
+                for capacite in capacites}
+    for jeton, couche, experts in relire(chemin_journal):
+        if jeton <= seuil:
+            continue
+        for capacite in capacites:
+            r = resultats[capacite]
+            pin_couche = pins[capacite].get(couche, set())
+            acc = r["par_couche"].setdefault(couche, [0, 0])
+            for e in experts:
+                s = 1 if e in pin_couche else 0
+                r["succes"] += s
+                r["demandes"] += 1
+                acc[0] += s
+                acc[1] += 1
+
+    out = {}
+    for capacite in capacites:
+        r = resultats[capacite]
+        out[capacite] = {
+            "taux": r["succes"] / r["demandes"] if r["demandes"] else 0.0,
+            "taux_par_couche": {c: (s / d if d else 0.0)
+                                for c, (s, d) in sorted(r["par_couche"].items())},
+        }
+    return out
