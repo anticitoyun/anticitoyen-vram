@@ -593,11 +593,60 @@ class MoEBlock(nn.Module):
         # défaut, GELU-tanh pour Gemma 4)
         a = getattr(experts[0], "act", "silu") if experts else "silu"
         self.act = "gelu_tanh" if str(a).startswith("gelu") else "silu"
+        # Histogramme de routage par expert : voir _compter_routage. None tant
+        # qu'aucun pas ne l'a réservé (aucun forward encore, ou couche dense).
+        self._usage_routage: Optional[torch.Tensor] = None
 
     def _act(self, g: torch.Tensor) -> torch.Tensor:
         if self.act == "gelu_tanh":
             return F.gelu(g, approximate="tanh")
         return F.silu(g)
+
+    def _compter_routage(self, topi: torch.Tensor) -> None:
+        """Histogramme des experts routés, accumulé SUR DEVICE, jamais lu ici.
+
+        Premier compteur du chantier colibrì (`revue/colibri-lecture-code.md`) :
+        colibrì sépare `rt_count()` (comptage, toujours actif, un incrément par
+        expert unique déjà testé au lookup) de `rt_trace()` (trace textuelle,
+        opt-in, plus chère) — chez nous `_trace_routage` confondait les deux
+        dans un seul mécanisme opt-in. Celui-ci tourne à CHAQUE pas, sans
+        condition : un `torch.bincount` sur les indices que le routeur vient de
+        produire, du même ordre de grandeur que ce qu'il a déjà lu, négligeable
+        devant le GEMM du MLP qui suit dans la même couche.
+
+        Capturable par un graphe CUDA : le tampon est réservé une seule fois,
+        HORS capture, puis seulement modifié en place (`+=`, jamais réassigné)
+        — même exigence que le cache RoPE (`RotaryEmbedding.reserver`, voir
+        `test_rope_ne_se_realloue_pas_sous_capture`) : une (ré)allocation
+        pendant une capture laisserait au graphe une adresse morte au replay.
+        Refuse plutôt que d'en créer une.
+
+        `torch.bincount` a été essayé d'abord et REFUSÉ : sa forme de sortie
+        dépend de la plus grande valeur d'entrée, ce que CUDA ne peut décider
+        sans lire la carte — « Cannot copy between CPU and CUDA tensors during
+        CUDA graph capture », mesuré ici même. `scatter_add_` n'a pas ce
+        défaut : la forme de sa sortie est celle du tampon, fixée d'avance,
+        indépendante des VALEURS de `topi` — seule sa forme à lui compte, déjà
+        connue avant le lancement du noyau.
+
+        Un index hors domaine (bogue amont — le routage ne doit jamais en
+        produire) est vérifié sur CPU : `scatter_add_` y refuse tout index hors
+        limites (`RuntimeError`, testé ci-dessous). Sur CUDA cette même
+        situation est UN COMPORTEMENT NON DÉFINI de `scatter_add_` — ni
+        exception garantie ni sécurité mémoire — donc PAS le filet de sécurité
+        pour ce cas côté carte ; c'est le test CPU qui doit attraper une
+        régression du routage avant qu'elle n'atteigne le GPU.
+        """
+        n = len(self.experts)
+        if self._usage_routage is None:
+            if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "compteur de routage non réservé avant la capture du "
+                    "graphe CUDA — un premier appel hors capture le réserve")
+            self._usage_routage = torch.zeros(n, dtype=torch.int64,
+                                              device=topi.device)
+        idx = topi.reshape(-1).to(torch.int64)
+        self._usage_routage.scatter_add_(0, idx, torch.ones_like(idx))
 
     # ------------------------------------------------------------------
     # Pile d'experts pour le chemin groupé. Les qweight/échelles de tous les
@@ -863,6 +912,10 @@ class MoEBlock(nn.Module):
         # réduction pondérée ; l'aller-retour en bf16 coûtait deux copies par
         # couche pour rien
         topw, topi = self._route(x)
+        # Ici, pas dans _route : `_route` est surchargée (MoEBlockGemma) sans
+        # appeler super(), alors que `forward` est le seul point que tous les
+        # chemins de routage traversent une fois topi connu.
+        self._compter_routage(topi)
 
         # Chemin groupé : trois lancements pour toute la couche, quel que soit
         # le nombre d'experts touchés. La boucle par expert reste le chemin des
@@ -1605,6 +1658,19 @@ class ACVRamModel(nn.Module):
             if isinstance(m, QuantLinear):
                 total += m.nbytes
         return total
+
+    def usage_routage(self) -> dict:
+        """Histogramme de routage par couche — À LA DEMANDE seulement.
+
+        `MoEBlock._compter_routage` tourne à chaque pas ; ceci ne l'est PAS :
+        c'est le point de lecture (dump fin de requête, endpoint /routage),
+        jamais appelé depuis le chemin de décodage. Rend `{index_couche:
+        tenseur}` pour chaque couche MoE qui a déjà tourné au moins une fois ;
+        les couches denses ou pas encore sollicitées n'y figurent pas. Les
+        tenseurs restent sur leur device — `.cpu()` (et donc la synchronisation
+        qu'il implique) est décidé par l'appelant, pas ici."""
+        return {m.index_couche: m._usage_routage for m in self.modules()
+                if isinstance(m, MoEBlock) and m._usage_routage is not None}
 
     def nbytes_detail(self) -> dict:
         """Decompose `nbytes` pour que l'ecart a la prevision se NOMME.
