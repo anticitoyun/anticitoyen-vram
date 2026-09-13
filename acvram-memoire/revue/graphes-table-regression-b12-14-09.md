@@ -49,3 +49,37 @@ restent vraies et testées — la garde levée elle-même n'est pas fausse),
 mais je ne le recommande pas activé par défaut sans en comprendre la
 cause. À trancher : profiler avec `ncu` avant de statuer, ou revenir à
 « graphes désactivés pour le chemin table » en attendant.
+
+## Cause confirmée (pas la piste initiale)
+
+Vérification directe, hors décodage réel (jamais besoin d'ncu) :
+`bloc._route(torch.zeros(1, hidden))` sur les 48 couches du modèle exilé
+par expert. `x=0` route, DE FAÇON DÉTERMINISTE (logits tous nuls,
+`torch.topk` départage par index croissant), toujours vers les experts
+`[0..top_k-1]` — **et sur les 48 couches, sans exception, entre 1 et 7 de
+ces 8 experts sont FROIDS** sous le placement AUTOPIN de ce modèle.
+
+`bucket_batch(12) = 16` (`graphs.py:315`, aucun rapport avec
+`ACVRAM_HYBRID_SLOTS`/`max_slots` — ce plafond ne s'applique qu'aux
+couches HYBRIDES GDN/KDA/MLA, absentes de Coder-30B ; le correctif x0s
+cité ne couvre pas ce chemin). `_fill` (`graphs.py:494-508`) met les 4
+lignes de remplissage à zéro (`entry["x"].zero_()`) mais NE les masque PAS
+avant le passage MoE : elles traversent tout le chemin groupé comme des
+jetons réels. Résultat : **1 à 7 lectures PCIe inutiles PAR COUCHE, à
+CHAQUE pas de décodage**, sur les 48 couches — un coût fixe qui n'existe
+ni à b=1 (`bucket_batch(1)=1`, aucun remplissage) ni sur le résident complet
+(les mêmes créneaux fantômes routent vers des experts qui, là, sont TOUS
+résidents — coût de calcul gâché mais aucune traversée PCIe).
+
+L'hypothèse initiale (latence de double déréférencement) n'est pas
+réfutée en soi mais devient inutile : celle-ci suffit entièrement à
+expliquer la régression, et n'a demandé aucun profilage — juste une
+question posée au routeur.
+
+## Correctif, non fait ici
+
+Masquer les créneaux fantômes (`slot_mapping < 0`, déjà posé par `_fill`
+pour d'autres tampons) AVANT le rassemblement MoE, pas seulement mettre `x`
+à zéro. Touche le routage/dispatch partagé par le chemin PILE aussi (lui
+gâche du calcul sans le payer en PCIe, mais gagnerait aussi) — portée plus
+large que ce bead, pas engagé sans décision explicite.

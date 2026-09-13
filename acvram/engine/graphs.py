@@ -223,6 +223,14 @@ class GraphRunner:
         # des tampons ROTATIFS — l'adresse que le graphe a capturée
         # resterait celle du créneau, quel que soit l'expert qui l'occupe
         # réellement au rejeu suivant.
+        # Défaut = garde active : mesuré le 14/09 (revue/graphes-table-
+        # regression-b12-14-09.md), b=12 RÉGRESSE de 37 % (30,3→19,0 j/s)
+        # une fois la garde levée pour le chemin table, malgré les trois
+        # conditions de sécurité prouvées — cause non expliquée (pas une
+        # recapture : 5 captures, 203 rejeux). Tant qu'elle ne l'est pas,
+        # le chemin table reste hors des graphes par défaut ; ACVRAM_GRAPHES_
+        # TABLE=1 pour l'activer en connaissance de cause (mesure, débogage).
+        table_graphes_ok = bool(os.environ.get("ACVRAM_GRAPHES_TABLE"))
         surs_table: set = set()
         for mod in m.modules():
             if isinstance(mod, MoEBlock):
@@ -238,8 +246,9 @@ class GraphRunner:
                 if mod._stack_state != "oui":
                     self.raison = "pile d'experts hétérogène"
                     return False             # pile heterogene : eager
-                if all(p[0] in ("nvfp4", "nvfp4_table")
-                      for p in mod._stacks.values()):
+                if table_graphes_ok and all(
+                        p[0] in ("nvfp4", "nvfp4_table")
+                        for p in mod._stacks.values()):
                     for exp in mod.experts:
                         for nom in ("gate_proj", "up_proj", "down_proj"):
                             lin = getattr(exp, nom, None)
