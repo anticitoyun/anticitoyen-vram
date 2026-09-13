@@ -285,3 +285,68 @@ FP4 native 8 945 → + glue en noyaux 10 535 → + pipeline cp.async
 **16 938**, soit ×2,23 sur le meilleur chemin d'hier. Qualité : A4 sur les
 experts mesurée par poste2 sur le noyau réel : PPL +0,919 % (seuil 1 %),
 `ACVRAM_MOE_MMA=1` par défaut (poste2).
+
+## Face à vLLM (14/09, soir) — décodage b=12, profil, tuile 128
+
+Contexte : poste2 a mesuré vLLM 0.29 sur la même carte, Coder-30B NVFP4 :
+décodage 12 séquences 1 198 t/s (10 ms/pas), prefill pp2048 34 788 j/s,
+GEMM groupée CUTLASS FP4 14,3 ms par pas contre nos 38 ms.
+
+### (1) Décodage b=12 : MMA2 sur le chemin décodage
+
+`outils/banc_decodage_moe.py`, Coder-30B, 62 pas, 5 rép, eager :
+
+| chemin | ms/pas | j/s | compteurs |
+|--------|-------:|----:|-----------|
+| GEMV par expert (défaut) | 19,17 | 626 | fg=2976 |
+| MMA2 forcée (GROUPED_MAX=0, bt 16, S=4) | 37,68 | 319 | fpg=2976, mma=8928 |
+
+**×0,51** (×0,49 avant cp.async) : le pipeline n'y change rien. À ~1
+jeton par tuile de 16, ce n'est pas le noyau qui coûte mais le chemin
+(quant_act + 3 GEMM + glue par couche) contre un GEMV gate·up fusionné.
+Verdict tenu : GEMV au décodage.
+
+### (2) Profil du pas de décodage b=12 (chemin par défaut, eager)
+
+GPU 12,25 ms par pas ; sous graphes CUDA le pas mesuré est **16,54 ms
+(726 j/s)** — 4,3 ms par pas hors rejeu (ordonnanceur, échantillonnage,
+`bind`/`fill`), 26 % du pas.
+
+| poste | ms | part GPU |
+|-------|---:|----:|
+| `nvfp4_gemv_grouped_gateup` (MoE gate·up) | 3,35 | 27 % |
+| `nvfp4_gemv_grouped_warp` (MoE down) | 2,63 | 21 % |
+| `int8_gemv_kernel` (projections d'attention, ×192) | 2,99 | 24 % |
+| `paged_attn_partial` | 0,72 | 6 % |
+| `int8_gemv` lm_head | 0,88 | 7 % |
+| routage, élémentaires, reste | ~1,7 | 14 % |
+
+Lecture : le MoE (6 ms) est proche de sa borne (≈ 68 experts distincts ×
+2,36 Mo × 48 couches ≈ 7,7 Go → 7,3 ms si tous distincts, moins en
+pratique). **Le GEMV INT8 des projections d'attention est à ~27 % de sa
+borne** (0,86 Go → 0,8 ms, mesuré 3,0) : premier levier noyau au décodage
+(−2 ms, −16 % du GPU). Le second est hors GPU : 4,3 ms par pas d'ordonnan-
+cement, à profiler côté CPU. vLLM fait le pas entier en 10 ms.
+
+### (3) Tuile de 128 jetons (bead 0si) — RÉFUTÉ
+
+Prédiction scellée : +13 à +18 % à L=2048 (les poids lus une fois au lieu
+de deux) ; réfutation : < +5 %.
+
+| bt | L=2048 | L=512 |
+|---:|-------:|------:|
+| 64 (S=4) | 17 009 ± 75 | 8 701 ± 49 |
+| 128 (S=4) | 16 989 ± 51 | 8 111 ± 49 |
+
+**±0 % à L=2048, −7 % à L=512** (l'issue gênante : 1 bloc de 8 warps par
+SM). Réfuté : la seconde lecture des poids de bt=64 était déjà servie par
+le L2 (deux tuiles du même expert se suivent, 300 Mo par couche pour 96 Mo
+de L2 mais lues de près). La borne à 28 ms de la note précédente était
+donc fausse : la vraie est 15,4 Go → 14,7 ms, et le noyau est à **39 %**
+de sa borne, pas 75 %. CUTLASS (14,3 ms) est à la borne. Ce qui reste
+entre nous et lui n'est pas dans les octets : `Shape<128,128,128>` avec
+**K = 128 par étape** (moitié de synchronisations), **TMA** (`cp.async.bulk
+.tensor`, un fil émet le chargement d'une tuile entière) et **warps
+producteurs/consommateurs** ; nos `cp.async` de 16 o par fil et nos
+`__syncthreads` par pas de 64 sont la différence. Bead 0si à réécrire :
+TMA + K=128, prédiction sur le 39 %.

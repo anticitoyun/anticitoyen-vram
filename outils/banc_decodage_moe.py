@@ -17,7 +17,7 @@ sys.path.insert(0, _REPO)
 bras = sys.argv[1]
 B = int(sys.argv[2]) if len(sys.argv) > 2 else 12
 N = int(os.environ.get("BANC_JETONS", "64"))
-if bras in ("mma", "profil"):
+if bras in ("mma", "profilmma"):
     os.environ["ACVRAM_MOE_MMA"] = "1"; os.environ["ACVRAM_MOE_GROUPED_MAX"] = "0"
     os.environ.setdefault("ACVRAM_MOE_MMA_BT", "16"); os.environ.setdefault("ACVRAM_MOE_MMA_ETAGES", "4")
 import torch
@@ -69,7 +69,7 @@ def passe(rep, profiler=False):
     torch.cuda.synchronize()
     return time.perf_counter() - t0, pas
 passe(0); passe(1)
-if bras == "profil":
+if bras in ("profil", "profilmma"):
     passe(2, profiler=True); sys.exit(0)
 res = sorted(passe(10 + r) for r in range(5))
 dt, pas = res[len(res) // 2]
