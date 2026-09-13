@@ -148,7 +148,8 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
                max_tokens: int = 8192, device: Optional[str] = None,
                dtype: torch.dtype = torch.bfloat16,
                progress: Optional[Callable[[int, int], None]] = None,
-               min_context: int = 0) -> EvalResult:
+               min_context: int = 0,
+               apres_chargement: Optional[Callable[[Any], None]] = None) -> EvalResult:
     """Perplexité par fenêtre glissante sur un modèle converti.
 
     ``min_context`` écarte du décompte les positions qui ont moins de tant de
@@ -159,6 +160,12 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
     que la seconde moitié de chaque fenêtre. La valeur par défaut reste zéro
     pour que les mesures déjà publiées restent comparables ; toute comparaison
     de formats devrait passer au moins 64.
+
+    ``apres_chargement``, appelé avec le modèle chargé juste après
+    `load_model` et avant la première fenêtre : point d'extension pour des
+    sondes de recherche (hooks de fake-quant d'activation, par exemple —
+    voir outils/hooks_activations_a4.py) sans dupliquer la boucle de
+    fenêtre glissante ci-dessous dans chaque script qui en a besoin.
     """
     from .engine.loader import load_model
     from .engine.model import ForwardBatch
@@ -180,6 +187,8 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
         raise ValueError("corpus trop court pour être évalué")
 
     model = loaded.model
+    if apres_chargement is not None:
+        apres_chargement(model)
     result = EvalResult(model=os.path.basename(os.path.abspath(model_dir)),
                         min_context=min_context, window=window)
     if corpus_path and os.path.isfile(corpus_path):

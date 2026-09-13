@@ -1,0 +1,86 @@
+"""Fake-quant des ACTIVATIONS, bloc 16 — sonde de recherche, pas un chemin
+d'exécution livré.
+
+Bead anticitoyen-vram-brd, étape 1 (poste4, 13/09/2026) : la RTX 5090 a une
+MMA FP4 native (`mma.sync...kind::mxf4nvf4...e2m1.e2m1...ue4m3`) qui exige
+les DEUX opérandes en E2M1 avec échelle bloc UE4M3 (W4A4). Notre moteur
+quantifie aujourd'hui les poids en NVFP4 mais garde les activations en
+BF16 (W4A16, déquantification logicielle) — plafond mesuré à +24 % par
+poste4. Avant d'écrire un noyau W4A4, il faut savoir ce que ça coûte en
+qualité : ce module fait le calcul en PyTorch pur (aucun GPU requis), en
+« fake quant » — arrondi puis reconstruction en pleine précision, le calcul
+matriciel qui suit reste exact. C'est la méthode standard pour ESTIMER une
+perte de quantification sans écrire le noyau qui l'exploite.
+
+Trois fonctions, pour les trois régimes du protocole :
+  W4A16  bf16_identite         (témoin : aucune perte d'activation)
+  W4A4   fake_quantize_nvfp4_activation   (E2M1 bloc 16, échelle UE4M3)
+  W4A8   fake_quantize_e4m3_activation    (E4M3 bloc 16, repli mxf8f6f4)
+
+Le bloc est le MÊME (16) dans les trois cas : seule la représentation de
+l'élément change, pas la granularité de l'échelle — sinon un écart de PPL
+mesurerait deux choses à la fois.
+"""
+from __future__ import annotations
+
+import torch
+
+from .nvfp4 import BLOCK, dequantize_nvfp4, quantize_nvfp4
+
+__all__ = [
+    "fake_quantize_nvfp4_activation",
+    "fake_quantize_e4m3_activation",
+]
+
+
+def fake_quantize_nvfp4_activation(x: torch.Tensor, block: int = BLOCK) -> torch.Tensor:
+    """Aller-retour E2M1/bloc 16, échelle UE4M3 par bloc + FP32 par appel.
+
+    Réutilise `quantize_nvfp4`/`dequantize_nvfp4` telles quelles : ce sont
+    les MÊMES fonctions que celles qui quantifient les poids, donc le même
+    format, sans code dupliqué qui pourrait diverger du noyau CUDA que ces
+    fonctions documentent devoir reproduire au bit près.
+
+    DYNAMIQUE, pas calibrée à l'avance : chaque appel choisit sa propre
+    échelle globale à partir du lot d'activations reçu. C'est le seul choix
+    cohérent avec un GEMM W4A4 en production — les activations ne se
+    calibrent pas hors ligne, contrairement aux poids.
+    """
+    orig_shape = x.shape
+    orig_dtype = x.dtype
+    x2 = x.reshape(-1, orig_shape[-1])
+    t = quantize_nvfp4(x2, block=block)
+    deq = dequantize_nvfp4(t, torch.float32)
+    return deq.reshape(orig_shape).to(orig_dtype)
+
+
+def fake_quantize_e4m3_activation(x: torch.Tensor, block: int = BLOCK) -> torch.Tensor:
+    """Aller-retour E4M3 (FP8), échelle absmax par bloc de MÊME TAILLE que
+    NVFP4 — repli W4A8 (mxf8f6f4 dans la nomenclature NVIDIA : A en FP8,
+    poids restent FP4).
+
+    Bloc choisi égal à `fake_quantize_nvfp4_activation` (16), pas la
+    convention MXFP8 usuelle (bloc 32, échelle UE8M0) : le protocole compare
+    des FORMATS D'ÉLÉMENT à granularité d'échelle ÉGALE, sinon l'écart de
+    PPL entre A4 et A8 mesurerait aussi un écart de granularité et la
+    comparaison ne répondrait plus à la question posée.
+    """
+    orig_shape = x.shape
+    orig_dtype = x.dtype
+    n = orig_shape[-1]
+    x2 = x.reshape(-1, n).to(torch.float32)
+    rem = n % block
+    pad = 0 if rem == 0 else block - rem
+    if pad:
+        x2 = torch.nn.functional.pad(x2, (0, pad))
+    rows, k = x2.shape
+    xb = x2.view(rows, k // block, block)
+    e4m3_max = torch.finfo(torch.float8_e4m3fn).max
+    amax = xb.abs().amax(dim=-1, keepdim=True)
+    scale = (amax / e4m3_max).clamp(min=torch.finfo(torch.float32).tiny)
+    q = (xb / scale).to(torch.float8_e4m3fn)
+    deq = q.to(torch.float32) * scale
+    deq = deq.reshape(rows, k)
+    if pad:
+        deq = deq[:, :n]
+    return deq.reshape(orig_shape).to(orig_dtype)
