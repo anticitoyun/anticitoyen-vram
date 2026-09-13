@@ -164,3 +164,54 @@ tenue partout ; l'issue gênante ne s'est pas produite. bt=64 ≥ bt=32
   sur la latence ; à mesurer seulement si le MoE redevient le poste dominant.
 - `nvfp4_quant_act` est un lancement séparé par entrée (2 par couche) : à
   fusionner dans l'épilogue de gate·up pour `down_proj`.
+
+## Profil du pas et décodage b=12 (13/09, nuit)
+
+Prédictions écrites avant : attention paginée premier poste (≥ 35 %),
+MoE MMA 15-25 %, `quant_act` < 5 %, projections denses 10-20 % ; au
+décodage b=12, MMA ≈ GEMV à ±10 %, issue gênante MMA plus lent.
+
+### Profil `torch.profiler`, prefill chaud L=2048, `ACVRAM_MOE_MMA=1`
+
+Pas mesuré 226 ms ; somme des `self_device_time` 289 ms (les entrées
+`aten::` recomptent leurs noyaux, lire les lignes de noyaux).
+
+| poste | ms | appels | part du pas |
+|-------|---:|------:|-----:|
+| `nvfp4_gemm_grouped_mma_kernel<64>` | **114,4** | 144 | **≈ 50 %** |
+| routage + index/gather/copies/mul/sum (glue Python du MoE) | ≈ 55 | ~1 500 | ≈ 25 % |
+| GEMM bf16 cutlass (projections attention, INT8 promu) | 19,1 | 192 | 8 % |
+| `int8_dequant_kernel` | 11,0 | 192 | 5 % |
+| flash attention | 11,5 | 48 | 5 % |
+| `nvfp4_quant_act_kernel` | 1,6 | 96 | 0,7 % |
+
+- **Prédiction attention fausse** : 5 %, pas 35 %. À L=2048 sur ce MoE le
+  pas est le MoE, pas l'attention.
+- **`quant_act` = 0,7 %** : la fusion dans l'épilogue gate·up n'a pas
+  d'objet, retirée du plan.
+- **Le noyau MMA est encore le premier poste, et loin de sa borne** :
+  poids MoE par couche ≈ 300 Mo en 4 bits, lus 2× à 128 j/expert avec
+  bt=64 → 28 ms sur 48 couches à 1 050 Go/s ; calcul 1,5·10¹³ FLOP →
+  7 ms à 2 000 TFLOPS. Mesuré 114 ms : **~25 % de la borne mémoire**.
+  Cause : fragments chargés depuis la mémoire globale un pas de K en
+  avance seulement, aucun `cp.async`, un bloc de 128 fils par 64 lignes.
+  C'est la retouche suivante : étage en shared par `cp.async` à 3-4
+  étapes, BM=128 pour réutiliser A, 8 warps.
+- La glue Python (25 %) est le second poste : `x[flat_t[ordre]]`,
+  `d[inv]`, `.to(float32)`, `sum(dim=1)` — un noyau de dispersion /
+  réduction pondérée par expert la ferait disparaître.
+
+### Décodage MoE b=12 (Qwen3-Coder-30B, 62 pas de 12 séquences, 5 rép, médian)
+
+| chemin | ms / pas | j/s | compteurs |
+|--------|---------:|----:|-----------|
+| GEMV par expert (défaut, `_forward_grouped`) | **19,51** | **615** | fg=2976 |
+| MMA (`ACVRAM_MOE_GROUPED_MAX=0`, `ACVRAM_MOE_MMA=1`, bt=16) | 39,61 | 303 | fpg=2976, mma=8928 |
+
+**MMA ×0,49 au décodage** : l'issue gênante. 96 affectations sur 128
+experts → une tuile de 16 jetons par expert en tient ~1 ; les octets de
+poids lus sont les mêmes qu'en GEMV, mais le GEMV fusionné gate·up tient
+634 Go/s effectifs quand le noyau MMA plafonne à ~25 % de la borne. Le
+GEMV reste le chemin du décodage ; la MMA n'y a d'intérêt qu'une fois son
+étage mémoire refait — et même alors le gain attendu est celui de la
+lecture, pas du calcul.
