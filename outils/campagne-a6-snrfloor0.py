@@ -57,7 +57,19 @@ def _ppl(dossier: str) -> dict:
     r = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True)
     if r.returncode != 0:
         return {"echec": r.stderr[-3000:]}
-    donnees = json.loads(r.stdout)
+    # `acvram eval` imprime le cadrage et la progression AVANT le JSON —
+    # extraire a partir du DERNIER "\n[\n" (le json.dumps(indent=2) final
+    # commence exactement ainsi : "[" seul sur sa ligne puis l'element
+    # indente) ; un simple "\n[" se trouve aussi a l'INTERIEUR de l'objet
+    # (des listes vides comme "vus_plusieurs_fois": [] suivies d'une
+    # virgule et d'une nouvelle ligne) et coupe le JSON au mauvais
+    # endroit — piege trouve au premier essai.
+    idx = r.stdout.rfind("\n[\n")
+    brut = r.stdout[idx + 1:] if idx >= 0 else r.stdout
+    try:
+        donnees = json.loads(brut)
+    except json.JSONDecodeError:
+        return {"echec": f"JSON illisible :\n{r.stdout[-2000:]}"}
     return donnees[0] if donnees else {"echec": "liste vide"}
 
 
@@ -101,22 +113,45 @@ def _decode_b12(dossier: str) -> dict:
            "watts_repos": round(base.moyenne, 1), **e.resume()}
 
 
+def cmd_decoder(dossier: str) -> int:
+    """Sous-commande dediee, appelee dans son PROPRE processus par
+    cmd_mesurer — deux load_model() dans le meme processus (comme mon
+    piege du duel vLLM/acvram la veille) laisseraient le premier modele
+    resident en VRAM, forcant le second en exil massif (mesure : 39/128
+    experts residents au lieu de la totalite) et publiant un debit ×16
+    plus lent qui n'aurait rien a voir avec snr_floor."""
+    print("RESULTAT_DECODE " + json.dumps(_decode_b12(dossier), ensure_ascii=False))
+    return 0
+
+
+def _mesurer_decode_isole(dossier: str) -> dict:
+    cmd = [VENV_PY, str(Path(__file__).resolve()), "decoder", dossier]
+    r = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True)
+    if r.returncode != 0:
+        return {"echec": r.stderr[-3000:]}
+    idx = r.stdout.rfind("RESULTAT_DECODE ")
+    if idx < 0:
+        return {"echec": f"pas de ligne RESULTAT_DECODE :\n{r.stdout[-2000:]}"}
+    return json.loads(r.stdout[idx + len("RESULTAT_DECODE "):])
+
+
 def cmd_mesurer(avant: str, apres: str) -> int:
     print(f"BEAD A6 — mesure avant/apres : {avant} vs {apres}")
     print("  PPL avant...", flush=True)
     ppl_avant = _ppl(avant)
     print("  PPL apres...", flush=True)
     ppl_apres = _ppl(apres)
-    print("  decodage b=12 avant...", flush=True)
-    dec_avant = _decode_b12(avant)
-    print("  decodage b=12 apres...", flush=True)
-    dec_apres = _decode_b12(apres)
+    print("  decodage b=12 avant (processus isole)...", flush=True)
+    dec_avant = _mesurer_decode_isole(avant)
+    print("  decodage b=12 apres (processus isole)...", flush=True)
+    dec_apres = _mesurer_decode_isole(apres)
 
     resultat = {"avant": {"dossier": avant, "ppl": ppl_avant, "decode": dec_avant},
                "apres": {"dossier": apres, "ppl": ppl_apres, "decode": dec_apres}}
     print("RESULTAT " + json.dumps(resultat, ensure_ascii=False, indent=2))
 
-    if "echec" not in ppl_avant and "echec" not in ppl_apres:
+    if ("echec" not in ppl_avant and "echec" not in ppl_apres
+            and "echec" not in dec_avant and "echec" not in dec_apres):
         p_avant = ppl_avant.get("perplexity")
         p_apres = ppl_apres.get("perplexity")
         d_avant = dec_avant["jetons_s"]
@@ -140,6 +175,8 @@ def main() -> int:
         return cmd_convertir(sys.argv[2], sys.argv[3])
     if sys.argv[1] == "mesurer":
         return cmd_mesurer(sys.argv[2], sys.argv[3])
+    if sys.argv[1] == "decoder":
+        return cmd_decoder(sys.argv[2])
     print(f"ECHEC / CAUSE: sous-commande inconnue {sys.argv[1]!r}")
     return 2
 
