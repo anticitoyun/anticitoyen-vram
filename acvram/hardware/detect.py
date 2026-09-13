@@ -211,9 +211,21 @@ class Gpu:
 
     @property
     def vram_bandwidth_gbps(self) -> float:
-        """Bande passante mémoire approximative, servant seulement à classer les étages."""
+        """Bande passante mémoire EN LECTURE SEULE, celle qui borne un GEMV.
+
+        1792 pour la 5090 est le pic de plaque : trafic mixte (lecture ET
+        écriture), jamais ce que lit un poids pendant le décodage. Mesuré le
+        9/09 sur cette carte, trois dispositifs indépendants convergent sur
+        ~1050 (57-59 % du pic) — `docs/PLAFOND-MEMOIRE-5090.md` — et notre
+        propre GEMV nvfp4 y plafonne à 94 %, pas à 55 % d'un chiffre
+        inatteignable. Utiliser le pic ici sous-estimait le coût de l'exil
+        d'un facteur 1,7 dans `estimer_cout_exil` (memory/tiering.py) : un
+        régime confondu avec un autre (règle 6), pas une approximation fine.
+        Les autres cartes du tableau restent au pic de plaque, faute d'une
+        mesure en lecture seule équivalente — à corriger quand elle existera,
+        pas à deviner ici."""
         table = {
-            "5090": 1792.0, "5080": 960.0, "4090": 1008.0, "4080": 717.0,
+            "5090": 1050.0, "5080": 960.0, "4090": 1008.0, "4080": 717.0,
             "3090": 936.0, "3080 ti": 912.0, "3080": 760.0, "3060": 360.0,
         }
         low = self.name.lower()

@@ -118,10 +118,15 @@ _GIB = 2 ** 30
 
 
 def _tier_5090(link_gbps: float = 26.8) -> Tier:
-    # 5090 : VRAM ~1792 Go/s ; lien gen4x16 estimé ~26,8 Go/s (detect.py:200).
+    # 5090 : VRAM en lecture ~1050 Go/s, MESURÉ le 9/09 (trois dispositifs
+    # indépendants convergent, docs/PLAFOND-MEMOIRE-5090.md) — pas le pic de
+    # plaque 1792 (trafic mixte, jamais ce que lit un GEMV). Corrigé le
+    # 13/09 (poste7) : `detect.py:vram_bandwidth_gbps` prenait le pic, ce qui
+    # sous-estimait le ratio de `estimer_cout_exil` d'un facteur 1,7.
+    # Lien gen4x16 estimé ~26,8 Go/s (detect.py:200).
     return Tier(name="cuda:0", kind="gpu", device_index=0, capacity=32 * _GIB,
                 weight_format="nvfp4", kv_format="fp8",
-                read_bandwidth=1792.0, link_bandwidth=link_gbps)
+                read_bandwidth=1050.0, link_bandwidth=link_gbps)
 
 
 def _plan_nemotron(n_exiles: int, link_gbps: float = 26.8) -> Plan:
@@ -141,14 +146,15 @@ def _plan_nemotron(n_exiles: int, link_gbps: float = 26.8) -> Plan:
 
 
 def test_exil_franchit_le_seuil_falaise():
-    # PRÉDICTION SCELLÉE (règle 4), lien gen4x16 estimé 26,8 Go/s, VRAM 1792 :
+    # PRÉDICTION SCELLÉE (règle 4), lien gen4x16 estimé 26,8 Go/s, VRAM en
+    # lecture 1050 Go/s (mesuré, pas le pic — voir _tier_5090) :
     #   T_transfert(1 couche) = 0,556 Gio / 26,8 Go/s ≈ 22,3 ms/jeton
-    #   pas résident (32 couches, 0,606 Gio chacune) ≈ 11,6 ms
-    # Donc UNE seule couche exilée coûte déjà ~1,9× le pas entier : franchit de
-    # très loin le seuil de 20 %. Issue qui me gênerait : le modèle over-
-    # signale si le lien réel est plus rapide — c'est pourquoi la bande est un
-    # paramètre du plan (mesurable), pas une constante, et pourquoi le test
-    # « pas de falaise » ci-dessous vérifie que le signal peut se taire.
+    #   pas résident (32 couches, 0,606 Gio chacune) ≈ 19,8 ms
+    # Donc UNE seule couche exilée coûte déjà plus que le pas entier (ratio
+    # ≈ 1,12) : franchit le seuil de 20 %. Issue qui me gênerait : le modèle
+    # over-signale si le lien réel est plus rapide — c'est pourquoi la bande
+    # est un paramètre du plan (mesurable), pas une constante, et pourquoi le
+    # test « pas de falaise » ci-dessous vérifie que le signal peut se taire.
     c = estimer_cout_exil(_plan_nemotron(8))
     assert c is not None
     assert c["n_couches_exilees"] == 8
@@ -168,10 +174,11 @@ def test_pas_de_falaise_quand_rien_n_est_exile():
 
 
 def test_pas_de_falaise_quand_le_lien_est_rapide():
-    # Même exil, mais un lien aussi rapide que la VRAM (NVLink hypothétique) :
-    # le surcoût tombe sous le seuil. Deuxième preuve que le signal se tait
-    # quand il le doit — sinon ce serait une alarme, pas un contrôle.
-    c = estimer_cout_exil(_plan_nemotron(1, link_gbps=1792.0))
+    # Même exil, mais un lien aussi rapide que la VRAM en lecture (1050,
+    # NVLink hypothétique) : le surcoût tombe sous le seuil. Deuxième preuve
+    # que le signal se tait quand il le doit — sinon ce serait une alarme,
+    # pas un contrôle.
+    c = estimer_cout_exil(_plan_nemotron(1, link_gbps=1050.0))
     assert c is not None and not c["franchit_seuil"]
     assert c["ratio"] < 0.20
 

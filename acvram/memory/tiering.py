@@ -981,7 +981,9 @@ def _gpu_counts(spec: Optional[str], n_gpus: int) -> list[int]:
 # dépassent la capacité de l'étage. Or le coût de l'exil est entièrement dans le
 # TEMPS — un facteur 3 à 4 mesuré (docs/TEST-EXIL.md:97-102, +196 s pour douze
 # couches), parce qu'une couche transférée est bornée par le lien PCIe (~26 Go/s
-# gen4x16) et non par la VRAM (~1790 Go/s) : deux ordres de grandeur par octet.
+# gen4x16) et non par la VRAM en lecture (~1050 Go/s mesuré, pas le pic de
+# plaque 1792 — `Gpu.vram_bandwidth_gbps`, docs/PLAFOND-MEMOIRE-5090.md) :
+# près de deux ordres de grandeur par octet.
 # Décider sur les octets ne voit pas cette falaise.
 #
 # Cette fonction la chiffre AVANT le chargement, sans carte, à partir des bandes
