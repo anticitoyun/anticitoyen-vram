@@ -59,6 +59,16 @@ def _charger(model_dir: str, env_exil):
         os.environ.pop(var, None)
     if env_exil:
         os.environ[env_exil[0]] = env_exil[1]
+    # REPIN coupé : ce banc mesure le placement STATIQUE, pas le va-et-vient
+    # dynamique. Le laisser actif casse ici pour une raison propre au banc
+    # (deux Engine successifs sur le MEME `loaded` — `Engine._pin` se
+    # réinitialise depuis `m._pin_experts`, un instantané pris au chargement,
+    # que le premier Engine ne remet jamais à jour en échangeant réellement
+    # les poids : le second Engine part alors d'un pin périmé et peut choisir
+    # de « promouvoir » un expert déjà résident -> AttributeError sur
+    # `lin.streamed.host`. Latent, mais sans risque en service réel : un
+    # SEUL Engine y vit pour toute la durée du modèle chargé.
+    os.environ["ACVRAM_REPIN"] = "0"
 
     from acvram.engine.loader import load_model
 
@@ -107,12 +117,27 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
     ap.add_argument("--sortie", default="mesure-qui-tue.json")
+    ap.add_argument("--regime", choices=sorted(REGIMES), default=None,
+                    help="un seul régime (un processus par régime, moins de "
+                         "pression mémoire) ; omis = tous, dans le même "
+                         "processus")
     args = ap.parse_args()
 
     import torch
 
+    # Un régime par processus : chaque charge/mesure/décharge complètement
+    # avant que le processus suivant démarre — plus robuste qu'un del +
+    # empty_cache() interne quand la machine est déjà sous pression (mesuré
+    # le 13/09 : deux tués coup sur coup en tout-en-un, aucun kernel OOM dans
+    # dmesg -- la garde qui a tué venait de l'orchestrateur, pas du noyau).
+    regimes = {args.regime: REGIMES[args.regime]} if args.regime else REGIMES
+
     resultats: dict = {}
-    for nom, env in REGIMES.items():
+    if os.path.isfile(args.sortie):
+        with open(args.sortie, "r", encoding="utf-8") as fh:
+            resultats = json.load(fh).get("resultats", {})
+
+    for nom, env in regimes.items():
         print(f"[INFO] chargement regime={nom} ({env})", flush=True)
         loaded, load_s = _charger(args.model, env)
         resultats[nom] = {"charge_s": round(load_s, 1)}
@@ -126,11 +151,14 @@ def main() -> int:
         torch.cuda.empty_cache()
 
     facteurs: dict = {}
-    for b in (1, 12):
-        ref = resultats["resident_complet"][f"b{b}"]["jetons_s"]
-        for nom in ("exil_par_couche", "exil_par_expert"):
-            d = resultats[nom][f"b{b}"]["jetons_s"]
-            facteurs.setdefault(nom, {})[f"b{b}"] = round(ref / d, 3) if d else None
+    if "resident_complet" in resultats:
+        for b in (1, 12):
+            ref = resultats["resident_complet"][f"b{b}"]["jetons_s"]
+            for nom in ("exil_par_couche", "exil_par_expert"):
+                if nom in resultats:
+                    d = resultats[nom][f"b{b}"]["jetons_s"]
+                    facteurs.setdefault(nom, {})[f"b{b}"] = (
+                        round(ref / d, 3) if d else None)
 
     sortie = {
         "modele": args.model,
