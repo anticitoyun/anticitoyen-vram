@@ -11,6 +11,7 @@ résident sur un GPU, ou épinglé en mémoire hôte derrière un
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 from typing import Any, Optional
@@ -1151,10 +1152,34 @@ def _octets_reels(manifest: dict) -> tuple[dict, dict, int, int]:
     return attn, mlp, embed, head
 
 
-def _reajuster_plan(plan: Plan, manifest: dict) -> None:
+def _compter_experts_manifest(manifest: dict) -> dict:
+    """Nombre d'experts par couche, d'après les clés du manifeste — un
+    sondage de NOMS, aucun tenseur chargé. Absente du dict : couche dense
+    (pas de `mlp.experts.`), comme `_octets_reels` pour `attn`/`mlp`."""
+    import re
+    motif = re.compile(r"^model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.gate_proj\.weight$")
+    n: dict = {}
+    for nom in manifest["tensors"]:
+        m = motif.match(nom)
+        if m:
+            i, e = int(m.group(1)), int(m.group(2))
+            n[i] = max(n.get(i, 0), e + 1)
+    return n
+
+
+def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8) -> None:
     """Fait descendre en RAM hôte les MLP des dernières couches d'un GPU
-    dont les poids réels dépassent la capacité de l'étage."""
+    dont les poids réels dépassent la capacité de l'étage.
+
+    `top_k` (bead pds, point 1, poste7 §4) : sous ce nombre d'experts résidents,
+    un placement PAR EXPERT n'a plus de sens — un jeton qui en route `top_k`
+    trouverait presque toujours un froid, et le gain PCIe théorique (moins
+    d'octets transférés) disparaîtrait dans les allers-retours qu'un manque
+    d'emplacements chauds provoquerait. En dessous, l'exil de la couche
+    ENTIÈRE reste le seul geste — c'est le comportement d'avant ce bead.
+    """
     attn, mlp, embed, head = _octets_reels(manifest)
+    n_experts = _compter_experts_manifest(manifest)
     for t in plan.tiers:
         if t.kind != "gpu":
             continue
@@ -1173,7 +1198,16 @@ def _reajuster_plan(plan: Plan, manifest: dict) -> None:
             u += head if plan.lm_head_device == dev else 0
             for l in plan.layers:
                 u += l.attn_bytes if l.attn_storage == dev else 0
-                u += l.mlp_bytes if l.mlp_storage == dev else 0
+                if l.mlp_storage != dev:
+                    continue
+                if l.experts_residents is not None:
+                    # Placement PAR EXPERT : seule la fraction résidente
+                    # compte — `mlp_storage == dev` reste vrai (la couche
+                    # s'EXÉCUTE ici), mais tous ses octets n'y vivent plus.
+                    e = n_experts.get(l.index) or 1
+                    u += l.mlp_bytes * l.experts_residents // e
+                else:
+                    u += l.mlp_bytes
             return u
         # La capacité de l'étage est celle qu'avait la machine le jour de la
         # conversion. Elle ne dit rien de ce que la carte a de libre à cet
@@ -1211,10 +1245,34 @@ def _reajuster_plan(plan: Plan, manifest: dict) -> None:
         marge = max(2 * 2**30, int(0.07 * capacite))
         deplacees = 0
         while utilise() > capacite - marge:
-            cand = [l for l in plan.layers if l.mlp_storage == dev]
+            # Candidats déjà résidents (couche entière) OU déjà à moitié
+            # (placement par expert antérieur, dont on peut encore réduire
+            # `experts_residents`) : les deux peuvent encore libérer de la
+            # place, contrairement à une couche déjà totalement exilée.
+            cand = [l for l in plan.layers
+                   if l.mlp_storage == dev
+                   and (l.experts_residents is None or l.experts_residents > 0)]
             if not cand:
                 break
             l = cand[-1]
+            e = n_experts.get(l.index, 0)
+            depasse = utilise() - (capacite - marge)
+            if e >= top_k and depasse > 0:
+                # Placement PAR EXPERT (bead pds) : ne descendre que ce qu'il
+                # faut, pas la couche entière — `estimer_cout_exil`
+                # (memory/tiering.py) chiffrera le coût du reste exilé contre
+                # la bande PCIe mesurée (~21 Go/s, M0).
+                actuels = l.experts_residents if l.experts_residents is not None else e
+                par_expert = l.mlp_bytes / e
+                a_exiler = min(actuels, max(1, math.ceil(depasse / par_expert)))
+                c = actuels - a_exiler
+                if c >= top_k:
+                    l.experts_residents = c
+                    deplacees += 1
+                    continue
+                # c < top_k : un placement par expert n'a plus de sens
+                # (docstring) — tombe dans l'exil de couche entière ci-dessous.
+                l.experts_residents = None
             l.mlp_storage = "cpu"
             # Descendre un MLP en RAM dit où il est STOCKÉ, pas où il est
             # CALCULÉ. Forcer ici le calcul sur processeur défaisait la
@@ -1458,7 +1516,7 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
     if spec is not None:
         neuf = _replanifier(manifest, spec, max_model_len=max_model_len)
         if neuf is not None:
-            _reajuster_plan(neuf, manifest)
+            _reajuster_plan(neuf, manifest, top_k=spec.num_experts_per_tok or 8)
             _exil_demande(neuf)
             return neuf
     plan = _Plan(model=d["model"])
