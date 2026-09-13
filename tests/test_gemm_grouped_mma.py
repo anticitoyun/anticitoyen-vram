@@ -124,9 +124,11 @@ def test_quant_act_bit_identique(G, K):
     [64, 65, 3, 130],
 ])
 @pytest.mark.parametrize("M,K", [(1536, 2048), (2048, 1536), (1500, 1536)])
-@pytest.mark.parametrize("bt", [16, 64])
+@pytest.mark.parametrize("bt", [16, 64, 128])
 @pytest.mark.parametrize("etages", [0, 2, 3, 4])
 def test_gemm_mma_contre_reference_w4a4(comptes, M, K, bt, etages):
+    if bt == 128 and etages == 0:
+        pytest.skip("bt=128 : variante a etages seulement")
     ext = _ext()
     E = len(comptes)
     qw, bs, gs = _pile(E, M, K, 0.05, sum(comptes) + M + bt)
@@ -170,9 +172,9 @@ def test_bt32_et_etages_identiques():
     G = int(cnt.sum())
     xq, xsf = ext.nvfp4_quant_act(_x(G, K, 11))
     tq, tb = _tables(qw, bs)
-    for bt in (16, 32, 64):
+    for bt in (16, 32, 64, 128):
         te, t0, tn = _tuiles(cnt, bt)
-        ref = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, bt, 0)
+        ref = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, min(bt, 64), 0)
         for et in (2, 3, 4):
             y = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, bt, et)
             assert torch.equal(y, ref), f"bt={bt} etages={et} differe de la variante directe"
