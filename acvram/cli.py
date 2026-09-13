@@ -138,6 +138,7 @@ VARIABLES_LUES = {
     "ACVRAM_SANS_PRECHARGE",
     "ACVRAM_SANS_REPLAN",
     "ACVRAM_SEUIL_FUSION",
+    "ACVRAM_SPECULATION_LOT_MAX",
     "ACVRAM_SYNC_COUCHES",
     "ACVRAM_TETE_LIEE",
     "ACVRAM_TRACEBACK",
@@ -568,7 +569,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
           f"({engine.allocator.num_blocks * 16} jetons par couche)")
     print(f"  cache prefixe : {'desactive' if args.no_prefix_cache else 'actif'}")
     print(f"  speculation   : {args.speculative}"
-          f"{'' if args.speculative == 'none' else f', k={args.spec_k}'}")
+          f"{'' if args.speculative == 'none' else f', k={args.spec_k}, '
+                                                   f'lot_max={engine._garde_spec.lot_max}'}")
     if tokenizer:
         print(f"  gabarit chat  : {tokenizer.template_source}")
     else:
@@ -828,7 +830,14 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--speculative", choices=["none", "ngram", "draft", "mtp", "auto"],
                     default="ngram",
                     help="ngram ne coute rien et paie quand la sortie recopie "
-                         "l'entree ; draft exige --draft-model")
+                         "l'entree ; draft exige --draft-model. N'importe "
+                         "quel propositeur reste soumis a la garde de lot "
+                         "ACVRAM_SPECULATION_LOT_MAX (defaut 2) : au-dela, "
+                         "la carte est deja pleine a largeur 1 par sequence "
+                         "et verifier plus large coute plus qu'il ne rend "
+                         "(mesure 14/09, revue/verdict-cout-verification-"
+                         "ngram-b12-14-09.md, -49,9 % de debit a b=12) -- "
+                         "voir GardeSpeculation dans engine/speculative.py")
     sv.add_argument("--draft-model", help="repertoire converti d'un petit modele "
                                           "charge de proposer des jetons")
     sv.add_argument("--draft-device", help="appareil du modele brouillon "
