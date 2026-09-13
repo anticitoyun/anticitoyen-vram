@@ -40,6 +40,14 @@ def test_compte_s_accumule_entre_appels():
     assert bloc._usage_routage.tolist() == [2, 4, 1, 1, 0, 0, 0, 0]
 
 
+def test_creneau_fantome_n_est_pas_compte():
+    """-1 (créneau fantôme du remplissage godet `bucket_batch`, bead pds
+    14/09) : ni compté, ni confondu avec l'expert 0 par `clamp(min=0)`."""
+    bloc = _bloc(n_experts=4, top_k=2)
+    bloc._compter_routage(torch.tensor([[0, 1], [-1, -1]]))
+    assert bloc._usage_routage.tolist() == [1, 1, 0, 0]
+
+
 def test_le_tampon_ne_change_pas_d_adresse():
     """Condition de capturabilité par un graphe CUDA : `+=` doit muter le
     tenseur existant, jamais en créer un nouveau — sinon un graphe capturé

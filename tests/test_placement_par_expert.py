@@ -322,3 +322,64 @@ def test_repin_sous_graphe_cuda():
         "une table délibérément corrompue n'a AUCUN effet au rejeu -- le "
         "noyau ne relit pas la table à chaque lancement, ce que (1) "
         "supposait sans le prouver")
+
+
+def test_creneaux_fantomes_masques_bit_identique_et_compte_exclu():
+    """Bead pds, 14/09 (masquage du remplissage godet, chef) : la sortie
+    des jetons RÉELS d'un lot rembourré (b_reel=3 -> godet 4, `bucket_batch`)
+    doit être bit-identique au même lot non rembourré, et le remplissage ne
+    doit RIEN ajouter à `_usage_routage` -- l'inverse de la cause mesurée le
+    14/09 (les 48 couches de Coder-30B routaient x=0 vers 1 à 7 experts
+    froids, sans masque, une lecture PCIe inutile par couche à chaque pas).
+
+    « Un changement qui doit casser » (REGLES.md règle 5) : SANS masque, le
+    même lot rembourré ajoute bien une sélection au compte -- sinon ce test
+    ne prouverait rien, qu'il passe ou non.
+    """
+    from acvram.memory.table_adresses import construire_table
+
+    dev = torch.device("cuda")
+    residents = {0, 2, 4, 6}
+
+    def _table_couche():
+        b = _couche(dev, residents)
+        b._table_qw = {}
+        b._table_bscale = {}
+        for nom in ("gate_proj", "up_proj", "down_proj"):
+            tq, tb = construire_table(b.experts, nom, device=dev)
+            b._table_qw[nom] = tq
+            b._table_bscale[nom] = tb
+        b._stack_state = "?"
+        return b
+
+    torch.manual_seed(202)
+    x_reel = torch.randn(3, CACHE, device=dev, dtype=torch.bfloat16)
+    x_pad = torch.zeros(4, CACHE, device=dev, dtype=torch.bfloat16)
+    x_pad[:3] = x_reel
+    valid = torch.tensor([True, True, True, False], device=dev)
+
+    bloc_reel = _table_couche()
+    with torch.no_grad():
+        y_reel = bloc_reel(x_reel.clone())
+    assert bloc_reel._stacks["gate_proj"][0] == "nvfp4_table"
+    compte_reel = bloc_reel._usage_routage.clone()
+
+    bloc_masque = _table_couche()
+    with torch.no_grad():
+        y_masque = bloc_masque(x_pad.clone(), valid=valid)
+    compte_masque = bloc_masque._usage_routage.clone()
+
+    assert torch.equal(y_reel, y_masque[:3]), (
+        f"le remplissage change la sortie des jetons réels (écart max "
+        f"{(y_reel - y_masque[:3]).abs().max().item()})")
+    assert torch.equal(compte_reel, compte_masque), (
+        "le créneau fantôme masqué a quand même été compté")
+
+    bloc_nu = _table_couche()
+    with torch.no_grad():
+        bloc_nu(x_pad.clone())            # valid=None : PAS de masquage
+    compte_nu = bloc_nu._usage_routage.clone()
+
+    assert not torch.equal(compte_nu, compte_reel), (
+        "sans masque, le compte aurait dû différer (le fantôme ajoute une "
+        "sélection) -- sinon ce test ne prouve rien")

@@ -1486,6 +1486,19 @@ __global__ void nvfp4_gemv_grouped_warp_kernel(
     const int g = blockIdx.y, e = expert_ids[g];
     charger_x_sh<XT>(x + (long)token_ids[g] * K, xs_sh, K);
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    // Creneau fantome du remplissage godet (bucket_batch) : e < 0, pose par
+    // le masque cote hote. Sortie a zero (ignoree par l'appelant), aucune
+    // lecture de poids -- c'est tout le point (bead pds, 14/09) : un expert
+    // qu'aucun jeton REEL ne demande ne traverse jamais le bus.
+    if (e < 0) {
+        #pragma unroll
+        for (int r = 0; r < RPW; ++r) {
+            const int row = (blockIdx.x * GW_WARPS + warp) * RPW + r;
+            if (row >= M) return;
+            if (lane == 0) y[(long)g * M + row] = 0.f;
+        }
+        return;
+    }
     const long half_k = (long)K >> 1;
     const int nloads = K / WEIGHTS_PER_LOAD;
     const float gscale = gscales[e];
@@ -1523,6 +1536,18 @@ __global__ void nvfp4_gemv_grouped_gateup_kernel(
     const int g = blockIdx.y, e = expert_ids[g];
     charger_x_sh<XT>(x + (long)token_ids[g] * K, xs_sh, K);
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    // Creneau fantome (e < 0, bead pds 14/09) : sortie a zero, aucune
+    // lecture de poids -- meme garde que la variante table et la variante
+    // simple (nvfp4_gemv_grouped_warp_kernel).
+    if (e < 0) {
+        #pragma unroll
+        for (int r = 0; r < RPW; ++r) {
+            const int row = (blockIdx.x * GW_WARPS + warp) * RPW + r;
+            if (row >= M) return;
+            if (lane == 0) y[(long)g * M + row] = 0.f;
+        }
+        return;
+    }
     const long half_k = (long)K >> 1;
     const int nloads = K / WEIGHTS_PER_LOAD;
     #pragma unroll
@@ -1586,11 +1611,23 @@ __global__ void nvfp4_gemv_grouped_gateup_table_kernel(
     extern __shared__ float xs_sh[];
     const int g = blockIdx.y, e = expert_ids[g];
     charger_x_sh<XT>(x + (long)token_ids[g] * K, xs_sh, K);
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    // Creneau fantome (e < 0, bead pds 14/09) : AVANT tout dereferencement
+    // de table -- table_qg[-1] serait un acces hors bornes, pas seulement
+    // une lecture de poids gaspillee. Sortie a zero, aucune lecture hote.
+    if (e < 0) {
+        #pragma unroll
+        for (int r = 0; r < RPW; ++r) {
+            const int row = (blockIdx.x * GW_WARPS + warp) * RPW + r;
+            if (row >= M) return;
+            if (lane == 0) y[(long)g * M + row] = 0.f;
+        }
+        return;
+    }
     const unsigned char *qg_e = reinterpret_cast<const unsigned char *>(table_qg[e]);
     const unsigned char *bg_e = reinterpret_cast<const unsigned char *>(table_bg[e]);
     const unsigned char *qu_e = reinterpret_cast<const unsigned char *>(table_qu[e]);
     const unsigned char *bu_e = reinterpret_cast<const unsigned char *>(table_bu[e]);
-    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const long half_k = (long)K >> 1;
     const int nloads = K / WEIGHTS_PER_LOAD;
     #pragma unroll
@@ -2612,9 +2649,20 @@ __global__ void nvfp4_gemv_grouped_table_kernel(
     extern __shared__ float xs_sh[];
     const int g = blockIdx.y, e = expert_ids[g];
     charger_x_sh<XT>(x + (long)token_ids[g] * K, xs_sh, K);
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    // Creneau fantome (e < 0, bead pds 14/09) : AVANT tout dereferencement
+    // de table. Sortie a zero, aucune lecture hote.
+    if (e < 0) {
+        #pragma unroll
+        for (int r = 0; r < RPW; ++r) {
+            const int row = (blockIdx.x * GW_WARPS + warp) * RPW + r;
+            if (row >= M) return;
+            if (lane == 0) y[(long)g * M + row] = 0.f;
+        }
+        return;
+    }
     const unsigned char *qw_e = reinterpret_cast<const unsigned char *>(table_qw[e]);
     const unsigned char *bs_e = reinterpret_cast<const unsigned char *>(table_bs[e]);
-    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const long half_k = (long)K >> 1;
     const int nloads = K / WEIGHTS_PER_LOAD;
     const float gscale = gscales[e];

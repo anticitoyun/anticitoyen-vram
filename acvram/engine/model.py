@@ -639,13 +639,20 @@ class MoEBlock(nn.Module):
         indépendante des VALEURS de `topi` — seule sa forme à lui compte, déjà
         connue avant le lancement du noyau.
 
-        Un index hors domaine (bogue amont — le routage ne doit jamais en
-        produire) est vérifié sur CPU : `scatter_add_` y refuse tout index hors
-        limites (`RuntimeError`, testé ci-dessous). Sur CUDA cette même
-        situation est UN COMPORTEMENT NON DÉFINI de `scatter_add_` — ni
-        exception garantie ni sécurité mémoire — donc PAS le filet de sécurité
-        pour ce cas côté carte ; c'est le test CPU qui doit attraper une
-        régression du routage avant qu'elle n'atteigne le GPU.
+        Un index hors domaine PAR LE HAUT (bogue amont — le routage ne doit
+        jamais en produire) est vérifié sur CPU : `scatter_add_` y refuse
+        tout index hors limites (`RuntimeError`, testé ci-dessous). Sur CUDA
+        cette même situation est UN COMPORTEMENT NON DÉFINI de `scatter_add_`
+        — ni exception garantie ni sécurité mémoire — donc PAS le filet de
+        sécurité pour ce cas côté carte ; c'est le test CPU qui doit attraper
+        une régression du routage avant qu'elle n'atteigne le GPU.
+
+        `-1` PAR LE BAS est, lui, un cas NORMAL et attendu depuis le
+        masquage des créneaux fantômes (`forward`, bead pds 14/09) : un
+        jeton de remplissage qu'aucun compte ne doit voir. `clamp(min=0)`
+        rend l'index valide pour `scatter_add_` (jamais -1 en pratique,
+        adresse toujours dans les bornes) tandis que `poids` vaut 0 pour ces
+        entrées — comptées zéro fois, pas comptées « à l'expert 0 ».
         """
         n = len(self.experts)
         if self._usage_routage is None:
@@ -656,7 +663,8 @@ class MoEBlock(nn.Module):
             self._usage_routage = torch.zeros(n, dtype=torch.int64,
                                               device=topi.device)
         idx = topi.reshape(-1).to(torch.int64)
-        self._usage_routage.scatter_add_(0, idx, torch.ones_like(idx))
+        poids = (idx >= 0).to(torch.int64)
+        self._usage_routage.scatter_add_(0, idx.clamp(min=0), poids)
 
     # ------------------------------------------------------------------
     # Pile d'experts pour le chemin groupé. Les qweight/échelles de tous les
@@ -1013,12 +1021,25 @@ class MoEBlock(nn.Module):
             _trace_routage.noter(self.index_couche, topi)
         return topw, topi
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor,
+               valid: Optional[torch.Tensor] = None) -> torch.Tensor:
         t, h = x.shape
         # topw reste en fp32 : il sort du routage ainsi et y retourne pour la
         # réduction pondérée ; l'aller-retour en bf16 coûtait deux copies par
         # couche pour rien
         topw, topi = self._route(x)
+        if valid is not None:
+            # Créneaux fantômes du remplissage godet (`bucket_batch`,
+            # graphs.py) : `x` y est nul, mais x=0 route quand même —
+            # DÉTERMINISTE (logits nuls, `topk` départage par index
+            # croissant) — vers [0..top_k-1], et RIEN ne garantit que ces
+            # experts sont résidents (mesuré le 14/09 : sur les 48 couches
+            # de Coder-30B exilé par expert, TOUTES en avaient au moins un
+            # froid). -1 les retire du routage réel : ni comptés
+            # (`_compter_routage`), ni dispatchés (les noyaux groupés
+            # rendent zéro sans lire aucun poids pour un expert < 0 — la
+            # boucle par expert les ignore de même, plus bas).
+            topi = topi.masked_fill(~valid.unsqueeze(-1), -1)
         # Ici, pas dans _route : `_route` est surchargée (MoEBlockGemma) sans
         # appeler super(), alors que `forward` est le seul point que tous les
         # chemins de routage traversent une fois topi connu.
@@ -1050,6 +1071,8 @@ class MoEBlock(nn.Module):
             ids = topi.reshape(-1).tolist()          # unique synchronisation
             poids = topw.reshape(-1).to(x.dtype)
             for e in ids:
+                if e < 0:                            # créneau fantôme
+                    continue
                 exp = self.experts[e]
                 for lin in (getattr(exp, "gate_proj", None), exp.up_proj, exp.down_proj):
                     if lin is not None:
@@ -1063,6 +1086,8 @@ class MoEBlock(nn.Module):
             # couche, la ou chaque expert en produit deja un.
             out = torch.zeros(x.shape, device=x.device, dtype=torch.float32)
             for j, e in enumerate(ids):
+                if e < 0:                            # créneau fantôme : contribution nulle
+                    continue
                 out += (self.experts[e](x) * poids[j]).to(torch.float32)
             out = out.to(x.dtype)
             if self.shared is not None:
@@ -1078,6 +1103,8 @@ class MoEBlock(nn.Module):
         flat_weight = topw.reshape(-1).to(x.dtype)   # topw est en fp32
         flat_token = torch.arange(t, device=x.device).repeat_interleave(self.top_k)
         for e in flat_expert.unique().tolist():
+            if e < 0:                                # créneau fantôme : rien à faire
+                continue
             sel = flat_expert == e
             tok = flat_token[sel]
             y = self.experts[e](x[tok])
@@ -1416,7 +1443,12 @@ class DecoderLayer(nn.Module):
         if self.mlp is None:
             return x + (a if r == 1.0 else a * r)
         x, h = add_norm(x, a, self.post_attention_layernorm, r)
-        y = self.mlp(h)
+        # Créneaux fantômes du remplissage godet (bucket_batch, graphs.py) :
+        # `slots` porte déjà la sentinelle -1 posée par `_fill` (bead pds,
+        # 14/09) — la même qui protège le cache KV. Dense (MLP simple) n'a
+        # pas de routage dépendant des données, `valid` n'y sert à rien.
+        y = (self.mlp(h, valid=slots >= 0) if isinstance(self.mlp, MoEBlock)
+             else self.mlp(h))
         return x + (y if r == 1.0 else y * r)
 
     def decode_fixed_res(self, x: torch.Tensor, delta: Optional[torch.Tensor],
@@ -1434,7 +1466,10 @@ class DecoderLayer(nn.Module):
         a = self.self_attn.decode_fixed(h, positions, slots, block_tables,
                                         seq_lens, max_pos, cache, q_len)
         x, h2 = add_norm(x, a, self.post_attention_layernorm, r)
-        return x, self.mlp(h2)
+        # Créneaux fantômes : même garde que decode_fixed ci-dessus.
+        y = (self.mlp(h2, valid=slots >= 0) if isinstance(self.mlp, MoEBlock)
+             else self.mlp(h2))
+        return x, y
 
     def prefetch(self) -> None:
         for m in self.modules():
