@@ -12,6 +12,9 @@ import os
 import sys
 
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+# 5090 seule : le compteur d'énergie (energie.py) filtre les cartes sur cette variable ;
+# sans elle il somme 5090 + 3080 Ti (constat de poste7 sur la campagne 20 s, 14/09).
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 import torch  # noqa: E402
 from vllm import LLM, SamplingParams, TokensPrompt  # noqa: E402
 
