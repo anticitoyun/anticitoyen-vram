@@ -243,6 +243,13 @@ int8. L'estimation de coin de table de chef (0,05-0,08 ms par appel,
 la mesure suffit à trancher, et le protocole prévoyait explicitement
 l'arrêt si `int_mm` seul ≥ 24 ms).
 
+**Réserve (pas un chantier, juste nommer la cause)** : 28,2 ms pour
+3,7 T-op ≈ 130 TOPS, moins de 10 % du pic int8 tensor cores de la 5090 —
+contre le bf16 à 30,9 ms, ~60 % de son pic. `torch._int_mm` est mal
+servi par cuBLASLt sur ces formes précises, ce n'est pas une limite
+matérielle. Si ce levier revient un jour, ce sera par un GEMM CUTLASS
+int8/FP4 dédié, jamais par `torch._int_mm`.
+
 ## Verdict repli W8A8
 
 **Réfuté sans réserve utile.** Même symptôme que le W4A4 : un coût fixe
