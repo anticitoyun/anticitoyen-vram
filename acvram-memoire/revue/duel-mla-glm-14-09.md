@@ -96,3 +96,34 @@ Lu dans `/opt/ia/vLLM` 0.29.0 (venv `/opt/ia/vLLM/.venv`) :
 Reste, dès que les fichiers sont là : chargement à sec sous `carte.sh`
 (chargement seul : backend annoncé dans le log, `Using TRITON_MLA`,
 `VLLM_CUTLASS` NvFp4 MoE, taille du KV, capture des graphes), pas de mesure.
+
+### Chargement à sec vLLM + GLM-4.7-Flash-NVFP4 (14/09, 20h38-20h45, carte.sh, chargement seul)
+
+1. `attention_config={"backend": "TRITON_ATTN"}` (celui du Coder) → `ValueError:
+   MLA not supported` : pour un modèle MLA, laisser vLLM choisir
+   (`BANC_ATTN=auto` dans `ncu_vllm_decode12.py` ; `banc_decode_vllm_glm.py` ne
+   force rien).
+2. **TRITON_MLA échoue sur sm_120 à la capture des graphes** :
+   `triton.runtime.errors.OutOfResources: shared memory, Required: 102400,
+   Hardware limit: 101376` dans `_decode_grouped_att_m_fwd`
+   (`v1/attention/ops/triton_decode_attention.py:534`). Cause lue : Lk = 576
+   (kv_lora 512 + rope 64, dims DeepSeek/GLM) → BLOCK_DMODEL 512, BLOCK_DPE 64,
+   `num_stages = 2` ; la garde `num_stages = 1` n'existe que pour
+   `BLOCK_DMODEL >= 1024` (:530), écrite pour H100 (227 Ko de shared) — la 5090
+   n'a que 99 Ko. Aucun réglage utilisateur ne l'évite (KV fp8 ou bf16 : mêmes
+   tuiles).
+3. **Correctif d'expérience, borné au processus** (`BANC_MLA_STAGES1=1` :
+   la même règle dès 512, par `exec` du source de la fonction) : chargement OK
+   — poids 18,04 Gio en 83 s, `VLLM_CUTLASS` NvFp4 MoE, KV cache 5,98 Gio
+   (237 328 jetons), graphes PIECEWISE 51 + FULL 35 capturés, 4 pas de
+   décodage b=12 exécutés (`NCU_OK 12 4`). Un correctif d'installation
+   (`/opt/ia/vLLM`, 1 ligne) reste une décision utilisateur ; sans lui vLLM
+   0.29 ne décode PAS un MLA aux dimensions DeepSeek sur RTX 50 — fait à
+   verser au duel (le concurrent a besoin d'un patch pour jouer).
+4. Pendant la manche, `carte.sh` a relevé power.limit 600 → 400 W (réglage
+   d'un autre passage) : sans effet sur un chargement à sec.
+
+Prochaine commande (duel, quand le srcbf16-nvfp4 de poste2 existe) :
+`BANC_MLA_STAGES1=1 outils/carte.sh /opt/ia/vLLM/.venv/bin/python
+outils/banc_decode_vllm_glm.py` — à condition d'y porter le même correctif
+d'expérience (fait : le banc lit `BANC_MLA_STAGES1`).

@@ -33,9 +33,28 @@ def invite(k: int, n: int) -> list:
     return [(k * 104729 + i * 7919) % (VOCAB_APPROX - 100) + 10 for i in range(n)]
 
 
+# BANC_ATTN : backend d'attention forcé (TRITON_ATTN = celui du duel Coder, attention
+# classique) ; "auto" pour laisser vLLM choisir — obligatoire pour un modèle MLA
+# (GLM-4.7-Flash : TRITON_MLA seul sur sm_120, forcer TRITON_ATTN lève « MLA not
+# supported »). BANC_KV : kv_cache_dtype (auto | fp8).
+ATTN = os.environ.get("BANC_ATTN", "TRITON_ATTN")
+if os.environ.get("BANC_MLA_STAGES1") == "1":
+    # sm_120 : 101 376 o de mémoire partagée par bloc ; le noyau Triton de décodage
+    # MLA de vLLM 0.29 (triton_decode_attention.py:530) ne passe num_stages à 1 que
+    # pour BLOCK_DMODEL >= 1024, et demande 102 400 o à BLOCK_DMODEL=512 (kv_lora 512
+    # + rope 64 = Lk 576, GLM-4.7-Flash / DeepSeek) → OutOfResources à la capture.
+    # Correctif d'expérience, borné à ce processus : même règle dès 512. Un correctif
+    # d'installation (patch de /opt/ia/vLLM) est une décision utilisateur.
+    import inspect
+    import vllm.v1.attention.ops.triton_decode_attention as _tda
+    src = inspect.getsource(_tda._decode_grouped_att_m_fwd)
+    assert "BLOCK_DMODEL >= 1024" in src
+    exec(src.replace("BLOCK_DMODEL >= 1024", "BLOCK_DMODEL >= 512"), _tda.__dict__)
+    print("BANC_MLA_STAGES1 : num_stages=1 des BLOCK_DMODEL >= 512 (processus seul)")
+opts = {} if ATTN == "auto" else {"attention_config": {"backend": ATTN}}
 llm = LLM(model=chemin_modele, dtype="auto", enforce_eager=False,
           enable_prefix_caching=False, gpu_memory_utilization=0.85,
-          attention_config={"backend": "TRITON_ATTN"}, max_model_len=CTX)
+          kv_cache_dtype=os.environ.get("BANC_KV", "auto"), max_model_len=CTX, **opts)
 moteur = llm.llm_engine
 prompts = [invite(1000 + k, min(256, CTX // 4)) for k in range(SLOTS)]
 

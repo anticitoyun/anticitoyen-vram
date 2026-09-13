@@ -28,6 +28,17 @@ sys.path.insert(0, os.path.join(_ICI, "gpu", "mesure"))
 from energie import Energie, repos  # noqa: E402
 from vllm import LLM, SamplingParams, TokensPrompt  # noqa: E402
 
+if os.environ.get("BANC_MLA_STAGES1", "1") == "1":
+    # sm_120 : 99 Ko de shared par bloc ; le décodage MLA Triton de vLLM 0.29 demande
+    # 102 400 o à BLOCK_DMODEL=512 (Lk 576) faute de la garde num_stages=1 réservée à
+    # >= 1024 (triton_decode_attention.py:530, écrite pour H100). Même règle dès 512,
+    # dans ce processus seulement — voir revue/duel-mla-glm-14-09.md.
+    import inspect
+    import vllm.v1.attention.ops.triton_decode_attention as _tda
+    _src = inspect.getsource(_tda._decode_grouped_att_m_fwd)
+    assert "BLOCK_DMODEL >= 1024" in _src
+    exec(_src.replace("BLOCK_DMODEL >= 1024", "BLOCK_DMODEL >= 512"), _tda.__dict__)
+
 chemin_modele = sys.argv[1] if len(sys.argv) > 1 else \
     "/mnt/4TO_SATACMR_2022/Modeles/models_vllm/GLM-4.7-Flash-NVFP4"
 SLOTS_LISTE = [int(x) for x in os.environ.get("BANC_SLOTS", "1,4,12").split(",")]
