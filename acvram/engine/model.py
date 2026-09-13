@@ -1086,9 +1086,13 @@ _MOE_GROUPED_MAX = int(os.environ.get("ACVRAM_MOE_GROUPED_MAX", "32"))
 # L'ancien défaut 64 était du mauvais côté du croisement.
 _MOE_GEMM_MAX = float(os.environ.get("ACVRAM_MOE_GEMM_MAX", "48"))
 
-# GEMM groupée W4A4 sur la MMA FP4 native de sm_120 (ACVRAM_MOE_MMA=1) et
-# jetons par tuile (16, 32 ou 64) ; coupée par défaut, voir _forward_prefill_grouped.
-_MOE_MMA = os.environ.get("ACVRAM_MOE_MMA", "0") == "1"
+# GEMM groupée W4A4 sur la MMA FP4 native de sm_120 (ACVRAM_MOE_MMA=0 pour
+# revenir au chemin déquant+GEMM bf16) et jetons par tuile (16, 32 ou 64) ;
+# voir _forward_prefill_grouped. Activée par défaut le 13/09/2026 : PPL
+# Qwen3-Coder-30B-A3B-nvfp4, experts A4 (gate/up/down), routeur+attention
+# A16, +0,919 % contre le seuil scellé +1 % (revue/verdict-moe-mma-reel-
+# qwen3-coder.md) — dans la fourchette prédite avant mesure.
+_MOE_MMA = os.environ.get("ACVRAM_MOE_MMA", "1") == "1"
 _MOE_MMA_BT = int(os.environ.get("ACVRAM_MOE_MMA_BT", "64"))
 
 # Marque, dans le magasin d'états, une séquence dont l'état réside dans les
