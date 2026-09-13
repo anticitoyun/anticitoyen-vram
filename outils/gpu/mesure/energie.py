@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import sys
 import threading
 import time
 
@@ -277,14 +278,24 @@ class Energie:
         }
 
 
-def repos(secondes: float = 10.0, periode: float = 1.0) -> Energie:
+def repos(secondes: float = 30.0, periode: float = 1.0) -> Energie:
     """Ligne de base, prise APRÈS la mesure, serveur chargé mais inactif.
 
     Prise avant, elle dérive : sur une séance d'appareil photo du 7 septembre,
     la ligne de base du début a fait attribuer à un calcul une baisse qui
     n'était que la dérive de la base. Elle se prend donc après chaque cas, et
     de préférence de même durée que la fenêtre mesurée.
+
+    ``secondes`` sous 30 s (14/09, duck.ai chef) : un bruit sur la moyenne
+    de repos se multiplie par la durée de la fenêtre mesurée dans
+    ``joules_net`` — une ligne de base courte propage plus de bruit qu'elle
+    n'en économise de temps. Averti, pas refusé : certaines campagnes
+    (fenêtres elles-mêmes courtes) n'ont pas le choix.
     """
+    if secondes < 30.0:
+        print(f"[energie] repos({secondes:.1f} s) < 30 s : ligne de base "
+              f"plus bruitée que recommandé (14/09, duck.ai chef)",
+              file=sys.stderr, flush=True)
     with Energie(periode=periode) as e:
         time.sleep(secondes)
     return e
