@@ -135,6 +135,14 @@ def _empreinte_adresses(runner, entry: dict) -> dict:
 
 
 
+def _avec_tokens(batch: "ForwardBatch", tokens: torch.Tensor) -> "ForwardBatch":
+    """Copie superficielle du lot avec d'autres jetons (épinglés ou device)."""
+    import copy
+    b2 = copy.copy(batch)
+    b2.tokens = tokens
+    return b2
+
+
 class GraphRunner:
     max_ql = 1          # > 1 : lots de vérification spéculative sur hybrides
     # ACVRAM_HYBRID_SLOTS : plafond du nombre de séquences hybrides (GDN/KDA/
@@ -157,6 +165,10 @@ class GraphRunner:
         self.max_model_len = max_model_len
         self.device: Optional[torch.device] = None
         self.graphs: dict[tuple[int, int], dict] = {}
+        # pipeline (runner, ACVRAM_PIPELINE=1) : lot préparé en attente de
+        # rejeu, et événement enregistré après chaque rejeu
+        self._prepare = None
+        self.evenement_jetons = torch.cuda.Event()
         self._pool = None
         self.paged_ok = False
         self.hybrid_layers: list = []
@@ -303,14 +315,33 @@ class GraphRunner:
         print(f"[graphe] repli eager — {raison}", flush=True)
 
     def run(self, batch: ForwardBatch) -> Optional[torch.Tensor]:
-        """Logits du lot, ou None si ce lot n'est pas rejouable en graphe."""
-        if not self.enabled or batch.is_prefill:
+        """Logits du lot, ou None si ce lot n'est pas rejouable en graphe.
+
+        Chemin historique (ACVRAM_PIPELINE=0) : préparer, rejouer, copier.
+        Le chemin recouvert (runner, ACVRAM_PIPELINE=1) appelle ``preparer``
+        et ``rejouer_suivant`` séparément pour enfiler le pas n+1 pendant
+        que le rejeu n tourne encore."""
+        if not self.preparer(batch):
             return None
+        out = self.rejouer_suivant()
+        return out if out is None else out.clone()
+
+    def preparer(self, batch: ForwardBatch) -> bool:
+        """Lie les créneaux, capture au besoin, remplit les tampons d'entrée
+        du graphe pour ce lot. Rend False si le lot n'est pas rejouable en
+        graphe (le runner replie en eager). Aucune attente de l'hôte : les
+        copies vers les tampons d'entrée sont enfilées sur le flux courant
+        APRÈS le rejeu précédent — l'ordre du flux garantit que ce rejeu a
+        fini de les lire. ``batch.tokens`` peut être un tenseur device (les
+        jetons échantillonnés du pas précédent, jamais rapatriés)."""
+        self._prepare = None
+        if not self.enabled or batch.is_prefill:
+            return False
         ql = batch.query_lens[0]
         if any(q_ != ql for q_ in batch.query_lens):
-            return None                      # longueurs mixtes : eager
+            return False                      # longueurs mixtes : eager
         if ql != 1 and not self.paged_ok:
-            return None                      # la verification exige le noyau
+            return False                      # la verification exige le noyau
         b_reel = batch.batch_size
         b = bucket_batch(b_reel)
         nblk = bucket_blocks(max(t.shape[0] for t in batch.block_tables))
@@ -324,18 +355,18 @@ class GraphRunner:
             if godet is None:
                 self._eager(f"lot hybride {b_reel} au-dela du plafond "
                             f"ACVRAM_HYBRID_SLOTS={self.max_slots}")
-                return None
+                return False
             b = godet
             if batch.gdn_store is None:
                 self._eager("gdn_store absent (etat recurrent non initialise)")
-                return None
+                return False
             if ql > self.max_ql:
                 self._eager(f"ql={ql} au-dela de max_ql={self.max_ql}")
-                return None
+                return False
             if b_reel > 1 and ql != 1:
                 self._eager("lot multi-sequences en verification speculative "
                              "(ql != 1) : non supporte sous graphe")
-                return None
+                return False
             lb = godet_mla(max(batch.seq_lens))
             self._bind_hybrid(batch, lb, b_godet=b)
         key = (b, ql, nblk, lb)
@@ -354,7 +385,7 @@ class GraphRunner:
                 if trace:
                     print(f"[graphe] limite {MAX_GRAPHS} atteinte, clé {key} : eager",
                           flush=True)
-                return None
+                return False
             try:
                 entry = self._capture(b, ql, nblk, batch)
             except Exception as e:                        # noqa: BLE001
@@ -390,7 +421,7 @@ class GraphRunner:
                 self.enabled = False
                 self.graphs.clear()
                 torch.cuda.empty_cache()
-                return None
+                return False
             self.graphs[key] = entry
             if os.environ.get("ACVRAM_TRACE_PTRS"):
                 entry["ptrs"] = _empreinte_adresses(self, entry)
@@ -399,13 +430,32 @@ class GraphRunner:
             if trace:
                 print(f"[graphe] capture clé {key} : "
                       f"{(time.perf_counter()-t1)*1000:.1f} ms", flush=True)
-            out = entry["out"][:b_reel * ql].clone()
-            return out
+            # la capture a rempli ET rejoué ce lot : rien à relancer
+            self._prepare = (entry, key, b_reel, ql, t0, t1, time.perf_counter(), True)
+            return True
 
         self._fill(entry, batch)
         if trace and os.environ.get("ACVRAM_CHRONO_SYNC"):
             torch.cuda.synchronize(self.device)
         t2 = time.perf_counter()
+        self._prepare = (entry, key, b_reel, ql, t0, t1, t2, False)
+        return True
+
+    def rejouer_suivant(self) -> Optional[torch.Tensor]:
+        """Rejoue le lot préparé par ``preparer`` et rend une VUE des logits
+        (``entry["out"][:b*ql]`` : adresse stable pour une clé de godet
+        donnée, réécrite par le rejeu suivant — tout ce qui la lit doit être
+        enfilé avant le prochain ``rejouer_suivant``). Enregistre
+        ``evenement_jetons`` juste après le rejeu ; le runner l'attend
+        seulement quand il consomme les jetons de ce pas, un pas plus tard."""
+        if self._prepare is None:
+            return None
+        entry, key, b_reel, ql, t0, t1, t2, deja = self._prepare
+        self._prepare = None
+        trace = bool(os.environ.get("ACVRAM_TRACE_STEPS"))
+        if deja:
+            self.evenement_jetons.record()
+            return entry["out"][:b_reel * ql]
         if "step" in entry:                  # ACVRAM_GRAPHS_EAGER : sans capture
             with torch.inference_mode():
                 entry["out"] = entry["step"]()
@@ -431,7 +481,8 @@ class GraphRunner:
                 # le debit si elle reste active en permanence. Non committe.
                 torch.cuda.synchronize(self.device)
         self.replays += 1
-        out = entry["out"][:b_reel * ql].clone()
+        self.evenement_jetons.record()
+        out = entry["out"][:b_reel * ql]
         t3 = time.perf_counter()
         getattr(self, "temps_bind", None) is None and setattr(self, "temps_bind", [])
         getattr(self, "temps_fill", None) is None and setattr(self, "temps_fill", [])
@@ -443,6 +494,7 @@ class GraphRunner:
             print(f"[graphe-lent] bind {(t1-t0)*1000:.1f} fill "
                   f"{(t2-t1)*1000:.1f} replay {(t3-t2)*1000:.1f} ms clé {key}",
                   flush=True)
+        return out
         return out
 
     # -- hybrides ----------------------------------------------------------
@@ -487,36 +539,57 @@ class GraphRunner:
     def _embed(self, batch: ForwardBatch) -> torch.Tensor:
         """Le plongement, hors graphe, sur l'appareil où réside la table."""
         m = self.model
-        idx = batch.tokens.to(m.embed_tokens.device)
+        idx = batch.tokens
+        if idx.device != m.embed_tokens.device:
+            idx = idx.to(m.embed_tokens.device, non_blocking=idx.is_pinned())
         x = torch.nn.functional.embedding(idx, m.embed_tokens).to(m.dtype)
         return x if m.spec.embedding_multiplier == 1.0 else x * m.spec.embedding_multiplier
+
+    def _etage(self, entry: dict) -> dict:
+        """Tampons hôte ÉPINGLÉS de l'entrée, à deux parités : le pas n écrit
+        la parité n % 2 pendant que la copie asynchrone du pas n-1 lit
+        l'autre. Une copie depuis de la mémoire paginable bloque l'hôte le
+        temps de la mise en attente ; depuis l'épinglée, elle est enfilée et
+        l'hôte continue."""
+        et = entry.get("etage")
+        if et is None:
+            b, ql, nblk = entry["key"][:3]
+            def deux(*forme):
+                return [torch.zeros(*forme, dtype=torch.long).pin_memory() for _ in range(2)]
+            et = entry["etage"] = {"tour": 0, "positions": deux(b * ql), "slots": deux(b * ql),
+                                   "seq_lens": deux(b), "tables": deux(b, nblk),
+                                   "tokens": deux(b * ql)}
+        return et
 
     def _fill(self, entry: dict, batch: ForwardBatch) -> None:
         b, _ql, nblk = entry["key"][:3]
         b_reel = batch.batch_size
+        n = b_reel * _ql
+        et = self._etage(entry)
+        k = et["tour"] & 1
+        et["tour"] += 1
+        if not batch.tokens.is_cuda:
+            # jetons hôte : passés par l'épinglé pour que l'embedding parte
+            # sans bloquer ; jetons device (pipeline) : rien à faire
+            tk = et["tokens"][k]
+            tk[:n].copy_(batch.tokens)
+            batch = _avec_tokens(batch, tk[:n])
         emb = self._embed(batch).to(self.device)
-        if b_reel < b:
-            n_pad = (b - b_reel) * _ql
-            entry["x"].zero_()
-            entry["x"][:b_reel * _ql].copy_(emb, non_blocking=True)
-            entry["positions"].zero_()
-            entry["positions"][:b_reel * _ql].copy_(batch.positions, non_blocking=True)
-            entry["slots"].fill_(-1)
-            entry["slots"][:b_reel * _ql].copy_(batch.slot_mapping, non_blocking=True)
-            sl = torch.zeros(b, dtype=torch.long)
-            sl[:b_reel] = torch.tensor(batch.seq_lens, dtype=torch.long)
-            entry["seq_lens"].copy_(sl, non_blocking=True)
-        else:
-            entry["x"].copy_(emb, non_blocking=True)
-            entry["positions"].copy_(batch.positions, non_blocking=True)
-            entry["slots"].copy_(batch.slot_mapping, non_blocking=True)
-            entry["seq_lens"].copy_(
-                torch.tensor(batch.seq_lens, dtype=torch.long), non_blocking=True)
+        pos, sl, sq, tb = et["positions"][k], et["slots"][k], et["seq_lens"][k], et["tables"][k]
+        pos.zero_(); pos[:n].copy_(batch.positions)
+        sl.fill_(-1); sl[:n].copy_(batch.slot_mapping)
+        sq.zero_(); sq[:b_reel] = torch.tensor(batch.seq_lens, dtype=torch.long)
         # Table completee au godet avec le bloc 0 : lu, dequantifie, masque.
-        tables = entry["tables"]
-        tables.zero_()
+        tb.zero_()
         for i, t in enumerate(batch.block_tables):
-            tables[i, : t.shape[0]].copy_(t, non_blocking=True)
+            tb[i, : t.shape[0]].copy_(t)
+        if b_reel < b:
+            entry["x"].zero_()
+        entry["x"][:n].copy_(emb, non_blocking=True)
+        entry["positions"].copy_(pos, non_blocking=True)
+        entry["slots"].copy_(sl, non_blocking=True)
+        entry["seq_lens"].copy_(sq, non_blocking=True)
+        entry["tables"].copy_(tb, non_blocking=True)
         if os.environ.get("ACVRAM_TRACE_PTRS"):
             sl = batch.slot_mapping.tolist(); po = batch.positions.tolist()
             print(f"[graphe-FORMES] clé {entry['key']} seq_lens={batch.seq_lens} "
