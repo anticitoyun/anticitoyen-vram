@@ -6,8 +6,11 @@
 # exclu) sont profiles ; horloges non verrouillees (--clock-control none) pour que
 # la duree soit celle du regime reel — les COMPTES (inst, octets) n'en dependent pas.
 # Sortie : CSV brut + tableau agrege par noyau, puis par poste, dans
-# /tmp/claude-1000/ncu-ipo-<moteur>.{csv,txt}
+# ${NCU_SORTIE}/ncu-ipo-<moteur>.{csv,txt}
 set -euo pipefail
+# Dossier de sortie (CSV, journaux, HOME de travail pour root) : NCU_SORTIE, par defaut
+# /tmp/ncu-acvram -- jamais un chemin de session en dur (cliquet identifiants).
+NCU_SORTIE=${NCU_SORTIE:-/tmp/ncu-acvram}; mkdir -p "$NCU_SORTIE"
 MOTEUR=${1:-acvram}; B=${2:-12}
 ICI=$(dirname "$(readlink -f "$0")")
 MODELE=${BANC_MODELE_CHEMIN:-/mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4}
@@ -25,11 +28,11 @@ case "$MOTEUR" in
           CMD=("$PY" "$ICI/ncu_vllm_decode12.py" "$VLLM_MODELE") ;;
   *) echo "moteur inconnu : $MOTEUR"; exit 2 ;;
 esac
-OUT=/tmp/claude-1000/ncu-ipo-${MOTEUR}.csv
+OUT=${NCU_SORTIE}/ncu-ipo-${MOTEUR}.csv
 # Les compteurs sont reserves a root (RmProfilingAdminOnly=1) : sudoers NOPASSWD sur
 # ncu (docs/MATERIEL.md). sudo remet l'environnement a zero -> on le repasse par env,
 # avec un HOME de travail pour que root n'ecrive rien dans les caches de l'utilisateur.
-HOME_NCU=${HOME_NCU:-/tmp/claude-1000/home-ncu}; mkdir -p "$HOME_NCU"
+HOME_NCU=${HOME_NCU:-${NCU_SORTIE}/home-ncu}; mkdir -p "$HOME_NCU"
 # Copie du cache de noyaux compile de CET arbre (cle = sha256 du chemin du paquet,
 # acvram/kernels/__init__.py) pour que root ne recompile pas ni n'ecrive chez l'utilisateur.
 REPO=$(dirname "$ICI"); CLE=$(python3 -c "import hashlib,os;print(hashlib.sha256(os.path.realpath('$REPO/acvram/kernels').encode()).hexdigest()[:12])")
@@ -48,6 +51,6 @@ done
 sudo -n /usr/local/cuda/bin/ncu --csv --target-processes all --clock-control none --cache-control "${NCU_CACHE:-all}" \
   --nvtx --nvtx-include "mesure/" ${NCU_NOYAUX:+--kernel-name "regex:$NCU_NOYAUX"} \
   --metrics "${NCU_METRIQUES:-gpu__time_duration.sum,dram__bytes_op_read.sum,dram__bytes_op_write.sum,sm__inst_executed.sum,sm__inst_executed_pipe_tensor.sum,sm__cycles_elapsed.avg.per_second}" \
-  "${ENV[@]}" "${CMD[@]}" > "$OUT" 2>/tmp/claude-1000/ncu-ipo-${MOTEUR}.err || true
-grep -c "^\"[0-9]" "$OUT" || { echo "ECHEC : rien profile, voir /tmp/claude-1000/ncu-ipo-${MOTEUR}.err"; tail -5 /tmp/claude-1000/ncu-ipo-${MOTEUR}.err; exit 1; }
-python3 "$ICI/ncu_instr_par_octet_agrege.py" "$OUT" "$BANC_PAS_NCU" | tee /tmp/claude-1000/ncu-ipo-${MOTEUR}.txt
+  "${ENV[@]}" "${CMD[@]}" > "$OUT" 2>${NCU_SORTIE}/ncu-ipo-${MOTEUR}.err || true
+grep -c "^\"[0-9]" "$OUT" || { echo "ECHEC : rien profile, voir ${NCU_SORTIE}/ncu-ipo-${MOTEUR}.err"; tail -5 ${NCU_SORTIE}/ncu-ipo-${MOTEUR}.err; exit 1; }
+python3 "$ICI/ncu_instr_par_octet_agrege.py" "$OUT" "$BANC_PAS_NCU" | tee ${NCU_SORTIE}/ncu-ipo-${MOTEUR}.txt

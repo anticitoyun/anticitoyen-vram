@@ -3,19 +3,22 @@
 #   outils/carte.sh outils/ncu_pas_decodage.sh 12 [gemv|mma]
 # Filtre : les noyaux du pas (MoE, INT8, attention, routage, glue, norme) ; on saute
 # les premiers lancements (chargement + 2 passes de chauffe + prefill) et on
-# profile un echantillon. Sortie CSV dans /tmp/claude-1000/ncu-pas-<bras>.csv
+# profile un echantillon. Sortie CSV dans ${NCU_SORTIE}/ncu-pas-<bras>.csv
 # puis un tableau agrege par noyau : appels, ms, Go DRAM lus, Go/s effectifs.
 set -euo pipefail
+# Dossier de sortie (CSV, journaux, HOME de travail pour root) : NCU_SORTIE, par defaut
+# /tmp/ncu-acvram -- jamais un chemin de session en dur (cliquet identifiants).
+NCU_SORTIE=${NCU_SORTIE:-/tmp/ncu-acvram}; mkdir -p "$NCU_SORTIE"
 B=${1:-12}; BRAS=${2:-gemv}
 ICI=$(dirname "$(readlink -f "$0")"); REPO=$(dirname "$ICI")
 PY=${PY:-~/Bureau/Claude/anticitoyen-vram/.venv/bin/python3}
-OUT=/tmp/claude-1000/ncu-pas-${BRAS}.csv
+OUT=${NCU_SORTIE}/ncu-pas-${BRAS}.csv
 export ACVRAM_TYPE=mesure BANC_JETONS=8
 /usr/local/cuda/bin/ncu --csv --target-processes all \
   --metrics gpu__time_duration.sum,dram__bytes_op_read.sum,dram__bytes_op_write.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed \
   --kernel-name "regex:nvfp4_gemv_grouped|int8_gemv|paged_attn|moe_route|moe_reduce|rmsnorm|rms_norm|rope|nvfp4_gemm_grouped|silu|topk|elementwise|gather|index" \
   --launch-skip 4000 --launch-count 1200 \
-  "$PY" "$ICI/banc_decodage_moe.py" "$BRAS" "$B" > "$OUT" 2>/tmp/claude-1000/ncu-pas-${BRAS}.err || true
+  "$PY" "$ICI/banc_decodage_moe.py" "$BRAS" "$B" > "$OUT" 2>${NCU_SORTIE}/ncu-pas-${BRAS}.err || true
 "$PY" - "$OUT" <<'PYEOF'
 import csv, sys, collections
 rows = [r for r in csv.reader(open(sys.argv[1])) if r and r[0].isdigit()]
