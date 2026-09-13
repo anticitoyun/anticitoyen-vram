@@ -1,6 +1,55 @@
-# Verdict — énergie BRUTE : acvram gagne à b=1 SEULEMENT sur fenêtre ≥20s
+# Verdict — énergie BRUTE, 3 moteurs : acvram ne gagne NULLE PART
 
-## Mise à jour du 14/09 (fin de session) — chiffre qui prime sur tout ce qui suit
+## Mise à jour finale du 14/09 — bug à 2 cartes trouvé par poste7, colonne llama.cpp ajoutée
+
+**Le classement « acvram gagne à b=1 » ci-dessous (section précédente) est
+LUI-MÊME faux — poste7 a trouvé que `campagne-20s-vllm-14-09.py` ne posait
+pas `CUDA_VISIBLE_DEVICES=0`** (contrairement au script acvram, qui le
+pose). `energie.py` IGNORE cette variable par défaut et somme TOUTES les
+cartes NVML visibles — le brut vLLM de toute la colonne précédente
+agrégeait donc la 3080 Ti au repos (~28,5 W) avec la 5090 réellement
+mesurée. Preuve trouvée par poste7 : b=12 vLLM affichait 0,2913 J × 1 437 t/s
+= 418 W, AU-DESSUS du plafond de 400 W — impossible sur une seule carte
+bridée.
+
+**Corrigé** (`CUDA_VISIBLE_DEVICES=0` posé explicitement dans les trois
+scripts ; troisième garde ajoutée à `energie.py.invalidations` : une
+mesure `ACVRAM_TYPE=mesure` sur plus d'une carte est désormais signalée,
+champ `cartes` publié dans `resume()`) et complété par une colonne
+**llama.cpp** (binaire réel sm_120 de poste8, GGUF Q4_K_M) demandée par
+chef pour fermer le duel à trois. Mêmes rondes ≥20s, mêmes prompts
+synthétiques, un chargement séparé par moteur (accord de poste2, qui fait
+pp2048 sur le même llama.cpp en parallèle).
+
+    b     acvram t/s   acvram J/j   vLLM t/s    vLLM J/j    llama.cpp t/s   llama.cpp J/j
+    1     233,0        1,4296       196,7       1,3729      319,9           1,1675
+    2     340,2        1,1369       306,8       0,9557      275,7           1,2396
+    3     412,1        0,9493       460,1       0,6639      —               —
+    4     510,4        0,7724       589,9       0,5440      —               —
+    12    630,6        0,6188     1 437,9       0,2719      747,8           0,4436
+
+**acvram ne gagne À AUCUN b testé, une fois le bug à deux cartes corrigé.**
+À b=1, c'est **llama.cpp** qui gagne (1,1675 J/j, -18,4 % contre acvram,
+-15,0 % contre vLLM) — la conclusion « acvram bat vLLM à b=1 » du duel
+historique du 9/09 (×1,96 décodage) ne tient plus non plus dans son
+régime ≥20s corrigé : llama.cpp devance largement les DEUX. À b=2 et
+b=12, vLLM reste devant (b=2 : -15,9 % contre acvram, mais llama.cpp
+repasse dernier ici, résultat non monotone à creuser si utile ; b=12 :
+vLLM ×2,28 plus efficace qu'acvram, cohérent avec le duel historique de
+poste2).
+
+**Correction assumée, publiquement** : les sections « acvram gagne à b=1 »
+puis « acvram gagne à b=2 » puis « acvram ne gagne qu'à b=1 » qui suivent
+dans ce document ont chacune semblé vraies avec les données disponibles
+au moment où elles ont été écrites, et se sont révélées fausses à l'étape
+suivante — pour des raisons différentes à chaque fois (bruit de mesure,
+puis fenêtre trop courte, puis un bug d'agrégation de cartes). Rien n'est
+effacé ci-dessous : la trace complète de la correction progressive reste
+lisible, avec la cause de chaque révision.
+
+---
+
+## Historique — étape 2 (avant le bug à 2 cartes, après la fenêtre ≥20s)
 
 chef a demandé de refaire b=1-4 ET b=12 (chiffre officiel) sur une fenêtre
 **≥ 20 s** (au lieu des quelques secondes des mesures précédentes), pour que
@@ -179,13 +228,14 @@ parqué, comme convenu : pas de téléchargement sans l'utilisateur.**
 
 ## bd
 
-Item 3 de la mesure 2a de poste7 : **fait**, refermé par la campagne ≥20s.
-Le créneau réel où acvram bat vLLM en énergie brute soutenue se limite à
-**b=1** (-9,4 %) ; b=2 (gagné sur fenêtre courte, confirmé par répétition)
-s'inverse en faveur de vLLM sur fenêtre longue, et l'écart se creuse à
-b=3/4/12 dans le sens du duel historique de poste2. Nouveau chiffre
-officiel b=12 : 630,59 t/s / 0,6188 J/jeton (31 s), remplace le 712,62 t/s
-du run court. Racine du blocage initial identifiée et documentée
+Item 3 de la mesure 2a de poste7 : **fait**, refermé au troisième essai.
+**Conclusion finale : acvram ne gagne à AUCUN des b testés (1/2/3/4/12)
+une fois le bug à deux cartes corrigé** — b=1 revient à llama.cpp, b=2 et
+b=12 à vLLM. Nouveau chiffre officiel b=12 acvram : 630,59 t/s / 0,6188
+J/jeton (31 s), remplace le 712,62 t/s du run court. `energie.py` a reçu
+une troisième garde (mesure sur >1 carte sans le dire, sous
+`ACVRAM_TYPE=mesure`) suite à ce bug, plus le champ `cartes` dans
+`resume()`. Racine du blocage initial (OOM vLLM) identifiée et documentée
 (`echec-energie-brute-vllm-oom-14-09.md`) : ne jamais charger un checkpoint
 acvram dans vLLM, les formats NVFP4 ne sont pas interchangeables entre les
 deux moteurs. Modèle témoin GLM-42B : **parqué** — GGUF écarté (chef),

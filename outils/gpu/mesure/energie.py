@@ -260,6 +260,19 @@ class Energie:
                                f"absente du recensement initial")
         if self.bridages:
             raisons.append("bridage pendant la fenêtre : " + ", ".join(sorted(self.bridages)))
+        # Troisième garde, 14/09 (poste7) : campagne-20s-vllm-14-09.py ne
+        # posait pas CUDA_VISIBLE_DEVICES — energie.py:80-83 (nvml() IGNORE
+        # cette variable pour un usage normal, mais la respecte quand elle
+        # EST posée) a alors agrégé la 3080 Ti au repos (~28,5 W) avec la
+        # 5090 mesurée, gonflant tout le brut vLLM sans le dire. Une mesure
+        # (`ACVRAM_TYPE=mesure`) qui couvre plus d'une carte sans que
+        # l'appelant l'ait choisi explicitement est invalidée : le champ
+        # `cartes` de `resume()` rend visible ce qui a été sommé.
+        if os.environ.get("ACVRAM_TYPE") == "mesure" and len(self.debut) > 1:
+            raisons.append(
+                f"mesure sur {len(self.debut)} cartes ({sorted(self.debut)}) : "
+                f"le brut agrège plusieurs cartes sans le dire — poser "
+                f"CUDA_VISIBLE_DEVICES pour restreindre a une seule")
         # Deux gardes ajoutées le 14/09 (poste7/chef, après le +51 % de
         # puissance_nvml.py:76 sur une fenêtre de 2 s) : une moyenne
         # au-dessus du plafond matériel est un signe que la fenêtre est
@@ -290,6 +303,7 @@ class Energie:
             "joules": round(self.joules, 1),
             "watts": round(self.moyenne, 1),
             "duree_s": round(self.duree, 2),
+            "cartes": sorted(self.debut),
             "plafond_w": round(self.plafond, 0),
             "horloge_min": min(h) if h else -1,
             "horloge_max": max(h) if h else -1,

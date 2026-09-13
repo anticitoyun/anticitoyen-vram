@@ -12,20 +12,24 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 
-def _fenetre(joules, duree, plafond_w):
+def _fenetre(joules, duree, plafond_w, cartes=(0,)):
     """Une fenetre minimale, NVML simule (pas de carte reelle)."""
     from outils.gpu.mesure import energie as mod  # noqa: PLC0415
 
     class _FauxNvml:
-        cartes = [(0, object())]
+        def __init__(self):
+            self.cartes = [(i, object()) for i in cartes]
 
         def plafond_w(self, h):
             return plafond_w
 
     f = object.__new__(mod.Energie)
     f.indisponible = None
-    f.debut, f.fin = {0: 0}, {0: int(joules * 1000)}
-    f.pids_debut, f.pids_fin = {0: ()}, {0: ()}
+    joules_par_carte = int(joules * 1000 / len(cartes))
+    f.debut = {i: 0 for i in cartes}
+    f.fin = {i: joules_par_carte for i in cartes}
+    f.pids_debut = {i: () for i in cartes}
+    f.pids_fin = {i: () for i in cartes}
     f.bridages = set()
     f.duree = duree
     mod._nvml = _FauxNvml()
@@ -64,3 +68,27 @@ def test_plafond_indisponible_ne_declenche_pas_la_garde():
     une fenetre juste parce que le plafond est inconnu."""
     f = _fenetre(joules=100.0, duree=10.0, plafond_w=0.0)
     assert not any("plafond" in x for x in f.invalidations)
+
+
+def test_deux_cartes_en_mesure_est_invalide(monkeypatch):
+    """Le bug de poste7 (14/09) : campagne-20s-vllm-14-09.py ne posait pas
+    CUDA_VISIBLE_DEVICES, le brut a agrege la 3080 Ti au repos avec la
+    5090 mesuree, sans le dire."""
+    monkeypatch.setenv("ACVRAM_TYPE", "mesure")
+    f = _fenetre(joules=100.0, duree=10.0, plafond_w=400.0, cartes=(0, 1))
+    r = f.invalidations
+    assert any("2 cartes" in x for x in r)
+
+
+def test_une_carte_en_mesure_reste_valide(monkeypatch):
+    monkeypatch.setenv("ACVRAM_TYPE", "mesure")
+    f = _fenetre(joules=100.0, duree=10.0, plafond_w=400.0, cartes=(0,))
+    assert f.invalidations == []
+
+
+def test_deux_cartes_hors_mesure_ne_declenche_pas_la_garde(monkeypatch):
+    """La garde ne vise que ACVRAM_TYPE=mesure -- un etat/diagnostic sur
+    plusieurs cartes est un usage legitime, pas une erreur a signaler."""
+    monkeypatch.delenv("ACVRAM_TYPE", raising=False)
+    f = _fenetre(joules=100.0, duree=10.0, plafond_w=400.0, cartes=(0, 1))
+    assert not any("cartes" in x and "agrège" in x for x in f.invalidations)
