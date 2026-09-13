@@ -71,18 +71,62 @@ que la cause exacte de cette régression n'est pas comprise : elle
 pourrait aussi les toucher si `_try_build_stacks`-like logic ou un
 mécanisme voisin existe pour les couches GDN.
 
+## Addendum 14/09 — cause isolée : ce n'est PAS l'OOM
+
+Consigne de chef après le premier verdict : séparer les messages de
+`_try_build_stacks()` et confirmer la cause. Fait (30 min) :
+
+- `acvram/engine/model.py` : chaque branche de retour `None` dans `one()`
+  pose désormais `self._raison_repli` avant de sortir (échelle AWQ
+  hétérogène / forme-padding différents / formats mélangés / INT4 exilé
+  sans table / OOM transitoire — cinq causes distinctes, un seul message
+  générique avant ce correctif). `_try_build_stacks()` imprime
+  `[acvram] repli lent (pas de graphes, boucle par expert) sur cette
+  couche : <raison>` dès qu'une couche échoue, plutôt que de rester
+  silencieuse jusqu'à un éventuel message de `graphs.py` — un utilisateur
+  qui sert un modèle et tombe à 47 t/s sans le savoir, c'est pire qu'un
+  refus (chef).
+- `acvram/engine/graphs.py` : `self.raison` reprend `mod._raison_repli`
+  au lieu du texte générique fixe.
+- **Vérifié empiriquement en rechargeant `-sf0`** (pas de reconstruction
+  nécessaire, juste le chargement) : le message précis rendu est
+  **« gate_proj : échelle AWQ posée sur certains experts seulement (pas
+  tous — repli par expert) »**, répété sur les 48 couches. Le message
+  OOM dédié (« mémoire GPU insuffisante ») n'apparaît dans AUCUN des deux
+  journaux (avant ou après le correctif) — **ce n'est pas l'OOM**, confirmé
+  deux fois.
+
+**Mécanisme complet** : sans l'échappatoire int8 (`snr_floor=0`), le
+convertisseur AWQ pose une échelle par canal sur CERTAINS experts
+seulement (ceux qui en ont besoin pour rester sous le seuil de qualité),
+pas sur les autres — cassant l'hypothèse d'homogénéité que la pile
+groupée exige (`p.scaler is not None and not p.scaler.is_identity`,
+model.py). Le dossier `snr_floor=25` n'a pas ce problème parce que les
+tenseurs difficiles partent en int8 (uniformément absents de la
+condition NVFP4) plutôt que de recevoir une échelle AWQ non-uniforme.
+
+**Piège méthodologique trouvé en chemin** : `outils/campagne-a6-
+snrfloor0.py` n'insérait pas la racine du dépôt dans `sys.path` — un
+`import acvram` y résolvait vers le dépôt DE BASE (installation editable
+partagée entre worktrees) au lieu de CE worktree. Sans effet sur les
+mesures PPL/débit déjà publiées (le moteur n'avait pas encore changé au
+moment de ces mesures), mais aurait rendu invisible tout correctif
+ultérieur sans qu'aucune erreur ne le signale — corrigé.
+
+Nettoyage : dossier `-sf0` (17 Gio) supprimé du HDD. Source bf16
+(`models/Qwen3-Coder-30B-A3B-Instruct`, 57 Gio) conservée pour l'instant
+— à confirmer si elle doit disparaître aussi.
+
 ## Ce qui reste
 
-1. Isoler la cause exacte (OOM transitoire vs autre) : instrumenter
-   `_try_build_stacks()` pour distinguer les deux branches de retour
-   `False`, ou reproduire avec plus de VRAM libre / `torch.cuda.memory_stats()`
-   autour de l'appel.
-2. Si OOM confirmé : le problème n'est pas snr_floor=0 en soi mais un
-   pic mémoire lors du chargement — potentiellement réglable (construire
-   les piles projection par projection avec libération intermédiaire,
-   déjà en partie fait par le `try/except` existant mais qui abandonne
-   au lieu de réessayer avec moins de parallélisme).
-3. Décider si Kimi-Linear/Ornith valent la peine d'être testés avant de
-   comprendre ce mécanisme, ou si A7 (alpha AWQ commun) redevient
-   prioritaire étant donné qu'A6 échoue plus cher que prévu sur la cible
-   principale.
+1. **A7** (alpha AWQ commun gate/up, +1,7-1,9 pt, 0 octet) — priorité
+   suivante, à sec.
+2. Kimi-Linear/Ornith non testés — le mécanisme trouvé (échelle AWQ
+   hétérogène) est spécifique aux architectures MoE à experts groupés ;
+   les hybrides linéaires n'ont pas cette structure de pile, donc rien
+   n'indique qu'ils seraient touchés de la même façon, mais rien ne le
+   garantit non plus sans mesure.
+3. Piste d'amélioration signalée par chef si le mécanisme se reproduit
+   ailleurs : construire les piles par sous-groupe d'experts homogènes
+   plutôt que tout-ou-rien, pour ne PAS perdre les graphes CUDA sur une
+   poignée d'experts à échelle AWQ non-uniforme.

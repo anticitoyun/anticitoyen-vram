@@ -700,13 +700,32 @@ class MoEBlock(nn.Module):
         from ..quant.int4 import INT4Tensor
         from ..quant.nvfp4 import NVFP4Tensor
 
+        # « pile d'experts hétérogène » recouvrait trois causes distinctes
+        # sous un seul message (graphs.py) : impossible de savoir, sans
+        # lire le code, si le repli lent vient d'une VRAIE hétérogénéité de
+        # format/forme, d'une échelle AWQ posée sur certains experts
+        # seulement, ou d'un manque transitoire de VRAM pendant la
+        # construction (branche OOM plus bas, qui avait deja son propre
+        # message). Trouve le 14/09 sur Qwen3-Coder-30B-A3B reconverti a
+        # snr_floor=0 : le repli SEMBLAIT etre un bogue d'heterogeneite
+        # (aucune trace du message OOM dans le journal) mais le manifeste
+        # etait parfaitement uniforme sur format/forme/group_size — la
+        # vraie cause etait l'echelle AWQ, posee sur certains experts
+        # seulement par le convertisseur une fois l'echappatoire int8
+        # retiree (snr_floor=0), invisible sans ce champ.
+        self._raison_repli = ""
+
         def one(nom, projs):
             ws = [p.qweight for p in projs]
             if any(p.scaler is not None and not p.scaler.is_identity
                    for p in projs):
+                self._raison_repli = (
+                    f"{nom} : échelle AWQ posée sur certains experts "
+                    f"seulement (pas tous — repli par expert)")
                 return None                    # échelle AWQ par expert : repli
             if all(isinstance(w, NVFP4Tensor) for w in ws):
                 if len({(w.shape, w.padded_in) for w in ws}) != 1:
+                    self._raison_repli = f"{nom} : forme ou padding differents entre experts"
                     return None
                 if any(p.streamed is not None for p in projs):
                     return self._table_pile(nom, ws)
@@ -721,8 +740,10 @@ class MoEBlock(nn.Module):
                 return ("nvfp4", qw, bs, gs, ws[0].padded_in, ws[0].shape[0])
             if all(isinstance(w, INT4Tensor) for w in ws):
                 if any(p.streamed is not None for p in projs):
+                    self._raison_repli = f"{nom} : INT4 exilé, pas de table pour ce format"
                     return None             # pas de pendant table pour INT4
                 if len({(w.shape, w.padded_in, w.group_size) for w in ws}) != 1:
+                    self._raison_repli = f"{nom} : forme, padding ou group_size differents entre experts (INT4)"
                     return None
                 qw = torch.stack([w.qweight for w in ws]).contiguous()
                 sc = torch.stack([w.scales for w in ws]).contiguous()
@@ -731,6 +752,7 @@ class MoEBlock(nn.Module):
                     w.qweight, w.scales, w.zeros = qw[e], sc[e], zr[e]
                 return ("int4", qw, sc, zr, ws[0].padded_in,
                         ws[0].group_size, ws[0].shape[0])
+            self._raison_repli = f"{nom} : formats de quantification mélangés entre experts (ni tout NVFP4, ni tout INT4)"
             return None
 
         piles = {}
@@ -738,12 +760,16 @@ class MoEBlock(nn.Module):
             for nom in self._noms_experts():
                 pile = one(nom, [getattr(e, nom) for e in self.experts])
                 if pile is None:
+                    print(f"[acvram] repli lent (pas de graphes, boucle par "
+                          f"expert) sur cette couche : {self._raison_repli}",
+                          flush=True)
                     return False
                 piles[nom] = pile
         except torch.OutOfMemoryError:
             # la pile d'une projection double transitoirement sa mémoire ;
             # un modèle qui remplit la carte (80B) reste sur la boucle par
             # expert plutôt que de mourir ici
+            self._raison_repli = "mémoire GPU insuffisante pendant la construction de la pile"
             torch.cuda.empty_cache()
             print("[acvram] piles d'experts : mémoire GPU insuffisante, boucle par expert",
                   flush=True)

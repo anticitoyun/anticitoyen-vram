@@ -23,10 +23,20 @@ import sys
 import time
 from pathlib import Path
 
+REPO = Path(__file__).resolve().parent.parent
+# SANS CECI, `import acvram` resout via le finder d'installation editable
+# du venv partage — qui pointe sur le depot DE BASE
+# (anticitoyen-vram/acvram), PAS ce worktree : `python outils/script.py`
+# met le dossier du SCRIPT (outils/) en sys.path[0], pas la racine du
+# depot, donc rien ne fait gagner ce worktree sans cette ligne. Piege
+# trouve le 14/09 en cherchant pourquoi un correctif de graphs.py
+# n'apparaissait jamais dans les journaux — les mesures PPL/decode d'A6
+# n'etaient PAS affectees (aucun code moteur n'avait encore change dans
+# ce worktree a ce moment-la), mais un correctif ulterieur l'aurait ete.
+sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "gpu" / "mesure"))
 from energie import Energie, repos  # noqa: E402
 
-REPO = Path(__file__).resolve().parent.parent
 VENV_PY = "~/Bureau/Claude/anticitoyen-vram/.venv/bin/python3"
 CORPUS = Path("/mnt/4TO_SATACMR_2022/Modeles/corpus/wiki-gptq.txt")
 SORTIE_HDD = Path("/mnt/4TO_SATACMR_2022/Modeles/models_acvram")  # SSD a 41 Gio libres
