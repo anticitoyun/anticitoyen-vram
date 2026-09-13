@@ -350,3 +350,35 @@ entre nous et lui n'est pas dans les octets : `Shape<128,128,128>` avec
 producteurs/consommateurs** ; nos `cp.async` de 16 o par fil et nos
 `__syncthreads` par pas de 64 sont la différence. Bead 0si à réécrire :
 TMA + K=128, prédiction sur le 39 %.
+
+## INT8 GEMV des projections d'attention, NV=12 (14/09, soir)
+
+Le profil b=12 montrait `int8_gemv<4,8>` + `<4,4>` par couche : NV
+plafonnait à 8, les poids étaient relus. Version à NV ≤ 12 (activations
+chargées par mot de 4 poids, même ordre d'accumulation ; 243 registres
+bf16, pas de débordement), tests bit-identiques à N=1 pour N=1..16.
+
+Prédiction scellée : `int8_gemv` 2,99 → ~1,7 ms par pas (−1,3 ms) ;
+réfutation : < −0,5 ms.
+
+| mesure | avant | après |
+|--------|------:|------:|
+| `int8_gemv` projections, profil eager (GPU) | 2,99 ms (<4,8>+<4,4>) | **2,62 ms** (<4,12>) |
+| GPU du pas, eager | 12,25 ms | 11,94 ms |
+| pas sous graphes, banc b=12 | 16,54 ms (726 j/s) | **14,54 ms (826 j/s)** |
+
+**Réfuté sur le noyau** (−0,37 ms < −0,5) : la seconde lecture des poids
+était servie par le L2 — la même leçon que la tuile de 128 le même jour,
+deux fois en une soirée : « lu deux fois » ne coûte que si les deux
+lectures sortent de la HBM. Les 2 ms gagnés sur le pas sous graphes ne
+sont PAS attribuables à ce changement sans A/B dans les mêmes conditions
+(le 16,54 datait d'une autre session de mesure, après le duel de poste2) ;
+ils sont rapportés, pas revendiqués.
+
+Pourquoi le noyau reste à ~31 % de sa borne (0,86 Go en 2,62 ms) : à
+K=2048, `threads_for(K)` donne 128 fils pour `nloads = 128` — **chaque fil
+fait exactement un chargement de 16 o par ligne** puis réduit : aucune
+latence recouverte, le bloc attend sa seule rafale. Le levier est là
+(plusieurs chargements en vol par fil, moins de fils par ligne ou plus de
+lignes par bloc), à mesurer par A/B propre. Bead à ouvrir si chef le
+retient devant 0si.

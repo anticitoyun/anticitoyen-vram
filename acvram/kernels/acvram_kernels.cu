@@ -230,6 +230,11 @@ __device__ __forceinline__ void load_xs(const XT *__restrict__ p, float *xs) {
             xs[c * 4 + 0] = v.x; xs[c * 4 + 1] = v.y;
             xs[c * 4 + 2] = v.z; xs[c * 4 + 3] = v.w;
         }
+    } else if constexpr (NX == 4) {
+        const uint2 v = *reinterpret_cast<const uint2 *>(p);
+        const float2 f0 = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(&v.x));
+        const float2 f1 = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(&v.y));
+        xs[0] = f0.x; xs[1] = f0.y; xs[2] = f1.x; xs[3] = f1.y;
     } else {
         const uint4 *x8 = reinterpret_cast<const uint4 *>(p);
         #pragma unroll
@@ -567,34 +572,50 @@ __global__ void int8_gemv_kernel(
         for (int n = 0; n < NV; ++n) acc[r][n] = 0.f;
 
     for (int i = lo + threadIdx.x; i < hi; i += blockDim.x) {
-        // Les N activations sont chargées une fois par lecture de poids : le
-        // poids est le tenseur cher, l'activation tient en registres.
-        float xs[NV][WEIGHTS_PER_LOAD];
-        #pragma unroll
-        for (int n = 0; n < NV; ++n)
-            load_xs<XT, WEIGHTS_PER_LOAD>(
-                x + (long)n * K + (long)i * WEIGHTS_PER_LOAD, xs[n]);
+        // Les poids des ROWS lignes sont lus une fois (le tenseur cher) et
+        // servent aux NV activations. Les activations sont chargées par mot
+        // de 4 poids et non par uint4 de 16 : NV x 4 flottants en registres
+        // au lieu de NV x 16, ce qui permet NV = 12 (un lot de 12 séquences en
+        // UNE passe sur les poids, là où NV <= 8 en imposait deux — profil du
+        // 14/09 : int8_gemv<4,8> + <4,4> à chaque couche, poids lus 2x).
+        // L'ordre d'accumulation (j croissant dans `part`) est celui d'avant.
         const int g = (i * WEIGHTS_PER_LOAD) / group;
+        uint4 p[ROWS]; float s[ROWS];
+        float part[ROWS][NV];
         #pragma unroll
         for (int r = 0; r < ROWS; ++r) {
-            const int row = row0 + r;
-            if (row >= M) continue;
-            const uint4 p = reinterpret_cast<const uint4 *>(qw + (long)row * K)[i];
-            const float s = __half2float(scales[(long)row * ng + g]);
-            const float z = static_cast<float>(zeros[(long)row * ng + g]);
-            const unsigned int words[4] = {p.x, p.y, p.z, p.w};
-            float part[NV];
+            const int row = min(row0 + r, M - 1);
+            p[r] = reinterpret_cast<const uint4 *>(qw + (long)row * K)[i];
+            s[r] = __half2float(scales[(long)row * ng + g]);
             #pragma unroll
-            for (int n = 0; n < NV; ++n) part[n] = 0.f;
+            for (int n = 0; n < NV; ++n) part[r][n] = 0.f;
+        }
+        float z[ROWS];
+        #pragma unroll
+        for (int r = 0; r < ROWS; ++r)
+            z[r] = static_cast<float>(zeros[(long)min(row0 + r, M - 1) * ng + g]);
+        #pragma unroll
+        for (int w = 0; w < 4; ++w) {
+            float x4[NV][4];
             #pragma unroll
-            for (int j = 0; j < WEIGHTS_PER_LOAD; ++j) {
-                const float v =
-                    static_cast<float>((words[j >> 2] >> ((j & 3) * 8)) & 0xFFu) - z;
+            for (int n = 0; n < NV; ++n)
+                load_xs<XT, 4>(x + (long)n * K + (long)i * WEIGHTS_PER_LOAD + 4 * w, x4[n]);
+            #pragma unroll
+            for (int r = 0; r < ROWS; ++r) {
+                const unsigned int word = (w == 0) ? p[r].x : (w == 1) ? p[r].y : (w == 2) ? p[r].z : p[r].w;
                 #pragma unroll
-                for (int n = 0; n < NV; ++n) part[n] += v * xs[n][j];
+                for (int jj = 0; jj < 4; ++jj) {
+                    const float v = static_cast<float>((word >> (jj * 8)) & 0xFFu) - z[r];
+                    #pragma unroll
+                    for (int n = 0; n < NV; ++n) part[r][n] += v * x4[n][jj];
+                }
             }
+        }
+        #pragma unroll
+        for (int r = 0; r < ROWS; ++r) {
+            if (row0 + r >= M) continue;
             #pragma unroll
-            for (int n = 0; n < NV; ++n) acc[r][n] += part[n] * s;
+            for (int n = 0; n < NV; ++n) acc[r][n] += part[r][n] * s[r];
         }
     }
 
@@ -1372,10 +1393,16 @@ torch::Tensor int8_gemv(torch::Tensor qweight, torch::Tensor scales,
         case 5: I8G(5, XT, YT, PX, PY, SP); break; \
         case 6: I8G(6, XT, YT, PX, PY, SP); break; \
         case 7: I8G(7, XT, YT, PX, PY, SP); break; \
-        default: I8G(8, XT, YT, PX, PY, SP); break; } } while (0)
+        case 8: I8G(8, XT, YT, PX, PY, SP); break; \
+        case 9: I8G(9, XT, YT, PX, PY, SP); break; \
+        case 10: I8G(10, XT, YT, PX, PY, SP); break; \
+        case 11: I8G(11, XT, YT, PX, PY, SP); break; \
+        default: I8G(12, XT, YT, PX, PY, SP); break; } } while (0)
+    // Tranches de 12 activations : un lot de 12 séquences (le régime du
+    // serveur) passe en UNE lecture des poids ; au-delà, une passe par tranche.
     const int Ntot = N;
-    for (int base = 0; base < Ntot; base += 8) {
-        const int N = min(8, Ntot - base);      // masque volontaire pour I8G_N
+    for (int base = 0; base < Ntot; base += 12) {
+        const int N = min(12, Ntot - base);     // masque volontaire pour I8G_N
         if (bf) {
             I8G_N(__nv_bfloat16, __nv_bfloat16,
                   reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr()) + (long)base * K,
