@@ -216,6 +216,33 @@ réfutation, une économie partagée plausible ne suffirait pas à
 retraverser 24 ms). Si le chantier veut un chiffre plus juste pour cette
 hypothèse précise, il resterait à mesurer, pas à supposer.
 
+## Contrôle de chef : décomposer int_mm seul / quantification seule
+
+Objection reçue avant de fermer : le verdict A' porte sur « quantification
+torch non fusée + int_mm », pas sur `int_mm` seul — la quantification
+(amax/div/round/clamp/cast, plusieurs lancements séparés) pourrait
+dominer artificiellement. Mesuré séparément (`outils/banc_1aj_w8a8_decompose.py`),
+mêmes 192 formes, activations PRÉQUANTIFIÉES hors chronomètre pour (1) :
+
+```
+SOMME int_mm seul   (activations dejà int8) : 28,22 ms
+SOMME quantification seule                   : 10,03 ms
+Seuil de preuve (int_mm seul)      : <= 16 ms
+Seuil de refutation (int_mm seul)   : >= 24 ms
+VERDICT : FERMÉ POUR DE BON (28,22 ms >= 24 ms)
+```
+
+**`int_mm` seul dépasse déjà le seuil de réfutation.** La quantification
+non fusée (10,03 ms) explique une partie de l'écart mais pas
+l'essentiel : même en la retirant complètement du chronomètre,
+`torch._int_mm`/cuBLASLt int8 ne descend qu'à 28,22 ms — proche de la
+borne bf16 déjà en place (30,85 ms), pas le ×2 attendu des tensor cores
+int8. L'estimation de coin de table de chef (0,05-0,08 ms par appel,
+≈10-15 ms au total) ne tient pas dans ce régime de formes (2048 jetons ×
+512-4096) sur cette carte — cause non creusée plus loin (pas nécessaire :
+la mesure suffit à trancher, et le protocole prévoyait explicitement
+l'arrêt si `int_mm` seul ≥ 24 ms).
+
 ## Verdict repli W8A8
 
 **Réfuté sans réserve utile.** Même symptôme que le W4A4 : un coût fixe
