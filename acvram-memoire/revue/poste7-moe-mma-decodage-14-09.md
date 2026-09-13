@@ -23,3 +23,23 @@ Sources : chiffres de poste4 (instr-par-octet-14-09.md, transmis par chef — fi
 ## Place
 
 (1) godet 12 / NV=16 — lancé. **(3) MoE MMA : mesure d'une heure (cond. 3), puis grille fixe (cond. 2), puis mesure sous graphes.** Ensuite 1aj : même technique, part d'instructions plus petite (−1,5 ms, −15/−25 W selon poste4). Total prédit : 15,66 − 1,2 − 1,7 − 1,5 ≈ **11,3 ms, ≤ 370 W** ; ce qui reste au-delà se lit dans le dénominateur DRAM (6,67 Go à 1 050 Go/s = 6,35 ms), pas dans les noyaux.
+
+## 2. Après (iii) de poste4 (713e394) : pas de split-K, (ii) → bt=32 → pas complet, seuils rescellés
+
+**Bilan de mes prédictions** : ms **tenu** (4,0 dans 4,0-4,3) ; inst/octet **tenu** (0,13 ≤ 0,35) ; octets **non tenu** (+13 %) ; W : **mon seuil était mal posé**, pas seulement non tenu. « ≤ 345 W » ne disait ni brut ni net, et un seuil brut à 380 W sur une carte plafonnée à 400 W ne peut pas rendre « faux » quand le noyau touche le plafond **à pleine horloge** — c'est l'horloge qui répond, et elle a répondu : 2 617 MHz contre 1 792 pour la GEMV, 340,5 W nets contre un témoin copie à 341 W. Le noyau est au plafond parce qu'il déplace 1 156 Go/s, plus parce qu'il calcule. Règle 4 sur moi : un seuil porte son régime (brut/net) dans son nom. **Verdict split-K : non** — il n'enlève ni octets ni watts DRAM, et la seule chose qu'il aurait corrigée (une horloge rabattue par les instructions) n'existe plus. Les 2 jours vont à (ii).
+
+**Ordre** : (ii) glue hôte (argsort, bincount, `int(ntiles.sum())`, +2 300 lancements — c'est ma condition 2, poste1) → **bt=32** (un paramètre, une heure) → pas complet sous graphes. Corollaire pour REGLES §9 : « ~1 050 Go/s » est dépassé par ce noyau (1 156) ; la borne dépend du motif d'accès, à re-annoter avec le noyau qui l'a mesurée.
+
+**Le +13 % d'octets : l'explication ne tient pas à b=12.** À t=12 et k=8, `cnt ≤ 12 < 16` : aucun expert ne reçoit 17-32 jetons, donc aucune seconde tuile de M. Soit la manche avait t > 16 (godet, spéculation — à lire dans `cnt.max()` de la manche), soit les octets viennent d'ailleurs (échelles ou tables relues par tuile, `xq`, `down` seul). **Contrôle qui tranche** : bt=32, mêmes octets par noyau (gate, up, down séparés) ; si 4,33 → 3,83 Go, c'était la tuile et il faut expliquer t > 16 ; sinon la cause est dans un des trois noyaux et son nom le dit.
+
+**Seuils du pas complet sous graphes, après (ii) + bt=32, MMA seule (godet 12 compté à part, −1,2 ms)**, référence 15,66 ms / 392 W / 0,512 J/jeton (même instrument) :
+
+| grandeur | prédit | réfuté si |
+|---|---|---|
+| pas | **13,4-13,9 ms** (MoE 5,98 → 3,8-4,0, glue neutre sous graphes) | gain < 1,2 ms : la glue (ii) a mangé 40 % du noyau |
+| W moyen brut | **385-400, inchangé** — je retire « ≤ 380 » : les noyaux MoE restent au plafond, à pleine horloge ; le gain est du temps à puissance constante | < 375 W (alors quelque chose d'autre a changé) |
+| J/jeton brut | **≤ 0,46** (13,7 ms × 0,395 W / 12 = 0,45 ; −0,79 J par pas sur les 3 GEMM) | ≥ 0,48 |
+| mJ/couche MoE sous graphes | 54,6 ± 3 (le chiffre eager doit se retrouver) | > 62 |
+| `dram__bytes_read` MoE | 3,83 Go ± 3 % à bt=32 | > 4,0 Go |
+
+Fenêtre : ≥ 20 s au compteur (`poste7-instrument-energie`), pas 6 s.
