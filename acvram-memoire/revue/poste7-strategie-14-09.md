@@ -45,3 +45,27 @@ Rejeu 14,5 → ~12,0-12,5 ms → 960-1 000 t/s interne, soit **−17 à −20 % 
 2. 1aj W4A4 projections + `lm_head`, décodage **et** prefill (poste4 3 j, poste2 PPL 0,5 j).
 3. Mesures 2a (brut b=1/4) et 2c (llama.cpp 4a899373) — les deux chiffres publiables de la semaine (poste2/poste8 1 j).
 4. 2b MLA vs vLLM (1 j). 5. 0si TMA (2 j), après 1aj, pas avant.
+
+## Correction 14/09 soir — 2a réfutée en ampleur à b=1, en sens à b=4
+
+Source : `energie-brute-faible-lot-14-09.md:14-21` (poste3, branche `poste3`, 42545de). Ma prédiction scellée en §2a — « b=1 : nous < vLLM d'au moins 30 % ; b=4 : ≥ 15 % » — est **fausse** : b=1 −3,8 % (sens juste, ampleur ×8 trop grande), b=4 **+20 %** (sens faux). Cause : la prémisse « repos 17 W vs 64 W » était un repos **froid** (rien chargé, audit-a2) appliqué à un régime chaud ; mesuré modèle chargé : 68-76 W nous, 89-97 W vLLM. Règle 4, « chiffre exact hors de son régime » — la mienne.
+
+Ce que le tableau de poste3 contient et qu'elle n'a pas déplié (W brut = J/jeton × t/s ; net = brut − repos ; pas = b / t/s) :
+
+| b | acvram W brut / net / pas | vLLM W brut / net / pas | net W nous/vLLM |
+|---|---|---|---|
+| 1 | 326 / 258 / 4,41 ms | 296 / 207 / 5,05 ms | 1,25 |
+| 2 | **401** / 325 / 6,13 | 252 / 155 / **10,05** | 2,09 |
+| 3 | **426** / 353 / 7,04 | 275 / 182 / **10,05** | 1,94 |
+| 4 | **435** / 361 / 7,40 | 267 / 172 / **10,05** | 2,10 |
+
+À b=1 : net 1,139 J/jeton nous vs 1,046 vLLM (**+9 % pour nous**) ; repos 0,301 vs 0,451. **Le −3,8 % brut est entièrement le plancher de repos (−0,150 J) moins la perte des noyaux (+0,093 J).** Le créneau 2a existe, mais c'est le repos et le pas plus court qui le paient, pas les noyaux — à publier tel quel.
+
+Deux contrôles à rendre avant de citer le crossover, tous deux tirés du tableau lui-même :
+
+1. **Plafond 400 W dépassé** : 401 / 426 / 435 W brut à b=2/3/4, plafond 400 W posé (chef.md, sudoers). Soit le plafond n'était pas actif (régime ≠ des duels b=12 à 400 W, à porter par le nom du dossier), soit `energie.py` intègre un `power.draw` instantané qui dépasse la moyenne contrainte, soit J et t/s n'ont pas la même fenêtre. Contrôle : `nvidia-smi -q -d POWER` (limite appliquée) relevé pendant, et W×s recalculé depuis le JSON (`scratchpad/resultat-energie-brute-vllm-14-09.json`). Quelle que soit la cause : **dès b=2 nous sommes au plafond, vLLM ne dépasse jamais 300 W** — le débit b=2-4 est borné par la puissance, pas par les noyaux.
+2. **vLLM change de régime entre b=1 et b=2** : pas 5,05 ms à b=1, 10,05 ms à b=2, 3 et 4 — **identique à son pas b=12** (10 ms, vis-a-vis-decodage-b12-14-09) ; par séquence 99,5 t/s constant dès b=2. Hypothèse : rembourrage au godet capturé avec lignes factices routées vers les experts (mêmes octets qu'un lot plein), ou repli eager. Contrôle 15 min : tailles capturées dans le journal vLLM, ou relance avec `--cudagraph-capture-sizes 1,2,3,4`. Si le pas b=2 tombe vers 5,5-6 ms, vLLM brut b=2 ≈ 0,70 J/jeton et **le crossover passe sous b=2 : 2a ne tient qu'à b=1**.
+
+Pour le tableau instr/octet de poste4 : le rapport de puissance nette est 1,25× à b=1 et ~2× dès b=2 (plafond touché, donc ≥ 2 hors plafond). 1,25× à b=1 ne réfute pas « instr/octet ≥ 3× » : à b=1 le pas contient les bulles du plancher de lancement (4,41 ms pour 48 couches) et la puissance moyenne les intègre ; seul J par noyau en boucle tranche (protocole §1). Prédiction ajoutée : **si instr/octet explique la puissance, le rapport par noyau sera ~2× et ne dépendra pas de b** ; s'il varie avec b, la cause est dans le pas (bulles, plafond), pas dans les noyaux.
+
+Ordre inchangé. Ce qui se publie de 2a aujourd'hui : « b=1 brut −3,8 %, payé par le repos » ; le crossover et b=2 attendent le contrôle 2.
