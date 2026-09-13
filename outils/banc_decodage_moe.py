@@ -5,6 +5,7 @@ GEMM groupée MMA forcée sur le chemin décodage.
     outils/carte.sh .venv/bin/python3 outils/banc_decodage_moe.py gemv 12
     outils/carte.sh .venv/bin/python3 outils/banc_decodage_moe.py mma 12      # bt 16, étages 4
     outils/carte.sh .venv/bin/python3 outils/banc_decodage_moe.py profil 12   # torch.profiler d'un pas
+    ncu ... outils/banc_decodage_moe.py ncu 12   # BANC_PAS_NCU pas dans une plage NVTX "mesure"
 
 Coder-30B, invites de 128 jetons, N jetons décodés, EOS neutralisé, 5 rép,
 médian ; compteurs de chemin (_forward_grouped / _gemm_mma). Le profil
@@ -70,6 +71,20 @@ def passe(rep, profiler=False):
     torch.cuda.synchronize()
     return time.perf_counter() - t0, pas
 passe(0); passe(1)
+if bras == "ncu":
+    # Sous ncu (--nvtx --nvtx-include "mesure/") : seuls les noyaux des
+    # BANC_PAS_NCU pas de decodage b=B, apres le prefill, sont profiles.
+    for b in range(B):
+        eng.add_request([(1000 + 2 * 7919 + b * 101 + i * 13) % 150000 + 10 for i in range(128)], SP)
+    while any(not s.prefilled for s in eng.running) or eng.waiting:
+        eng.step()
+    for _ in range(3): eng.step()
+    torch.cuda.synchronize()
+    torch.cuda.nvtx.range_push("mesure")
+    for _ in range(int(os.environ.get("BANC_PAS_NCU", "4"))): eng.step()
+    torch.cuda.synchronize()
+    torch.cuda.nvtx.range_pop()
+    print("NCU_OK", B, c); sys.exit(0)
 if bras in ("profil", "profilmma"):
     passe(2, profiler=True); sys.exit(0)
 res = sorted(passe(10 + r) for r in range(5))
