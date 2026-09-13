@@ -2187,7 +2187,18 @@ template <int N> __device__ __forceinline__ void cp_async_wait() {
 #endif
 }
 
-template <int BT, int S>
+__device__ __forceinline__ void cp_async8(void *smem, const void *gmem) {
+#ifdef ACVRAM_MMA_FP4
+    const unsigned s = (unsigned)__cvta_generic_to_shared(smem);
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 8;\n" :: "r"(s), "l"(gmem));
+#endif
+}
+
+// KS : profondeur d'un étage, 64 (une MMA par fragment, foulée 48 o) ou 128
+// (deux MMA par fragment et moitié de __syncthreads, foulée 80 o : 20g+tq
+// donne 32 bancs distincts). Les échelles d'un étage tiennent en KS/16 octets
+// par ligne : un mot de 4 par MMA.
+template <int BT, int S, int KS>
 __global__ void __launch_bounds__(GM2_FILS) nvfp4_gemm_grouped_mma2_kernel(
     const float *__restrict__ gscales,
     const unsigned char *__restrict__ xq, const unsigned char *__restrict__ xsf,
@@ -2197,17 +2208,19 @@ __global__ void __launch_bounds__(GM2_FILS) nvfp4_gemm_grouped_mma2_kernel(
     __nv_bfloat16 *__restrict__ y, int M, int K) {
 #ifdef ACVRAM_MMA_FP4
     constexpr int MF = BT / 16;
-    // shared dynamique : à bt=128 et 4 étages, 52 Ko dépassent les 48 Ko
-    // statiques ; le découpage est fait à la main, un tableau par étage
+    constexpr int LD = KS / 2 + 16;          // 48 ou 80 octets par ligne
+    constexpr int NM = KS / GM_KB;           // MMA par fragment et par étage
+    constexpr int SB = KS / 16;              // octets d'échelles par ligne et par étage
+    constexpr int CH = KS / 32;              // chargements de 16 o par ligne et par étage
     extern __shared__ __align__(16) unsigned char gm2_smem[];
-    typedef unsigned char (*TA)[BT * GM2_LD];
-    typedef unsigned char (*TB)[GM2_BM * GM2_LD];
-    typedef unsigned char (*TSA)[BT * 4];
-    typedef unsigned char (*TSB)[GM2_BM * 4];
+    typedef unsigned char (*TA)[BT * LD];
+    typedef unsigned char (*TB)[GM2_BM * LD];
+    typedef unsigned char (*TSA)[BT * SB];
+    typedef unsigned char (*TSB)[GM2_BM * SB];
     TA sA = reinterpret_cast<TA>(gm2_smem);
-    TB sB = reinterpret_cast<TB>(gm2_smem + S * BT * GM2_LD);
-    TSA sSA = reinterpret_cast<TSA>(gm2_smem + S * (BT + GM2_BM) * GM2_LD);
-    TSB sSB = reinterpret_cast<TSB>(gm2_smem + S * (BT + GM2_BM) * GM2_LD + S * BT * 4);
+    TB sB = reinterpret_cast<TB>(gm2_smem + S * BT * LD);
+    TSA sSA = reinterpret_cast<TSA>(gm2_smem + S * (BT + GM2_BM) * LD);
+    TSB sSB = reinterpret_cast<TSB>(gm2_smem + S * (BT + GM2_BM) * LD + S * BT * SB);
 
     const int tile = blockIdx.y;
     const int e = tile_e[tile], t0 = tile_t0[tile], nt = tile_n[tile];
@@ -2218,24 +2231,27 @@ __global__ void __launch_bounds__(GM2_FILS) nvfp4_gemm_grouped_mma2_kernel(
     const int g = lane >> 2, tq = lane & 3;
     const long half_k = (long)K >> 1;
     const int nblk = K >> 4;
-    const int KT = K / GM_KB;
+    const int KT = K / KS;
 
     auto emettre = [&](int st, int k0) {
         const long kb = k0 >> 1, ks = k0 >> 4;
-        for (int c = tid; c < 2 * BT; c += GM2_FILS) {
-            const int r = c >> 1, h = c & 1;
+        for (int c = tid; c < CH * BT; c += GM2_FILS) {
+            const int r = c / CH, h = c % CH;
             const long src = (long)(t0 + min(r, nt - 1)) * half_k + kb + 16 * h;
-            cp_async16(&sA[st][r * GM2_LD + 16 * h], xq + src);
+            cp_async16(&sA[st][r * LD + 16 * h], xq + src);
         }
-        for (int c = tid; c < 2 * GM2_BM; c += GM2_FILS) {
-            const int r = c >> 1, h = c & 1;
+        for (int c = tid; c < CH * GM2_BM; c += GM2_FILS) {
+            const int r = c / CH, h = c % CH;
             const long src = (long)min(row0 + r, M - 1) * half_k + kb + 16 * h;
-            cp_async16(&sB[st][r * GM2_LD + 16 * h], qw_e + src);
+            cp_async16(&sB[st][r * LD + 16 * h], qw_e + src);
         }
-        if (tid < BT) cp_async4(&sSA[st][tid * 4], xsf + (long)(t0 + min(tid, nt - 1)) * nblk + ks);
-        else if (tid < BT + GM2_BM) {
+        if (tid < BT) {
+            const unsigned char *src = xsf + (long)(t0 + min(tid, nt - 1)) * nblk + ks;
+            if constexpr (SB == 4) cp_async4(&sSA[st][tid * SB], src); else cp_async8(&sSA[st][tid * SB], src);
+        } else if (tid < BT + GM2_BM) {
             const int r = tid - BT;
-            cp_async4(&sSB[st][r * 4], bs_e + (long)min(row0 + r, M - 1) * nblk + ks);
+            const unsigned char *src = bs_e + (long)min(row0 + r, M - 1) * nblk + ks;
+            if constexpr (SB == 4) cp_async4(&sSB[st][r * SB], src); else cp_async8(&sSB[st][r * SB], src);
         }
     };
 
@@ -2249,7 +2265,7 @@ __global__ void __launch_bounds__(GM2_FILS) nvfp4_gemm_grouped_mma2_kernel(
 
     #pragma unroll
     for (int s = 0; s < S - 1; ++s) {
-        if (s < KT) emettre(s, s * GM_KB);
+        if (s < KT) emettre(s, s * KS);
         cp_async_commit();
     }
     for (int kt = 0; kt < KT; ++kt) {
@@ -2257,43 +2273,47 @@ __global__ void __launch_bounds__(GM2_FILS) nvfp4_gemm_grouped_mma2_kernel(
         __syncthreads();
         {
             const int kn = kt + S - 1;
-            if (kn < KT) emettre(kn % S, kn * GM_KB);
+            if (kn < KT) emettre(kn % S, kn * KS);
             cp_async_commit();
         }
         const int st = kt % S;
-        unsigned a[MF][4], sfa[MF], b[2][2], sfb[2];
         #pragma unroll
-        for (int mf = 0; mf < MF; ++mf) {
+        for (int m = 0; m < NM; ++m) {
+            const int ko = 32 * m;                     // décalage d'octets de la MMA m dans la ligne
+            unsigned a[MF][4], sfa[MF], b[2][2], sfb[2];
             #pragma unroll
-            for (int h = 0; h < 2; ++h) {
-                const int j = mf * 16 + g + 8 * h;
-                const unsigned char *p = &sA[st][j * GM2_LD + 4 * tq];
+            for (int mf = 0; mf < MF; ++mf) {
+                #pragma unroll
+                for (int h = 0; h < 2; ++h) {
+                    const int j = mf * 16 + g + 8 * h;
+                    const unsigned char *p = &sA[st][j * LD + ko + 4 * tq];
+                    const unsigned lo = *reinterpret_cast<const unsigned *>(p);
+                    const unsigned hi = *reinterpret_cast<const unsigned *>(p + 16);
+                    a[mf][h] = (j < nt) ? lo : 0u;
+                    a[mf][h + 2] = (j < nt) ? hi : 0u;
+                }
+                const int js = mf * 16 + (lane >> 2) + 8 * (lane & 1);
+                const unsigned sv = *reinterpret_cast<const unsigned *>(&sSA[st][js * SB + 4 * m]);
+                sfa[mf] = (js < nt) ? sv : 0u;
+            }
+            #pragma unroll
+            for (int nf = 0; nf < 2; ++nf) {
+                const int r = warp * 16 + nf * 8 + g;
+                const bool ok = row0 + r < M;
+                const unsigned char *p = &sB[st][r * LD + ko + 4 * tq];
                 const unsigned lo = *reinterpret_cast<const unsigned *>(p);
                 const unsigned hi = *reinterpret_cast<const unsigned *>(p + 16);
-                a[mf][h] = (j < nt) ? lo : 0u;
-                a[mf][h + 2] = (j < nt) ? hi : 0u;
+                b[nf][0] = ok ? lo : 0u;
+                b[nf][1] = ok ? hi : 0u;
+                const unsigned sv = *reinterpret_cast<const unsigned *>(&sSB[st][r * SB + 4 * m]);
+                sfb[nf] = ok ? sv : 0u;
             }
-            const int js = mf * 16 + (lane >> 2) + 8 * (lane & 1);
-            const unsigned sv = *reinterpret_cast<const unsigned *>(&sSA[st][js * 4]);
-            sfa[mf] = (js < nt) ? sv : 0u;
-        }
-        #pragma unroll
-        for (int nf = 0; nf < 2; ++nf) {
-            const int r = warp * 16 + nf * 8 + g;
-            const bool ok = row0 + r < M;
-            const unsigned char *p = &sB[st][r * GM2_LD + 4 * tq];
-            const unsigned lo = *reinterpret_cast<const unsigned *>(p);
-            const unsigned hi = *reinterpret_cast<const unsigned *>(p + 16);
-            b[nf][0] = ok ? lo : 0u;
-            b[nf][1] = ok ? hi : 0u;
-            const unsigned sv = *reinterpret_cast<const unsigned *>(&sSB[st][r * 4]);
-            sfb[nf] = ok ? sv : 0u;
-        }
-        #pragma unroll
-        for (int mf = 0; mf < MF; ++mf)
             #pragma unroll
-            for (int nf = 0; nf < 2; ++nf)
-                mma_mxf4nvf4(acc[mf][nf], a[mf], b[nf], sfa[mf], sfb[nf]);
+            for (int mf = 0; mf < MF; ++mf)
+                #pragma unroll
+                for (int nf = 0; nf < 2; ++nf)
+                    mma_mxf4nvf4(acc[mf][nf], a[mf], b[nf], sfa[mf], sfb[nf]);
+        }
     }
     cp_async_wait<0>();
 
@@ -2372,10 +2392,12 @@ torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table
                                      torch::Tensor gscales, torch::Tensor xq,
                                      torch::Tensor xsf, torch::Tensor tile_e,
                                      torch::Tensor tile_t0, torch::Tensor tile_n,
-                                     int64_t M, int64_t K, int64_t bt, int64_t etages) {
+                                     int64_t M, int64_t K, int64_t bt, int64_t etages, int64_t ks) {
     CHECK_CUDA(xq); ACVRAM_DEVICE_GUARD(xq);
     TORCH_CHECK(etages == 0 || etages == 2 || etages == 3 || etages == 4,
                 "GEMM groupee MMA : etages dans {0 (direct), 2, 3, 4}");
+    TORCH_CHECK(ks == 64 || ks == 128, "GEMM groupee MMA : ks dans {64, 128}");
+    TORCH_CHECK(K % ks == 0, "GEMM groupee MMA : K multiple de ks");
     CHECK_CONTIG(xq); CHECK_CONTIG(xsf); CHECK_CONTIG(gscales);
     TORCH_CHECK(K % GM_KB == 0, "GEMM groupee MMA : K multiple de 64");
     TORCH_CHECK(table_qw.scalar_type() == torch::kInt64 && table_qw.is_cuda() && table_qw.is_contiguous(),
@@ -2403,14 +2425,16 @@ torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table
         #undef GM_L
     } else {
         dim3 grid((M + GM2_BM - 1) / GM2_BM, T);
-        const size_t shm = (size_t)etages * ((bt + GM2_BM) * GM2_LD + (bt + GM2_BM) * 4);
-        #define GM_L2(BT, S) do { \
-            if (shm > 48 * 1024) cudaFuncSetAttribute(nvfp4_gemm_grouped_mma2_kernel<BT, S>, \
+        const size_t shm = (size_t)etages * ((bt + GM2_BM) * (ks / 2 + 16) + (bt + GM2_BM) * (ks / 16));
+        #define GM_L2(BT, S, KS) do { \
+            if (shm > 48 * 1024) cudaFuncSetAttribute(nvfp4_gemm_grouped_mma2_kernel<BT, S, KS>, \
                                                       cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm); \
-            nvfp4_gemm_grouped_mma2_kernel<BT, S><<<grid, GM2_FILS, shm, stream>>>(GM_ARGS); } while (0)
-        #define GM_LS(S) do { if (bt == 16) GM_L2(16, S); else if (bt == 32) GM_L2(32, S); \
-                              else if (bt == 64) GM_L2(64, S); else GM_L2(128, S); } while (0)
-        if (etages == 2) GM_LS(2); else if (etages == 3) GM_LS(3); else GM_LS(4);
+            nvfp4_gemm_grouped_mma2_kernel<BT, S, KS><<<grid, GM2_FILS, shm, stream>>>(GM_ARGS); } while (0)
+        #define GM_LS(S, KS) do { if (bt == 16) GM_L2(16, S, KS); else if (bt == 32) GM_L2(32, S, KS); \
+                                  else if (bt == 64) GM_L2(64, S, KS); else GM_L2(128, S, KS); } while (0)
+        #define GM_LK(KS) do { if (etages == 2) GM_LS(2, KS); else if (etages == 3) GM_LS(3, KS); else GM_LS(4, KS); } while (0)
+        if (ks == 64) GM_LK(64); else GM_LK(128);
+        #undef GM_LK
         #undef GM_LS
         #undef GM_L2
     }
@@ -3818,9 +3842,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("nvfp4_gemm_grouped_mma", &nvfp4_gemm_grouped_mma,
           py::arg("table_qw"), py::arg("table_bscale"), py::arg("gscales"), py::arg("xq"),
           py::arg("xsf"), py::arg("tile_e"), py::arg("tile_t0"), py::arg("tile_n"),
-          py::arg("M"), py::arg("K"), py::arg("bt"), py::arg("etages") = 0,
+          py::arg("M"), py::arg("K"), py::arg("bt"), py::arg("etages") = 0, py::arg("ks") = 64,
           "MoE NVFP4 : GEMM groupee W4A4 sur la MMA FP4 native de sm_120 (mxf4nvf4) ; "
-          "etages 0 = chargements directs, 2-4 = pipeline cp.async en shared");
+          "etages 0 = chargements directs, 2-4 = pipeline cp.async en shared ; ks 64 ou 128 par etage");
     m.def("nvfp4_gemm_grouped_mma_disponible", &nvfp4_gemm_grouped_mma_disponible,
           "vrai si la carte courante est sm_120 et le noyau MMA FP4 compile");
     m.def("nvfp4_quant_act", &nvfp4_quant_act,

@@ -28,6 +28,8 @@ elif bras == "d":
 elif bras.startswith("m"):
     os.environ["ACVRAM_MOE_MMA"] = "1"
     reste = bras[1:]
+    if "k" in reste:
+        reste, ks = reste.split("k"); os.environ["ACVRAM_MOE_MMA_KS"] = ks
     if "e" in reste:
         bt, et = reste.split("e"); os.environ["ACVRAM_MOE_MMA_ETAGES"] = et
     else:

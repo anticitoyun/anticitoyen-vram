@@ -833,7 +833,7 @@ class MoEBlock(nn.Module):
         tq, tb = self._tables_adresses(pile)
         y = kernels.get_extension().nvfp4_gemm_grouped_mma(
             tq, tb, gs, xq, xsf, tiles[0], tiles[1], tiles[2],
-            qw.shape[1], k, _MOE_MMA_BT, _MOE_MMA_ETAGES)
+            qw.shape[1], k, _MOE_MMA_BT, _MOE_MMA_ETAGES, _MOE_MMA_KS)
         return y if brut else y[:, :m]
 
     def _forward_prefill_grouped(self, x, topw, topi) -> Optional[torch.Tensor]:
@@ -1160,6 +1160,10 @@ _MOE_MMA_BT = int(os.environ.get("ACVRAM_MOE_MMA_BT", "64"))
 # Mesuré le 14/09/2026, Coder-30B, prefill chaud L=2048 : 0 → 10 411 j/s,
 # 2 → 16 655, 3 → 16 851, 4 → 16 938 (revue/mma-fp4-native-sm120.md).
 _MOE_MMA_ETAGES = int(os.environ.get("ACVRAM_MOE_MMA_ETAGES", "4"))
+# Profondeur d'un étage du pipeline (64 ou 128) ; 128 = deux MMA par
+# synchronisation. Mesuré le 14/09/2026 (bead 0si), Coder-30B prefill chaud :
+# L=2048 16 911 → 19 148 j/s, L=512 8 761 → 9 853 (revue/mma-fp4-native-sm120.md).
+_MOE_MMA_KS = int(os.environ.get("ACVRAM_MOE_MMA_KS", "128"))
 
 # Décodage MLA sous graphes : 0 = boucle par créneau ; 1 = le noyau
 # d'attention batché seul (bead 6wa, bit-identique, −28,5 % sur le pas
