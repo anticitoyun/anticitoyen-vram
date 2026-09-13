@@ -99,3 +99,77 @@ def test_le_snr_et_le_kld_peuvent_classer_deux_candidats_en_sens_oppose():
         for j in range(i + 1, len(candidats))
     )
     assert inversion, "SNR et KLD ordonnent toujours pareil sur cet echantillon"
+
+
+def test_ordre_sac_kld_exige_mesurer_kld(tiny_checkpoint, target_rig,
+                                        tmp_path_factory, monkeypatch):
+    """`ACVRAM_ORDRE_SAC=kld` sans `mesurer_kld` degenererait en silence sur
+    une cle jamais calculee — meme garde que les autres modes du sac a dos
+    (voir la garde `liste` juste au-dessus dans convert.py)."""
+    from acvram.engine.config import load_model_spec
+    from acvram.memory.tiering import PlannerOptions, auto_plan
+    from acvram.quant.convert import ConversionOptions, convert_checkpoint
+
+    spec = load_model_spec(tiny_checkpoint, "tiny")
+    plan, _ = auto_plan(spec, target_rig,
+                        PlannerOptions(max_model_len=512, max_concurrent_seqs=2))
+    out = str(tmp_path_factory.mktemp("kld_sans_mesure"))
+    monkeypatch.setenv("ACVRAM_ORDRE_SAC", "kld")
+    try:
+        with pytest.raises(ValueError, match="exige.*mesurer_kld"):
+            convert_checkpoint(tiny_checkpoint, plan,
+                               ConversionOptions(out_dir=out, bits_budget_gib=1.0),
+                               spec=spec)
+    finally:
+        monkeypatch.delenv("ACVRAM_ORDRE_SAC", raising=False)
+
+
+def test_ordre_sac_kld_publie_son_nom_et_change_les_promotions(
+        tiny_checkpoint, target_rig, tmp_path_factory, monkeypatch):
+    """Le sac a dos tourne avec `mesurer_kld=True` et `ACVRAM_ORDRE_SAC=kld`,
+    le manifeste avoue le mode utilise, et — a budget serre, comme pour
+    `genre`/`cout_decroissant` (test_ordre_genre_et_cout) — le jeu de
+    promotions differe de celui du SNR par defaut. Si les deux modes
+    promouvaient toujours le meme ensemble, le tri par KLD ne servirait a
+    rien de plus qu'une reecriture du SNR."""
+    import json
+    import pathlib
+
+    from acvram.engine.config import load_model_spec
+    from acvram.memory.tiering import PlannerOptions, auto_plan
+    from acvram.quant.convert import ConversionOptions, convert_checkpoint
+
+    spec = load_model_spec(tiny_checkpoint, "tiny")
+    plan, _ = auto_plan(spec, target_rig,
+                        PlannerOptions(max_model_len=512, max_concurrent_seqs=2))
+
+    def convertir(mode, budget, mesurer_kld):
+        out = str(tmp_path_factory.mktemp(f"kld_{mode}"))
+        monkeypatch.setenv("ACVRAM_ORDRE_SAC", mode)
+        try:
+            r = convert_checkpoint(
+                tiny_checkpoint, plan,
+                ConversionOptions(out_dir=out, bits_budget_gib=budget,
+                                  mesurer_kld=mesurer_kld),
+                spec=spec)
+        finally:
+            monkeypatch.delenv("ACVRAM_ORDRE_SAC", raising=False)
+        m = json.loads((pathlib.Path(out) / "acvram_manifest.json").read_text())
+        return m, sorted(p["name"] for p in r.promotions)
+
+    # meme fenetre de budget que test_ordre_genre_et_cout : assez serree pour
+    # qu'un ordre different change reellement l'ensemble des promus.
+    m_ref, _ = convertir("snr", 1.0, mesurer_kld=True)
+    plancher = m_ref["budget"]["plancher_gib"]
+    plafond = m_ref["budget"]["plafond_gib"]
+    budget_serre = plancher + (plafond - plancher) * 0.4
+
+    m_snr, promus_snr = convertir("snr", budget_serre, mesurer_kld=True)
+    m_kld, promus_kld = convertir("kld", budget_serre, mesurer_kld=True)
+
+    assert m_kld["budget"]["ordre_glouton"] == "kld_couche_par_octet_decroissant"
+    assert m_snr["budget"]["ordre_glouton"] == "snr_par_octet_decroissant"
+    assert promus_kld, "le mode kld ne promeut rien"
+    assert promus_snr != promus_kld, (
+        "SNR et KLD promeuvent exactement le meme ensemble a budget serre : "
+        f"{promus_snr}")
