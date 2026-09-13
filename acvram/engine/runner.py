@@ -283,6 +283,14 @@ class Engine:
             gr = GraphRunner(self.model, max_model_len)
             self.graphs = gr if gr.enabled else None
 
+        # REPIN (bead anticitoyen-vram-pds, point 3 — poste7 §4). `_pin` :
+        # {index_couche: set(experts résidents)}, VIDE tant qu'aucune couche
+        # ne route par expert (point (2), pas encore câblé) — REPIN est alors
+        # un no-op de fait, pas un no-op déguisé : `_repin_pass` ne trouve
+        # rien à échanger et ne journalise rien, ce que les tests vérifient.
+        self._pin: dict = {}
+        self._dernier_repin = 0
+
     # -- admission -------------------------------------------------------
     def _eos_ids(self) -> set[int]:
         ids: set[int] = set()
@@ -705,7 +713,52 @@ class Engine:
         self.stats.running = len(self.running)
         self.stats.waiting = len(self.waiting)
         self.stats.kv_blocks_free = self.allocator.num_free
+        self._repin_pass()
         return outputs
+
+    def _repin_pass(self) -> None:
+        """REPIN à chaud, hors pas (bead anticitoyen-vram-pds, point 3).
+
+        Appelé à la FIN de `step()` — jamais pendant un pas, jamais pendant
+        une capture (même règle que `MoEBlock._compter_routage`) : la
+        décision peut être lente (elle parcourt toutes les couches MoE), la
+        capacité peut changer (`_pin`), et un graphe capturé ne doit jamais
+        voir cette mutation se produire pendant qu'il rejoue.
+
+        Cadence : `ACVRAM_REPIN` jetons décodés (défaut 64, `0` désactive).
+        Ne fait rien tant qu'aucune couche n'a de `_pin` non vide (point (2)
+        pas encore câblé) — voir `Engine.__init__`.
+        """
+        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+            return
+        try:
+            n = int(os.environ.get("ACVRAM_REPIN", "64") or "64")
+        except ValueError:
+            n = 64
+        from ..memory.repin import cadence_atteinte, choisir_echanges
+        if not cadence_atteinte(self.stats.decode_tokens - self._dernier_repin, n):
+            return
+        self._dernier_repin = self.stats.decode_tokens
+        if not self._pin:
+            return
+        from .model import MoEBlock
+        etat = {}
+        for m in self.model.modules():
+            if not isinstance(m, MoEBlock):
+                continue
+            pin = self._pin.get(m.index_couche)
+            if not pin or m._usage_routage is None:
+                continue
+            heat = {e: int(c) for e, c in
+                    enumerate(m._usage_routage.detach().to("cpu").tolist())}
+            etat[m.index_couche] = (pin, heat)
+        for echange in choisir_echanges(etat, max_echanges=4):
+            pin = self._pin[echange.couche]
+            pin.discard(echange.sortant)
+            pin.add(echange.entrant)
+            print(f"[REPIN] couche {echange.couche} : "
+                  f"expert {echange.sortant} sort, {echange.entrant} entre "
+                  f"(gain {echange.gain})", flush=True)
 
     def _plain_decode(self, decodable: list[Sequence]) -> list[GenerationOutput]:
         trace = os.environ.get("ACVRAM_TRACE_STEPS")
