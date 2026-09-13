@@ -186,3 +186,19 @@ Memory Usage isn't always accurate »* (ecart entre annonce et pic, mesure a
 ~1,8 Gio chez nous, dont 0,70 de contexte CUDA) et *« Max Concurrent Predictions
 a 1 »* qui libere de la VRAM reservee sans usage (meme famille que le budget KV
 dimensionne pour 4096 jetons quel que soit `max_model_len`).
+
+## OmniRoute — passerelle API locale (13/09)
+
+`/mnt/AI_GENERATOR/OmniRoute`, données `~/.omniroute`, API Anthropic et OpenAI
+sur `http://localhost:20128`. Clé : `~/.config/acvram/omniroute.env`
+(`OMNIROUTE_URL`, `OMNIROUTE_KEY`) — jamais dans un fichier versionné.
+Fournisseurs gratuits actifs : opencode (`oc/big-pickle`, `oc/mimo-v2.5-free`,
+`oc/nemotron-3-ultra-free`), aihorde (images). Compression `default-caveman` =
+RTK standard + Caveman full. Usage : second avis externe par script (curl), en
+complément de duck.ai. Les sessions Claude Code NE passent PAS par OmniRoute
+(`claude-opus-5`/`sonnet-5` y rendent 402, opencode-zen payant).
+Lancement : unité utilisateur transitoire `omniroute`
+(`systemd-run --user --unit=omniroute … node --max-old-space-size=16384
+scripts/dev/run-next.mjs dev`) — le tas de 8 Go par défaut sature
+(503 `resource_pressure`, puis OOM) ; hors systemd le superviseur de session
+l'arrête (SIGTERM).
