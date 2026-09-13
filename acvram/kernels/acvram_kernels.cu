@@ -2925,6 +2925,109 @@ torch::Tensor mla_decode(torch::Tensor q_eff, torch::Tensor cache,
 }
 
 
+// --- version batchée : les B créneaux du pas en un lancement (bead 6wa,
+// spec acvram-memoire/revue/spec-batching-mla-6wa-13-09.md). Les caches ne
+// sont pas contigus entre créneaux (un tenseur par créneau, adresses
+// stables sur la vie du serveur) : ils arrivent par une table d'adresses
+// [B] int64, comme les tables de blocs de paged_attn. Même arithmétique que
+// mla_scores_kernel / mla_reduce_kernel : sortie bit-identique par créneau.
+__global__ void mla_scores_batch_kernel(const float *__restrict__ q,          // [B, H, W]
+                                        const int64_t *__restrict__ cache_ptrs, // [B]
+                                        const long *__restrict__ lens,        // [B]
+                                        float *__restrict__ scores,           // [B, H, L]
+                                        int H, int L, int W, float scale) {
+    const int b = blockIdx.x, h = blockIdx.y;
+    const int r = blockIdx.z * blockDim.x + threadIdx.x;
+    if (r >= L) return;
+    const __nv_bfloat16 *cache = reinterpret_cast<const __nv_bfloat16 *>(cache_ptrs[b]);
+    float s = -INFINITY;
+    if (r <= (int)lens[b]) {
+        const float *qh = q + ((size_t)b * H + h) * W;
+        const __nv_bfloat16 *kr = cache + (size_t)r * W;
+        float acc = 0.f;
+        for (int d = 0; d < W; d += 2) {
+            const float2 kk = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(kr + d));
+            acc += qh[d] * kk.x + qh[d + 1] * kk.y;
+        }
+        s = acc * scale;
+    }
+    scores[((size_t)b * H + h) * L + r] = s;
+}
+
+__global__ void mla_reduce_batch_kernel(const float *__restrict__ scores,     // [B, H, L]
+                                        const int64_t *__restrict__ cache_ptrs,
+                                        float *__restrict__ o,                // [B, H, R]
+                                        int H, int L, int W, int R) {
+    const int b = blockIdx.x, h = blockIdx.y, tid = threadIdx.x, T = blockDim.x;
+    extern __shared__ float sh[];
+    __shared__ float red[32];
+    const __nv_bfloat16 *cache = reinterpret_cast<const __nv_bfloat16 *>(cache_ptrs[b]);
+    const float *sc = scores + ((size_t)b * H + h) * L;
+    float m = -INFINITY;
+    for (int r = tid; r < L; r += T) m = fmaxf(m, sc[r]);
+    for (int off = 16; off > 0; off >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, off));
+    if ((tid & 31) == 0) red[tid >> 5] = m;
+    __syncthreads();
+    m = -INFINITY;
+    for (int w = 0; w < T / 32; ++w) m = fmaxf(m, red[w]);
+    __syncthreads();
+    float l = 0.f;
+    for (int r = tid; r < L; r += T) { const float p = __expf(sc[r] - m); sh[r] = p; l += p; }
+    for (int off = 16; off > 0; off >>= 1) l += __shfl_xor_sync(0xffffffffu, l, off);
+    if ((tid & 31) == 0) red[tid >> 5] = l;
+    __syncthreads();
+    l = 0.f;
+    for (int w = 0; w < T / 32; ++w) l += red[w];
+    const float inv = 1.f / l;
+    __syncthreads();
+    for (int d = tid; d < R; d += T) {
+        float acc = 0.f;
+        for (int r = 0; r < L; ++r) {
+            const float p = sh[r];
+            if (p != 0.f) acc += p * __bfloat162float(cache[(size_t)r * W + d]);
+        }
+        o[((size_t)b * H + h) * R + d] = acc * inv;
+    }
+}
+
+torch::Tensor mla_decode_batch(torch::Tensor q_eff, torch::Tensor cache_ptrs,
+                               torch::Tensor lens, torch::Tensor scores,
+                               int64_t L, int64_t rank, double scale) {
+    CHECK_CUDA(q_eff); ACVRAM_DEVICE_GUARD(q_eff);
+    CHECK_CONTIG(q_eff); CHECK_CONTIG(cache_ptrs); CHECK_CONTIG(lens); CHECK_CONTIG(scores);
+    TORCH_CHECK(q_eff.dim() == 3 && q_eff.scalar_type() == torch::kFloat, "MLA batch : q_eff [B, H, W] fp32");
+    const int B = q_eff.size(0), H = q_eff.size(1), W = q_eff.size(2);
+    TORCH_CHECK(W % 2 == 0, "MLA : largeur paire attendue");
+    TORCH_CHECK(cache_ptrs.scalar_type() == torch::kInt64 && cache_ptrs.is_cuda() && cache_ptrs.numel() == B,
+                "MLA batch : cache_ptrs [B] int64 sur la carte");
+    TORCH_CHECK(lens.scalar_type() == torch::kLong && lens.numel() == B, "MLA batch : lens [B] int64");
+    // comme mla_decode, le tampon de scores est lu à plat [B*H*L] : seule sa
+    // taille compte, pas sa forme
+    TORCH_CHECK(scores.scalar_type() == torch::kFloat && scores.numel() >= (long)B * H * L,
+                "MLA batch : scores fp32 d'au moins B*H*L elements");
+    auto o = torch::empty({B, H, (long)rank}, q_eff.options());
+    auto stream = at::cuda::getCurrentCUDAStream();
+    dim3 g1(B, H, ((int)L + 127) / 128);
+    mla_scores_batch_kernel<<<g1, 128, 0, stream>>>(
+        q_eff.data_ptr<float>(), cache_ptrs.data_ptr<int64_t>(), lens.data_ptr<long>(),
+        scores.data_ptr<float>(), H, (int)L, W, (float)scale);
+    const size_t shm = (size_t)L * sizeof(float);
+    if (shm > 48 * 1024) {
+        static size_t autorise = 0;
+        if (shm > autorise) {
+            cudaFuncSetAttribute(mla_reduce_batch_kernel,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm);
+            autorise = shm;
+        }
+    }
+    dim3 g2(B, H);
+    mla_reduce_batch_kernel<<<g2, 256, shm, stream>>>(
+        scores.data_ptr<float>(), cache_ptrs.data_ptr<int64_t>(),
+        o.data_ptr<float>(), H, (int)L, W, (int)rank);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return o;
+}
+
 // RMSNorm fusionnée (bf16 -> bf16, variance en fp32) : un bloc par ligne.
 // Même arithmétique que la version torch : x normalisé arrondi en bf16, puis
 // produit bf16 par le poids — bit-identique.
@@ -3393,6 +3496,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("mult") = 1.0);
     m.def("kda_decode", &kda_decode, "KDA : pas de decodage fusionne (une sequence)");
     m.def("mla_decode", &mla_decode, "MLA absorbee : scores + softmax + lecture latente");
+    m.def("mla_decode_batch", &mla_decode_batch,
+          "MLA : decodage de B creneaux en un lancement, caches par table d'adresses [B] int64");
     m.def("paged_attention", &paged_attention,
           "attention de decodage fusionnee sur cache KV int8 pagine");
 }
