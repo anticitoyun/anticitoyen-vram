@@ -215,3 +215,35 @@ poids lus sont les mêmes qu'en GEMV, mais le GEMV fusionné gate·up tient
 GEMV reste le chemin du décodage ; la MMA n'y a d'intérêt qu'une fois son
 étage mémoire refait — et même alors le gain attendu est celui de la
 lecture, pas du calcul.
+
+## Glue du prefill MoE en deux noyaux (13/09, nuit) — `moe_act`, `moe_reduce_trie`
+
+Prédiction écrite avant : MMA L=2048 +15-20 %, déquant L=2048 +14 %,
+GEMM directe L=512 +10 % ; issue gênante < +5 %.
+
+| chemin | L | glue torch | **glue noyaux** | gain |
+|--------|--:|----------:|----------:|----:|
+| MMA bt64 | 2048 | 9 000 ± 65 | **10 535 ± 94** | +17 % |
+| déquant + `grouped_mm` | 2048 | 7 559 ± 33 | **8 615 ± 40** | +14 % |
+| GEMM directe (wmma) | 512 | 3 879 ± 16 | **4 003 ± 10** | +3 % |
+
+(j/s, moteur chaud, cache de préfixe coupé, 7 rép ; compteurs inchangés.)
+
+Deux des trois prédictions tenues ; à L=512 la glue ne pèse que ~3 % du
+pas (le GEMM y domine), prédiction +10 % trop haute. Le pas MMA à L=2048
+passe de 227,6 à 194,4 ms : la glue restante (index/gather de `xs`,
+construction des tuiles ≈ 10 lancements par couche) et la quantification
+sont maintenant sous 10 %.
+
+Équivalence (`tests/test_moe_glue.py`, 87 passed avec les tests GEMM) :
+`moe_act` SiLU identique à ≥ 99 % en bf16 ; GELU-tanh a demandé de
+reproduire la suite d'opérations fp32 de `F.gelu` avec un `tanh` en
+double — `tanhf` sous `--use_fast_math` est l'approximation MUFU et 0,2 %
+des sorties différaient de 1-2 ulp ; en double avec la même formule
+qu'en fp32, 93,7 % identiques seulement (l'arrondi des intermédiaires) ;
+formule fp32 de torch + `tanh` double : ≥ 99 %. `moe_reduce_trie`
+≥ 98 % identique (ordre de somme de torch).
+
+État du pas L=2048 (MMA) : 194 ms dont noyau MMA ≈ 114 — il pèse
+maintenant ≈ 60 %, et il est à 25 % de sa borne. C'est la retouche (a),
+`cp.async`, si la qualité W4A4 passe.

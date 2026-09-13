@@ -2225,8 +2225,13 @@ __global__ void moe_act_kernel(const __nv_bfloat16 *__restrict__ g,
         const float y = __bfloat162float(u[r * Mp + c]);
         float a;
         if (act == 1) {
-            const float k0 = 0.7978845608028654f, k1 = 0.044715f;
-            a = 0.5f * x * (1.f + tanhf(k0 * (x + k1 * x * x * x)));
+            // tanh en double : sous --use_fast_math, tanhf est l'approximation
+            // MUFU et 0,2 % des sorties bf16 différaient de F.gelu d'un ulp ou
+            // deux. Le noyau est borné par la mémoire, le double ne coûte rien.
+            // même suite d'opérations fp32 que F.gelu(approximate="tanh")
+            const float kb = 0.7978845608028654f, kk = 0.044715f;
+            const float inner = kb * (x + kk * x * x * x);
+            a = 0.5f * x * (1.0f + (float)tanh((double)inner));
         } else {
             a = x / (1.f + expf(-x));
         }
