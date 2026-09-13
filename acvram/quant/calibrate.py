@@ -302,6 +302,92 @@ def search_channel_scales(
     ), best_err
 
 
+def search_channel_scales_commun(
+    weights: list[torch.Tensor],
+    stats: Optional[ActStats],
+    fmt: str,
+    group_size: Optional[int] = None,
+    n_grid: int = 20,
+    calib_x: Optional[torch.Tensor] = None,
+    journal: Optional[dict] = None,
+) -> tuple[ChannelScaler, list[float]]:
+    """Comme `search_channel_scales`, mais un SEUL alpha pour plusieurs
+    tenseurs qui lisent la MEME entree (gate_proj/up_proj d'un bloc MLP,
+    par exemple).
+
+    Item A7 de l'audit poste7 (14/09) : `search_channel_scales` appelee
+    separement sur `gate` et `up` choisit deux exposants differents la
+    plupart du temps (chacun minimise SA PROPRE erreur), et
+    `_scaler_commun` (layers.py) refuse alors de porter le scaler sur la
+    pile empilee — 5 empilements sur 64 mesures sur Llama-2-7b-int8 le
+    10/09 (`revue/alpha-partage-recuperer-59-fusions.md`). Chercher un
+    alpha qui minimise la SOMME des erreurs relatives des deux tenseurs
+    rend les deux scalers identiques PAR CONSTRUCTION, sans toucher au
+    moteur : `_scaler_commun`/`_try_build_stacks` acceptent deja un
+    scaler partage, ils ne le reçoivent simplement jamais.
+
+    Rend l'echelle commune retenue et la liste des erreurs relatives
+    INDIVIDUELLES obtenues avec CET alpha (une par tenseur, meme ordre
+    que `weights`) — a comparer au meilleur alpha propre de chaque
+    tenseur (`search_channel_scales` appele separement) pour connaitre
+    le prix de la fusion avant de la choisir (deja mesure le 10/09 :
+    sous 2 % a budget 4,50 Gio pour 45/64 groupes).
+    """
+    if len(weights) < 2:
+        raise ValueError("recherche commune : au moins deux tenseurs")
+    ws = [w.detach().to(torch.float32) for w in weights]
+    k = ws[0].shape[1]
+    if any(w.shape[1] != k for w in ws):
+        raise ValueError("recherche commune : les tenseurs doivent partager "
+                         "le meme nombre de canaux d'entree")
+    device = ws[0].device
+
+    if stats is None:
+        act = torch.ones(k, device=device)
+    else:
+        act = stats.mean_abs.to(device).to(torch.float32).clamp(min=1e-6)
+
+    if calib_x is not None:
+        x = calib_x.reshape(-1, k).to(torch.float32).to(device)
+    else:
+        x = torch.diag(act)
+
+    y_refs = [x @ w.t() for w in ws]
+    ref_norms = [y.norm().clamp(min=1e-12) for y in y_refs]
+
+    best_somme = float("inf")
+    best_scale: Optional[torch.Tensor] = None
+    best_erreurs: list[float] = []
+    grille_somme: list[float] = []
+
+    for i in range(n_grid + 1):
+        alpha = i / n_grid
+        s = act.pow(alpha)
+        s = s / s.mean().clamp(min=1e-12)
+        s = s.clamp(min=1e-4, max=1e4)
+        erreurs = []
+        for w, y_ref, ref_norm in zip(ws, y_refs, ref_norms):
+            wq = _quant_dequant(w * s.unsqueeze(0), fmt, group_size)
+            y = (x / s) @ wq.t()
+            erreurs.append(((y - y_ref).norm() / ref_norm).item())
+        somme = sum(erreurs)
+        grille_somme.append(somme)
+        if somme < best_somme:
+            best_somme, best_scale, best_erreurs = somme, s.clone(), erreurs
+
+    assert best_scale is not None
+    if journal is not None:
+        journal["erreurs_grille_commune"] = [round(e, 8) for e in grille_somme]
+        journal["alpha_commun_retenu"] = round(
+            grille_somme.index(best_somme) / n_grid, 4)
+    identity = torch.ones_like(best_scale)
+    if torch.allclose(best_scale, identity, atol=1e-3):
+        best_scale = None
+    return ChannelScaler(
+        best_scale.to(torch.float32) if best_scale is not None else None
+    ), best_erreurs
+
+
 def kld_couche_bits(y_ref: torch.Tensor, y_q: torch.Tensor) -> float:
     """Divergence de Kullback-Leibler entre les sorties de couche, en bits.
 
