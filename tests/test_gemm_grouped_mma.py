@@ -176,8 +176,9 @@ def test_bt32_et_etages_identiques():
         te, t0, tn = _tuiles(cnt, bt)
         ref = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, min(bt, 64), 0)
         for et in (2, 3, 4):
-            y = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, bt, et)
-            assert torch.equal(y, ref), f"bt={bt} etages={et} differe de la variante directe"
+            for ks in (64, 128):
+                y = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, bt, et, ks)
+                assert torch.equal(y, ref), f"bt={bt} etages={et} ks={ks} differe de la variante directe"
 
 
 def test_tables_adresses():

@@ -403,3 +403,24 @@ reste est le plancher d'un lancement de ~9 Mo (rampe, queue, ~10 µs sur
 27) : le levier serait de lancer moins (q/k/v sont déjà fusionnés ; o ne
 peut pas l'être avec eux). Variante gardée derrière
 `ACVRAM_INT8_GEMV_WARP=1`, défaut = noyau à blocs. Bead z5q fermé.
+
+## K = 128 par étage (bead 0si, première étape) — 14/09 nuit
+
+Prédiction scellée : +10-20 % sur le noyau seul ; réfutation < +5 %.
+Même pipeline cp.async, foulée de ligne 80 o (20g+tq : 32 bancs distincts),
+deux MMA par fragment et par étage, échelles en 8 o, moitié de
+`__syncthreads`. Bit-identique à la variante directe (166 tests, bt ×
+étages × ks).
+
+| ks | L=2048 | ms/pas | L=512 | ms/pas |
+|---:|-------:|-------:|------:|-------:|
+| 64 | 16 911 ± 36 | 121,1 | 8 761 ± 42 | 58,4 |
+| **128** | **19 148 ± 23** | **107,0** | **9 853 ± 44** | **52,0** |
+
+**+13 % en j/s aux deux longueurs** ; sur le pas, −14 ms à L=2048 : le
+noyau passe d'environ 38 à ≈ 24 ms (−37 %, au-delà de la prédiction), soit
+~60 % de la vraie borne (14,7 ms) contre 39 % avant. `ACVRAM_MOE_MMA_KS=128`
+par défaut. Bilan chantier 2 à L=2048 : 7 592 → 19 148 j/s (×2,52) ;
+vLLM pp2048 est à 34 788, le noyau CUTLASS à 14,3 ms. Reste dans 0si : TMA
+(`cp.async.bulk.tensor`, un fil par tuile) et warps producteurs/
+consommateurs pour les derniers 10 ms.
