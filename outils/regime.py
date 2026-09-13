@@ -22,7 +22,10 @@ def exiger_regime_nominal(engine, autoriser_piles_inconnues: bool = True) -> Non
     """
     r = engine.regime()
     fautes = []
-    if not r["graphes"]:
+    if r["graphes_demandes"] and not r["graphes"]:
+        # `graphes_demandes=False` (banc qui compare volontairement l'eager,
+        # ex. gemv vs mma sans graphe) n'est PAS une degradation -- seul un
+        # refus alors qu'on les a demandes l'est.
         fautes.append(f"graphes désactivés ({r['graphes_raison']})")
     if r["couches_exilees"]:
         fautes.append(f"{r['couches_exilees']}/{r['couches_total']} couches exilées")

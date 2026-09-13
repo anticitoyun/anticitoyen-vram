@@ -349,6 +349,7 @@ class Engine:
             self.allocator.spill_cb = _deverser
 
         self.graphs = None
+        self._graphes_demandes = enable_cuda_graphs
         self._graphes_raison: Optional[str] = ("désactivés (enable_cuda_graphs=False)"
                                                if not enable_cuda_graphs else None)
         if enable_cuda_graphs:
@@ -449,6 +450,7 @@ class Engine:
 
         return {
             "graphes": self.graphs is not None,
+            "graphes_demandes": self._graphes_demandes,
             "graphes_raison": self._graphes_raison,
             "couches_exilees": couches_exilees,
             "couches_total": len(plan.layers),
@@ -462,7 +464,8 @@ class Engine:
     def regime_ligne(self) -> str:
         """Une ligne, pour le log au chargement et `acvram serve --regime`."""
         r = self.regime()
-        nominal = (r["graphes"] and r["couches_exilees"] == 0
+        nominal = ((r["graphes"] or not r["graphes_demandes"])
+                  and r["couches_exilees"] == 0
                   and r["experts_exiles"] == 0 and r["piles_ok"] is not False
                   and len(r["cartes"]) <= 1)
         etat = "NOMINAL" if nominal else "DÉGRADÉ"

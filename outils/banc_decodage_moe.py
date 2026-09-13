@@ -24,6 +24,7 @@ import torch
 from acvram.engine.loader import load_model
 from acvram.engine.runner import Engine
 from acvram.engine.sampler import SamplingParams
+from regime import exiger_regime_nominal
 import importlib.util
 _s = importlib.util.spec_from_file_location("rm", os.path.join(_ICI, "racine_modeles.py"))
 _m = importlib.util.module_from_spec(_s); _s.loader.exec_module(_m)
@@ -69,6 +70,7 @@ def passe(rep, profiler=False):
     torch.cuda.synchronize()
     return time.perf_counter() - t0, pas
 passe(0); passe(1)
+exiger_regime_nominal(eng, autoriser_piles_inconnues=False)
 if bras in ("profil", "profilmma"):
     passe(2, profiler=True); sys.exit(0)
 res = sorted(passe(10 + r) for r in range(5))
