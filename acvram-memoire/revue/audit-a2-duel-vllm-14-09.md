@@ -148,6 +148,63 @@ repos est mesuré JUSTE AVANT la fenêtre (ce qui est le cas), mais un
 J/jeton net légèrement différent des deux côtés — pas de raison de penser
 que ça inverserait le facteur ×3.
 
+## Addendum 14/09 (suite) — profil du décodage et configuration exacte
+
+Deux dernières questions de chef avant TabbyAPI.
+
+### Configuration exacte (logs de démarrage + `hf_quant_config.json`)
+
+- **Backend MoE** : `VLLM_CUTLASS` NvFp4 (choisi parmi
+  `FLASHINFER_TRTLLM, FLASHINFER_CUTEDSL, FLASHINFER_CUTEDSL_BATCHED,
+  FLASHINFER_CUTLASS, VLLM_CUTLASS, MARLIN, HUMMING, EMULATION` — les
+  quatre premiers (FlashInfer) écartés car le paquet est absent du venv,
+  voir plus haut). `MoEPrepareAndFinalizeNoDPEPModular` (pas de
+  parallélisme expert par données).
+- **Activations en entrée du MoE : FP4**, pas FP8 — confirmé par les
+  noyaux `cvt_fp16_to_fp4` dans les deux profils (pp2048 ET décodage) :
+  vLLM quantifie l'activation bf16 en E2M1 juste avant chaque GEMM
+  groupée, donc **W4A4 comme nous**, pas W4A8/W4A16.
+- **KV cache** : `fp8_e4m3` (`kv_cache_quant_algo` du checkpoint
+  ModelOpt). C'est ce format qui a fait échouer FLASH_ATTN (exige
+  FA3/SM90 ou FA4/SM100, absents sur sm_120) — TRITON_ATTN, retenu, l'
+  accepte.
+- **Attention** : `TRITON_ATTN` (forcé, FlashInfer absent).
+- **Quantification** (`hf_quant_config.json`) : `NVFP4`, `group_size=16`
+  (identique au nôtre) ; le routeur (`mlp.gate`) et `lm_head` sont
+  **exclus** de la quantification sur les 48 couches — comme notre
+  routeur/attention restés en A16.
+- **Graphes CUDA** : `cudagraph_mode=FULL_AND_PIECEWISE`,
+  `cudagraph_capture_sizes=[1,2,4,8,16,24,32,...,512]` (51 tailles,
+  jusqu'à 512 séquences/jetons batchés), `max_cudagraph_capture_size=512`.
+
+### Profil du pas de décodage, 12 séquences (vis-à-vis du 569 t/s / 1198 t/s)
+
+`outils/profil_vllm_decode12.py`, 8 pas de décodage profilés (au lieu des
+200 de la mesure d'énergie — assez pour un profil représentatif, trace
+plus légère). Total noyaux CUDA agrégé : **115,09 ms pour 8 pas**
+(≈ 14,4 ms/pas pour 12 séquences, cohérent avec 1198 t/s mesuré : 12
+jetons produits toutes les ~10 ms de calcul GPU, le reste étant la
+plomberie CPU/lancement). Dix premiers, par temps CUDA propre :
+
+| ms (8 pas) | % | appels | noyau |
+|---|---|---|---|
+| 47,62 | 41,4 | 864 | GEMM groupée CUTLASS FP4 (MoE, `GroupProblemShape`) |
+| 9,19 | 8,0 | 768 | GEMM CUTLASS FP4 (non groupée) |
+| 7,72 | 6,7 | 864 | `shuffleInputRowsKernel` (rassemblement par expert) |
+| 5,47 | 4,8 | 96 | GEMM CUTLASS FP4 (troisième forme, tuile différente) |
+| 5,27 | 4,6 | 432 | `kernel_unified_attention` (Triton) |
+| 3,68 | 3,2 | 432 | `reduce_kernel` (somme) |
+| 3,51 | 3,1 | 343 | **`cutlass_80_wmma_tensorop_bf16`** — noyau bf16 non quantifié, probablement le routeur/`lm_head` exclus de NVFP4 |
+| 3,47 | 3,0 | 96 | `cvt_fp16_to_fp4` |
+| 2,58 | 2,2 | 96 | `cvt_fp16_to_fp4` (seconde forme) |
+
+**La GEMM groupée MoE domine largement au décodage (41,4 %, contre 29 %
+au prefill)** — cohérent avec le régime : au décodage, chaque séquence
+n'active que top-k experts sur 1 jeton, le ratio calcul/lancement est
+pire, donc le noyau qui fait le plus de travail utile pèse relativement
+plus lourd. Le noyau bf16 WMMA (ligne 7) confirme que le routeur reste en
+précision pleine, comme annoncé par `hf_quant_config.json`.
+
 ## Ce qui reste
 
 TabbyAPI (EXL3 4.0bpw, `models_exl3/Qwen3-Coder-30B-A3B-4.0bpw-EXL3`) —
