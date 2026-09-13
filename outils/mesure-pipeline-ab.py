@@ -15,6 +15,7 @@ import torch
 from acvram.engine.loader import load_model
 from acvram.engine.runner import Engine
 from acvram.engine.sampler import SamplingParams
+from regime import exiger_regime_nominal          # sibling de outils/, pas un paquet
 
 MODEL = "/mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4"
 N_SLOTS = 12
@@ -38,6 +39,7 @@ def _mesurer(pipeline: bool) -> dict:
     engine = Engine(loaded, None, max_batch_size=N_SLOTS, max_model_len=2048)
     engine.pipeline_actif = pipeline
     engine.warm_graphs()
+    exiger_regime_nominal(engine, autoriser_piles_inconnues=False)
 
     params = SamplingParams(temperature=0.0, max_tokens=N_JETONS)
     for k in range(N_SLOTS):

@@ -774,6 +774,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                 "max_model_len": engine.max_model_len,
                 "kv_tokens": plan.kv_max_tokens,
                 "chat_template": tokenizer.template_source if tokenizer else None,
+                "regime": engine.regime(),
             })])
 
     # -- chat -------------------------------------------------------------

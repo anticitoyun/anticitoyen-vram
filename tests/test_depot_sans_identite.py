@@ -86,7 +86,10 @@ COURRIEL_TOLERE = ("noreply", "example")
 # VENV_PY/CORPUS/SORTIE_HDD nommes en dur). Total mesure apres fusion :
 # 317 (inchange -- les +7 de ce script recouvrent des chemins deja
 # comptes ailleurs par erreur d'estimation, verifie par mesure directe).
-PLAFOND_CHEMINS = 317
+# 14/09 soir (poste1) : releve a 319 -- b42e051 (OmniRoute, docs/REFERENCES.md)
+# ajoute 2 chemins legitimes, mes propres fichiers de ce soir (regime.py,
+# diag-logits-arrivee-jeton0.py/.sh) n'en ajoutent aucun.
+PLAFOND_CHEMINS = 319
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute

@@ -349,10 +349,14 @@ class Engine:
             self.allocator.spill_cb = _deverser
 
         self.graphs = None
+        self._graphes_raison: Optional[str] = ("désactivés (enable_cuda_graphs=False)"
+                                               if not enable_cuda_graphs else None)
         if enable_cuda_graphs:
             from .graphs import GraphRunner
             gr = GraphRunner(self.model, max_model_len)
             self.graphs = gr if gr.enabled else None
+            if not gr.enabled:
+                self._graphes_raison = gr.raison or "raison non nommée"
 
         # REPIN (bead anticitoyen-vram-pds, point 3 — poste7 §4). `_pin` :
         # {index_couche: set(experts résidents)} — peuplé depuis les couches
@@ -385,6 +389,88 @@ class Engine:
         # sur l'événement du pas n — un objet partagé ré-enregistré par le
         # pas n+1 pointerait alors vers SA PROPRE fin, pas celle du pas n
         # (bogue trouvé le 14/09 soir, même famille que le premier).
+
+        # `piles_ok` n'est pas encore décidé à ce point (paresseux, au
+        # premier passage GPU) : cette ligne ne peut donc pas être un
+        # verdict complet, seulement ce qui est déjà connu au chargement.
+        if not os.environ.get("ACVRAM_REGIME_MUET"):
+            print(f"[acvram] {self.regime_ligne()}", flush=True)
+
+    # -- régime ------------------------------------------------------------
+    def regime(self) -> dict:
+        """État réel du moteur après chargement — pas ce qu'on espérait,
+        ce qui tourne. Demandé par chef (14/09 soir) après qu'un
+        deuxième chargement de modèle dans le même processus ait
+        silencieusement dégradé le plan (exil supplémentaire, graphes CUDA
+        coupés, modèle réparti sur 2 cartes) et faussé une mesure sans
+        qu'aucune ligne ne le dise. « Plus jamais un chiffre mesuré sur un
+        moteur dégradé sans le savoir. »
+
+        `piles_ok` : `MoEBlock._stack_state` est décidé PARESSEUSEMENT, au
+        premier passage GPU de chaque couche — encore "?" (non vérifié)
+        juste après le chargement, avant tout `step()`/`warm_graphs()`.
+        `experts_exiles` compte les EXPERTS (au moins une de leurs
+        projections `QuantLinear.streamed`), pas les couches — l'exil du
+        plan (`couches_exilees`) est un exil de couche ENTIÈRE ; les deux
+        coexistent et ne se déduisent pas l'un de l'autre.
+        """
+        from .model import MoEBlock
+
+        plan = self.loaded.plan
+        couches_exilees = sum(1 for lp in plan.layers if lp.streamed)
+        cartes = sorted({lp.exec_device for lp in plan.layers}
+                        | {plan.embed_device, plan.lm_head_device})
+
+        etats_piles: set[str] = set()
+        experts_total = experts_exiles = 0
+        for m in self.model.modules():
+            if not isinstance(m, MoEBlock):
+                continue
+            etats_piles.add(m._stack_state)
+            for expert in m.experts:
+                experts_total += 1
+                if any(getattr(getattr(expert, nom, None), "streamed", None) is not None
+                      for nom in ("gate_proj", "up_proj", "down_proj")):
+                    experts_exiles += 1
+
+        if not etats_piles:
+            piles_ok: Optional[bool] = None          # pas de couche MoE
+        elif "non" in etats_piles:
+            piles_ok = False
+        elif etats_piles == {"oui"}:
+            piles_ok = True
+        else:
+            piles_ok = None                           # au moins une "?" : non vérifié
+
+        chemin_moe = ("mma" if os.environ.get("ACVRAM_MOE_MMA", "1") not in ("0", "")
+                     else "gemv")
+        if os.environ.get("ACVRAM_GRAPHES_TABLE") == "0":
+            chemin_moe += "+pile" if piles_ok else "+pile(désactivé)"
+
+        return {
+            "graphes": self.graphs is not None,
+            "graphes_raison": self._graphes_raison,
+            "couches_exilees": couches_exilees,
+            "couches_total": len(plan.layers),
+            "experts_exiles": experts_exiles,
+            "experts_total": experts_total,
+            "piles_ok": piles_ok,
+            "cartes": cartes,
+            "chemin_moe": chemin_moe,
+        }
+
+    def regime_ligne(self) -> str:
+        """Une ligne, pour le log au chargement et `acvram serve --regime`."""
+        r = self.regime()
+        nominal = (r["graphes"] and r["couches_exilees"] == 0
+                  and r["experts_exiles"] == 0 and r["piles_ok"] is not False
+                  and len(r["cartes"]) <= 1)
+        etat = "NOMINAL" if nominal else "DÉGRADÉ"
+        return (f"régime {etat} — graphes={'on' if r['graphes'] else 'off'} "
+               f"couches_exilées={r['couches_exilees']}/{r['couches_total']} "
+               f"experts_exilés={r['experts_exiles']}/{r['experts_total']} "
+               f"piles_ok={r['piles_ok']} cartes={r['cartes']} "
+               f"chemin_moe={r['chemin_moe']}")
 
     # -- admission -------------------------------------------------------
     def _eos_ids(self) -> set[int]:

@@ -53,6 +53,7 @@ VARIABLES_LUES = {
     "ACVRAM_MODELES",
     "ACVRAM_SEUIL_EXIL",
     "ACVRAM_REPIN",
+    "ACVRAM_REGIME_MUET",
     "ACVRAM_VERROU",
     "ACVRAM_NOM",
     "ACVRAM_MLA_DEBUG_ECART",
@@ -578,6 +579,14 @@ def cmd_serve(args: argparse.Namespace) -> int:
         print(yellow("  aucun tokenizer.json ; les points d'entree /v1 qui "
                      "prennent du texte echoueront"))
 
+    if args.regime:
+        # Apres warm_graphs (si graphes actifs) : `piles_ok` a alors vu
+        # passer au moins un pas GPU par couche MoE, sinon "?" partout et
+        # le verdict ne dirait rien de plus que la ligne du chargement.
+        ligne = engine.regime_ligne()
+        print(f"  {ligne}")
+        return 0 if "DÉGRADÉ" not in ligne else 1
+
     name = args.served_name or os.path.basename(os.path.abspath(args.model))
     app = create_app(engine, tokenizer, name,
                      {"model_path": args.model, "version": __version__})
@@ -838,6 +847,10 @@ def build_parser() -> argparse.ArgumentParser:
                                            "(par defaut : le GPU le plus oisif)")
     sv.add_argument("--spec-k", type=int, default=4,
                     help="jetons proposes par etape")
+    sv.add_argument("--regime", action="store_true",
+                    help="charge, imprime le regime (graphes/exil/piles/"
+                         "cartes/chemin MoE) et quitte -- code 1 si degrade, "
+                         "sans lancer le serveur")
     sv.add_argument("--host-kv-gib", type=float, default=8.0,
                     help="etage hote du cache KV en Gio (0 = desactive) : les "
                          "prefixes evinces de la VRAM descendent en RAM et "
