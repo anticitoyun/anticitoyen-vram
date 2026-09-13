@@ -799,7 +799,7 @@ class MoEBlock(nn.Module):
         tq, tb = self._tables_adresses(pile)
         y = kernels.get_extension().nvfp4_gemm_grouped_mma(
             tq, tb, gs, xq, xsf, tiles[0], tiles[1], tiles[2],
-            qw.shape[1], k, _MOE_MMA_BT)
+            qw.shape[1], k, _MOE_MMA_BT, _MOE_MMA_ETAGES)
         return y if brut else y[:, :m]
 
     def _forward_prefill_grouped(self, x, topw, topi) -> Optional[torch.Tensor]:
@@ -1094,6 +1094,10 @@ _MOE_GEMM_MAX = float(os.environ.get("ACVRAM_MOE_GEMM_MAX", "48"))
 # qwen3-coder.md) — dans la fourchette prédite avant mesure.
 _MOE_MMA = os.environ.get("ACVRAM_MOE_MMA", "1") == "1"
 _MOE_MMA_BT = int(os.environ.get("ACVRAM_MOE_MMA_BT", "64"))
+# Étages du pipeline cp.async du noyau MMA (0 = chargements directs).
+# Mesuré le 14/09/2026, Coder-30B, prefill chaud L=2048 : 0 → 10 411 j/s,
+# 2 → 16 655, 3 → 16 851, 4 → 16 938 (revue/mma-fp4-native-sm120.md).
+_MOE_MMA_ETAGES = int(os.environ.get("ACVRAM_MOE_MMA_ETAGES", "4"))
 
 # Marque, dans le magasin d'états, une séquence dont l'état réside dans les
 # tampons fixes d'une couche (chemin graphes) plutôt qu'en tuple fonctionnel.

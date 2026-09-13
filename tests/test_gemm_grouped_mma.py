@@ -124,8 +124,9 @@ def test_quant_act_bit_identique(G, K):
     [64, 65, 3, 130],
 ])
 @pytest.mark.parametrize("M,K", [(1536, 2048), (2048, 1536), (1500, 1536)])
-@pytest.mark.parametrize("bt", [16, 32, 64])
-def test_gemm_mma_contre_reference_w4a4(comptes, M, K, bt):
+@pytest.mark.parametrize("bt", [16, 64])
+@pytest.mark.parametrize("etages", [0, 2, 3, 4])
+def test_gemm_mma_contre_reference_w4a4(comptes, M, K, bt, etages):
     ext = _ext()
     E = len(comptes)
     qw, bs, gs = _pile(E, M, K, 0.05, sum(comptes) + M + bt)
@@ -137,7 +138,7 @@ def test_gemm_mma_contre_reference_w4a4(comptes, M, K, bt):
     assert torch.equal(xq, rq) and torch.equal(xsf, rsf)
     te, t0, tn = _tuiles(cnt, bt)
     tq, tb = _tables(qw, bs)
-    y = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, bt)
+    y = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, bt, etages)
     assert y.shape == (G, M) and y.dtype == torch.bfloat16
     # référence float64 à partir des MÊMES activations quantifiées
     xa = _dequant_nibbles(xq).view(G, -1, 16) * xsf.view(torch.float8_e4m3fn).double().unsqueeze(-1)
@@ -156,6 +157,25 @@ def test_gemm_mma_contre_reference_w4a4(comptes, M, K, bt):
     exact = (y.double() == attendu.to(torch.bfloat16).double()).float().mean().item()
     assert hors == 0, f"{hors} valeurs hors tolérance sur {ecart.numel()}, max {ecart.max().item():.3e}"
     assert exact > 0.9, f"seulement {exact:.3f} des sorties bit-identiques à bf16(référence)"
+
+
+def test_bt32_et_etages_identiques():
+    """bt=32 et les variantes a etages rendent la MEME sortie que la directe
+    (memes fragments, meme ordre de somme) : bit-identique attendu."""
+    ext = _ext()
+    comptes = [15, 17, 1, 33]
+    E, M, K = len(comptes), 1536, 2048
+    qw, bs, gs = _pile(E, M, K, 0.05, 3)
+    cnt = torch.tensor(comptes, device="cuda")
+    G = int(cnt.sum())
+    xq, xsf = ext.nvfp4_quant_act(_x(G, K, 11))
+    tq, tb = _tables(qw, bs)
+    for bt in (16, 32, 64):
+        te, t0, tn = _tuiles(cnt, bt)
+        ref = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, bt, 0)
+        for et in (2, 3, 4):
+            y = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, bt, et)
+            assert torch.equal(y, ref), f"bt={bt} etages={et} differe de la variante directe"
 
 
 def test_tables_adresses():

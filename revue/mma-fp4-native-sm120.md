@@ -247,3 +247,41 @@ formule fp32 de torch + `tanh` double : ≥ 99 %. `moe_reduce_trie`
 État du pas L=2048 (MMA) : 194 ms dont noyau MMA ≈ 114 — il pèse
 maintenant ≈ 60 %, et il est à 25 % de sa borne. C'est la retouche (a),
 `cp.async`, si la qualité W4A4 passe.
+
+## Étage `cp.async` du noyau MMA (14/09) — `nvfp4_gemm_grouped_mma2_kernel<BT, S>`
+
+BM=128 lignes, 8 warps, tuiles A/B/échelles en mémoire partagée à foulée
+48 o (32 utiles + 16 : les 32 lectures de 4 o d'un warp tombent sur 32
+bancs distincts), S étapes en pipeline (`cp.async.cg` 16 o pour les
+données, `.ca` 4 o pour les échelles), même ordre de somme que la variante
+directe. Sélection par l'argument `etages` (0 = directe, 2-4), réglage
+`ACVRAM_MOE_MMA_ETAGES`.
+
+Prédiction écrite avant : L=2048 10 535 → 14-16 000 j/s (noyau 114 →
+40-55 ms, ×2-3) ; issue gênante < +20 %.
+
+| variante | L | j/s | σ | ms/pas |
+|----------|--:|----:|--:|------:|
+| directe (étages 0) | 2048 | 10 411 | 98 | 196,7 |
+| étages 2 | 2048 | 16 655 | 24 | 123,0 |
+| étages 3 | 2048 | 16 851 | 32 | 121,5 |
+| **étages 4** | 2048 | **16 938** | 41 | **120,9** |
+| directe | 512 | 5 888 | 29 | 87,0 |
+| **étages 4** | 512 | **8 701** | 49 | **58,8** |
+
+Compteurs mma=1008 partout. Équivalence : 128 tests, et **bit-identique**
+à la variante directe pour bt ∈ {16, 32, 64} × étages ∈ {2, 3, 4}
+(`test_bt32_et_etages_identiques`). Suite complète : 774 passed.
+
+Lecture : le pas L=2048 perd 76 ms ; le noyau passe de ≈ 114 à ≈ 38 ms
+(×3, la borne mémoire estimée est 28 ms → il est maintenant à ~75 % de sa
+borne). ×1,63 sur le pas entier, ×1,48 à L=512. Deux étapes suffisent
+presque (−1,7 %) : la latence est couverte dès qu'une tuile est en vol
+pendant le calcul de la précédente ; 4 est retenu par défaut.
+
+Bilan du chantier 2 sur le prefill chaud L=2048 de Coder-30B, en j/s :
+déquant + `grouped_mm` 7 592 → GEMM directe wmma (ancienne) 4 864 → MMA
+FP4 native 8 945 → + glue en noyaux 10 535 → + pipeline cp.async
+**16 938**, soit ×2,23 sur le meilleur chemin d'hier. Qualité : A4 sur les
+experts mesurée par poste2 sur le noyau réel : PPL +0,919 % (seuil 1 %),
+`ACVRAM_MOE_MMA=1` par défaut (poste2).
