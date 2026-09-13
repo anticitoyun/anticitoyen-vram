@@ -260,6 +260,27 @@ class Energie:
                                f"absente du recensement initial")
         if self.bridages:
             raisons.append("bridage pendant la fenêtre : " + ", ".join(sorted(self.bridages)))
+        # Deux gardes ajoutées le 14/09 (poste7/chef, après le +51 % de
+        # puissance_nvml.py:76 sur une fenêtre de 2 s) : une moyenne
+        # au-dessus du plafond matériel est un signe que la fenêtre est
+        # trop courte pour que le limiteur ait pu agir, pas que la carte a
+        # dépassé sa limite ; une fenêtre de moins de 10 s n'a jamais assez
+        # de marge pour que cette moyenne soit fiable. `getattr` : les
+        # fenêtres construites à la main pour d'autres tests (avant cette
+        # garde) ne posent pas toujours `duree`.
+        duree = getattr(self, "duree", 0.0)
+        if 0 < duree < 10.0:
+            raisons.append(f"fenêtre trop courte pour une moyenne fiable : "
+                           f"{duree:.2f} s < 10 s")
+        # Le contrôle de plafond n'a de sens QUE sur une fenêtre déjà jugée
+        # assez longue — en dessous, `self.plafond` (un appel NVML) n'a pas
+        # à être sollicité du tout.
+        if duree >= 10.0:
+            plafond = self.plafond
+            if plafond > 0 and self.moyenne > plafond:
+                raisons.append(f"puissance moyenne {self.moyenne:.1f} W > "
+                               f"plafond {plafond:.0f} W — fenêtre trop "
+                               f"courte pour que le limiteur ait pu agir")
         return raisons
 
     def resume(self) -> dict:
