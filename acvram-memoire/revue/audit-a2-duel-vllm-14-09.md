@@ -79,6 +79,75 @@ x8/x8 avec la 3080 Ti et d'autres sessions tournaient en parallèle
 pas structurel, à vérifier si la comparaison doit trancher plus finement
 que ×2.
 
+## Addendum 14/09 — profil noyau et décodage à 12 séquences
+
+Suite de chef après le premier résultat : où est l'écart, et l'objectif
+du projet (débit/énergie au décodage concurrent).
+
+### Profil noyau, un pp2048
+
+`torch.profiler` DEPUIS le processus appelant ne voit rien (vLLM exécute
+l'inférence dans un processus séparé, `EngineCore`, via multiprocessing —
+un profiler côté appelant ne capte que l'attente RPC,
+`cudaDeviceSynchronize` 84 ms, ZÉRO noyau CUDA — piège trouvé en le
+lançant). Corrigé avec le mécanisme intégré de vLLM
+(`profiler_config={"profiler": "torch", ...}` + `llm.start_profile()`),
+qui fait tourner le profiler DANS l'EngineCore. `outils/profil_vllm_pp2048.py`.
+
+Total noyaux CUDA agrégé pour UN pp2048 : **49,4 ms** (contre notre pas
+complet ~121 ms avant cp.async, 38 ms de noyau MMA seul depuis). Dix
+premiers, par temps CUDA propre :
+
+| ms | % | noyau |
+|---|---|---|
+| 14,31 | 29,0 | GEMM groupée CUTLASS FP4 (`GroupProblemShape`, block-scaled E2M1/UE4M3) — l'équivalent de notre MMA |
+| 13,80 | 27,9 | `kernel_unified_attention` (Triton) |
+| 4,61 | 9,3 | multiplication élémentaire bf16 (SiLU·up, la glue de porte) |
+| 4,03 | 8,2 | `shuffleInputRowsKernel` (rassemblement par expert) |
+| 3,28 | 6,7 | GEMM CUTLASS FP4 (non groupée — projections denses probablement) |
+| 1,67 | 3,4 | `cvt_fp16_to_fp4` (quantification d'activation) |
+| 1,50 | 3,0 | `reduce_kernel` (somme) |
+| 1,45 | 2,9 | `cvt_fp16_to_fp4` (seconde instance) |
+| 0,89 | 1,8 | `triton_red_fused_3` |
+| 0,54 | 1,1 | `compute_arg_sorts` (tri du routage) |
+
+**Leur GEMM groupée FP4 seule (14,31 ms) est déjà plus rapide que notre
+noyau MMA seul (38 ms, post-cp.async)** — l'écart n'est donc pas
+uniquement dans la glue Python/lancements (notre piste habituelle), il
+est aussi dans le noyau GEMM lui-même. Face au profil de poste4
+(MMA 38 ms, glue, int8 dense 30 ms, flash 11 ms sur 121 ms), vLLM répartit
+différemment : GEMM+attention = 28,1 ms (57 % du total), glue+routage+
+quantification = 21,3 ms (43 %) — proportion de glue comparable, mais sur
+un total 2,4× plus petit.
+
+### Décodage à 12 séquences (objectif du projet)
+
+Même protocole que poste3 (`outils/gpu/mesure/banc-horloge-decodage.py`) :
+12 séquences, contexte 2048, 200 jetons décodés chacune, énergie NVML
+monotone (compteur, pas une moyenne de puissances — `energie.py`), repos
+mesuré avant (8 s), net = brut − repos×durée. `outils/banc_decode_vllm.py`.
+
+| moteur | t/s agrégé | J/jeton net | horloge SM (MHz) | bridage pendant la fenêtre |
+|---|---|---|---|---|
+| acvram (poste3, référence) | 568,6 | 0,601 | — | — |
+| vLLM | 1198,4 | 0,202 | 2572-2827 | puissance (plafond 400 W atteint) |
+
+**vLLM ≈ 2,11× le débit ET ≈ 2,97× plus efficace en énergie par jeton.**
+Les deux mesures tournent sous le même bridage de puissance (400 W,
+`nvidia-smi`), donc le bridage n'explique pas l'écart à lui seul — au
+contraire, vLLM atteint un débit bien supérieur MALGRÉ le même plafond,
+ce qui suggère un travail utile par watt structurellement meilleur (noyau
+GEMM FP4 plus efficace, confirmé par le profil ci-dessus).
+
+**Réserve** : `watts_repos` mesuré ici (66,9 W) reste élevé pour un
+« repos » de 5090 — comme pour pp2048, la carte partage un bus PCIe
+x8/x8 avec la 3080 Ti et d'autres sessions tournaient en parallèle
+malgré `carte.sh` ; l'écart net (brut − repos) reste correct tant que le
+repos est mesuré JUSTE AVANT la fenêtre (ce qui est le cas), mais un
+« vrai » repos (carte seule, aucune autre session active) donnerait un
+J/jeton net légèrement différent des deux côtés — pas de raison de penser
+que ça inverserait le facteur ×3.
+
 ## Ce qui reste
 
 TabbyAPI (EXL3 4.0bpw, `models_exl3/Qwen3-Coder-30B-A3B-4.0bpw-EXL3`) —
