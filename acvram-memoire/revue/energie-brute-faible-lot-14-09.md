@@ -113,11 +113,25 @@ la suite d'une session déjà longue — je préfère vérifier avec chef avant
 de lancer un chargement qui pourrait échouer de façon peu informative,
 plutôt que de multiplier les tentatives sans lui.
 
+**Suite, décidée par chef (14/09)** : le chemin GGUF est écarté (fragile,
+résultat non défendable) ; l'alternative proposée était vLLM en
+`--quantization fp8` (dynamique, à la volée, sans conversion préalable) à
+partir de la source **bf16**, si elle est sur le poste. **Vérifié dans
+`acvram_manifest.json`** de notre propre conversion
+(`GLM-4.7-Grande-Heretic-42B-srcQ4_K_M-nvfp4/acvram_manifest.json`, champ
+`model.name`) : **la source de notre conversion est déjà le GGUF Q4_K_M**
+(`GLM-4.7-30B-A3B-20-2-Heretic-30B-A3B-Q4_K_M.gguf`), pas un bf16 — et
+aucun bf16 HF de ce modèle n'existe ailleurs sur le poste (vérifié sous
+`/mnt/4TO_SATACMR_2022/Modeles`, seul le même GGUF y est présent). **Point
+parqué, comme convenu : pas de téléchargement sans l'utilisateur.**
+
 ## bd
 
 Item 3 de la mesure 2a de poste7 : **fait, avec la correction de la marge
 b=1**. Racine du blocage initial identifiée et documentée
 (`echec-energie-brute-vllm-oom-14-09.md`) : ne jamais charger un checkpoint
 acvram dans vLLM, les formats NVFP4 ne sont pas interchangeables entre les
-deux moteurs. Modèle témoin GLM-42B : bloqué faute de checkpoint vLLM-natif,
-piste GGUF identifiée mais pas essayée, en attente de décision.
+deux moteurs. Modèle témoin GLM-42B : **parqué** — GGUF écarté (chef),
+FP8 dynamique impossible (pas de source bf16 sur le poste, vérifié dans
+le manifeste acvram et sur le disque des originaux) ; à reprendre si une
+source bf16 est un jour ajoutée, pas avant.
