@@ -182,9 +182,47 @@ Je pars sur (ii), plus simple à câbler et strictement équivalente à (i).
   ≤ +0,3 % — activation int8 dynamique par jeton, perte attendue
   ≤ 0,1 % d'après chef, à vérifier, pas supposée.
 
-## Suite
+## Résultat A' (14/09 soir, carte, `outils/banc_1aj_prefill_w8a8_vitesse.py`)
 
-(A') vitesse seule, même protocole que pour W4A4 (micro-banc sur les
-vrais poids, chemin actuel vs nouveau, médian de plusieurs répétitions,
-carte). Pas encore lancé — ce diagnostic clôt le préalable demandé avant
-d'écrire quoi que ce soit.
+192 projections (48 couches × q/k/v/o), pp2048, poids int8 requantifié
+en int8 signé PAR CANAL DE SORTIE (amax par ligne, format W8A8 standard
+SmoothQuant/TensorRT — confirmé par chef avant la mesure : nos groupes
+int8 courent le long de K, donc un seul `torch._int_mm` n'est correct
+qu'avec une échelle par ligne, pas par groupe) :
+
+```
+SOMME actuel  (int8 -> bf16 -> cuBLAS, chemin reel)  : 30,85 ms
+SOMME nouveau (int8 signe par ligne + torch._int_mm) : 42,28 ms
+Seuil de preuve      : <= 16 ms
+Seuil de refutation   : >= 24 ms
+VERDICT : RÉFUTATION
+```
+
+**Réfuté, avec une marge confortable** (42,28 ms contre un seuil de
+24 ms — 76 % au-delà). Motif visible dans le détail par couche : les
+petites projections (k_proj/v_proj, 512 sorties) sont proportionnellement
+les PLUS touchées (0,042 → 0,110 ms, ×2,6) — signature d'un coût FIXE
+par appel (quantification d'activation + lancement `torch._int_mm`) qui
+domine sur les petites matrices, plus visible ici que sur q_proj/o_proj.
+
+**Réserve méthodologique à nommer, ne change pas le verdict** : q/k/v
+partagent la MÊME activation d'entrée dans une vraie couche, mais ce
+banc requantifie l'activation en int8 séparément pour chacun des 4
+appels par couche (mesure isolée, pas une intégration réelle) — une
+implémentation qui partagerait la quantification d'activation entre
+q/k/v économiserait une partie du coût fixe observé sur k_proj/v_proj.
+Non mesuré ici (pas nécessaire : 42,28 ms est à 76 % au-delà du seuil de
+réfutation, une économie partagée plausible ne suffirait pas à
+retraverser 24 ms). Si le chantier veut un chiffre plus juste pour cette
+hypothèse précise, il resterait à mesurer, pas à supposer.
+
+## Verdict repli W8A8
+
+**Réfuté sans réserve utile.** Même symptôme que le W4A4 : un coût fixe
+par appel qui ne s'amortit pas sur des projections de cette taille.
+`torch._int_mm`/cuBLASLt int8 ne rattrape pas le cuBLAS bf16 déjà
+utilisé aujourd'hui, dans ce régime. Bead 1aj fermé côté prefill
+projections attention — les deux pistes de repli tentées (W4A4 noyau
+groupé E=1, W8A8 `torch._int_mm`) perdent toutes les deux dans le même
+régime, pour une raison structurelle proche (coût fixe par appel,
+prefill à gros lot déjà proche de sa borne bf16).
