@@ -1570,6 +1570,72 @@ torch::Tensor nvfp4_gemv_grouped_gateup(
     return out;
 }
 
+// Pendant décodage de nvfp4_gemm_grouped_mma (patron identique, table.hpp
+// bead pds) : chaque expert lu par ADRESSE (`table_*[e]`), résident ou
+// épinglé zéro-copie, jamais par une pile contiguë — une couche au
+// placement hétérogène (certains experts froids) n'a plus besoin de
+// désactiver le chemin groupé (`_try_build_stacks`, model.py).
+template <typename XT, int RPW>
+__global__ void nvfp4_gemv_grouped_gateup_table_kernel(
+    const int64_t *__restrict__ table_qg, const int64_t *__restrict__ table_bg,
+    const float *__restrict__ gsg,
+    const int64_t *__restrict__ table_qu, const int64_t *__restrict__ table_bu,
+    const float *__restrict__ gsu,
+    const int *__restrict__ expert_ids, const int *__restrict__ token_ids,
+    const XT *__restrict__ x, float *__restrict__ y, int M, int K, int act) {
+    extern __shared__ float xs_sh[];
+    const int g = blockIdx.y, e = expert_ids[g];
+    charger_x_sh<XT>(x + (long)token_ids[g] * K, xs_sh, K);
+    const unsigned char *qg_e = reinterpret_cast<const unsigned char *>(table_qg[e]);
+    const unsigned char *bg_e = reinterpret_cast<const unsigned char *>(table_bg[e]);
+    const unsigned char *qu_e = reinterpret_cast<const unsigned char *>(table_qu[e]);
+    const unsigned char *bu_e = reinterpret_cast<const unsigned char *>(table_bu[e]);
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const long half_k = (long)K >> 1;
+    const int nloads = K / WEIGHTS_PER_LOAD;
+    #pragma unroll
+    for (int r = 0; r < RPW; ++r) {
+        const int row = (blockIdx.x * GW_WARPS + warp) * RPW + r;
+        if (row >= M) return;
+        const float ag = nvfp4_row_dot_warp(
+            reinterpret_cast<const uint4 *>(qg_e + (long)row * half_k),
+            bg_e + (long)row * nloads, gsg[e], xs_sh, nloads >> 1, lane);
+        const float au = nvfp4_row_dot_warp(
+            reinterpret_cast<const uint4 *>(qu_e + (long)row * half_k),
+            bu_e + (long)row * nloads, gsu[e], xs_sh, nloads >> 1, lane);
+        if (lane == 0) y[(long)g * M + row] = acv_act(ag, act) * au;
+    }
+}
+
+torch::Tensor nvfp4_gemv_grouped_gateup_table(
+        torch::Tensor table_qg, torch::Tensor table_bg, torch::Tensor gsg,
+        torch::Tensor table_qu, torch::Tensor table_bu, torch::Tensor gsu,
+        torch::Tensor expert_ids, torch::Tensor token_ids,
+        torch::Tensor x, int64_t M, int64_t K, int64_t act) {
+    CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(x);
+    TORCH_CHECK(K % 32 == 0 && (size_t)(K + K / 32) * sizeof(float) <= 48 * 1024,
+                "gate-up fusionne : K multiple de 32 et <= 11904");
+    const int G = expert_ids.size(0);
+    const bool bf = x.scalar_type() == torch::kBFloat16;
+    auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
+    auto out = torch::empty({G, M}, xc.options().dtype(torch::kFloat));
+    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 1;
+    dim3 grid(((int)M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
+    const size_t shm = (size_t)(K + K / 32) * sizeof(float);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    #define GUT_LAUNCH(XT, PX) do { if (rpw == 1) GUT_L(XT, 1, PX); else if (rpw == 2) GUT_L(XT, 2, PX); else GUT_L(XT, 4, PX); } while (0)
+    #define GUT_L(XT, R, PX) nvfp4_gemv_grouped_gateup_table_kernel<XT, R><<<grid, GW_WARPS * WARP, shm, stream>>>( \
+        table_qg.data_ptr<int64_t>(), table_bg.data_ptr<int64_t>(), gsg.data_ptr<float>(), \
+        table_qu.data_ptr<int64_t>(), table_bu.data_ptr<int64_t>(), gsu.data_ptr<float>(), \
+        expert_ids.data_ptr<int>(), token_ids.data_ptr<int>(), PX, out.data_ptr<float>(), (int)M, (int)K, (int)act)
+    if (bf) { GUT_LAUNCH(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
+    else { GUT_LAUNCH(float, xc.data_ptr<float>()); }
+    #undef GUT_LAUNCH
+    #undef GUT_L
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
 
 // --------------------------------------------------------------------------
 // GEMM groupée NVFP4 : les experts d'une couche MoE, poids lus en 4 bits.
@@ -2535,6 +2601,61 @@ torch::Tensor nvfp4_gemv_grouped(torch::Tensor qw, torch::Tensor bscale,
     return out;
 }
 
+// Pendant table de nvfp4_gemv_grouped_warp_kernel (down_proj, une seule
+// projection) : même patron table_*[e] que le gate-up ci-dessus.
+template <typename XT, int RPW>
+__global__ void nvfp4_gemv_grouped_table_kernel(
+    const int64_t *__restrict__ table_qw, const int64_t *__restrict__ table_bs,
+    const float *__restrict__ gscales, const int *__restrict__ expert_ids,
+    const int *__restrict__ token_ids, const XT *__restrict__ x,
+    float *__restrict__ y, int M, int K) {
+    extern __shared__ float xs_sh[];
+    const int g = blockIdx.y, e = expert_ids[g];
+    charger_x_sh<XT>(x + (long)token_ids[g] * K, xs_sh, K);
+    const unsigned char *qw_e = reinterpret_cast<const unsigned char *>(table_qw[e]);
+    const unsigned char *bs_e = reinterpret_cast<const unsigned char *>(table_bs[e]);
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const long half_k = (long)K >> 1;
+    const int nloads = K / WEIGHTS_PER_LOAD;
+    const float gscale = gscales[e];
+    #pragma unroll
+    for (int r = 0; r < RPW; ++r) {
+        const int row = (blockIdx.x * GW_WARPS + warp) * RPW + r;
+        if (row >= M) return;
+        const float acc = nvfp4_row_dot_warp(
+            reinterpret_cast<const uint4 *>(qw_e + (long)row * half_k),
+            bs_e + (long)row * nloads, gscale, xs_sh, nloads >> 1, lane);
+        if (lane == 0) y[(long)g * M + row] = acc;
+    }
+}
+
+torch::Tensor nvfp4_gemv_grouped_table(torch::Tensor table_qw, torch::Tensor table_bs,
+                                       torch::Tensor gscales,
+                                       torch::Tensor expert_ids, torch::Tensor token_ids,
+                                       torch::Tensor x, int64_t M, int64_t K) {
+    CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(x);
+    TORCH_CHECK(K % 32 == 0 && (size_t)(K + K / 32) * sizeof(float) <= 48 * 1024,
+                "chemin table : K multiple de 32 et <= 11904");
+    const int G = expert_ids.size(0);
+    const bool bf = x.scalar_type() == torch::kBFloat16;
+    auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
+    auto out = torch::empty({G, (int)M}, xc.options().dtype(torch::kFloat));
+    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 1;
+    dim3 grid(((int)M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
+    const size_t shm = (size_t)(K + K / 32) * sizeof(float);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    #define GT_LAUNCH(XT, PX) do { if (rpw == 1) GT_L(XT, 1, PX); else if (rpw == 2) GT_L(XT, 2, PX); else GT_L(XT, 4, PX); } while (0)
+    #define GT_L(XT, R, PX) nvfp4_gemv_grouped_table_kernel<XT, R><<<grid, GW_WARPS * WARP, shm, stream>>>( \
+        table_qw.data_ptr<int64_t>(), table_bs.data_ptr<int64_t>(), gscales.data_ptr<float>(), \
+        expert_ids.data_ptr<int>(), token_ids.data_ptr<int>(), PX, out.data_ptr<float>(), (int)M, (int)K)
+    if (bf) { GT_LAUNCH(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
+    else { GT_LAUNCH(float, xc.data_ptr<float>()); }
+    #undef GT_LAUNCH
+    #undef GT_L
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
 torch::Tensor int4_gemv_grouped(torch::Tensor qw, torch::Tensor scales,
                                 torch::Tensor zeros,
                                 torch::Tensor expert_ids,
@@ -3357,6 +3478,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("gsu"), py::arg("expert_ids"), py::arg("token_ids"), py::arg("x"),
           py::arg("K"), py::arg("act") = 0,
           "MoE NVFP4 : gate et up fusionnes, sortie act(gate)*up (act 0=SiLU, 1=GELU-tanh)");
+    m.def("nvfp4_gemv_grouped_table", &nvfp4_gemv_grouped_table,
+          py::arg("table_qw"), py::arg("table_bs"), py::arg("gscales"),
+          py::arg("expert_ids"), py::arg("token_ids"), py::arg("x"),
+          py::arg("M"), py::arg("K"),
+          "Pendant table de nvfp4_gemv_grouped (bead pds) : chaque expert lu "
+          "par adresse, resident ou epingle -- couche au placement heterogene");
+    m.def("nvfp4_gemv_grouped_gateup_table", &nvfp4_gemv_grouped_gateup_table,
+          py::arg("table_qg"), py::arg("table_bg"), py::arg("gsg"),
+          py::arg("table_qu"), py::arg("table_bu"), py::arg("gsu"),
+          py::arg("expert_ids"), py::arg("token_ids"), py::arg("x"),
+          py::arg("M"), py::arg("K"), py::arg("act") = 0,
+          "Pendant table de nvfp4_gemv_grouped_gateup (bead pds), meme motif "
+          "que nvfp4_gemm_grouped_mma");
     m.def("nvfp4_gemm_grouped", &nvfp4_gemm_grouped,
           "MoE NVFP4 : GEMM groupee sur tuiles de jetons, poids lus en 4 bits");
     m.def("moe_act", &moe_act,

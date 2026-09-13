@@ -796,6 +796,22 @@ def nvfp4_gemv_grouped(x: torch.Tensor, qw: torch.Tensor, bscale: torch.Tensor,
                                   x.contiguous(), k)
 
 
+def nvfp4_gemv_grouped_table(x: torch.Tensor, table_qw: torch.Tensor,
+                             table_bs: torch.Tensor, gscales: torch.Tensor,
+                             expert_ids: torch.Tensor, token_ids: torch.Tensor,
+                             k: int, m: int) -> Optional[torch.Tensor]:
+    """Pendant table de `nvfp4_gemv_grouped` (bead pds) : chaque expert lu par
+    adresse (résident ou épinglé), pas par une pile contiguë — couche au
+    placement hétérogène."""
+    ext = get_extension()
+    if ext is None or k % 32 != 0:
+        return None
+    if x.shape[-1] != k:
+        x = torch.nn.functional.pad(x, (0, k - x.shape[-1]))
+    return ext.nvfp4_gemv_grouped_table(table_qw, table_bs, gscales, expert_ids,
+                                        token_ids, x.contiguous(), m, k)
+
+
 def int4_gemv_grouped(x: torch.Tensor, qw: torch.Tensor, scales: torch.Tensor,
                       zeros: torch.Tensor, expert_ids: torch.Tensor,
                       token_ids: torch.Tensor, k: int,

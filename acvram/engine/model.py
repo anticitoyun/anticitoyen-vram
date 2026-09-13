@@ -668,20 +668,40 @@ class MoEBlock(nn.Module):
         return ("gate_proj", "up_proj", "down_proj") if hasattr(self.experts[0], "gate_proj") \
             else ("up_proj", "down_proj")
 
+    def _table_pile(self, nom: str, ws: list):
+        """Pendant table (bead pds) du chemin empilé : chaque expert lu par
+        adresse (`table_qw[e]`), résident ou épinglé — pas de pile contiguë,
+        donc valable même si une partie des experts est streamed. Rend None
+        si la table n'existe pas pour cette projection (format non NVFP4
+        homogène à toutes les couches, ou construction refusée au
+        chargement) : le chemin par expert reste alors le repli."""
+        table_qw = (self._table_qw or {}).get(nom)
+        table_bscale = (self._table_bscale or {}).get(nom)
+        if table_qw is None or table_bscale is None:
+            return None
+        cache = self.__dict__.setdefault("_gs_table", {})
+        gs = cache.get(nom)
+        if gs is None:
+            gs = torch.tensor([w.global_scale_float() for w in ws],
+                              dtype=torch.float32, device=table_qw.device)
+            cache[nom] = gs
+        return ("nvfp4_table", table_qw, table_bscale, gs,
+                ws[0].padded_in, ws[0].shape[0])
+
     def _try_build_stacks(self) -> bool:
         from ..quant.int4 import INT4Tensor
         from ..quant.nvfp4 import NVFP4Tensor
 
-        def one(projs):
+        def one(nom, projs):
             ws = [p.qweight for p in projs]
-            if any(p.streamed is not None for p in projs):
-                return None
             if any(p.scaler is not None and not p.scaler.is_identity
                    for p in projs):
                 return None                    # échelle AWQ par expert : repli
             if all(isinstance(w, NVFP4Tensor) for w in ws):
                 if len({(w.shape, w.padded_in) for w in ws}) != 1:
                     return None
+                if any(p.streamed is not None for p in projs):
+                    return self._table_pile(nom, ws)
                 qw = torch.stack([w.qweight for w in ws]).contiguous()
                 bs = torch.stack([w.block_scale.view(torch.uint8)
                                   for w in ws]).contiguous()
@@ -692,6 +712,8 @@ class MoEBlock(nn.Module):
                     w.block_scale = bs[e].view(torch.float8_e4m3fn)
                 return ("nvfp4", qw, bs, gs, ws[0].padded_in, ws[0].shape[0])
             if all(isinstance(w, INT4Tensor) for w in ws):
+                if any(p.streamed is not None for p in projs):
+                    return None             # pas de pendant table pour INT4
                 if len({(w.shape, w.padded_in, w.group_size) for w in ws}) != 1:
                     return None
                 qw = torch.stack([w.qweight for w in ws]).contiguous()
@@ -706,7 +728,7 @@ class MoEBlock(nn.Module):
         piles = {}
         try:
             for nom in self._noms_experts():
-                pile = one([getattr(e, nom) for e in self.experts])
+                pile = one(nom, [getattr(e, nom) for e in self.experts])
                 if pile is None:
                     return False
                 piles[nom] = pile
@@ -726,6 +748,10 @@ class MoEBlock(nn.Module):
             _, qw, bs, gs, k, m = pile
             return kernels.nvfp4_gemv_grouped(x32, qw, bs, gs, expert_ids,
                                               token_ids, k)[:, :m]
+        if pile[0] == "nvfp4_table":
+            _, tq, tb, gs, k, m = pile
+            return kernels.nvfp4_gemv_grouped_table(x32, tq, tb, gs, expert_ids,
+                                                    token_ids, k, m)[:, :m]
         _, qw, sc, zr, k, gsz, m = pile
         return kernels.int4_gemv_grouped(x32, qw, sc, zr, expert_ids,
                                          token_ids, k, gsz)[:, :m]
@@ -910,6 +936,15 @@ class MoEBlock(nn.Module):
             act = ext.nvfp4_gemv_grouped_gateup(
                 pg[1], pg[2], pg[3], pu[1], pu[2], pu[3], eid, tok,
                 x.contiguous(), pg[4],
+                1 if self.act == "gelu_tanh" else 0)[:, :pg[5]]
+        elif (pg[0] == "nvfp4_table" and pu[0] == "nvfp4_table" and ext is not None
+                and hasattr(ext, "nvfp4_gemv_grouped_gateup_table")
+                and pg[4] * 4 <= 48 * 1024):
+            # pendant table (bead pds) : couche au placement hétérogène,
+            # chaque expert lu par adresse plutôt que par une pile contiguë
+            act = ext.nvfp4_gemv_grouped_gateup_table(
+                pg[1], pg[2], pg[3], pu[1], pu[2], pu[3], eid, tok,
+                x.contiguous(), pg[5], pg[4],
                 1 if self.act == "gelu_tanh" else 0)[:, :pg[5]]
         else:
             x32 = x.to(torch.float32)

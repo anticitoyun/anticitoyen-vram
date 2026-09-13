@@ -130,6 +130,50 @@ def test_repin_reel_echange_sans_changer_la_sortie():
         "« placement = vitesse, jamais sémantique »")
 
 
+def test_chemin_groupe_table_bit_identique_au_chemin_groupe_pile():
+    """Suite du point 4 (chef, 13/09) : `_try_build_stacks` ne doit plus
+    refuser une couche hétérogène — le chemin groupé TABLE (décodage,
+    `nvfp4_gemv_grouped_gateup_table` / `nvfp4_gemv_grouped_table`) doit
+    rester bit-identique au chemin groupé PILE existant (même noyau
+    `nvfp4_row_dot_warp`, seule l'adresse change).
+
+    Comparé au chemin groupé, PAS à la boucle par expert : les deux
+    empruntent des noyaux différents (accumulation d'ordre différent), un
+    écart de l'ordre du dernier bit y est déjà connu et accepté (mémoire
+    « une divergence n'est pas une preuve », NVFP4 resserre le SNR par
+    construction) — ce test isole la seule question qui compte ici :
+    l'adressage par table change-t-il le résultat du MÊME noyau ?"""
+    from acvram.memory.table_adresses import construire_table
+
+    dev = torch.device("cuda")
+    pile = _couche(dev, None)                    # tout résident : chemin groupé pile
+    pile._stack_state = "?"
+
+    table = _couche(dev, {0, 2, 4, 6})             # hétérogène : chemin groupé table
+    table._table_qw = {}
+    table._table_bscale = {}
+    for nom in ("gate_proj", "up_proj", "down_proj"):
+        tq, tb = construire_table(table.experts, nom, device=dev)
+        table._table_qw[nom] = tq
+        table._table_bscale[nom] = tb
+    table._stack_state = "?"
+
+    torch.manual_seed(123)
+    x = torch.randn(1, CACHE, device=dev, dtype=torch.bfloat16)
+    with torch.no_grad():
+        y_pile = pile(x.clone())
+        y_table = table(x.clone())
+
+    assert pile._stacks["gate_proj"][0] == "nvfp4", "témoin : pile attendue"
+    assert table._stack_state == "oui", "le chemin groupé aurait dû s'activer"
+    assert table._stacks["gate_proj"][0] == "nvfp4_table", (
+        "pendant table non construit -- retombé sur autre chose sans le dire")
+    assert torch.equal(y_pile, y_table), (
+        f"adressage par table != pile contiguë, même noyau (écart max "
+        f"{(y_pile - y_table).abs().max().item()}) — violation de "
+        f"« placement = vitesse, jamais sémantique »")
+
+
 def test_tous_exiles_est_aussi_bit_identique():
     """Cas limite : `residents` vide (aucun résident). Doit rester correct —
     équivalent à l'exil de couche entière d'aujourd'hui, à ce détail près
