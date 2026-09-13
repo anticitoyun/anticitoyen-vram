@@ -35,11 +35,14 @@ proche du seuil, une seconde passe est recommandée avant de conclure.
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import sys
 import time
 from pathlib import Path
+
+import torch
 import sys as _s, pathlib as _p  # noqa: E401
 _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
 from outils.hooks_activations_a4 import (installer_hooks_moe_experts,  # noqa: E402
@@ -128,6 +131,16 @@ def main() -> int:
         r = perplexity(str(DOSSIER), str(CORPUS), device=a.device,
                        apres_chargement=_brancher, **EVAL_KW)
         retirer_hooks(getattr(_brancher, "handles", []))
+        # Deux régimes, un seul processus : sans ce nettoyage, le modèle du
+        # régime précédent (~17 Gio pour Qwen3-Coder-30B en nvfp4) reste
+        # résident tant que le ramasse-miettes cyclique n'est pas passé (les
+        # hooks/parents forment des cycles), et le second chargement (deux
+        # copies ~34 Gio > 32 Gio de la 5090) force un exil massif — observé
+        # comme un plantage CUDA (ScatterGatherKernel, index hors bornes)
+        # dans le chemin d'experts exilés, pas dans nos hooks. Llama-2-7B
+        # (~7 Gio/copie) ne l'a jamais révélé.
+        gc.collect()
+        torch.cuda.empty_cache()
 
         ppl = r.perplexity
         resultats[regime] = {"ppl": ppl, "releve": r.to_dict()}

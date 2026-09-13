@@ -94,7 +94,28 @@ partielle par le fait que down_proj seul ne représente que ~22 % du coût
 A4 complet sur Llama-2-7B (donc gate+up pourraient porter une part non
 négligeable, jamais isolée jusqu'ici).
 
+## Addendum, 13/09 : mesure du noyau RÉEL, pas d'un fake-quant
+
+`installer_hooks_moe_experts` s'est révélé inerte à `window=2048` (le
+prefill de cette taille prend `_forward_prefill_grouped`, pas
+`_forward_grouped`/`_grouped` — seuil `ACVRAM_MOE_GROUPED_MAX=32`,
+model.py:980-983 — vérifié : PPL identique bit à bit entre témoin et
+« moe-a4 », donc non publié comme mesure). poste4 signale mieux :
+`ACVRAM_MOE_MMA=1` (main ≥ 6c99fa5) fait passer CE chemin de prefill par
+`nvfp4_gemm_grouped_mma` — le VRAI noyau W4A4, pas une simulation :
+active/désactivée par un flag process-level (`_MOE_MMA` figé à l'import
+de `model.py`), donc deux processus séparés, pas un hook.
+
+**Nouvelle prédiction, remplace celle du fake-quant ci-dessus** : même
+fourchette qu'avant sur le fond (+0,4 % à +1,0 %), mais la confiance
+augmente — c'est le noyau qui tournera en production, pas une
+approximation. Vérification de mécanisme : débit mesuré doit différer
+nettement entre les deux régimes (~10 500 j/s à L=2048 avec MMA contre
+~8 600 sans, d'après poste4) — sinon le chemin MMA n'est pas pris et la
+mesure ne vaut rien, comme pour le fake-quant.
+
 ## Ce qui reste, sur carte
 
-File : poste3 → poste4 (~8 min) → moi → poste1.
-`python outils/moe-experts-a4-qwen3-coder.py --pour-de-vrai`.
+`python outils/moe-mma-reel-qwen3-coder.py --pour-de-vrai --regime a16`
+puis `--regime mma-reel` (deux processus séparés, `ACVRAM_MOE_MMA` figé
+à l'import).
