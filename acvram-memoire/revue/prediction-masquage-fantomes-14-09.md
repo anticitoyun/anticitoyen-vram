@@ -62,3 +62,44 @@ masquage est un vrai gain (validé par test, et le résident complet en
 profite directionnellement), mais graphes+table pour b=12 n'est
 toujours pas un gain net démontré contre l'eager. Remesure propre (carte
 calme) et éventuellement ncu restent à faire avant de changer le défaut.
+
+## Remesure carte exclusive (règle du 14/09 après-midi, chef) — CONFIRME, contention écartée
+
+Deux remesures à la file, carte EXCLUSIVE (verrou tenu du chargement à la
+fin, aucune autre session active) :
+
+    exil_par_expert b=12, graphes+masque   contention   exclusif
+    facteur vs résident                    23,0         23,1
+    résident complet, j/s                  681,8        681,4
+
+**Quasi identique entre les deux régimes de carte.** La contention
+n'expliquait PAS l'écart à la prédiction : le facteur 23 est réel et
+reproductible, PAS un artefact de mesure partagée. Ma prédiction (« sous
+20,2 ») reste RÉFUTÉE, cette fois sans réserve.
+
+Le témoin ÉNERGIE de poste3 (`banc-horloge-decodage.py`, protocole
+568,6 t/s / 0,601 J) reste, lui, INVALIDÉ deux fois de suite — MÊME sous
+carte exclusive (612,7 puis 615,7 t/s, 0,549 puis 0,552 J, bridage de
+puissance les deux fois). Comme les deux essais donnent des chiffres très
+proches l'un de l'autre malgré des conditions de carte différentes
+(contention puis exclusive), ce n'est pas non plus la contention qui
+invalide CETTE fenêtre-là — plus probablement un état thermique élevé,
+accumulé après un après-midi de charge quasi continue sur la carte par
+plusieurs sessions. Le script (`repos(secondes=8.0)`, ligne dure) n'utilise
+d'ailleurs pas les 30 s que chef citait comme le régime du témoin
+d'origine — écart non résolu ici, à vérifier avant de rejouer ce witness
+précis.
+
+**Ce que je peux affirmer sans réserve** (comparaison à script constant,
+avant/après masquage, deux mesures : 14/09 après-midi 611-614 j/s puis
+ce soir 681,4-681,8 j/s) : **+11 % de débit sur le résident complet b=12,
+reproductible**, sans jamais passer par le protocole énergie de poste3.
+
+## Conclusion
+
+Le masquage tient sa promesse pour le résident complet (+11 %,
+reproductible). Pour l'exil par expert avec graphes, le facteur 23 est
+maintenant établi comme RÉEL, pas un artefact — la piste qui reste est
+celle mise de côté le 14/09 (latence de dépendance du double
+déréférencement du chemin table), à trancher par `ncu` si la question
+reste ouverte.
