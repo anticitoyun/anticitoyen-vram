@@ -80,3 +80,9 @@ de mesure.
 Aucun bead créé/fermé pour ce résultat : ni confirmation franche ni
 implémentation à faire, seulement une note de mesure et une décision de
 produit renvoyée à chef.
+
+## Décision — 13/09/2026
+
+**Non retenu.** L'utilisateur, par chef : aucun réglage d'horloge —
+`ACVRAM_HORLOGE_DECODAGE` n'est pas créé, ce verdict reste une note de
+mesure. Le compromis à 2100 MHz (§ ci-dessus) n'est pas adopté par défaut.
