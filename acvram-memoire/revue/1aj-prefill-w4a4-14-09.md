@@ -119,3 +119,72 @@ s'arrête là côté vitesse, pas de volet B1/B2 à lancer derrière —
 « la qualité ne rachète pas une perte de vitesse ». Bead fermé côté
 prefill W4A4 projections attention, sur ce noyau et cette approche
 (E=1 dense sur un noyau conçu pour le groupé MoE).
+
+# Repli W8A8 — diagnostic du chemin actuel + prédiction scellée (A')
+
+poste1, 14/09/2026 soir, hors carte. chef, après le calcul de coin de
+table sur le volet A (48 couches × 2·2048²·(4096+512+512+4096) ≈ 3,7
+TFLOP ; à ~150 TFLOPS bf16 réels ≈ 25 ms — nos 30,67 ms sont donc déjà
+proches de la borne bf16 tensor cores, vLLM à 3,3 ms est à la borne
+FP4) : diagnostiquer précisément le chemin actuel avant d'écrire quoi
+que ce soit.
+
+## Diagnostic — ce que fait le chemin int8 actuel en prefill
+
+Lu directement dans le code (`acvram/kernels/__init__.py:625-663`,
+`int8_matmul`) : bascule sur `n = x.shape[0]` (nombre de jetons) contre
+`ACVRAM_INT8_GEMV_MAX` (défaut 80). À pp2048, `n=2048 ≫ 80` : chemin
+`else` pris, ligne 662-663 —
+
+```python
+w = int8_dequant(t, x.dtype)                    # int8 -> bf16, dequant complete
+return torch.nn.functional.linear(x, w.to(x.dtype))   # cuBLAS bf16
+```
+
+**Confirmé : déquantification int8 → bf16 complète, puis GEMM bf16 via
+cuBLAS (`F.linear`).** Pas de tensor cores int8. Cohérent avec le calcul
+de chef : 30,67 ms ≈ la borne bf16, pas un défaut d'implémentation à
+corriger — c'est la BONNE décision pour ce seuil (`ACVRAM_INT8_GEMV_MAX`
+existe précisément parce que la déquantification l'emporte au-delà
+d'~88 jetons, commentaire ligne 634-643) : au régime prefill, rien ne
+manque, le chemin fait ce qu'il doit avec les octets qu'il a.
+
+**Nuance à nommer avant d'écrire W8A8** : notre `INT8Tensor` est
+AFFINE, pas symétrique — `qweight` en **uint8** (0-255) avec un
+zero-point `zeros` par groupe (`formats.py:188-231`), pas un int8 signé
+centré sur zéro. `torch._int_mm`/cuBLASLt calculent un produit
+int8×int8→int32 SANS terme de zero-point : les utiliser directement sur
+notre `qweight` tel quel donnerait un résultat faux (mauvaise
+interprétation uint8 vs int8 signé, ET le décalage du zero-point non
+corrigé). « Zéro requant » au sens strict n'est donc pas littéral : soit
+(i) on replie le zero-point dans une correction post-GEMM (terme
+`zero · Σactivations` par canal de sortie, standard pour un GEMM
+affine — le poids qui alimente le produit matriciel reste NUMÉRIQUEMENT
+le même octet, aucune perte), soit (ii) on centre le uint8 en int8
+signé par un simple décalage `-128` (transformation reversible,
+équivalente à re-baser le zero-point, PAS une perte de précision — un
+bijection sur l'espace des 256 codes). Les deux gardent le poids
+"tel quel" au sens où aucune information n'est perdue ; ça change
+seulement l'arithmétique de reconstruction, pas le contenu quantifié.
+Je pars sur (ii), plus simple à câbler et strictement équivalente à (i).
+
+## Prédiction scellée A' (vitesse), chef
+
+- Départ : 30,67 ms (mesuré ce soir, volet A, chemin actuel confirmé
+  inchangé).
+- **Chemin testé** : poids int8 affine → décalage en int8 signé (zéro
+  perte), activation int8 PAR JETON dynamique (échelle par ligne,
+  calculée à la volée), produit via `torch._int_mm` (tensor cores int8,
+  2× le débit bf16 en théorie).
+- **Seuil de preuve : ≤ 16 ms** (borne haute de la fourchette 14-16 ms).
+- **Seuil de réfutation : ≥ 24 ms.**
+- Qualité (volet B', à faire séparément si A' tient) : PPL Coder-30B
+  ≤ +0,3 % — activation int8 dynamique par jeton, perte attendue
+  ≤ 0,1 % d'après chef, à vérifier, pas supposée.
+
+## Suite
+
+(A') vitesse seule, même protocole que pour W4A4 (micro-banc sur les
+vrais poids, chemin actuel vs nouveau, médian de plusieurs répétitions,
+carte). Pas encore lancé — ce diagnostic clôt le préalable demandé avant
+d'écrire quoi que ce soit.
