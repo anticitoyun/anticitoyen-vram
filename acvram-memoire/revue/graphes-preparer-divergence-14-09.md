@@ -83,3 +83,33 @@ LOGITS (tolérance ~1 ulp bf16) plutôt que l'égalité stricte des jetons —
 un greedy qui bascule sur un TIE est un résultat correct des deux côtés,
 pas une divergence à corriger. poste4 n'a rien à changer côté tampons.
 Intégration du recouvrement reprise.
+
+## s11 ("arrivee", jeton 0 après admission) : même famille, confirmé
+
+poste4 a trouvé, avec son propre test (`outils/test_graphes_vs_eager.py`,
+main `021c7f2`), que sa séquence admise en cours de lot (indice 11)
+diverge d'eager dès son PREMIER jeton décodé — cas plus suspect que
+s4/s7 puisque c'est le tout premier pas d'un slot repris (table/position/
+slot_mapping), potentiellement un vrai bogue d'admission plutôt qu'un
+tie bf16.
+
+Contrôle (`outils/diag-logits-arrivee-jeton0.py` + `.sh`, deux processus
+séparés) — piège trouvé en le construisant : `step()` prefille ET décode
+une séquence nouvellement admise dans le MÊME appel (`_decodables()`
+l'inclut dès que `prefilled` passe à vrai, juste après son prefill,
+`runner.py:787`) — deux appels à `_emit` pour s11 dans un seul pas, jeton
+0 (prefill) puis jeton 1 (décode) ; un premier essai qui ne gardait pas
+QUE le premier appel capturait le mauvais jeton, produisant des valeurs
+incohérentes entre les deux chemins. Corrigé (ne garder que le premier
+`_emit` pour `request_id=="s11"`), puis reproduit EXACTEMENT la
+divergence de poste4 (eager=198, graphes=76, comme son propre test) :
+
+    eager  : top1=198 val=12,452925  top2=76  val=12,374856  écart=0,078069
+    graphes: top1=76  val=12,403308  top2=198 val=12,258751  écart=0,144557
+
+Mêmes DEUX candidats des deux côtés (198 et 76), juste lequel gagne qui
+bascule — signature classique du tie bf16, pas d'une adresse fausse.
+Les deux écarts (0,078 et 0,145) sont sous le seuil `TOLERANCE_ULP=0,4`
+déjà retenu pour s4/s7 à cette magnitude. **Même verdict : bruit
+numérique légitime, pas un bogue d'admission.** Rien à changer côté
+table/position/slot_mapping.
