@@ -65,3 +65,164 @@ départ.
 Les poids INT8 PROMUS (sensibles, gardés en int8 par la conversion)
 restent sur leur chemin actuel dans ce micro-banc aussi — le volet A ne
 touche que les projections réellement `nvfp4`.
+
+## Correction avant mesure : q/k/v/o sont TOUS int8 sur ce modèle, pas nvfp4
+
+Vérifié directement sur le modèle chargé (14/09 soir) : `q_proj`,
+`k_proj`, `v_proj`, `o_proj` ET `lm_head` sont TOUS au format `int8` sur
+Coder-30B — aucun n'est `nvfp4`. Pas une promotion ad hoc : `convert.py`
+leur donne un plancher `int8` délibéré (même raisonnement que la tête,
+151 936 classes). Décision de chef après ce constat : mesurer quand
+même, en quantifiant CES poids int8 vers nvfp4 **en mémoire** (pas le
+fichier converti, rien touché à la conversion), pour ce banc vitesse
+seule — `lm_head` exclu (reste int8 dans tous les cas, décision
+distincte). Le script et les seuils ci-dessus restent inchangés,
+seulement la source du poids nvfp4 testé.
+
+## Résultat (14/09 soir, carte, `outils/banc_1aj_prefill_vitesse.py`)
+
+192 projections (48 couches × q/k/v/o), pp2048 :
+
+```
+SOMME actuel  (int8, chemin reel)                 : 30,67 ms
+SOMME nouveau (nvfp4 en memoire + MMA E=1)         : 43,02 ms
+Seuil de preuve      : <= 8 ms
+Seuil de refutation   : >= 20 ms
+VERDICT : RÉFUTATION
+```
+
+Le chemin actuel (30,67 ms) confirme le départ mesuré par poste4
+(30 ms) — méthode validée. Le nouveau chemin est **+40 % plus lent**,
+pas plus rapide, uniformément sur toutes les couches et toutes les
+tailles (q_proj 4096 sorties : +41 % ; k/v_proj 512 sorties : +45-55 % ;
+o_proj 2048 sorties : +38 %) — un surcoût à peu près PROPORTIONNEL, pas
+concentré sur une taille particulière, cohérent avec un coût fixe par
+appel (quantification d'activation + ordonnancement de tuiles) qui ne
+s'amortit pas mieux ici que dans le chemin `torch._scaled_mm` rejeté le
+10/09 pour la même raison générale (voir section précédente). Hypothèse
+non vérifiée plus loin (pas nécessaire, la mesure suffit à trancher) :
+le noyau `nvfp4_gemm_grouped_mma`/`mma2` est construit pour le régime
+MoE (beaucoup de petits groupes d'experts) ; en E=1 dense, il ne
+retrouve pas son terrain — même limite structurelle que le chemin
+`torch._scaled_mm`, sous un noyau différent.
+
+Note en passant, PAS la mesure de qualité (volet B, à faire séparément,
+sérieusement) : l'écart relatif moyen entre la sortie int8 réelle et la
+sortie nvfp4-en-mémoire, sur une activation aléatoire non calibrée, est
+étonnamment stable à ~13,9-14,0 % sur les 192 projections — un signal,
+pas une mesure, à ne pas citer comme un chiffre de qualité.
+
+## Verdict volet A
+
+**Réfuté sans réserve.** Conforme au protocole écrit avant mesure : on
+s'arrête là côté vitesse, pas de volet B1/B2 à lancer derrière —
+« la qualité ne rachète pas une perte de vitesse ». Bead fermé côté
+prefill W4A4 projections attention, sur ce noyau et cette approche
+(E=1 dense sur un noyau conçu pour le groupé MoE).
+
+# Repli W8A8 — diagnostic du chemin actuel + prédiction scellée (A')
+
+poste1, 14/09/2026 soir, hors carte. chef, après le calcul de coin de
+table sur le volet A (48 couches × 2·2048²·(4096+512+512+4096) ≈ 3,7
+TFLOP ; à ~150 TFLOPS bf16 réels ≈ 25 ms — nos 30,67 ms sont donc déjà
+proches de la borne bf16 tensor cores, vLLM à 3,3 ms est à la borne
+FP4) : diagnostiquer précisément le chemin actuel avant d'écrire quoi
+que ce soit.
+
+## Diagnostic — ce que fait le chemin int8 actuel en prefill
+
+Lu directement dans le code (`acvram/kernels/__init__.py:625-663`,
+`int8_matmul`) : bascule sur `n = x.shape[0]` (nombre de jetons) contre
+`ACVRAM_INT8_GEMV_MAX` (défaut 80). À pp2048, `n=2048 ≫ 80` : chemin
+`else` pris, ligne 662-663 —
+
+```python
+w = int8_dequant(t, x.dtype)                    # int8 -> bf16, dequant complete
+return torch.nn.functional.linear(x, w.to(x.dtype))   # cuBLAS bf16
+```
+
+**Confirmé : déquantification int8 → bf16 complète, puis GEMM bf16 via
+cuBLAS (`F.linear`).** Pas de tensor cores int8. Cohérent avec le calcul
+de chef : 30,67 ms ≈ la borne bf16, pas un défaut d'implémentation à
+corriger — c'est la BONNE décision pour ce seuil (`ACVRAM_INT8_GEMV_MAX`
+existe précisément parce que la déquantification l'emporte au-delà
+d'~88 jetons, commentaire ligne 634-643) : au régime prefill, rien ne
+manque, le chemin fait ce qu'il doit avec les octets qu'il a.
+
+**Nuance à nommer avant d'écrire W8A8** : notre `INT8Tensor` est
+AFFINE, pas symétrique — `qweight` en **uint8** (0-255) avec un
+zero-point `zeros` par groupe (`formats.py:188-231`), pas un int8 signé
+centré sur zéro. `torch._int_mm`/cuBLASLt calculent un produit
+int8×int8→int32 SANS terme de zero-point : les utiliser directement sur
+notre `qweight` tel quel donnerait un résultat faux (mauvaise
+interprétation uint8 vs int8 signé, ET le décalage du zero-point non
+corrigé). « Zéro requant » au sens strict n'est donc pas littéral : soit
+(i) on replie le zero-point dans une correction post-GEMM (terme
+`zero · Σactivations` par canal de sortie, standard pour un GEMM
+affine — le poids qui alimente le produit matriciel reste NUMÉRIQUEMENT
+le même octet, aucune perte), soit (ii) on centre le uint8 en int8
+signé par un simple décalage `-128` (transformation reversible,
+équivalente à re-baser le zero-point, PAS une perte de précision — un
+bijection sur l'espace des 256 codes). Les deux gardent le poids
+"tel quel" au sens où aucune information n'est perdue ; ça change
+seulement l'arithmétique de reconstruction, pas le contenu quantifié.
+Je pars sur (ii), plus simple à câbler et strictement équivalente à (i).
+
+## Prédiction scellée A' (vitesse), chef
+
+- Départ : 30,67 ms (mesuré ce soir, volet A, chemin actuel confirmé
+  inchangé).
+- **Chemin testé** : poids int8 affine → décalage en int8 signé (zéro
+  perte), activation int8 PAR JETON dynamique (échelle par ligne,
+  calculée à la volée), produit via `torch._int_mm` (tensor cores int8,
+  2× le débit bf16 en théorie).
+- **Seuil de preuve : ≤ 16 ms** (borne haute de la fourchette 14-16 ms).
+- **Seuil de réfutation : ≥ 24 ms.**
+- Qualité (volet B', à faire séparément si A' tient) : PPL Coder-30B
+  ≤ +0,3 % — activation int8 dynamique par jeton, perte attendue
+  ≤ 0,1 % d'après chef, à vérifier, pas supposée.
+
+## Résultat A' (14/09 soir, carte, `outils/banc_1aj_prefill_w8a8_vitesse.py`)
+
+192 projections (48 couches × q/k/v/o), pp2048, poids int8 requantifié
+en int8 signé PAR CANAL DE SORTIE (amax par ligne, format W8A8 standard
+SmoothQuant/TensorRT — confirmé par chef avant la mesure : nos groupes
+int8 courent le long de K, donc un seul `torch._int_mm` n'est correct
+qu'avec une échelle par ligne, pas par groupe) :
+
+```
+SOMME actuel  (int8 -> bf16 -> cuBLAS, chemin reel)  : 30,85 ms
+SOMME nouveau (int8 signe par ligne + torch._int_mm) : 42,28 ms
+Seuil de preuve      : <= 16 ms
+Seuil de refutation   : >= 24 ms
+VERDICT : RÉFUTATION
+```
+
+**Réfuté, avec une marge confortable** (42,28 ms contre un seuil de
+24 ms — 76 % au-delà). Motif visible dans le détail par couche : les
+petites projections (k_proj/v_proj, 512 sorties) sont proportionnellement
+les PLUS touchées (0,042 → 0,110 ms, ×2,6) — signature d'un coût FIXE
+par appel (quantification d'activation + lancement `torch._int_mm`) qui
+domine sur les petites matrices, plus visible ici que sur q_proj/o_proj.
+
+**Réserve méthodologique à nommer, ne change pas le verdict** : q/k/v
+partagent la MÊME activation d'entrée dans une vraie couche, mais ce
+banc requantifie l'activation en int8 séparément pour chacun des 4
+appels par couche (mesure isolée, pas une intégration réelle) — une
+implémentation qui partagerait la quantification d'activation entre
+q/k/v économiserait une partie du coût fixe observé sur k_proj/v_proj.
+Non mesuré ici (pas nécessaire : 42,28 ms est à 76 % au-delà du seuil de
+réfutation, une économie partagée plausible ne suffirait pas à
+retraverser 24 ms). Si le chantier veut un chiffre plus juste pour cette
+hypothèse précise, il resterait à mesurer, pas à supposer.
+
+## Verdict repli W8A8
+
+**Réfuté sans réserve utile.** Même symptôme que le W4A4 : un coût fixe
+par appel qui ne s'amortit pas sur des projections de cette taille.
+`torch._int_mm`/cuBLASLt int8 ne rattrape pas le cuBLAS bf16 déjà
+utilisé aujourd'hui, dans ce régime. Bead 1aj fermé côté prefill
+projections attention — les deux pistes de repli tentées (W4A4 noyau
+groupé E=1, W8A8 `torch._int_mm`) perdent toutes les deux dans le même
+régime, pour une raison structurelle proche (coût fixe par appel,
+prefill à gros lot déjà proche de sa borne bf16).
