@@ -108,7 +108,20 @@ def main() -> int:
 
     sortie = Path(a.sortie)
     sortie.mkdir(parents=True, exist_ok=True)
+    # FUSIONNE avec un resultats.json existant, jamais un remplacement pur :
+    # le verrou de carte se rend ENTRE deux regimes lances separement (pour
+    # laisser passer une autre session), et deux invocations successives de
+    # ce script sur le meme --sortie doivent ACCUMULER, pas s'ecraser l'une
+    # l'autre. Manque le 13/09 : un premier lancement a4 seul, suivi d'un
+    # second a8 seul, a fait disparaitre le resultat a4 du fichier — corrige
+    # ici, le journal (a4.log/a8.log) portait heureusement les deux chiffres.
     resultats = {}
+    fichier_resultats = sortie / "resultats.json"
+    if fichier_resultats.exists():
+        try:
+            resultats = json.loads(fichier_resultats.read_text()).get("resultats", {})
+        except (json.JSONDecodeError, OSError):
+            resultats = {}
     for regime in regimes:
         t0 = time.time()
 
