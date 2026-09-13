@@ -205,11 +205,57 @@ pire, donc le noyau qui fait le plus de travail utile pèse relativement
 plus lourd. Le noyau bf16 WMMA (ligne 7) confirme que le routeur reste en
 précision pleine, comme annoncé par `hf_quant_config.json`.
 
-## Ce qui reste
+## TabbyAPI (EXL3 4.0bpw)
 
-TabbyAPI (EXL3 4.0bpw, `models_exl3/Qwen3-Coder-30B-A3B-4.0bpw-EXL3`) —
-pas d'API offline `generate()` aussi directe que vLLM/acvram dans ce
-dépôt : exllamav3 n'expose qu'un usage serveur (TabbyAPI lui-même). Un
-client HTTP avec le même dénominateur (measurer TTFT du premier jeton
-d'un `generate(max_tokens=1)`, invite différente par répétition) reste à
-écrire.
+`outils/banc_tabbyapi.py` : lance le serveur lui-même (`main.py
+--model-name ... --max-seq-len ... --cache-size ...`), l'interroge en
+HTTP, l'arrête — le verrou carte.sh enveloppe tout le script, pas
+seulement la mesure. Trois obstacles, tous des détails d'API propres à
+TabbyAPI (aucun ne remet en cause acvram ni vLLM) :
+
+1. `/v1/completions` n'accepte qu'un `prompt` **string**, pas de jetons
+   bruts comme vLLM/acvram — aller-retour par `/v1/token/decode` pour
+   garder la même formule d'invite numérique ; le compte réel de jetons
+   après retokenisation est lu dans `usage.prompt_tokens` du serveur
+   (jamais supposé égal à L — la retokenisation du texte décodé dérive
+   légèrement, 2127-2157 jetons mesurés pour un L visé de 2048).
+2. `max_seq_len`/`cache_size` doivent être des multiples de 256
+   (PAGE_SIZE d'exllamav3) — `AssertionError` sinon.
+3. `usage` est `null` par défaut en non-streaming ; il faut
+   `stream_options.include_usage: true` dans la requête MÊME sans
+   streaming, sinon `AttributeError` en lisant `usage.prompt_tokens`.
+
+Chargement du modèle (30B, EXL3 4.0bpw) : 187,8 s.
+
+### Résultat
+
+| moteur | pp2048 (j/s) | décodage 12 séq (t/s) | J/jeton net (décodage) |
+|---|---|---|---|
+| vLLM | 34 788 | 1 198,4 | 0,202 |
+| acvram | 17 111 | 568,6 | 0,601 |
+| **TabbyAPI** | **8 671** | **135,9** | **1,026** |
+
+**TabbyAPI est nettement le plus lent des trois sur les deux axes** —
+×2 plus lent qu'acvram en prefill, ×4,2 plus lent en décodage concurrent,
+×1,7 moins efficace en énergie. Hypothèses plausibles, non vérifiées ici
+(hors périmètre de cette mesure) : exllamav3/TabbyAPI est pensé pour un
+usage mono-utilisateur (log de démarrage : « Disabling GPU split because
+one GPU is in use »), pas pour la concurrence à 12 séquences que ce banc
+impose ; le format EXL3 (quantification par couche, GPTQ-like) n'a pas
+d'équivalent du noyau MoE groupé CUTLASS FP4 de vLLM ni du noyau MMA
+natif d'acvram.
+
+**Réserve** : mesuré sous le même bridage 400 W et une seule passe (pas
+de jumelles) — un TabbyAPI mal configuré pour ce cas d'usage précis
+(concurrence élevée) donnerait le même chiffre qu'un TabbyAPI
+structurellement plus lent ; cette mesure ne les distingue pas.
+
+## Bilan des trois moteurs
+
+vLLM devant sur toute la ligne, acvram au milieu, TabbyAPI loin derrière
+— dans CE régime (Coder-30B, NVFP4/FP4 pour les deux premiers, EXL3 pour
+le troisième, 12 séquences concurrentes, RTX 5090 bridée 400 W). Les
+noyaux FP4 CUTLASS de vLLM (GEMM groupée MoE, GEMM dense) sont plus
+rapides que notre MMA natif malgré un travail équivalent (même format,
+même bloc-échelle) — piste à approfondir côté acvram si le chantier le
+justifie (hors périmètre de cet audit).
