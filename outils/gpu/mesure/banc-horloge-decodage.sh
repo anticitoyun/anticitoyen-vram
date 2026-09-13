@@ -1,17 +1,32 @@
 #!/bin/bash
 # Banc horloge SM x energie -- Coder-30B, b=12 (chef, suite a poste7 §1).
 #
-# 13/09/2026 : sudoers permet desormais `sudo -n nvidia-smi -lgc/-rgc/-pl`
-# sans mot de passe (voir /etc/sudoers.d/nvidia-smi) -- ce script verrouille
-# et deverrouille lui-meme l'horloge, sous outils/carte.sh (ACVRAM_TYPE=etat).
+# CE SCRIPT NE PREND PAS LE VERROU LUI-MEME : il est concu pour etre
+# ENVELOPPE une seule fois, de bout en bout, par `outils/carte.sh` (13/09,
+# la campagne tient mieux dans UN verrou continu que dans des verrous par
+# etape -- entre un `-lgc` et la mesure qui le vise, un autre appelant
+# aurait pu se glisser). L'appeler seul, sans enveloppe, echouera au
+# premier acces a outils/gpu/mesure/ (garde du depot).
+#
+#   ACVRAM_NOM=horloge-poste3 ACVRAM_TYPE=etat outils/carte.sh \
+#       outils/gpu/mesure/banc-horloge-decodage.sh
+#
+# En service detache (le superviseur de session tue sur MemFree brut, pas
+# sur la memoire reellement disponible -- carte.sh:76-84) :
+#
+#   systemd-run --user --unit=horloge-poste3 --collect \
+#       -p WorkingDirectory="$PWD" \
+#       env ACVRAM_NOM=horloge-poste3 ACVRAM_TYPE=etat \
+#       outils/carte.sh outils/gpu/mesure/banc-horloge-decodage.sh
+#
+# 13/09/2026 : sudoers permet `sudo -n nvidia-smi -lgc/-rgc/-pl` sans mot de
+# passe (/etc/sudoers.d/nvidia-smi).
 #
 # GARDE OBLIGATOIRE : `-rgc` en fin de campagne ET sur toute interruption
 # (trap EXIT/INT/TERM) -- une horloge restee verrouillee apres ce script
 # affamerait toute session suivante. Le plafond de puissance (400 W) est
 # revérifié apres chaque -rgc : ce script ne le TOUCHE jamais (-pl n'est
 # appele nulle part ici), seule sa PERSISTANCE apres reset est controlee.
-#
-# Usage : outils/gpu/mesure/banc-horloge-decodage.sh
 set -u
 S="$(cd "$(dirname "$0")/../../.." && pwd)"
 PY=~/Bureau/Claude/anticitoyen-vram/.venv/bin/python3
@@ -29,44 +44,38 @@ libre() {
 }
 
 reinit_horloge() {
-  # Idempotent : peut etre appele plusieurs fois (trap + fin normale) sans
-  # echouer sur une carte deja reinitialisee.
-  ACVRAM_NOM=horloge-reset ACVRAM_TYPE=etat "$S/outils/carte.sh" \
-    sudo -n nvidia-smi -i 0 -rgc >/dev/null 2>&1
+  # Idempotent : appelable plusieurs fois (trap + fin normale) sans echouer
+  # sur une carte deja reinitialisee. PAS de carte.sh ici : le verrou est
+  # deja tenu par l'enveloppe exterieure pour toute la duree du script.
+  sudo -n nvidia-smi -i 0 -rgc >/dev/null 2>&1
   local pl
   pl=$(nvidia-smi -i 0 --query-gpu=power.limit --format=csv,noheader,nounits | cut -d. -f1)
   if [ "$pl" != "$PLAFOND_ATTENDU_W" ]; then
     echo "ALERTE : power.limit=$pl W apres -rgc, attendu $PLAFOND_ATTENDU_W W" >&2
   fi
 }
-# CE TRAP EST LA GARDE REELLE : sans lui, un Ctrl-C ou un kill pendant un
-# palier laisserait l'horloge verrouillee pour la session suivante — exactement
-# le defaut que -rgc en fin de script normal ne couvre pas.
 trap reinit_horloge EXIT INT TERM
 
 verrouiller() {
-  local f="$1"
-  ACVRAM_NOM="horloge-lock-${f}" ACVRAM_TYPE=etat "$S/outils/carte.sh" \
-    sudo -n nvidia-smi -i 0 -lgc "${f},${f}"
+  sudo -n nvidia-smi -i 0 -lgc "${1},${1}"
 }
 
 mesurer() {
-  local nom="$1" palier="$2" sortie="$3"; shift 3
-  ACVRAM_NOM="$nom" ACVRAM_TYPE=mesure "$S/outils/carte.sh" \
-    "$PY" "$SCRIPT" "$MODEL" "$palier" "$sortie" "$@"
+  local palier="$1" sortie="$2"; shift 2
+  "$PY" "$SCRIPT" "$MODEL" "$palier" "$sortie" "$@"
 }
 
 echo "=== palier defaut (aucun verrou) ==="
 libre
-mesurer horloge-decodage-defaut defaut "$SORTIE_DIR/decodage-defaut.json"
+mesurer defaut "$SORTIE_DIR/decodage-defaut.json"
 libre
-mesurer horloge-prefill-defaut defaut "$SORTIE_DIR/prefill-defaut.json" --prefill
+mesurer defaut "$SORTIE_DIR/prefill-defaut.json" --prefill
 
 for f in "${PALIERS_MHZ[@]}"; do
   echo "=== palier ${f} MHz ==="
   libre
   verrouiller "$f" || { echo "REFUS : verrouillage a ${f} MHz echoue"; continue; }
-  mesurer "horloge-decodage-${f}" "$f" "$SORTIE_DIR/decodage-${f}.json"
+  mesurer "$f" "$SORTIE_DIR/decodage-${f}.json"
 done
 
 reinit_horloge
