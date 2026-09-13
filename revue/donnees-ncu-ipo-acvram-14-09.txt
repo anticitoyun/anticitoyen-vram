@@ -1,0 +1,38 @@
+Par pas (moyenne sur 1 pas), 1506 lancements profilés, 0 valeurs illisibles
+                                                                  appels   ms/pas  Go lus    Go/s    Ginst  inst/oct tens%  fma%  lsu%   SM%   MHz
+nvfp4_gemv_grouped_gateup_kernel<__nv_bfloat16, 1>                  48.0    4.174   2.556     612    3.469      1.36   0.0   0.0   0.0   0.0  2481
+nvfp4_gemv_grouped_warp_kernel<float, 1>                            48.0    4.059   1.296     319    3.306      2.55   0.0   0.0   0.0   0.0  2455
+int8_gemv_kernel<4, 12> grille=(512, 1, 1)                          48.0    1.639   0.420     256    0.556      1.32   0.0   0.0   0.0   0.0  2418
+int8_gemv_kernel<4, 12> grille=(1280, 1, 1)                         48.0    1.619   0.520     321    0.705      1.35   0.0   0.0   0.0   0.0  2328
+paged_attn_partial_kernel<128, __nv_bfloat16>                       48.0    0.858   0.085     100    0.309      3.62   0.0   0.0   0.0   0.0  2324
+int8_gemv_kernel<4, 4> grille=(1280, 1, 1)                          48.0    0.723   0.517     715    0.298      0.58   0.0   0.0   0.0   0.0  2395
+at::elementwise_kernel                                             241.0    0.705   0.020      28    0.008      0.40   0.0   0.0   0.0   0.0  2536
+int8_gemv lm_head (37984, 1, 1)                                      1.0    0.684   0.319     469    0.436      1.37   0.0   0.0   0.0   0.0  2715
+int8_gemv_kernel<4, 4> grille=(512, 1, 1)                           48.0    0.664   0.415     625    0.236      0.57   0.0   0.0   0.0   0.0  2429
+at::vectorized_elementwise_kernel                                  200.0    0.397   0.009      22    0.001      0.08   0.0   0.0   0.0   0.0  2523
+at::unrolled_elementwise_kernel                                    145.0    0.396   0.009      22    0.003      0.37   0.0   0.0   0.0   0.0  2534
+rmsnorm_bf16_kernel                                                 97.0    0.384   0.014      35    0.011      0.84   0.0   0.0   0.0   0.0  2548
+moe_route_kernel                                                    48.0    0.371   0.002       4    0.006      3.74   0.0   0.0   0.0   0.0  2562
+int8_gemv_kernel<4, 4> grille=(37984, 1, 1)                          1.0    0.265   0.319    1205    0.184      0.58   0.0   0.0   0.0   0.0  2712
+rope_inplace_kernel                                                 48.0    0.203   0.008      38    0.016      2.09   0.0   0.0   0.0   0.0  2537
+0_wmma_tensorop_bf16_s161616gemm_bf16_16x16_128x2_tn_align8>        48.0    0.190   0.029     153    0.003      0.09   3.7   0.0   0.0   0.0  2541
+kv_write_int8_kernel                                                48.0    0.168   0.001       9    0.002      1.37   0.0   0.0   0.0   0.0  2542
+paged_attn_reduce_kernel<128, __nv_bfloat16>                        48.0    0.166   0.052     310    0.011      0.22   0.0   0.0   0.0   0.0  2533
+elementwise_kernel_with_index                                       96.0    0.139   0.000       2    0.000      0.02   0.0   0.0   0.0   0.0  2507
+moe_reduce_kernel                                                   48.0    0.133   0.051     379    0.005      0.09   0.0   0.0   0.0   0.0  2528
+at::_scatter_gather_elementwise_kernel                              49.0    0.131   0.003      23    0.000      0.01   0.0   0.0   0.0   0.0  2537
+cublasLt::splitKreduce_kernel<32, 16>                               48.0    0.112   0.002      22    0.000      0.14   0.0   0.0   0.0   0.0  2535
+at::reduce_kernel                                                    3.0    0.028   0.022     780    0.005      0.22   0.0   0.0   0.0   0.0  2536
+at::indexSelectSmallIndex                                            1.0    0.007   0.000       2    0.000      3.86   0.0   0.0   0.0   0.0  2570
+
+Par poste
+                                                                  appels   ms/pas  Go lus    Go/s    Ginst  inst/oct tens%  fma%  lsu%   SM%   MHz
+projections attention                                              193.0    4.910   2.190     446    1.979      0.90   0.0   0.0   0.0   0.0  2394   27.0 %
+MoE gate·up                                                         48.0    4.174   2.556     612    3.469      1.36   0.0   0.0   0.0   0.0  2481   22.9 %
+MoE down                                                            48.0    4.059   1.296     319    3.306      2.55   0.0   0.0   0.0   0.0  2455   22.3 %
+norm + rope + élémentaires                                         731.0    2.085   0.059      28    0.039      0.67   0.0   0.0   0.0   0.0  2534   11.4 %
+attention paginée                                                   96.0    1.024   0.137     134    0.321      2.34   0.0   0.0   0.0   0.0  2429    5.6 %
+routage + glue MoE                                                 293.0    0.922   0.080      87    0.016      0.20   0.0   0.0   0.0   0.0  2530    5.1 %
+lm_head                                                             49.0    0.874   0.348     401    0.438      1.26   0.0   0.0   0.0   0.0  2545    4.8 %
+reste                                                               48.0    0.168   0.001       9    0.002      1.37   0.0   0.0   0.0   0.0  2542    0.9 %
+TOTAL                                                             1506.0   18.215   6.667     366    9.571      1.44   0.0   0.0   0.0   0.0  2505
