@@ -1134,6 +1134,10 @@ _MOE_MMA_BT = int(os.environ.get("ACVRAM_MOE_MMA_BT", "64"))
 # 2 → 16 655, 3 → 16 851, 4 → 16 938 (revue/mma-fp4-native-sm120.md).
 _MOE_MMA_ETAGES = int(os.environ.get("ACVRAM_MOE_MMA_ETAGES", "4"))
 
+# Décodage MLA : les créneaux d'un lot en un lancement (mla_decode_batch,
+# bead 6wa) ; ACVRAM_MLA_BATCH=0 rend la boucle par créneau. Bit-identique.
+_MLA_BATCH = os.environ.get("ACVRAM_MLA_BATCH", "1") == "1"
+
 # Marque, dans le magasin d'états, une séquence dont l'état réside dans les
 # tampons fixes d'une couche (chemin graphes) plutôt qu'en tuple fonctionnel.
 _STATIC = object()
@@ -1284,6 +1288,12 @@ class DecoderLayerGDN(nn.Module):
             un = lambda t, st: la.decode_static(t, st)
         b = h.shape[0] // q_len
         if b > 1:                              # un créneau par séquence
+            if q_len == 1 and hasattr(la, "rank") and _MLA_BATCH:
+                ext = kernels.get_extension()
+                if ext is not None and hasattr(ext, "mla_decode_batch"):
+                    ptrs, scores = self._mla_lot(b)
+                    return la.decode_static_batch(h, self.statics[:b], self.static_bucket,
+                                                  ptrs, scores)
             return torch.cat([un(h[i:i + 1], self.statics[i]) for i in range(b)], dim=0)
         if q_len == 1:
             return un(h, self.static)
@@ -1294,6 +1304,23 @@ class DecoderLayerGDN(nn.Module):
             for k, v in hist.items():
                 v[j].copy_(self.static[k])
         return torch.cat(ys, dim=0)
+
+    def _mla_lot(self, b: int):
+        """Table d'adresses des caches des ``b`` premiers créneaux et tampon de
+        scores partagé, créés une fois par jeu d'adresses (bead 6wa, spec §3-A).
+        Les caches par créneau ne sont jamais réalloués : la clé est stable, et
+        la création tombe dans l'échauffement eager qui précède toute capture
+        de graphe (graphs.py, _capture) — jamais dans la capture elle-même."""
+        cle = tuple(self.statics[i]["cache"].data_ptr() for i in range(b))
+        cache = self.__dict__.setdefault("_mla_lots", {})
+        entree = cache.get(cle)
+        if entree is None:
+            dev = self.statics[0]["cache"].device
+            ptrs = torch.tensor(cle, dtype=torch.int64, device=dev)
+            sc0 = self.statics[0]["scores"]
+            scores = torch.zeros(b, sc0.shape[0], sc0.shape[1], dtype=torch.float32, device=dev)
+            entree = cache[cle] = (ptrs, scores)
+        return entree
 
     def ensure_hist(self, q_len: int) -> dict:
         """Historique alloué une fois pour toutes (les graphes capturés y

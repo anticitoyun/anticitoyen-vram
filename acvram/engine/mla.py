@@ -296,11 +296,11 @@ class MLAttention(nn.Module):
         n = int(st["len"].item())
         return st["cache"][:n].clone()
 
-    def decode_static(self, x: torch.Tensor, st: dict, bucket: int
-                      ) -> torch.Tensor:
-        """Un jeton, une séquence ; attention sur ``cache[:bucket]`` masquée
-        au-delà de ``len`` ; écrit le latent à la ligne ``len`` puis avance."""
-        # mêmes formulations que ``forward`` (t = 1), pour arrondir pareil
+    def _prep_decode(self, x: torch.Tensor, st: dict, bucket: int):
+        """Préparation d'un jeton pour un créneau : projections, RoPE, norme,
+        écriture du latent à la ligne ``len``. Rend ``q_eff`` [1, nh, rank+rope].
+        Partagée par ``decode_static`` et ``decode_static_batch`` — un seul
+        texte, donc les deux chemins arrondissent pareil."""
         prem, kvp = self._proj_entree(x)
         q = self._q_depuis(prem).reshape(1, self.nh, self.nope + self.rope)
         q_nope, q_pe = q.split([self.nope, self.rope], dim=-1)
@@ -313,16 +313,43 @@ class MLAttention(nn.Module):
         q_abs = torch.einsum('hrn,thn->thr', self.k_b.to(x.dtype), q_nope)
         q_eff = torch.cat([q_abs, q_pe], dim=-1)             # [1, nh, rank+rope]
         k_new = torch.cat([c, k_pe], dim=-1)                 # [1, rank+rope]
+        st["cache"].index_copy_(0, st["len"].view(1), k_new)
+        return q_eff
+
+    def _sortie_decode(self, x: torch.Tensor, st: dict, o_lat: torch.Tensor) -> torch.Tensor:
+        y = torch.einsum('hvr,hr->hv', self.v_b.to(torch.float32), o_lat)
+        st["len"].add_(1)
+        return self.o_proj(y.reshape(1, self.nh * self.dv).to(x.dtype))
+
+    def decode_static_batch(self, x: torch.Tensor, sts: list, bucket: int,
+                            cache_ptrs: torch.Tensor, scores_batch: torch.Tensor
+                            ) -> torch.Tensor:
+        """``decode_static`` pour B créneaux avec UN lancement du noyau
+        d'attention (bead 6wa) ; préparation et sortie restent par créneau,
+        donc la sortie est bit-identique à la boucle. ``cache_ptrs`` [B] int64
+        = adresses des caches (stables, construites une fois par lot)."""
+        ext = _extension()
+        B = len(sts)
+        q = torch.stack([self._prep_decode(x[i:i + 1], sts[i], bucket).to(torch.float32)[0]
+                         for i in range(B)]).contiguous()          # [B, nh, W]
+        lens = torch.stack([st["len"] for st in sts])
+        o_lat = ext.mla_decode_batch(q, cache_ptrs, lens, scores_batch, bucket,
+                                     self.rank, self.scale)          # [B, nh, rank]
+        return torch.cat([self._sortie_decode(x[i:i + 1], sts[i], o_lat[i]) for i in range(B)], dim=0)
+
+    def decode_static(self, x: torch.Tensor, st: dict, bucket: int
+                      ) -> torch.Tensor:
+        """Un jeton, une séquence ; attention sur ``cache[:bucket]`` masquée
+        au-delà de ``len`` ; écrit le latent à la ligne ``len`` puis avance."""
+        # mêmes formulations que ``forward`` (t = 1), pour arrondir pareil
+        q_eff = self._prep_decode(x, st, bucket)
         cache = st["cache"]
-        cache.index_copy_(0, st["len"].view(1), k_new)
         ext = _extension() if x.is_cuda else None
         if ext is not None:
             o_lat = ext.mla_decode(q_eff.to(torch.float32)[0].contiguous(),
                                    cache, st["len"], st["scores"], bucket,
                                    self.rank, self.scale)        # [nh, rank]
-            y = torch.einsum('hvr,hr->hv', self.v_b.to(torch.float32), o_lat)
-            st["len"].add_(1)
-            return self.o_proj(y.reshape(1, self.nh * self.dv).to(x.dtype))
+            return self._sortie_decode(x, st, o_lat)
         C = cache[:bucket]
         scores = torch.einsum('thr,sr->ths', q_eff.to(torch.float32),
                               C.to(torch.float32)) * self.scale
