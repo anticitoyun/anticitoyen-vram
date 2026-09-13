@@ -83,7 +83,7 @@ le monde.
 ## Résultat (14/09, carte exclusive, `outils/carte.sh`)
 
 `outils/mesure-pipeline-ab.py`, résident Coder-30B b=12, 12 séquences ×
-200 jetons, `ACVRAM_PIPELINE=0` puis `=1`, même processus :
+200 jetons, `ACVRAM_PIPELINE=0` puis `=1` :
 
 ```
 [A] PIPELINE=0 : jetons_s=705,38  ms_par_pas=15,594
@@ -93,45 +93,72 @@ prédiction scellée : pas <= 13,5 ms (B=15,417 ms)
 verdict prédiction : NE TIENT PAS
 ```
 
-**Échec de la prédiction.** Le gain mesuré (+0,6 %, −0,18 ms/pas) est
-très inférieur à l'écart visé (16,5 → ≤13,5 ms, soit −3 ms).
+**Échec de la prédiction** dès la première mesure : gain minuscule
+(+0,6 %), très inférieur à l'écart visé (16,5 → ≤13,5 ms, −3 ms).
 
-### Cause : la prédiction confondait l'ATTENTE et le TRAVAIL hors rejeu
+### Ma première explication était fausse — corrigée par chef
 
-chef l'avait déjà précisé avant la mesure : « `.tolist()` à 93,6 % =
-l'hôte qui ATTEND le GPU ; le gain vient du recouvrement de ce qui suit
-(emit/build/fill) avec le rejeu suivant, pas de la suppression de
-l'attente. » Le profilage (`outils/profil_cpu_pas.py`) avait mesuré
-_emit cumulant 93,6 % de son temps DANS `.tolist()` — c'est-à-dire que
-sur les 4,3 ms hors rejeu, l'écrasante majorité n'est pas du calcul
-hôte à recouvrir, c'est de l'attente d'un résultat GPU dont dépend la
-suite (l'argmax du pas n dépend des logits du rejeu n : cette
-dépendance ne disparaît pas, le recouvrement ne fait que déplacer QUI
-attend, pas la durée de l'attente elle-même).
+J'ai d'abord écrit ici que l'attente `.tolist()` était intrinsèque
+(dépendance de données argmax(n)←logits(n)) et que seul le travail
+hôte hors-attente (~6,4 % des 4,3 ms) était masquable. chef a
+objecté, à raison : si l'argmax reste sur device et que le rejeu n+1
+lit `tokens_dev` sans jamais rapatrier, l'hôte n'a AUCUNE raison
+d'attendre AVANT d'enfiler le rejeu n+1 — l'ordre d'enfilage devait
+être vérifié, pas supposé correct.
 
-Seule la part hors-`.tolist()` de ces 4,3 ms — le reste, ~6,4 % —
-est du vrai travail hôte (emit/build/fill/preparer) susceptible d'être
-masqué derrière le rejeu du pas suivant. Borne théorique :
-4,3 ms × 6,4 % ≈ 0,28 ms/pas. La mesure (−0,18 ms/pas) est du même
-ordre de grandeur que cette borne, pas du même ordre que les 3 ms
-visés — c'est cohérent avec le mécanisme réellement implémenté (un
-seul `.tolist()` par pas, retardé, embedding sur device), pas avec un
-défaut d'implémentation.
+**Il avait raison : c'était un vrai bogue.** Relecture de
+`_plain_decode_pipeline` : le code faisait `event.synchronize()` puis
+`_consommer` (le `.tolist()`) **avant** `_pipeline_suite` (qui lance
+le rejeu n+1) — l'inverse de ce que le docstring prétendait. Aucun
+recouvrement n'avait lieu : le rejeu n+1 n'était enfilé qu'après que
+l'hôte ait fini tout son travail de consommation. Corrigé (rejeu n+1
+enfilé D'ABORD, sync/`.tolist()` du pas n APRÈS — l'ordre du flux CUDA
+garantit la dépendance sur `tokens_dev`, pas besoin d'événement pour
+ça). Deux bogues induits par la correction, trouvés et corrigés dans
+la foulée : un `torch.cuda.Event` unique réenregistré à chaque pas
+(pointait vers le mauvais pas avec le nouvel ordre — même famille que
+le bogue déjà trouvé le 14/09 dans `graphs.py`), et la convention de
+position `pos = seq.length - 1` de `_build_batch_device` qui supposait
+`output_ids` déjà mis à jour (plus vrai maintenant que
+`_pipeline_suite` tourne avant `_consommer` — corrigé en `pos =
+seq.length` + `_grow(seq, extra=1)`).
 
-Confondu ayant été écarté : `charge_s` de la mesure [A] (119,0 s) est
-anormal (file d'attente carte 368 s + verrou de compilation orphelin
-977 s rapportés au lancement, cf. log brut) mais ce délai est dans le
-CHARGEMENT du modèle, hors de la boucle chronométrée (`duree_s`,
-`ms_par_pas` ne courent qu'après `warm_graphs()`) — les deux mesures
-[A] et [B] ont des `duree_s` proches (3,10 vs 3,08 s) dans le même
-processus, donc la contention affecte les deux de façon comparable et
-n'explique pas l'écart au seuil.
+**Contrôle (1) de chef, fait par événements CUDA directs** (pas
+nsys) plutôt que par lecture de code : `outils/diag-trou-gpu-pipeline.py`
+mesure le trou GPU réel entre `rejouer_suivant(n)` et
+`rejouer_suivant(n+1)`, 30 pas. Résultat : trou moyen **0,25-0,32 ms**
+contre un rejeu réel de 13,6-14,5 ms — le recouvrement fonctionne bien
+au niveau GPU une fois le bogue d'ordre corrigé.
 
-**Verdict** : le recouvrement fonctionne (bit-identique validé,
-`tests/test_pipeline_decodage.py`, 1 passed) mais son gain réel est
-plafonné par la part non-attente du hors-rejeu, pas par les 4,3 ms
-entiers. La prédiction de chef (≤13,5 ms) supposait implicitement
-que le recouvrement supprimait l'attente elle-même ; ce n'est pas ce
-que le mécanisme fait, et ce n'est pas ce qu'il peut faire tant que le
-pas n+1 dépend du jeton du pas n. Un échec est un résultat : je ne
-publie pas de chiffre reconstruit pour combler l'écart.
+### Et pourtant le gain réel reste quasi nul (+0,4 à +0,6 %)
+
+Contrôlé un second confondu avant de conclure : `mesure-pipeline-ab.py`
+chargeait les deux moteurs dans le MÊME processus — le deuxième
+chargement peut hériter d'un état VRAM que `empty_cache()` ne récupère
+pas entièrement (constaté une fois sur `diag-trou-gpu-pipeline.py` :
+plan dégradé, graphes CUDA désactivés, modèle réparti sur 2 cartes).
+Comme le script mesure toujours PIPELINE=0 en premier (propre) et
+PIPELINE=1 en second (potentiellement dégradé), ce biais jouait
+SYSTÉMATIQUEMENT contre PIPELINE=1. **Contrôle qui pouvait rendre
+faux** : remesuré en deux processus séparés (`--seul 0` / `--seul 1`,
+`outils/mesure-pipeline-ab.sh`). Résultat quasi identique
+(709,75 → 711,17 j/s, 15,498 → 15,467 ms, +0,2 %) : le confondu du
+double chargement N'EXPLIQUE PAS l'écart — écarté.
+
+**Verdict après correction complète et contrôles** : le mécanisme de
+recouvrement fonctionne exactement comme prévu côté GPU (trou de
+0,25 ms, pas de bogue d'ordonnancement restant), mais le gain de débit
+réel reste minuscule. Explication qui tient debout : le nombre
+d'origine (4,3 ms hors rejeu, 93,6 % dans `.tolist()`,
+`outils/profil_cpu_pas.py`) vient de cProfile, dont le document
+lui-même prévenait — « l'outil ajoute lui-même un surcoût
+d'instrumentation », chiffre absolu non comparable. La mesure directe
+par événements CUDA (ce soir) ne trouve qu'~0,25-0,3 ms de travail
+hôte réellement hors-GPU par pas, pas 4,3 ms — cohérent avec un gain
+plafonné à quelques dixièmes de ms/pas (~2 % du pas), pas les 3 ms
+visés par la prédiction scellée. La prémisse chiffrée qui a lancé ce
+chantier était probablement gonflée par l'instrument qui l'a mesurée,
+pas par un défaut du code. Un échec est un résultat : je ne publie pas
+de chiffre reconstruit pour combler l'écart, et je ne referai pas
+tourner cProfile sur ce chemin sans l'avoir dit — cette remesure
+resterait à faire si le chantier veut trancher le chiffre d'origine.

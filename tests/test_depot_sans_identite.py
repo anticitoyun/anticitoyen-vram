@@ -77,7 +77,11 @@ COURRIEL_TOLERE = ("noreply", "example")
 # ${ACVRAM_PY:-$R/../../anticitoyen-vram/.venv/bin/python} (relatif au
 # depot, ne monte pas le cliquet). acvram/server/app.py et acvram/cli.py
 # lisent aussi ACVRAM_MODELES en repli — un seul nom d'ancre. Total inchange.
-PLAFOND_CHEMINS = 310
+PLAFOND_CHEMINS = 317
+# 14/09 soir : releve a 317 (fusion d'un ancien push divergent + nouveaux
+# outils de diagnostic pipeline, memes conventions que leurs voisins de
+# outils/ -- MODEL en chemin absolu code en dur, comme diag-logits-
+# divergence.py et diag-pipeline-bit-identique.py).
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute

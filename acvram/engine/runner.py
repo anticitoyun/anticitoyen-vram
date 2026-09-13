@@ -379,10 +379,12 @@ class Engine:
         # même lancé. Le synchroniser au pas suivant garantirait le rejeu,
         # pas l'échantillonnage enfilé APRÈS lui sur le même flux : un jeton
         # parfois encore en vol au moment du `.tolist()` — trouvé par le
-        # test bit-identique (bead runner, 14/09), pas par relecture. Le
-        # pipeline enregistre donc le SIEN, après `_sample_only`.
-        self._evenement_echantillon = (torch.cuda.Event()
-                                       if torch.cuda.is_available() else None)
+        # test bit-identique (bead runner, 14/09), pas par relecture. Un
+        # `torch.cuda.Event()` NEUF à chaque pas (pas un seul réutilisé) :
+        # `_plain_decode_pipeline` enfile le pas n+1 avant de synchroniser
+        # sur l'événement du pas n — un objet partagé ré-enregistré par le
+        # pas n+1 pointerait alors vers SA PROPRE fin, pas celle du pas n
+        # (bogue trouvé le 14/09 soir, même famille que le premier).
 
     # -- admission -------------------------------------------------------
     def _eos_ids(self) -> set[int]:
@@ -910,18 +912,18 @@ class Engine:
         rapatrié sur l'hôte (bead runner, 14/09, accord d'interface avec
         poste4 côté `graphs.py`).
 
-        Appelée APRÈS `_consommer` (qui a déjà ajouté le jeton à
-        `output_ids` — celui-là même que `tokens_dev` porte, en tenseur) :
-        même convention de position que `_build_batch`, `pos = seq.length -
-        1`. `tokens_dev` n'évite que la LECTURE hôte du jeton, pas un
-        décalage d'indexation."""
+        Appelée AVANT `_consommer` (recouvrement : c'est justement pour ça
+        qu'on n'attend pas) — `output_ids` ne porte PAS encore ce jeton,
+        contrairement à `_build_batch`. Convention DÉCALÉE d'un cran :
+        `pos = seq.length` (pas `- 1`), et l'appelant doit réserver le bloc
+        avec `_grow(seq, extra=1)`."""
         positions: list[int] = []
         slots: list[int] = []
         query_lens: list[int] = []
         seq_lens: list[int] = []
         block_tables: list[torch.Tensor] = []
         for seq in seqs:
-            pos = seq.length - 1
+            pos = seq.length
             positions.append(pos)
             slots.append(seq.blocks[pos // BLOCK_SIZE] * BLOCK_SIZE
                          + pos % BLOCK_SIZE)
@@ -959,22 +961,25 @@ class Engine:
             return self._emit(logits, decodable)
         logits = self.graphs.rejouer_suivant()
         tokens_dev, logprobs_dev = self._sample_only(logits, decodable)
-        self._evenement_echantillon.record()
+        evenement = torch.cuda.Event()
+        evenement.record()
         self._pipeline_pendiente = {
             "seqs": decodable, "tokens_dev": tokens_dev,
-            "logprobs_dev": logprobs_dev, "event": self._evenement_echantillon}
+            "logprobs_dev": logprobs_dev, "event": evenement}
         return []
 
     def _pipeline_suite(self, roster: list[Sequence],
                         tokens_dev: torch.Tensor) -> list[GenerationOutput]:
-        """Prépare et lance le pas SUIVANT en recouvrement — `roster` est le
-        sous-ensemble encore actif du pas qui vient d'être rapatriée (donc
-        déjà ajouté à `output_ids` par `_consommer`, appelé juste avant par
-        `_plain_decode_pipeline`), `tokens_dev` ses jetons DEVICE alignés
-        dans le même ordre. `_grow` sans `extra` : `seq.length` compte déjà
-        ce jeton, même convention que `_plain_decode_sync`."""
+        """Prépare et lance le pas SUIVANT en recouvrement — enfilée AVANT
+        que `_consommer` n'ait rapatrié le pas courant (c'est le
+        recouvrement : `_plain_decode_pipeline` appelle celle-ci D'ABORD).
+        `roster` est le sous-ensemble encore actif tel que connu au pas
+        PRÉCÉDENT (`output_ids` ne porte pas encore son jeton de ce pas-ci),
+        `tokens_dev` ses jetons DEVICE alignés dans le même ordre. `_grow`
+        avec `extra=1` : réserve le bloc du jeton pas encore ajouté à
+        `output_ids` (cf. `_build_batch_device`)."""
         for seq in roster:
-            if not self._grow(seq):
+            if not self._grow(seq, extra=1):
                 self._finish(seq, "length")
         vivants = [s for s in roster if not s.finished]
         if not vivants:
@@ -991,10 +996,11 @@ class Engine:
             return self._emit(logits, vivants)
         logits = self.graphs.rejouer_suivant()
         tokens_dev2, logprobs_dev2 = self._sample_only(logits, vivants)
-        self._evenement_echantillon.record()
+        evenement = torch.cuda.Event()
+        evenement.record()
         self._pipeline_pendiente = {
             "seqs": vivants, "tokens_dev": tokens_dev2,
-            "logprobs_dev": logprobs_dev2, "event": self._evenement_echantillon}
+            "logprobs_dev": logprobs_dev2, "event": evenement}
         return []
 
     def _plain_decode_pipeline(self, decodable: list[Sequence]) -> list[GenerationOutput]:
@@ -1013,9 +1019,6 @@ class Engine:
             return self._pipeline_amorcer(decodable)
 
         self._pipeline_pendiente = None
-        pend["event"].synchronize()
-        outputs = self._consommer(pend["tokens_dev"], pend["logprobs_dev"], pend["seqs"])
-
         roster_avant = [s for s in pend["seqs"] if not s.finished]
         # `.id`, pas `in`/`==` : `Sequence` est un dataclass à égalité par
         # champs (output_ids inclus) — comparer les objets eux-mêmes serait
@@ -1023,14 +1026,31 @@ class Engine:
         # et lent (compare tous les champs, listes comprises).
         ids_pend = {s.id for s in pend["seqs"]}
         nouveaux = [s for s in decodable if s.id not in ids_pend]
+
         if nouveaux or not roster_avant:
+            # Recomposition du lot : pas de rejeu à enfiler par avance (sa
+            # forme dépend de la nouvelle composition), donc rien à
+            # recouvrir ici — on synchronise puis on retombe sur le pas
+            # normal, comme documenté.
+            pend["event"].synchronize()
+            outputs = self._consommer(pend["tokens_dev"], pend["logprobs_dev"], pend["seqs"])
             outputs += self._pipeline_amorcer(roster_avant + nouveaux)
             return outputs
 
+        # Lot stable : enfiler le rejeu n+1 D'ABORD (il ne lit que
+        # `tokens_dev`, un tenseur DEVICE écrit par le rejeu n — l'ordre du
+        # flux CUDA garantit la dépendance, aucun événement requis ici) puis
+        # SEULEMENT ENSUITE synchroniser pour rapatrier les jetons du pas n
+        # — sinon le rejeu n+1 ne part qu'après tout le travail hôte de
+        # `_consommer`, et il n'y a plus rien à recouvrir (ce qui était le
+        # bogue : le +0,6 % mesuré le 14/09 venait de cet ordre inversé).
         mask = [not s.finished for s in pend["seqs"]]
         tokens_dev = (pend["tokens_dev"] if all(mask) else
                      pend["tokens_dev"][torch.tensor(mask, device=pend["tokens_dev"].device)])
-        outputs += self._pipeline_suite(roster_avant, tokens_dev)
+        outputs = self._pipeline_suite(roster_avant, tokens_dev)
+
+        pend["event"].synchronize()
+        outputs = self._consommer(pend["tokens_dev"], pend["logprobs_dev"], pend["seqs"]) + outputs
         return outputs
 
     def _speculative_decode(self, decodable: list[Sequence]

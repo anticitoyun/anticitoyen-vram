@@ -65,6 +65,20 @@ def _mesurer(pipeline: bool) -> dict:
 
 
 def main() -> None:
+    import sys
+    # `--seul 0|1` : un seul bras, DANS UN PROCESSUS À LUI -- charger les
+    # deux modeles dans le meme processus (comportement historique) laisse
+    # une deuxieme charge dans un etat VRAM non totalement recupere par
+    # `empty_cache()` (constate le 14/09 soir : plan degrade, graphes CUDA
+    # desactives au deuxieme chargement) -- confondu qui biaise TOUJOURS
+    # contre PIPELINE=1 (mesure en second). outils/mesure-pipeline-ab.sh
+    # lance les deux bras en deux processus separes et compare.
+    if "--seul" in sys.argv:
+        i = sys.argv.index("--seul")
+        r = _mesurer(pipeline=bool(int(sys.argv[i + 1])))
+        print(r, flush=True)
+        return
+
     r0 = _mesurer(pipeline=False)
     print(f"[A] PIPELINE=0 : {r0}", flush=True)
     r1 = _mesurer(pipeline=True)
