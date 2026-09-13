@@ -773,10 +773,13 @@ class MoEBlock(nn.Module):
         n = torch.clamp(cnt[tile_e] - idx * bt, max=bt)
         return (tile_e.to(torch.int32), t0.to(torch.int32), n.to(torch.int32))
 
-    def _gemm(self, pile, xs, tiles):
+    def _gemm(self, pile, xs, tiles, brut=False):
+        """``brut`` : rend la sortie rembourrée [G, M_pile] sans la vue [:, :m]
+        (la glue lit la foulée elle-même et évite une copie)."""
         _, qw, bs, gs, k, m = pile
-        return kernels.get_extension().nvfp4_gemm_grouped(
-            qw, bs, gs, xs, tiles[0], tiles[1], tiles[2], k)[:, :m]
+        y = kernels.get_extension().nvfp4_gemm_grouped(
+            qw, bs, gs, xs, tiles[0], tiles[1], tiles[2], k)
+        return y if brut else y[:, :m]
 
     def _tables_adresses(self, pile):
         """Tables d'adresses identité (contrat bead pds) : chaque expert à sa
@@ -791,12 +794,13 @@ class MoEBlock(nn.Module):
                           (bs.data_ptr() + ar * bs.stride(0)).to(qw.device))
         return cache[cle]
 
-    def _gemm_mma(self, pile, xq, xsf, tiles):
+    def _gemm_mma(self, pile, xq, xsf, tiles, brut=False):
         _, qw, _, gs, k, m = pile
         tq, tb = self._tables_adresses(pile)
-        return kernels.get_extension().nvfp4_gemm_grouped_mma(
+        y = kernels.get_extension().nvfp4_gemm_grouped_mma(
             tq, tb, gs, xq, xsf, tiles[0], tiles[1], tiles[2],
-            qw.shape[1], k, _MOE_MMA_BT)[:, :m]
+            qw.shape[1], k, _MOE_MMA_BT)
+        return y if brut else y[:, :m]
 
     def _forward_prefill_grouped(self, x, topw, topi) -> Optional[torch.Tensor]:
         if self._stacks is None or "gate_proj" not in self._stacks:
@@ -832,6 +836,22 @@ class MoEBlock(nn.Module):
         ordre = torch.argsort(flat_e, stable=True)
         cnt = torch.bincount(flat_e, minlength=E)
         xs = x[flat_t[ordre]].to(torch.bfloat16).contiguous()        # [G, H]
+        # Glue en deux noyaux (moe_act, moe_reduce_trie) : le profil du 13/09
+        # donnait 25 % du pas aux conversions fp32, produit, rembourrage,
+        # permutation inverse et somme faits en torch sur [G, M] entiers.
+        glue = (ext is not None and hasattr(ext, "moe_act")
+                and not os.environ.get("ACVRAM_MOE_GLUE_TORCH"))
+        code_act = 1 if self.act == "gelu_tanh" else 0
+
+        def _activation(g, u, m, kd):
+            if glue and g.dtype == torch.bfloat16:
+                return ext.moe_act(g, u, m, kd, code_act)
+            act = (self._act(g[:, :m].to(torch.float32))
+                   * u[:, :m].to(torch.float32)).to(torch.bfloat16)
+            if act.shape[1] != kd:
+                act = F.pad(act, (0, kd - act.shape[1]))
+            return act.contiguous()
+
         if mma:
             # poids ET activations en 4 bits : les activations sont quantifiées
             # une fois par entrée (E2M1 bloc 16 + UE4M3) et servent à gate et up
@@ -839,35 +859,34 @@ class MoEBlock(nn.Module):
             if xs.shape[1] != pg[4]:
                 xs = F.pad(xs, (0, pg[4] - xs.shape[1])).contiguous()
             xq, xsf = ext.nvfp4_quant_act(xs)
-            g = self._gemm_mma(pg, xq, xsf, tiles)
-            u = self._gemm_mma(pu, xq, xsf, tiles)
-            act = (self._act(g.to(torch.float32))
-                   * u.to(torch.float32)).to(torch.bfloat16)
-            if act.shape[1] != pd[4]:
-                act = F.pad(act, (0, pd[4] - act.shape[1]))
-            aq, asf = ext.nvfp4_quant_act(act.contiguous())
-            d = self._gemm_mma(pd, aq, asf, tiles)
+            g = self._gemm_mma(pg, xq, xsf, tiles, brut=True)
+            u = self._gemm_mma(pu, xq, xsf, tiles, brut=True)
+            act = _activation(g, u, pg[5], pd[4])
+            aq, asf = ext.nvfp4_quant_act(act)
+            d = self._gemm_mma(pd, aq, asf, tiles, brut=True)
         elif direct:
             # les poids restent en 4 bits : plus de pile bf16 intermédiaire
             # (trois passes de plusieurs Gio par couche en moins)
             tiles = self._tuiles(cnt)
             if xs.shape[1] != pg[4]:                   # entrée rembourrée
                 xs = F.pad(xs, (0, pg[4] - xs.shape[1])).contiguous()
-            g = self._gemm(pg, xs, tiles)
-            u = self._gemm(pu, xs, tiles)
-            act = (self._act(g.to(torch.float32))
-                   * u.to(torch.float32)).to(torch.bfloat16)
-            if act.shape[1] != pd[4]:
-                act = F.pad(act, (0, pd[4] - act.shape[1]))
-            d = self._gemm(pd, act.contiguous(), tiles)
+            g = self._gemm(pg, xs, tiles, brut=True)
+            u = self._gemm(pu, xs, tiles, brut=True)
+            act = _activation(g, u, pg[5], pd[4])
+            d = self._gemm(pd, act, tiles, brut=True)
         else:
             offs = torch.cumsum(cnt, 0).to(torch.int32)
             wg = self._pile_bf16(pg); g = torch._grouped_mm(xs, wg.transpose(1, 2), offs=offs); del wg
             wu = self._pile_bf16(pu); u = torch._grouped_mm(xs, wu.transpose(1, 2), offs=offs); del wu
-            act = (self._act(g.to(torch.float32)) * u.to(torch.float32)).to(torch.bfloat16)
+            act = _activation(g, u, pg[5], pd[4])
             wd = self._pile_bf16(pd); d = torch._grouped_mm(act, wd.transpose(1, 2), offs=offs); del wd
-        d = d.to(torch.float32) * topw.reshape(-1)[ordre].to(torch.float32).unsqueeze(-1)
+        m_out = pd[5]
         inv = torch.empty_like(ordre); inv[ordre] = torch.arange(ordre.numel(), device=x.device)
+        if glue and d.dtype == torch.bfloat16 and x.dtype == torch.bfloat16:
+            tw = topw.reshape(-1)
+            tw = tw if tw.dtype == torch.float32 else tw.to(torch.float32)
+            return ext.moe_reduce_trie(d, tw.contiguous(), inv.to(torch.int32).contiguous(), m_out, k)
+        d = d[:, :m_out].to(torch.float32) * topw.reshape(-1)[ordre].to(torch.float32).unsqueeze(-1)
         return d[inv].view(t, k, -1).sum(dim=1).to(x.dtype)
 
     def _forward_grouped(self, x, topw, topi):

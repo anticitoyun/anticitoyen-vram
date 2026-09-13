@@ -2199,6 +2199,107 @@ torch::Tensor moe_reduce(torch::Tensor d, torch::Tensor topw, int64_t k) {
     return y;
 }
 
+// --------------------------------------------------------------------------
+// Glue du prefill MoE (jetons triés par expert), deux lancements au lieu de
+// douze. Le profil du 13/09 (revue/mma-fp4-native-sm120.md) donnait 25 % du
+// pas à cette glue : conversions bf16→fp32 de [G, M] entiers, produit,
+// rembourrage, permutation inverse, somme, reconversion — chacune une passe
+// sur 25 à 50 Mo. Ici tout se fait en registres, en fp32, depuis les vues
+// bf16 [:, :m] à foulée Mp, sans intermédiaire.
+// --------------------------------------------------------------------------
+
+// act(g) * u pour les colonnes < m, zéro au-delà jusqu'à Kd (rembourrage de
+// l'entrée de down_proj). act 0 = SiLU, 1 = GELU-tanh — le même calcul fp32
+// que F.silu / F.gelu(approximate="tanh") sur g.to(float32).
+__global__ void moe_act_kernel(const __nv_bfloat16 *__restrict__ g,
+                               const __nv_bfloat16 *__restrict__ u,
+                               __nv_bfloat16 *__restrict__ out,
+                               long n, int Mp, int m, int Kd, int act) {
+    const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const long r = i / Kd;
+    const int c = (int)(i - r * Kd);
+    float v = 0.f;
+    if (c < m) {
+        const float x = __bfloat162float(g[r * Mp + c]);
+        const float y = __bfloat162float(u[r * Mp + c]);
+        float a;
+        if (act == 1) {
+            // tanh en double : sous --use_fast_math, tanhf est l'approximation
+            // MUFU et 0,2 % des sorties bf16 différaient de F.gelu d'un ulp ou
+            // deux. Le noyau est borné par la mémoire, le double ne coûte rien.
+            // même suite d'opérations fp32 que F.gelu(approximate="tanh")
+            const float kb = 0.7978845608028654f, kk = 0.044715f;
+            const float inner = kb * (x + kk * x * x * x);
+            a = 0.5f * x * (1.0f + (float)tanh((double)inner));
+        } else {
+            a = x / (1.f + expf(-x));
+        }
+        v = a * y;
+    }
+    out[i] = __float2bfloat16(v);
+}
+
+torch::Tensor moe_act(torch::Tensor g, torch::Tensor u, int64_t m, int64_t Kd, int64_t act) {
+    CHECK_CUDA(g); CHECK_CUDA(u); ACVRAM_DEVICE_GUARD(g);
+    TORCH_CHECK(g.scalar_type() == torch::kBFloat16 && u.scalar_type() == torch::kBFloat16,
+                "moe_act : g et u en bf16");
+    TORCH_CHECK(g.dim() == 2 && u.sizes() == g.sizes() && g.stride(1) == 1 && u.stride(0) == g.stride(0),
+                "moe_act : g et u [G, .] de meme forme et meme foulee");
+    TORCH_CHECK(m <= g.size(1) && m <= Kd, "moe_act : m <= largeur et m <= Kd");
+    const long G = g.size(0);
+    auto out = torch::empty({G, Kd}, g.options());
+    const long n = G * Kd;
+    if (n == 0) return out;
+    const int th = 256;
+    moe_act_kernel<<<(unsigned)((n + th - 1) / th), th, 0, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const __nv_bfloat16 *>(g.data_ptr()),
+        reinterpret_cast<const __nv_bfloat16 *>(u.data_ptr()),
+        reinterpret_cast<__nv_bfloat16 *>(out.data_ptr()),
+        n, (int)g.stride(0), (int)m, (int)Kd, (int)act);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
+// y[t, c] = somme_j topw[t*k + j] * d[inv[t*k + j], c] : d est en ordre trié
+// par expert (foulée Mp, m colonnes utiles), inv donne la ligne de chaque
+// emplacement (jeton, j). Somme en fp32 dans l'ordre j = 0..k-1, sortie bf16.
+__global__ void moe_reduce_trie_kernel(const __nv_bfloat16 *__restrict__ d, int Mp,
+                                       const float *__restrict__ topw,
+                                       const int *__restrict__ inv,
+                                       __nv_bfloat16 *__restrict__ y, int m, int k) {
+    const int t = blockIdx.y;
+    const int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col >= m) return;
+    float s = 0.f;
+    for (int j = 0; j < k; ++j) {
+        const long row = inv[t * k + j];
+        s += topw[t * k + j] * __bfloat162float(d[row * Mp + col]);
+    }
+    y[(long)t * m + col] = __float2bfloat16(s);
+}
+
+torch::Tensor moe_reduce_trie(torch::Tensor d, torch::Tensor topw, torch::Tensor inv,
+                              int64_t m, int64_t k) {
+    CHECK_CUDA(d); ACVRAM_DEVICE_GUARD(d); CHECK_CONTIG(topw); CHECK_CONTIG(inv);
+    TORCH_CHECK(d.scalar_type() == torch::kBFloat16 && d.dim() == 2 && d.stride(1) == 1,
+                "moe_reduce_trie : d bf16 [G, .] a foulee de ligne");
+    TORCH_CHECK(topw.scalar_type() == torch::kFloat && inv.scalar_type() == torch::kInt,
+                "moe_reduce_trie : topw fp32, inv int32");
+    TORCH_CHECK(topw.numel() == inv.numel() && topw.numel() % k == 0, "moe_reduce_trie : t*k emplacements");
+    TORCH_CHECK(m <= d.size(1), "moe_reduce_trie : m <= largeur de d");
+    const int T = (int)(topw.numel() / k);
+    auto y = torch::empty({T, m}, d.options());
+    if (T == 0) return y;
+    dim3 grid((unsigned)((m + 255) / 256), T);
+    moe_reduce_trie_kernel<<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const __nv_bfloat16 *>(d.data_ptr()), (int)d.stride(0),
+        topw.data_ptr<float>(), inv.data_ptr<int>(),
+        reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), (int)m, (int)k);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return y;
+}
+
 torch::Tensor nvfp4_gemv_grouped(torch::Tensor qw, torch::Tensor bscale,
                                  torch::Tensor gscales,
                                  torch::Tensor expert_ids,
@@ -3089,6 +3190,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "MoE NVFP4 : gate et up fusionnes, sortie act(gate)*up (act 0=SiLU, 1=GELU-tanh)");
     m.def("nvfp4_gemm_grouped", &nvfp4_gemm_grouped,
           "MoE NVFP4 : GEMM groupee sur tuiles de jetons, poids lus en 4 bits");
+    m.def("moe_act", &moe_act,
+          "MoE prefill : act(g)*u en bf16 depuis les vues [:, :m], rembourre a Kd (act 0=SiLU, 1=GELU-tanh)");
+    m.def("moe_reduce_trie", &moe_reduce_trie,
+          "MoE prefill : reduction ponderee par jeton depuis l'ordre trie par expert, sortie bf16");
     m.def("nvfp4_gemm_grouped_mma", &nvfp4_gemm_grouped_mma,
           "MoE NVFP4 : GEMM groupee W4A4 sur la MMA FP4 native de sm_120 (mxf4nvf4)");
     m.def("nvfp4_gemm_grouped_mma_disponible", &nvfp4_gemm_grouped_mma_disponible,
