@@ -322,3 +322,9 @@ offre 101 376 : capture impossible, vLLM ne décode aucun MLA façon DeepSeek su
 RTX 50. Trouvé par poste4 (revue/duel-mla-glm-14-09.md) ; à refaire après
 toute réinstallation de vLLM. `BANC_MLA_STAGES1=0` dans
 `outils/banc_decode_vllm_glm.py` évite le double correctif.
+
+**Plafond de puissance de la 5090 : 400-600 W seulement** (14/09, vérifié
+`nvidia-smi -pl 300` → « should be between 400.00 W and 600.00 W »). Le mode
+« eco » ne peut donc pas passer par `-pl` : il passe par l'horloge
+(`-lgc 2 100` mesuré 13/09 : J −19 %, t/s −20 %). Le refus de poste3 le 14/09
+n'était pas sudo, c'était la borne matérielle.
