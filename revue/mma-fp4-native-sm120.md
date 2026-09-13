@@ -382,3 +382,24 @@ latence recouverte, le bloc attend sa seule rafale. Le levier est là
 (plusieurs chargements en vol par fil, moins de fils par ligne ou plus de
 lignes par bloc), à mesurer par A/B propre. Bead à ouvrir si chef le
 retient devant 0si.
+
+### INT8 GEMV « un warp par ligne » (bead z5q) — RÉFUTÉ deux fois
+
+Prédiction : 2,62 → 1,0-1,4 ms ; réfutation > 2,0 ms.
+
+| variante | `int8_gemv` par pas (profil eager b=12) |
+|----------|----:|
+| blocs 4 lignes, NV=12 (défaut) | 2,62 ms (q/k/v ≈ 1,29 + o ≈ 1,33) |
+| warp, 1 ligne/warp, x en shared, 4 uint4 en vol | **2,79 ms** |
+| warp, 4 lignes/warp (32/bloc), K ≤ 2048 (q/k/v seuls) | **1,69 ms** sur q/k/v (vs ≈ 1,29) + 1,33 o |
+
+Ce que le compte a montré, après coup : à N = 12 et K = 2048, une ligne
+lit **2 Ko de poids et 48 Ko d'activations** (12 × 2048 bf16) — le
+« GEMV » est un GEMM étroit dont le trafic dominant est x, pas W. Copier x
+en shared par bloc (48 Ko × 160-640 blocs = 8-31 Mo) coûte plus que ce
+que la réduction par shuffles rapporte ; le noyau à blocs lit x depuis le
+L1 (hits) et ses 12 réductions par la shared ne sont pas le goulot. Ce qui
+reste est le plancher d'un lancement de ~9 Mo (rampe, queue, ~10 µs sur
+27) : le levier serait de lancer moins (q/k/v sont déjà fusionnés ; o ne
+peut pas l'être avec eux). Variante gardée derrière
+`ACVRAM_INT8_GEMV_WARP=1`, défaut = noyau à blocs. Bead z5q fermé.
