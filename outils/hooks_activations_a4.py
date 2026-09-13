@@ -12,8 +12,11 @@ import pathlib as _p
 
 _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
 
+import torch
+
 from acvram.quant.fakequant_activation import (fake_quantize_e4m3_activation,
                                                fake_quantize_nvfp4_activation)
+from acvram.quant.smoothquant import replier_smoothquant
 
 # Les 7 projections que la MMA mxf4nvf4 exige en E2M1 pour ses DEUX
 # operandes (bead anticitoyen-vram-brd) — les memes que celles nommees dans
@@ -80,3 +83,66 @@ def installer_hooks(model, regime: str):
 def retirer_hooks(handles: list) -> None:
     for h in handles:
         h.remove()
+
+
+def installer_hooks_genres(model, genres: set, regime: str):
+    """Comme `installer_hooks`, mais restreint aux GENRES nommes (par ex.
+    {'down_proj'} pour isoler la contribution d'un seul genre — piste de
+    chef 13/09 : si la degradation A4 vient surtout de down_proj, on
+    peut le laisser en A8 et garder le reste en A4/A16."""
+    if regime not in REGIMES:
+        raise ValueError(f"regime {regime!r} inconnu ; attendu {sorted(REGIMES)}")
+    fq = REGIMES[regime]
+    trouves = {k: v for k, v in modules_a_hooker(model).items()
+              if k.rsplit(".", 1)[-1] in genres}
+    handles = []
+    if fq is None:
+        return handles, trouves
+
+    def _hook(module, args):
+        return (fq(args[0]),) + tuple(args[1:])
+
+    for mod in trouves.values():
+        handles.append(mod.register_forward_pre_hook(_hook))
+    return handles, trouves
+
+
+def _cle_hf(chemin_module: str) -> str:
+    """'layers.3.mlp.down_proj' -> 'model.layers.3.mlp.down_proj.weight',
+    la convention de nommage de `collect_activation_stats` (memes cles que
+    le manifeste de conversion, verifie sur test_calibration.py)."""
+    return f"model.{chemin_module}.weight"
+
+
+def installer_hooks_smoothquant(model, act_stats: dict, alpha: float):
+    """Replie l'echelle SmoothQuant dans chaque projection trouvee (poids
+    NVFP4 REMPLACE en memoire, jamais sur disque) puis hooke l'activation :
+    divise par la meme echelle avant le fake-quant E2M1.
+
+    `act_stats` : {cle HF: ActStats}, typiquement le retour de
+    `acvram.quant.collect.collect_activation_stats` sur le point de
+    controle HF d'origine (PAS le dossier converti — les statistiques
+    d'activation se relevent sur un forward en pleine precision).
+
+    Un genre sans statistiques correspondantes est SAUTE, pas remplace par
+    une echelle inventee — compte dans `manques`, publie par l'appelant."""
+    trouves = modules_a_hooker(model)
+    handles = []
+    manques = []
+    for chemin, mod in trouves.items():
+        cle = _cle_hf(chemin)
+        st = act_stats.get(cle)
+        if st is None or st.max_abs is None:
+            manques.append(chemin)
+            continue
+        x_absmax = st.max_abs.to(mod.qweight.qweight.device).to(torch.float32)
+        qw2, s = replier_smoothquant(mod.qweight, x_absmax, alpha)
+        mod.qweight = qw2.to(mod.qweight.qweight.device)
+        s_dev = s.to(mod.qweight.qweight.device)
+
+        def _hook(module, args, _s=s_dev):
+            x = args[0] / _s
+            return (fake_quantize_nvfp4_activation(x),) + tuple(args[1:])
+
+        handles.append(mod.register_forward_pre_hook(_hook))
+    return handles, trouves, manques

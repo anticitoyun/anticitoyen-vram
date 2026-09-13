@@ -6,9 +6,12 @@ import torch
 from acvram.engine.loader import load_model
 from acvram.engine.model import ForwardBatch
 from acvram.memory.kvcache import BLOCK_SIZE, BlockAllocator
+from acvram.quant.calibrate import ActStats
 from outils.hooks_activations_a4 import (GENRES_ATTN, GENRES_MLP,
-                                         installer_hooks, modules_a_hooker,
-                                         retirer_hooks)
+                                         installer_hooks,
+                                         installer_hooks_genres,
+                                         installer_hooks_smoothquant,
+                                         modules_a_hooker, retirer_hooks)
 
 
 def _prefill(model, prompt):
@@ -101,6 +104,86 @@ def test_regime_inconnu_leve():
     import pytest
     with pytest.raises(ValueError, match="inconnu"):
         installer_hooks(_Faux(), "a2")
+
+
+def test_isolation_down_proj_seul_ne_touche_pas_les_autres_genres(converted):
+    """`installer_hooks_genres(model, {'down_proj'}, 'a4')` doit hooker
+    EXACTEMENT autant de modules que de couches — pas 7x plus — et changer
+    les logits (sinon le hook est inerte)."""
+    loaded = load_model(converted, dtype=torch.float32, device_override="cpu")
+    model = loaded.model
+    reference = _prefill(model, [5, 42, 7, 99, 13])
+
+    handles, trouves = installer_hooks_genres(model, {"down_proj"}, "a4")
+    assert len(trouves) == len(model.layers)
+    assert all(chemin.endswith("down_proj") for chemin in trouves)
+    sortie = _prefill(model, [5, 42, 7, 99, 13])
+    retirer_hooks(handles)
+    assert not torch.equal(sortie, reference), "hook down_proj seul inerte"
+
+
+def test_smoothquant_replie_le_poids_et_hooke_l_activation(converted):
+    """Repliement SmoothQuant + hook sur les 7 genres, avec des
+    statistiques d'activation synthetiques (pas de vraie calibration ici —
+    l'objet est de verifier le CABLAGE, la vraie calibration vient de
+    collect_activation_stats sur le point de controle HF, teste par
+    ailleurs dans acvram.quant.collect)."""
+    loaded = load_model(converted, dtype=torch.float32, device_override="cpu")
+    model = loaded.model
+    reference = _prefill(model, [5, 42, 7, 99, 13])
+
+    trouves_avant = modules_a_hooker(model)
+    torch.manual_seed(0)
+    act_stats = {
+        f"model.{chemin}.weight": ActStats(
+            torch.rand(mod.in_features) + 0.1,
+            torch.rand(mod.in_features) + 0.1, 64)
+        for chemin, mod in trouves_avant.items()
+    }
+
+    handles, trouves, manques = installer_hooks_smoothquant(model, act_stats, alpha=0.65)
+    assert not manques, manques
+    assert len(handles) == len(trouves) == len(trouves_avant)
+    sortie = _prefill(model, [5, 42, 7, 99, 13])
+    retirer_hooks(handles)
+    assert torch.isfinite(sortie).all()
+    assert not torch.equal(sortie, reference), "smoothquant+hook inerte"
+
+
+def test_smoothquant_signale_les_genres_sans_statistiques(converted):
+    """Un genre absent des statistiques d'activation est COMPTE, pas
+    remplace par une echelle inventee — sinon un trou de calibration
+    passerait pour une couverture complete."""
+    loaded = load_model(converted, dtype=torch.float32, device_override="cpu")
+    model = loaded.model
+    handles, trouves, manques = installer_hooks_smoothquant(model, {}, alpha=0.5)
+    assert handles == []
+    assert set(manques) == set(trouves)
+
+
+def test_smoothquant_alpha_differents_rendent_des_sorties_differentes(converted):
+    """Le balayage d'alpha doit produire des resultats DISTINCTS — sinon
+    balayer alpha ne teste rien de plus qu'un seul point."""
+    loaded = load_model(converted, dtype=torch.float32, device_override="cpu")
+    trouves_avant = modules_a_hooker(loaded.model)
+    torch.manual_seed(1)
+    act_stats = {
+        f"model.{chemin}.weight": ActStats(
+            torch.rand(mod.in_features) + 0.1,
+            torch.rand(mod.in_features) + 0.1, 64)
+        for chemin, mod in trouves_avant.items()
+    }
+
+    sorties = {}
+    for alpha in (0.5, 0.65, 0.8):
+        l = load_model(converted, dtype=torch.float32, device_override="cpu")
+        handles, _, manques = installer_hooks_smoothquant(l.model, act_stats, alpha)
+        assert not manques
+        sorties[alpha] = _prefill(l.model, [5, 42, 7, 99, 13])
+        retirer_hooks(handles)
+
+    assert not torch.equal(sorties[0.5], sorties[0.65])
+    assert not torch.equal(sorties[0.65], sorties[0.8])
 
 
 def test_apres_chargement_de_perplexity_installe_les_hooks(converted,
