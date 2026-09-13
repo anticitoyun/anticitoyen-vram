@@ -121,17 +121,39 @@ l'E2M1 sans ALU (15 % d'instructions tensor, 0,18 inst/oct sur 4,9 Go).
 Mêmes octets : 6,67 Go (nous) contre 5,98 Go (eux) ; **sans le trafic
 fantôme ci-dessous nous serions à 5,42 Go, en dessous de vLLM**.
 
-### Trouvaille : le godet 16 relit les poids des projections
+### Trouvaille, puis réfutation : le godet 16 « relit » les poids — sous ncu seulement
 
 `int8_gemv_kernel<4, NV>` traite NV colonnes (lignes du lot) ; à 12
 séquences en godet 16 (`graphs.py:45`, `bucket_batch`), chaque projection
 et le lm_head sont lancés DEUX fois : `<4,12>` pour les 12 vraies lignes,
-puis `<4,4>` pour les 4 fantômes — et le second lancement **relit tous les
-poids** : 0,932 + 0,319 = **1,25 Go par pas, 19 % des octets DRAM du pas**,
-1,65 ms ncu. Le masquage des fantômes d'poste1 (routage/experts) ne
-couvre pas ce chemin. Levier immédiat, sans nouveau noyau : godet 12 (ou
-NV=16 en un lancement). Prédiction : −1,2 ms par pas de rejeu (14,5 →
-13,3, −8 %) et −19 % d'octets ; réfutation < −0,6 ms.
+puis `<4,4>` pour les 4 fantômes, et ncu comptait pour le second
+lancement 0,932 + 0,319 = 1,25 Go de DRAM par pas (19 % du pas).
+
+Correctif : tranche de 16 (NV=13-16 instanciés, un seul lancement ;
+`ACVRAM_INT8_TRANCHE=12` rend l'ancien découpage — témoin A/B dans le
+même binaire ; `tests/test_int8_gemv_lot.py` N=1..16 bit-identique à
+N=1, 29 passés). Prédiction scellée (chef) : −1,2 ms/pas, −19 % d'octets.
+
+**Mesure (19h37-19h47, carte exclusive) : RÉFUTÉE.** Jetons identiques
+A/B (12 empreintes, `test_graphes_vs_eager`). ms/pas en rejeu, ABAB :
+A 14,79 / 14,80 ; B 14,81 / 14,85 (σ 0,05) → **±0**. Contrôle qui a
+rendu « faux » : ncu relancé sur A avec `--cache-control none` (L2 non
+purgé entre les rejeux) — les lancements `<4,4>` des projections lisent
+**0,001 Go** de DRAM (contre 0,932 sous purge) : le second lancement était
+servi par le L2 (poids d'une projection : 2-8 Mo, sous les 96 Mo de L2),
+seul le lm_head `<4,4>` (319 Mo > L2) relit vraiment. **Par défaut ncu
+purge les caches avant chaque rejeu (`--cache-control all`) : chaque noyau
+est mesuré à froid, et une relecture que le L2 sert en vrai est comptée
+en DRAM.** Troisième fois que la leçon « une relecture servie par le L2
+n'est pas un levier » revient (tuile 128, INT8 NV=12, godet 16) — cette
+fois par l'instrument. Total DRAM du pas à cache chaud : **5,52 Go**
+(6,67 sous purge), inst/oct **1,73**. Le changement de tranche est gardé
+(97 lancements de moins par pas, 319 Mo de moins pour le lm_head, ±0 ms,
+jetons identiques) — sans gain à revendiquer. Données :
+`revue/donnees-ncu-ipo-acvram-cache-chaud-14-09.txt`. La colonne vLLM
+reste sous purge (5,98 Go) : à refaire à cache chaud avant de publier un
+ratio d'octets ; le ratio d'INSTRUCTIONS (×8,0, comptes exacts) n'en
+dépend pas.
 
 ### M1 — noyaux sous rejeu (torch.profiler, `BANC_GRAPHES=1 profil 12`)
 
@@ -149,13 +171,16 @@ d'poste1, à câbler ici avant toute reprise.
 
 | poste | Go/pas | borne à 1 050 Go/s | ms eager | % de borne |
 |---|---:|---:|---:|---:|
-| MoE gate·up | 2,556 | 2,43 | 3,35 | 73 % |
-| MoE down | 1,296 | 1,23 | 2,63 | **47 %** |
-| MoE total | 3,852 | 3,67 | 5,98 | 61 % |
-| projections int8 (12 lignes) | 0,940 | 0,90 | 2,62 | 34 % |
+| MoE gate·up | 2,554 | 2,43 | 3,35 | 73 % |
+| MoE down | 1,277 | 1,22 | 2,63 | **46 %** |
+| MoE total | 3,831 | 3,65 | 5,98 | 61 % |
+| projections int8 (12 lignes) | 0,930 | 0,89 | 2,62 | 34 % |
 | lm_head int8 (12 lignes) | 0,319 | 0,30 | 0,88 | 35 % |
 | attention paginée | 0,137 | 0,13 | 0,72 | 18 % |
-| pas entier (rejeu) | 6,667 | 6,35 | 14,5 | 44 % |
+| pas entier (rejeu, cache chaud) | 5,518 | 5,26 | 14,8 | 36 % |
+
+(octets à cache chaud, `--cache-control none` ; sous purge le pas
+comptait 6,67 Go, différence = relectures servies par le L2.)
 
 Prédiction « MoE ≥ 70 % de borne » : **réfutée** (61 % ; gate·up 73 %,
 down 47 %). Le MoE lit 3,85 Go, soit ≈ 30 experts distincts par couche
@@ -201,9 +226,9 @@ Même instrument, même carte, même heure, moteurs en processus :
 | ms par pas b=12 | 15,66 | 6,30 | ×2,5 |
 | W brut / net | 392 / 354 | 306 / 265 | ×1,28 / ×1,34 |
 | J par jeton brut / net | 0,512 / 0,462 | 0,192 / 0,167 | **×2,7 / ×2,8** |
-| Go DRAM lus par pas | 6,67 (5,42 sans fantômes) | 5,98 | ×1,1 |
+| Go DRAM lus par pas | 5,52 chaud (6,67 sous purge) | 5,98 sous purge (chaud : à mesurer) | ≈ ×1 |
 | G instructions par pas | 9,57 | 1,19 | **×8,0** |
-| inst / octet | 1,44 | 0,20 | ×7,2 |
+| inst / octet | 1,73 chaud (1,44 sous purge) | 0,20 sous purge | ×7,2 à ×8,7 |
 
 Le ×2,8 en énergie se décompose en ×2,5 de temps et ×1,3 de puissance ;
 les « 150 W » de l'énoncé sont ~90 W nets dans une mesure appariée (les
@@ -219,8 +244,9 @@ croyait : par instructions, le MoE (71 %) avant les projections (19 %).
 
 Ce que ça ordonne, en prédictions :
 
-1. **Godet 12 / NV=16** (trafic fantôme, 1,25 Go/pas) : −1,2 ms/pas,
-   −19 % d'octets ; pas de nouveau noyau. Réfutation < −0,6 ms.
+1. ~~**Godet 12 / NV=16** (trafic fantôme, 1,25 Go/pas) : −1,2 ms/pas,
+   −19 % d'octets~~ — **RÉFUTÉ** (±0 ms, artefact de purge ncu, voir
+   ci-dessus).
 2. **Bead 1aj** (projections + lm_head en W4A4 MMA natif) : octets ÷ 1,8
    ET instructions ÷ 7 sur 19 % des instructions du pas → −1,5 ms/pas
    et −15 à −25 W en boucle sur ces postes. Réfutation : W en boucle

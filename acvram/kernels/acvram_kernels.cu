@@ -1523,12 +1523,25 @@ torch::Tensor int8_gemv(torch::Tensor qweight, torch::Tensor scales,
         case 9: I8G(9, XT, YT, PX, PY, SP); break; \
         case 10: I8G(10, XT, YT, PX, PY, SP); break; \
         case 11: I8G(11, XT, YT, PX, PY, SP); break; \
-        default: I8G(12, XT, YT, PX, PY, SP); break; } } while (0)
-    // Tranches de 12 activations : un lot de 12 séquences (le régime du
-    // serveur) passe en UNE lecture des poids ; au-delà, une passe par tranche.
+        case 12: I8G(12, XT, YT, PX, PY, SP); break; \
+        case 13: I8G(13, XT, YT, PX, PY, SP); break; \
+        case 14: I8G(14, XT, YT, PX, PY, SP); break; \
+        case 15: I8G(15, XT, YT, PX, PY, SP); break; \
+        default: I8G(16, XT, YT, PX, PY, SP); break; } } while (0)
+    // Tranches de 16 activations : un lot de 12 séquences passe en UNE lecture
+    // des poids (NV=12), et le godet 16 des graphes CUDA (12 vraies lignes +
+    // 4 fantômes) aussi (NV=16). Avant le 14/09 la tranche était de 12 : le
+    // godet 16 lançait <4,12> puis <4,4>, et le second lancement RELISAIT
+    // tous les poids — 1,25 Go par pas de décodage b=12, 19 % des octets DRAM
+    // du pas, vus sous ncu en rejeu (revue/instr-par-octet-14-09.md).
+    // ACVRAM_INT8_TRANCHE=12 rend l'ancien découpage (témoin A/B).
+    static const int tranche = [] {
+        const char *e = std::getenv("ACVRAM_INT8_TRANCHE");
+        return (e && std::string(e) == "12") ? 12 : 16;
+    }();
     const int Ntot = N;
-    for (int base = 0; base < Ntot; base += 12) {
-        const int N = min(12, Ntot - base);     // masque volontaire pour I8G_N
+    for (int base = 0; base < Ntot; base += tranche) {
+        const int N = min(tranche, Ntot - base);     // masque volontaire pour I8G_N
         if (bf) {
             I8G_N(__nv_bfloat16, __nv_bfloat16,
                   reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr()) + (long)base * K,

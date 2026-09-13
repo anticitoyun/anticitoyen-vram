@@ -36,8 +36,12 @@ REPO=$(dirname "$ICI"); CLE=$(python3 -c "import hashlib,os;print(hashlib.sha256
 KC="$HOME_NCU/kernels-$CLE"; [ -d "$KC" ] || cp -r "$HOME/.cache/acvram/kernels-$CLE" "$KC"
 ENV=(env HOME="$HOME_NCU" XDG_CACHE_HOME="$HOME_NCU/.cache" TRITON_CACHE_DIR="$HOME_NCU/.triton" PATH="$PATH"
      CUDA_VISIBLE_DEVICES=0 ACVRAM_TYPE=mesure BANC_PAS_NCU="$BANC_PAS_NCU" BANC_GRAPHES="${BANC_GRAPHES:-1}" BANC_JETONS=8 BANC_SLOTS="$B"
-     VLLM_ENABLE_V1_MULTIPROCESSING=0 ACVRAM_KERNEL_CACHE="$KC")
-sudo -n /usr/local/cuda/bin/ncu --csv --target-processes all --clock-control none \
+     VLLM_ENABLE_V1_MULTIPROCESSING=0 ACVRAM_KERNEL_CACHE="$KC" ACVRAM_INT8_TRANCHE="${ACVRAM_INT8_TRANCHE:-16}")
+# NCU_CACHE=none : pas de purge des caches entre les rejeux (octets DRAM tels que
+# le pas les voit, L2 chaud entre deux noyaux voisins) ; defaut ncu = all (purge :
+# chaque noyau est mesure a froid, ce qui compte en DRAM une relecture que le L2 sert
+# en vrai -- lecon du 14/09 sur int8_gemv<4,4>).
+sudo -n /usr/local/cuda/bin/ncu --csv --target-processes all --clock-control none --cache-control "${NCU_CACHE:-all}" \
   --nvtx --nvtx-include "mesure/" \
   --metrics "${NCU_METRIQUES:-gpu__time_duration.sum,dram__bytes_op_read.sum,dram__bytes_op_write.sum,sm__inst_executed.sum,sm__inst_executed_pipe_tensor.sum,sm__cycles_elapsed.avg.per_second}" \
   "${ENV[@]}" "${CMD[@]}" > "$OUT" 2>/tmp/claude-1000/ncu-ipo-${MOTEUR}.err || true
