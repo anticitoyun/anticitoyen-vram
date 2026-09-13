@@ -982,7 +982,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 group_size=opts.group_size,
                 use_hadamard=router.wants_hadamard(name, wider),
                 use_awq=opts.awq, n_grid=opts.n_grid,
-                garder_grille=opts.garder_grille)
+                garder_grille=opts.garder_grille,
+                mesurer_kld=opts.mesurer_kld)
             if m2["out_snr_db"] > metrics["out_snr_db"] + 0.5:
                 sd2 = q2.state_dict(prefix=f"{name}.")
                 sd2.update(s2.state_dict(prefix=f"{name}."))
@@ -991,12 +992,22 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                                   for v in qt.state_dict().values())
                 larges_octets = sum(v.numel() * v.element_size()
                                     for v in sd2.values())
-                budget_candidats.append({
+                candidat = {
                     "name": name, "from": fmt, "to": wider,
                     "gain_db": m2["out_snr_db"] - metrics["out_snr_db"],
                     "cout": max(1, larges_octets - base_octets),
                     "sd": sd2, "metrics": m2,
-                })
+                }
+                # Protocole A/B KLD vs SNR (revue/protocole-ab-kld-vs-snr.md,
+                # 13/09) : un gain de KLD est une REDUCTION de divergence, donc
+                # base moins large — l'inverse du sens de `gain_db`, ou plus
+                # large moins base. Absent si `opts.mesurer_kld` est faux ; le
+                # mode de tri `kld` refuse alors de partir plutot que de
+                # degenerer en silence sur une cle jamais mesuree.
+                if "out_kld_bits" in metrics and "out_kld_bits" in m2:
+                    candidat["gain_kld_bits"] = (
+                        metrics["out_kld_bits"] - m2["out_kld_bits"])
+                budget_candidats.append(candidat)
             else:
                 candidat_budget = False
         elif (not est_expert
@@ -1166,13 +1177,23 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         _genres_vus: dict[str, int] = {}
         if _mode not in ("snr", "erreur", "inverse", "absolu",
                          "base_croissant", "liste", "genre",
-                         "cout_decroissant"):
+                         "cout_decroissant", "kld"):
             raise ValueError(
                 f"ACVRAM_ORDRE_SAC={_mode!r} inconnu ; attendu snr, erreur, "
-                f"absolu, base_croissant, genre, cout_decroissant, liste "
+                f"absolu, base_croissant, genre, cout_decroissant, kld, liste "
                 f"ou inverse. Un mode inconnu qui "
                 f"retomberait en silence sur le defaut ferait mesurer autre "
                 f"chose que ce qui est demande.")
+        # Protocole A/B (13/09) : trier par KLD exige de l'avoir mesure. Sans
+        # cette garde, `kld` degenererait en silence sur une cle absente —
+        # exactement le defaut que ce bloc de gardes existe pour eviter sur
+        # les autres modes.
+        if _mode == "kld" and not opts.mesurer_kld:
+            raise ValueError(
+                "ACVRAM_ORDRE_SAC=kld exige ConversionOptions.mesurer_kld=True "
+                "(--mesurer-kld) : sans lui, out_kld_bits n'est jamais calcule "
+                "et le tri par KLD retomberait en silence sur un classement "
+                "vide.")
 
         def _abs_err(m):
             """Erreur ABSOLUE en sortie de couche, en unites de sortie.
@@ -1279,6 +1300,16 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 gagne = (10.0 ** (-(c["metrics_base"]["out_snr_db"]) / 20.0)
                          - 10.0 ** (-(c["metrics"]["out_snr_db"]) / 20.0))
                 return -gagne / c["cout"]
+            if _mode == "kld":
+                # Protocole A/B (revue/protocole-ab-kld-vs-snr.md) : meme
+                # glouton, cle differente. `gain_kld_bits` est deja oriente
+                # (base moins large, positif si le format large divergence
+                # moins) ; absent seulement si un candidat a echappe a la
+                # mesure KLD (mesurer_kld actif mais tenseur non recandidat au
+                # tri budgetaire) — traite comme un gain nul, donc promu en
+                # dernier plutot que de faire lever tout le tri sur un seul
+                # candidat incomplet.
+                return -c.get("gain_kld_bits", 0.0) / c["cout"]
             signe = 1.0 if _mode == "inverse" else -1.0
             return signe * c["gain_db"] / c["cout"]
 
@@ -1394,6 +1425,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 "liste": "liste_explicite_sans_ordre_ni_budget",
                 "genre": "genre_du_tenseur_DERIVE_de_l_observation",
                 "cout_decroissant": "cout_decroissant_sans_decibel",
+                "kld": "kld_couche_par_octet_decroissant",
             }.get(_mode, f"mode_{_mode}_sans_description"),
             "demande_gib": opts.bits_budget_gib,
             "plancher_gib": round(plancher_octets / 1024 ** 3, 4),
