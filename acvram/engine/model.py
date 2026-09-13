@@ -729,8 +729,8 @@ class MoEBlock(nn.Module):
         # La GEMM groupée relit les poids d'un expert une fois par tuile de
         # 16 jetons ; la déquantification, elle, les écrit puis les relit en
         # bf16 une seule fois quel que soit le lot. Le premier gagne tant que
-        # les experts reçoivent peu de jetons — croisement mesuré entre 64
-        # et 128 sur Qwen3-Coder-30B (512 j : +33 %, 1024 j : +5 %, 2048 j : -25 %).
+        # les experts reçoivent peu de jetons — croisement mesuré vers 50
+        # jetons par expert, voir _MOE_GEMM_MAX.
         par_expert = topi.numel() / max(1, pg[1].shape[0])
         direct = (ext is not None and hasattr(ext, "nvfp4_gemm_grouped")
                   and not os.environ.get("ACVRAM_PREFILL_DEQUANT")
@@ -951,7 +951,15 @@ _MOE_GROUPED_MAX = int(os.environ.get("ACVRAM_MOE_GROUPED_MAX", "32"))
 
 # Jetons par expert au-delà desquels le prefill repasse de la GEMM groupée
 # NVFP4 à la déquantification en bf16 suivie de torch._grouped_mm.
-_MOE_GEMM_MAX = float(os.environ.get("ACVRAM_MOE_GEMM_MAX", "64"))
+# Mesuré le 13/09/2026, Qwen3-Coder-30B-A3B-nvfp4 (8 actifs / 128), RTX 5090,
+# moteur chaud, cache de préfixe coupé, 7 rép, médian (revue/banc-prefill-
+# moe-12-09.md) — GEMM groupée contre déquant, en jetons/s :
+#   jetons/expert   32     48     64     96    128
+#   GEMM          3913   4260   4511   4749   4864
+#   déquant       3022   4173   5075   6592   7592
+#   écart         +29 %   +2 %  -11 %  -28 %  -36 %
+# L'ancien défaut 64 était du mauvais côté du croisement.
+_MOE_GEMM_MAX = float(os.environ.get("ACVRAM_MOE_GEMM_MAX", "48"))
 
 # Marque, dans le magasin d'états, une séquence dont l'état réside dans les
 # tampons fixes d'une couche (chemin graphes) plutôt qu'en tuple fonctionnel.

@@ -135,6 +135,42 @@ par bras, `enable_prefix_cache=False`, prompt distinct à chaque répétition,
    `_MOE_GROUPED_MAX` ni le tranchage du runner : mesurer 48/64/96 pour
    placer le croisement.
 
+## Croisement GEMM / déquant en jetons par expert (13/09)
+
+Même protocole, bras (e) GEMM forcé (`ACVRAM_MOE_GEMM_MAX=99999`) contre
+(c) déquant, L ∈ {512, 768, 1024, 1536, 2048} soit par_expert = L × 8 / 128.
+Compteurs vérifiés à chaque passage (gemm=1008 ou pile=1008, jamais mêlés).
+
+Prédiction écrite avant : GEMM gagne à 32 et 48, croisement 64-96, perd à 128.
+
+| j/expert | L | GEMM j/s | σ | déquant j/s | σ | GEMM/déquant |
+|---------:|-----:|---------:|--:|------------:|--:|-------------:|
+|  32 |  512 | **3 913** | 22 | 3 022 | 69 | 1,29 |
+|  48 |  768 | **4 260** | 40 | 4 173 | 25 | 1,02 |
+|  64 | 1024 | 4 511 | 34 | **5 075** | 26 | 0,89 |
+|  96 | 1536 | 4 749 |  9 | **6 592** | 27 | 0,72 |
+| 128 | 2048 | 4 864 |  5 | **7 592** | 32 | 0,64 |
+
+Verdict : croisement vers **50 jetons/expert**, plus bas que prédit (et que
+le commentaire du 3/09 qui le plaçait entre 64 et 128 : « 1024 j : +5 % »
+est aujourd'hui −11 %). **Le défaut 64 était du mauvais côté** : à 64
+j/expert il coûtait 11 %. Défaut abaissé à 48 (model.py, `_MOE_GEMM_MAX`),
+tableau dans le commentaire. À 48 l'écart est +2 % (≈ 2 σ) : le seuil
+pourrait être 48 ou 56, pas 64.
+
+Le GEMM plafonne (3 913 → 4 864 de 32 à 128 j/expert, +24 %) là où la
+déquant fait ×2,5 : le noyau relit les poids par tuile de 16 jetons, son
+coût croît avec t ; la déquant paie un coût fixe puis un `grouped_mm` bf16
+qui exploite pleinement les tensor cores. Un noyau GEMM NVFP4 à tuile plus
+haute (32 ou 64 jetons) déplacerait le croisement — chantier distinct.
+
+## Question ouverte — le tranchage runner (chef, 13/09)
+
+Le tranchage `ACVRAM_BUDGET_JETONS` coûte ×4 à ×8 en débit de prefill
+(bras d). C'est un outil de latence : il rend la main aux slots qui
+décodent entre deux tranches. Piste : ne trancher que lorsque d'autres
+slots décodent réellement, et précalculer d'une pièce sinon. Non mesuré.
+
 ## Conclusion
 
 Le noyau `nvfp4_gemm_grouped` vaut +29 % de débit de prefill à ≈ 32 jetons

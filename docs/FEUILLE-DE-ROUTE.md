@@ -640,6 +640,10 @@ D'où une bascule sur le nombre moyen de jetons par expert, seuil 64
 (`ACVRAM_MOE_GEMM_MAX`). Prefill de bout en bout : 512 j 3 393 j/s,
 1024 j 4 114 j/s, 4096 j **8 200 j/s** (référence du 2 septembre : 6 420).
 
+Remesuré le 13 septembre, moteur chaud et cache de préfixe coupé : le
+croisement est vers 50 jetons par expert (48 : +2 %, 64 : −11 %), défaut
+abaissé à 48 (`revue/banc-prefill-moe-12-09.md`).
+
 ### Le plan comptait des MLP fantômes (v0.4.28)
 
 `_octets_reels` ne trouve aucun tenseur `.mlp.` pour un bloc Mamba2/GDN pur.
