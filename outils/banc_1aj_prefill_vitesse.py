@@ -2,10 +2,15 @@
 """Bead 1aj, volet A (vitesse seule, qualité ignorée) -- prédiction scellée
 dans acvram-memoire/revue/1aj-prefill-w4a4-14-09.md, à lire avant ce script.
 
-Micro-banc sur les VRAIS poids nvfp4 du modèle chargé (pas de tenseurs
-synthétiques) : pour q/k/v/o de chaque couche + lm_head, chronomètre le
-chemin ACTUEL (kernels.matmul, registre) contre le chemin NOUVEAU
-(nvfp4_quant_act + nvfp4_gemm_grouped_mma, E=1 -- le noyau écrit main, PAS
+Sur ce modèle, q/k/v/o sont TOUS int8 (vérifié 14/09 soir, pas nvfp4 --
+plancher délibéré de la conversion pour l'attention). Décision de chef :
+tester quand même, en quantifiant CES poids int8 vers nvfp4 EN MÉMOIRE
+(pas le fichier converti), pour ce banc « vitesse seule » -- lm_head
+exclu (reste int8 dans tous les cas, 151 936 classes).
+
+Chemin ACTUEL : `kernels.matmul` sur le poids int8 réel, inchangé.
+Chemin NOUVEAU : poids requantifié nvfp4 en mémoire + `nvfp4_quant_act`
+(activation) + `nvfp4_gemm_grouped_mma` E=1 (noyau écrit main, PAS
 torch._scaled_mm, cf. la note du 10/09 dans kernels/__init__.py).
 
     outils/carte.sh .venv/bin/python outils/banc_1aj_prefill_vitesse.py
@@ -23,6 +28,7 @@ import torch
 from acvram import kernels
 from acvram.engine.loader import load_model
 from acvram.engine.model import MoEBlock
+from acvram.quant.nvfp4 import quantize_nvfp4
 # Pas d'Engine construit ici (appel direct aux noyaux sur les poids charges) :
 # exiger_regime_nominal ne s'applique pas, rien a regarder.
 
@@ -33,9 +39,10 @@ BT, ETAGES, KS = 16, 4, 64
 
 
 def _projections(model):
-    """(nom, QuantLinear) pour q/k/v/o de chaque couche + lm_head, nvfp4 SEUL
-    (pas int8 promu, pas de pile à échelle par segment -- meme garde que
-    nvfp4_mm_tensorcore, kernels/fp4_gemm.py:172)."""
+    """(nom, QuantLinear) pour q/k/v/o de chaque couche -- vérifié sur ce
+    modèle (14/09 soir) : TOUS int8 (pas nvfp4), plancher délibéré de la
+    conversion pour l'attention. `lm_head` exclu sur consigne de chef
+    (151 936 classes, reste int8 dans tous les cas)."""
     for i, layer in enumerate(model.layers):
         attn = getattr(layer, "self_attn", None)
         if attn is None:
@@ -45,13 +52,8 @@ def _projections(model):
             if lin is None:
                 continue
             w = lin.qweight
-            if getattr(w, "format", None) == "nvfp4" and getattr(w, "global_scale_rows", None) is None:
+            if getattr(w, "format", None) == "int8":
                 yield f"L{i}.{nom}", lin
-    lin = getattr(model, "lm_head", None)
-    if lin is not None:
-        w = getattr(lin, "qweight", None)
-        if getattr(w, "format", None) == "nvfp4" and getattr(w, "global_scale_rows", None) is None:
-            yield "lm_head", lin
 
 
 def _chrono(fn, rep=REP):
@@ -80,15 +82,18 @@ def main():
     t_actuel = t_nouveau = 0.0
     ecarts = []
     for nom, lin in _projections(loaded.model):
-        w = lin.qweight
+        w = lin.qweight                        # int8 reel, chemin actuel inchange
+        w_dense = kernels.int8_dequant(w, torch.bfloat16)     # [out, in]
+        w_nv = quantize_nvfp4(w_dense)          # requantifie nvfp4 EN MEMOIRE, pour ce banc seul
+
         x = torch.randn(G, lin.in_features, dtype=torch.bfloat16, device=dev)
         x = x * 0.02  # échelle d'activation réaliste (pas de saturation E2M1)
 
         dt_a = _chrono(lambda: kernels.matmul(x, w))
 
-        table_qw = torch.tensor([w.qweight.data_ptr()], dtype=torch.int64, device=dev)
-        table_bs = torch.tensor([w.block_scale.data_ptr()], dtype=torch.int64, device=dev)
-        gscales = torch.tensor([w.global_scale_float()], dtype=torch.float32, device=dev)
+        table_qw = torch.tensor([w_nv.qweight.data_ptr()], dtype=torch.int64, device=dev)
+        table_bs = torch.tensor([w_nv.block_scale.data_ptr()], dtype=torch.int64, device=dev)
+        gscales = torch.tensor([w_nv.global_scale_float()], dtype=torch.float32, device=dev)
 
         def nouveau():
             xq, xsf = ext.nvfp4_quant_act(x)
@@ -114,7 +119,7 @@ def main():
         print(f"  {nom:16s} actuel={dt_a*1000:7.3f} ms  nouveau={dt_n*1000:7.3f} ms  "
               f"ecart_relatif={ecart:.4f}", flush=True)
 
-    print(f"\n{n} projections nvfp4 mesurées (q/k/v/o + lm_head)")
+    print(f"\n{n} projections mesurées (q/k/v/o, int8 -> nvfp4 en mémoire ; lm_head exclu)")
     print(f"SOMME actuel  : {t_actuel*1000:.2f} ms")
     print(f"SOMME nouveau : {t_nouveau*1000:.2f} ms")
     print(f"écart relatif moyen (nouveau vs actuel, sanité seulement, pas la mesure de qualité du volet B) : "
