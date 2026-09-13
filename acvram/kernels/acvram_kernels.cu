@@ -1897,6 +1897,163 @@ __global__ void __launch_bounds__(128) nvfp4_gemm_grouped_mma_kernel(
 #endif
 }
 
+// --- variante à étages : tuiles A/B/échelles en mémoire partagée par
+// cp.async, S étapes en pipeline, BM=128 lignes et 8 warps par bloc. Le
+// profil du 13/09 mettait la variante directe à ~25 % de sa borne mémoire
+// (chargements globaux un pas de K en avance, latence non couverte).
+// Foulée de ligne 48 octets : 32 utiles + 16 de bourrage, pour que les 32
+// lectures de 4 octets d'un warp (8 lignes x 4 quarts) tombent sur 32
+// bancs distincts (12g + tq mod 32).
+constexpr int GM2_BM = 128;
+constexpr int GM2_LD = 48;
+constexpr int GM2_FILS = 256;
+
+__device__ __forceinline__ void cp_async16(void *smem, const void *gmem) {
+#ifdef ACVRAM_MMA_FP4
+    const unsigned s = (unsigned)__cvta_generic_to_shared(smem);
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(s), "l"(gmem));
+#endif
+}
+__device__ __forceinline__ void cp_async4(void *smem, const void *gmem) {
+#ifdef ACVRAM_MMA_FP4
+    const unsigned s = (unsigned)__cvta_generic_to_shared(smem);
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" :: "r"(s), "l"(gmem));
+#endif
+}
+__device__ __forceinline__ void cp_async_commit() {
+#ifdef ACVRAM_MMA_FP4
+    asm volatile("cp.async.commit_group;\n" ::);
+#endif
+}
+template <int N> __device__ __forceinline__ void cp_async_wait() {
+#ifdef ACVRAM_MMA_FP4
+    asm volatile("cp.async.wait_group %0;\n" :: "n"(N));
+#endif
+}
+
+template <int BT, int S>
+__global__ void __launch_bounds__(GM2_FILS) nvfp4_gemm_grouped_mma2_kernel(
+    const float *__restrict__ gscales,
+    const unsigned char *__restrict__ xq, const unsigned char *__restrict__ xsf,
+    const int *__restrict__ tile_e, const int *__restrict__ tile_t0,
+    const int *__restrict__ tile_n, const int64_t *__restrict__ table_qw,
+    const int64_t *__restrict__ table_bscale,
+    __nv_bfloat16 *__restrict__ y, int M, int K) {
+#ifdef ACVRAM_MMA_FP4
+    constexpr int MF = BT / 16;
+    __shared__ __align__(16) unsigned char sA[S][BT * GM2_LD];
+    __shared__ __align__(16) unsigned char sB[S][GM2_BM * GM2_LD];
+    __shared__ __align__(16) unsigned char sSA[S][BT * 4];
+    __shared__ __align__(16) unsigned char sSB[S][GM2_BM * 4];
+
+    const int tile = blockIdx.y;
+    const int e = tile_e[tile], t0 = tile_t0[tile], nt = tile_n[tile];
+    const unsigned char *qw_e = reinterpret_cast<const unsigned char *>(table_qw[e]);
+    const unsigned char *bs_e = reinterpret_cast<const unsigned char *>(table_bscale[e]);
+    const int row0 = blockIdx.x * GM2_BM;
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    const int g = lane >> 2, tq = lane & 3;
+    const long half_k = (long)K >> 1;
+    const int nblk = K >> 4;
+    const int KT = K / GM_KB;
+
+    auto emettre = [&](int st, int k0) {
+        const long kb = k0 >> 1, ks = k0 >> 4;
+        for (int c = tid; c < 2 * BT; c += GM2_FILS) {
+            const int r = c >> 1, h = c & 1;
+            const long src = (long)(t0 + min(r, nt - 1)) * half_k + kb + 16 * h;
+            cp_async16(&sA[st][r * GM2_LD + 16 * h], xq + src);
+        }
+        for (int c = tid; c < 2 * GM2_BM; c += GM2_FILS) {
+            const int r = c >> 1, h = c & 1;
+            const long src = (long)min(row0 + r, M - 1) * half_k + kb + 16 * h;
+            cp_async16(&sB[st][r * GM2_LD + 16 * h], qw_e + src);
+        }
+        if (tid < BT) cp_async4(&sSA[st][tid * 4], xsf + (long)(t0 + min(tid, nt - 1)) * nblk + ks);
+        else if (tid < BT + GM2_BM) {
+            const int r = tid - BT;
+            cp_async4(&sSB[st][r * 4], bs_e + (long)min(row0 + r, M - 1) * nblk + ks);
+        }
+    };
+
+    float acc[MF][2][4];
+    #pragma unroll
+    for (int mf = 0; mf < MF; ++mf)
+        #pragma unroll
+        for (int nf = 0; nf < 2; ++nf)
+            #pragma unroll
+            for (int q = 0; q < 4; ++q) acc[mf][nf][q] = 0.f;
+
+    #pragma unroll
+    for (int s = 0; s < S - 1; ++s) {
+        if (s < KT) emettre(s, s * GM_KB);
+        cp_async_commit();
+    }
+    for (int kt = 0; kt < KT; ++kt) {
+        cp_async_wait<S - 2>();
+        __syncthreads();
+        {
+            const int kn = kt + S - 1;
+            if (kn < KT) emettre(kn % S, kn * GM_KB);
+            cp_async_commit();
+        }
+        const int st = kt % S;
+        unsigned a[MF][4], sfa[MF], b[2][2], sfb[2];
+        #pragma unroll
+        for (int mf = 0; mf < MF; ++mf) {
+            #pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int j = mf * 16 + g + 8 * h;
+                const unsigned char *p = &sA[st][j * GM2_LD + 4 * tq];
+                const unsigned lo = *reinterpret_cast<const unsigned *>(p);
+                const unsigned hi = *reinterpret_cast<const unsigned *>(p + 16);
+                a[mf][h] = (j < nt) ? lo : 0u;
+                a[mf][h + 2] = (j < nt) ? hi : 0u;
+            }
+            const int js = mf * 16 + (lane >> 2) + 8 * (lane & 1);
+            const unsigned sv = *reinterpret_cast<const unsigned *>(&sSA[st][js * 4]);
+            sfa[mf] = (js < nt) ? sv : 0u;
+        }
+        #pragma unroll
+        for (int nf = 0; nf < 2; ++nf) {
+            const int r = warp * 16 + nf * 8 + g;
+            const bool ok = row0 + r < M;
+            const unsigned char *p = &sB[st][r * GM2_LD + 4 * tq];
+            const unsigned lo = *reinterpret_cast<const unsigned *>(p);
+            const unsigned hi = *reinterpret_cast<const unsigned *>(p + 16);
+            b[nf][0] = ok ? lo : 0u;
+            b[nf][1] = ok ? hi : 0u;
+            const unsigned sv = *reinterpret_cast<const unsigned *>(&sSB[st][r * 4]);
+            sfb[nf] = ok ? sv : 0u;
+        }
+        #pragma unroll
+        for (int mf = 0; mf < MF; ++mf)
+            #pragma unroll
+            for (int nf = 0; nf < 2; ++nf)
+                mma_mxf4nvf4(acc[mf][nf], a[mf], b[nf], sfa[mf], sfb[nf]);
+    }
+    cp_async_wait<0>();
+
+    const float gscale = gscales[e];
+    #pragma unroll
+    for (int mf = 0; mf < MF; ++mf) {
+        #pragma unroll
+        for (int nf = 0; nf < 2; ++nf) {
+            const int r = row0 + warp * 16 + nf * 8 + 2 * tq;
+            #pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int j = mf * 16 + g + 8 * h;
+                if (j < nt) {
+                    __nv_bfloat16 *dst = y + (long)(t0 + j) * M + r;
+                    if (r < M)     dst[0] = __float2bfloat16(acc[mf][nf][2 * h] * gscale);
+                    if (r + 1 < M) dst[1] = __float2bfloat16(acc[mf][nf][2 * h + 1] * gscale);
+                }
+            }
+        }
+    }
+#endif
+}
+
 __global__ void nvfp4_mma_sonde_kernel(int *flag) {
 #ifdef ACVRAM_MMA_FP4
     flag[0] = 1;
@@ -1952,8 +2109,10 @@ torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table
                                      torch::Tensor gscales, torch::Tensor xq,
                                      torch::Tensor xsf, torch::Tensor tile_e,
                                      torch::Tensor tile_t0, torch::Tensor tile_n,
-                                     int64_t M, int64_t K, int64_t bt) {
+                                     int64_t M, int64_t K, int64_t bt, int64_t etages) {
     CHECK_CUDA(xq); ACVRAM_DEVICE_GUARD(xq);
+    TORCH_CHECK(etages == 0 || etages == 2 || etages == 3 || etages == 4,
+                "GEMM groupee MMA : etages dans {0 (direct), 2, 3, 4}");
     CHECK_CONTIG(xq); CHECK_CONTIG(xsf); CHECK_CONTIG(gscales);
     TORCH_CHECK(K % GM_KB == 0, "GEMM groupee MMA : K multiple de 64");
     TORCH_CHECK(table_qw.scalar_type() == torch::kInt64 && table_qw.is_cuda() && table_qw.is_contiguous(),
@@ -1966,16 +2125,26 @@ torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table
     const int G = xq.size(0), T = tile_e.size(0);
     auto y = torch::zeros({G, M}, torch::TensorOptions().dtype(torch::kBFloat16).device(xq.device()));
     if (T == 0) return y;
-    dim3 grid((M + GM_BM - 1) / GM_BM, T);
     auto stream = at::cuda::getCurrentCUDAStream();
-    #define GM_L(BT) nvfp4_gemm_grouped_mma_kernel<BT><<<grid, 128, 0, stream>>>( \
-        gscales.data_ptr<float>(), \
+    #define GM_ARGS gscales.data_ptr<float>(), \
         xq.data_ptr<unsigned char>(), xsf.data_ptr<unsigned char>(), \
         tile_e.data_ptr<int>(), tile_t0.data_ptr<int>(), tile_n.data_ptr<int>(), \
         table_qw.data_ptr<int64_t>(), table_bscale.data_ptr<int64_t>(), \
-        reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), (int)M, (int)K)
-    if (bt == 16) GM_L(16); else if (bt == 32) GM_L(32); else GM_L(64);
-    #undef GM_L
+        reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), (int)M, (int)K
+    if (etages == 0) {
+        dim3 grid((M + GM_BM - 1) / GM_BM, T);
+        #define GM_L(BT) nvfp4_gemm_grouped_mma_kernel<BT><<<grid, 128, 0, stream>>>(GM_ARGS)
+        if (bt == 16) GM_L(16); else if (bt == 32) GM_L(32); else GM_L(64);
+        #undef GM_L
+    } else {
+        dim3 grid((M + GM2_BM - 1) / GM2_BM, T);
+        #define GM_L2(BT, S) nvfp4_gemm_grouped_mma2_kernel<BT, S><<<grid, GM2_FILS, 0, stream>>>(GM_ARGS)
+        #define GM_LS(S) do { if (bt == 16) GM_L2(16, S); else if (bt == 32) GM_L2(32, S); else GM_L2(64, S); } while (0)
+        if (etages == 2) GM_LS(2); else if (etages == 3) GM_LS(3); else GM_LS(4);
+        #undef GM_LS
+        #undef GM_L2
+    }
+    #undef GM_ARGS
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return y;
 }
@@ -3195,7 +3364,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("moe_reduce_trie", &moe_reduce_trie,
           "MoE prefill : reduction ponderee par jeton depuis l'ordre trie par expert, sortie bf16");
     m.def("nvfp4_gemm_grouped_mma", &nvfp4_gemm_grouped_mma,
-          "MoE NVFP4 : GEMM groupee W4A4 sur la MMA FP4 native de sm_120 (mxf4nvf4)");
+          py::arg("table_qw"), py::arg("table_bscale"), py::arg("gscales"), py::arg("xq"),
+          py::arg("xsf"), py::arg("tile_e"), py::arg("tile_t0"), py::arg("tile_n"),
+          py::arg("M"), py::arg("K"), py::arg("bt"), py::arg("etages") = 0,
+          "MoE NVFP4 : GEMM groupee W4A4 sur la MMA FP4 native de sm_120 (mxf4nvf4) ; "
+          "etages 0 = chargements directs, 2-4 = pipeline cp.async en shared");
     m.def("nvfp4_gemm_grouped_mma_disponible", &nvfp4_gemm_grouped_mma_disponible,
           "vrai si la carte courante est sm_120 et le noyau MMA FP4 compile");
     m.def("nvfp4_quant_act", &nvfp4_quant_act,
