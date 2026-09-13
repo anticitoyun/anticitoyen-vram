@@ -171,6 +171,11 @@ noyaux, perd déjà 11 % au même réglage — son genou est vers 2700 MHz.
 Et sous 2100 MHz, l'efficacité **plafonne** (136-138 j/kJ) pendant que le débit
 continue de tomber : il n'y a plus rien à gagner.
 
+**L'horloge mémoire n'est PAS un levier sur cette carte** : `nvidia-smi -q -d
+SUPPORTED_CLOCKS` n'y liste qu'une seule fréquence mémoire (14001 MHz,
+14/09) — `-lmc` accepte n'importe quelle demande mais ne peut rien honorer en
+dessous, sans le dire (revue/verdict-horloge-memoire-14-09.md).
+
 **RTX 3080 Ti — là, la limite mord.** Qwen3-4B, décodage et prefill :
 
 | limite | décodage | prefill | W tirés | jetons/kJ |
