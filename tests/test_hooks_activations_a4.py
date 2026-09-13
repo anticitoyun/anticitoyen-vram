@@ -122,6 +122,26 @@ def test_isolation_down_proj_seul_ne_touche_pas_les_autres_genres(converted):
     assert not torch.equal(sortie, reference), "hook down_proj seul inerte"
 
 
+def test_isolation_gate_up_down_ne_touche_pas_attention(converted):
+    """`installer_hooks_genres(model, {'gate_proj','up_proj','down_proj'},
+    'a4')` (regime 'moe-proj-seul' du bead brd, recadrage de chef 13/09 :
+    le noyau MMA ne sert que le MLP/experts) doit hooker exactement 3
+    modules par couche, aucun genre d'attention."""
+    loaded = load_model(converted, dtype=torch.float32, device_override="cpu")
+    model = loaded.model
+    reference = _prefill(model, [5, 42, 7, 99, 13])
+
+    handles, trouves = installer_hooks_genres(
+        model, {"gate_proj", "up_proj", "down_proj"}, "a4")
+    assert len(trouves) == 3 * len(model.layers)
+    assert all(chemin.rsplit(".", 1)[-1] in
+              {"gate_proj", "up_proj", "down_proj"} for chemin in trouves)
+    assert not any("self_attn" in chemin for chemin in trouves)
+    sortie = _prefill(model, [5, 42, 7, 99, 13])
+    retirer_hooks(handles)
+    assert not torch.equal(sortie, reference), "hook gate/up/down inerte"
+
+
 def test_smoothquant_replie_le_poids_et_hooke_l_activation(converted):
     """Repliement SmoothQuant + hook sur les 7 genres, avec des
     statistiques d'activation synthetiques (pas de vraie calibration ici —

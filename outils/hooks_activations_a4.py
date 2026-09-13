@@ -114,6 +114,83 @@ def _cle_hf(chemin_module: str) -> str:
     return f"model.{chemin_module}.weight"
 
 
+class _PoigneeFonction:
+    """Imite l'interface `.remove()` des handles PyTorch
+    (`register_forward_pre_hook`), pour que `retirer_hooks` reste uniforme
+    quel que soit le mecanisme d'installation en dessous."""
+
+    def __init__(self, fn):
+        self._fn = fn
+
+    def remove(self):
+        self._fn()
+
+
+class _ExtensionSansAttribut:
+    """Delegue tout SAUF un attribut nomme, cache pour la duree du hook.
+
+    Sert a forcer le chemin de repli (gate et up separes, chacun passant
+    par `_grouped`) sur un MoEBlock qui prendrait sinon le noyau fusionne
+    `nvfp4_gemv_grouped_gateup` — lequel bypasse `_grouped` pour gate ET up
+    et ne serait donc JAMAIS fake-quantifie."""
+
+    def __init__(self, ext, nom_cache: str):
+        object.__setattr__(self, "_ext", ext)
+        object.__setattr__(self, "_nom_cache", nom_cache)
+
+    def __getattr__(self, nom):
+        if nom == self._nom_cache:
+            raise AttributeError(nom)
+        return getattr(self._ext, nom)
+
+
+def installer_hooks_moe_experts(model, regime: str = "a4"):
+    """Fake-quant sur l'ENTREE des GEMV groupes gate/up/down des MoEBlock.
+
+    Les experts MoE ne passent PAS par `QuantLinear.forward()` (jamais
+    appele : `_forward_grouped` appelle directement `self._grouped(x32,
+    pile, ...)`, qui lance le noyau CUDA sur les poids EMPILES). Les hooks
+    `torch.nn.Module` de ce fichier n'y voient donc rien — ce mecanisme
+    monkeypatch `_grouped` sur chaque instance de MoEBlock trouvee, et
+    masque temporairement le noyau fusionne gate+up (`_ExtensionSansAttribut`)
+    pour garantir que gate ET up passent, eux aussi, par `_grouped` pendant
+    la mesure — sinon "A4 sur gate+up+down" ne le serait qu'a moitie.
+
+    Rend (handles, blocs) — `handles[0].remove()` restaure tout (l'extension
+    CUDA globale ET chaque `_grouped` d'origine), comme les autres
+    installateurs de ce fichier."""
+    if regime not in REGIMES:
+        raise ValueError(f"regime {regime!r} inconnu ; attendu {sorted(REGIMES)}")
+    fq = REGIMES[regime]
+    blocs = [m for m in model.modules() if type(m).__name__.startswith("MoEBlock")]
+    if fq is None or not blocs:
+        return [], blocs
+
+    from acvram import kernels as _kernels
+
+    ext_original = _kernels.get_extension
+
+    def _get_extension_sans_fusion(*a, **kw):
+        ext = ext_original(*a, **kw)
+        return (_ExtensionSansAttribut(ext, "nvfp4_gemv_grouped_gateup")
+                if ext is not None else ext)
+
+    _kernels.get_extension = _get_extension_sans_fusion
+
+    restaurations = [(bloc, bloc._grouped) for bloc in blocs]
+    for bloc, original in restaurations:
+        def _grouped_fq(x32, pile, expert_ids, token_ids, _orig=original):
+            return _orig(fq(x32), pile, expert_ids, token_ids)
+        bloc._grouped = _grouped_fq
+
+    def _restaurer():
+        _kernels.get_extension = ext_original
+        for bloc, original in restaurations:
+            bloc._grouped = original
+
+    return [_PoigneeFonction(_restaurer)], blocs
+
+
 def installer_hooks_smoothquant(model, act_stats: dict, alpha: float):
     """Replie l'echelle SmoothQuant dans chaque projection trouvee (poids
     NVFP4 REMPLACE en memoire, jamais sur disque) puis hooke l'activation :

@@ -19,6 +19,11 @@ une COPIE en mémoire du poids, jamais persistée) :
                  genres restent en A16 (aucun SmoothQuant sur ce régime :
                  question isolée — la dégradation A4 nue vient-elle
                  surtout de down_proj ?)
+  moe-proj-seul  fake-quant E2M1 sur gate_proj+up_proj+down_proj (les
+                 trois genres du MLP), q/k/v/o restent en A16. Recadrage
+                 de chef (13/09) : le noyau MMA de poste4 ne sert QUE
+                 ces trois projections (chemin MoE groupé) ; le seuil
+                 réel se joue sur ce sous-ensemble, pas sur les 7 genres.
 
 Statistiques d'activation (max|X| par canal d'entrée) relevées sur le
 POINT DE CONTRÔLE HF D'ORIGINE (`Llama-2-7b-hf`, PAS le dossier converti :
@@ -78,14 +83,15 @@ def _calibrer(device: str):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pour-de-vrai", action="store_true")
-    ap.add_argument("--regimes", default="smooth-a0.50,smooth-a0.65,smooth-a0.80,downproj-seul")
+    ap.add_argument("--regimes", default="smooth-a0.50,smooth-a0.65,smooth-a0.80,downproj-seul,moe-proj-seul")
     ap.add_argument("--sortie",
                     default=str(Path("~/Bureau/Claude"
                                      "/acvram-memoire/corpus/smoothquant-a4-sweep")))
     ap.add_argument("--device", default="cuda:0")
     a = ap.parse_args()
     regimes = [r.strip() for r in a.regimes.split(",") if r.strip()]
-    connus = {"smooth-a0.50", "smooth-a0.65", "smooth-a0.80", "downproj-seul"}
+    connus = {"smooth-a0.50", "smooth-a0.65", "smooth-a0.80", "downproj-seul",
+              "moe-proj-seul"}
     inconnus = [r for r in regimes if r not in connus]
     if inconnus:
         print(f"ECHEC / CAUSE: regimes inconnus {inconnus}, attendu {sorted(connus)}")
@@ -144,6 +150,13 @@ def main() -> int:
                     raise RuntimeError("downproj-seul : aucune couche trouvee")
                 print(f"  {_regime} : {len(trouves)} down_proj hookes (A4), "
                       f"le reste en A16", flush=True)
+            elif _regime == "moe-proj-seul":
+                handles, trouves = installer_hooks_genres(
+                    model, {"gate_proj", "up_proj", "down_proj"}, "a4")
+                if not trouves:
+                    raise RuntimeError("moe-proj-seul : aucune couche trouvee")
+                print(f"  {_regime} : {len(trouves)} gate/up/down hookes (A4), "
+                      f"q/k/v/o en A16", flush=True)
             else:
                 alpha = float(_regime.split("a")[-1])
                 handles, trouves, manques = installer_hooks_smoothquant(

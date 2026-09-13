@@ -169,3 +169,34 @@ la durée tenue.
 ET exister en au moins deux exemplaires du même travail. Une seule des deux
 conditions laisse l'indécidable intact.* Corollaire : **un témoin unique
 n'est pas un témoin.**
+
+## 7. SmoothQuant par canal casse l'échelle de bloc NVFP4 — MESURÉ le 13/09
+
+Bead `anticitoyen-vram-brd` : lisser les activations avant fake-quant E2M1
+(`s_j = max|X_j|^α / max|W_j|^(1-α)`, par CANAL d'entrée j) DÉGRADE le PPL
+de façon MONOTONE avec α sur Llama-2-7B (α=0,50 → +4,98 %, α=0,65 →
++7,29 %, α=0,80 → +24,69 %) — **pire que l'absence totale de lissage**
+(A4 nu : +2,58 %). Voir `revue/verdict-smoothquant-a4-sweep.md`.
+
+**Le mécanisme (hypothèse, cohérente avec la monotonie observée, non
+vérifiée noyau par noyau) :** le NVFP4 quantifie par BLOC DE 16 canaux
+d'entrée consécutifs, avec UNE SEULE échelle E4M3 partagée par bloc — un
+canal isolé dans ce bloc ne pénalise QUE ce bloc, à coût quasi nul pour le
+reste du tenseur (c'est déjà la raison documentée du choix du bloc de 16,
+`acvram/quant/nvfp4.py`). SmoothQuant calcule une échelle *par canal
+individuel*, sans respecter cette frontière de bloc : un canal fortement
+mis à l'échelle par `s_j` peut désormais dominer l'`amax` du bloc entier,
+écrasant la résolution des 15 canaux voisins qui n'avaient pourtant pas
+besoin d'être touchés. Plus α est grand, plus `s = max|X|^α` s'écarte
+d'un canal à l'autre (l'activation varie fortement, le poids beaucoup
+moins), et plus ce déséquilibre intra-bloc s'aggrave — d'où la
+dégradation monotone.
+
+**Ce que ça dit pour tout mécanisme futur qui touche à l'échelle d'un
+format à bloc fin :** une transformation qui traite les canaux
+individuellement (rotation, lissage, permutation) doit soit respecter la
+frontière du bloc de quantification (une transformation PAR BLOC plutôt
+que sur le tenseur entier), soit être évaluée avec la MÊME rigueur que
+SmoothQuant ici — un gain démontré sur un format à groupe large (l'INT4-AWQ,
+groupe 128, où la même rotation Hadamard AIDE : `piste-hadamard-downproj-refutee.md`)
+ne se transporte PAS automatiquement à un format à bloc de 16.
