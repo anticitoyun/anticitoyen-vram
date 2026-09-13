@@ -79,3 +79,59 @@ dont dépend tout le reste du chantier (poste4, poste3, poste2) — je
 préfère nommer l'ampleur et confirmer le feu vert avant de l'écrire
 plutôt que de le pousser en un geste sur un mécanisme partagé par tout
 le monde.
+
+## Résultat (14/09, carte exclusive, `outils/carte.sh`)
+
+`outils/mesure-pipeline-ab.py`, résident Coder-30B b=12, 12 séquences ×
+200 jetons, `ACVRAM_PIPELINE=0` puis `=1`, même processus :
+
+```
+[A] PIPELINE=0 : jetons_s=705,38  ms_par_pas=15,594
+[B] PIPELINE=1 : jetons_s=709,95  ms_par_pas=15,417
+gain débit A->B : +0,6 %
+prédiction scellée : pas <= 13,5 ms (B=15,417 ms)
+verdict prédiction : NE TIENT PAS
+```
+
+**Échec de la prédiction.** Le gain mesuré (+0,6 %, −0,18 ms/pas) est
+très inférieur à l'écart visé (16,5 → ≤13,5 ms, soit −3 ms).
+
+### Cause : la prédiction confondait l'ATTENTE et le TRAVAIL hors rejeu
+
+chef l'avait déjà précisé avant la mesure : « `.tolist()` à 93,6 % =
+l'hôte qui ATTEND le GPU ; le gain vient du recouvrement de ce qui suit
+(emit/build/fill) avec le rejeu suivant, pas de la suppression de
+l'attente. » Le profilage (`outils/profil_cpu_pas.py`) avait mesuré
+_emit cumulant 93,6 % de son temps DANS `.tolist()` — c'est-à-dire que
+sur les 4,3 ms hors rejeu, l'écrasante majorité n'est pas du calcul
+hôte à recouvrir, c'est de l'attente d'un résultat GPU dont dépend la
+suite (l'argmax du pas n dépend des logits du rejeu n : cette
+dépendance ne disparaît pas, le recouvrement ne fait que déplacer QUI
+attend, pas la durée de l'attente elle-même).
+
+Seule la part hors-`.tolist()` de ces 4,3 ms — le reste, ~6,4 % —
+est du vrai travail hôte (emit/build/fill/preparer) susceptible d'être
+masqué derrière le rejeu du pas suivant. Borne théorique :
+4,3 ms × 6,4 % ≈ 0,28 ms/pas. La mesure (−0,18 ms/pas) est du même
+ordre de grandeur que cette borne, pas du même ordre que les 3 ms
+visés — c'est cohérent avec le mécanisme réellement implémenté (un
+seul `.tolist()` par pas, retardé, embedding sur device), pas avec un
+défaut d'implémentation.
+
+Confondu ayant été écarté : `charge_s` de la mesure [A] (119,0 s) est
+anormal (file d'attente carte 368 s + verrou de compilation orphelin
+977 s rapportés au lancement, cf. log brut) mais ce délai est dans le
+CHARGEMENT du modèle, hors de la boucle chronométrée (`duree_s`,
+`ms_par_pas` ne courent qu'après `warm_graphs()`) — les deux mesures
+[A] et [B] ont des `duree_s` proches (3,10 vs 3,08 s) dans le même
+processus, donc la contention affecte les deux de façon comparable et
+n'explique pas l'écart au seuil.
+
+**Verdict** : le recouvrement fonctionne (bit-identique validé,
+`tests/test_pipeline_decodage.py`, 1 passed) mais son gain réel est
+plafonné par la part non-attente du hors-rejeu, pas par les 4,3 ms
+entiers. La prédiction de chef (≤13,5 ms) supposait implicitement
+que le recouvrement supprimait l'attente elle-même ; ce n'est pas ce
+que le mécanisme fait, et ce n'est pas ce qu'il peut faire tant que le
+pas n+1 dépend du jeton du pas n. Un échec est un résultat : je ne
+publie pas de chiffre reconstruit pour combler l'écart.
