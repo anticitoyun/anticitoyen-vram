@@ -4,15 +4,17 @@ RTX 3080 Ti (index 1, 12 Go GDDR6X), sans la 5090.
 
 ## Taxe de stationnement des contextes CUDA
 
-État (a) : Services arrêtés (13/09)
+État (a) : Services arrêtés
+- Mesure instantanée : 22.81 W
+- Moyenne 5 min (nvidia-smi -lms 1000, 300 points) : 23.12 W
+- Min/Max : 21.96 W / 24.68 W
 - VRAM utilisée : 18 MiB
-- VRAM totale : 12 288 MiB (12 Go)
-- Puissance au repos : 22.81 W
+- VRAM totale : 12 288 MiB
 
 État (b) : Services démarrés sans requête
-- Services 8082/8083 non disponibles sur le système
+- Services 8082/8083 non disponibles
 
 État (c) : Pendant une requête
-- Services non actifs : relevé incomplet
+- Services non actifs
 
-**Note :** Services d'embeddings (8082) et reranking (8083) n'étaient pas disponibles au moment de la mesure. Puissance mesurée sur nvidia-smi, pas de charge GPU active.
+**Résumé :** Taxe stationnement GPU au repos ≈ 23 W. Services d'embeddings/reranking n'étaient pas disponibles pour test de charge.
