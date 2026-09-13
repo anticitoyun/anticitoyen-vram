@@ -39,6 +39,7 @@ import torch
 from acvram.engine.loader import load_model
 from acvram.engine.runner import Engine
 from acvram.engine.sampler import SamplingParams
+from regime import exiger_regime_nominal
 import importlib.util
 _s = importlib.util.spec_from_file_location("rm", os.path.join(_REPO, "outils/racine_modeles.py"))
 _m = importlib.util.module_from_spec(_s); _s.loader.exec_module(_m)
@@ -66,6 +67,7 @@ def un(rep):
     torch.cuda.synchronize()
     return time.perf_counter() - t0
 for r in range(2): un(100 + r)
+exiger_regime_nominal(eng, autoriser_piles_inconnues=False)
 for k in c: c[k] = 0
 d = [un(r) for r in range(REP)]
 jps = sorted(L / x for x in d)

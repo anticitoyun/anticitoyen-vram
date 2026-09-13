@@ -186,3 +186,10 @@ Memory Usage isn't always accurate »* (ecart entre annonce et pic, mesure a
 ~1,8 Gio chez nous, dont 0,70 de contexte CUDA) et *« Max Concurrent Predictions
 a 1 »* qui libere de la VRAM reservee sans usage (meme famille que le budget KV
 dimensionne pour 4096 jetons quel que soit `max_model_len`).
+
+## OmniRoute — abandonné (13/09)
+
+Passerelle API locale essayée le 13/09 (`/mnt/AI_GENERATOR/OmniRoute`, port
+20128). Verdict de l'utilisateur : ne remplace pas duck.ai (modèles gratuits
+paramétriques sans recherche web, REGLES §1), 19 Go de RSS en mode dev, build de
+production cassée en amont → inutile, arrêté. Ne pas relancer.

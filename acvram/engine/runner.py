@@ -349,10 +349,15 @@ class Engine:
             self.allocator.spill_cb = _deverser
 
         self.graphs = None
+        self._graphes_demandes = enable_cuda_graphs
+        self._graphes_raison: Optional[str] = ("désactivés (enable_cuda_graphs=False)"
+                                               if not enable_cuda_graphs else None)
         if enable_cuda_graphs:
             from .graphs import GraphRunner
             gr = GraphRunner(self.model, max_model_len)
             self.graphs = gr if gr.enabled else None
+            if not gr.enabled:
+                self._graphes_raison = gr.raison or "raison non nommée"
 
         # REPIN (bead anticitoyen-vram-pds, point 3 — poste7 §4). `_pin` :
         # {index_couche: set(experts résidents)} — peuplé depuis les couches
@@ -379,10 +384,96 @@ class Engine:
         # même lancé. Le synchroniser au pas suivant garantirait le rejeu,
         # pas l'échantillonnage enfilé APRÈS lui sur le même flux : un jeton
         # parfois encore en vol au moment du `.tolist()` — trouvé par le
-        # test bit-identique (bead runner, 14/09), pas par relecture. Le
-        # pipeline enregistre donc le SIEN, après `_sample_only`.
-        self._evenement_echantillon = (torch.cuda.Event()
-                                       if torch.cuda.is_available() else None)
+        # test bit-identique (bead runner, 14/09), pas par relecture. Un
+        # `torch.cuda.Event()` NEUF à chaque pas (pas un seul réutilisé) :
+        # `_plain_decode_pipeline` enfile le pas n+1 avant de synchroniser
+        # sur l'événement du pas n — un objet partagé ré-enregistré par le
+        # pas n+1 pointerait alors vers SA PROPRE fin, pas celle du pas n
+        # (bogue trouvé le 14/09 soir, même famille que le premier).
+
+        # `piles_ok` n'est pas encore décidé à ce point (paresseux, au
+        # premier passage GPU) : cette ligne ne peut donc pas être un
+        # verdict complet, seulement ce qui est déjà connu au chargement.
+        if not os.environ.get("ACVRAM_REGIME_MUET"):
+            print(f"[acvram] {self.regime_ligne()}", flush=True)
+
+    # -- régime ------------------------------------------------------------
+    def regime(self) -> dict:
+        """État réel du moteur après chargement — pas ce qu'on espérait,
+        ce qui tourne. Demandé par chef (14/09 soir) après qu'un
+        deuxième chargement de modèle dans le même processus ait
+        silencieusement dégradé le plan (exil supplémentaire, graphes CUDA
+        coupés, modèle réparti sur 2 cartes) et faussé une mesure sans
+        qu'aucune ligne ne le dise. « Plus jamais un chiffre mesuré sur un
+        moteur dégradé sans le savoir. »
+
+        `piles_ok` : `MoEBlock._stack_state` est décidé PARESSEUSEMENT, au
+        premier passage GPU de chaque couche — encore "?" (non vérifié)
+        juste après le chargement, avant tout `step()`/`warm_graphs()`.
+        `experts_exiles` compte les EXPERTS (au moins une de leurs
+        projections `QuantLinear.streamed`), pas les couches — l'exil du
+        plan (`couches_exilees`) est un exil de couche ENTIÈRE ; les deux
+        coexistent et ne se déduisent pas l'un de l'autre.
+        """
+        from .model import MoEBlock
+
+        plan = self.loaded.plan
+        couches_exilees = sum(1 for lp in plan.layers if lp.streamed)
+        cartes = sorted({lp.exec_device for lp in plan.layers}
+                        | {plan.embed_device, plan.lm_head_device})
+
+        etats_piles: set[str] = set()
+        experts_total = experts_exiles = 0
+        for m in self.model.modules():
+            if not isinstance(m, MoEBlock):
+                continue
+            etats_piles.add(m._stack_state)
+            for expert in m.experts:
+                experts_total += 1
+                if any(getattr(getattr(expert, nom, None), "streamed", None) is not None
+                      for nom in ("gate_proj", "up_proj", "down_proj")):
+                    experts_exiles += 1
+
+        if not etats_piles:
+            piles_ok: Optional[bool] = None          # pas de couche MoE
+        elif "non" in etats_piles:
+            piles_ok = False
+        elif etats_piles == {"oui"}:
+            piles_ok = True
+        else:
+            piles_ok = None                           # au moins une "?" : non vérifié
+
+        chemin_moe = ("mma" if os.environ.get("ACVRAM_MOE_MMA", "1") not in ("0", "")
+                     else "gemv")
+        if os.environ.get("ACVRAM_GRAPHES_TABLE") == "0":
+            chemin_moe += "+pile" if piles_ok else "+pile(désactivé)"
+
+        return {
+            "graphes": self.graphs is not None,
+            "graphes_demandes": self._graphes_demandes,
+            "graphes_raison": self._graphes_raison,
+            "couches_exilees": couches_exilees,
+            "couches_total": len(plan.layers),
+            "experts_exiles": experts_exiles,
+            "experts_total": experts_total,
+            "piles_ok": piles_ok,
+            "cartes": cartes,
+            "chemin_moe": chemin_moe,
+        }
+
+    def regime_ligne(self) -> str:
+        """Une ligne, pour le log au chargement et `acvram serve --regime`."""
+        r = self.regime()
+        nominal = ((r["graphes"] or not r["graphes_demandes"])
+                  and r["couches_exilees"] == 0
+                  and r["experts_exiles"] == 0 and r["piles_ok"] is not False
+                  and len(r["cartes"]) <= 1)
+        etat = "NOMINAL" if nominal else "DÉGRADÉ"
+        return (f"régime {etat} — graphes={'on' if r['graphes'] else 'off'} "
+               f"couches_exilées={r['couches_exilees']}/{r['couches_total']} "
+               f"experts_exilés={r['experts_exiles']}/{r['experts_total']} "
+               f"piles_ok={r['piles_ok']} cartes={r['cartes']} "
+               f"chemin_moe={r['chemin_moe']}")
 
     # -- admission -------------------------------------------------------
     def _eos_ids(self) -> set[int]:
@@ -910,18 +1001,18 @@ class Engine:
         rapatrié sur l'hôte (bead runner, 14/09, accord d'interface avec
         poste4 côté `graphs.py`).
 
-        Appelée APRÈS `_consommer` (qui a déjà ajouté le jeton à
-        `output_ids` — celui-là même que `tokens_dev` porte, en tenseur) :
-        même convention de position que `_build_batch`, `pos = seq.length -
-        1`. `tokens_dev` n'évite que la LECTURE hôte du jeton, pas un
-        décalage d'indexation."""
+        Appelée AVANT `_consommer` (recouvrement : c'est justement pour ça
+        qu'on n'attend pas) — `output_ids` ne porte PAS encore ce jeton,
+        contrairement à `_build_batch`. Convention DÉCALÉE d'un cran :
+        `pos = seq.length` (pas `- 1`), et l'appelant doit réserver le bloc
+        avec `_grow(seq, extra=1)`."""
         positions: list[int] = []
         slots: list[int] = []
         query_lens: list[int] = []
         seq_lens: list[int] = []
         block_tables: list[torch.Tensor] = []
         for seq in seqs:
-            pos = seq.length - 1
+            pos = seq.length
             positions.append(pos)
             slots.append(seq.blocks[pos // BLOCK_SIZE] * BLOCK_SIZE
                          + pos % BLOCK_SIZE)
@@ -959,22 +1050,25 @@ class Engine:
             return self._emit(logits, decodable)
         logits = self.graphs.rejouer_suivant()
         tokens_dev, logprobs_dev = self._sample_only(logits, decodable)
-        self._evenement_echantillon.record()
+        evenement = torch.cuda.Event()
+        evenement.record()
         self._pipeline_pendiente = {
             "seqs": decodable, "tokens_dev": tokens_dev,
-            "logprobs_dev": logprobs_dev, "event": self._evenement_echantillon}
+            "logprobs_dev": logprobs_dev, "event": evenement}
         return []
 
     def _pipeline_suite(self, roster: list[Sequence],
                         tokens_dev: torch.Tensor) -> list[GenerationOutput]:
-        """Prépare et lance le pas SUIVANT en recouvrement — `roster` est le
-        sous-ensemble encore actif du pas qui vient d'être rapatriée (donc
-        déjà ajouté à `output_ids` par `_consommer`, appelé juste avant par
-        `_plain_decode_pipeline`), `tokens_dev` ses jetons DEVICE alignés
-        dans le même ordre. `_grow` sans `extra` : `seq.length` compte déjà
-        ce jeton, même convention que `_plain_decode_sync`."""
+        """Prépare et lance le pas SUIVANT en recouvrement — enfilée AVANT
+        que `_consommer` n'ait rapatrié le pas courant (c'est le
+        recouvrement : `_plain_decode_pipeline` appelle celle-ci D'ABORD).
+        `roster` est le sous-ensemble encore actif tel que connu au pas
+        PRÉCÉDENT (`output_ids` ne porte pas encore son jeton de ce pas-ci),
+        `tokens_dev` ses jetons DEVICE alignés dans le même ordre. `_grow`
+        avec `extra=1` : réserve le bloc du jeton pas encore ajouté à
+        `output_ids` (cf. `_build_batch_device`)."""
         for seq in roster:
-            if not self._grow(seq):
+            if not self._grow(seq, extra=1):
                 self._finish(seq, "length")
         vivants = [s for s in roster if not s.finished]
         if not vivants:
@@ -991,10 +1085,11 @@ class Engine:
             return self._emit(logits, vivants)
         logits = self.graphs.rejouer_suivant()
         tokens_dev2, logprobs_dev2 = self._sample_only(logits, vivants)
-        self._evenement_echantillon.record()
+        evenement = torch.cuda.Event()
+        evenement.record()
         self._pipeline_pendiente = {
             "seqs": vivants, "tokens_dev": tokens_dev2,
-            "logprobs_dev": logprobs_dev2, "event": self._evenement_echantillon}
+            "logprobs_dev": logprobs_dev2, "event": evenement}
         return []
 
     def _plain_decode_pipeline(self, decodable: list[Sequence]) -> list[GenerationOutput]:
@@ -1013,9 +1108,6 @@ class Engine:
             return self._pipeline_amorcer(decodable)
 
         self._pipeline_pendiente = None
-        pend["event"].synchronize()
-        outputs = self._consommer(pend["tokens_dev"], pend["logprobs_dev"], pend["seqs"])
-
         roster_avant = [s for s in pend["seqs"] if not s.finished]
         # `.id`, pas `in`/`==` : `Sequence` est un dataclass à égalité par
         # champs (output_ids inclus) — comparer les objets eux-mêmes serait
@@ -1023,14 +1115,31 @@ class Engine:
         # et lent (compare tous les champs, listes comprises).
         ids_pend = {s.id for s in pend["seqs"]}
         nouveaux = [s for s in decodable if s.id not in ids_pend]
+
         if nouveaux or not roster_avant:
+            # Recomposition du lot : pas de rejeu à enfiler par avance (sa
+            # forme dépend de la nouvelle composition), donc rien à
+            # recouvrir ici — on synchronise puis on retombe sur le pas
+            # normal, comme documenté.
+            pend["event"].synchronize()
+            outputs = self._consommer(pend["tokens_dev"], pend["logprobs_dev"], pend["seqs"])
             outputs += self._pipeline_amorcer(roster_avant + nouveaux)
             return outputs
 
+        # Lot stable : enfiler le rejeu n+1 D'ABORD (il ne lit que
+        # `tokens_dev`, un tenseur DEVICE écrit par le rejeu n — l'ordre du
+        # flux CUDA garantit la dépendance, aucun événement requis ici) puis
+        # SEULEMENT ENSUITE synchroniser pour rapatrier les jetons du pas n
+        # — sinon le rejeu n+1 ne part qu'après tout le travail hôte de
+        # `_consommer`, et il n'y a plus rien à recouvrir (ce qui était le
+        # bogue : le +0,6 % mesuré le 14/09 venait de cet ordre inversé).
         mask = [not s.finished for s in pend["seqs"]]
         tokens_dev = (pend["tokens_dev"] if all(mask) else
                      pend["tokens_dev"][torch.tensor(mask, device=pend["tokens_dev"].device)])
-        outputs += self._pipeline_suite(roster_avant, tokens_dev)
+        outputs = self._pipeline_suite(roster_avant, tokens_dev)
+
+        pend["event"].synchronize()
+        outputs = self._consommer(pend["tokens_dev"], pend["logprobs_dev"], pend["seqs"]) + outputs
         return outputs
 
     def _speculative_decode(self, decodable: list[Sequence]

@@ -257,7 +257,16 @@ class GraphRunner:
                         mod._stack_state = ("oui" if mod._try_build_stacks()
                                             else "non")
                 if mod._stack_state != "oui":
-                    self.raison = "pile d'experts hétérogène"
+                    # « pile d'experts hétérogène » recouvrait trois causes
+                    # distinctes sans les distinguer (14/09, Qwen3-Coder-30B-A3B
+                    # reconverti a snr_floor=0 : le message pointait a tort
+                    # vers une hétérogénéité de format alors que le manifeste
+                    # était uniforme — la vraie cause était une échelle AWQ
+                    # posée sur certains experts seulement). `_raison_repli`
+                    # nomme la cause reelle, deja imprimee par
+                    # `_try_build_stacks` au moment du repli.
+                    self.raison = (getattr(mod, "_raison_repli", "")
+                                  or "pile d'experts non homogène (cause non identifiée)")
                     return False             # pile heterogene : eager
                 if table_graphes_ok and all(
                         p[0] in ("nvfp4", "nvfp4_table")

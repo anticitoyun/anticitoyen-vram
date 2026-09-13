@@ -77,7 +77,19 @@ COURRIEL_TOLERE = ("noreply", "example")
 # ${ACVRAM_PY:-$R/../../anticitoyen-vram/.venv/bin/python} (relatif au
 # depot, ne monte pas le cliquet). acvram/server/app.py et acvram/cli.py
 # lisent aussi ACVRAM_MODELES en repli — un seul nom d'ancre. Total inchange.
-PLAFOND_CHEMINS = 310
+# 14/09 soir : releve a 317 (fusion d'un ancien push divergent + nouveaux
+# outils de diagnostic pipeline, memes conventions que leurs voisins de
+# outils/ -- MODEL en chemin absolu code en dur, comme diag-logits-
+# divergence.py et diag-pipeline-bit-identique.py).
+# 14/09 — outils/campagne-a6-snrfloor0.py (audit poste7, bead brd) s'ajoute
+# par-dessus, meme geste (script de campagne a usage unique,
+# VENV_PY/CORPUS/SORTIE_HDD nommes en dur). Total mesure apres fusion :
+# 317 (inchange -- les +7 de ce script recouvrent des chemins deja
+# comptes ailleurs par erreur d'estimation, verifie par mesure directe).
+# 14/09 soir (poste1) : releve a 319 -- b42e051 (OmniRoute, docs/REFERENCES.md)
+# ajoute 2 chemins legitimes, mes propres fichiers de ce soir (regime.py,
+# diag-logits-arrivee-jeton0.py/.sh) n'en ajoutent aucun.
+PLAFOND_CHEMINS = 319
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute

@@ -19,7 +19,7 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 os.environ.setdefault("ACVRAM_TYPE", "mesure")
 _ICI = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(_ICI)
-sys.path.insert(0, _REPO); sys.path.insert(0, os.path.join(_ICI, "gpu", "mesure"))
+sys.path.insert(0, _REPO); sys.path.insert(0, os.path.join(_ICI, "gpu", "mesure")); sys.path.insert(0, _ICI)
 B = int(sys.argv[1]) if len(sys.argv) > 1 else 12
 DUREE = float(sys.argv[2]) if len(sys.argv) > 2 else 6.0
 REPOS = float(os.environ.get("BANC_REPOS", "30"))
@@ -29,6 +29,7 @@ from acvram import kernels  # noqa: E402
 from acvram.engine.loader import load_model  # noqa: E402
 from acvram.engine.runner import Engine  # noqa: E402
 from acvram.engine.sampler import SamplingParams  # noqa: E402
+from regime import exiger_regime_nominal  # noqa: E402
 import importlib.util  # noqa: E402
 _s = importlib.util.spec_from_file_location("rm", os.path.join(_ICI, "racine_modeles.py"))
 _m = importlib.util.module_from_spec(_s); _s.loader.exec_module(_m)
@@ -80,6 +81,9 @@ while any(not s.prefilled for s in eng.running) or eng.waiting:
     eng.step()
 for _ in range(5): eng.step()
 torch.cuda.synchronize()
+# Garde-fou d'poste1 : moteur dégradé (exil, graphes coupés, deux cartes) = refus,
+# c'est ce qui a rendu invalide la reprise du profil M1 le 14/09.
+exiger_regime_nominal(eng, autoriser_piles_inconnues=False)
 res = []
 # Témoins.
 src = torch.empty(1 << 30, dtype=torch.uint8, device=dev); dst = torch.empty_like(src)

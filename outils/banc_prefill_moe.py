@@ -50,6 +50,12 @@ def _charger(chemin_modele: str):
                         device_override="cuda:0")
     e = Engine(loaded, None, max_batch_size=1, max_model_len=4096,
                enable_cuda_graphs=False)
+    # `enable_cuda_graphs=False` est volontaire ici (prefill n'en profite
+    # pas) -- `exiger_regime_nominal` ne le compte pas comme une
+    # dégradation, seulement l'exil/le partage sur 2 cartes/les piles.
+    _prefill_un(e, 8)                     # un pas reel : resout piles_ok
+    from regime import exiger_regime_nominal
+    exiger_regime_nominal(e, autoriser_piles_inconnues=False)
     return e, loaded
 
 

@@ -29,6 +29,8 @@ import time
 # correctif-godet-hybride-13-09.md).
 sys.path.insert(0, "~/Bureau/Claude/travail/poste3")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "..", ".."))                # outils/ -- regime.py
 
 import torch
 
@@ -50,6 +52,7 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 from acvram.engine.loader import load_model  # noqa: E402
 from acvram.engine.runner import Engine  # noqa: E402
 from acvram.engine.sampler import SamplingParams  # noqa: E402
+from regime import exiger_regime_nominal  # noqa: E402
 
 print(f"[INFO] palier={PALIER} mode={'prefill' if MODE_PREFILL else 'decodage'} "
       f"modele={MODEL_DIR}", flush=True)
@@ -75,6 +78,7 @@ if MODE_PREFILL:
     engine.add_request(invite(2, 64), SamplingParams(temperature=0.0, max_tokens=1))
     engine.step()
     torch.cuda.synchronize()
+    exiger_regime_nominal(engine, autoriser_piles_inconnues=False)
 
     base = repos(secondes=5.0)
     with Energie() as e:
@@ -97,6 +101,7 @@ if MODE_PREFILL:
 else:
     engine = Engine(loaded, None, max_batch_size=SLOTS, max_model_len=CTX)
     engine.warm_graphs()
+    exiger_regime_nominal(engine, autoriser_piles_inconnues=False)
     torch.cuda.reset_peak_memory_stats(0)
     params = SamplingParams(temperature=0.0, max_tokens=N_JETONS)
     for k in range(SLOTS):
