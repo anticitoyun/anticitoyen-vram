@@ -366,6 +366,24 @@ class Engine:
                           if isinstance(m, MoEBlock) and m._pin_experts is not None}
         self._dernier_repin = 0
 
+        # Recouvrement pas n+1 / rejeu n (bead runner, 14/09 — chef, accord
+        # d'interface avec poste4). `_pipeline_pendiente` porte le résultat
+        # DÉJÀ REJOUÉ mais pas encore rapatrié d'un pas antérieur :
+        # {"seqs", "tokens_dev", "logprobs_dev", "event"}. None = rien en vol
+        # (au repos, ou juste après une recomposition du lot). Défaut OFF :
+        # `ACVRAM_PIPELINE=1` pour l'activer, le temps du verdict A/B.
+        self._pipeline_pendiente: Optional[dict] = None
+        self.pipeline_actif = bool(os.environ.get("ACVRAM_PIPELINE"))
+        # `evenement_jetons` de GraphRunner ne borne QUE le rejeu — enregistré
+        # par `rejouer_suivant()` avant que `_sample_only` (l'argmax) soit
+        # même lancé. Le synchroniser au pas suivant garantirait le rejeu,
+        # pas l'échantillonnage enfilé APRÈS lui sur le même flux : un jeton
+        # parfois encore en vol au moment du `.tolist()` — trouvé par le
+        # test bit-identique (bead runner, 14/09), pas par relecture. Le
+        # pipeline enregistre donc le SIEN, après `_sample_only`.
+        self._evenement_echantillon = (torch.cuda.Event()
+                                       if torch.cuda.is_available() else None)
+
     # -- admission -------------------------------------------------------
     def _eos_ids(self) -> set[int]:
         ids: set[int] = set()
@@ -847,6 +865,11 @@ class Engine:
         _repin_echanger_reel(m, sortant, entrant)
 
     def _plain_decode(self, decodable: list[Sequence]) -> list[GenerationOutput]:
+        if self.pipeline_actif and self.graphs is not None:
+            return self._plain_decode_pipeline(decodable)
+        return self._plain_decode_sync(decodable)
+
+    def _plain_decode_sync(self, decodable: list[Sequence]) -> list[GenerationOutput]:
         trace = os.environ.get("ACVRAM_TRACE_STEPS")
         tg = time.perf_counter()
         for seq in decodable:
@@ -877,6 +900,138 @@ class Engine:
                   f"{(t1-t0)*1000:.1f} avant {(t2-t1)*1000:.1f} emit "
                   f"{(t3-t2)*1000:.1f} ms len={decodable[0].length}", flush=True)
         return outs
+
+    def _build_batch_device(self, seqs: list[Sequence],
+                            tokens_dev: torch.Tensor) -> ForwardBatch:
+        """Comme `_build_batch(seqs, prefill=False)`, mais le jeton à
+        plonger vient d'un tenseur DEVICE (l'argmax du pas précédent, jamais
+        rapatrié) plutôt que de `seq.output_ids[-1]` — c'est justement ce qui
+        permet de lancer ce pas SANS attendre que le pas précédent soit
+        rapatrié sur l'hôte (bead runner, 14/09, accord d'interface avec
+        poste4 côté `graphs.py`).
+
+        Appelée APRÈS `_consommer` (qui a déjà ajouté le jeton à
+        `output_ids` — celui-là même que `tokens_dev` porte, en tenseur) :
+        même convention de position que `_build_batch`, `pos = seq.length -
+        1`. `tokens_dev` n'évite que la LECTURE hôte du jeton, pas un
+        décalage d'indexation."""
+        positions: list[int] = []
+        slots: list[int] = []
+        query_lens: list[int] = []
+        seq_lens: list[int] = []
+        block_tables: list[torch.Tensor] = []
+        for seq in seqs:
+            pos = seq.length - 1
+            positions.append(pos)
+            slots.append(seq.blocks[pos // BLOCK_SIZE] * BLOCK_SIZE
+                         + pos % BLOCK_SIZE)
+            query_lens.append(1)
+            seq_lens.append(pos + 1)
+            block_tables.append(torch.tensor(seq.blocks, dtype=torch.long))
+        return ForwardBatch(
+            tokens=tokens_dev,
+            positions=torch.tensor(positions, dtype=torch.long),
+            seq_lens=seq_lens, query_lens=query_lens,
+            block_tables=block_tables,
+            slot_mapping=torch.tensor(slots, dtype=torch.long),
+            is_prefill=False,
+            seq_ids=[s.id for s in seqs], gdn_store=self.gdn_states)
+
+    def _pipeline_amorcer(self, decodable: list[Sequence]) -> list[GenerationOutput]:
+        """Un pas NORMAL (synchrone, comme `_plain_decode_sync`), qui pose ou
+        REPOSE l'état du pipeline plutôt que de le poursuivre en
+        recouvrement — au tout premier pas, et chaque fois que la
+        composition du lot change (une séquence finit, une autre est
+        admise) : `_plain_decode_pipeline` retombe ici plutôt que de
+        deviner. Un seul pas de recouvrement perdu à chaque recomposition,
+        jamais de famine pour une arrivée."""
+        for seq in decodable:
+            if not self._grow(seq):
+                self._finish(seq, "length")
+        decodable = [s for s in decodable if not s.finished]
+        if not decodable:
+            return []
+        batch = self._build_batch(decodable, prefill=False)
+        ok = self.graphs.preparer(batch)
+        self.stats.decode_tokens += len(decodable)
+        if not ok:
+            logits = self.model(batch)
+            return self._emit(logits, decodable)
+        logits = self.graphs.rejouer_suivant()
+        tokens_dev, logprobs_dev = self._sample_only(logits, decodable)
+        self._evenement_echantillon.record()
+        self._pipeline_pendiente = {
+            "seqs": decodable, "tokens_dev": tokens_dev,
+            "logprobs_dev": logprobs_dev, "event": self._evenement_echantillon}
+        return []
+
+    def _pipeline_suite(self, roster: list[Sequence],
+                        tokens_dev: torch.Tensor) -> list[GenerationOutput]:
+        """Prépare et lance le pas SUIVANT en recouvrement — `roster` est le
+        sous-ensemble encore actif du pas qui vient d'être rapatriée (donc
+        déjà ajouté à `output_ids` par `_consommer`, appelé juste avant par
+        `_plain_decode_pipeline`), `tokens_dev` ses jetons DEVICE alignés
+        dans le même ordre. `_grow` sans `extra` : `seq.length` compte déjà
+        ce jeton, même convention que `_plain_decode_sync`."""
+        for seq in roster:
+            if not self._grow(seq):
+                self._finish(seq, "length")
+        vivants = [s for s in roster if not s.finished]
+        if not vivants:
+            return []
+        if len(vivants) != len(roster):
+            mask = torch.tensor([not s.finished for s in roster],
+                                device=tokens_dev.device)
+            tokens_dev = tokens_dev[mask]
+        batch = self._build_batch_device(vivants, tokens_dev)
+        ok = self.graphs.preparer(batch)
+        self.stats.decode_tokens += len(vivants)
+        if not ok:
+            logits = self.model(batch)
+            return self._emit(logits, vivants)
+        logits = self.graphs.rejouer_suivant()
+        tokens_dev2, logprobs_dev2 = self._sample_only(logits, vivants)
+        self._evenement_echantillon.record()
+        self._pipeline_pendiente = {
+            "seqs": vivants, "tokens_dev": tokens_dev2,
+            "logprobs_dev": logprobs_dev2, "event": self._evenement_echantillon}
+        return []
+
+    def _plain_decode_pipeline(self, decodable: list[Sequence]) -> list[GenerationOutput]:
+        """Décodage à un pas de retard (`ACVRAM_PIPELINE=1`, bead runner
+        14/09) : le pas n+1 est préparé et lancé AVANT de rapatrier les
+        jetons du pas n — c'est le recouvrement lui-même, `.tolist()`
+        continue d'attendre le GPU (chef : « le gain vient du
+        recouvrement, pas de la suppression de l'attente »).
+
+        `decodable` est calculé par `step()` AVANT l'appel — donc avant que
+        le rapatriement ci-dessous ait pu faire finir une séquence. Il ne
+        sert qu'à détecter un changement de composition (une arrivée) ; la
+        composition RÉELLE du pas en vol vient de `_pipeline_pendiente`."""
+        pend = self._pipeline_pendiente
+        if pend is None:
+            return self._pipeline_amorcer(decodable)
+
+        self._pipeline_pendiente = None
+        pend["event"].synchronize()
+        outputs = self._consommer(pend["tokens_dev"], pend["logprobs_dev"], pend["seqs"])
+
+        roster_avant = [s for s in pend["seqs"] if not s.finished]
+        # `.id`, pas `in`/`==` : `Sequence` est un dataclass à égalité par
+        # champs (output_ids inclus) — comparer les objets eux-mêmes serait
+        # à la fois faux (deux séquences ne sont jamais "égales" en ce sens)
+        # et lent (compare tous les champs, listes comprises).
+        ids_pend = {s.id for s in pend["seqs"]}
+        nouveaux = [s for s in decodable if s.id not in ids_pend]
+        if nouveaux or not roster_avant:
+            outputs += self._pipeline_amorcer(roster_avant + nouveaux)
+            return outputs
+
+        mask = [not s.finished for s in pend["seqs"]]
+        tokens_dev = (pend["tokens_dev"] if all(mask) else
+                     pend["tokens_dev"][torch.tensor(mask, device=pend["tokens_dev"].device)])
+        outputs += self._pipeline_suite(roster_avant, tokens_dev)
+        return outputs
 
     def _speculative_decode(self, decodable: list[Sequence]
                             ) -> list[GenerationOutput]:
@@ -1024,8 +1179,13 @@ class Engine:
             prompt_tokens=len(seq.prompt_ids),
             completion_tokens=len(seq.output_ids))
 
-    def _emit(self, logits: torch.Tensor,
-              seqs: list[Sequence]) -> list[GenerationOutput]:
+    def _sample_only(self, logits: torch.Tensor,
+                     seqs: list[Sequence]) -> tuple[torch.Tensor, torch.Tensor]:
+        """La moitié de `_emit` qui reste SUR DEVICE — aucun `.tolist()`/
+        `.item()`. Partagée par le pas normal (`_emit` l'appelle puis lit
+        tout de suite) et le pas recouvert (bead runner, 14/09), qui différe
+        la lecture d'un pas pour la faire pendant que le rejeu suivant tourne
+        déjà, au lieu de l'ajouter en série après chaque rejeu."""
         params = [s.params for s in seqs]
         # `all_ids` CONCATENE prompt et sortie : une liste neuve de la taille
         # du contexte entier, a chaque pas et pour chaque sequence. En
@@ -1035,9 +1195,23 @@ class Engine:
         # celle qui construit et celle qui lit ne puissent pas diverger.
         history = ([s.all_ids for s in seqs] if besoin_historique(params)
                    else [() for _ in seqs])
-        tokens, logprobs = sample(logits, params, history)
+        return sample(logits, params, history)
+
+    def _consommer(self, tokens: torch.Tensor, logprobs: torch.Tensor,
+                   seqs: list[Sequence]) -> list[GenerationOutput]:
+        """Le corps de `_emit` après l'échantillonnage — LE seul `.tolist()`
+        du pas, qu'il soit immédiat (`_emit`) ou différé d'un pas (pipeline).
+
+        `seq.finished` déjà vrai (chemin pipeline : la séquence s'est arrêtée
+        — longueur — APRÈS que ce rejeu a été lancé, avant qu'il soit
+        rapatrié) : son jeton est un jeton FANTÔME, ignoré — même principe
+        que le masquage des créneaux fantômes du remplissage godet
+        (`MoEBlock.forward`, bead pds), au niveau du planificateur cette
+        fois plutôt que du routage MoE."""
         out = []
         for seq, tok, lp in zip(seqs, tokens.tolist(), logprobs.tolist()):
+            if seq.finished:
+                continue
             seq.output_ids.append(int(tok))
             seq.cumulative_logprob += float(lp)
             if not seq.first_token_at:
@@ -1069,6 +1243,11 @@ class Engine:
                 prompt_tokens=len(seq.prompt_ids),
                 completion_tokens=len(seq.output_ids)))
         return out
+
+    def _emit(self, logits: torch.Tensor,
+              seqs: list[Sequence]) -> list[GenerationOutput]:
+        tokens, logprobs = self._sample_only(logits, seqs)
+        return self._consommer(tokens, logprobs, seqs)
 
     def _decode_delta(self, seq: Sequence, n_new: int = 1) -> str:
         """Décode au fil de l'eau, en respectant les séquences UTF-8 multi-jetons.

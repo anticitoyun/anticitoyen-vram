@@ -240,8 +240,9 @@ class GraphRunner:
         # une fois la garde levée pour le chemin table, malgré les trois
         # conditions de sécurité prouvées — cause non expliquée (pas une
         # recapture : 5 captures, 203 rejeux). Tant qu'elle ne l'est pas,
-        # le chemin table reste hors des graphes par défaut ; ACVRAM_GRAPHES_
-        # TABLE=1 pour l'activer en connaissance de cause (mesure, débogage).
+        # le chemin table reste hors des graphes par défaut ;
+        # ACVRAM_GRAPHES_TABLE=1 pour l'activer en connaissance de cause
+        # (mesure, débogage).
         table_graphes_ok = bool(os.environ.get("ACVRAM_GRAPHES_TABLE"))
         surs_table: set = set()
         for mod in m.modules():
