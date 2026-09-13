@@ -1134,9 +1134,11 @@ _MOE_MMA_BT = int(os.environ.get("ACVRAM_MOE_MMA_BT", "64"))
 # 2 → 16 655, 3 → 16 851, 4 → 16 938 (revue/mma-fp4-native-sm120.md).
 _MOE_MMA_ETAGES = int(os.environ.get("ACVRAM_MOE_MMA_ETAGES", "4"))
 
-# Décodage MLA : les créneaux d'un lot en un lancement (mla_decode_batch,
-# bead 6wa) ; ACVRAM_MLA_BATCH=0 rend la boucle par créneau. Bit-identique.
-_MLA_BATCH = os.environ.get("ACVRAM_MLA_BATCH", "1") == "1"
+# Décodage MLA sous graphes : 0 = boucle par créneau ; 1 = le noyau
+# d'attention batché seul (bead 6wa, bit-identique, −28,5 % sur le pas
+# GLM-42B b=12) ; 2 = tout decode_static batché, projections comprises
+# (numérique de forward_batch, à mesurer avant d'en faire le défaut).
+_MLA_BATCH = int(os.environ.get("ACVRAM_MLA_BATCH", "1"))
 
 # Marque, dans le magasin d'états, une séquence dont l'état réside dans les
 # tampons fixes d'une couche (chemin graphes) plutôt qu'en tuple fonctionnel.
@@ -1292,8 +1294,8 @@ class DecoderLayerGDN(nn.Module):
                 ext = kernels.get_extension()
                 if ext is not None and hasattr(ext, "mla_decode_batch"):
                     ptrs, scores = self._mla_lot(b)
-                    return la.decode_static_batch(h, self.statics[:b], self.static_bucket,
-                                                  ptrs, scores)
+                    fn = la.decode_static_batch_complet if _MLA_BATCH >= 2 else la.decode_static_batch
+                    return fn(h, self.statics[:b], self.static_bucket, ptrs, scores)
             return torch.cat([un(h[i:i + 1], self.statics[i]) for i in range(b)], dim=0)
         if q_len == 1:
             return un(h, self.static)
