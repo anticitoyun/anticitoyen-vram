@@ -2044,10 +2044,17 @@ __global__ void __launch_bounds__(GM2_FILS) nvfp4_gemm_grouped_mma2_kernel(
     __nv_bfloat16 *__restrict__ y, int M, int K) {
 #ifdef ACVRAM_MMA_FP4
     constexpr int MF = BT / 16;
-    __shared__ __align__(16) unsigned char sA[S][BT * GM2_LD];
-    __shared__ __align__(16) unsigned char sB[S][GM2_BM * GM2_LD];
-    __shared__ __align__(16) unsigned char sSA[S][BT * 4];
-    __shared__ __align__(16) unsigned char sSB[S][GM2_BM * 4];
+    // shared dynamique : à bt=128 et 4 étages, 52 Ko dépassent les 48 Ko
+    // statiques ; le découpage est fait à la main, un tableau par étage
+    extern __shared__ __align__(16) unsigned char gm2_smem[];
+    typedef unsigned char (*TA)[BT * GM2_LD];
+    typedef unsigned char (*TB)[GM2_BM * GM2_LD];
+    typedef unsigned char (*TSA)[BT * 4];
+    typedef unsigned char (*TSB)[GM2_BM * 4];
+    TA sA = reinterpret_cast<TA>(gm2_smem);
+    TB sB = reinterpret_cast<TB>(gm2_smem + S * BT * GM2_LD);
+    TSA sSA = reinterpret_cast<TSA>(gm2_smem + S * (BT + GM2_BM) * GM2_LD);
+    TSB sSB = reinterpret_cast<TSB>(gm2_smem + S * (BT + GM2_BM) * GM2_LD + S * BT * 4);
 
     const int tile = blockIdx.y;
     const int e = tile_e[tile], t0 = tile_t0[tile], nt = tile_n[tile];
@@ -2224,7 +2231,9 @@ torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table
                 "GEMM groupee MMA : table_bscale int64 contigu sur la carte");
     TORCH_CHECK(table_qw.numel() == gscales.numel() && table_bscale.numel() == gscales.numel(),
                 "GEMM groupee MMA : tables et gscales de meme longueur E");
-    TORCH_CHECK(bt == 16 || bt == 32 || bt == 64, "GEMM groupee MMA : bt dans {16, 32, 64}");
+    TORCH_CHECK(bt == 16 || bt == 32 || bt == 64 || bt == 128,
+                "GEMM groupee MMA : bt dans {16, 32, 64, 128} (128 : variante a etages seulement)");
+    TORCH_CHECK(bt != 128 || etages != 0, "GEMM groupee MMA : bt=128 exige etages > 0");
     const int G = xq.size(0), T = tile_e.size(0);
     auto y = torch::zeros({G, M}, torch::TensorOptions().dtype(torch::kBFloat16).device(xq.device()));
     if (T == 0) return y;
@@ -2241,8 +2250,13 @@ torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table
         #undef GM_L
     } else {
         dim3 grid((M + GM2_BM - 1) / GM2_BM, T);
-        #define GM_L2(BT, S) nvfp4_gemm_grouped_mma2_kernel<BT, S><<<grid, GM2_FILS, 0, stream>>>(GM_ARGS)
-        #define GM_LS(S) do { if (bt == 16) GM_L2(16, S); else if (bt == 32) GM_L2(32, S); else GM_L2(64, S); } while (0)
+        const size_t shm = (size_t)etages * ((bt + GM2_BM) * GM2_LD + (bt + GM2_BM) * 4);
+        #define GM_L2(BT, S) do { \
+            if (shm > 48 * 1024) cudaFuncSetAttribute(nvfp4_gemm_grouped_mma2_kernel<BT, S>, \
+                                                      cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm); \
+            nvfp4_gemm_grouped_mma2_kernel<BT, S><<<grid, GM2_FILS, shm, stream>>>(GM_ARGS); } while (0)
+        #define GM_LS(S) do { if (bt == 16) GM_L2(16, S); else if (bt == 32) GM_L2(32, S); \
+                              else if (bt == 64) GM_L2(64, S); else GM_L2(128, S); } while (0)
         if (etages == 2) GM_LS(2); else if (etages == 3) GM_LS(3); else GM_LS(4);
         #undef GM_LS
         #undef GM_L2
