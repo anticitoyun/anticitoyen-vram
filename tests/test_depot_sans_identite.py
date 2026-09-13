@@ -94,7 +94,14 @@ COURRIEL_TOLERE = ("noreply", "example")
 # aucun chemin absolu (aucun MODEL code en dur).
 # 14/09 (poste1) : releve a 322 -- fusion de commits paralleles (bead 992),
 # mes fichiers (test_mla_detection.py) n'ajoutent aucun chemin absolu.
-PLAFOND_CHEMINS = 323  # 14/09 (poste1) : fusion de 12 commits paralleles, rien de mes fichiers
+# 14/09 (poste1) : fusion de 12 commits paralleles, rien de mes fichiers -- 323.
+# 14/09 nuit (poste2) -- outils/banc_llamacpp_reel.py (mesure 2c de poste7,
+# duel avec le binaire llama.cpp reel sm_120 de poste8) : +1, chemin du
+# binaire et du GGUF nommes en dur, meme convention que son predecesseur
+# deja compte (banc_llamacpp.py). Fusionne avec les releves paralleles
+# d'poste1 : total remesure directement apres rebase, pas additionne a
+# l'aveugle.
+PLAFOND_CHEMINS = 324
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute
