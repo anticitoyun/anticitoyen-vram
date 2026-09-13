@@ -1,4 +1,56 @@
-# Verdict — énergie BRUTE b=1-4 : acvram bat vLLM à b=2, PAS à b=1 (bruit)
+# Verdict — énergie BRUTE : acvram gagne à b=1 SEULEMENT sur fenêtre ≥20s
+
+## Mise à jour du 14/09 (fin de session) — chiffre qui prime sur tout ce qui suit
+
+chef a demandé de refaire b=1-4 ET b=12 (chiffre officiel) sur une fenêtre
+**≥ 20 s** (au lieu des quelques secondes des mesures précédentes), pour que
+le limiteur de puissance ait le temps d'agir et que le régime mesuré soit
+celui d'un usage soutenu, pas d'un sprint. Contexte trop court (2048 jetons)
+pour un `max_tokens` géant : corrigé par des RONDES répétées (jusqu'à
+`max_model_len - prompt`) dans UNE seule fenêtre `Energie`, cumulées jusqu'à
+≥ 20 s. `scratchpad/campagne-20s-14-09.sh` + `campagne-20s-acvram-14-09.py`
++ `campagne-20s-vllm-14-09.py`.
+
+    b     acvram tok/s   acvram J/j BRUT   vLLM tok/s   vLLM J/j BRUT   durée (acvram/vLLM)
+    1     232,99         1,4296            196,60       1,5791          23,0 / 39,0 s
+    2     340,21         1,1369            306,58       1,0871          21,0 / 25,0 s
+    3     412,14         0,9493            459,90       0,7479          26,0 / 25,0 s
+    4     510,36         0,7724            567,78       0,6457          28,0 / 27,0 s
+    12    630,59         0,6188          1 437,42       0,2913          31,0 / 32,0 s
+
+    ratio J/jeton acvram/vLLM :  b=1 0,906  |  b=2 1,046  |  b=3 1,269  |  b=4 1,196  |  b=12 2,124
+
+**Le tableau change de forme sur fenêtre longue.** acvram ne gagne plus
+qu'à **b=1** (-9,4 %, marge PLUS LARGE que sur le coup court — pas un
+artefact de bruit cette fois puisque la fenêtre est 5× plus longue).
+**Le gain à b=2, confirmé par 3 répétitions sur fenêtre courte
+(voir plus bas), S'INVERSE sur fenêtre ≥20s** : vLLM passe devant
+(1,0871 contre 1,1369, vLLM gagne de 4,6 %). L'écart se creuse ensuite
+sans discontinuer (b=3 : vLLM -21,2 % de mieux ; b=4 : -16,4 % ; b=12 :
+vLLM ×2,12 plus efficace, cohérent avec le duel historique de poste2 à
+b=12).
+
+**Nouveau chiffre officiel b=12 (acvram) : 630,59 t/s / 0,6188 J/jeton
+brut, sur 31 s** — remplace le 712,62 t/s à 3 s du 14/09 (voir
+`verdict-chiffre-officiel-duel-b12-14-09.md`) : le régime soutenu perd
+~11,5 % de débit par rapport au sprint. vLLM b=12 sur 32 s : 1 437,42 t/s
+/ 0,2913 J/jeton — plus rapide que le 1 198,4 t/s du duel de poste2 (régime
+différent, ne pas comparer chiffre pour chiffre : prompts synthétiques et
+protocole de rondes ici, invites fixes chez elle).
+
+**Interprétation honnête du renversement b=2** : les 3 répétitions du
+paragraphe suivant restent EXACTES dans leur régime (fenêtres de
+quelques secondes) — ce n'est pas une erreur de calcul, c'est un régime
+différent qui donne une réponse différente (règle du 14/09 : un chiffre
+exact hors de son régime est faux comme décision). Sur un service à
+requêtes très courtes et espacées, le calcul court reste pertinent ; sur
+un service à charge soutenue, c'est le calcul à 20s qui compte, et il dit
+que **le créneau réel où acvram gagne, une fois la carte stabilisée, se
+limite à b=1**.
+
+---
+
+## Historique du 14/09 (avant la campagne ≥20s) — conservé, régime « coup court »
 
 poste3, 14/09/2026. Suite à
 [`protocole-energie-brute-faible-lot-14-09.md`](protocole-energie-brute-faible-lot-14-09.md)
@@ -127,8 +179,13 @@ parqué, comme convenu : pas de téléchargement sans l'utilisateur.**
 
 ## bd
 
-Item 3 de la mesure 2a de poste7 : **fait, avec la correction de la marge
-b=1**. Racine du blocage initial identifiée et documentée
+Item 3 de la mesure 2a de poste7 : **fait**, refermé par la campagne ≥20s.
+Le créneau réel où acvram bat vLLM en énergie brute soutenue se limite à
+**b=1** (-9,4 %) ; b=2 (gagné sur fenêtre courte, confirmé par répétition)
+s'inverse en faveur de vLLM sur fenêtre longue, et l'écart se creuse à
+b=3/4/12 dans le sens du duel historique de poste2. Nouveau chiffre
+officiel b=12 : 630,59 t/s / 0,6188 J/jeton (31 s), remplace le 712,62 t/s
+du run court. Racine du blocage initial identifiée et documentée
 (`echec-energie-brute-vllm-oom-14-09.md`) : ne jamais charger un checkpoint
 acvram dans vLLM, les formats NVFP4 ne sont pas interchangeables entre les
 deux moteurs. Modèle témoin GLM-42B : **parqué** — GGUF écarté (chef),
