@@ -106,6 +106,13 @@ class ConversionOptions:
     # par octet dépensé, jusqu'à épuisement : « le meilleur modèle qui tient
     # dans N gibioctets », au lieu d'un seuil arbitraire.
     bits_budget_gib: float = 0.0
+    # Mesure le KLD couche-par-couche (proxy softmax du meme vecteur de
+    # sortie que out_snr_db) et le publie dans le manifeste, en plus du SNR.
+    # N'AFFECTE AUCUNE DECISION : le convertisseur continue de promouvoir sur
+    # `out_snr_db`. Sert au protocole A/B (revue/duck-poste2-12-09.md) qui
+    # compare, a budget d'octets EGAL, si un classement par KLD aurait promu
+    # d'autres tenseurs — sans jamais changer ce qui se convertit aujourd'hui.
+    mesurer_kld: bool = False
 
 
 @dataclass
@@ -938,6 +945,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             use_awq=opts.awq,
             n_grid=opts.n_grid, garder_grille=opts.garder_grille,
             table=opts.q3n_table if fmt == "q3n" else None,
+            mesurer_kld=opts.mesurer_kld,
         )
         if fmt == "q3n":
             entry["block"] = qt.block
@@ -1032,6 +1040,10 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         # quota n'est pas un critere de qualite mais un ordre de parcours.
         if "out_snr_db" in metrics:
             entry["snr_db"] = round(float(metrics["out_snr_db"]), 3)
+        # OPTION (opts.mesurer_kld), n'influence aucune decision : publiee au
+        # manifeste pour le protocole A/B, a cote du SNR qui reste le critere.
+        if "out_kld_bits" in metrics:
+            entry["kld_bits"] = round(float(metrics["out_kld_bits"]), 6)
         sd = qt.state_dict(prefix=f"{name}.")
         sd.update(scaler.state_dict(prefix=f"{name}."))
         # Les fragments s'ecrivent depuis la memoire hote : on redescend ce que

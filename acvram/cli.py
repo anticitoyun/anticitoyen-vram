@@ -473,7 +473,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         quant_device=args.quant_device, bits_budget_gib=args.bits_budget,
         garder_grille=args.grille_erreurs,
         promotion_cout_max_mib=args.promotion_cout_max,
-        format_impose=args.format)
+        format_impose=args.format, mesurer_kld=args.mesurer_kld)
 
     last = [0.0]
 
@@ -800,6 +800,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "promu ; 0 (defaut) ne promeut rien. Mesure sur un 27B : "
                          "25 dB coute 13,4 %% de memoire et 10,6 %% de debit pour "
                          "2,0 %% de perplexite")
+    cv.add_argument("--mesurer-kld", action="store_true",
+                    help="publie le KLD couche-par-couche (proxy softmax, "
+                         "duck.ai 12/09) au manifeste, a cote du SNR. "
+                         "N'AFFECTE AUCUNE DECISION : le convertisseur promeut "
+                         "toujours sur le SNR. Sert au protocole A/B")
     cv.set_defaults(func=cmd_convert)
 
     sv = sub.add_parser("serve", help="lance le serveur compatible OpenAI")

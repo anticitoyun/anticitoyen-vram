@@ -302,6 +302,34 @@ def search_channel_scales(
     ), best_err
 
 
+def kld_couche_bits(y_ref: torch.Tensor, y_q: torch.Tensor) -> float:
+    """Divergence de Kullback-Leibler entre les sorties de couche, en bits.
+
+    Duck.ai (poste2, 12/09/2026, revue/duck-poste2-12-09.md) : trois modeles a
+    recherche web concordent — le KLD au logit final correle mieux que le
+    SNR-bloc avec la perte utilisateur reelle (Spearman 0,96-0,97 avec les
+    inversions de jeton, methodologie Fireworks). Le mesurer sur le VRAI
+    logit final couterait un forward complet du modele par tenseur candidat,
+    hors de portee d'une decision prise au fil de la conversion, tenseur par
+    tenseur. On calcule donc un proxy : softmax du MEME vecteur de sortie
+    deja produit pour `out_snr_db` (x = diag(probe), y = x @ w.T), traite
+    comme une loi de probabilite sur ses composantes.
+
+    C'est un OPTION AJOUTEE, pas un remplacement du SNR (consigne chef
+    12/09) : le convertisseur continue de decider par `out_snr_db`, ce champ
+    est seulement mesure et publie a cote pour le protocole A/B a venir.
+
+    Toujours positif, nul seulement si les deux lois coincident exactement.
+    PAS symetrique : kld(ref, q) mesure ce que le format quantifie perd de la
+    loi de reference — c'est le sens utilise par la litterature de
+    calibration (KL(p_fp16 || p_quant)), donc celui retenu ici.
+    """
+    p = torch.softmax(y_ref.flatten().to(torch.float64), dim=0)
+    q = torch.softmax(y_q.flatten().to(torch.float64), dim=0).clamp(min=1e-12)
+    kld_nats = torch.sum(p * (p.clamp(min=1e-12).log() - q.log())).item()
+    return kld_nats / math.log(2)
+
+
 def quantize_with_calibration(
     weight: torch.Tensor,
     fmt: str,
@@ -312,6 +340,7 @@ def quantize_with_calibration(
     n_grid: int = 20,
     garder_grille: bool = False,
     table=None,
+    mesurer_kld: bool = False,
 ) -> tuple[Any, ChannelScaler, dict]:
     """Chaîne complète par couche : tourner, mettre à l'échelle, quantifier.
 
@@ -393,6 +422,11 @@ def quantize_with_calibration(
         "awq": scaler.scale is not None,
         "bpw": getattr(qt, "bits_per_weight", 16.0),
     }
+    if mesurer_kld:
+        # OPTION, pas de remplacement : `out_snr_db` reste le critere de
+        # decision du convertisseur (consigne chef 12/09). Ce champ n'est
+        # lu par aucun chemin de decision existant.
+        metrics["out_kld_bits"] = kld_couche_bits(y_ref, y_q)
     if journal:
         metrics.update(journal)
     return qt, scaler, metrics
