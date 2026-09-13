@@ -2,8 +2,8 @@
 
 poste3, 14/09/2026. Suite à
 [`protocole-horloge-memoire-decodage-14-09.md`](protocole-horloge-memoire-decodage-14-09.md) —
-campagne lancée, interrompue par la preuve elle-même avant d'aller plus
-loin.
+campagne complète (8 cellules, 5 min 36 s), close par une preuve trouvée
+en la dépouillant, pas avant.
 
 ## La preuve, lue directement
 
@@ -22,25 +22,38 @@ cette carte n'a AUCUN autre palier à sélectionner.** `-lmc` n'a rien à
 verrouiller en dessous du maximum — ce n'est pas une limite logicielle
 contournable, c'est l'absence totale d'un second point de fonctionnement.
 
-## Ce que la campagne a quand même révélé, avant l'arrêt
+## Ce que la campagne a révélé — les 8 cellules ont tourné avant que j'aie pu l'arrêter
 
-Trois cellules mesurées avant que je m'arrête : `-lmc 10000,10000` a été
-**accepté sans erreur** à chaque fois, mais l'horloge relevée après coup a
-toujours été **13 801 ou 14 001 MHz** — jamais 10 000. Cohérent avec la
-liste ci-dessus : le pilote accepte la commande, ne peut matériellement pas
-l'honorer, et ne le dit pas. Exactement le même comportement que
-`-lmc 15000` documenté hier (accepté, écrêté à 13 801 sans message).
+Le script (5 min 36 s au total) a fini sa boucle avant que je puisse
+intervenir sur la base des premières lignes de journal — **les 8 cellules
+sont là, et confirment le constat de façon complète plutôt que partielle** :
 
-**Aucune des trois mesures collectées (`mem-10000_sm-defaut`,
-`mem-10000_sm-2100`, `mem-stock_sm-2100`) ne teste une horloge mémoire
-réduite** — toutes tournent à l'horloge mémoire native. Elles ne sont pas
-fausses en tant que telles (le témoin SM seul, `mem-stock_sm-2100`, recoupe
-d'ailleurs raisonnablement la campagne SM du 13/09 — 2100 MHz y donnait
-452,1 t/s / 0,485 J, ici 469,8 t/s / 0,484 J, régime proche), mais elles ne
-répondent PAS à la question posée par le duel énergie (vLLM 0,202 J/jeton).
-**Je n'ai pas continué le balayage** (12000, 8000, les combinaisons
-restantes) : chaque cellule suivante aurait reproduit exactement le même
-non-résultat, pour le coût d'un rechargement de modèle à chaque fois.
+    palier demandé          horloge mémoire réelle   tok/s   J/jeton net
+    mem-10000, sm-défaut    14001 MHz                502,8   0,6646
+    mem-12000, sm-défaut    13801 MHz                504,5   0,6651
+    mem-14000, sm-défaut    13801 MHz                504,1   0,6615
+    mem-stock, sm-défaut    (aucun verrou)           590,5   0,5689
+    mem-10000, sm-2100      13801 / SM 2992          469,8   0,4859
+    mem-12000, sm-2100      13801 / SM 2992          470,3   0,4836
+    mem-14000, sm-2100      14001 / SM 2992          470,6   0,4831
+    mem-stock, sm-2100      (mém. libre) / SM 2092   469,8   0,4844
+
+**Aucune des trois demandes (10000/12000/14000) n'a jamais fait baisser
+l'horloge mémoire réelle en dessous de 13 801 MHz** — cohérent avec la
+liste `SUPPORTED_CLOCKS` : le pilote accepte la commande, ne peut
+matériellement pas l'honorer, et ne le dit pas. Exactement le même
+comportement que `-lmc 15000` documenté hier (accepté, écrêté à 13 801 sans
+message). **Les quatre lignes "mem-X, sm-2100" sont quasi identiques entre
+elles** (469,8-470,6 t/s, 0,4831-0,4859 J/jeton) — la variation résiduelle
+est du bruit de mesure, pas un effet de l'horloge mémoire annoncée. Elles
+recoupent d'ailleurs raisonnablement la campagne SM seule du 13/09 (2100 MHz
+y donnait 452,1 t/s / 0,485 J — régime proche, écart plausible par la
+fenêtre de repos alors trop courte, corrigée depuis à 30 s).
+
+**Aucune des huit lignes ne teste une horloge mémoire réduite.** Elles ne
+sont pas fausses en tant que telles, mais elles ne répondent PAS à la
+question posée par le duel énergie (vLLM 0,202 J/jeton) — c'est le même
+levier SM déjà mesuré le 13/09, pas un nouveau.
 
 ## Conséquence pour la source du duck.ai (item 1, tour de chef)
 
