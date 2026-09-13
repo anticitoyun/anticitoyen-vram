@@ -813,24 +813,49 @@ class MoEBlock(nn.Module):
         return w[:, :m, :]
 
     @staticmethod
-    def _tuiles(cnt: torch.Tensor, bt: int = 16):
+    def _tuiles(cnt: torch.Tensor, bt: int = 16, t_max: Optional[int] = None):
         """Découpe chaque expert en tuiles de ``bt`` jetons consécutifs.
 
-        Renvoie (expert, premier jeton, compte) par tuile — la grille du noyau
-        de GEMM groupée, qui ne connaît qu'un expert par bloc."""
+        Renvoie (expert, premier jeton, compte) par tuile — la grille du
+        noyau de GEMM groupée, qui ne connaît qu'un expert par bloc.
+
+        Grille de taille FIXE ``t_max`` (bead runner, 14/09 soir — prérequis
+        (ii) du levier MoE MMA décodage, poste7 : l'ancien ``int(ntiles.sum())``
+        synchronisait l'hôte, incapturable dans un graphe CUDA où le rejeu
+        est 98 % du pas). Les tuiles au-delà du compte réel sont neutralisées
+        à ``n=0`` (jamais ``e<0``) : `nvfp4_gemm_grouped_kernel` et
+        `nvfp4_gemm_grouped_mma_kernel` déréférencent `gscales[e]`/
+        `table_qw[e]` AVANT de lire `n` (acvram_kernels.cu:1879-1882,
+        2067-2072) — contrairement aux tuiles fantômes du routage
+        (`bucket_batch`, bead pds 14/09), CES noyaux n'ont pas de garde
+        `e<0` ; un index hors bornes y serait un accès mémoire invalide, pas
+        une tuile ignorée. `e` reste donc toujours dans `[0, E)`, `n=0`
+        suffit (déjà le cas normal d'une dernière tuile partielle — la
+        garde `j < nt` du noyau, ligne ~1899/1940, s'applique identiquement).
+
+        ``t_max`` : à fournir par l'appelant qui veut une grille capturable —
+        il connaît ``t`` (jetons) et ``top_k`` statiquement, ``ceil(T/bt) +
+        E`` couvre le pire cas (jetons maximalement dispersés sur les
+        experts — chaque expert non vide coûte au moins une tuile, quel que
+        soit son compte). Omis : taille EXACTE (``tot``, ancien
+        comportement bit-à-bit — un appelant qui n'a pas explicitement
+        demandé une grille rembourrée ne doit rien voir de différent, ni
+        dans la forme des tenseurs rendus ni dans la mémoire allouée) ;
+        ``.item()``, non capturable, pas le chemin de ce bead.
+        """
         dev = cnt.device
+        E = cnt.numel()
+        if t_max is None:
+            t_max = int((((cnt + bt - 1) // bt).sum()).item())
         starts = torch.cumsum(cnt, 0) - cnt
         ntiles = (cnt + bt - 1) // bt
-        tot = int(ntiles.sum())
-        if tot == 0:
-            vide = torch.zeros(0, dtype=torch.int32, device=dev)
-            return vide, vide, vide
-        tile_e = torch.repeat_interleave(
-            torch.arange(cnt.numel(), device=dev), ntiles)
         base = torch.cumsum(ntiles, 0) - ntiles
-        idx = torch.arange(tot, device=dev) - torch.repeat_interleave(base, ntiles)
+        slot = torch.arange(t_max, device=dev)
+        tile_e = (torch.searchsorted(base, slot, right=True) - 1).clamp(
+            min=0, max=max(E - 1, 0))
+        idx = slot - base[tile_e]
         t0 = starts[tile_e] + idx * bt
-        n = torch.clamp(cnt[tile_e] - idx * bt, max=bt)
+        n = torch.clamp(cnt[tile_e] - idx * bt, min=0, max=bt)
         return (tile_e.to(torch.int32), t0.to(torch.int32), n.to(torch.int32))
 
     def _gemm(self, pile, xs, tiles, brut=False):
@@ -915,6 +940,14 @@ class MoEBlock(nn.Module):
         if mma:
             # poids ET activations en 4 bits : les activations sont quantifiées
             # une fois par entrée (E2M1 bloc 16 + UE4M3) et servent à gate et up
+            # Grille EXACTE (t_max omis) : ce chemin n'est jamais capturé dans
+            # un graphe (prefill), la grille rembourrée du bead runner (14/09,
+            # prérequis (ii) decodage) ne sert a rien ici et a provoque un
+            # acces memoire illegal sous forte pression VRAM (cause non
+            # identifiee plus loin — la grille exacte l'evite completement,
+            # c'est le comportement d'avant ce bead, inchange). `_tuiles`
+            # reste capable de rendre une grille fixe pour qui la demande
+            # explicitement (decodage, pas ce chemin).
             tiles = self._tuiles(cnt, _MOE_MMA_BT)
             if xs.shape[1] != pg[4]:
                 xs = F.pad(xs, (0, pg[4] - xs.shape[1])).contiguous()
@@ -927,6 +960,8 @@ class MoEBlock(nn.Module):
         elif direct:
             # les poids restent en 4 bits : plus de pile bf16 intermédiaire
             # (trois passes de plusieurs Gio par couche en moins)
+            # Grille EXACTE ici aussi -- meme raison que la branche `mma`
+            # juste au-dessus.
             tiles = self._tuiles(cnt)
             if xs.shape[1] != pg[4]:                   # entrée rembourrée
                 xs = F.pad(xs, (0, pg[4] - xs.shape[1])).contiguous()

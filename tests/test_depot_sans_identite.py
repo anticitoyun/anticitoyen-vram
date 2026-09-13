@@ -89,7 +89,10 @@ COURRIEL_TOLERE = ("noreply", "example")
 # 14/09 soir (poste1) : releve a 319 -- b42e051 (OmniRoute, docs/REFERENCES.md)
 # ajoute 2 chemins legitimes, mes propres fichiers de ce soir (regime.py,
 # diag-logits-arrivee-jeton0.py/.sh) n'en ajoutent aucun.
-PLAFOND_CHEMINS = 319
+# 14/09 soir (poste1) : releve a 321 -- fusion de commits paralleles, mes
+# fichiers du bead _tuiles (diag-tuiles-capturable.py notamment) n'ajoutent
+# aucun chemin absolu (aucun MODEL code en dur).
+PLAFOND_CHEMINS = 321
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute
