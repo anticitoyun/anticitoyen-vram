@@ -73,6 +73,39 @@ def passe(rep, profiler=False):
     return time.perf_counter() - t0, pas
 passe(0); passe(1)
 exiger_regime_nominal(eng, autoriser_piles_inconnues=False)
+if bras == "experts":
+    # Compte, au pas que le bras ncu profile (prefill + 3 pas, puis le 4e), les
+    # experts distincts et le max de jetons par expert de chaque couche, et les
+    # octets de poids que ce routage impose (poids + échelles des 3 projections
+    # par expert distinct) — le dénominateur exact des octets DRAM du MoE.
+    releve = []
+    def hook(mod, nom="_route"):
+        fn = getattr(mod, nom)
+        def w(x):
+            topw, topi = fn(x)
+            if releve is not None and releve_actif[0]:
+                cnt = torch.bincount(topi.reshape(-1).to(torch.int64), minlength=len(mod.experts))
+                releve.append((int((cnt > 0).sum()), int(cnt.max()), topi.shape[0]))
+            return topw, topi
+        setattr(mod, nom, w)
+    releve_actif = [False]
+    blocs = [m for _, m in loaded.model.named_modules() if type(m).__name__ == "MoEBlock"]
+    for m in blocs: hook(m)
+    for b in range(B):
+        eng.add_request([(1000 + 2 * 7919 + b * 101 + i * 13) % 150000 + 10 for i in range(128)], SP)
+    while any(not s.prefilled for s in eng.running) or eng.waiting:
+        eng.step()
+    for _ in range(3): eng.step()
+    torch.cuda.synchronize(); releve_actif[0] = True
+    eng.step(); torch.cuda.synchronize(); releve_actif[0] = False
+    st = blocs[0]._stacks
+    E = st["gate_proj"][1].shape[0]
+    par_expert = sum(st[n][1].numel() + st[n][2].numel() for n in ("gate_proj", "up_proj", "down_proj")) / E
+    distincts = sum(r[0] for r in releve); cmax = max(r[1] for r in releve)
+    print(f"EXPERTS pas mesure : {len(releve)} couches, t={releve[0][2]}, experts distincts total={distincts} "
+          f"(moy {distincts/len(releve):.1f}/couche), max jetons/expert={cmax}, "
+          f"octets poids+echelles par expert={par_expert/1e6:.3f} Mo -> {distincts*par_expert/1e9:.3f} Go de poids MoE au pas")
+    sys.exit(0)
 if bras == "ncu":
     # Sous ncu (--nvtx --nvtx-include "mesure/") : seuls les noyaux des
     # BANC_PAS_NCU pas de decodage b=B, apres le prefill, sont profiles.

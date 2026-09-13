@@ -46,7 +46,7 @@ done
 # chaque noyau est mesure a froid, ce qui compte en DRAM une relecture que le L2 sert
 # en vrai -- lecon du 14/09 sur int8_gemv<4,4>).
 sudo -n /usr/local/cuda/bin/ncu --csv --target-processes all --clock-control none --cache-control "${NCU_CACHE:-all}" \
-  --nvtx --nvtx-include "mesure/" \
+  --nvtx --nvtx-include "mesure/" ${NCU_NOYAUX:+--kernel-name "regex:$NCU_NOYAUX"} \
   --metrics "${NCU_METRIQUES:-gpu__time_duration.sum,dram__bytes_op_read.sum,dram__bytes_op_write.sum,sm__inst_executed.sum,sm__inst_executed_pipe_tensor.sum,sm__cycles_elapsed.avg.per_second}" \
   "${ENV[@]}" "${CMD[@]}" > "$OUT" 2>/tmp/claude-1000/ncu-ipo-${MOTEUR}.err || true
 grep -c "^\"[0-9]" "$OUT" || { echo "ECHEC : rien profile, voir /tmp/claude-1000/ncu-ipo-${MOTEUR}.err"; tail -5 /tmp/claude-1000/ncu-ipo-${MOTEUR}.err; exit 1; }

@@ -150,10 +150,12 @@ fois par l'instrument. Total DRAM du pas à cache chaud : **5,52 Go**
 (6,67 sous purge), inst/oct **1,73**. Le changement de tranche est gardé
 (97 lancements de moins par pas, 319 Mo de moins pour le lm_head, ±0 ms,
 jetons identiques) — sans gain à revendiquer. Données :
-`revue/donnees-ncu-ipo-acvram-cache-chaud-14-09.txt`. La colonne vLLM
-reste sous purge (5,98 Go) : à refaire à cache chaud avant de publier un
-ratio d'octets ; le ratio d'INSTRUCTIONS (×8,0, comptes exacts) n'en
-dépend pas.
+`revue/donnees-ncu-ipo-acvram-cache-chaud-14-09.txt`. Colonne vLLM refaite à cache chaud (20h11, noyaux lourds seuls :
+CUTLASS 4,870 Go, wmma 0,648, attention 0,152 ; petits noyaux 0,158 dans
+un passage séparé) : 5,83 Go, quasi inchangés (leurs noyaux ne relisent
+rien). GEMM à GEMM : vLLM 4,87 Go (MoE + projections) contre nous
+3,83 + 0,93 = 4,76 — mêmes octets à 2 %.
+`revue/donnees-ncu-ipo-vllm-cache-chaud-14-09.txt`.
 
 ### M1 — noyaux sous rejeu (torch.profiler, `BANC_GRAPHES=1 profil 12`)
 
@@ -226,9 +228,9 @@ Même instrument, même carte, même heure, moteurs en processus :
 | ms par pas b=12 | 15,66 | 6,30 | ×2,5 |
 | W brut / net | 392 / 354 | 306 / 265 | ×1,28 / ×1,34 |
 | J par jeton brut / net | 0,512 / 0,462 | 0,192 / 0,167 | **×2,7 / ×2,8** |
-| Go DRAM lus par pas | 5,52 chaud (6,67 sous purge) | 5,98 sous purge (chaud : à mesurer) | ≈ ×1 |
+| Go DRAM lus par pas | 5,52 chaud (6,67 sous purge) | ≈ 5,83 chaud (CUTLASS 4,87 + wmma 0,65 + attention 0,15 + petits 0,16 ; 5,98 sous purge) | ≈ ×1 |
 | G instructions par pas | 9,57 | 1,19 | **×8,0** |
-| inst / octet | 1,73 chaud (1,44 sous purge) | 0,20 sous purge | ×7,2 à ×8,7 |
+| inst / octet (cache chaud) | 1,73 | 0,20 | **×8,5** |
 
 Le ×2,8 en énergie se décompose en ×2,5 de temps et ×1,3 de puissance ;
 les « 150 W » de l'énoncé sont ~90 W nets dans une mesure appariée (les
@@ -271,7 +273,7 @@ expert, M≈3 jetons par expert), eager, carte exclusive. Seuils de poste7
 | noyaux MoE par pas, profil eager (`profilmma 12`) | gate·up 3,35 + down 2,63 = **5,98 ms** | 3 GEMM 3,62 + quant_act 0,17 + act/reduce ≈ 0,2 = **≈ 4,0 ms** |
 | pas GPU (Σ noyaux, profil) | 12,25 ms | 12,34 ms (le MoE gagne 2 ms, la glue torch en rend 2 : 59 types de noyaux, 3 809 lancements/pas) |
 | pas à l'horloge, eager | 19,54 ms | **39,47 ms** — borné par l'hôte (argsort, bincount, `int(ntiles.sum())`, 2 300 lancements torch de plus) : le blocage (ii) d'poste1 |
-| octets DRAM MoE (ncu, cache chaud) | 3,83 Go | **4,33 Go (+13 %)** — tuiles de 16 : un expert à > 16 jetons prend 2 tuiles et relit ses poids |
+| octets DRAM MoE (ncu, cache chaud) | 3,83 Go | 4,33 Go (+13 %) — **c'est le routage, pas les tuiles** : bras `experts` au même pas, GEMV 30,7 experts distincts/couche × 2,654 Mo × 48 = 3,907 Go attendus (3,83 mesurés, 98 %) ; MMA 34,0/couche = 4,326 Go attendus (4,33 mesurés, 100 %) ; max 12 jetons/expert dans les deux (une seule tuile de 16, objection de poste7/chef fondée). Les jetons des deux chemins ont divergé après le prefill (W4A4), le pas échantillonné route plus large. **Aucune relecture : bt=32 sans objet.** |
 | instructions MoE | 6,78 G (1,77 inst/oct) | **0,57 G (0,13 inst/oct, ÷ 12)** ; pas entier 9,57 → 2,60 G (÷ 3,7) |
 | W en boucle 6 s, 3 GEMM seules (tuiles et activations pré-quantifiées) | gate·up 399 brut / down 399 (MoE complet 392-399, 1 785-1 792 MHz) | **398,6 brut / 340,5 net, 2 617 MHz**, bridage puissance |
 | mJ par couche MoE en boucle | 78,4 (GEMV complet) | 54,6 (3 GEMM seules) : **−30 %** |
@@ -284,9 +286,12 @@ brute NON tenue** (398,6 ≥ 380 W ; en net 340,5 ≤ 345). L'horloge tient
 de 30 % ; mais le noyau reste au plafond : à 1 156 Go/s (ncu) il est
 maintenant borné par la DRAM (la copie témoin à 1,5 To/s fait 341 W à
 elle seule) — le prix des instructions est parti, celui des octets
-reste. Octets +13 % (seuil ±5 %) : NON tenu, cause identifiée (tuiles de
-16 ; un expert à 17-32 jetons relit ses poids) — corrigeable par
-bt=32 pour ces experts, ou split des tuiles en K, pas en M.
+reste. Octets +13 % : **pas un défaut du noyau** — le dénominateur exact
+(experts distincts × 2,654 Mo, bras `experts` de `banc_decodage_moe.py`)
+reproduit les octets ncu à 98-100 % sur les deux chemins ; l'écart est
+un routage plus large au pas échantillonné (34,0 contre 30,7 experts
+par couche, jetons divergés après le prefill). Le noyau MMA lit
+exactement ses poids, une fois.
 
 Selon la règle de poste7 (≥ 380 W brut → split-K, +2 j, (3) derrière 1aj)
 c'est split-K. Objection factuelle à lui soumettre : split-K vise un
