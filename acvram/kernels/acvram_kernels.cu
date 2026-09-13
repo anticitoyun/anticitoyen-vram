@@ -1698,6 +1698,290 @@ torch::Tensor nvfp4_gemm_grouped(torch::Tensor qw, torch::Tensor bscale,
 
 
 // --------------------------------------------------------------------------
+// GEMM groupée NVFP4 sur la MMA FP4 native de sm_120 (W4A4).
+//
+// La GEMM groupée ci-dessus déquantifie les poids en bf16 dans la mémoire
+// partagée avant de les consommer en wmma bf16 : c'est un W4A16 logiciel, et
+// la conversion est ce qui la fait plafonner au-delà de 48 jetons par expert
+// (revue/banc-prefill-moe-12-09.md). Blackwell grand public possède une MMA
+// à échelles par bloc — mma.sync m16n8k64 kind::mxf4nvf4 — qui consomme
+// directement E2M1 × UE4M3 par bloc de 16, exactement le format de nos
+// poids (revue/mma-fp4-native-sm120.md : 128/128 bit-identique, x7,9 en
+// débit contre bf16). Le prix : les activations doivent elles aussi être en
+// E2M1 par bloc de 16 (W4A4). Elles sont quantifiées à la volée par
+// nvfp4_quant_act ; la référence Python du test refait exactement le même
+// calcul (amax/6 → E4M3 au plus proche, puis E2M1 au plus proche ; les
+// égalités vont vers la magnitude supérieure, c'est ce que fait
+// cvt.rn.satfinite.e2m1x2 — mesuré, pas supposé).
+//
+// Le kind mxf8f6f4 (activations en 8 bits) n'est PAS un repli possible avec
+// nos poids : ses échelles sont UE8M0 par bloc de 32, pas E4M3 par bloc de
+// 16. Un W4A8 exigerait de reconvertir les poids.
+//
+// L'asm n'existe que sous une cible famille (sm_120f / sm_120a) ; le repli
+// PTX générique compile un stub qui ne doit jamais être atteint.
+// --------------------------------------------------------------------------
+#if defined(__CUDA_ARCH_FAMILY_SPECIFIC__) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
+#define ACVRAM_MMA_FP4 1
+#endif
+
+constexpr int GM_BM = 64;        // lignes de sortie par bloc (4 warps x 16)
+constexpr int GM_KB = 64;        // profondeur d'une MMA
+
+__device__ __forceinline__ void mma_mxf4nvf4(float d[4], const unsigned a[4], const unsigned b[2],
+                                             unsigned sfa, unsigned sfb) {
+#ifdef ACVRAM_MMA_FP4
+    const unsigned short z = 0;
+    asm volatile(
+        "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 "
+        "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%0,%1,%2,%3},{%10},{%11,%12},{%13},{%14,%15};\n"
+        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
+          "r"(sfa), "h"(z), "h"(z), "r"(sfb), "h"(z), "h"(z));
+#endif
+}
+
+// Activations bf16 [G, K] -> E2M1 [G, K/2] + échelles UE4M3 [G, K/16].
+// Un fil par bloc de 16 : amax/6 arrondi en E4M3, puis chaque valeur divisée
+// par l'échelle décodée et arrondie en E2M1 (satfinite : au-delà de 6 -> 6).
+__global__ void nvfp4_quant_act_kernel(const __nv_bfloat16 *__restrict__ x,
+                                       unsigned char *__restrict__ xq,
+                                       unsigned char *__restrict__ xsf,
+                                       long nblocs, int nblk) {
+    const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nblocs) return;
+    const long row = i / nblk;
+    const int blk = (int)(i - row * nblk);
+    const __nv_bfloat16 *src = x + row * (long)nblk * 16 + blk * 16;
+    float v[16];
+    float amax = 0.f;
+    #pragma unroll
+    for (int j = 0; j < 16; ++j) { v[j] = __bfloat162float(src[j]); amax = fmaxf(amax, fabsf(v[j])); }
+    unsigned char sbits = 0;
+    float sdec = 0.f;
+    if (amax > 0.f) {
+        // __fdiv_rn : l'extension est compilée avec --use_fast_math, dont la
+        // division est un MUFU.RCP approché qui bascule les égalités E2M1
+        // (mesuré : 5 codes sur 5 376 différaient de la référence Python)
+        const float s = fminf(__fdiv_rn(amax, 6.f), 448.f);
+        sbits = (unsigned char)__nv_cvt_float_to_fp8(s, __NV_SATFINITE, __NV_E4M3);
+        sdec = e4m3_to_float(sbits);
+    }
+    unsigned long long packed = 0ull;
+    if (sdec > 0.f) {
+        #pragma unroll
+        for (int j = 0; j < 16; j += 2) {
+            const float2 p = make_float2(__fdiv_rn(v[j], sdec), __fdiv_rn(v[j + 1], sdec));
+            const __nv_fp4x2_storage_t q = __nv_cvt_float2_to_fp4x2(p, __NV_E2M1, cudaRoundNearest);
+            packed |= (unsigned long long)(q & 0xFF) << (4 * j);
+        }
+    }
+    *reinterpret_cast<unsigned long long *>(xq + row * (long)nblk * 8 + blk * 8) = packed;
+    xsf[row * (long)nblk + blk] = sbits;
+}
+
+// Un bloc = 64 lignes de sortie x BT jetons d'une tuile ; 4 warps de 16
+// lignes. Fragments A (jetons) et B (poids) chargés depuis la mémoire
+// globale directement dans le layout de la MMA (aucune mémoire partagée :
+// plus rien à convertir). Double tampon de registres sur K.
+template <int BT>
+__global__ void __launch_bounds__(128) nvfp4_gemm_grouped_mma_kernel(
+    const float *__restrict__ gscales,
+    const unsigned char *__restrict__ xq, const unsigned char *__restrict__ xsf,
+    const int *__restrict__ tile_e, const int *__restrict__ tile_t0,
+    const int *__restrict__ tile_n, const int64_t *__restrict__ table_qw,
+    const int64_t *__restrict__ table_bscale,
+    __nv_bfloat16 *__restrict__ y, int M, int K) {
+#ifdef ACVRAM_MMA_FP4
+    constexpr int MF = BT / 16;
+    const int tile = blockIdx.y;
+    const int e = tile_e[tile], t0 = tile_t0[tile], nt = tile_n[tile];
+    // les piles de l'expert : adresses octet fournies par la table (contrat
+    // bead pds : résident = data_ptr() de sa tranche, froid = pointeur device
+    // zéro-copie d'un tampon épinglé), jamais recalculées d'après e
+    const unsigned char *qw_e = reinterpret_cast<const unsigned char *>(table_qw[e]);
+    const unsigned char *bs_e = reinterpret_cast<const unsigned char *>(table_bscale[e]);
+    const int row0 = blockIdx.x * GM_BM;
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int g = lane >> 2, tq = lane & 3;
+    const long half_k = (long)K >> 1;
+    const int nblk = K >> 4;
+
+    // lignes de poids de ce warp : 8*nf + g, valides si < M
+    long woff[2]; unsigned wok[2];
+    #pragma unroll
+    for (int nf = 0; nf < 2; ++nf) {
+        const int r = row0 + warp * 16 + nf * 8 + g;
+        wok[nf] = r < M;
+        woff[nf] = min(r, M - 1);
+    }
+    // lignes de jetons : 16*mf + g (+8) ; échelles : ligne (lane>>2) + 8*(lane&1)
+    long toff[MF][2]; unsigned tok_ok[MF][2]; long soff[MF]; unsigned sok[MF];
+    #pragma unroll
+    for (int mf = 0; mf < MF; ++mf) {
+        #pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const int j = mf * 16 + g + 8 * h;
+            tok_ok[mf][h] = j < nt;
+            toff[mf][h] = (long)(t0 + min(j, nt - 1));
+        }
+        const int js = mf * 16 + (lane >> 2) + 8 * (lane & 1);
+        sok[mf] = js < nt;
+        soff[mf] = (long)(t0 + min(js, nt - 1));
+    }
+
+    float acc[MF][2][4];
+    #pragma unroll
+    for (int mf = 0; mf < MF; ++mf)
+        #pragma unroll
+        for (int nf = 0; nf < 2; ++nf)
+            #pragma unroll
+            for (int q = 0; q < 4; ++q) acc[mf][nf][q] = 0.f;
+
+    unsigned a[2][MF][4], sfa[2][MF], b[2][2][2], sfb[2][2];
+    auto charger = [&](int buf, int k0) {
+        const long kb = k0 >> 1, ks = k0 >> 4;
+        #pragma unroll
+        for (int mf = 0; mf < MF; ++mf) {
+            #pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const unsigned char *p = xq + toff[mf][h] * half_k + kb + 4 * tq;
+                const unsigned lo = *reinterpret_cast<const unsigned *>(p);
+                const unsigned hi = *reinterpret_cast<const unsigned *>(p + 16);
+                a[buf][mf][h]     = tok_ok[mf][h] ? lo : 0u;
+                a[buf][mf][h + 2] = tok_ok[mf][h] ? hi : 0u;
+            }
+            const unsigned s = *reinterpret_cast<const unsigned *>(xsf + soff[mf] * nblk + ks);
+            sfa[buf][mf] = sok[mf] ? s : 0u;
+        }
+        #pragma unroll
+        for (int nf = 0; nf < 2; ++nf) {
+            const unsigned char *p = qw_e + woff[nf] * half_k + kb + 4 * tq;
+            const unsigned lo = *reinterpret_cast<const unsigned *>(p);
+            const unsigned hi = *reinterpret_cast<const unsigned *>(p + 16);
+            b[buf][nf][0] = wok[nf] ? lo : 0u;
+            b[buf][nf][1] = wok[nf] ? hi : 0u;
+            const unsigned s = *reinterpret_cast<const unsigned *>(bs_e + woff[nf] * nblk + ks);
+            sfb[buf][nf] = wok[nf] ? s : 0u;
+        }
+    };
+
+    charger(0, 0);
+    for (int k0 = 0; k0 < K; k0 += GM_KB) {
+        const int cur = (k0 / GM_KB) & 1;
+        if (k0 + GM_KB < K) charger(cur ^ 1, k0 + GM_KB);
+        #pragma unroll
+        for (int mf = 0; mf < MF; ++mf)
+            #pragma unroll
+            for (int nf = 0; nf < 2; ++nf)
+                mma_mxf4nvf4(acc[mf][nf], a[cur][mf], b[cur][nf], sfa[cur][mf], sfb[cur][nf]);
+    }
+
+    const float gscale = gscales[e];
+    #pragma unroll
+    for (int mf = 0; mf < MF; ++mf) {
+        #pragma unroll
+        for (int nf = 0; nf < 2; ++nf) {
+            const int r = row0 + warp * 16 + nf * 8 + 2 * tq;
+            #pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int j = mf * 16 + g + 8 * h;
+                if (j < nt) {
+                    __nv_bfloat16 *dst = y + (long)(t0 + j) * M + r;
+                    if (r < M)     dst[0] = __float2bfloat16(acc[mf][nf][2 * h] * gscale);
+                    if (r + 1 < M) dst[1] = __float2bfloat16(acc[mf][nf][2 * h + 1] * gscale);
+                }
+            }
+        }
+    }
+#endif
+}
+
+__global__ void nvfp4_mma_sonde_kernel(int *flag) {
+#ifdef ACVRAM_MMA_FP4
+    flag[0] = 1;
+#else
+    flag[0] = 0;
+#endif
+}
+
+// Vrai si le binaire chargé pour cette carte contient l'asm mxf4nvf4 (cible
+// famille sm_120f) : le repli PTX générique compile un stub, et rien d'autre
+// ne le dirait.
+bool nvfp4_gemm_grouped_mma_disponible() {
+    static int cache = -1;
+    if (cache >= 0) return cache == 1;
+    int major = 0, dev = 0;
+    cudaGetDevice(&dev);
+    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+    if (major != 12) { cache = 0; return false; }
+    auto flag = torch::zeros({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA, dev));
+    nvfp4_mma_sonde_kernel<<<1, 1, 0, at::cuda::getCurrentCUDAStream()>>>(flag.data_ptr<int>());
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    cache = flag.item<int>();
+    return cache == 1;
+}
+
+std::tuple<torch::Tensor, torch::Tensor> nvfp4_quant_act(torch::Tensor x) {
+    CHECK_CUDA(x); CHECK_CONTIG(x); ACVRAM_DEVICE_GUARD(x);
+    TORCH_CHECK(x.scalar_type() == torch::kBFloat16, "quant_act : activations bf16");
+    TORCH_CHECK(x.dim() == 2 && x.size(1) % 64 == 0, "quant_act : [G, K] avec K multiple de 64");
+    const long G = x.size(0), K = x.size(1);
+    const int nblk = (int)(K >> 4);
+    auto opt = torch::TensorOptions().dtype(torch::kUInt8).device(x.device());
+    auto xq = torch::empty({G, K / 2}, opt);
+    auto xsf = torch::empty({G, nblk}, opt);
+    const long nblocs = G * nblk;
+    if (nblocs > 0) {
+        auto stream = at::cuda::getCurrentCUDAStream();
+        const int th = 256;
+        nvfp4_quant_act_kernel<<<(unsigned)((nblocs + th - 1) / th), th, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16 *>(x.data_ptr()),
+            xq.data_ptr<unsigned char>(), xsf.data_ptr<unsigned char>(), nblocs, nblk);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
+    return {xq, xsf};
+}
+
+// table_qw / table_bscale [E] int64 : adresse octet (device) des piles
+// [M, K/2] et [M, K/16] de chaque expert — contrat du bead pds (poste1) :
+// résident = data_ptr() de sa tranche, froid = pointeur device zéro-copie
+// d'un tampon épinglé ; jamais 0 ; mise à jour hors pas seulement. Le noyau
+// ne connaît aucune autre adresse. gscales [E] reste résident, indexé par e.
+torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table_bscale,
+                                     torch::Tensor gscales, torch::Tensor xq,
+                                     torch::Tensor xsf, torch::Tensor tile_e,
+                                     torch::Tensor tile_t0, torch::Tensor tile_n,
+                                     int64_t M, int64_t K, int64_t bt) {
+    CHECK_CUDA(xq); ACVRAM_DEVICE_GUARD(xq);
+    CHECK_CONTIG(xq); CHECK_CONTIG(xsf); CHECK_CONTIG(gscales);
+    TORCH_CHECK(K % GM_KB == 0, "GEMM groupee MMA : K multiple de 64");
+    TORCH_CHECK(table_qw.scalar_type() == torch::kInt64 && table_qw.is_cuda() && table_qw.is_contiguous(),
+                "GEMM groupee MMA : table_qw int64 contigu sur la carte");
+    TORCH_CHECK(table_bscale.scalar_type() == torch::kInt64 && table_bscale.is_cuda() && table_bscale.is_contiguous(),
+                "GEMM groupee MMA : table_bscale int64 contigu sur la carte");
+    TORCH_CHECK(table_qw.numel() == gscales.numel() && table_bscale.numel() == gscales.numel(),
+                "GEMM groupee MMA : tables et gscales de meme longueur E");
+    TORCH_CHECK(bt == 16 || bt == 32 || bt == 64, "GEMM groupee MMA : bt dans {16, 32, 64}");
+    const int G = xq.size(0), T = tile_e.size(0);
+    auto y = torch::zeros({G, M}, torch::TensorOptions().dtype(torch::kBFloat16).device(xq.device()));
+    if (T == 0) return y;
+    dim3 grid((M + GM_BM - 1) / GM_BM, T);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    #define GM_L(BT) nvfp4_gemm_grouped_mma_kernel<BT><<<grid, 128, 0, stream>>>( \
+        gscales.data_ptr<float>(), \
+        xq.data_ptr<unsigned char>(), xsf.data_ptr<unsigned char>(), \
+        tile_e.data_ptr<int>(), tile_t0.data_ptr<int>(), tile_n.data_ptr<int>(), \
+        table_qw.data_ptr<int64_t>(), table_bscale.data_ptr<int64_t>(), \
+        reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), (int)M, (int)K)
+    if (bt == 16) GM_L(16); else if (bt == 32) GM_L(32); else GM_L(64);
+    #undef GM_L
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return y;
+}
+
+
+// --------------------------------------------------------------------------
 // RoPE en place : q et k tournés d'un seul lancement.
 //
 // En PyTorch la même chose coûte, par couche, deux tranches, deux négations,
@@ -2805,6 +3089,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "MoE NVFP4 : gate et up fusionnes, sortie act(gate)*up (act 0=SiLU, 1=GELU-tanh)");
     m.def("nvfp4_gemm_grouped", &nvfp4_gemm_grouped,
           "MoE NVFP4 : GEMM groupee sur tuiles de jetons, poids lus en 4 bits");
+    m.def("nvfp4_gemm_grouped_mma", &nvfp4_gemm_grouped_mma,
+          "MoE NVFP4 : GEMM groupee W4A4 sur la MMA FP4 native de sm_120 (mxf4nvf4)");
+    m.def("nvfp4_gemm_grouped_mma_disponible", &nvfp4_gemm_grouped_mma_disponible,
+          "vrai si la carte courante est sm_120 et le noyau MMA FP4 compile");
+    m.def("nvfp4_quant_act", &nvfp4_quant_act,
+          "activations bf16 [G, K] -> (E2M1 [G, K/2], echelles UE4M3 [G, K/16]) par bloc de 16");
     m.def("int4_gemv_grouped", &int4_gemv_grouped,
           "INT4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
     m.def("kv_write_int8", &kv_write_int8,

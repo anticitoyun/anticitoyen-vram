@@ -768,6 +768,26 @@ class MoEBlock(nn.Module):
         return kernels.get_extension().nvfp4_gemm_grouped(
             qw, bs, gs, xs, tiles[0], tiles[1], tiles[2], k)[:, :m]
 
+    def _tables_adresses(self, pile):
+        """Tables d'adresses identité (contrat bead pds) : chaque expert à sa
+        tranche de la pile résidente. Le placement par expert les remplacera."""
+        _, qw, bs, _, _, _ = pile
+        cle = (qw.data_ptr(), bs.data_ptr())
+        cache = self.__dict__.setdefault("_tables_mma", {})
+        if cle not in cache:
+            E = qw.shape[0]
+            ar = torch.arange(E, dtype=torch.int64)
+            cache[cle] = ((qw.data_ptr() + ar * qw.stride(0)).to(qw.device),
+                          (bs.data_ptr() + ar * bs.stride(0)).to(qw.device))
+        return cache[cle]
+
+    def _gemm_mma(self, pile, xq, xsf, tiles):
+        _, qw, _, gs, k, m = pile
+        tq, tb = self._tables_adresses(pile)
+        return kernels.get_extension().nvfp4_gemm_grouped_mma(
+            tq, tb, gs, xq, xsf, tiles[0], tiles[1], tiles[2],
+            qw.shape[1], k, _MOE_MMA_BT)[:, :m]
+
     def _forward_prefill_grouped(self, x, topw, topi) -> Optional[torch.Tensor]:
         if self._stacks is None or "gate_proj" not in self._stacks:
             return None                                # experts sans porte : boucle
@@ -781,10 +801,18 @@ class MoEBlock(nn.Module):
         # les experts reçoivent peu de jetons — croisement mesuré vers 50
         # jetons par expert, voir _MOE_GEMM_MAX.
         par_expert = topi.numel() / max(1, pg[1].shape[0])
-        direct = (ext is not None and hasattr(ext, "nvfp4_gemm_grouped")
-                  and not os.environ.get("ACVRAM_PREFILL_DEQUANT")
-                  and par_expert <= _MOE_GEMM_MAX
-                  and pg[4] % 64 == 0 and pd[4] % 64 == 0)
+        # W4A4 sur la MMA FP4 native (revue/mma-fp4-native-sm120.md) : coupé
+        # par défaut tant que la perte de qualité des activations en E2M1
+        # n'est pas ramenée sous 1 % (poste2, 13/09 : +2,58 % sans lissage).
+        # Une optimisation qui change la sortie est un bogue jusqu'à preuve.
+        mma = (_MOE_MMA and ext is not None and hasattr(ext, "nvfp4_gemm_grouped_mma")
+               and not os.environ.get("ACVRAM_PREFILL_DEQUANT")
+               and pg[4] % 64 == 0 and pd[4] % 64 == 0
+               and ext.nvfp4_gemm_grouped_mma_disponible())
+        direct = mma or (ext is not None and hasattr(ext, "nvfp4_gemm_grouped")
+                         and not os.environ.get("ACVRAM_PREFILL_DEQUANT")
+                         and par_expert <= _MOE_GEMM_MAX
+                         and pg[4] % 64 == 0 and pd[4] % 64 == 0)
         if not direct and not hasattr(torch, "_grouped_mm"):
             return None
         t, k = topi.shape
@@ -794,7 +822,22 @@ class MoEBlock(nn.Module):
         ordre = torch.argsort(flat_e, stable=True)
         cnt = torch.bincount(flat_e, minlength=E)
         xs = x[flat_t[ordre]].to(torch.bfloat16).contiguous()        # [G, H]
-        if direct:
+        if mma:
+            # poids ET activations en 4 bits : les activations sont quantifiées
+            # une fois par entrée (E2M1 bloc 16 + UE4M3) et servent à gate et up
+            tiles = self._tuiles(cnt, _MOE_MMA_BT)
+            if xs.shape[1] != pg[4]:
+                xs = F.pad(xs, (0, pg[4] - xs.shape[1])).contiguous()
+            xq, xsf = ext.nvfp4_quant_act(xs)
+            g = self._gemm_mma(pg, xq, xsf, tiles)
+            u = self._gemm_mma(pu, xq, xsf, tiles)
+            act = (self._act(g.to(torch.float32))
+                   * u.to(torch.float32)).to(torch.bfloat16)
+            if act.shape[1] != pd[4]:
+                act = F.pad(act, (0, pd[4] - act.shape[1]))
+            aq, asf = ext.nvfp4_quant_act(act.contiguous())
+            d = self._gemm_mma(pd, aq, asf, tiles)
+        elif direct:
             # les poids restent en 4 bits : plus de pile bf16 intermédiaire
             # (trois passes de plusieurs Gio par couche en moins)
             tiles = self._tuiles(cnt)
@@ -1013,6 +1056,11 @@ _MOE_GROUPED_MAX = int(os.environ.get("ACVRAM_MOE_GROUPED_MAX", "32"))
 #   écart         +29 %   +2 %  -11 %  -28 %  -36 %
 # L'ancien défaut 64 était du mauvais côté du croisement.
 _MOE_GEMM_MAX = float(os.environ.get("ACVRAM_MOE_GEMM_MAX", "48"))
+
+# GEMM groupée W4A4 sur la MMA FP4 native de sm_120 (ACVRAM_MOE_MMA=1) et
+# jetons par tuile (16, 32 ou 64) ; coupée par défaut, voir _forward_prefill_grouped.
+_MOE_MMA = os.environ.get("ACVRAM_MOE_MMA", "0") == "1"
+_MOE_MMA_BT = int(os.environ.get("ACVRAM_MOE_MMA_BT", "64"))
 
 # Marque, dans le magasin d'états, une séquence dont l'état réside dans les
 # tampons fixes d'une couche (chemin graphes) plutôt qu'en tuple fonctionnel.
