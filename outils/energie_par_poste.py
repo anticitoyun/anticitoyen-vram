@@ -68,6 +68,18 @@ with Energie(periode=0.5) as e:
 repos_w = e.moyenne
 print(f"REPOS {repos_w:.1f} W sur {REPOS:.0f} s (bridages {sorted(e.bridages)})", flush=True)
 
+# Le moteur d'abord : les piles d'experts (_stacks) et les graphes n'existent
+# qu'après lui ; le pas complet se mesure en dernier, dans le même état thermique.
+# Pas complet, rejeu de graphes, b=B — le régime réel.
+eng = Engine(loaded, None, max_batch_size=B, max_model_len=1024, enable_cuda_graphs=True, enable_prefix_cache=False)
+eng._eos = set()
+SP = SamplingParams(temperature=0.0, max_tokens=4096)
+for b in range(B):
+    eng.add_request([(1000 + b * 101 + i * 13) % 150000 + 10 for i in range(128)], SP)
+while any(not s.prefilled for s in eng.running) or eng.waiting:
+    eng.step()
+for _ in range(5): eng.step()
+torch.cuda.synchronize()
 res = []
 # Témoins.
 src = torch.empty(1 << 30, dtype=torch.uint8, device=dev); dst = torch.empty_like(src)
@@ -102,15 +114,5 @@ lm = model.lm_head
 res.append(mesure("lm_head int8", lambda: lm(x), lots=50))
 res.append(mesure("norme RMS (input_layernorm)", lambda: couche.input_layernorm(x), lots=200))
 
-# Pas complet, rejeu de graphes, b=B — le régime réel.
-eng = Engine(loaded, None, max_batch_size=B, max_model_len=1024, enable_cuda_graphs=True, enable_prefix_cache=False)
-eng._eos = set()
-SP = SamplingParams(temperature=0.0, max_tokens=4096)
-for b in range(B):
-    eng.add_request([(1000 + b * 101 + i * 13) % 150000 + 10 for i in range(128)], SP)
-while any(not s.prefilled for s in eng.running) or eng.waiting:
-    eng.step()
-for _ in range(5): eng.step()
-torch.cuda.synchronize()
 res.append(mesure("PAS COMPLET b=%d rejeu (Engine.step)" % B, lambda: eng.step(), lots=10))
 print("RESULTAT " + json.dumps({"B": B, "repos_W": round(repos_w, 1), "postes": res}, ensure_ascii=False))

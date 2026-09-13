@@ -300,6 +300,14 @@ echo 'options nvidia NVreg_RestrictProfilingToAdminUsers=0' \
 sudo update-initramfs -u && sudo reboot
 ```
 
+**Depuis le 14/09/2026, sans redémarrage** : `/etc/sudoers.d/ncu` autorise
+`sudo -n /usr/local/cuda/bin/ncu …` sans mot de passe (à côté de
+`/etc/sudoers.d/nvidia-smi`). `sudo` remet l'environnement à zéro : repasser
+les variables par `env` (HOME de travail, `ACVRAM_KERNEL_CACHE` sur une copie
+du cache compilé, `TRITON_CACHE_DIR`) pour que root n'écrive rien dans les
+caches de l'utilisateur — `outils/ncu_instr_par_octet.sh` le fait. Le
+paramètre de module ci-dessus reste à poser au prochain redémarrage.
+
 Sans cela, seul `nsys` (chronologie des lancements) fonctionne — il suffit pour
 compter les noyaux et voir où va le temps, mais pas pour connaître l'occupation,
 la pression de registres ni les conflits de banques, qui sont précisément ce qui

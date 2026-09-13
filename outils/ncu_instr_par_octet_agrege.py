@@ -7,23 +7,44 @@ import csv
 import re
 import sys
 
-rows = [r for r in csv.reader(open(sys.argv[1])) if r and r[0].isdigit()]
+# L'en-tête n'est pas la première ligne (sortie du programme mêlée au CSV) et
+# --nvtx insère des colonnes : on lit les colonnes par leur NOM.
+lignes = [r for r in csv.reader(open(sys.argv[1]))]
+i_ent = next(i for i, r in enumerate(lignes) if r and r[0] == "ID")
+ent = lignes[i_ent]
+col = {n: i for i, n in enumerate(ent)}
+rows = [r for r in lignes[i_ent + 1:] if r and r[0].isdigit() and len(r) == len(ent)]
 pas = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+illisibles = 0
 MULT = {"byte": 1, "Kbyte": 1e3, "Mbyte": 1e6, "Gbyte": 1e9, "inst": 1, "Kinst": 1e3, "Minst": 1e6, "Ginst": 1e9,
-        "hz": 1, "Khz": 1e3, "Mhz": 1e6, "Ghz": 1e9, "nsecond": 1e-9, "usecond": 1e-6, "msecond": 1e-3, "second": 1}
+        "hz": 1, "Khz": 1e3, "Mhz": 1e6, "Ghz": 1e9, "ns": 1e-9, "nsecond": 1e-9, "us": 1e-6, "usecond": 1e-6,
+        "ms": 1e-3, "msecond": 1e-3, "s": 1, "second": 1, "%": 1}
 par_lancement = collections.defaultdict(dict)
 for r in rows:
-    kid, nom, grille, met, unit, val = r[0], r[4], r[8], r[12], r[13], r[14].replace(",", "")
+    kid, nom, grille = r[col["ID"]], r[col["Kernel Name"]], r[col["Grid Size"]]
+    # Locale française : espaces (ou fines) pour les milliers, virgule décimale.
+    met, unit, val = r[col["Metric Name"]], r[col["Metric Unit"]], r[col["Metric Value"]]
+    val = val.replace(" ", "").replace("\u202f", "").replace("\xa0", "").replace(",", ".")
     try:
         v = float(val)
     except ValueError:
+        illisibles += 1
         continue
     d = par_lancement[kid]
     d["nom"], d["grille"] = nom, grille
     d[met] = v * MULT.get(unit, 1)
 
 def cle(d):
-    n = d["nom"].split("(")[0].split("<")[0][-60:]
+    # "void <unnamed>::int8_gemv_kernel<4, 12, ...>(...)" -> "int8_gemv_kernel<4, 12>"
+    n = d["nom"]
+    n = n[5:] if n.startswith("void ") else n
+    n = n.replace("<unnamed>::", "").replace("(anonymous namespace)::", "")
+    base = re.match(r"[\w:]+", n)
+    base = base.group(0) if base else n[:40]
+    m = re.match(r"[\w:]+<([^<>()]*)>", n)
+    if m and "at::" not in base:
+        base += "<" + ", ".join(x.strip() for x in m.group(1).split(",")[:2]) + ">"
+    n = base[-60:]
     if "int8_gemv" in n:
         return f"{n} grille={d['grille']}"
     return n
@@ -32,7 +53,7 @@ agg = collections.defaultdict(lambda: collections.defaultdict(float))
 for d in par_lancement.values():
     a = agg[cle(d)]
     a["n"] += 1
-    for m in ("gpu__time_duration.sum", "dram__bytes_read.sum", "dram__bytes_write.sum", "sm__inst_executed.sum",
+    for m in ("gpu__time_duration.sum", "dram__bytes_op_read.sum", "dram__bytes_op_write.sum", "sm__inst_executed.sum",
               "sm__inst_executed_pipe_tensor.sum", "sm__inst_executed_pipe_fma.sum", "sm__inst_executed_pipe_lsu.sum",
               "sm__throughput.avg.pct_of_peak_sustained_elapsed", "sm__cycles_elapsed.avg.per_second"):
         a[m] += d.get(m, 0.0)
@@ -42,8 +63,11 @@ int8 = [k for k in agg if "int8_gemv" in k]
 if int8:
     def gx(k):
         m = re.search(r"grille=\((\d+)", k); return int(m.group(1)) if m else 0
-    lm = max(int8, key=gx)
-    agg["int8_gemv lm_head " + lm.split(" grille=")[1]] = agg.pop(lm)
+    # lm_head : une seule fois par pas (les projections, une par couche).
+    seuls = [k for k in int8 if agg[k]["n"] <= 1.5 * pas]
+    if seuls:
+        lm = max(seuls, key=gx)
+        agg["int8_gemv lm_head " + lm.split(" grille=")[1]] = agg.pop(lm)
 
 POSTES = [
     ("MoE gate·up", r"gateup|GroupProblemShape.*gate|grouped.*gate"),
@@ -63,19 +87,19 @@ def poste(k):
 
 def ligne(k, a, w):
     t = a["gpu__time_duration.sum"] / pas * 1e3
-    rd = a["dram__bytes_read.sum"] / pas
+    rd = a["dram__bytes_op_read.sum"] / pas
     inst = a["sm__inst_executed.sum"] / pas
     ipo = inst / rd if rd else float("inf")
-    bw = (a["dram__bytes_read.sum"] + a["dram__bytes_write.sum"]) / a["gpu__time_duration.sum"] / 1e9 if a["gpu__time_duration.sum"] else 0
+    bw = (a["dram__bytes_op_read.sum"] + a["dram__bytes_op_write.sum"]) / a["gpu__time_duration.sum"] / 1e9 if a["gpu__time_duration.sum"] else 0
     n = a["n"]
     return (f"{k[:w]:{w}s} {n/pas:7.1f} {t:8.3f} {rd/1e9:7.3f} {bw:7.0f} {inst/1e9:8.3f} {ipo:9.2f} "
             f"{100*a['sm__inst_executed_pipe_tensor.sum']/max(inst*pas,1):5.1f} {100*a['sm__inst_executed_pipe_fma.sum']/max(inst*pas,1):5.1f} "
             f"{100*a['sm__inst_executed_pipe_lsu.sum']/max(inst*pas,1):5.1f} {a['sm__throughput.avg.pct_of_peak_sustained_elapsed']/n:5.1f} "
-            f"{a['sm__cycles_elapsed.avg.per_second']/n/1e6:5.0f}")
+            f"{a['sm__cycles_elapsed.avg.per_second']/max(n,1)/1e6:5.0f}")
 
 W = 64
 ent = f"{'':{W}s} {'appels':>7s} {'ms/pas':>8s} {'Go lus':>7s} {'Go/s':>7s} {'Ginst':>8s} {'inst/oct':>9s} {'tens%':>5s} {'fma%':>5s} {'lsu%':>5s} {'SM%':>5s} {'MHz':>5s}"
-print(f"Par pas (moyenne sur {pas} pas), {len(par_lancement)} lancements profilés")
+print(f"Par pas (moyenne sur {pas} pas), {len(par_lancement)} lancements profilés, {illisibles} valeurs illisibles")
 print(ent)
 tot_t = sum(a["gpu__time_duration.sum"] for a in agg.values())
 for k, a in sorted(agg.items(), key=lambda kv: -kv[1]["gpu__time_duration.sum"])[:28]:

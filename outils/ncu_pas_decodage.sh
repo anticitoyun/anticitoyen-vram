@@ -12,7 +12,7 @@ PY=${PY:-~/Bureau/Claude/anticitoyen-vram/.venv/bin/python3}
 OUT=/tmp/claude-1000/ncu-pas-${BRAS}.csv
 export ACVRAM_TYPE=mesure BANC_JETONS=8
 /usr/local/cuda/bin/ncu --csv --target-processes all \
-  --metrics gpu__time_duration.sum,dram__bytes_read.sum,dram__bytes_write.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed \
+  --metrics gpu__time_duration.sum,dram__bytes_op_read.sum,dram__bytes_op_write.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed \
   --kernel-name "regex:nvfp4_gemv_grouped|int8_gemv|paged_attn|moe_route|moe_reduce|rmsnorm|rms_norm|rope|nvfp4_gemm_grouped|silu|topk|elementwise|gather|index" \
   --launch-skip 4000 --launch-count 1200 \
   "$PY" "$ICI/banc_decodage_moe.py" "$BRAS" "$B" > "$OUT" 2>/tmp/claude-1000/ncu-pas-${BRAS}.err || true
@@ -30,8 +30,8 @@ for r in rows:
     a = agg[k]
     if met == "gpu__time_duration.sum":
         a["t"] += v / (1e6 if unit == "nsecond" else 1e3 if unit == "usecond" else 1.0); a["n"] += 1
-    elif met == "dram__bytes_read.sum": a["rd"] += v * {"byte": 1, "Kbyte": 1e3, "Mbyte": 1e6, "Gbyte": 1e9}.get(unit, 1)
-    elif met == "dram__bytes_write.sum": a["wr"] += v * {"byte": 1, "Kbyte": 1e3, "Mbyte": 1e6, "Gbyte": 1e9}.get(unit, 1)
+    elif met == "dram__bytes_op_read.sum": a["rd"] += v * {"byte": 1, "Kbyte": 1e3, "Mbyte": 1e6, "Gbyte": 1e9}.get(unit, 1)
+    elif met == "dram__bytes_op_write.sum": a["wr"] += v * {"byte": 1, "Kbyte": 1e3, "Mbyte": 1e6, "Gbyte": 1e9}.get(unit, 1)
     elif met.startswith("sm__throughput"): a["sm"] += v
 tot_t = sum(a["t"] for a in agg.values())
 print(f"{'noyau':70s} {'appels':>6s} {'ms':>8s} {'%':>5s} {'Go lus':>7s} {'Go ecr':>7s} {'Go/s eff':>9s} {'SM%':>5s}")
