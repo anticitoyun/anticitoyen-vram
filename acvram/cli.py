@@ -486,7 +486,8 @@ def cmd_convert(args: argparse.Namespace) -> int:
         quant_device=args.quant_device, bits_budget_gib=args.bits_budget,
         garder_grille=args.grille_erreurs,
         promotion_cout_max_mib=args.promotion_cout_max,
-        format_impose=args.format, mesurer_kld=args.mesurer_kld)
+        format_impose=args.format, mesurer_kld=args.mesurer_kld,
+        alpha_commun_gate_up=args.alpha_commun_gate_up)
 
     last = [0.0]
 
@@ -830,6 +831,15 @@ def build_parser() -> argparse.ArgumentParser:
                          "duck.ai 12/09) au manifeste, a cote du SNR. "
                          "N'AFFECTE AUCUNE DECISION : le convertisseur promeut "
                          "toujours sur le SNR. Sert au protocole A/B")
+    cv.add_argument("--alpha-commun-gate-up", action="store_true",
+                    help="item A7 (audit poste7, 14/09) : un SEUL alpha AWQ "
+                         "pour chaque paire gate_proj/up_proj admissible, au "
+                         "lieu d'un alpha independant par tenseur — "
+                         "necessaire pour que le moteur fusionne la paire "
+                         "(_scaler_commun refuse deux scalers differents). "
+                         "Defaut faux : ne change pas la conversion sans "
+                         "mesure (revue/prediction-a7-alpha-commun-gateup-"
+                         "14-09.md)")
     cv.set_defaults(func=cmd_convert)
 
     sv = sub.add_parser("serve", help="lance le serveur compatible OpenAI")
