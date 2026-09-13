@@ -23,9 +23,12 @@ deux fois puis le rejouer produit exactement l'état qu'un pas ordinaire aurait
 produit. Un test l'affirme jeton par jeton.
 
 Ce qui n'est **pas** capturé, à dessein : le prefill (formes libres), la
-spéculation (plusieurs positions par séquence), les modèles à experts (le
-routage dépend des données), les couches réparties sur plusieurs appareils et
-les poids streamés (le préchargement change les adresses).
+spéculation (plusieurs positions par séquence), les couches réparties sur
+plusieurs appareils, et les poids streamés dont le préchargement change
+l'ADRESSE d'un rejeu à l'autre (chemin par expert / `ExpertPool`, tampons
+rotatifs). EXCEPTION (bead pds, 14/09) : un poids streamé lu par TABLE
+(`table_qw[e]`, jamais gravée dans le graphe — adresse du tampon stable,
+seul son contenu change) reste capturable ; `_eligible()` le distingue.
 """
 
 from __future__ import annotations
@@ -207,6 +210,20 @@ class GraphRunner:
             self.raison = ("modèle réparti sur "
                            + ", ".join(sorted(str(d) for d in devs)))
             return False                     # pipeline multi-appareils : eager
+        # Chemin table (bead pds, point 4 suite — chef 14/09) : un
+        # `QuantLinear` streamed dont le noyau lit son adresse par TABLE
+        # (`table_qw[e]`/`table_bscale[e]`, relue à CHAQUE lancement, jamais
+        # gravée dans les arguments capturés) tolère un REPIN entre deux
+        # rejeux — seul le CONTENU du tampon change, pas l'adresse du
+        # tampon lui-même (stable pour la vie du modèle, `construire_table`
+        # au chargement, jamais réalloué ensuite). Preuve :
+        # test_repin_sous_graphe_cuda (3 conditions : visibilité rejeu,
+        # formes stables, un désync doit casser). Le chemin par expert /
+        # `ExpertPool` reste exclu : lui fait tourner un pointeur à travers
+        # des tampons ROTATIFS — l'adresse que le graphe a capturée
+        # resterait celle du créneau, quel que soit l'expert qui l'occupe
+        # réellement au rejeu suivant.
+        surs_table: set = set()
         for mod in m.modules():
             if isinstance(mod, MoEBlock):
                 # Le chemin groupé est à formes fixes : le routage ne varie
@@ -221,7 +238,16 @@ class GraphRunner:
                 if mod._stack_state != "oui":
                     self.raison = "pile d'experts hétérogène"
                     return False             # pile heterogene : eager
+                if all(p[0] in ("nvfp4", "nvfp4_table")
+                      for p in mod._stacks.values()):
+                    for exp in mod.experts:
+                        for nom in ("gate_proj", "up_proj", "down_proj"):
+                            lin = getattr(exp, nom, None)
+                            if lin is not None:
+                                surs_table.add(id(lin))
             if isinstance(mod, QuantLinear) and mod.streamed is not None:
+                if id(mod) in surs_table:
+                    continue                 # table : adresse relue en direct
                 # Le cas le plus couteux et le moins visible : il suffit d'un
                 # poids exile en RAM hote pour que TOUT le modele passe en
                 # eager. On nomme lequel.

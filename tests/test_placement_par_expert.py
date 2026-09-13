@@ -188,3 +188,137 @@ def test_tous_exiles_est_aussi_bit_identique():
         y1 = tout_resident(x.clone())
         y2 = tout_exile(x.clone())
     assert torch.equal(y1, y2)
+
+
+def test_repin_sous_graphe_cuda():
+    """Suite du point 4 (chef, 14/09) : lever la garde `graphs.py:224`
+    pour le chemin table exige de prouver trois conditions avant, pas après.
+
+    (1) Visibilité rejeu : un REPIN réel entre deux `replay()` (même flux,
+        même ordre d'émission — aucune synchro ajoutée) doit se refléter au
+        rejeu suivant, identique à un bloc frais construit avec le nouveau
+        placement d'emblée.
+    (2) Formes stables : les tenseurs que le graphe capture (les tables)
+        gardent la MÊME adresse après l'échange — seul leur contenu change.
+    (3) Un changement qui doit casser (REGLES.md règle 5) : un rejeu SANS
+        échange redonne le même résultat (stable au repos) ; une table
+        CORROMPUE à la main (une adresse changée à tort) doit, elle, se voir
+        au rejeu — pas « le REPIN change la sortie », qu'il ne doit JAMAIS
+        faire (placement = vitesse, jamais sémantique) et que (1) vérifie
+        déjà en creux, mais « le noyau relit vraiment la table à chaque
+        lancement », sans quoi (1) pourrait passer par coïncidence.
+    """
+    from acvram.engine.runner import _repin_echanger_reel
+    from acvram.memory.table_adresses import construire_table
+
+    dev = torch.device("cuda")
+    residents = {0, 2, 4, 6}
+    bloc = _couche(dev, residents)
+    bloc._table_qw = {}
+    bloc._table_bscale = {}
+    for nom in ("gate_proj", "up_proj", "down_proj"):
+        tq, tb = construire_table(bloc.experts, nom, device=dev)
+        bloc._table_qw[nom] = tq
+        bloc._table_bscale[nom] = tb
+    bloc._stack_state = "?"        # laisse _try_build_stacks choisir le groupé
+
+    # Le jeton doit router l'expert échangé (2) : TOP_K=4 sur N_EXPERTS=8 ne
+    # le garantit pas pour une graine quelconque -- sans lui l'échange serait
+    # invisible en sortie, et (3b) ne prouverait rien qu'un hasard de graine.
+    for graine in range(1000):
+        torch.manual_seed(graine)
+        x = torch.randn(1, CACHE, device=dev, dtype=torch.bfloat16)
+        with torch.no_grad():
+            _, topi = bloc._route(x)
+        if 2 in topi.reshape(-1).tolist():
+            break
+    else:
+        raise AssertionError("aucune graine testée ne route l'expert échangé")
+
+    with torch.no_grad():
+        bloc(x.clone())             # échauffement hors capture : piles, tampons
+    assert bloc._stack_state == "oui"
+    assert bloc._stacks["gate_proj"][0] == "nvfp4_table", (
+        "pendant table non construit -- ce test ne porterait pas sur ce "
+        "qu'il pretend tester")
+
+    adr_avant = {nom: (bloc._table_qw[nom].data_ptr(),
+                       bloc._table_bscale[nom].data_ptr())
+                for nom in bloc._table_qw}
+
+    g = torch.cuda.CUDAGraph()
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        with torch.no_grad():
+            bloc(x.clone())         # échauffement sur le flux annexe (contrat capture)
+    torch.cuda.current_stream().wait_stream(s)
+    with torch.cuda.graph(g):
+        with torch.no_grad():
+            static_out = bloc(x.clone())
+
+    # (3a) témoin : sans échange, un second rejeu redonne le même résultat.
+    g.replay()
+    torch.cuda.synchronize()
+    y_avant = static_out.clone()
+    g.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(static_out, y_avant), (
+        "deux rejeux sans échange diffèrent -- le graphe n'est même pas "
+        "stable au repos")
+
+    # L'échange REPIN réel, EXACTEMENT comme en service (_repin_pass, fin de
+    # step()) : sur le flux courant, sans synchronisation ajoutée -- c'est
+    # l'ordre d'émission par flux qui doit suffire (condition 1).
+    _repin_echanger_reel(bloc, sortant=2, entrant=5)
+
+    # (2) formes/adresses stables : le graphe a capturé CES tenseurs.
+    for nom in bloc._table_qw:
+        assert bloc._table_qw[nom].data_ptr() == adr_avant[nom][0]
+        assert bloc._table_bscale[nom].data_ptr() == adr_avant[nom][1]
+
+    g.replay()
+    torch.cuda.synchronize()
+    y_apres = static_out.clone()
+
+    # Référence indépendante : un bloc FRAIS, MÊME chemin groupé table (pas
+    # la boucle par expert -- noyau différent, écart au dernier bit déjà
+    # connu et accepté, cf. test_chemin_groupe_table_bit_identique_au_
+    # chemin_groupe_pile), placement échangé dès le départ.
+    reference = _couche(dev, {0, 4, 5, 6})       # 2 dehors, 5 dedans
+    reference._table_qw = {}
+    reference._table_bscale = {}
+    for nom in ("gate_proj", "up_proj", "down_proj"):
+        tq, tb = construire_table(reference.experts, nom, device=dev)
+        reference._table_qw[nom] = tq
+        reference._table_bscale[nom] = tb
+    reference._stack_state = "?"
+    with torch.no_grad():
+        y_reference = reference(x.clone())
+    assert reference._stacks["gate_proj"][0] == "nvfp4_table"
+
+    # (1) le rejeu APRÈS échange doit refléter le NOUVEAU placement.
+    assert torch.equal(y_apres, y_reference), (
+        f"le rejeu après REPIN ne reflète pas le nouveau placement (écart "
+        f"max {(y_apres - y_reference).abs().max().item()}) -- condition 1 "
+        f"violée : le graphe garde un contenu périmé")
+
+    # (3b) un changement qui DOIT casser : une table CORROMPUE à la main
+    # (l'adresse de l'expert 2 pointée, à tort, sur celle de l'expert 0) doit
+    # se voir au rejeu suivant. Pas « le REPIN change la sortie » -- il ne le
+    # doit JAMAIS (placement = vitesse, jamais sémantique, `y_avant ==
+    # y_apres` est attendu et déjà vérifié en creux par (1)) -- mais « le
+    # noyau relit vraiment la table, pas une valeur mise en cache ailleurs ».
+    # Sans cette preuve, (1) ci-dessus pourrait passer par coïncidence.
+    table_gate = bloc._table_qw["gate_proj"]
+    adr_correcte = table_gate[2].item()
+    table_gate[2] = table_gate[0].item()          # adresse de l'expert 0, a tort
+    g.replay()
+    torch.cuda.synchronize()
+    y_corrompu = static_out.clone()
+    table_gate[2] = adr_correcte                  # remis en etat avant de conclure
+
+    assert not torch.equal(y_corrompu, y_apres), (
+        "une table délibérément corrompue n'a AUCUN effet au rejeu -- le "
+        "noyau ne relit pas la table à chaque lancement, ce que (1) "
+        "supposait sans le prouver")
