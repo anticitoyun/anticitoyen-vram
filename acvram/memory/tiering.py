@@ -107,6 +107,21 @@ class LayerPlacement:
     is_moe: bool = False
     cached_expert_fraction: float = 0.0
     mlp_exec: str = "gpu"        # "gpu" (stream the weights in) or "cpu"
+    # Placement PAR EXPERT (bead anticitoyen-vram-pds, poste7 §4, revue/
+    # poste7-cache-experts-13-09.md) : la couche entière comme unité de
+    # placement (mlp_storage ci-dessus) reste le comportement par défaut ;
+    # ces deux champs sont le premier pas vers un grain plus fin, ADDITIFS et
+    # sans effet tant qu'ils sont None — aucun code existant ne les lit.
+    #   experts_residents : combien des experts de cette couche vivent en
+    #     VRAM (les autres, en RAM épinglée zéro-copie) — None = pas encore
+    #     décidé à ce grain, `cached_expert_fraction` reste la seule borne.
+    #   taux_succes : le h_pin/h_lru MESURÉ pour ce nombre de résidents
+    #     (`memory/trace_routage.taux_de_succes_pin`) — None = non mesuré, et
+    #     alors le plan garde `experts_residents / n_experts` comme borne
+    #     HAUTE (un routage uniforme ne fait pas mieux), jamais une valeur
+    #     inventée qui se ferait passer pour une mesure.
+    experts_residents: Optional[int] = None
+    taux_succes: Optional[float] = None
 
     @property
     def total_bytes(self) -> int:

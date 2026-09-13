@@ -22,9 +22,21 @@ la première brique, avant tout cache.
 
 from __future__ import annotations
 
+import json
+import os
+from typing import Optional
+
 import torch
 
-__all__ = ["concentration_top_fraction"]
+__all__ = ["concentration_top_fraction", "sauvegarder", "charger",
+           "choisir_residents"]
+
+# AUTOPIN de colibrì (colibri.c:11214-11262, cité dans
+# revue/colibri-lecture-code.md) exige au moins 5000 sélections d'historique
+# avant de décider — sous ce seuil, une couche à peine visitée déciderait sur
+# du bruit. Même règle ici, même chiffre : rien ne nous dit qu'un autre serait
+# mieux, et en inventer un ferait passer une supposition pour une mesure.
+SEUIL_CONFIANCE = 5000
 
 
 def concentration_top_fraction(compte: torch.Tensor, fraction: float = 0.10) -> float:
@@ -45,3 +57,57 @@ def concentration_top_fraction(compte: torch.Tensor, fraction: float = 0.10) -> 
     k = max(1, int(round(fraction * compte.numel())))
     plus_chauds = torch.topk(compte, min(k, compte.numel())).values.sum()
     return float((plus_chauds / total).item())
+
+
+def sauvegarder(usage: dict, chemin: str) -> None:
+    """Écrit l'histogramme `{couche: tenseur}` de `ACVRamModel.usage_routage()`
+    dans un profil persistant, creux (couches/experts jamais vus omis).
+
+    Format JSON `{"<couche>": {"<expert>": compte, ...}, ...}` — pas le texte
+    creux de colibrì (`.coli_usage`) : rien chez nous ne lit ce format à sa
+    place, et JSON évite d'inventer un parseur pour un gain de taille qui ne
+    sert personne ici. Ce que colibrì en tire — un fichier lisible, qui ne
+    grossit que par ce qui a vraiment été sélectionné — est conservé : les
+    zéros ne s'écrivent pas."""
+    dehors = {}
+    for couche, compte in usage.items():
+        compte_cpu = compte.detach().to("cpu")
+        ligne = {str(e): int(c) for e, c in enumerate(compte_cpu.tolist()) if c}
+        if ligne:
+            dehors[str(couche)] = ligne
+    tmp = f"{chemin}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(dehors, f)
+    os.replace(tmp, chemin)          # atomique : jamais un profil à moitié écrit
+
+
+def charger(chemin: str) -> Optional[dict]:
+    """Relit un profil écrit par `sauvegarder`. Rend `None`, pas un profil
+    vide, si le fichier n'existe pas ou est illisible — un profil absent et un
+    profil qui dit « rien n'a jamais été sélectionné » ne sont pas le même
+    fait (règle 10 : un échec est un résultat, pas un zéro qui l'imite)."""
+    try:
+        with open(chemin, "r", encoding="utf-8") as f:
+            brut = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return {int(couche): {int(e): c for e, c in ligne.items()}
+           for couche, ligne in brut.items()}
+
+
+def choisir_residents(compte_couche: dict, capacite: int,
+                      seuil_confiance: int = SEUIL_CONFIANCE) -> Optional[list]:
+    """AUTOPIN d'une couche : les `capacite` experts les plus demandés de
+    `compte_couche` (`{expert: compte}`, tel que rendu par `charger`).
+
+    Rend `None` — pas la liste vide, pas un tirage arbitraire — si
+    `sum(compte_couche.values()) < seuil_confiance` : sous ce seuil, décider
+    reviendrait à épingler sur du bruit (même geste que `LayerPlacement.
+    taux_succes = None` : l'absence de mesure ne se comble pas d'une valeur
+    qui a l'air d'une mesure). L'appelant garde alors le grain « couche
+    entière » (`cached_expert_fraction`) plutôt que ce grain plus fin.
+    """
+    if sum(compte_couche.values()) < seuil_confiance:
+        return None
+    classes = sorted(compte_couche.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [e for e, _ in classes[:capacite]]
