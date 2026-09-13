@@ -55,10 +55,11 @@ def passe(rep, profiler=False):
         torch.cuda.synchronize()
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
             eng.step(); torch.cuda.synchronize()
-        ev = [e for e in prof.key_averages() if e.self_device_time_total > 0 and not e.key.startswith("aten::")]
+        ev = [e for e in prof.key_averages() if e.self_device_time_total > 0 and not e.key.startswith("aten::")
+              and not e.key.startswith("cuda") and "Graph" not in e.key]
         tot = sum(e.self_device_time_total for e in ev); ev.sort(key=lambda e: -e.self_device_time_total)
         print(f"PROFIL b={B} pas GPU={tot/1000:.2f} ms, {len(ev)} noyaux")
-        for e in ev[:12]:
+        for e in ev[:16]:
             print(f"  {e.self_device_time_total/1000:7.3f} ms {100*e.self_device_time_total/tot:5.1f}%  x{e.count:<4d} {e.key[:88]}")
         while eng.running: eng.step()
         torch.cuda.synchronize()
