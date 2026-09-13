@@ -105,3 +105,62 @@ Deux voies :
 
 `anticitoyen-vram-brd` réécrit : le plan « tuile 32/64 » est retiré, il
 optimisait un chemin de conversion qui n'a pas lieu d'être.
+
+## Le noyau (13/09, plus tard) — `nvfp4_gemm_grouped_mma`, main 6c99fa5
+
+Écrit et mesuré le même jour. Fragments A (jetons quantifiés E2M1 bloc 16
++ UE4M3 par `nvfp4_quant_act`) et B (nos poids tels quels) chargés depuis
+la mémoire globale dans le layout de la MMA ; aucune shared, double tampon
+de registres sur K ; piles adressées par deux tables `[E]` int64 (contrat
+bead pds). Coupé par défaut (`ACVRAM_MOE_MMA=1`) tant que la PPL W4A4
+n'est pas sous +1 % (poste2 : +2,58 % sans lissage).
+
+### Équivalence (52 tests, `tests/test_gemm_grouped_mma.py`)
+
+- Quantification des activations **bit-identique** à la référence torch
+  sur 4 formes — après une correction : sous `--use_fast_math` la division
+  est un `MUFU.RCP` approché qui basculait 5 égalités E2M1 sur 5 376 ;
+  `__fdiv_rn` les rend exactes. Le matériel (`F2FP.SATFINITE.E2M1.F32`)
+  arrondit les égalités au code pair.
+- GEMM contre référence float64 sur les mêmes activations quantifiées :
+  45 cas (5 répartitions d'experts × 3 formes × bt 16/32/64), toutes
+  valeurs dans la tolérance fp32/bf16, > 90 % bit-identiques à bf16(réf).
+- Tables d'adresses : experts dispersés dans deux piles = même sortie ;
+  table fausse ≠ sortie.
+- Cosinus W4A4 / bf16 : 0,9954 — l'information, pas le verdict.
+
+### Débit (moteur chaud, cache de préfixe coupé, 7 rép, médian ± σ, j/s)
+
+Prédiction écrite avant : bat déquant + `grouped_mm` à tous les points
+(≥ 3 913 à 32, ≥ 7 592 à 128). Issue gênante : chargements directs sans
+shared → MMA < déquant à 128.
+
+| j/expert | L | GEMM bf16 | déquant | **MMA bt64** | MMA bt32 | MMA / meilleur ancien |
+|---------:|-----:|------:|------:|------:|------:|-----:|
+|  32 |  512 | 3 913 | 3 022 | **5 888 ± 29** | 5 900 ± 14 | 1,50 |
+|  48 |  768 | 4 260 | 4 173 | **7 065 ± 31** | — | 1,66 |
+|  64 | 1024 | 4 511 | 5 075 | **7 820 ± 27** | — | 1,54 |
+|  96 | 1536 | 4 749 | 6 592 | **8 551 ± 68** | — | 1,30 |
+| 128 | 2048 | 4 864 | 7 592 | **8 945 ± 53** | 8 219 ± 58 | 1,18 |
+
+Compteurs : `mma=1008`, `gemm=0`, `pile=0` à chaque point. Prédiction
+tenue partout ; l'issue gênante ne s'est pas produite. bt=64 ≥ bt=32
+(égal à 32 j/expert, +9 % à 128).
+
+### Lecture
+
+1. Le plafond a sauté : de 32 à 128 j/expert le débit fait +52 % (l'ancien
+   noyau : +24 %), et le croisement avec la déquant n'existe plus —
+   `_MOE_GEMM_MAX` n'a plus d'objet sur ce chemin.
+2. Le pas entier à L=2048 passe de 269,8 ms à 228,9 ms ; la part MoE n'est
+   plus le premier poste — mesurer le reste (attention, quantification des
+   activations, routage) avant d'optimiser le noyau davantage.
+3. Ce que ce chiffre ne dit pas : la qualité. 5 888 j/s à +2,58 % de PPL
+   ne se livre pas. Le lissage statique de poste2 décide.
+
+### Ce qui reste
+
+- Chargements directs : un `cp.async` en shared double-tamponné gagnerait
+  sur la latence ; à mesurer seulement si le MoE redevient le poste dominant.
+- `nvfp4_quant_act` est un lancement séparé par entrée (2 par couche) : à
+  fusionner dans l'épilogue de gate·up pour `down_proj`.
