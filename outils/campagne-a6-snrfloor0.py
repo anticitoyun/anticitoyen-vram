@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Campagne A6 (audit poste7, prédiction scellée dans
+revue/prediction-a6-int8-snrfloor0-14-09.md) : reconvertir un modèle à
+snr_floor=0 (défaut CLI actuel), comparer PPL et débit de décodage b=12
+contre le dossier existant (snr_floor=25, converti avant le 4/09).
+
+Coder-30B en premier, seul tant que le verdict n'est pas rendu (chef,
+14/09). Source bf16 : téléchargée avec accord explicite (~60 Gio,
+Qwen/Qwen3-Coder-30B-A3B-Instruct) sur le HDD — le SSD est à 41 Gio
+libres, la sortie -sf0 va aussi sur le HDD (`--out`, jamais le SSD).
+
+Protocole décodage IDENTIQUE à outils/gpu/mesure/banc-horloge-decodage.py
+(poste3) : 12 séquences, ctx 2048, 200 jetons, énergie NVML monotone —
+mais réécrit ici (pas importé) pour rester sur LE PAQUET acvram de CE
+worktree, pas celui du worktree de poste3 que son script pointe en dur.
+
+    python outils/campagne-a6-snrfloor0.py convertir <source_hf> <nom>
+    python outils/campagne-a6-snrfloor0.py mesurer <avant_dir> <apres_dir>
+"""
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "gpu" / "mesure"))
+from energie import Energie, repos  # noqa: E402
+
+REPO = Path(__file__).resolve().parent.parent
+VENV_PY = "~/Bureau/Claude/anticitoyen-vram/.venv/bin/python3"
+CORPUS = Path("/mnt/4TO_SATACMR_2022/Modeles/corpus/wiki-gptq.txt")
+SORTIE_HDD = Path("/mnt/4TO_SATACMR_2022/Modeles/models_acvram")  # SSD a 41 Gio libres
+SLOTS = 12
+CTX = 2048
+N_JETONS = 200
+VOCAB_APPROX = 150000
+
+
+def cmd_convertir(source: str, nom: str) -> int:
+    """`acvram convert <source> --name <nom> -o <hdd>/<nom>-sf0` — le
+    defaut CLI (snr_floor=0) s'applique sans flag, c'est tout le point."""
+    dest = SORTIE_HDD / f"{nom}-sf0"
+    print(f"BEAD A6 — conversion snr_floor=0 : {source} -> {dest}")
+    cmd = [VENV_PY, "-m", "acvram", "convert", source, "--name", nom,
+          "-o", str(dest)]
+    print("  " + " ".join(cmd))
+    r = subprocess.run(cmd, cwd=str(REPO))
+    return r.returncode
+
+
+def _ppl(dossier: str) -> dict:
+    # `acvram eval` rend une LISTE (un element par modele passe) — un seul
+    # dossier ici, donc data[0].
+    cmd = [VENV_PY, "-m", "acvram", "eval", dossier, "--corpus", str(CORPUS),
+          "--window", "2048", "--stride", "2048", "--min-context", "256",
+          "--json"]
+    r = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True)
+    if r.returncode != 0:
+        return {"echec": r.stderr[-3000:]}
+    donnees = json.loads(r.stdout)
+    return donnees[0] if donnees else {"echec": "liste vide"}
+
+
+def _invite(k: int, n: int) -> list:
+    return [(k * 104729 + i * 7919) % (VOCAB_APPROX - 100) + 10 for i in range(n)]
+
+
+def _decode_b12(dossier: str) -> dict:
+    import torch
+    from acvram.engine.loader import load_model
+    from acvram.engine.runner import Engine
+    from acvram.engine.sampler import SamplingParams
+
+    loaded = load_model(dossier, dtype=torch.bfloat16, max_model_len=CTX)
+    engine = Engine(loaded, None, max_batch_size=SLOTS, max_model_len=CTX)
+    engine.warm_graphs()
+    torch.cuda.reset_peak_memory_stats(0)
+    params = SamplingParams(temperature=0.0, max_tokens=N_JETONS)
+    for k in range(SLOTS):
+        engine.add_request(_invite(1000 + k, min(256, CTX // 4)), params,
+                           request_id=f"d{k}")
+
+    base = repos(secondes=8.0)
+    n_avant = engine.stats.decode_tokens
+    with Energie() as e:
+        t0 = time.perf_counter()
+        n_pas = 0
+        while engine.running or engine.waiting:
+            engine.step()
+            n_pas += 1
+            if n_pas > N_JETONS + 20:
+                raise RuntimeError("le lot ne se termine pas")
+        torch.cuda.synchronize()
+        duree = time.perf_counter() - t0
+    n = engine.stats.decode_tokens - n_avant
+    joules_net = max(e.joules - base.moyenne * duree, 0.0)
+    return {"slots": SLOTS, "ctx": CTX, "n_jetons_decodes": n,
+           "duree_mesure_s": round(duree, 4), "jetons_s": n / duree if duree else 0.0,
+           "joules_net": round(joules_net, 1),
+           "j_par_jeton_net": round(joules_net / n, 4) if n else None,
+           "watts_repos": round(base.moyenne, 1), **e.resume()}
+
+
+def cmd_mesurer(avant: str, apres: str) -> int:
+    print(f"BEAD A6 — mesure avant/apres : {avant} vs {apres}")
+    print("  PPL avant...", flush=True)
+    ppl_avant = _ppl(avant)
+    print("  PPL apres...", flush=True)
+    ppl_apres = _ppl(apres)
+    print("  decodage b=12 avant...", flush=True)
+    dec_avant = _decode_b12(avant)
+    print("  decodage b=12 apres...", flush=True)
+    dec_apres = _decode_b12(apres)
+
+    resultat = {"avant": {"dossier": avant, "ppl": ppl_avant, "decode": dec_avant},
+               "apres": {"dossier": apres, "ppl": ppl_apres, "decode": dec_apres}}
+    print("RESULTAT " + json.dumps(resultat, ensure_ascii=False, indent=2))
+
+    if "echec" not in ppl_avant and "echec" not in ppl_apres:
+        p_avant = ppl_avant.get("perplexity")
+        p_apres = ppl_apres.get("perplexity")
+        d_avant = dec_avant["jetons_s"]
+        d_apres = dec_apres["jetons_s"]
+        if p_avant and d_avant:
+            ppl_pct = 100 * (p_apres / p_avant - 1)
+            deb_pct = 100 * (d_apres / d_avant - 1)
+            seuil_ok = ppl_pct <= 2.0 and deb_pct >= 5.0
+            print(f"\n  PPL {p_avant:.4f} -> {p_apres:.4f} ({ppl_pct:+.2f} %)")
+            print(f"  debit {d_avant:.1f} -> {d_apres:.1f} t/s ({deb_pct:+.2f} %)")
+            print(f"  seuil scelle (PPL <=+2% ET debit >=+5%) : "
+                  f"{'RESPECTE' if seuil_ok else 'DEPASSE'}")
+    return 0
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("usage: campagne-a6-snrfloor0.py {convertir|mesurer} ...")
+        return 2
+    if sys.argv[1] == "convertir":
+        return cmd_convertir(sys.argv[2], sys.argv[3])
+    if sys.argv[1] == "mesurer":
+        return cmd_mesurer(sys.argv[2], sys.argv[3])
+    print(f"ECHEC / CAUSE: sous-commande inconnue {sys.argv[1]!r}")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
