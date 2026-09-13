@@ -10,7 +10,7 @@ propriétaire précédent.
 import torch
 import torch.nn as nn
 from acvram.engine.model import DecoderLayerGDN, _STATIC
-from acvram.engine.graphs import bucket_batch
+from acvram.engine.graphs import GraphRunner, bucket_batch, godet_hybride
 
 
 # -- simulacre minimal d'attention linéaire ----------------------------------
@@ -205,3 +205,103 @@ def test_bucket_batch_identite_sur_puissance():
     """Une puissance de deux ne change pas."""
     for p in [1, 2, 4, 8, 16, 32]:
         assert bucket_batch(p) == p
+
+
+# -- tests godet_hybride (bug du 13/09, bead anticitoyen-vram-x0s) ----------
+#
+# max_slots=12 (ACVRAM_HYBRID_SLOTS=12, notre réglage de campagne) n'est pas
+# une puissance de deux. Avant le correctif, `bucket_batch(9..12) = 16 > 12`
+# faisait tomber ces lots en eager en permanence : aucun test ne l'avait
+# jamais couvert, parce qu'aucune campagne n'avait jamais fait tourner un lot
+# concurrent RÉEL de 9 à 12 séquences sous ce réglage (les campagnes
+# « slots=12 » antérieures généraient une seule séquence par tour).
+
+
+def test_godet_hybride_lots_9_a_15_avec_max_slots_12():
+    """Épreuve directe du bug : b_reel de 9 à 12 doit rester rejouable."""
+    for b_reel in range(9, 13):
+        godet = godet_hybride(b_reel, max_slots=12)
+        assert godet is not None, (
+            f"b_reel={b_reel} <= max_slots=12 : ne doit JAMAIS refuser le "
+            "graphe (c'est exactement le bug du 13/09)")
+        assert godet <= 12, f"le godet {godet} dépasse le plafond des tampons"
+        assert godet >= b_reel, "le godet doit pouvoir contenir b_reel séquences"
+
+    for b_reel in range(13, 16):
+        assert godet_hybride(b_reel, max_slots=12) is None, (
+            f"b_reel={b_reel} > max_slots=12 : refus attendu, "
+            "les tampons ne le contiennent pas")
+
+
+def test_godet_hybride_egal_au_bucket_sous_la_puissance_de_deux():
+    """En dessous de la puissance de deux qui précède max_slots, inchangé."""
+    for b_reel in range(1, 9):
+        assert godet_hybride(b_reel, max_slots=12) == bucket_batch(b_reel)
+
+
+def test_godet_hybride_max_slots_puissance_de_deux_inchange():
+    """Avec max_slots déjà une puissance de deux, le comportement d'avant
+    le correctif est préservé au bit près (pas de régression)."""
+    for b_reel in range(1, 17):
+        attendu = bucket_batch(b_reel) if bucket_batch(b_reel) <= 16 else None
+        assert godet_hybride(b_reel, max_slots=16) == attendu
+
+
+class _FauxModeleDtype:
+    dtype = torch.float32
+
+
+class _FauxRunnerHybride(GraphRunner):
+    """Assez de surface pour appeler `_bind_hybrid` sans modèle réel."""
+
+    def __init__(self, hybrid_layers, max_model_len=128):
+        self.hybrid_layers = hybrid_layers
+        self.model = _FauxModeleDtype()
+        self.max_model_len = max_model_len
+
+
+class _FauxBatchHybride:
+    def __init__(self, seq_ids, gdn_store):
+        self.seq_ids = seq_ids
+        self.batch_size = len(seq_ids)
+        self.gdn_store = gdn_store
+
+
+def test_sentinelle_distincte_par_creneau_de_rembourrage():
+    """Bug trouvé en écrivant cette épreuve (13/09, bead x0s) : `_bind_hybrid`
+    donnait le MÊME sid (-1) à tous les créneaux de rembourrage. `static_bind`
+    suppose qu'un sid ne vit que dans un seul créneau — le second appel avec
+    sid=-1 croit que « -1 vit déjà ailleurs », exporte le premier créneau
+    (perd son propriétaire, `static_owners -> None`) au lieu de lui laisser
+    un état neuf à zéro. Rare tant qu'un seul créneau de rembourrage existait
+    par pas ; devenu fréquent depuis `godet_hybride`, qui autorise plusieurs
+    créneaux de rembourrage simultanés (b_reel=9, max_slots=12 : trois).
+    Corrigé : un sid distinct par créneau de rembourrage (-1, -2, -3, ...).
+    """
+    couche = _creer_couche()
+    sids = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]   # b_reel = 10
+    godet = godet_hybride(len(sids), max_slots=12)
+    assert godet == 12                                 # trois creneaux de rembourrage
+    runner = _FauxRunnerHybride([couche])
+    batch = _FauxBatchHybride(sids, {})
+    runner._bind_hybrid(batch, lb=0, b_godet=godet)
+
+    for slot in range(len(sids)):
+        assert couche.static_owners[slot] == sids[slot], (
+            f"créneau réel {slot} : sid attendu {sids[slot]}, "
+            f"obtenu {couche.static_owners[slot]}")
+    rembourrage = couche.static_owners[len(sids):godet]
+    assert rembourrage == [-1, -2], (
+        f"sentinelles de rembourrage attendues [-1, -2], obtenu {rembourrage}")
+    assert len(set(rembourrage)) == len(rembourrage), (
+        "deux créneaux de rembourrage partagent le même sid — régression du bug")
+
+
+def test_godet_hybride_ancien_code_aurait_refuse():
+    """Méta-test : preuve que l'ancien calcul (bucket_batch(b) > max_slots
+    sans plafonnement) refusait bien ces lots — sinon ce test ne prouve rien."""
+    for b_reel in range(9, 13):
+        ancien_refus = bucket_batch(b_reel) > 12
+        assert ancien_refus, (
+            f"b_reel={b_reel} : l'ancien calcul aurait dû refuser "
+            "(bucket_batch > max_slots) — le scénario du bug est invalide")

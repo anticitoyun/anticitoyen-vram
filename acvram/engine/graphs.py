@@ -45,12 +45,31 @@ def bucket_batch(n: int) -> int:
     while b < n:
         b <<= 1
     return b
+
+
+def godet_hybride(b_reel: int, max_slots: int) -> Optional[int]:
+    """Le godet à utiliser pour un lot hybride, ou ``None`` s'il refuse.
+
+    Bug du 13/09 (bead anticitoyen-vram-x0s) : comparer ``bucket_batch(b_reel)``
+    (une puissance de deux) à ``max_slots`` faisait tomber en eager,
+    silencieusement et en permanence, tout lot de
+    ``(puissance_de_deux_inférieure, max_slots]`` dès que ``max_slots`` n'est
+    pas lui-même une puissance de deux — à ``max_slots=12``,
+    ``bucket_batch(9..12) = 16 > 12``, et aucun lot de 9 à 12 séquences ne
+    passait jamais par le graphe. ``max_slots`` borne les tampons RÉELS par
+    créneau (``self.statics``) : un lot qui y tient doit toujours pouvoir
+    être rejoué, quel que soit son godet naturel — ``max_slots`` devient donc
+    lui-même un godet valide au-delà de la puissance de deux qui le précède.
+    """
+    if b_reel > max_slots:
+        return None
+    return min(bucket_batch(b_reel), max_slots)
 from .layers import QuantLinear
 from .model import DecoderLayerGDN, ForwardBatch, MoEBlock
 
 from .mla import MLA_BUCKET, godet_mla   # un graphe par palier de cache latent
 
-__all__ = ["GraphRunner"]
+__all__ = ["GraphRunner", "bucket_batch", "godet_hybride"]
 
 # Plafond du NOMBRE TOTAL de graphes captures. Chaque graphe retient sa memoire
 # d'activations, d'ou un plafond ; mais il faut lire ce qu'il fait vraiment.
@@ -115,6 +134,17 @@ def _empreinte_adresses(runner, entry: dict) -> dict:
 
 class GraphRunner:
     max_ql = 1          # > 1 : lots de vérification spéculative sur hybrides
+    # ACVRAM_HYBRID_SLOTS : plafond du nombre de séquences hybrides (GDN/KDA/
+    # MLA) rejouées dans un même graphe — dimensionne aussi `self.statics`,
+    # les tampons à états fixes, un par créneau. N'IMPORTE QUELLE valeur
+    # entière >= 1 est valable depuis le correctif du 13/09 (bead
+    # anticitoyen-vram-x0s, cf. `godet_hybride`) : elle n'a plus besoin
+    # d'être une puissance de deux. Avant ce correctif, une valeur qui n'en
+    # était pas une (12 par ex.) faisait tomber en eager, silencieusement et
+    # en permanence, tout lot concurrent de (puissance_de_deux_inférieure,
+    # ACVRAM_HYBRID_SLOTS] — ici, 9 à 12 séquences n'empruntaient jamais le
+    # graphe. Lu une seule fois, à l'IMPORT du module : le changer en cours
+    # de session n'a aucun effet sur un GraphRunner déjà construit.
     max_slots = int(os.environ.get("ACVRAM_HYBRID_SLOTS", "4"))   # séquences par graphe
 
     """Capture paresseuse et rejeu des pas de décodage purs."""
@@ -130,6 +160,7 @@ class GraphRunner:
         self.replays = 0
         self.captures = 0
         self._last_key: Optional[tuple[int, int]] = None
+        self._raisons_eager_vues: set = set()
         # Posée AVANT _eligible, qui la remplit : l'initialiser après
         # l'effacerait à chaque fois, et le message aurait annoncé
         # « raison non nommée » pour tous les cas nommés.
@@ -222,6 +253,20 @@ class GraphRunner:
         return "module inconnu"
 
     # -- exécution -------------------------------------------------------
+    def _eager(self, raison: str) -> None:
+        """Un lot qui retombe en eager le dit — une fois par raison distincte.
+
+        Bug du 13/09 (bead anticitoyen-vram-x0s) : un repli silencieux se lit
+        comme une absence de problème, exactement comme `_eligible()` le dit
+        déjà pour la désactivation globale. Une seule fois par raison : un
+        serveur qui replie à chaque pas sur le même motif ne doit pas noyer
+        sa propre sortie.
+        """
+        if raison in self._raisons_eager_vues:
+            return
+        self._raisons_eager_vues.add(raison)
+        print(f"[graphe] repli eager — {raison}", flush=True)
+
     def run(self, batch: ForwardBatch) -> Optional[torch.Tensor]:
         """Logits du lot, ou None si ce lot n'est pas rejouable en graphe."""
         if not self.enabled or batch.is_prefill:
@@ -240,9 +285,22 @@ class GraphRunner:
         trace = bool(os.environ.get("ACVRAM_TRACE_STEPS"))
         t0 = time.perf_counter()
         if self.hybrid_layers:
-            if (batch.gdn_store is None or ql > self.max_ql
-                    or (b > 1 and ql != 1) or b > self.max_slots):
-                return None                  # spéculation : une séquence
+            godet = godet_hybride(b_reel, self.max_slots)
+            if godet is None:
+                self._eager(f"lot hybride {b_reel} au-dela du plafond "
+                            f"ACVRAM_HYBRID_SLOTS={self.max_slots}")
+                return None
+            b = godet
+            if batch.gdn_store is None:
+                self._eager("gdn_store absent (etat recurrent non initialise)")
+                return None
+            if ql > self.max_ql:
+                self._eager(f"ql={ql} au-dela de max_ql={self.max_ql}")
+                return None
+            if b_reel > 1 and ql != 1:
+                self._eager("lot multi-sequences en verification speculative "
+                             "(ql != 1) : non supporte sous graphe")
+                return None
             lb = godet_mla(max(batch.seq_lens))
             self._bind_hybrid(batch, lb, b_godet=b)
         key = (b, ql, nblk, lb)
@@ -364,7 +422,20 @@ class GraphRunner:
         for layer in self.hybrid_layers:
             store = batch.gdn_store.setdefault(layer.index, {})
             for slot in range(b):
-                sid = sids[slot] if slot < n_reel else self._SID_REMBOURRAGE
+                # UN SID DISTINCT PAR CRENEAU DE REMBOURRAGE, PAS UN SID
+                # PARTAGE. `static_bind` (model.py) suppose qu'un sid ne vit
+                # que dans UN SEUL creneau a la fois : le partager entre deux
+                # rembourrages fait croire au second que le sid « vit deja
+                # ailleurs » (`store[sid] is _STATIC`), declenche un export
+                # du premier creneau (`static_owners[premier] = None`,
+                # `_reprendre`) et lui fait potentiellement heriter l'etat
+                # exporte du premier au lieu d'un etat neuf a zero. Rare tant
+                # que le godet ne depasse le lot reel que d'un seul creneau —
+                # devenu frequent depuis le correctif du bug x0s
+                # (godet_hybride), qui autorise plusieurs creneaux de
+                # rembourrage simultanes (ex. b_reel=9, max_slots=12 : trois).
+                sid = (sids[slot] if slot < n_reel
+                      else self._SID_REMBOURRAGE - (slot - n_reel))
                 layer.static_bind(slot, sid, store, godet_mla(self.max_model_len) + MLA_BUCKET,
                                   m.dtype)
             layer.static_bucket = lb
