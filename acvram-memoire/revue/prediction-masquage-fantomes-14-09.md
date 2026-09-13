@@ -33,3 +33,32 @@ seulement rendue inutile pour EXPLIQUER la régression observée).
 au-dessus de celui de b=1 (9,1) même après le correctif, cela dirait que
 le remplissage n'explique pas TOUT le facteur 31,9 — une part viendrait
 d'ailleurs (double déréférencement, ou autre chose de non identifié).
+
+## Résultat (après mesure)
+
+**Résident complet b=12** : 612,7 t/s / 0,549 J/jeton (vs témoin 568,6 /
+0,601) — +7,8 % débit, -8,6 % énergie. **Fenêtre invalidée par l'outil
+lui-même** (`banc-horloge-decodage.py`) : bridage de puissance pendant la
+mesure, `repos()` à 8 s (< 30 s recommandés, duck.ai 14/09). Chiffre
+directionnellement positif, PAS confirmé — une refonte propre (carte
+calme, `repos()` complet) reste à faire avant d'en tirer une conclusion.
+Contention réelle au moment de la mesure : plusieurs sessions actives sur
+la carte (nsys de poste4, banc de poste2).
+
+**Exil par expert b=12, graphes + masquage (`ACVRAM_GRAPHES_TABLE=1`)** :
+29,58 j/s, **facteur 23,0**. Mieux que graphes-seuls-sans-masquage (31,9)
+mais **PIRE que la prédiction** (« sous 20,2 ») et pire que sans graphes du
+tout (20,2). **Le masquage aide (31,9→23,0) sans suffire à rendre le
+chemin table+graphes rentable à b=12** : soit l'hypothèse initiale (latence
+de double déréférencement), reléguée à « inutile pour expliquer » plutôt
+que réfutée, joue réellement un rôle résiduel ; soit une part du signal
+vient de la contention de carte au moment de cette mesure (mêmes sessions
+concurrentes que ci-dessus) et n'a pas été isolée. Non tranché ici.
+
+## Conséquence
+
+`ACVRAM_GRAPHES_TABLE` reste à son défaut sûr (garde active, hors) : le
+masquage est un vrai gain (validé par test, et le résident complet en
+profite directionnellement), mais graphes+table pour b=12 n'est
+toujours pas un gain net démontré contre l'eager. Remesure propre (carte
+calme) et éventuellement ncu restent à faire avant de changer le défaut.
