@@ -337,6 +337,40 @@ class MLAttention(nn.Module):
                                      self.rank, self.scale)          # [B, nh, rank]
         return torch.cat([self._sortie_decode(x[i:i + 1], sts[i], o_lat[i]) for i in range(B)], dim=0)
 
+    def decode_static_batch_complet(self, x: torch.Tensor, sts: list, bucket: int,
+                                    cache_ptrs: torch.Tensor, scores_batch: torch.Tensor
+                                    ) -> torch.Tensor:
+        """Tout ``decode_static`` batché sur les B créneaux : projections, RoPE,
+        norme, ``q_eff`` en une passe sur ``x`` [B, D] (comme ``forward_batch``),
+        UN lancement d'attention (``mla_decode_batch``), einsum et ``o_proj``
+        sur le lot. Seules les écritures du latent restent par créneau (un
+        cache par créneau). Numérique : celle de ``forward_batch`` (chemin
+        eager), pas celle de la boucle — les GEMV à M=B et M=1 n'arrondissent
+        pas forcément pareil ; le test d'équivalence le mesure."""
+        ext = _extension()
+        B = len(sts)
+        lens = torch.stack([st["len"] for st in sts])                      # [B]
+        prem, kvp = self._proj_entree(x)
+        q = self._q_depuis(prem).reshape(B, self.nh, self.nope + self.rope)
+        q_nope, q_pe = q.split([self.nope, self.rope], dim=-1)
+        if self.rope_emb is not None:
+            c0, k_pe0 = kvp.split([self.rank, self.rope], dim=-1)
+            q_pe, k_pe0 = self._rope(q_pe, k_pe0, lens, bucket + 1)
+            kvp = torch.cat([c0, k_pe0], dim=-1)
+        c, k_pe = kvp.split([self.rank, self.rope], dim=-1)
+        c = self._norme(c, self.kv_a_norm)
+        q_abs = torch.einsum('hrn,bhn->bhr', self.k_b.to(x.dtype), q_nope)
+        q_eff = torch.cat([q_abs, q_pe], dim=-1)                           # [B, nh, W]
+        k_new = torch.cat([c, k_pe], dim=-1)                               # [B, W]
+        for i, st in enumerate(sts):
+            st["cache"].index_copy_(0, st["len"].view(1), k_new[i:i + 1])
+        o_lat = ext.mla_decode_batch(q_eff.to(torch.float32).contiguous(), cache_ptrs, lens,
+                                     scores_batch, bucket, self.rank, self.scale)  # [B, nh, rank]
+        y = torch.einsum('hvr,bhr->bhv', self.v_b.to(torch.float32), o_lat)
+        for st in sts:
+            st["len"].add_(1)
+        return self.o_proj(y.reshape(B, self.nh * self.dv).to(x.dtype))
+
     def decode_static(self, x: torch.Tensor, st: dict, bucket: int
                       ) -> torch.Tensor:
         """Un jeton, une séquence ; attention sur ``cache[:bucket]`` masquée
