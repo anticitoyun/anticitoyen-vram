@@ -105,18 +105,44 @@ pg, pu, pd = moe._stacks["gate_proj"], moe._stacks["up_proj"], moe._stacks["down
 gateup = lambda: ext.nvfp4_gemv_grouped_gateup(pg[1], pg[2], pg[3], pu[1], pu[2], pu[3], eid, tok, x, pg[4], 0)
 act = gateup()[:, :pg[5]].contiguous()
 seq = torch.arange(eid.shape[0], device=dev, dtype=torch.int32)
-res.append(mesure("MoE gate·up GEMV (nvfp4_gemv_grouped_gateup)", gateup, lots=50))
-res.append(mesure("MoE down GEMV (_grouped down_proj)", lambda: moe._grouped(act, pd, eid, seq), lots=50))
+if os.environ.get("BANC_SEULEMENT") != "mma":
+    res.append(mesure("MoE gate·up GEMV (nvfp4_gemv_grouped_gateup)", gateup, lots=50))
+    res.append(mesure("MoE down GEMV (_grouped down_proj)", lambda: moe._grouped(act, pd, eid, seq), lots=50))
 res.append(mesure("MoE complet (_forward_grouped : gate·up + down + reduce)", lambda: moe._forward_grouped(x, topw, topi), lots=50))
-if getattr(attn, "qkv_proj", None) is not None:
-    res.append(mesure("projections q/k/v int8 empilées (qkv_proj)", lambda: attn.qkv_proj(x), lots=100))
-else:
-    res.append(mesure("projection q int8", lambda: attn.q_proj(x), lots=100))
-xo = torch.randn(B, attn.o_proj.qweight.shape[1] if hasattr(attn.o_proj, "qweight") else 4096, dtype=torch.bfloat16, device=dev)
-res.append(mesure("projection o int8 (o_proj)", lambda: attn.o_proj(xo), lots=100))
-lm = model.lm_head
-res.append(mesure("lm_head int8", lambda: lm(x), lots=50))
-res.append(mesure("norme RMS (input_layernorm)", lambda: couche.input_layernorm(x), lots=200))
+# Le même MoE par le chemin GEMM groupée MMA FP4 (celui du prefill) à t=B jetons :
+# quant_act + gate + up + moe_act + quant_act + down + reduce_trie — étape (iii) de poste7
+# (revue/poste7-moe-mma-decodage-14-09.md). Tuile ACVRAM_MOE_MMA_BT (16 conseillé à M≈3).
+SEUL = os.environ.get("BANC_SEULEMENT")          # "mma" : ne mesurer que les postes MMA
+if moe._forward_prefill_grouped(x, topw, topi) is not None:
+    # Les 3 GEMM MMA seules (gate, up, down), tuiles et activations quantifiées une
+    # fois : W du noyau sans la glue hôte (argsort, bincount, .item()) qui borne la
+    # boucle complète ci-dessous.
+    import torch.nn.functional as F
+    flat_e = topi.reshape(-1).to(torch.int64); ordre = torch.argsort(flat_e, stable=True)
+    cnt = torch.bincount(flat_e, minlength=len(moe.experts))
+    bt = int(os.environ.get("ACVRAM_MOE_MMA_BT", "64")); tiles = moe._tuiles(cnt, bt)
+    xs = x[torch.arange(B, device=dev).repeat_interleave(moe.top_k)[ordre]].to(torch.bfloat16).contiguous()
+    if xs.shape[1] != pg[4]: xs = F.pad(xs, (0, pg[4] - xs.shape[1])).contiguous()
+    xq, xsf = ext.nvfp4_quant_act(xs)
+    g = moe._gemm_mma(pg, xq, xsf, tiles, brut=True); u = moe._gemm_mma(pu, xq, xsf, tiles, brut=True)
+    a3 = ext.moe_act(g, u, pg[5], pd[4], 0); aq, asf = ext.nvfp4_quant_act(a3)
+    def trois_gemm():
+        moe._gemm_mma(pg, xq, xsf, tiles, brut=True); moe._gemm_mma(pu, xq, xsf, tiles, brut=True)
+        moe._gemm_mma(pd, aq, asf, tiles, brut=True)
+    res.append(mesure("MoE 3 GEMM MMA seules (gate+up+down, BT=%d, %d tuiles)" % (bt, int(tiles[0].numel())), trois_gemm, lots=50))
+    res.append(mesure("quant_act x2 (E2M1 bloc 16)", lambda: (ext.nvfp4_quant_act(xs), ext.nvfp4_quant_act(a3)), lots=100))
+    res.append(mesure("MoE complet MMA (_forward_prefill_grouped, BT=%s)" % os.environ.get("ACVRAM_MOE_MMA_BT", "64"),
+                      lambda: moe._forward_prefill_grouped(x, topw, topi), lots=50))
+if SEUL != "mma":
+    if getattr(attn, "qkv_proj", None) is not None:
+        res.append(mesure("projections q/k/v int8 empilées (qkv_proj)", lambda: attn.qkv_proj(x), lots=100))
+    else:
+        res.append(mesure("projection q int8", lambda: attn.q_proj(x), lots=100))
+    xo = torch.randn(B, attn.o_proj.qweight.shape[1] if hasattr(attn.o_proj, "qweight") else 4096, dtype=torch.bfloat16, device=dev)
+    res.append(mesure("projection o int8 (o_proj)", lambda: attn.o_proj(xo), lots=100))
+    lm = model.lm_head
+    res.append(mesure("lm_head int8", lambda: lm(x), lots=50))
+    res.append(mesure("norme RMS (input_layernorm)", lambda: couche.input_layernorm(x), lots=200))
 
 res.append(mesure("PAS COMPLET b=%d rejeu (Engine.step)" % B, lambda: eng.step(), lots=10))
 print("RESULTAT " + json.dumps({"B": B, "repos_W": round(repos_w, 1), "postes": res}, ensure_ascii=False))

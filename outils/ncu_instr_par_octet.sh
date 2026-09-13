@@ -37,6 +37,10 @@ KC="$HOME_NCU/kernels-$CLE"; [ -d "$KC" ] || cp -r "$HOME/.cache/acvram/kernels-
 ENV=(env HOME="$HOME_NCU" XDG_CACHE_HOME="$HOME_NCU/.cache" TRITON_CACHE_DIR="$HOME_NCU/.triton" PATH="$PATH"
      CUDA_VISIBLE_DEVICES=0 ACVRAM_TYPE=mesure BANC_PAS_NCU="$BANC_PAS_NCU" BANC_GRAPHES="${BANC_GRAPHES:-1}" BANC_JETONS=8 BANC_SLOTS="$B"
      VLLM_ENABLE_V1_MULTIPROCESSING=0 ACVRAM_KERNEL_CACHE="$KC" ACVRAM_INT8_TRANCHE="${ACVRAM_INT8_TRANCHE:-16}")
+# Reglages du chemin MoE (bras mma) : repasses seulement s'ils sont poses.
+for v in ACVRAM_MOE_MMA ACVRAM_MOE_GROUPED_MAX ACVRAM_MOE_MMA_BT ACVRAM_MOE_MMA_ETAGES ACVRAM_MOE_MMA_KS ACVRAM_MOE_GEMM_MAX; do
+  [ -n "${!v:-}" ] && ENV+=("$v=${!v}")
+done
 # NCU_CACHE=none : pas de purge des caches entre les rejeux (octets DRAM tels que
 # le pas les voit, L2 chaud entre deux noyaux voisins) ; defaut ncu = all (purge :
 # chaque noyau est mesure a froid, ce qui compte en DRAM une relecture que le L2 sert

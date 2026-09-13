@@ -259,3 +259,42 @@ Ce que ça ordonne, en prédictions :
    activation quantifiée une fois par couche. Prédiction : instructions
    du MoE ÷ 4 (6,8 → ≤ 1,7 G), pas −2 à −3 ms, W du pas sous le plafond
    (< 380 brut). Réfutation : pas ≥ 14 ms ou W ≥ 390.
+
+## Étape (iii) de poste7 — MoE en MMA groupée au décodage, b=12 eager (14/09, 19h51-19h58)
+
+`ACVRAM_MOE_GROUPED_MAX=0`, `ACVRAM_MOE_MMA_BT=16` (une tuile m16 par
+expert, M≈3 jetons par expert), eager, carte exclusive. Seuils de poste7
+(`revue/poste7-moe-mma-decodage-14-09.md`) : ≥ 5,0 ms ou ≥ 380 W → split-K.
+
+| mesure | GEMV (défaut) | MMA groupée BT=16 |
+|---|---:|---:|
+| noyaux MoE par pas, profil eager (`profilmma 12`) | gate·up 3,35 + down 2,63 = **5,98 ms** | 3 GEMM 3,62 + quant_act 0,17 + act/reduce ≈ 0,2 = **≈ 4,0 ms** |
+| pas GPU (Σ noyaux, profil) | 12,25 ms | 12,34 ms (le MoE gagne 2 ms, la glue torch en rend 2 : 59 types de noyaux, 3 809 lancements/pas) |
+| pas à l'horloge, eager | 19,54 ms | **39,47 ms** — borné par l'hôte (argsort, bincount, `int(ntiles.sum())`, 2 300 lancements torch de plus) : le blocage (ii) d'poste1 |
+| octets DRAM MoE (ncu, cache chaud) | 3,83 Go | **4,33 Go (+13 %)** — tuiles de 16 : un expert à > 16 jetons prend 2 tuiles et relit ses poids |
+| instructions MoE | 6,78 G (1,77 inst/oct) | **0,57 G (0,13 inst/oct, ÷ 12)** ; pas entier 9,57 → 2,60 G (÷ 3,7) |
+| W en boucle 6 s, 3 GEMM seules (tuiles et activations pré-quantifiées) | gate·up 399 brut / down 399 (MoE complet 392-399, 1 785-1 792 MHz) | **398,6 brut / 340,5 net, 2 617 MHz**, bridage puissance |
+| mJ par couche MoE en boucle | 78,4 (GEMV complet) | 54,6 (3 GEMM seules) : **−30 %** |
+| quant_act ×2 en boucle | — | 150 W, 7,4 µs (borné par le lancement) |
+
+Verdict (iii) contre les seuils scellés : **temps tenu** (≈ 4,0 ms
+< 5,0 ; la prédiction 4,0-4,3 de poste7 est au point) ; **puissance
+brute NON tenue** (398,6 ≥ 380 W ; en net 340,5 ≤ 345). L'horloge tient
+(2 617 ≥ 2 400 contre 1 792 pour la GEMV) et l'énergie par couche baisse
+de 30 % ; mais le noyau reste au plafond : à 1 156 Go/s (ncu) il est
+maintenant borné par la DRAM (la copie témoin à 1,5 To/s fait 341 W à
+elle seule) — le prix des instructions est parti, celui des octets
+reste. Octets +13 % (seuil ±5 %) : NON tenu, cause identifiée (tuiles de
+16 ; un expert à 17-32 jetons relit ses poids) — corrigeable par
+bt=32 pour ces experts, ou split des tuiles en K, pas en M.
+
+Selon la règle de poste7 (≥ 380 W brut → split-K, +2 j, (3) derrière 1aj)
+c'est split-K. Objection factuelle à lui soumettre : split-K vise un
+noyau lent (latence non recouverte) ; ici le noyau est à 1 156 Go/s et
+au plafond de puissance parce qu'il déplace les octets vite — split-K
+n'enlève pas d'octets. Ce qui enlèverait des watts au pas : (a) les
+2 ms de glue hôte (gratuits en W), (b) le +13 % d'octets des tuiles, (c)
+rien côté noyau tant que la DRAM elle-même coûte ~300 W au débit de la
+borne. Le pas complet sous graphes (poste1, (ii)) est la mesure qui
+tranche `pas ≤ 380 W et ≤ 0,45 J/jeton`. Données :
+`revue/donnees-ncu-ipo-acvram-mma-bt16-eager-14-09.txt`.
