@@ -31,11 +31,41 @@ def test_int8_gemv_lot_bit_identique_a_n1(M, K, N):
     x = torch.randn(N, K, device="cuda").to(torch.bfloat16)
     y = ext.int8_gemv(t.qweight.contiguous(), t.scales.contiguous(), t.zeros.contiguous(), x.contiguous(), t.group_size)
     assert y.shape == (N, t.qweight.shape[0])
-    un_par_un = torch.cat([ext.int8_gemv(t.qweight.contiguous(), t.scales.contiguous(), t.zeros.contiguous(),
-                                         x[i:i + 1].contiguous(), t.group_size) for i in range(N)])
-    assert torch.equal(y, un_par_un), f"N={N} : {int((y != un_par_un).sum())} valeurs differentes de N=1"
+    if N <= 12:
+        # même noyau (warp) pour N et pour 1 : ligne par ligne, bit-identique.
+        # Au-delà de 12 le lot passe par le noyau à blocs dont l'ordre de
+        # réduction diffère : seule la tolérance fp32/bf16 vaut.
+        un_par_un = torch.cat([ext.int8_gemv(t.qweight.contiguous(), t.scales.contiguous(), t.zeros.contiguous(),
+                                             x[i:i + 1].contiguous(), t.group_size) for i in range(N)])
+        assert torch.equal(y, un_par_un), f"N={N} : {int((y != un_par_un).sum())} valeurs differentes de N=1"
     # et contre la référence déquantifiée en fp32 : tolérance bf16
     from acvram.kernels import int8_dequant
     ref = x.float() @ int8_dequant(t, torch.float16).float().T
     ecart = (y.float() - ref).abs()
     assert (ecart <= ref.abs() * 2 ** -6 + 1e-2).float().mean().item() > 0.999
+
+
+@pytest.mark.parametrize("M,K", [(5120, 2048), (2048, 4096), (4096, 2048), (151936, 2048)])
+@pytest.mark.parametrize("N", [1, 12])
+def test_int8_gemv_warp_contre_blocs(M, K, N):
+    """Le noyau « un warp par ligne » (bead z5q) contre le noyau à blocs :
+    l'ordre de réduction diffère, l'écart est celui d'une somme fp32
+    réordonnée, borné à un ulp bf16 ; et N=12 rend ligne par ligne ce que
+    rend N=1 (même noyau)."""
+    import os
+    ext = _ext()
+    torch.manual_seed(M + K + N + 1)
+    w = (torch.randn(M, K, device="cuda") * 0.05)
+    t = quantize(w, "int8", group_size=128)
+    x = torch.randn(N, K, device="cuda").to(torch.bfloat16)
+    args = (t.qweight.contiguous(), t.scales.contiguous(), t.zeros.contiguous())
+    y_warp = ext.int8_gemv(*args, x.contiguous(), t.group_size)
+    from acvram.kernels import int8_dequant
+    ref = x.float() @ int8_dequant(t, torch.float16).float().T
+    ecart = (y_warp.float() - ref).abs()
+    tol = ref.abs() * 2 ** -7 + 1e-3 * ref.abs().max()
+    hors = int((ecart > tol).sum())
+    assert hors == 0, f"{hors} hors tolerance, max {ecart.max().item():.3e}"
+    if N > 1:
+        un = torch.cat([ext.int8_gemv(*args, x[i:i + 1].contiguous(), t.group_size) for i in range(N)])
+        assert torch.equal(y_warp, un)

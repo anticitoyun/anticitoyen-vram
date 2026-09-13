@@ -1356,6 +1356,104 @@ torch::Tensor int8_dequant(torch::Tensor qweight, torch::Tensor scales,
 }
 
 
+// Variante « un warp par ligne » du GEMV INT8 pour un petit lot (bead z5q).
+// Le noyau à 4 lignes par bloc, à K = 2048, donne 128 fils et UN chargement
+// de 16 octets par fil et par ligne, puis douze réductions de bloc par la
+// mémoire partagée (une par activation) : la latence du chargement n'est pas
+// recouverte et la réduction domine (profil du 14/09 : 2,62 ms pour 0,86 Go,
+// ~31 % de la borne). Ici chaque voie d'un warp charge K/512 uint4 d'un
+// coup (4 en vol à K = 2048), les activations sont copiées une fois par bloc
+// en mémoire partagée, et la réduction se fait par shuffles — ni shared ni
+// __syncthreads dans la boucle. Même granularité d'échelle (par uint4 de 16
+// poids, un groupe) que le noyau à blocs ; l'ordre de réduction diffère.
+constexpr int I8W_WARPS = 8;                     // warps par bloc
+constexpr int I8W_RPW = 4;                       // lignes par warp : 32 lignes par bloc
+// Compte qui a tranché (14/09) : avec une ligne par warp, chaque bloc de 8
+// lignes recopie les 48 Ko d'activations (12 x 2048 bf16) — 640 blocs x
+// 48 Ko = 31 Mo de trafic L2 pour 10 Mo de poids ; le noyau à 4 lignes par
+// bloc en relisait 61 Mo. Le GEMV « borné par les poids » était borné par la
+// relecture de x. Quatre lignes par warp divisent ce trafic par quatre.
+
+template <int NV>
+__global__ void __launch_bounds__(I8W_WARPS * WARP) int8_gemv_warp_kernel(
+    const unsigned char *__restrict__ qw, const __half *__restrict__ scales,
+    const unsigned char *__restrict__ zeros, const __nv_bfloat16 *__restrict__ x,
+    __nv_bfloat16 *__restrict__ y, int M, int K, int group) {
+    extern __shared__ __align__(16) unsigned char i8w_smem[];
+    __nv_bfloat16 *xs = reinterpret_cast<__nv_bfloat16 *>(i8w_smem);   // [NV][K]
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    // activations : NV x K bf16, copiées par uint4
+    {
+        const uint4 *src = reinterpret_cast<const uint4 *>(x);
+        uint4 *dst = reinterpret_cast<uint4 *>(xs);
+        const int n16 = NV * K / 8;
+        for (int i = tid; i < n16; i += blockDim.x) dst[i] = src[i];
+    }
+    __syncthreads();
+    const int row0 = (blockIdx.x * I8W_WARPS + warp) * I8W_RPW;
+    if (row0 >= M) return;
+    const int ng = K / group;
+    const int nchunks = K / (WARP * WEIGHTS_PER_LOAD);              // 512 poids par tour de warp
+    constexpr int MAXC = 4;                                         // K <= 2048 par ce chemin
+    // tous les chargements d'abord : RPW x nchunks uint4 en vol par voie
+    uint4 p[I8W_RPW][MAXC];
+    #pragma unroll
+    for (int r = 0; r < I8W_RPW; ++r) {
+        const uint4 *qrow = reinterpret_cast<const uint4 *>(qw + (long)min(row0 + r, M - 1) * K);
+        #pragma unroll
+        for (int c = 0; c < MAXC; ++c)
+            if (c < nchunks) p[r][c] = qrow[c * WARP + lane];
+    }
+    #pragma unroll
+    for (int r = 0; r < I8W_RPW; ++r) {
+        const int row = row0 + r;
+        if (row >= M) break;
+        const __half *srow = scales + (long)row * ng;
+        const unsigned char *zrow = zeros + (long)row * ng;
+        float acc[NV];
+        #pragma unroll
+        for (int n = 0; n < NV; ++n) acc[n] = 0.f;
+        #pragma unroll
+        for (int c = 0; c < MAXC; ++c) {
+            if (c >= nchunks) break;
+            const int col0 = (c * WARP + lane) * WEIGHTS_PER_LOAD;
+            const int g = col0 / group;
+            const float sc = __half2float(srow[g]);
+            const float z = static_cast<float>(zrow[g]);
+            const unsigned int words[4] = {p[r][c].x, p[r][c].y, p[r][c].z, p[r][c].w};
+            float part[NV];
+            #pragma unroll
+            for (int n = 0; n < NV; ++n) part[n] = 0.f;
+            #pragma unroll
+            for (int w = 0; w < 4; ++w) {
+                float xv[NV][4];
+                #pragma unroll
+                for (int n = 0; n < NV; ++n) {
+                    const uint2 u = *reinterpret_cast<const uint2 *>(xs + (long)n * K + col0 + 4 * w);
+                    const float2 f0 = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(&u.x));
+                    const float2 f1 = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(&u.y));
+                    xv[n][0] = f0.x; xv[n][1] = f0.y; xv[n][2] = f1.x; xv[n][3] = f1.y;
+                }
+                #pragma unroll
+                for (int jj = 0; jj < 4; ++jj) {
+                    const float v = static_cast<float>((words[w] >> (jj * 8)) & 0xFFu) - z;
+                    #pragma unroll
+                    for (int n = 0; n < NV; ++n) part[n] += v * xv[n][jj];
+                }
+            }
+            #pragma unroll
+            for (int n = 0; n < NV; ++n) acc[n] += part[n] * sc;
+        }
+        #pragma unroll
+        for (int n = 0; n < NV; ++n) {
+            float a = acc[n];
+            #pragma unroll
+            for (int off = 16; off > 0; off >>= 1) a += __shfl_xor_sync(0xffffffffu, a, off);
+            if (lane == 0) y[(long)n * M + row] = __float2bfloat16(a);
+        }
+    }
+}
+
 torch::Tensor int8_gemv(torch::Tensor qweight, torch::Tensor scales,
                         torch::Tensor zeros, torch::Tensor x, int64_t group) {
     CHECK_CUDA(qweight); CHECK_CUDA(x);
@@ -1374,8 +1472,36 @@ torch::Tensor int8_gemv(torch::Tensor qweight, torch::Tensor scales,
     const int N = xc.size(0);
     auto out = splits == 1 ? torch::empty({N, M}, xc.options())
                            : torch::zeros({N, M}, xc.options());
-    dim3 grid((M + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK, splits);
     auto stream = at::cuda::getCurrentCUDAStream();
+    // Variante « un warp par ligne » (bead z5q), COUPÉE par défaut : mesurée
+    // le 14/09 à 2,79 ms (1 ligne/warp) puis 1,69 ms sur q/k/v seuls (4
+    // lignes/warp) contre ~1,29 pour le noyau à blocs. À N = 12 une ligne
+    // touche 48 Ko d'activations pour 2 Ko de poids : ce GEMV est un GEMM
+    // étroit, et le noyau à blocs lit x depuis le L1 mieux que la copie en
+    // shared. ACVRAM_INT8_GEMV_WARP=1 pour la remesurer.
+    static const bool warp_ok = std::getenv("ACVRAM_INT8_GEMV_WARP") != nullptr
+                                && std::string(std::getenv("ACVRAM_INT8_GEMV_WARP")) == "1";
+    const size_t shm_x = (size_t)N * K * sizeof(__nv_bfloat16);
+    if (bf && warp_ok && N <= 12 && K % (WARP * WEIGHTS_PER_LOAD) == 0 && K <= 2048 && shm_x <= 96 * 1024) {
+        dim3 gridw((M + I8W_WARPS * I8W_RPW - 1) / (I8W_WARPS * I8W_RPW));
+        #define I8W(NV) do { \
+            if (shm_x > 48 * 1024) cudaFuncSetAttribute(int8_gemv_warp_kernel<NV>, \
+                                                        cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm_x); \
+            int8_gemv_warp_kernel<NV><<<gridw, I8W_WARPS * WARP, shm_x, stream>>>( \
+                qweight.data_ptr<unsigned char>(), reinterpret_cast<const __half *>(scales.data_ptr()), \
+                zeros.data_ptr<unsigned char>(), reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr()), \
+                reinterpret_cast<__nv_bfloat16 *>(out.data_ptr()), M, K, (int)group); } while (0)
+        switch (N) {
+            case 1: I8W(1); break; case 2: I8W(2); break; case 3: I8W(3); break;
+            case 4: I8W(4); break; case 5: I8W(5); break; case 6: I8W(6); break;
+            case 7: I8W(7); break; case 8: I8W(8); break; case 9: I8W(9); break;
+            case 10: I8W(10); break; case 11: I8W(11); break; default: I8W(12); break;
+        }
+        #undef I8W
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+        return x.dim() == 1 ? out.squeeze(0) : out;
+    }
+    dim3 grid((M + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK, splits);
     const size_t shm = ROWS_PER_BLOCK * nwarps * sizeof(float);
     // NV : nombre d'activations traitées par lecture de poids, arrondi à la
     // puissance de deux supérieure (les lignes en trop sont ignorées).
