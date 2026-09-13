@@ -88,6 +88,48 @@ def test_moitie_exilee_par_expert_est_bit_identique(residents):
         f"vitesse, jamais sémantique »")
 
 
+def test_repin_reel_echange_sans_changer_la_sortie():
+    """Bead pds point 2 : un échange RÉEL (`_repin_echanger_reel`) — copie
+    hôte↔VRAM + mise à jour des trois tables — laisse la sortie inchangée
+    pour un jeton qui route l'un OU l'autre des deux experts échangés.
+    « Placement = vitesse, jamais sémantique », version dynamique."""
+    from acvram.engine.runner import _repin_echanger_reel
+    from acvram.memory.table_adresses import construire_table, verifier_table
+
+    dev = torch.device("cuda")
+    residents = {0, 1, 2, 3}
+    bloc = _couche(dev, residents)
+    bloc._table_qw = {}
+    bloc._table_bscale = {}
+    for nom in ("gate_proj", "up_proj", "down_proj"):
+        tq, tb = construire_table(bloc.experts, nom, device=dev)
+        bloc._table_qw[nom] = tq
+        bloc._table_bscale[nom] = tb
+
+    torch.manual_seed(11)
+    x = torch.randn(1, CACHE, device=dev, dtype=torch.bfloat16)
+    with torch.no_grad():
+        y_avant = bloc(x.clone())
+
+    # Échange 2 (résident) <-> 5 (froid) : les tables doivent rester valides
+    # (verifier_table le lèverait sinon) et le calcul, identique.
+    _repin_echanger_reel(bloc, sortant=2, entrant=5)
+    for nom in ("gate_proj", "up_proj", "down_proj"):
+        verifier_table(bloc._table_qw[nom])
+        verifier_table(bloc._table_bscale[nom])
+    # L'expert 2 est maintenant froid : le noyau existant (qui ignore encore
+    # la table) doit continuer à le lire correctement via `.streamed`.
+    assert bloc.experts[2].gate_proj.streamed is not None
+    assert bloc.experts[5].gate_proj.streamed is None
+
+    with torch.no_grad():
+        y_apres = bloc(x.clone())
+
+    assert torch.equal(y_avant, y_apres), (
+        "un échange REPIN réel a changé la sortie — violation de "
+        "« placement = vitesse, jamais sémantique »")
+
+
 def test_tous_exiles_est_aussi_bit_identique():
     """Cas limite : `residents` vide (aucun résident). Doit rester correct —
     équivalent à l'exil de couche entière d'aujourd'hui, à ce détail près

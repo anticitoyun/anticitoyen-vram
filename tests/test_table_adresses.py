@@ -7,9 +7,10 @@ from __future__ import annotations
 import pytest
 import torch
 
-from acvram.engine.layers import QuantLinear
+from acvram.engine.layers import ExpertPool, QuantLinear
 from acvram.engine.model import MLP
-from acvram.memory.table_adresses import construire_table, verifier_table
+from acvram.memory.table_adresses import (adresse_expert, construire_table,
+                                          verifier_table)
 from acvram.quant.nvfp4 import quantize_nvfp4
 
 
@@ -57,3 +58,34 @@ def test_construire_table_respecte_l_ordre_des_experts():
     qw, _ = construire_table(experts, "up_proj")
     attendu = [e.up_proj.qweight.qweight.data_ptr() for e in experts]
     assert qw.tolist() == attendu
+
+
+def test_adresse_expert_froid_lit_le_tampon_epingle_pas_l_original():
+    """Régression : `to_device(streamed=True)` construit `.streamed.host` à
+    partir d'une COPIE et ne touche jamais `.qweight` — lire `.qweight.qweight`
+    pour un expert froid donnerait l'adresse de l'original ORPHELIN, pas
+    celle que le noyau doit réellement lire."""
+    mlp = _mlp_nvfp4(0)
+    original_ptr = mlp.gate_proj.qweight.qweight.data_ptr()
+    mlp.gate_proj.to_device(torch.device("cpu"), streamed=True)
+
+    lue = adresse_expert(mlp.gate_proj, "qweight")
+    reelle = mlp.gate_proj.streamed.host["qweight"].data_ptr()
+
+    assert lue == reelle
+    assert lue != original_ptr
+
+
+def test_construire_table_mixte_resident_et_froid():
+    """Un expert résident et un froid dans la MÊME table : chacun donne son
+    adresse réelle, pas celle de l'autre ni celle de l'original du froid."""
+    residents = _mlp_nvfp4(1)
+    froid = _mlp_nvfp4(2)
+    pool = ExpertPool(torch.device("cpu"), 4)
+    froid.gate_proj.to_device(torch.device("cpu"), streamed=True, pool=pool)
+
+    qw, _ = construire_table([residents, froid], "gate_proj")
+
+    assert qw[0].item() == residents.gate_proj.qweight.qweight.data_ptr()
+    assert qw[1].item() == froid.gate_proj.streamed.host["qweight"].data_ptr()
+    assert qw[1].item() != froid.gate_proj.qweight.qweight.data_ptr()

@@ -221,6 +221,77 @@ def _tranche(seq, a: int, b: int) -> tuple:
     return tuple(p[a:]) + tuple(seq.output_ids[:b - n])
 
 
+# --------------------------------------------------------------------------
+# REPIN (bead anticitoyen-vram-pds, point 3) : rétrograder/promouvoir UN
+# `QuantLinear` d'expert. Fonctions libres (pas des méthodes de `Engine`) :
+# elles ne touchent qu'un objet passé en argument, testables sans modèle.
+# --------------------------------------------------------------------------
+
+def _demote_expert(lin, mlp_dev) -> None:
+    """Résident -> froid : copie VRAM -> tampon hôte épinglé neuf
+    (`to_device(streamed=True)`), puis RÉDUIT `lin.qweight` à un gabarit sans
+    octets — `to_device(streamed=True)` ne le touche jamais (voir la
+    docstring de `memory.table_adresses.adresse_expert`), et le laisser tel
+    quel garderait référencé l'ancien tenseur VRAM : exactement l'octet que
+    REPIN devait rendre.
+
+    `lin.qweight` n'est pas mis à `None` : `_resolved_weight()`
+    (`_rehydrate(self.qweight, tensors)`) s'en sert comme GABARIT à CHAQUE
+    lecture d'un expert streamé — `.shape`, `.padded_in`, et `._gs_f` (le
+    scalaire d'échelle mémoïsé, dont l'absence coûterait un `.item()` par
+    GEMV, 62 % du décodage au profil NVFP4 cité dans `layers.py`). Le
+    gabarit garde donc ces trois informations, mais ses GROS tenseurs
+    (`qweight`, `block_scale`) sont vidés — `_rehydrate_brut` ne les lit
+    jamais, seule leur forme logique compte."""
+    lin.to_device(mlp_dev, streamed=True)
+    t = lin.qweight
+    # `[:0]` seul resterait une VUE sur le stockage complet de `t.qweight` —
+    # `.cpu().clone()` en fait un tenseur INDÉPENDANT, 0 octet utile, sur un
+    # stockage neuf : la VRAM de `t` n'est plus référencée que par lui-même,
+    # libérable dès que le ramasse-miettes le reprend.
+    gabarit = type(t)(t.qweight[:0].cpu().clone(), t.block_scale[:0].cpu().clone(),
+                      t.global_scale.detach().cpu().clone(),
+                      t.shape, t.padded_in)
+    gs = t.__dict__.get("_gs_f")
+    if gs is not None:
+        gabarit.__dict__["_gs_f"] = gs
+    lin.qweight = gabarit
+
+
+def _promote_expert(lin, mlp_dev) -> None:
+    """Froid -> résident : reconstruit `qweight` en VRAM depuis
+    `streamed.host` (le tampon épinglé, les VRAIS octets) — réutilise
+    `_rehydrate` (`layers.py`, la même fonction que le préchargement par pas
+    utilise), avec `lin.qweight` COMME GABARIT (voir `_demote_expert` :
+    valide même réduit, `_rehydrate_brut` n'en lit que la forme et `_gs_f`)."""
+    from .layers import _rehydrate
+    tensors = {k: v.to(mlp_dev) for k, v in lin.streamed.host.items()}
+    lin.qweight = _rehydrate(lin.qweight, tensors)
+    lin.streamed = None
+
+
+def _repin_echanger_reel(m, sortant: int, entrant: int) -> None:
+    """L'échange RÉEL pour UNE couche déjà placée par expert (`m._table_qw`
+    non `None`) : trois projections, copie hôte↔VRAM puis tables mises à
+    jour — jamais avant, sinon un lecteur de la table verrait une adresse
+    pas encore garnie. `verifier_table` après chaque écriture (jamais 0).
+
+    Fonction libre (comme `_demote_expert`/`_promote_expert`) : ne touche
+    que `m` et les deux ids passés, testable sans `Engine`."""
+    from ..memory.table_adresses import adresse_expert, verifier_table
+    s_mlp, e_mlp = m.experts[sortant], m.experts[entrant]
+    mlp_dev = s_mlp.gate_proj.qweight.qweight.device
+    for nom in ("gate_proj", "up_proj", "down_proj"):
+        s_lin, e_lin = getattr(s_mlp, nom), getattr(e_mlp, nom)
+        _demote_expert(s_lin, mlp_dev)
+        _promote_expert(e_lin, mlp_dev)
+        for tbl, cle in ((m._table_qw[nom], "qweight"),
+                        (m._table_bscale[nom], "block_scale")):
+            tbl[sortant] = adresse_expert(s_lin, cle)
+            tbl[entrant] = adresse_expert(e_lin, cle)
+            verifier_table(tbl)
+
+
 class Engine:
     """Détient le modèle, l'allocateur de blocs et les files de requêtes."""
 
@@ -747,6 +818,7 @@ class Engine:
             return
         from .model import MoEBlock
         etat = {}
+        couches: dict = {}
         for m in self.model.modules():
             if not isinstance(m, MoEBlock):
                 continue
@@ -756,13 +828,23 @@ class Engine:
             heat = {e: int(c) for e, c in
                     enumerate(m._usage_routage.detach().to("cpu").tolist())}
             etat[m.index_couche] = (pin, heat)
+            couches[m.index_couche] = m
         for echange in choisir_echanges(etat, max_echanges=4):
             pin = self._pin[echange.couche]
+            m = couches[echange.couche]
+            reel = m._table_qw is not None
+            if reel:
+                self._repin_echanger(m, echange.sortant, echange.entrant)
             pin.discard(echange.sortant)
             pin.add(echange.entrant)
+            suite = "" if reel else (" — PAS de table (NVFP4 seulement) : "
+                                     "placement Python seul, aucun octet déplacé")
             print(f"[REPIN] couche {echange.couche} : "
                   f"expert {echange.sortant} sort, {echange.entrant} entre "
-                  f"(gain {echange.gain})", flush=True)
+                  f"(gain {echange.gain}){suite}", flush=True)
+
+    def _repin_echanger(self, m, sortant: int, entrant: int) -> None:
+        _repin_echanger_reel(m, sortant, entrant)
 
     def _plain_decode(self, decodable: list[Sequence]) -> list[GenerationOutput]:
         trace = os.environ.get("ACVRAM_TRACE_STEPS")

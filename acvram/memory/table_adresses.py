@@ -66,7 +66,7 @@ from __future__ import annotations
 
 import torch
 
-__all__ = ["verifier_table", "construire_table"]
+__all__ = ["verifier_table", "construire_table", "adresse_expert"]
 
 
 def verifier_table(table: torch.Tensor) -> None:
@@ -91,17 +91,43 @@ def construire_table(experts: list, projection: str,
     entrée pour dire à quel expert elle appartient. Chaque `getattr(mlp,
     projection)` est un `QuantLinear` dont `.qweight` est un `NVFP4Tensor`
     (`quant/nvfp4.py`) : `.qweight.qweight`/`.qweight.block_scale` portent
-    les octets, `.data_ptr()` leur adresse — VRAM si l'expert est résident,
-    hôte épinglé s'il est en cours de streaming, peu importe : l'UVA rend les
-    deux directement lisibles depuis la carte (vérifié,
-    `outils/test_uva_pin_memory.py`, voir la docstring du module).
+    les octets pour un expert RÉSIDENT, `.data_ptr()` leur adresse VRAM.
+
+    Un expert FROID (`QuantLinear.streamed is not None`, `layers.py:437`) a
+    ses octets ailleurs : `to_device(..., streamed=True)` construit
+    `self.streamed` à partir d'une COPIE de `self.qweight` dans un tampon
+    hôte épinglé (`StreamedWeight._emballer`) — `self.qweight` lui-même reste
+    l'original, orphelin, jamais mis à jour. Lire `.qweight.qweight` pour un
+    expert froid donnerait donc une adresse qui n'est PLUS celle que le
+    noyau doit dérérencer : cette fonction lit `.streamed.host["qweight"]`/
+    `["block_scale"]` dans ce cas — le tampon épinglé RÉEL, dont l'UVA rend
+    l'adresse directement lisible depuis la carte (vérifié,
+    `outils/test_uva_pin_memory.py`, confirmé indépendamment par poste4 sur
+    son noyau, voir la docstring du module).
 
     Ne construit PAS le placement — le reçoit tel quel via `experts`. Lève
     (`verifier_table`) si un expert n'a pas encore d'adresse réelle."""
-    qw = torch.tensor([getattr(m, projection).qweight.qweight.data_ptr()
+    qw = torch.tensor([adresse_expert(getattr(m, projection), "qweight")
                        for m in experts], dtype=torch.int64, device=device)
-    bs = torch.tensor([getattr(m, projection).qweight.block_scale.data_ptr()
+    bs = torch.tensor([adresse_expert(getattr(m, projection), "block_scale")
                        for m in experts], dtype=torch.int64, device=device)
     verifier_table(qw)
     verifier_table(bs)
     return qw, bs
+
+
+def adresse_expert(lin, cle: str) -> int:
+    """L'adresse OCTET actuelle de `cle` (``"qweight"`` ou ``"block_scale"``)
+    pour un `QuantLinear` d'expert — résident ou froid, peu importe.
+
+    Résident (`lin.streamed is None`) : `lin.qweight` (le `NVFP4Tensor`) porte
+    les octets directement. Froid : `lin.qweight` est un ORIGINAL orphelin
+    que `to_device(streamed=True)` ne met jamais à jour (`layers.py:437-441`)
+    — les octets réels sont dans `lin.streamed.host[cle]`, le tampon épinglé
+    que `StreamedWeight` a construit. Utilisée par `construire_table` et par
+    le REPIN réel (`engine/runner.py`), qui doit ré-interroger cette même
+    fonction après chaque promotion/rétrogradation d'expert : l'adresse
+    change de nature (VRAM ↔ hôte), jamais seulement de valeur."""
+    if lin.streamed is not None:
+        return lin.streamed.host[cle].data_ptr()
+    return getattr(lin.qweight, cle).data_ptr()

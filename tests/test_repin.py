@@ -4,7 +4,10 @@ carte, aucun `Engine` : ce sont des fonctions sur des dicts.
 """
 from __future__ import annotations
 
+import torch
+
 from acvram.memory.repin import Echange, cadence_atteinte, choisir_echanges
+from acvram.memory.table_adresses import adresse_expert
 
 
 # --------------------------------------------------------------------------
@@ -146,6 +149,82 @@ def test_repin_pass_sans_pin_ne_journalise_rien(capsys, monkeypatch):
 
     assert capsys.readouterr().out == ""
     assert eng._dernier_repin == 64
+
+
+def _lineaire_nvfp4(sortie, entree, graine):
+    import torch
+    from acvram.engine.layers import QuantLinear
+    from acvram.quant.nvfp4 import quantize_nvfp4
+    g = torch.Generator().manual_seed(graine)
+    w = torch.randn(sortie, entree, generator=g) * 0.02
+    return QuantLinear(quantize_nvfp4(w), out_features=sortie, in_features=entree)
+
+
+# --------------------------------------------------------------------------
+# _demote_expert / _promote_expert — aucune carte, CPU suffit (StreamedWeight
+# fonctionne sans CUDA, voir layers.py)
+# --------------------------------------------------------------------------
+
+def test_demote_puis_promote_preserve_les_valeurs():
+    from acvram.engine.runner import _demote_expert, _promote_expert
+    from acvram.quant.nvfp4 import dequantize_nvfp4
+
+    lin = _lineaire_nvfp4(32, 16, 1)
+    ref = dequantize_nvfp4(lin.qweight, torch.float32)
+    dev = torch.device("cpu")
+
+    _demote_expert(lin, dev)
+    assert lin.streamed is not None
+    apres_demote = dequantize_nvfp4(lin.qweight, torch.float32)  # gabarit : 0 octet utile
+    assert apres_demote.numel() == 0
+
+    _promote_expert(lin, dev)
+    assert lin.streamed is None
+    apres_promote = dequantize_nvfp4(lin.qweight, torch.float32)
+    assert torch.equal(apres_promote, ref)
+
+
+def test_demote_libere_le_gros_tenseur_pas_seulement_le_nom():
+    """Le gabarit après `_demote_expert` ne doit PAS être une vue sur
+    l'ancien tenseur (même à 0 élément, une vue garderait tout le stockage
+    original vivant — voir le commentaire de `_demote_expert`)."""
+    from acvram.engine.runner import _demote_expert
+    lin = _lineaire_nvfp4(32, 16, 2)
+    ancien_stockage = lin.qweight.qweight.untyped_storage()
+    _demote_expert(lin, torch.device("cpu"))
+    assert lin.qweight.qweight.untyped_storage().data_ptr() != ancien_stockage.data_ptr()
+
+
+def test_promote_reconstruit_meme_apres_plusieurs_cycles():
+    """Deux allers-retours de suite : `_promote_expert` ne doit jamais
+    dépendre d'un `qweight` de la toute première charge — le gabarit réduit
+    de `_demote_expert` doit rester un gabarit VALIDE pour le cycle suivant."""
+    from acvram.engine.runner import _demote_expert, _promote_expert
+    from acvram.quant.nvfp4 import dequantize_nvfp4
+    lin = _lineaire_nvfp4(16, 8, 3)
+    ref = dequantize_nvfp4(lin.qweight, torch.float32)
+    dev = torch.device("cpu")
+    for _ in range(3):
+        _demote_expert(lin, dev)
+        _promote_expert(lin, dev)
+    assert torch.equal(dequantize_nvfp4(lin.qweight, torch.float32), ref)
+
+
+def test_adresse_expert_change_de_regime_pendant_le_froid():
+    """Pendant le froid, `adresse_expert` lit le tampon épinglé — une adresse
+    différente de la résidence d'origine. (Après re-promotion, l'allocateur
+    peut légitimement réutiliser la même adresse que libère la démotion :
+    ce n'est pas vérifié ici, ce serait vérifier l'allocateur, pas le code.)
+    """
+    from acvram.engine.runner import _demote_expert, _promote_expert
+    lin = _lineaire_nvfp4(16, 8, 4)
+    dev = torch.device("cpu")
+    avant = adresse_expert(lin, "qweight")
+    _demote_expert(lin, dev)
+    pendant = adresse_expert(lin, "qweight")           # lit streamed.host
+    assert pendant != avant
+    _promote_expert(lin, dev)
+    assert lin.streamed is None                        # re-résident, plus streamé
 
 
 def test_repin_pass_avant_la_cadence_ne_fait_rien(monkeypatch):
