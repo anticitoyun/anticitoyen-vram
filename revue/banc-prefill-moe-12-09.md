@@ -62,51 +62,87 @@ empruntent `_forward_grouped` → `nvfp4_gemv_grouped_gateup` (model.py:789).
 Ce chemin GEMV est indépendant de `ACVRAM_PREFILL_DEQUANT` : les deux
 colonnes mesuraient le même code.
 
-## Régime chaud : adaptatif vs GEMM directe vs déquant
+## Régime chaud — première version INVALIDE (12/09 soir)
 
-Moteur chaud (2 passes de chauffe, 7 répétitions, médian ± σ). Trois chemins :
-- **(a) adaptatif** : `_MOE_GROUPED_MAX=32` (défaut) → `_forward_grouped` (GEMV)
-- **(b) GEMM NVFP4** : `_MOE_GROUPED_MAX=99999` → `_forward_prefill_grouped`, noyau direct
-- **(c) déquant** : idem + `ACVRAM_PREFILL_DEQUANT=1` → `_pile_bf16` + `grouped_mm`
+La première mesure « a/b/c à ±0,6 % » était fausse deux fois : (1) le pas
+durait ~27 ms à L=512 **et** à L=2048 — signature du cache de préfixe
+(`enable_prefix_cache=True` par défaut, runner.py:229) sur un prompt
+identique à chaque répétition : seul un résidu était précalculé, t ≤ 32,
+GEMV pour tous les bras ; (2) la condition est `t <= _MOE_GROUPED_MAX` →
+GEMV (model.py:875), donc MAX=99999 force le **GEMV**, pas le GEMM. Les
+compteurs (`_forward_prefill_grouped=0` partout) le disaient ; je l'ai
+attribué à la lecture unique de la variable de module au lieu de le lire
+comme un résultat. Section retirée, remplacée par la suivante.
 
-|   L  | (a) adaptatif   | (b) GEMM NVFP4  | (c) déquant      | b/a   | c/a   | b/c   |
-|-----:|----------------:|-----------------:|------------------:|------:|------:|------:|
-|  512 | 19 020 ±  366   | 19 140 ±  420    | 18 834 ±  429     | 1,006 | 0,990 | 1,016 |
-| 2048 | 73 528 ± 1 103  | 73 933 ±  512    | 73 496 ±  485     | 1,006 | 1,000 | 1,006 |
+## Régime chaud (13/09) — cache de préfixe coupé, chemins prouvés
 
-Valeurs en j/s (jetons par seconde).
+Moteur chaud (2 passes de chauffe, 7 répétitions, médian ± σ), un processus
+par bras, `enable_prefix_cache=False`, prompt distinct à chaque répétition,
+`generate(max_tokens=1)` chronométré entre deux `synchronize`. Compteurs sur
+`_forward_prefill_grouped` (fpg), `_forward_grouped` (fg), `_gemm`,
+`_pile_bf16` (pile), cumulés sur les 7 répétitions (48 couches × 7 = 336).
+
+| bras | réglage | chemin |
+|------|---------|--------|
+| (b) GEMM direct | défaut (t > 32) | `_forward_prefill_grouped` → `_gemm` |
+| (c) déquant | `ACVRAM_PREFILL_DEQUANT=1` | `_forward_prefill_grouped` → `_pile_bf16` |
+| (a) GEMV plein | `ACVRAM_MOE_GROUPED_MAX=99999` | `_forward_grouped` sur L jetons |
+| (d) tranches 32 | `ACVRAM_BUDGET_JETONS=32` | runner découpe, `_forward_grouped` × L/32 |
+| (e) GEMM forcé | `ACVRAM_MOE_GEMM_MAX=99999` | comme (b), sans repli déquant |
+
+### L=512 (≈ 32 jetons par expert)
+
+| bras | j/s | σ | ms/pas | fpg | fg | gemm | pile | /b |
+|------|----:|--:|-------:|----:|---:|-----:|-----:|---:|
+| (b) GEMM direct | **3 916** | 22 | 130,7 | 336 | 0 | 1008 | 0 | 1,00 |
+| (c) déquant | 3 034 | 20 | 168,8 | 336 | 0 | 0 | 1008 | 0,77 |
+| (a) GEMV plein | 1 644 | 6 | 311,4 | 0 | 336 | 0 | 0 | 0,42 |
+| (d) tranches 32 | 962 | 83 | 532,1 | 0 | 5376 | 0 | 0 | 0,25 |
+
+### L=2048 (≈ 128 jetons par expert)
+
+| bras | j/s | σ | ms/pas | fpg | fg | gemm | pile | /b |
+|------|----:|--:|-------:|----:|---:|-----:|-----:|---:|
+| (b) défaut | **7 607** | 25 | 269,2 | 336 | 0 | **0** | **1008** | 1,00 |
+| (c) déquant | 7 592 | 202 | 269,8 | 336 | 0 | 0 | 1008 | 1,00 |
+| (e) GEMM forcé | 4 860 | 4 | 421,4 | 336 | 0 | 1008 | 0 | 0,64 |
+| (a) GEMV plein | 1 661 | 2 | 1232,9 | 0 | 336 | 0 | 0 | 0,22 |
+| (d) tranches 32 | 894 | 4 | 2290,2 | 0 | 21504 | 0 | 0 | 0,12 |
+
+### Prédictions écrites avant la mesure, et verdict
+
+- (b) ≈ 6 400 j/s à L=512 : **faux**, 3 916 (la référence 6 420 vient du banc
+  serveur, autre dénominateur — lot, TTFT exclu) ; ≈ 8 000 à L=2048 : 7 607, proche.
+- c/b ≈ 0,75 : **0,77 à L=512, confirmé**. À L=2048 c = b parce que (b) était
+  déjà en déquant (compteurs `gemm=0`) — le seuil `_MOE_GEMM_MAX=64`
+  (model.py:737) a basculé le chemin ; sans compteur cette égalité aurait
+  été lue comme « noyau noyé ».
+- a/b ≈ 0,5-0,8 : **0,42 / 0,22**, plus sévère que prévu.
+- d/b ≈ 0,5-0,8 : **0,25 / 0,12**, bien plus sévère : 16 (resp. 64) pas
+  runner de 32 jetons, chacun un GEMV par expert.
+- Issue gênante (b ≈ c) : **ne s'est pas produite** à 32 jetons/expert.
 
 ### Lecture
 
-Les trois chemins sont à **±0,6 %** — dans le bruit de mesure. Le pas chaud
-dure ~27 ms ; le MoE GEMM en représente une fraction trop faible pour que le
-choix du noyau soit visible. Le seuil de tranche (`_MOE_GROUPED_MAX`,
-model.py:950) **n'est pas un levier** en régime chaud.
-
-### Compteurs
-
-Vérification par interception (même processus, moteur chaud, L=512) :
-
-| Config            | `_forward_prefill_grouped` | `_forward_grouped` | `_gemm` |
-|-------------------|--------------------------:|-------------------:|--------:|
-| MAX=32 (défaut)   |                         0 |                 48 |       0 |
-| MAX=0 (forcé fpg) |                         0 |                 48 |       0 |
-
-Après la chauffe, le prefill adaptatif (runner.py:542) découpe toute requête
-en tranches ≤ 32 jetons, qui empruntent `_forward_grouped` → GEMV. Le seuil
-`_MOE_GROUPED_MAX` ne peut pas forcer le chemin GEMM depuis le même processus
-car la variable de module est lue une seule fois à l'import (model.py:950).
-Les mesures (a)/(b)/(c) tournaient en processus séparés.
+1. **Le noyau GEMM NVFP4 gagne 29 % à 32 jetons/expert** (L=512) et **perd
+   36 % à 128 jetons/expert** (L=2048, bras e). Le seuil `_MOE_GEMM_MAX=64`
+   est du bon côté ; le croisement exact est entre 32 et 128, non mesuré.
+2. **Le GEMV par expert n'est jamais le bon chemin au-delà de 32 jetons** :
+   ×0,42 en pleine longueur, ×0,25 en tranches. Le tranchage
+   `ACVRAM_BUDGET_JETONS` coupe la latence des autres séquences, il ne peut
+   pas être vendu comme un gain de débit.
+3. Le levier réel est `_MOE_GEMM_MAX` (jetons par expert), pas
+   `_MOE_GROUPED_MAX` ni le tranchage du runner : mesurer 48/64/96 pour
+   placer le croisement.
 
 ## Conclusion
 
-Le noyau `nvfp4_gemm_grouped` apporte un gain réel au **premier prefill**
-(unchunked, t > 32) : −10 % à L=512 en supprimant 215 ms de déquantification.
-En régime chaud, le prefill adaptatif contourne ce chemin au profit de
-`nvfp4_gemv_grouped_gateup` (GEMV par expert, toujours NVFP4) — le noyau GEMM
-groupée n'y est plus appelé. Les trois chemins (adaptatif, GEMM directe,
-déquant) donnent le même débit à ±0,6 % : le seuil de tranche n'est pas un
-levier.
+Le noyau `nvfp4_gemm_grouped` vaut +29 % de débit de prefill à ≈ 32 jetons
+par expert (L=512 sur Qwen3-Coder-30B, 8 actifs / 128) et −36 % à ≈ 128
+(L=2048) : le repli déquant au-delà de `_MOE_GEMM_MAX=64` est justifié, le
+croisement reste à placer entre 32 et 128. Le GEMV par expert (chemin
+`_forward_grouped`) est 2,4 à 8× plus lent que le GEMM dès que t > 32 ; le
+tranchage du runner en 32 est un outil de latence, pas de débit.
 
 Le noyau NVFP4 reste utile au **décodage** (lots petits, memory-bound), où il
 évite de lire 4× plus d'octets. Le banc de décodage MoE est un chantier
