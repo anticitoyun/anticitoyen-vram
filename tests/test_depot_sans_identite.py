@@ -94,7 +94,25 @@ COURRIEL_TOLERE = ("noreply", "example")
 # aucun chemin absolu (aucun MODEL code en dur).
 # 14/09 (poste1) : releve a 322 -- fusion de commits paralleles (bead 992),
 # mes fichiers (test_mla_detection.py) n'ajoutent aucun chemin absolu.
-PLAFOND_CHEMINS = 323  # 14/09 (poste1) : fusion de 12 commits paralleles, rien de mes fichiers
+# 14/09 (poste1) : fusion de 12 commits paralleles, rien de mes fichiers -- 323.
+# 14/09 nuit (poste2) -- outils/banc_llamacpp_reel.py (mesure 2c de poste7,
+# duel avec le binaire llama.cpp reel sm_120 de poste8) : +1, chemin du
+# binaire et du GGUF nommes en dur, meme convention que son predecesseur
+# deja compte (banc_llamacpp.py). Fusionne avec les releves paralleles
+# d'poste1 : total remesure directement apres rebase, pas additionne a
+# l'aveugle.
+# 14/09 nuit (poste2) -- outils/equivalence-glm-2couches.py (equivalence CPU
+# 2 couches vs HF, item (2) de poste7) : +1, SOURCE/VENV_PROJET/VENV_VLLM
+# nommes en dur, meme convention que ses voisins de outils/. Total remesure
+# directement apres rebase.
+# 15/09 (poste2) : releve a 371 apres rebase sur main -- travail d'autres
+# sessions (poste4 1aj/MMA-decodage, poste3 modes energie, poste7/poste1
+# GLM) fusionne entre-temps, aucun de mes propres fichiers n'y contribue
+# (verifie : mon nouveau outils/ppl-decode-mma-coder30b.py utilise des
+# chemins /mnt/... hors du motif CHEMIN, donc +0). Mesure directe.
+# 15/09 (poste2) : +1 -- carnet de pause (acvram-memoire/poste2.md), une
+# commande de reprise `cd ~/...`. Mesure directe.
+PLAFOND_CHEMINS = 372
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute

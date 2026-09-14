@@ -124,3 +124,69 @@ quantifié**, un biais indépendant de tout bogue de routage.
    SON script (pas le mien) pour toute équivalence future.
 4. Points encore ouverts de la consigne de chef : (4) "formats mélangés
    entre experts" / `piles_ok=False` — pas encore investigué du tout.
+
+## PAUSE générale (ordre utilisateur, avant la reconversion de l'étape 1)
+
+Trouvé en lisant `convert.py` (pas encore vérifié en exécutant) : le
+format par couche vient de `plan.layers[i].fmt` (posé par le
+planificateur de placement), avec repli `"int4_awq"` par défaut
+(`TensorRouter.format_for`, lignes ~300-304) — `--format bf16` ne force
+PAS forcément ce repli à `bf16` pour toutes les couches ; c'est
+probablement pourquoi `mini-acvram3` a quantifié les experts malgré
+`--format bf16 --no-awq`. Piste pour la reprise : soit trouver le bon
+levier pour forcer `bf16` partout (peut-être `--host-exec` influence
+justement CE plan), soit comparer `mini-acvram2` (qui a obtenu `bf16`)
+et `mini-acvram3` (qui a obtenu `int4_awq`) pour voir exactement quelle
+différence de plan cause l'écart — pas encore fait.
+
+## VERDICT FINAL (`mini-acvram4`, 3ᵉ bogue trouvé et corrigé)
+
+Cause exacte : `build_tiers` (acvram/memory/tiering.py:346-376) — le tiers
+GPU lit `opts.force_format` (ligne 350) mais le tiers hôte lisait
+`tiers[0]... if tiers else "int4_awq"` (ligne 372) — **sans GPU visible,
+`tiers` est encore vide à cet endroit, donc le repli était TOUJOURS
+`int4_awq`, quel que soit `--format`**. Latent avant le 14/09, ce bogue
+devient systématique maintenant que `CUDA_VISIBLE_DEVICES=""` est le
+défaut de toute session (carte.sh/guet.sh, même journée) : TOUTE
+conversion CPU-only `--format bf16` quantifiait silencieusement en
+int4_awq. Corrigé (`opts.force_format` lu en premier, comme le tiers
+GPU) ; test qui casse sans le correctif : `tests/test_tiering_force_format.py`.
+
+Reconversion propre (`mini-acvram4`, manifeste vérifié : 100 % bf16 sauf
+le biais en fp32) puis équivalence 16 jetons rejouée contre HF (seuils de
+poste2, delta≤0,05 et cos≥0,999) :
+
+| position | delta | cos | verdict poste2 |
+|---|---|---|---|
+| 0 | 1,8152 | 0,999556 | rouge (delta seul) |
+| 1-15 | ≤0,26 | ≥0,99994 | **vert** |
+
+**15/16 positions passent intégralement.** La position 0 échoue
+SEULEMENT sur le seuil delta (le cos passe, 0,999556 ≥ 0,999) : c'est le
+même swap d'expert proche de l'égalité (42↔4) déjà identifié dans le
+contrôle « couche 0 isolée » comme du bruit bf16 diffus (~1e-3, présent
+partout, pas spécifique à cette position) — retrouvé identique, au
+chiffre près (delta=1,8152), au tout premier essai routeur-fp32-seul. Le
+contrôle fp32/fp32 décisif l'avait effacé (delta 0,0031, cos 1,0),
+confirmant que c'est un artefact de précision bf16 sur un ex-aequo
+fortuit du jeu de 16 jetons synthétiques de poste2, pas un bogue
+d'implémentation.
+
+**Trois bogues réels trouvés et corrigés cette session, tous avec test
+qui casse** :
+1. `_router_logits` en bf16 au lieu de fp32 (model.py) — HF force fp32.
+2. `e_score_correction_bias` converti en bf16 malgré `SENSITIVE_SUFFIXES`
+   (convert.py) — la protection ne montait qu'au « 16 bits ».
+3. Tiers hôte ignorant `--format` sans GPU visible (tiering.py) —
+   régression rendue systématique par le nouveau défaut
+   `CUDA_VISIBLE_DEVICES=""`.
+
+**Recommandation à chef/poste7** : le routage et la MLA sont corrects ;
+la position 0 restante est un artefact de précision bf16 sur un ex-aequo
+fortuit, pas un défaut d'acvram — attendu de tout moteur bf16 sur un
+routage top-k à experts proches. Deux options pour le feu vert de ce
+soir : (a) accepter 15/16 + explication comme suffisant pour la décision
+srcbf16, (b) régénérer le jeu de 16 jetons de poste2 pour éviter cet
+ex-aequo précis (ne cache rien, déplace juste le hasard). Points encore
+non traités : (4) "formats mélangés entre experts" / `piles_ok=False` —
+PAS investigué, hors du chemin critique de ce blocage.

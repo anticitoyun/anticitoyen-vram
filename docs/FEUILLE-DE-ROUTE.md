@@ -3437,3 +3437,18 @@ de ROM concurrente) sont tombés ensemble. Prédiction écrite d'avance : si
 la persistance était la cause principale, la dispersion passe sous 10 %
 et le premier passage cesse d'être aberrant ; si elle reste à 20 %, il
 faut chercher dans l'ordonnancement ou l'allocateur.
+
+
+## 15 septembre 2026 — le MoE décode par la MMA groupée (v0.6.1)
+
+À b=12, les GEMV MoE dépensaient 1,4-2,6 instructions par octet DRAM
+(71 % des instructions du pas, chaque noyau au plafond de 400 W) là où la
+MMA block-scaled de CUTLASS en fait 0,18 (`revue/instr-par-octet-14-09.md`,
+×8,5 sur le pas contre vLLM). Le chemin MMA du prefill est rendu capturable
+au décodage (`MoEBlock._forward_grouped_mma` : grille de tuiles fixe,
+`scatter_add_` au lieu de `bincount`, fantômes à poids nul ; trois noyaux
+groupés corrigés d'un accès à `t0 − 1` sur tuile vide). Mesuré : régime
+court 22 s, −13,6 % de temps et −19 % de J/jeton, le pas sort du plafond ;
+chiffre officiel mode moyen (poste3, rondes ctx 2048) : 17,37 → 16,25 ms,
+0,620 → 0,538 J/jeton. Qualité : PPL par le chemin de décodage MMA=1/MMA=0
+= 0,9995 (poste2). Défaut `ACVRAM_MOE_DECODE_MMA=1` ; `0` = témoin.

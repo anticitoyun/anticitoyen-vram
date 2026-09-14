@@ -39,7 +39,9 @@ import torch
 
 from . import formats
 
-__all__ = ["ChannelScaler", "search_channel_scales", "hadamard_transform",
+__all__ = ["ChannelScaler", "search_channel_scales",
+           "search_channel_scales_commun", "alpha_commun_gate_up",
+           "hadamard_transform",
            "largest_pow2_divisor", "apply_hadamard_weight", "ActStats",
            "quantize_with_calibration"]
 
@@ -388,6 +390,39 @@ def search_channel_scales_commun(
     ), best_erreurs
 
 
+def alpha_commun_gate_up(
+    weights: list[torch.Tensor],
+    stats: Optional[ActStats],
+    fmt: str,
+    group_size: Optional[int] = None,
+    use_hadamard: bool = False,
+    n_grid: int = 20,
+    journal: Optional[dict] = None,
+) -> tuple[Optional[torch.Tensor], int]:
+    """Alpha commun A7, cablage `convert.py` : replique la rotation de
+    Hadamard de `quantize_with_calibration` avant `search_channel_scales_commun`,
+    pour que l'echelle rendue vive dans le MEME espace que celui ou
+    `quantize_with_calibration(..., forced_scale=...)` la consommera —
+    sinon un `use_hadamard=True` cote gate/up ferait chercher l'alpha sur des
+    poids non tournes et l'appliquer a des poids tournes, silencieusement."""
+    ws = [w.detach().to(torch.float32) for w in weights]
+    had_block = 0
+    if use_hadamard:
+        had_block = largest_pow2_divisor(ws[0].shape[1])
+        if had_block >= 8:
+            ws = [apply_hadamard_weight(w, had_block) for w in ws]
+            if stats is not None:
+                rotated = hadamard_transform(
+                    stats.mean_abs.reshape(1, -1).to(torch.float32),
+                    block=had_block).abs().reshape(-1)
+                stats = ActStats(rotated.clamp(min=1e-6), None, stats.n_samples)
+        else:
+            had_block = 0
+    scaler, _ = search_channel_scales_commun(
+        ws, stats, fmt, group_size, n_grid, journal=journal)
+    return scaler.scale, had_block
+
+
 def kld_couche_bits(y_ref: torch.Tensor, y_q: torch.Tensor) -> float:
     """Divergence de Kullback-Leibler entre les sorties de couche, en bits.
 
@@ -427,6 +462,7 @@ def quantize_with_calibration(
     garder_grille: bool = False,
     table=None,
     mesurer_kld: bool = False,
+    forced_scale: Optional[torch.Tensor] = None,
 ) -> tuple[Any, ChannelScaler, dict]:
     """Chaîne complète par couche : tourner, mettre à l'échelle, quantifier.
 
@@ -450,7 +486,13 @@ def quantize_with_calibration(
 
     scaler = ChannelScaler(None, had_block)
     journal: Optional[dict] = {} if garder_grille else None
-    if use_awq:
+    if forced_scale is not None:
+        # A7 (alpha commun gate/up) : l'echelle vient d'une recherche jointe
+        # faite en amont dans le MEME espace tourne (voir
+        # `alpha_commun_gate_up`) — la recherche par tenseur ci-dessous est
+        # sautee, pas rejouee.
+        scaler = ChannelScaler(forced_scale.to(w.device, torch.float32), had_block)
+    elif use_awq:
         found, _ = search_channel_scales(w, stats, fmt, group_size, n_grid,
                                          journal=journal)
         scaler = ChannelScaler(found.scale, had_block)
