@@ -1,0 +1,39 @@
+Par pas (moyenne sur 1 pas), 3617 lancements profilés, 0 valeurs illisibles
+                                                                  appels   ms/pas  Go lus    Go/s    Ginst  inst/oct tens%  fma%  lsu%   SM%   MHz
+nvfp4_gemm_grouped_mma2_kernel<16, 4>                              144.0    4.112   4.285    1127    0.598      0.14   2.6   0.0   0.0   0.0  2448
+int8_gemv_kernel<4, 16> grille=(512, 1, 1)                          48.0    2.311   0.413     180    0.720      1.75   0.0   0.0   0.0   0.0  2481
+at::vectorized_elementwise_kernel                                 1304.0    2.212   0.004       2    0.003      0.73   0.0   0.0   0.0   0.0  2516
+int8_gemv_kernel<4, 16> grille=(1280, 1, 1)                         48.0    2.013   0.519     265    0.914      1.76   0.0   0.0   0.0   0.0  2375
+int8_gemv lm_head (37984, 1, 1)                                      1.0    0.879   0.319     387    0.565      1.77   0.0   0.0   0.0   0.0  2756
+gemmSN_TN_kernel                                                    48.0    0.872   0.051      60    0.023      0.45   0.0   0.0   0.0   0.0  2571
+paged_attn_partial_kernel<128, __nv_bfloat16>                       48.0    0.853   0.080      97    0.309      3.86   0.0   0.0   0.0   0.0  2319
+at::unrolled_elementwise_kernel                                    385.0    0.753   0.004       6    0.006      1.41   0.0   0.0   0.0   0.0  2520
+at::index_elementwise_kernel                                       240.0    0.629   0.006      10    0.000      0.02   0.0   0.0   0.0   0.0  2536
+at::elementwise_kernel                                             241.0    0.541   0.002       6    0.008      3.44   0.0   0.0   0.0   0.0  2527
+moe_route_kernel                                                    48.0    0.361   0.001       3    0.006      5.63   0.0   0.0   0.0   0.0  2561
+rmsnorm_bf16_kernel                                                 97.0    0.344   0.002       9    0.011      4.64   0.0   0.0   0.0   0.0  2541
+nvfp4_quant_act_kernel                                              96.0    0.270   0.000       4    0.010     35.23   0.0   0.0   0.0   0.0  2529
+elementwise_kernel_with_index                                      192.0    0.266   0.000       0    0.000      0.24   0.0   0.0   0.0   0.0  2502
+at::_scatter_gather_elementwise_kernel                              97.0    0.221   0.003      12    0.000      0.01   0.0   0.0   0.0   0.0  2532
+at::warpMergeSortKVInPlace                                          48.0    0.213   0.001       4    0.000      0.06   0.0   0.0   0.0   0.0  2553
+rope_inplace_kernel                                                 48.0    0.196   0.001       4    0.016     27.56   0.0   0.0   0.0   0.0  2532
+at_cuda_detail::DeviceScanKernel                                    96.0    0.193   0.001       5    0.000      0.08   0.0   0.0   0.0   0.0  2525
+kv_write_int8_kernel                                                48.0    0.149   0.000       2    0.002      6.84   0.0   0.0   0.0   0.0  2543
+at_cuda_detail::DeviceScanInitKernel                                96.0    0.136   0.000       1    0.000      0.06   0.0   0.0   0.0   0.0  2506
+at::searchsorted_cuda_kernel                                        48.0    0.130   0.001       5    0.000      0.05   0.0   0.0   0.0   0.0  2538
+paged_attn_reduce_kernel<128, __nv_bfloat16>                        48.0    0.118   0.001      10    0.011     20.22   0.0   0.0   0.0   0.0  2514
+moe_reduce_trie_kernel                                              48.0    0.104   0.000       4    0.006     20.37   0.0   0.0   0.0   0.0  2513
+at::vectorized_gather_kernel                                        48.0    0.096   0.000       3    0.003     17.14   0.0   0.0   0.0   0.0  2516
+moe_act_kernel                                                      48.0    0.093   0.000      16    0.012     40.16   0.0   0.0   0.0   0.0  2503
+at::reduce_kernel                                                    3.0    0.020   0.000      22    0.005     24.81   0.0   0.0   0.0   0.0  2492
+at::indexSelectSmallIndex                                            1.0    0.007   0.000       3    0.000      3.09   0.0   0.0   0.0   0.0  2562
+
+Par poste
+                                                                  appels   ms/pas  Go lus    Go/s    Ginst  inst/oct tens%  fma%  lsu%   SM%   MHz
+projections attention                                              240.0    8.437   5.217     662    2.232      0.43   0.7   0.0   0.0   0.0  2440   46.6 %
+norm + rope + élémentaires                                        2075.0    4.046   0.014       4    0.044      3.27   0.0   0.0   0.0   0.0  2519   22.4 %
+routage + glue MoE                                                 917.0    2.411   0.012       6    0.041      3.32   0.0   0.0   0.0   0.0  2526   13.3 %
+reste                                                              288.0    1.350   0.052      40    0.025      0.48   0.0   0.0   0.0   0.0  2529    7.5 %
+attention paginée                                                   96.0    0.971   0.081      86    0.321      3.98   0.0   0.0   0.0   0.0  2417    5.4 %
+lm_head                                                              1.0    0.879   0.319     387    0.565      1.77   0.0   0.0   0.0   0.0  2756    4.9 %
+TOTAL                                                             3617.0   18.093   5.694     337    3.228      0.57   0.5   0.0   0.0   0.0  2514

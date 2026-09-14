@@ -48,7 +48,12 @@ done
 # le pas les voit, L2 chaud entre deux noyaux voisins) ; defaut ncu = all (purge :
 # chaque noyau est mesure a froid, ce qui compte en DRAM une relecture que le L2 sert
 # en vrai -- lecon du 14/09 sur int8_gemv<4,4>).
+# NCU_LANCEMENTS : plafond de noyaux profiles (defaut 2000 ~ un pas). ncu sauvegarde
+# et restaure les 15 Gio du processus a chaque rejeu : ~0,75 s par noyau ; sans
+# plafond, un pas du chemin MMA (3 617 lancements) prend 46 min (15/09). Une seule
+# passe par appel de carte.sh : le processus est root (sudoers), il ne se tue pas.
 sudo -n /usr/local/cuda/bin/ncu --csv --target-processes all --clock-control none --cache-control "${NCU_CACHE:-all}" \
+  --launch-count "${NCU_LANCEMENTS:-2000}" \
   --nvtx --nvtx-include "mesure/" ${NCU_NOYAUX:+--kernel-name "regex:$NCU_NOYAUX"} \
   --metrics "${NCU_METRIQUES:-gpu__time_duration.sum,dram__bytes_op_read.sum,dram__bytes_op_write.sum,sm__inst_executed.sum,sm__inst_executed_pipe_tensor.sum,sm__cycles_elapsed.avg.per_second}" \
   "${ENV[@]}" "${CMD[@]}" > "$OUT" 2>${NCU_SORTIE}/ncu-ipo-${MOTEUR}.err || true
