@@ -28,7 +28,7 @@ import torch
 from ..engine.config import ModelSpec, load_model_spec
 from ..memory.tiering import Plan
 from . import formats
-from .calibrate import (ActStats, ChannelScaler, alpha_commun_gate_up,
+from .calibrate import (ActStats, alpha_commun_gate_up,
                         quantize_with_calibration)
 
 __all__ = ["ConversionOptions", "ConversionReport", "convert_checkpoint",
@@ -147,9 +147,11 @@ class ConversionReport:
     # Combien d'experts, dans les couches MoE, n'avaient AUCUNE statistique
     # d'activation a la calibration (jamais routes, ou trop peu, pendant le
     # corpus de calibration) : une mesure du corpus, pas un defaut de
-    # conversion. Ces experts recoivent une echelle AWQ identite EXPLICITE
-    # (des 1, pas None) plutot que la recherche ne s'effondre en silence sur
-    # None -- poste7/chef, 15/09, bead "uniformiser l'echelle AWQ" (P2).
+    # conversion, et SANS CONSEQUENCE sur la quantification puisque AWQ
+    # n'est jamais cherche pour un expert (bead "uniformiser l'echelle
+    # AWQ", P2, poste7/chef 15/09 -- voir la boucle principale et
+    # revue/verdict-glm-regime-degrade-15-09.md pour la lecture erronee
+    # ecartee avant celle-ci).
     experts_sans_stats: int = 0
 
     @property
@@ -866,11 +868,18 @@ def _verifier_homogeneite_moe(tensors: dict, num_layers: int) -> None:
     1. Format mélangé (2 944 nvfp4 + 64 int4_awq) — cause réelle : bloc MTP
        mal routé (`TensorRouter.format_for`), corrigé le même soir.
     2. `has_act_scale` mélangé (« échelle AWQ posée sur certains experts
-       seulement ») — cause réelle : experts peu routés à la calibration,
-       échelle identité repliée sur `None` au lieu d'être explicite ;
-       corrigé au point d'appel (`forced_scale`/échelle identité explicite
-       ci-dessus, bead P2 « uniformiser l'échelle AWQ »). Cette garde reste
-       un filet, pas le correctif : si elle se déclenche à nouveau, c'est
+       seulement ») — cause réelle, vérifiée sur `_try_build_stacks`
+       (`model.py:720`) : `any(p.scaler is not None and not
+       p.scaler.is_identity for p in projs)` répond à « au moins UN expert
+       a une échelle RÉELLE », pas à une hétérogénéité entre experts — un
+       seul expert bien calibré casse la pile même si tous les autres sont
+       à l'identité. Une échelle identité EXPLICITE (des 1, pas `None`)
+       aurait donc AGGRAVÉ le repli (`is_identity` exige `scale is None`),
+       piste essayée puis écartée le 15/09 (voir
+       `revue/verdict-glm-regime-degrade-15-09.md`). Correctif retenu, au
+       point d'appel : AWQ n'est jamais cherché pour un tenseur d'expert
+       (bead P2 « uniformiser l'échelle AWQ »). Cette garde reste un
+       filet, pas le correctif : si elle se déclenche à nouveau, c'est
        qu'une TROISIÈME cause existe.
 
     N'examine PAS la couche `num_layers` (le bloc MTP, jamais chargé par le
@@ -1122,37 +1131,35 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
 
         st = stats.get(name) if stats else None
         est_expert = ".mlp.experts." in name
+        if est_expert and st is None:
+            report.experts_sans_stats += 1
+        # poste7/chef, 15/09 (P2, bead "uniformiser l'echelle AWQ") : mon
+        # premier correctif ("echelle identite EXPLICITE quand un expert
+        # n'a pas de statistiques") partait d'une lecture erronee du
+        # message de _try_build_stacks. Le vrai controle moteur
+        # (model.py:720) est `any(p.scaler is not None and not
+        # p.scaler.is_identity for p in projs)` -- il repond a "au moins
+        # UN expert porte une echelle REELLE (non identite)", pas a "les
+        # experts sont-ils homogenes entre eux". Un expert bien calibre
+        # (echelle non triviale) fait donc echouer toute la pile, MEME si
+        # tous les autres experts sont a l'identite -- et `is_identity`
+        # exige `scale is None` : une echelle explicite a des 1 (mon
+        # premier essai) N'EST PAS identite pour ce controle, elle aurait
+        # plutot AGGRAVE le repli. La seule fixation qui marche : ne
+        # JAMAIS chercher d'echelle AWQ pour un expert -- verifie sur
+        # carte le 15/09 (regime NOMINAL retrouve, voir
+        # revue/verdict-glm-regime-degrade-15-09.md pour la trace de
+        # l'erreur initiale).
         qt, scaler, metrics = _quantize_on(
             qdev, tensor, fmt, st,
             group_size=opts.group_size,
             use_hadamard=router.wants_hadamard(name, fmt),
-            use_awq=opts.awq,
+            use_awq=opts.awq and not est_expert,
             n_grid=opts.n_grid, garder_grille=opts.garder_grille,
             table=opts.q3n_table if fmt == "q3n" else None,
             mesurer_kld=opts.mesurer_kld,
             forced_scale=alpha_commun.get(name),
         )
-        if est_expert and opts.awq and scaler.scale is None:
-            # poste7/chef, 15/09 (P2, bead "uniformiser l'echelle AWQ") :
-            # un expert PEU ROUTE pendant la calibration n'a pas de vraies
-            # statistiques (`st is None`), la recherche AWQ voit une
-            # activation uniforme et converge vers l'echelle identite,
-            # que `search_channel_scales` REDUIT A None (ligne ~287,
-            # `torch.allclose(..., identity)`). Un expert voisin, mieux
-            # route, garde une echelle non triviale -- meme couche,
-            # `scaler.scale` present pour l'un, absent pour l'autre :
-            # exactement la cause nommee par `_try_build_stacks`
-            # ("echelle AWQ posee sur certains experts seulement"),
-            # confirmee le 15/09 sur GLM-4.7-Flash apres le correctif MTP.
-            # L'echelle identite explicite (des 1, pas None) est
-            # mathematiquement un no-op (`x / 1 == x`) mais rend TOUS les
-            # experts d'une couche structurellement homogenes
-            # (`has_act_scale` uniformement vrai), ce qu'exige la pile
-            # groupee.
-            scaler = ChannelScaler(torch.ones(tensor.shape[1], dtype=torch.float32),
-                                   scaler.hadamard_block)
-            if st is None:
-                report.experts_sans_stats += 1
         if fmt == "q3n":
             entry["block"] = qt.block
             entry["table"] = list(qt.table)
@@ -1802,8 +1809,9 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         manifest["experts_sans_stats"] = report.experts_sans_stats
         print(f"[acvram] {report.experts_sans_stats} expert(s) sans statistique "
              f"d'activation a la calibration (jamais routes ou trop peu sur le "
-             f"corpus) — echelle AWQ identite explicite posee, pas d'echelle "
-             f"absente a cote d'une echelle presente dans la meme couche.",
+             f"corpus) — mesure du corpus de calibration, sans consequence : "
+             f"AWQ n'est jamais cherche pour les experts (voir la boucle "
+             f"principale), la pile groupee ne depend donc pas de ce compte.",
              flush=True)
 
     _verifier_homogeneite_moe(manifest["tensors"], spec.num_layers)
