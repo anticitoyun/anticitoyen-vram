@@ -728,7 +728,9 @@ class MoEBlock(nn.Module):
             if any(sc is not None and sc.hadamard_block for sc in scs):
                 self._raison_repli = f"{nom} : rotation Hadamard par expert (pas de pile)"
                 return None
-            if any(sc is not None and sc.scale is not None for sc in scs):
+            if any(sc is not None and sc.scale is not None for sc in scs) or _MOE_AWQ_TEMOIN:
+                # ACVRAM_MOE_AWQ_TEMOIN=1 : tables de 1 même sans échelle, pour
+                # mesurer le coût du chemin (division par ligne) sans changer la sortie
                 K_in = getattr(ws[0], "padded_in", None) or ws[0].qweight.shape[1]
                 dev = ws[0].qweight.device
                 table = torch.ones(len(projs), K_in, dtype=torch.bfloat16, device=dev)
@@ -1416,6 +1418,7 @@ _MOE_MMA_KS = int(os.environ.get("ACVRAM_MOE_MMA_KS", "128"))
 # un expert reçoit au plus 12 jetons (bras `experts`).
 _MOE_DECODE_MMA = os.environ.get("ACVRAM_MOE_DECODE_MMA", "1") == "1"
 _MOE_DECODE_MMA_BT = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_BT", "16"))
+_MOE_AWQ_TEMOIN = os.environ.get("ACVRAM_MOE_AWQ_TEMOIN", "0") == "1"
 # Lot minimal pour le chemin MMA : 9 (godets 12 et 16 seulement). Courbe de
 # poste3, 15/09, MMA/GEMV : b=2 +36 % ms / −3,5 % J ; b=3 +27 / −6,3 ; b=4 +24 /
 # +2,2 ; b=6 +18 / +2,7 ; b=12 −6,4 / −13,2 — le coût fixe de la MMA
