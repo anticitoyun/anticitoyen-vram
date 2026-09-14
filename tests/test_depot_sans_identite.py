@@ -117,7 +117,10 @@ COURRIEL_TOLERE = ("noreply", "example")
 # d'poste1, 1aj D/E, modes energie de poste3), aucun de mes propres
 # fichiers n'y contribue (verifie : verdict-glm-awq-mla-15-09.md n'a
 # aucun chemin /home ou /media). Mesure directe.
-PLAFOND_CHEMINS = 411
+# 15/09 (chef) : 433 apres fusion de poste1-11 (temoins ulp, equivalence), poste2 (GLM AWQ),
+# poste3 (campagnes 1aj, courbes), poste4 (route+pack) -- carnets et scripts de campagne
+# nomment leurs chemins ; mesure directe, aucun de mes fichiers.
+PLAFOND_CHEMINS = 433
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute

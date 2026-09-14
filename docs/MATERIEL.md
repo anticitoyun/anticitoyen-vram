@@ -319,14 +319,14 @@ décide de nos noyaux.
 (original conservé en `.orig-0.29`). Sans lui, le décodage MLA Triton (Lk 576,
 BLOCK_DMODEL 512) demande 102 400 o de mémoire partagée par bloc, la 5090 en
 offre 101 376 : capture impossible, vLLM ne décode aucun MLA façon DeepSeek sur
-RTX 50. Trouvé par poste4 (revue/duel-mla-glm-14-09.md) ; à refaire après
+RTX 50. Trouvé le 14/09 (revue/duel-mla-glm-14-09.md) ; à refaire après
 toute réinstallation de vLLM. `BANC_MLA_STAGES1=0` dans
 `outils/banc_decode_vllm_glm.py` évite le double correctif.
 
 **Plafond de puissance de la 5090 : 400-600 W seulement** (14/09, vérifié
 `nvidia-smi -pl 300` → « should be between 400.00 W and 600.00 W »). Le mode
 « eco » ne peut donc pas passer par `-pl` : il passe par l'horloge
-(`-lgc 2 100` mesuré 13/09 : J −19 %, t/s −20 %). Le refus de poste3 le 14/09
+(`-lgc 2 100` mesuré 13/09 : J −19 %, t/s −20 %). Le refus observé le 14/09
 n'était pas sudo, c'était la borne matérielle.
 
 **FlashInfer installé (14/09, décision utilisateur, P1 de poste7)** :
@@ -334,7 +334,7 @@ n'était pas sudo, c'était la borne matérielle.
 0.6.18.post1, nvidia-cutlass-dsl 4.7.1 ; import et 5090 sm_120 vérifiés) ;
 sources en lecture seule `/opt/ia/flashinfer/src` (a72f726, GitHub, jamais de
 publication) — banc de l'étalon : `src/benchmarks/bench_b12x_mxfp4_moe.py`.
-Aucune mesure lancée ; poste4 mesure après le pas complet MoE (5), sous carte.sh,
+Aucune mesure lancée ; la mesure vient après le pas complet MoE (5), sous carte.sh,
 `CUDA_VISIBLE_DEVICES=0`, 20 s.
 
 **Piège de chemin (15/09)** : `/mnt/4TO_SATACMR_2022/Modeles/models_acvram` est un

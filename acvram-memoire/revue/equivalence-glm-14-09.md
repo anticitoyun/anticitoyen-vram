@@ -230,14 +230,30 @@ multiplicateur venait à monter sans l'expliquer.
 HF bf16 CPU, eager vs sdpa, mêmes 16 jetons : plancher témoin = **4,00
 ulp** (position 3). Seuil recalé (poste7 §3, plancher+1) = **5 ulp**, pas
 2. Recalculé à ce seuil sur `mini-acvram4` vs HF : les positions 3, 4, 5,
-15 passent maintenant (toutes ≤ 3,45 ulp < 5) — **15/16 passent**, seule
-la position 0 (14,52 ulp, l'ex-aequo réel) reste en échec sur le critère
-delta.
+15 passent maintenant (toutes ≤ 3,45 ulp < 5) — 15/16 sur le critère
+delta seul.
 
-Provisoire : le témoin GPU vs CPU (poste7 §3, 5 min de carte, après poste3
-dans la file) pourrait relever encore ce plancher — pas fait ici. Le
-multiplicateur "2" reste "en vigueur" tel que scellé jusqu'à ce que
-poste7/chef confirment le passage à 5.
+**Position 0 vérifiée précisément à ce seuil** : écart top-1/top-2 de la
+référence = 0,375 = 3 ulp ≤ 5×0,125=0,625 → **ex-aequo prouvé** au seuil
+recalé (il ne l'était pas à 2 ulp : 0,375 > 0,25). **Verdict complet à
+seuil=5 : 16/16 passent** (15 par delta/top-1/cos, 1 par ex-aequo).
+
+## TÉMOIN GPU vs CPU MESURÉ (revue/prediction-temoin-ulp-gpu-cpu-15-09.md)
+
+Plancher BRUT (max des 16) = 14,69 ulp — porté ENTIÈREMENT par la
+position 0 (ex-aequo déjà connu, confirmé indépendant du bras : écart
+top-1/top-2 propre = 6 ulp côté GPU, 3 ulp côté CPU eager/sdpa — une
+propriété du jeton, pas d'une implémentation). Les 15 AUTRES positions
+plafonnent à 4 ulp dans ce témoin aussi (position 15) — MÊME chiffre que
+le témoin CPU eager/sdpa (position 3, 4 ulp). Deux témoins indépendants
+s'accordent sur 4 ulp hors ex-aequo.
+
+**Nuance non tranchée seule** : appliquer le plancher BRUT (14,69+1=
+15,69) comme seuil général rendrait le critère quasi inopérant. En
+excluant la position déjà identifiée comme ex-aequo du calcul du
+plancher (cohérent avec ce que fait le critère lui-même), le plancher
+reste 4 ulp et le seuil général reste **5 ulp** — inchangé par ce second
+témoin. Remonté à chef/poste7 sans décider seule.
 
 **Trois bogues réels trouvés et corrigés cette session, tous avec test
 qui casse** :
