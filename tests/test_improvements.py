@@ -1062,8 +1062,23 @@ def test_convertisseur_refuse_une_couche_moe_a_formats_melanges():
         # casser la pile groupee de CETTE couche.
         fmt = "int4_awq" if expert == 0 else "nvfp4"
         tensors[f"model.layers.2.mlp.experts.{expert}.up_proj.weight"] = {"format": fmt}
-    with pytest.raises(ValueError, match="formats MÉLANGÉS"):
+    with pytest.raises(ValueError, match="MÉLANGÉS"):
         _verifier_homogeneite_moe(tensors, num_layers=4)
+
+
+def test_convertisseur_tolere_une_echelle_awq_melangee_entre_experts():
+    """poste7, 15/09 (a6a7436) : l'echelle AWQ par expert reste legitimement
+    heterogene dans la pile -- c'est au chargeur (poste4) de la porter,
+    pas a la conversion de l'uniformiser ou de la refuser. Rejoue 63
+    experts avec has_act_scale=True et 1 sans (meme format partout,
+    presence d'echelle differente) : NE DOIT PLUS lever (inverse du
+    comportement d'avant a6a7436)."""
+    from acvram.quant.convert import _verifier_homogeneite_moe
+    tensors = {}
+    for expert in range(64):
+        tensors[f"model.layers.1.mlp.experts.{expert}.gate_proj.weight"] = {
+            "format": "int4_awq", "has_act_scale": expert != 0}
+    _verifier_homogeneite_moe(tensors, num_layers=2)  # ne leve pas
 
 
 def test_convertisseur_ignore_le_bloc_mtp_pour_l_homogeneite_moe():
