@@ -47,3 +47,61 @@ ou boucle, pas de refaire la mesure de puissance elle-même).
                verrou continu pour toute la campagne, pas un par cellule)
     nommage    dossier de sortie porte le nom du mode (règle 4 de poste7 :
                « le mode est porté par le nom »)
+
+## Reprise du 14/09 (matin) — corrections avant relance
+
+**Ce qui change et pourquoi.** (1) « refus -pl 300 » d'hier soir n'était pas
+sudo : la 5090 n'accepte que 400-600 W (`docs/MATERIEL.md` §plage,
+1103825). **eco = `-lgc 2100`** (horloge bloquée, plafond 400 inchangé),
+alternative déjà nommée par poste7. (2) La lecture P-state d'hier (`P8`) était
+prise **après la sortie du processus** — à froid : elle ne répondait pas à
+la question. Le P-state se relève maintenant **dans le processus, modèle
+chargé, graphes capturés, pendant 30 s sans aucun pas** (sonde toutes les
+5 s : état, W, MHz). (3) `moyen` est **remesuré dans la même campagne**
+(dérive thermique : on ne compare pas à un chiffre d'hier). (4) En-tête
+REGLES §3 dans chaque enregistrement JSON (instrument, cartes, fenêtre,
+plafond, horloge min/moy/max, mode).
+
+**Seuils (poste7, inchangés)** : `max` t/s ≥ 1,08 × moyen ; `eco` J ≤ 0,90 ×
+moyen — le moyen de la MÊME campagne. Alarme publiée d'avance : si le moyen
+remesuré à b=12 s'écarte de > 5 % de 630,6 t/s / 0,619 J (hier), les deux
+régimes diffèrent et je le dis avant de comparer.
+
+**Mes prédictions ajoutées (scellées, à réfuter)** :
+
+    max b=12   : le plafond 400 W mordait à b=12 (moyenne 395-400 W hier,
+                 401-435 W à b=2-4 avant régulation) → t/s +8 à +15 %,
+                 J/jeton +5 à +15 % (plus de W pour un peu plus de t/s).
+                 Réfuté si t/s < +3 % (le plafond ne mordait pas, comme au
+                 3/09 à b=1 : +0,3 %) — alors « max » ne vaut rien.
+    max b=1    : +0 à +2 % t/s (b=1 ≈ 330 W < 400, plafond inactif).
+    eco b=12   : 2 100 MHz vs ~2 600 libre → t/s −15 à −22 %, J −12 à −20 %
+                 (13/09 : −20 % / −19 %). Réfuté si J > −10 % (poste7).
+    P-state    : P0 maintenu pendant tout le repos chaud, W 65-80 → la cause
+                 du plancher est le contexte CUDA vivant, pas une boucle de
+                 service (il n'y en a aucune dans ce script : sleep pur).
+                 Réfuté si l'état lu est P8/P5 avec W ≥ 60 (autre cause :
+                 mémoire/horloge mémoire) ou si W < 30 (le plancher 68-76
+                 venait du serveur, à remesurer sous `acvram serve`).
+
+## P5 — garde de décodage sous prefill (même prise de carte, après les modes)
+
+Montage : b=1 établi (A, invite 256, 300 pas chronométrés seule), puis B
+(invite 8 192, `max_tokens=1`) admise sous `ACVRAM_BUDGET_JETONS` = 512 /
+2 048 / 8 192. Fenêtre = admission de B → `B.prefilled`. Chute = 1 −
+t/s(A sous prefill)/t/s(A seule). Preuve que la config a pris : pas du
+prefill de B = 16 / 4 / 1 exactement, sinon cellule invalide.
+
+poste7 : chute ≤ 30 % à 512 et ≥ 70 % à 8 192 → le budget est la garde ;
+indépendant du budget → la garde est ailleurs.
+
+Ma prédiction : chaque pas sous prefill coûte (tranche de prefill + 1 pas de
+décodage) ; à 6 400 j/s de prefill, 512 jetons ≈ 80 ms contre 5,5 ms le pas
+seul → **chute ≈ 90 % à 512, ≈ 98 % à 2 048, ≈ 99 % à 8 192** — dépendante
+du budget mais jamais ≤ 30 % : le budget découpe la latence de B, il ne
+protège pas le débit de A tant que la tranche coûte plus qu'un pas. Réfuté
+si chute ≤ 30 % à 512 (le prefill se recouvre avec le décodage, ce que je
+ne vois nulle part dans `runner.py:705-760`) ; à l'inverse, chute égale aux
+trois budgets = config pas prise (voir preuve) avant toute autre lecture.
+Durée prefill de B seule : ≈ 1,3 s à 8 192 (borne 6 400 j/s), plus à 512
+(16 lancements + 16 pas de décodage intercalés).
