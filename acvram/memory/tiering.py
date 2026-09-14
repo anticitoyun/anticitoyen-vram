@@ -369,7 +369,16 @@ def build_tiers(rig: Rig, opts: PlannerOptions) -> list[Tier]:
         tiers.append(Tier(
             name="cpu", kind="host", device_index=-1,
             capacity=int(avail * opts.host_fraction),
-            weight_format=tiers[0].weight_format if tiers else "int4_awq",
+            # `force_format` D'ABORD, comme le tiers GPU (ligne ~350) : sans
+            # carte visible (CUDA_VISIBLE_DEVICES="", defaut de toute session
+            # depuis carte.sh/guet.sh du 14/09), `tiers` est VIDE ici — l'ancien
+            # repli `tiers[0].weight_format if tiers else "int4_awq"` retombait
+            # alors TOUJOURS sur int4_awq, ignorant silencieusement --format.
+            # Ce n'etait pas visible avant que CUDA_VISIBLE_DEVICES="" devienne
+            # le defaut : sans carte visible, toute conversion --format bf16
+            # sans GPU quantifiait les poids malgre la demande explicite.
+            weight_format=opts.force_format or
+            (tiers[0].weight_format if tiers else "int4_awq"),
             kv_format="fp16", read_bandwidth=70.0,
             link_bandwidth=max((t.link_bandwidth for t in tiers), default=25.0),
         ))
