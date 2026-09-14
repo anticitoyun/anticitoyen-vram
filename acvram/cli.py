@@ -481,6 +481,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
                    if args.q3n_table else None),
         mixed_precision=args.mixed_precision, snr_floor=args.snr_floor,
         max_promotions=args.max_promotions,
+        promotion_classes=tuple(c.strip() for c in args.promotion_classes.split(",") if c.strip()),
         autoriser_grossissement=args.autoriser_grossissement,
         quant_device=args.quant_device, bits_budget_gib=args.bits_budget,
         garder_grille=args.grille_erreurs,
@@ -816,6 +817,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "c'est l'ordre de parcours qui decide a la place du "
                          "SNR (5333 inversions mesurees sur Agents-A1-4B). "
                          "1.0 ne borne plus rien")
+    cv.add_argument("--promotion-classes", default="",
+                    help="classes promouvables, suffixes separes par des virgules "
+                         "(ex. q_proj,k_proj,lm_head) ; vide = toutes")
     cv.add_argument("--snr-floor", type=float, default=0.0,
                     help="SNR en sortie de couche (dB) sous lequel un tenseur est "
                          "promu ; 0 (defaut) ne promeut rien. Mesure sur un 27B : "

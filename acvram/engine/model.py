@@ -879,12 +879,12 @@ class MoEBlock(nn.Module):
                           (bs.data_ptr() + ar * bs.stride(0)).to(qw.device))
         return cache[cle]
 
-    def _gemm_mma(self, pile, xq, xsf, tiles, brut=False):
+    def _gemm_mma(self, pile, xq, xsf, tiles, brut=False, bt=None):
         _, qw, _, gs, k, m = pile
         tq, tb = self._tables_adresses(pile)
         y = kernels.get_extension().nvfp4_gemm_grouped_mma(
             tq, tb, gs, xq, xsf, tiles[0], tiles[1], tiles[2],
-            qw.shape[1], k, _MOE_MMA_BT, _MOE_MMA_ETAGES, _MOE_MMA_KS)
+            qw.shape[1], k, bt or _MOE_MMA_BT, _MOE_MMA_ETAGES, _MOE_MMA_KS)
         return y if brut else y[:, :m]
 
     def _forward_prefill_grouped(self, x, topw, topi) -> Optional[torch.Tensor]:
@@ -983,6 +983,58 @@ class MoEBlock(nn.Module):
             return ext.moe_reduce_trie(d, tw.contiguous(), inv.to(torch.int32).contiguous(), m_out, k)
         d = d[:, :m_out].to(torch.float32) * topw.reshape(-1)[ordre].to(torch.float32).unsqueeze(-1)
         return d[inv].view(t, k, -1).sum(dim=1).to(x.dtype)
+
+    def _forward_grouped_mma(self, x, topw, topi) -> Optional[torch.Tensor]:
+        """Décodage (t petit) par la GEMM groupée MMA FP4 native — levier (3)
+        de poste7 (revue/poste7-moe-mma-decodage-14-09.md) : à b=12 les GEMV
+        dépensent 1,4-2,6 instructions par octet DRAM (71 % des instructions
+        du pas, chaque noyau au plafond de 400 W) là où la MMA block-scaled
+        en fait 0,13. Même code que la branche ``mma`` du prefill, mais
+        CAPTURABLE : grille de tuiles FIXE (``_tuiles(cnt, bt, t_max)``,
+        poste1 c8096c0), aucun ``.item()``, formes constantes en t et top_k.
+        Créneaux fantômes (``topi == -1``) : expert 0 avec poids 0 — une
+        contribution nulle et FINIE (une ligne sans tuile lirait une sortie
+        non initialisée, que 0 × NaN ne neutralise pas). Rend ``None`` si
+        le chemin n'est pas disponible (piles non nvfp4, noyau absent)."""
+        st = self._stacks
+        if st is None or "gate_proj" not in st:
+            return None
+        pg, pu, pd = (st[n] for n in ("gate_proj", "up_proj", "down_proj"))
+        if any(p[0] != "nvfp4" for p in (pg, pu, pd)):
+            return None
+        ext = kernels.get_extension()
+        if (ext is None or not hasattr(ext, "nvfp4_gemm_grouped_mma")
+                or not hasattr(ext, "moe_act") or not hasattr(ext, "moe_reduce_trie")
+                or pg[4] % 64 != 0 or pd[4] % 64 != 0
+                or not ext.nvfp4_gemm_grouped_mma_disponible()):
+            return None
+        t, k = topi.shape
+        E = pg[1].shape[0]
+        fantome = topi < 0
+        flat_e = torch.where(fantome, torch.zeros_like(topi), topi).reshape(-1).to(torch.int64)
+        tw = torch.where(fantome, torch.zeros_like(topw), topw).reshape(-1)
+        tw = tw if tw.dtype == torch.float32 else tw.to(torch.float32)
+        flat_t = torch.arange(t, device=x.device).repeat_interleave(k)
+        ordre = torch.argsort(flat_e, stable=True)
+        # scatter_add_, pas bincount : bincount lit le max sur l'hôte (forme de
+        # sortie), incapturable dans un graphe CUDA.
+        cnt = torch.zeros(E, dtype=torch.int64, device=x.device).scatter_add_(
+            0, flat_e, torch.ones_like(flat_e))
+        bt = _MOE_DECODE_MMA_BT
+        tiles = self._tuiles(cnt, bt, t_max=-(-(t * k) // bt) + E)
+        xs = x[flat_t[ordre]].to(torch.bfloat16)
+        if xs.shape[1] != pg[4]:
+            xs = F.pad(xs, (0, pg[4] - xs.shape[1]))
+        xs = xs.contiguous()
+        xq, xsf = ext.nvfp4_quant_act(xs)
+        g = self._gemm_mma(pg, xq, xsf, tiles, brut=True, bt=bt)
+        u = self._gemm_mma(pu, xq, xsf, tiles, brut=True, bt=bt)
+        act = ext.moe_act(g, u, pg[5], pd[4], 1 if self.act == "gelu_tanh" else 0)
+        aq, asf = ext.nvfp4_quant_act(act)
+        d = self._gemm_mma(pd, aq, asf, tiles, brut=True, bt=bt)
+        inv = torch.empty_like(ordre); inv[ordre] = torch.arange(ordre.numel(), device=x.device)
+        y = ext.moe_reduce_trie(d, tw.contiguous(), inv.to(torch.int32).contiguous(), pd[5], k)
+        return y if x.dtype == torch.bfloat16 else y.to(x.dtype)
 
     def _forward_grouped(self, x, topw, topi):
         t = x.shape[0]
@@ -1115,7 +1167,9 @@ class MoEBlock(nn.Module):
                 self._stack_state = "oui" if self._try_build_stacks() else "non"
             if self._stack_state == "oui":
                 if t <= _MOE_GROUPED_MAX:
-                    y = self._forward_grouped(x, topw, topi)
+                    y = (self._forward_grouped_mma(x, topw, topi) if _MOE_DECODE_MMA else None)
+                    if y is None:
+                        y = self._forward_grouped(x, topw, topi)
                 else:
                     y = self._forward_prefill_grouped(x, topw, topi)
                 if y is not None:
@@ -1225,6 +1279,12 @@ _MOE_MMA_ETAGES = int(os.environ.get("ACVRAM_MOE_MMA_ETAGES", "4"))
 # synchronisation. Mesuré le 14/09/2026 (bead 0si), Coder-30B prefill chaud :
 # L=2048 16 911 → 19 148 j/s, L=512 8 761 → 9 853 (revue/mma-fp4-native-sm120.md).
 _MOE_MMA_KS = int(os.environ.get("ACVRAM_MOE_MMA_KS", "128"))
+# Décodage MoE par la MMA groupée (levier (3) de poste7, 14/09) : coupé par
+# défaut tant que le pas complet sous graphes n'a pas tenu ses seuils
+# (15,5-16,3 ms, 0,50-0,53 J/jeton à b=12 ; revue/poste7-moe-mma-decodage-14-09.md § 3).
+# Tuile de 16 : à b=12 un expert reçoit au plus 12 jetons (bras `experts`).
+_MOE_DECODE_MMA = os.environ.get("ACVRAM_MOE_DECODE_MMA", "0") == "1"
+_MOE_DECODE_MMA_BT = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_BT", "16"))
 
 # Décodage MLA sous graphes : 0 = boucle par créneau ; 1 = le noyau
 # d'attention batché seul (bead 6wa, bit-identique, −28,5 % sur le pas

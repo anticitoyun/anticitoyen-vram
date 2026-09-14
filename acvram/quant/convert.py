@@ -92,6 +92,13 @@ class ConversionOptions:
     # une demi-journee.
     format_impose: Optional[str] = None
     max_promotions: float = 0.15      # part maximale de tenseurs promus
+    # Classes de tenseurs PROMOUVABLES (suffixes de nom, ex. ("q_proj", "k_proj")) ;
+    # vide = toutes. Bead 1aj décodage (poste7, 14/09) : sur Coder-30B tous les
+    # q/k/v/o et le lm_head sont promus int8 (0,93 + 0,32 Go par jeton à b=1, +18 %
+    # d'octets sur llama.cpp) ; tout retirer (A6, snr_floor=0) coûte +8,79 % de PPL.
+    # Le test par projection convertit en ne laissant promouvoir qu'une classe à
+    # la fois pour trouver laquelle refuse le W4.
+    promotion_classes: tuple = ()
     # Prix plafond d'une promotion, en mébioctets ajoutés (0 = pas de plafond).
     # Le quota ci-dessus compte des tenseurs ; or une porte de 0,1 Mio et une
     # projection MLP de 39 Mio gagnent le même nombre de décibels en montant
@@ -1019,6 +1026,9 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 and opts.mixed_precision != "off"
                 and metrics["out_snr_db"] < opts.snr_floor
                 and fmt in PROMOTE
+                and (not opts.promotion_classes
+                     or any(name.endswith(c + ".weight") or name.endswith(c)
+                            for c in opts.promotion_classes))
                 and (not opts.promotion_cout_max_mib
                      or cout_promotion_mib(tensor.numel(), fmt, PROMOTE[fmt],
                                            opts.group_size)
