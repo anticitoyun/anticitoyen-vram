@@ -510,10 +510,15 @@ def _adapt_hf(source: Iterator[tuple[str, torch.Tensor]], spec
                 t = t.reshape(t.shape[0], -1)
             yield name, t
         return
-    if mt in ("deepseek_v2", "deepseek_v3", "glm4_moe") and int(getattr(spec, "kv_lora_rank", 0) or 0):
+    if getattr(spec, "est_mla", False):
         # HF : kv_b_proj [nh·(nope+v), rank] scindé en k_b [nh, rank, nope] et
         # v_b [nh, v, rank] (convention du convertisseur llama.cpp, attendue
-        # par le loader) ; experts partagés sous mlp.shared_expert
+        # par le loader) ; experts partagés sous mlp.shared_expert. Le
+        # critère est `ModelSpec.est_mla` (kv_lora_rank > 0), pas une liste de
+        # model_type : glm4_moe_lite (GLM-4.7-Flash) en manquait (bead
+        # anticitoyen-vram-992, 14/09). nope != v (192/256 sur ce modèle,
+        # jamais posé chez nous avant) : la scission ne suppose PAS nope==v,
+        # testé explicitement (test_mla_detection.py).
         nh, nope, vd, rank = (int(spec.num_attention_heads), int(spec.qk_nope_head_dim),
                               int(spec.v_head_dim), int(spec.kv_lora_rank))
         for name, t in source:
