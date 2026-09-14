@@ -94,8 +94,8 @@ COURRIEL_TOLERE = ("noreply", "example")
 # aucun chemin absolu (aucun MODEL code en dur).
 # 14/09 (poste1) : releve a 322 -- fusion de commits paralleles (bead 992),
 # mes fichiers (test_mla_detection.py) n'ajoutent aucun chemin absolu.
-PLAFOND_CHEMINS = 324  # 14/09 nuit (poste1) : fusion de commits paralleles (carte.sh/guet.sh + main
-# a3e44dd), rien de mes fichiers (tiering.py, tests/test_tiering_force_format.py, revue/*)
+PLAFOND_CHEMINS = 325  # 15/09 (poste1) : fusion de commits paralleles (equivalence.py + main
+# fabaf65), rien de mes fichiers
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute

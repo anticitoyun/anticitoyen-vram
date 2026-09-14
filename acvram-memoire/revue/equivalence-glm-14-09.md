@@ -238,12 +238,22 @@ référence = 0,375 = 3 ulp ≤ 5×0,125=0,625 → **ex-aequo prouvé** au seuil
 recalé (il ne l'était pas à 2 ulp : 0,375 > 0,25). **Verdict complet à
 seuil=5 : 16/16 passent** (15 par delta/top-1/cos, 1 par ex-aequo).
 
-Provisoire : le témoin GPU vs CPU (poste7 §3) est en file derrière la
-conversion de poste2 — pas encore mesuré. Tant qu'il ne l'est pas, le
-multiplicateur "2" reste "en vigueur" tel que scellé ; le "5" ci-dessus
-est le résultat du SEUL témoin CPU, pas encore le seuil final (chef :
-"seuil = max des deux planchers + 1"). Aucun changement de code fait
-sur la base de ce seul témoin.
+## TÉMOIN GPU vs CPU MESURÉ (revue/prediction-temoin-ulp-gpu-cpu-15-09.md)
+
+Plancher BRUT (max des 16) = 14,69 ulp — porté ENTIÈREMENT par la
+position 0 (ex-aequo déjà connu, confirmé indépendant du bras : écart
+top-1/top-2 propre = 6 ulp côté GPU, 3 ulp côté CPU eager/sdpa — une
+propriété du jeton, pas d'une implémentation). Les 15 AUTRES positions
+plafonnent à 4 ulp dans ce témoin aussi (position 15) — MÊME chiffre que
+le témoin CPU eager/sdpa (position 3, 4 ulp). Deux témoins indépendants
+s'accordent sur 4 ulp hors ex-aequo.
+
+**Nuance non tranchée seule** : appliquer le plancher BRUT (14,69+1=
+15,69) comme seuil général rendrait le critère quasi inopérant. En
+excluant la position déjà identifiée comme ex-aequo du calcul du
+plancher (cohérent avec ce que fait le critère lui-même), le plancher
+reste 4 ulp et le seuil général reste **5 ulp** — inchangé par ce second
+témoin. Remonté à chef/poste7 sans décider seule.
 
 **Trois bogues réels trouvés et corrigés cette session, tous avec test
 qui casse** :

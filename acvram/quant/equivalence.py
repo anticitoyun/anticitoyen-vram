@@ -19,11 +19,17 @@ positions sur 16 sont comptées ex-aequo. Pas de cosinus global : il
 masque une position fausse derrière quinze bonnes (0,999556 passait
 avec un delta de 1,815 avant ce correctif).
 
-Le multiplicateur « 2 ulp » est négocié, pas mesuré (§ 3) : il devra être
-recalé sur un témoin qui ne nous implique pas (référence contre
-elle-même, deux implémentations légitimes — eager vs sdpa, ou GPU vs
-CPU) avant d'être considéré définitif. En vigueur : 2, jusqu'à cette
-mesure.
+Le multiplicateur a été RECALÉ le 15/09 (pas laissé négocié) sur deux
+témoins référence-contre-elle-même, tous deux HF bf16, mêmes 16 jetons
+(revue/prediction-temoin-ulp-cpu-15-09.md,
+revue/prediction-temoin-ulp-gpu-cpu-15-09.md) :
+  - CPU eager vs sdpa       : plancher hors ex-aequo = 4,00 ulp
+  - GPU (cuda:0) vs CPU     : plancher hors ex-aequo = 4,00 ulp (le
+    plancher BRUT y monte à 14,69, mais entièrement porté par la même
+    position déjà identifiée comme ex-aequo dans le premier témoin —
+    exclue du calcul du plancher pour la même raison qu'elle serait
+    exclue du critère lui-même, pas retenue comme bruit général)
+Les deux témoins s'accordent sur 4 ulp. Seuil retenu = plancher + 1 = 5.
 """
 
 from __future__ import annotations
@@ -32,6 +38,9 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
+# Recalé le 15/09 (voir ci-dessus) — un paramètre documenté, pas un
+# nombre nu choisi à la main : 2 était une négociation avant mesure.
+MULTIPLICATEUR_ULP = 5.0
 MAX_EX_AEQUO = 2
 COS_MIN = 0.9999
 
@@ -56,15 +65,19 @@ class VerdictPosition:
 
 def verdict_position(delta: float, echelle_ref: float,
                      top1_ref: int, top1_nous: int, cos: float,
-                     ecart_top1_top2_ref: Optional[float]) -> VerdictPosition:
+                     ecart_top1_top2_ref: Optional[float],
+                     multiplicateur: float = MULTIPLICATEUR_ULP) -> VerdictPosition:
     """``echelle_ref`` : ``max_j |logit_ref,j|`` sur TOUTE la ligne de
     référence (pas seulement le top-1, pas notre propre sortie — poste7
     § 3 : l'erreur d'accumulation sur le vocabulaire est fixée par les
     grands termes de la référence, jamais par la nôtre). ``ecart_top1_
     top2_ref`` : l'écart MESURÉ entre les deux meilleurs logits de la
     RÉFÉRENCE seule, ou ``None`` s'il n'a pas été relevé (jamais
-    supposé)."""
-    seuil = 2.0 * ulp_bf16(echelle_ref)
+    supposé). ``multiplicateur`` : par défaut le seuil recalé (5, voir
+    le docstring du module) — un paramètre, pas une valeur cachée, pour
+    qu'un futur recalage (nouveau témoin) n'oblige pas à modifier
+    l'appelant."""
+    seuil = multiplicateur * ulp_bf16(echelle_ref)
     if top1_ref == top1_nous:
         if delta <= seuil and cos >= COS_MIN:
             return VerdictPosition(True, False, "ok")

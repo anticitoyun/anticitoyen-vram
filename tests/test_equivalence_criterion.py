@@ -41,8 +41,9 @@ def test_top1_different_sans_ex_aequo_prouve_echoue():
 
 
 def test_delta_seul_hors_seuil_echoue_meme_cos_bon():
-    """Cumulatif (§ 3) : cos excellent ne suffit pas si delta dépasse."""
-    v = verdict_position(delta=0.3, echelle_ref=10.0,   # seuil = 2*0.0625 = 0.125
+    """Cumulatif (§ 3) : cos excellent ne suffit pas si delta dépasse
+    largement le seuil recalé (5 ulp — voir MULTIPLICATEUR_ULP)."""
+    v = verdict_position(delta=1.0, echelle_ref=10.0,   # seuil = 5*0.0625 = 0.3125
                          top1_ref=3, top1_nous=3, cos=0.99999,
                          ecart_top1_top2_ref=None)
     assert not v.ok and not v.ex_aequo
@@ -62,13 +63,12 @@ def test_plus_de_deux_ex_aequo_refute_globalement():
 
 def test_temoin_softmax_au_lieu_de_sigmoid():
     """poste2, capture initiale (routage en softmax, pas sigmoid) :
-    position 1, top-1 réellement différent (acvram=1242, hf=77199),
-    échelle de référence 16,625, écart top-1/top-2 de référence 0,375 —
-    au-dessus de 2 ulp à cette échelle (2×0,125=0,25) : pas un ex-aequo,
-    c'est le bogue."""
-    v = verdict_position(delta=8.0, echelle_ref=16.625,
-                         top1_ref=77199, top1_nous=1242, cos=0.9,
-                         ecart_top1_top2_ref=0.375)
+    position 5, top-1 identique (42589) mais delta=5,01 et cos=0,954 —
+    échoue largement sur delta ET cos, indépendamment du multiplicateur
+    ulp (pas une histoire d'ex-aequo à la frontière)."""
+    v = verdict_position(delta=5.0124, echelle_ref=21.125,
+                         top1_ref=42589, top1_nous=42589, cos=0.954475,
+                         ecart_top1_top2_ref=1.5)
     assert not v.ok and not v.ex_aequo
 
 
@@ -81,6 +81,26 @@ def test_temoin_routeur_bf16_sans_biais_fp32():
                          top1_ref=16949, top1_nous=3559, cos=0.994,
                          ecart_top1_top2_ref=0.625)
     assert not v.ok and not v.ex_aequo
+
+
+def test_verdict_global_casse_sur_le_bogue_softmax():
+    """Quatre positions RÉELLES de la capture avant le correctif routage
+    sigmoid (poste2, logits-acvram.json vs logits-hf.json ; valeurs
+    mesurées, pas reconstruites) : 3 ex-aequo (1, 10, 15 — gap réf ≤ 5
+    ulp) et une franche (5, top-1 identique mais delta=5,01/cos=0,954).
+    Même avec le seuil recalé et jusqu'à 2 ex-aequo tolérés, le verdict
+    global reste RÉFUTÉ (soit par la position 5, soit par le compte
+    d'ex-aequo) — REGLES §4 bis, témoin négatif."""
+    lignes = [
+        (77199, 1242, 2.0248, 0.997028, 25.2500, 0.3750),   # position 1
+        (42589, 42589, 5.0124, 0.954475, 21.1250, 1.5000),  # position 5
+        (96914, 90439, 0.8620, 0.999905, 24.6250, 0.0312),  # position 10
+        (39649, 27608, 3.1620, 0.970630, 14.5625, 0.2500),  # position 15
+    ]
+    verdicts = [verdict_position(delta, echelle, t1r, t1n, cos, gap)
+               for t1r, t1n, delta, cos, echelle, gap in lignes]
+    ok, raison = verdict_global(verdicts)
+    assert not ok, raison
 
 
 def test_temoin_repli_int4_awq_tiers_hote():
