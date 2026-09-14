@@ -3471,3 +3471,15 @@ de 2 à 6 ne satisfait le critère (J ≤ et ms ≤ 1,02×) : le coût fixe du
 chemin MMA est ≈ 2,0-2,3 ms/pas et ne s'amortit qu'à 12. Défaut
 `ACVRAM_MOE_DECODE_MMA_MIN_T = 9` (godets 12 et 16) ; le 6 provisoire servait
 b=5-8 à −18 %. À remesurer après route+pack.
+
+### v0.6.5 (15/09) — routage + rassemblement du MoE en un noyau (route+pack)
+
+Le frontend torch du chemin MMA au décodage (argsort, scatter_add_, `_tuiles`,
+gather, pad, inv : ~45 lancements par couche, 2 160 par pas) est remplacé par
+`moe_route_pack` (un lancement ; tri stable par comptage, tuiles de grille
+fixe, fantômes à poids nul), bit à bit égal au torch. Chiffre officiel b=12
+(poste7, régime ≥ 20 s au compteur, une carte, Coder-30B) : **12,80 ms/pas,
+0,425 J/jeton, 398 W** — contre 14,46 ms / 0,435 J / 361 W sans :
+**« −12 % de temps, −2 % de joules : le pas est revenu au plafond »**.
+Lancements par pas 3 677 → 1 517 (cliquet ≤ 1 700), jetons identiques.
+Défaut `ACVRAM_MOE_ROUTE_PACK=1` ; `0` = témoin torch.
