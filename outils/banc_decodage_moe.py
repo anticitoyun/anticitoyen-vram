@@ -60,7 +60,7 @@ def passe(rep, profiler=False):
         ev = [e for e in prof.key_averages() if e.self_device_time_total > 0 and not e.key.startswith("aten::")
               and not e.key.startswith("cuda") and "Graph" not in e.key]
         tot = sum(e.self_device_time_total for e in ev); ev.sort(key=lambda e: -e.self_device_time_total)
-        print(f"PROFIL b={B} pas GPU={tot/1000:.2f} ms, {len(ev)} noyaux")
+        print(f"PROFIL b={B} pas GPU={tot/1000:.2f} ms, {len(ev)} noyaux, {sum(e.count for e in ev)} lancements")
         for e in ev[:16]:
             print(f"  {e.self_device_time_total/1000:7.3f} ms {100*e.self_device_time_total/tot:5.1f}%  x{e.count:<4d} {e.key[:88]}")
         while eng.running: eng.step()
