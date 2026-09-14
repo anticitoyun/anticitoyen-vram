@@ -46,8 +46,11 @@ LM Studio reste intéressant comme cible de comparaison, et parce que
 | colibrì | <https://github.com/JustVugg/colibri> · [cuda](https://github.com/JustVugg/colibri/blob/main/docs/cuda.md) · [tuning](https://github.com/JustVugg/colibri/blob/main/docs/tuning.md) | **lu le 13/09, à exploiter** — MoE 744B+ en C pur, experts streamés VRAM/RAM/NVMe, cache d'experts apprenant, prefetch double banque, O_DIRECT, KV MLA persistant ; clone `externes/colibri` ; voir `acvram-memoire/revue/colibri-hierarchie-experts-disque.md` |
 | Ollama | <https://ollama.com/> · [github](https://github.com/ollama/ollama) · [API](https://github.com/ollama/ollama/blob/main/docs/api.md) | à évaluer — surtout pour son **dialecte d'API**, que nos clients pourraient vouloir |
 
-TabbyAPI (port 5000, EXL3) complète ce tableau côté maison ; acvram sert sur
-**8090**.
+TabbyAPI (port 5000, EXL3) a été **retiré du duel le 15/09** (poste7 : hors
+objectif B, ×2,5-8 derrière, aucun chemin MLA/MoE sm_120 ; ses chiffres du
+14/09 restent historiques dans `revue/audit-a2`, son banc dans
+`outils/archives/banc_tabbyapi.py`, l'installation `/opt/ia/TabbyAPI` reste
+à l'utilisateur) ; acvram sert sur **8090**.
 
 ## Modèles et formats
 

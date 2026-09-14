@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Duel A2 (audit poste7, item A2) : premier duel à 4 moteurs depuis la
-réinstallation de vLLM/TabbyAPI. Consigne de chef (14/09) : valider
-vLLM et TabbyAPI sur Qwen3-Coder-30B-A3B, régime pp2048, même NVML
+"""Duel A2 (audit poste7, item A2) : duel à TROIS moteurs — acvram, llama.cpp,
+vLLM. TabbyAPI retiré le 15/09 (décision de poste7 : hors objectif B, ×2,5-8
+derrière, aucun chemin MLA/MoE sm_120 ; ses chiffres du 14/09 restent dans
+audit-a2 comme historiques ; son banc est dans outils/archives/). Consigne
+de chef (14/09) : valider les rivaux sur Qwen3-Coder-30B-A3B, régime
+pp2048, même NVML
 power.draw.instant (idle soustrait), même fenêtre — contre notre chiffre
 du jour (acvram, prefill 16 938 j/s, poste4 14/09).
 
@@ -13,18 +16,20 @@ bouts, invite DIFFÉRENTE à chaque répétition, cache de préfixe désactivé,
 implémentent CE protocole, chacun dans le venv de son moteur :
   outils/banc_prefill_chaud.py   (acvram, branche poste4 ea98f36)
   outils/banc_prefill_vllm.py    (vLLM, même dénominateur, écrit ici)
+  outils/banc_llamacpp_reel.py   (llama.cpp, binaire réel sm_120 de poste8,
+                                  même dénominateur, poste2 14/09)
 Ce fichier ne fait qu'ENVELOPPER l'appel d'un relevé de puissance NVML sur
 TOUTE la fenêtre (2 chauffes + 7 répétitions), comme demandé — pas de
 fenêtre par répétition (trop courte pour l'échantillonnage, piège trouvé
 sur mon premier essai).
 
-Modèles, un par moteur (même modèle de base, même NVFP4 — sauf TabbyAPI,
-EXL3, seul format que ce moteur sait servir) :
-  acvram    /mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4
-  vLLM      /mnt/4TO_SATACMR_2022/Modeles/models_vllm/Qwen3-Coder-30B-A3B-Instruct-FP4
-            (NVFP4/Qwen3-Coder-30B-A3B-Instruct-FP4, NVIDIA ModelOpt,
-            téléchargé le 14/09 avec accord explicite — 18,1 Gio)
-  TabbyAPI  /mnt/4TO_SATACMR_2022/Modeles/models_exl3/Qwen3-Coder-30B-A3B-4.0bpw-EXL3
+Modèles, un par moteur (même modèle de base ; NVFP4 pour acvram et vLLM,
+GGUF Q4_K_M pour llama.cpp — son seul format) :
+  acvram     /mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4
+  vLLM       /mnt/4TO_SATACMR_2022/Modeles/models_vllm/Qwen3-Coder-30B-A3B-Instruct-FP4
+             (NVFP4/Qwen3-Coder-30B-A3B-Instruct-FP4, NVIDIA ModelOpt,
+             téléchargé le 14/09 avec accord explicite — 18,1 Gio)
+  llama.cpp  GGUF et binaire fixés dans outils/banc_llamacpp_reel.py
 
 Un seul moteur à la fois (VRAM insuffisante pour deux copies d'un 30B
 simultanées) — libérer explicitement entre deux appels de ce script.
@@ -49,8 +54,6 @@ BASE = Path(MODELES)
 DOSSIER_ACVRAM = BASE / "Qwen3-Coder-30B-A3B-nvfp4"
 DOSSIER_VLLM = Path("/mnt/4TO_SATACMR_2022/Modeles/models_vllm"
                     "/Qwen3-Coder-30B-A3B-Instruct-FP4")
-DOSSIER_EXL3 = Path("/mnt/4TO_SATACMR_2022/Modeles/models_exl3"
-                    "/Qwen3-Coder-30B-A3B-4.0bpw-EXL3")
 
 GPU = 0
 PP_LEN = 2048
@@ -96,6 +99,22 @@ def _mesurer_acvram() -> dict:
            "n_releves_puissance": n}
 
 
+def _mesurer_llamacpp() -> dict:
+    # Serveur llama-server lance et arrete PAR le banc (comme un client
+    # reel) ; puissance et energie mesurees dedans, meme raison que vLLM.
+    venv_python = Path("~/Bureau/Claude/anticitoyen-vram"
+                       "/.venv/bin/python3")
+    cmd = [str(venv_python), "outils/banc_llamacpp_reel.py"]
+    res = _lancer_et_parser(cmd, REPO)
+    if "echec" in res:
+        return res
+    return {"pp_len": PP_LEN, "pp_js": res["pp_js"], "pp_sigma": res["pp_sigma"],
+            "pp_ms": round(1000.0 * PP_LEN / res["pp_js"], 2) if res["pp_js"] else None,
+            "binaire_version": res.get("binaire_version"),
+            "decodage_jetons_s": res.get("jetons_s"),
+            "decodage_j_par_jeton_net": res.get("j_par_jeton_net")}
+
+
 def _mesurer_vllm() -> dict:
     # Puissance mesuree DEDANS banc_prefill_vllm.py, autour de la seule
     # boucle de mesure — pas ici, qui envelopperait aussi le chargement
@@ -115,10 +134,10 @@ def _mesurer_vllm() -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pour-de-vrai", action="store_true")
-    ap.add_argument("--moteur", required=True, choices=["acvram", "vllm", "tabbyapi"])
+    ap.add_argument("--moteur", required=True, choices=["acvram", "llamacpp", "vllm"])
     a = ap.parse_args()
 
-    print(f"BEAD audit poste7 A2 — duel 4 moteurs, moteur={a.moteur}")
+    print(f"BEAD audit poste7 A2 — duel 3 moteurs, moteur={a.moteur}")
     print(f"  pp {PP_LEN}, GPU {GPU}, denominateur commun "
           f"(poste4 14/09) : generate(max_tokens=1), invite differente "
           f"par repetition, cache de prefixe coupe, 2 chauffes + 7 rep, "
@@ -138,9 +157,7 @@ def main() -> int:
             return 2
         donnees = _mesurer_vllm()
     else:
-        print("ECHEC / CAUSE: tabbyapi pas encore implemente (serveur HTTP, "
-              "voir suite du chantier)")
-        return 2
+        donnees = _mesurer_llamacpp()
 
     if "echec" in donnees:
         print(f"ECHEC / CAUSE:\n{donnees['echec']}")
