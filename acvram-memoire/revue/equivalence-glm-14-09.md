@@ -230,14 +230,20 @@ multiplicateur venait à monter sans l'expliquer.
 HF bf16 CPU, eager vs sdpa, mêmes 16 jetons : plancher témoin = **4,00
 ulp** (position 3). Seuil recalé (poste7 §3, plancher+1) = **5 ulp**, pas
 2. Recalculé à ce seuil sur `mini-acvram4` vs HF : les positions 3, 4, 5,
-15 passent maintenant (toutes ≤ 3,45 ulp < 5) — **15/16 passent**, seule
-la position 0 (14,52 ulp, l'ex-aequo réel) reste en échec sur le critère
-delta.
+15 passent maintenant (toutes ≤ 3,45 ulp < 5) — 15/16 sur le critère
+delta seul.
 
-Provisoire : le témoin GPU vs CPU (poste7 §3, 5 min de carte, après poste3
-dans la file) pourrait relever encore ce plancher — pas fait ici. Le
-multiplicateur "2" reste "en vigueur" tel que scellé jusqu'à ce que
-poste7/chef confirment le passage à 5.
+**Position 0 vérifiée précisément à ce seuil** : écart top-1/top-2 de la
+référence = 0,375 = 3 ulp ≤ 5×0,125=0,625 → **ex-aequo prouvé** au seuil
+recalé (il ne l'était pas à 2 ulp : 0,375 > 0,25). **Verdict complet à
+seuil=5 : 16/16 passent** (15 par delta/top-1/cos, 1 par ex-aequo).
+
+Provisoire : le témoin GPU vs CPU (poste7 §3) est en file derrière la
+conversion de poste2 — pas encore mesuré. Tant qu'il ne l'est pas, le
+multiplicateur "2" reste "en vigueur" tel que scellé ; le "5" ci-dessus
+est le résultat du SEUL témoin CPU, pas encore le seuil final (chef :
+"seuil = max des deux planchers + 1"). Aucun changement de code fait
+sur la base de ce seul témoin.
 
 **Trois bogues réels trouvés et corrigés cette session, tous avec test
 qui casse** :
