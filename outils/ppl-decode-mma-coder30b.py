@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
-"""PPL par le CHEMIN DE DÉCODAGE, ACVRAM_MOE_DECODE_MMA=1 — juge de (5)
-scellé par poste7 (`acvram-memoire/revue/poste7-moe-mma-qualite-15-09.md`) :
-9,206 ± 0,02 prédit, ouverture par défaut si ≤ 9,213, réfuté si > 9,213.
+"""PPL par le CHEMIN DE DÉCODAGE — juge de (5), poste7 puis chef (15/09).
+
+Montage (teacher forcing, KV continu) différent de l'étalon 9,2056/9,1218
+(fenêtres 2048/2048 réinitialisées) : le seuil absolu de poste7 ne
+s'applique plus tel quel. chef demande DEUX bras avec CE script :
+`ACVRAM_MOE_DECODE_MMA=0` (A, GEMV W4A16, contrôle de cohérence — doit
+tomber près de l'étalon du parc 9,12 ± 0,05, sinon le montage a un biais
+à nommer) puis `=1` (B, MMA W4A4). Juge : B/A ≤ 1,010 → (5) s'ouvre ;
+> 1,015 → défaut propre au décodage, retour à poste4 ; entre les deux,
+retour à poste7.
+
+    ACVRAM_MOE_DECODE_MMA=0 outils/carte.sh python outils/ppl-decode-mma-coder30b.py
+    ACVRAM_MOE_DECODE_MMA=1 outils/carte.sh python outils/ppl-decode-mma-coder30b.py
 
 PIÈGE VÉRIFIÉ DANS LE CODE avant d'écrire ce script (demandé par chef,
 15/09) : `acvram eval` (`acvram/evaluate.py::perplexity`) construit
@@ -38,8 +48,6 @@ PPL relativement à un défaut réel du chemin décodage : si (5) est fautif,
 cette mesure le verra aussi. Le nombre de jetons notés est choisi pour
 rester du même ordre de grandeur (≈ 8191, comme 4 fenêtres de 2048 avec
 min_context 0).
-
-    outils/carte.sh python outils/ppl-decode-mma-coder30b.py
 """
 import math
 import os
@@ -66,7 +74,11 @@ def main() -> int:
     from acvram.server.chat import load_tokenizer
     from acvram.evaluate import _load_corpus
 
-    assert os.environ.get("ACVRAM_MOE_DECODE_MMA") == "1", "flag pas pose avant import"
+    # Bras A (chef, 15/09) : =0 (GEMV W4A16, controle de coherence contre
+    # l'etalon du parc) et =1 (B, MMA W4A4) avec ce MEME script -- le
+    # `setdefault` plus haut respecte une valeur deja posee dans
+    # l'environnement de l'appelant.
+    assert os.environ.get("ACVRAM_MOE_DECODE_MMA") in ("0", "1"), "flag pas pose avant import"
 
     tokenizer = load_tokenizer(MODEL)
     texte = _load_corpus(CORPUS)
