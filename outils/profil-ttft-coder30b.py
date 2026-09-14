@@ -22,6 +22,7 @@ from pathlib import Path
 import sys as _s, pathlib as _p  # noqa: E401
 _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
 from outils.racine_modeles import MODELES  # noqa: E402
+from outils._chemins import sorties  # noqa: E402
 
 BASE = Path(MODELES)
 DOSSIER = BASE / "Qwen3-Coder-30B-A3B-nvfp4"
@@ -99,8 +100,7 @@ def _mesurer_concurrent(engine, tokenizer, a) -> int:
         profiler_ctx.__exit__(None, None, None)
         table = profiler_ctx.key_averages().table(
             sort_by="self_cpu_time_total", row_limit=30)
-        chemin = Path("~/Bureau/Claude/acvram-memoire"
-                     "/corpus/profil-ttft-coder30b-trace-concurrent.txt")
+        chemin = sorties() / "profil-ttft-coder30b-trace-concurrent.txt"
         chemin.parent.mkdir(parents=True, exist_ok=True)
         chemin.write_text(table)
         print(f"  [profil] trace ecrite dans {chemin}", flush=True)
@@ -123,8 +123,7 @@ def _mesurer_concurrent(engine, tokenizer, a) -> int:
           flush=True)
     print(f"\n{'CONFIRME >70 %' if pct_hors > 70 else 'INFIRME <=70 %'} — cf. audit poste7")
 
-    sortie = Path("~/Bureau/Claude/acvram-memoire"
-                 "/corpus/profil-ttft-coder30b/resultats-concurrent.json")
+    sortie = sorties() / "profil-ttft-coder30b" / "resultats-concurrent.json"
     sortie.parent.mkdir(parents=True, exist_ok=True)
     sortie.write_text(json.dumps(
         {"concurrence": N, "ttft_median_s": med, "ttft_min_s": ttfts[0] if ttfts else None,
@@ -215,8 +214,7 @@ def main() -> int:
             profiler_ctx.__exit__(None, None, None)
             table = profiler_ctx.key_averages().table(
                 sort_by="self_cpu_time_total", row_limit=20)
-            chemin = Path("~/Bureau/Claude/acvram-memoire"
-                         "/corpus/profil-ttft-coder30b-trace.txt")
+            chemin = sorties() / "profil-ttft-coder30b-trace.txt"
             chemin.parent.mkdir(parents=True, exist_ok=True)
             chemin.write_text(table)
             n_sync = table.count("cudaStreamSynchronize") + table.count("cudaDeviceSynchronize")
@@ -245,8 +243,7 @@ def main() -> int:
     med = sorted(l["pct_hors_forward"] for l in lignes)[len(lignes) // 2]
     print(f"\nmediane hors-forward : {med:.1f} %  "
           f"({'CONFIRME >70 %' if med > 70 else 'INFIRME <=70 %'} — cf. audit poste7)")
-    sortie = Path("~/Bureau/Claude/acvram-memoire"
-                 "/corpus/profil-ttft-coder30b/resultats.json")
+    sortie = sorties() / "profil-ttft-coder30b" / "resultats.json"
     sortie.parent.mkdir(parents=True, exist_ok=True)
     sortie.write_text(json.dumps({"requetes": lignes, "mediane_pct_hors_forward": med},
                                  indent=2, ensure_ascii=False))

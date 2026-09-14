@@ -94,8 +94,10 @@ COURRIEL_TOLERE = ("noreply", "example")
 # aucun chemin absolu (aucun MODEL code en dur).
 # 14/09 (poste1) : releve a 322 -- fusion de commits paralleles (bead 992),
 # mes fichiers (test_mla_detection.py) n'ajoutent aucun chemin absolu.
-PLAFOND_CHEMINS = 325  # 15/09 (poste1) : fusion de commits paralleles (equivalence.py + main
-# fabaf65), rien de mes fichiers
+PLAFOND_CHEMINS = 318  # 15/09 soir (poste1) : le cliquet ne peut que descendre (poste7 §8,
+# poste7-reprise-15-09-b.md) -- outils/_chemins.py (modeles()/sorties()) et conversion de
+# 4 scripts (campagne-ab-kld-vs-snr.py, campagne-quota.py, profil-ttft-coder30b.py,
+# banc-4moteurs.py), -7 chemins en dur. poste8 et poste3/poste4/poste2 baissent la suite.
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute
