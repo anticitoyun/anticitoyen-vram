@@ -152,3 +152,23 @@ def test_route_pack_awq_egal_torch():
     ref = (x.to(torch.bfloat16)[torch.arange(T, device=dev).repeat_interleave(TOP_K)[o]] / awq[flat_e[o]])
     assert torch.equal(xs, ref)
     assert torch.equal(es, flat_e[o].to(torch.int32))
+
+
+@CUDA
+def test_table_unite_sautee(monkeypatch):
+    """Échelle absente écrite comme identité explicite (poste2 2205709) : la
+    table vaut 1 partout, le produit est sauté (poste7 § 8 : coût 0 sur un modèle
+    sans AWQ) ; ACVRAM_MOE_AWQ_TEMOIN=2 force le produit (témoin du coût)."""
+    from acvram.engine import model as M
+    dev = torch.device("cuda:0")
+    bloc = _bloc_awq(dev)
+    for m in bloc.experts:
+        for n in ("gate_proj", "up_proj", "down_proj"):
+            lin = getattr(m, n)
+            lin.scaler = ChannelScaler(scale=torch.ones(lin.in_features, dtype=torch.float16), hadamard_block=0)
+    assert bloc._try_build_stacks()
+    assert bloc._stacks_awq["gate_proj"] is None and bloc._stacks_awq["down_proj"] is None
+    monkeypatch.setattr(M, "_MOE_AWQ_TEMOIN", 2)
+    assert bloc._try_build_stacks()
+    assert bloc._stacks_awq["gate_proj"] is not None
+    assert torch.equal(bloc._stacks_awq["gate_proj"], torch.ones_like(bloc._stacks_awq["gate_proj"]))

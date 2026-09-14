@@ -30,6 +30,22 @@ Prédiction scellée ≤ +0,10 ms/pas. ABAB b=12, 1 787 pas, 25 s, 400 W :
 **+0,12 ms (+0,9 %), 2,5 µs/couche** — au-dessus des 2 µs de poste7 ; profil GPU d'un pas +0,07 ms
 (route_pack +0,5 µs, moe_act +0,2 µs par couche), le reste au plafond de puissance.
 
+## Garde d'unité (poste7 § 8) et scellé Coder 0,00 ± 0,03 ms — RÉFUTÉ tel que scellé
+Table = 1 partout (échelle absente écrite en identité, poste2 2205709) → `awq[nom] = None`, produit
+sauté (`ACVRAM_MOE_AWQ_TEMOIN=1` construit puis saute ; `=2` force le produit, témoin du +0,12).
+ABAB b=12 (b12-unite-*.json), même chemin de calcul dans les deux bras :
+
+| bras | pas ms | J/jeton |
+|---|---|---|
+| A1 / A2 (rien) | 13,948 / 13,976 | 0,508 / 0,510 |
+| B1 / B2 (tables construites puis sautées) | **14,210** / 14,044 | 0,516 / 0,512 |
+
+Δ = +0,26 et +0,07 ms : le scellé (0,00 ± 0,03, réfuté > 0,05) est réfuté, mais les deux B
+s'écartent de 0,17 ms entre eux — la ronde ABAB de 25 s ne résout pas ±0,03. Seule différence
+réelle : 34 Mo de tables allouées au chargement puis libérées (placement mémoire ?). À trancher
+par plus de bras ou par un profil GPU pur (qui donnait +0,00 par construction). Pas de garde à
+ajouter tant que l'instrument ne sait pas dire « faux » à ce niveau.
+
 ## Instrument : +1 s dans `energie.py` (b11b8a3)
 Première passe : +0,56 ms, et cinq bras à 25,04 / 26,04 s exactement. `Energie.__exit__` attendait
 le `sleep(periode)` du fil de sonde avant de lire `time.time()` : durée, ms/pas, jetons/s, W moyens
