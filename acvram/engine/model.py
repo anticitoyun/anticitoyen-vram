@@ -1010,30 +1010,41 @@ class MoEBlock(nn.Module):
             return None
         t, k = topi.shape
         E = pg[1].shape[0]
-        fantome = topi < 0
-        flat_e = torch.where(fantome, torch.zeros_like(topi), topi).reshape(-1).to(torch.int64)
-        tw = torch.where(fantome, torch.zeros_like(topw), topw).reshape(-1)
-        tw = tw if tw.dtype == torch.float32 else tw.to(torch.float32)
-        flat_t = torch.arange(t, device=x.device).repeat_interleave(k)
-        ordre = torch.argsort(flat_e, stable=True)
-        # scatter_add_, pas bincount : bincount lit le max sur l'hôte (forme de
-        # sortie), incapturable dans un graphe CUDA.
-        cnt = torch.zeros(E, dtype=torch.int64, device=x.device).scatter_add_(
-            0, flat_e, torch.ones_like(flat_e))
         bt = _MOE_DECODE_MMA_BT
-        tiles = self._tuiles(cnt, bt, t_max=-(-(t * k) // bt) + E)
-        xs = x[flat_t[ordre]].to(torch.bfloat16)
-        if xs.shape[1] != pg[4]:
-            xs = F.pad(xs, (0, pg[4] - xs.shape[1]))
-        xs = xs.contiguous()
+        t_max = -(-(t * k) // bt) + E
+        if _MOE_ROUTE_PACK and hasattr(ext, "moe_route_pack") and t * k <= 1024:
+            # Un lancement pour tout le frontend (poste7-reprise-15-09-b § 2) :
+            # ~40 lancements torch par couche (22 µs sous ncu) en un.
+            xs, ordre, inv, tw, _cnt, te, t0, tn = ext.moe_route_pack(
+                topi.contiguous(), topw.contiguous(), x.contiguous(), E, bt, t_max, pg[4])
+            tiles = (te, t0, tn)
+        else:
+            # Témoin torch (ACVRAM_MOE_ROUTE_PACK=0) : le contrat bit à bit du
+            # noyau, tests/test_moe_route_pack.py.
+            fantome = topi < 0
+            flat_e = torch.where(fantome, torch.zeros_like(topi), topi).reshape(-1).to(torch.int64)
+            tw = torch.where(fantome, torch.zeros_like(topw), topw).reshape(-1)
+            tw = tw if tw.dtype == torch.float32 else tw.to(torch.float32)
+            flat_t = torch.arange(t, device=x.device).repeat_interleave(k)
+            ordre = torch.argsort(flat_e, stable=True)
+            # scatter_add_, pas bincount : bincount lit le max sur l'hôte (forme de
+            # sortie), incapturable dans un graphe CUDA.
+            cnt = torch.zeros(E, dtype=torch.int64, device=x.device).scatter_add_(
+                0, flat_e, torch.ones_like(flat_e))
+            tiles = self._tuiles(cnt, bt, t_max=t_max)
+            xs = x[flat_t[ordre]].to(torch.bfloat16)
+            if xs.shape[1] != pg[4]:
+                xs = F.pad(xs, (0, pg[4] - xs.shape[1]))
+            xs = xs.contiguous()
+            inv = torch.empty_like(ordre); inv[ordre] = torch.arange(ordre.numel(), device=x.device)
+            inv = inv.to(torch.int32)
         xq, xsf = ext.nvfp4_quant_act(xs)
         g = self._gemm_mma(pg, xq, xsf, tiles, brut=True, bt=bt)
         u = self._gemm_mma(pu, xq, xsf, tiles, brut=True, bt=bt)
         act = ext.moe_act(g, u, pg[5], pd[4], 1 if self.act == "gelu_tanh" else 0)
         aq, asf = ext.nvfp4_quant_act(act)
         d = self._gemm_mma(pd, aq, asf, tiles, brut=True, bt=bt)
-        inv = torch.empty_like(ordre); inv[ordre] = torch.arange(ordre.numel(), device=x.device)
-        y = ext.moe_reduce_trie(d, tw.contiguous(), inv.to(torch.int32).contiguous(), pd[5], k)
+        y = ext.moe_reduce_trie(d, tw.contiguous(), inv.contiguous(), pd[5], k)
         return y if x.dtype == torch.bfloat16 else y.to(x.dtype)
 
     def _forward_grouped(self, x, topw, topi):
@@ -1171,7 +1182,15 @@ class MoEBlock(nn.Module):
                 self._stack_state = "oui" if self._try_build_stacks() else "non"
             if self._stack_state == "oui":
                 if t <= _MOE_GROUPED_MAX:
-                    y = (self._forward_grouped_mma(x, topw, topi) if _MOE_DECODE_MMA else None)
+                    # Garde de lot (poste7, revue/poste7-mma-lot-15-09.md) : à b=1 la
+                    # MMA perd 36 % de débit et 14 % de J (poste3 : 4,48 → 7,00 ms,
+                    # 1,51 → 1,72 J) — une tuile m16 pour un jeton. En eager `t`
+                    # est le lot réel ; sous graphes c'est le GODET (le chemin est
+                    # figé à la capture, un lot réel de 5 dans un godet de 8 prend
+                    # le chemin du godet) — pas de `.item()` sur `valid` : une
+                    # synchronisation par couche, et rien de capturable.
+                    mma_ok = _MOE_DECODE_MMA and t >= _MOE_DECODE_MMA_MIN_T
+                    y = (self._forward_grouped_mma(x, topw, topi) if mma_ok else None)
                     if y is None:
                         y = self._forward_grouped(x, topw, topi)
                 else:
@@ -1293,6 +1312,12 @@ _MOE_MMA_KS = int(os.environ.get("ACVRAM_MOE_MMA_KS", "128"))
 # un expert reçoit au plus 12 jetons (bras `experts`).
 _MOE_DECODE_MMA = os.environ.get("ACVRAM_MOE_DECODE_MMA", "1") == "1"
 _MOE_DECODE_MMA_BT = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_BT", "16"))
+# Lot minimal (jetons réels) pour le chemin MMA : 6 provisoire (poste7 15/09,
+# « aucun b ne doit être pire que ce matin ») ; seuil définitif par la courbe
+# b=2/3/4/6 de poste3 : MMA dès que J(MMA) ≤ J(GEMV) et ms ≤ 1,02 × GEMV.
+_MOE_DECODE_MMA_MIN_T = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_MIN_T", "6"))
+# Frontend route+pack en un noyau (15/09, poste7) ; "0" = témoin torch.
+_MOE_ROUTE_PACK = os.environ.get("ACVRAM_MOE_ROUTE_PACK", "1") == "1"
 
 # Décodage MLA sous graphes : 0 = boucle par créneau ; 1 = le noyau
 # d'attention batché seul (bead 6wa, bit-identique, −28,5 % sur le pas

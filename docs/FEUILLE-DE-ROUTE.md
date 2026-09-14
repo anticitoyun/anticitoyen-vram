@@ -3452,3 +3452,13 @@ court 22 s, −13,6 % de temps et −19 % de J/jeton, le pas sort du plafond ;
 chiffre officiel mode moyen (poste3, rondes ctx 2048) : 17,37 → 16,25 ms,
 0,620 → 0,538 J/jeton. Qualité : PPL par le chemin de décodage MMA=1/MMA=0
 = 0,9995 (poste2). Défaut `ACVRAM_MOE_DECODE_MMA=1` ; `0` = témoin.
+
+### v0.6.2 (15/09) — garde de lot sur le chemin MMA
+
+poste3, b=1, ABAB 20 s : MMA=0 4,48 ms/pas, 223 t/s, 1,51 J ; MMA=1 7,00 ms,
+143 t/s, 1,72 J — une tuile m16 pour un jeton coûte 36 % de débit. Garde
+`ACVRAM_MOE_DECODE_MMA_MIN_T` (défaut 6, provisoire, poste7
+`revue/poste7-mma-lot-15-09.md`) : GEMV sous le seuil, MMA au-dessus ; `t` = lot
+réel en eager, godet sous graphes. Seuil définitif par la courbe b=2/3/4/6
+(MMA dès que J(MMA) ≤ J(GEMV) et ms ≤ 1,02 × GEMV), à remesurer après
+route+pack. Test `tests/test_moe_decode_mma_lot.py`.
