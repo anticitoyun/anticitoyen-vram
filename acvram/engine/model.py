@@ -715,14 +715,32 @@ class MoEBlock(nn.Module):
         # retiree (snr_floor=0), invisible sans ce champ.
         self._raison_repli = ""
 
+        awq = {}                               # nom -> table [E, K] bf16 (x / s[e]) ou None
+
         def one(nom, projs):
             ws = [p.qweight for p in projs]
-            if any(p.scaler is not None and not p.scaler.is_identity
-                   for p in projs):
-                self._raison_repli = (
-                    f"{nom} : échelle AWQ posée sur certains experts "
-                    f"seulement (pas tous — repli par expert)")
-                return None                    # échelle AWQ par expert : repli
+            # Échelle AWQ PAR EXPERT dans la pile (poste7, poste7-glm-awq-pile-15-09) :
+            # les lignes sont déjà rassemblées par expert (route+pack, eid) ;
+            # x_ligne / s[e] avant la quantification / le GEMV = exactement ce que
+            # fait la boucle par expert (QuantLinear.forward : scaler.apply).
+            # Refus seulement pour la rotation Hadamard (pas par ligne).
+            scs = [p.scaler for p in projs]
+            if any(sc is not None and sc.hadamard_block for sc in scs):
+                self._raison_repli = f"{nom} : rotation Hadamard par expert (pas de pile)"
+                return None
+            if any(sc is not None and sc.scale is not None for sc in scs) or _MOE_AWQ_TEMOIN:
+                # ACVRAM_MOE_AWQ_TEMOIN=1 : tables de 1 même sans échelle, pour
+                # mesurer le coût du chemin (division par ligne) sans changer la sortie
+                K_in = getattr(ws[0], "padded_in", None) or ws[0].qweight.shape[1]
+                dev = ws[0].qweight.device
+                table = torch.ones(len(projs), K_in, dtype=torch.bfloat16, device=dev)
+                for e, sc in enumerate(scs):
+                    if sc is not None and sc.scale is not None:
+                        v = sc.scale.to(dev, torch.bfloat16)
+                        table[e, :v.numel()] = v
+                awq[nom] = table
+            else:
+                awq[nom] = None
             if all(isinstance(w, NVFP4Tensor) for w in ws):
                 if len({(w.shape, w.padded_in) for w in ws}) != 1:
                     self._raison_repli = f"{nom} : forme ou padding differents entre experts"
@@ -792,7 +810,15 @@ class MoEBlock(nn.Module):
             print("[acvram] piles d'experts : mémoire GPU insuffisante, boucle par expert",
                   flush=True)
             return False
+        # gate et up lisent la même entrée : leurs échelles AWQ doivent être
+        # égales (alpha commun, A7) pour un seul rassemblement ; sinon repli.
+        g, u = awq.get("gate_proj"), awq.get("up_proj")
+        if (g is None) != (u is None) or (g is not None and not torch.equal(g, u)):
+            self._raison_repli = "gate_proj/up_proj : échelles AWQ différentes entre gate et up (repli par expert)"
+            print(f"[acvram] repli lent (boucle par expert) sur cette couche : {self._raison_repli}", flush=True)
+            return False
         self._stacks = piles
+        self._stacks_awq = awq
         return True
 
     def _grouped(self, x32: torch.Tensor, pile, expert_ids, token_ids):
@@ -939,6 +965,14 @@ class MoEBlock(nn.Module):
         ordre = torch.argsort(flat_e, stable=True)
         cnt = torch.bincount(flat_e, minlength=E)
         xs = x[flat_t[ordre]].to(torch.bfloat16).contiguous()        # [G, H]
+        # échelle AWQ par expert (poste7-glm-awq-pile-15-09) : x_ligne / s[e]
+        # comme ChannelScaler.apply en boucle — au prefill aussi, sinon la
+        # sortie change en silence dès que les experts portent une échelle
+        awq = getattr(self, "_stacks_awq", {})
+        e_sorted = flat_e[ordre]
+        if awq.get("gate_proj") is not None:
+            xs = (xs / awq["gate_proj"][e_sorted, :xs.shape[1]]).contiguous()
+        awq_d = awq.get("down_proj")
         # Glue en deux noyaux (moe_act, moe_reduce_trie) : le profil du 13/09
         # donnait 25 % du pas aux conversions fp32, produit, rembourrage,
         # permutation inverse et somme faits en torch sur [G, M] entiers.
@@ -948,9 +982,12 @@ class MoEBlock(nn.Module):
 
         def _activation(g, u, m, kd):
             if glue and g.dtype == torch.bfloat16:
-                return ext.moe_act(g, u, m, kd, code_act)
+                return ext.moe_act(g, u, m, kd, code_act, awq_d,
+                                   e_sorted.to(torch.int32) if awq_d is not None else None)
             act = (self._act(g[:, :m].to(torch.float32))
                    * u[:, :m].to(torch.float32)).to(torch.bfloat16)
+            if awq_d is not None:
+                act = act / awq_d[e_sorted, :m]
             if act.shape[1] != kd:
                 act = F.pad(act, (0, kd - act.shape[1]))
             return act.contiguous()
@@ -1033,8 +1070,10 @@ class MoEBlock(nn.Module):
         if _MOE_ROUTE_PACK and hasattr(ext, "moe_route_pack") and t * k <= 1024:
             # Un lancement pour tout le frontend (poste7-reprise-15-09-b § 2) :
             # ~40 lancements torch par couche (22 µs sous ncu) en un.
-            xs, ordre, inv, tw, _cnt, te, t0, tn = ext.moe_route_pack(
-                topi.contiguous(), topw.contiguous(), x.contiguous(), E, bt, t_max, pg[4])
+            awq = getattr(self, "_stacks_awq", {})
+            xs, ordre, inv, tw, _cnt, te, t0, tn, e_sorted = ext.moe_route_pack(
+                topi.contiguous(), topw.contiguous(), x.contiguous(), E, bt, t_max, pg[4],
+                awq.get("gate_proj"))
             tiles = (te, t0, tn)
         else:
             # Témoin torch (ACVRAM_MOE_ROUTE_PACK=0) : le contrat bit à bit du
@@ -1053,12 +1092,16 @@ class MoEBlock(nn.Module):
             xs = x[flat_t[ordre]].to(torch.bfloat16)
             if xs.shape[1] != pg[4]:
                 xs = F.pad(xs, (0, pg[4] - xs.shape[1]))
+            awq = getattr(self, "_stacks_awq", {})
+            e_sorted = flat_e[ordre].to(torch.int32)
+            if awq.get("gate_proj") is not None:
+                xs = xs / awq["gate_proj"][e_sorted.long()]
             xs = xs.contiguous()
             inv = torch.empty_like(ordre); inv[ordre] = torch.arange(ordre.numel(), device=x.device)
             inv = inv.to(torch.int32)
         xq, xsf = ext.nvfp4_quant_act(xs)
         code_act = 1 if self.act == "gelu_tanh" else 0
-        if (_MOE_DECODE_FUSED and hasattr(ext, "nvfp4_moe_fused") and bt == 16
+        if (_MOE_DECODE_FUSED and hasattr(ext, "nvfp4_moe_fused") and bt == 16 and awq.get("down_proj") is None
                 and pg[4] % 128 == 0 and pg[5] == pd[4] and pd[4] % _MOE_FUSED_TN == 0 and pd[5] % 128 == 0):
             # Port de b12x (poste7-reprise-15-09-b § 3-4) : gate+up+act+quant en
             # shared, down par tranches, split-K sériel (bit-reproductible),
@@ -1071,7 +1114,8 @@ class MoEBlock(nn.Module):
         else:
             g = self._gemm_mma(pg, xq, xsf, tiles, brut=True, bt=bt)
             u = self._gemm_mma(pu, xq, xsf, tiles, brut=True, bt=bt)
-            act = ext.moe_act(g, u, pg[5], pd[4], code_act)
+            act = ext.moe_act(g, u, pg[5], pd[4], code_act, awq.get("down_proj"),
+                              e_sorted if awq.get("down_proj") is not None else None)
             aq, asf = ext.nvfp4_quant_act(act)
             d = self._gemm_mma(pd, aq, asf, tiles, brut=True, bt=bt)
         y = ext.moe_reduce_trie(d, tw.contiguous(), inv.contiguous(), pd[5], k)
@@ -1116,13 +1160,22 @@ class MoEBlock(nn.Module):
             d = d * topw.reshape(-1, 1).to(d.dtype)
             return d.view(t, self.top_k, -1).sum(dim=1).to(x.dtype)
         pg, pu = self._stacks["gate_proj"], self._stacks["up_proj"]
+        awq = getattr(self, "_stacks_awq", {})
+        if awq.get("gate_proj") is not None:
+            # échelle AWQ par expert : la ligne (jeton, expert) est divisée par
+            # s[e] avant les projections, comme ChannelScaler.apply en boucle
+            x_g = (x[tok.long()].to(torch.bfloat16)
+                   / awq["gate_proj"][eid.long(), :x.shape[1]]).to(x.dtype)
+            tok_g = torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
+        else:
+            x_g, tok_g = x, tok
         if (pg[0] == "nvfp4" and pu[0] == "nvfp4" and ext is not None
                 and hasattr(ext, "nvfp4_gemv_grouped_gateup")
                 and pg[4] * 4 <= 48 * 1024):
             # gate, up et SiLU·up en un lancement, activation bf16 lue telle quelle
             act = ext.nvfp4_gemv_grouped_gateup(
-                pg[1], pg[2], pg[3], pu[1], pu[2], pu[3], eid, tok,
-                x.contiguous(), pg[4],
+                pg[1], pg[2], pg[3], pu[1], pu[2], pu[3], eid, tok_g,
+                x_g.contiguous(), pg[4],
                 1 if self.act == "gelu_tanh" else 0)[:, :pg[5]]
         elif (pg[0] == "nvfp4_table" and pu[0] == "nvfp4_table" and ext is not None
                 and hasattr(ext, "nvfp4_gemv_grouped_gateup_table")
@@ -1130,15 +1183,17 @@ class MoEBlock(nn.Module):
             # pendant table (bead pds) : couche au placement hétérogène,
             # chaque expert lu par adresse plutôt que par une pile contiguë
             act = ext.nvfp4_gemv_grouped_gateup_table(
-                pg[1], pg[2], pg[3], pu[1], pu[2], pu[3], eid, tok,
-                x.contiguous(), pg[5], pg[4],
+                pg[1], pg[2], pg[3], pu[1], pu[2], pu[3], eid, tok_g,
+                x_g.contiguous(), pg[5], pg[4],
                 1 if self.act == "gelu_tanh" else 0)[:, :pg[5]]
         else:
-            x32 = x.to(torch.float32)
-            g = self._grouped(x32, pg, eid, tok)
-            u = self._grouped(x32, pu, eid, tok)
+            x32 = x_g.to(torch.float32)
+            g = self._grouped(x32, pg, eid, tok_g)
+            u = self._grouped(x32, pu, eid, tok_g)
             act = self._act(g) * u              # [G, I] fp32
         seq = torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
+        if awq.get("down_proj") is not None:
+            act = (act.to(torch.bfloat16) / awq["down_proj"][eid.long(), :act.shape[1]]).to(act.dtype)
         d = self._grouped(act, self._stacks["down_proj"], eid, seq)
         # Chaque jeton possède exactement top_k lignes contiguës : une somme
         # sur cet axe remplace l'index_add_ atomique — déterministe, plus
@@ -1374,6 +1429,7 @@ _MOE_MMA_KS = int(os.environ.get("ACVRAM_MOE_MMA_KS", "128"))
 # un expert reçoit au plus 12 jetons (bras `experts`).
 _MOE_DECODE_MMA = os.environ.get("ACVRAM_MOE_DECODE_MMA", "1") == "1"
 _MOE_DECODE_MMA_BT = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_BT", "16"))
+_MOE_AWQ_TEMOIN = os.environ.get("ACVRAM_MOE_AWQ_TEMOIN", "0") == "1"
 # Lot minimal pour le chemin MMA : 9 (godets 12 et 16 seulement). Courbe de
 # poste3, 15/09, MMA/GEMV : b=2 +36 % ms / −3,5 % J ; b=3 +27 / −6,3 ; b=4 +24 /
 # +2,2 ; b=6 +18 / +2,7 ; b=12 −6,4 / −13,2 — le coût fixe de la MMA
