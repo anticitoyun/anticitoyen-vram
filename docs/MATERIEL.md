@@ -328,3 +328,11 @@ toute réinstallation de vLLM. `BANC_MLA_STAGES1=0` dans
 « eco » ne peut donc pas passer par `-pl` : il passe par l'horloge
 (`-lgc 2 100` mesuré 13/09 : J −19 %, t/s −20 %). Le refus de poste3 le 14/09
 n'était pas sudo, c'était la borne matérielle.
+
+**FlashInfer installé (14/09, décision utilisateur, P1 de poste7)** :
+`/opt/ia/flashinfer/.venv` (uv, Python 3.12, torch 2.14.0+cu130, flashinfer-python
+0.6.18.post1, nvidia-cutlass-dsl 4.7.1 ; import et 5090 sm_120 vérifiés) ;
+sources en lecture seule `/opt/ia/flashinfer/src` (a72f726, GitHub, jamais de
+publication) — banc de l'étalon : `src/benchmarks/bench_b12x_mxfp4_moe.py`.
+Aucune mesure lancée ; poste4 mesure après le pas complet MoE (5), sous carte.sh,
+`CUDA_VISIBLE_DEVICES=0`, 20 s.
