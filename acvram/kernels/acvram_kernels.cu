@@ -2955,7 +2955,7 @@ std::vector<torch::Tensor> moe_route_pack(torch::Tensor topi, torch::Tensor topw
 // dans l'ordre fixe des tranches (bit-reproductible d'un pas à l'autre),
 // applique gs_down et écrit d [G, M_out] bf16 — que moe_reduce_trie réduit par
 // jeton comme sur le chemin B. L'intermédiaire ne touche jamais la globale.
-template <int S, int KS, int TN>
+template <int S, int KS, int TN, bool ATOM>
 __global__ void __launch_bounds__(TN * 2) nvfp4_moe_fused_kernel(
     const float *__restrict__ gs_g, const float *__restrict__ gs_u, const float *__restrict__ gs_d,
     const unsigned char *__restrict__ xq, const unsigned char *__restrict__ xsf,
@@ -2964,7 +2964,8 @@ __global__ void __launch_bounds__(TN * 2) nvfp4_moe_fused_kernel(
     const int64_t *__restrict__ tq_u, const int64_t *__restrict__ tb_u,
     const int64_t *__restrict__ tq_d, const int64_t *__restrict__ tb_d,
     float *__restrict__ ws, int *__restrict__ compteurs,
-    __nv_bfloat16 *__restrict__ d, int K, int I, int M_out, int act) {
+    __nv_bfloat16 *__restrict__ d, const int *__restrict__ ordre, const float *__restrict__ tw,
+    float *__restrict__ y32, int k_top, int K, int I, int M_out, int act) {
 #ifdef ACVRAM_MMA_FP4
     constexpr int WARPS = TN / 16, FILS = WARPS * 32;
     static_assert(TN == 64 || TN == 128, "TN : 64 ou 128");
@@ -3145,6 +3146,22 @@ __global__ void __launch_bounds__(TN * 2) nvfp4_moe_fused_kernel(
     }
     const float gsd = gs_d[e];
     __shared__ int s_dernier;
+    // partiel de ce CTA : ws[(tile*NS + sl)][16][M_out] fp32 — écrit tuile N par
+    // tuile N (magasins coalescés), UNE clôture + UN compteur par CTA à la fin
+    // (la version « clôture par tuile N » coûtait 16 __threadfence + 3
+    // __syncthreads par CTA : 133 µs/couche mesurés le 15/09 contre 83 en B)
+    float *part = ws + ((long)tile * NS + sl) * (16L * M_out);
+    // témoin ATOMIQUES (poste7-reprise-15-09-b § 4 : si le sériel coûte > 10 µs) :
+    // y32[jeton, col] += partiel · gs_d · poids, pas de ws, pas de reduce_trie
+    float w_[2]; int tok_[2];
+    if constexpr (ATOM) {
+        #pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const int j = g + 8 * h;
+            const int f = (j < nt) ? ordre[t0 + j] : 0;
+            w_[h] = (j < nt) ? tw[f] * gsd : 0.f; tok_[h] = f / k_top;
+        }
+    }
     #pragma unroll
     for (int s = 0; s < S2 - 1; ++s) { if (s < NT2) emettre2(s, s); cp_async_commit(); }
     for (int n = 0; n < NT2; ++n) {
@@ -3167,44 +3184,60 @@ __global__ void __launch_bounds__(TN * 2) nvfp4_moe_fused_kernel(
                 const unsigned sfb = *reinterpret_cast<const unsigned *>(sb + r * SB2 + 4 * m);
                 mma_mxf4nvf4(acc2[nf], a2[m], bb, sfa2[m], sfb);
             }
-        // partiel de ce CTA pour (tile, n) : ws[((tile*NT2 + n)*NS + sl)][16][128]
-        float *part = ws + ((long)(tile * NT2 + n) * NS + sl) * (16 * 128);
         #pragma unroll
         for (int nf = 0; nf < NF2; ++nf) {
-            const int col = warp * (128 / WARPS) + nf * 8 + 2 * tq;
+            const int col = n * 128 + warp * (128 / WARPS) + nf * 8 + 2 * tq;
             #pragma unroll
-            for (int h = 0; h < 2; ++h)
-                *reinterpret_cast<float2 *>(part + (g + 8 * h) * 128 + col) = make_float2(acc2[nf][2 * h], acc2[nf][2 * h + 1]);
+            for (int h = 0; h < 2; ++h) {
+                if constexpr (ATOM) {
+                    if (w_[h] != 0.f) {
+                        float *dst = y32 + (long)tok_[h] * M_out + col;
+                        atomicAdd(dst, acc2[nf][2 * h] * w_[h]); atomicAdd(dst + 1, acc2[nf][2 * h + 1] * w_[h]);
+                    }
+                } else {
+                    *reinterpret_cast<float2 *>(part + (g + 8 * h) * M_out + col) = make_float2(acc2[nf][2 * h], acc2[nf][2 * h + 1]);
+                }
+            }
         }
+    }
+    cp_async_wait<0>();
+    if constexpr (!ATOM) {
         __threadfence();
         __syncthreads();
-        if (tid == 0) s_dernier = (atomicAdd(&compteurs[tile * NT2 + n], 1) == NS - 1);
+        if (tid == 0) s_dernier = (atomicAdd(&compteurs[tile], 1) == NS - 1);
         __syncthreads();
         if (s_dernier) {
             __threadfence();
-            const float *base = ws + (long)(tile * NT2 + n) * NS * (16 * 128);
-            #pragma unroll
-            for (int nf = 0; nf < NF2; ++nf) {
-                const int col = warp * (128 / WARPS) + nf * 8 + 2 * tq;
+            const float *base = ws + (long)tile * NS * (16L * M_out);
+            for (int n = 0; n < NT2; ++n) {
                 #pragma unroll
-                for (int h = 0; h < 2; ++h) {
-                    const int j = g + 8 * h;
-                    float s0 = 0.f, s1 = 0.f;
-                    for (int q = 0; q < NS; ++q) {              // ordre FIXE des tranches
-                        const float2 pv = *reinterpret_cast<const float2 *>(base + (long)q * (16 * 128) + j * 128 + col);
-                        s0 += pv.x; s1 += pv.y;
-                    }
-                    if (j < nt) {
-                        __nv_bfloat16 *dst = d + (long)(t0 + j) * M_out + n * 128 + col;
-                        dst[0] = __float2bfloat16(s0 * gsd); dst[1] = __float2bfloat16(s1 * gsd);
+                for (int nf = 0; nf < NF2; ++nf) {
+                    const int col = n * 128 + warp * (128 / WARPS) + nf * 8 + 2 * tq;
+                    #pragma unroll
+                    for (int h = 0; h < 2; ++h) {
+                        const int j = g + 8 * h;
+                        float s0 = 0.f, s1 = 0.f;
+                        for (int q = 0; q < NS; ++q) {
+                            const float2 pv = *reinterpret_cast<const float2 *>(base + (long)q * (16L * M_out) + j * M_out + col);
+                            s0 += pv.x; s1 += pv.y;
+                        }
+                        if (j < nt) {
+                            __nv_bfloat16 *dst = d + (long)(t0 + j) * M_out + col;
+                            dst[0] = __float2bfloat16(s0 * gsd); dst[1] = __float2bfloat16(s1 * gsd);
+                        }
                     }
                 }
             }
-            if (tid == 0) compteurs[tile * NT2 + n] = 0;         // prêt pour le pas suivant
+            if (tid == 0) compteurs[tile] = 0;
         }
     }
     cp_async_wait<0>();
 #endif
+}
+
+__global__ void f32_vers_bf16_kernel(const float *__restrict__ x, __nv_bfloat16 *__restrict__ y, long n) {
+    const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = __float2bfloat16(x[i]);
 }
 
 torch::Tensor nvfp4_moe_fused(torch::Tensor tq_g, torch::Tensor tb_g, torch::Tensor gs_g,
@@ -3213,40 +3246,56 @@ torch::Tensor nvfp4_moe_fused(torch::Tensor tq_g, torch::Tensor tb_g, torch::Ten
                               torch::Tensor xq, torch::Tensor xsf,
                               torch::Tensor tile_e, torch::Tensor tile_t0, torch::Tensor tile_n,
                               torch::Tensor ws, torch::Tensor compteurs,
-                              int64_t K, int64_t I, int64_t M_out, int64_t act, int64_t tn) {
+                              int64_t K, int64_t I, int64_t M_out, int64_t act, int64_t tn,
+                              torch::Tensor ordre, torch::Tensor tw, int64_t k_top, int64_t t, bool atomique,
+                              int64_t etages) {
     CHECK_CUDA(xq); ACVRAM_DEVICE_GUARD(xq);
     for (auto &z : {tq_g, tb_g, gs_g, tq_u, tb_u, gs_u, tq_d, tb_d, gs_d, xq, xsf, tile_e, tile_t0, tile_n, ws, compteurs})
         CHECK_CONTIG(z);
     TORCH_CHECK(K % 128 == 0 && I % tn == 0 && M_out % 128 == 0, "MoE fusionne : K multiple de 128, I de tn, M_out de 128");
     TORCH_CHECK(tn == 64 || tn == 128, "MoE fusionne : tn 64 ou 128");
     const int T = tile_e.size(0), G = xq.size(0), NS = (int)(I / tn), NT2 = (int)(M_out / 128);
-    TORCH_CHECK(ws.numel() >= (long)T * NT2 * NS * 16 * 128 && ws.scalar_type() == torch::kFloat,
-                "MoE fusionne : ws fp32 de T*NT2*NS*2048 elements");
-    TORCH_CHECK(compteurs.numel() >= (long)T * NT2 && compteurs.scalar_type() == torch::kInt, "MoE fusionne : compteurs int32 T*NT2 (a zero)");
-    auto d = torch::empty({G, M_out}, xq.options().dtype(torch::kBFloat16));
-    if (T == 0 || G == 0) return d;
+    TORCH_CHECK(ws.numel() >= (long)T * NS * 16 * M_out && ws.scalar_type() == torch::kFloat,
+                "MoE fusionne : ws fp32 de T*NS*16*M_out elements");
+    TORCH_CHECK(compteurs.numel() >= (long)T && compteurs.scalar_type() == torch::kInt, "MoE fusionne : compteurs int32 T (a zero)");
+    // sériel : d [G, M_out] (reduce_trie ensuite) ; atomique : y32 [t, M_out] fp32 remis a zero ici
+    auto d = torch::empty({atomique ? 0 : G, M_out}, xq.options().dtype(torch::kBFloat16));
+    auto y32 = atomique ? torch::zeros({t, M_out}, xq.options().dtype(torch::kFloat))
+                        : torch::empty({0}, xq.options().dtype(torch::kFloat));
+    if (T == 0 || G == 0) return atomique ? y32 : d;
     auto stream = at::cuda::getCurrentCUDAStream();
-    constexpr int S = 3, KS = 128;
-    #define MF_LANCE(TN) do { \
+    constexpr int KS = 128;
+    TORCH_CHECK(etages == 2 || etages == 3, "MoE fusionne : etages 2 ou 3");
+    #define MF_LANCE(TN, S) do { \
         constexpr int LD = KS / 2 + 16, SB = KS / 16; \
         constexpr int ETAGE = 16 * LD + 2 * TN * LD + 16 * SB + 2 * TN * SB; \
         constexpr int LD2 = TN / 2 + 16, SB2 = TN / 16; \
         constexpr int SHM2 = 16 * LD2 + 16 * SB2 + 3 * (128 * LD2 + 128 * SB2); \
         constexpr int SHM = (S * ETAGE > SHM2) ? S * ETAGE : SHM2; \
         static bool attr = false; \
-        if (!attr) { cudaFuncSetAttribute(nvfp4_moe_fused_kernel<S, KS, TN>, cudaFuncAttributeMaxDynamicSharedMemorySize, SHM); attr = true; } \
+        if (!attr) { cudaFuncSetAttribute(nvfp4_moe_fused_kernel<S, KS, TN, false>, cudaFuncAttributeMaxDynamicSharedMemorySize, SHM); \
+                     cudaFuncSetAttribute(nvfp4_moe_fused_kernel<S, KS, TN, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, SHM); attr = true; } \
         dim3 grid((unsigned)NS, (unsigned)T); \
-        nvfp4_moe_fused_kernel<S, KS, TN><<<grid, TN * 2, SHM, stream>>>( \
+        auto lance = atomique ? nvfp4_moe_fused_kernel<S, KS, TN, true> : nvfp4_moe_fused_kernel<S, KS, TN, false>; \
+        lance<<<grid, TN * 2, SHM, stream>>>( \
             gs_g.data_ptr<float>(), gs_u.data_ptr<float>(), gs_d.data_ptr<float>(), \
             xq.data_ptr<unsigned char>(), xsf.data_ptr<unsigned char>(), \
             tile_e.data_ptr<int>(), tile_t0.data_ptr<int>(), tile_n.data_ptr<int>(), \
             tq_g.data_ptr<int64_t>(), tb_g.data_ptr<int64_t>(), tq_u.data_ptr<int64_t>(), tb_u.data_ptr<int64_t>(), \
             tq_d.data_ptr<int64_t>(), tb_d.data_ptr<int64_t>(), ws.data_ptr<float>(), compteurs.data_ptr<int>(), \
-            reinterpret_cast<__nv_bfloat16 *>(d.data_ptr()), (int)K, (int)I, (int)M_out, (int)act); } while (0)
-    if (tn == 64) MF_LANCE(64); else MF_LANCE(128);
+            reinterpret_cast<__nv_bfloat16 *>(d.data_ptr()), ordre.data_ptr<int>(), tw.data_ptr<float>(), \
+            y32.data_ptr<float>(), (int)k_top, (int)K, (int)I, (int)M_out, (int)act); } while (0)
+    if (tn == 64) { if (etages == 2) MF_LANCE(64, 2); else MF_LANCE(64, 3); }
+    else          { if (etages == 2) MF_LANCE(128, 2); else MF_LANCE(128, 3); }
     #undef MF_LANCE
     C10_CUDA_KERNEL_LAUNCH_CHECK();
-    return d;
+    if (!atomique) return d;
+    auto y = torch::empty({t, M_out}, xq.options().dtype(torch::kBFloat16));
+    const long n = (long)t * M_out;
+    f32_vers_bf16_kernel<<<(unsigned)((n + 255) / 256), 256, 0, stream>>>(
+        y32.data_ptr<float>(), reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), n);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return y;
 }
 
 torch::Tensor nvfp4_gemv_grouped(torch::Tensor qw, torch::Tensor bscale,
