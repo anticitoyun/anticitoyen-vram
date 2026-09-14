@@ -1117,22 +1117,29 @@ class MoEBlock(nn.Module):
         return d.view(t, self.top_k, -1).sum(dim=1).to(x.dtype)
 
     def _router_logits(self, x: torch.Tensor) -> torch.Tensor:
-        # Toujours en fp32 (HF modeling_glm4_moe_lite.py:401 fait de même) :
-        # un arrondi bf16 de la SORTIE du F.linear, même avec accumulation
-        # cuBLAS fp32, suffit à faire basculer le top-k sur les experts à
-        # égalité proche du seuil (mesuré : 4/16 jetons de l'équivalence
-        # GLM-4.7-Flash, revue/prediction-routeur-fp32-14-09.md).
+        # fp32 SEULEMENT quand il sert : sigmoid+biais (GLM) départage des
+        # experts à égalité proche où un arrondi bf16 de la SORTIE du
+        # F.linear, même avec accumulation cuBLAS fp32, suffit à faire
+        # basculer le top-k (mesuré : 4/16 jetons de l'équivalence
+        # GLM-4.7-Flash, revue/prediction-routeur-fp32-14-09.md). Un modèle
+        # softmax sans biais (Coder-30B) n'a pas cette égalité à départager
+        # — le fp32 y coûtait un cast + un F.linear fp32 de plus par couche
+        # sans corriger quoi que ce soit, mesuré par poste3 (bissection ABAB,
+        # 15/09) : +0,187 ms/pas à b=1, 3,9 µs/couche sur 48 couches.
+        dtype_voulu = (torch.float32
+                      if self.scoring == "sigmoid" and self.score_bias is not None
+                      else x.dtype)
         cache = getattr(self, "_router_w", None)
         if cache is None:
             cache = {}
             self._router_w = cache
-        w = cache.get(torch.float32)
+        w = cache.get(dtype_voulu)
         if w is None and hasattr(self.router.qweight, "weight"):
-            w = self.router.qweight.weight.to(torch.float32)
-            cache[torch.float32] = w
+            w = self.router.qweight.weight.to(dtype_voulu)
+            cache[dtype_voulu] = w
         if w is not None:
-            return F.linear(x.to(torch.float32), w)
-        return self.router(x).to(torch.float32)
+            return F.linear(x.to(dtype_voulu), w)
+        return self.router(x).to(dtype_voulu)
 
     def _route(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Poids et indices des top-k experts par jeton."""
