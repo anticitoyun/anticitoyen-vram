@@ -124,3 +124,17 @@ quantifié**, un biais indépendant de tout bogue de routage.
    SON script (pas le mien) pour toute équivalence future.
 4. Points encore ouverts de la consigne de chef : (4) "formats mélangés
    entre experts" / `piles_ok=False` — pas encore investigué du tout.
+
+## PAUSE générale (ordre utilisateur, avant la reconversion de l'étape 1)
+
+Trouvé en lisant `convert.py` (pas encore vérifié en exécutant) : le
+format par couche vient de `plan.layers[i].fmt` (posé par le
+planificateur de placement), avec repli `"int4_awq"` par défaut
+(`TensorRouter.format_for`, lignes ~300-304) — `--format bf16` ne force
+PAS forcément ce repli à `bf16` pour toutes les couches ; c'est
+probablement pourquoi `mini-acvram3` a quantifié les experts malgré
+`--format bf16 --no-awq`. Piste pour la reprise : soit trouver le bon
+levier pour forcer `bf16` partout (peut-être `--host-exec` influence
+justement CE plan), soit comparer `mini-acvram2` (qui a obtenu `bf16`)
+et `mini-acvram3` (qui a obtenu `int4_awq`) pour voir exactement quelle
+différence de plan cause l'écart — pas encore fait.
