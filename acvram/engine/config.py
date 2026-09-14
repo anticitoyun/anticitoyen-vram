@@ -572,7 +572,11 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
     # qwen3_next est désormais exécutable (couches Gated DeltaNet) quand la
     # configuration porte nos champs layer_types/linear_* ; les autres
     # hybrides restent refusés.
-    if mt in ("deepseek_v2", "deepseek_v3", "glm4_moe") and cfg.get("kv_lora_rank"):
+    # Le critere est la compression du KV elle-meme (cf. ModelSpec.est_mla),
+    # pas une liste de model_type : glm4_moe_lite (GLM-4.7-Flash) en manquait,
+    # la conversion serait passee en silence par le chemin non-MLA (bead
+    # anticitoyen-vram-992, 14/09).
+    if cfg.get("kv_lora_rank"):
         cfg = {**cfg, "mla_rope": True,
                "layer_types": cfg.get("layer_types") or
                ["full_attention"] * int(cfg.get("num_hidden_layers", 0))}

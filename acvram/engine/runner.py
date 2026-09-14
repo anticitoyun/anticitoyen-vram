@@ -30,7 +30,7 @@ from ..memory.kvcache import BLOCK_SIZE, BlockAllocator
 from .loader import LoadedModel
 from .model import ForwardBatch
 from .sampler import SamplingParams, besoin_historique, sample
-from .speculative import Proposal, verify_proposal
+from .speculative import GardeSpeculation, Proposal, verify_proposal
 
 __all__ = ["Sequence", "GenerationOutput", "Engine", "EngineStats"]
 
@@ -331,6 +331,11 @@ class Engine:
         # incertain. Pas de spéculation sur eux tant que ce chemin manque.
         self.speculator = speculator
         self.spec_k = spec_k
+        # Garde de lot : mesure 14/09 (verdict-cout-verification-ngram-b12),
+        # la speculation coute a b_reel=12 (carte deja pleine) et gagne a
+        # b_reel=1 (verdict-taux-ngram-code-13-09) -- cf. GardeSpeculation.
+        self._garde_spec = GardeSpeculation(
+            int(os.environ.get("ACVRAM_SPECULATION_LOT_MAX", "2")))
         self.waiting: list[Sequence] = []
         self.running: list[Sequence] = []
         self.stats = EngineStats(kv_blocks_total=n_blocks)
@@ -876,8 +881,11 @@ class Engine:
         decodable = self._decodables()
         if decodable:
             t0 = time.perf_counter()
-            if self.speculator is not None:
+            b_reel = len(decodable)
+            if self.speculator is not None and self._garde_spec.eligible(b_reel):
+                n0 = self.stats.decode_tokens
                 outputs += self._speculative_decode(decodable)
+                self._garde_spec.enregistrer(self.stats.decode_tokens - n0, b_reel)
             else:
                 outputs += self._plain_decode(decodable)
             t1 = time.perf_counter()

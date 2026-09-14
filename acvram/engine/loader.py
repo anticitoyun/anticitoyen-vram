@@ -701,7 +701,12 @@ def load_model(path: str, plan: Optional[Plan] = None,
             layers.append(DecoderLayerGDN(i, bloc, mlp_c, in_norm, post_norm, d, mlp_device=mlp_dev))
             continue
 
-        est_kimi = spec.model_type in ("kimi_linear", "deepseek_v2", "deepseek_v3", "glm4_moe")
+        # `kimi_linear` (recurrence lineaire GDN, pas de KV compresse) et les
+        # MLA (kv_lora_rank > 0, ModelSpec.est_mla) partagent ce chemin de
+        # chargement, distingues plus bas par layer_types[i]. Le critere MLA
+        # n'est plus une liste de model_type : glm4_moe_lite (GLM-4.7-Flash)
+        # en manquait (bead anticitoyen-vram-992, 14/09).
+        est_kimi = spec.model_type == "kimi_linear" or spec.est_mla
         if est_kimi:
             petit = lambda suffix: reader.get(p + suffix).to(torch.float32).to(d)
             petit16 = lambda suffix: reader.get(p + suffix).to(dtype).to(d)

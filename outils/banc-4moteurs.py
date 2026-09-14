@@ -87,7 +87,7 @@ def _mesurer_acvram() -> dict:
     venv_python = Path("~/Bureau/Claude/anticitoyen-vram"
                        "/.venv/bin/python3")
     cmd = [str(venv_python), "outils/banc_prefill_chaud.py", "m64e4", str(PP_LEN)]
-    res, w, n = mesurer_pendant(lambda: _lancer_et_parser(cmd, REPO), gpu=GPU)
+    res, w, n, _med = mesurer_pendant(lambda: _lancer_et_parser(cmd, REPO), gpu=GPU)
     if "echec" in res:
         return res
     return {"pp_len": PP_LEN, "pp_js": res["med_jps"], "pp_sigma": res["sigma"],

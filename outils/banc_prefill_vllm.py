@@ -62,7 +62,7 @@ def _boucle():
     return [un(r) for r in range(REP)]
 
 
-durees, watts, n_releves = mesurer_pendant(_boucle, gpu=0)
+durees, watts, n_releves, _watts_median = mesurer_pendant(_boucle, gpu=0)
 jps = sorted(L / d for d in durees)
 med = jps[REP // 2]
 moy = sum(jps) / REP
