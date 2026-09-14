@@ -965,6 +965,14 @@ class MoEBlock(nn.Module):
         ordre = torch.argsort(flat_e, stable=True)
         cnt = torch.bincount(flat_e, minlength=E)
         xs = x[flat_t[ordre]].to(torch.bfloat16).contiguous()        # [G, H]
+        # échelle AWQ par expert (poste7-glm-awq-pile-15-09) : x_ligne / s[e]
+        # comme ChannelScaler.apply en boucle — au prefill aussi, sinon la
+        # sortie change en silence dès que les experts portent une échelle
+        awq = getattr(self, "_stacks_awq", {})
+        e_sorted = flat_e[ordre]
+        if awq.get("gate_proj") is not None:
+            xs = (xs / awq["gate_proj"][e_sorted, :xs.shape[1]]).contiguous()
+        awq_d = awq.get("down_proj")
         # Glue en deux noyaux (moe_act, moe_reduce_trie) : le profil du 13/09
         # donnait 25 % du pas aux conversions fp32, produit, rembourrage,
         # permutation inverse et somme faits en torch sur [G, M] entiers.
@@ -974,9 +982,12 @@ class MoEBlock(nn.Module):
 
         def _activation(g, u, m, kd):
             if glue and g.dtype == torch.bfloat16:
-                return ext.moe_act(g, u, m, kd, code_act)
+                return ext.moe_act(g, u, m, kd, code_act, awq_d,
+                                   e_sorted.to(torch.int32) if awq_d is not None else None)
             act = (self._act(g[:, :m].to(torch.float32))
                    * u[:, :m].to(torch.float32)).to(torch.bfloat16)
+            if awq_d is not None:
+                act = act / awq_d[e_sorted, :m]
             if act.shape[1] != kd:
                 act = F.pad(act, (0, kd - act.shape[1]))
             return act.contiguous()

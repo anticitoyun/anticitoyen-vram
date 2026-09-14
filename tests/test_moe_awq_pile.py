@@ -90,8 +90,8 @@ def test_gate_up_differents_refuses():
 
 
 @CUDA
-@pytest.mark.parametrize("chemin", ["mma", "gemv"])
-def test_pile_egale_boucle_a_un_ulp(chemin):
+@pytest.mark.parametrize("chemin", ["mma", "gemv", "prefill_mma", "prefill_direct"])
+def test_pile_egale_boucle_a_un_ulp(chemin, monkeypatch):
     from acvram.engine import model as M
     dev = torch.device("cuda:0")
     bloc = _bloc_awq(dev)
@@ -99,10 +99,17 @@ def test_pile_egale_boucle_a_un_ulp(chemin):
     bloc._stack_state = "oui"
     x, topw, topi = _entree(dev)
     ref = _boucle(bloc, x, topw, topi)
-    if chemin == "mma":
-        y = bloc._forward_grouped_mma(x, topw, topi)
-    else:
-        y = bloc._forward_grouped(x, topw, topi)
+    if chemin.startswith("prefill"):
+        monkeypatch.setattr(M, "_MOE_MMA", chemin == "prefill_mma")
+        monkeypatch.setattr(M, "_MOE_GEMM_MAX", 1e9)
+
+    def pile():
+        if chemin == "mma":
+            return bloc._forward_grouped_mma(x, topw, topi)
+        if chemin == "gemv":
+            return bloc._forward_grouped(x, topw, topi)
+        return bloc._forward_prefill_grouped(x, topw, topi)
+    y = pile()
     assert y is not None
     ecart = _ulp_max(y, ref)
     if chemin == "gemv":
@@ -115,11 +122,11 @@ def test_pile_egale_boucle_a_un_ulp(chemin):
     # avec table contre la boucle avec scalers (rapport ≤ 1,25).
     sauve = bloc._stacks_awq
     bloc._stacks_awq = {}
-    y_bad = bloc._forward_grouped_mma(x, topw, topi) if chemin == "mma" else bloc._forward_grouped(x, topw, topi)
+    y_bad = pile()
     ecart_bad = _ulp_max(y_bad, ref)
     _sans_echelle(bloc)
     ref0 = _boucle(bloc, x, topw, topi)
-    y0 = bloc._forward_grouped_mma(x, topw, topi) if chemin == "mma" else bloc._forward_grouped(x, topw, topi)
+    y0 = pile()
     bloc._stacks_awq = sauve
     ecart0 = _ulp_max(y0, ref0)
     # témoin de faute : sans table, la pile est loin de la boucle échelonnée
