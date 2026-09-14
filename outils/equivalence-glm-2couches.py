@@ -5,17 +5,17 @@ couches 0-1 (dense + première MoE), acvram CONTRE HF transformers, même
 invite de 16 jetons. Seuil scellé : max |Δlogit| ≤ 5e-2 ET cosinus ≥ 0,999
 sur les logits des 16 positions. Réfuté → PAS de conversion ce soir.
 
-BLOQUÉ tant que bead anticitoyen-vram-992 (poste1) n'est pas livré : trois
-listes MLA doivent porter `glm4_moe_lite` — acvram/engine/config.py:575
-(mla_rope), acvram/engine/loader.py:703 (branche MLAttention, sinon
-chemin non-MLA silencieux), acvram/quant/convert.py:580 (scission
-kv_b_proj -> k_b_proj/v_b_proj, nope=192/v=256 ; sans elle la conversion
-laisse un tenseur non scindé que le loader ne retrouve pas). Vérifié par
-lecture directe des trois sites le 14/09 au soir (les deux premiers ;
-convert.py:580 confirmé en préparant CE script).
+EXÉCUTÉ le 14/09 au soir, sur le correctif d'poste1 fusionné (`16bac2f`,
+bead anticitoyen-vram-992, les trois listes MLA portent `glm4_moe_lite`).
+RÉSULTAT : RÉFUTÉ — pire |Δlogit| 5,0669 (seuil 0,05), pire cosinus
+0,952137 (seuil 0,999). Détail complet, tenseurs manquants écartés par
+mesure directe, piste non tranchée (régime DÉGRADÉ sur bf16 pur) :
+`revue/verdict-equivalence-glm-2couches-14-09.md`. PAS de conversion.
 
-Conçu, PAS ENCORE EXÉCUTÉ : dépend du commit d'poste1. Écrit maintenant
-("à sec") pour tourner dès qu'il est poussé.
+Incident de procédure corrigé après coup (pas re-exécuté) : la première
+exécution de l'étape `acvram` a tourné sur `cuda:0` (auto_plan) sans
+`carte.sh`, faute d'un `device_override` explicite — voir le commentaire
+dans `etape_acvram`.
 
 Méthode, en quatre étapes (mode `tout`) :
   1. extraire  : découpe couches 0-1 + embed/norm/lm_head du bf16 source
@@ -117,7 +117,14 @@ def etape_acvram() -> None:
     from acvram.engine.runner import Engine
     from acvram.engine.sampler import SamplingParams
 
-    loaded = load_model(str(CONVERTI), dtype=torch.bfloat16, max_model_len=64)
+    # `--quant-device cpu` (etape de conversion, plus haut) ne force que le
+    # device de la recherche AWQ -- SANS `device_override`, `load_model` (le
+    # forward, ici) choisit le GPU par lui-meme via `auto_plan`. Le 14/09 au
+    # soir, ce forward a tourne sur cuda:0 sans passer par carte.sh et a
+    # chevauche une mesure ncu de poste4. "CPU" en tete de ce script n'etait
+    # vrai qu'a moitie -- corrige ici, force explicitement.
+    loaded = load_model(str(CONVERTI), dtype=torch.bfloat16, max_model_len=64,
+                        device_override="cpu")
     toks = invite()
     logits_par_position = []
     for k in range(1, N_JETONS + 1):
