@@ -99,30 +99,38 @@ def etape_extraire() -> None:
 
 def etape_acvram() -> None:
     """Convertit le mini-repertoire (bf16, sans AWQ, CPU) puis capture les
-    logits complets a 16 positions par prefixes croissants."""
+    logits complets a 16 positions par prefixes croissants.
+
+    A SEC signifie AUCUN CONTEXTE CUDA, pas seulement "aucune donnee sur le
+    GPU". Deux incidents le 14/09 au soir : (1) `device_override="cpu"` sans
+    `CUDA_VISIBLE_DEVICES` laisse `load_model`/`torch` INITIALISER cuda:0
+    (contexte + libs chargees, quelques centaines de Mio, visible sur
+    `nvidia-smi --query-compute-apps`) meme si aucun tenseur n'y est place --
+    releve par chef (PID 255501, chevauchement d'une prise de poste3) ; (2)
+    un forward complet avait deja tourne sur cuda:0 sans carte.sh avant ca.
+    `CUDA_VISIBLE_DEVICES=""` cache le GPU au process : `torch.cuda` ne peut
+    alors PLUS l'initialiser, meme par accident -- verifie ici avec
+    `nvidia-smi` avant d'affirmer que ca tourne a sec, pas suppose."""
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES="")
     if CONVERTI.exists():
         shutil.rmtree(CONVERTI)
     r = subprocess.run(
         [VENV_PROJET, "-m", "acvram", "convert", str(MINI),
          "--format", "bf16", "--no-awq", "--quant-device", "cpu",
          "--host-exec", "cpu", "--max-model-len", "64", "-o", str(CONVERTI)],
-        capture_output=True, text=True, cwd=str(Path(__file__).resolve().parent.parent))
+        capture_output=True, text=True, env=env,
+        cwd=str(Path(__file__).resolve().parent.parent))
     print(r.stdout[-2000:], file=sys.stderr)
     if r.returncode != 0:
         print(r.stderr[-3000:], file=sys.stderr)
         raise RuntimeError(f"conversion mini echouee (code {r.returncode})")
 
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # avant tout import torch/acvram
     import torch
     from acvram.engine.loader import load_model
     from acvram.engine.runner import Engine
     from acvram.engine.sampler import SamplingParams
 
-    # `--quant-device cpu` (etape de conversion, plus haut) ne force que le
-    # device de la recherche AWQ -- SANS `device_override`, `load_model` (le
-    # forward, ici) choisit le GPU par lui-meme via `auto_plan`. Le 14/09 au
-    # soir, ce forward a tourne sur cuda:0 sans passer par carte.sh et a
-    # chevauche une mesure ncu de poste4. "CPU" en tete de ce script n'etait
-    # vrai qu'a moitie -- corrige ici, force explicitement.
     loaded = load_model(str(CONVERTI), dtype=torch.bfloat16, max_model_len=64,
                         device_override="cpu")
     toks = invite()
@@ -155,7 +163,10 @@ def etape_acvram() -> None:
 
 def etape_hf() -> None:
     """Un seul forward teacher-force des 16 jetons via HF transformers,
-    dans le venv vLLM (glm4_moe_lite natif, transformers 5.17)."""
+    dans le venv vLLM (glm4_moe_lite natif, transformers 5.17). A sec :
+    `CUDA_VISIBLE_DEVICES` deja mis a "" par l'appelant (main() en mode
+    "tout"), pose ici aussi pour un lancement direct en mode "hf"."""
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
     import torch
     from transformers import AutoModelForCausalLM
 
@@ -215,7 +226,8 @@ def main() -> int:
             return 0
     if mode in ("tout", "hf"):
         if mode == "tout":
-            r = subprocess.run([VENV_VLLM, __file__, "hf"])
+            r = subprocess.run([VENV_VLLM, __file__, "hf"],
+                              env=dict(os.environ, CUDA_VISIBLE_DEVICES=""))
             if r.returncode != 0:
                 return r.returncode
         else:
