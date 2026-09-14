@@ -28,7 +28,7 @@ import torch
 from ..engine.config import ModelSpec, load_model_spec
 from ..memory.tiering import Plan
 from . import formats
-from .calibrate import (ActStats, ChannelScaler, alpha_commun_gate_up,
+from .calibrate import (ActStats, alpha_commun_gate_up,
                         quantize_with_calibration)
 
 __all__ = ["ConversionOptions", "ConversionReport", "convert_checkpoint",
@@ -144,6 +144,15 @@ class ConversionReport:
     promotions: list[dict] = field(default_factory=list)
     mean_out_snr_db: float = 0.0
     seconds: float = 0.0
+    # Combien d'experts, dans les couches MoE, n'avaient AUCUNE statistique
+    # d'activation a la calibration (jamais routes, ou trop peu, pendant le
+    # corpus de calibration) : une mesure du corpus, pas un defaut de
+    # conversion, et SANS CONSEQUENCE sur la quantification puisque AWQ
+    # n'est jamais cherche pour un expert (bead "uniformiser l'echelle
+    # AWQ", P2, poste7/chef 15/09 -- voir la boucle principale et
+    # revue/verdict-glm-regime-degrade-15-09.md pour la lecture erronee
+    # ecartee avant celle-ci).
+    experts_sans_stats: int = 0
 
     @property
     def ratio(self) -> float:
@@ -843,7 +852,8 @@ def _verifier_formats_declares(manifest: dict, weight_map: dict) -> None:
 
 
 def _verifier_homogeneite_moe(tensors: dict, num_layers: int) -> None:
-    """Refuse une couche MoE dont les experts n'ont pas TOUS le même format.
+    """Refuse une couche MoE dont les experts n'ont pas TOUS le même format
+    ET la même présence d'échelle AWQ.
 
     poste7, 15/09 (`revue/poste7-glm-formats-mixtes-15-09.md` §2) : l'homogénéité
     d'une pile d'experts se décide à la CONVERSION, pas au chargement — un
@@ -851,19 +861,34 @@ def _verifier_homogeneite_moe(tensors: dict, num_layers: int) -> None:
     régime que personne n'a mesuré. `_try_build_stacks` (engine/model.py)
     exige déjà cette homogénéité pour construire la pile groupée ; ici on
     refuse D'ÉCRIRE le dossier plutôt que de laisser un chargeur découvrir
-    le problème en silence (comme le 15/09 sur GLM-4.7-Flash : 2 944
-    tenseurs nvfp4 et 64 int4_awq, cause réelle ailleurs — voir
-    `_precalculer_alpha_commun_gate_up`/`TensorRouter.format_for` pour le
-    bloc MTP — mais CETTE garde aurait arrêté la conversion avant qu'elle
-    n'atteigne poste3).
+    le problème en silence.
+
+    DEUX causes distinctes, trouvées séparément le 15/09 sur GLM-4.7-Flash,
+    d'où les deux vérifications :
+    1. Format mélangé (2 944 nvfp4 + 64 int4_awq) — cause réelle : bloc MTP
+       mal routé (`TensorRouter.format_for`), corrigé le même soir.
+    2. `has_act_scale` mélangé (« échelle AWQ posée sur certains experts
+       seulement ») — cause réelle, vérifiée sur `_try_build_stacks`
+       (`model.py:720`) : `any(p.scaler is not None and not
+       p.scaler.is_identity for p in projs)` répond à « au moins UN expert
+       a une échelle RÉELLE », pas à une hétérogénéité entre experts — un
+       seul expert bien calibré casse la pile même si tous les autres sont
+       à l'identité. Une échelle identité EXPLICITE (des 1, pas `None`)
+       aurait donc AGGRAVÉ le repli (`is_identity` exige `scale is None`),
+       piste essayée puis écartée le 15/09 (voir
+       `revue/verdict-glm-regime-degrade-15-09.md`). Correctif retenu, au
+       point d'appel : AWQ n'est jamais cherché pour un tenseur d'expert
+       (bead P2 « uniformiser l'échelle AWQ »). Cette garde reste un
+       filet, pas le correctif : si elle se déclenche à nouveau, c'est
+       qu'une TROISIÈME cause existe.
 
     N'examine PAS la couche `num_layers` (le bloc MTP, jamais chargé par le
-    moteur au décodage sans spéculation MTP — il peut porter un format
-    différent sans effet sur l'inférence réelle).
+    moteur au décodage sans spéculation MTP — il peut porter un format ou
+    une échelle différents sans effet sur l'inférence réelle).
     """
     import re
-    from collections import defaultdict
-    par_groupe: dict[tuple, dict[int, str]] = defaultdict(dict)
+    from collections import Counter, defaultdict
+    par_groupe: dict[tuple, dict[int, tuple]] = defaultdict(dict)
     for nom, entree in tensors.items():
         mo = re.match(r"model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(\w+)\.weight$", nom)
         if not mo:
@@ -871,19 +896,22 @@ def _verifier_homogeneite_moe(tensors: dict, num_layers: int) -> None:
         couche, expert, proj = int(mo.group(1)), int(mo.group(2)), mo.group(3)
         if couche == num_layers:
             continue
-        par_groupe[(couche, proj)][expert] = str(entree.get("format"))
-    for (couche, proj), formats_par_expert in par_groupe.items():
-        distincts = set(formats_par_expert.values())
+        cle = (str(entree.get("format")), bool(entree.get("has_act_scale")))
+        par_groupe[(couche, proj)][expert] = cle
+    for (couche, proj), cles_par_expert in par_groupe.items():
+        distincts = set(cles_par_expert.values())
         if len(distincts) > 1:
-            from collections import Counter
-            compte = Counter(formats_par_expert.values())
-            exemples = sorted(formats_par_expert.items())[:3]
+            formats = Counter(c[0] for c in cles_par_expert.values())
+            echelles = Counter(c[1] for c in cles_par_expert.values())
+            quoi = ("formats" if len(formats) > 1 else "présences d'échelle AWQ")
+            exemples = sorted(cles_par_expert.items())[:3]
             raise ValueError(
-                f"couche {couche}, projection {proj} : experts à formats "
-                f"MÉLANGÉS {dict(compte)} — la pile groupée ne peut pas se "
-                f"construire (exemples : {exemples}). Refus d'écrire ce "
-                f"dossier plutôt que de laisser un chargeur le découvrir "
-                f"plus tard.")
+                f"couche {couche}, projection {proj} : experts à "
+                f"{quoi} MÉLANGÉS (formats={dict(formats)}, "
+                f"echelle_awq={dict(echelles)}) — la pile groupée ne peut "
+                f"pas se construire (exemples : {exemples}). Refus "
+                f"d'écrire ce dossier plutôt que de laisser un chargeur le "
+                f"découvrir plus tard.")
 
 
 def _diagnostic_fusion(tensors: dict) -> dict:
@@ -1102,11 +1130,31 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             continue
 
         st = stats.get(name) if stats else None
+        est_expert = ".mlp.experts." in name
+        if est_expert and st is None:
+            report.experts_sans_stats += 1
+        # poste7/chef, 15/09 (P2, bead "uniformiser l'echelle AWQ") : mon
+        # premier correctif ("echelle identite EXPLICITE quand un expert
+        # n'a pas de statistiques") partait d'une lecture erronee du
+        # message de _try_build_stacks. Le vrai controle moteur
+        # (model.py:720) est `any(p.scaler is not None and not
+        # p.scaler.is_identity for p in projs)` -- il repond a "au moins
+        # UN expert porte une echelle REELLE (non identite)", pas a "les
+        # experts sont-ils homogenes entre eux". Un expert bien calibre
+        # (echelle non triviale) fait donc echouer toute la pile, MEME si
+        # tous les autres experts sont a l'identite -- et `is_identity`
+        # exige `scale is None` : une echelle explicite a des 1 (mon
+        # premier essai) N'EST PAS identite pour ce controle, elle aurait
+        # plutot AGGRAVE le repli. La seule fixation qui marche : ne
+        # JAMAIS chercher d'echelle AWQ pour un expert -- verifie sur
+        # carte le 15/09 (regime NOMINAL retrouve, voir
+        # revue/verdict-glm-regime-degrade-15-09.md pour la trace de
+        # l'erreur initiale).
         qt, scaler, metrics = _quantize_on(
             qdev, tensor, fmt, st,
             group_size=opts.group_size,
             use_hadamard=router.wants_hadamard(name, fmt),
-            use_awq=opts.awq,
+            use_awq=opts.awq and not est_expert,
             n_grid=opts.n_grid, garder_grille=opts.garder_grille,
             table=opts.q3n_table if fmt == "q3n" else None,
             mesurer_kld=opts.mesurer_kld,
@@ -1136,7 +1184,6 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         # passe. Les experts d'un bloc restent exclus dans les deux cas : le
         # chemin de décodage groupé exige leur pile homogène, et leur SNR
         # individuel pèse peu.
-        est_expert = ".mlp.experts." in name
         candidat_budget = (opts.bits_budget_gib > 0 and not est_expert
                            and fmt in PROMOTE
                            and metrics["out_snr_db"] < 40.0)
@@ -1757,6 +1804,15 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
               f"plus triees par besoin. Relever --max-promotions ou trier en "
               f"deux passes.", flush=True)
         manifest["quota_promotions_sature"] = True
+
+    if report.experts_sans_stats:
+        manifest["experts_sans_stats"] = report.experts_sans_stats
+        print(f"[acvram] {report.experts_sans_stats} expert(s) sans statistique "
+             f"d'activation a la calibration (jamais routes ou trop peu sur le "
+             f"corpus) — mesure du corpus de calibration, sans consequence : "
+             f"AWQ n'est jamais cherche pour les experts (voir la boucle "
+             f"principale), la pile groupee ne depend donc pas de ce compte.",
+             flush=True)
 
     _verifier_homogeneite_moe(manifest["tensors"], spec.num_layers)
     manifest["diagnostic_fusion"] = _diagnostic_fusion(manifest["tensors"])
