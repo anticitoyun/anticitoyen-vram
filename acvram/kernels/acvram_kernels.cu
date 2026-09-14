@@ -3298,6 +3298,177 @@ torch::Tensor nvfp4_moe_fused(torch::Tensor tq_g, torch::Tensor tb_g, torch::Ten
     return y;
 }
 
+
+// -------------------------------------------------------------------------
+// GEMM ÉTROIT (M <= 16 jetons) sur tensor cores bf16, poids int8 (groupes) ou
+// NVFP4 (blocs de 16) déquantifiés en registres — 1aj marche 2 élargie
+// (poste7-reprise-15-09-b § 5) : les GEMV int8/nvfp4 à M=12 étaient à ×3 de la
+// borne (18,9 Mo de projections lus en 54 µs par couche au lieu de 18 ;
+// lm_head 311 Mo en 0,9 ms au lieu de 0,3) parce qu'un fil y porte une seule
+// lecture de 16 octets par ligne, sans latence recouverte, et relit x par
+// tranche de NV. Ici : CTA = ROWS lignes de poids x tout K en étages cp.async
+// (x 16 lignes + poids), mma.sync m16n8k16 bf16, accumulation fp32 par
+// groupe (int8 : (w - z) exact en bf16, x s par groupe de 128 ; nvfp4 : nibble
+// -> bf16 exact, x échelle UE4M3 par bloc de 16, x échelle globale à la fin).
+// Même arithmétique que les GEMV (produits exacts, sommes fp32), ordre des
+// sommes différent : déterministe, pas d'atomique.
+constexpr int NG_KS = 64;                            // profondeur d'un étage
+constexpr int NG_S = 4;
+__device__ __forceinline__ void mma_bf16_16816(float c[4], const unsigned a[4], const unsigned b[2]) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%0,%1,%2,%3};\n"
+                 : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+}
+__device__ __forceinline__ unsigned bf16x2_pack(float lo, float hi) {
+    return (unsigned)__bfloat16_as_ushort(__float2bfloat16(lo)) | ((unsigned)__bfloat16_as_ushort(__float2bfloat16(hi)) << 16);
+}
+__device__ __forceinline__ float e2m1_val(unsigned n) {
+    // 0,0.5,1,1.5,2,3,4,6 et leurs opposés
+    const float t[8] = {0.f, 0.5f, 1.f, 1.5f, 2.f, 3.f, 4.f, 6.f};
+    const float v = t[n & 7];
+    return (n & 8) ? -v : v;
+}
+template <int ROWS, bool NVFP4>
+__global__ void __launch_bounds__(ROWS * 4) narrow_gemm_kernel(
+    const unsigned char *__restrict__ qw,      // int8 [N, K] ou nvfp4 [N, K/2]
+    const unsigned char *__restrict__ sc8,     // nvfp4 : échelles UE4M3 [N, K/16]
+    const __half *__restrict__ sc16,           // int8 : échelles fp16 [N, K/g]
+    const unsigned char *__restrict__ zr,      // int8 : zéros [N, K/g]
+    const __nv_bfloat16 *__restrict__ x,       // [M, K] bf16
+    __nv_bfloat16 *__restrict__ y,             // [M, N] bf16
+    int M, int N, int K, int group, float gscale) {
+    constexpr int WARPS = ROWS / 8, FILS = WARPS * 32;
+    constexpr int XB = 16 * NG_KS * 2;                                // x : 16 lignes x 64 bf16
+    constexpr int WB = NVFP4 ? ROWS * (NG_KS / 2) : ROWS * NG_KS;    // poids d'un étage
+    constexpr int SB = NVFP4 ? ROWS * (NG_KS / 16) : 0;               // échelles nvfp4 (4 o par ligne)
+    constexpr int XLD = NG_KS * 2 + 16;                               // foulée x (144 o)
+    constexpr int WLD = (NVFP4 ? NG_KS / 2 : NG_KS) + 16;             // foulée poids
+    constexpr int ETAGE = 16 * XLD + ROWS * WLD + (NVFP4 ? ROWS * 4 : 0);
+    extern __shared__ __align__(16) unsigned char smem_ng[];
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    const int g = lane >> 2, tq = lane & 3;
+    const int row0 = blockIdx.x * ROWS;
+    const int KT = K / NG_KS;
+    const long wl = NVFP4 ? (K >> 1) : K;                               // octets par ligne de poids
+    auto sX = [&](int st) { return smem_ng + st * ETAGE; };
+    auto sW = [&](int st) { return smem_ng + st * ETAGE + 16 * XLD; };
+    auto sS = [&](int st) { return smem_ng + st * ETAGE + 16 * XLD + ROWS * WLD; };
+    auto emettre = [&](int st, int k0) {
+        // x : 16 lignes x 128 o (lignes >= M : ligne M-1, masquées à l'écriture)
+        for (int c = tid; c < 16 * 8; c += FILS) {
+            const int r = c >> 3, h = c & 7;
+            cp_async16(sX(st) + r * XLD + 16 * h, reinterpret_cast<const unsigned char *>(x + (long)min(r, M - 1) * K + k0) + 16 * h);
+        }
+        constexpr int CH = (NVFP4 ? NG_KS / 2 : NG_KS) / 16;            // 16 o par ligne : 2 ou 4
+        for (int c = tid; c < ROWS * CH; c += FILS) {
+            const int r = c / CH, h = c % CH;
+            const int row = min(row0 + r, N - 1);
+            cp_async16(sW(st) + r * WLD + 16 * h, qw + (long)row * wl + (NVFP4 ? (k0 >> 1) : k0) + 16 * h);
+        }
+        if constexpr (NVFP4) {
+            if (tid < ROWS) {
+                const int row = min(row0 + tid, N - 1);
+                cp_async4(sS(st) + tid * 4, sc8 + (long)row * (K >> 4) + (k0 >> 4));
+            }
+        }
+    };
+    float acc[4] = {0.f, 0.f, 0.f, 0.f};
+    float accg[4] = {0.f, 0.f, 0.f, 0.f};                       // int8 : accumulateur du groupe courant
+    const int n_g = row0 + warp * 8 + g;                        // ma ligne de poids pour B
+    const int n0 = row0 + warp * 8 + 2 * tq, n1 = n0 + 1;       // mes deux colonnes de C
+    const int ngrp = K / group;
+    #pragma unroll
+    for (int s = 0; s < NG_S - 1; ++s) { if (s < KT) emettre(s, s * NG_KS); cp_async_commit(); }
+    for (int kt = 0; kt < KT; ++kt) {
+        cp_async_wait<NG_S - 2>();
+        __syncthreads();
+        { const int kn = kt + NG_S - 1; if (kn < KT) emettre(kn % NG_S, kn * NG_KS); cp_async_commit(); }
+        const int st = kt % NG_S;
+        const unsigned char *xs = sX(st), *ws = sW(st);
+        #pragma unroll
+        for (int k16 = 0; k16 < NG_KS / 16; ++k16) {
+            const int kk = k16 * 16;
+            unsigned a[4];
+            a[0] = *reinterpret_cast<const unsigned *>(xs + g * XLD + (kk + 2 * tq) * 2);
+            a[1] = *reinterpret_cast<const unsigned *>(xs + (g + 8) * XLD + (kk + 2 * tq) * 2);
+            a[2] = *reinterpret_cast<const unsigned *>(xs + g * XLD + (kk + 2 * tq + 8) * 2);
+            a[3] = *reinterpret_cast<const unsigned *>(xs + (g + 8) * XLD + (kk + 2 * tq + 8) * 2);
+            unsigned b[2];
+            if constexpr (NVFP4) {
+                // nibbles k = kk+2tq, +1 (octet (kk+2tq)/2) et kk+2tq+8, +9
+                const unsigned char *wr = ws + (warp * 8 + g) * WLD + (kk >> 1);
+                const unsigned c0 = wr[tq], c1 = wr[tq + 4];
+                b[0] = bf16x2_pack(e2m1_val(c0 & 15), e2m1_val(c0 >> 4));
+                b[1] = bf16x2_pack(e2m1_val(c1 & 15), e2m1_val(c1 >> 4));
+                float cb[4] = {0.f, 0.f, 0.f, 0.f};
+                mma_bf16_16816(cb, a, b);
+                // échelle UE4M3 du bloc k16 pour mes deux colonnes (lignes de poids n0, n1)
+                const unsigned char *se = sS(st);
+                const float s0 = e4m3_to_float(se[(warp * 8 + 2 * tq) * 4 + k16]);
+                const float s1 = e4m3_to_float(se[(warp * 8 + 2 * tq + 1) * 4 + k16]);
+                acc[0] += cb[0] * s0; acc[1] += cb[1] * s1; acc[2] += cb[2] * s0; acc[3] += cb[3] * s1;
+            } else {
+                const int grp = (kt * NG_KS + kk) / group;
+                const float z = (float)zr[(long)min(n_g, N - 1) * ngrp + grp];
+                const unsigned char *wr = ws + (warp * 8 + g) * WLD + kk;
+                b[0] = bf16x2_pack((float)wr[2 * tq] - z, (float)wr[2 * tq + 1] - z);
+                b[1] = bf16x2_pack((float)wr[2 * tq + 8] - z, (float)wr[2 * tq + 9] - z);
+                mma_bf16_16816(accg, a, b);
+                // fin de groupe : x échelle fp16 de chaque colonne, comme int8_gemv (part * s)
+                if (((kt * NG_KS + kk + 16) % group) == 0) {
+                    const float s0 = __half2float(sc16[(long)min(n0, N - 1) * ngrp + grp]);
+                    const float s1 = __half2float(sc16[(long)min(n1, N - 1) * ngrp + grp]);
+                    acc[0] += accg[0] * s0; acc[1] += accg[1] * s1; acc[2] += accg[2] * s0; acc[3] += accg[3] * s1;
+                    accg[0] = accg[1] = accg[2] = accg[3] = 0.f;
+                }
+            }
+        }
+    }
+    cp_async_wait<0>();
+    // C : lignes g et g+8 (jetons), colonnes n0, n1
+    if (g < M) {
+        if (n0 < N) y[(long)g * N + n0] = __float2bfloat16(acc[0] * gscale);
+        if (n1 < N) y[(long)g * N + n1] = __float2bfloat16(acc[1] * gscale);
+    }
+    if (g + 8 < M) {
+        if (n0 < N) y[(long)(g + 8) * N + n0] = __float2bfloat16(acc[2] * gscale);
+        if (n1 < N) y[(long)(g + 8) * N + n1] = __float2bfloat16(acc[3] * gscale);
+    }
+}
+
+// x [M <= 16, K] bf16 -> y [M, N] bf16. rows : lignes de poids par CTA (32 pour
+// les projections — 160-256 CTA —, 128 pour le lm_head).
+torch::Tensor narrow_gemm(torch::Tensor qw, c10::optional<torch::Tensor> sc8, c10::optional<torch::Tensor> sc16,
+                          c10::optional<torch::Tensor> zr, torch::Tensor x, int64_t K, int64_t group,
+                          double gscale, int64_t rows) {
+    CHECK_CUDA(qw); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(qw); CHECK_CONTIG(qw); CHECK_CONTIG(x);
+    const bool nv = sc8.has_value();
+    TORCH_CHECK(x.dim() == 2 && x.size(0) >= 1 && x.size(0) <= 16 && x.size(1) == K, "narrow_gemm : x [M<=16, K] bf16");
+    TORCH_CHECK(x.scalar_type() == torch::kBFloat16, "narrow_gemm : x bf16");
+    TORCH_CHECK(K % NG_KS == 0, "narrow_gemm : K multiple de 64");
+    TORCH_CHECK(rows == 16 || rows == 32 || rows == 128, "narrow_gemm : rows 16, 32 ou 128");
+    if (!nv) TORCH_CHECK(group % NG_KS == 0 && sc16.has_value() && zr.has_value(), "narrow_gemm int8 : groupe multiple de 64, echelles et zeros");
+    const int M = x.size(0), N = qw.size(0);
+    auto y = torch::empty({M, N}, x.options());
+    auto stream = at::cuda::getCurrentCUDAStream();
+    #define NG_LANCE(ROWS, NV) do { \
+        constexpr int XLD = NG_KS * 2 + 16, WLD = (NV ? NG_KS / 2 : NG_KS) + 16; \
+        constexpr int ETAGE = 16 * XLD + ROWS * WLD + (NV ? ROWS * 4 : 0); \
+        constexpr int SHM = NG_S * ETAGE; \
+        static bool attr = false; \
+        if (!attr && SHM > 48 * 1024) { cudaFuncSetAttribute(narrow_gemm_kernel<ROWS, NV>, cudaFuncAttributeMaxDynamicSharedMemorySize, SHM); attr = true; } \
+        narrow_gemm_kernel<ROWS, NV><<<(unsigned)((N + ROWS - 1) / ROWS), ROWS * 4, SHM, stream>>>( \
+            qw.data_ptr<unsigned char>(), NV ? sc8->data_ptr<unsigned char>() : nullptr, \
+            NV ? nullptr : reinterpret_cast<const __half *>(sc16->data_ptr()), NV ? nullptr : zr->data_ptr<unsigned char>(), \
+            reinterpret_cast<const __nv_bfloat16 *>(x.data_ptr()), reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), \
+            M, N, (int)K, (int)group, (float)gscale); } while (0)
+    if (nv) { if (rows == 16) NG_LANCE(16, true); else if (rows == 32) NG_LANCE(32, true); else NG_LANCE(128, true); }
+    else    { if (rows == 16) NG_LANCE(16, false); else if (rows == 32) NG_LANCE(32, false); else NG_LANCE(128, false); }
+    #undef NG_LANCE
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return y;
+}
+
 torch::Tensor nvfp4_gemv_grouped(torch::Tensor qw, torch::Tensor bscale,
                                  torch::Tensor gscales,
                                  torch::Tensor expert_ids,
@@ -4374,6 +4545,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "MoE prefill : act(g)*u en bf16 depuis les vues [:, :m], rembourre a Kd (act 0=SiLU, 1=GELU-tanh)");
     m.def("nvfp4_moe_fused", &nvfp4_moe_fused,
           "MoE decodage fusionne (port b12x) : gate+up+act+quant en shared, down par tranches, split-K seriel -> d bf16 [G, M_out]");
+    m.def("narrow_gemm", &narrow_gemm,
+          py::arg("qw"), py::arg("sc8"), py::arg("sc16"), py::arg("zr"), py::arg("x"), py::arg("K"),
+          py::arg("group"), py::arg("gscale"), py::arg("rows"),
+          "GEMM etroit (M<=16) bf16 tensor cores, poids int8 (groupes) ou nvfp4 (blocs 16) dequantifies en registres");
     m.def("moe_route_pack", &moe_route_pack,
           "MoE decodage : routage + rassemblement en un lancement -> (xs, ordre, inv, tw, cnt, tile_e, tile_t0, tile_n)");
     m.def("moe_reduce_trie", &moe_reduce_trie,
