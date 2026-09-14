@@ -93,7 +93,17 @@ res.append(mesure("temoin GEMM bf16 8192^3 (instructions, ~0 octet DRAM)", lambd
 del src, dst, a, bm
 
 # Postes du pas, couche 5, tenseurs de la forme réelle du décodage b=B.
-couche = model.layers[5]
+# P7 (poste7, revue/poste7-lancement-14-09.md) : TAMPONS TOURNANTS. Une boucle sur les
+# poids d'UNE couche (experts touchés 53 Mo, projection 2-8 Mo) tient dans le L2
+# de 96 Mo : le noyau relit le L2, pas la DRAM, et son W n'est pas celui du pas.
+# Chaque poste tourne donc sur les 48 couches à tour de rôle (2,5 Go d'experts,
+# 0,9 Go de projections) : chaque lancement lit ses poids depuis la DRAM.
+# Témoin de la règle : même mesure sur la couche 5 seule (BANC_L2_CHAUD=1).
+L2_CHAUD = os.environ.get("BANC_L2_CHAUD") == "1"
+couches = [model.layers[5]] if L2_CHAUD else [c for c in model.layers if getattr(c.mlp, "_stacks", None)]
+nc = len(couches)
+print(f"COUCHES {nc} ({'L2 chaud, couche 5 seule' if L2_CHAUD else 'tampons tournants'})", flush=True)
+couche = couches[0]
 moe, attn = couche.mlp, couche.self_attn
 x = torch.randn(B, model.spec.hidden_size, dtype=torch.bfloat16, device=dev)
 g = torch.Generator(device="cpu").manual_seed(7)
@@ -101,14 +111,24 @@ topi = torch.stack([torch.randperm(len(moe.experts), generator=g)[:moe.top_k] fo
 topw = torch.softmax(torch.randn(B, moe.top_k, generator=g), -1).to(dev).to(torch.bfloat16)
 eid = topi.reshape(-1).to(torch.int32)
 tok = torch.arange(B, device=dev, dtype=torch.int32).repeat_interleave(moe.top_k)
-pg, pu, pd = moe._stacks["gate_proj"], moe._stacks["up_proj"], moe._stacks["down_proj"]
-gateup = lambda: ext.nvfp4_gemv_grouped_gateup(pg[1], pg[2], pg[3], pu[1], pu[2], pu[3], eid, tok, x, pg[4], 0)
-act = gateup()[:, :pg[5]].contiguous()
 seq = torch.arange(eid.shape[0], device=dev, dtype=torch.int32)
+piles = [(c.mlp._stacks["gate_proj"], c.mlp._stacks["up_proj"], c.mlp._stacks["down_proj"]) for c in couches]
+pg, pu, pd = piles[0]
+def gateup_c(i):
+    pg, pu, _ = piles[i % nc]
+    return ext.nvfp4_gemv_grouped_gateup(pg[1], pg[2], pg[3], pu[1], pu[2], pu[3], eid, tok, x, pg[4], 0)
+act = gateup_c(0)[:, :pg[5]].contiguous()
+class Tour:
+    """Un compteur : chaque appel avance d'une couche."""
+    def __init__(self): self.i = 0
+    def __call__(self):
+        self.i += 1; return self.i
+t_gu, t_dn, t_moe, t_qkv, t_o, t_norm, t_mma, t_mmac = (Tour() for _ in range(8))
 if os.environ.get("BANC_SEULEMENT") != "mma":
-    res.append(mesure("MoE gate·up GEMV (nvfp4_gemv_grouped_gateup)", gateup, lots=50))
-    res.append(mesure("MoE down GEMV (_grouped down_proj)", lambda: moe._grouped(act, pd, eid, seq), lots=50))
-res.append(mesure("MoE complet (_forward_grouped : gate·up + down + reduce)", lambda: moe._forward_grouped(x, topw, topi), lots=50))
+    res.append(mesure("MoE gate·up GEMV (nvfp4_gemv_grouped_gateup)", lambda: gateup_c(t_gu()), lots=48))
+    res.append(mesure("MoE down GEMV (_grouped down_proj)", lambda: moe._grouped(act, piles[t_dn() % nc][2], eid, seq), lots=48))
+res.append(mesure("MoE complet (_forward_grouped : gate·up + down + reduce)",
+                  lambda: couches[t_moe() % nc].mlp._forward_grouped(x, topw, topi), lots=48))
 # Le même MoE par le chemin GEMM groupée MMA FP4 (celui du prefill) à t=B jetons :
 # quant_act + gate + up + moe_act + quant_act + down + reduce_trie — étape (iii) de poste7
 # (revue/poste7-moe-mma-decodage-14-09.md). Tuile ACVRAM_MOE_MMA_BT (16 conseillé à M≈3).
@@ -127,22 +147,23 @@ if moe._forward_prefill_grouped(x, topw, topi) is not None:
     g = moe._gemm_mma(pg, xq, xsf, tiles, brut=True); u = moe._gemm_mma(pu, xq, xsf, tiles, brut=True)
     a3 = ext.moe_act(g, u, pg[5], pd[4], 0); aq, asf = ext.nvfp4_quant_act(a3)
     def trois_gemm():
-        moe._gemm_mma(pg, xq, xsf, tiles, brut=True); moe._gemm_mma(pu, xq, xsf, tiles, brut=True)
-        moe._gemm_mma(pd, aq, asf, tiles, brut=True)
-    res.append(mesure("MoE 3 GEMM MMA seules (gate+up+down, BT=%d, %d tuiles)" % (bt, int(tiles[0].numel())), trois_gemm, lots=50))
+        cpg, cpu_, cpd = piles[t_mma() % nc]
+        moe._gemm_mma(cpg, xq, xsf, tiles, brut=True); moe._gemm_mma(cpu_, xq, xsf, tiles, brut=True)
+        moe._gemm_mma(cpd, aq, asf, tiles, brut=True)
+    res.append(mesure("MoE 3 GEMM MMA seules (gate+up+down, BT=%d, %d tuiles)" % (bt, int(tiles[0].numel())), trois_gemm, lots=48))
     res.append(mesure("quant_act x2 (E2M1 bloc 16)", lambda: (ext.nvfp4_quant_act(xs), ext.nvfp4_quant_act(a3)), lots=100))
     res.append(mesure("MoE complet MMA (_forward_prefill_grouped, BT=%s)" % os.environ.get("ACVRAM_MOE_MMA_BT", "64"),
-                      lambda: moe._forward_prefill_grouped(x, topw, topi), lots=50))
+                      lambda: couches[t_mmac() % nc].mlp._forward_prefill_grouped(x, topw, topi), lots=48))
 if SEUL != "mma":
     if getattr(attn, "qkv_proj", None) is not None:
-        res.append(mesure("projections q/k/v int8 empilées (qkv_proj)", lambda: attn.qkv_proj(x), lots=100))
+        res.append(mesure("projections q/k/v int8 empilées (qkv_proj)", lambda: couches[t_qkv() % nc].self_attn.qkv_proj(x), lots=96))
     else:
-        res.append(mesure("projection q int8", lambda: attn.q_proj(x), lots=100))
+        res.append(mesure("projection q int8", lambda: couches[t_qkv() % nc].self_attn.q_proj(x), lots=96))
     xo = torch.randn(B, attn.o_proj.qweight.shape[1] if hasattr(attn.o_proj, "qweight") else 4096, dtype=torch.bfloat16, device=dev)
-    res.append(mesure("projection o int8 (o_proj)", lambda: attn.o_proj(xo), lots=100))
+    res.append(mesure("projection o int8 (o_proj)", lambda: couches[t_o() % nc].self_attn.o_proj(xo), lots=96))
     lm = model.lm_head
     res.append(mesure("lm_head int8", lambda: lm(x), lots=50))
-    res.append(mesure("norme RMS (input_layernorm)", lambda: couche.input_layernorm(x), lots=200))
+    res.append(mesure("norme RMS (input_layernorm)", lambda: couches[t_norm() % nc].input_layernorm(x), lots=192))
 
 def pas_complet():
     # Les séquences finissent (max_model_len) : réadmettre un lot dès que le moteur se
