@@ -87,9 +87,12 @@ exiger_regime_nominal(eng, autoriser_piles_inconnues=False)
 res = []
 # Témoins.
 src = torch.empty(1 << 30, dtype=torch.uint8, device=dev); dst = torch.empty_like(src)
-res.append(mesure("temoin copie DRAM 1 Gio (octets, ~0 instruction)", lambda: dst.copy_(src), lots=4))
+SEUL = os.environ.get("BANC_SEULEMENT")          # "mma" : postes MMA seuls ; "pas" : le pas complet seul
+if SEUL != "pas":
+    res.append(mesure("temoin copie DRAM 1 Gio (octets, ~0 instruction)", lambda: dst.copy_(src), lots=4))
 a = torch.randn(8192, 8192, dtype=torch.bfloat16, device=dev); bm = torch.randn(8192, 8192, dtype=torch.bfloat16, device=dev)
-res.append(mesure("temoin GEMM bf16 8192^3 (instructions, ~0 octet DRAM)", lambda: torch.matmul(a, bm), lots=2))
+if SEUL != "pas":
+    res.append(mesure("temoin GEMM bf16 8192^3 (instructions, ~0 octet DRAM)", lambda: torch.matmul(a, bm), lots=2))
 del src, dst, a, bm
 
 # Postes du pas, couche 5, tenseurs de la forme réelle du décodage b=B.
@@ -124,16 +127,16 @@ class Tour:
     def __call__(self):
         self.i += 1; return self.i
 t_gu, t_dn, t_moe, t_qkv, t_o, t_norm, t_mma, t_mmac = (Tour() for _ in range(8))
-if os.environ.get("BANC_SEULEMENT") != "mma":
+if SEUL not in ("mma", "pas"):
     res.append(mesure("MoE gate·up GEMV (nvfp4_gemv_grouped_gateup)", lambda: gateup_c(t_gu()), lots=48))
     res.append(mesure("MoE down GEMV (_grouped down_proj)", lambda: moe._grouped(act, piles[t_dn() % nc][2], eid, seq), lots=48))
-res.append(mesure("MoE complet (_forward_grouped : gate·up + down + reduce)",
-                  lambda: couches[t_moe() % nc].mlp._forward_grouped(x, topw, topi), lots=48))
+if SEUL != "pas":
+    res.append(mesure("MoE complet (_forward_grouped : gate·up + down + reduce)",
+                      lambda: couches[t_moe() % nc].mlp._forward_grouped(x, topw, topi), lots=48))
 # Le même MoE par le chemin GEMM groupée MMA FP4 (celui du prefill) à t=B jetons :
 # quant_act + gate + up + moe_act + quant_act + down + reduce_trie — étape (iii) de poste7
 # (revue/poste7-moe-mma-decodage-14-09.md). Tuile ACVRAM_MOE_MMA_BT (16 conseillé à M≈3).
-SEUL = os.environ.get("BANC_SEULEMENT")          # "mma" : ne mesurer que les postes MMA
-if moe._forward_prefill_grouped(x, topw, topi) is not None:
+if SEUL != "pas" and moe._forward_prefill_grouped(x, topw, topi) is not None:
     # Les 3 GEMM MMA seules (gate, up, down), tuiles et activations quantifiées une
     # fois : W du noyau sans la glue hôte (argsort, bincount, .item()) qui borne la
     # boucle complète ci-dessous.
@@ -154,7 +157,7 @@ if moe._forward_prefill_grouped(x, topw, topi) is not None:
     res.append(mesure("quant_act x2 (E2M1 bloc 16)", lambda: (ext.nvfp4_quant_act(xs), ext.nvfp4_quant_act(a3)), lots=100))
     res.append(mesure("MoE complet MMA (_forward_prefill_grouped, BT=%s)" % os.environ.get("ACVRAM_MOE_MMA_BT", "64"),
                       lambda: couches[t_mmac() % nc].mlp._forward_prefill_grouped(x, topw, topi), lots=48))
-if SEUL != "mma":
+if SEUL not in ("mma", "pas"):
     if getattr(attn, "qkv_proj", None) is not None:
         res.append(mesure("projections q/k/v int8 empilées (qkv_proj)", lambda: couches[t_qkv() % nc].self_attn.qkv_proj(x), lots=96))
     else:

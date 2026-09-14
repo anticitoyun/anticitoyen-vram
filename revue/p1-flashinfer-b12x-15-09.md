@@ -313,3 +313,29 @@ marche qui rend à TOUS les lots (le fixe est en lancements) ; (2) pour le
 port, l'exigence « ≥ 170 CTA à b=1 » (split-K) ne vaut que 3,5 µs × 3
 par couche = 0,5 ms/pas à b=1 — moins que la fusion des 7 lancements en
 un (b12x fait tout en un noyau : 26,8 µs à b=1 contre nos ≈ 30 + 30 µs).
+
+## Route+pack — A/B du pas b=12 sous graphes (15/09, 18:04-18:14, une carte)
+
+En-tête : 5090 seule (carte.sh), 400 W, horloge libre, 40 °C, compteur NVML
+(22 s), venv acvram, Coder-30B NVFP4, v0.6.3 + poste4 27ae762
+(`ACVRAM_MOE_ROUTE_PACK=0` = A témoin torch, `1` = B), MMA décodage (godet 16
+≥ 9).
+
+| | A (routage torch) | B (route+pack) | Δ |
+|---|---:|---:|---:|
+| jetons (12 séquences, 229 pas) | 12 empreintes | **identiques** | — |
+| lancements par pas (profil sous rejeu) | 3 677 (57 noyaux) | **1 517 (39)** | −59 % (seuil ≤ 1 700 tenu) |
+| Σ noyaux GPU (profil) | 13,62 ms | 11,82 ms | −1,80 |
+| ms/pas, banc 62 pas ×2 ABAB | 13,84 / 13,84 | **12,05 / 12,07** | **−1,79 ms (−12,9 %)**, 867 → 996 t/s |
+| pas complet 22 s au compteur | 14,46 ms, 361 W, 5,22 J/pas | 12,80 ms, **398 W**, 5,09 J/pas | −11,5 % ms ; W +37 |
+| J/jeton brut | 0,435 | 0,425 | **−2,4 %** |
+
+Seuil de poste7 (−0,6 à −1,0 ms, réfuté > −0,3) : **tenu et dépassé
+(−1,8 ms)** — la glue torch valait 1,8 ms de pas, pas 1,0 : ce sont les
+lancements (2 160 de moins) et les trous entre eux, pas les µs de noyau.
+Le J/jeton, lui, ne bouge presque pas : le pas plus dense remonte au plafond
+de 400 W (361 → 398 W) — le temps gagné est payé en watts. Le levier
+énergie reste dans les noyaux (b12x : 400 W aussi, mais 63 µs).
+Défaut : `ACVRAM_MOE_ROUTE_PACK=1` ; test de lancements par pas
+`tests/test_lancements_par_pas.py` (modèle + carte, sauté sinon) et par
+couche (`test_moe_route_pack.py`, ≤ 8).
