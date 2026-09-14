@@ -3462,3 +3462,12 @@ poste3, b=1, ABAB 20 s : MMA=0 4,48 ms/pas, 223 t/s, 1,51 J ; MMA=1 7,00 ms,
 réel en eager, godet sous graphes. Seuil définitif par la courbe b=2/3/4/6
 (MMA dès que J(MMA) ≤ J(GEMV) et ms ≤ 1,02 × GEMV), à remesurer après
 route+pack. Test `tests/test_moe_decode_mma_lot.py`.
+
+### v0.6.3 (15/09) — seuil de lot à 9
+
+Courbe de poste3 (16 cellules, une carte) MMA/GEMV : b=2 +36 % ms / −3,5 % J,
+b=3 +27 / −6,3, b=4 +24 / +2,2, b=6 +18 / +2,7, b=12 −6,4 / −13,2. Aucun lot
+de 2 à 6 ne satisfait le critère (J ≤ et ms ≤ 1,02×) : le coût fixe du
+chemin MMA est ≈ 2,0-2,3 ms/pas et ne s'amortit qu'à 12. Défaut
+`ACVRAM_MOE_DECODE_MMA_MIN_T = 9` (godets 12 et 16) ; le 6 provisoire servait
+b=5-8 à −18 %. À remesurer après route+pack.

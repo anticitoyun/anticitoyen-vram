@@ -1,8 +1,8 @@
 """Garde de lot du chemin MMA au décodage (poste7, revue/poste7-mma-lot-15-09.md) :
-sous ACVRAM_MOE_DECODE_MMA_MIN_T (défaut 6, provisoire), le GEMV ; au-dessus,
-la MMA. poste3, 15/09 : à b=1 la MMA fait 7,00 ms/pas contre 4,48 (−36 % de
-débit, +14 % de J). Le test lit le seuil de l'env et casse si la garde
-disparaît (t=1 → GEMV, t=12 → MMA)."""
+sous ACVRAM_MOE_DECODE_MMA_MIN_T (défaut 9 : godets 12 et 16 seulement), le
+GEMV ; au-dessus, la MMA. Courbe de poste3, 15/09, MMA/GEMV : b=1 +56 % ms,
+b=2 +36, b=3 +27, b=4 +24, b=6 +18, b=12 −6,4 % ms / −13,2 % J. Le test lit
+le seuil de l'env et casse si la garde disparaît (t=1, 8 → GEMV, 12 → MMA)."""
 import os
 import subprocess
 import sys
@@ -25,7 +25,7 @@ b._stacks = {"gate_proj": ("nvfp4",)}
 class X:
     def __init__(self, t): self.shape = (t, 8); self.is_cuda = True; self.dtype = torch.bfloat16
     def __getitem__(self, i): return self
-for t in (1, seuil - 1, seuil, 12):
+for t in (1, 8, seuil - 1, seuil, 12):
     M.MoEBlock.forward(b, X(t))
 print(seuil, ",".join(appels))
 """
@@ -39,10 +39,11 @@ def _lance(env_sup):
     return r.stdout.strip()
 
 
-def test_garde_de_lot_defaut_6():
-    assert _lance({}) == "6 gemv,gemv,mma,mma"
+def test_garde_de_lot_defaut_9():
+    """Défaut 9 (v0.6.3, courbe de poste3) : t=1 et t=8 (godet 8) en GEMV, 9 et 12 en MMA."""
+    assert _lance({}) == "9 gemv,gemv,gemv,mma,mma"
 
 
 def test_garde_lit_le_seuil():
-    assert _lance({"ACVRAM_MOE_DECODE_MMA_MIN_T": "2"}) == "2 gemv,gemv,mma,mma"
+    assert _lance({"ACVRAM_MOE_DECODE_MMA_MIN_T": "2"}) == "2 gemv,mma,gemv,mma,mma"
     assert _lance({"ACVRAM_MOE_DECODE_MMA_MIN_T": "1"}).split(" ")[1].split(",")[0] == "mma"   # t=1 en MMA

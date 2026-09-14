@@ -1312,10 +1312,13 @@ _MOE_MMA_KS = int(os.environ.get("ACVRAM_MOE_MMA_KS", "128"))
 # un expert reçoit au plus 12 jetons (bras `experts`).
 _MOE_DECODE_MMA = os.environ.get("ACVRAM_MOE_DECODE_MMA", "1") == "1"
 _MOE_DECODE_MMA_BT = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_BT", "16"))
-# Lot minimal (jetons réels) pour le chemin MMA : 6 provisoire (poste7 15/09,
-# « aucun b ne doit être pire que ce matin ») ; seuil définitif par la courbe
-# b=2/3/4/6 de poste3 : MMA dès que J(MMA) ≤ J(GEMV) et ms ≤ 1,02 × GEMV.
-_MOE_DECODE_MMA_MIN_T = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_MIN_T", "6"))
+# Lot minimal pour le chemin MMA : 9 (godets 12 et 16 seulement). Courbe de
+# poste3, 15/09, MMA/GEMV : b=2 +36 % ms / −3,5 % J ; b=3 +27 / −6,3 ; b=4 +24 /
+# +2,2 ; b=6 +18 / +2,7 ; b=12 −6,4 / −13,2 — le coût fixe de la MMA
+# (≈ 2,0-2,3 ms/pas : 3 lancements + glue) ne s'amortit qu'à 12. Le 6
+# provisoire servait b=5-8 (godet 8) à −18 % de débit. À remesurer après
+# route+pack (la glue tombe).
+_MOE_DECODE_MMA_MIN_T = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_MIN_T", "9"))
 # Frontend route+pack en un noyau (15/09, poste7) ; "0" = témoin torch.
 _MOE_ROUTE_PACK = os.environ.get("ACVRAM_MOE_ROUTE_PACK", "1") == "1"
 
