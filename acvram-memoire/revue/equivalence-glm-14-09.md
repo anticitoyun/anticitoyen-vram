@@ -184,6 +184,52 @@ tenable pour une comparaison bf16↔bf16 entre deux implémentations
 indépendantes, ou faut-il un delta relatif / s'appuyer sur le cosinus
 seul (qui, lui, passe partout : pire_cos=0,999556 ≥ 0,999) ?
 
+## CRITÈRE PAR POSITION (poste7, poste7-glm-equivalence-15-09.md § 2 puis
+§ 3) : implémenté dans `acvram/quant/equivalence.py`
+
+Cumulatif (§ 3) : par position, top-1 identique ET
+`delta ≤ 2 ulp bf16 de max_j |logit_ref,j|` (échelle = maximum sur toute
+la ligne de RÉFÉRENCE, pas notre sortie, pas seulement le top-1) ET
+`cos ≥ 0,9999` — sauf ex-aequo prouvé (écart top-1/top-2 de la référence
+lui-même ≤ 2 ulp). ≤ 2 ex-aequo autorisés sur 16, pas de cosinus global.
+
+Rejoué sur `mini-acvram4` (les 3 correctifs) vs HF :
+
+| position | delta | delta/ulp | cos | verdict |
+|---|---|---|---|---|
+| 0 | 1,8152 | 14,52 | 0,999556 | **non** (top-1 identique, delta hors seuil ; écart réf top1/top2=0,375 > seuil 0,25 — PAS un ex-aequo prouvé au multiplicateur actuel) |
+| 1 | 0,0957 | 0,77 | 0,999992 | oui |
+| 2 | 0,1512 | 1,21 | 0,999986 | oui |
+| 3 | 0,1279 | 2,05 | 0,999970 | **non** (juste au-dessus de 2 ulp) |
+| 4 | 0,1346 | 2,15 | 0,999986 | **non** (idem) |
+| 5 | 0,2558 | 2,05 | 0,999940 | **non** (idem) |
+| 6 | 0,2141 | 1,71 | 0,999997 | oui |
+| 7 | 0,1472 | 1,18 | 0,999975 | oui |
+| 8 | 0,1407 | 1,13 | 0,999982 | oui |
+| 9 | 0,1636 | 1,31 | 0,999990 | oui |
+| 10 | 0,2065 | 1,65 | 0,999994 | oui |
+| 11 | 0,2281 | 1,82 | 0,999961 | oui |
+| 12 | 0,1573 | 1,26 | 0,999987 | oui |
+| 13 | 0,2112 | 0,84 | 0,999972 | oui |
+| 14 | 0,1799 | 1,44 | 0,999986 | oui |
+| 15 | 0,2156 | 3,45 | 0,999969 | **non** (3,45 ulp) |
+
+**11/16 passent** au critère cumulatif exact (top-1 ET delta≤2ulp ET
+cos≥0,9999) — chiffre mesuré, différent du « 13/16 » cité par poste7 dans
+son message de clarification (probablement une estimation avant mesure
+exacte, pas une contradiction à trancher ici). 5 échecs : position 0
+(ex-aequo réel mais qui ne passe pas le seuil ACTUEL de 2 ulp sur
+l'écart top-1/top-2 — le multiplicateur est « négocié, pas mesuré »,
+poste7 l'a dit elle-même) ; positions 3, 4, 5 juste au-dessus de 2 ulp
+(2,05-2,15 — la marge où le multiplicateur négocié déciderait) ;
+position 15 nettement au-dessus (3,45 ulp), à regarder plus près si le
+multiplicateur venait à monter sans l'expliquer.
+
+Pas encore fait (nécessite GPU, hors du périmètre de cette tâche) : la
+mesure du témoin référence-contre-elle-même (HF bf16 eager vs sdpa, ou
+GPU vs CPU) que poste7 demande pour recaler le multiplicateur « 2 ulp » —
+plancher témoin + 1 ulp, écrit avant de relancer notre bras.
+
 **Trois bogues réels trouvés et corrigés cette session, tous avec test
 qui casse** :
 1. `_router_logits` en bf16 au lieu de fp32 (model.py) — HF force fp32.
