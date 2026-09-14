@@ -2,15 +2,29 @@
 """Équivalence CPU 2 couches, GLM-4.7-Flash — item (2) de poste7
 (revue/poste7-lancement-14-09.md §2, scellé le 14/09) : forward CPU bf16 des
 couches 0-1 (dense + première MoE), acvram CONTRE HF transformers, même
-invite de 16 jetons. Seuil scellé : max |Δlogit| ≤ 5e-2 ET cosinus ≥ 0,999
-sur les logits des 16 positions. Réfuté → PAS de conversion ce soir.
+invite de 16 jetons.
+
+Critère RÉÉCRIT le 15/09 (poste7, revue/poste7-glm-equivalence-15-09.md §2
+puis §3) : le seuil absolu (max|Δlogit| ≤ 5e-2 global) est RETIRÉ — sur
+des logits de 10-30, l'ulp bf16 vaut 0,0625-0,25 ; un seuil sous l'ulp ne
+peut pas rendre « vrai », ce n'est pas un contrôle (REGLES §4). Remplacé
+par `acvram.quant.equivalence` : par position, cumulatif, top-1 identique
+ET delta ≤ 2 ulp bf16 de max_j|logit_ref,j| ET cos ≥ 0,9999 — sauf
+ex-aequo PROUVÉ (écart top-1/top-2 de la référence seule ≤ 2 ulp) ; ≤ 2
+ex-aequo autorisés sur 16 ; pas de cosinus global (il masque une position
+fausse derrière quinze bonnes — 0,999556 passait avec un delta de 1,815).
+Le multiplicateur « 2 ulp » est négocié, pas mesuré (§3) : recalage prévu
+sur un témoin référence-contre-elle-même, pas encore fait.
 
 EXÉCUTÉ le 14/09 au soir, sur le correctif d'poste1 fusionné (`16bac2f`,
 bead anticitoyen-vram-992, les trois listes MLA portent `glm4_moe_lite`).
-RÉSULTAT : RÉFUTÉ — pire |Δlogit| 5,0669 (seuil 0,05), pire cosinus
-0,952137 (seuil 0,999). Détail complet, tenseurs manquants écartés par
-mesure directe, piste non tranchée (régime DÉGRADÉ sur bf16 pur) :
-`revue/verdict-equivalence-glm-2couches-14-09.md`. PAS de conversion.
+RÉSULTAT initial (ancien seuil global) : RÉFUTÉ — pire |Δlogit| 5,0669,
+pire cosinus 0,952137. Trois bogues trouvés et corrigés depuis (routeur
+et biais de correction en bf16 au lieu de fp32, tiers hôte ignorant
+`--format` sans GPU visible) : rejoué au nouveau critère par position,
+**11/16 passent** (revue/equivalence-glm-14-09.md, table complète avec
+delta en ulp). PAS encore de conversion sur ce seul chiffre — voir la
+recommandation dans cette même revue.
 
 Incident de procédure corrigé après coup (pas re-exécuté) : la première
 exécution de l'étape `acvram` a tourné sur `cuda:0` (auto_plan) sans
@@ -53,8 +67,9 @@ VENV_PROJET = "~/Bureau/Claude/anticitoyen-vram/.venv/bin/python"
 VENV_VLLM = "/opt/ia/vLLM/.venv/bin/python"
 N_JETONS = 16
 VOCAB_SUR = 150000  # marge sous vocab_size=154880, evite les ids speciaux (154820+)
-SEUIL_DELTA = 5e-2
-SEUIL_COS = 0.999
+# SEUIL_DELTA/SEUIL_COS (5e-2 global, 0,999) RETIRES le 15/09 : sous l'ulp
+# bf16 lui-meme, un seuil absolu ne peut pas rendre "vrai" (poste7 §2). Le
+# critere vit maintenant dans acvram.quant.equivalence (par position).
 
 
 def invite() -> list:
@@ -185,7 +200,14 @@ def etape_hf() -> None:
 
 
 def etape_comparer() -> int:
+    """Critère par position (poste7, revue/poste7-glm-equivalence-15-09.md
+    §2 puis §3) : top-1 identique ET delta ≤ 2 ulp bf16 de
+    max_j|logit_ref,j| ET cos ≥ 0,9999, sauf ex-aequo prouvé (écart
+    top-1/top-2 de la référence seule ≤ 2 ulp) ; ≤ 2 ex-aequo sur 16 ;
+    pas de cosinus global."""
     import math
+
+    from acvram.quant.equivalence import ulp_bf16, verdict_global, verdict_position
 
     with open(SCRATCH / "logits-acvram.json") as fh:
         acv = json.load(fh)
@@ -195,23 +217,30 @@ def etape_comparer() -> int:
         print(f"ECHEC / CAUSE: nombre de positions different ({len(acv)} vs {len(hf)})")
         return 2
 
-    pire_delta, pire_cos = 0.0, 1.0
+    verdicts = []
     for i, (a, h) in enumerate(zip(acv, hf)):
-        deltas = [abs(x - y) for x, y in zip(a, h)]
-        d = max(deltas)
-        num = sum(x * y for x, y in zip(a, h))
+        delta = max(abs(x - y) for x, y in zip(a, h))
+        echelle_ref = max(abs(v) for v in h)
+        top1_ref = max(range(len(h)), key=lambda k: h[k])
+        top1_nous = max(range(len(a)), key=lambda k: a[k])
+        ordre = sorted(range(len(h)), key=lambda k: -h[k])
+        ecart_top1_top2_ref = h[ordre[0]] - h[ordre[1]]
         na = math.sqrt(sum(x * x for x in a))
         nh = math.sqrt(sum(y * y for y in h))
-        cos = num / (na * nh) if na and nh else 0.0
-        pire_delta = max(pire_delta, d)
-        pire_cos = min(pire_cos, cos)
-        print(f"  position {i}: |delta| max {d:.4f}  cos {cos:.6f}", flush=True)
+        cos = sum(x * y for x, y in zip(a, h)) / (na * nh) if na and nh else 0.0
 
-    verdict = pire_delta <= SEUIL_DELTA and pire_cos >= SEUIL_COS
-    print(f"RESULTAT pire_delta={pire_delta:.4f} (seuil {SEUIL_DELTA}) "
-         f"pire_cos={pire_cos:.6f} (seuil {SEUIL_COS}) "
-         f"VERDICT={'PASSE' if verdict else 'REFUTE'}")
-    return 0 if verdict else 1
+        v = verdict_position(delta, echelle_ref, top1_ref, top1_nous, cos,
+                             ecart_top1_top2_ref)
+        verdicts.append(v)
+        u = ulp_bf16(echelle_ref)
+        marque = "EX-AEQUO" if v.ex_aequo else ("ok" if v.ok else "ECHEC")
+        print(f"  position {i}: delta={delta:.4f} ({delta / u:.2f} ulp) "
+             f"cos={cos:.6f} {marque} — {v.raison}", flush=True)
+
+    ok, raison = verdict_global(verdicts)
+    print(f"RESULTAT {sum(1 for v in verdicts if v.ok)}/{len(verdicts)} positions "
+         f"passent — {raison} — VERDICT={'PASSE' if ok else 'REFUTE'}")
+    return 0 if ok else 1
 
 
 def main() -> int:
