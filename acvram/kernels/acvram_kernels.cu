@@ -3446,7 +3446,7 @@ torch::Tensor narrow_gemm(torch::Tensor qw, c10::optional<torch::Tensor> sc8, c1
     TORCH_CHECK(x.dim() == 2 && x.size(0) >= 1 && x.size(0) <= 16 && x.size(1) == K, "narrow_gemm : x [M<=16, K] bf16");
     TORCH_CHECK(x.scalar_type() == torch::kBFloat16, "narrow_gemm : x bf16");
     TORCH_CHECK(K % NG_KS == 0, "narrow_gemm : K multiple de 64");
-    TORCH_CHECK(rows == 32 || rows == 128, "narrow_gemm : rows 32 ou 128");
+    TORCH_CHECK(rows == 16 || rows == 32 || rows == 128, "narrow_gemm : rows 16, 32 ou 128");
     if (!nv) TORCH_CHECK(group % NG_KS == 0 && sc16.has_value() && zr.has_value(), "narrow_gemm int8 : groupe multiple de 64, echelles et zeros");
     const int M = x.size(0), N = qw.size(0);
     auto y = torch::empty({M, N}, x.options());
@@ -3462,8 +3462,8 @@ torch::Tensor narrow_gemm(torch::Tensor qw, c10::optional<torch::Tensor> sc8, c1
             NV ? nullptr : reinterpret_cast<const __half *>(sc16->data_ptr()), NV ? nullptr : zr->data_ptr<unsigned char>(), \
             reinterpret_cast<const __nv_bfloat16 *>(x.data_ptr()), reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), \
             M, N, (int)K, (int)group, (float)gscale); } while (0)
-    if (nv) { if (rows == 32) NG_LANCE(32, true); else NG_LANCE(128, true); }
-    else    { if (rows == 32) NG_LANCE(32, false); else NG_LANCE(128, false); }
+    if (nv) { if (rows == 16) NG_LANCE(16, true); else if (rows == 32) NG_LANCE(32, true); else NG_LANCE(128, true); }
+    else    { if (rows == 16) NG_LANCE(16, false); else if (rows == 32) NG_LANCE(32, false); else NG_LANCE(128, false); }
     #undef NG_LANCE
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return y;

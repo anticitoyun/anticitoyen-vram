@@ -500,11 +500,17 @@ _NVFP4_GEMV_MAX = int(os.environ.get("ACVRAM_NVFP4_GEMV_MAX", "32"))
 # minimal (à M=1 le GEMV lit x une fois et reste bon).
 _NARROW_GEMM = os.environ.get("ACVRAM_NARROW_GEMM", "0") == "1"
 _NARROW_MIN = int(os.environ.get("ACVRAM_NARROW_MIN_M", "2"))
+# NVFP4 : le chemin étroit est plus LENT que son GEMV (D b=12 : 13,41 → 14,08 ms,
+# 15/09) — décodage E2M1 + une MMA par bloc de 16 ; coupé tant que non repris.
+_NARROW_NVFP4 = os.environ.get("ACVRAM_NARROW_NVFP4", "0") == "1"
+
+
+_NARROW_ROWS = int(os.environ.get("ACVRAM_NARROW_ROWS", "32"))
 
 
 def _narrow_rows(n_sortie: int) -> int:
-    """32 lignes par CTA sous 16 384 sorties (160-512 CTA), 128 au-delà (lm_head)."""
-    return 32 if n_sortie <= 16384 else 128
+    """ACVRAM_NARROW_ROWS (32) lignes par CTA sous 16 384 sorties, 128 au-delà (lm_head)."""
+    return _NARROW_ROWS if n_sortie <= 16384 else 128
 
 
 def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
@@ -535,7 +541,7 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
         if t.padded_in != xf.shape[-1]:
             xf = torch.nn.functional.pad(xf, (0, t.padded_in - xf.shape[-1]))
         gsr = getattr(t, "global_scale_rows", None)
-        if (_NARROW_GEMM and gsr is None and _NARROW_MIN <= n <= 16 and t.padded_in % 64 == 0
+        if (_NARROW_GEMM and _NARROW_NVFP4 and gsr is None and _NARROW_MIN <= n <= 16 and t.padded_in % 64 == 0
                 and xf.dtype == torch.bfloat16 and hasattr(ext, "narrow_gemm")):
             # 1aj marche 2 : GEMM étroit tensor cores, poids lus une fois par
             # CTA en étages (le GEMV relisait W par tranche de 8 et ne
