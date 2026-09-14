@@ -124,7 +124,10 @@ COURRIEL_TOLERE = ("noreply", "example")
 # 1aj/awq-temoin/courbe-lot/nsys), poste1-11, poste2 -- les scripts de campagne de
 # scratchpad/ nomment modeles et sorties en dur (+72). Mesure directe. A trancher par
 # poste7 : scratchpad/ exempte, ou chemins lus de ACVRAM_MODELES.
-PLAFOND_CHEMINS = 505
+# 15/09 nuit (chef) : 584 = 505 - 7 (helper _chemins d poste1) + 85 (revue/inventaire-
+# chemins-absolus-15-09.md de poste8 : un DOCUMENT qui liste les chemins, pas un outil ; a
+# exclure du cliquet demain avec le helper, cible 433 sous 1 j -- poste7 section 8) + 1.
+PLAFOND_CHEMINS = 584
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute

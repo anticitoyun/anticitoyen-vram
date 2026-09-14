@@ -52,6 +52,7 @@ from pathlib import Path
 import sys as _s, pathlib as _p  # noqa: E401
 _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
 from outils.racine_modeles import MODELES  # noqa: E402
+from outils._chemins import sorties  # noqa: E402
 
 GIO = 1024 ** 3
 CARTE = Path(__file__).resolve().parent / "carte.sh"
@@ -66,7 +67,7 @@ SOURCE = BASE / "Llama-2-7b-hf"
 CORPUS = Path("/mnt/4TO_SATACMR_2022/Modeles/corpus/wiki-gptq.txt")
 CORPUS_SHA = "e52922746ad09bac73b0dba32b2987c0d7924da14337dcd43c1d9113a9f6d0ae"
 PPL_REFERENCE = 5.4141
-RELEVES = Path("~/Bureau/Claude/acvram-memoire/corpus")
+RELEVES = sorties()
 
 # Memes bornes que outils/campagne-quota.py (plancher/plafond mesures,
 # tout-nvfp4 / tout-int8 de Llama-2-7B). Le budget par defaut de CE

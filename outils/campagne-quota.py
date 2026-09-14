@@ -32,6 +32,7 @@ from pathlib import Path
 import sys as _s, pathlib as _p  # noqa: E401
 _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
 from outils.racine_modeles import MODELES  # noqa: E402
+from outils._chemins import sorties  # noqa: E402
 
 P_POIDS = 6_738_417_664          # poids comptes dans le manifeste des etalons
 GIO = 1024 ** 3
@@ -50,7 +51,7 @@ CORPUS_SHA = "e52922746ad09bac73b0dba32b2987c0d7924da14337dcd43c1d9113a9f6d0ae"
 #   wiki.test.raw  173c87a53759e0201f33e0ccf978e510c2042d7f2cb78229d9a50d79b9e7dd08
 #   335 688 jetons, 163 segments, PPL de reference 5,5625 (contre 5,4141)
 # L'ecart de 2,67 % entre les deux corpus serait attribue aux bits.
-RELEVES = Path("~/Bureau/Claude/acvram-memoire/corpus")
+RELEVES = sorties()
 
 # LE PLANCHER EST UNE VALEUR CALCULEE, PAS UN CHIFFRE ROND.
 #

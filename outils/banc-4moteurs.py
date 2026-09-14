@@ -48,6 +48,7 @@ import sys as _s, pathlib as _p  # noqa: E401
 _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
 from outils.puissance_nvml import mesurer_idle, mesurer_pendant  # noqa: E402
 from outils.racine_modeles import MODELES  # noqa: E402
+from outils._chemins import sorties  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 BASE = Path(MODELES)
@@ -57,8 +58,7 @@ DOSSIER_VLLM = Path("/mnt/4TO_SATACMR_2022/Modeles/models_vllm"
 
 GPU = 0
 PP_LEN = 2048
-SORTIE = Path("~/Bureau/Claude/acvram-memoire"
-             "/corpus/banc-4moteurs/resultats.json")
+SORTIE = sorties() / "banc-4moteurs" / "resultats.json"
 
 
 def _ecrire(moteur: str, donnees: dict) -> None:
