@@ -100,3 +100,81 @@ prédiction : −25 à −35 µs/couche, soit la moitié de l'écart, sans la
 dépendance. À b=1 le fusionné ne rend que 26,8 µs contre nos ≈ 4,18 ms /
 48 = 87 µs par couche tout compris (GEMV 21 Mo) — l'écart à b=1 est
 ailleurs (projections int8, lm_head : 1aj).
+
+## Voie (c) de poste7 — contrôle de dépendance du cubin (15/09, 1 h, hors carte)
+
+Ce que produit `cute.compile(..., --enable-tvm-ffi)` et que FlashInfer met en
+cache (`~/.cache/flashinfer/0.6.18.post1/120f/cached_ops/b12x_moe_sm120a_cute_dsl/`) :
+**un objet ELF relocatable `.o` de 160 Ko par forme** —
+`static_m12_k2048_n768_t8_r96_<sha>.o` (Coder, b=12), `static_m16_..._r128`
+(godet 16), `static_m12_k2048_n1536_t4_r48` (GLM), `micro_m1_...` (b=1). Il
+contient le cubin (fatbin chargé par `_cudaLibraryLoadData` + `cuda_load`) ET
+le code hôte MLIR de lancement (grille, shared, `_cudaLaunchKernelEx`) ; pas
+de `cuModuleLoad` à faire nous-mêmes, ni de signature de kernel à
+reconstituer : l'entrée est `__tvm_ffi_b12x_moe_static_<forme>` (convention
+TVM-FFI : tableau de `TVMFFIAny`, tenseurs en `DLTensor*`, flux pris dans
+l'environnement).
+
+Symboles non définis du `.o` (nm) : 11 enveloppes `_cuda*`/`_cu*`
+(`_cudaLibraryLoadData`, `_cudaLibraryGetKernel`, `_cudaLaunchKernelEx`,
+`_cudaFuncSetAttribute`, `_cudaKernelSetAttributeForDevice`,
+`_cuKernelGetAttribute`, `_cudaGetDevice`, `_cudaSetDevice`,
+`_cudaDeviceGetAttribute`, `cuda_dialect_init/unload_library_once`,
+`CuteDSLRT_TVMFFISetRaisedCudaError`) fournies par
+`libcute_dsl_runtime.so` (43 Mo, C pur, ne dépend que de libc/libdl, fait
+`dlopen`/`dlsym` de libcudart — pas de Python, pas de torch) ; et 3
+symboles TVM-FFI (`TVMFFIEnvGetStream`, `TVMFFIErrorSetRaisedFromCStr[Parts]`)
+de `libtvm_ffi.so` (2 Mo). **Aucune dépendance au runtime Python
+cutlass-dsl ni à torch 2.14 à l'exécution** : la réfutation structurelle de
+poste7 ne tient pas — sous réserve du point 3.
+
+Ce qu'il faut de notre côté :
+1. lier le `.o` dans notre extension (ninja : un objet de plus), avec les
+   11 enveloppes ÉCRITES PAR NOUS (renvois directs vers cudart/cuda
+   driver : `_cudaLaunchKernelEx` → `cudaLaunchKernelExC`, etc.) et les 3
+   stubs TVM-FFI (flux courant de torch, message d'erreur) — sans embarquer
+   `libcute_dsl_runtime.so` ;
+2. un appel C++ qui remplit les 24 `DLTensor` dans l'ordre de
+   `moe_dispatch.py:1722-1750` (a, ids compacts, poids de routage, 6
+   espaces de travail `packed_a/scale/barrier`, w13/down FP4 + leurs
+   échelles en disposition MMA native (32,4,m_tiles,4,k_tiles,E), row_counts,
+   active_expert_count, weight_expert_ids, global_to_local, input_gs,
+   alpha ×2, down_input_scale, sortie scatter, token_map, token_weights) ;
+   tailles des espaces lues dans `B12xMoEWrapper.__init__` ;
+3. **vérifier les signatures des enveloppes** : `libcute_dsl_runtime` les
+   résout par `dlsym` sur cudart (vu à l'objdump : trampolines), mais si
+   une enveloppe ajoute un argument, l'édition de liens passe et l'appel
+   plante — contrôle par désassemblage des sites d'appel du `.o` (registres
+   chargés avant `call`) avant de lier, 1 h ;
+4. le pré-noyau `compact_topk_ids` (Triton, 30 lignes,
+   `triton_compact.py`) réécrit en CUDA : ids globaux → compacts
+   [0, actifs), table compact→global, compte ; les fantômes (-1) à traiter
+   (`other=-1` dans le Triton : un id -1 devient un expert « −1 » —
+   à masquer avant, poids 0) ;
+5. conversion de disposition des experts au chargement : `w13_fp4`
+   = [E, 2I, K/2] (gate et up concaténés par lignes, à vérifier
+   intercalés ou empilés), `down_fp4` [E, K, I/2], échelles E4M3 bloc 16
+   en tuiles MMA (128 lignes × 64 colonnes de blocs) — nos piles
+   `("nvfp4", qw, bs, gs, K, M)` ont les mêmes octets E2M1, seules les
+   échelles changent de disposition : conversion hors ligne ou au
+   chargement (poste1 : placement, tables d'adresses — le `.o` prend des
+   pointeurs contigus [E,…], pas une table par expert : **incompatible
+   avec l'exil par expert** tel quel).
+
+**Bloquant à trancher AVANT le jour de travail (utilisateur) : la licence.**
+`nvidia_cutlass_dsl` 4.7.1 est sous « NVIDIA Software License Agreement »
+(pas BSD comme CUTLASS) : distribuables = « python files in the Software
+package in source format » ; « unless a developer tool is identified as
+distributable, it is delivered for your internal use only » ; 2.2 interdit
+de distribuer « any portion of the Software or Derivatives ». Donc
+`libcute_dsl_runtime.so` ne va PAS dans le `.deb` (d'où les enveloppes à
+nous, point 1) ; le `.o` compilé depuis le code de FlashInfer (Apache-2.0)
+par le DSL : sortie de compilation, pas « Software » à ma lecture — mais
+c'est une lecture, pas un droit ; usage interne (bancs, duel) sans
+question. Si le `.deb` ne peut pas l'embarquer, (c) sert au duel et aux
+mesures, et le produit garde (b) (fusion à nous) — ordre inversé par
+rapport à poste7.
+
+Prédiction si (c) aboutit (rappel des seuils de poste7) : 62,7 µs ± 10 % à
+froid avec fantômes ; pas Coder b=12 −1,8 à −2,3 ms sur le bras B de
+c6377d5 ; J −12 % ; PPL b12x/A ≤ 1,010 (poste2, teacher forcing).
