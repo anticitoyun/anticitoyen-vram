@@ -225,10 +225,19 @@ poste7 l'a dit elle-même) ; positions 3, 4, 5 juste au-dessus de 2 ulp
 position 15 nettement au-dessus (3,45 ulp), à regarder plus près si le
 multiplicateur venait à monter sans l'expliquer.
 
-Pas encore fait (nécessite GPU, hors du périmètre de cette tâche) : la
-mesure du témoin référence-contre-elle-même (HF bf16 eager vs sdpa, ou
-GPU vs CPU) que poste7 demande pour recaler le multiplicateur « 2 ulp » —
-plancher témoin + 1 ulp, écrit avant de relancer notre bras.
+## TÉMOIN CPU MESURÉ (15/09, revue/prediction-temoin-ulp-cpu-15-09.md)
+
+HF bf16 CPU, eager vs sdpa, mêmes 16 jetons : plancher témoin = **4,00
+ulp** (position 3). Seuil recalé (poste7 §3, plancher+1) = **5 ulp**, pas
+2. Recalculé à ce seuil sur `mini-acvram4` vs HF : les positions 3, 4, 5,
+15 passent maintenant (toutes ≤ 3,45 ulp < 5) — **15/16 passent**, seule
+la position 0 (14,52 ulp, l'ex-aequo réel) reste en échec sur le critère
+delta.
+
+Provisoire : le témoin GPU vs CPU (poste7 §3, 5 min de carte, après poste3
+dans la file) pourrait relever encore ce plancher — pas fait ici. Le
+multiplicateur "2" reste "en vigueur" tel que scellé jusqu'à ce que
+poste7/chef confirment le passage à 5.
 
 **Trois bogues réels trouvés et corrigés cette session, tous avec test
 qui casse** :
