@@ -191,16 +191,19 @@ class Energie:
         return self
 
     def __exit__(self, *a) -> None:
+        # Relever AVANT d'arrêter le fil : `join` attend la fin de son
+        # `sleep(periode)`, jusqu'à 1 s — la durée le portait, donc ms/pas,
+        # jetons/s et W aussi (15/09 : cinq bras à 25,04 / 26,04 s exactement,
+        # +1,000 s attribués à tort à un noyau qui coûtait 70 µs).
+        if not self.indisponible:
+            n = nvml()
+            self.duree = time.time() - self._t0
+            for i, h in n.cartes:
+                self.fin[i] = n.energie_mj(h)
+                self.pids_fin[i] = n.pids(h)
         self._stop = True
         if self._t:
             self._t.join(timeout=3)
-        if self.indisponible:
-            return
-        n = nvml()
-        self.duree = time.time() - self._t0
-        for i, h in n.cartes:
-            self.fin[i] = n.energie_mj(h)
-            self.pids_fin[i] = n.pids(h)
 
     # -- lecture ----------------------------------------------------------
     @property
