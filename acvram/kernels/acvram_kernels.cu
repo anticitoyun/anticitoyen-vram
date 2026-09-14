@@ -1877,6 +1877,11 @@ __global__ void nvfp4_gemm_grouped_kernel(
 
     const int tile = blockIdx.y;
     const int e = tile_e[tile], t0 = tile_t0[tile], nt = tile_n[tile];
+    // Tuile vide (grille FIXE du décodage sous graphes, _tuiles(cnt, bt, t_max) :
+    // n=0 au-delà du compte réel, t0 pouvant dépasser la fin de xq) : rien à
+    // lire ni à écrire. Sans ce retour, min(r, nt-1) = -1 et les chargements
+    // partent à t0-1 : accès mémoire illégal mesuré le 14/09 sur Coder-30B.
+    if (nt <= 0) return;
     const int row0 = blockIdx.x * GG_BM;
     const int tid = threadIdx.x, warp = tid >> 5;
     const float gscale = gscales[e];
@@ -2065,6 +2070,11 @@ __global__ void __launch_bounds__(128) nvfp4_gemm_grouped_mma_kernel(
     constexpr int MF = BT / 16;
     const int tile = blockIdx.y;
     const int e = tile_e[tile], t0 = tile_t0[tile], nt = tile_n[tile];
+    // Tuile vide (grille FIXE du décodage sous graphes, _tuiles(cnt, bt, t_max) :
+    // n=0 au-delà du compte réel, t0 pouvant dépasser la fin de xq) : rien à
+    // lire ni à écrire. Sans ce retour, min(r, nt-1) = -1 et les chargements
+    // partent à t0-1 : accès mémoire illégal mesuré le 14/09 sur Coder-30B.
+    if (nt <= 0) return;
     // les piles de l'expert : adresses octet fournies par la table (contrat
     // bead pds : résident = data_ptr() de sa tranche, froid = pointeur device
     // zéro-copie d'un tampon épinglé), jamais recalculées d'après e
@@ -2237,6 +2247,11 @@ __global__ void __launch_bounds__(GM2_FILS) nvfp4_gemm_grouped_mma2_kernel(
 
     const int tile = blockIdx.y;
     const int e = tile_e[tile], t0 = tile_t0[tile], nt = tile_n[tile];
+    // Tuile vide (grille FIXE du décodage sous graphes, _tuiles(cnt, bt, t_max) :
+    // n=0 au-delà du compte réel, t0 pouvant dépasser la fin de xq) : rien à
+    // lire ni à écrire. Sans ce retour, min(r, nt-1) = -1 et les chargements
+    // partent à t0-1 : accès mémoire illégal mesuré le 14/09 sur Coder-30B.
+    if (nt <= 0) return;
     const unsigned char *qw_e = reinterpret_cast<const unsigned char *>(table_qw[e]);
     const unsigned char *bs_e = reinterpret_cast<const unsigned char *>(table_bscale[e]);
     const int row0 = blockIdx.x * GM2_BM;
