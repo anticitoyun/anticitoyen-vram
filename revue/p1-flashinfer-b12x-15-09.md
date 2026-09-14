@@ -246,3 +246,35 @@ poste7 ordonne la marche de glue d'abord (quant dans l'épilogue de moe_act,
 réduction dans down) — elle est CONTENUE dans ce port (activation+quant
 dans l'épilogue de FC1, réduction par atomiques de FC2) : la faire
 séparément ne sert que si le port glisse.
+
+## (1) ncu du chemin B au décodage (15/09, 14:37-16:07, carte, deux passes)
+
+Un pas b=12 sous graphes, MMA décodage (défaut 0.6.1) : **3 617 lancements
+par pas** (A : 1 506 — le routage torch en ajoute ~2 100). ncu rejoue chaque
+noyau avec sauvegarde des 15 Gio : 46 min par passe (leçon écrite dans le
+script : `NCU_LANCEMENTS=2000` par défaut, une passe par appel carte.sh — le
+processus est root, il ne se tue pas ; incident signalé, REGLES §6).
+
+| noyau (par pas, ÷48 = par couche) | lanc. | ms ncu chaud | ms ncu purgé | Go DRAM chaud | Go purgé |
+|---|---:|---:|---:|---:|---:|
+| 3 GEMM `mma2` (gate, up, down) | 144 | 4,112 (**86 µs/couche**) | 4,117 | 4,285 | 4,303 |
+| `quant_act` ×2 | 96 | 0,270 | 0,307 | 0,000 | 0,036 |
+| `moe_act` | 48 | 0,093 | 0,110 | 0,000 | 0,019 |
+| `moe_reduce_trie` | 48 | 0,104 | 0,126 | 0,000 | 0,026 |
+| routage torch : `index_elementwise` ×5 | 240 | 0,629 | 0,897 | 0,006 | 0,017 |
+| `scatter_gather` ×2 | 97 | 0,221 | 0,262 | 0,003 | 0,006 |
+| `searchsorted` | 48 | 0,130 | 0,188 | 0,001 | 0,001 |
+| `gather` | 48 | 0,096 | 0,118 | 0,000 | 0,003 |
+| **glue totale** | ~625 | **1,54 (32 µs/couche)** | **2,01 (42)** | 0,010 | 0,108 |
+| pas entier | 3 617 | 18,09 | 19,48 | 5,694 | 5,974 |
+
+Lecture : les octets ne changent pas (les GEMM lisent leurs 4,3 Go une
+fois ; l'intermédiaire g/u/act/aq — 5 passages de 150 Ko — est servi par le
+L2 à chaud, coûte 0,1 Go purgé) ; **la glue est du temps de lancement, pas
+des octets** : 32-42 µs/couche sous ncu (surestimé ~45 % sur ces noyaux
+de 2-13 µs → réel ≈ 20-30), dont **22-30 de routage torch** (argsort,
+scatter_add_, `_tuiles`, gather, inv : ~45 lancements/couche) et 10-12 de
+quant/act/reduce. Règle de poste7 (≥ 20 → glue d'abord) : glue d'abord, et
+la marche utile est le routage (§ 2 rescellé : route+pack CUDA en un
+lancement, ≤ 5 µs/couche, lancements/pas ≤ 1 700, pas −0,6/−1,0 ms,
+réfuté > −0,3).
