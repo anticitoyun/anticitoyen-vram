@@ -3,7 +3,7 @@
 poste3, 15/09/2026, 18:09-18:14, une prise de carte (v064-poste3). Ordre :
 chef, seuil **4,30 ± 0,02 ms / 232,7 t/s** (le good c652947 de la
 bissection, [`verdict-gemvmax-bissect-15-09.md`](verdict-gemvmax-bissect-15-09.md)).
-Moteur : main da17b01 (v0.6.4, poste1 : fp32 seulement sigmoid + biais).
+Moteur : main f2273d7 (v0.6.4 = da17b01 d'poste1, fp32 seulement sigmoid + biais, + une note de revue), relevé au journal de l'unité.
 
 ## En-tête (REGLES §3)
 
