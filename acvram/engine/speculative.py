@@ -34,6 +34,7 @@ réponse différente.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol
 
@@ -42,7 +43,54 @@ import torch
 from .sampler import SamplingParams
 
 __all__ = ["Proposal", "Proposer", "NGramProposer", "DraftModelProposer",
-           "verify_proposal", "make_proposer"]
+           "verify_proposal", "make_proposer", "GardeSpeculation"]
+
+
+class GardeSpeculation:
+    """Decide si la speculation doit s'activer ce pas.
+
+    Mesure du 14/09 (revue/verdict-cout-verification-ngram-b12-14-09.md) :
+    a b_reel=12 la carte est deja pleine a largeur 1 par sequence, verifier
+    jusqu'a spec_k+1 par sequence n'a plus de marge a absorber gratuitement
+    -- le debit mesure a ete divise par deux (481,4 -> 241,4 t/s). A b_reel=1
+    (revue/verdict-taux-ngram-code-13-09.md, taux 1,6137) la speculation
+    gagne. Deux gardes, l'une a priori, l'autre mesuree :
+
+    1. seuil de lot : au-dessus de `lot_max`, jamais eligible (le regime ou
+       la carte n'a plus de marge commence a un lot connu, pas a deviner) ;
+    2. garde glissante : meme sous le seuil, si le gain reel moyen sur les
+       dernieres `fenetre` pas speculatifs tombe sous `gain_min` (jetons
+       emis par pas / b_reel), la speculation se desactive -- le lot seul ne
+       capture pas tous les regimes ou l'acceptation ne paie pas. Elle se
+       reactive quand le lot redescend a nouveau sous le seuil apres etre
+       monte au-dessus (transition haute -> basse) : une chance neuve, pas
+       une desactivation permanente.
+    """
+
+    def __init__(self, lot_max: int, fenetre: int = 32, gain_min: float = 1.05):
+        self.lot_max = lot_max
+        self.gain_min = gain_min
+        self._fenetre: deque = deque(maxlen=fenetre)
+        self._desactive = False
+        self._dernier_lot: int | None = None
+
+    def eligible(self, b_reel: int) -> bool:
+        if (self._dernier_lot is not None and self._dernier_lot > self.lot_max
+                and b_reel <= self.lot_max):
+            self._desactive = False
+            self._fenetre.clear()
+        self._dernier_lot = b_reel
+        return b_reel <= self.lot_max and not self._desactive
+
+    def enregistrer(self, jetons_emis: int, b_reel: int) -> None:
+        """A appeler apres un pas ou la speculation a reellement tourne."""
+        if b_reel <= 0:
+            return
+        self._fenetre.append(jetons_emis / b_reel)
+        if len(self._fenetre) == self._fenetre.maxlen:
+            moyenne = sum(self._fenetre) / len(self._fenetre)
+            if moyenne < self.gain_min:
+                self._desactive = True
 
 
 @dataclass

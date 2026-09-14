@@ -21,15 +21,19 @@ def puissance_instantanee_w(gpu: int = 0) -> float:
 
 
 def mesurer_idle(gpu: int = 0, secondes: float = 3.0, pas: float = 0.2) -> float:
-    """Médiane de puissance GPU au repos — À MESURER JUSTE AVANT chaque
+    """Moyenne de puissance GPU au repos — À MESURER JUSTE AVANT chaque
     régime (l'idle d'une carte que quelqu'un d'autre a chauffée n'est pas
-    l'idle de la carte froide)."""
+    l'idle de la carte froide).
+
+    Moyenne, pas médiane (poste7, 14/09) : sur une charge par rafales, la
+    médiane sous-estime l'énergie réellement consommée — seule la moyenne
+    (pondérée par le temps entre relevés) correspond à un total de joules."""
     releves = []
     fin = time.time() + secondes
     while time.time() < fin:
         releves.append(puissance_instantanee_w(gpu))
         time.sleep(pas)
-    return statistics.median(releves)
+    return statistics.mean(releves)
 
 
 class _Echantillonneur:
@@ -64,13 +68,19 @@ class _Echantillonneur:
 def mesurer_pendant(fn, gpu: int = 0, pas: float = 0.1):
     """Exécute ``fn()`` en échantillonnant la puissance en parallèle.
 
-    Rend (résultat_de_fn, watts_median_pendant, nombre_de_releves).
-    Un seul relevé (fenêtre trop courte) rend le relevé lui-même, pas une
+    Rend (résultat_de_fn, watts_moyen_pendant, nombre_de_releves,
+    watts_median_pendant). La MOYENNE est le champ à utiliser pour toute
+    conversion en joules (P moyenne × durée = énergie) — la médiane,
+    gardée en champ secondaire, sous-estime sur une charge par rafales
+    (poste7, 14/09 : +51 % d'écart mesuré entre médiane et compteur NVML
+    TotalEnergyConsumption sur une fenêtre de 2 s). Un seul relevé
+    (fenêtre trop courte) rend ce relevé pour les deux champs, pas une
     erreur — signalé par ``nombre_de_releves == 1`` pour que l'appelant
-    juge s'il fait confiance à la médiane."""
+    juge s'il fait confiance à la valeur."""
     with _Echantillonneur(gpu, pas) as ech:
         resultat = fn()
     if not ech.releves:
         raise RuntimeError("aucun releve de puissance pendant la fenetre "
                            "— fn() trop rapide pour le pas d'echantillonnage")
-    return resultat, statistics.median(ech.releves), len(ech.releves)
+    return (resultat, statistics.mean(ech.releves), len(ech.releves),
+            statistics.median(ech.releves))
