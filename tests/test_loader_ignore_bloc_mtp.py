@@ -58,7 +58,12 @@ def test_le_bloc_fantome_layers_2_est_ignore(tmp_path, target_rig):
 
     plan, _ = auto_plan(spec, target_rig, PlannerOptions(max_model_len=512))
     out = str(tmp_path / "acvram")
-    convert_checkpoint(src, plan, ConversionOptions(out_dir=out), spec=spec)
+    # awq=False, quant_device="cpu" : ce test verifie le compte de couches
+    # du loader, pas la qualite de quantification -- la recherche AWQ par
+    # defaut (device="cuda:0", 20 valeurs de grille) rendait ce test lent
+    # (mesure : suite complete 60s -> 380s pour deux conversions).
+    convert_checkpoint(src, plan, ConversionOptions(
+        out_dir=out, awq=False, quant_device="cpu"), spec=spec)
 
     loaded = load_model(out, dtype=torch.float32, device_override="cpu")
     assert loaded.spec.num_layers == 2
@@ -75,7 +80,8 @@ def test_le_manifeste_converti_ne_declare_pas_le_bloc_fantome(tmp_path, target_r
     spec = load_model_spec(src, "fantome")
     plan, _ = auto_plan(spec, target_rig, PlannerOptions(max_model_len=512))
     out = str(tmp_path / "acvram2")
-    convert_checkpoint(src, plan, ConversionOptions(out_dir=out), spec=spec)
+    convert_checkpoint(src, plan, ConversionOptions(
+        out_dir=out, awq=False, quant_device="cpu"), spec=spec)
 
     with open(f"{out}/acvram_manifest.json") as fh:
         manifest = json.load(fh)
