@@ -101,7 +101,11 @@ COURRIEL_TOLERE = ("noreply", "example")
 # deja compte (banc_llamacpp.py). Fusionne avec les releves paralleles
 # d'poste1 : total remesure directement apres rebase, pas additionne a
 # l'aveugle.
-PLAFOND_CHEMINS = 324
+# 14/09 nuit (poste2) -- outils/equivalence-glm-2couches.py (equivalence CPU
+# 2 couches vs HF, item (2) de poste7) : +1, SOURCE/VENV_PROJET/VENV_VLLM
+# nommes en dur, meme convention que ses voisins de outils/. Total remesure
+# directement apres rebase.
+PLAFOND_CHEMINS = 326
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute
