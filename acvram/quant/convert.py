@@ -307,15 +307,33 @@ class TensorRouter:
             # Même plancher que l'attention : la tête projette sur 151 936
             # classes, à 3,25 bits ses logits ne classent plus.
             return "int8" if fmt == "q3n" else fmt
-        if ".mtp." in name or name.startswith("model.mtp."):
-            # La tête de prédiction multi-jetons est un bloc de transformeur de
-            # plus : elle suit le format de la dernière couche, pas le bf16 des
-            # tenseurs hors couches.
-            return self._layer_fmt.get(self.spec.num_layers - 1, "int4_awq")
         idx = self.layer_index(name)
+        # La tête de prédiction multi-jetons est un bloc de transformeur de
+        # plus : elle suit le format de la dernière couche, pas le bf16 des
+        # tenseurs hors couches. Deux conventions HF pour la nommer : un
+        # préfixe `.mtp.`/`model.mtp.` dédié, OU — GLM-4.7-Flash — le même
+        # schéma `model.layers.N.*` que les couches réelles, avec N EGAL au
+        # nombre de couches réelles (une de plus que le dernier indice
+        # valide). Sans le second cas, `layer_index` rend cet indice hors
+        # plan tel quel et le repli silencieux plus bas l'aurait quantifié
+        # en int4_awq — le format decouvert le 15/09 sur
+        # model.layers.47.mlp.experts.*.gate_proj.weight (47 couches
+        # reelles, indices 0-46), qui n'a RIEN a voir avec une promotion
+        # SNR par expert (verifie : aucun `promoted_from` sur ces
+        # tenseurs, le manifeste les quantifiait directement en int4_awq).
+        if ".mtp." in name or name.startswith("model.mtp.") or idx == self.spec.num_layers:
+            return self._layer_fmt.get(self.spec.num_layers - 1, "int4_awq")
         if idx is None:
             return "bf16"
-        return self._layer_fmt.get(idx, "int4_awq")
+        if idx not in self._layer_fmt:
+            # PLUS JAMAIS de repli silencieux : un tenseur hors plan doit
+            # arrêter la conversion en nommant la couche, pas se faire
+            # quantifier dans un format que personne n'a choisi pour lui.
+            raise ValueError(
+                f"« {name} » (couche {idx}) n'a pas de format planifié -- "
+                f"le plan de placement ne connaît que {sorted(self._layer_fmt)} "
+                f"couches ; refus plutôt qu'un repli int4_awq silencieux")
+        return self._layer_fmt[idx]
 
     def _fmt_brut(self, name: str) -> str:
         idx = self.layer_index(name)
@@ -822,6 +840,50 @@ def _verifier_formats_declares(manifest: dict, weight_map: dict) -> None:
               flush=True)
         for nom, fmt in suspects[:6]:
             print(f"           {nom} (declare {fmt})", flush=True)
+
+
+def _verifier_homogeneite_moe(tensors: dict, num_layers: int) -> None:
+    """Refuse une couche MoE dont les experts n'ont pas TOUS le même format.
+
+    poste7, 15/09 (`revue/poste7-glm-formats-mixtes-15-09.md` §2) : l'homogénéité
+    d'une pile d'experts se décide à la CONVERSION, pas au chargement — un
+    loader qui « dépile » ou ramène au format majoritaire fabriquerait un
+    régime que personne n'a mesuré. `_try_build_stacks` (engine/model.py)
+    exige déjà cette homogénéité pour construire la pile groupée ; ici on
+    refuse D'ÉCRIRE le dossier plutôt que de laisser un chargeur découvrir
+    le problème en silence (comme le 15/09 sur GLM-4.7-Flash : 2 944
+    tenseurs nvfp4 et 64 int4_awq, cause réelle ailleurs — voir
+    `_precalculer_alpha_commun_gate_up`/`TensorRouter.format_for` pour le
+    bloc MTP — mais CETTE garde aurait arrêté la conversion avant qu'elle
+    n'atteigne poste3).
+
+    N'examine PAS la couche `num_layers` (le bloc MTP, jamais chargé par le
+    moteur au décodage sans spéculation MTP — il peut porter un format
+    différent sans effet sur l'inférence réelle).
+    """
+    import re
+    from collections import defaultdict
+    par_groupe: dict[tuple, dict[int, str]] = defaultdict(dict)
+    for nom, entree in tensors.items():
+        mo = re.match(r"model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(\w+)\.weight$", nom)
+        if not mo:
+            continue
+        couche, expert, proj = int(mo.group(1)), int(mo.group(2)), mo.group(3)
+        if couche == num_layers:
+            continue
+        par_groupe[(couche, proj)][expert] = str(entree.get("format"))
+    for (couche, proj), formats_par_expert in par_groupe.items():
+        distincts = set(formats_par_expert.values())
+        if len(distincts) > 1:
+            from collections import Counter
+            compte = Counter(formats_par_expert.values())
+            exemples = sorted(formats_par_expert.items())[:3]
+            raise ValueError(
+                f"couche {couche}, projection {proj} : experts à formats "
+                f"MÉLANGÉS {dict(compte)} — la pile groupée ne peut pas se "
+                f"construire (exemples : {exemples}). Refus d'écrire ce "
+                f"dossier plutôt que de laisser un chargeur le découvrir "
+                f"plus tard.")
 
 
 def _diagnostic_fusion(tensors: dict) -> dict:
@@ -1696,6 +1758,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
               f"deux passes.", flush=True)
         manifest["quota_promotions_sature"] = True
 
+    _verifier_homogeneite_moe(manifest["tensors"], spec.num_layers)
     manifest["diagnostic_fusion"] = _diagnostic_fusion(manifest["tensors"])
     if not opts.dry_run:
         _verifier_formats_declares(manifest, writer.weight_map)

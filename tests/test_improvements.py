@@ -990,6 +990,100 @@ def test_les_projections_gdn_ne_descendent_pas_sous_int8(tmp_path):
     assert r.format_for("model.layers.1.mlp.experts.0.up_proj.weight") == "q3n"
 
 
+def test_bloc_mtp_nomme_layers_n_pas_int4_awq_en_dur(tmp_path):
+    """15/09, GLM-4.7-Flash : le bloc MTP (num_nextn_predict_layers=1) est
+    rangé sous `model.layers.<num_hidden_layers>.*` — MÊME convention que
+    les couches réelles, PAS le préfixe `.mtp.`/`model.mtp.` que le routeur
+    reconnaissait déjà. `layer_index` rendait donc 47 pour un modèle à 47
+    couches réelles (indices 0-46), `_layer_fmt` n'avait pas cette clé, et
+    le repli codé en dur rendait "int4_awq" -- confondu un moment avec une
+    promotion SNR par expert (aucun `promoted_from` sur ces tenseurs : ils
+    étaient quantifiés DIRECTEMENT dans ce format, pas promus).
+    `model.layers.47.mlp.experts.0.gate_proj.weight` doit suivre le format
+    de la DERNIÈRE couche réelle (46), comme le préfixe `.mtp.` littéral."""
+    import json
+    from acvram.engine.config import load_model_spec
+    from acvram.hardware.detect import detect_rig
+    from acvram.memory.tiering import PlannerOptions, auto_plan
+    from acvram.quant.convert import ConversionOptions, TensorRouter
+    d = tmp_path / "m"; d.mkdir()
+    json.dump({"architectures": ["LlamaForCausalLM"], "hidden_size": 256,
+               "intermediate_size": 512, "num_hidden_layers": 47,
+               "num_attention_heads": 8, "num_key_value_heads": 8,
+               "vocab_size": 512}, open(d / "config.json", "w"))
+    spec = load_model_spec(str(d), "m")
+    plan, _ = auto_plan(spec, detect_rig(), PlannerOptions(max_model_len=256))
+    r = TensorRouter(spec, plan, ConversionOptions(out_dir=str(tmp_path)))
+    attendu = r.format_for("model.layers.46.mlp.gate_proj.weight")
+    assert r.format_for("model.layers.47.mlp.experts.0.gate_proj.weight") == attendu
+    assert attendu != "int4_awq" or r.format_for(
+        "model.layers.47.mlp.shared_expert.down_proj.weight") == attendu
+
+
+def test_tenseur_hors_plan_leve_plutot_que_repli_silencieux(tmp_path):
+    """Corollaire du test précédent : un indice de couche qui n'est NI une
+    couche réelle NI le bloc MTP (ex. un nom de tenseur corrompu, ou une
+    future convention non reconnue) doit arrêter la conversion en la
+    nommant -- jamais retomber sur int4_awq en silence, le bogue même que
+    ce commit corrige pour le cas MTP."""
+    import json
+    import pytest
+    from acvram.engine.config import load_model_spec
+    from acvram.hardware.detect import detect_rig
+    from acvram.memory.tiering import PlannerOptions, auto_plan
+    from acvram.quant.convert import ConversionOptions, TensorRouter
+    d = tmp_path / "m"; d.mkdir()
+    json.dump({"architectures": ["LlamaForCausalLM"], "hidden_size": 256,
+               "intermediate_size": 512, "num_hidden_layers": 4,
+               "num_attention_heads": 8, "num_key_value_heads": 8,
+               "vocab_size": 512}, open(d / "config.json", "w"))
+    spec = load_model_spec(str(d), "m")
+    plan, _ = auto_plan(spec, detect_rig(), PlannerOptions(max_model_len=256))
+    r = TensorRouter(spec, plan, ConversionOptions(out_dir=str(tmp_path)))
+    with pytest.raises(ValueError, match="pas de format planifié"):
+        r.format_for("model.layers.99.mlp.gate_proj.weight")
+
+
+def test_convertisseur_refuse_une_couche_moe_a_formats_melanges():
+    """poste7, 15/09 : la garde 'écrase la couche' pas 'répare au chargement'.
+    Rejoue le manifeste exact du 15/09 sur GLM-4.7-Flash (2 944 experts
+    nvfp4 + 64 int4_awq) tel que `_verifier_homogeneite_moe` doit le voir --
+    ce test casse si on retire la garde ou son appel dans
+    `convert_checkpoint`."""
+    import pytest
+    from acvram.quant.convert import _verifier_homogeneite_moe
+    tensors = {}
+    for couche in range(1, 4):
+        for expert in range(64):
+            tensors[f"model.layers.{couche}.mlp.experts.{expert}.gate_proj.weight"] = {
+                "format": "nvfp4"}
+    for expert in range(64):
+        # une seule couche a l'un de ses experts en int4_awq -- assez pour
+        # casser la pile groupee de CETTE couche.
+        fmt = "int4_awq" if expert == 0 else "nvfp4"
+        tensors[f"model.layers.2.mlp.experts.{expert}.up_proj.weight"] = {"format": fmt}
+    with pytest.raises(ValueError, match="formats MÉLANGÉS"):
+        _verifier_homogeneite_moe(tensors, num_layers=4)
+
+
+def test_convertisseur_ignore_le_bloc_mtp_pour_l_homogeneite_moe():
+    """Le bloc MTP (couche == num_layers) peut porter un format different
+    des couches reelles sans que la garde ne l'accuse -- il n'est jamais
+    charge par le moteur au decodage. Reproduit exactement le manifeste du
+    15/09 (46 couches reelles homogenes en nvfp4, 1 bloc MTP entierement
+    int4_awq) : NE DOIT PAS lever."""
+    from acvram.quant.convert import _verifier_homogeneite_moe
+    tensors = {}
+    for couche in range(1, 47):
+        for expert in range(64):
+            tensors[f"model.layers.{couche}.mlp.experts.{expert}.gate_proj.weight"] = {
+                "format": "nvfp4"}
+    for expert in range(64):
+        tensors[f"model.layers.47.mlp.experts.{expert}.gate_proj.weight"] = {
+            "format": "int4_awq"}
+    _verifier_homogeneite_moe(tensors, num_layers=47)  # ne leve pas
+
+
 def test_mode_liste_explicite(tiny_checkpoint, target_rig, tmp_path_factory,
                               monkeypatch):
     """Le mode liste promeut EXACTEMENT la liste, ignore le budget, et refuse
