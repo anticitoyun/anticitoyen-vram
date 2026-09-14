@@ -445,11 +445,14 @@ class Engine:
                         | {plan.embed_device, plan.lm_head_device})
 
         etats_piles: set[str] = set()
+        raisons_piles: set[str] = set()
         experts_total = experts_exiles = 0
         for m in self.model.modules():
             if not isinstance(m, MoEBlock):
                 continue
             etats_piles.add(m._stack_state)
+            if m._stack_state == "non" and getattr(m, "_raison_repli", ""):
+                raisons_piles.add(m._raison_repli)
             for expert in m.experts:
                 experts_total += 1
                 if any(getattr(getattr(expert, nom, None), "streamed", None) is not None
@@ -479,6 +482,7 @@ class Engine:
             "experts_exiles": experts_exiles,
             "experts_total": experts_total,
             "piles_ok": piles_ok,
+            "piles_raison": sorted(raisons_piles),
             "cartes": cartes,
             "chemin_moe": chemin_moe,
         }
@@ -491,10 +495,18 @@ class Engine:
                   and r["experts_exiles"] == 0 and r["piles_ok"] is not False
                   and len(r["cartes"]) <= 1)
         etat = "NOMINAL" if nominal else "DÉGRADÉ"
+        piles_txt = f"piles_ok={r['piles_ok']}"
+        if r["piles_ok"] is False and r["piles_raison"]:
+            # DÉGRADÉ nommé, pas seulement constaté : sans la cause, un
+            # "piles_ok=False" oblige à relire le code pour savoir si c'est
+            # une vraie anomalie (formats réellement mélangés) ou un cas
+            # attendu (bf16 non quantifié, sans noyau groupé — trouvé le
+            # 15/09 sur un GLM converti --format bf16, pris pour un bogue).
+            piles_txt += " (" + " ; ".join(r["piles_raison"]) + ")"
         return (f"régime {etat} — graphes={'on' if r['graphes'] else 'off'} "
                f"couches_exilées={r['couches_exilees']}/{r['couches_total']} "
                f"experts_exilés={r['experts_exiles']}/{r['experts_total']} "
-               f"piles_ok={r['piles_ok']} cartes={r['cartes']} "
+               f"{piles_txt} cartes={r['cartes']} "
                f"chemin_moe={r['chemin_moe']} "
                f"cache_prefixe={self.stats.hit_rate:.3f} "
                f"({self.stats.cached_prompt_tokens} vram+hôte, "

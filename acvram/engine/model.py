@@ -752,7 +752,25 @@ class MoEBlock(nn.Module):
                     w.qweight, w.scales, w.zeros = qw[e], sc[e], zr[e]
                 return ("int4", qw, sc, zr, ws[0].padded_in,
                         ws[0].group_size, ws[0].shape[0])
-            self._raison_repli = f"{nom} : formats de quantification mélangés entre experts (ni tout NVFP4, ni tout INT4)"
+            # "ni tout NVFP4, ni tout INT4" NE PROUVE PAS un mélange : un
+            # troisième format UNIFORME (bf16 clair, q3n...) tombe ici aussi
+            # et n'a rien d'hétérogène. Distinguer les deux : le premier est
+            # attendu (ce chemin ne sait construire une pile QUE pour NVFP4/
+            # INT4 — aucun noyau groupé bf16 n'existe, `_forward_prefill_
+            # grouped` refuse tout pile dont le tag n'est pas "nvfp4") ; le
+            # second est une vraie anomalie de conversion à investiguer.
+            # Trouvé le 15/09 sur un GLM-4.7-Flash converti `--format bf16` :
+            # le message annonçait un mélange qui n'existait pas.
+            types = {type(w).__name__ for w in ws}
+            if len(types) == 1:
+                self._raison_repli = (
+                    f"{nom} : format {types.pop()} uniforme mais non pris en "
+                    f"charge par ce chemin (ni NVFP4 ni INT4 — attendu pour "
+                    f"un modèle non quantifié, pas une anomalie)")
+            else:
+                self._raison_repli = (
+                    f"{nom} : formats de quantification réellement mélangés "
+                    f"entre experts ({', '.join(sorted(types))})")
             return None
 
         piles = {}
