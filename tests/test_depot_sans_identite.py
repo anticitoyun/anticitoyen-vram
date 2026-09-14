@@ -120,7 +120,11 @@ COURRIEL_TOLERE = ("noreply", "example")
 # 15/09 (chef) : 433 apres fusion de poste1-11 (temoins ulp, equivalence), poste2 (GLM AWQ),
 # poste3 (campagnes 1aj, courbes), poste4 (route+pack) -- carnets et scripts de campagne
 # nomment leurs chemins ; mesure directe, aucun de mes fichiers.
-PLAFOND_CHEMINS = 433
+# 15/09 soir (chef) : 505 apres fusion poste4 (awq pile, narrow), poste3 (campagnes
+# 1aj/awq-temoin/courbe-lot/nsys), poste1-11, poste2 -- les scripts de campagne de
+# scratchpad/ nomment modeles et sorties en dur (+72). Mesure directe. A trancher par
+# poste7 : scratchpad/ exempte, ou chemins lus de ACVRAM_MODELES.
+PLAFOND_CHEMINS = 505
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute
