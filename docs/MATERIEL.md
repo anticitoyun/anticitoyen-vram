@@ -336,3 +336,10 @@ sources en lecture seule `/opt/ia/flashinfer/src` (a72f726, GitHub, jamais de
 publication) — banc de l'étalon : `src/benchmarks/bench_b12x_mxfp4_moe.py`.
 Aucune mesure lancée ; poste4 mesure après le pas complet MoE (5), sous carte.sh,
 `CUDA_VISIBLE_DEVICES=0`, 20 s.
+
+**Piège de chemin (15/09)** : `/mnt/4TO_SATACMR_2022/Modeles/models_acvram` est un
+LIEN vers le SSD `/mnt/2TO_2023_980PRO/Modeles/models_acvram` — écrire « sur le
+HDD » par ce chemin remplit le SSD (deux variantes 1aj = 34 Go → 870 Mo libres,
+« No space left » alors que `df` du HDD affiche 1,1 To). Les convertis d'essai
+vont dans `/mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/` (vrai dossier HDD) ;
+le SSD reste réservé au parc servi (`ACVRAM_MODELES`).
