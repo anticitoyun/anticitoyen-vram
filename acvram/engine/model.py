@@ -729,8 +729,10 @@ class MoEBlock(nn.Module):
                 self._raison_repli = f"{nom} : rotation Hadamard par expert (pas de pile)"
                 return None
             if any(sc is not None and sc.scale is not None for sc in scs) or _MOE_AWQ_TEMOIN:
-                # ACVRAM_MOE_AWQ_TEMOIN=1 : tables de 1 même sans échelle, pour
-                # mesurer le coût du chemin (division par ligne) sans changer la sortie
+                # ACVRAM_MOE_AWQ_TEMOIN=1 : tables de 1 même sans échelle (le
+                # chargeur les voit, la garde d'unité doit les sauter : coût 0
+                # scellé par poste7 § 8) ; =2 : produit forcé, témoin du coût du
+                # chemin (+0,12 ms/pas mesuré le 15/09).
                 K_in = getattr(ws[0], "padded_in", None) or ws[0].qweight.shape[1]
                 dev = ws[0].qweight.device
                 table = torch.ones(len(projs), K_in, dtype=torch.bfloat16, device=dev)
@@ -738,7 +740,10 @@ class MoEBlock(nn.Module):
                     if sc is not None and sc.scale is not None:
                         v = sc.scale.to(dev, torch.bfloat16)
                         table[e, :v.numel()] = v
-                awq[nom] = table
+                # Table = unité (échelle absente écrite comme identité explicite,
+                # poste2 2205709) : x / 1 ne change rien, on saute le produit.
+                unite = bool(torch.all(table == 1).item())
+                awq[nom] = None if (unite and _MOE_AWQ_TEMOIN != 2) else table
             else:
                 awq[nom] = None
             if all(isinstance(w, NVFP4Tensor) for w in ws):
@@ -1429,7 +1434,7 @@ _MOE_MMA_KS = int(os.environ.get("ACVRAM_MOE_MMA_KS", "128"))
 # un expert reçoit au plus 12 jetons (bras `experts`).
 _MOE_DECODE_MMA = os.environ.get("ACVRAM_MOE_DECODE_MMA", "1") == "1"
 _MOE_DECODE_MMA_BT = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_BT", "16"))
-_MOE_AWQ_TEMOIN = os.environ.get("ACVRAM_MOE_AWQ_TEMOIN", "0") == "1"
+_MOE_AWQ_TEMOIN = int(os.environ.get("ACVRAM_MOE_AWQ_TEMOIN", "0"))
 # Lot minimal pour le chemin MMA : 9 (godets 12 et 16 seulement). Courbe de
 # poste3, 15/09, MMA/GEMV : b=2 +36 % ms / −3,5 % J ; b=3 +27 / −6,3 ; b=4 +24 /
 # +2,2 ; b=6 +18 / +2,7 ; b=12 −6,4 / −13,2 — le coût fixe de la MMA
