@@ -178,3 +178,71 @@ rapport à poste7.
 Prédiction si (c) aboutit (rappel des seuils de poste7) : 62,7 µs ± 10 % à
 froid avec fantômes ; pas Coder b=12 −1,8 à −2,3 ms sur le bras B de
 c6377d5 ; J −12 % ; PPL b12x/A ≤ 1,010 (poste2, teacher forcing).
+
+## Plan de découpe chiffré du port (b) — lecture de `moe_static_kernel.py` (15/09, hors carte)
+
+Ce que fait b12x « static » (Apache-2.0, `moe_static_kernel.py:1-134, 340-590`,
+`moe_dispatch.py:295-321, 1634-1637`) à 96 lignes routées (12 × 8) :
+
+* **Un seul noyau résident**, deux phases séparées par une barrière de
+  grille : (1) frontend — un leader de CTA par paire routée : `atomicAdd`
+  sur `row_counts[expert]`, écrit jeton source + poids de routage, quantifie
+  la ligne en FP4 dans le stockage expert-major `[max_rows, K, E]` ;
+  (2) compute — unité de travail = **(m-tile, tranche d'intermédiaire de
+  128, expert)** prise dans une file linéaire (`_compact_static_get_work_tile`),
+  tuile MMA (64, 128) sous 128 lignes routées, K par pas de 128, 4 warps
+  MMA + 1 warp TMA (160 fils), 2 étages, `MmaMXF4NVF4Op` (le même
+  `kind::mxf4nvf4` que le nôtre).
+* **FC1 gate et up ensemble** sur la tranche (mêmes fragments A, poids lus
+  une fois), SwiGLU dans les registres, **quantification de la tranche en
+  FP4 directement dans la shared** (A du FC2), puis **FC2 balaie les 16
+  tuiles de sortie** (2048/128) avec cette tranche de K=128 et **accumule
+  par `atomicAdd` bf16x2 dans la sortie token-major**, pondéré par le
+  routage : l'intermédiaire ne touche jamais la mémoire globale, il n'y a
+  ni `moe_act`, ni `quant_act` de l'intermédiaire, ni `reduce`, ni
+  scatter — FC2 est un split-K par tranche d'intermédiaire (6 tranches pour
+  I=768) résolu par atomiques.
+* Travail à b=12 Coder : ≈ 28 experts × 1 m-tile × 6 tranches = **168
+  unités** pour 170 SM — une par CTA (échelle « MAC » 64-148 CTAs
+  résidentes selon les lignes, `_STATIC_MAC_LADDER`).
+
+Notre chemin B, en regard : 3 lancements de GEMM (gate, up, down :
+`nvfp4_gemm_grouped_mma2`, BM=128 de sortie × BT=16 jetons, K pipeliné
+cp.async 4 étages), `quant_act` ×2, `moe_act`, `moe_reduce_trie`, plus
+argsort/gather/scatter torch — l'intermédiaire fait 5 passages en global
+(g, u écrits ; lus par moe_act ; act écrit ; lu par quant ; aq écrit ; lu
+par down) : 96 × 768 × 2 o = 150 Ko par passage, négligeable en octets,
+**≥ 7 lancements par couche** contre 1.
+
+### Découpe proposée (CUDA C++, notre extension, sans DSL)
+
+| élément | b12x | port |
+|---|---|---|
+| CTA | (m-tile 64, tranche 128, expert), 160 fils | (expert, m-tile **16** — b=12 tient dans une tuile m16, godet 16 aussi —, tranche d'intermédiaire 128), **256 fils = 8 warps**, chaque warp 2 tuiles n8 sur les 128 colonnes |
+| FC1 | gate + up, TMA 2 étages | gate + up dans la même boucle K (fragments A partagés), cp.async 4 étages, KS=128 (notre pipeline existant) : 2 × [16×2048]·[128×2048]ᵀ |
+| activation + quant | registres → shared FP4 (coopératif) | registres → shared : 16 lignes × 64 o de nibbles + 8 o d'échelles UE4M3 (bloc 16), **même formule que `nvfp4_quant_act` (ties-to-even, `__fdiv_rn`) : bit-identique au chemin B** — c'est le test |
+| FC2 | 16 tuiles n128, atomicAdd bf16x2 token-major × poids | idem : [16×128]·[128×128]ᵀ par tuile depuis down[e][:, tranche], **`atomicAdd` fp32** dans un tampon [t, 2048] fp32 (évite la perte bf16 des atomiques : 6 tranches × 8 experts = 48 sommes par sortie) puis une conversion bf16 (1 lancement, ou dans le noyau d'après) ; fantômes : poids 0 |
+| frontend | route/pack en noyau + barrière de grille | **phase 2 seulement d'abord** : on garde argsort/scatter_add_/gather torch + `quant_act` de x (capturables, ~15 µs) ; la barrière de grille et le pack en noyau = marche 2 |
+| grille | file linéaire persistante | grille fixe **E_max × 6 tranches** = 128 × 6 = 768 blocs (tuiles n=0 sautées : `if (nt <= 0) return`, déjà là) — capturable, 4,5 blocs par SM, un seul lancement |
+
+Octets : par unité (e, tranche) 128 Ko gate + 128 Ko up + 128 Ko down
+(+ échelles 24 Ko) = 408 Ko ; × 28 experts × 6 = **68,5 Mo** = exactement
+les poids des experts touchés, lus une fois (aujourd'hui aussi ; le gain
+n'est pas en octets). Temps prédit à L2 froid : 68,5 Mo à 1,18 To/s
+= 58 µs + queue (168 CTAs actives sur 768 lancées, dernière vague) →
+**60-75 µs/couche** (poste7 : ≤ 75, réfuté > 90) contre 3 GEMM 75 + glue 30
+aujourd'hui ; pas b=12 : −(105 − 70) × 48 ≈ **−1,7 ms** (−12 % sur 13,75).
+Risques nommés : (a) 6 tranches × 8 experts d'atomiques fp32 par sortie
+(96 × 2048 × 48 = 9,4 M atomiques par couche ≈ 10-15 µs si sérialisés
+sur le L2 — b12x le fait en bf16x2 et vit avec) ; (b) l'occupation : 8
+warps × (fragments gate+up 2×[16×128] acc = 64 fp32/fil) tient ; (c)
+bit-identité avec B non garantie sur FC2 (ordre des sommes du split-K
+par atomiques ≠ réduction triée) → le test au bit se fait sur FC1+quant
+(déterministe), FC2 contre float64 à tolérance, jetons A/B et PPL poste2.
+
+Coût : 2-3 j (noyau 1 j, tests 0,5 j, câblage graphe + mesures 0,5-1 j).
+Ce que le ncu (1) doit dire avant : si la glue mesure ≥ 20 µs/couche,
+poste7 ordonne la marche de glue d'abord (quant dans l'épilogue de moe_act,
+réduction dans down) — elle est CONTENUE dans ce port (activation+quant
+dans l'épilogue de FC1, réduction par atomiques de FC2) : la faire
+séparément ne sert que si le port glisse.
