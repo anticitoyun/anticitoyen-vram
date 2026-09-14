@@ -2937,6 +2937,367 @@ std::vector<torch::Tensor> moe_route_pack(torch::Tensor topi, torch::Tensor topw
     return {xs, ordre, inv, tw, cnt, te, t0, tn};
 }
 
+
+// -------------------------------------------------------------------------
+// MoE FUSIONNÉ au décodage (port de b12x, plan revue/p1-flashinfer-b12x-15-09.md,
+// décisions de poste7 poste7-reprise-15-09-b § 4) : un CTA = (tranche
+// d'intermédiaire de TN colonnes, tuile de 16 jetons d'un expert), WARPS =
+// TN/16 warps (un warp = 16 lignes de poids = un bloc de quantification).
+// Phase 1 : gate et up de la tranche dans la même boucle K (fragments A
+// partagés, poids lus une fois), pipeline cp.async S étages × KS ; épilogue :
+// g, u arrondis en bf16 (comme la GEMM groupée), SiLU(g)·u en fp32 (formule de
+// moe_act), arrondi bf16, quantifié E2M1 bloc 16 + UE4M3 (formule de
+// nvfp4_quant_act) DANS la mémoire partagée — bit-identique au chemin B jusque
+// là (tests/test_moe_fused.py). Phase 2 : FC2 balaie les M_out/128 tuiles de
+// sortie avec la tranche (K = TN) ; SPLIT-K SÉRIEL, sans atomique sur les
+// données : chaque CTA écrit son partiel fp32 [16 × 128] dans ws, incrémente
+// le compteur de sa (tuile, tuile N) ; le DERNIER arrivé somme les NS partiels
+// dans l'ordre fixe des tranches (bit-reproductible d'un pas à l'autre),
+// applique gs_down et écrit d [G, M_out] bf16 — que moe_reduce_trie réduit par
+// jeton comme sur le chemin B. L'intermédiaire ne touche jamais la globale.
+template <int S, int KS, int TN, bool ATOM>
+__global__ void __launch_bounds__(TN * 2) nvfp4_moe_fused_kernel(
+    const float *__restrict__ gs_g, const float *__restrict__ gs_u, const float *__restrict__ gs_d,
+    const unsigned char *__restrict__ xq, const unsigned char *__restrict__ xsf,
+    const int *__restrict__ tile_e, const int *__restrict__ tile_t0, const int *__restrict__ tile_n,
+    const int64_t *__restrict__ tq_g, const int64_t *__restrict__ tb_g,
+    const int64_t *__restrict__ tq_u, const int64_t *__restrict__ tb_u,
+    const int64_t *__restrict__ tq_d, const int64_t *__restrict__ tb_d,
+    float *__restrict__ ws, int *__restrict__ compteurs,
+    __nv_bfloat16 *__restrict__ d, const int *__restrict__ ordre, const float *__restrict__ tw,
+    float *__restrict__ y32, int k_top, int K, int I, int M_out, int act) {
+#ifdef ACVRAM_MMA_FP4
+    constexpr int WARPS = TN / 16, FILS = WARPS * 32;
+    static_assert(TN == 64 || TN == 128, "TN : 64 ou 128");
+    constexpr int LD = KS / 2 + 16, NM = KS / GM_KB, SB = KS / 16, CH = KS / 32;
+    constexpr int A_OCT = 16 * LD, B_OCT = TN * LD, SA_OCT = 16 * SB, SB_OCT = TN * SB;
+    constexpr int ETAGE = A_OCT + 2 * B_OCT + SA_OCT + 2 * SB_OCT;
+    constexpr int LD2 = TN / 2 + 16, SB2 = TN / 16, NM2 = TN / GM_KB;
+    constexpr int B2_OCT = 128 * LD2 + 128 * SB2, A2_OCT = 16 * LD2 + 16 * SB2;
+    constexpr int NF2 = 128 / WARPS / 8;               // tuiles n8 par warp en phase 2
+    constexpr int S2 = 3;
+    extern __shared__ __align__(16) unsigned char smem_mf[];
+    unsigned char *smem = smem_mf;
+    const int tile = blockIdx.y, sl = blockIdx.x, NS = gridDim.x;
+    const int e = tile_e[tile], t0 = tile_t0[tile], nt = tile_n[tile];
+    if (nt <= 0) return;
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    const int g = lane >> 2, tq = lane & 3;
+    const long half_k = (long)K >> 1; const int nblk = K >> 4, KT = K / KS;
+    const unsigned char *qg = reinterpret_cast<const unsigned char *>(tq_g[e]);
+    const unsigned char *bg = reinterpret_cast<const unsigned char *>(tb_g[e]);
+    const unsigned char *qu = reinterpret_cast<const unsigned char *>(tq_u[e]);
+    const unsigned char *bu = reinterpret_cast<const unsigned char *>(tb_u[e]);
+    const int row0 = sl * TN;
+    auto sA  = [&](int st) { return smem + st * ETAGE; };
+    auto sBg = [&](int st) { return smem + st * ETAGE + A_OCT; };
+    auto sBu = [&](int st) { return smem + st * ETAGE + A_OCT + B_OCT; };
+    auto sSA = [&](int st) { return smem + st * ETAGE + A_OCT + 2 * B_OCT; };
+    auto sSBg = [&](int st) { return smem + st * ETAGE + A_OCT + 2 * B_OCT + SA_OCT; };
+    auto sSBu = [&](int st) { return smem + st * ETAGE + A_OCT + 2 * B_OCT + SA_OCT + SB_OCT; };
+    auto emettre = [&](int st, int k0) {
+        const long kb = k0 >> 1; const int ks = k0 >> 4;
+        for (int c = tid; c < CH * 16; c += FILS) {
+            const int r = c / CH, h = c % CH;
+            cp_async16(sA(st) + r * LD + 16 * h, xq + (long)(t0 + min(r, nt - 1)) * half_k + kb + 16 * h);
+        }
+        for (int c = tid; c < CH * TN; c += FILS) {
+            const int r = c / CH, h = c % CH;
+            const long src = (long)(row0 + r) * half_k + kb + 16 * h;
+            cp_async16(sBg(st) + r * LD + 16 * h, qg + src);
+            cp_async16(sBu(st) + r * LD + 16 * h, qu + src);
+        }
+        if (tid < 16) {
+            const unsigned char *src = xsf + (long)(t0 + min(tid, nt - 1)) * nblk + ks;
+            if constexpr (SB == 4) cp_async4(sSA(st) + tid * SB, src); else cp_async8(sSA(st) + tid * SB, src);
+        } else if (tid < 16 + TN) {
+            const int r = tid - 16;
+            const unsigned char *sg = bg + (long)(row0 + r) * nblk + ks, *su = bu + (long)(row0 + r) * nblk + ks;
+            if constexpr (SB == 4) { cp_async4(sSBg(st) + r * SB, sg); cp_async4(sSBu(st) + r * SB, su); }
+            else { cp_async8(sSBg(st) + r * SB, sg); cp_async8(sSBu(st) + r * SB, su); }
+        }
+    };
+    float accg[2][4], accu[2][4];
+    #pragma unroll
+    for (int nf = 0; nf < 2; ++nf)
+        #pragma unroll
+        for (int q = 0; q < 4; ++q) { accg[nf][q] = 0.f; accu[nf][q] = 0.f; }
+    #pragma unroll
+    for (int s = 0; s < S - 1; ++s) { if (s < KT) emettre(s, s * KS); cp_async_commit(); }
+    for (int kt = 0; kt < KT; ++kt) {
+        cp_async_wait<S - 2>();
+        __syncthreads();
+        { const int kn = kt + S - 1; if (kn < KT) emettre(kn % S, kn * KS); cp_async_commit(); }
+        const int st = kt % S;
+        #pragma unroll
+        for (int m = 0; m < NM; ++m) {
+            const int ko = 32 * m;
+            unsigned a[4], sfa, bgf[2][2], buf[2][2], sfbg[2], sfbu[2];
+            #pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int j = g + 8 * h;
+                const unsigned char *pa = sA(st) + j * LD + ko + 4 * tq;
+                const unsigned lo = *reinterpret_cast<const unsigned *>(pa), hi = *reinterpret_cast<const unsigned *>(pa + 16);
+                a[h] = (j < nt) ? lo : 0u; a[h + 2] = (j < nt) ? hi : 0u;
+            }
+            { const int js = (lane >> 2) + 8 * (lane & 1);
+              const unsigned sv = *reinterpret_cast<const unsigned *>(sSA(st) + js * SB + 4 * m);
+              sfa = (js < nt) ? sv : 0u; }
+            #pragma unroll
+            for (int nf = 0; nf < 2; ++nf) {
+                const int r = warp * 16 + nf * 8 + g;
+                const unsigned char *pg_ = sBg(st) + r * LD + ko + 4 * tq, *pu_ = sBu(st) + r * LD + ko + 4 * tq;
+                bgf[nf][0] = *reinterpret_cast<const unsigned *>(pg_); bgf[nf][1] = *reinterpret_cast<const unsigned *>(pg_ + 16);
+                buf[nf][0] = *reinterpret_cast<const unsigned *>(pu_); buf[nf][1] = *reinterpret_cast<const unsigned *>(pu_ + 16);
+                sfbg[nf] = *reinterpret_cast<const unsigned *>(sSBg(st) + r * SB + 4 * m);
+                sfbu[nf] = *reinterpret_cast<const unsigned *>(sSBu(st) + r * SB + 4 * m);
+            }
+            #pragma unroll
+            for (int nf = 0; nf < 2; ++nf) {
+                mma_mxf4nvf4(accg[nf], a, bgf[nf], sfa, sfbg[nf]);
+                mma_mxf4nvf4(accu[nf], a, buf[nf], sfa, sfbu[nf]);
+            }
+        }
+    }
+    cp_async_wait<0>();
+    __syncthreads();
+    // --- épilogue FC1 : bf16(g·gs), bf16(u·gs) -> act bf16 -> E2M1 bloc 16 (= ce warp) en shared
+    unsigned char *A2 = smem, *SA2 = smem + 16 * LD2;
+    const float gsg = gs_g[e], gsu = gs_u[e];
+    float v[2][4];
+    #pragma unroll
+    for (int h = 0; h < 2; ++h)
+        #pragma unroll
+        for (int nf = 0; nf < 2; ++nf)
+            #pragma unroll
+            for (int c = 0; c < 2; ++c) {
+                const float gg = __bfloat162float(__float2bfloat16(accg[nf][2 * h + c] * gsg));
+                const float uu = __bfloat162float(__float2bfloat16(accu[nf][2 * h + c] * gsu));
+                float a_;
+                if (act == 1) {
+                    const float kb = 0.7978845608028654f, kk = 0.044715f;
+                    const float inner = kb * (gg + kk * gg * gg * gg);
+                    a_ = 0.5f * gg * (1.0f + (float)tanh((double)inner));
+                } else {
+                    a_ = gg / (1.f + expf(-gg));
+                }
+                v[h][nf * 2 + c] = __bfloat162float(__float2bfloat16(a_ * uu));
+            }
+    #pragma unroll
+    for (int h = 0; h < 2; ++h) {
+        float amax = 0.f;
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) amax = fmaxf(amax, fabsf(v[h][i]));
+        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 1));
+        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 2));
+        unsigned char sbits = 0; float sdec = 0.f;
+        if (amax > 0.f) {
+            const float sc = fminf(__fdiv_rn(amax, 6.f), 448.f);
+            sbits = (unsigned char)__nv_cvt_float_to_fp8(sc, __NV_SATFINITE, __NV_E4M3);
+            sdec = e4m3_to_float(sbits);
+        }
+        unsigned char q0 = 0, q1 = 0;
+        if (sdec > 0.f) {
+            const float2 p0 = make_float2(__fdiv_rn(v[h][0], sdec), __fdiv_rn(v[h][1], sdec));
+            const float2 p1 = make_float2(__fdiv_rn(v[h][2], sdec), __fdiv_rn(v[h][3], sdec));
+            q0 = (unsigned char)(__nv_cvt_float2_to_fp4x2(p0, __NV_E2M1, cudaRoundNearest) & 0xFF);
+            q1 = (unsigned char)(__nv_cvt_float2_to_fp4x2(p1, __NV_E2M1, cudaRoundNearest) & 0xFF);
+        }
+        const int j = g + 8 * h;
+        if (j < nt) {
+            A2[j * LD2 + warp * 8 + tq] = q0;
+            A2[j * LD2 + warp * 8 + 4 + tq] = q1;
+            if (tq == 0) SA2[j * SB2 + warp] = sbits;
+        }
+    }
+    __syncthreads();
+    // --- FC2 : partiels [16 x 128] par tuile N, split-K sériel sur les NS tranches
+    const unsigned char *qd = reinterpret_cast<const unsigned char *>(tq_d[e]);
+    const unsigned char *bd = reinterpret_cast<const unsigned char *>(tb_d[e]);
+    const long half_i = (long)I >> 1; const int nblk_i = I >> 4;
+    unsigned char *B2 = smem + A2_OCT;
+    const int NT2 = M_out / 128;
+    auto emettre2 = [&](int st, int n) {
+        const long kb = (long)sl * (TN / 2); const int ks = sl * (TN / 16);
+        unsigned char *b = B2 + st * B2_OCT, *sb = b + 128 * LD2;
+        constexpr int CH2 = TN / 32;
+        for (int c = tid; c < CH2 * 128; c += FILS) {
+            const int r = c / CH2, h = c % CH2;
+            cp_async16(b + r * LD2 + 16 * h, qd + (long)(n * 128 + r) * half_i + kb + 16 * h);
+        }
+        if (tid < 128) {
+            const unsigned char *src = bd + (long)(n * 128 + tid) * nblk_i + ks;
+            if constexpr (SB2 == 4) cp_async4(sb + tid * SB2, src); else cp_async8(sb + tid * SB2, src);
+        }
+    };
+    unsigned a2[NM2][4], sfa2[NM2];
+    #pragma unroll
+    for (int m = 0; m < NM2; ++m) {
+        #pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const int j = g + 8 * h;
+            const unsigned char *pa = A2 + j * LD2 + 32 * m + 4 * tq;
+            const unsigned lo = *reinterpret_cast<const unsigned *>(pa), hi = *reinterpret_cast<const unsigned *>(pa + 16);
+            a2[m][h] = (j < nt) ? lo : 0u; a2[m][h + 2] = (j < nt) ? hi : 0u;
+        }
+        const int js = (lane >> 2) + 8 * (lane & 1);
+        const unsigned sv = *reinterpret_cast<const unsigned *>(SA2 + js * SB2 + 4 * m);
+        sfa2[m] = (js < nt) ? sv : 0u;
+    }
+    const float gsd = gs_d[e];
+    __shared__ int s_dernier;
+    // partiel de ce CTA : ws[(tile*NS + sl)][16][M_out] fp32 — écrit tuile N par
+    // tuile N (magasins coalescés), UNE clôture + UN compteur par CTA à la fin
+    // (la version « clôture par tuile N » coûtait 16 __threadfence + 3
+    // __syncthreads par CTA : 133 µs/couche mesurés le 15/09 contre 83 en B)
+    float *part = ws + ((long)tile * NS + sl) * (16L * M_out);
+    // témoin ATOMIQUES (poste7-reprise-15-09-b § 4 : si le sériel coûte > 10 µs) :
+    // y32[jeton, col] += partiel · gs_d · poids, pas de ws, pas de reduce_trie
+    float w_[2]; int tok_[2];
+    if constexpr (ATOM) {
+        #pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const int j = g + 8 * h;
+            const int f = (j < nt) ? ordre[t0 + j] : 0;
+            w_[h] = (j < nt) ? tw[f] * gsd : 0.f; tok_[h] = f / k_top;
+        }
+    }
+    #pragma unroll
+    for (int s = 0; s < S2 - 1; ++s) { if (s < NT2) emettre2(s, s); cp_async_commit(); }
+    for (int n = 0; n < NT2; ++n) {
+        cp_async_wait<S2 - 2>();
+        __syncthreads();
+        { const int nn = n + S2 - 1; if (nn < NT2) emettre2(nn % S2, nn); cp_async_commit(); }
+        const unsigned char *b = B2 + (n % S2) * B2_OCT, *sb = b + 128 * LD2;
+        float acc2[NF2][4];
+        #pragma unroll
+        for (int nf = 0; nf < NF2; ++nf)
+            #pragma unroll
+            for (int q = 0; q < 4; ++q) acc2[nf][q] = 0.f;
+        #pragma unroll
+        for (int m = 0; m < NM2; ++m)
+            #pragma unroll
+            for (int nf = 0; nf < NF2; ++nf) {
+                const int r = warp * (128 / WARPS) + nf * 8 + g;
+                const unsigned char *pb = b + r * LD2 + 32 * m + 4 * tq;
+                unsigned bb[2] = { *reinterpret_cast<const unsigned *>(pb), *reinterpret_cast<const unsigned *>(pb + 16) };
+                const unsigned sfb = *reinterpret_cast<const unsigned *>(sb + r * SB2 + 4 * m);
+                mma_mxf4nvf4(acc2[nf], a2[m], bb, sfa2[m], sfb);
+            }
+        #pragma unroll
+        for (int nf = 0; nf < NF2; ++nf) {
+            const int col = n * 128 + warp * (128 / WARPS) + nf * 8 + 2 * tq;
+            #pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                if constexpr (ATOM) {
+                    if (w_[h] != 0.f) {
+                        float *dst = y32 + (long)tok_[h] * M_out + col;
+                        atomicAdd(dst, acc2[nf][2 * h] * w_[h]); atomicAdd(dst + 1, acc2[nf][2 * h + 1] * w_[h]);
+                    }
+                } else {
+                    *reinterpret_cast<float2 *>(part + (g + 8 * h) * M_out + col) = make_float2(acc2[nf][2 * h], acc2[nf][2 * h + 1]);
+                }
+            }
+        }
+    }
+    cp_async_wait<0>();
+    if constexpr (!ATOM) {
+        __threadfence();
+        __syncthreads();
+        if (tid == 0) s_dernier = (atomicAdd(&compteurs[tile], 1) == NS - 1);
+        __syncthreads();
+        if (s_dernier) {
+            __threadfence();
+            const float *base = ws + (long)tile * NS * (16L * M_out);
+            for (int n = 0; n < NT2; ++n) {
+                #pragma unroll
+                for (int nf = 0; nf < NF2; ++nf) {
+                    const int col = n * 128 + warp * (128 / WARPS) + nf * 8 + 2 * tq;
+                    #pragma unroll
+                    for (int h = 0; h < 2; ++h) {
+                        const int j = g + 8 * h;
+                        float s0 = 0.f, s1 = 0.f;
+                        for (int q = 0; q < NS; ++q) {
+                            const float2 pv = *reinterpret_cast<const float2 *>(base + (long)q * (16L * M_out) + j * M_out + col);
+                            s0 += pv.x; s1 += pv.y;
+                        }
+                        if (j < nt) {
+                            __nv_bfloat16 *dst = d + (long)(t0 + j) * M_out + col;
+                            dst[0] = __float2bfloat16(s0 * gsd); dst[1] = __float2bfloat16(s1 * gsd);
+                        }
+                    }
+                }
+            }
+            if (tid == 0) compteurs[tile] = 0;
+        }
+    }
+    cp_async_wait<0>();
+#endif
+}
+
+__global__ void f32_vers_bf16_kernel(const float *__restrict__ x, __nv_bfloat16 *__restrict__ y, long n) {
+    const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = __float2bfloat16(x[i]);
+}
+
+torch::Tensor nvfp4_moe_fused(torch::Tensor tq_g, torch::Tensor tb_g, torch::Tensor gs_g,
+                              torch::Tensor tq_u, torch::Tensor tb_u, torch::Tensor gs_u,
+                              torch::Tensor tq_d, torch::Tensor tb_d, torch::Tensor gs_d,
+                              torch::Tensor xq, torch::Tensor xsf,
+                              torch::Tensor tile_e, torch::Tensor tile_t0, torch::Tensor tile_n,
+                              torch::Tensor ws, torch::Tensor compteurs,
+                              int64_t K, int64_t I, int64_t M_out, int64_t act, int64_t tn,
+                              torch::Tensor ordre, torch::Tensor tw, int64_t k_top, int64_t t, bool atomique,
+                              int64_t etages) {
+    CHECK_CUDA(xq); ACVRAM_DEVICE_GUARD(xq);
+    for (auto &z : {tq_g, tb_g, gs_g, tq_u, tb_u, gs_u, tq_d, tb_d, gs_d, xq, xsf, tile_e, tile_t0, tile_n, ws, compteurs})
+        CHECK_CONTIG(z);
+    TORCH_CHECK(K % 128 == 0 && I % tn == 0 && M_out % 128 == 0, "MoE fusionne : K multiple de 128, I de tn, M_out de 128");
+    TORCH_CHECK(tn == 64 || tn == 128, "MoE fusionne : tn 64 ou 128");
+    const int T = tile_e.size(0), G = xq.size(0), NS = (int)(I / tn), NT2 = (int)(M_out / 128);
+    TORCH_CHECK(ws.numel() >= (long)T * NS * 16 * M_out && ws.scalar_type() == torch::kFloat,
+                "MoE fusionne : ws fp32 de T*NS*16*M_out elements");
+    TORCH_CHECK(compteurs.numel() >= (long)T && compteurs.scalar_type() == torch::kInt, "MoE fusionne : compteurs int32 T (a zero)");
+    // sériel : d [G, M_out] (reduce_trie ensuite) ; atomique : y32 [t, M_out] fp32 remis a zero ici
+    auto d = torch::empty({atomique ? 0 : G, M_out}, xq.options().dtype(torch::kBFloat16));
+    auto y32 = atomique ? torch::zeros({t, M_out}, xq.options().dtype(torch::kFloat))
+                        : torch::empty({0}, xq.options().dtype(torch::kFloat));
+    if (T == 0 || G == 0) return atomique ? y32 : d;
+    auto stream = at::cuda::getCurrentCUDAStream();
+    constexpr int KS = 128;
+    TORCH_CHECK(etages == 2 || etages == 3, "MoE fusionne : etages 2 ou 3");
+    #define MF_LANCE(TN, S) do { \
+        constexpr int LD = KS / 2 + 16, SB = KS / 16; \
+        constexpr int ETAGE = 16 * LD + 2 * TN * LD + 16 * SB + 2 * TN * SB; \
+        constexpr int LD2 = TN / 2 + 16, SB2 = TN / 16; \
+        constexpr int SHM2 = 16 * LD2 + 16 * SB2 + 3 * (128 * LD2 + 128 * SB2); \
+        constexpr int SHM = (S * ETAGE > SHM2) ? S * ETAGE : SHM2; \
+        static bool attr = false; \
+        if (!attr) { cudaFuncSetAttribute(nvfp4_moe_fused_kernel<S, KS, TN, false>, cudaFuncAttributeMaxDynamicSharedMemorySize, SHM); \
+                     cudaFuncSetAttribute(nvfp4_moe_fused_kernel<S, KS, TN, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, SHM); attr = true; } \
+        dim3 grid((unsigned)NS, (unsigned)T); \
+        auto lance = atomique ? nvfp4_moe_fused_kernel<S, KS, TN, true> : nvfp4_moe_fused_kernel<S, KS, TN, false>; \
+        lance<<<grid, TN * 2, SHM, stream>>>( \
+            gs_g.data_ptr<float>(), gs_u.data_ptr<float>(), gs_d.data_ptr<float>(), \
+            xq.data_ptr<unsigned char>(), xsf.data_ptr<unsigned char>(), \
+            tile_e.data_ptr<int>(), tile_t0.data_ptr<int>(), tile_n.data_ptr<int>(), \
+            tq_g.data_ptr<int64_t>(), tb_g.data_ptr<int64_t>(), tq_u.data_ptr<int64_t>(), tb_u.data_ptr<int64_t>(), \
+            tq_d.data_ptr<int64_t>(), tb_d.data_ptr<int64_t>(), ws.data_ptr<float>(), compteurs.data_ptr<int>(), \
+            reinterpret_cast<__nv_bfloat16 *>(d.data_ptr()), ordre.data_ptr<int>(), tw.data_ptr<float>(), \
+            y32.data_ptr<float>(), (int)k_top, (int)K, (int)I, (int)M_out, (int)act); } while (0)
+    if (tn == 64) { if (etages == 2) MF_LANCE(64, 2); else MF_LANCE(64, 3); }
+    else          { if (etages == 2) MF_LANCE(128, 2); else MF_LANCE(128, 3); }
+    #undef MF_LANCE
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    if (!atomique) return d;
+    auto y = torch::empty({t, M_out}, xq.options().dtype(torch::kBFloat16));
+    const long n = (long)t * M_out;
+    f32_vers_bf16_kernel<<<(unsigned)((n + 255) / 256), 256, 0, stream>>>(
+        y32.data_ptr<float>(), reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), n);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return y;
+}
+
 torch::Tensor nvfp4_gemv_grouped(torch::Tensor qw, torch::Tensor bscale,
                                  torch::Tensor gscales,
                                  torch::Tensor expert_ids,
@@ -4011,6 +4372,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "MoE NVFP4 : GEMM groupee sur tuiles de jetons, poids lus en 4 bits");
     m.def("moe_act", &moe_act,
           "MoE prefill : act(g)*u en bf16 depuis les vues [:, :m], rembourre a Kd (act 0=SiLU, 1=GELU-tanh)");
+    m.def("nvfp4_moe_fused", &nvfp4_moe_fused,
+          "MoE decodage fusionne (port b12x) : gate+up+act+quant en shared, down par tranches, split-K seriel -> d bf16 [G, M_out]");
     m.def("moe_route_pack", &moe_route_pack,
           "MoE decodage : routage + rassemblement en un lancement -> (xs, ordre, inv, tw, cnt, tile_e, tile_t0, tile_n)");
     m.def("moe_reduce_trie", &moe_reduce_trie,

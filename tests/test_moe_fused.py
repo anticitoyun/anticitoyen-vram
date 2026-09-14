@@ -1,0 +1,98 @@
+"""MoE fusionné au décodage (port b12x, `nvfp4_moe_fused`) :
+(a) DÉTERMINISME : deux appels identiques rendent la même sortie au bit
+    (split-K sériel, ordre fixe des tranches — contrôle des jumelles, REGLES §4) ;
+(b) contre le chemin B (3 GEMM + moe_act + quant + reduce) : même intermédiaire
+    (FC1+quant bit-identiques par construction), FC2 sommé dans un autre ordre
+    → égal à la référence float64 à la tolérance bf16, et ≥ 95 % des sorties
+    bit-identiques à B ;
+(c) fantômes : contribution nulle et finie ; (d) tn 64 et 128 concordent au bit
+    entre eux ? non (ordre des tranches différent) — chacun contre float64."""
+import pytest
+import torch
+
+from tests.test_moe_decode_mma_graphe import _bloc, _entree, CUDA, N_EXPERTS, TOP_K, T, CACHE, INTER
+
+
+def _fused(bloc, x, topw, topi, tn):
+    from acvram.engine import model as M
+    a, b = M._MOE_DECODE_FUSED, M._MOE_FUSED_TN
+    try:
+        M._MOE_DECODE_FUSED, M._MOE_FUSED_TN = True, tn
+        return bloc._forward_grouped_mma(x, topw, topi)
+    finally:
+        M._MOE_DECODE_FUSED, M._MOE_FUSED_TN = a, b
+
+
+def _b(bloc, x, topw, topi):
+    from acvram.engine import model as M
+    a = M._MOE_DECODE_FUSED
+    try:
+        M._MOE_DECODE_FUSED = False
+        return bloc._forward_grouped_mma(x, topw, topi)
+    finally:
+        M._MOE_DECODE_FUSED = a
+
+
+def _ref64(bloc, x, topw, topi):
+    """Référence float64 depuis les MÊMES tenseurs quantifiés que le chemin B
+    (poids E2M1 déquantifiés, activations quantifiées par nvfp4_quant_act)."""
+    from tests.test_gemm_grouped_mma import _dequant_nibbles, _w64
+    from acvram.kernels import get_extension
+    ext = get_extension()
+    pg, pu, pd = (bloc._stacks[n] for n in ("gate_proj", "up_proj", "down_proj"))
+    W = {n: _w64(p[1], p[2]).reshape(p[1].shape[0], p[1].shape[1], -1) for n, p in (("g", pg), ("u", pu), ("d", pd))}
+    t, k = topi.shape
+    y = torch.zeros(t, pd[1].shape[1], dtype=torch.float64, device=x.device)
+    xq, xsf = ext.nvfp4_quant_act(x.to(torch.bfloat16).contiguous())
+    xa = (_dequant_nibbles(xq).view(t, -1, 16) * xsf.view(torch.float8_e4m3fn).double().unsqueeze(-1)).reshape(t, -1)
+    for i in range(t):
+        for j in range(k):
+            e = int(topi[i, j])
+            if e < 0:
+                continue
+            g = (xa[i] @ W["g"][e].T) * pg[3][e].double()
+            u = (xa[i] @ W["u"][e].T) * pu[3][e].double()
+            g, u = g.to(torch.bfloat16).double(), u.to(torch.bfloat16).double()
+            act = (g / (1 + torch.exp(-g)) * u).to(torch.bfloat16)
+            aq, asf = ext.nvfp4_quant_act(act.reshape(1, -1).contiguous())
+            aa = (_dequant_nibbles(aq).view(1, -1, 16) * asf.view(torch.float8_e4m3fn).double().unsqueeze(-1)).reshape(-1)
+            y[i] += (aa @ W["d"][e].T) * pd[3][e].double() * float(topw[i, j])
+    return y
+
+
+@CUDA
+@pytest.mark.parametrize("tn", [64, 128])
+def test_fused_deterministe_et_juste(tn):
+    from acvram.kernels import get_extension
+    if not hasattr(get_extension(), "nvfp4_moe_fused"):
+        pytest.skip("extension sans nvfp4_moe_fused")
+    dev = torch.device("cuda:0")
+    bloc = _bloc(dev)
+    x, topw, topi = _entree(dev)
+    y1 = _fused(bloc, x, topw, topi, tn)
+    y2 = _fused(bloc, x, topw, topi, tn)
+    assert torch.isfinite(y1).all()
+    assert torch.equal(y1, y2), "deux appels identiques different : le split-K n'est pas seriel"
+    ref = _ref64(bloc, x, topw, topi)
+    yb = _b(bloc, x, topw, topi)
+    tol = ref.abs() * 2 ** -6 + 1e-2 * ref.abs().max()
+    hors = int(((y1.double() - ref).abs() > tol).sum())
+    assert hors == 0, f"{hors} sorties hors tolerance vs float64 (max {(y1.double() - ref).abs().max().item():.3e})"
+    exact = (y1 == yb).float().mean().item()
+    assert exact > 0.95, f"seulement {exact:.3f} des sorties bit-identiques au chemin B"
+
+
+@CUDA
+def test_fused_fantomes():
+    from acvram.kernels import get_extension
+    if not hasattr(get_extension(), "nvfp4_moe_fused"):
+        pytest.skip("extension sans nvfp4_moe_fused")
+    dev = torch.device("cuda:0")
+    bloc = _bloc(dev)
+    x, topw, topi = _entree(dev)
+    y_ref = _fused(bloc, x, topw, topi, 64)
+    topi_f = topi.clone(); topi_f[8:] = -1; x_f = x.clone(); x_f[8:] = 0
+    y_f = _fused(bloc, x_f, topw, topi_f, 64)
+    assert torch.isfinite(y_f).all()
+    assert torch.equal(y_f[8:], torch.zeros_like(y_f[8:]))
+    assert torch.equal(y_f[:8], y_ref[:8])

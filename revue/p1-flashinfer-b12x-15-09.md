@@ -339,3 +339,57 @@ de 400 W (361 → 398 W) — le temps gagné est payé en watts. Le levier
 Défaut : `ACVRAM_MOE_ROUTE_PACK=1` ; test de lancements par pas
 `tests/test_lancements_par_pas.py` (modèle + carte, sauté sinon) et par
 couche (`test_moe_route_pack.py`, ≤ 8).
+
+## Port (b) — noyau `nvfp4_moe_fused`, mesures (15/09, 18:58-19:54, carte)
+
+Livré (poste4, `ACVRAM_MOE_DECODE_FUSED=1`, coupé par défaut) : CTA =
+(tranche TN de l'intermédiaire, tuile de 16 jetons d'un expert), gate+up
+dans la même boucle K (cp.async S étages × 128), act+quant en shared
+(formules de moe_act/quant_act : FC1+quant bit-identique à B), FC2 par
+tranches ; deux épilogues : split-K SÉRIEL (partiels fp32 en ws, dernier
+CTA somme dans l'ordre fixe, `d` → reduce_trie ; bit-reproductible) et
+témoin ATOMIQUES (y32 par jeton, cast bf16 ; non reproductible au bit).
+Tests : jumelles au bit (sériel), référence float64, ≥ 95 % identique à B,
+fantômes, TN 64/128.
+
+| variante | ms/pas banc (62 pas ×5) | µs/couche ncu (cache chaud) | Go/s | SM actifs |
+|---|---:|---:|---:|---:|
+| B (3 GEMM + act + quant + reduce, route+pack) | 11,45-11,48 | 83 (3 GEMM seules) | 1 094 | 82 % |
+| sériel TN128 S3 | 13,25 | 112 | 965 | 68 % (partiels : 22 Mo/couche ÉCRITS en DRAM — le L2 est write-back) |
+| sériel TN64 S2/S3 | 19,6 | 203 (S3) | 701 | 52 % |
+| atomiques TN128 S3 | 11,09 | 109 | 937 | 67 % |
+| atomiques TN64 S2 | 11,45 | 77 | 1 082 | 87 % |
+| **atomiques TN128 S2** | **10,93 (−4,6 %)** | **69,7** | **1 165** | 82 % |
+
+Le sériel coûte ≈ 45 µs/couche (seuil de poste7 ≤ 5, > 10 → atomiques
+acceptés avec contrôles). Ce qui a débloqué le noyau : **2 étages au lieu
+de 3** (shared 48 → 2-3 CTA par SM : la latence d'un CTA seul à 16 lignes
+n'est pas recouvrable, 109 → 70 µs), pas la largeur de tranche.
+
+Régime ≥ 20 s au compteur (le chiffre qui compte), F = atomiques TN128 S2 :
+
+| | B | F | Δ |
+|---|---:|---:|---:|
+| ms/pas (22 s) | 12,04 | 12,17 | **+1 %** |
+| W | 399,4 | 399,9 | plafond des deux côtés |
+| J/jeton | 0,401 | 0,406 | +1 % |
+| jetons (12 séquences, 229 pas) | réf. | **4 divergences** (s4 @13, s7 @24, s8 @1 : 198/197, s11 @5) | atomiques : ordre des sommes non fixe |
+
+Contre les seuils de poste7 (§ 3) : **≤ 75 µs/couche froid : TENU (69,7)** ;
+**pas 22 s ≤ 11,3 ms : RÉFUTÉ (12,17, = B)** ; **J ≤ 0,38 : RÉFUTÉ (0,406 ;
+sous le 0,41 de réfutation stricte, mais égal à B)** ; jetons identiques :
+non (4/12, atomiques). Le banc court (−4,6 %) ne se retrouve pas à 22 s :
+les 13 µs/couche gagnés sur les GEMM (83 → 70, 0,6 ms/pas) sont mangés par
+les deux lancements ajoutés (zéros de y32, cast) et par le plafond de
+400 W qui rend le pas insensible à 5 % de noyaux en moins — B et F sont au
+même W, au même J.
+
+Lecture : **le MoE n'est plus le poste** — 48 × 70 µs = 3,4 ms sur 12,2 ;
+b12x à 63 µs ne ferait gagner que 0,3 ms de plus. Les 8,8 ms restants
+sont les projections int8 (2,6), le lm_head (0,9), l'attention (0,7), les
+normes/routage/glue (~2) et les trous de lancement — à 400 W, J/jeton suit
+ms/pas. Le noyau fusionné reste disponible (coupé : atomiques non
+reproductibles, pas de gain au régime 20 s) ; son gain apparaîtra si le
+plafond cesse d'être atteint (mode éco, horloge bridée) ou pour GLM (I=1536,
+tranche 128 = 12 CTA par expert-tuile). Données :
+`revue/donnees-ncu-*fused*` (à copier) ; tests `tests/test_moe_fused.py`.

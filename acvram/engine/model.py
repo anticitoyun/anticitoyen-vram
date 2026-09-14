@@ -1057,13 +1057,50 @@ class MoEBlock(nn.Module):
             inv = torch.empty_like(ordre); inv[ordre] = torch.arange(ordre.numel(), device=x.device)
             inv = inv.to(torch.int32)
         xq, xsf = ext.nvfp4_quant_act(xs)
-        g = self._gemm_mma(pg, xq, xsf, tiles, brut=True, bt=bt)
-        u = self._gemm_mma(pu, xq, xsf, tiles, brut=True, bt=bt)
-        act = ext.moe_act(g, u, pg[5], pd[4], 1 if self.act == "gelu_tanh" else 0)
-        aq, asf = ext.nvfp4_quant_act(act)
-        d = self._gemm_mma(pd, aq, asf, tiles, brut=True, bt=bt)
+        code_act = 1 if self.act == "gelu_tanh" else 0
+        if (_MOE_DECODE_FUSED and hasattr(ext, "nvfp4_moe_fused") and bt == 16
+                and pg[4] % 128 == 0 and pg[5] == pd[4] and pd[4] % _MOE_FUSED_TN == 0 and pd[5] % 128 == 0):
+            # Port de b12x (poste7-reprise-15-09-b § 3-4) : gate+up+act+quant en
+            # shared, down par tranches, split-K sériel (bit-reproductible),
+            # sortie d [G, M] réduite par moe_reduce_trie comme le chemin B.
+            if _MOE_FUSED_ATOMIQUE:
+                # témoin atomiques (non reproductible au bit) : rend y directement
+                y = self._moe_fused(pg, pu, pd, xq, xsf, tiles, code_act, ordre=ordre, tw=tw, k=k, t=t)
+                return y if x.dtype == torch.bfloat16 else y.to(x.dtype)
+            d = self._moe_fused(pg, pu, pd, xq, xsf, tiles, code_act)
+        else:
+            g = self._gemm_mma(pg, xq, xsf, tiles, brut=True, bt=bt)
+            u = self._gemm_mma(pu, xq, xsf, tiles, brut=True, bt=bt)
+            act = ext.moe_act(g, u, pg[5], pd[4], code_act)
+            aq, asf = ext.nvfp4_quant_act(act)
+            d = self._gemm_mma(pd, aq, asf, tiles, brut=True, bt=bt)
         y = ext.moe_reduce_trie(d, tw.contiguous(), inv.contiguous(), pd[5], k)
         return y if x.dtype == torch.bfloat16 else y.to(x.dtype)
+
+    _fused_ws: dict = {}                 # (device, T, NT2, NS) -> (ws, compteurs), partagé par toutes les couches
+
+    def _moe_fused(self, pg, pu, pd, xq, xsf, tiles, code_act, ordre=None, tw=None, k=0, t=0):
+        ext = kernels.get_extension()
+        tq_g, tb_g = self._tables_adresses(pg)
+        tq_u, tb_u = self._tables_adresses(pu)
+        tq_d, tb_d = self._tables_adresses(pd)
+        K, I, M_out, tn = pg[4], pd[4], pd[1].shape[1], _MOE_FUSED_TN
+        T, NT2, NS = tiles[0].numel(), M_out // 128, I // tn
+        cle = (xq.device, T, NT2, NS)
+        buf = MoEBlock._fused_ws.get(cle)
+        if buf is None:
+            # partiels [T][NT2][NS][16 x 128] fp32 + compteurs (remis a zero par le
+            # noyau) : alloués une fois, réutilisés par toutes les couches
+            ws = torch.empty(T * NS * 16 * M_out, dtype=torch.float32, device=xq.device)
+            cpt = torch.zeros(T, dtype=torch.int32, device=xq.device)
+            buf = MoEBlock._fused_ws[cle] = (ws, cpt)
+        ws, cpt = buf
+        atom = ordre is not None
+        return ext.nvfp4_moe_fused(tq_g, tb_g, pg[3], tq_u, tb_u, pu[3], tq_d, tb_d, pd[3],
+                                   xq, xsf, tiles[0], tiles[1], tiles[2], ws, cpt,
+                                   K, I, M_out, code_act, tn,
+                                   ordre.contiguous() if atom else tiles[0], tw.contiguous() if atom else pg[3],
+                                   k, t, atom, _MOE_FUSED_ETAGES)
 
     def _forward_grouped(self, x, topw, topi):
         t = x.shape[0]
@@ -1344,6 +1381,12 @@ _MOE_DECODE_MMA_BT = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_BT", "16"))
 # provisoire servait b=5-8 (godet 8) à −18 % de débit. À remesurer après
 # route+pack (la glue tombe).
 _MOE_DECODE_MMA_MIN_T = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_MIN_T", "9"))
+# MoE fusionné au décodage (port b12x, 15/09) : coupé tant que les seuils de
+# poste7 ne sont pas tenus (≤ 75 µs/couche, pas b=12 ≤ 11,3 ms, J ≤ 0,38).
+_MOE_DECODE_FUSED = os.environ.get("ACVRAM_MOE_DECODE_FUSED", "0") == "1"
+_MOE_FUSED_TN = int(os.environ.get("ACVRAM_MOE_FUSED_TN", "64"))
+_MOE_FUSED_ATOMIQUE = os.environ.get("ACVRAM_MOE_FUSED_ATOMIQUE", "0") == "1"   # témoin, non reproductible au bit
+_MOE_FUSED_ETAGES = int(os.environ.get("ACVRAM_MOE_FUSED_ETAGES", "3"))          # 2 : shared plus petite, 2-3 CTA par SM
 # Frontend route+pack en un noyau (15/09, poste7) ; "0" = témoin torch.
 _MOE_ROUTE_PACK = os.environ.get("ACVRAM_MOE_ROUTE_PACK", "1") == "1"
 
