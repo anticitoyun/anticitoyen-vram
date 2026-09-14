@@ -278,3 +278,38 @@ quant/act/reduce. Règle de poste7 (≥ 20 → glue d'abord) : glue d'abord, et
 la marche utile est le routage (§ 2 rescellé : route+pack CUDA en un
 lancement, ≤ 5 µs/couche, lancements/pas ≤ 1 700, pas −0,6/−1,0 ms,
 réfuté > −0,3).
+
+## Les 3 GEMM du chemin B à b=1/6/12 (15/09, 16:57-17:00, ncu une passe bornée, cache chaud)
+
+Ordre de poste7 (`poste7-mma-lot-15-09.md` § 2) : le coût fixe de B hors glue
+(2,0-2,3 ms/pas, courbe de poste3) serait un plancher de latence par GEMM
+(une seule vague, chaque CTA parcourt K entier) — confirmé si
+b=6 ≤ 1,3 × b=1, réfuté si ≥ 2×. Mesure : `nvfp4_gemm_grouped_mma2` seul,
+144 lancements = 1 pas, MMA forcée (`MIN_T=1`), grille fixe, route+pack.
+
+| b | ms/pas (3 GEMM, ncu) | µs par GEMM | Go lus/pas | Go/s effectif | grille (blocs, moy. 3 GEMM) | warps actifs | MHz |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1,425 | 9,9 | 1,020 | **715** | 1 204 | 16,5 % | 2 517 |
+| 6 | 3,291 | 22,9 | 3,417 | 1 038 | 1 232 | 16,6 % | 2 456 |
+| 12 | 4,010 | 27,8 | 4,285 | 1 069 | 1 269 | 16,6 % | 2 447 |
+
+b=6 / b=1 = **2,31×** : le critère de poste7 réfute son plancher tel quel
+(≥ 2×). Mais le mécanisme est à moitié là : à b=1 chaque GEMM lit 7,1 Mo
+(8 experts) en 9,9 µs = 715 Go/s, contre 1 069 à b=12 — **un excès de
+≈ 3,5 µs par GEMM à b=1** (7,1 Mo à 1,07 To/s = 6,6 µs), soit 0,5 ms par
+pas de ncu sur 144 lancements (réel ≈ 0,3-0,4 avec la surestimation) ;
+le reste du coût fixe de B à b=1 (2,0-2,3 ms mesurés par poste3) n'est PAS
+dans les GEMM : il est dans la glue et les lancements (route+pack, 2
+quant_act, moe_act, reduce_trie : 7 lancements de 2-13 µs chacun = 30-50
+µs/couche = 1,5-2,4 ms/pas, indépendants de b — c'est le « fixe »). Grille
+lancée 1 204-1 269 blocs quel que soit b (grille fixe : 129-134 tuiles ×
+6 ou 16 tuiles N), mais à b=1 seules 8 tuiles portent du travail (48 CTA
+utiles sur gate/up, 128 sur down) : occupation 16,5 % de warps actifs
+partout — le pipeline cp.async à 8 warps est borné par la mémoire, pas par
+l'occupation, dès b=6.
+
+Conséquences : (1) route+pack (7 → 1 lancement de routage) est bien la
+marche qui rend à TOUS les lots (le fixe est en lancements) ; (2) pour le
+port, l'exigence « ≥ 170 CTA à b=1 » (split-K) ne vaut que 3,5 µs × 3
+par couche = 0,5 ms/pas à b=1 — moins que la fusion des 7 lancements en
+un (b12x fait tout en un noyau : 26,8 µs à b=1 contre nos ≈ 30 + 30 µs).

@@ -1,0 +1,8 @@
+Par pas (moyenne sur 1 pas), 144 lancements profilés, 0 valeurs illisibles
+                                                                  appels   ms/pas  Go lus    Go/s    Ginst  inst/oct tens%  fma%  lsu%   SM%   MHz
+nvfp4_gemm_grouped_mma2_kernel<16, 4>                              144.0    4.010   4.285    1069    0.000      0.00   0.0   0.0   0.0   0.0  2447 grille=   1269 warps_actifs= 16.6%
+
+Par poste
+                                                                  appels   ms/pas  Go lus    Go/s    Ginst  inst/oct tens%  fma%  lsu%   SM%   MHz
+projections attention                                              144.0    4.010   4.285    1069    0.000      0.00   0.0   0.0   0.0   0.0  2447 grille=   1269 warps_actifs= 16.6%  100.0 %
+TOTAL                                                              144.0    4.010   4.285    1069    0.000      0.00   0.0   0.0   0.0   0.0  2447 grille=   1269 warps_actifs= 16.6%
