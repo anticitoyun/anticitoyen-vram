@@ -110,7 +110,9 @@ COURRIEL_TOLERE = ("noreply", "example")
 # GLM) fusionne entre-temps, aucun de mes propres fichiers n'y contribue
 # (verifie : mon nouveau outils/ppl-decode-mma-coder30b.py utilise des
 # chemins /mnt/... hors du motif CHEMIN, donc +0). Mesure directe.
-PLAFOND_CHEMINS = 371
+# 15/09 (poste2) : +1 -- carnet de pause (acvram-memoire/poste2.md), une
+# commande de reprise `cd ~/...`. Mesure directe.
+PLAFOND_CHEMINS = 372
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute
