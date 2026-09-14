@@ -32,7 +32,13 @@ def exiger_regime_nominal(engine, autoriser_piles_inconnues: bool = True) -> Non
     if r["experts_exiles"]:
         fautes.append(f"{r['experts_exiles']}/{r['experts_total']} experts exilés")
     if r["piles_ok"] is False:
-        fautes.append("pile(s) d'experts hétérogène(s), repli eager")
+        # La cause exacte (vraiment hétérogène, ou seulement un format
+        # uniforme non pris en charge par ce chemin — bf16 pur, trouvé le
+        # 15/09) vit dans `piles_raison` (Engine.regime()) depuis le
+        # correctif du même jour ; sans elle, "hétérogène" affirmait une
+        # chose que le code ne vérifiait pas toujours.
+        raison = "; ".join(r.get("piles_raison") or []) or "cause non relevée"
+        fautes.append(f"pile(s) d'experts en repli eager : {raison}")
     elif r["piles_ok"] is None and not autoriser_piles_inconnues:
         fautes.append("piles_ok non vérifié (pas de pas GPU avant l'appel)")
     if len(r["cartes"]) > 1:
