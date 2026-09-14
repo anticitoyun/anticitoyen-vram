@@ -28,9 +28,13 @@ set -u
 # disait puisqu elle fonctionnait. Elle produisait meme la panne INVERSE de
 # celle qu elle previent : deux sessions sur deux cartes se bloquaient, deux
 # sessions sur la meme carte passaient.
-# CUDA_VISIBLE_DEVICES est ce que le processus servira effectivement ; on prend
-# son PREMIER index, qui est celui que le moteur appelle cuda:0.
-_cvd=${CUDA_VISIBLE_DEVICES:-0}; _carte=${_cvd%%,*}
+# ACVRAM_CARTE, PAS CUDA_VISIBLE_DEVICES : les lanceurs de session exportent
+# desormais CUDA_VISIBLE_DEVICES="" par defaut (carte invisible tant que rien
+# ne la reserve, poste7 14/09) — le lire ici donnerait toujours la carte 0 par
+# defaut ("" -> 0 via ${:-0}) sans jamais refleter la carte VOULUE. On prend
+# le premier index d'ACVRAM_CARTE, qui est celui que le moteur appelle cuda:0
+# une fois exposee plus bas.
+_cvd=${ACVRAM_CARTE:-0}; _carte=${_cvd%%,*}
 case "${_carte:-0}" in
   ''|*[!0-9]*) _carte=0 ;;          # vide ou non numerique : la carte 0
 esac
@@ -165,7 +169,12 @@ AVANT=$(etat_carte)
 # suivant attendait jusqu'a l'abandon. Verifie dans les deux sens : sans cette
 # fermeture, 25 s d'attente puis echec ; avec, la carte est reprise en 1 s.
 # Le shell garde le verrou, la commande ne l'a jamais.
-"$@" 9>&-
+# LA CARTE SE REND VISIBLE ICI, JAMAIS PLUS TOT. Le verrou tenu, on expose la
+# carte reservee (ACVRAM_CARTE, "0" par defaut) a la commande SEULE — pas au
+# shell de carte.sh, qui n'en a pas besoin. Une session dont le lanceur exporte
+# CUDA_VISIBLE_DEVICES="" ne voit donc la carte qu'a l'INTERIEUR d'un carte.sh,
+# jamais avant, jamais par accident dans un sous-processus qui l'aurait heritee.
+CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" "$@" 9>&-
 code=$?
 APRES=$(etat_carte)
 if [ "$TYPE" = mesure ] && [ -n "$AVANT" ] && [ "$AVANT" != "$APRES" ]; then
