@@ -28,7 +28,8 @@ import torch
 from ..engine.config import ModelSpec, load_model_spec
 from ..memory.tiering import Plan
 from . import formats
-from .calibrate import ActStats, ChannelScaler, quantize_with_calibration
+from .calibrate import (ActStats, ChannelScaler, alpha_commun_gate_up,
+                        quantize_with_calibration)
 
 __all__ = ["ConversionOptions", "ConversionReport", "convert_checkpoint",
            "TensorRouter"]
@@ -120,6 +121,16 @@ class ConversionOptions:
     # compare, a budget d'octets EGAL, si un classement par KLD aurait promu
     # d'autres tenseurs — sans jamais changer ce qui se convertit aujourd'hui.
     mesurer_kld: bool = False
+    # Item A7 de l'audit poste7 (14/09) : `gate_proj` et `up_proj` lisent la
+    # meme entree mais chacun cherchait son propre alpha AWQ, si bien que
+    # `_scaler_commun` (layers.py) refusait presque toujours de porter un
+    # scaler unique sur la paire empilee — 5 fusions recuperees sur 64 sur
+    # Llama-2-7b-int8 (revue/alpha-partage-recuperer-59-fusions.md). Ce flag
+    # cherche UN alpha commun par paire (`calibrate.alpha_commun_gate_up`),
+    # identique par construction. Defaut a faux : ne change pas la
+    # conversion par defaut sans mesure (revue/prediction-a7-alpha-commun-
+    # gateup-14-09.md).
+    alpha_commun_gate_up: bool = False
 
 
 @dataclass
@@ -323,6 +334,62 @@ class TensorRouter:
         # et la rotation n'apporte que peu, au prix d'une transformée en
         # n log n sur chaque activation.
         return fmt == "int4_awq" and not name.endswith(SENSITIVE_SUFFIXES)
+
+
+def _precalculer_alpha_commun_gate_up(
+    model_path: str, spec, router: "TensorRouter",
+    stats: Optional[dict[str, ActStats]], opts: ConversionOptions,
+    qdev: torch.device) -> dict[str, torch.Tensor]:
+    """Pre-passe A7 : un alpha AWQ COMMUN par paire gate_proj/up_proj admissible
+    (meme format des deux cotes, ni bf16/fp16, hors experts MoE — leur pile
+    groupee obeit a une autre regle, celle qui a fait echouer A6, voir
+    `revue/verdict-a6-int8-snrfloor0-14-09.md`).
+
+    Relit gate_proj et up_proj une SECONDE fois depuis le disque : prix
+    accepte pour ne pas toucher a la boucle de conversion principale, qui
+    reste un passage tenseur par tenseur. Rend un alpha `None` (pas de
+    scaler) comme un alpha : les deux valent une fusion, un alpha degenere a
+    l'identite n'ayant rien a partager.
+    """
+    en_attente: dict[str, torch.Tensor] = {}
+    resultat: dict[str, torch.Tensor] = {}
+    for name, tensor in _adapt_hf(_iter_checkpoint(model_path), spec):
+        if ".mlp.experts." in name or tensor.dim() != 2:
+            continue
+        if name.endswith(".mlp.gate_proj.weight"):
+            en_attente[name[: -len("gate_proj.weight")]] = tensor
+            continue
+        if not name.endswith(".mlp.up_proj.weight"):
+            continue
+        cle = name[: -len("up_proj.weight")]
+        gate_tensor = en_attente.pop(cle, None)
+        if gate_tensor is None:
+            continue
+        gate_name, up_name = f"{cle}gate_proj.weight", name
+        fmt = router.format_for(gate_name)
+        if fmt != router.format_for(up_name) or fmt in ("bf16", "fp16"):
+            continue
+        st = stats.get(gate_name) if stats else None
+        gate_t = gate_tensor.to(qdev, dtype=torch.float32)
+        up_t = tensor.to(qdev, dtype=torch.float32)
+        st_dev = None if st is None else ActStats(
+            st.mean_abs.to(qdev), None, st.n_samples)
+        try:
+            scale, _ = alpha_commun_gate_up(
+                [gate_t, up_t], st_dev, fmt, group_size=opts.group_size,
+                use_hadamard=router.wants_hadamard(gate_name, fmt),
+                n_grid=opts.n_grid)
+        except torch.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            scale, _ = alpha_commun_gate_up(
+                [gate_tensor.to(torch.float32), tensor.to(torch.float32)],
+                st, fmt, group_size=opts.group_size,
+                use_hadamard=router.wants_hadamard(gate_name, fmt),
+                n_grid=opts.n_grid)
+        if scale is not None:
+            resultat[gate_name] = scale.cpu()
+            resultat[up_name] = scale.cpu()
+    return resultat
 
 
 def _quantize_on(dev: torch.device, tensor: torch.Tensor, fmt: str,
@@ -942,6 +1009,13 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     keys = []
     budget_candidats: list[dict] = []
 
+    alpha_commun: dict[str, torch.Tensor] = {}
+    if opts.alpha_commun_gate_up:
+        alpha_commun = _precalculer_alpha_commun_gate_up(
+            model_path, spec, router, stats, opts, qdev)
+        print(f"[acvram] alpha commun gate/up : {len(alpha_commun) // 2} "
+              f"paires fusionnees", flush=True)
+
     for name, tensor in _adapt_hf(_iter_checkpoint(model_path), spec):
         report.tensors += 1
         report.in_bytes += tensor.numel() * tensor.element_size()
@@ -974,6 +1048,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             n_grid=opts.n_grid, garder_grille=opts.garder_grille,
             table=opts.q3n_table if fmt == "q3n" else None,
             mesurer_kld=opts.mesurer_kld,
+            forced_scale=alpha_commun.get(name),
         )
         if fmt == "q3n":
             entry["block"] = qt.block
