@@ -8,30 +8,52 @@ transformers. Réfuté → pas de conversion ce soir.
 
 ## Résultat
 
-RÉFUTÉ. Sur les 16 positions :
+RÉFUTÉ, **reproduit sur deux passages indépendants** — un premier par
+mégarde sur GPU (incident de procédure, voir plus bas), un second corrigé
+et vérifié entièrement CPU (`device_override="cpu"` + `--host-exec cpu`,
+aucun PID sur `nvidia-smi` pendant le passage). Les deux passages
+donnent le même ordre de grandeur :
+
+| passage | pire \|Δlogit\| | pire cosinus | régime |
+|---|---|---|---|
+| 1 (GPU, incident) | 5,0669 | 0,952137 | DÉGRADÉ (piles_ok=False) |
+| 2 (CPU, propre) | 5,0124 | 0,954475 | NOMINAL (piles_ok=None) |
+
+Détail du passage 2 (CPU, retenu comme résultat de référence — celui
+versionné dans `donnees-equivalence-glm-14-09/`) :
 
 | position | \|Δlogit\| max | cosinus |
 |---|---|---|
-| 0 | 3,4495 | 0,998698 |
-| 1 | 1,6774 | 0,994951 |
-| 2 | 1,8831 | 0,997807 |
-| 3 | 1,9267 | 0,992638 |
-| 4 | 0,1681 | 0,999774 |
-| 5 | 5,0669 | 0,952137 |
-| 6 | 4,2859 | 0,999004 |
-| 7 | 2,6502 | 0,986674 |
-| 8 | 1,2240 | 0,998870 |
-| 9 | 2,3774 | 0,995889 |
-| 10 | 0,6064 | 0,999924 |
-| 11 | 0,8287 | 0,998951 |
-| 12 | 3,1211 | 0,992331 |
-| 13 | 0,2088 | 0,999970 |
-| 14 | 1,4689 | 0,999202 |
-| 15 | 2,9739 | 0,972043 |
+| 0 | 3,5411 | 0,998692 |
+| 1 | 2,0248 | 0,997028 |
+| 2 | 1,9315 | 0,997851 |
+| 3 | 0,3509 | 0,998970 |
+| 4 | 0,1925 | 0,999777 |
+| 5 | 5,0124 | 0,954475 |
+| 6 | 1,4751 | 0,999855 |
+| 7 | 1,5771 | 0,994733 |
+| 8 | 1,2026 | 0,999014 |
+| 9 | 2,5615 | 0,995985 |
+| 10 | 0,8620 | 0,999905 |
+| 11 | 0,8429 | 0,998694 |
+| 12 | 1,9596 | 0,996858 |
+| 13 | 4,8674 | 0,976307 |
+| 14 | 1,4890 | 0,999249 |
+| 15 | 3,1620 | 0,970630 |
 
-Pire |Δlogit| : 5,0669 (seuil 0,05, ×101). Pire cosinus : 0,952137 (seuil
-0,999). **Aucune des 16 positions ne passe le critère Δlogit** ; 8/16
-passent le critère cosinus seul. Les deux sont exigés ensemble.
+Pire |Δlogit| : 5,0124 (seuil 0,05, ×100). Pire cosinus : 0,954475 (seuil
+0,999). **Aucune des 16 positions ne passe le critère Δlogit** sur aucun
+des deux passages. Les deux critères sont exigés ensemble.
+
+**Ce que la reproduction CPU tranche** : le régime passe de DÉGRADÉ
+(GPU) à NOMINAL (CPU, `piles_ok=None` — pas de couche MoE vérifiée par
+pile car le chemin CPU n'utilise jamais la construction par pile),
+**et l'écart reste le même ordre de grandeur**. La cause « formats
+mélangés » du passage 1 était donc bien un artefact du chemin GPU
+(la question posée plus bas est résolue : lecture 1, faux
+déclenchement — voir section suivante), **pas** la source de l'écart.
+L'écart lui-même est donc probablement réel, dans le calcul MLA/MoE
+lui-même, indépendant du device.
 
 ## Écarté avant de conclure
 
@@ -41,53 +63,47 @@ sont présents un-à-un dans le mini-répertoire extrait, comparés à la
 source (`model.safetensors.index.json`). Pas de perte de données côté
 extraction.
 
-## Non tranché, à ne pas confondre avec la cause
+## Tranché : le message « formats mélangés » est un artefact GPU
 
-Le journal de conversion affiche, sur une conversion **bf16 pure, sans
-AWQ, sans quantification** : `régime DÉGRADÉ — piles_ok=False`, cause
+Passage 1 (GPU) affichait, sur une conversion **bf16 pure, sans AWQ,
+sans quantification** : `régime DÉGRADÉ — piles_ok=False`, cause
 `« gate_proj : formats de quantification mélangés entre experts (ni
 tout NVFP4, ni tout INT4) »` (message ajouté par moi le 14/09,
-`acvram/engine/model.py::_try_build_stacks`). Ce contrôle vérifie
-l'homogénéité de scaler de quantification entre experts — il ne devrait
-normalement jamais se déclencher quand aucun expert n'est quantifié.
-Deux lectures possibles, **aucune tranchée ici** :
-1. faux déclenchement du contrôle sur du bf16 (les experts bf16 n'ont
-   pas de scaler du tout ; peut-être lu comme « mélangé » par erreur) ;
-2. signal réel d'un problème dans la construction de la pile MLA/MoE qui
-   contaminerait aussi les résultats numériques.
-
-Le régime DÉGRADÉ ne fait que forcer un chemin lent (boucle par expert
-au lieu d'un noyau groupé) — **numériquement équivalent en théorie**,
-donc ne devrait PAS à lui seul expliquer un écart de logit aussi grand.
-Mais un doute existe : le chemin lent est moins testé que le chemin
-rapide.
+`acvram/engine/model.py::_try_build_stacks`). Passage 2 (CPU) ne
+l'affiche PAS (`piles_ok=None`, régime NOMINAL) — le chemin CPU ne passe
+jamais par la construction en pile (`_try_build_stacks` est un optimiseur
+GPU), donc ce contrôle ne s'y exécute pas du tout. **L'écart de logit
+étant identique sur les deux passages**, le message DÉGRADÉ n'explique
+rien : c'est un faux déclenchement du contrôle d'homogénéité sur du bf16
+non quantifié (lecture 1 de la section précédente, confirmée), sans
+rapport avec la cause réelle de l'écart.
 
 ## Ce qui n'a pas été fait
 
 - Pas de décomposition couche par couche (attention seule vs MLP seul)
-  pour isoler où l'écart apparaît en premier.
-- Pas de vérification indépendante du message DÉGRADÉ lui-même (cause
-  1 vs 2 ci-dessus).
+  pour isoler où l'écart apparaît en premier — c'est le diagnostic
+  qu'poste1 prend en charge (couche 0 dense+MLA seule, puis routage MoE).
 - Pas de conversion, comme l'exige le protocole sur un verdict réfuté.
 
 ## Suite
 
-Pas de conversion GLM-4.7-Flash ce soir. Rendu à chef/poste7 pour
-décider : creuser la cause (probablement poste1, qui connaît le mieux
-son propre correctif MLA fraîchement fusionné, `16bac2f`) ou reporter au
-lendemain.
+Pas de conversion GLM-4.7-Flash ce soir. poste1 prend le diagnostic par
+couche (couche 0 dense+MLA seule, puis routage MoE GLM : sigmoid + bias +
+expert partagé) sur son correctif `16bac2f`.
 
 ## Script et données
 
-`outils/equivalence-glm-2couches.py`. Logits bruts :
-`/tmp/glm-equivalence-2couches/logits-acvram.json`,
-`/tmp/glm-equivalence-2couches/logits-hf.json` (non versionnés, scratch).
+`outils/equivalence-glm-2couches.py`. Logits bruts versionnés :
+`revue/donnees-equivalence-glm-14-09/logits-acvram.json` (passage 2,
+CPU),  `revue/donnees-equivalence-glm-14-09/logits-hf.json`.
 
-**Incident de procédure, disjoint du verdict** : l'étape `acvram` de ce
-script a tourné sur `cuda:0` (planificateur `auto_plan`, choix
-automatique) sans passer par `carte.sh` — `--quant-device cpu` ne
-force QUE le device de la recherche AWQ/quantification à la
-conversion, pas le device d'exécution du moteur au forward. A
-chevauché une mesure `ncu` de poste4 (prévenue). Le script doit être
-corrigé pour forcer le CPU au forward, ou passer par `carte.sh`, avant
-toute réutilisation.
+**Incident de procédure du passage 1, corrigé** : l'étape `acvram` a
+d'abord tourné sur `cuda:0` (planificateur `auto_plan`, choix
+automatique) sans passer par `carte.sh` — `--quant-device cpu` ne force
+QUE le device de la recherche AWQ/quantification à la conversion, pas le
+device d'exécution du moteur au forward. A chevauché une mesure `ncu` de
+poste4 (prévenue). Corrigé pour le passage 2 : `device_override="cpu"`
+explicite dans `load_model()`, `--host-exec cpu` à la conversion,
+lancé via `systemd-run` (le harnais a tué le premier essai post-
+correctif sur un faux « mémoire faible » — `free -h` montrait 68 Gio
+disponibles) ; vérifié sans PID sur `nvidia-smi` pendant tout le passage.

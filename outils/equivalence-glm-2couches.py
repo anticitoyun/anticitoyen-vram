@@ -105,7 +105,7 @@ def etape_acvram() -> None:
     r = subprocess.run(
         [VENV_PROJET, "-m", "acvram", "convert", str(MINI),
          "--format", "bf16", "--no-awq", "--quant-device", "cpu",
-         "--max-model-len", "64", "-o", str(CONVERTI)],
+         "--host-exec", "cpu", "--max-model-len", "64", "-o", str(CONVERTI)],
         capture_output=True, text=True, cwd=str(Path(__file__).resolve().parent.parent))
     print(r.stdout[-2000:], file=sys.stderr)
     if r.returncode != 0:
