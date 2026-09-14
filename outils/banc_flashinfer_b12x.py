@@ -21,8 +21,13 @@ benchmarks/bench_b12x_mxfp4_moe.py, licence Apache-2.0 ci-dessus. Ajouts :
   --experts-pool N : les jetons routent sur N experts distincts au plus (le
       routage d'origine, (t*k+j) % E, touche t*k experts distincts : 96 a
       b=12 top-8, la ou Coder-30B en touche ~30 et GLM-4.7-Flash ~34) ;
-  --cold-l2 : purge du L2 entre deux mesures (bench_gpu_time cold_l2_cache),
-      la boucle d'origine est L2-chaude (P7) ;
+  --cold-l2 : L2 FROID par rotation de pools d'experts DISJOINTS dans un
+      meme graphe (4 lots de --experts-pool experts, 318 Mo > 96 Mo de L2
+      pour Coder) — comme 48 couches differentes par pas. Le cold_l2_cache
+      de bench_gpu_time n'agit pas ici : il tourne des copies des ARGUMENTS
+      (tenseurs passes a fn), or run() les capture par fermeture, et sa
+      rotation compte les octets alloues (604 Mo) pas les 74 touches ;
+      mesure du 15/09 : chaud = froid = 31,7 us, identique au bit ;
   energie NVML (compteur, energie.py d'acvram) sur la fenetre repeat-ms,
       W brut/net et horloge, imprimes avec la latence.
     outils/carte.sh /opt/ia/flashinfer/.venv/bin/python outils/banc_flashinfer_b12x.py ...
@@ -112,6 +117,33 @@ def _make_weights(
     )
     alpha = torch.ones(num_experts, dtype=torch.float32, device="cuda")
     return w1, w2, alpha
+
+
+def _temps_graphe_pools(moe, base_kwargs, pools_ids, repeat_ms, warmup_ms):
+    """Un graphe = len(pools_ids) appels de moe.run, chacun sur un pool d'experts
+    disjoint ; temps de rejeu / nombre d'appels. Chaque appel lit ses poids depuis
+    la DRAM tant que la somme des pools depasse le L2."""
+    for ids in pools_ids:
+        moe.run(**dict(base_kwargs, token_selected_experts=ids))
+    torch.cuda.synchronize()
+    s = torch.cuda.Stream()
+    with torch.cuda.stream(s):
+        for ids in pools_ids:
+            moe.run(**dict(base_kwargs, token_selected_experts=ids))
+    torch.cuda.current_stream().wait_stream(s)
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        for ids in pools_ids:
+            moe.run(**dict(base_kwargs, token_selected_experts=ids))
+    def _boucle(duree_ms):
+        t0 = time.perf_counter(); n = 0; mesures = []
+        while (time.perf_counter() - t0) * 1000 < duree_ms:
+            e0 = torch.cuda.Event(enable_timing=True); e1 = torch.cuda.Event(enable_timing=True)
+            e0.record(); g.replay(); e1.record(); e1.synchronize()
+            mesures.append(e0.elapsed_time(e1) / len(pools_ids)); n += 1
+        return mesures
+    _boucle(warmup_ms)
+    return _boucle(repeat_ms)
 
 
 def _tflops(
@@ -256,13 +288,28 @@ def main():
                 time.sleep(args.repos_s)
             horloges = []
             with Energie(periode=0.25) as e:
-                measurements = bench_gpu_time(
-                    run,
-                    dry_run_time_ms=args.warmup_ms,
-                    repeat_time_ms=args.repeat_ms,
-                    use_cuda_graph=True,
-                    cold_l2_cache=args.cold_l2,
-                )
+                if args.cold_l2:
+                    pool = max(args.experts_pool, args.top_k)
+                    n_pools = max(1, args.num_experts // (pool + 2))
+                    gcpu = torch.Generator(device="cpu").manual_seed(args.seed + 7 * num_tokens)
+                    pools_ids = [(torch.stack([torch.randperm(pool, generator=gcpu)[: args.top_k]
+                                               for _ in range(num_tokens)]) + p * (pool + 2)).to("cuda", torch.int32)
+                                 for p in range(n_pools)]
+                    base = dict(x=x, w1_weight=w1, w1_weight_sf=w1_sf, w1_alpha=alpha,
+                                fc2_input_scale=(alpha[:1] if quant_mode == "nvfp4" else None),
+                                w2_weight=w2, w2_weight_sf=w2_sf, w2_alpha=alpha,
+                                token_final_scales=token_weights)
+                    # use_cuda_graph=True du wrapper = tampons pre-alloues, capturable dans MON graphe
+                    measurements = _temps_graphe_pools(moe, base, pools_ids, args.repeat_ms, args.warmup_ms)
+                    distincts = f"{distincts}x{n_pools}pools"
+                else:
+                    measurements = bench_gpu_time(
+                        run,
+                        dry_run_time_ms=args.warmup_ms,
+                        repeat_time_ms=args.repeat_ms,
+                        use_cuda_graph=True,
+                        cold_l2_cache=False,
+                    )
                 horloges.append(nvml().horloge_sm(h))
             latency_ms = float(np.median(measurements))
             backend = select_sm120_moe_backend(
