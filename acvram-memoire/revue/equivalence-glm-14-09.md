@@ -156,21 +156,33 @@ Reconversion propre (`mini-acvram4`, manifeste vérifié : 100 % bf16 sauf
 le biais en fp32) puis équivalence 16 jetons rejouée contre HF (seuils de
 poste2, delta≤0,05 et cos≥0,999) :
 
-| position | delta | cos | verdict poste2 |
-|---|---|---|---|
-| 0 | 1,8152 | 0,999556 | rouge (delta seul) |
-| 1-15 | ≤0,26 | ≥0,99994 | **vert** |
+| position | delta | cos |
+|---|---|---|
+| 0 | 1,8152 | 0,999556 |
+| 1-15 | 0,096-0,256 | 0,99994-0,99999 |
 
-**15/16 positions passent intégralement.** La position 0 échoue
-SEULEMENT sur le seuil delta (le cos passe, 0,999556 ≥ 0,999) : c'est le
-même swap d'expert proche de l'égalité (42↔4) déjà identifié dans le
-contrôle « couche 0 isolée » comme du bruit bf16 diffus (~1e-3, présent
-partout, pas spécifique à cette position) — retrouvé identique, au
-chiffre près (delta=1,8152), au tout premier essai routeur-fp32-seul. Le
-contrôle fp32/fp32 décisif l'avait effacé (delta 0,0031, cos 1,0),
-confirmant que c'est un artefact de précision bf16 sur un ex-aequo
-fortuit du jeu de 16 jetons synthétiques de poste2, pas un bogue
-d'implémentation.
+**CORRECTION (après un premier rapport erroné à chef)** : le script de
+poste2 rend un verdict GLOBAL — `pire_delta = max sur les 16 positions`,
+`pire_cos = min sur les 16` — PAS un verdict par position. « 15/16
+passent » était une erreur de lecture de ma part (seuil par position que
+j'avais inventé, pas celui de poste2). Le verdict réel :
+**pire_delta=1,8152 (seuil 0,05), pire_cos=0,999556 (seuil 0,999) →
+TOUJOURS RÉFUTÉ**, et ce même en excluant la position 0 : les positions
+1-15 ont individuellement un delta de 0,10-0,26, TOUTES au-dessus de
+0,05 — un plancher de bruit bf16↔bf16 diffus (retrouvé au contrôle
+« couche 0 isolée »), présent partout, jamais sous le seuil.
+
+La position 0 (1,8152) reste le même swap d'expert proche de l'égalité
+(42↔4) déjà identifié comme bruit bf16 (contrôle fp32/fp32 décisif :
+delta 0,0031, cos 1,0 une fois les deux bras en fp32) — pas un bogue
+d'implémentation. Mais même sa correction ne suffirait pas à passer le
+seuil delta global, à cause du plancher sur 1-15.
+
+**Question ouverte pour poste7/poste2, pas tranchée ici** : le seuil
+`SEUIL_DELTA=5e-2` (absolu, sur des logits d'un vocabulaire ~150k) est-il
+tenable pour une comparaison bf16↔bf16 entre deux implémentations
+indépendantes, ou faut-il un delta relatif / s'appuyer sur le cosinus
+seul (qui, lui, passe partout : pire_cos=0,999556 ≥ 0,999) ?
 
 **Trois bogues réels trouvés et corrigés cette session, tous avec test
 qui casse** :
@@ -181,12 +193,17 @@ qui casse** :
    régression rendue systématique par le nouveau défaut
    `CUDA_VISIBLE_DEVICES=""`.
 
-**Recommandation à chef/poste7** : le routage et la MLA sont corrects ;
-la position 0 restante est un artefact de précision bf16 sur un ex-aequo
-fortuit, pas un défaut d'acvram — attendu de tout moteur bf16 sur un
-routage top-k à experts proches. Deux options pour le feu vert de ce
-soir : (a) accepter 15/16 + explication comme suffisant pour la décision
-srcbf16, (b) régénérer le jeu de 16 jetons de poste2 pour éviter cet
-ex-aequo précis (ne cache rien, déplace juste le hasard). Points encore
-non traités : (4) "formats mélangés entre experts" / `piles_ok=False` —
+**Recommandation à chef/poste7** : le routage et la MLA sont corrects, le
+cosinus passe partout (pire_cos=0,999556 ≥ 0,999), mais le VERDICT GLOBAL
+de poste2 reste réfuté sur le seuil delta — pas seulement à cause de la
+position 0 (ex-aequo bf16 fortuit), mais à cause d'un plancher de bruit
+bf16↔bf16 (0,10-0,26) présent sur TOUTES les positions, largement au-
+dessus de 0,05. Trois options, pas tranchées ici : (a) desserrer
+SEUIL_DELTA ou passer à un delta relatif, si le cosinus seul est jugé
+suffisant pour la décision srcbf16 ; (b) régénérer le jeu de 16 jetons de
+poste2 pour éviter l'ex-aequo précis de la position 0 SANS changer le
+seuil — ne résoudrait que 1 position sur 16, le plancher resterait ; (c)
+ne pas comparer en bf16 du tout (fp32 des deux côtés, déjà fait en
+contrôle : delta≤0,02 partout). Points encore non traités : (4) "formats
+mélangés entre experts" / `piles_ok=False` —
 PAS investigué, hors du chemin critique de ce blocage.
