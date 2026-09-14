@@ -418,6 +418,71 @@ def _precalculer_alpha_commun_gate_up(
     return resultat
 
 
+def _precalculer_alpha_commun_experts(
+    model_path: str, spec, router: "TensorRouter",
+    stats: Optional[dict[str, ActStats]], opts: ConversionOptions,
+    qdev: torch.device) -> tuple[dict[str, torch.Tensor], set[str]]:
+    """Meme mecanisme que `_precalculer_alpha_commun_gate_up`, mais pour les
+    experts MoE, et RENDU OBLIGATOIRE (pas derriere `opts.alpha_commun_gate_up`) :
+    le moteur (`model.py:816`, poste7 a6a7436/5239f27) refuse la pile groupee
+    d'une projection dont les tables `gate_proj`/`up_proj` par expert ne sont
+    PAS EGALES au bit -- pas seulement homogenes chacune de son cote. Une
+    recherche AWQ independante par tenseur diverge presque toujours entre les
+    deux (meme constat qu'A7 sur les couches denses : 5 fusions recuperees
+    sur 64 SANS ce forcage, `revue/alpha-partage-recuperer-59-fusions.md`) --
+    sans ce forcage, quasi aucune pile d'experts ne se construirait malgre le
+    correctif d'echelle par expert.
+
+    Rend aussi l'ensemble des noms ou le choix conjoint est l'identite
+    (`scale is None`) : pour ceux-la, la recherche AWQ independante ne doit
+    pas non plus tourner (elle pourrait diverger vers une echelle reelle d'un
+    seul cote) -- l'appelant doit forcer `use_awq=False` sur ces deux noms.
+    """
+    en_attente: dict[str, torch.Tensor] = {}
+    resultat: dict[str, torch.Tensor] = {}
+    identite: set[str] = set()
+    for name, tensor in _adapt_hf(_iter_checkpoint(model_path), spec):
+        if ".mlp.experts." not in name or tensor.dim() != 2:
+            continue
+        if name.endswith(".gate_proj.weight"):
+            en_attente[name[: -len("gate_proj.weight")]] = tensor
+            continue
+        if not name.endswith(".up_proj.weight"):
+            continue
+        cle = name[: -len("up_proj.weight")]
+        gate_tensor = en_attente.pop(cle, None)
+        if gate_tensor is None:
+            continue
+        gate_name, up_name = f"{cle}gate_proj.weight", name
+        fmt = router.format_for(gate_name)
+        if fmt != router.format_for(up_name) or fmt in ("bf16", "fp16"):
+            continue
+        st = stats.get(gate_name) if stats else None
+        gate_t = gate_tensor.to(qdev, dtype=torch.float32)
+        up_t = tensor.to(qdev, dtype=torch.float32)
+        st_dev = None if st is None else ActStats(
+            st.mean_abs.to(qdev), None, st.n_samples)
+        try:
+            scale, _ = alpha_commun_gate_up(
+                [gate_t, up_t], st_dev, fmt, group_size=opts.group_size,
+                use_hadamard=router.wants_hadamard(gate_name, fmt),
+                n_grid=opts.n_grid)
+        except torch.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            scale, _ = alpha_commun_gate_up(
+                [gate_tensor.to(torch.float32), tensor.to(torch.float32)],
+                st, fmt, group_size=opts.group_size,
+                use_hadamard=router.wants_hadamard(gate_name, fmt),
+                n_grid=opts.n_grid)
+        if scale is not None:
+            resultat[gate_name] = scale.cpu()
+            resultat[up_name] = scale.cpu()
+        else:
+            identite.add(gate_name)
+            identite.add(up_name)
+    return resultat, identite
+
+
 def _quantize_on(dev: torch.device, tensor: torch.Tensor, fmt: str,
                  st: Optional[ActStats], **kw):
     """Quantifie sur ``dev``, en retombant sur le processeur si la VRAM manque.
@@ -1083,11 +1148,19 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     budget_candidats: list[dict] = []
 
     alpha_commun: dict[str, torch.Tensor] = {}
+    alpha_identite: set[str] = set()
     if opts.alpha_commun_gate_up:
         alpha_commun = _precalculer_alpha_commun_gate_up(
             model_path, spec, router, stats, opts, qdev)
         print(f"[acvram] alpha commun gate/up : {len(alpha_commun) // 2} "
               f"paires fusionnees", flush=True)
+    if opts.awq:
+        a_experts, alpha_identite = _precalculer_alpha_commun_experts(
+            model_path, spec, router, stats, opts, qdev)
+        alpha_commun.update(a_experts)
+        print(f"[acvram] alpha commun experts gate/up : {len(a_experts) // 2} "
+              f"paires partagees, {len(alpha_identite) // 2} forcees a "
+              f"l'identite (pile groupee, gate=up obligatoire)", flush=True)
 
     for name, tensor in _adapt_hf(_iter_checkpoint(model_path), spec):
         report.tensors += 1
@@ -1117,20 +1190,24 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         if est_expert and st is None:
             report.experts_sans_stats += 1
         # poste7 (a6a7436, 15/09) : l'echelle AWQ par expert reste dans la
-        # pile -- le moteur (poste4) apprend a la porter cote loader
-        # ([E,K], appliquee apres route+pack) plutot que d'exiger
-        # l'identite partout. Cote conversion, chaque expert cherche donc
-        # a nouveau son echelle AWQ ; quand la recherche s'effondre a
-        # l'identite (`scaler.scale is None`, souvent faute de
-        # statistiques de routage), on pose une echelle identite
-        # EXPLICITE (torch.ones) : le manifeste ne doit jamais melanger
-        # "echelle absente" et "echelle presente" par ambiguite d'
-        # absence, seulement par une valeur ecrite.
+        # pile -- le moteur (poste4, 5239f27) la porte cote loader ([E,K],
+        # appliquee apres route+pack) plutot que d'exiger l'identite
+        # partout. MAIS `_try_build_stacks` (model.py:816) exige que les
+        # tables gate_proj et up_proj d'un meme expert soient EGALES au bit
+        # -- d'ou `alpha_commun` (calcule plus haut, obligatoire pour les
+        # experts, meme mecanisme qu'A7) : quand une paire ne partage pas
+        # d'echelle AWQ commune, ses deux membres sont dans `alpha_identite`
+        # et la recherche independante est coupee (`use_awq=...and name not
+        # in alpha_identite`) pour ne pas diverger. Ici, quand la recherche
+        # (forcee ou independante) s'effondre malgre tout a l'identite
+        # (`scaler.scale is None`), on pose une echelle identite EXPLICITE
+        # (torch.ones) : le manifeste ne doit jamais melanger "echelle
+        # absente" et "echelle presente" par ambiguite d'absence.
         qt, scaler, metrics = _quantize_on(
             qdev, tensor, fmt, st,
             group_size=opts.group_size,
             use_hadamard=router.wants_hadamard(name, fmt),
-            use_awq=opts.awq,
+            use_awq=opts.awq and name not in alpha_identite,
             n_grid=opts.n_grid, garder_grille=opts.garder_grille,
             table=opts.q3n_table if fmt == "q3n" else None,
             mesurer_kld=opts.mesurer_kld,
