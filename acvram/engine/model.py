@@ -1036,18 +1036,22 @@ class MoEBlock(nn.Module):
         return d.view(t, self.top_k, -1).sum(dim=1).to(x.dtype)
 
     def _router_logits(self, x: torch.Tensor) -> torch.Tensor:
-        # Le routeur est un petit poids en clair : sa copie est gardée dans le
-        # type de l'entrée. En bf16 le produit accumule quand même en fp32
-        # (cuBLAS) mais évite de convertir l'état caché à chaque couche.
+        # Toujours en fp32 (HF modeling_glm4_moe_lite.py:401 fait de même) :
+        # un arrondi bf16 de la SORTIE du F.linear, même avec accumulation
+        # cuBLAS fp32, suffit à faire basculer le top-k sur les experts à
+        # égalité proche du seuil (mesuré : 4/16 jetons de l'équivalence
+        # GLM-4.7-Flash, revue/prediction-routeur-fp32-14-09.md).
         cache = getattr(self, "_router_w", None)
         if cache is None:
             cache = {}
             self._router_w = cache
-        w = cache.get(x.dtype)
+        w = cache.get(torch.float32)
         if w is None and hasattr(self.router.qweight, "weight"):
-            w = self.router.qweight.weight.to(x.dtype)
-            cache[x.dtype] = w
-        return F.linear(x, w) if w is not None else self.router(x)
+            w = self.router.qweight.weight.to(torch.float32)
+            cache[torch.float32] = w
+        if w is not None:
+            return F.linear(x.to(torch.float32), w)
+        return self.router(x).to(torch.float32)
 
     def _route(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Poids et indices des top-k experts par jeton."""
