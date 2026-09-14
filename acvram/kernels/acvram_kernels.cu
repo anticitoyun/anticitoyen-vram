@@ -2438,8 +2438,12 @@ torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table
                 "GEMM groupee MMA : bt dans {16, 32, 64, 128} (128 : variante a etages seulement)");
     TORCH_CHECK(bt != 128 || etages != 0, "GEMM groupee MMA : bt=128 exige etages > 0");
     const int G = xq.size(0), T = tile_e.size(0);
-    auto y = torch::zeros({G, M}, torch::TensorOptions().dtype(torch::kBFloat16).device(xq.device()));
-    if (T == 0) return y;
+    // empty, pas zeros : chaque ligne de xq appartient a exactement une tuile
+    // (routage par comptage, _tuiles), le noyau ecrit toutes les lignes et
+    // toutes les colonnes M ; le remplissage a zero etait un lancement de plus
+    // par GEMM (3 par couche au decodage, compte par test_moe_route_pack).
+    auto y = torch::empty({G, M}, torch::TensorOptions().dtype(torch::kBFloat16).device(xq.device()));
+    if (T == 0) return y.zero_();
     auto stream = at::cuda::getCurrentCUDAStream();
     #define GM_ARGS gscales.data_ptr<float>(), \
         xq.data_ptr<unsigned char>(), xsf.data_ptr<unsigned char>(), \
@@ -2789,6 +2793,148 @@ torch::Tensor moe_reduce_trie(torch::Tensor d, torch::Tensor topw, torch::Tensor
         reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), (int)m, (int)k);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return y;
+}
+
+
+// -------------------------------------------------------------------------
+// Routage + rassemblement (route+pack) du MoE en UN lancement — frontend du
+// chemin MMA au decodage (poste7-reprise-15-09-b.md § 2). Remplace, par couche,
+// ~40 lancements torch (where, argsort, scatter_add_, _tuiles : searchsorted /
+// cumsum / arange / clamp, index gather, pad, inv) mesures a 22 us sous ncu.
+//
+// Contrat : exactement ce que rendait le torch (bit a bit) :
+//   ordre  = argsort STABLE de flat_e (fantomes topi<0 -> expert 0, poids 0)
+//   inv    = permutation inverse (inv[ordre[p]] = p)
+//   tw     = poids fp32 dans l'ordre plat, 0 pour les fantomes
+//   cnt    = histogramme des experts [E]
+//   tuiles = MoEBlock._tuiles(cnt, bt, t_max) : (tile_e, t0, n) sur une grille
+//            FIXE de t_max tuiles, n=0 au-dela (jamais e hors [0,E)) —
+//            tile_e = DERNIER expert dont base <= slot (searchsorted right - 1)
+//   xs     = x[jeton(ordre[p])] en bf16, rembourre a Hpad de zeros
+// G = t*k <= 1024 (un bloc recompte tout en shared : 96 paires a b=12, 128 en
+// godet 16 ; ce n'est pas un noyau de prefill). Grille : G blocs, chaque bloc
+// recalcule le tri par comptage (trivial) et copie SA ligne ; le bloc 0 ecrit
+// en plus cnt, inv, tw et les tuiles.
+constexpr int RP_GMAX = 1024;
+constexpr int RP_FILS = 256;
+__device__ __forceinline__ float rp_to_float(float v) { return v; }
+__device__ __forceinline__ float rp_to_float(__nv_bfloat16 v) { return __bfloat162float(v); }
+
+template <typename XT, typename IT>
+__global__ void __launch_bounds__(RP_FILS) moe_route_pack_kernel(
+    const IT *__restrict__ topi, const float *__restrict__ topw,
+    const XT *__restrict__ x, int H, int Hpad,
+    int G, int t, int k, int E, int bt, int t_max,
+    int *__restrict__ ordre, int *__restrict__ inv, float *__restrict__ tw,
+    int *__restrict__ cnt, int *__restrict__ tile_e, int *__restrict__ tile_t0,
+    int *__restrict__ tile_n, __nv_bfloat16 *__restrict__ xs) {
+    __shared__ int s_e[RP_GMAX];
+    __shared__ int s_cnt[1024];          // E <= 1024
+    __shared__ int s_start[1024];
+    __shared__ int s_base[1024];
+    __shared__ int s_pos[RP_GMAX];
+    const int tid = threadIdx.x;
+    for (int e = tid; e < E; e += RP_FILS) s_cnt[e] = 0;
+    __syncthreads();
+    for (int f = tid; f < G; f += RP_FILS) {
+        const int e = (int)topi[f];
+        s_e[f] = e < 0 ? 0 : e;
+    }
+    __syncthreads();
+    // comptage (l'ordre des atomiques n'importe pas : on ne lit que le total)
+    for (int f = tid; f < G; f += RP_FILS) atomicAdd(&s_cnt[s_e[f]], 1);
+    __syncthreads();
+    // starts = cumsum exclusif de cnt ; base = cumsum exclusif de ceil(cnt/bt)
+    if (tid == 0) {
+        int acc = 0, accb = 0;
+        for (int e = 0; e < E; ++e) {
+            s_start[e] = acc; acc += s_cnt[e];
+            s_base[e] = accb; accb += (s_cnt[e] + bt - 1) / bt;
+        }
+    }
+    __syncthreads();
+    // position triee de chaque paire : start[e] + rang parmi les paires de meme
+    // expert d'indice plat inferieur (= argsort stable)
+    for (int f = tid; f < G; f += RP_FILS) {
+        const int e = s_e[f];
+        int rang = 0;
+        for (int g = 0; g < f; ++g) rang += (s_e[g] == e);
+        s_pos[f] = s_start[e] + rang;
+    }
+    __syncthreads();
+    // ce bloc copie la ligne triee p = blockIdx.x : trouver f tel que pos[f] == p
+    const int p = blockIdx.x;
+    int f_src = -1;
+    for (int f = tid; f < G; f += RP_FILS) if (s_pos[f] == p) f_src = f;
+    __shared__ int s_f;
+    if (f_src >= 0) s_f = f_src;
+    __syncthreads();
+    const int f = s_f;
+    const int jeton = f / k;
+    // ligne bf16 : H elements de x, puis des zeros jusqu'a Hpad
+    const XT *src = x + (long)jeton * H;
+    __nv_bfloat16 *dst = xs + (long)p * Hpad;
+    for (int i = tid; i < Hpad; i += RP_FILS) {
+        float v = i < H ? rp_to_float(src[i]) : 0.f;
+        dst[i] = __float2bfloat16(v);
+    }
+    if (tid == 0) ordre[p] = f;
+    if (blockIdx.x == 0) {
+        for (int g = tid; g < G; g += RP_FILS) {
+            inv[g] = s_pos[g];
+            tw[g] = topi[g] < 0 ? 0.f : topw[g];
+        }
+        for (int e = tid; e < E; e += RP_FILS) cnt[e] = s_cnt[e];
+        for (int slot = tid; slot < t_max; slot += RP_FILS) {
+            // dernier expert dont base <= slot, borne a [0, E-1]
+            int e = 0;
+            for (int q = 0; q < E; ++q) if (s_base[q] <= slot) e = q;
+            const int idx = slot - s_base[e];
+            int n = s_cnt[e] - idx * bt;
+            n = n < 0 ? 0 : (n > bt ? bt : n);
+            tile_e[slot] = e;
+            tile_t0[slot] = s_start[e] + idx * bt;
+            tile_n[slot] = n;
+        }
+    }
+}
+
+std::vector<torch::Tensor> moe_route_pack(torch::Tensor topi, torch::Tensor topw,
+                                          torch::Tensor x, int64_t E, int64_t bt,
+                                          int64_t t_max, int64_t Hpad) {
+    CHECK_CUDA(topi); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(x);
+    CHECK_CONTIG(topi); CHECK_CONTIG(topw); CHECK_CONTIG(x);
+    TORCH_CHECK(topi.dim() == 2 && topw.sizes() == topi.sizes(), "moe_route_pack : topi/topw [t, k]");
+    TORCH_CHECK(topi.scalar_type() == torch::kInt || topi.scalar_type() == torch::kLong, "moe_route_pack : topi int");
+    TORCH_CHECK(x.dim() == 2 && x.size(0) == topi.size(0), "moe_route_pack : x [t, H]");
+    TORCH_CHECK(E <= 1024 && bt >= 1 && Hpad >= x.size(1), "moe_route_pack : E <= 1024, bt >= 1, Hpad >= H");
+    const int t = (int)topi.size(0), k = (int)topi.size(1), G = t * k;
+    TORCH_CHECK(G >= 1 && G <= RP_GMAX, "moe_route_pack : 1 <= t*k <= 1024 (decodage)");
+    // Pas de conversion de type (chaque .to() est un lancement de plus par couche —
+    // le test compte les lancements) : topi int32 ou int64, x bf16 ou fp32 en direct.
+    TORCH_CHECK(topw.scalar_type() == torch::kFloat, "moe_route_pack : topw fp32 (tel que sorti du routage)");
+    TORCH_CHECK(x.scalar_type() == torch::kBFloat16 || x.scalar_type() == torch::kFloat, "moe_route_pack : x bf16 ou fp32");
+    auto oi = torch::empty({G}, topi.options().dtype(torch::kInt));
+    auto ordre = torch::empty({G}, oi.options()), inv = torch::empty({G}, oi.options());
+    auto tw = torch::empty({G}, topw.options());
+    auto cnt = torch::empty({E}, oi.options());
+    auto te = torch::empty({t_max}, oi.options()), t0 = torch::empty({t_max}, oi.options()),
+         tn = torch::empty({t_max}, oi.options());
+    auto xs = torch::empty({G, Hpad}, x.options().dtype(torch::kBFloat16));
+    auto stream = at::cuda::getCurrentCUDAStream();
+    #define RP_LANCE(XT, IT, PX) moe_route_pack_kernel<XT, IT><<<G, RP_FILS, 0, stream>>>( \
+            topi.data_ptr<IT>(), topw.data_ptr<float>(), PX, (int)x.size(1), (int)Hpad, \
+            G, t, k, (int)E, (int)bt, (int)t_max, ordre.data_ptr<int>(), inv.data_ptr<int>(), \
+            tw.data_ptr<float>(), cnt.data_ptr<int>(), te.data_ptr<int>(), t0.data_ptr<int>(), \
+            tn.data_ptr<int>(), reinterpret_cast<__nv_bfloat16 *>(xs.data_ptr()))
+    const bool bf = x.scalar_type() == torch::kBFloat16, i64 = topi.scalar_type() == torch::kLong;
+    if (bf && i64) RP_LANCE(__nv_bfloat16, int64_t, reinterpret_cast<const __nv_bfloat16 *>(x.data_ptr()));
+    else if (bf) RP_LANCE(__nv_bfloat16, int, reinterpret_cast<const __nv_bfloat16 *>(x.data_ptr()));
+    else if (i64) RP_LANCE(float, int64_t, x.data_ptr<float>());
+    else RP_LANCE(float, int, x.data_ptr<float>());
+    #undef RP_LANCE
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return {xs, ordre, inv, tw, cnt, te, t0, tn};
 }
 
 torch::Tensor nvfp4_gemv_grouped(torch::Tensor qw, torch::Tensor bscale,
@@ -3865,6 +4011,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "MoE NVFP4 : GEMM groupee sur tuiles de jetons, poids lus en 4 bits");
     m.def("moe_act", &moe_act,
           "MoE prefill : act(g)*u en bf16 depuis les vues [:, :m], rembourre a Kd (act 0=SiLU, 1=GELU-tanh)");
+    m.def("moe_route_pack", &moe_route_pack,
+          "MoE decodage : routage + rassemblement en un lancement -> (xs, ordre, inv, tw, cnt, tile_e, tile_t0, tile_n)");
     m.def("moe_reduce_trie", &moe_reduce_trie,
           "MoE prefill : reduction ponderee par jeton depuis l'ordre trie par expert, sortie bf16");
     m.def("nvfp4_gemm_grouped_mma", &nvfp4_gemm_grouped_mma,

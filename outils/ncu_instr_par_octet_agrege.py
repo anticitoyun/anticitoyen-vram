@@ -55,7 +55,8 @@ for d in par_lancement.values():
     a["n"] += 1
     for m in ("gpu__time_duration.sum", "dram__bytes_op_read.sum", "dram__bytes_op_write.sum", "sm__inst_executed.sum",
               "sm__inst_executed_pipe_tensor.sum", "sm__inst_executed_pipe_fma.sum", "sm__inst_executed_pipe_lsu.sum",
-              "sm__throughput.avg.pct_of_peak_sustained_elapsed", "sm__cycles_elapsed.avg.per_second"):
+              "sm__throughput.avg.pct_of_peak_sustained_elapsed", "sm__cycles_elapsed.avg.per_second",
+              "launch__grid_size", "sm__warps_active.avg.pct_of_peak_sustained_active"):
         a[m] += d.get(m, 0.0)
 
 # La plus grande grille int8_gemv = lm_head (N = vocabulaire).
@@ -95,7 +96,9 @@ def ligne(k, a, w):
     return (f"{k[:w]:{w}s} {n/pas:7.1f} {t:8.3f} {rd/1e9:7.3f} {bw:7.0f} {inst/1e9:8.3f} {ipo:9.2f} "
             f"{100*a['sm__inst_executed_pipe_tensor.sum']/max(inst*pas,1):5.1f} {100*a['sm__inst_executed_pipe_fma.sum']/max(inst*pas,1):5.1f} "
             f"{100*a['sm__inst_executed_pipe_lsu.sum']/max(inst*pas,1):5.1f} {a['sm__throughput.avg.pct_of_peak_sustained_elapsed']/n:5.1f} "
-            f"{a['sm__cycles_elapsed.avg.per_second']/max(n,1)/1e6:5.0f}")
+            f"{a['sm__cycles_elapsed.avg.per_second']/max(n,1)/1e6:5.0f}"
+            + (f" grille={a['launch__grid_size']/max(n,1):7.0f} warps_actifs={a['sm__warps_active.avg.pct_of_peak_sustained_active']/max(n,1):5.1f}%"
+               if a.get("launch__grid_size") else ""))
 
 W = 64
 ent = f"{'':{W}s} {'appels':>7s} {'ms/pas':>8s} {'Go lus':>7s} {'Go/s':>7s} {'Ginst':>8s} {'inst/oct':>9s} {'tens%':>5s} {'fma%':>5s} {'lsu%':>5s} {'SM%':>5s} {'MHz':>5s}"
