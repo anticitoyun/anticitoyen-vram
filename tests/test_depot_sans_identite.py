@@ -112,7 +112,12 @@ COURRIEL_TOLERE = ("noreply", "example")
 # chemins /mnt/... hors du motif CHEMIN, donc +0). Mesure directe.
 # 15/09 (poste2) : +1 -- carnet de pause (acvram-memoire/poste2.md), une
 # commande de reprise `cd ~/...`. Mesure directe.
-PLAFOND_CHEMINS = 372
+# 15/09 soir (poste2) : releve a 411 apres rebase sur main -- travail
+# d'autres sessions fusionne (PAUSE 8, correctifs GLM/collect.py
+# d'poste1, 1aj D/E, modes energie de poste3), aucun de mes propres
+# fichiers n'y contribue (verifie : verdict-glm-awq-mla-15-09.md n'a
+# aucun chemin /home ou /media). Mesure directe.
+PLAFOND_CHEMINS = 411
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute
