@@ -144,5 +144,14 @@ if SEUL != "mma":
     res.append(mesure("lm_head int8", lambda: lm(x), lots=50))
     res.append(mesure("norme RMS (input_layernorm)", lambda: couche.input_layernorm(x), lots=200))
 
-res.append(mesure("PAS COMPLET b=%d rejeu (Engine.step)" % B, lambda: eng.step(), lots=10))
+def pas_complet():
+    # Les séquences finissent (max_model_len) : réadmettre un lot dès que le moteur se
+    # vide, sinon la boucle mesure un moteur au repos (b=1, 14/09 : 114 W, 3,9 µs/pas).
+    if not eng.running:
+        for b in range(B):
+            eng.add_request([(1000 + b * 101 + i * 13) % 150000 + 10 for i in range(128)], SP)
+        while any(not s.prefilled for s in eng.running) or eng.waiting:
+            eng.step()
+    eng.step()
+res.append(mesure("PAS COMPLET b=%d rejeu (Engine.step)" % B, pas_complet, lots=10))
 print("RESULTAT " + json.dumps({"B": B, "repos_W": round(repos_w, 1), "postes": res}, ensure_ascii=False))

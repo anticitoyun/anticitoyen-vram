@@ -303,3 +303,76 @@ rien côté noyau tant que la DRAM elle-même coûte ~300 W au débit de la
 borne. Le pas complet sous graphes (poste1, (ii)) est la mesure qui
 tranche `pas ≤ 380 W et ≤ 0,45 J/jeton`. Données :
 `revue/donnees-ncu-ipo-acvram-mma-bt16-eager-14-09.txt`.
+
+## Point 0 de reprise (poste7) — llama.cpp b=1 sous le même instrument (14/09, 10h10-10h34)
+
+En-tête de mesure (REGLES §3) : 5090 seule (`CUDA_VISIBLE_DEVICES=0`),
+plafond 400 W, horloge libre (3 135 MHz max ; sonde -lgc de poste3 à
+10:11:55 hors verrou → la première fenêtre llama.cpp (9,8 s, 3 000 jetons)
+est aussi invalide par sa durée, refaite), compteur NVML
+`TotalEnergyConsumption` (energie.py), ncu sous sudoers avec
+`--cache-control none`, llama-server = binaire LM Studio cuda12 2.22.0
+(celui de poste8/poste3), Coder-30B Q4_K_M (18,6 Go), `-np 1 -c 16384 -ngl 999` ;
+acvram = venv anticitoyen-vram, Coder-30B NVFP4 (experts NVFP4, attention et
+lm_head int8), rejeu de graphes, `max_model_len=1024`. Outils :
+`outils/ncu_llamacpp_b1.sh` (invite d'un jeton, tout profilé, ÷ pas),
+`outils/energie_llamacpp_b1.py`, `outils/energie_par_poste.py 1 22`.
+
+| b=1, par jeton | acvram | llama.cpp | rapport |
+|---|---:|---:|---:|
+| Go DRAM lus (ncu, cache chaud) | **2,299** | **1,946** | **+18 %** |
+| dont MoE (8 experts × 48) | 1,020 | ≈ 1,22 (mul_mat_vec_q_moe 0,54 + mul_mat_vec_q<·,1> 0,68 mêlé) | |
+| dont projections d'attention | 0,927 (int8) | (dans mul_mat_vec_q, Q4_K ≈ 0,5) | |
+| dont lm_head | 0,318 (int8) | (Q6_K ≈ 0,24) | |
+| G instructions warp | 0,927 | 1,078 | ×0,86 |
+| **inst / octet** | **0,40** | **0,55** | llama.cpp ×1,4 **de plus** |
+| ms par jeton (moteur en processus / serveur) | 4,18 (239 t/s) | 3,16 à 3 000 jetons de contexte, 3,50 à 8 000 (317 → 285 t/s) | ×0,76-0,84 |
+| W brut / net (fenêtre ≥ 20 s) | 329,5 / 287,5 (2 962 MHz, pas de bridage) | 396,7 / 363,3 (**plafond 400 W atteint**) | llama.cpp ×1,26 net |
+| repos chaud, modèle chargé | 42,0 (moteur en processus) | **33,3** (llama-server, 225 MHz) | |
+| J par jeton brut / net | 1,377 / 1,200 | 1,390 / 1,273 (8 000 jetons) ; 1,250 / 1,140 (3 000, fenêtre 9,8 s invalide) | ≈ égaux |
+
+Contre les seuils scellés de poste7 (`poste7-organisation-14-09.md`) :
+
+* « llama.cpp ≤ 0,5 inst/octet » : **0,55** — au-dessus, sous le seuil de
+  réfutation (≥ 1,0). Leurs `mul_mat_vec_q` K-quants font 0,5-0,7
+  inst/oct ; **notre GEMV à b=1 fait 0,40** : à un jeton nos noyaux ne
+  dépensent PAS plus d'instructions par octet qu'eux (c'est à b=12 que
+  la réutilisation ×12 en FMA nous coûte 1,73).
+* « octets ±10 % des nôtres » : **réfuté, +18 % chez nous** (2,30 vs
+  1,95 Go) — l'écart est exactement celui de poste3 sur J/jeton (−18 %), et
+  il est nommé : projections d'attention en int8 (0,93 Go) et lm_head int8
+  (0,32) là où Q4_K_M lit du 4,5-6,5 bpw (≈ 0,5 + 0,24).
+* « repos chaud 60-80 W comme nous » : **réfuté, 33,3 W** pour llama-server
+  chargé (≤ 40 = « plancher » selon poste7) ; notre moteur en processus :
+  42 W. Les 68-76 W de poste3 sont ceux du serveur HTTP acvram, pas du
+  moteur.
+* « la différence est dans les noyaux, W nets ≥ 1,2× les leurs » :
+  **réfuté dans l'autre sens** — leurs W nets sont ×1,26 les nôtres
+  (363 contre 288) ; ils vont plus vite parce qu'ils lisent moins d'octets
+  (−15 %) et les lisent plus vite (555-615 Go/s contre 550), au prix du
+  plafond de puissance. **En J/jeton, même instrument, même heure :
+  1,38 contre 1,39 brut, 1,20 contre 1,27 net — pas de −18 %.** Le −18 %
+  de poste3 (1,168 vs 1,430) compare deux serveurs HTTP à repos différents
+  et sur un contexte différent : à refaire en processus avant d'en tirer
+  un chantier.
+
+Ce que ça ordonne à b=1 : le seul levier nommé est **les octets des
+projections d'attention et du lm_head** (int8 → NVFP4 = −0,6 Go, −26 % des
+octets du jeton) — c'est 1aj décodage, pas la MMA MoE (à M=1 notre GEMV
+est déjà à 0,40 inst/oct et 1 017 Go/s sur gate·up). Contrôle qui peut
+rendre faux : 1aj à b=1 doit rendre ≥ 3,6 ms/jeton (−14 %) ; s'il rend
+≥ 4,0, les octets n'étaient pas le goulot à b=1.
+
+Données : `revue/donnees-ncu-ipo-llamacpp-b1-14-09.txt`,
+`revue/donnees-ncu-ipo-acvram-b1-14-09.txt`. Contention signalée par
+poste2 (forward GPU de 2 couches hors verrou pendant le ncu acvram b=1,
+10:20-10:25) : sans effet sur les COMPTES (octets, instructions), seules
+les durées ncu — non utilisées — pouvaient bouger.
+
+### Étape 2 (poste7) — bt=32 par noyau : sans objet, chiffré
+
+À b=12, `bras experts` : max 12 jetons par expert sur 48 couches (GEMV et
+MMA), 30,7-34,0 experts distincts par couche ; une tuile de 16 ne se
+remplit jamais, aucune n'est doublée, les octets ncu = experts distincts
+× 2,654 Mo à 98-100 %. bt=32 ne peut rien enlever (il ne changerait
+qu'à ≥ 17 jetons par expert, soit b ≥ 35 en godet). Pas de manche.
