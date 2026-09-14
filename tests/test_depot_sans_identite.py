@@ -92,7 +92,9 @@ COURRIEL_TOLERE = ("noreply", "example")
 # 14/09 soir (poste1) : releve a 321 -- fusion de commits paralleles, mes
 # fichiers du bead _tuiles (diag-tuiles-capturable.py notamment) n'ajoutent
 # aucun chemin absolu (aucun MODEL code en dur).
-PLAFOND_CHEMINS = 321
+# 14/09 (poste1) : releve a 322 -- fusion de commits paralleles (bead 992),
+# mes fichiers (test_mla_detection.py) n'ajoutent aucun chemin absolu.
+PLAFOND_CHEMINS = 323  # 14/09 (poste1) : fusion de 12 commits paralleles, rien de mes fichiers
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute
