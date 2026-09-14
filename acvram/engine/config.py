@@ -569,6 +569,18 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
                                                              cfg.get("partial_rotary_factor_full", 1.0))),
                "embedding_multiplier": float(cfg["hidden_size"]) ** 0.5,
                "attention_multiplier": 1.0}
+    if mt == "glm4_moe_lite":
+        # HF (modeling_glm4_moe_lite.py:402-423, poste7 14/09) : sigmoid +
+        # biais de correction (`e_score_correction_bias`) INCONDITIONNEL
+        # pour cette famille — sa config ne declare pas `scoring_func`, et
+        # le repli generique plus bas tombait sur "softmax", qui IGNORE le
+        # biais (branche softmax de model.py, le biais n'est lu qu'ailleurs)
+        # et se trompe sur un sous-ensemble des jetons (8/16 mesures,
+        # equivalence CPU 2 couches vs HF, revue/poste7-refutation-glm-
+        # routage-14-09.md). PAS un heuristique general "sigmoid si biais
+        # present" : ernie4_5_moe a biais ET softmax, legitimement (ligne
+        # ~534 ci-dessus) — ce cas est nomme par model_type, pas devine.
+        cfg = {**cfg, "router_scoring": "sigmoid"}
     # qwen3_next est désormais exécutable (couches Gated DeltaNet) quand la
     # configuration porte nos champs layer_types/linear_* ; les autres
     # hybrides restent refusés.

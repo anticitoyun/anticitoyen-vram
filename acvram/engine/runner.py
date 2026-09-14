@@ -165,11 +165,33 @@ class EngineStats:
             "kv_blocks_total": self.kv_blocks_total,
             "cached_prompt_tokens": self.cached_prompt_tokens,
             "prefill_tokens_saved": self.cached_prompt_tokens,
+            "hit_rate": round(self.hit_rate, 3),
+            "host_kv_tokens": self.host_kv_tokens,
+            "kv_refills": self.kv_refills,
             "accepted_tokens": self.accepted_tokens,
             "proposed_tokens": self.proposed_tokens,
             "acceptance_rate": round(self.acceptance_rate, 3),
             "tokens_per_step": round(self.tokens_per_step, 3),
         }
+
+    @property
+    def hit_rate(self) -> float:
+        """Fraction des jetons d'invite servis par le cache de préfixe
+        (VRAM + étage hôte) plutôt que recalculés — P3, veille TRT-LLM/
+        FlashInfer (poste7, 14/09) : un tour d'agent au préfixe froid recalcule
+        tout, un tour chaud ne recalcule que ce qui a changé. Publié pour
+        qu'une mesure DEHORS du process (banc « tour d'agent ») distingue un
+        cache qui rate (blocs qui ne s'apparient pas) d'un vrai coût de
+        calcul."""
+        total = self.cached_prompt_tokens + self.prefill_tokens
+        return self.cached_prompt_tokens / total if total else 0.0
+
+    @property
+    def host_kv_tokens(self) -> int:
+        """Jetons remontés depuis l'étage hôte du cache KV (P3) — sous-
+        ensemble de `cached_prompt_tokens` : ceux qui n'étaient PAS déjà en
+        VRAM et ont dû être réimportés (`kv_refills`, un bloc à la fois)."""
+        return self.kv_refills * BLOCK_SIZE
 
     @property
     def acceptance_rate(self) -> float:
@@ -478,7 +500,10 @@ class Engine:
                f"couches_exilées={r['couches_exilees']}/{r['couches_total']} "
                f"experts_exilés={r['experts_exiles']}/{r['experts_total']} "
                f"piles_ok={r['piles_ok']} cartes={r['cartes']} "
-               f"chemin_moe={r['chemin_moe']}")
+               f"chemin_moe={r['chemin_moe']} "
+               f"cache_prefixe={self.stats.hit_rate:.3f} "
+               f"({self.stats.cached_prompt_tokens} vram+hôte, "
+               f"{self.stats.host_kv_tokens} hôte)")
 
     # -- admission -------------------------------------------------------
     def _eos_ids(self) -> set[int]:
