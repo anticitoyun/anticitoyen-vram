@@ -196,3 +196,32 @@ Passerelle API locale essayée le 13/09 (`/mnt/AI_GENERATOR/OmniRoute`, port
 20128). Verdict de l'utilisateur : ne remplace pas duck.ai (modèles gratuits
 paramétriques sans recherche web, REGLES §1), 19 Go de RSS en mode dev, build de
 production cassée en amont → inutile, arrêté. Ne pas relancer.
+
+## kimi-k3-in-c — Kimi K3 (2,78 T) en C99, CPU seul, 8 Go (15/09)
+
+Source : https://github.com/FareedKhan-dev/kimi-k3-in-c (lecture, clone local
+`externes/kimi-k3-in-c`, ac1584a, Apache-2.0). Ce qui vaut pour acvram :
+* **Modèle hors mémoire par construction** : tronc dense épinglé à la profondeur
+  choisie + anneau de lecture séquentiel (préfetch parfait, une `pread` par
+  couche, « un balayage cyclique bat le LRU → préfixe épinglé ») ; 1,45 To
+  d'experts routés jamais résidents, multipliés depuis le MXFP4 empaqueté ;
+  sortie **bit-identique de 8 Go à 224 Go** — seule l'horloge change.
+* **Deux caches, un seul qui répond** (mesuré, 12 budgets sous cgroup) : le
+  cache LRU d'experts reste à 0 % de rétention jusqu'à ~36 Go puis plafonne à
+  30-44 % (routeur à équilibrage par quantiles : 16/896 experts, pas de sous-
+  ensemble chaud) ; le tronc épinglé rend hit ≈ épinglé/93. À budget FIXE, tout
+  donner au tronc bat tout donner aux experts : ×1,69 (28,4 → 16,8 s/jeton à
+  128 Go) — **l'allocation bat la capacité**. À rapprocher de notre exil ×9-23
+  et de « Où acvram peut gagner » : mesurer notre courbe hit(experts) avant de
+  promettre un cache d'experts (le profil AUTOPIN dit si un sous-ensemble chaud
+  existe chez Coder/GLM — chez K3 il n'existe pas).
+* **Instrument** : plancher de bruit publié (3 passes identiques : 33 %),
+  toute table transcrite d'un fichier de données, cgroup dur pour borner la
+  RAM (notre superviseur MemFree, en mieux), simulateur de cache hors ligne
+  sur une trace de 100 096 requêtes d'experts (`tools/sim_cache.py`) — à copier
+  pour notre `expert_usage.py` : rejouer une trace, pas relancer la carte.
+* Architecture : 93 couches, 69 KDA (attention linéaire, état porté) + 24 MLA
+  gated, la dernière toujours MLA ; KV MLA 2,37 Mo/position ; nibble bas =
+  élément pair (fixture qui casse si l'ordre s'inverse — notre leçon du 13/09).
+* Débits : 32,7 s/jeton à 8 Go → 19,2 à 224 Go (EPYC 7763, NVMe 3,2 Go/s) :
+  c'est un instrument d'exécution hors mémoire, pas un rival de débit.

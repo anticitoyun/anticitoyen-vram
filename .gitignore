@@ -27,3 +27,4 @@ acvram_*.deb
 # Export passif de beads : regenere par `bd export`, porte le courriel de l auteur
 # de chaque issue. Le test d identite le refuserait ; il n a rien a faire dans l histoire.
 .beads/issues.jsonl
+externes/
