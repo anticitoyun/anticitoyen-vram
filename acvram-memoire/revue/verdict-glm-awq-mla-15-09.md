@@ -52,12 +52,22 @@ n'affiche que ce qui reste sur `cuda:0`, jamais explicitement ce qui a
 été exilé) — un plan qui exile la moitié sans le nommer complique le
 diagnostic de sa propre marge.
 
-Reconversion en cours avec `--host-exec stream` pour une marge réelle,
-seulement si la carte est libre — la reconversion NVFP4/AWQ et la PPL
-associée ne dépendaient pas de ce contrôle et sont déjà rendues
-ci-dessus.
+Reconversion tentée avec `--host-exec stream` pour une marge réelle :
+**plan identique au bit près** (27,2 Gio de poids sur cuda:0, couches
+0-46) — le flag n'a eu AUCUN effet sur ce modèle. **Bogue tiering à
+remonter à poste1, pas corrigé ce soir** : `--host-exec` ne semble agir
+que sur des `layer_types` spécifiques (nemotron_h/mamba dans
+`acvram/memory/tiering.py`), pas sur le placement générique d'un MoE
+dense comme GLM — une seule ligne à vérifier dans `tiering.py`, pas
+creusé plus loin (hors périmètre de ce soir, chef confirme).
+
+Contournement retenu (chef) : `outils/glm-ppl-bf16-hf.py`, HF
+`transformers` direct avec `device_map="auto"` (accelerate, installé ce
+soir dans le venv vLLM — absent avant), même régime/encodage que
+`acvram eval`. Contourne le planificateur acvram entièrement plutôt que
+de le réparer.
 
 ## Suite
 
-PPL absolue vs bf16 (juge final ≤×1,01) : en attente de la reconversion
-bf16 avec marge explicite. Rendu séparément si elle a lieu ce soir.
+PPL absolue vs bf16 (juge final ≤×1,01) : lancée via
+`outils/glm-ppl-bf16-hf.py`. Rendu séparément.
