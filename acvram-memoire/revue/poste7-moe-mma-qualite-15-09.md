@@ -6,3 +6,10 @@
 4. **Si réfuté, pas de W4A16 sur MMA** : `kind::mxf4nvf4` ne prend que du FP4 ; la variante est **W4A8 par `kind::mxf8f6f4`** (A e4m3, B e2m1), qui exige des échelles ue8m0 bloc 32 sur les poids — nouveau format, reconversion du parc, > 3 j : pas avant le duel GLM. En attendant (5) resterait un mode « eco » optionnel à qualité annoncée (+0,92 % PPL, −19 % J).
 5. **Si conforme** : (5) par défaut le jour même ; le modèle servi devient W4A4 experts aux deux phases au lieu de l'hybride actuel (A4 prefill / A16 décodage) — la qualité annoncée est celle du 13/09, déjà acceptée. Les 5/12 séquences divergentes avant 64 jetons ne sont pas un critère ; l'accord greedy 32-128 jetons (duck-poste2 Q5) peut devenir une colonne d'étalon, pas un seuil.
 6. Témoin bt=8 : sans objet (bt ∈ {16,32,64,128} imposé). Le témoin de faute qui vaut : le test au bit doit casser si l'on retire le saut `tile_n = 0` (déjà exigé pour (ii)).
+
+## § 2 — Verdict (15/09, après le banc de poste2 a10b987 et le certifié de poste3 c6377d5)
+
+1. **Ouvrir (5) par défaut** (`ACVRAM_MOE_DECODE_MMA=1`) : chemin de décodage prouvé (t ≤ 32 sur 8191/8191 pas), B/A = 0,9995 ≤ 1,010 tenu ; l'absolu 9,206 est retiré (montage KV continu, biais identique sur A et B, prédit dans l'en-tête avant mesure — c'est recevable).
+2. **Ce que ce banc prouve, et pas plus** : sur 8 191 jetons la résolution est ~±1 %, il ne peut pas revoir le +0,919 % ; il exclut un défaut propre au décodage (qui aurait rendu plusieurs %). La qualité annoncée reste celle du prefill : **+0,919 % PPL** (343 896 jetons), le modèle servi devient W4A4 experts aux deux phases.
+3. **Chiffre officiel b=12** = bras B de poste3 c6377d5 (rondes ctx 2048, ≥ 20 s) : −13,2 % J, −6,4 % ms ; le −19 % / −13,6 % de poste4 (fenêtres 22 s) est un autre régime et ne se cite plus comme officiel. Toute mesure de décodage antérieure porte désormais « MMA=0 » dans son régime.
+4. Dans le même commit que le défaut : le banc `outils/ppl-decode-mma-coder30b.py` et le test au bit restent ; `MMA=0` reste le témoin, pas un mode servi.
