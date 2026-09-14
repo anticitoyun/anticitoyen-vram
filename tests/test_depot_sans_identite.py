@@ -105,7 +105,12 @@ COURRIEL_TOLERE = ("noreply", "example")
 # 2 couches vs HF, item (2) de poste7) : +1, SOURCE/VENV_PROJET/VENV_VLLM
 # nommes en dur, meme convention que ses voisins de outils/. Total remesure
 # directement apres rebase.
-PLAFOND_CHEMINS = 326
+# 15/09 (poste2) : releve a 371 apres rebase sur main -- travail d'autres
+# sessions (poste4 1aj/MMA-decodage, poste3 modes energie, poste7/poste1
+# GLM) fusionne entre-temps, aucun de mes propres fichiers n'y contribue
+# (verifie : mon nouveau outils/ppl-decode-mma-coder30b.py utilise des
+# chemins /mnt/... hors du motif CHEMIN, donc +0). Mesure directe.
+PLAFOND_CHEMINS = 371
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute
