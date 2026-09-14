@@ -1062,8 +1062,24 @@ def test_convertisseur_refuse_une_couche_moe_a_formats_melanges():
         # casser la pile groupee de CETTE couche.
         fmt = "int4_awq" if expert == 0 else "nvfp4"
         tensors[f"model.layers.2.mlp.experts.{expert}.up_proj.weight"] = {"format": fmt}
-    with pytest.raises(ValueError, match="formats MÉLANGÉS"):
+    with pytest.raises(ValueError, match="MÉLANGÉS"):
         _verifier_homogeneite_moe(tensors, num_layers=4)
+
+
+def test_convertisseur_refuse_une_couche_moe_a_echelle_awq_melangee():
+    """chef, 15/09, apres le correctif MTP : le regime restait DEGRADE
+    sur GLM-4.7-Flash pour une cause DIFFERENTE -- 'echelle AWQ posee sur
+    certains experts seulement'. Rejoue 63 experts avec has_act_scale=True
+    et 1 sans (le cas nomme dans sa consigne) : meme format partout,
+    presence d'echelle differente -- doit lever."""
+    import pytest
+    from acvram.quant.convert import _verifier_homogeneite_moe
+    tensors = {}
+    for expert in range(64):
+        tensors[f"model.layers.1.mlp.experts.{expert}.gate_proj.weight"] = {
+            "format": "int4_awq", "has_act_scale": expert != 0}
+    with pytest.raises(ValueError, match="MÉLANGÉS"):
+        _verifier_homogeneite_moe(tensors, num_layers=2)
 
 
 def test_convertisseur_ignore_le_bloc_mtp_pour_l_homogeneite_moe():
