@@ -67,6 +67,60 @@ bf16 sur la frontière top-4, ou biais mal aligné sur un sous-ensemble
 d'experts) ; si identiques, regarder les poids/expert partagé, puis
 l'attention (v_head_dim 256, jamais posé chez nous avant ce modèle).
 
-Pas encore mesuré. Ce document sera complété avant de conclure — pas de
-verdict final tant que la cause des 3 positions restantes n'est pas
-nommée.
+## Suite mesurée : 3 causes empilées, pas encore de verdict final
+
+1. Routeur en bf16 (revue/prediction-routeur-fp32-14-09.md) : RÉFUTÉ, effet
+   négligeable seul.
+2. Couche 0 isolée (MLA seule, revue/prediction-couche0-isolee-14-09.md) :
+   bruit bf16 diffus ~1e-3 partout, pas concentré sur 0/1/3/5 — MLA saine.
+3. Contrôle décisif fp32/fp32 des deux côtés
+   (revue/prediction-fp32-decisif-14-09.md) : positions 0 et 5 corrigées
+   (bruit bf16), 1 et 3 restent fausses même en fp32 pur — bogue réel,
+   indépendant de la précision de calcul.
+4. Cause trouvée (revue/prediction-biais-fp32-14-09.md) :
+   `e_score_correction_bias` converti en bf16 (pas de la liste
+   `SENSITIVE_SUFFIXES`) alors que ses 64 valeurs codent une correction fine
+   (~0,01-0,03) sur un décalage commun (~9) — le pas bf16 à cette magnitude
+   (~0,03) efface exactement l'information qui décide le rang 4/5. Correctif
+   posé : fp32 inconditionnel pour ce tenseur (convert.py).
+
+**PAS ENCORE CONCLUANT** : la reconversion avec le correctif
+(`mini-acvram3`) donne un résultat DÉGRADÉ sur toute la séquence (pire
+delta 6,64, pire cosinus 0,978, 16/16 positions sous les seuils de poste2),
+alors que les tenseurs non concernés (embeddings, layernorms, poids du
+routeur) sont vérifiés BYTE-IDENTIQUES entre `mini-acvram2` et
+`mini-acvram3`. Cause de cette dégradation pas encore diagnostiquée —
+suspects : script de capture, ou une interaction du correctif avec la
+quantification int4_awq des experts (SNR ~20 dB, non exclue). Investigation
+interrompue par une tâche de priorité supérieure (carte.sh/guet.sh, ordre de
+chef relayant poste7) ; reprise prévue juste après.
+
+**Régression EXPLIQUÉE** (juste avant la PAUSE, pas encore corrigée) :
+`mini-acvram3` a été reconverti avec les flags EXACTS de poste2
+(`--quant-device cpu --host-exec cpu`), que `mini-acvram2` n'avait pas.
+Comparaison directe des manifestes : les poids d'experts sont `bf16` dans
+`mini-acvram2` (`formats_nominaux.obtenu=bf16`, rien quantifié — le modèle
+tient dans le budget GPU par défaut) mais `int4_awq` dans `mini-acvram3`
+(SNR ~19,9 dB, `--no-awq` ne désactive que la calibration AWQ, pas le
+format cible choisi par le planificateur pour un hébergement CPU). Cette
+quantification à ~20 dB de bruit, ABSENTE côté HF (bf16 plein), suffit
+largement à expliquer un delta de logits 4-6 partout — **le script de
+poste2 compare peut-être depuis toujours un acvram quantifié à un HF non
+quantifié**, un biais indépendant de tout bogue de routage.
+
+## REPRISE (après le correctif carte.sh/guet.sh et le redémarrage de session)
+
+1. Reconvertir avec le correctif biais fp32 SANS `--quant-device
+   cpu`/`--host-exec cpu` (laisser le plan GPU par défaut comme
+   `mini-acvram2`, `CUDA_VISIBLE_DEVICES=""` pour ne pas toucher la carte
+   réelle) — vérifier `formats_nominaux.obtenu=bf16` pour les experts avant
+   de mesurer quoi que ce soit.
+2. Rejouer l'équivalence 16 jetons (bf16/bf16, seuils de poste2) sur ce
+   nouveau checkpoint : prédiction (non scellée formellement, mais
+   attendue) — 16/16 positions passent, pire cosinus ≥ 0,999.
+3. Si confirmé : signaler à poste2/chef que son script de comparaison
+   quantifie l'expert MoE côté acvram alors que HF ne l'est jamais — un
+   biais de méthode séparé du bogue de biais de routage, à corriger dans
+   SON script (pas le mien) pour toute équivalence future.
+4. Points encore ouverts de la consigne de chef : (4) "formats mélangés
+   entre experts" / `piles_ok=False` — pas encore investigué du tout.

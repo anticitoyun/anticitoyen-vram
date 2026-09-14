@@ -251,6 +251,19 @@ class TensorRouter:
 
     def format_for(self, name: str) -> str:
         """Le format d'un tenseur est celui de l'appareil où sa couche s'exécute."""
+        if name.endswith("e_score_correction_bias"):
+            # fp32 INCONDITIONNEL, pas seulement "16 bits protégés" : ce biais
+            # porte une grande valeur commune (~9 pour GLM-4.7-Flash) et une
+            # correction fine par expert de l'ordre de 0,01-0,03 qui TRANCHE
+            # le top-k entre experts quasi ex-aequo. Le pas bf16 a cette
+            # magnitude (~0,03) est du meme ordre que la correction elle-meme :
+            # arrondi en bf16, deux experts voisins peuvent echanger leur rang.
+            # Mesure : equivalence CPU GLM-4.7-Flash, positions 1 et 3 sur 16
+            # jetons synthetiques divergent encore meme apres avoir force TOUT
+            # le reste (routeur, hidden states) en fp32 des deux cotes — seul
+            # ce biais, quantifie en bf16 a la conversion, expliquait le reste
+            # (revue/verdict-equivalence-glm-14-09.md).
+            return "fp32"
         if self.opts.keep_sensitive_16bit and name.endswith(SENSITIVE_SUFFIXES):
             # LE FORMAT 16 BITS DEMANDE, PAS bf16 EN DUR. Cette regle protege
             # les tenseurs sensibles de la quantification : pour un modele en
@@ -938,8 +951,11 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         if progress and report.tensors % 25 == 0:
             progress(name, report.tensors, 0)
 
-        if fmt in ("bf16", "fp16") or tensor.dim() != 2:
-            out = tensor.to(torch.bfloat16 if fmt == "bf16" else torch.float16)
+        if fmt == "fp32" or fmt in ("bf16", "fp16") or tensor.dim() != 2:
+            if fmt == "fp32":
+                out = tensor.to(torch.float32)
+            else:
+                out = tensor.to(torch.bfloat16 if fmt == "bf16" else torch.float16)
             if not opts.dry_run:
                 writer.add(f"{name}", out)
             entry["keys"] = [name]
