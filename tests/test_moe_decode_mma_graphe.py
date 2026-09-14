@@ -90,3 +90,19 @@ def test_capturable_en_graphe_et_rejeu_identique():
     g.replay(); torch.cuda.synchronize()
     y_e = bloc._forward_grouped_mma(x2, w2, t2)
     assert torch.equal(y_g, y_e), f"rejeu != eager : {int((y_g != y_e).sum())} valeurs"
+
+
+@CUDA
+def test_grille_fixe_large_t0_hors_tampon():
+    """Grille rembourrée bien plus large que le lot (t_max = 96 tuiles pour 48
+    lignes) : les tuiles vides ont t0 au-delà de xq — le noyau ne doit rien y
+    lire (accès illégal du 14/09 sur Coder-30B, E=128)."""
+    dev = torch.device("cuda:0")
+    bloc = _bloc(dev)
+    x, topw, topi = _entree(dev)
+    from acvram.engine import model as M
+    ancien = M._MOE_DECODE_MMA_BT
+    y_exact = bloc._forward_prefill_grouped(x, topw, topi)
+    y = bloc._forward_grouped_mma(x, topw, topi)
+    torch.cuda.synchronize()
+    assert torch.equal(y, y_exact)
