@@ -495,6 +495,16 @@ def nvfp4_dequant(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16,
 # 40 à plus de 64, et un seuil sous le plus petit croisement ne peut pas perdre
 # sur une forme non balayée. La variable reste comme échappement.
 _NVFP4_GEMV_MAX = int(os.environ.get("ACVRAM_NVFP4_GEMV_MAX", "32"))
+# GEMM étroit sur tensor cores (1aj marche 2, 15/09) pour les linéaires int8 et
+# NVFP4 à M petit ; ACVRAM_NARROW_GEMM=1 pour l'ouvrir, ACVRAM_NARROW_MIN_M = lot
+# minimal (à M=1 le GEMV lit x une fois et reste bon).
+_NARROW_GEMM = os.environ.get("ACVRAM_NARROW_GEMM", "0") == "1"
+_NARROW_MIN = int(os.environ.get("ACVRAM_NARROW_MIN_M", "2"))
+
+
+def _narrow_rows(n_sortie: int) -> int:
+    """32 lignes par CTA sous 16 384 sorties (160-512 CTA), 128 au-delà (lm_head)."""
+    return 32 if n_sortie <= 16384 else 128
 
 
 def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
@@ -525,6 +535,15 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
         if t.padded_in != xf.shape[-1]:
             xf = torch.nn.functional.pad(xf, (0, t.padded_in - xf.shape[-1]))
         gsr = getattr(t, "global_scale_rows", None)
+        if (_NARROW_GEMM and gsr is None and _NARROW_MIN <= n <= 16 and t.padded_in % 64 == 0
+                and xf.dtype == torch.bfloat16 and hasattr(ext, "narrow_gemm")):
+            # 1aj marche 2 : GEMM étroit tensor cores, poids lus une fois par
+            # CTA en étages (le GEMV relisait W par tranche de 8 et ne
+            # recouvrait aucune latence : 767 Go/s à b=12).
+            y = ext.narrow_gemm(t.qweight.contiguous(), t.block_scale.view(torch.uint8).contiguous(),
+                                None, None, xf.contiguous(), t.padded_in, 16, t.global_scale_float(),
+                                _narrow_rows(t.shape[0]))
+            return y.to(x.dtype).reshape(*orig_shape[:-1], t.shape[0])
         y = ext.nvfp4_gemv(
             t.qweight.contiguous(),
             t.block_scale.view(torch.uint8).contiguous(),
@@ -653,6 +672,11 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
     if ext is not None and t.qweight.is_cuda and n <= gemv_threshold:
         if k_pad != xf.shape[-1]:
             xf = torch.nn.functional.pad(xf, (0, k_pad - xf.shape[-1]))
+        if (_NARROW_GEMM and _NARROW_MIN <= n <= 16 and k_pad % 64 == 0 and t.group_size % 64 == 0
+                and xf.dtype == torch.bfloat16 and hasattr(ext, "narrow_gemm")):
+            y = ext.narrow_gemm(t.qweight.contiguous(), None, t.scales.contiguous(), t.zeros.contiguous(),
+                                xf.contiguous(), k_pad, t.group_size, 1.0, _narrow_rows(t.qweight.shape[0]))
+            return y.to(x.dtype).reshape(*orig_shape[:-1], t.qweight.shape[0])
         y = ext.int8_gemv(
             t.qweight.contiguous(), t.scales.contiguous(), t.zeros.contiguous(),
             xf.contiguous(), t.group_size)
