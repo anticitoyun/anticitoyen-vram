@@ -34,7 +34,9 @@ import torch
 
 from ..engine.config import ModelSpec
 from ..engine.layers import QuantLinear, RMSNorm, RotaryEmbedding
-from ..engine.model import Attention, DecoderLayer, ForwardBatch, MLP, MoEBlock
+from ..engine.mla import MLAttention
+from ..engine.model import (Attention, DecoderLayer, DecoderLayerGDN,
+                           ForwardBatch, MLP, MoEBlock)
 from ..quant.formats import PlainTensor
 from .calibrate import ActStats
 
@@ -104,18 +106,29 @@ class _StatCollector:
             if not isinstance(sub, QuantLinear):
                 continue
             key = f"{prefix}{name}.weight" if name else f"{prefix}weight"
+            self.attach_named(sub, key)
 
-            def hook(_mod, args, key=key):
-                if not args:
-                    return
-                x = args[0]
-                if not isinstance(x, torch.Tensor) or x.dim() < 2:
-                    return
-                new = ActStats.from_inputs(x.detach().to(torch.float32).cpu())
-                prev = self.stats.get(key)
-                self.stats[key] = prev.merge(new) if prev else new
+    def attach_named(self, sub: torch.nn.Module, key: str) -> None:
+        """Un crochet sur UN module, sous une clé choisie plutôt que dérivée
+        de son attribut Python — nécessaire quand le nom d'attribut interne
+        (`kv_a_proj`, `linear_attn`) diffère du nom du tenseur source
+        (`kv_a_proj_with_mqa`, `self_attn`) : aliaser l'attribut ne suffit
+        pas, `named_modules()` déduplique par identité et ne revisite jamais
+        un même sous-module sous un second nom."""
+        if not isinstance(sub, QuantLinear):
+            return
 
-            self._handles.append(sub.register_forward_pre_hook(hook))
+        def hook(_mod, args, key=key):
+            if not args:
+                return
+            x = args[0]
+            if not isinstance(x, torch.Tensor) or x.dim() < 2:
+                return
+            new = ActStats.from_inputs(x.detach().to(torch.float32).cpu())
+            prev = self.stats.get(key)
+            self.stats[key] = prev.merge(new) if prev else new
+
+        self._handles.append(sub.register_forward_pre_hook(hook))
 
     def detach(self) -> None:
         for h in self._handles:
@@ -156,6 +169,9 @@ def collect_activation_stats(
     collector = _StatCollector()
     rope = RotaryEmbedding(spec.head_dim, spec.max_position_embeddings,
                            spec.rope_theta, spec.rope_scaling)
+    rope_mla = (RotaryEmbedding(spec.qk_rope_head_dim, spec.max_position_embeddings,
+                                spec.rope_theta, spec.rope_scaling)
+               if spec.est_mla and spec.mla_rope else None)
     embed = get("model.embed_tokens.weight").to(dtype).to(dev)
 
     # Un tenseur d'état caché par séquence de calibration, transporté d'un bloc à l'autre.
@@ -165,8 +181,34 @@ def collect_activation_stats(
     with torch.inference_mode():
         for i in range(spec.num_layers):
             p = f"model.layers.{i}."
-            layer = _build_bf16_layer(spec, p, get, dev, dtype, rope, i)
-            collector.attach(layer, p)
+            try:
+                layer = _build_bf16_layer(spec, p, get, dev, dtype, rope, i, rope_mla)
+            except KeyError as exc:
+                # Une couche a une structure inattendue (nom de tenseur absent) :
+                # ELLE seule perd ses statistiques, pas tout le modele. cli.py
+                # ne desactivait AWQ qu'en cas d'exception non rattrapee ici —
+                # le 15/09, un q_proj absent (MLA a q_lora, GLM-4.7-Flash)
+                # eteignait AWQ pour les 223 tenseurs du modele entier pour UN
+                # nom manquant sur UNE couche.
+                print(f"  [avertissement] calibration couche {i} indisponible "
+                     f"({exc}) ; ses tenseurs se replient sur l'arrondi au "
+                     f"plus proche, les autres couches restent calibrees")
+                if progress:
+                    progress(i + 1, spec.num_layers)
+                continue
+            if spec.est_mla:
+                # `linear_attn` (nom générique de DecoderLayerGDN) et
+                # `kv_a_proj` (attribut de MLAttention) ne portent pas les
+                # noms du manifeste ("self_attn", "kv_a_proj_with_mqa") —
+                # attacher les sous-arbres séparément, sous le bon préfixe,
+                # plutôt que de dépendre du chemin d'attribut par défaut.
+                collector.attach(layer.linear_attn, p + "self_attn.")
+                collector.attach_named(
+                    layer.linear_attn.kv_a_proj,
+                    p + "self_attn.kv_a_proj_with_mqa.weight")
+                collector.attach(layer.mlp, p + "mlp.")
+            else:
+                collector.attach(layer, p)
             for j, h in enumerate(hiddens):
                 n = h.shape[0]
                 batch = ForwardBatch(
@@ -188,15 +230,58 @@ def collect_activation_stats(
     return collector.stats
 
 
+def _has(get, key: str) -> bool:
+    try:
+        get(key)
+        return True
+    except KeyError:
+        return False
+
+
 def _build_bf16_layer(spec: ModelSpec, prefix: str, get, dev, dtype, rope,
-                      index: int) -> DecoderLayer:
-    attn = Attention(
-        spec,
-        _plain(get(prefix + "self_attn.q_proj.weight"), dev, dtype),
-        _plain(get(prefix + "self_attn.k_proj.weight"), dev, dtype),
-        _plain(get(prefix + "self_attn.v_proj.weight"), dev, dtype),
-        _plain(get(prefix + "self_attn.o_proj.weight"), dev, dtype),
-        rope)
+                      index: int, rope_mla=None):
+    pa = prefix + "self_attn."
+    if spec.est_mla:
+        # Meme critere que loader.py (bead anticitoyen-vram-992) : la
+        # structure (q_lora ou non) decide, jamais une liste de noms. GLM-
+        # 4.7-Flash a q_a_proj/q_b_proj (pas de q_proj plat) — le manquer
+        # levait un KeyError qui remontait jusqu'a desactiver AWQ pour tout
+        # le modele (cli.py:469, 15/09).
+        q_lora = _has(get, pa + "q_a_proj.weight")
+        attn = MLAttention(
+            q_proj=None if q_lora else _plain(get(pa + "q_proj.weight"), dev, dtype),
+            q_a_proj=_plain(get(pa + "q_a_proj.weight"), dev, dtype) if q_lora else None,
+            q_a_norm=(get(pa + "q_a_layernorm.weight").to(dtype).to(dev)
+                     if q_lora else None),
+            q_b_proj=_plain(get(pa + "q_b_proj.weight"), dev, dtype) if q_lora else None,
+            rope=rope_mla,
+            kv_a_proj=_plain(get(pa + "kv_a_proj_with_mqa.weight"), dev, dtype),
+            o_proj=_plain(get(pa + "o_proj.weight"), dev, dtype),
+            kv_a_norm=get(pa + "kv_a_layernorm.weight").to(dtype).to(dev),
+            # k_b/v_b : jamais quantifies par AWQ (SENSITIVE_SUFFIXES,
+            # convert.py:219), donc jamais lus ici — ce sont des tenseurs
+            # d'ABSORPTION deja scindes a la conversion, pas des lineaires
+            # a calibrer. Une paire de zeros de la bonne forme suffit : le
+            # collecteur ne les hooke pas (ce ne sont pas des QuantLinear),
+            # ils ne participent qu'au calcul de l'attention en aval, dont
+            # les statistiques ne sont pas ce que cette passe releve.
+            k_b=torch.zeros(spec.num_attention_heads, spec.kv_lora_rank,
+                            spec.qk_nope_head_dim, dtype=dtype, device=dev),
+            v_b=torch.zeros(spec.num_attention_heads, spec.v_head_dim,
+                            spec.kv_lora_rank, dtype=dtype, device=dev),
+            num_heads=spec.num_attention_heads,
+            qk_nope=spec.qk_nope_head_dim, qk_rope=spec.qk_rope_head_dim,
+            kv_lora_rank=spec.kv_lora_rank, v_dim=spec.v_head_dim,
+            eps=spec.rms_norm_eps).to(dev)
+        attn.fuse_projections()
+    else:
+        attn = Attention(
+            spec,
+            _plain(get(pa + "q_proj.weight"), dev, dtype),
+            _plain(get(pa + "k_proj.weight"), dev, dtype),
+            _plain(get(pa + "v_proj.weight"), dev, dtype),
+            _plain(get(pa + "o_proj.weight"), dev, dtype),
+            rope)
 
     try:
         router = _plain(get(prefix + "mlp.gate.weight"), dev, torch.float32)
@@ -210,8 +295,28 @@ def _build_bf16_layer(spec: ModelSpec, prefix: str, get, dev, dtype, rope,
                 e += 1
             except KeyError:
                 break
-        mlp: torch.nn.Module = MoEBlock(router, experts,
-                                        spec.num_experts_per_tok or 2)
+        # Meme structure que loader.py:441-456 : expert partage, biais de
+        # correction et fonction de score sont optionnels PAR MODELE, jamais
+        # devines. Sans eux, la calibration de GLM-4.7-Flash routait en
+        # softmax sans biais (le defaut de MoEBlock) alors que le modele
+        # route en sigmoid+biais — des experts differents de la production,
+        # donc des statistiques d'activation pour les mauvais tenseurs.
+        shared, shared_gate = None, None
+        if _has(get, prefix + "mlp.shared_expert.gate_proj.weight"):
+            shared = MLP(
+                _plain(get(prefix + "mlp.shared_expert.gate_proj.weight"), dev, dtype),
+                _plain(get(prefix + "mlp.shared_expert.up_proj.weight"), dev, dtype),
+                _plain(get(prefix + "mlp.shared_expert.down_proj.weight"), dev, dtype))
+            if _has(get, prefix + "mlp.shared_expert_gate.weight"):
+                shared_gate = get(prefix + "mlp.shared_expert_gate.weight").to(dtype).to(dev)
+        score_bias = (get(prefix + "mlp.gate.e_score_correction_bias").float().to(dev)
+                     if _has(get, prefix + "mlp.gate.e_score_correction_bias") else None)
+        mlp: torch.nn.Module = MoEBlock(
+            router, experts, spec.num_experts_per_tok or 2, shared,
+            shared_gate=shared_gate,
+            norm_topk_prob=bool(spec.raw.get("norm_topk_prob", True)),
+            scoring=spec.router_scoring, score_bias=score_bias,
+            routed_scale=spec.routed_scaling_factor)
     except KeyError:
         mlp = MLP(_plain(get(prefix + "mlp.gate_proj.weight"), dev, dtype),
                   _plain(get(prefix + "mlp.up_proj.weight"), dev, dtype),
@@ -222,6 +327,12 @@ def _build_bf16_layer(spec: ModelSpec, prefix: str, get, dev, dtype, rope,
     post_norm = RMSNorm(
         get(prefix + "post_attention_layernorm.weight").to(dtype).to(dev),
         spec.rms_norm_eps)
+    if spec.est_mla:
+        # MLAttention.forward rend (y, cache_latent) sur UNE sequence et non
+        # (x, batch, cache) -> seule DecoderLayerGDN sait l'appeler (meme
+        # chemin que loader.py:777, ou "linear_attn" designe aussi bien une
+        # recurrence lineaire qu'une MLA — le nom est historique).
+        return DecoderLayerGDN(index, attn, mlp, in_norm, post_norm, dev)
     return DecoderLayer(index, attn, mlp, in_norm, post_norm, dev)
 
 
