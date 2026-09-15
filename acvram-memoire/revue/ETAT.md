@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **CORRECTIF fp32 FUSIONNÉ (3ea31ae) : `_tete(x)` partagée par forward et decode_fixed, fp32 des deux côtés, test à sec cassant (test_tete_fp32_chemin_fixe.py). poste3 : arbitre GLM SLOTS=12 (≥80/84) et Coder b=4 (≥26/28), puis pas b=12 (scellé ≤ +0,3 ms vs 17,10).** Objectif : duel à refaire après l'arbitre ; ensuite (2) table à 5 moteurs.
+Mis à jour : 16/09 (initial, poste7). **ARBITRE TENU partout (8c2a05a) : GLM 12 créneaux graphes 80/84, GRAPHS_EAGER 80/84, eager 81/84 ; Coder b=4 27/28 ; mla1-3 = main. Pas b=12 JUSTE : 21,27-21,32 ms, 514 t/s, 0,774 J, 398 W (17,10 était invalide ; +2,3 ms = MoE W4A16 régime duel, +0,7 ms = tête fp32). DUEL b=12 : 514 contre vLLM 796 t/s → ×1,55 (était ×4,08). Prise B en cours (arbitres b=1/4, ~15 min).** Objectif : duel republié après prise B ; ensuite (2) table à 5 moteurs.
 
 ## Chantiers ouverts et scellés
 
