@@ -1141,6 +1141,14 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         # a chaque jeton (`layers.py:479-481`, mesure +2,06 ms/pas,
         # `verdict-glm-2ms-manifestes-16-09.md`) -- retiree des tenseurs
         # int8, gardee sur nvfp4 ou elle compense une vraie perte.
+        #
+        # poste7 (`poste7-glm-mma0-verdict-16-09.md` § 2/4) : sous la pile
+        # groupee W4A4, l'activation est elle-meme quantifiee en NVFP4 apres
+        # division par l'echelle (`nvfp4_quant_act`, model.py:1022) -- la
+        # metrique de recherche doit voir ce meme chemin pour les experts,
+        # sinon elle choisit un alpha qui elargit l'etendue intra-bloc de
+        # l'activation sans le savoir (`quantize_activation_nvfp4`,
+        # calibrate.py).
         qt, scaler, metrics = _quantize_on(
             qdev, tensor, fmt, st,
             group_size=opts.group_size,
@@ -1150,6 +1158,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             table=opts.q3n_table if fmt == "q3n" else None,
             mesurer_kld=opts.mesurer_kld,
             forced_scale=alpha_commun.get(name),
+            quantize_activation_nvfp4=est_expert and fmt == "nvfp4",
         )
         if est_expert and scaler.scale is None:
             scaler = ChannelScaler(

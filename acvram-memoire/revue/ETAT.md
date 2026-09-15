@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **DUEL PRISE B (52c019c) : nous/vLLM = 0,70 (b=1) / 0,79 (b=4) / 0,65 (b=12) — scellé 0,8-0,9 RÉFUTÉ DE PEU (b=12 sous le plancher 0,7). Restes identifiés : MoE W4A16 7,2 ms (−2,3 si MMA, +1,4 % PPL) ; projections int8 4,4 ms (fusion à faire) ; tête fp32 0,85 ms (réductible à 0,2). J b=12 0,774 vs 0,445 (×1,74) ; prefill ×6.** Objectif : poste7 tranche republication vs correctifs supplémentaires ; ensuite (2) table à 5 moteurs.
+Mis à jour : 16/09 (initial, poste7). **Narrow MLA + tête (96e5af7) : arbitre 82/84 tenu ; pas 21,06-21,15 ms, −0,23 ms (−1,1 %) — scellé ≤ 19,0 RÉFUTÉ. Attribution : narrow_gemm réduit les lancements (387×7 µs), pas les octets ; le plafond réel est le MoE W4A16 (7,1 ms, −2,3 en MMA contre +1,4 % PPL). Duel inchangé à 1 % (×1,53). Tête : écart 0,14 ms, témoin ambigu à confirmer par poste4.** Attente : PPL cb2784b poste2 (prefill+décodage ≤ 1,010) — décide si MoE MMA passe aux deux sites. Ensuite (2) table à 5 moteurs.
 
 ## Chantiers ouverts et scellés
 
