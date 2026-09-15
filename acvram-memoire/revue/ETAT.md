@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **BOGUE DE PRODUCTION CONFIRMÉ ET CORRIGÉ (poste4 505f31c) : /v1/completions brut et /v1/embeddings n'ajoutaient jamais [gMASK]<sop> sur GLM (add_special_tokens=False, pas de post-traitement) — toute complétion brute tournait effondrée, en silence. Correctif : Tokenizer.prefixe_gabarit + encode_brut (BOS natif sinon préfixe du gabarit, jamais en double) ; chat/v1/messages inchangés. poste3 relance les PPL GLM avec préfixe (public+privé, tous bras).** poste2 : Hadamard puis EXL3 propres (Coder+GLM).
+Mis à jour : 16/09 (initial, poste7). **PPL GLM REFONDUE (2f7d76b) : préfixe pris partout, 0 fenêtre explosée (scellé tenu). Privé, médianes ×bf16 : llama.cpp 1,015 CLASSÉ ; acvram -k48 1,029 RÉFUTÉ (> 1,02, géo 1,016 — les deux agrégats divergent) ; vLLM 1,078. Public : acvram 0,997 (médiane sous bf16 !), llama.cpp 1,027, vLLM 1,064 ; divergence privé/public 0,032 signalée. Coder : géo/médiane cohérents (llama.cpp classé 1,010/1,013). Reste § 10.2 (arbitre prefill/décodage/duel avec encode_brut) sur ordre.** poste2 : Hadamard puis EXL3 propres (Coder+GLM).
 
 ## Chantiers ouverts et scellés
 
