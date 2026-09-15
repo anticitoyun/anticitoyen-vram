@@ -47,10 +47,15 @@ MAX_MODEL_LEN = CHUNK + 64
 
 
 def main() -> int:
+    import json as jsonmod
     import torch
-    from acvram.engine.loader import load_model
+    from acvram.engine.config import ModelSpec
+    from acvram.engine.loader import (load_model, _reajuster_plan,
+                                      _exil_demande, _exil_experts_demande)
     from acvram.engine.runner import Engine
     from acvram.engine.sampler import SamplingParams
+    from acvram.hardware.detect import detect_rig
+    from acvram.memory.tiering import PlannerOptions, auto_plan
     from acvram.server.chat import load_tokenizer
     from acvram.evaluate import _load_corpus
     from acvram.kernels import get_extension
@@ -79,7 +84,33 @@ def main() -> int:
     chunks = [ids_plats[k * CHUNK:(k + 1) * CHUNK] for k in range(N_SEQ)]
     print(f"  corpus : {N_SEQ} x {CHUNK} jetons, {os.path.basename(CORPUS)}", flush=True)
 
-    loaded = load_model(MODEL, dtype=torch.bfloat16, max_model_len=MAX_MODEL_LEN)
+    # `load_model(max_model_len=...)` replanifie avec `PlannerOptions.
+    # max_concurrent_seqs` par DEFAUT (8, tiering.py:152), utilise ligne 447
+    # (`kv_per_tok * max_model_len * max_concurrent_seqs`) pour dimensionner
+    # le budget KV -- a b=12 sur 2048 jetons cela reserve pour 8 sequences,
+    # pas 12 : trouve le 16/09 (5 des 12 sequences finies "length" bien avant
+    # 2047, `_grow` epuisant l'allocateur ; `_finish(seq, "length")`,
+    # loader.py:1013 -- symptome identique a une fin normale, silencieux).
+    # On construit donc le plan nous-memes avec `max_concurrent_seqs=N_SEQ`.
+    with open(os.path.join(MODEL, "acvram_manifest.json")) as fh:
+        manifest = jsonmod.load(fh)
+    spec = ModelSpec(**{k: v for k, v in manifest["model"].items()
+                        if k in ModelSpec.__dataclass_fields__})
+    rig = detect_rig()
+    plan, _ = auto_plan(spec, rig, PlannerOptions(
+        max_model_len=MAX_MODEL_LEN, max_concurrent_seqs=N_SEQ))
+    _reajuster_plan(plan, manifest, top_k=spec.num_experts_per_tok or 8)
+    _exil_demande(plan)
+    _exil_experts_demande(plan, manifest)
+
+    print(f"  plan : kv_max_tokens={plan.kv_max_tokens} pour "
+         f"max_concurrent_seqs={N_SEQ} x max_model_len={MAX_MODEL_LEN} "
+         f"(besoin {N_SEQ * CHUNK})", flush=True)
+    assert plan.kv_max_tokens >= N_SEQ * CHUNK, (
+        f"budget KV {plan.kv_max_tokens} < besoin {N_SEQ * CHUNK} -- "
+        f"le plan replanifie est encore sous-dimensionne")
+
+    loaded = load_model(MODEL, plan=plan, dtype=torch.bfloat16, max_model_len=MAX_MODEL_LEN)
     engine = Engine(loaded, tokenizer, max_batch_size=N_SEQ,
                     max_model_len=MAX_MODEL_LEN, enable_cuda_graphs=not eager)
     engine._eos = set()
@@ -133,7 +164,7 @@ def main() -> int:
     proof = {
         "acvram_moe_decode_mma": os.environ["ACVRAM_MOE_DECODE_MMA"],
         "acvram_narrow_gemm": os.environ["ACVRAM_NARROW_GEMM"],
-        "eager": eager,
+        "eager": eager, "kv_max_tokens": plan.kv_max_tokens,
         "ppl": ppl, "n_jetons_notes": n_total,
         "pas_t_le_32": f"{pas_petits}/{pas_total}", "n_pas": n_pas,
         "lancements_narrow_gemm": compte["narrow_gemm"],
