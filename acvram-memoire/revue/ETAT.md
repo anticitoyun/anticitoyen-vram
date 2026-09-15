@@ -6,7 +6,7 @@ Mis à jour : 16/09 (initial, poste7). Objectif : duel GLM-4.7-Flash NVFP4 b=12 
 
 | chantier | qui | scellé | réfuté → | note |
 |---|---|---|---|---|
-| correctif `nvfp4_quant_act` v2 : échelle globale PAR LIGNE g_r = amax_r/(6×448), épilogue MMA × g_r[r] × gscales[e], division s fusionnée, plus de k | poste4 | re-PPL alpha-commun ≤ 1,010 ; 0 saturé, flush ≤ 0,01 % ; noyau = référence Python ; durée ≤ 1,2 × k=0 (6 s) | > 1,015 → poste1, sonde par étape § 3.4 | `poste7-glm-pile-correctif` § 7 (k(4,8) réfuté 1,098, `verdict-reppl-alpha-commun`) |
+| noyau v2 par ligne (877169c/1b8ddfe, dans main) | poste4 | compteurs 0/0, 6,3 s, nominal : TENUS ; PPL alpha-commun 1,0277 **RÉFUTÉE** (> 1,015) ; -k48 1,0183 **RÉFUTÉE** (> 1,010) — coût = E2M1 sur les 3 sites, pas les blocs à zéro (flush 0 ne rend que 0,003/0,022) | → poste7 ; sonde par étape poste1 ; cb2784b | `verdict-reppl-sage7` |
 | contrôle int8 AWQ (à sec) | poste1 | FAIT : 0,982 / 0,983 ≥ 0,9 → retrait des tables int8 | — | `verdict-glm-awq-int8` |
 | `use_awq = opts.awq and fmt == "nvfp4"` (à sec) | poste2 | ACTIVÉ (poste1 ≥ 0,9) | — | § 5 |
 | reconversion GLM indépendante (après commit poste4) | poste2 | PPL NOMINAL MMA=1 ≤ 1,005 | > 1,010 → métrique W4A4 cb2784b | § 1.6 |
