@@ -186,3 +186,26 @@ def test_table_unite_sautee(monkeypatch):
     assert bloc._try_build_stacks()
     assert bloc._stacks_awq["gate_proj"] is not None
     assert torch.equal(bloc._stacks_awq["gate_proj"], torch.ones_like(bloc._stacks_awq["gate_proj"]))
+
+
+@CUDA
+@pytest.mark.parametrize("egales", [True, False], ids=["gate=up", "gate!=up"])
+def test_compte_de_lancements_avec_awq(egales):
+    """poste7 (poste7-glm-gateup-16-09) : lever gate ≠ up = une seconde
+    nvfp4_quant_act, rien d'autre. Égales : 8 lancements/couche comme sans AWQ
+    (la division vit dans route_pack et moe_act) ; distinctes : 9."""
+    from torch.profiler import profile, ProfilerActivity
+    from acvram.engine import model as M
+    dev = torch.device("cuda:0")
+    bloc = _bloc_awq(dev, gate_up_egales=egales)
+    assert bloc._try_build_stacks() and M._MOE_ROUTE_PACK
+    bloc._stack_state = "oui"
+    x, topw, topi = _entree(dev)
+    bloc._forward_grouped_mma(x, topw, topi); torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        bloc._forward_grouped_mma(x, topw, topi); torch.cuda.synchronize()
+    noyaux = [e for e in prof.key_averages() if e.self_device_time_total > 0
+              and not e.key.startswith("aten::") and "Memcpy" not in e.key and "Memset" not in e.key]
+    n = sum(e.count for e in noyaux)
+    courts = [f"{e.count}x {e.key.split('(')[0].split('<')[0][-40:]}" for e in noyaux]
+    assert n == (8 if egales else 9), f"{n} lancements par couche : {courts}"
