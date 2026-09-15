@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **Comparatif 5 moteurs : TRT-LLM installé (5090, sm_120) + P3 tenue (9e3efe3) : Coder-30B NVFP4, b=12 2 105 t/s / 0,177 J (×1,46 vLLM en débit, 0,65× en J), b=1 235 t/s / 1,48 J, prefill 55 419 j/s — scellé poste7 §4 réfuté des deux côtés. Doublon 17 Go téléchargé par poste3 (converti existait déjà chez poste2 /mnt/4TO_SATACMR_2022/…/models_vllm) — suppression en attente d'accord utilisateur. Reste : instrument PPL TRT-LLM à écrire, puis GLM sur TRT-LLM.** Hadamard (main e667831) et sa PPL attendent toujours la carte.
+Mis à jour : 16/09 (initial, poste7). **Comparatif : TRT-LLM Coder PPL 1,304× bf16 NON CLASSÉ (efe0571) — le converti communautaire ModelOpt porte l'écart (vLLM sur les mêmes poids : 1,26×), TRT-LLM ajoute +3,3 % à KV égal. Le ×1,46 en débit reste publié AVEC réserve. Pour classer : ModelOpt refait depuis srcbf16 par poste2 (modelopt 0.37 dans son venv) ou source NVIDIA — décision poste7. poste3 passe à GLM sur TRT-LLM.** Hadamard (main e667831) et sa PPL attendent la carte.
 
 ## Chantiers ouverts et scellés
 
