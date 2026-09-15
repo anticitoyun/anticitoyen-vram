@@ -169,7 +169,7 @@ def main() -> int:
         "acvram_moe_decode_mma": os.environ["ACVRAM_MOE_DECODE_MMA"],
         "acvram_narrow_gemm": os.environ["ACVRAM_NARROW_GEMM"],
         "eager": eager, "kv_max_tokens": plan.kv_max_tokens,
-        "decalage": decalage, "modele": MODEL, "ACVRAM_MLA_BATCH": os.environ.get("ACVRAM_MLA_BATCH"), "ACVRAM_MLA_UNE_PASSE": os.environ.get("ACVRAM_MLA_UNE_PASSE"),
+        "decalage": decalage, "modele": MODEL, "ACVRAM_MLA_BATCH": os.environ.get("ACVRAM_MLA_BATCH"), "ACVRAM_MLA_UNE_PASSE": os.environ.get("ACVRAM_MLA_UNE_PASSE"), "ACVRAM_MLA_PREP_NOYAU": os.environ.get("ACVRAM_MLA_PREP_NOYAU"),
         "acvram": os.path.dirname(os.path.dirname(os.path.abspath(sys.modules["acvram"].__file__))),
         "ppl": ppl, "n_jetons_notes": n_total,
         "pas_t_le_32": f"{pas_petits}/{pas_total}", "n_pas": n_pas,
