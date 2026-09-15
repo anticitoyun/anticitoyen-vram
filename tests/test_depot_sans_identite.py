@@ -127,7 +127,9 @@ COURRIEL_TOLERE = ("noreply", "example")
 # 15/09 nuit (chef) : 584 = 505 - 7 (helper _chemins d poste1) + 85 (revue/inventaire-
 # chemins-absolus-15-09.md de poste8 : un DOCUMENT qui liste les chemins, pas un outil ; a
 # exclure du cliquet demain avec le helper, cible 433 sous 1 j -- poste7 section 8) + 1.
-PLAFOND_CHEMINS = 584
+# 16/09 matin (chef) : 600 apres les carnets de pause (poste2.md +3, poste3, poste4) ;
+# README sans chemin. Cible 433 par le helper d poste1 (poste7 section 8).
+PLAFOND_CHEMINS = 600
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute
