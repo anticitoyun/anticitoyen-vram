@@ -20,6 +20,10 @@ import os
 import sys
 from pathlib import Path
 
+import sys as _s2, pathlib as _p2
+_s2.path.insert(0, str(_p2.Path(__file__).resolve().parent.parent))
+from outils._chemins import sorties
+
 from vllm import LLM, SamplingParams
 
 chemin_modele = sys.argv[1]
@@ -81,8 +85,7 @@ print(f"Total noyaux CUDA agrege : {total_ms:.2f} ms")
 for nom, ms in top:
     print(f"  {ms:8.2f} ms  {100*ms/total_ms if total_ms else 0:5.1f} %  {nom}")
 
-chemin = Path("~/Bureau/Claude/acvram-memoire"
-             "/corpus/profil-vllm-pp2048-trace.txt")
+chemin = sorties() / "profil-vllm-pp2048-trace.txt"
 chemin.parent.mkdir(parents=True, exist_ok=True)
 chemin.write_text(f"Trace : {trace_path}\nTotal noyaux CUDA agrege : {total_ms:.2f} ms\n" +
                   "\n".join(f"{ms:8.2f} ms  {100*ms/total_ms if total_ms else 0:5.1f} %  {nom}"

@@ -25,14 +25,14 @@ from pathlib import Path
 import sys as _s, pathlib as _p  # noqa: E401
 _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
 from outils.racine_modeles import MODELES  # noqa: E402
+from outils._chemins import sorties  # noqa: E402
 
 BASE = Path(MODELES)
 # (dossier, perplexite MESUREE, corpus wiki-gptq, etalon exterieur 5,4141)
 POINTS = [("Llama-2-7b-nvfp4", 5.6102), ("Llama-2-7b-quota-4g50", 5.5643),
           ("Llama-2-7b-quota-5g00", 5.5394), ("Llama-2-7b-quota-5g50", 5.5125),
           ("Llama-2-7b-quota-6g00", 5.4918), ("Llama-2-7b-int8", 5.4144)]
-ECHELLES = Path("~/Bureau/Claude/acvram-memoire/corpus/"
-                "normes-poids-source.json")
+ECHELLES = sorties() / "normes-poids-source.json"
 
 
 def pearson(x, y):

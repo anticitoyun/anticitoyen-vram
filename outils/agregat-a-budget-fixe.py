@@ -17,10 +17,10 @@ from pathlib import Path
 import sys as _s, pathlib as _p  # noqa: E401
 _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
 from outils.racine_modeles import MODELES  # noqa: E402
+from outils._chemins import sorties  # noqa: E402
 
 BASE = Path(MODELES)
-ECH = Path("~/Bureau/Claude/acvram-memoire/corpus/"
-           "normes-poids-source.json")
+ECH = sorties() / "normes-poids-source.json"
 # (dossier, PPL mesuree, budget 6,00 Gio, deux exemplaires pour base_croissant)
 POINTS = [("Llama-2-7b-ordre-inverse", 5.4482),        # B
           ("Llama-2-7b-ordre-normal", 5.4918),         # A (defaut)

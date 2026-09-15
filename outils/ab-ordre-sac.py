@@ -42,6 +42,7 @@ from pathlib import Path
 import sys as _s, pathlib as _p  # noqa: E401
 _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
 from outils.racine_modeles import MODELES  # noqa: E402
+from outils._chemins import sorties  # noqa: E402
 
 RACINE = Path(__file__).resolve().parent.parent
 CARTE = Path(__file__).resolve().parent / "carte.sh"
@@ -232,8 +233,7 @@ def main() -> int:
                     help="modes a produire, separes par des virgules "
                          "(snr, inverse, erreur, absolu, base_croissant). "
                          "Sans cet argument, les deux bras historiques.")
-    ap.add_argument("--sortie", default="~/Bureau/Claude/"
-                                        "acvram-memoire/corpus/ordre-sac")
+    ap.add_argument("--sortie", default=str(sorties() / "ordre-sac"))
     ap.add_argument("--max-promus", type=int, default=0,
                     help="plafond de COMPTE : promeut les N premiers de "
                          "l'ordre, budget ignore. Dossiers suffixes -nN.")

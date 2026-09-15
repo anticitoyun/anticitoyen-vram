@@ -5,8 +5,9 @@ from pathlib import Path
 import sys as _s, pathlib as _p  # noqa: E401
 _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
 from outils.racine_modeles import MODELES  # noqa: E402
+from outils._chemins import sorties  # noqa: E402
 M=f"{MODELES}/Llama-2-7b-fp16pur"
-C=Path("~/Bureau/Claude/acvram-memoire/corpus")
+C=sorties()
 rapide=AutoTokenizer.from_pretrained(M, use_fast=True)
 lent  =AutoTokenizer.from_pretrained(M, use_fast=False)
 for nom in ("wiki-gptq.txt","wiki.test.raw"):
