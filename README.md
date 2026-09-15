@@ -13,7 +13,7 @@ Conçue pour une machine précise :
 | Mémoire | 96 Go DDR5 |
 | GPU 0 | ASUS RTX 5090 Astral LC OC, 32 Go — Blackwell, `sm_120` |
 | GPU 1 | ASUS RTX 3080 Ti, 12 Go — Ampere, `sm_86` |
-| Système | Linux Mint 22.3 |
+| Système | Ubuntu 26.04 LTS (CUDA 13) ; les deux cartes en PCIe x8/x8, bridées 400 W / 275 W |
 
 ## Les deux idées
 
@@ -242,15 +242,43 @@ Deux constats issus de ces mesures ont changé les valeurs par défaut :
 * [`docs/FEUILLE-DE-ROUTE.md`](docs/FEUILLE-DE-ROUTE.md) — **ce qui n'est pas fait**, à lire en premier
 * [`CONVENTIONS.md`](CONVENTIONS.md) — conventions de travail sur le code (langue, style, contrôles avant de pousser)
 
+## Résultats mesurés (15/09/2026, RTX 5090 à 400 W, régime ≥ 20 s au compteur d'énergie)
+
+Qwen3-Coder-30B-A3B en NVFP4 (experts) + INT8 (attention, tête), même
+protocole pour tous les moteurs (`outils/`, une carte, `energie.py`) :
+
+| | acvram 0.6.5 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+|---|---|---|---|
+| décodage 12 séquences | **934 t/s · 0,426 J/jeton** | 1 198-1 437 t/s · 0,271 J | — |
+| décodage 1 séquence | 232,7 t/s · 1,46 J/jeton | 197 t/s · 1,43 J | 1,17-1,39 J |
+| prefill pp2048 | 19 148 jetons/s | 34 788 | 8 671 (TabbyAPI, retiré) |
+
+Le 14/09 au matin acvram était à 630 t/s et 0,619 J/jeton sur la même
+cellule : les gains viennent de la MMA FP4 native de Blackwell
+(`mma.sync … kind::mxf4nvf4`, ×7,9 sur le bf16), du MoE en GEMM groupée par
+godet de lot, d'un routage en un seul noyau (3 677 → 1 517 lancements par
+pas) et d'un GEMM étroit sur tensor cores pour les projections. Chaque chiffre a
+sa note dans `acvram-memoire/revue/` avec la prédiction scellée avant la
+mesure, l'instrument et son régime — un chiffre sans régime n'est pas publié.
+
+Où acvram est devant : modèles MLA (GLM-4.7-Flash) en NVFP4 natif sm_120, que
+vLLM ne sert qu'en FP8 ; et les modèles qui ne tiennent pas en VRAM. Où il ne
+l'est pas : le décodage à grand lot d'un MoE qui tient en VRAM, où vLLM garde
+×1,05 en débit et ×1,14 en énergie.
+
 ## État
 
-Version 0.2.0. Écrit avant que la machine cible ne soit disponible : tous les
-chemins de code sont exercés sur processeur, aucun n'a encore tourné sur une
-5090. Les noyaux processeur *sont* compilés et testés ; les noyaux CUDA n'ont
-jamais vu nvcc. Voir [`docs/FEUILLE-DE-ROUTE.md`](docs/FEUILLE-DE-ROUTE.md) pour
-ce que cela implique exactement.
+Version 0.6.5. Tout tourne sur la 5090 : noyaux CUDA compilés pour `sm_120a`
+(FP4 natif) et `sm_86`, graphes CUDA, quantification NVFP4/INT8/INT4, serveur
+HTTP. Garde-fous en place : la carte est invisible aux sessions de travail
+(`CUDA_VISIBLE_DEVICES` vide) et seul `outils/carte.sh` la prête, sous verrou,
+à une mesure à la fois ; un guetteur journalise tout accès hors verrou ; une
+mesure d'énergie couvrant plus d'une carte ou moins de 10 s est invalidée ;
+un modèle chargé en régime dégradé le dit et n'entre pas dans un duel.
 
-67 tests, sur processeur, déterministes, environ une minute : `pytest -q`.
+640 tests (`pytest -q`, une minute sur processeur ; les tests GPU ne tournent
+que sous `carte.sh`). Suivi du travail : `acvram-memoire/` (règles, annuaire,
+carnets, revue de 180 notes).
 
 ## Licence
 
