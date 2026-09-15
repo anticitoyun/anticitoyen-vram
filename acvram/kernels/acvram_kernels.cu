@@ -4284,6 +4284,246 @@ void mla_ecrit_latent(torch::Tensor k_new, torch::Tensor cache_ptrs, torch::Tens
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// ============================================================================
+// MLA à UNE PASSE (poste7-duel-verdict-16-09 § 3) : les deux noyaux ci-dessus
+// lisaient le cache latent [L, W] une fois PAR TÊTE dans mla_scores puis une
+// seconde fois par tête dans mla_reduce — 40 lectures du cache par pas et par
+// couche, ≈ 52 Go/pas à b=12 ctx 2 048 (les 32,8 ms mesurés). En forme
+// absorbée les H têtes partagent la même tête KV : un CTA par (séquence,
+// tranche de L) lit chaque tuile de TL lignes UNE fois en mémoire partagée,
+// calcule les scores des H têtes (fp32, même arithmétique que mla_scores :
+// Σ q·k en fp32 puis × scale), softmax en ligne par tête (m, l, rescalage de
+// l'accumulateur), accumule o_lat[H, R] sur la même tuile, et écrit (o, m, l)
+// partiels dans ws [B, S, H, R+2] ; mla_1p_combine recombine les S tranches
+// (flash-decoding). Tout en fp32 : pas de mma bf16 sur q (l'erreur 2^-8 sur
+// des scores de l'ordre de 10 aurait coûté le cos ≥ 0,9999 scellé) — le
+// calcul (≈ 25 GFMA/pas) reste sous la lecture (1,3 Go/pas).
+//
+// Mémoire partagée : q fp32 [H][W] + tuile bf16 [TL][W+8] + S, P [HMAX][TL] +
+// m, l, alpha [HMAX] — 83 Ko à H=20, W=576, TL=32 ; un CTA par SM.
+// Scores : chaque warp prend RW lignes à la fois, les lanes se partagent W
+// (paires bf16), q lu une fois pour RW lignes, réduction par __shfl_xor.
+// o_lat : un fil = deux colonnes de R, toutes les têtes en registres.
+// Lignes valides : r ≤ len (le jeton courant vient d'être écrit) — comme
+// mla_scores ; les tranches entièrement au-delà écrivent m = −inf, l = 0.
+// ============================================================================
+constexpr int MLA1P_FILS = 256;
+
+template <int HMAX, int TL, int RW>
+__global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
+    const float *__restrict__ q,              // [B, H, W] fp32
+    const int64_t *__restrict__ cache_ptrs,   // [B] (ou nullptr : cache0)
+    const __nv_bfloat16 *__restrict__ cache0, // [L, W] si B = 1 sans table
+    const long *__restrict__ lens,            // [B]
+    float *__restrict__ ws,                   // [B, S, H, R+2]
+    int H, int L, int W, int R, int S, int rows_par_cta, float scale) {
+    static_assert(HMAX <= 32, "HMAX <= 32 : une lane par tete pour l'ecriture des scores");
+    const int b = blockIdx.x, s = blockIdx.y, tid = threadIdx.x;
+    const int warp = tid >> 5, lane = tid & 31;
+    const int WP = W + 8;                                        // foulée bf16 d'une ligne de tuile
+    extern __shared__ __align__(16) unsigned char mla_smem[];
+    float *q_s = reinterpret_cast<float *>(mla_smem);                        // [H][W]
+    __nv_bfloat16 *tile = reinterpret_cast<__nv_bfloat16 *>(q_s + (size_t)H * W);   // [TL][WP]
+    float *S_s = reinterpret_cast<float *>(tile + (size_t)TL * WP);         // [HMAX][TL]
+    float *P_s = S_s + HMAX * TL;                                            // [HMAX][TL]
+    float *m_s = P_s + HMAX * TL, *l_s = m_s + HMAX, *a_s = l_s + HMAX;
+    const __nv_bfloat16 *cache = cache_ptrs
+        ? reinterpret_cast<const __nv_bfloat16 *>(cache_ptrs[b]) : cache0;
+    const int valide = min((int)lens[b] + 1, L);
+    const int r0 = s * rows_par_cta, r1 = min(r0 + rows_par_cta, valide);
+    float *out = ws + ((size_t)(b * S + s) * H) * (R + 2);
+    if (r0 >= r1) {                                              // tranche vide
+        for (int i = tid; i < H * (R + 2); i += MLA1P_FILS) {
+            const int h = i / (R + 2), c = i - h * (R + 2);
+            out[i] = c == R ? -INFINITY : 0.f;
+        }
+        return;
+    }
+    // q en mémoire partagée (float4)
+    {
+        const float4 *src = reinterpret_cast<const float4 *>(q + (size_t)b * H * W);
+        float4 *dst = reinterpret_cast<float4 *>(q_s);
+        for (int i = tid; i < H * W / 4; i += MLA1P_FILS) dst[i] = src[i];
+    }
+    if (tid < HMAX) { m_s[tid] = -INFINITY; l_s[tid] = 0.f; a_s[tid] = 1.f; }
+    float o[HMAX][2];
+    #pragma unroll
+    for (int h = 0; h < HMAX; ++h) { o[h][0] = 0.f; o[h][1] = 0.f; }
+    const int c0 = 2 * tid;                                      // colonnes de o_lat de ce fil
+    const int chunks_par_ligne = W / 8;                          // uint4 = 8 bf16
+
+    for (int t0 = r0; t0 < r1; t0 += TL) {
+        const int n = min(TL, r1 - t0);
+        __syncthreads();                                         // la tuile précédente est consommée
+        // --- tuile [n][W] : lecture vectorisée 16 o ---
+        for (int i = tid; i < n * chunks_par_ligne; i += MLA1P_FILS) {
+            const int r = i / chunks_par_ligne, c = i - r * chunks_par_ligne;
+            const uint4 v = *reinterpret_cast<const uint4 *>(cache + (size_t)(t0 + r) * W + c * 8);
+            *reinterpret_cast<uint4 *>(tile + (size_t)r * WP + c * 8) = v;
+        }
+        __syncthreads();
+        // --- scores : le warp w prend les lignes w*RW .. w*RW+RW-1 (+ 8*RW…) ---
+        for (int rb = warp * RW; rb < n; rb += 8 * RW) {
+            float part[HMAX][RW];
+            #pragma unroll
+            for (int h = 0; h < HMAX; ++h)
+                #pragma unroll
+                for (int i = 0; i < RW; ++i) part[h][i] = 0.f;
+            for (int j = lane; j < W / 2; j += 32) {
+                float2 k2[RW];
+                #pragma unroll
+                for (int i = 0; i < RW; ++i) {
+                    const int r = rb + i;
+                    k2[i] = r < n ? __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(
+                                        tile + (size_t)r * WP + 2 * j))
+                                  : make_float2(0.f, 0.f);
+                }
+                #pragma unroll
+                for (int h = 0; h < HMAX; ++h) {
+                    if (h < H) {
+                        const float2 q2 = *reinterpret_cast<const float2 *>(q_s + (size_t)h * W + 2 * j);
+                        #pragma unroll
+                        for (int i = 0; i < RW; ++i) part[h][i] += q2.x * k2[i].x + q2.y * k2[i].y;
+                    }
+                }
+            }
+            #pragma unroll
+            for (int h = 0; h < HMAX; ++h) {
+                #pragma unroll
+                for (int i = 0; i < RW; ++i) {
+                    float v = part[h][i];
+                    #pragma unroll
+                    for (int off = 16; off > 0; off >>= 1) v += __shfl_xor_sync(0xffffffffu, v, off);
+                    if (lane == h && h < H && rb + i < n) S_s[h * TL + rb + i] = v * scale;
+                }
+            }
+        }
+        __syncthreads();
+        // --- softmax en ligne, un fil par tête ---
+        if (tid < H) {
+            const float *Sh = S_s + tid * TL;
+            float mt = -INFINITY;
+            for (int r = 0; r < n; ++r) mt = fmaxf(mt, Sh[r]);
+            const float m_old = m_s[tid], m_new = fmaxf(m_old, mt);
+            const float a = m_old == -INFINITY ? 0.f : __expf(m_old - m_new);
+            float lt = 0.f;
+            float *Ph = P_s + tid * TL;
+            for (int r = 0; r < n; ++r) { const float p = __expf(Sh[r] - m_new); Ph[r] = p; lt += p; }
+            l_s[tid] = l_s[tid] * a + lt;
+            m_s[tid] = m_new;
+            a_s[tid] = a;
+        }
+        __syncthreads();
+        // --- o_lat : rescalage puis accumulation sur la tuile ---
+        if (c0 < R) {
+            #pragma unroll
+            for (int h = 0; h < HMAX; ++h) {
+                if (h < H) { const float a = a_s[h]; o[h][0] *= a; o[h][1] *= a; }
+            }
+            for (int r = 0; r < n; ++r) {
+                const float2 v2 = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(
+                    tile + (size_t)r * WP + c0));
+                #pragma unroll
+                for (int h = 0; h < HMAX; ++h) {
+                    if (h < H) {
+                        const float p = P_s[h * TL + r];
+                        o[h][0] += p * v2.x; o[h][1] += p * v2.y;
+                    }
+                }
+            }
+        }
+    }
+    __syncthreads();
+    if (c0 < R) {
+        #pragma unroll
+        for (int h = 0; h < HMAX; ++h)
+            if (h < H) { float *oh = out + (size_t)h * (R + 2) + c0; oh[0] = o[h][0]; oh[1] = o[h][1]; }
+    }
+    if (tid < H) { out[(size_t)tid * (R + 2) + R] = m_s[tid]; out[(size_t)tid * (R + 2) + R + 1] = l_s[tid]; }
+}
+
+// Recombinaison des S tranches : o = Σ_s o_s·e^{m_s−M} / Σ_s l_s·e^{m_s−M}.
+__global__ void mla_1p_combine_kernel(const float *__restrict__ ws,   // [B, S, H, R+2]
+                                      float *__restrict__ o,          // [B, H, R]
+                                      int H, int R, int S) {
+    const int b = blockIdx.x, h = blockIdx.y;
+    const float *base = ws + ((size_t)b * S * H + h) * (R + 2);
+    const size_t pas = (size_t)H * (R + 2);
+    float M = -INFINITY;
+    for (int s = 0; s < S; ++s) M = fmaxf(M, base[s * pas + R]);
+    float Lsum = 0.f;
+    for (int s = 0; s < S; ++s) {
+        const float m = base[s * pas + R];
+        if (m != -INFINITY) Lsum += base[s * pas + R + 1] * __expf(m - M);
+    }
+    const float inv = Lsum > 0.f ? 1.f / Lsum : 0.f;
+    for (int c = threadIdx.x; c < R; c += blockDim.x) {
+        float acc = 0.f;
+        for (int s = 0; s < S; ++s) {
+            const float m = base[s * pas + R];
+            if (m != -INFINITY) acc += base[s * pas + c] * __expf(m - M);
+        }
+        o[((size_t)b * H + h) * R + c] = acc * inv;
+    }
+}
+
+static int mla_1p_tranches(int L, int TL) {
+    // ≈ 64 lignes par CTA (2 tuiles), 32 tranches au plus : à b=12, L=2 048
+    // → 384 CTA (2 par SM) ; à L=128 → 2
+    const int tuiles = (L + TL - 1) / TL;
+    return max(1, min(32, (tuiles + 1) / 2));
+}
+
+torch::Tensor mla_decode_1p(torch::Tensor q_eff, c10::optional<torch::Tensor> cache_ptrs,
+                            c10::optional<torch::Tensor> cache, torch::Tensor lens,
+                            int64_t L, int64_t rank, double scale) {
+    CHECK_CUDA(q_eff); ACVRAM_DEVICE_GUARD(q_eff); CHECK_CONTIG(q_eff); CHECK_CONTIG(lens);
+    TORCH_CHECK(q_eff.dim() == 3 && q_eff.scalar_type() == torch::kFloat, "MLA 1p : q_eff [B, H, W] fp32");
+    const int B = q_eff.size(0), H = q_eff.size(1), W = q_eff.size(2), R = (int)rank;
+    TORCH_CHECK(W % 8 == 0 && R % 2 == 0 && R <= W && R <= 2 * MLA1P_FILS,
+                "MLA 1p : W multiple de 8, R pair <= W et <= 512");
+    TORCH_CHECK(H >= 1 && H <= 32, "MLA 1p : 1 <= H <= 32 tetes");
+    TORCH_CHECK(lens.scalar_type() == torch::kLong && lens.numel() == B, "MLA 1p : lens [B] int64");
+    const int64_t *ptrs = nullptr;
+    const __nv_bfloat16 *cache0 = nullptr;
+    if (cache_ptrs.has_value() && cache_ptrs->defined()) {
+        CHECK_CONTIG(*cache_ptrs);
+        TORCH_CHECK(cache_ptrs->scalar_type() == torch::kInt64 && cache_ptrs->is_cuda()
+                    && cache_ptrs->numel() == B, "MLA 1p : cache_ptrs [B] int64 sur la carte");
+        ptrs = cache_ptrs->data_ptr<int64_t>();
+    } else {
+        TORCH_CHECK(B == 1 && cache.has_value() && cache->defined(), "MLA 1p : cache [L, W] bf16 si B = 1 sans table");
+        CHECK_CONTIG(*cache);
+        TORCH_CHECK(cache->scalar_type() == torch::kBFloat16 && cache->size(1) == W && cache->size(0) >= L,
+                    "MLA 1p : cache [>= L, W] bf16");
+        cache0 = reinterpret_cast<const __nv_bfloat16 *>(cache->data_ptr());
+    }
+    const int TL = H <= 20 ? 32 : 16;
+    const int S = mla_1p_tranches((int)L, TL);
+    const int rows = ((((int)L + S - 1) / S) + TL - 1) / TL * TL;
+    auto ws = torch::empty({(long)B * S * H * (R + 2)}, q_eff.options());
+    auto o = torch::empty({B, H, (long)rank}, q_eff.options());
+    auto stream = at::cuda::getCurrentCUDAStream();
+    const int HMAX = H <= 20 ? 20 : 32;
+    const size_t shm = (size_t)H * W * sizeof(float) + (size_t)TL * (W + 8) * sizeof(__nv_bfloat16)
+                       + (size_t)2 * HMAX * TL * sizeof(float) + 3 * HMAX * sizeof(float);
+    dim3 grid(B, S);
+    #define MLA1P_LANCE(HM, T, RWW) do { \
+        static size_t autorise = 0; \
+        if (shm > autorise) { cudaFuncSetAttribute(mla_1p_kernel<HM, T, RWW>, \
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm); autorise = shm; } \
+        mla_1p_kernel<HM, T, RWW><<<grid, MLA1P_FILS, shm, stream>>>( \
+            q_eff.data_ptr<float>(), ptrs, cache0, lens.data_ptr<long>(), ws.data_ptr<float>(), \
+            H, (int)L, W, R, S, rows, (float)scale); } while (0)
+    TORCH_CHECK(shm <= 99 * 1024, "MLA 1p : memoire partagee > 99 Ko (H, W trop grands)");
+    if (HMAX == 20) MLA1P_LANCE(20, 32, 4); else MLA1P_LANCE(32, 16, 2);
+    #undef MLA1P_LANCE
+    dim3 g2(B, H);
+    mla_1p_combine_kernel<<<g2, 128, 0, stream>>>(ws.data_ptr<float>(), o.data_ptr<float>(), H, R, S);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return o;
+}
+
 // RMSNorm fusionnée (bf16 -> bf16, variance en fp32) : un bloc par ligne.
 // Même arithmétique que la version torch : x normalisé arrondi en bf16, puis
 // produit bf16 par le poids — bit-identique.
@@ -4786,6 +5026,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("mla_decode", &mla_decode, "MLA absorbee : scores + softmax + lecture latente");
     m.def("mla_ecrit_latent", &mla_ecrit_latent,
           "MLA decodage : k_new [B, W] -> cache_b[len_b], puis len_b += 1, un lancement pour les B creneaux (tables d'adresses [B])");
+    m.def("mla_decode_1p", &mla_decode_1p, py::arg("q_eff"), py::arg("cache_ptrs") = py::none(),
+          py::arg("cache") = py::none(), py::arg("lens"), py::arg("L"), py::arg("rank"), py::arg("scale"),
+          "MLA absorbee a UNE PASSE (poste7-duel-verdict-16-09) : le cache latent lu une fois pour les H tetes, "
+          "softmax en ligne, tranches de L recombinees -> o_lat [B, H, rank] fp32 ; cache_ptrs [B] int64 ou cache [L, W] (B = 1)");
     m.def("mla_decode_batch", &mla_decode_batch,
           "MLA : decodage de B creneaux en un lancement, caches par table d'adresses [B] int64");
     m.def("paged_attention", &paged_attention,

@@ -28,6 +28,25 @@ __all__ = ["MLAttention", "MLA_BUCKET", "godet_mla"]
 # fin coûte davantage de graphes capturés (un par palier), mais chaque pas
 # lit moins. Réglable pour mesurer l'arbitrage.
 MLA_BUCKET = int(os.environ.get("ACVRAM_MLA_BUCKET", "128"))
+# Noyau MLA à une passe (poste7-duel-verdict-16-09 § 3) : le cache latent lu une
+# fois pour les H têtes au lieu de 2 × H fois (mla_scores + mla_reduce) ;
+# =0 rejoue les deux noyaux d'avant (témoin d'équivalence).
+_MLA_UNE_PASSE = os.environ.get("ACVRAM_MLA_UNE_PASSE", "1") == "1"
+
+
+def _mla_decode(ext, q_eff, cache, len_t, scores, bucket, rank, scale):
+    """Une séquence : q_eff [nh, W] fp32, cache [>= bucket, W] bf16 -> o_lat [nh, rank]."""
+    if _MLA_UNE_PASSE and hasattr(ext, "mla_decode_1p"):
+        return ext.mla_decode_1p(q_eff.unsqueeze(0), None, cache, len_t.reshape(1),
+                                 bucket, rank, scale)[0]
+    return ext.mla_decode(q_eff, cache, len_t, scores, bucket, rank, scale)
+
+
+def _mla_decode_batch(ext, q, cache_ptrs, lens, scores, bucket, rank, scale):
+    """B créneaux : q [B, nh, W] fp32, table d'adresses [B] -> o_lat [B, nh, rank]."""
+    if _MLA_UNE_PASSE and hasattr(ext, "mla_decode_1p"):
+        return ext.mla_decode_1p(q, cache_ptrs, None, lens, bucket, rank, scale)
+    return ext.mla_decode_batch(q, cache_ptrs, lens, scores, bucket, rank, scale)
 
 
 def godet_mla(longueur: int) -> int:
@@ -197,9 +216,9 @@ class MLAttention(nn.Module):
                 len_t = torch.tensor(total - 1, dtype=torch.long, device=x.device)
                 scores_buf = torch.zeros(self.nh, bucket, dtype=torch.float32,
                                          device=x.device)
-                o_lat = ext.mla_decode(q_eff.to(torch.float32)[0].contiguous(),
-                                       C, len_t, scores_buf, bucket,
-                                       self.rank, self.scale)          # [nh, rank]
+                o_lat = _mla_decode(ext, q_eff.to(torch.float32)[0].contiguous(),
+                                    C, len_t, scores_buf, bucket,
+                                    self.rank, self.scale)             # [nh, rank]
                 if os.environ.get("ACVRAM_MLA_DEBUG_ECART"):
                     pos_dbg = torch.arange(bucket, device=x.device)
                     masque_dbg = pos_dbg > (total - 1)
@@ -333,8 +352,8 @@ class MLAttention(nn.Module):
         q = torch.stack([self._prep_decode(x[i:i + 1], sts[i], bucket).to(torch.float32)[0]
                          for i in range(B)]).contiguous()          # [B, nh, W]
         lens = torch.stack([st["len"] for st in sts])
-        o_lat = ext.mla_decode_batch(q, cache_ptrs, lens, scores_batch, bucket,
-                                     self.rank, self.scale)          # [B, nh, rank]
+        o_lat = _mla_decode_batch(ext, q, cache_ptrs, lens, scores_batch, bucket,
+                                  self.rank, self.scale)             # [B, nh, rank]
         return torch.cat([self._sortie_decode(x[i:i + 1], sts[i], o_lat[i]) for i in range(B)], dim=0)
 
     def _v_b32(self) -> torch.Tensor:
@@ -378,8 +397,8 @@ class MLAttention(nn.Module):
         else:
             for i, st in enumerate(sts):
                 st["cache"].index_copy_(0, st["len"].view(1), k_new[i:i + 1])
-        o_lat = ext.mla_decode_batch(q_eff.to(torch.float32).contiguous(), cache_ptrs, lens,
-                                     scores_batch, bucket, self.rank, self.scale)  # [B, nh, rank]
+        o_lat = _mla_decode_batch(ext, q_eff.to(torch.float32).contiguous(), cache_ptrs, lens,
+                                  scores_batch, bucket, self.rank, self.scale)  # [B, nh, rank]
         y = torch.einsum('hvr,bhr->bhv', self._v_b32(), o_lat)
         if not un_lancement:
             for st in sts:
@@ -395,9 +414,9 @@ class MLAttention(nn.Module):
         cache = st["cache"]
         ext = _extension() if x.is_cuda else None
         if ext is not None:
-            o_lat = ext.mla_decode(q_eff.to(torch.float32)[0].contiguous(),
-                                   cache, st["len"], st["scores"], bucket,
-                                   self.rank, self.scale)        # [nh, rank]
+            o_lat = _mla_decode(ext, q_eff.to(torch.float32)[0].contiguous(),
+                                cache, st["len"], st["scores"], bucket,
+                                self.rank, self.scale)           # [nh, rank]
             return self._sortie_decode(x, st, o_lat)
         C = cache[:bucket]
         scores = torch.einsum('thr,sr->ths', q_eff.to(torch.float32),
