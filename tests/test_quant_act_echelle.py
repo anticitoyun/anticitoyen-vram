@@ -72,7 +72,7 @@ def test_noyau_egal_reference_au_bit(table):
     assert z == int((vivant & (xsf == 0)).sum())
     assert sat == 0
     assert gr[9].item() == 0.0 and int(xsf[9].sum()) == 0 and int(xq[9].sum()) == 0
-    assert xsf[11, 0].item() == 0xFE, "le bloc maximal d'une ligne porte l'échelle 448 (E4M3 0xFE)"
+    assert xsf[11, 0].item() == 0x7E, "le bloc maximal d'une ligne porte l'échelle 448 (E4M3 0x7E)"
 
 
 @CUDA

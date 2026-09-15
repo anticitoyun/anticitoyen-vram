@@ -33,9 +33,31 @@ def _b(bloc, x, topw, topi):
         M._MOE_DECODE_FUSED = a
 
 
+def _quant_act_sans_echelle_globale(v: torch.Tensor) -> torch.Tensor:
+    """Aller-retour de l'activation telle que le noyau FUSIONNÉ la requantifie
+    en shared : amax/6 -> E4M3 (satfinite 448), valeurs / échelle -> E2M1 au
+    plus proche (égalités vers le code pair), SANS échelle globale de ligne —
+    l'arithmétique d'avant poste7-glm-pile-correctif § 7, gardée sur ce chemin
+    témoin (un CTA ne voit qu'une tranche de I). float64 [N]."""
+    from tests.test_gemm_grouped_mma import _MID, _E2M1
+    vb = v.float().reshape(-1, 16)
+    s = (vb.abs().amax(-1) / 6.0).clamp(max=448.0).to(torch.float8_e4m3fn).float()
+    ok = s > 0
+    q = torch.where(ok.unsqueeze(-1), vb / s.clamp(min=1e-30).unsqueeze(-1), torch.zeros_like(vb))
+    a = q.abs().clamp(max=6.0)
+    mid = _MID.to(v.device)
+    iu = torch.searchsorted(mid, a.reshape(-1).contiguous(), right=True).view_as(a)
+    il = torch.searchsorted(mid, a.reshape(-1).contiguous(), right=False).view_as(a)
+    code = torch.where(iu != il, torch.where(il % 2 == 0, il, iu), iu)
+    val = _E2M1.to(v.device)[code] * torch.sign(q)
+    return (val * s.unsqueeze(-1)).double().reshape(-1)
+
+
 def _ref64(bloc, x, topw, topi):
-    """Référence float64 depuis les MÊMES tenseurs quantifiés que le chemin B
-    (poids E2M1 déquantifiés, activations quantifiées par nvfp4_quant_act)."""
+    """Référence float64 depuis les MÊMES tenseurs quantifiés que le noyau
+    fusionné : x par nvfp4_quant_act (échelle de ligne g_r, consommée par
+    l'épilogue FC1), l'activation requantifiée sans échelle globale comme
+    dans le noyau."""
     from tests.test_gemm_grouped_mma import dequant_act_ref, _w64
     from acvram.kernels import get_extension
     ext = get_extension()
@@ -54,8 +76,7 @@ def _ref64(bloc, x, topw, topi):
             u = (xa[i] @ W["u"][e].T) * pu[3][e].double()
             g, u = g.to(torch.bfloat16).double(), u.to(torch.bfloat16).double()
             act = (g / (1 + torch.exp(-g)) * u).to(torch.bfloat16)
-            aq, asf, ga = ext.nvfp4_quant_act(act.reshape(1, -1).contiguous())
-            aa = dequant_act_ref(aq, asf, ga).reshape(-1)
+            aa = _quant_act_sans_echelle_globale(act)
             y[i] += (aa @ W["d"][e].T) * pd[3][e].double() * float(topw[i, j])
     return y
 
