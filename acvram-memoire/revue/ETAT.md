@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **PPL CORPUS PRIVÉ — Coder PUBLIABLE (2f998da) : llama.cpp Q4_K_M 1,013 seul classé ; acvram nvfp4 1,027 RÉFUTÉ (scellé [1,010;1,025]) ; vLLM ModelOpt 1,156, TRT-LLM 1,234 non classés (divergence privé/public 0,033/0,070 signalée). GLM INJUGEABLE : PPL bf16 explose par fenêtre (107 090/8 402/262 chez llama.cpp !), 3 convertis 7-43 % SOUS bf16 = instabilité numérique du modèle sur ce texte, différente par moteur — pas un classement. → poste7 : PPL par fenêtre + agrégat robuste scellé d'avance, fenêtre GLM lue aux logits avant tout classement.** poste2 : Hadamard puis EXL3 propres (Coder+GLM).
+Mis à jour : 16/09 (initial, poste7). **CAUSE GLM TROUVÉE (ffc1498) : pas d'instabilité du moteur, GLM n'a pas de puits d'attention sans son préfixe [gMASK]<sop> — toute fenêtre non préfixée s'effondre selon son 1er jeton (104 637 → 31,9 avec préfixe, même fenêtre). AUCUNE PPL GLM publiée (dont wiki-gptq/0,9956) ne classe : il faut refaire toutes les fenêtres GLM avec [gMASK]<sop] en tête (2 jetons non notés), tous bras, public+privé. Coder non concerné. poste3 complète et relance dans le même passage.** poste2 : Hadamard puis EXL3 propres (Coder+GLM).
 
 ## Chantiers ouverts et scellés
 
