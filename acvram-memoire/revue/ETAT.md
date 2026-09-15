@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **PPL GLM REFONDUE (2f7d76b) : préfixe pris partout, 0 fenêtre explosée (scellé tenu). Privé, médianes ×bf16 : llama.cpp 1,015 CLASSÉ ; acvram -k48 1,029 RÉFUTÉ (> 1,02, géo 1,016 — les deux agrégats divergent) ; vLLM 1,078. Public : acvram 0,997 (médiane sous bf16 !), llama.cpp 1,027, vLLM 1,064 ; divergence privé/public 0,032 signalée. Coder : géo/médiane cohérents (llama.cpp classé 1,010/1,013). Reste § 10.2 (arbitre prefill/décodage/duel avec encode_brut) sur ordre.** poste2 : Hadamard puis EXL3 propres (Coder+GLM).
+Mis à jour : 16/09 (initial, poste7). **NOUVEAU BOGUE DE DÉCODAGE (1016cf2) : le décodage GLM avec préfixe encode_brut ne reproduit PAS le prefill — arbitre b=12 60/84 (b=4 23/28, b=1 6/7), |Δ| médian ≈9 dès le 1er jeton généré (sans préfixe : 80/84, |Δ|≈0,5). Défaut du chemin décodage ou de l'entrée Engine face aux jetons spéciaux de tête — → poste4, priorité avant toute colonne qualité du duel. AWQ experts réfutée comme cause de l'inversion privé/public (cause encore ouverte, piste KV int8). Duel : temps tenu (21,0 ms), affiché « colonne PPL en refonte ».** poste2 : Hadamard puis EXL3 propres (Coder+GLM).
 
 ## Chantiers ouverts et scellés
 
