@@ -131,6 +131,19 @@ class ConversionOptions:
     # conversion par defaut sans mesure (revue/prediction-a7-alpha-commun-
     # gateup-14-09.md).
     alpha_commun_gate_up: bool = False
+    # poste7 (`poste7-hadamard-16-09.md`, 16/09) : la métrique W4A4 des experts
+    # (`quantize_activation_nvfp4`, cb2784b) RÉFUTÉE plus mauvaise (1,0229)
+    # que sans elle (1,0183) — le défaut n'est pas l'alpha choisi mais le
+    # bloc de 16 lui-même (E2M1, étendue 12:1) sous UN canal aberrant, qu'AUCUNE
+    # échelle par canal ne peut corriger puisqu'elle s'applique à tout le
+    # canal, pas à un bloc isolé. Rotation de Walsh-Hadamard bloc-diagonale
+    # H_512 sur les poids d'experts avant quantification (gate/up K=2048,
+    # down K=1536, les deux divisibles par 512) : étale l'aberration sur
+    # 512 valeurs au lieu d'une seule dans chaque bloc de 16, SANS échelle
+    # AWQ (`use_awq=False` sur ces tenseurs — la rotation est le mécanisme
+    # à l'essai, pas un supplément à l'échelle). Défaut faux : n'affecte
+    # aucune conversion existante sans le demander explicitement.
+    hadamard_experts: bool = False
 
 
 @dataclass
@@ -1148,19 +1161,26 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         # metrique de recherche doit voir ce meme chemin pour les experts,
         # sinon elle choisit un alpha qui elargit l'etendue intra-bloc de
         # l'activation sans le savoir (`quantize_activation_nvfp4`,
-        # calibrate.py).
+        # calibrate.py). RÉFUTÉ (`verdict-glm-k48-w4a4-prefill-16-09.md`,
+        # 1,0229 pire que 1,0183 sans elle) : le defaut est le bloc E2M1 de
+        # 16 lui-meme, pas l'alpha -- `hadamard_experts` (poste7, `poste7-
+        # hadamard-16-09.md`) tourne le poids ET l'activation en H_512 AVANT
+        # quantification, SANS echelle AWQ sur ces tenseurs (les deux
+        # mecanismes ne se cumulent pas ici, l'un remplace l'autre a l'essai).
+        experts_hadamard = est_expert and opts.hadamard_experts and fmt == "nvfp4"
         qt, scaler, metrics = _quantize_on(
             qdev, tensor, fmt, st,
             group_size=opts.group_size,
-            use_hadamard=router.wants_hadamard(name, fmt),
-            use_awq=opts.awq and fmt == "nvfp4",
+            use_hadamard=router.wants_hadamard(name, fmt) or experts_hadamard,
+            use_awq=opts.awq and fmt == "nvfp4" and not experts_hadamard,
             n_grid=opts.n_grid, garder_grille=opts.garder_grille,
             table=opts.q3n_table if fmt == "q3n" else None,
             mesurer_kld=opts.mesurer_kld,
             forced_scale=alpha_commun.get(name),
-            quantize_activation_nvfp4=est_expert and fmt == "nvfp4",
+            quantize_activation_nvfp4=est_expert and fmt == "nvfp4" and not experts_hadamard,
+            hadamard_block=512 if experts_hadamard else None,
         )
-        if est_expert and scaler.scale is None:
+        if est_expert and scaler.scale is None and not experts_hadamard:
             scaler = ChannelScaler(
                 torch.ones(tensor.shape[1], dtype=torch.float32),
                 scaler.hadamard_block,
@@ -1306,6 +1326,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             "has_act_scale": scaler.scale is not None,
             "bpw": round(metrics["bpw"], 3),
             "out_snr_db": round(metrics["out_snr_db"], 2),
+            **({"rotation": "hadamard-512"} if experts_hadamard else {}),
             # L'echelle de sortie, sans laquelle le SNR ne se compare pas d'un
             # tenseur a l'autre. Publiee pour qu'une analyse posterieure au
             # manifeste puisse reconstituer l'erreur absolue sans reconvertir.

@@ -480,6 +480,7 @@ def quantize_with_calibration(
     mesurer_kld: bool = False,
     forced_scale: Optional[torch.Tensor] = None,
     quantize_activation_nvfp4: bool = False,
+    hadamard_block: Optional[int] = None,
 ) -> tuple[Any, ChannelScaler, dict]:
     """Chaîne complète par couche : tourner, mettre à l'échelle, quantifier.
 
@@ -487,11 +488,16 @@ def quantize_with_calibration(
     change les statistiques de canaux sur lesquelles opère la recherche AWQ :
     chercher avant de tourner optimiserait une échelle pour une distribution qui
     n'existe plus.
+
+    ``hadamard_block`` impose la taille du bloc au lieu du plus grand diviseur
+    puissance de deux (`largest_pow2_divisor`) — nécessaire quand l'expérience
+    veut un bloc PLUS PETIT que celui-ci (poste7, `poste7-hadamard-16-09.md` :
+    H_512 sur des tenseurs K=2048, dont le diviseur naturel serait 2048).
     """
     w = weight.detach().to(torch.float32)
     had_block = 0
     if use_hadamard:
-        had_block = largest_pow2_divisor(w.shape[1])
+        had_block = hadamard_block or largest_pow2_divisor(w.shape[1])
         if had_block >= 8:
             w = apply_hadamard_weight(w, had_block)
             if stats is not None:

@@ -506,7 +506,8 @@ def cmd_convert(args: argparse.Namespace) -> int:
         garder_grille=args.grille_erreurs,
         promotion_cout_max_mib=args.promotion_cout_max,
         format_impose=args.format, mesurer_kld=args.mesurer_kld,
-        alpha_commun_gate_up=args.alpha_commun_gate_up)
+        alpha_commun_gate_up=args.alpha_commun_gate_up,
+        hadamard_experts=args.hadamard_experts)
 
     last = [0.0]
 
@@ -859,6 +860,13 @@ def build_parser() -> argparse.ArgumentParser:
                          "Defaut faux : ne change pas la conversion sans "
                          "mesure (revue/prediction-a7-alpha-commun-gateup-"
                          "14-09.md)")
+    cv.add_argument("--hadamard-experts", action="store_true",
+                    help="tourne les poids d'experts (gate/up/down) en "
+                         "Hadamard bloc H_512 avant quantification, SANS "
+                         "echelle AWQ sur ces tenseurs — a l'essai contre le "
+                         "defaut de bloc NVFP4 (E2M1, etendue 12:1) qu'aucune "
+                         "echelle par canal ne corrige (poste7-hadamard-16-"
+                         "09.md). Defaut faux")
     cv.set_defaults(func=cmd_convert)
 
     sv = sub.add_parser("serve", help="lance le serveur compatible OpenAI")
