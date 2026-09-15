@@ -2114,6 +2114,20 @@ class ACVRamModel(nn.Module):
         target = head_dev.device if head_dev is not None else x.device
         if os.environ.get("ACVRAM_LOGITS_BF16") == "1":
             return self.lm_head(x.to(target))
+        # Tete INT8 au decodage (poste7-duel-verdict par. 14 (ii)) : x reste en
+        # bf16, le GEMV accumule et SORT en fp32 — memes produits, meme ordre
+        # de sommes que x.to(float32) : logits egaux au bit, sans la conversion
+        # de h ni le double trafic de x en fp32 (0,85 -> ~0,2 ms attendu).
+        # ACVRAM_TETE_FP32_ENTREE=1 : temoin (l ancienne conversion).
+        w = self.lm_head.qweight
+        lin = self.lm_head
+        if (x.dtype == torch.bfloat16 and getattr(w, "format", "") == "int8"
+                and head_dev is not None and head_dev.is_cuda
+                and getattr(lin, "scaler", None) is None and getattr(lin, "streamed", None) is None
+                and getattr(lin, "bias", None) is None
+                and x.shape[0] <= kernels._INT8_GEMV_MAX
+                and os.environ.get("ACVRAM_TETE_FP32_ENTREE") != "1"):
+            return kernels.int8_matmul(x.to(target), w, sortie_fp32=True)
         return self.lm_head(x.to(target, dtype=torch.float32))
 
     def _logits_finaux(self, logits: torch.Tensor) -> torch.Tensor:

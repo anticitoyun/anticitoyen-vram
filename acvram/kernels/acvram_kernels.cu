@@ -1455,7 +1455,7 @@ __global__ void __launch_bounds__(I8W_WARPS * WARP) int8_gemv_warp_kernel(
 }
 
 torch::Tensor int8_gemv(torch::Tensor qweight, torch::Tensor scales,
-                        torch::Tensor zeros, torch::Tensor x, int64_t group) {
+                        torch::Tensor zeros, torch::Tensor x, int64_t group, bool sortie_fp32) {
     CHECK_CUDA(qweight); CHECK_CUDA(x);
     ACVRAM_DEVICE_GUARD(qweight);
     CHECK_CONTIG(qweight); CHECK_CONTIG(scales); CHECK_CONTIG(zeros);
@@ -1468,10 +1468,17 @@ torch::Tensor int8_gemv(torch::Tensor qweight, torch::Tensor scales,
     const int nwarps = (threads + 31) / 32;
     const int splits = splits_for(M, K, (int)qweight.get_device());
     const bool bf = xc.scalar_type() == torch::kBFloat16 && splits == 1;
+    // sortie_fp32 (tete lm_head, poste7-duel-verdict par. 14 (ii)) : x lu en bf16,
+    // accumulation et SORTIE fp32 — le meme noyau, les memes produits (un bf16
+    // converti est exact en fp32) et le meme ordre de sommes que le chemin
+    // x.to(float32) : logits egaux au bit, sans la conversion de h ni le
+    // double trafic de x en fp32 dans chaque bloc.
+    const bool bf_y32 = bf && sortie_fp32;
     xc = (bf ? xc : xc.to(torch::kFloat)).contiguous();
     const int N = xc.size(0);
-    auto out = splits == 1 ? torch::empty({N, M}, xc.options())
-                           : torch::zeros({N, M}, xc.options());
+    auto opt_y = bf_y32 ? xc.options().dtype(torch::kFloat) : xc.options();
+    auto out = splits == 1 ? torch::empty({N, M}, opt_y)
+                           : torch::zeros({N, M}, opt_y);
     auto stream = at::cuda::getCurrentCUDAStream();
     // Variante « un warp par ligne » (bead z5q), COUPÉE par défaut : mesurée
     // le 14/09 à 2,79 ms (1 ligne/warp) puis 1,69 ms sur q/k/v seuls (4
@@ -1482,7 +1489,7 @@ torch::Tensor int8_gemv(torch::Tensor qweight, torch::Tensor scales,
     static const bool warp_ok = std::getenv("ACVRAM_INT8_GEMV_WARP") != nullptr
                                 && std::string(std::getenv("ACVRAM_INT8_GEMV_WARP")) == "1";
     const size_t shm_x = (size_t)N * K * sizeof(__nv_bfloat16);
-    if (bf && warp_ok && N <= 12 && K % (WARP * WEIGHTS_PER_LOAD) == 0 && K <= 2048 && shm_x <= 96 * 1024) {
+    if (bf && !bf_y32 && warp_ok && N <= 12 && K % (WARP * WEIGHTS_PER_LOAD) == 0 && K <= 2048 && shm_x <= 96 * 1024) {
         dim3 gridw((M + I8W_WARPS * I8W_RPW - 1) / (I8W_WARPS * I8W_RPW));
         #define I8W(NV) do { \
             if (shm_x > 48 * 1024) cudaFuncSetAttribute(int8_gemv_warp_kernel<NV>, \
@@ -1542,7 +1549,11 @@ torch::Tensor int8_gemv(torch::Tensor qweight, torch::Tensor scales,
     const int Ntot = N;
     for (int base = 0; base < Ntot; base += tranche) {
         const int N = min(tranche, Ntot - base);     // masque volontaire pour I8G_N
-        if (bf) {
+        if (bf_y32) {
+            I8G_N(__nv_bfloat16, float,
+                  reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr()) + (long)base * K,
+                  out.data_ptr<float>() + (long)base * M, 1);
+        } else if (bf) {
             I8G_N(__nv_bfloat16, __nv_bfloat16,
                   reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr()) + (long)base * K,
                   reinterpret_cast<__nv_bfloat16 *>(out.data_ptr()) + (long)base * M, 1);
@@ -5164,7 +5175,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("int4_dequant", &int4_dequant, "INT4 affine par groupes -> matrice dense");
     m.def("int4_gemv", &int4_gemv, "INT4 : dequantification + produit fusionnes");
     m.def("int8_dequant", &int8_dequant, "INT8 affine par groupes -> matrice dense");
-    m.def("int8_gemv", &int8_gemv, "INT8 : dequantification + produit fusionnes");
+    m.def("int8_gemv", &int8_gemv, py::arg("qweight"), py::arg("scales"), py::arg("zeros"), py::arg("x"),
+          py::arg("group"), py::arg("sortie_fp32") = false,
+          "INT8 : dequantification + produit fusionnes ; sortie_fp32 : x bf16, accumulation et sortie fp32 (tete)");
     m.def("nvfp4_gemv_grouped", &nvfp4_gemv_grouped,
           "NVFP4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
     m.def("nvfp4_gemv_grouped_gateup", &nvfp4_gemv_grouped_gateup,
