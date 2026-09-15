@@ -445,11 +445,28 @@ class GraphRunner:
             return True
 
         self._fill(entry, batch)
+        if os.environ.get("ACVRAM_TRACE_ENTREES"):
+            self._sonde_entrees(entry, batch, key)
         if trace and os.environ.get("ACVRAM_CHRONO_SYNC"):
             torch.cuda.synchronize(self.device)
         t2 = time.perf_counter()
         self._prepare = (entry, key, b_reel, ql, t0, t1, t2, False)
         return True
+
+    def _sonde_entrees(self, entry: dict, batch: ForwardBatch, key) -> None:
+        """ACVRAM_TRACE_ENTREES=1 (poste7 § 12) : ce que le pas à formes fixes va
+        lire — jetons, positions, seq_lens du lot ET les tampons device
+        remplis (x = plongement, positions, slots, seq_lens) — à comparer au
+        journal du chemin eager (runner._sonde_eager) sur la même séquence."""
+        torch.cuda.synchronize(self.device)
+        n = min(4, batch.batch_size)
+        tok = batch.tokens[:n].tolist() if torch.is_tensor(batch.tokens) else list(batch.tokens[:n])
+        x = entry["x"][:n, :4].float().tolist()
+        print(f"[ENTREES-FIXES] rejeu n°{self.replays} clé {key} jetons={tok} "
+              f"positions={batch.positions[:n].tolist()} seq_lens={list(batch.seq_lens[:n])} | "
+              f"x[:4]={[[round(v, 5) for v in r] for r in x]} "
+              f"positions_dev={entry['positions'][:n].tolist()} slots_dev={entry['slots'][:n].tolist()} "
+              f"seq_lens_dev={entry['seq_lens'][:n].tolist()}", flush=True)
 
     def rejouer_suivant(self) -> Optional[torch.Tensor]:
         """Rejoue le lot préparé par ``preparer`` et rend une VUE des logits
@@ -635,6 +652,8 @@ class GraphRunner:
             "seq_lens": torch.zeros(b, dtype=torch.long, device=d),
         }
         self._fill(entry, batch)
+        if os.environ.get("ACVRAM_TRACE_ENTREES"):
+            self._sonde_entrees(entry, batch, entry["key"])
         max_pos = min(self.max_model_len + 1, nblk * BLOCK_SIZE + 1)
 
         # Tout cache RoPE doit exister à sa taille finale avant la capture :
