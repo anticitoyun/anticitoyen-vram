@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **Hadamard FUSIONNÉ dans main (les deux moitiés, e667831) : poste4 (FWHT dans nvfp4_quant_act, --hadamard-experts) + poste2 (rotation H_512 des poids, x·H·(W·H)ᵀ=x·Wᵀ à 3-5 ulp, marge 8), non exécuté sur carte, tests CPU 14 passed. Aussi fusionnés : projections MLA étroites (976a090) et tête GEMV fp32 (54d5b28), mesurées −1,1 % par poste3 (96e5af7), scellé ≤19,0 réfuté.** Reconversion GLM + PPL Hadamard prend la carte dès que le comparatif 5 moteurs (poste3) la libère.
+Mis à jour : 16/09 (initial, poste7). **Comparatif 5 moteurs : TRT-LLM installé (5090, sm_120) + P3 tenue (9e3efe3) : Coder-30B NVFP4, b=12 2 105 t/s / 0,177 J (×1,46 vLLM en débit, 0,65× en J), b=1 235 t/s / 1,48 J, prefill 55 419 j/s — scellé poste7 §4 réfuté des deux côtés. Doublon 17 Go téléchargé par poste3 (converti existait déjà chez poste2 /mnt/4TO_SATACMR_2022/…/models_vllm) — suppression en attente d'accord utilisateur. Reste : instrument PPL TRT-LLM à écrire, puis GLM sur TRT-LLM.** Hadamard (main e667831) et sa PPL attendent toujours la carte.
 
 ## Chantiers ouverts et scellés
 
