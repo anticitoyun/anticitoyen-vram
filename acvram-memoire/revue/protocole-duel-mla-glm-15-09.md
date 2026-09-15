@@ -63,3 +63,18 @@ que je crois) ou si ses octets ≥ 1,8 × (l'attention bf16 pèse plus que
 30 % du pas). Alarme d'avance : si un bras ne charge pas (OOM, graphes
 refusés, backend absent), c'est un résultat publié tel quel, pas un
 chiffre reconstruit.
+
+## Complément du 16/09 (à sec, avant le go) — bras vLLM
+
+* Bras acvram servi depuis **mon worktree figé** (`ACVRAM_ARBRE`), jamais
+  l'arbre main ; dossier acvram = celui que poste2 livrera après reconversion
+  (formats homogènes par couche — la garde `piles_ok` du régime NOMINAL est
+  la preuve, écrite au journal), chemin et manifeste au verdict.
+* Bras vLLM **NVFP4** : GadflyII (20 Go, présent), `scratchpad/decode-glm-vllm-16-09.py`
+  = copie du banc de poste4 + `BANC_QUANT`/`BANC_GPU_UTIL`, energie.py corrigé.
+* Bras vLLM **fp8 dynamique** (prédiction de poste7) : même script,
+  `BANC_QUANT=fp8` sur la source bf16 (49 shards), `gpu_memory_utilization`
+  0,97, b=1 et 12. Attendu : **OOM au chargement** (31 Go de poids fp8 sur
+  32) — c'est la moitié « ne sert pas ce modèle » de la prédiction ; l'OOM
+  est publié comme résultat avec le message, pas contourné. S'il charge
+  (KV fp8 2048 sur < 1 Go), la mesure vaut et le seuil de poste7 s'applique.
