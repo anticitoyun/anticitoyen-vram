@@ -14,12 +14,20 @@ L'écart mesuré n'est PAS 1 ulp exactement : neuf étages de papillon
 introduisent 3 à 6 ulp fp32 de bruit d'arrondi, pas un défaut de la
 rotation elle-même — un seuil à 1 ulp littéral aurait échoué sur du code
 correct. Le seuil ici (8 ulp) borne l'accumulation attendue, pas l'identité
-algébrique en elle-même."""
+algébrique en elle-même.
+
+Côté activation, le chemin réel de production est `fwht_activations`
+(poste4, 7eb44da, `ChannelScaler.apply`) — pas `hadamard_transform` — donc
+c'est CETTE fonction qui doit apparaître dans le test, même si le poids se
+tourne à la conversion avec `apply_hadamard_weight` (`hadamard_transform`
+interne, normalisation légèrement différente d'un ulp par construction,
+poste4 `poste4-hadamard-16-09.md` : « le produit reste exact à 1 ulp
+mais ton test 1 ulp doit le vérifier de ton côté » — vérifié ici)."""
 import math
 
 import torch
 
-from acvram.quant.calibrate import apply_hadamard_weight, hadamard_transform
+from acvram.quant.calibrate import apply_hadamard_weight, fwht_activations
 
 SEUIL_ULP = 8.0
 
@@ -43,7 +51,7 @@ def test_rotation_hadamard_512_preserve_le_produit_gate_up():
     x = torch.randn(8, k, dtype=torch.float32)
     y_ref = x @ w.t()
     w_h = apply_hadamard_weight(w, block=512)
-    x_h = hadamard_transform(x, block=512)
+    x_h = fwht_activations(x, block=512)
     y_h = x_h @ w_h.t()
     assert _ecart_en_ulp(y_h, y_ref) <= SEUIL_ULP
 
@@ -55,7 +63,7 @@ def test_rotation_hadamard_512_preserve_le_produit_down_proj():
     x = torch.randn(8, k, dtype=torch.float32)
     y_ref = x @ w.t()
     w_h = apply_hadamard_weight(w, block=512)
-    x_h = hadamard_transform(x, block=512)
+    x_h = fwht_activations(x, block=512)
     y_h = x_h @ w_h.t()
     assert _ecart_en_ulp(y_h, y_ref) <= SEUIL_ULP
 
