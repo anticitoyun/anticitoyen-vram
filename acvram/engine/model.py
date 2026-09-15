@@ -815,13 +815,14 @@ class MoEBlock(nn.Module):
             print("[acvram] piles d'experts : mémoire GPU insuffisante, boucle par expert",
                   flush=True)
             return False
-        # gate et up lisent la même entrée : leurs échelles AWQ doivent être
-        # égales (alpha commun, A7) pour un seul rassemblement ; sinon repli.
+        # gate et up lisent la même entrée : échelles égales -> un seul
+        # rassemblement et une seule quantification (la table d'up EST celle
+        # de gate) ; distinctes (GLM AWQ par expert, poste7-glm-awq-pile) ->
+        # seconde ligne xs2 / x_u, seconde quantification, gate+up non fusionnés.
         g, u = awq.get("gate_proj"), awq.get("up_proj")
-        if (g is None) != (u is None) or (g is not None and not torch.equal(g, u)):
-            self._raison_repli = "gate_proj/up_proj : échelles AWQ différentes entre gate et up (repli par expert)"
-            print(f"[acvram] repli lent (boucle par expert) sur cette couche : {self._raison_repli}", flush=True)
-            return False
+        if g is not None and u is not None and torch.equal(g, u):
+            awq["up_proj"] = g
+        awq["up_distinct"] = not (awq.get("up_proj") is g)
         self._stacks = piles
         self._stacks_awq = awq
         return True
@@ -975,8 +976,13 @@ class MoEBlock(nn.Module):
         # sortie change en silence dès que les experts portent une échelle
         awq = getattr(self, "_stacks_awq", {})
         e_sorted = flat_e[ordre]
+        xs_u = xs
+        if awq.get("up_distinct") and awq.get("up_proj") is not None:
+            xs_u = (xs / awq["up_proj"][e_sorted, :xs.shape[1]]).contiguous()
         if awq.get("gate_proj") is not None:
             xs = (xs / awq["gate_proj"][e_sorted, :xs.shape[1]]).contiguous()
+            if not awq.get("up_distinct"):
+                xs_u = xs
         awq_d = awq.get("down_proj")
         # Glue en deux noyaux (moe_act, moe_reduce_trie) : le profil du 13/09
         # donnait 25 % du pas aux conversions fp32, produit, rembourrage,
@@ -1009,11 +1015,14 @@ class MoEBlock(nn.Module):
             # reste capable de rendre une grille fixe pour qui la demande
             # explicitement (decodage, pas ce chemin).
             tiles = self._tuiles(cnt, _MOE_MMA_BT)
-            if xs.shape[1] != pg[4]:
+            if xs.shape[1] != pg[4]:                   # entrée rembourrée
+                partage = xs_u is xs
                 xs = F.pad(xs, (0, pg[4] - xs.shape[1])).contiguous()
+                xs_u = xs if partage else F.pad(xs_u, (0, pg[4] - xs_u.shape[1])).contiguous()
             xq, xsf = ext.nvfp4_quant_act(xs)
+            xq2, xsf2 = (xq, xsf) if xs_u is xs else ext.nvfp4_quant_act(xs_u)
             g = self._gemm_mma(pg, xq, xsf, tiles, brut=True)
-            u = self._gemm_mma(pu, xq, xsf, tiles, brut=True)
+            u = self._gemm_mma(pu, xq2, xsf2, tiles, brut=True)
             act = _activation(g, u, pg[5], pd[4])
             aq, asf = ext.nvfp4_quant_act(act)
             d = self._gemm_mma(pd, aq, asf, tiles, brut=True)
@@ -1024,15 +1033,17 @@ class MoEBlock(nn.Module):
             # juste au-dessus.
             tiles = self._tuiles(cnt)
             if xs.shape[1] != pg[4]:                   # entrée rembourrée
+                partage = xs_u is xs
                 xs = F.pad(xs, (0, pg[4] - xs.shape[1])).contiguous()
+                xs_u = xs if partage else F.pad(xs_u, (0, pg[4] - xs_u.shape[1])).contiguous()
             g = self._gemm(pg, xs, tiles, brut=True)
-            u = self._gemm(pu, xs, tiles, brut=True)
+            u = self._gemm(pu, xs_u, tiles, brut=True)
             act = _activation(g, u, pg[5], pd[4])
             d = self._gemm(pd, act, tiles, brut=True)
         else:
             offs = torch.cumsum(cnt, 0).to(torch.int32)
             wg = self._pile_bf16(pg); g = torch._grouped_mm(xs, wg.transpose(1, 2), offs=offs); del wg
-            wu = self._pile_bf16(pu); u = torch._grouped_mm(xs, wu.transpose(1, 2), offs=offs); del wu
+            wu = self._pile_bf16(pu); u = torch._grouped_mm(xs_u, wu.transpose(1, 2), offs=offs); del wu
             act = _activation(g, u, pg[5], pd[4])
             wd = self._pile_bf16(pd); d = torch._grouped_mm(act, wd.transpose(1, 2), offs=offs); del wd
         m_out = pd[5]
@@ -1076,9 +1087,9 @@ class MoEBlock(nn.Module):
             # Un lancement pour tout le frontend (poste7-reprise-15-09-b § 2) :
             # ~40 lancements torch par couche (22 µs sous ncu) en un.
             awq = getattr(self, "_stacks_awq", {})
-            xs, ordre, inv, tw, _cnt, te, t0, tn, e_sorted = ext.moe_route_pack(
+            xs, ordre, inv, tw, _cnt, te, t0, tn, e_sorted, xs2 = ext.moe_route_pack(
                 topi.contiguous(), topw.contiguous(), x.contiguous(), E, bt, t_max, pg[4],
-                awq.get("gate_proj"))
+                awq.get("gate_proj"), awq.get("up_proj") if awq.get("up_distinct") else None)
             tiles = (te, t0, tn)
         else:
             # Témoin torch (ACVRAM_MOE_ROUTE_PACK=0) : le contrat bit à bit du
@@ -1099,14 +1110,21 @@ class MoEBlock(nn.Module):
                 xs = F.pad(xs, (0, pg[4] - xs.shape[1]))
             awq = getattr(self, "_stacks_awq", {})
             e_sorted = flat_e[ordre].to(torch.int32)
+            xs2 = xs
+            if awq.get("up_distinct"):
+                xs2 = xs if awq.get("up_proj") is None else (xs / awq["up_proj"][e_sorted.long()]).contiguous()
             if awq.get("gate_proj") is not None:
                 xs = xs / awq["gate_proj"][e_sorted.long()]
             xs = xs.contiguous()
+            if not awq.get("up_distinct"):
+                xs2 = xs
             inv = torch.empty_like(ordre); inv[ordre] = torch.arange(ordre.numel(), device=x.device)
             inv = inv.to(torch.int32)
         xq, xsf = ext.nvfp4_quant_act(xs)
+        xq2, xsf2 = (xq, xsf) if xs2 is xs else ext.nvfp4_quant_act(xs2)
         code_act = 1 if self.act == "gelu_tanh" else 0
         if (_MOE_DECODE_FUSED and hasattr(ext, "nvfp4_moe_fused") and bt == 16 and awq.get("down_proj") is None
+                and xs2 is xs
                 and pg[4] % 128 == 0 and pg[5] == pd[4] and pd[4] % _MOE_FUSED_TN == 0 and pd[5] % 128 == 0):
             # Port de b12x (poste7-reprise-15-09-b § 3-4) : gate+up+act+quant en
             # shared, down par tranches, split-K sériel (bit-reproductible),
@@ -1118,7 +1136,7 @@ class MoEBlock(nn.Module):
             d = self._moe_fused(pg, pu, pd, xq, xsf, tiles, code_act)
         else:
             g = self._gemm_mma(pg, xq, xsf, tiles, brut=True, bt=bt)
-            u = self._gemm_mma(pu, xq, xsf, tiles, brut=True, bt=bt)
+            u = self._gemm_mma(pu, xq2, xsf2, tiles, brut=True, bt=bt)
             act = ext.moe_act(g, u, pg[5], pd[4], code_act, awq.get("down_proj"),
                               e_sorted if awq.get("down_proj") is not None else None)
             aq, asf = ext.nvfp4_quant_act(act)
@@ -1166,16 +1184,23 @@ class MoEBlock(nn.Module):
             return d.view(t, self.top_k, -1).sum(dim=1).to(x.dtype)
         pg, pu = self._stacks["gate_proj"], self._stacks["up_proj"]
         awq = getattr(self, "_stacks_awq", {})
-        if awq.get("gate_proj") is not None:
+        distinct = bool(awq.get("up_distinct"))
+        if awq.get("gate_proj") is not None or distinct:
             # échelle AWQ par expert : la ligne (jeton, expert) est divisée par
             # s[e] avant les projections, comme ChannelScaler.apply en boucle
-            x_g = (x[tok.long()].to(torch.bfloat16)
-                   / awq["gate_proj"][eid.long(), :x.shape[1]]).to(x.dtype)
+            def _ligne(table):
+                xe = x[tok.long()].to(torch.bfloat16)
+                if table is not None:
+                    xe = xe / table[eid.long(), :x.shape[1]]
+                return xe.to(x.dtype)
+            x_g = _ligne(awq.get("gate_proj"))
+            x_u = _ligne(awq.get("up_proj")) if distinct else x_g
             tok_g = torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
         else:
-            x_g, tok_g = x, tok
+            x_g, x_u, tok_g = x, x, tok
         if (pg[0] == "nvfp4" and pu[0] == "nvfp4" and ext is not None
                 and hasattr(ext, "nvfp4_gemv_grouped_gateup")
+                and not distinct                       # un seul x pour gate et up
                 and pg[4] * 4 <= 48 * 1024):
             # gate, up et SiLU·up en un lancement, activation bf16 lue telle quelle
             act = ext.nvfp4_gemv_grouped_gateup(
@@ -1184,6 +1209,7 @@ class MoEBlock(nn.Module):
                 1 if self.act == "gelu_tanh" else 0)[:, :pg[5]]
         elif (pg[0] == "nvfp4_table" and pu[0] == "nvfp4_table" and ext is not None
                 and hasattr(ext, "nvfp4_gemv_grouped_gateup_table")
+                and not distinct
                 and pg[4] * 4 <= 48 * 1024):
             # pendant table (bead pds) : couche au placement hétérogène,
             # chaque expert lu par adresse plutôt que par une pile contiguë
@@ -1194,7 +1220,7 @@ class MoEBlock(nn.Module):
         else:
             x32 = x_g.to(torch.float32)
             g = self._grouped(x32, pg, eid, tok_g)
-            u = self._grouped(x32, pu, eid, tok_g)
+            u = self._grouped(x32 if x_u is x_g else x_u.to(torch.float32), pu, eid, tok_g)
             act = self._act(g) * u              # [G, I] fp32
         seq = torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
         if awq.get("down_proj") is not None:
