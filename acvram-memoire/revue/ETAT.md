@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **NOUVEAU BOGUE DE DÉCODAGE (1016cf2) : le décodage GLM avec préfixe encode_brut ne reproduit PAS le prefill — arbitre b=12 60/84 (b=4 23/28, b=1 6/7), |Δ| médian ≈9 dès le 1er jeton généré (sans préfixe : 80/84, |Δ|≈0,5). Défaut du chemin décodage ou de l'entrée Engine face aux jetons spéciaux de tête — → poste4, priorité avant toute colonne qualité du duel. AWQ experts réfutée comme cause de l'inversion privé/public (cause encore ouverte, piste KV int8). Duel : temps tenu (21,0 ms), affiché « colonne PPL en refonte ».** poste2 : Hadamard puis EXL3 propres (Coder+GLM).
+Mis à jour : 16/09 (initial, poste7). **2e BOGUE DE PRODUCTION TROUVÉ (df9d5f8) : Engine.__init__ (runner.py:348) prend min(num_blocks paginés, défaut=1024) ; GLM (MLA = latent contigu, sans cache paginé) hérite d'un budget FIXE de 16 384 jetons quel que soit le VRAM/plan réel — dès que la somme des jetons vivants dépasse ça (ex. 12×2k), les réponses sont coupées avant max_tokens SANS message. Correctif à faire dans Engine (budget de blocs = plan, pas un défaut). Instrument PPL décodage corrigé (12/12 séquences, 24 564 cibles) mais la passe attend le correctif du bogue de décodage (poste4, priorité en cours).** poste2 : Hadamard puis EXL3 propres (Coder+GLM).
 
 ## Chantiers ouverts et scellés
 
