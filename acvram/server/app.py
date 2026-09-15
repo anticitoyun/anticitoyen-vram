@@ -906,7 +906,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             prompt_text = ""
         else:
             prompt_text = prompt[0] if isinstance(prompt, list) else prompt
-            prompt_ids = _encode(tokenizer, str(prompt_text))
+            prompt_ids = _encode(tokenizer, str(prompt_text), brut=True)
         params = _params_from(req, 256)
         request_id, q = await service.submit(prompt_ids, params)
 
@@ -944,7 +944,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
 
         data, total = [], 0
         for i, item in enumerate(inputs):
-            ids = item if isinstance(item, list) else _encode(tokenizer, str(item))
+            ids = item if isinstance(item, list) else _encode(tokenizer, str(item), brut=True)
             ids = ids[: engine.max_model_len]
             if not ids:
                 raise HTTPException(400, "entrée vide")
@@ -965,10 +965,13 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
     return app
 
 
-def _encode(tokenizer: Optional[Tokenizer], text: str) -> list[int]:
+def _encode(tokenizer: Optional[Tokenizer], text: str, brut: bool = False) -> list[int]:
+    """``brut`` : invite de complétion brute (pas de gabarit rendu) — le
+    tokeniseur pose alors ses jetons spéciaux et le préfixe du gabarit
+    (``[gMASK]<sop>`` sur GLM) ; le chemin conversation les a déjà."""
     if tokenizer is None:
         raise HTTPException(500, "aucun tokeniseur trouvé dans le répertoire du modèle")
-    ids = tokenizer.encode(text)
+    ids = tokenizer.encode_brut(text) if brut else tokenizer.encode(text)
     if not ids:
         raise HTTPException(400, "l'invite s'est encodée en zéro jeton")
     return ids
