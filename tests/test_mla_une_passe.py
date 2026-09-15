@@ -35,7 +35,7 @@ def _ref64(q, caches, lens, scale):
     out = torch.zeros(B, H, R, dtype=torch.float64, device=q.device)
     for b in range(B):
         n = int(lens[b]) + 1                                  # r <= len, comme mla_scores
-        k = caches[b][:n].double()
+        k = caches[b][:n].double()                            # bf16 ou float64 (fp8 déquantifié exact)
         s = (q[b].double() @ k.T) * scale                     # [H, n]
         p = torch.softmax(s, dim=-1)
         out[b] = p @ k[:, :R]
@@ -150,12 +150,13 @@ def test_cache_fp8_meme_arithmetique_sur_le_dequantifie():
     assert c8[0].shape == (L, W + FP8_PAD)
     ptrs8 = torch.tensor([c.data_ptr() for c in c8], dtype=torch.int64, device=dev)
     y8 = ext.mla_decode_1p(q, ptrs8, None, lens_t, L, R, scale, True)
-    deq = [_fp8_dequant_rows(c, W).contiguous() for c in c8]
-    ptrs_d = torch.tensor([c.data_ptr() for c in deq], dtype=torch.int64, device=dev)
-    y_d = ext.mla_decode_1p(q, ptrs_d, None, lens_t, L, R, scale, False)
+    # référence float64 sur les valeurs EXACTES code × échelle (un cache bf16
+    # déquantifié arrondirait code × s à 8 bits : 1,7e-3 d'écart, t-qa 3a1d2fd)
+    deq64 = [_fp8_dequant_rows(c, W, torch.float64) for c in c8]
+    ref = _ref64(q, deq64, lens, scale)
     torch.cuda.synchronize()
-    rel = ((y8.double() - y_d.double()).norm(dim=-1) / y_d.double().norm(dim=-1).clamp(min=1e-30)).max().item()
-    assert rel <= 1e-5, f"fp8 sur codes vs bf16 sur déquantifié : {rel:.2e}"
+    rel = ((y8.double() - ref).norm(dim=-1) / ref.norm(dim=-1).clamp(min=1e-30)).max().item()
+    assert rel <= 1e-4, f"fp8 sur codes vs float64 sur code × échelle : {rel:.2e}"
     y_bf = ext.mla_decode_1p(q, ptrs, None, lens_t, L, R, scale, False)
     cos = torch.nn.functional.cosine_similarity(y8.double().reshape(B * H, R), y_bf.double().reshape(B * H, R), dim=-1)
     print(f"\nfp8 vs bf16 d'origine : cos min {cos.min().item():.6f}")
