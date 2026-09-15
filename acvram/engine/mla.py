@@ -324,9 +324,29 @@ class MLAttention(nn.Module):
             self.qa_kv = empiler([self.q_a_proj, self.kv_a_proj])
             if self.qa_kv is not None:
                 self.q_a_taille = int(self.q_a_proj.qweight.shape[0])
+            self._marquer_etroit()
             return self.qa_kv is not None
         self.q_kv = empiler([self.q_proj, self.kv_a_proj])
+        self._marquer_etroit()
         return self.q_kv is not None
+
+    def _marquer_etroit(self) -> None:
+        """Projections int8 du décodage (qa_kv / q_kv, q_b, o) sur le GEMM
+        étroit à tensor cores (narrow_gemm, M ≤ 16) au lieu du GEMV int8 —
+        poste7-duel-verdict § 14 (i) : int8_gemv<4,12> coûtait 4,4 ms/pas à
+        b=12 (31 µs par lancement pour ~3 Mo : borné par le calcul, pas par
+        les octets), attendu −2,0 ms, même arithmétique à l'ordre des sommes
+        près (arbitre ≥ 80/84). ACVRAM_NARROW_MLA=0 : témoin (GEMV)."""
+        if os.environ.get("ACVRAM_NARROW_MLA", "1") != "1":
+            return
+        for w in (getattr(self.qa_kv, "qweight", None), getattr(self.q_kv, "qweight", None),
+                  getattr(getattr(self, "q_b_proj", None), "qweight", None),
+                  getattr(getattr(self, "o_proj", None), "qweight", None)):
+            if w is not None and getattr(w, "format", "") == "int8":
+                try:
+                    w.etroit = True
+                except (AttributeError, TypeError):
+                    pass
 
     # -- chemin à formes fixes (graphes CUDA) --------------------------------
     def new_static(self, device: torch.device, max_len: int,

@@ -678,7 +678,11 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
     if ext is not None and t.qweight.is_cuda and n <= gemv_threshold:
         if k_pad != xf.shape[-1]:
             xf = torch.nn.functional.pad(xf, (0, k_pad - xf.shape[-1]))
-        if (_NARROW_GEMM and not sortie_fp32 and _NARROW_MIN <= n <= 16 and k_pad % 64 == 0
+        # `t.etroit` : tenseur désigné pour le GEMM étroit indépendamment du
+        # réglage global (les projections int8 q/kv/o de l'attention MLA,
+        # poste7-duel-verdict § 14 (i) : int8_gemv<4,12> = 4,4 ms/pas à b=12)
+        etroit = _NARROW_GEMM or getattr(t, "etroit", False)
+        if (etroit and not sortie_fp32 and _NARROW_MIN <= n <= 16 and k_pad % 64 == 0
                 and t.group_size % 64 == 0 and xf.dtype == torch.bfloat16 and hasattr(ext, "narrow_gemm")):
             y = ext.narrow_gemm(t.qweight.contiguous(), None, t.scales.contiguous(), t.zeros.contiguous(),
                                 xf.contiguous(), k_pad, t.group_size, 1.0, _narrow_rows(t.qweight.shape[0]))
