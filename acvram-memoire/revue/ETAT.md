@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **Générique CLOS (poste1, 4a39339) : EAGER et GRAPHES sur Coder-30B donnent 3/84 CHACUN, mêmes positions, deltas identiques au flottant près — un GraphRunner défaillant ne reproduirait pas fortuitement l'erreur du chemin sans capture ; les 3/84 = écart décodage/prefill déjà connu (témoin Coder). Aucun défaut générique de rejeu. GLM _mla_lot reste propre à GLM, poste4 seule ; cercle resserré sur `h` (entrée au pas 2, dans fill). Plancher eager GLM = 66-67,6 ms.** Objectif : duel retiré, à refaire après correctif GLM-spécifique ; ensuite (2) table à 5 moteurs.
+Mis à jour : 16/09 (initial, poste7). **CAUSE TROUVÉE (7bdde94) : PAS MLA. Caches latents identiques au bit (fixe=eager) aux pas 1-2 ; le défaut est `lm_head` en bf16 dans `forward_fixed` (model.py:2146/2153) alors que `forward` eager le fait en fp32 (correctif a5fac1c ACVRAM_LOGITS_BF16 jamais porté au chemin fixe). Résolution bf16 à 133 = 1,0 → logits GLM massacrés (marges ~0,3), Coder peu touché (25/28), mla1-3 innocents mais à rejuger avec la tête fp32. Correctif : h.to(torch.float32) aux deux lignes.** Objectif : duel retiré, à refaire après correctif lm_head fp32 ; ensuite (2) table à 5 moteurs.
 
 ## Chantiers ouverts et scellés
 
