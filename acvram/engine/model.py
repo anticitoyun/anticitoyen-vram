@@ -1461,13 +1461,13 @@ _MOE_MMA_KS = int(os.environ.get("ACVRAM_MOE_MMA_KS", "128"))
 _MOE_DECODE_MMA = os.environ.get("ACVRAM_MOE_DECODE_MMA", "1") == "1"
 _MOE_DECODE_MMA_BT = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_BT", "16"))
 _MOE_AWQ_TEMOIN = int(os.environ.get("ACVRAM_MOE_AWQ_TEMOIN", "0"))
-# Lot minimal pour le chemin MMA : 9 (godets 12 et 16 seulement). Courbe de
-# poste3, 15/09, MMA/GEMV : b=2 +36 % ms / −3,5 % J ; b=3 +27 / −6,3 ; b=4 +24 /
-# +2,2 ; b=6 +18 / +2,7 ; b=12 −6,4 / −13,2 — le coût fixe de la MMA
-# (≈ 2,0-2,3 ms/pas : 3 lancements + glue) ne s'amortit qu'à 12. Le 6
-# provisoire servait b=5-8 (godet 8) à −18 % de débit. À remesurer après
-# route+pack (la glue tombe).
-_MOE_DECODE_MMA_MIN_T = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_MIN_T", "9"))
+# Lot minimal pour le chemin MMA : 5 (godets 8, 12 et 16 ; 2 et 4 en GEMV).
+# Courbe de poste3, 15/09, MMA/GEMV : b=2 +36 % ms / −3,5 % J ; b=3 +27 / −6,3 ;
+# b=4 +24 / +2,2 ; b=12 −6,4 / −13,2. Le 9 (v0.6.3) laissait le godet 8 au
+# GEMV ; après route+pack la cellule b=5 (poste3, 16/09,
+# revue/verdict-cellule-b5-16-09.md) donne ms −0,3 % (égalité) et J −4,1 % :
+# la GEMM sort du plafond 400 W (SM 2 937 MHz au lieu de 2 727) → 5.
+_MOE_DECODE_MMA_MIN_T = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_MIN_T", "5"))
 # MoE fusionné au décodage (port b12x, 15/09) : coupé tant que les seuils de
 # poste7 ne sont pas tenus (≤ 75 µs/couche, pas b=12 ≤ 11,3 ms, J ≤ 0,38).
 _MOE_DECODE_FUSED = os.environ.get("ACVRAM_MOE_DECODE_FUSED", "0") == "1"
