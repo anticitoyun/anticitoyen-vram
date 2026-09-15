@@ -1,7 +1,7 @@
 # AWQ par expert : gate et up à échelles distinctes dans la pile — 15/09 (poste4)
 
-Ordre de chef (chantier 1) ; **patch préparé sur `poste4`, non fusionné** : attend la
-note de décision de poste7. Contexte : `revue/awq-pile-15-09.md`, `revue/poste7-glm-awq-pile-15-09.md`.
+Ordre de chef (chantier 1) ; décision poste7 (a) `poste7-glm-gateup-16-09` ; témoin plancher
+d'poste1 conforme (2845b31) → **prêt à fusionner** (16/09 06:45). Contexte : `revue/awq-pile-15-09.md`, `revue/poste7-glm-awq-pile-15-09.md`.
 
 ## Ce que le patch change
 - Chargeur (`_try_build_stacks`) : plus de refus « gate ≠ up ». Tables égales → une seule table
@@ -45,6 +45,7 @@ deux côtés (sinon MMA=0 n'aurait pas rendu 16/16). Le critère « 2 ulp contre
 peut pas être tenu par le chemin W4A4 par construction — c'est la table des trois issues de poste7
 (`poste7-glm-w4a4-16-09`) qui tranche : bogue (non), W4A4 coûte (à mesurer en PPL), métrique.
 
-## Reste avant fusion
-Note de poste7 ; tests carte ; coût mesuré distinct vs égal (b=12) ; PPL GLM avec échelles
-distinctes (poste2).
+## Reste
+Coût mesuré distinct vs égal (b=12, avec le converti hétérogène reconverti par poste2) ; pas GLM
+b=12 ≤ 1,03× (campagne `scratchpad/campagne-glm-gateup-16-09.sh`) ; montée 0.6.6 (MIN_T=5 déjà
+câblé bdb9f14, narrow par défaut selon le verdict PPL b=12 de poste2).
