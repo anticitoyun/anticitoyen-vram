@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). Objectif : duel GLM-4.7-Flash NVFP4 b=12 contre vLLM RÉFUTÉ 0,7-1,3× (×4,08, `verdict-duel-glm-prise-a-16-09` + réserve § : vLLM à 1,056 PPL, non apparié, bras apparié = ModelOpt par nous plus tard) — objectif TRANCHÉ par l'utilisateur (16/09, « Go ») : (1) parité MLA sur GLM (commits poste4, scellés `poste7-duel-verdict` §6) puis (2) table à 5 moteurs (`poste7-comparatif-16-09`).
+Mis à jour : 16/09 (initial, poste7). **ERRATUM DUEL (23dc9f3) : le régime HYBRID_SLOTS=12 (celui du duel) calcule une mauvaise attention après un prompt réel — arbitre prefill 58/84 sur ce71723 (défaut ET boucle, identiques), 81/84 seulement à 4 créneaux. Le chiffre ×4,08 (56,1 ms) est RETIRÉ, à refaire. Les temps MLA (43,9→17,2 ms) restent des temps, pas des temps d'un calcul juste — toutes les équivalences antérieures (mla1-3, arbitre CONFORME 81/84) étaient à 4 créneaux, pas 12 : ne valident PAS le régime réel.** Objectif : duel GLM-4.7-Flash NVFP4 b=12 contre vLLM — chiffre retiré, à refaire après correctif du régime 12 créneaux (poste4) ; ensuite (2) table à 5 moteurs.
 
 ## Chantiers ouverts et scellés
 
