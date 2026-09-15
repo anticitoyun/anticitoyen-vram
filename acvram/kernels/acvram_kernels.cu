@@ -4350,12 +4350,17 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
     static_assert(HMAX <= 32, "HMAX <= 32 : une lane par tete pour l'ecriture des scores");
     const int b = blockIdx.x, s = blockIdx.y, tid = threadIdx.x;
     const int warp = tid >> 5, lane = tid & 31;
-    const int WP = W + 8;                                        // foulée (éléments) d'une ligne de tuile
+    // foulée d'une ligne de tuile : W+8 éléments bf16 (1 168 o) ou, en FP8,
+    // W+16 OCTETS — un multiple de 16 o dans les deux cas, condition des
+    // lectures uint4 en shared (W+8 octets = 584 : adresse mal alignée,
+    // CUDA_ERROR_MISALIGNED_ADDRESS, t-qa 89bb888)
+    const int WP = FP8 ? W + 16 : W + 8;
     extern __shared__ __align__(16) unsigned char mla_smem[];
     float *q_s = reinterpret_cast<float *>(mla_smem);                        // [H][W]
     __nv_bfloat16 *tile = reinterpret_cast<__nv_bfloat16 *>(q_s + (size_t)H * W);   // [TL][WP] bf16 ou codes
     unsigned char *tile8 = reinterpret_cast<unsigned char *>(tile);          // FP8 : [TL][WP] codes
-    float *S_s = reinterpret_cast<float *>(tile + (size_t)TL * WP);         // [HMAX][TL]
+    const size_t tuile_octets = FP8 ? (size_t)TL * WP : (size_t)TL * WP * sizeof(__nv_bfloat16);
+    float *S_s = reinterpret_cast<float *>(reinterpret_cast<unsigned char *>(tile) + tuile_octets);   // [HMAX][TL]
     float *P_s = S_s + HMAX * TL;                                            // [HMAX][TL]
     float *m_s = P_s + HMAX * TL, *l_s = m_s + HMAX, *a_s = l_s + HMAX;
     float *sc_s = a_s + HMAX;                                                // FP8 : [TL] échelles de ligne
@@ -4564,6 +4569,7 @@ torch::Tensor mla_decode_1p(torch::Tensor q_eff, c10::optional<torch::Tensor> ca
     auto o = torch::empty({B, H, (long)rank}, q_eff.options());
     auto stream = at::cuda::getCurrentCUDAStream();
     const int HMAX = H <= 20 ? 20 : 32;
+    // tuile : TL lignes de (W+8) bf16 ; en fp8 TL lignes de (W+16) octets, plus petite
     const size_t shm = (size_t)H * W * sizeof(float) + (size_t)TL * (W + 8) * sizeof(__nv_bfloat16)
                        + (size_t)2 * HMAX * TL * sizeof(float) + 3 * HMAX * sizeof(float)
                        + (size_t)(TL + 256) * sizeof(float);
