@@ -6,7 +6,7 @@ Mis à jour : 16/09 (initial, poste7). Objectif : duel GLM-4.7-Flash NVFP4 b=12 
 
 | chantier | qui | scellé | réfuté → | note |
 |---|---|---|---|---|
-| MLA commits 1+2 FAITS : 21,44→17,62 ms (mla_* 6,45→2,32 ≤3 TENU, bit-identique, PPL 1,000000). Bras narrow GLM : −0,65 ms seul (fusion projections ≈ −2 ms attendus, narrow OK à garder ON). Commit 3 (latent fp8, 89bb888, 4 bras) — EN COURS, verrou pris 10:19 ~45 min | poste3 | mla3 : PPL ± 0,004, mla_* −0,2 à −0,5 ms si LATENT_FP8 | — | `verdict-mla2-16-09` |
+| MLA commit 3 (89bb888, corrigé 3a1d2fd) : lancements 2 541→1 835 ; pas A 21,58 / B 21,43 / C 17,17 ms ; A/B/C bit-identiques, PPL 1,000000. B (prep seul) RÉFUTÉ en temps (neutre, vaut par les lancements). Reste vs vLLM 15,1 : 2,1 ms, presque tout dans 387 GEMV int8 → fusion des projections. **Bras D (fp8) EN COURS** (mla4-poste3, ~35 min) | poste3 | D : PPL ± 0,004, mla_* −0,2/−0,5 ms | — | `verdict-mla3-16-09` |
 | **défaut d'instrument** : PPL GLM tronque 4/12 séquences (kv_max_tokens épuisé, 22 664/24 564 jetons) — B/A valide, PPL absolue non ; à corriger avant toute PPL GLM publiée | — | — | — | `verdict-mla1-16-09` |
 | résidence dynamique des experts (hors VRAM), après MLA | poste1 (mesure à sec au retour) | fréquence d'activation : ≥ 60 % sur 50 % des experts (réfuté < 60 % → sans objet) | < 60 % → écarté | `poste7-avis-exterieur` |
 | noyau v2 par ligne (877169c/1b8ddfe, dans main) | poste4 | compteurs 0/0, 6,3 s, nominal : TENUS ; PPL alpha-commun 1,0277 **RÉFUTÉE** (> 1,015) ; -k48 1,0183 **RÉFUTÉE** (> 1,010) — coût = E2M1 sur les 3 sites, pas les blocs à zéro (flush 0 ne rend que 0,003/0,022) | → poste7 ; sonde par étape poste1 ; cb2784b | `verdict-reppl-sage7` |
