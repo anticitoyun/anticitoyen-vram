@@ -6,7 +6,7 @@ Mis à jour : 16/09 (initial, poste7). Objectif : duel GLM-4.7-Flash NVFP4 b=12 
 
 | chantier | qui | scellé | réfuté → | note |
 |---|---|---|---|---|
-| noyau MLA une passe (cu:4050-4180) : cache latent lu 2×/tête → 1 lecture/pas (20 têtes, mma bf16 M=32, softmax en ligne, split-L) — 2e commit : cache latent fp8 par ligne | poste4 | mla_* ≤ 6 ms b=12 ctx 2048 (réfuté > 10 → ncu) ; pas ≤ 30 ms (réfuté > 36 → nsys) ; top-1 identique, cos ≥ 0,9999, PPL 3 tranches ± 0,004 ; attendu ~0,55-0,6× vLLM, pas la parité | > 10/36 → ncu/nsys | `poste7-duel-verdict`, `poste7-avis-exterieur` |
+| noyau MLA une passe — 2e commit : cache latent fp8 par ligne | poste4 | mla_* ≤ 6 ms ; pas ≤ 30 ms ; top-1 identique, cos ≥ 0,9999, PPL ± 0,004 ; **nsys (670cd63)** : 15 534 lancements/pas (Coder 1 517) — MLA séquence par séquence (2 845 int8_gemv b=1, 5,6 ms), ~5 000 cat (10 ms), 8 ms élémentaires, trou 5,3 ms ; attention 6,4 ms, MoE 6,3 ms ; en-tête : batcher au lot 12 → 43,9 → ~19-22 ms attendu (vLLM 15,1) | > 10/36 → ncu/nsys | `poste7-duel-verdict`, `verdict-glm-nsys-pplvllm` |
 | résidence dynamique des experts (hors VRAM), après MLA | poste1 (mesure à sec au retour) | fréquence d'activation : ≥ 60 % sur 50 % des experts (réfuté < 60 % → sans objet) | < 60 % → écarté | `poste7-avis-exterieur` |
 | noyau v2 par ligne (877169c/1b8ddfe, dans main) | poste4 | compteurs 0/0, 6,3 s, nominal : TENUS ; PPL alpha-commun 1,0277 **RÉFUTÉE** (> 1,015) ; -k48 1,0183 **RÉFUTÉE** (> 1,010) — coût = E2M1 sur les 3 sites, pas les blocs à zéro (flush 0 ne rend que 0,003/0,022) | → poste7 ; sonde par étape poste1 ; cb2784b | `verdict-reppl-sage7` |
 | contrôle int8 AWQ (à sec) | poste1 | FAIT : 0,982 / 0,983 ≥ 0,9 → retrait des tables int8 | — | `verdict-glm-awq-int8` |
