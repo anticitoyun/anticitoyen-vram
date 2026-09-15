@@ -401,6 +401,31 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _calib_source(use_awq: bool, calib_file: Optional[str]) -> dict:
+    """Nom + sha256 du corpus de calibration réellement utilisé.
+
+    poste7 (`poste7-corpus-16-09.md` § 8) : le manifeste ne portait jamais QUEL
+    corpus avait servi à la calibration — le doute sur GLM -k48 (calibré
+    sur wiki-gptq, le corpus d'ÉVAL ?) ne pouvait pas se trancher en lisant
+    le manifeste seul. Nom + sha256 du fichier réellement utilisé, ou du
+    corpus intégré (DEFAULT_CALIB_TEXT) quand aucun `--calib-file` n'est
+    fourni, ou une absence explicite quand awq=False — jamais une absence
+    ambiguë.
+    """
+    import hashlib
+    if not use_awq:
+        return {"fichier": None, "sha256": None, "note": "aucune (awq=False)"}
+    if calib_file and os.path.isfile(calib_file):
+        with open(calib_file, "rb") as fh:
+            sha = hashlib.sha256(fh.read()).hexdigest()
+        return {"fichier": os.path.abspath(calib_file), "sha256": sha, "note": None}
+    from .quant.collect import DEFAULT_CALIB_TEXT
+    sha = hashlib.sha256("".join(DEFAULT_CALIB_TEXT).encode("utf-8")).hexdigest()
+    return {"fichier": None, "sha256": sha,
+            "note": "corpus integre DEFAULT_CALIB_TEXT "
+                    "(acvram/quant/collect.py, aucun --calib-file fourni)"}
+
+
 def cmd_convert(args: argparse.Namespace) -> int:
     from .engine.config import load_model_spec
     from .hardware.detect import detect_rig
@@ -494,6 +519,8 @@ def cmd_convert(args: argparse.Namespace) -> int:
             use_awq = False
             stats = None
 
+    calib_source = _calib_source(use_awq, args.calib_file)
+
     opts = ConversionOptions(
         out_dir=args.out, awq=use_awq, use_hadamard=args.hadamard,
         group_size=args.group_size, n_grid=args.grid,
@@ -509,7 +536,8 @@ def cmd_convert(args: argparse.Namespace) -> int:
         promotion_cout_max_mib=args.promotion_cout_max,
         format_impose=args.format, mesurer_kld=args.mesurer_kld,
         alpha_commun_gate_up=args.alpha_commun_gate_up,
-        hadamard_experts=args.hadamard_experts)
+        hadamard_experts=args.hadamard_experts,
+        calib_source=calib_source)
 
     last = [0.0]
 

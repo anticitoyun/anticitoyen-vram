@@ -144,6 +144,14 @@ class ConversionOptions:
     # à l'essai, pas un supplément à l'échelle). Défaut faux : n'affecte
     # aucune conversion existante sans le demander explicitement.
     hadamard_experts: bool = False
+    # poste7 (`poste7-corpus-16-09.md` § 8) : nom + sha256 du fichier de
+    # calibration reellement utilise (ou du corpus integre, ou une absence
+    # explicite si awq=False) -- calcule par cli.py, porte au manifeste via
+    # `asdict(opts)` (`options.calib_source`). Ce champ ne pilote AUCUNE
+    # decision de conversion, il ne fait que documenter ce qui a servi :
+    # le doute sur GLM -k48 (calibre sur le corpus d'eval wiki-gptq ?) ne
+    # pouvait pas se trancher en lisant le manifeste seul.
+    calib_source: Optional[dict] = None
 
 
 @dataclass
