@@ -60,7 +60,23 @@ class Tokenizer:
         prefixe = self.prefixe_gabarit
         if not prefixe or text.lstrip().startswith(prefixe) or len(ids) > len(sans):
             return ids
-        return self.encode(prefixe, add_special_tokens=False) + ids
+        pre = self.encode(prefixe, add_special_tokens=False)
+        # Garde (poste7) : n'injecter que si le littéral s'encode ENTIÈREMENT en
+        # jetons spéciaux (vocabulaire ajouté) — un gabarit qui commence par
+        # du texte ordinaire n'est pas un préfixe de modèle.
+        if not self._que_des_speciaux(pre):
+            return ids
+        return pre + ids
+
+    def _que_des_speciaux(self, ids: list[int]) -> bool:
+        getter = getattr(self.backend, "get_added_tokens_decoder", None)
+        if getter is None or not ids:
+            return False
+        try:
+            speciaux = set(getter().keys())
+        except Exception:                        # noqa: BLE001
+            return False
+        return all(i in speciaux for i in ids)
 
     @property
     def eos_token_id(self) -> Optional[int]:

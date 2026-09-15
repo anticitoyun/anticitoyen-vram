@@ -33,6 +33,9 @@ class _Backend:
     def token_to_id(self, tok):
         return self.VOCAB.get(tok)
 
+    def get_added_tokens_decoder(self):
+        return {i: t for t, i in self.VOCAB.items()}          # les seuls jetons spéciaux
+
 
 GLM = "[gMASK]<sop>\n{%- if tools -%}\n<|system|>{{ tools }}{%- endif -%}{{ messages[0].content }}"
 LLAMA = "{{ bos_token }}{% for m in messages %}{{ m.content }}{% endfor %}"
@@ -66,4 +69,22 @@ def test_bos_du_tokeniseur_suffit():
 
 def test_sans_gabarit_rien_n_est_ajoute():
     t = Tokenizer(backend=_Backend(), config={}, template=None, template_source="t")
+    assert t.encode_brut("bonjour") == t.encode("bonjour")
+
+
+def test_gabarit_qui_commence_par_du_texte_ordinaire_n_injecte_rien():
+    """Garde (poste7) : le littéral de tête ne vaut préfixe que s'il s'encode
+    entièrement en jetons spéciaux — du texte ordinaire, un espace ou un
+    commentaire en tête de gabarit n'ajoutent rien."""
+    for gabarit in ("Tu es un assistant.\n{{ messages[0].content }}",
+                    "   {# commentaire #}{{ messages[0].content }}",
+                    "[gMASK] bonjour {{ messages[0].content }}"):
+        t = Tokenizer(backend=_Backend(), config={}, template=gabarit, template_source="t")
+        assert t.encode_brut("bonjour monde") == t.encode("bonjour monde"), gabarit
+
+
+def test_backend_sans_vocabulaire_ajoute_n_injecte_rien():
+    class _SansAjoutes(_Backend):
+        get_added_tokens_decoder = None
+    t = Tokenizer(backend=_SansAjoutes(), config={}, template=GLM, template_source="t")
     assert t.encode_brut("bonjour") == t.encode("bonjour")
