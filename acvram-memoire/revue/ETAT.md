@@ -12,7 +12,7 @@ Mis à jour : 16/09 (initial, poste7). Objectif : duel GLM-4.7-Flash NVFP4 b=12 
 | reconversion GLM indépendante (après commit poste4) | poste2 | PPL NOMINAL MMA=1 ≤ 1,005 | > 1,010 → métrique W4A4 cb2784b | § 1.6 |
 | pas b=12 reconverti, à code égal | poste4 | ≤ 1,012 × `-sansawq` | > 1,03× → diff manifestes | § 5.4 |
 | re-tampon 0.6.6 narrow OFF | poste3 | FAIT : 13,60 ms / 806 t/s / 0,494 J (ON 11,38 / 0,412) | — | `verdict-retampon-cellule-narrow` |
-| cellule narrow 3 × 3 (0.6.7) | poste3 | FAIT : moyenne 0,9984 tenue, par-tranche fausse 3/3 (témoin 0,0001) → INDÉTERMINÉ, question à poste7 § 2 | — | `verdict-retampon-cellule-narrow` |
+| cellule narrow 3 × 3 (0.6.7) | poste3 | TENU (poste7 § 6) : moyenne 0,9984, aucune tranche > 1,004 → narrow ON par défaut en 0.6.7 ; 0.6.6 reste OFF ; condition par tranche retirée (mal posée) ; −1,2 % non attribué écrit tel quel | — | `verdict-retampon-cellule-narrow` |
 | duel prise A | poste3 | vLLM NVFP4 0,7-1,3× notre débit b=12 | — | `poste7-objectif-14-09` |
 
 ## File de carte (un bloc, une fusion de main par phase)
@@ -26,6 +26,10 @@ Mis à jour : 16/09 (initial, poste7). Objectif : duel GLM-4.7-Flash NVFP4 b=12 
 ## Dernier commit par branche
 
 main (voir git) · poste4 17d7132 (correctif, tests GPU t-qa.sh à faire par poste3 avant fusion) · poste2-usawq 989c657 fusionné · poste2 cb2784b (réserve) · poste1 dbb84c8 · poste3 — · poste8 1ec7225 (suspendue)
+
+## Bruit de l'instrument
+
+PPL teacher-forcing à 24 k jetons : étendue 0,008 entre tranches → tout scellé futur ± 0,004 minimum, ou 3 tranches.
 
 ## Suspendu / veille
 
