@@ -34,3 +34,11 @@ Prise B (ncu octets par jeton, `campagne-duel-glm-ncu-15-09.sh`) dira si vLLM li
 ## Réserve (poste7 § 6, 16/09)
 
 bras vLLM GadflyII à +5,4 points de PPL (1,056), hors seuil 1,02, non apparié : sa vitesse ne se classe pas — sans en faire une excuse, mêmes octets NVFP4 des deux côtés, notre ×4 est réel et se lit dans 15 534 lancements/pas. Bras vLLM apparié = conversion ModelOpt par nous (poste2, dans le comparatif 5 moteurs, pas avant).
+
+## ERRATUM FORMEL (16/09, poste7 § 10, cause : verdict-glm-slots12-erratum-16-09)
+
+**b=12 RETIRÉ.** Le régime mesuré (HYBRID_SLOTS=12) calcule une mauvaise attention
+après un prompt réel — arbitre prefill 58/84 (défaut ET boucle, identiques) contre
+81/84 à 4 créneaux. Le chiffre ×4,08 (56,1 ms) ne se lit plus comme une comparaison
+valide. b=1 et b=4 du duel : à revérifier par l'arbitre à leur configuration exacte
+avant republication.
