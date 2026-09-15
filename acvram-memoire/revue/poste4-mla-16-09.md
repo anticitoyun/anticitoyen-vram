@@ -30,6 +30,20 @@ mon attendu 24-28 ms (les 5,6 ms de GEMV lot 1 et ~8 ms de cat/copies tombent, l
 5,3 ms reste). Équivalence : top-1 identique, cos ≥ 0,9999 contre `ACVRAM_MLA_BATCH=1` sur
 16 positions × 2 couches ; PPL 3 tranches ± 0,004.
 
+Verdict poste3 (3f69c82) : TENU — 21,44 ms (témoin 43,66), 2 541 lancements (41 au-dessus de
+2 500), logits bit-identiques 768/768, PPL B/A = 1,000000.
+
+## Marche « RoPE + cat » (commit 1b) : préparation du lot en un noyau
+`mla_prep_batch(q, kvp, lens, cos32, sin32, k_b, w_norm, …) → (q_eff fp32 [B,nh,W], k_new bf16
+[B,W])` remplace par couche : RoPE (≈ 10 élémentaires), trois `cat`, l'einsum k_b (bmm +
+copies), la norme kv_a, la conversion fp32 — ≈ 15 lancements → 1. Arithmétique : RoPE
+opération par opération comme torch (cos/sin bf16, produits et somme arrondis bf16), norme =
+la réduction de `rmsnorm_bf16_kernel` à l'identique (k_new bit-identique), q_abs accumulé en
+fp32 puis arrondi bf16 (≤ 1 ulp de cuBLAS). Témoin `ACVRAM_MLA_PREP_NOYAU=0`. Tests :
+`test_module_batch_complet` (témoin bit-identique à forward_batch ; noyau ≤ 1 ulp de la boucle,
+caches identiques), `test_prep_batch_avec_rope` (k_new bit-identique, y ≤ 1 ulp).
+Prédiction : 2 541 → **≈ 1 850 lancements/pas** (−15 × 46), pas 21,4 → 19,5-20,5 ms.
+
 ## Commit 2 — attention à une passe (prêt sur `poste4-mla-1p`, 0309a03)
 `mla_decode_1p` : le cache latent lu une fois pour les H têtes (tuile de 32 lignes en
 shared, scores fp32 des H têtes — pas de mma bf16 sur q : 2⁻⁸ sur des scores ~10 aurait coûté
@@ -37,4 +51,15 @@ le cos ≥ 0,9999 —, softmax en ligne, o_lat en registres, tranches de L recom
 `ACVRAM_MLA_UNE_PASSE=0` rejoue les deux noyaux. Scellé : mla_* 6,4 → ≤ 3 ms. Fusionné sur
 poste4 après le verdict du commit 1.
 
-## Commit 3 — latent fp8 par ligne (`poste7-avis-exterieur` § 6), après le 2.
+## Commit 3 — latent fp8 par ligne (`poste7-avis-exterieur` § 6)
+Écrit, **défaut OFF** (`ACVRAM_MLA_LATENT_FP8=1` pour l'essai) : le cache des créneaux devient
+`[max_len, W+16] uint8` (W codes E4M3 + échelle fp32 s = amax/448 par ligne) ; `new_static`,
+`static_load` (quantifie), `static_export` (déquantifie), `_prep_decode` (torch) et
+`mla_ecrit_latent(…, fp8)` (noyau, bit-identique à `_fp8_quant_rows`) écrivent ce format ;
+`mla_decode_1p(…, fp8)` le lit : codes en shared, table E4M3→float, échelle de ligne appliquée
+au score et absorbée dans p_r — moitié des octets lus, même arithmétique fp32 ensuite (test :
+fp8 sur les codes == bf16 sur le déquantifié à 1e-5). Les deux noyaux d'avant restent bf16
+(fp8 force le chemin 1p). Attendu (poste7) : ≤ 0,5 ms de gain sur mla_* ; **réfuté si PPL 3
+tranches sort de ± 0,004** → bf16 gardé. Coût VRAM : −50 % sur le latent des créneaux.
+Prédiction : mla_* −0,2 à −0,5 ms ; PPL : E4M3 par ligne = 3 bits de mantisse sur un latent
+normé, je n'exclus pas un dépassement (vLLM KV fp8 : +5 points) — c'est la mesure qui dit.

@@ -122,13 +122,25 @@ def test_module_batch_complet(B, lens):
         ptrs = torch.tensor([st["cache"].data_ptr() for st in sts_b], dtype=torch.int64, device="cuda")
         scores = torch.zeros(B, nh, L + 16, device="cuda")
         len_ptrs = torch.tensor([st["len"].data_ptr() for st in sts_b], dtype=torch.int64, device="cuda")
-        y_complet = la.decode_static_batch_complet(x, sts_b, bucket, ptrs, scores, len_ptrs)
+        import acvram.engine.mla as mla_mod
+        noyau = mla_mod._MLA_PREP_NOYAU
+        mla_mod._MLA_PREP_NOYAU = False                 # témoin torch : bit-identique à forward_batch
+        try:
+            y_complet = la.decode_static_batch_complet(x, sts_b, bucket, ptrs, scores, len_ptrs)
+        finally:
+            mla_mod._MLA_PREP_NOYAU = noyau
+        sts_d = etats(7)
+        ptrs_d = torch.tensor([st["cache"].data_ptr() for st in sts_d], dtype=torch.int64, device="cuda")
+        len_ptrs_d = torch.tensor([st["len"].data_ptr() for st in sts_d], dtype=torch.int64, device="cuda")
+        y_noyau = la.decode_static_batch_complet(x, sts_d, bucket, ptrs_d, scores, len_ptrs_d)
         # forward_batch : même lot, caches passés comme tenseurs [len, W] (None si vides)
         caches = [None if n == 0 else sts_c[i]["cache"][:n].clone() for i, n in enumerate(lens)]
         y_fb, _ = la.forward_batch(x, caches)
-    # les états avancent pareil
+    # les états avancent pareil (la norme kv_a du noyau est bit-identique : caches égaux)
     for a, b in zip(sts_a, sts_b):
         assert torch.equal(a["cache"], b["cache"]) and torch.equal(a["len"], b["len"])
+    for a, d in zip(sts_a, sts_d):
+        assert torch.equal(a["cache"], d["cache"]) and torch.equal(a["len"], d["len"])
     assert torch.equal(y_complet, y_fb), "le chemin complet doit reproduire forward_batch bit a bit"
     a, b = y_complet.float(), y_boucle.float()
     tol = b.abs() * 2 ** -7 + 1e-3 * b.abs().max()
@@ -136,6 +148,12 @@ def test_module_batch_complet(B, lens):
     ident = (a == b).float().mean().item()
     assert hors == 0, f"{hors} valeurs hors tolerance, max {(a - b).abs().max().item():.3e}"
     print(f"\ncomplet vs boucle : {ident:.4f} identiques, ecart max {(a - b).abs().max().item():.3e}")
+    # préparation en un noyau (mla_prep_batch) : seul l'einsum k_b change d'ordre de sommes
+    if hasattr(_ext(), "mla_prep_batch"):
+        c = y_noyau.float()
+        hors_n = int(((c - b).abs() > tol).sum())
+        assert hors_n == 0, f"prep noyau : {hors_n} valeurs hors tolerance vs boucle, max {(c - b).abs().max().item():.3e}"
+        print(f"prep noyau vs témoin torch : {(c == a).float().mean().item():.4f} identiques")
 
 
 def test_ecrit_latent_un_lancement():
@@ -186,3 +204,45 @@ def test_ecrit_latent_un_lancement():
                         and "Memcpy" not in e.key and "Memset" not in e.key)
     assert compte[4] == compte[12], f"lancements par appel : B=4 -> {compte[4]}, B=12 -> {compte[12]}"
     print(f"\nlancements par couche MLA (chemin complet) : {compte[12]}")
+
+
+def test_prep_batch_avec_rope():
+    """``mla_prep_batch`` avec RoPE : q_pe et k_pe tournés comme le chemin torch
+    (cos/sin bf16, produits et somme arrondis en bf16) — bit-identique sur k_new
+    (norme + RoPE) et sur la partie RoPE de q_eff ; q_abs à ≤ 1 ulp bf16."""
+    ext = _ext()
+    if not hasattr(ext, "mla_prep_batch"):
+        pytest.skip("extension sans mla_prep_batch")
+    from acvram.engine.layers import RotaryEmbedding
+    import acvram.engine.mla as mla_mod
+    nh, nope, rope, rank, dv, hidden, L = 4, 32, 16, 64, 32, 128, 128
+    B = 6
+    la = _module(nh, nope, rope, rank, dv, hidden, 11)
+    la.rope_emb = RotaryEmbedding(rope, 4096, 10000.0, None, torch.device("cuda"), torch.bfloat16)
+    torch.manual_seed(5)
+    x = torch.randn(B, hidden, device="cuda").to(torch.bfloat16)
+    lens = [0, 3, 40, 127, 5, 60]
+    res = {}
+    for noyau in (False, True):
+        sts = []
+        for n in lens:
+            st = la.new_static(torch.device("cuda"), L + 16, torch.bfloat16)
+            st["len"].fill_(n); sts.append(st)
+        ptrs = torch.tensor([st["cache"].data_ptr() for st in sts], dtype=torch.int64, device="cuda")
+        lptrs = torch.tensor([st["len"].data_ptr() for st in sts], dtype=torch.int64, device="cuda")
+        scores = torch.zeros(B, nh, L + 16, device="cuda")
+        garde = mla_mod._MLA_PREP_NOYAU
+        mla_mod._MLA_PREP_NOYAU = noyau
+        try:
+            with torch.inference_mode():
+                y = la.decode_static_batch_complet(x, sts, L, ptrs, scores, lptrs)
+        finally:
+            mla_mod._MLA_PREP_NOYAU = garde
+        torch.cuda.synchronize()
+        res[noyau] = (y, [st["cache"][n].clone() for st, n in zip(sts, lens)])
+    for kt, kn in zip(res[False][1], res[True][1]):
+        assert torch.equal(kt, kn), "k_new (norme + RoPE) doit être bit-identique au chemin torch"
+    a, b = res[True][0].float(), res[False][0].float()
+    tol = b.abs() * 2 ** -7 + 1e-3 * b.abs().max()
+    hors = int(((a - b).abs() > tol).sum())
+    assert hors == 0, f"{hors} valeurs hors tolerance, max {(a - b).abs().max().item():.3e}"

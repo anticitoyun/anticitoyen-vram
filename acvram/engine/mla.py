@@ -28,6 +28,62 @@ __all__ = ["MLAttention", "MLA_BUCKET", "godet_mla"]
 # fin coûte davantage de graphes capturés (un par palier), mais chaque pas
 # lit moins. Réglable pour mesurer l'arbitrage.
 MLA_BUCKET = int(os.environ.get("ACVRAM_MLA_BUCKET", "128"))
+# Noyau MLA à une passe (poste7-duel-verdict-16-09 § 3) : le cache latent lu une
+# fois pour les H têtes au lieu de 2 × H fois (mla_scores + mla_reduce) ;
+# =0 rejoue les deux noyaux d'avant (témoin d'équivalence).
+_MLA_UNE_PASSE = os.environ.get("ACVRAM_MLA_UNE_PASSE", "1") == "1"
+# Préparation du lot (einsum k_b, RoPE, norme kv_a, cat, conversion fp32) en un
+# lancement `mla_prep_batch` au lieu d'une quinzaine (poste7-duel-verdict § 6.2,
+# marche « RoPE + cat ») ; =0 rejoue les opérations torch (témoin).
+_MLA_PREP_NOYAU = os.environ.get("ACVRAM_MLA_PREP_NOYAU", "1") == "1"
+# Cache latent des créneaux en fp8 E4M3 par ligne (poste7-avis-exterieur-16-09
+# § 6, commit 3 du chantier MLA) : une ligne = W codes + 16 octets (échelle
+# fp32 s = amax/448) ; la moitié des octets lus par l'attention. Lu par
+# mla_decode_1p seulement (les deux noyaux d'avant restent bf16). Réfuté si
+# la PPL sort de ± 0,004 → bf16 gardé ; défaut 0 tant que ce n'est pas mesuré.
+_MLA_LATENT_FP8 = os.environ.get("ACVRAM_MLA_LATENT_FP8", "0") == "1"
+FP8_PAD = 16
+
+
+def _fp8_quant_rows(x: torch.Tensor) -> torch.Tensor:
+    """[n, W] bf16 -> [n, W+16] uint8 : codes E4M3(x/s) puis s fp32 en octets
+    (même arithmétique que mla_ecrit_latent : amax par ligne, s = amax/448
+    divisé par un TENSEUR — tensor/scalaire multiplie par l'inverse)."""
+    n, W = x.shape
+    xf = x.to(torch.float32)
+    amax = xf.abs().amax(-1, keepdim=True)
+    s = torch.where(amax > 0, amax / torch.full_like(amax, 448.0), torch.ones_like(amax))
+    out = torch.zeros(n, W + FP8_PAD, dtype=torch.uint8, device=x.device)
+    out[:, :W] = (xf / s).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).view(torch.uint8)
+    out[:, W:W + 4] = s.contiguous().view(torch.uint8).reshape(n, 4)
+    return out
+
+
+def _fp8_dequant_rows(c: torch.Tensor, W: int, dtype=torch.bfloat16) -> torch.Tensor:
+    """[n, W+16] uint8 -> [n, W] : code × échelle de ligne."""
+    s = c[:, W:W + 4].contiguous().view(torch.float32)              # [n, 1]
+    return (c[:, :W].contiguous().view(torch.float8_e4m3fn).to(torch.float32) * s).to(dtype)
+
+
+def _est_fp8(st: dict) -> bool:
+    return st["cache"].dtype == torch.uint8
+
+
+def _mla_decode(ext, q_eff, cache, len_t, scores, bucket, rank, scale):
+    """Une séquence : q_eff [nh, W] fp32, cache [>= bucket, W] bf16 (ou fp8
+    [>= bucket, W+16] uint8) -> o_lat [nh, rank]."""
+    fp8 = cache.dtype == torch.uint8
+    if (_MLA_UNE_PASSE or fp8) and hasattr(ext, "mla_decode_1p"):
+        return ext.mla_decode_1p(q_eff.unsqueeze(0), None, cache, len_t.reshape(1),
+                                 bucket, rank, scale, fp8)[0]
+    return ext.mla_decode(q_eff, cache, len_t, scores, bucket, rank, scale)
+
+
+def _mla_decode_batch(ext, q, cache_ptrs, lens, scores, bucket, rank, scale, fp8=False):
+    """B créneaux : q [B, nh, W] fp32, table d'adresses [B] -> o_lat [B, nh, rank]."""
+    if (_MLA_UNE_PASSE or fp8) and hasattr(ext, "mla_decode_1p"):
+        return ext.mla_decode_1p(q, cache_ptrs, None, lens, bucket, rank, scale, fp8)
+    return ext.mla_decode_batch(q, cache_ptrs, lens, scores, bucket, rank, scale)
 
 
 def godet_mla(longueur: int) -> int:
@@ -197,9 +253,9 @@ class MLAttention(nn.Module):
                 len_t = torch.tensor(total - 1, dtype=torch.long, device=x.device)
                 scores_buf = torch.zeros(self.nh, bucket, dtype=torch.float32,
                                          device=x.device)
-                o_lat = ext.mla_decode(q_eff.to(torch.float32)[0].contiguous(),
-                                       C, len_t, scores_buf, bucket,
-                                       self.rank, self.scale)          # [nh, rank]
+                o_lat = _mla_decode(ext, q_eff.to(torch.float32)[0].contiguous(),
+                                    C, len_t, scores_buf, bucket,
+                                    self.rank, self.scale)             # [nh, rank]
                 if os.environ.get("ACVRAM_MLA_DEBUG_ECART"):
                     pos_dbg = torch.arange(bucket, device=x.device)
                     masque_dbg = pos_dbg > (total - 1)
@@ -275,8 +331,11 @@ class MLAttention(nn.Module):
     # -- chemin à formes fixes (graphes CUDA) --------------------------------
     def new_static(self, device: torch.device, max_len: int,
                    dtype: torch.dtype) -> dict:
-        return {"cache": torch.zeros(max_len, self.rank + self.rope,
-                                     dtype=dtype, device=device),
+        W = self.rank + self.rope
+        cache = (torch.zeros(max_len, W + FP8_PAD, dtype=torch.uint8, device=device)
+                 if _MLA_LATENT_FP8 and device.type == "cuda" else
+                 torch.zeros(max_len, W, dtype=dtype, device=device))
+        return {"cache": cache,
                 "len": torch.zeros((), dtype=torch.long, device=device),
                 # scores de travail du noyau fusionné [nh, max_len]
                 "scores": torch.zeros(self.nh, max_len, dtype=torch.float32,
@@ -288,13 +347,26 @@ class MLAttention(nn.Module):
             st["len"].zero_()
             return
         n = etat.shape[0]
-        st["cache"][:n].copy_(etat)
+        if _est_fp8(st):
+            st["cache"][:n].copy_(_fp8_quant_rows(etat))
+        else:
+            st["cache"][:n].copy_(etat)
         st["len"].fill_(n)
 
     @staticmethod
     def static_export(st: dict):
         n = int(st["len"].item())
+        if _est_fp8(st):
+            return _fp8_dequant_rows(st["cache"][:n], st["cache"].shape[1] - FP8_PAD)
         return st["cache"][:n].clone()
+
+    @staticmethod
+    def _ecrit_ligne(st: dict, k_new: torch.Tensor) -> None:
+        """Une ligne [1, W] à la position ``len`` du cache du créneau (bf16 ou fp8)."""
+        if _est_fp8(st):
+            st["cache"].index_copy_(0, st["len"].view(1), _fp8_quant_rows(k_new))
+        else:
+            st["cache"].index_copy_(0, st["len"].view(1), k_new)
 
     def _prep_decode(self, x: torch.Tensor, st: dict, bucket: int):
         """Préparation d'un jeton pour un créneau : projections, RoPE, norme,
@@ -313,7 +385,7 @@ class MLAttention(nn.Module):
         q_abs = torch.einsum('hrn,thn->thr', self.k_b.to(x.dtype), q_nope)
         q_eff = torch.cat([q_abs, q_pe], dim=-1)             # [1, nh, rank+rope]
         k_new = torch.cat([c, k_pe], dim=-1)                 # [1, rank+rope]
-        st["cache"].index_copy_(0, st["len"].view(1), k_new)
+        self._ecrit_ligne(st, k_new)
         return q_eff
 
     def _sortie_decode(self, x: torch.Tensor, st: dict, o_lat: torch.Tensor) -> torch.Tensor:
@@ -333,9 +405,16 @@ class MLAttention(nn.Module):
         q = torch.stack([self._prep_decode(x[i:i + 1], sts[i], bucket).to(torch.float32)[0]
                          for i in range(B)]).contiguous()          # [B, nh, W]
         lens = torch.stack([st["len"] for st in sts])
-        o_lat = ext.mla_decode_batch(q, cache_ptrs, lens, scores_batch, bucket,
-                                     self.rank, self.scale)          # [B, nh, rank]
+        o_lat = _mla_decode_batch(ext, q, cache_ptrs, lens, scores_batch, bucket,
+                                  self.rank, self.scale, _est_fp8(sts[0]))   # [B, nh, rank]
         return torch.cat([self._sortie_decode(x[i:i + 1], sts[i], o_lat[i]) for i in range(B)], dim=0)
+
+    def _k_b_c(self) -> torch.Tensor:
+        """``k_b`` [nh, rank, nope] contigu, une fois (le noyau de préparation le lit tel quel)."""
+        kb = self.__dict__.get("_k_b_c_cache")
+        if kb is None or kb.device != self.k_b.device:
+            kb = self.__dict__["_k_b_c_cache"] = self.k_b.detach().contiguous()
+        return kb
 
     def _v_b32(self) -> torch.Tensor:
         """``v_b`` en fp32, converti une fois (la conversion à chaque appel
@@ -362,24 +441,36 @@ class MLAttention(nn.Module):
         lens = torch.stack([st["len"] for st in sts])                      # [B]
         prem, kvp = self._proj_entree(x)
         q = self._q_depuis(prem).reshape(B, self.nh, self.nope + self.rope)
-        q_nope, q_pe = q.split([self.nope, self.rope], dim=-1)
-        if self.rope_emb is not None:
-            c0, k_pe0 = kvp.split([self.rank, self.rope], dim=-1)
-            q_pe, k_pe0 = self._rope(q_pe, k_pe0, lens, bucket + 1)
-            kvp = torch.cat([c0, k_pe0], dim=-1)
-        c, k_pe = kvp.split([self.rank, self.rope], dim=-1)
-        c = self._norme(c, self.kv_a_norm)
-        q_abs = torch.einsum('hrn,bhn->bhr', self.k_b.to(x.dtype), q_nope)
-        q_eff = torch.cat([q_abs, q_pe], dim=-1)                           # [B, nh, W]
-        k_new = torch.cat([c, k_pe], dim=-1).contiguous()                  # [B, W]
+        if (_MLA_PREP_NOYAU and hasattr(ext, "mla_prep_batch") and q.dtype == torch.bfloat16
+                and kvp.dtype == torch.bfloat16 and self.k_b.dtype == torch.bfloat16
+                and self.kv_a_norm.dtype == torch.bfloat16):
+            if self.rope_emb is not None:
+                cos32, sin32 = self.rope_emb.tables32(bucket + 1, x.device)
+            else:
+                cos32 = sin32 = None
+            q_eff, k_new = ext.mla_prep_batch(q.contiguous(), kvp.contiguous(), lens, cos32, sin32,
+                                              self._k_b_c(), self.kv_a_norm, self.nope, self.rope,
+                                              self.rank, self.eps)          # fp32 [B, nh, W], bf16 [B, W]
+        else:
+            q_nope, q_pe = q.split([self.nope, self.rope], dim=-1)
+            if self.rope_emb is not None:
+                c0, k_pe0 = kvp.split([self.rank, self.rope], dim=-1)
+                q_pe, k_pe0 = self._rope(q_pe, k_pe0, lens, bucket + 1)
+                kvp = torch.cat([c0, k_pe0], dim=-1)
+            c, k_pe = kvp.split([self.rank, self.rope], dim=-1)
+            c = self._norme(c, self.kv_a_norm)
+            q_abs = torch.einsum('hrn,bhn->bhr', self.k_b.to(x.dtype), q_nope)
+            q_eff = torch.cat([q_abs, q_pe], dim=-1).to(torch.float32)       # [B, nh, W]
+            k_new = torch.cat([c, k_pe], dim=-1).contiguous()              # [B, W]
+        fp8 = _est_fp8(sts[0])
         un_lancement = len_ptrs is not None and hasattr(ext, "mla_ecrit_latent")
         if un_lancement:
-            ext.mla_ecrit_latent(k_new, cache_ptrs, len_ptrs)              # cache_b[len_b] = k_new[b] ; len_b += 1
+            ext.mla_ecrit_latent(k_new, cache_ptrs, len_ptrs, fp8)         # cache_b[len_b] = k_new[b] ; len_b += 1
         else:
             for i, st in enumerate(sts):
-                st["cache"].index_copy_(0, st["len"].view(1), k_new[i:i + 1])
-        o_lat = ext.mla_decode_batch(q_eff.to(torch.float32).contiguous(), cache_ptrs, lens,
-                                     scores_batch, bucket, self.rank, self.scale)  # [B, nh, rank]
+                self._ecrit_ligne(st, k_new[i:i + 1])
+        o_lat = _mla_decode_batch(ext, q_eff.contiguous(), cache_ptrs, lens,
+                                  scores_batch, bucket, self.rank, self.scale, fp8)  # [B, nh, rank]
         y = torch.einsum('hvr,bhr->bhv', self._v_b32(), o_lat)
         if not un_lancement:
             for st in sts:
@@ -395,11 +486,11 @@ class MLAttention(nn.Module):
         cache = st["cache"]
         ext = _extension() if x.is_cuda else None
         if ext is not None:
-            o_lat = ext.mla_decode(q_eff.to(torch.float32)[0].contiguous(),
-                                   cache, st["len"], st["scores"], bucket,
-                                   self.rank, self.scale)        # [nh, rank]
+            o_lat = _mla_decode(ext, q_eff.to(torch.float32)[0].contiguous(),
+                                cache, st["len"], st["scores"], bucket,
+                                self.rank, self.scale)           # [nh, rank]
             return self._sortie_decode(x, st, o_lat)
-        C = cache[:bucket]
+        C = _fp8_dequant_rows(cache[:bucket], self.rank + self.rope) if _est_fp8(st) else cache[:bucket]
         scores = torch.einsum('thr,sr->ths', q_eff.to(torch.float32),
                               C.to(torch.float32)) * self.scale
         pos = torch.arange(bucket, device=x.device)
