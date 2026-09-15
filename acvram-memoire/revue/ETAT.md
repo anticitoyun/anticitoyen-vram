@@ -1,12 +1,12 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). Objectif : duel GLM-4.7-Flash NVFP4 b=12 contre vLLM RÉFUTÉ 0,7-1,3× (×4,08, `verdict-duel-glm-prise-a-16-09`) — B réduit à (c) : parité MLA puis table à 5 moteurs, décision utilisateur en attente.
+Mis à jour : 16/09 (initial, poste7). Objectif : duel GLM-4.7-Flash NVFP4 b=12 contre vLLM RÉFUTÉ 0,7-1,3× (×4,08, `verdict-duel-glm-prise-a-16-09` + réserve § : vLLM à 1,056 PPL, non apparié, bras apparié = ModelOpt par nous plus tard) — B réduit à (c) : parité MLA puis table à 5 moteurs, décision utilisateur en attente.
 
 ## Chantiers ouverts et scellés
 
 | chantier | qui | scellé | réfuté → | note |
 |---|---|---|---|---|
-| noyau MLA une passe — 2e commit : cache latent fp8 par ligne | poste4 | mla_* ≤ 6 ms ; pas ≤ 30 ms ; top-1 identique, cos ≥ 0,9999, PPL ± 0,004 ; **nsys (670cd63)** : 15 534 lancements/pas (Coder 1 517) — MLA séquence par séquence (2 845 int8_gemv b=1, 5,6 ms), ~5 000 cat (10 ms), 8 ms élémentaires, trou 5,3 ms ; attention 6,4 ms, MoE 6,3 ms ; en-tête : batcher au lot 12 → 43,9 → ~19-22 ms attendu (vLLM 15,1) | > 10/36 → ncu/nsys | `poste7-duel-verdict`, `verdict-glm-nsys-pplvllm` |
+| MLA, 3 commits dans cet ordre (poste7 § 6, cause § 2 corrigée : cache relu = 6,4 ms mesurés, pas 32,8) : (1) batcher décodage au lot b (int8 GEMM M=12, normes/RoPE/cat en noyaux [B], mla.py:324-400) (2) attention à une passe (3) latent fp8 | poste4 | (1) lancements/pas ≤ 2 500 au même nsys, pas ≤ 22 ms (> 26 → trou hôte), top-1/cos ≥ 0,9999/PPL ± 0,004 | (1) > 26 ms → trou hôte | `poste7-duel-verdict` §6 |
 | résidence dynamique des experts (hors VRAM), après MLA | poste1 (mesure à sec au retour) | fréquence d'activation : ≥ 60 % sur 50 % des experts (réfuté < 60 % → sans objet) | < 60 % → écarté | `poste7-avis-exterieur` |
 | noyau v2 par ligne (877169c/1b8ddfe, dans main) | poste4 | compteurs 0/0, 6,3 s, nominal : TENUS ; PPL alpha-commun 1,0277 **RÉFUTÉE** (> 1,015) ; -k48 1,0183 **RÉFUTÉE** (> 1,010) — coût = E2M1 sur les 3 sites, pas les blocs à zéro (flush 0 ne rend que 0,003/0,022) | → poste7 ; sonde par étape poste1 ; cb2784b | `verdict-reppl-sage7` |
 | contrôle int8 AWQ (à sec) | poste1 | FAIT : 0,982 / 0,983 ≥ 0,9 → retrait des tables int8 | — | `verdict-glm-awq-int8` |

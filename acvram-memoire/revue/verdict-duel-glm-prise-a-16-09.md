@@ -29,3 +29,8 @@ acvram Coder-30B 0.6.6    4,48       7,85       13,60      0,494          (autre
 
 ## 3. Ce qui manque pour que le chiffre soit complet, et ce que je propose
 Prise B (ncu octets par jeton, `campagne-duel-glm-ncu-15-09.sh`) dira si vLLM lit moins d'octets ou les lit plus vite ; PPL vLLM même corpus (10 min) pour la colonne ; un nsys d'un pas b=12 GLM (`nsys-rejeu-b12-15-09.py`, 5 min) pour découper les 56 ms en MLA / MoE / trous — c'est la mesure qui nomme le chantier. Je ne lance rien : poste7 tranche l'ordre.
+
+
+## Réserve (poste7 § 6, 16/09)
+
+bras vLLM GadflyII à +5,4 points de PPL (1,056), hors seuil 1,02, non apparié : sa vitesse ne se classe pas — sans en faire une excuse, mêmes octets NVFP4 des deux côtés, notre ×4 est réel et se lit dans 15 534 lancements/pas. Bras vLLM apparié = conversion ModelOpt par nous (poste2, dans le comparatif 5 moteurs, pas avant).
