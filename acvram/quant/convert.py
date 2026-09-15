@@ -1203,11 +1203,19 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         # (`scaler.scale is None`), on pose une echelle identite EXPLICITE
         # (torch.ones) : le manifeste ne doit jamais melanger "echelle
         # absente" et "echelle presente" par ambiguite d'absence.
+        #
+        # poste7 (`poste7-organisation-16-09.md`, poste1 `verdict-glm-awq-int8-
+        # 16-09.md` : q_a 0,982, kv_a 0,983, o_proj sans table -- retrait
+        # sans risque, tous >= 0,9) : l'AWQ sur un tenseur int8 compense une
+        # erreur ~16x plus petite qu'en 4 bits pour le meme cout de division
+        # a chaque jeton (`layers.py:479-481`, mesure +2,06 ms/pas,
+        # `verdict-glm-2ms-manifestes-16-09.md`) -- retiree des tenseurs
+        # int8, gardee sur nvfp4 ou elle compense une vraie perte.
         qt, scaler, metrics = _quantize_on(
             qdev, tensor, fmt, st,
             group_size=opts.group_size,
             use_hadamard=router.wants_hadamard(name, fmt),
-            use_awq=opts.awq and name not in alpha_identite,
+            use_awq=opts.awq and name not in alpha_identite and fmt == "nvfp4",
             n_grid=opts.n_grid, garder_grille=opts.garder_grille,
             table=opts.q3n_table if fmt == "q3n" else None,
             mesurer_kld=opts.mesurer_kld,
@@ -1251,7 +1259,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 qdev, tensor, wider, st,
                 group_size=opts.group_size,
                 use_hadamard=router.wants_hadamard(name, wider),
-                use_awq=opts.awq, n_grid=opts.n_grid,
+                use_awq=opts.awq and wider == "nvfp4", n_grid=opts.n_grid,
                 garder_grille=opts.garder_grille,
                 mesurer_kld=opts.mesurer_kld)
             if m2["out_snr_db"] > metrics["out_snr_db"] + 0.5:
@@ -1297,7 +1305,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 qdev, tensor, wider, st,
                 group_size=opts.group_size,
                 use_hadamard=router.wants_hadamard(name, wider),
-                use_awq=opts.awq, n_grid=opts.n_grid,
+                use_awq=opts.awq and wider == "nvfp4", n_grid=opts.n_grid,
                 garder_grille=opts.garder_grille)
             if m2["out_snr_db"] > metrics["out_snr_db"] + 1.0:
                 report.promotions.append({
