@@ -1,3 +1,6 @@
+# ERRATUM (16/09, ~19:00, poste3) — l'étalon 8,1427 est celui de GLM, pas de Coder
+Le rapport ×1,304 ci-dessous compare à **8,1427 = PPL bf16 de GLM-4.7-Flash** (`verdict-glm-ppl-finale-15-09`), cité par erreur : il n'existait pas d'étalon bf16 Coder-30B dans le dépôt. Mesuré depuis, même cadrage (HF bf16 `device_map=auto`, `scratchpad/coder-ppl-bf16-hf-16-09.py`, 7 164 notés) : **bf16 Coder-30B = 9,1747** ; acvram `Qwen3-Coder-30B-A3B-nvfp4` (`reppl-eval-16-09.py`, MMA, piles 48/48) = **9,2833**. Rapports corrigés : TRT-LLM 10,617 → **1,157×** (non classé, > 1,02) ; vLLM mêmes poids 10,262 → **1,119×** (non classé) ; acvram nvfp4 → **1,012×** (classé). Les chiffres mesurés et l'attribution (converti 1,12×, moteur +3,3 %) tiennent ; seuls les rapports changent. Journaux : `scratchpad/llamacpp-coder-16-09/ppl-bf16-hf.log`, `ppl-acvram-nvfp4.json`.
+
 # Verdict — PPL TensorRT-LLM, Coder-30B NVFP4 ModelOpt : non classé (1,304× bf16), le checkpoint porte 1,26×
 
 instrument : `scratchpad/ppl-trtllm-16-09.py` (logits de contexte bruts, alignés logits[t]→f[t+1], log-softmax fp32 sur CPU) ; témoins `scratchpad/ppl-vllm-coder-16-09.py` (vLLM, `prompt_logprobs=0`, TRITON_ATTN) — journaux `scratchpad/trtllm-coder-16-09/ppl-*.{log,json}`
