@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **MÉTHODO (5df8865) : GLM -k48 recoupe wiki-gptq à 0 % (calib effective inconnue, ni accusé ni blanchi, 0,9956× reste inexpliqué) ; Coder-nvfp4 sans calibration. ATTENTION : wiki-gptq EST wikitext-2 test (58 % de recoupement) — pas un remplacement valide. Proposition de poste3 à trancher par poste7 : corpus tiers privé = revue/*.md à un commit fixé (579 637 jetons, disjoint par construction, interdit en calibration EXL3), sha256 dans chaque verdict, chaque colonne porte sa calibration. Refonte des 10 PPL dès le corpus scellé.** poste2 : Hadamard puis EXL3 propres (Coder+GLM).
+Mis à jour : 16/09 (initial, poste7). **PPL CORPUS PRIVÉ — Coder PUBLIABLE (2f998da) : llama.cpp Q4_K_M 1,013 seul classé ; acvram nvfp4 1,027 RÉFUTÉ (scellé [1,010;1,025]) ; vLLM ModelOpt 1,156, TRT-LLM 1,234 non classés (divergence privé/public 0,033/0,070 signalée). GLM INJUGEABLE : PPL bf16 explose par fenêtre (107 090/8 402/262 chez llama.cpp !), 3 convertis 7-43 % SOUS bf16 = instabilité numérique du modèle sur ce texte, différente par moteur — pas un classement. → poste7 : PPL par fenêtre + agrégat robuste scellé d'avance, fenêtre GLM lue aux logits avant tout classement.** poste2 : Hadamard puis EXL3 propres (Coder+GLM).
 
 ## Chantiers ouverts et scellés
 
