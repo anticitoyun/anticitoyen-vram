@@ -82,19 +82,28 @@ def test_pile_acceptee_et_tables():
 
 
 @CUDA
-def test_gate_up_differents_refuses():
+def test_gate_up_differents_acceptes():
+    """GLM AWQ par expert : gate et up à échelles distinctes -> pile acceptée,
+    seconde ligne (up_distinct) ; égales -> une seule table partagée."""
     dev = torch.device("cuda:0")
     bloc = _bloc_awq(dev, gate_up_egales=False)
-    assert not bloc._try_build_stacks()
-    assert "gate" in bloc._raison_repli
+    assert bloc._try_build_stacks(), bloc._raison_repli
+    t = bloc._stacks_awq
+    assert t["up_distinct"] and t["up_proj"] is not t["gate_proj"]
+    assert not torch.equal(t["up_proj"], t["gate_proj"])
+    bloc = _bloc_awq(dev, gate_up_egales=True)
+    assert bloc._try_build_stacks()
+    t = bloc._stacks_awq
+    assert not t["up_distinct"] and t["up_proj"] is t["gate_proj"]
 
 
 @CUDA
+@pytest.mark.parametrize("egales", [True, False], ids=["gate=up", "gate!=up"])
 @pytest.mark.parametrize("chemin", ["mma", "gemv", "prefill_mma", "prefill_direct"])
-def test_pile_egale_boucle_a_un_ulp(chemin, monkeypatch):
+def test_pile_egale_boucle_a_un_ulp(chemin, egales, monkeypatch):
     from acvram.engine import model as M
     dev = torch.device("cuda:0")
-    bloc = _bloc_awq(dev)
+    bloc = _bloc_awq(dev, gate_up_egales=egales)
     assert bloc._try_build_stacks()
     bloc._stack_state = "oui"
     x, topw, topi = _entree(dev)
@@ -146,12 +155,17 @@ def test_route_pack_awq_egal_torch():
     topi = topi.clone(); topi[10:] = -1
     E, bt = N_EXPERTS, 16; t_max = -(-(T * TOP_K) // bt) + E
     pg = bloc._stacks["gate_proj"]; awq = bloc._stacks_awq["gate_proj"]
-    xs, ordre, *_ , es = ext.moe_route_pack(topi.contiguous(), topw.contiguous(), x.contiguous(), E, bt, t_max, pg[4], awq)
+    xs, ordre, *_ , es, xs2 = ext.moe_route_pack(topi.contiguous(), topw.contiguous(), x.contiguous(), E, bt, t_max, pg[4], awq)
     flat_e = torch.where(topi < 0, torch.zeros_like(topi), topi).reshape(-1)
     o = torch.argsort(flat_e, stable=True)
-    ref = (x.to(torch.bfloat16)[torch.arange(T, device=dev).repeat_interleave(TOP_K)[o]] / awq[flat_e[o]])
+    xe = x.to(torch.bfloat16)[torch.arange(T, device=dev).repeat_interleave(TOP_K)[o]]
+    ref = xe / awq[flat_e[o]]
     assert torch.equal(xs, ref)
     assert torch.equal(es, flat_e[o].to(torch.int32))
+    assert xs2.data_ptr() == xs.data_ptr()                 # sans awq2 : xs2 EST xs
+    awq2 = (0.5 + torch.rand(E, pg[4], device=dev)).to(torch.bfloat16)
+    xs, *_ , xs2 = ext.moe_route_pack(topi.contiguous(), topw.contiguous(), x.contiguous(), E, bt, t_max, pg[4], awq, awq2)
+    assert torch.equal(xs, ref) and torch.equal(xs2, xe / awq2[flat_e[o]])
 
 
 @CUDA
@@ -172,3 +186,26 @@ def test_table_unite_sautee(monkeypatch):
     assert bloc._try_build_stacks()
     assert bloc._stacks_awq["gate_proj"] is not None
     assert torch.equal(bloc._stacks_awq["gate_proj"], torch.ones_like(bloc._stacks_awq["gate_proj"]))
+
+
+@CUDA
+@pytest.mark.parametrize("egales", [True, False], ids=["gate=up", "gate!=up"])
+def test_compte_de_lancements_avec_awq(egales):
+    """poste7 (poste7-glm-gateup-16-09) : lever gate ≠ up = une seconde
+    nvfp4_quant_act, rien d'autre. Égales : 8 lancements/couche comme sans AWQ
+    (la division vit dans route_pack et moe_act) ; distinctes : 9."""
+    from torch.profiler import profile, ProfilerActivity
+    from acvram.engine import model as M
+    dev = torch.device("cuda:0")
+    bloc = _bloc_awq(dev, gate_up_egales=egales)
+    assert bloc._try_build_stacks() and M._MOE_ROUTE_PACK
+    bloc._stack_state = "oui"
+    x, topw, topi = _entree(dev)
+    bloc._forward_grouped_mma(x, topw, topi); torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        bloc._forward_grouped_mma(x, topw, topi); torch.cuda.synchronize()
+    noyaux = [e for e in prof.key_averages() if e.self_device_time_total > 0
+              and not e.key.startswith("aten::") and "Memcpy" not in e.key and "Memset" not in e.key]
+    n = sum(e.count for e in noyaux)
+    courts = [f"{e.count}x {e.key.split('(')[0].split('<')[0][-40:]}" for e in noyaux]
+    assert n == (8 if egales else 9), f"{n} lancements par couche : {courts}"
