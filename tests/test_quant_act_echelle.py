@@ -12,7 +12,7 @@ import pytest
 import torch
 
 from tests.test_gemm_grouped_mma import quant_act_ref
-from tests.test_moe_decode_mma_graphe import CUDA, _entree
+from tests.test_moe_decode_mma_graphe import CUDA, INTER, TOP_K, _entree
 from tests.test_moe_awq_pile import _bloc_awq, _boucle, _ulp_max
 
 G, K, E = 48, 256, 4
@@ -118,25 +118,41 @@ def test_pile_compensee_identique_sur_blocs_normaux():
 
 @CUDA
 def test_pile_k0_casse_sur_petites_activations():
-    """Mêmes poids, x ÷ 256 : à k = 0 la pile s'écarte de la boucle W4A16
-    (blocs à zéro), à k = (4, 8) elle reste dans la marge — le test rend
-    « faux » sur l'ancien noyau."""
+    """Mêmes poids, x ÷ 16 : silu(g)·u tombe vers 1e-3 (amax/6 sous 2⁻⁹), à
+    k = 0 la pile met ses blocs à zéro et s'écarte de la boucle W4A16 ; à
+    k = (4, 8) aucun bloc à zéro et l'erreur reste celle du W4A4 — le test
+    rend « faux » sur l'ancien noyau, et les compteurs disent pourquoi.
+    (x ÷ 256 mettait aussi act·2^8 sous le plancher : la prémisse se vérifie
+    par les compteurs, pas à l'œil — poste3, t-qa 17d7132.)"""
     from acvram.engine import model as M
     dev = torch.device("cuda:0")
     bloc = _bloc_awq(dev)
     assert bloc._try_build_stacks()
     bloc._stack_state = "oui"
     x, topw, topi = _entree(dev)
-    x = (x.float() * 2 ** -8).to(torch.bfloat16)
+    x = (x.float() * 2 ** -4).to(torch.bfloat16)
     ref = _boucle(bloc, x, topw, topi).float()
-    y_k = bloc._forward_grouped_mma(x, topw, topi).float()
-    kx, ka = M._QA_LOG2K_X, M._QA_LOG2K_ACT
-    M._QA_LOG2K_X = M._QA_LOG2K_ACT = 0
+    kx, ka, compte = M._QA_LOG2K_X, M._QA_LOG2K_ACT, M._QA_COMPTE
+    M._QA_COMPTE = True
+
+    def passe(k_x, k_act):
+        M._QA_LOG2K_X, M._QA_LOG2K_ACT = k_x, k_act
+        M._QA_COMPTEURS.clear()
+        y = bloc._forward_grouped_mma(x, topw, topi).float()
+        torch.cuda.synchronize()
+        n, z, sat = (int(v) for v in M._QA_COMPTEURS[x.device].tolist())
+        return ((y - ref).norm() / ref.norm()).item(), n, z, sat
     try:
-        y_0 = bloc._forward_grouped_mma(x, topw, topi).float()
+        e_k, n_k, z_k, sat_k = passe(4, 8)
+        e_0, n_0, z_0, sat_0 = passe(0, 0)
     finally:
-        M._QA_LOG2K_X, M._QA_LOG2K_ACT = kx, ka
-    e_k = ((y_k - ref).norm() / ref.norm()).item()
-    e_0 = ((y_0 - ref).norm() / ref.norm()).item()
+        M._QA_LOG2K_X, M._QA_LOG2K_ACT, M._QA_COMPTE = kx, ka, compte
+        M._QA_COMPTEURS.clear()
+    assert n_k == n_0 > 0
+    # les compteurs cumulent les deux sites : x (1 quant, blocs normaux à
+    # x ÷ 16) et act (G·I/16 blocs) ; la prémisse porte sur les blocs de act
+    n_act = x.shape[0] * TOP_K * INTER // 16
+    assert z_0 >= 0.8 * n_act, f"prémisse : k=0 devait mettre à zéro la plupart des blocs de act ({z_0}/{n_act})"
+    assert z_k == 0 and sat_k == 0, f"k=(4,8) : {z_k} blocs à zéro, {sat_k} saturés sur {n_k}"
     assert e_0 > 3 * e_k, f"k=0 devait casser : err {e_0:.3f} contre {e_k:.3f} à k=(4,8)"
     assert e_k < 0.25, e_k
