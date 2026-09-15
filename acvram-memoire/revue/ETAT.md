@@ -32,6 +32,9 @@ Après le duel : poste1 sonde par étape 3 sites (10 min, choix A8/rotation) ; p
 
 main (voir git) · poste4 01c48ef fusionné · poste2-awq-independant 33c0a95 fusionné · poste2 cb2784b (réserve) · poste1 dbb84c8 · poste3 — · poste8 1ec7225 (suspendue)
 
+
+**spec-kit** (`/mnt/AI_GENERATOR/spec-kit-src`) : sans objet pour les chantiers de mesure ; essai borné sur le comparatif 5 moteurs par poste2 (à sec, 30 min, worktree jetable), scellé ≤ 10 k jetons ET une étape de `poste7-comparatif` §5 retenue, sinon retiré (`poste7-spec-kit-16-09`).
+
 ## Bruit de l'instrument
 
 PPL teacher-forcing à 24 k jetons : étendue 0,008 entre tranches → tout scellé futur ± 0,004 minimum, ou 3 tranches.
