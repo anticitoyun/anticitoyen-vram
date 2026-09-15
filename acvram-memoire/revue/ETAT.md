@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **PIVOT (cf2eb77) : module MLA à créneaux JUSTE (4/4 vs référence hors créneau). Coder-30B SANS MLA a le même défaut sous formes fixes (graphes 25/28 cos min 0,872, eager 27/28) — le défaut est GÉNÉRIQUE au pipeline à formes fixes (jetons/embedding/positions au pas 2), pas MLA ; GLM l'amplifie ×6 (l'état MLA porte l'erreur d'un pas à l'autre). Plancher eager GLM = 66-67,6 ms (17,2 ms invalide). Chantier élargi au-delà de MLA — décision poste7 sur la suite.** Objectif : duel retiré, à refaire après correctif du pipeline formes fixes ; ensuite (2) table à 5 moteurs.
+Mis à jour : 16/09 (initial, poste7). **Générique CLOS (poste1, 4a39339) : EAGER et GRAPHES sur Coder-30B donnent 3/84 CHACUN, mêmes positions, deltas identiques au flottant près — un GraphRunner défaillant ne reproduirait pas fortuitement l'erreur du chemin sans capture ; les 3/84 = écart décodage/prefill déjà connu (témoin Coder). Aucun défaut générique de rejeu. GLM _mla_lot reste propre à GLM, poste4 seule ; cercle resserré sur `h` (entrée au pas 2, dans fill). Plancher eager GLM = 66-67,6 ms.** Objectif : duel retiré, à refaire après correctif GLM-spécifique ; ensuite (2) table à 5 moteurs.
 
 ## Chantiers ouverts et scellés
 
