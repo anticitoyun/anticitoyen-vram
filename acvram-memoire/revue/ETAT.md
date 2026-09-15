@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **Narrow MLA + tête (96e5af7) : arbitre 82/84 tenu ; pas 21,06-21,15 ms, −0,23 ms (−1,1 %) — scellé ≤ 19,0 RÉFUTÉ. Attribution : narrow_gemm réduit les lancements (387×7 µs), pas les octets ; le plafond réel est le MoE W4A16 (7,1 ms, −2,3 en MMA contre +1,4 % PPL). Duel inchangé à 1 % (×1,53). Tête : écart 0,14 ms, témoin ambigu à confirmer par poste4.** Attente : PPL cb2784b poste2 (prefill+décodage ≤ 1,010) — décide si MoE MMA passe aux deux sites. Ensuite (2) table à 5 moteurs.
+Mis à jour : 16/09 (initial, poste7). **Rotation Hadamard, à sec, en parallèle (poste7-hadamard-16-09) : poste2 (H_512 bloc-diagonale sur les poids d'experts, sans AWQ) + poste4 (FWHT 512 dans nvfp4_quant_act aux deux sites + entrée tournée). Scellés : PPL NOMINAL MMA=1 ≤ 1,010 prefill ET décodage ; W4A16 tourné = non tourné ± 0,002 ; pas ≤ 19,0 ms ; prefill ≥ 12 000 j/s ; réfuté > 1,015 → W4A4 abandonné sur GLM, W4A16 définitif.** Carte va au comparatif 5 moteurs (poste3) en priorité ; Hadamard prend la carte quand libre.
 
 ## Chantiers ouverts et scellés
 
