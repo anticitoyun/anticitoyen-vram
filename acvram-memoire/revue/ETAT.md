@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **CAUSE GLM TROUVÉE (ffc1498) : pas d'instabilité du moteur, GLM n'a pas de puits d'attention sans son préfixe [gMASK]<sop> — toute fenêtre non préfixée s'effondre selon son 1er jeton (104 637 → 31,9 avec préfixe, même fenêtre). AUCUNE PPL GLM publiée (dont wiki-gptq/0,9956) ne classe : il faut refaire toutes les fenêtres GLM avec [gMASK]<sop] en tête (2 jetons non notés), tous bras, public+privé. Coder non concerné. poste3 complète et relance dans le même passage.** poste2 : Hadamard puis EXL3 propres (Coder+GLM).
+Mis à jour : 16/09 (initial, poste7). **BOGUE DE PRODUCTION CONFIRMÉ ET CORRIGÉ (poste4 505f31c) : /v1/completions brut et /v1/embeddings n'ajoutaient jamais [gMASK]<sop> sur GLM (add_special_tokens=False, pas de post-traitement) — toute complétion brute tournait effondrée, en silence. Correctif : Tokenizer.prefixe_gabarit + encode_brut (BOS natif sinon préfixe du gabarit, jamais en double) ; chat/v1/messages inchangés. poste3 relance les PPL GLM avec préfixe (public+privé, tous bras).** poste2 : Hadamard puis EXL3 propres (Coder+GLM).
 
 ## Chantiers ouverts et scellés
 
