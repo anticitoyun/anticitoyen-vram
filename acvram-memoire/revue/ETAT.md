@@ -25,7 +25,7 @@ Mis à jour : 16/09 (initial, poste7). Objectif : duel GLM-4.7-Flash NVFP4 b=12 
 
 ## Dernier commit par branche
 
-main (voir git) · poste4 (correctif en cours) · poste2 cb2784b (hors main) · poste1 dbb84c8 · poste3 — · poste8 1ec7225 (suspendue)
+main (voir git) · poste4 (correctif en cours) · poste2-usawq 989c657 fusionné · poste2 cb2784b (réserve) · poste1 dbb84c8 · poste3 — · poste8 1ec7225 (suspendue)
 
 ## Suspendu / veille
 
