@@ -24,6 +24,7 @@ from pathlib import Path
 import sys as _s, pathlib as _p  # noqa: E401
 _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
 from outils.racine_modeles import MODELES  # noqa: E402
+from outils._chemins import sorties  # noqa: E402
 
 BASE = Path(MODELES)
 # budget croissant ; le plancher est le dossier tout-nvfp4
@@ -172,8 +173,7 @@ def main() -> int:
         print("  DESACCORD PARTIEL : la substitution deplacerait une partie du "
               "classement.\n  L'A/B a signe inverse dira ce que cela vaut en "
               "perplexite.")
-    Path("~/Bureau/Claude/acvram-memoire/corpus/"
-         "desaccord-classements.json").write_text(json.dumps(
+    sorties() / "desaccord-classements.json".write_text(json.dumps(
              {"n": len(cand), "spearman": rho, "spearman_temoin": rho_temoin,
               "top": {k: len(set(par_snr[:k]) & set(par_perte[:k]))
                       for k in (10, 25, 50, 100) if k <= len(cand)}},

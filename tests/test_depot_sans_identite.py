@@ -129,7 +129,20 @@ COURRIEL_TOLERE = ("noreply", "example")
 # exclure du cliquet demain avec le helper, cible 433 sous 1 j -- poste7 section 8) + 1.
 # 16/09 matin (chef) : 600 apres les carnets de pause (poste2.md +3, poste3, poste4) ;
 # README sans chemin. Cible 433 par le helper d poste1 (poste7 section 8).
-PLAFOND_CHEMINS = 600
+# 16/09 (poste1) : l'inventaire de poste8 (acvram-memoire/revue/inventaire-chemins-
+# absolus-15-09.md, 85 chemins) sort par EXEMPTES_CHEMINS -- documenter le probleme
+# ne doit pas l'aggraver (-85). + 15 fichiers outils/ convertis a sorties()
+# (acvram-memoire/corpus en dur -> outils/_chemins.py). Mesure directe : 501.
+# Reste hors de ma portee (pas convertis) : scripts scratchpad/ (chemins de
+# worktree par session, pas modeles/sorties -- categorie non couverte par le
+# helper) et carnets (historique date, pas du code). Cible 433 pas atteinte.
+PLAFOND_CHEMINS = 501
+
+# Le fichier qui NOMME les chemins pour les faire disparaitre ne doit pas
+# lui-meme les compter -- meme discipline datee que EXEMPTES_SESSION.
+EXEMPTES_CHEMINS = {
+    "acvram-memoire/revue/inventaire-chemins-absolus-15-09.md",  # 16/09, poste8
+}
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute
@@ -204,7 +217,7 @@ def test_aucun_courriel_dans_le_depot():
 
 
 def test_le_cliquet_des_chemins_absolus_ne_monte_pas():
-    trouves = _trouve(CHEMIN)
+    trouves = {k: v for k, v in _trouve(CHEMIN).items() if k not in EXEMPTES_CHEMINS}
     total = sum(len(v) for v in trouves.values())
     assert total <= PLAFOND_CHEMINS, (
         f"{total} chemins absolus nommes pour un plafond de "
@@ -219,6 +232,8 @@ def test_le_cliquet_des_chemins_absolus_ne_monte_pas():
     assert total >= PLAFOND_CHEMINS - 20, (
         f"{total} chemins contre un plafond de {PLAFOND_CHEMINS} : abaisser "
         f"PLAFOND_CHEMINS a {total}, sinon le cliquet laisse remonter.")
+    inutiles = EXEMPTES_CHEMINS - set(_trouve(CHEMIN))
+    assert not inutiles, f"exemption(s) de chemins qui ne servent plus : {inutiles}"
 
 
 def test_les_trois_detecteurs_savent_tirer():

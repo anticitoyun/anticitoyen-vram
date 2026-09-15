@@ -3,11 +3,12 @@ from pathlib import Path
 import sys as _s, pathlib as _p  # noqa: E401
 _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
 from outils.racine_modeles import MODELES  # noqa: E402
+from outils._chemins import sorties  # noqa: E402
 BASE=Path(MODELES)
 DOS=[(0.0,"Llama-2-7b-nvfp4"),(4.50,"Llama-2-7b-quota-4g50"),(5.00,"Llama-2-7b-quota-5g00"),
      (5.50,"Llama-2-7b-quota-5g50"),(6.00,"Llama-2-7b-quota-6g00"),(6.55,"Llama-2-7b-quota-plafond")]
 GIO=1024**3; BUDGET=6.00
-S=json.load(open("~/Bureau/Claude/acvram-memoire/corpus/normes-poids-source.json"))
+S=json.load(open(sorties() / "normes-poids-source.json"))
 def octets(v):
     out,inn=v["shape"][0],v["shape"][1]; g=v.get("group_size") or 128; ng=max(1,inn//g)
     if v["format"]=="int8": return out*inn+out*ng*2+out*ng

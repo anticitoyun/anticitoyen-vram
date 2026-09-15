@@ -13,9 +13,10 @@ import numpy as np
 import sys as _s, pathlib as _p  # noqa: E401
 _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
 from outils.racine_modeles import MODELES  # noqa: E402
+from outils._chemins import sorties  # noqa: E402
 BASE=MODELES
 SRC=os.path.join(BASE,"Llama-2-7b-hf")
-groupes=json.load(open("~/Bureau/Claude/acvram-memoire/corpus/groupes-x-y.json"))
+groupes=json.load(open(sorties() / "groupes-x-y.json"))
 X,Y=set(groupes["X_76"]),set(groupes["Y_27"])
 CIBLE=X|Y
 def lire(f,h,k,deb,fh):

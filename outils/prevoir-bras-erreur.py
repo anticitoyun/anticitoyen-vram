@@ -17,6 +17,7 @@ from pathlib import Path
 import sys as _s, pathlib as _p  # noqa: E401
 _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
 from outils.racine_modeles import MODELES  # noqa: E402
+from outils._chemins import sorties  # noqa: E402
 
 BASE = Path(MODELES)
 DOS = [(0.0, "Llama-2-7b-nvfp4"), (4.50, "Llama-2-7b-quota-4g50"),
@@ -171,8 +172,7 @@ PRE-REFUTATION DEJA ACQUISE, sans mesurer : `erreur` promeut {n_e} tenseurs,
   recuperables par le seul ordre — un PLANCHER sur le gain accessible,
   pas un plafond. Rien n'interdit qu'un meilleur ordre en recupere 80 %.
 ================================================================""")
-    Path("~/Bureau/Claude/acvram-memoire/corpus/"
-         "prediction-bras-erreur.json").write_text(json.dumps(
+    sorties() / "prediction-bras-erreur.json".write_text(json.dumps(
              {"promus_prevus": {k: len(v) for k, v in resultats.items()},
               "temoin_ecart_bras_A": ecart_a,
               "fourchette": [PLAFOND_PPL, A_PPL],
