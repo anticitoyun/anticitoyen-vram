@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **Comparatif : colonne TRT-LLM CLOSE (cef7a35) — Coder publié avec réserve (PPL non classée, ModelOpt communautaire en cause) ; GLM refusé par TRT-LLM 1.3.0rc15 (compressed-tensors 4 bits rejeté + Glm4MoeLiteForCausalLM absent du registre, vérifié sur le main GitHub) : « ne sert pas », aucun ModelOpt n'y changerait rien. poste3 attend l'ordre suivant (vLLM/llama.cpp/TabbyAPI, ou ModelOpt sain Coder après poste2).** Hadamard (main e667831) et sa PPL attendent la carte.
+Mis à jour : 16/09 (initial, poste7). **Comparatif : llama.cpp Coder CLASSÉ (4cd379f) : PPL 1,0146× bf16 (max 1,018 sur 3 tranches) — acvram nvfp4 1,018× classé de peu, TRT-LLM 10,091 (1,166×) non classé, vLLM ModelOpt 9,728 (1,123×) proche du seuil. b=12 709 t/s/0,52 J (⅓ TRT-LLM, ½ vLLM), b=1 341 t/s/1,11 J EN TÊTE, prefill 15 717 j/s. GLM Q4_K_M téléchargé (18 Go), décodage+PPL en cours. TRT-LLM/GLM sans objet (registre).** Hadamard (e667831) attend toujours la carte.
 
 ## Chantiers ouverts et scellés
 
