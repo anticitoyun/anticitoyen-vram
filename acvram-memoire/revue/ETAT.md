@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **Rotation Hadamard, à sec, en parallèle (poste7-hadamard-16-09) : poste2 (H_512 bloc-diagonale sur les poids d'experts, sans AWQ) + poste4 (FWHT 512 dans nvfp4_quant_act aux deux sites + entrée tournée). Scellés : PPL NOMINAL MMA=1 ≤ 1,010 prefill ET décodage ; W4A16 tourné = non tourné ± 0,002 ; pas ≤ 19,0 ms ; prefill ≥ 12 000 j/s ; réfuté > 1,015 → W4A4 abandonné sur GLM, W4A16 définitif.** Carte va au comparatif 5 moteurs (poste3) en priorité ; Hadamard prend la carte quand libre.
+Mis à jour : 16/09 (initial, poste7). **Hadamard FUSIONNÉ dans main (les deux moitiés, e667831) : poste4 (FWHT dans nvfp4_quant_act, --hadamard-experts) + poste2 (rotation H_512 des poids, x·H·(W·H)ᵀ=x·Wᵀ à 3-5 ulp, marge 8), non exécuté sur carte, tests CPU 14 passed. Aussi fusionnés : projections MLA étroites (976a090) et tête GEMV fp32 (54d5b28), mesurées −1,1 % par poste3 (96e5af7), scellé ≤19,0 réfuté.** Reconversion GLM + PPL Hadamard prend la carte dès que le comparatif 5 moteurs (poste3) la libère.
 
 ## Chantiers ouverts et scellés
 
