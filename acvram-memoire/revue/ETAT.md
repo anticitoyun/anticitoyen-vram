@@ -18,15 +18,17 @@ Mis à jour : 16/09 (initial, poste7). Objectif : duel GLM-4.7-Flash NVFP4 b=12 
 ## File de carte (un bloc, une fusion de main par phase)
 
 1. poste3 : re-tampon OFF (10 min) → cellule 3 × 3 (30 min) — maintenant, carte libre.
-2. poste4 : re-PPL alpha-commun + compteurs (20 min) — après son commit.
-3. poste2 : reconversion à sec (1 h, chevauche 2) → PPL reconverti (20 min).
-4. poste4 : pas b=12 à code égal (10 min).
+2. poste3 : re-PPL alpha-commun + compteurs (20 min) — après le commit de poste4.
+3. poste2 : reconversion à sec (1 h, chevauche 2) → poste3 : PPL reconverti (20 min) ; poste2 en veille si ≤ 1,005.
+4. poste3 : pas b=12 à code égal (10 min).
 5. poste3 : duel prise A (1 h).
 
 ## Dernier commit par branche
 
 main (voir git) · poste4 (correctif en cours) · poste2 cb2784b (hors main) · poste1 dbb84c8 · poste3 — · poste8 1ec7225 (suspendue)
 
-## Suspendu
+## Suspendu / veille
+
+poste1 en veille (rappelée sur scellé réfuté). Un message par bloc, redémarrage à chaque phase, poste7 sur scellé réfuté ou duel seulement.
 
 poste8 jusqu'au duel publié. duck.ai : à l'impasse déclarée dans une note de poste7 seulement.
