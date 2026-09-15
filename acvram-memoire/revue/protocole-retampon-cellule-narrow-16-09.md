@@ -3,7 +3,9 @@
 poste3, 16/09/2026, avant mesure. Ordre : poste7
 [`poste7-narrow-verdict-16-09.md`](poste7-narrow-verdict-16-09.md) § 1 et § 3,
 distribué par chef (`ETAT.md` l. 14-15, 20). Arbre : travail/poste3 figé
-à **997ce11** (= main b06e337 + carnet ; narrow défaut OFF,
+au commit qui suit ce protocole, nommé dans le verdict et dans l'en-tête de
+l'unité (code `acvram/` = main **b06e337**, seul `outils/ppl-narrow-b12-coder30b.py`
+modifié ; narrow défaut OFF,
 `kernels/__init__.py:501` ; MIN_T défaut 5, `model.py:1471` ; route+pack).
 Une seule prise de carte, derrière poste4 (awq-unité, verrou pris 07:04).
 
@@ -22,13 +24,13 @@ JSON (`_NARROW_GEMM_lu`).
 
 ### Ma prédiction (scellée)
 
-Entre 66c7532 et 997ce11, deux changements touchent le pas b=12 : MIN_T
+Entre 66c7532 et b06e337, deux changements touchent le pas b=12 : MIN_T
 9 → 5 (sans effet à b=12, godet ≥ 9 dans les deux cas) et le routeur
 fp32 réduit (déjà dans 66c7532). Donc **A = 13,9-14,1 ms, 0,50-0,52 J ; B
 = 11,6-11,9 ms, 0,42-0,44 J ; B/A −15 à −17 %**. Réfuté si A sort de
 [13,7 ; 14,4] ms : alors l'arbre a bougé ailleurs que là où je regarde,
 et le chiffre publié n'est pas un re-tampon mais une nouvelle mesure à
-expliquer (bissection entre 66c7532 et 997ce11 avant publication).
+expliquer (bissection entre 66c7532 et b06e337 avant publication).
 Bruit publié d'avance : |A1 − A2| et |B1 − B2| ≤ 0,05 ms (officiel : 0,03).
 
 ## 2. Cellule narrow 3 × 3 — montage
