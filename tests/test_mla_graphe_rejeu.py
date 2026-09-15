@@ -143,3 +143,57 @@ def test_static_load_apres_capture_puis_rejeu(rope):
         x_buf.copy_(x); g.replay(); torch.cuda.synchronize(); sorties_g.append(out.clone())
     sorties_e = _eager(la, sts_e, appel_e, entrees2)
     _compare(sorties_g, sorties_e, sts_g, sts_e, [37])
+
+
+@pytest.mark.parametrize("rope", [False, True])
+@pytest.mark.parametrize("B", [1, 4])
+def test_creneaux_egalent_la_reference_hors_creneau(rope, B):
+    """Ce que le test de rejeu ne disait pas : le chemin à créneaux
+    (static_load d'un cache de prefill, puis decode_static /
+    decode_static_batch_complet, 4 pas) contre la RÉFÉRENCE `forward`
+    hors créneau (mla.py, chemin eager juste de l'arbitre de poste3), même
+    séquence, mêmes entrées — sortie et lignes du cache. Tolérance : le
+    godet diffère (L contre godet_mla(total)) donc l'ordre des sommes fp32
+    du noyau aussi ; 2^-6 relatif, pas bit-identique."""
+    _ext()
+    la = _module_rope(41 + B, rope)
+    torch.manual_seed(50 + B)
+    n0 = 100
+    prompt = torch.randn(n0, HIDDEN, device="cuda").to(torch.bfloat16)
+    entrees = [torch.randn(B, HIDDEN, device="cuda").to(torch.bfloat16) for _ in range(4)]
+    with torch.inference_mode():
+        # référence : prefill puis 4 pas hors créneau, une séquence par ligne du lot
+        refs, caches = [], []
+        for i in range(B):
+            _, cache = la.forward(prompt if i == 0 else torch.roll(prompt, i, 0), None)
+            caches.append(cache)
+        for k in range(4):
+            ys = []
+            for i in range(B):
+                y, caches[i] = la.forward(entrees[k][i:i + 1], caches[i])
+                ys.append(y)
+            refs.append(torch.cat(ys, 0))
+        # créneaux : static_load du cache de prefill (les mêmes n0 lignes)
+        sts = []
+        for i in range(B):
+            st = la.new_static(torch.device("cuda"), L + 16, torch.bfloat16)
+            _, c0 = la.forward(prompt if i == 0 else torch.roll(prompt, i, 0), None)
+            la.static_load(st, c0)
+            sts.append(st)
+        if B == 1:
+            appel = lambda x: la.decode_static(x, sts[0], L)
+        else:
+            ptrs = torch.tensor([st["cache"].data_ptr() for st in sts], dtype=torch.int64, device="cuda")
+            lptrs = torch.tensor([st["len"].data_ptr() for st in sts], dtype=torch.int64, device="cuda")
+            scores = torch.zeros(B, NH, L + 16, device="cuda")
+            appel = lambda x: la.decode_static_batch_complet(x, sts, L, ptrs, scores, lptrs)
+        outs = [appel(entrees[k]).clone() for k in range(4)]
+    torch.cuda.synchronize()
+    for k in range(4):
+        a, b = outs[k].float(), refs[k].float()
+        tol = b.abs() * 2 ** -6 + 1e-2 * b.abs().max()
+        hors = int(((a - b).abs() > tol).sum())
+        assert hors == 0, f"pas {k + 1} : {hors} valeurs hors tolérance vs référence (max {(a - b).abs().max().item():.3e})"
+    for i in range(B):
+        assert int(sts[i]["len"]) == n0 + 4
+        assert torch.equal(sts[i]["cache"][:n0 + 4], caches[i]), f"créneau {i} : lignes du cache ≠ référence"
