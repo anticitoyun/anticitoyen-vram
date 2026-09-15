@@ -193,7 +193,7 @@ def test_table_unite_sautee(monkeypatch):
 def test_compte_de_lancements_avec_awq(egales):
     """poste7 (poste7-glm-gateup-16-09) : lever gate ≠ up = une seconde
     nvfp4_quant_act, rien d'autre. Égales : 8 lancements/couche comme sans AWQ
-    (la division vit dans route_pack et moe_act) ; distinctes : 9."""
+    (la division AWQ vit dans nvfp4_quant_act, poste7-glm-pile-correctif § 1.4) ; distinctes : 9."""
     from torch.profiler import profile, ProfilerActivity
     from acvram.engine import model as M
     dev = torch.device("cuda:0")
