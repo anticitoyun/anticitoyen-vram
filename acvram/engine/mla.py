@@ -32,6 +32,10 @@ MLA_BUCKET = int(os.environ.get("ACVRAM_MLA_BUCKET", "128"))
 # fois pour les H têtes au lieu de 2 × H fois (mla_scores + mla_reduce) ;
 # =0 rejoue les deux noyaux d'avant (témoin d'équivalence).
 _MLA_UNE_PASSE = os.environ.get("ACVRAM_MLA_UNE_PASSE", "1") == "1"
+# Préparation du lot (einsum k_b, RoPE, norme kv_a, cat, conversion fp32) en un
+# lancement `mla_prep_batch` au lieu d'une quinzaine (poste7-duel-verdict § 6.2,
+# marche « RoPE + cat ») ; =0 rejoue les opérations torch (témoin).
+_MLA_PREP_NOYAU = os.environ.get("ACVRAM_MLA_PREP_NOYAU", "1") == "1"
 
 
 def _mla_decode(ext, q_eff, cache, len_t, scores, bucket, rank, scale):
@@ -356,6 +360,13 @@ class MLAttention(nn.Module):
                                   self.rank, self.scale)             # [B, nh, rank]
         return torch.cat([self._sortie_decode(x[i:i + 1], sts[i], o_lat[i]) for i in range(B)], dim=0)
 
+    def _k_b_c(self) -> torch.Tensor:
+        """``k_b`` [nh, rank, nope] contigu, une fois (le noyau de préparation le lit tel quel)."""
+        kb = self.__dict__.get("_k_b_c_cache")
+        if kb is None or kb.device != self.k_b.device:
+            kb = self.__dict__["_k_b_c_cache"] = self.k_b.detach().contiguous()
+        return kb
+
     def _v_b32(self) -> torch.Tensor:
         """``v_b`` en fp32, converti une fois (la conversion à chaque appel
         coûtait un lancement et une passe mémoire par couche et par pas)."""
@@ -381,23 +392,34 @@ class MLAttention(nn.Module):
         lens = torch.stack([st["len"] for st in sts])                      # [B]
         prem, kvp = self._proj_entree(x)
         q = self._q_depuis(prem).reshape(B, self.nh, self.nope + self.rope)
-        q_nope, q_pe = q.split([self.nope, self.rope], dim=-1)
-        if self.rope_emb is not None:
-            c0, k_pe0 = kvp.split([self.rank, self.rope], dim=-1)
-            q_pe, k_pe0 = self._rope(q_pe, k_pe0, lens, bucket + 1)
-            kvp = torch.cat([c0, k_pe0], dim=-1)
-        c, k_pe = kvp.split([self.rank, self.rope], dim=-1)
-        c = self._norme(c, self.kv_a_norm)
-        q_abs = torch.einsum('hrn,bhn->bhr', self.k_b.to(x.dtype), q_nope)
-        q_eff = torch.cat([q_abs, q_pe], dim=-1)                           # [B, nh, W]
-        k_new = torch.cat([c, k_pe], dim=-1).contiguous()                  # [B, W]
+        if (_MLA_PREP_NOYAU and hasattr(ext, "mla_prep_batch") and q.dtype == torch.bfloat16
+                and kvp.dtype == torch.bfloat16 and self.k_b.dtype == torch.bfloat16
+                and self.kv_a_norm.dtype == torch.bfloat16):
+            if self.rope_emb is not None:
+                cos32, sin32 = self.rope_emb.tables32(bucket + 1, x.device)
+            else:
+                cos32 = sin32 = None
+            q_eff, k_new = ext.mla_prep_batch(q.contiguous(), kvp.contiguous(), lens, cos32, sin32,
+                                              self._k_b_c(), self.kv_a_norm, self.nope, self.rope,
+                                              self.rank, self.eps)          # fp32 [B, nh, W], bf16 [B, W]
+        else:
+            q_nope, q_pe = q.split([self.nope, self.rope], dim=-1)
+            if self.rope_emb is not None:
+                c0, k_pe0 = kvp.split([self.rank, self.rope], dim=-1)
+                q_pe, k_pe0 = self._rope(q_pe, k_pe0, lens, bucket + 1)
+                kvp = torch.cat([c0, k_pe0], dim=-1)
+            c, k_pe = kvp.split([self.rank, self.rope], dim=-1)
+            c = self._norme(c, self.kv_a_norm)
+            q_abs = torch.einsum('hrn,bhn->bhr', self.k_b.to(x.dtype), q_nope)
+            q_eff = torch.cat([q_abs, q_pe], dim=-1).to(torch.float32)       # [B, nh, W]
+            k_new = torch.cat([c, k_pe], dim=-1).contiguous()              # [B, W]
         un_lancement = len_ptrs is not None and hasattr(ext, "mla_ecrit_latent")
         if un_lancement:
             ext.mla_ecrit_latent(k_new, cache_ptrs, len_ptrs)              # cache_b[len_b] = k_new[b] ; len_b += 1
         else:
             for i, st in enumerate(sts):
                 st["cache"].index_copy_(0, st["len"].view(1), k_new[i:i + 1])
-        o_lat = _mla_decode_batch(ext, q_eff.to(torch.float32).contiguous(), cache_ptrs, lens,
+        o_lat = _mla_decode_batch(ext, q_eff.contiguous(), cache_ptrs, lens,
                                   scores_batch, bucket, self.rank, self.scale)  # [B, nh, rank]
         y = torch.einsum('hvr,bhr->bhv', self._v_b32(), o_lat)
         if not un_lancement:

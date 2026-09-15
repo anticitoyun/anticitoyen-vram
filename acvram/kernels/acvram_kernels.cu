@@ -4524,6 +4524,155 @@ torch::Tensor mla_decode_1p(torch::Tensor q_eff, c10::optional<torch::Tensor> ca
     return o;
 }
 
+// Préparation MLA du pas pour les B créneaux en UN lancement (poste7-duel
+// verdict § 6.2, marche « RoPE + cat » : 2 541 lancements/pas mesurés contre
+// ≤ 2 500 scellés). Remplace, par couche : RoPE (≈ 10 élémentaires), trois
+// cat, l'einsum k_b (bmm + copies), la norme kv_a et la conversion fp32 de
+// q_eff. Même arithmétique que le chemin torch, opération par opération :
+//  - RoPE « norm » (paires 2i, 2i+1) avec cos/sin bf16 (tables32 = les
+//    tables bf16 en fp32) : y0 = bf16(bf16(x0·c) − bf16(x1·s)), y1 =
+//    bf16(bf16(x0·s) + bf16(x1·c)) — ce que font deux produits et une somme
+//    bf16 de torch ;
+//  - q_abs[b,h,r] = Σ_n k_b[h,r,n]·q_nope[b,h,n] accumulé en fp32, arrondi
+//    bf16 (la sortie de l'einsum) puis écrit en fp32 (le .to(float32) de
+//    q_eff) — seul poste où l'ordre des sommes diffère de cuBLAS (≤ 1 ulp) ;
+//  - norme kv_a : la réduction de rmsnorm_bf16_kernel à 256 fils, à
+//    l'identique (même découpe, même arbre de shuffles) — bit-identique.
+// Grille 1D : nh × (rank/64) blocs pour q (un bloc = 64 lignes de k_b[h] pour
+// tous les b ; les blocs de première tranche tournent aussi q_pe), puis B
+// blocs pour k_new (norme + RoPE d'un créneau).
+constexpr int MLAP_FILS = 256, MLAP_LIGNES = 64;
+__global__ void __launch_bounds__(MLAP_FILS) mla_prep_batch_kernel(
+    const __nv_bfloat16 *__restrict__ q,       // [B, nh, nope+rope]
+    const __nv_bfloat16 *__restrict__ kvp,     // [B, rank+rope]
+    const long *__restrict__ lens,             // [B] positions
+    const float *__restrict__ cos32,           // [max_pos, rope] (nullptr : pas de RoPE)
+    const float *__restrict__ sin32,
+    const __nv_bfloat16 *__restrict__ k_b,     // [nh, rank, nope]
+    const __nv_bfloat16 *__restrict__ w_norm,  // [rank]
+    float *__restrict__ q_eff,                 // [B, nh, rank+rope] fp32
+    __nv_bfloat16 *__restrict__ k_new,         // [B, rank+rope]
+    int B, int nh, int nope, int rope, int rank, float eps) {
+    extern __shared__ __align__(16) unsigned char mlap_smem[];
+    const int W = rank + rope, QW = nope + rope, NR = rank / MLAP_LIGNES;
+    const int tid = threadIdx.x;
+    auto rot = [&](float x0, float x1, float c, float s, float &y0, float &y1) {
+        const float a = __bfloat162float(__float2bfloat16(x0 * c));
+        const float bb = __bfloat162float(__float2bfloat16(x1 * s));
+        const float cc = __bfloat162float(__float2bfloat16(x0 * s));
+        const float d = __bfloat162float(__float2bfloat16(x1 * c));
+        y0 = __bfloat162float(__float2bfloat16(a - bb));
+        y1 = __bfloat162float(__float2bfloat16(cc + d));
+    };
+    if ((int)blockIdx.x < nh * NR) {
+        const int h = blockIdx.x / NR, r0 = (blockIdx.x - h * NR) * MLAP_LIGNES;
+        float *qn = reinterpret_cast<float *>(mlap_smem);                 // [B][nope] fp32
+        for (int i = tid; i < B * nope; i += MLAP_FILS) {
+            const int b = i / nope, n = i - b * nope;
+            qn[i] = __bfloat162float(q[((size_t)b * nh + h) * QW + n]);
+        }
+        __syncthreads();
+        const int r = tid >> 2, quart = tid & 3;                          // 64 lignes × 4 quarts de nope
+        const __nv_bfloat16 *kr = k_b + ((size_t)h * rank + r0 + r) * nope;
+        for (int b = 0; b < B; ++b) {
+            float acc = 0.f;
+            for (int n = quart; n < nope; n += 4)
+                acc += __bfloat162float(kr[n]) * qn[b * nope + n];
+            acc += __shfl_xor_sync(0xffffffffu, acc, 1);
+            acc += __shfl_xor_sync(0xffffffffu, acc, 2);
+            if (quart == 0)
+                q_eff[((size_t)b * nh + h) * W + r0 + r] = __bfloat162float(__float2bfloat16(acc));
+        }
+        if (r0 == 0 && cos32 != nullptr) {                                 // q_pe tourné, tous les b
+            const int paires = rope / 2;
+            for (int i = tid; i < B * paires; i += MLAP_FILS) {
+                const int b = i / paires, j = i - b * paires;
+                const long pos = lens[b];
+                const __nv_bfloat16 *src = q + ((size_t)b * nh + h) * QW + nope + 2 * j;
+                float y0, y1;
+                rot(__bfloat162float(src[0]), __bfloat162float(src[1]),
+                    cos32[pos * rope + j], sin32[pos * rope + j], y0, y1);
+                float *dst = q_eff + ((size_t)b * nh + h) * W + rank + 2 * j;
+                dst[0] = y0; dst[1] = y1;
+            }
+        } else if (r0 == 0) {
+            for (int i = tid; i < B * rope; i += MLAP_FILS) {
+                const int b = i / rope, j = i - b * rope;
+                q_eff[((size_t)b * nh + h) * W + rank + j] =
+                    __bfloat162float(q[((size_t)b * nh + h) * QW + nope + j]);
+            }
+        }
+        return;
+    }
+    // --- k_new[b] : norme kv_a (rmsnorm_bf16 à 256 fils, à l'identique) + RoPE de k_pe ---
+    const int b = blockIdx.x - nh * NR;
+    __shared__ float red[32];
+    const __nv_bfloat16 *xr = kvp + (size_t)b * W;
+    float ss = 0.f;
+    for (int i = tid; i < rank; i += MLAP_FILS) { const float v = __bfloat162float(xr[i]); ss += v * v; }
+    for (int o = 16; o > 0; o >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, o);
+    if ((tid & 31) == 0) red[tid >> 5] = ss;
+    __syncthreads();
+    ss = 0.f;
+    for (int k = 0; k < MLAP_FILS / 32; ++k) ss += red[k];
+    const float rs = rsqrtf(ss / (float)rank + eps);
+    __nv_bfloat16 *out = k_new + (size_t)b * W;
+    for (int i = tid; i < rank; i += MLAP_FILS) {
+        const float n = __bfloat162float(__float2bfloat16(__bfloat162float(xr[i]) * rs));
+        out[i] = __float2bfloat16(n * __bfloat162float(w_norm[i]));
+    }
+    if (cos32 != nullptr) {
+        const long pos = lens[b];
+        for (int j = tid; j < rope / 2; j += MLAP_FILS) {
+            float y0, y1;
+            rot(__bfloat162float(xr[rank + 2 * j]), __bfloat162float(xr[rank + 2 * j + 1]),
+                cos32[pos * rope + j], sin32[pos * rope + j], y0, y1);
+            out[rank + 2 * j] = __float2bfloat16(y0); out[rank + 2 * j + 1] = __float2bfloat16(y1);
+        }
+    } else {
+        for (int j = tid; j < rope; j += MLAP_FILS) out[rank + j] = xr[rank + j];
+    }
+}
+
+std::vector<torch::Tensor> mla_prep_batch(torch::Tensor q, torch::Tensor kvp, torch::Tensor lens,
+                                          c10::optional<torch::Tensor> cos32, c10::optional<torch::Tensor> sin32,
+                                          torch::Tensor k_b, torch::Tensor w_norm,
+                                          int64_t nope, int64_t rope, int64_t rank, double eps) {
+    CHECK_CUDA(q); ACVRAM_DEVICE_GUARD(q);
+    for (auto &z : {q, kvp, lens, k_b, w_norm}) CHECK_CONTIG(z);
+    TORCH_CHECK(q.dim() == 3 && q.scalar_type() == torch::kBFloat16 && q.size(2) == nope + rope,
+                "prep MLA : q [B, nh, nope+rope] bf16");
+    const int B = q.size(0), nh = q.size(1), W = (int)(rank + rope);
+    TORCH_CHECK(kvp.dim() == 2 && kvp.size(0) == B && kvp.size(1) == W && kvp.scalar_type() == torch::kBFloat16,
+                "prep MLA : kvp [B, rank+rope] bf16");
+    TORCH_CHECK(rank % MLAP_LIGNES == 0 && rope % 2 == 0 && nope % 4 == 0 && B * nope * 4 <= 48 * 1024,
+                "prep MLA : rank multiple de 64, rope pair, nope multiple de 4, B*nope*4 o <= 48 Ko");
+    TORCH_CHECK(k_b.dim() == 3 && k_b.size(0) == nh && k_b.size(1) == rank && k_b.size(2) == nope
+                && k_b.scalar_type() == torch::kBFloat16, "prep MLA : k_b [nh, rank, nope] bf16");
+    TORCH_CHECK(w_norm.numel() == rank && w_norm.scalar_type() == torch::kBFloat16, "prep MLA : w_norm [rank] bf16");
+    TORCH_CHECK(lens.scalar_type() == torch::kLong && lens.numel() == B, "prep MLA : lens [B] int64");
+    const float *c32 = nullptr, *s32 = nullptr;
+    if (cos32.has_value() && cos32->defined()) {
+        CHECK_CONTIG(*cos32); CHECK_CONTIG(*sin32);
+        TORCH_CHECK(cos32->scalar_type() == torch::kFloat && cos32->dim() == 2 && cos32->size(1) == rope
+                    && sin32->sizes() == cos32->sizes(), "prep MLA : cos32/sin32 [max_pos, rope] fp32");
+        c32 = cos32->data_ptr<float>(); s32 = sin32->data_ptr<float>();
+    }
+    auto q_eff = torch::empty({B, nh, W}, q.options().dtype(torch::kFloat));
+    auto k_new = torch::empty({B, W}, q.options());
+    const int NR = (int)rank / MLAP_LIGNES;
+    const size_t shm = (size_t)B * nope * sizeof(float);
+    mla_prep_batch_kernel<<<(unsigned)(nh * NR + B), MLAP_FILS, shm, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const __nv_bfloat16 *>(q.data_ptr()),
+        reinterpret_cast<const __nv_bfloat16 *>(kvp.data_ptr()), lens.data_ptr<long>(), c32, s32,
+        reinterpret_cast<const __nv_bfloat16 *>(k_b.data_ptr()),
+        reinterpret_cast<const __nv_bfloat16 *>(w_norm.data_ptr()),
+        q_eff.data_ptr<float>(), reinterpret_cast<__nv_bfloat16 *>(k_new.data_ptr()),
+        B, nh, (int)nope, (int)rope, (int)rank, (float)eps);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return {q_eff, k_new};
+}
+
 // RMSNorm fusionnée (bf16 -> bf16, variance en fp32) : un bloc par ligne.
 // Même arithmétique que la version torch : x normalisé arrondi en bf16, puis
 // produit bf16 par le poids — bit-identique.
@@ -5024,6 +5173,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("mult") = 1.0);
     m.def("kda_decode", &kda_decode, "KDA : pas de decodage fusionne (une sequence)");
     m.def("mla_decode", &mla_decode, "MLA absorbee : scores + softmax + lecture latente");
+    m.def("mla_prep_batch", &mla_prep_batch,
+          "MLA decodage : q [B,nh,nope+rope] + kvp [B,rank+rope] -> (q_eff [B,nh,W] fp32, k_new [B,W] bf16) : "
+          "einsum k_b, RoPE, norme kv_a et cat en un lancement (cos32/sin32 = tables fp32 indexees par position, ou None)");
     m.def("mla_ecrit_latent", &mla_ecrit_latent,
           "MLA decodage : k_new [B, W] -> cache_b[len_b], puis len_b += 1, un lancement pour les B creneaux (tables d'adresses [B])");
     m.def("mla_decode_1p", &mla_decode_1p, py::arg("q_eff"), py::arg("cache_ptrs") = py::none(),

@@ -30,6 +30,20 @@ mon attendu 24-28 ms (les 5,6 ms de GEMV lot 1 et ~8 ms de cat/copies tombent, l
 5,3 ms reste). Équivalence : top-1 identique, cos ≥ 0,9999 contre `ACVRAM_MLA_BATCH=1` sur
 16 positions × 2 couches ; PPL 3 tranches ± 0,004.
 
+Verdict poste3 (3f69c82) : TENU — 21,44 ms (témoin 43,66), 2 541 lancements (41 au-dessus de
+2 500), logits bit-identiques 768/768, PPL B/A = 1,000000.
+
+## Marche « RoPE + cat » (commit 1b) : préparation du lot en un noyau
+`mla_prep_batch(q, kvp, lens, cos32, sin32, k_b, w_norm, …) → (q_eff fp32 [B,nh,W], k_new bf16
+[B,W])` remplace par couche : RoPE (≈ 10 élémentaires), trois `cat`, l'einsum k_b (bmm +
+copies), la norme kv_a, la conversion fp32 — ≈ 15 lancements → 1. Arithmétique : RoPE
+opération par opération comme torch (cos/sin bf16, produits et somme arrondis bf16), norme =
+la réduction de `rmsnorm_bf16_kernel` à l'identique (k_new bit-identique), q_abs accumulé en
+fp32 puis arrondi bf16 (≤ 1 ulp de cuBLAS). Témoin `ACVRAM_MLA_PREP_NOYAU=0`. Tests :
+`test_module_batch_complet` (témoin bit-identique à forward_batch ; noyau ≤ 1 ulp de la boucle,
+caches identiques), `test_prep_batch_avec_rope` (k_new bit-identique, y ≤ 1 ulp).
+Prédiction : 2 541 → **≈ 1 850 lancements/pas** (−15 × 46), pas 21,4 → 19,5-20,5 ms.
+
 ## Commit 2 — attention à une passe (prêt sur `poste4-mla-1p`, 0309a03)
 `mla_decode_1p` : le cache latent lu une fois pour les H têtes (tuile de 32 lignes en
 shared, scores fp32 des H têtes — pas de mma bf16 sur q : 2⁻⁸ sur des scores ~10 aurait coûté
