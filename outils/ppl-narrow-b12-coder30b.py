@@ -78,11 +78,15 @@ def main() -> int:
 
     tokenizer = load_tokenizer(MODEL)
     texte = _load_corpus(CORPUS)
-    ids_plats = tokenizer.encode(texte)[: N_SEQ * CHUNK]
+    # PPL_DECALAGE (jetons) : tranche disjointe du corpus (poste7 narrow-verdict § 3 :
+    # 0 / 24576 / 49152) ; defaut 0 = tranche historique du 16/09.
+    decalage = int(os.environ.get("PPL_DECALAGE", "0"))
+    ids_tous = tokenizer.encode(texte)
+    ids_plats = ids_tous[decalage: decalage + N_SEQ * CHUNK]
     assert len(ids_plats) == N_SEQ * CHUNK, (
-        f"corpus trop court : {len(ids_plats)} < {N_SEQ * CHUNK}")
+        f"corpus trop court : {len(ids_tous)} jetons < decalage {decalage} + {N_SEQ * CHUNK}")
     chunks = [ids_plats[k * CHUNK:(k + 1) * CHUNK] for k in range(N_SEQ)]
-    print(f"  corpus : {N_SEQ} x {CHUNK} jetons, {os.path.basename(CORPUS)}", flush=True)
+    print(f"  corpus : {N_SEQ} x {CHUNK} jetons, decalage {decalage}, {os.path.basename(CORPUS)}", flush=True)
 
     # `load_model(max_model_len=...)` replanifie avec `PlannerOptions.
     # max_concurrent_seqs` par DEFAUT (8, tiering.py:152), utilise ligne 447
@@ -165,6 +169,8 @@ def main() -> int:
         "acvram_moe_decode_mma": os.environ["ACVRAM_MOE_DECODE_MMA"],
         "acvram_narrow_gemm": os.environ["ACVRAM_NARROW_GEMM"],
         "eager": eager, "kv_max_tokens": plan.kv_max_tokens,
+        "decalage": decalage,
+        "acvram": os.path.dirname(os.path.dirname(os.path.abspath(sys.modules["acvram"].__file__))),
         "ppl": ppl, "n_jetons_notes": n_total,
         "pas_t_le_32": f"{pas_petits}/{pas_total}", "n_pas": n_pas,
         "lancements_narrow_gemm": compte["narrow_gemm"],
