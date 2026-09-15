@@ -2046,19 +2046,48 @@ __device__ __forceinline__ void mma_mxf4nvf4(float d[4], const unsigned a[4], co
 // compteurs (facultatif, ACVRAM_QA_COMPTE=1) : [0] blocs non nuls, [1] flushés
 // (amax_blk > 0 et échelle 0), [2] saturés (s > 448 avant satfinite ; 0 par
 // construction, le compteur est là pour le prouver).
+// Rotation de Hadamard (poste7-hadamard-16-09, QuaRot) : x' = x·H par bloc de
+// `hadamard` colonnes (H_512 bloc-diagonale sur GLM : K = 2 048 = 4 × 512,
+// 1 536 = 3 × 512), poids tournés W·H par le convertisseur, produit
+// inchangé, canal aberrant étalé sur tout le bloc E2M1. Ici : FWHT fp32 en
+// mémoire partagée (log2 étages papillon, chaque sortie = une somme de deux
+// valeurs, reproductible au bit), normalisation par 1/√bloc en fp32 (RN),
+// puis arrondi bf16 — l'arithmétique de ChannelScaler.apply (hadamard(x)
+// puis / s) que la boucle par expert applique ; la référence Python
+// (tests/test_gemm_grouped_mma.py quant_act_ref) refait les mêmes étapes.
 constexpr int QA_FILS = 256;
 __global__ void __launch_bounds__(QA_FILS) nvfp4_quant_act_kernel(
     const __nv_bfloat16 *__restrict__ x, unsigned char *__restrict__ xq,
     unsigned char *__restrict__ xsf, float *__restrict__ grow, int nblk,
     const __nv_bfloat16 *__restrict__ awq, const int *__restrict__ e_sorted,
-    long long *__restrict__ compteurs) {
-    extern __shared__ float qa_row[];               // [K] fp32 après division AWQ
+    long long *__restrict__ compteurs, int hadamard) {
+    extern __shared__ float qa_row[];               // [K] fp32 après rotation et division AWQ
     __shared__ float qa_red[QA_FILS / 32];
     const long row = blockIdx.x;
     const int K = nblk * 16;
     const __nv_bfloat16 *src = x + row * (long)K;
     const __nv_bfloat16 *sc = awq ? awq + (long)e_sorted[row] * K : nullptr;
     float amax = 0.f;
+    if (hadamard > 0) {
+        for (int i = threadIdx.x; i < K; i += QA_FILS) qa_row[i] = __bfloat162float(src[i]);
+        __syncthreads();
+        for (int h = 1; h < hadamard; h <<= 1) {
+            for (int p = threadIdx.x; p < K / 2; p += QA_FILS) {
+                const int g = p / h, j = p - g * h;
+                const int i0 = g * 2 * h + j, i1 = i0 + h;
+                const float a = qa_row[i0], c = qa_row[i1];
+                qa_row[i0] = a + c; qa_row[i1] = a - c;
+            }
+            __syncthreads();
+        }
+        const float inv = __fdiv_rn(1.f, __fsqrt_rn((float)hadamard)); // 1/√bloc en fp32 RN (pas le sqrtf approché de fast_math)
+        for (int i = threadIdx.x; i < K; i += QA_FILS) {
+            float t = __bfloat162float(__float2bfloat16(__fmul_rn(qa_row[i], inv)));
+            if (sc) t = __bfloat162float(__float2bfloat16(__fdiv_rn(t, __bfloat162float(sc[i]))));
+            qa_row[i] = t;
+            amax = fmaxf(amax, fabsf(t));
+        }
+    } else
     for (int i = threadIdx.x; i < K; i += QA_FILS) {
         float t = __bfloat162float(src[i]);
         if (sc) t = __bfloat162float(__float2bfloat16(__fdiv_rn(t, __bfloat162float(sc[i]))));
@@ -2461,13 +2490,15 @@ bool nvfp4_gemm_grouped_mma_disponible() {
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> nvfp4_quant_act(
         torch::Tensor x, c10::optional<torch::Tensor> awq, c10::optional<torch::Tensor> e_sorted,
-        c10::optional<torch::Tensor> compteurs) {
+        c10::optional<torch::Tensor> compteurs, int64_t hadamard) {
     CHECK_CUDA(x); CHECK_CONTIG(x); ACVRAM_DEVICE_GUARD(x);
     TORCH_CHECK(x.scalar_type() == torch::kBFloat16, "quant_act : activations bf16");
     TORCH_CHECK(x.dim() == 2 && x.size(1) % 64 == 0, "quant_act : [G, K] avec K multiple de 64");
     const long G = x.size(0), K = x.size(1);
     TORCH_CHECK(K <= 16384, "quant_act : K <= 16384 (une ligne en memoire partagee)");
     const int nblk = (int)(K >> 4);
+    TORCH_CHECK(hadamard >= 0 && (hadamard == 0 || ((hadamard & (hadamard - 1)) == 0 && K % hadamard == 0 && hadamard >= 16)),
+                "quant_act : bloc de Hadamard = puissance de 2 >= 16 divisant K, ou 0");
     const __nv_bfloat16 *awq_p = nullptr;
     const int *es_p = nullptr;
     if (awq.has_value() && awq->defined()) {
@@ -2499,7 +2530,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> nvfp4_quant_act(
         nvfp4_quant_act_kernel<<<(unsigned)G, QA_FILS, shm, stream>>>(
             reinterpret_cast<const __nv_bfloat16 *>(x.data_ptr()),
             xq.data_ptr<unsigned char>(), xsf.data_ptr<unsigned char>(), grow.data_ptr<float>(),
-            nblk, awq_p, es_p, cpt_p);
+            nblk, awq_p, es_p, cpt_p, (int)hadamard);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
     return {xq, xsf, grow};
@@ -5232,7 +5263,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "activations bf16 [G, K] -> (E2M1 [G, K/2], echelles UE4M3 [G, K/16], echelle globale fp32 [G] "
           "par ligne = amax_r/(6*448), a passer en grow a la GEMM) ; awq [E, K] bf16 + e_sorted [G] : x/s[e] fusionne",
           py::arg("x"), py::arg("awq") = py::none(), py::arg("e_sorted") = py::none(),
-          py::arg("compteurs") = py::none());
+          py::arg("compteurs") = py::none(), py::arg("hadamard") = 0);
     m.def("int4_gemv_grouped", &int4_gemv_grouped,
           "INT4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
     m.def("kv_write_int8", &kv_write_int8,
