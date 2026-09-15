@@ -6,7 +6,8 @@ Mis à jour : 16/09 (initial, poste7). Objectif : duel GLM-4.7-Flash NVFP4 b=12 
 
 | chantier | qui | scellé | réfuté → | note |
 |---|---|---|---|---|
-| MLA, 3 commits dans cet ordre (poste7 § 6, cause § 2 corrigée : cache relu = 6,4 ms mesurés, pas 32,8) : (1) batcher décodage au lot b (int8 GEMM M=12, normes/RoPE/cat en noyaux [B], mla.py:324-400) (2) attention à une passe (3) latent fp8 | poste4 | (1) lancements/pas ≤ 2 500 au même nsys, pas ≤ 22 ms (> 26 → trou hôte), top-1/cos ≥ 0,9999/PPL ± 0,004 | (1) > 26 ms → trou hôte | `poste7-duel-verdict` §6 |
+| MLA, commit 1 FAIT (3f69c82) : 21,44 ms ≤ 22 TENU (témoin BATCH=1 43,66), logits bit-identiques 768/768, PPL B/A=1,000000 ; 2 541 lancements ≤ 2 500 dépassé de 41 → marche RoPE+cat nommée ; postes restants vs vLLM 15,1 : denses 5,85 (essayer ACVRAM_NARROW_GEMM=1), attention 6,45 (commit 2), élém.+trou 2,5. Commits 2 (attention 1 passe, poste4-mla-1p 0309a03) et 3 (latent fp8) : PEUVENT PARTIR | poste4 | commit 2 : 6,4 → ≤ 3 ms ; commit 3 : latent fp8 | — | `verdict-mla1-16-09` |
+| **défaut d'instrument** : PPL GLM tronque 4/12 séquences (kv_max_tokens épuisé, 22 664/24 564 jetons) — B/A valide, PPL absolue non ; à corriger avant toute PPL GLM publiée | — | — | — | `verdict-mla1-16-09` |
 | résidence dynamique des experts (hors VRAM), après MLA | poste1 (mesure à sec au retour) | fréquence d'activation : ≥ 60 % sur 50 % des experts (réfuté < 60 % → sans objet) | < 60 % → écarté | `poste7-avis-exterieur` |
 | noyau v2 par ligne (877169c/1b8ddfe, dans main) | poste4 | compteurs 0/0, 6,3 s, nominal : TENUS ; PPL alpha-commun 1,0277 **RÉFUTÉE** (> 1,015) ; -k48 1,0183 **RÉFUTÉE** (> 1,010) — coût = E2M1 sur les 3 sites, pas les blocs à zéro (flush 0 ne rend que 0,003/0,022) | → poste7 ; sonde par étape poste1 ; cb2784b | `verdict-reppl-sage7` |
 | contrôle int8 AWQ (à sec) | poste1 | FAIT : 0,982 / 0,983 ≥ 0,9 → retrait des tables int8 | — | `verdict-glm-awq-int8` |
