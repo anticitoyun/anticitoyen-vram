@@ -3483,3 +3483,18 @@ fixe, fantômes à poids nul), bit à bit égal au torch. Chiffre officiel b=12
 **« −12 % de temps, −2 % de joules : le pas est revenu au plafond »**.
 Lancements par pas 3 677 → 1 517 (cliquet ≤ 1 700), jetons identiques.
 Défaut `ACVRAM_MOE_ROUTE_PACK=1` ; `0` = témoin torch.
+
+### v0.6.6 (16/09) — seuil de lot à 5 ; échelle AWQ par expert dans la pile
+
+Cellule b=5 de poste3 (`revue/verdict-cellule-b5-16-09.md`, ABAB 34 s, energie.py
+corrigé) : MIN_T=5 contre 9, ms −0,3 % (égalité), J −4,1 % (SM 2 937 MHz au
+lieu de 2 727 : la GEMM sort du plafond 400 W). Critère de poste7 tenu → défaut
+`ACVRAM_MOE_DECODE_MMA_MIN_T = 5` (godets 8, 12, 16 en MMA ; 2 et 4 en GEMV).
+
+Échelle AWQ par expert dans la pile MoE (`revue/awq-pile-15-09.md`,
+`revue/poste4-awq-gate-up-15-09.md`) : tables [E, K] bf16 au chargeur, ligne
+(jeton, expert) divisée par s[e] dans `moe_route_pack` avant la quantification,
+activation divisée par s_down[e] dans `moe_act`, GEMV et prefill groupé
+alignés ; gate et up à échelles distinctes = seconde ligne et seconde
+`nvfp4_quant_act` (8 → 9 lancements par couche). Table d'unité sautée. La
+pile n'exile plus une couche pour une échelle AWQ.

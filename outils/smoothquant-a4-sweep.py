@@ -47,6 +47,7 @@ from outils.hooks_activations_a4 import (installer_hooks_genres,  # noqa: E402
                                          installer_hooks_smoothquant,
                                          retirer_hooks)
 from outils.racine_modeles import MODELES  # noqa: E402
+from outils._chemins import sorties  # noqa: E402
 
 BASE = Path(MODELES)
 DOSSIER = BASE / "Llama-2-7b-nvfp4"
@@ -85,8 +86,7 @@ def main() -> int:
     ap.add_argument("--pour-de-vrai", action="store_true")
     ap.add_argument("--regimes", default="smooth-a0.50,smooth-a0.65,smooth-a0.80,downproj-seul,moe-proj-seul")
     ap.add_argument("--sortie",
-                    default=str(Path("~/Bureau/Claude"
-                                     "/acvram-memoire/corpus/smoothquant-a4-sweep")))
+                    default=str(sorties() / "smoothquant-a4-sweep"))
     ap.add_argument("--device", default="cuda:0")
     a = ap.parse_args()
     regimes = [r.strip() for r in a.regimes.split(",") if r.strip()]

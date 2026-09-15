@@ -2838,7 +2838,8 @@ __global__ void __launch_bounds__(RP_FILS) moe_route_pack_kernel(
     int *__restrict__ ordre, int *__restrict__ inv, float *__restrict__ tw,
     int *__restrict__ cnt, int *__restrict__ tile_e, int *__restrict__ tile_t0,
     int *__restrict__ tile_n, __nv_bfloat16 *__restrict__ xs,
-    const __nv_bfloat16 *__restrict__ awq, int *__restrict__ e_sorted) {
+    const __nv_bfloat16 *__restrict__ awq, int *__restrict__ e_sorted,
+    const __nv_bfloat16 *__restrict__ awq2, __nv_bfloat16 *__restrict__ xs2) {
     __shared__ int s_e[RP_GMAX];
     __shared__ int s_cnt[1024];          // E <= 1024
     __shared__ int s_start[1024];
@@ -2889,10 +2890,19 @@ __global__ void __launch_bounds__(RP_FILS) moe_route_pack_kernel(
     const XT *src = x + (long)jeton * H;
     __nv_bfloat16 *dst = xs + (long)p * Hpad;
     const __nv_bfloat16 *sc = awq ? awq + (long)e_p * Hpad : nullptr;
+    // gate et up a echelles distinctes (awq2) : seconde ligne xs2, meme x
+    const __nv_bfloat16 *sc2 = awq2 ? awq2 + (long)e_p * Hpad : nullptr;
+    __nv_bfloat16 *dst2 = xs2 ? xs2 + (long)p * Hpad : nullptr;
     for (int i = tid; i < Hpad; i += RP_FILS) {
-        float v = i < H ? rp_to_float(src[i]) : 0.f;
+        const float x0 = i < H ? rp_to_float(src[i]) : 0.f;
+        float v = x0;
         if (sc) v = __bfloat162float(__float2bfloat16(v)) / __bfloat162float(sc[i]);
         dst[i] = __float2bfloat16(v);
+        if (dst2) {
+            float v2 = x0;
+            if (sc2) v2 = __bfloat162float(__float2bfloat16(v2)) / __bfloat162float(sc2[i]);
+            dst2[i] = __float2bfloat16(v2);
+        }
     }
     if (tid == 0) { ordre[p] = f; e_sorted[p] = e_p; }
     if (blockIdx.x == 0) {
@@ -2918,7 +2928,8 @@ __global__ void __launch_bounds__(RP_FILS) moe_route_pack_kernel(
 std::vector<torch::Tensor> moe_route_pack(torch::Tensor topi, torch::Tensor topw,
                                           torch::Tensor x, int64_t E, int64_t bt,
                                           int64_t t_max, int64_t Hpad,
-                                          c10::optional<torch::Tensor> awq) {
+                                          c10::optional<torch::Tensor> awq,
+                                          c10::optional<torch::Tensor> awq2) {
     CHECK_CUDA(topi); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(x);
     CHECK_CONTIG(topi); CHECK_CONTIG(topw); CHECK_CONTIG(x);
     TORCH_CHECK(topi.dim() == 2 && topw.sizes() == topi.sizes(), "moe_route_pack : topi/topw [t, k]");
@@ -2946,12 +2957,25 @@ std::vector<torch::Tensor> moe_route_pack(torch::Tensor topi, torch::Tensor topw
         CHECK_CONTIG(*awq);
         pawq = reinterpret_cast<const __nv_bfloat16 *>(awq->data_ptr());
     }
+    // awq2 : echelle d'up distincte de celle de gate -> seconde ligne xs2 ;
+    // sinon xs2 EST xs (un seul rassemblement, une seule quantification)
+    const __nv_bfloat16 *pawq2 = nullptr; __nv_bfloat16 *pxs2 = nullptr;
+    torch::Tensor xs2 = xs;
+    if (awq2.has_value()) {
+        TORCH_CHECK(awq2->scalar_type() == torch::kBFloat16 && awq2->dim() == 2 && awq2->size(0) == E && awq2->size(1) == Hpad,
+                    "moe_route_pack : table AWQ up [E, Hpad] bf16");
+        CHECK_CONTIG(*awq2);
+        pawq2 = reinterpret_cast<const __nv_bfloat16 *>(awq2->data_ptr());
+        xs2 = torch::empty({G, Hpad}, xs.options());
+        pxs2 = reinterpret_cast<__nv_bfloat16 *>(xs2.data_ptr());
+    }
     auto stream = at::cuda::getCurrentCUDAStream();
     #define RP_LANCE(XT, IT, PX) moe_route_pack_kernel<XT, IT><<<G, RP_FILS, 0, stream>>>( \
             topi.data_ptr<IT>(), topw.data_ptr<float>(), PX, (int)x.size(1), (int)Hpad, \
             G, t, k, (int)E, (int)bt, (int)t_max, ordre.data_ptr<int>(), inv.data_ptr<int>(), \
             tw.data_ptr<float>(), cnt.data_ptr<int>(), te.data_ptr<int>(), t0.data_ptr<int>(), \
-            tn.data_ptr<int>(), reinterpret_cast<__nv_bfloat16 *>(xs.data_ptr()), pawq, es.data_ptr<int>())
+            tn.data_ptr<int>(), reinterpret_cast<__nv_bfloat16 *>(xs.data_ptr()), pawq, es.data_ptr<int>(), \
+            pawq2, pxs2)
     const bool bf = x.scalar_type() == torch::kBFloat16, i64 = topi.scalar_type() == torch::kLong;
     if (bf && i64) RP_LANCE(__nv_bfloat16, int64_t, reinterpret_cast<const __nv_bfloat16 *>(x.data_ptr()));
     else if (bf) RP_LANCE(__nv_bfloat16, int, reinterpret_cast<const __nv_bfloat16 *>(x.data_ptr()));
@@ -2959,7 +2983,7 @@ std::vector<torch::Tensor> moe_route_pack(torch::Tensor topi, torch::Tensor topw
     else RP_LANCE(float, int, x.data_ptr<float>());
     #undef RP_LANCE
     C10_CUDA_KERNEL_LAUNCH_CHECK();
-    return {xs, ordre, inv, tw, cnt, te, t0, tn, es};
+    return {xs, ordre, inv, tw, cnt, te, t0, tn, es, xs2};
 }
 
 
@@ -4576,8 +4600,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("group"), py::arg("gscale"), py::arg("rows"),
           "GEMM etroit (M<=16) bf16 tensor cores, poids int8 (groupes) ou nvfp4 (blocs 16) dequantifies en registres");
     m.def("moe_route_pack", &moe_route_pack, py::arg("topi"), py::arg("topw"), py::arg("x"), py::arg("E"), py::arg("bt"),
-          py::arg("t_max"), py::arg("Hpad"), py::arg("awq") = py::none(),
-          "MoE decodage : routage + rassemblement en un lancement -> (xs, ordre, inv, tw, cnt, tile_e, tile_t0, tile_n, e_sorted) ; awq [E,Hpad] bf16 : x / s[e]");
+          py::arg("t_max"), py::arg("Hpad"), py::arg("awq") = py::none(), py::arg("awq2") = py::none(),
+          "MoE decodage : routage + rassemblement en un lancement -> (xs, ordre, inv, tw, cnt, tile_e, tile_t0, tile_n, e_sorted, xs2) ; awq [E,Hpad] bf16 : x / s[e] ; awq2 (up distinct de gate) : xs2 = x / s_up[e], sinon xs2 est xs");
     m.def("moe_reduce_trie", &moe_reduce_trie,
           "MoE prefill : reduction ponderee par jeton depuis l'ordre trie par expert, sortie bf16");
     m.def("nvfp4_gemm_grouped_mma", &nvfp4_gemm_grouped_mma,

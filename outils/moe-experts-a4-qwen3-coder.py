@@ -48,6 +48,7 @@ _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
 from outils.hooks_activations_a4 import (installer_hooks_moe_experts,  # noqa: E402
                                          retirer_hooks)
 from outils.racine_modeles import MODELES  # noqa: E402
+from outils._chemins import sorties  # noqa: E402
 
 BASE = Path(MODELES)
 DOSSIER = BASE / "Qwen3-Coder-30B-A3B-nvfp4"
@@ -64,8 +65,7 @@ def main() -> int:
     ap.add_argument("--pour-de-vrai", action="store_true")
     ap.add_argument("--regimes", default="a16,moe-a4")
     ap.add_argument("--sortie",
-                    default=str(Path("~/Bureau/Claude"
-                                     "/acvram-memoire/corpus/moe-experts-a4-qwen3-coder")))
+                    default=str(sorties() / "moe-experts-a4-qwen3-coder"))
     ap.add_argument("--device", default="cuda:0")
     a = ap.parse_args()
     regimes = [r.strip() for r in a.regimes.split(",") if r.strip()]
