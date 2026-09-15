@@ -121,7 +121,8 @@ def test_module_batch_complet(B, lens):
         y_boucle = torch.cat([la.decode_static(x[i:i + 1], sts_a[i], bucket) for i in range(B)], dim=0)
         ptrs = torch.tensor([st["cache"].data_ptr() for st in sts_b], dtype=torch.int64, device="cuda")
         scores = torch.zeros(B, nh, L + 16, device="cuda")
-        y_complet = la.decode_static_batch_complet(x, sts_b, bucket, ptrs, scores)
+        len_ptrs = torch.tensor([st["len"].data_ptr() for st in sts_b], dtype=torch.int64, device="cuda")
+        y_complet = la.decode_static_batch_complet(x, sts_b, bucket, ptrs, scores, len_ptrs)
         # forward_batch : même lot, caches passés comme tenseurs [len, W] (None si vides)
         caches = [None if n == 0 else sts_c[i]["cache"][:n].clone() for i, n in enumerate(lens)]
         y_fb, _ = la.forward_batch(x, caches)
@@ -135,3 +136,53 @@ def test_module_batch_complet(B, lens):
     ident = (a == b).float().mean().item()
     assert hors == 0, f"{hors} valeurs hors tolerance, max {(a - b).abs().max().item():.3e}"
     print(f"\ncomplet vs boucle : {ident:.4f} identiques, ecart max {(a - b).abs().max().item():.3e}")
+
+
+def test_ecrit_latent_un_lancement():
+    """``mla_ecrit_latent`` : k_new[b] à la ligne len_b de chaque cache, puis
+    len_b += 1 — identique à la boucle index_copy_ / add_, et le nombre de
+    lancements du chemin complet ne dépend plus de B (12 créneaux coûtaient
+    12 index_copy_ + 12 add_ par couche, poste7-duel-verdict-16-09 § 6)."""
+    ext = _ext()
+    if not hasattr(ext, "mla_ecrit_latent"):
+        pytest.skip("extension sans mla_ecrit_latent")
+    from torch.profiler import profile, ProfilerActivity
+    nh, nope, rope, rank, dv, hidden, L = 4, 32, 16, 64, 32, 128, 128
+    W = rank + rope
+    torch.manual_seed(3)
+    for B in (4, 12):
+        lens = [(7 * i) % 100 for i in range(B)]
+        sts_a, sts_b = [], []
+        for n in lens:
+            for sts in (sts_a, sts_b):
+                st = {"cache": torch.zeros(L + 16, W, dtype=torch.bfloat16, device="cuda"),
+                      "len": torch.tensor(n, dtype=torch.long, device="cuda")}
+                sts.append(st)
+        k_new = torch.randn(B, W, device="cuda").to(torch.bfloat16)
+        for i, st in enumerate(sts_a):
+            st["cache"].index_copy_(0, st["len"].view(1), k_new[i:i + 1]); st["len"].add_(1)
+        ptrs = torch.tensor([st["cache"].data_ptr() for st in sts_b], dtype=torch.int64, device="cuda")
+        lptrs = torch.tensor([st["len"].data_ptr() for st in sts_b], dtype=torch.int64, device="cuda")
+        ext.mla_ecrit_latent(k_new, ptrs, lptrs)
+        torch.cuda.synchronize()
+        for a, b in zip(sts_a, sts_b):
+            assert torch.equal(a["cache"], b["cache"]) and torch.equal(a["len"], b["len"])
+    # lancements du chemin complet : indépendants de B
+    la = _module(nh, nope, rope, rank, dv, hidden, 200)
+    compte = {}
+    for B in (4, 12):
+        sts = []
+        for i in range(B):
+            st = la.new_static(torch.device("cuda"), L + 16, torch.bfloat16); st["len"].fill_(5 * i); sts.append(st)
+        x = torch.randn(B, hidden, device="cuda").to(torch.bfloat16)
+        ptrs = torch.tensor([st["cache"].data_ptr() for st in sts], dtype=torch.int64, device="cuda")
+        lptrs = torch.tensor([st["len"].data_ptr() for st in sts], dtype=torch.int64, device="cuda")
+        scores = torch.zeros(B, nh, L + 16, device="cuda")
+        with torch.inference_mode():
+            la.decode_static_batch_complet(x, sts, L, ptrs, scores, lptrs); torch.cuda.synchronize()
+            with profile(activities=[ProfilerActivity.CUDA]) as prof:
+                la.decode_static_batch_complet(x, sts, L, ptrs, scores, lptrs); torch.cuda.synchronize()
+        compte[B] = sum(e.count for e in prof.key_averages() if e.self_device_time_total > 0
+                        and "Memcpy" not in e.key and "Memset" not in e.key)
+    assert compte[4] == compte[12], f"lancements par appel : B=4 -> {compte[4]}, B=12 -> {compte[12]}"
+    print(f"\nlancements par couche MLA (chemin complet) : {compte[12]}")

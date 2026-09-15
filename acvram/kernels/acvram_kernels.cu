@@ -4247,6 +4247,43 @@ torch::Tensor mla_decode_batch(torch::Tensor q_eff, torch::Tensor cache_ptrs,
     return o;
 }
 
+// Écriture du latent du pas pour les B créneaux en UN lancement (poste7-duel
+// verdict § 6.2, commit 1 : le chemin MLA du décodage tournait créneau par
+// créneau — 12 index_copy_ + 12 len.add_ par couche). Un bloc par créneau :
+// la ligne k_new[b] va à cache_b[len_b], puis len_b += 1. Les caches et les
+// longueurs vivent chacun dans son tenseur (adresses stables sur la vie du
+// serveur) : tables d'adresses [B] int64, comme mla_decode_batch. L'attention
+// du même pas lit la copie ``lens`` prise AVANT ce lancement.
+__global__ void mla_ecrit_latent_kernel(const __nv_bfloat16 *__restrict__ k_new,   // [B, W]
+                                        const int64_t *__restrict__ cache_ptrs,    // [B]
+                                        const int64_t *__restrict__ len_ptrs,      // [B]
+                                        int W) {
+    const int b = blockIdx.x;
+    long *lp = reinterpret_cast<long *>(len_ptrs[b]);
+    const long len = *lp;
+    const uint4 *src = reinterpret_cast<const uint4 *>(k_new + (size_t)b * W);
+    uint4 *dst = reinterpret_cast<uint4 *>(reinterpret_cast<__nv_bfloat16 *>(cache_ptrs[b]) + len * W);
+    for (int i = threadIdx.x; i < W / 8; i += blockDim.x) dst[i] = src[i];
+    __syncthreads();
+    if (threadIdx.x == 0) *lp = len + 1;
+}
+
+void mla_ecrit_latent(torch::Tensor k_new, torch::Tensor cache_ptrs, torch::Tensor len_ptrs) {
+    CHECK_CUDA(k_new); ACVRAM_DEVICE_GUARD(k_new); CHECK_CONTIG(k_new);
+    CHECK_CONTIG(cache_ptrs); CHECK_CONTIG(len_ptrs);
+    TORCH_CHECK(k_new.dim() == 2 && k_new.scalar_type() == torch::kBFloat16 && k_new.size(1) % 8 == 0,
+                "ecrit_latent : k_new [B, W] bf16, W multiple de 8");
+    const int B = k_new.size(0), W = k_new.size(1);
+    TORCH_CHECK(cache_ptrs.scalar_type() == torch::kInt64 && cache_ptrs.is_cuda() && cache_ptrs.numel() == B
+                && len_ptrs.scalar_type() == torch::kInt64 && len_ptrs.is_cuda() && len_ptrs.numel() == B,
+                "ecrit_latent : cache_ptrs et len_ptrs [B] int64 sur la carte");
+    if (B == 0) return;
+    mla_ecrit_latent_kernel<<<B, 64, 0, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const __nv_bfloat16 *>(k_new.data_ptr()),
+        cache_ptrs.data_ptr<int64_t>(), len_ptrs.data_ptr<int64_t>(), W);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 // RMSNorm fusionnée (bf16 -> bf16, variance en fp32) : un bloc par ligne.
 // Même arithmétique que la version torch : x normalisé arrondi en bf16, puis
 // produit bf16 par le poids — bit-identique.
@@ -4747,6 +4784,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("mult") = 1.0);
     m.def("kda_decode", &kda_decode, "KDA : pas de decodage fusionne (une sequence)");
     m.def("mla_decode", &mla_decode, "MLA absorbee : scores + softmax + lecture latente");
+    m.def("mla_ecrit_latent", &mla_ecrit_latent,
+          "MLA decodage : k_new [B, W] -> cache_b[len_b], puis len_b += 1, un lancement pour les B creneaux (tables d'adresses [B])");
     m.def("mla_decode_batch", &mla_decode_batch,
           "MLA : decodage de B creneaux en un lancement, caches par table d'adresses [B] int64");
     m.def("paged_attention", &paged_attention,

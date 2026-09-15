@@ -337,14 +337,24 @@ class MLAttention(nn.Module):
                                      self.rank, self.scale)          # [B, nh, rank]
         return torch.cat([self._sortie_decode(x[i:i + 1], sts[i], o_lat[i]) for i in range(B)], dim=0)
 
+    def _v_b32(self) -> torch.Tensor:
+        """``v_b`` en fp32, converti une fois (la conversion à chaque appel
+        coûtait un lancement et une passe mémoire par couche et par pas)."""
+        vb = self.__dict__.get("_v_b32_cache")
+        if vb is None or vb.device != self.v_b.device:
+            vb = self.__dict__["_v_b32_cache"] = self.v_b.detach().to(torch.float32).contiguous()
+        return vb
+
     def decode_static_batch_complet(self, x: torch.Tensor, sts: list, bucket: int,
-                                    cache_ptrs: torch.Tensor, scores_batch: torch.Tensor
-                                    ) -> torch.Tensor:
+                                    cache_ptrs: torch.Tensor, scores_batch: torch.Tensor,
+                                    len_ptrs: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Tout ``decode_static`` batché sur les B créneaux : projections, RoPE,
         norme, ``q_eff`` en une passe sur ``x`` [B, D] (comme ``forward_batch``),
         UN lancement d'attention (``mla_decode_batch``), einsum et ``o_proj``
-        sur le lot. Seules les écritures du latent restent par créneau (un
-        cache par créneau). Numérique : celle de ``forward_batch`` (chemin
+        sur le lot. L'écriture du latent et l'avance des longueurs passent
+        par ``mla_ecrit_latent`` (un lancement, tables d'adresses ``[B]`` des
+        caches et des longueurs) quand ``len_ptrs`` est fourni, par créneau
+        sinon. Numérique : celle de ``forward_batch`` (chemin
         eager), pas celle de la boucle — les GEMV à M=B et M=1 n'arrondissent
         pas forcément pareil ; le test d'équivalence le mesure."""
         ext = _extension()
@@ -361,14 +371,19 @@ class MLAttention(nn.Module):
         c = self._norme(c, self.kv_a_norm)
         q_abs = torch.einsum('hrn,bhn->bhr', self.k_b.to(x.dtype), q_nope)
         q_eff = torch.cat([q_abs, q_pe], dim=-1)                           # [B, nh, W]
-        k_new = torch.cat([c, k_pe], dim=-1)                               # [B, W]
-        for i, st in enumerate(sts):
-            st["cache"].index_copy_(0, st["len"].view(1), k_new[i:i + 1])
+        k_new = torch.cat([c, k_pe], dim=-1).contiguous()                  # [B, W]
+        un_lancement = len_ptrs is not None and hasattr(ext, "mla_ecrit_latent")
+        if un_lancement:
+            ext.mla_ecrit_latent(k_new, cache_ptrs, len_ptrs)              # cache_b[len_b] = k_new[b] ; len_b += 1
+        else:
+            for i, st in enumerate(sts):
+                st["cache"].index_copy_(0, st["len"].view(1), k_new[i:i + 1])
         o_lat = ext.mla_decode_batch(q_eff.to(torch.float32).contiguous(), cache_ptrs, lens,
                                      scores_batch, bucket, self.rank, self.scale)  # [B, nh, rank]
-        y = torch.einsum('hvr,bhr->bhv', self.v_b.to(torch.float32), o_lat)
-        for st in sts:
-            st["len"].add_(1)
+        y = torch.einsum('hvr,bhr->bhv', self._v_b32(), o_lat)
+        if not un_lancement:
+            for st in sts:
+                st["len"].add_(1)
         return self.o_proj(y.reshape(B, self.nh * self.dv).to(x.dtype))
 
     def decode_static(self, x: torch.Tensor, st: dict, bucket: int
