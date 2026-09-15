@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **ERRATUM DUEL (23dc9f3) : le régime HYBRID_SLOTS=12 (celui du duel) calcule une mauvaise attention après un prompt réel — arbitre prefill 58/84 sur ce71723 (défaut ET boucle, identiques), 81/84 seulement à 4 créneaux. Le chiffre ×4,08 (56,1 ms) est RETIRÉ, à refaire. Les temps MLA (43,9→17,2 ms) restent des temps, pas des temps d'un calcul juste — toutes les équivalences antérieures (mla1-3, arbitre CONFORME 81/84) étaient à 4 créneaux, pas 12 : ne valident PAS le régime réel.** Objectif : duel GLM-4.7-Flash NVFP4 b=12 contre vLLM — chiffre retiré, à refaire après correctif du régime 12 créneaux (poste4) ; ensuite (2) table à 5 moteurs.
+Mis à jour : 16/09 (initial, poste7). **ERRATUM DUEL — CAUSE TROUVÉE (14b121f) : faux dès b=1 aux graphes, JUSTE en eager (b=1 7/7, b=4 27/28) — pas l'attention, la capture/rejeu du GraphRunner : ce qu'il relit au 2e pas (len, palier, table ptrs de _mla_lot) n'est plus le créneau lié (graphs.py:512-537, model.py:1708-1726, mla.py:345-355/89). b=1/b=4/b=12 du duel NON PUBLIABLES (même régime). Duel entier à refaire après correctif GraphRunner (ou en eager, plus lent, si poste7 veut un chiffre juste maintenant).** Objectif : duel GLM-4.7-Flash NVFP4 contre vLLM — retiré, à refaire après correctif GraphRunner (poste4) ; ensuite (2) table à 5 moteurs.
 
 ## Chantiers ouverts et scellés
 
