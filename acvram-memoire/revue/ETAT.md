@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **Comparatif : TRT-LLM Coder PPL 1,304× bf16 NON CLASSÉ (efe0571) — le converti communautaire ModelOpt porte l'écart (vLLM sur les mêmes poids : 1,26×), TRT-LLM ajoute +3,3 % à KV égal. Le ×1,46 en débit reste publié AVEC réserve. Pour classer : ModelOpt refait depuis srcbf16 par poste2 (modelopt 0.37 dans son venv) ou source NVIDIA — décision poste7. poste3 passe à GLM sur TRT-LLM.** Hadamard (main e667831) et sa PPL attendent la carte.
+Mis à jour : 16/09 (initial, poste7). **Comparatif : colonne TRT-LLM CLOSE (cef7a35) — Coder publié avec réserve (PPL non classée, ModelOpt communautaire en cause) ; GLM refusé par TRT-LLM 1.3.0rc15 (compressed-tensors 4 bits rejeté + Glm4MoeLiteForCausalLM absent du registre, vérifié sur le main GitHub) : « ne sert pas », aucun ModelOpt n'y changerait rien. poste3 attend l'ordre suivant (vLLM/llama.cpp/TabbyAPI, ou ModelOpt sain Coder après poste2).** Hadamard (main e667831) et sa PPL attendent la carte.
 
 ## Chantiers ouverts et scellés
 
