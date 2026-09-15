@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). Objectif : duel GLM-4.7-Flash NVFP4 b=12 contre vLLM RÉFUTÉ 0,7-1,3× (×4,08, `verdict-duel-glm-prise-a-16-09` + réserve § : vLLM à 1,056 PPL, non apparié, bras apparié = ModelOpt par nous plus tard) — B réduit à (c) : parité MLA puis table à 5 moteurs, décision utilisateur en attente.
+Mis à jour : 16/09 (initial, poste7). Objectif : duel GLM-4.7-Flash NVFP4 b=12 contre vLLM RÉFUTÉ 0,7-1,3× (×4,08, `verdict-duel-glm-prise-a-16-09` + réserve § : vLLM à 1,056 PPL, non apparié, bras apparié = ModelOpt par nous plus tard) — objectif TRANCHÉ par l'utilisateur (16/09, « Go ») : (1) parité MLA sur GLM (commits poste4, scellés `poste7-duel-verdict` §6) puis (2) table à 5 moteurs (`poste7-comparatif-16-09`).
 
 ## Chantiers ouverts et scellés
 
