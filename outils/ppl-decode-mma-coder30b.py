@@ -79,6 +79,9 @@ def main() -> int:
     # `setdefault` plus haut respecte une valeur deja posee dans
     # l'environnement de l'appelant.
     assert os.environ.get("ACVRAM_MOE_DECODE_MMA") in ("0", "1"), "flag pas pose avant import"
+    # poste2, 16/09 : reprend ce script pour le voyant narrow_gemm (poste7 §6,
+    # protocole-narrow-voyants-15-09.md) -- meme piege a eviter, meme preuve.
+    assert os.environ.get("ACVRAM_NARROW_GEMM") in ("0", "1"), "flag pas pose avant import"
 
     tokenizer = load_tokenizer(MODEL)
     texte = _load_corpus(CORPUS)
@@ -119,7 +122,8 @@ def main() -> int:
     ppl = math.exp(min(etat["nll"] / etat["n"], 60.0))
     print(f"RESULTAT ppl={ppl:.4f} n_jetons_notes={etat['n']} "
          f"pas_t_le_32={etat['pas_petits']}/{etat['pas_total']} "
-         f"acvram_moe_decode_mma={os.environ['ACVRAM_MOE_DECODE_MMA']}")
+         f"acvram_moe_decode_mma={os.environ['ACVRAM_MOE_DECODE_MMA']} "
+         f"acvram_narrow_gemm={os.environ['ACVRAM_NARROW_GEMM']}")
     return 0
 
 
