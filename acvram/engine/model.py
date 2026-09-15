@@ -732,7 +732,8 @@ class MoEBlock(nn.Module):
                 # ACVRAM_MOE_AWQ_TEMOIN=1 : tables de 1 même sans échelle (le
                 # chargeur les voit, la garde d'unité doit les sauter : coût 0
                 # scellé par poste7 § 8) ; =2 : produit forcé, témoin du coût du
-                # chemin (+0,12 ms/pas mesuré le 15/09).
+                # chemin (+0,12 ms/pas mesuré le 15/09) ; =3 : tables ignorées
+                # (sorties fausses, témoin de coût d'un convertisseur à échelles).
                 K_in = getattr(ws[0], "padded_in", None) or ws[0].qweight.shape[1]
                 dev = ws[0].qweight.device
                 table = torch.ones(len(projs), K_in, dtype=torch.bfloat16, device=dev)
@@ -743,7 +744,7 @@ class MoEBlock(nn.Module):
                 # Table = unité (échelle absente écrite comme identité explicite,
                 # poste2 2205709) : x / 1 ne change rien, on saute le produit.
                 unite = bool(torch.all(table == 1).item())
-                awq[nom] = None if (unite and _MOE_AWQ_TEMOIN != 2) else table
+                awq[nom] = None if (unite and _MOE_AWQ_TEMOIN != 2) or _MOE_AWQ_TEMOIN == 3 else table
             else:
                 awq[nom] = None
             if all(isinstance(w, NVFP4Tensor) for w in ws):

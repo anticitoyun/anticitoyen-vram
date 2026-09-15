@@ -45,7 +45,32 @@ deux côtés (sinon MMA=0 n'aurait pas rendu 16/16). Le critère « 2 ulp contre
 peut pas être tenu par le chemin W4A4 par construction — c'est la table des trois issues de poste7
 (`poste7-glm-w4a4-16-09`) qui tranche : bogue (non), W4A4 coûte (à mesurer en PPL), métrique.
 
+## Pas GLM b=12 (16/09, carte exclusive, `ACVRAM_TYPE=mesure`, fenêtres 25 s ABAB)
+Scellé poste7 (a) : B/A ≤ 1,03× (réfuté > 1,05×), coût attendu +0,1-0,3 ms/pas.
+A = `GLM-4.7-Flash-srcbf16-nvfp4-sansawq` (aucune échelle, tables absentes) ;
+B = `-avant-noawq-experts` (1614/3008 paires gate≠up, tables gate, up et down appliquées) ;
+B∅ = B avec tables ignorées (`ACVRAM_MOE_AWQ_TEMOIN=3`, sorties fausses, coût du chemin seul).
+Régime NOMINAL sur les six bras (graphes=on, 0 exilé, chemin_moe=mma).
+
+| bras | pas (ms) | t/s | J/jeton | W |
+|---|---|---|---|---|
+| A1 / A2 | 55,51 / 55,61 | 197,2 / 196,8 | 1,548 / 1,572 | 305 / 309 |
+| B1 / B2 | 58,61 / 58,71 | 186,8 / 186,4 | 1,601 / 1,619 | 299 / 302 |
+| B∅3 / B∅4 | 57,61 / 57,62 | 190,0 / 190,0 | 1,563 / 1,571 | 297 / 299 |
+
+- **Tel que scellé (B/A) : 1,056× → RÉFUTÉ** (> 1,05), Δ = +3,10 ms/pas.
+- Décomposition par le témoin B∅ : **+2,06 ms tient au converti** (B∅ − A, tables ignorées,
+  même code) ; **+1,04 ms tient aux échelles** (B − B∅, soit 22 µs/couche : deuxième
+  `nvfp4_quant_act`, deuxième ligne de `moe_route_pack`, division dans `moe_act`) — 1,018× de B∅,
+  sous les 1,03× si le sans-AWQ de référence est le même converti.
+- Le scellé comparait deux convertis, pas deux codes : la part converti (+2,06 ms) n'est pas
+  expliquée ici (même nombre de couches, d'experts et de régime ; format des autres tenseurs à
+  vérifier par poste2). La part échelles dépasse aussi l'attendu +0,1-0,3 ms (×3-10).
+- Journaux : `scratchpad/glm-gateup-16-09.log`, `scratchpad/glm-gateup-temoin3-16-09.log` ; JSON
+  dans le répertoire de la campagne.
+
 ## Reste
-Coût mesuré distinct vs égal (b=12, avec le converti hétérogène reconverti par poste2) ; pas GLM
-b=12 ≤ 1,03× (campagne `scratchpad/campagne-glm-gateup-16-09.sh`) ; montée 0.6.6 (MIN_T=5 déjà
-câblé bdb9f14, narrow par défaut selon le verdict PPL b=12 de poste2).
+Part converti (+2,06 ms) à expliquer avant de retrancher le scellé ; part échelles (+1,04 ms) à
+profiler par lancement (ncu, b=12) ; correctif d'équivalence pile/boucle avec table réelle
+(discriminateur d'poste1) ; montée 0.6.6 (MIN_T=5 déjà câblé bdb9f14, narrow OFF, re-tampon OFF
+selon `revue/poste7-narrow-verdict-16-09.md`).
