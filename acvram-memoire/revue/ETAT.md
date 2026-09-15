@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **ERRATUM DUEL — CAUSE TROUVÉE (14b121f) : faux dès b=1 aux graphes, JUSTE en eager (b=1 7/7, b=4 27/28) — pas l'attention, la capture/rejeu du GraphRunner : ce qu'il relit au 2e pas (len, palier, table ptrs de _mla_lot) n'est plus le créneau lié (graphs.py:512-537, model.py:1708-1726, mla.py:345-355/89). b=1/b=4/b=12 du duel NON PUBLIABLES (même régime). Duel entier à refaire après correctif GraphRunner (ou en eager, plus lent, si poste7 veut un chiffre juste maintenant).** Objectif : duel GLM-4.7-Flash NVFP4 contre vLLM — retiré, à refaire après correctif GraphRunner (poste4) ; ensuite (2) table à 5 moteurs.
+Mis à jour : 16/09 (initial, poste7). **PLANCHER EAGER (7fa055c) : pas b=12 juste (arbitre 81/84) = 66-67,6 ms, 166 t/s, 1,23-1,24 J, 205 W (carte à moitié inoccupée, surcoût Python) — 17,2 ms n'était PAS l'ordre de grandeur d'un chemin juste. Union GPU seule (nsys) = 38,5 ms, borne basse. Module MLA innocenté (test_mla_graphe_rejeu 6/6 verts) : défaut dans le GraphRunner (liaison/remplissage/clé), en cours poste4.** Objectif : duel retiré, à refaire après correctif GraphRunner ; ensuite (2) table à 5 moteurs.
 
 ## Chantiers ouverts et scellés
 
