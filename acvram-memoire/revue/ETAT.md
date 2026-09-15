@@ -21,7 +21,7 @@ Mis à jour : 16/09 (initial, poste7). Objectif : duel GLM-4.7-Flash NVFP4 b=12 
 2. poste3 : re-PPL alpha-commun + compteurs (20 min) — après le commit de poste4.
 3. poste2 : reconversion à sec (1 h, chevauche 2) → poste3 : PPL reconverti (20 min) ; poste2 en veille si ≤ 1,005.
 4. poste3 : pas b=12 à code égal (10 min).
-5. **EN COURS** — poste3 : duel prise A, -k48, régime prefill W4A16 / décodage MMA MIN_T=5 ; colonne PPL avec le régime, temps de prefill à part (1 h).
+5. FAIT : duel prise A **RÉFUTÉ** (8d5edb5) — b=12 195 t/s / 1,58 J contre vLLM 796 t/s / 0,445 J (×4,08) ; b=4 ×3,4 ; b=1 ×2,0 ; prefill ×6,1. Lecture : MLA (32,8 ms), pas le NVFP4 — mêmes octets d'experts que Coder-30B. → poste7. ; colonne PPL avec le régime, temps de prefill à part (1 h).
 
 Après le duel : poste1 sonde par étape 3 sites (10 min, choix A8/rotation) ; poste2 cb2784b (nominal MMA=1 ≤ 1,010 ; réfuté → Hadamard par bloc) ; poste4 rien (noyau par ligne reste). Fait à publier : k_x=4 saturant 1,019 < 1,0277 sans saturation.
 
