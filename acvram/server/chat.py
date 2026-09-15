@@ -38,6 +38,31 @@ class Tokenizer:
         return self.backend.decode(ids, skip_special_tokens=skip_special_tokens)
 
     @property
+    def prefixe_gabarit(self) -> str:
+        """Le texte littéral par lequel le gabarit de conversation commence,
+        avant sa première balise Jinja — ce que le modèle voit en tête de
+        TOUTE conversation. GLM-4.x : ``[gMASK]<sop>`` (poste7 § 10, cause
+        trouvée par poste3 : sans ce préfixe le modèle n'a aucun puits
+        d'attention et s'effondre). Vide pour les gabarits qui commencent par
+        une balise (Llama, Qwen : leur préfixe est le BOS du tokeniseur)."""
+        t = self.template or ""
+        i = min([k for k in (t.find("{{"), t.find("{%"), t.find("{#")) if k >= 0] or [len(t)])
+        return t[:i].strip()
+
+    def encode_brut(self, text: str) -> list[int]:
+        """L'invite d'une complétion BRUTE (/v1/completions, plongements) :
+        les jetons spéciaux du tokeniseur (BOS des modèles qui en posent un
+        par post-traitement), puis, si rien n'a été posé, le préfixe littéral
+        du gabarit — sauf si le texte le porte déjà. Le chemin conversation
+        n'en a pas besoin : son gabarit rendu contient déjà ce préfixe."""
+        ids = self.encode(text, add_special_tokens=True)
+        sans = self.encode(text, add_special_tokens=False)
+        prefixe = self.prefixe_gabarit
+        if not prefixe or text.lstrip().startswith(prefixe) or len(ids) > len(sans):
+            return ids
+        return self.encode(prefixe, add_special_tokens=False) + ids
+
+    @property
     def eos_token_id(self) -> Optional[int]:
         eos = self.config.get("eos_token")
         if isinstance(eos, dict):
