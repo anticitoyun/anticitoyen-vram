@@ -2015,43 +2015,97 @@ __device__ __forceinline__ void mma_mxf4nvf4(float d[4], const unsigned a[4], co
 #endif
 }
 
-// Activations bf16 [G, K] -> E2M1 [G, K/2] + échelles UE4M3 [G, K/16].
-// Un fil par bloc de 16 : amax/6 arrondi en E4M3, puis chaque valeur divisée
-// par l'échelle décodée et arrondie en E2M1 (satfinite : au-delà de 6 -> 6).
-__global__ void nvfp4_quant_act_kernel(const __nv_bfloat16 *__restrict__ x,
-                                       unsigned char *__restrict__ xq,
-                                       unsigned char *__restrict__ xsf,
-                                       long nblocs, int nblk) {
-    const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= nblocs) return;
-    const long row = i / nblk;
-    const int blk = (int)(i - row * nblk);
-    const __nv_bfloat16 *src = x + row * (long)nblk * 16 + blk * 16;
-    float v[16];
+// Activations bf16 [G, K] -> E2M1 [G, K/2] + échelles UE4M3 [G, K/16]
+// + échelle globale fp32 PAR LIGNE grow [G] (poste7-glm-pile-correctif-16-09
+// § 7). Un CTA par ligne : la ligne en mémoire partagée, amax de ligne par
+// réduction, g_r = amax_r / 2688 (= 6 × 448), puis chaque bloc de 16 :
+// s = (amax_blk / amax_r) × 448 → E4M3 (le bloc maximal donne 448 exactement :
+// saturation impossible par construction), valeurs / (sdec · g_r) → E2M1. Un bloc n'est flushé à
+// zéro que si amax_blk < ~2,2e-6 × amax_r (E4M3 sous 2^-10). L'épilogue de
+// la GEMM multiplie par grow[r] × gscales[e]. Sans échelle globale (avant),
+// amax/6 < 2^-9 mettait le bloc entier à zéro : 23-31 % des blocs de
+// silu(g)·u sur GLM (verdict-glm-saturation-16-09) ; un 2^k fixe saturait
+// les queues d'une fenêtre réelle (verdict-reppl-alpha-commun-16-09).
+//
+// Échelle AWQ par expert fusionnée (awq [E, K] bf16, e_sorted [G]) :
+// bf16(bf16(v) / s[e][c]) avant tout, la même arithmétique que la ligne de
+// moe_route_pack et que scaler.apply de la boucle. Toutes les divisions en
+// __fdiv_rn (--use_fast_math rend une division approchée qui bascule les
+// égalités E2M1 : 5 codes sur 5 376 mesurés).
+// compteurs (facultatif, ACVRAM_QA_COMPTE=1) : [0] blocs non nuls, [1] flushés
+// (amax_blk > 0 et échelle 0), [2] saturés (s > 448 avant satfinite ; 0 par
+// construction, le compteur est là pour le prouver).
+constexpr int QA_FILS = 256;
+__global__ void __launch_bounds__(QA_FILS) nvfp4_quant_act_kernel(
+    const __nv_bfloat16 *__restrict__ x, unsigned char *__restrict__ xq,
+    unsigned char *__restrict__ xsf, float *__restrict__ grow, int nblk,
+    const __nv_bfloat16 *__restrict__ awq, const int *__restrict__ e_sorted,
+    long long *__restrict__ compteurs) {
+    extern __shared__ float qa_row[];               // [K] fp32 après division AWQ
+    __shared__ float qa_red[QA_FILS / 32];
+    const long row = blockIdx.x;
+    const int K = nblk * 16;
+    const __nv_bfloat16 *src = x + row * (long)K;
+    const __nv_bfloat16 *sc = awq ? awq + (long)e_sorted[row] * K : nullptr;
     float amax = 0.f;
+    for (int i = threadIdx.x; i < K; i += QA_FILS) {
+        float t = __bfloat162float(src[i]);
+        if (sc) t = __bfloat162float(__float2bfloat16(__fdiv_rn(t, __bfloat162float(sc[i]))));
+        qa_row[i] = t;
+        amax = fmaxf(amax, fabsf(t));
+    }
     #pragma unroll
-    for (int j = 0; j < 16; ++j) { v[j] = __bfloat162float(src[j]); amax = fmaxf(amax, fabsf(v[j])); }
-    unsigned char sbits = 0;
-    float sdec = 0.f;
-    if (amax > 0.f) {
-        // __fdiv_rn : l'extension est compilée avec --use_fast_math, dont la
-        // division est un MUFU.RCP approché qui bascule les égalités E2M1
-        // (mesuré : 5 codes sur 5 376 différaient de la référence Python)
-        const float s = fminf(__fdiv_rn(amax, 6.f), 448.f);
-        sbits = (unsigned char)__nv_cvt_float_to_fp8(s, __NV_SATFINITE, __NV_E4M3);
-        sdec = e4m3_to_float(sbits);
-    }
-    unsigned long long packed = 0ull;
-    if (sdec > 0.f) {
+    for (int o = 16; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+    if ((threadIdx.x & 31) == 0) qa_red[threadIdx.x >> 5] = amax;
+    __syncthreads();
+    if (threadIdx.x < 32) {
+        float m = threadIdx.x < QA_FILS / 32 ? qa_red[threadIdx.x] : 0.f;
         #pragma unroll
-        for (int j = 0; j < 16; j += 2) {
-            const float2 p = make_float2(__fdiv_rn(v[j], sdec), __fdiv_rn(v[j + 1], sdec));
-            const __nv_fp4x2_storage_t q = __nv_cvt_float2_to_fp4x2(p, __NV_E2M1, cudaRoundNearest);
-            packed |= (unsigned long long)(q & 0xFF) << (4 * j);
-        }
+        for (int o = 16; o > 0; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
+        if (threadIdx.x == 0) qa_red[0] = m;
     }
-    *reinterpret_cast<unsigned long long *>(xq + row * (long)nblk * 8 + blk * 8) = packed;
-    xsf[row * (long)nblk + blk] = sbits;
+    __syncthreads();
+    const float amax_r = qa_red[0];
+    // 2688 = 6 × 448 ; toutes les opérations en RN explicite (__fdiv_rn,
+    // __fmul_rn) : la référence Python (tests/test_gemm_grouped_mma.py
+    // quant_act_ref) refait exactement les mêmes — torch divise un tenseur par
+    // un scalaire Python en multipliant par l'inverse (1 ulp d'écart sur 20 %
+    // des lignes, t-qa 065960a), la référence divise donc par un tenseur.
+    const float g = amax_r > 0.f ? __fdiv_rn(amax_r, 2688.f) : 0.f;
+    if (threadIdx.x == 0) grow[row] = g;
+    for (int blk = threadIdx.x; blk < nblk; blk += QA_FILS) {
+        const float *v = qa_row + blk * 16;
+        float amax_b = 0.f;
+        #pragma unroll
+        for (int j = 0; j < 16; ++j) amax_b = fmaxf(amax_b, fabsf(v[j]));
+        unsigned char sbits = 0;
+        float sdec = 0.f;
+        if (amax_b > 0.f && g > 0.f) {
+            // (amax_blk / amax_r) × 448 : le bloc maximal donne 1 × 448 = 448
+            // exactement (E4M3 0xFE), les autres ≤ 448 — pas de clamp, pas
+            // d'arrondi qui dépasse (amax_r / (6 g) pouvait rendre 448 + 1 ulp)
+            const float sb = __fmul_rn(__fdiv_rn(amax_b, amax_r), 448.f);
+            sbits = (unsigned char)__nv_cvt_float_to_fp8(sb, __NV_SATFINITE, __NV_E4M3);
+            sdec = e4m3_to_float(sbits);
+            if (compteurs) {
+                atomicAdd((unsigned long long *)compteurs, 1ull);
+                if (sdec == 0.f) atomicAdd((unsigned long long *)compteurs + 1, 1ull);
+                if (sb > 448.f) atomicAdd((unsigned long long *)compteurs + 2, 1ull);
+            }
+        }
+        unsigned long long packed = 0ull;
+        if (sdec > 0.f) {
+            const float d = __fmul_rn(sdec, g);                     // fp32 RN, comme la référence
+            #pragma unroll
+            for (int j = 0; j < 16; j += 2) {
+                const float2 p = make_float2(__fdiv_rn(v[j], d), __fdiv_rn(v[j + 1], d));
+                const __nv_fp4x2_storage_t q = __nv_cvt_float2_to_fp4x2(p, __NV_E2M1, cudaRoundNearest);
+                packed |= (unsigned long long)(q & 0xFF) << (4 * j);
+            }
+        }
+        *reinterpret_cast<unsigned long long *>(xq + row * (long)nblk * 8 + blk * 8) = packed;
+        xsf[row * (long)nblk + blk] = sbits;
+    }
 }
 
 // Un bloc = 64 lignes de sortie x BT jetons d'une tuile ; 4 warps de 16
@@ -2060,7 +2114,7 @@ __global__ void nvfp4_quant_act_kernel(const __nv_bfloat16 *__restrict__ x,
 // plus rien à convertir). Double tampon de registres sur K.
 template <int BT>
 __global__ void __launch_bounds__(128) nvfp4_gemm_grouped_mma_kernel(
-    const float *__restrict__ gscales,
+    const float *__restrict__ gscales, const float *__restrict__ grow,
     const unsigned char *__restrict__ xq, const unsigned char *__restrict__ xsf,
     const int *__restrict__ tile_e, const int *__restrict__ tile_t0,
     const int *__restrict__ tile_n, const int64_t *__restrict__ table_qw,
@@ -2167,8 +2221,10 @@ __global__ void __launch_bounds__(128) nvfp4_gemm_grouped_mma_kernel(
                 const int j = mf * 16 + g + 8 * h;
                 if (j < nt) {
                     __nv_bfloat16 *dst = y + (long)(t0 + j) * M + r;
-                    if (r < M)     dst[0] = __float2bfloat16(acc[mf][nf][2 * h] * gscale);
-                    if (r + 1 < M) dst[1] = __float2bfloat16(acc[mf][nf][2 * h + 1] * gscale);
+                    // échelle globale par ligne d'activation (nvfp4_quant_act, grow[G])
+                    const float gs = grow ? gscale * grow[t0 + j] : gscale;
+                    if (r < M)     dst[0] = __float2bfloat16(acc[mf][nf][2 * h] * gs);
+                    if (r + 1 < M) dst[1] = __float2bfloat16(acc[mf][nf][2 * h + 1] * gs);
                 }
             }
         }
@@ -2223,7 +2279,7 @@ __device__ __forceinline__ void cp_async8(void *smem, const void *gmem) {
 // par ligne : un mot de 4 par MMA.
 template <int BT, int S, int KS>
 __global__ void __launch_bounds__(GM2_FILS) nvfp4_gemm_grouped_mma2_kernel(
-    const float *__restrict__ gscales,
+    const float *__restrict__ gscales, const float *__restrict__ grow,
     const unsigned char *__restrict__ xq, const unsigned char *__restrict__ xsf,
     const int *__restrict__ tile_e, const int *__restrict__ tile_t0,
     const int *__restrict__ tile_n, const int64_t *__restrict__ table_qw,
@@ -2356,8 +2412,10 @@ __global__ void __launch_bounds__(GM2_FILS) nvfp4_gemm_grouped_mma2_kernel(
                 const int j = mf * 16 + g + 8 * h;
                 if (j < nt) {
                     __nv_bfloat16 *dst = y + (long)(t0 + j) * M + r;
-                    if (r < M)     dst[0] = __float2bfloat16(acc[mf][nf][2 * h] * gscale);
-                    if (r + 1 < M) dst[1] = __float2bfloat16(acc[mf][nf][2 * h + 1] * gscale);
+                    // échelle globale par ligne d'activation (nvfp4_quant_act, grow[G])
+                    const float gs = grow ? gscale * grow[t0 + j] : gscale;
+                    if (r < M)     dst[0] = __float2bfloat16(acc[mf][nf][2 * h] * gs);
+                    if (r + 1 < M) dst[1] = __float2bfloat16(acc[mf][nf][2 * h + 1] * gs);
                 }
             }
         }
@@ -2390,25 +2448,50 @@ bool nvfp4_gemm_grouped_mma_disponible() {
     return cache == 1;
 }
 
-std::tuple<torch::Tensor, torch::Tensor> nvfp4_quant_act(torch::Tensor x) {
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> nvfp4_quant_act(
+        torch::Tensor x, c10::optional<torch::Tensor> awq, c10::optional<torch::Tensor> e_sorted,
+        c10::optional<torch::Tensor> compteurs) {
     CHECK_CUDA(x); CHECK_CONTIG(x); ACVRAM_DEVICE_GUARD(x);
     TORCH_CHECK(x.scalar_type() == torch::kBFloat16, "quant_act : activations bf16");
     TORCH_CHECK(x.dim() == 2 && x.size(1) % 64 == 0, "quant_act : [G, K] avec K multiple de 64");
     const long G = x.size(0), K = x.size(1);
+    TORCH_CHECK(K <= 16384, "quant_act : K <= 16384 (une ligne en memoire partagee)");
     const int nblk = (int)(K >> 4);
+    const __nv_bfloat16 *awq_p = nullptr;
+    const int *es_p = nullptr;
+    if (awq.has_value() && awq->defined()) {
+        TORCH_CHECK(e_sorted.has_value() && e_sorted->defined(), "quant_act : table AWQ sans e_sorted");
+        CHECK_CUDA(*awq); CHECK_CONTIG(*awq); CHECK_CUDA(*e_sorted); CHECK_CONTIG(*e_sorted);
+        TORCH_CHECK(awq->scalar_type() == torch::kBFloat16 && awq->dim() == 2 && awq->size(1) == K,
+                    "quant_act : table AWQ [E, K] bf16 de la largeur de x");
+        TORCH_CHECK(e_sorted->scalar_type() == torch::kInt && e_sorted->numel() == G,
+                    "quant_act : e_sorted int32 [G]");
+        awq_p = reinterpret_cast<const __nv_bfloat16 *>(awq->data_ptr());
+        es_p = e_sorted->data_ptr<int>();
+    }
+    long long *cpt_p = nullptr;
+    if (compteurs.has_value() && compteurs->defined()) {
+        CHECK_CUDA(*compteurs); CHECK_CONTIG(*compteurs);
+        TORCH_CHECK(compteurs->scalar_type() == torch::kLong && compteurs->numel() == 3,
+                    "quant_act : compteurs int64 [3] (blocs, flushes, satures)");
+        cpt_p = reinterpret_cast<long long *>(compteurs->data_ptr<int64_t>());
+    }
     auto opt = torch::TensorOptions().dtype(torch::kUInt8).device(x.device());
     auto xq = torch::empty({G, K / 2}, opt);
     auto xsf = torch::empty({G, nblk}, opt);
-    const long nblocs = G * nblk;
-    if (nblocs > 0) {
+    auto grow = torch::empty({G}, opt.dtype(torch::kFloat32));
+    if (G > 0) {
         auto stream = at::cuda::getCurrentCUDAStream();
-        const int th = 256;
-        nvfp4_quant_act_kernel<<<(unsigned)((nblocs + th - 1) / th), th, 0, stream>>>(
+        const size_t shm = (size_t)K * sizeof(float);
+        if (shm > 48 * 1024)
+            cudaFuncSetAttribute(nvfp4_quant_act_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm);
+        nvfp4_quant_act_kernel<<<(unsigned)G, QA_FILS, shm, stream>>>(
             reinterpret_cast<const __nv_bfloat16 *>(x.data_ptr()),
-            xq.data_ptr<unsigned char>(), xsf.data_ptr<unsigned char>(), nblocs, nblk);
+            xq.data_ptr<unsigned char>(), xsf.data_ptr<unsigned char>(), grow.data_ptr<float>(),
+            nblk, awq_p, es_p, cpt_p);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
-    return {xq, xsf};
+    return {xq, xsf, grow};
 }
 
 // table_qw / table_bscale [E] int64 : adresse octet (device) des piles
@@ -2420,8 +2503,16 @@ torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table
                                      torch::Tensor gscales, torch::Tensor xq,
                                      torch::Tensor xsf, torch::Tensor tile_e,
                                      torch::Tensor tile_t0, torch::Tensor tile_n,
-                                     int64_t M, int64_t K, int64_t bt, int64_t etages, int64_t ks) {
+                                     int64_t M, int64_t K, int64_t bt, int64_t etages, int64_t ks,
+                                     c10::optional<torch::Tensor> grow) {
     CHECK_CUDA(xq); ACVRAM_DEVICE_GUARD(xq);
+    const float *grow_p = nullptr;
+    if (grow.has_value() && grow->defined()) {
+        CHECK_CUDA(*grow); CHECK_CONTIG(*grow);
+        TORCH_CHECK(grow->scalar_type() == torch::kFloat && grow->numel() == xq.size(0),
+                    "GEMM groupee MMA : grow fp32 [G] (une echelle globale par ligne d'activation)");
+        grow_p = grow->data_ptr<float>();
+    }
     TORCH_CHECK(etages == 0 || etages == 2 || etages == 3 || etages == 4,
                 "GEMM groupee MMA : etages dans {0 (direct), 2, 3, 4}");
     TORCH_CHECK(ks == 64 || ks == 128, "GEMM groupee MMA : ks dans {64, 128}");
@@ -2445,7 +2536,7 @@ torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table
     auto y = torch::empty({G, M}, torch::TensorOptions().dtype(torch::kBFloat16).device(xq.device()));
     if (T == 0) return y.zero_();
     auto stream = at::cuda::getCurrentCUDAStream();
-    #define GM_ARGS gscales.data_ptr<float>(), \
+    #define GM_ARGS gscales.data_ptr<float>(), grow_p, \
         xq.data_ptr<unsigned char>(), xsf.data_ptr<unsigned char>(), \
         tile_e.data_ptr<int>(), tile_t0.data_ptr<int>(), tile_n.data_ptr<int>(), \
         table_qw.data_ptr<int64_t>(), table_bscale.data_ptr<int64_t>(), \
@@ -3014,7 +3105,8 @@ __global__ void __launch_bounds__(TN * 2) nvfp4_moe_fused_kernel(
     const int64_t *__restrict__ tq_d, const int64_t *__restrict__ tb_d,
     float *__restrict__ ws, int *__restrict__ compteurs,
     __nv_bfloat16 *__restrict__ d, const int *__restrict__ ordre, const float *__restrict__ tw,
-    float *__restrict__ y32, int k_top, int K, int I, int M_out, int act) {
+    float *__restrict__ y32, int k_top, int K, int I, int M_out, int act,
+    const float *__restrict__ grow) {
 #ifdef ACVRAM_MMA_FP4
     constexpr int WARPS = TN / 16, FILS = WARPS * 32;
     static_assert(TN == 64 || TN == 128, "TN : 64 ou 128");
@@ -3112,10 +3204,15 @@ __global__ void __launch_bounds__(TN * 2) nvfp4_moe_fused_kernel(
     __syncthreads();
     // --- épilogue FC1 : bf16(g·gs), bf16(u·gs) -> act bf16 -> E2M1 bloc 16 (= ce warp) en shared
     unsigned char *A2 = smem, *SA2 = smem + 16 * LD2;
-    const float gsg = gs_g[e], gsu = gs_u[e];
+    const float gsg0 = gs_g[e], gsu0 = gs_u[e];
     float v[2][4];
     #pragma unroll
-    for (int h = 0; h < 2; ++h)
+    for (int h = 0; h < 2; ++h) {
+        // échelle globale par ligne d'activation (grow de nvfp4_quant_act) ;
+        // l'activation, elle, est requantifiée ci-dessous sans échelle globale
+        // (chemin témoin, plancher E4M3 non corrigé — ACVRAM_MOE_DECODE_FUSED=0)
+        const float gr = grow ? grow[t0 + min(g + 8 * h, nt - 1)] : 1.f;
+        const float gsg = gsg0 * gr, gsu = gsu0 * gr;
         #pragma unroll
         for (int nf = 0; nf < 2; ++nf)
             #pragma unroll
@@ -3132,6 +3229,7 @@ __global__ void __launch_bounds__(TN * 2) nvfp4_moe_fused_kernel(
                 }
                 v[h][nf * 2 + c] = __bfloat162float(__float2bfloat16(a_ * uu));
             }
+    }
     #pragma unroll
     for (int h = 0; h < 2; ++h) {
         float amax = 0.f;
@@ -3297,8 +3395,14 @@ torch::Tensor nvfp4_moe_fused(torch::Tensor tq_g, torch::Tensor tb_g, torch::Ten
                               torch::Tensor ws, torch::Tensor compteurs,
                               int64_t K, int64_t I, int64_t M_out, int64_t act, int64_t tn,
                               torch::Tensor ordre, torch::Tensor tw, int64_t k_top, int64_t t, bool atomique,
-                              int64_t etages) {
+                              int64_t etages, c10::optional<torch::Tensor> grow) {
     CHECK_CUDA(xq); ACVRAM_DEVICE_GUARD(xq);
+    const float *grow_p = nullptr;
+    if (grow.has_value() && grow->defined()) {
+        CHECK_CUDA(*grow); CHECK_CONTIG(*grow);
+        TORCH_CHECK(grow->scalar_type() == torch::kFloat && grow->numel() == xq.size(0), "MoE fusionne : grow fp32 [G]");
+        grow_p = grow->data_ptr<float>();
+    }
     for (auto &z : {tq_g, tb_g, gs_g, tq_u, tb_u, gs_u, tq_d, tb_d, gs_d, xq, xsf, tile_e, tile_t0, tile_n, ws, compteurs})
         CHECK_CONTIG(z);
     TORCH_CHECK(K % 128 == 0 && I % tn == 0 && M_out % 128 == 0, "MoE fusionne : K multiple de 128, I de tn, M_out de 128");
@@ -3333,7 +3437,7 @@ torch::Tensor nvfp4_moe_fused(torch::Tensor tq_g, torch::Tensor tb_g, torch::Ten
             tq_g.data_ptr<int64_t>(), tb_g.data_ptr<int64_t>(), tq_u.data_ptr<int64_t>(), tb_u.data_ptr<int64_t>(), \
             tq_d.data_ptr<int64_t>(), tb_d.data_ptr<int64_t>(), ws.data_ptr<float>(), compteurs.data_ptr<int>(), \
             reinterpret_cast<__nv_bfloat16 *>(d.data_ptr()), ordre.data_ptr<int>(), tw.data_ptr<float>(), \
-            y32.data_ptr<float>(), (int)k_top, (int)K, (int)I, (int)M_out, (int)act); } while (0)
+            y32.data_ptr<float>(), (int)k_top, (int)K, (int)I, (int)M_out, (int)act, grow_p); } while (0)
     if (tn == 64) { if (etages == 2) MF_LANCE(64, 2); else MF_LANCE(64, 3); }
     else          { if (etages == 2) MF_LANCE(128, 2); else MF_LANCE(128, 3); }
     #undef MF_LANCE
@@ -4143,6 +4247,499 @@ torch::Tensor mla_decode_batch(torch::Tensor q_eff, torch::Tensor cache_ptrs,
     return o;
 }
 
+// Écriture du latent du pas pour les B créneaux en UN lancement (poste7-duel
+// verdict § 6.2, commit 1 : le chemin MLA du décodage tournait créneau par
+// créneau — 12 index_copy_ + 12 len.add_ par couche). Un bloc par créneau :
+// la ligne k_new[b] va à cache_b[len_b], puis len_b += 1. Les caches et les
+// longueurs vivent chacun dans son tenseur (adresses stables sur la vie du
+// serveur) : tables d'adresses [B] int64, comme mla_decode_batch. L'attention
+// du même pas lit la copie ``lens`` prise AVANT ce lancement.
+// Cache latent fp8 (poste7-avis-exterieur-16-09 § 6, commit 3 du chantier MLA) :
+// une ligne = W codes E4M3 + 16 octets dont l'échelle fp32 s = amax/448
+// (foulée W+16 octets, alignée 16). Quantification : code = E4M3(v / s) en RN
+// satfinite, division correctement arrondie — la référence torch divise par
+// un TENSEUR (tensor/scalaire multiplie par l'inverse : 1 ulp d'écart).
+constexpr int MLA_FP8_PAD = 16;
+__device__ __forceinline__ int mla_fp8_foulee(int W) { return W + MLA_FP8_PAD; }
+
+__global__ void mla_ecrit_latent_kernel(const __nv_bfloat16 *__restrict__ k_new,   // [B, W]
+                                        const int64_t *__restrict__ cache_ptrs,    // [B]
+                                        const int64_t *__restrict__ len_ptrs,      // [B]
+                                        int W, int fp8) {
+    const int b = blockIdx.x;
+    long *lp = reinterpret_cast<long *>(len_ptrs[b]);
+    const long len = *lp;
+    if (!fp8) {
+        const uint4 *src = reinterpret_cast<const uint4 *>(k_new + (size_t)b * W);
+        uint4 *dst = reinterpret_cast<uint4 *>(reinterpret_cast<__nv_bfloat16 *>(cache_ptrs[b]) + len * W);
+        for (int i = threadIdx.x; i < W / 8; i += blockDim.x) dst[i] = src[i];
+    } else {
+        __shared__ float red[32];
+        const __nv_bfloat16 *src = k_new + (size_t)b * W;
+        float amax = 0.f;
+        for (int i = threadIdx.x; i < W; i += blockDim.x) amax = fmaxf(amax, fabsf(__bfloat162float(src[i])));
+        for (int o = 16; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+        if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = amax;
+        __syncthreads();
+        amax = 0.f;
+        for (int k = 0; k < (int)(blockDim.x >> 5); ++k) amax = fmaxf(amax, red[k]);
+        const float sc = amax > 0.f ? __fdiv_rn(amax, 448.f) : 1.f;
+        unsigned char *dst = reinterpret_cast<unsigned char *>(cache_ptrs[b]) + len * (long)mla_fp8_foulee(W);
+        for (int i = threadIdx.x; i < W; i += blockDim.x)
+            dst[i] = (unsigned char)__nv_cvt_float_to_fp8(__fdiv_rn(__bfloat162float(src[i]), sc),
+                                                          __NV_SATFINITE, __NV_E4M3);
+        if (threadIdx.x == 0) *reinterpret_cast<float *>(dst + W) = sc;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) *lp = len + 1;
+}
+
+void mla_ecrit_latent(torch::Tensor k_new, torch::Tensor cache_ptrs, torch::Tensor len_ptrs, bool fp8) {
+    CHECK_CUDA(k_new); ACVRAM_DEVICE_GUARD(k_new); CHECK_CONTIG(k_new);
+    CHECK_CONTIG(cache_ptrs); CHECK_CONTIG(len_ptrs);
+    TORCH_CHECK(k_new.dim() == 2 && k_new.scalar_type() == torch::kBFloat16 && k_new.size(1) % (fp8 ? 16 : 8) == 0,
+                "ecrit_latent : k_new [B, W] bf16, W multiple de 8 (16 en fp8)");
+    const int B = k_new.size(0), W = k_new.size(1);
+    TORCH_CHECK(cache_ptrs.scalar_type() == torch::kInt64 && cache_ptrs.is_cuda() && cache_ptrs.numel() == B
+                && len_ptrs.scalar_type() == torch::kInt64 && len_ptrs.is_cuda() && len_ptrs.numel() == B,
+                "ecrit_latent : cache_ptrs et len_ptrs [B] int64 sur la carte");
+    if (B == 0) return;
+    mla_ecrit_latent_kernel<<<B, fp8 ? 128 : 64, 0, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const __nv_bfloat16 *>(k_new.data_ptr()),
+        cache_ptrs.data_ptr<int64_t>(), len_ptrs.data_ptr<int64_t>(), W, fp8 ? 1 : 0);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// ============================================================================
+// MLA à UNE PASSE (poste7-duel-verdict-16-09 § 3) : les deux noyaux ci-dessus
+// lisaient le cache latent [L, W] une fois PAR TÊTE dans mla_scores puis une
+// seconde fois par tête dans mla_reduce — 40 lectures du cache par pas et par
+// couche, ≈ 52 Go/pas à b=12 ctx 2 048 (les 32,8 ms mesurés). En forme
+// absorbée les H têtes partagent la même tête KV : un CTA par (séquence,
+// tranche de L) lit chaque tuile de TL lignes UNE fois en mémoire partagée,
+// calcule les scores des H têtes (fp32, même arithmétique que mla_scores :
+// Σ q·k en fp32 puis × scale), softmax en ligne par tête (m, l, rescalage de
+// l'accumulateur), accumule o_lat[H, R] sur la même tuile, et écrit (o, m, l)
+// partiels dans ws [B, S, H, R+2] ; mla_1p_combine recombine les S tranches
+// (flash-decoding). Tout en fp32 : pas de mma bf16 sur q (l'erreur 2^-8 sur
+// des scores de l'ordre de 10 aurait coûté le cos ≥ 0,9999 scellé) — le
+// calcul (≈ 25 GFMA/pas) reste sous la lecture (1,3 Go/pas).
+//
+// Mémoire partagée : q fp32 [H][W] + tuile bf16 [TL][W+8] + S, P [HMAX][TL] +
+// m, l, alpha [HMAX] — 83 Ko à H=20, W=576, TL=32 ; un CTA par SM.
+// Scores : chaque warp prend RW lignes à la fois, les lanes se partagent W
+// (paires bf16), q lu une fois pour RW lignes, réduction par __shfl_xor.
+// o_lat : un fil = deux colonnes de R, toutes les têtes en registres.
+// Lignes valides : r ≤ len (le jeton courant vient d'être écrit) — comme
+// mla_scores ; les tranches entièrement au-delà écrivent m = −inf, l = 0.
+// ============================================================================
+constexpr int MLA1P_FILS = 256;
+
+template <int HMAX, int TL, int RW, bool FP8>
+__global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
+    const float *__restrict__ q,              // [B, H, W] fp32
+    const int64_t *__restrict__ cache_ptrs,   // [B] (ou nullptr : cache0)
+    const __nv_bfloat16 *__restrict__ cache0, // [L, W] si B = 1 sans table
+    const long *__restrict__ lens,            // [B]
+    float *__restrict__ ws,                   // [B, S, H, R+2]
+    int H, int L, int W, int R, int S, int rows_par_cta, float scale) {
+    // FP8 : lignes de W codes E4M3 + échelle fp32 (foulée W+16 o) ; la tuile
+    // garde les codes, une table de 256 flottants en shared les décode ; le
+    // score d'une ligne est multiplié par son échelle, et p_r l'absorbe pour
+    // o_lat — la moitié des octets lus, même arithmétique fp32 ensuite.
+    static_assert(HMAX <= 32, "HMAX <= 32 : une lane par tete pour l'ecriture des scores");
+    const int b = blockIdx.x, s = blockIdx.y, tid = threadIdx.x;
+    const int warp = tid >> 5, lane = tid & 31;
+    // foulée d'une ligne de tuile : W+8 éléments bf16 (1 168 o) ou, en FP8,
+    // W+16 OCTETS — un multiple de 16 o dans les deux cas, condition des
+    // lectures uint4 en shared (W+8 octets = 584 : adresse mal alignée,
+    // CUDA_ERROR_MISALIGNED_ADDRESS, t-qa 89bb888)
+    const int WP = FP8 ? W + 16 : W + 8;
+    extern __shared__ __align__(16) unsigned char mla_smem[];
+    float *q_s = reinterpret_cast<float *>(mla_smem);                        // [H][W]
+    __nv_bfloat16 *tile = reinterpret_cast<__nv_bfloat16 *>(q_s + (size_t)H * W);   // [TL][WP] bf16 ou codes
+    unsigned char *tile8 = reinterpret_cast<unsigned char *>(tile);          // FP8 : [TL][WP] codes
+    const size_t tuile_octets = FP8 ? (size_t)TL * WP : (size_t)TL * WP * sizeof(__nv_bfloat16);
+    float *S_s = reinterpret_cast<float *>(reinterpret_cast<unsigned char *>(tile) + tuile_octets);   // [HMAX][TL]
+    float *P_s = S_s + HMAX * TL;                                            // [HMAX][TL]
+    float *m_s = P_s + HMAX * TL, *l_s = m_s + HMAX, *a_s = l_s + HMAX;
+    float *sc_s = a_s + HMAX;                                                // FP8 : [TL] échelles de ligne
+    float *lut = sc_s + TL;                                                  // FP8 : [256] E4M3 -> float
+    const __nv_bfloat16 *cache = cache_ptrs
+        ? reinterpret_cast<const __nv_bfloat16 *>(cache_ptrs[b]) : cache0;
+    const unsigned char *cache8 = reinterpret_cast<const unsigned char *>(cache);
+    const long foulee8 = FP8 ? (long)mla_fp8_foulee(W) : 0;
+    if (FP8) for (int i = tid; i < 256; i += MLA1P_FILS) lut[i] = e4m3_to_float((unsigned char)i);
+    const int valide = min((int)lens[b] + 1, L);
+    const int r0 = s * rows_par_cta, r1 = min(r0 + rows_par_cta, valide);
+    float *out = ws + ((size_t)(b * S + s) * H) * (R + 2);
+    if (r0 >= r1) {                                              // tranche vide
+        for (int i = tid; i < H * (R + 2); i += MLA1P_FILS) {
+            const int h = i / (R + 2), c = i - h * (R + 2);
+            out[i] = c == R ? -INFINITY : 0.f;
+        }
+        return;
+    }
+    // q en mémoire partagée (float4)
+    {
+        const float4 *src = reinterpret_cast<const float4 *>(q + (size_t)b * H * W);
+        float4 *dst = reinterpret_cast<float4 *>(q_s);
+        for (int i = tid; i < H * W / 4; i += MLA1P_FILS) dst[i] = src[i];
+    }
+    if (tid < HMAX) { m_s[tid] = -INFINITY; l_s[tid] = 0.f; a_s[tid] = 1.f; }
+    float o[HMAX][2];
+    #pragma unroll
+    for (int h = 0; h < HMAX; ++h) { o[h][0] = 0.f; o[h][1] = 0.f; }
+    const int c0 = 2 * tid;                                      // colonnes de o_lat de ce fil
+    const int chunks_par_ligne = FP8 ? W / 16 : W / 8;           // uint4 = 8 bf16 ou 16 codes
+
+    for (int t0 = r0; t0 < r1; t0 += TL) {
+        const int n = min(TL, r1 - t0);
+        __syncthreads();                                         // la tuile précédente est consommée
+        // --- tuile [n][W] : lecture vectorisée 16 o ---
+        for (int i = tid; i < n * chunks_par_ligne; i += MLA1P_FILS) {
+            const int r = i / chunks_par_ligne, c = i - r * chunks_par_ligne;
+            if (FP8) {
+                const uint4 v = *reinterpret_cast<const uint4 *>(cache8 + (t0 + r) * foulee8 + c * 16);
+                *reinterpret_cast<uint4 *>(tile8 + (size_t)r * WP + c * 16) = v;
+            } else {
+                const uint4 v = *reinterpret_cast<const uint4 *>(cache + (size_t)(t0 + r) * W + c * 8);
+                *reinterpret_cast<uint4 *>(tile + (size_t)r * WP + c * 8) = v;
+            }
+        }
+        if (FP8 && tid < n) sc_s[tid] = *reinterpret_cast<const float *>(cache8 + (t0 + tid) * foulee8 + W);
+        __syncthreads();
+        // --- scores : le warp w prend les lignes w*RW .. w*RW+RW-1 (+ 8*RW…) ---
+        for (int rb = warp * RW; rb < n; rb += 8 * RW) {
+            float part[HMAX][RW];
+            #pragma unroll
+            for (int h = 0; h < HMAX; ++h)
+                #pragma unroll
+                for (int i = 0; i < RW; ++i) part[h][i] = 0.f;
+            for (int j = lane; j < W / 2; j += 32) {
+                float2 k2[RW];
+                #pragma unroll
+                for (int i = 0; i < RW; ++i) {
+                    const int r = rb + i;
+                    if (r >= n) { k2[i] = make_float2(0.f, 0.f); continue; }
+                    if (FP8) {
+                        const unsigned char *pc = tile8 + (size_t)r * WP + 2 * j;
+                        k2[i] = make_float2(lut[pc[0]], lut[pc[1]]);
+                    } else {
+                        k2[i] = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(
+                                    tile + (size_t)r * WP + 2 * j));
+                    }
+                }
+                #pragma unroll
+                for (int h = 0; h < HMAX; ++h) {
+                    if (h < H) {
+                        const float2 q2 = *reinterpret_cast<const float2 *>(q_s + (size_t)h * W + 2 * j);
+                        #pragma unroll
+                        for (int i = 0; i < RW; ++i) part[h][i] += q2.x * k2[i].x + q2.y * k2[i].y;
+                    }
+                }
+            }
+            #pragma unroll
+            for (int h = 0; h < HMAX; ++h) {
+                #pragma unroll
+                for (int i = 0; i < RW; ++i) {
+                    float v = part[h][i];
+                    #pragma unroll
+                    for (int off = 16; off > 0; off >>= 1) v += __shfl_xor_sync(0xffffffffu, v, off);
+                    if (lane == h && h < H && rb + i < n)
+                        S_s[h * TL + rb + i] = FP8 ? v * sc_s[rb + i] * scale : v * scale;
+                }
+            }
+        }
+        __syncthreads();
+        // --- softmax en ligne, un fil par tête ---
+        if (tid < H) {
+            const float *Sh = S_s + tid * TL;
+            float mt = -INFINITY;
+            for (int r = 0; r < n; ++r) mt = fmaxf(mt, Sh[r]);
+            const float m_old = m_s[tid], m_new = fmaxf(m_old, mt);
+            const float a = m_old == -INFINITY ? 0.f : __expf(m_old - m_new);
+            float lt = 0.f;
+            float *Ph = P_s + tid * TL;
+            for (int r = 0; r < n; ++r) {
+                const float p = __expf(Sh[r] - m_new);
+                Ph[r] = FP8 ? p * sc_s[r] : p;                   // l'échelle de ligne passe dans p pour o_lat
+                lt += p;
+            }
+            l_s[tid] = l_s[tid] * a + lt;
+            m_s[tid] = m_new;
+            a_s[tid] = a;
+        }
+        __syncthreads();
+        // --- o_lat : rescalage puis accumulation sur la tuile ---
+        if (c0 < R) {
+            #pragma unroll
+            for (int h = 0; h < HMAX; ++h) {
+                if (h < H) { const float a = a_s[h]; o[h][0] *= a; o[h][1] *= a; }
+            }
+            for (int r = 0; r < n; ++r) {
+                float2 v2;
+                if (FP8) { const unsigned char *pc = tile8 + (size_t)r * WP + c0; v2 = make_float2(lut[pc[0]], lut[pc[1]]); }
+                else v2 = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(tile + (size_t)r * WP + c0));
+                #pragma unroll
+                for (int h = 0; h < HMAX; ++h) {
+                    if (h < H) {
+                        const float p = P_s[h * TL + r];
+                        o[h][0] += p * v2.x; o[h][1] += p * v2.y;
+                    }
+                }
+            }
+        }
+    }
+    __syncthreads();
+    if (c0 < R) {
+        #pragma unroll
+        for (int h = 0; h < HMAX; ++h)
+            if (h < H) { float *oh = out + (size_t)h * (R + 2) + c0; oh[0] = o[h][0]; oh[1] = o[h][1]; }
+    }
+    if (tid < H) { out[(size_t)tid * (R + 2) + R] = m_s[tid]; out[(size_t)tid * (R + 2) + R + 1] = l_s[tid]; }
+}
+
+// Recombinaison des S tranches : o = Σ_s o_s·e^{m_s−M} / Σ_s l_s·e^{m_s−M}.
+__global__ void mla_1p_combine_kernel(const float *__restrict__ ws,   // [B, S, H, R+2]
+                                      float *__restrict__ o,          // [B, H, R]
+                                      int H, int R, int S) {
+    const int b = blockIdx.x, h = blockIdx.y;
+    const float *base = ws + ((size_t)b * S * H + h) * (R + 2);
+    const size_t pas = (size_t)H * (R + 2);
+    float M = -INFINITY;
+    for (int s = 0; s < S; ++s) M = fmaxf(M, base[s * pas + R]);
+    float Lsum = 0.f;
+    for (int s = 0; s < S; ++s) {
+        const float m = base[s * pas + R];
+        if (m != -INFINITY) Lsum += base[s * pas + R + 1] * __expf(m - M);
+    }
+    const float inv = Lsum > 0.f ? 1.f / Lsum : 0.f;
+    for (int c = threadIdx.x; c < R; c += blockDim.x) {
+        float acc = 0.f;
+        for (int s = 0; s < S; ++s) {
+            const float m = base[s * pas + R];
+            if (m != -INFINITY) acc += base[s * pas + c] * __expf(m - M);
+        }
+        o[((size_t)b * H + h) * R + c] = acc * inv;
+    }
+}
+
+static int mla_1p_tranches(int L, int TL) {
+    // ≈ 64 lignes par CTA (2 tuiles), 32 tranches au plus : à b=12, L=2 048
+    // → 384 CTA (2 par SM) ; à L=128 → 2
+    const int tuiles = (L + TL - 1) / TL;
+    return max(1, min(32, (tuiles + 1) / 2));
+}
+
+torch::Tensor mla_decode_1p(torch::Tensor q_eff, c10::optional<torch::Tensor> cache_ptrs,
+                            c10::optional<torch::Tensor> cache, torch::Tensor lens,
+                            int64_t L, int64_t rank, double scale, bool fp8) {
+    CHECK_CUDA(q_eff); ACVRAM_DEVICE_GUARD(q_eff); CHECK_CONTIG(q_eff); CHECK_CONTIG(lens);
+    TORCH_CHECK(q_eff.dim() == 3 && q_eff.scalar_type() == torch::kFloat, "MLA 1p : q_eff [B, H, W] fp32");
+    const int B = q_eff.size(0), H = q_eff.size(1), W = q_eff.size(2), R = (int)rank;
+    TORCH_CHECK(W % 8 == 0 && R % 2 == 0 && R <= W && R <= 2 * MLA1P_FILS,
+                "MLA 1p : W multiple de 8, R pair <= W et <= 512");
+    TORCH_CHECK(!fp8 || W % 16 == 0, "MLA 1p fp8 : W multiple de 16 (foulee W+16 alignee)");
+    TORCH_CHECK(H >= 1 && H <= 32, "MLA 1p : 1 <= H <= 32 tetes");
+    TORCH_CHECK(lens.scalar_type() == torch::kLong && lens.numel() == B, "MLA 1p : lens [B] int64");
+    const int64_t *ptrs = nullptr;
+    const __nv_bfloat16 *cache0 = nullptr;
+    if (cache_ptrs.has_value() && cache_ptrs->defined()) {
+        CHECK_CONTIG(*cache_ptrs);
+        TORCH_CHECK(cache_ptrs->scalar_type() == torch::kInt64 && cache_ptrs->is_cuda()
+                    && cache_ptrs->numel() == B, "MLA 1p : cache_ptrs [B] int64 sur la carte");
+        ptrs = cache_ptrs->data_ptr<int64_t>();
+    } else {
+        TORCH_CHECK(B == 1 && cache.has_value() && cache->defined(), "MLA 1p : cache [L, W] bf16 si B = 1 sans table");
+        CHECK_CONTIG(*cache);
+        if (fp8) {
+            TORCH_CHECK(cache->scalar_type() == torch::kUInt8 && cache->size(1) == W + MLA_FP8_PAD && cache->size(0) >= L,
+                        "MLA 1p fp8 : cache [>= L, W+16] uint8");
+        } else {
+            TORCH_CHECK(cache->scalar_type() == torch::kBFloat16 && cache->size(1) == W && cache->size(0) >= L,
+                        "MLA 1p : cache [>= L, W] bf16");
+        }
+        cache0 = reinterpret_cast<const __nv_bfloat16 *>(cache->data_ptr());
+    }
+    const int TL = H <= 20 ? 32 : 16;
+    const int S = mla_1p_tranches((int)L, TL);
+    const int rows = ((((int)L + S - 1) / S) + TL - 1) / TL * TL;
+    auto ws = torch::empty({(long)B * S * H * (R + 2)}, q_eff.options());
+    auto o = torch::empty({B, H, (long)rank}, q_eff.options());
+    auto stream = at::cuda::getCurrentCUDAStream();
+    const int HMAX = H <= 20 ? 20 : 32;
+    // tuile : TL lignes de (W+8) bf16 ; en fp8 TL lignes de (W+16) octets, plus petite
+    const size_t shm = (size_t)H * W * sizeof(float) + (size_t)TL * (W + 8) * sizeof(__nv_bfloat16)
+                       + (size_t)2 * HMAX * TL * sizeof(float) + 3 * HMAX * sizeof(float)
+                       + (size_t)(TL + 256) * sizeof(float);
+    dim3 grid(B, S);
+    #define MLA1P_LANCE(HM, T, RWW, F8) do { \
+        static size_t autorise = 0; \
+        if (shm > autorise) { cudaFuncSetAttribute(mla_1p_kernel<HM, T, RWW, F8>, \
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm); autorise = shm; } \
+        mla_1p_kernel<HM, T, RWW, F8><<<grid, MLA1P_FILS, shm, stream>>>( \
+            q_eff.data_ptr<float>(), ptrs, cache0, lens.data_ptr<long>(), ws.data_ptr<float>(), \
+            H, (int)L, W, R, S, rows, (float)scale); } while (0)
+    TORCH_CHECK(shm <= 99 * 1024, "MLA 1p : memoire partagee > 99 Ko (H, W trop grands)");
+    if (HMAX == 20) { if (fp8) MLA1P_LANCE(20, 32, 4, true); else MLA1P_LANCE(20, 32, 4, false); }
+    else            { if (fp8) MLA1P_LANCE(32, 16, 2, true); else MLA1P_LANCE(32, 16, 2, false); }
+    #undef MLA1P_LANCE
+    dim3 g2(B, H);
+    mla_1p_combine_kernel<<<g2, 128, 0, stream>>>(ws.data_ptr<float>(), o.data_ptr<float>(), H, R, S);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return o;
+}
+
+// Préparation MLA du pas pour les B créneaux en UN lancement (poste7-duel
+// verdict § 6.2, marche « RoPE + cat » : 2 541 lancements/pas mesurés contre
+// ≤ 2 500 scellés). Remplace, par couche : RoPE (≈ 10 élémentaires), trois
+// cat, l'einsum k_b (bmm + copies), la norme kv_a et la conversion fp32 de
+// q_eff. Même arithmétique que le chemin torch, opération par opération :
+//  - RoPE « norm » (paires 2i, 2i+1) avec cos/sin bf16 (tables32 = les
+//    tables bf16 en fp32) : y0 = bf16(bf16(x0·c) − bf16(x1·s)), y1 =
+//    bf16(bf16(x0·s) + bf16(x1·c)) — ce que font deux produits et une somme
+//    bf16 de torch ;
+//  - q_abs[b,h,r] = Σ_n k_b[h,r,n]·q_nope[b,h,n] accumulé en fp32, arrondi
+//    bf16 (la sortie de l'einsum) puis écrit en fp32 (le .to(float32) de
+//    q_eff) — seul poste où l'ordre des sommes diffère de cuBLAS (≤ 1 ulp) ;
+//  - norme kv_a : la réduction de rmsnorm_bf16_kernel à 256 fils, à
+//    l'identique (même découpe, même arbre de shuffles) — bit-identique.
+// Grille 1D : nh × (rank/64) blocs pour q (un bloc = 64 lignes de k_b[h] pour
+// tous les b ; les blocs de première tranche tournent aussi q_pe), puis B
+// blocs pour k_new (norme + RoPE d'un créneau).
+constexpr int MLAP_FILS = 256, MLAP_LIGNES = 64;
+__global__ void __launch_bounds__(MLAP_FILS) mla_prep_batch_kernel(
+    const __nv_bfloat16 *__restrict__ q,       // [B, nh, nope+rope]
+    const __nv_bfloat16 *__restrict__ kvp,     // [B, rank+rope]
+    const long *__restrict__ lens,             // [B] positions
+    const float *__restrict__ cos32,           // [max_pos, rope] (nullptr : pas de RoPE)
+    const float *__restrict__ sin32,
+    const __nv_bfloat16 *__restrict__ k_b,     // [nh, rank, nope]
+    const __nv_bfloat16 *__restrict__ w_norm,  // [rank]
+    float *__restrict__ q_eff,                 // [B, nh, rank+rope] fp32
+    __nv_bfloat16 *__restrict__ k_new,         // [B, rank+rope]
+    int B, int nh, int nope, int rope, int rank, float eps) {
+    extern __shared__ __align__(16) unsigned char mlap_smem[];
+    const int W = rank + rope, QW = nope + rope, NR = rank / MLAP_LIGNES;
+    const int tid = threadIdx.x;
+    auto rot = [&](float x0, float x1, float c, float s, float &y0, float &y1) {
+        const float a = __bfloat162float(__float2bfloat16(x0 * c));
+        const float bb = __bfloat162float(__float2bfloat16(x1 * s));
+        const float cc = __bfloat162float(__float2bfloat16(x0 * s));
+        const float d = __bfloat162float(__float2bfloat16(x1 * c));
+        y0 = __bfloat162float(__float2bfloat16(a - bb));
+        y1 = __bfloat162float(__float2bfloat16(cc + d));
+    };
+    if ((int)blockIdx.x < nh * NR) {
+        const int h = blockIdx.x / NR, r0 = (blockIdx.x - h * NR) * MLAP_LIGNES;
+        float *qn = reinterpret_cast<float *>(mlap_smem);                 // [B][nope] fp32
+        for (int i = tid; i < B * nope; i += MLAP_FILS) {
+            const int b = i / nope, n = i - b * nope;
+            qn[i] = __bfloat162float(q[((size_t)b * nh + h) * QW + n]);
+        }
+        __syncthreads();
+        const int r = tid >> 2, quart = tid & 3;                          // 64 lignes × 4 quarts de nope
+        const __nv_bfloat16 *kr = k_b + ((size_t)h * rank + r0 + r) * nope;
+        for (int b = 0; b < B; ++b) {
+            float acc = 0.f;
+            for (int n = quart; n < nope; n += 4)
+                acc += __bfloat162float(kr[n]) * qn[b * nope + n];
+            acc += __shfl_xor_sync(0xffffffffu, acc, 1);
+            acc += __shfl_xor_sync(0xffffffffu, acc, 2);
+            if (quart == 0)
+                q_eff[((size_t)b * nh + h) * W + r0 + r] = __bfloat162float(__float2bfloat16(acc));
+        }
+        if (r0 == 0 && cos32 != nullptr) {                                 // q_pe tourné, tous les b
+            const int paires = rope / 2;
+            for (int i = tid; i < B * paires; i += MLAP_FILS) {
+                const int b = i / paires, j = i - b * paires;
+                const long pos = lens[b];
+                const __nv_bfloat16 *src = q + ((size_t)b * nh + h) * QW + nope + 2 * j;
+                float y0, y1;
+                rot(__bfloat162float(src[0]), __bfloat162float(src[1]),
+                    cos32[pos * rope + j], sin32[pos * rope + j], y0, y1);
+                float *dst = q_eff + ((size_t)b * nh + h) * W + rank + 2 * j;
+                dst[0] = y0; dst[1] = y1;
+            }
+        } else if (r0 == 0) {
+            for (int i = tid; i < B * rope; i += MLAP_FILS) {
+                const int b = i / rope, j = i - b * rope;
+                q_eff[((size_t)b * nh + h) * W + rank + j] =
+                    __bfloat162float(q[((size_t)b * nh + h) * QW + nope + j]);
+            }
+        }
+        return;
+    }
+    // --- k_new[b] : norme kv_a (rmsnorm_bf16 à 256 fils, à l'identique) + RoPE de k_pe ---
+    const int b = blockIdx.x - nh * NR;
+    __shared__ float red[32];
+    const __nv_bfloat16 *xr = kvp + (size_t)b * W;
+    float ss = 0.f;
+    for (int i = tid; i < rank; i += MLAP_FILS) { const float v = __bfloat162float(xr[i]); ss += v * v; }
+    for (int o = 16; o > 0; o >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, o);
+    if ((tid & 31) == 0) red[tid >> 5] = ss;
+    __syncthreads();
+    ss = 0.f;
+    for (int k = 0; k < MLAP_FILS / 32; ++k) ss += red[k];
+    const float rs = rsqrtf(ss / (float)rank + eps);
+    __nv_bfloat16 *out = k_new + (size_t)b * W;
+    for (int i = tid; i < rank; i += MLAP_FILS) {
+        const float n = __bfloat162float(__float2bfloat16(__bfloat162float(xr[i]) * rs));
+        out[i] = __float2bfloat16(n * __bfloat162float(w_norm[i]));
+    }
+    if (cos32 != nullptr) {
+        const long pos = lens[b];
+        for (int j = tid; j < rope / 2; j += MLAP_FILS) {
+            float y0, y1;
+            rot(__bfloat162float(xr[rank + 2 * j]), __bfloat162float(xr[rank + 2 * j + 1]),
+                cos32[pos * rope + j], sin32[pos * rope + j], y0, y1);
+            out[rank + 2 * j] = __float2bfloat16(y0); out[rank + 2 * j + 1] = __float2bfloat16(y1);
+        }
+    } else {
+        for (int j = tid; j < rope; j += MLAP_FILS) out[rank + j] = xr[rank + j];
+    }
+}
+
+std::vector<torch::Tensor> mla_prep_batch(torch::Tensor q, torch::Tensor kvp, torch::Tensor lens,
+                                          c10::optional<torch::Tensor> cos32, c10::optional<torch::Tensor> sin32,
+                                          torch::Tensor k_b, torch::Tensor w_norm,
+                                          int64_t nope, int64_t rope, int64_t rank, double eps) {
+    CHECK_CUDA(q); ACVRAM_DEVICE_GUARD(q);
+    for (auto &z : {q, kvp, lens, k_b, w_norm}) CHECK_CONTIG(z);
+    TORCH_CHECK(q.dim() == 3 && q.scalar_type() == torch::kBFloat16 && q.size(2) == nope + rope,
+                "prep MLA : q [B, nh, nope+rope] bf16");
+    const int B = q.size(0), nh = q.size(1), W = (int)(rank + rope);
+    TORCH_CHECK(kvp.dim() == 2 && kvp.size(0) == B && kvp.size(1) == W && kvp.scalar_type() == torch::kBFloat16,
+                "prep MLA : kvp [B, rank+rope] bf16");
+    TORCH_CHECK(rank % MLAP_LIGNES == 0 && rope % 2 == 0 && nope % 4 == 0 && B * nope * 4 <= 48 * 1024,
+                "prep MLA : rank multiple de 64, rope pair, nope multiple de 4, B*nope*4 o <= 48 Ko");
+    TORCH_CHECK(k_b.dim() == 3 && k_b.size(0) == nh && k_b.size(1) == rank && k_b.size(2) == nope
+                && k_b.scalar_type() == torch::kBFloat16, "prep MLA : k_b [nh, rank, nope] bf16");
+    TORCH_CHECK(w_norm.numel() == rank && w_norm.scalar_type() == torch::kBFloat16, "prep MLA : w_norm [rank] bf16");
+    TORCH_CHECK(lens.scalar_type() == torch::kLong && lens.numel() == B, "prep MLA : lens [B] int64");
+    const float *c32 = nullptr, *s32 = nullptr;
+    if (cos32.has_value() && cos32->defined()) {
+        CHECK_CONTIG(*cos32); CHECK_CONTIG(*sin32);
+        TORCH_CHECK(cos32->scalar_type() == torch::kFloat && cos32->dim() == 2 && cos32->size(1) == rope
+                    && sin32->sizes() == cos32->sizes(), "prep MLA : cos32/sin32 [max_pos, rope] fp32");
+        c32 = cos32->data_ptr<float>(); s32 = sin32->data_ptr<float>();
+    }
+    auto q_eff = torch::empty({B, nh, W}, q.options().dtype(torch::kFloat));
+    auto k_new = torch::empty({B, W}, q.options());
+    const int NR = (int)rank / MLAP_LIGNES;
+    const size_t shm = (size_t)B * nope * sizeof(float);
+    mla_prep_batch_kernel<<<(unsigned)(nh * NR + B), MLAP_FILS, shm, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const __nv_bfloat16 *>(q.data_ptr()),
+        reinterpret_cast<const __nv_bfloat16 *>(kvp.data_ptr()), lens.data_ptr<long>(), c32, s32,
+        reinterpret_cast<const __nv_bfloat16 *>(k_b.data_ptr()),
+        reinterpret_cast<const __nv_bfloat16 *>(w_norm.data_ptr()),
+        q_eff.data_ptr<float>(), reinterpret_cast<__nv_bfloat16 *>(k_new.data_ptr()),
+        B, nh, (int)nope, (int)rope, (int)rank, (float)eps);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return {q_eff, k_new};
+}
+
 // RMSNorm fusionnée (bf16 -> bf16, variance en fp32) : un bloc par ligne.
 // Même arithmétique que la version torch : x normalisé arrondi en bf16, puis
 // produit bf16 par le poids — bit-identique.
@@ -4594,6 +5191,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("awq") = py::none(), py::arg("e_sorted") = py::none(),
           "MoE prefill : act(g)*u en bf16 depuis les vues [:, :m], rembourre a Kd (act 0=SiLU, 1=GELU-tanh) ; awq [E,Kd] + e_sorted [G] : x / s[e]");
     m.def("nvfp4_moe_fused", &nvfp4_moe_fused,
+          py::arg("tq_g"), py::arg("tb_g"), py::arg("gs_g"), py::arg("tq_u"), py::arg("tb_u"), py::arg("gs_u"),
+          py::arg("tq_d"), py::arg("tb_d"), py::arg("gs_d"), py::arg("xq"), py::arg("xsf"),
+          py::arg("tile_e"), py::arg("tile_t0"), py::arg("tile_n"), py::arg("ws"), py::arg("compteurs"),
+          py::arg("K"), py::arg("I"), py::arg("M_out"), py::arg("act"), py::arg("tn"), py::arg("ordre"), py::arg("tw"),
+          py::arg("k_top"), py::arg("t"), py::arg("atomique"), py::arg("etages"), py::arg("grow") = py::none(),
           "MoE decodage fusionne (port b12x) : gate+up+act+quant en shared, down par tranches, split-K seriel -> d bf16 [G, M_out]");
     m.def("narrow_gemm", &narrow_gemm,
           py::arg("qw"), py::arg("sc8"), py::arg("sc16"), py::arg("zr"), py::arg("x"), py::arg("K"),
@@ -4608,12 +5210,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("table_qw"), py::arg("table_bscale"), py::arg("gscales"), py::arg("xq"),
           py::arg("xsf"), py::arg("tile_e"), py::arg("tile_t0"), py::arg("tile_n"),
           py::arg("M"), py::arg("K"), py::arg("bt"), py::arg("etages") = 0, py::arg("ks") = 64,
+          py::arg("grow") = py::none(),
           "MoE NVFP4 : GEMM groupee W4A4 sur la MMA FP4 native de sm_120 (mxf4nvf4) ; "
           "etages 0 = chargements directs, 2-4 = pipeline cp.async en shared ; ks 64 ou 128 par etage");
     m.def("nvfp4_gemm_grouped_mma_disponible", &nvfp4_gemm_grouped_mma_disponible,
           "vrai si la carte courante est sm_120 et le noyau MMA FP4 compile");
     m.def("nvfp4_quant_act", &nvfp4_quant_act,
-          "activations bf16 [G, K] -> (E2M1 [G, K/2], echelles UE4M3 [G, K/16]) par bloc de 16");
+          "activations bf16 [G, K] -> (E2M1 [G, K/2], echelles UE4M3 [G, K/16], echelle globale fp32 [G] "
+          "par ligne = amax_r/(6*448), a passer en grow a la GEMM) ; awq [E, K] bf16 + e_sorted [G] : x/s[e] fusionne",
+          py::arg("x"), py::arg("awq") = py::none(), py::arg("e_sorted") = py::none(),
+          py::arg("compteurs") = py::none());
     m.def("int4_gemv_grouped", &int4_gemv_grouped,
           "INT4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
     m.def("kv_write_int8", &kv_write_int8,
@@ -4634,6 +5240,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("mult") = 1.0);
     m.def("kda_decode", &kda_decode, "KDA : pas de decodage fusionne (une sequence)");
     m.def("mla_decode", &mla_decode, "MLA absorbee : scores + softmax + lecture latente");
+    m.def("mla_prep_batch", &mla_prep_batch,
+          "MLA decodage : q [B,nh,nope+rope] + kvp [B,rank+rope] -> (q_eff [B,nh,W] fp32, k_new [B,W] bf16) : "
+          "einsum k_b, RoPE, norme kv_a et cat en un lancement (cos32/sin32 = tables fp32 indexees par position, ou None)");
+    m.def("mla_ecrit_latent", &mla_ecrit_latent, py::arg("k_new"), py::arg("cache_ptrs"), py::arg("len_ptrs"),
+          py::arg("fp8") = false,
+          "MLA decodage : k_new [B, W] -> cache_b[len_b], puis len_b += 1, un lancement pour les B creneaux (tables d'adresses [B])");
+    m.def("mla_decode_1p", &mla_decode_1p, py::arg("q_eff"), py::arg("cache_ptrs") = py::none(),
+          py::arg("cache") = py::none(), py::arg("lens"), py::arg("L"), py::arg("rank"), py::arg("scale"),
+          py::arg("fp8") = false,
+          "MLA absorbee a UNE PASSE (poste7-duel-verdict-16-09) : le cache latent lu une fois pour les H tetes, "
+          "softmax en ligne, tranches de L recombinees -> o_lat [B, H, rank] fp32 ; cache_ptrs [B] int64 ou cache [L, W] (B = 1)");
     m.def("mla_decode_batch", &mla_decode_batch,
           "MLA : decodage de B creneaux en un lancement, caches par table d'adresses [B] int64");
     m.def("paged_attention", &paged_attention,

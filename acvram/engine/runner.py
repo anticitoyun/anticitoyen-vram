@@ -1020,6 +1020,7 @@ class Engine:
         logits = self.graphs.run(batch) if self.graphs is not None else None
         voie = "graphe"
         if logits is None:
+            self._sonde_eager(batch)
             logits = self.model(batch)
             voie = "eager"
         self.model._mtp_hidden_n = len(decodable)     # un rejeu ne pose rien en Python
@@ -1091,6 +1092,7 @@ class Engine:
         ok = self.graphs.preparer(batch)
         self.stats.decode_tokens += len(decodable)
         if not ok:
+            self._sonde_eager(batch)
             logits = self.model(batch)
             return self._emit(logits, decodable)
         logits = self.graphs.rejouer_suivant()
@@ -1126,6 +1128,7 @@ class Engine:
         ok = self.graphs.preparer(batch)
         self.stats.decode_tokens += len(vivants)
         if not ok:
+            self._sonde_eager(batch)
             logits = self.model(batch)
             return self._emit(logits, vivants)
         logits = self.graphs.rejouer_suivant()
@@ -1332,6 +1335,26 @@ class Engine:
             text_delta=text, finished=bool(reason), finish_reason=reason,
             prompt_tokens=len(seq.prompt_ids),
             completion_tokens=len(seq.output_ids))
+
+    def _sonde_eager(self, batch: ForwardBatch) -> None:
+        """ACVRAM_TRACE_ENTREES=1 : le pendant eager de graphs._sonde_entrees —
+        jetons, positions, seq_lens et le plongement que le modèle va calculer."""
+        if not os.environ.get("ACVRAM_TRACE_ENTREES"):
+            return
+        torch.cuda.synchronize()
+        n = min(4, batch.batch_size)
+        m = self.model
+        idx = batch.tokens[:n]
+        if torch.is_tensor(idx):
+            idx = idx.to(m.embed_tokens.device)
+        else:
+            idx = torch.tensor(list(idx), device=m.embed_tokens.device)
+        x = torch.nn.functional.embedding(idx, m.embed_tokens).to(m.dtype)
+        if m.spec.embedding_multiplier != 1.0:
+            x = x * m.spec.embedding_multiplier
+        print(f"[ENTREES-EAGER] jetons={idx.tolist()} positions={batch.positions[:n].tolist()} "
+              f"seq_lens={list(batch.seq_lens[:n])} | x[:4]={[[round(v, 5) for v in r] for r in x[:, :4].float().tolist()]}",
+              flush=True)
 
     def _sample_only(self, logits: torch.Tensor,
                      seqs: list[Sequence]) -> tuple[torch.Tensor, torch.Tensor]:

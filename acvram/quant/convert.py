@@ -419,9 +419,6 @@ def _precalculer_alpha_commun_gate_up(
 
 
 
-
-
-
 def _quantize_on(dev: torch.device, tensor: torch.Tensor, fmt: str,
                  st: Optional[ActStats], **kw):
     """Quantifie sur ``dev``, en retombant sur le processeur si la VRAM manque.
@@ -1092,13 +1089,13 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             model_path, spec, router, stats, opts, qdev)
         print(f"[acvram] alpha commun gate/up : {len(alpha_commun) // 2} "
               f"paires fusionnees", flush=True)
-    # poste7 (gate!=up, main 7c3698d, 16/09) : `_try_build_stacks` (model.py:816)
-    # ne force plus gate_proj == up_proj -- il fusionne quand la recherche les
-    # rend egaux et garde une seconde ligne/quantification sinon. L'echelle
-    # forcee a l'identite par paire (`_precalculer_alpha_commun_experts`,
-    # 908e926) n'est donc plus necessaire pour les experts ; la recherche
-    # independante par tenseur ci-dessous suffit (identite explicite quand
-    # elle s'effondre malgre tout, ligne ~1216).
+    # poste7 (gate!=up, main 7c3698d) : `_try_build_stacks` ne force plus
+    # gate_proj == up_proj -- il fusionne quand la recherche les rend egaux,
+    # garde une seconde ligne/quantification sinon. L'echelle forcee a
+    # l'identite par paire (`_precalculer_alpha_commun_experts`, 908e926)
+    # n'est donc plus necessaire pour les experts ; la recherche independante
+    # par tenseur ci-dessous suffit (identite explicite quand elle s'effondre
+    # malgre tout, ligne ~1220).
 
     for name, tensor in _adapt_hf(_iter_checkpoint(model_path), spec):
         report.tensors += 1
@@ -1130,18 +1127,12 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         # poste7 (a6a7436, 15/09 ; gate!=up 7c3698d, 16/09) : l'echelle AWQ par
         # expert reste dans la pile -- le moteur (poste4) la porte cote
         # loader ([E,K], appliquee apres route+pack), gate_proj et up_proj
-        # n'ont plus besoin d'etre egaux (`_try_build_stacks` fusionne quand
-        # ils le sont, garde une seconde ligne sinon) : recherche AWQ
-        # independante par tenseur, comme pour les tenseurs denses. poste7
-        # (`poste7-glm-mma0-verdict-16-09.md` § 2/4) : sous la pile groupee
-        # W4A4, l'activation est elle-meme quantifiee en NVFP4 apres division
-        # par l'echelle (`nvfp4_quant_act`, model.py:1022) -- la metrique de
-        # recherche doit voir ce meme chemin, sinon elle choisit un alpha qui
-        # elargit l'etendue intra-bloc de l'activation sans le savoir.
-        # Quand la recherche s'effondre malgre tout a l'identite
-        # (`scaler.scale is None`), on pose une echelle identite EXPLICITE
-        # (torch.ones) : le manifeste ne doit jamais melanger "echelle
-        # absente" et "echelle presente" par ambiguite d'absence.
+        # n'ont plus besoin d'etre egaux : recherche AWQ independante par
+        # tenseur, comme pour les tenseurs denses. Quand la recherche
+        # s'effondre malgre tout a l'identite (`scaler.scale is None`), on
+        # pose une echelle identite EXPLICITE (torch.ones) : le manifeste ne
+        # doit jamais melanger "echelle absente" et "echelle presente" par
+        # ambiguite d'absence.
         #
         # poste7 (`poste7-organisation-16-09.md`, poste1 `verdict-glm-awq-int8-
         # 16-09.md` : q_a 0,982, kv_a 0,983, o_proj sans table -- retrait
@@ -1150,6 +1141,14 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         # a chaque jeton (`layers.py:479-481`, mesure +2,06 ms/pas,
         # `verdict-glm-2ms-manifestes-16-09.md`) -- retiree des tenseurs
         # int8, gardee sur nvfp4 ou elle compense une vraie perte.
+        #
+        # poste7 (`poste7-glm-mma0-verdict-16-09.md` § 2/4) : sous la pile
+        # groupee W4A4, l'activation est elle-meme quantifiee en NVFP4 apres
+        # division par l'echelle (`nvfp4_quant_act`, model.py:1022) -- la
+        # metrique de recherche doit voir ce meme chemin pour les experts,
+        # sinon elle choisit un alpha qui elargit l'etendue intra-bloc de
+        # l'activation sans le savoir (`quantize_activation_nvfp4`,
+        # calibrate.py).
         qt, scaler, metrics = _quantize_on(
             qdev, tensor, fmt, st,
             group_size=opts.group_size,

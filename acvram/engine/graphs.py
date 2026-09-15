@@ -445,11 +445,28 @@ class GraphRunner:
             return True
 
         self._fill(entry, batch)
+        if os.environ.get("ACVRAM_TRACE_ENTREES"):
+            self._sonde_entrees(entry, batch, key)
         if trace and os.environ.get("ACVRAM_CHRONO_SYNC"):
             torch.cuda.synchronize(self.device)
         t2 = time.perf_counter()
         self._prepare = (entry, key, b_reel, ql, t0, t1, t2, False)
         return True
+
+    def _sonde_entrees(self, entry: dict, batch: ForwardBatch, key) -> None:
+        """ACVRAM_TRACE_ENTREES=1 (poste7 § 12) : ce que le pas à formes fixes va
+        lire — jetons, positions, seq_lens du lot ET les tampons device
+        remplis (x = plongement, positions, slots, seq_lens) — à comparer au
+        journal du chemin eager (runner._sonde_eager) sur la même séquence."""
+        torch.cuda.synchronize(self.device)
+        n = min(4, batch.batch_size)
+        tok = batch.tokens[:n].tolist() if torch.is_tensor(batch.tokens) else list(batch.tokens[:n])
+        x = entry["x"][:n, :4].float().tolist()
+        print(f"[ENTREES-FIXES] rejeu n°{self.replays} clé {key} jetons={tok} "
+              f"positions={batch.positions[:n].tolist()} seq_lens={list(batch.seq_lens[:n])} | "
+              f"x[:4]={[[round(v, 5) for v in r] for r in x]} "
+              f"positions_dev={entry['positions'][:n].tolist()} slots_dev={entry['slots'][:n].tolist()} "
+              f"seq_lens_dev={entry['seq_lens'][:n].tolist()}", flush=True)
 
     def rejouer_suivant(self) -> Optional[torch.Tensor]:
         """Rejoue le lot préparé par ``preparer`` et rend une VUE des logits
@@ -466,6 +483,18 @@ class GraphRunner:
         if deja:
             self.evenement_jetons.record()
             return entry["out"][:b_reel * ql]
+        if trace and os.environ.get("ACVRAM_TRACE_CRENEAUX") and self.hybrid_layers:
+            # Sonde (poste7 § 11) : ce que le rejeu va lire, couche 0 hybride —
+            # longueurs, palier, adresses des créneaux contre la table _mla_lot
+            l0 = self.hybrid_layers[0]
+            sts = l0.statics[:b_reel]
+            lens = [int(st["len"].item()) for st in sts]
+            lot = l0.__dict__.get("_mla_lots", {})
+            cle = tuple((st["cache"].data_ptr(), st["len"].data_ptr()) for st in l0.statics[:key[0]])
+            print(f"[graphe-CRENEAUX] rejeu n°{self.replays} clé {key} palier {l0.static_bucket} "
+                  f"lens={lens} proprietaires={l0.static_owners[:b_reel]} "
+                  f"caches={[st['cache'].dtype for st in sts][:1]} "
+                  f"table_mla_lot={'ok' if cle in lot else 'ABSENTE'}", flush=True)
         if "step" in entry:                  # ACVRAM_GRAPHS_EAGER : sans capture
             with torch.inference_mode():
                 entry["out"] = entry["step"]()
@@ -623,6 +652,8 @@ class GraphRunner:
             "seq_lens": torch.zeros(b, dtype=torch.long, device=d),
         }
         self._fill(entry, batch)
+        if os.environ.get("ACVRAM_TRACE_ENTREES"):
+            self._sonde_entrees(entry, batch, entry["key"])
         max_pos = min(self.max_model_len + 1, nblk * BLOCK_SIZE + 1)
 
         # Tout cache RoPE doit exister à sa taille finale avant la capture :

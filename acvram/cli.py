@@ -58,6 +58,7 @@ VARIABLES_LUES = {
     "ACVRAM_NOM",
     "ACVRAM_MLA_DEBUG_ECART",
     "ACVRAM_MLA_EAGER_TORCH",
+    "ACVRAM_MLA_LATENT_FP8",
     # Bras du banc a trois bras de l'attention paginee. Lu par le noyau, donc
     # il DOIT etre declare ici : la garde l'a signale comme inconnu, ce qui est
     # exactement son role — une variable posee qui ne va nulle part est une
@@ -121,6 +122,8 @@ VARIABLES_LUES = {
     "ACVRAM_MLA_BATCH",
     "ACVRAM_MLA_BUCKET",
     "ACVRAM_MLA_NORME_NOYAU",
+    "ACVRAM_MLA_PREP_NOYAU",
+    "ACVRAM_MLA_UNE_PASSE",
     "ACVRAM_MLP_HOTE_CPU",
     "ACVRAM_MODELS_DIR",
     "ACVRAM_MOE_DECODE_MASQUES",
@@ -137,6 +140,7 @@ VARIABLES_LUES = {
     "ACVRAM_NARROW_MIN_M",
     "ACVRAM_NARROW_NVFP4",
     "ACVRAM_NARROW_ROWS",
+    "ACVRAM_QA_COMPTE",
     "ACVRAM_MOE_GEMM_MAX",
     "ACVRAM_MOE_GLUE_TORCH",
     "ACVRAM_MOE_GROUPED_MAX",
@@ -159,6 +163,8 @@ VARIABLES_LUES = {
     "ACVRAM_SYNC_COUCHES",
     "ACVRAM_TETE_LIEE",
     "ACVRAM_TRACEBACK",
+    "ACVRAM_TRACE_CRENEAUX",
+    "ACVRAM_TRACE_ENTREES",
     "ACVRAM_TRACE_PTRS",
     "ACVRAM_TRACE_ROUTAGE",
     "ACVRAM_CHRONO_SYNC",
