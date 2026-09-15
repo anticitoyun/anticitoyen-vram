@@ -2018,19 +2018,43 @@ __device__ __forceinline__ void mma_mxf4nvf4(float d[4], const unsigned a[4], co
 // Activations bf16 [G, K] -> E2M1 [G, K/2] + échelles UE4M3 [G, K/16].
 // Un fil par bloc de 16 : amax/6 arrondi en E4M3, puis chaque valeur divisée
 // par l'échelle décodée et arrondie en E2M1 (satfinite : au-delà de 6 -> 6).
+//
+// Échelle globale 2^log2k (poste7-glm-pile-correctif-16-09 § 1.4, cause
+// confirmée par verdict-glm-saturation-16-09) : sans elle, un bloc dont
+// amax/6 < 2^-9 (plancher dénormal E4M3) était écrit entièrement à zéro —
+// 23-31 % des blocs de silu(g)·u à l'entrée de down_proj sur GLM. Le noyau
+// quantifie x·2^k (produit exact) et la GEMM compense par gscale·2^-k
+// (MoEBlock._gs_mma) : zéro lancement, arithmétique inchangée pour k = 0.
+// Contrainte : amax·2^k/6 ≤ 448 sinon satfinite écrase l'échelle ; k par site
+// (ACVRAM_QA_LOG2K_X pour x, ACVRAM_QA_LOG2K_ACT pour l'activation).
+//
+// Échelle AWQ par expert fusionnée (awq [E, K] bf16, e_sorted [G]) :
+// bf16(bf16(v) / s[e][c]) avant la quantification, la même arithmétique que
+// la ligne de moe_route_pack et que scaler.apply de la boucle — une passe
+// mémoire sur [G, K] de moins (22 µs/couche mesurés, poste4-awq-gate-up).
 __global__ void nvfp4_quant_act_kernel(const __nv_bfloat16 *__restrict__ x,
                                        unsigned char *__restrict__ xq,
                                        unsigned char *__restrict__ xsf,
-                                       long nblocs, int nblk) {
+                                       long nblocs, int nblk, int log2k,
+                                       const __nv_bfloat16 *__restrict__ awq,
+                                       const int *__restrict__ e_sorted,
+                                       long long *__restrict__ compteurs) {
     const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= nblocs) return;
     const long row = i / nblk;
     const int blk = (int)(i - row * nblk);
     const __nv_bfloat16 *src = x + row * (long)nblk * 16 + blk * 16;
+    const __nv_bfloat16 *sc = awq ? awq + (long)e_sorted[row] * nblk * 16 + blk * 16 : nullptr;
+    const float f = ldexpf(1.f, log2k);
     float v[16];
     float amax = 0.f;
     #pragma unroll
-    for (int j = 0; j < 16; ++j) { v[j] = __bfloat162float(src[j]); amax = fmaxf(amax, fabsf(v[j])); }
+    for (int j = 0; j < 16; ++j) {
+        float t = __bfloat162float(src[j]);
+        if (sc) t = __bfloat162float(__float2bfloat16(__fdiv_rn(t, __bfloat162float(sc[j]))));
+        v[j] = t * f;
+        amax = fmaxf(amax, fabsf(v[j]));
+    }
     unsigned char sbits = 0;
     float sdec = 0.f;
     if (amax > 0.f) {
@@ -2040,6 +2064,13 @@ __global__ void nvfp4_quant_act_kernel(const __nv_bfloat16 *__restrict__ x,
         const float s = fminf(__fdiv_rn(amax, 6.f), 448.f);
         sbits = (unsigned char)__nv_cvt_float_to_fp8(s, __NV_SATFINITE, __NV_E4M3);
         sdec = e4m3_to_float(sbits);
+        if (compteurs) {
+            // preuve (poste7, ACVRAM_QA_COMPTE=1) : [0] blocs non nuls, [1] mis à
+            // zéro (amax/6 sous le plancher E4M3), [2] saturés (amax/6 > 448)
+            atomicAdd((unsigned long long *)compteurs, 1ull);
+            if (sdec == 0.f) atomicAdd((unsigned long long *)compteurs + 1, 1ull);
+            if (__fdiv_rn(amax, 6.f) > 448.f) atomicAdd((unsigned long long *)compteurs + 2, 1ull);
+        }
     }
     unsigned long long packed = 0ull;
     if (sdec > 0.f) {
@@ -2390,12 +2421,35 @@ bool nvfp4_gemm_grouped_mma_disponible() {
     return cache == 1;
 }
 
-std::tuple<torch::Tensor, torch::Tensor> nvfp4_quant_act(torch::Tensor x) {
+std::tuple<torch::Tensor, torch::Tensor> nvfp4_quant_act(torch::Tensor x, int64_t log2k,
+                                                         c10::optional<torch::Tensor> awq,
+                                                         c10::optional<torch::Tensor> e_sorted,
+                                                         c10::optional<torch::Tensor> compteurs) {
     CHECK_CUDA(x); CHECK_CONTIG(x); ACVRAM_DEVICE_GUARD(x);
     TORCH_CHECK(x.scalar_type() == torch::kBFloat16, "quant_act : activations bf16");
     TORCH_CHECK(x.dim() == 2 && x.size(1) % 64 == 0, "quant_act : [G, K] avec K multiple de 64");
+    TORCH_CHECK(log2k >= 0 && log2k <= 24, "quant_act : log2k dans [0, 24]");
     const long G = x.size(0), K = x.size(1);
     const int nblk = (int)(K >> 4);
+    const __nv_bfloat16 *awq_p = nullptr;
+    const int *es_p = nullptr;
+    if (awq.has_value() && awq->defined()) {
+        TORCH_CHECK(e_sorted.has_value() && e_sorted->defined(), "quant_act : table AWQ sans e_sorted");
+        CHECK_CUDA(*awq); CHECK_CONTIG(*awq); CHECK_CUDA(*e_sorted); CHECK_CONTIG(*e_sorted);
+        TORCH_CHECK(awq->scalar_type() == torch::kBFloat16 && awq->dim() == 2 && awq->size(1) == K,
+                    "quant_act : table AWQ [E, K] bf16 de la largeur de x");
+        TORCH_CHECK(e_sorted->scalar_type() == torch::kInt && e_sorted->numel() == G,
+                    "quant_act : e_sorted int32 [G]");
+        awq_p = reinterpret_cast<const __nv_bfloat16 *>(awq->data_ptr());
+        es_p = e_sorted->data_ptr<int>();
+    }
+    long long *cpt_p = nullptr;
+    if (compteurs.has_value() && compteurs->defined()) {
+        CHECK_CUDA(*compteurs); CHECK_CONTIG(*compteurs);
+        TORCH_CHECK(compteurs->scalar_type() == torch::kLong && compteurs->numel() == 3,
+                    "quant_act : compteurs int64 [3] (blocs, zéro, saturés)");
+        cpt_p = reinterpret_cast<long long *>(compteurs->data_ptr<int64_t>());
+    }
     auto opt = torch::TensorOptions().dtype(torch::kUInt8).device(x.device());
     auto xq = torch::empty({G, K / 2}, opt);
     auto xsf = torch::empty({G, nblk}, opt);
@@ -2405,7 +2459,8 @@ std::tuple<torch::Tensor, torch::Tensor> nvfp4_quant_act(torch::Tensor x) {
         const int th = 256;
         nvfp4_quant_act_kernel<<<(unsigned)((nblocs + th - 1) / th), th, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16 *>(x.data_ptr()),
-            xq.data_ptr<unsigned char>(), xsf.data_ptr<unsigned char>(), nblocs, nblk);
+            xq.data_ptr<unsigned char>(), xsf.data_ptr<unsigned char>(), nblocs, nblk,
+            (int)log2k, awq_p, es_p, cpt_p);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
     return {xq, xsf};
@@ -4613,7 +4668,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("nvfp4_gemm_grouped_mma_disponible", &nvfp4_gemm_grouped_mma_disponible,
           "vrai si la carte courante est sm_120 et le noyau MMA FP4 compile");
     m.def("nvfp4_quant_act", &nvfp4_quant_act,
-          "activations bf16 [G, K] -> (E2M1 [G, K/2], echelles UE4M3 [G, K/16]) par bloc de 16");
+          "activations bf16 [G, K] -> (E2M1 [G, K/2], echelles UE4M3 [G, K/16]) par bloc de 16 ; "
+          "x*2^log2k (compense par gscale*2^-log2k dans la GEMM) ; awq [E, K] bf16 + e_sorted [G] : x/s[e] fusionne",
+          py::arg("x"), py::arg("log2k") = 0, py::arg("awq") = py::none(), py::arg("e_sorted") = py::none(),
+          py::arg("compteurs") = py::none());
     m.def("int4_gemv_grouped", &int4_gemv_grouped,
           "INT4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
     m.def("kv_write_int8", &kv_write_int8,

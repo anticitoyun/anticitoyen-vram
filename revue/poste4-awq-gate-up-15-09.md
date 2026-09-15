@@ -69,6 +69,26 @@ Régime NOMINAL sur les six bras (graphes=on, 0 exilé, chemin_moe=mma).
 - Journaux : `scratchpad/glm-gateup-16-09.log`, `scratchpad/glm-gateup-temoin3-16-09.log` ; JSON
   dans le répertoire de la campagne.
 
+## Table d'unités : scellé Coder 0,00 ± 0,03 ms — TENU (16/09, chantier 2)
+Coder-30B b=12, `scratchpad/campagne-awq-unite-scelle-16-09.sh`, ABAB × 6 prévu, verdict par la
+médiane des |Δ| par paire (réfuté > 0,05 ms). A = `ACVRAM_MOE_AWQ_TEMOIN=0` (aucune table),
+B = `=1` (tables de 1 construites au chargement puis sautées, `awq[nom] = None`).
+
+| paire | A (ms) | B (ms) | Δ B−A |
+|---|---|---|---|
+| 1 | 13,601 | 13,619 | +0,018 |
+| 2 | 13,603 | 13,602 | −0,001 |
+| 3 | 13,609 | 13,610 | +0,001 |
+| 4 | 13,618 | 13,618 | 0,000 |
+| 5 | 13,625 | 13,638 | +0,013 |
+
+Médiane **+0,001 ms**, moyenne +0,006, max +0,018 : dans 0,00 ± 0,03, **tenu**. La 6ᵉ paire est
+perdue par ma faute : j'ai édité `acvram_kernels.cu` dans l'arbre pendant que la campagne y
+lançait ses processus (`ACVRAM_ARBRE` = ce worktree) ; le bras A6 a reconstruit l'extension sur
+un noyau intermédiaire (`undefined symbol` sur `data_ptr<long long>`), repli sur les noyaux de
+référence, mesure invalide. Règle rappelée (`arbre-partage-edition-a-chaud`) : pas une ligne dans
+l'arbre qu'une campagne importe. Journal : `scratchpad/awq-unite-scelle-16-09.log`.
+
 ## Reste
 Part converti (+2,06 ms) à expliquer avant de retrancher le scellé ; part échelles (+1,04 ms) à
 profiler par lancement (ncu, b=12) ; correctif d'équivalence pile/boucle avec table réelle

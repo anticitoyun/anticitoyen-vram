@@ -31,13 +31,20 @@ def _ext():
     return ext
 
 
-def quant_act_ref(x: torch.Tensor):
+def quant_act_ref(x: torch.Tensor, log2k: int = 0, awq=None, e_sorted=None):
     """Référence : amax/6 -> E4M3 au plus proche (satfinite 448), puis chaque
     valeur / échelle décodée -> E2M1 au plus proche, égalités vers le code
     pair (cvt.rn.satfinite.e2m1x2). Le noyau doit diviser en IEEE (__fdiv_rn) :
-    sous --use_fast_math la division approchée basculait 5 égalités sur 5 376."""
+    sous --use_fast_math la division approchée basculait 5 égalités sur 5 376.
+
+    ``log2k`` : échelle globale 2^k posée sur x avant l'E4M3 (produit exact),
+    à compenser par gscale·2^-k dans la GEMM ; ``awq`` [E, K] bf16 et
+    ``e_sorted`` [G] : x/s[e] en bf16 (bf16(bf16(v)/bf16(s))) avant tout."""
     G, K = x.shape
-    xb = x.float().view(G, K // 16, 16)
+    xf = x.float()
+    if awq is not None:
+        xf = (xf / awq[e_sorted.long()].float()).to(torch.bfloat16).float()
+    xb = (xf * float(2 ** log2k)).view(G, K // 16, 16)
     amax = xb.abs().amax(-1)
     s = (amax / 6.0).clamp(max=448.0)
     sbits = s.to(torch.float8_e4m3fn)
