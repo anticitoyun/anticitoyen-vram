@@ -131,3 +131,42 @@ def test_capturable_dans_un_graphe():
     lens_t.fill_(5)
     g.replay(); torch.cuda.synchronize()
     assert torch.equal(y, ext.mla_decode_1p(q, ptrs, None, lens_t, 512, R, scale))
+
+
+@CUDA
+def test_cache_fp8_meme_arithmetique_sur_le_dequantifie():
+    """Cache latent fp8 (commit 3) : mla_decode_1p en fp8 sur les codes ==
+    mla_decode_1p bf16 sur le cache DÉQUANTIFIÉ (mêmes nombres, même
+    arithmétique fp32 ensuite) ; mla_ecrit_latent fp8 == _fp8_quant_rows au
+    bit ; et l'écart fp8 / bf16 d'origine est mesuré (information, pas
+    scellé ici : c'est la PPL 3 tranches ± 0,004 qui tranche)."""
+    ext = _ext(); dev = torch.device("cuda:0")
+    from acvram.engine.mla import _fp8_quant_rows, _fp8_dequant_rows, FP8_PAD
+    B, H, L = 4, 20, 512
+    lens = [0, 100, 300, 511]
+    q, caches, ptrs, lens_t = _cas(dev, B, H, L, lens, graine=11)
+    scale = 1.0 / (W ** 0.5)
+    c8 = [_fp8_quant_rows(c).contiguous() for c in caches]
+    assert c8[0].shape == (L, W + FP8_PAD)
+    ptrs8 = torch.tensor([c.data_ptr() for c in c8], dtype=torch.int64, device=dev)
+    y8 = ext.mla_decode_1p(q, ptrs8, None, lens_t, L, R, scale, True)
+    deq = [_fp8_dequant_rows(c, W).contiguous() for c in c8]
+    ptrs_d = torch.tensor([c.data_ptr() for c in deq], dtype=torch.int64, device=dev)
+    y_d = ext.mla_decode_1p(q, ptrs_d, None, lens_t, L, R, scale, False)
+    torch.cuda.synchronize()
+    rel = ((y8.double() - y_d.double()).norm(dim=-1) / y_d.double().norm(dim=-1).clamp(min=1e-30)).max().item()
+    assert rel <= 1e-5, f"fp8 sur codes vs bf16 sur déquantifié : {rel:.2e}"
+    y_bf = ext.mla_decode_1p(q, ptrs, None, lens_t, L, R, scale, False)
+    cos = torch.nn.functional.cosine_similarity(y8.double().reshape(B * H, R), y_bf.double().reshape(B * H, R), dim=-1)
+    print(f"\nfp8 vs bf16 d'origine : cos min {cos.min().item():.6f}")
+    assert cos.min().item() > 0.99
+    # écriture d'une ligne en fp8 par le noyau == référence torch
+    k_new = torch.randn(B, W, device=dev).to(torch.bfloat16).contiguous()
+    lens_w = [torch.tensor(n, dtype=torch.long, device=dev) for n in lens]
+    lptrs = torch.tensor([t.data_ptr() for t in lens_w], dtype=torch.int64, device=dev)
+    ext.mla_ecrit_latent(k_new, ptrs8, lptrs, True)
+    torch.cuda.synchronize()
+    ref = _fp8_quant_rows(k_new)
+    for b, n in enumerate(lens):
+        assert torch.equal(c8[b][n], ref[b]), f"créneau {b} : ligne fp8 ≠ référence"
+        assert int(lens_w[b]) == n + 1

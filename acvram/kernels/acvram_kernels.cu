@@ -4254,33 +4254,59 @@ torch::Tensor mla_decode_batch(torch::Tensor q_eff, torch::Tensor cache_ptrs,
 // longueurs vivent chacun dans son tenseur (adresses stables sur la vie du
 // serveur) : tables d'adresses [B] int64, comme mla_decode_batch. L'attention
 // du même pas lit la copie ``lens`` prise AVANT ce lancement.
+// Cache latent fp8 (poste7-avis-exterieur-16-09 § 6, commit 3 du chantier MLA) :
+// une ligne = W codes E4M3 + 16 octets dont l'échelle fp32 s = amax/448
+// (foulée W+16 octets, alignée 16). Quantification : code = E4M3(v / s) en RN
+// satfinite, division correctement arrondie — la référence torch divise par
+// un TENSEUR (tensor/scalaire multiplie par l'inverse : 1 ulp d'écart).
+constexpr int MLA_FP8_PAD = 16;
+__device__ __forceinline__ int mla_fp8_foulee(int W) { return W + MLA_FP8_PAD; }
+
 __global__ void mla_ecrit_latent_kernel(const __nv_bfloat16 *__restrict__ k_new,   // [B, W]
                                         const int64_t *__restrict__ cache_ptrs,    // [B]
                                         const int64_t *__restrict__ len_ptrs,      // [B]
-                                        int W) {
+                                        int W, int fp8) {
     const int b = blockIdx.x;
     long *lp = reinterpret_cast<long *>(len_ptrs[b]);
     const long len = *lp;
-    const uint4 *src = reinterpret_cast<const uint4 *>(k_new + (size_t)b * W);
-    uint4 *dst = reinterpret_cast<uint4 *>(reinterpret_cast<__nv_bfloat16 *>(cache_ptrs[b]) + len * W);
-    for (int i = threadIdx.x; i < W / 8; i += blockDim.x) dst[i] = src[i];
+    if (!fp8) {
+        const uint4 *src = reinterpret_cast<const uint4 *>(k_new + (size_t)b * W);
+        uint4 *dst = reinterpret_cast<uint4 *>(reinterpret_cast<__nv_bfloat16 *>(cache_ptrs[b]) + len * W);
+        for (int i = threadIdx.x; i < W / 8; i += blockDim.x) dst[i] = src[i];
+    } else {
+        __shared__ float red[32];
+        const __nv_bfloat16 *src = k_new + (size_t)b * W;
+        float amax = 0.f;
+        for (int i = threadIdx.x; i < W; i += blockDim.x) amax = fmaxf(amax, fabsf(__bfloat162float(src[i])));
+        for (int o = 16; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+        if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = amax;
+        __syncthreads();
+        amax = 0.f;
+        for (int k = 0; k < (int)(blockDim.x >> 5); ++k) amax = fmaxf(amax, red[k]);
+        const float sc = amax > 0.f ? __fdiv_rn(amax, 448.f) : 1.f;
+        unsigned char *dst = reinterpret_cast<unsigned char *>(cache_ptrs[b]) + len * (long)mla_fp8_foulee(W);
+        for (int i = threadIdx.x; i < W; i += blockDim.x)
+            dst[i] = (unsigned char)__nv_cvt_float_to_fp8(__fdiv_rn(__bfloat162float(src[i]), sc),
+                                                          __NV_SATFINITE, __NV_E4M3);
+        if (threadIdx.x == 0) *reinterpret_cast<float *>(dst + W) = sc;
+    }
     __syncthreads();
     if (threadIdx.x == 0) *lp = len + 1;
 }
 
-void mla_ecrit_latent(torch::Tensor k_new, torch::Tensor cache_ptrs, torch::Tensor len_ptrs) {
+void mla_ecrit_latent(torch::Tensor k_new, torch::Tensor cache_ptrs, torch::Tensor len_ptrs, bool fp8) {
     CHECK_CUDA(k_new); ACVRAM_DEVICE_GUARD(k_new); CHECK_CONTIG(k_new);
     CHECK_CONTIG(cache_ptrs); CHECK_CONTIG(len_ptrs);
-    TORCH_CHECK(k_new.dim() == 2 && k_new.scalar_type() == torch::kBFloat16 && k_new.size(1) % 8 == 0,
-                "ecrit_latent : k_new [B, W] bf16, W multiple de 8");
+    TORCH_CHECK(k_new.dim() == 2 && k_new.scalar_type() == torch::kBFloat16 && k_new.size(1) % (fp8 ? 16 : 8) == 0,
+                "ecrit_latent : k_new [B, W] bf16, W multiple de 8 (16 en fp8)");
     const int B = k_new.size(0), W = k_new.size(1);
     TORCH_CHECK(cache_ptrs.scalar_type() == torch::kInt64 && cache_ptrs.is_cuda() && cache_ptrs.numel() == B
                 && len_ptrs.scalar_type() == torch::kInt64 && len_ptrs.is_cuda() && len_ptrs.numel() == B,
                 "ecrit_latent : cache_ptrs et len_ptrs [B] int64 sur la carte");
     if (B == 0) return;
-    mla_ecrit_latent_kernel<<<B, 64, 0, at::cuda::getCurrentCUDAStream()>>>(
+    mla_ecrit_latent_kernel<<<B, fp8 ? 128 : 64, 0, at::cuda::getCurrentCUDAStream()>>>(
         reinterpret_cast<const __nv_bfloat16 *>(k_new.data_ptr()),
-        cache_ptrs.data_ptr<int64_t>(), len_ptrs.data_ptr<int64_t>(), W);
+        cache_ptrs.data_ptr<int64_t>(), len_ptrs.data_ptr<int64_t>(), W, fp8 ? 1 : 0);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -4309,7 +4335,7 @@ void mla_ecrit_latent(torch::Tensor k_new, torch::Tensor cache_ptrs, torch::Tens
 // ============================================================================
 constexpr int MLA1P_FILS = 256;
 
-template <int HMAX, int TL, int RW>
+template <int HMAX, int TL, int RW, bool FP8>
 __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
     const float *__restrict__ q,              // [B, H, W] fp32
     const int64_t *__restrict__ cache_ptrs,   // [B] (ou nullptr : cache0)
@@ -4317,18 +4343,28 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
     const long *__restrict__ lens,            // [B]
     float *__restrict__ ws,                   // [B, S, H, R+2]
     int H, int L, int W, int R, int S, int rows_par_cta, float scale) {
+    // FP8 : lignes de W codes E4M3 + échelle fp32 (foulée W+16 o) ; la tuile
+    // garde les codes, une table de 256 flottants en shared les décode ; le
+    // score d'une ligne est multiplié par son échelle, et p_r l'absorbe pour
+    // o_lat — la moitié des octets lus, même arithmétique fp32 ensuite.
     static_assert(HMAX <= 32, "HMAX <= 32 : une lane par tete pour l'ecriture des scores");
     const int b = blockIdx.x, s = blockIdx.y, tid = threadIdx.x;
     const int warp = tid >> 5, lane = tid & 31;
-    const int WP = W + 8;                                        // foulée bf16 d'une ligne de tuile
+    const int WP = W + 8;                                        // foulée (éléments) d'une ligne de tuile
     extern __shared__ __align__(16) unsigned char mla_smem[];
     float *q_s = reinterpret_cast<float *>(mla_smem);                        // [H][W]
-    __nv_bfloat16 *tile = reinterpret_cast<__nv_bfloat16 *>(q_s + (size_t)H * W);   // [TL][WP]
+    __nv_bfloat16 *tile = reinterpret_cast<__nv_bfloat16 *>(q_s + (size_t)H * W);   // [TL][WP] bf16 ou codes
+    unsigned char *tile8 = reinterpret_cast<unsigned char *>(tile);          // FP8 : [TL][WP] codes
     float *S_s = reinterpret_cast<float *>(tile + (size_t)TL * WP);         // [HMAX][TL]
     float *P_s = S_s + HMAX * TL;                                            // [HMAX][TL]
     float *m_s = P_s + HMAX * TL, *l_s = m_s + HMAX, *a_s = l_s + HMAX;
+    float *sc_s = a_s + HMAX;                                                // FP8 : [TL] échelles de ligne
+    float *lut = sc_s + TL;                                                  // FP8 : [256] E4M3 -> float
     const __nv_bfloat16 *cache = cache_ptrs
         ? reinterpret_cast<const __nv_bfloat16 *>(cache_ptrs[b]) : cache0;
+    const unsigned char *cache8 = reinterpret_cast<const unsigned char *>(cache);
+    const long foulee8 = FP8 ? (long)mla_fp8_foulee(W) : 0;
+    if (FP8) for (int i = tid; i < 256; i += MLA1P_FILS) lut[i] = e4m3_to_float((unsigned char)i);
     const int valide = min((int)lens[b] + 1, L);
     const int r0 = s * rows_par_cta, r1 = min(r0 + rows_par_cta, valide);
     float *out = ws + ((size_t)(b * S + s) * H) * (R + 2);
@@ -4350,7 +4386,7 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
     #pragma unroll
     for (int h = 0; h < HMAX; ++h) { o[h][0] = 0.f; o[h][1] = 0.f; }
     const int c0 = 2 * tid;                                      // colonnes de o_lat de ce fil
-    const int chunks_par_ligne = W / 8;                          // uint4 = 8 bf16
+    const int chunks_par_ligne = FP8 ? W / 16 : W / 8;           // uint4 = 8 bf16 ou 16 codes
 
     for (int t0 = r0; t0 < r1; t0 += TL) {
         const int n = min(TL, r1 - t0);
@@ -4358,9 +4394,15 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
         // --- tuile [n][W] : lecture vectorisée 16 o ---
         for (int i = tid; i < n * chunks_par_ligne; i += MLA1P_FILS) {
             const int r = i / chunks_par_ligne, c = i - r * chunks_par_ligne;
-            const uint4 v = *reinterpret_cast<const uint4 *>(cache + (size_t)(t0 + r) * W + c * 8);
-            *reinterpret_cast<uint4 *>(tile + (size_t)r * WP + c * 8) = v;
+            if (FP8) {
+                const uint4 v = *reinterpret_cast<const uint4 *>(cache8 + (t0 + r) * foulee8 + c * 16);
+                *reinterpret_cast<uint4 *>(tile8 + (size_t)r * WP + c * 16) = v;
+            } else {
+                const uint4 v = *reinterpret_cast<const uint4 *>(cache + (size_t)(t0 + r) * W + c * 8);
+                *reinterpret_cast<uint4 *>(tile + (size_t)r * WP + c * 8) = v;
+            }
         }
+        if (FP8 && tid < n) sc_s[tid] = *reinterpret_cast<const float *>(cache8 + (t0 + tid) * foulee8 + W);
         __syncthreads();
         // --- scores : le warp w prend les lignes w*RW .. w*RW+RW-1 (+ 8*RW…) ---
         for (int rb = warp * RW; rb < n; rb += 8 * RW) {
@@ -4374,9 +4416,14 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
                 #pragma unroll
                 for (int i = 0; i < RW; ++i) {
                     const int r = rb + i;
-                    k2[i] = r < n ? __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(
-                                        tile + (size_t)r * WP + 2 * j))
-                                  : make_float2(0.f, 0.f);
+                    if (r >= n) { k2[i] = make_float2(0.f, 0.f); continue; }
+                    if (FP8) {
+                        const unsigned char *pc = tile8 + (size_t)r * WP + 2 * j;
+                        k2[i] = make_float2(lut[pc[0]], lut[pc[1]]);
+                    } else {
+                        k2[i] = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(
+                                    tile + (size_t)r * WP + 2 * j));
+                    }
                 }
                 #pragma unroll
                 for (int h = 0; h < HMAX; ++h) {
@@ -4394,7 +4441,8 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
                     float v = part[h][i];
                     #pragma unroll
                     for (int off = 16; off > 0; off >>= 1) v += __shfl_xor_sync(0xffffffffu, v, off);
-                    if (lane == h && h < H && rb + i < n) S_s[h * TL + rb + i] = v * scale;
+                    if (lane == h && h < H && rb + i < n)
+                        S_s[h * TL + rb + i] = FP8 ? v * sc_s[rb + i] * scale : v * scale;
                 }
             }
         }
@@ -4408,7 +4456,11 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
             const float a = m_old == -INFINITY ? 0.f : __expf(m_old - m_new);
             float lt = 0.f;
             float *Ph = P_s + tid * TL;
-            for (int r = 0; r < n; ++r) { const float p = __expf(Sh[r] - m_new); Ph[r] = p; lt += p; }
+            for (int r = 0; r < n; ++r) {
+                const float p = __expf(Sh[r] - m_new);
+                Ph[r] = FP8 ? p * sc_s[r] : p;                   // l'échelle de ligne passe dans p pour o_lat
+                lt += p;
+            }
             l_s[tid] = l_s[tid] * a + lt;
             m_s[tid] = m_new;
             a_s[tid] = a;
@@ -4421,8 +4473,9 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
                 if (h < H) { const float a = a_s[h]; o[h][0] *= a; o[h][1] *= a; }
             }
             for (int r = 0; r < n; ++r) {
-                const float2 v2 = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(
-                    tile + (size_t)r * WP + c0));
+                float2 v2;
+                if (FP8) { const unsigned char *pc = tile8 + (size_t)r * WP + c0; v2 = make_float2(lut[pc[0]], lut[pc[1]]); }
+                else v2 = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(tile + (size_t)r * WP + c0));
                 #pragma unroll
                 for (int h = 0; h < HMAX; ++h) {
                     if (h < H) {
@@ -4476,12 +4529,13 @@ static int mla_1p_tranches(int L, int TL) {
 
 torch::Tensor mla_decode_1p(torch::Tensor q_eff, c10::optional<torch::Tensor> cache_ptrs,
                             c10::optional<torch::Tensor> cache, torch::Tensor lens,
-                            int64_t L, int64_t rank, double scale) {
+                            int64_t L, int64_t rank, double scale, bool fp8) {
     CHECK_CUDA(q_eff); ACVRAM_DEVICE_GUARD(q_eff); CHECK_CONTIG(q_eff); CHECK_CONTIG(lens);
     TORCH_CHECK(q_eff.dim() == 3 && q_eff.scalar_type() == torch::kFloat, "MLA 1p : q_eff [B, H, W] fp32");
     const int B = q_eff.size(0), H = q_eff.size(1), W = q_eff.size(2), R = (int)rank;
     TORCH_CHECK(W % 8 == 0 && R % 2 == 0 && R <= W && R <= 2 * MLA1P_FILS,
                 "MLA 1p : W multiple de 8, R pair <= W et <= 512");
+    TORCH_CHECK(!fp8 || W % 16 == 0, "MLA 1p fp8 : W multiple de 16 (foulee W+16 alignee)");
     TORCH_CHECK(H >= 1 && H <= 32, "MLA 1p : 1 <= H <= 32 tetes");
     TORCH_CHECK(lens.scalar_type() == torch::kLong && lens.numel() == B, "MLA 1p : lens [B] int64");
     const int64_t *ptrs = nullptr;
@@ -4494,8 +4548,13 @@ torch::Tensor mla_decode_1p(torch::Tensor q_eff, c10::optional<torch::Tensor> ca
     } else {
         TORCH_CHECK(B == 1 && cache.has_value() && cache->defined(), "MLA 1p : cache [L, W] bf16 si B = 1 sans table");
         CHECK_CONTIG(*cache);
-        TORCH_CHECK(cache->scalar_type() == torch::kBFloat16 && cache->size(1) == W && cache->size(0) >= L,
-                    "MLA 1p : cache [>= L, W] bf16");
+        if (fp8) {
+            TORCH_CHECK(cache->scalar_type() == torch::kUInt8 && cache->size(1) == W + MLA_FP8_PAD && cache->size(0) >= L,
+                        "MLA 1p fp8 : cache [>= L, W+16] uint8");
+        } else {
+            TORCH_CHECK(cache->scalar_type() == torch::kBFloat16 && cache->size(1) == W && cache->size(0) >= L,
+                        "MLA 1p : cache [>= L, W] bf16");
+        }
         cache0 = reinterpret_cast<const __nv_bfloat16 *>(cache->data_ptr());
     }
     const int TL = H <= 20 ? 32 : 16;
@@ -4506,17 +4565,19 @@ torch::Tensor mla_decode_1p(torch::Tensor q_eff, c10::optional<torch::Tensor> ca
     auto stream = at::cuda::getCurrentCUDAStream();
     const int HMAX = H <= 20 ? 20 : 32;
     const size_t shm = (size_t)H * W * sizeof(float) + (size_t)TL * (W + 8) * sizeof(__nv_bfloat16)
-                       + (size_t)2 * HMAX * TL * sizeof(float) + 3 * HMAX * sizeof(float);
+                       + (size_t)2 * HMAX * TL * sizeof(float) + 3 * HMAX * sizeof(float)
+                       + (size_t)(TL + 256) * sizeof(float);
     dim3 grid(B, S);
-    #define MLA1P_LANCE(HM, T, RWW) do { \
+    #define MLA1P_LANCE(HM, T, RWW, F8) do { \
         static size_t autorise = 0; \
-        if (shm > autorise) { cudaFuncSetAttribute(mla_1p_kernel<HM, T, RWW>, \
+        if (shm > autorise) { cudaFuncSetAttribute(mla_1p_kernel<HM, T, RWW, F8>, \
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm); autorise = shm; } \
-        mla_1p_kernel<HM, T, RWW><<<grid, MLA1P_FILS, shm, stream>>>( \
+        mla_1p_kernel<HM, T, RWW, F8><<<grid, MLA1P_FILS, shm, stream>>>( \
             q_eff.data_ptr<float>(), ptrs, cache0, lens.data_ptr<long>(), ws.data_ptr<float>(), \
             H, (int)L, W, R, S, rows, (float)scale); } while (0)
     TORCH_CHECK(shm <= 99 * 1024, "MLA 1p : memoire partagee > 99 Ko (H, W trop grands)");
-    if (HMAX == 20) MLA1P_LANCE(20, 32, 4); else MLA1P_LANCE(32, 16, 2);
+    if (HMAX == 20) { if (fp8) MLA1P_LANCE(20, 32, 4, true); else MLA1P_LANCE(20, 32, 4, false); }
+    else            { if (fp8) MLA1P_LANCE(32, 16, 2, true); else MLA1P_LANCE(32, 16, 2, false); }
     #undef MLA1P_LANCE
     dim3 g2(B, H);
     mla_1p_combine_kernel<<<g2, 128, 0, stream>>>(ws.data_ptr<float>(), o.data_ptr<float>(), H, R, S);
@@ -5176,10 +5237,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("mla_prep_batch", &mla_prep_batch,
           "MLA decodage : q [B,nh,nope+rope] + kvp [B,rank+rope] -> (q_eff [B,nh,W] fp32, k_new [B,W] bf16) : "
           "einsum k_b, RoPE, norme kv_a et cat en un lancement (cos32/sin32 = tables fp32 indexees par position, ou None)");
-    m.def("mla_ecrit_latent", &mla_ecrit_latent,
+    m.def("mla_ecrit_latent", &mla_ecrit_latent, py::arg("k_new"), py::arg("cache_ptrs"), py::arg("len_ptrs"),
+          py::arg("fp8") = false,
           "MLA decodage : k_new [B, W] -> cache_b[len_b], puis len_b += 1, un lancement pour les B creneaux (tables d'adresses [B])");
     m.def("mla_decode_1p", &mla_decode_1p, py::arg("q_eff"), py::arg("cache_ptrs") = py::none(),
           py::arg("cache") = py::none(), py::arg("lens"), py::arg("L"), py::arg("rank"), py::arg("scale"),
+          py::arg("fp8") = false,
           "MLA absorbee a UNE PASSE (poste7-duel-verdict-16-09) : le cache latent lu une fois pour les H tetes, "
           "softmax en ligne, tranches de L recombinees -> o_lat [B, H, rank] fp32 ; cache_ptrs [B] int64 ou cache [L, W] (B = 1)");
     m.def("mla_decode_batch", &mla_decode_batch,

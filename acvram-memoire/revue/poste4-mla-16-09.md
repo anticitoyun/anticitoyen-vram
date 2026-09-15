@@ -51,4 +51,15 @@ le cos ≥ 0,9999 —, softmax en ligne, o_lat en registres, tranches de L recom
 `ACVRAM_MLA_UNE_PASSE=0` rejoue les deux noyaux. Scellé : mla_* 6,4 → ≤ 3 ms. Fusionné sur
 poste4 après le verdict du commit 1.
 
-## Commit 3 — latent fp8 par ligne (`poste7-avis-exterieur` § 6), après le 2.
+## Commit 3 — latent fp8 par ligne (`poste7-avis-exterieur` § 6)
+Écrit, **défaut OFF** (`ACVRAM_MLA_LATENT_FP8=1` pour l'essai) : le cache des créneaux devient
+`[max_len, W+16] uint8` (W codes E4M3 + échelle fp32 s = amax/448 par ligne) ; `new_static`,
+`static_load` (quantifie), `static_export` (déquantifie), `_prep_decode` (torch) et
+`mla_ecrit_latent(…, fp8)` (noyau, bit-identique à `_fp8_quant_rows`) écrivent ce format ;
+`mla_decode_1p(…, fp8)` le lit : codes en shared, table E4M3→float, échelle de ligne appliquée
+au score et absorbée dans p_r — moitié des octets lus, même arithmétique fp32 ensuite (test :
+fp8 sur les codes == bf16 sur le déquantifié à 1e-5). Les deux noyaux d'avant restent bf16
+(fp8 force le chemin 1p). Attendu (poste7) : ≤ 0,5 ms de gain sur mla_* ; **réfuté si PPL 3
+tranches sort de ± 0,004** → bf16 gardé. Coût VRAM : −50 % sur le latent des créneaux.
+Prédiction : mla_* −0,2 à −0,5 ms ; PPL : E4M3 par ligne = 3 bits de mantisse sur un latent
+normé, je n'exclus pas un dépassement (vLLM KV fp8 : +5 points) — c'est la mesure qui dit.
