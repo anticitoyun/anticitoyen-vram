@@ -35,11 +35,11 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, os.environ.get("ACVRAM_ARBRE", str(Path(__file__).resolve().parent.parent)))
 
 os.environ.setdefault("ACVRAM_MOE_DECODE_MMA", "1")
 
-MODEL = "/mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4"
+MODEL = os.environ.get("PPL_MODEL", "/mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4")
 CORPUS = "/mnt/4TO_SATACMR_2022/Modeles/corpus/wiki-gptq.txt"
 N_SEQ = 12
 CHUNK = 2048                      # 12 x 2048 = 24 576 jetons DE DECODAGE
@@ -169,7 +169,7 @@ def main() -> int:
         "acvram_moe_decode_mma": os.environ["ACVRAM_MOE_DECODE_MMA"],
         "acvram_narrow_gemm": os.environ["ACVRAM_NARROW_GEMM"],
         "eager": eager, "kv_max_tokens": plan.kv_max_tokens,
-        "decalage": decalage,
+        "decalage": decalage, "modele": MODEL, "ACVRAM_MLA_BATCH": os.environ.get("ACVRAM_MLA_BATCH"),
         "acvram": os.path.dirname(os.path.dirname(os.path.abspath(sys.modules["acvram"].__file__))),
         "ppl": ppl, "n_jetons_notes": n_total,
         "pas_t_le_32": f"{pas_petits}/{pas_total}", "n_pas": n_pas,
