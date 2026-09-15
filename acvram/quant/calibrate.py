@@ -38,6 +38,7 @@ from typing import Any, Callable, Optional
 import torch
 
 from . import formats
+from .fakequant_activation import fake_quantize_nvfp4_activation
 
 __all__ = ["ChannelScaler", "search_channel_scales",
            "search_channel_scales_commun", "alpha_commun_gate_up",
@@ -230,6 +231,7 @@ def search_channel_scales(
     n_grid: int = 20,
     calib_x: Optional[torch.Tensor] = None,
     journal: Optional[dict] = None,
+    quantize_activation_nvfp4: bool = False,
 ) -> tuple[ChannelScaler, float]:
     """Recherche AWQ sur grille de l'échelle par canal.
 
@@ -237,6 +239,17 @@ def search_channel_scales(
     Lorsque ``calib_x`` est fourni, l'objectif est la véritable erreur en sortie
     de couche sur de vraies activations ; sinon l'activation est approchée par sa
     magnitude moyenne par canal, ce que fait le mode économique d'AWQ.
+
+    ``quantize_activation_nvfp4`` (poste7, `poste7-glm-mma0-verdict-16-09.md` § 2,
+    16/09) : par défaut la métrique suppose ``x / s`` en pleine précision
+    (W4A16) alors que le chemin réel des experts en pile groupée quantifie
+    aussi l'activation en NVFP4 après division par l'échelle
+    (`nvfp4_quant_act`, `model.py:1022`) — une métrique W4A16 pour un chemin
+    W4A4 choisit un alpha qui élargit l'étendue intra-bloc de l'activation
+    sans que la recherche le voie. Passer ce drapeau applique
+    `fake_quantize_nvfp4_activation` à ``x / s`` avant le produit matriciel
+    de la grille, pour que l'alpha retenu minimise l'erreur du chemin
+    réellement emprunté.
     """
     w = weight.detach().to(torch.float32)
     device = w.device
@@ -275,7 +288,10 @@ def search_channel_scales(
         s = s / s.mean().clamp(min=1e-12)            # garde l'échelle centrée
         s = s.clamp(min=1e-4, max=1e4)
         wq = _quant_dequant(w * s.unsqueeze(0), fmt, group_size)
-        y = (x / s) @ wq.t()
+        xa = x / s
+        if quantize_activation_nvfp4:
+            xa = fake_quantize_nvfp4_activation(xa)
+        y = xa @ wq.t()
         err = ((y - y_ref).norm() / ref_norm).item()
         grille.append(err)
         if err < best_err:
@@ -463,6 +479,7 @@ def quantize_with_calibration(
     table=None,
     mesurer_kld: bool = False,
     forced_scale: Optional[torch.Tensor] = None,
+    quantize_activation_nvfp4: bool = False,
 ) -> tuple[Any, ChannelScaler, dict]:
     """Chaîne complète par couche : tourner, mettre à l'échelle, quantifier.
 
@@ -493,8 +510,9 @@ def quantize_with_calibration(
         # sautee, pas rejouee.
         scaler = ChannelScaler(forced_scale.to(w.device, torch.float32), had_block)
     elif use_awq:
-        found, _ = search_channel_scales(w, stats, fmt, group_size, n_grid,
-                                         journal=journal)
+        found, _ = search_channel_scales(
+            w, stats, fmt, group_size, n_grid, journal=journal,
+            quantize_activation_nvfp4=quantize_activation_nvfp4)
         scaler = ChannelScaler(found.scale, had_block)
 
     w_eff = w * scaler.scale.to(torch.float32).unsqueeze(0) \
