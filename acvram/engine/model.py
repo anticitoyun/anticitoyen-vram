@@ -931,31 +931,15 @@ class MoEBlock(nn.Module):
                           (bs.data_ptr() + ar * bs.stride(0)).to(qw.device))
         return cache[cle]
 
-    _gs_mma_cache: dict = {}         # (id(gs), log2k) -> gs * 2^-log2k, partagé par toutes les couches
-
-    @staticmethod
-    def _gs_mma(pile, log2k):
-        """Échelles globales par expert compensées de l'échelle 2^log2k que
-        nvfp4_quant_act a posée sur les activations (poste7-glm-pile-correctif
-        § 1.4 (A)) : produit exact en fp32, calculé une fois par pile et par
-        site, aucun lancement dans le pas."""
-        gs = pile[3]
-        if log2k == 0:
-            return gs
-        cle = (id(gs), log2k)
-        out = MoEBlock._gs_mma_cache.get(cle)
-        if out is None:
-            out = (gs * (2.0 ** -log2k)).contiguous()
-            MoEBlock._gs_mma_cache[cle] = out
-        return out
-
-    def _gemm_mma(self, pile, xq, xsf, tiles, brut=False, bt=None, log2k=0):
-        _, qw, _, _, k, m = pile
-        gs = self._gs_mma(pile, log2k)
+    def _gemm_mma(self, pile, xq, xsf, tiles, brut=False, bt=None, grow=None):
+        """``grow`` [G] fp32 : l'échelle globale par ligne d'activation rendue
+        par nvfp4_quant_act (poste7-glm-pile-correctif § 7), multipliée par
+        gscales[e] dans l'épilogue — sans elle les codes E2M1 sont faux."""
+        _, qw, _, gs, k, m = pile
         tq, tb = self._tables_adresses(pile)
         y = kernels.get_extension().nvfp4_gemm_grouped_mma(
             tq, tb, gs, xq, xsf, tiles[0], tiles[1], tiles[2],
-            qw.shape[1], k, bt or _MOE_MMA_BT, _MOE_MMA_ETAGES, _MOE_MMA_KS)
+            qw.shape[1], k, bt or _MOE_MMA_BT, _MOE_MMA_ETAGES, _MOE_MMA_KS, grow)
         return y if brut else y[:, :m]
 
     def _forward_prefill_grouped(self, x, topw, topi) -> Optional[torch.Tensor]:
@@ -1044,15 +1028,16 @@ class MoEBlock(nn.Module):
             if xs.shape[1] != pg[4]:                   # entrée rembourrée
                 xs = F.pad(xs, (0, pg[4] - xs.shape[1])).contiguous()
             es32 = e_sorted.to(torch.int32).contiguous() if (awq_g is not None or awq_u is not None or awq_d is not None) else None
-            # x·2^k et x/s[e] dans le noyau ; gscales compensées dans _gemm_mma
+            # x/s[e] et l'échelle globale par ligne dans le noyau ; la GEMM
+            # multiplie grow[r] × gscales[e] dans son épilogue
             cpt = _qa_compteurs(xs.device)
-            xq, xsf = ext.nvfp4_quant_act(xs, _QA_LOG2K_X, awq_g, es32, cpt)
-            xq2, xsf2 = (xq, xsf) if awq_u is awq_g else ext.nvfp4_quant_act(xs, _QA_LOG2K_X, awq_u, es32, cpt)
-            g = self._gemm_mma(pg, xq, xsf, tiles, brut=True, log2k=_QA_LOG2K_X)
-            u = self._gemm_mma(pu, xq2, xsf2, tiles, brut=True, log2k=_QA_LOG2K_X)
+            xq, xsf, gr = ext.nvfp4_quant_act(xs, awq_g, es32, cpt)
+            xq2, xsf2, gr2 = (xq, xsf, gr) if awq_u is awq_g else ext.nvfp4_quant_act(xs, awq_u, es32, cpt)
+            g = self._gemm_mma(pg, xq, xsf, tiles, brut=True, grow=gr)
+            u = self._gemm_mma(pu, xq2, xsf2, tiles, brut=True, grow=gr2)
             act = _activation(g, u, pg[5], pd[4], awq_d=None)
-            aq, asf = ext.nvfp4_quant_act(act, _QA_LOG2K_ACT, awq_d, es32, cpt)
-            d = self._gemm_mma(pd, aq, asf, tiles, brut=True, log2k=_QA_LOG2K_ACT)
+            aq, asf, gra = ext.nvfp4_quant_act(act, awq_d, es32, cpt)
+            d = self._gemm_mma(pd, aq, asf, tiles, brut=True, grow=gra)
         elif direct:
             # les poids restent en 4 bits : plus de pile bf16 intermédiaire
             # (trois passes de plusieurs Gio par couche en moins)
@@ -1154,9 +1139,9 @@ class MoEBlock(nn.Module):
         awq_d = awq.get("down_proj")
         es32 = e_sorted if (awq_g is not None or awq_u is not None or awq_d is not None) else None
         cpt = _qa_compteurs(xs.device)
-        xq, xsf = ext.nvfp4_quant_act(xs, _QA_LOG2K_X, awq_g, es32, cpt)
-        xq2, xsf2 = ((xq, xsf) if (xs2 is xs and awq_u is awq_g)
-                     else ext.nvfp4_quant_act(xs2, _QA_LOG2K_X, awq_u, es32, cpt))
+        xq, xsf, gr = ext.nvfp4_quant_act(xs, awq_g, es32, cpt)
+        xq2, xsf2, gr2 = ((xq, xsf, gr) if (xs2 is xs and awq_u is awq_g)
+                          else ext.nvfp4_quant_act(xs2, awq_u, es32, cpt))
         code_act = 1 if self.act == "gelu_tanh" else 0
         if (_MOE_DECODE_FUSED and hasattr(ext, "nvfp4_moe_fused") and bt == 16 and awq_d is None
                 and xs2 is xs and awq_u is awq_g
@@ -1166,21 +1151,21 @@ class MoEBlock(nn.Module):
             # sortie d [G, M] réduite par moe_reduce_trie comme le chemin B.
             if _MOE_FUSED_ATOMIQUE:
                 # témoin atomiques (non reproductible au bit) : rend y directement
-                y = self._moe_fused(pg, pu, pd, xq, xsf, tiles, code_act, ordre=ordre, tw=tw, k=k, t=t)
+                y = self._moe_fused(pg, pu, pd, xq, xsf, tiles, code_act, ordre=ordre, tw=tw, k=k, t=t, grow=gr)
                 return y if x.dtype == torch.bfloat16 else y.to(x.dtype)
-            d = self._moe_fused(pg, pu, pd, xq, xsf, tiles, code_act)
+            d = self._moe_fused(pg, pu, pd, xq, xsf, tiles, code_act, grow=gr)
         else:
-            g = self._gemm_mma(pg, xq, xsf, tiles, brut=True, bt=bt, log2k=_QA_LOG2K_X)
-            u = self._gemm_mma(pu, xq2, xsf2, tiles, brut=True, bt=bt, log2k=_QA_LOG2K_X)
+            g = self._gemm_mma(pg, xq, xsf, tiles, brut=True, bt=bt, grow=gr)
+            u = self._gemm_mma(pu, xq2, xsf2, tiles, brut=True, bt=bt, grow=gr2)
             act = ext.moe_act(g, u, pg[5], pd[4], code_act)
-            aq, asf = ext.nvfp4_quant_act(act, _QA_LOG2K_ACT, awq_d, es32, cpt)
-            d = self._gemm_mma(pd, aq, asf, tiles, brut=True, bt=bt, log2k=_QA_LOG2K_ACT)
+            aq, asf, gra = ext.nvfp4_quant_act(act, awq_d, es32, cpt)
+            d = self._gemm_mma(pd, aq, asf, tiles, brut=True, bt=bt, grow=gra)
         y = ext.moe_reduce_trie(d, tw.contiguous(), inv.contiguous(), pd[5], k)
         return y if x.dtype == torch.bfloat16 else y.to(x.dtype)
 
     _fused_ws: dict = {}                 # (device, T, NT2, NS) -> (ws, compteurs), partagé par toutes les couches
 
-    def _moe_fused(self, pg, pu, pd, xq, xsf, tiles, code_act, ordre=None, tw=None, k=0, t=0):
+    def _moe_fused(self, pg, pu, pd, xq, xsf, tiles, code_act, ordre=None, tw=None, k=0, t=0, grow=None):
         ext = kernels.get_extension()
         tq_g, tb_g = self._tables_adresses(pg)
         tq_u, tb_u = self._tables_adresses(pu)
@@ -1197,15 +1182,14 @@ class MoEBlock(nn.Module):
             buf = MoEBlock._fused_ws[cle] = (ws, cpt)
         ws, cpt = buf
         atom = ordre is not None
-        # gate/up consomment xq·2^k_x : gscales compensées ; l'activation est
-        # quantifiée DANS le noyau fusionné sans échelle globale (plancher
+        # gate/up : grow[r] × gscales[e] dans l'épilogue FC1 ; l'activation est
+        # requantifiée DANS le noyau fusionné sans échelle globale (plancher
         # E4M3 non corrigé sur ce chemin témoin, ACVRAM_MOE_DECODE_FUSED=0)
-        return ext.nvfp4_moe_fused(tq_g, tb_g, self._gs_mma(pg, _QA_LOG2K_X),
-                                   tq_u, tb_u, self._gs_mma(pu, _QA_LOG2K_X), tq_d, tb_d, pd[3],
+        return ext.nvfp4_moe_fused(tq_g, tb_g, pg[3], tq_u, tb_u, pu[3], tq_d, tb_d, pd[3],
                                    xq, xsf, tiles[0], tiles[1], tiles[2], ws, cpt,
                                    K, I, M_out, code_act, tn,
                                    ordre.contiguous() if atom else tiles[0], tw.contiguous() if atom else pg[3],
-                                   k, t, atom, _MOE_FUSED_ETAGES)
+                                   k, t, atom, _MOE_FUSED_ETAGES, grow)
 
     def _forward_grouped(self, x, topw, topi):
         t = x.shape[0]
@@ -1499,19 +1483,11 @@ _MOE_MMA_KS = int(os.environ.get("ACVRAM_MOE_MMA_KS", "128"))
 _MOE_DECODE_MMA = os.environ.get("ACVRAM_MOE_DECODE_MMA", "1") == "1"
 _MOE_DECODE_MMA_BT = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_BT", "16"))
 _MOE_AWQ_TEMOIN = int(os.environ.get("ACVRAM_MOE_AWQ_TEMOIN", "0"))
-# Échelle globale 2^k posée par nvfp4_quant_act avant l'E4M3 par bloc, par
-# site (poste7-glm-pile-correctif-16-09 § 1.4, verdict-glm-plancher-echelle) :
-# sans elle un bloc dont amax/6 < 2^-9 est écrit à zéro (23-31 % des blocs de
-# silu(g)·u sur GLM). k = le plus grand tel que max(amax)·2^k ≤ 2688/4 :
-# x/s max 2,70 → 7 ; act/s_d max 0,289 → 11. Compensé dans les gscales de la
-# GEMM (_gs_mma), zéro lancement ; 0 = arithmétique d'avant.
-# k = milieu entre le plus petit k qui rend 0 % de blocs à zéro (act : 6,
-# x : 0) et le plus grand qui tient en haut (max·2^k ≤ 672 : act 11, x 7).
-_QA_LOG2K_X = int(os.environ.get("ACVRAM_QA_LOG2K_X", "4"))
-_QA_LOG2K_ACT = int(os.environ.get("ACVRAM_QA_LOG2K_ACT", "8"))
-# ACVRAM_QA_COMPTE=1 : compteurs (blocs non nuls, mis à zéro, saturés) cumulés
-# sur le processus par nvfp4_quant_act, imprimés à la sortie — la preuve
-# demandée par poste7 sur la passe de PPL réelle (attendu 0 et 0).
+# ACVRAM_QA_COMPTE=1 : compteurs (blocs non nuls, flushés à zéro, saturés)
+# cumulés sur le processus par nvfp4_quant_act (échelle globale PAR LIGNE,
+# poste7-glm-pile-correctif § 7 : saturation impossible par construction, flush
+# sous ~2,2e-6 × amax de ligne), imprimés à la sortie — la preuve demandée par
+# poste7 sur la passe de PPL réelle (attendu 0 saturé, flush ≤ 0,01 %).
 _QA_COMPTE = os.environ.get("ACVRAM_QA_COMPTE", "0") == "1"
 _QA_COMPTEURS: dict = {}
 
@@ -1531,7 +1507,7 @@ def _qa_compteurs(device):
 def _qa_imprime():
     for dev, c in _QA_COMPTEURS.items():
         n, z, sat = (int(v) for v in c.tolist())
-        print(f"[acvram] quant_act {dev} : blocs non nuls {n}, mis à zéro {z} "
+        print(f"[acvram] quant_act {dev} : blocs non nuls {n}, flushés {z} "
               f"({z / max(n, 1):.6%}), saturés {sat} ({sat / max(n, 1):.6%})", file=sys.stderr, flush=True)
 # Lot minimal pour le chemin MMA : 5 (godets 8, 12 et 16 ; 2 et 4 en GEMV).
 # Courbe de poste3, 15/09, MMA/GEMV : b=2 +36 % ms / −3,5 % J ; b=3 +27 / −6,3 ;

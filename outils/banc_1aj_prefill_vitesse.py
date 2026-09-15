@@ -96,19 +96,19 @@ def main():
         gscales = torch.tensor([w_nv.global_scale_float()], dtype=torch.float32, device=dev)
 
         def nouveau():
-            xq, xsf = ext.nvfp4_quant_act(x)
+            xq, xsf, gr = ext.nvfp4_quant_act(x)
             return ext.nvfp4_gemm_grouped_mma(
                 table_qw, table_bs, gscales, xq, xsf,
                 tiles[0], tiles[1], tiles[2],
-                lin.out_features, lin.in_features, BT, ETAGES, KS)
+                lin.out_features, lin.in_features, BT, ETAGES, KS, grow=gr)
 
         dt_n = _chrono(nouveau)
 
         y_a = kernels.matmul(x, w)
-        xq, xsf = ext.nvfp4_quant_act(x)
+        xq, xsf, gr = ext.nvfp4_quant_act(x)
         y_n = ext.nvfp4_gemm_grouped_mma(table_qw, table_bs, gscales, xq, xsf,
                                          tiles[0], tiles[1], tiles[2],
-                                         lin.out_features, lin.in_features, BT, ETAGES, KS)
+                                         lin.out_features, lin.in_features, BT, ETAGES, KS, grow=gr)
         y_n = y_n[:, :lin.out_features]
         ecart = (y_a - y_n).abs().mean().item() / (y_a.abs().mean().item() + 1e-9)
         ecarts.append(ecart)

@@ -89,6 +89,34 @@ un noyau intermédiaire (`undefined symbol` sur `data_ptr<long long>`), repli su
 référence, mesure invalide. Règle rappelée (`arbre-partage-edition-a-chaud`) : pas une ligne dans
 l'arbre qu'une campagne importe. Journal : `scratchpad/awq-unite-scelle-16-09.log`.
 
+## Correctif quant_act (16/09) : 2^k fixe réfuté, échelle globale PAR LIGNE (poste7 § 7)
+- 04a9541 (k_x=4, k_act=8, gscales·2^-k) : re-PPL de poste3 RÉFUTÉ (1,098 ; 56 k blocs saturés ;
+  `verdict-reppl-alpha-commun-16-09`) — la queue de act/s_d sur une fenêtre réelle dépasse
+  10,5 (max 0,29 sur 16 jetons : un facteur ≥ 36 raté), et A (sans table) à k_act=8 rend ×45.
+- Rejeu à sec de cette ×45 : `model.py` compensait bien le site down sans table (`_gemm_mma(pd,
+  …, log2k=_QA_LOG2K_ACT)` aux deux chemins, 04a9541) ; une non-compensation aurait rendu une
+  PPL en milliers, pas 45. La ×45 est cohérente avec la saturation de queues massives de
+  silu(g)·u NON divisées par s_d (sans AWQ, les canaux saillants gardent leurs centaines) :
+  un bloc dont amax = 500 écrasé à 10,5. Non vérifié sur carte (k abandonné).
+- Les 25 s contre 6 s à k=(4,8) : pas expliqué par le code (aucune branche propre à « les deux
+  non nuls » ; `_gs_mma` = un dict à 3 entrées par couche). Hypothèse à contrôler par poste3 :
+  les deux bras (4,8) étaient les premiers de chaque série, juste après la reconstruction de
+  l'extension → cache de pages froid sur le converti (17 Go, ~1 Go/s ≈ 19 s = 25 − 6).
+  Contrôle : rejouer le même bras deux fois de suite ; 6 s la seconde fois → artefact d'ordre.
+- Nouveau noyau (§ 7) : `nvfp4_quant_act(x, awq, e_sorted, compteurs) → (xq, xsf, grow[G])`,
+  un CTA par ligne (ligne en shared, K ≤ 16 384), g_r = amax_r/(6×448), s_blk = amax_blk/(6·g_r)
+  → E4M3 (≤ 448 par construction), valeurs/(sdec·g_r) → E2M1 ; `nvfp4_gemm_grouped_mma(…,
+  grow=)` multiplie g_r[r]×gscales[e] dans l'épilogue (les deux variantes) ; `nvfp4_moe_fused`
+  reçoit grow pour gate/up (son act reste requantifié sans échelle globale : témoin OFF).
+  Plus aucun k, aucune compensation dans gscales, `ACVRAM_QA_LOG2K_*` retirées ; compteurs
+  `ACVRAM_QA_COMPTE=1` = (blocs non nuls, flushés, saturés) — saturés attendu 0 par
+  construction, flush ≤ 0,01 %.
+- Tests : `tests/test_quant_act_echelle.py` (noyau == référence Python au bit avec table ;
+  jamais saturé, petits blocs gardés ≥ 1e-5 × amax_r ; invariance ×1024 par ligne ; pile x÷16
+  près de la boucle, 0 saturé, flush ≤ 1 %) ; `quant_act_ref` et les tests GEMM/décodage/fusion
+  passés à `grow` ; `test_moe_fused` : identité au bit avec B remplacée par la tolérance
+  float64 (l'act du noyau fusionné n'a pas d'échelle de ligne). Non exécutés sur carte.
+
 ## Reste
 Part converti (+2,06 ms) à expliquer avant de retrancher le scellé ; part échelles (+1,04 ms) à
 profiler par lancement (ncu, b=12) ; correctif d'équivalence pile/boucle avec table réelle

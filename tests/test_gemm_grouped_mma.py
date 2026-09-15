@@ -31,26 +31,31 @@ def _ext():
     return ext
 
 
-def quant_act_ref(x: torch.Tensor, log2k: int = 0, awq=None, e_sorted=None):
-    """Référence : amax/6 -> E4M3 au plus proche (satfinite 448), puis chaque
-    valeur / échelle décodée -> E2M1 au plus proche, égalités vers le code
-    pair (cvt.rn.satfinite.e2m1x2). Le noyau doit diviser en IEEE (__fdiv_rn) :
+def quant_act_ref(x: torch.Tensor, awq=None, e_sorted=None):
+    """Référence de nvfp4_quant_act (poste7-glm-pile-correctif § 7) : échelle
+    globale PAR LIGNE g_r = amax_r / (6 × 448) fp32 ; par bloc de 16,
+    s = amax_blk / (6 · g_r) -> E4M3 au plus proche (≤ 448 par construction),
+    puis chaque valeur / (sdec · g_r) -> E2M1 au plus proche, égalités vers le
+    code pair (cvt.rn.satfinite.e2m1x2). Le noyau divise en IEEE (__fdiv_rn) :
     sous --use_fast_math la division approchée basculait 5 égalités sur 5 376.
-
-    ``log2k`` : échelle globale 2^k posée sur x avant l'E4M3 (produit exact),
-    à compenser par gscale·2^-k dans la GEMM ; ``awq`` [E, K] bf16 et
-    ``e_sorted`` [G] : x/s[e] en bf16 (bf16(bf16(v)/bf16(s))) avant tout."""
+    ``awq`` [E, K] bf16 et ``e_sorted`` [G] : x/s[e] en bf16
+    (bf16(bf16(v)/bf16(s))) avant tout. Rend (codes, échelles E4M3, g_r)."""
     G, K = x.shape
     xf = x.float()
     if awq is not None:
         xf = (xf / awq[e_sorted.long()].float()).to(torch.bfloat16).float()
-    xb = (xf * float(2 ** log2k)).view(G, K // 16, 16)
-    amax = xb.abs().amax(-1)
-    s = (amax / 6.0).clamp(max=448.0)
+    xb = xf.view(G, K // 16, 16)
+    amax_b = xb.abs().amax(-1)                                    # [G, K/16]
+    amax_r = amax_b.amax(-1)                                      # [G]
+    g = torch.where(amax_r > 0, amax_r / (6.0 * 448.0), torch.zeros_like(amax_r))
+    ok_r = (g > 0).unsqueeze(-1)
+    s = torch.where(ok_r & (amax_b > 0), amax_b / (6.0 * g).clamp(min=1e-30).unsqueeze(-1),
+                    torch.zeros_like(amax_b)).clamp(max=448.0)
     sbits = s.to(torch.float8_e4m3fn)
     sdec = sbits.float()
     ok = sdec > 0
-    v = torch.where(ok.unsqueeze(-1), xb / sdec.clamp(min=1e-30).unsqueeze(-1), torch.zeros_like(xb))
+    d = (sdec * g.unsqueeze(-1)).clamp(min=1e-30)
+    v = torch.where(ok.unsqueeze(-1), xb / d.unsqueeze(-1), torch.zeros_like(xb))
     a = v.abs().clamp(max=6.0)
     mid = _MID.to(x.device)
     iu = torch.searchsorted(mid, a.reshape(-1).contiguous(), right=True).view_as(a)
@@ -59,7 +64,15 @@ def quant_act_ref(x: torch.Tensor, log2k: int = 0, awq=None, e_sorted=None):
     code = code | (torch.signbit(v).to(torch.uint8) << 3)
     code = torch.where(ok.unsqueeze(-1), code, torch.zeros_like(code))
     octets = code[..., 0::2] | (code[..., 1::2] << 4)
-    return octets.reshape(G, K // 2).contiguous(), sbits.view(torch.uint8).reshape(G, K // 16).contiguous()
+    return (octets.reshape(G, K // 2).contiguous(),
+            sbits.view(torch.uint8).reshape(G, K // 16).contiguous(), g.contiguous())
+
+
+def dequant_act_ref(xq, xsf, grow):
+    """E2M1 [G, K/2] + UE4M3 [G, K/16] + g_r [G] -> float64 [G, K]."""
+    G = xq.shape[0]
+    xa = _dequant_nibbles(xq).view(G, -1, 16) * xsf.view(torch.float8_e4m3fn).double().unsqueeze(-1)
+    return (xa * grow.double().view(G, 1, 1)).reshape(G, -1)
 
 
 def _dequant_nibbles(q: torch.Tensor) -> torch.Tensor:
@@ -117,8 +130,9 @@ def _x(G, K, graine):
 def test_quant_act_bit_identique(G, K):
     ext = _ext()
     x = _x(G, K, G * 31 + K)
-    xq, xsf = ext.nvfp4_quant_act(x)
-    rq, rsf = quant_act_ref(x)
+    xq, xsf, gr = ext.nvfp4_quant_act(x)
+    rq, rsf, rg = quant_act_ref(x)
+    assert torch.equal(gr, rg), f"échelles de ligne : {int((gr != rg).sum())} différentes sur {G}"
     assert torch.equal(xsf, rsf), f"échelles : {int((xsf != rsf).sum())} octets différents sur {rsf.numel()}"
     assert torch.equal(xq, rq), f"codes : {int((xq != rq).sum())} octets différents sur {rq.numel()}"
 
@@ -142,16 +156,15 @@ def test_gemm_mma_contre_reference_w4a4(comptes, M, K, bt, etages):
     cnt = torch.tensor(comptes, device="cuda")
     G = int(cnt.sum())
     x = _x(G, K, G + K)
-    xq, xsf = ext.nvfp4_quant_act(x)
-    rq, rsf = quant_act_ref(x)
-    assert torch.equal(xq, rq) and torch.equal(xsf, rsf)
+    xq, xsf, gr = ext.nvfp4_quant_act(x)
+    rq, rsf, rg = quant_act_ref(x)
+    assert torch.equal(xq, rq) and torch.equal(xsf, rsf) and torch.equal(gr, rg)
     te, t0, tn = _tuiles(cnt, bt)
     tq, tb = _tables(qw, bs)
-    y = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, bt, etages)
+    y = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, bt, etages, grow=gr)
     assert y.shape == (G, M) and y.dtype == torch.bfloat16
-    # référence float64 à partir des MÊMES activations quantifiées
-    xa = _dequant_nibbles(xq).view(G, -1, 16) * xsf.view(torch.float8_e4m3fn).double().unsqueeze(-1)
-    xa = xa.reshape(G, K)
+    # référence float64 à partir des MÊMES activations quantifiées (g_r comprise)
+    xa = dequant_act_ref(xq, xsf, gr)
     w = _w64(qw, bs).reshape(E, M, K)
     attendu = torch.zeros(G, M, device="cuda", dtype=torch.float64)
     debut = 0
@@ -177,14 +190,14 @@ def test_bt32_et_etages_identiques():
     qw, bs, gs = _pile(E, M, K, 0.05, 3)
     cnt = torch.tensor(comptes, device="cuda")
     G = int(cnt.sum())
-    xq, xsf = ext.nvfp4_quant_act(_x(G, K, 11))
+    xq, xsf, gr = ext.nvfp4_quant_act(_x(G, K, 11))
     tq, tb = _tables(qw, bs)
     for bt in (16, 32, 64, 128):
         te, t0, tn = _tuiles(cnt, bt)
-        ref = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, min(bt, 64), 0)
+        ref = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, min(bt, 64), 0, grow=gr)
         for et in (2, 3, 4):
             for ks in (64, 128):
-                y = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, bt, et, ks)
+                y = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, bt, et, ks, grow=gr)
                 assert torch.equal(y, ref), f"bt={bt} etages={et} ks={ks} differe de la variante directe"
 
 
@@ -197,10 +210,10 @@ def test_tables_adresses():
     qw, bs, gs = _pile(E, M, K, 0.05, 99)
     cnt = torch.tensor(comptes, device="cuda")
     G = int(cnt.sum())
-    xq, xsf = ext.nvfp4_quant_act(_x(G, K, 5))
+    xq, xsf, gr = ext.nvfp4_quant_act(_x(G, K, 5))
     te, t0, tn = _tuiles(cnt, bt)
     tq, tb = _tables(qw, bs)
-    y = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, bt)
+    y = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, bt, grow=gr)
     # experts 0 et 2 dans une seconde pile, 1 et 3 permutés dans la première
     pile2 = torch.stack([qw[2], qw[0]]).contiguous(); bs2 = torch.stack([bs[2], bs[0]]).contiguous()
     pile1 = torch.stack([qw[3], qw[1]]).contiguous(); bs1 = torch.stack([bs[3], bs[1]]).contiguous()
@@ -208,11 +221,11 @@ def test_tables_adresses():
                         pile2.data_ptr(), pile1.data_ptr()], dtype=torch.int64).cuda()
     tb2 = torch.tensor([bs2.data_ptr() + bs2.stride(0), bs1.data_ptr() + bs1.stride(0),
                         bs2.data_ptr(), bs1.data_ptr()], dtype=torch.int64).cuda()
-    y2 = ext.nvfp4_gemm_grouped_mma(tq2, tb2, gs, xq, xsf, te, t0, tn, M, K, bt)
+    y2 = ext.nvfp4_gemm_grouped_mma(tq2, tb2, gs, xq, xsf, te, t0, tn, M, K, bt, grow=gr)
     assert torch.equal(y, y2)
     # table qui pointe l'expert 1 sur l'expert 3 : doit changer le résultat
     tq3 = tq2.clone(); tq3[1] = tq2[3]
-    y3 = ext.nvfp4_gemm_grouped_mma(tq3, tb2, gs, xq, xsf, te, t0, tn, M, K, bt)
+    y3 = ext.nvfp4_gemm_grouped_mma(tq3, tb2, gs, xq, xsf, te, t0, tn, M, K, bt, grow=gr)
     assert not torch.equal(y, y3)
 
 
@@ -229,10 +242,10 @@ def test_cosinus_contre_chemin_bf16(comptes):
     G = int(cnt.sum())
     g = torch.Generator(device="cuda").manual_seed(G)
     x = torch.randn(G, K, device="cuda", generator=g).to(torch.bfloat16)
-    xq, xsf = ext.nvfp4_quant_act(x)
+    xq, xsf, gr = ext.nvfp4_quant_act(x)
     te, t0, tn = _tuiles(cnt, 64)
     tq, tb = _tables(qw, bs)
-    y = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, 64)
+    y = ext.nvfp4_gemm_grouped_mma(tq, tb, gs, xq, xsf, te, t0, tn, M, K, 64, grow=gr)
     w = (_w64(qw, bs).reshape(E, M, K) * gs.double().view(E, 1, 1)).to(torch.bfloat16)
     offs = torch.cumsum(cnt, 0).to(torch.int32)
     y_ref = torch._grouped_mm(x, w.transpose(1, 2), offs=offs)

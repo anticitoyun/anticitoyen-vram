@@ -53,13 +53,10 @@ def _err(a: torch.Tensor, b: torch.Tensor) -> float:
     return float(torch.linalg.norm(a - b) / torch.linalg.norm(b).clamp(min=1e-30))
 
 
-def _deq_act(xq: torch.Tensor, xsf: torch.Tensor) -> torch.Tensor:
-    """E2M1 [G, K/2] + UE4M3 [G, K/16] -> fp32 [G, K], même arithmétique que le noyau."""
-    from test_gemm_grouped_mma import _dequant_nibbles
-    v = _dequant_nibbles(xq).float()                       # [G, K]
-    G, K = v.shape
-    s = xsf.view(torch.float8_e4m3fn).float()               # [G, K/16]
-    return (v.view(G, K // 16, 16) * s.unsqueeze(-1)).view(G, K)
+def _deq_act(xq: torch.Tensor, xsf: torch.Tensor, gr: torch.Tensor) -> torch.Tensor:
+    """E2M1 [G, K/2] + UE4M3 [G, K/16] + g_r [G] -> fp32 [G, K], même arithmétique que le noyau."""
+    from test_gemm_grouped_mma import dequant_act_ref
+    return dequant_act_ref(xq, xsf, gr).float()
 
 
 def _x_reel(n: int) -> torch.Tensor:
@@ -132,9 +129,9 @@ def sonder(nom: str, chemin: Path, x_cpu: torch.Tensor) -> dict:
     rd = [(a, r) for n, a, r in trace if n == "moe_reduce_trie"]
     assert len(gm) == 3 and len(ma) == 1 and len(rd) == 1 and len(qa) in (2, 3), (len(gm), len(ma), len(rd), len(qa))
     distinct = len(qa) == 3
-    (xs_in, (xq, xsf)) = qa[0][0][0], qa[0][1]
-    (xs2_in, (xq2, xsf2)) = (qa[1][0][0], qa[1][1]) if distinct else (xs_in, (xq, xsf))
-    act_in, (aq, asf) = qa[-1][0][0], qa[-1][1]
+    (xs_in, (xq, xsf, gr)) = qa[0][0][0], qa[0][1]
+    (xs2_in, (xq2, xsf2, gr2)) = (qa[1][0][0], qa[1][1]) if distinct else (xs_in, (xq, xsf, gr))
+    act_in, (aq, asf, gra) = qa[-1][0][0], qa[-1][1]
     g, u, d = gm[0][1], gm[1][1], gm[2][1]
     act = ma[0][1]
 
@@ -177,20 +174,29 @@ def sonder(nom: str, chemin: Path, x_cpu: torch.Tensor) -> dict:
            "G": G, "etapes": {}}
     E = res["etapes"]
 
-    # 1. quantification des activations gate/up
-    xq_r, xsf_r = quant_act_ref(xs_in)
-    deq = _deq_act(xq, xsf).double()
-    e1 = {"octets_diff_ref": int((xq_r != xq).sum() + (xsf_r != xsf).sum()),
+    # 1. quantification des activations gate/up (division x/s[e] fusionnée
+    #    dans le noyau : les arguments relevés portent la table et e_sorted)
+    def div_bf16(xin, tb, es_):
+        xf_ = xin.float()
+        if tb is not None:
+            xf_ = (xf_ / tb[es_.long()].float()).to(torch.bfloat16).float()
+        return xf_.double()
+    a0 = qa[0][0]
+    xq_r, xsf_r, gr_r = quant_act_ref(xs_in, a0[1], a0[2])
+    deq = _deq_act(xq, xsf, gr).double()
+    xs_div = div_bf16(xs_in, a0[1], a0[2])
+    e1 = {"octets_diff_ref": int((xq_r != xq).sum() + (xsf_r != xsf).sum() + (gr_r != gr).sum()),
           "blocs_zero": float((xsf == 0).double().mean()),
-          "err_iso": _err(deq, xs_in.double()),          # bruit de quantification seul
+          "err_iso": _err(deq, xs_div),                  # bruit de quantification seul
           "err_cum": _err(deq, xg_ref),
-          "err_xs_vs_exact": _err(xs_in.double(), xg_ref)}   # division bf16 de route_pack
+          "err_xs_vs_exact": _err(xs_div, xg_ref)}       # division bf16 du noyau
     if distinct:
-        xq2_r, xsf2_r = quant_act_ref(xs2_in)
-        deq2 = _deq_act(xq2, xsf2).double()
-        e1.update({"up_octets_diff_ref": int((xq2_r != xq2).sum() + (xsf2_r != xsf2).sum()),
+        a1 = qa[1][0]
+        xq2_r, xsf2_r, gr2_r = quant_act_ref(xs2_in, a1[1], a1[2])
+        deq2 = _deq_act(xq2, xsf2, gr2).double()
+        e1.update({"up_octets_diff_ref": int((xq2_r != xq2).sum() + (xsf2_r != xsf2).sum() + (gr2_r != gr2).sum()),
                    "up_blocs_zero": float((xsf2 == 0).double().mean()),
-                   "up_err_iso": _err(deq2, xs2_in.double()), "up_err_cum": _err(deq2, xu_ref)})
+                   "up_err_iso": _err(deq2, div_bf16(xs2_in, a1[1], a1[2])), "up_err_cum": _err(deq2, xu_ref)})
     else:
         deq2 = deq
     E["1_quant_act"] = e1
@@ -202,24 +208,26 @@ def sonder(nom: str, chemin: Path, x_cpu: torch.Tensor) -> dict:
     E["2_gemm_gate_up"] = {"err_iso": _err(g[:, :m_i], g_iso), "err_cum": _err(g[:, :m_i], g_cum),
                            "up_err_iso": _err(u[:, :m_i], u_iso), "up_err_cum": _err(u[:, :m_i], u_cum)}
 
-    # 3. moe_act : silu(g)·u / s_d
-    def acte(gg, uu):
+    # 3. moe_act : silu(g)·u (la division par s_d vit dans quant_act, étape 4)
+    def acte(gg, uu, diviser):
         gg = gg[:, :m_i]; uu = uu[:, :m_i]
         a = torch.nn.functional.gelu(gg, approximate="tanh") if mod.act == "gelu_tanh" else torch.nn.functional.silu(gg)
         v = a * uu
         out = torch.zeros(G, I, device=dev, dtype=torch.float64)
-        out[:, :m_i] = v / sd_r[:, :m_i]
+        out[:, :m_i] = v / sd_r[:, :m_i] if diviser else v
         return out
-    act_iso = acte(g.double(), u.double()); act_cum = acte(g_cum, u_cum)
-    E["3_moe_act"] = {"err_iso": _err(act, act_iso), "err_cum": _err(act, act_cum)}
+    act_iso = acte(g.double(), u.double(), False); act_cum = acte(g_cum, u_cum, True)
+    E["3_moe_act"] = {"err_iso": _err(act, act_iso), "err_cum": _err(act, acte(g_cum, u_cum, False))}
 
-    # 4. quantification de l'entrée de down
-    aq_r, asf_r = quant_act_ref(act_in)
-    deqa = _deq_act(aq, asf).double()
-    E["4_quant_act_down"] = {"octets_diff_ref": int((aq_r != aq).sum() + (asf_r != asf).sum()),
+    # 4. quantification de l'entrée de down (division act/s_d[e] fusionnée)
+    a2 = qa[-1][0]
+    aq_r, asf_r, gra_r = quant_act_ref(act_in, a2[1], a2[2])
+    deqa = _deq_act(aq, asf, gra).double()
+    act_div = div_bf16(act_in, a2[1], a2[2])
+    E["4_quant_act_down"] = {"octets_diff_ref": int((aq_r != aq).sum() + (asf_r != asf).sum() + (gra_r != gra).sum()),
                              "blocs_zero": float((asf == 0).double().mean()),
                              "blocs_zero_ref_nonnuls": int(((asf == 0) & (act_in.view(G, I // 16, 16).abs().amax(-1) > 0)).sum()),
-                             "err_iso": _err(deqa, act_in.double()), "err_cum": _err(deqa, act_cum)}
+                             "err_iso": _err(deqa, act_div), "err_cum": _err(deqa, act_cum)}
 
     # 5. GEMM down
     d_iso = gemm_par_expert(deqa, Wd, Mo); d_cum = gemm_par_expert(act_cum, Wd, Mo)

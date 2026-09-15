@@ -2015,74 +2015,89 @@ __device__ __forceinline__ void mma_mxf4nvf4(float d[4], const unsigned a[4], co
 #endif
 }
 
-// Activations bf16 [G, K] -> E2M1 [G, K/2] + échelles UE4M3 [G, K/16].
-// Un fil par bloc de 16 : amax/6 arrondi en E4M3, puis chaque valeur divisée
-// par l'échelle décodée et arrondie en E2M1 (satfinite : au-delà de 6 -> 6).
-//
-// Échelle globale 2^log2k (poste7-glm-pile-correctif-16-09 § 1.4, cause
-// confirmée par verdict-glm-saturation-16-09) : sans elle, un bloc dont
-// amax/6 < 2^-9 (plancher dénormal E4M3) était écrit entièrement à zéro —
-// 23-31 % des blocs de silu(g)·u à l'entrée de down_proj sur GLM. Le noyau
-// quantifie x·2^k (produit exact) et la GEMM compense par gscale·2^-k
-// (MoEBlock._gs_mma) : zéro lancement, arithmétique inchangée pour k = 0.
-// Contrainte : amax·2^k/6 ≤ 448 sinon satfinite écrase l'échelle ; k par site
-// (ACVRAM_QA_LOG2K_X pour x, ACVRAM_QA_LOG2K_ACT pour l'activation).
+// Activations bf16 [G, K] -> E2M1 [G, K/2] + échelles UE4M3 [G, K/16]
+// + échelle globale fp32 PAR LIGNE grow [G] (poste7-glm-pile-correctif-16-09
+// § 7). Un CTA par ligne : la ligne en mémoire partagée, amax de ligne par
+// réduction, g_r = amax_r / (6 × 448), puis chaque bloc de 16 : s = amax_blk /
+// (6 · g_r) → E4M3 (le bloc maximal tombe sur 448 : saturation impossible
+// par construction), valeurs / (sdec · g_r) → E2M1. Un bloc n'est flushé à
+// zéro que si amax_blk < ~2,2e-6 × amax_r (E4M3 sous 2^-10). L'épilogue de
+// la GEMM multiplie par grow[r] × gscales[e]. Sans échelle globale (avant),
+// amax/6 < 2^-9 mettait le bloc entier à zéro : 23-31 % des blocs de
+// silu(g)·u sur GLM (verdict-glm-saturation-16-09) ; un 2^k fixe saturait
+// les queues d'une fenêtre réelle (verdict-reppl-alpha-commun-16-09).
 //
 // Échelle AWQ par expert fusionnée (awq [E, K] bf16, e_sorted [G]) :
-// bf16(bf16(v) / s[e][c]) avant la quantification, la même arithmétique que
-// la ligne de moe_route_pack et que scaler.apply de la boucle — une passe
-// mémoire sur [G, K] de moins (22 µs/couche mesurés, poste4-awq-gate-up).
-__global__ void nvfp4_quant_act_kernel(const __nv_bfloat16 *__restrict__ x,
-                                       unsigned char *__restrict__ xq,
-                                       unsigned char *__restrict__ xsf,
-                                       long nblocs, int nblk, int log2k,
-                                       const __nv_bfloat16 *__restrict__ awq,
-                                       const int *__restrict__ e_sorted,
-                                       long long *__restrict__ compteurs) {
-    const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= nblocs) return;
-    const long row = i / nblk;
-    const int blk = (int)(i - row * nblk);
-    const __nv_bfloat16 *src = x + row * (long)nblk * 16 + blk * 16;
-    const __nv_bfloat16 *sc = awq ? awq + (long)e_sorted[row] * nblk * 16 + blk * 16 : nullptr;
-    const float f = ldexpf(1.f, log2k);
-    float v[16];
+// bf16(bf16(v) / s[e][c]) avant tout, la même arithmétique que la ligne de
+// moe_route_pack et que scaler.apply de la boucle. Toutes les divisions en
+// __fdiv_rn (--use_fast_math rend une division approchée qui bascule les
+// égalités E2M1 : 5 codes sur 5 376 mesurés).
+// compteurs (facultatif, ACVRAM_QA_COMPTE=1) : [0] blocs non nuls, [1] flushés
+// (amax_blk > 0 et échelle 0), [2] saturés (s > 448 avant satfinite ; 0 par
+// construction, le compteur est là pour le prouver).
+constexpr int QA_FILS = 256;
+__global__ void __launch_bounds__(QA_FILS) nvfp4_quant_act_kernel(
+    const __nv_bfloat16 *__restrict__ x, unsigned char *__restrict__ xq,
+    unsigned char *__restrict__ xsf, float *__restrict__ grow, int nblk,
+    const __nv_bfloat16 *__restrict__ awq, const int *__restrict__ e_sorted,
+    long long *__restrict__ compteurs) {
+    extern __shared__ float qa_row[];               // [K] fp32 après division AWQ
+    __shared__ float qa_red[QA_FILS / 32];
+    const long row = blockIdx.x;
+    const int K = nblk * 16;
+    const __nv_bfloat16 *src = x + row * (long)K;
+    const __nv_bfloat16 *sc = awq ? awq + (long)e_sorted[row] * K : nullptr;
     float amax = 0.f;
+    for (int i = threadIdx.x; i < K; i += QA_FILS) {
+        float t = __bfloat162float(src[i]);
+        if (sc) t = __bfloat162float(__float2bfloat16(__fdiv_rn(t, __bfloat162float(sc[i]))));
+        qa_row[i] = t;
+        amax = fmaxf(amax, fabsf(t));
+    }
     #pragma unroll
-    for (int j = 0; j < 16; ++j) {
-        float t = __bfloat162float(src[j]);
-        if (sc) t = __bfloat162float(__float2bfloat16(__fdiv_rn(t, __bfloat162float(sc[j]))));
-        v[j] = t * f;
-        amax = fmaxf(amax, fabsf(v[j]));
-    }
-    unsigned char sbits = 0;
-    float sdec = 0.f;
-    if (amax > 0.f) {
-        // __fdiv_rn : l'extension est compilée avec --use_fast_math, dont la
-        // division est un MUFU.RCP approché qui bascule les égalités E2M1
-        // (mesuré : 5 codes sur 5 376 différaient de la référence Python)
-        const float s = fminf(__fdiv_rn(amax, 6.f), 448.f);
-        sbits = (unsigned char)__nv_cvt_float_to_fp8(s, __NV_SATFINITE, __NV_E4M3);
-        sdec = e4m3_to_float(sbits);
-        if (compteurs) {
-            // preuve (poste7, ACVRAM_QA_COMPTE=1) : [0] blocs non nuls, [1] mis à
-            // zéro (amax/6 sous le plancher E4M3), [2] saturés (amax/6 > 448)
-            atomicAdd((unsigned long long *)compteurs, 1ull);
-            if (sdec == 0.f) atomicAdd((unsigned long long *)compteurs + 1, 1ull);
-            if (__fdiv_rn(amax, 6.f) > 448.f) atomicAdd((unsigned long long *)compteurs + 2, 1ull);
-        }
-    }
-    unsigned long long packed = 0ull;
-    if (sdec > 0.f) {
+    for (int o = 16; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+    if ((threadIdx.x & 31) == 0) qa_red[threadIdx.x >> 5] = amax;
+    __syncthreads();
+    if (threadIdx.x < 32) {
+        float m = threadIdx.x < QA_FILS / 32 ? qa_red[threadIdx.x] : 0.f;
         #pragma unroll
-        for (int j = 0; j < 16; j += 2) {
-            const float2 p = make_float2(__fdiv_rn(v[j], sdec), __fdiv_rn(v[j + 1], sdec));
-            const __nv_fp4x2_storage_t q = __nv_cvt_float2_to_fp4x2(p, __NV_E2M1, cudaRoundNearest);
-            packed |= (unsigned long long)(q & 0xFF) << (4 * j);
-        }
+        for (int o = 16; o > 0; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
+        if (threadIdx.x == 0) qa_red[0] = m;
     }
-    *reinterpret_cast<unsigned long long *>(xq + row * (long)nblk * 8 + blk * 8) = packed;
-    xsf[row * (long)nblk + blk] = sbits;
+    __syncthreads();
+    const float amax_r = qa_red[0];
+    const float g = amax_r > 0.f ? __fdiv_rn(amax_r, 6.f * 448.f) : 0.f;
+    if (threadIdx.x == 0) grow[row] = g;
+    for (int blk = threadIdx.x; blk < nblk; blk += QA_FILS) {
+        const float *v = qa_row + blk * 16;
+        float amax_b = 0.f;
+        #pragma unroll
+        for (int j = 0; j < 16; ++j) amax_b = fmaxf(amax_b, fabsf(v[j]));
+        unsigned char sbits = 0;
+        float sdec = 0.f;
+        if (amax_b > 0.f && g > 0.f) {
+            const float sb = __fdiv_rn(amax_b, 6.f * g);       // ≤ 448 par construction
+            sbits = (unsigned char)__nv_cvt_float_to_fp8(fminf(sb, 448.f), __NV_SATFINITE, __NV_E4M3);
+            sdec = e4m3_to_float(sbits);
+            if (compteurs) {
+                atomicAdd((unsigned long long *)compteurs, 1ull);
+                if (sdec == 0.f) atomicAdd((unsigned long long *)compteurs + 1, 1ull);
+                if (sb > 448.f) atomicAdd((unsigned long long *)compteurs + 2, 1ull);
+            }
+        }
+        unsigned long long packed = 0ull;
+        if (sdec > 0.f) {
+            const float d = sdec * g;                               // fp32, comme la référence
+            #pragma unroll
+            for (int j = 0; j < 16; j += 2) {
+                const float2 p = make_float2(__fdiv_rn(v[j], d), __fdiv_rn(v[j + 1], d));
+                const __nv_fp4x2_storage_t q = __nv_cvt_float2_to_fp4x2(p, __NV_E2M1, cudaRoundNearest);
+                packed |= (unsigned long long)(q & 0xFF) << (4 * j);
+            }
+        }
+        *reinterpret_cast<unsigned long long *>(xq + row * (long)nblk * 8 + blk * 8) = packed;
+        xsf[row * (long)nblk + blk] = sbits;
+    }
 }
 
 // Un bloc = 64 lignes de sortie x BT jetons d'une tuile ; 4 warps de 16
@@ -2091,7 +2106,7 @@ __global__ void nvfp4_quant_act_kernel(const __nv_bfloat16 *__restrict__ x,
 // plus rien à convertir). Double tampon de registres sur K.
 template <int BT>
 __global__ void __launch_bounds__(128) nvfp4_gemm_grouped_mma_kernel(
-    const float *__restrict__ gscales,
+    const float *__restrict__ gscales, const float *__restrict__ grow,
     const unsigned char *__restrict__ xq, const unsigned char *__restrict__ xsf,
     const int *__restrict__ tile_e, const int *__restrict__ tile_t0,
     const int *__restrict__ tile_n, const int64_t *__restrict__ table_qw,
@@ -2198,8 +2213,10 @@ __global__ void __launch_bounds__(128) nvfp4_gemm_grouped_mma_kernel(
                 const int j = mf * 16 + g + 8 * h;
                 if (j < nt) {
                     __nv_bfloat16 *dst = y + (long)(t0 + j) * M + r;
-                    if (r < M)     dst[0] = __float2bfloat16(acc[mf][nf][2 * h] * gscale);
-                    if (r + 1 < M) dst[1] = __float2bfloat16(acc[mf][nf][2 * h + 1] * gscale);
+                    // échelle globale par ligne d'activation (nvfp4_quant_act, grow[G])
+                    const float gs = grow ? gscale * grow[t0 + j] : gscale;
+                    if (r < M)     dst[0] = __float2bfloat16(acc[mf][nf][2 * h] * gs);
+                    if (r + 1 < M) dst[1] = __float2bfloat16(acc[mf][nf][2 * h + 1] * gs);
                 }
             }
         }
@@ -2254,7 +2271,7 @@ __device__ __forceinline__ void cp_async8(void *smem, const void *gmem) {
 // par ligne : un mot de 4 par MMA.
 template <int BT, int S, int KS>
 __global__ void __launch_bounds__(GM2_FILS) nvfp4_gemm_grouped_mma2_kernel(
-    const float *__restrict__ gscales,
+    const float *__restrict__ gscales, const float *__restrict__ grow,
     const unsigned char *__restrict__ xq, const unsigned char *__restrict__ xsf,
     const int *__restrict__ tile_e, const int *__restrict__ tile_t0,
     const int *__restrict__ tile_n, const int64_t *__restrict__ table_qw,
@@ -2387,8 +2404,10 @@ __global__ void __launch_bounds__(GM2_FILS) nvfp4_gemm_grouped_mma2_kernel(
                 const int j = mf * 16 + g + 8 * h;
                 if (j < nt) {
                     __nv_bfloat16 *dst = y + (long)(t0 + j) * M + r;
-                    if (r < M)     dst[0] = __float2bfloat16(acc[mf][nf][2 * h] * gscale);
-                    if (r + 1 < M) dst[1] = __float2bfloat16(acc[mf][nf][2 * h + 1] * gscale);
+                    // échelle globale par ligne d'activation (nvfp4_quant_act, grow[G])
+                    const float gs = grow ? gscale * grow[t0 + j] : gscale;
+                    if (r < M)     dst[0] = __float2bfloat16(acc[mf][nf][2 * h] * gs);
+                    if (r + 1 < M) dst[1] = __float2bfloat16(acc[mf][nf][2 * h + 1] * gs);
                 }
             }
         }
@@ -2421,15 +2440,14 @@ bool nvfp4_gemm_grouped_mma_disponible() {
     return cache == 1;
 }
 
-std::tuple<torch::Tensor, torch::Tensor> nvfp4_quant_act(torch::Tensor x, int64_t log2k,
-                                                         c10::optional<torch::Tensor> awq,
-                                                         c10::optional<torch::Tensor> e_sorted,
-                                                         c10::optional<torch::Tensor> compteurs) {
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> nvfp4_quant_act(
+        torch::Tensor x, c10::optional<torch::Tensor> awq, c10::optional<torch::Tensor> e_sorted,
+        c10::optional<torch::Tensor> compteurs) {
     CHECK_CUDA(x); CHECK_CONTIG(x); ACVRAM_DEVICE_GUARD(x);
     TORCH_CHECK(x.scalar_type() == torch::kBFloat16, "quant_act : activations bf16");
     TORCH_CHECK(x.dim() == 2 && x.size(1) % 64 == 0, "quant_act : [G, K] avec K multiple de 64");
-    TORCH_CHECK(log2k >= 0 && log2k <= 24, "quant_act : log2k dans [0, 24]");
     const long G = x.size(0), K = x.size(1);
+    TORCH_CHECK(K <= 16384, "quant_act : K <= 16384 (une ligne en memoire partagee)");
     const int nblk = (int)(K >> 4);
     const __nv_bfloat16 *awq_p = nullptr;
     const int *es_p = nullptr;
@@ -2447,23 +2465,25 @@ std::tuple<torch::Tensor, torch::Tensor> nvfp4_quant_act(torch::Tensor x, int64_
     if (compteurs.has_value() && compteurs->defined()) {
         CHECK_CUDA(*compteurs); CHECK_CONTIG(*compteurs);
         TORCH_CHECK(compteurs->scalar_type() == torch::kLong && compteurs->numel() == 3,
-                    "quant_act : compteurs int64 [3] (blocs, zéro, saturés)");
+                    "quant_act : compteurs int64 [3] (blocs, flushes, satures)");
         cpt_p = reinterpret_cast<long long *>(compteurs->data_ptr<int64_t>());
     }
     auto opt = torch::TensorOptions().dtype(torch::kUInt8).device(x.device());
     auto xq = torch::empty({G, K / 2}, opt);
     auto xsf = torch::empty({G, nblk}, opt);
-    const long nblocs = G * nblk;
-    if (nblocs > 0) {
+    auto grow = torch::empty({G}, opt.dtype(torch::kFloat32));
+    if (G > 0) {
         auto stream = at::cuda::getCurrentCUDAStream();
-        const int th = 256;
-        nvfp4_quant_act_kernel<<<(unsigned)((nblocs + th - 1) / th), th, 0, stream>>>(
+        const size_t shm = (size_t)K * sizeof(float);
+        if (shm > 48 * 1024)
+            cudaFuncSetAttribute(nvfp4_quant_act_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm);
+        nvfp4_quant_act_kernel<<<(unsigned)G, QA_FILS, shm, stream>>>(
             reinterpret_cast<const __nv_bfloat16 *>(x.data_ptr()),
-            xq.data_ptr<unsigned char>(), xsf.data_ptr<unsigned char>(), nblocs, nblk,
-            (int)log2k, awq_p, es_p, cpt_p);
+            xq.data_ptr<unsigned char>(), xsf.data_ptr<unsigned char>(), grow.data_ptr<float>(),
+            nblk, awq_p, es_p, cpt_p);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
-    return {xq, xsf};
+    return {xq, xsf, grow};
 }
 
 // table_qw / table_bscale [E] int64 : adresse octet (device) des piles
@@ -2475,8 +2495,16 @@ torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table
                                      torch::Tensor gscales, torch::Tensor xq,
                                      torch::Tensor xsf, torch::Tensor tile_e,
                                      torch::Tensor tile_t0, torch::Tensor tile_n,
-                                     int64_t M, int64_t K, int64_t bt, int64_t etages, int64_t ks) {
+                                     int64_t M, int64_t K, int64_t bt, int64_t etages, int64_t ks,
+                                     c10::optional<torch::Tensor> grow) {
     CHECK_CUDA(xq); ACVRAM_DEVICE_GUARD(xq);
+    const float *grow_p = nullptr;
+    if (grow.has_value() && grow->defined()) {
+        CHECK_CUDA(*grow); CHECK_CONTIG(*grow);
+        TORCH_CHECK(grow->scalar_type() == torch::kFloat && grow->numel() == xq.size(0),
+                    "GEMM groupee MMA : grow fp32 [G] (une echelle globale par ligne d'activation)");
+        grow_p = grow->data_ptr<float>();
+    }
     TORCH_CHECK(etages == 0 || etages == 2 || etages == 3 || etages == 4,
                 "GEMM groupee MMA : etages dans {0 (direct), 2, 3, 4}");
     TORCH_CHECK(ks == 64 || ks == 128, "GEMM groupee MMA : ks dans {64, 128}");
@@ -2500,7 +2528,7 @@ torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table
     auto y = torch::empty({G, M}, torch::TensorOptions().dtype(torch::kBFloat16).device(xq.device()));
     if (T == 0) return y.zero_();
     auto stream = at::cuda::getCurrentCUDAStream();
-    #define GM_ARGS gscales.data_ptr<float>(), \
+    #define GM_ARGS gscales.data_ptr<float>(), grow_p, \
         xq.data_ptr<unsigned char>(), xsf.data_ptr<unsigned char>(), \
         tile_e.data_ptr<int>(), tile_t0.data_ptr<int>(), tile_n.data_ptr<int>(), \
         table_qw.data_ptr<int64_t>(), table_bscale.data_ptr<int64_t>(), \
@@ -3069,7 +3097,8 @@ __global__ void __launch_bounds__(TN * 2) nvfp4_moe_fused_kernel(
     const int64_t *__restrict__ tq_d, const int64_t *__restrict__ tb_d,
     float *__restrict__ ws, int *__restrict__ compteurs,
     __nv_bfloat16 *__restrict__ d, const int *__restrict__ ordre, const float *__restrict__ tw,
-    float *__restrict__ y32, int k_top, int K, int I, int M_out, int act) {
+    float *__restrict__ y32, int k_top, int K, int I, int M_out, int act,
+    const float *__restrict__ grow) {
 #ifdef ACVRAM_MMA_FP4
     constexpr int WARPS = TN / 16, FILS = WARPS * 32;
     static_assert(TN == 64 || TN == 128, "TN : 64 ou 128");
@@ -3167,10 +3196,15 @@ __global__ void __launch_bounds__(TN * 2) nvfp4_moe_fused_kernel(
     __syncthreads();
     // --- épilogue FC1 : bf16(g·gs), bf16(u·gs) -> act bf16 -> E2M1 bloc 16 (= ce warp) en shared
     unsigned char *A2 = smem, *SA2 = smem + 16 * LD2;
-    const float gsg = gs_g[e], gsu = gs_u[e];
+    const float gsg0 = gs_g[e], gsu0 = gs_u[e];
     float v[2][4];
     #pragma unroll
-    for (int h = 0; h < 2; ++h)
+    for (int h = 0; h < 2; ++h) {
+        // échelle globale par ligne d'activation (grow de nvfp4_quant_act) ;
+        // l'activation, elle, est requantifiée ci-dessous sans échelle globale
+        // (chemin témoin, plancher E4M3 non corrigé — ACVRAM_MOE_DECODE_FUSED=0)
+        const float gr = grow ? grow[t0 + min(g + 8 * h, nt - 1)] : 1.f;
+        const float gsg = gsg0 * gr, gsu = gsu0 * gr;
         #pragma unroll
         for (int nf = 0; nf < 2; ++nf)
             #pragma unroll
@@ -3187,6 +3221,7 @@ __global__ void __launch_bounds__(TN * 2) nvfp4_moe_fused_kernel(
                 }
                 v[h][nf * 2 + c] = __bfloat162float(__float2bfloat16(a_ * uu));
             }
+    }
     #pragma unroll
     for (int h = 0; h < 2; ++h) {
         float amax = 0.f;
@@ -3352,8 +3387,14 @@ torch::Tensor nvfp4_moe_fused(torch::Tensor tq_g, torch::Tensor tb_g, torch::Ten
                               torch::Tensor ws, torch::Tensor compteurs,
                               int64_t K, int64_t I, int64_t M_out, int64_t act, int64_t tn,
                               torch::Tensor ordre, torch::Tensor tw, int64_t k_top, int64_t t, bool atomique,
-                              int64_t etages) {
+                              int64_t etages, c10::optional<torch::Tensor> grow) {
     CHECK_CUDA(xq); ACVRAM_DEVICE_GUARD(xq);
+    const float *grow_p = nullptr;
+    if (grow.has_value() && grow->defined()) {
+        CHECK_CUDA(*grow); CHECK_CONTIG(*grow);
+        TORCH_CHECK(grow->scalar_type() == torch::kFloat && grow->numel() == xq.size(0), "MoE fusionne : grow fp32 [G]");
+        grow_p = grow->data_ptr<float>();
+    }
     for (auto &z : {tq_g, tb_g, gs_g, tq_u, tb_u, gs_u, tq_d, tb_d, gs_d, xq, xsf, tile_e, tile_t0, tile_n, ws, compteurs})
         CHECK_CONTIG(z);
     TORCH_CHECK(K % 128 == 0 && I % tn == 0 && M_out % 128 == 0, "MoE fusionne : K multiple de 128, I de tn, M_out de 128");
@@ -3388,7 +3429,7 @@ torch::Tensor nvfp4_moe_fused(torch::Tensor tq_g, torch::Tensor tb_g, torch::Ten
             tq_g.data_ptr<int64_t>(), tb_g.data_ptr<int64_t>(), tq_u.data_ptr<int64_t>(), tb_u.data_ptr<int64_t>(), \
             tq_d.data_ptr<int64_t>(), tb_d.data_ptr<int64_t>(), ws.data_ptr<float>(), compteurs.data_ptr<int>(), \
             reinterpret_cast<__nv_bfloat16 *>(d.data_ptr()), ordre.data_ptr<int>(), tw.data_ptr<float>(), \
-            y32.data_ptr<float>(), (int)k_top, (int)K, (int)I, (int)M_out, (int)act); } while (0)
+            y32.data_ptr<float>(), (int)k_top, (int)K, (int)I, (int)M_out, (int)act, grow_p); } while (0)
     if (tn == 64) { if (etages == 2) MF_LANCE(64, 2); else MF_LANCE(64, 3); }
     else          { if (etages == 2) MF_LANCE(128, 2); else MF_LANCE(128, 3); }
     #undef MF_LANCE
@@ -4649,6 +4690,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("awq") = py::none(), py::arg("e_sorted") = py::none(),
           "MoE prefill : act(g)*u en bf16 depuis les vues [:, :m], rembourre a Kd (act 0=SiLU, 1=GELU-tanh) ; awq [E,Kd] + e_sorted [G] : x / s[e]");
     m.def("nvfp4_moe_fused", &nvfp4_moe_fused,
+          py::arg("tq_g"), py::arg("tb_g"), py::arg("gs_g"), py::arg("tq_u"), py::arg("tb_u"), py::arg("gs_u"),
+          py::arg("tq_d"), py::arg("tb_d"), py::arg("gs_d"), py::arg("xq"), py::arg("xsf"),
+          py::arg("tile_e"), py::arg("tile_t0"), py::arg("tile_n"), py::arg("ws"), py::arg("compteurs"),
+          py::arg("K"), py::arg("I"), py::arg("M_out"), py::arg("act"), py::arg("tn"), py::arg("ordre"), py::arg("tw"),
+          py::arg("k_top"), py::arg("t"), py::arg("atomique"), py::arg("etages"), py::arg("grow") = py::none(),
           "MoE decodage fusionne (port b12x) : gate+up+act+quant en shared, down par tranches, split-K seriel -> d bf16 [G, M_out]");
     m.def("narrow_gemm", &narrow_gemm,
           py::arg("qw"), py::arg("sc8"), py::arg("sc16"), py::arg("zr"), py::arg("x"), py::arg("K"),
@@ -4663,14 +4709,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("table_qw"), py::arg("table_bscale"), py::arg("gscales"), py::arg("xq"),
           py::arg("xsf"), py::arg("tile_e"), py::arg("tile_t0"), py::arg("tile_n"),
           py::arg("M"), py::arg("K"), py::arg("bt"), py::arg("etages") = 0, py::arg("ks") = 64,
+          py::arg("grow") = py::none(),
           "MoE NVFP4 : GEMM groupee W4A4 sur la MMA FP4 native de sm_120 (mxf4nvf4) ; "
           "etages 0 = chargements directs, 2-4 = pipeline cp.async en shared ; ks 64 ou 128 par etage");
     m.def("nvfp4_gemm_grouped_mma_disponible", &nvfp4_gemm_grouped_mma_disponible,
           "vrai si la carte courante est sm_120 et le noyau MMA FP4 compile");
     m.def("nvfp4_quant_act", &nvfp4_quant_act,
-          "activations bf16 [G, K] -> (E2M1 [G, K/2], echelles UE4M3 [G, K/16]) par bloc de 16 ; "
-          "x*2^log2k (compense par gscale*2^-log2k dans la GEMM) ; awq [E, K] bf16 + e_sorted [G] : x/s[e] fusionne",
-          py::arg("x"), py::arg("log2k") = 0, py::arg("awq") = py::none(), py::arg("e_sorted") = py::none(),
+          "activations bf16 [G, K] -> (E2M1 [G, K/2], echelles UE4M3 [G, K/16], echelle globale fp32 [G] "
+          "par ligne = amax_r/(6*448), a passer en grow a la GEMM) ; awq [E, K] bf16 + e_sorted [G] : x/s[e] fusionne",
+          py::arg("x"), py::arg("awq") = py::none(), py::arg("e_sorted") = py::none(),
           py::arg("compteurs") = py::none());
     m.def("int4_gemv_grouped", &int4_gemv_grouped,
           "INT4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
