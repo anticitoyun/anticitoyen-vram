@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **PLANCHER EAGER (7fa055c) : pas b=12 juste (arbitre 81/84) = 66-67,6 ms, 166 t/s, 1,23-1,24 J, 205 W (carte à moitié inoccupée, surcoût Python) — 17,2 ms n'était PAS l'ordre de grandeur d'un chemin juste. Union GPU seule (nsys) = 38,5 ms, borne basse. Module MLA innocenté (test_mla_graphe_rejeu 6/6 verts) : défaut dans le GraphRunner (liaison/remplissage/clé), en cours poste4.** Objectif : duel retiré, à refaire après correctif GraphRunner ; ensuite (2) table à 5 moteurs.
+Mis à jour : 16/09 (initial, poste7). **PIVOT (cf2eb77) : module MLA à créneaux JUSTE (4/4 vs référence hors créneau). Coder-30B SANS MLA a le même défaut sous formes fixes (graphes 25/28 cos min 0,872, eager 27/28) — le défaut est GÉNÉRIQUE au pipeline à formes fixes (jetons/embedding/positions au pas 2), pas MLA ; GLM l'amplifie ×6 (l'état MLA porte l'erreur d'un pas à l'autre). Plancher eager GLM = 66-67,6 ms (17,2 ms invalide). Chantier élargi au-delà de MLA — décision poste7 sur la suite.** Objectif : duel retiré, à refaire après correctif du pipeline formes fixes ; ensuite (2) table à 5 moteurs.
 
 ## Chantiers ouverts et scellés
 
