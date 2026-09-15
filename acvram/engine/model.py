@@ -2059,8 +2059,6 @@ class ACVRamModel(nn.Module):
         idx = (batch.last_token_indices() if logits_positions is None
                else logits_positions)
         x = x[idx.to(x.device)]
-        head_dev = getattr(self.lm_head.qweight, "qweight", None)
-        target = head_dev.device if head_dev is not None else x.device
         # LES LOGITS SE PRODUISENT EN FP32, ET C'EST L'ENTREE QU'ON CONVERTIT.
         # Le dtype de sortie des noyaux suit celui de x — nvfp4_gemv fait
         # `out = torch::empty({N, M}, xc.options())` — donc passer x en float
@@ -2094,9 +2092,7 @@ class ACVRamModel(nn.Module):
         # correctif MESURABLE par A/B sans recompiler, et sert de repli si le
         # cout en temps s'averait sensible. Un correctif qu'on ne peut pas
         # comparer a son absence n'est pas evaluable.
-        _bf16 = os.environ.get("ACVRAM_LOGITS_BF16") == "1"
-        logits = self.lm_head(x.to(target) if _bf16
-                              else x.to(target, dtype=torch.float32))
+        logits = self._tete(x)
         if logits.dtype != torch.float32:
             # Un noyau qui rend autre chose que ce qu'on lui a donne annule le
             # correctif en silence. On le dit une fois plutot que de le taire.
@@ -2106,6 +2102,19 @@ class ACVRamModel(nn.Module):
                       "une entree fp32 : le noyau de la tete impose son type, "
                       "et le gain de resolution n'est pas acquis.", flush=True)
         return self._logits_finaux(logits)
+
+    def _tete(self, x: torch.Tensor) -> torch.Tensor:
+        """L'entrée de ``lm_head`` en fp32 sur l'appareil de la tête — LE MÊME
+        texte pour le chemin eager et le chemin à formes fixes (graphes,
+        ACVRAM_GRAPHS_EAGER). Le fixe gardait la tête en bf16 (a5fac1c n'avait
+        porté le fp32 qu'en eager) : l'argmax basculait dès le 2e pas de
+        décodage, 64-68 % de jetons justes à l'arbitre prefill = décodage
+        (poste7-duel-verdict § 13, REGLES §7). ACVRAM_LOGITS_BF16=1 : témoin."""
+        head_dev = getattr(self.lm_head.qweight, "qweight", None)
+        target = head_dev.device if head_dev is not None else x.device
+        if os.environ.get("ACVRAM_LOGITS_BF16") == "1":
+            return self.lm_head(x.to(target))
+        return self.lm_head(x.to(target, dtype=torch.float32))
 
     def _logits_finaux(self, logits: torch.Tensor) -> torch.Tensor:
         # La tête de sortie est rembourrée à un multiple de 64 lignes pour ses
@@ -2143,14 +2152,14 @@ class ACVRamModel(nn.Module):
                             self.layers[-1].residual_multiplier)
             if self.mtp is not None:
                 self._garder_hidden(x)
-            return self._logits_finaux(self.lm_head(h))
+            return self._logits_finaux(self._tete(h))
         for i, layer in enumerate(self.layers):
             x = layer.decode_fixed(x, positions, slots, block_tables,
                                    seq_lens, max_pos, self.caches.get(i), q_len)
         if self.mtp is not None:
             self._garder_hidden(x)
         x = self.norm(x)
-        return self._logits_finaux(self.lm_head(x))
+        return self._logits_finaux(self._tete(x))
 
     # Lignes réservées d'avance pour l'état caché que lit la tête MTP : un lot
     # de vérification spéculative en pose k+1 par séquence.
