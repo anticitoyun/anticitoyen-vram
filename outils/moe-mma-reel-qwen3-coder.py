@@ -27,6 +27,7 @@ from pathlib import Path
 import sys as _s, pathlib as _p  # noqa: E401
 _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
 from outils.racine_modeles import MODELES  # noqa: E402
+from outils._chemins import sorties  # noqa: E402
 
 BASE = Path(MODELES)
 DOSSIER = BASE / "Qwen3-Coder-30B-A3B-nvfp4"
@@ -43,8 +44,7 @@ def main() -> int:
     ap.add_argument("--pour-de-vrai", action="store_true")
     ap.add_argument("--regime", required=True, choices=["a16", "mma-reel"])
     ap.add_argument("--sortie",
-                    default=str(Path("~/Bureau/Claude"
-                                     "/acvram-memoire/corpus/moe-mma-reel-qwen3-coder")))
+                    default=str(sorties() / "moe-mma-reel-qwen3-coder"))
     ap.add_argument("--device", default="cuda:0")
     a = ap.parse_args()
     regime = a.regime

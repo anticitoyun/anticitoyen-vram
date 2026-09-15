@@ -14,6 +14,10 @@ import os
 import sys
 from pathlib import Path
 
+import sys as _s2, pathlib as _p2
+_s2.path.insert(0, str(_p2.Path(__file__).resolve().parent.parent))
+from outils._chemins import sorties
+
 from vllm import LLM, SamplingParams
 
 chemin_modele = sys.argv[1]
@@ -84,8 +88,7 @@ for nom, ms in top:
 sortie = "\n".join(lignes)
 print(sortie)
 
-chemin = Path("~/Bureau/Claude/acvram-memoire"
-             "/corpus/profil-vllm-decode12-trace.txt")
+chemin = sorties() / "profil-vllm-decode12-trace.txt"
 chemin.parent.mkdir(parents=True, exist_ok=True)
 chemin.write_text(sortie)
 print(f"\nFAIT / TESTE: {chemin} / RESTE: rien")

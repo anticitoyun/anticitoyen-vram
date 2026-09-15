@@ -37,6 +37,7 @@ import sys as _s, pathlib as _p  # noqa: E401
 _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent))
 from outils.hooks_activations_a4 import installer_hooks, retirer_hooks  # noqa: E402
 from outils.racine_modeles import MODELES  # noqa: E402
+from outils._chemins import sorties  # noqa: E402
 
 BASE = Path(MODELES)
 DOSSIER = BASE / "Llama-2-7b-nvfp4"
@@ -69,8 +70,7 @@ def main() -> int:
                     help="sous-ensemble, ex. a4,a8 pour sauter le temoin a16 "
                          "deja mesure (voir la note du docstring)")
     ap.add_argument("--sortie",
-                    default=str(Path("~/Bureau/Claude"
-                                     "/acvram-memoire/corpus/a4-fakequant")))
+                    default=str(sorties() / "a4-fakequant"))
     ap.add_argument("--device", default="cuda:0")
     a = ap.parse_args()
     regimes = [r.strip() for r in a.regimes.split(",") if r.strip()]
