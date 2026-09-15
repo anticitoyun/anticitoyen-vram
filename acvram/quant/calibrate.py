@@ -43,6 +43,7 @@ from .fakequant_activation import fake_quantize_nvfp4_activation
 __all__ = ["ChannelScaler", "search_channel_scales",
            "search_channel_scales_commun", "alpha_commun_gate_up",
            "hadamard_transform",
+           "fwht_activations",
            "largest_pow2_divisor", "apply_hadamard_weight", "ActStats",
            "quantize_with_calibration"]
 
@@ -89,6 +90,30 @@ def hadamard_transform(x: torch.Tensor, block: Optional[int] = None,
     if normalize:
         y = y / math.sqrt(b)
     return y.reshape(orig_shape)
+
+
+def fwht_activations(x: torch.Tensor, block: int) -> torch.Tensor:
+    """La rotation de Hadamard des ACTIVATIONS, l'arithmétique du noyau
+    (nvfp4_quant_act, poste7-hadamard-16-09) : étages papillon en fp32 (chaque
+    sortie = une somme de deux valeurs), normalisation × (1/√bloc) calculée en
+    fp32 RN (√ puis division tenseur/tenseur — tenseur/scalaire multiplierait
+    par l'inverse, un ulp d'écart), puis retour au dtype de x. Utilisée par la
+    boucle par expert (ChannelScaler.apply) et par les chemins torch de la
+    pile : les trois arrondissent pareil, la référence des tests aussi."""
+    n = x.shape[-1]
+    if block < 2 or n % block:
+        raise ValueError(f"le bloc de Hadamard {block} ne divise pas {n}")
+    orig_shape, dtype = x.shape, x.dtype
+    y = x.reshape(-1, n // block, block).to(torch.float32).clone()
+    h = 1
+    while h < block:
+        v = y.view(y.shape[0], y.shape[1], block // (2 * h), 2, h)
+        a, c = v[..., 0, :], v[..., 1, :]
+        y = torch.stack((a + c, a - c), dim=-2).reshape(y.shape[0], y.shape[1], block)
+        h *= 2
+    racine = torch.tensor(float(block), dtype=torch.float32, device=x.device).sqrt()
+    inv = torch.ones((), dtype=torch.float32, device=x.device) / racine
+    return (y * inv).reshape(orig_shape).to(dtype)
 
 
 def apply_hadamard_weight(weight: torch.Tensor, block: Optional[int] = None) -> torch.Tensor:
@@ -144,7 +169,7 @@ class ChannelScaler:
 
     def apply(self, x: torch.Tensor) -> torch.Tensor:
         if self.hadamard_block:
-            x = hadamard_transform(x, block=self.hadamard_block)
+            x = fwht_activations(x, self.hadamard_block)
         if self.scale is not None:
             x = x / self._au_dtype(x.dtype)
         return x

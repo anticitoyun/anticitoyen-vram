@@ -69,3 +69,28 @@ def test_int8_gemv_warp_contre_blocs(M, K, N):
     if N > 1:
         un = torch.cat([ext.int8_gemv(*args, x[i:i + 1].contiguous(), t.group_size) for i in range(N)])
         assert torch.equal(y_warp, un)
+
+
+@pytest.mark.parametrize("M,K", [(151936, 2048), (5120, 2048)])
+@pytest.mark.parametrize("N", [1, 12, 16])
+def test_sortie_fp32_egale_au_bit_au_chemin_x_fp32(M, K, N):
+    """Tête lm_head (poste7-duel-verdict § 14 (ii)) : x bf16 + sortie_fp32 rend
+    exactement les logits du chemin x.to(float32) (mêmes produits, même ordre
+    de sommes, sans conversion de h) — et pas ceux du chemin bf16, qui arrondit
+    la sortie (l'argmax basculait, § 13)."""
+    ext = _ext()
+    torch.manual_seed(M + K + N + 7)
+    w = torch.randn(M, K, device="cuda") * 0.05
+    t = quantize(w, "int8", group_size=128)
+    args = (t.qweight.contiguous(), t.scales.contiguous(), t.zeros.contiguous())
+    x = (torch.randn(N, K, device="cuda") * 3).to(torch.bfloat16).contiguous()
+    y32 = ext.int8_gemv(*args, x, t.group_size, True)
+    ref = ext.int8_gemv(*args, x.float().contiguous(), t.group_size)
+    assert y32.dtype == torch.float32 and ref.dtype == torch.float32
+    assert torch.equal(y32, ref), f"{int((y32 != ref).sum())} logits différents du chemin x fp32"
+    y16 = ext.int8_gemv(*args, x, t.group_size)
+    assert y16.dtype == torch.bfloat16 and not torch.equal(y16.float(), ref)
+    # et par int8_matmul (le chemin de MoEModel._tete)
+    from acvram.kernels import int8_matmul
+    z = int8_matmul(x, t, sortie_fp32=True)
+    assert z.dtype == torch.float32 and torch.equal(z, ref[:, :t.shape[0]])

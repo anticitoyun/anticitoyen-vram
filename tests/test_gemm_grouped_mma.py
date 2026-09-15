@@ -31,7 +31,25 @@ def _ext():
     return ext
 
 
-def quant_act_ref(x: torch.Tensor, awq=None, e_sorted=None):
+def fwht_ref(xf: torch.Tensor, bloc: int) -> torch.Tensor:
+    """FWHT fp32 par bloc de ``bloc`` colonnes, l'arithmétique du noyau : étages
+    h = 1, 2, …, bloc/2, chaque sortie = a + c ou a − c (une seule somme,
+    reproductible), puis × (1/√bloc) calculé en fp32 RN (√ puis division
+    tenseur/tenseur), puis arrondi bf16 (comme ChannelScaler.apply)."""
+    G, K = xf.shape
+    y = xf.float().reshape(G, K // bloc, bloc).clone()
+    h = 1
+    while h < bloc:
+        v = y.view(G, K // bloc, bloc // (2 * h), 2, h)
+        a, c = v[..., 0, :], v[..., 1, :]
+        y = torch.stack((a + c, a - c), dim=-2).reshape(G, K // bloc, bloc)
+        h *= 2
+    racine = torch.tensor(float(bloc), dtype=torch.float32, device=xf.device).sqrt()
+    inv = torch.ones((), dtype=torch.float32, device=xf.device) / racine
+    return (y.reshape(G, K) * inv).to(torch.bfloat16).float()
+
+
+def quant_act_ref(x: torch.Tensor, awq=None, e_sorted=None, hadamard: int = 0):
     """Référence de nvfp4_quant_act (poste7-glm-pile-correctif § 7) : échelle
     globale PAR LIGNE g_r = amax_r / 2688 fp32 ; par bloc de 16,
     s = (amax_blk / amax_r) × 448 -> E4M3 au plus proche (448 exactement au bloc
@@ -43,6 +61,8 @@ def quant_act_ref(x: torch.Tensor, awq=None, e_sorted=None):
     (bf16(bf16(v)/bf16(s))) avant tout. Rend (codes, échelles E4M3, g_r)."""
     G, K = x.shape
     xf = x.float()
+    if hadamard:
+        xf = fwht_ref(xf, hadamard)
     if awq is not None:
         xf = (xf / awq[e_sorted.long()].float()).to(torch.bfloat16).float()
     xb = xf.view(G, K // 16, 16)

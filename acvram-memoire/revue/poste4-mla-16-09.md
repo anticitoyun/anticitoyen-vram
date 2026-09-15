@@ -63,3 +63,18 @@ fp8 sur les codes == bf16 sur le déquantifié à 1e-5). Les deux noyaux d'avant
 tranches sort de ± 0,004** → bf16 gardé. Coût VRAM : −50 % sur le latent des créneaux.
 Prédiction : mla_* −0,2 à −0,5 ms ; PPL : E4M3 par ligne = 3 bits de mantisse sur un latent
 normé, je n'exclus pas un dépassement (vLLM KV fp8 : +5 points) — c'est la mesure qui dit.
+
+## Après le duel (poste7 § 14) : deux postes sans coût de PPL
+- **(ii) tête** (54d5b28) : `int8_gemv(…, sortie_fp32=True)` = noyau `<bf16, float>` — x reste
+  en bf16, accumulation et sortie fp32 : mêmes produits, même ordre de sommes que `x.to(float32)`
+  → logits **égaux au bit** (test `test_sortie_fp32_egale_au_bit_au_chemin_x_fp32`, 151 936 ×
+  2 048, N = 1/12/16 ; le chemin bf16 diverge). `MoEModel._tete` l'emprunte au décodage ;
+  témoin `ACVRAM_TETE_FP32_ENTREE=1`. Prédiction : −0,4 à −0,7 ms/pas (poste7 −0,6).
+- **(i) projections** : les int8 q/kv/o de l'attention MLA (qa_kv fusionné, q_b, o) portent
+  `etroit` → `narrow_gemm` (tensor cores bf16, M ≤ 16) au lieu de `int8_gemv<4,12>` (31 µs par
+  lancement pour ~3 Mo : calcul, pas octets). Portée limitée à ces tenseurs : le réglage global
+  `ACVRAM_NARROW_GEMM` et le verdict Coder 0.6.6 (narrow OFF) ne bougent pas. Témoin
+  `ACVRAM_NARROW_MLA=0` ; bras `ACVRAM_NARROW_ROWS=16` (1aj-2) à essayer. Même arithmétique à
+  l'ordre des sommes près ; arbitre ≥ 80/84 à repasser. Prédiction : −1,5 à −2,5 ms/pas (poste7
+  −2,0 ; réfuté < −1,0 → borné par les octets).
+- Scellé poste7 après (i)+(ii) : pas b=12 ≤ 19,0 ms (réfuté > 20,0), depuis 21,3.

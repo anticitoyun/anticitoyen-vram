@@ -28,6 +28,7 @@ import torch.nn.functional as F
 from .. import kernels
 from ..memory import trace_routage as _trace_routage
 from ..memory.kvcache import PagedKVCache, bucket_blocks
+from ..quant.calibrate import fwht_activations
 from .config import ModelSpec
 from .layers import (QuantLinear, RMSNorm, RotaryEmbedding, add_norm, apply_rope,
                      rope_fusee,
@@ -717,6 +718,7 @@ class MoEBlock(nn.Module):
         self._raison_repli = ""
 
         awq = {}                               # nom -> table [E, K] bf16 (x / s[e]) ou None
+        hadamard = {}                          # nom -> bloc de rotation (0 : aucune)
 
         def one(nom, projs):
             ws = [p.qweight for p in projs]
@@ -726,8 +728,19 @@ class MoEBlock(nn.Module):
             # fait la boucle par expert (QuantLinear.forward : scaler.apply).
             # Refus seulement pour la rotation Hadamard (pas par ligne).
             scs = [p.scaler for p in projs]
-            if any(sc is not None and sc.hadamard_block for sc in scs):
-                self._raison_repli = f"{nom} : rotation Hadamard par expert (pas de pile)"
+            # Rotation de Hadamard (poste7-hadamard-16-09, `hadamard_block` du
+            # manifeste, 512 sur GLM) : acceptée si tous les experts de la
+            # projection portent le MÊME bloc — la pile tourne l'entrée une
+            # fois pour tous (noyau nvfp4_quant_act sur le chemin MMA,
+            # fwht_activations en torch sur GEMV / direct / _grouped_mm), la
+            # boucle par expert le fait dans ChannelScaler.apply : mêmes bits.
+            blocs = {int(sc.hadamard_block or 0) for sc in scs if sc is not None} or {0}
+            if len(blocs) != 1:
+                self._raison_repli = f"{nom} : blocs de Hadamard différents entre experts {sorted(blocs)}"
+                return None
+            hadamard[nom] = blocs.pop()
+            if hadamard[nom] and any(sc is None for sc in scs):
+                self._raison_repli = f"{nom} : rotation Hadamard sur une partie des experts seulement"
                 return None
             if any(sc is not None and sc.scale is not None for sc in scs) or _MOE_AWQ_TEMOIN:
                 # ACVRAM_MOE_AWQ_TEMOIN=1 : tables de 1 même sans échelle (le
@@ -825,6 +838,10 @@ class MoEBlock(nn.Module):
         if g is not None and u is not None and torch.equal(g, u):
             awq["up_proj"] = g
         awq["up_distinct"] = not (awq.get("up_proj") is g)
+        awq["hadamard"] = hadamard
+        if hadamard.get("gate_proj", 0) != hadamard.get("up_proj", 0):
+            self._raison_repli = "gate et up : blocs de Hadamard différents (même entrée)"
+            return None
         self._stacks = piles
         self._stacks_awq = awq
         return True
@@ -985,9 +1002,14 @@ class MoEBlock(nn.Module):
         awq_g = awq.get("gate_proj")
         awq_u = awq.get("up_proj") if awq.get("up_distinct") else awq_g
         awq_d = awq.get("down_proj")
+        hd = awq.get("hadamard", {})
+        hd_x, hd_d = hd.get("gate_proj", 0), hd.get("down_proj", 0)
         if not mma:
-            # chemins bf16 (direct, _grouped_mm) : division en torch ; la
-            # branche mma la fusionne dans nvfp4_quant_act (table + e_sorted)
+            # chemins bf16 (direct, _grouped_mm) : rotation et division en
+            # torch ; la branche mma les fusionne dans nvfp4_quant_act
+            if hd_x:
+                xs = fwht_activations(xs.to(torch.bfloat16), hd_x).to(xs.dtype)
+                xs_u = xs
             if awq.get("up_distinct") and awq_u is not None:
                 xs_u = (xs / awq_u[e_sorted, :xs.shape[1]]).contiguous()
             if awq_g is not None:
@@ -1001,12 +1023,14 @@ class MoEBlock(nn.Module):
                 and not os.environ.get("ACVRAM_MOE_GLUE_TORCH"))
         code_act = 1 if self.act == "gelu_tanh" else 0
 
-        def _activation(g, u, m, kd, awq_d=awq_d):
-            if glue and g.dtype == torch.bfloat16:
+        def _activation(g, u, m, kd, awq_d=awq_d, hd_d=hd_d):
+            if glue and g.dtype == torch.bfloat16 and not hd_d:
                 return ext.moe_act(g, u, m, kd, code_act, awq_d,
                                    e_sorted.to(torch.int32) if awq_d is not None else None)
             act = (self._act(g[:, :m].to(torch.float32))
                    * u[:, :m].to(torch.float32)).to(torch.bfloat16)
+            if hd_d:
+                act = fwht_activations(act, hd_d)
             if awq_d is not None:
                 act = act / awq_d[e_sorted, :m]
             if act.shape[1] != kd:
@@ -1031,12 +1055,12 @@ class MoEBlock(nn.Module):
             # x/s[e] et l'échelle globale par ligne dans le noyau ; la GEMM
             # multiplie grow[r] × gscales[e] dans son épilogue
             cpt = _qa_compteurs(xs.device)
-            xq, xsf, gr = ext.nvfp4_quant_act(xs, awq_g, es32, cpt)
-            xq2, xsf2, gr2 = (xq, xsf, gr) if awq_u is awq_g else ext.nvfp4_quant_act(xs, awq_u, es32, cpt)
+            xq, xsf, gr = ext.nvfp4_quant_act(xs, awq_g, es32, cpt, hd_x)
+            xq2, xsf2, gr2 = (xq, xsf, gr) if awq_u is awq_g else ext.nvfp4_quant_act(xs, awq_u, es32, cpt, hd_x)
             g = self._gemm_mma(pg, xq, xsf, tiles, brut=True, grow=gr)
             u = self._gemm_mma(pu, xq2, xsf2, tiles, brut=True, grow=gr2)
-            act = _activation(g, u, pg[5], pd[4], awq_d=None)
-            aq, asf, gra = ext.nvfp4_quant_act(act, awq_d, es32, cpt)
+            act = _activation(g, u, pg[5], pd[4], awq_d=None, hd_d=0)
+            aq, asf, gra = ext.nvfp4_quant_act(act, awq_d, es32, cpt, hd_d)
             d = self._gemm_mma(pd, aq, asf, tiles, brut=True, grow=gra)
         elif direct:
             # les poids restent en 4 bits : plus de pile bf16 intermédiaire
@@ -1106,6 +1130,7 @@ class MoEBlock(nn.Module):
             tiles = (te, t0, tn)
             awq_g = awq.get("gate_proj")
             awq_u = awq.get("up_proj") if awq.get("up_distinct") else awq_g
+            tourne_torch = False
         else:
             # Témoin torch (ACVRAM_MOE_ROUTE_PACK=0) : le contrat bit à bit du
             # noyau, tests/test_moe_route_pack.py.
@@ -1125,6 +1150,10 @@ class MoEBlock(nn.Module):
                 xs = F.pad(xs, (0, pg[4] - xs.shape[1]))
             awq = getattr(self, "_stacks_awq", {})
             e_sorted = flat_e[ordre].to(torch.int32)
+            if awq.get("hadamard", {}).get("gate_proj", 0):
+                # rotation AVANT la division (ordre de ChannelScaler.apply) ;
+                # le noyau ne la refera pas : hd_x est remis à 0 ci-dessous
+                xs = fwht_activations(xs, awq["hadamard"]["gate_proj"])
             xs2 = xs
             if awq.get("up_distinct"):
                 xs2 = xs if awq.get("up_proj") is None else (xs / awq["up_proj"][e_sorted.long()]).contiguous()
@@ -1134,17 +1163,20 @@ class MoEBlock(nn.Module):
             if not awq.get("up_distinct"):
                 xs2 = xs
             awq_g = awq_u = None                    # déjà divisées en torch (témoin)
+            tourne_torch = True
             inv = torch.empty_like(ordre); inv[ordre] = torch.arange(ordre.numel(), device=x.device)
             inv = inv.to(torch.int32)
         awq_d = awq.get("down_proj")
+        hd = awq.get("hadamard", {})
+        hd_x, hd_d = (0 if tourne_torch else hd.get("gate_proj", 0)), hd.get("down_proj", 0)
         es32 = e_sorted if (awq_g is not None or awq_u is not None or awq_d is not None) else None
         cpt = _qa_compteurs(xs.device)
-        xq, xsf, gr = ext.nvfp4_quant_act(xs, awq_g, es32, cpt)
+        xq, xsf, gr = ext.nvfp4_quant_act(xs, awq_g, es32, cpt, hd_x)
         xq2, xsf2, gr2 = ((xq, xsf, gr) if (xs2 is xs and awq_u is awq_g)
-                          else ext.nvfp4_quant_act(xs2, awq_u, es32, cpt))
+                          else ext.nvfp4_quant_act(xs2, awq_u, es32, cpt, hd_x))
         code_act = 1 if self.act == "gelu_tanh" else 0
         if (_MOE_DECODE_FUSED and hasattr(ext, "nvfp4_moe_fused") and bt == 16 and awq_d is None
-                and xs2 is xs and awq_u is awq_g
+                and not hd_x and not hd_d and xs2 is xs and awq_u is awq_g
                 and pg[4] % 128 == 0 and pg[5] == pd[4] and pd[4] % _MOE_FUSED_TN == 0 and pd[5] % 128 == 0):
             # Port de b12x (poste7-reprise-15-09-b § 3-4) : gate+up+act+quant en
             # shared, down par tranches, split-K sériel (bit-reproductible),
@@ -1158,7 +1190,7 @@ class MoEBlock(nn.Module):
             g = self._gemm_mma(pg, xq, xsf, tiles, brut=True, bt=bt, grow=gr)
             u = self._gemm_mma(pu, xq2, xsf2, tiles, brut=True, bt=bt, grow=gr2)
             act = ext.moe_act(g, u, pg[5], pd[4], code_act)
-            aq, asf, gra = ext.nvfp4_quant_act(act, awq_d, es32, cpt)
+            aq, asf, gra = ext.nvfp4_quant_act(act, awq_d, es32, cpt, hd_d)
             d = self._gemm_mma(pd, aq, asf, tiles, brut=True, bt=bt, grow=gra)
         y = ext.moe_reduce_trie(d, tw.contiguous(), inv.contiguous(), pd[5], k)
         return y if x.dtype == torch.bfloat16 else y.to(x.dtype)
@@ -1207,6 +1239,12 @@ class MoEBlock(nn.Module):
         pg, pu = self._stacks["gate_proj"], self._stacks["up_proj"]
         awq = getattr(self, "_stacks_awq", {})
         distinct = bool(awq.get("up_distinct"))
+        hd = awq.get("hadamard", {})
+        hd_x, hd_d = hd.get("gate_proj", 0), hd.get("down_proj", 0)
+        if hd_x:
+            # rotation de Hadamard (poids tournés) : x·H par bloc, la même
+            # arithmétique que ChannelScaler.apply — une fois par jeton
+            x = fwht_activations(x.to(torch.bfloat16), hd_x).to(x.dtype)
         if awq.get("gate_proj") is not None or distinct:
             # échelle AWQ par expert : la ligne (jeton, expert) est divisée par
             # s[e] avant les projections, comme ChannelScaler.apply en boucle
@@ -1245,6 +1283,8 @@ class MoEBlock(nn.Module):
             u = self._grouped(x32 if x_u is x_g else x_u.to(torch.float32), pu, eid, tok_g)
             act = self._act(g) * u              # [G, I] fp32
         seq = torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
+        if hd_d:
+            act = fwht_activations(act.to(torch.bfloat16), hd_d).to(act.dtype)
         if awq.get("down_proj") is not None:
             act = (act.to(torch.bfloat16) / awq["down_proj"][eid.long(), :act.shape[1]]).to(act.dtype)
         d = self._grouped(act, self._stacks["down_proj"], eid, seq)
@@ -2114,6 +2154,20 @@ class ACVRamModel(nn.Module):
         target = head_dev.device if head_dev is not None else x.device
         if os.environ.get("ACVRAM_LOGITS_BF16") == "1":
             return self.lm_head(x.to(target))
+        # Tete INT8 au decodage (poste7-duel-verdict par. 14 (ii)) : x reste en
+        # bf16, le GEMV accumule et SORT en fp32 — memes produits, meme ordre
+        # de sommes que x.to(float32) : logits egaux au bit, sans la conversion
+        # de h ni le double trafic de x en fp32 (0,85 -> ~0,2 ms attendu).
+        # ACVRAM_TETE_FP32_ENTREE=1 : temoin (l ancienne conversion).
+        w = self.lm_head.qweight
+        lin = self.lm_head
+        if (x.dtype == torch.bfloat16 and getattr(w, "format", "") == "int8"
+                and head_dev is not None and head_dev.is_cuda
+                and getattr(lin, "scaler", None) is None and getattr(lin, "streamed", None) is None
+                and getattr(lin, "bias", None) is None
+                and x.shape[0] <= kernels._INT8_GEMV_MAX
+                and os.environ.get("ACVRAM_TETE_FP32_ENTREE") != "1"):
+            return kernels.int8_matmul(x.to(target), w, sortie_fp32=True)
         return self.lm_head(x.to(target, dtype=torch.float32))
 
     def _logits_finaux(self, logits: torch.Tensor) -> torch.Tensor:

@@ -67,3 +67,28 @@ def test_nvfp4_contre_gemv_et_float64(M, N, K, rows):
     assert int(((y.double() - r64).abs() > tol).sum()) == 0
     exact = (y == ref.to(y.dtype)).float().mean().item()
     assert exact > 0.9, f"{exact:.3f} bit-identiques au GEMV nvfp4"
+
+
+def test_projections_mla_marquees_etroites(monkeypatch):
+    """poste7-duel-verdict § 14 (i) : les projections int8 q/kv/o de l'attention
+    MLA portent `etroit` (GEMM étroit à M ≤ 16) après fuse_projections ;
+    ACVRAM_NARROW_MLA=0 ne marque rien (témoin GEMV)."""
+    import torch.nn as nn
+    from acvram.engine.layers import QuantLinear
+    from acvram.engine.mla import MLAttention
+    from acvram.quant.formats import quantize
+    nh, nope, rope, rank, dv, hidden = 4, 32, 16, 64, 32, 256
+
+    def lin(o, i):
+        t = quantize(torch.randn(o, i) * 0.05, "int8", group_size=128)
+        return QuantLinear(t, out_features=o, in_features=i)
+    for env, attendu in (("1", True), ("0", False)):
+        monkeypatch.setenv("ACVRAM_NARROW_MLA", env)
+        la = MLAttention(lin(nh * (nope + rope), hidden), lin(rank + rope, hidden), lin(hidden, nh * dv),
+                         torch.ones(rank, dtype=torch.bfloat16), torch.randn(nh, rank, nope).to(torch.bfloat16),
+                         torch.randn(nh, dv, rank).to(torch.bfloat16), nh, nope, rope, rank, dv)
+        la.fuse_projections()
+        assert bool(getattr(la.o_proj.qweight, "etroit", False)) is attendu
+        fusion = la.q_kv if la.q_kv is not None else la.q_a_proj
+        if fusion is not None and getattr(fusion, "qweight", None) is not None:
+            assert bool(getattr(fusion.qweight, "etroit", False)) is attendu

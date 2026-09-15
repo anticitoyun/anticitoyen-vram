@@ -648,7 +648,7 @@ _INT8_GEMV_MAX = int(os.environ.get("ACVRAM_INT8_GEMV_MAX", "80"))
 
 
 def int8_matmul(x: torch.Tensor, t: INT8Tensor,
-                gemv_threshold: int = 0) -> torch.Tensor:
+                gemv_threshold: int = 0, sortie_fp32: bool = False) -> torch.Tensor:
     """``x @ W.T`` avec W stocké en INT8 affine par groupes.
 
     Sans ce chemin, les tenseurs promus en INT8 par la conversion — quelques
@@ -678,15 +678,22 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
     if ext is not None and t.qweight.is_cuda and n <= gemv_threshold:
         if k_pad != xf.shape[-1]:
             xf = torch.nn.functional.pad(xf, (0, k_pad - xf.shape[-1]))
-        if (_NARROW_GEMM and _NARROW_MIN <= n <= 16 and k_pad % 64 == 0 and t.group_size % 64 == 0
-                and xf.dtype == torch.bfloat16 and hasattr(ext, "narrow_gemm")):
+        # `t.etroit` : tenseur désigné pour le GEMM étroit indépendamment du
+        # réglage global (les projections int8 q/kv/o de l'attention MLA,
+        # poste7-duel-verdict § 14 (i) : int8_gemv<4,12> = 4,4 ms/pas à b=12)
+        etroit = _NARROW_GEMM or getattr(t, "etroit", False)
+        if (etroit and not sortie_fp32 and _NARROW_MIN <= n <= 16 and k_pad % 64 == 0
+                and t.group_size % 64 == 0 and xf.dtype == torch.bfloat16 and hasattr(ext, "narrow_gemm")):
             y = ext.narrow_gemm(t.qweight.contiguous(), None, t.scales.contiguous(), t.zeros.contiguous(),
                                 xf.contiguous(), k_pad, t.group_size, 1.0, _narrow_rows(t.qweight.shape[0]))
             return y.to(x.dtype).reshape(*orig_shape[:-1], t.qweight.shape[0])
         y = ext.int8_gemv(
             t.qweight.contiguous(), t.scales.contiguous(), t.zeros.contiguous(),
-            xf.contiguous(), t.group_size)
+            xf.contiguous(), t.group_size, sortie_fp32)
         y = y[..., : t.shape[0]]
+        if sortie_fp32:
+            # tete lm_head : x bf16, logits fp32 — pas de retour au dtype de x
+            return y.to(torch.float32).reshape(*orig_shape[:-1], t.shape[0])
         return y.to(x.dtype).reshape(*orig_shape[:-1], t.shape[0])
 
     w = int8_dequant(t, x.dtype if x.dtype != torch.float32 else torch.float16)
