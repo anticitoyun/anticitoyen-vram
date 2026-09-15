@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **cb2784b RÉFUTÉ (0363244) : PPL prefill W4A4 1,02292 (> 1,010), PIRE que sans la métrique (1,0183 sans quantize_activation_nvfp4) — la métrique aggrave. Décodage non mesuré (protocole à établir), question à poste7 : mesurer quand même ou Hadamard par bloc directement.** MoE reste W4A16 (7,1 ms). Projections MLA closes. Duel publié à ×1,53, état stable. Ensuite (2) table à 5 moteurs.
+Mis à jour : 16/09 (initial, poste7). **Rotation Hadamard, à sec, en parallèle (poste7-hadamard-16-09) : poste2 (H_512 bloc-diagonale sur les poids d'experts, sans AWQ) + poste4 (FWHT 512 dans nvfp4_quant_act aux deux sites + entrée tournée). Scellés : PPL NOMINAL MMA=1 ≤ 1,010 prefill ET décodage ; W4A16 tourné = non tourné ± 0,002 ; pas ≤ 19,0 ms ; prefill ≥ 12 000 j/s ; réfuté > 1,015 → W4A4 abandonné sur GLM, W4A16 définitif.** Carte va au comparatif 5 moteurs (poste3) en priorité ; Hadamard prend la carte quand libre.
 
 ## Chantiers ouverts et scellés
 
