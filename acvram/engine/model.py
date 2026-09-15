@@ -1529,7 +1529,11 @@ _MOE_ROUTE_PACK = os.environ.get("ACVRAM_MOE_ROUTE_PACK", "1") == "1"
 # d'attention batché seul (bead 6wa, bit-identique, −28,5 % sur le pas
 # GLM-42B b=12) ; 2 = tout decode_static batché, projections comprises
 # (numérique de forward_batch, à mesurer avant d'en faire le défaut).
-_MLA_BATCH = int(os.environ.get("ACVRAM_MLA_BATCH", "1"))
+# 2 = tout le chemin MLA du décodage batché sur le lot (projections en un
+# GEMM M=b, normes, RoPE, cat, écriture du latent en un lancement) — défaut
+# depuis poste7-duel-verdict-16-09 § 6.2 (15 534 lancements/pas à b=12 en
+# séquence par séquence) ; 1 = noyau d'attention seul batché ; 0 = boucle.
+_MLA_BATCH = int(os.environ.get("ACVRAM_MLA_BATCH", "2"))
 
 # Marque, dans le magasin d'états, une séquence dont l'état réside dans les
 # tampons fixes d'une couche (chemin graphes) plutôt qu'en tuple fonctionnel.
@@ -1684,9 +1688,11 @@ class DecoderLayerGDN(nn.Module):
             if q_len == 1 and hasattr(la, "rank") and _MLA_BATCH:
                 ext = kernels.get_extension()
                 if ext is not None and hasattr(ext, "mla_decode_batch"):
-                    ptrs, scores = self._mla_lot(b)
-                    fn = la.decode_static_batch_complet if _MLA_BATCH >= 2 else la.decode_static_batch
-                    return fn(h, self.statics[:b], self.static_bucket, ptrs, scores)
+                    ptrs, scores, len_ptrs = self._mla_lot(b)
+                    if _MLA_BATCH >= 2:
+                        return la.decode_static_batch_complet(h, self.statics[:b], self.static_bucket,
+                                                              ptrs, scores, len_ptrs)
+                    return la.decode_static_batch(h, self.statics[:b], self.static_bucket, ptrs, scores)
             return torch.cat([un(h[i:i + 1], self.statics[i]) for i in range(b)], dim=0)
         if q_len == 1:
             return un(h, self.static)
@@ -1704,15 +1710,19 @@ class DecoderLayerGDN(nn.Module):
         Les caches par créneau ne sont jamais réalloués : la clé est stable, et
         la création tombe dans l'échauffement eager qui précède toute capture
         de graphe (graphs.py, _capture) — jamais dans la capture elle-même."""
-        cle = tuple(self.statics[i]["cache"].data_ptr() for i in range(b))
+        cle = tuple((self.statics[i]["cache"].data_ptr(), self.statics[i]["len"].data_ptr()) for i in range(b))
         cache = self.__dict__.setdefault("_mla_lots", {})
         entree = cache.get(cle)
         if entree is None:
             dev = self.statics[0]["cache"].device
-            ptrs = torch.tensor(cle, dtype=torch.int64, device=dev)
+            ptrs = torch.tensor([c for c, _ in cle], dtype=torch.int64, device=dev)
+            # les longueurs aussi : un tenseur 0-d par créneau, adresse stable
+            # (mla_ecrit_latent les avance sur la carte, un lancement pour b)
+            len_ptrs = torch.tensor([self.statics[i]["len"].data_ptr() for i in range(b)],
+                                    dtype=torch.int64, device=dev)
             sc0 = self.statics[0]["scores"]
             scores = torch.zeros(b, sc0.shape[0], sc0.shape[1], dtype=torch.float32, device=dev)
-            entree = cache[cle] = (ptrs, scores)
+            entree = cache[cle] = (ptrs, scores, len_ptrs)
         return entree
 
     def ensure_hist(self, q_len: int) -> dict:
