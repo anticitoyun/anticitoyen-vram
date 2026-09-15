@@ -104,7 +104,7 @@ l'arbre qu'une campagne importe. Journal : `scratchpad/awq-unite-scelle-16-09.lo
   l'extension → cache de pages froid sur le converti (17 Go, ~1 Go/s ≈ 19 s = 25 − 6).
   Contrôle : rejouer le même bras deux fois de suite ; 6 s la seconde fois → artefact d'ordre.
 - Nouveau noyau (§ 7) : `nvfp4_quant_act(x, awq, e_sorted, compteurs) → (xq, xsf, grow[G])`,
-  un CTA par ligne (ligne en shared, K ≤ 16 384), g_r = amax_r/(6×448), s_blk = amax_blk/(6·g_r)
+  un CTA par ligne (ligne en shared, K ≤ 16 384), g_r = amax_r/2688, s_blk = (amax_blk/amax_r)×448
   → E4M3 (≤ 448 par construction), valeurs/(sdec·g_r) → E2M1 ; `nvfp4_gemm_grouped_mma(…,
   grow=)` multiplie g_r[r]×gscales[e] dans l'épilogue (les deux variantes) ; `nvfp4_moe_fused`
   reçoit grow pour gate/up (son act reste requantifié sans échelle globale : témoin OFF).
@@ -116,6 +116,14 @@ l'arbre qu'une campagne importe. Journal : `scratchpad/awq-unite-scelle-16-09.lo
   près de la boucle, 0 saturé, flush ≤ 1 %) ; `quant_act_ref` et les tests GEMM/décodage/fusion
   passés à `grow` ; `test_moe_fused` : identité au bit avec B remplacée par la tolérance
   float64 (l'act du noyau fusionné n'a pas d'échelle de ligne). Non exécutés sur carte.
+
+- t-qa 065960a (poste3) : ROUGE, 153 échecs, cause unique : `gr` du noyau ≠ référence sur ~20 %
+  des lignes (xq, xsf égaux). Cause lue : torch divise un tenseur par un scalaire Python en
+  multipliant par l'inverse (1 ulp) là où le noyau fait `__fdiv_rn` ; et `amax_r/(6·g_r)`
+  pouvait rendre 448 + 1 ulp (« 15 saturés »). Correctif : divisions tenseur/tenseur dans la
+  référence, `s_blk = (amax_blk/amax_r)×448` (448 exact au bloc maximal, plus de clamp),
+  `__fmul_rn` partout ; seuil de flush du test corrigé (4e-6 × amax_r, pas × g_r) ; référence
+  float64 de `test_moe_mma_decodage` passée à `dequant_act_ref` (elle ignorait g_r).
 
 ## Reste
 Part converti (+2,06 ms) à expliquer avant de retrancher le scellé ; part échelles (+1,04 ms) à

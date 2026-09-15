@@ -51,9 +51,9 @@ def test_decodage_mma_egal_prefill_mma(bt):
     assert torch.equal(xq12, xq[:12]) and torch.equal(xsf12, xsf[:12]) and torch.equal(gr12, gr[:12])   # la quantification est par ligne
     y_decode = _gemm_par_routage(ext, pile, xq12, xsf12, gr12, topi_all[:12], bt)
     # les deux côtés contre la référence float64 (sinon deux sorties fausses seraient « égales »)
-    from tests.test_gemm_grouped_mma import _dequant_nibbles, _w64
+    from tests.test_gemm_grouped_mma import dequant_act_ref, _w64
     qw, bs, gs = pile
-    xa = (_dequant_nibbles(xq12).view(12, -1, 16) * xsf12.view(torch.float8_e4m3fn).double().unsqueeze(-1)).reshape(12, K)
+    xa = dequant_act_ref(xq12, xsf12, gr12)
     w = _w64(qw, bs).reshape(E, M, K)
     ref = torch.stack([(xa[t] @ w[e].T) * gs[e].double() for t in range(12) for e in topi_all[t].tolist()])
     tol = ref.abs() * 2 ** -6 + 1e-2

@@ -2018,9 +2018,9 @@ __device__ __forceinline__ void mma_mxf4nvf4(float d[4], const unsigned a[4], co
 // Activations bf16 [G, K] -> E2M1 [G, K/2] + échelles UE4M3 [G, K/16]
 // + échelle globale fp32 PAR LIGNE grow [G] (poste7-glm-pile-correctif-16-09
 // § 7). Un CTA par ligne : la ligne en mémoire partagée, amax de ligne par
-// réduction, g_r = amax_r / (6 × 448), puis chaque bloc de 16 : s = amax_blk /
-// (6 · g_r) → E4M3 (le bloc maximal tombe sur 448 : saturation impossible
-// par construction), valeurs / (sdec · g_r) → E2M1. Un bloc n'est flushé à
+// réduction, g_r = amax_r / 2688 (= 6 × 448), puis chaque bloc de 16 :
+// s = (amax_blk / amax_r) × 448 → E4M3 (le bloc maximal donne 448 exactement :
+// saturation impossible par construction), valeurs / (sdec · g_r) → E2M1. Un bloc n'est flushé à
 // zéro que si amax_blk < ~2,2e-6 × amax_r (E4M3 sous 2^-10). L'épilogue de
 // la GEMM multiplie par grow[r] × gscales[e]. Sans échelle globale (avant),
 // amax/6 < 2^-9 mettait le bloc entier à zéro : 23-31 % des blocs de
@@ -2066,7 +2066,12 @@ __global__ void __launch_bounds__(QA_FILS) nvfp4_quant_act_kernel(
     }
     __syncthreads();
     const float amax_r = qa_red[0];
-    const float g = amax_r > 0.f ? __fdiv_rn(amax_r, 6.f * 448.f) : 0.f;
+    // 2688 = 6 × 448 ; toutes les opérations en RN explicite (__fdiv_rn,
+    // __fmul_rn) : la référence Python (tests/test_gemm_grouped_mma.py
+    // quant_act_ref) refait exactement les mêmes — torch divise un tenseur par
+    // un scalaire Python en multipliant par l'inverse (1 ulp d'écart sur 20 %
+    // des lignes, t-qa 065960a), la référence divise donc par un tenseur.
+    const float g = amax_r > 0.f ? __fdiv_rn(amax_r, 2688.f) : 0.f;
     if (threadIdx.x == 0) grow[row] = g;
     for (int blk = threadIdx.x; blk < nblk; blk += QA_FILS) {
         const float *v = qa_row + blk * 16;
@@ -2076,8 +2081,11 @@ __global__ void __launch_bounds__(QA_FILS) nvfp4_quant_act_kernel(
         unsigned char sbits = 0;
         float sdec = 0.f;
         if (amax_b > 0.f && g > 0.f) {
-            const float sb = __fdiv_rn(amax_b, 6.f * g);       // ≤ 448 par construction
-            sbits = (unsigned char)__nv_cvt_float_to_fp8(fminf(sb, 448.f), __NV_SATFINITE, __NV_E4M3);
+            // (amax_blk / amax_r) × 448 : le bloc maximal donne 1 × 448 = 448
+            // exactement (E4M3 0xFE), les autres ≤ 448 — pas de clamp, pas
+            // d'arrondi qui dépasse (amax_r / (6 g) pouvait rendre 448 + 1 ulp)
+            const float sb = __fmul_rn(__fdiv_rn(amax_b, amax_r), 448.f);
+            sbits = (unsigned char)__nv_cvt_float_to_fp8(sb, __NV_SATFINITE, __NV_E4M3);
             sdec = e4m3_to_float(sbits);
             if (compteurs) {
                 atomicAdd((unsigned long long *)compteurs, 1ull);
@@ -2087,7 +2095,7 @@ __global__ void __launch_bounds__(QA_FILS) nvfp4_quant_act_kernel(
         }
         unsigned long long packed = 0ull;
         if (sdec > 0.f) {
-            const float d = sdec * g;                               // fp32, comme la référence
+            const float d = __fmul_rn(sdec, g);                     // fp32 RN, comme la référence
             #pragma unroll
             for (int j = 0; j < 16; j += 2) {
                 const float2 p = make_float2(__fdiv_rn(v[j], d), __fdiv_rn(v[j + 1], d));

@@ -33,8 +33,9 @@ def _ext():
 
 def quant_act_ref(x: torch.Tensor, awq=None, e_sorted=None):
     """Référence de nvfp4_quant_act (poste7-glm-pile-correctif § 7) : échelle
-    globale PAR LIGNE g_r = amax_r / (6 × 448) fp32 ; par bloc de 16,
-    s = amax_blk / (6 · g_r) -> E4M3 au plus proche (≤ 448 par construction),
+    globale PAR LIGNE g_r = amax_r / 2688 fp32 ; par bloc de 16,
+    s = (amax_blk / amax_r) × 448 -> E4M3 au plus proche (448 exactement au bloc
+    maximal, ≤ 448 ailleurs : pas de saturation),
     puis chaque valeur / (sdec · g_r) -> E2M1 au plus proche, égalités vers le
     code pair (cvt.rn.satfinite.e2m1x2). Le noyau divise en IEEE (__fdiv_rn) :
     sous --use_fast_math la division approchée basculait 5 égalités sur 5 376.
@@ -47,10 +48,13 @@ def quant_act_ref(x: torch.Tensor, awq=None, e_sorted=None):
     xb = xf.view(G, K // 16, 16)
     amax_b = xb.abs().amax(-1)                                    # [G, K/16]
     amax_r = amax_b.amax(-1)                                      # [G]
-    g = torch.where(amax_r > 0, amax_r / (6.0 * 448.0), torch.zeros_like(amax_r))
+    # divisions tenseur / tenseur uniquement : torch divise par un scalaire
+    # Python en multipliant par l'inverse (1 ulp d'écart, t-qa 065960a) ;
+    # le noyau fait __fdiv_rn / __fmul_rn, RN explicites
+    g = torch.where(amax_r > 0, amax_r / torch.full_like(amax_r, 2688.0), torch.zeros_like(amax_r))
     ok_r = (g > 0).unsqueeze(-1)
-    s = torch.where(ok_r & (amax_b > 0), amax_b / (6.0 * g).clamp(min=1e-30).unsqueeze(-1),
-                    torch.zeros_like(amax_b)).clamp(max=448.0)
+    s = torch.where(ok_r & (amax_b > 0), (amax_b / amax_r.clamp(min=1e-30).unsqueeze(-1)) * 448.0,
+                    torch.zeros_like(amax_b))
     sbits = s.to(torch.float8_e4m3fn)
     sdec = sbits.float()
     ok = sdec > 0

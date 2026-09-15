@@ -5,7 +5,7 @@ et division AWQ fusionnée.
 Sans échelle globale, un bloc de 16 dont amax/6 < 2⁻⁹ (plancher dénormal
 E4M3) était écrit entièrement à zéro : 23-31 % des blocs de silu(g)·u à
 l'entrée de down_proj sur GLM ; un 2^k fixe saturait les queues d'une fenêtre
-réelle. Le noyau pose g_r = amax_r/(6×448) par ligne : le bloc maximal tombe
+réelle. Le noyau pose g_r = amax_r/2688 par ligne, s_blk = (amax_blk/amax_r)×448 : le bloc maximal tombe
 sur 448 (saturation impossible), un bloc n'est flushé que sous ~2,2e-6 × amax_r.
 Contrats : noyau == référence Python de la même arithmétique au bit (table
 comprise) ; 0 saturé quelle que soit l'amplitude ; invariance d'échelle par
@@ -79,7 +79,7 @@ def test_noyau_egal_reference_au_bit(table):
 def test_jamais_sature_et_petits_blocs_gardes():
     """Un changement qui doit casser sur les deux anciens noyaux : sans échelle
     globale, les blocs à 2e-3 étaient flushés ; avec 2^k fixe, une queue à
-    3e3 saturait. Ici : 0 saturé, 0 flushé tant que amax_blk ≥ 1e-5 × amax_r,
+    3e3 saturait. Ici : 0 saturé, 0 flushé tant que amax_blk ≥ 4e-6 × amax_r,
     et la déquantification retrouve x au bruit E2M1 près."""
     ext = _ext(); dev = torch.device("cuda:0")
     g = torch.Generator().manual_seed(9)
@@ -91,8 +91,10 @@ def test_jamais_sature_et_petits_blocs_gardes():
     n, z, sat = cpt.tolist()
     assert sat == 0
     amax = x.float().view(G, K // 16, 16).abs().amax(-1)
-    petits_gardes = (amax >= 1e-5 * gr.unsqueeze(-1)) & (amax > 0)
-    assert int(((xsf == 0) & petits_gardes).sum()) == 0, "un bloc ≥ 1e-5 × amax de ligne a été flushé"
+    amax_r = amax.amax(-1, keepdim=True)
+    # flush ⇔ (amax_blk/amax_r)·448 < 2^-10 (sous l'E4M3) ⇔ amax_blk < 2,2e-6 × amax_r
+    petits_gardes = (amax >= 4e-6 * amax_r) & (amax > 0)
+    assert int(((xsf == 0) & petits_gardes).sum()) == 0, "un bloc ≥ 4e-6 × amax de ligne a été flushé"
     assert z == int(((xsf == 0) & (amax > 0)).sum())
     deq = dequant_act_ref(xq, xsf, gr)
     lignes = [i for i in range(G) if i != 7]
