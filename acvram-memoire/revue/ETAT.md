@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **Narrow MLA + tête (96e5af7) : arbitre 82/84 tenu ; pas 21,06-21,15 ms, −0,23 ms (−1,1 %) — scellé ≤ 19,0 RÉFUTÉ. Attribution : narrow_gemm réduit les lancements (387×7 µs), pas les octets ; le plafond réel est le MoE W4A16 (7,1 ms, −2,3 en MMA contre +1,4 % PPL). Duel inchangé à 1 % (×1,53). Tête : écart 0,14 ms, témoin ambigu à confirmer par poste4.** Attente : PPL cb2784b poste2 (prefill+décodage ≤ 1,010) — décide si MoE MMA passe aux deux sites. Ensuite (2) table à 5 moteurs.
+Mis à jour : 16/09 (initial, poste7). **cb2784b RÉFUTÉ (0363244) : PPL prefill W4A4 1,02292 (> 1,010), PIRE que sans la métrique (1,0183 sans quantize_activation_nvfp4) — la métrique aggrave. Décodage non mesuré (protocole à établir), question à poste7 : mesurer quand même ou Hadamard par bloc directement.** MoE reste W4A16 (7,1 ms). Projections MLA closes. Duel publié à ×1,53, état stable. Ensuite (2) table à 5 moteurs.
 
 ## Chantiers ouverts et scellés
 
