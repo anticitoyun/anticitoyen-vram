@@ -42,3 +42,11 @@ après un prompt réel — arbitre prefill 58/84 (défaut ET boucle, identiques)
 81/84 à 4 créneaux. Le chiffre ×4,08 (56,1 ms) ne se lit plus comme une comparaison
 valide. b=1 et b=4 du duel : à revérifier par l'arbitre à leur configuration exacte
 avant republication.
+
+## PUBLICATION FINALE (16/09, poste7 § 14, après correctif tête fp32 et prise B)
+
+Chiffre définitif : `verdict-duel-glm-prise-b-16-09` (52c019c). Nous/vLLM = 0,70
+(b=1) / 0,79 (b=4) / 0,65 (b=12) — scellé 0,8-0,9 RÉFUTÉ DE PEU à b=12, réserve
+de qualité inchangée (vLLM PPL 1,056, non apparié). Régime W4A16 prefill +
+décodage, arbitré SLOTS=b. **MLA : parité atteinte sur son poste** — chantier
+clos. Postes restants (poste4, poste2) : projections int8, tête GEMV, MoE MMA.
