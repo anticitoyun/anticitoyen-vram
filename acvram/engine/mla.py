@@ -549,9 +549,11 @@ class MLAttention(nn.Module):
             len_t = torch.tensor(total - 1, dtype=torch.long, device=x.device)
             scores_buf = torch.zeros(self.nh, bucket, dtype=torch.float32,
                                      device=x.device)
-            o_lat = ext.mla_decode(q_eff[i].to(torch.float32).contiguous(),
-                                   C, len_t, scores_buf, bucket,
-                                   self.rank, self.scale)      # [nh, rank]
+            # même noyau (une passe) et même godet que les créneaux : le chemin
+            # hors créneau et decode_static_batch_complet arrondissent pareil
+            o_lat = _mla_decode(ext, q_eff[i].to(torch.float32).contiguous(),
+                                C, len_t, scores_buf, bucket,
+                                self.rank, self.scale)         # [nh, rank]
             o_lats.append(o_lat)
             nouvelles_caches.append(cache_i)
 
