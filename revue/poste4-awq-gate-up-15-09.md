@@ -25,6 +25,26 @@ note de décision de poste7. Contexte : `revue/awq-pile-15-09.md`, `revue/poste7
 - `test_route_pack_awq_egal_torch` : `xs2` bit à bit = `x / s_up[e]` ; sans `awq2`, même `data_ptr`.
 - À sec : `nvcc -c` du .cu passe (sm_120f) ; py_compile ; CPU 10 passed / 16 skipped.
 
+## Tests sur carte (16/09 06:27, poste4 5dcffdf)
+`tests/test_moe_awq_pile.py` + route_pack + graphe + fused : **25 passed** (équivalence ×8 dont
+gate≠up sur les 4 chemins, `xs2` bit à bit, 8/9 lancements, table d'unité).
+
+## Contrôle du RÉFUTÉ d'poste1 (dd51a3c) : c'est W4A4, pas l'échelle
+Son script (`equiv-pile-boucle-glm.py`, converti alpha-commun, 16 préfixes, critère 2 ulp) relancé
+tel quel, même carte, même créneau :
+
+| réglage | positions ok | delta | lecture |
+|---|---|---|---|
+| défaut (MIN_T=9, poste1) | 0-7 ok, 8-15 échec | 0,9-1,8 | coupure = `model.py:1340` `t >= MIN_T` |
+| `ACVRAM_MOE_DECODE_MMA=0` | **16/16** | 0,04-0,13 | GEMV W4A16 partout = boucle |
+| `ACVRAM_MOE_DECODE_MMA_MIN_T=1` | 1/16 (un ex-aequo) | 0,7-2,3 | MMA W4A4 partout |
+
+La coupure à 9 est la garde de lot : préfixe ≥ 9 → `_forward_grouped_mma`, activations
+quantifiées E2M1 bloc 16 (chemin officiel v0.6.1, PPL 0,9995). L'échelle AWQ est appliquée des
+deux côtés (sinon MMA=0 n'aurait pas rendu 16/16). Le critère « 2 ulp contre la boucle W4A16 » ne
+peut pas être tenu par le chemin W4A4 par construction — c'est la table des trois issues de poste7
+(`poste7-glm-w4a4-16-09`) qui tranche : bogue (non), W4A4 coûte (à mesurer en PPL), métrique.
+
 ## Reste avant fusion
 Note de poste7 ; tests carte ; coût mesuré distinct vs égal (b=12) ; PPL GLM avec échelles
 distinctes (poste2).
