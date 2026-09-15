@@ -466,6 +466,18 @@ class GraphRunner:
         if deja:
             self.evenement_jetons.record()
             return entry["out"][:b_reel * ql]
+        if trace and os.environ.get("ACVRAM_TRACE_CRENEAUX") and self.hybrid_layers:
+            # Sonde (poste7 § 11) : ce que le rejeu va lire, couche 0 hybride —
+            # longueurs, palier, adresses des créneaux contre la table _mla_lot
+            l0 = self.hybrid_layers[0]
+            sts = l0.statics[:b_reel]
+            lens = [int(st["len"].item()) for st in sts]
+            lot = l0.__dict__.get("_mla_lots", {})
+            cle = tuple((st["cache"].data_ptr(), st["len"].data_ptr()) for st in l0.statics[:key[0]])
+            print(f"[graphe-CRENEAUX] rejeu n°{self.replays} clé {key} palier {l0.static_bucket} "
+                  f"lens={lens} proprietaires={l0.static_owners[:b_reel]} "
+                  f"caches={[st['cache'].dtype for st in sts][:1]} "
+                  f"table_mla_lot={'ok' if cle in lot else 'ABSENTE'}", flush=True)
         if "step" in entry:                  # ACVRAM_GRAPHS_EAGER : sans capture
             with torch.inference_mode():
                 entry["out"] = entry["step"]()
