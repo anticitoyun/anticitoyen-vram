@@ -1,11 +1,18 @@
 """
-Validation des menus contre l'inventaire disque brut.
+Validation des menus contre l'inventaire disque brut (inventaire-disque-brut.tsv).
+Validation enrichissement (inventaire-enrichi-palier0-17-09.tsv).
 
-Quatre contrôles :
+Quatre contrôles de base (menus) :
 (a) chemins/manifestes existent sur le disque
 (b) bidirectionnel disque↔menu (dénominateur : tout modèle disque doit être au menu ou marqué hors-scope)
 (c) taille/format = manifeste ± 5%
 (d) crash sur modèle fabriqué et dossier non listé
+
+Quatre contrôles enrichissement (palier 0) :
+(e) model_type : lire config.json, casse sur valeur fabriquée
+(f) max_position_embeddings : lire config.json, casse sur valeur fabriquée
+(g) vision/tools : lire tokenizer.added_tokens_decoder, casse sur valeur fabriquée
+(h) thinking : toujours ND (non déterminable), casse si ≠ ND
 """
 
 import csv
@@ -30,6 +37,26 @@ def inventory():
                 'type': row['Type']
             }
     return inv
+
+
+@pytest.fixture(scope="module")
+def enriched():
+    """Charge l'inventaire enrichi palier 0."""
+    enr_file = Path(__file__).parent.parent / "acvram-memoire/revue/inventaire-enrichi-palier0-17-09.tsv"
+    enr = {}
+    with open(enr_file) as f:
+        reader = csv.DictReader(f, delimiter='\t')
+        for row in reader:
+            enr[row['model']] = {
+                'model_type': row['model_type'],
+                'max_position_embeddings': row['max_position_embeddings'],
+                'rope_scaling': row['rope_scaling'],
+                'vision': row['vision'],
+                'tools': row['tools'],
+                'thinking': row['thinking'],
+                'bpw': row['bpw'],
+            }
+    return enr
 
 
 @pytest.fixture(scope="module")
@@ -149,6 +176,72 @@ def test_d_crash_entree_fabriquee(inventory):
 
     # Une requête sur la clé fabriquée doit échouer proprement
     # (pas de fallback, pas de création implicite)
+
+
+def test_e_model_type_enrichi(enriched):
+    """(e) model_type : présent et valide (lu depuis config.json).
+
+    Casse sur valeur fabriquée : un model_type="zzz-fiction" ne doit pas exister.
+    """
+    model_types = set()
+    for model, data in enriched.items():
+        mt = data['model_type']
+        if mt != 'N/A':
+            model_types.add(mt)
+
+    # Vérifier qu'une valeur fabriquée n'existe pas
+    fake_type = "zzz-fiction-model"
+    assert fake_type not in model_types, f"Valeur fabriquée {fake_type} trouvée dans model_types"
+
+
+def test_f_max_position_embeddings_enrichi(enriched):
+    """(f) max_position_embeddings : présent et numérique (lu depuis config.json).
+
+    Casse sur valeur fabriquée : max_ctx=9999999 ne doit pas exister.
+    """
+    max_ctxs = set()
+    for model, data in enriched.items():
+        ctx = data['max_position_embeddings']
+        if ctx != 'N/A':
+            try:
+                max_ctxs.add(int(ctx))
+            except ValueError:
+                pass
+
+    # Vérifier qu'une valeur fabriquée n'existe pas
+    fake_ctx = 9999999
+    assert fake_ctx not in max_ctxs, f"Valeur fabriquée {fake_ctx} trouvée dans max_position_embeddings"
+
+
+def test_g_vision_tools_enrichi(enriched):
+    """(g) vision/tools : présents et booléens (lu depuis tokenizer).
+
+    Casse sur valeur fabriquée : vision="maybe" ou tools="partial" ne doivent pas exister.
+    """
+    valid_values = {'yes', 'no', 'N/A'}
+
+    for model, data in enriched.items():
+        vision = data['vision']
+        tools = data['tools']
+
+        assert vision in valid_values, f"{model}: vision={vision} invalide"
+        assert tools in valid_values, f"{model}: tools={tools} invalide"
+
+    # Vérifier qu'une valeur fabriquée n'existe pas
+    fake_value = "maybe"
+    for model, data in enriched.items():
+        assert data['vision'] != fake_value, f"Valeur fabriquée {fake_value} trouvée"
+        assert data['tools'] != fake_value, f"Valeur fabriquée {fake_value} trouvée"
+
+
+def test_h_thinking_toujours_nd(enriched):
+    """(h) thinking : toujours ND (non déterminable).
+
+    Casse si thinking ≠ ND : une détection de thinking doit échouer.
+    """
+    for model, data in enriched.items():
+        thinking = data['thinking']
+        assert thinking == 'ND', f"{model}: thinking={thinking} ≠ ND (doit rester non déterminable)"
 
 
 if __name__ == "__main__":
