@@ -33,7 +33,9 @@ except Exception:                                        # noqa: BLE001
 
 PAGE = 16                  # jetons par bloc du cache (kvcache.BLOCK_SIZE)
 NREP_TUILE = 16            # lignes de la tuile Q : n_rep rembourré (tl.dot ≥ 16)
-PAGES_PAR_TUILE = 2        # 32 jetons par itération
+PAGES_PAR_TUILE = 4        # 64 jetons par itération
+TRANCHES_MAX = 32          # au-delà, la réduction des tranches coûte plus que le parallélisme
+                           # (b=1 ctx 2048 : 64 tranches de 32 jetons = 0,828 ms contre 0,704 CUDA)
 
 
 def disponible() -> bool:
@@ -103,8 +105,11 @@ if triton is not None:
             v = tl.load(vc_ptr + cell[:, None] * D + d[None, :], mask=valide[:, None], other=0)
             sv = tl.load(vs_ptr + page * stride_sp + (t % PAGE_C) * stride_st + hkv,
                          mask=valide, other=0.0)
-            pv = (p * sv.to(tl.float32)[None, :]).to(q.dtype)
-            acc = acc * corr[:, None] + tl.dot(pv, v.to(q.dtype))
+            # p·v en fp16 : p ∈ [0, 1] × échelle et v int8 y sont exacts à 2⁻¹²
+            # (en bf16, chaque probabilité perdait 2⁻⁹ : 264/384 sorties hors
+            # 2⁻⁸ du noyau CUDA, poste3) ; la somme reste fp32
+            pv = (p * sv.to(tl.float32)[None, :]).to(tl.float16)
+            acc = acc * corr[:, None] + tl.dot(pv, v.to(tl.float16))
             m = m_new
         tl.store(pm_ptr + base * NREP_T + rows, m)
         tl.store(pl_ptr + base * NREP_T + rows, l)
@@ -114,10 +119,11 @@ if triton is not None:
     def _reduce_kernel(part_ptr, pm_ptr, pl_ptr, out_ptr, HKV, C,
                        stride_ob, stride_oh,
                        NREP: tl.constexpr, D: tl.constexpr, CT: tl.constexpr,
-                       NREP_T: tl.constexpr):
+                       NREP_T: tl.constexpr, DB: tl.constexpr):
         b = tl.program_id(0)
         hkv = tl.program_id(1)
-        rows = tl.arange(0, NREP_T)
+        db = tl.program_id(2)                             # tranche de D : la réduction
+        rows = tl.arange(0, NREP_T)                       # de C tranches se parallélise
         masque_h = rows < NREP
         cs = tl.arange(0, CT)
         masque_c = cs < C
@@ -130,8 +136,8 @@ if triton is not None:
         l = tl.load(pl_ptr + (base + cs[None, :]) * NREP_T + rows[:, None],
                     mask=masque_c[None, :], other=0.0)
         lg = tl.sum(l * w, 1)
-        d = tl.arange(0, D)
-        acc = tl.zeros((NREP_T, D), tl.float32)
+        d = db * DB + tl.arange(0, DB)
+        acc = tl.zeros((NREP_T, DB), tl.float32)
         for c in range(0, C):
             wc = tl.exp(tl.load(pm_ptr + (base + c) * NREP_T + rows) - mg)
             a = tl.load(part_ptr + ((base + c) * NREP_T + rows[:, None]) * D + d[None, :])
@@ -147,7 +153,7 @@ def _tranches(n_pages: int, b: int, hkv: int, device) -> tuple[int, int]:
     b = 1, une tranche par page au moins ; ne dépend que des formes (godet),
     donc stable sous un graphe CUDA."""
     sms = torch.cuda.get_device_properties(device).multi_processor_count if device.type == "cuda" else 4
-    voulu = max(1, -(-2 * sms // max(1, b * hkv)))
+    voulu = max(1, min(TRANCHES_MAX, -(-2 * sms // max(1, b * hkv))))
     pages_par_tranche = max(PAGES_PAR_TUILE, -(-n_pages // voulu))
     pages_par_tranche = -(-pages_par_tranche // PAGES_PAR_TUILE) * PAGES_PAR_TUILE
     c = -(-n_pages // pages_par_tranche)
@@ -181,6 +187,7 @@ def paged_attention(q: torch.Tensor, kc: torch.Tensor, ks: torch.Tensor,
     CT = 1
     while CT < C:
         CT *= 2
-    _reduce_kernel[(B, n_kv)](part, pm, pl, out, n_kv, C, out.stride(0), out.stride(1),
-                              NREP=n_rep, D=D, CT=max(CT, 2), NREP_T=NREP_TUILE, num_warps=4)
+    _reduce_kernel[(B, n_kv, D // 32)](part, pm, pl, out, n_kv, C, out.stride(0), out.stride(1),
+                                       NREP=n_rep, D=D, CT=max(CT, 2), NREP_T=NREP_TUILE, DB=32,
+                                       num_warps=4)
     return out
