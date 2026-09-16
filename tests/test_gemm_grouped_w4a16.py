@@ -351,20 +351,19 @@ def test_b0_un_offset_decale_d_une_ligne_casse():
 
 # ---- B1 : la même grille lisant NVFP4 dans la tuile
 
-def test_b1_les_decodeurs_e2m1_et_e4m3_sont_exacts():
-    """Les deux décodeurs arithmétiques du noyau contre torch : les 16 codes
-    E2M1 et les 256 octets E4M3 (fn : 0x7F/0xFF = NaN, exclus — jamais
-    produits par quantize_nvfp4)."""
+def test_b1_les_tables_de_decodage_sont_exactes_en_bf16():
+    """Les deux tables du noyau (E2M1 → bf16, E4M3 → bf16) : exactes contre
+    torch (E4M3 fn : 0x7F/0xFF = NaN → 0, jamais produits par quantize_nvfp4),
+    et le produit code × échelle est exact en bf16 (1 + 3 bits ≤ 7)."""
     gg = _gg()
-    codes = torch.arange(16, dtype=torch.uint8)
-    out = gg.decoder(codes, True)
-    att = torch.tensor([0, .5, 1, 1.5, 2, 3, 4, 6] * 2) * torch.tensor([1] * 8 + [-1] * 8)
-    assert torch.equal(out, att.float()), out
-    octets = torch.arange(256, dtype=torch.uint8)
-    out = gg.decoder(octets, False)
-    att = octets.view(torch.float8_e4m3fn).float()
-    ok = ~torch.isnan(att)
-    assert torch.equal(out[ok], att[ok]), (out[~torch.isclose(out, att)][:5])
+    lut4, lut8 = gg.tables("cpu", torch.bfloat16)
+    att4 = torch.tensor([0, .5, 1, 1.5, 2, 3, 4, 6] * 2) * torch.tensor([1.] * 8 + [-1.] * 8)
+    assert torch.equal(lut4.float(), att4)
+    att8 = torch.arange(256, dtype=torch.uint8).view(torch.float8_e4m3fn).float()
+    ok = ~torch.isnan(att8)
+    assert torch.equal(lut8.float()[ok], att8[ok]) and (lut8.float()[~ok] == 0).all()
+    prod = (lut4.float()[:, None] * lut8.float()[None, ok])
+    assert torch.equal(prod.to(torch.bfloat16).float(), prod)
 
 
 def candidat_groupe_nvfp4(qw, bs, gs, x, comptes, M, K, decalage=0, gs_par_ligne=False):

@@ -77,52 +77,19 @@ if triton is not None:
 if triton is not None:
 
     @triton.jit
-    def _e2m1(codes):
-        """Quartet E2M1 (bit 3 = signe, bits 2-1 = exposant, bit 0 = mantisse)
-        → fp32 : {0, 0,5, 1, 1,5, 2, 3, 4, 6}, par arithmétique (pas de
-        table : l'interpréteur et le noyau font la même chose)."""
-        mag = codes & 7
-        mant = (mag & 1).to(tl.float32)
-        expo = (mag >> 1).to(tl.float32)
-        val = tl.where(expo == 0, mant * 0.5, (1.0 + 0.5 * mant) * tl.exp2(expo - 1.0))
-        return tl.where((codes & 8) != 0, -val, val)
-
-    @triton.jit
-    def _e4m3(octets):
-        """Octet E4M3 (fn) → fp32 par reconstruction des bits fp32 : normal
-        (1 + m/8)·2^(e−7), sous-normal m·2^(−9), signe bit 7 — exact."""
-        o = octets.to(tl.int32)
-        signe = (o >> 7) & 1
-        e = (o >> 3) & 15
-        m = o & 7
-        bits_norm = ((e - 7 + 127) << 23) | (m << 20)
-        norm = tl.cast(bits_norm, tl.float32, bitcast=True)
-        sous = m.to(tl.float32) * 0.001953125             # 2^-9
-        val = tl.where(e == 0, sous, norm)
-        return tl.where(signe != 0, -val, val)
-
-    @triton.jit
-    def _decode_kernel(src, dst, N: tl.constexpr, QUATRE: tl.constexpr):
-        """Sonde : décode N octets/quartets pour vérifier les décodeurs contre torch."""
-        i = tl.arange(0, N)
-        o = tl.load(src + i)
-        if QUATRE:
-            v = _e2m1(o)
-        else:
-            v = _e4m3(o)
-        tl.store(dst + i, v)
-
-    @triton.jit
     def _gemm_groupe_nvfp4_kernel(xs_ptr, qw_ptr, bs_ptr, gs_ptr, y_ptr, te_ptr, t0_ptr, tn_ptr,
-                                  n_tuiles, M, K,
+                                  lut4_ptr, lut8_ptr, n_tuiles, M, K,
                                   stride_xg, stride_qe, stride_qm, stride_be, stride_bm,
                                   stride_gse, stride_gsm, stride_yg,
                                   BT: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
-        """B1 : même grille que `_gemm_groupe_kernel`, opérande B lu en NVFP4
+        """B1' : même grille que `_gemm_groupe_kernel`, opérande B lu en NVFP4
         (E2M1 par paires, échelle E4M3 par bloc de 16, échelle globale par
-        expert ou par ligne) et déquantifié en registres avant `tl.dot`.
-        Les poids ne sont jamais écrits en bf16 : ~0,56 o/param lus au lieu
-        de 2 + 2 (écriture puis relecture de la pile bf16)."""
+        expert ou par ligne) et décodé en bf16 SANS fp32 dans la boucle K
+        (poste7-b1-verdict-17-09 : la version arithmétique fp32 par valeur
+        faisait 41 TFLOPS contre 92 pour B0) : deux tables constantes
+        (16 E2M1 → bf16, 256 E4M3 → bf16), une lecture de table par valeur,
+        produit code × échelle exact en bf16 (1 + 3 bits de mantisse ≤ 7),
+        échelle globale dans l'épilogue seulement."""
         pid = tl.program_id(0)
         nprog = tl.num_programs(0)
         n_blocs_n = tl.cdiv(M, BN)
@@ -149,13 +116,16 @@ if triton is not None:
                 masque_kb = kb < K // 2
                 oct = tl.load(qw_ptr + e * stride_qe + cols[:, None] * stride_qm + kb[None, :],
                               mask=masque_c[:, None] & masque_kb[None, :], other=0)
-                w = tl.reshape(tl.join(_e2m1(oct & 15), _e2m1(oct >> 4)), (BN, BK))
-                # échelles de bloc : une par 16 colonnes
+                lo = tl.load(lut4_ptr + (oct & 15))
+                hi = tl.load(lut4_ptr + (oct >> 4))
+                w = tl.reshape(tl.join(lo, hi), (BN, BK))
+                # échelles de bloc : une par 16 colonnes, bf16 exact
                 ksc = k0 // 16 + tl.arange(0, BK // 16)
                 masque_sc = ksc < K // 16
                 sc = tl.load(bs_ptr + e * stride_be + cols[:, None] * stride_bm + ksc[None, :],
                              mask=masque_c[:, None] & masque_sc[None, :], other=0)
-                scf = tl.reshape(tl.broadcast_to(tl.expand_dims(_e4m3(sc), 2), (BN, BK // 16, 16)), (BN, BK))
+                scb = tl.load(lut8_ptr + sc)
+                scf = tl.reshape(tl.broadcast_to(tl.expand_dims(scb, 2), (BN, BK // 16, 16)), (BN, BK))
                 b = (w * scf).to(a.dtype)
                 acc = tl.dot(a, tl.trans(b), acc)
             gs = tl.load(gs_ptr + e * stride_gse + cols * stride_gsm, mask=masque_c, other=0.0)
@@ -164,13 +134,30 @@ if triton is not None:
                      acc.to(y_ptr.dtype.element_ty), mask=masque_l[:, None] & masque_c[None, :])
 
 
+_LUTS: dict = {}
+
+
+def tables(device, dtype=torch.bfloat16):
+    """(E2M1 [16], E4M3 [256]) → ``dtype``, constantes par appareil. E4M3 fn :
+    0x7F et 0xFF (NaN) → 0, jamais produits par `quantize_nvfp4`."""
+    cle = (str(device), dtype)
+    if cle not in _LUTS:
+        e2m1 = torch.tensor([0, .5, 1, 1.5, 2, 3, 4, 6] * 2) * torch.tensor([1.] * 8 + [-1.] * 8)
+        e4m3 = torch.arange(256, dtype=torch.uint8).view(torch.float8_e4m3fn).float()
+        e4m3 = torch.nan_to_num(e4m3, nan=0.0)
+        _LUTS[cle] = (e2m1.to(device=device, dtype=dtype).contiguous(),
+                      e4m3.to(device=device, dtype=dtype).contiguous())
+    return _LUTS[cle]
+
+
 BT = 128                # lignes par tuile : celui de `_tuiles(cnt, BT)`
-# Tuile 128 × 128 × 64, 8 warps, 2 étages : 2 × (128 + 128) × 64 × 2 o = 64 Kio
-# de mémoire partagée — sous les ~99 Kio par bloc de sm_120, un programme par
-# SM. Réglé à sec, jamais mesuré : ce sont les quatre boutons d'une seconde
-# passe si le scellé (GEMM ≤ 80 ms) n'est pas atteint ; pas d'autotune, un
-# banc au premier prefill fausserait la mesure de poste3.
+# B0 (bf16) : tuile 128 × 128 × 64, 8 warps, 2 étages = 64 Kio de shared —
+# sous les ~99 Kio par bloc de sm_120, un programme par SM ; mesuré 92 TFLOPS
+# (poste3 cb7bfa2). B1' (NVFP4) : l'opérande B pèse 4 + 0,5 Kio par étage au
+# lieu de 16, donc 4 étages = 4 × (16 + 4,5) = 82 Kio. Pas d'autotune : un banc
+# au premier prefill fausserait la mesure.
 _BN, _BK, _WARPS, _STAGES = 128, 64, 8, 2
+_STAGES_NVFP4 = 4
 
 
 def _programmes(device) -> int:
@@ -219,22 +206,14 @@ def gemm_groupe_nvfp4(xs: torch.Tensor, qw: torch.Tensor, bs: torch.Tensor, gs: 
         stride_gse, stride_gsm = gs.stride(0), 0
     else:
         stride_gse, stride_gsm = gs.stride(0), gs.stride(1)
+    lut4, lut8 = tables(xs.device, xs.dtype)
     grille = (min(_programmes(xs.device), int(te.numel()) * -(-M // _BN)),)
     _gemm_groupe_nvfp4_kernel[grille](
-        xs, qw, bs, gs, y, te, t0, tn, te.numel(), M, K,
+        xs, qw, bs, gs, y, te, t0, tn, lut4, lut8, te.numel(), M, K,
         xs.stride(0), qw.stride(0), qw.stride(1), bs.stride(0), bs.stride(1),
         stride_gse, stride_gsm, y.stride(0),
-        BT=BT, BN=_BN, BK=_BK, num_warps=_WARPS, num_stages=_STAGES)
+        BT=BT, BN=_BN, BK=_BK, num_warps=_WARPS, num_stages=_STAGES_NVFP4)
     return y
-
-
-def decoder(octets: torch.Tensor, quatre: bool) -> torch.Tensor:
-    """Les décodeurs du noyau, appliqués à un vecteur d'octets (sonde de test)."""
-    n = octets.numel()
-    assert n & (n - 1) == 0, "puissance de 2"
-    out = torch.zeros(n, dtype=torch.float32, device=octets.device)
-    _decode_kernel[(1,)](octets, out, N=n, QUATRE=quatre)
-    return out
 
 
 def tuiles_un_expert(n: int, device) -> tuple:
