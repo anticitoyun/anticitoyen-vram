@@ -313,7 +313,19 @@ class Energie:
             "temp_max": max(t) if t else -1,
             "bridages": ",".join(sorted(self.bridages)) or "aucun",
             "invalidations": " ; ".join(self.invalidations) or "aucune",
+            # le régime des noyaux (ACVRAM_PREFILL, MOE_MMA…) fait partie de la
+            # mesure : poste7-prefill-a8-verdict-17-09, un chiffre sans lui n'entre
+            # plus dans INDEX
+            "regime": _regime_noyaux(),
         }
+
+
+def _regime_noyaux() -> str:
+    try:
+        import acvram
+        return acvram.regime_ligne()
+    except Exception as e:                       # noqa: BLE001 — energie.py sert aussi sans acvram
+        return f"indisponible ({type(e).__name__}: {e})"
 
 
 def repos(secondes: float = 30.0, periode: float = 1.0) -> Energie:

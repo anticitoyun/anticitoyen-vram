@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Erreur du chemin W4A8 de prefill (kernels/__init__.py, ACVRAM_PREFILL=a8 par
-défaut → kernels/fp4_gemm.py nvfp4_mm_w4a8) sur les poids RÉELS d'un converti,
+"""Erreur du chemin W4A8 de prefill (kernels/__init__.py, ACVRAM_PREFILL=w8a8 —
+défaut « a8 » jusqu'au 17/09 → kernels/fp4_gemm.py nvfp4_mm_w4a8) sur les poids RÉELS d'un converti,
 à sec (processeur, même arithmétique que le noyau : déquant fp32, échelle par
 ligne amax/448, E4M3, produit fp32).
 

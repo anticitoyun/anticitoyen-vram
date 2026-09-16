@@ -45,3 +45,15 @@ if _os.environ.get("ACVRAM_ALLOC_EXTENSIBLE"):
     _os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 __all__ = ["__version__"]
+
+
+def regime_noyaux() -> dict:
+    """Régime effectif des noyaux (variables de chemin, extension, masques) —
+    voir `acvram.regime`. Importé paresseusement : ce module reste léger."""
+    from .regime import regime_noyaux as f
+    return f()
+
+
+def regime_ligne() -> str:
+    from .regime import regime_ligne as f
+    return f()

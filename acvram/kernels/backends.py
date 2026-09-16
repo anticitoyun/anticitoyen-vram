@@ -46,6 +46,26 @@ def register(backend: Backend) -> None:
     _RESOLVED.clear()
 
 
+_MASQUES: set[str] = set()
+
+
+def masquer(nom: str) -> None:
+    """Retire un backend de la résolution (bissection : `acvram.regime.masquer`).
+
+    La porte `available = get_extension() is not None` de `cuda-fusionne`
+    cachait un chemin torch (`nvfp4_mm_w4a8`) qu'aucun masque de noyau ne
+    voyait (verdict-diff-moe-prefill-w4a8-17-09) : ici le masque porte sur
+    le backend entier, la porte passe dessous."""
+    if nom not in {b.name for b in _REGISTRY}:
+        raise KeyError(f"backend inconnu : {nom} (connus : {sorted(b.name for b in _REGISTRY)})")
+    _MASQUES.add(nom)
+    _RESOLVED.clear()
+
+
+def noms() -> list[str]:
+    return [b.name for b in _REGISTRY]
+
+
 def resolve(fmt: str, device: torch.device) -> list[Backend]:
     """Les backends candidats pour ce format sur ce périphérique, les plus
     prioritaires d'abord. Mémoïsé — la disponibilité d'une machine ne change
@@ -58,7 +78,7 @@ def resolve(fmt: str, device: torch.device) -> list[Backend]:
     if got is None:
         got = sorted((b for b in _REGISTRY
                       if fmt in b.formats and b.device_type == device.type
-                      and b.available(device)),
+                      and b.name not in _MASQUES and b.available(device)),
                      key=lambda b: -b.priority)
         _RESOLVED[key] = got
     return got

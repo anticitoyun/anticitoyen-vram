@@ -453,6 +453,8 @@ class Engine:
         plan (`couches_exilees`) est un exil de couche ENTIÈRE ; les deux
         coexistent et ne se déduisent pas l'un de l'autre.
         """
+        from .. import kernels
+        from ..regime import regime_noyaux
         from .model import MoEBlock
 
         plan = self.loaded.plan
@@ -501,6 +503,10 @@ class Engine:
             "piles_raison": sorted(raisons_piles),
             "cartes": cartes,
             "chemin_moe": chemin_moe,
+            # régime du prefill NVFP4 non groupé : bf16 (W4A16) | w8a8 | w4a4 —
+            # jamais plus tacite (poste7-prefill-a8-verdict-17-09)
+            "prefill": kernels.prefill_regime(),
+            "noyaux": regime_noyaux()["hors_defaut"],
         }
 
     def regime_ligne(self) -> str:
@@ -523,8 +529,9 @@ class Engine:
                f"couches_exilées={r['couches_exilees']}/{r['couches_total']} "
                f"experts_exilés={r['experts_exiles']}/{r['experts_total']} "
                f"{piles_txt} cartes={r['cartes']} "
-               f"chemin_moe={r['chemin_moe']} "
-               f"cache_prefixe={self.stats.hit_rate:.3f} "
+               f"chemin_moe={r['chemin_moe']} prefill={r['prefill']} "
+               + (f"noyaux={r['noyaux']} " if r["noyaux"] else "")
+               + f"cache_prefixe={self.stats.hit_rate:.3f} "
                f"({self.stats.cached_prompt_tokens} vram+hôte, "
                f"{self.stats.host_kv_tokens} hôte)")
 

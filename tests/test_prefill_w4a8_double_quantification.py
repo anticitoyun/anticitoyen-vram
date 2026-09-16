@@ -1,10 +1,12 @@
-"""Le prefill d'une QuantLinear NVFP4 sous extension n'est pas W4A16 : au-delà
-de ACVRAM_NVFP4_GEMV_MAX (32) lignes, `kernels.nvfp4_matmul` prend par défaut
-`ACVRAM_PREFILL=a8` → `fp4_gemm.nvfp4_mm_w4a8`, qui requantifie en E4M3 PAR
-LIGNE les activations ET le poids déquantifié (double quantification
-FP4 bloc 16 → E4M3 ligne entière), puis `torch._scaled_mm`. Le régime
-tout-torch (ACVRAM_DISABLE_KERNELS=1, backend « reference ») fait
-dequantize_nvfp4 → linear bf16 exact. C'est la seule différence porteuse
+"""Le prefill d'une QuantLinear NVFP4 sous extension n'était pas W4A16
+jusqu'au 17/09 : au-delà de ACVRAM_NVFP4_GEMV_MAX (32) lignes,
+`kernels.nvfp4_matmul` prenait par défaut `ACVRAM_PREFILL=a8` →
+`fp4_gemm.nvfp4_mm_w4a8`, qui requantifie en E4M3 PAR LIGNE les activations
+ET le poids déquantifié (double quantification FP4 bloc 16 → E4M3 ligne
+entière), puis `torch._scaled_mm`. Depuis poste7-prefill-a8-verdict-17-09 le
+défaut est `bf16` (déquant exacte, cuBLAS) et ce chemin se demande par son
+nom : `ACVRAM_PREFILL=w8a8`. Le régime tout-torch (ACVRAM_DISABLE_KERNELS=1,
+backend « reference ») fait dequantize_nvfp4 → linear bf16 exact. C'est la seule différence porteuse
 d'erreur entre les deux chemins de prefill MoE : les experts routés passent
 par la pile bf16 + torch._grouped_mm dans les deux régimes
 (model.py _forward_prefill_grouped), l'expert partagé et la couche dense par
@@ -19,9 +21,8 @@ l'expert partagé, à chaque couche, chaque jeton.
 Témoins : (1) processeur, même arithmétique que fp4_gemm.py : la double
 quantification du poids coûte > 1,5 % RMS là où la déquantification exacte
 en bf16 en coûte < 0,4 % ; (2) carte : `nvfp4_matmul` à 64 lignes, bras a8
-contre bras bf16 contre référence fp64 ; (3) carte, xfail strict : le
-DÉFAUT vaut le bras bf16 — casse tant que le défaut reste a8, et devra être
-retiré le jour où il change."""
+contre bras bf16 contre référence fp64 ; (3) carte : le DÉFAUT vaut le bras
+bf16 (cassait tant que le défaut était a8)."""
 import pytest
 import torch
 
@@ -59,7 +60,7 @@ def test_double_quantification_e4m3_par_ligne_coute_plus_que_bf16():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="chemin _scaled_mm (carte ≥ 8.9)")
-@pytest.mark.parametrize("mode,attendu", [("bf16", "exact"), ("a8", "lossy")])
+@pytest.mark.parametrize("mode,attendu", [("bf16", "exact"), ("w8a8", "lossy")])
 def test_nvfp4_matmul_prefill_bras_a8_contre_bf16(monkeypatch, mode, attendu):
     from acvram import kernels
     ext = kernels.get_extension()
@@ -76,11 +77,10 @@ def test_nvfp4_matmul_prefill_bras_a8_contre_bf16(monkeypatch, mode, attendu):
     if attendu == "exact":
         assert e < 0.005, f"bras bf16 : {e:.4f}"
     else:
-        assert e > 0.015, f"bras a8 : {e:.4f} — le chemin W4A8 ne perd plus ?"
+        assert e > 0.015, f"bras w8a8 : {e:.4f} — le chemin W4A8 ne perd plus ?"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="chemin _scaled_mm (carte ≥ 8.9)")
-@pytest.mark.xfail(strict=True, reason="défaut ACVRAM_PREFILL=a8 : le prefill NVFP4 sous extension n'est pas W4A16")
 def test_defaut_prefill_egale_le_bras_bf16(monkeypatch):
     from acvram import kernels
     if kernels.get_extension() is None:

@@ -247,6 +247,40 @@ def _purger_verrou(cache: str, age_max: float = 300.0) -> None:
             pass
 
 
+class _ExtensionMasquee:
+    """L'extension sans certains symboles : `hasattr` rend faux, le moteur
+    prend le repli torch de ces noyaux seuls (bissection noyau par noyau,
+    poste3 geste B 16/09, remonté du scratchpad dans le dépôt le 17/09)."""
+
+    def __init__(self, ext, noms):
+        self._ext, self._noms = ext, frozenset(noms)
+
+    def __getattr__(self, n):
+        if n in self._noms:
+            raise AttributeError(n)
+        return getattr(self._ext, n)
+
+
+def masquer_noyaux(noms) -> None:
+    """Cache ces noyaux à l'extension (chargée si besoin). Un nom que
+    l'extension n'a pas est une erreur : un masque qui ne masque rien
+    fabrique un « sans effet »."""
+    global _EXT
+    ext = get_extension()
+    if ext is None:
+        raise RuntimeError("extension absente : rien à masquer")
+    base = ext._ext if isinstance(ext, _ExtensionMasquee) else ext
+    deja = set(ext._noms) if isinstance(ext, _ExtensionMasquee) else set()
+    for n in noms:
+        if not hasattr(base, n):
+            raise KeyError(f"noyau inconnu : {n}")
+    _EXT = _ExtensionMasquee(base, deja | set(noms))
+
+
+def noyaux_masques() -> list[str]:
+    return sorted(_EXT._noms) if isinstance(_EXT, _ExtensionMasquee) else []
+
+
 def get_extension():
     """Compile une fois, puis rend le module d'extension, ou None."""
     global _EXT, _TRIED, _ERROR
@@ -501,6 +535,17 @@ def nvfp4_dequant(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16,
 # 40 à plus de 64, et un seuil sous le plus petit croisement ne peut pas perdre
 # sur une forme non balayée. La variable reste comme échappement.
 _NVFP4_GEMV_MAX = int(os.environ.get("ACVRAM_NVFP4_GEMV_MAX", "32"))
+PREFILL_REGIMES = ("bf16", "w8a8", "w4a4")
+
+
+def prefill_regime() -> str:
+    """Régime du prefill NVFP4 au-delà du seuil GEMV, lu à chaque appel :
+    ``bf16`` (défaut, exact), ``w8a8``, ``w4a4``. Un nom inconnu — dont les
+    anciens ``a8``/``a4`` — est une erreur, pas un repli silencieux."""
+    mode = os.environ.get("ACVRAM_PREFILL", "bf16")
+    if mode not in PREFILL_REGIMES:
+        raise ValueError(f"ACVRAM_PREFILL={mode!r} : attendu {', '.join(PREFILL_REGIMES)}")
+    return mode
 # GEMM étroit sur tensor cores (1aj marche 2, 15/09) pour les linéaires int8 et
 # NVFP4 à M petit ; ACVRAM_NARROW_GEMM=1 pour l'ouvrir, ACVRAM_NARROW_MIN_M = lot
 # minimal (à M=1 le GEMV lit x une fois et reste bon).
@@ -576,20 +621,23 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
                           gscale_rows=gsr, rows_per_group=1)
         return torch.nn.functional.linear(x, w.to(x.dtype))
 
-    # Prefill. Par défaut, W4A8 : activation FP8 (≈2 % d'erreur contre ≈9,5 %
-    # en FP4) sur les tensor cores FP8. ACVRAM_PREFILL=a4 rend le chemin FP4
-    # pur (le plus rapide, le moins précis) ; =bf16 force le repli.
+    # Prefill. Par défaut ``bf16`` : déquantification exacte puis cuBLAS —
+    # W4A16 au sens propre. Les deux autres régimes changent la sortie et se
+    # demandent par leur nom (poste7-prefill-a8-verdict-17-09) : ``w8a8``
+    # requantifie le poids déquantifié en E4M3 par ligne ET l'activation en
+    # FP8 (double quantification, 3,6-4,0 % RMS mesurés contre 0,14 % en bf16,
+    # verdict-diff-moe-prefill-w4a8-17-09 — ce fut le défaut « a8 » jusqu'au
+    # 17/09, et le 1 % perdu contre Marlin sur GLM) ; ``w4a4`` quantifie
+    # l'activation en E2M1 bloc 16 sur la MMA FP4. Ni l'un ni l'autre ne
+    # retombe sur un régime tiers : indisponible → bf16.
     if n > gemv_threshold:
-        mode = os.environ.get("ACVRAM_PREFILL", "a8")
-        if mode == "a4":
+        mode = prefill_regime()
+        if mode == "w4a4":
             tc = nvfp4_mm_tensorcore(x, t)
             if tc is not None:
                 return tc
-        elif mode != "bf16":
+        elif mode == "w8a8":
             tc = nvfp4_mm_w4a8(x, t)
-            if tc is not None:
-                return tc
-            tc = nvfp4_mm_tensorcore(x, t)
             if tc is not None:
                 return tc
 

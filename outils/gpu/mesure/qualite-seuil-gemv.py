@@ -96,7 +96,7 @@ def main(argv):
         raise SystemExit("aucun pas de decodage a douze lignes : rien a comparer")
     logits = pris[0]
     obj = {"logits": logits, "seuil": _NVFP4_GEMV_MAX,
-           "prefill": os.environ.get("ACVRAM_PREFILL", "a8")}
+           "prefill": os.environ.get("ACVRAM_PREFILL", "bf16")}
     if ns.sortie:
         torch.save(obj, ns.sortie)
     print(f"{_NVFP4_GEMV_MAX}\t{obj['prefill']}\t{tuple(logits.shape)}\t"
