@@ -77,3 +77,24 @@ def test_l_entree_plus_courte_que_k_pad():
     assert t.qweight.shape[1] > 200
     y = ge.gemm_etroit(x, t)
     assert _juger(y, x, t)[0] == 0
+
+
+def test_la_bascule_triton_porte_sa_mesure_et_le_regime_l_imprime(monkeypatch):
+    """Condition (b) de poste7 (poste7-e-c-verdict-17-09 § 2) : la constante de
+    bascule est le plus petit lot où Triton bat CUDA dans la mesure de poste3
+    (rejeu de graphe, pas dense Coder + tête) — pas « 8 » par intuition ;
+    (c) `regime_ligne()` l'imprime."""
+    from acvram import kernels
+    mesure = kernels.MESURE_BASCULE_DENSE
+    assert sorted(mesure) == [1, 2, 4, 8, 12]
+    premier = min(b for b, (cuda, triton) in mesure.items() if triton < cuda)
+    assert kernels._NARROW_TRITON_MIN_B == premier == 2, (kernels._NARROW_TRITON_MIN_B, premier)
+    assert all(triton < cuda for b, (cuda, triton) in mesure.items() if b >= premier)
+    assert mesure[1][1] > mesure[1][0], "à b = 1 CUDA gagne : c'est ce qui justifie le mixte"
+    monkeypatch.setattr(kernels, "_NARROW_KERNEL", "mixte")
+    assert kernels.narrow_choix(1) == "cuda" and kernels.narrow_choix(2) == "triton" and kernels.narrow_choix(12) == "triton"
+    assert kernels.narrow_regime() == "triton≥2|cuda"
+    monkeypatch.setattr(kernels, "_NARROW_KERNEL", "tete")
+    assert kernels.narrow_choix(1, sortie_fp32=True) == "triton" and kernels.narrow_choix(12) == "cuda"
+    monkeypatch.setattr(kernels, "_NARROW_KERNEL", "cuda")
+    assert kernels.narrow_choix(12) == "cuda" and kernels.narrow_regime() == "cuda"
