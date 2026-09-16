@@ -171,3 +171,92 @@ def test_awq_does_not_degrade_the_model_end_to_end(tokenized_checkpoint,
         # n'aggrave pas nettement les choses. La démonstration est le test en
         # sortie de couche ci-dessus.
         assert cos_awq > cos_rtn - 0.03, f"{fmt}: AWQ {cos_awq:.5f} vs RTN {cos_rtn:.5f}"
+
+
+@pytest.fixture(scope="module")
+def multimodal_checkpoint(tokenized_checkpoint):
+    """Le même point de contrôle, sous l'enrobage multimodal HF (Qwen3.8-27B,
+    `qwen3_5`) : le modèle de langue vit sous `model.language_model.`, plus
+    une tour visuelle non servie — même règle que `convert.py::_adapt_hf`.
+    Trouvé le 17/09 en reconvertissant Qwen3.8-27B : `get("model.embed_
+    tokens.weight")` levait KeyError (clé réelle `model.language_model.
+    embed_tokens.weight`), capturé par le `except Exception` générique du
+    CLI et rapporté comme « calibration indisponible » — un faux repli sur
+    l'arrondi au plus proche, jamais annoncé comme tel."""
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+
+    with safe_open(os.path.join(tokenized_checkpoint, "model.safetensors"),
+                   framework="pt", device="cpu") as fh:
+        sd = {f"model.language_model.{k[len('model.'):]}" if k.startswith("model.") else k: fh.get_tensor(k)
+              for k in fh.keys()}
+    sd["model.visual.blocks.0.weight"] = torch.randn(4, 4, dtype=torch.bfloat16)
+    d = os.path.dirname(tokenized_checkpoint) + "-mm"
+    os.makedirs(d, exist_ok=True)
+    save_file(sd, os.path.join(d, "model.safetensors"))
+    for fn in ("config.json", "tokenizer.json", "tokenizer_config.json"):
+        import shutil
+        shutil.copy(os.path.join(tokenized_checkpoint, fn), os.path.join(d, fn))
+    return d
+
+
+def test_collecte_normalise_le_prefixe_multimodal(tokenized_checkpoint,
+                                                   multimodal_checkpoint):
+    """Témoin : les statistiques relevées sous l'enrobage `model.language_
+    model.` doivent être EXACTEMENT celles du même point de contrôle sans
+    enrobage — sinon la normalisation ne fait rien d'utile, ou fait autre
+    chose. La tour visuelle (`model.visual.`) ne doit lever aucune erreur
+    ni entrer dans les statistiques."""
+    from acvram.server.chat import load_tokenizer
+
+    spec = load_model_spec(tokenized_checkpoint, "tiny")
+    tok = load_tokenizer(tokenized_checkpoint)
+    calib = load_calib_ids(tok, None, 4, 64, spec.vocab_size)
+
+    plat = collect_activation_stats(tokenized_checkpoint, spec, calib,
+                                    device="cpu", dtype=torch.float32)
+    mm = collect_activation_stats(multimodal_checkpoint, spec, calib,
+                                  device="cpu", dtype=torch.float32)
+
+    assert set(mm) == set(plat), "les jeux de tenseurs statistiqués diffèrent"
+    for name, st in plat.items():
+        assert torch.equal(st.mean_abs, mm[name].mean_abs), \
+            f"{name} : statistiques différentes sous l'enrobage multimodal"
+        assert st.n_samples == mm[name].n_samples
+
+
+def test_calibration_survit_a_un_echec_de_passe_sur_une_couche(tokenized_checkpoint,
+                                                                monkeypatch):
+    """Un échec de PASSE AVANT (RuntimeError), pas seulement de construction
+    (KeyError), sur UNE couche ne doit éteindre AWQ que pour CETTE couche —
+    même motif que le KeyError de construction (MLA à q_lora, GLM-4.7-Flash,
+    15/09), étendu à l'échec de passe. Trouvé sur Qwen3.8-27B (`qwen3_5`,
+    attention pleine avec `attn_output_gate`) : la construction de la couche
+    réussissait, la passe avant échouait plus loin (vue de forme incompatible
+    avec l'attention que cette passe suppose) — non rattrapé avant cette
+    correction, l'échec remontait jusqu'à cli.py et désactivait AWQ pour le
+    modèle entier pour UNE couche sur 64."""
+    from acvram.engine.model import DecoderLayer
+    from acvram.server.chat import load_tokenizer
+
+    original_forward = DecoderLayer.forward
+
+    def echoue_apres_les_hooks(self, *a, **kw):
+        sortie = original_forward(self, *a, **kw)
+        if self.index == 1:
+            raise RuntimeError("shape '[512, 24, 256]' is invalid for input of size 6291456")
+        return sortie
+
+    monkeypatch.setattr(DecoderLayer, "forward", echoue_apres_les_hooks)
+
+    spec = load_model_spec(tokenized_checkpoint, "tiny")
+    tok = load_tokenizer(tokenized_checkpoint)
+    calib = load_calib_ids(tok, None, 4, 64, spec.vocab_size)
+    stats = collect_activation_stats(tokenized_checkpoint, spec, calib,
+                                     device="cpu", dtype=torch.float32)
+
+    assert not any(name.startswith("model.layers.1.") for name in stats), \
+        "la couche en échec a laissé des statistiques partielles au lieu de les retirer"
+    for i in (0, 2, 3):
+        assert any(name.startswith(f"model.layers.{i}.") for name in stats), \
+            f"couche {i} : ses statistiques ont été perdues par l'échec d'une autre couche"

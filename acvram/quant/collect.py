@@ -152,13 +152,25 @@ def collect_activation_stats(
     files = _shard_files(model_path)
     handles = {fn: safe_open(os.path.join(model_path, fn), framework="pt",
                              device="cpu") for fn in files}
-    location: dict[str, str] = {}
+    # Enrobages multimodaux HF (poste7-kv-lm4 non lié ; convert.py::_adapt_hf
+    # applique la même règle au flux principal) : le modèle de langue vit
+    # sous `model.language_model.`, la tour visuelle n'est pas servie ici.
+    # Sans cette normalisation, `get("model.embed_tokens.weight")` levait
+    # KeyError sur Qwen3.8-27B (clé réelle `model.language_model.embed_
+    # tokens.weight`) — capturé par le `except Exception` générique du
+    # CLI et rapporté comme « calibration indisponible », un faux repli
+    # sur l'arrondi au plus proche qui n'annonçait jamais avoir moins fait.
+    location: dict[str, tuple[str, str]] = {}
     for fn, h in handles.items():
         for k in h.keys():
-            location[k] = fn
+            if k.startswith(("model.visual.", "visual.",
+                             "model.vision_tower.", "model.audio_tower.")):
+                continue
+            location[k.replace("model.language_model.", "model.")] = (fn, k)
 
     def get(key: str) -> torch.Tensor:
-        return handles[location[key]].get_tensor(key)
+        fn, reelle = location[key]
+        return handles[fn].get_tensor(reelle)
 
     collector = _StatCollector()
     rope = RotaryEmbedding(spec.head_dim, spec.max_position_embeddings,
@@ -175,49 +187,63 @@ def collect_activation_stats(
     with torch.inference_mode():
         for i in range(spec.num_layers):
             p = f"model.layers.{i}."
+            avant = set(collector.stats)
+            layer = None
             try:
                 layer = _build_bf16_layer(spec, p, get, dev, dtype, rope, i, rope_mla)
-            except KeyError as exc:
-                # Une couche a une structure inattendue (nom de tenseur absent) :
-                # ELLE seule perd ses statistiques, pas tout le modele. cli.py
-                # ne desactivait AWQ qu'en cas d'exception non rattrapee ici —
-                # le 15/09, un q_proj absent (MLA a q_lora, GLM-4.7-Flash)
-                # eteignait AWQ pour les 223 tenseurs du modele entier pour UN
-                # nom manquant sur UNE couche.
+                if spec.est_mla:
+                    # `linear_attn` (nom générique de DecoderLayerGDN) et
+                    # `kv_a_proj` (attribut de MLAttention) ne portent pas les
+                    # noms du manifeste ("self_attn", "kv_a_proj_with_mqa") —
+                    # attacher les sous-arbres séparément, sous le bon préfixe,
+                    # plutôt que de dépendre du chemin d'attribut par défaut.
+                    collector.attach(layer.linear_attn, p + "self_attn.")
+                    collector.attach_named(
+                        layer.linear_attn.kv_a_proj,
+                        p + "self_attn.kv_a_proj_with_mqa.weight")
+                    collector.attach(layer.mlp, p + "mlp.")
+                else:
+                    collector.attach(layer, p)
+                sorties = []
+                for h in hiddens:
+                    n = h.shape[0]
+                    batch = ForwardBatch(
+                        tokens=torch.zeros(n, dtype=torch.long),
+                        positions=torch.arange(n, device=dev),
+                        seq_lens=[n], query_lens=[n], block_tables=[],
+                        slot_mapping=torch.zeros(n, dtype=torch.long),
+                        is_prefill=True)
+                    sorties.append(layer(h, batch, None))
+                hiddens[:] = sorties
+            except (KeyError, RuntimeError) as exc:
+                # Une couche a une structure inattendue : ELLE seule perd ses
+                # statistiques (et les partielles qu'un hook aurait déjà
+                # notées avant l'échec, retirées ci-dessous), pas tout le
+                # modèle. cli.py ne désactivait AWQ qu'en cas d'exception non
+                # rattrapée ici — le 15/09, un q_proj absent (MLA à q_lora,
+                # GLM-4.7-Flash, KeyError DE CONSTRUCTION) éteignait AWQ pour
+                # les 223 tenseurs du modèle entier pour UN nom manquant sur
+                # UNE couche. Étendu ici à l'échec DE PASSE (RuntimeError) :
+                # trouvé sur Qwen3.8-27B (`qwen3_5`, attention pleine avec
+                # `attn_output_gate`) — la construction réussissait, la passe
+                # avant échouait plus loin (vue/repli de forme incompatible
+                # avec l'attention que cette passe suppose), et l'échec
+                # n'était pas rattrapé ici avant cette correction : il
+                # remontait jusqu'à cli.py et désactivait AWQ pour les 866
+                # tenseurs du modèle entier pour UNE couche sur 64.
+                for k in set(collector.stats) - avant:
+                    del collector.stats[k]
                 print(f"  [avertissement] calibration couche {i} indisponible "
                      f"({exc}) ; ses tenseurs se replient sur l'arrondi au "
                      f"plus proche, les autres couches restent calibrees")
+            finally:
+                collector.detach()
+                if layer is not None:
+                    del layer
+                if dev.type == "cuda":
+                    torch.cuda.empty_cache()
                 if progress:
                     progress(i + 1, spec.num_layers)
-                continue
-            if spec.est_mla:
-                # `linear_attn` (nom générique de DecoderLayerGDN) et
-                # `kv_a_proj` (attribut de MLAttention) ne portent pas les
-                # noms du manifeste ("self_attn", "kv_a_proj_with_mqa") —
-                # attacher les sous-arbres séparément, sous le bon préfixe,
-                # plutôt que de dépendre du chemin d'attribut par défaut.
-                collector.attach(layer.linear_attn, p + "self_attn.")
-                collector.attach_named(
-                    layer.linear_attn.kv_a_proj,
-                    p + "self_attn.kv_a_proj_with_mqa.weight")
-                collector.attach(layer.mlp, p + "mlp.")
-            else:
-                collector.attach(layer, p)
-            for j, h in enumerate(hiddens):
-                n = h.shape[0]
-                batch = ForwardBatch(
-                    tokens=torch.zeros(n, dtype=torch.long),
-                    positions=torch.arange(n, device=dev),
-                    seq_lens=[n], query_lens=[n], block_tables=[],
-                    slot_mapping=torch.zeros(n, dtype=torch.long),
-                    is_prefill=True)
-                hiddens[j] = layer(h, batch, None)
-            collector.detach()
-            del layer
-            if dev.type == "cuda":
-                torch.cuda.empty_cache()
-            if progress:
-                progress(i + 1, spec.num_layers)
 
     for h in handles.values():
         h.__exit__(None, None, None) if hasattr(h, "__exit__") else None
