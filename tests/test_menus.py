@@ -220,26 +220,6 @@ def test_a_chaque_entree_existe_sous_sa_racine_et_son_manifeste_se_lit(poste):
     assert not fautes, f"{len(fautes)} entrée(s) :\n  " + "\n  ".join(fautes)
 
 
-@pytest.fixture(scope="module")
-def enriched():
-    """Charge l'inventaire enrichi palier 0."""
-    enr_file = Path(__file__).parent.parent / "acvram-memoire/revue/inventaire-enrichi-palier0-17-09.tsv"
-    enr = {}
-    with open(enr_file) as f:
-        reader = csv.DictReader(f, delimiter='\t')
-        for row in reader:
-            enr[row['model']] = {
-                'model_type': row['model_type'],
-                'max_position_embeddings': row['max_position_embeddings'],
-                'rope_scaling': row['rope_scaling'],
-                'vision': row['vision'],
-                'tools': row['tools'],
-                'thinking': row['thinking'],
-                'bpw': row['bpw'],
-            }
-    return enr
-
-
 def test_b_disque_et_menu_dans_les_deux_sens(poste):
     _, _, menu, _, disque, _ = poste
     fautes = controle_b(menu, disque)
@@ -364,70 +344,95 @@ def test_d_un_manifeste_illisible_casse_a(tmp_path):
     assert a == ["Deux-nvfp4 : manifeste illisible (JSONDecodeError)"], a
 
 
-def test_e_model_type_enrichi(enriched):
-    """(e) model_type : présent et valide (lu depuis config.json).
+# ---- palier 0 (poste8 24feac3, relu REGLES § 7) : le TSV enrichi doit SUIVRE LES
+# ---- FICHIERS — chaque ligne est recalculée depuis le disque par la même règle
+# ---- que le script qui l'a produite (outils/enrichir-inventaire-17-09.py)
 
-    Casse sur valeur fabriquée : un model_type="zzz-fiction" ne doit pas exister.
-    """
-    model_types = set()
-    for model, data in enriched.items():
-        mt = data['model_type']
-        if mt != 'N/A':
-            model_types.add(mt)
-
-    # Vérifier qu'une valeur fabriquée n'existe pas
-    fake_type = "zzz-fiction-model"
-    assert fake_type not in model_types, f"Valeur fabriquée {fake_type} trouvée dans model_types"
+def _enrichir():
+    import importlib.util
+    chemin = Path(__file__).parent.parent / "outils" / "enrichir-inventaire-17-09.py"
+    spec = importlib.util.spec_from_file_location("enrichir_inventaire", chemin)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
-def test_f_max_position_embeddings_enrichi(enriched):
-    """(f) max_position_embeddings : présent et numérique (lu depuis config.json).
-
-    Casse sur valeur fabriquée : max_ctx=9999999 ne doit pas exister.
-    """
-    max_ctxs = set()
-    for model, data in enriched.items():
-        ctx = data['max_position_embeddings']
-        if ctx != 'N/A':
-            try:
-                max_ctxs.add(int(ctx))
-            except ValueError:
-                pass
-
-    # Vérifier qu'une valeur fabriquée n'existe pas
-    fake_ctx = 9999999
-    assert fake_ctx not in max_ctxs, f"Valeur fabriquée {fake_ctx} trouvée dans max_position_embeddings"
+@pytest.fixture(scope="module")
+def enrichi_brut():
+    with open(REVUE / "inventaire-enrichi-palier0-17-09.tsv", newline="") as f:
+        return list(csv.DictReader(f, delimiter="\t"))
 
 
-def test_g_vision_tools_enrichi(enriched):
-    """(g) vision/tools : présents et booléens (lu depuis tokenizer).
+def test_e_le_tsv_enrichi_suit_les_fichiers(poste, enrichi_brut):
+    """(e) Chaque colonne de chaque ligne = ce que les fichiers du dossier
+    disent (config.json, gabarit, manifeste, nom) ; N/A quand la source
+    manque. La première version (24feac3) disait vision=yes sur 42 modèles
+    sans vision_config (Qwen3-Coder, GLM, Llama…) et tools=no sur 31 dont le
+    gabarit contient « tools » : aucun test ne lisait la source."""
+    _, lignes, _, _, _, _ = poste
+    par_nom = {r["Modèle"]: r for r in lignes}
+    enr = _enrichir()
+    fautes = []
+    for r in enrichi_brut:
+        src = par_nom.get(r["model"])
+        if src is None:
+            fautes.append(f"{r['model']} : absent de l'inventaire brut")
+            continue
+        attendu = enr.enrichir(src["Chemin"], src["Format"], r["model"])
+        for col in enr.COLONNES:
+            if r.get(col) != attendu[col]:
+                fautes.append(f"{r['model']}.{col} : TSV {r.get(col)!r}, fichiers {attendu[col]!r}")
+    assert not fautes, f"{len(fautes)} écart(s) TSV/fichiers :\n  " + "\n  ".join(fautes[:40])
 
-    Casse sur valeur fabriquée : vision="maybe" ou tools="partial" ne doivent pas exister.
-    """
-    valid_values = {'yes', 'no', 'N/A'}
 
-    for model, data in enriched.items():
-        vision = data['vision']
-        tools = data['tools']
-
-        assert vision in valid_values, f"{model}: vision={vision} invalide"
-        assert tools in valid_values, f"{model}: tools={tools} invalide"
-
-    # Vérifier qu'une valeur fabriquée n'existe pas
-    fake_value = "maybe"
-    for model, data in enriched.items():
-        assert data['vision'] != fake_value, f"Valeur fabriquée {fake_value} trouvée"
-        assert data['tools'] != fake_value, f"Valeur fabriquée {fake_value} trouvée"
+def test_g_le_tsv_enrichi_couvre_exactement_l_inventaire(poste, enrichi_brut):
+    _, lignes, _, _, _, _ = poste
+    a, b = {r["Modèle"] for r in lignes}, {r["model"] for r in enrichi_brut}
+    assert a == b, (sorted(a - b), sorted(b - a))
 
 
-def test_h_thinking_toujours_nd(enriched):
-    """(h) thinking : toujours ND (non déterminable).
+def test_f_les_regles_d_enrichissement_lisent_les_fichiers(tmp_path):
+    """(f) Sur un dossier fabriqué : vision_config → yes, « tools » dans le
+    gabarit → yes, manifeste sans nvfp4 → son vrai format ; sans config →
+    N/A partout, jamais une valeur devinée."""
+    enr = _enrichir()
+    d = tmp_path / "Modele-Vision"
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps({
+        "model_type": "qwen3_vl", "max_position_embeddings": 4096,
+        "rope_scaling": {"type": "linear", "factor": 2.0}, "vision_config": {}, "architectures": ["X"]}))
+    (d / "chat_template.jinja").write_text("{% if tools %}{% endif %}")
+    (d / "acvram_manifest.json").write_text(json.dumps({"tensors": {"a": {"format": "int8"}, "b": {"format": "bf16"}}}))
+    r = enr.enrichir(str(d), "NVFP4_acvram", "Modele-Vision")
+    assert r == {"model": "Modele-Vision", "format": "NVFP4_acvram", "model_type": "qwen3_vl",
+                 "max_position_embeddings": "4096", "rope_scaling": '{"factor": 2.0, "type": "linear"}',
+                 "vision": "yes", "tools": "yes", "thinking": "ND", "bpw": "int8"}, r
+    (d / "config.json").write_text(json.dumps({"model_type": "llama", "architectures": ["LlamaForCausalLM"]}))
+    (d / "chat_template.jinja").write_text("{{ messages }}")
+    r = enr.enrichir(str(d), "NVFP4_acvram", "Modele-Vision")
+    assert (r["vision"], r["tools"], r["max_position_embeddings"], r["rope_scaling"]) == ("no", "no", "N/A", "None"), r
+    v = tmp_path / "Truc-Q5_K_M"
+    v.mkdir()
+    r = enr.enrichir(str(v), "GGUF", "Truc-Q5_K_M")
+    assert (r["model_type"], r["vision"], r["tools"], r["bpw"]) == ("N/A", "N/A", "N/A", "Q5_K_M"), r
+    assert enr.enrichir(str(v), "EXL3", "Truc-sans-bpw")["bpw"] == "N/A"
 
-    Casse si thinking ≠ ND : une détection de thinking doit échouer.
-    """
-    for model, data in enriched.items():
-        thinking = data['thinking']
-        assert thinking == 'ND', f"{model}: thinking={thinking} ≠ ND (doit rester non déterminable)"
+
+def test_h_une_valeur_fabriquee_dans_le_tsv_casse_e(poste, enrichi_brut):
+    """(h) Le contrôle (e) doit dire « faux » : une ligne du TSV modifiée sur
+    chaque colonne (vision inversée, tools inversé, bpw inventé, model_type
+    inventé) est vue, et seule elle."""
+    _, lignes, _, _, _, _ = poste
+    par_nom = {r["Modèle"]: r for r in lignes}
+    enr = _enrichir()
+    r = next(x for x in enrichi_brut if x["format"] == "NVFP4_acvram")
+    src = par_nom[r["model"]]
+    for col, faux in (("vision", "yes" if r["vision"] != "yes" else "no"), ("tools", "maybe"),
+                      ("bpw", "W2A2"), ("model_type", "zzz-fiction"), ("thinking", "yes")):
+        copie = dict(r); copie[col] = faux
+        attendu = enr.enrichir(src["Chemin"], src["Format"], r["model"])
+        ecarts = [c for c in enr.COLONNES if copie[c] != attendu[c]]
+        assert ecarts == [col], (col, ecarts)
 
 
 if __name__ == "__main__":
