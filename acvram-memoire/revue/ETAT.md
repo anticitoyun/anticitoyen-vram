@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **2e BOGUE DE PRODUCTION TROUVÉ (df9d5f8) : Engine.__init__ (runner.py:348) prend min(num_blocks paginés, défaut=1024) ; GLM (MLA = latent contigu, sans cache paginé) hérite d'un budget FIXE de 16 384 jetons quel que soit le VRAM/plan réel — dès que la somme des jetons vivants dépasse ça (ex. 12×2k), les réponses sont coupées avant max_tokens SANS message. Correctif à faire dans Engine (budget de blocs = plan, pas un défaut). Instrument PPL décodage corrigé (12/12 séquences, 24 564 cibles) mais la passe attend le correctif du bogue de décodage (poste4, priorité en cours).** poste2 : Hadamard puis EXL3 propres (Coder+GLM).
+Mis à jour : 16/09 (initial, poste7). **2e BOGUE CORRIGÉ (poste1, dc02487) : self.model.caches vide pour MLA → budget retombait sur défaut 1024 blocs/16 384 jetons ; lit maintenant plan.kv_max_tokens. 3e bogue trouvé au passage : _grow échoué en décodage ne rendait AUCUN GenerationOutput (silence total, pas même finish_reason) — corrigé sur le chemin sans recouvrement (_plain_decode_sync), journal + finish_reason=length ; pipeline de recouvrement et spéculatif = territoire poste4, non touchés. Scellé carte (12×2047 GLM) attend le correctif de poste4.** poste2 : Hadamard puis EXL3 propres (Coder+GLM).
 
 ## Chantiers ouverts et scellés
 
