@@ -492,9 +492,15 @@ class Engine:
             chemin_moe += "+pile" if piles_ok else "+pile(désactivé)"
 
         return {
-            "graphes": self.graphs is not None,
+            # état VIVANT : `GraphRunner.enabled` retombe à False quand une
+            # capture échoue au premier pas (graphs.py ~431) ; lu sur l'objet,
+            # la ligne disait `graphes=on` sur des bras entièrement en eager
+            # (poste7-kv-lm4-clos-17-09 § 1)
+            "graphes": self.graphs is not None and bool(self.graphs.enabled),
             "graphes_demandes": self._graphes_demandes,
-            "graphes_raison": self._graphes_raison,
+            "graphes_raison": (self._graphes_raison if self.graphs is None
+                               else (None if self.graphs.enabled
+                                     else (self.graphs.raison or "capture impossible"))),
             "couches_exilees": couches_exilees,
             "couches_total": len(plan.layers),
             "experts_exiles": experts_exiles,

@@ -306,3 +306,37 @@ def test_quantifier_diagnostic_sans_positions_ignore_le_puits(monkeypatch):
     obtenu = kv_lm4.quantifier_diagnostic(x, "k", positions=None)
     q, s = kv_lm4.quantifier(x)
     assert torch.equal(obtenu, kv_lm4.dequantifier(q, s, "lm4", x.dtype))
+
+
+def test_le_diagnostic_lm4_est_branche_a_l_ecriture_du_cache(monkeypatch):
+    """Les interrupteurs de poste2 (6a660fb) ne servent à rien s'ils ne sont
+    appelés nulle part : `PagedKVCache.write` les applique AVANT le stockage
+    quand l'un des deux est posé, sur un porteur int8. Bras qui doit casser :
+    sans interrupteur, le cache int8 rend int8 ; avec `PUITS=0` (contrôle),
+    il rend ≈ lm4 ; avec `SEUL=k`, V reste int8 ; avec `PUITS=4`, les
+    positions < 4 restent int8 et les autres deviennent lm4."""
+    from acvram.memory import kv_lm4
+    monkeypatch.delenv("ACVRAM_KV_LM4_SEUL", raising=False)
+    monkeypatch.delenv("ACVRAM_KV_LM4_PUITS", raising=False)
+    x_k, x_v = torch.randn(8, 2, 128), torch.randn(8, 2, 128)
+    pos = torch.arange(8)
+
+    def lit(**env):
+        for k_, v_ in env.items():
+            monkeypatch.setenv(k_, v_)
+        c = _cache("int8")
+        c.write(torch.arange(8), x_k, x_v, positions=pos)
+        for k_ in env:
+            monkeypatch.delenv(k_)
+        return c.gather(torch.tensor([0]), 8, torch.float32)
+
+    q, s = kv_lm4.quantifier(x_k)
+    lm4_k = kv_lm4.dequantifier(q, s, "lm4", torch.float32)
+    k0, v0 = lit()
+    assert _rms(k0, x_k) < 0.02 and _rms(v0, x_v) < 0.02
+    k1, v1 = lit(ACVRAM_KV_LM4_PUITS="0")
+    assert _rms(k1, lm4_k) < 0.02 and _rms(k1, x_k) > 0.08 and _rms(v1, x_v) > 0.08
+    k2, v2 = lit(ACVRAM_KV_LM4_SEUL="k")
+    assert _rms(k2, lm4_k) < 0.02 and _rms(v2, x_v) < 0.02
+    k3, _ = lit(ACVRAM_KV_LM4_PUITS="4")
+    assert _rms(k3[:4], x_k[:4]) < 0.02 and _rms(k3[4:], lm4_k[4:]) < 0.02

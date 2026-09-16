@@ -121,6 +121,13 @@ def dequantifier(emballe: torch.Tensor, echelle: torch.Tensor, fmt: str,
 # ---------------------------------------------------------------------------
 
 
+def diagnostic_actif() -> bool:
+    """L'un des deux interrupteurs est posé (même à sa valeur neutre :
+    `ACVRAM_KV_LM4_PUITS=0` seul = lm4 des deux côtés par le diagnostic, le
+    bras de contrôle qui doit reproduire le 1,0215 de lm4 stocké)."""
+    return ("ACVRAM_KV_LM4_SEUL" in os.environ) or ("ACVRAM_KV_LM4_PUITS" in os.environ)
+
+
 def actif(cote: str) -> bool:
     """``lm4`` s'applique-t-il à ce côté (``"k"`` ou ``"v"``) ?
     ``ACVRAM_KV_LM4_SEUL`` restreint lm4 à un seul côté pour isoler la

@@ -328,7 +328,7 @@ class Attention(nn.Module):
                 q, k = apply_rope(q, k, cos, sin)
 
         if cache is not None:
-            cache.write(batch.slots_on(x.device), k, v)
+            cache.write(batch.slots_on(x.device), k, v, positions=batch.positions_on(x.device))
 
         if batch.is_decode:
             return self._decode(q, k, v, batch, cache, t, gate)
@@ -365,7 +365,7 @@ class Attention(nn.Module):
             if self.rope is not None:
                 cos, sin = self.rope(positions, x.device, x.dtype, max_pos=max_pos)
                 q, k = apply_rope(q, k, cos, sin)
-        cache.write(slots, k, v)
+        cache.write(slots, k, v, positions=positions)
         out = kernels.paged_attention(q, cache, block_tables, seq_lens,
                                       self.n_rep, self.scale, q_len=q_len,
                                       window=self.window)
