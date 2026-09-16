@@ -12,6 +12,9 @@ import pytest
 import torch
 
 
+DEV = "cuda" if torch.cuda.is_available() else "cpu"
+
+
 def _rp():
     if not torch.cuda.is_available():
         os.environ.setdefault("TRITON_INTERPRET", "1")
@@ -29,8 +32,8 @@ def _torch(topi, valid, usage):
     usage.scatter_add_(0, idx.clamp(min=0), (idx >= 0).to(torch.int64))
     t, k = topi.shape
     eid = topi.reshape(-1).to(torch.int32)
-    tok = torch.arange(t, dtype=torch.int32).repeat_interleave(k)
-    seq = torch.arange(t * k, dtype=torch.int32)
+    tok = torch.arange(t, dtype=torch.int32, device=topi.device).repeat_interleave(k)
+    seq = torch.arange(t * k, dtype=torch.int32, device=topi.device)
     return eid, tok, seq
 
 
@@ -40,13 +43,13 @@ def test_eid_compteur_et_index_au_bit(godet, avec_valid):
     rp = _rp()
     torch.manual_seed(godet)
     E, k = 128, 8
-    usage_t = torch.zeros(E, dtype=torch.int64)
-    usage_r = torch.zeros(E, dtype=torch.int64)
+    usage_t = torch.zeros(E, dtype=torch.int64, device=DEV)
+    usage_r = torch.zeros(E, dtype=torch.int64, device=DEV)
     for pas in range(3):                                   # compteur cumulé sur trois pas
-        topi = torch.randint(0, E, (godet, k), dtype=torch.int32)
+        topi = torch.randint(0, E, (godet, k), dtype=torch.int32, device=DEV)
         valid = None
         if avec_valid:
-            valid = torch.ones(godet, dtype=torch.bool)
+            valid = torch.ones(godet, dtype=torch.bool, device=DEV)
             valid[max(1, godet - godet // 4):] = False      # les dernières lignes sont des fantômes
         eid_t, tok_t, seq_t = _torch(topi.clone(), valid, usage_t)
         eid_r = rp.route_prep(topi, valid, usage_r)
@@ -61,9 +64,9 @@ def test_un_fantome_non_masque_casse_le_compteur():
     """Le bras qui doit différer : sans `valid`, les fantômes comptent — le
     juge voit la différence, donc il voit aussi un masque oublié."""
     rp = _rp()
-    topi = torch.randint(0, 16, (8, 4), dtype=torch.int32)
-    valid = torch.tensor([1, 1, 1, 1, 1, 1, 0, 0], dtype=torch.bool)
-    avec, sans = torch.zeros(16, dtype=torch.int64), torch.zeros(16, dtype=torch.int64)
+    topi = torch.randint(0, 16, (8, 4), dtype=torch.int32, device=DEV)
+    valid = torch.tensor([1, 1, 1, 1, 1, 1, 0, 0], dtype=torch.bool, device=DEV)
+    avec, sans = torch.zeros(16, dtype=torch.int64, device=DEV), torch.zeros(16, dtype=torch.int64, device=DEV)
     e1 = rp.route_prep(topi, valid, avec)
     e2 = rp.route_prep(topi, None, sans)
     assert int(avec.sum()) == 24 and int(sans.sum()) == 32
@@ -95,17 +98,17 @@ def test_f2_route_fusee_egale_moe_route(sigmoide, biais, renorm, scale, E, k):
     rp = _rp()
     torch.manual_seed(E + k)
     T = 16
-    lg = torch.randn(T, E) * 3
+    lg = (torch.randn(T, E) * 3).to(DEV)
     lg[3, :4] = lg[3, 5]                                   # égalités fabriquées
-    bias = (torch.randn(E) * 0.2) if biais else None
-    valid = torch.ones(T, dtype=torch.bool); valid[12:] = False
-    u = torch.zeros(E, dtype=torch.int64)
+    bias = (torch.randn(E) * 0.2).to(DEV) if biais else None
+    valid = torch.ones(T, dtype=torch.bool, device=DEV); valid[12:] = False
+    u = torch.zeros(E, dtype=torch.int64, device=DEV)
     tw, ti, eid = rp.route_fusee(lg, bias, k, sigmoide, renorm, scale, valid, u)
     rw, ri = _route_torch(lg, bias, k, sigmoide, renorm, scale)
     assert torch.equal(ti.long(), ri), (ti[3], ri[3])
     assert (tw - rw).abs().max() < 2 ** -20 * max(1.0, scale), float((tw - rw).abs().max())
     assert torch.equal(eid.view(T, k)[:12].long(), ri[:12]) and (eid.view(T, k)[12:] == -1).all()
-    attendu = torch.zeros(E, dtype=torch.int64).scatter_add_(0, ri[:12].reshape(-1), torch.ones(12 * k, dtype=torch.int64))
+    attendu = torch.zeros(E, dtype=torch.int64, device=DEV).scatter_add_(0, ri[:12].reshape(-1), torch.ones(12 * k, dtype=torch.int64, device=DEV))
     assert torch.equal(u, attendu)
 
 
@@ -114,9 +117,9 @@ def test_f2_un_biais_change_la_selection_mais_pas_les_poids():
     poids = probs sans biais)."""
     rp = _rp()
     torch.manual_seed(1)
-    lg = torch.randn(4, 64)
-    bias = torch.zeros(64); bias[7] = 10.0                 # l'expert 7 est forcé
-    u = torch.zeros(64, dtype=torch.int64)
+    lg = torch.randn(4, 64).to(DEV)
+    bias = torch.zeros(64, device=DEV); bias[7] = 10.0     # l'expert 7 est forcé
+    u = torch.zeros(64, dtype=torch.int64, device=DEV)
     tw, ti, _ = rp.route_fusee(lg, bias, 4, True, False, 1.0, None, u)
     assert (ti == 7).any(1).all()
     probs = torch.sigmoid(lg)
