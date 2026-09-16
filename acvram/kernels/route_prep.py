@@ -50,6 +50,57 @@ if triton is not None:
         tl.atomic_add(usage_ptr + tl.where(reel, e, 0), 1, mask=reel)
 
 
+    @triton.jit
+    def _route_fusee_kernel(logits_ptr, bias_ptr, valid_ptr, topw_ptr, topi_ptr, eid_ptr, usage_ptr,
+                            E, scale,
+                            K: tl.constexpr, BE: tl.constexpr, SIGMOIDE: tl.constexpr,
+                            RENORM: tl.constexpr, AVEC_BIAIS: tl.constexpr, AVEC_VALID: tl.constexpr):
+        """F2 : `moe_route` (acvram_kernels.cu, même arithmétique : probabilités
+        fp32, sélection sur probs + biais, égalités vers l'indice le plus bas,
+        renormalisation 1/somme × échelle) et `route_prep` en un programme par
+        jeton."""
+        t = tl.program_id(0)
+        i = tl.arange(0, BE)
+        masque = i < E
+        lg = tl.load(logits_ptr + t * E + i, mask=masque, other=float("-inf")).to(tl.float32)
+        if SIGMOIDE:
+            probs = 1.0 / (1.0 + tl.exp(-lg))
+        else:
+            m = tl.max(lg, 0)
+            ex = tl.exp(lg - m)
+            probs = ex / tl.sum(ex, 0)
+        probs = tl.where(masque, probs, 0.0)
+        if AVEC_BIAIS:
+            sel = probs + tl.load(bias_ptr + i, mask=masque, other=0.0).to(tl.float32)
+        else:
+            sel = probs
+        sel = tl.where(masque, sel, float("-inf"))
+        if AVEC_VALID:
+            v = tl.load(valid_ptr + t)
+        else:
+            v = 1
+        jj = tl.arange(0, 32)
+        mj = jj < K
+        pw = tl.zeros((32,), dtype=tl.float32)                  # les k probabilités choisies, en registres
+        somme = 0.0
+        for j in range(K):
+            bv = tl.max(sel, 0)
+            bi = tl.min(tl.where(sel == bv, i, BE), 0)          # égalité : indice le plus bas
+            pj = tl.sum(tl.where(i == bi, probs, 0.0), 0)
+            somme += pj
+            pw = tl.where(jj == j, pj, pw)
+            tl.store(topi_ptr + t * K + j, bi.to(tl.int32))
+            e = tl.where(v != 0, bi, -1)
+            tl.store(eid_ptr + t * K + j, e.to(tl.int32))
+            tl.atomic_add(usage_ptr + tl.where(v != 0, bi, 0), 1, mask=v != 0)
+            sel = tl.where(i == bi, float("-inf"), sel)
+        if RENORM:
+            f = (1.0 / somme) * scale
+        else:
+            f = 1.0 * scale
+        tl.store(topw_ptr + t * K + jj, pw * f, mask=mj)
+
+
 _INDEX: dict = {}
 
 
@@ -77,3 +128,27 @@ def route_prep(topi: torch.Tensor, valid, usage: torch.Tensor) -> torch.Tensor:
     _route_prep_kernel[(-(-n // BLOC),)](
         topi_c, v, eid, usage, n, K=k, BLOC=BLOC, AVEC_VALID=valid is not None)
     return eid
+
+
+def route_fusee(logits: torch.Tensor, bias, k: int, sigmoide: bool, renorm: bool, scale: float,
+                valid, usage: torch.Tensor):
+    """``logits`` [T, E] → (topw fp32 [T, k], topi int32 [T, k], eid int32 [T·k])
+    — `moe_route` + `route_prep` en un lancement (F2)."""
+    T, E = logits.shape
+    assert E <= 1024 and k <= 32, (E, k)
+    BE = 1
+    while BE < E:
+        BE *= 2
+    topw = torch.empty(T, k, dtype=torch.float32, device=logits.device)
+    topi = torch.empty(T, k, dtype=torch.int32, device=logits.device)
+    eid = torch.empty(T * k, dtype=torch.int32, device=logits.device)
+    if T == 0:
+        return topw, topi, eid
+    lg = logits.contiguous()
+    b = bias.contiguous() if bias is not None and bias.numel() else lg
+    v = valid.contiguous() if valid is not None else eid
+    _route_fusee_kernel[(T,)](
+        lg, b, v, topw, topi, eid, usage, E, float(scale),
+        K=k, BE=max(BE, 32), SIGMOIDE=sigmoide, RENORM=renorm,
+        AVEC_BIAIS=bias is not None and bias.numel() > 0, AVEC_VALID=valid is not None)
+    return topw, topi, eid

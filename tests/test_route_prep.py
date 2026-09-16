@@ -68,3 +68,56 @@ def test_un_fantome_non_masque_casse_le_compteur():
     e2 = rp.route_prep(topi, None, sans)
     assert int(avec.sum()) == 24 and int(sans.sum()) == 32
     assert (e1 == -1).sum() == 8 and (e2 == -1).sum() == 0
+
+
+def _route_torch(lg, bias, k, sigmoide, renorm, scale):
+    """La branche torch de `MoEBlock._route` (celle qui remplace moe_route sans extension)."""
+    if sigmoide:
+        probs = torch.sigmoid(lg)
+        sel = probs if bias is None else probs + bias
+        _, topi = torch.topk(sel, k, dim=-1)
+        topw = probs.gather(-1, topi)
+    else:
+        probs = torch.softmax(lg, dim=-1)
+        topw, topi = torch.topk(probs, k, dim=-1)
+    if renorm:
+        topw = topw / topw.sum(dim=-1, keepdim=True)
+    return topw * scale, topi
+
+
+@pytest.mark.parametrize("sigmoide,biais,renorm,scale", [(False, False, True, 1.0), (True, True, True, 2.5),
+                                                          (True, False, False, 1.0), (False, False, False, 1.0)])
+@pytest.mark.parametrize("E,k", [(128, 8), (256, 8), (60, 6), (1024, 32)])
+def test_f2_route_fusee_egale_moe_route(sigmoide, biais, renorm, scale, E, k):
+    """F2 : mêmes experts (égalités vers l'indice le plus bas, comme
+    moe_route_kernel), poids à 2⁻²⁰ près (exp fp32 : libdevice contre __expf),
+    eid et compteur au bit, sur des godets avec fantômes."""
+    rp = _rp()
+    torch.manual_seed(E + k)
+    T = 16
+    lg = torch.randn(T, E) * 3
+    lg[3, :4] = lg[3, 5]                                   # égalités fabriquées
+    bias = (torch.randn(E) * 0.2) if biais else None
+    valid = torch.ones(T, dtype=torch.bool); valid[12:] = False
+    u = torch.zeros(E, dtype=torch.int64)
+    tw, ti, eid = rp.route_fusee(lg, bias, k, sigmoide, renorm, scale, valid, u)
+    rw, ri = _route_torch(lg, bias, k, sigmoide, renorm, scale)
+    assert torch.equal(ti.long(), ri), (ti[3], ri[3])
+    assert (tw - rw).abs().max() < 2 ** -20 * max(1.0, scale), float((tw - rw).abs().max())
+    assert torch.equal(eid.view(T, k)[:12].long(), ri[:12]) and (eid.view(T, k)[12:] == -1).all()
+    attendu = torch.zeros(E, dtype=torch.int64).scatter_add_(0, ri[:12].reshape(-1), torch.ones(12 * k, dtype=torch.int64))
+    assert torch.equal(u, attendu)
+
+
+def test_f2_un_biais_change_la_selection_mais_pas_les_poids():
+    """Le bras qui doit différer (moe_route : sélection sur probs + biais,
+    poids = probs sans biais)."""
+    rp = _rp()
+    torch.manual_seed(1)
+    lg = torch.randn(4, 64)
+    bias = torch.zeros(64); bias[7] = 10.0                 # l'expert 7 est forcé
+    u = torch.zeros(64, dtype=torch.int64)
+    tw, ti, _ = rp.route_fusee(lg, bias, 4, True, False, 1.0, None, u)
+    assert (ti == 7).any(1).all()
+    probs = torch.sigmoid(lg)
+    assert torch.allclose(tw, probs.gather(-1, ti.long()), atol=2 ** -20)

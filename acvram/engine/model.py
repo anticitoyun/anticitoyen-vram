@@ -1465,12 +1465,42 @@ class MoEBlock(nn.Module):
         # topw reste en fp32 : il sort du routage ainsi et y retourne pour la
         # réduction pondérée ; l'aller-retour en bf16 coûtait deux copies par
         # couche pour rien
+        # Poste F, fusion (2) : logits du routeur (cuBLAS) puis `moe_route` +
+        # route_prep en UN noyau Triton (kernels/route_prep.route_fusee) —
+        # même arithmétique que moe_route (fp32, égalités vers l'indice bas).
+        fusee = (_ROUTE_PREP == 2 and x.is_cuda and self._usage_routage is not None
+                 and self._stack_state == "oui" and t <= _MOE_GROUPED_MAX
+                 and self.top_k <= 32)
+        if fusee:
+            from ..kernels import route_prep as _rp
+            fusee = _rp.disponible()
+        if fusee:
+            logits = self._router_logits(x)
+            if logits.shape[-1] > 1024:
+                fusee = False
+        if fusee:
+            topw, topi, eid = _rp.route_fusee(
+                logits, self.score_bias if self.scoring == "sigmoid" else None, self.top_k,
+                self.scoring == "sigmoid", bool(self.norm_topk_prob), float(self.routed_scale),
+                valid, self._usage_routage)
+            if _trace_routage.actif():
+                _trace_routage.noter(self.index_couche, topi)
+            if valid is not None:
+                topi = eid.view(t, self.top_k)
+            mma_ok = _MOE_DECODE_MMA and t >= _MOE_DECODE_MMA_MIN_T
+            y = (self._forward_grouped_mma(x, topw, topi) if mma_ok else None)
+            if y is None:
+                y = self._forward_grouped(x, topw, topi, eid=eid)
+            if y is not None:
+                if self.shared is not None:
+                    y = y + self._shared_out(x)
+                return y
         topw, topi = self._route(x)
         # Poste F, fusion (1) : masque des fantômes + compteur d'usage + eid en
         # UN lancement (kernels/route_prep), `tok`/`seq` réservés par godet —
         # à la place de ~10 petits noyaux torch par couche (verdict-lancements-
         # b1-17-09). Même eid, même compteur, au bit ; chemin groupé seul.
-        if (_ROUTE_PREP and x.is_cuda and topi.dtype == torch.int32
+        if (_ROUTE_PREP >= 1 and x.is_cuda and topi.dtype == torch.int32
                 and self._usage_routage is not None and self._stack_state == "oui"
                 and t <= _MOE_GROUPED_MAX):
             from ..kernels import route_prep as _rp
@@ -1691,7 +1721,11 @@ _MOE_DECODE_MMA_MIN_T = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_MIN_T", "5"))
 # Poste F, fusion (1) : préparation du routage en un lancement (kernels/route_prep)
 # — défaut depuis verdict-f1-route-prep-17-09 (tenu : bit-à-bit b=1/b=12,
 # 1275→795 lancements, b=1 313,4 t/s pur)
-_ROUTE_PREP = os.environ.get("ACVRAM_ROUTE_PREP", "1") == "1"
+# 0 : chemin torch | 1 (défaut, F1 tenu f912f90) : route_prep après moe_route |
+# 2 (F2, opt-in) : moe_route + route_prep fusionnés (route_fusee)
+_ROUTE_PREP = int(os.environ.get("ACVRAM_ROUTE_PREP", "1"))
+if _ROUTE_PREP not in (0, 1, 2):
+    raise ValueError(f"ACVRAM_ROUTE_PREP={_ROUTE_PREP!r} : attendu 0, 1 ou 2")
 # MoE fusionné au décodage (port b12x, 15/09) : coupé tant que les seuils de
 # poste7 ne sont pas tenus (≤ 75 µs/couche, pas b=12 ≤ 11,3 ms, J ≤ 0,38).
 _MOE_DECODE_FUSED = os.environ.get("ACVRAM_MOE_DECODE_FUSED", "0") == "1"
