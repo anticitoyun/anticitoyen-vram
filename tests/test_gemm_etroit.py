@@ -98,3 +98,70 @@ def test_la_bascule_triton_porte_sa_mesure_et_le_regime_l_imprime(monkeypatch):
     assert kernels.narrow_choix(1, sortie_fp32=True) == "triton" and kernels.narrow_choix(12) == "cuda"
     monkeypatch.setattr(kernels, "_NARROW_KERNEL", "cuda")
     assert kernels.narrow_choix(12) == "cuda" and kernels.narrow_regime() == "cuda"
+
+
+def test_la_derniere_tranche_ne_lit_pas_au_dela_des_echelles():
+    """poste3 b34a1bb : accès mémoire illégal dans le moteur (b = 12, capture
+    de graphe) — NG groupes non multiple de la taille de tranche, la dernière
+    tranche itérait g ≥ NG et lisait échelle et zéro au-delà du tenseur.
+    L'interpréteur ne borne pas les lectures : on place les échelles et les
+    zéros en TÊTE d'un tampon dont la suite est une SENTINELLE (NaN / 255),
+    on force une découpe qui déborde (NG = 16, 6 tranches de 3) — une lecture
+    au-delà rend une sortie non finie ou fausse (vérifié : la version d'avant
+    le correctif échoue ici). Puis la garde sur la forme des échelles."""
+    ge = _ge()
+    x, t = _montage(12, 256, 2048)
+    N, ng = t.scales.shape
+    assert ng == 16
+    base_s = torch.full((N * ng + 4096,), float("nan"), dtype=t.scales.dtype, device=t.scales.device)
+    base_s[:N * ng] = t.scales.reshape(-1)
+    base_z = torch.full((N * ng + 4096,), 255, dtype=t.zeros.dtype, device=t.zeros.device)
+    base_z[:N * ng] = t.zeros.reshape(-1)
+    piege = INT8Tensor(t.qweight, base_s[:N * ng].view(N, ng), base_z[:N * ng].view(N, ng), t.group_size, t.shape)
+    orig = ge._programmes
+    ge._programmes = lambda device: 12          # voulu = ceil(24 / 4) = 6 tranches, gpt 3 : 6 × 3 = 18 > 16
+    try:
+        y = ge.gemm_etroit(x, piege)
+    finally:
+        ge._programmes = orig
+    assert torch.isfinite(y.float()).all(), "la dernière tranche a lu la sentinelle au-delà des échelles"
+    assert _juger(y, x, t)[0] == 0
+    mauvais = INT8Tensor(t.qweight, t.scales[:, :-1].contiguous(), t.zeros, t.group_size, t.shape)
+    with pytest.raises(AssertionError):
+        ge.gemm_etroit(x, mauvais)
+
+
+def _dans_un_piege(t_src, remplissage, marge=4096):
+    """Copie ``t_src`` en tête d'un tampon plat dont la suite vaut
+    ``remplissage`` : toute lecture au-delà du tenseur ramène la sentinelle."""
+    base = torch.full((t_src.numel() + marge,), remplissage, dtype=t_src.dtype, device=t_src.device)
+    base[:t_src.numel()] = t_src.reshape(-1)
+    return base[:t_src.numel()].view(t_src.shape)
+
+
+@pytest.mark.parametrize("godet", [1, 2, 8, 16])
+def test_le_noyau_ne_lit_rien_au_dela_du_godet_ni_des_poids(godet):
+    """Condition (1) de poste7 (poste7-e-c-verdict, remesure b34a1bb, REGLES § 3) :
+    le noyau se valide au RÉGIME DU MOTEUR — le lot est le godet
+    (bucket_batch : 1, 2, 8, 16) avec ses lignes fantômes, pas le lot exact
+    d'un banc. Ici x (godet entier, fantômes = lignes nulles), qw, échelles et
+    zéros sont chacun en tête d'un tampon à sentinelle (NaN ou 255), N = 200
+    (pas multiple de la tuile 64), K < k_pad, NG = 16 découpé en tranches qui
+    débordent : toute lecture hors bornes rend une sortie non finie ou fausse."""
+    ge = _ge()
+    x, t = _montage(godet, 200, 2000)               # k_pad 2048 > K 2000, ng 16
+    reel = max(1, godet - godet // 4)                # les dernières lignes du godet sont des fantômes
+    x[reel:] = 0
+    x = _dans_un_piege(x, float("nan"))
+    piege = INT8Tensor(_dans_un_piege(t.qweight, 255), _dans_un_piege(t.scales, float("nan")),
+                       _dans_un_piege(t.zeros, 255), t.group_size, t.shape)
+    orig = ge._programmes
+    ge._programmes = lambda device: 12
+    try:
+        y = ge.gemm_etroit(x, piege)
+        y32 = ge.gemm_etroit(x, piege, sortie_fp32=True)
+    finally:
+        ge._programmes = orig
+    assert y.shape == (godet, 200) and torch.isfinite(y.float()).all() and torch.isfinite(y32).all()
+    assert _juger(y, x, t)[0] == 0 and _juger(y32, x, t)[0] == 0
+    assert not y[reel:].float().any(), "une ligne fantôme (x nulle) doit rendre zéro"

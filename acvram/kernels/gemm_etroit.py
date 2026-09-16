@@ -41,7 +41,7 @@ def disponible() -> bool:
 if triton is not None:
 
     @triton.jit
-    def _etroit_kernel(x_ptr, q_ptr, s_ptr, z_ptr, y_ptr, M, N, K, groupes_par_tranche,
+    def _etroit_kernel(x_ptr, q_ptr, s_ptr, z_ptr, y_ptr, M, N, K, NG, groupes_par_tranche,
                        stride_xm, stride_qn, stride_sn, stride_ys, stride_ym,
                        BM_: tl.constexpr, BN_: tl.constexpr, G: tl.constexpr):
         pn = tl.program_id(0)
@@ -54,14 +54,20 @@ if triton is not None:
         acc = tl.zeros((BM_, BN_), dtype=tl.float32)
         g0 = ps * groupes_par_tranche
         for g in range(g0, g0 + groupes_par_tranche):
+            # la dernière tranche déborde quand NG n'est pas multiple de la
+            # taille de tranche : g ≥ NG lisait l'échelle et le zéro AU-DELÀ
+            # du tenseur (cols·NG + g), accès illégal sous graphe dans le
+            # moteur (poste3 b34a1bb) — invisible au banc, dont les tenseurs
+            # voisins absorbaient la lecture
+            masque_g = g < NG
             ks = g * G + kk
-            masque_k = ks < K
+            masque_k = (ks < K) & masque_g
             x = tl.load(x_ptr + rows[:, None] * stride_xm + ks[None, :],
                         mask=masque_m[:, None] & masque_k[None, :], other=0.0)
             q = tl.load(q_ptr + cols[:, None] * stride_qn + ks[None, :],
                         mask=masque_n[:, None] & masque_k[None, :], other=0)
-            s = tl.load(s_ptr + cols * stride_sn + g, mask=masque_n, other=0.0).to(tl.float32)
-            z = tl.load(z_ptr + cols * stride_sn + g, mask=masque_n, other=0).to(tl.float32)
+            s = tl.load(s_ptr + cols * stride_sn + g, mask=masque_n & masque_g, other=0.0).to(tl.float32)
+            z = tl.load(z_ptr + cols * stride_sn + g, mask=masque_n & masque_g, other=0).to(tl.float32)
             prod = tl.dot(x, tl.trans(q.to(x.dtype)))                     # [BM, BN] fp32
             sx = tl.sum(x.to(tl.float32), 1)                              # Σ_k x[m, k] du groupe
             acc += (prod - sx[:, None] * z[None, :]) * s[None, :]
@@ -83,6 +89,7 @@ def gemm_etroit(x: torch.Tensor, t, sortie_fp32: bool = False) -> torch.Tensor:
     G = t.group_size
     assert M <= BM and K <= k_pad and k_pad % G == 0, (M, K, k_pad, G)
     ng = k_pad // G
+    assert t.scales.shape == (N, ng) and t.zeros.shape == (N, ng), (t.scales.shape, t.zeros.shape, N, ng)
     tuiles_n = -(-N // BN)
     voulu = -(-2 * _programmes(x.device) // tuiles_n)
     tranches = max(1, min(ng, voulu))
@@ -90,7 +97,7 @@ def gemm_etroit(x: torch.Tensor, t, sortie_fp32: bool = False) -> torch.Tensor:
     tranches = -(-ng // gpt)
     y = torch.zeros(tranches, M, N, dtype=torch.float32, device=x.device)
     _etroit_kernel[(tuiles_n, tranches)](
-        x, t.qweight, t.scales, t.zeros, y, M, N, K, gpt,
+        x, t.qweight, t.scales, t.zeros, y, M, N, K, ng, gpt,
         x.stride(0), t.qweight.stride(0), t.scales.stride(0), y.stride(0), y.stride(1),
         BM_=BM, BN_=BN, G=G, num_warps=_WARPS, num_stages=_STAGES)
     out = y.sum(0) if tranches > 1 else y[0]
