@@ -61,6 +61,12 @@ VARIABLES_LUES = {
     "ACVRAM_MLA_LATENT_FP8",
     "ACVRAM_KV_FORMAT",
     "ACVRAM_PREFILL_GROUPED",
+    # Deux interrupteurs de diagnostic (poste7-kv-lm4-clos-17-09 § 1), lus par
+    # memory/kv_lm4.py::actif / hors_puits, pas par le noyau ou le chargeur :
+    # la passe de cause de poste3 (K seul, V seul, puits) decide seulement si
+    # tq3+1 s ecrit apres le commit B de poste4.
+    "ACVRAM_KV_LM4_SEUL",
+    "ACVRAM_KV_LM4_PUITS",
     # Bras du banc a trois bras de l'attention paginee. Lu par le noyau, donc
     # il DOIT etre declare ici : la garde l'a signale comme inconnu, ce qui est
     # exactement son role — une variable posee qui ne va nulle part est une

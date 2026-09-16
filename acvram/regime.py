@@ -123,6 +123,10 @@ HORS_REGIME = frozenset({
     "ACVRAM_LISTE_CLE", "ACVRAM_LISTE_PROMUS", "ACVRAM_MAX_PROMUS", "ACVRAM_ORDRE_SAC",
     "ACVRAM_ORDRE_SAC_INVERSE", "ACVRAM_GRAPHES_MUETS", "ACVRAM_MAX_GRAPHS", "ACVRAM_INSTA_MAX",
     "ACVRAM_REGIME_MUET",
+    # Deux interrupteurs de diagnostic (poste7-kv-lm4-clos-17-09 § 1) : lus par
+    # memory/kv_lm4.py::actif / hors_puits pour une passe de cause hors
+    # moteur (script de PPL de poste3), pas un chemin de calcul du moteur.
+    "ACVRAM_KV_LM4_SEUL", "ACVRAM_KV_LM4_PUITS",
 })
 
 
