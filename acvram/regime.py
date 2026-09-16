@@ -48,7 +48,7 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("DISABLE_FP4_GEMM", "", None, "1"),
     Variable("DISABLE_PAGED_ATTN", "", None, "1"),
     # --- projections NVFP4 non groupées --------------------------------
-    Variable("PREFILL", "bf16", None, "bf16", "bf16 | w8a8 | w4a4 au-delà de NVFP4_GEMV_MAX lignes"),
+    Variable("PREFILL", "bf16", None, "bf16", "bf16 | w4a16 (B1 Triton, NVFP4 dans la tuile) | w8a8 | w4a4 au-delà de NVFP4_GEMV_MAX lignes"),
     Variable("NVFP4_GEMV_MAX", "32", ("acvram.kernels", "_NVFP4_GEMV_MAX")),
     Variable("INT8_GEMV_MAX", "80", ("acvram.kernels", "_INT8_GEMV_MAX")),
     Variable("NARROW_GEMM", "0", ("acvram.kernels", "_NARROW_GEMM"), "0"),
@@ -58,7 +58,7 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("NARROW_MLA", "1", None, "0"),
     Variable("SEUIL_FUSION", "256", ("acvram.engine.model", "SEUIL_FUSION")),
     Variable("PREFILL_GROUPED", "groupe", ("acvram.engine.model", "_PREFILL_GROUPED"), "groupe",
-             "GEMM groupée bf16 du prefill MoE : groupe (B0 Triton persistant, défaut depuis poste7-b0-et-cause-lm4-17-09) | grouped_mm (torch, ancien défaut, témoin) | bmm par seaux (réfuté 0edc3b9)"),
+             "GEMM groupée du prefill MoE : groupe (B0 Triton bf16 persistant, défaut depuis poste7-b0-et-cause-lm4-17-09) | w4a16 (B1, NVFP4 lu dans la tuile, opt-in jusqu'au scellé) | grouped_mm (torch, ancien défaut, témoin) | bmm par seaux (réfuté 0edc3b9)"),
     Variable("SANS_FUSION", "", None, "1"),
     Variable("SANS_FUSION_BF16", "", None, "1"),
     Variable("TETE_LIEE", "int8", ("acvram.engine.loader", "_TETE_LIEE")),

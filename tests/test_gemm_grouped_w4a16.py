@@ -347,3 +347,81 @@ def test_b0_un_offset_decale_d_une_ligne_casse():
     cas = _cas("decodage", "cuda" if torch.cuda.is_available() else "cpu")
     hors, _ = juger(candidat_groupe(*cas, decalage=1), reference(*cas))
     assert hors > 0, "un offset décalé d'une ligne passe le juge : il ne voit rien"
+
+
+# ---- B1 : la même grille lisant NVFP4 dans la tuile
+
+def test_b1_les_decodeurs_e2m1_et_e4m3_sont_exacts():
+    """Les deux décodeurs arithmétiques du noyau contre torch : les 16 codes
+    E2M1 et les 256 octets E4M3 (fn : 0x7F/0xFF = NaN, exclus — jamais
+    produits par quantize_nvfp4)."""
+    gg = _gg()
+    codes = torch.arange(16, dtype=torch.uint8)
+    out = gg.decoder(codes, True)
+    att = torch.tensor([0, .5, 1, 1.5, 2, 3, 4, 6] * 2) * torch.tensor([1] * 8 + [-1] * 8)
+    assert torch.equal(out, att.float()), out
+    octets = torch.arange(256, dtype=torch.uint8)
+    out = gg.decoder(octets, False)
+    att = octets.view(torch.float8_e4m3fn).float()
+    ok = ~torch.isnan(att)
+    assert torch.equal(out[ok], att[ok]), (out[~torch.isclose(out, att)][:5])
+
+
+def candidat_groupe_nvfp4(qw, bs, gs, x, comptes, M, K, decalage=0, gs_par_ligne=False):
+    gg = _gg()
+    dt = torch.bfloat16 if x.is_cuda else torch.float16
+    if gs_par_ligne:
+        gs = gs.unsqueeze(1).expand(qw.shape[0], qw.shape[1]).contiguous()
+    y = gg.gemm_groupe_nvfp4(x.to(dt), qw, bs, gs, _tiles_pour(comptes, gg.BT, x.device, decalage))
+    return y.to(torch.bfloat16) if not x.is_cuda else y
+
+
+@pytest.mark.parametrize("forme", list(FORMES))
+@pytest.mark.parametrize("gs_par_ligne", [False, True])
+def test_b1_la_gemm_nvfp4_dans_la_tuile_passe_le_juge(forme, gs_par_ligne):
+    cas = _cas(forme, "cuda" if torch.cuda.is_available() else "cpu")
+    hors, ecart = juger(candidat_groupe_nvfp4(*cas, gs_par_ligne=gs_par_ligne), reference(*cas))
+    assert hors == 0, f"{forme} : {hors} valeurs hors tolérance, écart max {ecart:.3e}"
+
+
+@pytest.mark.parametrize("faute", list(FAUTES))
+def test_b1_les_fautes_fabriquees_cassent_aussi_le_noyau(faute):
+    """Les trois fautes (bloc sans déquant, échelle globale oubliée, échelle
+    décalée d'un bloc) injectées dans les OCTETS que lit le noyau."""
+    cas = _cas("decodage", "cuda" if torch.cuda.is_available() else "cpu")
+    qw, bs, gs, x, comptes, M, K = cas
+    bs2, gs2 = bs.clone(), gs.clone()
+    if faute == "bloc-sans-dequant":
+        bs2[3, 0:32, 1] = 0x38
+    elif faute == "echelle-globale-oubliee":
+        gs2[3] = 1.0
+    else:
+        bs2[3] = torch.roll(bs2[3], 1, dims=-1)
+    hors, _ = juger(candidat_groupe_nvfp4(qw, bs2, gs2, x, comptes, M, K), reference(*cas))
+    assert hors > 0, f"{faute} : le noyau fauté passe le juge"
+
+
+def test_b1_un_offset_decale_d_une_ligne_casse():
+    cas = _cas("decodage", "cuda" if torch.cuda.is_available() else "cpu")
+    hors, _ = juger(candidat_groupe_nvfp4(*cas, decalage=1), reference(*cas))
+    assert hors > 0
+
+
+def test_b1_nvfp4_linear_egale_la_dequant_bf16_sur_un_tenseur_fusionne():
+    """Le chemin non groupé (`ACVRAM_PREFILL=w4a16`, nvfp4_matmul) : un
+    NVFP4Tensor avec échelle globale PAR LIGNE (q/k/v fusionnés) et une
+    entrée plus courte que `padded_in` — contre dequantize_nvfp4 + linear."""
+    gg = _gg()
+    from acvram.quant.nvfp4 import dequantize_nvfp4, quantize_nvfp4
+    g = torch.Generator().manual_seed(5)
+    w = (torch.randn(96, 200, generator=g) * 0.05).to(torch.bfloat16)
+    t = quantize_nvfp4(w)
+    assert t.padded_in > 200
+    t.global_scale_rows = (t.global_scale.float() * torch.linspace(0.5, 2.0, 96)).contiguous()
+    x = (torch.randn(300, 200, generator=g)).to(torch.float16 if not torch.cuda.is_available() else torch.bfloat16)
+    y = gg.nvfp4_linear(x, t)
+    wd = dequantize_nvfp4(t, torch.float32)
+    attendu = x.float() @ wd.T
+    borne = x.float().abs() @ wd.abs().T
+    hors = ((y.float() - attendu).abs() > TOL_REL * borne).sum()
+    assert y.shape == (300, 96) and int(hors) == 0, int(hors)
