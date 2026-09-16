@@ -408,7 +408,7 @@ def _calib_source(use_awq: bool, calib_file: Optional[str]) -> dict:
     corpus avait servi à la calibration — le doute sur GLM -k48 (calibré
     sur wiki-gptq, le corpus d'ÉVAL ?) ne pouvait pas se trancher en lisant
     le manifeste seul. Nom + sha256 du fichier réellement utilisé, ou du
-    corpus intégré (DEFAULT_CALIB_TEXT) quand aucun `--calib-file` n'est
+    corpus intégré (acvram/data/calibration-anglais.txt) quand aucun `--calib-file` n'est
     fourni, ou une absence explicite quand awq=False — jamais une absence
     ambiguë.
     """
@@ -419,11 +419,13 @@ def _calib_source(use_awq: bool, calib_file: Optional[str]) -> dict:
         with open(calib_file, "rb") as fh:
             sha = hashlib.sha256(fh.read()).hexdigest()
         return {"fichier": os.path.abspath(calib_file), "sha256": sha, "note": None}
-    from .quant.collect import DEFAULT_CALIB_TEXT
-    sha = hashlib.sha256("".join(DEFAULT_CALIB_TEXT).encode("utf-8")).hexdigest()
-    return {"fichier": None, "sha256": sha,
-            "note": "corpus integre DEFAULT_CALIB_TEXT "
-                    "(acvram/quant/collect.py, aucun --calib-file fourni)"}
+    from .quant.collect import default_calib_path
+    chemin = default_calib_path()
+    with open(chemin, "rb") as fh:
+        sha = hashlib.sha256(fh.read()).hexdigest()
+    return {"fichier": chemin, "sha256": sha,
+            "note": "corpus integre acvram/data/calibration-anglais.txt (Gutenberg #1342), "
+                    "aucun --calib-file fourni"}
 
 
 def cmd_convert(args: argparse.Namespace) -> int:
@@ -502,8 +504,9 @@ def cmd_convert(args: argparse.Namespace) -> int:
             tokenizer = load_tokenizer(args.model)
             calib = load_calib_ids(tokenizer, args.calib_file, args.calib_seqs,
                                    args.calib_len, spec.vocab_size)
-            print(f"  calibration sur {len(calib)} sequences "
-                  f"({sum(len(c) for c in calib)} jetons) ...")
+            calib_reel = (len(calib), sum(len(c) for c in calib))
+            print(f"  calibration sur {calib_reel[0]} sequences "
+                  f"({calib_reel[1]} jetons) ...")
 
             def cprog(done: int, total: int) -> None:
                 _progress(f"  calibration couche {done}/{total}")
@@ -518,6 +521,8 @@ def cmd_convert(args: argparse.Namespace) -> int:
                          f"repli sur l'arrondi au plus proche"))
             use_awq = False
             stats = None
+    if not use_awq:
+        calib_reel = (0, 0)
 
     calib_source = _calib_source(use_awq, args.calib_file)
 
@@ -538,7 +543,11 @@ def cmd_convert(args: argparse.Namespace) -> int:
         alpha_commun_gate_up=args.alpha_commun_gate_up,
         hadamard_experts=args.hadamard_experts,
         passage_direct=args.passage_direct,
-        calib_source=calib_source)
+        calib_source=calib_source,
+        # ce que load_calib_ids a REELLEMENT rendu (poste7, poste7-calibration-
+        # verdict-17-09 : le manifeste portait les defauts de classe 16/128,
+        # jamais poses ni lus) ; 0/0 sans calibration
+        calib_seqs=calib_reel[0], calib_tokens=calib_reel[1])
 
     last = [0.0]
 
@@ -833,9 +842,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="rapporte tailles et erreurs sans ecrire de fragments")
     cv.add_argument("--force", action="store_true",
                     help="convertit meme si le modele ne tient pas")
-    cv.add_argument("--calib-file", help="fichier texte de calibration "
-                                         "(par defaut : un petit corpus integre)")
-    cv.add_argument("--calib-seqs", type=int, default=16)
+    cv.add_argument("--calib-file", help="fichier texte de calibration (par defaut : "
+                                         "acvram/data/calibration-anglais.txt, Gutenberg #1342)")
+    cv.add_argument("--calib-seqs", type=int, default=32)
     cv.add_argument("--calib-len", type=int, default=512)
     cv.add_argument("--calib-device", default="cuda:0",
                     help="appareil sur lequel executer les passes de calibration")

@@ -42,8 +42,12 @@ SHARD_TARGET_BYTES = 4 * 1024 ** 3
 class ConversionOptions:
     out_dir: str
     calibrate: bool = False
-    calib_tokens: int = 128
-    calib_seqs: int = 16
+    # Sequences et jetons REELLEMENT lus par load_calib_ids, poses par cli.py ;
+    # 0/0 = aucune calibration. Jamais un defaut qui ressemble a une mesure
+    # (16/128 sont restes trois semaines au manifeste sans qu'aucune passe ne
+    # les ait produits — poste7-calibration-verdict-17-09).
+    calib_tokens: int = 0
+    calib_seqs: int = 0
     use_hadamard: str = "auto"        # auto | always | never
     # Conserve l'erreur des 21 valeurs de la grille AWQ pour chaque tenseur, au
     # lieu du seul minimum. Sert a calculer le prix d'un exposant COMMUN a un
