@@ -145,9 +145,10 @@ def test_static_load_apres_capture_puis_rejeu(rope):
     _compare(sorties_g, sorties_e, sts_g, sts_e, [37])
 
 
+@pytest.mark.parametrize("puits", [False, True], ids=["ordinaire", "puits-pos0"])
 @pytest.mark.parametrize("rope", [False, True])
 @pytest.mark.parametrize("B", [1, 4])
-def test_creneaux_egalent_la_reference_hors_creneau(rope, B):
+def test_creneaux_egalent_la_reference_hors_creneau(rope, B, puits):
     """Ce que le test de rejeu ne disait pas : le chemin à créneaux
     (static_load d'un cache de prefill, puis decode_static /
     decode_static_batch_complet, 4 pas) contre la RÉFÉRENCE `forward`
@@ -166,6 +167,10 @@ def test_creneaux_egalent_la_reference_hors_creneau(rope, B):
         refs, caches = [], []
         for i in range(B):
             _, cache = la.forward(prompt if i == 0 else torch.roll(prompt, i, 0), None)
+            if puits:
+                # poste7 § 12 : puits d'attention en position 0 ([gMASK]<sop>) —
+                # la ligne 0 du latent domine le softmax de toutes les têtes
+                cache[0] = (cache[0].float() * 40).to(cache.dtype)
             caches.append(cache)
         for k in range(4):
             ys = []
@@ -178,6 +183,8 @@ def test_creneaux_egalent_la_reference_hors_creneau(rope, B):
         for i in range(B):
             st = la.new_static(torch.device("cuda"), L + 16, torch.bfloat16)
             _, c0 = la.forward(prompt if i == 0 else torch.roll(prompt, i, 0), None)
+            if puits:
+                c0[0] = (c0[0].float() * 40).to(c0.dtype)
             la.static_load(st, c0)
             sts.append(st)
         if B == 1:
