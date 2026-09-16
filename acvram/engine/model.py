@@ -28,6 +28,7 @@ import torch.nn.functional as F
 from .. import kernels
 from ..memory import trace_routage as _trace_routage
 from ..memory.kvcache import PagedKVCache, bucket_blocks
+from ..memory import kv_lm4
 from ..quant.calibrate import fwht_activations
 from .config import ModelSpec
 from .layers import (QuantLinear, RMSNorm, RotaryEmbedding, add_norm, apply_rope,
@@ -351,6 +352,27 @@ class Attention(nn.Module):
         """
         b = x.shape[0]
         q, k, v, gate = self._proj(x, b)
+        # Poste F, fusion (3a) : normes par tête + RoPE + écriture int8 du
+        # cache en UN noyau Triton (kernels/rope_kv) — à la place de
+        # rope_inplace puis kv_write_int8 ; sans diagnostic lm4 (positions).
+        if (_ROPE_KV and self.rope is not None and q.is_cuda and q.dtype == torch.bfloat16
+                and cache.cfg.dtype == "int8" and cache.k_scale is not None
+                and not kv_lm4.diagnostic_actif()):
+            r = self._rope_kv_fusee(q, k, v, positions, max_pos, slots, cache)
+            if r is not None:
+                q, k = r
+                out = kernels.paged_attention(q, cache, block_tables, seq_lens,
+                                              self.n_rep, self.scale, q_len=q_len,
+                                              window=self.window)
+                if out is None:
+                    if q_len != 1:
+                        raise RuntimeError("verification speculative a formes fixes "
+                                           "sans noyau pagine : chemin inéligible")
+                    kk, vv = cache.gather_fixed(block_tables, q.dtype)
+                    out = decode_attention_fixed(q, kk, vv, seq_lens, self.n_rep,
+                                                 self.scale, window=self.window)
+                out = self._gated(out.to(x.dtype), gate, b)
+                return self.o_proj(out.reshape(b, self.n_heads * self.head_dim))
         r = None
         if self.rope is not None:
             r = rope_fusee(q, k, self.rope, positions, max_pos,
@@ -378,6 +400,34 @@ class Attention(nn.Module):
                                          self.scale, window=self.window)
         out = self._gated(out.to(x.dtype), gate, b)
         return self.o_proj(out.reshape(b, self.n_heads * self.head_dim))
+
+    def _rope_kv_fusee(self, q, k, v, positions, max_pos, slots, cache):
+        """Conditions de `rope_fusee` (normes RMSNorm bf16 de la taille d'une
+        tête, eps partagé, tables fp32) puis le noyau fusionné ; None si inéligible."""
+        from ..kernels import rope_kv as _rk
+        if not _rk.disponible():
+            return None
+        normes = [n for n in (self.q_norm, self.k_norm) if n is not None]
+        if any(type(n).__name__ != "RMSNorm" or n.weight.dtype != torch.bfloat16
+               or n.weight.shape[-1] != q.shape[-1] for n in normes):
+            return None
+        if len(normes) == 2 and abs(self.q_norm.eps - self.k_norm.eps) > 1e-12:
+            return None
+        cos32, sin32 = self.rope.tables32(max_pos, q.device)
+        d = cos32.shape[-1]
+        if d % 2 or d > q.shape[-1] or q.shape[-1] & (q.shape[-1] - 1):
+            return None
+        if q.stride(2) != 1 or q.stride(1) != q.shape[2]:
+            q = q.contiguous()
+        if k.stride(2) != 1 or k.stride(1) != k.shape[2]:
+            k = k.contiguous()
+        if v.stride(2) != 1:
+            v = v.contiguous()
+        _rk.rope_kv(q, k, v, cos32, sin32, positions, slots,
+                    None if self.q_norm is None else self.q_norm.weight,
+                    None if self.k_norm is None else self.k_norm.weight,
+                    normes[0].eps if normes else 1e-6, cache)
+        return q, k
 
     def _gated(self, out: torch.Tensor, gate, t: int) -> torch.Tensor:
         if gate is not None:
@@ -1724,6 +1774,8 @@ _MOE_DECODE_MMA_MIN_T = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_MIN_T", "5"))
 # 0 : chemin torch | 1 (défaut, F1 tenu f912f90) : route_prep après moe_route |
 # 2 (F2, opt-in) : moe_route + route_prep fusionnés (route_fusee)
 _ROUTE_PREP = int(os.environ.get("ACVRAM_ROUTE_PREP", "1"))
+# Poste F, fusion (3a) : normes + RoPE + kv_write en un noyau Triton (opt-in)
+_ROPE_KV = os.environ.get("ACVRAM_ROPE_KV", "0") == "1"
 if _ROUTE_PREP not in (0, 1, 2):
     raise ValueError(f"ACVRAM_ROUTE_PREP={_ROUTE_PREP!r} : attendu 0, 1 ou 2")
 # MoE fusionné au décodage (port b12x, 15/09) : coupé tant que les seuils de

@@ -76,6 +76,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MOE_DECODE_MMA", "1", ("acvram.engine.model", "_MOE_DECODE_MMA"), "0"),
     Variable("MOE_DECODE_MMA_BT", "16", ("acvram.engine.model", "_MOE_DECODE_MMA_BT")),
     Variable("MOE_DECODE_MMA_MIN_T", "5", ("acvram.engine.model", "_MOE_DECODE_MMA_MIN_T")),
+    Variable("ROPE_KV", "0", ("acvram.engine.model", "_ROPE_KV"), "0",
+             "poste F (3a) : normes par tête + RoPE + kv_write int8 en un noyau Triton"),
     Variable("ROUTE_PREP", "1", ("acvram.engine.model", "_ROUTE_PREP"), "0",
              "poste F : 1 = route_prep (F1, défaut) | 2 = moe_route + route_prep fusionnés (F2, Triton) | 0 = torch"),
     Variable("MOE_DECODE_FUSED", "0", ("acvram.engine.model", "_MOE_DECODE_FUSED"), "0"),
