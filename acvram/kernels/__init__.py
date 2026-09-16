@@ -922,6 +922,13 @@ def int4_gemv_grouped(x: torch.Tensor, qw: torch.Tensor, scales: torch.Tensor,
                                  x.contiguous(), k, group_size)
 
 
+# Attention paginée du décodage : "cuda" (acvram_kernels.cu, défaut) | "triton"
+# (kernels/attn_paginee.py, poste E, une lecture de K/V par groupe GQA)
+_PAGED_ATTN = os.environ.get("ACVRAM_PAGED_ATTN", "cuda")
+if _PAGED_ATTN not in ("cuda", "triton"):
+    raise ValueError(f"ACVRAM_PAGED_ATTN={_PAGED_ATTN!r} : attendu cuda ou triton")
+
+
 def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
                     seq_lens: torch.Tensor, n_rep: int,
                     scale: float, q_len: int = 1,
@@ -942,6 +949,17 @@ def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
     d = q.shape[-1]
     if d not in (32, 64, 128, 256, 512):
         return None
+    # Poste E (poste7-b0-et-cause-lm4-17-09) : noyau Triton par groupe GQA,
+    # opt-in tant que le scellé (≤ 1,5 ms b=12 ctx 2048 ET ≤ 0,72 ms b=1,
+    # sortie = noyau CUDA ± 2⁻⁸) n'est pas mesuré ; décodage q_len = 1 seul.
+    if (_PAGED_ATTN == "triton" and q_len == 1 and d in (64, 128)
+            and q.shape[1] // cache.cfg.num_kv_heads <= 16):
+        from . import attn_paginee
+        if attn_paginee.disponible():
+            return attn_paginee.paged_attention(
+                q.contiguous(), cache.k, cache.k_scale, cache.v, cache.v_scale,
+                tables.contiguous(), seq_lens.contiguous(), cache.cfg.num_kv_heads,
+                float(scale), int(window))
     return ext.paged_attention(
         q.contiguous(), cache.k, cache.k_scale,
         cache.v, cache.v_scale, tables.contiguous(),
