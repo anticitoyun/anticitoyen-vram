@@ -1,6 +1,8 @@
 # Comparatif à cinq moteurs — Coder-30B et GLM-4.7-Flash (17/09)
 
-**Note datée 17/09 soir (`poste7-poste-d-verdict-17-09`)** : budget KV dimensionné pour 8 séquences (`loader.py:1459`) tronquait 4/12 séquences dans toute cellule acvram b>8 mesurée avant ce correctif. Coder édité ci-dessous (743,4 t/s, valeur correcte). GLM en attente de remesure (CERT_PLAN_LEN=3072) avant édition — ancienne valeur 514/540 t/s conservée, étiquetée « 4/12 tronquées ». Bogue lui-même : chantier séparé, non corrigé sur main à cette date.
+**Note datée 17/09 soir (`poste7-poste-d-verdict-17-09`)** : budget KV dimensionné pour 8 séquences (`loader.py:1459`) tronquait 4/12 séquences dans toute cellule acvram b>8 mesurée avant ce correctif. Coder et GLM édités avec les valeurs correctes (bogue lui-même : chantier séparé, non corrigé sur main à cette date — anciennes valeurs 730/514-540 t/s, étiquetées « 4/12 tronquées », conservées en historique dans les verdicts nommés).
+
+**Note datée 17/09 soir (`poste7-b0-et-cause-lm4-17-09`)** : prefill GEMM groupée passée défaut `ACVRAM_PREFILL_GROUPED=groupe` (0.6.6, Triton persistant, B0) — Coder 8 633→9 913 j/s (+14,8%), GLM 4 462→4 661 j/s (+4,5%, sous la prédiction 5 000 mais aucune régression, PPL±0,002 tenue). Ancien défaut `grouped_mm` gardé comme témoin. B1 (lecture NVFP4 dans la tuile) scellé Coder≥15 000, GLM≥6 000.
 
 Assemblé par chef, critère 6 points `poste7-plan-completion-comparatif-17-09`. Corpus privé scellé `5909d27` (jamais publié en clair) ; corpus public = échantillon documenté dans chaque verdict. Préfixe `[gMASK]<sop>` obligatoire sur toute mesure GLM. Tout acvram mesuré sur main ≥ `0971c90` (défaut `ACVRAM_PREFILL=bf16`), régime porté par `regime_ligne()` dans chaque instrument.
 
@@ -8,7 +10,7 @@ Assemblé par chef, critère 6 points `poste7-plan-completion-comparatif-17-09`.
 
 | moteur / régime | PPL privé | PPL public | b=1 t/s | b=1 J | b=12 t/s | b=12 J | prefill j/s | classé |
 |---|---|---|---|---|---|---|---|---|
-| acvram W4A16 (nvfp4, bf16 prefill) | 1,0144 | 1,0099 | 233,9 | 1,365 | **743,4** | **0,538** | 8 633 | oui |
+| acvram W4A16 (nvfp4, bf16 prefill) | 1,0144 | 1,0099 | 233,9 | 1,365 | **743,4** | **0,538** | **9 913** | oui |
 | EXL3 4,25 bpw (exllamav3, TabbyAPI) | 1,0006 | 1,0004 | 168,0 | 1,546 | 855,7 | 0,362 | 10 656 | oui |
 | llama.cpp Q4_K_M | 1,0103 | 1,0146 | 341,4 | 1,108 | 709,2 | 0,523 | 15 717 | oui |
 | vLLM W4A16 Marlin (ModelOpt communautaire) | 1,1227 | 1,0876 | 302,9 | — | 2 031,4 | 0,197 | 20 988 | non |
@@ -24,7 +26,7 @@ Assemblé par chef, critère 6 points `poste7-plan-completion-comparatif-17-09`.
 | moteur / régime | PPL privé | PPL public | b=12 t/s | b=12 J | prefill j/s | classé |
 |---|---|---|---|---|---|---|
 | acvram W4A16 bf16 prefill (`-vllm-direct`) | 1,0096 | — | — | — | — | oui |
-| acvram W4A16 bf16 prefill (`-k48-calibA`) | 1,0143 | 1,0281 | — | — | 4 464 | oui |
+| acvram W4A16 bf16 prefill (`-k48-calibA`) | 1,0143 | 1,0281 | — | — | **4 661** | oui |
 | vLLM Marlin W4A16 | 1,0164 | 1,0133 | 858 | 0,397 | 18 117 | oui |
 | llama.cpp Q4_K_M (unsloth, imatrix) | 1,0248 | 1,0397 | 702 | 0,495 | 11 293 | non (> 1,02) |
 | vLLM W4A4 (défaut) | 1,0717 | 1,0751 | 796 | 0,445 | 26 732 | non |

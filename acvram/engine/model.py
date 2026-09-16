@@ -1589,13 +1589,15 @@ _MOE_GEMM_MAX = float(os.environ.get("ACVRAM_MOE_GEMM_MAX", "48"))
 # qwen3-coder.md) — dans la fourchette prédite avant mesure.
 _MOE_MMA = os.environ.get("ACVRAM_MOE_MMA", "1") == "1"
 # GEMM groupée bf16 du prefill au-delà de _MOE_GEMM_MAX jetons par expert :
-# "grouped_mm" (torch._grouped_mm, DÉFAUT) | "groupe" (B0, kernels/gemm_groupe :
-# un lancement Triton persistant pour tous les experts, opt-in jusqu'au
-# scellé de poste7-prefill-b-plan-17-09 : GEMM ≤ 80 ms, prefill ≥ 11 000 j/s) |
-# "bmm" (seaux d'experts, RÉFUTÉ : poste3 0edc3b9, 5 486 j/s contre 8 614 —
-# tuiles d'un petit M inchangées et ~58 Go de copies w[experts] par prefill ;
-# gardé comme témoin d'une fausse piste, jamais comme défaut)
-_PREFILL_GROUPED = os.environ.get("ACVRAM_PREFILL_GROUPED", "grouped_mm")
+# "groupe" (B0, kernels/gemm_groupe, DÉFAUT depuis poste7-b0-et-cause-lm4-17-09 :
+# un lancement Triton persistant pour tous les experts ; Coder 9 913 j/s contre
+# 8 633 (+14,8 %), GLM 4 661 contre 4 462 (+4,5 %, sous la prédiction 5 000
+# mais aucune régression, PPL ±0,002 tenue sur les deux) | "grouped_mm"
+# (torch._grouped_mm, ancien défaut, gardé comme témoin) | "bmm" (seaux
+# d'experts, RÉFUTÉ : poste3 0edc3b9, 5 486 j/s contre 8 614 — tuiles d'un
+# petit M inchangées et ~58 Go de copies w[experts] par prefill ; gardé comme
+# témoin d'une fausse piste, jamais comme défaut)
+_PREFILL_GROUPED = os.environ.get("ACVRAM_PREFILL_GROUPED", "groupe")
 if _PREFILL_GROUPED not in ("bmm", "grouped_mm", "groupe"):
     raise ValueError(f"ACVRAM_PREFILL_GROUPED={_PREFILL_GROUPED!r} : attendu grouped_mm, groupe ou bmm")
 _MOE_MMA_BT = int(os.environ.get("ACVRAM_MOE_MMA_BT", "64"))
