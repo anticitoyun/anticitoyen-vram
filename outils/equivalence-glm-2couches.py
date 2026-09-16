@@ -76,6 +76,225 @@ def invite() -> list:
     return [(1000 + i * 13) % VOCAB_SUR + 10 for i in range(N_JETONS)]
 
 
+# --------------------------------------------------------------------------
+# Profil par couche (poste7, revue/poste7-bissection-w4a16-verdict-17-09.md §2,
+# 17/09) : le chantier « 1 % » (acvram W4A16 1,028 contre Marlin 1,016, MEMES
+# poids) n'est dans aucun noyau (deja verifie par poste3/poste7) -- ce qui reste
+# est la mathematique commune aux deux chemins. Ici, poids bf16 PURS des deux
+# cotes (GLM-4.7-Flash-srcbf16-bf16 contre HF sur la source) : la
+# quantification est retiree comme variable, seul le CODE peut differer.
+#
+# Invite REELLE (pas synthetique comme `invite()` ci-dessus) : une invite
+# synthetique a des statistiques d'activation plates, qui masqueraient
+# precisement le genre de defaut cherche (RoPE, normes, routeur MoE sensibles
+# a la distribution reelle des activations). >= 256 jetons, prefixe GLM
+# `[gMASK]<sop>` en tete (obligatoire depuis le 16/09, sinon la comparaison
+# ne vaut rien -- modele-sans-son-prefixe-de-sequence.md).
+PROFIL_SCRATCH = Path("/tmp/glm-profil-couches")
+PROFIL_ACVRAM_BF16 = "/mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-srcbf16-bf16"
+PROFIL_CORPUS = str(Path(__file__).resolve().parent.parent
+                    / "scratchpad/corpus-calib-k48/bras-A-anglais.txt")
+N_JETONS_PROFIL = 300           # marge confortable sur le >= 256 demande
+SEUIL_RELATIF_COUCHE = 0.005    # 0,5 % par couche (poste7 §2)
+SEUIL_CROISSANCE = 1.5          # x1,5 d'une couche a la suivante
+SEUIL_SITE = 3.0                # un site suspect : x3 au-dela du profil attendu
+
+
+def etape_profil_invite() -> None:
+    """Tokenise l'invite reelle UNE SEULE FOIS (venv acvram) et publie les
+    identifiants partages -- evite tout risque de divergence entre les deux
+    tokenisations independantes (acvram et HF) d'un meme texte."""
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+    from acvram.server.chat import load_tokenizer
+
+    tok = load_tokenizer(SOURCE)
+    prefixe = tok.encode_brut("")
+    with open(PROFIL_CORPUS, encoding="utf-8", errors="replace") as fh:
+        texte = fh.read()
+    corps = tok.encode(texte, add_special_tokens=False)
+    n = N_JETONS_PROFIL - len(prefixe)
+    assert len(corps) >= n, f"corpus trop court : {len(corps)} < {n}"
+    ids = prefixe + corps[:n]
+    assert len(ids) >= 256, f"invite {len(ids)} < 256 jetons demandes"
+
+    PROFIL_SCRATCH.mkdir(parents=True, exist_ok=True)
+    with open(PROFIL_SCRATCH / "ids.json", "w") as fh:
+        json.dump(ids, fh)
+    print(f"  invite : {len(ids)} jetons ({len(prefixe)} de prefixe "
+         f"[gMASK]<sop> + {n} du corpus), premiers ids {ids[:6]}", flush=True)
+
+
+def _charger_ids() -> list:
+    with open(PROFIL_SCRATCH / "ids.json") as fh:
+        return json.load(fh)
+
+
+def _accroche(module, captures: dict, cle: str):
+    """Capture la sortie d'un sous-module (tenseur nu ou premiere valeur
+    d'un tuple, HF renvoie (sortie, poids_attention) sur self_attn)."""
+    import torch as _torch
+
+    def crochet(mod, entree, sortie):
+        t = sortie[0] if isinstance(sortie, tuple) else sortie
+        captures.setdefault(cle, []).append(t.detach().to(_torch.float32).clone())
+    return module.register_forward_hook(crochet)
+
+
+def etape_profil_acvram() -> None:
+    """Charge GLM-4.7-Flash-srcbf16-bf16 (nos poids bf16 purs) sur CPU, à
+    sec, et capture la sortie de chaque couche ET de ses quatre sous-blocs
+    (norme d'entree, attention MLA, norme post, MoE/MLP) sur UN SEUL passage
+    prefill couvrant toute l'invite -- pas de decoupage (runner.py:114,
+    "le prefill n'est pas decoupe"), donc un seul forward par couche."""
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # avant tout import torch/acvram
+    import torch
+    from acvram.engine.loader import load_model
+    from acvram.engine.runner import Engine
+    from acvram.engine.sampler import SamplingParams
+
+    ids = _charger_ids()
+    loaded = load_model(PROFIL_ACVRAM_BF16, dtype=torch.bfloat16,
+                        max_model_len=len(ids) + 8, device_override="cpu")
+    captures: dict = {}
+    crochets = []
+    for i, layer in enumerate(loaded.model.layers):
+        crochets.append(_accroche(layer, captures, f"couche{i}"))
+        crochets.append(_accroche(layer.input_layernorm, captures, f"norme_entree{i}"))
+        # MLA : `self.linear_attn` (DecoderLayerGDN, loader.py:736-761), pas
+        # `self_attn` -- nom herite du chemin GDN que la MLA partage.
+        attn = getattr(layer, "linear_attn", None) or getattr(layer, "self_attn", None)
+        crochets.append(_accroche(attn, captures, f"attention{i}"))
+        crochets.append(_accroche(layer.post_attention_layernorm, captures, f"norme_post{i}"))
+        crochets.append(_accroche(layer.mlp, captures, f"mlp{i}"))
+
+    # `enable_prefix_cache` (defaut True) photographie l'etat GDN/MLA a une
+    # frontiere interieure a l'invite (`_frontiere_insta`, runner.py:637-652)
+    # en RAM epinglee -- `torch.empty_like(..., pin_memory=True)` exige un
+    # contexte CUDA, absent a sec (`CUDA_VISIBLE_DEVICES=""`). Coupe : aucun
+    # sens ici (une seule requete, jamais reprise), et evite le crash.
+    engine = Engine(loaded, None, max_batch_size=1,
+                    max_model_len=len(ids) + 8, enable_cuda_graphs=False,
+                    enable_prefix_cache=False)
+    engine.add_request(ids, SamplingParams(temperature=0.0, max_tokens=1), request_id="s0")
+    n_pas = 0
+    while engine.running or engine.waiting:
+        engine.step()
+        n_pas += 1
+        if n_pas > 5:
+            raise RuntimeError("prefill non termine en 5 pas — decoupage inattendu ?")
+    for c in crochets:
+        c.remove()
+
+    n_couches = len(loaded.model.layers)
+    assert all(f"couche{i}" in captures for i in range(n_couches)), \
+        "toutes les couches n'ont pas ete capturees"
+    for i in range(n_couches):
+        for cle in (f"couche{i}", f"norme_entree{i}", f"attention{i}",
+                   f"norme_post{i}", f"mlp{i}"):
+            assert len(captures[cle]) == 1, f"{cle} capture {len(captures[cle])} fois, attendu 1"
+
+    PROFIL_SCRATCH.mkdir(parents=True, exist_ok=True)
+    torch.save({"n_couches": n_couches,
+               **{k: v[0] for k, v in captures.items()}},
+              PROFIL_SCRATCH / "acvram.pt")
+    print(f"  {n_couches} couches capturees (acvram, bf16 pur, CPU)", flush=True)
+
+
+def etape_profil_hf() -> None:
+    """Meme invite, HF `AutoModelForCausalLM` sur la source, memes quatre
+    sous-blocs par couche. A sec : `CUDA_VISIBLE_DEVICES` deja pose a "" par
+    l'appelant en mode "profil" ; pose ici aussi pour un lancement direct."""
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    modele = AutoModelForCausalLM.from_pretrained(SOURCE, dtype=torch.bfloat16)
+    modele.eval()
+    ids = _charger_ids()
+
+    captures: dict = {}
+    crochets = []
+    for i, layer in enumerate(modele.model.layers):
+        crochets.append(_accroche(layer, captures, f"couche{i}"))
+        crochets.append(_accroche(layer.input_layernorm, captures, f"norme_entree{i}"))
+        crochets.append(_accroche(layer.self_attn, captures, f"attention{i}"))
+        crochets.append(_accroche(layer.post_attention_layernorm, captures, f"norme_post{i}"))
+        crochets.append(_accroche(layer.mlp, captures, f"mlp{i}"))
+
+    input_ids = torch.tensor([ids], dtype=torch.long)
+    with torch.no_grad():
+        modele(input_ids)
+    for c in crochets:
+        c.remove()
+
+    n_couches = len(modele.model.layers)
+    PROFIL_SCRATCH.mkdir(parents=True, exist_ok=True)
+    torch.save({"n_couches": n_couches,
+               **{k: v[0] for k, v in captures.items()}},
+              PROFIL_SCRATCH / "hf.pt")
+    print(f"  {n_couches} couches capturees (HF, {modele.config.num_hidden_layers} "
+         f"couches declarees, rope_interleave={modele.config.rope_interleave})",
+         flush=True)
+
+
+def _relatif(a, h) -> float:
+    """||a - h|| / ||h||, sur le tenseur complet [jetons, dimension]."""
+    import torch
+    d = (a.to(torch.float64) - h.to(torch.float64)).norm()
+    n = h.to(torch.float64).norm()
+    return float(d / n) if n > 0 else float("inf")
+
+
+def etape_profil_comparer() -> int:
+    """Erreur relative ||Δh||/||h_HF|| par couche (scellé <= 0,5 %, croissance
+    <= x1,5) ; si une couche saute d'un facteur >= 3 au-dela de la croissance
+    attendue, detail par sous-bloc de CETTE couche (poste7 §2)."""
+    import torch
+
+    acv = torch.load(PROFIL_SCRATCH / "acvram.pt", weights_only=True)
+    hf = torch.load(PROFIL_SCRATCH / "hf.pt", weights_only=True)
+    n = acv["n_couches"]
+    if n != hf["n_couches"]:
+        print(f"ECHEC / CAUSE: nombre de couches different ({n} vs {hf['n_couches']})")
+        return 2
+
+    erreurs = []
+    for i in range(n):
+        e = _relatif(acv[f"couche{i}"], hf[f"couche{i}"])
+        erreurs.append(e)
+        croissance = e / erreurs[i - 1] if i > 0 and erreurs[i - 1] > 0 else 1.0
+        marque = "SITE >=x3" if (i > 0 and croissance >= SEUIL_SITE) else \
+                ("CROISSANCE" if croissance > SEUIL_CROISSANCE else "ok")
+        print(f"  couche {i:2d}: erreur relative {e * 100:.4f} % "
+             f"(croissance x{croissance:.2f}) {marque}", flush=True)
+
+    pire = max(range(n), key=lambda i: erreurs[i])
+    hors_seuil = [i for i, e in enumerate(erreurs) if e > SEUIL_RELATIF_COUCHE]
+    croissances_hors_seuil = [
+        i for i in range(1, n)
+        if erreurs[i - 1] > 0 and erreurs[i] / erreurs[i - 1] > SEUIL_CROISSANCE]
+
+    print(f"\n  pire couche : {pire} (erreur relative {erreurs[pire] * 100:.4f} %)")
+    print(f"  couches au-dela de {SEUIL_RELATIF_COUCHE * 100:.1f} % : {hors_seuil}")
+    print(f"  croissances au-dela de x{SEUIL_CROISSANCE} : {croissances_hors_seuil}")
+
+    site = next((i for i in range(1, n)
+                if erreurs[i - 1] > 0 and erreurs[i] / erreurs[i - 1] >= SEUIL_SITE), None)
+    if site is not None:
+        print(f"\n  -- detail par sous-bloc de la couche {site} (site suspect) --")
+        for sous_bloc in ("norme_entree", "attention", "norme_post", "mlp"):
+            e = _relatif(acv[f"{sous_bloc}{site}"], hf[f"{sous_bloc}{site}"])
+            print(f"    {sous_bloc:14s}: erreur relative {e * 100:.4f} %", flush=True)
+        # Le residu (x + sortie d'attention, x + mlp) est une simple addition,
+        # pas un module hooke -- meme calcul des deux cotes (DecoderLayerGDN.
+        # forward model.py:1652, _mlp model.py:1787-1791), aucun site possible
+        # dans l'addition elle-meme.
+
+    ok = not hors_seuil and not croissances_hors_seuil
+    print(f"\nRESULTAT VERDICT={'PASSE' if ok else 'REFUTE'}")
+    return 0 if ok else 1
+
+
 def etape_extraire() -> None:
     """Écrit un mini-répertoire HF valide à 2 couches — config tronquée,
     UN SEUL fragment safetensors (les tenseurs voulus tiennent large sous
@@ -264,6 +483,29 @@ def main() -> int:
             return 0
     if mode in ("tout", "comparer"):
         return etape_comparer()
+
+    # -- profil par couche (poste7 §2, 17/09) : quatre etapes independantes,
+    # comme "tout" ci-dessus mais sur le modele COMPLET et une invite reelle.
+    if mode in ("profil", "profil_invite"):
+        etape_profil_invite()
+        if mode == "profil_invite":
+            return 0
+    if mode in ("profil", "profil_acvram"):
+        etape_profil_acvram()
+        if mode == "profil_acvram":
+            return 0
+    if mode in ("profil", "profil_hf"):
+        if mode == "profil":
+            r = subprocess.run([VENV_VLLM, __file__, "profil_hf"],
+                              env=dict(os.environ, CUDA_VISIBLE_DEVICES=""))
+            if r.returncode != 0:
+                return r.returncode
+        else:
+            etape_profil_hf()
+            return 0
+    if mode in ("profil", "profil_comparer"):
+        return etape_profil_comparer()
+
     print(f"ECHEC / CAUSE: mode inconnu {mode!r}")
     return 2
 
