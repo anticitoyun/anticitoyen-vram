@@ -33,12 +33,14 @@ from typing import Callable, Iterator, Optional
 import torch
 
 from ..engine.config import ModelSpec
+from ..engine.gdn import GatedDeltaNet
 from ..engine.layers import QuantLinear, RMSNorm, RotaryEmbedding
 from ..engine.mla import MLAttention
 from ..engine.model import (Attention, DecoderLayer, DecoderLayerGDN,
                            ForwardBatch, MLP, MoEBlock)
 from ..quant.formats import PlainTensor
 from .calibrate import ActStats
+from .convert import _NORMES_ZERO_CENTREES, _QWEN35_HF, _QWEN35_RENOMMAGE
 
 __all__ = ["collect_activation_stats", "DEFAULT_CALIB_FILE", "default_calib_path", "load_calib_ids"]
 
@@ -160,17 +162,39 @@ def collect_activation_stats(
     # tokens.weight`) — capturé par le `except Exception` générique du
     # CLI et rapporté comme « calibration indisponible », un faux repli
     # sur l'arrondi au plus proche qui n'annonçait jamais avoir moins fait.
+    # Qwen3.5/GDN (chantier calibration-hybrides-gdn-17-09) : même
+    # renommage/normes/repli que `convert.py::_adapt_hf` sur le flux
+    # principal (linear_attn.in_proj_* -> qkv/gate/alpha/beta, A_log/
+    # dt_bias -> *.weight, conv1d [d,1,L] -> [d,L], normes centrées à
+    # zéro -> (1 + w)) — sans cette normalisation, `_build_bf16_layer`
+    # ne trouverait ni les tenseurs GDN sous leur nom canonique, ni la
+    # bonne valeur des normes.
+    mt = str(getattr(spec, "model_type", "") or spec.raw.get("model_type", ""))
+    qwen35 = mt in _QWEN35_HF and not spec.raw.get("gdn_a_log_negexp")
+
     location: dict[str, tuple[str, str]] = {}
     for fn, h in handles.items():
         for k in h.keys():
             if k.startswith(("model.visual.", "visual.",
                              "model.vision_tower.", "model.audio_tower.")):
                 continue
-            location[k.replace("model.language_model.", "model.")] = (fn, k)
+            nom = k.replace("model.language_model.", "model.")
+            if qwen35:
+                for src, dst in _QWEN35_RENOMMAGE.items():
+                    if src in nom:
+                        nom = nom.replace(src, dst)
+                        break
+            location[nom] = (fn, k)
 
     def get(key: str) -> torch.Tensor:
         fn, reelle = location[key]
-        return handles[fn].get_tensor(reelle)
+        t = handles[fn].get_tensor(reelle)
+        if qwen35:
+            if key.endswith("linear_attn.conv1d.weight") and t.dim() == 3:
+                t = t.reshape(t.shape[0], t.shape[-1])
+            if key.endswith(_NORMES_ZERO_CENTREES):
+                t = t.to(torch.float32) + 1.0
+        return t
 
     collector = _StatCollector()
     rope = RotaryEmbedding(spec.head_dim, spec.max_position_embeddings,
@@ -191,7 +215,19 @@ def collect_activation_stats(
             layer = None
             try:
                 layer = _build_bf16_layer(spec, p, get, dev, dtype, rope, i, rope_mla)
-                if spec.est_mla:
+                if isinstance(layer, DecoderLayerGDN) and isinstance(layer.linear_attn, GatedDeltaNet):
+                    # Attributs Python (qwen/gate/alpha/beta_proj/out_proj)
+                    # ne portent pas les noms canoniques du manifeste
+                    # (linear_attn.{qkv,gate,alpha,beta,out}.weight) — chaque
+                    # linéaire attachée sous son nom exact, comme kv_a_proj
+                    # ci-dessous pour la MLA.
+                    collector.attach_named(layer.linear_attn.qkv, p + "linear_attn.qkv.weight")
+                    collector.attach_named(layer.linear_attn.gate, p + "linear_attn.gate.weight")
+                    collector.attach_named(layer.linear_attn.alpha, p + "linear_attn.alpha.weight")
+                    collector.attach_named(layer.linear_attn.beta_proj, p + "linear_attn.beta.weight")
+                    collector.attach_named(layer.linear_attn.out_proj, p + "linear_attn.out.weight")
+                    collector.attach(layer.mlp, p + "mlp.")
+                elif spec.est_mla:
                     # `linear_attn` (nom générique de DecoderLayerGDN) et
                     # `kv_a_proj` (attribut de MLAttention) ne portent pas les
                     # noms du manifeste ("self_attn", "kv_a_proj_with_mqa") —
@@ -261,7 +297,36 @@ def _has(get, key: str) -> bool:
 def _build_bf16_layer(spec: ModelSpec, prefix: str, get, dev, dtype, rope,
                       index: int, rope_mla=None):
     pa = prefix + "self_attn."
-    if spec.est_mla:
+    # GDN pur (Qwen3.5, `qwen3_5_text`) : layer_types[index] tranche, jamais
+    # une liste de model_type — même critère que loader.py:791 (`est_gdn`).
+    # kimi_linear et MLA partagent le même NOM d'attribut (`linear_attn`,
+    # historique) mais un chemin de chargement distinct (loader.py:719) ;
+    # ce chantier ne couvre que le cas simple GDN, pas kimi_linear.
+    est_gdn = (bool(spec.layer_types) and index < len(spec.layer_types)
+              and spec.layer_types[index] == "linear_attention"
+              and not spec.est_mla and spec.model_type != "kimi_linear")
+    if est_gdn:
+        pla = prefix + "linear_attn."
+        petit = lambda suffix: get(pla + suffix).to(torch.float32).to(dev)
+        attn = GatedDeltaNet(
+            qkv=_plain(get(pla + "qkv.weight"), dev, dtype),
+            gate=_plain(get(pla + "gate.weight"), dev, dtype),
+            alpha=_plain(get(pla + "alpha.weight"), dev, dtype),
+            beta=_plain(get(pla + "beta.weight"), dev, dtype),
+            out=_plain(get(pla + "out.weight"), dev, dtype),
+            conv_weight=petit("conv1d.weight"),
+            dt_bias=petit("dt_bias.weight"),
+            # gdn_a_log_negexp (GGUF) : hors de ce chemin, `collect_
+            # activation_stats` ne l'active jamais côté qwen35 (voir
+            # `qwen35` ci-dessus) — a_log lu tel quel, comme loader.py:814.
+            a_log=petit("a_log.weight"),
+            norm_weight=petit("norm.weight"),
+            num_k_heads=spec.linear_num_key_heads,
+            num_v_heads=spec.linear_num_value_heads,
+            head_k_dim=spec.linear_key_head_dim,
+            head_v_dim=spec.linear_value_head_dim,
+            eps=spec.rms_norm_eps).to(dev)
+    elif spec.est_mla:
         # Meme critere que loader.py (bead anticitoyen-vram-992) : la
         # structure (q_lora ou non) decide, jamais une liste de noms. GLM-
         # 4.7-Flash a q_a_proj/q_b_proj (pas de q_proj plat) — le manquer
@@ -295,13 +360,28 @@ def _build_bf16_layer(spec: ModelSpec, prefix: str, get, dev, dtype, rope,
             eps=spec.rms_norm_eps).to(dev)
         attn.fuse_projections()
     else:
+        # attn_output_gate (Qwen3.5 attention pleine, `attn_output_gate:
+        # true`) : q_proj sort [q_h | porte_h] par tête — deux fois
+        # `num_attention_heads * head_dim`, pas une fois. Sans
+        # `output_gate=True`, `Attention._proj` (engine/model.py:297)
+        # tentait de reformer `q_proj(x)` en [t, num_attention_heads,
+        # head_dim] alors que sa dernière dimension vaut le double :
+        # `modeling_qwen3_5.py:761-763` (q_proj HF), `:787-790` (chunk en
+        # query/porte) — RuntimeError shape, pas une KeyError, non
+        # rattrapée avant le correctif du 17/09 (69b6d9e). q_norm/k_norm
+        # (`:773-774`) ajoutés pour la même fidélité que loader.py:837-839.
         attn = Attention(
             spec,
             _plain(get(pa + "q_proj.weight"), dev, dtype),
             _plain(get(pa + "k_proj.weight"), dev, dtype),
             _plain(get(pa + "v_proj.weight"), dev, dtype),
             _plain(get(pa + "o_proj.weight"), dev, dtype),
-            rope)
+            rope,
+            q_norm=(RMSNorm(get(pa + "q_norm.weight").to(dtype).to(dev), spec.rms_norm_eps)
+                   if _has(get, pa + "q_norm.weight") else None),
+            k_norm=(RMSNorm(get(pa + "k_norm.weight").to(dtype).to(dev), spec.rms_norm_eps)
+                   if _has(get, pa + "k_norm.weight") else None),
+            output_gate=spec.attn_output_gate)
 
     try:
         router = _plain(get(prefix + "mlp.gate.weight"), dev, torch.float32)
@@ -347,11 +427,12 @@ def _build_bf16_layer(spec: ModelSpec, prefix: str, get, dev, dtype, rope,
     post_norm = RMSNorm(
         get(prefix + "post_attention_layernorm.weight").to(dtype).to(dev),
         spec.rms_norm_eps)
-    if spec.est_mla:
-        # MLAttention.forward rend (y, cache_latent) sur UNE sequence et non
-        # (x, batch, cache) -> seule DecoderLayerGDN sait l'appeler (meme
-        # chemin que loader.py:777, ou "linear_attn" designe aussi bien une
-        # recurrence lineaire qu'une MLA — le nom est historique).
+    if est_gdn or spec.est_mla:
+        # GatedDeltaNet.forward et MLAttention.forward rendent (y, etat) sur
+        # UNE sequence et non (x, batch, cache) -> seule DecoderLayerGDN sait
+        # les appeler (meme chemin que loader.py:787/827, ou "linear_attn"
+        # designe aussi bien une recurrence lineaire qu'une MLA — le nom est
+        # historique).
         return DecoderLayerGDN(index, attn, mlp, in_norm, post_norm, dev)
     return DecoderLayer(index, attn, mlp, in_norm, post_norm, dev)
 
