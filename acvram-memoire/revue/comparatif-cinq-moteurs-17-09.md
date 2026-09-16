@@ -4,13 +4,15 @@
 
 **Note datée 17/09 soir (`poste7-b0-et-cause-lm4-17-09`)** : prefill GEMM groupée passée défaut `ACVRAM_PREFILL_GROUPED=groupe` (0.6.6, Triton persistant, B0) — Coder 8 633→9 913 j/s (+14,8%), GLM 4 462→4 661 j/s (+4,5%, sous la prédiction 5 000 mais aucune régression, PPL±0,002 tenue). Ancien défaut `grouped_mm` gardé comme témoin. B1 (lecture NVFP4 dans la tuile) scellé Coder≥15 000, GLM≥6 000.
 
+**Note datée 17/09 soir, étiquette 0.6.7-E (`poste7-e-c-verdict-17-09`, `verdict-coder-ec-remesure-17-09`)** : décodage édité — `ACVRAM_PAGED_ATTN=triton` (E, poste attention paginée) passé défaut, `ACVRAM_NARROW_KERNEL=cuda` conservé (C `mixte` plante sous graphes b≥2, illegal memory access, correctif poste4 en cours ; `mixte` reste opt-in). Coder b=1 233,9→257,8 t/s (+10,2%, J −11%), b=12 743,4→887,7 t/s (+19,4%, J −16,5%) — table éditée avec les valeurs 0.6.7, anciennes valeurs (233,9/743,4) conservées ici en historique, pas remesurées ailleurs (GLM, autres moteurs).
+
 Assemblé par chef, critère 6 points `poste7-plan-completion-comparatif-17-09`. Corpus privé scellé `5909d27` (jamais publié en clair) ; corpus public = échantillon documenté dans chaque verdict. Préfixe `[gMASK]<sop>` obligatoire sur toute mesure GLM. Tout acvram mesuré sur main ≥ `0971c90` (défaut `ACVRAM_PREFILL=bf16`), régime porté par `regime_ligne()` dans chaque instrument.
 
 ## Table Coder-30B-A3B (`Qwen3-Coder-30B-A3B`)
 
 | moteur / régime | PPL privé | PPL public | b=1 t/s | b=1 J | b=12 t/s | b=12 J | prefill j/s | classé |
 |---|---|---|---|---|---|---|---|---|
-| acvram W4A16 (nvfp4, bf16 prefill) | 1,0144 | 1,0099 | 233,9 | 1,365 | **743,4** | **0,538** | **9 913** | oui |
+| acvram W4A16 (nvfp4, bf16 prefill) | 1,0144 | 1,0099 | **257,8** | **1,214** | **887,7** | **0,449** | **9 913** | oui |
 | EXL3 4,25 bpw (exllamav3, TabbyAPI) | 1,0006 | 1,0004 | 168,0 | 1,546 | 855,7 | 0,362 | 10 656 | oui |
 | llama.cpp Q4_K_M | 1,0103 | 1,0146 | 341,4 | 1,108 | 709,2 | 0,523 | 15 717 | oui |
 | vLLM W4A16 Marlin (ModelOpt communautaire) | 1,1227 | 1,0876 | 302,9 | — | 2 031,4 | 0,197 | 20 988 | non |
