@@ -16,6 +16,19 @@ au-delà de d : x·inv·w ; une seule conversion bf16 en sortie. Juge :
 tests/test_rope_kv.py (q, k à 1 ulp bf16 du calcul fp32 de référence, codes
 int8 et échelles fp16 identiques, créneaux négatifs intacts). Décodage
 ``q_len = 1`` ; la version torch/CUDA reste le repli.
+
+HISTORIQUE (17/09) — ce fichier est la version d462c24, la seule saine EN SITU
+sous rejeu de graphe (poste3 : PPL décodage 5,59 pour 5,54, cache Triton chaud
+ou vidé). Quatre variantes « plus exactes » (tl.sqrt_rn / tl.fdiv ieee, inverses
+en fp64, libdevice.rint, produit fp64→fp32 : df4db39…ece3bed) rendent les
+mêmes codes que kv_write_int8 aux demi-entiers exacts dans les tests unitaires,
+mais corrompent le cache pas à pas SOUS GRAPHE SEULEMENT (PPL 26 à 249 701,
+non reproductible ; saines en eager). Cause non identifiée : compilées hors
+carte pour sm_120, elles n'ont ni scratch global, ni mémoire locale, ni appel
+(outils/sonde-rope-kv-situ-17-09.py cherche où). Conséquence assumée : aux
+demi-entiers exacts (x = amax/2), le code int8 peut différer de kv_write_int8
+d'une unité — l'erreur de quantification y est la même (½ pas), le critère de
+E (distance fp64 ≤ 1,1 ×) ne le voit pas ; tests/test_rope_kv.py le tolère.
 """
 from __future__ import annotations
 
@@ -43,8 +56,7 @@ if triton is not None:
                         wq_ptr, wk_ptr, kc_ptr, ks_ptr, vc_ptr, vs_ptr,
                         HQ, HKV, eps,
                         stride_qt, stride_qh, stride_kt, stride_kh, stride_vt, stride_vh,
-                        D: tl.constexpr, DR: tl.constexpr, NORME_Q: tl.constexpr, NORME_K: tl.constexpr,
-                        INTERPRETE: tl.constexpr):
+                        D: tl.constexpr, DR: tl.constexpr, NORME_Q: tl.constexpr, NORME_K: tl.constexpr):
         t = tl.program_id(0)
         h = tl.program_id(1)
         est_q = h < HQ
@@ -66,16 +78,7 @@ if triton is not None:
             wk = tl.full((D,), 1.0, tl.float32)
         w = tl.where(est_q, wq, wk)
         norme = tl.where(est_q, NORME_Q, NORME_K)        # constexpr 1/0 : normer cette tête ?
-        # IEEE (sqrt_rn, fdiv ieee) : sur carte, `tl.sqrt` et `/` sont approchés
-        # (sqrt.approx, div.full à 2 ulp) — l'interpréteur numpy, exact, ne le
-        # voyait pas ; les codes int8 basculaient aux demi-entiers (poste3, 3/6)
-        # Les inverses passent par fp64 puis fp32 : la valeur correctement
-        # arrondie, quelle que soit la façon dont Triton abaisse `/`, `tl.fdiv`
-        # ou `tl.sqrt_rn` sur sm_120 (poste3 : `fdiv(ieee_rounding=True)` laissait
-        # encore un code ±63 pour ±64 exactement à ±63,5) — une division fp64 par
-        # (jeton, tête), négligeable.
-        ss = tl.sum(x * x, 0).to(tl.float64)
-        inv = (1.0 / tl.sqrt(ss / D + eps)).to(tl.float32)
+        inv = 1.0 / tl.sqrt(tl.sum(x * x, 0) / D + eps)
         inv = tl.where(norme == 1, inv, 1.0)
         y = x * inv * w
         # rotation des DR premières coordonnées (rotate_half) : partenaire i ± DR/2
@@ -106,47 +109,25 @@ if triton is not None:
         ecrit = (base == 1) & (slot >= 0)
         hk = tl.maximum(h - HQ, 0)
         kf = out.to(tl.float32)
-        kmax = tl.maximum((tl.max(tl.abs(kf), 0).to(tl.float64) / 127.0).to(tl.float32), 1e-8)
-        kinv = (1.0 / kmax.to(tl.float64)).to(tl.float32)      # = 1.f / sc de kv_write_int8_kernel
-        # Sur carte, tout arrondi maison (floor, p − floor(p)) lit le produit
-        # x·inv NON arrondi (63,49998 pour 63,5 : sonde outils/sonde-rint-17-09,
-        # r = 0,49999818) — contraction fma, ET une conversion fp64 → fp32 ne
-        # l'empêche pas (sonde-rint-2 de poste3). Seul `libdevice.rint`, appel
-        # opaque sur un argument fp32, voit le 63,5 : c'est lui sur carte.
-        kp = kf * kinv
-        kcode = tl.minimum(tl.maximum(_arrondi(kp, INTERPRETE), -127.0), 127.0)
+        kmax = tl.maximum(tl.max(tl.abs(kf), 0) / 127.0, 1e-8)
+        kcode = tl.minimum(tl.maximum(_rint(kf * (1.0 / kmax)), -127.0), 127.0)
         cell = tl.maximum(slot, 0) * HKV + hk
         tl.store(kc_ptr + cell * D + i, kcode.to(tl.int8), mask=tous & ecrit)
         tl.store(ks_ptr + cell + i * 0, kmax.to(tl.float16), mask=(i == 0) & ecrit)
         vv = tl.load(v_ptr + t * stride_vt + hk * stride_vh + i, mask=tous & (base == 1), other=0.0).to(tl.float32)
-        vmax = tl.maximum((tl.max(tl.abs(vv), 0).to(tl.float64) / 127.0).to(tl.float32), 1e-8)
-        vinv = (1.0 / vmax.to(tl.float64)).to(tl.float32)
-        vp = vv * vinv
-        vcode = tl.minimum(tl.maximum(_arrondi(vp, INTERPRETE), -127.0), 127.0)
+        vmax = tl.maximum(tl.max(tl.abs(vv), 0) / 127.0, 1e-8)
+        vcode = tl.minimum(tl.maximum(_rint(vv * (1.0 / vmax)), -127.0), 127.0)
         tl.store(vc_ptr + cell * D + i, vcode.to(tl.int8), mask=tous & ecrit)
         tl.store(vs_ptr + cell + i * 0, vmax.to(tl.float16), mask=(i == 0) & ecrit)
 
     @triton.jit
-    def _arrondi(x, INTERPRETE: tl.constexpr):
-        """Sur carte : `libdevice.rint` (l'arrondi de __float2int_rn, vérifié
-        exact par la sonde) ; sous l'interpréteur numpy, qui n'a pas libdevice,
-        la version maison — égale à rint sur tous les demi-entiers (test)."""
-        if INTERPRETE:
-            return _rint(x)
-        else:
-            return tl.extra.cuda.libdevice.rint(x)
-
-    @triton.jit
     def _rint(x):
-        """Arrondi au plus proche, égalités vers le pair (rint / __float2int_rn)
-        : floor, soustraction, ×0,5 — pas de `%` flottant. INTERPRÉTEUR
-        SEULEMENT : sur carte, la soustraction lit le produit non arrondi
-        (contraction fma, même à travers une conversion fp64 → fp32 — sondes
-        de poste3, r = 0,49999818 pour 63,5) ; là, `_arrondi` prend libdevice."""
+        """Arrondi au plus proche, égalités vers le pair (rint) — sans libdevice,
+        pour que l'interpréteur et le noyau fassent la même chose."""
         f = tl.floor(x)
-        r = x - f                                            # exact (|x| < 2^23)
-        impair = (f - 2.0 * tl.floor(f * 0.5)) == 1.0        # parité de f, exacte
-        haut = (r > 0.5) | ((r == 0.5) & impair)
+        r = x - f
+        pair = (f % 2.0) == 0.0
+        haut = (r > 0.5) | ((r == 0.5) & (pair == 0))
         return tl.where(haut, f + 1.0, f)
 
 
@@ -173,5 +154,4 @@ def rope_kv(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, cos32: torch.Tens
         cache.k, cache.k_scale, cache.v, cache.v_scale,
         HQ, HKV, float(eps),
         q.stride(0), q.stride(1), k.stride(0), k.stride(1), v.stride(0), v.stride(1),
-        D=D, DR=DR, NORME_Q=1 if wq is not None else 0, NORME_K=1 if wk is not None else 0,
-        INTERPRETE=1 if os.environ.get("TRITON_INTERPRET") == "1" else 0)
+        D=D, DR=DR, NORME_Q=1 if wq is not None else 0, NORME_K=1 if wk is not None else 0)
