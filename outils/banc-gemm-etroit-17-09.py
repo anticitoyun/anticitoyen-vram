@@ -16,7 +16,14 @@ import sys
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import acvram.kernels as kernels                                            # noqa: E402
 from acvram.kernels import gemm_etroit as ge, get_extension, int8_matmul     # noqa: E402
+
+# Le bras « cuda » FORCE le noyau CUDA : `int8_matmul` suit ACVRAM_NARROW_KERNEL,
+# et sous le défaut `mixte` les deux bras rendaient le même noyau Triton
+# (2,028 / 2,031 ms — un témoin qui ne témoignait pas, poste3 a9e5f59).
+kernels._NARROW_KERNEL = "cuda"
+assert kernels.narrow_choix(12) == "cuda" and kernels.narrow_choix(1) == "cuda"
 from acvram.quant.formats import _quantize_int8                             # noqa: E402
 
 COUCHES = 48
