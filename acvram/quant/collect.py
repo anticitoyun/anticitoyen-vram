@@ -40,41 +40,35 @@ from ..engine.model import (Attention, DecoderLayer, DecoderLayerGDN,
 from ..quant.formats import PlainTensor
 from .calibrate import ActStats
 
-__all__ = ["collect_activation_stats", "DEFAULT_CALIB_TEXT", "load_calib_ids"]
+__all__ = ["collect_activation_stats", "DEFAULT_CALIB_FILE", "default_calib_path", "load_calib_ids"]
 
-# Un échantillon délibérément mêlé : prose, code et texte non anglais, parce
-# que les canaux qui comptent diffèrent d'un registre à l'autre et qu'un jeu de
-# calibration monolingue biaise les échelles vers ce qu'il contenait.
-DEFAULT_CALIB_TEXT = [
-    "The quick brown fox jumps over the lazy dog. "
-    "Machine learning models are trained on large corpora of text.",
-    "def quicksort(xs):\n    if len(xs) <= 1:\n        return xs\n"
-    "    pivot = xs[len(xs) // 2]\n"
-    "    return quicksort([x for x in xs if x < pivot]) + "
-    "[x for x in xs if x == pivot] + quicksort([x for x in xs if x > pivot])",
-    "La quantification sur quatre bits reduit la taille des poids d'un facteur "
-    "proche de quatre, au prix d'une erreur de reconstruction qu'il faut "
-    "compenser par une mise a l'echelle par canal.",
-    "In a distributed system, consistency, availability and partition "
-    "tolerance cannot all be guaranteed simultaneously.",
-    "SELECT customer_id, SUM(amount) AS total FROM orders "
-    "WHERE created_at >= '2024-01-01' GROUP BY customer_id HAVING total > 1000;",
-    "Les modeles a melange d'experts n'activent qu'une fraction de leurs "
-    "parametres par jeton, ce qui change completement le calcul de placement.",
-]
+# Corpus de calibration intégré : Gutenberg #1342 (Orgueil et Préjugés, domaine
+# public, 738 Ko, `acvram/data/calibration-anglais.txt`) — poste7,
+# `poste7-calibration-verdict-17-09` : les six phrases mêlées d'avant (prose,
+# code, SQL, français) favorisaient wikitext et inversaient le classement
+# privé/public ; un texte anglais long et ordinaire est le bras A des mesures.
+DEFAULT_CALIB_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                  "data", "calibration-anglais.txt")
+
+
+def default_calib_path() -> str:
+    """Chemin du corpus intégré ; erreur claire s'il manque du paquet."""
+    if not os.path.isfile(DEFAULT_CALIB_FILE):
+        raise FileNotFoundError(f"corpus de calibration intégré absent : {DEFAULT_CALIB_FILE}")
+    return DEFAULT_CALIB_FILE
 
 
 def load_calib_ids(tokenizer, path: Optional[str], n_seqs: int,
                    seq_len: int, vocab_size: int) -> list[list[int]]:
     """Tokenise le corpus de calibration, ou échoue plutôt que de rendre du bruit."""
     texts: list[str] = []
-    if path and os.path.isfile(path):
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            blob = fh.read()
-        step = max(1, len(blob) // max(1, n_seqs))
-        texts = [blob[i:i + step] for i in range(0, len(blob), step)][:n_seqs]
-    else:
-        texts = (DEFAULT_CALIB_TEXT * ((n_seqs // len(DEFAULT_CALIB_TEXT)) + 1))[:n_seqs]
+    if path and not os.path.isfile(path):
+        raise FileNotFoundError(f"fichier de calibration introuvable : {path}")
+    path = path or default_calib_path()
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        blob = fh.read()
+    step = max(1, len(blob) // max(1, n_seqs))
+    texts = [blob[i:i + step] for i in range(0, len(blob), step)][:n_seqs]
 
     if tokenizer is None:
         # Des identifiants aléatoires donnent des statistiques de canaux

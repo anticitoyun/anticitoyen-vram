@@ -42,8 +42,12 @@ SHARD_TARGET_BYTES = 4 * 1024 ** 3
 class ConversionOptions:
     out_dir: str
     calibrate: bool = False
-    calib_tokens: int = 128
-    calib_seqs: int = 16
+    # Sequences et jetons REELLEMENT lus par load_calib_ids, poses par cli.py ;
+    # 0/0 = aucune calibration. Jamais un defaut qui ressemble a une mesure
+    # (16/128 sont restes trois semaines au manifeste sans qu'aucune passe ne
+    # les ait produits — poste7-calibration-verdict-17-09).
+    calib_tokens: int = 0
+    calib_seqs: int = 0
     use_hadamard: str = "auto"        # auto | always | never
     # Conserve l'erreur des 21 valeurs de la grille AWQ pour chaque tenseur, au
     # lieu du seul minimum. Sert a calculer le prix d'un exposant COMMUN a un
@@ -1129,6 +1133,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     # par tenseur ci-dessous suffit (identite explicite quand elle s'effondre
     # malgre tout, ligne ~1220).
 
+    from .hfquant import is_hfquant
+    source_quantifiee = opts.passage_direct and is_hfquant(model_path)
     for name, tensor in _adapt_hf(_iter_checkpoint(model_path, opts.passage_direct), spec):
         report.tensors += 1
         if progress and report.tensors % 25 == 0:
@@ -1154,6 +1160,15 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         report.in_bytes += tensor.numel() * tensor.element_size()
         fmt = router.format_for(name)
         entry: dict[str, Any] = {"format": fmt, "shape": list(tensor.shape)}
+        if (source_quantifiee and tensor.dim() == 2 and tensor.dtype in (torch.bfloat16, torch.float16)
+                and fmt not in ("bf16", "fp16", "fp32")):
+            # passage direct : une couche que la source a GARDÉE EN CLAIR
+            # (ignore / exclude_modules : lm_head, plongements, routeurs,
+            # attention MLA chez GadflyII) reste en clair — quantifier ici
+            # servirait d'autres poids que vLLM (poste3, 17/09 : q_a/q_b/kv_a/
+            # o_proj et lm_head passés en nvfp4 par le plan)
+            fmt = "bf16" if tensor.dtype == torch.bfloat16 else "fp16"
+            entry = {"format": fmt, "shape": list(tensor.shape), "passage_direct": "clair"}
 
         if fmt == "fp32" or fmt in ("bf16", "fp16") or tensor.dim() != 2:
             if fmt == "fp32":

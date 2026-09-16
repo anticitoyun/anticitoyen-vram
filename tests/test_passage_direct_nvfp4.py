@@ -97,8 +97,12 @@ def test_convert_passage_direct_ecrit_les_octets_de_la_source(tmp_path, tiny_che
     out = tmp_path / "direct"
     convert_checkpoint(path, plan, ConversionOptions(out_dir=str(out), awq=False, passage_direct=True), spec=spec)
     manifeste = json.load(open(out / "acvram_manifest.json"))
-    entrees = {k: v for k, v in manifeste["tensors"].items() if v.get("passage_direct")}
+    entrees = {k: v for k, v in manifeste["tensors"].items() if v.get("passage_direct") is True}
     assert len(entrees) == 4 * 7 and all(v["format"] == "nvfp4" for v in entrees.values())
+    # les couches gardées en clair par la source (lm_head ici, comme l'ignore de
+    # vLLM) restent en clair, quel que soit le plan (poste3, 17/09)
+    tete = manifeste["tensors"]["lm_head.weight"]
+    assert tete["format"] == "bf16" and tete.get("passage_direct") == "clair", tete
     src = load_file(os.path.join(path, "model.safetensors"))
     ecrit = {}
     for f in sorted(os.listdir(out)):
