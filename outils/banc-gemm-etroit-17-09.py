@@ -72,7 +72,7 @@ def chrono_eager(f):
 def main():
     assert get_extension() is not None
     g = torch.Generator().manual_seed(17)
-    for b in (12, 1):
+    for b in tuple(int(x) for x in os.environ.get("BANC_B", "12,1").split(",")):   # BANC_B=1,2,4,8,12 : bascule cuda/Triton (poste7, régime mixte)
         total_c = total_t = 0.0
         hors_tot = 0
         for nom, n, k in DENSE:
