@@ -50,12 +50,44 @@ def _ref(x, w, eps, cos32, sin32, pos, dr):
 
 
 def _codes(x):
-    """kv_write_int8_kernel : sc = max(amax/127, 1e-8), inv = 1/sc (IEEE),
-    code = rint(x · inv) — la multiplication par l'inverse, pas la division :
-    aux demi-entiers les deux diffèrent d'un code."""
+    """Sous l'interpréteur : la formule de kv_write_int8_kernel en torch —
+    sc = max(amax/127, 1e-8), inv = 1/sc, code = rint(x · inv). Sur carte,
+    cette formule en torch n'est PAS la vérité (poste3 : x = 1,8671875,
+    amax = 3,734375 → produit fp32 IEEE 63,499996 → 63, torch cuda rend 64,
+    autre ordre ou fma) : la vérité est le noyau CUDA lui-même, voir
+    `_cache_cuda`."""
     xf = x.float()
     sc = (xf.abs().amax(-1, keepdim=True) / 127).clamp(min=1e-8)
     return (xf * (1.0 / sc)).round().clamp(-127, 127), sc.squeeze(-1).to(torch.float16)
+
+
+def _cache_cuda(k, v, slots, HKV, D, blocs):
+    """Sur carte : le cache écrit par le chemin actuel (`PagedKVCache.write` →
+    `kv_write_int8`, le noyau CUDA que rope_kv remplace) — la référence
+    d'équivalence, bit à bit ; None sans carte ou sans extension."""
+    if not torch.cuda.is_available():
+        return None
+    from acvram.kernels import get_extension
+    ext = get_extension()
+    if ext is None or not hasattr(ext, "kv_write_int8"):
+        return None
+    c = PagedKVCache(KVCacheConfig(num_layers=1, num_kv_heads=HKV, head_dim=D, num_blocks=blocs, dtype="int8", device=DEV))
+    c.write(slots, k.to(torch.bfloat16), v.to(torch.bfloat16))
+    return c
+
+
+def _memes_codes(c, ref, k, v, slots, t):
+    """Codes et échelles du créneau t : contre le cache CUDA si présent, sinon la formule."""
+    sl = int(slots[t])
+    blk, off = sl // 16, sl % 16
+    if ref is not None:
+        return (torch.equal(c.k[blk, off], ref.k[blk, off]) and torch.equal(c.v[blk, off], ref.v[blk, off])
+                and torch.equal(c.k_scale[blk, off], ref.k_scale[blk, off])
+                and torch.equal(c.v_scale[blk, off], ref.v_scale[blk, off]))
+    kc, ks = _codes(k[t])
+    vc, vs = _codes(v[t])
+    return (torch.equal(c.k[blk, off].float(), kc) and torch.equal(c.v[blk, off].float(), vc)
+            and torch.equal(c.k_scale[blk, off], ks) and torch.equal(c.v_scale[blk, off], vs))
 
 
 def _montage(T, HQ, HKV, D, DR, norme_q=True, empile=False, graine=0):
@@ -92,15 +124,11 @@ def test_q_k_et_cache_suivent_la_reference(HQ, HKV, D, DR, norme_q, empile):
         assert int(ulp.max()) <= 1, f"{nom} : {int(ulp.max())} ulp de la référence fp32"
         assert float((ulp > 0).float().mean()) < 0.01, f"{nom} : trop de valeurs à 1 ulp"
     assert not torch.equal(q, q0) and not torch.equal(k, k0)
+    ref = _cache_cuda(k, v, slots, HKV, D, 4)              # k tel qu'écrit par rope_kv (après rotation)
     for t in range(T):
-        sl = int(slots[t])
-        blk, off = sl // 16, sl % 16
-        if sl < 0:
+        if int(slots[t]) < 0:
             continue
-        kc, ks = _codes(k[t])
-        vc, vs = _codes(v[t])
-        assert torch.equal(c.k[blk, off].float(), kc) and torch.equal(c.v[blk, off].float(), vc), t
-        assert torch.equal(c.k_scale[blk, off], ks) and torch.equal(c.v_scale[blk, off], vs), t
+        assert _memes_codes(c, ref, k, v, slots, t), f"jeton {t} : codes ou échelles ≠ {'kv_write_int8' if ref is not None else 'formule'}"
     ecrits = {(int(s) // 16, int(s) % 16) for s in slots if int(s) >= 0}
     for blk in range(4):
         for off in range(16):
@@ -122,9 +150,10 @@ def test_les_bras_qui_doivent_differer():
 def test_le_demi_entier_exact_arrondit_comme_kv_write_int8():
     """Le cas de poste3 (rope-kv-diff.log) : x = amax/2 en bf16 donne
     x·(1/sc) = 63,5·(1+ε) — le code doit être celui du noyau CUDA
-    (`1.f/sc` IEEE puis `__float2int_rn`), c'est-à-dire celui de torch avec
-    la même formule. On fabrique 64 têtes dont la moitié des coordonnées
-    valent exactement amax/2, sur tous les exposants."""
+    `kv_write_int8` (`1.f/sc` puis `__float2int_rn`) : sur carte on compare
+    au cache écrit par ce noyau (une formule torch cuda ne le reproduit pas
+    à l'ulp près) ; sous l'interpréteur, à la formule en torch. 64 têtes dont
+    la moitié des coordonnées valent exactement amax/2."""
     rk = _rk()
     T, HKV, D = 4, 16, 32
     q = torch.zeros(T, 1, D, dtype=DT, device=DEV)
@@ -137,6 +166,6 @@ def test_le_demi_entier_exact_arrondit_comme_kv_write_int8():
     cos32, sin32 = _tables(4, D)
     c = PagedKVCache(KVCacheConfig(num_layers=1, num_kv_heads=HKV, head_dim=D, num_blocks=1, dtype="int8", device=DEV))
     rk.rope_kv(q, k, v, cos32, sin32, pos, slots, None, None, 1e-6, c)
+    ref = _cache_cuda(k, v, slots, HKV, D, 1)
     for t in range(T):
-        vc, _ = _codes(v[t])
-        assert torch.equal(c.v[0, t].float(), vc), (t, (c.v[0, t].float() - vc).nonzero()[:4])
+        assert _memes_codes(c, ref, k, v, slots, t), t
