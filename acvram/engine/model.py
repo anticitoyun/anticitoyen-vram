@@ -1149,6 +1149,17 @@ class MoEBlock(nn.Module):
             wu = self._pile_bf16(pu); u = torch._grouped_mm(xs_u, wu.transpose(1, 2), offs=offs); del wu
             act = _activation(g, u, pg[5], pd[4])
             wd = self._pile_bf16(pd); d = torch._grouped_mm(act, wd.transpose(1, 2), offs=offs); del wd
+        elif _PREFILL_GROUPED == "groupe":
+            # B0 : un lancement persistant pour les 128 experts, lignes lues
+            # par index dans le noyau, grille de tuiles à taille fixe (aucun
+            # offset relu sur l'hôte)
+            from ..kernels import gemm_groupe as gg
+            G = xs.shape[0]
+            tiles = self._tuiles(cnt, gg.BT, t_max=-(-G // gg.BT) + E)
+            wg = self._pile_bf16(pg); g = gg.gemm_groupe(xs, wg, tiles); del wg
+            wu = self._pile_bf16(pu); u = gg.gemm_groupe(xs_u, wu, tiles); del wu
+            act = _activation(g, u, pg[5], pd[4])
+            wd = self._pile_bf16(pd); d = gg.gemm_groupe(act, wd, tiles); del wd
         else:
             # bmm par seaux (A, poste7-profil-verdict-17-09) : réfuté −36 %, témoin
             plan = self._plan_bmm(cnt)
@@ -1578,13 +1589,15 @@ _MOE_GEMM_MAX = float(os.environ.get("ACVRAM_MOE_GEMM_MAX", "48"))
 # qwen3-coder.md) — dans la fourchette prédite avant mesure.
 _MOE_MMA = os.environ.get("ACVRAM_MOE_MMA", "1") == "1"
 # GEMM groupée bf16 du prefill au-delà de _MOE_GEMM_MAX jetons par expert :
-# "grouped_mm" (torch._grouped_mm, DÉFAUT) | "bmm" (seaux d'experts, RÉFUTÉ :
-# poste3 0edc3b9, 5 486 j/s contre 8 614 — les tuiles GEMM restent celles d'un
-# petit M, et le gather w[experts] par seau ajoute ~58 Go de copies par
-# prefill ; gardé comme témoin d'une fausse piste, jamais comme défaut)
+# "grouped_mm" (torch._grouped_mm, DÉFAUT) | "groupe" (B0, kernels/gemm_groupe :
+# un lancement Triton persistant pour tous les experts, opt-in jusqu'au
+# scellé de poste7-prefill-b-plan-17-09 : GEMM ≤ 80 ms, prefill ≥ 11 000 j/s) |
+# "bmm" (seaux d'experts, RÉFUTÉ : poste3 0edc3b9, 5 486 j/s contre 8 614 —
+# tuiles d'un petit M inchangées et ~58 Go de copies w[experts] par prefill ;
+# gardé comme témoin d'une fausse piste, jamais comme défaut)
 _PREFILL_GROUPED = os.environ.get("ACVRAM_PREFILL_GROUPED", "grouped_mm")
-if _PREFILL_GROUPED not in ("bmm", "grouped_mm"):
-    raise ValueError(f"ACVRAM_PREFILL_GROUPED={_PREFILL_GROUPED!r} : attendu bmm ou grouped_mm")
+if _PREFILL_GROUPED not in ("bmm", "grouped_mm", "groupe"):
+    raise ValueError(f"ACVRAM_PREFILL_GROUPED={_PREFILL_GROUPED!r} : attendu grouped_mm, groupe ou bmm")
 _MOE_MMA_BT = int(os.environ.get("ACVRAM_MOE_MMA_BT", "64"))
 # Étages du pipeline cp.async du noyau MMA (0 = chargements directs).
 # Mesuré le 14/09/2026, Coder-30B, prefill chaud L=2048 : 0 → 10 411 j/s,
