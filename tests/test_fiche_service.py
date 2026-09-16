@@ -261,6 +261,33 @@ def test_lancer_serveur_commande_shell_avec_cd(tmp_path):
         pytest.fail("le groupe de processus a survécu à arreter_serveur")
 
 
+def test_lancer_serveur_timeout_tue_aussi_le_groupe(tmp_path):
+    """Même piège que ci-dessus, mais sur le REPLI DE `lancer_serveur` quand
+    `/v1/models` ne répond jamais (trouvé le 17/09 en validant le juge de
+    refus : un serveur EXL3/TabbyAPI qui écoutait sur le mauvais port a
+    survécu au timeout, occupant la carte pour la mesure suivante)."""
+    dossier = tmp_path / "sous-dossier"
+    dossier.mkdir()
+    (dossier / "ne_repond_jamais.py").write_text(
+        "import time\n"
+        "open('marqueur', 'w').close()\n"
+        "time.sleep(60)\n")
+    commande = f"cd {dossier} && {sys.executable} ne_repond_jamais.py"
+    srv = fiche_service.lancer_serveur(commande, "http://127.0.0.1:1", 0,
+                                       tmp_path / "j.log", 1.5)
+    assert srv.charge is False
+    assert "répond pas" in srv.cause_echec
+    pid_shell = srv.processus.pid
+    for _ in range(20):
+        try:
+            os.killpg(pid_shell, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("le repli sur timeout a laissé le groupe vivant")
+
+
 def test_lancer_serveur_timeout(tmp_path):
     s = fiche_service.lancer_serveur(None, "http://127.0.0.1:1", 0,
                                      tmp_path / "j.log", 1.0)

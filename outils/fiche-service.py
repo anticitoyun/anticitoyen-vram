@@ -188,30 +188,42 @@ def lancer_serveur(commande: Optional[str], base_url: str, port: int,
                 pass
             time.sleep(1.0)
     if processus is not None:
-        processus.terminate()
+        # GROUPE, pas seulement le shell — même piège que `arreter_serveur` :
+        # un timeout de chargement laissait le serveur (TabbyAPI, vLLM, tout
+        # `cd && exec`) orphelin sur la carte, `terminate()` ne tuant que le
+        # `sh -c`. Trouvé le 17/09 en validant le juge de refus : le serveur
+        # abliterated a survécu au timeout, occupant la VRAM pour la mesure
+        # suivante.
+        _tuer_groupe(processus)
     return Serveur(base_url, processus, journal, timeout_s, False,
                    f"/v1/models ne répond pas après {timeout_s:.0f} s")
+
+
+def _tuer_groupe(processus: subprocess.Popen) -> None:
+    """Le GROUPE, pas seulement le shell : `commande` peut être `cd X &&
+    binaire`, où le shell (`sh -c ...`) n'est pas le serveur lui-même.
+    `terminate()` sur le seul PID du shell laisserait le serveur orphelin
+    sur le port et la carte — `start_new_session=True` au lancement rend ce
+    groupe tuable en un coup. Utilisé aussi bien à l'arrêt normal qu'au
+    repli sur timeout de chargement (les deux laissaient l'orphelin avant
+    le 17/09)."""
+    try:
+        os.killpg(processus.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        processus.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(processus.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def arreter_serveur(serveur: Serveur) -> None:
     if serveur.processus is None or serveur.processus.poll() is not None:
         return
-    # Le GROUPE, pas seulement le shell : `commande` peut être `cd X &&
-    # binaire`, où le shell (`sh -c ...`) n'est pas le serveur lui-même.
-    # `terminate()` sur le seul PID du shell laisserait le serveur orphelin
-    # sur le port et la carte — `start_new_session=True` au lancement rend
-    # ce groupe tuable en un coup.
-    try:
-        os.killpg(serveur.processus.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    try:
-        serveur.processus.wait(timeout=15)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(serveur.processus.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    _tuer_groupe(serveur.processus)
 
 
 def vram_pid(pid: int) -> Optional[int]:
