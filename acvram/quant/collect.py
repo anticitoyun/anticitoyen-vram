@@ -152,13 +152,25 @@ def collect_activation_stats(
     files = _shard_files(model_path)
     handles = {fn: safe_open(os.path.join(model_path, fn), framework="pt",
                              device="cpu") for fn in files}
-    location: dict[str, str] = {}
+    # Enrobages multimodaux HF (poste7-kv-lm4 non lié ; convert.py::_adapt_hf
+    # applique la même règle au flux principal) : le modèle de langue vit
+    # sous `model.language_model.`, la tour visuelle n'est pas servie ici.
+    # Sans cette normalisation, `get("model.embed_tokens.weight")` levait
+    # KeyError sur Qwen3.8-27B (clé réelle `model.language_model.embed_
+    # tokens.weight`) — capturé par le `except Exception` générique du
+    # CLI et rapporté comme « calibration indisponible », un faux repli
+    # sur l'arrondi au plus proche qui n'annonçait jamais avoir moins fait.
+    location: dict[str, tuple[str, str]] = {}
     for fn, h in handles.items():
         for k in h.keys():
-            location[k] = fn
+            if k.startswith(("model.visual.", "visual.",
+                             "model.vision_tower.", "model.audio_tower.")):
+                continue
+            location[k.replace("model.language_model.", "model.")] = (fn, k)
 
     def get(key: str) -> torch.Tensor:
-        return handles[location[key]].get_tensor(key)
+        fn, reelle = location[key]
+        return handles[fn].get_tensor(reelle)
 
     collector = _StatCollector()
     rope = RotaryEmbedding(spec.head_dim, spec.max_position_embeddings,
