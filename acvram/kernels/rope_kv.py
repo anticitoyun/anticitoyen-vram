@@ -68,7 +68,13 @@ if triton is not None:
         # IEEE (sqrt_rn, fdiv ieee) : sur carte, `tl.sqrt` et `/` sont approchés
         # (sqrt.approx, div.full à 2 ulp) — l'interpréteur numpy, exact, ne le
         # voyait pas ; les codes int8 basculaient aux demi-entiers (poste3, 3/6)
-        inv = tl.fdiv(1.0, tl.sqrt_rn(tl.sum(x * x, 0) / D + eps), ieee_rounding=True)
+        # Les inverses passent par fp64 puis fp32 : la valeur correctement
+        # arrondie, quelle que soit la façon dont Triton abaisse `/`, `tl.fdiv`
+        # ou `tl.sqrt_rn` sur sm_120 (poste3 : `fdiv(ieee_rounding=True)` laissait
+        # encore un code ±63 pour ±64 exactement à ±63,5) — une division fp64 par
+        # (jeton, tête), négligeable.
+        ss = tl.sum(x * x, 0).to(tl.float64)
+        inv = (1.0 / tl.sqrt(ss / D + eps)).to(tl.float32)
         inv = tl.where(norme == 1, inv, 1.0)
         y = x * inv * w
         # rotation des DR premières coordonnées (rotate_half) : partenaire i ± DR/2
@@ -99,25 +105,30 @@ if triton is not None:
         ecrit = (base == 1) & (slot >= 0)
         hk = tl.maximum(h - HQ, 0)
         kf = out.to(tl.float32)
-        kmax = tl.maximum(tl.fdiv(tl.max(tl.abs(kf), 0), 127.0, ieee_rounding=True), 1e-8)
-        kcode = tl.minimum(tl.maximum(_rint(kf * tl.fdiv(1.0, kmax, ieee_rounding=True)), -127.0), 127.0)
+        kmax = tl.maximum((tl.max(tl.abs(kf), 0).to(tl.float64) / 127.0).to(tl.float32), 1e-8)
+        kinv = (1.0 / kmax.to(tl.float64)).to(tl.float32)      # = 1.f / sc de kv_write_int8_kernel
+        kcode = tl.minimum(tl.maximum(_rint(kf * kinv), -127.0), 127.0)
         cell = tl.maximum(slot, 0) * HKV + hk
         tl.store(kc_ptr + cell * D + i, kcode.to(tl.int8), mask=tous & ecrit)
         tl.store(ks_ptr + cell + i * 0, kmax.to(tl.float16), mask=(i == 0) & ecrit)
         vv = tl.load(v_ptr + t * stride_vt + hk * stride_vh + i, mask=tous & (base == 1), other=0.0).to(tl.float32)
-        vmax = tl.maximum(tl.fdiv(tl.max(tl.abs(vv), 0), 127.0, ieee_rounding=True), 1e-8)
-        vcode = tl.minimum(tl.maximum(_rint(vv * tl.fdiv(1.0, vmax, ieee_rounding=True)), -127.0), 127.0)
+        vmax = tl.maximum((tl.max(tl.abs(vv), 0).to(tl.float64) / 127.0).to(tl.float32), 1e-8)
+        vinv = (1.0 / vmax.to(tl.float64)).to(tl.float32)
+        vcode = tl.minimum(tl.maximum(_rint(vv * vinv), -127.0), 127.0)
         tl.store(vc_ptr + cell * D + i, vcode.to(tl.int8), mask=tous & ecrit)
         tl.store(vs_ptr + cell + i * 0, vmax.to(tl.float16), mask=(i == 0) & ecrit)
 
     @triton.jit
     def _rint(x):
-        """Arrondi au plus proche, égalités vers le pair (rint) — sans libdevice,
-        pour que l'interpréteur et le noyau fassent la même chose."""
+        """Arrondi au plus proche, égalités vers le pair (rint / __float2int_rn),
+        en opérations EXACTES sur carte : floor, soustraction, ×0,5 — pas de
+        `%` flottant (poste3 : un code ±63 au lieu de ±64 exactement à ±63,5,
+        le modulo flottant de Triton ne rendait pas la parité attendue sur
+        cuda ; l'interpréteur numpy, lui, la rendait)."""
         f = tl.floor(x)
-        r = x - f
-        pair = (f % 2.0) == 0.0
-        haut = (r > 0.5) | ((r == 0.5) & (pair == 0))
+        r = x - f                                            # exact (|x| < 2^23)
+        impair = (f - 2.0 * tl.floor(f * 0.5)) == 1.0        # parité de f, exacte
+        haut = (r > 0.5) | ((r == 0.5) & impair)
         return tl.where(haut, f + 1.0, f)
 
 

@@ -117,3 +117,26 @@ def test_les_bras_qui_doivent_differer():
     assert not torch.equal(q1, ref), "une autre position doit changer q"
     q2 = q.clone(); rk.rope_kv(q2, k.clone(), v, cos32, sin32, pos, slots, wq * 2, wk, eps, c)
     assert not torch.equal(q2, ref), "un autre poids de norme doit changer q"
+
+
+def test_le_demi_entier_exact_arrondit_comme_kv_write_int8():
+    """Le cas de poste3 (rope-kv-diff.log) : x = amax/2 en bf16 donne
+    x·(1/sc) = 63,5·(1+ε) — le code doit être celui du noyau CUDA
+    (`1.f/sc` IEEE puis `__float2int_rn`), c'est-à-dire celui de torch avec
+    la même formule. On fabrique 64 têtes dont la moitié des coordonnées
+    valent exactement amax/2, sur tous les exposants."""
+    rk = _rk()
+    T, HKV, D = 4, 16, 32
+    q = torch.zeros(T, 1, D, dtype=DT, device=DEV)
+    base = torch.randn(T, HKV, D, device=DEV).to(DT)
+    amax = base.abs().amax(-1, keepdim=True)
+    base[..., ::2] = (amax / 2).to(DT).expand(-1, -1, D // 2)     # exactement amax/2 (exposant −1)
+    k, v = base.clone(), base.clone()
+    slots = torch.arange(T, device=DEV)
+    pos = torch.zeros(T, dtype=torch.long, device=DEV)
+    cos32, sin32 = _tables(4, D)
+    c = PagedKVCache(KVCacheConfig(num_layers=1, num_kv_heads=HKV, head_dim=D, num_blocks=1, dtype="int8", device=DEV))
+    rk.rope_kv(q, k, v, cos32, sin32, pos, slots, None, None, 1e-6, c)
+    for t in range(T):
+        vc, _ = _codes(v[t])
+        assert torch.equal(c.v[0, t].float(), vc), (t, (c.v[0, t].float() - vc).nonzero()[:4])
