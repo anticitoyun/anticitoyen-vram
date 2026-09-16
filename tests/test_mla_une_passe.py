@@ -171,3 +171,34 @@ def test_cache_fp8_meme_arithmetique_sur_le_dequantifie():
     for b, n in enumerate(lens):
         assert torch.equal(c8[b][n], ref[b]), f"créneau {b} : ligne fp8 ≠ référence"
         assert int(lens_w[b]) == n + 1
+
+
+@CUDA
+@pytest.mark.parametrize("H", [20])
+def test_puits_d_attention_en_position_0(H):
+    """poste7 § 12 : GLM porte un puits d'attention en position 0 ([gMASK]<sop>) —
+    la ligne 0 du cache attire presque toute la masse du softmax de toutes les
+    têtes. Le noyau à une passe (softmax en ligne, tranches recombinées : la
+    ligne 0 est dans la première tuile de la première tranche, son maximum
+    domine M) doit rendre la référence float64 et les deux noyaux d'avant
+    comme pour un cache ordinaire — un puits qui casserait ici nommerait le
+    noyau ; s'il passe, le défaut est ailleurs (prefill, créneaux, blocs)."""
+    ext = _ext(); dev = torch.device("cuda:0")
+    B, L = 4, 2048
+    lens = [1, 300, 1500, 2047]
+    q, caches, ptrs, lens_t = _cas(dev, B, H, L, lens, graine=21)
+    scale = 1.0 / (W ** 0.5)
+    for b in range(B):
+        # ligne 0 alignée sur TOUTES les têtes : direction moyenne des q, × 40
+        puits = q[b].mean(0)
+        caches[b][0] = (40 * puits / puits.norm() * q[b].norm(dim=-1).mean()).to(torch.bfloat16)
+    y = ext.mla_decode_1p(q, ptrs, None, lens_t, L, R, scale)
+    scores = torch.zeros(B, H, L, device=dev)
+    y_old = ext.mla_decode_batch(q, ptrs, lens_t, scores, L, R, scale)
+    torch.cuda.synchronize()
+    ref = _ref64(q, caches, lens, scale)
+    # le puits domine bien : p_0 > 0,9 en moyenne sur les têtes du créneau 3
+    k = caches[3][:2048].double(); s = (q[3].double() @ k.T) * scale
+    p0 = torch.softmax(s, -1)[:, 0].mean().item()
+    assert p0 > 0.9, f"le puits n'attire que {p0:.2f}"
+    _compare(y, ref, y_old)
