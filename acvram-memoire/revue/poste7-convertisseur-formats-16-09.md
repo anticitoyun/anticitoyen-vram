@@ -44,10 +44,25 @@ Contraintes qui décident de la forme, toutes issues de REGLES § 2 :
 
 Prédiction et réfutation : fragments et manifeste produits par la GUI **identiques (sha256) à ceux de la CLI** aux mêmes options sur un petit modèle ; lancement pendant une mesure → **refus** (ce contrôle doit rendre « faux » : le tester verrou tenu). Coût : une session à sec, ~½ journée. Quand : **après le duel** (file en un bloc, REGLES § 1) et **après le point 1 de l'ordre** — sinon la GUI industrialise la requantification en défaut.
 
+## 6. Retour du point 1 (poste1 98d1e87, main 2964f07) — trou 1 confirmé, mécanisme non établi
+
+Mesuré : `global_scale` identique au bit ; `block_scale` et codes divergent sur ~50 % des blocs, écart médian 33 %, jusqu'à 84 %. Le raccourci `--no-awq` est **réfuté** : le passage direct est un vrai chantier.
+
+La lecture « ModelOpt calibre son échelle de bloc » est une hypothèse, pas un mécanisme (REGLES § 4 bis). Un E4M3 arrondit à ≤ 6,25 % ; 33 % de médiane a deux causes possibles, qui n'appellent pas le même remède :
+* (a) échelle de bloc **cherchée** (MSE/optimale) et non amax/6 → ModelOpt produit de meilleurs poids que nous à octets égaux : c'est un levier de qualité pour NOTRE convertisseur, pas seulement une question d'équité ;
+* (b) **désalignement** de la comparaison (blocs de 16 pris sur le mauvais axe, échelles swizzlées, transposition [out, in/16]) → les poids sont les mêmes, l'instrument compare deux découpages.
+
+Contrôle qui rend « faux », 10 min à sec : sous la règle amax/6 chaque bloc de 16 porte au moins un code de magnitude 6 (à l'arrondi près). Sur les blocs divergents de ModelOpt, compter la part de blocs **sans** code à 6. ≈ 0 % → (b), reprendre l'instrument avant d'écrire une ligne ; nettement > 0 % (scellé : > 20 %) → (a), et le passage direct s'accompagne d'une recherche d'échelle de bloc dans `quantize_nvfp4` (`nvfp4.py:216`), scellé : PPL ≤ celle de la conversion actuelle − 0,004 sur 3 tranches.
+
+Priorité : **à sec, sans carte, après la capture Hadamard de poste4 (ne pas l'interrompre) et AVANT toute colonne PPL GLM publiée dans le comparatif** — sans lui, la colonne compare deux quantifications. chef en fait la porte du comparatif, pas une urgence de carte.
+
 ## Ordre
 
 0. GUI : poste2, à sec, après le duel et après le point 1 — route `/convertir` + verrou pris par le sous-processus ; scellé : sha256 GUI = CLI, refus sous verrou tenu. Pas avant.
-1. poste1 (à sec, 10 min) : 3 tenseurs d'un NVFP4 modelopt → `hfquant` déquant → `quantize_nvfp4(no_awq)` → codes et échelles comparés bit à bit aux originaux. Verdict : `verdict-requant-nvfp4-bitabit`. Identiques → trou 1 = `--no-awq` + garde manifeste ; différents → poste4 écrit le passage direct (§ 3.1) après le correctif MLA.
+1. FAIT (poste1 98d1e87) : divergent → passage direct à écrire. Suite :
+   1a. poste1 (à sec, 10 min) : sur les blocs divergents ModelOpt, part de blocs sans code de magnitude 6 ; scellé > 20 % → (a) échelle cherchée, ≈ 0 % → (b) instrument désaligné. Verdict : `verdict-modelopt-bloc-amax`.
+   1b. poste4, après la capture Hadamard, à sec : passage direct `weight/weight_scale/weight_scale_2 → NVFP4Tensor` sans déquant ; scellé : déquant bit à bit égale à `hfquant`, PPL acvram vs vLLM même checkpoint ≤ 0,004 sur 3 tranches. Si 1a rend (a) : ajouter la recherche d'échelle de bloc dans `quantize_nvfp4`, scellé PPL ≤ actuelle − 0,004.
+   1c. chef : aucune colonne PPL GLM dans le comparatif avant 1b.
 2. poste2, seulement si l'utilisateur retient gpt-oss-120b : lecteur MXFP4 (§ 3.2), scellé PPL ≤ 0,02 privé.
 3. Personne : export, EXL2, Q2_K/Q3_K numpy — écartés.
 4. chef porte à l'utilisateur : convertisseur import = existant ; format acvram = propre au projet, par choix (noyaux maison) ; aucun export prévu.
