@@ -1,6 +1,15 @@
 import json
 import os
 
+# Sans carte visible, les noyaux Triton (kernels/gemm_groupe, gemm_etroit,
+# attn_paginee) tournent dans l'interpréteur numpy : la variable doit être
+# posée AVANT tout import de triton — la collecte de la suite l'importe (via
+# torch) avant que le premier test Triton ne la pose, et un @triton.jit
+# décoré sans elle rend « Cannot call @triton.jit'd outside of the scope of
+# a kernel » (vu en suite complète seulement, pas en fichier isolé).
+if os.environ.get("CUDA_VISIBLE_DEVICES") == "":
+    os.environ.setdefault("TRITON_INTERPRET", "1")
+
 import pytest
 import torch
 import torch.nn.functional as F
