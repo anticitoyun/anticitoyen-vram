@@ -49,7 +49,10 @@ if triton is not None:
                         HQ, HKV, N, C, chunk, scale, window,
                         stride_qb, stride_qh, stride_page, stride_tok, stride_kvh,
                         stride_sp, stride_st,
-                        NREP: tl.constexpr, D: tl.constexpr, BN: tl.constexpr):
+                        NREP: tl.constexpr, D: tl.constexpr, BN: tl.constexpr,
+                        PAGE_C: tl.constexpr, NREP_T: tl.constexpr):
+        # PAGE_C / NREP_T en arguments constexpr : Triton 3.8 refuse un global
+        # du module dans un @jit (l'interpréteur l'acceptait — poste3, banc E)
         b = tl.program_id(0)
         hkv = tl.program_id(1)
         c = tl.program_id(2)
@@ -110,7 +113,8 @@ if triton is not None:
     @triton.jit
     def _reduce_kernel(part_ptr, pm_ptr, pl_ptr, out_ptr, HKV, C,
                        stride_ob, stride_oh,
-                       NREP: tl.constexpr, D: tl.constexpr, CT: tl.constexpr):
+                       NREP: tl.constexpr, D: tl.constexpr, CT: tl.constexpr,
+                       NREP_T: tl.constexpr):
         b = tl.program_id(0)
         hkv = tl.program_id(1)
         rows = tl.arange(0, NREP_T)
@@ -136,8 +140,6 @@ if triton is not None:
         tl.store(out_ptr + b * stride_ob + (hkv * NREP + rows[:, None]) * stride_oh + d[None, :],
                  out.to(out_ptr.dtype.element_ty), mask=masque_h[:, None])
 
-    PAGE_C: tl.constexpr = PAGE
-    NREP_T: tl.constexpr = NREP_TUILE
 
 
 def _tranches(n_pages: int, b: int, hkv: int, device) -> tuple[int, int]:
@@ -174,10 +176,11 @@ def paged_attention(q: torch.Tensor, kc: torch.Tensor, ks: torch.Tensor,
         HQ, n_kv, N, C, chunk, float(scale), int(window) if window > 0 else 1 << 30,
         q.stride(0), q.stride(1), kc.stride(0) // D, kc.stride(1) // D, kc.stride(2) // D,
         ks.stride(0), ks.stride(1),
-        NREP=n_rep, D=D, BN=PAGE * PAGES_PAR_TUILE, num_warps=4, num_stages=2)
+        NREP=n_rep, D=D, BN=PAGE * PAGES_PAR_TUILE, PAGE_C=PAGE, NREP_T=NREP_TUILE,
+        num_warps=4, num_stages=2)
     CT = 1
     while CT < C:
         CT *= 2
     _reduce_kernel[(B, n_kv)](part, pm, pl, out, n_kv, C, out.stride(0), out.stride(1),
-                              NREP=n_rep, D=D, CT=max(CT, 2), num_warps=4)
+                              NREP=n_rep, D=D, CT=max(CT, 2), NREP_T=NREP_TUILE, num_warps=4)
     return out

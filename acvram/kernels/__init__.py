@@ -708,8 +708,8 @@ _INT8_GEMV_MAX = int(os.environ.get("ACVRAM_INT8_GEMV_MAX", "80"))
 # Linéaires INT8 à b ≤ 16 : "cuda" (narrow_gemm / int8_gemv, défaut) | "triton"
 # (kernels/gemm_etroit.py, poste C)
 _NARROW_KERNEL = os.environ.get("ACVRAM_NARROW_KERNEL", "cuda")
-if _NARROW_KERNEL not in ("cuda", "triton"):
-    raise ValueError(f"ACVRAM_NARROW_KERNEL={_NARROW_KERNEL!r} : attendu cuda ou triton")
+if _NARROW_KERNEL not in ("cuda", "triton", "tete"):
+    raise ValueError(f"ACVRAM_NARROW_KERNEL={_NARROW_KERNEL!r} : attendu cuda, triton ou tete")
 
 
 def int8_matmul(x: torch.Tensor, t: INT8Tensor,
@@ -744,7 +744,11 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
         # Poste C (poste7-profil-verdict-17-09) : GEMM étroit W8A16 Triton pour
         # b ≤ 16, linéaires denses ET tête (fp32) ; opt-in jusqu'au scellé
         # (dense b=12 ≤ 1,0 ms/pas, sortie = chemin actuel ± 2⁻⁸)
-        if _NARROW_KERNEL == "triton" and n <= 16 and xf.dtype == torch.bfloat16:
+        # "tete" : Triton pour la tête seule — mesuré ×3,03 à b=12 (0,659 →
+        # 0,217 ms, exact) là où les linéaires denses sont plus lents (poste3
+        # d65e49e : 6,59 contre 4,86 ms/pas, k/v N=512 ×0,4)
+        if ((_NARROW_KERNEL == "triton" or (_NARROW_KERNEL == "tete" and sortie_fp32))
+                and n <= 16 and xf.dtype == torch.bfloat16):
             from . import gemm_etroit
             if gemm_etroit.disponible():
                 y = gemm_etroit.gemm_etroit(xf.contiguous(), t, sortie_fp32)[:, : t.shape[0]]
