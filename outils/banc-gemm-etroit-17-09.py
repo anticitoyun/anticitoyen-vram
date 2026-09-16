@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Poste C, noyau seul (5 min de carte) : linéaires INT8 denses à b = 12 et
+b = 1 — `narrow_gemm` / `int8_gemv` (CUDA, chemin actuel) contre
+`gemm_etroit` (Triton). Formes Coder-30B-A3B dense par couche (q 2048→4096,
+k/v 2048→512 ×2, o 4096→2048, groupes de 128) × 48 couches, et la tête
+2048→151 936 (fp32). Scellé : dense b = 12 ≤ 1,0 ms par pas (poste7) ;
+sortie = CUDA ± 2⁻⁸ (imprimé).
+
+    outils/carte.sh python outils/banc-gemm-etroit-17-09.py
+"""
+import os
+import statistics
+import sys
+
+import torch
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from acvram.kernels import gemm_etroit as ge, get_extension, int8_matmul     # noqa: E402
+from acvram.quant.formats import _quantize_int8                             # noqa: E402
+
+COUCHES = 48
+DENSE = [("q_proj", 4096, 2048), ("k_proj", 512, 2048), ("v_proj", 512, 2048), ("o_proj", 2048, 4096)]
+TETE = ("lm_head", 151936, 2048)
+REPET = 30
+
+
+def tenseur(n, k, g):
+    t = _quantize_int8(torch.randn(n, k, generator=g) * 0.05, group_size=128)
+    t.qweight, t.scales, t.zeros = t.qweight.cuda(), t.scales.cuda(), t.zeros.cuda()
+    return t
+
+
+def chrono(f):
+    for _ in range(5):
+        f()
+    torch.cuda.synchronize()
+    ts = []
+    for _ in range(REPET):
+        d, a = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        d.record(); f(); a.record(); torch.cuda.synchronize()
+        ts.append(d.elapsed_time(a))
+    return statistics.median(ts)
+
+
+def main():
+    assert get_extension() is not None
+    g = torch.Generator().manual_seed(17)
+    for b in (12, 1):
+        total_c = total_t = 0.0
+        hors_tot = 0
+        for nom, n, k in DENSE:
+            t = tenseur(n, k, g)
+            x = torch.randn(b, k, generator=g).cuda().to(torch.bfloat16)
+            os.environ["ACVRAM_NARROW_GEMM"] = "1"
+            cuda = lambda: int8_matmul(x, t)
+            tri = lambda: ge.gemm_etroit(x, t)
+            yc, yt = cuda(), tri()
+            borne = x.float().abs() @ (t.scales.float().repeat_interleave(128, 1) * 255).abs().T
+            hors_tot += int(((yt.float() - yc.float()).abs() > 2 ** -8 * borne).sum())
+            tc, tt = chrono(cuda), chrono(tri)
+            total_c += tc; total_t += tt
+            print(f"b={b:2d} {nom:7s} {n:6d}x{k:5d}  cuda {tc:7.4f} ms  triton {tt:7.4f} ms  ×{tc / tt:4.2f}")
+        t = tenseur(*TETE[1:], g)
+        x = torch.randn(b, TETE[2], generator=g).cuda().to(torch.bfloat16)
+        cuda = lambda: int8_matmul(x, t, sortie_fp32=True)
+        tri = lambda: ge.gemm_etroit(x, t, sortie_fp32=True)
+        tc, tt = chrono(cuda), chrono(tri)
+        print(f"b={b:2d} {TETE[0]:7s} {TETE[1]:6d}x{TETE[2]:5d}  cuda {tc:7.4f} ms  triton {tt:7.4f} ms  ×{tc / tt:4.2f}")
+        pas_c, pas_t = total_c * COUCHES + tc, total_t * COUCHES + tt
+        print(f"b={b:2d} PAS dense ({COUCHES} couches + tête) : cuda {pas_c:6.3f} ms  triton {pas_t:6.3f} ms"
+              f"  hors 2^-8 : {hors_tot}" + (f"  seuil 1,0 ms → {'TENU' if pas_t <= 1.0 else 'HORS SCELLÉ'}" if b == 12 else ""))
+
+
+if __name__ == "__main__":
+    main()

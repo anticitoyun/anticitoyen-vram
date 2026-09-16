@@ -705,6 +705,11 @@ def int8_dequant(t: INT8Tensor, dtype: torch.dtype = torch.float16) -> torch.Ten
 
 
 _INT8_GEMV_MAX = int(os.environ.get("ACVRAM_INT8_GEMV_MAX", "80"))
+# Linéaires INT8 à b ≤ 16 : "cuda" (narrow_gemm / int8_gemv, défaut) | "triton"
+# (kernels/gemm_etroit.py, poste C)
+_NARROW_KERNEL = os.environ.get("ACVRAM_NARROW_KERNEL", "cuda")
+if _NARROW_KERNEL not in ("cuda", "triton"):
+    raise ValueError(f"ACVRAM_NARROW_KERNEL={_NARROW_KERNEL!r} : attendu cuda ou triton")
 
 
 def int8_matmul(x: torch.Tensor, t: INT8Tensor,
@@ -736,6 +741,14 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
     k_pad = t.qweight.shape[1]
 
     if ext is not None and t.qweight.is_cuda and n <= gemv_threshold:
+        # Poste C (poste7-profil-verdict-17-09) : GEMM étroit W8A16 Triton pour
+        # b ≤ 16, linéaires denses ET tête (fp32) ; opt-in jusqu'au scellé
+        # (dense b=12 ≤ 1,0 ms/pas, sortie = chemin actuel ± 2⁻⁸)
+        if _NARROW_KERNEL == "triton" and n <= 16 and xf.dtype == torch.bfloat16:
+            from . import gemm_etroit
+            if gemm_etroit.disponible():
+                y = gemm_etroit.gemm_etroit(xf.contiguous(), t, sortie_fp32)[:, : t.shape[0]]
+                return y.reshape(*orig_shape[:-1], t.shape[0])
         if k_pad != xf.shape[-1]:
             xf = torch.nn.functional.pad(xf, (0, k_pad - xf.shape[-1]))
         # `t.etroit` : tenseur désigné pour le GEMM étroit indépendamment du
