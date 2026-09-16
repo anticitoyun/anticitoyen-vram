@@ -111,9 +111,25 @@ def fwht_activations(x: torch.Tensor, block: int) -> torch.Tensor:
         a, c = v[..., 0, :], v[..., 1, :]
         y = torch.stack((a + c, a - c), dim=-2).reshape(y.shape[0], y.shape[1], block)
         h *= 2
-    racine = torch.tensor(float(block), dtype=torch.float32, device=x.device).sqrt()
-    inv = torch.ones((), dtype=torch.float32, device=x.device) / racine
-    return (y * inv).reshape(orig_shape).to(dtype)
+    # 1/√bloc en fp32 RN, calculé UNE fois sur l'hôte (numpy : √ et division
+    # correctement arrondies, comme __fsqrt_rn / __fdiv_rn du noyau) — pas de
+    # torch.tensor(..., device=cuda) ici : cette copie hôte→carte est interdite
+    # pendant une capture de graphe CUDA (poste2, verdict-glm-hadamard-conversion :
+    # 0 godet capturé sur le converti tourné). Le scalaire Python est un fp32
+    # exact ; y * scalaire multiplie en fp32 RN.
+    return (y * _inv_racine_fp32(block)).reshape(orig_shape).to(dtype)
+
+
+_INV_RACINES: dict = {}
+
+
+def _inv_racine_fp32(block: int) -> float:
+    inv = _INV_RACINES.get(block)
+    if inv is None:
+        import numpy as np
+        inv = float(np.float32(1.0) / np.sqrt(np.float32(block)))
+        _INV_RACINES[block] = inv
+    return inv
 
 
 def apply_hadamard_weight(weight: torch.Tensor, block: Optional[int] = None) -> torch.Tensor:
