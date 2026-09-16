@@ -298,3 +298,52 @@ def test_prefill_groupe_bmm_egale_grouped_mm_et_la_boucle_sur_le_mini_moe(tiny_m
         ecart = (sorties["bmm"] - sorties["grouped_mm"]).norm() / sorties["grouped_mm"].norm()
         print(f"bmm contre grouped_mm : {ecart:.6f}")
         assert ecart < 2 ** -8, f"bmm contre grouped_mm : {ecart:.5f}"
+
+
+# ---- B0 (poste7-prefill-b-plan-17-09) : GEMM groupée persistante Triton
+
+def _gg():
+    """Le module Triton ; sans carte, l'interpréteur (`TRITON_INTERPRET=1`,
+    posé AVANT l'import : le choix se fait à la décoration) en fp16 — son
+    numpy n'a pas de bf16."""
+    import importlib
+    import os
+    if not torch.cuda.is_available():
+        os.environ.setdefault("TRITON_INTERPRET", "1")
+    gg = importlib.import_module("acvram.kernels.gemm_groupe")
+    if not gg.disponible():
+        pytest.skip("Triton indisponible")
+    return gg
+
+
+def _tiles_pour(comptes, bt, device, decalage=0):
+    from acvram.engine.model import MoEBlock
+    cnt = torch.tensor(comptes, device=device)
+    te, t0, tn = MoEBlock._tuiles(cnt, bt, t_max=-(-sum(comptes) // bt) + len(comptes))
+    if decalage:
+        t0 = t0.clone()
+        t0[2] += decalage                                  # une tuile décalée d'une ligne
+    return te, t0, tn
+
+
+def candidat_groupe(qw, bs, gs, x, comptes, M, K, decalage=0):
+    gg = _gg()
+    dt = torch.bfloat16 if x.is_cuda else torch.float16
+    w = torch.stack([_dequant(qw, bs, gs, e, dt) for e in range(qw.shape[0])])
+    y = gg.gemm_groupe(x.to(dt), w, _tiles_pour(comptes, gg.BT, x.device, decalage))
+    return y.to(torch.bfloat16) if not x.is_cuda else y
+
+
+@pytest.mark.parametrize("forme", list(FORMES))
+def test_b0_la_gemm_groupee_persistante_passe_le_juge(forme):
+    cas = _cas(forme, "cuda" if torch.cuda.is_available() else "cpu")
+    hors, ecart = juger(candidat_groupe(*cas), reference(*cas))
+    assert hors == 0, f"{forme} : {hors} valeurs hors tolérance, écart max {ecart:.3e}"
+
+
+def test_b0_un_offset_decale_d_une_ligne_casse():
+    """Le juge doit voir une tuile qui commence une ligne trop tard : les
+    lignes de l'expert touché lisent celles du voisin."""
+    cas = _cas("decodage", "cuda" if torch.cuda.is_available() else "cpu")
+    hors, _ = juger(candidat_groupe(*cas, decalage=1), reference(*cas))
+    assert hors > 0, "un offset décalé d'une ligne passe le juge : il ne voit rien"

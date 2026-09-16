@@ -58,7 +58,7 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("NARROW_MLA", "1", None, "0"),
     Variable("SEUIL_FUSION", "256", ("acvram.engine.model", "SEUIL_FUSION")),
     Variable("PREFILL_GROUPED", "grouped_mm", ("acvram.engine.model", "_PREFILL_GROUPED"), "grouped_mm",
-             "GEMM groupée bf16 du prefill MoE : grouped_mm (torch, défaut) | bmm par seaux (réfuté 0edc3b9, −36 %)"),
+             "GEMM groupée bf16 du prefill MoE : grouped_mm (torch, défaut) | groupe (B0 Triton persistant) | bmm par seaux (réfuté 0edc3b9)"),
     Variable("SANS_FUSION", "", None, "1"),
     Variable("SANS_FUSION_BF16", "", None, "1"),
     Variable("TETE_LIEE", "int8", ("acvram.engine.loader", "_TETE_LIEE")),
