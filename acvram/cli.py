@@ -63,6 +63,7 @@ VARIABLES_LUES = {
     "ACVRAM_PREFILL_GROUPED",
     "ACVRAM_PAGED_ATTN",
     "ACVRAM_NARROW_KERNEL",
+    "ACVRAM_NARROW_TRITON_MIN_B",
     # Deux interrupteurs de diagnostic (poste7-kv-lm4-clos-17-09 § 1), lus par
     # memory/kv_lm4.py::actif / hors_puits, pas par le noyau ou le chargeur :
     # la passe de cause de poste3 (K seul, V seul, puits) decide seulement si

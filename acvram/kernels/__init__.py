@@ -705,11 +705,37 @@ def int8_dequant(t: INT8Tensor, dtype: torch.dtype = torch.float16) -> torch.Ten
 
 
 _INT8_GEMV_MAX = int(os.environ.get("ACVRAM_INT8_GEMV_MAX", "80"))
-# Linéaires INT8 à b ≤ 16 : "cuda" (narrow_gemm / int8_gemv, défaut) | "triton"
-# (kernels/gemm_etroit.py, poste C)
-_NARROW_KERNEL = os.environ.get("ACVRAM_NARROW_KERNEL", "cuda")
-if _NARROW_KERNEL not in ("cuda", "triton", "tete"):
-    raise ValueError(f"ACVRAM_NARROW_KERNEL={_NARROW_KERNEL!r} : attendu cuda, triton ou tete")
+# Linéaires INT8 à b ≤ 16 (poste C, poste7-e-c-verdict-17-09 § 2) : "mixte"
+# (défaut : Triton dès b ≥ NARROW_TRITON_MIN_B, CUDA en dessous) | "cuda"
+# (narrow_gemm / int8_gemv) | "triton" (kernels/gemm_etroit.py partout) |
+# "tete" (Triton pour la tête seule). Le point de bascule est MESURÉ (poste3,
+# rejeu de graphe, pas dense Coder 48 couches + tête, ms) :
+#     b        1     2     4     8    12
+#     cuda   2,69  5,09  4,56  4,37  4,11
+#     triton 2,95  2,31  1,96  2,06  2,07
+# Triton gagne dès b = 2 (×2,2) et perd à b = 1 (×0,91) : la constante porte
+# sa mesure dans tests/test_gemm_etroit.py, sous graphes le lot est le godet.
+_NARROW_KERNEL = os.environ.get("ACVRAM_NARROW_KERNEL", "mixte")
+if _NARROW_KERNEL not in ("mixte", "cuda", "triton", "tete"):
+    raise ValueError(f"ACVRAM_NARROW_KERNEL={_NARROW_KERNEL!r} : attendu mixte, cuda, triton ou tete")
+_NARROW_TRITON_MIN_B = int(os.environ.get("ACVRAM_NARROW_TRITON_MIN_B", "2"))
+MESURE_BASCULE_DENSE = {1: (2.69, 2.95), 2: (5.09, 2.31), 4: (4.56, 1.96), 8: (4.37, 2.06), 12: (4.11, 2.07)}
+
+
+def narrow_choix(n: int, sortie_fp32: bool = False) -> str:
+    """Le noyau des linéaires INT8 pour un lot de ``n`` lignes : "triton" ou "cuda"."""
+    if _NARROW_KERNEL == "mixte":
+        return "triton" if n >= _NARROW_TRITON_MIN_B else "cuda"
+    if _NARROW_KERNEL == "tete":
+        return "triton" if sortie_fp32 else "cuda"
+    return _NARROW_KERNEL
+
+
+def narrow_regime() -> str:
+    """Pour `regime_ligne()` : ``dense=triton≥2|cuda`` (mixte), ``cuda``, ``triton``, ``tete``."""
+    if _NARROW_KERNEL == "mixte":
+        return f"triton≥{_NARROW_TRITON_MIN_B}|cuda"
+    return _NARROW_KERNEL
 
 
 def int8_matmul(x: torch.Tensor, t: INT8Tensor,
@@ -747,8 +773,7 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
         # "tete" : Triton pour la tête seule — mesuré ×3,03 à b=12 (0,659 →
         # 0,217 ms, exact) là où les linéaires denses sont plus lents (poste3
         # d65e49e : 6,59 contre 4,86 ms/pas, k/v N=512 ×0,4)
-        if ((_NARROW_KERNEL == "triton" or (_NARROW_KERNEL == "tete" and sortie_fp32))
-                and n <= 16 and xf.dtype == torch.bfloat16):
+        if narrow_choix(n, sortie_fp32) == "triton" and n <= 16 and xf.dtype == torch.bfloat16:
             from . import gemm_etroit
             if gemm_etroit.disponible():
                 y = gemm_etroit.gemm_etroit(xf.contiguous(), t, sortie_fp32)[:, : t.shape[0]]
