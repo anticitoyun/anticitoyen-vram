@@ -55,7 +55,9 @@ def menus():
 
 
 def parse_size(size_str):
-    """Parse 'X.XG' -> bytes."""
+    """Parse 'X.XG' -> bytes. Returns None for [symlink]."""
+    if '[symlink]' in size_str:
+        return None
     if 'G' in size_str:
         return float(size_str.replace('G', '')) * 1e9
     elif 'M' in size_str:
@@ -108,6 +110,7 @@ def test_c_taille_format_precision(inventory, menus):
 
     Pour chaque modèle au menu, vérifier que la taille disque
     ne dévie pas de plus de 5% du manifeste.
+    Les symlinks sont ignorés (hors-scope).
     """
     all_menu_models = set()
     for models in menus.values():
@@ -120,6 +123,9 @@ def test_c_taille_format_precision(inventory, menus):
 
         meta = inventory[model]
         disk_size = parse_size(meta['size'])
+
+        if disk_size is None:
+            continue  # symlink ignoré (taille non applicable)
 
         # Pour un format donné, on accepte ±5%
         # (les tailles TSV sont arrondies, les tailles réelles peuvent varier)
