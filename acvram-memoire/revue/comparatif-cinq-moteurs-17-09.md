@@ -1,12 +1,14 @@
 # Comparatif à cinq moteurs — Coder-30B et GLM-4.7-Flash (17/09)
 
+**Note datée 17/09 soir (`poste7-poste-d-verdict-17-09`)** : budget KV dimensionné pour 8 séquences (`loader.py:1459`) tronquait 4/12 séquences dans toute cellule acvram b>8 mesurée avant ce correctif. Coder édité ci-dessous (743,4 t/s, valeur correcte). GLM en attente de remesure (CERT_PLAN_LEN=3072) avant édition — ancienne valeur 514/540 t/s conservée, étiquetée « 4/12 tronquées ». Bogue lui-même : chantier séparé, non corrigé sur main à cette date.
+
 Assemblé par chef, critère 6 points `poste7-plan-completion-comparatif-17-09`. Corpus privé scellé `5909d27` (jamais publié en clair) ; corpus public = échantillon documenté dans chaque verdict. Préfixe `[gMASK]<sop>` obligatoire sur toute mesure GLM. Tout acvram mesuré sur main ≥ `0971c90` (défaut `ACVRAM_PREFILL=bf16`), régime porté par `regime_ligne()` dans chaque instrument.
 
 ## Table Coder-30B-A3B (`Qwen3-Coder-30B-A3B`)
 
 | moteur / régime | PPL privé | PPL public | b=1 t/s | b=1 J | b=12 t/s | b=12 J | prefill j/s | classé |
 |---|---|---|---|---|---|---|---|---|
-| acvram W4A16 (nvfp4, bf16 prefill) | 1,0144 | 1,0099 | 233,9 | 1,365 | 730,4 | 0,546 | 8 633 | oui |
+| acvram W4A16 (nvfp4, bf16 prefill) | 1,0144 | 1,0099 | 233,9 | 1,365 | **743,4** | **0,538** | 8 633 | oui |
 | EXL3 4,25 bpw (exllamav3, TabbyAPI) | 1,0006 | 1,0004 | 168,0 | 1,546 | 855,7 | 0,362 | 10 656 | oui |
 | llama.cpp Q4_K_M | 1,0103 | 1,0146 | 341,4 | 1,108 | 709,2 | 0,523 | 15 717 | oui |
 | vLLM W4A16 Marlin (ModelOpt communautaire) | 1,1227 | 1,0876 | 302,9 | — | 2 031,4 | 0,197 | 20 988 | non |
@@ -29,7 +31,7 @@ Assemblé par chef, critère 6 points `poste7-plan-completion-comparatif-17-09`.
 | acvram W4A16 a8 (ancien défaut, historique) | 1,0280 | 1,0213 | 514* | 0,774* | ~3 681-4 453 | non |
 
 *ligne `-k48` sous ancien défaut `a8`, conservée pour mémoire du chantier clos, pas pour classement.
-b=12 GLM `-k48-calibA` bf16 (converti retenu) : **539,5 t/s, 0,732 J** (verdict-profil-coder-pas-17-09, poste3) — écart avec le 514 t/s du 17/09 matin dû au converti calibA (+3,5 %), pas au régime `ACVRAM_PREFILL` (n'affecte pas le décodage).
+b=12 GLM `-k48-calibA` bf16 (converti retenu) : 539,5 t/s, 0,732 J (verdict-profil-coder-pas-17-09, poste3) — écart avec le 514 t/s du 17/09 matin dû au converti calibA (+3,5 %), pas au régime `ACVRAM_PREFILL`. **4/12 tronquées (bogue budget KV) : à remesurer, non édité.**
 
 b=1 acquis séparément : vLLM Marlin W4A16 **183,5 t/s** (1,705 J brut / 1,329 net) ; vLLM W4A4 153,7 t/s. b=1 acvram GLM non mesuré isolément dans cette campagne (non bloquant : b=12 et prefill suffisent au classement qualité/vitesse demandé).
 
