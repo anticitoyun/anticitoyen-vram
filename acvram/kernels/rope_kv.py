@@ -108,12 +108,12 @@ if triton is not None:
         kf = out.to(tl.float32)
         kmax = tl.maximum((tl.max(tl.abs(kf), 0).to(tl.float64) / 127.0).to(tl.float32), 1e-8)
         kinv = (1.0 / kmax.to(tl.float64)).to(tl.float32)      # = 1.f / sc de kv_write_int8_kernel
-        # Le produit x·inv est fait en fp64 puis CONVERTI en fp32 : sur carte,
-        # `x * inv - floor(...)` se contracte en fma(x, inv, -floor) qui garde
-        # le produit non arrondi (63,49998 au lieu de 63,5 : sonde
-        # outils/sonde-rint-17-09.py, r = 0,49999818) — la conversion coupe
-        # la contraction et rend le fp32 correctement arrondi.
-        kp = (kf.to(tl.float64) * kinv.to(tl.float64)).to(tl.float32)
+        # Sur carte, tout arrondi maison (floor, p − floor(p)) lit le produit
+        # x·inv NON arrondi (63,49998 pour 63,5 : sonde outils/sonde-rint-17-09,
+        # r = 0,49999818) — contraction fma, ET une conversion fp64 → fp32 ne
+        # l'empêche pas (sonde-rint-2 de poste3). Seul `libdevice.rint`, appel
+        # opaque sur un argument fp32, voit le 63,5 : c'est lui sur carte.
+        kp = kf * kinv
         kcode = tl.minimum(tl.maximum(_arrondi(kp, INTERPRETE), -127.0), 127.0)
         cell = tl.maximum(slot, 0) * HKV + hk
         tl.store(kc_ptr + cell * D + i, kcode.to(tl.int8), mask=tous & ecrit)
@@ -121,7 +121,7 @@ if triton is not None:
         vv = tl.load(v_ptr + t * stride_vt + hk * stride_vh + i, mask=tous & (base == 1), other=0.0).to(tl.float32)
         vmax = tl.maximum((tl.max(tl.abs(vv), 0).to(tl.float64) / 127.0).to(tl.float32), 1e-8)
         vinv = (1.0 / vmax.to(tl.float64)).to(tl.float32)
-        vp = (vv.to(tl.float64) * vinv.to(tl.float64)).to(tl.float32)
+        vp = vv * vinv
         vcode = tl.minimum(tl.maximum(_arrondi(vp, INTERPRETE), -127.0), 127.0)
         tl.store(vc_ptr + cell * D + i, vcode.to(tl.int8), mask=tous & ecrit)
         tl.store(vs_ptr + cell + i * 0, vmax.to(tl.float16), mask=(i == 0) & ecrit)
@@ -139,10 +139,10 @@ if triton is not None:
     @triton.jit
     def _rint(x):
         """Arrondi au plus proche, égalités vers le pair (rint / __float2int_rn)
-        : floor, soustraction, ×0,5 — pas de `%` flottant. L'argument DOIT être
-        un fp32 déjà arrondi (issu d'une conversion) : sur un produit brut, la
-        soustraction se contracte en fma et lit le produit non arrondi (sonde
-        outils/sonde-rint-17-09.py, poste3 : r = 0,49999818 pour 63,5)."""
+        : floor, soustraction, ×0,5 — pas de `%` flottant. INTERPRÉTEUR
+        SEULEMENT : sur carte, la soustraction lit le produit non arrondi
+        (contraction fma, même à travers une conversion fp64 → fp32 — sondes
+        de poste3, r = 0,49999818 pour 63,5) ; là, `_arrondi` prend libdevice."""
         f = tl.floor(x)
         r = x - f                                            # exact (|x| < 2^23)
         impair = (f - 2.0 * tl.floor(f * 0.5)) == 1.0        # parité de f, exacte
