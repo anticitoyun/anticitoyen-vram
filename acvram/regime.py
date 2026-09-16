@@ -55,7 +55,7 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("INT8_GEMV_MAX", "80", ("acvram.kernels", "_INT8_GEMV_MAX")),
     Variable("NARROW_GEMM", "0", ("acvram.kernels", "_NARROW_GEMM"), "0"),
     Variable("NARROW_KERNEL", "cuda", ("acvram.kernels", "_NARROW_KERNEL"), None,
-             "linéaires INT8 à b ≤ 16 : cuda (défaut) | triton (poste C, GEMM étroit W8A16 par groupes)"),
+             "linéaires INT8 à b ≤ 16 : cuda (défaut) | triton (poste C, GEMM étroit W8A16 ; dense réfuté d65e49e) | tete (Triton pour lm_head seul, ×3 mesuré)"),
     Variable("NARROW_NVFP4", "0", ("acvram.kernels", "_NARROW_NVFP4"), "0"),
     Variable("NARROW_MIN_M", "2", ("acvram.kernels", "_NARROW_MIN")),
     Variable("NARROW_ROWS", "32", ("acvram.kernels", "_NARROW_ROWS")),

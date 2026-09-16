@@ -4,8 +4,9 @@
 formes Coder-30B-A3B (48 couches, 32 têtes q / 4 têtes KV, D = 128), cache
 int8 rempli au hasard, tables disjointes.
 
-Scellé (poste7) : Triton ≤ 1,5 ms par pas (48 couches) à b = 12, ctx 2 048,
-ET ≤ 0,72 ms à b = 1 (ctx 300 : le cas servi le plus courant, aucune
+Scellé (poste7), en REJEU DE GRAPHE (le régime servi ; l'eager, imprimé à
+côté, mesure surtout le lanceur Python de Triton, 20-40 µs par appel) :
+Triton ≤ 1,5 ms par pas (48 couches) à b = 12, ctx 2 048, ET ≤ 0,72 ms à b = 1 (ctx 300 : le cas servi le plus courant, aucune
 régression) ; sortie = CUDA ± 2⁻⁸ (imprimé, lignes hors tolérance).
 
     outils/carte.sh python outils/banc-attn-paginee-17-09.py
@@ -39,7 +40,33 @@ def montage(b, ctx, g):
 
 
 def chrono(f):
-    for _ in range(5):
+    """Temps GPU d'un REJEU DE GRAPHE (le régime servi : graphes on, b=12) —
+    pas d'un lancement eager : le lanceur Python de Triton coûte 20-40 µs par
+    appel, et 4 linéaires × 48 couches en eager mesuraient le lanceur, pas le
+    noyau (poste3 d65e49e : 6,59 ms « Triton » contre 4,86 CUDA). Un chiffre
+    eager est imprimé aussi, pour le voir."""
+    for _ in range(3):
+        f()
+    torch.cuda.synchronize()
+    s = torch.cuda.Stream()
+    with torch.cuda.stream(s):
+        for _ in range(2):
+            f()
+    torch.cuda.current_stream().wait_stream(s)
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        f()
+    torch.cuda.synchronize()
+    ts = []
+    for _ in range(REPET):
+        d, a = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        d.record(); g.replay(); a.record(); torch.cuda.synchronize()
+        ts.append(d.elapsed_time(a))
+    return statistics.median(ts)
+
+
+def chrono_eager(f):
+    for _ in range(3):
         f()
     torch.cuda.synchronize()
     ts = []
@@ -63,10 +90,11 @@ def main():
         ecart = (yt.double() - yc.double()).abs().amax(-1)
         hors = int((ecart > yc.double().abs().amax(-1).clamp(min=1e-6) * 2 ** -8).sum())
         tc, tt = chrono(cuda) * COUCHES, chrono(tri) * COUCHES
+        ec, et = chrono_eager(cuda) * COUCHES, chrono_eager(tri) * COUCHES
         C, chunk = ap._tranches(tables.shape[1], b, HKV, q.device)
         verdict = "" if seuil is None else ("TENU" if tt <= seuil else "HORS SCELLÉ")
-        print(f"b={b:2d} ctx={ctx:5d}  cuda {tc:6.3f} ms/pas  triton {tt:6.3f} ms/pas (C={C}, chunk={chunk})"
-              f"  ×{tc / tt:4.2f}  hors 2^-8 : {hors}/{b * HQ}"
+        print(f"b={b:2d} ctx={ctx:5d}  graphe : cuda {tc:6.3f} ms/pas  triton {tt:6.3f} ms/pas (C={C}, chunk={chunk})"
+              f"  ×{tc / tt:4.2f}  [eager cuda {ec:6.3f} triton {et:6.3f}]  hors 2^-8 : {hors}/{b * HQ}"
               + (f"  seuil {seuil} ms → {verdict}" if seuil else ""))
 
 
