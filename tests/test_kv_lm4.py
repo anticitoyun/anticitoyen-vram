@@ -212,3 +212,97 @@ def test_de_bout_en_bout_le_decodage_lit_un_cache_lm4(converted, monkeypatch):
     e2 = _rms(logits["lm2"][1:], logits["defaut"][1:])
     print(f"écart logits décodage : lm4 {e4:.4f}, lm2 {e2:.4f}")
     assert 0 < e4 < e2, (e4, e2)
+
+
+# ---------------------------------------------------------------------------
+# Deux interrupteurs de diagnostic (poste7-kv-lm4-clos-17-09 § 1), pour la
+# passe de cause de poste3 : K seul lm4, V seul lm4, puits exempté. Rien
+# n'y touche la carte ; `quantifier_diagnostic` fait juste une
+# substitution numérique, testable au bit près.
+# ---------------------------------------------------------------------------
+
+
+def test_actif_par_defaut_les_deux_cotes(monkeypatch):
+    monkeypatch.delenv("ACVRAM_KV_LM4_SEUL", raising=False)
+    assert kv_lm4.actif("k") and kv_lm4.actif("v")
+
+
+def test_seul_restreint_lm4_a_un_seul_cote(monkeypatch):
+    monkeypatch.setenv("ACVRAM_KV_LM4_SEUL", "k")
+    assert kv_lm4.actif("k") and not kv_lm4.actif("v")
+    monkeypatch.setenv("ACVRAM_KV_LM4_SEUL", "v")
+    assert kv_lm4.actif("v") and not kv_lm4.actif("k")
+
+
+def test_seul_refuse_une_valeur_inconnue(monkeypatch):
+    monkeypatch.setenv("ACVRAM_KV_LM4_SEUL", "q")
+    with pytest.raises(ValueError):
+        kv_lm4.actif("k")
+    with pytest.raises(ValueError):
+        kv_lm4.actif("q")           # coté lui-meme invalide, sans lire l'env
+
+
+def test_puits_exempte_les_n_premieres_positions(monkeypatch):
+    monkeypatch.delenv("ACVRAM_KV_LM4_PUITS", raising=False)
+    positions = torch.arange(20)
+    assert bool(kv_lm4.hors_puits(positions).all()), "sans puits, tout est quantifie lm4"
+    monkeypatch.setenv("ACVRAM_KV_LM4_PUITS", "16")
+    masque = kv_lm4.hors_puits(positions)
+    assert not masque[:16].any() and masque[16:].all()
+
+
+def test_puits_refuse_une_valeur_negative(monkeypatch):
+    monkeypatch.setenv("ACVRAM_KV_LM4_PUITS", "-1")
+    with pytest.raises(ValueError):
+        kv_lm4.hors_puits(torch.arange(4))
+
+
+def test_quantifier_diagnostic_bascule_en_int8_hors_cote(monkeypatch):
+    """Témoin (REGLES § 5) : le côté exclu par ACVRAM_KV_LM4_SEUL doit
+    RENDRE UN RÉSULTAT DIFFÉRENT du lm4 par défaut -- sinon l'interrupteur
+    ne changerait rien et la mesure de poste3 ne prouverait rien."""
+    g = torch.Generator().manual_seed(3)
+    x = torch.randn(64, 4, 128, generator=g)
+    monkeypatch.delenv("ACVRAM_KV_LM4_SEUL", raising=False)
+    lm4_defaut = kv_lm4.quantifier_diagnostic(x, "v")
+    monkeypatch.setenv("ACVRAM_KV_LM4_SEUL", "k")               # v exclu
+    int8_v = kv_lm4.quantifier_diagnostic(x, "v")
+    assert not torch.allclose(int8_v, lm4_defaut), \
+        "le temoin ne diverge pas : ACVRAM_KV_LM4_SEUL=k n'a rien change sur v"
+    assert torch.allclose(int8_v, kv_lm4._int8_amax(x)), \
+        "le cote exclu doit suivre exactement l'int8 par amax, pas un autre format"
+
+
+def test_quantifier_diagnostic_garde_le_puits_en_int8():
+    """Les positions du puits suivent l'int8 par amax au bit près, les
+    autres suivent lm4 au bit près -- pas une approximation entre les deux."""
+    g = torch.Generator().manual_seed(4)
+    x = torch.randn(20, 4, 128, generator=g)
+    positions = torch.arange(20)
+    import os
+    ancien = os.environ.pop("ACVRAM_KV_LM4_SEUL", None)
+    try:
+        os.environ["ACVRAM_KV_LM4_PUITS"] = "16"
+        obtenu = kv_lm4.quantifier_diagnostic(x, "k", positions=positions)
+        attendu_puits = kv_lm4._int8_amax(x[:16])
+        q, s = kv_lm4.quantifier(x[16:])
+        attendu_hors = kv_lm4.dequantifier(q, s, "lm4", x.dtype)
+        assert torch.equal(obtenu[:16], attendu_puits)
+        assert torch.equal(obtenu[16:], attendu_hors)
+    finally:
+        os.environ.pop("ACVRAM_KV_LM4_PUITS", None)
+        if ancien is not None:
+            os.environ["ACVRAM_KV_LM4_SEUL"] = ancien
+
+
+def test_quantifier_diagnostic_sans_positions_ignore_le_puits(monkeypatch):
+    """`positions=None` : ACVRAM_KV_LM4_PUITS ne doit avoir aucun effet --
+    l'appelant qui ne mesure pas le puits sur cet appel ne doit pas en
+    subir un silencieusement."""
+    monkeypatch.delenv("ACVRAM_KV_LM4_SEUL", raising=False)
+    monkeypatch.setenv("ACVRAM_KV_LM4_PUITS", "16")
+    g = torch.Generator().manual_seed(5)
+    x = torch.randn(8, 4, 128, generator=g)
+    obtenu = kv_lm4.quantifier_diagnostic(x, "k", positions=None)
+    q, s = kv_lm4.quantifier(x)
+    assert torch.equal(obtenu, kv_lm4.dequantifier(q, s, "lm4", x.dtype))

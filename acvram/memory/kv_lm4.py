@@ -21,6 +21,8 @@ prouve rien à 4 — pas des formats de livraison.
 from __future__ import annotations
 
 import math
+import os
+from typing import Optional
 
 import torch
 
@@ -105,3 +107,84 @@ def dequantifier(emballe: torch.Tensor, echelle: torch.Tensor, fmt: str,
     y = table(b, emballe.device)[codes.long()]
     xr = y * echelle.to(torch.float32).unsqueeze(-1)
     return (xr @ rotation(xr.shape[-1], emballe.device).T).to(dtype)
+
+
+# ---------------------------------------------------------------------------
+# Deux interrupteurs de diagnostic (poste7-kv-lm4-clos-17-09 § 1) : lm4 clos
+# comme réfuté (verdict-kv-lm4-qualite-17-09, écart × 10 au seuil), cause pas
+# encore lue. Trois bras à 25 min de carte (poste3) décident seulement si
+# tq3+1 s'écrit après le commit B de poste4 — ils ne rouvrent PAS lm4.
+# Ni l'un ni l'autre ne touche `kvcache.py` : c'est une substitution
+# numérique (aller-retour) pour une mesure de PPL, pas un nouveau format de
+# stockage — rouvrir la pile paginée pour une passe de cause d'une heure
+# serait le remède disproportionné que REGLES § 9 met en garde.
+# ---------------------------------------------------------------------------
+
+
+def actif(cote: str) -> bool:
+    """``lm4`` s'applique-t-il à ce côté (``"k"`` ou ``"v"``) ?
+    ``ACVRAM_KV_LM4_SEUL`` restreint lm4 à un seul côté pour isoler la
+    cause de la perte ; vide (défaut) = les deux côtés. L'autre côté
+    retombe sur l'int8 par amax (`_int8_amax`), pas sur lm4 — sinon
+    l'interrupteur ne changerait rien."""
+    if cote not in ("k", "v"):
+        raise ValueError(f"côté inconnu : {cote!r} (attendu 'k' ou 'v')")
+    seul = os.environ.get("ACVRAM_KV_LM4_SEUL", "").strip().lower()
+    if seul not in ("", "k", "v"):
+        raise ValueError(
+            f"ACVRAM_KV_LM4_SEUL invalide : {seul!r} (attendu 'k', 'v' ou vide)")
+    return seul in ("", cote)
+
+
+def hors_puits(positions: torch.Tensor) -> torch.Tensor:
+    """Masque booléen, même forme que ``positions`` : ``True`` = hors du
+    puits d'attention, quantifié lm4 comme d'habitude.
+    ``ACVRAM_KV_LM4_PUITS`` (0 = aucun puits, défaut) exempte les jetons
+    de position ``< N`` — l'ancre d'attention (position 0, norme
+    10-40×, l'erreur relative lm4 y pèse 10-40× sur le logit dominant)
+    retombe sur l'int8 par amax."""
+    n = int(os.environ.get("ACVRAM_KV_LM4_PUITS", "0") or "0")
+    if n < 0:
+        raise ValueError(f"ACVRAM_KV_LM4_PUITS invalide : {n} (attendu >= 0)")
+    return positions >= n
+
+
+def _int8_amax(x: torch.Tensor) -> torch.Tensor:
+    """Aller-retour int8 par ligne (échelle = amax/127) : le format de
+    repli des deux interrupteurs, même convention que
+    `PagedKVCache._quantize` (memory/kvcache.py) et
+    `test_quatre_bits_par_rotation_bat_int8_par_amax_sur_un_puits` — pas un
+    troisième format inventé pour ce diagnostic."""
+    amax = x.abs().amax(dim=-1, keepdim=True).to(torch.float32).clamp(min=1e-8)
+    scale = amax / 127.0
+    q = (x.to(torch.float32) / scale).round().clamp(-127, 127)
+    return (q * scale).to(x.dtype)
+
+
+def quantifier_diagnostic(x: torch.Tensor, cote: str,
+                         positions: Optional[torch.Tensor] = None,
+                         fmt: str = "lm4") -> torch.Tensor:
+    """Aller-retour lm4 sur ``x`` [..., D], SAUF où l'un des deux
+    interrupteurs de diagnostic l'exempte — alors aller-retour int8 par
+    amax à la place. Rend un tenseur déjà déquantifié (même forme/dtype que
+    ``x``), pour une substitution directe dans un montage de PPL en
+    décodage (même montage que `verdict-kv-lm4-qualite-17-09`) : ce
+    diagnostic ne stocke rien, il ne fait que remplacer les valeurs lues.
+
+    ``positions`` : indices de jeton par ligne de ``x`` (dim 0), ``None``
+    si le puits n'est pas mesuré sur cet appel (`ACVRAM_KV_LM4_PUITS` est
+    alors sans effet)."""
+    if not actif(cote):
+        return _int8_amax(x)
+    if positions is None:
+        q, s = quantifier(x, fmt)
+        return dequantifier(q, s, fmt, x.dtype)
+    dans_le_puits = ~hors_puits(positions)
+    sortie = torch.empty_like(x)
+    if dans_le_puits.any():
+        sortie[dans_le_puits] = _int8_amax(x[dans_le_puits])
+    hors = ~dans_le_puits
+    if hors.any():
+        q, s = quantifier(x[hors], fmt)
+        sortie[hors] = dequantifier(q, s, fmt, x.dtype)
+    return sortie
