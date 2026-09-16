@@ -1149,6 +1149,16 @@ class MoEBlock(nn.Module):
             wu = self._pile_bf16(pu); u = torch._grouped_mm(xs_u, wu.transpose(1, 2), offs=offs); del wu
             act = _activation(g, u, pg[5], pd[4])
             wd = self._pile_bf16(pd); d = torch._grouped_mm(act, wd.transpose(1, 2), offs=offs); del wd
+        elif _PREFILL_GROUPED == "w4a16":
+            # B1 : la grille de B0, les poids lus en NVFP4 dans la tuile —
+            # ni pile bf16 (nvfp4_dequant 50,8 ms), ni relecture de 60 Go
+            from ..kernels import gemm_groupe as gg
+            G = xs.shape[0]
+            tiles = self._tuiles(cnt, gg.BT, t_max=-(-G // gg.BT) + E)
+            g = gg.gemm_groupe_nvfp4(xs, pg[1], pg[2], pg[3].reshape(-1).to(torch.float32), tiles, m=pg[5])
+            u = gg.gemm_groupe_nvfp4(xs_u, pu[1], pu[2], pu[3].reshape(-1).to(torch.float32), tiles, m=pu[5])
+            act = _activation(g, u, pg[5], pd[4])
+            d = gg.gemm_groupe_nvfp4(act, pd[1], pd[2], pd[3].reshape(-1).to(torch.float32), tiles, m=pd[5])
         elif _PREFILL_GROUPED == "groupe":
             # B0 : un lancement persistant pour les 128 experts, lignes lues
             # par index dans le noyau, grille de tuiles à taille fixe (aucun
@@ -1598,8 +1608,8 @@ _MOE_MMA = os.environ.get("ACVRAM_MOE_MMA", "1") == "1"
 # petit M inchangées et ~58 Go de copies w[experts] par prefill ; gardé comme
 # témoin d'une fausse piste, jamais comme défaut)
 _PREFILL_GROUPED = os.environ.get("ACVRAM_PREFILL_GROUPED", "groupe")
-if _PREFILL_GROUPED not in ("bmm", "grouped_mm", "groupe"):
-    raise ValueError(f"ACVRAM_PREFILL_GROUPED={_PREFILL_GROUPED!r} : attendu grouped_mm, groupe ou bmm")
+if _PREFILL_GROUPED not in ("bmm", "grouped_mm", "groupe", "w4a16"):
+    raise ValueError(f"ACVRAM_PREFILL_GROUPED={_PREFILL_GROUPED!r} : attendu groupe, w4a16, grouped_mm ou bmm")
 _MOE_MMA_BT = int(os.environ.get("ACVRAM_MOE_MMA_BT", "64"))
 # Étages du pipeline cp.async du noyau MMA (0 = chargements directs).
 # Mesuré le 14/09/2026, Coder-30B, prefill chaud L=2048 : 0 → 10 411 j/s,

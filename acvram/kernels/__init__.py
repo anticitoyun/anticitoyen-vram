@@ -535,12 +535,14 @@ def nvfp4_dequant(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16,
 # 40 à plus de 64, et un seuil sous le plus petit croisement ne peut pas perdre
 # sur une forme non balayée. La variable reste comme échappement.
 _NVFP4_GEMV_MAX = int(os.environ.get("ACVRAM_NVFP4_GEMV_MAX", "32"))
-PREFILL_REGIMES = ("bf16", "w8a8", "w4a4")
+PREFILL_REGIMES = ("bf16", "w4a16", "w8a8", "w4a4")
 
 
 def prefill_regime() -> str:
     """Régime du prefill NVFP4 au-delà du seuil GEMV, lu à chaque appel :
-    ``bf16`` (défaut, exact), ``w8a8``, ``w4a4``. Un nom inconnu — dont les
+    ``bf16`` (défaut, exact : déquant puis cuBLAS), ``w4a16`` (même
+    arithmétique, poids lus en 4 bits dans la tuile — kernels/gemm_groupe,
+    B1, sortie = bf16 ± 2⁻⁷), ``w8a8``, ``w4a4``. Un nom inconnu — dont les
     anciens ``a8``/``a4`` — est une erreur, pas un repli silencieux."""
     mode = os.environ.get("ACVRAM_PREFILL", "bf16")
     if mode not in PREFILL_REGIMES:
@@ -640,6 +642,10 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
             tc = nvfp4_mm_w4a8(x, t)
             if tc is not None:
                 return tc
+        elif mode == "w4a16":
+            from . import gemm_groupe
+            if gemm_groupe.disponible():
+                return gemm_groupe.nvfp4_linear(x, t)
 
     w = nvfp4_dequant(t, x.dtype if x.dtype != torch.float32 else torch.bfloat16)
     return torch.nn.functional.linear(x, w.to(x.dtype))
