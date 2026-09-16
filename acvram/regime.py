@@ -76,6 +76,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MOE_DECODE_MMA", "1", ("acvram.engine.model", "_MOE_DECODE_MMA"), "0"),
     Variable("MOE_DECODE_MMA_BT", "16", ("acvram.engine.model", "_MOE_DECODE_MMA_BT")),
     Variable("MOE_DECODE_MMA_MIN_T", "5", ("acvram.engine.model", "_MOE_DECODE_MMA_MIN_T")),
+    Variable("NORME_FUSEE", "0", ("acvram.engine.model", "_NORME_FUSEE"), "0",
+             "poste F (3b) : norme d'entrée dans le GEMV int8 q/k/v (int8_gemv_norme, .cu)"),
     Variable("ROPE_KV", "0", ("acvram.engine.model", "_ROPE_KV"), "0",
              "poste F (3a) : normes par tête + RoPE + kv_write int8 en un noyau Triton"),
     Variable("ROUTE_PREP", "1", ("acvram.engine.model", "_ROUTE_PREP"), "0",

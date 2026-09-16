@@ -274,9 +274,14 @@ class Attention(nn.Module):
         self.qkv_tailles = tuple(l.qweight.shape[0] for l in lins)
         return True
 
-    def _proj(self, x: torch.Tensor, t: int):
-        """q, k, v (et la porte de sortie) : une GEMV empilée si possible."""
-        if self.qkv_proj is not None and t <= SEUIL_FUSION:
+    def _proj(self, x: torch.Tensor, t: int, qkv=None):
+        """q, k, v (et la porte de sortie) : une GEMV empilée si possible ;
+        ``qkv`` déjà calculé (3b : norme absorbée par le GEMV) est découpé tel quel."""
+        if qkv is not None:
+            p = torch.split(qkv, self.qkv_tailles, dim=-1)
+            qr, kr = p[0], p[1]
+            vr = kr if self.k_eq_v else p[2]
+        elif self.qkv_proj is not None and t <= SEUIL_FUSION:
             p = torch.split(self.qkv_proj(x), self.qkv_tailles, dim=-1)
             qr, kr = p[0], p[1]
             vr = kr if self.k_eq_v else p[2]
@@ -335,10 +340,30 @@ class Attention(nn.Module):
             return self._decode(q, k, v, batch, cache, t, gate)
         return self._prefill(q, k, v, batch, cache, t, gate)
 
+    def norme_fusee_possible(self, t: int) -> bool:
+        """(3b) : la projection q/k/v empilée est un INT8 sans échelle AWQ ni
+        biais, lot ≤ 8 — le GEMV peut absorber la norme d'entrée."""
+        lin = self.qkv_proj
+        return (lin is not None and t <= SEUIL_FUSION and t <= 8
+                and getattr(getattr(lin, "qweight", None), "format", "") == "int8"
+                and getattr(lin, "streamed", None) is None
+                and (lin.scaler is None or lin.scaler.is_identity) and lin.bias is None)
+
+    def decode_fixed_norme(self, res, delta, norme, mult, positions, slots, block_tables,
+                           seq_lens, max_pos, cache, q_len: int = 1):
+        """(3b) : `add_norm(res, delta)` absorbé par le GEMV q/k/v — rend
+        (x = res + mult·delta, sortie d'attention) ; None si le noyau décline."""
+        r = kernels.int8_matmul_norme(delta, self.qkv_proj.qweight, res, norme.weight, norme.eps, mult)
+        if r is None:
+            return None
+        qkv, x = r
+        return x, self.decode_fixed(x, positions, slots, block_tables, seq_lens, max_pos,
+                                    cache, q_len, qkv=qkv)
+
     def decode_fixed(self, x: torch.Tensor, positions: torch.Tensor,
                      slots: torch.Tensor, block_tables: torch.Tensor,
                      seq_lens: torch.Tensor, max_pos: int,
-                     cache: PagedKVCache, q_len: int = 1) -> torch.Tensor:
+                     cache: PagedKVCache, q_len: int = 1, qkv=None) -> torch.Tensor:
         """Le pas de décodage à formes fixes — le chemin que capture le graphe.
 
         Même mathématique que ``forward`` en décodage, mais aucun scalaire
@@ -351,7 +376,7 @@ class Attention(nn.Module):
         repli déquantifier-puis-SDPA ne connaît que q_len = 1).
         """
         b = x.shape[0]
-        q, k, v, gate = self._proj(x, b)
+        q, k, v, gate = self._proj(x, b, qkv=qkv)
         # Poste F, fusion (3a) : normes par tête + RoPE + écriture int8 du
         # cache en UN noyau Triton (kernels/rope_kv) — à la place de
         # rope_inplace puis kv_write_int8 ; sans diagnostic lm4 (positions).
@@ -1776,6 +1801,8 @@ _MOE_DECODE_MMA_MIN_T = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_MIN_T", "5"))
 _ROUTE_PREP = int(os.environ.get("ACVRAM_ROUTE_PREP", "1"))
 # Poste F, fusion (3a) : normes + RoPE + kv_write en un noyau Triton (opt-in)
 _ROPE_KV = os.environ.get("ACVRAM_ROPE_KV", "0") == "1"
+# Poste F, fusion (3b) : norme d'entrée absorbée par le GEMV int8 q/k/v (opt-in, .cu)
+_NORME_FUSEE = os.environ.get("ACVRAM_NORME_FUSEE", "0") == "1"
 if _ROUTE_PREP not in (0, 1, 2):
     raise ValueError(f"ACVRAM_ROUTE_PREP={_ROUTE_PREP!r} : attendu 0, 1 ou 2")
 # MoE fusionné au décodage (port b12x, 15/09) : coupé tant que les seuils de
@@ -2095,12 +2122,23 @@ class DecoderLayer(nn.Module):
         (x, delta). La somme résiduelle de la couche précédente est absorbée
         par la première normalisation — un lancement de moins par couche."""
         r = self.residual_multiplier
-        if delta is None:
-            h = self.input_layernorm(x)
-        else:
-            x, h = add_norm(x, delta, self.input_layernorm, r)
-        a = self.self_attn.decode_fixed(h, positions, slots, block_tables,
-                                        seq_lens, max_pos, cache, q_len)
+        a = None
+        if (_NORME_FUSEE and delta is not None and x.is_cuda and x.dtype == torch.bfloat16
+                and type(self.input_layernorm).__name__ == "RMSNorm"
+                and self.self_attn.norme_fusee_possible(x.shape[0])):
+            # Poste F (3b) : la norme d'entrée dans le GEMV q/k/v — un
+            # lancement de moins par couche, x_out écrit par le noyau
+            res = self.self_attn.decode_fixed_norme(x, delta, self.input_layernorm, r, positions,
+                                                    slots, block_tables, seq_lens, max_pos, cache, q_len)
+            if res is not None:
+                x, a = res
+        if a is None:
+            if delta is None:
+                h = self.input_layernorm(x)
+            else:
+                x, h = add_norm(x, delta, self.input_layernorm, r)
+            a = self.self_attn.decode_fixed(h, positions, slots, block_tables,
+                                            seq_lens, max_pos, cache, q_len)
         x, h2 = add_norm(x, a, self.post_attention_layernorm, r)
         # Créneaux fantômes : même garde que decode_fixed ci-dessus.
         y = (self.mlp(h2, valid=slots >= 0) if isinstance(self.mlp, MoEBlock)

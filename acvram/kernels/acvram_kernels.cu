@@ -546,6 +546,16 @@ __global__ void int8_dequant_kernel(
 // fois le trafic d'un pas simple, et la spéculation ne pouvait jamais payer.
 // Ici le poids est lu une fois et sert aux N activations, gardées en
 // registres.
+// Poste F, fusion (3b) (verdict-lancements-b1-17-09 : add_norm x 2 par couche,
+// 0,235 ms, 97 lancements a b=1) : la NORME D'ENTREE est faite DANS le GEMV.
+// Quand `nw` est fourni, chaque bloc recalcule la ligne normalisee dans sa
+// memoire partagee — x_in = bf16(res + mult*x) si `res` (le flux residuel,
+// ecrit une fois dans `xout` par le bloc (0,0)), puis rs = rsqrtf(sum(x_in^2)/K
+// + eps) et xs = bf16(bf16(x_in*rs) * w) — l'arithmetique EXACTE de
+// rmsnorm_bf16_kernel, une somme fp32 dont seul l'ordre differe (rs peut
+// bouger d'un ulp fp32 : au plus 1 ulp bf16 sur quelques xs). Recalculer
+// sum(x^2) par bloc coute K lectures de L2 par bloc (4 Kio a K=2048) contre
+// un lancement et une ecriture-relecture de la ligne normalisee.
 template <int ROWS, int NV, typename XT, typename YT>
 __global__ void int8_gemv_kernel(
     const unsigned char *__restrict__ qw,
@@ -553,11 +563,45 @@ __global__ void int8_gemv_kernel(
     const unsigned char *__restrict__ zeros,
     const XT *__restrict__ x,
     YT *__restrict__ y,
-    int M, int K, int N, int group, int k_splits) {
+    int M, int K, int N, int group, int k_splits,
+    const __nv_bfloat16 *__restrict__ res = nullptr,   // flux residuel [N, K] ou nul
+    const __nv_bfloat16 *__restrict__ nw = nullptr,    // poids RMSNorm [K] : active la norme
+    __nv_bfloat16 *__restrict__ xout = nullptr,        // res + mult*x, ecrit par le bloc (0,0)
+    float eps = 0.f, float mult = 1.f) {
     extern __shared__ float smem[];
     const int nwarps = (blockDim.x + WARP - 1) / WARP;
     const int row0 = blockIdx.x * ROWS;
     if (row0 >= M) return;
+    if (nw != nullptr) {
+        // xs apres la zone de reduction (ROWS*nwarps floats, arrondie a 8)
+        __nv_bfloat16 *xs = reinterpret_cast<__nv_bfloat16 *>(smem + ((ROWS * nwarps + 7) & ~7));
+        const __nv_bfloat16 *xb = reinterpret_cast<const __nv_bfloat16 *>(x);
+        for (int n = 0; n < NV; ++n) {
+            float ss = 0.f;
+            for (int i = threadIdx.x; i < K; i += blockDim.x) {
+                float v = __bfloat162float(xb[(long)n * K + i]);
+                if (res != nullptr)
+                    v = __bfloat162float(__float2bfloat16(__bfloat162float(res[(long)n * K + i]) + mult * v));
+                xs[(long)n * K + i] = __float2bfloat16(v);
+                if (xout != nullptr && blockIdx.x == 0 && blockIdx.y == 0)
+                    xout[(long)n * K + i] = __float2bfloat16(v);
+                ss += v * v;
+            }
+            for (int o = 16; o > 0; o >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, o);
+            if ((threadIdx.x & 31) == 0) smem[threadIdx.x >> 5] = ss;
+            __syncthreads();
+            ss = 0.f;
+            for (int k = 0; k < nwarps; ++k) ss += smem[k];
+            const float rs = rsqrtf(ss / (float)K + eps);
+            __syncthreads();                       // smem[] relu par tous avant reecriture
+            for (int i = threadIdx.x; i < K; i += blockDim.x) {
+                const float nv = __bfloat162float(__float2bfloat16(__bfloat162float(xs[(long)n * K + i]) * rs));
+                xs[(long)n * K + i] = __float2bfloat16(nv * __bfloat162float(nw[i]));
+            }
+            __syncthreads();
+        }
+        x = reinterpret_cast<const XT *>(xs);
+    }
     const int nloads = K / WEIGHTS_PER_LOAD;
     const int ng = K / group;
     const int split = blockIdx.y;
@@ -1452,6 +1496,60 @@ __global__ void __launch_bounds__(I8W_WARPS * WARP) int8_gemv_warp_kernel(
             if (lane == 0) y[(long)n * M + row] = __float2bfloat16(a);
         }
     }
+}
+
+// Fusion (3b) : y = W . rmsnorm(res + mult*x) et xout = res + mult*x, en un
+// lancement (le noyau de base, prologue de norme active ; x bf16, N <= 8,
+// N*K*2 <= 32 Kio de memoire partagee — sinon l'appelant fait add_norm).
+std::vector<torch::Tensor> int8_gemv_norme(torch::Tensor qweight, torch::Tensor scales,
+                                           torch::Tensor zeros, torch::Tensor x, int64_t group,
+                                           torch::Tensor res, torch::Tensor nw, double eps, double mult) {
+    CHECK_CUDA(qweight); CHECK_CUDA(x); CHECK_CUDA(res); CHECK_CUDA(nw);
+    ACVRAM_DEVICE_GUARD(qweight);
+    CHECK_CONTIG(qweight); CHECK_CONTIG(scales); CHECK_CONTIG(zeros);
+    TORCH_CHECK(x.scalar_type() == torch::kBFloat16 && res.scalar_type() == torch::kBFloat16
+                && nw.scalar_type() == torch::kBFloat16, "int8_gemv_norme : bf16 attendu");
+    const int K = qweight.size(1);
+    TORCH_CHECK(K % group == 0 && group % 16 == 0, "int8_gemv_norme : groupe");
+    auto xc = (x.dim() == 1 ? x.reshape({1, -1}) : x).contiguous();
+    auto rc = (res.dim() == 1 ? res.reshape({1, -1}) : res).contiguous();
+    TORCH_CHECK(xc.size(1) == K && rc.sizes() == xc.sizes() && nw.numel() == K,
+                "int8_gemv_norme : x [N, K], res [N, K], w [K]");
+    const int M = qweight.size(0);
+    const int N = xc.size(0);
+    TORCH_CHECK(N >= 1 && N <= 8, "int8_gemv_norme : N <= 8");
+    const int threads = threads_for(K);
+    const int nwarps = (threads + 31) / 32;
+    const int splits = splits_for(M, K, (int)qweight.get_device());
+    auto out = splits == 1 ? torch::empty({N, M}, xc.options())
+                           : torch::zeros({N, M}, xc.options().dtype(torch::kFloat));
+    auto xout = torch::empty_like(xc);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    dim3 grid((M + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK, splits);
+    const size_t shm = ((ROWS_PER_BLOCK * nwarps + 7) & ~7) * sizeof(float) + (size_t)N * K * sizeof(__nv_bfloat16);
+    TORCH_CHECK(shm <= 48 * 1024, "int8_gemv_norme : memoire partagee ", shm, " > 48 Kio");
+    auto wc = nw.contiguous();
+    #define I8N(NV, YT, PY) int8_gemv_kernel<ROWS_PER_BLOCK, NV, __nv_bfloat16, YT> \
+        <<<grid, threads, shm, stream>>>( \
+            qweight.data_ptr<unsigned char>(), \
+            reinterpret_cast<const __half *>(scales.data_ptr()), \
+            zeros.data_ptr<unsigned char>(), \
+            reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr()), PY, M, K, N, (int)group, splits, \
+            reinterpret_cast<const __nv_bfloat16 *>(rc.data_ptr()), \
+            reinterpret_cast<const __nv_bfloat16 *>(wc.data_ptr()), \
+            reinterpret_cast<__nv_bfloat16 *>(xout.data_ptr()), (float)eps, (float)mult)
+    #define I8N_N(YT, PY) do { switch (N) { \
+        case 1: I8N(1, YT, PY); break; case 2: I8N(2, YT, PY); break; \
+        case 3: I8N(3, YT, PY); break; case 4: I8N(4, YT, PY); break; \
+        case 5: I8N(5, YT, PY); break; case 6: I8N(6, YT, PY); break; \
+        case 7: I8N(7, YT, PY); break; default: I8N(8, YT, PY); break; } } while (0)
+    if (splits == 1) I8N_N(__nv_bfloat16, reinterpret_cast<__nv_bfloat16 *>(out.data_ptr()));
+    else I8N_N(float, out.data_ptr<float>());
+    #undef I8N_N
+    #undef I8N
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    if (splits != 1) out = out.to(torch::kBFloat16);
+    return {x.dim() == 1 ? out.squeeze(0) : out, x.dim() == 1 ? xout.squeeze(0) : xout};
 }
 
 torch::Tensor int8_gemv(torch::Tensor qweight, torch::Tensor scales,
@@ -5206,6 +5304,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("int4_dequant", &int4_dequant, "INT4 affine par groupes -> matrice dense");
     m.def("int4_gemv", &int4_gemv, "INT4 : dequantification + produit fusionnes");
     m.def("int8_dequant", &int8_dequant, "INT8 affine par groupes -> matrice dense");
+    m.def("int8_gemv_norme", &int8_gemv_norme, py::arg("qweight"), py::arg("scales"), py::arg("zeros"),
+          py::arg("x"), py::arg("group"), py::arg("res"), py::arg("w"), py::arg("eps"), py::arg("mult") = 1.0,
+          "INT8 : y = W . rmsnorm(res + mult*x) et xout = res + mult*x en un lancement (poste F, 3b)");
     m.def("int8_gemv", &int8_gemv, py::arg("qweight"), py::arg("scales"), py::arg("zeros"), py::arg("x"),
           py::arg("group"), py::arg("sortie_fp32") = false,
           "INT8 : dequantification + produit fusionnes ; sortie_fp32 : x bf16, accumulation et sortie fp32 (tete)");

@@ -743,6 +743,29 @@ def narrow_regime() -> str:
     return _NARROW_KERNEL
 
 
+def int8_matmul_norme(delta: torch.Tensor, t: INT8Tensor, res: torch.Tensor,
+                      w: torch.Tensor, eps: float, mult: float = 1.0):
+    """Poste F, fusion (3b) : ``x = res + mult·delta`` puis ``y = W ·
+    rmsnorm(x)`` en UN lancement (`int8_gemv_norme`, prologue de norme dans
+    `int8_gemv_kernel`). Rend (y [N, M], x) ou None si inéligible — l'appelant
+    fait alors `add_norm` puis le GEMV, comme avant."""
+    ext = get_extension()
+    if ext is None or not hasattr(ext, "int8_gemv_norme") or not t.qweight.is_cuda:
+        return None
+    if delta.dtype != torch.bfloat16 or res.dtype != torch.bfloat16 or w.dtype != torch.bfloat16:
+        return None
+    forme = delta.shape
+    xf = delta.reshape(-1, forme[-1])
+    n, k = xf.shape
+    k_pad = t.qweight.shape[1]
+    if n < 1 or n > 8 or k != k_pad or k % 16 or n * k * 2 > 32 * 1024 or w.numel() != k:
+        return None
+    y, x = ext.int8_gemv_norme(t.qweight.contiguous(), t.scales.contiguous(), t.zeros.contiguous(),
+                               xf.contiguous(), t.group_size, res.reshape(-1, k).contiguous(),
+                               w.contiguous(), float(eps), float(mult))
+    return (y[:, : t.shape[0]].reshape(*forme[:-1], t.shape[0]), x.reshape(forme))
+
+
 def int8_matmul(x: torch.Tensor, t: INT8Tensor,
                 gemv_threshold: int = 0, sortie_fp32: bool = False) -> torch.Tensor:
     """``x @ W.T`` avec W stocké en INT8 affine par groupes.
