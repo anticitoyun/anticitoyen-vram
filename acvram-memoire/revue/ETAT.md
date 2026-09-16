@@ -1,6 +1,6 @@
 # ÉTAT — seule lecture d'entrée (≤ 40 lignes, tenu par chef ; REGLES et INDEX à la demande, par section)
 
-Mis à jour : 16/09 (initial, poste7). **2e BOGUE CORRIGÉ (poste1, dc02487) : self.model.caches vide pour MLA → budget retombait sur défaut 1024 blocs/16 384 jetons ; lit maintenant plan.kv_max_tokens. 3e bogue trouvé au passage : _grow échoué en décodage ne rendait AUCUN GenerationOutput (silence total, pas même finish_reason) — corrigé sur le chemin sans recouvrement (_plain_decode_sync), journal + finish_reason=length ; pipeline de recouvrement et spéculatif = territoire poste4, non touchés. Scellé carte (12×2047 GLM) attend le correctif de poste4.** poste2 : Hadamard puis EXL3 propres (Coder+GLM).
+Mis à jour : 16/09 (initial, poste7). **ERRATUM : pas de bogue de décodage (9d1dbdb) — arbitre corrigé (rejouait l'invite SANS préfixe par erreur) : b=12 80/84, eager 79/84, b=4 27/28, b=1 7/7 = chiffres de la prise B, conformes. Seul défaut réel restant sur GLM = Engine/1024 blocs (corrigé par poste1, dc02487). PPL 12/12 : décodage 1,012×bf16, prefill 1,016, rapport 0,996 — colonne qualité du duel = 1,012 sur le privé. poste4 peut lâcher T0/T1/T2.** poste2 : Hadamard puis EXL3 propres (Coder+GLM).
 
 ## Chantiers ouverts et scellés
 
