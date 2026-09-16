@@ -87,6 +87,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MLA_UNE_PASSE", "1", ("acvram.engine.mla", "_MLA_UNE_PASSE"), "0"),
     Variable("MLA_PREP_NOYAU", "1", ("acvram.engine.mla", "_MLA_PREP_NOYAU"), "0"),
     Variable("MLA_LATENT_FP8", "0", ("acvram.engine.mla", "_MLA_LATENT_FP8"), "0"),
+    Variable("KV_FORMAT", "", ("acvram.memory.tiering", "_KV_FORMAT"), None,
+             "cache KV des paliers carte : vide = capacités (int8) | lm4 4 bits par rotation | lm3, lm2 témoins"),
     Variable("MLA_NORME_NOYAU", "1", None, "0"),
     Variable("MLA_EAGER_TORCH", "", None, "1"),
     Variable("MLA_DEBUG_ECART", "", None),

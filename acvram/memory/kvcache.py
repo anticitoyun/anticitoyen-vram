@@ -28,6 +28,8 @@ from typing import Optional, Sequence
 
 import torch
 
+from . import kv_lm4
+
 __all__ = ["KVCacheConfig", "PagedKVCache", "BlockAllocator"]
 
 BLOCK_SIZE = 16
@@ -236,12 +238,18 @@ class KVCacheConfig:
     head_dim: int
     num_blocks: int
     block_size: int = BLOCK_SIZE
-    dtype: str = "int8"                 # int8 | fp8_e4m3 | fp16 | bf16
+    dtype: str = "int8"                 # int8 | fp8_e4m3 | fp16 | bf16 | lm4 (lm3, lm2 : témoins)
     device: str = "cuda:0"
 
     @property
     def quantized(self) -> bool:
-        return self.dtype in ("int8", "fp8_e4m3")
+        return self.dtype in ("int8", "fp8_e4m3") or self.rotated
+
+    @property
+    def rotated(self) -> bool:
+        """4 bits par rotation (`kv_lm4`) : deux codes par octet, échelle
+        fp16 par (jeton, tête) comme int8, mais D/2 octets de stockage."""
+        return self.dtype in kv_lm4.FORMATS
 
     @property
     def torch_dtype(self) -> torch.dtype:
@@ -250,14 +258,20 @@ class KVCacheConfig:
             "fp8_e4m3": torch.float8_e4m3fn,
             "fp16": torch.float16,
             "bf16": torch.bfloat16,
+            "lm4": torch.uint8, "lm3": torch.uint8, "lm2": torch.uint8,
         }[self.dtype]
+
+    @property
+    def storage_dim(self) -> int:
+        """Dernière dimension des tenseurs k/v : D, ou D/2 emballé."""
+        return self.head_dim // 2 if self.rotated else self.head_dim
 
     def bytes_per_block(self) -> int:
         elems = 2 * self.block_size * self.num_kv_heads * self.head_dim
-        width = 1 if self.quantized else 2
+        width = 0.5 if self.rotated else 1 if self.quantized else 2
         scale_bytes = (2 * self.block_size * self.num_kv_heads * 2
                        if self.quantized else 0)
-        return elems * width + scale_bytes
+        return int(elems * width) + scale_bytes
 
     def total_bytes(self) -> int:
         return self.bytes_per_block() * self.num_blocks * self.num_layers
@@ -333,7 +347,7 @@ class PagedKVCache:
     def __init__(self, cfg: KVCacheConfig, device: Optional[str] = None) -> None:
         self.cfg = cfg
         self.device = torch.device(device or cfg.device)
-        shape = (cfg.num_blocks, cfg.block_size, cfg.num_kv_heads, cfg.head_dim)
+        shape = (cfg.num_blocks, cfg.block_size, cfg.num_kv_heads, cfg.storage_dim)
         dt = cfg.torch_dtype
         self.k = torch.zeros(shape, dtype=dt, device=self.device)
         self.v = torch.zeros(shape, dtype=dt, device=self.device)
@@ -349,6 +363,8 @@ class PagedKVCache:
         """``x`` vaut [jetons, têtes_kv, dim_tête] -> stockage + échelle par tête."""
         if not self.cfg.quantized:
             return x.to(self.cfg.torch_dtype), None
+        if self.cfg.rotated:
+            return kv_lm4.quantifier(x, self.cfg.dtype)
         amax = x.abs().amax(dim=-1, keepdim=True).to(torch.float32)
         if self.cfg.dtype == "int8":
             scale = (amax / 127.0).clamp(min=1e-8)
@@ -363,6 +379,8 @@ class PagedKVCache:
                     dtype: torch.dtype) -> torch.Tensor:
         if scale is None:
             return q.to(dtype)
+        if self.cfg.rotated:
+            return kv_lm4.dequantifier(q, scale, self.cfg.dtype, dtype)
         return (q.to(torch.float32) * scale.to(torch.float32).unsqueeze(-1)).to(dtype)
 
     # -- I/O -------------------------------------------------------------
@@ -429,8 +447,8 @@ class PagedKVCache:
         bs = self.cfg.block_size
         n_blocks = (length + bs - 1) // bs
         blocks = block_table[:n_blocks]
-        k = self.k[blocks].reshape(-1, self.cfg.num_kv_heads, self.cfg.head_dim)
-        v = self.v[blocks].reshape(-1, self.cfg.num_kv_heads, self.cfg.head_dim)
+        k = self.k[blocks].reshape(-1, self.cfg.num_kv_heads, self.cfg.storage_dim)
+        v = self.v[blocks].reshape(-1, self.cfg.num_kv_heads, self.cfg.storage_dim)
         ks = vs = None
         if self.k_scale is not None:
             ks = self.k_scale[blocks].reshape(-1, self.cfg.num_kv_heads)
@@ -471,9 +489,9 @@ class PagedKVCache:
         k = self.k[block_tables]          # [b, n, bs, hkv, d]
         v = self.v[block_tables]
         k = k.reshape(b, n * self.cfg.block_size, self.cfg.num_kv_heads,
-                      self.cfg.head_dim)
+                      self.cfg.storage_dim)
         v = v.reshape(b, n * self.cfg.block_size, self.cfg.num_kv_heads,
-                      self.cfg.head_dim)
+                      self.cfg.storage_dim)
         ks = vs = None
         if self.k_scale is not None:
             ks = self.k_scale[block_tables].reshape(b, -1, self.cfg.num_kv_heads)

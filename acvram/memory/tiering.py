@@ -34,12 +34,20 @@ Deux faits structurels guident chaque décision :
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 from ..engine.config import ModelSpec
 from ..hardware.detect import Rig
 from ..quant.formats import bits_per_weight
+from . import kv_lm4
+
+# Format du cache KV des paliers carte : vide = celui des capacités détectées
+# (int8 sur Ampere+). `lm4` : 4 bits par rotation (kv_lm4), témoins lm3/lm2.
+_KV_FORMAT = os.environ.get("ACVRAM_KV_FORMAT", "").lower()
+if _KV_FORMAT and _KV_FORMAT not in ("int8", "fp8_e4m3", "fp16", "bf16", *kv_lm4.FORMATS):
+    raise ValueError(f"ACVRAM_KV_FORMAT={_KV_FORMAT!r} : attendu int8, fp8_e4m3, fp16, bf16, lm4, lm3 ou lm2")
 
 
 __all__ = ["Tier", "LayerPlacement", "Plan", "PlannerOptions", "plan_placement"]
@@ -348,7 +356,7 @@ def build_tiers(rig: Rig, opts: PlannerOptions) -> list[Tier]:
     for g in sorted(rig.gpus, key=lambda x: (-x.vram_bandwidth_gbps, x.index)):
         caps = g.caps
         fmt = opts.force_format or (caps.weight_format if caps else "int4_awq")
-        kvf = caps.kv_format if caps else "int8"
+        kvf = _KV_FORMAT or (caps.kv_format if caps else "int8")
         # Planifier sur la mémoire LIBRE, pas totale. Le 8/09/2026, le plan
         # recalculé de Qwen3-Coder-Next donnait 8 Gio de poids à la 3080 Ti
         # « de 10,9 Gio » alors que le llama-server permanent y tenait déjà
@@ -379,7 +387,7 @@ def build_tiers(rig: Rig, opts: PlannerOptions) -> list[Tier]:
             # sans GPU quantifiait les poids malgre la demande explicite.
             weight_format=opts.force_format or
             (tiers[0].weight_format if tiers else "int4_awq"),
-            kv_format="fp16", read_bandwidth=70.0,
+            kv_format=_KV_FORMAT or "fp16", read_bandwidth=70.0,
             link_bandwidth=max((t.link_bandwidth for t in tiers), default=25.0),
         ))
     return tiers
@@ -441,7 +449,10 @@ def plan_placement(spec: ModelSpec, rig: Rig,
             remaining[t.name] -= etat_rec * remaining[t.name] / max(1.0, pool_e)
 
     # ---- 1. cache KV -----------------------------------------------------
-    kv_per_tok = spec.kv_bytes_per_token(opts.kv_bits)
+    kv_bits = opts.kv_bits
+    if gpu_tiers and gpu_tiers[0].kv_format in kv_lm4.FORMATS:
+        kv_bits = kv_lm4.bits(gpu_tiers[0].kv_format)    # le budget suit le format
+    kv_per_tok = spec.kv_bytes_per_token(kv_bits)
     plan.kv_bytes_per_token = kv_per_tok
     if gpu_tiers and kv_per_tok:
         wanted = kv_per_tok * opts.max_model_len * opts.max_concurrent_seqs

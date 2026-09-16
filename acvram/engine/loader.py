@@ -187,6 +187,15 @@ def indice_origine(architectures) -> str:
     return "origine indeterminee"
 
 
+def _kv_format(plan: Plan, device: str) -> str:
+    """Format du cache KV d'un appareil : celui du palier du plan (écrit dans
+    le manifeste à la conversion), ou `ACVRAM_KV_FORMAT` s'il est posé — le
+    plan vient du manifeste, l'environnement doit donc s'appliquer ICI, pas
+    seulement à la construction des paliers (tiering.build_tiers)."""
+    from ..memory.tiering import _KV_FORMAT
+    return _KV_FORMAT or next((t.kv_format for t in plan.tiers if t.name == device), "int8")
+
+
 def load_model(path: str, plan: Optional[Plan] = None,
                dtype: torch.dtype = torch.bfloat16,
                max_model_len: Optional[int] = None,
@@ -543,8 +552,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 moe=moe, post_ffn_norm_1=n1, post_ffn_norm_2=n2, pre_ffn_norm_2=p2))
             n_blocks = kv_blocks.get(lp.exec_device, 0)
             if n_blocks:
-                kv_fmt = next((t.kv_format for t in plan.tiers
-                               if t.name == lp.exec_device), "int8")
+                kv_fmt = _kv_format(plan, lp.exec_device)
                 caches[i] = PagedKVCache(KVCacheConfig(
                     num_layers=1, num_kv_heads=nkv, head_dim=hd,
                     num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
@@ -571,7 +579,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 n4("post_feedforward_layernorm.weight", eps_post), None, d))
             n_blocks = kv_blocks.get(lp.exec_device, 0)
             if n_blocks:
-                kv_fmt = next((t.kv_format for t in plan.tiers if t.name == lp.exec_device), "int8")
+                kv_fmt = _kv_format(plan, lp.exec_device)
                 caches[i] = PagedKVCache(KVCacheConfig(
                     num_layers=1, num_kv_heads=spec.num_key_value_heads,
                     head_dim=spec.head_dim, num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
@@ -595,7 +603,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
             layers.append(couche)
             n_blocks = kv_blocks.get(lp.exec_device, 0)
             if n_blocks:
-                kv_fmt = next((t.kv_format for t in plan.tiers if t.name == lp.exec_device), "int8")
+                kv_fmt = _kv_format(plan, lp.exec_device)
                 caches[i] = PagedKVCache(KVCacheConfig(
                     num_layers=1, num_kv_heads=spec.num_key_value_heads,
                     head_dim=spec.head_dim, num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
@@ -623,7 +631,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
             layers.append(DecoderLayerParallel(i, attn, mamba, mlp_f, in_norm, post_norm, d))
             n_blocks = kv_blocks.get(lp.exec_device, 0)
             if n_blocks:
-                kv_fmt = next((t.kv_format for t in plan.tiers if t.name == lp.exec_device), "int8")
+                kv_fmt = _kv_format(plan, lp.exec_device)
                 caches[i] = PagedKVCache(KVCacheConfig(
                     num_layers=1, num_kv_heads=spec.num_key_value_heads,
                     head_dim=spec.head_dim, num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
@@ -682,7 +690,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
             layers.append(couche)
             n_blocks = kv_blocks.get(lp.exec_device, 0)
             if n_blocks:
-                kv_fmt = next((t.kv_format for t in plan.tiers if t.name == lp.exec_device), "int8")
+                kv_fmt = _kv_format(plan, lp.exec_device)
                 caches[i] = PagedKVCache(KVCacheConfig(
                     num_layers=1, num_kv_heads=spec.num_key_value_heads,
                     head_dim=spec.head_dim, num_blocks=n_blocks, dtype=kv_fmt, device=str(d)))
@@ -837,8 +845,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
 
         n_blocks = kv_blocks.get(lp.exec_device, 0)
         if n_blocks:
-            kv_fmt = next((t.kv_format for t in plan.tiers
-                           if t.name == lp.exec_device), "int8")
+            kv_fmt = _kv_format(plan, lp.exec_device)
             a_allouer.append((i, KVCacheConfig(
                 num_layers=1, num_kv_heads=spec.num_key_value_heads,
                 head_dim=spec.head_dim, num_blocks=n_blocks,
@@ -970,7 +977,7 @@ def _charger_mtp(manifest: dict, reader: "_ShardReader", spec: ModelSpec,
         cache = PagedKVCache(KVCacheConfig(
             num_layers=1, num_kv_heads=spec.num_key_value_heads,
             head_dim=spec.head_dim, num_blocks=n_blocks,
-            dtype="int8", device=str(device)))
+            dtype=_kv_format(plan, str(device)), device=str(device)))
         tetes.append(MTPHead(couche, enorm, hnorm, eh, fin, cache, device))
     return tetes
 
@@ -1107,9 +1114,13 @@ def _kv_blocks_per_device(plan: Plan, spec: ModelSpec,
     for dev, budget in plan.kv_budget.items():
         n_layers = max(1, layers_on.get(dev, 1))
         per_layer = budget // n_layers
-        bytes_per_block = (2 * BLOCK_SIZE * spec.num_key_value_heads
-                           * spec.head_dim + 2 * BLOCK_SIZE
-                           * spec.num_key_value_heads * 2)
+        # Les octets d'un bloc dépendent du FORMAT du palier (int8 8,125
+        # bits, lm4 4,125) : compter en int8 un cache lm4 lui volait la moitié
+        # de sa capacité, le gain de mémoire du format n'existait pas.
+        kv_fmt = _kv_format(plan, dev)
+        bytes_per_block = KVCacheConfig(
+            num_layers=1, num_kv_heads=spec.num_key_value_heads,
+            head_dim=spec.head_dim, num_blocks=1, dtype=kv_fmt).bytes_per_block()
         out[dev] = max(1, per_layer // max(1, bytes_per_block))
     return out
 
