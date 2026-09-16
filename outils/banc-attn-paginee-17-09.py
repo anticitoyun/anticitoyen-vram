@@ -4,7 +4,10 @@
 formes Coder-30B-A3B (48 couches, 32 têtes q / 4 têtes KV, D = 128), cache
 int8 rempli au hasard, tables disjointes.
 
-Scellé (poste7), en REJEU DE GRAPHE (le régime servi ; l'eager, imprimé à
+Scellé neuf (poste7-e-c-verdict-17-09) : distance fp64 de Triton ≤ 1,1 × celle
+du CUDA sur 100 % des lignes (b, tête) — sinon vraie divergence ; le « hors
+2⁻⁸ » entre deux sorties bf16 arrondies séparément vaut jusqu'à 1 ulp = 2⁻⁷
+et ne juge rien. Vitesses (poste7), en REJEU DE GRAPHE (le régime servi ; l'eager, imprimé à
 côté, mesure surtout le lanceur Python de Triton, 20-40 µs par appel) :
 Triton ≤ 1,5 ms par pas (48 couches) à b = 12, ctx 2 048, ET ≤ 0,72 ms à b = 1 (ctx 300 : le cas servi le plus courant, aucune
 régression) ; sortie = CUDA ± 2⁻⁸ (imprimé, lignes hors tolérance).
@@ -37,6 +40,27 @@ def montage(b, ctx, g):
     lens = torch.full((b,), ctx, dtype=torch.long, device="cuda")
     q = torch.randn(b, HQ, D, device="cuda", generator=g).to(torch.bfloat16)
     return c, tables, lens, q
+
+
+def reference64(c, tables, lens, q, scale):
+    """Attention exacte (float64) lue du MÊME cache int8 : la référence de
+    poste7 (poste7-e-c-verdict-17-09) — distance de chaque noyau à elle."""
+    B, HQ, D = q.shape
+    n_rep = HQ // HKV
+    ref = torch.zeros(B, HQ, D, dtype=torch.float64, device=q.device)
+    for b in range(B):
+        n = int(lens[b])
+        k, v = c.gather(tables[b], n, torch.float64)                 # [n, HKV, D]
+        for h in range(HQ):
+            kh, vh = k[:, h // n_rep], v[:, h // n_rep]
+            p = torch.softmax((kh @ q[b, h].double()) * scale, 0)
+            ref[b, h] = p @ vh
+    return ref
+
+
+def distances(y, ref):
+    """Distance L2 par ligne (b, tête) à la référence, relative à la norme de la ligne."""
+    return ((y.double() - ref).norm(dim=-1) / ref.norm(dim=-1).clamp(min=1e-9)).reshape(-1)
 
 
 def chrono(f):
@@ -89,6 +113,13 @@ def main():
         yc, yt = cuda(), tri()
         ecart = (yt.double() - yc.double()).abs().amax(-1)
         hors = int((ecart > yc.double().abs().amax(-1).clamp(min=1e-6) * 2 ** -8).sum())
+        ref = reference64(c, tables, lens, q, scale)
+        dc, dt = distances(yc, ref), distances(yt, ref)
+        ratio = dt / dc.clamp(min=1e-12)
+        ok11 = float((dt <= 1.1 * dc).float().mean())
+        print(f"    distance à la référence fp64 (L2 relative par ligne) : cuda méd {dc.median():.2e} max {dc.max():.2e}"
+              f" | triton méd {dt.median():.2e} max {dt.max():.2e} | triton ≤ 1,1×cuda sur {ok11:.1%} des lignes,"
+              f" ratio max {ratio.max():.2f}, méd {ratio.median():.2f}")
         tc, tt = chrono(cuda) * COUCHES, chrono(tri) * COUCHES
         ec, et = chrono_eager(cuda) * COUCHES, chrono_eager(tri) * COUCHES
         C, chunk = ap._tranches(tables.shape[1], b, HKV, q.device)
