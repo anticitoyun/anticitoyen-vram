@@ -385,14 +385,27 @@ class PagedKVCache:
 
     # -- I/O -------------------------------------------------------------
     def write(self, slot_mapping: torch.Tensor, k: torch.Tensor,
-              v: torch.Tensor) -> None:
+              v: torch.Tensor, positions: Optional[torch.Tensor] = None) -> None:
         """Disperse les nouvelles clés et valeurs dans leurs emplacements.
 
         ``slot_mapping[i]`` est la position à plat ``bloc × taille_bloc +
         décalage`` du jeton ``i`` ; la calculer du côté de l'ordonnanceur garde
         ici une unique dispersion vectorisée au lieu d'une boucle par séquence.
+        ``positions`` (position absolue du jeton ``i``, PAS son décalage dans
+        le bloc) ne sert qu'au diagnostic lm4 ci-dessous.
         """
         bs = self.cfg.block_size
+        # Diagnostic lm4 (poste7-kv-lm4-clos-17-09 § 1, poste2 6a660fb) : quand
+        # ACVRAM_KV_LM4_SEUL ou ACVRAM_KV_LM4_PUITS est posée, k et v sont
+        # remplacés par leur aller-retour (lm4 sur le côté / les positions
+        # actifs, int8 par amax ailleurs) AVANT d'entrer dans le cache, quel
+        # que soit son format : le porteur attendu est `int8` (le bras de
+        # référence — int8∘int8 est idempotent, int8∘lm4 ≈ lm4 à 0,7 %), et
+        # le noyau paginé continue de servir la lecture. Eager seulement
+        # (`.any()` hôte dans quantifier_diagnostic) ; le régime le dit.
+        if kv_lm4.diagnostic_actif():
+            k = kv_lm4.quantifier_diagnostic(k, "k", positions)
+            v = kv_lm4.quantifier_diagnostic(v, "v", positions)
         # Chemin fusionné : amax, quantification et dispersion en un noyau.
         # Le chemin PyTorch demandait une vingtaine de lancements par couche
         # sur des tenseurs de quelques centaines de valeurs.

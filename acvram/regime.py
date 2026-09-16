@@ -89,6 +89,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MLA_UNE_PASSE", "1", ("acvram.engine.mla", "_MLA_UNE_PASSE"), "0"),
     Variable("MLA_PREP_NOYAU", "1", ("acvram.engine.mla", "_MLA_PREP_NOYAU"), "0"),
     Variable("MLA_LATENT_FP8", "0", ("acvram.engine.mla", "_MLA_LATENT_FP8"), "0"),
+    Variable("KV_LM4_SEUL", "", None, None, "diagnostic lm4 (kvcache.write) : lm4 sur k ou v seulement, int8 ailleurs"),
+    Variable("KV_LM4_PUITS", "", None, None, "diagnostic lm4 : positions < N gardées int8 ; 0 = contrôle (lm4 partout par le diagnostic)"),
     Variable("KV_FORMAT", "", ("acvram.memory.tiering", "_KV_FORMAT"), None,
              "cache KV des paliers carte : vide = capacités (int8) | lm4 4 bits par rotation | lm3, lm2 témoins"),
     Variable("MLA_NORME_NOYAU", "1", None, "0"),
@@ -123,10 +125,6 @@ HORS_REGIME = frozenset({
     "ACVRAM_LISTE_CLE", "ACVRAM_LISTE_PROMUS", "ACVRAM_MAX_PROMUS", "ACVRAM_ORDRE_SAC",
     "ACVRAM_ORDRE_SAC_INVERSE", "ACVRAM_GRAPHES_MUETS", "ACVRAM_MAX_GRAPHS", "ACVRAM_INSTA_MAX",
     "ACVRAM_REGIME_MUET",
-    # Deux interrupteurs de diagnostic (poste7-kv-lm4-clos-17-09 § 1) : lus par
-    # memory/kv_lm4.py::actif / hors_puits pour une passe de cause hors
-    # moteur (script de PPL de poste3), pas un chemin de calcul du moteur.
-    "ACVRAM_KV_LM4_SEUL", "ACVRAM_KV_LM4_PUITS",
 })
 
 
