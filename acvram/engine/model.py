@@ -1802,7 +1802,9 @@ _MOE_DECODE_MMA_MIN_T = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_MIN_T", "5"))
 _ROUTE_PREP = int(os.environ.get("ACVRAM_ROUTE_PREP", "2"))
 # Poste F, fusion (3a) : normes + RoPE + kv_write en un noyau Triton (opt-in)
 _ROPE_KV = os.environ.get("ACVRAM_ROPE_KV", "0") == "1"
-# Poste F, fusion (3b) : norme d'entrée absorbée par le GEMV int8 q/k/v (opt-in, .cu)
+# Poste F, fusion (3b) : norme d'entrée absorbée par le GEMV int8 q/k/v — RÉFUTÉ
+# (poste3 6dbb1bb : exact, −47 lancements, mais +0,31 ms/pas : chaque bloc du
+# GEMV recalcule la norme) ; témoin nommé, jamais défaut (acvram_kernels.cu)
 _NORME_FUSEE = os.environ.get("ACVRAM_NORME_FUSEE", "0") == "1"
 if _ROUTE_PREP not in (0, 1, 2):
     raise ValueError(f"ACVRAM_ROUTE_PREP={_ROUTE_PREP!r} : attendu 0, 1 ou 2")

@@ -548,6 +548,14 @@ __global__ void int8_dequant_kernel(
 // registres.
 // Poste F, fusion (3b) (verdict-lancements-b1-17-09 : add_norm x 2 par couche,
 // 0,235 ms, 97 lancements a b=1) : la NORME D'ENTREE est faite DANS le GEMV.
+// REFUTE, temoin nomme (poste3, verdict-f3b-norme-fusee-17-09, 6dbb1bb) :
+// exact (bit a bit, capture ok, -47 lancements) mais +0,31 ms par pas — la
+// norme est recalculee par CHACUN des ~1 024 blocs du GEMV (K lectures +
+// deux passes synchronisees, +4,4 us par lancement de 7,8 us ; b=8 : 7,5 ->
+// 12,0 ms). Structurel : la somme des carres de la ligne n'existe qu'apres
+// tous les blocs du GEMV precedent (pas d'epilogue possible), et un bloc
+// dedie qui normalise et diffuse EST add_norm. Reste opt-in
+// (ACVRAM_NORME_FUSEE=1), jamais defaut ; le gain vise etait 4 % du pas.
 // Quand `nw` est fourni, chaque bloc recalcule la ligne normalisee dans sa
 // memoire partagee — x_in = bf16(res + mult*x) si `res` (le flux residuel,
 // ecrit une fois dans `xout` par le bloc (0,0)), puis rs = rsqrtf(sum(x_in^2)/K

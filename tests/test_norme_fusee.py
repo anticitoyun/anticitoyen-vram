@@ -1,5 +1,8 @@
 """Poste F, fusion (3b) : la norme d'entrée dans le GEMV int8 q/k/v
-(`int8_gemv_norme`, prologue de `int8_gemv_kernel`, acvram_kernels.cu).
+(`int8_gemv_norme`, prologue de `int8_gemv_kernel`, acvram_kernels.cu) —
+RÉFUTÉ comme défaut (poste3 6dbb1bb : exact, mais +0,31 ms/pas, la norme est
+recalculée par chaque bloc) ; le noyau reste un témoin nommé, ce test garde
+son exactitude.
 
 Sur carte : (y, x_out) = int8_gemv_norme(delta, W, res, w, eps, mult) contre
 add_norm(res, delta) puis int8_gemv — x_out AU BIT (même formule bf16(res +
