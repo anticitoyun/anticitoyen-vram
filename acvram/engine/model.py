@@ -882,6 +882,71 @@ class MoEBlock(nn.Module):
         return w[:, :m, :]
 
     @staticmethod
+    def _plan_bmm(cnt: torch.Tensor, pas: int = 32, etirement: float = 1.5):
+        """Plan d'une GEMM groupée bf16 par ``torch.bmm`` sur seaux d'experts
+        (poste7-profil-verdict-17-09 § 2 A) : sur sm_120 / torch 2.14,
+        ``torch._grouped_mm`` se déroule en un ``aten::mm`` par expert plus
+        une copie DtoH des ``offs`` — 432 synchronisations par prefill de
+        48 couches, et des GEMM de 128 lignes à ~26 % du pic.
+
+        Les experts non vides, triés par compte décroissant, sont groupés en
+        seaux : un seau reçoit les experts dont le compte est ≥ cap /
+        ``etirement`` (cap = compte maximal du seau arrondi à ``pas``), les
+        lignes de chaque expert sont rembourrées à ``cap`` — le travail
+        inutile est borné par ``etirement`` — et un seul ``bmm`` sert le
+        seau. UNE lecture des comptes sur l'hôte par couche (les trois
+        projections partagent le plan), au lieu d'une par pile.
+
+        Renvoie (seaux, src, dst, G) : ``seaux`` = [(experts LongTensor,
+        cap, base)], ``src[i]`` = ligne d'entrée triée par expert, ``dst[i]``
+        = son emplacement dans le tampon rembourré (tous seaux bout à bout,
+        ``base`` = début du seau), ``G`` = nombre de lignes du tampon."""
+        comptes = cnt.tolist()
+        offs = [0]
+        for c in comptes:
+            offs.append(offs[-1] + c)
+        ordre = sorted((e for e, c in enumerate(comptes) if c), key=lambda e: -comptes[e])
+        seaux, base = [], 0
+        i = 0
+        while i < len(ordre):
+            cap = -(-comptes[ordre[i]] // pas) * pas
+            j = i + 1                                  # le premier expert entre toujours
+            while j < len(ordre) and comptes[ordre[j]] * etirement >= cap:
+                j += 1
+            experts = ordre[i:j]
+            seaux.append((experts, cap, base))
+            base += cap * len(experts)
+            i = j
+        src, dst = [], []
+        for experts, cap, b0 in seaux:
+            for r, e in enumerate(experts):
+                src.append(torch.arange(offs[e], offs[e + 1]))
+                dst.append(torch.arange(b0 + r * cap, b0 + r * cap + comptes[e]))
+        src = torch.cat(src).to(cnt.device) if src else torch.empty(0, dtype=torch.long, device=cnt.device)
+        dst = torch.cat(dst).to(cnt.device) if dst else src
+        seaux = [(torch.tensor(ex, dtype=torch.long, device=cnt.device), cap, b0)
+                 for ex, cap, b0 in seaux]
+        return seaux, src, dst, base
+
+    @staticmethod
+    def _grouped_bmm(xs: torch.Tensor, w: torch.Tensor, plan) -> torch.Tensor:
+        """``xs`` [G, K] trié par expert, ``w`` [E, M, K] bf16 → [G, M] bf16 :
+        même résultat que ``torch._grouped_mm(xs, w.transpose(1, 2), offs)``
+        à l'ordre d'accumulation près (juge : tests/test_gemm_grouped_w4a16.py)."""
+        seaux, src, dst, G = plan
+        M = w.shape[1]
+        tampon = torch.zeros(G, xs.shape[1], dtype=xs.dtype, device=xs.device)
+        tampon[dst] = xs[src]
+        sortie = torch.empty(G, M, dtype=xs.dtype, device=xs.device)
+        for experts, cap, b0 in seaux:
+            n = experts.numel()
+            bloc = tampon[b0:b0 + n * cap].view(n, cap, -1)
+            sortie[b0:b0 + n * cap] = torch.bmm(bloc, w[experts].transpose(1, 2)).view(n * cap, M)
+        y = torch.empty(xs.shape[0], M, dtype=xs.dtype, device=xs.device)
+        y[src] = sortie[dst]
+        return y
+
+    @staticmethod
     def _tuiles(cnt: torch.Tensor, bt: int = 16, t_max: Optional[int] = None):
         """Découpe chaque expert en tuiles de ``bt`` jetons consécutifs.
 
@@ -984,7 +1049,7 @@ class MoEBlock(nn.Module):
                          and not os.environ.get("ACVRAM_PREFILL_DEQUANT")
                          and par_expert <= _MOE_GEMM_MAX
                          and pg[4] % 64 == 0 and pd[4] % 64 == 0)
-        if not direct and not hasattr(torch, "_grouped_mm"):
+        if not direct and _PREFILL_GROUPED == "grouped_mm" and not hasattr(torch, "_grouped_mm"):
             return None
         t, k = topi.shape
         E = pg[1].shape[0]
@@ -1076,12 +1141,20 @@ class MoEBlock(nn.Module):
             u = self._gemm(pu, xs_u, tiles, brut=True)
             act = _activation(g, u, pg[5], pd[4])
             d = self._gemm(pd, act, tiles, brut=True)
-        else:
+        elif _PREFILL_GROUPED == "grouped_mm":
+            # témoin : l'ancien chemin, `torch._grouped_mm` (déroulé sur sm_120)
             offs = torch.cumsum(cnt, 0).to(torch.int32)
             wg = self._pile_bf16(pg); g = torch._grouped_mm(xs, wg.transpose(1, 2), offs=offs); del wg
             wu = self._pile_bf16(pu); u = torch._grouped_mm(xs_u, wu.transpose(1, 2), offs=offs); del wu
             act = _activation(g, u, pg[5], pd[4])
             wd = self._pile_bf16(pd); d = torch._grouped_mm(act, wd.transpose(1, 2), offs=offs); del wd
+        else:
+            # GEMM groupée bf16 par seaux de `bmm` (A, poste7-profil-verdict-17-09)
+            plan = self._plan_bmm(cnt)
+            wg = self._pile_bf16(pg); g = self._grouped_bmm(xs, wg, plan); del wg
+            wu = self._pile_bf16(pu); u = self._grouped_bmm(xs_u, wu, plan); del wu
+            act = _activation(g, u, pg[5], pd[4])
+            wd = self._pile_bf16(pd); d = self._grouped_bmm(act, wd, plan); del wd
         m_out = pd[5]
         inv = torch.empty_like(ordre); inv[ordre] = torch.arange(ordre.numel(), device=x.device)
         if glue and d.dtype == torch.bfloat16 and x.dtype == torch.bfloat16:
@@ -1503,6 +1576,11 @@ _MOE_GEMM_MAX = float(os.environ.get("ACVRAM_MOE_GEMM_MAX", "48"))
 # A16, +0,919 % contre le seuil scellé +1 % (revue/verdict-moe-mma-reel-
 # qwen3-coder.md) — dans la fourchette prédite avant mesure.
 _MOE_MMA = os.environ.get("ACVRAM_MOE_MMA", "1") == "1"
+# GEMM groupée bf16 du prefill au-delà de _MOE_GEMM_MAX jetons par expert :
+# "bmm" (seaux d'experts, défaut) | "grouped_mm" (torch._grouped_mm, témoin)
+_PREFILL_GROUPED = os.environ.get("ACVRAM_PREFILL_GROUPED", "bmm")
+if _PREFILL_GROUPED not in ("bmm", "grouped_mm"):
+    raise ValueError(f"ACVRAM_PREFILL_GROUPED={_PREFILL_GROUPED!r} : attendu bmm ou grouped_mm")
 _MOE_MMA_BT = int(os.environ.get("ACVRAM_MOE_MMA_BT", "64"))
 # Étages du pipeline cp.async du noyau MMA (0 = chargements directs).
 # Mesuré le 14/09/2026, Coder-30B, prefill chaud L=2048 : 0 → 10 411 j/s,

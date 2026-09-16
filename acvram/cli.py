@@ -60,6 +60,7 @@ VARIABLES_LUES = {
     "ACVRAM_MLA_EAGER_TORCH",
     "ACVRAM_MLA_LATENT_FP8",
     "ACVRAM_KV_FORMAT",
+    "ACVRAM_PREFILL_GROUPED",
     # Bras du banc a trois bras de l'attention paginee. Lu par le noyau, donc
     # il DOIT etre declare ici : la garde l'a signale comme inconnu, ce qui est
     # exactement son role — une variable posee qui ne va nulle part est une
