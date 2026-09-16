@@ -303,11 +303,17 @@ def _invite_texte(graine: int, n_caracteres: int) -> str:
     return f"[graine {graine}] " + texte[:n_caracteres]
 
 
+# TabbyAPI ne remplit `usage` (même hors flux) que si `stream_options.include_usage`
+# est vrai ; vLLM refuse ce champ hors flux (400). Posé par moteur dans main().
+_OPTIONS_COMPLETION: dict = {}
+
+
 def _completion(client: httpx.Client, base_url: str, modele: str, prompt: str,
                 max_tokens: int, temperature: float = 0.0) -> dict:
     r = client.post(f"{base_url}/v1/completions", json={
         "model": modele, "prompt": prompt, "max_tokens": max_tokens,
-        "temperature": temperature, "stream": False}, timeout=180.0)
+        "temperature": temperature, "stream": False, **_OPTIONS_COMPLETION},
+        timeout=180.0)
     r.raise_for_status()
     return r.json()
 
@@ -322,7 +328,7 @@ def mesure_prefill(client: httpx.Client, base_url: str, modele: str,
         t0 = time.perf_counter()
         rep = _completion(client, base_url, modele, invite, max_tokens=1)
         dt = time.perf_counter() - t0
-        n = rep.get("usage", {}).get("prompt_tokens", 0)
+        n = (rep.get("usage") or {}).get("prompt_tokens", 0)
         reels.append(n)
         if n > 0 and dt > 0:
             taux.append(n / dt)
@@ -460,6 +466,8 @@ def charger_validation_juge(chemin: Path, prompts_sha256: str) -> Optional[dict]
 # ---------------------------------------------------------------------------
 
 def construire_fiche(args: argparse.Namespace) -> dict:
+    if args.moteur == "tabbyapi":
+        _OPTIONS_COMPLETION["stream_options"] = {"include_usage": True}
     fiche: dict = {"nom": args.nom, "moteur": args.moteur, "modele": args.modele}
     journal = Path(args.journal or f"/tmp/fiche-service-{args.nom}.log")
     serveur = lancer_serveur(args.commande, args.base_url, args.port, journal,
