@@ -21,7 +21,7 @@ Assemblé par chef, critère 6 points `poste7-plan-completion-comparatif-17-09`.
 
 **Statut vLLM/TRT-LLM Coder : ModelOpt propre = refus accepté**, deux blocages fichier:ligne indépendants et documentés (`unified_export_hf.py:419-422` Qwen3MoeExperts non supporté transformers 5 ; `nvfp4_tensor.py:84` déport CPU/GPU casse le calcul NVFP4 sous transformers 4, modèle > 32 Gio VRAM). Cellule remplie par le checkpoint communautaire (1,16-1,30), non classée — scellé du protocole réfuté : le checkpoint porte ~12 % de la perte, les activations 4 bits ~3 %, Marlin bat CUTLASS en décodage.
 
-**Revendication Coder** : acvram est le seul moteur classé **et** compétitif en b=12 sur ce jeu (730 t/s, 0,546 J) ; EXL3 gagne la qualité pure (1,0006) et l'énergie b=12 (0,362 J) mais perd b=1 (168 t/s, le plus lent des classés) ; llama.cpp reste le plus rapide en b=1 (341 t/s) parmi les classés. vLLM/TRT-LLM ne sont pas comparables sur le privé (checkpoint non classé) — seule leur vitesse brute (2 000-2 100 t/s b=12) est acquise, hors classement qualité.
+**Revendication Coder (mise à jour 0.6.8, `poste7-objectif-b1-17-09`)** : acvram est désormais **le plus rapide des moteurs classés à b=12** (997,8 t/s, 0,400 J — devant EXL3 855,7 t/s ; EXL3 garde l'avantage énergétique, 0,362 J) et reste classé et compétitif sur la qualité (1,0144). llama.cpp garde l'avance à b=1 (341,4 contre 257,8 t/s, +32%) et au prefill (15 717 contre 9 913 j/s, +59%) — chantier en cours (poste F, fusion de noyaux b=1). vLLM/TRT-LLM ne sont pas comparables sur le privé (checkpoint non classé) — seule leur vitesse brute (2 000-2 100 t/s b=12) est acquise, hors classement qualité.
 
 ## Table GLM-4.7-Flash (poids GadflyII, sauf mention)
 
