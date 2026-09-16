@@ -76,14 +76,28 @@ def _cache_cuda(k, v, slots, HKV, D, blocs):
     return c
 
 
+def _egal_sauf_demi_entiers(codes, ref_codes, x, sc):
+    """Codes égaux, ou différents d'UNE unité là où x·(1/sc) tombe exactement
+    sur un demi-entier : l'erreur de quantification y est ½ pas des deux côtés
+    (kv_write_int8 arrondit le produit fp32, le noyau Triton lit le produit
+    contracté en fma — versions df4db39+ exactes ici mais fausses sous graphe)."""
+    if torch.equal(codes, ref_codes):
+        return True
+    p = x.float() * (1.0 / sc.float().unsqueeze(-1))
+    demi = (p - p.floor() - 0.5).abs() < 2 ** -16
+    diff = (codes.int() - ref_codes.int()).abs()
+    return bool(((diff == 0) | ((diff == 1) & demi)).all())
+
+
 def _memes_codes(c, ref, k, v, slots, t):
     """Codes et échelles du créneau t : contre le cache CUDA si présent, sinon la formule."""
     sl = int(slots[t])
     blk, off = sl // 16, sl % 16
     if ref is not None:
-        return (torch.equal(c.k[blk, off], ref.k[blk, off]) and torch.equal(c.v[blk, off], ref.v[blk, off])
-                and torch.equal(c.k_scale[blk, off], ref.k_scale[blk, off])
-                and torch.equal(c.v_scale[blk, off], ref.v_scale[blk, off]))
+        return (torch.equal(c.k_scale[blk, off], ref.k_scale[blk, off])
+                and torch.equal(c.v_scale[blk, off], ref.v_scale[blk, off])
+                and _egal_sauf_demi_entiers(c.k[blk, off], ref.k[blk, off], k[t], ref.k_scale[blk, off])
+                and _egal_sauf_demi_entiers(c.v[blk, off], ref.v[blk, off], v[t], ref.v_scale[blk, off]))
     kc, ks = _codes(k[t])
     vc, vs = _codes(v[t])
     return (torch.equal(c.k[blk, off].float(), kc) and torch.equal(c.v[blk, off].float(), vc)
