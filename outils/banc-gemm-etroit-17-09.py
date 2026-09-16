@@ -3,8 +3,9 @@
 b = 1 — `narrow_gemm` / `int8_gemv` (CUDA, chemin actuel) contre
 `gemm_etroit` (Triton). Formes Coder-30B-A3B dense par couche (q 2048→4096,
 k/v 2048→512 ×2, o 4096→2048, groupes de 128) × 48 couches, et la tête
-2048→151 936 (fp32). Scellé : dense b = 12 ≤ 1,0 ms par pas (poste7) ;
-sortie = CUDA ± 2⁻⁸ (imprimé).
+2048→151 936 (fp32). Scellé : dense b = 12 ≤ 1,0 ms par pas (poste7), en REJEU DE GRAPHE (le régime
+servi) ; l'eager est imprimé à côté et mesure surtout le lanceur Python de
+Triton ; sortie = CUDA ± 2⁻⁸ (imprimé).
 
     outils/carte.sh python outils/banc-gemm-etroit-17-09.py
 """
@@ -31,7 +32,33 @@ def tenseur(n, k, g):
 
 
 def chrono(f):
-    for _ in range(5):
+    """Temps GPU d'un REJEU DE GRAPHE (le régime servi : graphes on, b=12) —
+    pas d'un lancement eager : le lanceur Python de Triton coûte 20-40 µs par
+    appel, et 4 linéaires × 48 couches en eager mesuraient le lanceur, pas le
+    noyau (poste3 d65e49e : 6,59 ms « Triton » contre 4,86 CUDA). Un chiffre
+    eager est imprimé aussi, pour le voir."""
+    for _ in range(3):
+        f()
+    torch.cuda.synchronize()
+    s = torch.cuda.Stream()
+    with torch.cuda.stream(s):
+        for _ in range(2):
+            f()
+    torch.cuda.current_stream().wait_stream(s)
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        f()
+    torch.cuda.synchronize()
+    ts = []
+    for _ in range(REPET):
+        d, a = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        d.record(); g.replay(); a.record(); torch.cuda.synchronize()
+        ts.append(d.elapsed_time(a))
+    return statistics.median(ts)
+
+
+def chrono_eager(f):
+    for _ in range(3):
         f()
     torch.cuda.synchronize()
     ts = []
@@ -59,7 +86,8 @@ def main():
             hors_tot += int(((yt.float() - yc.float()).abs() > 2 ** -8 * borne).sum())
             tc, tt = chrono(cuda), chrono(tri)
             total_c += tc; total_t += tt
-            print(f"b={b:2d} {nom:7s} {n:6d}x{k:5d}  cuda {tc:7.4f} ms  triton {tt:7.4f} ms  ×{tc / tt:4.2f}")
+            print(f"b={b:2d} {nom:7s} {n:6d}x{k:5d}  graphe : cuda {tc:7.4f} ms  triton {tt:7.4f} ms  ×{tc / tt:4.2f}"
+                  f"   eager : cuda {chrono_eager(cuda):7.4f}  triton {chrono_eager(tri):7.4f}")
         t = tenseur(*TETE[1:], g)
         x = torch.randn(b, TETE[2], generator=g).cuda().to(torch.bfloat16)
         cuda = lambda: int8_matmul(x, t, sortie_fp32=True)
