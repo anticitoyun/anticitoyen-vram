@@ -117,9 +117,38 @@ class HFQuantCheckpoint:
         hi = (packed >> 4).to(torch.long)
         idx = torch.stack((lo, hi), dim=-1).reshape(packed.shape[0], -1)   # [out, in]
         w = _E2M1.to(packed.device)[idx]
-        s = scale.to(torch.float32) / global_scale.to(torch.float32).reshape(())
+        # × (1/global) et non / global : c'est l'arithmétique de vLLM (alpha =
+        # 1/(échelle globale) en fp32 multiplié dans l'épilogue) et celle du
+        # passage direct (`nvfp4_direct`, global_scale = 1/weight_global_scale) —
+        # les deux déquantifient au bit près les mêmes octets.
+        inv = torch.ones((), dtype=torch.float32, device=packed.device) / global_scale.to(torch.float32).reshape(())
+        s = scale.to(torch.float32) * inv
         blk = w.shape[1] // s.shape[1]
         return (w * s.repeat_interleave(blk, 1)).to(torch.bfloat16)
+
+    @staticmethod
+    def nvfp4_direct(packed: torch.Tensor, scale: torch.Tensor, global_scale: torch.Tensor,
+                     inverser_global: bool):
+        """Passage DIRECT (poste7-convertisseur-formats-16-09 § 3.1) : les octets
+        NVFP4 de la source deviennent un ``NVFP4Tensor`` sans déquantifier ni
+        requantifier — même E2M1 (quartet bas = indice pair, `pack_e2m1`),
+        mêmes échelles E4M3 par bloc de 16, échelle globale fp32 :
+        modelopt ``weight_scale_2`` telle quelle ; compressed-tensors
+        ``1 / weight_global_scale`` (vLLM multiplie par l'inverse). Les poids
+        servis sont alors ceux de vLLM, et la colonne PPL du duel compare deux
+        moteurs, pas deux quantifications."""
+        from .nvfp4 import NVFP4Tensor
+        out_f, half = packed.shape
+        g = global_scale.to(torch.float32).reshape(())
+        if inverser_global:
+            g = torch.ones((), dtype=torch.float32) / g
+        bs = scale.contiguous()
+        if bs.dtype != torch.float8_e4m3fn:
+            bs = bs.view(torch.float8_e4m3fn) if bs.dtype == torch.uint8 else bs.to(torch.float8_e4m3fn)
+        if bs.shape != (out_f, half * 2 // 16):
+            raise ValueError(f"échelles NVFP4 {tuple(bs.shape)} pour un poids {out_f}x{half * 2}")
+        return NVFP4Tensor(qweight=packed.contiguous(), block_scale=bs, global_scale=g.clone(),
+                           shape=(out_f, half * 2), padded_in=half * 2)
 
     @staticmethod
     def _modelopt_nvfp4(packed: torch.Tensor, scale: torch.Tensor,
@@ -141,7 +170,10 @@ class HFQuantCheckpoint:
                 return sorted(set(json.load(fh)["weight_map"].values()))
         return [f for f in sorted(os.listdir(self.path)) if f.endswith(".safetensors")]
 
-    def iter_tensors(self) -> Iterator[tuple[str, torch.Tensor]]:
+    def iter_tensors(self, direct_nvfp4: bool = False) -> Iterator[tuple[str, torch.Tensor]]:
+        """``direct_nvfp4`` : les poids NVFP4 (modelopt, compressed-tensors
+        nvfp4-pack-quantized) sortent en ``NVFP4Tensor`` tels quels ; les
+        autres formats et les couches gardées en clair sortent comme avant."""
         dev = "cuda:0" if torch.cuda.is_available() else "cpu"
         # les compagnons (scales, qzeros, weight_scale…) peuvent vivre dans un
         # autre fragment que le poids : index global clé → fichier
@@ -181,6 +213,11 @@ class HFQuantCheckpoint:
                                       "input_scale"):
                             continue
                         if suffix == "weight_packed":
+                            if direct_nvfp4 and self.format == "nvfp4-pack-quantized":
+                                yield base + ".weight", self.nvfp4_direct(
+                                    fh.get_tensor(key), lire(fh, base + ".weight_scale"),
+                                    lire(fh, base + ".weight_global_scale"), inverser_global=True)
+                                continue
                             packed = fh.get_tensor(key).to(dev)
                             scale = lire(fh, base + ".weight_scale").to(dev)
                             if self.format == "nvfp4-pack-quantized":
@@ -201,6 +238,11 @@ class HFQuantCheckpoint:
                             continue
                         if suffix == "weight" and base + ".weight_scale_2" in have:
                             t = fh.get_tensor(key)
+                            if t.dtype == torch.uint8 and direct_nvfp4:
+                                yield key, self.nvfp4_direct(
+                                    t, lire(fh, base + ".weight_scale"),
+                                    lire(fh, base + ".weight_scale_2"), inverser_global=False)
+                                continue
                             if t.dtype == torch.uint8:      # fp4 empaqueté [out, in/2]
                                 yield key, self._modelopt_nvfp4(
                                     t.to(dev), lire(fh, base + ".weight_scale").to(dev),
