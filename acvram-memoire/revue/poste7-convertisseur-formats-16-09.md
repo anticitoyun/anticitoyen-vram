@@ -33,8 +33,20 @@ Ne vaut pas le coût : types GGUF Q2_K/Q3_K en numpy (requantifier un 3 bits en 
 
 Si la requantification NVFP4 → NVFP4 avec `--no-awq` reproduit les codes modelopt bit à bit (même formule amax/6 par bloc, même global amax/(448·6)), le trou 1 se réduit à une option de ligne de commande et un test — c'est l'issue qui me gênerait, elle est à mesurer en premier (10 min à sec sur 3 tenseurs), avant d'écrire le passage direct.
 
+## 5. Conversion depuis la GUI — question 2 de l'utilisateur (« donc nécessaire »)
+
+**Oui pour le produit, non pour l'objectif de mesure.** Fait : la fenêtre ne liste que les dossiers portant `acvram_manifest.json` (`packaging/acvram-gui:83-84`), et le serveur n'a aucune route de conversion (`server/app.py:208-935` : console, parc, moteurs, v1/*). Un utilisateur du `.deb` qui possède un GGUF, un EXL3 ou un HF n'a que la ligne de commande — le `.deb` ne sert donc que ce que nous avons converti. Le format étant le nôtre (§ 1), la conversion est l'entrée du produit, pas une option.
+
+Contraintes qui décident de la forme, toutes issues de REGLES § 2 :
+* la conversion alloue sur la carte (`--calib-device cuda:0`, `--quant-device auto`, `cli.py`) → **le sous-processus prend `carte.sh` lui-même** et écrit `CONVERSION` dans le verrou ; verrou tenu par une mesure → refus affiché, pas d'attente ;
+* serveur en marche et conversion partagent la VRAM → soit serveur arrêté d'abord (la fenêtre sait déjà le faire, `acvram-gui:174`), soit conversion à sec (`cpu`/`cpu`) — durée CPU à mesurer avant de la proposer par défaut ;
+* forme minimale : `POST /convertir` (source, format, sortie, `--no-awq`) → sous-processus `acvram convert`, journal streamé comme `page_attente` le fait pour le serveur (`acvram-gui:146-149`) ; `is_gguf/is_exl3/is_hfquant` appelés AVANT le lancement pour dire « lisible / refusé (GPTQ, MXFP4) » ; ~150 lignes `app.py`, ~60 `console.py`, 0 ligne dans `convert.py`.
+
+Prédiction et réfutation : fragments et manifeste produits par la GUI **identiques (sha256) à ceux de la CLI** aux mêmes options sur un petit modèle ; lancement pendant une mesure → **refus** (ce contrôle doit rendre « faux » : le tester verrou tenu). Coût : une session à sec, ~½ journée. Quand : **après le duel** (file en un bloc, REGLES § 1) et **après le point 1 de l'ordre** — sinon la GUI industrialise la requantification en défaut.
+
 ## Ordre
 
+0. GUI : poste2, à sec, après le duel et après le point 1 — route `/convertir` + verrou pris par le sous-processus ; scellé : sha256 GUI = CLI, refus sous verrou tenu. Pas avant.
 1. poste1 (à sec, 10 min) : 3 tenseurs d'un NVFP4 modelopt → `hfquant` déquant → `quantize_nvfp4(no_awq)` → codes et échelles comparés bit à bit aux originaux. Verdict : `verdict-requant-nvfp4-bitabit`. Identiques → trou 1 = `--no-awq` + garde manifeste ; différents → poste4 écrit le passage direct (§ 3.1) après le correctif MLA.
 2. poste2, seulement si l'utilisateur retient gpt-oss-120b : lecteur MXFP4 (§ 3.2), scellé PPL ≤ 0,02 privé.
 3. Personne : export, EXL2, Q2_K/Q3_K numpy — écartés.
