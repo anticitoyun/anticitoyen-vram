@@ -29,6 +29,7 @@ Assemblé par chef, critère 6 points `poste7-plan-completion-comparatif-17-09`.
 | acvram W4A16 a8 (ancien défaut, historique) | 1,0280 | 1,0213 | 514* | 0,774* | ~3 681-4 453 | non |
 
 *ligne `-k48` sous ancien défaut `a8`, conservée pour mémoire du chantier clos, pas pour classement.
+b=12 GLM `-k48-calibA` bf16 (converti retenu) : **539,5 t/s, 0,732 J** (verdict-profil-coder-pas-17-09, poste3) — écart avec le 514 t/s du 17/09 matin dû au converti calibA (+3,5 %), pas au régime `ACVRAM_PREFILL` (n'affecte pas le décodage).
 
 b=1 acquis séparément : vLLM Marlin W4A16 **183,5 t/s** (1,705 J brut / 1,329 net) ; vLLM W4A4 153,7 t/s. b=1 acvram GLM non mesuré isolément dans cette campagne (non bloquant : b=12 et prefill suffisent au classement qualité/vitesse demandé).
 
