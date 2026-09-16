@@ -24,12 +24,14 @@ def _rk():
     return rk
 
 
-DT = torch.bfloat16 if torch.cuda.is_available() else torch.float16
+DEV = "cuda" if torch.cuda.is_available() else "cpu"
+DT = torch.bfloat16 if DEV == "cuda" else torch.float16
 
 
 def _tables(maxpos, dr):
     ang = torch.outer(torch.arange(maxpos).float(), 1.0 / (10000 ** (torch.arange(0, dr, 2).float() / dr)))
-    return torch.cat([ang.cos(), ang.cos()], -1).contiguous(), torch.cat([ang.sin(), ang.sin()], -1).contiguous()
+    return (torch.cat([ang.cos(), ang.cos()], -1).contiguous().to(DEV),
+            torch.cat([ang.sin(), ang.sin()], -1).contiguous().to(DEV))
 
 
 def _ref(x, w, eps, cos32, sin32, pos, dr):
@@ -40,7 +42,7 @@ def _ref(x, w, eps, cos32, sin32, pos, dr):
         y = xf * torch.rsqrt((xf * xf).mean(-1, keepdim=True) + eps) * w.float()
     else:
         y = xf
-    c, s = cos32[pos][:, None, :], sin32[pos][:, None, :]
+    c, s = cos32[pos.to(cos32.device)][:, None, :], sin32[pos.to(sin32.device)][:, None, :]
     h = dr // 2
     y1, y2 = y[..., :h], y[..., h:dr]
     rot = torch.cat([y1 * c[..., :h] - y2 * s[..., :h], y2 * c[..., h:] + y1 * s[..., h:]], -1)
@@ -56,19 +58,20 @@ def _codes(x):
 def _montage(T, HQ, HKV, D, DR, norme_q=True, empile=False, graine=0):
     torch.manual_seed(graine)
     if empile:                                   # q, k, v = tranches d'une projection [T, (HQ+2HKV)·D]
-        proj = torch.randn(T, (HQ + 2 * HKV) * D).to(DT)
+        proj = torch.randn(T, (HQ + 2 * HKV) * D).to(DT).to(DEV)
         q = proj[:, :HQ * D].view(T, HQ, D)
         k = proj[:, HQ * D:(HQ + HKV) * D].view(T, HKV, D)
         v = proj[:, (HQ + HKV) * D:].view(T, HKV, D)
     else:
-        q, k, v = (torch.randn(T, h, D).to(DT) for h in (HQ, HKV, HKV))
-    wq = (1 + 0.1 * torch.randn(D)).to(DT) if norme_q else None
-    wk = (1 + 0.1 * torch.randn(D)).to(DT)
-    pos = torch.randint(0, 64, (T,))
+        q, k, v = (torch.randn(T, h, D).to(DT).to(DEV) for h in (HQ, HKV, HKV))
+    wq = (1 + 0.1 * torch.randn(D)).to(DT).to(DEV) if norme_q else None
+    wk = (1 + 0.1 * torch.randn(D)).to(DT).to(DEV)
+    pos = torch.randint(0, 64, (T,)).to(DEV)
     slots = torch.arange(T) * 3 + 1
     slots[T // 2] = -1                           # une ligne de rembourrage
+    slots = slots.to(DEV)
     cos32, sin32 = _tables(64, DR)
-    c = PagedKVCache(KVCacheConfig(num_layers=1, num_kv_heads=HKV, head_dim=D, num_blocks=4, dtype="int8", device="cpu"))
+    c = PagedKVCache(KVCacheConfig(num_layers=1, num_kv_heads=HKV, head_dim=D, num_blocks=4, dtype="int8", device=DEV))
     return q, k, v, wq, wk, pos, slots, cos32, sin32, c
 
 
