@@ -537,6 +537,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         format_impose=args.format, mesurer_kld=args.mesurer_kld,
         alpha_commun_gate_up=args.alpha_commun_gate_up,
         hadamard_experts=args.hadamard_experts,
+        passage_direct=args.passage_direct,
         calib_source=calib_source)
 
     last = [0.0]
@@ -890,6 +891,12 @@ def build_parser() -> argparse.ArgumentParser:
                          "Defaut faux : ne change pas la conversion sans "
                          "mesure (revue/prediction-a7-alpha-commun-gateup-"
                          "14-09.md)")
+    cv.add_argument("--passage-direct", action="store_true",
+                    help="source deja NVFP4 (modelopt, compressed-tensors "
+                         "nvfp4-pack-quantized) : copie ses poids 4 bits tels "
+                         "quels — sans dequantifier, sans recherche AWQ, sans "
+                         "promotion ni rotation — pour servir exactement les "
+                         "poids de vLLM ; les couches en clair suivent le plan")
     cv.add_argument("--hadamard-experts", action="store_true",
                     help="tourne les poids d'experts (gate/up/down) en "
                          "Hadamard bloc H_512 avant quantification, SANS "

@@ -28,6 +28,7 @@ import torch
 from ..engine.config import ModelSpec, load_model_spec
 from ..memory.tiering import Plan
 from . import formats
+from .nvfp4 import NVFP4Tensor
 from .calibrate import (ActStats, ChannelScaler, alpha_commun_gate_up,
                         quantize_with_calibration)
 
@@ -144,6 +145,13 @@ class ConversionOptions:
     # à l'essai, pas un supplément à l'échelle). Défaut faux : n'affecte
     # aucune conversion existante sans le demander explicitement.
     hadamard_experts: bool = False
+    # Passage DIRECT d'une source déjà NVFP4 (modelopt, compressed-tensors
+    # nvfp4-pack-quantized) : ses poids 4 bits sont copiés tels quels — ni
+    # déquantification, ni recherche AWQ, ni promotion, ni rotation — pour
+    # que le converti serve exactement les poids de vLLM (poste7-convertisseur-
+    # formats-16-09 § 3.1). Les couches gardées en clair par la source
+    # suivent le plan comme avant.
+    passage_direct: bool = False
     # poste7 (`poste7-corpus-16-09.md` § 8) : nom + sha256 du fichier de
     # calibration reellement utilise (ou du corpus integre, ou une absence
     # explicite si awq=False) -- calcule par cli.py, porte au manifeste via
@@ -571,6 +579,9 @@ def _adapt_hf(source: Iterator[tuple[str, torch.Tensor]], spec
         dense_i = int(spec.intermediate_size or 0)
 
         def rogner(t: torch.Tensor, rows: int = 0, cols: int = 0) -> torch.Tensor:
+            if isinstance(t, NVFP4Tensor):
+                raise NotImplementedError("passage direct NVFP4 : nemotron_h rogne ses tenseurs, "
+                                          "non pris en charge sans requantification")
             if rows and t.shape[0] > rows:
                 t = t[:rows]
             if cols and t.dim() == 2 and t.shape[1] > cols:
@@ -708,7 +719,7 @@ def _adapt_hf(source: Iterator[tuple[str, torch.Tensor]], spec
         yield name, t
 
 
-def _iter_checkpoint(path: str) -> Iterator[tuple[str, torch.Tensor]]:
+def _iter_checkpoint(path: str, direct_nvfp4: bool = False) -> Iterator[tuple[str, torch.Tensor]]:
     """Lit les tenseurs d'un point de contrôle safetensors ou GGUF."""
     from safetensors import safe_open
 
@@ -726,7 +737,7 @@ def _iter_checkpoint(path: str) -> Iterator[tuple[str, torch.Tensor]]:
 
     from .hfquant import HFQuantCheckpoint, is_hfquant
     if is_hfquant(path):
-        yield from HFQuantCheckpoint(path).iter_tensors()
+        yield from HFQuantCheckpoint(path).iter_tensors(direct_nvfp4=direct_nvfp4)
         return
 
     index_path = os.path.join(path, "model.safetensors.index.json")
@@ -1118,14 +1129,31 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     # par tenseur ci-dessous suffit (identite explicite quand elle s'effondre
     # malgre tout, ligne ~1220).
 
-    for name, tensor in _adapt_hf(_iter_checkpoint(model_path), spec):
+    for name, tensor in _adapt_hf(_iter_checkpoint(model_path, opts.passage_direct), spec):
         report.tensors += 1
+        if progress and report.tensors % 25 == 0:
+            progress(name, report.tensors, 0)
+        if isinstance(tensor, NVFP4Tensor):
+            # passage direct : les octets de la source, sans recherche ni
+            # métrique (aucune référence bf16 à comparer) ; format imposé
+            # nvfp4 quel que soit le plan, sinon le poids servi ne serait
+            # plus celui de vLLM
+            qt = tensor
+            report.in_bytes += qt.nbytes
+            sd = {k: v.cpu() for k, v in qt.state_dict(prefix=f"{name}.").items()}
+            if not opts.dry_run:
+                for k, v in sd.items():
+                    writer.add(k, v)
+            entry = {"format": "nvfp4", "shape": list(qt.shape), "keys": list(sd.keys()),
+                     "group_size": opts.group_size, "hadamard_block": 0, "has_act_scale": False,
+                     "bpw": round(float(qt.bits_per_weight), 3), "passage_direct": True}
+            report.per_format["nvfp4"] = report.per_format.get("nvfp4", 0) + qt.nbytes
+            manifest["tensors"][name] = entry
+            keys.append(name)
+            continue
         report.in_bytes += tensor.numel() * tensor.element_size()
         fmt = router.format_for(name)
         entry: dict[str, Any] = {"format": fmt, "shape": list(tensor.shape)}
-
-        if progress and report.tensors % 25 == 0:
-            progress(name, report.tensors, 0)
 
         if fmt == "fp32" or fmt in ("bf16", "fp16") or tensor.dim() != 2:
             if fmt == "fp32":
