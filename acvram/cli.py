@@ -590,6 +590,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     loaded = load_model(args.model, dtype=torch.bfloat16 if not args.fp16
                         else torch.float16,
                         max_model_len=args.max_model_len,
+                        max_concurrent_seqs=args.max_batch,
                         device_override=args.device)
     tokenizer = load_tokenizer(args.model)
     speculator = None

@@ -343,7 +343,7 @@ def bench_decode(model_dir: str, n_tokens: int = 256,
 
     t0 = time.time()
     loaded = load_model(model_dir, dtype=torch.bfloat16,
-                        max_model_len=contexte)
+                        max_model_len=contexte, max_concurrent_seqs=1)
     load_s = time.time() - t0
 
     # Refus, pas avertissement : quand les cartes du manifeste ne sont pas
