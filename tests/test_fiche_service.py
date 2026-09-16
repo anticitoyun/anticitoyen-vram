@@ -7,6 +7,7 @@ et le contrôle instruct/abliterated vérifiables sans jamais charger un poids.
 """
 import http.server
 import json
+import os
 import sys
 import threading
 import time
@@ -215,6 +216,49 @@ def test_lancer_serveur_deja_debout(serveur, tmp_path):
     s = fiche_service.lancer_serveur(None, serveur, 0, tmp_path / "j.log", 5.0)
     assert s.charge is True
     assert s.processus is None
+
+
+def test_lancer_serveur_commande_shell_avec_cd(tmp_path):
+    """Les commandes réelles du plan (`cd /opt/ia/X && binaire ...`) sont des
+    lignes shell, pas un exécutable+arguments — `shlex.split` les cassait
+    (`["cd", "/opt/ia/X", "&&", ...]`, Popen cherchait un exécutable « cd »).
+    Reproduit ici avec un petit serveur : le `cd` doit réellement s'appliquer
+    (le script est résolu relativement au nouveau répertoire, pas au cwd du
+    test), et l'arrêt ne doit laisser aucun processus vivant (groupe tué)."""
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    dossier = tmp_path / "sous-dossier"
+    dossier.mkdir()
+    (dossier / "faux_serveur.py").write_text(
+        "import http.server, sys\n"
+        "class H(http.server.BaseHTTPRequestHandler):\n"
+        "    def do_GET(self): self.send_response(200); self.end_headers()\n"
+        "    def log_message(self, *a): pass\n"
+        "http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()\n")
+
+    commande = f"cd {dossier} && {sys.executable} faux_serveur.py {{port}}"
+    srv = fiche_service.lancer_serveur(commande, f"http://127.0.0.1:{port}", port,
+                                       tmp_path / "j.log", 10.0)
+    assert srv.charge is True, srv.cause_echec
+    pid_shell = srv.processus.pid
+    fiche_service.arreter_serveur(srv)
+    # Le SIGTERM au groupe part avant que `wait()` ne rende (qui n'attend que
+    # le shell) : le reste du groupe peut survivre une fraction de seconde,
+    # pas indéfiniment — d'où un court sondage plutôt qu'une assertion
+    # instantanée, sans quoi le test confondrait « pas encore mort » et
+    # « jamais tué » (exactement ce qu'un `terminate()` sur le seul shell
+    # laisserait faire, sans jamais converger).
+    for _ in range(20):
+        try:
+            os.killpg(pid_shell, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("le groupe de processus a survécu à arreter_serveur")
 
 
 def test_lancer_serveur_timeout(tmp_path):

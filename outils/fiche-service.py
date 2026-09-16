@@ -39,8 +39,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
-import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -55,6 +56,13 @@ import httpx
 VALIDATION_JUGE = Path("acvram-memoire/corpus/juge-refus-valide.json")
 ECART_MIN_JUGE = 4          # scellé poste7 § 2 : écart instruct/abliterated ≥ 4/12
 FRACTION_LECTURE = 0.10     # « lecture de 10 % » — échantillon relu par un humain
+# Consigne poste7 (preuve du script, 17/09) : décodage pur en flux (entre premier
+# et dernier chunk streamé, hors TTFT/préfill) — mesuré 313,4 t/s contre 287,1
+# en « rondes » (préfill + traîne inclus, certifie-b12) : régime différent,
+# pas un défaut du script. Toute table qui publie cette colonne doit porter
+# cette phrase dans son en-tête, verbatim, pas seulement dans ce JSON.
+DECODE_B1_NOTE = ("décodage pur en flux, hors préfill — non comparable aux "
+                  "rondes du comparatif")
 
 
 # ---------------------------------------------------------------------------
@@ -150,10 +158,19 @@ def lancer_serveur(commande: Optional[str], base_url: str, port: int,
     et se contente de vérifier qu'il répond."""
     processus = None
     if commande:
-        cmd = shlex.split(commande.format(port=port))
+        # `shell=True`, pas `shlex.split` + liste : les commandes réelles du
+        # plan (`cd /opt/ia/TabbyAPI && .venv/bin/python main.py ...`) sont
+        # des lignes shell, pas un seul exécutable + arguments — trouvé le
+        # 17/09 en lançant TabbyAPI pour la preuve du script, `shlex.split`
+        # produisait `["cd", "/opt/ia/TabbyAPI", "&&", ...]`, et `Popen` sans
+        # shell cherchait un exécutable nommé « cd ». `start_new_session`
+        # crée un groupe de processus : sans lui, tuer le shell laisse le
+        # serveur qu'il a lancé orphelin sur le port et la carte.
         journal.parent.mkdir(parents=True, exist_ok=True)
         fh = open(journal, "w")
-        processus = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT)
+        processus = subprocess.Popen(commande.format(port=port), shell=True,
+                                     stdout=fh, stderr=subprocess.STDOUT,
+                                     start_new_session=True)
 
     t0 = time.perf_counter()
     with httpx.Client(timeout=10.0) as client:
@@ -179,11 +196,22 @@ def lancer_serveur(commande: Optional[str], base_url: str, port: int,
 def arreter_serveur(serveur: Serveur) -> None:
     if serveur.processus is None or serveur.processus.poll() is not None:
         return
-    serveur.processus.terminate()
+    # Le GROUPE, pas seulement le shell : `commande` peut être `cd X &&
+    # binaire`, où le shell (`sh -c ...`) n'est pas le serveur lui-même.
+    # `terminate()` sur le seul PID du shell laisserait le serveur orphelin
+    # sur le port et la carte — `start_new_session=True` au lancement rend
+    # ce groupe tuable en un coup.
+    try:
+        os.killpg(serveur.processus.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
     try:
         serveur.processus.wait(timeout=15)
     except subprocess.TimeoutExpired:
-        serveur.processus.kill()
+        try:
+            os.killpg(serveur.processus.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def vram_pid(pid: int) -> Optional[int]:
@@ -309,7 +337,8 @@ def mesure_decode_b1(client: httpx.Client, base_url: str, modele: str,
         return {"refus": "aucun passage n'a produit assez de jetons pour un débit"}
     taux.sort()
     return {"decode_tok_s": round(taux[len(taux) // 2], 2),
-           "decode_jetons_produits": produits, "decode_repetitions": len(taux)}
+           "decode_jetons_produits": produits, "decode_repetitions": len(taux),
+           "decode_b1_note": DECODE_B1_NOTE}
 
 
 # ---------------------------------------------------------------------------
