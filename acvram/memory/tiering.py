@@ -241,6 +241,13 @@ class Plan:
     est_jetons_par_kj: Optional[float] = None
     total_weight_bytes: int = 0
     bytes_per_tier: dict[str, int] = field(default_factory=dict)
+    # Le nombre de séquences pour lequel `kv_max_tokens` a été dimensionné
+    # (`opts.max_concurrent_seqs`, ligne 447 ci-dessous) — porté sur le plan
+    # pour que `regime_ligne()` et `certifie-b12` puissent dire CONTRE QUOI le
+    # budget a été calculé, sans quoi un lot réel différent de ce chiffre
+    # tronque des séquences en silence (`loader.py::_replanifier` ne le
+    # passait pas, trouvé par poste3 le 17/09 sur un banc b=12 planifié pour 8).
+    kv_planned_seqs: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -252,6 +259,7 @@ class Plan:
             "kv_bytes_per_token": self.kv_bytes_per_token,
             "kv_budget": self.kv_budget,
             "kv_max_tokens": self.kv_max_tokens,
+            "kv_planned_seqs": self.kv_planned_seqs,
             "etat_recurrent_bytes": self.etat_recurrent_bytes,
             "expert_cache_bytes": self.expert_cache_bytes,
             "stage_ranges": {k: list(v) for k, v in self.stage_ranges.items()},
@@ -443,6 +451,7 @@ def plan_placement(spec: ModelSpec, rig: Rig,
     # ---- 1. cache KV -----------------------------------------------------
     kv_per_tok = spec.kv_bytes_per_token(opts.kv_bits)
     plan.kv_bytes_per_token = kv_per_tok
+    plan.kv_planned_seqs = opts.max_concurrent_seqs
     if gpu_tiers and kv_per_tok:
         wanted = kv_per_tok * opts.max_model_len * opts.max_concurrent_seqs
         pool = sum(remaining[t.name] for t in gpu_tiers)

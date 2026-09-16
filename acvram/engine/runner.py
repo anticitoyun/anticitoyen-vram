@@ -133,6 +133,12 @@ class EngineStats:
     accepted_tokens: int = 0
     proposed_tokens: int = 0
     spec_steps: int = 0
+    # Séquences terminées par `_finish_budget_epuise` (budget KV épuisé avant
+    # `max_tokens`), jamais par un `EOS`/`max_tokens` normal. Compté pour que
+    # `certifie-b12` puisse refuser une cellule où le lot réel a été rogné en
+    # cours de mesure au lieu de la lire dans les logs — trouvé le 17/09 par
+    # poste3 sur une cellule b=12 planifiée pour 8 séquences (`loader.py`).
+    sequences_tronquees_budget: int = 0
 
     @property
     def decode_tok_s(self) -> float:
@@ -172,6 +178,7 @@ class EngineStats:
             "proposed_tokens": self.proposed_tokens,
             "acceptance_rate": round(self.acceptance_rate, 3),
             "tokens_per_step": round(self.tokens_per_step, 3),
+            "sequences_tronquees_budget": self.sequences_tronquees_budget,
         }
 
     @property
@@ -519,11 +526,13 @@ class Engine:
             # attendu (bf16 non quantifié, sans noyau groupé — trouvé le
             # 15/09 sur un GLM converti --format bf16, pris pour un bogue).
             piles_txt += " (" + " ; ".join(r["piles_raison"]) + ")"
+        kv_seqs = getattr(self.loaded.plan, "kv_planned_seqs", 0) or "?"
         return (f"régime {etat} — graphes={'on' if r['graphes'] else 'off'} "
                f"couches_exilées={r['couches_exilees']}/{r['couches_total']} "
                f"experts_exilés={r['experts_exiles']}/{r['experts_total']} "
                f"{piles_txt} cartes={r['cartes']} "
                f"chemin_moe={r['chemin_moe']} "
+               f"kv_budget={self.allocator.num_blocks * BLOCK_SIZE}/{kv_seqs} "
                f"cache_prefixe={self.stats.hit_rate:.3f} "
                f"({self.stats.cached_prompt_tokens} vram+hôte, "
                f"{self.stats.host_kv_tokens} hôte)")
@@ -755,6 +764,7 @@ class Engine:
         sûr partout (aucun état à recomposer), câblé dans le retour
         seulement au chemin sans graphes pour l'instant (indépendant du
         chantier de recouvrement de poste4)."""
+        self.stats.sequences_tronquees_budget += 1
         print(f"[acvram] budget KV épuisé, séquence tronquée avant "
              f"max_tokens : request_id={seq.request_id} "
              f"sortis={len(seq.output_ids)}/{seq.params.max_tokens} "

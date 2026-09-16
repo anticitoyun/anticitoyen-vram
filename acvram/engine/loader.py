@@ -190,6 +190,7 @@ def indice_origine(architectures) -> str:
 def load_model(path: str, plan: Optional[Plan] = None,
                dtype: torch.dtype = torch.bfloat16,
                max_model_len: Optional[int] = None,
+               max_concurrent_seqs: Optional[int] = None,
                device_override: Optional[str] = None) -> LoadedModel:
     """Charge en mémoire un répertoire de modèle converti, placé selon le plan."""
     with open(os.path.join(path, "acvram_manifest.json"), "r", encoding="utf-8") as fh:
@@ -255,7 +256,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
               f" : verifier une sortie de couche contre une reference avant de "
               f"servir ce modele", flush=True)
     if plan is None:
-        plan = _plan_from_manifest(manifest, spec, max_model_len=max_model_len)
+        plan = _plan_from_manifest(manifest, spec, max_model_len=max_model_len,
+                                   max_concurrent_seqs=max_concurrent_seqs)
     _avertir_noyaux()
     reader = _ShardReader(path, manifest["weight_map"])
     group_size = manifest.get("options", {}).get("group_size", 128)
@@ -1404,7 +1406,8 @@ def _rapatrier_sur_une_carte(plan: Plan, attn: dict, mlp: dict,
 
 
 def _replanifier(manifest: dict, spec: "ModelSpec",
-                 max_model_len: Optional[int] = None) -> "Plan | None":
+                 max_model_len: Optional[int] = None,
+                 max_concurrent_seqs: Optional[int] = None) -> "Plan | None":
     """Rejoue TOUJOURS le planificateur avec l'état actuel de la machine.
 
     Le plan est écrit une fois pour toutes à la conversion, et `_reajuster_plan`
@@ -1431,6 +1434,14 @@ def _replanifier(manifest: dict, spec: "ModelSpec",
     serveur qui ne connaît pas encore la taille de ses requêtes doit continuer
     à dimensionner pour le pire cas plausible, pas pour un contexte court par
     défaut.
+
+    ``max_concurrent_seqs`` : même logique, pour le nombre de séquences —
+    absent avant le 17/09/2026, ce qui dimensionnait TOUJOURS le budget KV
+    pour `PlannerOptions.max_concurrent_seqs` par défaut (8), quel que soit
+    le `--max-batch`/`max_batch_size` réellement demandé. À b=12, 4
+    séquences sur 12 tronquaient silencieusement avant `max_tokens` (budget
+    épuisé, `_finish_budget_epuise`) sans qu'aucun compteur ne le signale —
+    trouvé par poste3 sur `certifie-b12`, `poste7-poste-d-verdict-17-09.md`.
     """
     if os.environ.get("ACVRAM_PLAN_FIGE") or os.environ.get("ACVRAM_SANS_REPLAN"):
         return None
@@ -1445,7 +1456,10 @@ def _replanifier(manifest: dict, spec: "ModelSpec",
             return None
         ctx = (max_model_len if max_model_len
                else max(2048, int(d.get("kv_max_tokens") or 0) or 8192))
-        neuf, _ = auto_plan(spec, rig, PlannerOptions(max_model_len=ctx))
+        slots = (max_concurrent_seqs if max_concurrent_seqs
+                else int(d.get("kv_planned_seqs") or 0) or PlannerOptions().max_concurrent_seqs)
+        neuf, _ = auto_plan(spec, rig, PlannerOptions(max_model_len=ctx,
+                                                       max_concurrent_seqs=slots))
     except Exception as e:                                   # pragma: no cover
         print(f"[acvram] replanification impossible ({e}) ; plan du manifeste "
               f"conservé", flush=True)
@@ -1548,11 +1562,13 @@ def _exil_experts_demande(plan: Plan, manifest: dict) -> None:
 
 
 def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
-                        max_model_len: Optional[int] = None) -> Plan:
+                        max_model_len: Optional[int] = None,
+                        max_concurrent_seqs: Optional[int] = None) -> Plan:
     from ..memory.tiering import LayerPlacement, Plan as _Plan, Tier
     d = manifest["plan"]
     if spec is not None:
-        neuf = _replanifier(manifest, spec, max_model_len=max_model_len)
+        neuf = _replanifier(manifest, spec, max_model_len=max_model_len,
+                            max_concurrent_seqs=max_concurrent_seqs)
         if neuf is not None:
             _reajuster_plan(neuf, manifest, top_k=spec.num_experts_per_tok or 8)
             _exil_demande(neuf)
@@ -1572,4 +1588,5 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
     plan.kv_budget = d.get("kv_budget", {})
     plan.kv_bytes_per_token = d.get("kv_bytes_per_token", 0)
     plan.kv_max_tokens = d.get("kv_max_tokens", 0)
+    plan.kv_planned_seqs = d.get("kv_planned_seqs", 0)
     return plan
