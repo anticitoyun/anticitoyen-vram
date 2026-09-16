@@ -1318,16 +1318,21 @@ class MoEBlock(nn.Module):
                                    ordre.contiguous() if atom else tiles[0], tw.contiguous() if atom else pg[3],
                                    k, t, atom, _MOE_FUSED_ETAGES, grow)
 
-    def _forward_grouped(self, x, topw, topi):
+    def _forward_grouped(self, x, topw, topi, eid=None):
         t = x.shape[0]
         ext = kernels.get_extension()
-        eid = topi.reshape(-1).to(torch.int32)
-        tok = torch.arange(t, device=x.device,
-                           dtype=torch.int32).repeat_interleave(self.top_k)
+        if eid is not None:                            # route_prep : eid déjà prêt, index par godet
+            from ..kernels import route_prep as _rp
+            tok, _seq = _rp.index_jetons(t, self.top_k, x.device)
+        else:
+            eid = topi.reshape(-1).to(torch.int32)
+            tok = torch.arange(t, device=x.device,
+                               dtype=torch.int32).repeat_interleave(self.top_k)
+            _seq = None
         if "gate_proj" not in self._stacks:            # experts sans porte (ReLU²)
             u = self._grouped(x.to(torch.float32), self._stacks["up_proj"], eid, tok)
             act = F.relu(u); act = act * act
-            seq = torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
+            seq = _seq if _seq is not None else torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
             d = self._grouped(act, self._stacks["down_proj"], eid, seq)
             d = d * topw.reshape(-1, 1).to(d.dtype)
             return d.view(t, self.top_k, -1).sum(dim=1).to(x.dtype)
@@ -1377,7 +1382,7 @@ class MoEBlock(nn.Module):
             g = self._grouped(x32, pg, eid, tok_g)
             u = self._grouped(x32 if x_u is x_g else x_u.to(torch.float32), pu, eid, tok_g)
             act = self._act(g) * u              # [G, I] fp32
-        seq = torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
+        seq = _seq if _seq is not None else torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
         if hd_d:
             act = fwht_activations(act.to(torch.bfloat16), hd_d).to(act.dtype)
         if awq.get("down_proj") is not None:
@@ -1461,6 +1466,26 @@ class MoEBlock(nn.Module):
         # réduction pondérée ; l'aller-retour en bf16 coûtait deux copies par
         # couche pour rien
         topw, topi = self._route(x)
+        # Poste F, fusion (1) : masque des fantômes + compteur d'usage + eid en
+        # UN lancement (kernels/route_prep), `tok`/`seq` réservés par godet —
+        # à la place de ~10 petits noyaux torch par couche (verdict-lancements-
+        # b1-17-09). Même eid, même compteur, au bit ; chemin groupé seul.
+        if (_ROUTE_PREP and x.is_cuda and topi.dtype == torch.int32
+                and self._usage_routage is not None and self._stack_state == "oui"
+                and t <= _MOE_GROUPED_MAX):
+            from ..kernels import route_prep as _rp
+            if _rp.disponible():
+                eid = _rp.route_prep(topi, valid, self._usage_routage)
+                if valid is not None:
+                    topi = eid.view(t, self.top_k)
+                mma_ok = _MOE_DECODE_MMA and t >= _MOE_DECODE_MMA_MIN_T
+                y = (self._forward_grouped_mma(x, topw, topi) if mma_ok else None)
+                if y is None:
+                    y = self._forward_grouped(x, topw, topi, eid=eid)
+                if y is not None:
+                    if self.shared is not None:
+                        y = y + self._shared_out(x)
+                    return y
         if valid is not None:
             # Créneaux fantômes du remplissage godet (`bucket_batch`,
             # graphs.py) : `x` y est nul, mais x=0 route quand même —
@@ -1663,6 +1688,8 @@ def _qa_imprime():
 # revue/verdict-cellule-b5-16-09.md) donne ms −0,3 % (égalité) et J −4,1 % :
 # la GEMM sort du plafond 400 W (SM 2 937 MHz au lieu de 2 727) → 5.
 _MOE_DECODE_MMA_MIN_T = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_MIN_T", "5"))
+# Poste F, fusion (1) : préparation du routage en un lancement (kernels/route_prep)
+_ROUTE_PREP = os.environ.get("ACVRAM_ROUTE_PREP", "0") == "1"
 # MoE fusionné au décodage (port b12x, 15/09) : coupé tant que les seuils de
 # poste7 ne sont pas tenus (≤ 75 µs/couche, pas b=12 ≤ 11,3 ms, J ≤ 0,38).
 _MOE_DECODE_FUSED = os.environ.get("ACVRAM_MOE_DECODE_FUSED", "0") == "1"

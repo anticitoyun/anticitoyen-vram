@@ -76,6 +76,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MOE_DECODE_MMA", "1", ("acvram.engine.model", "_MOE_DECODE_MMA"), "0"),
     Variable("MOE_DECODE_MMA_BT", "16", ("acvram.engine.model", "_MOE_DECODE_MMA_BT")),
     Variable("MOE_DECODE_MMA_MIN_T", "5", ("acvram.engine.model", "_MOE_DECODE_MMA_MIN_T")),
+    Variable("ROUTE_PREP", "0", ("acvram.engine.model", "_ROUTE_PREP"), "0",
+             "poste F (1) : masque des fantômes + compteur + eid en un noyau Triton, index par godet"),
     Variable("MOE_DECODE_FUSED", "0", ("acvram.engine.model", "_MOE_DECODE_FUSED"), "0"),
     Variable("MOE_FUSED_TN", "64", ("acvram.engine.model", "_MOE_FUSED_TN")),
     Variable("MOE_FUSED_ATOMIQUE", "0", ("acvram.engine.model", "_MOE_FUSED_ATOMIQUE"), "0"),
