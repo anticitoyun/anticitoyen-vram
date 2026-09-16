@@ -1,0 +1,258 @@
+"""Fiche de service (`outils/fiche-service.py`, poste1, à sec) — juge de
+refus, calcul des débits et lancement/attente de serveur, tous exercés
+contre un faux serveur HTTP local (aucun modèle, aucun GPU). Le faux serveur
+répond selon des marqueurs dans le texte de l'invite : « REFUSER » déclenche
+une réponse à motif de refus, sinon une réponse neutre — ce qui rend le juge
+et le contrôle instruct/abliterated vérifiables sans jamais charger un poids.
+"""
+import http.server
+import json
+import sys
+import threading
+import time
+from pathlib import Path
+
+import httpx
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "outils"))
+import importlib
+
+fiche_service = importlib.import_module("fiche-service")
+
+
+# ---------------------------------------------------------------------------
+# Faux serveur OpenAI-compatible
+# ---------------------------------------------------------------------------
+
+class _Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):  # silence
+        pass
+
+    def _corps(self) -> dict:
+        n = int(self.headers.get("Content-Length", 0))
+        return json.loads(self.rfile.read(n)) if n else {}
+
+    def do_GET(self):
+        if self.path == "/v1/models":
+            self._json(200, {"data": []})
+        else:
+            self._json(404, {})
+
+    def do_POST(self):
+        req = self._corps()
+        if self.path == "/v1/chat/completions":
+            contenu = req["messages"][-1]["content"]
+            texte = ("Je suis desole, mais je ne peux pas vous aider avec ceci."
+                     if "REFUSER" in contenu else "Voici la reponse demandee.")
+            self._json(200, {
+                "choices": [{"message": {"role": "assistant", "content": texte}}],
+                "usage": {"prompt_tokens": len(contenu.split()), "completion_tokens": 8}})
+        elif self.path == "/v1/completions":
+            prompt = req["prompt"]
+            n_prompt = len(prompt.split())
+            if req.get("stream"):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for i in range(req.get("max_tokens", 1)):
+                    morceau = {"choices": [{"text": "x", "finish_reason": None}]}
+                    self.wfile.write(f"data: {json.dumps(morceau)}\n\n".encode())
+                    self.wfile.flush()
+                    time.sleep(0.001)
+                self.wfile.write(b"data: [DONE]\n\n")
+            else:
+                self._json(200, {
+                    "choices": [{"text": "x" * 8, "finish_reason": "length"}],
+                    "usage": {"prompt_tokens": n_prompt, "completion_tokens": 1}})
+        else:
+            self._json(404, {})
+
+    def _json(self, code: int, corps: dict) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(corps).encode())
+
+
+@pytest.fixture(scope="module")
+def serveur():
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    port = httpd.server_address[1]
+    fil = threading.Thread(target=httpd.serve_forever, daemon=True)
+    fil.start()
+    yield f"http://127.0.0.1:{port}"
+    httpd.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Juge de refus
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("reponse, attendu", [
+    ("Je suis désolé, mais je ne peux pas vous aider avec ceci.", True),
+    ("I'm sorry, but I cannot assist with that request.", True),
+    ("JE SUIS DESOLE, MAIS JE NE PEUX PAS.", True),  # sans accents, majuscules
+    ("Voici la réponse : la capitale de la France est Paris.", False),
+    ("", False),
+])
+def test_juge_motifs(reponse, attendu):
+    assert fiche_service.juge_motifs(reponse) is attendu
+
+
+def test_echantillon_a_relire_taille_et_determinisme():
+    reponses = [f"r{i}" for i in range(12)]
+    a = fiche_service.echantillon_a_relire(reponses, graine=42)
+    b = fiche_service.echantillon_a_relire(reponses, graine=42)
+    assert a == b                       # déterministe pour une même graine
+    assert len(a) == 2                   # ceil(12 * 0.10) = 2
+    assert all(0 <= i < 12 for i in a)
+
+
+def test_echantillon_a_relire_liste_courte():
+    assert fiche_service.echantillon_a_relire(["seul"], graine=1) == [0]
+
+
+# ---------------------------------------------------------------------------
+# Corpus de refus — jeu fixe, jamais fabriqué par l'outil
+# ---------------------------------------------------------------------------
+
+def test_charger_corpus_refus_absent(tmp_path):
+    with pytest.raises(SystemExit, match="absent"):
+        fiche_service.charger_corpus_refus(tmp_path / "n-existe-pas.txt")
+
+
+def test_charger_corpus_refus_mauvais_compte(tmp_path):
+    p = tmp_path / "refus-12.txt"
+    p.write_text("une seule invite\n")
+    with pytest.raises(SystemExit, match="12 attendues"):
+        fiche_service.charger_corpus_refus(p)
+
+
+def test_charger_corpus_refus_correct(tmp_path):
+    import hashlib
+    p = tmp_path / "refus-12.txt"
+    lignes = [f"invite {i}" for i in range(12)]
+    p.write_text("\n".join(lignes) + "\n")
+    invites, sha = fiche_service.charger_corpus_refus(p)
+    assert invites == lignes
+    assert sha == hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Débits, contre le faux serveur
+# ---------------------------------------------------------------------------
+
+def test_mesure_prefill(serveur):
+    with httpx.Client() as client:
+        r = fiche_service.mesure_prefill(client, serveur, "m", jetons_vises=32,
+                                         repetitions=2)
+    assert "refus" not in r
+    assert r["prefill_tok_s"] > 0
+    assert len(r["prefill_jetons_reels"]) == 2
+
+
+def test_mesure_decode_b1(serveur):
+    with httpx.Client() as client:
+        r = fiche_service.mesure_decode_b1(client, serveur, "m", n_tokens=16,
+                                           prompt_len=8, chauffe=0, repetitions=2)
+    assert "refus" not in r
+    assert r["decode_tok_s"] > 0
+    assert r["decode_jetons_produits"] == 16
+
+
+def test_mesure_refus(serveur):
+    invites = ["REFUSER ceci"] * 5 + ["question normale"] * 7
+    with httpx.Client() as client:
+        r = fiche_service.mesure_refus(client, serveur, "m", invites,
+                                       max_tokens=16, graine_relecture=7)
+    assert r["n_refus"] == 5
+    assert r["n_total"] == 12
+    assert len(r["lecture_manuelle"]) == 2  # ceil(12*0.10)
+
+
+# ---------------------------------------------------------------------------
+# Contrôle du juge (poste7 § 2) — écart ≥ 4/12
+# ---------------------------------------------------------------------------
+
+def test_valider_juge_ecart_suffisant(serveur):
+    invites = ["REFUSER un peu"] * 6 + ["question normale"] * 6
+    # même serveur pour les deux "modèles" ; on distingue par les invites :
+    # le "abliterated" ne reçoit que les invites neutres.
+    resultat = fiche_service.valider_juge(
+        serveur, serveur, "instruct", "abliterated", invites, "shaXYZ")
+    assert resultat["instruct"]["n_refus"] == 6
+    assert resultat["abliterated"]["n_refus"] == 6
+    # même corpus envoyé aux deux -> écart nul ici ; le test ci-dessous couvre
+    # le cas où le juge doit refuser de publier.
+    assert resultat["ok"] is (abs(6 - 6) >= fiche_service.ECART_MIN_JUGE)
+    assert resultat["ok"] is False
+    assert resultat["ecart"] == 0
+
+
+def test_charger_validation_juge_absente(tmp_path):
+    assert fiche_service.charger_validation_juge(tmp_path / "x.json", "sha") is None
+
+
+def test_charger_validation_juge_corpus_change(tmp_path):
+    p = tmp_path / "v.json"
+    p.write_text(json.dumps({"ok": True, "prompts_sha256": "ancien"}))
+    assert fiche_service.charger_validation_juge(p, "nouveau") is None
+
+
+def test_charger_validation_juge_valide(tmp_path):
+    p = tmp_path / "v.json"
+    p.write_text(json.dumps({"ok": True, "prompts_sha256": "sha", "ecart": 6}))
+    v = fiche_service.charger_validation_juge(p, "sha")
+    assert v["ok"] is True and v["ecart"] == 6
+
+
+# ---------------------------------------------------------------------------
+# Serveur : attente et échec
+# ---------------------------------------------------------------------------
+
+def test_lancer_serveur_deja_debout(serveur, tmp_path):
+    s = fiche_service.lancer_serveur(None, serveur, 0, tmp_path / "j.log", 5.0)
+    assert s.charge is True
+    assert s.processus is None
+
+
+def test_lancer_serveur_timeout(tmp_path):
+    s = fiche_service.lancer_serveur(None, "http://127.0.0.1:1", 0,
+                                     tmp_path / "j.log", 1.0)
+    assert s.charge is False
+    assert "répond pas" in s.cause_echec
+
+
+def test_vram_pid_sans_exception():
+    assert fiche_service.vram_pid(999999999) is None
+
+
+# ---------------------------------------------------------------------------
+# Fiche complète, TSV
+# ---------------------------------------------------------------------------
+
+def test_construire_fiche_sans_validation_juge(serveur, tmp_path, monkeypatch):
+    monkeypatch.setattr(fiche_service, "VALIDATION_JUGE", tmp_path / "absente.json")
+    corpus = tmp_path / "refus-12.txt"
+    corpus.write_text("\n".join(f"invite {i}" for i in range(12)))
+    import argparse
+    args = argparse.Namespace(
+        nom="test-entree", moteur="acvram", modele="m", commande=None,
+        base_url=serveur, port=0, journal=str(tmp_path / "j.log"),
+        timeout_chargement=5.0, arreter_serveur=False,
+        prefill_jetons=32, prefill_repetitions=2, decode_jetons=16,
+        decode_prompt_len=8, decode_chauffe=0, decode_repetitions=2,
+        refus_corpus=str(corpus), refus_jetons=16,
+        sortie=str(tmp_path / "fiche-service.tsv"))
+    fiche = fiche_service.construire_fiche(args)
+    assert fiche["charge"] is True
+    assert fiche["refus"]["publie"] is False
+    assert "non validé" in fiche["refus"]["cause"]
+
+    chemin = Path(args.sortie)
+    fiche_service.ecrire_tsv(fiche, chemin)
+    fiche_service.ecrire_tsv(fiche, chemin)
+    lignes = chemin.read_text().splitlines()
+    assert lignes[0].startswith("nom\t")
+    assert len(lignes) == 3  # en-tête + deux lignes, jamais un second en-tête
