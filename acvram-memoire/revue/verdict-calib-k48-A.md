@@ -41,6 +41,32 @@ durée 4902,9 s (≈ 81,7 min, CPU)
 les six phrases répétées — signe direct que la taille/diversité du
 corpus change ce que l'AWQ voit, cohérent avec l'hypothèse de poste7.
 
+## Contrôle demandé par poste7 : la ligne « calibration sur … jetons »
+
+Le manifeste MENT sur la taille de calibration réellement utilisée :
+`options.calib_seqs=16`, `options.calib_tokens=128` — ce sont les défauts
+figés de la dataclasse `ConversionOptions` (`convert.py:44-45`), jamais
+lus ni posés par `cmd_convert` (`cli.py:503` ne transmet que `args`
+générique, pas ces deux champs) ; ils ne reflètent PAS `--calib-seqs 32
+--calib-len 512` réellement passés en ligne de commande. Seul
+`options.calib_source.fichier`/`sha256` (ajouté ce chantier) est fidèle.
+
+Ligne du journal de conversion (`cli.py:505`, `print(f"  calibration sur
+{len(calib)} sequences ({sum(len(c) for c in calib)} jetons) ...")`),
+reproduite à l'identique par appel direct à `load_calib_ids` avec le même
+fichier/mêmes paramètres (le journal original du 17/09 n'a pas survécu au
+redémarrage de session, mais le calcul est déterministe — même fichier,
+même sha256, même sortie) :
+
+```
+  calibration sur 32 sequences (16384 jetons) ...
+```
+
+Confirme, indépendamment de la vérification `load_calib_ids` déjà citée
+plus haut, que la conversion a bien tourné sur 16 384 jetons — le
+manifeste ment sur `calib_seqs`/`calib_tokens`, pas sur ce qui a
+réellement été calibré.
+
 ## Régime
 
 `acvram serve --regime` (`outils/carte.sh`) : **NOMINAL**, graphes=on,
