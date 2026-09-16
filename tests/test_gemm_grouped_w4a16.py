@@ -219,7 +219,8 @@ def test_le_noyau_cuda_passe_le_juge(forme, noyau):
 
 def candidat_bmm(qw, bs, gs, x, comptes, M, K):
     """`MoEBlock._plan_bmm` + `_grouped_bmm` sur la pile déquantifiée en bf16 :
-    le chemin `else` de `_forward_prefill_grouped` (défaut `ACVRAM_PREFILL_GROUPED=bmm`)."""
+    le chemin `else` de `_forward_prefill_grouped` (`ACVRAM_PREFILL_GROUPED=bmm`,
+    réfuté sur carte : −36 %, poste3 0edc3b9 ; le défaut est `grouped_mm`)."""
     from acvram.engine.model import MoEBlock
     w = torch.stack([_dequant(qw, bs, gs, e, torch.bfloat16) for e in range(qw.shape[0])])
     plan = MoEBlock._plan_bmm(torch.tensor(comptes, device=x.device))
@@ -261,7 +262,7 @@ from test_moe_grouped import tiny_moe  # noqa: E402,F401  (fixture de session, r
 
 def test_prefill_groupe_bmm_egale_grouped_mm_et_la_boucle_sur_le_mini_moe(tiny_moe, monkeypatch):
     """Bout en bout sur le mini-MoE du conftest, processeur : le chemin
-    `_forward_prefill_grouped` en `bmm` (défaut) contre le témoin
+    `_forward_prefill_grouped` en `bmm` (réfuté, témoin) contre le défaut
     `grouped_mm` et contre la boucle par expert (`forward` sur CPU), même
     routage, t = 64 > _MOE_GROUPED_MAX."""
     from acvram.engine import model as M
