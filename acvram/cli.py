@@ -376,6 +376,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             ok = False
             print(f"  {red('ECHEC')} {mod} est absent (pip install {mod})")
 
+    from .engine.gdn import gdn_available
+    if gdn_available():
+        print(f"  {green('ok')}    Gated DeltaNet (hybrides Qwen3-Next/kimi)")
+    else:
+        print(f"  {yellow('alerte')} Gated DeltaNet indisponible ; les modeles "
+              f"hybrides Qwen3-Next/kimi seront refuses au chargement : "
+              f"pip install -e '.[gdn]'")
+
     if rig.host.total and rig.host.total < 32 * 1024 ** 3:
         print(f"  {yellow('alerte')} {_h(rig.host.total)} de memoire vive limitent "
               f"l'etage hote")
