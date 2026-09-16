@@ -50,9 +50,12 @@ def _ref(x, w, eps, cos32, sin32, pos, dr):
 
 
 def _codes(x):
+    """kv_write_int8_kernel : sc = max(amax/127, 1e-8), inv = 1/sc (IEEE),
+    code = rint(x · inv) — la multiplication par l'inverse, pas la division :
+    aux demi-entiers les deux diffèrent d'un code."""
     xf = x.float()
     sc = (xf.abs().amax(-1, keepdim=True) / 127).clamp(min=1e-8)
-    return (xf / sc).round().clamp(-127, 127), sc.squeeze(-1).to(torch.float16)
+    return (xf * (1.0 / sc)).round().clamp(-127, 127), sc.squeeze(-1).to(torch.float16)
 
 
 def _montage(T, HQ, HKV, D, DR, norme_q=True, empile=False, graine=0):

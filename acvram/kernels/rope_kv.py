@@ -65,7 +65,10 @@ if triton is not None:
             wk = tl.full((D,), 1.0, tl.float32)
         w = tl.where(est_q, wq, wk)
         norme = tl.where(est_q, NORME_Q, NORME_K)        # constexpr 1/0 : normer cette tête ?
-        inv = 1.0 / tl.sqrt(tl.sum(x * x, 0) / D + eps)
+        # IEEE (sqrt_rn, fdiv ieee) : sur carte, `tl.sqrt` et `/` sont approchés
+        # (sqrt.approx, div.full à 2 ulp) — l'interpréteur numpy, exact, ne le
+        # voyait pas ; les codes int8 basculaient aux demi-entiers (poste3, 3/6)
+        inv = tl.fdiv(1.0, tl.sqrt_rn(tl.sum(x * x, 0) / D + eps), ieee_rounding=True)
         inv = tl.where(norme == 1, inv, 1.0)
         y = x * inv * w
         # rotation des DR premières coordonnées (rotate_half) : partenaire i ± DR/2
@@ -96,14 +99,14 @@ if triton is not None:
         ecrit = (base == 1) & (slot >= 0)
         hk = tl.maximum(h - HQ, 0)
         kf = out.to(tl.float32)
-        kmax = tl.maximum(tl.max(tl.abs(kf), 0) / 127.0, 1e-8)
-        kcode = tl.minimum(tl.maximum(_rint(kf * (1.0 / kmax)), -127.0), 127.0)
+        kmax = tl.maximum(tl.fdiv(tl.max(tl.abs(kf), 0), 127.0, ieee_rounding=True), 1e-8)
+        kcode = tl.minimum(tl.maximum(_rint(kf * tl.fdiv(1.0, kmax, ieee_rounding=True)), -127.0), 127.0)
         cell = tl.maximum(slot, 0) * HKV + hk
         tl.store(kc_ptr + cell * D + i, kcode.to(tl.int8), mask=tous & ecrit)
         tl.store(ks_ptr + cell + i * 0, kmax.to(tl.float16), mask=(i == 0) & ecrit)
         vv = tl.load(v_ptr + t * stride_vt + hk * stride_vh + i, mask=tous & (base == 1), other=0.0).to(tl.float32)
-        vmax = tl.maximum(tl.max(tl.abs(vv), 0) / 127.0, 1e-8)
-        vcode = tl.minimum(tl.maximum(_rint(vv * (1.0 / vmax)), -127.0), 127.0)
+        vmax = tl.maximum(tl.fdiv(tl.max(tl.abs(vv), 0), 127.0, ieee_rounding=True), 1e-8)
+        vcode = tl.minimum(tl.maximum(_rint(vv * tl.fdiv(1.0, vmax, ieee_rounding=True)), -127.0), 127.0)
         tl.store(vc_ptr + cell * D + i, vcode.to(tl.int8), mask=tous & ecrit)
         tl.store(vs_ptr + cell + i * 0, vmax.to(tl.float16), mask=(i == 0) & ecrit)
 
