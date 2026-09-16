@@ -345,8 +345,19 @@ class Engine:
         self._max_insta = int(os.environ.get("ACVRAM_INSTA_MAX", "3"))
         self._insta: "OrderedDict[int, list]" = OrderedDict()
 
-        n_blocks = min((c.cfg.num_blocks for c in self.model.caches.values()),
-                       default=1024)
+        if self.model.caches:
+            n_blocks = min(c.cfg.num_blocks for c in self.model.caches.values())
+        else:
+            # Modèle sans cache paginé (MLA latent contigu, GLM ; ou
+            # récurrence linéaire pure) : `self.model.caches` est vide, le
+            # générateur ci-dessus ne rend jamais rien. Le budget de jetons
+            # vivants doit venir du plan réel (`auto_plan`, `kv_max_tokens`)
+            # — pas d'un défaut arbitraire qui écraserait silencieusement un
+            # budget calculé pour ce rig. Trouvé le 16/09 : le défaut de
+            # 1024 blocs (16 384 jetons) s'appliquait à tout modèle MLA,
+            # quel que soit le rig ou le plan réel.
+            kv_max = getattr(self.loaded.plan, "kv_max_tokens", 0) or 0
+            n_blocks = max(1, kv_max // BLOCK_SIZE) if kv_max else 1024
         self.allocator = BlockAllocator(n_blocks, enable_prefix_cache)
         # Les hybrides ne vérifient pas encore q_len > 1 à formes fixes : une
         # proposition n-gram y coûte une passe eager (≈3× le pas) pour un gain
@@ -731,6 +742,30 @@ class Engine:
             seq.hashes.append(h)
             self.allocator.register(seq.blocks[i], h)
 
+    def _finish_budget_epuise(self, seq: Sequence) -> GenerationOutput:
+        """`_grow` a échoué : le budget KV est épuisé, pas la séquence qui
+        a fini naturellement. `finish_reason` reste "length" (contrat API
+        OpenAI/Anthropic, ne pas y toucher) mais jamais silencieux par
+        ailleurs (REGLES : un échec est un résultat) — trouvé le 16/09,
+        les quatre sites qui appellent `_grow` puis `_finish(seq, "length")`
+        ne distinguaient pas ce cas d'un `max_tokens` atteint normalement,
+        et aucun n'émettait de `GenerationOutput` pour cette séquence : elle
+        disparaissait du lot sans jamais signaler sa fin à l'appelant. Rendu
+        ici pour que l'appelant l'ajoute à ce que le pas rend ; le rendre est
+        sûr partout (aucun état à recomposer), câblé dans le retour
+        seulement au chemin sans graphes pour l'instant (indépendant du
+        chantier de recouvrement de poste4)."""
+        print(f"[acvram] budget KV épuisé, séquence tronquée avant "
+             f"max_tokens : request_id={seq.request_id} "
+             f"sortis={len(seq.output_ids)}/{seq.params.max_tokens} "
+             f"blocs_libres={self.allocator.num_free}", flush=True)
+        sortie = GenerationOutput(
+            sequence_id=seq.id, request_id=seq.request_id, token_ids=[],
+            finished=True, finish_reason="length",
+            prompt_tokens=len(seq.prompt_ids), completion_tokens=len(seq.output_ids))
+        self._finish(seq, "length")
+        return sortie
+
     def _grow(self, seq: Sequence, extra: int = 0) -> bool:
         need = seq.blocks_needed(extra=extra)
         if need <= len(seq.blocks):
@@ -1008,12 +1043,11 @@ class Engine:
     def _plain_decode_sync(self, decodable: list[Sequence]) -> list[GenerationOutput]:
         trace = os.environ.get("ACVRAM_TRACE_STEPS")
         tg = time.perf_counter()
-        for seq in decodable:
-            if not self._grow(seq):
-                self._finish(seq, "length")
+        epuisees = [self._finish_budget_epuise(seq) for seq in decodable
+                   if not self._grow(seq)]
         decodable = [s for s in decodable if not s.finished]
         if not decodable:
-            return []
+            return epuisees
         t0 = time.perf_counter()
         batch = self._build_batch(decodable, prefill=False)
         t1 = time.perf_counter()
@@ -1035,7 +1069,7 @@ class Engine:
             print(f"[pas-lent] {voie} grow {(t0-tg)*1000:.1f} batch "
                   f"{(t1-t0)*1000:.1f} avant {(t2-t1)*1000:.1f} emit "
                   f"{(t3-t2)*1000:.1f} ms len={decodable[0].length}", flush=True)
-        return outs
+        return epuisees + outs
 
     def _build_batch_device(self, seqs: list[Sequence],
                             tokens_dev: torch.Tensor) -> ForwardBatch:
@@ -1083,7 +1117,7 @@ class Engine:
         jamais de famine pour une arrivée."""
         for seq in decodable:
             if not self._grow(seq):
-                self._finish(seq, "length")
+                self._finish_budget_epuise(seq)
         decodable = [s for s in decodable if not s.finished]
         if not decodable:
             return []
@@ -1114,7 +1148,7 @@ class Engine:
         `output_ids` (cf. `_build_batch_device`)."""
         for seq in roster:
             if not self._grow(seq, extra=1):
-                self._finish(seq, "length")
+                self._finish_budget_epuise(seq)
         vivants = [s for s in roster if not s.finished]
         if not vivants:
             return []
@@ -1223,7 +1257,7 @@ class Engine:
                                 else prop.probs[:max(0, room)])
             proposals[seq.id] = prop
             if not self._grow(seq, extra=len(prop)):
-                self._finish(seq, "length")
+                self._finish_budget_epuise(seq)
 
         decodable = [s for s in decodable if not s.finished]
         if not decodable:
