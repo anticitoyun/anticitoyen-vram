@@ -1771,9 +1771,10 @@ _MOE_DECODE_MMA_MIN_T = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_MIN_T", "5"))
 # Poste F, fusion (1) : préparation du routage en un lancement (kernels/route_prep)
 # — défaut depuis verdict-f1-route-prep-17-09 (tenu : bit-à-bit b=1/b=12,
 # 1275→795 lancements, b=1 313,4 t/s pur)
-# 0 : chemin torch | 1 (défaut, F1 tenu f912f90) : route_prep après moe_route |
-# 2 (F2, opt-in) : moe_route + route_prep fusionnés (route_fusee)
-_ROUTE_PREP = int(os.environ.get("ACVRAM_ROUTE_PREP", "1"))
+# 0 : chemin torch | 1 (F1 tenu f912f90) : route_prep après moe_route |
+# 2 (défaut depuis verdict-f2-topk-17-09, critère plancher tenu) :
+# moe_route + route_prep fusionnés (route_fusee)
+_ROUTE_PREP = int(os.environ.get("ACVRAM_ROUTE_PREP", "2"))
 # Poste F, fusion (3a) : normes + RoPE + kv_write en un noyau Triton (opt-in)
 _ROPE_KV = os.environ.get("ACVRAM_ROPE_KV", "0") == "1"
 if _ROUTE_PREP not in (0, 1, 2):
