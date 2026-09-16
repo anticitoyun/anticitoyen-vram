@@ -870,7 +870,7 @@ class MoEBlock(nn.Module):
         from ..quant.formats import NVFP4Tensor
         plat = NVFP4Tensor.__new__(NVFP4Tensor)
         plat.qweight = qw.view(E * M, -1)
-        plat.block_scale = bs.view(E * M, -1)
+        plat.block_scale = bs.view(E * M, -1).view(torch.float8_e4m3fn)   # la pile garde des octets
         plat.global_scale = torch.ones((), dtype=torch.float32, device=qw.device)
         plat.padded_in = k
         plat.shape = (E * M, k)

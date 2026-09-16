@@ -287,7 +287,15 @@ def dequantize_nvfp4(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16) -> tor
     gsr = getattr(t, "global_scale_rows", None)
     gs = (gsr.to(torch.float32).view(-1, 1) if gsr is not None
           else t.global_scale.to(torch.float32))
-    scale = t.block_scale.to(torch.float32) * gs
+    # Les échelles de bloc voyagent parfois en OCTETS (safetensors, piles
+    # d'experts `_pile_bf16`) : un uint8 converti en float donnerait la valeur
+    # de l'octet (0-255) au lieu de l'E4M3 décodée — c'est ce qui rendait une
+    # PPL de 10⁸ sous ACVRAM_DISABLE_KERNELS=1 (le noyau CUDA, lui, décode les
+    # octets ; le jumeau torch doit faire pareil — REGLES §7).
+    bs = t.block_scale
+    if bs.dtype == torch.uint8:
+        bs = bs.view(torch.float8_e4m3fn)
+    scale = bs.to(torch.float32) * gs
     out = vals * scale.unsqueeze(-1)
     out = out.reshape(out_f, k)
     if k != t.shape[-1]:

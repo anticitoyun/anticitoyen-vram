@@ -442,12 +442,18 @@ def nvfp4_dequant(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16,
     groupe de lignes (pile d'experts), à la place de ``t.global_scale``."""
     ext = get_extension()
     if ext is None or not t.qweight.is_cuda:
-        out = dequantize_nvfp4(t, dtype)
-        if gscale_rows is not None:
-            out = out.view(-1, rows_per_group, out.shape[-1]) \
-                * (gscale_rows.to(out.dtype) / float(t.global_scale_float())).view(-1, 1, 1)
-            out = out.reshape(-1, out.shape[-1])
-        return out
+        if gscale_rows is None:
+            return dequantize_nvfp4(t, dtype)
+        # Le jumeau torch du noyau : échelle de bloc × échelle globale DE LA
+        # LIGNE en fp32, puis × code, un seul arrondi vers dtype — pas une
+        # déquantification en bf16 remultipliée ensuite (double arrondi, 1 ulp
+        # d'écart avec le noyau, verdict-repli-torch-passage-direct-17-09).
+        # Les piles (model.py _pile_bf16) portent global_scale = 1 : gscale_rows
+        # est alors l'échelle globale de chaque expert telle quelle.
+        gsr = gscale_rows.to(torch.float32).repeat_interleave(int(rows_per_group))
+        jumeau = NVFP4Tensor(t.qweight, t.block_scale, t.global_scale, t.shape, t.padded_in,
+                             global_scale_rows=gsr)      # remplace t.global_scale, comme le noyau
+        return dequantize_nvfp4(jumeau, dtype)
     out = ext.nvfp4_dequant(
         t.qweight.contiguous(),
         t.block_scale.view(torch.uint8).contiguous(),
