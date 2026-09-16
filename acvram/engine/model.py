@@ -1142,14 +1142,15 @@ class MoEBlock(nn.Module):
             act = _activation(g, u, pg[5], pd[4])
             d = self._gemm(pd, act, tiles, brut=True)
         elif _PREFILL_GROUPED == "grouped_mm":
-            # témoin : l'ancien chemin, `torch._grouped_mm` (déroulé sur sm_120)
+            # défaut : `torch._grouped_mm` (déroulé sur sm_120 en un mm par
+            # expert + une copie DtoH par pile — mais ses copies s'arrêtent là)
             offs = torch.cumsum(cnt, 0).to(torch.int32)
             wg = self._pile_bf16(pg); g = torch._grouped_mm(xs, wg.transpose(1, 2), offs=offs); del wg
             wu = self._pile_bf16(pu); u = torch._grouped_mm(xs_u, wu.transpose(1, 2), offs=offs); del wu
             act = _activation(g, u, pg[5], pd[4])
             wd = self._pile_bf16(pd); d = torch._grouped_mm(act, wd.transpose(1, 2), offs=offs); del wd
         else:
-            # GEMM groupée bf16 par seaux de `bmm` (A, poste7-profil-verdict-17-09)
+            # bmm par seaux (A, poste7-profil-verdict-17-09) : réfuté −36 %, témoin
             plan = self._plan_bmm(cnt)
             wg = self._pile_bf16(pg); g = self._grouped_bmm(xs, wg, plan); del wg
             wu = self._pile_bf16(pu); u = self._grouped_bmm(xs_u, wu, plan); del wu
@@ -1577,8 +1578,11 @@ _MOE_GEMM_MAX = float(os.environ.get("ACVRAM_MOE_GEMM_MAX", "48"))
 # qwen3-coder.md) — dans la fourchette prédite avant mesure.
 _MOE_MMA = os.environ.get("ACVRAM_MOE_MMA", "1") == "1"
 # GEMM groupée bf16 du prefill au-delà de _MOE_GEMM_MAX jetons par expert :
-# "bmm" (seaux d'experts, défaut) | "grouped_mm" (torch._grouped_mm, témoin)
-_PREFILL_GROUPED = os.environ.get("ACVRAM_PREFILL_GROUPED", "bmm")
+# "grouped_mm" (torch._grouped_mm, DÉFAUT) | "bmm" (seaux d'experts, RÉFUTÉ :
+# poste3 0edc3b9, 5 486 j/s contre 8 614 — les tuiles GEMM restent celles d'un
+# petit M, et le gather w[experts] par seau ajoute ~58 Go de copies par
+# prefill ; gardé comme témoin d'une fausse piste, jamais comme défaut)
+_PREFILL_GROUPED = os.environ.get("ACVRAM_PREFILL_GROUPED", "grouped_mm")
 if _PREFILL_GROUPED not in ("bmm", "grouped_mm"):
     raise ValueError(f"ACVRAM_PREFILL_GROUPED={_PREFILL_GROUPED!r} : attendu bmm ou grouped_mm")
 _MOE_MMA_BT = int(os.environ.get("ACVRAM_MOE_MMA_BT", "64"))
