@@ -223,3 +223,40 @@ def test_collecte_normalise_le_prefixe_multimodal(tokenized_checkpoint,
         assert torch.equal(st.mean_abs, mm[name].mean_abs), \
             f"{name} : statistiques différentes sous l'enrobage multimodal"
         assert st.n_samples == mm[name].n_samples
+
+
+def test_calibration_survit_a_un_echec_de_passe_sur_une_couche(tokenized_checkpoint,
+                                                                monkeypatch):
+    """Un échec de PASSE AVANT (RuntimeError), pas seulement de construction
+    (KeyError), sur UNE couche ne doit éteindre AWQ que pour CETTE couche —
+    même motif que le KeyError de construction (MLA à q_lora, GLM-4.7-Flash,
+    15/09), étendu à l'échec de passe. Trouvé sur Qwen3.8-27B (`qwen3_5`,
+    attention pleine avec `attn_output_gate`) : la construction de la couche
+    réussissait, la passe avant échouait plus loin (vue de forme incompatible
+    avec l'attention que cette passe suppose) — non rattrapé avant cette
+    correction, l'échec remontait jusqu'à cli.py et désactivait AWQ pour le
+    modèle entier pour UNE couche sur 64."""
+    from acvram.engine.model import DecoderLayer
+    from acvram.server.chat import load_tokenizer
+
+    original_forward = DecoderLayer.forward
+
+    def echoue_apres_les_hooks(self, *a, **kw):
+        sortie = original_forward(self, *a, **kw)
+        if self.index == 1:
+            raise RuntimeError("shape '[512, 24, 256]' is invalid for input of size 6291456")
+        return sortie
+
+    monkeypatch.setattr(DecoderLayer, "forward", echoue_apres_les_hooks)
+
+    spec = load_model_spec(tokenized_checkpoint, "tiny")
+    tok = load_tokenizer(tokenized_checkpoint)
+    calib = load_calib_ids(tok, None, 4, 64, spec.vocab_size)
+    stats = collect_activation_stats(tokenized_checkpoint, spec, calib,
+                                     device="cpu", dtype=torch.float32)
+
+    assert not any(name.startswith("model.layers.1.") for name in stats), \
+        "la couche en échec a laissé des statistiques partielles au lieu de les retirer"
+    for i in (0, 2, 3):
+        assert any(name.startswith(f"model.layers.{i}.") for name in stats), \
+            f"couche {i} : ses statistiques ont été perdues par l'échec d'une autre couche"
