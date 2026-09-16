@@ -109,3 +109,24 @@ def test_pile_tournee_egale_boucle(chemin, monkeypatch):
         y_bad = (bloc._forward_grouped_mma if chemin == "mma" else bloc._forward_prefill_grouped)(x, topw, topi)
         bloc._stacks_awq = sauve
         assert _ulp_max(y_bad, ref) > 4 * max(ecart, 1.0), "sans rotation de l'entrée la pile devrait diverger"
+
+
+@CUDA
+def test_fwht_activations_capturable_dans_un_graphe():
+    """poste2 (verdict-glm-hadamard-conversion) : sur le converti tourné, 0 godet
+    capturé — la normalisation créait un tenseur depuis l'hôte à chaque appel
+    (copie CPU→carte interdite en capture). fwht_activations doit se capturer
+    et rendre, au rejeu, exactement le résultat eager."""
+    from acvram.quant.calibrate import fwht_activations
+    dev = torch.device("cuda:0")
+    x = torch.randn(12, 2048, device=dev).to(torch.bfloat16)
+    attendu = fwht_activations(x, 512).clone()
+    s = torch.cuda.Stream(); s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        fwht_activations(x, 512)
+    torch.cuda.current_stream().wait_stream(s)
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        y = fwht_activations(x, 512)
+    y.zero_(); g.replay(); torch.cuda.synchronize()
+    assert torch.equal(y, attendu)
