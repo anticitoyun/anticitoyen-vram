@@ -496,10 +496,20 @@ class Engine:
         if os.environ.get("ACVRAM_GRAPHES_TABLE") == "0":
             chemin_moe += "+pile" if piles_ok else "+pile(désactivé)"
 
+        # `self.graphs` reste le MÊME OBJET après une capture ratée en cours
+        # de service (`GraphRunner._capture` bascule `enabled=False` mais ne
+        # se retire pas de `self.graphs`, graphs.py:431) : lire seulement
+        # « l'objet existe » disait `graphes=on` alors que le moteur avait
+        # déjà replié en eager — signalé par plusieurs verdicts (poste E, KV
+        # lm4) où `regime_ligne()` mentait sur le régime réellement mesuré.
+        graphes_vivants = self.graphs is not None and self.graphs.enabled
+        graphes_raison = self._graphes_raison
+        if self.graphs is not None and not self.graphs.enabled:
+            graphes_raison = self.graphs.raison or "raison non nommée"
         return {
-            "graphes": self.graphs is not None,
+            "graphes": graphes_vivants,
             "graphes_demandes": self._graphes_demandes,
-            "graphes_raison": self._graphes_raison,
+            "graphes_raison": graphes_raison,
             "couches_exilees": couches_exilees,
             "couches_total": len(plan.layers),
             "experts_exiles": experts_exiles,
