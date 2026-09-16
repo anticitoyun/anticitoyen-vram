@@ -783,7 +783,12 @@ def load_model(path: str, plan: Optional[Plan] = None,
         est_gdn = bool(spec.layer_types) and \
             spec.layer_types[i] == "linear_attention"
         if est_gdn:
-            from .gdn import GatedDeltaNet
+            from .gdn import GatedDeltaNet, gdn_available
+            if not gdn_available():
+                raise RuntimeError(
+                    f"la couche {i} est à récurrence linéaire (Gated DeltaNet) "
+                    f"mais `transformers` n'est pas installé avec le support "
+                    f"nécessaire : pip install -e '.[gdn]'")
             petit = lambda suffix: reader.get(p + suffix).to(torch.float32).to(d)
             gdn = GatedDeltaNet(
                 qkv=lin("linear_attn.qkv.weight", False),
