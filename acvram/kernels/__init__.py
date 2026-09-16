@@ -939,9 +939,13 @@ def int4_gemv_grouped(x: torch.Tensor, qw: torch.Tensor, scales: torch.Tensor,
                                  x.contiguous(), k, group_size)
 
 
-# Attention paginée du décodage : "cuda" (acvram_kernels.cu, défaut) | "triton"
-# (kernels/attn_paginee.py, poste E, une lecture de K/V par groupe GQA)
-_PAGED_ATTN = os.environ.get("ACVRAM_PAGED_ATTN", "cuda")
+# Attention paginée du décodage : "triton" (kernels/attn_paginee.py, poste E,
+# une lecture de K/V par groupe GQA, défaut depuis poste7-e-c-verdict-17-09 —
+# tenu sur Coder-30B (4 cellules) ET le témoin dense Qwen2.5-Coder-14B, PPL
+# décodage 8k ±0,002, pas de dérive au long contexte ctx 8k) | "cuda"
+# (acvram_kernels.cu, ancien défaut, gardé témoin) ; GLM (MLA) ne passe pas
+# par ce chemin
+_PAGED_ATTN = os.environ.get("ACVRAM_PAGED_ATTN", "triton")
 if _PAGED_ATTN not in ("cuda", "triton"):
     raise ValueError(f"ACVRAM_PAGED_ATTN={_PAGED_ATTN!r} : attendu cuda ou triton")
 

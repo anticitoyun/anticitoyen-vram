@@ -47,8 +47,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("DISABLE_CUDA_GRAPHS", "", None, "1"),
     Variable("DISABLE_FP4_GEMM", "", None, "1"),
     Variable("DISABLE_PAGED_ATTN", "", None, "1"),
-    Variable("PAGED_ATTN", "cuda", ("acvram.kernels", "_PAGED_ATTN"), None,
-             "attention paginée du décodage : cuda (défaut) | triton (poste E, K/V lus une fois par groupe GQA)"),
+    Variable("PAGED_ATTN", "triton", ("acvram.kernels", "_PAGED_ATTN"), "cuda",
+             "attention paginée du décodage : triton (poste E, K/V lus une fois par groupe GQA, défaut depuis poste7-e-c-verdict-17-09) | cuda (ancien défaut, témoin)"),
     # --- projections NVFP4 non groupées --------------------------------
     Variable("PREFILL", "bf16", None, "bf16", "bf16 | w4a16 (B1 Triton, NVFP4 dans la tuile) | w8a8 | w4a4 au-delà de NVFP4_GEMV_MAX lignes"),
     Variable("NVFP4_GEMV_MAX", "32", ("acvram.kernels", "_NVFP4_GEMV_MAX")),
