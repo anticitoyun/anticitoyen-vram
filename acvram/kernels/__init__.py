@@ -715,7 +715,13 @@ _INT8_GEMV_MAX = int(os.environ.get("ACVRAM_INT8_GEMV_MAX", "80"))
 #     triton 2,95  2,31  1,96  2,06  2,07
 # Triton gagne dès b = 2 (×2,2) et perd à b = 1 (×0,91) : la constante porte
 # sa mesure dans tests/test_gemm_etroit.py, sous graphes le lot est le godet.
-_NARROW_KERNEL = os.environ.get("ACVRAM_NARROW_KERNEL", "mixte")
+#
+# DÉFAUT REMIS À "cuda" (verdict-coder-ec-remesure-17-09, poste3 b34a1bb) :
+# "mixte" plante en service réel à b ≥ 2 sous capture de graphe (illegal
+# memory access, reproductible 3/3, avec ou sans E) — le banc à sec ne voit
+# que le lot exact, pas la réalité des tenseurs de capture (soupçon godet 16).
+# "mixte" reste opt-in jusqu'à correctif poste4.
+_NARROW_KERNEL = os.environ.get("ACVRAM_NARROW_KERNEL", "cuda")
 if _NARROW_KERNEL not in ("mixte", "cuda", "triton", "tete"):
     raise ValueError(f"ACVRAM_NARROW_KERNEL={_NARROW_KERNEL!r} : attendu mixte, cuda, triton ou tete")
 _NARROW_TRITON_MIN_B = int(os.environ.get("ACVRAM_NARROW_TRITON_MIN_B", "2"))
