@@ -8,6 +8,7 @@ et le contrôle instruct/abliterated vérifiables sans jamais charger un poids.
 import http.server
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -297,6 +298,54 @@ def test_lancer_serveur_timeout(tmp_path):
 
 def test_vram_pid_sans_exception():
     assert fiche_service.vram_pid(999999999) is None
+
+
+def test_descendants_traverse_un_vrai_arbre_de_processus():
+    """`shell=True` fait de `serveur.processus.pid` un `sh -c`, jamais le
+    binaire qui tient la VRAM — `_descendants` doit trouver son (petit-)
+    enfant réel, pas juste lui-même."""
+    proc = subprocess.Popen(
+        ["sh", "-c", f"{sys.executable} -c \"import time; time.sleep(5)\""])
+    try:
+        temps_limite = time.perf_counter() + 3
+        enfant = None
+        while time.perf_counter() < temps_limite and enfant is None:
+            arbre = fiche_service._descendants(proc.pid)
+            autres = arbre - {proc.pid}
+            if autres:
+                enfant = next(iter(autres))
+            else:
+                time.sleep(0.05)
+        assert enfant is not None, "le processus python enfant n'est jamais apparu"
+        assert proc.pid in fiche_service._descendants(proc.pid)
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+def test_vram_pid_somme_sur_les_descendants_pas_seulement_le_pid_donne(monkeypatch):
+    """Régression trouvée par poste3 en campagne (bloc 0, `vram_chargement_
+    octets` toujours None depuis le passage à `shell=True`) : nvidia-smi ne
+    voit que le PID du binaire réel (l'enfant), jamais celui du `sh -c`
+    qu'on lui passe — sommer sur les descendants doit récupérer ce chiffre."""
+    proc = subprocess.Popen(
+        ["sh", "-c", f"{sys.executable} -c \"import time; time.sleep(5)\""])
+    try:
+        temps_limite = time.perf_counter() + 3
+        arbre = {proc.pid}
+        while time.perf_counter() < temps_limite and arbre == {proc.pid}:
+            arbre = fiche_service._descendants(proc.pid)
+        enfant = next(iter(arbre - {proc.pid}))
+
+        def faux_run(*a, **kw):
+            class R:
+                stdout = f"{enfant}, 1234\n999999, 9999\n"
+            return R()
+        monkeypatch.setattr(fiche_service.subprocess, "run", faux_run)
+        assert fiche_service.vram_pid(proc.pid) == 1234 * 1024 * 1024
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
 
 
 # ---------------------------------------------------------------------------

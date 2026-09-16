@@ -226,11 +226,41 @@ def arreter_serveur(serveur: Serveur) -> None:
     _tuer_groupe(serveur.processus)
 
 
+def _descendants(pid: int) -> set[int]:
+    """`pid` et tous ses descendants, lu dans /proc (pas `ps`, pas un
+    sous-processus par niveau). Nécessaire depuis le passage à `shell=True` :
+    `serveur.processus.pid` est le `sh -c ...`, jamais le binaire qui tient
+    la VRAM (son enfant, voire son petit-enfant pour un `cd X && Y`)."""
+    tous = {pid}
+    frontiere = {pid}
+    while frontiere:
+        suivante = set()
+        for nom in os.listdir("/proc"):
+            if not nom.isdigit():
+                continue
+            p = int(nom)
+            if p in tous:
+                continue
+            try:
+                with open(f"/proc/{p}/stat") as fh:
+                    ppid = int(fh.read().split(")")[-1].split()[1])
+            except (OSError, IndexError, ValueError):
+                continue
+            if ppid in frontiere:
+                suivante.add(p)
+        tous |= suivante
+        frontiere = suivante
+    return tous
+
+
 def vram_pid(pid: int) -> Optional[int]:
-    """Octets VRAM du processus `pid`, via `nvidia-smi --query-compute-apps`
-    (jamais `torch.cuda.memory_allocated` : le processus mesuré n'est pas le
-    nôtre, et ce compteur ignore de toute façon la réserve de l'allocateur —
-    `outils/gpu/mesure/verifier-budget-vram.py`)."""
+    """Octets VRAM tenus par `pid` OU UN DE SES DESCENDANTS, via
+    `nvidia-smi --query-compute-apps` (jamais `torch.cuda.memory_allocated` :
+    le processus mesuré n'est pas le nôtre, et ce compteur ignore de toute
+    façon la réserve de l'allocateur — `outils/gpu/mesure/
+    verifier-budget-vram.py`). Sommé sur tous les descendants trouvés dans
+    la liste : un `cd X && Y` peut avoir plusieurs enfants intermédiaires
+    avant le binaire qui alloue réellement."""
     try:
         sortie = subprocess.run(
             ["nvidia-smi", "-i", "0", "--query-compute-apps=pid,used_memory",
@@ -238,13 +268,16 @@ def vram_pid(pid: int) -> Optional[int]:
             capture_output=True, text=True, timeout=20).stdout
     except Exception:                                       # noqa: BLE001
         return None
+    descendants = _descendants(pid)
+    total, trouve = 0, False
     for ligne in sortie.splitlines():
         if not ligne.strip():
             continue
         p, mo = (x.strip() for x in ligne.split(","))
-        if p == str(pid):
-            return int(mo) * 1024 * 1024
-    return None
+        if p.isdigit() and int(p) in descendants:
+            total += int(mo) * 1024 * 1024
+            trouve = True
+    return total if trouve else None
 
 
 # ---------------------------------------------------------------------------
