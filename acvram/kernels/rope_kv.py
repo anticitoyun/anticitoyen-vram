@@ -43,7 +43,8 @@ if triton is not None:
                         wq_ptr, wk_ptr, kc_ptr, ks_ptr, vc_ptr, vs_ptr,
                         HQ, HKV, eps,
                         stride_qt, stride_qh, stride_kt, stride_kh, stride_vt, stride_vh,
-                        D: tl.constexpr, DR: tl.constexpr, NORME_Q: tl.constexpr, NORME_K: tl.constexpr):
+                        D: tl.constexpr, DR: tl.constexpr, NORME_Q: tl.constexpr, NORME_K: tl.constexpr,
+                        INTERPRETE: tl.constexpr):
         t = tl.program_id(0)
         h = tl.program_id(1)
         est_q = h < HQ
@@ -113,7 +114,7 @@ if triton is not None:
         # outils/sonde-rint-17-09.py, r = 0,49999818) — la conversion coupe
         # la contraction et rend le fp32 correctement arrondi.
         kp = (kf.to(tl.float64) * kinv.to(tl.float64)).to(tl.float32)
-        kcode = tl.minimum(tl.maximum(_rint(kp), -127.0), 127.0)
+        kcode = tl.minimum(tl.maximum(_arrondi(kp, INTERPRETE), -127.0), 127.0)
         cell = tl.maximum(slot, 0) * HKV + hk
         tl.store(kc_ptr + cell * D + i, kcode.to(tl.int8), mask=tous & ecrit)
         tl.store(ks_ptr + cell + i * 0, kmax.to(tl.float16), mask=(i == 0) & ecrit)
@@ -121,9 +122,19 @@ if triton is not None:
         vmax = tl.maximum((tl.max(tl.abs(vv), 0).to(tl.float64) / 127.0).to(tl.float32), 1e-8)
         vinv = (1.0 / vmax.to(tl.float64)).to(tl.float32)
         vp = (vv.to(tl.float64) * vinv.to(tl.float64)).to(tl.float32)
-        vcode = tl.minimum(tl.maximum(_rint(vp), -127.0), 127.0)
+        vcode = tl.minimum(tl.maximum(_arrondi(vp, INTERPRETE), -127.0), 127.0)
         tl.store(vc_ptr + cell * D + i, vcode.to(tl.int8), mask=tous & ecrit)
         tl.store(vs_ptr + cell + i * 0, vmax.to(tl.float16), mask=(i == 0) & ecrit)
+
+    @triton.jit
+    def _arrondi(x, INTERPRETE: tl.constexpr):
+        """Sur carte : `libdevice.rint` (l'arrondi de __float2int_rn, vérifié
+        exact par la sonde) ; sous l'interpréteur numpy, qui n'a pas libdevice,
+        la version maison — égale à rint sur tous les demi-entiers (test)."""
+        if INTERPRETE:
+            return _rint(x)
+        else:
+            return tl.extra.cuda.libdevice.rint(x)
 
     @triton.jit
     def _rint(x):
@@ -162,4 +173,5 @@ def rope_kv(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, cos32: torch.Tens
         cache.k, cache.k_scale, cache.v, cache.v_scale,
         HQ, HKV, float(eps),
         q.stride(0), q.stride(1), k.stride(0), k.stride(1), v.stride(0), v.stride(1),
-        D=D, DR=DR, NORME_Q=1 if wq is not None else 0, NORME_K=1 if wk is not None else 0)
+        D=D, DR=DR, NORME_Q=1 if wq is not None else 0, NORME_K=1 if wk is not None else 0,
+        INTERPRETE=1 if os.environ.get("TRITON_INTERPRET") == "1" else 0)
