@@ -1689,7 +1689,9 @@ def _qa_imprime():
 # la GEMM sort du plafond 400 W (SM 2 937 MHz au lieu de 2 727) → 5.
 _MOE_DECODE_MMA_MIN_T = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_MIN_T", "5"))
 # Poste F, fusion (1) : préparation du routage en un lancement (kernels/route_prep)
-_ROUTE_PREP = os.environ.get("ACVRAM_ROUTE_PREP", "0") == "1"
+# — défaut depuis verdict-f1-route-prep-17-09 (tenu : bit-à-bit b=1/b=12,
+# 1275→795 lancements, b=1 313,4 t/s pur)
+_ROUTE_PREP = os.environ.get("ACVRAM_ROUTE_PREP", "1") == "1"
 # MoE fusionné au décodage (port b12x, 15/09) : coupé tant que les seuils de
 # poste7 ne sont pas tenus (≤ 75 µs/couche, pas b=12 ≤ 11,3 ms, J ≤ 0,38).
 _MOE_DECODE_FUSED = os.environ.get("ACVRAM_MOE_DECODE_FUSED", "0") == "1"
