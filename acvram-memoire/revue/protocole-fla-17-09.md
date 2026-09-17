@@ -1,0 +1,5 @@
+# Protocole — fenêtre FLA (poste4 0039946 GDN + e28b7b1 KDA/Mamba2 ; poste7 priorité 1) : Qwen3.8-27B calibA sous `ACVRAM_GDN=fla` (défaut) contre `torch` (témoin)
+
+étapes : (1) `pytest tests/test_gdn_fla.py` sur carte (JIT sm_120, préfill par blocs jugé là) ; (2) `certifie-b12` b=12 ×1, `prefill-glm-acvram-15-09.py w4a16 2048` (`PREFILL_PILES_INCONNUES=1`), `certifie-b12` b=1 ×1 — fla puis torch, `ACVRAM_GDN=` dans `engine_regime` de chaque JSON ; (3) `ppl-decode-kv-17-09.py` 256+1024 sur calibA fla et torch, et PPL 3 tranches (`ppl-acvram-17-09.py`, tranches-glm × bf16 6,5344) fla ; chaîne `scratchpad/fla-17-09/chaine.sh` ; régime classé.
+scellé (poste7) : b=12 ≥ 400 t/s (97 avant ; faux < 250) ; prefill ≥ 5 × (2 446 → ≥ 12 230 j/s) ; PPL fla = torch ± 0,002 (3 tranches, et ppl-decode-kv à ± 0,02) ; b=1 : dénominateur calibA 63,8 t/s, juge double t/s ≥ 85 ET J/jeton ≤ 0,75 × 6,25 = 4,69.
+falsification : test rouge ou JIT échoué = arrêt, sortie brute à poste4 ; PPL hors ± 0,002 = la voie fla n'est pas équivalente, vitesses non publiées comme défaut.
