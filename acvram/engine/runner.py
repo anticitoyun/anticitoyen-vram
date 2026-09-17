@@ -463,6 +463,7 @@ class Engine:
         """
         from .. import kernels
         from ..regime import regime_noyaux
+        from .gdn import gdn_regime as _gdn_regime
         from .model import MoEBlock
 
         plan = self.loaded.plan
@@ -528,6 +529,7 @@ class Engine:
             "prefill": kernels.prefill_regime(),
             # linéaires INT8 du décodage : triton≥b|cuda (poste C, bascule mesurée)
             "dense": kernels.narrow_regime(),
+            "gdn": _gdn_regime(),
             "noyaux": regime_noyaux()["hors_defaut"],
         }
 
@@ -553,6 +555,7 @@ class Engine:
                f"experts_exilés={r['experts_exiles']}/{r['experts_total']} "
                f"{piles_txt} cartes={r['cartes']} "
                f"chemin_moe={r['chemin_moe']} prefill={r['prefill']} dense={r['dense']} "
+               f"ACVRAM_GDN={r['gdn']} "
                + (f"noyaux={r['noyaux']} " if r["noyaux"] else "")
                + f"kv_budget={self.allocator.num_blocks * BLOCK_SIZE}/{kv_seqs} "
                + f"cache_prefixe={self.stats.hit_rate:.3f} "
