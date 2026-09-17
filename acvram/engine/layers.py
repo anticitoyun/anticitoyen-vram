@@ -367,7 +367,17 @@ class ExpertPool:
 
     def copier(self, plat: torch.Tensor, decoupe: dict) -> int:
         jeu = self._jeu(plat, decoupe)
+        # Premier emplacement LIBRE à partir du tour de rôle — pas le tour de
+        # rôle seul : en exil total (36/36, poste3 02b316d), la couche 0 se
+        # copie à la demande APRÈS que la couche 1 a été préchargée, l'ordre
+        # des rendus n'est plus celui des prises, et le tour de rôle tombait
+        # sur un emplacement en vol alors que deux étaient rendus.
         i = jeu["prochain"]
+        for k in range(self.n_slots):
+            j = (i + k) % self.n_slots
+            if not jeu["distribue"][j]:
+                i = j
+                break
         if jeu["distribue"][i]:
             # Tous les emplacements de cette disposition sont en vol. Continuer
             # ecraserait les octets d'un expert qu'un calcul n'a pas encore lu,

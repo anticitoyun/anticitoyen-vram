@@ -85,3 +85,28 @@ def test_sur_carte_n_poids_partagent_les_tampons_du_pool():
     prive = L.StreamedWeight({"w": torch.randn(1024, 1024, dtype=torch.bfloat16)}, dev)
     prive.prefetch(); torch.cuda.synchronize(dev)
     assert torch.cuda.memory_allocated(dev) - avant >= 2 * 1024 * 1024 * 2, "sans pool : deux copies privées (le bras qui doit différer)"
+
+
+class _EvenementFactice:
+    def record(self, *a): pass
+    def wait(self, *a): pass
+
+
+def test_le_pool_prend_un_emplacement_libre_pas_le_tour_de_role(monkeypatch):
+    """Exil total (36/36, poste3 02b316d) : « ExpertPool saturé : 4 emplacements »
+    alors que deux étaient rendus. Séquence réelle du forward (model.py :
+    précharge i+1 puis exécute i) quand la couche 0 est elle-même en flux :
+    précharge(1) prend s0,s1 ; la couche 0 copie à la demande s2 et s3 et les
+    rend ; précharge(2) tombait sur s0 (tour de rôle), en vol."""
+    monkeypatch.setattr(torch.cuda, "Event", _EvenementFactice)
+    monkeypatch.setattr(L.ExpertPool, "SYNC", True)
+    pool = L.ExpertPool(torch.device("cpu"), 4, dense=True)
+    plat = torch.zeros(64, dtype=torch.uint8)
+    dec = {"w": (0, (64,), torch.uint8, 64)}
+    s0, s1 = pool.copier(plat, dec), pool.copier(plat, dec)        # précharge(1)
+    s2 = pool.copier(plat, dec); pool.liberer(s2)                   # couche 0, q à la demande
+    s3 = pool.copier(plat, dec); pool.liberer(s3)                   # couche 0, o à la demande
+    a, b = pool.copier(plat, dec), pool.copier(plat, dec)           # précharge(2) : ne doit pas saturer
+    assert {a, b} == {s2, s3} and len({s0, s1, a, b}) == 4
+    with pytest.raises(RuntimeError, match="ExpertPool sature"):    # tout en vol : le refus reste
+        pool.copier(plat, dec)

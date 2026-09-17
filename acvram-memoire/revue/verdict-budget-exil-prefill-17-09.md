@@ -135,3 +135,17 @@ Test ajouté : cible 100 Mio sous le plancher → relevée puis bornée au
 plancher. Suite 777 passed. Même scellé que ci-dessus pour l'essai suivant,
 plus : le journal doit montrer un seul tour d'exil supplémentaire (le
 premier suffit : 0,32 Gio revenaient dès le tour 1 chez poste3).
+
+### Exil total 36/36 : « ExpertPool saturé : 4 emplacements » (poste3 02b316d) — corrigé
+
+`ExpertPool.copier` prenait l'emplacement du TOUR DE RÔLE et refusait s'il
+était en vol, sans regarder les autres. Séquence du forward (`model.py`,
+précharge i+1 puis exécute i) quand la couche 0 est elle-même en flux :
+précharge(1) prend s0,s1 ; la couche 0, jamais préchargée, copie à la
+demande s2 puis s3 et les rend ; précharge(2) tombe sur s0, en vol, alors
+que s2 et s3 sont libres. En exil partiel, la première couche en flux est
+préchargée par sa voisine résidente et l'ordre des rendus reste celui des
+prises. Correctif : premier emplacement LIBRE à partir du tour de rôle ; le
+refus reste quand tout est en vol. Juge : `test_pool_dense_exil.py::
+test_le_pool_prend_un_emplacement_libre_pas_le_tour_de_role` (la séquence
+ci-dessus, puis saturation réelle → RuntimeError). Suite 778 passed.
