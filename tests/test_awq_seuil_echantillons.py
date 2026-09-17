@@ -157,13 +157,16 @@ def test_expert_a_statistique_suffisante_et_variee_recoit_awq(tmp_path):
     assert not torch.allclose(scale, torch.ones_like(scale))
 
 
-def test_garde_ratio_norme_refuse_meme_avec_beaucoup_dechantillons(tmp_path):
-    """poste7-awq-experts-peu-routes-portee-17-09 §2 : le seuil d'échantillons
+def test_garde_ratio_norme_replie_meme_avec_beaucoup_dechantillons(tmp_path):
+    """poste7-awq-experts-peu-routes-portee-17-09 §2, mise à jour par
+    poste7-awq-relu2-garde-repli-17-09 (geste b) : le seuil d'échantillons
     protège la CAUSE la plus fréquente (statistique bruitée par manque de
     jetons), pas toute source d'échelle instable -- le même motif dégénéré
     (un canal extrême, les autres au plancher) mais avec BEAUCOUP
     d'échantillons (n_samples=100, au-dessus du seuil de 8) doit aussi être
-    refusé, par la garde de norme, pas par le seuil."""
+    rattrapé par la garde de norme, pas par le seuil. Depuis le geste (b),
+    un seul tenseur fautif (bien sous le plafond de 50 %) est REPLIÉ à
+    l'identité, pas refusé -- ce test attrapait le refus d'AVANT le repli."""
     ckpt = _tiny_moe(tmp_path / "hf")
     spec = load_model_spec(ckpt, "tiny-moe")
     plan, _ = auto_plan(spec, load_profile("rig-14900k-5090-3080ti"),
@@ -174,7 +177,6 @@ def test_garde_ratio_norme_refuse_meme_avec_beaucoup_dechantillons(tmp_path):
     stats["model.layers.0.mlp.experts.1.down_proj.weight"] = ActStats(
         magnitudes, magnitudes, 100)     # meme motif degenere, n_samples eleve
     out = tmp_path / "out_extreme"
-    import pytest
-    with pytest.raises(ValueError, match="ratio de norme"):
-        convert_checkpoint(ckpt, plan, ConversionOptions(out_dir=str(out)),
-                           spec=spec, stats=stats)
+    report = convert_checkpoint(ckpt, plan, ConversionOptions(out_dir=str(out)),
+                                spec=spec, stats=stats)
+    assert report.tenseurs_replies == ["model.layers.0.mlp.experts.1.down_proj.weight"]

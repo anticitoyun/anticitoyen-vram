@@ -185,6 +185,11 @@ class ConversionReport:
     # pile-15-09.md (poste7 a6a7436 : echelle AWQ par expert gardee dans la
     # pile, portee cote loader par poste4).
     experts_sans_stats: int = 0
+    # poste7-awq-relu2-garde-repli-17-09 : tenseurs dont l'AWQ a ete rejete
+    # (ratio de norme hors bornes) et repliés à l'identité — vide si
+    # aucun. `cmd_convert` (cli.py) lit ce champ pour ajouter `-repliN` au
+    # nom du dossier de sortie (REGLES §4 : le régime dans le nom).
+    tenseurs_replies: list[str] = field(default_factory=list)
 
     @property
     def ratio(self) -> float:
@@ -1255,6 +1260,12 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     # 0,29-0,69.
     RATIO_NORME_BAS, RATIO_NORME_HAUT = 0.80, 1.25
     ratios_hors_bornes: list[tuple[str, float]] = []
+    # poste7-awq-relu2-garde-repli-17-09, geste (b) : repli identite PAR
+    # TENSEUR plutot que refus de toute la conversion, sous un plafond --
+    # au-dela de la moitie des tenseurs repliee, ce n'est plus une
+    # reparation ciblee mais une calibration cassee dans son ensemble.
+    tenseurs_replies: list[tuple[str, float]] = []
+    PLAFOND_REPLI = 0.50
     budget_candidats: list[dict] = []
 
     alpha_commun: dict[str, torch.Tensor] = {}
@@ -1397,6 +1408,32 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 torch.ones(tensor.shape[1], dtype=torch.float32),
                 scaler.hadamard_block,
             )
+        # poste7-awq-relu2-garde-repli-17-09 : geste (b), repli PAR TENSEUR au
+        # lieu du refus global. Cause identifiee (pas "peu route" comme
+        # d'abord suppose) : l'entree de `down_proj` chez nemotron_h est
+        # ReLU²(up(x)) -- creuse par construction, les canaux jamais actives
+        # sur le corpus s'ecrasent au plancher `clamp(min=1e-6)`
+        # (`calibrate.py:302`) contre ~1 ailleurs, etendue 1,7e6x independante
+        # du nombre d'echantillons. Coder/GLM (SiLU a porte) n'ont pas ce
+        # motif -- 0 malade chez eux n'etait pas un hasard de corpus.
+        if "ratio_norme" in metrics and st is not None:
+            r = metrics["ratio_norme"]
+            if not (RATIO_NORME_BAS <= r <= RATIO_NORME_HAUT):
+                tenseurs_replies.append((name, r))
+                qt, scaler, metrics = _quantize_on(
+                    qdev, tensor, fmt, None,
+                    group_size=opts.group_size,
+                    use_hadamard=router.wants_hadamard(name, fmt) or experts_hadamard,
+                    use_awq=False,
+                    n_grid=opts.n_grid, garder_grille=opts.garder_grille,
+                    table=opts.q3n_table if fmt == "q3n" else None,
+                    mesurer_kld=opts.mesurer_kld,
+                    hadamard_block=512 if experts_hadamard else None,
+                )
+                if est_expert and scaler.scale is None:
+                    scaler = ChannelScaler(
+                        torch.ones(tensor.shape[1], dtype=torch.float32),
+                        scaler.hadamard_block)
         if fmt == "q3n":
             entry["block"] = qt.block
             entry["table"] = list(qt.table)
@@ -2069,6 +2106,33 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     if ratios_tous:
         manifest["ratio_norme_min"] = round(min(ratios_tous), 4)
         manifest["ratio_norme_max"] = round(max(ratios_tous), 4)
+    if tenseurs_replies:
+        # Plafond AVANT le repli, sur le total de tenseurs qui ont eu une
+        # recherche AWQ (denominateur `ratios_tous`, pas seulement les
+        # experts) : au-dela de la moitie, ce n'est plus une reparation
+        # ciblee, la calibration entiere est a refaire.
+        part = len(tenseurs_replies) / max(1, len(ratios_tous))
+        if part > PLAFOND_REPLI:
+            pires = sorted(tenseurs_replies, key=lambda x: abs(x[1] - 1.0), reverse=True)
+            detail = "; ".join(f"{n} : {r:.3f}" for n, r in pires[:10])
+            raise ValueError(
+                f"conversion refusée : {len(tenseurs_replies)}/{len(ratios_tous)} "
+                f"tenseurs ({part:.0%}) hors des bornes de ratio de norme "
+                f"[{RATIO_NORME_BAS},{RATIO_NORME_HAUT}] même après repli à "
+                f"l'identité — au-delà de {PLAFOND_REPLI:.0%}, ce n'est plus "
+                f"une réparation ciblée, la calibration est à refaire "
+                f"entièrement. Pires : {detail}. "
+                f"poste7-awq-relu2-garde-repli-17-09.")
+        report.tenseurs_replies = [n for n, _ in tenseurs_replies]
+        manifest["tenseurs_replies_identite"] = {
+            "nombre": len(tenseurs_replies),
+            "part": round(part, 4),
+            "noms": report.tenseurs_replies,
+        }
+        print(f"[acvram] {len(tenseurs_replies)}/{len(ratios_tous)} tenseur(s) "
+             f"repliés à l'identité (ratio de norme hors [{RATIO_NORME_BAS},"
+             f"{RATIO_NORME_HAUT}] avec AWQ, cause : entrée creuse ReLU² sur "
+             f"nemotron_h — poste7-awq-relu2-garde-repli-17-09).", flush=True)
     if ratios_hors_bornes:
         pires = sorted(ratios_hors_bornes, key=lambda x: abs(x[1] - 1.0), reverse=True)
         detail = "; ".join(f"{n} : {r:.3f}" for n, r in pires[:10])

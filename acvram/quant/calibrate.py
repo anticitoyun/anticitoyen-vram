@@ -264,6 +264,25 @@ def _quant_dequant(w: torch.Tensor, fmt: str, group_size: Optional[int]) -> torc
     return formats.dequantize(t, torch.float32)
 
 
+def _magnitude_avec_plancher_relatif(mean_abs: torch.Tensor) -> torch.Tensor:
+    """`mean_abs`, plancher a 1 % de sa PROPRE mediane -- pas une constante
+    absolue (poste7-awq-relu2-garde-repli-17-09, geste (d)).
+
+    Un plancher absolu (`1e-6`) laisse l'etendue salience/plancher grandir
+    avec l'echelle du tenseur lui-meme : sur l'entree ReLU²(up(x)) de
+    `down_proj` (nemotron_h, `config.py:563`/`model.py:622`), les canaux
+    jamais actives sur le corpus retombent a ~1e-6 alors que les actifs
+    valent ~1 -- etendue 1,7e6× mesuree, independante du nombre
+    d'echantillons (le motif existe des qu'un canal n'a jamais tire un
+    ReLU positif). Un plancher a 1 % de la mediane borne cette etendue a
+    ~100× quelle que soit l'echelle absolue du tenseur. Sur une activation
+    SANS ce motif (Coder/GLM, SiLU a porte, mediane deja proche des
+    canaux bas), le plancher relatif reste sous l'ancien plancher absolu
+    et ne change rien."""
+    plancher = 1e-2 * mean_abs.median().clamp(min=1e-12)
+    return mean_abs.clamp(min=plancher)
+
+
 def search_channel_scales(
     weight: torch.Tensor,
     stats: Optional[ActStats],
@@ -299,7 +318,7 @@ def search_channel_scales(
     if stats is None:
         act = torch.ones(k, device=device)
     else:
-        act = stats.mean_abs.to(device).to(torch.float32).clamp(min=1e-6)
+        act = _magnitude_avec_plancher_relatif(stats.mean_abs.to(device).to(torch.float32))
 
     if calib_x is not None:
         x = calib_x.reshape(-1, k).to(torch.float32).to(device)
@@ -404,7 +423,7 @@ def search_channel_scales_commun(
     if stats is None:
         act = torch.ones(k, device=device)
     else:
-        act = stats.mean_abs.to(device).to(torch.float32).clamp(min=1e-6)
+        act = _magnitude_avec_plancher_relatif(stats.mean_abs.to(device).to(torch.float32))
 
     if calib_x is not None:
         x = calib_x.reshape(-1, k).to(torch.float32).to(device)

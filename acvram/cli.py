@@ -607,9 +607,21 @@ def cmd_convert(args: argparse.Namespace) -> int:
                                 progress=progress)
     _progress_done()
     print(report.render())
+    sortie = args.out
+    if report.tenseurs_replies and not args.dry_run:
+        # poste7-awq-relu2-garde-repli-17-09, REGLES §4 : le regime (combien
+        # de tenseurs sont repartis a l'identite plutot qu'AWQ) dans le NOM,
+        # pas seulement dans le manifeste -- un dossier au meme nom que le
+        # converti "propre" laisserait croire aux deux regimes interchangeables.
+        renomme = f"{args.out.rstrip('/')}-repli{len(report.tenseurs_replies)}"
+        if not os.path.exists(renomme):
+            os.rename(args.out, renomme)
+            sortie = renomme
+            print(f"  renomme : {bold(renomme)} "
+                 f"({len(report.tenseurs_replies)} tenseur(s) replies)")
     if not args.dry_run:
         print()
-        print(f"  servez-le avec : {bold(f'acvram serve {args.out}')}")
+        print(f"  servez-le avec : {bold(f'acvram serve {sortie}')}")
     return 0
 
 
