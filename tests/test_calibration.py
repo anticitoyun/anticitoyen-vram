@@ -1,5 +1,6 @@
 """Calibration AWQ : elle doit relever de vraies statistiques et aider réellement."""
 
+import hashlib
 import json
 import os
 
@@ -8,7 +9,22 @@ import torch
 
 from acvram.engine.config import load_model_spec
 from acvram.quant.calibrate import ActStats
-from acvram.quant.collect import collect_activation_stats, load_calib_ids
+from acvram.quant.collect import DEFAULT_CALIB_FILE, collect_activation_stats, load_calib_ids
+
+
+def test_le_corpus_de_calibration_integre_est_bien_bras_a():
+    """poste7-priorite-apres-campagne-17-09 SS4, poste7-calibration-verdict-17-09 :
+    le corpus par défaut doit être le bras A (prose anglaise ordinaire,
+    Gutenberg #1342) -- pas les six phrases mêlées (prose+code+SQL+français)
+    qui favorisaient wikitext et inversaient le classement privé/public.
+    Épingle le sha256, pas seulement le chemin : `test_calib_source_
+    manifeste.py` vérifie déjà que le manifeste NOMME `DEFAULT_CALIB_FILE`,
+    pas que son CONTENU est le bon -- un remplacement silencieux du fichier
+    passerait ce test-là sans être vu."""
+    sha = hashlib.sha256(open(DEFAULT_CALIB_FILE, "rb").read()).hexdigest()
+    assert sha == "cb7c0d9af2041d31e655fafe79becb0877c3fc775690c7a558eb8707035e5138", (
+        f"DEFAULT_CALIB_FILE ({DEFAULT_CALIB_FILE}) n'est plus le bras A "
+        f"(sha256 {sha}) -- corpus de calibration intégré change en silence")
 
 
 @pytest.fixture(scope="module")
