@@ -14,3 +14,11 @@ Ce qui reste en NVFP4 chez nous après le correctif : les experts MoE (le régim
 Contrôle de vitesse dans la même fenêtre (obligatoire, le FP8 double les octets de 23 × 2 projections) : **b=12 689,8 → 600-680 t/s, b=1 269,7 → 240-265** ; faux si b=12 < 550 : la voie FP8 est lente (déquant à la volée ?) et non seulement plus lourde — poste à nommer avant de livrer. Issue qui me gênerait : classée à ≤ 1,020 **et** b=12 < 550 — un converti classé qu'on ne peut pas mettre en défaut.
 
 Instrument : le même que `verdict-nemotron-srcbf16-17-09` (3 tranches, bf16 géo 13,416 déjà mesuré : pas à refaire), sha256 du converti et liste des tenseurs hors NVFP4 dans le verdict.
+
+## Mesuré (poste3 bc48d96) et suite — 17/09 soir
+
+PPL géo **1,0304** (1,0327 / 1,0430 / 1,0155 ; srcbf16 1,0632) : bande 1,020-1,035 → **exclusions partielles, calibration bras A selon le protocole**. Ma prédiction 1,010-1,022 est réfutée de 0,008 (carnet). Vitesses : b=1 **209,0** (prédit 240-265 : réfuté, −22 %), b=12 **798,9** (prédit 600-680 : réfuté vers le haut, +16 %) — cause lue par poste3 : les 46 projections FP8 passent par un GEMM qui lit les poids une fois par pas (b=12 favorisé) contre une GEMV NVFP4 O(b) (b=1 pénalisé par les octets doublés) : le même poste que le GEMM dense Qwen3.8, vu de l'autre bout. Le −22 % à b=1 est le prix de la précision officielle en octets, pas un défaut.
+
+**Confirmé : calibration bras A sur le converti précision officielle** (poste2 à sec ~1 h, sha256 corpus + converti ; poste3 20 min, mêmes 3 tranches). Prédiction déjà écrite, précisée sans bande orpheline : **1,015-1,025** ; ≤ 1,020 → classée ; 1,020-1,025 → non classée, chantier qualité Nemotron **fermé** (« non classé 1,02x, précision officielle + calibA », ligne des menus) ; > 1,025 → fermé aussi, et la calibration n'était pas le levier. Contrôle secondaire, scellé : la tranche 2 (1,0430) est à +0,010 des deux autres — si la calibration ne la bouge pas (reste ≥ 1,035 quand les tranches 1 et 3 baissent), le résidu n'est pas dans les experts mais dans un mécanisme dépendant du texte (état Mamba2 long, routage) : à nommer, pas à recalibrer.
+
+Bonus attendu sans mesure dédiée : la GEMM Triton dense M ≥ 4 (palier 1, défaut) couvre aussi les projections NVFP4 restantes de Nemotron à b=12 — à lire dans le prochain JSON b=12, pas de fenêtre pour ça.
