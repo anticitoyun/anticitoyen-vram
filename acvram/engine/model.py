@@ -1910,8 +1910,17 @@ def _multi_projection(lins):
         return None
 
 
+# Palier 2 (multi-projection q/k/v, qkv/gate/α/β) : TÉMOIN NOMMÉ, jamais
+# défaut — 0,88 To/s pondéré au banc, qkv_multi 0,52 pas mieux que kv seule
+# 0,47 avec N triplé : le mécanisme « sous-occupation » est réfuté, cause
+# inconnue (poste7-gemm-dense-palier2-non-ouvert-17-09 § 1). Réouverture par
+# un micro-banc qui EXPLIQUE le 0,52. ACVRAM_MULTI_PROJ=1 pour le rejouer.
+_MULTI_PROJ = os.environ.get("ACVRAM_MULTI_PROJ", "0") == "1"
+
+
 def _multi_utilisable(mp, x: torch.Tensor, t: int) -> bool:
-    return (mp is not None and kernels._DENSE_NVFP4 == "triton" and 2 <= t <= 32
+    return (mp is not None and _MULTI_PROJ and kernels._DENSE_NVFP4 == "triton"
+            and kernels._DENSE_NVFP4_MIN_M <= t <= 32
             and (x.dtype == torch.bfloat16 and x.is_cuda
                  or x.dtype == torch.float16 and os.environ.get("TRITON_INTERPRET") == "1"))
 
@@ -2526,6 +2535,22 @@ class ACVRamModel(nn.Module):
                 and x.shape[0] <= kernels._INT8_GEMV_MAX
                 and os.environ.get("ACVRAM_TETE_FP32_ENTREE") != "1"):
             return kernels.int8_matmul(x.to(target), w, sortie_fp32=True)
+        # Tête NVFP4 à b ≥ DENSE_NVFP4_MIN_M (poste7-gemm-dense-palier2-non-
+        # ouvert-17-09 § 2) : la même GEMM dense étroite que les projections
+        # (poids lus une fois par pas), logits accumulés en fp32 ; la GEMV fp32
+        # relisait 0,6 Go par séquence — 18 % du pas Qwen3.8 b=12 (poste3 0690bd4).
+        if (x.dtype == torch.bfloat16 and getattr(w, "format", "") == "nvfp4"
+                and head_dev is not None and head_dev.is_cuda
+                and getattr(lin, "streamed", None) is None and getattr(lin, "bias", None) is None
+                and kernels._DENSE_NVFP4 == "triton" and kernels._DENSE_NVFP4_MIN_M <= x.shape[0] <= 32
+                and os.environ.get("ACVRAM_TETE_FP32_ENTREE") != "1"):
+            from ..kernels import gemm_dense_etroit as _gde
+            if _gde.disponible():
+                xt = x.to(target)
+                sc = getattr(lin, "scaler", None)
+                if sc is not None and not sc.is_identity:
+                    xt = sc.apply(xt)
+                return _gde.gemm_dense_etroit(xt, w, sortie_fp32=True)[:, : w.shape[0]]
         return self.lm_head(x.to(target, dtype=torch.float32))
 
     def _logits_finaux(self, logits: torch.Tensor) -> torch.Tensor:

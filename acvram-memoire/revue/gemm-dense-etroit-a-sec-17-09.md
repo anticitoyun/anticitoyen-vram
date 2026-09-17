@@ -95,3 +95,24 @@ tranches), gate_up 0,95-1,05, down 1,05-1,15 ; **pondéré 0,95-1,05**. Faux
 si < 0,85 : alors la sous-occupation n'est pas la seule cause (latence du
 décodage par table dans la boucle K) et c'est le noyau CUDA (§ 4 de poste7).
 En situ ensuite (poste3) : pas GEMM ≈ 16-19 ms ⇒ 500-600 t/s.
+
+## Défaut, tête et témoin (troisième commit) — poste7-gemm-dense-palier2-non-ouvert-17-09
+
+- **Défaut `ACVRAM_DENSE_NVFP4=triton`, bascule `ACVRAM_DENSE_NVFP4_MIN_M=4`**
+  (poste3 0690bd4 : b=12 128 → 349 t/s, J/j ÷ 2,7, b=1 et ppl-decode-kv
+  inchangés ; à M = 2 la GEMV gagne au banc, 1,50 contre 1,12 To/s).
+- **Tête NVFP4 couverte** (`model.py _tete`) : x bf16, M ≥ 4, sans biais ni
+  flux → `gemm_dense_etroit(…, sortie_fp32=True)` (scaler appliqué avant
+  s'il y en a un) ; les logits sont accumulés en fp32 depuis des produits
+  bf16 × bf16 exacts — la GEMV fp32 relisait 0,6 Go par séquence (18 % du
+  pas). Témoin : `ACVRAM_TETE_FP32_ENTREE=1` ou `DENSE_NVFP4=gemv`.
+  Test : logits fp32 contre x fp32 @ déquant fp32 (le chemin GEMV) — 2⁻⁷ ×
+  borne, écart max 10⁻⁵ relatif ET même argmax sur chaque ligne.
+- **Palier 2 = témoin nommé** : `ACVRAM_MULTI_PROJ=1` (défaut 0) pour la
+  multi-projection ; jamais empruntée par défaut (0,88 pondéré, qkv_multi
+  0,52 ≈ kv seule 0,47 : la sous-occupation n'explique pas, cause inconnue).
+- Scellé de poste7 pour la tête (poste3, après Nemotron) : b=12 349 → ≥ 400
+  t/s (faux < 380 : relire le profil), ppl-decode-kv ± 0,0005, b=1 ± 3 %.
+  Ma prédiction : 5,6 ms de tête à 0,23 To/s → ~1,2 ms à 1,1 To/s
+  (N = 248 320 : grille large, le régime « down » 1,09) ⇒ pas 34,4 → ~30 ms,
+  **≈ 400 t/s** — juste au scellé ; faux si < 380.

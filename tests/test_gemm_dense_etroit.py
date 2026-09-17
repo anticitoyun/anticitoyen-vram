@@ -141,11 +141,28 @@ def test_le_gdn_projette_en_un_lancement_sous_dense_nvfp4_triton(monkeypatch):
                            dt_bias=torch.rand(NV) - 0.5, a_log=torch.rand(NV) * 3 - 2,
                            norm_weight=torch.ones(DV), num_k_heads=NK, num_v_heads=NV, head_k_dim=DK, head_v_dim=DV)
     x = torch.randn(12, H).to(DT)
+    from acvram.engine import model as MD
     monkeypatch.setattr(kernels, "_DENSE_NVFP4", "gemv")
     with torch.no_grad():
         y_sep, _ = couche(x, None)
         assert couche.fuse() and couche.multi.tailles == (conv_dim, NV * DV, NV, NV)
         monkeypatch.setattr(kernels, "_DENSE_NVFP4", "triton")
+        monkeypatch.setattr(MD, "_MULTI_PROJ", True)                       # témoin, opt-in
         y_multi, _ = couche(x, None)
     ecart = ((y_multi.float() - y_sep.float()).abs().max() / y_sep.float().abs().max()).item()
     assert ecart < 2 ** -6, ecart
+
+
+def test_les_logits_de_la_tete_en_fp32_egalent_la_gemv_fp32():
+    """La tête (N = vocabulaire) par la GEMM dense étroite, sortie fp32 :
+    les logits sont LE tenseur à comparer (poste7-gemm-dense-palier2-non-
+    ouvert § 2) — contre x fp32 @ déquant fp32 (le chemin GEMV fp32 actuel) :
+    2⁻⁷ × borne ET même argmax sur chaque ligne."""
+    x, t = _cas(12, 256, 1000, seed=21)
+    y = GD.gemm_dense_etroit(x, t, bn=64, bk=64, sortie_fp32=True)
+    assert y.dtype == torch.float32 and y.shape == (12, 1000)
+    wd = dequantize_nvfp4(t, torch.float32)
+    attendu = x.float() @ wd.T
+    assert _juger(y, x, t) == 0
+    assert torch.equal(y.argmax(-1), attendu.argmax(-1))
+    assert ((y - attendu).abs().max() / attendu.abs().max()).item() < 1e-5

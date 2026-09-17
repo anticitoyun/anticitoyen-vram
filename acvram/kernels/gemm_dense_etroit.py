@@ -194,9 +194,11 @@ def _tranches(n: int, k: int, device, bn: int, bk: int) -> tuple[int, int]:
 
 
 def gemm_dense_etroit(x: torch.Tensor, t, bn: int = 0, bk: int = 0, warps: int = 0,
-                      stages: int = 0) -> torch.Tensor:
+                      stages: int = 0, sortie_fp32: bool = False) -> torch.Tensor:
     """``x`` [M ≤ 32, K] bf16 (fp16 sous l'interpréteur), ``t`` NVFP4Tensor
-    (échelle globale scalaire ou par ligne) → [M, N] dans le dtype de x."""
+    (échelle globale scalaire ou par ligne) → [M, N] dans le dtype de x, ou
+    fp32 (``sortie_fp32`` : la tête — les logits sont LE tenseur à comparer,
+    accumulés en fp32 depuis des produits bf16 × bf16 exacts)."""
     bn, bk = bn or _BN, bk or _BK
     warps, stages = warps or _WARPS, stages or _STAGES
     M, K = x.shape
@@ -220,7 +222,7 @@ def gemm_dense_etroit(x: torch.Tensor, t, bn: int = 0, bk: int = 0, warps: int =
         x.stride(0), t.qweight.stride(0), t.block_scale.stride(0), 1 if gsr is not None else 0,
         y.stride(0), y.stride(1),
         BM=BM, BN=bn, BK=bk, num_warps=warps, num_stages=stages)
-    return _reduire(y, x.dtype)
+    return _reduire(y, torch.float32 if sortie_fp32 else x.dtype)
 
 
 class MultiProjection:
