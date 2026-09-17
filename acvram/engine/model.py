@@ -21,6 +21,7 @@ from typing import Optional
 
 import os
 import sys
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -628,6 +629,21 @@ class MLP2(nn.Module):
 
 
 _SYNC_COUCHES = bool(os.environ.get("ACVRAM_SYNC_COUCHES"))
+# ACVRAM_TRACE_COUCHES=1 : une ligne par couche, après synchronisation, avec
+# l'horodatage — pour situer un pas qui ne rend jamais la main (70B en exil,
+# 17/09 : 33 min sans une ligne, GPU 0 %, pile Python illisible sans ptrace).
+# Lent (une synchronisation par couche) : diagnostic seulement.
+_TRACE_COUCHES = bool(os.environ.get("ACVRAM_TRACE_COUCHES"))
+
+
+def _trace_couche(quoi: str, i: int, layer) -> None:
+    if not _TRACE_COUCHES:
+        return
+    if layer.device.type == "cuda":
+        torch.cuda.synchronize(layer.device)
+    exile = any(getattr(m, "streamed", None) is not None for m in layer.modules())
+    print(f"[acvram] {quoi} couche {i:3d} {'flux' if exile else 'résidente'} "
+          f"t={time.monotonic():.3f}", file=sys.stderr, flush=True)
 
 
 class MoEBlock(nn.Module):
@@ -2333,6 +2349,7 @@ class ACVRamModel(nn.Module):
             if i + 1 < len(self.layers):
                 self.layers[i + 1].prefetch()
             x = layer(x, batch, self.caches.get(i))
+            _trace_couche("forward", i, layer)
             if _SYNC_COUCHES:
                 # Diagnostic : une faute CUDA asynchrone remonte au premier
                 # point de synchronisation, loin de son origine. Synchroniser
@@ -2475,6 +2492,7 @@ class ACVRamModel(nn.Module):
         for i, layer in enumerate(self.layers):
             x = layer.decode_fixed(x, positions, slots, block_tables,
                                    seq_lens, max_pos, self.caches.get(i), q_len)
+            _trace_couche("décodage", i, layer)
         if self.mtp is not None:
             self._garder_hidden(x)
         x = self.norm(x)
