@@ -1197,6 +1197,15 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     snrs: list[float] = []
     per_layer: list[dict] = []
     keys = []
+    # poste7-awq-experts-peu-routes-portee-17-09 : garde permanente, pas
+    # seulement le seuil d'echantillons qui evite la CAUSE la plus
+    # frequente -- verifie l'EFFET sur CHAQUE tenseur quantifie, quelle que
+    # soit la cause d'une echelle mal reglee. Borne large (0,80-1,25) : une
+    # quantification saine reste tres proche de 1 (mesure sur 340 experts
+    # sains, 0,944-1,012) ; les six malades de Nemotron sortaient a
+    # 0,29-0,69.
+    RATIO_NORME_BAS, RATIO_NORME_HAUT = 0.80, 1.25
+    ratios_hors_bornes: list[tuple[str, float]] = []
     budget_candidats: list[dict] = []
 
     alpha_commun: dict[str, torch.Tensor] = {}
@@ -1468,6 +1477,10 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             continue
 
         snrs.append(metrics["out_snr_db"])
+        if "ratio_norme" in metrics:
+            r = metrics["ratio_norme"]
+            if not (RATIO_NORME_BAS <= r <= RATIO_NORME_HAUT):
+                ratios_hors_bornes.append((name, r))
         per_layer.append({"name": name, **{k: round(v, 2) if isinstance(v, float)
                                            else v for k, v in metrics.items()}})
         if not opts.dry_run:
@@ -1480,6 +1493,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             "has_act_scale": scaler.scale is not None,
             "bpw": round(metrics["bpw"], 3),
             "out_snr_db": round(metrics["out_snr_db"], 2),
+            **({"ratio_norme": round(metrics["ratio_norme"], 4)}
+               if "ratio_norme" in metrics else {}),
             **({"rotation": "hadamard-512"} if experts_hadamard else {}),
             # L'echelle de sortie, sans laquelle le SNR ne se compare pas d'un
             # tenseur a l'autre. Publiee pour qu'une analyse posterieure au
@@ -1883,6 +1898,10 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             fmt = c["to"] if large else c["fmt_base"]
             entry = c["entry"]
             snrs.append(met["out_snr_db"])
+            if "ratio_norme" in met:
+                r = met["ratio_norme"]
+                if not (RATIO_NORME_BAS <= r <= RATIO_NORME_HAUT):
+                    ratios_hors_bornes.append((name, r))
             per_layer.append({"name": name,
                               **{k: round(v, 2) if isinstance(v, float) else v
                                  for k, v in met.items()
@@ -1898,6 +1917,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 "has_act_scale": c["has_act_scale"],
                 "bpw": round(met["bpw"], 3),
                 "out_snr_db": round(met["out_snr_db"], 2),
+                **({"ratio_norme": round(met["ratio_norme"], 4)}
+                   if "ratio_norme" in met else {}),
                 # DEUXIEME SITE D'ECRITURE, et c'est celui que prend le SAC A
                 # DOS. `out_ref_norm` n'etait ajoute qu'au site 1065, sur le
                 # chemin du plancher SNR — donc une conversion BUDGETAIRE ne
@@ -1993,6 +2014,22 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
              f"echelle identite EXPLICITE dans le manifeste (jamais une "
              f"absence ambigue).",
              flush=True)
+
+    ratios_tous = [e["ratio_norme"] for e in manifest["tensors"].values()
+                  if "ratio_norme" in e]
+    if ratios_tous:
+        manifest["ratio_norme_min"] = round(min(ratios_tous), 4)
+        manifest["ratio_norme_max"] = round(max(ratios_tous), 4)
+    if ratios_hors_bornes:
+        pires = sorted(ratios_hors_bornes, key=lambda x: abs(x[1] - 1.0), reverse=True)
+        detail = "; ".join(f"{n} : {r:.3f}" for n, r in pires[:10])
+        raise ValueError(
+            f"conversion refusée : {len(ratios_hors_bornes)} tenseur(s) "
+            f"hors des bornes de ratio de norme [{RATIO_NORME_BAS},"
+            f"{RATIO_NORME_HAUT}] — {detail}. Une quantification saine reste "
+            f"proche de 1 (mesure : 0,944-1,012 sur 340 experts sains) ; "
+            f"poste7-awq-experts-peu-routes-portee-17-09, motif Nemotron "
+            f"17/09 (échelle AWQ mal réglée par une statistique bruitée).")
 
     _verifier_homogeneite_moe(manifest["tensors"], spec.num_layers)
     manifest["diagnostic_fusion"] = _diagnostic_fusion(manifest["tensors"])
