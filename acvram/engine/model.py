@@ -1193,6 +1193,16 @@ class MoEBlock(nn.Module):
                 act = F.pad(act, (0, kd - act.shape[1]))
             return act.contiguous()
 
+        if _PREFILL_A4 != "off" and not mma:
+            # porte qualité W4A4 (torch) : entrée de gate/up arrondie en NVFP4 ; `both` arrondit
+            # aussi l'entrée de down (via _activation ci-dessous)
+            partage_a4 = xs_u is xs
+            xs = fausse_quant_nvfp4(xs)
+            xs_u = xs if partage_a4 else fausse_quant_nvfp4(xs_u)
+            if _PREFILL_A4 == "both":
+                _act_sans_a4 = _activation
+                def _activation(g, u, m, kd, _f=_act_sans_a4):   # noqa: F811
+                    return fausse_quant_nvfp4(_f(g, u, m, kd))
         if mma:
             # poids ET activations en 4 bits : les activations sont quantifiées
             # une fois par entrée (E2M1 bloc 16 + UE4M3) et servent à gate et up
@@ -1754,6 +1764,36 @@ _MOE_MMA = os.environ.get("ACVRAM_MOE_MMA", "1") == "1"
 # petit M inchangées et ~58 Go de copies w[experts] par prefill ; gardé comme
 # témoin d'une fausse piste, jamais comme défaut)
 _PREFILL_GROUPED = os.environ.get("ACVRAM_PREFILL_GROUPED", "groupe")
+# ACVRAM_PREFILL_A4=off|gateup|both : porte qualité W4A4 du prefill MoE (poste7-lecture-profils-coder-17-09) —
+# fausse quantification NVFP4 des ACTIVATIONS en torch (E2M1 bloc 16, échelle de bloc UE4M3, échelle
+# globale par ligne, comme nvfp4_quant_act), sur l'entrée de gate/up (gateup) et aussi sur celle de
+# down (both) ; aucun noyau : mesure la perte de qualité qu'un GEMM W4A4 imposerait, pas sa vitesse.
+_PREFILL_A4 = os.environ.get("ACVRAM_PREFILL_A4", "off")
+if _PREFILL_A4 not in ("off", "gateup", "both"):
+    raise ValueError(f"ACVRAM_PREFILL_A4={_PREFILL_A4!r} : off | gateup | both")
+
+
+_E2M1 = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
+_E2M1_MILIEUX = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
+
+
+def fausse_quant_nvfp4(x: torch.Tensor) -> torch.Tensor:
+    """x [G, K] (K multiple de 16) → x arrondi comme le ferait nvfp4_quant_act :
+    échelle globale par ligne s = amax_ligne / (448 × 6), échelle de bloc (16) en
+    UE4M3 = amax_bloc / (6 s), valeur E2M1 au plus proche (milieux des paliers),
+    puis déquantifié. Sortie dans le dtype de x. Torch pur (porte qualité)."""
+    G, K = x.shape
+    assert K % 16 == 0, K
+    xf = x.to(torch.float32)
+    s_row = (xf.abs().amax(dim=1, keepdim=True) / (448.0 * 6.0)).clamp_min(1e-12)   # [G,1]
+    xb = xf.view(G, K // 16, 16)
+    bs = (xb.abs().amax(dim=2, keepdim=True) / (6.0 * s_row.unsqueeze(2)))           # [G,K/16,1]
+    bs = bs.to(torch.float8_e4m3fn).to(torch.float32)                                # UE4M3 (arrondi fp8)
+    ech = (bs * s_row.unsqueeze(2)).clamp_min(1e-12)
+    v = (xb / ech).clamp(-6.0, 6.0)
+    idx = torch.bucketize(v.abs(), _E2M1_MILIEUX.to(x.device))
+    q = _E2M1.to(x.device)[idx] * torch.sign(v)
+    return (q * ech).view(G, K).to(x.dtype)
 if _PREFILL_GROUPED not in ("bmm", "grouped_mm", "groupe", "w4a16"):
     raise ValueError(f"ACVRAM_PREFILL_GROUPED={_PREFILL_GROUPED!r} : attendu groupe, w4a16, grouped_mm ou bmm")
 _MOE_MMA_BT = int(os.environ.get("ACVRAM_MOE_MMA_BT", "64"))

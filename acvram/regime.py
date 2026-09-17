@@ -64,6 +64,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("SEUIL_FUSION", "256", ("acvram.engine.model", "SEUIL_FUSION")),
     Variable("PREFILL_GROUPED", "groupe", ("acvram.engine.model", "_PREFILL_GROUPED"), "groupe",
              "GEMM groupée du prefill MoE : groupe (B0 Triton bf16 persistant, défaut depuis poste7-b0-et-cause-lm4-17-09) | w4a16 (B1, NVFP4 lu dans la tuile, opt-in jusqu'au scellé) | grouped_mm (torch, ancien défaut, témoin) | bmm par seaux (réfuté 0edc3b9)"),
+    Variable("PREFILL_A4", "off", ("acvram.engine.model", "_PREFILL_A4"), None,
+             "porte qualité W4A4 du prefill MoE : fausse quantification NVFP4 des activations en torch — off | gateup (entrée de gate/up) | both (+ entrée de down) ; poste7-lecture-profils-coder-17-09"),
     Variable("SANS_FUSION", "", None, "1"),
     Variable("SANS_FUSION_BF16", "", None, "1"),
     Variable("TETE_LIEE", "int8", ("acvram.engine.loader", "_TETE_LIEE")),
