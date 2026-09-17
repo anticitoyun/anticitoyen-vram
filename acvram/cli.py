@@ -559,6 +559,26 @@ def cmd_convert(args: argparse.Namespace) -> int:
 
     calib_source = _calib_source(use_awq, args.calib_file)
 
+    # poste7-diff-octet-a-octet-retire-17-09, REGLES §4 : sans le commit du
+    # convertisseur, deux manifestes du meme nom peuvent venir de deux
+    # regimes de code differents et rien ne les distingue (motif exact du
+    # 17/09 : bogue de calibration corrige entre deux convertis nommes
+    # pareil). Refus a la CLI (le point d'usage reel), pas dans
+    # convert_checkpoint (les tests construisent des jouets sans extraction
+    # git, et n'ont pas besoin de cette provenance).
+    from .quant.convert import _convertisseur_commit
+    if _convertisseur_commit() is None:
+        print(red("conversion refusee : le commit du convertisseur est "
+                  "introuvable (pas une extraction git ?) -- sans lui, ce "
+                  "converti ne pourra jamais etre distingue d'un autre du "
+                  "meme nom produit par une version differente du code."))
+        return 2
+    if use_awq and not calib_source.get("sha256"):
+        print(red("conversion refusee : le sha256 du corpus de calibration "
+                  "n'a pas pu etre calcule -- sans lui, un converti AWQ ne "
+                  "porte pas ce qui l'a produit."))
+        return 2
+
     opts = ConversionOptions(
         out_dir=args.out, awq=use_awq, use_hadamard=args.hadamard,
         group_size=args.group_size, n_grid=args.grid,
@@ -595,9 +615,21 @@ def cmd_convert(args: argparse.Namespace) -> int:
                                 progress=progress)
     _progress_done()
     print(report.render())
+    sortie = args.out
+    if report.tenseurs_replies and not args.dry_run:
+        # poste7-awq-relu2-garde-repli-17-09, REGLES §4 : le regime (combien
+        # de tenseurs sont repartis a l'identite plutot qu'AWQ) dans le NOM,
+        # pas seulement dans le manifeste -- un dossier au meme nom que le
+        # converti "propre" laisserait croire aux deux regimes interchangeables.
+        renomme = f"{args.out.rstrip('/')}-repli{len(report.tenseurs_replies)}"
+        if not os.path.exists(renomme):
+            os.rename(args.out, renomme)
+            sortie = renomme
+            print(f"  renomme : {bold(renomme)} "
+                 f"({len(report.tenseurs_replies)} tenseur(s) replies)")
     if not args.dry_run:
         print()
-        print(f"  servez-le avec : {bold(f'acvram serve {args.out}')}")
+        print(f"  servez-le avec : {bold(f'acvram serve {sortie}')}")
     return 0
 
 
