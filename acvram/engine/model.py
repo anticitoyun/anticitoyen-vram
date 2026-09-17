@@ -1543,7 +1543,7 @@ class MoEBlock(nn.Module):
         # Poste F, fusion (2) : logits du routeur (cuBLAS) puis `moe_route` +
         # route_prep en UN noyau Triton (kernels/route_prep.route_fusee) —
         # même arithmétique que moe_route (fp32, égalités vers l'indice bas).
-        fusee = (_ROUTE_PREP == 2 and x.is_cuda and self._usage_routage is not None
+        fusee = (_ROUTE_PREP == 2 and x.is_cuda and getattr(self, "_usage_routage", None) is not None
                  and self._stack_state == "oui" and t <= _MOE_GROUPED_MAX
                  and self.top_k <= 32)
         if fusee:
@@ -1576,7 +1576,7 @@ class MoEBlock(nn.Module):
         # à la place de ~10 petits noyaux torch par couche (verdict-lancements-
         # b1-17-09). Même eid, même compteur, au bit ; chemin groupé seul.
         if (_ROUTE_PREP >= 1 and x.is_cuda and topi.dtype == torch.int32
-                and self._usage_routage is not None and self._stack_state == "oui"
+                and getattr(self, "_usage_routage", None) is not None and self._stack_state == "oui"
                 and t <= _MOE_GROUPED_MAX):
             from ..kernels import route_prep as _rp
             if _rp.disponible():

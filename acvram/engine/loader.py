@@ -306,7 +306,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
     # Caches KV differes : voir la fusion des projections plus bas, qui a
     # besoin de place libre au moment ou elle concatene.
     a_allouer: list = []
-    _borner_kv_par_la_vram(plan, manifest, dev)
+    _borner_kv_par_la_vram(plan, manifest, dev,
+                           reserve=_reserve_prefill(spec, max_model_len, manifest))
     kv_blocks = _kv_blocks_per_device(plan, spec, max_model_len)
 
     # Arène épinglée pour les poids exilés, dimensionnée ICI parce que le plan
@@ -1059,7 +1060,7 @@ _KV_MARGE_MIN = 1536 * 2**20
 _KV_MARGE_PART = 0.05
 
 
-def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev) -> None:
+def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0) -> None:
     """Borne le budget KV de chaque GPU par ce qu'il a réellement de libre.
 
     Le budget du manifeste vient du planificateur, qui raisonne sur des tailles
@@ -1085,7 +1086,7 @@ def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev) -> None:
         for l in plan.layers:
             poids += attn.get(l.index, l.attn_bytes) if l.attn_storage == t.name else 0
             poids += mlp.get(l.index, l.mlp_bytes) if l.mlp_storage == t.name else 0
-        marge = max(_KV_MARGE_MIN, int(_KV_MARGE_PART * capacite))
+        marge = max(_KV_MARGE_MIN, int(_KV_MARGE_PART * capacite)) + int(reserve)
         borne = libre - poids - marge
         budget = int(plan.kv_budget[t.name])
         if borne < budget:
@@ -1093,7 +1094,7 @@ def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev) -> None:
             print(f"[acvram] budget KV de {t.name} borné par la VRAM libre : "
                   f"{budget / 2**30:.2f} → {max(0, borne) / 2**30:.2f} Gio "
                   f"(libre {libre / 2**30:.1f}, poids {poids / 2**30:.1f}, "
-                  f"marge {marge / 2**30:.1f})", file=sys.stderr)
+                  f"marge {marge / 2**30:.1f} dont préfill {reserve / 2**30:.2f})", file=sys.stderr)
 
 
 def _kv_blocks_per_device(plan: Plan, spec: ModelSpec,
@@ -1190,9 +1191,15 @@ def _compter_experts_manifest(manifest: dict) -> dict:
     return n
 
 
-def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8) -> None:
+def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8, reserve: int = 0) -> None:
     """Fait descendre en RAM hôte les MLP des dernières couches d'un GPU
     dont les poids réels dépassent la capacité de l'étage.
+
+    ``reserve`` : octets transitoires du plus grand préfill
+    (`ModelSpec.activations_prefill_bytes`), soustraits de la capacité au
+    même titre que la marge — avant, le budget ne comptait que résidents + KV
+    + marge, et Llama-3.3-70B-nvfp4 chargeait DÉGRADÉ (32/80 exilées) puis
+    tombait en OOM de 448 Mio au premier préfill (verdict-palier1-bloc6-17-09).
 
     `top_k` (bead pds, point 1, poste7 §4) : sous ce nombre d'experts résidents,
     un placement PAR EXPERT n'a plus de sens — un jeton qui en route `top_k`
@@ -1265,7 +1272,7 @@ def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8) -> None:
         # marge pour le contexte CUDA, les activations et les piles d'experts :
         # la capacité de l'étage est déjà nette des réserves du plan, mais un
         # 70B chargé à 99 % tombait encore en OOM à l'allocation du KV
-        marge = max(2 * 2**30, int(0.07 * capacite))
+        marge = max(2 * 2**30, int(0.07 * capacite)) + int(reserve)
         deplacees = 0
         while utilise() > capacite - marge:
             # Candidats déjà résidents (couche entière) OU déjà à moitié
@@ -1309,7 +1316,8 @@ def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8) -> None:
             deplacees += 1
         if deplacees:
             print(f"[acvram] plan réajusté : {deplacees} MLP de plus en RAM hôte sur {dev} "
-                  f"(poids réels {utilise() / 2**30:.1f} Gio pour {capacite / 2**30:.1f} Gio libres)",
+                  f"(poids réels {utilise() / 2**30:.1f} Gio pour {capacite / 2**30:.1f} Gio libres, "
+                  f"activations de préfill réservées {reserve / 2**30:.2f} Gio)",
                   flush=True)
             continue
         # Symétrique de la descente. Le plan est figé au moment de la
@@ -1577,6 +1585,18 @@ def _exil_experts_demande(plan: Plan, manifest: dict) -> None:
             pass
 
 
+def _reserve_prefill(spec, max_model_len: Optional[int], manifest: dict) -> int:
+    """Octets transitoires du plus grand préfill à retirer des budgets
+    (KV, exil) : `ModelSpec.activations_prefill_bytes` sur ``max_model_len``
+    — sinon la longueur planifiée du manifeste, sinon 8 192 ; 0 sans spec
+    (ancien chemin, signalé)."""
+    if spec is None:
+        return 0
+    d = manifest.get("plan", {}) if isinstance(manifest, dict) else {}
+    ctx = int(max_model_len or (d.get("kv_max_tokens") or 0) or 8192)
+    return int(spec.activations_prefill_bytes(ctx))
+
+
 def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
                         max_model_len: Optional[int] = None,
                         max_concurrent_seqs: Optional[int] = None) -> Plan:
@@ -1586,7 +1606,8 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
         neuf = _replanifier(manifest, spec, max_model_len=max_model_len,
                             max_concurrent_seqs=max_concurrent_seqs)
         if neuf is not None:
-            _reajuster_plan(neuf, manifest, top_k=spec.num_experts_per_tok or 8)
+            _reajuster_plan(neuf, manifest, top_k=spec.num_experts_per_tok or 8,
+                            reserve=_reserve_prefill(spec, max_model_len, manifest))
             _exil_demande(neuf)
             _exil_experts_demande(neuf, manifest)
             return neuf
@@ -1598,7 +1619,7 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
                    for l in d["layers"]]
     plan.embed_device = d["embed_device"]
     plan.lm_head_device = d["lm_head_device"]
-    _reajuster_plan(plan, manifest)
+    _reajuster_plan(plan, manifest, reserve=_reserve_prefill(spec, max_model_len, manifest))
     _exil_demande(plan)
     _exil_experts_demande(plan, manifest)
     plan.kv_budget = d.get("kv_budget", {})

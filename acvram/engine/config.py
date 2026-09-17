@@ -333,6 +333,45 @@ class ModelSpec:
         overhead = 0.0 if kv_bits >= 16 else 2 * self.num_key_value_heads * 2
         return int((per_layer + overhead) * self.couches_avec_kv)
 
+    def activations_prefill_bytes(self, n_jetons: int) -> int:
+        """Octets TRANSITOIRES de VRAM qu'un préfill de ``n_jetons`` demande
+        au-delà des poids résidents et du cache KV — le terme que le budget
+        d'exil ne comptait pas (poste3, verdict-palier1-bloc6-17-09 :
+        Llama-3.3-70B-nvfp4 chargé DÉGRADÉ à 32/80 couches exilées, puis OOM de
+        448 Mio au tout premier préfill).
+
+        Le préfill n'est pas découpé (runner : pas de chunked prefill) : le
+        plus grand chunk est une invite de ``max_model_len`` jetons. Par
+        jeton, en bf16 sauf mention : le flux résiduel, la ligne normée, la
+        sortie d'attention et celle du MLP (4·H), q/k/v ((HQ + 2·HKV)·D), et
+        pour le MLP gate, up, act (3·I) plus une copie fp32 de act (chemins
+        torch) ; pour un MoE, ces trois-là sur les ``top_k`` lignes routées
+        par jeton (moe_intermediate) et l'expert partagé. S'y ajoute, une fois,
+        la plus grosse matrice déquantifiée en bf16 que le chemin W4A16 du
+        préfill matérialise (`nvfp4_matmul` au-delà du seuil GEMV ; pour les
+        experts, la pile `_pile_bf16` = E·I_moe·H) : c'est l'allocation de
+        470 Mio (28672 × 8192 × 2) qui manquait au 70B. Les logits n'y sont
+        pas : le moteur ne les calcule que pour les positions échantillonnées.
+        Un préfill groupé de plusieurs invites (ACVRAM_PREFILL_BATCH) peut
+        dépasser cette estimation : elle couvre une invite, la plus longue."""
+        T = max(1, int(n_jetons))
+        H = self.hidden_size
+        D = self.head_dim or (H // max(1, self.num_attention_heads))
+        qkv = (self.num_attention_heads + 2 * self.num_key_value_heads) * D
+        par_jeton = 4 * H * 2 + qkv * 2
+        if self.num_experts and self.moe_intermediate_size:
+            k = max(1, self.num_experts_per_tok)
+            im = self.moe_intermediate_size
+            par_jeton += k * (3 * im * 2 + im * 4) + self.shared_expert_intermediate_size * 3 * 2
+            plus_grosse = max(self.num_experts * im * H,
+                              self.intermediate_size * H if self.first_k_dense_replace else 0,
+                              qkv * H) * 2
+        else:
+            im = self.intermediate_size
+            par_jeton += 3 * im * 2 + im * 4
+            plus_grosse = max(im * H, qkv * H) * 2
+        return T * par_jeton + plus_grosse
+
     def etat_recurrent_bytes(self, max_batch: int = 16) -> int:
         """Octets d'état récurrent à provisionner, toutes couches linéaires.
 
