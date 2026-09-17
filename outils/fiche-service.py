@@ -470,6 +470,8 @@ def construire_fiche(args: argparse.Namespace) -> dict:
         _OPTIONS_COMPLETION["stream_options"] = {"include_usage": True}
     fiche: dict = {"nom": args.nom, "moteur": args.moteur, "modele": args.modele}
     journal = Path(args.journal or f"/tmp/fiche-service-{args.nom}.log")
+    if args.base_url is None:
+        args.base_url = f"http://127.0.0.1:{args.port}"
     serveur = lancer_serveur(args.commande, args.base_url, args.port, journal,
                              args.timeout_chargement)
     fiche["charge"] = serveur.charge
@@ -554,7 +556,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     f.add_argument("--commande", default=None,
                    help="commande de lancement du serveur, '{port}' substitué ; "
                         "omise si --base-url désigne un serveur déjà debout")
-    f.add_argument("--base-url", default="http://127.0.0.1:8091")
+    f.add_argument("--base-url", default=None,
+                   help="défaut : http://127.0.0.1:<--port> (un --port seul suffit ; "
+                        "sinon le serveur écoutait sur --port et la fiche interrogeait 8091)")
     f.add_argument("--port", type=int, default=8091)
     f.add_argument("--journal", default=None)
     f.add_argument("--timeout-chargement", type=float, default=300.0)
