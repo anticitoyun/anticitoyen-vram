@@ -1129,7 +1129,12 @@ def _kv_plancher(plan: Plan, spec: ModelSpec, max_model_len: Optional[int], dev:
     ici = sum(1 for lp in plan.layers if spec.couche_a_kv(lp.index) and lp.exec_device == dev)
     if not total or not ici:
         return 0
-    jetons = int(max_model_len or 2048) + BLOCK_SIZE
+    # Exactement ce que le planificateur accorde à une séquence (`auto_plan` :
+    # kv_bytes_per_token × max_model_len) — un plancher plus haut d'un bloc
+    # (+16 jetons, 3 Mio) restait inatteignable : le budget du plan ne monte
+    # pas au-dessus de sa cible, quatre tours d'exil rendaient « 3 Mio
+    # manquants » et le refus (poste3, essai a803254).
+    jetons = int(max_model_len or 2048)
     return bpt * jetons * ici // total
 
 
@@ -1148,7 +1153,12 @@ def _borner_kv_avec_exil(plan: Plan, manifest: dict, dev, spec: ModelSpec,
     plancher tienne ; sinon le chargement s'arrête avec les chiffres."""
     if not torch.cuda.is_available() or not plan.kv_budget:
         return
-    cible = dict(plan.kv_budget)
+    # La cible d'un appareil ne descend pas sous son plancher : si le plan
+    # lui accordait moins, la borne (qui ne fait que réduire) ne pourrait
+    # jamais l'y amener, quel que soit l'exil.
+    cible = {k: max(int(v), _kv_plancher(plan, spec, max_model_len, k))
+             for k, v in plan.kv_budget.items()}
+    plan.kv_budget = dict(cible)
     top_k = spec.num_experts_per_tok or 8
     supplement = 0
     for tour in range(tours + 1):
