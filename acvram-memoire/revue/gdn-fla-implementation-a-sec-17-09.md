@@ -61,11 +61,21 @@ pour 621 chez vLLM ; la récurrence tournait en torch, séquence par séquence).
   continuité prefill fla → décodage fla contre tout-torch.
 Suite : 786 passed.
 
+## KDA et Mamba2 (second commit) : décodage du lot en un lancement
+
+`engine/lot_etats.py` factorise les créneaux-vues (LOT = 16) ; `kda.py` et
+`mamba2.py` gagnent `forward_batch` / `decode_static_batch` /
+`peut_batcher_decode` sur `fused_recurrent_kda` (état transposé [V, K] →
+[K, V], comme le prefill) et `fused_recurrent_simple_gla` (q = C, k = B,
+v = xs·dt, g = A·dt, échelle 1), mêmes interrupteurs que leur prefill
+(`ACVRAM_KDA_CHUNK` / `ACVRAM_MAMBA_CHUNK` = 0 : tout torch). À b = 1 sous
+graphes, KDA garde son noyau CUDA fusionné (`kda_decode`) ; le lot fla ne
+prend que b > 1 (`model.py:_la_decode`). Juge : `tests/test_hybrides_fla_lot.py`
+— lot b = 3 contre b appels torch (sorties et états ≤ 2⁻⁷), bras cassant :
+l'état KDA passé sans transposition rend rouge. Suite 789 passed.
+
 ## Non fait (à suivre)
 
-- KDA et Mamba2 : décodage groupé par `fused_recurrent_kda` /
-  `fused_recurrent_simple_gla` — KDA a déjà un noyau CUDA fusionné par
-  séquence (`kda_decode`), Mamba2 non ; prochain commit.
 - fla en bf16 (vLLM) au lieu de fp32 : à mesurer après le scellé.
 
 ## Scellés de poste7, rappelés (fenêtre poste3 ≤ 40 min, Qwen3.8-27B calibA)

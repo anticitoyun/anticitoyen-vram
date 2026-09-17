@@ -129,9 +129,10 @@ def test_le_lot_de_b_sequences_en_un_lancement_vaut_b_appels(monkeypatch):
 
 def test_un_seul_lot_sert_seize_creneaux_puis_un_second():
     couche = _couche()
-    sts = [couche.new_static(torch.device(DEV)) for _ in range(G._LOT + 1)]
-    assert len(couche._lots) == 2 and sts[G._LOT]["lot"] == (1, 0)
-    assert sts[0]["S"].data_ptr() == couche._lots[0]["S"].data_ptr()
+    from acvram.engine.lot_etats import LOT
+    sts = [couche.new_static(torch.device(DEV)) for _ in range(LOT + 1)]
+    assert len(couche._lots) == 2 and sts[LOT]["lot"] == (1, 0)
+    assert sts[0]["S"].data_ptr() == couche._lots[0]["S_"].data_ptr()
 
 
 @CUDA

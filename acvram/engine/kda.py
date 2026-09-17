@@ -25,6 +25,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .lot_etats import nouveau_static, redistribuer, tranches
+
 __all__ = ["KimiDeltaAttention"]
 
 
@@ -38,6 +40,24 @@ def _chunk_kda():
         return chunk_kda
     except ImportError:
         return None
+
+
+def _recurrent_kda():
+    """Le noyau récurrent de fla pour le décodage du LOT (17/09) — même
+    interrupteur que le prefill (`ACVRAM_KDA_CHUNK=0` : tout torch)."""
+    import os
+    if os.environ.get("ACVRAM_KDA_CHUNK", "1") == "0":
+        return None
+    try:
+        from fla.ops.kda import fused_recurrent_kda
+        return fused_recurrent_kda
+    except ImportError:
+        return None
+
+
+def _interprete() -> bool:
+    import os
+    return os.environ.get("TRITON_INTERPRET") == "1"
 
 
 def _extension():
@@ -164,9 +184,8 @@ class KimiDeltaAttention(nn.Module):
     # -- chemin à formes fixes (graphes CUDA) --------------------------------
     def new_static(self, device: torch.device) -> dict:
         k1 = self.kernel - 1
-        z = lambda *f: torch.zeros(*f, dtype=torch.float32, device=device)
-        return {"cq": z(self.d_inner, k1), "ck": z(self.d_inner, k1),
-                "cv": z(self.d_inner, k1), "S": z(self.nh, self.d, self.d)}
+        return nouveau_static(self, device, {"cq": (self.d_inner, k1), "ck": (self.d_inner, k1),
+                                             "cv": (self.d_inner, k1), "S": (self.nh, self.d, self.d)})
 
     @staticmethod
     def static_load(st: dict, etat) -> None:
@@ -182,6 +201,66 @@ class KimiDeltaAttention(nn.Module):
     def static_export(st: dict) -> tuple:
         return (st["cq"].clone(), st["ck"].clone(), st["cv"].clone(),
                 st["S"].clone())
+
+    # -- décodage du lot en un lancement (fla, 17/09) ------------------------
+    def peut_batcher_decode(self, h: torch.Tensor) -> bool:
+        return _recurrent_kda() is not None and (h.is_cuda or _interprete())
+
+    def _lot_projete(self, x: torch.Tensor, cq: torch.Tensor, ck: torch.Tensor, cv: torch.Tensor):
+        """``b`` jetons ; les trois états de convolution [b, d_inner, k-1] mis
+        à jour EN PLACE. Rend (q_raw, k_raw, v, g1, beta, g2) aux formes de fla
+        (q/k bruts : la L2-norme et l'échelle 1/√d sont dans le noyau)."""
+        b = x.shape[0]
+
+        def conv(xp, w, buf):
+            seq = torch.cat([buf, xp.unsqueeze(-1)], dim=-1)               # [b, d_inner, k]
+            buf.copy_(seq[:, :, 1:])
+            return F.silu(F.conv1d(seq, w.unsqueeze(1), groups=self.d_inner)[:, :, 0])
+        q = conv(self.q_proj(x).to(torch.float32), self.conv_q.float(), cq)
+        k = conv(self.k_proj(x).to(torch.float32), self.conv_k.float(), ck)
+        v = conv(self.v_proj(x).to(torch.float32), self.conv_v.float(), cv)
+        g1 = F.softplus(self.f_b(self.f_a(x)).to(torch.float32) + self.dt_bias)
+        g1 = g1.reshape(b, 1, self.nh, self.d) * self.a.reshape(1, 1, self.nh, 1)
+        beta = torch.sigmoid(self.beta_proj(x).to(torch.float32)).reshape(b, 1, self.nh)
+        g2 = self.g_b(self.g_a(x)).to(torch.float32).reshape(b, self.nh, self.d)
+        forme = (b, 1, self.nh, self.d)
+        return (q.reshape(forme).contiguous(), k.reshape(forme).contiguous(), v.reshape(forme).contiguous(),
+                g1.contiguous(), beta.contiguous(), g2)
+
+    def _lot_sortie(self, o, g2, x_dtype):
+        b = o.shape[0]
+        o = o[:, 0].to(torch.float32)                                        # [b, nh, d]
+        var = o.pow(2).mean(-1, keepdim=True)
+        normed = o * torch.rsqrt(var + self.eps) * self.norm_weight.to(torch.float32)
+        y = (normed * torch.sigmoid(g2)).reshape(b, self.d_inner)
+        return self.out_proj(y.to(x_dtype))
+
+    def forward_batch(self, h: torch.Tensor, etats: list) -> tuple[torch.Tensor, list]:
+        b = h.shape[0]
+        z_ = lambda *f: torch.zeros(*f, dtype=torch.float32, device=h.device)
+        k1 = self.kernel - 1
+        cq, ck, cv, S = (torch.stack([e[j] if e is not None else z_(*forme) for e in etats])
+                         for j, forme in ((0, (self.d_inner, k1)), (1, (self.d_inner, k1)),
+                                          (2, (self.d_inner, k1)), (3, (self.nh, self.d, self.d))))
+        q, k, v, g1, beta, g2 = self._lot_projete(h, cq, ck, cv)
+        # l'état fla est [K, V], le nôtre [V, K] (docstring du module)
+        o, S_fin = _recurrent_kda()(q, k, v, g=g1, beta=beta, initial_state=S.transpose(-1, -2).contiguous(),
+                                    output_final_state=True, use_qk_l2norm_in_kernel=True)
+        S_new = S_fin.transpose(-1, -2).to(torch.float32)
+        y = self._lot_sortie(o, g2, h.dtype)
+        return y, [(cq[i].clone(), ck[i].clone(), cv[i].clone(), S_new[i].contiguous()) for i in range(b)]
+
+    def decode_static_batch(self, h: torch.Tensor, statics: list) -> torch.Tensor:
+        b = h.shape[0]
+        g_, contigu = tranches(self, statics, b, ("cq", "ck", "cv", "S"))
+        q, k, v, g1, beta, g2 = self._lot_projete(h, g_["cq"], g_["ck"], g_["cv"])
+        o, S_fin = _recurrent_kda()(q, k, v, g=g1, beta=beta,
+                                    initial_state=g_["S"].transpose(-1, -2).contiguous(),
+                                    output_final_state=True, use_qk_l2norm_in_kernel=True)
+        g_["S"].copy_(S_fin.transpose(-1, -2))
+        if not contigu:
+            redistribuer(statics, b, g_)
+        return self._lot_sortie(o, g2, h.dtype)
 
     def decode_static(self, x: torch.Tensor, st: dict) -> torch.Tensor:
         """Un jeton, une séquence, états mis à jour EN PLACE dans ``st``."""
