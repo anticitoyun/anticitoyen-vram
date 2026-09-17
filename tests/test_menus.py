@@ -435,5 +435,64 @@ def test_h_une_valeur_fabriquee_dans_le_tsv_casse_e(poste, enrichi_brut):
         assert ecarts == [col], (col, ecarts)
 
 
+def test_i_verdicts_cites_existent_et_contiennent_chiffres():
+    """(i) Chaque chiffre cité dans un menu doit apparaître dans le verdict source qu'il cite.
+
+    Format attendu dans menu : PPL 1,0253 géo (méd 1,0152) — verdict-qwen38-calibA-17-09
+
+    Le test extrait le chiffre (1,0253) et cherche si "1,0253" figure dans le fichier
+    verdict-qwen38-calibA-17-09.md du répertoire revue/.
+
+    Bras cassant : changer un chiffre du menu sans le mettre à jour dans le verdict
+    renvoie FAIL.
+    """
+    menus_dir = Path(__file__).parent.parent / "acvram-memoire/revue"
+
+    menu_files = {
+        "claude": menus_dir / "claude-modeles.md",
+        "kimi": menus_dir / "kimi-modeles.md"
+    }
+
+    failures = []
+
+    # Regex : chiffre suivi de fichier verdict ou poste7
+    verdict_pattern = r'([\d,]+)\s+[^—]*—\s*((verdict|poste7)-[\w-]+)'
+
+    for menu_name, menu_path in menu_files.items():
+        with open(menu_path) as f:
+            content = f.read()
+
+        # Chercher tous les appels de verdicts
+        for match in re.finditer(verdict_pattern, content):
+            chiffre = match.group(1)
+            verdict_file = match.group(2)  # ex: "verdict-qwen38-calibA-17-09" ou "poste7-calibration-verdict-17-09"
+
+            # Chercher le fichier verdict
+            verdict_path = menus_dir / f"{verdict_file}.md"
+
+            if not verdict_path.exists():
+                failures.append(f"{menu_name}:{match.start()}: fichier {verdict_file}.md inexistant")
+                continue
+
+            # Vérifier que le chiffre figure dans le verdict
+            with open(verdict_path) as vf:
+                verdict_content = vf.read()
+
+            # Chercher le chiffre avec flexibilité (virgule/point, zéro final optionnel)
+            chiffre_patterns = [
+                chiffre,
+                chiffre + '0',  # zéro final optionnel (1,015 → 1,0150)
+                chiffre.replace(',', '.'),
+                chiffre.replace(',', '.') + '0',
+            ]
+            found = any(re.search(re.escape(p), verdict_content) for p in chiffre_patterns)
+            if not found:
+                failures.append(
+                    f"{menu_name}: chiffre {chiffre} cité par {verdict_file}.md ne s'y trouve pas"
+                )
+
+    assert not failures, "\n".join(failures)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
