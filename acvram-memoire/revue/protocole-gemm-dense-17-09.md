@@ -1,0 +1,6 @@
+# Protocole — GEMM dense NVFP4 de poste4 (b ≥ 2, remplace la GEMV O(b) : profil FLA 86 ms/pas à b=12) : scellés en situ, ≤ 30 min (poste7 via chef, 17/09 14h45)
+
+objet : le commit d'intégration de poste4 (après son micro-banc), fusionné sur main ; Qwen3.8-27B calibA sous FLA (défaut) ; bonus Coder-30B (`_etroit` dense int8 : 1,09 ms/pas → ≤ 0,6 attendu si le noyau couvre aussi int8).
+instrument : `certifie-b12` b=12 ×2 et b=1 ×1 (régime classé), `ppl-acvram-17-09.py` 3 tranches × bf16 6,5344, `ppl-decode-kv-17-09.py` 256+1024, `profil-gdn-17-09.py b12` (part GEMV/GEMM et ms) ; test d'équivalence logits GEMM vs boucle GEMV dans le commit de poste4, avec bras cassant (échelle de bloc décalée d'un rang → rouge) ; Coder : `profil-pas-coder-17-09.py b12` ; chaîne `scratchpad/gemm-dense-17-09/chaine.sh`.
+scellé (poste7) : Qwen3.8 b=12 128 → ≥ 500 t/s (≈ 800 à 73 % de bande ; faux < 300) ; J/jeton 3,12 → ≤ 1,0 ; b=1 ± 3 % de 69,9 ; PPL 3 tranches et ppl-decode-kv ± 0,0005 de fla (1,0255 / 4,0882) ; test d'équivalence vert et bras cassant rouge dans le même commit ; bonus Coder `_etroit` ≤ 0,6 ms.
+falsification : b=12 < 300 ⇒ le noyau ne lit pas les poids une fois (profil : ms de GEMM vs 11 ms plancher) ; PPL hors ± 0,0005 ⇒ arithmétique ≠ GEMV, refus du défaut ; b=1 hors ± 3 % ⇒ le seuil de bascule GEMV/GEMM est mal placé.
