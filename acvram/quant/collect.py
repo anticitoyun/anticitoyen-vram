@@ -37,10 +37,11 @@ from ..engine.gdn import GatedDeltaNet
 from ..engine.layers import QuantLinear, RMSNorm, RotaryEmbedding
 from ..engine.mla import MLAttention
 from ..engine.model import (Attention, DecoderLayer, DecoderLayerGDN,
-                           ForwardBatch, MLP, MoEBlock)
+                           ForwardBatch, MLP, MLP2, MoEBlock)
 from ..quant.formats import PlainTensor
 from .calibrate import ActStats
-from .convert import _NORMES_ZERO_CENTREES, _QWEN35_HF, _QWEN35_RENOMMAGE
+from .convert import (_NORMES_ZERO_CENTREES, _QWEN35_HF, _QWEN35_RENOMMAGE,
+                      _nemotron_h_rename, _nemotron_h_valeur)
 
 __all__ = ["collect_activation_stats", "DEFAULT_CALIB_FILE", "default_calib_path", "load_calib_ids"]
 
@@ -171,6 +172,7 @@ def collect_activation_stats(
     # bonne valeur des normes.
     mt = str(getattr(spec, "model_type", "") or spec.raw.get("model_type", ""))
     qwen35 = mt in _QWEN35_HF and not spec.raw.get("gdn_a_log_negexp")
+    nemotron_h = mt == "nemotron_h"
 
     location: dict[str, tuple[str, str]] = {}
     for fn, h in handles.items():
@@ -178,12 +180,24 @@ def collect_activation_stats(
             if k.startswith(("model.visual.", "visual.",
                              "model.vision_tower.", "model.audio_tower.")):
                 continue
-            nom = k.replace("model.language_model.", "model.")
-            if qwen35:
-                for src, dst in _QWEN35_RENOMMAGE.items():
-                    if src in nom:
-                        nom = nom.replace(src, dst)
-                        break
+            if nemotron_h:
+                # poste7-hybrides-etape1-close-gemm-dense-17-09 : le point de
+                # contrôle brut nomme ses tenseurs `backbone.layers.N.mixer.*`
+                # (pas `model.layers.N.*`) -- même table que `_adapt_hf`
+                # (flux principal), sinon `get("model.embed_tokens.weight")`
+                # lève KeyError avant même d'atteindre la boucle par couche
+                # et la calibration entière se replie sur l'arrondi au plus
+                # proche (message vu le 17/09, avant ce correctif).
+                nom = _nemotron_h_rename(k, spec.num_layers)
+                if nom is None:
+                    continue
+            else:
+                nom = k.replace("model.language_model.", "model.")
+                if qwen35:
+                    for src, dst in _QWEN35_RENOMMAGE.items():
+                        if src in nom:
+                            nom = nom.replace(src, dst)
+                            break
             location[nom] = (fn, k)
 
     def get(key: str) -> torch.Tensor:
@@ -194,6 +208,8 @@ def collect_activation_stats(
                 t = t.reshape(t.shape[0], t.shape[-1])
             if key.endswith(_NORMES_ZERO_CENTREES):
                 t = t.to(torch.float32) + 1.0
+        if nemotron_h:
+            t = _nemotron_h_valeur(key, t)
         return t
 
     collector = _StatCollector()
@@ -240,6 +256,25 @@ def collect_activation_stats(
                     collector.attach(layer.mlp, p + "mlp.")
                 else:
                     collector.attach(layer, p)
+                if isinstance(layer.mlp, MoEBlock) and layer.mlp.shared is not None:
+                    # `MoEBlock.shared` (attribut Python) != `mlp.shared_
+                    # expert.*` (clé du manifeste) -- même piège que
+                    # `linear_attn`/`kv_a_proj` ci-dessus, trouvé le 17/09 en
+                    # calibrant nemotron_h (couche MoE, `self_attn=None`,
+                    # attach générique) mais préexistant sur TOUT modèle à
+                    # expert partagé qui n'emprunte pas les branches GDN/MLA
+                    # : le collecteur générique notait les stats sous
+                    # `mlp.shared.up_proj.weight`, jamais lu par `calibrate.
+                    # py` qui cherche `mlp.shared_expert.up_proj.weight` --
+                    # l'expert partagé retombait en silence sur l'arrondi au
+                    # plus proche. `MLP2` (nemotron_h) n'a pas de gate_proj.
+                    collector.attach_named(layer.mlp.shared.up_proj,
+                                           p + "mlp.shared_expert.up_proj.weight")
+                    collector.attach_named(layer.mlp.shared.down_proj,
+                                           p + "mlp.shared_expert.down_proj.weight")
+                    if hasattr(layer.mlp.shared, "gate_proj"):
+                        collector.attach_named(layer.mlp.shared.gate_proj,
+                                               p + "mlp.shared_expert.gate_proj.weight")
                 sorties = []
                 for h in hiddens:
                     n = h.shape[0]
@@ -296,6 +331,89 @@ def _has(get, key: str) -> bool:
 
 def _build_bf16_layer(spec: ModelSpec, prefix: str, get, dev, dtype, rope,
                       index: int, rope_mla=None):
+    if (spec.model_type == "nemotron_h" and spec.layer_types
+            and index < len(spec.layer_types)):
+        # Chaque couche nemotron_h est à USAGE UNIQUE (`layers_block_type` :
+        # "mamba" XOR "moe" XOR "attention", jamais deux ensemble) --
+        # contrairement au dispatch générique ci-dessous, qui suppose
+        # toujours une attention ET un mlp sur la même couche. Sans ces
+        # branches, la construction levait KeyError sur le premier tenseur
+        # absent (`self_attn.q_proj.weight` sur une couche mamba/moe,
+        # `mlp.experts.0.gate_proj.weight` sur une couche moe -- nemotron_h
+        # n'a pas de porte, `MLP2` à 2 projections + ReLU², pas la `MLP` à
+        # 3 projections du dispatch générique) et la couche entière
+        # retombait en IDENTITÉ : les couches EN AVAL calibraient sur un état
+        # caché faux, silencieusement — 23+23 couches sur 52 du vrai modèle.
+        kind = spec.layer_types[index]
+        in_norm = RMSNorm(get(prefix + "input_layernorm.weight").to(dtype).to(dev),
+                          spec.rms_norm_eps)
+        if kind == "mamba":
+            # Même construction que `loader.py:669-682`. `mlp=None` accepté
+            # par `DecoderLayerGDN.forward` (`if self.mlp is None: return x`).
+            # Les statistiques d'entrée de `mamba.in_proj`/`out_proj` que le
+            # collecteur générique attache sous une mauvaise clé
+            # (`linear_attn.in_proj`, pas `mamba.in_proj`) sont sans
+            # conséquence : ces deux tenseurs restent en bf16 depuis
+            # `poste7-hybrides-etape1-close-gemm-dense-17-09`
+            # (`convert.py::TensorRouter.format_for`), jamais lus par AWQ.
+            from ..engine.mamba2 import Mamba2Mixer
+            pm = prefix + "mamba."
+            petit = lambda suffix: get(pm + suffix).to(torch.float32).to(dev)
+            mamba = Mamba2Mixer(
+                in_proj=_plain(get(pm + "in_proj.weight"), dev, dtype),
+                out_proj=_plain(get(pm + "out_proj.weight"), dev, dtype),
+                conv_weight=petit("conv1d.weight"),
+                conv_bias=petit("conv1d.bias") if _has(get, pm + "conv1d.bias") else None,
+                dt_bias=petit("dt_bias.weight"), A=petit("A.weight"), D=petit("D.weight"),
+                norm_weight=petit("norm.weight"),
+                num_heads=spec.mamba_num_heads, head_dim=spec.mamba_head_dim,
+                n_groups=spec.mamba_n_groups, state_size=spec.mamba_state_size,
+                eps=spec.rms_norm_eps).to(dev)
+            return DecoderLayerGDN(index, mamba, None, in_norm, None, dev)
+        if kind in ("mlp", "moe"):
+            # `MLP2` (up/down, ReLU²) -- pas la `MLP` gate/up/down du
+            # dispatch générique, qui n'existe pas sur ce modèle. Même
+            # structure que `loader.py:684-707` : routeur nommé `mlp.gate.*`
+            # (pas `mlp.router.*`, vérifié le 17/09 sur le point de contrôle
+            # réel), expert partagé optionnel sans porte propre.
+            if kind == "mlp":
+                mlp: torch.nn.Module = MLP2(
+                    _plain(get(prefix + "mlp.up_proj.weight"), dev, dtype),
+                    _plain(get(prefix + "mlp.down_proj.weight"), dev, dtype), "relu2")
+            else:
+                router = _plain(get(prefix + "mlp.gate.weight"), dev, torch.float32)
+                experts, e = [], 0
+                while _has(get, prefix + f"mlp.experts.{e}.up_proj.weight"):
+                    experts.append(MLP2(
+                        _plain(get(prefix + f"mlp.experts.{e}.up_proj.weight"), dev, dtype),
+                        _plain(get(prefix + f"mlp.experts.{e}.down_proj.weight"), dev, dtype),
+                        "relu2"))
+                    e += 1
+                shared = None
+                if _has(get, prefix + "mlp.shared_expert.up_proj.weight"):
+                    shared = MLP2(
+                        _plain(get(prefix + "mlp.shared_expert.up_proj.weight"), dev, dtype),
+                        _plain(get(prefix + "mlp.shared_expert.down_proj.weight"), dev, dtype),
+                        "relu2")
+                score_bias = (get(prefix + "mlp.gate.e_score_correction_bias").float().to(dev)
+                             if _has(get, prefix + "mlp.gate.e_score_correction_bias") else None)
+                mlp = MoEBlock(
+                    router, experts, spec.num_experts_per_tok or 2, shared,
+                    norm_topk_prob=bool(spec.raw.get("norm_topk_prob", True)),
+                    scoring=spec.router_scoring, score_bias=score_bias,
+                    routed_scale=spec.routed_scaling_factor)
+            return DecoderLayer(index, None, mlp, in_norm, None, dev)
+        # attention (sans RoPE, `spec.attention_rope` déjà mis à faux par
+        # `load_model_spec`), même construction que `loader.py:709-716`.
+        pa = prefix + "self_attn."
+        attn = Attention(
+            spec,
+            _plain(get(pa + "q_proj.weight"), dev, dtype),
+            _plain(get(pa + "k_proj.weight"), dev, dtype),
+            _plain(get(pa + "v_proj.weight"), dev, dtype),
+            _plain(get(pa + "o_proj.weight"), dev, dtype),
+            None if not spec.attention_rope else rope)
+        return DecoderLayer(index, attn, None, in_norm, None, dev)
     pa = prefix + "self_attn."
     # GDN pur (Qwen3.5, `qwen3_5_text`) : layer_types[index] tranche, jamais
     # une liste de model_type — même critère que loader.py:791 (`est_gdn`).
