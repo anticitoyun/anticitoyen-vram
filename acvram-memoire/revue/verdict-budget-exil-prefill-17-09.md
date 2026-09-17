@@ -120,3 +120,18 @@ ligne CERT sort en moins de 5 min, décodage b=1 ≈ 1-1,5 j/s (PCIe : 40 ×
 (alors la borne mange plus que 4 tours ne rattrapent : lire les chiffres),
 ou moteur à vide encore (alors une troisième file d'attente, à chercher
 avec `ACVRAM_TRACE_STEPS=1`).
+
+### Essai a803254 (poste3) : refus en 7 s, « 3 Mio manquants » × 4 tours — ma faute
+
+Le plancher comptait `max_model_len + 16` jetons (un bloc de marge) : 3 Mio
+au-dessus de la cible du planificateur (0,32 Gio = 166 400 × 2 048), et la
+borne ne fait que RÉDUIRE une cible — quatre tours d'exil (41 MLP au lieu
+de 37) laissaient le budget à 0,32, toujours 3 Mio sous un plancher
+inatteignable. Prédiction fausse par construction, pas par la carte.
+Correctif (poste4) : plancher = exactement `kv_bytes_per_token ×
+max_model_len` (la convention d'`auto_plan`) ; et la cible est d'abord
+relevée au plancher si le plan lui accordait moins, la borne fait le reste.
+Test ajouté : cible 100 Mio sous le plancher → relevée puis bornée au
+plancher. Suite 777 passed. Même scellé que ci-dessus pour l'essai suivant,
+plus : le journal doit montrer un seul tour d'exil supplémentaire (le
+premier suffit : 0,32 Gio revenaient dès le tour 1 chez poste3).

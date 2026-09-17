@@ -54,8 +54,22 @@ def test_le_plancher_est_une_sequence_de_max_model_len():
     plan.kv_bytes_per_token = spec.kv_bytes_per_token()
     assert plan.kv_bytes_per_token == 166400, plan.kv_bytes_per_token   # int8 + échelles : 8,125 bits × 80 × 2 × 8 × 128
     plancher = LD._kv_plancher(plan, spec, 2048, "gpu-test")
-    assert plancher == plan.kv_bytes_per_token * (2048 + 16)
+    assert plancher == plan.kv_bytes_per_token * 2048, "exactement la cible du planificateur pour une séquence"
     assert 0.3 * GIB < plancher < 0.35 * GIB
+
+
+def test_un_plan_dont_la_cible_est_sous_le_plancher_est_releve_puis_borne(monkeypatch):
+    """Essai a803254 (poste3) : cible 0,32 Gio, plancher 3 Mio plus haut, la
+    borne ne fait que réduire → quatre tours « 3 Mio manquants » puis refus.
+    La cible est d'abord relevée au plancher ; la borne fait le reste."""
+    spec = _spec_70b()
+    plan = _plan(80, 30 * GIB, 100 * 2 ** 20)                 # cible bien sous le plancher
+    plan.kv_bytes_per_token = spec.kv_bytes_per_token()
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(LD, "_borner_kv_par_la_vram", _borne_factice(28 * GIB))
+    LD._reajuster_plan(plan, {"tensors": {}}, top_k=8, reserve=3 * GIB)
+    LD._borner_kv_avec_exil(plan, {"tensors": {}}, None, spec, 2048, reserve=3 * GIB)
+    assert plan.kv_budget["gpu-test"] == LD._kv_plancher(plan, spec, 2048, "gpu-test")
 
 
 def test_sous_le_plancher_on_exile_encore_jusqu_a_ce_que_le_kv_tienne(monkeypatch):
