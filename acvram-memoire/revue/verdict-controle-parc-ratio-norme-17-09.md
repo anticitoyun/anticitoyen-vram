@@ -93,17 +93,40 @@ de corpus, ni commit du convertisseur — antérieur au commit `5bce2cc`
 conversions faites APRÈS ce commit. Le converti `-verif17-09` (en cours,
 §3) le portera.
 
-## 3. Reconversion GLM `-verif17-09` (diff octet à octet demandé par poste7) : en cours, lente
+## 3. Reconversion GLM `-verif17-09` : terminée, expert partagé NON affecté (promotion int8)
 
-`--quant-device cpu` (reproduction exacte des options du k48-calibA
-d'origine — la byte-exactitude du témoin l'exige, changer de device
-aurait faussé la comparaison). Démarré 16h16:07, 1er fragment écrit
-19h03:03 (délai 2h46:56 = 166,9 min) — contention CPU confirmée (Nemotron
-en file + suite pytest complète tournaient en parallèle sur le même
-processeur jusqu'à leur propre fin). L'original (`k48-calibA`, seul sur
-CPU) avait pris 81,7 min au total. 2e fragment attendu avant 2× ce délai
-(~00h37 le 18/09) sans quoi c'est un vrai blocage. Toujours en cours à
-21h20 (1/5 fragments), pas encore de verdict sur l'expert partagé de GLM.
+Durée totale 22625,1 s (6h17), contre 81,7 min pour l'original seul sur
+CPU — contention confirmée (Nemotron en file + suite pytest complète en
+parallèle jusqu'à leur propre fin, ~3h de recouvrement). 1er fragment à
+19h03:03 (délai 166,9 min), le reste a suivi sans second blocage une fois
+la suite pytest terminée. Conversion réussie, garde ratio_norme jamais
+déclenchée (aucun refus).
+
+**Diff octet à octet, résultat surprenant** : les 141 tenseurs
+`mlp.shared_expert.*` sont en format **int8** dans les DEUX convertis
+(promotion `mixed_precision=auto`, SNR NVFP4 brut sous le plancher 25 dB),
+`has_act_scale=False` et `out_snr_db` **identiques à 2 décimales près**
+dans les deux versions (ex. couche 1 down_proj : 44,36 dB dans les deux).
+**L'AWQ est délibérément désactivé sur les tenseurs int8** (retiré depuis
+`poste7-organisation-16-09.md`/poste1 : compense une erreur ~16× plus petite
+pour le même coût) — le correctif de clé de l'expert partagé
+(`0e4ef38`) ne pouvait donc rien changer ici : la statistique qu'il
+corrige n'est simplement jamais consultée pour un tenseur promu en int8.
+
+**Conclusion révisée** : le code était bien vulnérable (branche MLA
+inconditionnelle, comme rapporté), mais sur CE converti GLM précis,
+l'expert partagé est protégé par la promotion int8, pas par le
+correctif — la casse théorique n'a eu AUCUN effet pratique sur les
+chiffres déjà publiés (privé 1,0143, public 1,0281). Témoin de contrôle
+(un expert routé, format nvfp4, censé être insensible au correctif
+expert-partagé) : écart de reconstruction de 10,7 % entre les deux
+convertis malgré un `out_snr_db` identique à 2 décimales -- la recherche
+AWQ (grille à 20 points) n'est PAS bit-exacte d'une exécution à l'autre
+(réductions flottantes multi-thread non associatives), même si la
+QUALITÉ retenue l'est. Le diff octet à octet demandé n'est donc
+concluant que par les MÉTADONNÉES (format, has_act_scale, SNR), pas par
+l'égalité des octets bruts -- à signaler pour toute future demande de
+diff « byte-exact » sur cette pile.
 
 ## Suite
 
