@@ -1800,7 +1800,9 @@ _MOE_DECODE_MMA_MIN_T = int(os.environ.get("ACVRAM_MOE_DECODE_MMA_MIN_T", "5"))
 # 2 (défaut depuis verdict-f2-topk-17-09, critère plancher tenu) :
 # moe_route + route_prep fusionnés (route_fusee)
 _ROUTE_PREP = int(os.environ.get("ACVRAM_ROUTE_PREP", "2"))
-# Poste F, fusion (3a) : normes + RoPE + kv_write en un noyau Triton (opt-in)
+# Poste F, fusion (3a) : normes + RoPE + kv_write en un noyau Triton — RÉFUTÉ
+# (verdict-f3a-finale-17-09 : corrompt le cache sous graphe, ou codes ≠
+# kv_write_int8 selon la version ; kernels/rope_kv.py) ; témoin, jamais défaut
 _ROPE_KV = os.environ.get("ACVRAM_ROPE_KV", "0") == "1"
 # Poste F, fusion (3b) : norme d'entrée absorbée par le GEMV int8 q/k/v — RÉFUTÉ
 # (poste3 6dbb1bb : exact, −47 lancements, mais +0,31 ms/pas : chaque bloc du

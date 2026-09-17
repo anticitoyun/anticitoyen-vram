@@ -79,7 +79,7 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("NORME_FUSEE", "0", ("acvram.engine.model", "_NORME_FUSEE"), "0",
              "poste F (3b) : norme d'entrée dans le GEMV int8 q/k/v — RÉFUTÉ 6dbb1bb (+0,31 ms/pas, norme recalculée par bloc), témoin"),
     Variable("ROPE_KV", "0", ("acvram.engine.model", "_ROPE_KV"), "0",
-             "poste F (3a) : normes par tête + RoPE + kv_write int8 en un noyau Triton"),
+             "poste F (3a) : normes + RoPE + kv_write int8 en un noyau Triton — RÉFUTÉ a3f1b7e (corrompt sous graphe / codes ≠ kv_write_int8), témoin"),
     Variable("ROUTE_PREP", "2", ("acvram.engine.model", "_ROUTE_PREP"), "0",
              "poste F : 2 = moe_route + route_prep fusionnés (F2, défaut, verdict-f2-topk-17-09) | 1 = route_prep seul (F1) | 0 = torch"),
     Variable("MOE_DECODE_FUSED", "0", ("acvram.engine.model", "_MOE_DECODE_FUSED"), "0"),

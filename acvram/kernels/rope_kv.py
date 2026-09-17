@@ -1,4 +1,19 @@
-"""Norme par tête + RoPE + écriture int8 du cache KV en UN lancement —
+"""RÉFUTÉ, TÉMOIN NOMMÉ (F3a, 17/09, verdict-f3a-finale-17-09 a3f1b7e) : ce noyau
+n'est jamais défaut. Deux faits incompatibles, non résolus : (1) la seule
+version saine en situ sous rejeu de graphe (celle-ci, d462c24 : PPL décodage
+5,59 pour 5,54, cache Triton chaud ou vidé) ne rend pas les codes int8 de
+kv_write_int8 aux demi-entiers exacts (tests carte 3/6 : contraction fma du
+produit x·(1/sc), l'arrondi maison lit le produit non arrondi) ; (2) les quatre
+variantes qui les rendent (sqrt_rn/fdiv ieee, inverses fp64, libdevice.rint,
+produit fp64→fp32 : df4db39…ece3bed) corrompent le cache pas à pas SOUS GRAPHE
+SEULEMENT (PPL 26 à 249 701, non reproductible ; saines en eager ; PTX sm_120
+sans scratch, mémoire locale ni appel — cause non identifiée). Gain visé :
+−48 lancements, −0,10 ms par pas à b=1 (rope_inplace + kv_write_int8). Reste
+`ACVRAM_ROPE_KV=1`, opt-in, pour qui reprend la cause avec la sonde
+outils/sonde-rope-kv-situ-17-09.py (à corriger : A et B dans deux processus,
+sinon B charge DÉGRADÉ sans graphe et la sonde ne juge pas le régime qui casse).
+
+Norme par tête + RoPE + écriture int8 du cache KV en UN lancement —
 poste F, fusion (3a) (verdict-lancements-b1-17-09 : `rope_inplace` × 48
 0,100 ms et `kv_write_int8` × 48 0,080 ms par pas à b = 1).
 
