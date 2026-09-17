@@ -334,15 +334,35 @@ def mesure_prefill(client: httpx.Client, base_url: str, modele: str,
            "prefill_jetons_vises": jetons_vises, "prefill_jetons_reels": reels}
 
 
+def _invite_enumeration(k: int) -> str:
+    """Conçue pour un LONG débit, pas pour ressembler à un prompt réel : une
+    énumération n'a structurellement aucune raison de s'arrêter avant la
+    borne demandée, contrairement à `_invite_texte` (mots remaniés) sur
+    lequel certains modèles émettent leur second `eos_token_id`
+    (`<|endoftext|>`, souvent aussi bos/pad) bien avant `n_tokens` —
+    `revue/verdict-asymetrie-eos-b1-17-09.md`. `k` décale le point de départ
+    pour éviter le cache de préfixe entre passages, comme `_invite_texte`."""
+    debut = 1 + k * 37
+    return (f"[graine {k}] Énumère, un par ligne et sans rien ajouter "
+           f"d'autre, tous les entiers de {debut} jusqu'à {debut + 400}.")
+
+
 def mesure_decode_b1(client: httpx.Client, base_url: str, modele: str,
                      n_tokens: int = 256, prompt_len: int = 128,
                      chauffe: int = 1, repetitions: int = 3) -> dict:
     """débit b=1, mesuré chunk à chunk en flux (exclut le TTFT/préfill, comme
     `stats.decode_seconds` côté acvram — ici recalculé côté client puisque le
-    moteur en face n'est pas forcément acvram)."""
+    moteur en face n'est pas forcément acvram).
 
-    def un_passage(k: int) -> tuple[Optional[float], int]:
-        invite = _invite_texte(20_000 + k, prompt_len * 4)
+    Deux invites essayées avant de laisser la colonne vide : l'invite
+    normale (texte remanié) d'abord, puis — seulement si elle s'arrête
+    avant `n_tokens // 2` jetons — une énumération conçue pour un long
+    débit (poste7, 17/09, suite à l'asymétrie acvram/GGUF). Même règle des
+    deux côtés : EOS avant `n_tokens // 2` → colonne vide, jamais un débit
+    calculé sur un démarrage tronqué."""
+
+    def un_passage(k: int, fabrique_invite) -> tuple[Optional[float], int]:
+        invite = fabrique_invite(k)
         horodatages, texte = [], ""
         with client.stream("POST", f"{base_url}/v1/completions", json={
                 "model": modele, "prompt": invite, "max_tokens": n_tokens,
@@ -364,26 +384,36 @@ def mesure_decode_b1(client: httpx.Client, base_url: str, modele: str,
             return None, n_produits
         return (n_produits - 1) / (horodatages[-1] - horodatages[0]), n_produits
 
-    for k in range(chauffe):
-        un_passage(k)
-    taux, produits = [], 0
-    for k in range(repetitions):
-        t, produits = un_passage(chauffe + k)
-        if t is not None:
-            taux.append(t)
+    def essai(fabrique_invite, decalage: int) -> tuple[list[float], int]:
+        for k in range(chauffe):
+            un_passage(decalage + k, fabrique_invite)
+        taux, produits = [], 0
+        for k in range(repetitions):
+            t, produits = un_passage(decalage + chauffe + k, fabrique_invite)
+            if t is not None:
+                taux.append(t)
+        return taux, produits
 
     # Défaut = refus : un modèle qui coupe sur EOS avant `n_tokens` mesure son
     # démarrage, pas son débit (même piège documenté dans bench_decode).
+    taux, produits = essai(lambda k: _invite_texte(20_000 + k, prompt_len * 4), 0)
+    invite_retenue = "texte remanié"
+    if produits < n_tokens // 2:
+        taux2, produits2 = essai(_invite_enumeration, 100)
+        if produits2 > produits:
+            taux, produits, invite_retenue = taux2, produits2, "énumération"
+
     if produits < n_tokens // 2:
         return {"refus": f"génération arrêtée à {produits}/{n_tokens} jetons "
-                         f"(EOS du modèle) : le débit porterait sur le "
-                         f"démarrage, pas sur le décodage."}
+                         f"(EOS du modèle, deux invites essayées — texte "
+                         f"remanié et énumération) : le débit porterait sur "
+                         f"le démarrage, pas sur le décodage."}
     if not taux:
         return {"refus": "aucun passage n'a produit assez de jetons pour un débit"}
     taux.sort()
     return {"decode_tok_s": round(taux[len(taux) // 2], 2),
            "decode_jetons_produits": produits, "decode_repetitions": len(taux),
-           "decode_b1_note": DECODE_B1_NOTE}
+           "decode_invite": invite_retenue, "decode_b1_note": DECODE_B1_NOTE}
 
 
 # ---------------------------------------------------------------------------

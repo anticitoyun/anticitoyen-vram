@@ -69,3 +69,29 @@ complet des `eos_token_id` (si l'outil de conversion le permet), ou
 accepter l'asymétrie comme propriété connue du format et l'annoter dans
 les menus au même titre que la note b=1 « décodage pur en flux » déjà
 actée par poste7.
+
+## Suite (poste7, tranché (b) : documenter, pas régénérer)
+
+* **Fiche** : `mesure_decode_b1` (`outils/fiche-service.py`) essaie
+  désormais une seconde invite conçue pour un long débit — une
+  énumération d'entiers, structurellement sans raison de s'arrêter —
+  avant de laisser la colonne b=1 vide. Même règle des deux invites :
+  EOS avant `n_tokens // 2` → refus, jamais un débit calculé sur un
+  démarrage tronqué. Le champ `decode_invite` de la fiche dit laquelle a
+  servi (`"texte remanié"` ou `"énumération"`).
+* **Phrase à porter dans les menus** (mot pour mot, poste7) : « b=1 vide =
+  arrêt correct sur EOS avant 256 jetons, pas un défaut de mesure ;
+  llama.cpp continue parce que son GGUF ne déclare qu'un eos sur deux » —
+  fichier:ligne des deux côtés : `generation_config.json` du converti
+  acvram (`eos_token_id` à deux entrées) contre les métadonnées du GGUF
+  (`tokenizer.ggml.eos_token_id`, une seule entrée) ; le piège lui-même
+  est déjà nommé dans `acvram/quant/gguf.py:637-650`. La ligne llama.cpp
+  des entrées concernées porte « génère jusqu'à max_tokens (eos
+  incomplet) » — sa vitesse reste valide, régime nommé, ce n'est pas un
+  débit à jeter.
+* **Noté pour plus tard, pas maintenant** (poste7) : `SamplingParams`
+  n'a ni `ignore_eos` ni `min_tokens` — `acvram/bench.py:417` le
+  documente déjà comme limite connue. Petit chantier moteur possible
+  après la campagne (forcer un lot de jetons minimal indépendamment de
+  l'EOS, pour que la mesure b=1 ne dépende plus du choix du modèle de
+  s'arrêter ou non) ; hors périmètre ici.

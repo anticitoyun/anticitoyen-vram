@@ -57,7 +57,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
-                for i in range(req.get("max_tokens", 1)):
+                demandes = req.get("max_tokens", 1)
+                # « TRONQUE » simule un EOS précoce (texte remanié, invite
+                # normale) ; « Énumère » (fabrique_invite de secours) va
+                # jusqu'au bout — reproduit l'asymétrie qui motive le repli
+                # sur une seconde invite dans mesure_decode_b1.
+                rendus = 1 if "TRONQUE" in prompt else demandes
+                for i in range(rendus):
                     morceau = {"choices": [{"text": "x", "finish_reason": None}]}
                     self.wfile.write(f"data: {json.dumps(morceau)}\n\n".encode())
                     self.wfile.flush()
@@ -161,6 +167,33 @@ def test_mesure_decode_b1(serveur):
     assert "refus" not in r
     assert r["decode_tok_s"] > 0
     assert r["decode_jetons_produits"] == 16
+    assert r["decode_invite"] == "texte remanié"
+
+
+def test_mesure_decode_b1_retombe_sur_l_enumeration_si_eos_precoce(serveur, monkeypatch):
+    """poste7, 17/09 (asymétrie acvram/GGUF) : une invite normale qui s'arrête
+    avant `n_tokens // 2` (le faux serveur simule l'EOS via « TRONQUE ») doit
+    faire essayer l'énumération avant de renvoyer un refus."""
+    monkeypatch.setattr(fiche_service, "_invite_texte",
+                        lambda graine, n: f"[TRONQUE {graine}]")
+    with httpx.Client() as client:
+        r = fiche_service.mesure_decode_b1(client, serveur, "m", n_tokens=16,
+                                           prompt_len=8, chauffe=0, repetitions=2)
+    assert "refus" not in r, r
+    assert r["decode_invite"] == "énumération"
+    assert r["decode_jetons_produits"] == 16
+
+
+def test_mesure_decode_b1_refuse_si_les_deux_invites_tronquent(serveur, monkeypatch):
+    monkeypatch.setattr(fiche_service, "_invite_texte",
+                        lambda graine, n: f"[TRONQUE {graine}]")
+    monkeypatch.setattr(fiche_service, "_invite_enumeration",
+                        lambda k: f"[TRONQUE enum {k}]")
+    with httpx.Client() as client:
+        r = fiche_service.mesure_decode_b1(client, serveur, "m", n_tokens=16,
+                                           prompt_len=8, chauffe=0, repetitions=2)
+    assert "refus" in r
+    assert "deux invites essayées" in r["refus"]
 
 
 def test_mesure_refus(serveur):
