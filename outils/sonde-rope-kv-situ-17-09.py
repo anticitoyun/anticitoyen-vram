@@ -12,9 +12,11 @@ noyau n'est pas rejoué par le graphe), ou STALE (contenu d'un autre pas).
 On imprime les 16 premiers pas puis le décompte sur `PAS` pas — la première
 catégorie non IDENTIQUE dit où chercher.
 
-    ACVRAM_KV_FORMAT=int8 outils/carte.sh .venv/bin/python outils/sonde-rope-kv-situ-17-09.py [prefixe=256] [pas=64]
+    ACVRAM_KV_FORMAT=int8 ACVRAM_MOE_MMA=0 ACVRAM_MOE_DECODE_MMA=0 ACVRAM_NARROW_GEMM=1 \
+        outils/carte.sh .venv/bin/python outils/sonde-rope-kv-situ-17-09.py [prefixe=256] [pas=64]
 
-Ne pose pas ACVRAM_ROPE_KV dans l'environnement : la sonde bascule le module.
+(le régime classé de la cellule F ; sans effet sur l'écriture du cache, mais
+c'est le régime jugé). Ne pose pas ACVRAM_ROPE_KV : la sonde bascule le module.
 """
 import os
 import sys
@@ -63,8 +65,14 @@ def decode(eng, ids, releves):
         s = seq_ref.get("s")
         if s is None or not s.blocks:
             continue
-        n = len(s.prompt_ids) + len(s.output_ids) - 1          # position du dernier jeton écrit
-        if n < PREFIXE:
+        # position du jeton ENTRÉ à ce pas (donc écrit dans le cache) : le
+        # dernier échantillonné (output_ids[-1]) n'y est pas encore — poste3 :
+        # IndexError sur le bloc 16 au premier pas, n = 256 alors que 256
+        # n'est écrit qu'au pas suivant
+        n = len(s.prompt_ids) + len(s.output_ids) - 2
+        if n < PREFIXE or n // 16 >= len(s.blocks):
+            continue
+        if releves and releves[-1][0] == n:
             continue
         blk, off = s.blocks[n // 16], n % 16
         releves.append((n, c0.k[blk, off].clone(), c0.k_scale[blk, off].clone(), c0.v[blk, off].clone()))
