@@ -149,3 +149,15 @@ prises. Correctif : premier emplacement LIBRE à partir du tour de rôle ; le
 refus reste quand tout est en vol. Juge : `test_pool_dense_exil.py::
 test_le_pool_prend_un_emplacement_libre_pas_le_tour_de_role` (la séquence
 ci-dessus, puis saturation réelle → RuntimeError). Suite 778 passed.
+
+### Régression de la réserve (poste3, fla-17-09) : 13,04 Gio réservés sans `max_model_len` — corrigée
+
+`_reserve_prefill` prenait, faute de `max_model_len`, `kv_max_tokens` du
+manifeste : la CAPACITÉ KV planifiée toutes séquences (56 401 jetons sur
+Qwen3.8-27B), pas une longueur d'invite → 13,04 Gio d'activations réservées,
+19/64 couches exilées d'un modèle de 13,1 Gio, instrument de préfill refusé
+(« régime dégradé ») ; mêmes refus sur Kimi (147 experts) et Nemotron au
+palier 2. Correctif : `ctx = max_model_len or 8192` (le défaut du moteur),
+jamais `kv_max_tokens` ; test : 56 401 planifiés → réserve de 8 192, et de
+4 096 quand `max_model_len` le dit. Sur Qwen3.8 à 4 096 : 1,05 Gio
+d'activations + 0,8 Gio de tampons denses = 1,85 Gio.
