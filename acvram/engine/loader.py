@@ -904,6 +904,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 m.fuse()
             elif isinstance(m, Attention):
                 m.fuse()
+            elif hasattr(m, "fuse") and type(m).__name__ == "GatedDeltaNet":
+                m.fuse()
 
     # Chaque empilement alloue son tenseur concatene avant de liberer les deux
     # sources : 0,355 Gio de pic par fusion, 95 fois. Les blocs liberes restent

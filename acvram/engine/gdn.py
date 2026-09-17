@@ -108,6 +108,24 @@ class GatedDeltaNet(nn.Module):
         self.kernel = conv_weight.shape[-1]
         self.eps = eps
 
+    # -- quatre projections de même entrée en un lancement (palier 2) -----
+    def fuse(self) -> bool:
+        """qkv, gate, α, β lisent x : une multi-projection NVFP4 (chacune
+        avec son scaler) à 2 ≤ b ≤ 32 sous ACVRAM_DENSE_NVFP4=triton."""
+        from .model import _multi_projection
+        self.multi = _multi_projection([self.qkv, self.gate, self.alpha, self.beta_proj])
+        return self.multi is not None
+
+    def _projections(self, x: torch.Tensor):
+        """(qkv, z, b, a) en fp32 — un lancement si la multi-projection sert."""
+        from .model import _multi_utilisable
+        mp = getattr(self, "multi", None)
+        if _multi_utilisable(mp, x, x.shape[0]):
+            qkv, z, a, b = torch.split(mp(x), mp.tailles, dim=-1)
+            return qkv.to(torch.float32), z.to(torch.float32), b.to(torch.float32), a.to(torch.float32)
+        return (self.qkv(x).to(torch.float32), self.gate(x).to(torch.float32),
+                self.beta_proj(x).to(torch.float32), self.alpha(x).to(torch.float32))
+
     # -- normalisation gated (RMSNorm de la sortie, porte SiLU(z)) --------
     def _norm_gated(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         x32 = x.to(torch.float32)
@@ -126,10 +144,7 @@ class GatedDeltaNet(nn.Module):
 
         # toute la récurrence se calcule en float32 : la règle delta cumule
         # des produits d'état où le bfloat16 dérive vite
-        qkv = self.qkv(x).to(torch.float32)                 # [t, conv_dim]
-        z = self.gate(x).to(torch.float32)                  # [t, value_dim]
-        b = self.beta_proj(x).to(torch.float32)             # [t, nv]
-        a = self.alpha(x).to(torch.float32)                 # [t, nv]
+        qkv, z, b, a = self._projections(x)                 # [t, conv_dim], [t, value_dim], [t, nv] × 2
 
         # convolution causale depthwise, avec état (kernel-1 colonnes)
         seq = qkv.t().unsqueeze(0)                          # [1, conv_dim, t]
@@ -218,10 +233,7 @@ class GatedDeltaNet(nn.Module):
         jetons (un par séquence) ; ``conv_state`` [b, conv_dim, k-1] est mis
         à jour EN PLACE. Rend (q, k, v, g, beta, z) aux formes de fla."""
         b = x.shape[0]
-        qkv = self.qkv(x).to(torch.float32)                 # [b, conv_dim]
-        z = self.gate(x).to(torch.float32)
-        bt = self.beta_proj(x).to(torch.float32)
-        a = self.alpha(x).to(torch.float32)
+        qkv, z, bt, a = self._projections(x)
         seq = torch.cat([conv_state, qkv.unsqueeze(-1)], dim=-1)   # [b, conv_dim, k]
         conv_state.copy_(seq[:, :, 1:])
         conv = F.silu(F.conv1d(seq, self.conv_weight.unsqueeze(1), groups=self.conv_dim))

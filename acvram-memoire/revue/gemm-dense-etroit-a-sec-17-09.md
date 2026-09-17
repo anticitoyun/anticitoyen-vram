@@ -48,3 +48,50 @@ et le décodage par table laissent la bande inoccupée — alors BK plus grand
 `cli.VARIABLES_LUES` : `ACVRAM_PREFILL_A4` (21b6476 sur main l'avait mis dans
 regime.VARIABLES mais pas dans la liste de cadrage : `test_cadrage_perplexite`
 rouge en suite complète).
+
+## Palier 2 (poste7-gemm-dense-porte-fermee-palier-17-09 § 3) — à sec, second commit
+
+Banc de poste3 (21033b7, M = 12) : q 0,72 · kv 0,47 · o 0,86 · gdn_qkv 1,01 ·
+gdn_out 0,83 · gate_up 0,94 · down 1,09 To/s — le taux suit N : la porte
+palier 1 (min ≥ 1,3) fermée ; ma prédiction (q/k/v/o 1,0-1,4) réfutée sauf
+sur down.
+
+Fait vérifié avant d'écrire : **l'empilement q/k/v existe déjà**
+(`Attention.fuse` → `stack_nvfp4_linears`) mais il est REFUSÉ sur calibA —
+`_scaler_commun` : act_scale q ≠ k ≠ v (max |q − k| = 19,4 sur la couche 3),
+qkv ≠ gate du GDN (0,53). Une conversion calibrée par projection ne s'empile
+pas sans requantifier ; c'est un choix du convertisseur (poste2), pas du
+moteur. D'où, sans toucher aux poids :
+
+1. **`MultiProjection`** (`kernels/gemm_dense_etroit.py`) : plusieurs
+   projections NVFP4 de même entrée en UN lancement, chacune avec SON scaler
+   (x / s calculé en fp32 dans le noyau puis arrondi — le même arrondi que
+   `ChannelScaler.apply` en torch), table de pointeurs (poids, échelles de
+   bloc, scalers), tuiles par projection, échelle globale concaténée.
+   Branchée : `Attention.fuse()` la pose quand l'empilement refuse
+   (`qkv_multi`, servie par `_proj` à 2 ≤ t ≤ 32 sous
+   `ACVRAM_DENSE_NVFP4=triton`) ; `GatedDeltaNet.fuse()` (nouveau, appelé
+   par le chargeur) sert qkv + gate + α + β (N = 16 480) en un lancement.
+2. **Tranches K** : `_PROGRAMMES_PAR_SM` balayé par le banc (2 / 4 / 8) sur
+   toutes les formes ; **réduction fusionnée** (`_reduire_kernel` : somme des
+   partiels + sortie bf16 en un lancement, contre deux en torch) — sur kv à
+   13 µs, un lancement compte.
+3. Banc : formes réelles du pas (qkv_multi 6144+1024+1024 avec scalers
+   distincts, gdn_multi, o, gdn_out, gate_up, down, × couches 17/48/65),
+   témoin `separees_triton` (palier 1) et gemv/narrow sur q et kv ; juge =
+   **taux pondéré par les octets du pas** (meilleure config exacte par
+   forme) : ≥ 1,0 OUVRE, < 0,85 FAUX. Le JSON porte `pondere_To_s` et
+   `ms_gemm_pas` (la somme des GEMM du pas à M = 12).
+
+Juge à sec : `test_gemm_dense_etroit.py` +4 — multi = projections séparées
+(M 2/12/32, scalers distincts), sans scaler + échelle par ligne, bras
+cassant : scalers échangés entre projections → rouge ; intégration GDN
+(`fuse()` puis forward sous `triton` = forward sous `gemv`). Suite 811.
+
+Prédiction scellée (banc poste3, M = 12) : qkv_multi 0,95-1,05 (le gdn_qkv
+1,01 en est le témoin, même N), gdn_multi 1,0-1,1, o et gdn_out 0,90-1,0
+avec 4-8 programmes/SM (pas ≥ 1,0 : la réduction fp32 grandit avec les
+tranches), gate_up 0,95-1,05, down 1,05-1,15 ; **pondéré 0,95-1,05**. Faux
+si < 0,85 : alors la sous-occupation n'est pas la seule cause (latence du
+décodage par table dans la boucle K) et c'est le noyau CUDA (§ 4 de poste7).
+En situ ensuite (poste3) : pas GEMM ≈ 16-19 ms ⇒ 500-600 t/s.
