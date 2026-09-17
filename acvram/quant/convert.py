@@ -1083,6 +1083,33 @@ def _convertisseur_commit() -> Optional[dict]:
     return {"commit": commit, "arbre_modifie": sale}
 
 
+def _sha256_du_checkpoint(chemin: str) -> Optional[str]:
+    """sha256 combiné des poids source (un hash par fichier, puis hash de la
+    liste triée `nom:sha256`) -- poste7-diff-octet-a-octet-retire-17-09,
+    REGLES §4 : « un converti est identifié par son sha256, jamais par ses
+    options » vaut tout autant pour la SOURCE. Deux répertoires du même nom
+    mais de contenu différent (source déplacée/remplacée en silence) ne se
+    distinguent pas par le chemin ni par le compte d'octets seul (`_octets_
+    du_checkpoint`) si les tailles coïncident par hasard.
+    `None` si aucun fichier de poids trouvé — jamais une valeur devinée."""
+    import hashlib
+    fichiers = []
+    for r, _, fs in os.walk(chemin):
+        for f in fs:
+            if f.endswith((".safetensors", ".bin", ".gguf")):
+                fichiers.append(os.path.join(r, f))
+    if not fichiers:
+        return None
+    par_fichier = []
+    for f in sorted(fichiers):
+        h = hashlib.sha256()
+        with open(f, "rb") as fh:
+            for bloc in iter(lambda: fh.read(1 << 20), b""):
+                h.update(bloc)
+        par_fichier.append(f"{os.path.basename(f)}:{h.hexdigest()}")
+    return hashlib.sha256("\n".join(par_fichier).encode()).hexdigest()
+
+
 def _octets_du_checkpoint(chemin: str) -> int:
     """Somme des poids du checkpoint source, pour reconnaitre une source
     renommee ou deplacee. La taille seule ne PROUVE pas l identite — deux
@@ -1178,7 +1205,29 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             "chemin": os.path.abspath(model_path),
             "nom": os.path.basename(os.path.abspath(model_path)),
             "octets": _octets_du_checkpoint(model_path),
+            "sha256": _sha256_du_checkpoint(model_path),
         },
+        # poste7-diff-octet-a-octet-retire-17-09 (REGLES §4) : la recherche AWQ
+        # n'est PAS bit-exacte d'une execution a l'autre (reductions
+        # flottantes multi-thread non associatives, mesure sur GLM -- 10,7 %
+        # d'ecart de reconstruction sur un tenseur nvfp4 malgre un SNR
+        # identique a 2 decimales). Aucune graine ne corrige cela : le
+        # chemin de calibration/quantification n'a pas de generateur
+        # aleatoire, donc rien a fixer -- l'ecart vient du threading, pas du
+        # hasard. Champ honnête, pas fabriqué : documente l'ABSENCE d'un
+        # levier plutôt que d'y mettre une valeur qui n'en contrôle rien.
+        "graine": {
+            "valeur": None,
+            "note": "aucun generateur aleatoire dans la calibration/"
+                    "quantification -- la non-determinisme observee vient "
+                    "des reductions flottantes multi-thread, pas d'une graine.",
+        },
+        "avertissement_determinisme": (
+            "AWQ non deterministe : un converti est identifie par son "
+            "sha256 (poids ET manifeste), jamais par ses options -- deux "
+            "conversions aux memes options peuvent differer de l'ordre de "
+            "10 % sur la reconstruction d'un tenseur nvfp4, meme SNR "
+            "rapporte."),
         # Ce qui a ete demande et ce qui est sorti, cote a cote et toujours,
         # meme quand ils coincident. Un manifeste qui ne porte que le resultat
         # laisse croire qu'il a ete voulu.
