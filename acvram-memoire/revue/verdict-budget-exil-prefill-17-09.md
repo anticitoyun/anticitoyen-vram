@@ -58,3 +58,22 @@ passe ; décodage b=1 ≤ 5 j/s (lié à la bande PCIe : 40 couches × 0,36 Gio 
 pas ≈ 14 Gio à 21 Go/s ≈ 0,7 s/pas ⇒ ~1,5 j/s plus probable). Faux si : OOM
 encore (alors une troisième cause, à chercher avec `torch.cuda.memory_summary`
 au moment de l'échec) ou exil > 52 (la réserve mange trop).
+
+### Essai (poste3, 09:09-09:41, ee69a7b = main ce4014e)
+
+- Instrument PPL, 3 tranches : exil **57/80** (ma borne « faux si > 52 » est
+  dépassée : prédiction fausse sur ce montage — l'instrument charge sans
+  godets b=1 ni HYBRID_SLOTS=1, sa réserve est plus grosse), arène 20,45 Gio,
+  aucun OOM, PPL ≈ 22 (GGUF source à comparer). L'OOM du préfill est levé :
+  c'était bien les deux copies privées.
+- Rondes b=1 (certifie-b12, HYBRID_SLOTS=1, ctx 2048) : DÉGRADÉ 37/80 (dans
+  34-40), arène 13,07 Gio, préfill passé, puis **blocage** : 33 min sans une
+  ligne, GPU 0 %, 17-22 W ; fil principal en `poll` (attente CUDA bloquante),
+  36 fils python en futex (pool torch au repos), cuda-EvtHandlr en poll.
+  Aucun verrou Python dans le moteur (runner.py:382 seul) : le flux de calcul
+  attend un événement du flux de copie du pool, ou l'inverse. Pile Python
+  illisible (ptrace_scope=1, processus sous setsid, pas de sudo). Tué 09:41.
+- Témoin lancé 09:42 : même commande avec `ACVRAM_POOL_SYNC=1` (layers.py:365 :
+  copies sur le flux de calcul, sans flux annexe ni événement). Prédiction
+  scellée avant : décode (~1 j/s) ⇒ cause dans l'ordonnancement événements/flux
+  du pool appliqué aux denses ; bloque aussi ⇒ pas le pool, « refus » publié.
