@@ -1053,6 +1053,36 @@ def _diagnostic_fusion(tensors: dict) -> dict:
     }
 
 
+def _convertisseur_commit() -> Optional[dict]:
+    """Commit du convertisseur qui a écrit CE manifeste -- REGLES §4 : une
+    mesure porte son régime dans son en-tête, pas dans un nom de fichier ou
+    une mémoire. Un correctif du convertisseur (par exemple `0e4ef38`,
+    calibration nemotron_h) change le régime des convertis qu'il produit ;
+    sans ce champ, deux manifestes au même nom peuvent être de deux régimes
+    et rien ne le distingue. `None` (pas un défaut deviné) si le paquet
+    n'est pas une extraction git -- une installation figée n'a pas de
+    commit à rapporter."""
+    import subprocess
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # `.git` est un FICHIER (pas un dossier) dans un git WORKTREE -- `isdir`
+    # aurait rendu None sur tous nos convertis produits depuis un worktree
+    # (poste2, poste3, poste4, ...), la norme ici, pas l'exception.
+    if not os.path.exists(os.path.join(repo, ".git")):
+        return None
+    try:
+        commit = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5, check=True
+        ).stdout.strip()
+        sale = bool(subprocess.run(
+            ["git", "-C", repo, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=5, check=True
+        ).stdout.strip())
+    except (subprocess.SubprocessError, OSError):
+        return None
+    return {"commit": commit, "arbre_modifie": sale}
+
+
 def _octets_du_checkpoint(chemin: str) -> int:
     """Somme des poids du checkpoint source, pour reconnaitre une source
     renommee ou deplacee. La taille seule ne PROUVE pas l identite — deux
@@ -1131,6 +1161,10 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     writer = ShardWriter(opts.out_dir)
     manifest: dict[str, Any] = {
         "acvram_version": 1,
+        # poste7-expert-partage-cle-portee-17-09, REGLES §4 : un correctif du
+        # convertisseur (ex. 0e4ef38) change le régime des convertis qu'il
+        # produit -- ce champ distingue les manifestes d'avant/après.
+        "convertisseur": _convertisseur_commit(),
         "model": spec.to_dict(),
         "plan": plan.to_dict(),
         "options": asdict(opts),
@@ -1231,6 +1265,29 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             continue
 
         st = stats.get(name) if stats else None
+        # poste7-hybrides-etape1-close-gemm-dense-17-09 : Nemotron calibA PPL
+        # 1,4301 vs 1,0304 sans calibration, degradation uniforme sur les 3
+        # tranches. Diff tenseur par tenseur (a sec, disque) : 70 tenseurs
+        # exclus (mamba.in_proj/out_proj, self_attn) byte-identiques entre
+        # les deux convertis (pas la cause) ; expert partage sain (ratio de
+        # norme 0,994 +/- 0,015) ; MAIS 6/346 experts.*.down_proj
+        # echantillonnes ont un ratio de norme calibA/officielle de 0,29 a
+        # 0,69 (SNR interne pourtant bon, 27-29 dB -- coherent avec la
+        # metrique W_EFF, pas avec le poids d'origine une fois reechelonne).
+        # Cause : `act_scale` de ces tenseurs s'etend sur 1,68e6x/2,4e5x
+        # (0,0001 a 177, 0,008 a 19) contre ~630x pour un tenseur sain
+        # (0,013 a 8,1) -- la recherche AWQ (`search_channel_scales`,
+        # clamp PAR VALEUR a [1e-4,1e4], jamais sur l'ETENDUE) tire un motif
+        # de salience extreme d'une statistique BRUITEE : un expert MoE peu
+        # routé sur bras-A (prose anglaise, 32 sequences) voit une poignee
+        # de jetons, et `mean_abs` par canal n'estime plus rien -- exactement
+        # le regime que "trop peu sur le corpus" (message plus bas) NOMMAIT
+        # deja sans jamais le TESTER : `experts_sans_stats` ne comptait que
+        # n_samples == 0, jamais "trop peu". Sous ce seuil, l'identite (le
+        # meme repli que "jamais routé") vaut mieux qu'une AWQ instable.
+        MIN_ECHANTILLONS_AWQ = 8
+        if st is not None and st.n_samples < MIN_ECHANTILLONS_AWQ:
+            st = None
         est_expert = ".mlp.experts." in name
         if est_expert and st is None:
             report.experts_sans_stats += 1
