@@ -135,12 +135,15 @@ def test_le_gdn_projette_en_un_lancement_sous_dense_nvfp4_triton(monkeypatch):
 
     def qlin(o, i):
         t = quantize_nvfp4((torch.randn(o, i) * 0.2).to(torch.bfloat16))
+        # sur carte, les poids doivent y être : `_multi_projection` refuse
+        # un NVFP4 hôte (poste3, t0-test : fuse() → False sur le jouet)
+        t.qweight, t.block_scale, t.global_scale = t.qweight.to(DEV), t.block_scale.to(DEV), t.global_scale.to(DEV)
         return QuantLinear(t, None, scaler=None)
     couche = GatedDeltaNet(qkv=qlin(conv_dim, H), gate=qlin(NV * DV, H), alpha=qlin(NV, H), beta=qlin(NV, H),
                            out=qlin(H, NV * DV), conv_weight=torch.randn(conv_dim, KER) * 0.3,
                            dt_bias=torch.rand(NV) - 0.5, a_log=torch.rand(NV) * 3 - 2,
-                           norm_weight=torch.ones(DV), num_k_heads=NK, num_v_heads=NV, head_k_dim=DK, head_v_dim=DV)
-    x = torch.randn(12, H).to(DT)
+                           norm_weight=torch.ones(DV), num_k_heads=NK, num_v_heads=NV, head_k_dim=DK, head_v_dim=DV).to(DEV)
+    x = torch.randn(12, H).to(DT).to(DEV)
     from acvram.engine import model as MD
     monkeypatch.setattr(kernels, "_DENSE_NVFP4", "gemv")
     with torch.no_grad():
