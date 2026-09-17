@@ -51,10 +51,17 @@ def disponible() -> bool:
 if triton is not None:
 
     @triton.jit
-    def _dense_etroit_kernel(x_ptr, qw_ptr, bs_ptr, gs_ptr, y_ptr, lut4_ptr, lut8_ptr,
-                             M, N, K, k_par_tranche,
-                             stride_xm, stride_qn, stride_bn, stride_gs, stride_yt, stride_ym,
+    def _dense_etroit_kernel(x_ptr, qw_ptr, bs_ptr, gs_ptr, y_ptr, out_ptr, cpt_ptr, lut4_ptr, lut8_ptr,
+                             M, N, K, k_par_tranche, T,
+                             stride_xm, stride_qn, stride_bn, stride_gs, stride_yt, stride_ym, stride_om,
                              BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+        """Épilogue « dernier bloc » (poste7-lm-head-392-verdict-17-09) : les T
+        tranches K d'une tuile N écrivent leur partiel fp32 puis incrémentent
+        un compteur ; la dernière arrivée somme les T partiels DANS L'ORDRE
+        t = 0..T-1 (déterministe, même somme que `_reduire_kernel`), écrit la
+        sortie et remet le compteur à zéro (rejouable sous graphe sans
+        memset). Un lancement au lieu de deux : la réduction séparée valait
+        12 % du pas Qwen3.8 b=12."""
         pn = tl.program_id(0)
         pt = tl.program_id(1)
         rows = tl.arange(0, BM)
@@ -86,8 +93,22 @@ if triton is not None:
             acc = tl.dot(a, tl.trans(b), acc)
         gs = tl.load(gs_ptr + cols * stride_gs, mask=masque_n, other=0.0)
         acc = acc * gs[None, :]
-        tl.store(y_ptr + pt * stride_yt + rows[:, None] * stride_ym + cols[None, :],
-                 acc, mask=masque_m[:, None] & masque_n[None, :])
+        masque = masque_m[:, None] & masque_n[None, :]
+        if T == 1:
+            tl.store(out_ptr + rows[:, None] * stride_om + cols[None, :],
+                     acc.to(out_ptr.dtype.element_ty), mask=masque)
+        else:
+            tl.store(y_ptr + pt * stride_yt + rows[:, None] * stride_ym + cols[None, :], acc, mask=masque)
+            tl.debug_barrier()
+            arrivee = tl.atomic_add(cpt_ptr + pn, 1, sem="acq_rel")
+            if arrivee == T - 1:
+                somme = tl.zeros((BM, BN), dtype=tl.float32)
+                for t in range(0, T):
+                    somme += tl.load(y_ptr + t * stride_yt + rows[:, None] * stride_ym + cols[None, :],
+                                     mask=masque, other=0.0, volatile=True)
+                tl.store(out_ptr + rows[:, None] * stride_om + cols[None, :],
+                         somme.to(out_ptr.dtype.element_ty), mask=masque)
+                tl.atomic_xchg(cpt_ptr + pn, 0)
 
 
     @triton.jit
@@ -215,14 +236,29 @@ def gemm_dense_etroit(x: torch.Tensor, t, bn: int = 0, bk: int = 0, warps: int =
           else t.global_scale.to(torch.float32).reshape(1))
     tuiles_n = -(-N // bn)
     tranches, par_tranche = _tranches(N, k_pad, x.device, bn, bk)
-    y = torch.empty(tranches, M, N, dtype=torch.float32, device=x.device)
+    out = torch.empty(M, N, dtype=torch.float32 if sortie_fp32 else x.dtype, device=x.device)
+    y = torch.empty(tranches if tranches > 1 else 0, M, N, dtype=torch.float32, device=x.device)
     _dense_etroit_kernel[(tuiles_n, tranches)](
-        x, t.qweight, t.block_scale.view(torch.uint8), gs, y, lut4, lut8,
-        M, N, k_pad, par_tranche,
+        x, t.qweight, t.block_scale.view(torch.uint8), gs, y, out, _compteurs(x.device, tuiles_n), lut4, lut8,
+        M, N, k_pad, par_tranche, tranches,
         x.stride(0), t.qweight.stride(0), t.block_scale.stride(0), 1 if gsr is not None else 0,
-        y.stride(0), y.stride(1),
+        y.stride(0), y.stride(1), out.stride(0),
         BM=BM, BN=bn, BK=bk, num_warps=warps, num_stages=stages)
-    return _reduire(y, torch.float32 if sortie_fp32 else x.dtype)
+    return out
+
+
+_COMPTEURS: dict = {}
+
+
+def _compteurs(device, n: int) -> torch.Tensor:
+    """Compteurs d'arrivée par tuile N, à zéro entre deux appels (le dernier
+    bloc les remet) : un tampon par appareil, grandi au besoin, jamais
+    réalloué en dessous (une adresse stable pour les graphes)."""
+    cle = str(device)
+    vivants = _COMPTEURS.setdefault(cle, [])          # les anciens restent vivants : un graphe capturé les tient
+    if not vivants or vivants[-1].numel() < n:
+        vivants.append(torch.zeros(max(n, 8192), dtype=torch.int32, device=device))
+    return vivants[-1]
 
 
 class MultiProjection:

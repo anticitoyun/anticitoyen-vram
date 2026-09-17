@@ -116,3 +116,26 @@ En situ ensuite (poste3) : pas GEMM ≈ 16-19 ms ⇒ 500-600 t/s.
   Ma prédiction : 5,6 ms de tête à 0,23 To/s → ~1,2 ms à 1,1 To/s
   (N = 248 320 : grille large, le régime « down » 1,09) ⇒ pas 34,4 → ~30 ms,
   **≈ 400 t/s** — juste au scellé ; faux si < 380.
+
+## Dernier tour : réduction fusionnée (épilogue « dernier bloc ») — poste7-lm-head-392-verdict-17-09
+
+`_dense_etroit_kernel` : les T tranches K d'une tuile N écrivent leur partiel
+fp32 puis incrémentent un compteur (`tl.atomic_add`, acq_rel) ; la dernière
+arrivée somme les T partiels **dans l'ordre t = 0..T-1** (lectures
+`volatile`, même somme que `_reduire_kernel` : déterministe, bit à bit
+rejouable), écrit la sortie (bf16 ou fp32 pour la tête) et remet le compteur
+à zéro — un lancement au lieu de deux, aucun memset, rejouable sous graphe.
+T = 1 : écriture directe, pas de tampon. Compteurs : un tampon int32 par
+appareil, jamais réalloué en dessous, les anciens gardés vivants (un graphe
+capturé les tient). Test : plusieurs tranches → exact, compteurs revenus à
+zéro, second appel identique au bit. Suite 816 passed. La multi-projection
+(témoin) garde `_reduire_kernel`.
+
+Scellé de poste7 (poste3) : ≥ 455 t/s NU tenu / < 435 faux, J/jeton ≤ 0,95× ;
+tenu ⇒ défaut, faux ⇒ on laisse. Ma prédiction : la réduction séparée était
+12 % du pas (≈ 3,4 ms sur 28,9 nu à 415 t/s) ; l'épilogue en rend ~2,5 ms
+(la somme reste, mais dans le noyau et sans second lancement ni relecture
+du workspace par un autre noyau) ⇒ ~26,4 ms ⇒ **≈ 450-460 t/s nu** — au
+bord du scellé ; faux si < 435 (alors la somme par le dernier bloc sérialise
+la fin des tuiles : les T-1 autres attendent… non, elles sortent ; c'est le
+volatile qui coûterait).

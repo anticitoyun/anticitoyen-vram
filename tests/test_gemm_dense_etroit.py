@@ -57,7 +57,12 @@ def test_plusieurs_tranches_k_se_somment(monkeypatch):
     monkeypatch.setattr(GD, "_PROGRAMMES_PAR_SM", 64)             # force plusieurs tranches K
     tranches, par = GD._tranches(64, 1024, x.device, 64, 64)
     assert tranches > 1 and par % 64 == 0
-    assert _juger(GD.gemm_dense_etroit(x, t, bn=64, bk=64), x, t) == 0
+    y1 = GD.gemm_dense_etroit(x, t, bn=64, bk=64)
+    assert _juger(y1, x, t) == 0
+    # épilogue « dernier bloc » : les compteurs sont revenus à zéro (rejouable)
+    # et un second appel rend le même bit (la somme suit l'ordre t = 0..T-1)
+    assert int(GD._compteurs(x.device, 1).abs().sum()) == 0
+    assert torch.equal(GD.gemm_dense_etroit(x, t, bn=64, bk=64), y1)
 
 
 def test_bras_cassant_echelle_de_bloc_decalee_d_un_rang():
