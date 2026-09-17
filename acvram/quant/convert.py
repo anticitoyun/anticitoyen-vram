@@ -1053,6 +1053,36 @@ def _diagnostic_fusion(tensors: dict) -> dict:
     }
 
 
+def _convertisseur_commit() -> Optional[dict]:
+    """Commit du convertisseur qui a écrit CE manifeste -- REGLES §4 : une
+    mesure porte son régime dans son en-tête, pas dans un nom de fichier ou
+    une mémoire. Un correctif du convertisseur (par exemple `0e4ef38`,
+    calibration nemotron_h) change le régime des convertis qu'il produit ;
+    sans ce champ, deux manifestes au même nom peuvent être de deux régimes
+    et rien ne le distingue. `None` (pas un défaut deviné) si le paquet
+    n'est pas une extraction git -- une installation figée n'a pas de
+    commit à rapporter."""
+    import subprocess
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # `.git` est un FICHIER (pas un dossier) dans un git WORKTREE -- `isdir`
+    # aurait rendu None sur tous nos convertis produits depuis un worktree
+    # (poste2, poste3, poste4, ...), la norme ici, pas l'exception.
+    if not os.path.exists(os.path.join(repo, ".git")):
+        return None
+    try:
+        commit = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5, check=True
+        ).stdout.strip()
+        sale = bool(subprocess.run(
+            ["git", "-C", repo, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=5, check=True
+        ).stdout.strip())
+    except (subprocess.SubprocessError, OSError):
+        return None
+    return {"commit": commit, "arbre_modifie": sale}
+
+
 def _octets_du_checkpoint(chemin: str) -> int:
     """Somme des poids du checkpoint source, pour reconnaitre une source
     renommee ou deplacee. La taille seule ne PROUVE pas l identite — deux
@@ -1131,6 +1161,10 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     writer = ShardWriter(opts.out_dir)
     manifest: dict[str, Any] = {
         "acvram_version": 1,
+        # poste7-expert-partage-cle-portee-17-09, REGLES §4 : un correctif du
+        # convertisseur (ex. 0e4ef38) change le régime des convertis qu'il
+        # produit -- ce champ distingue les manifestes d'avant/après.
+        "convertisseur": _convertisseur_commit(),
         "model": spec.to_dict(),
         "plan": plan.to_dict(),
         "options": asdict(opts),
