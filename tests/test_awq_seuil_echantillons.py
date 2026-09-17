@@ -60,21 +60,22 @@ def _tiny_moe(tmp_path):
     return str(d)
 
 
+def _magnitudes_variees(n):
+    """Magnitude VARIEE par canal (colonnes x8 tous les 8, motif deja valide
+    par test_quant.py::test_hadamard_helps_int4_on_outlier_channels) -- une
+    statistique uniforme ne donne rien a optimiser a la recherche AWQ, qui
+    s'effondrerait a l'identite meme avec beaucoup d'echantillons."""
+    m = torch.full((n,), 0.02)
+    m[::8] *= 8.0
+    return m
+
+
 def _stats_fabrique(n_riche, n_pauvre):
     """Expert 0 : statistique riche (256 jetons). Expert 1 : statistique
     pauvre (2 jetons, comme un expert presque jamais routé sur bras A) --
     un canal jamais vu (magnitude quasi nulle) cote a cote d'un canal
     heurte une fois par un jeton extreme (motif qui a produit l'étendue
     1,68e6x mesurée sur le vrai modèle)."""
-    # magnitude VARIEE par canal (colonnes x8 tous les 8, motif deja valide
-    # par test_quant.py::test_hadamard_helps_int4_on_outlier_channels) --
-    # une statistique uniforme ne donne rien a optimiser a la recherche AWQ,
-    # qui s'effondrerait a l'identite meme avec beaucoup d'echantillons.
-    def _magnitudes_variees(n):
-        m = torch.full((n,), 0.02)
-        m[::8] *= 8.0
-        return m
-
     riche_h = ActStats(_magnitudes_variees(H), None, n_riche)
     riche_ik = ActStats(_magnitudes_variees(IK), None, n_riche)
     magnitudes = torch.full((IK,), 1e-6)
@@ -133,10 +134,47 @@ def test_expert_a_statistique_pauvre_ne_recoit_pas_dawq(tmp_path):
         "pas une echelle AWQ tiree d'une statistique bruitee")
 
 
-def test_expert_a_statistique_suffisante_recoit_awq(tmp_path):
-    """Au-dessus du seuil (8), même un expert modestement échantillonné
-    garde son AWQ -- le seuil protège le régime pauvre, pas tout ce qui
-    n'est pas 256."""
-    out = _convertir(tmp_path, n_pauvre=32)
+def test_expert_a_statistique_suffisante_et_variee_recoit_awq(tmp_path):
+    """Au-dessus du seuil (8), un expert échantillonné sur un motif de
+    salience RAISONNABLE (variée mais pas dégénérée) garde son AWQ, sans
+    déclencher la garde de norme -- le seuil protège le régime pauvre,
+    pas tout ce qui n'est pas 256."""
+    ckpt = _tiny_moe(tmp_path / "hf")
+    spec = load_model_spec(ckpt, "tiny-moe")
+    plan, _ = auto_plan(spec, load_profile("rig-14900k-5090-3080ti"),
+                        PlannerOptions(max_model_len=256, max_concurrent_seqs=2))
+    stats = _stats_fabrique(n_riche=256, n_pauvre=2)   # expert 1 ignoré ci-dessous
+    stats["model.layers.0.mlp.experts.1.down_proj.weight"] = ActStats(
+        _magnitudes_variees(IK), None, 32)
+    stats["model.layers.0.mlp.experts.1.up_proj.weight"] = ActStats(
+        _magnitudes_variees(H), None, 32)
+    stats["model.layers.0.mlp.experts.1.gate_proj.weight"] = ActStats(
+        _magnitudes_variees(H), None, 32)
+    out = tmp_path / "out_varie"
+    convert_checkpoint(ckpt, plan, ConversionOptions(out_dir=str(out)),
+                       spec=spec, stats=stats)
     scale = _act_scale(out, "model.layers.0.mlp.experts.1.down_proj.weight")
     assert not torch.allclose(scale, torch.ones_like(scale))
+
+
+def test_garde_ratio_norme_refuse_meme_avec_beaucoup_dechantillons(tmp_path):
+    """poste7-awq-experts-peu-routes-portee-17-09 §2 : le seuil d'échantillons
+    protège la CAUSE la plus fréquente (statistique bruitée par manque de
+    jetons), pas toute source d'échelle instable -- le même motif dégénéré
+    (un canal extrême, les autres au plancher) mais avec BEAUCOUP
+    d'échantillons (n_samples=100, au-dessus du seuil de 8) doit aussi être
+    refusé, par la garde de norme, pas par le seuil."""
+    ckpt = _tiny_moe(tmp_path / "hf")
+    spec = load_model_spec(ckpt, "tiny-moe")
+    plan, _ = auto_plan(spec, load_profile("rig-14900k-5090-3080ti"),
+                        PlannerOptions(max_model_len=256, max_concurrent_seqs=2))
+    magnitudes = torch.full((IK,), 1e-6)
+    magnitudes[0] = 50.0
+    stats = _stats_fabrique(n_riche=256, n_pauvre=2)
+    stats["model.layers.0.mlp.experts.1.down_proj.weight"] = ActStats(
+        magnitudes, magnitudes, 100)     # meme motif degenere, n_samples eleve
+    out = tmp_path / "out_extreme"
+    import pytest
+    with pytest.raises(ValueError, match="ratio de norme"):
+        convert_checkpoint(ckpt, plan, ConversionOptions(out_dir=str(out)),
+                           spec=spec, stats=stats)

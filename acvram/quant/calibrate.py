@@ -607,6 +607,13 @@ def quantize_with_calibration(
     metrics = {
         "w_rel_err": w_err,
         "w_snr_db": 20 * math.log10(1.0 / max(w_err, 1e-12)),
+        # poste7-awq-experts-peu-routes-portee-17-09 : ‖poids reconstruit‖ /
+        # ‖poids source‖ -- distinct de `w_rel_err` (une erreur ELEMENT PAR
+        # ELEMENT peut rester petite alors que la NORME globale s'effondre
+        # si l'echelle est mal reglee sur seulement quelques canaux, motif
+        # mesure sur Nemotron : 6 experts a 27-29 dB de w_snr_db propre mais
+        # ratio_norme 0,29-0,69 apres reechelonnage).
+        "ratio_norme": (deq.norm() / w.norm().clamp(min=1e-12)).item(),
         "out_rel_err": out_err,
         "out_abs_err": out_abs_err,
         "out_ref_norm": out_ref_norm,
