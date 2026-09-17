@@ -1265,6 +1265,29 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             continue
 
         st = stats.get(name) if stats else None
+        # poste7-hybrides-etape1-close-gemm-dense-17-09 : Nemotron calibA PPL
+        # 1,4301 vs 1,0304 sans calibration, degradation uniforme sur les 3
+        # tranches. Diff tenseur par tenseur (a sec, disque) : 70 tenseurs
+        # exclus (mamba.in_proj/out_proj, self_attn) byte-identiques entre
+        # les deux convertis (pas la cause) ; expert partage sain (ratio de
+        # norme 0,994 +/- 0,015) ; MAIS 6/346 experts.*.down_proj
+        # echantillonnes ont un ratio de norme calibA/officielle de 0,29 a
+        # 0,69 (SNR interne pourtant bon, 27-29 dB -- coherent avec la
+        # metrique W_EFF, pas avec le poids d'origine une fois reechelonne).
+        # Cause : `act_scale` de ces tenseurs s'etend sur 1,68e6x/2,4e5x
+        # (0,0001 a 177, 0,008 a 19) contre ~630x pour un tenseur sain
+        # (0,013 a 8,1) -- la recherche AWQ (`search_channel_scales`,
+        # clamp PAR VALEUR a [1e-4,1e4], jamais sur l'ETENDUE) tire un motif
+        # de salience extreme d'une statistique BRUITEE : un expert MoE peu
+        # routé sur bras-A (prose anglaise, 32 sequences) voit une poignee
+        # de jetons, et `mean_abs` par canal n'estime plus rien -- exactement
+        # le regime que "trop peu sur le corpus" (message plus bas) NOMMAIT
+        # deja sans jamais le TESTER : `experts_sans_stats` ne comptait que
+        # n_samples == 0, jamais "trop peu". Sous ce seuil, l'identite (le
+        # meme repli que "jamais routé") vaut mieux qu'une AWQ instable.
+        MIN_ECHANTILLONS_AWQ = 8
+        if st is not None and st.n_samples < MIN_ECHANTILLONS_AWQ:
+            st = None
         est_expert = ".mlp.experts." in name
         if est_expert and st is None:
             report.experts_sans_stats += 1
