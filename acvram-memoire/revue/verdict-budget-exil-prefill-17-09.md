@@ -19,3 +19,42 @@ Ligne de fiche pour poste3 : **acvram Llama-3.3-70B-nvfp4 = « refus : OOM au pr
 Prédiction pour le rejeu du 70B (bloc à part) : ≈ 34-36/80 couches exilées à 2 048 de contexte (1,15 Gio ≈ 3 MLP de 350 Mio), préfill qui passe, b=1 ≤ 5 t/s ; à `max_model_len` 8 192 la réserve monte à 3,3 Gio (≈ 9 MLP de plus) — le contexte demandé décide du nombre de couches exilées, c'est voulu.
 
 Aussi dans ce commit (pas ce bogue) : `MoEBlock.forward` lit `_usage_routage` par `getattr` — un bloc factice des tests (`test_improvements`, `Faux(MoEBlock)` sans `__init__`) cassait la suite depuis que `ACVRAM_ROUTE_PREP=2` est le défaut.
+
+## Suite (17/09, après 1aa767b fusionné) : l'OOM persiste — la cause était ailleurs
+
+poste3, Llama-3.3-70B-nvfp4 après 1aa767b : 52/80 couches exilées, 31,0 Gio
+occupés, même OOM 448 Mio au premier préfill. La réserve ci-dessus était juste
+mais ne pouvait pas suffire : **exiler une couche dense ne libérait pas sa
+VRAM, il la doublait.**
+
+Fichier:ligne (main 428c653) : `acvram/engine/layers.py:188` —
+`StreamedWeight.__init__(host_tensors, device, n_buffers=2, pool=None)` ; `:233-244`
+`_ensure()` alloue `n_buffers` copies GPU de la couche (`torch.empty_like(self.plat,
+device=self.device)`), jamais rendues, une paire PAR POIDS. Le pool partagé
+n'existait que pour les experts MoE (`loader.py` : `ExpertPool(mlp_dev, 2·top_k+2)`
+passé à `MoEBlock`) ; les linéaires denses exilés passaient par `lin()`/`mlin()`
+→ `QuantLinear.to_device(d, streamed=True)` sans `pool`, donc deux tampons privés
+chacun. Sur le 70B : 52 couches × (attn + mlp ≈ 0,36 Gio nvfp4) × 2 = **37 Gio
+épinglés sur la carte pour des poids « exilés »** — plus que la carte. Le
+`while utilise() > capacite − marge` (`loader.py:1270`) ne les compte pas
+(`utilise()` somme les RÉSIDENTS), donc chaque itération d'exil aggravait ce
+qu'elle croyait réduire ; le préfill trouvait 448 Mio de moins que rien.
+Invisible sur les MoE (pool) et sur les denses qui tiennent (rien d'exilé).
+
+Correctif (poste4) : `loader.py::_pool_dense(device)` — UN `ExpertPool(device,
+_DENSE_SLOTS=4, dense=True)` par appareil, passé à `lin()`/`mlin()` quand
+`streamed` ; `layers.py::ExpertPool(dense=)` ; `QuantLinear.prefetch()` précharge
+depuis un pool dense (pas depuis un pool d'experts) ; `_reserve_prefill(…, plan)`
+ajoute `_DENSE_SLOTS × max(attn+mlp)` (1,7 Gio sur le 70B) puisque ces tampons
+sont désormais comptés une fois pour toutes. `ACVRAM_DENSE_SLOTS` hors régime
+(regime.py, cli.py). Juge : `tests/test_pool_dense_exil.py` — réserve = 4 × plus
+grosse couche, prefetch dense/experts, et sur carte : 12 poids d'une forme dans
+le pool ≤ 4 tampons, un poids sans pool ≥ 2 copies (le bras qui doit différer).
+Suite 772 passed.
+
+Prédiction scellée pour l'essai du 70B (poste3, 2 048 ctx, budget par défaut) :
+exil 34-40/80 couches ; VRAM de tampons dense ≤ 2 Gio ; préfill 2 048 jetons
+passe ; décodage b=1 ≤ 5 j/s (lié à la bande PCIe : 40 couches × 0,36 Gio par
+pas ≈ 14 Gio à 21 Go/s ≈ 0,7 s/pas ⇒ ~1,5 j/s plus probable). Faux si : OOM
+encore (alors une troisième cause, à chercher avec `torch.cuda.memory_summary`
+au moment de l'échec) ou exil > 52 (la réserve mange trop).

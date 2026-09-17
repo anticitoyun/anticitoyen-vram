@@ -300,6 +300,27 @@ def load_model(path: str, plan: Optional[Plan] = None,
     # premier chargement, pas une erreur (`expert_usage.charger`).
     _profil_usage = expert_usage.charger(
         os.path.join(path, expert_usage.NOM_PROFIL))
+    # Tampons GPU des poids DENSES exilés (attention, MLP dense, expert
+    # partagé) : UN pool par appareil, `_DENSE_SLOTS` jeux par forme de
+    # tenseur, partagés par toutes les couches. Avant : chaque StreamedWeight
+    # gardait DEUX copies privées de son poids sur la carte pour toute la vie
+    # du process (layers.py StreamedWeight._ensure) — exiler une couche dense
+    # DOUBLAIT son empreinte VRAM au lieu de la libérer : Llama-3.3-70B-nvfp4,
+    # 52/80 couches exilées = 18,6 Gio épinglés à l'hôte et ~37 Gio réclamés à
+    # la carte au premier préfill (OOM 448 Mio, poste3 verdict-palier2-nemotron-
+    # 17-09), quel que soit le budget. Avec le pool : ≤ _DENSE_SLOTS × la
+    # taille de chaque forme distincte (≈ 1-2 Gio sur le 70B), compté dans la
+    # réserve du plan (_reserve_prefill).
+    _pools_denses: dict = {}
+
+    def _pool_dense(device: torch.device):
+        from .layers import ExpertPool
+        if device.type != "cuda":
+            return None
+        cle = str(device)
+        if cle not in _pools_denses:
+            _pools_denses[cle] = ExpertPool(device, _DENSE_SLOTS, dense=True)
+        return _pools_denses[cle]
 
     layers: list[DecoderLayer] = []
     caches: dict[int, PagedKVCache] = {}
@@ -307,7 +328,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
     # besoin de place libre au moment ou elle concatene.
     a_allouer: list = []
     _borner_kv_par_la_vram(plan, manifest, dev,
-                           reserve=_reserve_prefill(spec, max_model_len, manifest))
+                           reserve=_reserve_prefill(spec, max_model_len, manifest, plan))
     kv_blocks = _kv_blocks_per_device(plan, spec, max_model_len)
 
     # Arène épinglée pour les poids exilés, dimensionnée ICI parce que le plan
@@ -344,7 +365,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
             m = _linear(p + suffix, manifest, reader, group_size)
             if m is None:
                 raise KeyError(f"tenseur manquant {p + suffix}")
-            return m.to_device(d, streamed=streamed)
+            return m.to_device(d, streamed=streamed,
+                               pool=_pool_dense(d) if streamed else None)
 
         # Le MLP peut vivre et s'exécuter sur le processeur pendant que l'attention reste sur le GPU.
         mlp_on_cpu = (lp.mlp_storage == "cpu"
@@ -356,7 +378,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
             m = _linear(p + suffix, manifest, reader, group_size)
             if m is None:
                 raise KeyError(f"tenseur manquant {p + suffix}")
-            return m.to_device(mlp_dev, streamed=streamed_mlp)
+            return m.to_device(mlp_dev, streamed=streamed_mlp,
+                               pool=_pool_dense(mlp_dev) if streamed_mlp else None)
 
         # Les experts d'une couche exilée partagent un pool de tampons GPU
         # dimensionné pour les experts routés d'un jeton, au lieu de deux
@@ -1585,16 +1608,27 @@ def _exil_experts_demande(plan: Plan, manifest: dict) -> None:
             pass
 
 
-def _reserve_prefill(spec, max_model_len: Optional[int], manifest: dict) -> int:
-    """Octets transitoires du plus grand préfill à retirer des budgets
-    (KV, exil) : `ModelSpec.activations_prefill_bytes` sur ``max_model_len``
-    — sinon la longueur planifiée du manifeste, sinon 8 192 ; 0 sans spec
-    (ancien chemin, signalé)."""
+# Jeux de tampons GPU par forme de tenseur pour les poids denses exilés : une
+# couche en calcul (gate, up de même forme = 2) + la suivante préchargée (2),
+# le pool refuse au-delà (« ExpertPool saturé ») plutôt que d'allouer.
+_DENSE_SLOTS = int(os.environ.get("ACVRAM_DENSE_SLOTS", "4"))
+
+
+def _reserve_prefill(spec, max_model_len: Optional[int], manifest: dict,
+                     plan: Optional[Plan] = None) -> int:
+    """Octets transitoires à retirer des budgets (KV, exil) :
+    `ModelSpec.activations_prefill_bytes` sur ``max_model_len`` (sinon la
+    longueur planifiée du manifeste, sinon 8 192) PLUS les tampons GPU du
+    streaming dense (`_DENSE_SLOTS` × la plus grosse couche du plan, borne
+    haute de « _DENSE_SLOTS × chaque forme distincte ») ; 0 sans spec."""
     if spec is None:
         return 0
     d = manifest.get("plan", {}) if isinstance(manifest, dict) else {}
     ctx = int(max_model_len or (d.get("kv_max_tokens") or 0) or 8192)
-    return int(spec.activations_prefill_bytes(ctx))
+    reserve = int(spec.activations_prefill_bytes(ctx))
+    if plan is not None and plan.layers:
+        reserve += _DENSE_SLOTS * max(int(l.attn_bytes) + int(l.mlp_bytes) for l in plan.layers)
+    return reserve
 
 
 def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
@@ -1607,7 +1641,7 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
                             max_concurrent_seqs=max_concurrent_seqs)
         if neuf is not None:
             _reajuster_plan(neuf, manifest, top_k=spec.num_experts_per_tok or 8,
-                            reserve=_reserve_prefill(spec, max_model_len, manifest))
+                            reserve=_reserve_prefill(spec, max_model_len, manifest, neuf))
             _exil_demande(neuf)
             _exil_experts_demande(neuf, manifest)
             return neuf
@@ -1619,7 +1653,7 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
                    for l in d["layers"]]
     plan.embed_device = d["embed_device"]
     plan.lm_head_device = d["lm_head_device"]
-    _reajuster_plan(plan, manifest, reserve=_reserve_prefill(spec, max_model_len, manifest))
+    _reajuster_plan(plan, manifest, reserve=_reserve_prefill(spec, max_model_len, manifest, plan))
     _exil_demande(plan)
     _exil_experts_demande(plan, manifest)
     plan.kv_budget = d.get("kv_budget", {})

@@ -322,8 +322,9 @@ class ExpertPool:
     qu'après le routage.
     """
 
-    def __init__(self, device: torch.device, n_slots: int) -> None:
+    def __init__(self, device: torch.device, n_slots: int, dense: bool = False) -> None:
         self.device = device
+        self.dense = dense              # pool partagé des poids denses exilés : préchargeable
         self.n_slots = max(2, n_slots)
         self.stream = torch.cuda.Stream(device=device) if device.type == "cuda" else None
         self._par_disposition: dict[tuple, dict] = {}
@@ -453,7 +454,11 @@ class QuantLinear(nn.Module):
         # d'une couche remplissait la carte.
         if os.environ.get("ACVRAM_SANS_PRECHARGE"):
             return                       # diagnostic : tout se copie à la demande
-        if self.streamed is not None and self.streamed.pool is None:
+        if self.streamed is not None and (self.streamed.pool is None
+                                          or getattr(self.streamed.pool, "dense", False)):
+            # sans pool, ou pool DENSE partagé (17/09) : un poids par couche,
+            # le pool garde ses emplacements par événements — jamais pour un
+            # pool d'experts (les 512 d'une couche rempliraient la carte)
             self._pending_slot = self.streamed.prefetch()
 
     def precharger(self) -> None:
