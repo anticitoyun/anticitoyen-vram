@@ -556,6 +556,66 @@ def _adapt_muse(source: Iterator[tuple[str, torch.Tensor]], spec
     assert not en_attente, f"q_proj/gate_proj dépareillés : {list(en_attente)}"
 
 
+_NEMOTRON_H_MAMBA_HEADS = ("in_proj", "out_proj", "conv1d", "A_log", "D", "dt_bias", "norm")
+
+
+def _nemotron_h_rename(name: str, n_layers: int) -> Optional[str]:
+    """Nom acvram (`model.layers.N.*`) pour un tenseur brut nemotron_h
+    (`backbone.layers.N.mixer.*` -> `model.layers.N.*`), ou ``None`` si le
+    tenseur est hors plan (MTP, couche au-delà de ``n_layers``).
+
+    Factorisé pour être PARTAGÉ par `_adapt_hf` (flux principal) et
+    `collect.py` (calibration AWQ) -- poste7-hybrides-etape1-close-gemm-dense-
+    17-09 : la calibration cherchait `model.embed_tokens.weight` directement
+    sur le point de contrôle brut (nommé `backbone.embeddings.weight`),
+    échouait avec un message masquant le repli sur l'arrondi au plus proche.
+    Une seule table de vérité, pas une deuxième copie qui aurait pu diverger
+    (VARIABLES vs HORS_REGIME sur kv_lm4.py, même session, 17/09)."""
+    if name.startswith("backbone.layers."):
+        _, _, idx, rest = name.split(".", 3)
+        if int(idx) >= n_layers:
+            return None
+        pre = f"model.layers.{idx}."
+        if rest == "norm.weight":
+            return pre + "input_layernorm.weight"
+        if rest.startswith("mixer."):
+            sub = rest[len("mixer."):]
+            tete = sub.split(".")[0]
+            if tete in _NEMOTRON_H_MAMBA_HEADS:
+                if tete == "A_log":
+                    return pre + "mamba.A.weight"
+                if tete in ("D", "dt_bias"):
+                    return pre + f"mamba.{tete}.weight"
+                return pre + "mamba." + sub
+            if tete in ("q_proj", "k_proj", "v_proj", "o_proj"):
+                return pre + "self_attn." + sub
+            return pre + "mlp." + sub.replace("shared_experts.", "shared_expert.")
+        return pre + rest
+    if name == "backbone.embeddings.weight":
+        return "model.embed_tokens.weight"
+    if name == "backbone.norm_f.weight":
+        return "model.norm.weight"
+    if name.startswith("mtp."):
+        return None
+    return name
+
+
+def _nemotron_h_valeur(dst: str, t: torch.Tensor) -> torch.Tensor:
+    """Transforme la VALEUR d'un tenseur nemotron_h déjà renommé par
+    `_nemotron_h_rename` : A = −exp(A_log) (convention GGUF ssm_a), conv1d
+    [d, 1, L] -> [d, L], D/dt_bias aplatis à 1D. Les trois suffixes de
+    destination sont uniques dans tout le modèle -- aucune autre couche n'y
+    aboutit, donc les tester sur `dst` après renommage donne le même
+    résultat que les tester sur le nom brut avant."""
+    if dst.endswith("mamba.A.weight"):
+        return -torch.exp(t.to(torch.float32))
+    if dst.endswith("mamba.conv1d.weight"):
+        return t.reshape(t.shape[0], -1)
+    if dst.endswith(("mamba.D.weight", "mamba.dt_bias.weight")):
+        return t.reshape(-1)
+    return t
+
+
 def _adapt_hf(source: Iterator[tuple[str, torch.Tensor]], spec
               ) -> Iterator[tuple[str, torch.Tensor]]:
     mt = str(getattr(spec, "model_type", "") or spec.raw.get("model_type", ""))
@@ -583,8 +643,9 @@ def _adapt_hf(source: Iterator[tuple[str, torch.Tensor]], spec
     if mt == "nemotron_h":
         # noms HF (backbone.layers.N.mixer.*) → noms acvram ; A = −exp(A_log)
         # (convention GGUF ssm_a), conv1d [d,1,L] → [d,L]. Les GGUF passent
-        # ici sans être touchés (déjà nommés).
-        mamba = ("in_proj", "out_proj", "conv1d", "A_log", "D", "dt_bias", "norm")
+        # ici sans être touchés (déjà nommés). Renommage/valeur factorisés
+        # dans `_nemotron_h_rename`/`_nemotron_h_valeur`, partagés avec
+        # `collect.py`.
         n_layers = int(spec.num_layers)
         ignores = 0
         # EXL3 rembourre les deux dimensions à un multiple de 128 (in_proj
@@ -618,40 +679,11 @@ def _adapt_hf(source: Iterator[tuple[str, torch.Tensor]], spec
                     t = rogner(t, rows=shared_i) if name.endswith("up_proj.weight") else rogner(t, cols=shared_i)
                 elif name.endswith(("mixer.up_proj.weight", "mixer.down_proj.weight")):
                     t = rogner(t, rows=dense_i) if name.endswith("up_proj.weight") else rogner(t, cols=dense_i)
-            if name.startswith("backbone.layers."):
-                _, _, idx, rest = name.split(".", 3)
-                if int(idx) >= n_layers:
-                    ignores += 1
-                    continue
-                pre = f"model.layers.{idx}."
-                if rest == "norm.weight":
-                    yield pre + "input_layernorm.weight", t
-                elif rest.startswith("mixer."):
-                    sub = rest[len("mixer."):]
-                    tete = sub.split(".")[0]
-                    if tete in mamba:
-                        if tete == "A_log":
-                            yield pre + "mamba.A.weight", (-torch.exp(t.to(torch.float32)))
-                        elif tete == "conv1d" and sub.endswith("weight"):
-                            yield pre + "mamba.conv1d.weight", t.reshape(t.shape[0], -1)
-                        elif tete in ("D", "dt_bias"):
-                            yield pre + f"mamba.{tete}.weight", t.reshape(-1)
-                        else:
-                            yield pre + "mamba." + sub, t
-                    elif tete in ("q_proj", "k_proj", "v_proj", "o_proj"):
-                        yield pre + "self_attn." + sub, t
-                    else:
-                        yield pre + "mlp." + sub.replace("shared_experts.", "shared_expert."), t
-                else:
-                    yield pre + rest, t
-            elif name == "backbone.embeddings.weight":
-                yield "model.embed_tokens.weight", t
-            elif name == "backbone.norm_f.weight":
-                yield "model.norm.weight", t
-            elif name.startswith("mtp."):
+            dst = _nemotron_h_rename(name, n_layers)
+            if dst is None:
                 ignores += 1
-            else:
-                yield name, t
+                continue
+            yield dst, _nemotron_h_valeur(dst, t)
         if ignores:
             print(f"  nemotron_h : {ignores} tenseurs MTP ignorés")
         return
