@@ -316,6 +316,20 @@ class TensorRouter:
             # ce biais, quantifie en bf16 a la conversion, expliquait le reste
             # (revue/verdict-equivalence-glm-14-09.md).
             return "fp32"
+        if self.spec.model_type == "nemotron_h" and (
+                name.endswith(("mamba.in_proj.weight", "mamba.out_proj.weight"))
+                or ".self_attn." in name):
+            # poste7-hybrides-etape1-close-gemm-dense-17-09 : le checkpoint
+            # officiel NVFP4 (models_vllm/.../hf_quant_config.json,
+            # quant_algo=MIXED_PRECISION) laisse ces tenseurs hors de
+            # `quantized_layers` (self_attn, les 6 couches full_attention) ou
+            # les passe en FP8 (mamba.in_proj/out_proj) -- jamais en NVFP4.
+            # acvram ne porte pas de format FP8 autonome ; bf16 est la
+            # meilleure approximation disponible (plus fin que FP8, jamais
+            # plus grossier). Notre conversion précédente quantifiait les
+            # deux en NVFP4 comme le reste du modèle : PPL 1,0632 contre
+            # 0,987 pour vLLM officiel.
+            return "bf16"
         if self.opts.keep_sensitive_16bit and name.endswith(SENSITIVE_SUFFIXES):
             # LE FORMAT 16 BITS DEMANDE, PAS bf16 EN DUR. Cette regle protege
             # les tenseurs sensibles de la quantification : pour un modele en

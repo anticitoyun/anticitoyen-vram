@@ -218,6 +218,11 @@ class Attention(nn.Module):
             self.qkv_tailles = tuple(l.qweight.shape[0] for l in lins)
             self.qkv_partiel = None
             return True
+        # Empilement refusé (scalers différents, conversion calibrée par
+        # projection) : à 2 ≤ b ≤ 32, une multi-projection NVFP4 sert les
+        # trois en un lancement, chacune avec son échelle (17/09, palier 2 de
+        # poste7-gemm-dense-porte-fermee-palier-17-09) — voir _proj
+        self.qkv_multi = _multi_projection(lins)
 
         # FUSION PARTIELLE. Le groupe entier ne s'empile pas — un format
         # different, une echelle differente — mais un SOUS-ENSEMBLE le peut, et
@@ -284,6 +289,10 @@ class Attention(nn.Module):
             vr = kr if self.k_eq_v else p[2]
         elif self.qkv_proj is not None and t <= SEUIL_FUSION:
             p = torch.split(self.qkv_proj(x), self.qkv_tailles, dim=-1)
+            qr, kr = p[0], p[1]
+            vr = kr if self.k_eq_v else p[2]
+        elif _multi_utilisable(getattr(self, "qkv_multi", None), x, t):
+            p = torch.split(self.qkv_multi(x), self.qkv_multi.tailles, dim=-1)
             qr, kr = p[0], p[1]
             vr = kr if self.k_eq_v else p[2]
         elif getattr(self, "qkv_partiel", None) is not None and t <= SEUIL_FUSION:
@@ -1884,6 +1893,28 @@ _MOE_ROUTE_PACK = os.environ.get("ACVRAM_MOE_ROUTE_PACK", "1") == "1"
 # depuis poste7-duel-verdict-16-09 § 6.2 (15 534 lancements/pas à b=12 en
 # séquence par séquence) ; 1 = noyau d'attention seul batché ; 0 = boucle.
 _MLA_BATCH = int(os.environ.get("ACVRAM_MLA_BATCH", "2"))
+
+def _multi_projection(lins):
+    """`MultiProjection` (kernels/gemm_dense_etroit) des projections NVFP4
+    de même entrée, ou None si une n'est pas NVFP4, porte un biais, une
+    rotation, ou n'est pas sur la carte."""
+    try:
+        from ..kernels.gemm_dense_etroit import MultiProjection, disponible
+        from ..quant.nvfp4 import NVFP4Tensor
+        interprete = os.environ.get("TRITON_INTERPRET") == "1"
+        if not disponible() or not all(isinstance(l.qweight, NVFP4Tensor)
+                                       and (l.qweight.qweight.is_cuda or interprete) for l in lins):
+            return None
+        return MultiProjection(lins)
+    except (AssertionError, ImportError):
+        return None
+
+
+def _multi_utilisable(mp, x: torch.Tensor, t: int) -> bool:
+    return (mp is not None and kernels._DENSE_NVFP4 == "triton" and 2 <= t <= 32
+            and (x.dtype == torch.bfloat16 and x.is_cuda
+                 or x.dtype == torch.float16 and os.environ.get("TRITON_INTERPRET") == "1"))
+
 
 # Marque, dans le magasin d'états, une séquence dont l'état réside dans les
 # tampons fixes d'une couche (chemin graphes) plutôt qu'en tuple fonctionnel.

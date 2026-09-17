@@ -67,3 +67,85 @@ def test_bras_cassant_echelle_de_bloc_decalee_d_un_rang():
     x2, t2 = _cas(12, 256, 128, seed=3)
     y = GD.gemm_dense_etroit(x, t, bn=64, bk=64)
     assert _juger(y, x2, t2) > 0, "l'échelle décalée d'un rang doit se voir"
+
+
+def _projections(M, K, tailles, seed=11, scalers=True):
+    """b projections NVFP4 de même entrée, chacune avec SON ChannelScaler
+    (x / s, différents : ce que la fusion par empilement refuse)."""
+    from acvram.engine.layers import QuantLinear
+    from acvram.quant.calibrate import ChannelScaler
+    g = torch.Generator().manual_seed(seed)
+    lins = []
+    for i, n in enumerate(tailles):
+        w = (torch.randn(n, K, generator=g) * 0.05).to(torch.bfloat16)
+        t = quantize_nvfp4(w)
+        t.qweight, t.block_scale, t.global_scale = t.qweight.to(DEV), t.block_scale.to(DEV), t.global_scale.to(DEV)
+        sc = ChannelScaler((0.5 + torch.rand(K, generator=g) * (1 + i)).to(torch.float16).to(DEV), 0) if scalers else None
+        lins.append(QuantLinear(t, None, scaler=sc))
+    x = torch.randn(M, K, generator=g).to(DT).to(DEV)
+    return lins, x
+
+
+def _attendu_separe(lins, x):
+    """Le chemin actuel, projection par projection : x / s (arrondi bf16/fp16)
+    puis produit sur la déquantification fp32."""
+    ys, bornes = [], []
+    for l in lins:
+        xs = l.scaler.apply(x) if l.scaler is not None else x
+        wd = dequantize_nvfp4(l.qweight, torch.float32)[:, : x.shape[1]]
+        ys.append(xs.float() @ wd.T); bornes.append(xs.float().abs() @ wd.abs().T)
+    return torch.cat(ys, 1), torch.cat(bornes, 1)
+
+
+@pytest.mark.parametrize("M", [2, 12, 32])
+def test_la_multi_projection_vaut_les_projections_separees(M):
+    lins, x = _projections(M, 256, (192, 64, 64))
+    mp = GD.MultiProjection(lins)
+    y = mp(x, bn=64, bk=64)
+    attendu, borne = _attendu_separe(lins, x)
+    assert y.shape == (M, 320) and mp.tailles == (192, 64, 64)
+    assert int(((y.float() - attendu).abs() > TOL_REL * borne).sum()) == 0
+
+
+def test_la_multi_projection_sans_scaler_et_a_echelle_par_ligne():
+    lins, x = _projections(12, 200, (96, 32), scalers=False)
+    lins[0].qweight.global_scale_rows = (lins[0].qweight.global_scale.float() * torch.linspace(0.5, 2.0, 96).to(DEV)).contiguous()
+    y = GD.MultiProjection(lins)(x, bn=32, bk=64)
+    attendu, borne = _attendu_separe(lins, x)
+    assert int(((y.float() - attendu).abs() > TOL_REL * borne).sum()) == 0
+
+
+def test_bras_cassant_multi_scalers_echanges():
+    lins, x = _projections(12, 256, (128, 128))
+    attendu, borne = _attendu_separe(lins, x)
+    lins[0].scaler, lins[1].scaler = lins[1].scaler, lins[0].scaler        # l'échelle de l'autre projection
+    y = GD.MultiProjection(lins)(x, bn=64, bk=64)
+    assert int(((y.float() - attendu).abs() > TOL_REL * borne).sum()) > 0, "l'échelle d'activation échangée doit se voir"
+
+
+def test_le_gdn_projette_en_un_lancement_sous_dense_nvfp4_triton(monkeypatch):
+    """Intégration : `GatedDeltaNet.fuse()` → multi-projection (qkv, gate,
+    α, β) ; sortie de la couche contre la voie séparée (nvfp4 déquantifié)."""
+    from acvram import kernels
+    from acvram.engine.gdn import GatedDeltaNet
+    from acvram.engine.layers import QuantLinear
+    H, NK, NV, DK, DV, KER = 64, 2, 4, 16, 16, 4
+    conv_dim = 2 * NK * DK + NV * DV
+    torch.manual_seed(20260917)
+
+    def qlin(o, i):
+        t = quantize_nvfp4((torch.randn(o, i) * 0.2).to(torch.bfloat16))
+        return QuantLinear(t, None, scaler=None)
+    couche = GatedDeltaNet(qkv=qlin(conv_dim, H), gate=qlin(NV * DV, H), alpha=qlin(NV, H), beta=qlin(NV, H),
+                           out=qlin(H, NV * DV), conv_weight=torch.randn(conv_dim, KER) * 0.3,
+                           dt_bias=torch.rand(NV) - 0.5, a_log=torch.rand(NV) * 3 - 2,
+                           norm_weight=torch.ones(DV), num_k_heads=NK, num_v_heads=NV, head_k_dim=DK, head_v_dim=DV)
+    x = torch.randn(12, H).to(DT)
+    monkeypatch.setattr(kernels, "_DENSE_NVFP4", "gemv")
+    with torch.no_grad():
+        y_sep, _ = couche(x, None)
+        assert couche.fuse() and couche.multi.tailles == (conv_dim, NV * DV, NV, NV)
+        monkeypatch.setattr(kernels, "_DENSE_NVFP4", "triton")
+        y_multi, _ = couche(x, None)
+    ecart = ((y_multi.float() - y_sep.float()).abs().max() / y_sep.float().abs().max()).item()
+    assert ecart < 2 ** -6, ecart
