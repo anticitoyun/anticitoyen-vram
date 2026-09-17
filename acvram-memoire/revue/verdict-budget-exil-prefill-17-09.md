@@ -77,3 +77,46 @@ au moment de l'échec) ou exil > 52 (la réserve mange trop).
   copies sur le flux de calcul, sans flux annexe ni événement). Prédiction
   scellée avant : décode (~1 j/s) ⇒ cause dans l'ordonnancement événements/flux
   du pool appliqué aux denses ; bloque aussi ⇒ pas le pool, « refus » publié.
+
+### Cause du « blocage » (poste3, essai TRACE_COUCHES 70082d4, dmon 10 min)
+
+Aucune ligne de couche, pas même la 0 ; rxpci 0-3 Mo/s, sm 0-2 % : **le
+modèle n'est jamais appelé.** La ligne présente dans les trois essais :
+« budget KV de cuda:0 borné par la VRAM libre : 0,32 → 0,00 Gio (libre 28,7,
+poids 24,5, marge 4,5 dont préfill 2,94) » (`loader.py:1117`). Zéro octet
+de KV → `_kv_blocks_per_device` rend `max(1, …)` = 1 bloc de 16 jetons ;
+l'invite de 256 jetons (17 blocs) n'est jamais admise (`runner.py:_admit`
+: `need > num_free → break`, sans fin) ; le moteur tourne à vide, fil
+principal en poll, fils en futex. Ni le pool, ni un cycle CUDA : une
+requête inadmissible gardée en file. Le POOL_SYNC et la trace ne pouvaient
+rien voir — le premier pas n'a jamais existé.
+
+Deux mécanismes se contredisaient : la boucle d'exil (`_reajuster_plan`,
+marge 2 Gio + 7 % + réserve, VRAM libre lue AVANT) s'arrêtait satisfaite à
+37/80 ; la borne KV (`_borner_kv_par_la_vram`, marge 1,5 Gio + 5 % + réserve,
+VRAM libre lue APRÈS le JIT) trouvait 2 Gio de moins et prenait sur le KV
+— jusqu'à zéro, sans refuser. Correctif (poste4) :
+- `loader._kv_plancher` : octets KV d'UNE séquence de `max_model_len`
+  jetons sur l'appareil (0,33 Gio sur le 70B à 2 048) ;
+  `_borner_kv_avec_exil` : borne, puis si le budget est sous le plancher,
+  exil supplémentaire (`_reajuster_plan` avec `reserve + manque`) et
+  re-borne, 4 tours ; encore sous le plancher → **`RuntimeError` « refus :
+  budget KV insuffisant »** avec les chiffres (un chargement qui ne peut
+  servir une requête s'arrête, il n'attend pas).
+- `runner._admit` : `need > allocator.num_blocks` → la requête est finie
+  `finish_reason="refus"`, sortie rendue au pas suivant, ligne
+  `[acvram] requête refusée : N blocs KV nécessaires, M en tout`.
+- Juge : `tests/test_kv_plancher_exil.py` — plancher = 166 400 × (2 048+16) ;
+  montage qui reproduit le KV à zéro (bras témoin) puis exil supplémentaire
+  jusqu'au plancher ; refus explicite quand rien ne suffit ; moteur CPU à
+  1 bloc : la requête de 40 jetons sort « refus » au premier pas, une courte
+  passe ensuite. Suite 776 passed.
+
+Prédiction pour l'essai suivant (poste3, même certifie b=1, ctx 2 048) : exil
+≈ 40-44/80 (une à deux couches de plus que 37, pour 0,33 Gio de KV + l'écart
+de 2 Gio entre les deux lectures de VRAM), budget KV ≥ 0,33 Gio, la première
+ligne CERT sort en moins de 5 min, décodage b=1 ≈ 1-1,5 j/s (PCIe : 40 ×
+0,36 Gio par pas à ~21 Go/s ≈ 0,7 s). Faux si : RuntimeError « refus »
+(alors la borne mange plus que 4 tours ne rattrapent : lire les chiffres),
+ou moteur à vide encore (alors une troisième file d'attente, à chercher
+avec `ACVRAM_TRACE_STEPS=1`).

@@ -327,8 +327,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
     # Caches KV differes : voir la fusion des projections plus bas, qui a
     # besoin de place libre au moment ou elle concatene.
     a_allouer: list = []
-    _borner_kv_par_la_vram(plan, manifest, dev,
-                           reserve=_reserve_prefill(spec, max_model_len, manifest, plan))
+    _borner_kv_avec_exil(plan, manifest, dev, spec, max_model_len,
+                         reserve=_reserve_prefill(spec, max_model_len, manifest, plan))
     kv_blocks = _kv_blocks_per_device(plan, spec, max_model_len)
 
     # Arène épinglée pour les poids exilés, dimensionnée ICI parce que le plan
@@ -1118,6 +1118,62 @@ def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0) ->
                   f"{budget / 2**30:.2f} → {max(0, borne) / 2**30:.2f} Gio "
                   f"(libre {libre / 2**30:.1f}, poids {poids / 2**30:.1f}, "
                   f"marge {marge / 2**30:.1f} dont préfill {reserve / 2**30:.2f})", file=sys.stderr)
+
+
+def _kv_plancher(plan: Plan, spec: ModelSpec, max_model_len: Optional[int], dev: str) -> int:
+    """Octets KV qu'il faut AU MOINS sur ``dev`` pour qu'UNE séquence de
+    ``max_model_len`` jetons y passe : sous ce plancher, l'ordonnanceur
+    n'admet jamais la requête et le moteur tourne à vide."""
+    bpt = int(getattr(plan, "kv_bytes_per_token", 0) or spec.kv_bytes_per_token())
+    total = sum(1 for lp in plan.layers if spec.couche_a_kv(lp.index))
+    ici = sum(1 for lp in plan.layers if spec.couche_a_kv(lp.index) and lp.exec_device == dev)
+    if not total or not ici:
+        return 0
+    jetons = int(max_model_len or 2048) + BLOCK_SIZE
+    return bpt * jetons * ici // total
+
+
+def _borner_kv_avec_exil(plan: Plan, manifest: dict, dev, spec: ModelSpec,
+                         max_model_len: Optional[int], reserve: int = 0, tours: int = 4) -> None:
+    """`_borner_kv_par_la_vram`, puis exile encore si le budget KV est passé
+    SOUS le plancher d'une séquence — et refuse explicitement s'il y reste.
+
+    Llama-3.3-70B-nvfp4 (poste3, 17/09, trois essais) : la boucle d'exil
+    (`_reajuster_plan`) et la borne KV lisent la VRAM libre à deux instants
+    et avec deux marges ; l'exil s'arrêtait à 37/80 satisfait, puis la borne
+    ramenait le budget KV « 0,32 → 0,00 Gio ». Zéro bloc : la séquence de
+    256 jetons n'était jamais admise, le moteur attendait un travail qui ne
+    venait pas (33 min, GPU 0 %, fil principal en poll) — pris pour un
+    blocage CUDA. Ici la borne et l'exil se répondent jusqu'à ce que le
+    plancher tienne ; sinon le chargement s'arrête avec les chiffres."""
+    if not torch.cuda.is_available() or not plan.kv_budget:
+        return
+    cible = dict(plan.kv_budget)
+    top_k = spec.num_experts_per_tok or 8
+    supplement = 0
+    for tour in range(tours + 1):
+        _borner_kv_par_la_vram(plan, manifest, dev, reserve=reserve)
+        manque = 0
+        for t in plan.tiers:
+            if t.kind != "gpu" or t.name not in plan.kv_budget:
+                continue
+            plancher = _kv_plancher(plan, spec, max_model_len, t.name)
+            manque = max(manque, plancher - int(plan.kv_budget[t.name]))
+        if manque <= 0:
+            return
+        if tour == tours:
+            break
+        supplement += manque
+        plan.kv_budget = dict(cible)
+        print(f"[acvram] budget KV sous le plancher d'une séquence de {max_model_len} "
+              f"jetons ({manque / 2**20:.0f} Mio manquants) : exil supplémentaire (tour {tour + 1})",
+              file=sys.stderr)
+        _reajuster_plan(plan, manifest, top_k=top_k, reserve=reserve + supplement)
+    raise RuntimeError(
+        f"refus : budget KV insuffisant après {tours} tours d'exil — "
+        f"{ {k: round(v / 2**30, 2) for k, v in plan.kv_budget.items()} } Gio pour un plancher "
+        f"d'une séquence de {max_model_len} jetons ({manque / 2**20:.0f} Mio manquants) ; "
+        f"réduire max_model_len ou forcer l'exil (ACVRAM_EXIL_COUCHES)")
 
 
 def _kv_blocks_per_device(plan: Plan, spec: ModelSpec,

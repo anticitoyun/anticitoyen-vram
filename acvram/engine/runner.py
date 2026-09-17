@@ -380,6 +380,7 @@ class Engine:
         self.running: list[Sequence] = []
         self.stats = EngineStats(kv_blocks_total=n_blocks)
         self._lock = threading.Lock()
+        self._refusees: list[GenerationOutput] = []     # admissions impossibles, rendues au pas suivant
         self._eos = self._eos_ids()
         # Étage hôte du cache KV : les blocs de préfixe évincés descendent en
         # RAM et remontent au réemploi, au lieu d'être recalculés.
@@ -610,6 +611,20 @@ class Engine:
                 # premières étapes de décodage n'aient pas besoin aussitôt d'un
                 # bloc supplémentaire.
                 need = seq.blocks_needed(extra=BLOCK_SIZE)
+                if need > self.allocator.num_blocks:
+                    # Jamais admissible, même carte vide : la garder en file
+                    # laissait le moteur tourner à vide sans une ligne (70B
+                    # en exil, budget KV 0 → 1 bloc, invite de 17 blocs).
+                    self.waiting.pop(0)
+                    print(f"[acvram] requête refusée : {need} blocs KV nécessaires, "
+                          f"{self.allocator.num_blocks} en tout (request_id={seq.request_id})",
+                          flush=True)
+                    self._finish(seq, "refus")
+                    self._refusees.append(GenerationOutput(
+                        sequence_id=seq.id, request_id=seq.request_id, token_ids=[],
+                        finished=True, finish_reason="refus",
+                        prompt_tokens=len(seq.prompt_ids), completion_tokens=0))
+                    continue
                 if need > self.allocator.num_free:
                     break
                 self.waiting.pop(0)
@@ -903,7 +918,8 @@ class Engine:
         new = self._admit()
         if new:
             self.stats.pas_avec_prefill += 1
-        outputs: list[GenerationOutput] = []
+        outputs: list[GenerationOutput] = self._refusees
+        self._refusees = []
 
         # Lot groupé : un seul prefill pour toutes les séquences de `new` au
         # lieu d'un par séquence. `input_layernorm` et le MoE
