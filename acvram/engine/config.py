@@ -542,14 +542,24 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         cfg = {**cfg, "rope_theta": rp_gen["rope_theta"]}
     if cfg.get("model_type") == "gemma4_unified_text":
         cfg = {**cfg, "model_type": "gemma4_text"}     # même modèle texte
-    if cfg.get("model_type") == "nemotron_h" and cfg.get("hybrid_override_pattern"):
-        # point de contrôle HF (bf16 ou EXL3) : motif M/E/-/* → types de
-        # couches, mêmes conventions que la synthèse GGUF (attention sans
-        # RoPE, MLP ReLU², routage sigmoïde + biais, experts partagés)
-        motif = str(cfg["hybrid_override_pattern"])
-        kinds = {"M": "mamba", "E": "moe", "-": "mlp", "*": "full_attention"}
+    if cfg.get("model_type") == "nemotron_h" and (
+            cfg.get("hybrid_override_pattern") or cfg.get("layers_block_type")):
+        # point de contrôle HF (bf16 ou EXL3) : motif M/E/-/* (hybrid_override_
+        # pattern) ou liste de mots (layers_block_type, le seul champ présent
+        # sur le bf16 source — hybrid_override_pattern n'y est écrit que sur
+        # le dérivé EXL3) → types de couches, mêmes conventions que la
+        # synthèse GGUF (attention sans RoPE, MLP ReLU², routage sigmoïde +
+        # biais, experts partagés)
+        if cfg.get("hybrid_override_pattern"):
+            motif = str(cfg["hybrid_override_pattern"])
+            kinds = {"M": "mamba", "E": "moe", "-": "mlp", "*": "full_attention"}
+            couches = [kinds[c] for c in motif[:int(cfg["num_hidden_layers"])]]
+        else:
+            mots = {"mamba": "mamba", "moe": "moe", "attention": "full_attention",
+                    "mlp": "mlp", "-": "mlp"}
+            couches = [mots[m] for m in cfg["layers_block_type"][:int(cfg["num_hidden_layers"])]]
         cfg = {**cfg,
-               "layer_types": [kinds[c] for c in motif[:int(cfg["num_hidden_layers"])]],
+               "layer_types": couches,
                "attention_rope": False, "hidden_act": "relu2",
                "rms_norm_eps": cfg.get("norm_eps") or cfg.get("layer_norm_epsilon") or 1e-5,
                "num_experts": cfg.get("n_routed_experts") or 0,

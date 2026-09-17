@@ -594,6 +594,15 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
         if t.padded_in != xf.shape[-1]:
             xf = torch.nn.functional.pad(xf, (0, t.padded_in - xf.shape[-1]))
         gsr = getattr(t, "global_scale_rows", None)
+        if _DENSE_NVFP4 == "triton" and 2 <= n <= 32 and xf.dtype == torch.bfloat16:
+            # GEMM dense étroite W4A16 (poste7-hybrides-etape1-close-gemm-dense-
+            # 17-09 § 2) : les M lignes en registres, les poids lus UNE fois
+            # par pas — la boucle GEMV ci-dessous les relit par séquence
+            # (Qwen3.8 b=12 : 0,23 To/s). M = 1 garde la GEMV.
+            from . import gemm_dense_etroit
+            if gemm_dense_etroit.disponible():
+                y = gemm_dense_etroit.gemm_dense_etroit(xf, t)
+                return y.reshape(*orig_shape[:-1], t.shape[0])
         if (_NARROW_GEMM and _NARROW_NVFP4 and gsr is None and _NARROW_MIN <= n <= 16 and t.padded_in % 64 == 0
                 and xf.dtype == torch.bfloat16 and hasattr(ext, "narrow_gemm")):
             # 1aj marche 2 : GEMM étroit tensor cores, poids lus une fois par
@@ -705,6 +714,11 @@ def int8_dequant(t: INT8Tensor, dtype: torch.dtype = torch.float16) -> torch.Ten
 
 
 _INT8_GEMV_MAX = int(os.environ.get("ACVRAM_INT8_GEMV_MAX", "80"))
+# Linéaires NVFP4 denses à 2 ≤ b ≤ 32 : gemv (défaut, témoin : nvfp4_gemv, les
+# poids relus par séquence) | triton (kernels/gemm_dense_etroit.py, poids lus
+# une fois par pas) — défaut à basculer sur le scellé de poste7 (micro-banc
+# ≥ 1,3 To/s, puis Qwen3.8 b=12 ≥ 500 t/s).
+_DENSE_NVFP4 = os.environ.get("ACVRAM_DENSE_NVFP4", "gemv")
 # Plafond (octets) du pic de déquantification du repli GEMM d'int8_matmul,
 # au-delà duquel la matrice est traitée par tranches de lignes.
 _DEQUANT_TRANCHE_MAX = int(os.environ.get("ACVRAM_DEQUANT_TRANCHE_MAX", str(256 * 2**20)))

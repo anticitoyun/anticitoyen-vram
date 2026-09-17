@@ -58,6 +58,8 @@ VARIABLES: tuple[Variable, ...] = (
              "linéaires INT8 à b ≤ 16 : mixte (défaut, Triton dès b≥NARROW_TRITON_MIN_B, verdict-coder-c-mixte-17-09) | cuda | triton | tete"),
     Variable("NARROW_TRITON_MIN_B", "2", ("acvram.kernels", "_NARROW_TRITON_MIN_B")),
     Variable("NARROW_NVFP4", "0", ("acvram.kernels", "_NARROW_NVFP4"), "0"),
+    Variable("DENSE_NVFP4", "gemv", ("acvram.kernels", "_DENSE_NVFP4"), "gemv",
+             "linéaires NVFP4 denses à 2 ≤ b ≤ 32 : gemv (témoin, poids relus par séquence) | triton (gemm_dense_etroit, poids lus une fois par pas)"),
     Variable("NARROW_MIN_M", "2", ("acvram.kernels", "_NARROW_MIN")),
     Variable("NARROW_ROWS", "32", ("acvram.kernels", "_NARROW_ROWS")),
     Variable("NARROW_MLA", "1", None, "0"),
@@ -129,7 +131,8 @@ HORS_REGIME = frozenset({
     "ACVRAM_TRACE_ROUTAGE", "ACVRAM_TRACE_STEPS", "ACVRAM_TRACE_COUCHES", "ACVRAM_CHRONO_SYNC", "ACVRAM_SYNC_COUCHES",
     "ACVRAM_WARM_GRAPHS", "ACVRAM_WARM_SPEC", "ACVRAM_PLAN_FIGE", "ACVRAM_SANS_REPLAN",
     "ACVRAM_SANS_PRECHARGE", "ACVRAM_POOL_SYNC", "ACVRAM_PIPELINE", "ACVRAM_PREFILL_BATCH",
-    "ACVRAM_SPECULATION_LOT_MAX", "ACVRAM_MTP", "ACVRAM_HYBRID_SLOTS", "ACVRAM_DENSE_SLOTS", "ACVRAM_DEQUANT_TRANCHE_MAX", "ACVRAM_INSTA_PAS",
+    "ACVRAM_SPECULATION_LOT_MAX", "ACVRAM_MTP", "ACVRAM_HYBRID_SLOTS", "ACVRAM_DENSE_SLOTS", "ACVRAM_DEQUANT_TRANCHE_MAX",
+    "ACVRAM_DENSE_ETROIT_BN", "ACVRAM_DENSE_ETROIT_BK", "ACVRAM_DENSE_ETROIT_WARPS", "ACVRAM_DENSE_ETROIT_STAGES", "ACVRAM_INSTA_PAS",
     "ACVRAM_GRAPHES_TABLE", "ACVRAM_MLP_HOTE_CPU", "ACVRAM_KDA_CHUNK", "ACVRAM_MAMBA_CHUNK",
     # compilation, placement, parc, mémoire : pas des chemins de calcul
     "ACVRAM_ALLOC_EXTENSIBLE", "ACVRAM_ARCH_FAMILY", "ACVRAM_CUDA_HOME", "ACVRAM_GW_WARPS",
