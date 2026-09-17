@@ -108,7 +108,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MLA_EAGER_TORCH", "", None, "1"),
     Variable("MLA_DEBUG_ECART", "", None),
     Variable("HYBRID_KERNELS", "1", None, "0", "KDA / GDN : noyaux hybrides ou torch"),
-    Variable("GDN", "1", None, "0"),
+    Variable("GDN", "fla", ("acvram.engine.gdn", "_GDN_VOIE"), "torch",
+             "Gated DeltaNet : fla (noyaux Triton de flash-linear-attention, prefill par blocs et décodage du lot en un lancement) | torch (référence transformers, séquence par séquence) ; 0 = refus des hybrides"),
     # --- autres chemins de calcul ----------------------------------------
     Variable("FUSION_NVFP4", "1", None, "0", "témoin de mesure : fusion gate/up NVFP4"),
     Variable("FUSION_PARTIELLE", "0", None, "0"),
@@ -178,6 +179,14 @@ def regime_ligne() -> str:
     puis extension et masques. « défaut » seul veut dire : tout au défaut."""
     r = regime_noyaux()
     parts = [f"{k}={v if v else repr('')}" for k, v in r["hors_defaut"].items()] or ["défaut"]
+    # la voie GDN est toujours nommée, défaut compris : c'est elle qui sépare
+    # 97 de 621 j/s sur Qwen3.8 (poste7, 17/09), et « fla » demandé ne vaut
+    # rien si fla est absent ou la carte aussi — la voie EFFECTIVE est écrite
+    try:
+        from .engine.gdn import gdn_regime
+        parts.append("ACVRAM_GDN=" + gdn_regime())
+    except Exception as exc:                                 # noqa: BLE001
+        parts.append(f"ACVRAM_GDN=?({type(exc).__name__})")
     parts.append("extension=" + ("oui" if r["extension"] else f"non({r['extension_raison']})"))
     if r["backends_masques"]:
         parts.append("backends_masques=" + ",".join(r["backends_masques"]))

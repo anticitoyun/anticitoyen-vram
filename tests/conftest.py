@@ -9,6 +9,22 @@ import os
 # a kernel » (vu en suite complète seulement, pas en fichier isolé).
 if os.environ.get("CUDA_VISIBLE_DEVICES") == "":
     os.environ.setdefault("TRITON_INTERPRET", "1")
+    # Les noyaux `fla` (flash-linear-attention) sont autoréglés : sans
+    # pilote, le banc de l'autoréglage échoue (« 0 active drivers »). Sous
+    # l'interpréteur, la première configuration suffit — les valeurs ne
+    # dépendent pas du réglage, seul le temps en dépend.
+    try:
+        from triton.runtime import autotuner as _at
+
+        _init = _at.Autotuner.__init__
+
+        def _init_une_config(self, *a, **kw):
+            _init(self, *a, **kw)
+            if len(self.configs) > 1:
+                self.configs = self.configs[:1]
+        _at.Autotuner.__init__ = _init_une_config
+    except Exception:                                    # noqa: BLE001
+        pass
 
 import pytest
 import torch

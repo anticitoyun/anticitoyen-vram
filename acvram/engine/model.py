@@ -1894,7 +1894,9 @@ class DecoderLayerGDN(nn.Module):
         # b — seul ext.mla_decode a encore besoin du cache, par séquence.
         # Conservateur : au moindre doute (créneau actif, prefill mélangé,
         # noyau absent), la boucle inchangée ci-dessous.
-        if (hasattr(la, "rank") and batch.gdn_store is not None
+        # GDN (17/09) : même contrat, `forward_batch` = un lancement fla pour
+        # les b séquences (poste7-priorite-apres-campagne-17-09 § 2)
+        if (hasattr(la, "forward_batch") and batch.gdn_store is not None
                 and all(ql == 1 for ql in batch.query_lens)
                 and la.peut_batcher_decode(h)):
             sids = [batch.seq_ids[i] if batch.seq_ids else i
@@ -1995,6 +1997,9 @@ class DecoderLayerGDN(nn.Module):
             un = lambda t, st: la.decode_static(t, st)
         b = h.shape[0] // q_len
         if b > 1:                              # un créneau par séquence
+            if q_len == 1 and hasattr(la, "decode_static_batch") and not hasattr(la, "rank") \
+                    and la.peut_batcher_decode(h):
+                return la.decode_static_batch(h, self.statics[:b])      # GDN : un lancement fla
             if q_len == 1 and hasattr(la, "rank") and _MLA_BATCH:
                 ext = kernels.get_extension()
                 if ext is not None and hasattr(ext, "mla_decode_batch"):

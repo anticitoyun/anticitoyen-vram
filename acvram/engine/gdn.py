@@ -23,13 +23,55 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-__all__ = ["GatedDeltaNet", "gdn_available"]
+__all__ = ["GatedDeltaNet", "gdn_available", "gdn_regime"]
+
+# ACVRAM_GDN = fla (défaut) | torch : la récurrence par les noyaux Triton de
+# flash-linear-attention (`chunk_gated_delta_rule` au prefill,
+# `fused_recurrent_gated_delta_rule` au décodage, un lancement par couche
+# pour tout le lot) ou par la référence torch de transformers (une séquence
+# à la fois, des dizaines de lancements par séquence et par couche — Qwen3.8
+# b=12 : 97 j/s pour 621 chez vLLM, poste7-priorite-apres-campagne-17-09).
+# « 1 » vaut fla, « 0 » reste le refus des hybrides (quant/gguf.py).
+_GDN_VOIE = os.environ.get("ACVRAM_GDN", "fla")
+_LOT = 16          # créneaux par tampon groupé des états fixes (b ≤ 16 : un seul lot)
+
+
+def _fla():
+    """(chunk, fused_recurrent) de fla, ou None si absent ou non demandé."""
+    if _GDN_VOIE in ("torch", "0"):
+        return None
+    try:
+        from fla.ops.gated_delta_rule import (chunk_gated_delta_rule,
+                                              fused_recurrent_gated_delta_rule)
+        return chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
+    except ImportError:
+        return None
+
+
+def gdn_regime() -> str:
+    """Voie effective, pour `regime_ligne()` : fla | torch(raison)."""
+    if _GDN_VOIE in ("torch", "0"):
+        return "torch"
+    if _fla() is None:
+        return "torch(fla absent)"
+    if not (torch.cuda.is_available() or os.environ.get("TRITON_INTERPRET") == "1"):
+        return "torch(sans carte)"
+    return "fla"
+
+
+def _voie_fla(x: torch.Tensor) -> bool:
+    return _fla() is not None and (x.is_cuda or os.environ.get("TRITON_INTERPRET") == "1")
 
 
 def _refs():
+    """La référence torch de transformers — la fonction NUE : depuis que fla
+    est installé (17/09), transformers l'enveloppe (integrations/hub_kernels)
+    et la renvoie vers fla, silencieusement ; la voie « torch » serait fla.
+    `__wrapped__` (functools.wraps) rend l'originale."""
     from transformers.models.qwen3_next.modeling_qwen3_next import (
         torch_chunk_gated_delta_rule, torch_recurrent_gated_delta_rule)
-    return torch_chunk_gated_delta_rule, torch_recurrent_gated_delta_rule
+    return (getattr(torch_chunk_gated_delta_rule, "__wrapped__", torch_chunk_gated_delta_rule),
+            getattr(torch_recurrent_gated_delta_rule, "__wrapped__", torch_recurrent_gated_delta_rule))
 
 
 def gdn_available() -> bool:
@@ -114,10 +156,22 @@ class GatedDeltaNet(nn.Module):
             k = k.repeat_interleave(self.nv // self.nk, dim=2)
 
         s_prev = state[1] if state is not None else None
-        rule = recurrent_rule if decode else chunk_rule
-        core, s_new = rule(q, k, v, g=g, beta=beta,
-                           initial_state=s_prev, output_final_state=True,
-                           use_qk_l2norm_in_kernel=True)
+        # sous l'interpréteur Triton (tests sans carte) seul le noyau
+        # récurrent tourne : le noyau par blocs y bute sur `i_t.to(...)`
+        fla = _fla() if _voie_fla(x) and (decode or x.is_cuda) else None
+        if fla is not None:
+            # même mathématique, même disposition d'état [B, H, K, V] que la
+            # référence (transformers l'a portée de fla) ; entrées en fp32,
+            # TRITON_F32_DEFAULT=ieee posé par fla — exact, pas TF32
+            rule = fla[1] if decode else fla[0]
+            core, s_new = rule(q.contiguous(), k.contiguous(), v.contiguous(), g=g.contiguous(),
+                               beta=beta.contiguous(), initial_state=s_prev,
+                               output_final_state=True, use_qk_l2norm_in_kernel=True)
+        else:
+            rule = recurrent_rule if decode else chunk_rule
+            core, s_new = rule(q, k, v, g=g, beta=beta,
+                               initial_state=s_prev, output_final_state=True,
+                               use_qk_l2norm_in_kernel=True)
 
         core = core.reshape(-1, self.dv)
         y = self._norm_gated(core, z.reshape(-1, self.dv))
@@ -129,10 +183,20 @@ class GatedDeltaNet(nn.Module):
     # rejoue telle quelle et l'on recopie ses sorties dans les tampons fixes
     # — même mathématique, mêmes noyaux, donc mêmes arrondis que ``forward``.
     def new_static(self, device: torch.device) -> dict:
-        return {"conv": torch.zeros(self.conv_dim, self.kernel - 1,
-                                    dtype=torch.float32, device=device),
-                "S": torch.zeros(1, self.nv, self.dk, self.dv,
-                                 dtype=torch.float32, device=device)}
+        """Un créneau = des VUES dans un tampon groupé de `_LOT` créneaux
+        (`_lots`) : les créneaux 0..b-1 (b ≤ _LOT) forment des tranches
+        contiguës, et `decode_static_batch` sert tout le lot en un lancement
+        sans rassembler ni redistribuer les états."""
+        lots = self.__dict__.setdefault("_lots", [])
+        n = self.__dict__.setdefault("_n_statics", 0)
+        if n % _LOT == 0:
+            lots.append({"conv": torch.zeros(_LOT, self.conv_dim, self.kernel - 1,
+                                             dtype=torch.float32, device=device),
+                         "S": torch.zeros(_LOT, self.nv, self.dk, self.dv,
+                                          dtype=torch.float32, device=device)})
+        lot, i = lots[n // _LOT], n % _LOT
+        self.__dict__["_n_statics"] = n + 1
+        return {"conv": lot["conv"][i], "S": lot["S"][i:i + 1], "lot": (n // _LOT, i)}
 
     @staticmethod
     def static_load(st: dict, etat) -> None:
@@ -150,3 +214,70 @@ class GatedDeltaNet(nn.Module):
         st["conv"].copy_(conv)
         st["S"].copy_(S.to(torch.float32))
         return y
+
+    # -- décodage du lot en un lancement (fla) ------------------------------
+    def peut_batcher_decode(self, h: torch.Tensor) -> bool:
+        return _voie_fla(h)
+
+    def _lot_projete(self, x: torch.Tensor, conv_state: torch.Tensor):
+        """Projections, convolution causale à état et portes pour ``b``
+        jetons (un par séquence) ; ``conv_state`` [b, conv_dim, k-1] est mis
+        à jour EN PLACE. Rend (q, k, v, g, beta, z) aux formes de fla."""
+        b = x.shape[0]
+        qkv = self.qkv(x).to(torch.float32)                 # [b, conv_dim]
+        z = self.gate(x).to(torch.float32)
+        bt = self.beta_proj(x).to(torch.float32)
+        a = self.alpha(x).to(torch.float32)
+        seq = torch.cat([conv_state, qkv.unsqueeze(-1)], dim=-1)   # [b, conv_dim, k]
+        conv_state.copy_(seq[:, :, 1:])
+        conv = F.silu(F.conv1d(seq, self.conv_weight.unsqueeze(1), groups=self.conv_dim))
+        mixed = conv.transpose(1, 2)                        # [b, 1, conv_dim]
+        q, k, v = torch.split(mixed, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
+        q = q.reshape(b, 1, self.nk, self.dk)
+        k = k.reshape(b, 1, self.nk, self.dk)
+        v = v.reshape(b, 1, self.nv, self.dv)
+        if self.nv // self.nk > 1:
+            q = q.repeat_interleave(self.nv // self.nk, dim=2)
+            k = k.repeat_interleave(self.nv // self.nk, dim=2)
+        beta = bt.sigmoid().unsqueeze(1)                    # [b, 1, nv]
+        g = (-self.a_log.exp() * F.softplus(a + self.dt_bias)).unsqueeze(1)
+        return q.contiguous(), k.contiguous(), v.contiguous(), g.contiguous(), beta.contiguous(), z
+
+    def forward_batch(self, h: torch.Tensor, etats: list) -> tuple[torch.Tensor, list]:
+        """Décodage eager de ``b`` séquences (un jeton chacune) en un
+        lancement de la récurrence ; ``etats`` = tuples (conv, S) ou None."""
+        b = h.shape[0]
+        conv_state = torch.stack([e[0] if e is not None else
+                                  torch.zeros(self.conv_dim, self.kernel - 1, dtype=torch.float32, device=h.device)
+                                  for e in etats])
+        S = torch.cat([e[1] if e is not None else
+                       torch.zeros(1, self.nv, self.dk, self.dv, dtype=torch.float32, device=h.device)
+                       for e in etats])
+        q, k, v, g, beta, z = self._lot_projete(h, conv_state)
+        core, S_new = _fla()[1](q, k, v, g=g, beta=beta, initial_state=S.contiguous(),
+                                output_final_state=True, use_qk_l2norm_in_kernel=True)
+        y = self._norm_gated(core.reshape(-1, self.dv), z.reshape(-1, self.dv)).reshape(b, self.value_dim)
+        y = self.out_proj(y.to(h.dtype))
+        return y, [(conv_state[i].clone(), S_new[i:i + 1].to(torch.float32)) for i in range(b)]
+
+    def decode_static_batch(self, h: torch.Tensor, statics: list) -> torch.Tensor:
+        """Chemin à formes fixes pour ``b`` créneaux : états lus et écrits
+        dans les tranches contiguës du tampon groupé (aucune copie si les
+        créneaux 0..b-1 vivent dans le même lot), un lancement de fla."""
+        b = h.shape[0]
+        lots = self.__dict__.get("_lots", [])
+        contigu = (b <= _LOT and lots and all(st.get("lot") == (0, i) for i, st in enumerate(statics[:b])))
+        if contigu:
+            conv_state, S = lots[0]["conv"][:b], lots[0]["S"][:b]
+        else:
+            conv_state = torch.stack([st["conv"] for st in statics[:b]])
+            S = torch.cat([st["S"] for st in statics[:b]])
+        q, k, v, g, beta, z = self._lot_projete(h, conv_state)
+        core, S_new = _fla()[1](q, k, v, g=g, beta=beta, initial_state=S.contiguous(),
+                                output_final_state=True, use_qk_l2norm_in_kernel=True)
+        S.copy_(S_new)
+        if not contigu:
+            for i, st in enumerate(statics[:b]):
+                st["conv"].copy_(conv_state[i]); st["S"].copy_(S[i:i + 1])
+        y = self._norm_gated(core.reshape(-1, self.dv), z.reshape(-1, self.dv)).reshape(b, self.value_dim)
+        return self.out_proj(y.to(h.dtype))
