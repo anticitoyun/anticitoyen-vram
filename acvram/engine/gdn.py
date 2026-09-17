@@ -23,6 +23,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .lot_etats import nouveau_static, redistribuer, tranches
+
 __all__ = ["GatedDeltaNet", "gdn_available", "gdn_regime"]
 
 # ACVRAM_GDN = fla (défaut) | torch : la récurrence par les noyaux Triton de
@@ -33,7 +35,6 @@ __all__ = ["GatedDeltaNet", "gdn_available", "gdn_regime"]
 # b=12 : 97 j/s pour 621 chez vLLM, poste7-priorite-apres-campagne-17-09).
 # « 1 » vaut fla, « 0 » reste le refus des hybrides (quant/gguf.py).
 _GDN_VOIE = os.environ.get("ACVRAM_GDN", "fla")
-_LOT = 16          # créneaux par tampon groupé des états fixes (b ≤ 16 : un seul lot)
 
 
 def _fla():
@@ -183,20 +184,13 @@ class GatedDeltaNet(nn.Module):
     # rejoue telle quelle et l'on recopie ses sorties dans les tampons fixes
     # — même mathématique, mêmes noyaux, donc mêmes arrondis que ``forward``.
     def new_static(self, device: torch.device) -> dict:
-        """Un créneau = des VUES dans un tampon groupé de `_LOT` créneaux
-        (`_lots`) : les créneaux 0..b-1 (b ≤ _LOT) forment des tranches
-        contiguës, et `decode_static_batch` sert tout le lot en un lancement
-        sans rassembler ni redistribuer les états."""
-        lots = self.__dict__.setdefault("_lots", [])
-        n = self.__dict__.setdefault("_n_statics", 0)
-        if n % _LOT == 0:
-            lots.append({"conv": torch.zeros(_LOT, self.conv_dim, self.kernel - 1,
-                                             dtype=torch.float32, device=device),
-                         "S": torch.zeros(_LOT, self.nv, self.dk, self.dv,
-                                          dtype=torch.float32, device=device)})
-        lot, i = lots[n // _LOT], n % _LOT
-        self.__dict__["_n_statics"] = n + 1
-        return {"conv": lot["conv"][i], "S": lot["S"][i:i + 1], "lot": (n // _LOT, i)}
+        """Un créneau = des VUES dans un tampon groupé (`lot_etats`) : les
+        créneaux 0..b-1 forment des tranches contiguës, `decode_static_batch`
+        sert le lot en un lancement sans rassembler ni redistribuer."""
+        st = nouveau_static(self, device, {"conv": (self.conv_dim, self.kernel - 1),
+                                           "S_": (self.nv, self.dk, self.dv)})
+        st["S"] = st.pop("S_").unsqueeze(0)             # [1, nv, dk, dv], la forme de l'état fonctionnel
+        return st
 
     @staticmethod
     def static_load(st: dict, etat) -> None:
@@ -265,13 +259,8 @@ class GatedDeltaNet(nn.Module):
         dans les tranches contiguës du tampon groupé (aucune copie si les
         créneaux 0..b-1 vivent dans le même lot), un lancement de fla."""
         b = h.shape[0]
-        lots = self.__dict__.get("_lots", [])
-        contigu = (b <= _LOT and lots and all(st.get("lot") == (0, i) for i, st in enumerate(statics[:b])))
-        if contigu:
-            conv_state, S = lots[0]["conv"][:b], lots[0]["S"][:b]
-        else:
-            conv_state = torch.stack([st["conv"] for st in statics[:b]])
-            S = torch.cat([st["S"] for st in statics[:b]])
+        g_, contigu = tranches(self, statics, b, ("conv", "S_"))
+        conv_state, S = g_["conv"], g_["S_"]
         q, k, v, g, beta, z = self._lot_projete(h, conv_state)
         core, S_new = _fla()[1](q, k, v, g=g, beta=beta, initial_state=S.contiguous(),
                                 output_final_state=True, use_qk_l2norm_in_kernel=True)
