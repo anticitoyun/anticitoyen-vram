@@ -705,6 +705,9 @@ def int8_dequant(t: INT8Tensor, dtype: torch.dtype = torch.float16) -> torch.Ten
 
 
 _INT8_GEMV_MAX = int(os.environ.get("ACVRAM_INT8_GEMV_MAX", "80"))
+# Plafond (octets) du pic de déquantification du repli GEMM d'int8_matmul,
+# au-delà duquel la matrice est traitée par tranches de lignes.
+_DEQUANT_TRANCHE_MAX = int(os.environ.get("ACVRAM_DEQUANT_TRANCHE_MAX", str(256 * 2**20)))
 # Linéaires INT8 à b ≤ 16 (poste C, poste7-e-c-verdict-17-09 § 2) : "mixte"
 # (défaut : Triton dès b ≥ NARROW_TRITON_MIN_B, CUDA en dessous) | "cuda"
 # (narrow_gemm / int8_gemv) | "triton" (kernels/gemm_etroit.py partout) |
@@ -826,7 +829,25 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
             return y.to(torch.float32).reshape(*orig_shape[:-1], t.shape[0])
         return y.to(x.dtype).reshape(*orig_shape[:-1], t.shape[0])
 
-    w = int8_dequant(t, x.dtype if x.dtype != torch.float32 else torch.float16)
+    dt = x.dtype if x.dtype != torch.float32 else torch.float16
+    # Repli GEMM : déquantifier la matrice ENTIÈRE en bf16 coûtait, sur la
+    # tête de Gemma-4-31B (262 144 × 5 376), 5,25 Gio d'un coup au premier
+    # préfill — OOM après un chargement juste (poste3 0cf7fe6). Par tranches
+    # de lignes de sortie : même arithmétique, mêmes valeurs (chaque tranche
+    # est la même matrice restreinte), pic borné par _DEQUANT_TRANCHE_MAX.
+    lignes = t.qweight.shape[0]
+    par_ligne = t.qweight.shape[1] * (4 + dt.itemsize)     # fp32 intermédiaire + sortie
+    if lignes * par_ligne > _DEQUANT_TRANCHE_MAX:
+        pas = max(64, (_DEQUANT_TRANCHE_MAX // par_ligne) // 64 * 64)
+        out = torch.empty(*x.shape[:-1], t.shape[0], dtype=x.dtype, device=x.device)
+        for a in range(0, t.shape[0], pas):
+            b = min(a + pas, t.shape[0])
+            tr = INT8Tensor(t.qweight[a:b], t.scales[a:b], t.zeros[a:b], t.group_size,
+                            (b - a, t.shape[1]), t.format)
+            w = int8_dequant(tr, dt)
+            out[..., a:b] = torch.nn.functional.linear(x, w.to(x.dtype))
+        return out
+    w = int8_dequant(t, dt)
     return torch.nn.functional.linear(x, w.to(x.dtype))
 
 
