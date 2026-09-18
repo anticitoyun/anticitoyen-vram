@@ -42,15 +42,31 @@ T = 1) ; tuiles identiques à `MoEBlock._tuiles` (bt 16 et 128) ; bras
 cassant : un compte faux change les tuiles. La sortie de la GEMM ne dépend
 pas de la place d'une ligne dans sa tuile : identique par construction.
 
-## 3. Ce qui attend la carte (poste3)
+## 3. Ce qui attend la carte (poste3) — trois bras, trois prédictions (poste7)
 
 Deux régimes en témoin (défauts bf16 / torch) jusqu'au scellé, un commit par
-fusion. Mesure : `prefill-dense-acvram` Coder 2 048 aux défauts, puis
-`ACVRAM_PREFILL_INT8=a8`, puis `+ ACVRAM_COLLE_MOE=triton` ; PPL privé sous
-a8 (porte ≤ 1,020) ; profil (torch.profiler) sous les deux pour lire les
-postes. Prédiction scellée : a8 : int8_dequant 11,2 → 0, cutlass 19,4 →
-9-11 (int8 tensor cores ≈ 2× bf16) ⇒ −20 ms ; colle : 8,3 → 2-3 ms ⇒ −6 ;
-pas 197 → ~171 ms ⇒ **≈ 12 000 j/s** (tenu si ≥ 11 000 ; faux si
-< 11 000 — alors le W8A8 Triton n'atteint pas 2× cutlass sur ces formes,
-lire le profil) ; PPL ≤ 1,017 (faux si > 1,020 : A8 par jeton trop
-grossier sur q/k/v — la voie serait A8 par groupe de 128, un noyau de plus).
+fusion. Avant toute mesure, dans la fenêtre de poste3 (je n'ai pas de carte) :
+(a) `pytest tests/test_gemm_w8a8.py tests/test_colle_moe.py` sur carte — la
+suite GPU des deux noyaux Triton neufs (REGLES § 7), jamais exécutée sur
+carte à ce jour ; (b) cache Triton vidé (`rm -rf ~/.triton/cache`, REGLES
+§ 6) puis un préfill de chauffe hors mesure (le JIT des deux noyaux se fait
+là, pas dans le chrono). Instrument : `prefill-dense-acvram` Coder 2 048,
+`regime_ligne()` en tête (elle porte `prefill_int8=` et `ACVRAM_COLLE_MOE`
+hors défaut), profil torch.profiler par bras pour lire les postes.
+
+| bras | régime | prédiction (pas GPU 197,0 ms ; 9 844 j/s) |
+|---|---|---|
+| T témoin | défauts (bf16, torch) | 197 ± 2 ms — 9 750-9 950 j/s |
+| A a8 seul | `ACVRAM_PREFILL_INT8=a8` | int8_dequant 11,2 → 0 ; cutlass 19,4 → 9-11 ⇒ **−20 ms** (fourchette −17 à −23) ⇒ 174-180 ms, 11 400-11 800 j/s |
+| B a8 + colle | `+ ACVRAM_COLLE_MOE=triton` | colle 8,3 → 2-3 ⇒ **−6 ms** de plus (−5 à −7) ⇒ 168-174 ms, 11 800-12 200 j/s |
+
+Verdicts, écrits avant : scellé P0 sur B ≥ 11 000 j/s (< 11 000 faux : lire
+le profil — le W8A8 Triton n'a pas 2× cutlass sur ces formes, ou la colle
+n'a pas bougé). La colle passe en défaut seulement si **B − A ≥ 3 ms** ;
+sous 3 ms « moins de lancements n'est pas un gain » (REGLES § 4), elle reste
+témoin. a8 passe en défaut si A − T ≥ 15 ms ET PPL privé ≤ 1,020
+(prédiction ≤ 1,017 ; > 1,020 faux : A8 par groupe de 128, un noyau de plus,
+décision séparée). Issue qui me gênerait : A − T ≈ −11 (la déquant seule,
+le GEMM int8 pas plus rapide que cutlass bf16 : alors le tl.dot int8 de
+Triton n'atteint pas les tensor cores int8 à 2×, et c'est un profil avant
+toute ligne).
