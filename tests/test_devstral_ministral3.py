@@ -1,5 +1,12 @@
 """Devstral-Small-2-24B (chef, 18/09) : Mistral3ForConditionalGeneration,
-text_config ministral3, yarn dans rope_parameters (pas rope_scaling)."""
+text_config ministral3, yarn dans rope_parameters (pas rope_scaling).
+
+ROPE_PARAMETERS ci-dessous copie le config.json REELLEMENT PUBLIE
+(huggingface.co/mistralai/Devstral-Small-2-24B-Instruct-2512, verifie le
+18/09) -- PAS les defauts de la classe Ministral3Config de transformers
+(qui portent original_max_position_embeddings=16384, factor=16.0,
+rope_theta=1e6 : tous DIFFERENTS du modele reel). Le seuil `original_
+max_position_embeddings` du vrai modele est 8192, pas 16384."""
 import json
 import math
 
@@ -7,10 +14,10 @@ from acvram.engine.config import load_model_spec
 
 ROPE_PARAMETERS = {
     "type": "yarn",
-    "rope_theta": 1000000.0,
-    "factor": 16.0,
-    "original_max_position_embeddings": 16384,
-    "max_position_embeddings": 262144,
+    "rope_type": "yarn",
+    "rope_theta": 100000000.0,
+    "factor": 48.0,
+    "original_max_position_embeddings": 8192,
     "beta_fast": 32.0,
     "beta_slow": 1.0,
     "mscale_all_dim": 1.0,
@@ -54,8 +61,8 @@ def test_devstral_deplie_text_config_et_porte_le_yarn(tmp_path):
     assert spec.num_key_value_heads == 8
     assert spec.rope_scaling is not None
     assert spec.rope_scaling.get("type") == "yarn"
-    assert spec.rope_scaling.get("factor") == 16.0
-    assert spec.rope_scaling.get("original_max_position_embeddings") == 16384
+    assert spec.rope_scaling.get("factor") == 48.0
+    assert spec.rope_scaling.get("original_max_position_embeddings") == 8192
     assert spec.rope_scaling.get("beta_fast") == 32.0
     assert spec.rope_scaling.get("beta_slow") == 1.0
 
@@ -75,15 +82,18 @@ def test_temoin_cassant_sans_le_branchement_rope_scaling_reste_none(tmp_path, mo
     assert spec.rope_scaling is None
 
 
-def test_llama_4_scaling_beta_vaut_1_sous_16384_positions():
+def test_llama_4_scaling_beta_vaut_1_sous_8192_positions_pas_au_dela():
     """Verifie numeriquement la formule HF (modeling_ministral3.py,
-    get_llama_4_attn_scale) qui justifie de NE PAS porter ce champ :
-    floor(position/original_max_position_embeddings) = 0 pour toute
-    position < 16384, donc scaling = 1 + beta*log(1) = 1 exactement."""
-    beta, orig = 0.1, 16384
-    for position in (0, 1, 8191, 8192, 16383):
+    get_llama_4_attn_scale) sur le VRAI original_max_position_embeddings du
+    modele publie (8192, pas 16384 -- voir le docstring du fichier) :
+    floor(position/8192) = 0 pour toute position < 8192, scaling = 1
+    exactement. PAS un no-op general : a position 8192 pile, le scaling
+    bouge deja (1,069) -- ce n'est confirme sans effet QUE si aucune fenetre
+    servie/mesuree n'atteint 8192 jetons de position, a verifier avec
+    poste3 avant la conversion, pas suppose."""
+    beta, orig = 0.1, 8192
+    for position in (0, 1, 4096, 8191):
         scaling = 1 + beta * math.log(1 + math.floor(position / orig))
         assert scaling == 1.0, f"position {position} : scaling {scaling} != 1.0"
-    # temoin positif : au-dela, la formule bouge bien (sinon le calcul lui-meme serait mort)
-    scaling_au_dela = 1 + beta * math.log(1 + math.floor(16384 / orig))
-    assert scaling_au_dela != 1.0
+    scaling_a_8192 = 1 + beta * math.log(1 + math.floor(8192 / orig))
+    assert abs(scaling_a_8192 - 1.0693147) < 1e-6

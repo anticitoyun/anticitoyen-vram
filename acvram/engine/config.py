@@ -550,12 +550,20 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         # Devstral-Small-2 (chef, 18/09) : `rope_parameters` porte le yarn
         # (type/factor/original_max_position_embeddings/beta_fast/beta_slow),
         # memes noms de cles que le `rope_scaling` que lit deja layers.py
-        # (_build_inv_freq) -- passe tel quel. `llama_4_scaling_beta`, seul
-        # champ propre a ministral3, N'EST PAS porte : sa formule (modeling_
-        # ministral3.py, get_llama_4_attn_scale) vaut `1 + beta*log(1+floor(
-        # position/original_max_position_embeddings))`, et
-        # floor(position/16384) = 0 pour toute position < 16384 -- scaling
-        # EXACTEMENT 1.0, donc sans effet sur un max_model_len <= 8192.
+        # (_build_inv_freq) -- passe tel quel.
+        #
+        # `llama_4_scaling_beta` (seul champ propre a ministral3) N'EST PAS
+        # PORTE ICI -- PAS UN NO-OP CONFIRME. Le vrai config.json publie
+        # (huggingface.co/mistralai/Devstral-Small-2-24B-Instruct-2512,
+        # verifie le 18/09, pas la valeur par defaut de la bibliotheque
+        # transformers) porte `original_max_position_embeddings=8192`, pas
+        # 16384. La formule HF (modeling_ministral3.py, get_llama_4_attn_
+        # scale) vaut `1 + beta*log(1+floor(position/original_max_position_
+        # embeddings))` : EXACTEMENT 1.0 pour toute position < 8192, mais
+        # PAS au-dela (position 8192 : 1 + 0,1*log(2) = 1,069). Un manque a
+        # 0 % pres seulement si aucune fenetre servie/mesuree ne depasse
+        # 8192 jetons de position -- a confirmer avec poste3 avant la
+        # conversion, pas suppose ici.
         cfg = {**cfg, "rope_scaling": rp_gen}
     if cfg.get("model_type") == "gemma4_unified_text":
         cfg = {**cfg, "model_type": "gemma4_text"}     # même modèle texte
