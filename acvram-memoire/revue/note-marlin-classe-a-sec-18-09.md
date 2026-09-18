@@ -174,3 +174,28 @@ prédiction : Marlin ≤ B0 en PPL (plus proche de fp32), écart < 0,001.
   sa déquant) ; seuil posé à 5·10⁻⁴, Marlin exigé ≤ B0. 7/7 verts à sec
   (le seul test carte reste skippé ici). Charge : tests ciblés seulement,
   plus de suite complète hors frontière de bloc.
+
+## Disposition unique (poste7-p1-disposition-unique-18-09) : banc du décodage, à sec
+
+poste7 tranche : UNE disposition Marlin, servie aussi au décodage (le chemin
+vLLM, fused_marlin_moe) ; hôte et repack à la volée écartés. Livré :
+- `marlin_port.aligner_blocs_capturable` : l'alignement des paires par
+  blocs d'expert en UN lancement Triton, sorties de taille FIXE (P_max = G +
+  E·(bloc−1)), tampons réutilisés — capturable sous graphe ; = `aligner_blocs`
+  (test, 4 formes dont b=12/b=1 Coder).
+- `outils/banc-marlin-decode-18-09.py` : b=12 (96 paires) et b=1 (8 paires),
+  E 128, top_k 8, K 2 048, I 768, gate + up + act·up + down × 48, SOUS GRAPHE
+  (aligneur dedans), Marlin contre le GEMV actuel (défauts rpw=4, xreg down) ;
+  chaque bras jugé contre fp32 (|Δ| ≤ 2⁻⁷·max|y| par ligne, ≤ 5·10⁻⁴ hors),
+  20 routages tirés au sort (les routages réels d'un modèle ne sont pas
+  disponibles à sec — distincts imprimés), bandes de poste7 imprimées.
+Prédiction, la mienne (poste7 : b=12 4,6-5,4 ms, b=1 0,9-1,1) : b=12 **5,0-6,0
+ms** — le bloc 8 rembourre 96 paires à ~540 lignes (÷ 5,6 d'occupation
+utile) et Marlin à M = 8 par expert lit ses 302 Mo par couche à ~1,2-1,4
+To/s (cellule vLLM 2 031 t/s = ~5,9 ms/pas TOUT compris, dont ~4,5 pour
+les experts) ; b=1 **1,1-1,4 ms** (64 lignes rembourrées pour 8 paires,
+latence par lancement × 3 GEMM × 48 : le GEMV actuel fait 3,0 ms à b=1 sur
+toute la couche MoE, Marlin sera au moins aussi bon sur les octets mais
+paie 3 lancements + l'aligneur). Faux si b=12 > 6,5 ou b=1 > 1,2 (alors
+forme (b)). Issue qui me gênerait : b=1 en zone grise seul — la cellule
+b=1 (366 t/s, devant llama.cpp) juge, une passe.

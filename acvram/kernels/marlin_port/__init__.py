@@ -231,3 +231,84 @@ def gemm_moe(a: torch.Tensor, w_marlin, s_marlin, g_marlin, sorted_ids, expert_i
         a, c, w_marlin, None, s_marlin, None, g_marlin, None, None, None, workspace,
         sorted_ids, expert_ids, num_post, topk_weights, block_size, top_k, mul_topk_weights,
         _kfe2m1f_id(), size_m, size_n, size_k, True, False, True, False, -1, -1, -1)
+
+
+# --- alignement CAPTURABLE (décodage sous graphe, poste7-p1-disposition-unique-18-09) ---
+
+try:
+    import triton
+    import triton.language as tl
+except Exception:                                        # noqa: BLE001
+    triton = None
+    tl = None
+
+if triton is not None:
+
+    @triton.jit
+    def _aligner_kernel(e_ptr, sorted_ptr, expert_ptr, npost_ptr, G, P, bloc,
+                        BG: tl.constexpr, E: tl.constexpr, BP: tl.constexpr):
+        """Un programme : tri des G paires par clé composite e·2¹⁶ + paire
+        (déterministe), comptes par expert (histogramme), rembourrage de
+        chaque expert à un multiple de ``bloc`` (sentinelle G), expert de
+        chaque bloc — sorties de taille FIXE, aucun scalaire hôte."""
+        i = tl.arange(0, BG)
+        masque = i < G
+        e = tl.load(e_ptr + i, mask=masque, other=E).to(tl.int32)
+        tri = tl.sort(e * 65536 + i)
+        rang = tl.arange(0, BG)
+        e_tri = tri >> 16
+        paire = tri & 65535
+        valide = rang < G
+        j = tl.arange(0, E)
+        h = tl.histogram(tl.where(masque, e, 0), E)
+        h0 = tl.sum(tl.where(masque, 0, 1), 0)
+        cnt = tl.where(j == 0, h - h0, h)                              # [E]
+        rembourre = ((cnt + bloc - 1) // bloc) * bloc
+        debut_pad = tl.cumsum(rembourre, 0) - rembourre
+        debut_tri = tl.cumsum(cnt, 0) - cnt
+        # position de chaque paire triée : début rembourré de son expert + rang dans l'expert
+        sel = (j[None, :] == e_tri[:, None]).to(tl.int32)               # [BG, E]
+        dp = tl.sum(sel * debut_pad[None, :], 1)
+        dt = tl.sum(sel * debut_tri[None, :], 1)
+        pos = dp + (rang - dt)
+        tl.store(sorted_ptr + pos, paire, mask=valide)
+        # expert de chaque bloc : le dernier expert dont debut_pad ≤ b·bloc, parmi ceux qui ont des paires
+        b = tl.arange(0, BP)
+        deb_b = b * bloc
+        total = tl.sum(rembourre, 0)
+        masque_b = (b < P // bloc) & (deb_b < total)
+        n_le = tl.sum(((debut_pad[None, :] <= deb_b[:, None]) & (rembourre[None, :] > 0)).to(tl.int32), 1)
+        # n_le compte les experts non vides commencés avant ou en b·bloc ; l'expert du bloc = le n_le-ième non vide
+        rang_nv = tl.cumsum((rembourre > 0).to(tl.int32), 0)            # rang (1-based) des experts non vides
+        sel_b = (rang_nv[None, :] == n_le[:, None]).to(tl.int32) * (rembourre[None, :] > 0).to(tl.int32)
+        e_b = tl.sum(sel_b * j[None, :], 1)
+        tl.store(expert_ptr + b, e_b.to(tl.int32), mask=masque_b)
+        tl.store(npost_ptr + tl.arange(0, 1), tl.full((1,), 0, tl.int32) + total)
+
+
+def aligner_blocs_capturable(flat_e: torch.Tensor, block_size: int, num_experts: int, tampons=None):
+    """`aligner_blocs` en UN lancement Triton, sorties de taille fixe
+    (P_max = G + E·(block−1)) : capturable dans un graphe CUDA. ``flat_e``
+    [G] int32 (expert de chaque paire, ordre des jetons). ``tampons`` :
+    (sorted_ids, expert_ids, num_post) réutilisés (adresses stables)."""
+    G = flat_e.numel()
+    E = num_experts
+    P = G + E * (block_size - 1)
+    P = -(-P // block_size) * block_size
+    if tampons is None:
+        sorted_ids = torch.empty(P, dtype=torch.int32, device=flat_e.device)
+        expert_ids = torch.empty(P // block_size, dtype=torch.int32, device=flat_e.device)
+        num_post = torch.empty(1, dtype=torch.int32, device=flat_e.device)
+    else:
+        sorted_ids, expert_ids, num_post = tampons
+    sorted_ids.fill_(G)
+    expert_ids.fill_(0)
+    BG = 16
+    while BG < G:
+        BG *= 2
+    BP = 16
+    while BP < P // block_size:
+        BP *= 2
+    _aligner_kernel[(1,)](flat_e.to(torch.int32).contiguous(), sorted_ids, expert_ids, num_post, G, P, block_size,
+                          BG=BG, E=E, BP=BP, num_warps=4)
+    return sorted_ids, expert_ids, num_post
