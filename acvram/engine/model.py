@@ -3046,3 +3046,29 @@ class ACVRamModel(nn.Module):
             "douze_plus_gros": [{"nom": n, "octets": o} for n, o in gros],
             "octets_par_nom_total": sum(par_forme.values()),
         }
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic (poste7-p1-situ-verdict-18-09, piste « premier pas divergent ») :
+# ACVRAM_DUMP_MOE=<dossier> — la sortie de chaque MoEBlock est recopiée dans un
+# tampon STATIQUE par forme (alloué au premier passage eager, donc à adresse
+# fixe : un graphe capturé y écrit à chaque rejeu) ; le moteur (runner.step)
+# sauve tous les tampons après chaque pas. Comparaison : outils/comparer-dump-
+# moe-18-09.py <A> <B> — (b) capturé contre (b) eager nomme le premier
+# (pas, couche) divergent. Jamais actif en service.
+_DUMP_MOE = os.environ.get("ACVRAM_DUMP_MOE", "")
+if _DUMP_MOE:
+    os.makedirs(_DUMP_MOE, exist_ok=True)
+    _moe_forward_orig = MoEBlock.forward
+
+    def _moe_forward_dump(self, x, valid=None):
+        y = _moe_forward_orig(self, x, valid)
+        bufs = self.__dict__.setdefault("_dump_bufs", {})
+        cle = (tuple(y.shape), y.dtype)
+        buf = bufs.get(cle)
+        if buf is None:
+            buf = bufs[cle] = torch.empty_like(y)
+        buf.copy_(y)
+        return y
+
+    MoEBlock.forward = _moe_forward_dump
