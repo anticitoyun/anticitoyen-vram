@@ -73,7 +73,7 @@ def main():
     assert ext is not None and hasattr(ext, "nvfp4_gemv_grouped_gateup_v2"), "extension sans v2"
     # ACVRAM_GROUPED_RPW est lu par le .cu au PREMIER lancement (static) : une
     # valeur par processus ; la ligne de régime en tête la nomme (poste7)
-    rpw = int(os.environ.get("ACVRAM_GROUPED_RPW", "1"))
+    rpw = int(os.environ.get("ACVRAM_GROUPED_RPW", "4"))
     ligne = regime_ligne()
     print(ligne, flush=True)
     print(f"ACVRAM_GROUPED_RPW={rpw} (une valeur par processus)", flush=True)

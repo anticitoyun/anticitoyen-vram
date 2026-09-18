@@ -11,7 +11,7 @@
 # Sortie : ${NCU_SORTIE}/ncu-gemv-rpw<N>.csv + tableau agrégé (médiane par noyau).
 set -euo pipefail
 NCU_SORTIE=${NCU_SORTIE:-/tmp/ncu-acvram}; mkdir -p "$NCU_SORTIE"
-B=${1:-12}; RPW=${ACVRAM_GROUPED_RPW:-1}
+B=${1:-12}; RPW=${ACVRAM_GROUPED_RPW:-4}
 ICI=$(dirname "$(readlink -f "$0")"); REPO=$(dirname "$ICI")
 PY=${PY:-~/Bureau/Claude/anticitoyen-vram/.venv/bin/python3}
 OUT=${NCU_SORTIE}/ncu-gemv-rpw${RPW}.csv

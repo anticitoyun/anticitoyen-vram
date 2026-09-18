@@ -63,8 +63,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("DENSE_NVFP4_MIN_M", "4", ("acvram.kernels", "_DENSE_NVFP4_MIN_M")),
     # lues dans acvram_kernels.cu (getenv, figées au premier lancement : un
     # PROCESSUS par valeur — poste7-gemv-experts-rpw-18-09)
-    Variable("GROUPED_RPW", "1", None, None,
-             "GEMV groupée des experts : lignes par warp (1 | 2 | 4) ; l'activation est étagée une fois par bloc de GW_WARPS×RPW lignes"),
+    Variable("GROUPED_RPW", "4", None, None,
+             "GEMV groupée des experts : lignes par warp (4 défaut depuis poste7-rpw-defaut-18-09, Coder b=12 1 262 t/s nu ; 1 | 2 témoins) ; l'activation est étagée une fois par bloc de GW_WARPS×RPW lignes"),
     Variable("GROUPED_OLD", "", None, "1", "témoin : l'ancien noyau groupé à 4 lignes par bloc"),
     Variable("MOE_GEMV", "v1", ("acvram.engine.model", "_MOE_GEMV"), "v1",
              "GEMV groupée du décodage MoE : v1 (une passe de poids par paire expert-jeton) | v2 (paires triées par expert, poids lus une fois pour ≤ 4 jetons, sortie identique au bit)"),

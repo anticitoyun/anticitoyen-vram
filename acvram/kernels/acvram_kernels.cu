@@ -1758,7 +1758,9 @@ __device__ __forceinline__ void charger_x_sh(const XT *__restrict__ xn, float *x
 #endif
 // RPW lignes par warp, en boucle : l'activation n'est chargée qu'une fois
 // par bloc pour GW_WARPS*RPW lignes (sinon son trafic L2 égale celui des
-// poids sur ces petites projections).
+// poids sur ces petites projections). Défaut 4 depuis poste7-rpw-defaut-18-09
+// (poste3, Coder b=12 in situ ABAB : 1 262 t/s nu contre 1 114 à rpw=1 ;
+// ACVRAM_GROUPED_RPW=1|2 témoins).
 template <typename XT, int RPW>
 __global__ void nvfp4_gemv_grouped_warp_kernel(
     const unsigned char *__restrict__ qw, const unsigned char *__restrict__ bscale,
@@ -1861,7 +1863,7 @@ torch::Tensor nvfp4_gemv_grouped_gateup(
     const bool bf = x.scalar_type() == torch::kBFloat16;
     auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
     auto out = torch::empty({G, M}, xc.options().dtype(torch::kFloat));
-    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 1;
+    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 4;
     dim3 grid((M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
     const size_t shm = (size_t)(K + K / 32) * sizeof(float);
     auto stream = at::cuda::getCurrentCUDAStream();
@@ -2092,7 +2094,7 @@ torch::Tensor nvfp4_gemv_grouped_v2(torch::Tensor qw, torch::Tensor bscale, torc
     const bool bf = x.scalar_type() == torch::kBFloat16;
     auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
     auto out = torch::empty({G, M}, xc.options().dtype(torch::kFloat));
-    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 1;
+    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 4;
     const int tpb = gv2_tpb(K);
     dim3 grid((M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
     const size_t shm = (size_t)tpb * (K + K / 32) * sizeof(float);
@@ -2123,7 +2125,7 @@ torch::Tensor nvfp4_gemv_grouped_gateup_v2(
     const bool bf = x.scalar_type() == torch::kBFloat16;
     auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
     auto out = torch::empty({G, M}, xc.options().dtype(torch::kFloat));
-    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 1;
+    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 4;
     const int tpb = gv2_tpb(K);
     dim3 grid((M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
     const size_t shm = (size_t)tpb * (K + K / 32) * sizeof(float);
@@ -2204,7 +2206,7 @@ torch::Tensor nvfp4_gemv_grouped_gateup_table(
     const bool bf = x.scalar_type() == torch::kBFloat16;
     auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
     auto out = torch::empty({G, M}, xc.options().dtype(torch::kFloat));
-    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 1;
+    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 4;
     dim3 grid(((int)M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
     const size_t shm = (size_t)(K + K / 32) * sizeof(float);
     auto stream = at::cuda::getCurrentCUDAStream();
@@ -4052,7 +4054,7 @@ torch::Tensor nvfp4_gemv_grouped(torch::Tensor qw, torch::Tensor bscale,
         const bool bf = x.scalar_type() == torch::kBFloat16;
         auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
         auto out = torch::empty({G, M}, xc.options().dtype(torch::kFloat));
-        static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 1;
+        static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 4;
         dim3 grid((M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
         const size_t shm = (size_t)(K + K / 32) * sizeof(float);
         #define GWK(XT, PX) do { \
@@ -4151,7 +4153,7 @@ torch::Tensor nvfp4_gemv_grouped_table(torch::Tensor table_qw, torch::Tensor tab
     const bool bf = x.scalar_type() == torch::kBFloat16;
     auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
     auto out = torch::empty({G, (int)M}, xc.options().dtype(torch::kFloat));
-    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 1;
+    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 4;
     dim3 grid(((int)M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
     const size_t shm = (size_t)(K + K / 32) * sizeof(float);
     auto stream = at::cuda::getCurrentCUDAStream();
