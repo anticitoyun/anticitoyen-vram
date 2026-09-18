@@ -349,6 +349,7 @@ Donne trois usages d'un cache KV quantifié.</textarea>
 
   <section>
     <h2 data-t="h_moteur">moteur</h2>
+    <div id="tronque" class="note" style="display:none"></div>
     <table id="details"><tbody></tbody></table>
     <div class="note">Pour brancher un client :
       <code>OPENAI_BASE_URL</code> ou <code>ANTHROPIC_BASE_URL</code> sur
@@ -392,6 +393,24 @@ async function rafraichir() {
     if (e.kv_blocks_total > 0)
       $('kvb').style.width = (100 * e.kv_blocks_free / e.kv_blocks_total) + '%';
     if (m.version) $('version').textContent = 'v' + m.version;
+
+    // Ajout n°2 (poste7-gui-ajouts-18-09) : un compteur > 0 noye dans le
+    // tableau generique ci-dessous n'a jamais ete vu — « toutes les
+    // cellules b > 8 faussees jusqu'au 17/09 sans une ligne d'erreur ».
+    // Le ratio kv_max_tokens / kv_planned_seqs donne le budget REEL par
+    // sequence planifiee, pour lire un compteur > 0 sans deviner s'il est
+    // structurel (budget sous-dimensionne) ou accidentel.
+    const tronq = $('tronque');
+    if ((e.sequences_tronquees_budget || 0) > 0) {
+      tronq.style.display = '';
+      tronq.className = 'note ko';
+      tronq.textContent = e.sequences_tronquees_budget + ' séquence(s) tronquée(s) par '
+        + 'budget KV épuisé (hors max_tokens demandé) — budget : '
+        + nb(m.kv_tokens_par_sequence_planifiee, 0) + ' jetons/séquence planifiée ('
+        + nb(m.kv_max_tokens, 0) + ' / ' + nb(m.kv_planned_seqs, 0) + ' séquences).';
+    } else {
+      tronq.style.display = 'none';
+    }
 
     // Le tableau montre ce que /metrics rend, sans trier ni interpreter :
     // une console qui choisit ce qu'elle affiche cache ce qu'elle omet.

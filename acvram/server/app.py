@@ -825,7 +825,19 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
         # `version` sert a la console, qui l'affiche en tete : sans elle on ne
         # sait pas quelle version repond, et deux versions ont deja coexiste
         # sur cette machine (paquet 0.5.0, venv 0.2.0).
+        plan = engine.loaded.plan
+        # Ajout n°2 (poste7-gui-ajouts-18-09) : `sequences_tronquees_budget`
+        # (EngineStats) est deja compte, jamais affiche — « toutes les
+        # cellules b > 8 faussees jusqu'au 17/09 sans une ligne d'erreur ».
+        # `kv_max_tokens / kv_planned_seqs` donne le budget REEL par sequence
+        # planifiee (slots x contexte) : sans lui, un compteur > 0 ne dit pas
+        # si le budget est structurellement sous-dimensionne ou accidentel.
+        kv_seqs = getattr(plan, "kv_planned_seqs", 0) or 0
         return {"engine": engine.stats.to_dict(),
+                "kv_max_tokens": plan.kv_max_tokens,
+                "kv_planned_seqs": kv_seqs,
+                "kv_tokens_par_sequence_planifiee": (
+                    round(plan.kv_max_tokens / kv_seqs, 1) if kv_seqs else None),
                 "version": __version__, **app.state.info}
 
     @app.get("/v1/models")
