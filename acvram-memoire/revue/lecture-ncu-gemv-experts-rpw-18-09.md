@@ -93,3 +93,21 @@ blocs (≈ 64-80 registres/fil) ; gateup 87,9 → 68-76 µs, down 65,2 → 55-60
 tenu ou faux à parts égales, je n'engage pas plus. Faux si > 6,2 : fermé à
 1 262. Si tenu, en situ ≥ 1 300 nu (Coder b=12 : 1 262 × 7,35/6,2 ≈ 1 330
 si le reste du pas ne bouge pas).
+
+## 6. Verdict (poste3) : porte FAUSSE — chantier fermé à 1 262 t/s nu
+
+gateup + down 7,80 ms/pas contre témoin 7,37 (> 6,2). gateup 105,2 µs
+(**+19 %** ; ma prédiction 68-76 réfutée) : 96 registres par fil → 2 blocs
+par SM, warps actifs 32 % contre 87 % ; le décrochage shared tombe bien
+(mio_throttle 4,66 → 0,15, short_scoreboard ÷ 30) mais l'occupation le
+paie — j'avais écrit « 64-80 registres, 3-4 blocs » ; c'est 96 et 2 : le
+`float4 v[2][8]` plus les deux uint4 et les quatre accumulateurs, le
+compilateur n'a pas replié. down **tenu** (57,2 µs, −12 %, 56 registres,
+4 blocs). pytest 20/20 bit-exact : la méthode d'équivalence (mêmes
+expressions) a tenu, c'est le seul acquis.
+
+Pistes hors chantier, notées, non engagées : xreg sur down seul (K = 768,
+NP = 1 : le gain mesuré, −12 % du down = −0,4 ms/pas) ; gateup borné à 64
+registres par `__launch_bounds__(256, 4)` (le compilateur déverse ou
+replie — à mesurer, pas à prédire). Règle de poste7 appliquée : porte
+fausse = pas d'in situ.

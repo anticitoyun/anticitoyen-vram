@@ -67,7 +67,7 @@ VARIABLES: tuple[Variable, ...] = (
              "GEMV groupée des experts : lignes par warp (4 défaut depuis poste7-rpw-defaut-18-09, Coder b=12 1 262 t/s nu ; 1 | 2 témoins) ; l'activation est étagée une fois par bloc de GW_WARPS×RPW lignes"),
     Variable("GROUPED_OLD", "", None, "1", "témoin : l'ancien noyau groupé à 4 lignes par bloc"),
     Variable("GROUPED_XREG", "0", None, "0",
-             "GEMV groupée des experts, K ≤ 2048 : 1 = x en registres par tranche (LDS.128, poste7-gemv-experts-dernier-geste-18-09), sortie identique au bit ; 0 = x relu en shared (témoin)"),
+             "GEMV groupée des experts, K ≤ 2048 : down = x en registres par tranche sur la projection down seule (−12 %, poste7-gemv-experts-clos-18-09, défaut après l'ABAB de poste3 ≤ 0,97×) | 1 = gate/up aussi (témoin réfuté : 96 registres, 2 blocs/SM, +19 %) | 0 = x relu en shared (témoin) ; sortie identique au bit dans tous les cas"),
     Variable("MOE_GEMV", "v1", ("acvram.engine.model", "_MOE_GEMV"), "v1",
              "GEMV groupée du décodage MoE : v1 (une passe de poids par paire expert-jeton) | v2 (paires triées par expert, poids lus une fois pour ≤ 4 jetons, sortie identique au bit)"),
     Variable("MULTI_PROJ", "0", ("acvram.engine.model", "_MULTI_PROJ"), "0",

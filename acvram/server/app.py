@@ -194,15 +194,17 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                        allow_headers=["*"])
     app.state.service = service
     app.state.info = served_paths or {}
-    app.state.energie_precedente = None   # (horodatage, {carte: mJ}, decode_tokens) — ajout n°3
+    app.state.anneau_energie = _capteurs.AnneauEnergie()   # ajout n°3, corrigé le 18/09
 
     @app.on_event("startup")
     async def _startup() -> None:
         service.start(asyncio.get_running_loop())
+        app.state.anneau_energie.start(lambda: engine.stats.decode_tokens)
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
         service.stop()
+        app.state.anneau_energie.stop()
 
     # -- console ----------------------------------------------------------
     # Le paquet s'installait sans rien de visible : ni entree de menu, ni
@@ -823,31 +825,17 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             "avertissements": list(plan.warnings),
         }
 
-    def _energie_par_jeton(engine: Engine) -> dict:
-        """J/jeton en direct, intégré sur la fenêtre glissante entre deux
-        appels à `/metrics` (ajout GUI n°3, poste7-gui-ajouts-18-09 § 3).
-
-        Compteur NVML monotone (`capteurs.energie_mj`), pas une moyenne de
-        puissances — même raison que `outils/gpu/mesure/energie.py`.
-        Division cote serveur uniquement (la console ne trie ni n'interprete).
-        Recette : a vide "—" (None), jamais 0 ; l'appel precedent sert de
-        depart de fenetre, donc le tout premier appel n'a pas de delta.
-        """
-        mj = _capteurs.energie_mj()
+    def _energie_par_jeton() -> dict:
+        """J/jeton en direct (ajout GUI n°3, poste7-gui-ajouts-18-09 § 3),
+        corrigé le 18/09 (poste7-metrics-energie-fenetre-18-09) : lu depuis
+        `app.state.anneau_energie`, un anneau d'échantillons alimenté par
+        un fil de fond — jamais consommé ici, pour que deux lecteurs
+        concurrents de `/metrics` rendent la MÊME valeur sur la même
+        fenêtre (l'ancienne version, qui consommait son propre échantillon
+        précédent à chaque appel, les faisait diverger)."""
         cartes = _capteurs.nvidia()
-        maintenant = time.time()
-        decode_tokens = engine.stats.decode_tokens
-        precedent = app.state.energie_precedente
-        app.state.energie_precedente = (maintenant, mj, decode_tokens)
-        j_par_jeton = None
-        if precedent is not None and mj:
-            t0, mj0, tok0 = precedent
-            delta_mj = sum(mj[i] - mj0[i] for i in mj if i in mj0)
-            delta_tok = decode_tokens - tok0
-            if delta_tok > 0 and delta_mj >= 0:
-                j_par_jeton = round(delta_mj / 1000.0 / delta_tok, 4)
         return {
-            "j_par_jeton": j_par_jeton,
+            "j_par_jeton_10s": app.state.anneau_energie.j_par_jeton(),
             "cartes": [{"index": c["index"], "horloge_sm": c["horloge_sm"],
                         "watts_plafond": c["watts_max"]} for c in cartes],
         }
@@ -870,7 +858,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                 "kv_planned_seqs": kv_seqs,
                 "kv_tokens_par_sequence_planifiee": (
                     round(plan.kv_max_tokens / kv_seqs, 1) if kv_seqs else None),
-                "energie": _energie_par_jeton(engine),
+                "energie": _energie_par_jeton(),
                 # Ajout n°4 (poste7-gui-ajouts-18-09 § 4) : la meme ligne,
                 # octet pour octet, que le "[regime]" ecrit dans le JSON
                 # d'une mesure (`acvram.regime_ligne`) — variables ACVRAM_*

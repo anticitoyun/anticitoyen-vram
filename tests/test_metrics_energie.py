@@ -1,8 +1,9 @@
-"""Ajout GUI n°3 (poste7-gui-ajouts-18-09 § 3) : `/metrics` doit porter le
-J/jeton en direct, intégré côté serveur sur la fenêtre glissante entre deux
-appels — compteur NVML monotone (`capteurs.energie_mj`), jamais une moyenne
-de puissances. Recette de poste7 : « à vide "—", jamais 0 ; sous charge, ± 10 %
-de energie.py sur la même fenêtre. »"""
+"""Ajout GUI n°3 (poste7-gui-ajouts-18-09 § 3), corrigé le 18/09
+(poste7-metrics-energie-fenetre-18-09) : `AnneauEnergie` intègre le J/jeton
+sur une fenêtre glissante alimentée par un fil de fond, et `j_par_jeton()`
+ne CONSOMME JAMAIS ce qu'il lit — la première version faisait diverger
+deux lecteurs concurrents de `/metrics` sur la même fenêtre réelle (trouvé
+par poste3 au contrôle GUI). Recette : à vide « — » (None), jamais 0."""
 
 import json
 import os
@@ -10,10 +11,69 @@ import os
 import pytest
 import torch
 
+from acvram.server import capteurs
+
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient   # noqa: E402
 
-from acvram.server import app as app_mod   # noqa: E402
+
+def _anneau(mj_lecteur):
+    return capteurs.AnneauEnergie(fenetre_s=10.0, tic_s=999.0, lecteur=mj_lecteur)
+
+
+def test_vide_sans_assez_d_echantillons():
+    a = _anneau(lambda: {0: 1_000_000})
+    assert a.j_par_jeton() is None
+    a.tic(100)
+    assert a.j_par_jeton() is None   # un seul echantillon : pas de fenetre
+
+
+def test_ratio_calcule_sur_deux_tics():
+    valeurs = iter([{0: 1_000_000}, {0: 1_050_000}])
+    a = _anneau(lambda: next(valeurs))
+    a.tic(100)
+    a.tic(150)
+    # delta 50 000 mJ = 50 J, delta 50 jetons -> 1,0 J/jeton
+    assert a.j_par_jeton() == 1.0
+
+
+def test_lecture_ne_consomme_pas():
+    """Le bras cassant : deux lecteurs concurrents de la MEME fenetre
+    doivent rendre la MEME valeur, pas des valeurs qui divergent parce
+    que le premier aurait « mangé » l'échantillon du second."""
+    valeurs = iter([{0: 2_000_000}, {0: 2_100_000}])
+    a = _anneau(lambda: next(valeurs))
+    a.tic(200)
+    a.tic(250)
+    premiere_lecture = a.j_par_jeton()
+    deuxieme_lecture = a.j_par_jeton()
+    assert premiere_lecture is not None
+    assert premiere_lecture == deuxieme_lecture == 2.0
+
+
+def test_fenetre_purge_les_echantillons_trop_vieux(monkeypatch):
+    # fenetre 10 s : au 3e tic (t=10,9), limite = 0,9 -> purge t=0, garde t=1
+    horloge = iter([0.0, 1.0, 10.9])
+    monkeypatch.setattr(capteurs.time, "time", lambda: next(horloge))
+    valeurs = iter([{0: 1_000_000}, {0: 1_010_000}, {0: 1_040_000}])
+    a = _anneau(lambda: next(valeurs))
+    a.tic(10)    # t=0
+    a.tic(20)    # t=1  -> delta 10 000 mJ / 10 jetons = 1,0 J/jeton
+    assert a.j_par_jeton() == 1.0
+    a.tic(50)    # t=10,9 -> purge t=0, garde t=1 et t=10,9
+    # delta 30 000 mJ / 30 jetons = 1,0 J/jeton, sur la fenetre 1..10,9
+    assert a.j_par_jeton() == 1.0
+
+
+def test_absent_sans_nvml_ni_jetons():
+    a = _anneau(lambda: {})   # NVML absent
+    a.tic(10)
+    a.tic(20)
+    assert a.j_par_jeton() is None
+    a2 = _anneau(lambda: {0: 1_000_000})
+    a2.tic(10)
+    a2.tic(10)   # aucun jeton decode entre les deux tics
+    assert a2.j_par_jeton() is None
 
 
 @pytest.fixture(scope="module")
@@ -47,53 +107,18 @@ def client(converted):
         yield c, engine
 
 
-def test_absent_sans_nvml(client, monkeypatch):
+def test_metrics_expose_j_par_jeton_10s(client, monkeypatch):
+    """Integration : /metrics rend le champ que la console lit, calcule a
+    partir de l'anneau reel du serveur (fil de fond neutralise par un
+    lecteur controle, pas de materiel requis)."""
     c, engine = client
-    monkeypatch.setattr(app_mod._capteurs, "energie_mj", lambda: {})
-    monkeypatch.setattr(app_mod._capteurs, "nvidia", lambda: [])
-    c.app.state.energie_precedente = None
+    anneau = c.app.state.anneau_energie
+    anneau.stop()   # le fil de fond reel tique toutes les 1 s : l'arreter
+    valeurs = iter([{0: 3_000_000}, {0: 3_020_000}])
+    monkeypatch.setattr(anneau, "_lecteur", lambda: next(valeurs))
+    anneau._echantillons.clear()
+    anneau.tic(300)
+    anneau.tic(320)
     m = c.get("/metrics").json()
-    assert m["energie"]["j_par_jeton"] is None
-    assert m["energie"]["cartes"] == []
-
-
-def test_absent_au_premier_appel(client, monkeypatch):
-    """Le tout premier appel n'a pas de fenetre : jamais 0, toujours None."""
-    c, engine = client
-    monkeypatch.setattr(app_mod._capteurs, "energie_mj", lambda: {0: 1_000_000})
-    monkeypatch.setattr(app_mod._capteurs, "nvidia",
-                         lambda: [{"index": 0, "horloge_sm": 1500, "watts_max": 400}])
-    c.app.state.energie_precedente = None
-    m = c.get("/metrics").json()
-    assert m["energie"]["j_par_jeton"] is None
-    assert m["energie"]["cartes"] == [{"index": 0, "horloge_sm": 1500, "watts_plafond": 400}]
-
-
-def test_ratio_calcule_sur_la_fenetre(client, monkeypatch):
-    c, engine = client
-    engine.stats.decode_tokens = 100
-    monkeypatch.setattr(app_mod._capteurs, "energie_mj", lambda: {0: 1_000_000})
-    monkeypatch.setattr(app_mod._capteurs, "nvidia",
-                         lambda: [{"index": 0, "horloge_sm": 1500, "watts_max": 400}])
-    c.app.state.energie_precedente = None
-    c.get("/metrics")   # amorce la fenetre
-
-    engine.stats.decode_tokens = 150
-    monkeypatch.setattr(app_mod._capteurs, "energie_mj", lambda: {0: 1_050_000})
-    m = c.get("/metrics").json()
-    # delta 50 000 mJ = 50 J, delta 50 jetons -> 1,0 J/jeton
-    assert m["energie"]["j_par_jeton"] == 1.0
-
-
-def test_ratio_absent_sans_nouveaux_jetons(client, monkeypatch):
-    """Diviser par zero doit rendre None, jamais une division fausse."""
-    c, engine = client
-    engine.stats.decode_tokens = 200
-    monkeypatch.setattr(app_mod._capteurs, "energie_mj", lambda: {0: 2_000_000})
-    monkeypatch.setattr(app_mod._capteurs, "nvidia", lambda: [])
-    c.app.state.energie_precedente = None
-    c.get("/metrics")
-
-    monkeypatch.setattr(app_mod._capteurs, "energie_mj", lambda: {0: 2_100_000})
-    m = c.get("/metrics").json()   # decode_tokens inchange -> delta_tok = 0
-    assert m["energie"]["j_par_jeton"] is None
+    assert m["energie"]["j_par_jeton_10s"] == 1.0
+    assert "cartes" in m["energie"]
