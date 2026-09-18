@@ -151,7 +151,8 @@ def quantize(weight: torch.Tensor, fmt: str, group_size: Optional[int] = None,
     if fmt == "int4_awq":
         return spec.quantize(weight, group_size=group_size or 128, **kwargs)
     if fmt == "int8":
-        return _quantize_int8(weight, group_size or 128)
+        return _quantize_int8(weight, group_size or 128,
+                              symmetric=kwargs.get("symmetric", False))
     if fmt == "q3n":
         from .q3n import quantize_q3n
         return quantize_q3n(weight, table=kwargs.get("table"))
@@ -215,17 +216,32 @@ class INT8Tensor:
                 f"{prefix}zeros": self.zeros}
 
 
-def _quantize_int8(weight: torch.Tensor, group_size: int) -> INT8Tensor:
+def _quantize_int8(weight: torch.Tensor, group_size: int,
+                   symmetric: bool = False) -> INT8Tensor:
     w = weight.detach().to(torch.float32)
     out_f, k = w.shape
     if k % group_size:
         w = torch.nn.functional.pad(w, (0, group_size - k % group_size))
     ng = w.shape[1] // group_size
     wg = w.view(out_f, ng, group_size)
-    wmax, wmin = wg.amax(-1, keepdim=True), wg.amin(-1, keepdim=True)
-    scale = ((wmax - wmin) / 255.0).clamp(min=1e-9)
-    zero = (-wmin / scale).round().clamp(0, 255)
-    q = (wg / scale + zero).round().clamp(0, 255).to(torch.uint8).reshape(out_f, -1)
+    if symmetric:
+        # poste7-p2-qkvo-int8-canal-18-09 : torch._int_mm/cuBLASLt attend un
+        # int8 signe sans point-zero (une correction sinon a appliquer a
+        # chaque produit). Loge dans le MEME conteneur affine (zero fixe a
+        # 128) plutot qu'un format separe : le chargeur et les noyaux qui
+        # testent `format == "int8"` (model.py, mla.py) n'ont rien a savoir
+        # du symetrique. `group_size` egal a la largeur d'entree donne le
+        # "par canal" (une echelle par ligne de sortie).
+        amax = wg.abs().amax(-1, keepdim=True).clamp(min=1e-9)
+        scale = amax / 127.0
+        zero = torch.full_like(scale, 128.0)
+        q = (wg / scale).round().clamp(-127, 127) + 128.0
+    else:
+        wmax, wmin = wg.amax(-1, keepdim=True), wg.amin(-1, keepdim=True)
+        scale = ((wmax - wmin) / 255.0).clamp(min=1e-9)
+        zero = (-wmin / scale).round().clamp(0, 255)
+        q = (wg / scale + zero).round().clamp(0, 255)
+    q = q.to(torch.uint8).reshape(out_f, -1)
     return INT8Tensor(q, scale.squeeze(-1).to(torch.float16),
                       zero.squeeze(-1).to(torch.uint8), group_size,
                       tuple(weight.shape))

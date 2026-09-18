@@ -575,6 +575,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         out_dir=args.out, awq=use_awq, use_hadamard=args.hadamard,
         group_size=args.group_size, n_grid=args.grid,
         lm_head_format=args.lm_head_format, dry_run=args.dry_run,
+        attn_qkvo_int8_canal=args.attn_qkvo_int8_canal,
         q3n_table=(tuple(float(v) for v in args.q3n_table.split(","))
                    if args.q3n_table else None),
         mixed_precision=args.mixed_precision, snr_floor=args.snr_floor,
@@ -893,6 +894,10 @@ def build_parser() -> argparse.ArgumentParser:
     cv.add_argument("--grid", type=int, default=20,
                     help="finesse de la grille de recherche AWQ")
     cv.add_argument("--lm-head-format", help="format de la projection de sortie")
+    cv.add_argument("--attn-qkvo-int8-canal", action="store_true",
+                    help="q/k/v/o en int8 symetrique par canal (une echelle "
+                         "par ligne, sans point-zero variable) au lieu du "
+                         "groupe de 128 affine du reste du modele")
     cv.add_argument("--q3n-table", help=("niveaux q3n de ce modèle, huit "
                     "flottants séparés par des virgules (symétriques, bornes "
                     "±1) ; défaut : table de la spécification"))
