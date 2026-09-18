@@ -998,7 +998,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "la carte est deja pleine a largeur 1 par sequence "
                          "et verifier plus large coute plus qu'il ne rend "
                          "(mesure 14/09, revue/verdict-cout-verification-"
-                         "ngram-b12-14-09.md, -49,9 % de debit a b=12) -- "
+                         "ngram-b12-14-09.md, -49,9 %% de debit a b=12) -- "
                          "voir GardeSpeculation dans engine/speculative.py")
     sv.add_argument("--draft-model", help="repertoire converti d'un petit modele "
                                           "charge de proposer des jetons")
