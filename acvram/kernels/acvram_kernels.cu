@@ -1878,6 +1878,271 @@ torch::Tensor nvfp4_gemv_grouped_gateup(
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// GEMV groupée v2 (18/09, poste7-lecture-profils-coder-17-09 § 2 : « GEMV
+// groupée à ≥ 85 % de bande ») : les paires (expert, jeton) arrivent TRIÉES
+// par expert (`ordre` = argsort(eid) côté hôte) ; un bloc « meneur » sert
+// jusqu'à TPB jetons du même expert d'un coup — les poids de l'expert sont
+// lus UNE fois par pas pour ces jetons (v1 : une fois par paire, 1,39 × sur
+// Coder b=12 : 96 paires pour 69 experts, relectures hors L2 pour partie), et
+// l'activation n'est étagée qu'une fois par bloc pour ses TPB jetons. Même
+// arithmétique que v1, dans le même ordre (nvfp4_row_dot_warp dupliquée
+// par jeton) : sortie identique au bit — le juge (tests/test_gemv_experts_v2.py).
+// Sortie écrite à la place d'ORIGINE de chaque paire (y[ordre[g]]) : les
+// consommateurs (act, down, pondération) ne changent pas.
+template <int TPB>
+__device__ __forceinline__ void nvfp4_row_dot_warp_multi(
+        const uint4 *__restrict__ wrow, const unsigned char *__restrict__ brow,
+        float gscale, const float *__restrict__ xs_sh, int xsz, int npairs, int lane, int n,
+        float *__restrict__ acc) {
+    #pragma unroll
+    for (int j = 0; j < TPB; ++j) acc[j] = 0.f;
+    int i = lane;
+    for (; i + WARP < npairs; i += 2 * WARP) {
+        const uint4 pA = wrow[i], pB = wrow[i + WARP];
+        const unsigned char bA0 = brow[2 * i], bA1 = brow[2 * i + 1];
+        const unsigned char bB0 = brow[2 * (i + WARP)], bB1 = brow[2 * (i + WARP) + 1];
+        const unsigned int wA[4] = {pA.x, pA.y, pA.z, pA.w};
+        const unsigned int wB[4] = {pB.x, pB.y, pB.z, pB.w};
+        const float fA0 = e4m3_to_float(bA0), fA1 = e4m3_to_float(bA1);
+        const float fB0 = e4m3_to_float(bB0), fB1 = e4m3_to_float(bB1);
+        #pragma unroll
+        for (int j = 0; j < TPB; ++j) {
+            if (j < n) {
+                const float *xA = xs_sh + (long)j * xsz + (long)i * XSH_PAS;
+                const float *xB = xs_sh + (long)j * xsz + (long)(i + WARP) * XSH_PAS;
+                float a0 = 0.f, a1 = 0.f, c0 = 0.f, c1 = 0.f;
+                #pragma unroll
+                for (int b = 0; b < 8; ++b) {
+                    const float2 v0 = e2m1_pair((wA[b >> 2] >> ((b & 3) * 8)) & 0xFFu);
+                    a0 += v0.x * xA[2 * b] + v0.y * xA[2 * b + 1];
+                    const float2 v1 = e2m1_pair((wA[2 + (b >> 2)] >> ((b & 3) * 8)) & 0xFFu);
+                    a1 += v1.x * xA[WEIGHTS_PER_LOAD + 2 * b] + v1.y * xA[WEIGHTS_PER_LOAD + 2 * b + 1];
+                    const float2 u0 = e2m1_pair((wB[b >> 2] >> ((b & 3) * 8)) & 0xFFu);
+                    c0 += u0.x * xB[2 * b] + u0.y * xB[2 * b + 1];
+                    const float2 u1 = e2m1_pair((wB[2 + (b >> 2)] >> ((b & 3) * 8)) & 0xFFu);
+                    c1 += u1.x * xB[WEIGHTS_PER_LOAD + 2 * b] + u1.y * xB[WEIGHTS_PER_LOAD + 2 * b + 1];
+                }
+                acc[j] += (a0 * fA0 + a1 * fA1 + c0 * fB0 + c1 * fB1) * gscale;
+            }
+        }
+    }
+    for (; i < npairs; i += WARP) {
+        const uint4 p4 = wrow[i];
+        const float s0 = e4m3_to_float(brow[2 * i]) * gscale;
+        const float s1 = e4m3_to_float(brow[2 * i + 1]) * gscale;
+        const unsigned int words[4] = {p4.x, p4.y, p4.z, p4.w};
+        #pragma unroll
+        for (int j = 0; j < TPB; ++j) {
+            if (j < n) {
+                const float *xp = xs_sh + (long)j * xsz + (long)i * XSH_PAS;
+                float part0 = 0.f, part1 = 0.f;
+                #pragma unroll
+                for (int b = 0; b < 8; ++b) {
+                    const float2 v0 = e2m1_pair((words[b >> 2] >> ((b & 3) * 8)) & 0xFFu);
+                    part0 += v0.x * xp[2 * b] + v0.y * xp[2 * b + 1];
+                    const float2 v1 = e2m1_pair((words[2 + (b >> 2)] >> ((b & 3) * 8)) & 0xFFu);
+                    part1 += v1.x * xp[WEIGHTS_PER_LOAD + 2 * b] + v1.y * xp[WEIGHTS_PER_LOAD + 2 * b + 1];
+                }
+                acc[j] += part0 * s0 + part1 * s1;
+            }
+        }
+    }
+    #pragma unroll
+    for (int j = 0; j < TPB; ++j)
+        for (int o = 16; o > 0; o >>= 1) acc[j] += __shfl_xor_sync(0xffffffffu, acc[j], o);
+}
+
+// Meneur du sous-segment [g, g+n) : e ≥ 0, g au début d'un segment d'expert
+// ou à un multiple de TPB depuis ce début ; n ≤ TPB paires. Rend n (0 : pas
+// meneur). Calcul par le fil 0, diffusé par la mémoire partagée.
+template <int TPB>
+__device__ __forceinline__ int gv2_meneur(const int *__restrict__ eid_s, int G, int g, int e, int *s_n) {
+    if (threadIdx.x == 0) {
+        int debut = g;
+        while (debut > 0 && eid_s[debut - 1] == e) --debut;
+        int n = 0;
+        if ((g - debut) % TPB == 0) {
+            n = 1;
+            while (n < TPB && g + n < G && eid_s[g + n] == e) ++n;
+        }
+        *s_n = n;
+    }
+    __syncthreads();
+    return *s_n;
+}
+
+template <typename XT, int TPB>
+__device__ __forceinline__ void gv2_charger_x(const XT *__restrict__ x, const int *__restrict__ tok_s,
+                                              int g, int n, float *xs_sh, int K, int xsz) {
+    for (int j = 0; j < n; ++j) {
+        const XT *xn = x + (long)tok_s[g + j] * K;
+        float *dst = xs_sh + (long)j * xsz;
+        for (int i = threadIdx.x; i < K; i += blockDim.x) {
+            const int d = i + (i >> 5);
+            if constexpr (sizeof(XT) == 4) dst[d] = xn[i];
+            else dst[d] = __bfloat162float(xn[i]);
+        }
+    }
+    __syncthreads();
+}
+
+template <typename XT, int TPB, int RPW>
+__global__ void nvfp4_gemv_grouped_v2_kernel(
+    const unsigned char *__restrict__ qw, const unsigned char *__restrict__ bscale,
+    const float *__restrict__ gscales, const int *__restrict__ eid_s,
+    const int *__restrict__ tok_s, const int *__restrict__ ordre,
+    const XT *__restrict__ x, float *__restrict__ y, int M, int K, int G) {
+    extern __shared__ float xs_sh[];
+    __shared__ int s_n;
+    const int g = blockIdx.y, e = eid_s[g];
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    if (e < 0) {                     // créneau fantôme : zéro, aucun poids lu
+        #pragma unroll
+        for (int r = 0; r < RPW; ++r) {
+            const int row = (blockIdx.x * GW_WARPS + warp) * RPW + r;
+            if (row >= M) return;
+            if (lane == 0) y[(long)ordre[g] * M + row] = 0.f;
+        }
+        return;
+    }
+    const int n = gv2_meneur<TPB>(eid_s, G, g, e, &s_n);
+    if (n == 0) return;
+    const int xsz = xsh_taille(K);
+    gv2_charger_x<XT, TPB>(x, tok_s, g, n, xs_sh, K, xsz);
+    const long half_k = (long)K >> 1;
+    const int nloads = K / WEIGHTS_PER_LOAD;
+    const float gscale = gscales[e];
+    float acc[TPB];
+    #pragma unroll
+    for (int r = 0; r < RPW; ++r) {
+        const int row = (blockIdx.x * GW_WARPS + warp) * RPW + r;
+        if (row >= M) return;
+        nvfp4_row_dot_warp_multi<TPB>(
+            reinterpret_cast<const uint4 *>(qw + ((long)e * M + row) * half_k),
+            bscale + ((long)e * M + row) * nloads, gscale, xs_sh, xsz, nloads >> 1, lane, n, acc);
+        if (lane == 0) {
+            #pragma unroll
+            for (int j = 0; j < TPB; ++j)
+                if (j < n) y[(long)ordre[g + j] * M + row] = acc[j];
+        }
+    }
+}
+
+template <typename XT, int TPB, int RPW>
+__global__ void nvfp4_gemv_grouped_gateup_v2_kernel(
+    const unsigned char *__restrict__ qg, const unsigned char *__restrict__ bg,
+    const float *__restrict__ gsg,
+    const unsigned char *__restrict__ qu, const unsigned char *__restrict__ bu,
+    const float *__restrict__ gsu,
+    const int *__restrict__ eid_s, const int *__restrict__ tok_s, const int *__restrict__ ordre,
+    const XT *__restrict__ x, float *__restrict__ y, int M, int K, int G, int act) {
+    extern __shared__ float xs_sh[];
+    __shared__ int s_n;
+    const int g = blockIdx.y, e = eid_s[g];
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    if (e < 0) {
+        #pragma unroll
+        for (int r = 0; r < RPW; ++r) {
+            const int row = (blockIdx.x * GW_WARPS + warp) * RPW + r;
+            if (row >= M) return;
+            if (lane == 0) y[(long)ordre[g] * M + row] = 0.f;
+        }
+        return;
+    }
+    const int n = gv2_meneur<TPB>(eid_s, G, g, e, &s_n);
+    if (n == 0) return;
+    const int xsz = xsh_taille(K);
+    gv2_charger_x<XT, TPB>(x, tok_s, g, n, xs_sh, K, xsz);
+    const long half_k = (long)K >> 1;
+    const int nloads = K / WEIGHTS_PER_LOAD;
+    float ag[TPB], au[TPB];
+    #pragma unroll
+    for (int r = 0; r < RPW; ++r) {
+        const int row = (blockIdx.x * GW_WARPS + warp) * RPW + r;
+        if (row >= M) return;
+        const long off = (long)e * M + row;
+        nvfp4_row_dot_warp_multi<TPB>(reinterpret_cast<const uint4 *>(qg + off * half_k), bg + off * nloads,
+                                      gsg[e], xs_sh, xsz, nloads >> 1, lane, n, ag);
+        nvfp4_row_dot_warp_multi<TPB>(reinterpret_cast<const uint4 *>(qu + off * half_k), bu + off * nloads,
+                                      gsu[e], xs_sh, xsz, nloads >> 1, lane, n, au);
+        if (lane == 0) {
+            #pragma unroll
+            for (int j = 0; j < TPB; ++j)
+                if (j < n) y[(long)ordre[g + j] * M + row] = acv_act(ag[j], act) * au[j];
+        }
+    }
+}
+
+// TPB : le plus grand de {4, 2, 1} dont l'étage d'activations tient en 48 Kio.
+static int gv2_tpb(int64_t K) {
+    const size_t un = (size_t)(K + K / 32) * sizeof(float);
+    if (4 * un <= 48 * 1024) return 4;
+    if (2 * un <= 48 * 1024) return 2;
+    return 1;
+}
+
+torch::Tensor nvfp4_gemv_grouped_v2(torch::Tensor qw, torch::Tensor bscale, torch::Tensor gscales,
+                                    torch::Tensor eid_s, torch::Tensor tok_s, torch::Tensor ordre,
+                                    torch::Tensor x, int64_t K) {
+    CHECK_CUDA(qw); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(qw);
+    CHECK_CONTIG(qw); CHECK_CONTIG(bscale); CHECK_CONTIG(x);
+    TORCH_CHECK(K % 32 == 0 && (size_t)(K + K / 32) * sizeof(float) <= 48 * 1024, "v2 : K multiple de 32 et <= 11904");
+    const int M = qw.size(1), G = eid_s.size(0);
+    const bool bf = x.scalar_type() == torch::kBFloat16;
+    auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
+    auto out = torch::empty({G, M}, xc.options().dtype(torch::kFloat));
+    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 1;
+    const int tpb = gv2_tpb(K);
+    dim3 grid((M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
+    const size_t shm = (size_t)tpb * (K + K / 32) * sizeof(float);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    #define GV2_L(XT, T, R, PX) nvfp4_gemv_grouped_v2_kernel<XT, T, R><<<grid, GW_WARPS * WARP, shm, stream>>>( \
+        qw.data_ptr<unsigned char>(), bscale.data_ptr<unsigned char>(), gscales.data_ptr<float>(), \
+        eid_s.data_ptr<int>(), tok_s.data_ptr<int>(), ordre.data_ptr<int>(), PX, out.data_ptr<float>(), M, (int)K, G)
+    #define GV2_R(XT, T, PX) do { if (rpw == 1) GV2_L(XT, T, 1, PX); else if (rpw == 2) GV2_L(XT, T, 2, PX); else GV2_L(XT, T, 4, PX); } while (0)
+    #define GV2_T(XT, PX) do { if (tpb == 4) GV2_R(XT, 4, PX); else if (tpb == 2) GV2_R(XT, 2, PX); else GV2_R(XT, 1, PX); } while (0)
+    if (bf) { GV2_T(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
+    else { GV2_T(float, xc.data_ptr<float>()); }
+    #undef GV2_T
+    #undef GV2_R
+    #undef GV2_L
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
+torch::Tensor nvfp4_gemv_grouped_gateup_v2(
+        torch::Tensor qg, torch::Tensor bg, torch::Tensor gsg,
+        torch::Tensor qu, torch::Tensor bu, torch::Tensor gsu,
+        torch::Tensor eid_s, torch::Tensor tok_s, torch::Tensor ordre,
+        torch::Tensor x, int64_t K, int64_t act) {
+    CHECK_CUDA(qg); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(qg);
+    CHECK_CONTIG(qg); CHECK_CONTIG(qu); CHECK_CONTIG(bg); CHECK_CONTIG(bu);
+    TORCH_CHECK(K % 32 == 0 && (size_t)(K + K / 32) * sizeof(float) <= 48 * 1024, "v2 : K multiple de 32 et <= 11904");
+    const int M = qg.size(1), G = eid_s.size(0);
+    const bool bf = x.scalar_type() == torch::kBFloat16;
+    auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
+    auto out = torch::empty({G, M}, xc.options().dtype(torch::kFloat));
+    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 1;
+    const int tpb = gv2_tpb(K);
+    dim3 grid((M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
+    const size_t shm = (size_t)tpb * (K + K / 32) * sizeof(float);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    #define GU2_L(XT, T, R, PX) nvfp4_gemv_grouped_gateup_v2_kernel<XT, T, R><<<grid, GW_WARPS * WARP, shm, stream>>>( \
+        qg.data_ptr<unsigned char>(), bg.data_ptr<unsigned char>(), gsg.data_ptr<float>(), \
+        qu.data_ptr<unsigned char>(), bu.data_ptr<unsigned char>(), gsu.data_ptr<float>(), \
+        eid_s.data_ptr<int>(), tok_s.data_ptr<int>(), ordre.data_ptr<int>(), PX, out.data_ptr<float>(), M, (int)K, G, (int)act)
+    #define GU2_R(XT, T, PX) do { if (rpw == 1) GU2_L(XT, T, 1, PX); else if (rpw == 2) GU2_L(XT, T, 2, PX); else GU2_L(XT, T, 4, PX); } while (0)
+    #define GU2_T(XT, PX) do { if (tpb == 4) GU2_R(XT, 4, PX); else if (tpb == 2) GU2_R(XT, 2, PX); else GU2_R(XT, 1, PX); } while (0)
+    if (bf) { GU2_T(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
+    else { GU2_T(float, xc.data_ptr<float>()); }
+    #undef GU2_T
+    #undef GU2_R
+    #undef GU2_L
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
 // Pendant décodage de nvfp4_gemm_grouped_mma (patron identique, table.hpp
 // bead pds) : chaque expert lu par ADRESSE (`table_*[e]`), résident ou
 // épinglé zéro-copie, jamais par une pile contiguë — une couche au
@@ -5320,6 +5585,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "INT8 : dequantification + produit fusionnes ; sortie_fp32 : x bf16, accumulation et sortie fp32 (tete)");
     m.def("nvfp4_gemv_grouped", &nvfp4_gemv_grouped,
           "NVFP4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
+    m.def("nvfp4_gemv_grouped_v2", &nvfp4_gemv_grouped_v2,
+          py::arg("qw"), py::arg("bscale"), py::arg("gscales"), py::arg("eid_s"), py::arg("tok_s"),
+          py::arg("ordre"), py::arg("x"), py::arg("K"),
+          "NVFP4 : GEMV groupée v2, paires triées par expert, poids lus une fois pour TPB jetons");
+    m.def("nvfp4_gemv_grouped_gateup_v2", &nvfp4_gemv_grouped_gateup_v2,
+          py::arg("qg"), py::arg("bg"), py::arg("gsg"), py::arg("qu"), py::arg("bu"), py::arg("gsu"),
+          py::arg("eid_s"), py::arg("tok_s"), py::arg("ordre"), py::arg("x"), py::arg("K"), py::arg("act") = 0,
+          "NVFP4 : gate/up fusionnés v2, paires triées par expert");
     m.def("nvfp4_gemv_grouped_gateup", &nvfp4_gemv_grouped_gateup,
           py::arg("qg"), py::arg("bg"), py::arg("gsg"), py::arg("qu"), py::arg("bu"),
           py::arg("gsu"), py::arg("expert_ids"), py::arg("token_ids"), py::arg("x"),

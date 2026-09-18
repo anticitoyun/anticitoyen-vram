@@ -1002,6 +1002,19 @@ def nvfp4_gemv_grouped(x: torch.Tensor, qw: torch.Tensor, bscale: torch.Tensor,
                                   x.contiguous(), k)
 
 
+def nvfp4_gemv_grouped_v2(x: torch.Tensor, qw: torch.Tensor, bscale: torch.Tensor,
+                          gscales: torch.Tensor, eid_s: torch.Tensor, tok_s: torch.Tensor,
+                          ordre: torch.Tensor, k: int) -> Optional[torch.Tensor]:
+    """v2 (18/09) : paires triées par expert (``eid_s``, ``tok_s``), ``ordre``
+    = place d'origine de chaque paire ; poids lus une fois pour ≤ 4 jetons."""
+    ext = get_extension()
+    if ext is None or k % 32 != 0:
+        return None
+    if x.shape[-1] != k:
+        x = torch.nn.functional.pad(x, (0, k - x.shape[-1]))
+    return ext.nvfp4_gemv_grouped_v2(qw, bscale, gscales, eid_s, tok_s, ordre, x.contiguous(), k)
+
+
 def nvfp4_gemv_grouped_table(x: torch.Tensor, table_qw: torch.Tensor,
                              table_bs: torch.Tensor, gscales: torch.Tensor,
                              expert_ids: torch.Tensor, token_ids: torch.Tensor,
