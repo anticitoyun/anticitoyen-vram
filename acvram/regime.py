@@ -74,6 +74,8 @@ VARIABLES: tuple[Variable, ...] = (
              "GEMV groupée des experts, K ≤ 2048 : down (défaut depuis verdict-gemv-experts-xreg-down-18-09 : ABAB × 0,944 nu, Coder b=12 1 307 t/s) = x en registres par tranche sur la projection down seule | 1 = gate/up aussi (témoin réfuté : 96 registres, 2 blocs/SM, +19 %) | 0 = x relu en shared (témoin) ; sortie identique au bit dans tous les cas"),
     Variable("GEMV_LAYOUT", "naturel", ("acvram.engine.model", "_GEMV_LAYOUT"), "naturel",
              "P1 disposition UNIQUE (forme (b)) : marlin = pile Marlin seule (préfill GEMM classe Marlin ET GEMV du décodage relisant les tuiles 16 k × 64 n ; la pile NVFP4 est rendue après le repack, experts_layout=marlin ; va avec PREFILL_GROUPED=marlin, sinon refus à l import ; scellé ≤ 0,97 × GEMV à b=1 et b=12, fp32 par ligne) | naturel = pile NVFP4 seule (témoin, avec PREFILL_GROUPED≠marlin)"),
+    Variable("DOUBLE_DISPOSITION_DIAG", "0", None, "0",
+             "diagnostic seulement (bissection du biais GEMV (b), poste7-p1-situ-verdict-18-09) : 1 = les deux dispositions gardées, préfill {groupe|marlin} × décodage {naturel|marlin} sur les mêmes piles ; jamais un régime servi"),
     Variable("MOE_GEMV", "v1", ("acvram.engine.model", "_MOE_GEMV"), "v1",
              "GEMV groupée du décodage MoE : v1 (une passe de poids par paire expert-jeton) | v2 (paires triées par expert, poids lus une fois pour ≤ 4 jetons, sortie identique au bit)"),
     Variable("MULTI_PROJ", "0", ("acvram.engine.model", "_MULTI_PROJ"), "0",

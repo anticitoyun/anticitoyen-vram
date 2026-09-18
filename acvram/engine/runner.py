@@ -582,8 +582,8 @@ class Engine:
             "prefill_int8": kernels.prefill_int8_regime(),
             # P1 disposition unique : « marlin » (pile Marlin seule, préfill et
             # décodage, la pile NVFP4 rendue) | « naturel » (pile NVFP4 seule)
-            "experts_layout": "marlin" if any(getattr(m, "experts_layout", None) == "marlin"
-                                              for m in self.model.modules() if isinstance(m, MoEBlock)) else "naturel",
+            "experts_layout": next((getattr(m, "experts_layout") for m in self.model.modules()
+                                    if isinstance(m, MoEBlock) and getattr(m, "experts_layout", None)), "naturel"),
             # linéaires INT8 du décodage : triton≥b|cuda (poste C, bascule mesurée)
             "dense": kernels.narrow_regime(),
             "gdn": _gdn_regime(),

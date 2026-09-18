@@ -212,3 +212,25 @@ moteur lui donne ou fait de sa sortie sous disposition unique (à isoler par
 bissection in situ : préfixe par Marlin + décodage v1 est impossible sous
 disposition unique — alors comparer décodage (b) et v1 sur les MÊMES piles
 en double disposition, hors régime, dans le seul but du diagnostic).
+
+### GLM prefill Marlin −0,003 et GEMV (b) décodage +0,008 : même famille, à nommer ensemble (poste7)
+
+Le scan à sec des échelles sur GLM-4.7-Flash-nvfp4 (46 couches, facteur 1) :
+**0 échelle annulée, 0 déjà nulle** — la pile Marlin de GLM est
+bit-équivalente à la pile E4M3. Le −0,003 du prefill GLM ne vient donc pas des
+tables ; il vient de l'arithmétique du chemin : Marlin sort g, u et down en
+**bf16** (`gemm_moe(…, c=)`) et l'activation silu(g)·u est prise en bf16 avant
+down, là où `groupe`/`direct` gardent des intermédiaires fp32 — trois arrondis
+2⁻⁸ par jeton et par expert, sans biais de signe mais pas équivalents ; le
+sens (mieux) est un hasard de ce modèle, pas une propriété. Le +0,008 du GEMV
+(b) au décodage est l'autre face : un chemin dont l'arithmétique par élément
+est exacte (§ 8-1) mais dont la sortie in situ diffère. Aucune revendication
+tant que la cause de chacun n'est pas nommée.
+
+**Bissection in situ** (ajoutée : `ACVRAM_DOUBLE_DISPOSITION_DIAG=1`, régime
+`experts_layout=double(diag)`, jamais servi) : sur les MÊMES piles, quatre
+cellules ppl-decode-kv — préfixe {groupe, marlin} × décodage {naturel = v1,
+marlin = (b)} (`ACVRAM_PREFILL_GROUPED` × `ACVRAM_GEMV_LAYOUT`). Si le +0,008
+suit le décodage (b) quel que soit le préfixe → le noyau (instrument par
+couche pour le localiser) ; s'il suit le préfixe Marlin → le cache KV écrit par
+le prefill bf16 (même cause que le −0,003 GLM, signe opposé sur Coder).
