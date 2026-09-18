@@ -1256,7 +1256,7 @@ class MoEBlock(nn.Module):
         # bf16 une seule fois quel que soit le lot. Le premier gagne tant que
         # les experts reçoivent peu de jetons — croisement mesuré vers 50
         # jetons par expert, voir _MOE_GEMM_MAX.
-        par_expert = topi.numel() / max(1, pg[1].shape[0])
+        par_expert = topi.numel() / max(1, pg[3].shape[0])          # E : l'échelle globale [E] survit à la disposition unique (pg[1] rendu)
         # W4A4 sur la MMA FP4 native (revue/mma-fp4-native-sm120.md) : coupé
         # par défaut tant que la perte de qualité des activations en E2M1
         # n'est pas ramenée sous 1 % (poste2, 13/09 : +2,58 % sans lissage).
@@ -1272,7 +1272,7 @@ class MoEBlock(nn.Module):
         if not direct and _PREFILL_GROUPED == "grouped_mm" and not hasattr(torch, "_grouped_mm"):
             return None
         t, k = topi.shape
-        E = pg[1].shape[0]
+        E = pg[3].shape[0]                             # [E] échelles globales : survit à pg[1] = None (disposition unique)
         flat_e = topi.reshape(-1).to(torch.int64)
         flat_t = torch.arange(t, device=x.device).repeat_interleave(k)
         colle = _colle_moe_triton(flat_e.numel(), E, x.device)
@@ -1492,7 +1492,7 @@ class MoEBlock(nn.Module):
                 or not ext.nvfp4_gemm_grouped_mma_disponible()):
             return None
         t, k = topi.shape
-        E = pg[1].shape[0]
+        E = pg[3].shape[0]                             # [E] échelles globales : survit à pg[1] = None (disposition unique)
         bt = _MOE_DECODE_MMA_BT
         t_max = -(-(t * k) // bt) + E
         if _MOE_ROUTE_PACK and hasattr(ext, "moe_route_pack") and t * k <= 1024:
