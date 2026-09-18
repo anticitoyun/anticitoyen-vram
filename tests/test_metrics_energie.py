@@ -76,6 +76,43 @@ def test_absent_sans_nvml_ni_jetons():
     assert a2.j_par_jeton() is None
 
 
+def test_jetons_fenetre_accompagne_toujours_j_par_jeton():
+    """poste7 (poste7-metrics-energie-fenetre-18-09) : `jetons_fenetre()` = 0
+    est la SEULE raison publiee de None — les deux se lisent ensemble."""
+    a = _anneau(lambda: {0: 1_000_000})
+    assert a.jetons_fenetre() == 0   # pas assez d'echantillons
+    a.tic(10)
+    assert a.jetons_fenetre() == 0   # un seul echantillon
+    a.tic(10)   # meme mj, meme jetons
+    assert a.jetons_fenetre() == 0 and a.j_par_jeton() is None
+
+
+def test_jetons_fenetre_egale_le_delta():
+    valeurs = iter([{0: 5_000_000}, {0: 5_010_000}])
+    a = _anneau(lambda: next(valeurs))
+    a.tic(1000)
+    a.tic(1042)
+    assert a.jetons_fenetre() == 42
+    assert a.j_par_jeton() == round(10_000 / 1000.0 / 42, 4)
+
+
+def test_sous_charge_continue_jamais_none():
+    """Deuxieme test de la decision : un lecteur qui tombe toutes les
+    100 ms sous une charge continue ne doit jamais voir None une fois la
+    fenetre amorcee — meme si son passage tombe juste apres un tic."""
+    mj = [0]
+    a = capteurs.AnneauEnergie(fenetre_s=10.0, tic_s=1.0,
+                                lecteur=lambda: {0: mj[0]})
+    tokens = 0
+    a.tic(tokens)   # amorce
+    for _ in range(20):
+        mj[0] += 10_000        # 10 J par tic
+        tokens += 5
+        a.tic(tokens)
+        assert a.j_par_jeton() is not None   # jamais None une fois amorce
+        assert a.jetons_fenetre() > 0
+
+
 @pytest.fixture(scope="module")
 def client(converted):
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers
@@ -121,4 +158,6 @@ def test_metrics_expose_j_par_jeton_10s(client, monkeypatch):
     anneau.tic(320)
     m = c.get("/metrics").json()
     assert m["energie"]["j_par_jeton_10s"] == 1.0
+    assert m["energie"]["fenetre_s"] == 10.0
+    assert m["energie"]["jetons_fenetre"] == 20
     assert "cartes" in m["energie"]

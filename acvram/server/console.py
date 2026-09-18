@@ -423,7 +423,8 @@ async function rafraichir() {
       .map(c => nb(c.horloge_sm, 0) + ' MHz / ' + nb(c.watts_plafond, 0) + ' W')
       .join(', ');
     $('energie').textContent = 'énergie : ' + nb(nrj.j_par_jeton_10s, 3)
-      + ' J/jeton' + (plafonds ? ' — horloge SM / plafond : ' + plafonds : '');
+      + ' J/jeton (' + nb(nrj.jetons_fenetre, 0) + ' jetons / ' + nb(nrj.fenetre_s, 0) + ' s)'
+      + (plafonds ? ' — horloge SM / plafond : ' + plafonds : '');
 
     // Ajout n°4 (poste7-gui-ajouts-18-09 § 4) : la meme ligne "[régime] ..."
     // qu'un JSON de mesure — copiable, pour qu'un rapport puisse la coller

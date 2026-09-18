@@ -834,8 +834,11 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
         fenêtre (l'ancienne version, qui consommait son propre échantillon
         précédent à chaque appel, les faisait diverger)."""
         cartes = _capteurs.nvidia()
+        anneau = app.state.anneau_energie
         return {
-            "j_par_jeton_10s": app.state.anneau_energie.j_par_jeton(),
+            "j_par_jeton_10s": anneau.j_par_jeton(),
+            "fenetre_s": anneau.fenetre_s,
+            "jetons_fenetre": anneau.jetons_fenetre(),
             "cartes": [{"index": c["index"], "horloge_sm": c["horloge_sm"],
                         "watts_plafond": c["watts_max"]} for c in cartes],
         }
