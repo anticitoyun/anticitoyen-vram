@@ -44,3 +44,18 @@ Prédiction scellée pour le banc (quand il tournera) : X = 120-150 TFLOPS
 thread_k/n choisis par Marlin) ; bande 110-137 plus probable que ≥ 137 (les
 tuiles N = 768/1 536 sont petites pour ses stripes) ; témoin B0 ≈ 90-100.
 Faux si < 110 (alors la porte se ferme sans carte, comme écrit).
+
+### Conditions de poste7 intégrées au banc (18/09, à sec)
+
+1. JIT hors capture (REGLES § 6, garde b) : `--compiler-seulement` compile
+   l'extension SANS carte (`CUDA_VISIBLE_DEVICES=""`, nvcc seul, 23 s ici,
+   contrôlé de bout en bout : .so chargé, ops enregistrées) ; le banc charge
+   depuis le cache, chauffe en eager (3 appels + 2 sur flux annexe) avant
+   toute capture, et se déclare **BANC INVALIDE** si l'extension a été
+   compilée dans son processus ou si le sha du .so change pendant le banc.
+   Trouvé au passage : depuis CUDA 12.8, nvcc donne une liaison interne aux
+   stubs hôte des gabarits `__global__` instanciés explicitement — édition de
+   liens « undefined hidden symbol Marlin<…> » ; vLLM pose
+   `-static-global-template-stub=false` (CMakeLists.txt:1377), posé aussi.
+2. En-tête (INDEX) : `regime_ligne()` + `marlin_port_so=<sha256 du .so>` +
+   `marlin_source=vLLM v0.29.0`, imprimés et dans le JSON.

@@ -42,19 +42,46 @@ def _kfe2m1f_id() -> int:
 
 
 _EXT = None
+VERSION_SOURCE = "vLLM v0.29.0 (csrc/libtorch_stable, commit de la balise v0.29.0)"
+COMPILE_ICI = False          # vrai si la compilation a eu lieu dans CE processus (REGLES § 6, garde b)
+
+
+def dossier_cache() -> pathlib.Path:
+    return pathlib.Path(os.environ.get("ACVRAM_MARLIN_CACHE",
+                                       pathlib.Path.home() / ".cache" / "acvram" / "marlin_port"))
+
+
+def chemin_so() -> pathlib.Path:
+    return dossier_cache() / "acvram_marlin.so"
+
+
+def sha_so() -> str:
+    """sha256 du binaire compilé — l'en-tête d'une cellule (INDEX) le porte."""
+    import hashlib
+    p = chemin_so()
+    if not p.exists():
+        return "absent"
+    return hashlib.sha256(p.read_bytes()).hexdigest()[:16]
 
 
 def charger(verbose: bool = False):
-    """Compile (une fois) et charge l'extension ; rend l'espace `torch.ops.acvram_marlin`."""
-    global _EXT
+    """Compile (une fois) et charge l'extension ; rend l'espace `torch.ops.acvram_marlin`.
+
+    JIT hors capture (REGLES § 6) : à compiler AVANT la prise de carte —
+    `CUDA_VISIBLE_DEVICES="" python outils/banc-marlin-p1-18-09.py --compiler-seulement`
+    (nvcc seul, aucune carte requise : archs sm_86 + sm_120 par défaut). Si le
+    binaire n'est pas en cache au moment du banc, `COMPILE_ICI` passe à vrai
+    et le banc se déclare invalide."""
+    global _EXT, COMPILE_ICI
     if _EXT is not None:
         return _EXT
     from torch.utils.cpp_extension import load
+    COMPILE_ICI = not chemin_so().exists()
     moe = ICI / "libtorch_stable" / "moe" / "marlin_moe_wna16"
     sources = [str(ICI / "bindings.cpp"), str(moe / "ops.cu"),
                str(ICI / "libtorch_stable" / "quantization" / "marlin" / "gptq_marlin_repack.cu")]
     sources += sorted(glob.glob(str(moe / "sm80_kernel_*.cu")))
-    cache = pathlib.Path(os.environ.get("ACVRAM_MARLIN_CACHE", pathlib.Path.home() / ".cache" / "acvram" / "marlin_port"))
+    cache = dossier_cache()
     cache.mkdir(parents=True, exist_ok=True)
     from .. import _arch_flags
     load(name="acvram_marlin", sources=sources, is_python_module=False, verbose=verbose,
@@ -64,8 +91,12 @@ def charger(verbose: bool = False):
          # cublas) sont derrière cette garde ; l'espace de noms Marlin est posé
          # par kernel.h (moe) et par défaut (repack), pas ici
          extra_cflags=["-O3", "-std=c++20", "-DUSE_CUDA"],
-         extra_cuda_cflags=["-O3", "-std=c++20", "--expt-relaxed-constexpr", "-DENABLE_BF16", "-DUSE_CUDA"]
-                           + _arch_flags())
+         # -static-global-template-stub=false : depuis CUDA 12.8 nvcc donne une
+         # liaison INTERNE aux stubs hôte des gabarits __global__ instanciés
+         # explicitement ; sans ce drapeau (que vLLM pose, CMakeLists.txt:1377)
+         # l'édition de liens rend « undefined hidden symbol Marlin<…> »
+         extra_cuda_cflags=["-O3", "-std=c++20", "--expt-relaxed-constexpr", "-DENABLE_BF16", "-DUSE_CUDA",
+                            "-static-global-template-stub=false"] + _arch_flags())
     _EXT = torch.ops.acvram_marlin
     return _EXT
 

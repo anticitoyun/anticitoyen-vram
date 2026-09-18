@@ -13,7 +13,14 @@ Témoin : déquantification bf16 + GEMM cutlass par expert (la classe B0).
 GLM-4.7-Flash : même formule sur ses postes (7,11 TFLOP d'experts routés,
 part fixe à donner : --glm-fixe-ms, sinon trois hypothèses).
 
+    CUDA_VISIBLE_DEVICES="" python outils/banc-marlin-p1-18-09.py --compiler-seulement   # AVANT la carte (nvcc seul)
     outils/carte.sh python outils/banc-marlin-p1-18-09.py [--rapide] [--glm-fixe-ms 80]
+
+REGLES § 6 : le JIT ne se fait jamais sous le verrou ni sous capture — le
+binaire est compilé à sec, le banc le charge depuis le cache (sinon il se
+déclare invalide), chauffe en eager avant tout rejeu, et vérifie que le
+binaire n'a pas changé. En-tête (INDEX) : régime + sha256 du .so + version
+de la source vLLM portée.
 """
 import argparse
 import json
@@ -72,12 +79,23 @@ def main():
     ap.add_argument("--rapide", action="store_true")
     ap.add_argument("--glm-fixe-ms", type=float, default=None)
     ap.add_argument("--lignes-juge", type=int, default=512)
+    ap.add_argument("--compiler-seulement", action="store_true",
+                    help="compile l'extension (nvcc, sans carte : CUDA_VISIBLE_DEVICES=\"\") et sort — à faire AVANT la prise de carte")
     args = ap.parse_args()
+    if args.compiler_seulement:
+        t0 = time.time(); MP.charger(verbose=False)
+        print(f"extension Marlin compilée/chargée en {time.time() - t0:.0f} s ; .so {MP.chemin_so()} sha256 {MP.sha_so()} ; "
+              f"source {MP.VERSION_SOURCE}")
+        return
     repet = 8 if args.rapide else 30
     dev = torch.device("cuda")
     from acvram.regime import regime_ligne
-    print(regime_ligne(), flush=True)
-    t0 = time.time(); MP.charger(verbose=False); print(f"extension Marlin chargée en {time.time() - t0:.0f} s", flush=True)
+    # en-tête (INDEX) : régime, sha256 du binaire, version de la source portée
+    t0 = time.time(); MP.charger(verbose=False); dt = time.time() - t0
+    entete = f"{regime_ligne()} marlin_port_so={MP.sha_so()} marlin_source={MP.VERSION_SOURCE}"
+    print(entete, flush=True)
+    print(f"extension Marlin chargée en {dt:.0f} s ({'COMPILÉE DANS CE PROCESSUS — banc invalide, REGLES § 6' if MP.COMPILE_ICI else 'depuis le cache'})", flush=True)
+    sha_avant = MP.sha_so()
 
     qw13, bs13, gs13, ts13 = pile(2 * N, K, 1, dev)          # gate+up empilés : [E, 1536, 2048]
     qw2, bs2, gs2, ts2 = pile(K, N, 2, dev)                  # down : [E, 2048, 768]
@@ -152,12 +170,18 @@ def main():
     ecart_max = ((y_tri - y_ref).abs() / borne.clamp_min(1e-6)).max().item()
     print(f"juge : {hors} valeurs hors 2⁻⁷ × Σ|x·w| sur {ref_rows}×{K} ; écart max {ecart_max:.2e} (2⁻⁷ = 7.8e-3)", flush=True)
 
+    # garde b (REGLES § 6) : appel eager chauffé AVANT tout rejeu (chrono le
+    # fait : 3 appels eager, 2 sur flux annexe, puis capture) ; le binaire ne
+    # doit pas changer pendant le banc et n'avoir pas été compilé ici
     ms_marlin = chrono(marlin, repet)
     ms_temoin = chrono(temoin, max(3, repet // 3))
+    jit_invalide = MP.COMPILE_ICI or MP.sha_so() != sha_avant
     X = FLOP_PAS / (ms_marlin * COUCHES * 1e-3) / 1e12
     X_temoin = FLOP_PAS / (ms_temoin * COUCHES * 1e-3) / 1e12
     js = lambda tf: 2048 / (FIXE_S + 7.43 / tf)
-    if hors:
+    if jit_invalide:
+        verdict = "BANC INVALIDE : extension compilée pendant le banc ou binaire changé (REGLES § 6) — recompiler à sec puis rejouer"
+    elif hors:
         verdict = "SORTIE FAUSSE : ne compte pas"
     elif X >= 137:
         verdict = "≥ 137 : in situ, scellé parité ≥ 15 700 j/s"
@@ -178,6 +202,8 @@ def main():
     out = os.path.join(os.path.dirname(__file__), "..", "scratchpad", "banc-marlin-p1-18-09.json")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     json.dump({"date": time.strftime("%Y-%m-%d %H:%M"), "carte": torch.cuda.get_device_name(0), "regime": regime_ligne(),
+               "entete": entete, "marlin_port_so_sha256": sha_avant, "marlin_source": MP.VERSION_SOURCE,
+               "jit_invalide": jit_invalide,
                "repet": repet, "block_size_m": block, "ms_couche_marlin": ms_marlin, "ms_pas_marlin": ms_marlin * 48,
                "X_tflops": X, "X_temoin": X_temoin, "hors_2m7": hors, "ecart_max": ecart_max,
                "formule_js": js(X), "verdict": verdict, "glm_tflop": glm_tflop}, open(out, "w"), indent=1, ensure_ascii=False)
