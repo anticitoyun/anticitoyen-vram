@@ -193,6 +193,18 @@ class Attention(nn.Module):
         self.k_eq_v = k_eq_v
         self.window = window
         self.rope = rope
+        # Scaling « llama 4 » de ministral3/Devstral (transformers
+        # modeling_ministral3.get_llama_4_attn_scale) : q ← q · (1 + β·ln(1 +
+        # ⌊pos/plafond⌋)) après le RoPE, par jeton, sous rope yarn avec
+        # llama_4_scaling_beta > 0. Vaut 1 exactement sous le plafond
+        # (original_max_position_embeddings, 8 192 sur Devstral) ; au-delà,
+        # sans lui les logits sont faux sans le dire (refus de 67aa280, levé
+        # ici). tests/test_devstral_llama4_scaling.py contre transformers.
+        rs = getattr(spec, "rope_scaling", None) or {}
+        beta = float(rs.get("llama_4_scaling_beta") or 0.0)
+        plafond = int(rs.get("original_max_position_embeddings") or 0)
+        yarn = str(rs.get("rope_type") or rs.get("type") or "") == "yarn"
+        self.llama4 = (beta, plafond) if (yarn and beta > 0 and plafond > 0 and rope is not None) else None
         # Déclaré ici et pas au niveau de la classe : un attribut de classe
         # masque le module enregistré par nn.Module.__setattr__, et la
         # projection empilée resterait invisible (self.qkv_proj toujours None).
@@ -342,6 +354,8 @@ class Attention(nn.Module):
             if self.rope is not None:
                 cos, sin = self.rope(pos, x.device, x.dtype, max_pos=mx)
                 q, k = apply_rope(q, k, cos, sin)
+        if self.llama4 is not None:
+            q = self._echelle_llama4(q, pos)
 
         if cache is not None:
             cache.write(batch.slots_on(x.device), k, v, positions=batch.positions_on(x.device))
@@ -349,6 +363,14 @@ class Attention(nn.Module):
         if batch.is_decode:
             return self._decode(q, k, v, batch, cache, t, gate)
         return self._prefill(q, k, v, batch, cache, t, gate)
+
+    def _echelle_llama4(self, q: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        """q · (1 + β·ln(1 + ⌊pos/plafond⌋)), calculé en fp32 puis arrondi au
+        dtype de q — la même arithmétique que transformers (positions/plafond
+        en flottant, torch.log, `.to(query_states.dtype)`)."""
+        beta, plafond = self.llama4
+        s = 1.0 + beta * torch.log1p(torch.floor(positions.to(torch.float32) / plafond))
+        return q * s.to(q.dtype).view(-1, *([1] * (q.dim() - 1)))
 
     def norme_fusee_possible(self, t: int) -> bool:
         """(3b) : la projection q/k/v empilée est un INT8 sans échelle AWQ ni
@@ -396,6 +418,8 @@ class Attention(nn.Module):
             r = self._rope_kv_fusee(q, k, v, positions, max_pos, slots, cache)
             if r is not None:
                 q, k = r
+                if self.llama4 is not None:
+                    q = self._echelle_llama4(q, positions)
                 out = kernels.paged_attention(q, cache, block_tables, seq_lens,
                                               self.n_rep, self.scale, q_len=q_len,
                                               window=self.window)
@@ -422,6 +446,8 @@ class Attention(nn.Module):
             if self.rope is not None:
                 cos, sin = self.rope(positions, x.device, x.dtype, max_pos=max_pos)
                 q, k = apply_rope(q, k, cos, sin)
+        if self.llama4 is not None:
+            q = self._echelle_llama4(q, positions)
         cache.write(slots, k, v, positions=positions)
         out = kernels.paged_attention(q, cache, block_tables, seq_lens,
                                       self.n_rep, self.scale, q_len=q_len,
