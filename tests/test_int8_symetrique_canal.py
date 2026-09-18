@@ -10,7 +10,29 @@ import json
 import torch
 from safetensors.torch import save_file
 
+from acvram.quant.convert import _est_projection_attn
 from acvram.quant.formats import INT8Tensor, _dequantize_int8, _quantize_int8
+
+
+def test_projection_attn_couvre_gqa_et_mla_pas_les_normes():
+    """18/09, chantier GLM (MLA) : q/k/v/o ne nomme rien chez GLM
+    (q_a_proj/q_b_proj/kv_a_proj_with_mqa/o_proj) -- `_est_projection_attn`
+    doit couvrir les deux architectures sans suffixe fixe, et exclure les
+    normes (q_a_layernorm/kv_a_layernorm), jamais candidates a l'int8."""
+    for nom in ("model.layers.0.self_attn.q_proj.weight",
+               "model.layers.0.self_attn.k_proj.weight",
+               "model.layers.0.self_attn.v_proj.weight",
+               "model.layers.0.self_attn.o_proj.weight",
+               "model.layers.0.self_attn.q_a_proj.weight",
+               "model.layers.0.self_attn.q_b_proj.weight",
+               "model.layers.0.self_attn.kv_a_proj_with_mqa.weight",
+               "model.layers.0.self_attn.kv_b_proj.weight"):
+        assert _est_projection_attn(nom), f"projection non reconnue : {nom}"
+    for nom in ("model.layers.0.self_attn.q_a_layernorm.weight",
+               "model.layers.0.self_attn.kv_a_layernorm.weight",
+               "model.layers.0.mlp.gate_proj.weight",
+               "model.norm.weight"):
+        assert not _est_projection_attn(nom), f"faux positif : {nom}"
 
 
 def _petit_checkpoint(tmp_path):

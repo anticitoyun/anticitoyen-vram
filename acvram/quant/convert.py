@@ -293,6 +293,18 @@ SENSITIVE_SUFFIXES = (
 )
 
 
+def _est_projection_attn(name: str) -> bool:
+    """poste7-p2-qkvo-int8-canal-18-09, generalise le 18/09 pour GLM (MLA) :
+    q/k/v/o couvre l'attention GQA de Coder, mais GLM nomme ses projections
+    q_a_proj/q_b_proj/kv_a_proj_with_mqa/kv_b_proj/o_proj -- aucun suffixe
+    fixe ne les couvre tous. Toute pondération sous `.self_attn.` qui n'est
+    PAS une norme (q_a_layernorm, kv_a_layernorm) est une projection ;
+    k_b_proj/v_b_proj y passent aussi mais restent bf16 (SENSITIVE_SUFFIXES,
+    absorptions MLA 3D) donc jamais gênés par le filtre fmt=="int8" en aval."""
+    return (".self_attn." in name and name.endswith(".weight")
+           and "norm" not in name)
+
+
 class TensorRouter:
     """Décide du format de stockage de chaque tenseur, à partir du plan de placement."""
 
@@ -1412,8 +1424,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         # routeur les a places en int8 -- le reste du modele garde le groupe
         # de 128 affine (opts.group_size) sans y toucher.
         attn_canal = (opts.attn_qkvo_int8_canal and fmt == "int8"
-                     and name.endswith(("self_attn.q_proj.weight", "self_attn.k_proj.weight",
-                                         "self_attn.v_proj.weight", "self_attn.o_proj.weight")))
+                     and _est_projection_attn(name))
         group_size_tenseur = tensor.shape[1] if attn_canal else opts.group_size
         qt, scaler, metrics = _quantize_on(
             qdev, tensor, fmt, st,
@@ -1571,8 +1582,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             # plus bas, sinon le tenseur reste nvfp4 et group_size=largeur
             # entiere y serait un mensonge de bilan.
             attn_canal_candidat = (opts.attn_qkvo_int8_canal and wider == "int8"
-                                   and name.endswith(("self_attn.q_proj.weight", "self_attn.k_proj.weight",
-                                                       "self_attn.v_proj.weight", "self_attn.o_proj.weight")))
+                                   and _est_projection_attn(name))
             group_size_candidat = tensor.shape[1] if attn_canal_candidat else opts.group_size
             q2, s2, m2 = _quantize_on(
                 qdev, tensor, wider, st,
