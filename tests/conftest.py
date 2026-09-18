@@ -307,6 +307,16 @@ def _verrou_tenu_en_mesure():
     return None
 
 
+def _suite_ciblee(config) -> bool:
+    """Un chemin/nodeid explicite, un `-k` ou un `-m` : la personne a dit ce
+    qu'elle veut lancer. Rien de tout ça (pytest nu, `testpaths` de
+    `pyproject.toml` par défaut) = suite complète. `file_or_dir` est déjà
+    séparé des valeurs de flags par l'analyseur de pytest lui-même — pas de
+    re-parsing fragile de la ligne de commande brute."""
+    return bool(config.getoption("file_or_dir") or config.getoption("keyword")
+               or config.getoption("markexpr"))
+
+
 def _gpu_demande(config):
     """La suite touche-t-elle la carte ? Oui des qu'un GPU est visible et que
     rien ne l'interdit. On ne cherche PAS a deviner quels tests allouent : le
@@ -376,6 +386,27 @@ def pytest_configure(config):
       un verrou pour la SESSION pytest
           -> UNE attente, couverture complete. C'est celui-ci.
     """
+    # 18/09 : load 90/32 cœurs, trois suites COMPLETES de pairs en parallele
+    # pendant une fenetre P1 -- le verrou-mesure ci-dessous ne protege que les
+    # worktrees qui l'ont deja fusionne (REGLES §1), donc un second filet,
+    # INCONDITIONNEL, qui ne depend d'aucune fusion : une suite NON CIBLEE
+    # (aucun chemin/nodeid, aucun -k, aucun -m -- pytest nu, testpaths par
+    # defaut) est le signal le plus fiable qu'une session a lance « la suite »
+    # plutot que ce qu'elle vient de changer. Refuse a load1 > nproc/4 (plus
+    # bas que le seuil nproc/2 d'energie.py : ici on protege TOUTE la
+    # machine, pas seulement une fenetre HTTP).
+    # Ordre voulu : l'override se lit AVANT `_suite_ciblee(config)`, en
+    # court-circuit -- un `config` factice (tests, `None`) ne doit pas être
+    # sollicité quand l'override suffit à trancher.
+    if os.environ.get("ACVRAM_TESTS_SOUS_CHARGE") != "1" and not _suite_ciblee(config):
+        load1 = os.getloadavg()[0]
+        nproc = os.cpu_count() or 1
+        if load1 > nproc / 4:
+            raise pytest.UsageError(
+                f"suite complète sous charge : cible tes tests ou attends "
+                f"(load1={load1:.1f} > nproc/4={nproc / 4:.1f}, {nproc} cœurs). "
+                f"ACVRAM_TESTS_SOUS_CHARGE=1 pour la CI finale.")
+
     # Symétrique de ce qui précède, et INCONDITIONNEL (pas derrière
     # `_gpu_demande`, qui ne voit rien sans CUDA_VISIBLE_DEVICES) : une
     # fenêtre HTTP mesurée sous `carte.sh` (TYPE=mesure) se fait fausser par
