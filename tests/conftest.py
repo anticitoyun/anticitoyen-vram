@@ -410,3 +410,16 @@ def pytest_unconfigure(config):
     if _VERROUS:
         _relacher()
         print("[tests] carte relachee", flush=True)
+
+
+def attendre_chemin(bloc, nom: str, avant: int = 0) -> int:
+    """REGLES § 7, « noyau atteint, pas fonction appelée » (poste7, 18/09, après
+    trois tests d'équivalence qui comparaient sans atteindre le chemin) :
+    asserte que le préfill du ``bloc`` (MoEBlock) vient de prendre le chemin
+    ``nom`` (compteur `_chemin`) et que son compte a AVANCÉ depuis ``avant``.
+    Rend le compte courant. À appeler AVANT toute comparaison de sorties."""
+    chemins = getattr(bloc, "chemins", {})
+    assert getattr(bloc, "dernier_chemin", None) == nom, \
+        f"chemin pris : {getattr(bloc, 'dernier_chemin', None)!r}, attendu {nom!r} (compteurs {chemins})"
+    assert chemins.get(nom, 0) > avant, f"le chemin {nom!r} n'a pas avancé : {chemins}"
+    return chemins[nom]
