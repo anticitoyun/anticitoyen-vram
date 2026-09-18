@@ -403,7 +403,8 @@ class Energie:
         # CHARGE-DELIBEREE dans le verrou), comme charge-gpu.py.
         if self._en_surcharge() and os.environ.get("ACVRAM_CHARGE_OK") != "1":
             pour = []
-            for nom, c in (("avant", self.charge_avant), ("après", self.charge_apres)):
+            for nom, c in (("avant", getattr(self, "charge_avant", None)),
+                          ("après", getattr(self, "charge_apres", None))):
                 if c and c["load1"] > c["nproc"] / 2:
                     pour.append(f"{nom} load1={c['load1']} > nproc/2={c['nproc'] / 2} "
                                f"({c['processus_charges'] or 'aucun PID identifié >100% hors services permanents'})")
@@ -413,8 +414,12 @@ class Energie:
         return raisons
 
     def _en_surcharge(self) -> bool:
+        # `getattr` : les fenêtres construites à la main (avant cette garde,
+        # `object.__new__(Energie)` dans des tests existants) ne posent pas
+        # `charge_avant`/`charge_apres` -- même logique que `duree` plus haut.
         return any(c is not None and c["load1"] > c["nproc"] / 2
-                  for c in (self.charge_avant, self.charge_apres))
+                  for c in (getattr(self, "charge_avant", None),
+                           getattr(self, "charge_apres", None)))
 
     def resume(self) -> dict:
         h = [v for v in self.horloges if v >= 0]
@@ -429,8 +434,8 @@ class Energie:
             "horloge_max": max(h) if h else -1,
             "temp_max": max(t) if t else -1,
             "bridages": ",".join(sorted(self.bridages)) or "aucun",
-            "charge_avant": self.charge_avant,
-            "charge_apres": self.charge_apres,
+            "charge_avant": getattr(self, "charge_avant", None),
+            "charge_apres": getattr(self, "charge_apres", None),
             "invalidations": " ; ".join(self.invalidations) or "aucune",
             # le régime des noyaux (ACVRAM_PREFILL, MOE_MMA…) fait partie de la
             # mesure : poste7-prefill-a8-verdict-17-09, un chiffre sans lui n'entre
