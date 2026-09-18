@@ -254,6 +254,14 @@ class Energie:
         self.indisponible: str | None = None
         self.charge_avant: dict | None = None
         self.charge_apres: dict | None = None
+        # poste7-profil-verdict-18-09 §3 (précision) : ni "fin seulement" ni un
+        # second instrument -- `load1` rejoint la boucle d'échantillons PAR
+        # TIC qui existe déjà pour horloge/température (gratuit,
+        # `/proc/loadavg`) ; jugé sur le MAX de toute la fenêtre, pas sur deux
+        # points. Le relevé des processus >100 % CPU, lui, coûteux en continu,
+        # reste début+fin (`relever_charge`, inchangé).
+        self.charges1: list[float] = []
+        self.nproc = os.cpu_count() or 1
 
     # -- collecte ---------------------------------------------------------
     def __enter__(self) -> "Energie":
@@ -278,6 +286,7 @@ class Energie:
                     self.horloges.append(n.horloge_sm(h))
                     self.temperatures.append(n.temperature(h))
                     self.puissances.append(n.puissance_w(h))
+                self.charges1.append(os.getloadavg()[0])
                 time.sleep(self.periode)
 
         self._t = threading.Thread(target=boucle, daemon=True)
@@ -298,7 +307,8 @@ class Energie:
         # Après `self.duree` : même raison qu'à l'entrée, son coût ne doit
         # pas s'ajouter à la fenêtre mesurée.
         self.charge_apres = relever_charge()
-        if self._en_surcharge() and os.environ.get("ACVRAM_CHARGE_OK") == "1":
+        pic = self._load1_max()
+        if pic is not None and pic > self.nproc / 2 and os.environ.get("ACVRAM_CHARGE_OK") == "1":
             _marquer_charge_deliberee()
         self._stop = True
         if self._t:
@@ -398,28 +408,33 @@ class Energie:
                                f"courte pour que le limiteur ait pu agir")
         # REGLES §2, "18/09, load 70,8 : trois pytest de pairs pendant une
         # fenêtre HTTP" : une charge CPU non annoncée fausse une mesure HTTP
-        # comme une charge GPU non verrouillée fausse un ms/pas. Refuse par
+        # comme une charge GPU non verrouillée fausse un ms/pas. Jugée sur le
+        # MAX de load1 pendant TOUTE la fenêtre (boucle par tic, comme le
+        # bridage), pas seulement à ses deux bouts -- une charge lancée à
+        # mi-fenêtre serait sinon passée entre deux relevés. Refuse par
         # défaut ; ACVRAM_CHARGE_OK=1 l'accepte ET l'annonce (__exit__ écrit
         # CHARGE-DELIBEREE dans le verrou), comme charge-gpu.py.
-        if self._en_surcharge() and os.environ.get("ACVRAM_CHARGE_OK") != "1":
-            pour = []
-            for nom, c in (("avant", getattr(self, "charge_avant", None)),
-                          ("après", getattr(self, "charge_apres", None))):
-                if c and c["load1"] > c["nproc"] / 2:
-                    pour.append(f"{nom} load1={c['load1']} > nproc/2={c['nproc'] / 2} "
-                               f"({c['processus_charges'] or 'aucun PID identifié >100% hors services permanents'})")
-            raisons.append("charge CPU non annoncée pendant la fenêtre : "
-                           + " ; ".join(pour)
-                           + " -- ACVRAM_CHARGE_OK=1 si délibérée")
+        nproc = getattr(self, "nproc", None) or (os.cpu_count() or 1)
+        pic = self._load1_max()
+        if pic is not None and pic > nproc / 2 and os.environ.get("ACVRAM_CHARGE_OK") != "1":
+            processus = (getattr(self, "charge_apres", None) or {}).get("processus_charges") \
+                      or (getattr(self, "charge_avant", None) or {}).get("processus_charges")
+            raisons.append(
+                f"charge pendant la fenêtre : load1 max {pic:.2f} > nproc/2={nproc / 2} "
+                f"({processus or 'aucun PID identifié >100% hors services permanents'}) "
+                f"-- ACVRAM_CHARGE_OK=1 si délibérée")
         return raisons
 
-    def _en_surcharge(self) -> bool:
-        # `getattr` : les fenêtres construites à la main (avant cette garde,
-        # `object.__new__(Energie)` dans des tests existants) ne posent pas
-        # `charge_avant`/`charge_apres` -- même logique que `duree` plus haut.
-        return any(c is not None and c["load1"] > c["nproc"] / 2
-                  for c in (getattr(self, "charge_avant", None),
-                           getattr(self, "charge_apres", None)))
+    def _load1_max(self) -> float | None:
+        """Le pic de `load1` pendant la fenêtre — la boucle par tic
+        (`charges1`) s'il a tourné, sinon les deux bouts (`charge_avant`/
+        `charge_apres`, fenêtres construites à la main comme `object.__new__
+        (Energie)` dans des tests existants, ou NVML absent)."""
+        pics = list(getattr(self, "charges1", None) or [])
+        for c in (getattr(self, "charge_avant", None), getattr(self, "charge_apres", None)):
+            if c:
+                pics.append(c["load1"])
+        return max(pics) if pics else None
 
     def resume(self) -> dict:
         h = [v for v in self.horloges if v >= 0]
@@ -434,6 +449,7 @@ class Energie:
             "horloge_max": max(h) if h else -1,
             "temp_max": max(t) if t else -1,
             "bridages": ",".join(sorted(self.bridages)) or "aucun",
+            "load1_max": self._load1_max(),
             "charge_avant": getattr(self, "charge_avant", None),
             "charge_apres": getattr(self, "charge_apres", None),
             "invalidations": " ; ".join(self.invalidations) or "aucune",
