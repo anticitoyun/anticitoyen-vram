@@ -159,6 +159,7 @@ HORS_REGIME = frozenset({
     # jamais mesurés comme défaut — à monter dans VARIABLES le jour où l'un l'est
     "ACVRAM_INT8_GEMV_WARP", "ACVRAM_INT8_TRANCHE", "ACVRAM_PA_CHUNK", "ACVRAM_PA_ETAPE",
     "ACVRAM_PAGED_ALLOC", "ACVRAM_PA_SANS_COMPTEUR",
+    "ACVRAM_MARLIN_CACHE",       # dossier de compilation du port Marlin (P1), pas un chemin de calcul
 })
 
 

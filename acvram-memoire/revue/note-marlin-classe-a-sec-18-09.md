@@ -6,3 +6,41 @@
 4. **Faisable en 3-5 j : oui, en PORTANT** le template (repack au chargement de nos piles — un noyau, à la construction des `_stacks` —, wrapper grouped avec nos offsets, épilogue act·up fusionné, tests ± 2⁻⁷ + bras cassant échelle décalée) ; **non en réécrivant** de zéro (pipeline cp.async + fragments + stripes + repack : 6-10 j et une classe d'erreurs qu'un port n'a pas). Licence Apache-2.0 : réutilisable avec l'en-tête d'attribution, contrairement à TabbyAPI (AGPL, lecture seule). Coût caché : le repack double la VRAM d'une pile pendant sa conversion (768 Ko par expert, faire expert par expert) et fige le format en mémoire (le GEMV de décodage lit `[N, K/2]` tel quel : garder les deux dispositions, +0 octet sur disque, ×2 en VRAM pour les experts — 1,7 Go sur Coder — ou re-permuter à la volée pour le décodage : à trancher, c'est le vrai coût du port).
 5. **Porte 110 TFLOPS : incohérente avec le scellé 15 700 j/s, corrigée à 137.** Experts Coder 2 048 : 2·16 384·2 048·768 × 3 projections × 48 couches = **7,43 TFLOP** (B0 : 79,9 ms = 93 TFLOPS, cohérent). Pas actuel 207 ms ; retirer la déquant 50,8 laisse 156 ; 15 700 j/s = 130,4 ms exige experts ≤ 54,3 ms = **137 TFLOPS** effectifs (68 % de la crête bf16 mesurée, 200). À 110 TFLOPS : 67,5 ms → 143,8 ms → 14 240 j/s — la porte serait franchie et le scellé manqué. Un scellé = un seuil : soit porte 137 et scellé 15 700, soit porte 110 et scellé 14 200 (à poste7). Ce que la classe rend sur ces formes (M ≈ 128 lignes par expert, N 768, K 2 048 : intensité 512 FLOP/o, jamais bornée par la bande ; borné par MMA + déquant CUDA-cores recouverte) : vLLM à 20 988 j/s (97,6 ms le prefill entier) implique experts ≤ 60 ms ⇒ **≥ 125-150 TFLOPS** sur cette carte — 137 est atteignable par un port fidèle, pas garanti par un port approximatif (stripes et `max_par` mal réglés : −20 %).
 6. Ce que la note ne dit pas : le PPL (mêmes codes W4, A bf16 : ± 0,002 attendu, pas 0), et la place du repack sous graphes (hors décodage : aucun). Décision § 5 de poste7 inchangée : port ou non = semaine CUDA, à l'utilisateur.
+
+## Micro-banc P1 livré à sec (18/09, après la décision de poste7 : porte 137, formule j/s = 2048/(0,076 + 7,43/X))
+
+- `acvram/kernels/marlin_port/` : sources vLLM v0.29.0 verbatim (Apache-2.0,
+  `LICENSE-vllm` joint) — `marlin.cuh`, `marlin_dtypes.cuh`, `dequant.h`,
+  `marlin_mma.h`, `gptq_marlin_repack.cu`, `moe/marlin_moe_wna16/{kernel.h,
+  marlin_template.h, ops.cu}`, `core/scalar_type.hpp`, `torch_utils.h` ;
+  espace de noms des ops renommé `acvram_marlin` (`bindings.cpp`, schémas
+  copiés) ; instanciations générées pour NVFP4 seul (E2M1 + E4M3 par 16,
+  bf16 : 15 noyaux, `sm80_kernel_bfloat16_fe2m1f_bfloat16.cu`). Compilation
+  à sec contrôlée : `nvcc -c` des trois .cu + `g++ -c` des bindings sans
+  erreur (C++20, `-DUSE_CUDA` pour le shim de l'ABI stable, sm_86 + sm_120).
+- `marlin_port/__init__.py` : `charger()` (cpp_extension.load, cache
+  `~/.cache/acvram/marlin_port`), `preparer_pile(qw, bs, gs)` = repack par
+  expert (`gptq_marlin_repack`, notre `[N, K/2]` uint8 vu int32 et transposé
+  comme le nvfp4 de vLLM — même ordre de quartets, bas d'abord) + échelles
+  permutées et converties S0E5M3 (facteur 2ⁿ commun aux experts, échelle
+  globale × 2^(126−7) ÷ facteur), `aligner_blocs` (moe_align_block_size en
+  torch, tri stable), `gemm_moe` (fp32 reduce, sans atomique). L'id
+  `kFE2M1f` (562 949 953 487 106) contrôlé contre vLLM.
+- `outils/banc-marlin-p1-18-09.py` : formes Coder 2 048 (E 128, top_k 8,
+  T 16 384, gate+up N 1 536, down), rejeu de graphe, juge 2⁻⁷ × Σ|x·w| contre
+  la déquant fp32 sur 512 lignes, témoin déquant bf16 + cutlass par expert
+  (classe B0), X = 7,43 TFLOP / (ms × 48), trois bandes de poste7 imprimées,
+  formule Coder et GLM (7,11 TFLOP routés, part fixe donnée ou trois
+  hypothèses). JSON `scratchpad/banc-marlin-p1-18-09.json`.
+- Tests à sec : `tests/test_marlin_port_a_sec.py` (id, alignement = contrat
+  vLLM, échelles). Suite 849 passed.
+- Non fait, sur décision : intégration moteur (deux dispositions d'experts,
+  Plan, `experts_layout=double` dans `regime_ligne()`), tests ± 2⁻⁷ + bras
+  cassant en situ — après le oui de l'utilisateur ; aucune passe de carte
+  P1 avant (le banc attend aussi).
+
+Prédiction scellée pour le banc (quand il tournera) : X = 120-150 TFLOPS
+(vLLM 20 988 j/s ⇒ ≥ 125 sur cette carte ; port fidèle, block_size_m 64,
+thread_k/n choisis par Marlin) ; bande 110-137 plus probable que ≥ 137 (les
+tuiles N = 768/1 536 sont petites pour ses stripes) ; témoin B0 ≈ 90-100.
+Faux si < 110 (alors la porte se ferme sans carte, comme écrit).
