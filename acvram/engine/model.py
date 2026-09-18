@@ -946,9 +946,13 @@ class MoEBlock(nn.Module):
         self._stacks_awq = awq
         return True
 
-    def _grouped(self, x32: torch.Tensor, pile, expert_ids, token_ids):
+    def _grouped(self, x32: torch.Tensor, pile, expert_ids, token_ids, tri=None):
         if pile[0] == "nvfp4":
             _, qw, bs, gs, k, m = pile
+            if tri is not None:
+                eid_s, ordre = tri
+                return kernels.nvfp4_gemv_grouped_v2(x32, qw, bs, gs, eid_s, token_ids[ordre.long()].contiguous(),
+                                                     ordre, k)[:, :m]
             return kernels.nvfp4_gemv_grouped(x32, qw, bs, gs, expert_ids,
                                               token_ids, k)[:, :m]
         if pile[0] == "nvfp4_table":
@@ -1468,7 +1472,20 @@ class MoEBlock(nn.Module):
             tok_g = torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
         else:
             x_g, x_u, tok_g = x, x, tok
-        if (pg[0] == "nvfp4" and pu[0] == "nvfp4" and ext is not None
+        # v2 : paires triées par expert (argsort stable : déterministe, sous
+        # graphe) ; le noyau écrit chaque paire à sa place d'origine
+        tri = None
+        if (_MOE_GEMV == "v2" and pg[0] == "nvfp4" and pu[0] == "nvfp4" and ext is not None
+                and hasattr(ext, "nvfp4_gemv_grouped_gateup_v2") and not distinct
+                and self._stacks.get("down_proj", ("",))[0] == "nvfp4"
+                and pg[4] * 4 <= 48 * 1024):
+            ordre = torch.argsort(eid, stable=True).to(torch.int32)
+            tri = (eid[ordre.long()].contiguous(), ordre)
+        if tri is not None:
+            act = ext.nvfp4_gemv_grouped_gateup_v2(
+                pg[1], pg[2], pg[3], pu[1], pu[2], pu[3], tri[0], tok_g[ordre.long()].contiguous(), ordre,
+                x_g.contiguous(), pg[4], 1 if self.act == "gelu_tanh" else 0)[:, :pg[5]]
+        elif (pg[0] == "nvfp4" and pu[0] == "nvfp4" and ext is not None
                 and hasattr(ext, "nvfp4_gemv_grouped_gateup")
                 and not distinct                       # un seul x pour gate et up
                 and pg[4] * 4 <= 48 * 1024):
@@ -1497,7 +1514,7 @@ class MoEBlock(nn.Module):
             act = fwht_activations(act.to(torch.bfloat16), hd_d).to(act.dtype)
         if awq.get("down_proj") is not None:
             act = (act.to(torch.bfloat16) / awq["down_proj"][eid.long(), :act.shape[1]]).to(act.dtype)
-        d = self._grouped(act, self._stacks["down_proj"], eid, seq)
+        d = self._grouped(act, self._stacks["down_proj"], eid, seq, tri=tri)
         # Chaque jeton possède exactement top_k lignes contiguës : une somme
         # sur cet axe remplace l'index_add_ atomique — déterministe, plus
         # rapide, et rejouable dans un graphe CUDA sans écart d'un rejeu à
@@ -1883,6 +1900,12 @@ _MOE_FUSED_ATOMIQUE = os.environ.get("ACVRAM_MOE_FUSED_ATOMIQUE", "0") == "1"   
 _MOE_FUSED_ETAGES = int(os.environ.get("ACVRAM_MOE_FUSED_ETAGES", "3"))          # 2 : shared plus petite, 2-3 CTA par SM
 # Frontend route+pack en un noyau (15/09, poste7) ; "0" = témoin torch.
 _MOE_ROUTE_PACK = os.environ.get("ACVRAM_MOE_ROUTE_PACK", "1") == "1"
+# GEMV groupée du décodage MoE (18/09, poste7-lecture-profils-coder-17-09 § 2) :
+# v1 (défaut jusqu'au scellé : une passe de poids PAR PAIRE (expert, jeton)) |
+# v2 (paires triées par expert, poids lus une fois pour ≤ 4 jetons du même
+# expert, sortie identique au bit). Scellé : experts 6,6 → ≤ 5,3 ms, Coder
+# b=12 nu ≥ 1 300 t/s (faux < 1 200).
+_MOE_GEMV = os.environ.get("ACVRAM_MOE_GEMV", "v1")
 
 # Décodage MLA sous graphes : 0 = boucle par créneau ; 1 = le noyau
 # d'attention batché seul (bead 6wa, bit-identique, −28,5 % sur le pas
