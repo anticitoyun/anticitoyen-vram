@@ -44,6 +44,7 @@
 #include <array>
 #include <map>
 #include <cstdlib>
+#include <string>
 #include <vector>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -1852,6 +1853,7 @@ __global__ void nvfp4_gemv_grouped_gateup_kernel(
 
 // x en registres (défini plus bas) : aiguillage depuis les wrappers v1
 static bool xreg_demande();
+static bool xreg_demande_gateup();
 static bool xreg_possible(int64_t K);
 torch::Tensor nvfp4_gemv_grouped_xreg(torch::Tensor qw, torch::Tensor bscale, torch::Tensor gscales,
                                       torch::Tensor expert_ids, torch::Tensor token_ids, torch::Tensor x, int64_t K);
@@ -1869,7 +1871,7 @@ torch::Tensor nvfp4_gemv_grouped_gateup(
     CHECK_CONTIG(qg); CHECK_CONTIG(qu); CHECK_CONTIG(bg); CHECK_CONTIG(bu);
     TORCH_CHECK(K % 32 == 0 && (size_t)(K + K / 32) * sizeof(float) <= 48 * 1024,
                 "gate-up fusionne : K multiple de 32 et <= 11904");
-    if (xreg_demande() && xreg_possible(K))
+    if (xreg_demande_gateup() && xreg_possible(K))
         return nvfp4_gemv_grouped_gateup_xreg(qg, bg, gsg, qu, bu, gsu, expert_ids, token_ids, x, K, act);
     const int M = qg.size(1), G = expert_ids.size(0);
     const bool bf = x.scalar_type() == torch::kBFloat16;
@@ -2072,10 +2074,21 @@ __global__ void nvfp4_gemv_grouped_gateup_xreg_kernel(
     }
 }
 
-static bool xreg_demande() {
-    static const bool v = std::getenv("ACVRAM_GROUPED_XREG") && atoi(std::getenv("ACVRAM_GROUPED_XREG")) != 0;
+// ACVRAM_GROUPED_XREG : 0 (témoin : x relu en shared) | down (x en registres
+// sur la projection down seule — poste7-gemv-experts-clos-18-09 : gateup à 96
+// registres tombait à 2 blocs/SM, +19 % ; down 56 registres, −12 %) | 1 (les
+// deux, témoin réfuté). Rend 0, 1 (down seul) ou 2 (les deux).
+static int xreg_mode() {
+    static const int v = [] {
+        const char *e = std::getenv("ACVRAM_GROUPED_XREG");
+        if (!e || !*e) return 0;
+        if (std::string(e) == "down") return 1;
+        return atoi(e) != 0 ? 2 : 0;
+    }();
     return v;
 }
+static bool xreg_demande() { return xreg_mode() >= 1; }            // down
+static bool xreg_demande_gateup() { return xreg_mode() >= 2; }     // gate/up aussi
 static bool xreg_possible(int64_t K) { return K % 32 == 0 && K <= 2048; }   // ≤ 2 uint4 par voie
 
 torch::Tensor nvfp4_gemv_grouped_xreg(torch::Tensor qw, torch::Tensor bscale, torch::Tensor gscales,
