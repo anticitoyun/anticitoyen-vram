@@ -594,6 +594,15 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
         if t.padded_in != xf.shape[-1]:
             xf = torch.nn.functional.pad(xf, (0, t.padded_in - xf.shape[-1]))
         gsr = getattr(t, "global_scale_rows", None)
+        if _DENSE_NVFP4 == "triton" and _DENSE_NVFP4_MIN_M <= n <= 32 and xf.dtype == torch.bfloat16:
+            # GEMM dense étroite W4A16 (poste7-hybrides-etape1-close-gemm-dense-
+            # 17-09 § 2) : les M lignes en registres, les poids lus UNE fois
+            # par pas — la boucle GEMV ci-dessous les relit par séquence
+            # (Qwen3.8 b=12 : 0,23 To/s). M = 1 garde la GEMV.
+            from . import gemm_dense_etroit
+            if gemm_dense_etroit.disponible():
+                y = gemm_dense_etroit.gemm_dense_etroit(xf, t)
+                return y.reshape(*orig_shape[:-1], t.shape[0])
         if (_NARROW_GEMM and _NARROW_NVFP4 and gsr is None and _NARROW_MIN <= n <= 16 and t.padded_in % 64 == 0
                 and xf.dtype == torch.bfloat16 and hasattr(ext, "narrow_gemm")):
             # 1aj marche 2 : GEMM étroit tensor cores, poids lus une fois par
@@ -705,6 +714,26 @@ def int8_dequant(t: INT8Tensor, dtype: torch.dtype = torch.float16) -> torch.Ten
 
 
 _INT8_GEMV_MAX = int(os.environ.get("ACVRAM_INT8_GEMV_MAX", "80"))
+# Linéaires INT8 au préfill (n > INT8_GEMV_MAX) : bf16 (défaut jusqu'au scellé
+# P0 : déquant entière + cutlass) | a8 (kernels/gemm_w8a8.py : activation int8
+# par jeton, tensor cores int8, sans déquant). Scellé : Coder préfill 2 048
+# ≥ 11 000 j/s, porte PPL privé ≤ 1,020 (poste7-profil-verdict-18-09).
+_PREFILL_INT8 = os.environ.get("ACVRAM_PREFILL_INT8", "bf16")
+if _PREFILL_INT8 not in ("bf16", "a8"):
+    raise ValueError(f"ACVRAM_PREFILL_INT8={_PREFILL_INT8!r} : attendu bf16 | a8")
+
+
+def prefill_int8_regime() -> str:
+    return _PREFILL_INT8
+# Linéaires NVFP4 denses à 2 ≤ b ≤ 32 : gemv (défaut, témoin : nvfp4_gemv, les
+# poids relus par séquence) | triton (kernels/gemm_dense_etroit.py, poids lus
+# une fois par pas) — défaut à basculer sur le scellé de poste7 (micro-banc
+# ≥ 1,3 To/s, puis Qwen3.8 b=12 ≥ 500 t/s).
+# Défaut « triton » depuis verdict-gemm-dense-palier1-situ-17-09 (poste3 :
+# Qwen3.8 b=12 128 → 349 t/s, J/j ÷ 2,7, b=1 et ppl-decode-kv inchangés) ;
+# bascule à M ≥ 4 (poste7 : à M = 2 la GEMV gagne au banc, 1,50 contre 1,12 To/s).
+_DENSE_NVFP4 = os.environ.get("ACVRAM_DENSE_NVFP4", "triton")
+_DENSE_NVFP4_MIN_M = int(os.environ.get("ACVRAM_DENSE_NVFP4_MIN_M", "4"))
 # Plafond (octets) du pic de déquantification du repli GEMM d'int8_matmul,
 # au-delà duquel la matrice est traitée par tranches de lignes.
 _DEQUANT_TRANCHE_MAX = int(os.environ.get("ACVRAM_DEQUANT_TRANCHE_MAX", str(256 * 2**20)))
@@ -829,6 +858,15 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
             return y.to(torch.float32).reshape(*orig_shape[:-1], t.shape[0])
         return y.to(x.dtype).reshape(*orig_shape[:-1], t.shape[0])
 
+    # P0 (poste7-profil-verdict-18-09) : au-delà du seuil GEMV, GEMM W8A8 sans
+    # déquantification par appel — activation int8 par jeton, poids uint8
+    # tels quels, produit entier exact sur les tensor cores ; ACVRAM_PREFILL_INT8=a8
+    if (_PREFILL_INT8 == "a8" and x.dtype in (torch.bfloat16, torch.float16)
+            and t.qweight.shape[1] % t.group_size == 0):
+        from . import gemm_w8a8
+        if gemm_w8a8.disponible() and (x.is_cuda or gemm_w8a8.INTERPRETE):
+            y = gemm_w8a8.gemm_w8a8(xf, t, sortie_fp32=sortie_fp32)[:, : t.shape[0]]
+            return y.reshape(*orig_shape[:-1], t.shape[0])
     dt = x.dtype if x.dtype != torch.float32 else torch.float16
     # Repli GEMM : déquantifier la matrice ENTIÈRE en bf16 coûtait, sur la
     # tête de Gemma-4-31B (262 144 × 5 376), 5,25 Gio d'un coup au premier
@@ -982,6 +1020,19 @@ def nvfp4_gemv_grouped(x: torch.Tensor, qw: torch.Tensor, bscale: torch.Tensor,
         x = torch.nn.functional.pad(x, (0, k - x.shape[-1]))
     return ext.nvfp4_gemv_grouped(qw, bscale, gscales, expert_ids, token_ids,
                                   x.contiguous(), k)
+
+
+def nvfp4_gemv_grouped_v2(x: torch.Tensor, qw: torch.Tensor, bscale: torch.Tensor,
+                          gscales: torch.Tensor, eid_s: torch.Tensor, tok_s: torch.Tensor,
+                          ordre: torch.Tensor, k: int) -> Optional[torch.Tensor]:
+    """v2 (18/09) : paires triées par expert (``eid_s``, ``tok_s``), ``ordre``
+    = place d'origine de chaque paire ; poids lus une fois pour ≤ 4 jetons."""
+    ext = get_extension()
+    if ext is None or k % 32 != 0:
+        return None
+    if x.shape[-1] != k:
+        x = torch.nn.functional.pad(x, (0, k - x.shape[-1]))
+    return ext.nvfp4_gemv_grouped_v2(qw, bscale, gscales, eid_s, tok_s, ordre, x.contiguous(), k)
 
 
 def nvfp4_gemv_grouped_table(x: torch.Tensor, table_qw: torch.Tensor,

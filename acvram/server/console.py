@@ -34,6 +34,13 @@ PAGE = """<!doctype html>
     desaturee, sinon les roses posent sur du gris neutre et paraissent sales.
     Douze nuances nommees, du presque-noir au rose pale. */
  :root{
+   /* Sans ceci, <select> et son menu deroulant sont rendus par le theme GTK
+      natif de la machine (pas par ce CSS) : sur un theme clair, la liste des
+      modeles et des cartes devient blanche sur texte clair, illisible — le
+      18/09, signale par l utilisateur. `color-scheme` demande au moteur de
+      rendre les CONTROLES DE FORMULAIRE (select, son popup, scrollbars) en
+      sombre, sans toucher au reste de la page qui a deja ses couleurs. */
+   color-scheme: dark;
    --fond:#120a10; --fond2:#180d15; --surface:#20111b; --surface2:#291624;
    --bord:#3a1f31; --bord-vif:#5c2c47;
    --rose-pale:#fce7f3; --rose-clair:#f9a8d4; --rose:#f472b6;
@@ -91,6 +98,7 @@ PAGE = """<!doctype html>
  td{padding:5px 0;border-bottom:1px solid var(--bord)}
  td:not(:first-child){text-align:right;color:var(--doux)}
  .note{color:var(--faible);font-size:12px;margin-top:10px}
+ #regime{cursor:pointer;font-family:monospace;padding:2px 20px;margin-top:0;user-select:all}
  code{background:var(--fond2);padding:1px 6px;border-radius:5px;
       border:1px solid var(--bord);color:var(--rose-clair)}
  .barre{height:7px;border-radius:99px;background:var(--fond2);overflow:hidden;
@@ -213,7 +221,11 @@ PAGE = """<!doctype html>
  .mot button{padding:3px 11px;font-size:11px;border-radius:99px}
  .mot .perm{border-color:var(--rose-nuit);color:var(--rose)}
  .mot.soi{opacity:.7}
+ .mot.intrus{background:rgba(251,113,133,.08);border-radius:8px;padding-left:8px}
+ .mot.intrus .nom{color:var(--alerte)}
  .arret{border-color:var(--alerte)!important;color:var(--alerte)!important}
+ .verrou{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:6px 0}
+ .verrou .pastille{margin-left:0}
 </style></head><body>
 <div id="fond"></div><div id="voile"></div>
 <header>
@@ -232,6 +244,7 @@ PAGE = """<!doctype html>
   </span>
   <span class="pastille" id="etat">…</span>
 </header>
+<div id="regime" class="note" style="display:none" title="cliquer pour copier"></div>
 <main>
   <div class="grille">
     <div class="carte"><div class="k" data-t="decodage">décodage</div>
@@ -248,6 +261,12 @@ PAGE = """<!doctype html>
     <h2 data-t="h_cartes">cartes graphiques</h2>
     <div id="cartes" class="cartes"></div>
     <div class="note" id="cartes_note"></div>
+  </section>
+
+  <section>
+    <h2 data-t="h_verrou">verrou de la carte</h2>
+    <div id="verrou"></div>
+    <div class="note" data-t="n_verrou">« libre » vaut « pas de verrou pose sur cette carte » — pas une lecture instantanee : un verrou peut se prendre l'instant d'apres.</div>
   </section>
 
   <section>
@@ -332,6 +351,8 @@ Donne trois usages d'un cache KV quantifié.</textarea>
 
   <section>
     <h2 data-t="h_moteur">moteur</h2>
+    <div id="tronque" class="note" style="display:none"></div>
+    <div id="energie" class="note"></div>
     <table id="details"><tbody></tbody></table>
     <div class="note">Pour brancher un client :
       <code>OPENAI_BASE_URL</code> ou <code>ANTHROPIC_BASE_URL</code> sur
@@ -375,6 +396,43 @@ async function rafraichir() {
     if (e.kv_blocks_total > 0)
       $('kvb').style.width = (100 * e.kv_blocks_free / e.kv_blocks_total) + '%';
     if (m.version) $('version').textContent = 'v' + m.version;
+
+    // Ajout n°2 (poste7-gui-ajouts-18-09) : un compteur > 0 noye dans le
+    // tableau generique ci-dessous n'a jamais ete vu — « toutes les
+    // cellules b > 8 faussees jusqu'au 17/09 sans une ligne d'erreur ».
+    // Le ratio kv_max_tokens / kv_planned_seqs donne le budget REEL par
+    // sequence planifiee, pour lire un compteur > 0 sans deviner s'il est
+    // structurel (budget sous-dimensionne) ou accidentel.
+    const tronq = $('tronque');
+    if ((e.sequences_tronquees_budget || 0) > 0) {
+      tronq.style.display = '';
+      tronq.className = 'note ko';
+      tronq.textContent = e.sequences_tronquees_budget + ' séquence(s) tronquée(s) par '
+        + 'budget KV épuisé (hors max_tokens demandé) — budget : '
+        + nb(m.kv_tokens_par_sequence_planifiee, 0) + ' jetons/séquence planifiée ('
+        + nb(m.kv_max_tokens, 0) + ' / ' + nb(m.kv_planned_seqs, 0) + ' séquences).';
+    } else {
+      tronq.style.display = 'none';
+    }
+
+    // Ajout n°3 (poste7-gui-ajouts-18-09 § 3) : J/jeton, integre cote serveur
+    // sur la fenetre glissante entre deux appels a /metrics (compteur NVML
+    // monotone, pas une moyenne de puissances) — a vide "—", jamais 0.
+    const nrj = m.energie || {};
+    const plafonds = (nrj.cartes || [])
+      .map(c => nb(c.horloge_sm, 0) + ' MHz / ' + nb(c.watts_plafond, 0) + ' W')
+      .join(', ');
+    $('energie').textContent = 'énergie : ' + nb(nrj.j_par_jeton_10s, 3)
+      + ' J/jeton (' + nb(nrj.jetons_fenetre, 0) + ' jetons / ' + nb(nrj.fenetre_s, 0) + ' s)'
+      + (plafonds ? ' — horloge SM / plafond : ' + plafonds : '');
+
+    // Ajout n°4 (poste7-gui-ajouts-18-09 § 4) : la meme ligne "[régime] ..."
+    // qu'un JSON de mesure — copiable, pour qu'un rapport puisse la coller
+    // telle quelle plutot que de retaper les variables ACVRAM_* actives.
+    if (m.regime_ligne) {
+      $('regime').style.display = '';
+      $('regime').textContent = m.regime_ligne;
+    }
 
     // Le tableau montre ce que /metrics rend, sans trier ni interpreter :
     // une console qui choisit ce qu'elle affiche cache ce qu'elle omet.
@@ -432,6 +490,43 @@ async function charger_cartes() {
   }
 }
 
+// -- verrou de la carte -----------------------------------------------------
+// « Une annonce a une minute de retard, une fenetre GUI non » (poste7-gui-
+// ajouts-18-09) : le seul incident du circuit qui coute plus qu'une seule
+// mesure (six manches le 10/09, rejoue le 14 et le 15) est celui que la
+// console peut voir avant qu'une session ne l'annonce.
+async function charger_verrou() {
+  try {
+    const r = await (await fetch('/verrou')).json();
+    const box = $('verrou');
+    box.innerHTML = '';
+    if (!(r.verrous || []).length) {
+      box.innerHTML = '<div class="verrou"><span class="pastille ok">libre</span></div>';
+      return;
+    }
+    for (const v of r.verrous) {
+      const el = document.createElement('div');
+      el.className = 'verrou';
+      if (v.tenu) {
+        const duree = v.depuis_secondes > 3600
+          ? Math.floor(v.depuis_secondes / 3600) + ' h'
+          : Math.floor(v.depuis_secondes / 60) + ' min ' + (v.depuis_secondes % 60) + ' s';
+        el.innerHTML =
+          '<span class="pastille">carte ' + (v.carte ?? '?') + '</span>'
+          + '<span class="ch">' + v.nom + ' (' + v.type + ')</span>'
+          + '<span class="ch">pid ' + v.pid + '</span>'
+          + '<span class="ch">depuis ' + duree + '</span>';
+      } else {
+        el.innerHTML =
+          '<span class="pastille ok">carte ' + (v.carte ?? '?') + ' libre</span>';
+      }
+      box.appendChild(el);
+    }
+  } catch (e) {
+    $('verrou').innerHTML = '<div class="note">verrou indisponible : ' + e.message + '</div>';
+  }
+}
+
 // -- moteurs voisins ------------------------------------------------------
 // Une machine de mesure porte souvent plusieurs serveurs d inference. Un
 // voisin qui calcule pendant qu on mesure FABRIQUE le resultat — c est arrive
@@ -447,7 +542,10 @@ async function charger_moteurs() {
     box.innerHTML = '';
     for (const m of r.moteurs || []) {
       const el = document.createElement('div');
-      el.className = 'mot' + (m.moi ? ' soi' : '');
+      // « intrus » = ni port permanent ni verrou de sa carte (legitime,
+      // calcule cote serveur) — un rouge que la console ne trie ni ne juge,
+      // elle affiche le champ tel que /moteurs le rend.
+      el.className = 'mot' + (m.moi ? ' soi' : '') + (!m.moi && !m.legitime ? ' intrus' : '');
       const duree = m.secondes === null ? ''
         : (m.secondes > 3600 ? Math.floor(m.secondes / 3600) + ' h'
            : Math.floor(m.secondes / 60) + ' min');
@@ -867,6 +965,7 @@ document.addEventListener('keydown', ev => {
 const T = {
  fr:{h_parc:'choisir un modèle par carte',l_carte:'carte',l_modele:'modèle compatible',b_copier:'Copier la commande',decodage:'décodage',prefill:'prefill',encours:'en cours / en file',
   kvlibre:'cache KV libre',h_cartes:'cartes graphiques',
+  h_verrou:'verrou de la carte',n_verrou:'« libre » vaut « pas de verrou posé sur cette carte » — pas une lecture instantanée : un verrou peut se prendre l\\'instant d\\'après.',
   h_moteurs:'moteurs sur les cartes',h_capteurs:'capteurs et températures',f_temp:'températures',f_fan:'ventilateurs',f_in:'tensions',f_power:'puissances',f_curr:'courants',h_repart:'répartition du travail',
   h_taches:'tâches',h_regl:'explications & réglages',h_moteur:'moteur',
   b_distribuer:'Distribuer',b_vider:'Vider',b_enreg:'Enregistrer',
@@ -882,6 +981,7 @@ const T = {
   e_amb:'<b>Ambiances</b> — touches <code>Z</code> et <code>C</code>, <code>G</code> pour la galerie. Les images sont servies, jamais copiées.'},
  en:{h_parc:'pick a model per card',l_carte:'card',l_modele:'compatible model',b_copier:'Copy the command',decodage:'decode',prefill:'prefill',encours:'running / queued',
   kvlibre:'free KV cache',h_cartes:'graphics cards',
+  h_verrou:'card lock',n_verrou:'"free" means "no lock set on this card" — not an instantaneous read: a lock can be taken the moment after.',
   h_moteurs:'engines on the cards',h_capteurs:'sensors and temperatures',f_temp:'temperatures',f_fan:'fans',f_in:'voltages',f_power:'power',f_curr:'currents',h_repart:'work placement',
   h_taches:'tasks',h_regl:'explanations & settings',h_moteur:'engine',
   b_distribuer:'Dispatch',b_vider:'Clear',b_enreg:'Save',
@@ -897,6 +997,7 @@ const T = {
   e_amb:'<b>Backdrops</b> — keys <code>Z</code> and <code>C</code>, <code>G</code> for the gallery. Images are served, never copied.'},
  de:{h_parc:'Modell je Karte wählen',l_carte:'Karte',l_modele:'kompatibles Modell',b_copier:'Befehl kopieren',decodage:'Dekodierung',prefill:'Prefill',encours:'laufend / wartend',
   kvlibre:'freier KV-Cache',h_cartes:'Grafikkarten',
+  h_verrou:'Kartensperre',n_verrou:'„frei" bedeutet „keine Sperre auf dieser Karte" — keine Momentaufnahme: eine Sperre kann im nächsten Moment gesetzt werden.',
   h_moteurs:'Engines auf den Karten',h_capteurs:'Sensoren und Temperaturen',f_temp:'Temperaturen',f_fan:'Lüfter',f_in:'Spannungen',f_power:'Leistung',f_curr:'Ströme',h_repart:'Arbeitsverteilung',
   h_taches:'Aufgaben',h_regl:'Erklärungen & Einstellungen',h_moteur:'Engine',
   b_distribuer:'Verteilen',b_vider:'Leeren',b_enreg:'Speichern',
@@ -912,6 +1013,7 @@ const T = {
   e_amb:'<b>Hintergründe</b> — Tasten <code>Z</code> und <code>C</code>, <code>G</code> für die Galerie. Bilder werden ausgeliefert, nie kopiert.'},
  es:{h_parc:'elegir un modelo por tarjeta',l_carte:'tarjeta',l_modele:'modelo compatible',b_copier:'Copiar el comando',decodage:'decodificación',prefill:'prefill',encours:'en curso / en cola',
   kvlibre:'caché KV libre',h_cartes:'tarjetas gráficas',
+  h_verrou:'bloqueo de la tarjeta',n_verrou:'«libre» significa «sin bloqueo en esta tarjeta» — no es una lectura instantánea: un bloqueo puede tomarse al instante siguiente.',
   h_moteurs:'motores en las tarjetas',h_capteurs:'sensores y temperaturas',f_temp:'temperaturas',f_fan:'ventiladores',f_in:'tensiones',f_power:'potencias',f_curr:'corrientes',h_repart:'reparto del trabajo',
   h_taches:'tareas',h_regl:'explicaciones y ajustes',h_moteur:'motor',
   b_distribuer:'Distribuir',b_vider:'Vaciar',b_enreg:'Guardar',
@@ -927,6 +1029,7 @@ const T = {
   e_amb:'<b>Ambientes</b> — teclas <code>Z</code> y <code>C</code>, <code>G</code> para la galería. Las imágenes se sirven, nunca se copian.'},
  eo:{h_parc:'elekti modelon laŭ karto',l_carte:'karto',l_modele:'kongrua modelo',b_copier:'Kopii la komandon',decodage:'malkodado',prefill:'antaŭplenigo',encours:'kurantaj / atendantaj',
   kvlibre:'libera KV-kaŝmemoro',h_cartes:'grafikaj kartoj',
+  h_verrou:'ŝloso de la karto',n_verrou:'"libera" signifas "neniu ŝloso sur ĉi tiu karto" — ne tuja legado: ŝloso povas esti prenita la sekvan momenton.',
   h_moteurs:'motoroj sur la kartoj',h_capteurs:'sensiloj kaj temperaturoj',f_temp:'temperaturoj',f_fan:'ventoliloj',f_in:'tensioj',f_power:'potencoj',f_curr:'kurentoj',h_repart:'disdivido de la laboro',
   h_taches:'taskoj',h_regl:'klarigoj kaj agordoj',h_moteur:'motoro',
   b_distribuer:'Disdoni',b_vider:'Malplenigi',b_enreg:'Konservi',
@@ -955,7 +1058,7 @@ function traduire(code) {
   try { localStorage.setItem('acvram_langue', LANG); } catch (e) {}
   // Les listes deja peintes portent des libelles traduits : on les repeint,
   // sinon la moitie de la page change de langue et l autre non.
-  charger_cartes(); charger_moteurs(); charger_repartition(); remplir_modeles();
+  charger_cartes(); charger_verrou(); charger_moteurs(); charger_repartition(); remplir_modeles();
 }
 
 $('langue').onchange = e => traduire(e.target.value);
@@ -1054,9 +1157,16 @@ charger_capteurs();
 setInterval(charger_capteurs, 2000);
 
 charger_cartes();
+charger_verrou();
 charger_moteurs();
 setInterval(charger_cartes, 2000);
+// « affiche < 5 s » (poste7-gui-ajouts-18-09) : un verrou pris par un temoin
+// doit apparaitre vite, plus vite que le rythme des moteurs (3 s).
+setInterval(charger_verrou, 2000);
 setInterval(() => { if (a_confirmer === null) charger_moteurs(); }, 3000);
+$('regime').addEventListener('click', () => {
+  navigator.clipboard?.writeText($('regime').textContent).catch(() => {});
+});
 init_ambiances();
 charger_modele();
 charger_repartition();

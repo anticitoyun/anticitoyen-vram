@@ -1,18 +1,17 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """acvram-gui — la console acvram dans une fenêtre native, sans navigateur.
 
 POURQUOI UNE FENÊTRE NATIVE ET NON UN ONGLET. La console web dépend d'un
-navigateur ouvert, de ses onglets, de son bloqueur de fenêtres (la galerie a
-été bloquée en silence par Chromium le 10/09). Une fenêtre à soi n'a aucun de
-ces problèmes, apparaît dans le menu et la barre des tâches sous son nom, et se
-ferme avec la machine.
+navigateur ouvert, de ses onglets, de son bloqueur de fenêtres. Une fenêtre à
+soi n'a aucun de ces problèmes, apparaît dans le menu et la barre des tâches
+sous son nom, et se ferme avec la machine.
 
 POURQUOI WEBKIT ET NON DES WIDGETS GTK. La console est du HTML/CSS/JS et
 change souvent ; la refaire en widgets doublerait chaque évolution. WebKit rend
 exactement la même page, dans le même thème rose, avec zéro divergence. La
 fenêtre apporte ce que la page ne peut pas : démarrer et arrêter le serveur,
-choisir le modèle, plein écran, zoom, une seconde fenêtre pour la galerie, et
-une barre d'état qui lit les capteurs même quand la page ne le fait pas.
+choisir le modèle, plein écran, zoom, et une barre d'état qui lit les
+capteurs même quand la page ne le fait pas.
 
 CE QU'IL FAIT AU DÉMARRAGE. Il cherche un serveur acvram déjà en marche (le
 champ `acvram` de /v1/models — /health ne suffit pas, llama-server le porte
@@ -48,7 +47,12 @@ PORT_DEFAUT = int(os.environ.get("ACVRAM_PORT", "8765"))
 # Le thème de la page, repris pour les écrans natifs (accueil, erreurs) afin
 # que rien ne détonne : mêmes nuances, même police.
 CSS = """
-:root{--fond:#120a10;--carte:#1c1018;--bord:#3b1f30;--texte:#fbe4ee;--texte-2:#c98fae;
+:root{
+/* color-scheme demande au theme GTK de rendre le popup <select> en sombre :
+   sans ca, le menu deroulant des modeles/cartes est blanc sur texte clair,
+   illisible sur un theme systeme clair (18/09, signale par l utilisateur). */
+color-scheme:dark;
+--fond:#120a10;--carte:#1c1018;--bord:#3b1f30;--texte:#fbe4ee;--texte-2:#c98fae;
 --rose-clair:#f9a8d4;--rose-vif:#ec4899;--rose-nuit:#9d174d;--alerte:#fb7185}
 body{margin:0;background:var(--fond);color:var(--texte);font:14px/1.5 system-ui,sans-serif;padding:28px}
 h1{font-size:22px;color:var(--rose-clair);margin:0 0 6px}
@@ -133,12 +137,23 @@ Choisissez un modèle et une carte : la console s'ouvrira dès que le serveur r�
   <p class="note">Le serveur est un sous-processus de cette fenêtre : la fermer l'arrête.
   Il tourne sous <code>outils/carte.sh</code> quand il est disponible, avec le verrou de la carte choisie.</p>
 </div>
+<div class="carte">
+  <h2>modèle déjà en mémoire</h2>
+  <p class="note">Un serveur acvram tourne déjà (lancé par une autre session, un autre port) ?
+  Cette fenêtre ne cherche que les ports {" ".join(map(str, PORTS))} au démarrage — donnez le port exact.</p>
+  <label>port <input type="number" id="port_existant" value="{PORT_DEFAUT}" min="1" max="65535" style="width:90px"></label>
+  <p><button onclick="connecter()">se connecter</button></p>
+</div>
 <script>
 function lancer(){{
   const m=document.getElementById('modele').value, c=document.getElementById('carte').value;
   window.webkit.messageHandlers.acvram.postMessage(JSON.stringify({{
     action:'lancer', modele:m, carte:c, graphes:document.getElementById('graphes').checked,
     slots:document.getElementById('slots').value, ctx:document.getElementById('ctx').value}}));
+}}
+function connecter(){{
+  const p=document.getElementById('port_existant').value;
+  window.webkit.messageHandlers.acvram.postMessage(JSON.stringify({{action:'connecter', port:p}}));
 }}
 </script></body></html>"""
 
@@ -158,7 +173,6 @@ class Fenetre(Gtk.Window):
         self.set_icon_name("acvram")
         self.proc: subprocess.Popen | None = None
         self.port: int | None = None
-        self.galerie: Gtk.Window | None = None
 
         boite = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.add(boite)
@@ -170,7 +184,6 @@ class Fenetre(Gtk.Window):
                              ("view-fullscreen", "plein écran (F11)", self.plein_ecran),
                              ("zoom-in", "zoom + (Ctrl +)", lambda *_: self.zoom(0.1)),
                              ("zoom-out", "zoom − (Ctrl −)", lambda *_: self.zoom(-0.1)),
-                             ("image-x-generic", "galerie dans une fenêtre (G)", self.ouvrir_galerie),
                              ("process-stop", "arrêter le serveur lancé ici", self.arreter_serveur)):
             b = Gtk.Button.new_from_icon_name(ico, Gtk.IconSize.BUTTON)
             b.set_tooltip_text(tip)
@@ -181,10 +194,21 @@ class Fenetre(Gtk.Window):
         reglages = self.web.get_settings()
         reglages.set_enable_developer_extras(True)
         reglages.set_enable_javascript(True)
+        # Sans ce reglage, une ouverture non declenchee par un geste utilisateur
+        # DIRECT (verifie a sec : un clic simule via JS compte comme tel) est
+        # refusee silencieusement — un vrai clic humain sur "galerie" passe
+        # sans lui, mais le laisser off est un risque non mesure pour rien.
+        reglages.set_javascript_can_open_windows_automatically(True)
         # Le pont page → Python : la page d'accueil envoie « lancer ».
         gest = self.web.get_user_content_manager()
         gest.register_script_message_handler("acvram")
         gest.connect("script-message-received::acvram", self.message_page)
+        # target="_blank" (le lien « galerie » de la console servie) ne fait
+        # rien dans une WebView embarquee sans ce gestionnaire : WebKitGTK ne
+        # cree pas de fenetre tout seul pour une navigation « nouvelle vue »,
+        # il emet juste ce signal et attend qu'on lui en fournisse une
+        # (18/09, signale par l'utilisateur : « galerie ne fait plus rien »).
+        self.web.connect("create", self.nouvelle_fenetre)
         boite.pack_start(self.web, True, True, 0)
 
         self.etat = Gtk.Label(xalign=0)
@@ -219,19 +243,15 @@ class Fenetre(Gtk.Window):
     def zoom(self, d: float):
         self.web.set_zoom_level(max(0.5, min(3.0, self.web.get_zoom_level() + d)))
 
-    def ouvrir_galerie(self, *_):
-        if not self.port:
-            return
-        if self.galerie is None:
-            self.galerie = Gtk.Window(title="acvram — galerie")
-            self.galerie.set_default_size(1100, 800)
-            w = WebKit2.WebView()
-            self.galerie.add(w)
-            self.galerie.connect("destroy", lambda *_: setattr(self, "galerie", None))
-            w.load_uri(f"http://127.0.0.1:{self.port}/galerie")
-            self.galerie.show_all()
-        else:
-            self.galerie.present()
+    def nouvelle_fenetre(self, web_view, _navigation_action):
+        """Fournit la fenetre qu'une navigation target="_blank" (ou
+        window.open) demande — sans ca WebKitGTK n'ouvre rien du tout."""
+        nouvelle = WebKit2.WebView.new_with_related_view(web_view)
+        fenetre = Gtk.Window(title="acvram")
+        fenetre.set_default_size(1100, 800)
+        fenetre.add(nouvelle)
+        nouvelle.connect("ready-to-show", lambda w: fenetre.show_all())
+        return nouvelle
 
     def touche(self, _w, ev):
         from gi.repository import Gdk
@@ -243,7 +263,6 @@ class Fenetre(Gtk.Window):
         elif ctrl and k in ("minus", "KP_Subtract"): self.zoom(-0.1)
         elif ctrl and k == "0": self.web.set_zoom_level(1.0)
         elif ctrl and k == "q": self.close()
-        elif k in ("g", "G") and not ctrl: self.ouvrir_galerie()
         else: return False
         return True
 
@@ -255,6 +274,21 @@ class Fenetre(Gtk.Window):
             return
         if d.get("action") == "lancer":
             self.lancer_serveur(d)
+        elif d.get("action") == "connecter":
+            self.connecter_existant(d)
+
+    def connecter_existant(self, d: dict):
+        try:
+            port = int(d["port"])
+        except (KeyError, ValueError):
+            self.web.load_html(page_accueil("port invalide."), "file:///")
+            return
+        if serveur_acvram(port):
+            self.ouvrir(port)
+        else:
+            self.web.load_html(page_accueil(
+                f"aucun serveur acvram ne répond sur le port {port} "
+                f"(vérifié : /v1/models doit porter le champ « acvram »)."), "file:///")
 
     def lancer_serveur(self, d: dict):
         modele = d["modele"]
@@ -348,15 +382,8 @@ class Fenetre(Gtk.Window):
 
 
 def main():
-    # Un seul acvram-gui à la fois n'est pas exigé — deux fenêtres sur le même
-    # serveur sont un usage légitime (console + galerie sur deux écrans).
     f = Fenetre()
     f.show_all()
-    if "--galerie" in sys.argv[1:]:          # action du menu : la galerie seule
-        if f.port:
-            f.ouvrir_galerie()
-        # sans serveur, la fenêtre principale reste sur l'accueil : on ne peut
-        # pas montrer une galerie que personne ne sert.
     signal.signal(signal.SIGINT, lambda *_: Gtk.main_quit())
     Gtk.main()
 

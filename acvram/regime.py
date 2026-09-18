@@ -51,6 +51,10 @@ VARIABLES: tuple[Variable, ...] = (
              "attention paginée du décodage : triton (poste E, K/V lus une fois par groupe GQA, défaut depuis poste7-e-c-verdict-17-09) | cuda (ancien défaut, témoin)"),
     # --- projections NVFP4 non groupées --------------------------------
     Variable("PREFILL", "bf16", None, "bf16", "bf16 | w4a16 (B1 Triton, NVFP4 dans la tuile) | w8a8 | w4a4 au-delà de NVFP4_GEMV_MAX lignes"),
+    Variable("PREFILL_INT8", "bf16", ("acvram.kernels", "_PREFILL_INT8"), "bf16",
+             "linéaires INT8 au préfill : bf16 (déquant entière + cutlass) | a8 (P0 : activation int8 par jeton, tensor cores int8, sans déquant ; poste7-profil-verdict-18-09)"),
+    Variable("COLLE_MOE", "torch", ("acvram.engine.model", "_COLLE_MOE"), "torch",
+             "colle du préfill MoE : torch (argsort + bincount + _tuiles) | triton (P0 : tri + histogramme et grille en deux lancements, mêmes tenseurs)"),
     Variable("NVFP4_GEMV_MAX", "32", ("acvram.kernels", "_NVFP4_GEMV_MAX")),
     Variable("INT8_GEMV_MAX", "80", ("acvram.kernels", "_INT8_GEMV_MAX")),
     Variable("NARROW_GEMM", "0", ("acvram.kernels", "_NARROW_GEMM"), "0"),
@@ -58,12 +62,28 @@ VARIABLES: tuple[Variable, ...] = (
              "linéaires INT8 à b ≤ 16 : mixte (défaut, Triton dès b≥NARROW_TRITON_MIN_B, verdict-coder-c-mixte-17-09) | cuda | triton | tete"),
     Variable("NARROW_TRITON_MIN_B", "2", ("acvram.kernels", "_NARROW_TRITON_MIN_B")),
     Variable("NARROW_NVFP4", "0", ("acvram.kernels", "_NARROW_NVFP4"), "0"),
+    Variable("DENSE_NVFP4", "triton", ("acvram.kernels", "_DENSE_NVFP4"), "gemv",
+             "linéaires NVFP4 denses (et tête) à DENSE_NVFP4_MIN_M ≤ b ≤ 32 : triton (gemm_dense_etroit, poids lus une fois par pas, défaut depuis verdict-gemm-dense-palier1-situ-17-09) | gemv (témoin, poids relus par séquence)"),
+    Variable("DENSE_NVFP4_MIN_M", "4", ("acvram.kernels", "_DENSE_NVFP4_MIN_M")),
+    # lues dans acvram_kernels.cu (getenv, figées au premier lancement : un
+    # PROCESSUS par valeur — poste7-gemv-experts-rpw-18-09)
+    Variable("GROUPED_RPW", "4", None, None,
+             "GEMV groupée des experts : lignes par warp (4 défaut depuis poste7-rpw-defaut-18-09, Coder b=12 1 262 t/s nu ; 1 | 2 témoins) ; l'activation est étagée une fois par bloc de GW_WARPS×RPW lignes"),
+    Variable("GROUPED_OLD", "", None, "1", "témoin : l'ancien noyau groupé à 4 lignes par bloc"),
+    Variable("GROUPED_XREG", "down", None, "0",
+             "GEMV groupée des experts, K ≤ 2048 : down (défaut depuis verdict-gemv-experts-xreg-down-18-09 : ABAB × 0,944 nu, Coder b=12 1 307 t/s) = x en registres par tranche sur la projection down seule | 1 = gate/up aussi (témoin réfuté : 96 registres, 2 blocs/SM, +19 %) | 0 = x relu en shared (témoin) ; sortie identique au bit dans tous les cas"),
+    Variable("MOE_GEMV", "v1", ("acvram.engine.model", "_MOE_GEMV"), "v1",
+             "GEMV groupée du décodage MoE : v1 (une passe de poids par paire expert-jeton) | v2 (paires triées par expert, poids lus une fois pour ≤ 4 jetons, sortie identique au bit)"),
+    Variable("MULTI_PROJ", "0", ("acvram.engine.model", "_MULTI_PROJ"), "0",
+             "témoin (palier 2 non ouvert, 0,88 To/s) : q/k/v et qkv/gate/α/β du GDN en un lancement, chacune avec son scaler"),
     Variable("NARROW_MIN_M", "2", ("acvram.kernels", "_NARROW_MIN")),
     Variable("NARROW_ROWS", "32", ("acvram.kernels", "_NARROW_ROWS")),
     Variable("NARROW_MLA", "1", None, "0"),
     Variable("SEUIL_FUSION", "256", ("acvram.engine.model", "SEUIL_FUSION")),
     Variable("PREFILL_GROUPED", "groupe", ("acvram.engine.model", "_PREFILL_GROUPED"), "groupe",
              "GEMM groupée du prefill MoE : groupe (B0 Triton bf16 persistant, défaut depuis poste7-b0-et-cause-lm4-17-09) | w4a16 (B1, NVFP4 lu dans la tuile, opt-in jusqu'au scellé) | grouped_mm (torch, ancien défaut, témoin) | bmm par seaux (réfuté 0edc3b9)"),
+    Variable("PREFILL_A4", "off", ("acvram.engine.model", "_PREFILL_A4"), None,
+             "porte qualité W4A4 du prefill MoE : fausse quantification NVFP4 des activations en torch — off | gateup (entrée de gate/up) | both (+ entrée de down) ; poste7-lecture-profils-coder-17-09"),
     Variable("SANS_FUSION", "", None, "1"),
     Variable("SANS_FUSION_BF16", "", None, "1"),
     Variable("TETE_LIEE", "int8", ("acvram.engine.loader", "_TETE_LIEE")),
@@ -108,7 +128,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MLA_EAGER_TORCH", "", None, "1"),
     Variable("MLA_DEBUG_ECART", "", None),
     Variable("HYBRID_KERNELS", "1", None, "0", "KDA / GDN : noyaux hybrides ou torch"),
-    Variable("GDN", "1", None, "0"),
+    Variable("GDN", "fla", ("acvram.engine.gdn", "_GDN_VOIE"), "torch",
+             "Gated DeltaNet : fla (noyaux Triton de flash-linear-attention, prefill par blocs et décodage du lot en un lancement) | torch (référence transformers, séquence par séquence) ; 0 = refus des hybrides"),
     # --- autres chemins de calcul ----------------------------------------
     Variable("FUSION_NVFP4", "1", None, "0", "témoin de mesure : fusion gate/up NVFP4"),
     Variable("FUSION_PARTIELLE", "0", None, "0"),
@@ -126,16 +147,28 @@ HORS_REGIME = frozenset({
     "ACVRAM_TRACE_ROUTAGE", "ACVRAM_TRACE_STEPS", "ACVRAM_TRACE_COUCHES", "ACVRAM_CHRONO_SYNC", "ACVRAM_SYNC_COUCHES",
     "ACVRAM_WARM_GRAPHS", "ACVRAM_WARM_SPEC", "ACVRAM_PLAN_FIGE", "ACVRAM_SANS_REPLAN",
     "ACVRAM_SANS_PRECHARGE", "ACVRAM_POOL_SYNC", "ACVRAM_PIPELINE", "ACVRAM_PREFILL_BATCH",
-    "ACVRAM_SPECULATION_LOT_MAX", "ACVRAM_MTP", "ACVRAM_HYBRID_SLOTS", "ACVRAM_DENSE_SLOTS", "ACVRAM_DEQUANT_TRANCHE_MAX", "ACVRAM_INSTA_PAS",
+    "ACVRAM_SPECULATION_LOT_MAX", "ACVRAM_MTP", "ACVRAM_HYBRID_SLOTS", "ACVRAM_DENSE_SLOTS", "ACVRAM_DEQUANT_TRANCHE_MAX",
+    "ACVRAM_DENSE_ETROIT_BN", "ACVRAM_DENSE_ETROIT_BK", "ACVRAM_DENSE_ETROIT_WARPS", "ACVRAM_DENSE_ETROIT_STAGES", "ACVRAM_INSTA_PAS",
     "ACVRAM_GRAPHES_TABLE", "ACVRAM_MLP_HOTE_CPU", "ACVRAM_KDA_CHUNK", "ACVRAM_MAMBA_CHUNK",
     # compilation, placement, parc, mémoire : pas des chemins de calcul
     "ACVRAM_ALLOC_EXTENSIBLE", "ACVRAM_ARCH_FAMILY", "ACVRAM_CUDA_HOME", "ACVRAM_GW_WARPS",
     "ACVRAM_KERNEL_CACHE", "ACVRAM_BANC_ACCEPTE_REPLAN", "ACVRAM_BUDGET_JETONS",
     "ACVRAM_EXIL_COUCHES", "ACVRAM_EXIL_EXPERTS_FRACTION", "ACVRAM_SEUIL_EXIL", "ACVRAM_REPIN",
     "ACVRAM_FOND_COOL", "ACVRAM_FOND_ZEN", "ACVRAM_GALERIE_DIR", "ACVRAM_MODELES", "ACVRAM_PARC",
+    "ACVRAM_VERROU_GLOB",   # test seul (ajout GUI n°1) : chemin du glob, pas un chemin de calcul
     "ACVRAM_LISTE_CLE", "ACVRAM_LISTE_PROMUS", "ACVRAM_MAX_PROMUS", "ACVRAM_ORDRE_SAC",
     "ACVRAM_ORDRE_SAC_INVERSE", "ACVRAM_GRAPHES_MUETS", "ACVRAM_MAX_GRAPHS", "ACVRAM_INSTA_MAX",
     "ACVRAM_REGIME_MUET",
+    # garde-fou d'admission, pas un chemin de calcul (poste7-reprise-ordre-18-09
+    # §Suite) : Engine.__init__ refuse max_batch_size > plan.kv_planned_seqs,
+    # ce flag force le lancement en connaissance de cause. Visible dans
+    # regime_ligne() par kv_plan_override=1 quand posé, pas ici.
+    "ACVRAM_KV_PLAN_OVERRIDE",
+    # lues dans acvram_kernels.cu (getenv) : témoins A/B et réglages d'instrument,
+    # jamais mesurés comme défaut — à monter dans VARIABLES le jour où l'un l'est
+    "ACVRAM_INT8_GEMV_WARP", "ACVRAM_INT8_TRANCHE", "ACVRAM_PA_CHUNK", "ACVRAM_PA_ETAPE",
+    "ACVRAM_PAGED_ALLOC", "ACVRAM_PA_SANS_COMPTEUR",
+    "ACVRAM_MARLIN_CACHE",       # dossier de compilation du port Marlin (P1), pas un chemin de calcul
 })
 
 
@@ -178,11 +211,38 @@ def regime_ligne() -> str:
     puis extension et masques. « défaut » seul veut dire : tout au défaut."""
     r = regime_noyaux()
     parts = [f"{k}={v if v else repr('')}" for k, v in r["hors_defaut"].items()] or ["défaut"]
+    # la voie GDN est toujours nommée, défaut compris : c'est elle qui sépare
+    # 97 de 621 j/s sur Qwen3.8 (poste7, 17/09), et « fla » demandé ne vaut
+    # rien si fla est absent ou la carte aussi — la voie EFFECTIVE est écrite
+    try:
+        from .engine.gdn import gdn_regime
+        parts.append("ACVRAM_GDN=" + gdn_regime())
+    except Exception as exc:                                 # noqa: BLE001
+        parts.append(f"ACVRAM_GDN=?({type(exc).__name__})")
     parts.append("extension=" + ("oui" if r["extension"] else f"non({r['extension_raison']})"))
     if r["backends_masques"]:
         parts.append("backends_masques=" + ",".join(r["backends_masques"]))
     if r["noyaux_masques"]:
         parts.append("noyaux_masques=" + ",".join(r["noyaux_masques"]))
+    # Un pip install dans le venv de mesure change l'arithmétique sans qu'aucun
+    # défaut ACVRAM_* ne bouge (poste7-glm-etendue-canal-saillant-18-09 § 5) : un
+    # JSON sans ces versions ne distingue pas un noyau Triton d'une autre
+    # version. torch toujours présent ; triton et fla optionnels.
+    try:
+        import torch
+        parts.append("torch=" + torch.__version__)
+    except Exception as exc:                                  # noqa: BLE001
+        parts.append(f"torch=?({type(exc).__name__})")
+    try:
+        import triton
+        parts.append("triton=" + triton.__version__)
+    except Exception:
+        parts.append("triton=absent")
+    try:
+        import fla
+        parts.append("fla=" + getattr(fla, "__version__", "?"))
+    except Exception:
+        parts.append("fla=absent")
     return "[régime] " + " ".join(parts)
 
 

@@ -33,6 +33,10 @@ def test_l_estimation_donne_l_ordre_de_grandeur_du_70b_et_croit_avec_la_longueur
     assert s.activations_prefill_bytes(1) >= 28672 * 8192 * 2, "la déquant bf16 de la plus grosse projection y est"
     assert _reserve_prefill(s, 2048, {}) == a2k and _reserve_prefill(None, 2048, {}) == 0
     assert _reserve_prefill(s, None, {"plan": {"kv_max_tokens": 8192}}) == a8k
+    # la capacité KV planifiée n'est pas une longueur d'invite (Qwen3.8 : 56 401
+    # jetons → 13 Gio réservés, 19/64 couches exilées pour rien)
+    assert _reserve_prefill(s, None, {"plan": {"kv_max_tokens": 56401}}) == a8k
+    assert _reserve_prefill(s, 4096, {"plan": {"kv_max_tokens": 56401}}) == s.activations_prefill_bytes(4096)
 
 
 def _plan(n_couches: int, mlp_gib: float, attn_gib: float, capacite: int) -> Plan:

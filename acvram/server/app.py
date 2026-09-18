@@ -11,6 +11,7 @@ en flux de partager un seul pipeline réparti sur deux GPU et la mémoire vive.
 from __future__ import annotations
 
 import asyncio
+import glob
 import os
 import json
 import re
@@ -27,6 +28,8 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                StreamingResponse)
 
 from .. import __version__
+from .. import regime_ligne as _regime_ligne
+from . import capteurs as _capteurs
 from .console import GALERIE, PAGE
 from ..engine.runner import Engine, GenerationOutput
 from ..engine.sampler import SamplingParams
@@ -179,6 +182,7 @@ def _params_from(req: Any, default_max: int) -> SamplingParams:
         stop=req.stop_list(),
         seed=req.seed,
         n=req.n,
+        ignore_eos=req.ignore_eos,
     )
 
 
@@ -191,14 +195,17 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                        allow_headers=["*"])
     app.state.service = service
     app.state.info = served_paths or {}
+    app.state.anneau_energie = _capteurs.AnneauEnergie()   # ajout n°3, corrigé le 18/09
 
     @app.on_event("startup")
     async def _startup() -> None:
         service.start(asyncio.get_running_loop())
+        app.state.anneau_energie.start(lambda: engine.stats.decode_tokens)
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
         service.stop()
+        app.state.anneau_energie.stop()
 
     # -- console ----------------------------------------------------------
     # Le paquet s'installait sans rien de visible : ni entree de menu, ni
@@ -460,6 +467,59 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                     par_pid.setdefault(int(m_pid.group(1)), set()).add(int(m_port.group(1)))
         return par_pid
 
+    # poste7, 18/09 (poste7-gui-ajouts-18-09 § 2, ajout n°1) : le verrou
+    # outils/carte.sh est la seule verite sur l'etat du GPU (REGLES § 2),
+    # mais rien avant cette route ne le rendait visible dans la console —
+    # « une annonce a une minute de retard, une fenetre GUI non ». Six
+    # manches perdues le 10/09, deux incidents rejoues le 14 et le 15 sur ce
+    # meme defaut d'observabilite.
+    def _verrous() -> list:
+        """Un verrou par fichier `/tmp/acvram-carte-*.lock` trouve — le nom
+        de fichier PORTE l'index de carte (carte.sh:41), donc pas besoin de
+        connaitre les cartes a l'avance pour lister les verrous poses.
+        Motif substituable (ACVRAM_VERROU_GLOB) : les tests ne doivent pas
+        lire /tmp/acvram-carte-*.lock, partage par tout le circuit en
+        service."""
+        motif = os.environ.get("ACVRAM_VERROU_GLOB", "/tmp/acvram-carte-*.lock")
+        out = []
+        for verrou in sorted(glob.glob(motif)):
+            m = re.search(r"acvram-carte-(\d+)\.lock$", verrou)
+            carte = int(m.group(1)) if m else None
+            info = verrou + ".qui"
+            pid = nom = type_ = None
+            depuis = None
+            vivant = False
+            try:
+                champs = Path(info).read_text().split(None, 3)
+                pid = int(champs[0])
+                pris_a = int(champs[1])
+                nom = champs[2] if len(champs) > 2 else "?"
+                type_ = champs[3].strip() if len(champs) > 3 else "?"
+                depuis = max(0, int(time.time() - pris_a))
+                vivant = _pid_vivant(pid)
+            except Exception:                                # noqa: BLE001
+                pass                                          # .qui absent/perime : verrou sans detenteur lisible
+            out.append({
+                "carte": carte, "pid": pid if vivant else None,
+                "nom": nom if vivant else None, "type": type_ if vivant else None,
+                "depuis_secondes": depuis if vivant else None,
+                "tenu": vivant,
+            })
+        return out
+
+    def _pid_vivant(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # le PID existe mais appartient a un autre utilisateur — vivant
+            # quand meme, kill(0) ne l'a pas dit "mort".
+            return True
+        except Exception:                                    # noqa: BLE001
+            return False
+
     def _moteurs_gpu() -> list:
         try:
             sortie = subprocess.run(
@@ -480,6 +540,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             pass
         ports = _ports_par_pid()
         moi = os.getpid()
+        pids_verrous = {v["pid"] for v in _verrous() if v["tenu"]}
         out = []
         for ligne in sortie.splitlines():
             c = [x.strip() for x in ligne.split(",")]
@@ -496,15 +557,25 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             nom = next((n for n, motifs in _SIGNATURES
                         if any(m.lower() in bas for m in motifs)), "inconnu")
             p = sorted(ports.get(pid, ()))
+            permanent = any(x in _PORTS_PERMANENTS for x in p)
             out.append({
                 "pid": pid, "mio": float(c[1]),
                 "carte": index_par_uuid.get(c[2] if len(c) > 2 else "", None),
                 "moteur": nom, "commande": cmd[:220], "ports": p,
-                "permanent": any(x in _PORTS_PERMANENTS for x in p),
+                "permanent": permanent,
+                # LEGITIME = service permanent OU detenteur du verrou de la
+                # carte ou'il tourne (poste7-gui-ajouts-18-09 § 2, n°1) — calcule
+                # ici, pas dans la console (REGLES : la console montre ce que
+                # le serveur rend, jamais un tri/calcul en JS).
+                "legitime": permanent or pid in pids_verrous,
                 "moi": pid == moi,
                 "secondes": max(0, int(time.time() - debut)) if debut else None,
             })
         return out
+
+    @app.get("/verrou", include_in_schema=False)
+    async def verrou() -> dict:
+        return {"verrous": _verrous()}
 
     @app.get("/moteurs", include_in_schema=False)
     async def moteurs() -> dict:
@@ -755,12 +826,54 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             "avertissements": list(plan.warnings),
         }
 
+    def _energie_par_jeton() -> dict:
+        """J/jeton en direct (ajout GUI n°3, poste7-gui-ajouts-18-09 § 3),
+        corrigé le 18/09 (poste7-metrics-energie-fenetre-18-09) : lu depuis
+        `app.state.anneau_energie`, un anneau d'échantillons alimenté par
+        un fil de fond — jamais consommé ici, pour que deux lecteurs
+        concurrents de `/metrics` rendent la MÊME valeur sur la même
+        fenêtre (l'ancienne version, qui consommait son propre échantillon
+        précédent à chaque appel, les faisait diverger)."""
+        cartes = _capteurs.nvidia()
+        anneau = app.state.anneau_energie
+        return {
+            "j_par_jeton_10s": anneau.j_par_jeton(),
+            "fenetre_s": anneau.fenetre_s,
+            "jetons_fenetre": anneau.jetons_fenetre(),
+            "cartes": [{"index": c["index"], "horloge_sm": c["horloge_sm"],
+                        "watts_plafond": c["watts_max"]} for c in cartes],
+        }
+
     @app.get("/metrics")
     async def metrics() -> dict:
         # `version` sert a la console, qui l'affiche en tete : sans elle on ne
         # sait pas quelle version repond, et deux versions ont deja coexiste
         # sur cette machine (paquet 0.5.0, venv 0.2.0).
+        plan = engine.loaded.plan
+        # Ajout n°2 (poste7-gui-ajouts-18-09) : `sequences_tronquees_budget`
+        # (EngineStats) est deja compte, jamais affiche — « toutes les
+        # cellules b > 8 faussees jusqu'au 17/09 sans une ligne d'erreur ».
+        # `kv_max_tokens / kv_planned_seqs` donne le budget REEL par sequence
+        # planifiee (slots x contexte) : sans lui, un compteur > 0 ne dit pas
+        # si le budget est structurellement sous-dimensionne ou accidentel.
+        kv_seqs = getattr(plan, "kv_planned_seqs", 0) or 0
         return {"engine": engine.stats.to_dict(),
+                "kv_max_tokens": plan.kv_max_tokens,
+                "kv_planned_seqs": kv_seqs,
+                "kv_tokens_par_sequence_planifiee": (
+                    round(plan.kv_max_tokens / kv_seqs, 1) if kv_seqs else None),
+                # poste7-profil-verdict-18-09 §4 : sans elle, un client HTTP de
+                # mesure (hors carte.sh) ne peut pas savoir quelle carte est
+                # RÉELLEMENT servie et somme celles qu'il voit lui-même —
+                # 18/09, acvram [0,1] contre llama.cpp [0], énergie faussée
+                # par le repos de la carte inutilisée.
+                "cartes": engine.regime()["cartes"],
+                "energie": _energie_par_jeton(),
+                # Ajout n°4 (poste7-gui-ajouts-18-09 § 4) : la meme ligne,
+                # octet pour octet, que le "[regime]" ecrit dans le JSON
+                # d'une mesure (`acvram.regime_ligne`) — variables ACVRAM_*
+                # hors defaut + versions torch/triton/fla.
+                "regime_ligne": _regime_ligne(),
                 "version": __version__, **app.state.info}
 
     @app.get("/v1/models")

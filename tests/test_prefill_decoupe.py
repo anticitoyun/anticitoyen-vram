@@ -14,7 +14,9 @@ from acvram.engine.sampler import SamplingParams
 
 
 def _moteur(converted, n=4):
-    charge = load_model(converted, dtype=torch.float32, device_override="cpu")
+    charge = load_model(converted, dtype=torch.float32, device_override="cpu",
+                        max_concurrent_seqs=n)
+    charge.plan.kv_planned_seqs = n   # cf. test_server.py : pas de GPU ici, le kwarg est ignoré
     return Engine(charge, None, max_batch_size=n, max_model_len=512)
 
 

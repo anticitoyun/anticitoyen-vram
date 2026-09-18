@@ -1,0 +1,4 @@
+# Protocole — campagne RPW de la GEMV groupée des experts (poste4 a850937 : `ACVRAM_GROUPED_RPW=1|2|4` lignes par warp, `ACVRAM_GROUPED_OLD=1` témoin ancien noyau ; poste7-gemv-experts-rpw-18-09)
+
+instrument : `outils/banc-gemv-experts-18-09.py` (E=128, top-8, b=12, K=2048, I=768, 48 couches, 20 routages, gate/up + down, rejeu graphe ; v1 = noyau groupé sous RPW), un processus par valeur (la variable est lue au premier lancement du .cu) ; ordre rpw=2, rpw=4, témoin rpw=1 en fin ; `scratchpad/gemv-experts-rpw-18-09/banc-rpw{2,4,1}.{log,json}` ; arbre poste3 = main 1ef1cf1 ; bit-exact lu entre les JSON (sommes/empreintes par routage).
+scellé (poste7) : seuil unique 6,7 ms/pas (v1) sur min(rpw=2, rpw=4) — ≤ 6,7 tenu, > 6,7 faux ; et bit-exact au témoin rpw=1. Prédiction poste4 : rpw=2 6,9-7,4, rpw=4 6,6-7,2 (elle annonce le scellé « non tenu de peu »). Témoin de départ : rpw=1 = 7,88 ms/pas (verdict porte v2).

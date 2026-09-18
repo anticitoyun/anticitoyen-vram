@@ -72,6 +72,12 @@ class _SamplingFields(BaseModel):
     logprobs: Optional[Union[bool, int]] = None
     top_logprobs: Optional[int] = None
     user: Optional[str] = None
+    # Même nom et sémantique que vLLM/llama-server (poste7-harnais-egal-
+    # ignore-eos-18-09) : ignore l'EOS, continue jusqu'à `max_tokens`. Sans
+    # équivalent HTTP ici, un harnais comparatif qui force `--ignore-eos`
+    # côté llama.cpp fait tomber le lot acvram sous b pendant la fenêtre —
+    # asymétrie non neutre, pas un réglage de confort.
+    ignore_eos: bool = False
 
     def stop_list(self) -> list[str]:
         if self.stop is None:

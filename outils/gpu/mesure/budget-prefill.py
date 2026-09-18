@@ -102,14 +102,21 @@ def main(argv):
     from acvram.engine.runner import Engine
     from acvram.engine.sampler import SamplingParams
 
+    n_lot = {"charge": ns.concurrence + 1, "lot": ns.lot}.get(ns.regime, 1)
     if ns.processeur:
         charge = load_model(ns.processeur, dtype=torch.float32,
                             device_override="cpu",
-                            max_model_len=ns.max_model_len)
+                            max_model_len=ns.max_model_len,
+                            max_concurrent_seqs=n_lot)
     else:
         charge = load_model(os.path.join(A, ns.modele),
-                            max_model_len=ns.max_model_len)
-    n_lot = {"charge": ns.concurrence + 1, "lot": ns.lot}.get(ns.regime, 1)
+                            max_model_len=ns.max_model_len,
+                            max_concurrent_seqs=n_lot)
+    # `_replanifier` (loader.py) n'agit que si `detect_rig()` voit un GPU —
+    # au rodage `--processeur`, le kwarg ci-dessus est ignoré. Le porter
+    # explicitement au lot réel plutôt que de laisser le défaut du manifeste
+    # (poste7-reprise-ordre-18-09 §Suite).
+    charge.plan.kv_planned_seqs = n_lot
     moteur = Engine(charge, None, max_batch_size=n_lot,
                     max_model_len=ns.max_model_len)
 

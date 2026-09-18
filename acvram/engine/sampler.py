@@ -31,6 +31,13 @@ class SamplingParams:
     seed: Optional[int] = None
     n: int = 1
     logprobs: Optional[int] = None
+    # Même sémantique que vLLM/llama-server (poste7-harnais-egal-ignore-eos-18-09) :
+    # continue au-delà de l'EOS jusqu'à `max_tokens`, sans toucher aux
+    # `stop`/`stop_token_ids` explicites de l'appelant. Sans lui, un harnais
+    # comparatif qui force ignore_eos chez llama.cpp mais pas ici fait tomber
+    # le lot acvram sous b à chaque séquence qui atteint l'EOS avant les
+    # autres — asymétrie non neutre, cellule b=12 indécidable.
+    ignore_eos: bool = False
 
     @property
     def greedy(self) -> bool:

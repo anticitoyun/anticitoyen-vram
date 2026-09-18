@@ -218,6 +218,11 @@ class Attention(nn.Module):
             self.qkv_tailles = tuple(l.qweight.shape[0] for l in lins)
             self.qkv_partiel = None
             return True
+        # Empilement refusé (scalers différents, conversion calibrée par
+        # projection) : à 2 ≤ b ≤ 32, une multi-projection NVFP4 sert les
+        # trois en un lancement, chacune avec son échelle (17/09, palier 2 de
+        # poste7-gemm-dense-porte-fermee-palier-17-09) — voir _proj
+        self.qkv_multi = _multi_projection(lins)
 
         # FUSION PARTIELLE. Le groupe entier ne s'empile pas — un format
         # different, une echelle differente — mais un SOUS-ENSEMBLE le peut, et
@@ -284,6 +289,10 @@ class Attention(nn.Module):
             vr = kr if self.k_eq_v else p[2]
         elif self.qkv_proj is not None and t <= SEUIL_FUSION:
             p = torch.split(self.qkv_proj(x), self.qkv_tailles, dim=-1)
+            qr, kr = p[0], p[1]
+            vr = kr if self.k_eq_v else p[2]
+        elif _multi_utilisable(getattr(self, "qkv_multi", None), x, t):
+            p = torch.split(self.qkv_multi(x), self.qkv_multi.tailles, dim=-1)
             qr, kr = p[0], p[1]
             vr = kr if self.k_eq_v else p[2]
         elif getattr(self, "qkv_partiel", None) is not None and t <= SEUIL_FUSION:
@@ -935,11 +944,62 @@ class MoEBlock(nn.Module):
             return None
         self._stacks = piles
         self._stacks_awq = awq
+        self._stacks_marlin = self._construire_marlin(piles, awq, hadamard)
         return True
 
-    def _grouped(self, x32: torch.Tensor, pile, expert_ids, token_ids):
+    def _construire_marlin(self, piles, awq, hadamard):
+        """P1 (poste7-p1-porte-marlin-18-09, X = 152 TFLOPS au banc) : seconde
+        DISPOSITION des experts, repackée pour la GEMM groupée classe Marlin
+        (kernels/marlin_port, vLLM v0.29.0) — gate, up, down chacune avec son
+        échelle globale par expert (gate et up ne partagent pas la leur :
+        pas de w13 fusionné). La pile NVFP4 reste pour le décodage (GEMV) :
+        `experts_layout=double`, comptée par le Plan (`_reserve_prefill`).
+        AWQ par expert et Hadamard (Coder classé 302025e : table [E, K])
+        sont appliqués À L'ACTIVATION avant toute GEMM du préfill
+        (`_forward_prefill_grouped` : `xs / awq_g[e_sorted]`, `xs_u`,
+        `act / awq_d[e_sorted]`, `fwht_activations` hors mma) — les poids
+        repackés sont les mêmes codes, l'échelle reste côté x : rien à
+        refuser (une première version refusait toute table AWQ, à tort —
+        poste7/chef 18/09). Refusée, avec sa raison : pile non NVFP4, formes
+        hors tuiles (K, N multiples de 64), extension non compilée à sec
+        (REGLES § 6 : jamais de nvcc sous le verrou —
+        `outils/banc-marlin-p1-18-09.py --compiler-seulement`)."""
+        if _PREFILL_GROUPED != "marlin":
+            return None
+        raison = None
+        if any(piles[n][0] != "nvfp4" for n in ("gate_proj", "up_proj", "down_proj") if n in piles) \
+                or "gate_proj" not in piles:
+            raison = "piles non NVFP4"
+        else:
+            for n in ("gate_proj", "up_proj", "down_proj"):
+                _, qw, bs, gs, k, m = piles[n]
+                if k % 64 or qw.shape[1] % 64:
+                    raison = f"{n} : K={k} ou N={qw.shape[1]} non multiple de 64"
+        if raison is None:
+            from ..kernels import marlin_port as MP
+            if MP.charger(compiler=False) is None:
+                raison = "extension Marlin non compilée à sec (banc-marlin-p1 --compiler-seulement)"
+        if raison is not None:
+            if not getattr(MoEBlock, "_marlin_refus_dit", False):
+                MoEBlock._marlin_refus_dit = True
+                print(f"[acvram] ACVRAM_PREFILL_GROUPED=marlin refusé : {raison} — GEMM groupée « groupe »", flush=True)
+            return None
+        from ..kernels import marlin_port as MP
+        out = {}
+        for n in ("gate_proj", "up_proj", "down_proj"):
+            _, qw, bs, gs, k, m = piles[n]
+            w, sc, g = MP.preparer_pile(qw, bs.view(torch.float8_e4m3fn) if bs.dtype == torch.uint8 else bs,
+                                        gs.reshape(-1).to(torch.float32))
+            out[n] = (w, sc, g, k, m)
+        return out
+
+    def _grouped(self, x32: torch.Tensor, pile, expert_ids, token_ids, tri=None):
         if pile[0] == "nvfp4":
             _, qw, bs, gs, k, m = pile
+            if tri is not None:
+                eid_s, ordre = tri
+                return kernels.nvfp4_gemv_grouped_v2(x32, qw, bs, gs, eid_s, token_ids[ordre.long()].contiguous(),
+                                                     ordre, k)[:, :m]
             return kernels.nvfp4_gemv_grouped(x32, qw, bs, gs, expert_ids,
                                               token_ids, k)[:, :m]
         if pile[0] == "nvfp4_table":
@@ -1115,6 +1175,15 @@ class MoEBlock(nn.Module):
             qw.shape[1], k, bt or _MOE_MMA_BT, _MOE_MMA_ETAGES, _MOE_MMA_KS, grow)
         return y if brut else y[:, :m]
 
+    def _chemin(self, nom: str) -> None:
+        """Compteur du chemin RÉELLEMENT pris au préfill (REGLES § 7 : « noyau
+        atteint, pas fonction appelée » — trois tests d'équivalence ont
+        comparé sans l'atteindre) ; tout test de régime l'asserte AVANT de
+        comparer (`conftest.attendre_chemin`)."""
+        c = self.__dict__.setdefault("chemins", {})
+        c[nom] = c.get(nom, 0) + 1
+        self.__dict__["dernier_chemin"] = nom
+
     def _forward_prefill_grouped(self, x, topw, topi) -> Optional[torch.Tensor]:
         if self._stacks is None or "gate_proj" not in self._stacks:
             return None                                # experts sans porte : boucle
@@ -1146,8 +1215,14 @@ class MoEBlock(nn.Module):
         E = pg[1].shape[0]
         flat_e = topi.reshape(-1).to(torch.int64)
         flat_t = torch.arange(t, device=x.device).repeat_interleave(k)
-        ordre = torch.argsort(flat_e, stable=True)
-        cnt = torch.bincount(flat_e, minlength=E)
+        colle = _colle_moe_triton(flat_e.numel(), E, x.device)
+        if colle is not None:
+            # P0 : tri + histogramme en UN lancement (colle_moe.trier_paires),
+            # mêmes ordre/cnt qu'argsort stable + bincount (tests/test_colle_moe.py)
+            ordre, _, cnt = colle.trier_paires(flat_e, E)
+        else:
+            ordre = torch.argsort(flat_e, stable=True)
+            cnt = torch.bincount(flat_e, minlength=E)
         xs = x[flat_t[ordre]].to(torch.bfloat16).contiguous()        # [G, H]
         # échelle AWQ par expert (poste7-glm-awq-pile-15-09) : x_ligne / s[e]
         # comme ChannelScaler.apply en boucle — au prefill aussi, sinon la
@@ -1193,8 +1268,19 @@ class MoEBlock(nn.Module):
                 act = F.pad(act, (0, kd - act.shape[1]))
             return act.contiguous()
 
+        if _PREFILL_A4 != "off" and not mma:
+            # porte qualité W4A4 (torch) : entrée de gate/up arrondie en NVFP4 ; `both` arrondit
+            # aussi l'entrée de down (via _activation ci-dessous)
+            partage_a4 = xs_u is xs
+            xs = fausse_quant_nvfp4(xs)
+            xs_u = xs if partage_a4 else fausse_quant_nvfp4(xs_u)
+            if _PREFILL_A4 == "both":
+                _act_sans_a4 = _activation
+                def _activation(g, u, m, kd, _f=_act_sans_a4):   # noqa: F811
+                    return fausse_quant_nvfp4(_f(g, u, m, kd))
         if mma:
             # poids ET activations en 4 bits : les activations sont quantifiées
+            self._chemin('mma')
             # une fois par entrée (E2M1 bloc 16 + UE4M3) et servent à gate et up
             # Grille EXACTE (t_max omis) : ce chemin n'est jamais capturé dans
             # un graphe (prefill), la grille rembourrée du bead runner (14/09,
@@ -1218,7 +1304,29 @@ class MoEBlock(nn.Module):
             act = _activation(g, u, pg[5], pd[4], awq_d=None, hd_d=0)
             aq, asf, gra = ext.nvfp4_quant_act(act, awq_d, es32, cpt, hd_d)
             d = self._gemm_mma(pd, aq, asf, tiles, brut=True, grow=gra)
+        elif _PREFILL_GROUPED == "marlin" and getattr(self, "_stacks_marlin", None) is not None:
+            # AVANT `direct` (poste3, verdict-marlin-p1-situ-18-09 : à petit T par
+            # expert, `direct` passait devant et un test n'atteignait jamais Marlin)
+            self._chemin('marlin')
+            # P1 : GEMM groupée classe Marlin (port vLLM) sur la seconde
+            # disposition ; lignes déjà triées par expert (xs), blocs alignés
+            # par expert depuis e_sorted, sortie dans l'ordre de xs — la
+            # recombinaison ci-dessous ne change pas
+            from ..kernels import marlin_port as MP
+            G = xs.shape[0]
+            mg, mu, md = (self._stacks_marlin[n] for n in ("gate_proj", "up_proj", "down_proj"))
+            bloc = MP.choisir_block_size(t, k, E)
+            s_ids, e_ids, n_post = MP.aligner_blocs(e_sorted.to(torch.int32).unsqueeze(1), bloc, E)
+            ws = self._marlin_workspace(x.device)
+            uns = self._marlin_uns(G, x.device)
+            xs_m = xs if xs.shape[1] == mg[3] else F.pad(xs, (0, mg[3] - xs.shape[1]))
+            g = MP.gemm_moe(xs_m.contiguous(), mg[0], mg[1], mg[2], s_ids, e_ids, n_post, uns, bloc, 1, G, mg[1].shape[2], mg[3], ws)
+            xu_m = xs_m if xs_u is xs else (xs_u if xs_u.shape[1] == mu[3] else F.pad(xs_u, (0, mu[3] - xs_u.shape[1]))).contiguous()
+            u = MP.gemm_moe(xu_m, mu[0], mu[1], mu[2], s_ids, e_ids, n_post, uns, bloc, 1, G, mu[1].shape[2], mu[3], ws)
+            act = _activation(g, u, pg[5], pd[4])
+            d = MP.gemm_moe(act, md[0], md[1], md[2], s_ids, e_ids, n_post, uns, bloc, 1, G, md[1].shape[2], md[3], ws)
         elif direct:
+            self._chemin('direct')
             # les poids restent en 4 bits : plus de pile bf16 intermédiaire
             # (trois passes de plusieurs Gio par couche en moins)
             # Grille EXACTE ici aussi -- meme raison que la branche `mma`
@@ -1233,6 +1341,7 @@ class MoEBlock(nn.Module):
             act = _activation(g, u, pg[5], pd[4])
             d = self._gemm(pd, act, tiles, brut=True)
         elif _PREFILL_GROUPED == "grouped_mm":
+            self._chemin('grouped_mm')
             # défaut : `torch._grouped_mm` (déroulé sur sm_120 en un mm par
             # expert + une copie DtoH par pile — mais ses copies s'arrêtent là)
             offs = torch.cumsum(cnt, 0).to(torch.int32)
@@ -1241,6 +1350,7 @@ class MoEBlock(nn.Module):
             act = _activation(g, u, pg[5], pd[4])
             wd = self._pile_bf16(pd); d = torch._grouped_mm(act, wd.transpose(1, 2), offs=offs); del wd
         elif _PREFILL_GROUPED == "w4a16":
+            self._chemin('w4a16')
             # B1 : la grille de B0, les poids lus en NVFP4 dans la tuile —
             # ni pile bf16 (nvfp4_dequant 50,8 ms), ni relecture de 60 Go
             from ..kernels import gemm_groupe as gg
@@ -1250,19 +1360,22 @@ class MoEBlock(nn.Module):
             u = gg.gemm_groupe_nvfp4(xs_u, pu[1], pu[2], pu[3].reshape(-1).to(torch.float32), tiles, m=pu[5])
             act = _activation(g, u, pg[5], pd[4])
             d = gg.gemm_groupe_nvfp4(act, pd[1], pd[2], pd[3].reshape(-1).to(torch.float32), tiles, m=pd[5])
-        elif _PREFILL_GROUPED == "groupe":
+        elif _PREFILL_GROUPED == "groupe" or _PREFILL_GROUPED == "marlin":
+            self._chemin('groupe')
             # B0 : un lancement persistant pour les 128 experts, lignes lues
             # par index dans le noyau, grille de tuiles à taille fixe (aucun
-            # offset relu sur l'hôte)
+            # offset relu sur l'hôte) ; P0 : la grille en un lancement
             from ..kernels import gemm_groupe as gg
             G = xs.shape[0]
-            tiles = self._tuiles(cnt, gg.BT, t_max=-(-G // gg.BT) + E)
+            t_max = -(-G // gg.BT) + E
+            tiles = colle.tuiles(cnt, gg.BT, t_max) if colle is not None else self._tuiles(cnt, gg.BT, t_max=t_max)
             wg = self._pile_bf16(pg); g = gg.gemm_groupe(xs, wg, tiles); del wg
             wu = self._pile_bf16(pu); u = gg.gemm_groupe(xs_u, wu, tiles); del wu
             act = _activation(g, u, pg[5], pd[4])
             wd = self._pile_bf16(pd); d = gg.gemm_groupe(act, wd, tiles); del wd
         else:
             # bmm par seaux (A, poste7-profil-verdict-17-09) : réfuté −36 %, témoin
+            self._chemin("bmm")
             plan = self._plan_bmm(cnt)
             wg = self._pile_bf16(pg); g = self._grouped_bmm(xs, wg, plan); del wg
             wu = self._pile_bf16(pu); u = self._grouped_bmm(xs_u, wu, plan); del wu
@@ -1276,6 +1389,21 @@ class MoEBlock(nn.Module):
             return ext.moe_reduce_trie(d, tw.contiguous(), inv.to(torch.int32).contiguous(), m_out, k)
         d = d[:, :m_out].to(torch.float32) * topw.reshape(-1)[ordre].to(torch.float32).unsqueeze(-1)
         return d[inv].view(t, k, -1).sum(dim=1).to(x.dtype)
+
+    _marlin_ws: dict = {}
+
+    def _marlin_workspace(self, device):
+        cle = str(device)
+        if cle not in MoEBlock._marlin_ws:
+            from ..kernels import marlin_port as MP
+            MoEBlock._marlin_ws[cle] = MP.espace_travail(device, 4)
+        return MoEBlock._marlin_ws[cle]
+
+    def _marlin_uns(self, G: int, device):
+        cache = self.__dict__.setdefault("_marlin_uns_cache", {})
+        if G not in cache:
+            cache[G] = torch.ones(G, 1, dtype=torch.float32, device=device)
+        return cache[G]
 
     def _forward_grouped_mma(self, x, topw, topi) -> Optional[torch.Tensor]:
         """Décodage (t petit) par la GEMM groupée MMA FP4 native — levier (3)
@@ -1449,7 +1577,20 @@ class MoEBlock(nn.Module):
             tok_g = torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
         else:
             x_g, x_u, tok_g = x, x, tok
-        if (pg[0] == "nvfp4" and pu[0] == "nvfp4" and ext is not None
+        # v2 : paires triées par expert (argsort stable : déterministe, sous
+        # graphe) ; le noyau écrit chaque paire à sa place d'origine
+        tri = None
+        if (_MOE_GEMV == "v2" and pg[0] == "nvfp4" and pu[0] == "nvfp4" and ext is not None
+                and hasattr(ext, "nvfp4_gemv_grouped_gateup_v2") and not distinct
+                and self._stacks.get("down_proj", ("",))[0] == "nvfp4"
+                and pg[4] * 4 <= 48 * 1024):
+            ordre = torch.argsort(eid, stable=True).to(torch.int32)
+            tri = (eid[ordre.long()].contiguous(), ordre)
+        if tri is not None:
+            act = ext.nvfp4_gemv_grouped_gateup_v2(
+                pg[1], pg[2], pg[3], pu[1], pu[2], pu[3], tri[0], tok_g[ordre.long()].contiguous(), ordre,
+                x_g.contiguous(), pg[4], 1 if self.act == "gelu_tanh" else 0)[:, :pg[5]]
+        elif (pg[0] == "nvfp4" and pu[0] == "nvfp4" and ext is not None
                 and hasattr(ext, "nvfp4_gemv_grouped_gateup")
                 and not distinct                       # un seul x pour gate et up
                 and pg[4] * 4 <= 48 * 1024):
@@ -1478,7 +1619,7 @@ class MoEBlock(nn.Module):
             act = fwht_activations(act.to(torch.bfloat16), hd_d).to(act.dtype)
         if awq.get("down_proj") is not None:
             act = (act.to(torch.bfloat16) / awq["down_proj"][eid.long(), :act.shape[1]]).to(act.dtype)
-        d = self._grouped(act, self._stacks["down_proj"], eid, seq)
+        d = self._grouped(act, self._stacks["down_proj"], eid, seq, tri=tri)
         # Chaque jeton possède exactement top_k lignes contiguës : une somme
         # sur cet axe remplace l'index_add_ atomique — déterministe, plus
         # rapide, et rejouable dans un graphe CUDA sans écart d'un rejeu à
@@ -1754,7 +1895,37 @@ _MOE_MMA = os.environ.get("ACVRAM_MOE_MMA", "1") == "1"
 # petit M inchangées et ~58 Go de copies w[experts] par prefill ; gardé comme
 # témoin d'une fausse piste, jamais comme défaut)
 _PREFILL_GROUPED = os.environ.get("ACVRAM_PREFILL_GROUPED", "groupe")
-if _PREFILL_GROUPED not in ("bmm", "grouped_mm", "groupe", "w4a16"):
+# ACVRAM_PREFILL_A4=off|gateup|both : porte qualité W4A4 du prefill MoE (poste7-lecture-profils-coder-17-09) —
+# fausse quantification NVFP4 des ACTIVATIONS en torch (E2M1 bloc 16, échelle de bloc UE4M3, échelle
+# globale par ligne, comme nvfp4_quant_act), sur l'entrée de gate/up (gateup) et aussi sur celle de
+# down (both) ; aucun noyau : mesure la perte de qualité qu'un GEMM W4A4 imposerait, pas sa vitesse.
+_PREFILL_A4 = os.environ.get("ACVRAM_PREFILL_A4", "off")
+if _PREFILL_A4 not in ("off", "gateup", "both"):
+    raise ValueError(f"ACVRAM_PREFILL_A4={_PREFILL_A4!r} : off | gateup | both")
+
+
+_E2M1 = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
+_E2M1_MILIEUX = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
+
+
+def fausse_quant_nvfp4(x: torch.Tensor) -> torch.Tensor:
+    """x [G, K] (K multiple de 16) → x arrondi comme le ferait nvfp4_quant_act :
+    échelle globale par ligne s = amax_ligne / (448 × 6), échelle de bloc (16) en
+    UE4M3 = amax_bloc / (6 s), valeur E2M1 au plus proche (milieux des paliers),
+    puis déquantifié. Sortie dans le dtype de x. Torch pur (porte qualité)."""
+    G, K = x.shape
+    assert K % 16 == 0, K
+    xf = x.to(torch.float32)
+    s_row = (xf.abs().amax(dim=1, keepdim=True) / (448.0 * 6.0)).clamp_min(1e-12)   # [G,1]
+    xb = xf.view(G, K // 16, 16)
+    bs = (xb.abs().amax(dim=2, keepdim=True) / (6.0 * s_row.unsqueeze(2)))           # [G,K/16,1]
+    bs = bs.to(torch.float8_e4m3fn).to(torch.float32)                                # UE4M3 (arrondi fp8)
+    ech = (bs * s_row.unsqueeze(2)).clamp_min(1e-12)
+    v = (xb / ech).clamp(-6.0, 6.0)
+    idx = torch.bucketize(v.abs(), _E2M1_MILIEUX.to(x.device))
+    q = _E2M1.to(x.device)[idx] * torch.sign(v)
+    return (q * ech).view(G, K).to(x.dtype)
+if _PREFILL_GROUPED not in ("bmm", "grouped_mm", "groupe", "w4a16", "marlin"):
     raise ValueError(f"ACVRAM_PREFILL_GROUPED={_PREFILL_GROUPED!r} : attendu groupe, w4a16, grouped_mm ou bmm")
 _MOE_MMA_BT = int(os.environ.get("ACVRAM_MOE_MMA_BT", "64"))
 # Étages du pipeline cp.async du noyau MMA (0 = chargements directs).
@@ -1834,6 +2005,12 @@ _MOE_FUSED_ATOMIQUE = os.environ.get("ACVRAM_MOE_FUSED_ATOMIQUE", "0") == "1"   
 _MOE_FUSED_ETAGES = int(os.environ.get("ACVRAM_MOE_FUSED_ETAGES", "3"))          # 2 : shared plus petite, 2-3 CTA par SM
 # Frontend route+pack en un noyau (15/09, poste7) ; "0" = témoin torch.
 _MOE_ROUTE_PACK = os.environ.get("ACVRAM_MOE_ROUTE_PACK", "1") == "1"
+# GEMV groupée du décodage MoE (18/09, poste7-lecture-profils-coder-17-09 § 2) :
+# v1 (défaut jusqu'au scellé : une passe de poids PAR PAIRE (expert, jeton)) |
+# v2 (paires triées par expert, poids lus une fois pour ≤ 4 jetons du même
+# expert, sortie identique au bit). Scellé : experts 6,6 → ≤ 5,3 ms, Coder
+# b=12 nu ≥ 1 300 t/s (faux < 1 200).
+_MOE_GEMV = os.environ.get("ACVRAM_MOE_GEMV", "v1")
 
 # Décodage MLA sous graphes : 0 = boucle par créneau ; 1 = le noyau
 # d'attention batché seul (bead 6wa, bit-identique, −28,5 % sur le pas
@@ -1844,6 +2021,57 @@ _MOE_ROUTE_PACK = os.environ.get("ACVRAM_MOE_ROUTE_PACK", "1") == "1"
 # depuis poste7-duel-verdict-16-09 § 6.2 (15 534 lancements/pas à b=12 en
 # séquence par séquence) ; 1 = noyau d'attention seul batché ; 0 = boucle.
 _MLA_BATCH = int(os.environ.get("ACVRAM_MLA_BATCH", "2"))
+
+# P0 (poste7-profil-verdict-18-09) : colle du préfill MoE (tri des paires par
+# expert + grille de tuiles) en deux lancements Triton au lieu d'argsort
+# (radix, 8 lancements) + bincount + ~10 lancements de _tuiles ; mêmes
+# tenseurs (tests/test_colle_moe.py). torch = témoin.
+_COLLE_MOE = os.environ.get("ACVRAM_COLLE_MOE", "torch")
+if _COLLE_MOE not in ("torch", "triton"):
+    raise ValueError(f"ACVRAM_COLLE_MOE={_COLLE_MOE!r} : torch | triton")
+
+
+def _colle_moe_triton(G: int, E: int, device):
+    if _COLLE_MOE != "triton" or E & (E - 1):
+        return None
+    from ..kernels import colle_moe
+    if not colle_moe.disponible() or G > colle_moe.G_MAX:
+        return None
+    if device.type != "cuda" and os.environ.get("TRITON_INTERPRET") != "1":
+        return None
+    return colle_moe
+
+
+def _multi_projection(lins):
+    """`MultiProjection` (kernels/gemm_dense_etroit) des projections NVFP4
+    de même entrée, ou None si une n'est pas NVFP4, porte un biais, une
+    rotation, ou n'est pas sur la carte."""
+    try:
+        from ..kernels.gemm_dense_etroit import MultiProjection, disponible
+        from ..quant.nvfp4 import NVFP4Tensor
+        interprete = os.environ.get("TRITON_INTERPRET") == "1"
+        if not disponible() or not all(isinstance(l.qweight, NVFP4Tensor)
+                                       and (l.qweight.qweight.is_cuda or interprete) for l in lins):
+            return None
+        return MultiProjection(lins)
+    except (AssertionError, ImportError):
+        return None
+
+
+# Palier 2 (multi-projection q/k/v, qkv/gate/α/β) : TÉMOIN NOMMÉ, jamais
+# défaut — 0,88 To/s pondéré au banc, qkv_multi 0,52 pas mieux que kv seule
+# 0,47 avec N triplé : le mécanisme « sous-occupation » est réfuté, cause
+# inconnue (poste7-gemm-dense-palier2-non-ouvert-17-09 § 1). Réouverture par
+# un micro-banc qui EXPLIQUE le 0,52. ACVRAM_MULTI_PROJ=1 pour le rejouer.
+_MULTI_PROJ = os.environ.get("ACVRAM_MULTI_PROJ", "0") == "1"
+
+
+def _multi_utilisable(mp, x: torch.Tensor, t: int) -> bool:
+    return (mp is not None and _MULTI_PROJ and kernels._DENSE_NVFP4 == "triton"
+            and kernels._DENSE_NVFP4_MIN_M <= t <= 32
+            and (x.dtype == torch.bfloat16 and x.is_cuda
+                 or x.dtype == torch.float16 and os.environ.get("TRITON_INTERPRET") == "1"))
+
 
 # Marque, dans le magasin d'états, une séquence dont l'état réside dans les
 # tampons fixes d'une couche (chemin graphes) plutôt qu'en tuple fonctionnel.
@@ -1894,7 +2122,9 @@ class DecoderLayerGDN(nn.Module):
         # b — seul ext.mla_decode a encore besoin du cache, par séquence.
         # Conservateur : au moindre doute (créneau actif, prefill mélangé,
         # noyau absent), la boucle inchangée ci-dessous.
-        if (hasattr(la, "rank") and batch.gdn_store is not None
+        # GDN (17/09) : même contrat, `forward_batch` = un lancement fla pour
+        # les b séquences (poste7-priorite-apres-campagne-17-09 § 2)
+        if (hasattr(la, "forward_batch") and batch.gdn_store is not None
                 and all(ql == 1 for ql in batch.query_lens)
                 and la.peut_batcher_decode(h)):
             sids = [batch.seq_ids[i] if batch.seq_ids else i
@@ -1995,6 +2225,9 @@ class DecoderLayerGDN(nn.Module):
             un = lambda t, st: la.decode_static(t, st)
         b = h.shape[0] // q_len
         if b > 1:                              # un créneau par séquence
+            if q_len == 1 and hasattr(la, "decode_static_batch") and not hasattr(la, "rank") \
+                    and la.peut_batcher_decode(h):
+                return la.decode_static_batch(h, self.statics[:b])      # GDN : un lancement fla
             if q_len == 1 and hasattr(la, "rank") and _MLA_BATCH:
                 ext = kernels.get_extension()
                 if ext is not None and hasattr(ext, "mla_decode_batch"):
@@ -2450,6 +2683,22 @@ class ACVRamModel(nn.Module):
                 and x.shape[0] <= kernels._INT8_GEMV_MAX
                 and os.environ.get("ACVRAM_TETE_FP32_ENTREE") != "1"):
             return kernels.int8_matmul(x.to(target), w, sortie_fp32=True)
+        # Tête NVFP4 à b ≥ DENSE_NVFP4_MIN_M (poste7-gemm-dense-palier2-non-
+        # ouvert-17-09 § 2) : la même GEMM dense étroite que les projections
+        # (poids lus une fois par pas), logits accumulés en fp32 ; la GEMV fp32
+        # relisait 0,6 Go par séquence — 18 % du pas Qwen3.8 b=12 (poste3 0690bd4).
+        if (x.dtype == torch.bfloat16 and getattr(w, "format", "") == "nvfp4"
+                and head_dev is not None and head_dev.is_cuda
+                and getattr(lin, "streamed", None) is None and getattr(lin, "bias", None) is None
+                and kernels._DENSE_NVFP4 == "triton" and kernels._DENSE_NVFP4_MIN_M <= x.shape[0] <= 32
+                and os.environ.get("ACVRAM_TETE_FP32_ENTREE") != "1"):
+            from ..kernels import gemm_dense_etroit as _gde
+            if _gde.disponible():
+                xt = x.to(target)
+                sc = getattr(lin, "scaler", None)
+                if sc is not None and not sc.is_identity:
+                    xt = sc.apply(xt)
+                return _gde.gemm_dense_etroit(xt, w, sortie_fp32=True)[:, : w.shape[0]]
         return self.lm_head(x.to(target, dtype=torch.float32))
 
     def _logits_finaux(self, logits: torch.Tensor) -> torch.Tensor:

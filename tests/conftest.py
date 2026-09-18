@@ -9,6 +9,22 @@ import os
 # a kernel » (vu en suite complète seulement, pas en fichier isolé).
 if os.environ.get("CUDA_VISIBLE_DEVICES") == "":
     os.environ.setdefault("TRITON_INTERPRET", "1")
+    # Les noyaux `fla` (flash-linear-attention) sont autoréglés : sans
+    # pilote, le banc de l'autoréglage échoue (« 0 active drivers »). Sous
+    # l'interpréteur, la première configuration suffit — les valeurs ne
+    # dépendent pas du réglage, seul le temps en dépend.
+    try:
+        from triton.runtime import autotuner as _at
+
+        _init = _at.Autotuner.__init__
+
+        def _init_une_config(self, *a, **kw):
+            _init(self, *a, **kw)
+            if len(self.configs) > 1:
+                self.configs = self.configs[:1]
+        _at.Autotuner.__init__ = _init_une_config
+    except Exception:                                    # noqa: BLE001
+        pass
 
 import pytest
 import torch
@@ -258,6 +274,49 @@ def assert_logits_proches(a: torch.Tensor, b: torch.Tensor, msg: str = "",
 _VERROUS = []
 
 
+def _verrou_tenu_en_mesure():
+    """Une carte est-elle tenue en TYPE=mesure, MAINTENANT, par un vivant ?
+
+    Contrairement à `_gpu_demande` ci-dessous, ne dépend PAS de
+    `CUDA_VISIBLE_DEVICES` : le lanceur de session exporte cette variable
+    vide par défaut (poste7 14/09), donc une suite lancée normalement se
+    croit sans carte et ne prend jamais le flock plus bas — mais elle
+    tourne quand même sur le même PROCESSEUR qu'une fenêtre HTTP mesurée
+    sous `carte.sh`. Trouvé le 18/09 (load 70,8) : trois `pytest` de pairs
+    pendant une fenêtre HTTP, aucun n'a rien vu venir puisque aucun ne
+    touchait le GPU. REGLES §2 le disait en consigne ; ceci en fait un
+    refus dur — lecture seule, jamais de verrou pris ici."""
+    import glob
+    import re
+    motif = os.environ.get("ACVRAM_VERROU_GLOB", "/tmp/acvram-carte-*.lock")
+    for verrou in sorted(glob.glob(motif)):
+        info = verrou + ".qui"
+        try:
+            champs = open(info).read().split(None, 3)
+            pid, _pris_a, nom = int(champs[0]), champs[1], champs[2]
+            type_ = champs[3].strip() if len(champs) > 3 else "?"
+        except (OSError, ValueError, IndexError):
+            continue
+        if type_ != "mesure":
+            continue
+        try:
+            os.kill(pid, 0)
+        except (OSError, ValueError):
+            continue   # detenteur disparu, info perimee (meme logique que carte.sh qui_tient())
+        return verrou, pid, nom
+    return None
+
+
+def _suite_ciblee(config) -> bool:
+    """Un chemin/nodeid explicite, un `-k` ou un `-m` : la personne a dit ce
+    qu'elle veut lancer. Rien de tout ça (pytest nu, `testpaths` de
+    `pyproject.toml` par défaut) = suite complète. `file_or_dir` est déjà
+    séparé des valeurs de flags par l'analyseur de pytest lui-même — pas de
+    re-parsing fragile de la ligne de commande brute."""
+    return bool(config.getoption("file_or_dir") or config.getoption("keyword")
+               or config.getoption("markexpr"))
+
+
 def _gpu_demande(config):
     """La suite touche-t-elle la carte ? Oui des qu'un GPU est visible et que
     rien ne l'interdit. On ne cherche PAS a deviner quels tests allouent : le
@@ -327,6 +386,43 @@ def pytest_configure(config):
       un verrou pour la SESSION pytest
           -> UNE attente, couverture complete. C'est celui-ci.
     """
+    # 18/09 : load 90/32 cœurs, trois suites COMPLETES de pairs en parallele
+    # pendant une fenetre P1 -- le verrou-mesure ci-dessous ne protege que les
+    # worktrees qui l'ont deja fusionne (REGLES §1), donc un second filet,
+    # INCONDITIONNEL, qui ne depend d'aucune fusion : une suite NON CIBLEE
+    # (aucun chemin/nodeid, aucun -k, aucun -m -- pytest nu, testpaths par
+    # defaut) est le signal le plus fiable qu'une session a lance « la suite »
+    # plutot que ce qu'elle vient de changer. Refuse a load1 > nproc/4 (plus
+    # bas que le seuil nproc/2 d'energie.py : ici on protege TOUTE la
+    # machine, pas seulement une fenetre HTTP).
+    # Ordre voulu : l'override se lit AVANT `_suite_ciblee(config)`, en
+    # court-circuit -- un `config` factice (tests, `None`) ne doit pas être
+    # sollicité quand l'override suffit à trancher.
+    if os.environ.get("ACVRAM_TESTS_SOUS_CHARGE") != "1" and not _suite_ciblee(config):
+        load1 = os.getloadavg()[0]
+        nproc = os.cpu_count() or 1
+        if load1 > nproc / 4:
+            raise pytest.UsageError(
+                f"suite complète sous charge : cible tes tests ou attends "
+                f"(load1={load1:.1f} > nproc/4={nproc / 4:.1f}, {nproc} cœurs). "
+                f"ACVRAM_TESTS_SOUS_CHARGE=1 pour la CI finale.")
+
+    # Symétrique de ce qui précède, et INCONDITIONNEL (pas derrière
+    # `_gpu_demande`, qui ne voit rien sans CUDA_VISIBLE_DEVICES) : une
+    # fenêtre HTTP mesurée sous `carte.sh` (TYPE=mesure) se fait fausser par
+    # le PROCESSEUR qu'une suite pytest lui prend, même une suite qui ne
+    # touche jamais le GPU (18/09, load 70,8, REGLES §2).
+    if os.environ.get("ACVRAM_TESTS_PENDANT_MESURE") != "1":
+        tenue = _verrou_tenu_en_mesure()
+        if tenue:
+            verrou, pid, nom = tenue
+            raise pytest.UsageError(
+                f"carte tenue en TYPE=mesure par PID {pid} ({nom}, {verrou}) : "
+                f"la suite ne demarre pas — une suite pytest, meme sans GPU, "
+                f"prend du processeur a une fenetre HTTP mesuree (18/09, load "
+                f"70,8). ACVRAM_TESTS_PENDANT_MESURE=1 pour passer outre en "
+                f"connaissance de cause.")
+
     if not _gpu_demande(config):
         return
 
@@ -394,3 +490,16 @@ def pytest_unconfigure(config):
     if _VERROUS:
         _relacher()
         print("[tests] carte relachee", flush=True)
+
+
+def attendre_chemin(bloc, nom: str, avant: int = 0) -> int:
+    """REGLES § 7, « noyau atteint, pas fonction appelée » (poste7, 18/09, après
+    trois tests d'équivalence qui comparaient sans atteindre le chemin) :
+    asserte que le préfill du ``bloc`` (MoEBlock) vient de prendre le chemin
+    ``nom`` (compteur `_chemin`) et que son compte a AVANCÉ depuis ``avant``.
+    Rend le compte courant. À appeler AVANT toute comparaison de sorties."""
+    chemins = getattr(bloc, "chemins", {})
+    assert getattr(bloc, "dernier_chemin", None) == nom, \
+        f"chemin pris : {getattr(bloc, 'dernier_chemin', None)!r}, attendu {nom!r} (compteurs {chemins})"
+    assert chemins.get(nom, 0) > avant, f"le chemin {nom!r} n'a pas avancé : {chemins}"
+    return chemins[nom]

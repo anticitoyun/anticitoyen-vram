@@ -20,9 +20,12 @@ Tout est en unités lisibles à la sortie : °C, tr/min, V, W, A.
 """
 from __future__ import annotations
 
+import collections
+import ctypes
 import glob
 import os
 import subprocess
+import threading
 import time
 
 try:
@@ -202,6 +205,143 @@ def nvidia() -> list[dict]:
             "encodeurs": n("encoder.stats.sessionCount"),
         })
     return cartes
+
+
+_nvml_lib: object = None   # None = pas encore essayé, False = essayé et absent
+
+
+def _nvml():
+    """Charge NVML une fois (ctypes, sans dépendance ``pynvml``).
+
+    Ajout GUI n°3 (poste7-gui-ajouts-18-09) : `nvidia-smi
+    --query-gpu=total_energy_consumption` échoue sur cette machine ; NVML
+    tient le compteur d'énergie monotone que `/metrics` a besoin
+    d'intégrer sur sa fenêtre glissante. `outils/gpu/mesure/energie.py`
+    fait la même chose mais n'est pas empaqueté dans le `.deb` — ce
+    lecteur est donc son propre code, minimal, pas un import croisé.
+    """
+    global _nvml_lib
+    if _nvml_lib is None:
+        try:
+            lib = ctypes.CDLL("libnvidia-ml.so.1")
+            if lib.nvmlInit_v2() != 0:
+                raise OSError("nvmlInit_v2 refusé")
+        except OSError:
+            _nvml_lib = False
+        else:
+            _nvml_lib = lib
+    return _nvml_lib or None
+
+
+def energie_mj() -> dict[int, int]:
+    """{index carte: millijoules totaux depuis le démarrage du pilote}.
+
+    Vide si NVML est absent — jamais une valeur inventée à la place."""
+    lib = _nvml()
+    if lib is None:
+        return {}
+    n = ctypes.c_uint()
+    lib.nvmlDeviceGetCount_v2(ctypes.byref(n))
+    out: dict[int, int] = {}
+    for i in range(n.value):
+        h = ctypes.c_void_p()
+        if lib.nvmlDeviceGetHandleByIndex_v2(i, ctypes.byref(h)) != 0:
+            continue
+        v = ctypes.c_ulonglong()
+        if lib.nvmlDeviceGetTotalEnergyConsumption(h, ctypes.byref(v)) == 0:
+            out[i] = v.value
+    return out
+
+
+class AnneauEnergie:
+    """Fenêtre glissante de J/jeton, alimentée par un tic d'arrière-plan.
+
+    Correction (poste7-metrics-energie-fenetre-18-09) : la première version
+    de `/metrics` consommait son propre échantillon précédent à chaque
+    appel — deux lecteurs concurrents (deux clients qui pollent `/metrics`
+    en même temps) se volaient donc le delta l'un l'autre, et rendaient
+    DEUX valeurs différentes sur la MÊME fenêtre réelle (trouvé par poste3
+    le 18/09 lors du contrôle GUI). Ici le tic alimente un anneau
+    d'échantillons partagé ; `j_par_jeton()` ne fait que LIRE le premier
+    et le dernier échantillon de la fenêtre — appelable par autant de
+    lecteurs qu'on veut, sans état par client, sans jamais consommer."""
+
+    def __init__(self, fenetre_s: float = 10.0, tic_s: float = 1.0,
+                 lecteur=None) -> None:
+        self.fenetre_s = fenetre_s
+        self.tic_s = tic_s
+        self._lecteur = lecteur if lecteur is not None else energie_mj
+        self._echantillons: collections.deque = collections.deque()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._decode_tokens = None
+
+    def start(self, decode_tokens) -> None:
+        """`decode_tokens` : fonction sans argument rendant le compteur
+        courant de jetons décodés (`engine.stats.decode_tokens`)."""
+        if self._thread is not None:
+            return
+        self._decode_tokens = decode_tokens
+        self._thread = threading.Thread(target=self._run,
+                                        name="acvram-energie", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self.tic(self._decode_tokens())
+            self._stop.wait(self.tic_s)
+
+    def tic(self, decode_tokens: int) -> None:
+        """Un échantillon : énergie totale (toutes cartes sommées, comme
+        `energie.py`) + jetons décodés à l'instant T. Appelable directement
+        (tests) ou depuis le fil de fond (serveur réel)."""
+        mj = self._lecteur()
+        total_mj = sum(mj.values()) if mj else None
+        maintenant = time.time()
+        with self._lock:
+            self._echantillons.append((maintenant, total_mj, decode_tokens))
+            limite = maintenant - self.fenetre_s
+            while len(self._echantillons) > 1 and self._echantillons[0][0] < limite:
+                self._echantillons.popleft()
+
+    def jetons_fenetre(self) -> int:
+        """Jetons décodés couverts par la fenêtre actuelle — 0 si moins de
+        deux échantillons ou si le compteur n'a pas bougé. poste7
+        (poste7-metrics-energie-fenetre-18-09) : `j_par_jeton()` rend None
+        SEULEMENT quand ce compte vaut 0, jamais pour une autre raison
+        silencieuse — les deux se lisent toujours ensemble."""
+        with self._lock:
+            echantillons = list(self._echantillons)
+        if len(echantillons) < 2:
+            return 0
+        delta_tok = echantillons[-1][2] - echantillons[0][2]
+        return delta_tok if delta_tok > 0 else 0
+
+    def j_par_jeton(self) -> float | None:
+        """Lecture seule, jamais 0 : None si NVML absent, fenêtre trop
+        jeune (< 2 échantillons), ou aucun jeton décodé dans la fenêtre
+        (`jetons_fenetre() == 0`)."""
+        with self._lock:
+            echantillons = list(self._echantillons)
+        if len(echantillons) < 2:
+            return None
+        _, mj0, tok0 = echantillons[0]
+        _, mj1, tok1 = echantillons[-1]
+        delta_tok = tok1 - tok0
+        if delta_tok <= 0:
+            return None
+        if mj0 is None or mj1 is None:
+            return None
+        delta_mj = mj1 - mj0
+        if delta_mj < 0:
+            return None
+        return round(delta_mj / 1000.0 / delta_tok, 4)
 
 
 def systeme() -> dict:

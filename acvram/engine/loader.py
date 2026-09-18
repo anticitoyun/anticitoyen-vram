@@ -904,6 +904,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
                 m.fuse()
             elif isinstance(m, Attention):
                 m.fuse()
+            elif hasattr(m, "fuse") and type(m).__name__ == "GatedDeltaNet":
+                m.fuse()
 
     # Chaque empilement alloue son tenseur concatene avant de liberer les deux
     # sources : 0,355 Gio de pic par fusion, 95 fois. Les blocs liberes restent
@@ -1683,17 +1685,26 @@ _DENSE_SLOTS = int(os.environ.get("ACVRAM_DENSE_SLOTS", "4"))
 def _reserve_prefill(spec, max_model_len: Optional[int], manifest: dict,
                      plan: Optional[Plan] = None) -> int:
     """Octets transitoires à retirer des budgets (KV, exil) :
-    `ModelSpec.activations_prefill_bytes` sur ``max_model_len`` (sinon la
-    longueur planifiée du manifeste, sinon 8 192) PLUS les tampons GPU du
-    streaming dense (`_DENSE_SLOTS` × la plus grosse couche du plan, borne
-    haute de « _DENSE_SLOTS × chaque forme distincte ») ; 0 sans spec."""
+    `ModelSpec.activations_prefill_bytes` sur ``max_model_len`` (sinon 8 192,
+    le défaut du moteur — runner.Engine) PLUS les tampons GPU du streaming
+    dense (`_DENSE_SLOTS` × la plus grosse couche du plan, borne haute de
+    « _DENSE_SLOTS × chaque forme distincte ») ; 0 sans spec.
+
+    JAMAIS `kv_max_tokens` du manifeste : c'est la CAPACITÉ KV planifiée,
+    toutes séquences confondues (56 401 sur Qwen3.8-27B), pas la longueur
+    d'une invite — l'avoir pris (1aa767b) réservait 13,04 Gio d'activations
+    à un chargement sans max_model_len, exilait 19/64 couches d'un modèle de
+    13,1 Gio et faisait refuser l'instrument de préfill (poste3, fla-17-09)."""
     if spec is None:
         return 0
-    d = manifest.get("plan", {}) if isinstance(manifest, dict) else {}
-    ctx = int(max_model_len or (d.get("kv_max_tokens") or 0) or 8192)
+    ctx = int(max_model_len or 8192)
     reserve = int(spec.activations_prefill_bytes(ctx))
     if plan is not None and plan.layers:
         reserve += _DENSE_SLOTS * max(int(l.attn_bytes) + int(l.mlp_bytes) for l in plan.layers)
+        # P1 : seconde disposition des experts (repack Marlin, même masse que
+        # la pile NVFP4 : codes K·N/2 + échelles K·N/16) — experts_layout=double
+        if os.environ.get("ACVRAM_PREFILL_GROUPED", "groupe") == "marlin":
+            reserve += sum(int(l.mlp_bytes) for l in plan.layers if getattr(l, "is_moe", False))
     return reserve
 
 

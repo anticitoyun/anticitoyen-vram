@@ -43,11 +43,13 @@ from . import __version__            # noqa: E402  (source unique de verite)
 VARIABLES_LUES = {
     "ACVRAM_ALLOC_EXTENSIBLE",
     "ACVRAM_BANC_ACCEPTE_REPLAN",
+    "ACVRAM_KV_PLAN_OVERRIDE",
     "ACVRAM_KERNEL_CACHE",
     "ACVRAM_FOND_COOL",
     "ACVRAM_FOND_ZEN",
     "ACVRAM_GALERIE_DIR",
     "ACVRAM_LOGITS_BF16",
+    "ACVRAM_MARLIN_CACHE",
     "ACVRAM_MAX_GRAPHS",
     "ACVRAM_PARC",
     "ACVRAM_MODELES",
@@ -109,7 +111,14 @@ VARIABLES_LUES = {
     # qu'une liste incomplete fait echouer la garde — pas parce qu'on la lit.
     "ACVRAM_SRC_HASH",
     "ACVRAM_ARCH_FAMILY",
+    "ACVRAM_COLLE_MOE",
     "ACVRAM_CUDA_HOME",
+    "ACVRAM_DENSE_ETROIT_BK",
+    "ACVRAM_DENSE_ETROIT_BN",
+    "ACVRAM_DENSE_ETROIT_STAGES",
+    "ACVRAM_DENSE_ETROIT_WARPS",
+    "ACVRAM_DENSE_NVFP4",
+    "ACVRAM_DENSE_NVFP4_MIN_M",
     "ACVRAM_DENSE_SLOTS",
     "ACVRAM_DEQUANT_TRANCHE_MAX",
     "ACVRAM_DISABLE_CPU_KERNELS",
@@ -125,6 +134,9 @@ VARIABLES_LUES = {
     "ACVRAM_GDN",
     "ACVRAM_GRAPHES_MUETS",
     "ACVRAM_GRAPHES_TABLE",
+    "ACVRAM_GROUPED_OLD",
+    "ACVRAM_GROUPED_RPW",
+    "ACVRAM_GROUPED_XREG",
     "ACVRAM_GRAPHS_EAGER",
     "ACVRAM_GW_WARPS",
     "ACVRAM_HYBRID_KERNELS",
@@ -133,6 +145,11 @@ VARIABLES_LUES = {
     "ACVRAM_INSTA_PAS",
     "ACVRAM_INT8_GEMV_MAX",
     "ACVRAM_INT8_GEMV_WARP",
+    "ACVRAM_PA_SANS_COMPTEUR",
+    "ACVRAM_PAGED_ALLOC",
+    "ACVRAM_PA_ETAPE",
+    "ACVRAM_PA_CHUNK",
+    "ACVRAM_INT8_TRANCHE",
     "ACVRAM_KDA_CHUNK",
     "ACVRAM_MAMBA_CHUNK",
     "ACVRAM_MLA_BATCH",
@@ -164,13 +181,17 @@ VARIABLES_LUES = {
     "ACVRAM_MOE_MMA",
     "ACVRAM_MOE_MMA_BT",
     "ACVRAM_MOE_MMA_ETAGES",
+    "ACVRAM_MOE_GEMV",
     "ACVRAM_MOE_MMA_KS",
     "ACVRAM_MTP",
+    "ACVRAM_MULTI_PROJ",
     "ACVRAM_NVFP4_GEMV_MAX",
     "ACVRAM_PIPELINE",
     "ACVRAM_PLAN_FIGE",
     "ACVRAM_POOL_SYNC",
     "ACVRAM_PREFILL",
+    "ACVRAM_PREFILL_A4",
+    "ACVRAM_PREFILL_INT8",
     "ACVRAM_PREFILL_DEQUANT",
     "ACVRAM_SANS_FUSION_BF16",
     "ACVRAM_SANS_PRECHARGE",
@@ -189,6 +210,7 @@ VARIABLES_LUES = {
     "ACVRAM_TRACE_COUCHES",
     "ACVRAM_TRACE_STEPS",
     "ACVRAM_VERBOSE_BUILD",
+    "ACVRAM_VERROU_GLOB",
     "ACVRAM_WARM_GRAPHS",
     "ACVRAM_WARM_SPEC",
 }
@@ -998,7 +1020,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "la carte est deja pleine a largeur 1 par sequence "
                          "et verifier plus large coute plus qu'il ne rend "
                          "(mesure 14/09, revue/verdict-cout-verification-"
-                         "ngram-b12-14-09.md, -49,9 %% de debit a b=12) -- "
+                         "ngram-b12-14-09.md, -49,9 pourcent de debit a b=12) -- "
                          "voir GardeSpeculation dans engine/speculative.py")
     sv.add_argument("--draft-model", help="repertoire converti d'un petit modele "
                                           "charge de proposer des jetons")

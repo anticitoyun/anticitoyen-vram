@@ -44,6 +44,7 @@
 #include <array>
 #include <map>
 #include <cstdlib>
+#include <string>
 #include <vector>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -1758,7 +1759,9 @@ __device__ __forceinline__ void charger_x_sh(const XT *__restrict__ xn, float *x
 #endif
 // RPW lignes par warp, en boucle : l'activation n'est chargée qu'une fois
 // par bloc pour GW_WARPS*RPW lignes (sinon son trafic L2 égale celui des
-// poids sur ces petites projections).
+// poids sur ces petites projections). Défaut 4 depuis poste7-rpw-defaut-18-09
+// (poste3, Coder b=12 in situ ABAB : 1 262 t/s nu contre 1 114 à rpw=1 ;
+// ACVRAM_GROUPED_RPW=1|2 témoins).
 template <typename XT, int RPW>
 __global__ void nvfp4_gemv_grouped_warp_kernel(
     const unsigned char *__restrict__ qw, const unsigned char *__restrict__ bscale,
@@ -1848,6 +1851,17 @@ __global__ void nvfp4_gemv_grouped_gateup_kernel(
     }
 }
 
+// x en registres (défini plus bas) : aiguillage depuis les wrappers v1
+static bool xreg_demande();
+static bool xreg_demande_gateup();
+static bool xreg_possible(int64_t K);
+torch::Tensor nvfp4_gemv_grouped_xreg(torch::Tensor qw, torch::Tensor bscale, torch::Tensor gscales,
+                                      torch::Tensor expert_ids, torch::Tensor token_ids, torch::Tensor x, int64_t K);
+torch::Tensor nvfp4_gemv_grouped_gateup_xreg(torch::Tensor qg, torch::Tensor bg, torch::Tensor gsg,
+                                             torch::Tensor qu, torch::Tensor bu, torch::Tensor gsu,
+                                             torch::Tensor expert_ids, torch::Tensor token_ids,
+                                             torch::Tensor x, int64_t K, int64_t act);
+
 torch::Tensor nvfp4_gemv_grouped_gateup(
         torch::Tensor qg, torch::Tensor bg, torch::Tensor gsg,
         torch::Tensor qu, torch::Tensor bu, torch::Tensor gsu,
@@ -1857,11 +1871,13 @@ torch::Tensor nvfp4_gemv_grouped_gateup(
     CHECK_CONTIG(qg); CHECK_CONTIG(qu); CHECK_CONTIG(bg); CHECK_CONTIG(bu);
     TORCH_CHECK(K % 32 == 0 && (size_t)(K + K / 32) * sizeof(float) <= 48 * 1024,
                 "gate-up fusionne : K multiple de 32 et <= 11904");
+    if (xreg_demande_gateup() && xreg_possible(K))
+        return nvfp4_gemv_grouped_gateup_xreg(qg, bg, gsg, qu, bu, gsu, expert_ids, token_ids, x, K, act);
     const int M = qg.size(1), G = expert_ids.size(0);
     const bool bf = x.scalar_type() == torch::kBFloat16;
     auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
     auto out = torch::empty({G, M}, xc.options().dtype(torch::kFloat));
-    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 1;
+    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 4;
     dim3 grid((M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
     const size_t shm = (size_t)(K + K / 32) * sizeof(float);
     auto stream = at::cuda::getCurrentCUDAStream();
@@ -1874,6 +1890,531 @@ torch::Tensor nvfp4_gemv_grouped_gateup(
     else { GU_LAUNCH(float, xc.data_ptr<float>()); }
     #undef GU_LAUNCH
     #undef GU_L
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// GEMV groupée « x en registres » (18/09, poste7-gemv-experts-dernier-geste-18-09) :
+// la passe ncu (poste3, verdict-ncu-gemv-experts-rpw-18-09) montre la mémoire
+// PARTAGÉE dominante — x relu par flottant (32 LDS.32 par uint4 de poids, 128 o
+// de shared pour 16 o de poids), mio_throttle + short_scoreboard = 60 % des
+// décrochages à rpw=4, issue_active 56 %. Ici chaque voie charge UNE fois sa
+// tranche de x (les 32 flottants en face de chacun de ses uint4) en registres
+// par LDS.128 — étage à décalage de 4 flottants par 32 (XSH_PAS4 = 36 :
+// alignement 16 o gardé, bancs distincts par quart de warp) — puis balaie
+// ses RPW lignes sans plus toucher la shared. Même arithmétique, MÊMES
+// EXPRESSIONS que nvfp4_row_dot_warp (a0/a1/c0/c1, (…)·gscale, réduction par
+// shuffles) : sortie identique au bit (juge : tests/test_gemv_experts_v2.py).
+// Réservé à K ≤ 2 048 (≤ 2 uint4 par voie : 64 flottants de registres) ; au-delà,
+// le chemin partagé. ACVRAM_GROUPED_XREG=1 pour l'emprunter (0 : témoin).
+constexpr int XSH_GRP4 = 4;                 // flottants de décalage par groupe de 32
+constexpr int XSH_PAS4 = XSH_GRP + XSH_GRP4;
+__host__ __device__ __forceinline__ int xsh_taille4(int K) { return K + (K >> 5) * XSH_GRP4; }
+
+template <typename XT>
+__device__ __forceinline__ void charger_x_sh4(const XT *__restrict__ xn, float *xs_sh, int K) {
+    for (int i = threadIdx.x; i < K; i += blockDim.x) {
+        const int d = i + (i >> 5) * XSH_GRP4;
+        if constexpr (sizeof(XT) == 4) xs_sh[d] = xn[i];
+        else xs_sh[d] = __bfloat162float(xn[i]);
+    }
+    __syncthreads();
+}
+
+// Tranche de x d'une voie : NP uint4 (i = lane + 32·t), 32 flottants chacun.
+template <int NP>
+struct XReg { float4 v[NP][8]; };
+
+template <int NP>
+__device__ __forceinline__ void charger_xreg(const float *__restrict__ xs_sh, int npairs, int lane, XReg<NP> &xr) {
+    #pragma unroll
+    for (int t = 0; t < NP; ++t) {
+        const int i = lane + t * WARP;
+        const float4 *src = reinterpret_cast<const float4 *>(xs_sh + (long)i * XSH_PAS4);
+        #pragma unroll
+        for (int q = 0; q < 8; ++q) xr.v[t][q] = (i < npairs) ? src[q] : make_float4(0.f, 0.f, 0.f, 0.f);
+    }
+}
+
+__device__ __forceinline__ float xr_at(const float4 *v, int k) {   // k < 32, constant après déroulage
+    const float4 f = v[k >> 2];
+    return (k & 3) == 0 ? f.x : (k & 3) == 1 ? f.y : (k & 3) == 2 ? f.z : f.w;
+}
+
+template <int NP>
+__device__ __forceinline__ float nvfp4_row_dot_warp_xreg(
+        const uint4 *__restrict__ wrow, const unsigned char *__restrict__ brow,
+        float gscale, const XReg<NP> &xr, int npairs, int lane) {
+    float acc = 0.f;
+    int i = lane;
+    #pragma unroll
+    for (int t = 0; t + 1 < NP; t += 2) {
+        if (i + WARP < npairs) {
+            const uint4 pA = wrow[i], pB = wrow[i + WARP];
+            const unsigned char bA0 = brow[2 * i], bA1 = brow[2 * i + 1];
+            const unsigned char bB0 = brow[2 * (i + WARP)], bB1 = brow[2 * (i + WARP) + 1];
+            const unsigned int wA[4] = {pA.x, pA.y, pA.z, pA.w};
+            const unsigned int wB[4] = {pB.x, pB.y, pB.z, pB.w};
+            const float4 *xA = xr.v[t];
+            const float4 *xB = xr.v[t + 1];
+            float a0 = 0.f, a1 = 0.f, c0 = 0.f, c1 = 0.f;
+            #pragma unroll
+            for (int b = 0; b < 8; ++b) {
+                const float2 v0 = e2m1_pair((wA[b >> 2] >> ((b & 3) * 8)) & 0xFFu);
+                a0 += v0.x * xr_at(xA, 2 * b) + v0.y * xr_at(xA, 2 * b + 1);
+                const float2 v1 = e2m1_pair((wA[2 + (b >> 2)] >> ((b & 3) * 8)) & 0xFFu);
+                a1 += v1.x * xr_at(xA, WEIGHTS_PER_LOAD + 2 * b) + v1.y * xr_at(xA, WEIGHTS_PER_LOAD + 2 * b + 1);
+                const float2 u0 = e2m1_pair((wB[b >> 2] >> ((b & 3) * 8)) & 0xFFu);
+                c0 += u0.x * xr_at(xB, 2 * b) + u0.y * xr_at(xB, 2 * b + 1);
+                const float2 u1 = e2m1_pair((wB[2 + (b >> 2)] >> ((b & 3) * 8)) & 0xFFu);
+                c1 += u1.x * xr_at(xB, WEIGHTS_PER_LOAD + 2 * b) + u1.y * xr_at(xB, WEIGHTS_PER_LOAD + 2 * b + 1);
+            }
+            acc += (a0 * e4m3_to_float(bA0) + a1 * e4m3_to_float(bA1)
+                  + c0 * e4m3_to_float(bB0) + c1 * e4m3_to_float(bB1)) * gscale;
+            i += 2 * WARP;
+        }
+    }
+    #pragma unroll
+    for (int t = 0; t < NP; ++t) {
+        const int ii = lane + t * WARP;
+        // la même condition de reste que nvfp4_row_dot_warp : les indices
+        // qu'une paire n'a pas pris (i + WARP ≥ npairs) et ii < npairs
+        if (ii >= i && ii < npairs) {
+            const uint4 p4 = wrow[ii];
+            const float s0 = e4m3_to_float(brow[2 * ii]) * gscale;
+            const float s1 = e4m3_to_float(brow[2 * ii + 1]) * gscale;
+            const float4 *xp = xr.v[t];
+            const unsigned int words[4] = {p4.x, p4.y, p4.z, p4.w};
+            float part0 = 0.f, part1 = 0.f;
+            #pragma unroll
+            for (int b = 0; b < 8; ++b) {
+                const float2 v0 = e2m1_pair((words[b >> 2] >> ((b & 3) * 8)) & 0xFFu);
+                part0 += v0.x * xr_at(xp, 2 * b) + v0.y * xr_at(xp, 2 * b + 1);
+                const float2 v1 = e2m1_pair((words[2 + (b >> 2)] >> ((b & 3) * 8)) & 0xFFu);
+                part1 += v1.x * xr_at(xp, WEIGHTS_PER_LOAD + 2 * b) + v1.y * xr_at(xp, WEIGHTS_PER_LOAD + 2 * b + 1);
+            }
+            acc += part0 * s0 + part1 * s1;
+        }
+    }
+    for (int o = 16; o > 0; o >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, o);
+    return acc;
+}
+
+template <typename XT, int RPW, int NP>
+__global__ void nvfp4_gemv_grouped_xreg_kernel(
+    const unsigned char *__restrict__ qw, const unsigned char *__restrict__ bscale,
+    const float *__restrict__ gscales, const int *__restrict__ expert_ids,
+    const int *__restrict__ token_ids, const XT *__restrict__ x,
+    float *__restrict__ y, int M, int K) {
+    extern __shared__ float xs_sh[];
+    const int g = blockIdx.y, e = expert_ids[g];
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    if (e < 0) {
+        #pragma unroll
+        for (int r = 0; r < RPW; ++r) {
+            const int row = (blockIdx.x * GW_WARPS + warp) * RPW + r;
+            if (row >= M) return;
+            if (lane == 0) y[(long)g * M + row] = 0.f;
+        }
+        return;
+    }
+    charger_x_sh4<XT>(x + (long)token_ids[g] * K, xs_sh, K);
+    const long half_k = (long)K >> 1;
+    const int nloads = K / WEIGHTS_PER_LOAD, npairs = nloads >> 1;
+    const float gscale = gscales[e];
+    XReg<NP> xr;
+    charger_xreg<NP>(xs_sh, npairs, lane, xr);
+    #pragma unroll
+    for (int r = 0; r < RPW; ++r) {
+        const int row = (blockIdx.x * GW_WARPS + warp) * RPW + r;
+        if (row >= M) return;
+        const float acc = nvfp4_row_dot_warp_xreg<NP>(
+            reinterpret_cast<const uint4 *>(qw + ((long)e * M + row) * half_k),
+            bscale + ((long)e * M + row) * nloads, gscale, xr, npairs, lane);
+        if (lane == 0) y[(long)g * M + row] = acc;
+    }
+}
+
+template <typename XT, int RPW, int NP>
+__global__ void nvfp4_gemv_grouped_gateup_xreg_kernel(
+    const unsigned char *__restrict__ qg, const unsigned char *__restrict__ bg,
+    const float *__restrict__ gsg,
+    const unsigned char *__restrict__ qu, const unsigned char *__restrict__ bu,
+    const float *__restrict__ gsu,
+    const int *__restrict__ expert_ids, const int *__restrict__ token_ids,
+    const XT *__restrict__ x, float *__restrict__ y, int M, int K, int act) {
+    extern __shared__ float xs_sh[];
+    const int g = blockIdx.y, e = expert_ids[g];
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    if (e < 0) {
+        #pragma unroll
+        for (int r = 0; r < RPW; ++r) {
+            const int row = (blockIdx.x * GW_WARPS + warp) * RPW + r;
+            if (row >= M) return;
+            if (lane == 0) y[(long)g * M + row] = 0.f;
+        }
+        return;
+    }
+    charger_x_sh4<XT>(x + (long)token_ids[g] * K, xs_sh, K);
+    const long half_k = (long)K >> 1;
+    const int nloads = K / WEIGHTS_PER_LOAD, npairs = nloads >> 1;
+    XReg<NP> xr;
+    charger_xreg<NP>(xs_sh, npairs, lane, xr);
+    #pragma unroll
+    for (int r = 0; r < RPW; ++r) {
+        const int row = (blockIdx.x * GW_WARPS + warp) * RPW + r;
+        if (row >= M) return;
+        const long off = (long)e * M + row;
+        const float ag = nvfp4_row_dot_warp_xreg<NP>(
+            reinterpret_cast<const uint4 *>(qg + off * half_k), bg + off * nloads, gsg[e], xr, npairs, lane);
+        const float au = nvfp4_row_dot_warp_xreg<NP>(
+            reinterpret_cast<const uint4 *>(qu + off * half_k), bu + off * nloads, gsu[e], xr, npairs, lane);
+        if (lane == 0) y[(long)g * M + row] = acv_act(ag, act) * au;
+    }
+}
+
+// ACVRAM_GROUPED_XREG : 0 (témoin : x relu en shared) | down (DÉFAUT : x en registres
+// sur la projection down seule — poste7-gemv-experts-clos-18-09 : gateup à 96
+// registres tombait à 2 blocs/SM, +19 % ; down 56 registres, −12 %) | 1 (les
+// deux, témoin réfuté). Rend 0, 1 (down seul) ou 2 (les deux).
+// Défaut « down » depuis verdict-gemv-experts-xreg-down-18-09 (poste3, ABAB
+// Coder b=12 : × 0,944 nu, J/jeton × 0,954, bit-exact ; cellule 1 307 t/s nu).
+static int xreg_mode() {
+    static const int v = [] {
+        const char *e = std::getenv("ACVRAM_GROUPED_XREG");
+        if (!e || !*e) return 1;                 // défaut : down
+        if (std::string(e) == "down") return 1;
+        return atoi(e) != 0 ? 2 : 0;
+    }();
+    return v;
+}
+static bool xreg_demande() { return xreg_mode() >= 1; }            // down
+static bool xreg_demande_gateup() { return xreg_mode() >= 2; }     // gate/up aussi
+static bool xreg_possible(int64_t K) { return K % 32 == 0 && K <= 2048; }   // ≤ 2 uint4 par voie
+
+torch::Tensor nvfp4_gemv_grouped_xreg(torch::Tensor qw, torch::Tensor bscale, torch::Tensor gscales,
+                                      torch::Tensor expert_ids, torch::Tensor token_ids,
+                                      torch::Tensor x, int64_t K) {
+    CHECK_CUDA(qw); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(qw);
+    CHECK_CONTIG(qw); CHECK_CONTIG(bscale); CHECK_CONTIG(x);
+    TORCH_CHECK(xreg_possible(K), "xreg : K multiple de 32 et <= 2048");
+    const int M = qw.size(1), G = expert_ids.size(0);
+    const bool bf = x.scalar_type() == torch::kBFloat16;
+    auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
+    auto out = torch::empty({G, M}, xc.options().dtype(torch::kFloat));
+    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 4;
+    const int np = (K / 32 + WARP - 1) / WARP;            // uint4 par voie : 1 (K ≤ 1024) ou 2
+    dim3 grid((M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
+    const size_t shm = (size_t)xsh_taille4((int)K) * sizeof(float);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    #define XR_L(XT, R, P, PX) nvfp4_gemv_grouped_xreg_kernel<XT, R, P><<<grid, GW_WARPS * WARP, shm, stream>>>( \
+        qw.data_ptr<unsigned char>(), bscale.data_ptr<unsigned char>(), gscales.data_ptr<float>(), \
+        expert_ids.data_ptr<int>(), token_ids.data_ptr<int>(), PX, out.data_ptr<float>(), M, (int)K)
+    #define XR_R(XT, P, PX) do { if (rpw == 1) XR_L(XT, 1, P, PX); else if (rpw == 2) XR_L(XT, 2, P, PX); else XR_L(XT, 4, P, PX); } while (0)
+    #define XR_T(XT, PX) do { if (np == 1) XR_R(XT, 1, PX); else XR_R(XT, 2, PX); } while (0)
+    if (bf) { XR_T(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
+    else { XR_T(float, xc.data_ptr<float>()); }
+    #undef XR_T
+    #undef XR_R
+    #undef XR_L
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
+torch::Tensor nvfp4_gemv_grouped_gateup_xreg(
+        torch::Tensor qg, torch::Tensor bg, torch::Tensor gsg,
+        torch::Tensor qu, torch::Tensor bu, torch::Tensor gsu,
+        torch::Tensor expert_ids, torch::Tensor token_ids,
+        torch::Tensor x, int64_t K, int64_t act) {
+    CHECK_CUDA(qg); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(qg);
+    CHECK_CONTIG(qg); CHECK_CONTIG(qu); CHECK_CONTIG(bg); CHECK_CONTIG(bu);
+    TORCH_CHECK(xreg_possible(K), "xreg : K multiple de 32 et <= 2048");
+    const int M = qg.size(1), G = expert_ids.size(0);
+    const bool bf = x.scalar_type() == torch::kBFloat16;
+    auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
+    auto out = torch::empty({G, M}, xc.options().dtype(torch::kFloat));
+    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 4;
+    const int np = (K / 32 + WARP - 1) / WARP;
+    dim3 grid((M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
+    const size_t shm = (size_t)xsh_taille4((int)K) * sizeof(float);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    #define GX_L(XT, R, P, PX) nvfp4_gemv_grouped_gateup_xreg_kernel<XT, R, P><<<grid, GW_WARPS * WARP, shm, stream>>>( \
+        qg.data_ptr<unsigned char>(), bg.data_ptr<unsigned char>(), gsg.data_ptr<float>(), \
+        qu.data_ptr<unsigned char>(), bu.data_ptr<unsigned char>(), gsu.data_ptr<float>(), \
+        expert_ids.data_ptr<int>(), token_ids.data_ptr<int>(), PX, out.data_ptr<float>(), M, (int)K, (int)act)
+    #define GX_R(XT, P, PX) do { if (rpw == 1) GX_L(XT, 1, P, PX); else if (rpw == 2) GX_L(XT, 2, P, PX); else GX_L(XT, 4, P, PX); } while (0)
+    #define GX_T(XT, PX) do { if (np == 1) GX_R(XT, 1, PX); else GX_R(XT, 2, PX); } while (0)
+    if (bf) { GX_T(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
+    else { GX_T(float, xc.data_ptr<float>()); }
+    #undef GX_T
+    #undef GX_R
+    #undef GX_L
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// GEMV groupée v2 (18/09, poste7-lecture-profils-coder-17-09 § 2 : « GEMV
+// groupée à ≥ 85 % de bande ») : les paires (expert, jeton) arrivent TRIÉES
+// par expert (`ordre` = argsort(eid) côté hôte) ; un bloc « meneur » sert
+// jusqu'à TPB jetons du même expert d'un coup — les poids de l'expert sont
+// lus UNE fois par pas pour ces jetons (v1 : une fois par paire, 1,39 × sur
+// Coder b=12 : 96 paires pour 69 experts, relectures hors L2 pour partie), et
+// l'activation n'est étagée qu'une fois par bloc pour ses TPB jetons. Même
+// arithmétique que v1, dans le même ordre (nvfp4_row_dot_warp dupliquée
+// par jeton) : sortie identique au bit — le juge (tests/test_gemv_experts_v2.py).
+// Sortie écrite à la place d'ORIGINE de chaque paire (y[ordre[g]]) : les
+// consommateurs (act, down, pondération) ne changent pas.
+template <int TPB>
+__device__ __forceinline__ void nvfp4_row_dot_warp_multi(
+        const uint4 *__restrict__ wrow, const unsigned char *__restrict__ brow,
+        float gscale, const float *__restrict__ xs_sh, int xsz, int npairs, int lane, int n,
+        float *__restrict__ acc) {
+    #pragma unroll
+    for (int j = 0; j < TPB; ++j) acc[j] = 0.f;
+    int i = lane;
+    for (; i + WARP < npairs; i += 2 * WARP) {
+        const uint4 pA = wrow[i], pB = wrow[i + WARP];
+        const unsigned char bA0 = brow[2 * i], bA1 = brow[2 * i + 1];
+        const unsigned char bB0 = brow[2 * (i + WARP)], bB1 = brow[2 * (i + WARP) + 1];
+        const unsigned int wA[4] = {pA.x, pA.y, pA.z, pA.w};
+        const unsigned int wB[4] = {pB.x, pB.y, pB.z, pB.w};
+        const float fA0 = e4m3_to_float(bA0), fA1 = e4m3_to_float(bA1);
+        const float fB0 = e4m3_to_float(bB0), fB1 = e4m3_to_float(bB1);
+        #pragma unroll
+        for (int j = 0; j < TPB; ++j) {
+            if (j < n) {
+                const float *xA = xs_sh + (long)j * xsz + (long)i * XSH_PAS;
+                const float *xB = xs_sh + (long)j * xsz + (long)(i + WARP) * XSH_PAS;
+                float a0 = 0.f, a1 = 0.f, c0 = 0.f, c1 = 0.f;
+                #pragma unroll
+                for (int b = 0; b < 8; ++b) {
+                    const float2 v0 = e2m1_pair((wA[b >> 2] >> ((b & 3) * 8)) & 0xFFu);
+                    a0 += v0.x * xA[2 * b] + v0.y * xA[2 * b + 1];
+                    const float2 v1 = e2m1_pair((wA[2 + (b >> 2)] >> ((b & 3) * 8)) & 0xFFu);
+                    a1 += v1.x * xA[WEIGHTS_PER_LOAD + 2 * b] + v1.y * xA[WEIGHTS_PER_LOAD + 2 * b + 1];
+                    const float2 u0 = e2m1_pair((wB[b >> 2] >> ((b & 3) * 8)) & 0xFFu);
+                    c0 += u0.x * xB[2 * b] + u0.y * xB[2 * b + 1];
+                    const float2 u1 = e2m1_pair((wB[2 + (b >> 2)] >> ((b & 3) * 8)) & 0xFFu);
+                    c1 += u1.x * xB[WEIGHTS_PER_LOAD + 2 * b] + u1.y * xB[WEIGHTS_PER_LOAD + 2 * b + 1];
+                }
+                acc[j] += (a0 * fA0 + a1 * fA1 + c0 * fB0 + c1 * fB1) * gscale;
+            }
+        }
+    }
+    for (; i < npairs; i += WARP) {
+        const uint4 p4 = wrow[i];
+        const float s0 = e4m3_to_float(brow[2 * i]) * gscale;
+        const float s1 = e4m3_to_float(brow[2 * i + 1]) * gscale;
+        const unsigned int words[4] = {p4.x, p4.y, p4.z, p4.w};
+        #pragma unroll
+        for (int j = 0; j < TPB; ++j) {
+            if (j < n) {
+                const float *xp = xs_sh + (long)j * xsz + (long)i * XSH_PAS;
+                float part0 = 0.f, part1 = 0.f;
+                #pragma unroll
+                for (int b = 0; b < 8; ++b) {
+                    const float2 v0 = e2m1_pair((words[b >> 2] >> ((b & 3) * 8)) & 0xFFu);
+                    part0 += v0.x * xp[2 * b] + v0.y * xp[2 * b + 1];
+                    const float2 v1 = e2m1_pair((words[2 + (b >> 2)] >> ((b & 3) * 8)) & 0xFFu);
+                    part1 += v1.x * xp[WEIGHTS_PER_LOAD + 2 * b] + v1.y * xp[WEIGHTS_PER_LOAD + 2 * b + 1];
+                }
+                acc[j] += part0 * s0 + part1 * s1;
+            }
+        }
+    }
+    #pragma unroll
+    for (int j = 0; j < TPB; ++j)
+        for (int o = 16; o > 0; o >>= 1) acc[j] += __shfl_xor_sync(0xffffffffu, acc[j], o);
+}
+
+// Meneur du sous-segment [g, g+n) : e ≥ 0, g au début d'un segment d'expert
+// ou à un multiple de TPB depuis ce début ; n ≤ TPB paires. Rend n (0 : pas
+// meneur). Calcul par le fil 0, diffusé par la mémoire partagée.
+template <int TPB>
+__device__ __forceinline__ int gv2_meneur(const int *__restrict__ eid_s, int G, int g, int e, int *s_n) {
+    if (threadIdx.x == 0) {
+        int debut = g;
+        while (debut > 0 && eid_s[debut - 1] == e) --debut;
+        int n = 0;
+        if ((g - debut) % TPB == 0) {
+            n = 1;
+            while (n < TPB && g + n < G && eid_s[g + n] == e) ++n;
+        }
+        *s_n = n;
+    }
+    __syncthreads();
+    return *s_n;
+}
+
+template <typename XT, int TPB>
+__device__ __forceinline__ void gv2_charger_x(const XT *__restrict__ x, const int *__restrict__ tok_s,
+                                              int g, int n, float *xs_sh, int K, int xsz) {
+    for (int j = 0; j < n; ++j) {
+        const XT *xn = x + (long)tok_s[g + j] * K;
+        float *dst = xs_sh + (long)j * xsz;
+        for (int i = threadIdx.x; i < K; i += blockDim.x) {
+            const int d = i + (i >> 5);
+            if constexpr (sizeof(XT) == 4) dst[d] = xn[i];
+            else dst[d] = __bfloat162float(xn[i]);
+        }
+    }
+    __syncthreads();
+}
+
+template <typename XT, int TPB, int RPW>
+__global__ void nvfp4_gemv_grouped_v2_kernel(
+    const unsigned char *__restrict__ qw, const unsigned char *__restrict__ bscale,
+    const float *__restrict__ gscales, const int *__restrict__ eid_s,
+    const int *__restrict__ tok_s, const int *__restrict__ ordre,
+    const XT *__restrict__ x, float *__restrict__ y, int M, int K, int G) {
+    extern __shared__ float xs_sh[];
+    __shared__ int s_n;
+    const int g = blockIdx.y, e = eid_s[g];
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    if (e < 0) {                     // créneau fantôme : zéro, aucun poids lu
+        #pragma unroll
+        for (int r = 0; r < RPW; ++r) {
+            const int row = (blockIdx.x * GW_WARPS + warp) * RPW + r;
+            if (row >= M) return;
+            if (lane == 0) y[(long)ordre[g] * M + row] = 0.f;
+        }
+        return;
+    }
+    const int n = gv2_meneur<TPB>(eid_s, G, g, e, &s_n);
+    if (n == 0) return;
+    const int xsz = xsh_taille(K);
+    gv2_charger_x<XT, TPB>(x, tok_s, g, n, xs_sh, K, xsz);
+    const long half_k = (long)K >> 1;
+    const int nloads = K / WEIGHTS_PER_LOAD;
+    const float gscale = gscales[e];
+    float acc[TPB];
+    #pragma unroll
+    for (int r = 0; r < RPW; ++r) {
+        const int row = (blockIdx.x * GW_WARPS + warp) * RPW + r;
+        if (row >= M) return;
+        nvfp4_row_dot_warp_multi<TPB>(
+            reinterpret_cast<const uint4 *>(qw + ((long)e * M + row) * half_k),
+            bscale + ((long)e * M + row) * nloads, gscale, xs_sh, xsz, nloads >> 1, lane, n, acc);
+        if (lane == 0) {
+            #pragma unroll
+            for (int j = 0; j < TPB; ++j)
+                if (j < n) y[(long)ordre[g + j] * M + row] = acc[j];
+        }
+    }
+}
+
+template <typename XT, int TPB, int RPW>
+__global__ void nvfp4_gemv_grouped_gateup_v2_kernel(
+    const unsigned char *__restrict__ qg, const unsigned char *__restrict__ bg,
+    const float *__restrict__ gsg,
+    const unsigned char *__restrict__ qu, const unsigned char *__restrict__ bu,
+    const float *__restrict__ gsu,
+    const int *__restrict__ eid_s, const int *__restrict__ tok_s, const int *__restrict__ ordre,
+    const XT *__restrict__ x, float *__restrict__ y, int M, int K, int G, int act) {
+    extern __shared__ float xs_sh[];
+    __shared__ int s_n;
+    const int g = blockIdx.y, e = eid_s[g];
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    if (e < 0) {
+        #pragma unroll
+        for (int r = 0; r < RPW; ++r) {
+            const int row = (blockIdx.x * GW_WARPS + warp) * RPW + r;
+            if (row >= M) return;
+            if (lane == 0) y[(long)ordre[g] * M + row] = 0.f;
+        }
+        return;
+    }
+    const int n = gv2_meneur<TPB>(eid_s, G, g, e, &s_n);
+    if (n == 0) return;
+    const int xsz = xsh_taille(K);
+    gv2_charger_x<XT, TPB>(x, tok_s, g, n, xs_sh, K, xsz);
+    const long half_k = (long)K >> 1;
+    const int nloads = K / WEIGHTS_PER_LOAD;
+    float ag[TPB], au[TPB];
+    #pragma unroll
+    for (int r = 0; r < RPW; ++r) {
+        const int row = (blockIdx.x * GW_WARPS + warp) * RPW + r;
+        if (row >= M) return;
+        const long off = (long)e * M + row;
+        nvfp4_row_dot_warp_multi<TPB>(reinterpret_cast<const uint4 *>(qg + off * half_k), bg + off * nloads,
+                                      gsg[e], xs_sh, xsz, nloads >> 1, lane, n, ag);
+        nvfp4_row_dot_warp_multi<TPB>(reinterpret_cast<const uint4 *>(qu + off * half_k), bu + off * nloads,
+                                      gsu[e], xs_sh, xsz, nloads >> 1, lane, n, au);
+        if (lane == 0) {
+            #pragma unroll
+            for (int j = 0; j < TPB; ++j)
+                if (j < n) y[(long)ordre[g + j] * M + row] = acv_act(ag[j], act) * au[j];
+        }
+    }
+}
+
+// TPB : le plus grand de {4, 2, 1} dont l'étage d'activations tient en 48 Kio.
+static int gv2_tpb(int64_t K) {
+    const size_t un = (size_t)(K + K / 32) * sizeof(float);
+    if (4 * un <= 48 * 1024) return 4;
+    if (2 * un <= 48 * 1024) return 2;
+    return 1;
+}
+
+torch::Tensor nvfp4_gemv_grouped_v2(torch::Tensor qw, torch::Tensor bscale, torch::Tensor gscales,
+                                    torch::Tensor eid_s, torch::Tensor tok_s, torch::Tensor ordre,
+                                    torch::Tensor x, int64_t K) {
+    CHECK_CUDA(qw); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(qw);
+    CHECK_CONTIG(qw); CHECK_CONTIG(bscale); CHECK_CONTIG(x);
+    TORCH_CHECK(K % 32 == 0 && (size_t)(K + K / 32) * sizeof(float) <= 48 * 1024, "v2 : K multiple de 32 et <= 11904");
+    const int M = qw.size(1), G = eid_s.size(0);
+    const bool bf = x.scalar_type() == torch::kBFloat16;
+    auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
+    auto out = torch::empty({G, M}, xc.options().dtype(torch::kFloat));
+    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 4;
+    const int tpb = gv2_tpb(K);
+    dim3 grid((M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
+    const size_t shm = (size_t)tpb * (K + K / 32) * sizeof(float);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    #define GV2_L(XT, T, R, PX) nvfp4_gemv_grouped_v2_kernel<XT, T, R><<<grid, GW_WARPS * WARP, shm, stream>>>( \
+        qw.data_ptr<unsigned char>(), bscale.data_ptr<unsigned char>(), gscales.data_ptr<float>(), \
+        eid_s.data_ptr<int>(), tok_s.data_ptr<int>(), ordre.data_ptr<int>(), PX, out.data_ptr<float>(), M, (int)K, G)
+    #define GV2_R(XT, T, PX) do { if (rpw == 1) GV2_L(XT, T, 1, PX); else if (rpw == 2) GV2_L(XT, T, 2, PX); else GV2_L(XT, T, 4, PX); } while (0)
+    #define GV2_T(XT, PX) do { if (tpb == 4) GV2_R(XT, 4, PX); else if (tpb == 2) GV2_R(XT, 2, PX); else GV2_R(XT, 1, PX); } while (0)
+    if (bf) { GV2_T(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
+    else { GV2_T(float, xc.data_ptr<float>()); }
+    #undef GV2_T
+    #undef GV2_R
+    #undef GV2_L
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
+torch::Tensor nvfp4_gemv_grouped_gateup_v2(
+        torch::Tensor qg, torch::Tensor bg, torch::Tensor gsg,
+        torch::Tensor qu, torch::Tensor bu, torch::Tensor gsu,
+        torch::Tensor eid_s, torch::Tensor tok_s, torch::Tensor ordre,
+        torch::Tensor x, int64_t K, int64_t act) {
+    CHECK_CUDA(qg); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(qg);
+    CHECK_CONTIG(qg); CHECK_CONTIG(qu); CHECK_CONTIG(bg); CHECK_CONTIG(bu);
+    TORCH_CHECK(K % 32 == 0 && (size_t)(K + K / 32) * sizeof(float) <= 48 * 1024, "v2 : K multiple de 32 et <= 11904");
+    const int M = qg.size(1), G = eid_s.size(0);
+    const bool bf = x.scalar_type() == torch::kBFloat16;
+    auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
+    auto out = torch::empty({G, M}, xc.options().dtype(torch::kFloat));
+    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 4;
+    const int tpb = gv2_tpb(K);
+    dim3 grid((M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
+    const size_t shm = (size_t)tpb * (K + K / 32) * sizeof(float);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    #define GU2_L(XT, T, R, PX) nvfp4_gemv_grouped_gateup_v2_kernel<XT, T, R><<<grid, GW_WARPS * WARP, shm, stream>>>( \
+        qg.data_ptr<unsigned char>(), bg.data_ptr<unsigned char>(), gsg.data_ptr<float>(), \
+        qu.data_ptr<unsigned char>(), bu.data_ptr<unsigned char>(), gsu.data_ptr<float>(), \
+        eid_s.data_ptr<int>(), tok_s.data_ptr<int>(), ordre.data_ptr<int>(), PX, out.data_ptr<float>(), M, (int)K, G, (int)act)
+    #define GU2_R(XT, T, PX) do { if (rpw == 1) GU2_L(XT, T, 1, PX); else if (rpw == 2) GU2_L(XT, T, 2, PX); else GU2_L(XT, T, 4, PX); } while (0)
+    #define GU2_T(XT, PX) do { if (tpb == 4) GU2_R(XT, 4, PX); else if (tpb == 2) GU2_R(XT, 2, PX); else GU2_R(XT, 1, PX); } while (0)
+    if (bf) { GU2_T(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
+    else { GU2_T(float, xc.data_ptr<float>()); }
+    #undef GU2_T
+    #undef GU2_R
+    #undef GU2_L
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return out;
 }
@@ -1939,7 +2480,7 @@ torch::Tensor nvfp4_gemv_grouped_gateup_table(
     const bool bf = x.scalar_type() == torch::kBFloat16;
     auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
     auto out = torch::empty({G, M}, xc.options().dtype(torch::kFloat));
-    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 1;
+    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 4;
     dim3 grid(((int)M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
     const size_t shm = (size_t)(K + K / 32) * sizeof(float);
     auto stream = at::cuda::getCurrentCUDAStream();
@@ -3783,11 +4324,13 @@ torch::Tensor nvfp4_gemv_grouped(torch::Tensor qw, torch::Tensor bscale,
     const int G = expert_ids.size(0);
     auto stream = at::cuda::getCurrentCUDAStream();
     static const bool ancien = std::getenv("ACVRAM_GROUPED_OLD") != nullptr;
+    if (!ancien && xreg_demande() && xreg_possible(K))
+        return nvfp4_gemv_grouped_xreg(qw, bscale, gscales, expert_ids, token_ids, x, K);
     if (!ancien && (size_t)(K + K / 32) * sizeof(float) <= 48 * 1024) {
         const bool bf = x.scalar_type() == torch::kBFloat16;
         auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
         auto out = torch::empty({G, M}, xc.options().dtype(torch::kFloat));
-        static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 1;
+        static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 4;
         dim3 grid((M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
         const size_t shm = (size_t)(K + K / 32) * sizeof(float);
         #define GWK(XT, PX) do { \
@@ -3886,7 +4429,7 @@ torch::Tensor nvfp4_gemv_grouped_table(torch::Tensor table_qw, torch::Tensor tab
     const bool bf = x.scalar_type() == torch::kBFloat16;
     auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
     auto out = torch::empty({G, (int)M}, xc.options().dtype(torch::kFloat));
-    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 1;
+    static const int rpw = std::getenv("ACVRAM_GROUPED_RPW") ? atoi(std::getenv("ACVRAM_GROUPED_RPW")) : 4;
     dim3 grid(((int)M + GW_WARPS * rpw - 1) / (GW_WARPS * rpw), G);
     const size_t shm = (size_t)(K + K / 32) * sizeof(float);
     auto stream = at::cuda::getCurrentCUDAStream();
@@ -5320,6 +5863,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "INT8 : dequantification + produit fusionnes ; sortie_fp32 : x bf16, accumulation et sortie fp32 (tete)");
     m.def("nvfp4_gemv_grouped", &nvfp4_gemv_grouped,
           "NVFP4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
+    m.def("nvfp4_gemv_grouped_xreg", &nvfp4_gemv_grouped_xreg,
+          py::arg("qw"), py::arg("bscale"), py::arg("gscales"), py::arg("expert_ids"), py::arg("token_ids"),
+          py::arg("x"), py::arg("K"), "NVFP4 : GEMV groupée, x en registres par tranche (K <= 2048), identique au bit");
+    m.def("nvfp4_gemv_grouped_gateup_xreg", &nvfp4_gemv_grouped_gateup_xreg,
+          py::arg("qg"), py::arg("bg"), py::arg("gsg"), py::arg("qu"), py::arg("bu"), py::arg("gsu"),
+          py::arg("expert_ids"), py::arg("token_ids"), py::arg("x"), py::arg("K"), py::arg("act") = 0,
+          "NVFP4 : gate/up fusionnés, x en registres par tranche (K <= 2048), identique au bit");
+    m.def("nvfp4_gemv_grouped_v2", &nvfp4_gemv_grouped_v2,
+          py::arg("qw"), py::arg("bscale"), py::arg("gscales"), py::arg("eid_s"), py::arg("tok_s"),
+          py::arg("ordre"), py::arg("x"), py::arg("K"),
+          "NVFP4 : GEMV groupée v2, paires triées par expert, poids lus une fois pour TPB jetons");
+    m.def("nvfp4_gemv_grouped_gateup_v2", &nvfp4_gemv_grouped_gateup_v2,
+          py::arg("qg"), py::arg("bg"), py::arg("gsg"), py::arg("qu"), py::arg("bu"), py::arg("gsu"),
+          py::arg("eid_s"), py::arg("tok_s"), py::arg("ordre"), py::arg("x"), py::arg("K"), py::arg("act") = 0,
+          "NVFP4 : gate/up fusionnés v2, paires triées par expert");
     m.def("nvfp4_gemv_grouped_gateup", &nvfp4_gemv_grouped_gateup,
           py::arg("qg"), py::arg("bg"), py::arg("gsg"), py::arg("qu"), py::arg("bu"),
           py::arg("gsu"), py::arg("expert_ids"), py::arg("token_ids"), py::arg("x"),
