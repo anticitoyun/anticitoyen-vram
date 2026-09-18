@@ -28,14 +28,13 @@ def _pile(E, M, K, seed):
 
 def _routage(b, k, E, seed, mode="aleatoire"):
     g = torch.Generator().manual_seed(seed)
-    if mode == "aleatoire":
-        topi = torch.stack([torch.randperm(E, generator=g)[:k] for _ in range(b)])
-    elif mode == "un_expert":
+    if mode == "un_expert":
         topi = torch.full((b, k), 3); topi[:, 1:] = torch.stack([torch.randperm(E, generator=g)[:k - 1] for _ in range(b)])
+    else:                                              # aléatoire, fantômes
+        topi = torch.stack([torch.randperm(E, generator=g)[:k] for _ in range(b)])
     eid = topi.reshape(-1).to(torch.int32)
     if mode == "fantomes":
-        topi = torch.stack([torch.randperm(E, generator=g)[:k] for _ in range(b)])
-        eid = topi.reshape(-1).to(torch.int32); eid[-2 * k:] = -1            # deux jetons fantômes
+        eid[-2 * k:] = -1                              # deux jetons fantômes
     tok = torch.arange(b, dtype=torch.int32).repeat_interleave(k)
     return eid.to(DEV), tok.to(DEV)
 

@@ -60,3 +60,25 @@ ou le segment remonté sérialise : mesurer TPB 2 vs 4 par
 `ACVRAM_GROUPED_RPW` et un routage sans répétition, où v2 = v1 attendu ±
 3 %). En situ ensuite (poste3, 20 min) : `ACVRAM_MOE_GEMV=v2` sur Coder
 b=12 : ≥ 1 300 t/s nu (faux < 1 200), ppl-decode-kv identique (bit).
+
+## Verdict (poste3 ee2d12d) : porte FAUSSE — v2 plus lente de 23 %
+
+v1 7,88 ms/pas (1,13 To/s, 63 %), v2 9,66 ms/pas (0,92 To/s), sur 20/20
+routages, bit-exact 20/20. Mes deux prédictions dépassées (v1 6,5-7, v2
+4,6-5,3). Lecture de poste3, que je retiens : à 65-75 experts distincts pour
+96 paires, la relecture v1 (× 1,37) est servie par le L2 — elle ne coûtait
+pas de bande ; v2 paie le tri, les blocs non meneurs (27 % de blocs vides
+par tranche de lignes) et une occupation moindre (33 Kio d'étage par bloc
+contre 8) pour un bus qui ne lisait déjà rien deux fois. Le « 54 % relus »
+du profil était un compte d'octets demandés, pas d'octets sur le bus — un
+chiffre juste, hors sujet comme décision (fiche « un chiffre juste peut
+être hors sujet »). v1 reste défaut ; v2 reste témoin (`ACVRAM_MOE_GEMV=v2`).
+Ce que dirait un pas suivant, si poste7 le veut : le 63 % de v1 n'est pas
+la relecture, donc c'est la latence par ligne (2 uint4 par voie en vol,
+étage d'activation + __syncthreads par bloc de 8 lignes) — plus de lignes
+par bloc (ACVRAM_GROUPED_RPW=2/4, déjà exposé, jamais mesuré au banc) et
+des chargements de la ligne suivante avant la réduction ; à mesurer avant
+d'écrire une ligne.
+
+Bug de test corrigé : `_routage` définissait `eid` avant la branche
+« fantômes » (UnboundLocalError, 2 cas) ; poste3 l'a rejoué corrigé, 9/9.
