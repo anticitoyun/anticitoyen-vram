@@ -66,3 +66,40 @@ acvram doctor || warn "doctor a signale des problemes ; voir ci-dessus"
 say ""
 say "activez avec :  source $VENV/bin/activate"
 say "puis essayez :   acvram detect"
+
+# ---- outils terminal (Claude/Kimi/tout agent) : optionnel -------------------
+# acvram installe le paquet Python ; ce bloc, active seulement sur demande,
+# depose EN PLUS les lanceurs qui routent Claude Code / Kimi Code (ou tout
+# autre agent en terminal) vers acvram et les moteurs voisins (vLLM,
+# llama.cpp, TabbyAPI) — kimi-modeles/claude-modeles (choix de modele),
+# acvram-serveur (demarrage du serveur choisi), etc. Source : config-ia/bin,
+# le depot qui suit ces scripts (voisin d'anticitoyen-vram sur cette machine ;
+# ACVRAM_OUTILS_SRC pour en pointer un autre). Ne fait rien par defaut : ne
+# doit jamais bloquer une installation qui ne veut que le paquet acvram.
+if [ "${1:-}" = "--outils-terminal" ] || [ "${ACVRAM_INSTALL_OUTILS:-0}" = 1 ]; then
+    SRC="${ACVRAM_OUTILS_SRC:-$(dirname "$(pwd)")/config-ia/bin}"
+    DEST="$HOME/.local/bin"
+    say ""
+    say "outils terminal : deploiement depuis $SRC vers $DEST"
+    if [ ! -d "$SRC" ]; then
+        warn "source introuvable ($SRC) ; rien deploye. Fixez ACVRAM_OUTILS_SRC."
+    else
+        mkdir -p "$DEST"
+        # Ecartes : chemins fixes sur un ancien $HOME (migration du 13/09,
+        # pas remappes) — les deployer casserait plutot que reparer.
+        ECARTES="memoire memoire-consolider memoire-sync exporter-projet-ia installer-projet-ia"
+        n_copies=0; n_ecartes=0
+        for f in "$SRC"/*; do
+            [ -f "$f" ] || continue
+            nom="$(basename "$f")"
+            case " $ECARTES " in
+                *" $nom "*) n_ecartes=$((n_ecartes + 1)); continue;;
+            esac
+            cp -a "$f" "$DEST/$nom"
+            chmod +x "$DEST/$nom"
+            n_copies=$((n_copies + 1))
+        done
+        say "  $n_copies script(s) depose(s) dans $DEST"
+        [ "$n_ecartes" -gt 0 ] && warn "  $n_ecartes ecarte(s) (chemin fige sur l'ancien home, a corriger a la main : $ECARTES)"
+    fi
+fi
