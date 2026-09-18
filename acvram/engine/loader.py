@@ -1701,6 +1701,10 @@ def _reserve_prefill(spec, max_model_len: Optional[int], manifest: dict,
     reserve = int(spec.activations_prefill_bytes(ctx))
     if plan is not None and plan.layers:
         reserve += _DENSE_SLOTS * max(int(l.attn_bytes) + int(l.mlp_bytes) for l in plan.layers)
+        # P1 : seconde disposition des experts (repack Marlin, même masse que
+        # la pile NVFP4 : codes K·N/2 + échelles K·N/16) — experts_layout=double
+        if os.environ.get("ACVRAM_PREFILL_GROUPED", "groupe") == "marlin":
+            reserve += sum(int(l.mlp_bytes) for l in plan.layers if getattr(l, "is_moe", False))
     return reserve
 
 
