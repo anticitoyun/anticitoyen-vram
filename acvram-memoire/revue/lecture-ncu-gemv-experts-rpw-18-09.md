@@ -60,3 +60,36 @@ c. Ce que je ne propose pas : x en registres (64 par voie sur K = 2048 :
    par `dram__throughput` %.
 Ces trois corrections ne sont utiles qu'à une passe suivante ; je les porte
 si poste7 rouvre, sinon le script reste avec cette note.
+
+## 5. Dernier geste (poste7-gemv-experts-dernier-geste-18-09) — livré à sec
+
+`acvram_kernels.cu` : `nvfp4_gemv_grouped_xreg_kernel<XT, RPW, NP>` et
+`_gateup_xreg_kernel` — étage x à décalage de 4 flottants par 32
+(`XSH_PAS4 = 36`, alignement 16 o, bancs distincts par quart de warp) ;
+chaque voie charge UNE fois sa tranche (NP ≤ 2 uint4 → `float4 v[NP][8]`,
+64 registres à K = 2 048) par LDS.128 (`charger_xreg`), puis balaie ses RPW
+lignes sans toucher la shared ; `nvfp4_row_dot_warp_xreg` = les MÊMES
+expressions que `nvfp4_row_dot_warp` (a0/a1/c0/c1, `(…) * gscale`,
+reste `part0 * s0 + part1 * s1`, réduction par shuffles), même condition de
+paire et de reste → identique au bit attendu. Réservé à K ≤ 2 048
+(Coder : gate/up K = 2 048 → NP = 2, down K = 768 → NP = 1) ; au-delà, le
+chemin partagé. Aiguillage dans les wrappers v1 par
+`ACVRAM_GROUPED_XREG=1` (régime, défaut 0 : témoin), fonctions aussi
+exposées (`nvfp4_gemv_grouped_xreg`, `_gateup_xreg`) pour le juge et le
+banc. `nvcc -c` contrôlé sans erreur (C++20, sm_86 + sm_120).
+
+Juge (carte) : `test_gemv_experts_v2.py` +5 — xreg = v1 `torch.equal`
+sur (2048, 768), (768, 2048), (1024, 512) × {aléatoire, un expert saturé,
+fantômes} ; gate/up xreg = v1 ; bras cassant : x décalé d'un flottant →
+différent. Banc : bras `xreg` (ms/pas, bit-exact par routage). Script ncu
+corrigé (env par `sudo -n env …`, LC_ALL=C + parseur tolérant à la locale
+fr, `dram__bytes_read` retiré, noyaux xreg dans le filtre, somme
+gateup + down en ms/pas imprimée contre la porte 6,2).
+
+Prédiction scellée (ncu, poste3) : mio_throttle 4,6 → ≤ 1,5, short_scoreboard
+4,5 → ≤ 1,5, issue_active 56 → ≤ 45 % ; occupation par registres 6 → 3-4
+blocs (≈ 64-80 registres/fil) ; gateup 87,9 → 68-76 µs, down 65,2 → 55-60 ;
+**gateup + down 5,9-6,5 ms/pas** — la porte 6,2 au milieu de ma fourchette :
+tenu ou faux à parts égales, je n'engage pas plus. Faux si > 6,2 : fermé à
+1 262. Si tenu, en situ ≥ 1 300 nu (Coder b=12 : 1 262 × 7,35/6,2 ≈ 1 330
+si le reste du pas ne bouge pas).
