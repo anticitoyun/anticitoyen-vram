@@ -364,6 +364,30 @@ class Engine:
                 f"max_concurrent_seqs={max_batch_size}, ou poser "
                 f"ACVRAM_KV_PLAN_OVERRIDE=1 pour forcer en connaissance de cause.")
 
+        # poste7-devstral-llama4-scaling-18-09 : `llama_4_scaling_beta` (yarn
+        # ministral3/Devstral) n'est PAS porté sur q dans le forward de
+        # l'attention (chantier séparé, ~2h) -- sa formule HF (modeling_
+        # ministral3.py, get_llama_4_attn_scale) vaut 1 exactement sous
+        # `original_max_position_embeddings`, mais PAS au-delà. Plutôt
+        # qu'un no-op silencieux qui fausserait les logits sans le dire,
+        # REFUS NOMMÉ au-delà de ce plafond ; sous le plafond, la valeur
+        # non servie reste visible dans `regime_ligne()` (ni cachée ni
+        # fausse — juste inerte à cette longueur).
+        rs = getattr(self.spec, "rope_scaling", None) or {}
+        self._llama4_scaling_beta = float(rs.get("llama_4_scaling_beta") or 0.0)
+        self._llama4_scaling_plafond = int(rs.get("original_max_position_embeddings") or 0)
+        if (str(rs.get("rope_type") or rs.get("type") or "") == "yarn"
+                and self._llama4_scaling_beta > 0 and self._llama4_scaling_plafond
+                and max_model_len > self._llama4_scaling_plafond):
+            raise ValueError(
+                f"llama_4_scaling_beta non servi : max_model_len={max_model_len} "
+                f"> original_max_position_embeddings={self._llama4_scaling_plafond} "
+                f"(rope yarn, beta={self._llama4_scaling_beta}) -- au-delà de ce "
+                f"plafond la formule 1+beta*log(1+floor(position/"
+                f"{self._llama4_scaling_plafond})) n'est plus 1,0 et acvram ne "
+                f"l'applique pas encore sur q. Servir sous ce plafond, ou porter "
+                f"le scaling avant.")
+
         # Hybrides à récurrence linéaire : l'état GDN vit par séquence, hors
         # du cache paginé ; le cache de préfixe n'aurait pas de sens (les
         # blocs KV ne suffisent pas à restaurer l'état), on le coupe.
@@ -565,6 +589,10 @@ class Engine:
             "gdn": _gdn_regime(),
             "noyaux": regime_noyaux()["hors_defaut"],
             "kv_plan_override": self._kv_plan_override,
+            # poste7-devstral-llama4-scaling-18-09 : visible meme sous le
+            # plafond (non refuse ici), pour ne jamais laisser croire que le
+            # scaling est applique alors qu'il ne l'est nulle part.
+            "llama4_scaling_beta": self._llama4_scaling_beta or None,
         }
 
     def regime_ligne(self) -> str:
@@ -593,6 +621,8 @@ class Engine:
                + (f"noyaux={r['noyaux']} " if r["noyaux"] else "")
                + f"kv_budget={self.allocator.num_blocks * BLOCK_SIZE}/{kv_seqs} "
                + (f"kv_plan_override=1 " if r["kv_plan_override"] else "")
+               + (f"llama4_scaling_beta={r['llama4_scaling_beta']}(non_servi) "
+                  if r["llama4_scaling_beta"] else "")
                + (f"ignore_eos={self.stats.sequences_ignore_eos} "
                   if self.stats.sequences_ignore_eos else "")
                + f"cache_prefixe={self.stats.hit_rate:.3f} "
