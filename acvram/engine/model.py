@@ -954,20 +954,22 @@ class MoEBlock(nn.Module):
         échelle globale par expert (gate et up ne partagent pas la leur :
         pas de w13 fusionné). La pile NVFP4 reste pour le décodage (GEMV) :
         `experts_layout=double`, comptée par le Plan (`_reserve_prefill`).
-        Refusée, avec sa raison : AWQ ou Hadamard sur les experts (le noyau
-        ne les applique pas), pile non NVFP4, formes hors tuiles (K, N
-        multiples de 64), extension non compilée à sec (REGLES § 6 : jamais
-        de nvcc sous le verrou — `outils/banc-marlin-p1-18-09.py
-        --compiler-seulement`)."""
+        AWQ par expert et Hadamard (Coder classé 302025e : table [E, K])
+        sont appliqués À L'ACTIVATION avant toute GEMM du préfill
+        (`_forward_prefill_grouped` : `xs / awq_g[e_sorted]`, `xs_u`,
+        `act / awq_d[e_sorted]`, `fwht_activations` hors mma) — les poids
+        repackés sont les mêmes codes, l'échelle reste côté x : rien à
+        refuser (une première version refusait toute table AWQ, à tort —
+        poste7/chef 18/09). Refusée, avec sa raison : pile non NVFP4, formes
+        hors tuiles (K, N multiples de 64), extension non compilée à sec
+        (REGLES § 6 : jamais de nvcc sous le verrou —
+        `outils/banc-marlin-p1-18-09.py --compiler-seulement`)."""
         if _PREFILL_GROUPED != "marlin":
             return None
         raison = None
         if any(piles[n][0] != "nvfp4" for n in ("gate_proj", "up_proj", "down_proj") if n in piles) \
                 or "gate_proj" not in piles:
             raison = "piles non NVFP4"
-        elif any(awq.get(n) is not None for n in ("gate_proj", "up_proj", "down_proj")) \
-                or any(hadamard.get(n, 0) for n in ("gate_proj", "up_proj", "down_proj")):
-            raison = "AWQ ou Hadamard sur les experts"
         else:
             for n in ("gate_proj", "up_proj", "down_proj"):
                 _, qw, bs, gs, k, m = piles[n]

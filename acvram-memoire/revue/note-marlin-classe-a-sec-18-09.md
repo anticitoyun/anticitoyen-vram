@@ -85,9 +85,13 @@ formule(X) — alors la part fixe a bougé ou l'expert partagé pèse plus.
   le GEMV du décodage → `experts_layout=double` dans `regime_ligne()`
   (`runner.regime()`), et **comptée par le Plan** (`_reserve_prefill` :
   + Σ mlp_bytes des couches MoE sous `ACVRAM_PREFILL_GROUPED=marlin`, la
-  masse du repack = celle de la pile ; ≈ 1,7 Gio sur Coder). Refus
-  explicites, une ligne : piles non NVFP4, AWQ ou Hadamard sur les experts,
-  K ou N non multiple de 64, extension non compilée à sec (le moteur ne
+  masse du repack = celle de la pile ; ≈ 1,7 Gio sur Coder). **AWQ par
+  expert (le Coder classé 302025e, table [E, K]) et Hadamard : rien à
+  refuser** — l'échelle est côté activation, appliquée à `xs`/`xs_u`/`act`
+  AVANT les GEMM (`_forward_prefill_grouped`, hors mma), les poids repackés
+  sont les mêmes codes ; une première version refusait toute table AWQ, à
+  tort (poste7/chef 18/09), levée. Refus explicites, une ligne : piles non
+  NVFP4, K ou N non multiple de 64, extension non compilée à sec (le moteur ne
   compile JAMAIS sous le verrou : `charger(compiler=False)` rend None →
   repli « groupe » nommé).
 - `_forward_prefill_grouped`, branche `marlin` : lignes déjà triées par
@@ -98,9 +102,11 @@ formule(X) — alors la part fixe a bougé ou l'expert partagé pèse plus.
 - Régime : `ACVRAM_PREFILL_GROUPED = marlin | groupe (témoin) | w4a16 |
   grouped_mm | bmm` ; défaut inchangé (`groupe`) jusqu'au scellé in situ.
 - Tests : à sec — le Plan compte la seconde disposition, le régime la nomme ;
-  sur carte (skip ici) — `MoEBlock` jouet à 8 experts NVFP4, sortie
+  sur carte (skip ici) — `MoEBlock` jouet à 8 experts NVFP4, sans AWQ et
+  avec une table AWQ par expert (gate/up partagée, down distincte), sortie
   « marlin » = « groupe » à 2⁻⁷ × Σ|x·w|, **bras cassant** : échelles de bloc
-  de gate décalées d'un rang → rouge. Suite 864 passed.
+  de gate décalées d'un rang → rouge. Contrôle de la passe : `regime_ligne()`
+  = converti classé, experts_layout=double. Suite 864 passed.
 
 Scellé in situ (poste3, harnais égal, Coder 2 048) : **≥ 15 700 j/s**
 (formule : 16 405), PPL préfill = B0 ± 0,002 (mêmes codes W4, A bf16). Ma

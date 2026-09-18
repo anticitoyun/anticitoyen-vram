@@ -51,19 +51,31 @@ def test_le_regime_nomme_la_disposition(converted):
 CARTE = pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise (noyaux Marlin)")
 
 
-def _bloc_moe_jouet(E=8, H=256, I=128, top_k=2, dev="cuda"):
+def _bloc_moe_jouet(E=8, H=256, I=128, top_k=2, dev="cuda", awq=False):
     """Un MoEBlock à experts NVFP4 aléatoires, construit comme dans
-    test_moe_hadamard_pile (QuantLinear → to_device, MLP, routeur)."""
+    test_moe_hadamard_pile (QuantLinear → to_device, MLP, routeur) ; ``awq`` :
+    une échelle AWQ par expert (ChannelScaler, table [E, K] côté activation
+    comme le Coder classé 302025e), gate/up partagée, down distincte."""
     from acvram.engine.layers import QuantLinear
     from acvram.engine.model import MLP, MoEBlock
+    from acvram.quant.calibrate import ChannelScaler
     from acvram.quant.nvfp4 import quantize_nvfp4
     from acvram.quant.formats import _quantize_int8
 
-    def lin(o, i, graine):
+    def lin(o, i, graine, sc=None):
         g = torch.Generator().manual_seed(graine)
         w = (torch.randn(o, i, generator=g) * 0.05).to(torch.bfloat16)
-        return QuantLinear(quantize_nvfp4(w), out_features=o, in_features=i).to_device(dev)
-    experts = [MLP(lin(I, H, 10 * e + 1), lin(I, H, 10 * e + 2), lin(H, I, 10 * e + 3)) for e in range(E)]
+        return QuantLinear(quantize_nvfp4(w), out_features=o, in_features=i, scaler=sc).to_device(dev)
+
+    def scaler(i, graine):
+        if not awq:
+            return None
+        g = torch.Generator().manual_seed(graine)
+        return ChannelScaler((0.5 + torch.rand(i, generator=g) * 1.5).to(torch.bfloat16), 0)
+    experts = []
+    for e in range(E):
+        s_x, s_d = scaler(H, 100 + e), scaler(I, 200 + e)
+        experts.append(MLP(lin(I, H, 10 * e + 1, s_x), lin(I, H, 10 * e + 2, s_x), lin(H, I, 10 * e + 3, s_d)))
     gen = torch.Generator().manual_seed(5)
     routeur = QuantLinear(_quantize_int8((torch.randn(E, H, generator=gen) * 0.02).to(torch.bfloat16), 128),
                           out_features=E, in_features=H).to_device(dev)
@@ -71,19 +83,23 @@ def _bloc_moe_jouet(E=8, H=256, I=128, top_k=2, dev="cuda"):
 
 
 @CARTE
-def test_marlin_egale_groupe_au_prefill_et_le_bras_casse(monkeypatch):
+@pytest.mark.parametrize("awq", [False, True], ids=["sans_awq", "awq_par_expert"])
+def test_marlin_egale_groupe_au_prefill_et_le_bras_casse(monkeypatch, awq):
+    """Avec la table AWQ par expert (le Coder classé) : l'échelle est côté
+    activation, appliquée avant les deux GEMM — marlin = groupe quand même."""
     from acvram.engine import model as MD
     from acvram.kernels import marlin_port as MP
     if MP.charger(compiler=False) is None:
         pytest.skip("extension Marlin non compilée à sec")
     E, H, I, top_k, T = 8, 256, 128, 2, 96
-    bloc = _bloc_moe_jouet(E, H, I, top_k)
+    bloc = _bloc_moe_jouet(E, H, I, top_k, awq=awq)
     x = (torch.randn(T, H, device="cuda") * 0.5).to(torch.bfloat16)
     logits = bloc.router(x).float()
     topw, topi = torch.topk(torch.softmax(logits, -1), top_k, dim=-1)
     topw = topw / topw.sum(-1, keepdim=True)
     monkeypatch.setattr(MD, "_PREFILL_GROUPED", "groupe")
     assert bloc._try_build_stacks()
+    assert (bloc._stacks_awq.get("gate_proj") is not None) == awq and (bloc._stacks_awq.get("down_proj") is not None) == awq
     y_groupe = bloc._forward_prefill_grouped(x, topw, topi.to(torch.int32))
     monkeypatch.setattr(MD, "_PREFILL_GROUPED", "marlin")
     bloc._stacks_marlin = bloc._construire_marlin(bloc._stacks, bloc._stacks_awq, bloc._stacks_awq.get("hadamard", {}))
