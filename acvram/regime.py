@@ -161,6 +161,11 @@ HORS_REGIME = frozenset({
     "ACVRAM_LISTE_CLE", "ACVRAM_LISTE_PROMUS", "ACVRAM_MAX_PROMUS", "ACVRAM_ORDRE_SAC",
     "ACVRAM_ORDRE_SAC_INVERSE", "ACVRAM_GRAPHES_MUETS", "ACVRAM_MAX_GRAPHS", "ACVRAM_INSTA_MAX",
     "ACVRAM_REGIME_MUET",
+    # garde-fou d'admission, pas un chemin de calcul (poste7-reprise-ordre-18-09
+    # §Suite) : Engine.__init__ refuse max_batch_size > plan.kv_planned_seqs,
+    # ce flag force le lancement en connaissance de cause. Visible dans
+    # regime_ligne() par kv_plan_override=1 quand posé, pas ici.
+    "ACVRAM_KV_PLAN_OVERRIDE",
     # lues dans acvram_kernels.cu (getenv) : témoins A/B et réglages d'instrument,
     # jamais mesurés comme défaut — à monter dans VARIABLES le jour où l'un l'est
     "ACVRAM_INT8_GEMV_WARP", "ACVRAM_INT8_TRANCHE", "ACVRAM_PA_CHUNK", "ACVRAM_PA_ETAPE",

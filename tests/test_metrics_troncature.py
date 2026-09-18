@@ -38,7 +38,9 @@ def client(converted):
                                 "<|im_start|>assistant\n{% endif %}"},
               open(os.path.join(converted, "tokenizer_config.json"), "w"))
 
-    loaded = load_model(converted, dtype=torch.float32, device_override="cpu")
+    loaded = load_model(converted, dtype=torch.float32, device_override="cpu",
+                        max_concurrent_seqs=4)
+    loaded.plan.kv_planned_seqs = 4   # cf. test_server.py : pas de GPU ici, le kwarg est ignoré
     tokenizer = load_tokenizer(converted)
     engine = Engine(loaded, tokenizer, max_batch_size=4, max_model_len=256)
     with TestClient(create_app(engine, tokenizer, "tiny")) as c:
@@ -78,3 +80,13 @@ def test_ratio_absent_si_aucune_sequence_planifiee(client, monkeypatch):
     monkeypatch.setattr(engine.loaded.plan, "kv_planned_seqs", 0, raising=False)
     m = c.get("/metrics").json()
     assert m["kv_tokens_par_sequence_planifiee"] is None
+
+
+def test_metrics_porte_les_cartes(client):
+    """poste7-profil-verdict-18-09 §4 : sans ce champ, un client HTTP de
+    mesure (hors carte.sh) ne peut pas savoir quelle carte est réellement
+    servie et somme celles qu'il voit lui-même (18/09, acvram [0,1] contre
+    llama.cpp [0], énergie faussée)."""
+    c, engine = client
+    m = c.get("/metrics").json()
+    assert m["cartes"] == engine.regime()["cartes"]

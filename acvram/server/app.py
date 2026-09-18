@@ -182,6 +182,7 @@ def _params_from(req: Any, default_max: int) -> SamplingParams:
         stop=req.stop_list(),
         seed=req.seed,
         n=req.n,
+        ignore_eos=req.ignore_eos,
     )
 
 
@@ -861,6 +862,12 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                 "kv_planned_seqs": kv_seqs,
                 "kv_tokens_par_sequence_planifiee": (
                     round(plan.kv_max_tokens / kv_seqs, 1) if kv_seqs else None),
+                # poste7-profil-verdict-18-09 §4 : sans elle, un client HTTP de
+                # mesure (hors carte.sh) ne peut pas savoir quelle carte est
+                # RÉELLEMENT servie et somme celles qu'il voit lui-même —
+                # 18/09, acvram [0,1] contre llama.cpp [0], énergie faussée
+                # par le repos de la carte inutilisée.
+                "cartes": engine.regime()["cartes"],
                 "energie": _energie_par_jeton(),
                 # Ajout n°4 (poste7-gui-ajouts-18-09 § 4) : la meme ligne,
                 # octet pour octet, que le "[regime]" ecrit dans le JSON

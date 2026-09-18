@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
+import subprocess
 import sys
 import threading
 import time
@@ -140,6 +142,92 @@ def nvml() -> _Nvml:
     return _nvml
 
 
+# -- charge processeur : REGLES §2, "18/09, load 70,8 : trois pytest de
+# pairs pendant une fenêtre HTTP" -- une charge CPU non annoncée fausse une
+# mesure HTTP (le serveur partage le processeur avec l'appelant) exactement
+# comme une charge GPU non verrouillée fausse un ms/pas. Le contrôle est le
+# même que celui de charge-gpu.py : refuser plutôt qu'ajouter une consigne
+# à se rappeler.
+PORTS_SERVICES_PERMANENTS = (8081, 8082, 8083)   # llama-server, embeddings, reranker (REGLES §2)
+_JIFFIES_HZ = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100.0
+
+
+def _pids_services_permanents() -> set[int]:
+    """PID des trois services permanents -- légitimes, exclus du contrôle
+    de charge (un seul appel `ss`, PAS dans la boucle d'une fenêtre)."""
+    pids: set[int] = set()
+    try:
+        out = subprocess.run(["ss", "-tlnp"], capture_output=True, text=True,
+                             timeout=3).stdout
+    except (OSError, subprocess.SubprocessError):
+        return pids
+    for port in PORTS_SERVICES_PERMANENTS:
+        for ligne in out.splitlines():
+            if f":{port} " in ligne:
+                m = re.search(r"pid=(\d+)", ligne)
+                if m:
+                    pids.add(int(m.group(1)))
+    return pids
+
+
+def _temps_cpu_jiffies(pid: int) -> int | None:
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            champs = fh.read().rsplit(")", 1)[1].split()
+        return int(champs[11]) + int(champs[12])   # utime + stime, en jiffies
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def relever_charge(intervalle: float = 0.1) -> dict:
+    """Un instantané : load1/load5, nproc, et les PID hors services
+    permanents dont l'usage CPU dépasse 100 % (un coeur plein) sur
+    `intervalle` secondes. Coûte `intervalle` s -- appelé une fois au
+    début et une fois à la fin d'une fenêtre, jamais dans une boucle."""
+    load1, load5, _ = os.getloadavg()
+    nproc = os.cpu_count() or 1
+    exclus = _pids_services_permanents()
+    try:
+        pids = [int(p) for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        pids = []
+    pids = [p for p in pids if p not in exclus]
+    avant = {p: _temps_cpu_jiffies(p) for p in pids}
+    time.sleep(intervalle)
+    lourds = []
+    for p in pids:
+        t0, t1 = avant.get(p), _temps_cpu_jiffies(p)
+        if t0 is None or t1 is None:
+            continue
+        pct = 100.0 * (t1 - t0) / (_JIFFIES_HZ * intervalle)
+        if pct > 100.0:
+            lourds.append((p, round(pct, 1)))
+    return {"load1": round(load1, 2), "load5": round(load5, 2), "nproc": nproc,
+           "processus_charges": sorted(lourds, key=lambda x: -x[1])}
+
+
+def _marquer_charge_deliberee() -> None:
+    """Écrit CHARGE-DELIBEREE dans `$VERROU.qui`, comme `charge-gpu.py` --
+    un observateur qui lit `qui_tient()` (carte.sh) voit une charge connue,
+    pas un intrus à chercher pendant vingt minutes (10/09, REGLES §2)."""
+    carte = (os.environ.get("CUDA_VISIBLE_DEVICES", "") or "0").split(",")[0]
+    if not carte.isdigit():
+        carte = "0"
+    info = os.environ.get("ACVRAM_VERROU", f"/tmp/acvram-carte-{carte}.lock") + ".qui"
+    try:
+        with open(info) as fh:
+            p, t, n, ty = fh.read().split()
+    except (OSError, ValueError):
+        return
+    if n.endswith("-CHARGE-DELIBEREE"):
+        return
+    try:
+        with open(info, "w") as fh:
+            fh.write(f"{p} {t} {n}-CHARGE-DELIBEREE {ty}\n")
+    except OSError:
+        pass
+
+
 class Energie:
     """Fenêtre de mesure : énergie exacte, régime de la carte, invalidations.
 
@@ -164,9 +252,23 @@ class Energie:
         self._stop = False
         self._t: threading.Thread | None = None
         self.indisponible: str | None = None
+        self.charge_avant: dict | None = None
+        self.charge_apres: dict | None = None
+        # poste7-profil-verdict-18-09 §3 (précision) : ni "fin seulement" ni un
+        # second instrument -- `load1` rejoint la boucle d'échantillons PAR
+        # TIC qui existe déjà pour horloge/température (gratuit,
+        # `/proc/loadavg`) ; jugé sur le MAX de toute la fenêtre, pas sur deux
+        # points. Le relevé des processus >100 % CPU, lui, coûteux en continu,
+        # reste début+fin (`relever_charge`, inchangé).
+        self.charges1: list[float] = []
+        self.nproc = os.cpu_count() or 1
 
     # -- collecte ---------------------------------------------------------
     def __enter__(self) -> "Energie":
+        # Relevé AVANT `_t0` : son propre `intervalle` (0,1 s par défaut) ne
+        # doit pas entrer dans `self.duree`, sous peine de biaiser la fenêtre
+        # avec l'instrument même qui doit garantir qu'elle n'est pas biaisée.
+        self.charge_avant = relever_charge()
         try:
             n = nvml()
         except NvmlAbsent as e:
@@ -184,6 +286,7 @@ class Energie:
                     self.horloges.append(n.horloge_sm(h))
                     self.temperatures.append(n.temperature(h))
                     self.puissances.append(n.puissance_w(h))
+                self.charges1.append(os.getloadavg()[0])
                 time.sleep(self.periode)
 
         self._t = threading.Thread(target=boucle, daemon=True)
@@ -201,6 +304,12 @@ class Energie:
             for i, h in n.cartes:
                 self.fin[i] = n.energie_mj(h)
                 self.pids_fin[i] = n.pids(h)
+        # Après `self.duree` : même raison qu'à l'entrée, son coût ne doit
+        # pas s'ajouter à la fenêtre mesurée.
+        self.charge_apres = relever_charge()
+        pic = self._load1_max()
+        if pic is not None and pic > self.nproc / 2 and os.environ.get("ACVRAM_CHARGE_OK") == "1":
+            _marquer_charge_deliberee()
         self._stop = True
         if self._t:
             self._t.join(timeout=3)
@@ -297,7 +406,35 @@ class Energie:
                 raisons.append(f"puissance moyenne {self.moyenne:.1f} W > "
                                f"plafond {plafond:.0f} W — fenêtre trop "
                                f"courte pour que le limiteur ait pu agir")
+        # REGLES §2, "18/09, load 70,8 : trois pytest de pairs pendant une
+        # fenêtre HTTP" : une charge CPU non annoncée fausse une mesure HTTP
+        # comme une charge GPU non verrouillée fausse un ms/pas. Jugée sur le
+        # MAX de load1 pendant TOUTE la fenêtre (boucle par tic, comme le
+        # bridage), pas seulement à ses deux bouts -- une charge lancée à
+        # mi-fenêtre serait sinon passée entre deux relevés. Refuse par
+        # défaut ; ACVRAM_CHARGE_OK=1 l'accepte ET l'annonce (__exit__ écrit
+        # CHARGE-DELIBEREE dans le verrou), comme charge-gpu.py.
+        nproc = getattr(self, "nproc", None) or (os.cpu_count() or 1)
+        pic = self._load1_max()
+        if pic is not None and pic > nproc / 2 and os.environ.get("ACVRAM_CHARGE_OK") != "1":
+            processus = (getattr(self, "charge_apres", None) or {}).get("processus_charges") \
+                      or (getattr(self, "charge_avant", None) or {}).get("processus_charges")
+            raisons.append(
+                f"charge pendant la fenêtre : load1 max {pic:.2f} > nproc/2={nproc / 2} "
+                f"({processus or 'aucun PID identifié >100% hors services permanents'}) "
+                f"-- ACVRAM_CHARGE_OK=1 si délibérée")
         return raisons
+
+    def _load1_max(self) -> float | None:
+        """Le pic de `load1` pendant la fenêtre — la boucle par tic
+        (`charges1`) s'il a tourné, sinon les deux bouts (`charge_avant`/
+        `charge_apres`, fenêtres construites à la main comme `object.__new__
+        (Energie)` dans des tests existants, ou NVML absent)."""
+        pics = list(getattr(self, "charges1", None) or [])
+        for c in (getattr(self, "charge_avant", None), getattr(self, "charge_apres", None)):
+            if c:
+                pics.append(c["load1"])
+        return max(pics) if pics else None
 
     def resume(self) -> dict:
         h = [v for v in self.horloges if v >= 0]
@@ -312,6 +449,9 @@ class Energie:
             "horloge_max": max(h) if h else -1,
             "temp_max": max(t) if t else -1,
             "bridages": ",".join(sorted(self.bridages)) or "aucun",
+            "load1_max": self._load1_max(),
+            "charge_avant": getattr(self, "charge_avant", None),
+            "charge_apres": getattr(self, "charge_apres", None),
             "invalidations": " ; ".join(self.invalidations) or "aucune",
             # le régime des noyaux (ACVRAM_PREFILL, MOE_MMA…) fait partie de la
             # mesure : poste7-prefill-a8-verdict-17-09, un chiffre sans lui n'entre
