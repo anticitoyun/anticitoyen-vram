@@ -182,6 +182,7 @@ def _params_from(req: Any, default_max: int) -> SamplingParams:
         stop=req.stop_list(),
         seed=req.seed,
         n=req.n,
+        ignore_eos=req.ignore_eos,
     )
 
 

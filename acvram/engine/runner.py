@@ -139,6 +139,12 @@ class EngineStats:
     # cours de mesure au lieu de la lire dans les logs — trouvé le 17/09 par
     # poste3 sur une cellule b=12 planifiée pour 8 séquences (`loader.py`).
     sequences_tronquees_budget: int = 0
+    # Combien de séquences ADMISES portaient `ignore_eos=True` — porté dans
+    # l'en-tête d'une mesure (regime_ligne()) pour qu'un harnais comparatif
+    # (poste7-harnais-egal-ignore-eos-18-09) sache, en lisant le régime, que
+    # cette cellule a bien tourné avec le même comportement que llama.cpp
+    # `--ignore-eos` plutôt que de le supposer depuis sa propre requête.
+    sequences_ignore_eos: int = 0
 
     @property
     def decode_tok_s(self) -> float:
@@ -179,6 +185,7 @@ class EngineStats:
             "acceptance_rate": round(self.acceptance_rate, 3),
             "tokens_per_step": round(self.tokens_per_step, 3),
             "sequences_tronquees_budget": self.sequences_tronquees_budget,
+            "sequences_ignore_eos": self.sequences_ignore_eos,
         }
 
     @property
@@ -580,6 +587,8 @@ class Engine:
                + (f"noyaux={r['noyaux']} " if r["noyaux"] else "")
                + f"kv_budget={self.allocator.num_blocks * BLOCK_SIZE}/{kv_seqs} "
                + (f"kv_plan_override=1 " if r["kv_plan_override"] else "")
+               + (f"ignore_eos={self.stats.sequences_ignore_eos} "
+                  if self.stats.sequences_ignore_eos else "")
                + f"cache_prefixe={self.stats.hit_rate:.3f} "
                f"({self.stats.cached_prompt_tokens} vram+hôte, "
                f"{self.stats.host_kv_tokens} hôte)")
@@ -616,6 +625,8 @@ class Engine:
                 f"invite de {len(prompt_ids)} jetons au-delà de max_model_len "
                 f"{self.max_model_len}")
         seq = Sequence(list(prompt_ids), params, request_id)
+        if params.ignore_eos:
+            self.stats.sequences_ignore_eos += 1
         with self._lock:
             self.waiting.append(seq)
         return seq
@@ -1418,7 +1429,7 @@ class Engine:
             kept.append(int(tok))
             if not seq.first_token_at:
                 seq.first_token_at = time.time()
-            if tok in self._eos or tok in seq.params.stop_token_ids:
+            if (tok in self._eos and not seq.params.ignore_eos) or tok in seq.params.stop_token_ids:
                 reason = "stop"
                 break
             if len(seq.output_ids) >= seq.params.max_tokens:
@@ -1501,7 +1512,7 @@ class Engine:
                 seq.first_token_at = time.time()
 
             reason = ""
-            if tok in self._eos or tok in seq.params.stop_token_ids:
+            if (tok in self._eos and not seq.params.ignore_eos) or tok in seq.params.stop_token_ids:
                 reason = "stop"
             elif len(seq.output_ids) >= seq.params.max_tokens:
                 reason = "length"
