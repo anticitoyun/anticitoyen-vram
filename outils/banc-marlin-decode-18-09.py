@@ -79,6 +79,19 @@ def hors_par_ligne(y, ref):
     return int(((y.float() - ref).abs() > 2 ** -7 * ref.abs().amax(1, keepdim=True)).sum())
 
 
+# Biais (poste7-p1-situ-verdict-18-09, REGLES § 4 bis : un comptage ne détecte
+# pas un biais) : moyenne signée de Δ rapportée à moy|y| (critère poste7 ≤ 1e-4)
+# ET gain − 1 = Σ y·ref / Σ ref² − 1 — le biais MULTIPLICATIF, que la moyenne
+# signée ne voit pas sur une sortie centrée (un MoE l'est) ; le témoin négatif
+# (échelles de bloc tronquées d'un bit : toujours ≤ la vraie) doit le rendre.
+SEUIL_BIAIS = 1e-4
+
+
+def biais(y, ref):
+    d = y.float() - ref
+    return float(d.mean() / ref.abs().mean()), float((y.float() * ref).sum() / (ref * ref).sum() - 1.0)
+
+
 def main():
     from acvram.regime import regime_ligne
     ext = get_extension()
@@ -91,6 +104,7 @@ def main():
     # le GEMV lit les échelles de bloc en OCTETS (uint8), Marlin en Float8_e4m3fn
     # (« expected scalar type Byte but found Float8_e4m3fn », poste3) : deux vues
     bg8, bu8, bd8 = (b.view(torch.uint8).contiguous() for b in (bg, bu, bd))
+    bg_t, bu_t, bd_t = ((b.view(torch.uint8) & 0xFE).contiguous() for b in (bg, bu, bd))    # témoin négatif
     ws = MP.espace_travail(dev, 4)
     wg32 = [dequantize_nvfp4(t, torch.float32).to(dev) for t in tsg]
     wu32 = [dequantize_nvfp4(t, torch.float32).to(dev) for t in tsu]
@@ -136,6 +150,10 @@ def main():
                 act = ext.nvfp4_gemv_marlin_gateup(*mg, *mu, eid, tok, x, K, I, 0)
                 return ext.nvfp4_gemv_marlin(*md, eid, seq, act, I, K)
 
+            def temoin_negatif():
+                act = ext.nvfp4_gemv_grouped_gateup(qg, bg_t, gsg, qu, bu_t, gsu, eid, tok, x, K, 0)
+                return ext.nvfp4_gemv_grouped(qd, bd_t, gsd, eid, seq, act, I)[:, :K]
+
             # référence fp32 par paire
             xf = x.float(); ref = torch.empty(G, K, dtype=torch.float32, device=dev)
             for p in range(G):
@@ -146,22 +164,33 @@ def main():
             hm, hg = hors_par_ligne(ym.float(), ref), hors_par_ligne(yg.float(), ref)
             ms_m, ms_g = chrono(marlin), chrono(gemv)
             ligne = {"routage": r, "distincts": int(torch.unique(eid).numel()), "marlin_ms": ms_m, "gemv_ms": ms_g,
-                     "marlin_hors": hm, "gemv_hors": hg, "n": ref.numel()}
+                     "marlin_hors": hm, "gemv_hors": hg, "n": ref.numel(),
+                     "marlin_biais": biais(ym, ref), "gemv_biais": biais(yg, ref), "temoin_biais": biais(temoin_negatif(), ref)}
             if forme_b:
                 yb = forme_b_fn(); ligne["b_hors"] = hors_par_ligne(yb.float(), ref); ligne["b_ms"] = chrono(forme_b_fn)
-                ligne["b_determ"] = bool(torch.equal(yb, forme_b_fn()))
+                ligne["b_determ"] = bool(torch.equal(yb, forme_b_fn())); ligne["b_biais"] = biais(yb, ref)
             lignes.append(ligne)
             print(f"b={B:2d} routage {r:2d} distincts={ligne['distincts']:3d} marlin {ms_m:.4f} ms gemv {ms_g:.4f} ms  "
                   + (f"(b) {ligne['b_ms']:.4f} ms  " if forme_b else "")
                   + f"hors 2⁻⁷ par ligne : marlin {hm} gemv {hg}" + (f" (b) {ligne['b_hors']}" if forme_b else "")
-                  + f" / {ref.numel()}", flush=True)
+                  + f" / {ref.numel()}  biais(signé, gain−1) : marlin {ligne['marlin_biais'][0]:+.1e}/{ligne['marlin_biais'][1]:+.1e}"
+                  + f" gemv {ligne['gemv_biais'][0]:+.1e}/{ligne['gemv_biais'][1]:+.1e}"
+                  + (f" (b) {ligne['b_biais'][0]:+.1e}/{ligne['b_biais'][1]:+.1e}" if forme_b else "")
+                  + f" témoin {ligne['temoin_biais'][0]:+.1e}/{ligne['temoin_biais'][1]:+.1e}", flush=True)
         med_m = statistics.median(l["marlin_ms"] for l in lignes) * COUCHES
         med_g = statistics.median(l["gemv_ms"] for l in lignes) * COUCHES
         exact = all(l["marlin_hors"] <= 5e-4 * l["n"] and l["gemv_hors"] <= 5e-4 * l["n"] for l in lignes)
         res[B] = {"marlin_ms_pas": med_m, "gemv_ms_pas": med_g, "exact": exact, "lignes": lignes}
+        # témoin négatif : s'il passe le critère de biais, l'instrument est aveugle
+        res[B]["temoin_vu"] = all(abs(l["temoin_biais"][1]) > SEUIL_BIAIS for l in lignes)
+        res[B]["marlin_sans_biais"] = all(max(abs(v) for v in l["marlin_biais"]) <= SEUIL_BIAIS for l in lignes)
+        res[B]["gemv_sans_biais"] = all(max(abs(v) for v in l["gemv_biais"]) <= SEUIL_BIAIS for l in lignes)
         if forme_b:
             res[B]["b_ms_pas"] = statistics.median(l["b_ms"] for l in lignes) * COUCHES
             res[B]["b_exact"] = all(l["b_hors"] <= max(5e-4 * l["n"], l["gemv_hors"]) and l["b_determ"] for l in lignes)
+            res[B]["b_sans_biais"] = all(max(abs(v) for v in l["b_biais"]) <= SEUIL_BIAIS for l in lignes)
+        print(f"b={B} : biais ≤ 1e-4 (signé et gain) — marlin {res[B]['marlin_sans_biais']} gemv {res[B]['gemv_sans_biais']}"
+              + (f" (b) {res[B]['b_sans_biais']}" if forme_b else "") + f" · témoin négatif vu {res[B]['temoin_vu']}", flush=True)
         print(f"b={B} : Marlin {med_m:.2f} ms/pas (48 couches) · GEMV {med_g:.2f} · exact {exact}"
               + (f" · (b) {res[B]['b_ms_pas']:.2f} ms/pas, exact {res[B]['b_exact']}" if forme_b else ""), flush=True)
     m12, m1 = res[12]["marlin_ms_pas"], res[1]["marlin_ms_pas"]
@@ -176,8 +205,12 @@ def main():
     print(f"\nverdict Marlin décodage : b=12 {m12:.2f} ms, b=1 {m1:.2f} ms → {verdict}")
     if forme_b:
         b12, b1, g12, g1 = res[12]["b_ms_pas"], res[1]["b_ms_pas"], res[12]["gemv_ms_pas"], res[1]["gemv_ms_pas"]
-        if not (res[12]["b_exact"] and res[1]["b_exact"]):
+        if not (res[12]["temoin_vu"] and res[1]["temoin_vu"]):
+            vb = "INSTRUMENT AVEUGLE : le témoin négatif passe le critère de biais — ne compte pas"
+        elif not (res[12]["b_exact"] and res[1]["b_exact"]):
             vb = "SORTIE HORS CRITÈRE ou non déterministe : ne compte pas"
+        elif not (res[12]["b_sans_biais"] and res[1]["b_sans_biais"]):
+            vb = "BIAIS (|moy Δ| ou |gain−1| > 1e-4 × moy|y|) : ne compte pas"
         elif b12 <= 0.97 * g12 and b1 <= 0.97 * g1:
             vb = "scellé TENU (≤ 0,97 × GEMV à b=12 et b=1) : disposition unique, P1 continue"
         else:
