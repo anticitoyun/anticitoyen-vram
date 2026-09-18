@@ -199,7 +199,11 @@ def test_le_bloc_moe_decode_prend_gemv_marlin(monkeypatch):
     monkeypatch.setattr(MD, "_GEMV_LAYOUT", "marlin")
     bloc._stacks_marlin = bloc._construire_marlin(bloc._stacks, bloc._stacks_awq, bloc._stacks_awq.get("hadamard", {}))
     assert bloc._stacks_marlin is not None
+    n_v1 = bloc.chemins["gemv_v1"]
     yb = bloc._forward_grouped(x, topw, topi.to(torch.int32))
     attendre_chemin(bloc, "gemv_marlin")
+    # un seul chemin par appel : la première version prenait gemv_marlin PUIS
+    # recalculait gate/up par v1 (chaîne if/elif coupée en deux — poste3, 18/09)
+    assert bloc.chemins["gemv_v1"] == n_v1, bloc.chemins
     h1, hb = _hors_par_ligne(y1, ref), _hors_par_ligne(yb, ref)
     assert h1 <= TOL_HORS * ref.numel() and hb <= TOL_HORS * ref.numel(), (h1, hb)
