@@ -75,3 +75,36 @@ parité vLLM ne se joue pas sur les experts). À rebaser sur le témoin T de
 la même passe si le pas GLM actuel diffère de 463 ms (B0 est passé défaut
 après le 16/09) : fixe = pas_T − 126. Faux si GLM en situ < 0,95 ×
 formule(X) — alors la part fixe a bougé ou l'expert partagé pèse plus.
+
+## Intégration P1 (18/09, après X = 152,1 TFLOPS au banc de poste3 — bande haute)
+
+- `MoEBlock._construire_marlin` (à la construction des piles) : seconde
+  disposition des experts repackée (gate, up, down chacune avec son échelle
+  globale par expert — gate et up ne partagent pas la leur, donc pas de w13
+  fusionné : trois GEMM au lieu de deux, comme B0) ; la pile NVFP4 reste pour
+  le GEMV du décodage → `experts_layout=double` dans `regime_ligne()`
+  (`runner.regime()`), et **comptée par le Plan** (`_reserve_prefill` :
+  + Σ mlp_bytes des couches MoE sous `ACVRAM_PREFILL_GROUPED=marlin`, la
+  masse du repack = celle de la pile ; ≈ 1,7 Gio sur Coder). Refus
+  explicites, une ligne : piles non NVFP4, AWQ ou Hadamard sur les experts,
+  K ou N non multiple de 64, extension non compilée à sec (le moteur ne
+  compile JAMAIS sous le verrou : `charger(compiler=False)` rend None →
+  repli « groupe » nommé).
+- `_forward_prefill_grouped`, branche `marlin` : lignes déjà triées par
+  expert (`xs`), blocs alignés depuis `e_sorted` (`aligner_blocs`, top_k = 1,
+  sortie dans l'ordre de xs), gate → up → act·up (`_activation` inchangée)
+  → down ; recombinaison inchangée (`moe_reduce_trie` / `inv`). Workspace
+  Marlin par appareil, `ones` par G en cache.
+- Régime : `ACVRAM_PREFILL_GROUPED = marlin | groupe (témoin) | w4a16 |
+  grouped_mm | bmm` ; défaut inchangé (`groupe`) jusqu'au scellé in situ.
+- Tests : à sec — le Plan compte la seconde disposition, le régime la nomme ;
+  sur carte (skip ici) — `MoEBlock` jouet à 8 experts NVFP4, sortie
+  « marlin » = « groupe » à 2⁻⁷ × Σ|x·w|, **bras cassant** : échelles de bloc
+  de gate décalées d'un rang → rouge. Suite 864 passed.
+
+Scellé in situ (poste3, harnais égal, Coder 2 048) : **≥ 15 700 j/s**
+(formule : 16 405), PPL préfill = B0 ± 0,002 (mêmes codes W4, A bf16). Ma
+prédiction : 15 900-16 400 (les 48,8 ms du banc + act·up + colle, contre
+133,3 ms d'experts + déquant en situ : −84 ms sur 197 ⇒ 113 ms ⇒ 18 100
+si tout le reste tient ; je retiens 15 900-16 400 parce que la
+recombinaison et l'act·up ne sont pas dans les 48,8). Faux si < 15 700.
