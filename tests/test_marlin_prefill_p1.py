@@ -1,6 +1,6 @@
 """P1 — GEMM groupée classe Marlin au préfill (`ACVRAM_PREFILL_GROUPED=marlin`,
 port vLLM v0.29.0). À sec : le Plan compte la seconde disposition ; le
-régime la nomme (`experts_layout`). Sur carte : la sortie de
+régime la nomme (`experts_layout` marlin | naturel). Sur carte : la sortie de
 `MoEBlock._forward_prefill_grouped` sous « marlin » égale celle de « groupe »
 (B0) à 2⁻⁷ × Σ|x·w| ; bras cassant : échelle de bloc décalée d'un rang → rouge."""
 import os
@@ -31,13 +31,44 @@ def _plan():
     return Plan(model="synthetique", tiers=[tier], layers=couches)
 
 
-def test_le_plan_compte_la_seconde_disposition_sous_marlin(monkeypatch):
+def test_le_plan_ne_reserve_pas_de_seconde_disposition(monkeypatch):
+    """Disposition unique (poste7-p1-disposition-unique-18-09) : la réserve du
+    Plan est la même sous marlin et sous naturel — Σ mlp_bytes × 1, jamais
+    × 2. Bras cassant : réintroduire « reserve += Σ mlp_bytes » sous
+    PREFILL_GROUPED=marlin dans loader._reserve_prefill (5a0f6c4) rend
+    l'écart égal à Σ (14,4 Gio ici) et ce test rouge."""
     spec, plan = _spec(), _plan()
+    somme = sum(l.mlp_bytes for l in plan.layers)
     monkeypatch.delenv("ACVRAM_PREFILL_GROUPED", raising=False)
-    simple = LD._reserve_prefill(spec, 2048, {}, plan)
+    monkeypatch.delenv("ACVRAM_GEMV_LAYOUT", raising=False)
+    naturel = LD._reserve_prefill(spec, 2048, {}, plan)
     monkeypatch.setenv("ACVRAM_PREFILL_GROUPED", "marlin")
-    double = LD._reserve_prefill(spec, 2048, {}, plan)
-    assert double - simple == 48 * int(0.3 * GIB)               # une copie des experts (Coder : ≈ 1,7 Gio... ici 14,4 Gio synthétiques)
+    monkeypatch.setenv("ACVRAM_GEMV_LAYOUT", "marlin")
+    marlin = LD._reserve_prefill(spec, 2048, {}, plan)
+    assert marlin == naturel, (marlin - naturel, somme)
+    assert marlin < somme                                          # la réserve ne contient aucune copie des experts
+
+
+def test_la_pile_naturelle_est_rendue_apres_le_repack_a_sec(monkeypatch):
+    """`_try_build_stacks` : quand `_construire_marlin` rend des piles, la pile
+    NVFP4 est libérée (qw/bs None, experts au gabarit vide, experts_layout
+    marlin) ; quand il rend None, elle reste (témoin naturel). Sans carte :
+    bloc jouet sur CPU, repack remplacé par un stub."""
+    from acvram.engine.model import MoEBlock
+    bloc = _bloc_moe_jouet(4, 128, 64, 2, dev="cpu")
+    monkeypatch.setattr(MoEBlock, "_construire_marlin", lambda self, p, a, h: None)
+    assert bloc._try_build_stacks()
+    assert bloc._stacks["gate_proj"][1] is not None and bloc.experts[0].gate_proj.qweight.qweight.numel() > 0
+    assert getattr(bloc, "experts_layout", "naturel") == "naturel"
+    bloc2 = _bloc_moe_jouet(4, 128, 64, 2, dev="cpu")
+    monkeypatch.setattr(MoEBlock, "_construire_marlin",
+                        lambda self, p, a, h: {n: ("w", "s", "g", p[n][4], p[n][5]) for n in p})
+    assert bloc2._try_build_stacks()
+    for n in ("gate_proj", "up_proj", "down_proj"):
+        assert bloc2._stacks[n][1] is None and bloc2._stacks[n][2] is None
+        assert all(getattr(e, n).qweight.qweight.numel() == 0 for e in bloc2.experts)
+        assert getattr(bloc2.experts[0], n).qweight.shape == getattr(bloc.experts[0], n).qweight.shape
+    assert bloc2.experts_layout == "marlin"
 
 
 def test_le_regime_nomme_la_disposition(converted):
@@ -45,7 +76,7 @@ def test_le_regime_nomme_la_disposition(converted):
     from acvram.engine.runner import Engine
     engine = Engine(load_model(converted, dtype=torch.float32, device_override="cpu"), None,
                     max_batch_size=2, max_model_len=256)
-    assert "experts_layout=simple" in engine.regime_ligne()
+    assert "experts_layout=naturel" in engine.regime_ligne()
 
 
 CARTE = pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise (noyaux Marlin)")

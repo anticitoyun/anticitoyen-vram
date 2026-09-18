@@ -945,15 +945,48 @@ class MoEBlock(nn.Module):
         self._stacks = piles
         self._stacks_awq = awq
         self._stacks_marlin = self._construire_marlin(piles, awq, hadamard)
+        if self._stacks_marlin is not None:
+            self._liberer_pile_naturelle()
         return True
 
+    def _liberer_pile_naturelle(self) -> None:
+        """Disposition UNIQUE (poste7-p1-disposition-unique-18-09) : la pile
+        NVFP4 n'a servi que de source au repack ; ses codes et échelles sont
+        rendus (préfill ET décodage lisent `_stacks_marlin`). Les experts
+        gardent un GABARIT vide (même geste que runner._demote_expert :
+        `[:0].cpu().clone()`, métadonnées intactes) — tout chemin qui
+        relirait la pile naturelle casse au lieu de mesurer une double
+        disposition. `_stacks[n]` garde son genre « nvfp4 », son K et son M
+        (`pg[4]`, `pg[5]` servent aux formes) mais qw/bs valent None."""
+        for nom in list(self._stacks):
+            pile = self._stacks[nom]
+            if pile[0] != "nvfp4":
+                continue
+            for e in self.experts:
+                lin = getattr(e, nom)
+                t = lin.qweight
+                if t is None or t.qweight is None or t.qweight.numel() == 0:
+                    continue
+                gabarit = type(t)(t.qweight[:0].cpu().clone(), t.block_scale[:0].cpu().clone(),
+                                  t.global_scale.detach().cpu().clone(), t.shape, t.padded_in)
+                gs = t.__dict__.get("_gs_f")
+                if gs is not None:
+                    gabarit.__dict__["_gs_f"] = gs
+                lin.qweight = gabarit
+            _, _, _, gs, k, m = pile
+            self._stacks[nom] = ("nvfp4", None, None, gs, k, m)
+        self.__dict__["experts_layout"] = "marlin"
+
     def _construire_marlin(self, piles, awq, hadamard):
-        """P1 (poste7-p1-porte-marlin-18-09, X = 152 TFLOPS au banc) : seconde
+        """P1 (poste7-p1-porte-marlin-18-09, X = 152 TFLOPS au banc) : la
         DISPOSITION des experts, repackée pour la GEMM groupée classe Marlin
         (kernels/marlin_port, vLLM v0.29.0) — gate, up, down chacune avec son
         échelle globale par expert (gate et up ne partagent pas la leur :
-        pas de w13 fusionné). La pile NVFP4 reste pour le décodage (GEMV) :
-        `experts_layout=double`, comptée par le Plan (`_reserve_prefill`).
+        pas de w13 fusionné). Disposition UNIQUE depuis
+        poste7-p1-disposition-unique-18-09 : le décodage la lit aussi
+        (`nvfp4_gemv_marlin`, forme (b)) et la pile NVFP4 est rendue après le
+        repack (`_liberer_pile_naturelle`) : `experts_layout=marlin`, rien de
+        plus à réserver au Plan.
         AWQ par expert et Hadamard (Coder classé 302025e : table [E, K])
         sont appliqués À L'ACTIVATION avant toute GEMM du préfill
         (`_forward_prefill_grouped` : `xs / awq_g[e_sorted]`, `xs_u`,
@@ -1191,6 +1224,7 @@ class MoEBlock(nn.Module):
         if any(p[0] != "nvfp4" for p in (pg, pu, pd)):
             return None
         ext = kernels.get_extension()
+        unique = getattr(self, "_stacks_marlin", None) is not None and pg[1] is None
         # La GEMM groupée relit les poids d'un expert une fois par tuile de
         # 16 jetons ; la déquantification, elle, les écrit puis les relit en
         # bf16 une seule fois quel que soit le lot. Le premier gagne tant que
@@ -1201,11 +1235,11 @@ class MoEBlock(nn.Module):
         # par défaut tant que la perte de qualité des activations en E2M1
         # n'est pas ramenée sous 1 % (poste2, 13/09 : +2,58 % sans lissage).
         # Une optimisation qui change la sortie est un bogue jusqu'à preuve.
-        mma = (_MOE_MMA and ext is not None and hasattr(ext, "nvfp4_gemm_grouped_mma")
+        mma = (_MOE_MMA and not unique and ext is not None and hasattr(ext, "nvfp4_gemm_grouped_mma")
                and not os.environ.get("ACVRAM_PREFILL_DEQUANT")
                and pg[4] % 64 == 0 and pd[4] % 64 == 0
                and ext.nvfp4_gemm_grouped_mma_disponible())
-        direct = mma or (ext is not None and hasattr(ext, "nvfp4_gemm_grouped")
+        direct = mma or (ext is not None and not unique and hasattr(ext, "nvfp4_gemm_grouped")
                          and not os.environ.get("ACVRAM_PREFILL_DEQUANT")
                          and par_expert <= _MOE_GEMM_MAX
                          and pg[4] % 64 == 0 and pd[4] % 64 == 0)
@@ -1304,7 +1338,7 @@ class MoEBlock(nn.Module):
             act = _activation(g, u, pg[5], pd[4], awq_d=None, hd_d=0)
             aq, asf, gra = ext.nvfp4_quant_act(act, awq_d, es32, cpt, hd_d)
             d = self._gemm_mma(pd, aq, asf, tiles, brut=True, grow=gra)
-        elif _PREFILL_GROUPED == "marlin" and getattr(self, "_stacks_marlin", None) is not None:
+        elif (_PREFILL_GROUPED == "marlin" or unique) and getattr(self, "_stacks_marlin", None) is not None:
             # AVANT `direct` (poste3, verdict-marlin-p1-situ-18-09 : à petit T par
             # expert, `direct` passait devant et un test n'atteignait jamais Marlin)
             self._chemin('marlin')
@@ -1422,6 +1456,8 @@ class MoEBlock(nn.Module):
             return None
         pg, pu, pd = (st[n] for n in ("gate_proj", "up_proj", "down_proj"))
         if any(p[0] != "nvfp4" for p in (pg, pu, pd)):
+            return None
+        if pg[1] is None:                              # disposition unique : la pile naturelle est rendue
             return None
         ext = kernels.get_extension()
         if (ext is None or not hasattr(ext, "nvfp4_gemm_grouped_mma")
@@ -1584,7 +1620,9 @@ class MoEBlock(nn.Module):
         # graphe) ; le noyau écrit chaque paire à sa place d'origine
         tri = None
         act = None
-        marlin = getattr(self, "_stacks_marlin", None) if _GEMV_LAYOUT == "marlin" else None
+        marlin = getattr(self, "_stacks_marlin", None)
+        if marlin is not None and _GEMV_LAYOUT != "marlin" and pg[1] is not None:
+            marlin = None                              # piles Marlin présentes mais témoin naturel demandé
         if marlin is not None and ext is not None and hasattr(ext, "nvfp4_gemv_marlin_gateup") and not distinct:
             # forme (b), poste7-p1-disposition-unique-18-09 : le GEMV lit la
             # disposition Marlin (tuiles 16 k × 64 n) — une seule disposition
@@ -2047,6 +2085,12 @@ if _TRACE_ROUTAGE:
     _atexit.register(lambda: torch.save(_ROUTAGES, _TRACE_ROUTAGE) if _ROUTAGES else None)
 if _GEMV_LAYOUT not in ("naturel", "marlin"):
     raise ValueError(f"ACVRAM_GEMV_LAYOUT={_GEMV_LAYOUT!r} : naturel | marlin")
+if (_GEMV_LAYOUT == "marlin") != (_PREFILL_GROUPED == "marlin"):
+    # la disposition est UNIQUE : préfill et décodage lisent la même pile ;
+    # « Marlin au préfill, naturelle au décodage » (double disposition,
+    # experts_layout=double) n'existe plus (poste7-p1-disposition-unique-18-09)
+    raise ValueError(f"ACVRAM_GEMV_LAYOUT={_GEMV_LAYOUT!r} et ACVRAM_PREFILL_GROUPED={_PREFILL_GROUPED!r} : "
+                     "les deux à marlin (disposition unique) ou aucun (témoin naturel)")
 
 # Décodage MLA sous graphes : 0 = boucle par créneau ; 1 = le noyau
 # d'attention batché seul (bead 6wa, bit-identique, −28,5 % sur le pas

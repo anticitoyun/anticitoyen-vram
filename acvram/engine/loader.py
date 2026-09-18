@@ -1701,10 +1701,12 @@ def _reserve_prefill(spec, max_model_len: Optional[int], manifest: dict,
     reserve = int(spec.activations_prefill_bytes(ctx))
     if plan is not None and plan.layers:
         reserve += _DENSE_SLOTS * max(int(l.attn_bytes) + int(l.mlp_bytes) for l in plan.layers)
-        # P1 : seconde disposition des experts (repack Marlin, même masse que
-        # la pile NVFP4 : codes K·N/2 + échelles K·N/16) — experts_layout=double
-        if os.environ.get("ACVRAM_PREFILL_GROUPED", "groupe") == "marlin":
-            reserve += sum(int(l.mlp_bytes) for l in plan.layers if getattr(l, "is_moe", False))
+        # P1 disposition UNIQUE (poste7-p1-disposition-unique-18-09) : la pile
+        # Marlin REMPLACE la pile NVFP4 (MoEBlock._try_build_stacks la libère
+        # après le repack, même masse : codes K·N/2 + échelles K·N/16) — la
+        # réserve « seconde disposition » de 5a0f6c4 (Σ mlp_bytes, 17,04 Gio
+        # sur Coder : 21/48 couches exilées, poste3 18/09) n'existe plus.
+        # tests/test_marlin_prefill_p1.py : Σ × 1, jamais × 2.
     return reserve
 
 
