@@ -10,3 +10,8 @@ verdict : **test non vert → pas de mesure** ; défauts à porter par poste4 : 
 ## Lecture
 - REGLES §7 (« la garde qui couvre est celle qu'on a fait échouer ») s'applique au test lui-même : un bras cassant vert sur une branche non empruntée est la troisième occurrence du motif « sonde qui ne touche pas ce qui est lu » — la condition d'entrée (`direct`) est à écrire dans le test.
 - La chaîne est prête (`prefill T/M`, profil, PPL 3 tranches) ; elle repart en une commande dès le test corrigé ou sur ordre explicite de mesurer sans lui.
+
+## Addendum 14h15 — deuxième prise (poste4 820f3f7, arbre ab4cdb6) : **ARRÊT à nouveau**, `tests/test_marlin_prefill_p1.py` 3 failed / 4 passed sur carte
+1. `[96-sans_awq]` et `[96-awq_par_expert]` : `attendre_chemin(bloc, "groupe")` → **chemin pris `direct`** (compteurs `{'direct': 1}`) : à T = 96 le témoin « groupe » lui-même passe par la branche `direct` (par_expert 24 ≤ `_MOE_GEMM_MAX` 48) — le compteur de chemin fait son travail (c'est lui qui arrête), mais le cas T = 96 du test ne peut pas atteindre « groupe » sans `ACVRAM_MOE_GEMM_MAX=0` ou T ≥ 193 ; à retirer ou à forcer.
+2. `[1024-awq_par_expert]` : **le témoin B0 (« groupe ») échoue son propre critère contre fp32** — `hors_groupe = 115 > 1e-4 × 262 144 = 26` (test, ligne `assert hors_groupe <= TOL_HORS * ref.numel()`), AVANT toute comparaison Marlin ; `[1024-sans_awq]` passe. Avec la table AWQ par expert, soit la référence fp32 du test n'applique pas l'échelle comme le moteur (xs / awq_g[e_sorted] avant les GEMM), soit la tolérance 1e-4 est trop serrée pour B0+AWQ ; dans les deux cas Marlin n'est pas jugé sur ce cas.
+Aucune mesure lancée (protocole : test vert d'abord) ; la chaîne repart en une commande.
