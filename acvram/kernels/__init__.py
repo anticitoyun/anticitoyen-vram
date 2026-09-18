@@ -868,6 +868,18 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
             y = gemm_w8a8.gemm_w8a8(xf, t, sortie_fp32=sortie_fp32)[:, : t.shape[0]]
             return y.reshape(*orig_shape[:-1], t.shape[0])
     dt = x.dtype if x.dtype != torch.float32 else torch.float16
+    # `ext.int8_dequant` (extension CUDA) est calibré pour group_size=128 :
+    # un group_size différent ne plante pas mais retient ~12 Gio au premier
+    # prefill au lieu d'échouer proprement (trouvé par observation mémoire,
+    # pas par erreur explicite -- bead, pas un chantier). Le repli SANS
+    # extension (`_dequantize_int8`, carte absente ou processeur) gère lui
+    # n'importe quel group_size -- vu par `test_int8_matmul_tranches.py`
+    # (group_size=64, CPU) -- donc le refus ne vaut que pour le chemin CUDA.
+    if ext is not None and t.qweight.is_cuda and t.group_size != 128:
+        raise NotImplementedError(
+            f"int8_matmul (repli GEMM CUDA, prefill n={n} > ACVRAM_INT8_GEMV_MAX="
+            f"{gemv_threshold}) : group_size={t.group_size} != 128 non servi. "
+            f"GEMV (n <= {gemv_threshold}) n'est pas concerné.")
     # Repli GEMM : déquantifier la matrice ENTIÈRE en bf16 coûtait, sur la
     # tête de Gemma-4-31B (262 144 × 5 376), 5,25 Gio d'un coup au premier
     # préfill — OOM après un chargement juste (poste3 0cf7fe6). Par tranches
