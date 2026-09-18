@@ -83,6 +83,29 @@ def test_regime_ligne_porte_kv_budget(converted, rig_fige):
     assert f"kv_budget={engine.allocator.num_blocks * BLOCK_SIZE}/8" in ligne
 
 
+def test_max_batch_size_au_dela_du_plan_leve_poste7_reprise_18_09(converted, rig_fige):
+    """La faille fermée le 18/09 (poste7-reprise-ordre-18-09 §Suite,
+    verdict-kv-budget-8-a-sec-18-09) : `load_model(max_model_len=…)` SEUL —
+    sans `max_concurrent_seqs` — retombe sur le défaut hérité du manifeste
+    (`converted` : 2, cf. `test_sans_max_concurrent_seqs_retombe_sur_le_manifeste_pas_sur_8`
+    ci-dessus). Construire l'`Engine` à `max_batch_size=12` par-dessus ce
+    plan est exactement le geste qui tronquait en silence — il doit
+    maintenant lever, pas se lancer."""
+    loaded = _charger(converted, rig_fige, None)
+    assert loaded.plan.kv_planned_seqs == 2
+    with pytest.raises(ValueError, match="max_batch_size=12"):
+        Engine(loaded, None, max_batch_size=12, max_model_len=512,
+              enable_cuda_graphs=False)
+
+
+def test_max_batch_size_au_dela_du_plan_override_force_le_lancement(converted, rig_fige, monkeypatch):
+    monkeypatch.setenv("ACVRAM_KV_PLAN_OVERRIDE", "1")
+    loaded = _charger(converted, rig_fige, None)
+    engine = Engine(loaded, None, max_batch_size=12, max_model_len=512,
+                    enable_cuda_graphs=False)
+    assert "kv_plan_override=1" in engine.regime_ligne()
+
+
 def test_sequences_tronquees_budget_compte_et_apparait_dans_regime(converted, rig_fige, capsys):
     loaded = _charger(converted, rig_fige, 8)
     engine = Engine(loaded, None, max_batch_size=1, max_model_len=512,

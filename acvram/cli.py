@@ -43,6 +43,7 @@ from . import __version__            # noqa: E402  (source unique de verite)
 VARIABLES_LUES = {
     "ACVRAM_ALLOC_EXTENSIBLE",
     "ACVRAM_BANC_ACCEPTE_REPLAN",
+    "ACVRAM_KV_PLAN_OVERRIDE",
     "ACVRAM_KERNEL_CACHE",
     "ACVRAM_FOND_COOL",
     "ACVRAM_FOND_ZEN",
