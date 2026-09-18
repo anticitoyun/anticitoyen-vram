@@ -310,19 +310,33 @@ class AnneauEnergie:
             while len(self._echantillons) > 1 and self._echantillons[0][0] < limite:
                 self._echantillons.popleft()
 
+    def jetons_fenetre(self) -> int:
+        """Jetons décodés couverts par la fenêtre actuelle — 0 si moins de
+        deux échantillons ou si le compteur n'a pas bougé. poste7
+        (poste7-metrics-energie-fenetre-18-09) : `j_par_jeton()` rend None
+        SEULEMENT quand ce compte vaut 0, jamais pour une autre raison
+        silencieuse — les deux se lisent toujours ensemble."""
+        with self._lock:
+            echantillons = list(self._echantillons)
+        if len(echantillons) < 2:
+            return 0
+        delta_tok = echantillons[-1][2] - echantillons[0][2]
+        return delta_tok if delta_tok > 0 else 0
+
     def j_par_jeton(self) -> float | None:
         """Lecture seule, jamais 0 : None si NVML absent, fenêtre trop
-        jeune (< 2 échantillons), ou aucun jeton décodé dans la fenêtre."""
+        jeune (< 2 échantillons), ou aucun jeton décodé dans la fenêtre
+        (`jetons_fenetre() == 0`)."""
         with self._lock:
             echantillons = list(self._echantillons)
         if len(echantillons) < 2:
             return None
         _, mj0, tok0 = echantillons[0]
         _, mj1, tok1 = echantillons[-1]
-        if mj0 is None or mj1 is None:
-            return None
         delta_tok = tok1 - tok0
         if delta_tok <= 0:
+            return None
+        if mj0 is None or mj1 is None:
             return None
         delta_mj = mj1 - mj0
         if delta_mj < 0:
