@@ -274,6 +274,39 @@ def assert_logits_proches(a: torch.Tensor, b: torch.Tensor, msg: str = "",
 _VERROUS = []
 
 
+def _verrou_tenu_en_mesure():
+    """Une carte est-elle tenue en TYPE=mesure, MAINTENANT, par un vivant ?
+
+    Contrairement à `_gpu_demande` ci-dessous, ne dépend PAS de
+    `CUDA_VISIBLE_DEVICES` : le lanceur de session exporte cette variable
+    vide par défaut (poste7 14/09), donc une suite lancée normalement se
+    croit sans carte et ne prend jamais le flock plus bas — mais elle
+    tourne quand même sur le même PROCESSEUR qu'une fenêtre HTTP mesurée
+    sous `carte.sh`. Trouvé le 18/09 (load 70,8) : trois `pytest` de pairs
+    pendant une fenêtre HTTP, aucun n'a rien vu venir puisque aucun ne
+    touchait le GPU. REGLES §2 le disait en consigne ; ceci en fait un
+    refus dur — lecture seule, jamais de verrou pris ici."""
+    import glob
+    import re
+    motif = os.environ.get("ACVRAM_VERROU_GLOB", "/tmp/acvram-carte-*.lock")
+    for verrou in sorted(glob.glob(motif)):
+        info = verrou + ".qui"
+        try:
+            champs = open(info).read().split(None, 3)
+            pid, _pris_a, nom = int(champs[0]), champs[1], champs[2]
+            type_ = champs[3].strip() if len(champs) > 3 else "?"
+        except (OSError, ValueError, IndexError):
+            continue
+        if type_ != "mesure":
+            continue
+        try:
+            os.kill(pid, 0)
+        except (OSError, ValueError):
+            continue   # detenteur disparu, info perimee (meme logique que carte.sh qui_tient())
+        return verrou, pid, nom
+    return None
+
+
 def _gpu_demande(config):
     """La suite touche-t-elle la carte ? Oui des qu'un GPU est visible et que
     rien ne l'interdit. On ne cherche PAS a deviner quels tests allouent : le
@@ -343,6 +376,22 @@ def pytest_configure(config):
       un verrou pour la SESSION pytest
           -> UNE attente, couverture complete. C'est celui-ci.
     """
+    # Symétrique de ce qui précède, et INCONDITIONNEL (pas derrière
+    # `_gpu_demande`, qui ne voit rien sans CUDA_VISIBLE_DEVICES) : une
+    # fenêtre HTTP mesurée sous `carte.sh` (TYPE=mesure) se fait fausser par
+    # le PROCESSEUR qu'une suite pytest lui prend, même une suite qui ne
+    # touche jamais le GPU (18/09, load 70,8, REGLES §2).
+    if os.environ.get("ACVRAM_TESTS_PENDANT_MESURE") != "1":
+        tenue = _verrou_tenu_en_mesure()
+        if tenue:
+            verrou, pid, nom = tenue
+            raise pytest.UsageError(
+                f"carte tenue en TYPE=mesure par PID {pid} ({nom}, {verrou}) : "
+                f"la suite ne demarre pas — une suite pytest, meme sans GPU, "
+                f"prend du processeur a une fenetre HTTP mesuree (18/09, load "
+                f"70,8). ACVRAM_TESTS_PENDANT_MESURE=1 pour passer outre en "
+                f"connaissance de cause.")
+
     if not _gpu_demande(config):
         return
 
