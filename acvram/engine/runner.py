@@ -554,6 +554,8 @@ class Engine:
             # régime du prefill NVFP4 non groupé : bf16 (W4A16) | w8a8 | w4a4 —
             # jamais plus tacite (poste7-prefill-a8-verdict-17-09)
             "prefill": kernels.prefill_regime(),
+            # linéaires INT8 du préfill (P0) : bf16 | a8 — toujours écrit
+            "prefill_int8": kernels.prefill_int8_regime(),
             # linéaires INT8 du décodage : triton≥b|cuda (poste C, bascule mesurée)
             "dense": kernels.narrow_regime(),
             "gdn": _gdn_regime(),
@@ -582,7 +584,7 @@ class Engine:
                f"couches_exilées={r['couches_exilees']}/{r['couches_total']} "
                f"experts_exilés={r['experts_exiles']}/{r['experts_total']} "
                f"{piles_txt} cartes={r['cartes']} "
-               f"chemin_moe={r['chemin_moe']} prefill={r['prefill']} dense={r['dense']} "
+               f"chemin_moe={r['chemin_moe']} prefill={r['prefill']} prefill_int8={r['prefill_int8']} dense={r['dense']} "
                f"ACVRAM_GDN={r['gdn']} "
                + (f"noyaux={r['noyaux']} " if r["noyaux"] else "")
                + f"kv_budget={self.allocator.num_blocks * BLOCK_SIZE}/{kv_seqs} "
