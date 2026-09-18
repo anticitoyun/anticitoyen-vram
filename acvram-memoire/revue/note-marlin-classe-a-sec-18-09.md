@@ -114,3 +114,46 @@ prédiction : 15 900-16 400 (les 48,8 ms du banc + act·up + colle, contre
 133,3 ms d'experts + déquant en situ : −84 ms sur 197 ⇒ 113 ms ⇒ 18 100
 si tout le reste tient ; je retiens 15 900-16 400 parce que la
 recombinaison et l'act·up ne sont pas dans les 48,8). Faux si < 15 700.
+
+## Arrêt de poste3 (5803c1e) — trois défauts, deux ordres de poste7, verdict à sec
+
+1. `torch.roll` sur Float8_e4m3fn : `roll_cuda` n'existe pas → roll sur la
+   vue uint8 (test).
+2. **Le test n'atteignait pas Marlin** (3e occurrence de « sonde qui ne
+   touche pas ce qui est lu ») : à T = 96, `elif direct:` (par_expert ≤
+   `_MOE_GEMM_MAX`) passait avant la branche marlin. Corrigé deux fois :
+   la branche marlin passe AVANT `direct` dans `_forward_prefill_grouped`
+   (quand `_stacks_marlin` existe, c'est elle) ; et, structurel (REGLES § 7),
+   `MoEBlock._chemin(nom)` compte le chemin RÉELLEMENT pris (mma | marlin |
+   direct | grouped_mm | w4a16 | groupe | bmm : `bloc.chemins`,
+   `bloc.dernier_chemin`) et `conftest.attendre_chemin(bloc, nom, avant)`
+   l'asserte — tout test d'équivalence de régime l'appelle AVANT de
+   comparer ; un test qui compare sans l'avoir atteint est rouge.
+3. **L'écart 3,7-4,3 % hors 2⁻⁷·(moy|y|+|y|) à T = 1024 — hypothèse (a), le
+   critère, tenue ; (b) et (c) écartées** :
+   - (b) échelles : aller-retour E4M3 → S0E5M3 (octet) → valeur telle que le
+     noyau la lit (`dequant_fp8_scales` : e5 → exposant bf16 avec b7 en tête,
+     × 2^119 / facteur, × 2⁻¹²⁶ des codes) sur 6 × 98 304 blocs (dont des
+     blocs 10⁻³) : **0 différent, 0 flushé** — exact par construction (tout
+     en puissances de 2, mantisse 3 bits conservée).
+   - (a) critère : émulation torch (CPU, sans noyau) de B0 (déquant bf16 :
+     code × bloc × globale ARRONDI en bf16) et de Marlin (code × bloc exact,
+     globale fp32 dans l'épilogue) contre la référence fp32, N = 1 024 :
+     sous le critère relatif de poste3, **B0 lui-même 2,4 % hors, Marlin 0,6 %,
+     Marlin-contre-B0 3,0 %** — c'est le chiffre de poste3 (3,7-4,3 %) :
+     deux approximations bf16 comparées entre elles à 2⁻⁷ près sur des
+     sorties proches de zéro ; ‖Δ‖/‖y‖ : B0 4,4·10⁻³, Marlin 3,4·10⁻³ —
+     **Marlin est plus proche de fp32 que B0** (la globale n'est pas arrondie
+     en bf16 par poids). Sous 2⁻⁷·max|y| PAR LIGNE : B0 et Marlin ≤ 10⁻⁴
+     hors (B0 en laisse ~3·10⁻⁵, arrondi bf16 de sa déquant). Critère
+     retenu, dans le test : chaque chemin CONTRE fp32, jamais l'un contre
+     l'autre, |Δ| ≤ 2⁻⁷·max|y| par ligne, part hors ≤ 10⁻⁴, et Marlin ≤ B0.
+   - (c) accumulation : sans objet, l'ordre des sommes ne fait pas 4 %.
+   `tests/test_marlin_prefill_p1.py` : T ∈ {96, 1 024} × {sans AWQ, table
+   AWQ par expert}, chemin asserté (groupe puis marlin), référence fp32,
+   critère par ligne, bras cassant (échelles décalées, vue uint8) rouge ; et
+   l'émulation à sec du critère (test qui casse si le critère relatif
+   passait B0). Suite 865 passed.
+
+PPL préfill = B0 ± 0,002 reste le juge final (poste3, avec la vitesse) ; ma
+prédiction : Marlin ≤ B0 en PPL (plus proche de fp32), écart < 0,001.

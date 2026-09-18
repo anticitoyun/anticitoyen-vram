@@ -1175,6 +1175,15 @@ class MoEBlock(nn.Module):
             qw.shape[1], k, bt or _MOE_MMA_BT, _MOE_MMA_ETAGES, _MOE_MMA_KS, grow)
         return y if brut else y[:, :m]
 
+    def _chemin(self, nom: str) -> None:
+        """Compteur du chemin RÉELLEMENT pris au préfill (REGLES § 7 : « noyau
+        atteint, pas fonction appelée » — trois tests d'équivalence ont
+        comparé sans l'atteindre) ; tout test de régime l'asserte AVANT de
+        comparer (`conftest.attendre_chemin`)."""
+        c = self.__dict__.setdefault("chemins", {})
+        c[nom] = c.get(nom, 0) + 1
+        self.__dict__["dernier_chemin"] = nom
+
     def _forward_prefill_grouped(self, x, topw, topi) -> Optional[torch.Tensor]:
         if self._stacks is None or "gate_proj" not in self._stacks:
             return None                                # experts sans porte : boucle
@@ -1271,6 +1280,7 @@ class MoEBlock(nn.Module):
                     return fausse_quant_nvfp4(_f(g, u, m, kd))
         if mma:
             # poids ET activations en 4 bits : les activations sont quantifiées
+            self._chemin('mma')
             # une fois par entrée (E2M1 bloc 16 + UE4M3) et servent à gate et up
             # Grille EXACTE (t_max omis) : ce chemin n'est jamais capturé dans
             # un graphe (prefill), la grille rembourrée du bead runner (14/09,
@@ -1294,39 +1304,10 @@ class MoEBlock(nn.Module):
             act = _activation(g, u, pg[5], pd[4], awq_d=None, hd_d=0)
             aq, asf, gra = ext.nvfp4_quant_act(act, awq_d, es32, cpt, hd_d)
             d = self._gemm_mma(pd, aq, asf, tiles, brut=True, grow=gra)
-        elif direct:
-            # les poids restent en 4 bits : plus de pile bf16 intermédiaire
-            # (trois passes de plusieurs Gio par couche en moins)
-            # Grille EXACTE ici aussi -- meme raison que la branche `mma`
-            # juste au-dessus.
-            tiles = self._tuiles(cnt)
-            if xs.shape[1] != pg[4]:                   # entrée rembourrée
-                partage = xs_u is xs
-                xs = F.pad(xs, (0, pg[4] - xs.shape[1])).contiguous()
-                xs_u = xs if partage else F.pad(xs_u, (0, pg[4] - xs_u.shape[1])).contiguous()
-            g = self._gemm(pg, xs, tiles, brut=True)
-            u = self._gemm(pu, xs_u, tiles, brut=True)
-            act = _activation(g, u, pg[5], pd[4])
-            d = self._gemm(pd, act, tiles, brut=True)
-        elif _PREFILL_GROUPED == "grouped_mm":
-            # défaut : `torch._grouped_mm` (déroulé sur sm_120 en un mm par
-            # expert + une copie DtoH par pile — mais ses copies s'arrêtent là)
-            offs = torch.cumsum(cnt, 0).to(torch.int32)
-            wg = self._pile_bf16(pg); g = torch._grouped_mm(xs, wg.transpose(1, 2), offs=offs); del wg
-            wu = self._pile_bf16(pu); u = torch._grouped_mm(xs_u, wu.transpose(1, 2), offs=offs); del wu
-            act = _activation(g, u, pg[5], pd[4])
-            wd = self._pile_bf16(pd); d = torch._grouped_mm(act, wd.transpose(1, 2), offs=offs); del wd
-        elif _PREFILL_GROUPED == "w4a16":
-            # B1 : la grille de B0, les poids lus en NVFP4 dans la tuile —
-            # ni pile bf16 (nvfp4_dequant 50,8 ms), ni relecture de 60 Go
-            from ..kernels import gemm_groupe as gg
-            G = xs.shape[0]
-            tiles = self._tuiles(cnt, gg.BT, t_max=-(-G // gg.BT) + E)
-            g = gg.gemm_groupe_nvfp4(xs, pg[1], pg[2], pg[3].reshape(-1).to(torch.float32), tiles, m=pg[5])
-            u = gg.gemm_groupe_nvfp4(xs_u, pu[1], pu[2], pu[3].reshape(-1).to(torch.float32), tiles, m=pu[5])
-            act = _activation(g, u, pg[5], pd[4])
-            d = gg.gemm_groupe_nvfp4(act, pd[1], pd[2], pd[3].reshape(-1).to(torch.float32), tiles, m=pd[5])
         elif _PREFILL_GROUPED == "marlin" and getattr(self, "_stacks_marlin", None) is not None:
+            # AVANT `direct` (poste3, verdict-marlin-p1-situ-18-09 : à petit T par
+            # expert, `direct` passait devant et un test n'atteignait jamais Marlin)
+            self._chemin('marlin')
             # P1 : GEMM groupée classe Marlin (port vLLM) sur la seconde
             # disposition ; lignes déjà triées par expert (xs), blocs alignés
             # par expert depuis e_sorted, sortie dans l'ordre de xs — la
@@ -1344,7 +1325,43 @@ class MoEBlock(nn.Module):
             u = MP.gemm_moe(xu_m, mu[0], mu[1], mu[2], s_ids, e_ids, n_post, uns, bloc, 1, G, mu[1].shape[2], mu[3], ws)
             act = _activation(g, u, pg[5], pd[4])
             d = MP.gemm_moe(act, md[0], md[1], md[2], s_ids, e_ids, n_post, uns, bloc, 1, G, md[1].shape[2], md[3], ws)
+        elif direct:
+            self._chemin('direct')
+            # les poids restent en 4 bits : plus de pile bf16 intermédiaire
+            # (trois passes de plusieurs Gio par couche en moins)
+            # Grille EXACTE ici aussi -- meme raison que la branche `mma`
+            # juste au-dessus.
+            tiles = self._tuiles(cnt)
+            if xs.shape[1] != pg[4]:                   # entrée rembourrée
+                partage = xs_u is xs
+                xs = F.pad(xs, (0, pg[4] - xs.shape[1])).contiguous()
+                xs_u = xs if partage else F.pad(xs_u, (0, pg[4] - xs_u.shape[1])).contiguous()
+            g = self._gemm(pg, xs, tiles, brut=True)
+            u = self._gemm(pu, xs_u, tiles, brut=True)
+            act = _activation(g, u, pg[5], pd[4])
+            d = self._gemm(pd, act, tiles, brut=True)
+        elif _PREFILL_GROUPED == "grouped_mm":
+            self._chemin('grouped_mm')
+            # défaut : `torch._grouped_mm` (déroulé sur sm_120 en un mm par
+            # expert + une copie DtoH par pile — mais ses copies s'arrêtent là)
+            offs = torch.cumsum(cnt, 0).to(torch.int32)
+            wg = self._pile_bf16(pg); g = torch._grouped_mm(xs, wg.transpose(1, 2), offs=offs); del wg
+            wu = self._pile_bf16(pu); u = torch._grouped_mm(xs_u, wu.transpose(1, 2), offs=offs); del wu
+            act = _activation(g, u, pg[5], pd[4])
+            wd = self._pile_bf16(pd); d = torch._grouped_mm(act, wd.transpose(1, 2), offs=offs); del wd
+        elif _PREFILL_GROUPED == "w4a16":
+            self._chemin('w4a16')
+            # B1 : la grille de B0, les poids lus en NVFP4 dans la tuile —
+            # ni pile bf16 (nvfp4_dequant 50,8 ms), ni relecture de 60 Go
+            from ..kernels import gemm_groupe as gg
+            G = xs.shape[0]
+            tiles = self._tuiles(cnt, gg.BT, t_max=-(-G // gg.BT) + E)
+            g = gg.gemm_groupe_nvfp4(xs, pg[1], pg[2], pg[3].reshape(-1).to(torch.float32), tiles, m=pg[5])
+            u = gg.gemm_groupe_nvfp4(xs_u, pu[1], pu[2], pu[3].reshape(-1).to(torch.float32), tiles, m=pu[5])
+            act = _activation(g, u, pg[5], pd[4])
+            d = gg.gemm_groupe_nvfp4(act, pd[1], pd[2], pd[3].reshape(-1).to(torch.float32), tiles, m=pd[5])
         elif _PREFILL_GROUPED == "groupe" or _PREFILL_GROUPED == "marlin":
+            self._chemin('groupe')
             # B0 : un lancement persistant pour les 128 experts, lignes lues
             # par index dans le noyau, grille de tuiles à taille fixe (aucun
             # offset relu sur l'hôte) ; P0 : la grille en un lancement
@@ -1358,6 +1375,7 @@ class MoEBlock(nn.Module):
             wd = self._pile_bf16(pd); d = gg.gemm_groupe(act, wd, tiles); del wd
         else:
             # bmm par seaux (A, poste7-profil-verdict-17-09) : réfuté −36 %, témoin
+            self._chemin("bmm")
             plan = self._plan_bmm(cnt)
             wg = self._pile_bf16(pg); g = self._grouped_bmm(xs, wg, plan); del wg
             wu = self._pile_bf16(pu); u = self._grouped_bmm(xs_u, wu, plan); del wu
