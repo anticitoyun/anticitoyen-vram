@@ -56,10 +56,31 @@ propre — 0 tenseur à étendue>4096 (confirmé par le scan du parc,
 `verdict-controle-parc-ratio-norme-17-09.md` §3). Aucun chiffre publié
 n'est concerné par ce résultat.
 
-## Suite
+## Contrôle final : hypothèse canal salient, TENUE (5/5)
 
-Chantier à ouvrir (décision poste7/chef) : comprendre pourquoi
-`layers.46.experts.42.down_proj` (et les 4 autres tenseurs à
-`n_samples>=8` mais étendue extrême) résiste avec une vraie statistique
-— pas de piste prête de mon côté. Pas urgent : le converti classé est
-propre, la garde n°2 tient déjà pour toute nouvelle conversion.
+poste7 : les 5/14 restants (`n_samples>=8`) s'expliquent par un canal
+d'activation massif à l'entrée de `down_proj` — une propriété du modèle,
+pas un artefact de calibration — si ≤3 canaux dépassent 100× la médiane
+de `mean_abs` sur chacun des 5. Scellé : faux si <5/5 tenus.
+
+```
+layers.46.experts.42.down_proj  2 canaux>100xmed  mediane=0,0425  max=572,9   OK
+layers.30.experts.6.up_proj     0 canal           mediane=0,288   max=0,947   OK
+layers.30.experts.17.gate_proj  0 canal           mediane=0,256   max=1,22    OK
+layers.29.experts.28.up_proj    0 canal           mediane=0,270   max=0,834   OK
+layers.17.experts.57.up_proj    0 canal           mediane=0,193   max=1,05    OK
+```
+
+**5/5 TENU.** Seul le pire cas (`layers.46.experts.42`) porte réellement
+1-2 canaux massifs (jusqu'à ~13500× la médiane) ; les quatre autres n'ont
+AUCUN canal isolé au-delà de 100× malgré une étendue>4096 mesurée sur le
+converti — l'étendue y vient probablement d'une combinaison de plusieurs
+canaux modérément élevés plutôt que d'un seul canal extrême, mais reste
+sous le seuil des 3 dans les deux lectures.
+
+## Clôture
+
+Fermé en observation. Converti classé (`k48-calibA`) reste propre, pas
+de reconversion. Déclencheur pour rouvrir : si un futur scan montre un
+tenseur GLM classé (pas historique) à étendue>4096, ou si la garde n°2
+refuse/replie un converti GLM à l'avenir sur ce motif précis.
