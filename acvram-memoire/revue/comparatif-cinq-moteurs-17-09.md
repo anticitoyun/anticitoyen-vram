@@ -10,14 +10,14 @@ Assemblé par chef, critère 6 points `poste7-plan-completion-comparatif-17-09`.
 
 ## Table Coder-30B-A3B (`Qwen3-Coder-30B-A3B`)
 
-| moteur / régime | PPL privé | PPL public | b=1 t/s | b=1 J | b=12 t/s | b=12 J | prefill j/s | classé |
-|---|---|---|---|---|---|---|---|---|
-| acvram W4A16 (nvfp4, bf16 prefill) | 1,0148 géo (302025e) | 1,0099 | **366,4** | **0,907** | **1 126–1 147** | **0,342–0,347** | **9 913** | oui |
-| EXL3 4,25 bpw (exllamav3, TabbyAPI) | 1,0006 | 1,0004 | 168,0 | 1,546 | 855,7 | 0,362 | 10 656 | oui |
-| llama.cpp Q4_K_M | 1,0103 | 1,0146 | 344,0 | 1,151 | 971–1 066 | 0,278–0,306 | 15 717 | oui |
-| vLLM W4A16 Marlin (ModelOpt communautaire) | 1,1227 | 1,0876 | 302,9 | — | 2 031,4 | 0,197 | 20 988 | non |
-| vLLM W4A4 CUTLASS (ModelOpt communautaire) | 1,1554 | 1,1160 | 200,9 | — | 1 621,7 | 0,227 | 35 241 | non |
-| TRT-LLM W4A4 (même ModelOpt, KV fp8) | 1,2313 | 1,1376 | 234,9 | 1,481 | 2 104,7 | 0,177 | 55 419 | non |
+| moteur / régime | PPL privé | PPL public | b=1 t/s | b=1 J | b=12 t/s | b=12 J | prefill j/s | classé | source |
+|---|---|---|---|---|---|---|---|---|---|
+| acvram W4A16 (nvfp4, bf16 prefill) | 1,0148 géo (302025e) | 1,0099 | **366,4** | **0,907** | **1 126–1 147** | **0,342–0,347** | **9 913** | oui | verdict-coder-acvram-w4a16-17-09;poste7-b0-et-cause-lm4-17-09;verdict-harnais-egal-coder-18-09-b |
+| EXL3 4,25 bpw (exllamav3, TabbyAPI) | 1,0006 | 1,0004 | 168,0 | 1,546 | 855,7 | 0,362 | 10 656 | oui | verdict-coder-exl3-vitesses-17-09 |
+| llama.cpp Q4_K_M | 1,0103 | 1,0146 | 344,0 | 1,151 | 971–1 066 | 0,278–0,306 | 15 717 | oui | verdict-harnais-egal-coder-18-09-b;verdict-llamacpp-coder-16-09 |
+| vLLM W4A16 Marlin (ModelOpt communautaire) | 1,1227 | 1,0876 | 302,9 | — | 2 031,4 | 0,197 | 20 988 | non | verdict-coder-vllm-17-09 |
+| vLLM W4A4 CUTLASS (ModelOpt communautaire) | 1,1554 | 1,1160 | 200,9 | — | 1 621,7 | 0,227 | 35 241 | non | verdict-coder-vllm-17-09 |
+| TRT-LLM W4A4 (même ModelOpt, KV fp8) | 1,2313 | 1,1376 | 234,9 | 1,481 | 2 104,7 | 0,177 | 55 419 | non | verdict-coder-trtllm-17-09 |
 
 **Statut vLLM/TRT-LLM Coder : ModelOpt propre = refus accepté**, deux blocages fichier:ligne indépendants et documentés (`unified_export_hf.py:419-422` Qwen3MoeExperts non supporté transformers 5 ; `nvfp4_tensor.py:84` déport CPU/GPU casse le calcul NVFP4 sous transformers 4, modèle > 32 Gio VRAM). Cellule remplie par le checkpoint communautaire (1,16-1,30), non classée — scellé du protocole réfuté : le checkpoint porte ~12 % de la perte, les activations 4 bits ~3 %, Marlin bat CUTLASS en décodage.
 
