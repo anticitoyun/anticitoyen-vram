@@ -2074,14 +2074,16 @@ __global__ void nvfp4_gemv_grouped_gateup_xreg_kernel(
     }
 }
 
-// ACVRAM_GROUPED_XREG : 0 (témoin : x relu en shared) | down (x en registres
+// ACVRAM_GROUPED_XREG : 0 (témoin : x relu en shared) | down (DÉFAUT : x en registres
 // sur la projection down seule — poste7-gemv-experts-clos-18-09 : gateup à 96
 // registres tombait à 2 blocs/SM, +19 % ; down 56 registres, −12 %) | 1 (les
 // deux, témoin réfuté). Rend 0, 1 (down seul) ou 2 (les deux).
+// Défaut « down » depuis verdict-gemv-experts-xreg-down-18-09 (poste3, ABAB
+// Coder b=12 : × 0,944 nu, J/jeton × 0,954, bit-exact ; cellule 1 307 t/s nu).
 static int xreg_mode() {
     static const int v = [] {
         const char *e = std::getenv("ACVRAM_GROUPED_XREG");
-        if (!e || !*e) return 0;
+        if (!e || !*e) return 1;                 // défaut : down
         if (std::string(e) == "down") return 1;
         return atoi(e) != 0 ? 2 : 0;
     }();
