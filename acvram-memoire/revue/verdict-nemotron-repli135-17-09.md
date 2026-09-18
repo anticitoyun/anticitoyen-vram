@@ -11,3 +11,5 @@ verdict : **FAUX — 1,2634 > 1,020, prédiction 1,018-1,028 réfutée de 0,24**
 - Le repli ramène 1,4301 → 1,2634 : il retire ~40 % de l'écart, pas le défaut. Même signature que calibA (toutes les fenêtres × 1,2-1,3, aucune explosée) : l'échelle calibrée est toujours mal appariée sur toutes les couches, le repli n'en corrige qu'une partie.
 - L'officiel non calibré (1,0304) reste la meilleure conversion acvram de ce modèle ; l'écart à vLLM (0,987) n'a pas été récupéré par la calibration.
 - Les 5 conversions Nemotron acvram se rangent : officiel 1,0304 < srcbf16 1,0632 < repli135 1,2634 < calibA 1,4301 ; le classement (≤ 1,02) n'a jamais été atteint.
+
+## Addendum (poste7, 18/09) — le converti repli135 était invalide (bogue de plancher côté conversion, pas la calibration) : la mesure 1,2634 reste vraie, la prédiction reste réfutée, mais elle n'engage plus la clôture ; chantier ROUVERT, suite : protocole-nemotron-calibA-AB-17-09.
