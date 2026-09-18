@@ -72,6 +72,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("GROUPED_OLD", "", None, "1", "témoin : l'ancien noyau groupé à 4 lignes par bloc"),
     Variable("GROUPED_XREG", "down", None, "0",
              "GEMV groupée des experts, K ≤ 2048 : down (défaut depuis verdict-gemv-experts-xreg-down-18-09 : ABAB × 0,944 nu, Coder b=12 1 307 t/s) = x en registres par tranche sur la projection down seule | 1 = gate/up aussi (témoin réfuté : 96 registres, 2 blocs/SM, +19 %) | 0 = x relu en shared (témoin) ; sortie identique au bit dans tous les cas"),
+    Variable("GEMV_LAYOUT", "naturel", ("acvram.engine.model", "_GEMV_LAYOUT"), "naturel",
+             "P1 disposition unique (forme (b)) : marlin = le GEMV du décodage lit la disposition Marlin des experts (tuiles 16 k × 64 n, exige PREFILL_GROUPED=marlin ; scellé ≤ 0,97 × GEMV à b=1 et b=12, fp32 par ligne) | naturel = pile NVFP4 (témoin)"),
     Variable("MOE_GEMV", "v1", ("acvram.engine.model", "_MOE_GEMV"), "v1",
              "GEMV groupée du décodage MoE : v1 (une passe de poids par paire expert-jeton) | v2 (paires triées par expert, poids lus une fois pour ≤ 4 jetons, sortie identique au bit)"),
     Variable("MULTI_PROJ", "0", ("acvram.engine.model", "_MULTI_PROJ"), "0",
@@ -205,7 +207,11 @@ def regime_ligne() -> str:
     """Une ligne pour l'en-tête d'une mesure : ce qui diffère du défaut,
     puis extension et masques. « défaut » seul veut dire : tout au défaut."""
     r = regime_noyaux()
-    parts = [f"{k}={v if v else repr('')}" for k, v in r["hors_defaut"].items()] or ["défaut"]
+    parts = [f"{k}={v if v else repr('')}" for k, v in r["hors_defaut"].items()
+             if k != "ACVRAM_GEMV_LAYOUT"] or ["défaut"]
+    # la disposition lue par le GEMV des experts est toujours nommée (P1
+    # disposition unique, poste7-p1-disposition-unique-18-09) : marlin | naturel
+    parts.append("ACVRAM_GEMV_LAYOUT=" + str(r["variables"].get("ACVRAM_GEMV_LAYOUT", "?")))
     # la voie GDN est toujours nommée, défaut compris : c'est elle qui sépare
     # 97 de 621 j/s sur Qwen3.8 (poste7, 17/09), et « fla » demandé ne vaut
     # rien si fla est absent ou la carte aussi — la voie EFFECTIVE est écrite

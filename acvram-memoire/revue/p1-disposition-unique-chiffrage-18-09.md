@@ -95,3 +95,56 @@ par tuile ; juge fp32 par ligne + bras cassant (échelles décalées) ; banc =
 faux ⇒ P1 fermé VRAM, verdict daté, ligne utilisateur (pas de repli).
 Délai : 1 j de noyau + tests, ½ j de banc ; `-Xptxas -v` du noyau avant
 la carte (REGLES § 3).
+
+## 6. Écrit (GO poste7 18/09) — et une correction du § 3 avant la carte
+
+**Le § 3 comptait faux** : « 8 FFMA par uint4 » — un uint4 porte 32 poids,
+donc 32 FFMA dans (b) comme dans v1 ; le « ÷ 2,4 » n'existe pas. Compte
+réel, SASS sm_120 du .cu compilé à sec (`nvcc -cubin -Xptxas -v`,
+scratchpad/acvram.sass, boucle principale) :
+
+| noyau | registres | spill | boucle | instr / octet de poids | LDS / 64 o |
+|---|---|---|---|---|---|
+| v1 `gateup<bf16,4>` | (inchangé) | 0 | ~6,5 instr/octet + 2 LDS.32/octet | **≈ 8,5** | 128 |
+| (b) `gemv_marlin<bf16,2>` gate+up | **64** | 0 | 571 instr / 64 o | **8,9** | **4** (LDS.64) |
+| (b) `gemv_marlin<bf16,1>` down | **48** | 0 | 294 instr / 32 o | 9,2 | 4 |
+
+Le plancher commun (par octet : F2FP 1, HADD2 2, PRMT/LOP3 ~1,5, FMUL/FFMA
+2) est le même ; (b) paie 8 décodages d'échelle par uint4 (2 instr chacun :
+PRMT + LEA, le SEL du zéro retiré — l'octet 0 vaut 2⁻²²/facteur, ≤ 2⁻²²·6·|x|
+par poids) là où v1 en paie 2. **Le gain de (b) n'est donc PAS le compte
+d'instructions (égal) : c'est la mémoire partagée, 32× moins de LDS**, le
+poste que ncu désignait (mio_throttle + short_scoreboard 60 % des
+décrochages, issue_active 56 %). Si ce poste était bien le mur, (b) monte
+vers l'émission : 7,3 × 0,56/0,80 ≈ 5,1 ms ; s'il ne l'était pas, (b) = v1
+et le scellé tombe.
+
+**Prédiction scellée (remplace le § 3)** : b=12 **5,0-6,5 ms/pas** (GEMV
+7,3 ; porte 0,97 × = 7,08), b=1 **2,2-2,9 ms** (GEMV 3,0 ; porte 2,91).
+Faux si (b) > 0,97 × GEMV à l'un des deux → P1 fermé VRAM.
+
+Livré (branche poste4) : `nvfp4_gemv_marlin[_gateup]` (acvram_kernels.cu :
+bloc 8 warps par tuile de colonnes, chaque warp un huitième des tuiles k,
+deux tuiles en vol par voie, réduction 4 voies puis 8 warps en partagée,
+ordre fixe → déterministe) ; `ACVRAM_GEMV_LAYOUT=marlin|naturel` (regime.py,
+toujours dans regime_ligne ; `_construire_marlin` bâtit les piles sous
+GEMV_LAYOUT=marlin aussi) ; aiguillage `_forward_grouped` avec compteurs
+`gemv_marlin` / `gemv_v1` ; `ACVRAM_TRACE_ROUTAGE=f.pt` capture les routages
+réels hors graphe, `banc-marlin-decode-18-09.py --routages f.pt` les rejoue ;
+bras (b) dans le banc avec le scellé imprimé ; tests/test_gemv_marlin.py
+(à sec : place et décodage des 8 octets d'échelle contigus, vérifiés contre
+permuter_echelles/traiter_echelles_nvfp4 en CPU — 2 passés ; carte : (b)
+contre fp32 par ligne sur Coder gate/up, down, une tuile, fantômes, GELU,
+déterminisme, bras cassant échelles ET poids décalés, bloc MoE avec
+`attendre_chemin("gemv_marlin")` et témoin `gemv_v1`).
+
+Non couvert à sec : la permutation des POIDS (gptq_marlin_repack est un
+noyau CUDA) — lue dans la source, testée par la carte seulement. Pas encore
+fait : retirer la pile naturelle sous GEMV_LAYOUT=marlin (le gain VRAM) —
+après le scellé, pas avant.
+
+Ordre poste3 : `CUDA_VISIBLE_DEVICES="" python -c "from acvram.kernels import
+get_extension"` ne compile pas sans carte ; compiler AVANT le banc sous
+carte.sh (import seul, processus séparé), puis `pytest tests/test_gemv_marlin.py
+-q`, puis `banc-marlin-decode-18-09.py` (Triton cache vidé, sha du .so dans
+l'en-tête).
