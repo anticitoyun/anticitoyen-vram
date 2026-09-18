@@ -102,4 +102,47 @@ if [ "${1:-}" = "--outils-terminal" ] || [ "${ACVRAM_INSTALL_OUTILS:-0}" = 1 ]; 
         say "  $n_copies script(s) depose(s) dans $DEST"
         [ "$n_ecartes" -gt 0 ] && warn "  $n_ecartes ecarte(s) (chemin fige sur l'ancien home, a corriger a la main : $ECARTES)"
     fi
+
+    # ---- catalogue de modeles (acvram-chemins.tsv) : controle, pas fabrication --
+    # kimi-modeles/claude-modeles et acvram-serveur resolvent un alias via ce
+    # TSV (dossier, contexte). Une migration de disque ou de home peut le
+    # laisser pointer sur un montage qui n'existe plus (trouve le 18/09 :
+    # 195/201 lignes sur un prefixe perime apres la migration du 13/09,
+    # 98 autres deplacees sur un second disque de modeles). Ce bloc CONTROLE
+    # et signale ; il ne devine jamais un nouveau chemin a la place de
+    # l'utilisateur — un alias sans dossier reel est un modele a reconvertir
+    # ou une ligne a retirer, pas quelque chose a corriger seul.
+    TSV="${ACVRAM_CHEMINS_TSV:-$HOME/.kimi-code/acvram-chemins.tsv}"
+    if [ -f "$TSV" ]; then
+        say ""
+        say "catalogue de modeles : controle de $TSV"
+        "$PY" - "$TSV" <<'PYEOF'
+import sys
+tsv = sys.argv[1]
+total = manquants = 0
+orphelins = []
+with open(tsv, encoding="utf-8") as f:
+    for ligne in f:
+        ligne = ligne.rstrip("\n")
+        if not ligne.strip():
+            continue
+        total += 1
+        champs = ligne.split("\t")
+        if len(champs) < 2:
+            continue
+        alias, dossier = champs[0], champs[1]
+        import os
+        if not os.path.isdir(dossier):
+            manquants += 1
+            orphelins.append(alias)
+if manquants:
+    print(f"  {manquants}/{total} alias sans dossier reel (chemin casse ou modele absent)")
+    for a in orphelins[:10]:
+        print(f"    - {a}")
+    if manquants > 10:
+        print(f"    ... et {manquants - 10} de plus")
+else:
+    print(f"  {total}/{total} alias resolvent un dossier reel")
+PYEOF
+    fi
 fi
