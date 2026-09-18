@@ -199,3 +199,15 @@ toute la couche MoE, Marlin sera au moins aussi bon sur les octets mais
 paie 3 lancements + l'aligneur). Faux si b=12 > 6,5 ou b=1 > 1,2 (alors
 forme (b)). Issue qui me gênerait : b=1 en zone grise seul — la cellule
 b=1 (366 t/s, devant llama.cpp) juge, une passe.
+
+### Résultat du banc décodage (poste3) : b=12 **6,81 ms/pas**, b=1 **1,41 ms** — hors bandes (> 6,5 et > 1,2)
+
+Ma prédiction (5,0-6,0 / 1,1-1,4) : b=1 tenue, b=12 dépassée de 0,8 ; celle de
+poste7 (4,6-5,4 / 0,9-1,1) fausse des deux côtés. Marlin à M = 8-12 par expert
+ne bat pas le GEMV sur les octets : le rembourrage par blocs de 8 (96 paires
+→ ~540 lignes) et trois lancements + aligneur par couche coûtent plus que
+la relecture par paire du GEMV (7,3 ms/pas à rpw=4 + xreg). Instrument :
+le témoin GEMV lisait les échelles de bloc en Float8_e4m3fn (« expected
+scalar type Byte ») — vues uint8 portées dans le fichier (poste3 avait rejoué
+depuis une copie locale). Suite : décision de poste7 — forme (b), GEMV relisant
+la disposition Marlin (2 j, bit-exact), ou fermeture VRAM de P1.

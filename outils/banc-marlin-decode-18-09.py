@@ -78,6 +78,9 @@ def main():
     dev = torch.device("cuda")
     qg, bg, gsg, tsg = pile(I, K, 1, dev); qu, bu, gsu, tsu = pile(I, K, 2, dev); qd, bd, gsd, tsd = pile(K, I, 3, dev)
     mg = MP.preparer_pile(qg, bg, gsg); mu = MP.preparer_pile(qu, bu, gsu); md = MP.preparer_pile(qd, bd, gsd)
+    # le GEMV lit les échelles de bloc en OCTETS (uint8), Marlin en Float8_e4m3fn
+    # (« expected scalar type Byte but found Float8_e4m3fn », poste3) : deux vues
+    bg8, bu8, bd8 = (b.view(torch.uint8).contiguous() for b in (bg, bu, bd))
     ws = MP.espace_travail(dev, 4)
     wg32 = [dequantize_nvfp4(t, torch.float32).to(dev) for t in tsg]
     wu32 = [dequantize_nvfp4(t, torch.float32).to(dev) for t in tsu]
@@ -107,8 +110,8 @@ def main():
                 return MP.gemm_moe(act, md[0], md[1], md[2], s_ids, e_ids, n_post, uns, bloc, 1, G, K, I, ws, c=c3)
 
             def gemv():
-                act = ext.nvfp4_gemv_grouped_gateup(qg, bg, gsg, qu, bu, gsu, eid, tok, x, K, 0)
-                return ext.nvfp4_gemv_grouped(qd, bd, gsd, eid, seq, act, I)[:, :K]
+                act = ext.nvfp4_gemv_grouped_gateup(qg, bg8, gsg, qu, bu8, gsu, eid, tok, x, K, 0)
+                return ext.nvfp4_gemv_grouped(qd, bd8, gsd, eid, seq, act, I)[:, :K]
 
             # référence fp32 par paire
             xf = x.float(); ref = torch.empty(G, K, dtype=torch.float32, device=dev)
