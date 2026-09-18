@@ -178,7 +178,8 @@ def test_le_bloc_moe_decode_prend_gemv_marlin(monkeypatch):
         pytest.skip("extension Marlin non compilée à sec")
     E, H, I, top_k, T = 8, 256, 128, 2, 6
     bloc = _bloc_moe_jouet(E, H, I, top_k)
-    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "naturel")
+    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "naturel")            # témoin naturel (défaut marlin depuis le 18/09)
+    monkeypatch.setattr(MD, "_PREFILL_GROUPED", "groupe")
     assert bloc._try_build_stacks()
     assert bloc._stacks_marlin is None
     torch.manual_seed(T)

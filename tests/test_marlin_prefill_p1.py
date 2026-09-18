@@ -56,7 +56,7 @@ def test_la_pile_naturelle_est_rendue_apres_le_repack_a_sec(monkeypatch):
     bloc jouet sur CPU, repack remplacé par un stub."""
     from acvram.engine.model import MoEBlock
     bloc = _bloc_moe_jouet(4, 128, 64, 2, dev="cpu")
-    monkeypatch.setattr(MoEBlock, "_construire_marlin", lambda self, p, a, h: None)
+    monkeypatch.setattr(MoEBlock, "_construire_marlin", lambda self, p, a, h: None)   # extension absente → naturel
     assert bloc._try_build_stacks()
     assert bloc._stacks["gate_proj"][1] is not None and bloc.experts[0].gate_proj.qweight.qweight.numel() > 0
     assert getattr(bloc, "experts_layout", "naturel") == "naturel"
@@ -186,6 +186,7 @@ def test_marlin_et_groupe_contre_fp32_et_le_bras_casse(monkeypatch, awq, T):
     topw = topw / topw.sum(-1, keepdim=True)
     topi32 = topi.to(torch.int32)
     monkeypatch.setattr(MD, "_PREFILL_GROUPED", "groupe")
+    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "naturel")            # témoin : pile naturelle gardée (défaut marlin depuis le 18/09)
     # à petit T (96 : 24 lignes par expert ≤ _MOE_GEMM_MAX 48) `direct` prend
     # le pas sur `groupe` : le témoin serait inatteignable — on force groupe
     monkeypatch.setattr(MD, "_MOE_GEMM_MAX", 0)

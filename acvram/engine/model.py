@@ -1983,7 +1983,11 @@ _MOE_MMA = os.environ.get("ACVRAM_MOE_MMA", "1") == "1"
 # d'experts, RÉFUTÉ : poste3 0edc3b9, 5 486 j/s contre 8 614 — tuiles d'un
 # petit M inchangées et ~58 Go de copies w[experts] par prefill ; gardé comme
 # témoin d'une fausse piste, jamais comme défaut)
-_PREFILL_GROUPED = os.environ.get("ACVRAM_PREFILL_GROUPED", "groupe")
+# | "marlin" (P1, GEMM groupée classe Marlin sur la disposition unique des
+# experts : DÉFAUT depuis l'adoption utilisateur du 18/09 — Coder prefill
+# 15 987 j/s (+63 %), GLM 5 502 (+18 %), b=12 1 239 t/s / 0,303 J, au prix de
+# −1,2 % à b=1 ; poste7-p1-situ-verdict-18-09 ; « groupe » reste le témoin)
+_PREFILL_GROUPED = os.environ.get("ACVRAM_PREFILL_GROUPED", "marlin")
 # ACVRAM_PREFILL_A4=off|gateup|both : porte qualité W4A4 du prefill MoE (poste7-lecture-profils-coder-17-09) —
 # fausse quantification NVFP4 des ACTIVATIONS en torch (E2M1 bloc 16, échelle de bloc UE4M3, échelle
 # globale par ligne, comme nvfp4_quant_act), sur l'entrée de gate/up (gateup) et aussi sur celle de
@@ -2103,7 +2107,8 @@ _MOE_GEMV = os.environ.get("ACVRAM_MOE_GEMV", "v1")
 # P1 disposition unique (poste7-p1-disposition-unique-18-09, forme (b)) : le GEMV
 # du décodage lit la disposition Marlin (« marlin », exige
 # ACVRAM_PREFILL_GROUPED=marlin) ou la pile NVFP4 naturelle (« naturel », témoin).
-_GEMV_LAYOUT = os.environ.get("ACVRAM_GEMV_LAYOUT", "naturel")
+# Défaut « marlin » avec PREFILL_GROUPED (adoption du 18/09) ; témoin : les deux à naturel/groupe.
+_GEMV_LAYOUT = os.environ.get("ACVRAM_GEMV_LAYOUT", "marlin")
 # ACVRAM_TRACE_ROUTAGE=<fichier.pt> : les routages (expert par paire, [B, top_k])
 # de chaque appel décodé hors graphe, sauvés à la sortie (torch.save d'une liste)
 # — à rejouer par outils/banc-marlin-decode-18-09.py --routages.
