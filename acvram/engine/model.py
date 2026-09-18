@@ -972,7 +972,10 @@ class MoEBlock(nn.Module):
         self._stacks_awq = awq
         self._stacks_marlin = self._construire_marlin(piles, awq, hadamard)
         if self._stacks_marlin is not None:
-            self._liberer_pile_naturelle()
+            if _DOUBLE_DIAG:
+                self.__dict__["experts_layout"] = "double(diag)"
+            else:
+                self._liberer_pile_naturelle()
         return True
 
     def _liberer_pile_naturelle(self) -> None:
@@ -1023,7 +1026,7 @@ class MoEBlock(nn.Module):
         hors tuiles (K, N multiples de 64), extension non compilée à sec
         (REGLES § 6 : jamais de nvcc sous le verrou —
         `outils/banc-marlin-p1-18-09.py --compiler-seulement`)."""
-        if _PREFILL_GROUPED != "marlin" and _GEMV_LAYOUT != "marlin":
+        if _PREFILL_GROUPED != "marlin" and _GEMV_LAYOUT != "marlin" and not _DOUBLE_DIAG:
             return None
         raison = None
         if any(piles[n][0] != "nvfp4" for n in ("gate_proj", "up_proj", "down_proj") if n in piles) \
@@ -2111,7 +2114,11 @@ if _TRACE_ROUTAGE:
     _atexit.register(lambda: torch.save(_ROUTAGES, _TRACE_ROUTAGE) if _ROUTAGES else None)
 if _GEMV_LAYOUT not in ("naturel", "marlin"):
     raise ValueError(f"ACVRAM_GEMV_LAYOUT={_GEMV_LAYOUT!r} : naturel | marlin")
-if (_GEMV_LAYOUT == "marlin") != (_PREFILL_GROUPED == "marlin"):
+# Diagnostic seulement (bissection du biais, poste7-p1-situ-verdict-18-09) : les
+# DEUX dispositions gardées — préfill {groupe|marlin} × décodage {v1|(b)} sur les
+# mêmes piles ; jamais un régime servi (régime : experts_layout=double(diag)).
+_DOUBLE_DIAG = os.environ.get("ACVRAM_DOUBLE_DISPOSITION_DIAG", "0") == "1"
+if not _DOUBLE_DIAG and (_GEMV_LAYOUT == "marlin") != (_PREFILL_GROUPED == "marlin"):
     # la disposition est UNIQUE : préfill et décodage lisent la même pile ;
     # « Marlin au préfill, naturelle au décodage » (double disposition,
     # experts_layout=double) n'existe plus (poste7-p1-disposition-unique-18-09)

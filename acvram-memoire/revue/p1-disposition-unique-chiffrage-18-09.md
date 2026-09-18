@@ -167,3 +167,70 @@ coupé sous `unique` — casser plutôt que mesurer une double disposition
 (4) `ACVRAM_GEMV_LAYOUT=marlin` ⇔ `ACVRAM_PREFILL_GROUPED=marlin`, sinon
 refus à l'import. Couches exilées (pile « table ») : pas de repack, elles
 restent naturelles dans le pool — hors du périmètre de cette note.
+
+## 8. Biais du GEMV (b) in situ (+0,008 PPL) — instruments et hypothèses (poste7-p1-situ-verdict-18-09)
+
+**(0) Critère de biais** : dans `banc-marlin-decode-18-09.py` et dans un
+instrument par couche sur les piles RÉELLES, `outils/biais-gemv-marlin-18-09.py`
+(v1, (b), témoin, chacun contre fp32) : `biais_signe = moy(Δ)/moy|y|` (poste7,
+≤ 1e-4) **et** `gain − 1 = Σ y·ref/Σ ref² − 1` — un biais MULTIPLICATIF
+(échelles systématiquement trop petites, par exemple) est invisible à la
+moyenne signée sur une sortie centrée, ce qu'un MoE est ; le témoin négatif =
+échelles de bloc tronquées d'un bit (toujours ≤ la vraie, gain − 1 ≈ −3 %)
+doit rendre faux, sinon l'instrument est aveugle et le verdict « ne compte pas ».
+Second témoin dans l'instrument par couche : accumulation fp16 séquentielle sur
+down.
+
+**(1) bf16 dans le produit ou l'accumulation — réfutée par le SASS** (§ 6,
+scratchpad/acvram.sass, boucle principale de `nvfp4_gemv_marlin_kernel<bf16,2>`) :
+HADD2.F32 128 = conversions half→fp32 (2 par octet, comme v1), puis FFMA 96 +
+FMUL 64 + FADD 32 = 192 opérations fp32 = 128 produits + 32 FFMA d'échelle +
+32 FADD ; **aucune HFMA2/HMUL2**, accumulateurs fp32 (`float acc[NW][4][2]`),
+x en fp32 (`__bfloat162float`), échelles décodées en fp32 exact (test à sec
+rtol 1e-6). Rien à remédier sur ce point.
+
+**(2) tables d'échelles ≠ E4M3 — chiffrée à sec sur le Coder réel**
+(Qwen3-Coder-30B-A3B-nvfp4, 48 couches, `--echelles-seulement`) : la pile
+Marlin ANNULE les échelles avec s·facteur·2⁷ < 2 (`traiter_echelles_nvfp4`) ;
+facteur = 1 partout. Annulées : gate 69 582 blocs (0,012 %), up 68 074
+(0,011 %), down 0 — presque toutes en couche 0 (69 078 gate, 0,55 % de ses
+blocs), puis 201 (c. 1), 175 (c. 2), 128 (c. 4), 0 ailleurs ; déjà nulles dans
+la pile NVFP4 : 619 849 (0,10 %, couches 0-2). Ces blocs ont une échelle
+< 2⁻⁶ pour un maximum de 448 (rapport 3,5·10⁻⁵) : leur poids est déjà
+négligeable ; le prefill Marlin, qui lit la même pile, tient à Δ+0,0007. Le
+noyau (b) décode l'octet 0 en 2⁻²²/facteur (§ 6) : ±codes·2⁻²²·g, plus petit
+que tout poids vivant. Hypothèse 2 : **peu probable** ; l'instrument par couche
+tranchera (gain − 1 de (b) contre v1, couche 0 en tête).
+
+**(3) bornes M = 1** : le noyau n'a aucun chemin dépendant de M (grille N/64 ×
+G, x en partagée par bloc) ; b = 1 : 0 hors 2⁻⁷ au banc. Rien à chercher là.
+
+Ce que l'instrument par couche dira : si (b) et v1 ont le même gain − 1 et le
+même biais signé contre fp32 sur toutes les couches (|·| ≤ 1e-4) et que le
+témoin est vu, le biais de +0,008 n'est pas dans le GEMV mais dans ce que le
+moteur lui donne ou fait de sa sortie sous disposition unique (à isoler par
+bissection in situ : préfixe par Marlin + décodage v1 est impossible sous
+disposition unique — alors comparer décodage (b) et v1 sur les MÊMES piles
+en double disposition, hors régime, dans le seul but du diagnostic).
+
+### GLM prefill Marlin −0,003 et GEMV (b) décodage +0,008 : même famille, à nommer ensemble (poste7)
+
+Le scan à sec des échelles sur GLM-4.7-Flash-nvfp4 (46 couches, facteur 1) :
+**0 échelle annulée, 0 déjà nulle** — la pile Marlin de GLM est
+bit-équivalente à la pile E4M3. Le −0,003 du prefill GLM ne vient donc pas des
+tables ; il vient de l'arithmétique du chemin : Marlin sort g, u et down en
+**bf16** (`gemm_moe(…, c=)`) et l'activation silu(g)·u est prise en bf16 avant
+down, là où `groupe`/`direct` gardent des intermédiaires fp32 — trois arrondis
+2⁻⁸ par jeton et par expert, sans biais de signe mais pas équivalents ; le
+sens (mieux) est un hasard de ce modèle, pas une propriété. Le +0,008 du GEMV
+(b) au décodage est l'autre face : un chemin dont l'arithmétique par élément
+est exacte (§ 8-1) mais dont la sortie in situ diffère. Aucune revendication
+tant que la cause de chacun n'est pas nommée.
+
+**Bissection in situ** (ajoutée : `ACVRAM_DOUBLE_DISPOSITION_DIAG=1`, régime
+`experts_layout=double(diag)`, jamais servi) : sur les MÊMES piles, quatre
+cellules ppl-decode-kv — préfixe {groupe, marlin} × décodage {naturel = v1,
+marlin = (b)} (`ACVRAM_PREFILL_GROUPED` × `ACVRAM_GEMV_LAYOUT`). Si le +0,008
+suit le décodage (b) quel que soit le préfixe → le noyau (instrument par
+couche pour le localiser) ; s'il suit le préfixe Marlin → le cache KV écrit par
+le prefill bf16 (même cause que le −0,003 GLM, signe opposé sur Coder).
