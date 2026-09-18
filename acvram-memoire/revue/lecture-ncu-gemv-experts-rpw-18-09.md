@@ -1,0 +1,62 @@
+# Lecture de la passe ncu (poste3, verdict-ncu-gemv-experts-rpw-18-09, 344ffcd) — ce que le tableau dit, ce qu'il ne dit pas, et ce que serait le pas suivant (poste4, 18/09, aucune ligne de noyau écrite)
+
+## 1. Ce que rpw = 4 a fait, et pourquoi (confirmé)
+
+gate/up 95,5 → 87,9 µs (−8 %), down 81,0 → 65,2 (−20 %) ; requêtes L1
+−37 % | −50 % ; `long_scoreboard` (latence mémoire) 6,5 → 4,4 | 6,3 → 4,1 ;
+`barrier` 0,79 → 0,42. C'est le mécanisme annoncé : moins de mises en scène
+de x (une par bloc de 32 lignes au lieu de 8), moins de blocs (vagues 9 →
+2,3 | 24 → 6). Le seuil 1 300 non tenu et non rouvert : pris.
+
+## 2. Ce qui reste, lu dans les décrochages — et ce n'est pas la DRAM
+
+À rpw = 4, gate/up : `issue_active` **56 %** (le SM émet une instruction un
+cycle sur deux : ce n'est pas le profil d'un noyau qui attend la mémoire),
+`mio_throttle` **4,6** et `short_scoreboard` **4,5** par issue — tous deux
+au niveau de `long_scoreboard` (4,4). MIO = file des instructions de mémoire
+PARTAGÉE, short_scoreboard = attente d'un chargement partagé. Le noyau lit
+l'activation depuis la shared **par flottant** (`xA[2*b]`, `xA[2*b+1]` :
+32 LDS.32 par uint4 de poids) : pour 16 octets de poids lus une fois en
+global, **128 octets lus en shared** — rapport 8 : 1. La bande visée est
+celle du bus ; le noyau est borné par le pipeline LSU/shared. Le down
+(K = 768) : `issue_active` 65 %, short_scoreboard 1,85 (moins de x par
+ligne), mais 24 uint4 par ligne pour 32 voies : **8 voies sur 32 ne
+chargent rien** (25 % du warp inactif sur la charge), un seul chargement en
+vol par voie.
+
+Ce que le tableau ne dit pas : la DRAM à 40 % | 27 % est lue sous ncu
+(horloges verrouillées, noyaux sérialisés) — pas comparable aux 1,26 To/s
+en situ ; seule la comparaison rpw4/rpw1 dans le même régime compte.
+`dram__bytes_read` = n/a sur ncu 2026.3 : pas d'octets DRAM, la relecture
+L2 (hit 66-77 %) reste une estimation.
+
+## 3. Pas suivant possible, SI poste7 rouvre (sinon fermé) — sans toucher à l'arithmétique
+
+a. **Lecture vectorisée de x en shared** : `float4` (LDS.128) au lieu de
+   `float` — 8 instructions par uint4 de poids au lieu de 32 ; l'indice
+   décalé `i + (i >> 5)` (1 flottant par 32) casse l'alignement 16 octets :
+   passer à un décalage de 4 par 32 (`XSH_PAS = 36`, LDS.128 sans conflit
+   par quart de warp : voies 0-7 → bancs 0, 4, …, 28). Même arithmétique,
+   même ordre : **sortie identique au bit** (le juge de v2 sert tel quel).
+   Prédiction : mio_throttle et short_scoreboard ÷ 3, gate/up 87,9 →
+   70-78 µs, down 65 → 58-62 ; pas 7,35 → 6,2-6,7 ms ; Coder b=12 nu
+   1 262 → **1 330-1 400** (faux si < 1 300).
+b. **Down (K = 768)** : deux lignes par passage de warp, voies 0-23 sur la
+   ligne r, 24-31 + reprise sur r+1 — ou `uint2` (48 chargements de 8 o :
+   32 voies actives, 1,5 par voie) ; sortie identique si la réduction garde
+   l'ordre par ligne (à vérifier au juge). Prédiction : down 65 → 55 µs.
+c. Ce que je ne propose pas : x en registres (64 par voie sur K = 2048 :
+   la pression de registres — 40 aujourd'hui — ferait tomber l'occupation
+   de 6 blocs à 3), ni TPB/v2 (réfuté), ni CUDA nouveau.
+
+## 4. Défauts du script (`outils/ncu_gemv_experts_rpw_18-09.sh`), à porter
+
+1. `sudo -n ncu` remet l'environnement à zéro : aucune `ACVRAM_*` n'atteint
+   le processus — poste3 a posé le régime dans un wrapper Python ; le script
+   doit faire de même (`sudo -n env ACVRAM_…=… ncu …` ou wrapper).
+2. Parseur en locale fr (« 91 040 », « 45,56 ») : `replace(",", "")`
+   fabrique 4556 — retirer les espaces, puis virgule → point.
+3. `dram__bytes_read.sum` = n/a sur 5090 / ncu 2026.3 : retirer, la bande
+   par `dram__throughput` %.
+Ces trois corrections ne sont utiles qu'à une passe suivante ; je les porte
+si poste7 rouvre, sinon le script reste avec cette note.
