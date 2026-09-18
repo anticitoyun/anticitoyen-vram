@@ -148,3 +148,22 @@ get_extension"` ne compile pas sans carte ; compiler AVANT le banc sous
 carte.sh (import seul, processus séparé), puis `pytest tests/test_gemv_marlin.py
 -q`, puis `banc-marlin-decode-18-09.py` (Triton cache vidé, sha du .so dans
 l'en-tête).
+
+## 7. Disposition unique dans le CHARGEUR (poste3 : 17,04 Gio réservés, 21/48 couches exilées)
+
+Ma « disposition unique » n'avait touché que l'aiguillage du décodage ; le
+chargeur réservait toujours Σ mlp_bytes pour une seconde disposition
+(loader.py `_reserve_prefill`, 5a0f6c4) et `_try_build_stacks` gardait la
+pile NVFP4 à côté de la pile Marlin. Corrigé : (1) la réserve double est
+retirée (Σ × 1, jamais × 2 — test à sec avec bras cassant :
+`test_le_plan_ne_reserve_pas_de_seconde_disposition`) ; (2)
+`MoEBlock._liberer_pile_naturelle` après le repack : qw/bs de `_stacks[n]`
+→ None, experts au gabarit vide (`[:0].cpu().clone()`, comme
+`runner._demote_expert`), `experts_layout = "marlin"` ; tout chemin qui
+relirait la pile naturelle (mma préfill, direct, MMA décodage, v1) est
+coupé sous `unique` — casser plutôt que mesurer une double disposition
+(test à sec `test_la_pile_naturelle_est_rendue_apres_le_repack_a_sec`) ;
+(3) régime `experts_layout=marlin|naturel`, « double » n'existe plus ;
+(4) `ACVRAM_GEMV_LAYOUT=marlin` ⇔ `ACVRAM_PREFILL_GROUPED=marlin`, sinon
+refus à l'import. Couches exilées (pile « table ») : pas de repack, elles
+restent naturelles dans le pool — hors du périmètre de cette note.

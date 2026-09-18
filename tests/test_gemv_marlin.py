@@ -207,3 +207,12 @@ def test_le_bloc_moe_decode_prend_gemv_marlin(monkeypatch):
     assert bloc.chemins["gemv_v1"] == n_v1, bloc.chemins
     h1, hb = _hors_par_ligne(y1, ref), _hors_par_ligne(yb, ref)
     assert h1 <= TOL_HORS * ref.numel() and hb <= TOL_HORS * ref.numel(), (h1, hb)
+    # disposition unique : pile naturelle rendue, le chemin marlin reste le seul
+    # — même sous un témoin naturel demandé après coup (rien d'autre à lire)
+    bloc._liberer_pile_naturelle()
+    assert bloc._stacks["gate_proj"][1] is None and bloc.experts_layout == "marlin"
+    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "naturel")
+    n_m = bloc.chemins["gemv_marlin"]
+    yu = bloc._forward_grouped(x, topw, topi.to(torch.int32))
+    attendre_chemin(bloc, "gemv_marlin", avant=n_m)
+    assert torch.equal(yu, yb)

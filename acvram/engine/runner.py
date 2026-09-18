@@ -556,10 +556,10 @@ class Engine:
             "prefill": kernels.prefill_regime(),
             # linéaires INT8 du préfill (P0) : bf16 | a8 — toujours écrit
             "prefill_int8": kernels.prefill_int8_regime(),
-            # P1 : experts en deux dispositions (NVFP4 pour le GEMV, repack
-            # Marlin pour la GEMM groupée du préfill) — « double » | « simple »
-            "experts_layout": "double" if any(getattr(m, "_stacks_marlin", None) is not None
-                                              for m in self.model.modules() if isinstance(m, MoEBlock)) else "simple",
+            # P1 disposition unique : « marlin » (pile Marlin seule, préfill et
+            # décodage, la pile NVFP4 rendue) | « naturel » (pile NVFP4 seule)
+            "experts_layout": "marlin" if any(getattr(m, "experts_layout", None) == "marlin"
+                                              for m in self.model.modules() if isinstance(m, MoEBlock)) else "naturel",
             # linéaires INT8 du décodage : triton≥b|cuda (poste C, bascule mesurée)
             "dense": kernels.narrow_regime(),
             "gdn": _gdn_regime(),
