@@ -1,8 +1,10 @@
 """poste7-devstral-llama4-scaling-18-09 : llama_4_scaling_beta (yarn
-ministral3/Devstral) n'est pas porte sur q -- pas de no-op silencieux,
-REFUS NOMME au-dela de original_max_position_embeddings, valeur visible
-dans regime_ligne() meme sous le plafond (non refuse, mais non servi non
-plus). Meme harnais que test_budget_kv_slots_chargeur.py (converted +
+ministral3/Devstral) est porte sur q par model.Attention quand le spec le
+porte A LA CONSTRUCTION (tests/test_devstral_llama4_scaling.py) ; ici le
+spec est modifie APRES load_model, aucune Attention ne le sert -- pas de
+no-op silencieux, REFUS NOMME au-dela de original_max_position_embeddings,
+valeur visible dans regime_ligne() meme sous le plafond (non refuse, mais
+non servi non plus). Meme harnais que test_budget_kv_slots_chargeur.py (converted +
 rig_fige + Engine direct), rope_scaling force par monkeypatch sur le spec
 charge -- `converted` (conftest.py) n'a pas de yarn configure."""
 from unittest.mock import patch
