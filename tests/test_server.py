@@ -34,7 +34,14 @@ def client(converted):
                                 "<|im_start|>assistant\n{% endif %}"},
               open(os.path.join(converted, "tokenizer_config.json"), "w"))
 
-    loaded = load_model(converted, dtype=torch.float32, device_override="cpu")
+    loaded = load_model(converted, dtype=torch.float32, device_override="cpu",
+                        max_concurrent_seqs=4)
+    # `_replanifier` (loader.py) n'agit que si `detect_rig()` voit un GPU —
+    # absent ici, le kwarg ci-dessus est ignoré et le plan garde le
+    # `kv_planned_seqs=2` du manifeste `converted` (conftest.py). Le porter
+    # explicitement au lot réellement servi, comme le ferait un vrai
+    # rechargement sur carte (poste7-reprise-ordre-18-09 §Suite).
+    loaded.plan.kv_planned_seqs = 4
     tokenizer = load_tokenizer(converted)
     engine = Engine(loaded, tokenizer, max_batch_size=4, max_model_len=256)
     with TestClient(create_app(engine, tokenizer, "tiny")) as c:
