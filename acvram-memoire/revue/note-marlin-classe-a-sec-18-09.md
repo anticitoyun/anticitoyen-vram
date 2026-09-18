@@ -59,3 +59,19 @@ Faux si < 110 (alors la porte se ferme sans carte, comme écrit).
    `-static-global-template-stub=false` (CMakeLists.txt:1377), posé aussi.
 2. En-tête (INDEX) : `regime_ligne()` + `marlin_port_so=<sha256 du .so>` +
    `marlin_source=vLLM v0.29.0`, imprimés et dans le JSON.
+
+### Prédiction GLM par la formule (écrite avant la passe de poste3, 18/09)
+
+GLM-4.7-Flash : 46 couches MoE, E = 64, top_k 4, H 2 048, I_moe 1 536 →
+experts routés **7,11 TFLOP** par préfill de 2 048 (l'expert partagé est un
+GEMM dense, hors formule). Dernier préfill mesuré : **4 422 j/s** (W4A16,
+verdict-duel-glm-prise-b-16-09, pp2048 ; vLLM 26 732) = 463 ms. Experts
+aujourd'hui (B0 ≈ 93 TFLOPS + déquant NVFP4 : 302 Mo/couche, la même
+masse que Coder) ≈ 76 + 50 = 126 ms ⇒ **part fixe ≈ 337 ms** (MLA de
+préfill par séquence, expert partagé, tête) — c'est elle qui domine, pas les
+experts. Formule : j/s = 2048 / (0,337 + 7,11/X) :
+X = 110 → **5 100** ; X = 137 → **5 260** ; X = 150 → 5 300 (+15-20 % ; la
+parité vLLM ne se joue pas sur les experts). À rebaser sur le témoin T de
+la même passe si le pas GLM actuel diffère de 463 ms (B0 est passé défaut
+après le 16/09) : fixe = pas_T − 126. Faux si GLM en situ < 0,95 ×
+formule(X) — alors la part fixe a bougé ou l'expert partagé pèse plus.
