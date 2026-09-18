@@ -422,7 +422,7 @@ async function rafraichir() {
     const plafonds = (nrj.cartes || [])
       .map(c => nb(c.horloge_sm, 0) + ' MHz / ' + nb(c.watts_plafond, 0) + ' W')
       .join(', ');
-    $('energie').textContent = 'énergie : ' + nb(nrj.j_par_jeton, 3)
+    $('energie').textContent = 'énergie : ' + nb(nrj.j_par_jeton_10s, 3)
       + ' J/jeton' + (plafonds ? ' — horloge SM / plafond : ' + plafonds : '');
 
     // Ajout n°4 (poste7-gui-ajouts-18-09 § 4) : la meme ligne "[régime] ..."
