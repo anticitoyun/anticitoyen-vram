@@ -110,6 +110,7 @@ VARIABLES_LUES = {
     # qu'une liste incomplete fait echouer la garde — pas parce qu'on la lit.
     "ACVRAM_SRC_HASH",
     "ACVRAM_ARCH_FAMILY",
+    "ACVRAM_COLLE_MOE",
     "ACVRAM_CUDA_HOME",
     "ACVRAM_DENSE_ETROIT_BK",
     "ACVRAM_DENSE_ETROIT_BN",
@@ -189,6 +190,7 @@ VARIABLES_LUES = {
     "ACVRAM_POOL_SYNC",
     "ACVRAM_PREFILL",
     "ACVRAM_PREFILL_A4",
+    "ACVRAM_PREFILL_INT8",
     "ACVRAM_PREFILL_DEQUANT",
     "ACVRAM_SANS_FUSION_BF16",
     "ACVRAM_SANS_PRECHARGE",

@@ -1159,8 +1159,14 @@ class MoEBlock(nn.Module):
         E = pg[1].shape[0]
         flat_e = topi.reshape(-1).to(torch.int64)
         flat_t = torch.arange(t, device=x.device).repeat_interleave(k)
-        ordre = torch.argsort(flat_e, stable=True)
-        cnt = torch.bincount(flat_e, minlength=E)
+        colle = _colle_moe_triton(flat_e.numel(), E, x.device)
+        if colle is not None:
+            # P0 : tri + histogramme en UN lancement (colle_moe.trier_paires),
+            # mêmes ordre/cnt qu'argsort stable + bincount (tests/test_colle_moe.py)
+            ordre, _, cnt = colle.trier_paires(flat_e, E)
+        else:
+            ordre = torch.argsort(flat_e, stable=True)
+            cnt = torch.bincount(flat_e, minlength=E)
         xs = x[flat_t[ordre]].to(torch.bfloat16).contiguous()        # [G, H]
         # échelle AWQ par expert (poste7-glm-awq-pile-15-09) : x_ligne / s[e]
         # comme ChannelScaler.apply en boucle — au prefill aussi, sinon la
@@ -1276,10 +1282,11 @@ class MoEBlock(nn.Module):
         elif _PREFILL_GROUPED == "groupe":
             # B0 : un lancement persistant pour les 128 experts, lignes lues
             # par index dans le noyau, grille de tuiles à taille fixe (aucun
-            # offset relu sur l'hôte)
+            # offset relu sur l'hôte) ; P0 : la grille en un lancement
             from ..kernels import gemm_groupe as gg
             G = xs.shape[0]
-            tiles = self._tuiles(cnt, gg.BT, t_max=-(-G // gg.BT) + E)
+            t_max = -(-G // gg.BT) + E
+            tiles = colle.tuiles(cnt, gg.BT, t_max) if colle is not None else self._tuiles(cnt, gg.BT, t_max=t_max)
             wg = self._pile_bf16(pg); g = gg.gemm_groupe(xs, wg, tiles); del wg
             wu = self._pile_bf16(pu); u = gg.gemm_groupe(xs_u, wu, tiles); del wu
             act = _activation(g, u, pg[5], pd[4])
@@ -1916,6 +1923,26 @@ _MOE_GEMV = os.environ.get("ACVRAM_MOE_GEMV", "v1")
 # depuis poste7-duel-verdict-16-09 § 6.2 (15 534 lancements/pas à b=12 en
 # séquence par séquence) ; 1 = noyau d'attention seul batché ; 0 = boucle.
 _MLA_BATCH = int(os.environ.get("ACVRAM_MLA_BATCH", "2"))
+
+# P0 (poste7-profil-verdict-18-09) : colle du préfill MoE (tri des paires par
+# expert + grille de tuiles) en deux lancements Triton au lieu d'argsort
+# (radix, 8 lancements) + bincount + ~10 lancements de _tuiles ; mêmes
+# tenseurs (tests/test_colle_moe.py). torch = témoin.
+_COLLE_MOE = os.environ.get("ACVRAM_COLLE_MOE", "torch")
+if _COLLE_MOE not in ("torch", "triton"):
+    raise ValueError(f"ACVRAM_COLLE_MOE={_COLLE_MOE!r} : torch | triton")
+
+
+def _colle_moe_triton(G: int, E: int, device):
+    if _COLLE_MOE != "triton" or E & (E - 1):
+        return None
+    from ..kernels import colle_moe
+    if not colle_moe.disponible() or G > colle_moe.G_MAX:
+        return None
+    if device.type != "cuda" and os.environ.get("TRITON_INTERPRET") != "1":
+        return None
+    return colle_moe
+
 
 def _multi_projection(lins):
     """`MultiProjection` (kernels/gemm_dense_etroit) des projections NVFP4
