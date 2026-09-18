@@ -479,6 +479,12 @@ class ModelSpec:
 _ARCH_ALIASES = {
     "LlamaForCausalLM": "llama",
     "MistralForCausalLM": "llama",
+    # Devstral-Small-2 (Mistral3, text_config ministral3) : deplie generi-
+    # quement par le bloc `text_config` ci-dessous, meme convention que les
+    # modeles vision-langage. Explicite plutot que laisse au repli "llama"
+    # par defaut (`_ARCH_ALIASES.get(archs[0], "llama")`) -- un repli
+    # silencieux qui marche aujourd'hui casse sans bruit si le defaut change.
+    "Mistral3ForConditionalGeneration": "llama",
     "Qwen2ForCausalLM": "llama",
     "Qwen3ForCausalLM": "llama",
     "Qwen2MoeForCausalLM": "moe",
@@ -540,6 +546,17 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
     rp_gen = cfg.get("rope_parameters") or {}
     if "rope_theta" not in cfg and isinstance(rp_gen, dict) and rp_gen.get("rope_theta"):
         cfg = {**cfg, "rope_theta": rp_gen["rope_theta"]}
+    if cfg.get("model_type") == "ministral3" and not cfg.get("rope_scaling") and rp_gen:
+        # Devstral-Small-2 (chef, 18/09) : `rope_parameters` porte le yarn
+        # (type/factor/original_max_position_embeddings/beta_fast/beta_slow),
+        # memes noms de cles que le `rope_scaling` que lit deja layers.py
+        # (_build_inv_freq) -- passe tel quel. `llama_4_scaling_beta`, seul
+        # champ propre a ministral3, N'EST PAS porte : sa formule (modeling_
+        # ministral3.py, get_llama_4_attn_scale) vaut `1 + beta*log(1+floor(
+        # position/original_max_position_embeddings))`, et
+        # floor(position/16384) = 0 pour toute position < 16384 -- scaling
+        # EXACTEMENT 1.0, donc sans effet sur un max_model_len <= 8192.
+        cfg = {**cfg, "rope_scaling": rp_gen}
     if cfg.get("model_type") == "gemma4_unified_text":
         cfg = {**cfg, "model_type": "gemma4_text"}     # même modèle texte
     if cfg.get("model_type") == "nemotron_h" and (
