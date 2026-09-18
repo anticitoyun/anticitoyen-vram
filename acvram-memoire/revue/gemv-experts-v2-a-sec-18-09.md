@@ -106,3 +106,18 @@ Bug de test corrigé : `_routage` définissait `eid` avant la branche
   d'activation amorti sur 16 lignes, mais toujours 2 uint4 en vol par
   voie), rpw = 4 → 6,6-7,2 ; scellé **non tenu** de peu — faux si ≤ 6,7,
   et je le souhaite.
+
+## Défaut rpw = 4 (poste7-rpw-defaut-18-09) — fait à sec
+
+poste3 (in situ ABAB Coder b=12) : rpw = 4 → 1 262 t/s nu / 1 162 bridé /
+0,344 J (rpw = 1 : 1 114) ; seuil 1 300 non tenu (−3 %), non rouvert ; ma
+prédiction « non tenu de peu » sur le banc était juste de forme, et le
+scellé du banc (≤ 6,7) est resté faux — le levier existe (+13 % en situ) sans
+atteindre la bande visée. Fait : `acvram_kernels.cu` (six wrappers) et
+`regime.VARIABLES` : `ACVRAM_GROUPED_RPW` défaut **4** ; banc et script ncu
+alignés. `ppl-decode-kv` au défaut : à poste3 (carte). Ce qui décide de la
+fermeture : la passe ncu bornée rpw = 4 de poste3
+(`outils/ncu_gemv_experts_rpw_18-09.sh`) — je lis avant d'écrire.
+
+Aussi : `cli.VARIABLES_LUES` manquait `ACVRAM_VERROU_GLOB` (4b83a2f sur
+main) — `test_cadrage_perplexite` rouge en suite complète.

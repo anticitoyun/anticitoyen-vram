@@ -73,7 +73,7 @@ def main():
     assert ext is not None and hasattr(ext, "nvfp4_gemv_grouped_gateup_v2"), "extension sans v2"
     # ACVRAM_GROUPED_RPW est lu par le .cu au PREMIER lancement (static) : une
     # valeur par processus ; la ligne de régime en tête la nomme (poste7)
-    rpw = int(os.environ.get("ACVRAM_GROUPED_RPW", "1"))
+    rpw = int(os.environ.get("ACVRAM_GROUPED_RPW", "4"))
     ligne = regime_ligne()
     print(ligne, flush=True)
     print(f"ACVRAM_GROUPED_RPW={rpw} (une valeur par processus)", flush=True)
@@ -99,6 +99,10 @@ def main():
             act = ext.nvfp4_gemv_grouped_gateup_v2(qg, bg, gsg, qu, bu, gsu, eid_s, tok_s, ordre, x, K, 0)
             return ext.nvfp4_gemv_grouped_v2(qd, bd, gsd, eid_s, seq_s, ordre, act, I)
 
+        def xreg():
+            act = ext.nvfp4_gemv_grouped_gateup_xreg(qg, bg, gsg, qu, bu, gsu, eid, tok, x, K, 0)
+            return ext.nvfp4_gemv_grouped_xreg(qd, bd, gsd, eid, seq, act, I)
+
         def v2_gateup_seul():
             return ext.nvfp4_gemv_grouped_gateup_v2(qg, bg, gsg, qu, bu, gsu, eid_s, tok_s, ordre, x, K, 0)
 
@@ -108,13 +112,19 @@ def main():
         y1, y2 = v1(), v2()
         identique = bool(torch.equal(y1, y2))
         ms1, ms2 = chrono(v1), chrono(v2)
+        a_xreg = hasattr(ext, "nvfp4_gemv_grouped_xreg")
+        ms3 = chrono(xreg) if a_xreg else float("nan")
+        identique_xreg = bool(torch.equal(y1, xreg())) if a_xreg else None
         ms1g, ms2g = chrono(v1_gateup_seul), chrono(v2_gateup_seul)
         octets = distincts * octets_expert
         res.append({"routage": r, "distincts": distincts, "octets": octets, "identique": identique,
                     "v1_ms": ms1, "v2_ms": ms2, "v1_To_s": octets / ms1 / 1e9, "v2_To_s": octets / ms2 / 1e9,
-                    "v1_gateup_ms": ms1g, "v2_gateup_ms": ms2g})
+                    "v1_gateup_ms": ms1g, "v2_gateup_ms": ms2g,
+                    "xreg_ms": ms3, "xreg_To_s": octets / ms3 / 1e9 if ms3 == ms3 else float("nan"),
+                    "xreg_identique": identique_xreg})
         print(f"routage {r:2d} distincts={distincts:3d} {octets / 1e6:6.1f} Mo  v1 {ms1:.4f} ms ({octets / ms1 / 1e9:.2f} To/s)"
-              f"  v2 {ms2:.4f} ms ({octets / ms2 / 1e9:.2f} To/s)  gateup v1/v2 {ms1g:.4f}/{ms2g:.4f}  identique={identique}", flush=True)
+              f"  v2 {ms2:.4f} ms ({octets / ms2 / 1e9:.2f} To/s)  xreg {ms3:.4f} ms  gateup v1/v2 {ms1g:.4f}/{ms2g:.4f}"
+              f"  identique v2={identique} xreg={identique_xreg}", flush=True)
     med = lambda k: statistics.median(r[k] for r in res)
     v1_pas, v2_pas = med("v1_ms") * COUCHES, med("v2_ms") * COUCHES
     tous = all(r["identique"] for r in res)
@@ -126,6 +136,14 @@ def main():
                    + ("(≤ 6,7 : tenu si bit-exact)" if v1_pas <= 6.7 else "(> 6,7)")
                    + (" — bit-exact v2/v1 sur tous les routages" if tous else " — SORTIE DIFFÉRENTE"))
     print(verdict_rpw)
+    if all(r["xreg_ms"] == r["xreg_ms"] for r in res):
+        xreg_pas = med("xreg_ms") * COUCHES
+        tous_x = all(r["xreg_identique"] for r in res)
+        # dernier geste (poste7-gemv-experts-dernier-geste-18-09) : porte ncu gateup+down
+        # ≤ 6,2 ms/pas ; ici le rejeu de graphe en donne l'ordre de grandeur
+        print(f"xreg : {med('xreg_ms'):.4f} ms/couche ({med('xreg_To_s'):.2f} To/s) → {xreg_pas:.2f} ms/pas "
+              f"(v1 rpw={rpw} : {v1_pas:.2f}) ; identique au bit {sum(bool(r['xreg_identique']) for r in res)}/{len(res)}"
+              + (" — ≤ 6,2 : à confirmer sous ncu" if xreg_pas <= 6.2 else " — > 6,2"))
     print(f"\nmédianes : v1 {med('v1_ms'):.4f} ms/couche ({med('v1_To_s'):.2f} To/s, {med('v1_To_s') / 1.79 * 100:.0f} %) → {v1_pas:.2f} ms/pas ; "
           f"v2 {med('v2_ms'):.4f} ms/couche ({med('v2_To_s'):.2f} To/s, {med('v2_To_s') / 1.79 * 100:.0f} %) → {v2_pas:.2f} ms/pas ; "
           f"identique au bit sur {sum(r['identique'] for r in res)}/{len(res)} routages → {verdict}")
@@ -133,6 +151,7 @@ def main():
     os.makedirs(os.path.dirname(out), exist_ok=True)
     json.dump({"date": time.strftime("%Y-%m-%d %H:%M"), "carte": torch.cuda.get_device_name(0), "repet": REPET,
                "regime": ligne, "ACVRAM_GROUPED_RPW": rpw, "verdict_rpw": verdict_rpw,
+               "xreg_ms_pas": med("xreg_ms") * COUCHES if all(r["xreg_ms"] == r["xreg_ms"] for r in res) else None,
                "formes": {"E": E, "top_k": TOPK, "b": B, "K": K, "I": I, "couches": COUCHES},
                "resultats": res, "v1_ms_pas": v1_pas, "v2_ms_pas": v2_pas, "verdict": verdict},
               open(out, "w"), indent=1, ensure_ascii=False)

@@ -93,3 +93,51 @@ def test_le_bloc_moe_decode_v2_egale_v1(monkeypatch):
     eid = torch.tensor([5, 2, 5, -1, 2, 7], dtype=torch.int32, device=DEV)
     eid_s, ordre = _tri(eid)
     assert eid_s.tolist() == [-1, 2, 2, 5, 5, 7] and ordre.tolist() == [3, 1, 4, 0, 2, 5]
+
+
+# ---- x en registres (poste7-gemv-experts-dernier-geste-18-09) ------------------
+XREG = pytest.mark.skipif(not torch.cuda.is_available() or get_extension() is None
+                          or not hasattr(get_extension(), "nvfp4_gemv_grouped_xreg"),
+                          reason="extension sans xreg")
+
+
+@XREG
+@pytest.mark.parametrize("mode", ["aleatoire", "un_expert", "fantomes"])
+@pytest.mark.parametrize("K,M", [(2048, 768), (768, 2048), (1024, 512)])   # 2 uint4 par voie, 24 (reste), 1
+def test_xreg_egale_v1_au_bit(mode, K, M):
+    """x en registres par tranche + LDS.128 : mêmes expressions que
+    nvfp4_row_dot_warp → identique au bit à v1, gate/up et down."""
+    ext = get_extension()
+    E, b, k = 32, 12, 8
+    qw, bs, gs = _pile(E, M, K, seed=K + M + 1)
+    eid, tok = _routage(b, k, E, seed=5, mode=mode)
+    x = torch.randn(b, K, device=DEV).to(torch.bfloat16)
+    y1 = ext.nvfp4_gemv_grouped(qw, bs, gs, eid, tok, x, K)
+    y3 = ext.nvfp4_gemv_grouped_xreg(qw, bs, gs, eid, tok, x, K)
+    assert torch.equal(y1, y3), int((y1 != y3).sum())
+
+
+@XREG
+def test_gateup_xreg_egale_gateup_v1_au_bit():
+    ext = get_extension()
+    E, b, k, K, M = 32, 12, 8, 2048, 768
+    qg, bg, gsg = _pile(E, M, K, seed=21)
+    qu, bu, gsu = _pile(E, M, K, seed=22)
+    eid, tok = _routage(b, k, E, seed=13)
+    x = torch.randn(b, K, device=DEV).to(torch.bfloat16)
+    y1 = ext.nvfp4_gemv_grouped_gateup(qg, bg, gsg, qu, bu, gsu, eid, tok, x, K, 0)
+    y3 = ext.nvfp4_gemv_grouped_gateup_xreg(qg, bg, gsg, qu, bu, gsu, eid, tok, x, K, 0)
+    assert torch.equal(y1, y3), int((y1 != y3).sum())
+
+
+@XREG
+def test_bras_cassant_xreg_x_decale():
+    """Le bras qui doit différer : la même GEMV sur x décalé d'un flottant."""
+    ext = get_extension()
+    E, b, k, K, M = 32, 12, 8, 2048, 768
+    qw, bs, gs = _pile(E, M, K, seed=31)
+    eid, tok = _routage(b, k, E, seed=17)
+    x = torch.randn(b, K, device=DEV).to(torch.bfloat16)
+    y1 = ext.nvfp4_gemv_grouped(qw, bs, gs, eid, tok, x, K)
+    y3 = ext.nvfp4_gemv_grouped_xreg(qw, bs, gs, eid, tok, torch.roll(x, 1, dims=1).contiguous(), K)
+    assert not torch.equal(y1, y3)
