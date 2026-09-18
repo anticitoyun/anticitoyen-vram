@@ -157,16 +157,18 @@ def test_expert_a_statistique_suffisante_et_variee_recoit_awq(tmp_path):
     assert not torch.allclose(scale, torch.ones_like(scale))
 
 
-def test_garde_ratio_norme_replie_meme_avec_beaucoup_dechantillons(tmp_path):
-    """poste7-awq-experts-peu-routes-portee-17-09 §2, mise à jour par
-    poste7-awq-relu2-garde-repli-17-09 (geste b) : le seuil d'échantillons
-    protège la CAUSE la plus fréquente (statistique bruitée par manque de
-    jetons), pas toute source d'échelle instable -- le même motif dégénéré
-    (un canal extrême, les autres au plancher) mais avec BEAUCOUP
-    d'échantillons (n_samples=100, au-dessus du seuil de 8) doit aussi être
-    rattrapé par la garde de norme, pas par le seuil. Depuis le geste (b),
-    un seul tenseur fautif (bien sous le plafond de 50 %) est REPLIÉ à
-    l'identité, pas refusé -- ce test attrapait le refus d'AVANT le repli."""
+def test_canal_extreme_avec_beaucoup_dechantillons_ne_declenche_plus_le_repli(tmp_path):
+    """poste7-awq-experts-peu-routes-portee-17-09 §2 : à l'origine, ce motif
+    (un canal extrême à 50, les autres écrasés à 1e-6, n_samples=100 --
+    au-dessus du seuil de 8) déclenchait la garde de norme et forçait un
+    repli à l'identité (`poste7-awq-relu2-garde-repli-17-09`, geste b) :
+    le plancher ABSOLU (1e-6) laissait l'étendue exploser (50/1e-6 = 5e7).
+    Depuis le correctif `poste7-awq-plancher-median-faute-18-09` (plancher
+    borné sur `max(mean_abs)/4096`, pas sur une statistique de position),
+    ce même motif reste dans les bornes SANS repli : l'étendue est bornée
+    à 4096 par construction quelle que soit l'amplitude du canal extrême.
+    Un changement qui doit casser : revenir au plancher absolu ou au
+    plancher par médiane fait réapparaître le repli ici."""
     ckpt = _tiny_moe(tmp_path / "hf")
     spec = load_model_spec(ckpt, "tiny-moe")
     plan, _ = auto_plan(spec, load_profile("rig-14900k-5090-3080ti"),
@@ -179,4 +181,4 @@ def test_garde_ratio_norme_replie_meme_avec_beaucoup_dechantillons(tmp_path):
     out = tmp_path / "out_extreme"
     report = convert_checkpoint(ckpt, plan, ConversionOptions(out_dir=str(out)),
                                 spec=spec, stats=stats)
-    assert report.tenseurs_replies == ["model.layers.0.mlp.experts.1.down_proj.weight"]
+    assert report.tenseurs_replies == []

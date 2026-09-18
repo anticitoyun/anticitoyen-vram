@@ -265,21 +265,26 @@ def _quant_dequant(w: torch.Tensor, fmt: str, group_size: Optional[int]) -> torc
 
 
 def _magnitude_avec_plancher_relatif(mean_abs: torch.Tensor) -> torch.Tensor:
-    """`mean_abs`, plancher a 1 % de sa PROPRE mediane -- pas une constante
-    absolue (poste7-awq-relu2-garde-repli-17-09, geste (d)).
+    """`mean_abs`, plancher borné sur l'ÉTENDUE (max/plancher ≤ 4096), pas
+    une statistique de position comme la médiane (poste7-awq-plancher-
+    median-faute-18-09 : CORRECTIF -- la version précédente de cette
+    fonction, `1e-2 × médiane(mean_abs)`, supposait moins de la moitié des
+    canaux quasi nuls ; ReLU²(up(x)) (entrée de `down_proj`, nemotron_h,
+    `config.py:563`/`model.py:622`) viole cette hypothèse PAR NATURE dès
+    qu'une majorité de canaux ne s'active jamais sur le corpus -- la
+    médiane elle-même retombe alors près de zéro, et `1e-2 × médiane`
+    devient un plancher PLUS BAS que l'ancien `1e-6`, élargissant
+    l'étendue au lieu de la borner (mesuré : 6/10 tenseurs Nemotron
+    aggravés jusqu'à ×319, ratio de norme 0,29-0,69 → PPL 1,2634 sur un
+    converti désormais retiré).
 
-    Un plancher absolu (`1e-6`) laisse l'etendue salience/plancher grandir
-    avec l'echelle du tenseur lui-meme : sur l'entree ReLU²(up(x)) de
-    `down_proj` (nemotron_h, `config.py:563`/`model.py:622`), les canaux
-    jamais actives sur le corpus retombent a ~1e-6 alors que les actifs
-    valent ~1 -- etendue 1,7e6× mesuree, independante du nombre
-    d'echantillons (le motif existe des qu'un canal n'a jamais tire un
-    ReLU positif). Un plancher a 1 % de la mediane borne cette etendue a
-    ~100× quelle que soit l'echelle absolue du tenseur. Sur une activation
-    SANS ce motif (Coder/GLM, SiLU a porte, mediane deja proche des
-    canaux bas), le plancher relatif reste sous l'ancien plancher absolu
-    et ne change rien."""
-    plancher = 1e-2 * mean_abs.median().clamp(min=1e-12)
+    Borner sur le MAXIMUM du tenseur, jamais sa position centrale, tient
+    quelle que soit la fraction de canaux nuls : `plancher = max(1e-6,
+    max(mean_abs)/4096)` — l'étendue résultante est AU PLUS 4096 par
+    construction, peu importe combien de canaux sont écrasés. Sur une
+    activation sans motif creux (Coder/GLM, SiLU à porte), le maximum est
+    déjà proche des canaux bas et ce plancher reste sous 1e-6, sans effet."""
+    plancher = torch.clamp(mean_abs.max() / 4096.0, min=1e-6)
     return mean_abs.clamp(min=plancher)
 
 

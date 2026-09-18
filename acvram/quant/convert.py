@@ -1259,6 +1259,13 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     # sains, 0,944-1,012) ; les six malades de Nemotron sortaient a
     # 0,29-0,69.
     RATIO_NORME_BAS, RATIO_NORME_HAUT = 0.80, 1.25
+    # poste7-awq-plancher-median-faute-18-09 : le nombre qui relie directement
+    # a la PPL est l'ETENDUE des echelles (max/min de `scaler.scale`), pas
+    # seulement le ratio de norme en sortie -- 1,7e6x -> PPL 1,4301 ;
+    # 6e5x -> 1,2634 ; ~630x sain. `_magnitude_avec_plancher_relatif` borne
+    # cette etendue a 4096 PAR CONSTRUCTION ; ce plafond est une garde de
+    # secours pour ce qui y echapperait quand meme (`forced_scale`).
+    ETENDUE_MAX = 4096.0
     ratios_hors_bornes: list[tuple[str, float]] = []
     # poste7-awq-relu2-garde-repli-17-09, geste (b) : repli identite PAR
     # TENSEUR plutot que refus de toute la conversion, sous un plafond --
@@ -1416,7 +1423,33 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         # (`calibrate.py:302`) contre ~1 ailleurs, etendue 1,7e6x independante
         # du nombre d'echantillons. Coder/GLM (SiLU a porte) n'ont pas ce
         # motif -- 0 malade chez eux n'etait pas un hasard de corpus.
-        if "ratio_norme" in metrics and st is not None:
+        # poste7-awq-plancher-median-faute-18-09, garde n°2 : l'ÉTENDUE des
+        # échelles par canal (max/min de `scaler.scale`) est le nombre qui
+        # relie directement la casse à la PPL (1,7e6× -> PPL 1,4301 ;
+        # 6e5× -> 1,2634 ; ~630× sain) -- le ratio de norme est un SYMPTOME
+        # en sortie, l'étendue est la CAUSE mesurable côté échelle. `_magni
+        # tude_avec_plancher_relatif` borne cette étendue à 4096 PAR
+        # CONSTRUCTION ; ce contrôle attrape tout ce qui y échapperait
+        # quand même (ex. `forced_scale`, qui contourne la recherche).
+        etendue = (scaler.scale.max() / scaler.scale.min().clamp(min=1e-12)).item() \
+            if scaler.scale is not None else None
+        if etendue is not None and etendue > ETENDUE_MAX:
+            tenseurs_replies.append((name, etendue))
+            qt, scaler, metrics = _quantize_on(
+                qdev, tensor, fmt, None,
+                group_size=opts.group_size,
+                use_hadamard=router.wants_hadamard(name, fmt) or experts_hadamard,
+                use_awq=False,
+                n_grid=opts.n_grid, garder_grille=opts.garder_grille,
+                table=opts.q3n_table if fmt == "q3n" else None,
+                mesurer_kld=opts.mesurer_kld,
+                hadamard_block=512 if experts_hadamard else None,
+            )
+            if est_expert and scaler.scale is None:
+                scaler = ChannelScaler(
+                    torch.ones(tensor.shape[1], dtype=torch.float32),
+                    scaler.hadamard_block)
+        elif "ratio_norme" in metrics and st is not None:
             r = metrics["ratio_norme"]
             if not (RATIO_NORME_BAS <= r <= RATIO_NORME_HAUT):
                 tenseurs_replies.append((name, r))
