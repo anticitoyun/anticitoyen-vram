@@ -12,12 +12,8 @@ Terminal=false
 Categories=Science;
 Keywords=llm;inference;gpu;nvfp4;int4;quantification;
 StartupNotify=true
-Actions=web;galerie;
+Actions=web;
 
 [Desktop Action web]
 Name=Ouvrir dans le navigateur
 Exec=acvram-console
-
-[Desktop Action galerie]
-Name=Galerie
-Exec=acvram-gui --galerie
