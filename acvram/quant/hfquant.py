@@ -18,6 +18,14 @@ Conventions vérifiées sur les tenseurs :
 - modelopt NVFP4 : ``weight`` u8 [out, in/2] + ``weight_scale`` e4m3 +
   ``weight_scale_2`` f32 (w = fp4 · s · s2) ; les couches laissées en bf16
   passent telles quelles.
+- fp8 statique (Devstral-Small-2, ``weight_block_size: null`` — PAS de
+  blocs, une échelle PAR TENSEUR) : ``weight`` float8_e4m3fn [out, in],
+  ``weight_scale`` scalaire f32 ; w = weight.float() · weight_scale.
+  ``input_scale`` (côté activation, ``activation_scheme: "static"``) est
+  ignorée : le reste du pipeline requantifie depuis des poids bf16, jamais
+  depuis une activation statique. Vérifié sur le config.json publié
+  (huggingface.co/mistralai/Devstral-Small-2-24B-Instruct-2512, 18/09), pas
+  deviné depuis une convention voisine.
 """
 from __future__ import annotations
 
@@ -51,6 +59,8 @@ def is_hfquant(path: str) -> bool:
         return True
     if m == "compressed-tensors":
         return q.get("format") in ("pack-quantized", "nvfp4-pack-quantized")
+    if m == "fp8":
+        return True
     return m == "modelopt"
 
 
@@ -72,7 +82,8 @@ class HFQuantCheckpoint:
         self.bits = int(self.q.get("bits") or w.get("num_bits") or 4)
         self.group_size = int(self.q.get("group_size") or w.get("group_size") or 128)
         self.symmetric = bool(w.get("symmetric", not self.q.get("zero_point", False)))
-        if self.bits != 4 and self.format != "nvfp4-pack-quantized" and self.method != "modelopt":
+        if (self.bits != 4 and self.format != "nvfp4-pack-quantized"
+                and self.method not in ("modelopt", "fp8")):
             raise NotImplementedError(f"{self.method} {self.bits} bits non pris en charge")
 
     # ---------------------------------------------------------------- déquant
@@ -149,6 +160,12 @@ class HFQuantCheckpoint:
             raise ValueError(f"échelles NVFP4 {tuple(bs.shape)} pour un poids {out_f}x{half * 2}")
         return NVFP4Tensor(qweight=packed.contiguous(), block_scale=bs, global_scale=g.clone(),
                            shape=(out_f, half * 2), padded_in=half * 2)
+
+    @staticmethod
+    def _fp8(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """weight_block_size=null : une echelle SCALAIRE par tenseur, pas de
+        bloc -- w = weight.float() * scale, aucun repli-interleave a faire."""
+        return (weight.to(torch.float32) * scale.to(torch.float32).reshape(())).to(torch.bfloat16)
 
     @staticmethod
     def _modelopt_nvfp4(packed: torch.Tensor, scale: torch.Tensor,
@@ -249,5 +266,16 @@ class HFQuantCheckpoint:
                                     lire(fh, base + ".weight_scale_2")).cpu()
                                 continue
                             yield key, t                    # bf16 (couche gardée en clair)
+                            continue
+                    elif self.method == "fp8":
+                        if suffix in ("weight_scale", "input_scale"):
+                            continue
+                        if suffix == "weight" and base + ".weight_scale" in have:
+                            t = fh.get_tensor(key)
+                            if t.dtype == torch.float8_e4m3fn:
+                                yield key, self._fp8(
+                                    t.to(dev), lire(fh, base + ".weight_scale")).cpu()
+                                continue
+                            yield key, t   # modules_to_not_convert (vision_tower, lm_head…)
                             continue
                     yield key, fh.get_tensor(key)
