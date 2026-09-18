@@ -16,7 +16,17 @@ routages réels d'un modèle chargé ne sont pas disponibles à sec ; la
 répartition (experts distincts) est imprimée.
 
     CUDA_VISIBLE_DEVICES="" python outils/banc-marlin-p1-18-09.py --compiler-seulement   # .so à sec d'abord
-    outils/carte.sh python outils/banc-marlin-decode-18-09.py [--rapide]
+    outils/carte.sh python outils/banc-marlin-decode-18-09.py [--rapide] [--routages fichier.pt]
+
+Bras (b) (poste7-p1-disposition-unique-18-09, GO poste7 18/09 sur le chiffrage
+revue/p1-disposition-unique-chiffrage-18-09) : `nvfp4_gemv_marlin[_gateup]`,
+le GEMV lisant la disposition Marlin. Scellé (poste7) : (b) ≤ 0,97 × GEMV à
+b = 12 ET à b = 1, chaque chemin contre fp32 (part hors 2⁻⁷ ≤ 5·10⁻⁴ ou ≤ celle
+du GEMV) ; faux → P1 fermé VRAM, verdict daté. Prédiction poste4 (à sec,
+SASS : (b) 8,9 instr/octet contre ≈ 8,5 pour v1, mais 4 LDS par 64 o au lieu
+de 128 — le poste ncu) : b = 12 5,0-6,5 ms/pas, b = 1 2,2-2,9 ms.
+`--routages fichier.pt` : liste de tenseurs [B, top_k] (ACVRAM_TRACE_ROUTAGE
+sur un décodage réel) rejoués à la place du tirage uniforme.
 """
 import json
 import os
@@ -78,18 +88,30 @@ def main():
     dev = torch.device("cuda")
     qg, bg, gsg, tsg = pile(I, K, 1, dev); qu, bu, gsu, tsu = pile(I, K, 2, dev); qd, bd, gsd, tsd = pile(K, I, 3, dev)
     mg = MP.preparer_pile(qg, bg, gsg); mu = MP.preparer_pile(qu, bu, gsu); md = MP.preparer_pile(qd, bd, gsd)
+    # le GEMV lit les échelles de bloc en OCTETS (uint8), Marlin en Float8_e4m3fn
+    # (« expected scalar type Byte but found Float8_e4m3fn », poste3) : deux vues
+    bg8, bu8, bd8 = (b.view(torch.uint8).contiguous() for b in (bg, bu, bd))
     ws = MP.espace_travail(dev, 4)
     wg32 = [dequantize_nvfp4(t, torch.float32).to(dev) for t in tsg]
     wu32 = [dequantize_nvfp4(t, torch.float32).to(dev) for t in tsu]
     wd32 = [dequantize_nvfp4(t, torch.float32).to(dev) for t in tsd]
     gen = torch.Generator().manual_seed(18)
+    reels = None
+    if "--routages" in sys.argv:
+        reels = [t for t in torch.load(sys.argv[sys.argv.index("--routages") + 1]) if t.shape[1] == TOPK]
+        print(f"routages réels : {len(reels)} appels rejoués", flush=True)
+    forme_b = hasattr(ext, "nvfp4_gemv_marlin_gateup")
     res = {}
     for B in (12, 1):
         G = B * TOPK
         bloc = MP.choisir_block_size(B, TOPK, E)
         lignes = []
         for r in range(ROUTAGES):
-            topi = torch.stack([torch.randperm(E, generator=gen)[:TOPK] for _ in range(B)]).to(dev)
+            if reels is not None:
+                cand = [t for t in reels if t.shape[0] >= B]
+                topi = cand[r % len(cand)][:B].to(torch.long).to(dev)
+            else:
+                topi = torch.stack([torch.randperm(E, generator=gen)[:TOPK] for _ in range(B)]).to(dev)
             topw = torch.rand(B, TOPK, generator=gen).to(dev); topw = (topw / topw.sum(-1, keepdim=True)).float()
             x = (torch.randn(B, K, generator=gen) * 0.5).to(torch.bfloat16).to(dev)
             eid = topi.reshape(-1).to(torch.int32)
@@ -107,8 +129,12 @@ def main():
                 return MP.gemm_moe(act, md[0], md[1], md[2], s_ids, e_ids, n_post, uns, bloc, 1, G, K, I, ws, c=c3)
 
             def gemv():
-                act = ext.nvfp4_gemv_grouped_gateup(qg, bg, gsg, qu, bu, gsu, eid, tok, x, K, 0)
-                return ext.nvfp4_gemv_grouped(qd, bd, gsd, eid, seq, act, I)[:, :K]
+                act = ext.nvfp4_gemv_grouped_gateup(qg, bg8, gsg, qu, bu8, gsu, eid, tok, x, K, 0)
+                return ext.nvfp4_gemv_grouped(qd, bd8, gsd, eid, seq, act, I)[:, :K]
+
+            def forme_b_fn():
+                act = ext.nvfp4_gemv_marlin_gateup(*mg, *mu, eid, tok, x, K, I, 0)
+                return ext.nvfp4_gemv_marlin(*md, eid, seq, act, I, K)
 
             # référence fp32 par paire
             xf = x.float(); ref = torch.empty(G, K, dtype=torch.float32, device=dev)
@@ -119,15 +145,25 @@ def main():
             ym, yg = marlin(), gemv()
             hm, hg = hors_par_ligne(ym.float(), ref), hors_par_ligne(yg.float(), ref)
             ms_m, ms_g = chrono(marlin), chrono(gemv)
-            lignes.append({"routage": r, "distincts": int(torch.unique(eid).numel()), "marlin_ms": ms_m, "gemv_ms": ms_g,
-                           "marlin_hors": hm, "gemv_hors": hg, "n": ref.numel()})
-            print(f"b={B:2d} routage {r:2d} distincts={lignes[-1]['distincts']:3d} marlin {ms_m:.4f} ms gemv {ms_g:.4f} ms  "
-                  f"hors 2⁻⁷ par ligne : marlin {hm} gemv {hg} / {ref.numel()}", flush=True)
+            ligne = {"routage": r, "distincts": int(torch.unique(eid).numel()), "marlin_ms": ms_m, "gemv_ms": ms_g,
+                     "marlin_hors": hm, "gemv_hors": hg, "n": ref.numel()}
+            if forme_b:
+                yb = forme_b_fn(); ligne["b_hors"] = hors_par_ligne(yb.float(), ref); ligne["b_ms"] = chrono(forme_b_fn)
+                ligne["b_determ"] = bool(torch.equal(yb, forme_b_fn()))
+            lignes.append(ligne)
+            print(f"b={B:2d} routage {r:2d} distincts={ligne['distincts']:3d} marlin {ms_m:.4f} ms gemv {ms_g:.4f} ms  "
+                  + (f"(b) {ligne['b_ms']:.4f} ms  " if forme_b else "")
+                  + f"hors 2⁻⁷ par ligne : marlin {hm} gemv {hg}" + (f" (b) {ligne['b_hors']}" if forme_b else "")
+                  + f" / {ref.numel()}", flush=True)
         med_m = statistics.median(l["marlin_ms"] for l in lignes) * COUCHES
         med_g = statistics.median(l["gemv_ms"] for l in lignes) * COUCHES
         exact = all(l["marlin_hors"] <= 5e-4 * l["n"] and l["gemv_hors"] <= 5e-4 * l["n"] for l in lignes)
         res[B] = {"marlin_ms_pas": med_m, "gemv_ms_pas": med_g, "exact": exact, "lignes": lignes}
-        print(f"b={B} : Marlin {med_m:.2f} ms/pas (48 couches) · GEMV {med_g:.2f} · exact {exact}", flush=True)
+        if forme_b:
+            res[B]["b_ms_pas"] = statistics.median(l["b_ms"] for l in lignes) * COUCHES
+            res[B]["b_exact"] = all(l["b_hors"] <= max(5e-4 * l["n"], l["gemv_hors"]) and l["b_determ"] for l in lignes)
+        print(f"b={B} : Marlin {med_m:.2f} ms/pas (48 couches) · GEMV {med_g:.2f} · exact {exact}"
+              + (f" · (b) {res[B]['b_ms_pas']:.2f} ms/pas, exact {res[B]['b_exact']}" if forme_b else ""), flush=True)
     m12, m1 = res[12]["marlin_ms_pas"], res[1]["marlin_ms_pas"]
     if not (res[12]["exact"] and res[1]["exact"]):
         verdict = "SORTIE HORS CRITÈRE : ne compte pas"
@@ -137,7 +173,17 @@ def main():
         verdict = "zone grise (5,5-6,5 ou 1,0-1,2) : juge = cellule complète t/s + J, une passe"
     else:
         verdict = "> 6,5 ou > 1,2 : forme (b), GEMV relisant la disposition Marlin (2 j, bit-exact)"
-    print(f"\nverdict : b=12 {m12:.2f} ms, b=1 {m1:.2f} ms → {verdict}")
+    print(f"\nverdict Marlin décodage : b=12 {m12:.2f} ms, b=1 {m1:.2f} ms → {verdict}")
+    if forme_b:
+        b12, b1, g12, g1 = res[12]["b_ms_pas"], res[1]["b_ms_pas"], res[12]["gemv_ms_pas"], res[1]["gemv_ms_pas"]
+        if not (res[12]["b_exact"] and res[1]["b_exact"]):
+            vb = "SORTIE HORS CRITÈRE ou non déterministe : ne compte pas"
+        elif b12 <= 0.97 * g12 and b1 <= 0.97 * g1:
+            vb = "scellé TENU (≤ 0,97 × GEMV à b=12 et b=1) : disposition unique, P1 continue"
+        else:
+            vb = "scellé FAUX : P1 fermé VRAM (verdict daté, ligne utilisateur)"
+        print(f"verdict forme (b) : b=12 {b12:.2f} ms ({b12 / g12:.3f} × GEMV), b=1 {b1:.2f} ms ({b1 / g1:.3f} × GEMV) → {vb}")
+        verdict = verdict + " | (b) : " + vb
     out = os.path.join(os.path.dirname(__file__), "..", "scratchpad", "banc-marlin-decode-18-09.json")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     json.dump({"date": time.strftime("%Y-%m-%d %H:%M"), "carte": torch.cuda.get_device_name(0), "regime": regime_ligne(),

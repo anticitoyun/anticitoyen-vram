@@ -1895,6 +1895,219 @@ torch::Tensor nvfp4_gemv_grouped_gateup(
 }
 
 // ---------------------------------------------------------------------------
+// GEMV groupée sur la DISPOSITION MARLIN — forme (b) de poste7-p1-disposition-
+// unique-18-09 (chiffrage : revue/p1-disposition-unique-chiffrage-18-09) :
+// une seule disposition des experts en VRAM, celle de la GEMM du préfill
+// (marlin_port.preparer_pile : gptq_marlin_repack, tuiles 16 k × 64 n de 128
+// mots int32 ; échelles S0E5M3 permutées). La voie t du warp lit le uint4 t
+// de la tuile = les mots {t·4 + w}, w = 0..3 (warp du repack) : colonne
+// n = w·16 + t/4 et n + 8, k = (t%4)·2 + {0, 1, 8, 9} ; dans le mot, octet 0
+// = (n, k0),(n, k8) ; octet 1 = (n+8, k0),(n+8, k8) ; octet 2 = (n, k1),(n, k9) ;
+// octet 3 = (n+8, k1),(n+8, k9) (pack_idx {0,2,4,6,1,3,5,7} du repack, bas
+// d'abord). Les échelles de ses 8 colonnes sont CONTIGUËS dans la ligne de
+// la tuile k : octets 8·(t/4) + {0, 2, 1, 3, 4, 6, 5, 7} pour (w, n / n+8)
+// (permuter_echelles : p = 8·(n%8) + n/8, puis [0,2,1,3] par 4 —
+// traiter_echelles_nvfp4). Un warp lit donc une tuile entière en 512 o
+// contigus, tous utiles. Bloc = 8 warps sur UNE tuile de colonnes, chaque
+// warp un huitième des tuiles k ; réduction : 4 voies par colonne
+// (shuffles), puis les 8 warps en mémoire partagée — ordre fixe, sortie
+// déterministe, mais PAS identique au bit à v1 (autre ordre fp32) : juge
+// fp32 par ligne (≤ 2⁻⁷·max|y|), tests/test_gemv_marlin.py.
+constexpr int MB_WARPS = 8;
+constexpr int MB_TN = 64;                 // colonnes par tuile
+constexpr int MB_TK = 16;                 // k par tuile (= groupe d'échelle)
+
+// Échelle S0E5M3 (traiter_echelles_nvfp4) : octet = exposant half (5 bits)
+// << 3 | 3 bits hauts de mantisse de half(s·facteur)·2⁷ ; 0 = échelle nulle.
+// s·facteur = (1 + m/8)·2^(e−22) → bits fp32 = (e+105) << 23 | m << 20
+// = (b << 20) + 0x34800000. Le facteur se retire par l'échelle globale
+// (traiter_echelle_globale : g·2^119/facteur → g/facteur = g_marlin·2⁻¹¹⁹).
+// L'octet est pris à sa place par PRMT (bits 16-23, zéro ailleurs) puis un
+// seul IMAD (×16 + C) : deux instructions par échelle. L'octet 0 (échelle
+// que la pile a annulée : s·facteur < 2⁻⁶) donne 2⁻²²/facteur au lieu de 0 —
+// ≤ 2⁻²²·6·|x| par poids, invisible au juge 2⁻⁷ ; on s'épargne le SEL.
+__device__ __forceinline__ float s0e5m3_octet(unsigned int mot, int octet) {   // octet < 4, constant
+    return __uint_as_float(__byte_perm(mot, 0u, 0x4044u | ((unsigned)octet << 8)) * 16u + 0x34800000u);
+}
+__device__ __forceinline__ unsigned int octet_de(unsigned int mot, int octet) {   // octet < 4, constant
+    return __byte_perm(mot, 0u, 0x4440u | (unsigned)octet);
+}
+
+// Une tuile pour une voie : 4 mots (8 colonnes × 4 k), 8 octets d'échelle,
+// x aux k {k0, k1} (x01) et {k8, k9} (x89). acc[w][h] : colonne w·16 + t/4 + 8h.
+__device__ __forceinline__ void mb_tuile(const uint4 p, const uint2 sc,
+                                         const float2 x01, const float2 x89, float (&acc)[4][2]) {
+    const unsigned int w[4] = {p.x, p.y, p.z, p.w};
+    const unsigned int s[2] = {sc.x, sc.y};
+    #pragma unroll
+    for (int q = 0; q < 4; ++q) {
+        const float2 b0 = e2m1_pair(octet_de(w[q], 0));
+        const float2 b1 = e2m1_pair(octet_de(w[q], 1));
+        const float2 b2 = e2m1_pair(octet_de(w[q], 2));
+        const float2 b3 = e2m1_pair(octet_de(w[q], 3));
+        float pn = b0.x * x01.x + b0.y * x89.x;          // (n, k0), (n, k8)
+        pn += b2.x * x01.y + b2.y * x89.y;               // (n, k1), (n, k9)
+        float pn8 = b1.x * x01.x + b1.y * x89.x;         // (n+8, k0), (n+8, k8)
+        pn8 += b3.x * x01.y + b3.y * x89.y;              // (n+8, k1), (n+8, k9)
+        const int i0 = 4 * (q >> 1) + (q & 1);           // octet d'échelle de n ; n+8 : i0 + 2
+        acc[q][0] += pn * s0e5m3_octet(s[i0 >> 2], i0 & 3);
+        acc[q][1] += pn8 * s0e5m3_octet(s[(i0 + 2) >> 2], (i0 + 2) & 3);
+    }
+}
+
+// NW = 1 : une projection (down) ; NW = 2 : gate et up fusionnés, sortie
+// act(gate)·up. Grille (N/64, G), 256 fils, shared = K flottants + NW·8·64.
+template <typename XT, int NW>
+__global__ void __launch_bounds__(MB_WARPS * WARP) nvfp4_gemv_marlin_kernel(
+    const uint4 *__restrict__ q0, const unsigned char *__restrict__ s0, const float *__restrict__ g0,
+    const uint4 *__restrict__ q1, const unsigned char *__restrict__ s1, const float *__restrict__ g1,
+    const int *__restrict__ expert_ids, const int *__restrict__ token_ids,
+    const XT *__restrict__ x, float *__restrict__ y, int N, int K, int act) {
+    extern __shared__ float xs[];
+    float *red = xs + K;
+    const int g = blockIdx.y, e = expert_ids[g], nt = blockIdx.x;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    // creneau fantome (e < 0, bead pds) : zero, aucun octet de poids lu
+    if (e < 0) {
+        if (threadIdx.x < MB_TN) y[(long)g * N + nt * MB_TN + threadIdx.x] = 0.f;
+        return;
+    }
+    const XT *xn = x + (long)token_ids[g] * K;
+    for (int i = threadIdx.x; i < K; i += blockDim.x) {
+        if constexpr (sizeof(XT) == 4) xs[i] = xn[i];
+        else xs[i] = __bfloat162float(xn[i]);
+    }
+    __syncthreads();
+    const int KT = K / MB_TK, NT = N / MB_TN;
+    const long bw = (long)e * KT * NT * (MB_TK * MB_TN / 32) + (long)nt * (MB_TK * MB_TN / 32) + lane;
+    const int tr = (lane & 3) * 2, c = lane >> 2;
+    const long bs = (long)e * KT * N + (long)nt * MB_TN + 8 * c;
+    float acc[NW][4][2] = {};
+    int kt = warp;
+    // deux tuiles en vol par voie (les chargements des deux partent avant le calcul)
+    for (; kt + MB_WARPS < KT; kt += 2 * MB_WARPS) {
+        const int k2 = kt + MB_WARPS;
+        const uint4 pa = q0[bw + (long)kt * NT * 32], pb = q0[bw + (long)k2 * NT * 32];
+        const uint2 sa = *reinterpret_cast<const uint2 *>(s0 + bs + (long)kt * N);
+        const uint2 sb = *reinterpret_cast<const uint2 *>(s0 + bs + (long)k2 * N);
+        uint4 pa1, pb1; uint2 sa1, sb1;
+        if constexpr (NW == 2) {
+            pa1 = q1[bw + (long)kt * NT * 32]; pb1 = q1[bw + (long)k2 * NT * 32];
+            sa1 = *reinterpret_cast<const uint2 *>(s1 + bs + (long)kt * N);
+            sb1 = *reinterpret_cast<const uint2 *>(s1 + bs + (long)k2 * N);
+        }
+        const float2 xa01 = *reinterpret_cast<const float2 *>(xs + kt * MB_TK + tr);
+        const float2 xa89 = *reinterpret_cast<const float2 *>(xs + kt * MB_TK + tr + 8);
+        const float2 xb01 = *reinterpret_cast<const float2 *>(xs + k2 * MB_TK + tr);
+        const float2 xb89 = *reinterpret_cast<const float2 *>(xs + k2 * MB_TK + tr + 8);
+        mb_tuile(pa, sa, xa01, xa89, acc[0]);
+        mb_tuile(pb, sb, xb01, xb89, acc[0]);
+        if constexpr (NW == 2) {
+            mb_tuile(pa1, sa1, xa01, xa89, acc[1]);
+            mb_tuile(pb1, sb1, xb01, xb89, acc[1]);
+        }
+    }
+    for (; kt < KT; kt += MB_WARPS) {
+        const uint4 pa = q0[bw + (long)kt * NT * 32];
+        const uint2 sa = *reinterpret_cast<const uint2 *>(s0 + bs + (long)kt * N);
+        const float2 xa01 = *reinterpret_cast<const float2 *>(xs + kt * MB_TK + tr);
+        const float2 xa89 = *reinterpret_cast<const float2 *>(xs + kt * MB_TK + tr + 8);
+        mb_tuile(pa, sa, xa01, xa89, acc[0]);
+        if constexpr (NW == 2) {
+            const uint4 pa1 = q1[bw + (long)kt * NT * 32];
+            const uint2 sa1 = *reinterpret_cast<const uint2 *>(s1 + bs + (long)kt * N);
+            mb_tuile(pa1, sa1, xa01, xa89, acc[1]);
+        }
+    }
+    // 4 voies (t%4) par colonne → une ; puis dépôt par warp
+    #pragma unroll
+    for (int n = 0; n < NW; ++n)
+        #pragma unroll
+        for (int q = 0; q < 4; ++q)
+            #pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                float v = acc[n][q][h];
+                v += __shfl_xor_sync(0xffffffffu, v, 1);
+                v += __shfl_xor_sync(0xffffffffu, v, 2);
+                if ((lane & 3) == 0) red[(n * MB_WARPS + warp) * MB_TN + q * 16 + c + 8 * h] = v;
+            }
+    __syncthreads();
+    if (threadIdx.x < MB_TN) {
+        const int col = threadIdx.x;
+        float t0 = 0.f;
+        #pragma unroll
+        for (int w = 0; w < MB_WARPS; ++w) t0 += red[w * MB_TN + col];
+        t0 *= g0[e] * 0x1p-119f;
+        if constexpr (NW == 2) {
+            float t1 = 0.f;
+            #pragma unroll
+            for (int w = 0; w < MB_WARPS; ++w) t1 += red[(MB_WARPS + w) * MB_TN + col];
+            t0 = acv_act(t0, act) * (t1 * (g1[e] * 0x1p-119f));
+        }
+        y[(long)g * N + nt * MB_TN + col] = t0;
+    }
+}
+
+static void mb_verifier(const torch::Tensor &w, const torch::Tensor &s, const torch::Tensor &g, int64_t K, int64_t N) {
+    CHECK_CUDA(w); CHECK_CONTIG(w); CHECK_CONTIG(s); CHECK_CONTIG(g);
+    TORCH_CHECK(w.scalar_type() == torch::kInt, "disposition Marlin : poids int32 repackés");
+    TORCH_CHECK(s.scalar_type() == torch::kByte || s.scalar_type() == torch::kFloat8_e4m3fn,
+                "disposition Marlin : échelles S0E5M3 (uint8 ou float8_e4m3fn)");
+    TORCH_CHECK(g.scalar_type() == torch::kFloat, "échelle globale Marlin fp32");
+    TORCH_CHECK(K % 64 == 0 && N % 64 == 0, "disposition Marlin : K et N multiples de 64");
+    TORCH_CHECK(w.dim() == 3 && w.size(1) == K / 16 && w.size(2) == N * 2, "poids Marlin [E, K/16, N·2]");
+    TORCH_CHECK(s.dim() == 3 && s.size(1) == K / 16 && s.size(2) == N, "échelles Marlin [E, K/16, N]");
+    TORCH_CHECK((size_t)(K + 2 * MB_WARPS * MB_TN) * sizeof(float) <= 48 * 1024, "K ≤ 11264");
+}
+
+// x [T, K] bf16 ou fp32 ; sortie [G, N] fp32, ligne g = paire (expert_ids[g], token_ids[g]).
+torch::Tensor nvfp4_gemv_marlin(torch::Tensor w, torch::Tensor s, torch::Tensor g,
+                                torch::Tensor expert_ids, torch::Tensor token_ids,
+                                torch::Tensor x, int64_t K, int64_t N) {
+    mb_verifier(w, s, g, K, N); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(w);
+    const int G = expert_ids.size(0);
+    const bool bf = x.scalar_type() == torch::kBFloat16;
+    auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
+    TORCH_CHECK(xc.size(-1) == K, "x : dernière dimension K");
+    auto out = torch::empty({G, N}, xc.options().dtype(torch::kFloat));
+    dim3 grid(N / MB_TN, G);
+    const size_t shm = (size_t)(K + MB_WARPS * MB_TN) * sizeof(float);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    #define MB_L(XT, PX) nvfp4_gemv_marlin_kernel<XT, 1><<<grid, MB_WARPS * WARP, shm, stream>>>( \
+        reinterpret_cast<const uint4 *>(w.data_ptr()), static_cast<const unsigned char *>(s.data_ptr()), g.data_ptr<float>(), \
+        nullptr, nullptr, nullptr, expert_ids.data_ptr<int>(), token_ids.data_ptr<int>(), PX, out.data_ptr<float>(), (int)N, (int)K, 0)
+    if (bf) { MB_L(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
+    else { MB_L(float, xc.data_ptr<float>()); }
+    #undef MB_L
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
+torch::Tensor nvfp4_gemv_marlin_gateup(torch::Tensor wg, torch::Tensor sg, torch::Tensor gg,
+                                       torch::Tensor wu, torch::Tensor su, torch::Tensor gu,
+                                       torch::Tensor expert_ids, torch::Tensor token_ids,
+                                       torch::Tensor x, int64_t K, int64_t N, int64_t act) {
+    mb_verifier(wg, sg, gg, K, N); mb_verifier(wu, su, gu, K, N); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(wg);
+    const int G = expert_ids.size(0);
+    const bool bf = x.scalar_type() == torch::kBFloat16;
+    auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
+    TORCH_CHECK(xc.size(-1) == K, "x : dernière dimension K");
+    auto out = torch::empty({G, N}, xc.options().dtype(torch::kFloat));
+    dim3 grid(N / MB_TN, G);
+    const size_t shm = (size_t)(K + 2 * MB_WARPS * MB_TN) * sizeof(float);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    #define MB_L(XT, PX) nvfp4_gemv_marlin_kernel<XT, 2><<<grid, MB_WARPS * WARP, shm, stream>>>( \
+        reinterpret_cast<const uint4 *>(wg.data_ptr()), static_cast<const unsigned char *>(sg.data_ptr()), gg.data_ptr<float>(), \
+        reinterpret_cast<const uint4 *>(wu.data_ptr()), static_cast<const unsigned char *>(su.data_ptr()), gu.data_ptr<float>(), \
+        expert_ids.data_ptr<int>(), token_ids.data_ptr<int>(), PX, out.data_ptr<float>(), (int)N, (int)K, (int)act)
+    if (bf) { MB_L(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
+    else { MB_L(float, xc.data_ptr<float>()); }
+    #undef MB_L
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // GEMV groupée « x en registres » (18/09, poste7-gemv-experts-dernier-geste-18-09) :
 // la passe ncu (poste3, verdict-ncu-gemv-experts-rpw-18-09) montre la mémoire
 // PARTAGÉE dominante — x relu par flottant (32 LDS.32 par uint4 de poids, 128 o
@@ -5878,6 +6091,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("qg"), py::arg("bg"), py::arg("gsg"), py::arg("qu"), py::arg("bu"), py::arg("gsu"),
           py::arg("eid_s"), py::arg("tok_s"), py::arg("ordre"), py::arg("x"), py::arg("K"), py::arg("act") = 0,
           "NVFP4 : gate/up fusionnés v2, paires triées par expert");
+    m.def("nvfp4_gemv_marlin", &nvfp4_gemv_marlin,
+          py::arg("w"), py::arg("s"), py::arg("g"), py::arg("expert_ids"), py::arg("token_ids"),
+          py::arg("x"), py::arg("K"), py::arg("N"),
+          "NVFP4 : GEMV groupée lisant la DISPOSITION MARLIN (forme (b), P1 disposition unique)");
+    m.def("nvfp4_gemv_marlin_gateup", &nvfp4_gemv_marlin_gateup,
+          py::arg("wg"), py::arg("sg"), py::arg("gg"), py::arg("wu"), py::arg("su"), py::arg("gu"),
+          py::arg("expert_ids"), py::arg("token_ids"), py::arg("x"), py::arg("K"), py::arg("N"), py::arg("act") = 0,
+          "NVFP4 : gate et up fusionnés sur la disposition Marlin, sortie act(gate)*up");
     m.def("nvfp4_gemv_grouped_gateup", &nvfp4_gemv_grouped_gateup,
           py::arg("qg"), py::arg("bg"), py::arg("gsg"), py::arg("qu"), py::arg("bu"),
           py::arg("gsu"), py::arg("expert_ids"), py::arg("token_ids"), py::arg("x"),
