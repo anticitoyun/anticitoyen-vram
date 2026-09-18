@@ -70,3 +70,36 @@ décision séparée). Issue qui me gênerait : A − T ≈ −11 (la déquant se
 le GEMM int8 pas plus rapide que cutlass bf16 : alors le tl.dot int8 de
 Triton n'atteint pas les tensor cores int8 à 2×, et c'est un profil avant
 toute ligne).
+
+## 4. Verdict (poste3, verdict-p0-prefill-a8-colle-18-09) : FAUX — et la dernière porte
+
+a8 Triton : `_w8a8_kernel` 32,1 ms contre déquant 11,2 + cutlass 19,4 = 30,6
+(A − T = +2,0 ms GPU, prédit −17 à −23 ; ≈ 28 TOPS : troisième GEMM Triton
+perdante après B1/B1' — le `tl.dot` int8 → int32 par groupe avec la remise
+à l'échelle par jeton ne rend pas le 2× de l'INT8). Régime `a8` : témoin.
+Colle : lancements 5 017 → 2 857 tenus, GPU +0,4 ms (le tri en un
+lancement coûte ce que valaient les sept petits noyaux), mur −4,8 ms
+(−2,3 %) — B − A = +233 j/s > 2σ (≈ 208) : poste7 tranche.
+
+Dernière porte P0-a8 (poste7) : `outils/banc-int-mm-a8-18-09.py` — la voie
+cuBLASLt int8 (`torch._int_mm`) sur les quatre formes q/k/v/o Coder 2 048,
+× 48 : **≤ 16 ms ⇒ in situ a8-cublas (2 min), > 16 ms ⇒ P0-a8 fermé, pas de
+troisième noyau.** Ce que le banc mesure, et ce qu'il faut savoir avant de
+lire le chiffre : `_int_mm` fait UN produit int32 sur K entier — il ne sert
+qu'avec des poids int8 **symétriques par canal** (une échelle par ligne de
+sortie), pas avec notre INT8 affine par groupes de 128 ; la voie (b)
+mesurée suppose donc une **requantification** des q/k/v/o (chargement ou
+conversion : porte PPL à part, et +1 o/poids en VRAM ≈ 1 Go sur Coder si le
+décodage garde la forme par groupes). La voie (a) « par groupe » (NG
+`_int_mm` de K = 128 + NG épilogues) respecte nos poids et est mesurée
+aussi ; attendue hors porte. Arithmétique des deux voies contrôlée à sec
+contre une référence par groupes.
+
+Prédiction scellée (banc, × 48) : (b) quant A8 + `_int_mm` + épilogue ≈
+0,25-0,35 ms/couche ⇒ **12-17 ms** — la porte 16 au bord haut de la
+fourchette ; cuBLASLt int8 sur 5090 ≈ 350-450 TOPS sur q/o, moins sur k/v
+(N = 512, sous-occupés) ; (a) 60-120 ms (hors porte) ; témoin bf16 ≈ 19-21
+ms (le 19,4 en situ). Faux si (b) > 16 : fermé, comme écrit ; si (b) ≤ 16,
+le gain in situ = 30,6 − (b) ≈ 14-18 ms ⇒ 10 600-10 800 j/s — **sous le
+scellé 11 000** même si la porte ouvre : je l'écris avant la mesure, poste7
+décide si l'in situ vaut ses 2 minutes.

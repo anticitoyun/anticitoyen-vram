@@ -944,7 +944,54 @@ class MoEBlock(nn.Module):
             return None
         self._stacks = piles
         self._stacks_awq = awq
+        self._stacks_marlin = self._construire_marlin(piles, awq, hadamard)
         return True
+
+    def _construire_marlin(self, piles, awq, hadamard):
+        """P1 (poste7-p1-porte-marlin-18-09, X = 152 TFLOPS au banc) : seconde
+        DISPOSITION des experts, repackée pour la GEMM groupée classe Marlin
+        (kernels/marlin_port, vLLM v0.29.0) — gate, up, down chacune avec son
+        échelle globale par expert (gate et up ne partagent pas la leur :
+        pas de w13 fusionné). La pile NVFP4 reste pour le décodage (GEMV) :
+        `experts_layout=double`, comptée par le Plan (`_reserve_prefill`).
+        AWQ par expert et Hadamard (Coder classé 302025e : table [E, K])
+        sont appliqués À L'ACTIVATION avant toute GEMM du préfill
+        (`_forward_prefill_grouped` : `xs / awq_g[e_sorted]`, `xs_u`,
+        `act / awq_d[e_sorted]`, `fwht_activations` hors mma) — les poids
+        repackés sont les mêmes codes, l'échelle reste côté x : rien à
+        refuser (une première version refusait toute table AWQ, à tort —
+        poste7/chef 18/09). Refusée, avec sa raison : pile non NVFP4, formes
+        hors tuiles (K, N multiples de 64), extension non compilée à sec
+        (REGLES § 6 : jamais de nvcc sous le verrou —
+        `outils/banc-marlin-p1-18-09.py --compiler-seulement`)."""
+        if _PREFILL_GROUPED != "marlin":
+            return None
+        raison = None
+        if any(piles[n][0] != "nvfp4" for n in ("gate_proj", "up_proj", "down_proj") if n in piles) \
+                or "gate_proj" not in piles:
+            raison = "piles non NVFP4"
+        else:
+            for n in ("gate_proj", "up_proj", "down_proj"):
+                _, qw, bs, gs, k, m = piles[n]
+                if k % 64 or qw.shape[1] % 64:
+                    raison = f"{n} : K={k} ou N={qw.shape[1]} non multiple de 64"
+        if raison is None:
+            from ..kernels import marlin_port as MP
+            if MP.charger(compiler=False) is None:
+                raison = "extension Marlin non compilée à sec (banc-marlin-p1 --compiler-seulement)"
+        if raison is not None:
+            if not getattr(MoEBlock, "_marlin_refus_dit", False):
+                MoEBlock._marlin_refus_dit = True
+                print(f"[acvram] ACVRAM_PREFILL_GROUPED=marlin refusé : {raison} — GEMM groupée « groupe »", flush=True)
+            return None
+        from ..kernels import marlin_port as MP
+        out = {}
+        for n in ("gate_proj", "up_proj", "down_proj"):
+            _, qw, bs, gs, k, m = piles[n]
+            w, sc, g = MP.preparer_pile(qw, bs.view(torch.float8_e4m3fn) if bs.dtype == torch.uint8 else bs,
+                                        gs.reshape(-1).to(torch.float32))
+            out[n] = (w, sc, g, k, m)
+        return out
 
     def _grouped(self, x32: torch.Tensor, pile, expert_ids, token_ids, tri=None):
         if pile[0] == "nvfp4":
@@ -1279,7 +1326,25 @@ class MoEBlock(nn.Module):
             u = gg.gemm_groupe_nvfp4(xs_u, pu[1], pu[2], pu[3].reshape(-1).to(torch.float32), tiles, m=pu[5])
             act = _activation(g, u, pg[5], pd[4])
             d = gg.gemm_groupe_nvfp4(act, pd[1], pd[2], pd[3].reshape(-1).to(torch.float32), tiles, m=pd[5])
-        elif _PREFILL_GROUPED == "groupe":
+        elif _PREFILL_GROUPED == "marlin" and getattr(self, "_stacks_marlin", None) is not None:
+            # P1 : GEMM groupée classe Marlin (port vLLM) sur la seconde
+            # disposition ; lignes déjà triées par expert (xs), blocs alignés
+            # par expert depuis e_sorted, sortie dans l'ordre de xs — la
+            # recombinaison ci-dessous ne change pas
+            from ..kernels import marlin_port as MP
+            G = xs.shape[0]
+            mg, mu, md = (self._stacks_marlin[n] for n in ("gate_proj", "up_proj", "down_proj"))
+            bloc = MP.choisir_block_size(t, k, E)
+            s_ids, e_ids, n_post = MP.aligner_blocs(e_sorted.to(torch.int32).unsqueeze(1), bloc, E)
+            ws = self._marlin_workspace(x.device)
+            uns = self._marlin_uns(G, x.device)
+            xs_m = xs if xs.shape[1] == mg[3] else F.pad(xs, (0, mg[3] - xs.shape[1]))
+            g = MP.gemm_moe(xs_m.contiguous(), mg[0], mg[1], mg[2], s_ids, e_ids, n_post, uns, bloc, 1, G, mg[1].shape[2], mg[3], ws)
+            xu_m = xs_m if xs_u is xs else (xs_u if xs_u.shape[1] == mu[3] else F.pad(xs_u, (0, mu[3] - xs_u.shape[1]))).contiguous()
+            u = MP.gemm_moe(xu_m, mu[0], mu[1], mu[2], s_ids, e_ids, n_post, uns, bloc, 1, G, mu[1].shape[2], mu[3], ws)
+            act = _activation(g, u, pg[5], pd[4])
+            d = MP.gemm_moe(act, md[0], md[1], md[2], s_ids, e_ids, n_post, uns, bloc, 1, G, md[1].shape[2], md[3], ws)
+        elif _PREFILL_GROUPED == "groupe" or _PREFILL_GROUPED == "marlin":
             # B0 : un lancement persistant pour les 128 experts, lignes lues
             # par index dans le noyau, grille de tuiles à taille fixe (aucun
             # offset relu sur l'hôte) ; P0 : la grille en un lancement
@@ -1306,6 +1371,21 @@ class MoEBlock(nn.Module):
             return ext.moe_reduce_trie(d, tw.contiguous(), inv.to(torch.int32).contiguous(), m_out, k)
         d = d[:, :m_out].to(torch.float32) * topw.reshape(-1)[ordre].to(torch.float32).unsqueeze(-1)
         return d[inv].view(t, k, -1).sum(dim=1).to(x.dtype)
+
+    _marlin_ws: dict = {}
+
+    def _marlin_workspace(self, device):
+        cle = str(device)
+        if cle not in MoEBlock._marlin_ws:
+            from ..kernels import marlin_port as MP
+            MoEBlock._marlin_ws[cle] = MP.espace_travail(device, 4)
+        return MoEBlock._marlin_ws[cle]
+
+    def _marlin_uns(self, G: int, device):
+        cache = self.__dict__.setdefault("_marlin_uns_cache", {})
+        if G not in cache:
+            cache[G] = torch.ones(G, 1, dtype=torch.float32, device=device)
+        return cache[G]
 
     def _forward_grouped_mma(self, x, topw, topi) -> Optional[torch.Tensor]:
         """Décodage (t petit) par la GEMM groupée MMA FP4 native — levier (3)
@@ -1827,7 +1907,7 @@ def fausse_quant_nvfp4(x: torch.Tensor) -> torch.Tensor:
     idx = torch.bucketize(v.abs(), _E2M1_MILIEUX.to(x.device))
     q = _E2M1.to(x.device)[idx] * torch.sign(v)
     return (q * ech).view(G, K).to(x.dtype)
-if _PREFILL_GROUPED not in ("bmm", "grouped_mm", "groupe", "w4a16"):
+if _PREFILL_GROUPED not in ("bmm", "grouped_mm", "groupe", "w4a16", "marlin"):
     raise ValueError(f"ACVRAM_PREFILL_GROUPED={_PREFILL_GROUPED!r} : attendu groupe, w4a16, grouped_mm ou bmm")
 _MOE_MMA_BT = int(os.environ.get("ACVRAM_MOE_MMA_BT", "64"))
 # Étages du pipeline cp.async du noyau MMA (0 = chargements directs).

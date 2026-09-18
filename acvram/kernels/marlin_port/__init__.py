@@ -64,7 +64,7 @@ def sha_so() -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()[:16]
 
 
-def charger(verbose: bool = False):
+def charger(verbose: bool = False, compiler: bool = True):
     """Compile (une fois) et charge l'extension ; rend l'espace `torch.ops.acvram_marlin`.
 
     JIT hors capture (REGLES § 6) : à compiler AVANT la prise de carte —
@@ -77,6 +77,8 @@ def charger(verbose: bool = False):
         return _EXT
     from torch.utils.cpp_extension import load
     COMPILE_ICI = not chemin_so().exists()
+    if COMPILE_ICI and not compiler:
+        return None                      # le moteur ne compile jamais sous le verrou (REGLES § 6)
     moe = ICI / "libtorch_stable" / "moe" / "marlin_moe_wna16"
     sources = [str(ICI / "bindings.cpp"), str(moe / "ops.cu"),
                str(ICI / "libtorch_stable" / "quantization" / "marlin" / "gptq_marlin_repack.cu")]
