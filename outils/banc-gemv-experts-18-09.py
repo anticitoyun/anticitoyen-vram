@@ -12,6 +12,12 @@ par couche : v1 attendu ≈ 0,137 ms (1,2 To/s), v2 ≤ 0,110 ms (≥ 1,52 To/s
 = 85 %). Chaque bras est jugé identique au bit à v1.
 
     outils/carte.sh python outils/banc-gemv-experts-18-09.py [--rapide]
+    ACVRAM_GROUPED_RPW=2 outils/carte.sh python outils/banc-gemv-experts-18-09.py   # un processus par valeur
+
+Campagne RPW (poste7-gemv-experts-rpw-18-09) : rpw = 2, puis 4, puis le témoin
+rpw = 1 en fin ; scellé unique min(rpw = 2, 4) ≤ 6,7 ms/pas (v1), bit-exact
+exigé ; faux ⇒ une passe ncu bornée avant toute ligne de noyau. La ligne de
+régime est imprimée en tête et copiée dans le JSON (un fichier par valeur).
 """
 import json
 import os
@@ -62,8 +68,15 @@ def pile(M, Kk, seed):
 
 
 def main():
+    from acvram.regime import regime_ligne
     ext = get_extension()
     assert ext is not None and hasattr(ext, "nvfp4_gemv_grouped_gateup_v2"), "extension sans v2"
+    # ACVRAM_GROUPED_RPW est lu par le .cu au PREMIER lancement (static) : une
+    # valeur par processus ; la ligne de régime en tête la nomme (poste7)
+    rpw = int(os.environ.get("ACVRAM_GROUPED_RPW", "1"))
+    ligne = regime_ligne()
+    print(ligne, flush=True)
+    print(f"ACVRAM_GROUPED_RPW={rpw} (une valeur par processus)", flush=True)
     qg, bg, gsg = pile(I, K, 1); qu, bu, gsu = pile(I, K, 2); qd, bd, gsd = pile(K, I, 3)
     octets_expert = (qg.shape[1] * qg.shape[2] + bg.shape[1] * bg.shape[2]) * 2 + qd.shape[1] * qd.shape[2] + bd.shape[1] * bd.shape[2]
     g = torch.Generator().manual_seed(18)
@@ -107,12 +120,19 @@ def main():
     tous = all(r["identique"] for r in res)
     verdict = ("OUVRE (v2 ≤ 5,3 ms par pas de 48 couches et identique au bit)" if v2_pas <= 5.3 and tous
                else "FAUX (v2 > 5,3 ms par pas)" if tous else "SORTIE DIFFÉRENTE : ne compte pas")
+    # campagne RPW (poste7-gemv-experts-rpw-18-09) : scellé sur v1 seule,
+    # min(rpw = 2, 4) ≤ 6,7 ms/pas, bit-exact exigé, témoin rpw = 1 en fin
+    verdict_rpw = (f"rpw={rpw} : v1 {v1_pas:.2f} ms/pas "
+                   + ("(≤ 6,7 : tenu si bit-exact)" if v1_pas <= 6.7 else "(> 6,7)")
+                   + (" — bit-exact v2/v1 sur tous les routages" if tous else " — SORTIE DIFFÉRENTE"))
+    print(verdict_rpw)
     print(f"\nmédianes : v1 {med('v1_ms'):.4f} ms/couche ({med('v1_To_s'):.2f} To/s, {med('v1_To_s') / 1.79 * 100:.0f} %) → {v1_pas:.2f} ms/pas ; "
           f"v2 {med('v2_ms'):.4f} ms/couche ({med('v2_To_s'):.2f} To/s, {med('v2_To_s') / 1.79 * 100:.0f} %) → {v2_pas:.2f} ms/pas ; "
           f"identique au bit sur {sum(r['identique'] for r in res)}/{len(res)} routages → {verdict}")
-    out = os.path.join(os.path.dirname(__file__), "..", "scratchpad", "banc-gemv-experts-18-09.json")
+    out = os.path.join(os.path.dirname(__file__), "..", "scratchpad", f"banc-gemv-experts-18-09-rpw{rpw}.json")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     json.dump({"date": time.strftime("%Y-%m-%d %H:%M"), "carte": torch.cuda.get_device_name(0), "repet": REPET,
+               "regime": ligne, "ACVRAM_GROUPED_RPW": rpw, "verdict_rpw": verdict_rpw,
                "formes": {"E": E, "top_k": TOPK, "b": B, "K": K, "I": I, "couches": COUCHES},
                "resultats": res, "v1_ms_pas": v1_pas, "v2_ms_pas": v2_pas, "verdict": verdict},
               open(out, "w"), indent=1, ensure_ascii=False)

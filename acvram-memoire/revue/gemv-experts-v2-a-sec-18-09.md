@@ -82,3 +82,27 @@ d'écrire une ligne.
 
 Bug de test corrigé : `_routage` définissait `eid` avant la branche
 « fantômes » (UnboundLocalError, 2 cas) ; poste3 l'a rejoué corrigé, 9/9.
+
+## Prérequis de la campagne RPW (poste7-gemv-experts-rpw-18-09) — fait à sec
+
+- `regime.py` : `Variable("GROUPED_RPW", "1")` et `Variable("GROUPED_OLD",
+  "", torch="1")` — lues par le `.cu` (`std::getenv`, figées au premier
+  lancement : **un processus par valeur**) ; `regime_ligne()` les nomme
+  quand elles diffèrent (`[régime] ACVRAM_GROUPED_RPW=2 …`, vérifié).
+  Les six autres `getenv` du `.cu` (INT8_GEMV_WARP, INT8_TRANCHE, PA_CHUNK,
+  PA_ETAPE, PAGED_ALLOC, PA_SANS_COMPTEUR) déclarées HORS_REGIME (témoins
+  A/B jamais mesurés comme défaut) ; `test_regime_noyaux` scanne désormais
+  aussi le `.cu` — jusqu'ici aucune variable de l'extension n'était dans
+  une table.
+- `outils/banc-gemv-experts-18-09.py` : ligne de régime en tête et dans le
+  JSON (`banc-gemv-experts-18-09-rpw{N}.json`, un fichier par processus),
+  verdict RPW imprimé : v1 ms/pas ≤ 6,7 et bit-exact v2/v1 sur tous les
+  routages (le bit-exact v1(rpw)/v1(rpw=1) n'est pas dans le banc : les
+  deux processus ne se voient pas — comparer les `v1_ms`/JSON, et
+  `ppl-decode-kv` en situ si le scellé tient).
+- Mesure : poste3, rpw = 2 puis 4, témoin rpw = 1 en fin ; scellé unique
+  min(rpw 2, 4) ≤ 6,7 ms/pas ; faux ⇒ une passe ncu bornée avant toute
+  ligne de noyau. Ma prédiction : rpw = 2 → 6,9-7,4 ms/pas (l'étage
+  d'activation amorti sur 16 lignes, mais toujours 2 uint4 en vol par
+  voie), rpw = 4 → 6,6-7,2 ; scellé **non tenu** de peu — faux si ≤ 6,7,
+  et je le souhaite.

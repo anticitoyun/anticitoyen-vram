@@ -61,6 +61,11 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("DENSE_NVFP4", "triton", ("acvram.kernels", "_DENSE_NVFP4"), "gemv",
              "linéaires NVFP4 denses (et tête) à DENSE_NVFP4_MIN_M ≤ b ≤ 32 : triton (gemm_dense_etroit, poids lus une fois par pas, défaut depuis verdict-gemm-dense-palier1-situ-17-09) | gemv (témoin, poids relus par séquence)"),
     Variable("DENSE_NVFP4_MIN_M", "4", ("acvram.kernels", "_DENSE_NVFP4_MIN_M")),
+    # lues dans acvram_kernels.cu (getenv, figées au premier lancement : un
+    # PROCESSUS par valeur — poste7-gemv-experts-rpw-18-09)
+    Variable("GROUPED_RPW", "1", None, None,
+             "GEMV groupée des experts : lignes par warp (1 | 2 | 4) ; l'activation est étagée une fois par bloc de GW_WARPS×RPW lignes"),
+    Variable("GROUPED_OLD", "", None, "1", "témoin : l'ancien noyau groupé à 4 lignes par bloc"),
     Variable("MOE_GEMV", "v1", ("acvram.engine.model", "_MOE_GEMV"), "v1",
              "GEMV groupée du décodage MoE : v1 (une passe de poids par paire expert-jeton) | v2 (paires triées par expert, poids lus une fois pour ≤ 4 jetons, sortie identique au bit)"),
     Variable("MULTI_PROJ", "0", ("acvram.engine.model", "_MULTI_PROJ"), "0",
@@ -147,6 +152,10 @@ HORS_REGIME = frozenset({
     "ACVRAM_LISTE_CLE", "ACVRAM_LISTE_PROMUS", "ACVRAM_MAX_PROMUS", "ACVRAM_ORDRE_SAC",
     "ACVRAM_ORDRE_SAC_INVERSE", "ACVRAM_GRAPHES_MUETS", "ACVRAM_MAX_GRAPHS", "ACVRAM_INSTA_MAX",
     "ACVRAM_REGIME_MUET",
+    # lues dans acvram_kernels.cu (getenv) : témoins A/B et réglages d'instrument,
+    # jamais mesurés comme défaut — à monter dans VARIABLES le jour où l'un l'est
+    "ACVRAM_INT8_GEMV_WARP", "ACVRAM_INT8_TRANCHE", "ACVRAM_PA_CHUNK", "ACVRAM_PA_ETAPE",
+    "ACVRAM_PAGED_ALLOC", "ACVRAM_PA_SANS_COMPTEUR",
 })
 
 

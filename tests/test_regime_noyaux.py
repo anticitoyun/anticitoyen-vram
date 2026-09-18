@@ -23,6 +23,12 @@ def _variables_lues():
         src = open(f, errors="ignore").read()
         lues |= set(re.findall(r'os\.environ(?:\.get\(|\[)\s*"(ACVRAM_[A-Z0-9_]+)"', src))
         lues |= set(re.findall(r'os\.getenv\(\s*"(ACVRAM_[A-Z0-9_]+)"', src))
+    # l'extension aussi : `std::getenv("ACVRAM_…")` dans le .cu choisit des
+    # chemins (GROUPED_RPW, GROUPED_OLD…) — absents de toute table jusqu'au
+    # 18/09 (poste7-gemv-experts-rpw-18-09)
+    for f in glob.glob(str(racine / "kernels" / "*.cu")):
+        src = open(f, errors="ignore").read()
+        lues |= set(re.findall(r'getenv\(\s*"(ACVRAM_[A-Z0-9_]+)"', src))
     return lues
 
 
