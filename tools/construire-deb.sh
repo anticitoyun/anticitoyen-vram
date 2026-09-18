@@ -63,6 +63,41 @@ if trouve=$(grep -rlniE "$MOTIFS_INTERDITS" "$PKG" 2>/dev/null); then
     exit 1
 fi
 
+# ---- shebang absolu sur les lanceurs Python --------------------------------
+# `#!/usr/bin/env python3` suit le PATH de qui lance le programme : un
+# linuxbrew/pyenv/conda avant /usr/bin fait rater python3-gi (installe au
+# niveau systeme, jamais dans ces environnements alternatifs) — crash muet au
+# premier clic sur l'icone. Seul /usr/bin/python3 est garanti avoir les
+# dependances systeme listees dans DEBIAN/control (Depends: python3-gi, ...).
+if grep -lE '^#!.*env python3' packaging/* 2>/dev/null; then
+    echo "REFUS : un lanceur packaging/ utilise 'env python3' au lieu du chemin absolu /usr/bin/python3." >&2
+    exit 1
+fi
+
+# ---- sous-commandes sous les deux interpretes ------------------------------
+# --help construit tout le parseur (choix, aide, defauts) : un texte d'aide
+# malforme (ex : un '%' litteral interprete comme format par argparse) casse
+# le CLI entier des le premier appel, jamais vu par la suite de tests qui
+# n'invoque jamais --help. Teste sous .venv (dev) ET /usr/bin/python3 (ce que
+# le paquet execute reellement en dernier ressort) pour attraper une
+# dependance a une bibliotheque absente d'un des deux.
+for interp in .venv/bin/python /usr/bin/python3; do
+    [ -x "$interp" ] || continue
+    for sub in serve convert doctor; do
+        if ! PYTHONPATH="$PKG/usr/share/acvram" "$interp" -c "
+import sys; sys.argv=['acvram','$sub','--help']
+from acvram.cli import main
+try:
+    main()
+except SystemExit as e:
+    sys.exit(0 if e.code in (0, None) else 1)
+" >/dev/null 2>&1; then
+            echo "REFUS : 'acvram $sub --help' echoue sous $interp." >&2
+            exit 1
+        fi
+    done
+done
+
 # ---- lanceur ---------------------------------------------------------------
 cat > "$PKG/usr/bin/acvram" <<'LANCEUR'
 #!/usr/bin/env bash

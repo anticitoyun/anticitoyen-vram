@@ -27,11 +27,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "httpx>=0.27", "rich>=13"]
 nvml = ["nvidia-ml-py>=12.560"]
-# Gated DeltaNet (hybrides Qwen3-Next/kimi, `engine/gdn.py`) : la regle delta
-# elle-meme vient de transformers (`torch_chunk_gated_delta_rule`), jamais
-# reimplementee ici — dependance optionnelle, aucune raison de l'imposer aux
+# Gated DeltaNet (hybrides Qwen3-Next/kimi, `engine/gdn.py`) : noyaux Triton
+# de flash-linear-attention (chunk_gated_delta_rule au prefill, decodage du
+# lot en un lancement) ; transformers>=4.57 pour le repli torch_chunk quand
+# fla est absent — dependance optionnelle, aucune raison de l'imposer aux
 # deploiements qui ne servent pas ces familles.
-gdn = ["transformers>=4.57"]
+gdn = ["transformers>=4.57", "flash-linear-attention>=0.5"]
 
 [project.scripts]
 acvram = "acvram.cli:main"
