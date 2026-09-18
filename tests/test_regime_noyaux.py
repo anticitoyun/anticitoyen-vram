@@ -54,6 +54,17 @@ def test_ligne_de_regime_nomme_ce_qui_differe(monkeypatch):
     assert "ACVRAM_PREFILL" not in acvram.regime_ligne()
 
 
+def test_ligne_de_regime_porte_les_trois_versions():
+    """Un pip install dans le venv de mesure change l'arithmetique sans
+    qu'aucun defaut ACVRAM_* ne bouge (poste7-glm-etendue-canal-saillant-18-09
+    § 5) : la ligne doit porter torch, triton et fla pour qu'un JSON puisse
+    distinguer un noyau Triton d'une autre version."""
+    ligne = acvram.regime_ligne()
+    assert re.search(r"torch=\S+", ligne), ligne
+    assert re.search(r"triton=\S+", ligne), ligne
+    assert re.search(r"fla=\S+", ligne), ligne
+
+
 def test_prefill_regime_refuse_les_anciens_noms(monkeypatch):
     from acvram import kernels
     monkeypatch.delenv("ACVRAM_PREFILL", raising=False)

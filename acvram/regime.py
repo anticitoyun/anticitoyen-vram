@@ -202,6 +202,25 @@ def regime_ligne() -> str:
         parts.append("backends_masques=" + ",".join(r["backends_masques"]))
     if r["noyaux_masques"]:
         parts.append("noyaux_masques=" + ",".join(r["noyaux_masques"]))
+    # Un pip install dans le venv de mesure change l'arithmétique sans qu'aucun
+    # défaut ACVRAM_* ne bouge (poste7-glm-etendue-canal-saillant-18-09 § 5) : un
+    # JSON sans ces versions ne distingue pas un noyau Triton d'une autre
+    # version. torch toujours présent ; triton et fla optionnels.
+    try:
+        import torch
+        parts.append("torch=" + torch.__version__)
+    except Exception as exc:                                  # noqa: BLE001
+        parts.append(f"torch=?({type(exc).__name__})")
+    try:
+        import triton
+        parts.append("triton=" + triton.__version__)
+    except Exception:
+        parts.append("triton=absent")
+    try:
+        import fla
+        parts.append("fla=" + getattr(fla, "__version__", "?"))
+    except Exception:
+        parts.append("fla=absent")
     return "[régime] " + " ".join(parts)
 
 
