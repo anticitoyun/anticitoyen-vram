@@ -3,6 +3,7 @@ type kFE2M1f (= vLLM), alignement des jetons par blocs d'expert (contrat de
 moe_align_block_size), traitement des échelles S0E5M3 (formes, zéro sous 2,
 monotone), permutation des échelles (bijection). L'extension CUDA se
 compile et se juge sur carte (outils/banc-marlin-p1-18-09.py)."""
+import pytest
 import torch
 
 from acvram.kernels import marlin_port as MP
@@ -40,3 +41,18 @@ def test_echelles_s0e5m3_formes_et_seuil():
     # une échelle nulle reste nulle, une échelle sous 2/(f·2⁷) tombe à zéro
     s0 = torch.zeros(K // 16, N, dtype=torch.bfloat16)
     assert int(MP.traiter_echelles_nvfp4(s0, 1.0).view(torch.uint8).sum()) == 0
+
+
+@pytest.mark.parametrize("b,k,E,bloc", [(12, 8, 128, 8), (1, 8, 128, 8), (4, 3, 4, 4), (12, 8, 128, 16)])
+def test_l_aligneur_capturable_egale_aligner_blocs(b, k, E, bloc):
+    """Un lancement Triton, sorties de taille fixe (graphe) = la version torch."""
+    if not (torch.cuda.is_available() or __import__("os").environ.get("TRITON_INTERPRET") == "1"):
+        pytest.skip("Triton")
+    g = torch.Generator().manual_seed(b + k)
+    topk = torch.stack([torch.randperm(E, generator=g)[:k] for _ in range(b)])
+    s1, e1, n1 = MP.aligner_blocs(topk, bloc, E)
+    tampons = MP.aligner_blocs_capturable(topk.reshape(-1).to(torch.int32), bloc, E)
+    s2, e2, n2 = MP.aligner_blocs_capturable(topk.reshape(-1).to(torch.int32), bloc, E, tampons)   # rejoué sur les mêmes tampons
+    P = int(n1)
+    assert int(n2) == P and torch.equal(s1[:P], s2[:P]) and torch.equal(e1[:P // bloc], e2[:P // bloc])
+    assert bool((s2[P:] == b * k).all())                          # au-delà : sentinelle
