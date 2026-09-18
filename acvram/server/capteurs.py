@@ -20,6 +20,7 @@ Tout est en unités lisibles à la sortie : °C, tr/min, V, W, A.
 """
 from __future__ import annotations
 
+import ctypes
 import glob
 import os
 import subprocess
@@ -202,6 +203,52 @@ def nvidia() -> list[dict]:
             "encodeurs": n("encoder.stats.sessionCount"),
         })
     return cartes
+
+
+_nvml_lib: object = None   # None = pas encore essayé, False = essayé et absent
+
+
+def _nvml():
+    """Charge NVML une fois (ctypes, sans dépendance ``pynvml``).
+
+    Ajout GUI n°3 (poste7-gui-ajouts-18-09) : `nvidia-smi
+    --query-gpu=total_energy_consumption` échoue sur cette machine ; NVML
+    tient le compteur d'énergie monotone que `/metrics` a besoin
+    d'intégrer sur sa fenêtre glissante. `outils/gpu/mesure/energie.py`
+    fait la même chose mais n'est pas empaqueté dans le `.deb` — ce
+    lecteur est donc son propre code, minimal, pas un import croisé.
+    """
+    global _nvml_lib
+    if _nvml_lib is None:
+        try:
+            lib = ctypes.CDLL("libnvidia-ml.so.1")
+            if lib.nvmlInit_v2() != 0:
+                raise OSError("nvmlInit_v2 refusé")
+        except OSError:
+            _nvml_lib = False
+        else:
+            _nvml_lib = lib
+    return _nvml_lib or None
+
+
+def energie_mj() -> dict[int, int]:
+    """{index carte: millijoules totaux depuis le démarrage du pilote}.
+
+    Vide si NVML est absent — jamais une valeur inventée à la place."""
+    lib = _nvml()
+    if lib is None:
+        return {}
+    n = ctypes.c_uint()
+    lib.nvmlDeviceGetCount_v2(ctypes.byref(n))
+    out: dict[int, int] = {}
+    for i in range(n.value):
+        h = ctypes.c_void_p()
+        if lib.nvmlDeviceGetHandleByIndex_v2(i, ctypes.byref(h)) != 0:
+            continue
+        v = ctypes.c_ulonglong()
+        if lib.nvmlDeviceGetTotalEnergyConsumption(h, ctypes.byref(v)) == 0:
+            out[i] = v.value
+    return out
 
 
 def systeme() -> dict:

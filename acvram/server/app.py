@@ -28,6 +28,8 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                StreamingResponse)
 
 from .. import __version__
+from .. import regime_ligne as _regime_ligne
+from . import capteurs as _capteurs
 from .console import GALERIE, PAGE
 from ..engine.runner import Engine, GenerationOutput
 from ..engine.sampler import SamplingParams
@@ -192,6 +194,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                        allow_headers=["*"])
     app.state.service = service
     app.state.info = served_paths or {}
+    app.state.energie_precedente = None   # (horodatage, {carte: mJ}, decode_tokens) — ajout n°3
 
     @app.on_event("startup")
     async def _startup() -> None:
@@ -820,6 +823,35 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             "avertissements": list(plan.warnings),
         }
 
+    def _energie_par_jeton(engine: Engine) -> dict:
+        """J/jeton en direct, intégré sur la fenêtre glissante entre deux
+        appels à `/metrics` (ajout GUI n°3, poste7-gui-ajouts-18-09 § 3).
+
+        Compteur NVML monotone (`capteurs.energie_mj`), pas une moyenne de
+        puissances — même raison que `outils/gpu/mesure/energie.py`.
+        Division cote serveur uniquement (la console ne trie ni n'interprete).
+        Recette : a vide "—" (None), jamais 0 ; l'appel precedent sert de
+        depart de fenetre, donc le tout premier appel n'a pas de delta.
+        """
+        mj = _capteurs.energie_mj()
+        cartes = _capteurs.nvidia()
+        maintenant = time.time()
+        decode_tokens = engine.stats.decode_tokens
+        precedent = app.state.energie_precedente
+        app.state.energie_precedente = (maintenant, mj, decode_tokens)
+        j_par_jeton = None
+        if precedent is not None and mj:
+            t0, mj0, tok0 = precedent
+            delta_mj = sum(mj[i] - mj0[i] for i in mj if i in mj0)
+            delta_tok = decode_tokens - tok0
+            if delta_tok > 0 and delta_mj >= 0:
+                j_par_jeton = round(delta_mj / 1000.0 / delta_tok, 4)
+        return {
+            "j_par_jeton": j_par_jeton,
+            "cartes": [{"index": c["index"], "horloge_sm": c["horloge_sm"],
+                        "watts_plafond": c["watts_max"]} for c in cartes],
+        }
+
     @app.get("/metrics")
     async def metrics() -> dict:
         # `version` sert a la console, qui l'affiche en tete : sans elle on ne
@@ -838,6 +870,12 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                 "kv_planned_seqs": kv_seqs,
                 "kv_tokens_par_sequence_planifiee": (
                     round(plan.kv_max_tokens / kv_seqs, 1) if kv_seqs else None),
+                "energie": _energie_par_jeton(engine),
+                # Ajout n°4 (poste7-gui-ajouts-18-09 § 4) : la meme ligne,
+                # octet pour octet, que le "[regime]" ecrit dans le JSON
+                # d'une mesure (`acvram.regime_ligne`) — variables ACVRAM_*
+                # hors defaut + versions torch/triton/fla.
+                "regime_ligne": _regime_ligne(),
                 "version": __version__, **app.state.info}
 
     @app.get("/v1/models")

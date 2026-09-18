@@ -98,6 +98,7 @@ PAGE = """<!doctype html>
  td{padding:5px 0;border-bottom:1px solid var(--bord)}
  td:not(:first-child){text-align:right;color:var(--doux)}
  .note{color:var(--faible);font-size:12px;margin-top:10px}
+ #regime{cursor:pointer;font-family:monospace;padding:2px 20px;margin-top:0;user-select:all}
  code{background:var(--fond2);padding:1px 6px;border-radius:5px;
       border:1px solid var(--bord);color:var(--rose-clair)}
  .barre{height:7px;border-radius:99px;background:var(--fond2);overflow:hidden;
@@ -243,6 +244,7 @@ PAGE = """<!doctype html>
   </span>
   <span class="pastille" id="etat">…</span>
 </header>
+<div id="regime" class="note" style="display:none" title="cliquer pour copier"></div>
 <main>
   <div class="grille">
     <div class="carte"><div class="k" data-t="decodage">décodage</div>
@@ -350,6 +352,7 @@ Donne trois usages d'un cache KV quantifié.</textarea>
   <section>
     <h2 data-t="h_moteur">moteur</h2>
     <div id="tronque" class="note" style="display:none"></div>
+    <div id="energie" class="note"></div>
     <table id="details"><tbody></tbody></table>
     <div class="note">Pour brancher un client :
       <code>OPENAI_BASE_URL</code> ou <code>ANTHROPIC_BASE_URL</code> sur
@@ -410,6 +413,24 @@ async function rafraichir() {
         + nb(m.kv_max_tokens, 0) + ' / ' + nb(m.kv_planned_seqs, 0) + ' séquences).';
     } else {
       tronq.style.display = 'none';
+    }
+
+    // Ajout n°3 (poste7-gui-ajouts-18-09 § 3) : J/jeton, integre cote serveur
+    // sur la fenetre glissante entre deux appels a /metrics (compteur NVML
+    // monotone, pas une moyenne de puissances) — a vide "—", jamais 0.
+    const nrj = m.energie || {};
+    const plafonds = (nrj.cartes || [])
+      .map(c => nb(c.horloge_sm, 0) + ' MHz / ' + nb(c.watts_plafond, 0) + ' W')
+      .join(', ');
+    $('energie').textContent = 'énergie : ' + nb(nrj.j_par_jeton, 3)
+      + ' J/jeton' + (plafonds ? ' — horloge SM / plafond : ' + plafonds : '');
+
+    // Ajout n°4 (poste7-gui-ajouts-18-09 § 4) : la meme ligne "[régime] ..."
+    // qu'un JSON de mesure — copiable, pour qu'un rapport puisse la coller
+    // telle quelle plutot que de retaper les variables ACVRAM_* actives.
+    if (m.regime_ligne) {
+      $('regime').style.display = '';
+      $('regime').textContent = m.regime_ligne;
     }
 
     // Le tableau montre ce que /metrics rend, sans trier ni interpreter :
@@ -1142,6 +1163,9 @@ setInterval(charger_cartes, 2000);
 // doit apparaitre vite, plus vite que le rythme des moteurs (3 s).
 setInterval(charger_verrou, 2000);
 setInterval(() => { if (a_confirmer === null) charger_moteurs(); }, 3000);
+$('regime').addEventListener('click', () => {
+  navigator.clipboard?.writeText($('regime').textContent).catch(() => {});
+});
 init_ambiances();
 charger_modele();
 charger_repartition();
