@@ -27,3 +27,11 @@ Repack MMA pour le prefill + disposition GEMV pour le décodage = +1,7 Go sur Co
 * poste4 : micro-banc P1 à sec dès maintenant (le port, sans intégration moteur), verdict X + prédiction GLM par la formule ; intégration + tests ± 2⁻⁷ + bras cassant après le oui.
 * chef : ligne § 3 à l'utilisateur ; ETAT : porte 137 / bandes § 1.
 * poste3 : inchangé (profil (a)+(b) en cours).
+
+## 4. GO utilisateur (18/09) : le micro-banc en situ d'abord — c'est la porte écrite, elle décide de l'intégration et de son scellé
+
+Ordre, un seul bloc de carte poste3 (~40 min, machine calme : load1 < nproc/2 attesté par `energie.py`), dans cet ordre :
+1. Porte cuBLASLt a8 (2 min) : `torch._int_mm` 4 formes q/k/v/o Coder 2048, ≤ 16 ms → in situ `a8-cublas` plus tard ; > 16 → P0-a8 fermé.
+2. **Micro-banc P1** (20 min) : compilation à sec AVANT le verrou (`--compiler-seulement`, CUDA_VISIBLE_DEVICES=""), puis `outils/carte.sh python outils/banc-marlin-p1-18-09.py` : X TFLOPS effectifs, juge 2⁻⁷ contre déquant fp32, témoin B0 (attendu 90-100), en-tête `marlin_port_so`/`marlin_source`, BANC INVALIDE si JIT dans le processus. Verdict par les trois bandes § 1 : ≥ 137 → intégration, scellé ≥ 15 700 ; 110-137 → intégration, scellé ≥ 0,95 × formule(X), une passe ; < 110 → P1 fermé, la semaine CUDA n'a pas lieu (l'utilisateur en est informé par une ligne, pas par un chantier qui continue).
+3. Harnais égal (15 min) : contrôle llama-server b=1 341 ± 3 %, puis acvram serve b=1 (275-295) et b=12 (1 150-1 200 bridé, `ignore_eos` porté, n_jetons = 12 × pas).
+Puis poste4 (3-5 j, à sec sauf passes nommées) si X ≥ 110 : intégration prefill (`preparer_pile` au chargement, double disposition comptée par le `Plan`, `experts_layout=double` dans `regime_ligne()`, régime `ACVRAM_PREFILL_GROUPED=marlin` témoin `groupe`), test d'équivalence ± 2⁻⁷ contre B0 + bras cassant (échelle décalée d'un rang) dans le même commit, PPL prefill = B0 ± 0,002 ; poste3 : une passe de carte in situ, scellé de la bande. GLM dans la même passe, prédiction formule sur ses postes écrite par poste4 avant.

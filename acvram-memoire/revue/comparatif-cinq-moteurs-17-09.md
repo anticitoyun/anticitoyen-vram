@@ -14,7 +14,9 @@ Assemblé par chef, critère 6 points `poste7-plan-completion-comparatif-17-09`.
 
 ## Table Coder-30B-A3B (`Qwen3-Coder-30B-A3B`)
 
-| moteur / régime | PPL privé | PPL public | b=1 t/s | b=1 J | b=12 t/s | b=12 J | prefill j/s | classé |
+**Instrument de cette table : cellule moteur (chaque moteur avec son propre harnais natif, `certifie` pour acvram) — pas comparable terme à terme entre moteurs sans le vérifier (REGLES §4). Les valeurs harnais égal Coder acvram/llama.cpp, seules directement comparables, sont dans la note ci-dessus, pas ici.**
+
+| moteur / régime | PPL privé | PPL public | b=1 t/s (natif) | b=1 J (natif) | b=12 t/s (natif) | b=12 J (natif) | prefill j/s (natif) | classé |
 |---|---|---|---|---|---|---|---|---|
 | acvram W4A16 (nvfp4, bf16 prefill) | 1,0148 géo (302025e) | 1,0099 | **287,1** | **1,185** | **1 198** | **0,334** | **9 913** | oui |
 | EXL3 4,25 bpw (exllamav3, TabbyAPI) | 1,0006 | 1,0004 | 168,0 | 1,546 | 855,7 | 0,362 | 10 656 | oui |
