@@ -157,3 +157,20 @@ recombinaison et l'act·up ne sont pas dans les 48,8). Faux si < 15 700.
 
 PPL préfill = B0 ± 0,002 reste le juge final (poste3, avec la vitesse) ; ma
 prédiction : Marlin ≤ B0 en PPL (plus proche de fp32), écart < 0,001.
+
+### Deux corrections de test (poste7, un commit, à sec)
+
+- [96] : le témoin « groupe » était inatteignable à T = 96 (`direct` prend
+  le pas dès que par_expert ≤ `_MOE_GEMM_MAX` 48) → le test force
+  `_MOE_GEMM_MAX = 0` ; chemin asserté (`attendre_chemin`), rouge sinon.
+- [1024-awq] : hypothèse 1 de poste7 tenue — la référence recalculait l'AWQ en
+  fp32 à part ; elle consomme maintenant LA MÊME activation que le moteur
+  (table bf16 `_stacks_awq` construite par `_try_build_stacks`, division en
+  bf16 `xs / awq_g[e]`, `act / awq_d[e]` arrondi une fois en bf16 comme
+  `moe_act`). Contrôle « la référence passe son propre critère » : les 4 cas
+  de la carte émulés à sec (B0 émulé sur la même activation, T ∈ {96,
+  1 024} × {sans AWQ, table AWQ}) passent le critère par ligne — B0 laisse
+  3·10⁻⁵ hors sans AWQ et 1,2·10⁻⁴ avec une table large (l'arrondi bf16 de
+  sa déquant) ; seuil posé à 5·10⁻⁴, Marlin exigé ≤ B0. 7/7 verts à sec
+  (le seul test carte reste skippé ici). Charge : tests ciblés seulement,
+  plus de suite complète hors frontière de bloc.
