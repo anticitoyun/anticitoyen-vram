@@ -222,3 +222,10 @@ Par ordre de valeur, détaillé dans [`docs/FEUILLE-DE-ROUTE.md`](docs/FEUILLE-D
 4. Spéculation à la EAGLE.
 5. GEMM groupé pour les MoE.
 6. Compensation d'erreur à la GPTQ.
+
+Pistes notées et NON engagées (18/09, chantier GEMV des experts clos à
+1 262 t/s nu, `poste7-gemv-experts-clos-18-09`) : gate/up en « x en registres »
+borné par `__launch_bounds__(256, 4)` (≤ 64 registres — le compilateur
+déverse ou replie, à lire dans `-Xptxas -v` avant toute mesure) ; refusée
+pour l'instant, le levier plafonne (down seul : −12 %, adopté si l'ABAB
+tient ≤ 0,97×).
