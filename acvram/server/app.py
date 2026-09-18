@@ -11,6 +11,7 @@ en flux de partager un seul pipeline réparti sur deux GPU et la mémoire vive.
 from __future__ import annotations
 
 import asyncio
+import glob
 import os
 import json
 import re
@@ -460,6 +461,59 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                     par_pid.setdefault(int(m_pid.group(1)), set()).add(int(m_port.group(1)))
         return par_pid
 
+    # poste7, 18/09 (poste7-gui-ajouts-18-09 § 2, ajout n°1) : le verrou
+    # outils/carte.sh est la seule verite sur l'etat du GPU (REGLES § 2),
+    # mais rien avant cette route ne le rendait visible dans la console —
+    # « une annonce a une minute de retard, une fenetre GUI non ». Six
+    # manches perdues le 10/09, deux incidents rejoues le 14 et le 15 sur ce
+    # meme defaut d'observabilite.
+    def _verrous() -> list:
+        """Un verrou par fichier `/tmp/acvram-carte-*.lock` trouve — le nom
+        de fichier PORTE l'index de carte (carte.sh:41), donc pas besoin de
+        connaitre les cartes a l'avance pour lister les verrous poses.
+        Motif substituable (ACVRAM_VERROU_GLOB) : les tests ne doivent pas
+        lire /tmp/acvram-carte-*.lock, partage par tout le circuit en
+        service."""
+        motif = os.environ.get("ACVRAM_VERROU_GLOB", "/tmp/acvram-carte-*.lock")
+        out = []
+        for verrou in sorted(glob.glob(motif)):
+            m = re.search(r"acvram-carte-(\d+)\.lock$", verrou)
+            carte = int(m.group(1)) if m else None
+            info = verrou + ".qui"
+            pid = nom = type_ = None
+            depuis = None
+            vivant = False
+            try:
+                champs = Path(info).read_text().split(None, 3)
+                pid = int(champs[0])
+                pris_a = int(champs[1])
+                nom = champs[2] if len(champs) > 2 else "?"
+                type_ = champs[3].strip() if len(champs) > 3 else "?"
+                depuis = max(0, int(time.time() - pris_a))
+                vivant = _pid_vivant(pid)
+            except Exception:                                # noqa: BLE001
+                pass                                          # .qui absent/perime : verrou sans detenteur lisible
+            out.append({
+                "carte": carte, "pid": pid if vivant else None,
+                "nom": nom if vivant else None, "type": type_ if vivant else None,
+                "depuis_secondes": depuis if vivant else None,
+                "tenu": vivant,
+            })
+        return out
+
+    def _pid_vivant(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # le PID existe mais appartient a un autre utilisateur — vivant
+            # quand meme, kill(0) ne l'a pas dit "mort".
+            return True
+        except Exception:                                    # noqa: BLE001
+            return False
+
     def _moteurs_gpu() -> list:
         try:
             sortie = subprocess.run(
@@ -480,6 +534,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             pass
         ports = _ports_par_pid()
         moi = os.getpid()
+        pids_verrous = {v["pid"] for v in _verrous() if v["tenu"]}
         out = []
         for ligne in sortie.splitlines():
             c = [x.strip() for x in ligne.split(",")]
@@ -496,15 +551,25 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             nom = next((n for n, motifs in _SIGNATURES
                         if any(m.lower() in bas for m in motifs)), "inconnu")
             p = sorted(ports.get(pid, ()))
+            permanent = any(x in _PORTS_PERMANENTS for x in p)
             out.append({
                 "pid": pid, "mio": float(c[1]),
                 "carte": index_par_uuid.get(c[2] if len(c) > 2 else "", None),
                 "moteur": nom, "commande": cmd[:220], "ports": p,
-                "permanent": any(x in _PORTS_PERMANENTS for x in p),
+                "permanent": permanent,
+                # LEGITIME = service permanent OU detenteur du verrou de la
+                # carte ou'il tourne (poste7-gui-ajouts-18-09 § 2, n°1) — calcule
+                # ici, pas dans la console (REGLES : la console montre ce que
+                # le serveur rend, jamais un tri/calcul en JS).
+                "legitime": permanent or pid in pids_verrous,
                 "moi": pid == moi,
                 "secondes": max(0, int(time.time() - debut)) if debut else None,
             })
         return out
+
+    @app.get("/verrou", include_in_schema=False)
+    async def verrou() -> dict:
+        return {"verrous": _verrous()}
 
     @app.get("/moteurs", include_in_schema=False)
     async def moteurs() -> dict:
