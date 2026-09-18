@@ -122,6 +122,37 @@ def test_attn_qkvo_int8_canal_change_group_size_et_symmetrique_dans_le_manifeste
         assert head["group_size"] == 128
 
 
+def test_promotion_nvfp4_vers_int8_par_plancher_snr_est_aussi_symetrique_par_canal(
+        target_rig, tmp_path):
+    """18/09, trouve en CONVERTISSANT LE VRAI Qwen3-Coder-30B-A3B : q/k/v/o y
+    partent en nvfp4 (20,5-20,7 dB, sous tout plancher raisonnable) et
+    n'ATTEIGNENT l'int8 QUE PAR PROMOTION (`PROMOTE["nvfp4"] = "int8"`), pas
+    par un routage direct comme sous q3n. Le premier code n'appliquait
+    `attn_canal`/`group_size_tenseur` qu'au tenseur nvfp4 initial (jamais
+    "int8" a ce point) -- le converti reel sortait en groupe de 128 affine,
+    malgre `attn_int8: "canal"` au sommet du manifeste. Reproduit ici sans
+    la carte, plancher SNR volontairement haut pour forcer la promotion."""
+    from acvram.engine.config import load_model_spec
+    from acvram.memory.tiering import PlannerOptions, auto_plan
+    from acvram.quant.convert import ConversionOptions, convert_checkpoint
+
+    tiny_checkpoint = _petit_checkpoint(tmp_path)
+    spec = load_model_spec(tiny_checkpoint, "tiny")
+    plan, _ = auto_plan(spec, target_rig,
+                        PlannerOptions(max_model_len=512, max_concurrent_seqs=2))
+    out = str(tmp_path / "promu")
+    convert_checkpoint(tiny_checkpoint, plan,
+                       ConversionOptions(out_dir=out, attn_qkvo_int8_canal=True,
+                                         snr_floor=100.0, max_promotions=1.0),
+                       spec=spec)
+    manifest = json.load(open(out + "/acvram_manifest.json"))
+    q = manifest["tensors"]["model.layers.0.self_attn.q_proj.weight"]
+    assert q["format"] == "int8"
+    assert q["promoted_from"] == "nvfp4"
+    assert q["symmetrique"] is True
+    assert q["group_size"] == q["shape"][1]
+
+
 def test_temoin_cassant_sans_loption_group_size_reste_128(
         target_rig, tmp_path):
     """Bras casse : meme bascule q3n, meme modele, mais sans

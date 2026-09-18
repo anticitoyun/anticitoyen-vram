@@ -1562,18 +1562,32 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                      <= opts.promotion_cout_max_mib)
                 and len(report.promotions) < opts.max_promotions * max(1, len(keys) + 1)):
             wider = PROMOTE[fmt]
+            # poste7-p2-qkvo-int8-canal-18-09 : sur Qwen3-Coder, q/k/v/o partent
+            # en nvfp4 (20,5-20,7 dB, sous le plancher) et n'ATTEIGNENT l'int8
+            # QUE PAR CETTE PROMOTION -- `attn_canal`/`group_size_tenseur`
+            # calcules plus haut valaient donc faux (fmt="nvfp4" a ce moment).
+            # Refaits ici sur `wider`, le format candidat ; n'ecrasent les
+            # variables du manifeste que si la promotion est ACCEPTEE
+            # plus bas, sinon le tenseur reste nvfp4 et group_size=largeur
+            # entiere y serait un mensonge de bilan.
+            attn_canal_candidat = (opts.attn_qkvo_int8_canal and wider == "int8"
+                                   and name.endswith(("self_attn.q_proj.weight", "self_attn.k_proj.weight",
+                                                       "self_attn.v_proj.weight", "self_attn.o_proj.weight")))
+            group_size_candidat = tensor.shape[1] if attn_canal_candidat else opts.group_size
             q2, s2, m2 = _quantize_on(
                 qdev, tensor, wider, st,
-                group_size=opts.group_size,
+                group_size=group_size_candidat,
                 use_hadamard=router.wants_hadamard(name, wider),
                 use_awq=opts.awq and wider == "nvfp4", n_grid=opts.n_grid,
-                garder_grille=opts.garder_grille)
+                garder_grille=opts.garder_grille,
+                symmetric=attn_canal_candidat)
             if m2["out_snr_db"] > metrics["out_snr_db"] + 1.0:
                 report.promotions.append({
                     "name": name, "from": fmt, "to": wider,
                     "before": round(metrics["out_snr_db"], 2),
                     "after": round(m2["out_snr_db"], 2)})
                 fmt, qt, scaler, metrics = wider, q2, s2, m2
+                attn_canal, group_size_tenseur = attn_canal_candidat, group_size_candidat
                 entry["format"] = fmt
                 entry["promoted_from"] = report.promotions[-1]["from"]
                 # Le SNR d'AVANT, celui pris dans `promoted_from`. Sans lui,
