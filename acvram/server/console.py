@@ -34,6 +34,13 @@ PAGE = """<!doctype html>
     desaturee, sinon les roses posent sur du gris neutre et paraissent sales.
     Douze nuances nommees, du presque-noir au rose pale. */
  :root{
+   /* Sans ceci, <select> et son menu deroulant sont rendus par le theme GTK
+      natif de la machine (pas par ce CSS) : sur un theme clair, la liste des
+      modeles et des cartes devient blanche sur texte clair, illisible — le
+      18/09, signale par l utilisateur. `color-scheme` demande au moteur de
+      rendre les CONTROLES DE FORMULAIRE (select, son popup, scrollbars) en
+      sombre, sans toucher au reste de la page qui a deja ses couleurs. */
+   color-scheme: dark;
    --fond:#120a10; --fond2:#180d15; --surface:#20111b; --surface2:#291624;
    --bord:#3a1f31; --bord-vif:#5c2c47;
    --rose-pale:#fce7f3; --rose-clair:#f9a8d4; --rose:#f472b6;
