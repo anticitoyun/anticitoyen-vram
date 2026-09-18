@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """acvram-gui — la console acvram dans une fenêtre native, sans navigateur.
 
 POURQUOI UNE FENÊTRE NATIVE ET NON UN ONGLET. La console web dépend d'un
