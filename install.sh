@@ -88,18 +88,27 @@ if [ "${1:-}" = "--outils-terminal" ] || [ "${ACVRAM_INSTALL_OUTILS:-0}" = 1 ]; 
         # Ecartes : chemins fixes sur un ancien $HOME (migration du 13/09,
         # pas remappes) — les deployer casserait plutot que reparer.
         ECARTES="memoire memoire-consolider memoire-sync exporter-projet-ia installer-projet-ia"
-        n_copies=0; n_ecartes=0
+        # Par defaut, un fichier deja present dans DEST n'est PAS ecrase : un
+        # deploiement en masse a deja effacé une fois une correction locale
+        # (18/09, kimi-modeles) avec une copie plus ancienne de SRC. Utiliser
+        # ACVRAM_OUTILS_FORCE=1 pour ecraser volontairement (ex. apres avoir
+        # syncronise SRC en premier).
+        n_copies=0; n_ecartes=0; n_gardes=0
         for f in "$SRC"/*; do
             [ -f "$f" ] || continue
             nom="$(basename "$f")"
             case " $ECARTES " in
                 *" $nom "*) n_ecartes=$((n_ecartes + 1)); continue;;
             esac
+            if [ -e "$DEST/$nom" ] && [ "${ACVRAM_OUTILS_FORCE:-0}" != 1 ]; then
+                n_gardes=$((n_gardes + 1)); continue
+            fi
             cp -a "$f" "$DEST/$nom"
             chmod +x "$DEST/$nom"
             n_copies=$((n_copies + 1))
         done
         say "  $n_copies script(s) depose(s) dans $DEST"
+        [ "$n_gardes" -gt 0 ] && say "  $n_gardes deja present(s), gardes tels quels (ACVRAM_OUTILS_FORCE=1 pour ecraser)"
         [ "$n_ecartes" -gt 0 ] && warn "  $n_ecartes ecarte(s) (chemin fige sur l'ancien home, a corriger a la main : $ECARTES)"
     fi
 
