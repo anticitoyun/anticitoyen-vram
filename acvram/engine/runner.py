@@ -28,7 +28,7 @@ import torch
 
 from ..memory.kvcache import BLOCK_SIZE, BlockAllocator
 from .loader import LoadedModel
-from .model import ForwardBatch
+from .model import _DUMP_MOE, ForwardBatch
 from .sampler import SamplingParams, besoin_historique, sample
 from .speculative import GardeSpeculation, Proposal, verify_proposal
 
@@ -988,6 +988,24 @@ class Engine:
     # -- the step --------------------------------------------------------
     def step(self) -> list[GenerationOutput]:
         """Exécute une passe avant et rend ce qu'elle a produit."""
+        outputs = self._step()
+        if _DUMP_MOE:
+            self._sauver_dump_moe()
+        return outputs
+
+    def _sauver_dump_moe(self) -> None:
+        """ACVRAM_DUMP_MOE (model._DUMP_MOE) : tous les tampons statiques de
+        sortie MoE, par couche et par forme, après chaque pas (eager ou rejeu)."""
+        from .model import MoEBlock
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        n = self.__dict__.get("_dump_pas", 0)
+        self.__dict__["_dump_pas"] = n + 1
+        blocs = [m for m in self.model.modules() if isinstance(m, MoEBlock)]
+        d = {i: {f"{cle[0]}": b.detach().cpu().clone() for cle, b in m.__dict__.get("_dump_bufs", {}).items()}
+             for i, m in enumerate(blocs)}
+        torch.save(d, os.path.join(_DUMP_MOE, f"pas-{n:05d}.pt"))
+
+    def _step(self) -> list[GenerationOutput]:
         new = self._admit()
         if new:
             self.stats.pas_avec_prefill += 1

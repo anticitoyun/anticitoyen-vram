@@ -234,3 +234,25 @@ marlin = (b)} (`ACVRAM_PREFILL_GROUPED` × `ACVRAM_GEMV_LAYOUT`). Si le +0,008
 suit le décodage (b) quel que soit le préfixe → le noyau (instrument par
 couche pour le localiser) ; s'il suit le préfixe Marlin → le cache KV écrit par
 le prefill bf16 (même cause que le −0,003 GLM, signe opposé sur Coder).
+
+### Verdict de poste3 (revue/verdict-biais-gemv-b-18-09, 9584ad7) et suite
+
+Par couche, routages réels, 48/48 : (b) ≡ v1 (|biais| ≤ 1,8e-9, |gain−1| ≤
+1,2e-7 ; témoin tronqué vu à −0,13). La 2×2 en double disposition est
+impossible sur Coder (OOM ×8) ; la bissection par longueur de préfixe donne
+Δ = +0,0173 (16), +0,008 (256), +0,0206 (2048) : **le biais suit le décodage
+(b)** — ma prédiction (« suit le préfixe ») est RÉFUTÉE, celle de poste7 tenue.
+En eager, Δ = +0,0034 : ×5 sous rejeu de graphe. Donc : le noyau est juste
+en isolation, le chemin CAPTURÉ de (b) diverge du chemin eager de (b), et un
+résidu eager reste à nommer.
+
+Instrument livré pour la piste de poste7 (premier pas divergent) :
+`ACVRAM_DUMP_MOE=<dossier>` (model.py, bas de fichier) — tampon statique par
+couche et par forme, rempli par `copy_` dans le forward (un graphe capturé y
+écrit à chaque rejeu), sauvé après chaque pas par `Engine.step`
+(`_sauver_dump_moe`, pas-NNNNN.pt) ; `outils/comparer-dump-moe-18-09.py A B`
+nomme le premier (pas, couche) divergent et le profil du pas. Protocole :
+ppl-decode-kv 16/1024 deux fois sous disposition unique, `enable_cuda_graphs`
+vrai puis faux, même dossier de dump chacun ; puis la même paire en régime
+naturel (v1 capturé contre v1 eager) comme témoin : si v1 diverge aussi entre
+capture et eager, la divergence n'est pas propre à (b).
