@@ -20,15 +20,23 @@ OUT=${NCU_SORTIE}/ncu-gemv-rpw${RPW}.csv
 XREG=${ACVRAM_GROUPED_XREG:-0}
 OUT=${NCU_SORTIE}/ncu-gemv-rpw${RPW}-xreg${XREG}.csv
 # `sudo -n ncu` remet l'environnement à zéro (poste3, verdict-ncu-gemv-experts-rpw-
-# 18-09 : aucune ACVRAM_* n'atteignait la cible, chemin mma, fg=0) : le régime
-# est passé PAR `env` derrière sudo, et imprimé par la cible (regime_ligne).
-ENVS="ACVRAM_TYPE=mesure BANC_JETONS=8 ACVRAM_GROUPED_RPW=$RPW ACVRAM_GROUPED_XREG=$XREG \
-PATH=$PATH HOME=$HOME PYTHONPATH=${PYTHONPATH:-} LC_ALL=C"
+# 18-09 : aucune ACVRAM_* n'atteignait la cible, chemin mma, fg=0) et sudoers
+# n'autorise NOPASSWD que sur le binaire ncu lui-même (`sudo -n env … ncu`
+# rend rc=1) : le régime est posé dans un WRAPPER cible, exécuté par ncu.
+NCU=${NCU:-$(ls /usr/local/cuda*/bin/ncu 2>/dev/null | sort -V | tail -1)}
+WRAP=${NCU_SORTIE}/cible-rpw${RPW}-xreg${XREG}.sh
+cat > "$WRAP" <<WEOF
+#!/usr/bin/env bash
+export ACVRAM_TYPE=mesure BANC_JETONS=8 ACVRAM_GROUPED_RPW=$RPW ACVRAM_GROUPED_XREG=$XREG
+export LC_ALL=C HOME=$HOME PATH=$PATH PYTHONPATH=${PYTHONPATH:-}
+exec "$PY" "$ICI/banc_decodage_moe.py" gemv "$B"
+WEOF
+chmod +x "$WRAP"
 # 48 couches × 2 noyaux (gateup, down) = 96 lancements par pas ; on saute deux pas
-# après le prefill (chauffe) et on profile UN pas. LC_ALL=C : sortie ncu sans
-# séparateurs de milliers ni virgules décimales (le parseur cassait en fr).
+# après le prefill (chauffe) et on profile UN pas. LC_ALL=C dans le wrapper : sortie
+# ncu sans séparateurs de milliers ni virgules décimales (le parseur cassait en fr).
 # dram__bytes_read.sum : n/a sur 5090 / ncu 2026.3, retiré — la bande par dram__throughput.
-sudo -n env $ENVS /usr/local/cuda/bin/ncu --csv --target-processes all \
+sudo -n "$NCU" --csv --target-processes all \
   --metrics gpu__time_duration.sum,dram__throughput.avg.pct_of_peak_sustained_elapsed,\
 lts__t_sector_hit_rate.pct,sm__warps_active.avg.pct_of_peak_sustained_active,launch__occupancy_limit_shared_mem,\
 launch__occupancy_limit_registers,launch__waves_per_multiprocessor,launch__registers_per_thread,\
@@ -42,7 +50,7 @@ smsp__average_warps_issue_stalled_wait_per_issue_active.ratio,\
 l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum,l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum \
   --kernel-name "regex:nvfp4_gemv_grouped_gateup_kernel|nvfp4_gemv_grouped_warp_kernel|nvfp4_gemv_grouped_gateup_xreg_kernel|nvfp4_gemv_grouped_xreg_kernel" \
   --launch-skip 192 --launch-count 96 \
-  "$PY" "$ICI/banc_decodage_moe.py" gemv "$B" > "$OUT" 2>${NCU_SORTIE}/ncu-gemv-rpw${RPW}-xreg${XREG}.err || true
+  "$WRAP" > "$OUT" 2>${NCU_SORTIE}/ncu-gemv-rpw${RPW}-xreg${XREG}.err || true
 "$PY" - "$OUT" "$RPW" "$XREG" <<'PYEOF'
 import csv, sys, collections, statistics, re
 rows = [r for r in csv.reader(open(sys.argv[1])) if r and r[0].isdigit()]
