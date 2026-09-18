@@ -60,8 +60,26 @@ mécanisme SNR) restent au groupe de 128 affine standard, comme le classé.
 convert_checkpoint bout en bout GQA et MLA + promotion + généralisation
 `_est_projection_attn`) : tout vert avant la conversion réelle.
 
-## Suite
+## Clôture (poste3, 18/09 22h55)
 
-poste3 applique le même protocole de ratio HF que pour Coder. Seuil scellé
-par poste7 : i8c/classé ≤ 1,005 (prédiction ≤ 1,000, même mécanisme que
-Coder), sinon P2 GLM fermé.
+**P2 GLM FERMÉ.** i8c/classé = 1,0143 (tranches 1,0146/1,0052/1,0231), les
+3 > seuil 1,005. Absolu attendu ≈ 1,029. Converti gardé comme pièce, pas
+classé.
+
+Pas un défaut de cette conversion : cause identifiée par poste3, spécifique
+aux tenseurs de COMPRESSION MLA (`kv_a_proj_with_mqa` 576×2048,
+`q_b_proj`) — l'int8 symétrique par canal y coûte ce que le groupe de 128
+du classé préservait (compression vers un latent de rang 512, pas une
+projection dense large). Sur Coder (denses larges, mêmes tenseurs
+conceptuels mais sans compression latente), le même choix GAGNE +0,5 %
+(`verdict-p2-hors-moteur-18-09` : i8c/classé Coder = 0,9947, P2 Coder
+OUVERT). Le SNR sain mesuré ici (37-43 dB) ne pouvait pas voir ce coût :
+il compare une reconstruction à son poids source, pas au groupe-128
+affine qu'elle remplace sur un tenseur de compression.
+
+Rien à refaire côté conversion : le mécanisme (int8 canal sur PROJECTIONS
+MLA génériques, `_est_projection_attn`) reste correct et réutilisable,
+mais le VERDICT NUMÉRIQUE dépend du rôle du tenseur (dense large vs
+compression latente), pas seulement de son SNR de reconstruction —
+distinction à garder pour un futur chantier similaire sur une architecture
+MLA.
