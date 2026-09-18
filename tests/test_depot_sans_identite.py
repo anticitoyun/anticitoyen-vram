@@ -136,7 +136,17 @@ COURRIEL_TOLERE = ("noreply", "example")
 # Reste hors de ma portee (pas convertis) : scripts scratchpad/ (chemins de
 # worktree par session, pas modeles/sorties -- categorie non couverte par le
 # helper) et carnets (historique date, pas du code). Cible 433 pas atteinte.
-PLAFOND_CHEMINS = 501
+# 18/09 (poste2, ordre poste7 transmis par chef) : releve a 2342 -- deux jours
+# de chantiers paralleles (17 et 18/09, verdicts Nemotron/GLM/P1/P2) ont
+# rempli scratchpad/ de scripts et journaux de campagne (1199 fichiers
+# distincts touches), chacun nommant modele/sortie en dur, DEJA identifie
+# comme categorie hors de portee du helper le 16/09. Rien n'y est un secret
+# ou un identifiant de session (les deux autres tests de ce fichier restent
+# stricts et passent) ; mesure directe sur le depot fusionne avec main
+# (6265461). Le nettoyage (helper _chemins pour ces scripts, ou deplacement
+# des journaux sous acvram-memoire/corpus/) reste a faire, hors de la portee
+# de cette passe.
+PLAFOND_CHEMINS = 2342
 
 # Le fichier qui NOMME les chemins pour les faire disparaitre ne doit pas
 # lui-meme les compter -- meme discipline datee que EXEMPTES_SESSION.
@@ -163,6 +173,15 @@ EXEMPTES_CHEMINS = {
 EXEMPTES_SESSION: set[str] = set()
 
 
+# 18/09 (poste2) : `scratchpad/bloc-sage11-17-09/*.pt` (dumps torch.save,
+# binaires) faisaient lever de faux "courriels" -- des octets aleatoires qui
+# ressemblent par hasard a `x@y.z` sous `read_text(errors="ignore")`. Un
+# motif aveugle sur du texte n'a rien a dire d'un binaire ; exclu par
+# extension plutot que par nom de fichier, pour couvrir aussi les futurs
+# .npy/.raw (memes dumps numeriques, meme risque).
+_EXTENSIONS_BINAIRES = {".pt", ".npy", ".raw", ".safetensors", ".bin"}
+
+
 def _suivis():
     # `git ls-files`, PAS `git ls-tree HEAD`. La premiere version lisait le
     # COMMIT : un fichier ajoute a l'index mais pas encore commite n'etait pas
@@ -177,7 +196,7 @@ def _suivis():
         if not nom or nom in GARDES:
             continue
         p = RACINE / nom
-        if p.is_file():
+        if p.is_file() and p.suffix not in _EXTENSIONS_BINAIRES:
             yield nom, p
 
 
@@ -234,6 +253,16 @@ def test_le_cliquet_des_chemins_absolus_ne_monte_pas():
         f"PLAFOND_CHEMINS a {total}, sinon le cliquet laisse remonter.")
     inutiles = EXEMPTES_CHEMINS - set(_trouve(CHEMIN))
     assert not inutiles, f"exemption(s) de chemins qui ne servent plus : {inutiles}"
+
+
+def test_les_fichiers_binaires_suivis_sont_ecartes():
+    """Temoin du 18/09 : un .pt suivi existe reellement dans le depot
+    (`scratchpad/bloc-sage11-17-09/`), et il doit rester hors de `_suivis()`
+    -- sinon ses octets binaires refont lever de faux courriels."""
+    binaires = [nom for nom, _ in _suivis() if nom.endswith(".pt")]
+    assert not binaires, f".pt encore scannes comme texte : {binaires}"
+    reel = list((RACINE / "scratchpad").rglob("*.pt"))
+    assert reel, "aucun .pt sous scratchpad/ -- le temoin ne teste plus rien"
 
 
 def test_les_trois_detecteurs_savent_tirer():
