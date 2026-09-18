@@ -80,3 +80,13 @@ def test_ratio_absent_si_aucune_sequence_planifiee(client, monkeypatch):
     monkeypatch.setattr(engine.loaded.plan, "kv_planned_seqs", 0, raising=False)
     m = c.get("/metrics").json()
     assert m["kv_tokens_par_sequence_planifiee"] is None
+
+
+def test_metrics_porte_les_cartes(client):
+    """poste7-profil-verdict-18-09 §4 : sans ce champ, un client HTTP de
+    mesure (hors carte.sh) ne peut pas savoir quelle carte est réellement
+    servie et somme celles qu'il voit lui-même (18/09, acvram [0,1] contre
+    llama.cpp [0], énergie faussée)."""
+    c, engine = client
+    m = c.get("/metrics").json()
+    assert m["cartes"] == engine.regime()["cartes"]

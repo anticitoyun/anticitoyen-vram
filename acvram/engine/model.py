@@ -1583,6 +1583,7 @@ class MoEBlock(nn.Module):
         # v2 : paires triées par expert (argsort stable : déterministe, sous
         # graphe) ; le noyau écrit chaque paire à sa place d'origine
         tri = None
+        act = None
         marlin = getattr(self, "_stacks_marlin", None) if _GEMV_LAYOUT == "marlin" else None
         if marlin is not None and ext is not None and hasattr(ext, "nvfp4_gemv_marlin_gateup") and not distinct:
             # forme (b), poste7-p1-disposition-unique-18-09 : le GEMV lit la
@@ -1599,7 +1600,9 @@ class MoEBlock(nn.Module):
                 and pg[4] * 4 <= 48 * 1024):
             ordre = torch.argsort(eid, stable=True).to(torch.int32)
             tri = (eid[ordre.long()].contiguous(), ordre)
-        if tri is not None:
+        if marlin is not None and act is not None:
+            pass                                       # gemv_marlin pris ci-dessus
+        elif tri is not None:
             act = ext.nvfp4_gemv_grouped_gateup_v2(
                 pg[1], pg[2], pg[3], pu[1], pu[2], pu[3], tri[0], tok_g[ordre.long()].contiguous(), ordre,
                 x_g.contiguous(), pg[4], 1 if self.act == "gelu_tanh" else 0)[:, :pg[5]]
@@ -1633,7 +1636,8 @@ class MoEBlock(nn.Module):
             act = fwht_activations(act.to(torch.bfloat16), hd_d).to(act.dtype)
         if awq.get("down_proj") is not None:
             act = (act.to(torch.bfloat16) / awq["down_proj"][eid.long(), :act.shape[1]]).to(act.dtype)
-        if marlin is not None and ext is not None and hasattr(ext, "nvfp4_gemv_marlin"):
+        if marlin is not None and self.dernier_chemin == "gemv_marlin" and ext is not None \
+                and hasattr(ext, "nvfp4_gemv_marlin"):
             md = marlin["down_proj"]
             d = ext.nvfp4_gemv_marlin(md[0], md[1], md[2], eid, seq, act.contiguous(), md[3], md[4])
         else:
