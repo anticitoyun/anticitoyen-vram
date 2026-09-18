@@ -6,13 +6,15 @@
 
 **Note datée 17/09 soir, étiquette 0.6.8-E+C (`poste7-e-c-verdict-17-09`, `verdict-coder-c-mixte-17-09`)** : décodage édité — `ACVRAM_PAGED_ATTN=triton` (E) ET `ACVRAM_NARROW_KERNEL=mixte` (C, dès b≥2 ; le plantage initial sous capture était un débordement mémoire réel sur les tranches K, corrigé) passés défaut. Coder b=1 233,9→257,8 t/s (+10,2%, J −11%), b=12 743,4→997,8 t/s (+34%, J −26%) — table éditée avec les valeurs 0.6.8, anciennes valeurs (233,9/743,4) conservées ici en historique, pas remesurées ailleurs (GLM, autres moteurs).
 
+**Note datée 18/09 (`verdict-coder-b12-defaut-18-09`, chantier GEMV experts clos, `poste7-reprise-ordre-18-09`)** : décodage b=12 édité — défauts `ACVRAM_GROUPED_RPW=4` + `ACVRAM_GROUPED_XREG=down` (aucune variable posée, ligne `[régime]` vérifiée) : 997,8→**1 198 t/s bridé 400 W, 0,334 J/jeton** (nu 1 312 t/s). Ancienne valeur (997,8/0,400) conservée en historique. b=1 et prefill inchangés sous ce chantier (RPW/XREG ne s'y appliquent pas).
+
 Assemblé par chef, critère 6 points `poste7-plan-completion-comparatif-17-09`. Corpus privé scellé `5909d27` (jamais publié en clair) ; corpus public = échantillon documenté dans chaque verdict. Préfixe `[gMASK]<sop>` obligatoire sur toute mesure GLM. Tout acvram mesuré sur main ≥ `0971c90` (défaut `ACVRAM_PREFILL=bf16`), régime porté par `regime_ligne()` dans chaque instrument.
 
 ## Table Coder-30B-A3B (`Qwen3-Coder-30B-A3B`)
 
 | moteur / régime | PPL privé | PPL public | b=1 t/s | b=1 J | b=12 t/s | b=12 J | prefill j/s | classé |
 |---|---|---|---|---|---|---|---|---|
-| acvram W4A16 (nvfp4, bf16 prefill) | 1,0148 géo (302025e) | 1,0099 | **287,1** | **1,185** | **997,8** | **0,400** | **9 913** | oui |
+| acvram W4A16 (nvfp4, bf16 prefill) | 1,0148 géo (302025e) | 1,0099 | **287,1** | **1,185** | **1 198** | **0,334** | **9 913** | oui |
 | EXL3 4,25 bpw (exllamav3, TabbyAPI) | 1,0006 | 1,0004 | 168,0 | 1,546 | 855,7 | 0,362 | 10 656 | oui |
 | llama.cpp Q4_K_M | 1,0103 | 1,0146 | 341,4 | 1,108 | 709,2 | 0,523 | 15 717 | oui |
 | vLLM W4A16 Marlin (ModelOpt communautaire) | 1,1227 | 1,0876 | 302,9 | — | 2 031,4 | 0,197 | 20 988 | non |
@@ -21,7 +23,7 @@ Assemblé par chef, critère 6 points `poste7-plan-completion-comparatif-17-09`.
 
 **Statut vLLM/TRT-LLM Coder : ModelOpt propre = refus accepté**, deux blocages fichier:ligne indépendants et documentés (`unified_export_hf.py:419-422` Qwen3MoeExperts non supporté transformers 5 ; `nvfp4_tensor.py:84` déport CPU/GPU casse le calcul NVFP4 sous transformers 4, modèle > 32 Gio VRAM). Cellule remplie par le checkpoint communautaire (1,16-1,30), non classée — scellé du protocole réfuté : le checkpoint porte ~12 % de la perte, les activations 4 bits ~3 %, Marlin bat CUTLASS en décodage.
 
-**Revendication Coder (mise à jour F clos, `poste7-objectif-b1-17-09`)** : acvram est **le plus rapide des moteurs classés à b=12** (997,8 t/s, 0,400 J — devant EXL3 855,7 t/s ; EXL3 garde l'avantage énergétique, 0,362 J) et reste classé et compétitif sur la qualité (1,0148 géo, 302025e). llama.cpp garde l'avance à b=1 (341,4 contre 287,1 t/s, +19%, réduit depuis 233,9 grâce au poste F) et au prefill (15 717 contre 9 913 j/s, +59%). Scellé b=1≥300 réfuté sous F1+F2 (287,1) ; cellule publiée sous ce régime nommé, dernière retentative F3a en cours (issue quelconque → F clos définitivement). vLLM/TRT-LLM ne sont pas comparables sur le privé (checkpoint non classé) — seule leur vitesse brute (2 000-2 100 t/s b=12) est acquise, hors classement qualité.
+**Revendication Coder (mise à jour 18/09, `verdict-coder-b12-defaut-18-09`, `poste7-reprise-ordre-18-09`)** : depuis le 18/09, acvram est **le plus rapide et le plus économe des moteurs classés à b=12** (1 198 t/s, 0,334 J — devant EXL3 855,7 t/s / 0,362 J sur les deux axes) et reste classé et compétitif sur la qualité (1,0148 géo, 302025e). llama.cpp garde l'avance à b=1 (341,4 contre 287,1 t/s, +19%) et au prefill (15 717 contre 9 913 j/s, +59%) — les deux dernières cellules classées perdues contre un seul moteur, chantier ouvert (profil `verdict-profil-prefill-b1-18-09`). vLLM/TRT-LLM ne sont pas comparables sur le privé (checkpoint non classé) — seule leur vitesse brute (2 000-2 100 t/s b=12) est acquise, hors classement qualité.
 
 ## Table GLM-4.7-Flash (poids GadflyII, sauf mention)
 
