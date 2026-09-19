@@ -98,7 +98,7 @@ def test_ppl_prend_le_chemin_du_moteur_sous_cublas(monkeypatch):
     assert K.tete_int8_entree_bf16(8) and not K.tete_int8_entree_bf16(2047)
     monkeypatch.setattr(K, "_PREFILL_INT8", "bf16")
     assert not K.tete_int8_entree_bf16(2047) and K.tete_int8_entree_bf16(K._INT8_GEMV_MAX)
-    # témoin cassant : au défaut, le même appel compte la déquant
+    # témoin cassant : sous bf16 (témoin), le même appel compte la déquant
     K.int8_matmul(x, t, gemv_threshold=80)
     assert K.CHEMINS_INT8["dequant"] == avant.get("dequant", 0) + 1
 
@@ -145,3 +145,57 @@ def test_c11_gemm_etroit_sur_la_vue_egale_la_reference_sur_carte():
     assert torch.equal(y, gemm_etroit.gemm_etroit(x, vrai, False)[:, :64])
     v2 = INT8Tensor(v.qweight, torch.roll(v.scales, 1, dims=0).contiguous(), v.zeros, 128, v.shape, v.format)
     assert (gemm_etroit.gemm_etroit(x, v2, False)[:, :64].float() - ref).norm() / ref.norm() > 1e-2
+
+
+CLASSES = ["/mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4",
+           "/mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-srcbf16-nvfp4-k48-calibA"]
+
+
+def _premier_int8(dossier):
+    """Le premier tenseur int8 du manifeste (une projection q/k/v/o promue),
+    chargé paresseusement depuis ses safetensors — un seul tenseur lu."""
+    import glob
+    import json
+    try:
+        man = json.load(open(os.path.join(dossier, "acvram_manifest.json")))
+    except OSError:
+        return None
+    for nom, e in man["tensors"].items():
+        if e.get("format") == "int8" and "self_attn" in nom and "norm" not in nom:
+            from safetensors import safe_open
+            sd = {}
+            for f in glob.glob(os.path.join(dossier, "*.safetensors")):
+                with safe_open(f, "pt") as fh:
+                    for k in e["keys"]:
+                        if k in fh.keys():
+                            sd[k.rsplit(".", 1)[-1]] = fh.get_tensor(k)
+            if len(sd) == 3:
+                return INT8Tensor(sd["qweight"], sd["scales"], sd["zeros"], e.get("group_size", 128), tuple(e["shape"]))
+    return None
+
+
+@pytest.mark.parametrize("dossier", CLASSES)
+def test_defaut_cublas_ne_change_pas_un_classe(dossier, monkeypatch):
+    """poste7-p2-au-defaut-19-09 : sous le défaut `cublas`, un converti CLASSÉ
+    (q_proj int8 g128 affine : Coder nvfp4, GLM calibA) ne prend jamais le
+    chemin cublas (CHEMINS_INT8['cublas'] inchangé) ni a8, et rend la même
+    sortie AU BIT que le témoin bf16 — sur le vrai tenseur du disque."""
+    import acvram.kernels as K
+    t = _premier_int8(dossier)
+    if t is None:
+        pytest.skip(f"converti absent ou sans q_proj int8 : {dossier}")
+    assert t.group_size == 128 and t.zeros.shape[1] > 1                # g128 affine : pas un i8c
+    x = (torch.randn(96, t.qweight.shape[1]) * 0.5).to(torch.bfloat16)
+    monkeypatch.setattr(K, "_PREFILL_INT8", "cublas")
+    avant = dict(K.CHEMINS_INT8)
+    y_c = K.int8_matmul(x, t, gemv_threshold=80)
+    assert K.CHEMINS_INT8["cublas"] == avant.get("cublas", 0)
+    assert K.CHEMINS_INT8["a8"] == avant.get("a8", 0)
+    assert K.CHEMINS_INT8["dequant"] == avant.get("dequant", 0) + 1
+    monkeypatch.setattr(K, "_PREFILL_INT8", "bf16")
+    y_b = K.int8_matmul(x, t, gemv_threshold=80)
+    assert torch.equal(y_c, y_b)
+    # et le régime par défaut, sans variable posée, est bien cublas
+    from acvram import regime
+    v = {z.env: z for z in regime.VARIABLES}["ACVRAM_PREFILL_INT8"]
+    assert v.defaut == "cublas"
