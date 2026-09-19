@@ -154,6 +154,27 @@ def _a8(x: torch.Tensor) -> torch.Tensor:
 # lancement `mla_prep_batch` au lieu d'une quinzaine (poste7-duel-verdict § 6.2,
 # marche « RoPE + cat ») ; =0 rejoue les opérations torch (témoin).
 _MLA_PREP_NOYAU = os.environ.get("ACVRAM_MLA_PREP_NOYAU", "1") == "1"
+# Sonde niveau 2 (REGLES § 6, 20/09) : sous ACVRAM_MLA_PREP_TEMOIN=1, chaque appel du chemin
+# de lot copie DANS LE GRAPHE (clones capturés vers des tampons persistants alloués à
+# l'échauffement, hors capture) les entrées de `mla_prep_batch`, ses sorties à la sortie du
+# noyau, et q_eff une seconde fois juste avant l'attention. Lus après un rejeu, ils disent
+# lequel des trois diverge du chemin torch recalculé sur les MÊMES entrées : les entrées
+# (ce que le graphe donne), le noyau (tables, k_b), ou le bassin (q_eff recouvert avant
+# l'attention). Diagnostic seulement : coût d'un clone par tenseur et par couche.
+_MLA_PREP_TEMOIN = os.environ.get("ACVRAM_MLA_PREP_TEMOIN") == "1"
+# Test (a) de la sonde (poste2 01:40) : les sorties du noyau (q_eff, k_new) sont des
+# `torch::empty` C++ — sous capture, dans le bassin du graphe. Sous
+# ACVRAM_MLA_PREP_TAMPONS=1 elles sont recopiées dans des tampons persistants (alloués
+# hors capture, un jeu par B) et c'est CES tampons que lisent mla_ecrit_latent et
+# l'attention : déviant effacé → le bassin recouvrait q_eff/k_new avant leur lecture ;
+# déviant intact → les arêtes du graphe entre prep et attention sont hors de cause.
+_MLA_PREP_TAMPONS = os.environ.get("ACVRAM_MLA_PREP_TAMPONS") == "1"
+_TEMOINS: list = []          # un dict par couche, dans l'ordre du premier appel
+
+
+def temoins_prep() -> list:
+    """Les tampons témoins (voir `_MLA_PREP_TEMOIN`), une entrée par couche MLA."""
+    return _TEMOINS
 # C15 (poste7-glm-decode-budget-c14-c15-19-09, chantier-c15-19-09) : glue torch
 # du décodage GLM à b=1 — copies et concaténations qui ne calculent rien,
 # retirées SANS changer un bit (mêmes opérations, mêmes arrondis) :
@@ -674,6 +695,33 @@ class MLAttention(nn.Module):
         if self.rope_emb is not None:
             self.rope_emb.reserver(max_pos, device, self.k_b.dtype)
 
+    def _tampons_prep(self, q_eff: torch.Tensor, k_new: torch.Tensor) -> tuple:
+        """Copie les sorties du noyau dans des tampons persistants (un jeu par B),
+        alloués hors capture ; rend les tampons (voir `_MLA_PREP_TAMPONS`)."""
+        jeux = self.__dict__.setdefault("_tampons_prep_jeux", {})
+        B = q_eff.shape[0]
+        if B not in jeux:
+            _refuser_en_capture(f"tampons prep B={B}")
+            jeux[B] = (torch.empty_like(q_eff), torch.empty_like(k_new))
+        qp, kp = jeux[B]
+        qp.copy_(q_eff); kp.copy_(k_new)
+        return qp, kp
+
+    def _temoin_prep(self, tenseurs: dict) -> None:
+        """Copie `tenseurs` dans les tampons témoins de cette couche (alloués au premier
+        appel, hors capture ; sous capture le clone est enregistré dans le graphe)."""
+        t = self.__dict__.get("_temoin")
+        if t is None:
+            t = self.__dict__["_temoin"] = {"couche": len(_TEMOINS), "appels": 0}
+            _TEMOINS.append(t)
+        for nom, x in tenseurs.items():
+            if nom not in t:
+                _refuser_en_capture(f"témoin {nom}")
+                t[nom] = torch.empty_like(x)
+            t[nom].copy_(x)
+        if "q" in tenseurs:
+            t["appels"] += 1
+
     def _k_b_c(self) -> torch.Tensor:
         """``k_b`` [nh, rank, nope] contigu, une fois (le noyau de préparation le lit tel quel)."""
         kb = self.__dict__.get("_k_b_c_cache")
@@ -715,9 +763,14 @@ class MLAttention(nn.Module):
                 cos32, sin32 = self.rope_emb.tables32(bucket + 1, x.device)
             else:
                 cos32 = sin32 = None
-            q_eff, k_new = ext.mla_prep_batch(q.contiguous(), kvp.contiguous(), lens, cos32, sin32,
+            q_c, kvp_c = q.contiguous(), kvp.contiguous()
+            q_eff, k_new = ext.mla_prep_batch(q_c, kvp_c, lens, cos32, sin32,
                                               self._k_b_c(), self.kv_a_norm, self.nope, self.rope,
                                               self.rank, self.eps)          # fp32 [B, nh, W], bf16 [B, W]
+            if _MLA_PREP_TEMOIN:
+                self._temoin_prep({"q": q_c, "kvp": kvp_c, "lens": lens, "q_eff": q_eff, "k_new": k_new})
+            if _MLA_PREP_TAMPONS:
+                q_eff, k_new = self._tampons_prep(q_eff, k_new)
         else:
             q_nope, q_pe = q.split([self.nope, self.rope], dim=-1)
             if self.rope_emb is not None:
@@ -736,6 +789,8 @@ class MLAttention(nn.Module):
         else:
             for i, st in enumerate(sts):
                 self._ecrit_ligne(st, k_new[i:i + 1])
+        if _MLA_PREP_TEMOIN and "_temoin" in self.__dict__:
+            self._temoin_prep({"q_eff_avant_attn": q_eff, "lens_avant_attn": lens})
         o_lat = _mla_decode_batch(ext, q_eff.contiguous(), cache_ptrs, lens,
                                   scores_batch, bucket, self.rank, self.scale, fp8)  # [B, nh, rank]
         with _tf32_coeur(decode=True):
