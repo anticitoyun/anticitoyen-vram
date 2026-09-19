@@ -328,6 +328,23 @@ def _repin_echanger_reel(m, sortant: int, entrant: int) -> None:
             verifier_table(tbl)
 
 
+def _couverture_experts(model) -> str:
+    """Disposition des experts par couche MoE : « marlin » si toutes, « naturel »
+    si aucune, sinon « marlin(N/M) » — N couches sur la disposition unique, M
+    couches MoE (les autres refusées, pile naturelle gardée : gate/up distincts)."""
+    from .model import MoEBlock
+    blocs = [m for m in model.modules() if isinstance(m, MoEBlock)]
+    if not blocs:
+        return "aucun"
+    dispositions = [getattr(m, "experts_layout", None) or "naturel" for m in blocs]
+    n_marlin = sum(1 for d in dispositions if d == "marlin")
+    if n_marlin == len(blocs):
+        return "marlin"
+    if n_marlin == 0:
+        return dispositions[0] if len(set(dispositions)) == 1 else "naturel"
+    return f"marlin({n_marlin}/{len(blocs)})"
+
+
 class Engine:
     """Détient le modèle, l'allocateur de blocs et les files de requêtes."""
 
@@ -583,8 +600,9 @@ class Engine:
             "prefill_int8": kernels.prefill_int8_regime(),
             # P1 disposition unique : « marlin » (pile Marlin seule, préfill et
             # décodage, la pile NVFP4 rendue) | « naturel » (pile NVFP4 seule)
-            "experts_layout": next((getattr(m, "experts_layout") for m in self.model.modules()
-                                    if isinstance(m, MoEBlock) and getattr(m, "experts_layout", None)), "naturel"),
+            # couverture PAR COUCHE (poste7 19/09, budget GLM : 33 couches Marlin + 13 refusées
+            # « distinctes » sur la pile naturelle — « experts_layout=marlin » seul mentait)
+            "experts_layout": _couverture_experts(self.model),
             # linéaires INT8 du décodage : triton≥b|cuda (poste C, bascule mesurée)
             "dense": kernels.narrow_regime(),
             "gdn": _gdn_regime(),
