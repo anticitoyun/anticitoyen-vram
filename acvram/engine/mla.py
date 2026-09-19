@@ -32,6 +32,22 @@ MLA_BUCKET = int(os.environ.get("ACVRAM_MLA_BUCKET", "128"))
 # fois pour les H têtes au lieu de 2 × H fois (mla_scores + mla_reduce) ;
 # =0 rejoue les deux noyaux d'avant (témoin d'équivalence).
 _MLA_UNE_PASSE = os.environ.get("ACVRAM_MLA_UNE_PASSE", "1") == "1"
+# ACVRAM_MLA_A8=off|e4m3|int8 : porte qualité FP8-MLA (poste7-cloture-23h59-19-09) — les
+# ENTRÉES de q_b, kv_a et o (les trois projections que garde bf16 la règle « jamais NVFP4
+# sur MLA », REGLES § 9) arrondies en E4M3 bloc 16 (ou int8 par jeton, témoin) avant la
+# projection, torch pur ; aucun noyau : la perte qu'un GEMM FP8 imposerait, pas sa vitesse.
+_MLA_A8 = os.environ.get("ACVRAM_MLA_A8", "off")
+if _MLA_A8 not in ("off", "e4m3", "int8"):
+    raise ValueError(f"ACVRAM_MLA_A8={_MLA_A8!r} : off | e4m3 | int8")
+
+
+def _a8(x: torch.Tensor) -> torch.Tensor:
+    """Entrée d'une projection MLA sous la porte : identité au défaut."""
+    if _MLA_A8 == "off":
+        return x
+    from ..quant.fakequant_activation import fake_quantize_a8
+    forme = x.shape
+    return fake_quantize_a8(x.reshape(-1, forme[-1]), _MLA_A8).reshape(forme)
 # Préparation du lot (einsum k_b, RoPE, norme kv_a, cat, conversion fp32) en un
 # lancement `mla_prep_batch` au lieu d'une quinzaine (poste7-duel-verdict § 6.2,
 # marche « RoPE + cat ») ; =0 rejoue les opérations torch (témoin).
@@ -129,6 +145,7 @@ class MLAttention(nn.Module):
         # DeepSeek-V2/GLM : q en bas rang (q_b(norm(q_a(x)))) et RoPE sur la
         # partie pe de q et de k (Kimi : ni l'un ni l'autre)
         self.q_a_proj, self.q_b_proj = q_a_proj, q_b_proj
+
         self.q_a_norm = nn.Parameter(q_a_norm, requires_grad=False) if q_a_norm is not None else None
         self.rope_emb = rope
         self.kv_a_norm = nn.Parameter(kv_a_norm, requires_grad=False)
@@ -142,6 +159,18 @@ class MLAttention(nn.Module):
         self.q_kv = None            # q_proj et kv_a_proj empilées
         self.qa_kv = None           # q_a_proj et kv_a_proj empilées (bas rang)
         self.q_a_taille = 0
+
+
+    # les trois projections sous la porte FP8-MLA (_MLA_A8) : les modules gardent
+    # leur nom dans l'arbre (exil, chargeur), seul l'appel passe par _a8
+    def _o(self, y):
+        return self.o_proj(_a8(y))
+
+    def _kv_a(self, x):
+        return self.kv_a_proj(_a8(x))
+
+    def _q_b(self, x):
+        return self.q_b_proj(_a8(x))
 
     def _proj_entree(self, x: torch.Tensor):
         """Première projection de q et latent kv : une GEMV quand les deux
@@ -158,7 +187,7 @@ class MLAttention(nn.Module):
             nq = self.nh * (self.nope + self.rope)
             return g[:, :nq], g[:, nq:]
         prem = self.q_proj(x) if self.q_a_proj is None else self.q_a_proj(x)
-        return prem, self.kv_a_proj(x)
+        return prem, self._kv_a(x)
 
     def _norme(self, t: torch.Tensor, poids: torch.Tensor) -> torch.Tensor:
         """RMSNorm : un lancement quand le noyau est là, sept sinon.
@@ -182,7 +211,7 @@ class MLAttention(nn.Module):
         """De la sortie de la première projection au q complet."""
         if self.q_a_proj is None:
             return prem
-        return self.q_b_proj(self._norme(prem, self.q_a_norm))
+        return self._q_b(self._norme(prem, self.q_a_norm))
 
     def _q(self, x: torch.Tensor) -> torch.Tensor:
         return self._q_depuis(self._proj_entree(x)[0])
@@ -272,7 +301,7 @@ class MLAttention(nn.Module):
                           f"o_lat_norm={o_lat.norm().item():.4e}", flush=True)
                 y = torch.einsum('hvr,hr->hv', self.v_b.to(torch.float32), o_lat)
                 y = y.reshape(t, self.nh * self.dv).to(x.dtype)
-                return self.o_proj(y), cache
+                return self._o(y), cache
             pos = torch.arange(bucket, device=x.device)
             masque = pos > (total - 1)
         else:
@@ -293,7 +322,7 @@ class MLAttention(nn.Module):
             o_lat = torch.cat(morceaux)
             y = torch.einsum('hvr,thr->thv', self.v_b.to(torch.float32), o_lat)
             y = y.reshape(t, self.nh * self.dv).to(x.dtype)
-            return self.o_proj(y), cache
+            return self._o(y), cache
         scores = torch.einsum('thr,sr->ths', q_eff.to(torch.float32),
                               C.to(torch.float32)) * self.scale
         scores = scores.masked_fill(masque, float('-inf'))
@@ -303,7 +332,7 @@ class MLAttention(nn.Module):
                              C[:, :self.rank].to(torch.float32))
         y = torch.einsum('hvr,thr->thv', self.v_b.to(torch.float32), o_lat)
         y = y.reshape(t, self.nh * self.dv).to(x.dtype)
-        return self.o_proj(y), cache
+        return self._o(y), cache
 
     def fuse_projections(self) -> bool:
         """Une GEMV au lieu de deux à l'entrée de l'attention.
@@ -411,7 +440,7 @@ class MLAttention(nn.Module):
     def _sortie_decode(self, x: torch.Tensor, st: dict, o_lat: torch.Tensor) -> torch.Tensor:
         y = torch.einsum('hvr,hr->hv', self.v_b.to(torch.float32), o_lat)
         st["len"].add_(1)
-        return self.o_proj(y.reshape(1, self.nh * self.dv).to(x.dtype))
+        return self._o(y.reshape(1, self.nh * self.dv).to(x.dtype))
 
     def decode_static_batch(self, x: torch.Tensor, sts: list, bucket: int,
                             cache_ptrs: torch.Tensor, scores_batch: torch.Tensor
@@ -495,7 +524,7 @@ class MLAttention(nn.Module):
         if not un_lancement:
             for st in sts:
                 st["len"].add_(1)
-        return self.o_proj(y.reshape(B, self.nh * self.dv).to(x.dtype))
+        return self._o(y.reshape(B, self.nh * self.dv).to(x.dtype))
 
     def decode_static(self, x: torch.Tensor, st: dict, bucket: int
                       ) -> torch.Tensor:
@@ -520,7 +549,7 @@ class MLAttention(nn.Module):
                              C[:, :self.rank].to(torch.float32))
         y = torch.einsum('hvr,thr->thv', self.v_b.to(torch.float32), o_lat)
         st["len"].add_(1)
-        return self.o_proj(y.reshape(1, self.nh * self.dv).to(x.dtype))
+        return self._o(y.reshape(1, self.nh * self.dv).to(x.dtype))
 
     # -- chemin eager, lot de séquences hors créneau -------------------------
     def peut_batcher_decode(self, x: torch.Tensor) -> bool:
@@ -580,4 +609,4 @@ class MLAttention(nn.Module):
         o_lat_batch = torch.stack(o_lats, dim=0)              # [b, nh, rank]
         y = torch.einsum('hvr,bhr->bhv', self.v_b.to(torch.float32), o_lat_batch)
         y = y.reshape(b, self.nh * self.dv).to(x.dtype)
-        return self.o_proj(y), nouvelles_caches
+        return self._o(y), nouvelles_caches

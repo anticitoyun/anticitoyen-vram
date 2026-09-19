@@ -1097,6 +1097,14 @@ class MoEBlock(nn.Module):
         w = kernels.nvfp4_dequant(plat, torch.bfloat16,
                                   gscale_rows=gs.reshape(-1).to(torch.float32),
                                   rows_per_group=M).view(E, M, k)
+        if _PREFILL_W8R == "1":
+            # porte W8r (poste7-poursuite-chantiers-19-09) : les experts que ce chemin
+            # déquantifie en bf16 sont re-arrondis en int8 par ligne — la perte d'un
+            # format d'expert int8 par ligne, mesurée sans le stocker (chemins
+            # grouped_mm/bmm seulement : ils sont les seuls à lire cette pile bf16)
+            from ..quant.fakequant_activation import fake_quantize_w8_row
+            w = fake_quantize_w8_row(w)
+            self._chemin('w8r')
         return w[:, :m, :]
 
     @staticmethod
@@ -2016,6 +2024,12 @@ if _PREFILL_A4 not in ("off", "gateup", "both"):
 # défaut : l'arrondi de `quantifier_a8`, celui des chemins a8/cublas) ou en E4M3 bloc 16
 # (=e4m3, témoin : le format d'activation de la MMA mxf8f6f4). Aucun noyau : la perte, pas la
 # vitesse. Exclusive de PREFILL_A4 (deux arrondis empilés ne mesureraient rien).
+# ACVRAM_PREFILL_W8R=1 : porte qualité W8r — les piles d'experts déquantifiées par
+# `_pile_bf16` (chemins PREFILL_GROUPED=grouped_mm|bmm, pile naturelle donc
+# GEMV_LAYOUT=naturel) re-arrondies en int8 symétrique par ligne ; aucun noyau.
+_PREFILL_W8R = os.environ.get("ACVRAM_PREFILL_W8R", "0")
+if _PREFILL_W8R not in ("0", "1"):
+    raise ValueError(f"ACVRAM_PREFILL_W8R={_PREFILL_W8R!r} : 0 | 1")
 _PREFILL_A8 = os.environ.get("ACVRAM_PREFILL_A8", "off")
 _PREFILL_A8_FMT = os.environ.get("ACVRAM_PREFILL_A8_FMT", "int8")
 if _PREFILL_A8 not in ("off", "gateup", "both"):
@@ -2031,18 +2045,11 @@ _E2M1_MILIEUX = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
 
 
 def fausse_quant_a8(x: torch.Tensor, fmt: str = "int8") -> torch.Tensor:
-    """x [G, K] → x arrondi comme le ferait un GEMM W4A8 : `int8` = par jeton,
-    échelle amax/127 et arrondi à demi éloigné de zéro (`quantifier_a8_torch`,
-    au bit du noyau `_quant_a8_kernel`) ; `e4m3` = E4M3 par bloc de 16
-    (`fake_quantize_e4m3_activation`). Sortie dans le dtype de x. Torch pur."""
-    if fmt == "e4m3":
-        from ..quant.fakequant_activation import fake_quantize_e4m3_activation
-        return fake_quantize_e4m3_activation(x)
-    if fmt != "int8":
-        raise ValueError(f"fausse_quant_a8 : format {fmt!r}, attendu int8 | e4m3")
-    from ..kernels.gemm_w8a8 import quantifier_a8_torch
-    a, s = quantifier_a8_torch(x)
-    return (a.to(torch.float32) * s[:, None]).view(x.shape).to(x.dtype)
+    """x [G, K] → x arrondi comme le ferait un GEMM W4A8 (`int8` par jeton au
+    bit du noyau a8, ou `e4m3` bloc 16) — `quant.fakequant_activation.
+    fake_quantize_a8`, partagée avec la porte FP8-MLA (engine/mla.py)."""
+    from ..quant.fakequant_activation import fake_quantize_a8
+    return fake_quantize_a8(x, fmt)
 
 
 def fausse_quant_nvfp4(x: torch.Tensor) -> torch.Tensor:

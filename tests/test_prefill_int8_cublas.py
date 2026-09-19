@@ -83,8 +83,8 @@ def test_gemm_etroit_refuse_le_groupe_par_canal():
 def test_ppl_prend_le_chemin_du_moteur_sous_cublas(monkeypatch):
     """19/09 (verdict-p2-moteur) : sous cublas, un poids i8c à M > seuil GEMV
     doit compter « cublas » et jamais « dequant » (compteur CHEMINS_INT8) ;
-    et la tête INT8 reçoit x en bf16 au-delà du seuil GEMV sous a8/cublas
-    seulement — jamais au défaut bf16 (logits au bit conservés)."""
+    et la tête INT8 ne reçoit x en bf16 que sous le seuil GEMV, sous tout
+    régime (au-delà : conversion fp32 + déquant, jamais W8A8 à 2 048 lignes)."""
     import acvram.kernels as K
     w, t = _poids(N=64, K=2048)
     x = (torch.randn(96, 2048) * 0.5).to(torch.bfloat16)
@@ -93,7 +93,8 @@ def test_ppl_prend_le_chemin_du_moteur_sous_cublas(monkeypatch):
     K.int8_matmul(x, t, gemv_threshold=80)
     assert K.CHEMINS_INT8["cublas"] == avant.get("cublas", 0) + 1
     assert K.CHEMINS_INT8["dequant"] == avant.get("dequant", 0)
-    assert K.tete_int8_entree_bf16(2047) and K.tete_int8_entree_bf16(8)
+    # tête : jamais au-delà du seuil GEMV, quel que soit le régime (poste7-p2-ppl-instrument-file-7h-19-09)
+    assert K.tete_int8_entree_bf16(8) and not K.tete_int8_entree_bf16(2047)
     monkeypatch.setattr(K, "_PREFILL_INT8", "bf16")
     assert not K.tete_int8_entree_bf16(2047) and K.tete_int8_entree_bf16(K._INT8_GEMV_MAX)
     # témoin cassant : au défaut, le même appel compte la déquant
