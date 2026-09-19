@@ -122,6 +122,9 @@ _MLA_PREP_NOYAU = os.environ.get("ACVRAM_MLA_PREP_NOYAU", "1") == "1"
 #      tables cos/sin demi indexées en un lancement, et dans model.py le
 #      résidu différé des couches MLA (add + rmsnorm → add_norm, deux
 #      lancements de moins par couche) ; 6 lancements de moins par couche ;
+#      côté MoE (model.py `_forward_grouped`) : tok int64 servi d'avance, eid
+#      converti une fois, x[tok] rassemblé une fois, tok_g = seq — −3 par
+#      couche Marlin, −6 par couche à tables AWQ distinctes, des index (au bit) ;
 #  2 = en plus, b=1 passe par decode_static_batch_complet (mla_prep_batch,
 #      la numérique servie à b=12 : q_abs à ≤ 1 ulp bf16 de cuBLAS, PAS au bit
 #      avec decode_static) ; non vérifié à sec (noyau CUDA) ;

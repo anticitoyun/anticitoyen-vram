@@ -181,7 +181,7 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MLA_UNE_PASSE", "1", ("acvram.engine.mla", "_MLA_UNE_PASSE"), "0"),
     Variable("MLA_PREP_NOYAU", "1", ("acvram.engine.mla", "_MLA_PREP_NOYAU"), "0"),
     Variable("MLA_GLUE", "0", ("acvram.engine.mla", "_MLA_GLUE"), "0",
-             "C15 (chantier-c15-19-09) : 1 = glue torch du décodage MLA b=1 retirée au bit (v_b fp32 une fois, cat kvp, stack RoPE, demi-tables cos/sin, résidu différé add_norm des couches MLA : −6 lancements/couche) | 2 = en plus b=1 par decode_static_batch_complet (mla_prep_batch, numérique du lot, ≤ 1 ulp) | 0 = témoin"),
+             "C15 (chantier-c15-19-09) : 1 = glue torch du décodage MLA b=1 retirée au bit (v_b fp32 une fois, cat kvp, stack RoPE, demi-tables cos/sin, résidu différé add_norm des couches MLA : −6 lancements/couche ; MoE : tok int64 servi, eid converti une fois, x[tok] une fois, tok_g = seq : −3 Marlin / −6 distincte) | 2 = en plus b=1 par decode_static_batch_complet (mla_prep_batch, numérique du lot, ≤ 1 ulp) | 0 = témoin"),
     Variable("MLA_CORE", "tf32", ("acvram.engine.mla", "_MLA_CORE"), "tf32",
              "C13 (poste7-c13a-defaut-19-09 § 1 + addendum) : précision des deux premiers produits du cœur d'attention MLA au PRÉFILL (scores, o_lat), softmax et noyau mla_1p en fp32 inchangés — tf32 DÉFAUT (C13-a tenu : 7 191 j/s, ΔPPL géo +0,00066) | fp32 (référence de qualité) | bf16 (C13-b : entrées bf16, acc fp32 ; scellé contre fp32 : prefill GLM ≥ 9 000 j/s ET ΔPPL géo ≤ +0,002 → défaut)"),
     Variable("MLA_CORE_VB", "0", ("acvram.engine.mla", "_MLA_CORE_VB"), "0",

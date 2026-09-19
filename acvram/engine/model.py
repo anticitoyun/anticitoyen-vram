@@ -1727,17 +1727,38 @@ class MoEBlock(nn.Module):
             # rotation de Hadamard (poids tournés) : x·H par bloc, la même
             # arithmétique que ChannelScaler.apply — une fois par jeton
             x = fwht_activations(x.to(torch.bfloat16), hd_x).to(x.dtype)
+        glue = _mla_glue() >= 1
+        eid64 = None                                   # C15 : eid int64 une fois par couche (glue)
         if awq.get("gate_proj") is not None or distinct:
             # échelle AWQ par expert : la ligne (jeton, expert) est divisée par
             # s[e] avant les projections, comme ChannelScaler.apply en boucle
-            def _ligne(table):
-                xe = x[tok.long()].to(torch.bfloat16)
-                if table is not None:
-                    xe = xe / table[eid.long(), :x.shape[1]]
-                return xe.to(x.dtype)
-            x_g = _ligne(awq.get("gate_proj"))
-            x_u = _ligne(awq.get("up_proj")) if distinct else x_g
-            tok_g = torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
+            if glue:
+                # C15 (chantier-c15-19-09 § Reste) : les mêmes gathers et
+                # divisions, mais `tok` int64 servi d'avance (index_jetons),
+                # `eid` converti UNE fois par couche au lieu de trois, la ligne
+                # x[tok] rassemblée une fois pour gate et up (entrées
+                # distinctes), et `tok_g` = `seq` déjà réservé (même arange
+                # int32) : −3 lancements par couche Marlin, −6 par couche à
+                # tables distinctes, aucun bit changé (des index).
+                eid64 = eid.long()
+                tok64 = _rp.index_jetons_long(t, self.top_k, x.device) if _seq is not None else tok.long()
+                xe = x[tok64].to(torch.bfloat16)
+                tg, tu = awq.get("gate_proj"), awq.get("up_proj")
+                x_g = (xe / tg[eid64, :x.shape[1]] if tg is not None else xe).to(x.dtype)
+                if distinct:
+                    x_u = (xe / tu[eid64, :x.shape[1]] if tu is not None else xe).to(x.dtype)
+                else:
+                    x_u = x_g
+                tok_g = _seq if _seq is not None else torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
+            else:
+                def _ligne(table):
+                    xe = x[tok.long()].to(torch.bfloat16)
+                    if table is not None:
+                        xe = xe / table[eid.long(), :x.shape[1]]
+                    return xe.to(x.dtype)
+                x_g = _ligne(awq.get("gate_proj"))
+                x_u = _ligne(awq.get("up_proj")) if distinct else x_g
+                tok_g = torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
         else:
             x_g, x_u, tok_g = x, x, tok
         # v2 : paires triées par expert (argsort stable : déterministe, sous
@@ -1817,7 +1838,9 @@ class MoEBlock(nn.Module):
         if hd_d:
             act = fwht_activations(act.to(torch.bfloat16), hd_d).to(act.dtype)
         if awq.get("down_proj") is not None:
-            act = (act.to(torch.bfloat16) / awq["down_proj"][eid.long(), :act.shape[1]]).to(act.dtype)
+            if eid64 is None:
+                eid64 = eid.long()
+            act = (act.to(torch.bfloat16) / awq["down_proj"][eid64, :act.shape[1]]).to(act.dtype)
         if marlin is not None and self.dernier_chemin == "gemv_marlin" and ext is not None \
                 and hasattr(ext, "nvfp4_gemv_marlin"):
             md = marlin["down_proj"]
