@@ -142,7 +142,7 @@ if [ ! -x "$VENV/bin/acvram" ]; then
         CAPS=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | tr -d ' ')
         if echo "$CAPS" | grep -qE '^(1[0-9])\.'; then
             INDEX="https://download.pytorch.org/whl/cu130"
-            pip install --quiet --only-binary=:all: 'cuda-toolkit[nvcc,cccl]' || true
+            pip install --quiet --only-binary=:all: 'cuda-toolkit[nvcc,cccl]==13.0.*' || true
         else
             INDEX="https://download.pytorch.org/whl/cu124"
         fi

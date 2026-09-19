@@ -50,13 +50,16 @@ pip install --quiet --index-url "$INDEX" torch
 
 # cccl : sans lui le nvcc des roues pip n a pas nv/target (cuda_fp16.h:4492
 # fatal error, 19/09, doctor « repli noyaux de reference » sur le .deb 0.6.13) ;
-# nvidia-cuda-cccl>=13,<14 verifie par poste7 dans le venv du paquet.
+# nvidia-cuda-cccl>=13,<14 verifie par poste7 dans le venv du paquet. EPINGLE 13.0.* :
+# sans borne, pip prend nvcc 13.4 contre le runtime 13.0 de torch cu130 et cccl
+# refuse (« CUDA compiler and CUDA toolkit headers are incompatible », doctor
+# 19/09 18 h 05 sur la 3080 Ti) ; 13.0.88 + 13.0.85 compilent sm_86 et sm_120.
 # Le nvcc de la distribution est souvent trop ancien pour emettre du sm_120
 # (Mint 22.3 livre CUDA 12.0). On prend celui des roues pip, que
 # acvram/kernels/__init__.py sait trouver tout seul.
 if [ "${NVCC_WHEEL:-0}" = 1 ]; then
     say "installation de nvcc (roues cuda-toolkit)"
-    pip install --quiet --only-binary=:all: 'cuda-toolkit[nvcc,cccl]' \
+    pip install --quiet --only-binary=:all: 'cuda-toolkit[nvcc,cccl]==13.0.*' \
         || warn "nvcc non installe ; les noyaux fusionnes retomberont sur la reference"
 fi
 

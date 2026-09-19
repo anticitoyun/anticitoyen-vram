@@ -160,9 +160,26 @@ class GraphRunner:
 
     """Capture paresseuse et rejeu des pas de décodage purs."""
 
-    def __init__(self, model, max_model_len: int) -> None:
+    @staticmethod
+    def plafond_hybride(max_batch_size: Optional[int], env: Optional[str] = None) -> int:
+        """Plafond effectif des créneaux hybrides (GDN/KDA/Mamba2/MLA) d'un
+        graphe : ACVRAM_HYBRID_SLOTS s'il est posé, sinon le --max-batch du
+        moteur (au moins 4). Le défaut fixe à 4 faisait tomber GLM (MLA compte
+        comme hybride) en eager dès b=5 sous `acvram serve` — b=12 à 155 t/s
+        quand `certifie`, qui pose HYBRID_SLOTS=12 avant l'import, rendait 568
+        (poste2, G1 19/09) : un régime par défaut qui masquait le régime
+        mesuré. Le plafond dimensionne `statics` (un tampon d'états par
+        créneau) : il suit la taille de lot servie, pas une constante."""
+        if env is None:
+            env = os.environ.get("ACVRAM_HYBRID_SLOTS", "")
+        if env:
+            return max(1, int(env))
+        return max(4, int(max_batch_size or 0))
+
+    def __init__(self, model, max_model_len: int, max_batch_size: Optional[int] = None) -> None:
         self.model = model
         self.max_model_len = max_model_len
+        self.max_slots = self.plafond_hybride(max_batch_size)
         self.device: Optional[torch.device] = None
         self.graphs: dict[tuple[int, int], dict] = {}
         # pipeline (runner, ACVRAM_PIPELINE=1) : lot préparé en attente de
