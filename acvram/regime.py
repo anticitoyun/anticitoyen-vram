@@ -133,6 +133,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MLA_BUCKET", "128", ("acvram.engine.mla", "MLA_BUCKET")),
     Variable("MLA_UNE_PASSE", "1", ("acvram.engine.mla", "_MLA_UNE_PASSE"), "0"),
     Variable("MLA_PREP_NOYAU", "1", ("acvram.engine.mla", "_MLA_PREP_NOYAU"), "0"),
+    Variable("MLA_TF32", "0", ("acvram.engine.mla", "_MLA_TF32"), "0",
+             "C13-a (poste7-c7-clos-c13-attention-glm-19-09) : 1 = TF32 à portée limitée autour des deux einsum du cœur d'attention MLA (scores, o_lat ; entrées 10 bits de mantisse, acc fp32) ; 0 défaut = fp32 plein jusqu'au verdict (PPL ± 0,001, prefill GLM ≥ 6 200)"),
     Variable("MLA_A8", "off", ("acvram.engine.mla", "_MLA_A8"), None,
              "porte qualité FP8-MLA (poste7-cloture-23h59-19-09) : fausse quantification torch de l'ENTRÉE de q_b, kv_a et o — off | e4m3 (E4M3 bloc 16, format de la MMA mxf8f6f4) | int8 (par jeton, témoin) ; aucun noyau"),
     Variable("MLA_LATENT_FP8", "0", ("acvram.engine.mla", "_MLA_LATENT_FP8"), "0"),
