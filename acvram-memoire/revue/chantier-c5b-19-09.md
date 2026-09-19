@@ -16,3 +16,14 @@ Prédiction : le +0,5 % de PPL du KV int8 à 8 k (C5 faux tenu tel quel, int8 re
 * **Fenêtre carte** (après la fiche, ≥ 1 h) : (1) erreur relative K réel par jeton / par canal (à sec possible : 40 s, à faire AVANT tout code) ; (2) noyau + test noyau ; (3) `ppl-decode-kv` 3 × 2 048 contre bf16 (le juge de C5) ; (4) pas b=12 ABAB, capture 5/5.
 
 Non vérifié : tout chiffre de temps ; que l'erreur soit dans K (la sonde (1) le dit avant toute ligne) ; l'effet du puits seul.
+
+## Porte C5-b (poste7 `poste7-fiches-c5b-c13c-c14b-20-09` : erreur de K par canal ≤ 0,5 × par jeton → ouvert ; sinon fermé sans code) — mesurée à sec, **OUVERTE : ×0,245**
+Instrument : `donnees-c5b-19-09/porte.py` — Coder-30B sur processeur, préfill des 512 premiers jetons de la tranche 1 (sha256 `1316df41…`), sonde sur `KVCache.write` (K et V APRÈS RoPE, formes [512, 4 têtes kv, 128]), couches {0, 24, 47} ; quantification int8 torch : par jeton = échelle amax/127 par (jeton, tête) (ce que `kv_write_int8_kernel` fait) ; par canal = échelle amax/127 par (bloc de 16 jetons, tête, canal) (C5-b (a)) ; erreur relative Frobenius.
+
+| couche | K par jeton | **K par canal (16)** | rapport | V par jeton | V par canal (16) | amax/rms canal K (max) |
+|---|---|---|---|---|---|---|
+| 0 | 1,43 % | **0,35 %** | ×0,25 | 1,14 % | 0,48 % | 6,4 |
+| 24 | 1,60 % | **0,37 %** | ×0,23 | 0,71 % | 0,47 % | 6,9 |
+| 47 | 1,25 % | **0,36 %** | ×0,29 | 0,86 % | 0,49 % | 5,2 |
+
+Médiane du rapport **0,245 ≤ 0,5 : porte ouverte** — le coût int8 est bien dans les canaux de K (leçon lm4/KIVI confirmée sur les K réels : amax/rms par canal 5-7). V gagne aussi (×0,4-0,7) : à noter, hors de la forme (a) qui garde V par jeton (le noyau lit V après le softmax, l'échelle par canal de V se replie moins simplement) — une forme (a') V par canal aussi se chiffre si (a) tient le seuil de justesse. Ce que la porte ne dit pas : la PPL (erreur de K ÷ 4 ≠ ΔPPL ÷ 4 : le juge reste `ppl-decode-kv` 3 × 2 048 contre bf16 ≤ +0,002). Prochain : code (noyau `kv_write` par bloc + `paged_attn_partial` avec `q ⊙ s_bloc`, tampon bf16 du bloc courant), après C15/C14-c/C1 selon l'ordre.
