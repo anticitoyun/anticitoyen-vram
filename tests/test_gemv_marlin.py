@@ -217,3 +217,36 @@ def test_le_bloc_moe_decode_prend_gemv_marlin(monkeypatch):
     yu = bloc._forward_grouped(x, topw, topi.to(torch.int32))
     attendre_chemin(bloc, "gemv_marlin", avant=n_m)
     assert torch.equal(yu, yb)
+
+
+@CARTE
+@pytest.mark.parametrize("b,mode", [(1, "aleatoire"), (2, "aleatoire"), (4, "aleatoire"), (2, "fantomes")])
+def test_b_splitk_par_lot(b, mode):
+    """Split-K par lot (poste b=1, verdict-profil-b1-b-18-09) : gate/up Coder
+    (K=2048, N=768, top_k=8) à b=1 → 96 blocs → S=4 ; b=2 → S=2 ; b=4 → S=1
+    (chemin d'origine). Chaque S passe le juge fp32 par ligne, les fantômes
+    rendent zéro sous S>1, et deux appels sont identiques au bit (réduction
+    du dernier bloc dans l'ordre z fixe)."""
+    ext = get_extension()
+    E, k, K, N = 16, 8, 2048, 768
+    qg, bg, gsg, wg32 = _pile(E, N, K, 31); qu, bu, gsu, wu32 = _pile(E, N, K, 32)
+    mg, mu = _marlin(qg, bg, gsg), _marlin(qu, bu, gsu)
+    eid, tok = _routage(b + (2 if mode == "fantomes" else 0), k, E, 7, mode)
+    x = (torch.randn(int(tok.max()) + 1, K, device=DEV) * 0.5).to(torch.bfloat16)
+    y = ext.nvfp4_gemv_marlin_gateup(*mg, *mu, eid, tok, x, K, N, 0)
+    f = torch.nn.functional.silu
+    ref = torch.stack([f(x[t].float() @ wg32[e].T) * (x[t].float() @ wu32[e].T) if e >= 0
+                       else torch.zeros(N, device=DEV) for e, t in zip(eid.tolist(), tok.tolist())])
+    if mode == "fantomes":
+        assert torch.equal(y[-2 * k:], torch.zeros(2 * k, N, device=DEV))
+    assert _hors_par_ligne(y, ref) <= TOL_HORS * ref.numel()
+    assert torch.equal(y, ext.nvfp4_gemv_marlin_gateup(*mg, *mu, eid, tok, x, K, N, 0))
+    # down (K=768, N=2048) au même lot : S=2 à b=1 (256 blocs), S=1 dès b=2
+    qd, bd, gsd, wd32 = _pile(E, K, N, 33)
+    md = _marlin(qd, bd, gsd)
+    xd = (torch.randn(int(tok.max()) + 1, N, device=DEV) * 0.5).to(torch.bfloat16)
+    yd = ext.nvfp4_gemv_marlin(*md, eid, tok, xd, N, K)
+    refd = torch.stack([xd[t].float() @ wd32[e].T if e >= 0 else torch.zeros(K, device=DEV)
+                        for e, t in zip(eid.tolist(), tok.tolist())])
+    assert _hors_par_ligne(yd, refd) <= TOL_HORS * refd.numel()
+    assert torch.equal(yd, ext.nvfp4_gemv_marlin(*md, eid, tok, xd, N, K))
