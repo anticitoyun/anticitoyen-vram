@@ -69,28 +69,65 @@ def test_tf32_emule_borne_a_2_moins_10_sur_le_coeur():
     assert (scb - sc).norm() / sc.norm() > 2 ** -10
 
 
-def test_contexte_tf32_restaure_et_identite_au_defaut(monkeypatch):
+def test_defaut_tf32_prefill_seul_et_portees_opt_in(monkeypatch):
+    """poste7-c13a-defaut-19-09 § 1 + addendum : sans variable, MLA_CORE=tf32 pose allow_tf32
+    pendant les deux einsum du préfill et le rend après ; le 3e produit (MLA_CORE_VB) et
+    le décodage (MLA_CORE_DECODE) restent fp32 quelle que soit la valeur de MLA_CORE."""
+    from acvram import regime
+    vs = {x.env: x for x in regime.VARIABLES}
+    assert vs["ACVRAM_MLA_CORE"].defaut == "tf32"
+    assert vs["ACVRAM_MLA_CORE_VB"].defaut == "0"
+    assert vs["ACVRAM_MLA_CORE_DECODE"].defaut == "fp32"
+    # défaut = ce que mla.py lit sans variable posée
+    for nom in ("ACVRAM_MLA_CORE", "ACVRAM_MLA_CORE_VB", "ACVRAM_MLA_CORE_DECODE"):
+        monkeypatch.delenv(nom, raising=False)
+    src_defauts = (RACINE / "acvram" / "engine" / "mla.py").read_text()
+    assert 'os.environ.get("ACVRAM_MLA_CORE", "tf32")' in src_defauts
+    assert 'os.environ.get("ACVRAM_MLA_CORE_DECODE", "fp32")' in src_defauts
+    assert 'os.environ.get("ACVRAM_MLA_CORE_VB", "0")' in src_defauts
+    monkeypatch.setattr(MLA, "_MLA_CORE", "tf32")
+    monkeypatch.setattr(MLA, "_MLA_CORE_VB", False)
+    monkeypatch.setattr(MLA, "_MLA_CORE_DECODE", "fp32")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
+    with MLA._tf32_coeur() as c:                                        # les deux einsum du préfill
+        assert c._actif and torch.backends.cuda.matmul.allow_tf32 is True
+    assert torch.backends.cuda.matmul.allow_tf32 is False              # rendu après
+    with MLA._tf32_coeur(vb=True) as c:                                 # 3e produit : opt-in, fp32
+        assert not c._actif and torch.backends.cuda.matmul.allow_tf32 is False
+    with MLA._tf32_coeur(decode=True) as c:                             # décodage : fp32 jusqu'au niveau 2
+        assert not c._actif and torch.backends.cuda.matmul.allow_tf32 is False
+    assert MLA._dt_coeur() is torch.float32 and MLA._dt_coeur(decode=True) is torch.float32
+    # bras qui doivent différer : chaque portée ouverte par sa propre variable
+    monkeypatch.setattr(MLA, "_MLA_CORE_VB", True)
+    with MLA._tf32_coeur(vb=True) as c:
+        assert c._actif
+    monkeypatch.setattr(MLA, "_MLA_CORE_DECODE", "tf32")
+    with MLA._tf32_coeur(decode=True) as c:
+        assert c._actif
+    assert torch.backends.cuda.matmul.allow_tf32 is False
+    monkeypatch.setattr(MLA, "_MLA_CORE_DECODE", "bf16")
+    assert MLA._dt_coeur(decode=True) is torch.bfloat16
+    with MLA._tf32_coeur(decode=True) as c:
+        assert not c._actif                                             # bf16 : pas de drapeau
+    # bf16 au préfill n'atteint ni le 3e produit sans VB, ni le décodage
+    monkeypatch.setattr(MLA, "_MLA_CORE", "bf16")
+    monkeypatch.setattr(MLA, "_MLA_CORE_VB", False)
+    monkeypatch.setattr(MLA, "_MLA_CORE_DECODE", "fp32")
+    assert MLA._dt_coeur() is torch.bfloat16
+    assert MLA._dt_coeur(vb=True) is torch.float32 and MLA._dt_coeur(decode=True) is torch.float32
+    monkeypatch.setattr(MLA, "_MLA_CORE_VB", True)
+    assert MLA._dt_coeur(vb=True) is torch.bfloat16
     monkeypatch.setattr(MLA, "_MLA_CORE", "fp32")
     with MLA._tf32_coeur() as c:
         assert not c._actif and MLA._dt_coeur() is torch.float32
-    monkeypatch.setattr(MLA, "_MLA_CORE", "tf32")
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
-    with MLA._tf32_coeur() as c:
-        assert c._actif and torch.backends.cuda.matmul.allow_tf32 is True
-    assert torch.backends.cuda.matmul.allow_tf32 is False              # restauré
-    with MLA._tf32_coeur(decode=True) as c:
-        assert c._actif                                                 # tf32 couvre aussi le décodage
-    monkeypatch.setattr(MLA, "_MLA_CORE", "bf16")
-    with MLA._tf32_coeur() as c:
-        assert not c._actif and MLA._dt_coeur() is torch.bfloat16      # bf16 : pas de drapeau
-    from acvram import regime
-    v = {x.env: x for x in regime.VARIABLES}["ACVRAM_MLA_CORE"]
-    assert v.defaut == "fp32"
-    src = (RACINE / "acvram" / "engine" / "mla.py").read_text()
-    assert src.count("with _tf32_coeur():") == 5                        # préfill : scores, o_lat, v_b (chunké 3, non chunké 2)
+    src = src_defauts
+    assert src.count("with _tf32_coeur():") == 4                        # préfill : scores, o_lat (chunké, non chunké)
+    assert src.count("with _tf32_coeur(vb=True):") == 2                 # 3e produit du préfill (chunké, non chunké)
     assert src.count("with _tf32_coeur(decode=True):") == 4             # décodage : y = v_b · o_lat
-    assert src.count("_dt_coeur()") >= 10                               # chaque produit prend le dtype du régime
+    assert src.count("_dt_coeur(decode=True)") == 8                     # chaque produit du décodage lit SON régime
+    assert src.count("_dt_coeur(vb=True)") == 2
+    assert "ACVRAM_MLA_TF32" not in src                                 # plus d'alias (addendum : une variable par régime)
 
 
 def test_coeur_bf16_borne_a_2_moins_7_par_ligne_formes_reelles():
