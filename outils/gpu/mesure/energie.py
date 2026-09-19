@@ -446,6 +446,7 @@ class Energie:
             "cartes": sorted(self.debut),
             "plafond_w": round(self.plafond, 0),
             "horloge_min": min(h) if h else -1,
+            "horloge_moy": round(sum(h) / len(h)) if h else -1,   # en-tête de toute cellule b=12 (poste7, poste7-c16bis-puissance-mesure1-19-09)
             "horloge_max": max(h) if h else -1,
             "temp_max": max(t) if t else -1,
             "bridages": ",".join(sorted(self.bridages)) or "aucun",
