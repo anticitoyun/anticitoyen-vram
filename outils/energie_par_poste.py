@@ -291,6 +291,38 @@ if SEUL == "mesure1":
             rs["r3"] = mesure("M1 u=%d mma2 gate+up (2 GEMM groupees MMA, BT=%d, %d tuiles)" % (u, bt, nt), lambda: mma_gu(t_m1["mma_gu"]()), lots=48, unite=unite, octets=u * (o_nat["gate"] + o_nat["up"]))
             rs["r4"] = mesure("M1 u=%d mma2 down (GEMM groupee MMA, BT=%d, %d tuiles)" % (u, bt, nt), lambda: mma_dn(t_m1["mma_dn"]()), lots=48, unite=unite, octets=u * o_nat["down"])
             rs["r5"] = mesure("M1 u=%d quant_act x2 (E2M1 bloc 16, entrees de gate/up et de down)" % u, lambda: (ext.nvfp4_quant_act(xs, None, None, cpt, 0), ext.nvfp4_quant_act(a3, None, None, cpt, 0)), lots=100, unite=unite, octets=float(xs.numel() * 2 + a3.numel() * 2))
+        if A_MARLIN and hasattr(moe, "_gemm_mma_marlin") and pg[4] % 64 == 0:
+            # C17 : mma2 LISANT LES TUILES MARLIN (chantier-c17-mma2-lit-marlin-19-09) — même
+            # disposition que la GEMV Marlin, même liste de lignes, mêmes xq/tuiles que le bras
+            # naturel ; la ligne t(C17)/t(Marlin) par u est le scellé (2) de C17 (≤ 0,92 à u=45)
+            flat_e = topi_u.reshape(-1).to(torch.int64); ordre = torch.argsort(flat_e, stable=True)
+            cnt = torch.bincount(flat_e, minlength=E); tiles = moe._tuiles(cnt, bt)
+            xs = x[torch.arange(B, device=dev).repeat_interleave(moe.top_k)[ordre]].to(torch.bfloat16).contiguous()
+            if xs.shape[1] != pg[4]: xs = F.pad(xs, (0, pg[4] - xs.shape[1])).contiguous()
+            from acvram.engine.model import _qa_compteurs
+            cpt = _qa_compteurs(xs.device)
+            xq, xsf, gr = ext.nvfp4_quant_act(xs, None, None, cpt, 0)
+            g_ = moe._gemm_mma_marlin("gate_proj", xq, xsf, tiles, grow=gr, bt=bt)
+            u_ = moe._gemm_mma_marlin("up_proj", xq, xsf, tiles, grow=gr, bt=bt)
+            a3 = ext.moe_act(g_, u_, pg[5], pd[4], 0, None, None); aq, asf, gra = ext.nvfp4_quant_act(a3, None, None, cpt, 0)
+            t_m1.setdefault("mm_gu", Tour()); t_m1.setdefault("mm_dn", Tour())
+            def mm_gu(i, xq=xq, xsf=xsf, tiles=tiles, gr=gr):
+                c_ = couches[i % nc].mlp
+                c_._gemm_mma_marlin("gate_proj", xq, xsf, tiles, grow=gr, bt=bt); c_._gemm_mma_marlin("up_proj", xq, xsf, tiles, grow=gr, bt=bt)
+            def mm_dn(i, aq=aq, asf=asf, tiles=tiles, gra=gra):
+                couches[i % nc].mlp._gemm_mma_marlin("down_proj", aq, asf, tiles, grow=gra, bt=bt)
+            nt = int(tiles[0].numel())
+            rs["r6"] = mesure("M1 u=%d mma2-MARLIN gate+up (C17, 2 GEMM sur tuiles Marlin, BT=%d, %d tuiles)" % (u, bt, nt), lambda: mm_gu(t_m1["mm_gu"]()), lots=48, unite=unite, octets=u * (o_mar["gate"] + o_mar["up"]))
+            rs["r7"] = mesure("M1 u=%d mma2-MARLIN down (C17)" % u, lambda: mm_dn(t_m1["mm_dn"]()), lots=48, unite=unite, octets=u * o_mar["down"])
+            rs["r8"] = mesure("M1 u=%d quant_act x2 (C17, meme cout que le bras naturel)" % u, lambda: (ext.nvfp4_quant_act(xs, None, None, cpt, 0), ext.nvfp4_quant_act(a3, None, None, cpt, 0)), lots=100, unite=unite, octets=float(xs.numel() * 2 + a3.numel() * 2))
+            t_c17 = rs["r6"]["us_noyau_par_lancement"] + rs["r7"]["us_noyau_par_lancement"] + rs["r8"]["us_noyau_par_lancement"]
+            if "r1" in rs and "r2" in rs:
+                t_mar = rs["r1"]["us_noyau_par_lancement"] + rs["r2"]["us_noyau_par_lancement"]
+                bilan[("c17", u)] = {"t_marlin_us_couche": round(t_mar, 1), "t_c17_us_couche": round(t_c17, 1),
+                                     "t_c17_sur_t_marlin": round(t_c17 / t_mar, 3) if t_mar else None,
+                                     "W_c17_max": max(rs["r6"]["W"], rs["r7"]["W"]), "MHz_c17": rs["r6"]["MHz"], "MHz_marlin": rs["r1"]["MHz"],
+                                     "scelle_0_92": bool(t_mar and t_c17 <= 0.92 * t_mar)}
+                print("BILAN C17 u=%d %s" % (u, json.dumps(bilan[("c17", u)], ensure_ascii=False)), flush=True)
         res += list(rs.values())
         if not (A_MARLIN and A_NAT):
             continue
@@ -309,7 +341,7 @@ if SEUL == "mesure1":
                     "mesure2": bool(t_mar and t_mma <= 1.15 * t_mar and w_mma <= 350),
                     "cyclique_ok": cyc_min >= 0.9}
         print("BILAN u=%d %s" % (u, json.dumps(bilan[u], ensure_ascii=False)), flush=True)
-    print("RESULTAT " + json.dumps({"B": B, "repos_W": round(repos_w, 1), "mode": "mesure1", "distincts": unites, "bilan": bilan, "postes": res}, ensure_ascii=False))
+    print("RESULTAT " + json.dumps({"B": B, "repos_W": round(repos_w, 1), "mode": "mesure1", "distincts": unites, "bilan": {str(k): v for k, v in bilan.items()}, "postes": res}, ensure_ascii=False))
     raise SystemExit(0)
 
 def pas_complet():
