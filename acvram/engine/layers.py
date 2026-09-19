@@ -702,10 +702,13 @@ class RotaryEmbedding(nn.Module):
         """Amène les tables à leur taille finale, hors de toute capture, pour
         qu'aucun graphe n'ait à les étendre."""
         self._ensure(max_pos, device, dtype)
-        if getattr(self, "_cos32", None) is not None:
-            self.tables32(max_pos, device)
-        if getattr(self, "_cs_demi", None) is not None:
-            self.tables_demi(None, device, dtype, max_pos)
+        # REGLES § 6, remède C15 niveau 2 : les tables dérivées (fp32 pour le noyau de
+        # préparation, demi-tables C15) sont matérialisées ICI, sans condition — avant,
+        # `reserver` ne les réservait que si elles existaient déjà, et un chemin qui les
+        # touche pour la première fois SOUS capture (b=1 au niveau 2 : tables32 n'est
+        # lue que par le chemin de lot) les allouait dans le bassin privé du graphe.
+        self.tables32(max_pos, device)
+        self.tables_demi(None, device, dtype, max_pos)
 
     def tables_demi(self, positions: Optional[torch.Tensor], device, dtype,
                     max_pos: int) -> Optional[torch.Tensor]:
@@ -732,8 +735,10 @@ class RotaryEmbedding(nn.Module):
         self._ensure(max_pos, device, self._dtype)
         c32 = getattr(self, "_cos32", None)
         if c32 is None or c32.shape[0] != self._cos.shape[0] or c32.device != device:
-            if c32 is not None and torch.cuda.is_current_stream_capturing():
-                raise RuntimeError("tables RoPE fp32 réallouées pendant une capture de "
+            if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+                # première allocation comprise : un tenseur créé pendant une capture vit
+                # dans le bassin du graphe et meurt avec la capture suivante (REGLES § 6)
+                raise RuntimeError("tables RoPE fp32 allouées pendant une capture de "
                                    "graphe — appeler reserver() avant la capture")
             if os.environ.get("ACVRAM_TRACE_PTRS"):
                 print(f"[rope32] (ré)allocation des tables fp32 : {None if c32 is None else tuple(c32.shape)}"

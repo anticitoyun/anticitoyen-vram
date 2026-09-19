@@ -2617,6 +2617,8 @@ class DecoderLayerGDN(nn.Module):
         cache = self.__dict__.setdefault("_mla_lots", {})
         entree = cache.get(cle)
         if entree is None:
+            from .mla import _refuser_en_capture
+            _refuser_en_capture("tables d'adresses du lot MLA (_mla_lot)")
             dev = self.statics[0]["cache"].device
             ptrs = torch.tensor([c for c, _ in cle], dtype=torch.int64, device=dev)
             # les longueurs aussi : un tenseur 0-d par créneau, adresse stable

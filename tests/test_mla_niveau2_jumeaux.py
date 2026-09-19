@@ -190,3 +190,37 @@ def test_chaque_noyau_contre_son_jumeau_sur_carte(monkeypatch):
             yb = _pas_complet(la, xs[pas], st_b, bucket, None)
             e = ulp(ya, yb)
             assert e <= 1, f"DÉVIANT : chemin complet au pas {pas} ({e:.2f} ulp bf16)"
+
+
+def test_remede_regles_6_caches_paresseux_refuses_en_capture(monkeypatch):
+    """Remède C15 niveau 2 (poste7-glm-b1-noeuds-c15-niveau3 § 2, REGLES § 6) : tout cache paresseux
+    du chemin MLA (k_b contigu, v_b fp32, tables RoPE fp32, tables d'adresses du lot) lève s'il est
+    créé pendant une capture ; `chauffer()` les matérialise avant, et `reserver()` matérialise
+    tables32/tables_demi SANS condition (avant : seulement si elles existaient déjà — layers.py)."""
+    dev = "cpu"
+    la = _module(dev)
+    # simulation d'une capture en cours (CUDA « disponible »)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    with pytest.raises(RuntimeError, match="capture"):
+        la.rope_emb.tables32(64, torch.device(dev))                      # première allocation aussi refusée
+    la.__dict__.pop("_v_b32_cache", None)
+    with pytest.raises(RuntimeError, match="v_b fp32"):
+        la._v_b32()
+    # hors capture : chauffer matérialise tout, puis en capture rien n'est alloué
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    la.chauffer(torch.device(dev), 128)
+    c32, _ = la.rope_emb.tables32(128, torch.device(dev)); vb = la._v_b32()
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    c32b, _ = la.rope_emb.tables32(128, torch.device(dev))
+    assert c32b is c32 and la._v_b32() is vb                             # mêmes objets : aucune allocation
+    # reserver() sans condition : sur un module neuf, tables32 existe après reserver
+    la2 = _module(dev, seed=4)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert getattr(la2.rope_emb, "_cos32", None) is None
+    la2.rope_emb.reserver(128, torch.device(dev), DT)
+    assert la2.rope_emb._cos32 is not None
+    src = (__import__("pathlib").Path(__file__).resolve().parents[1] / "acvram" / "engine" / "graphs.py").read_text()
+    assert 'mod.chauffer(d, godet_mla(self.max_model_len) + MLA_BUCKET + 1)' in src
