@@ -20,7 +20,7 @@ class _MoteurFactice:
             "couches_exilees": 0, "couches_total": 4,
             "experts_exiles": 0, "experts_total": 64,
             "piles_ok": True, "piles_raison": [],
-            "cartes": ["cuda:0"], "chemin_moe": "mma",
+            "cartes": ["cuda:0"], "chemin_moe": "mma-a4",
         }
         self._r.update(override)
 

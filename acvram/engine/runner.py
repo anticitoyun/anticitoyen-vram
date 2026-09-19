@@ -586,7 +586,9 @@ class Engine:
         else:
             piles_ok = None                           # au moins une "?" : non vérifié
 
-        chemin_moe = ("mma" if os.environ.get("ACVRAM_MOE_MMA", "1") not in ("0", "")
+        # « mma-a4 », pas « mma » : le chemin MMA du préfill quantifie les activations en E2M1
+        # (W4A4) — le nom porte le régime de précision (poste7-glm-cellules-w4a4-hote-20-09)
+        chemin_moe = ("mma-a4" if os.environ.get("ACVRAM_MOE_MMA", "1") not in ("0", "")
                      else "gemv")
         if os.environ.get("ACVRAM_GRAPHES_TABLE") == "0":
             chemin_moe += "+pile" if piles_ok else "+pile(désactivé)"
