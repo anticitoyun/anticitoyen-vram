@@ -247,6 +247,25 @@ def test_c15_3b_le_routeur_triton_remplace_cublas_il_ne_s_ajoute_pas(monkeypatch
         assert (appels["logits_fusee"], appels["fusee"], appels["linear"]) == (0, 1, 1), appels
 
 
+def test_c15_3b_items_debranche_chaque_fusion_seule(monkeypatch):
+    """ACVRAM_GLUE_COMPACT_ITEMS (bissection de poste2) : sous COMPACT=1, seule
+    la fusion nommée est prise, les autres suivent le témoin ; vide = toutes ;
+    sous COMPACT=0, rien quoi qu'on nomme ; un nom inconnu est refusé."""
+    from acvram import kernels
+    monkeypatch.setattr(kernels, "_GLUE_COMPACT", 1)
+    monkeypatch.setattr(kernels, "_GLUE_COMPACT_ITEMS", "")
+    assert all(kernels.glue_compact(f) for f in kernels.GLUE_COMPACT_FUSIONS) and kernels.glue_compact()
+    monkeypatch.setattr(kernels, "_GLUE_COMPACT_ITEMS", "attn")
+    assert kernels.glue_compact("attn") and not any(kernels.glue_compact(f) for f in ("routeur", "etroit", "kv"))
+    monkeypatch.setattr(kernels, "_GLUE_COMPACT_ITEMS", "routeur,kv")
+    assert kernels.glue_compact("routeur") and kernels.glue_compact("kv") and not kernels.glue_compact("etroit")
+    monkeypatch.setattr(kernels, "_GLUE_COMPACT", 0)
+    assert not any(kernels.glue_compact(f) for f in kernels.GLUE_COMPACT_FUSIONS)
+    monkeypatch.setattr(kernels, "_GLUE_COMPACT", 1)
+    with pytest.raises(AssertionError):
+        kernels.glue_compact("rope")
+
+
 def test_valid_une_fois_par_pas_est_transmis(monkeypatch):
     """DecoderLayer.decode_fixed_res : `valid` reçu est donné tel quel au
     MoE ; sans lui, la couche calcule `slots >= 0` elle-même (témoin)."""

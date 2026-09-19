@@ -942,7 +942,7 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
             if gemm_etroit.disponible() and gemm_etroit.eligible(t):
                 CHEMINS_INT8["etroit_triton"] += 1
                 y = gemm_etroit.gemm_etroit(xf.contiguous(), t, sortie_fp32,
-                                            compact=glue_compact())[:, : t.shape[0]]
+                                            compact=glue_compact("etroit"))[:, : t.shape[0]]
                 return y.reshape(*orig_shape[:-1], t.shape[0])
         if k_pad != xf.shape[-1]:
             xf = torch.nn.functional.pad(xf, (0, k_pad - xf.shape[-1]))
@@ -1214,11 +1214,28 @@ if _PAGED_ATTN not in ("cuda", "triton"):
 _GLUE_COMPACT = int(os.environ.get("ACVRAM_GLUE_COMPACT", "0"))
 if _GLUE_COMPACT not in (0, 1):
     raise ValueError(f"ACVRAM_GLUE_COMPACT={_GLUE_COMPACT!r} : attendu 0 ou 1")
+# C15-3b : bissection par fusion — sous GLUE_COMPACT=1, la liste des fusions
+# prises (vide = toutes) : routeur | attn | etroit | kv (kv_write par tranches,
+# q sans copie, valid une fois par pas). Une fusion absente de la liste suit
+# le témoin. Sans effet sous GLUE_COMPACT=0.
+GLUE_COMPACT_FUSIONS = ("routeur", "attn", "etroit", "kv")
+_GLUE_COMPACT_ITEMS = os.environ.get("ACVRAM_GLUE_COMPACT_ITEMS", "")
+for _f in filter(None, _GLUE_COMPACT_ITEMS.split(",")):
+    if _f not in GLUE_COMPACT_FUSIONS:
+        raise ValueError(f"ACVRAM_GLUE_COMPACT_ITEMS={_GLUE_COMPACT_ITEMS!r} : fusions connues "
+                         f"{', '.join(GLUE_COMPACT_FUSIONS)}")
 
 
-def glue_compact() -> bool:
-    """Lu à l'appel (pas à l'import) : `regime.masquer` réécrit l'attribut."""
-    return bool(_GLUE_COMPACT)
+def glue_compact(fusion: str = "") -> bool:
+    """Lu à l'appel (pas à l'import) : `regime.masquer` réécrit l'attribut.
+    ``fusion`` : nom d'une fusion (GLUE_COMPACT_FUSIONS) — vraie si le niveau
+    3 est pris ET que la fusion n'est pas écartée par GLUE_COMPACT_ITEMS."""
+    if not _GLUE_COMPACT:
+        return False
+    if fusion and _GLUE_COMPACT_ITEMS:
+        assert fusion in GLUE_COMPACT_FUSIONS, fusion
+        return fusion in _GLUE_COMPACT_ITEMS.split(",")
+    return True
 
 
 def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
@@ -1251,8 +1268,8 @@ def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
             # C15 niveau 3 : le noyau Triton lit q par ses pas (stride_qb,
             # stride_qh) — la tranche q de la projection empilée passe sans
             # copie (un nœud par couche) ; le témoin recopie comme avant.
-            compact = glue_compact()
-            qq = q if (compact and q.stride(2) == 1 and q.stride(1) == q.shape[2]) \
+            compact = glue_compact("attn")
+            qq = q if (glue_compact("kv") and q.stride(2) == 1 and q.stride(1) == q.shape[2]) \
                 else q.contiguous()
             return attn_paginee.paged_attention(
                 qq, cache.k, cache.k_scale, cache.v, cache.v_scale,

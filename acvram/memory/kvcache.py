@@ -422,7 +422,7 @@ class PagedKVCache:
                 # les lit en place ; le témoin (ACVRAM_GLUE_COMPACT=0) garde
                 # les deux copies contiguës d'avant (2 nœuds par couche).
                 from ..kernels import glue_compact
-                if not glue_compact():
+                if not glue_compact("kv"):
                     k, v = k.contiguous(), v.contiguous()
                 ext.kv_write_int8(k, v, sm, self.k.view(-1, *self.k.shape[2:]),
                                   self.v.view(-1, *self.v.shape[2:]),

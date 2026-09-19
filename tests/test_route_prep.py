@@ -138,7 +138,7 @@ def _dtype_essai():
 
 @pytest.mark.parametrize("sigmoide,biais,renorm,scale", [(False, False, True, 1.0), (True, True, True, 2.5),
                                                           (True, False, False, 1.0)])
-@pytest.mark.parametrize("E,k,H", [(128, 8, 256), (60, 6, 96), (256, 8, 64)])
+@pytest.mark.parametrize("E,k,H", [(128, 8, 256), (60, 6, 96), (256, 8, 64), (128, 8, 2048), (40, 4, 700)])
 def test_c15_logits_fusee_egale_linear_puis_route_fusee(sigmoide, biais, renorm, scale, E, k, H):
     """Témoin : F.linear (produits exacts, somme fp32) puis `route_fusee`.
     Mêmes experts, mêmes eid et compteur au bit, poids à 2⁻¹⁶ près (ordre de
@@ -161,6 +161,31 @@ def test_c15_logits_fusee_egale_linear_puis_route_fusee(sigmoide, biais, renorm,
     assert torch.equal(eid, reid) and (eid.view(T, k)[16:] == -1).all()
     assert torch.equal(u, u2)
     assert (tw - rw).abs().max() < 2 ** -16 * max(1.0, scale), float((tw - rw).abs().max())
+    assert not rp._COMPTEURS[(2, str(x.device))].any(), "compteurs remis à zéro par le dernier programme"
+
+
+def test_c15_3b_le_compteur_porte_la_somme_des_partiels():
+    """Le bras qui doit casser (grille 1 × 4 × 8 = 32 programmes sur la forme
+    de Coder) : un compteur qui ne repart pas de zéro fait sélectionner un
+    programme qui n'est pas le dernier, sur des logits partiels — experts
+    faux ; remis à zéro, la sélection redevient celle du témoin."""
+    rp = _rp()
+    dt = _dtype_essai()
+    torch.manual_seed(11)
+    T, H, E, k = 12, 2048, 128, 8
+    x = (torch.randn(T, H) * 0.5).to(DEV, dt)
+    w = (torch.randn(E, H) * 0.02).to(DEV, dt)
+    u = torch.zeros(E, dtype=torch.int64, device=DEV)
+    _, ri, _ = rp.route_fusee(torch.nn.functional.linear(x.float(), w.float()), None, k, False, True, 1.0, None, u)
+    cnt = rp._compteur(1, x.device)
+    cnt[0] = 5
+    u2 = torch.zeros(E, dtype=torch.int64, device=DEV)
+    _, ti, _ = rp.route_logits_fusee(x, w, None, k, False, True, 1.0, None, u2, arrondi_bf16=False)
+    assert not torch.equal(ti, ri)
+    cnt.zero_()
+    u3 = torch.zeros(E, dtype=torch.int64, device=DEV)
+    _, ti2, _ = rp.route_logits_fusee(x, w, None, k, False, True, 1.0, None, u3, arrondi_bf16=False)
+    assert torch.equal(ti2, ri) and not cnt.any()
 
 
 def test_c15_logits_fusee_un_poids_deplace_change_la_selection():

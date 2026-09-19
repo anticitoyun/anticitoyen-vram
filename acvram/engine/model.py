@@ -1953,7 +1953,7 @@ class MoEBlock(nn.Module):
             from ..kernels import route_prep as _rp
             fusee = _rp.disponible()
         compact = None
-        if fusee and kernels.glue_compact():
+        if fusee and kernels.glue_compact("routeur"):
             # C15 niveau 3 : logits DANS le noyau de sélection (route_logits_fusee)
             # — ni F.linear, ni cast fp32 : 2-3 nœuds → 1 par couche. Poids du
             # routeur bf16 [E, H] contigu exigé ; arrondi bf16 des logits rejoué
@@ -3139,7 +3139,7 @@ class ACVRamModel(nn.Module):
             # C15 niveau 3 : `slots >= 0` (fantômes du godet) une fois par pas
             # au lieu d'une fois par couche (48 nœuds → 1) ; témoin : None,
             # chaque couche le recalcule.
-            valid = (slots >= 0) if kernels.glue_compact() else None
+            valid = (slots >= 0) if kernels.glue_compact("kv") else None
             for i, layer in enumerate(self.layers):
                 if valid is not None and type(layer) is DecoderLayer:
                     x, delta = layer.decode_fixed_res(

@@ -102,78 +102,98 @@ if triton is not None:
 
 
     @triton.jit
-    def _route_logits_fusee_kernel(x_ptr, w_ptr, bias_ptr, valid_ptr, topw_ptr, topi_ptr, eid_ptr,
-                                   usage_ptr, T, E, H, scale, stride_xt, stride_we,
-                                   K: tl.constexpr, BT: tl.constexpr, BE: tl.constexpr, BH: tl.constexpr,
+    def _route_logits_fusee_kernel(x_ptr, w_ptr, part_ptr, cnt_ptr, bias_ptr, valid_ptr, topw_ptr, topi_ptr,
+                                   eid_ptr, usage_ptr, T, E, H, scale, stride_xt, stride_we, NB, KS,
+                                   K: tl.constexpr, BT: tl.constexpr, BE: tl.constexpr, BEB: tl.constexpr,
+                                   BK: tl.constexpr, BH: tl.constexpr,
                                    SIGMOIDE: tl.constexpr, RENORM: tl.constexpr, AVEC_BIAIS: tl.constexpr,
                                    AVEC_VALID: tl.constexpr, ARRONDI_BF16: tl.constexpr):
-        """C15 niveau 3 : les logits du routeur (x [T, H] bf16 · Wᵀ [H, E],
-        produits exacts, accumulation fp32 par `tl.dot`) DANS le noyau de
-        sélection, à la place de F.linear (cuBLAS) puis `_route_fusee_kernel`.
-        ARRONDI_BF16 rejoue l'arrondi de la sortie bf16 de cuBLAS (Coder :
-        softmax sans biais, logits bf16) ; sans, logits fp32 (GLM : sigmoid +
-        biais, routeur fp32). Seul l'ordre de la somme diffère du témoin :
-        logits ± 1 ulp bf16, même sélection hors égalité à l'ulp. Un programme
-        par BT jetons (lignes fantômes masquées), même arithmétique de
-        sélection que `_route_fusee_kernel` vectorisée sur les lignes."""
+        """C15 niveau 3 / 3b : les logits du routeur (x [T, H] bf16 · Wᵀ [H, E])
+        DANS le noyau de sélection, à la place de F.linear (cuBLAS) puis
+        `_route_fusee_kernel`. Grille (bloc de BT jetons, bloc de BEB experts,
+        tranche de BK canaux) : chaque programme calcule un partiel fp32
+        [BT, BEB] par `tl.dot` (produits exacts, accumulation fp32) et l'écrit
+        dans part[pk, t, e] — 4 × 8 = 32 programmes pour Coder (E 128, H 2 048),
+        W lu une fois en tout ; le DERNIER programme du bloc de jetons (compteur
+        atomique acq_rel entre deux barrières, auto-remis à zéro) somme les KS
+        partiels dans l'ordre 0..KS−1 (déterministe), arrondit en bf16 si le
+        témoin sortait des logits bf16 (Coder : softmax sans biais ; fp32 sinon,
+        GLM) et fait la sélection : même arithmétique que `_route_fusee_kernel`
+        vectorisée sur les lignes. Seul l'ordre de la somme diffère du témoin :
+        logits ± 1 ulp bf16, même sélection hors égalité à l'ulp. Version 3b :
+        la version 0ca85673 (un seul programme, 32 itérations sérielles sur W)
+        coûtait 21,5 µs (verdict-c15-niveau3-coder-19-09) ; visée ≤ 3 µs."""
         pt = tl.program_id(0)
+        pn = tl.program_id(1)
+        pk = tl.program_id(2)
         rows = pt * BT + tl.arange(0, BT)
         masque_t = rows < T
-        i = tl.arange(0, BE)
-        masque = i < E
+        colsb = pn * BEB + tl.arange(0, BEB)
+        masque_b = colsb < E
         hh = tl.arange(0, BH)
-        acc = tl.zeros((BT, BE), dtype=tl.float32)
-        for h0 in range(0, H, BH):
+        acc = tl.zeros((BT, BEB), dtype=tl.float32)
+        for h0 in range(pk * BK, (pk + 1) * BK, BH):
             hs = h0 + hh
             mh = hs < H
             x = tl.load(x_ptr + rows[:, None] * stride_xt + hs[None, :],
                         mask=masque_t[:, None] & mh[None, :], other=0.0)
-            w = tl.load(w_ptr + i[:, None] * stride_we + hs[None, :],
-                        mask=masque[:, None] & mh[None, :], other=0.0)
-            acc += tl.dot(x, tl.trans(w.to(x.dtype)))                  # [BT, BE] fp32
-        if ARRONDI_BF16:
-            lg = acc.to(tl.bfloat16).to(tl.float32)
-        else:
-            lg = acc
-        lg = tl.where(masque[None, :], lg, float("-inf"))
-        if SIGMOIDE:
-            probs = 1.0 / (1.0 + tl.exp(-lg))
-        else:
-            m = tl.max(lg, 1)
-            ex = tl.exp(lg - m[:, None])
-            probs = ex / tl.sum(ex, 1)[:, None]
-        probs = tl.where(masque[None, :], probs, 0.0)
-        if AVEC_BIAIS:
-            sel = probs + tl.load(bias_ptr + i, mask=masque, other=0.0).to(tl.float32)[None, :]
-        else:
-            sel = probs
-        sel = tl.where(masque[None, :], sel, float("-inf"))
-        if AVEC_VALID:
-            v = tl.load(valid_ptr + rows, mask=masque_t, other=0)
-            ok = masque_t & (v != 0)
-        else:
-            ok = masque_t
-        jj = tl.arange(0, 32)
-        mj = jj < K
-        pw = tl.zeros((BT, 32), dtype=tl.float32)
-        somme = tl.zeros((BT,), dtype=tl.float32)
-        for j in range(K):
-            bv = tl.max(sel, 1)
-            bi = tl.min(tl.where(sel == bv[:, None], i[None, :], BE), 1)   # égalité : indice le plus bas
-            pj = tl.sum(tl.where(i[None, :] == bi[:, None], probs, 0.0), 1)
-            somme += pj
-            pw = tl.where(jj[None, :] == j, pj[:, None], pw)
-            tl.store(topi_ptr + rows * K + j, bi.to(tl.int32), mask=masque_t)
-            e = tl.where(ok, bi, -1)
-            tl.store(eid_ptr + rows * K + j, e.to(tl.int32), mask=masque_t)
-            tl.atomic_add(usage_ptr + tl.where(ok, bi, 0), 1, mask=ok)
-            sel = tl.where(i[None, :] == bi[:, None], float("-inf"), sel)
-        if RENORM:
-            f = (1.0 / somme) * scale
-        else:
-            f = somme * 0.0 + scale
-        tl.store(topw_ptr + rows[:, None] * K + jj[None, :], pw * f[:, None],
-                 mask=masque_t[:, None] & mj[None, :])
+            w = tl.load(w_ptr + colsb[:, None] * stride_we + hs[None, :],
+                        mask=masque_b[:, None] & mh[None, :], other=0.0)
+            acc += tl.dot(x, tl.trans(w.to(x.dtype)))                  # [BT, BEB] fp32
+        tl.store(part_ptr + (pk * T + rows[:, None]) * E + colsb[None, :], acc,
+                 mask=masque_t[:, None] & masque_b[None, :])
+        tl.debug_barrier()
+        n = tl.atomic_add(cnt_ptr + pt, 1, sem="acq_rel", scope="gpu")
+        tl.debug_barrier()
+        if n == NB * KS - 1:
+            i = tl.arange(0, BE)
+            masque = i < E
+            lg = tl.zeros((BT, BE), dtype=tl.float32)
+            for q in range(0, KS):
+                lg += tl.load(part_ptr + (q * T + rows[:, None]) * E + i[None, :],
+                              mask=masque_t[:, None] & masque[None, :], other=0.0, cache_modifier=".cg")
+            if ARRONDI_BF16:
+                lg = lg.to(tl.bfloat16).to(tl.float32)
+            lg = tl.where(masque[None, :], lg, float("-inf"))
+            if SIGMOIDE:
+                probs = 1.0 / (1.0 + tl.exp(-lg))
+            else:
+                m = tl.max(lg, 1)
+                ex = tl.exp(lg - m[:, None])
+                probs = ex / tl.sum(ex, 1)[:, None]
+            probs = tl.where(masque[None, :], probs, 0.0)
+            if AVEC_BIAIS:
+                sel = probs + tl.load(bias_ptr + i, mask=masque, other=0.0).to(tl.float32)[None, :]
+            else:
+                sel = probs
+            sel = tl.where(masque[None, :], sel, float("-inf"))
+            if AVEC_VALID:
+                v = tl.load(valid_ptr + rows, mask=masque_t, other=0)
+                ok = masque_t & (v != 0)
+            else:
+                ok = masque_t
+            jj = tl.arange(0, 32)
+            mj = jj < K
+            pw = tl.zeros((BT, 32), dtype=tl.float32)
+            somme = tl.zeros((BT,), dtype=tl.float32)
+            for j in range(K):
+                bv = tl.max(sel, 1)
+                bi = tl.min(tl.where(sel == bv[:, None], i[None, :], BE), 1)   # égalité : indice le plus bas
+                pj = tl.sum(tl.where(i[None, :] == bi[:, None], probs, 0.0), 1)
+                somme += pj
+                pw = tl.where(jj[None, :] == j, pj[:, None], pw)
+                tl.store(topi_ptr + rows * K + j, bi.to(tl.int32), mask=masque_t)
+                e = tl.where(ok, bi, -1)
+                tl.store(eid_ptr + rows * K + j, e.to(tl.int32), mask=masque_t)
+                tl.atomic_add(usage_ptr + tl.where(ok, bi, 0), 1, mask=ok)
+                sel = tl.where(i[None, :] == bi[:, None], float("-inf"), sel)
+            if RENORM:
+                f = (1.0 / somme) * scale
+            else:
+                f = somme * 0.0 + scale
+            tl.store(topw_ptr + rows[:, None] * K + jj[None, :], pw * f[:, None],
+                     mask=masque_t[:, None] & mj[None, :])
+            tl.store(cnt_ptr + pt, 0)
 
 
 _INDEX: dict = {}
@@ -241,16 +261,35 @@ def route_fusee(logits: torch.Tensor, bias, k: int, sigmoide: bool, renorm: bool
     return topw, topi, eid
 
 
-BT_LOGITS = 16             # jetons par programme (tl.dot : M ≥ 16) ; le godet ≤ 32 → 1-2 programmes
-BH_LOGITS = 64
+BT_LOGITS = 16             # jetons par bloc (tl.dot : M ≥ 16) ; le godet ≤ 32 → 1-2 blocs
+BEB_LOGITS = 32            # experts par programme
+BK_LOGITS = 256            # canaux par programme : Coder (E 128, H 2 048) → 4 × 8 = 32 programmes
+BH_LOGITS = 64             # pas de la boucle interne (tl.dot K ≥ 16)
+
+_COMPTEURS: dict = {}
+
+
+def _compteur(n: int, device) -> torch.Tensor:
+    """Compteurs int32 [n] des blocs de jetons, nuls entre deux lancements (le
+    dernier programme remet le sien à zéro) : réservés une fois par forme et
+    appareil, jamais pendant une capture de graphe."""
+    cle = (n, str(device))
+    c = _COMPTEURS.get(cle)
+    if c is None:
+        if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("route_prep : compteurs du routeur fusionné réservés pendant une capture "
+                               "de graphe — l'échauffement eager doit précéder (REGLES § 7)")
+        c = _COMPTEURS[cle] = torch.zeros(n, dtype=torch.int32, device=device)
+    return c
 
 
 def route_logits_fusee(x: torch.Tensor, w: torch.Tensor, bias, k: int, sigmoide: bool, renorm: bool,
                        scale: float, valid, usage: torch.Tensor, arrondi_bf16: bool = True):
     """C15 niveau 3 : ``x`` [T, H] bf16 (fp16 sous l'interpréteur), ``w`` [E, H]
     (poids du routeur, même dtype que x) → (topw fp32 [T, k], topi int32 [T, k],
-    eid int32 [T·k]) en UN lancement : logits (accumulation fp32, arrondis bf16
-    si ``arrondi_bf16`` comme la sortie de F.linear bf16) + `route_fusee`.
+    eid int32 [T·k]) en UN lancement : logits (partiels par blocs d'experts et
+    tranches de canaux, sommés par le dernier programme, arrondis bf16 si
+    ``arrondi_bf16`` comme la sortie de F.linear bf16) + `route_fusee`.
     Témoin : ``_router_logits`` puis `route_fusee` (ACVRAM_GLUE_COMPACT=0)."""
     T, H = x.shape
     E, H2 = w.shape
@@ -267,9 +306,15 @@ def route_logits_fusee(x: torch.Tensor, w: torch.Tensor, bias, k: int, sigmoide:
     wc = w if w.stride(1) == 1 else w.contiguous()
     b = bias.contiguous() if bias is not None and bias.numel() else xc
     v = valid.contiguous() if valid is not None else eid
-    _route_logits_fusee_kernel[(-(-T // BT_LOGITS),)](
-        xc, wc, b, v, topw, topi, eid, usage, T, E, H, float(scale), xc.stride(0), wc.stride(0),
-        K=k, BT=BT_LOGITS, BE=max(BE, 32), BH=BH_LOGITS, SIGMOIDE=sigmoide, RENORM=renorm,
+    nt = -(-T // BT_LOGITS)
+    nb = -(-E // BEB_LOGITS)
+    ks = -(-H // BK_LOGITS)
+    part = torch.empty(ks, T, E, dtype=torch.float32, device=x.device)
+    _route_logits_fusee_kernel[(nt, nb, ks)](
+        xc, wc, part, _compteur(nt, x.device), b, v, topw, topi, eid, usage, T, E, H, float(scale),
+        xc.stride(0), wc.stride(0), nb, ks,
+        K=k, BT=BT_LOGITS, BE=max(BE, 32), BEB=BEB_LOGITS, BK=BK_LOGITS, BH=BH_LOGITS,
+        SIGMOIDE=sigmoide, RENORM=renorm,
         AVEC_BIAIS=bias is not None and bias.numel() > 0, AVEC_VALID=valid is not None,
         ARRONDI_BF16=arrondi_bf16, num_warps=4)
     return topw, topi, eid
