@@ -3261,20 +3261,49 @@ __device__ __forceinline__ void cp_async8(void *smem, const void *gmem) {
 // (deux MMA par fragment et moitié de __syncthreads, foulée 80 o : 20g+tq
 // donne 32 bancs distincts). Les échelles d'un étage tiennent en KS/16 octets
 // par ligne : un mot de 4 par MMA.
-template <int BT, int S, int KS>
+// C17 (chantier-c17-mma2-lit-marlin-19-09, scellé poste7-c17-scelle-mesure1-ter) : MARLIN = le
+// même noyau lisant la DISPOSITION MARLIN des experts (P1, disposition unique) au lieu de la
+// pile naturelle — aucune copie, aucun repack : les tuiles 16 k × 64 n de 512 o (`table_qw` =
+// w_marlin [K/16, 2N] int32 par expert) arrivent en shared par les mêmes cp.async coalescés
+// (une tuile = 32 voies × 16 o), et le fragment B de la MMA (8 k consécutifs d'une colonne
+// par mot) est rassemblé depuis 4 mots de 4 voies (marlin_port._indices : voie t = 4·c + j
+// porte les colonnes w·16 + c (+8) aux k 2·j + {0, 1, 8, 9}, quartets dans l'ordre
+// _PACK_IDX = 0 2 4 6 1 3 5 7 : positions p0 n0:k, p1 n0:k+8, p2 n8:k, p3 n8:k+8, p4 n0:k+1,
+// p5 n0:k+9, p6 n8:k+1, p7 n8:k+9). Les échelles Marlin (`table_bscale` = s_marlin [K/16, N]
+// octets « S0E5M3 » = moitié haute de half(s·facteur·2^7) << 1, colonnes permutées
+// 8·(o%8) + swap4(o/8) par tuile de 64) sont reconverties en UE4M3 dans le fil :
+// champ d'exposant (octet >> 3) − (15 + log2 facteur) (= `decal`), forme sous-normale
+// reconstruite quand l'exposant tombe à ≤ 0 ; les échelles que le repack a annulées
+// (s·facteur·2^7 < 2, 0,0064 % sur Coder) restent nulles — c'est ce que la GEMV Marlin
+// calcule déjà. Même arithmétique MMA, même épilogue (gscales = échelle globale naturelle).
+__device__ __forceinline__ unsigned gm2_ue4m3_depuis_marlin(unsigned b, int decal) {
+    if (b == 0u) return 0u;
+    const int E = (int)(b >> 3) - decal;               // exposant UE4M3 (biais 7) reconstitué
+    const unsigned m = b & 7u;
+    if (E >= 1) return ((unsigned)E << 3) | m;
+    if (E >= -2) return (8u | m) >> (1 - E);             // sous-normal UE4M3 : 2^-6 · 0.M
+    return 0u;
+}
+
+template <int BT, int S, int KS, bool MARLIN = false>
 __global__ void __launch_bounds__(GM2_FILS) nvfp4_gemm_grouped_mma2_kernel(
     const float *__restrict__ gscales, const float *__restrict__ grow,
     const unsigned char *__restrict__ xq, const unsigned char *__restrict__ xsf,
     const int *__restrict__ tile_e, const int *__restrict__ tile_t0,
     const int *__restrict__ tile_n, const int64_t *__restrict__ table_qw,
     const int64_t *__restrict__ table_bscale,
-    __nv_bfloat16 *__restrict__ y, int M, int K) {
+    __nv_bfloat16 *__restrict__ y, int M, int K, int decal) {
 #ifdef ACVRAM_MMA_FP4
     constexpr int MF = BT / 16;
     constexpr int LD = KS / 2 + 16;          // 48 ou 80 octets par ligne
     constexpr int NM = KS / GM_KB;           // MMA par fragment et par étage
     constexpr int SB = KS / 16;              // octets d'échelles par ligne et par étage
     constexpr int CH = KS / 32;              // chargements de 16 o par ligne et par étage
+    // MARLIN : par étage, (KS/16) tuiles de k × 2 tuiles de n (BM = 128 = 2 × 64), 512 o chacune,
+    // foulée 528 (16 o de bourrage : cp.async 16 o aligné ; 132 mots ≡ 4 mod 32 bancs) ; échelles
+    // (KS/16) × 2 × 64 o = BM · SB, comme la pile naturelle.
+    constexpr int NTK = KS / 16;             // tuiles de 16 k par étage
+    constexpr int TUILE = 528;
     extern __shared__ __align__(16) unsigned char gm2_smem[];
     typedef unsigned char (*TA)[BT * LD];
     typedef unsigned char (*TB)[GM2_BM * LD];
@@ -3308,18 +3337,35 @@ __global__ void __launch_bounds__(GM2_FILS) nvfp4_gemm_grouped_mma2_kernel(
             const long src = (long)(t0 + min(r, nt - 1)) * half_k + kb + 16 * h;
             cp_async16(&sA[st][r * LD + 16 * h], xq + src);
         }
-        for (int c = tid; c < CH * GM2_BM; c += GM2_FILS) {
-            const int r = c / CH, h = c % CH;
-            const long src = (long)min(row0 + r, M - 1) * half_k + kb + 16 * h;
-            cp_async16(&sB[st][r * LD + 16 * h], qw_e + src);
+        if constexpr (!MARLIN) {
+            for (int c = tid; c < CH * GM2_BM; c += GM2_FILS) {
+                const int r = c / CH, h = c % CH;
+                const long src = (long)min(row0 + r, M - 1) * half_k + kb + 16 * h;
+                cp_async16(&sB[st][r * LD + 16 * h], qw_e + src);
+            }
+        } else {
+            // tuile (kt, nt) de w_marlin [K/16, 2N] int32 : octets kt · 8N + nt · 512 ; les deux
+            // tuiles de n du bloc sont row0/64 et +1 (N multiple de 64, BM = 128)
+            const int nt0 = row0 >> 6;
+            for (int c = tid; c < NTK * 2 * 32; c += GM2_FILS) {
+                const int ti = c >> 5, lc = c & 31, ktl = ti >> 1, ntl = ti & 1;
+                const long src = ((long)(ks + ktl) * 8 * (long)M) + (long)(nt0 + ntl) * 512 + lc * 16;
+                cp_async16(&sB[st][ti * TUILE + lc * 16], qw_e + src);
+            }
         }
         if (tid < BT) {
             const unsigned char *src = xsf + (long)(t0 + min(tid, nt - 1)) * nblk + ks;
             if constexpr (SB == 4) cp_async4(&sSA[st][tid * SB], src); else cp_async8(&sSA[st][tid * SB], src);
-        } else if (tid < BT + GM2_BM) {
+        } else if (!MARLIN && tid < BT + GM2_BM) {
             const int r = tid - BT;
             const unsigned char *src = bs_e + (long)min(row0 + r, M - 1) * nblk + ks;
             if constexpr (SB == 4) cp_async4(&sSB[st][r * SB], src); else cp_async8(&sSB[st][r * SB], src);
+        } else if (MARLIN && tid < BT + NTK * 2 * 4) {
+            // échelles Marlin : ligne kt de s_marlin [K/16, N] octets, 64 o par tuile de n ;
+            // rangées en shared par (ktl, ntl) : 64 o chacune, 4 morceaux de 16 o
+            const int c = tid - BT, ti = c >> 2, part = c & 3, ktl = ti >> 1, ntl = ti & 1;
+            const unsigned char *src = bs_e + (long)(ks + ktl) * M + (long)((row0 >> 6) + ntl) * 64 + part * 16;
+            cp_async16(&sSB[st][ti * 64 + part * 16], src);
         }
     };
 
@@ -3368,13 +3414,46 @@ __global__ void __launch_bounds__(GM2_FILS) nvfp4_gemm_grouped_mma2_kernel(
             for (int nf = 0; nf < 2; ++nf) {
                 const int r = warp * 16 + nf * 8 + g;
                 const bool ok = row0 + r < M;
-                const unsigned char *p = &sB[st][r * LD + ko + 4 * tq];
-                const unsigned lo = *reinterpret_cast<const unsigned *>(p);
-                const unsigned hi = *reinterpret_cast<const unsigned *>(p + 16);
-                b[nf][0] = ok ? lo : 0u;
-                b[nf][1] = ok ? hi : 0u;
-                const unsigned sv = *reinterpret_cast<const unsigned *>(&sSB[st][r * SB + 4 * m]);
-                sfb[nf] = ok ? sv : 0u;
+                if constexpr (!MARLIN) {
+                    const unsigned char *p = &sB[st][r * LD + ko + 4 * tq];
+                    const unsigned lo = *reinterpret_cast<const unsigned *>(p);
+                    const unsigned hi = *reinterpret_cast<const unsigned *>(p + 16);
+                    b[nf][0] = ok ? lo : 0u;
+                    b[nf][1] = ok ? hi : 0u;
+                    const unsigned sv = *reinterpret_cast<const unsigned *>(&sSB[st][r * SB + 4 * m]);
+                    sfb[nf] = ok ? sv : 0u;
+                } else {
+                    // colonne n = row0 + r : tuile de n ntl = r/64, o = r%64 ; dans la tuile Marlin
+                    // w = o/16 (mot), h = (o%16)/8 (moitié n0 / n8), c = o%8 (voie t = 4c + j)
+                    const int o = r & 63, ntl = r >> 6, w = o >> 4, h = (o >> 3) & 1, c = o & 7;
+                    // le mot lo de la MMA m couvre k = 64m + 8tq..+7 : tuile de k ktl = 4m + tq/2,
+                    // moitié kb = 8·(tq&1) ; hi = +32 k : ktl + 2
+                    #pragma unroll
+                    for (int half = 0; half < 2; ++half) {
+                        const int ktl = 4 * m + (tq >> 1) + 2 * half, kb = tq & 1;
+                        const unsigned char *tuile = &sB[st][(ktl * 2 + ntl) * TUILE];
+                        const int pA = kb + 2 * h;             // quartet k (pair) ; +4 = k+1 (impair)
+                        unsigned mot = 0u;
+                        #pragma unroll
+                        for (int i = 0; i < 4; ++i) {
+                            const int j = (i + g) & 3;         // ordre tourné par g : bancs distincts
+                            const unsigned W = *reinterpret_cast<const unsigned *>(tuile + (4 * c + j) * 16 + w * 4);
+                            const unsigned nl = (W >> (4 * pA)) & 0xFu, nh = (W >> (4 * (pA + 4))) & 0xFu;
+                            mot |= (nl | (nh << 4)) << (8 * j);    // octet j = paire (2j, 2j+1), pair en bas
+                        }
+                        b[nf][half] = ok ? mot : 0u;
+                    }
+                    // échelles : 4 tuiles de k de la MMA m, octet permuté 8·(o%8) + swap4(o/8) dans la
+                    // tuile de 64, reconverties S0E5M3 → UE4M3
+                    const int q = o >> 3, bidx = 8 * (o & 7) + ((q & ~3) | ((q & 1) << 1) | ((q >> 1) & 1));
+                    unsigned sv = 0u;
+                    #pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        const unsigned by = sSB[st][((4 * m + i) * 2 + ntl) * 64 + bidx];
+                        sv |= gm2_ue4m3_depuis_marlin(by, decal) << (8 * i);
+                    }
+                    sfb[nf] = ok ? sv : 0u;
+                }
             }
             #pragma unroll
             for (int mf = 0; mf < MF; ++mf)
@@ -3490,8 +3569,12 @@ torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table
                                      torch::Tensor xsf, torch::Tensor tile_e,
                                      torch::Tensor tile_t0, torch::Tensor tile_n,
                                      int64_t M, int64_t K, int64_t bt, int64_t etages, int64_t ks,
-                                     c10::optional<torch::Tensor> grow) {
+                                     c10::optional<torch::Tensor> grow, int64_t marlin) {
     CHECK_CUDA(xq); ACVRAM_DEVICE_GUARD(xq);
+    // C17 : marlin >= 0 = table_qw/table_bscale pointent la DISPOSITION MARLIN (w_marlin, s_marlin),
+    // `marlin` = decal d'exposant des echelles (15 + log2 facteur) ; -1 = pile naturelle
+    TORCH_CHECK(marlin < 0 || (etages > 0 && M % 128 == 0),
+                "GEMM groupee MMA sur disposition Marlin : etages > 0 et N multiple de 128 (deux tuiles de n par bloc)");
     const float *grow_p = nullptr;
     if (grow.has_value() && grow->defined()) {
         CHECK_CUDA(*grow); CHECK_CONTIG(*grow);
@@ -3527,6 +3610,7 @@ torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table
         tile_e.data_ptr<int>(), tile_t0.data_ptr<int>(), tile_n.data_ptr<int>(), \
         table_qw.data_ptr<int64_t>(), table_bscale.data_ptr<int64_t>(), \
         reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), (int)M, (int)K
+    #define GM_ARGS2 GM_ARGS, (int)marlin
     if (etages == 0) {
         dim3 grid((M + GM_BM - 1) / GM_BM, T);
         #define GM_L(BT) nvfp4_gemm_grouped_mma_kernel<BT><<<grid, 128, 0, stream>>>(GM_ARGS)
@@ -3536,9 +3620,15 @@ torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table
         dim3 grid((M + GM2_BM - 1) / GM2_BM, T);
         const size_t shm = (size_t)etages * ((bt + GM2_BM) * (ks / 2 + 16) + (bt + GM2_BM) * (ks / 16));
         #define GM_L2(BT, S, KS) do { \
-            if (shm > 48 * 1024) cudaFuncSetAttribute(nvfp4_gemm_grouped_mma2_kernel<BT, S, KS>, \
-                                                      cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm); \
-            nvfp4_gemm_grouped_mma2_kernel<BT, S, KS><<<grid, GM2_FILS, shm, stream>>>(GM_ARGS); } while (0)
+            if (marlin < 0) { \
+                if (shm > 48 * 1024) cudaFuncSetAttribute(nvfp4_gemm_grouped_mma2_kernel<BT, S, KS, false>, \
+                                                          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm); \
+                nvfp4_gemm_grouped_mma2_kernel<BT, S, KS, false><<<grid, GM2_FILS, shm, stream>>>(GM_ARGS2); \
+            } else { \
+                if (shm > 48 * 1024) cudaFuncSetAttribute(nvfp4_gemm_grouped_mma2_kernel<BT, S, KS, true>, \
+                                                          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm); \
+                nvfp4_gemm_grouped_mma2_kernel<BT, S, KS, true><<<grid, GM2_FILS, shm, stream>>>(GM_ARGS2); \
+            } } while (0)
         #define GM_LS(S, KS) do { if (bt == 16) GM_L2(16, S, KS); else if (bt == 32) GM_L2(32, S, KS); \
                                   else if (bt == 64) GM_L2(64, S, KS); else GM_L2(128, S, KS); } while (0)
         #define GM_LK(KS) do { if (etages == 2) GM_LS(2, KS); else if (etages == 3) GM_LS(3, KS); else GM_LS(4, KS); } while (0)
@@ -3547,6 +3637,7 @@ torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table
         #undef GM_LS
         #undef GM_L2
     }
+    #undef GM_ARGS2
     #undef GM_ARGS
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return y;
@@ -6228,9 +6319,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("table_qw"), py::arg("table_bscale"), py::arg("gscales"), py::arg("xq"),
           py::arg("xsf"), py::arg("tile_e"), py::arg("tile_t0"), py::arg("tile_n"),
           py::arg("M"), py::arg("K"), py::arg("bt"), py::arg("etages") = 0, py::arg("ks") = 64,
-          py::arg("grow") = py::none(),
+          py::arg("grow") = py::none(), py::arg("marlin") = -1,
           "MoE NVFP4 : GEMM groupee W4A4 sur la MMA FP4 native de sm_120 (mxf4nvf4) ; "
-          "etages 0 = chargements directs, 2-4 = pipeline cp.async en shared ; ks 64 ou 128 par etage");
+          "etages 0 = chargements directs, 2-4 = pipeline cp.async en shared ; ks 64 ou 128 par etage ; "
+          "marlin >= 0 (C17) : tables = disposition Marlin (w_marlin, s_marlin), valeur = decal d'exposant des echelles");
     m.def("nvfp4_gemm_grouped_mma_disponible", &nvfp4_gemm_grouped_mma_disponible,
           "vrai si la carte courante est sm_120 et le noyau MMA FP4 compile");
     m.def("nvfp4_quant_act", &nvfp4_quant_act,

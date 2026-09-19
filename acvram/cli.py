@@ -226,7 +226,7 @@ VARIABLES_LUES = {
     "ACVRAM_WARM_SPEC",
     # exportee par outils/carte.sh (son PID) a ce qu'il lance ; lue par eco.py
     # pour ne pas refuser sa propre prise de la carte
-    "ACVRAM_CARTE_TENUE", "ACVRAM_ECO",
+    "ACVRAM_CARTE_TENUE", "ACVRAM_ECO", "ACVRAM_MOE_DECODE_MMA_MARLIN",
 }
 
 

@@ -149,6 +149,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("TETE_FP32_ENTREE", "", None, "1"),
     # --- MoE ------------------------------------------------------------
     Variable("MOE_MMA", "1", ("acvram.engine.model", "_MOE_MMA"), "0", "prefill W4A4 sur MMA FP4"),
+    Variable("MOE_DECODE_MMA_MARLIN", "0", ("acvram.engine.model", "_MOE_DECODE_MMA_MARLIN"), "0",
+             "C17 (chantier-c17-mma2-lit-marlin-19-09) : sous la disposition unique Marlin, le décodage MoE par la MMA groupée (MOE_DECODE_MMA, t ≥ MIN_T) lit les TUILES MARLIN au lieu de laisser la GEMV Marlin ; 0 = jamais (défaut jusqu'au scellé) ; Mesure 1-ter sous 2 700 : ×0,89 à 45 distincts, ×1,23 à 8"),
     Variable("MOE_MMA_BT", "64", ("acvram.engine.model", "_MOE_MMA_BT")),
     Variable("MOE_MMA_ETAGES", "4", ("acvram.engine.model", "_MOE_MMA_ETAGES")),
     Variable("MOE_MMA_KS", "128", ("acvram.engine.model", "_MOE_MMA_KS")),
