@@ -305,9 +305,13 @@ def lire_sous_charge(index: int = 0, lire=None, charge=None, attente: float = 0.
             if cible is not None and len(lectures) >= 2 and all(
                     abs(v - cible) <= TOLERANCE_MHZ for v in lectures[-2:]):
                 h["stable"] = True; break                   # arrivée sur la consigne
-            if (ecoule >= minimum and len(lectures) >= 2 and sm >= 1000
-                    and abs(lectures[-1] - lectures[-2]) <= stable_mhz):
-                h["stable"] = True; break                   # ne monte plus, après le minimum de charge
+            # sans consigne : TROIS lectures consécutives à ± stable_mhz (une montée qui traverse
+            # une bande — 2 062, 2 062 puis 2 977 — n'est pas un palier : poste2 858298c, lu
+            # « lgc2100? » à tort) ; ≥ 1 000 et après le minimum de charge
+            if (ecoule >= minimum and len(lectures) >= 3 and sm >= 1000
+                    and abs(lectures[-1] - lectures[-2]) <= stable_mhz
+                    and abs(lectures[-2] - lectures[-3]) <= stable_mhz):
+                h["stable"] = True; break                   # ne monte plus
             if ecoule > plafond:
                 h["stable"] = False; break
     finally:
