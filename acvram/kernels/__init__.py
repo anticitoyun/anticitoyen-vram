@@ -774,14 +774,15 @@ def prefill_int8_regime() -> str:
 
 
 def tete_int8_entree_bf16(n_lignes: int) -> bool:
-    """La tête INT8 reçoit x en bf16 (GEMV fp32 / W8A8 / cublas) au lieu de la
-    conversion fp32 + déquant : toujours sous le seuil GEMV ; au-delà (PPL
-    `evaluate.perplexity`, logits sur toute la fenêtre) seulement sous un
-    régime int8 d'activation (a8 | cublas) — le défaut bf16 garde sa
-    conversion fp32 et ses logits au bit. 19/09 (verdict-p2-moteur) : la PPL
-    i8c passait par la déquant fp16 de la tête (`_tete` → fp32) alors que le
-    moteur servait cublas — deux chemins pour la même grandeur."""
-    return n_lignes <= _INT8_GEMV_MAX or _PREFILL_INT8 in ("a8", "cublas")
+    """La tête INT8 reçoit x en bf16 (GEMV fp32) SEULEMENT sous le seuil GEMV —
+    le régime que le moteur sert (tête à n ≤ 12 en service). Au-delà (PPL
+    `evaluate.perplexity`, logits sur toute la fenêtre) la tête garde la
+    conversion fp32 + déquant, quel que soit le régime : c62e2ef l'avait
+    ouverte à a8/cublas et la tête passait en W8A8 à 2 048 lignes (déquant
+    fp32 1,245 Gio + E4M3 + sortie fp32 1,245 Gio + log-softmax : pic 4 Gio,
+    `poste7-p2-ppl-instrument-file-7h-19-09`) — un régime jamais servi ; la
+    PPL se borne en découpant la tête par tranches (evaluate.perplexity)."""
+    return n_lignes <= _INT8_GEMV_MAX
 
 
 # Compteur des chemins pris par `int8_matmul` (clé = branche) : une preuve
