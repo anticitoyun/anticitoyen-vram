@@ -35,16 +35,28 @@ __all__ = [
 ]
 
 
-def fake_quantize_w8_row(w: torch.Tensor) -> torch.Tensor:
+def fake_quantize_w8_row(w: torch.Tensor, bloc_lignes: int = 4096) -> torch.Tensor:
     """Porte W8r (poste7, 19/09) : un poids [..., M, K] arrondi en int8
     SYMÉTRIQUE PAR LIGNE de sortie (échelle amax_ligne/127, arrondi à demi
     éloigné de zéro, ± 127) puis reconstruit — ce qu'un expert stocké en int8
-    par ligne rendrait, sans le stocker. Torch pur, dtype de w conservé."""
-    wf = w.to(torch.float32)
-    s = torch.clamp_min(wf.abs().amax(dim=-1, keepdim=True), 1e-8) / 127.0
-    v = wf / s
-    r = torch.where(v >= 0, torch.floor(v + 0.5), -torch.floor(-v + 0.5)).clamp(-127.0, 127.0)
-    return (r * s).to(w.dtype)
+    par ligne rendrait, sans le stocker. Torch pur, dtype de w conservé.
+
+    EN PLACE et PAR BLOCS de lignes (verdict-porte-w8r-19-09 : la version
+    d'un seul tenant allouait des temporaires fp32 de la taille de la pile
+    bf16 [128, 768, 2048] = 768 Mio × 3 → OOM) : le pic temporaire est celui
+    d'un bloc de ``bloc_lignes`` lignes (4 096 × 2 048 × 4 o = 32 Mio), la
+    sortie est w lui-même. Le résultat est identique à la version d'un tenant
+    (test), mais ne demande aucune allocation de la taille du poids."""
+    plat = w.reshape(-1, w.shape[-1])
+    for a in range(0, plat.shape[0], bloc_lignes):
+        b = plat[a:a + bloc_lignes]
+        bf = b.to(torch.float32)
+        s = torch.clamp_min(bf.abs().amax(dim=-1, keepdim=True), 1e-8) / 127.0
+        bf.div_(s)
+        r = torch.where(bf >= 0, torch.floor(bf + 0.5), -torch.floor(-bf + 0.5)).clamp_(-127.0, 127.0)
+        b.copy_((r * s).to(w.dtype))
+        del bf, r, s
+    return w
 
 
 def fake_quantize_a8(x: torch.Tensor, fmt: str = "int8") -> torch.Tensor:

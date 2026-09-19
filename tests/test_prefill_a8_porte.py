@@ -74,7 +74,7 @@ def test_porte_w8r_poids_par_ligne():
     torch.manual_seed(3)
     w = (torch.randn(4, 96, 256) * 0.02).to(torch.bfloat16)
     w[0, 5, 7] = 1.0                                               # un outlier par ligne : sa ligne seule paie
-    y = fake_quantize_w8_row(w)
+    y = fake_quantize_w8_row(w.clone())                            # en place : on garde w intact
     assert y.shape == w.shape and y.dtype == w.dtype
     assert torch.equal(y.float().abs().amax(-1), w.float().abs().amax(-1))          # amax de chaque ligne conservé
     assert int(torch.unique(y[1, 3].float()).numel()) <= 255
@@ -82,3 +82,29 @@ def test_porte_w8r_poids_par_ligne():
     assert 0.0 < err < 0.02
     assert (y[0, 5].float() - w[0, 5].float()).abs().max() > (y[0, 6].float() - w[0, 6].float()).abs().max()
     assert "ACVRAM_PREFILL_W8R" in {v.env for v in regime.VARIABLES}
+
+
+def test_porte_w8r_en_place_par_blocs_egale_un_seul_tenant_et_refuse_inerte(monkeypatch):
+    from acvram.quant.fakequant_activation import fake_quantize_w8_row
+    torch.manual_seed(5)
+    w = (torch.randn(3, 300, 128) * 0.02).to(torch.bfloat16)
+    ref = fake_quantize_w8_row(w.clone(), bloc_lignes=10 ** 9)            # un seul tenant
+    w2 = w.clone()
+    out = fake_quantize_w8_row(w2, bloc_lignes=7)                         # par blocs, en place
+    assert out is w2 and torch.equal(out, ref)                            # même résultat, aucun nouveau tenseur
+    # refus nommé quand la porte serait inerte sur le chemin pris
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    from test_marlin_refus_distinct import _bloc_distinct
+    from acvram.engine import model as MD
+    bloc = _bloc_distinct(top_k=2)
+    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "naturel")
+    monkeypatch.setattr(MD, "_PREFILL_GROUPED", "grouped_mm")
+    assert bloc._try_build_stacks(), bloc._raison_repli
+    monkeypatch.setattr(MD, "_PREFILL_W8R", "1")
+    monkeypatch.setattr(MD, "_MOE_MMA", True)                             # la MMA primerait : inerte
+    x = (torch.randn(4, 256) * 0.5).to(torch.bfloat16)
+    logits = bloc.router(x)
+    topw, topi = torch.topk(torch.softmax(logits.float(), -1), bloc.top_k, dim=-1)
+    with pytest.raises(RuntimeError, match="inerte"):
+        bloc._forward_prefill_grouped(x, topw, topi)

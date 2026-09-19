@@ -72,7 +72,7 @@ def test_raison_distincte_avant_la_raison_cuda():
     """À sec, un MoE non distinct est refusé « hors CUDA » ; un distinct l'est
     pour la forme — l'ordre des raisons rend la seconde lisible sans carte."""
     src = (pathlib.Path(__file__).resolve().parent.parent / "acvram" / "engine" / "model.py").read_text()
-    i_d = src.index('elif awq.get("up_distinct"):')
+    i_d = src.index('elif awq.get("up_distinct") and _MARLIN_DISTINCT != "1":')
     i_c = src.index('elif piles["gate_proj"][1].device.type != "cuda":')
     assert i_d < i_c
 
@@ -91,3 +91,20 @@ def test_plus_jamais_une_pile_rendue_dans_un_noyau(monkeypatch):
     topw, topi = torch.topk(torch.softmax(logits.float(), -1), bloc.top_k, dim=-1)
     with pytest.raises(RuntimeError, match="pile NVFP4 naturelle rendue"):
         bloc._forward_grouped(x, topw, topi)
+
+
+def test_c10_leve_le_refus_sous_variable(monkeypatch):
+    """ACVRAM_MARLIN_DISTINCT=1 (C10) : le refus « distinct » n'est plus la
+    raison — à sec la raison suivante (hors CUDA) prend le relais, ce qui
+    prouve que la forme distincte n'est plus exclue par elle-même."""
+    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "marlin")
+    monkeypatch.setattr(MD, "_PREFILL_GROUPED", "marlin")
+    monkeypatch.setattr(MD, "_MARLIN_DISTINCT", "1")
+    MoEBlock._marlin_refus_dit = False
+    bloc = _bloc_distinct(top_k=4)
+    import io, contextlib
+    tampon = io.StringIO()
+    with contextlib.redirect_stdout(tampon):
+        assert bloc._try_build_stacks(), bloc._raison_repli
+    assert "distinctes" not in tampon.getvalue() and "hors CUDA" in tampon.getvalue()
+    MoEBlock._marlin_refus_dit = False

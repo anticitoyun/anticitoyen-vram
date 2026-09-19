@@ -1032,7 +1032,7 @@ class MoEBlock(nn.Module):
         if any(piles[n][0] != "nvfp4" for n in ("gate_proj", "up_proj", "down_proj") if n in piles) \
                 or "gate_proj" not in piles:
             raison = "piles non NVFP4"
-        elif awq.get("up_distinct"):
+        elif awq.get("up_distinct") and _MARLIN_DISTINCT != "1":
             # la disposition unique ne rend la pile naturelle QUE si le GEMV
             # Marlin couvre la forme du MoE (poste7, 19/09, verdict-glm-b12) :
             # gate et up à entrées distinctes (tables AWQ séparées, GLM
@@ -1111,7 +1111,9 @@ class MoEBlock(nn.Module):
             # porte W8r (poste7-poursuite-chantiers-19-09) : les experts que ce chemin
             # déquantifie en bf16 sont re-arrondis en int8 par ligne — la perte d'un
             # format d'expert int8 par ligne, mesurée sans le stocker (chemins
-            # grouped_mm/bmm seulement : ils sont les seuls à lire cette pile bf16)
+            # grouped_mm/bmm seulement : ils sont les seuls à lire cette pile bf16) ;
+            # EN PLACE, par blocs de lignes : aucun temporaire de la taille de la
+            # pile (OOM 768 Mio, verdict-porte-w8r-19-09)
             from ..quant.fakequant_activation import fake_quantize_w8_row
             w = fake_quantize_w8_row(w)
             self._chemin('w8r')
@@ -1287,6 +1289,15 @@ class MoEBlock(nn.Module):
         # par défaut tant que la perte de qualité des activations en E2M1
         # n'est pas ramenée sous 1 % (poste2, 13/09 : +2,58 % sans lissage).
         # Une optimisation qui change la sortie est un bogue jusqu'à preuve.
+        if _PREFILL_W8R == "1" and (unique or _MOE_MMA or _PREFILL_GROUPED not in ("grouped_mm", "bmm")):
+            # la porte W8r ne vit que dans `_pile_bf16` : sur un autre chemin
+            # (marlin/groupe/mma, disposition unique) elle serait INERTE et la PPL
+            # mesurerait le défaut sous son nom (verdict-porte-w8r-19-09 : 0 chemin
+            # w8r compté sous mma). Refus nommé plutôt qu'une mesure fausse.
+            raise RuntimeError(
+                "ACVRAM_PREFILL_W8R=1 inerte sur ce chemin : il faut ACVRAM_PREFILL_GROUPED=grouped_mm|bmm, "
+                "ACVRAM_GEMV_LAYOUT=naturel et ACVRAM_MOE_MMA=0 (la MMA prime sur la pile bf16) — "
+                f"ici PREFILL_GROUPED={_PREFILL_GROUPED!r}, disposition unique={unique}, MOE_MMA={_MOE_MMA}")
         mma = (_MOE_MMA and not unique and ext is not None and hasattr(ext, "nvfp4_gemm_grouped_mma")
                and not os.environ.get("ACVRAM_PREFILL_DEQUANT")
                and pg[4] % 64 == 0 and pd[4] % 64 == 0
@@ -2190,6 +2201,13 @@ _MOE_GEMV = os.environ.get("ACVRAM_MOE_GEMV", "v1")
 # ACVRAM_PREFILL_GROUPED=marlin) ou la pile NVFP4 naturelle (« naturel », témoin).
 # Défaut « marlin » avec PREFILL_GROUPED (adoption du 18/09) ; témoin : les deux à naturel/groupe.
 _GEMV_LAYOUT = os.environ.get("ACVRAM_GEMV_LAYOUT", "marlin")
+# C10 (poste7-c9-119b-cache-experts-19-09 § Ordre (3)) : ACVRAM_MARLIN_DISTINCT=1 lève le
+# refus « gate/up à entrées distinctes » de la disposition unique — le décodage prend alors
+# le GEMV Marlin à UNE projection deux fois (gate puis up, activation torch), le préfill
+# la GEMM Marlin ; scellé GLM b=12 ≥ chemin d'avant × 1,05, sinon le refus reste le défaut.
+_MARLIN_DISTINCT = os.environ.get("ACVRAM_MARLIN_DISTINCT", "0")
+if _MARLIN_DISTINCT not in ("0", "1"):
+    raise ValueError(f"ACVRAM_MARLIN_DISTINCT={_MARLIN_DISTINCT!r} : 0 | 1")
 # ACVRAM_TRACE_ROUTAGE_PT=<fichier.pt> : les routages (expert par paire, [B, top_k])
 # de chaque appel décodé hors graphe, sauvés à la sortie (torch.save d'une liste)
 # — à rejouer par outils/banc-marlin-decode-18-09.py --routages. Nom DISTINCT
