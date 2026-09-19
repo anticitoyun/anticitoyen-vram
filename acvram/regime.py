@@ -92,6 +92,8 @@ VARIABLES: tuple[Variable, ...] = (
              "porte qualité W4A4 du prefill MoE : fausse quantification NVFP4 des activations en torch — off | gateup (entrée de gate/up) | both (+ entrée de down) ; poste7-lecture-profils-coder-17-09"),
     Variable("PREFILL_A8", "off", ("acvram.engine.model", "_PREFILL_A8"), None,
              "porte qualité W4A8 du prefill MoE (poste7-w4a4-clos-w4a8-porte-19-09) : fausse quantification des activations en torch — off | gateup | both ; format par PREFILL_A8_FMT ; exclusive de PREFILL_A4 ; scellé ratio − 1,0155 ≤ 0,004"),
+    Variable("PREFILL_W8R", "0", ("acvram.engine.model", "_PREFILL_W8R"), "0",
+             "porte qualité W8r (poste7-poursuite-chantiers-19-09) : experts déquantifiés par _pile_bf16 re-arrondis en int8 symétrique par ligne — 1 = porte ; ne s'applique qu'aux chemins PREFILL_GROUPED=grouped_mm|bmm (pile naturelle, GEMV_LAYOUT=naturel) ; aucun noyau"),
     Variable("PREFILL_A8_FMT", "int8", ("acvram.engine.model", "_PREFILL_A8_FMT"), None,
              "format de la porte A8 : int8 (par jeton, amax/127, l'arrondi de quantifier_a8 au bit) | e4m3 (E4M3 bloc 16, témoin mxf8f6f4)"),
     Variable("SANS_FUSION", "", None, "1"),

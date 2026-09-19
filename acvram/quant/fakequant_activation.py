@@ -31,7 +31,20 @@ __all__ = [
     "fake_quantize_nvfp4_activation",
     "fake_quantize_e4m3_activation",
     "fake_quantize_a8",
+    "fake_quantize_w8_row",
 ]
+
+
+def fake_quantize_w8_row(w: torch.Tensor) -> torch.Tensor:
+    """Porte W8r (poste7, 19/09) : un poids [..., M, K] arrondi en int8
+    SYMÉTRIQUE PAR LIGNE de sortie (échelle amax_ligne/127, arrondi à demi
+    éloigné de zéro, ± 127) puis reconstruit — ce qu'un expert stocké en int8
+    par ligne rendrait, sans le stocker. Torch pur, dtype de w conservé."""
+    wf = w.to(torch.float32)
+    s = torch.clamp_min(wf.abs().amax(dim=-1, keepdim=True), 1e-8) / 127.0
+    v = wf / s
+    r = torch.where(v >= 0, torch.floor(v + 0.5), -torch.floor(-v + 0.5)).clamp(-127.0, 127.0)
+    return (r * s).to(w.dtype)
 
 
 def fake_quantize_a8(x: torch.Tensor, fmt: str = "int8") -> torch.Tensor:

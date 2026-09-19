@@ -63,3 +63,22 @@ def test_fausse_quant_a8_modes_et_regime():
     noms = {v.env for v in regime.VARIABLES}
     assert {"ACVRAM_PREFILL_A8", "ACVRAM_PREFILL_A8_FMT"} <= noms
     assert "ACVRAM_PREFILL_A8" in regime.regime_noyaux()["variables"]
+
+
+def test_porte_w8r_poids_par_ligne():
+    """Porte W8r : arrondi int8 symétrique par ligne de sortie — ≤ 255 valeurs
+    distinctes par ligne, échelle amax/127 par ligne (l'amax est conservé au
+    bit), erreur relative sous celle de l'A4 d'activation ; variable dans la table."""
+    from acvram.quant.fakequant_activation import fake_quantize_w8_row
+    from acvram import regime
+    torch.manual_seed(3)
+    w = (torch.randn(4, 96, 256) * 0.02).to(torch.bfloat16)
+    w[0, 5, 7] = 1.0                                               # un outlier par ligne : sa ligne seule paie
+    y = fake_quantize_w8_row(w)
+    assert y.shape == w.shape and y.dtype == w.dtype
+    assert torch.equal(y.float().abs().amax(-1), w.float().abs().amax(-1))          # amax de chaque ligne conservé
+    assert int(torch.unique(y[1, 3].float()).numel()) <= 255
+    err = (y.float() - w.float()).norm() / w.float().norm()
+    assert 0.0 < err < 0.02
+    assert (y[0, 5].float() - w[0, 5].float()).abs().max() > (y[0, 6].float() - w[0, 6].float()).abs().max()
+    assert "ACVRAM_PREFILL_W8R" in {v.env for v in regime.VARIABLES}

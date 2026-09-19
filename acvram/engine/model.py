@@ -1097,6 +1097,14 @@ class MoEBlock(nn.Module):
         w = kernels.nvfp4_dequant(plat, torch.bfloat16,
                                   gscale_rows=gs.reshape(-1).to(torch.float32),
                                   rows_per_group=M).view(E, M, k)
+        if _PREFILL_W8R == "1":
+            # porte W8r (poste7-poursuite-chantiers-19-09) : les experts que ce chemin
+            # déquantifie en bf16 sont re-arrondis en int8 par ligne — la perte d'un
+            # format d'expert int8 par ligne, mesurée sans le stocker (chemins
+            # grouped_mm/bmm seulement : ils sont les seuls à lire cette pile bf16)
+            from ..quant.fakequant_activation import fake_quantize_w8_row
+            w = fake_quantize_w8_row(w)
+            self._chemin('w8r')
         return w[:, :m, :]
 
     @staticmethod
@@ -2016,6 +2024,12 @@ if _PREFILL_A4 not in ("off", "gateup", "both"):
 # défaut : l'arrondi de `quantifier_a8`, celui des chemins a8/cublas) ou en E4M3 bloc 16
 # (=e4m3, témoin : le format d'activation de la MMA mxf8f6f4). Aucun noyau : la perte, pas la
 # vitesse. Exclusive de PREFILL_A4 (deux arrondis empilés ne mesureraient rien).
+# ACVRAM_PREFILL_W8R=1 : porte qualité W8r — les piles d'experts déquantifiées par
+# `_pile_bf16` (chemins PREFILL_GROUPED=grouped_mm|bmm, pile naturelle donc
+# GEMV_LAYOUT=naturel) re-arrondies en int8 symétrique par ligne ; aucun noyau.
+_PREFILL_W8R = os.environ.get("ACVRAM_PREFILL_W8R", "0")
+if _PREFILL_W8R not in ("0", "1"):
+    raise ValueError(f"ACVRAM_PREFILL_W8R={_PREFILL_W8R!r} : 0 | 1")
 _PREFILL_A8 = os.environ.get("ACVRAM_PREFILL_A8", "off")
 _PREFILL_A8_FMT = os.environ.get("ACVRAM_PREFILL_A8_FMT", "int8")
 if _PREFILL_A8 not in ("off", "gateup", "both"):
