@@ -221,9 +221,12 @@ if SEUL not in ("mma", "pas", "mesure1"):
 # à la même unité. Exige les DEUX dispositions en mémoire : ACVRAM_DOUBLE_DISPOSITION_DIAG=1
 # (régime diagnostic, dit sur la ligne de régime) ; sinon refus nommé.
 if SEUL == "mesure1":
-    if not (marlins[0] is not None and pg[1] is not None):
-        raise SystemExit("mesure1 : il faut les deux dispositions (ACVRAM_DOUBLE_DISPOSITION_DIAG=1) — "
-                         f"marlin={marlins[0] is not None} naturelle={pg[1] is not None}")
+    # Les deux dispositions ensemble (ACVRAM_DOUBLE_DISPOSITION_DIAG=1) ne tiennent pas avec un
+    # processus étranger de 5,6 Gio sur la carte (OOM 19:51) : chaque disposition seule est
+    # acceptée, la liste d'experts est identique (générateur figé) et le bilan se fait hors ligne.
+    A_MARLIN, A_NAT = marlins[0] is not None, pg[1] is not None
+    if not (A_MARLIN or A_NAT):
+        raise SystemExit("mesure1 : aucune disposition d'experts")
     import torch.nn.functional as F
     E = len(moe.experts)
     def liste_experts(u):
@@ -246,8 +249,8 @@ if SEUL == "mesure1":
     def octets_par_expert(pile):
         """poids + échelles de bloc d'UN expert, depuis les tenseurs de la pile (E en tête)."""
         return sum(t.numel() * t.element_size() for t in pile if torch.is_tensor(t) and t.dim() >= 2) / E
-    o_nat = {n: octets_par_expert(piles[0][i][1:3]) for i, n in enumerate(("gate", "up", "down"))}
-    o_mar = {n: octets_par_expert(marlins[0][n + "_proj"][:2]) for n in ("gate", "up", "down")}
+    o_nat = {n: octets_par_expert(piles[0][i][1:3]) for i, n in enumerate(("gate", "up", "down"))} if A_NAT else {}
+    o_mar = {n: octets_par_expert(marlins[0][n + "_proj"][:2]) for n in ("gate", "up", "down")} if A_MARLIN else {}
     print("OCTETS_PAR_EXPERT " + json.dumps({"naturel_Mo": {k: round(v / 1e6, 3) for k, v in o_nat.items()},
                                              "marlin_Mo": {k: round(v / 1e6, 3) for k, v in o_mar.items()}}), flush=True)
     bilan = {}
@@ -255,34 +258,42 @@ if SEUL == "mesure1":
         topi_u = liste_experts(u)
         eid_u = topi_u.reshape(-1).to(torch.int32)
         unite = "1 couche MoE, %d jetons x top_k %d = %d lignes, %d experts DISTINCTS (meme liste pour les 4 noyaux)" % (B, moe.top_k, B * moe.top_k, u)
-        # Marlin GEMV (décodage) : gate·up puis down, sur eid_u
-        def m_gu(i, eid_u=eid_u):
-            mg, mu = marlins[i % nc]["gate_proj"], marlins[i % nc]["up_proj"]
-            return ext.nvfp4_gemv_marlin_gateup(mg[0], mg[1], mg[2], mu[0], mu[1], mu[2], eid_u, tok, x, mg[3], mg[4], 0)
-        act_u = m_gu(0)[:, :pg[5]].contiguous()
-        def m_dn(i, eid_u=eid_u, act_u=act_u):
-            md = marlins[i % nc]["down_proj"]
-            return ext.nvfp4_gemv_marlin(md[0], md[1], md[2], eid_u, seq, act_u, md[3], md[4])
-        # mma2 (GEMM groupée MMA FP4, M=B·top_k lignes triées par expert) : gate+up puis down
-        flat_e = topi_u.reshape(-1).to(torch.int64); ordre = torch.argsort(flat_e, stable=True)
-        cnt = torch.bincount(flat_e, minlength=E); tiles = moe._tuiles(cnt, bt)
-        xs = x[torch.arange(B, device=dev).repeat_interleave(moe.top_k)[ordre]].to(torch.bfloat16).contiguous()
-        if xs.shape[1] != pg[4]: xs = F.pad(xs, (0, pg[4] - xs.shape[1])).contiguous()
-        xq, xsf = ext.nvfp4_quant_act(xs)
-        g_ = moe._gemm_mma(pg, xq, xsf, tiles, brut=True); u_ = moe._gemm_mma(pu, xq, xsf, tiles, brut=True)
-        a3 = ext.moe_act(g_, u_, pg[5], pd[4], 0); aq, asf = ext.nvfp4_quant_act(a3)
-        def mma_gu(i, xq=xq, xsf=xsf, tiles=tiles):
-            cpg, cpu_, _ = piles[i % nc]
-            moe._gemm_mma(cpg, xq, xsf, tiles, brut=True); moe._gemm_mma(cpu_, xq, xsf, tiles, brut=True)
-        def mma_dn(i, aq=aq, asf=asf, tiles=tiles):
-            moe._gemm_mma(piles[i % nc][2], aq, asf, tiles, brut=True)
-        nt = int(tiles[0].numel())
-        r1 = mesure("M1 u=%d Marlin gate·up GEMV (nvfp4_gemv_marlin_gateup)" % u, lambda: m_gu(t_m1["mgu"]()), lots=48, unite=unite, octets=u * (o_mar["gate"] + o_mar["up"]))
-        r2 = mesure("M1 u=%d Marlin down GEMV (nvfp4_gemv_marlin)" % u, lambda: m_dn(t_m1["mdn"]()), lots=48, unite=unite, octets=u * o_mar["down"])
-        r3 = mesure("M1 u=%d mma2 gate+up (2 GEMM groupees MMA, BT=%d, %d tuiles)" % (u, bt, nt), lambda: mma_gu(t_m1["mma_gu"]()), lots=48, unite=unite, octets=u * (o_nat["gate"] + o_nat["up"]))
-        r4 = mesure("M1 u=%d mma2 down (GEMM groupee MMA, BT=%d, %d tuiles)" % (u, bt, nt), lambda: mma_dn(t_m1["mma_dn"]()), lots=48, unite=unite, octets=u * o_nat["down"])
-        r5 = mesure("M1 u=%d quant_act x2 (E2M1 bloc 16, entrees de gate/up et de down)" % u, lambda: (ext.nvfp4_quant_act(xs), ext.nvfp4_quant_act(a3)), lots=100, unite=unite, octets=float(xs.numel() * 2 + a3.numel() * 2))
-        res += [r1, r2, r3, r4, r5]
+        rs = {}
+        if A_MARLIN:
+            # Marlin GEMV (décodage) : gate·up puis down, sur eid_u
+            def m_gu(i, eid_u=eid_u):
+                mg, mu = marlins[i % nc]["gate_proj"], marlins[i % nc]["up_proj"]
+                return ext.nvfp4_gemv_marlin_gateup(mg[0], mg[1], mg[2], mu[0], mu[1], mu[2], eid_u, tok, x, mg[3], mg[4], 0)
+            act_u = m_gu(0)[:, :pg[5]].contiguous()
+            def m_dn(i, eid_u=eid_u, act_u=act_u):
+                md = marlins[i % nc]["down_proj"]
+                return ext.nvfp4_gemv_marlin(md[0], md[1], md[2], eid_u, seq, act_u, md[3], md[4])
+            rs["r1"] = mesure("M1 u=%d Marlin gate·up GEMV (nvfp4_gemv_marlin_gateup)" % u, lambda: m_gu(t_m1["mgu"]()), lots=48, unite=unite, octets=u * (o_mar["gate"] + o_mar["up"]))
+            rs["r2"] = mesure("M1 u=%d Marlin down GEMV (nvfp4_gemv_marlin)" % u, lambda: m_dn(t_m1["mdn"]()), lots=48, unite=unite, octets=u * o_mar["down"])
+        if A_NAT:
+            # mma2 (GEMM groupée MMA FP4, M=B·top_k lignes triées par expert) : gate+up puis down
+            flat_e = topi_u.reshape(-1).to(torch.int64); ordre = torch.argsort(flat_e, stable=True)
+            cnt = torch.bincount(flat_e, minlength=E); tiles = moe._tuiles(cnt, bt)
+            xs = x[torch.arange(B, device=dev).repeat_interleave(moe.top_k)[ordre]].to(torch.bfloat16).contiguous()
+            if xs.shape[1] != pg[4]: xs = F.pad(xs, (0, pg[4] - xs.shape[1])).contiguous()
+            from acvram.engine.model import _qa_compteurs
+            cpt = _qa_compteurs(xs.device)
+            xq, xsf, gr = ext.nvfp4_quant_act(xs, None, None, cpt, 0)
+            g_ = moe._gemm_mma(pg, xq, xsf, tiles, brut=True, grow=gr); u_ = moe._gemm_mma(pu, xq, xsf, tiles, brut=True, grow=gr)
+            a3 = ext.moe_act(g_, u_, pg[5], pd[4], 0, None, None); aq, asf, gra = ext.nvfp4_quant_act(a3, None, None, cpt, 0)
+            def mma_gu(i, xq=xq, xsf=xsf, tiles=tiles, gr=gr):
+                cpg, cpu_, _ = piles[i % nc]
+                moe._gemm_mma(cpg, xq, xsf, tiles, brut=True, grow=gr); moe._gemm_mma(cpu_, xq, xsf, tiles, brut=True, grow=gr)
+            def mma_dn(i, aq=aq, asf=asf, tiles=tiles, gra=gra):
+                moe._gemm_mma(piles[i % nc][2], aq, asf, tiles, brut=True, grow=gra)
+            nt = int(tiles[0].numel())
+            rs["r3"] = mesure("M1 u=%d mma2 gate+up (2 GEMM groupees MMA, BT=%d, %d tuiles)" % (u, bt, nt), lambda: mma_gu(t_m1["mma_gu"]()), lots=48, unite=unite, octets=u * (o_nat["gate"] + o_nat["up"]))
+            rs["r4"] = mesure("M1 u=%d mma2 down (GEMM groupee MMA, BT=%d, %d tuiles)" % (u, bt, nt), lambda: mma_dn(t_m1["mma_dn"]()), lots=48, unite=unite, octets=u * o_nat["down"])
+            rs["r5"] = mesure("M1 u=%d quant_act x2 (E2M1 bloc 16, entrees de gate/up et de down)" % u, lambda: (ext.nvfp4_quant_act(xs, None, None, cpt, 0), ext.nvfp4_quant_act(a3, None, None, cpt, 0)), lots=100, unite=unite, octets=float(xs.numel() * 2 + a3.numel() * 2))
+        res += list(rs.values())
+        if not (A_MARLIN and A_NAT):
+            continue
+        r1, r2, r3, r4, r5 = (rs[k] for k in ("r1", "r2", "r3", "r4", "r5"))
         # t par couche (temps noyau, pas la boucle), W max des noyaux d'experts, règle de poste7
         # (poste7-c16bis-puissance-mesure1-19-09 § 2) : Mesure 2 si t_mma2 ≤ 1,15 × t_marlin ET W_mma2 ≤ 350
         t_mar = r1["us_noyau_par_lancement"] + r2["us_noyau_par_lancement"]
