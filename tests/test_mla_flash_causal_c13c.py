@@ -207,7 +207,7 @@ def test_forme_1_fp32_plein_et_forme_2_reservee():
     NotImplementedError (signature prête, pas de chemin silencieux)."""
     k = _noyau()
     src = (RACINE / "acvram" / "kernels" / "attn_mla_causal.py").read_text()
-    assert k._PRECISION == {"fp32": "ieee"}
+    assert k._PRECISION["fp32"] == "ieee" and k._PRECISION.get("tf32") == "tf32"     # forme 2 : tf32 (poste2 f2dec8cf : 0,92 x cuBLAS tf32)
     dots = re.findall(r"tl\.dot\(([^\n]*)\)", src)
     assert len(dots) == 9 and all("input_precision=PRECISION" in d for d in dots), dots
     assert "allow_tf32=True" not in src and 'input_precision="tf32"' not in src
