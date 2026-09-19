@@ -88,18 +88,70 @@ if [ "${1:-}" = "--outils-terminal" ] || [ "${ACVRAM_INSTALL_OUTILS:-0}" = 1 ]; 
         # Ecartes : chemins fixes sur un ancien $HOME (migration du 13/09,
         # pas remappes) — les deployer casserait plutot que reparer.
         ECARTES="memoire memoire-consolider memoire-sync exporter-projet-ia installer-projet-ia"
-        n_copies=0; n_ecartes=0
+        # Par defaut, un fichier deja present dans DEST n'est PAS ecrase : un
+        # deploiement en masse a deja effacé une fois une correction locale
+        # (18/09, kimi-modeles) avec une copie plus ancienne de SRC. Utiliser
+        # ACVRAM_OUTILS_FORCE=1 pour ecraser volontairement (ex. apres avoir
+        # syncronise SRC en premier).
+        n_copies=0; n_ecartes=0; n_gardes=0
         for f in "$SRC"/*; do
             [ -f "$f" ] || continue
             nom="$(basename "$f")"
             case " $ECARTES " in
                 *" $nom "*) n_ecartes=$((n_ecartes + 1)); continue;;
             esac
+            if [ -e "$DEST/$nom" ] && [ "${ACVRAM_OUTILS_FORCE:-0}" != 1 ]; then
+                n_gardes=$((n_gardes + 1)); continue
+            fi
             cp -a "$f" "$DEST/$nom"
             chmod +x "$DEST/$nom"
             n_copies=$((n_copies + 1))
         done
         say "  $n_copies script(s) depose(s) dans $DEST"
+        [ "$n_gardes" -gt 0 ] && say "  $n_gardes deja present(s), gardes tels quels (ACVRAM_OUTILS_FORCE=1 pour ecraser)"
         [ "$n_ecartes" -gt 0 ] && warn "  $n_ecartes ecarte(s) (chemin fige sur l'ancien home, a corriger a la main : $ECARTES)"
+    fi
+
+    # ---- catalogue de modeles (acvram-chemins.tsv) : controle, pas fabrication --
+    # kimi-modeles/claude-modeles et acvram-serveur resolvent un alias via ce
+    # TSV (dossier, contexte). Une migration de disque ou de home peut le
+    # laisser pointer sur un montage qui n'existe plus (trouve le 18/09 :
+    # 195/201 lignes sur un prefixe perime apres la migration du 13/09,
+    # 98 autres deplacees sur un second disque de modeles). Ce bloc CONTROLE
+    # et signale ; il ne devine jamais un nouveau chemin a la place de
+    # l'utilisateur — un alias sans dossier reel est un modele a reconvertir
+    # ou une ligne a retirer, pas quelque chose a corriger seul.
+    TSV="${ACVRAM_CHEMINS_TSV:-$HOME/.kimi-code/acvram-chemins.tsv}"
+    if [ -f "$TSV" ]; then
+        say ""
+        say "catalogue de modeles : controle de $TSV"
+        "$PY" - "$TSV" <<'PYEOF'
+import sys
+tsv = sys.argv[1]
+total = manquants = 0
+orphelins = []
+with open(tsv, encoding="utf-8") as f:
+    for ligne in f:
+        ligne = ligne.rstrip("\n")
+        if not ligne.strip():
+            continue
+        total += 1
+        champs = ligne.split("\t")
+        if len(champs) < 2:
+            continue
+        alias, dossier = champs[0], champs[1]
+        import os
+        if not os.path.isdir(dossier):
+            manquants += 1
+            orphelins.append(alias)
+if manquants:
+    print(f"  {manquants}/{total} alias sans dossier reel (chemin casse ou modele absent)")
+    for a in orphelins[:10]:
+        print(f"    - {a}")
+    if manquants > 10:
+        print(f"    ... et {manquants - 10} de plus")
+else:
+    print(f"  {total}/{total} alias resolvent un dossier reel")
+PYEOF
     fi
 fi

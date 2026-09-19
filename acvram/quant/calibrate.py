@@ -546,6 +546,7 @@ def quantize_with_calibration(
     forced_scale: Optional[torch.Tensor] = None,
     quantize_activation_nvfp4: bool = False,
     hadamard_block: Optional[int] = None,
+    symmetric: bool = False,
 ) -> tuple[Any, ChannelScaler, dict]:
     """Chaîne complète par couche : tourner, mettre à l'échelle, quantifier.
 
@@ -589,7 +590,8 @@ def quantize_with_calibration(
     w_eff = w * scaler.scale.to(torch.float32).unsqueeze(0) \
         if scaler.scale is not None else w
     qt = formats.quantize(w_eff, fmt, group_size=group_size,
-                          **({"table": table} if fmt == "q3n" else {}))
+                          **({"table": table} if fmt == "q3n" else {}),
+                          **({"symmetric": symmetric} if fmt == "int8" else {}))
 
     deq = formats.dequantize(qt, torch.float32)
     if scaler.scale is not None:

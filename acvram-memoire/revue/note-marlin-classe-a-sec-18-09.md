@@ -157,3 +157,57 @@ recombinaison et l'act·up ne sont pas dans les 48,8). Faux si < 15 700.
 
 PPL préfill = B0 ± 0,002 reste le juge final (poste3, avec la vitesse) ; ma
 prédiction : Marlin ≤ B0 en PPL (plus proche de fp32), écart < 0,001.
+
+### Deux corrections de test (poste7, un commit, à sec)
+
+- [96] : le témoin « groupe » était inatteignable à T = 96 (`direct` prend
+  le pas dès que par_expert ≤ `_MOE_GEMM_MAX` 48) → le test force
+  `_MOE_GEMM_MAX = 0` ; chemin asserté (`attendre_chemin`), rouge sinon.
+- [1024-awq] : hypothèse 1 de poste7 tenue — la référence recalculait l'AWQ en
+  fp32 à part ; elle consomme maintenant LA MÊME activation que le moteur
+  (table bf16 `_stacks_awq` construite par `_try_build_stacks`, division en
+  bf16 `xs / awq_g[e]`, `act / awq_d[e]` arrondi une fois en bf16 comme
+  `moe_act`). Contrôle « la référence passe son propre critère » : les 4 cas
+  de la carte émulés à sec (B0 émulé sur la même activation, T ∈ {96,
+  1 024} × {sans AWQ, table AWQ}) passent le critère par ligne — B0 laisse
+  3·10⁻⁵ hors sans AWQ et 1,2·10⁻⁴ avec une table large (l'arrondi bf16 de
+  sa déquant) ; seuil posé à 5·10⁻⁴, Marlin exigé ≤ B0. 7/7 verts à sec
+  (le seul test carte reste skippé ici). Charge : tests ciblés seulement,
+  plus de suite complète hors frontière de bloc.
+
+## Disposition unique (poste7-p1-disposition-unique-18-09) : banc du décodage, à sec
+
+poste7 tranche : UNE disposition Marlin, servie aussi au décodage (le chemin
+vLLM, fused_marlin_moe) ; hôte et repack à la volée écartés. Livré :
+- `marlin_port.aligner_blocs_capturable` : l'alignement des paires par
+  blocs d'expert en UN lancement Triton, sorties de taille FIXE (P_max = G +
+  E·(bloc−1)), tampons réutilisés — capturable sous graphe ; = `aligner_blocs`
+  (test, 4 formes dont b=12/b=1 Coder).
+- `outils/banc-marlin-decode-18-09.py` : b=12 (96 paires) et b=1 (8 paires),
+  E 128, top_k 8, K 2 048, I 768, gate + up + act·up + down × 48, SOUS GRAPHE
+  (aligneur dedans), Marlin contre le GEMV actuel (défauts rpw=4, xreg down) ;
+  chaque bras jugé contre fp32 (|Δ| ≤ 2⁻⁷·max|y| par ligne, ≤ 5·10⁻⁴ hors),
+  20 routages tirés au sort (les routages réels d'un modèle ne sont pas
+  disponibles à sec — distincts imprimés), bandes de poste7 imprimées.
+Prédiction, la mienne (poste7 : b=12 4,6-5,4 ms, b=1 0,9-1,1) : b=12 **5,0-6,0
+ms** — le bloc 8 rembourre 96 paires à ~540 lignes (÷ 5,6 d'occupation
+utile) et Marlin à M = 8 par expert lit ses 302 Mo par couche à ~1,2-1,4
+To/s (cellule vLLM 2 031 t/s = ~5,9 ms/pas TOUT compris, dont ~4,5 pour
+les experts) ; b=1 **1,1-1,4 ms** (64 lignes rembourrées pour 8 paires,
+latence par lancement × 3 GEMM × 48 : le GEMV actuel fait 3,0 ms à b=1 sur
+toute la couche MoE, Marlin sera au moins aussi bon sur les octets mais
+paie 3 lancements + l'aligneur). Faux si b=12 > 6,5 ou b=1 > 1,2 (alors
+forme (b)). Issue qui me gênerait : b=1 en zone grise seul — la cellule
+b=1 (366 t/s, devant llama.cpp) juge, une passe.
+
+### Résultat du banc décodage (poste3) : b=12 **6,81 ms/pas**, b=1 **1,41 ms** — hors bandes (> 6,5 et > 1,2)
+
+Ma prédiction (5,0-6,0 / 1,1-1,4) : b=1 tenue, b=12 dépassée de 0,8 ; celle de
+poste7 (4,6-5,4 / 0,9-1,1) fausse des deux côtés. Marlin à M = 8-12 par expert
+ne bat pas le GEMV sur les octets : le rembourrage par blocs de 8 (96 paires
+→ ~540 lignes) et trois lancements + aligneur par couche coûtent plus que
+la relecture par paire du GEMV (7,3 ms/pas à rpw=4 + xreg). Instrument :
+le témoin GEMV lisait les échelles de bloc en Float8_e4m3fn (« expected
+scalar type Byte ») — vues uint8 portées dans le fichier (poste3 avait rejoué
+depuis une copie locale). Suite : décision de poste7 — forme (b), GEMV relisant
+la disposition Marlin (2 j, bit-exact), ou fermeture VRAM de P1.

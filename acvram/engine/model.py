@@ -193,6 +193,18 @@ class Attention(nn.Module):
         self.k_eq_v = k_eq_v
         self.window = window
         self.rope = rope
+        # Scaling « llama 4 » de ministral3/Devstral (transformers
+        # modeling_ministral3.get_llama_4_attn_scale) : q ← q · (1 + β·ln(1 +
+        # ⌊pos/plafond⌋)) après le RoPE, par jeton, sous rope yarn avec
+        # llama_4_scaling_beta > 0. Vaut 1 exactement sous le plafond
+        # (original_max_position_embeddings, 8 192 sur Devstral) ; au-delà,
+        # sans lui les logits sont faux sans le dire (refus de 67aa280, levé
+        # ici). tests/test_devstral_llama4_scaling.py contre transformers.
+        rs = getattr(spec, "rope_scaling", None) or {}
+        beta = float(rs.get("llama_4_scaling_beta") or 0.0)
+        plafond = int(rs.get("original_max_position_embeddings") or 0)
+        yarn = str(rs.get("rope_type") or rs.get("type") or "") == "yarn"
+        self.llama4 = (beta, plafond) if (yarn and beta > 0 and plafond > 0 and rope is not None) else None
         # Déclaré ici et pas au niveau de la classe : un attribut de classe
         # masque le module enregistré par nn.Module.__setattr__, et la
         # projection empilée resterait invisible (self.qkv_proj toujours None).
@@ -342,6 +354,8 @@ class Attention(nn.Module):
             if self.rope is not None:
                 cos, sin = self.rope(pos, x.device, x.dtype, max_pos=mx)
                 q, k = apply_rope(q, k, cos, sin)
+        if self.llama4 is not None:
+            q = self._echelle_llama4(q, pos)
 
         if cache is not None:
             cache.write(batch.slots_on(x.device), k, v, positions=batch.positions_on(x.device))
@@ -349,6 +363,14 @@ class Attention(nn.Module):
         if batch.is_decode:
             return self._decode(q, k, v, batch, cache, t, gate)
         return self._prefill(q, k, v, batch, cache, t, gate)
+
+    def _echelle_llama4(self, q: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        """q · (1 + β·ln(1 + ⌊pos/plafond⌋)), calculé en fp32 puis arrondi au
+        dtype de q — la même arithmétique que transformers (positions/plafond
+        en flottant, torch.log, `.to(query_states.dtype)`)."""
+        beta, plafond = self.llama4
+        s = 1.0 + beta * torch.log1p(torch.floor(positions.to(torch.float32) / plafond))
+        return q * s.to(q.dtype).view(-1, *([1] * (q.dim() - 1)))
 
     def norme_fusee_possible(self, t: int) -> bool:
         """(3b) : la projection q/k/v empilée est un INT8 sans échelle AWQ ni
@@ -396,6 +418,8 @@ class Attention(nn.Module):
             r = self._rope_kv_fusee(q, k, v, positions, max_pos, slots, cache)
             if r is not None:
                 q, k = r
+                if self.llama4 is not None:
+                    q = self._echelle_llama4(q, positions)
                 out = kernels.paged_attention(q, cache, block_tables, seq_lens,
                                               self.n_rep, self.scale, q_len=q_len,
                                               window=self.window)
@@ -422,6 +446,8 @@ class Attention(nn.Module):
             if self.rope is not None:
                 cos, sin = self.rope(positions, x.device, x.dtype, max_pos=max_pos)
                 q, k = apply_rope(q, k, cos, sin)
+        if self.llama4 is not None:
+            q = self._echelle_llama4(q, positions)
         cache.write(slots, k, v, positions=positions)
         out = kernels.paged_attention(q, cache, block_tables, seq_lens,
                                       self.n_rep, self.scale, q_len=q_len,
@@ -945,15 +971,51 @@ class MoEBlock(nn.Module):
         self._stacks = piles
         self._stacks_awq = awq
         self._stacks_marlin = self._construire_marlin(piles, awq, hadamard)
+        if self._stacks_marlin is not None:
+            if _DOUBLE_DIAG:
+                self.__dict__["experts_layout"] = "double(diag)"
+            else:
+                self._liberer_pile_naturelle()
         return True
 
+    def _liberer_pile_naturelle(self) -> None:
+        """Disposition UNIQUE (poste7-p1-disposition-unique-18-09) : la pile
+        NVFP4 n'a servi que de source au repack ; ses codes et échelles sont
+        rendus (préfill ET décodage lisent `_stacks_marlin`). Les experts
+        gardent un GABARIT vide (même geste que runner._demote_expert :
+        `[:0].cpu().clone()`, métadonnées intactes) — tout chemin qui
+        relirait la pile naturelle casse au lieu de mesurer une double
+        disposition. `_stacks[n]` garde son genre « nvfp4 », son K et son M
+        (`pg[4]`, `pg[5]` servent aux formes) mais qw/bs valent None."""
+        for nom in list(self._stacks):
+            pile = self._stacks[nom]
+            if pile[0] != "nvfp4":
+                continue
+            for e in self.experts:
+                lin = getattr(e, nom)
+                t = lin.qweight
+                if t is None or t.qweight is None or t.qweight.numel() == 0:
+                    continue
+                gabarit = type(t)(t.qweight[:0].cpu().clone(), t.block_scale[:0].cpu().clone(),
+                                  t.global_scale.detach().cpu().clone(), t.shape, t.padded_in)
+                gs = t.__dict__.get("_gs_f")
+                if gs is not None:
+                    gabarit.__dict__["_gs_f"] = gs
+                lin.qweight = gabarit
+            _, _, _, gs, k, m = pile
+            self._stacks[nom] = ("nvfp4", None, None, gs, k, m)
+        self.__dict__["experts_layout"] = "marlin"
+
     def _construire_marlin(self, piles, awq, hadamard):
-        """P1 (poste7-p1-porte-marlin-18-09, X = 152 TFLOPS au banc) : seconde
+        """P1 (poste7-p1-porte-marlin-18-09, X = 152 TFLOPS au banc) : la
         DISPOSITION des experts, repackée pour la GEMM groupée classe Marlin
         (kernels/marlin_port, vLLM v0.29.0) — gate, up, down chacune avec son
         échelle globale par expert (gate et up ne partagent pas la leur :
-        pas de w13 fusionné). La pile NVFP4 reste pour le décodage (GEMV) :
-        `experts_layout=double`, comptée par le Plan (`_reserve_prefill`).
+        pas de w13 fusionné). Disposition UNIQUE depuis
+        poste7-p1-disposition-unique-18-09 : le décodage la lit aussi
+        (`nvfp4_gemv_marlin`, forme (b)) et la pile NVFP4 est rendue après le
+        repack (`_liberer_pile_naturelle`) : `experts_layout=marlin`, rien de
+        plus à réserver au Plan.
         AWQ par expert et Hadamard (Coder classé 302025e : table [E, K])
         sont appliqués À L'ACTIVATION avant toute GEMM du préfill
         (`_forward_prefill_grouped` : `xs / awq_g[e_sorted]`, `xs_u`,
@@ -964,12 +1026,17 @@ class MoEBlock(nn.Module):
         hors tuiles (K, N multiples de 64), extension non compilée à sec
         (REGLES § 6 : jamais de nvcc sous le verrou —
         `outils/banc-marlin-p1-18-09.py --compiler-seulement`)."""
-        if _PREFILL_GROUPED != "marlin":
+        if _PREFILL_GROUPED != "marlin" and _GEMV_LAYOUT != "marlin" and not _DOUBLE_DIAG:
             return None
         raison = None
         if any(piles[n][0] != "nvfp4" for n in ("gate_proj", "up_proj", "down_proj") if n in piles) \
                 or "gate_proj" not in piles:
             raison = "piles non NVFP4"
+        elif piles["gate_proj"][1].device.type != "cuda":
+            # dimension « appareil » (MECANISMES) : gptq_marlin_repack n'a qu'un
+            # noyau CUDA ; à sec (tests, CUDA_VISIBLE_DEVICES vide) la pile
+            # naturelle reste le seul chemin, sans NotImplementedError.
+            raison = "pile hors CUDA (à sec) : Marlin exige la carte"
         else:
             for n in ("gate_proj", "up_proj", "down_proj"):
                 _, qw, bs, gs, k, m = piles[n]
@@ -1191,28 +1258,29 @@ class MoEBlock(nn.Module):
         if any(p[0] != "nvfp4" for p in (pg, pu, pd)):
             return None
         ext = kernels.get_extension()
+        unique = getattr(self, "_stacks_marlin", None) is not None and pg[1] is None
         # La GEMM groupée relit les poids d'un expert une fois par tuile de
         # 16 jetons ; la déquantification, elle, les écrit puis les relit en
         # bf16 une seule fois quel que soit le lot. Le premier gagne tant que
         # les experts reçoivent peu de jetons — croisement mesuré vers 50
         # jetons par expert, voir _MOE_GEMM_MAX.
-        par_expert = topi.numel() / max(1, pg[1].shape[0])
+        par_expert = topi.numel() / max(1, pg[3].shape[0])          # E : l'échelle globale [E] survit à la disposition unique (pg[1] rendu)
         # W4A4 sur la MMA FP4 native (revue/mma-fp4-native-sm120.md) : coupé
         # par défaut tant que la perte de qualité des activations en E2M1
         # n'est pas ramenée sous 1 % (poste2, 13/09 : +2,58 % sans lissage).
         # Une optimisation qui change la sortie est un bogue jusqu'à preuve.
-        mma = (_MOE_MMA and ext is not None and hasattr(ext, "nvfp4_gemm_grouped_mma")
+        mma = (_MOE_MMA and not unique and ext is not None and hasattr(ext, "nvfp4_gemm_grouped_mma")
                and not os.environ.get("ACVRAM_PREFILL_DEQUANT")
                and pg[4] % 64 == 0 and pd[4] % 64 == 0
                and ext.nvfp4_gemm_grouped_mma_disponible())
-        direct = mma or (ext is not None and hasattr(ext, "nvfp4_gemm_grouped")
+        direct = mma or (ext is not None and not unique and hasattr(ext, "nvfp4_gemm_grouped")
                          and not os.environ.get("ACVRAM_PREFILL_DEQUANT")
                          and par_expert <= _MOE_GEMM_MAX
                          and pg[4] % 64 == 0 and pd[4] % 64 == 0)
         if not direct and _PREFILL_GROUPED == "grouped_mm" and not hasattr(torch, "_grouped_mm"):
             return None
         t, k = topi.shape
-        E = pg[1].shape[0]
+        E = pg[3].shape[0]                             # [E] échelles globales : survit à pg[1] = None (disposition unique)
         flat_e = topi.reshape(-1).to(torch.int64)
         flat_t = torch.arange(t, device=x.device).repeat_interleave(k)
         colle = _colle_moe_triton(flat_e.numel(), E, x.device)
@@ -1304,7 +1372,7 @@ class MoEBlock(nn.Module):
             act = _activation(g, u, pg[5], pd[4], awq_d=None, hd_d=0)
             aq, asf, gra = ext.nvfp4_quant_act(act, awq_d, es32, cpt, hd_d)
             d = self._gemm_mma(pd, aq, asf, tiles, brut=True, grow=gra)
-        elif _PREFILL_GROUPED == "marlin" and getattr(self, "_stacks_marlin", None) is not None:
+        elif (_PREFILL_GROUPED == "marlin" or unique) and getattr(self, "_stacks_marlin", None) is not None:
             # AVANT `direct` (poste3, verdict-marlin-p1-situ-18-09 : à petit T par
             # expert, `direct` passait devant et un test n'atteignait jamais Marlin)
             self._chemin('marlin')
@@ -1423,6 +1491,8 @@ class MoEBlock(nn.Module):
         pg, pu, pd = (st[n] for n in ("gate_proj", "up_proj", "down_proj"))
         if any(p[0] != "nvfp4" for p in (pg, pu, pd)):
             return None
+        if pg[1] is None:                              # disposition unique : la pile naturelle est rendue
+            return None
         ext = kernels.get_extension()
         if (ext is None or not hasattr(ext, "nvfp4_gemm_grouped_mma")
                 or not hasattr(ext, "moe_act") or not hasattr(ext, "moe_reduce_trie")
@@ -1430,7 +1500,7 @@ class MoEBlock(nn.Module):
                 or not ext.nvfp4_gemm_grouped_mma_disponible()):
             return None
         t, k = topi.shape
-        E = pg[1].shape[0]
+        E = pg[3].shape[0]                             # [E] échelles globales : survit à pg[1] = None (disposition unique)
         bt = _MOE_DECODE_MMA_BT
         t_max = -(-(t * k) // bt) + E
         if _MOE_ROUTE_PACK and hasattr(ext, "moe_route_pack") and t * k <= 1024:
@@ -1548,6 +1618,9 @@ class MoEBlock(nn.Module):
             tok = torch.arange(t, device=x.device,
                                dtype=torch.int32).repeat_interleave(self.top_k)
             _seq = None
+        if _TRACE_ROUTAGE and not torch.cuda.is_current_stream_capturing():
+            # routages réels pour les rejouer au banc (banc-marlin-decode --routages)
+            _ROUTAGES.append(eid.view(-1, self.top_k).cpu())
         if "gate_proj" not in self._stacks:            # experts sans porte (ReLU²)
             u = self._grouped(x.to(torch.float32), self._stacks["up_proj"], eid, tok)
             act = F.relu(u); act = act * act
@@ -1580,13 +1653,28 @@ class MoEBlock(nn.Module):
         # v2 : paires triées par expert (argsort stable : déterministe, sous
         # graphe) ; le noyau écrit chaque paire à sa place d'origine
         tri = None
-        if (_MOE_GEMV == "v2" and pg[0] == "nvfp4" and pu[0] == "nvfp4" and ext is not None
+        act = None
+        marlin = getattr(self, "_stacks_marlin", None)
+        if marlin is not None and _GEMV_LAYOUT != "marlin" and pg[1] is not None:
+            marlin = None                              # piles Marlin présentes mais témoin naturel demandé
+        if marlin is not None and ext is not None and hasattr(ext, "nvfp4_gemv_marlin_gateup") and not distinct:
+            # forme (b), poste7-p1-disposition-unique-18-09 : le GEMV lit la
+            # disposition Marlin (tuiles 16 k × 64 n) — une seule disposition
+            # des experts ; juge fp32 par ligne (tests/test_gemv_marlin.py)
+            mg, mu = marlin["gate_proj"], marlin["up_proj"]
+            self._chemin("gemv_marlin")
+            act = ext.nvfp4_gemv_marlin_gateup(
+                mg[0], mg[1], mg[2], mu[0], mu[1], mu[2], eid, tok_g, x_g.contiguous(),
+                mg[3], mg[4], 1 if self.act == "gelu_tanh" else 0)[:, :pg[5]]
+        elif (_MOE_GEMV == "v2" and pg[0] == "nvfp4" and pu[0] == "nvfp4" and ext is not None
                 and hasattr(ext, "nvfp4_gemv_grouped_gateup_v2") and not distinct
                 and self._stacks.get("down_proj", ("",))[0] == "nvfp4"
                 and pg[4] * 4 <= 48 * 1024):
             ordre = torch.argsort(eid, stable=True).to(torch.int32)
             tri = (eid[ordre.long()].contiguous(), ordre)
-        if tri is not None:
+        if marlin is not None and act is not None:
+            pass                                       # gemv_marlin pris ci-dessus
+        elif tri is not None:
             act = ext.nvfp4_gemv_grouped_gateup_v2(
                 pg[1], pg[2], pg[3], pu[1], pu[2], pu[3], tri[0], tok_g[ordre.long()].contiguous(), ordre,
                 x_g.contiguous(), pg[4], 1 if self.act == "gelu_tanh" else 0)[:, :pg[5]]
@@ -1595,6 +1683,7 @@ class MoEBlock(nn.Module):
                 and not distinct                       # un seul x pour gate et up
                 and pg[4] * 4 <= 48 * 1024):
             # gate, up et SiLU·up en un lancement, activation bf16 lue telle quelle
+            self._chemin("gemv_v1")
             act = ext.nvfp4_gemv_grouped_gateup(
                 pg[1], pg[2], pg[3], pu[1], pu[2], pu[3], eid, tok_g,
                 x_g.contiguous(), pg[4],
@@ -1619,7 +1708,12 @@ class MoEBlock(nn.Module):
             act = fwht_activations(act.to(torch.bfloat16), hd_d).to(act.dtype)
         if awq.get("down_proj") is not None:
             act = (act.to(torch.bfloat16) / awq["down_proj"][eid.long(), :act.shape[1]]).to(act.dtype)
-        d = self._grouped(act, self._stacks["down_proj"], eid, seq, tri=tri)
+        if marlin is not None and self.dernier_chemin == "gemv_marlin" and ext is not None \
+                and hasattr(ext, "nvfp4_gemv_marlin"):
+            md = marlin["down_proj"]
+            d = ext.nvfp4_gemv_marlin(md[0], md[1], md[2], eid, seq, act.contiguous(), md[3], md[4])
+        else:
+            d = self._grouped(act, self._stacks["down_proj"], eid, seq, tri=tri)
         # Chaque jeton possède exactement top_k lignes contiguës : une somme
         # sur cet axe remplace l'index_add_ atomique — déterministe, plus
         # rapide, et rejouable dans un graphe CUDA sans écart d'un rejeu à
@@ -1894,7 +1988,11 @@ _MOE_MMA = os.environ.get("ACVRAM_MOE_MMA", "1") == "1"
 # d'experts, RÉFUTÉ : poste3 0edc3b9, 5 486 j/s contre 8 614 — tuiles d'un
 # petit M inchangées et ~58 Go de copies w[experts] par prefill ; gardé comme
 # témoin d'une fausse piste, jamais comme défaut)
-_PREFILL_GROUPED = os.environ.get("ACVRAM_PREFILL_GROUPED", "groupe")
+# | "marlin" (P1, GEMM groupée classe Marlin sur la disposition unique des
+# experts : DÉFAUT depuis l'adoption utilisateur du 18/09 — Coder prefill
+# 15 987 j/s (+63 %), GLM 5 502 (+18 %), b=12 1 239 t/s / 0,303 J, au prix de
+# −1,2 % à b=1 ; poste7-p1-situ-verdict-18-09 ; « groupe » reste le témoin)
+_PREFILL_GROUPED = os.environ.get("ACVRAM_PREFILL_GROUPED", "marlin")
 # ACVRAM_PREFILL_A4=off|gateup|both : porte qualité W4A4 du prefill MoE (poste7-lecture-profils-coder-17-09) —
 # fausse quantification NVFP4 des ACTIVATIONS en torch (E2M1 bloc 16, échelle de bloc UE4M3, échelle
 # globale par ligne, comme nvfp4_quant_act), sur l'entrée de gate/up (gateup) et aussi sur celle de
@@ -2011,6 +2109,31 @@ _MOE_ROUTE_PACK = os.environ.get("ACVRAM_MOE_ROUTE_PACK", "1") == "1"
 # expert, sortie identique au bit). Scellé : experts 6,6 → ≤ 5,3 ms, Coder
 # b=12 nu ≥ 1 300 t/s (faux < 1 200).
 _MOE_GEMV = os.environ.get("ACVRAM_MOE_GEMV", "v1")
+# P1 disposition unique (poste7-p1-disposition-unique-18-09, forme (b)) : le GEMV
+# du décodage lit la disposition Marlin (« marlin », exige
+# ACVRAM_PREFILL_GROUPED=marlin) ou la pile NVFP4 naturelle (« naturel », témoin).
+# Défaut « marlin » avec PREFILL_GROUPED (adoption du 18/09) ; témoin : les deux à naturel/groupe.
+_GEMV_LAYOUT = os.environ.get("ACVRAM_GEMV_LAYOUT", "marlin")
+# ACVRAM_TRACE_ROUTAGE=<fichier.pt> : les routages (expert par paire, [B, top_k])
+# de chaque appel décodé hors graphe, sauvés à la sortie (torch.save d'une liste)
+# — à rejouer par outils/banc-marlin-decode-18-09.py --routages.
+_TRACE_ROUTAGE = os.environ.get("ACVRAM_TRACE_ROUTAGE", "")
+_ROUTAGES: list = []
+if _TRACE_ROUTAGE:
+    import atexit as _atexit
+    _atexit.register(lambda: torch.save(_ROUTAGES, _TRACE_ROUTAGE) if _ROUTAGES else None)
+if _GEMV_LAYOUT not in ("naturel", "marlin"):
+    raise ValueError(f"ACVRAM_GEMV_LAYOUT={_GEMV_LAYOUT!r} : naturel | marlin")
+# Diagnostic seulement (bissection du biais, poste7-p1-situ-verdict-18-09) : les
+# DEUX dispositions gardées — préfill {groupe|marlin} × décodage {v1|(b)} sur les
+# mêmes piles ; jamais un régime servi (régime : experts_layout=double(diag)).
+_DOUBLE_DIAG = os.environ.get("ACVRAM_DOUBLE_DISPOSITION_DIAG", "0") == "1"
+if not _DOUBLE_DIAG and (_GEMV_LAYOUT == "marlin") != (_PREFILL_GROUPED == "marlin"):
+    # la disposition est UNIQUE : préfill et décodage lisent la même pile ;
+    # « Marlin au préfill, naturelle au décodage » (double disposition,
+    # experts_layout=double) n'existe plus (poste7-p1-disposition-unique-18-09)
+    raise ValueError(f"ACVRAM_GEMV_LAYOUT={_GEMV_LAYOUT!r} et ACVRAM_PREFILL_GROUPED={_PREFILL_GROUPED!r} : "
+                     "les deux à marlin (disposition unique) ou aucun (témoin naturel)")
 
 # Décodage MLA sous graphes : 0 = boucle par créneau ; 1 = le noyau
 # d'attention batché seul (bead 6wa, bit-identique, −28,5 % sur le pas
@@ -2933,3 +3056,29 @@ class ACVRamModel(nn.Module):
             "douze_plus_gros": [{"nom": n, "octets": o} for n, o in gros],
             "octets_par_nom_total": sum(par_forme.values()),
         }
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic (poste7-p1-situ-verdict-18-09, piste « premier pas divergent ») :
+# ACVRAM_DUMP_MOE=<dossier> — la sortie de chaque MoEBlock est recopiée dans un
+# tampon STATIQUE par forme (alloué au premier passage eager, donc à adresse
+# fixe : un graphe capturé y écrit à chaque rejeu) ; le moteur (runner.step)
+# sauve tous les tampons après chaque pas. Comparaison : outils/comparer-dump-
+# moe-18-09.py <A> <B> — (b) capturé contre (b) eager nomme le premier
+# (pas, couche) divergent. Jamais actif en service.
+_DUMP_MOE = os.environ.get("ACVRAM_DUMP_MOE", "")
+if _DUMP_MOE:
+    os.makedirs(_DUMP_MOE, exist_ok=True)
+    _moe_forward_orig = MoEBlock.forward
+
+    def _moe_forward_dump(self, x, valid=None):
+        y = _moe_forward_orig(self, x, valid)
+        bufs = self.__dict__.setdefault("_dump_bufs", {})
+        cle = (tuple(y.shape), y.dtype)
+        buf = bufs.get(cle)
+        if buf is None:
+            buf = bufs[cle] = torch.empty_like(y)
+        buf.copy_(y)
+        return y
+
+    MoEBlock.forward = _moe_forward_dump
