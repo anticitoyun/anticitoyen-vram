@@ -45,5 +45,7 @@
  "impossible de lancer acvram convert : {e}": "ไม่สามารถเริ่ม acvram convert: {e}",
  "conversion terminée — voir models_acvram.": "แปลงเสร็จสิ้น — ดู models_acvram",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert ล้มเหลว (รหัส {code}) — ดูบันทึกด้านบน",
- "serveur arrêté.": "เซิร์ฟเวอร์หยุดแล้ว"
+ "serveur arrêté.": "เซิร์ฟเวอร์หยุดแล้ว",
+ "toutes les options": "ตัวเลือกทั้งหมด",
+ "proposer les options": "เสนอตัวเลือก"
 }

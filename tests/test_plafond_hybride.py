@@ -24,3 +24,27 @@ def test_le_regime_porte_le_plafond():
     src = (pathlib.Path(__file__).resolve().parent.parent / "acvram" / "engine" / "runner.py").read_text()
     assert "max_batch_size=self.max_batch_size" in src                  # le GraphRunner reçoit le lot servi
     assert "hybrides≤" in src                                            # visible dans regime_ligne()
+
+
+def test_couverture_experts_par_couche():
+    """`experts_layout` du régime dit la couverture Marlin PAR COUCHE (GLM :
+    33 Marlin / 13 refusées) — « marlin » seul quand toutes le sont, « naturel »
+    quand aucune, « marlin(N/M) » sinon."""
+    import torch
+    from acvram.engine.runner import _couverture_experts
+    from acvram.engine.model import MoEBlock
+
+    class Faux(torch.nn.Module):
+        def __init__(self, dispositions):
+            super().__init__()
+            self.blocs = torch.nn.ModuleList()
+            for d in dispositions:
+                b = MoEBlock.__new__(MoEBlock)
+                torch.nn.Module.__init__(b)
+                if d is not None:
+                    b.__dict__["experts_layout"] = d
+                self.blocs.append(b)
+    assert _couverture_experts(Faux(["marlin", "marlin"])) == "marlin"
+    assert _couverture_experts(Faux([None, None])) == "naturel"
+    assert _couverture_experts(Faux(["marlin"] * 33 + [None] * 13)) == "marlin(33/46)"
+    assert _couverture_experts(Faux([])) == "aucun"

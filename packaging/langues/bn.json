@@ -45,5 +45,7 @@
  "impossible de lancer acvram convert : {e}": "acvram convert চালু করা যায়নি: {e}",
  "conversion terminée — voir models_acvram.": "রূপান্তর সম্পন্ন — models_acvram দেখুন।",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert ব্যর্থ হয়েছে (কোড {code}) — উপরের লগ দেখুন।",
- "serveur arrêté.": "সার্ভার বন্ধ।"
+ "serveur arrêté.": "সার্ভার বন্ধ।",
+ "toutes les options": "সব বিকল্প",
+ "proposer les options": "বিকল্প প্রস্তাব"
 }

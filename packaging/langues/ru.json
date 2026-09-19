@@ -45,5 +45,7 @@
  "impossible de lancer acvram convert : {e}": "не удалось запустить acvram convert: {e}",
  "conversion terminée — voir models_acvram.": "конвертация завершена — см. models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert завершился с ошибкой (код {code}) — см. журнал выше.",
- "serveur arrêté.": "сервер остановлен."
+ "serveur arrêté.": "сервер остановлен.",
+ "toutes les options": "все параметры",
+ "proposer les options": "предложить параметры"
 }
