@@ -237,7 +237,7 @@ def mode_demande(env: dict | None = None, chemin: str | None = None) -> str:
     return v
 
 
-def _charge_cuda(duree: float = 0.35, device: str = "cuda:0") -> None:
+def _charge_cuda(duree: float = 0.15, device: str = "cuda:0") -> None:
     """Occupe LÉGÈREMENT la carte `duree` s (matmuls bf16 1024², synchronisés) :
     une carte verrouillée OISIVE lit 225 MHz et ne monte à sa consigne qu'au
     premier contexte — l'effectif se lit pendant une charge, jamais au repos
@@ -265,19 +265,44 @@ def _charge_cuda(duree: float = 0.35, device: str = "cuda:0") -> None:
         print(f"acvram eco : charge de lecture impossible ({type(exc).__name__}: {exc})", file=sys.stderr)
 
 
-def lire_sous_charge(index: int = 0, lire=None, charge=None, attente: float = 0.12) -> dict:
-    """`lire(index)` pendant que `charge()` occupe la carte dans un fil : la
-    lecture part après `attente` s, quand l'horloge a rejoint sa consigne."""
+def lire_sous_charge(index: int = 0, lire=None, charge=None, attente: float = 0.12,
+                     plafond: float = 2.0, stable_mhz: int = 30) -> dict:
+    """`lire(index)` pendant que `charge()` occupe la carte dans un fil, **jusqu'à
+    stabilité** : deux lectures consécutives à ± `stable_mhz`, plafond `plafond` s.
+    Une carte froide monte par paliers (225 → 1 980 → 2 977 sur 3 × 0,35 s, poste2
+    19/09) : une seule lecture à 0,35 s dit 225 ou 1 980 et tomberait sous une
+    bande. La charge tourne pendant toute la lecture ; `stable` et `lectures`
+    sont rendus avec l'horloge (stable False = plafond atteint, dit)."""
     import threading, time
     lire = lire_horloge if lire is None else lire
     charge = _charge_cuda if charge is None else charge
-    fil = threading.Thread(target=charge, daemon=True); fil.start()
-    time.sleep(attente)
+    arret = threading.Event()
+
+    def boucle():
+        while not arret.is_set():
+            charge()
+    fil = threading.Thread(target=boucle, daemon=True); fil.start()
+    t0 = time.time(); lectures = []; h = {"verrou": None}
     try:
-        h = lire(index, sous_charge=True)
-    except TypeError:                                   # lecteur de test sans le paramètre
-        h = lire(index)
-    fil.join(timeout=5)
+        while True:
+            time.sleep(attente)
+            try:
+                h = lire(index, sous_charge=True)
+            except TypeError:                               # lecteur de test sans le paramètre
+                h = lire(index)
+            sm = h.get("sm_mhz")
+            if sm is None:
+                break
+            lectures.append(sm)
+            # stable = deux lectures à ± stable_mhz ET hors du palier de repos (< 1 000 MHz :
+            # une carte sous charge n'y reste pas ; deux 225 de suite = la montée n'a pas commencé)
+            if len(lectures) >= 2 and abs(lectures[-1] - lectures[-2]) <= stable_mhz and sm >= 1000:
+                h["stable"] = True; break
+            if time.time() - t0 > plafond:
+                h["stable"] = False; break
+    finally:
+        arret.set(); fil.join(timeout=5)
+    h["lectures"] = lectures
     return h
 
 
@@ -306,6 +331,9 @@ class Horloge:
         h = lire_sous_charge(self.index, self._lire, self._charge) if sous_charge else self._lire(self.index)
         self._lecture = h
         self.effectif = str(h["sm_mhz"]) if "sm_mhz" in h else "?"
+        if sous_charge and h.get("stable") is False:
+            print(f"acvram eco : horloge non stabilisée en 2 s sous charge (lectures {h.get('lectures')}) — "
+                  f"effectif {self.effectif} pris tel quel", file=sys.stderr)
         return self.effectif
 
     def _dans_une_bande(self) -> str | None:
