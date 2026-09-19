@@ -65,6 +65,82 @@ def version_acvram() -> str:
             continue
     return "?"
 
+# ---- langues ------------------------------------------------------------------
+# Les chaînes sont écrites en français dans le code (source). Les traductions
+# vivent dans langues/<code>.json (à côté du script dans le dépôt, sous
+# /usr/share/acvram/langues dans le paquet) : ajouter une langue = ajouter un
+# fichier, pas une ligne de code. T() rend la traduction de la langue courante,
+# ou la source si la clé manque (jamais une chaîne vide). Choix : menu de la
+# barre, mémorisé dans ~/.config/acvram/langue ; sinon ACVRAM_LANG, sinon la
+# locale (LANG), sinon fr.
+NOMS_LANGUES = {
+    "fr": "Français", "en": "English", "de": "Deutsch", "es": "Español", "it": "Italiano",
+    "eo": "Esperanto", "zh": "中文", "ja": "日本語", "ar": "العربية", "ru": "Русский",
+    "pt": "Português", "nl": "Nederlands", "pl": "Polski", "tr": "Türkçe", "ko": "한국어",
+    "hi": "हिन्दी", "uk": "Українська", "sv": "Svenska", "cs": "Čeština", "ro": "Română",
+    "el": "Ελληνικά", "hu": "Magyar", "fi": "Suomi", "da": "Dansk", "nb": "Norsk",
+    "vi": "Tiếng Việt", "id": "Bahasa Indonesia", "th": "ไทย", "he": "עברית", "fa": "فارسی",
+    "bn": "বাংলা", "ca": "Català",
+}
+LANGUES_RTL = {"ar", "he", "fa", "ur"}
+
+
+def dossiers_langues() -> list[str]:
+    ici = os.path.dirname(os.path.realpath(sys.argv[0]))
+    return [os.path.join(ici, "langues"), os.path.join(ici, "..", "share", "acvram", "langues"),
+            "/usr/share/acvram/langues"]
+
+
+def charger_traductions() -> dict[str, dict[str, str]]:
+    """{code: {source_fr: traduction}} depuis les fichiers trouvés ; fr = source."""
+    out: dict[str, dict[str, str]] = {"fr": {}}
+    for d in dossiers_langues():
+        try:
+            noms = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for n in noms:
+            if not n.endswith(".json") or n.startswith("_") or n[:-5] in out:
+                continue
+            try:
+                with open(os.path.join(d, n), encoding="utf-8") as f:
+                    out[n[:-5]] = json.load(f)
+            except (OSError, ValueError):
+                continue
+    return out
+
+
+TRADUCTIONS = charger_traductions()
+LANGUES = {c: NOMS_LANGUES.get(c, c) for c in TRADUCTIONS}   # seules les langues présentes
+FICHIER_LANGUE = os.path.expanduser("~/.config/acvram/langue")
+
+
+def langue_initiale() -> str:
+    try:
+        v = open(FICHIER_LANGUE, encoding="utf-8").read().strip()
+        if v in LANGUES:
+            return v
+    except OSError:
+        pass
+    v = os.environ.get("ACVRAM_LANG", "") or os.environ.get("LANG", "")
+    v = v[:2].lower()
+    return v if v in LANGUES else "fr"
+
+
+LANGUE = langue_initiale()
+
+
+def T(s: str, **kw) -> str:
+    """Traduction de la langue courante, source française sinon ; les {clés}
+    sont remplies après traduction, pour que l'ordre des mots reste libre."""
+    r = TRADUCTIONS.get(LANGUE, {}).get(s) or s
+    return r.format(**kw) if kw else r
+
+
+def dir_html() -> str:
+    return ' dir="rtl"' if LANGUE in LANGUES_RTL else ""
+
+
 # Le thème de la page, repris pour les écrans natifs (accueil, erreurs) afin
 # que rien ne détonne : mêmes nuances, même police.
 CSS = """
@@ -128,7 +204,7 @@ def modeles_du_parc() -> list[tuple[str, str]]:
 def page_accueil(erreur: str = "") -> str:
     opts = "".join(f'<option value="{c}">{n}</option>' for n, c in modeles_du_parc())
     if not opts:
-        opts = '<option disabled>aucun modèle converti trouvé — ACVRAM_PARC ?</option>'
+        opts = f'<option disabled>{T("aucun modèle converti trouvé — ACVRAM_PARC ?")}</option>'
     cartes = ""
     try:
         out = subprocess.run(["nvidia-smi", "--query-gpu=index,name,memory.total",
@@ -138,44 +214,40 @@ def page_accueil(erreur: str = "") -> str:
             i, n, m = [x.strip() for x in l.split(",")]
             cartes += f'<option value="{i}">{i} · {n} · {int(m) / 1024:.0f} Gio</option>'
     except Exception:
-        cartes = '<option value="">nvidia-smi indisponible</option>'
+        cartes = f'<option value="">{T("nvidia-smi indisponible")}</option>'
     err = f'<p class="ko">{erreur}</p>' if erreur else ""
-    return f"""<!doctype html><html><head><meta charset="utf-8"><style>{CSS}</style></head><body>
+    return f"""<!doctype html><html lang="{LANGUE}"{dir_html()}><head><meta charset="utf-8"><style>{CSS}</style></head><body>
 <h1>acvram</h1>
-<p class="note">Aucun serveur acvram ne répond sur les ports {" ".join(map(str, PORTS))}.
-Choisissez un modèle et une carte : la console s'ouvrira dès que le serveur répond.</p>
+<p class="note">{T("Aucun serveur acvram ne répond sur les ports {ports}. Choisissez un modèle et une carte : la console s'ouvrira dès que le serveur répond.", ports=" ".join(map(str, PORTS)))}</p>
 {err}
 <div class="carte">
-  <h2>modèle</h2>
+  <h2>{T("modèle")}</h2>
   <select id="modele">{opts}</select>
-  <h2>carte</h2>
+  <h2>{T("carte")}</h2>
   <select id="carte">{cartes}</select>
-  <h2>options</h2>
-  <label><input type="checkbox" id="graphes" checked> graphes CUDA</label><br>
-  <label>emplacements (slots) <input type="number" id="slots" value="4" min="1" max="32" style="width:60px"></label><br>
-  <label>contexte max <input type="number" id="ctx" value="8192" min="512" step="512" style="width:90px"></label>
-  <p><button onclick="lancer()">démarrer le serveur</button></p>
-  <p class="note">Le serveur est un sous-processus de cette fenêtre : la fermer l'arrête.
-  Il tourne sous <code>outils/carte.sh</code> quand il est disponible, avec le verrou de la carte choisie.</p>
+  <h2>{T("options")}</h2>
+  <label><input type="checkbox" id="graphes" checked> {T("graphes CUDA")}</label><br>
+  <label>{T("emplacements (slots)")} <input type="number" id="slots" value="4" min="1" max="32" style="width:60px"></label><br>
+  <label>{T("contexte max")} <input type="number" id="ctx" value="8192" min="512" step="512" style="width:90px"></label>
+  <p><button onclick="lancer()">{T("démarrer le serveur")}</button></p>
+  <p class="note">{T("Le serveur est un sous-processus de cette fenêtre : la fermer l'arrête. Il tourne sous <code>outils/carte.sh</code> quand il est disponible, avec le verrou de la carte choisie.")}</p>
 </div>
 <div class="carte">
-  <h2>modèle déjà en mémoire</h2>
-  <p class="note">Un serveur acvram tourne déjà (lancé par une autre session, un autre port) ?
-  Cette fenêtre ne cherche que les ports {" ".join(map(str, PORTS))} au démarrage — donnez le port exact.</p>
-  <label>port <input type="number" id="port_existant" value="{PORT_DEFAUT}" min="1" max="65535" style="width:90px"></label>
-  <p><button onclick="connecter()">se connecter</button></p>
+  <h2>{T("modèle déjà en mémoire")}</h2>
+  <p class="note">{T("Un serveur acvram tourne déjà (lancé par une autre session, un autre port) ? Cette fenêtre ne cherche que les ports {ports} au démarrage — donnez le port exact.", ports=" ".join(map(str, PORTS)))}</p>
+  <label>{T("port")} <input type="number" id="port_existant" value="{PORT_DEFAUT}" min="1" max="65535" style="width:90px"></label>
+  <p><button onclick="connecter()">{T("se connecter")}</button></p>
 </div>
 <div class="carte">
-  <h2>convertir un modèle</h2>
-  <p class="note">Lance <code>acvram convert</code> sur un répertoire HF (avec <code>config.json</code>) —
-  pas de suggestion de chemin : le répertoire source doit exister.</p>
-  <label>répertoire source <input type="text" id="conv_source" placeholder="/chemin/vers/le/modele-hf" style="width:100%"></label><br>
-  <label>nom de sortie <input type="text" id="conv_nom" placeholder="(defaut : nom du repertoire)" style="width:60%"></label><br>
-  <label>profil <input type="text" id="conv_profil" placeholder="(optionnel)" style="width:40%"></label><br>
-  <label><input type="checkbox" id="conv_essai"> --dry-run (planifie sans convertir)</label>
-  <p><button onclick="convertir()">convertir</button></p>
+  <h2>{T("convertir un modèle")}</h2>
+  <p class="note">{T("Lance <code>acvram convert</code> sur un répertoire HF (avec <code>config.json</code>) — pas de suggestion de chemin : le répertoire source doit exister.")}</p>
+  <label>{T("répertoire source")} <input type="text" id="conv_source" placeholder="{T("/chemin/vers/le/modele-hf")}" style="width:100%"></label><br>
+  <label>{T("nom de sortie")} <input type="text" id="conv_nom" placeholder="{T("(defaut : nom du repertoire)")}" style="width:60%"></label><br>
+  <label>{T("profil")} <input type="text" id="conv_profil" placeholder="{T("(optionnel)")}" style="width:40%"></label><br>
+  <label><input type="checkbox" id="conv_essai"> {T("--dry-run (planifie sans convertir)")}</label>
+  <p><button onclick="convertir()">{T("convertir")}</button></p>
 </div>
-<p class="note" style="margin-top:28px">acvram {version_acvram()} · <a href="{SOUTIEN_URL}" target="_blank" style="color:var(--rose-clair)">Soutenir le projet</a></p>
+<p class="note" style="margin-top:28px">acvram {version_acvram()} · <a href="{SOUTIEN_URL}" target="_blank" style="color:var(--rose-clair)">{T("Soutenir le projet")}</a></p>
 <script>
 function lancer(){{
   const m=document.getElementById('modele').value, c=document.getElementById('carte').value;
@@ -199,16 +271,16 @@ function convertir(){{
 
 
 def page_attente(modele: str) -> str:
-    return f"""<!doctype html><html><head><meta charset="utf-8"><style>{CSS}</style></head><body>
-<h1>acvram</h1><div class="carte"><h2>chargement de <code>{os.path.basename(modele)}</code>…</h2>
-<p class="note" id="j">le journal du serveur défile ci-dessous</p><pre id="log" style="font-size:11px;color:#c98fae;max-height:60vh;overflow:auto"></pre></div>
+    return f"""<!doctype html><html lang="{LANGUE}"{dir_html()}><head><meta charset="utf-8"><style>{CSS}</style></head><body>
+<h1>acvram</h1><div class="carte"><h2>{T("chargement de")} <code>{os.path.basename(modele)}</code>…</h2>
+<p class="note" id="j">{T("le journal du serveur défile ci-dessous")}</p><pre id="log" style="font-size:11px;color:#c98fae;max-height:60vh;overflow:auto"></pre></div>
 </body></html>"""
 
 
 def page_conversion(source: str) -> str:
-    return f"""<!doctype html><html><head><meta charset="utf-8"><style>{CSS}</style></head><body>
-<h1>acvram</h1><div class="carte"><h2>conversion de <code>{os.path.basename(source.rstrip("/"))}</code>…</h2>
-<p class="note" id="j">le journal de <code>acvram convert</code> défile ci-dessous</p><pre id="log" style="font-size:11px;color:#c98fae;max-height:60vh;overflow:auto"></pre></div>
+    return f"""<!doctype html><html lang="{LANGUE}"{dir_html()}><head><meta charset="utf-8"><style>{CSS}</style></head><body>
+<h1>acvram</h1><div class="carte"><h2>{T("conversion de")} <code>{os.path.basename(source.rstrip("/"))}</code>…</h2>
+<p class="note" id="j">{T("le journal de <code>acvram convert</code> défile ci-dessous")}</p><pre id="log" style="font-size:11px;color:#c98fae;max-height:60vh;overflow:auto"></pre></div>
 </body></html>"""
 
 
@@ -227,15 +299,31 @@ class Fenetre(Gtk.Window):
         # Barre d'outils native : ce que la page ne peut pas faire seule.
         barre = Gtk.HeaderBar(show_close_button=True, title="acvram")
         self.set_titlebar(barre)
+        self.boutons = []
         for ico, tip, cb in (("view-refresh", "recharger (F5)", self.recharger),
                              ("view-fullscreen", "plein écran (F11)", self.plein_ecran),
                              ("zoom-in", "zoom + (Ctrl +)", lambda *_: self.zoom(0.1)),
                              ("zoom-out", "zoom − (Ctrl −)", lambda *_: self.zoom(-0.1)),
                              ("process-stop", "arrêter le serveur lancé ici", self.arreter_serveur)):
             b = Gtk.Button.new_from_icon_name(ico, Gtk.IconSize.BUTTON)
-            b.set_tooltip_text(tip)
+            b.set_tooltip_text(T(tip))
             b.connect("clicked", cb)
             barre.pack_end(b) if ico == "process-stop" else barre.pack_start(b)
+            self.boutons.append((b, tip))
+        # Langue : menu dans la barre ; le choix est mémorisé et la page
+        # d'accueil (native) est regénérée ; la console servie reste telle
+        # que le serveur la rend.
+        self.menu_langue = Gtk.MenuButton()
+        self.menu_langue.set_tooltip_text(T("Langue"))
+        self.menu_langue.add(Gtk.Label(label=LANGUES[LANGUE]))
+        menu = Gtk.Menu()
+        for code, nom in sorted(LANGUES.items(), key=lambda kv: (kv[0] != "fr", kv[1].lower())):
+            item = Gtk.MenuItem(label=nom)
+            item.connect("activate", lambda _i, c=code: self.changer_langue(c))
+            menu.append(item)
+        menu.show_all()
+        self.menu_langue.set_popup(menu)
+        barre.pack_end(self.menu_langue)
 
         self.web = WebKit2.WebView()
         reglages = self.web.get_settings()
@@ -266,7 +354,8 @@ class Fenetre(Gtk.Window):
         version = Gtk.Label(xalign=1)
         version.set_markup(f'<span size="small" foreground="#c98fae">acvram {version_acvram()}</span>')
         pied.pack_end(version, False, False, 4)
-        soutien = Gtk.LinkButton.new_with_label(SOUTIEN_URL, "Soutenir")
+        soutien = Gtk.LinkButton.new_with_label(SOUTIEN_URL, T("Soutenir"))
+        self.b_soutien = soutien
         soutien.set_tooltip_text(SOUTIEN_URL)
         soutien.set_relief(Gtk.ReliefStyle.NONE)
         pied.pack_end(soutien, False, False, 0)
@@ -280,6 +369,26 @@ class Fenetre(Gtk.Window):
         if port:
             self.ouvrir(port)
         else:
+            self.web.load_html(page_accueil(), "file:///")
+
+    # -- langue -------------------------------------------------------------
+    def changer_langue(self, code: str):
+        global LANGUE
+        if code not in LANGUES or code == LANGUE:
+            return
+        LANGUE = code
+        try:
+            os.makedirs(os.path.dirname(FICHIER_LANGUE), exist_ok=True)
+            with open(FICHIER_LANGUE, "w", encoding="utf-8") as f:
+                f.write(code + "\n")
+        except OSError:
+            pass
+        for b, tip in self.boutons:
+            b.set_tooltip_text(T(tip))
+        self.menu_langue.get_child().set_text(LANGUES[code])
+        self.menu_langue.set_tooltip_text(T("Langue"))
+        self.b_soutien.set_label(T("Soutenir"))
+        if self.port is None and self.proc is None:
             self.web.load_html(page_accueil(), "file:///")
 
     # -- navigation ---------------------------------------------------------
@@ -349,14 +458,14 @@ class Fenetre(Gtk.Window):
         try:
             port = int(d["port"])
         except (KeyError, ValueError):
-            self.web.load_html(page_accueil("port invalide."), "file:///")
+            self.web.load_html(page_accueil(T("port invalide.")), "file:///")
             return
         if serveur_acvram(port):
             self.ouvrir(port)
         else:
-            self.web.load_html(page_accueil(
-                f"aucun serveur acvram ne répond sur le port {port} "
-                f"(vérifié : /v1/models doit porter le champ « acvram »)."), "file:///")
+            self.web.load_html(page_accueil(T(
+                "aucun serveur acvram ne répond sur le port {port} (vérifié : /v1/models doit porter le champ « acvram »).",
+                port=port)), "file:///")
 
     def lancer_serveur(self, d: dict):
         modele = d["modele"]
@@ -382,7 +491,7 @@ class Fenetre(Gtk.Window):
                                          stderr=subprocess.STDOUT, text=True,
                                          start_new_session=True)
         except OSError as e:
-            self.web.load_html(page_accueil(f"impossible de lancer acvram : {e}"), "file:///")
+            self.web.load_html(page_accueil(T("impossible de lancer acvram : {e}", e=e)), "file:///")
             return
         threading.Thread(target=self.suivre_journal, daemon=True).start()
         GLib.timeout_add_seconds(2, self.attendre_serveur)
@@ -397,8 +506,8 @@ class Fenetre(Gtk.Window):
 
     def attendre_serveur(self) -> bool:
         if self.proc and self.proc.poll() is not None:
-            self.web.load_html(page_accueil(
-                f"le serveur s'est arrêté (code {self.proc.returncode}) — voir le journal ci-dessus"), "file:///")
+            self.web.load_html(page_accueil(T(
+                "le serveur s'est arrêté (code {code}) — voir le journal ci-dessus", code=self.proc.returncode)), "file:///")
             self.proc = None
             return False
         if serveur_acvram(PORT_DEFAUT):
@@ -409,8 +518,7 @@ class Fenetre(Gtk.Window):
     def lancer_conversion(self, d: dict):
         source = d.get("source", "")
         if not os.path.isdir(source):
-            self.web.load_html(page_accueil(
-                f"répertoire source introuvable : {source}"), "file:///")
+            self.web.load_html(page_accueil(T("répertoire source introuvable : {source}", source=source)), "file:///")
             return
         cmd = ["acvram", "convert", source]
         if d.get("nom"):
@@ -425,7 +533,7 @@ class Fenetre(Gtk.Window):
                                          stderr=subprocess.STDOUT, text=True,
                                          start_new_session=True)
         except OSError as e:
-            self.web.load_html(page_accueil(f"impossible de lancer acvram convert : {e}"), "file:///")
+            self.web.load_html(page_accueil(T("impossible de lancer acvram convert : {e}", e=e)), "file:///")
             return
         threading.Thread(target=self.suivre_journal, daemon=True).start()
         GLib.timeout_add_seconds(2, self.attendre_conversion)
@@ -436,10 +544,9 @@ class Fenetre(Gtk.Window):
         code = self.proc.returncode
         self.proc = None
         if code == 0:
-            self.web.load_html(page_accueil("conversion terminée — voir models_acvram."), "file:///")
+            self.web.load_html(page_accueil(T("conversion terminée — voir models_acvram.")), "file:///")
         else:
-            self.web.load_html(page_accueil(
-                f"acvram convert a échoué (code {code}) — voir le journal ci-dessus."), "file:///")
+            self.web.load_html(page_accueil(T("acvram convert a échoué (code {code}) — voir le journal ci-dessus.", code=code)), "file:///")
         return False
 
     def arreter_serveur(self, *_):
@@ -451,7 +558,7 @@ class Fenetre(Gtk.Window):
                 os.killpg(self.proc.pid, signal.SIGKILL)
         self.proc = None
         self.port = None
-        self.web.load_html(page_accueil("serveur arrêté."), "file:///")
+        self.web.load_html(page_accueil(T("serveur arrêté.")), "file:///")
 
     # -- barre d'état -------------------------------------------------------
     def rafraichir_etat(self) -> bool:
@@ -476,7 +583,7 @@ class Fenetre(Gtk.Window):
         except Exception:
             pass
         if self.port:
-            parts.append(f"serveur :{self.port}")
+            parts.append(T("serveur :{port}", port=self.port))
         self.etat.set_markup('<span size="small" foreground="#c98fae">' + "   ·   ".join(parts) + "</span>")
         return True
 

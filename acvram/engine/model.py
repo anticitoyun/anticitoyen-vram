@@ -1346,6 +1346,17 @@ class MoEBlock(nn.Module):
                 _act_sans_a4 = _activation
                 def _activation(g, u, m, kd, _f=_act_sans_a4):   # noqa: F811
                     return fausse_quant_nvfp4(_f(g, u, m, kd))
+        if _PREFILL_A8 != "off" and not mma:
+            # porte qualité W4A8 (poste7-w4a4-clos-w4a8-porte-19-09) : même geste que la
+            # porte A4, activations arrondies en int8 par jeton (le quantificateur du
+            # chemin a8/cublas, au bit) ou en E4M3 bloc 16 (témoin `.kind::mxf8f6f4`)
+            partage_a8 = xs_u is xs
+            xs = fausse_quant_a8(xs, _PREFILL_A8_FMT)
+            xs_u = xs if partage_a8 else fausse_quant_a8(xs_u, _PREFILL_A8_FMT)
+            if _PREFILL_A8 == "both":
+                _act_sans_a8 = _activation
+                def _activation(g, u, m, kd, _f=_act_sans_a8):   # noqa: F811
+                    return fausse_quant_a8(_f(g, u, m, kd), _PREFILL_A8_FMT)
         if mma:
             # poids ET activations en 4 bits : les activations sont quantifiées
             self._chemin('mma')
@@ -2000,10 +2011,38 @@ _PREFILL_GROUPED = os.environ.get("ACVRAM_PREFILL_GROUPED", "marlin")
 _PREFILL_A4 = os.environ.get("ACVRAM_PREFILL_A4", "off")
 if _PREFILL_A4 not in ("off", "gateup", "both"):
     raise ValueError(f"ACVRAM_PREFILL_A4={_PREFILL_A4!r} : off | gateup | both")
+# ACVRAM_PREFILL_A8=off|gateup|both : porte qualité W4A8 (poste7-w4a4-clos-w4a8-porte-19-09) — la
+# fausse quant des activations du prefill MoE en int8 par jeton (ACVRAM_PREFILL_A8_FMT=int8,
+# défaut : l'arrondi de `quantifier_a8`, celui des chemins a8/cublas) ou en E4M3 bloc 16
+# (=e4m3, témoin : le format d'activation de la MMA mxf8f6f4). Aucun noyau : la perte, pas la
+# vitesse. Exclusive de PREFILL_A4 (deux arrondis empilés ne mesureraient rien).
+_PREFILL_A8 = os.environ.get("ACVRAM_PREFILL_A8", "off")
+_PREFILL_A8_FMT = os.environ.get("ACVRAM_PREFILL_A8_FMT", "int8")
+if _PREFILL_A8 not in ("off", "gateup", "both"):
+    raise ValueError(f"ACVRAM_PREFILL_A8={_PREFILL_A8!r} : off | gateup | both")
+if _PREFILL_A8_FMT not in ("int8", "e4m3"):
+    raise ValueError(f"ACVRAM_PREFILL_A8_FMT={_PREFILL_A8_FMT!r} : int8 | e4m3")
+if _PREFILL_A8 != "off" and _PREFILL_A4 != "off":
+    raise ValueError("ACVRAM_PREFILL_A8 et ACVRAM_PREFILL_A4 ne se cumulent pas : une porte à la fois")
 
 
 _E2M1 = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
 _E2M1_MILIEUX = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
+
+
+def fausse_quant_a8(x: torch.Tensor, fmt: str = "int8") -> torch.Tensor:
+    """x [G, K] → x arrondi comme le ferait un GEMM W4A8 : `int8` = par jeton,
+    échelle amax/127 et arrondi à demi éloigné de zéro (`quantifier_a8_torch`,
+    au bit du noyau `_quant_a8_kernel`) ; `e4m3` = E4M3 par bloc de 16
+    (`fake_quantize_e4m3_activation`). Sortie dans le dtype de x. Torch pur."""
+    if fmt == "e4m3":
+        from ..quant.fakequant_activation import fake_quantize_e4m3_activation
+        return fake_quantize_e4m3_activation(x)
+    if fmt != "int8":
+        raise ValueError(f"fausse_quant_a8 : format {fmt!r}, attendu int8 | e4m3")
+    from ..kernels.gemm_w8a8 import quantifier_a8_torch
+    a, s = quantifier_a8_torch(x)
+    return (a.to(torch.float32) * s[:, None]).view(x.shape).to(x.dtype)
 
 
 def fausse_quant_nvfp4(x: torch.Tensor) -> torch.Tensor:
@@ -2803,7 +2842,7 @@ class ACVRamModel(nn.Module):
                 and head_dev is not None and head_dev.is_cuda
                 and getattr(lin, "scaler", None) is None and getattr(lin, "streamed", None) is None
                 and getattr(lin, "bias", None) is None
-                and x.shape[0] <= kernels._INT8_GEMV_MAX
+                and kernels.tete_int8_entree_bf16(x.shape[0])
                 and os.environ.get("ACVRAM_TETE_FP32_ENTREE") != "1"):
             return kernels.int8_matmul(x.to(target), w, sortie_fp32=True)
         # Tête NVFP4 à b ≥ DENSE_NVFP4_MIN_M (poste7-gemm-dense-palier2-non-
