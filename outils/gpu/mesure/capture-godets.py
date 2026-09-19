@@ -37,7 +37,8 @@ for B in GODETS:
         # un repli eager VU pendant les pas (plafond, forme hors godet…) rend le godet faux,
         # même si « graphes=on » : le contrôle lit ce que le rejeu a fait, pas ce que l'objet dit
         r["replis_eager"] = sorted(getattr(eng.graphs, "_raisons_eager_vues", set())) if eng.graphs is not None else ["graphes absents"]
-        r["ok"] = bool(r["graphes_on"]) and r["lot"] == B and not r["replis_eager"]
+        r["n_replis_eager"] = int(getattr(eng.graphs, "replis_eager", 0)) if eng.graphs is not None else 0
+        r["ok"] = bool(r["graphes_on"]) and r["lot"] == B and not r["replis_eager"] and r["n_replis_eager"] == 0
         del eng; torch.cuda.empty_cache()
     except Exception as e:
         r["ok"] = False; r["erreur"] = f"{type(e).__name__}: {str(e)[:200]}"; r["trace"] = traceback.format_exc()[-800:]

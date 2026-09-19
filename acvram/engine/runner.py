@@ -345,6 +345,23 @@ def _couverture_experts(model) -> str:
     return f"marlin({n_marlin}/{len(blocs)})"
 
 
+
+def _etat_eco() -> dict:
+    """Relecture SOUS CHARGE à chaque `regime()` : le moteur est chargé, la carte
+    répond ; au chargement seul (carte verrouillée oisive) l'effectif lirait 225."""
+    from .. import eco
+    return eco.etat_eco(relire=True)
+
+
+def _eco_texte(e: dict) -> str:
+    """``eco=2700(2692)`` conforme, ``eco=2700(libre: refus sudo)`` sinon —
+    demandé ≠ effectif est un état nommé, jamais silencieux (poste7-eco-2700-defaut § 2)."""
+    eff = e.get("effectif") if e.get("effectif") is not None else "?"
+    if e.get("etat") == "sans carte":
+        return f"eco={e['demande']}(sans carte)"
+    return f"eco={e['demande']}({eff})" if e.get("conforme") else f"eco={e['demande']}({eff}: {e.get('etat')})"
+
+
 class Engine:
     """Détient le modèle, l'allocateur de blocs et les files de requêtes."""
 
@@ -580,6 +597,8 @@ class Engine:
             # la ligne disait `graphes=on` sur des bras entièrement en eager
             # (poste7-kv-lm4-clos-17-09 § 1)
             "graphes": self.graphs is not None and bool(self.graphs.enabled),
+            "repli_eager": int(getattr(self.graphs, "replis_eager", 0)) if self.graphs is not None else 0,
+            "replis_eager_raisons": sorted(getattr(self.graphs, "_raisons_eager_vues", set())) if self.graphs is not None else [],
             "slots_hybrides": getattr(self.graphs, "max_slots", None) if self.graphs is not None else None,
             "graphes_demandes": self._graphes_demandes,
             "graphes_raison": (self._graphes_raison if self.graphs is None
@@ -607,6 +626,7 @@ class Engine:
             "dense": kernels.narrow_regime(),
             "gdn": _gdn_regime(),
             "noyaux": regime_noyaux()["hors_defaut"],
+            "eco": _etat_eco(),
             "kv_plan_override": self._kv_plan_override,
             # poste7-devstral-llama4-scaling-18-09 : visible meme sous le
             # plafond (non refuse ici), pour ne jamais laisser croire que le
@@ -634,6 +654,7 @@ class Engine:
         slots = r.get("slots_hybrides")
         return (f"régime {etat} — graphes={'on' if r['graphes'] else 'off'}"
                 f"{'' if slots is None else f'(hybrides≤{slots})'} "
+                f"repli_eager={r.get('repli_eager', 0)} "
                f"couches_exilées={r['couches_exilees']}/{r['couches_total']} "
                f"experts_exilés={r['experts_exiles']}/{r['experts_total']} "
                f"{piles_txt} cartes={r['cartes']} "
@@ -649,7 +670,15 @@ class Engine:
                   if self.stats.sequences_ignore_eos else "")
                + f"cache_prefixe={self.stats.hit_rate:.3f} "
                f"({self.stats.cached_prompt_tokens} vram+hôte, "
-               f"{self.stats.host_kv_tokens} hôte)")
+               f"{self.stats.host_kv_tokens} hôte) "
+               + _eco_texte(r["eco"]))
+
+    def fermer(self) -> None:
+        """Arrêt du moteur : rend l'horloge éco posée par ce processus
+        (poste7-eco-2700-defaut-19-09 § 1) — le `-rgc` suit la vie du serveur.
+        Idempotent ; l'atexit et les signaux font le même geste."""
+        from .. import eco
+        eco.rendre_horloge()
 
     # -- admission -------------------------------------------------------
     def _eos_ids(self) -> set[int]:

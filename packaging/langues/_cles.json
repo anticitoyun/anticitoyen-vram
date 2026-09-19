@@ -45,5 +45,22 @@
  "impossible de lancer acvram convert : {e}",
  "conversion terminée — voir models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.",
- "serveur arrêté."
+ "serveur arrêté.",
+ "toutes les options",
+ "MoE sans MLA : q/k/v/o en int8 par canal (P2, régime livré 0.6.15)",
+ "acvram plan a échoué — seules les options lues dans config.json sont proposées",
+ "attention MLA : int8 par canal exclu (REGLES § 9)",
+ "cartes du plan : {g}",
+ "décodage estimé {d} t/s · prefill {p} j/s · poids {w} Gio · KV {k} jetons",
+ "formats mêlés dans le plan ({n}) : --format laissé au planificateur",
+ "le plan DÉBORDE : --force serait nécessaire, non proposé",
+ "proposer les options",
+ "source déjà NVFP4 ({qm}) : passage direct, poids de vLLM servis à l'identique",
+ "un seul format dans le plan : {f}",
+ "2100 (éco fort, lots ≥ 8)",
+ "2700 (défaut)",
+ "acvram eco {mode} a échoué (code {code}) : {texte}",
+ "off (horloge libre)",
+ "verrouille l'horloge de la carte pendant le service (sudo nvidia-smi -lgc) ; 2700 = défaut : même vitesse, −9 à −27 % d'énergie ; off = horloge libre",
+ "éco d'horloge"
 ]

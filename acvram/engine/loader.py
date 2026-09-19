@@ -207,6 +207,13 @@ def load_model(path: str, plan: Optional[Plan] = None,
 
     spec = ModelSpec(**{k: v for k, v in manifest["model"].items()
                         if k in ModelSpec.__dataclass_fields__})
+    # Éco par défaut (poste7-eco-2700-defaut-19-09 § 1) : le processus qui charge
+    # un moteur pose l'horloge SM (`-lgc 2700,2700`) AVANT le premier octet
+    # chargé, une fois par processus ; rendue par `Engine.fermer`, atexit et
+    # SIGTERM/SIGINT. Sans carte (CUDA_VISIBLE_DEVICES vide) ou sous
+    # ACVRAM_ECO=off : rien n'est exécuté, l'état est nommé quand même.
+    from .. import eco as _eco
+    _eco.poser_pour_ce_processus()
     # `ModelSpec.to_dict()` ne serialise pas `raw`, et le manifeste ne porte
     # donc AUCUNE des cles brutes de la configuration. Or le chargeur en lit
     # certaines — `gdn_a_log_negexp` decide si `a_log` doit etre retransforme,

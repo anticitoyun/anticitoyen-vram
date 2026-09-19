@@ -45,5 +45,10 @@
  "impossible de lancer acvram convert : {e}": "αδύνατη η εκκίνηση του acvram convert: {e}",
  "conversion terminée — voir models_acvram.": "η μετατροπή ολοκληρώθηκε — δείτε το models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "το acvram convert απέτυχε (κωδικός {code}) — δείτε το αρχείο καταγραφής παραπάνω.",
- "serveur arrêté.": "ο διακομιστής σταμάτησε."
+ "serveur arrêté.": "ο διακομιστής σταμάτησε.",
+ "toutes les options": "όλες οι επιλογές",
+ "proposer les options": "πρόταση επιλογών",
+ "éco d'horloge": "οικονομική λειτουργία ρολογιού",
+ "2700 (défaut)": "2700 (προεπιλογή)",
+ "off (horloge libre)": "ανενεργό (ελεύθερο ρολόι)"
 }

@@ -45,5 +45,10 @@
  "impossible de lancer acvram convert : {e}": "kan inte starta acvram convert: {e}",
  "conversion terminée — voir models_acvram.": "konverteringen är klar — se models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert misslyckades (kod {code}) — se loggen ovan.",
- "serveur arrêté.": "servern stoppad."
+ "serveur arrêté.": "servern stoppad.",
+ "toutes les options": "alla alternativ",
+ "proposer les options": "föreslå alternativ",
+ "éco d'horloge": "klock-ekoläge",
+ "2700 (défaut)": "2700 (standard)",
+ "off (horloge libre)": "av (fri klocka)"
 }

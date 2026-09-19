@@ -45,5 +45,10 @@
  "impossible de lancer acvram convert : {e}": "تعذّر تشغيل acvram convert: {e}",
  "conversion terminée — voir models_acvram.": "اكتمل التحويل — انظر models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "فشل acvram convert (الرمز {code}) — انظر السجل أعلاه.",
- "serveur arrêté.": "توقف الخادم."
+ "serveur arrêté.": "توقف الخادم.",
+ "toutes les options": "كل الخيارات",
+ "proposer les options": "اقتراح الخيارات",
+ "éco d'horloge": "وضع توفير الساعة",
+ "2700 (défaut)": "2700 (افتراضي)",
+ "off (horloge libre)": "إيقاف (ساعة حرة)"
 }

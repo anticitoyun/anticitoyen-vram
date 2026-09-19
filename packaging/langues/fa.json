@@ -45,5 +45,10 @@
  "impossible de lancer acvram convert : {e}": "اجرای acvram convert ممکن نیست: {e}",
  "conversion terminée — voir models_acvram.": "تبدیل پایان یافت — models_acvram را ببینید.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert ناموفق بود (کد {code}) — گزارش بالا را ببینید.",
- "serveur arrêté.": "سرور متوقف شد."
+ "serveur arrêté.": "سرور متوقف شد.",
+ "toutes les options": "همه گزینه‌ها",
+ "proposer les options": "پیشنهاد گزینه‌ها",
+ "éco d'horloge": "حالت اکو کلاک",
+ "2700 (défaut)": "2700 (پیش‌فرض)",
+ "off (horloge libre)": "خاموش (کلاک آزاد)"
 }

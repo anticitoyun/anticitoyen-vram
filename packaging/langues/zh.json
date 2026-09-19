@@ -45,5 +45,10 @@
  "impossible de lancer acvram convert : {e}": "无法启动 acvram convert：{e}",
  "conversion terminée — voir models_acvram.": "转换完成 — 见 models_acvram。",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert 失败（代码 {code}）— 见上方日志。",
- "serveur arrêté.": "服务器已停止。"
+ "serveur arrêté.": "服务器已停止。",
+ "toutes les options": "所有选项",
+ "proposer les options": "自动建议选项",
+ "éco d'horloge": "时钟节能模式",
+ "2700 (défaut)": "2700（默认）",
+ "off (horloge libre)": "关闭（自由时钟）"
 }

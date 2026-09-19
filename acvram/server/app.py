@@ -206,6 +206,8 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
     async def _shutdown() -> None:
         service.stop()
         app.state.anneau_energie.stop()
+        if hasattr(engine, "fermer"):
+            engine.fermer()                               # rend l'horloge éco (-rgc)
 
     # -- console ----------------------------------------------------------
     # Le paquet s'installait sans rien de visible : ni entree de menu, ni
@@ -868,6 +870,8 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                 # 18/09, acvram [0,1] contre llama.cpp [0], énergie faussée
                 # par le repos de la carte inutilisée.
                 "cartes": engine.regime()["cartes"],
+                "repli_eager": engine.regime().get("repli_eager", 0),
+                "replis_eager_raisons": engine.regime().get("replis_eager_raisons", []),
                 "energie": _energie_par_jeton(),
                 # Ajout n°4 (poste7-gui-ajouts-18-09 § 4) : la meme ligne,
                 # octet pour octet, que le "[regime]" ecrit dans le JSON

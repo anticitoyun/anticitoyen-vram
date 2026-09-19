@@ -121,6 +121,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("PA_SANS_COMPTEUR", "", None, None, "attention paginée sans compteur"),
     Variable("INT8_GEMV_WARP", "", None, None, "warps du GEMV int8 (lu dans le .cu)"),
     Variable("INT8_TRANCHE", "", None, None, "découpage du GEMV int8 (12 = ancien, témoin ; lu dans le .cu)"),
+    Variable("ECO", "", None, None,
+             "poste7-eco-2700-defaut-19-09 § 1 : mode éco d'horloge DEMANDÉ par un instrument pour ses bras A/B (2700 | 2100 | off), jamais pour le service — le service lit config.json (\"eco\": \"2700\" par défaut) ; l'effectif est sur la ligne de régime (eco=<demandé>(<effectif>)) et un instrument ne publie pas si demandé ≠ effectif"),
     Variable("DOUBLE_DISPOSITION_DIAG", "0", None, "0",
              "diagnostic seulement (bissection du biais GEMV (b), poste7-p1-situ-verdict-18-09) : 1 = les deux dispositions gardées, préfill {groupe|marlin} × décodage {naturel|marlin} sur les mêmes piles ; jamais un régime servi"),
     Variable("MOE_GEMV", "v1", ("acvram.engine.model", "_MOE_GEMV"), "v1",
@@ -147,6 +149,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("TETE_FP32_ENTREE", "", None, "1"),
     # --- MoE ------------------------------------------------------------
     Variable("MOE_MMA", "1", ("acvram.engine.model", "_MOE_MMA"), "0", "prefill W4A4 sur MMA FP4"),
+    Variable("MOE_DECODE_MMA_MARLIN", "0", ("acvram.engine.model", "_MOE_DECODE_MMA_MARLIN"), "0",
+             "C17 (chantier-c17-mma2-lit-marlin-19-09) : sous la disposition unique Marlin, le décodage MoE par la MMA groupée (MOE_DECODE_MMA, t ≥ MIN_T) lit les TUILES MARLIN au lieu de laisser la GEMV Marlin ; 0 = jamais (défaut jusqu'au scellé) ; Mesure 1-ter sous 2 700 : ×0,89 à 45 distincts, ×1,23 à 8"),
     Variable("MOE_MMA_BT", "64", ("acvram.engine.model", "_MOE_MMA_BT")),
     Variable("MOE_MMA_ETAGES", "4", ("acvram.engine.model", "_MOE_MMA_ETAGES")),
     Variable("MOE_MMA_KS", "128", ("acvram.engine.model", "_MOE_MMA_KS")),
@@ -178,8 +182,12 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MLA_PREP_NOYAU", "1", ("acvram.engine.mla", "_MLA_PREP_NOYAU"), "0"),
     Variable("MLA_GLUE", "0", ("acvram.engine.mla", "_MLA_GLUE"), "0",
              "C15 (chantier-c15-19-09) : 1 = glue torch du décodage MLA b=1 retirée au bit (v_b fp32 une fois, cat kvp, stack RoPE, demi-tables cos/sin, résidu différé add_norm des couches MLA : −6 lancements/couche) | 2 = en plus b=1 par decode_static_batch_complet (mla_prep_batch, numérique du lot, ≤ 1 ulp) | 0 = témoin"),
-    Variable("MLA_TF32", "0", ("acvram.engine.mla", "_MLA_TF32"), "0",
-             "C13 (poste7-c7-clos-c13-attention-glm-19-09, poste7-glm-decode-budget-c14-c15-19-09) : 1 = TF32 autour des deux einsum du cœur d'attention MLA au préfill (scores, o_lat ; entrées 10 bits de mantisse, acc fp32) | 2 = aussi les einsum v_b·o_lat du décodage (le sgemm fp32 de 1,5 ms/pas à b=12) ; 0 défaut = fp32 plein jusqu'au verdict (PPL ± 0,001, prefill GLM ≥ 6 200)"),
+    Variable("MLA_CORE", "tf32", ("acvram.engine.mla", "_MLA_CORE"), "tf32",
+             "C13 (poste7-c13a-defaut-19-09 § 1 + addendum) : précision des deux premiers produits du cœur d'attention MLA au PRÉFILL (scores, o_lat), softmax et noyau mla_1p en fp32 inchangés — tf32 DÉFAUT (C13-a tenu : 7 191 j/s, ΔPPL géo +0,00066) | fp32 (référence de qualité) | bf16 (C13-b : entrées bf16, acc fp32 ; scellé contre fp32 : prefill GLM ≥ 9 000 j/s ET ΔPPL géo ≤ +0,002 → défaut)"),
+    Variable("MLA_CORE_VB", "0", ("acvram.engine.mla", "_MLA_CORE_VB"), "0",
+             "C13 (poste7-c13a-defaut § 2) : 1 = le 3e produit du préfill y = v_b·o_lat (8ae21997) suit MLA_CORE ; 0 = fp32 ; scellé prefill ≥ 7 450 j/s ET ΔPPL géo ≤ +0,001 contre 2 produits → défaut 1"),
+    Variable("MLA_CORE_DECODE", "fp32", ("acvram.engine.mla", "_MLA_CORE_DECODE"), "fp32",
+             "C13 niveau 2 (poste7-c13a-defaut § 2) : régime du cœur au DÉCODAGE (y = v_b·o_lat, sgemm fp32 1,5 ms/pas à b=12), indépendant de MLA_CORE — fp32 défaut | tf32 | bf16 ; scellé sgemm ≤ 0,6 ms ET ppl-decode-kv 3 tranches ± 0,001 ET capture {1,2,8,12,16} 5/5 → défaut"),
     Variable("MLA_A8", "off", ("acvram.engine.mla", "_MLA_A8"), None,
              "porte qualité FP8-MLA (poste7-cloture-23h59-19-09) : fausse quantification torch de l'ENTRÉE de q_b, kv_a et o — off | e4m3 (E4M3 bloc 16, format de la MMA mxf8f6f4) | int8 (par jeton, témoin) ; aucun noyau"),
     Variable("MLA_LATENT_FP8", "0", ("acvram.engine.mla", "_MLA_LATENT_FP8"), "0"),
@@ -198,6 +206,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("FUSION_PARTIELLE", "0", None, "0"),
     Variable("LOGITS_BF16", "", None, "", "1 : tête en bf16 (précision-de-sortie-invisible-à-la-PPL)"),
     Variable("GRAPHS_EAGER", "", None, "1"),
+    Variable("GODETS_B", "1", ("acvram.engine.graphs", "_GODETS_B"), "0",
+             "clé de graphe CUDA, dimension b : 1 = lot arrondi au godet (puissances de deux, plafond HYBRID_SLOTS ; en place depuis le 11/09) | 0 = lot exact, témoin de mesure du chantier C4 (revue/chantier-c4-19-09) ; même sortie dans les deux cas"),
     Variable("PA_ARM", "A", None, "A"),
     Variable("SCALER_SANS_CACHE", "", None, "1"),
 )
@@ -295,8 +305,9 @@ def _horloge() -> Optional[str]:
         return None
     try:
         from . import eco
-        lire = eco.lire_horloge if _LIRE_HORLOGE is None else _LIRE_HORLOGE
-        return eco.etiquette_horloge(lire(eco.index_carte()))
+        if _LIRE_HORLOGE is not None:
+            return eco.etiquette_horloge(_LIRE_HORLOGE(eco.index_carte()))
+        return eco.etiquette_horloge(eco.lire_sous_charge(eco.index_carte()))   # jamais au repos
     except Exception:                                     # noqa: BLE001
         return "?"
 
@@ -346,9 +357,17 @@ def regime_ligne() -> str:
     # 19-09 § 2) est root et hors processus : aucun défaut ACVRAM_* ne bouge,
     # et un chiffre éco passerait pour un chiffre défaut. Nommée seulement
     # quand une carte est visible : à sec la ligne ne change pas.
-    horloge = _horloge()
-    if horloge is not None:
-        parts.append("horloge=" + horloge)
+    try:
+        from . import eco as _eco
+        h = _eco.horloge_du_processus()
+    except Exception:                                     # noqa: BLE001
+        h = None
+    if h is not None and h.etat != "sans carte":
+        parts.append(h.etiquette())                       # eco=<demandé>(<effectif>[: état])
+    else:
+        horloge = _horloge()
+        if horloge is not None:
+            parts.append("horloge=" + horloge)
     return "[régime] " + " ".join(parts)
 
 

@@ -45,5 +45,10 @@
  "impossible de lancer acvram convert : {e}": "ne eblas lanĉi acvram convert: {e}",
  "conversion terminée — voir models_acvram.": "konvertado finita — vidu models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert malsukcesis (kodo {code}) — vidu la protokolon supre.",
- "serveur arrêté.": "servilo haltigita."
+ "serveur arrêté.": "servilo haltigita.",
+ "toutes les options": "ĉiuj opcioj",
+ "proposer les options": "proponi opciojn",
+ "éco d'horloge": "eko-reĝimo de horloĝo",
+ "2700 (défaut)": "2700 (defaŭlta)",
+ "off (horloge libre)": "for (libera horloĝo)"
 }

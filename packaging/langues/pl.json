@@ -45,5 +45,10 @@
  "impossible de lancer acvram convert : {e}": "nie można uruchomić acvram convert: {e}",
  "conversion terminée — voir models_acvram.": "konwersja zakończona — zobacz models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert nie powiódł się (kod {code}) — zobacz dziennik powyżej.",
- "serveur arrêté.": "serwer zatrzymany."
+ "serveur arrêté.": "serwer zatrzymany.",
+ "toutes les options": "wszystkie opcje",
+ "proposer les options": "zaproponuj opcje",
+ "éco d'horloge": "tryb eko zegara",
+ "2700 (défaut)": "2700 (domyślnie)",
+ "off (horloge libre)": "wył. (wolny zegar)"
 }

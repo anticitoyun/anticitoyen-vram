@@ -8,9 +8,12 @@ des noyaux d'un pas de décodage, puis la rejoue pour le prix d'un seul appel.
 Ce que la capture exige — et comment on l'obtient :
 
 * **Des formes fixes.** Un graphe est capturé par *godet* ``(lot, blocs KV)`` :
-  le lot est pris tel quel (un serveur local décode presque toujours à 1), le
-  nombre de blocs est arrondi à la puissance de deux supérieure. La table de
-  blocs est complétée avec le bloc 0 — lu pour rien, masqué par ``seq_lens``.
+  le lot ET le nombre de blocs sont arrondis à la puissance de deux supérieure
+  (lot : `bucket_batch`, depuis le 11/09 ; ``ACVRAM_GODETS_B=0`` rend le lot
+  exact, témoin de mesure). La table de blocs est complétée avec le bloc 0 —
+  lu pour rien, masqué par ``seq_lens`` ; les lignes de rembourrage du lot
+  portent x = 0, slot -1, seq_len 0 (`_fill`) et, sur un hybride, un créneau
+  d'état lié à une sentinelle (`_bind_hybrid`).
 * **Des adresses stables.** Les entrées vivent dans des tampons statiques dont
   seul le contenu change avant chaque rejeu ; le cache RoPE est étendu à la
   longueur maximale *avant* la capture pour ne jamais être réalloué.
@@ -50,8 +53,29 @@ def bucket_batch(n: int) -> int:
     return b
 
 
+# ACVRAM_GODETS_B = 1 (défaut) | 0 : la dimension `b` de la clé de graphe est
+# arrondie au godet (`bucket_batch`, puissances de deux, plafonnée à
+# ACVRAM_HYBRID_SLOTS sur un hybride — en place depuis le 11/09, 70c10a3 et
+# 1213554) ou prise EXACTE (un graphe par taille de lot réelle). Le « 0 » est
+# le témoin de mesure du chantier C4 (revue/chantier-c4-19-09) : ce que les
+# godets rapportent quand un lot se vide séquence par séquence (12 → 1 : douze
+# clés exactes contre cinq godets, sous le plafond MAX_GRAPHS=16) ne se lit
+# que contre un bras sans godets. Lu une fois, à l'import ; `regime.masquer`
+# réécrit `_GODETS_B` sur le module déjà importé.
+_GODETS_B = os.environ.get("ACVRAM_GODETS_B", "1") != "0"
+
+
+def godet_lot(b_reel: int) -> int:
+    """La dimension `b` de la clé d'un lot dense : le godet, ou le lot exact
+    sous ``ACVRAM_GODETS_B=0``."""
+    return bucket_batch(b_reel) if _GODETS_B else b_reel
+
+
 def godet_hybride(b_reel: int, max_slots: int) -> Optional[int]:
     """Le godet à utiliser pour un lot hybride, ou ``None`` s'il refuse.
+
+    Sous ``ACVRAM_GODETS_B=0`` : le lot exact tant qu'il tient dans les
+    créneaux (``b_reel <= max_slots``), refus au-delà, comme au défaut.
 
     Bug du 13/09 (bead anticitoyen-vram-x0s) : comparer ``bucket_batch(b_reel)``
     (une puissance de deux) à ``max_slots`` faisait tomber en eager,
@@ -66,13 +90,15 @@ def godet_hybride(b_reel: int, max_slots: int) -> Optional[int]:
     """
     if b_reel > max_slots:
         return None
+    if not _GODETS_B:
+        return b_reel
     return min(bucket_batch(b_reel), max_slots)
 from .layers import QuantLinear
 from .model import DecoderLayerGDN, ForwardBatch, MoEBlock
 
 from .mla import MLA_BUCKET, godet_mla   # un graphe par palier de cache latent
 
-__all__ = ["GraphRunner", "bucket_batch", "godet_hybride"]
+__all__ = ["GraphRunner", "bucket_batch", "godet_hybride", "godet_lot"]
 
 # Plafond du NOMBRE TOTAL de graphes captures. Chaque graphe retient sa memoire
 # d'activations, d'ou un plafond ; mais il faut lire ce qu'il fait vraiment.
@@ -193,6 +219,7 @@ class GraphRunner:
         self.captures = 0
         self._last_key: Optional[tuple[int, int]] = None
         self._raisons_eager_vues: set = set()
+        self.replis_eager = 0                  # pas retombés en eager depuis le démarrage
         # Posée AVANT _eligible, qui la remplit : l'initialiser après
         # l'effacerait à chaque fois, et le message aurait annoncé
         # « raison non nommée » pour tous les cas nommés.
@@ -336,6 +363,12 @@ class GraphRunner:
         serveur qui replie à chaque pas sur le même motif ne doit pas noyer
         sa propre sortie.
         """
+        # compte TOUT repli en service, pas seulement la première raison :
+        # trois replis silencieux en une soirée (plafond hybride, capture
+        # aveugle, MLA spéculatif — 19/09) ; `/metrics.repli_eager`,
+        # `regime_ligne()` porte `repli_eager=N`, certifie/capture rendent
+        # faux si N > 0 (poste7)
+        self.replis_eager = getattr(self, "replis_eager", 0) + 1
         if raison in self._raisons_eager_vues:
             return
         self._raisons_eager_vues.add(raison)
@@ -370,7 +403,7 @@ class GraphRunner:
         if ql != 1 and not self.paged_ok:
             return False                      # la verification exige le noyau
         b_reel = batch.batch_size
-        b = bucket_batch(b_reel)
+        b = godet_lot(b_reel)                 # ACVRAM_GODETS_B : godet ou lot exact
         nblk = bucket_blocks(max(t.shape[0] for t in batch.block_tables))
         if nblk * BLOCK_SIZE > self.max_model_len + BLOCK_SIZE:
             nblk = bucket_blocks((self.max_model_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
@@ -558,6 +591,19 @@ class GraphRunner:
 
     def _bind_hybrid(self, batch: ForwardBatch, lb: int,
                      b_godet: int = 0) -> None:
+        """Lie les ``b_godet`` créneaux de chaque couche hybride : les
+        ``len(sids)`` premiers aux séquences du lot, les suivants (godet >
+        lot réel) à une sentinelle chacun.
+
+        LIER `range(godet)` ET NON `sids` (1213554, 11/09 ; MECANISMES
+        « prérequis bloquant ») : un créneau de rembourrage non lié garderait
+        l'état récurrent de son propriétaire précédent, `_la_decode`
+        (model.py) l'avancerait avec les entrées factices du godet — la
+        récurrence mute en place (gdn.py `decode_static`) — et `static_bind`
+        l'exporterait ensuite sous l'identifiant de ce propriétaire : un état
+        corrompu rentre dans une séquence vivante, sans planter. Lié à une
+        sentinelle, le créneau part à zéro et son état n'est jamais exporté
+        (`static_bind`, sid négatif : `_sid_fantome`)."""
         sids = batch.seq_ids or list(range(batch.batch_size))
         b = b_godet or len(sids)
         m = self.model

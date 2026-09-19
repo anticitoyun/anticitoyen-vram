@@ -45,5 +45,10 @@
  "impossible de lancer acvram convert : {e}": "acvram convert kann nicht gestartet werden: {e}",
  "conversion terminée — voir models_acvram.": "Konvertierung abgeschlossen — siehe models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert ist fehlgeschlagen (Code {code}) — siehe Protokoll oben.",
- "serveur arrêté.": "Server angehalten."
+ "serveur arrêté.": "Server angehalten.",
+ "toutes les options": "alle Optionen",
+ "proposer les options": "Optionen vorschlagen",
+ "éco d'horloge": "Takt-Sparmodus",
+ "2700 (défaut)": "2700 (Standard)",
+ "off (horloge libre)": "aus (freier Takt)"
 }
