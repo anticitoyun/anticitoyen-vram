@@ -123,6 +123,25 @@ def _a8(x: torch.Tensor) -> torch.Tensor:
 # lancement `mla_prep_batch` au lieu d'une quinzaine (poste7-duel-verdict § 6.2,
 # marche « RoPE + cat ») ; =0 rejoue les opérations torch (témoin).
 _MLA_PREP_NOYAU = os.environ.get("ACVRAM_MLA_PREP_NOYAU", "1") == "1"
+# C15 (poste7-glm-decode-budget-c14-c15-19-09, chantier-c15-19-09) : glue torch
+# du décodage GLM à b=1 — copies et concaténations qui ne calculent rien,
+# retirées SANS changer un bit (mêmes opérations, mêmes arrondis) :
+#  1 = _v_b32 réutilisé dans _sortie_decode (une conversion fp32 de v_b par
+#      couche et par pas en moins), cat kvp évitée dans _prep_decode (elle
+#      était redécoupée aussitôt), RoPE écrite en place (torch.stack en moins),
+#      tables cos/sin demi indexées en un lancement, et dans model.py le
+#      résidu différé des couches MLA (add + rmsnorm → add_norm, deux
+#      lancements de moins par couche) ; 6 lancements de moins par couche ;
+#      côté MoE (model.py `_forward_grouped`) : tok int64 servi d'avance, eid
+#      converti une fois, x[tok] rassemblé une fois, tok_g = seq — −3 par
+#      couche Marlin, −6 par couche à tables AWQ distinctes, des index (au bit) ;
+#  2 = en plus, b=1 passe par decode_static_batch_complet (mla_prep_batch,
+#      la numérique servie à b=12 : q_abs à ≤ 1 ulp bf16 de cuBLAS, PAS au bit
+#      avec decode_static) ; non vérifié à sec (noyau CUDA) ;
+#  0 = chemin inchangé (témoin).
+_MLA_GLUE = int(os.environ.get("ACVRAM_MLA_GLUE", "0"))
+if _MLA_GLUE not in (0, 1, 2):
+    raise ValueError(f"ACVRAM_MLA_GLUE={_MLA_GLUE!r} : 0 | 1 | 2")
 # Cache latent des créneaux en fp8 E4M3 par ligne (poste7-avis-exterieur-16-09
 # § 6, commit 3 du chantier MLA) : une ligne = W codes + 16 octets (échelle
 # fp32 s = amax/448) ; la moitié des octets lus par l'attention. Lu par
@@ -294,14 +313,30 @@ class MLAttention(nn.Module):
             return q_pe, k_pe
         # DeepSeek-V2/GLM : RoPE de type « norm » (paires adjacentes 2i, 2i+1),
         # pas la demi-rotation NEOX — llama.cpp le range hors LLAMA_ROPE_TYPE_NEOX
-        cos, sin = self.rope_emb(positions, q_pe.device, q_pe.dtype, max_pos=max_pos)
-        half = cos.shape[-1] // 2
-        c = cos[..., :half].unsqueeze(1)                       # [t, 1, r/2]
-        s = sin[..., :half].unsqueeze(1)
+        if _MLA_GLUE and hasattr(self.rope_emb, "tables_demi"):
+            # C15 : les demi-tables cos/sin empilées, UNE indexation par pas
+            # au lieu de deux (mêmes valeurs bf16, découpées après coup)
+            cs = self.rope_emb.tables_demi(positions, q_pe.device, q_pe.dtype, max_pos)
+            half = cs.shape[-1]
+            c = cs[:, 0].unsqueeze(1)                          # [t, 1, r/2]
+            s = cs[:, 1].unsqueeze(1)
+        else:
+            cos, sin = self.rope_emb(positions, q_pe.device, q_pe.dtype, max_pos=max_pos)
+            half = cos.shape[-1] // 2
+            c = cos[..., :half].unsqueeze(1)                   # [t, 1, r/2]
+            s = sin[..., :half].unsqueeze(1)
 
         def tourner(x: torch.Tensor) -> torch.Tensor:
             x2 = x.reshape(*x.shape[:-1], half, 2)
             x0, x1 = x2[..., 0], x2[..., 1]
+            if _MLA_GLUE:
+                # C15 : y0 et y1 écrits en place dans le tampon entrelacé —
+                # les quatre produits et la somme/différence bf16 sont les
+                # mêmes lancements, torch.stack (une copie) disparaît
+                y2 = torch.empty_like(x2)
+                torch.sub(x0 * c, x1 * s, out=y2[..., 0])
+                torch.add(x0 * s, x1 * c, out=y2[..., 1])
+                return y2.reshape(x.shape)
             y0 = x0 * c - x1 * s
             y1 = x0 * s + x1 * c
             return torch.stack((y0, y1), dim=-1).reshape(x.shape)
@@ -508,11 +543,16 @@ class MLAttention(nn.Module):
         prem, kvp = self._proj_entree(x)
         q = self._q_depuis(prem).reshape(1, self.nh, self.nope + self.rope)
         q_nope, q_pe = q.split([self.nope, self.rope], dim=-1)
-        if self.rope_emb is not None:
-            c0, k_pe0 = kvp.split([self.rank, self.rope], dim=-1)
-            q_pe, k_pe0 = self._rope(q_pe, k_pe0, st["len"].view(1), bucket + 1)
-            kvp = torch.cat([c0, k_pe0], dim=-1)
         c, k_pe = kvp.split([self.rank, self.rope], dim=-1)
+        if self.rope_emb is not None:
+            q_pe, k_pe_r = self._rope(q_pe, k_pe, st["len"].view(1), bucket + 1)
+            if _MLA_GLUE:
+                # C15 : la cat [c, k_pe tourné] était redécoupée à la ligne
+                # suivante — même tenseurs, une copie de moins par couche
+                k_pe = k_pe_r
+            else:
+                kvp = torch.cat([c, k_pe_r], dim=-1)
+                c, k_pe = kvp.split([self.rank, self.rope], dim=-1)
         c = self._norme(c, self.kv_a_norm)
         q_abs = torch.einsum('hrn,thn->thr', self.k_b.to(x.dtype), q_nope)
         q_eff = torch.cat([q_abs, q_pe], dim=-1)             # [1, nh, rank+rope]
@@ -521,8 +561,12 @@ class MLAttention(nn.Module):
         return q_eff
 
     def _sortie_decode(self, x: torch.Tensor, st: dict, o_lat: torch.Tensor) -> torch.Tensor:
+        # C15 : v_b converti une fois (_v_b32) au lieu d'à chaque couche et
+        # chaque pas — la conversion bf16 → fp32 est exacte, mêmes bits ;
+        # C13 : le produit lit son régime (_dt_coeur), .to() inerte sous fp32/tf32
+        v_b32 = self._v_b32() if _MLA_GLUE else self.v_b.to(torch.float32)
         with _tf32_coeur(decode=True):
-            y = torch.einsum('hvr,hr->hv', self.v_b.to(_dt_coeur(decode=True)), o_lat.to(_dt_coeur(decode=True)))
+            y = torch.einsum('hvr,hr->hv', v_b32.to(_dt_coeur(decode=True)), o_lat.to(_dt_coeur(decode=True)))
         st["len"].add_(1)
         return self._o(y.reshape(1, self.nh * self.dv).to(x.dtype))
 
@@ -632,7 +676,9 @@ class MLAttention(nn.Module):
         probs = scores.softmax(dim=-1)
         o_lat = torch.einsum('ths,sr->thr', probs,
                              C[:, :self.rank].to(torch.float32))
-        y = torch.einsum('hvr,thr->thv', self.v_b.to(torch.float32), o_lat)
+        # même geste C15 que _sortie_decode : le repli à sec le prouve
+        v_b32 = self._v_b32() if _MLA_GLUE else self.v_b.to(torch.float32)
+        y = torch.einsum('hvr,thr->thv', v_b32, o_lat)
         st["len"].add_(1)
         return self._o(y.reshape(1, self.nh * self.dv).to(x.dtype))
 

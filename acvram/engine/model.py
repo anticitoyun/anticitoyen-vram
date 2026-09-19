@@ -1727,17 +1727,38 @@ class MoEBlock(nn.Module):
             # rotation de Hadamard (poids tournés) : x·H par bloc, la même
             # arithmétique que ChannelScaler.apply — une fois par jeton
             x = fwht_activations(x.to(torch.bfloat16), hd_x).to(x.dtype)
+        glue = _mla_glue() >= 1
+        eid64 = None                                   # C15 : eid int64 une fois par couche (glue)
         if awq.get("gate_proj") is not None or distinct:
             # échelle AWQ par expert : la ligne (jeton, expert) est divisée par
             # s[e] avant les projections, comme ChannelScaler.apply en boucle
-            def _ligne(table):
-                xe = x[tok.long()].to(torch.bfloat16)
-                if table is not None:
-                    xe = xe / table[eid.long(), :x.shape[1]]
-                return xe.to(x.dtype)
-            x_g = _ligne(awq.get("gate_proj"))
-            x_u = _ligne(awq.get("up_proj")) if distinct else x_g
-            tok_g = torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
+            if glue:
+                # C15 (chantier-c15-19-09 § Reste) : les mêmes gathers et
+                # divisions, mais `tok` int64 servi d'avance (index_jetons),
+                # `eid` converti UNE fois par couche au lieu de trois, la ligne
+                # x[tok] rassemblée une fois pour gate et up (entrées
+                # distinctes), et `tok_g` = `seq` déjà réservé (même arange
+                # int32) : −3 lancements par couche Marlin, −6 par couche à
+                # tables distinctes, aucun bit changé (des index).
+                eid64 = eid.long()
+                tok64 = _rp.index_jetons_long(t, self.top_k, x.device) if _seq is not None else tok.long()
+                xe = x[tok64].to(torch.bfloat16)
+                tg, tu = awq.get("gate_proj"), awq.get("up_proj")
+                x_g = (xe / tg[eid64, :x.shape[1]] if tg is not None else xe).to(x.dtype)
+                if distinct:
+                    x_u = (xe / tu[eid64, :x.shape[1]] if tu is not None else xe).to(x.dtype)
+                else:
+                    x_u = x_g
+                tok_g = _seq if _seq is not None else torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
+            else:
+                def _ligne(table):
+                    xe = x[tok.long()].to(torch.bfloat16)
+                    if table is not None:
+                        xe = xe / table[eid.long(), :x.shape[1]]
+                    return xe.to(x.dtype)
+                x_g = _ligne(awq.get("gate_proj"))
+                x_u = _ligne(awq.get("up_proj")) if distinct else x_g
+                tok_g = torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
         else:
             x_g, x_u, tok_g = x, x, tok
         # v2 : paires triées par expert (argsort stable : déterministe, sous
@@ -1817,7 +1838,9 @@ class MoEBlock(nn.Module):
         if hd_d:
             act = fwht_activations(act.to(torch.bfloat16), hd_d).to(act.dtype)
         if awq.get("down_proj") is not None:
-            act = (act.to(torch.bfloat16) / awq["down_proj"][eid.long(), :act.shape[1]]).to(act.dtype)
+            if eid64 is None:
+                eid64 = eid.long()
+            act = (act.to(torch.bfloat16) / awq["down_proj"][eid64, :act.shape[1]]).to(act.dtype)
         if marlin is not None and self.dernier_chemin == "gemv_marlin" and ext is not None \
                 and hasattr(ext, "nvfp4_gemv_marlin"):
             md = marlin["down_proj"]
@@ -2301,6 +2324,14 @@ if not _DOUBLE_DIAG and (_GEMV_LAYOUT == "marlin") != (_PREFILL_GROUPED == "marl
 # séquence par séquence) ; 1 = noyau d'attention seul batché ; 0 = boucle.
 _MLA_BATCH = int(os.environ.get("ACVRAM_MLA_BATCH", "2"))
 
+
+def _mla_glue() -> int:
+    """C15 : niveau de glue MLA (engine/mla.py `_MLA_GLUE`, variable
+    ACVRAM_MLA_GLUE) lu au moment de l'appel — le module mla n'est importé que
+    par le chargeur, et un test masque l'attribut sans réimporter."""
+    from . import mla as _mla
+    return _mla._MLA_GLUE
+
 # P0 (poste7-profil-verdict-18-09) : colle du préfill MoE (tri des paires par
 # expert + grille de tuiles) en deux lancements Triton au lieu d'argsort
 # (radix, 8 lancements) + bincount + ~10 lancements de _tuiles ; mêmes
@@ -2512,6 +2543,28 @@ class DecoderLayerGDN(nn.Module):
             return x
         return self._mlp(x)
 
+    def decode_fixed_res(self, x: torch.Tensor, delta: Optional[torch.Tensor],
+                         positions: torch.Tensor, slots: torch.Tensor,
+                         block_tables: torch.Tensor, seq_lens: torch.Tensor,
+                         max_pos: int, cache, q_len: int = 1):
+        """C15 : ``decode_fixed`` à résidu différé pour les couches MLA (le
+        même contrat que ``DecoderLayer.decode_fixed_res``) : la somme
+        résiduelle de la couche précédente est absorbée par la première norme
+        (``add_norm`` = rmsnorm_bf16 avec résidu, acvram_kernels.cu
+        ``rmsnorm_bf16_kernel`` : ``bf16(fp32(res) + fp32(y))`` — l'addition
+        bf16 de torch, au bit), celle de l'attention par la seconde : deux
+        lancements de moins par couche. Pris par ``ACVRamModel._res_differe``
+        sous ACVRAM_MLA_GLUE ≥ 1 seulement."""
+        if delta is None:
+            h = self.input_layernorm(x)
+        else:
+            x, h = add_norm(x, delta, self.input_layernorm)
+        y = self._la_decode(h, q_len).to(x.dtype)
+        if self.mlp is None:
+            return x, y
+        x, h2 = add_norm(x, y, self.post_attention_layernorm)
+        return x, self.mlp(h2)
+
     def _la_decode(self, h: torch.Tensor, q_len: int) -> torch.Tensor:
         """Attention linéaire sur les tampons fixes ; ``q_len`` > 1 (lot de
         vérification spéculative) déroule les jetons un à un et photographie
@@ -2536,6 +2589,15 @@ class DecoderLayerGDN(nn.Module):
                     return la.decode_static_batch(h, self.statics[:b], self.static_bucket, ptrs, scores)
             return torch.cat([un(h[i:i + 1], self.statics[i]) for i in range(b)], dim=0)
         if q_len == 1:
+            if hasattr(la, "rank") and _mla_glue() >= 2:
+                # C15, niveau 2 : à b=1 aussi, la préparation en un noyau
+                # (mla_prep_batch) et l'écriture du latent en un lancement —
+                # la numérique du lot (servie à b=12), pas celle de la boucle
+                ext = kernels.get_extension()
+                if ext is not None and hasattr(ext, "mla_decode_batch"):
+                    ptrs, scores, len_ptrs = self._mla_lot(1)
+                    return la.decode_static_batch_complet(h, self.statics[:1], self.static_bucket,
+                                                          ptrs, scores, len_ptrs)
             return un(h, self.static)
         hist = self.ensure_hist(q_len)
         ys = []
@@ -3032,7 +3094,7 @@ class ACVRamModel(nn.Module):
                     x, delta, positions, slots, block_tables, seq_lens,
                     max_pos, self.caches.get(i), q_len)
             x, h = add_norm(x, delta, self.norm,
-                            self.layers[-1].residual_multiplier)
+                            getattr(self.layers[-1], "residual_multiplier", 1.0))
             if self.mtp is not None:
                 self._garder_hidden(x)
             return self._logits_finaux(self._tete(h))
@@ -3095,9 +3157,19 @@ class ACVRamModel(nn.Module):
         leurs propres enchaînements de normes."""
         v = getattr(self, "_res_ok", None)
         if v is None:
-            v = all(type(l) is DecoderLayer and l.self_attn is not None
-                    and l.mlp is not None and l.mlp_device == l.device
-                    and hasattr(l, "decode_fixed_res") for l in self.layers) \
+            def ordinaire(l) -> bool:
+                return (type(l) is DecoderLayer and l.self_attn is not None
+                        and l.mlp is not None and l.mlp_device == l.device
+                        and hasattr(l, "decode_fixed_res"))
+
+            def mla_glue(l) -> bool:
+                # C15 : couche MLA (GLM, DeepSeek) sous ACVRAM_MLA_GLUE ≥ 1 —
+                # jamais GDN/Mamba ni les blocs parallèles, qui gardent leurs
+                # enchaînements de normes
+                return (type(l) is DecoderLayerGDN and hasattr(l.linear_attn, "rank")
+                        and l.mlp is not None and l.mlp_device == l.device)
+            glue = _mla_glue() >= 1
+            v = all(ordinaire(l) or (glue and mla_glue(l)) for l in self.layers) \
                 and type(self.norm).__name__ == "RMSNorm"
             self._res_ok = v
         return v

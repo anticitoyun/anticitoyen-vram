@@ -114,6 +114,18 @@ def index_jetons(t: int, k: int, device) -> tuple[torch.Tensor, torch.Tensor]:
     return _INDEX[cle]
 
 
+_INDEX_LONG: dict = {}
+
+
+def index_jetons_long(t: int, k: int, device) -> torch.Tensor:
+    """``tok`` [T·k] en int64, réservé une fois par (T, k, appareil) — C15 :
+    l'indexation AWQ (``x[tok]``) le convertissait à chaque couche et chaque pas."""
+    cle = (t, k, str(device))
+    if cle not in _INDEX_LONG:
+        _INDEX_LONG[cle] = index_jetons(t, k, device)[0].long().contiguous()
+    return _INDEX_LONG[cle]
+
+
 def route_prep(topi: torch.Tensor, valid, usage: torch.Tensor) -> torch.Tensor:
     """``topi`` [T, k] int32, ``valid`` [T] bool ou None, ``usage`` [E] int64
     (incrémenté en place) → ``eid`` [T·k] int32."""
