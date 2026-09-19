@@ -134,6 +134,34 @@ _POSITIONS_MINIMALES = 512
 
 # Bornes des tranches de contexte, en jetons vus par la position notee.
 _TRANCHES = ((0, 8), (8, 32), (32, 128), (128, 512), (512, 0))
+# positions par tranche de tête dans `perplexity` (ACVRAM_PPL_TRANCHE) : 256
+# → logits fp32 256 × 151 936 = 156 Mio par tranche au lieu de 1,2 Gio
+_PPL_TRANCHE = int(os.environ.get("ACVRAM_PPL_TRANCHE", "256"))
+
+
+def h_device_cuda(model) -> bool:
+    try:
+        return next(model.parameters()).device.type == "cuda"
+    except Exception:                                        # noqa: BLE001
+        return False
+
+
+def _pertes_par_tranches(model, h: torch.Tensor, targets: torch.Tensor,
+                         first_new: int, tranche: int = 0) -> torch.Tensor:
+    """NLL par position, positions `first_new` … n−2 (le logit i prédit le
+    jeton i+1), la tête appliquée par tranches de `tranche` positions sur les
+    états cachés normalisés `h` [n, hidden] — arithmétique de `forward`
+    (`_tete` puis `_logits_finaux`, logits fp32), fenêtre entière ou non."""
+    tranche = tranche or _PPL_TRANCHE
+    n = h.shape[0]
+    morceaux = []
+    for a in range(first_new, n - 1, tranche):
+        b = min(a + tranche, n - 1)
+        logits = model._logits_finaux(model._tete(h[a:b])).to(torch.float32)
+        morceaux.append(torch.nn.functional.cross_entropy(
+            logits, targets[a:b], reduction="none"))
+        del logits
+    return torch.cat(morceaux) if morceaux else torch.zeros(0, device=h.device)
 
 
 def _load_corpus(path: Optional[str]) -> str:
@@ -241,28 +269,35 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
             block_tables=[torch.tensor(blocks, dtype=torch.long)],
             slot_mapping=slots, is_prefill=True)
 
-        logits = model(batch, logits_positions=batch.all_token_indices())
-        logits = logits[:-1].to(torch.float32)
-        targets = torch.tensor(chunk[1:], dtype=torch.long, device=logits.device)
-
         # On ne note que les positions que cette fenêtre expose pour la
         # première fois, afin qu'un jeton ne soit jamais compté deux fois avec
         # des quantités de contexte différentes.
         first_new = 0 if start == 0 else max(0, (window - stride) - 1)
         # Le logit d'indice i predit le jeton i+1 en ayant vu i+1 jetons.
         first_new = max(first_new, min_context)
-        if first_new >= logits.shape[0]:
+        if first_new >= n - 1:
             break
-        nll = torch.nn.functional.cross_entropy(
-            logits[first_new:], targets[first_new:], reduction="sum")
+        # La tête et la log-softmax par TRANCHES de positions (poste7-p2-ppl-
+        # instrument-file-7h-19-09) : les logits fp32 d'une fenêtre entière
+        # (2 047 × 151 936 = 1,2 Gio) plus la déquant de la tête plus la
+        # log-softmax faisaient un pic de 4 Gio que le service ne connaît
+        # jamais (tête à n ≤ 12) — OOM sur le converti i8c à 30 Gio pris.
+        # Les états cachés normalisés sont rendus une fois ; chaque tranche
+        # passe par `_tete` + `_logits_finaux`, les MÊMES fonctions que
+        # `forward`, donc les mêmes valeurs (tests/test_ppl_tranches.py).
+        h = model(batch, return_hidden=True)
+        targets = torch.tensor(chunk[1:], dtype=torch.long, device=h.device)
+        pertes = _pertes_par_tranches(model, h, targets, first_new)
+        nll = pertes.sum()
         total_nll += float(nll)
-        counted += int(targets[first_new:].numel())
+        counted += int(pertes.numel())
+        del h
+        if torch.cuda.is_available() and h_device_cuda(model):
+            torch.cuda.empty_cache()
         # Le meme cout, reparti par quantite de contexte disponible : c'est ce
         # qui dit si un chiffre eleve vient du modele ou des premieres
         # positions. Sans ce detail, un corpus de 283 jetons et un corpus de
         # 100 000 rendent deux nombres qu'on croit comparables.
-        pertes = torch.nn.functional.cross_entropy(
-            logits[first_new:], targets[first_new:], reduction="none")
         for k, (bas, haut) in enumerate(_TRANCHES):
             i0 = max(0, bas - first_new)
             i1 = min(pertes.shape[0], haut - first_new) if haut else pertes.shape[0]

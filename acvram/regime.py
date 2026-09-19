@@ -92,6 +92,8 @@ VARIABLES: tuple[Variable, ...] = (
              "porte qualité W4A4 du prefill MoE : fausse quantification NVFP4 des activations en torch — off | gateup (entrée de gate/up) | both (+ entrée de down) ; poste7-lecture-profils-coder-17-09"),
     Variable("PREFILL_A8", "off", ("acvram.engine.model", "_PREFILL_A8"), None,
              "porte qualité W4A8 du prefill MoE (poste7-w4a4-clos-w4a8-porte-19-09) : fausse quantification des activations en torch — off | gateup | both ; format par PREFILL_A8_FMT ; exclusive de PREFILL_A4 ; scellé ratio − 1,0155 ≤ 0,004"),
+    Variable("PREFILL_W8R", "0", ("acvram.engine.model", "_PREFILL_W8R"), "0",
+             "porte qualité W8r (poste7-poursuite-chantiers-19-09) : experts déquantifiés par _pile_bf16 re-arrondis en int8 symétrique par ligne — 1 = porte ; ne s'applique qu'aux chemins PREFILL_GROUPED=grouped_mm|bmm (pile naturelle, GEMV_LAYOUT=naturel) ; aucun noyau"),
     Variable("PREFILL_A8_FMT", "int8", ("acvram.engine.model", "_PREFILL_A8_FMT"), None,
              "format de la porte A8 : int8 (par jeton, amax/127, l'arrondi de quantifier_a8 au bit) | e4m3 (E4M3 bloc 16, témoin mxf8f6f4)"),
     Variable("SANS_FUSION", "", None, "1"),
@@ -129,6 +131,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MLA_BUCKET", "128", ("acvram.engine.mla", "MLA_BUCKET")),
     Variable("MLA_UNE_PASSE", "1", ("acvram.engine.mla", "_MLA_UNE_PASSE"), "0"),
     Variable("MLA_PREP_NOYAU", "1", ("acvram.engine.mla", "_MLA_PREP_NOYAU"), "0"),
+    Variable("MLA_A8", "off", ("acvram.engine.mla", "_MLA_A8"), None,
+             "porte qualité FP8-MLA (poste7-cloture-23h59-19-09) : fausse quantification torch de l'ENTRÉE de q_b, kv_a et o — off | e4m3 (E4M3 bloc 16, format de la MMA mxf8f6f4) | int8 (par jeton, témoin) ; aucun noyau"),
     Variable("MLA_LATENT_FP8", "0", ("acvram.engine.mla", "_MLA_LATENT_FP8"), "0"),
     Variable("KV_LM4_SEUL", "", None, None, "diagnostic lm4 (kvcache.write) : lm4 sur k ou v seulement, int8 ailleurs"),
     Variable("KV_LM4_PUITS", "", None, None, "diagnostic lm4 : positions < N gardées int8 ; 0 = contrôle (lm4 partout par le diagnostic)"),
@@ -156,7 +160,7 @@ HORS_REGIME = frozenset({
     "ACVRAM_TRACE_CRENEAUX", "ACVRAM_TRACE_ENTREES", "ACVRAM_TRACE_PTRS",
     "ACVRAM_TRACE_ROUTAGE", "ACVRAM_TRACE_STEPS", "ACVRAM_TRACE_COUCHES", "ACVRAM_CHRONO_SYNC", "ACVRAM_SYNC_COUCHES",
     "ACVRAM_WARM_GRAPHS", "ACVRAM_WARM_SPEC", "ACVRAM_PLAN_FIGE", "ACVRAM_SANS_REPLAN",
-    "ACVRAM_SANS_PRECHARGE", "ACVRAM_POOL_SYNC", "ACVRAM_PIPELINE", "ACVRAM_PREFILL_BATCH",
+    "ACVRAM_SANS_PRECHARGE", "ACVRAM_POOL_SYNC", "ACVRAM_PIPELINE", "ACVRAM_PREFILL_BATCH", "ACVRAM_PPL_TRANCHE",
     "ACVRAM_SPECULATION_LOT_MAX", "ACVRAM_MTP", "ACVRAM_HYBRID_SLOTS", "ACVRAM_DENSE_SLOTS", "ACVRAM_DEQUANT_TRANCHE_MAX",
     "ACVRAM_DENSE_ETROIT_BN", "ACVRAM_DENSE_ETROIT_BK", "ACVRAM_DENSE_ETROIT_WARPS", "ACVRAM_DENSE_ETROIT_STAGES", "ACVRAM_INSTA_PAS",
     "ACVRAM_GRAPHES_TABLE", "ACVRAM_MLP_HOTE_CPU", "ACVRAM_KDA_CHUNK", "ACVRAM_MAMBA_CHUNK",
@@ -180,6 +184,9 @@ HORS_REGIME = frozenset({
     "ACVRAM_INT8_GEMV_WARP", "ACVRAM_INT8_TRANCHE", "ACVRAM_PA_CHUNK", "ACVRAM_PA_ETAPE",
     "ACVRAM_PAGED_ALLOC", "ACVRAM_PA_SANS_COMPTEUR",
     "ACVRAM_MARLIN_CACHE",       # dossier de compilation du port Marlin (P1), pas un chemin de calcul
+    # exportée par outils/carte.sh à ce qu'il lance (son PID) : eco.py s'en sert
+    # pour ne pas refuser sa propre prise de la carte ; n'aiguille aucun calcul
+    "ACVRAM_CARTE_TENUE",
 })
 
 
@@ -215,6 +222,29 @@ def regime_noyaux() -> dict:
         "backends_masques": sorted(backends._MASQUES),
         "noyaux_masques": kernels.noyaux_masques(),
     }
+
+
+_LIRE_HORLOGE = None   # tests : remplace acvram.eco.lire_horloge quand non None
+
+
+def _horloge() -> Optional[str]:
+    """Étiquette de l'horloge SM (acvram.eco) : lgc<MHz> | libre | ?, ou None
+    sans carte (CUDA_VISIBLE_DEVICES vide, ou torch sans CUDA) — à sec la
+    ligne de régime ne change pas."""
+    if os.environ.get("CUDA_VISIBLE_DEVICES") == "":
+        return None
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return None
+    except Exception:                                     # noqa: BLE001
+        return None
+    try:
+        from . import eco
+        lire = eco.lire_horloge if _LIRE_HORLOGE is None else _LIRE_HORLOGE
+        return eco.etiquette_horloge(lire(eco.index_carte()))
+    except Exception:                                     # noqa: BLE001
+        return "?"
 
 
 def regime_ligne() -> str:
@@ -258,6 +288,13 @@ def regime_ligne() -> str:
         parts.append("fla=" + getattr(fla, "__version__", "?"))
     except Exception:
         parts.append("fla=absent")
+    # L'horloge SM verrouillée (`nvidia-smi -lgc`, mode éco, poste7-e1-eco-tenu-
+    # 19-09 § 2) est root et hors processus : aucun défaut ACVRAM_* ne bouge,
+    # et un chiffre éco passerait pour un chiffre défaut. Nommée seulement
+    # quand une carte est visible : à sec la ligne ne change pas.
+    horloge = _horloge()
+    if horloge is not None:
+        parts.append("horloge=" + horloge)
     return "[régime] " + " ".join(parts)
 
 

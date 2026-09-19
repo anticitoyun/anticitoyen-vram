@@ -1032,6 +1032,16 @@ class MoEBlock(nn.Module):
         if any(piles[n][0] != "nvfp4" for n in ("gate_proj", "up_proj", "down_proj") if n in piles) \
                 or "gate_proj" not in piles:
             raison = "piles non NVFP4"
+        elif awq.get("up_distinct"):
+            # la disposition unique ne rend la pile naturelle QUE si le GEMV
+            # Marlin couvre la forme du MoE (poste7, 19/09, verdict-glm-b12) :
+            # gate et up à entrées distinctes (tables AWQ séparées, GLM
+            # k48-calibA) ne sont pas servies par le noyau fusionné — au premier
+            # pas GLM, `_grouped` recevait une pile rendue (qw=None), serveur
+            # mort. Refus nommé : pile gardée, chemins d'avant (prefill
+            # « groupe », décodage `_grouped`) ; la forme distincte est le
+            # chantier C10 (GEMV Marlin à une projection, gate puis up).
+            raison = "gate/up à entrées distinctes (tables AWQ séparées) : GEMV Marlin fusionné inapplicable — chemin d'avant gardé (C10)"
         elif piles["gate_proj"][1].device.type != "cuda":
             # dimension « appareil » (MECANISMES) : gptq_marlin_repack n'a qu'un
             # noyau CUDA ; à sec (tests, CUDA_VISIBLE_DEVICES vide) la pile
@@ -1049,7 +1059,7 @@ class MoEBlock(nn.Module):
         if raison is not None:
             if not getattr(MoEBlock, "_marlin_refus_dit", False):
                 MoEBlock._marlin_refus_dit = True
-                print(f"[acvram] ACVRAM_PREFILL_GROUPED=marlin refusé : {raison} — GEMM groupée « groupe »", flush=True)
+                print(f"[acvram] disposition Marlin refusée : {raison} — pile naturelle gardée, prefill « groupe », décodage d'avant", flush=True)
             return None
         from ..kernels import marlin_port as MP
         out = {}
@@ -1097,6 +1107,14 @@ class MoEBlock(nn.Module):
         w = kernels.nvfp4_dequant(plat, torch.bfloat16,
                                   gscale_rows=gs.reshape(-1).to(torch.float32),
                                   rows_per_group=M).view(E, M, k)
+        if _PREFILL_W8R == "1":
+            # porte W8r (poste7-poursuite-chantiers-19-09) : les experts que ce chemin
+            # déquantifie en bf16 sont re-arrondis en int8 par ligne — la perte d'un
+            # format d'expert int8 par ligne, mesurée sans le stocker (chemins
+            # grouped_mm/bmm seulement : ils sont les seuls à lire cette pile bf16)
+            from ..quant.fakequant_activation import fake_quantize_w8_row
+            w = fake_quantize_w8_row(w)
+            self._chemin('w8r')
         return w[:, :m, :]
 
     @staticmethod
@@ -1677,6 +1695,18 @@ class MoEBlock(nn.Module):
             act = ext.nvfp4_gemv_marlin_gateup(
                 mg[0], mg[1], mg[2], mu[0], mu[1], mu[2], eid, tok_g, x_g.contiguous(),
                 mg[3], mg[4], 1 if self.act == "gelu_tanh" else 0)[:, :pg[5]]
+        elif marlin is not None and ext is not None and hasattr(ext, "nvfp4_gemv_marlin") and distinct:
+            # gate et up ont des ENTRÉES distinctes (tables AWQ séparées : GLM
+            # k48-calibA, verdict-glm-b12-19-09) : le noyau fusionné n'a qu'un
+            # x, donc gate puis up par le GEMV Marlin à une projection, et
+            # l'activation en torch — la pile naturelle est rendue (disposition
+            # unique), ce chemin ne peut plus y retomber (poste2 : qw=None au
+            # premier pas de GLM, serveur mort)
+            mg, mu = marlin["gate_proj"], marlin["up_proj"]
+            self._chemin("gemv_marlin")
+            g = ext.nvfp4_gemv_marlin(mg[0], mg[1], mg[2], eid, tok_g, x_g.contiguous(), mg[3], mg[4])[:, :pg[5]]
+            u = ext.nvfp4_gemv_marlin(mu[0], mu[1], mu[2], eid, tok_g, x_u.contiguous(), mu[3], mu[4])[:, :pu[5]]
+            act = self._act(g) * u
         elif (_MOE_GEMV == "v2" and pg[0] == "nvfp4" and pu[0] == "nvfp4" and ext is not None
                 and hasattr(ext, "nvfp4_gemv_grouped_gateup_v2") and not distinct
                 and self._stacks.get("down_proj", ("",))[0] == "nvfp4"
@@ -1710,6 +1740,14 @@ class MoEBlock(nn.Module):
                 x_g.contiguous(), pg[5], pg[4],
                 1 if self.act == "gelu_tanh" else 0)[:, :pg[5]]
         else:
+            if pg[0] == "nvfp4" and pg[1] is None:
+                # dimension « pile rendue » (MECANISMES) : sous la disposition
+                # unique, aucun repli ne relit la pile naturelle — une erreur
+                # nommée plutôt qu'un None dans un noyau (GLM, 19/09)
+                raise RuntimeError(
+                    "MoE décodage : pile NVFP4 naturelle rendue (disposition unique Marlin) et aucun "
+                    f"chemin Marlin applicable (distinct={distinct}, ext={ext is not None}, "
+                    f"marlin={marlin is not None}) — REGLES § 4, verdict-glm-b12-19-09")
             x32 = x_g.to(torch.float32)
             g = self._grouped(x32, pg, eid, tok_g)
             u = self._grouped(x32 if x_u is x_g else x_u.to(torch.float32), pu, eid, tok_g)
@@ -2016,6 +2054,12 @@ if _PREFILL_A4 not in ("off", "gateup", "both"):
 # défaut : l'arrondi de `quantifier_a8`, celui des chemins a8/cublas) ou en E4M3 bloc 16
 # (=e4m3, témoin : le format d'activation de la MMA mxf8f6f4). Aucun noyau : la perte, pas la
 # vitesse. Exclusive de PREFILL_A4 (deux arrondis empilés ne mesureraient rien).
+# ACVRAM_PREFILL_W8R=1 : porte qualité W8r — les piles d'experts déquantifiées par
+# `_pile_bf16` (chemins PREFILL_GROUPED=grouped_mm|bmm, pile naturelle donc
+# GEMV_LAYOUT=naturel) re-arrondies en int8 symétrique par ligne ; aucun noyau.
+_PREFILL_W8R = os.environ.get("ACVRAM_PREFILL_W8R", "0")
+if _PREFILL_W8R not in ("0", "1"):
+    raise ValueError(f"ACVRAM_PREFILL_W8R={_PREFILL_W8R!r} : 0 | 1")
 _PREFILL_A8 = os.environ.get("ACVRAM_PREFILL_A8", "off")
 _PREFILL_A8_FMT = os.environ.get("ACVRAM_PREFILL_A8_FMT", "int8")
 if _PREFILL_A8 not in ("off", "gateup", "both"):
@@ -2031,18 +2075,11 @@ _E2M1_MILIEUX = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
 
 
 def fausse_quant_a8(x: torch.Tensor, fmt: str = "int8") -> torch.Tensor:
-    """x [G, K] → x arrondi comme le ferait un GEMM W4A8 : `int8` = par jeton,
-    échelle amax/127 et arrondi à demi éloigné de zéro (`quantifier_a8_torch`,
-    au bit du noyau `_quant_a8_kernel`) ; `e4m3` = E4M3 par bloc de 16
-    (`fake_quantize_e4m3_activation`). Sortie dans le dtype de x. Torch pur."""
-    if fmt == "e4m3":
-        from ..quant.fakequant_activation import fake_quantize_e4m3_activation
-        return fake_quantize_e4m3_activation(x)
-    if fmt != "int8":
-        raise ValueError(f"fausse_quant_a8 : format {fmt!r}, attendu int8 | e4m3")
-    from ..kernels.gemm_w8a8 import quantifier_a8_torch
-    a, s = quantifier_a8_torch(x)
-    return (a.to(torch.float32) * s[:, None]).view(x.shape).to(x.dtype)
+    """x [G, K] → x arrondi comme le ferait un GEMM W4A8 (`int8` par jeton au
+    bit du noyau a8, ou `e4m3` bloc 16) — `quant.fakequant_activation.
+    fake_quantize_a8`, partagée avec la porte FP8-MLA (engine/mla.py)."""
+    from ..quant.fakequant_activation import fake_quantize_a8
+    return fake_quantize_a8(x, fmt)
 
 
 def fausse_quant_nvfp4(x: torch.Tensor) -> torch.Tensor:
