@@ -728,6 +728,12 @@ class GraphRunner:
         for mod in m.modules():
             if isinstance(mod, RotaryEmbedding):
                 mod.reserver(godet_mla(self.max_model_len) + MLA_BUCKET + 1, d, m.dtype)
+        # REGLES § 6 (remède C15 niveau 2) : les caches paresseux du chemin MLA (k_b contigu,
+        # v_b fp32, tables) sont matérialisés hors capture ; toute allocation pendant une
+        # capture lève ensuite (`_refuser_en_capture`), au lieu de corrompre en silence
+        for mod in m.modules():
+            if hasattr(mod, "chauffer") and hasattr(mod, "rank"):
+                mod.chauffer(d, godet_mla(self.max_model_len) + MLA_BUCKET + 1)
 
         # Toute echelle globale NVFP4 doit etre LUE avant la capture.
         #

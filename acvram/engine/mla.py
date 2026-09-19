@@ -196,6 +196,15 @@ def _mla_decode_batch(ext, q, cache_ptrs, lens, scores, bucket, rank, scale, fp8
     return ext.mla_decode_batch(q, cache_ptrs, lens, scores, bucket, rank, scale)
 
 
+def _refuser_en_capture(quoi: str) -> None:
+    """REGLES § 6 : un tenseur alloué pendant une capture de graphe vit dans le bassin du
+    graphe et meurt avec la capture suivante — silencieusement. Tout cache paresseux du
+    chemin MLA passe par ici ; `chauffer()` les matérialise avant `warm_graphs`."""
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(f"MLA : {quoi} alloué pendant une capture de graphe — "
+                           "appeler MLAttention.chauffer() avant la capture (REGLES § 6)")
+
+
 def godet_mla(longueur: int) -> int:
     """Palier de cache latent couvrant ``longueur``, en puissances de deux.
 
@@ -590,10 +599,20 @@ class MLAttention(nn.Module):
                                   self.rank, self.scale, _est_fp8(sts[0]))   # [B, nh, rank]
         return torch.cat([self._sortie_decode(x[i:i + 1], sts[i], o_lat[i]) for i in range(B)], dim=0)
 
+    def chauffer(self, device, max_pos: int) -> None:
+        """Remède C15 niveau 2 (REGLES § 6) : matérialise hors capture tout ce que le chemin de
+        décodage crée paresseusement — k_b contigu, v_b fp32, tables RoPE fp32 et demi-tables.
+        Idempotent ; à appeler avant toute capture (graphs.py le fait avec `reserver`)."""
+        if self.k_b.device.type == "cuda":
+            self._k_b_c(); self._v_b32()
+        if self.rope_emb is not None:
+            self.rope_emb.reserver(max_pos, device, self.k_b.dtype)
+
     def _k_b_c(self) -> torch.Tensor:
         """``k_b`` [nh, rank, nope] contigu, une fois (le noyau de préparation le lit tel quel)."""
         kb = self.__dict__.get("_k_b_c_cache")
         if kb is None or kb.device != self.k_b.device:
+            _refuser_en_capture("k_b contigu")
             kb = self.__dict__["_k_b_c_cache"] = self.k_b.detach().contiguous()
         return kb
 
@@ -602,6 +621,7 @@ class MLAttention(nn.Module):
         coûtait un lancement et une passe mémoire par couche et par pas)."""
         vb = self.__dict__.get("_v_b32_cache")
         if vb is None or vb.device != self.v_b.device:
+            _refuser_en_capture("v_b fp32")
             vb = self.__dict__["_v_b32_cache"] = self.v_b.detach().to(torch.float32).contiguous()
         return vb
 
