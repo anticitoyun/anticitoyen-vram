@@ -35,7 +35,7 @@ _s = importlib.util.spec_from_file_location("rm", os.path.join(_ICI, "racine_mod
 _m = importlib.util.module_from_spec(_s); _s.loader.exec_module(_m)
 chemin = os.path.join(_m.MODELES, os.environ.get("BANC_MODELE", "Qwen3-Coder-30B-A3B-nvfp4"))
 
-loaded = load_model(chemin, dtype=torch.bfloat16, device_override="cuda:0")
+loaded = load_model(chemin, dtype=torch.bfloat16, device_override="cuda:0", max_model_len=1024, max_concurrent_seqs=B)   # le Plan connaît le lot (garde kv_planned_seqs, 17/09)
 model = loaded.model
 ext = kernels.get_extension()
 dev = torch.device("cuda:0")

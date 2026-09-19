@@ -30,7 +30,7 @@ import importlib.util
 _s = importlib.util.spec_from_file_location("rm", os.path.join(_ICI, "racine_modeles.py"))
 _m = importlib.util.module_from_spec(_s); _s.loader.exec_module(_m)
 chemin = os.path.join(_m.MODELES, os.environ.get("BANC_MODELE", "Qwen3-Coder-30B-A3B-nvfp4"))
-loaded = load_model(chemin, dtype=torch.bfloat16, device_override="cuda:0")
+loaded = load_model(chemin, dtype=torch.bfloat16, device_override="cuda:0", max_model_len=1024, max_concurrent_seqs=B)   # le Plan connaît le lot (garde kv_planned_seqs, 17/09)
 eng = Engine(loaded, None, max_batch_size=B, max_model_len=1024,
              enable_cuda_graphs=os.environ.get("BANC_GRAPHES", "0") == "1", enable_prefix_cache=False)
 eng._eos = set()

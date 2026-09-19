@@ -357,7 +357,8 @@ class MLAttention(nn.Module):
                 with _tf32_coeur():
                     morceaux.append(torch.einsum('ths,sr->thr', sc.softmax(dim=-1), V32))
             o_lat = torch.cat(morceaux)
-            y = torch.einsum('hvr,thr->thv', self.v_b.to(torch.float32), o_lat)
+            with _tf32_coeur():                    # 3e produit du cœur au préfill (simt_sgemm_128x32 ×47, poste2)
+                y = torch.einsum('hvr,thr->thv', self.v_b.to(torch.float32), o_lat)
             y = y.reshape(t, self.nh * self.dv).to(x.dtype)
             return self._o(y), cache
         with _tf32_coeur():
@@ -369,7 +370,7 @@ class MLAttention(nn.Module):
         with _tf32_coeur():
             o_lat = torch.einsum('ths,sr->thr', probs,
                                  C[:, :self.rank].to(torch.float32))
-        y = torch.einsum('hvr,thr->thv', self.v_b.to(torch.float32), o_lat)
+            y = torch.einsum('hvr,thr->thv', self.v_b.to(torch.float32), o_lat)
         y = y.reshape(t, self.nh * self.dv).to(x.dtype)
         return self._o(y), cache
 

@@ -48,3 +48,20 @@ def test_couverture_experts_par_couche():
     assert _couverture_experts(Faux([None, None])) == "naturel"
     assert _couverture_experts(Faux(["marlin"] * 33 + [None] * 13)) == "marlin(33/46)"
     assert _couverture_experts(Faux([])) == "aucun"
+
+
+def test_tout_repli_eager_est_compte():
+    """poste7 19/09 : trois replis eager silencieux en une soirée — le GraphRunner
+    compte CHAQUE repli (`replis_eager`), pas seulement la première raison ;
+    `regime()` porte `repli_eager` et les raisons ; `regime_ligne()` l'imprime."""
+    gr = GraphRunner.__new__(GraphRunner)
+    gr._raisons_eager_vues = set()
+    gr.replis_eager = 0
+    gr._eager("lot hybride 12 au-dela du plafond")
+    gr._eager("lot hybride 12 au-dela du plafond")
+    gr._eager("forme non rejouable")
+    assert gr.replis_eager == 3 and len(gr._raisons_eager_vues) == 2
+    src = (pathlib.Path(__file__).resolve().parent.parent / "acvram" / "engine" / "runner.py").read_text()
+    assert '"repli_eager"' in src and "repli_eager=" in src
+    app = (pathlib.Path(__file__).resolve().parent.parent / "acvram" / "server" / "app.py").read_text()
+    assert '"repli_eager"' in app
