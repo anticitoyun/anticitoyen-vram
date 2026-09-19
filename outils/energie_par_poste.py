@@ -117,9 +117,22 @@ tok = torch.arange(B, device=dev, dtype=torch.int32).repeat_interleave(moe.top_k
 seq = torch.arange(eid.shape[0], device=dev, dtype=torch.int32)
 piles = [(c.mlp._stacks["gate_proj"], c.mlp._stacks["up_proj"], c.mlp._stacks["down_proj"]) for c in couches]
 pg, pu, pd = piles[0]
+# Disposition unique Marlin (P1, défaut depuis le 18/09) : la pile naturelle est
+# rendue (pg[1] is None), les GEMV du décodage lisent la disposition Marlin —
+# le poste MoE se boucle sur les noyaux Marlin (gate·up NW=2, down NW=1)
+marlins = [getattr(c.mlp, "_stacks_marlin", None) for c in couches]
+MARLIN = marlins[0] is not None and pg[1] is None
 def gateup_c(i):
     pg, pu, _ = piles[i % nc]
+    if MARLIN:
+        mg, mu = marlins[i % nc]["gate_proj"], marlins[i % nc]["up_proj"]
+        return ext.nvfp4_gemv_marlin_gateup(mg[0], mg[1], mg[2], mu[0], mu[1], mu[2], eid, tok, x, mg[3], mg[4], 0)
     return ext.nvfp4_gemv_grouped_gateup(pg[1], pg[2], pg[3], pu[1], pu[2], pu[3], eid, tok, x, pg[4], 0)
+def down_c(i):
+    if MARLIN:
+        md = marlins[i % nc]["down_proj"]
+        return ext.nvfp4_gemv_marlin(md[0], md[1], md[2], eid, seq, act, md[3], md[4])
+    return moe._grouped(act, piles[i % nc][2], eid, seq)
 act = gateup_c(0)[:, :pg[5]].contiguous()
 class Tour:
     """Un compteur : chaque appel avance d'une couche."""
@@ -128,15 +141,18 @@ class Tour:
         self.i += 1; return self.i
 t_gu, t_dn, t_moe, t_qkv, t_o, t_norm, t_mma, t_mmac = (Tour() for _ in range(8))
 if SEUL not in ("mma", "pas"):
-    res.append(mesure("MoE gate·up GEMV (nvfp4_gemv_grouped_gateup)", lambda: gateup_c(t_gu()), lots=48))
-    res.append(mesure("MoE down GEMV (_grouped down_proj)", lambda: moe._grouped(act, piles[t_dn() % nc][2], eid, seq), lots=48))
+    res.append(mesure("MoE gate·up GEMV (%s)" % ("nvfp4_gemv_marlin_gateup" if MARLIN else "nvfp4_gemv_grouped_gateup"),
+                      lambda: gateup_c(t_gu()), lots=48))
+    res.append(mesure("MoE down GEMV (%s)" % ("nvfp4_gemv_marlin" if MARLIN else "_grouped down_proj"),
+                      lambda: down_c(t_dn()), lots=48))
 if SEUL != "pas":
     res.append(mesure("MoE complet (_forward_grouped : gate·up + down + reduce)",
                       lambda: couches[t_moe() % nc].mlp._forward_grouped(x, topw, topi), lots=48))
 # Le même MoE par le chemin GEMM groupée MMA FP4 (celui du prefill) à t=B jetons :
 # quant_act + gate + up + moe_act + quant_act + down + reduce_trie — étape (iii) de poste7
 # (revue/poste7-moe-mma-decodage-14-09.md). Tuile ACVRAM_MOE_MMA_BT (16 conseillé à M≈3).
-if SEUL != "pas" and moe._forward_prefill_grouped(x, topw, topi) is not None:
+if SEUL != "pas" and not MARLIN and moe._forward_prefill_grouped(x, topw, topi) is not None:
+    # (sous la disposition unique Marlin, `_gemm_mma` lirait une pile rendue : section sautée)
     # Les 3 GEMM MMA seules (gate, up, down), tuiles et activations quantifiées une
     # fois : W du noyau sans la glue hôte (argsort, bincount, .item()) qui borne la
     # boucle complète ci-dessous.
