@@ -1,4 +1,4 @@
-# poste7 — nsys Coder : glue 1,58 ms tenue (C15 vaut double), C16 réfuté tel que scellé (0,49 ms) puis relocalisé dans le pas servi (1,9 ms), Marlin 3,73 ms = mma2 3,54 à l'instrument près → Mesure 1 décide seule l'énergie des experts à b=12 (19/09, 19 h 55)
+# poste7 — nsys Coder : glue 1,58 ms tenue (C15 vaut double), C16 réfuté tel que scellé (0,49 ms) puis relocalisé dans le pas servi (1,9 ms), Marlin 3,73 ms = mma2 3,54 à l'instrument près → Mesure 1 décide seule l'énergie des experts à b=12 (19/09, 19 h 25, heure du commit)
 
 Source : `verdict-nsys-coder-b12-19-09` (poste2 8faffdd) ; `verdict-ncu-m1-m2-19-09` (poste1) ; `poste7-m2-mma2-budgets-prefill-19-09` § 1-2 (prédictions écrites avant).
 

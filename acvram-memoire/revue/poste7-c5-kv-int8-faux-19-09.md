@@ -1,4 +1,4 @@
-# poste7 — C5 faux reste faux : le KV int8 coûte ~+0,5 % de PPL à 8 k ; int8 reste le défaut parce que l'alternative écrite (bf16) n'est pas un régime servable, la revendication qualité se réécrit à l'exact, et C5-b (échelles de K par canal + puits exempté) est le remède, pas bf16 (19/09, 20 h 35)
+# poste7 — C5 faux reste faux : le KV int8 coûte ~+0,5 % de PPL à 8 k ; int8 reste le défaut parce que l'alternative écrite (bf16) n'est pas un régime servable, la revendication qualité se réécrit à l'exact, et C5-b (échelles de K par canal + puits exempté) est le remède, pas bf16 (19/09, 19 h 46, heure du commit)
 
 Source : `verdict-c5-kv-int8-19-09` (poste2 d79bd61) ; `chantier-c5-19-09` § 11 et § 26 (poste1) ; `verdict-c2-temoin-19-09` ; REGLES § 3 (scellé ≥ 2 × l'écart du témoin), § 4 (trois états).
 

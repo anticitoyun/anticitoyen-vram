@@ -1,4 +1,4 @@
-# poste7 — niveau 2 TF32 au décodage : faux, fermé (les GEMM minces de M=12 sont SIMT, TF32 ne les touche pas) ; C14 : « ≤ 15 µs » faux (16,8) mais le scellé disait quoi faire à ce cas — le défaut se juge à l'étape 5, puis un ncu d'occupation avant d'insister (20/09, 01 h 30)
+# poste7 — niveau 2 TF32 au décodage : faux, fermé (les GEMM minces de M=12 sont SIMT, TF32 ne les touche pas) ; C14 : « ≤ 15 µs » faux (16,8) mais le scellé disait quoi faire à ce cas — le défaut se juge à l'étape 5, puis un ncu d'occupation avant d'insister (19/09, 21 h 45, heure du commit)
 
 Source : `verdict-niveau2-tf32-decode-19-09` (poste2) ; `verdict-c14-etape4-19-09` ; `poste7-glm-decode-budget-c14-c15-19-09` § 2 (scellés et clauses de réfutation écrites le 19/09 18 h 40) ; `verdict-budget-decode-glm-19-09` (b=12 : `gemmSN_TN` fp32 1,00 ×93, `reduce` 0,49 ×233, `mla_prep_batch` 0,97).
 

@@ -1,4 +1,4 @@
-# poste7 — GLM b=1 : ce n'est pas l'hôte (0,64 ms), ce sont 2,3 ms d'espaces entre les 2 163 nœuds du graphe — ma prédiction C16-GLM réfutée, le levier b=1 est le nombre de nœuds ; C15 niveau 3 scellé ; le test « graphes off » du niveau 2 vise le piège JIT-dans-capture (20/09, 05 h 20)
+# poste7 — GLM b=1 : ce n'est pas l'hôte (0,64 ms), ce sont 2,3 ms d'espaces entre les 2 163 nœuds du graphe — ma prédiction C16-GLM réfutée, le levier b=1 est le nombre de nœuds ; C15 niveau 3 scellé ; le test « graphes off » du niveau 2 vise le piège JIT-dans-capture (19/09, 23 h 38, heure du commit)
 
 Source : `verdict-glm-b1-osrt-19-09` (poste2 eeda94f, main 28441096 = C14 + C15-1) ; `poste7-glm-cellules-w4a4-hote-20-09` § 1 (prédiction et clause écrites avant) ; `verdict-c15-19-09` (niveau 2 : 1 552 nœuds, déviant au pas 15) ; REGLES § 6 (un noyau JIT dans une capture corrompt silencieusement ; remède : registre + chauffe avant `warm_graphs`, garde en capture).
 

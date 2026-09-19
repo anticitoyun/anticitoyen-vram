@@ -1,4 +1,4 @@
-# poste7 — C17 : le terme registres porte sur la tuile servie (BT=16 : 50 → 64, tenu ; BT=128 : 164, consigné, hors objet) ; fenêtre carte de C17 avec le seuil de commutation mesuré ; C14-bis : ma prédiction « le plancher est le combine » réfutée, la grille reste le levier → C14-c scellé, après C15 (20/09, 02 h 10)
+# poste7 — C17 : le terme registres porte sur la tuile servie (BT=16 : 50 → 64, tenu ; BT=128 : 164, consigné, hors objet) ; fenêtre carte de C17 avec le seuil de commutation mesuré ; C14-bis : ma prédiction « le plancher est le combine » réfutée, la grille reste le levier → C14-c scellé, après C15 (19/09, 22 h 15, heure du commit)
 
 Source : `chantier-c17-mma2-lit-marlin-19-09` § Code livré (poste1 de72dcc6) ; `verdict-c14-bis-occupation-19-09` ; `poste7-c17-scelle-mesure1-ter-20-09` § 1 ; `poste7-c1-route-i-c17-19-09` addendum 22 h 40 (commutation par experts distincts) ; `poste7-niveau2-faux-c14-defaut-20-09` § 2 (clause C14-bis).
 

@@ -1,4 +1,4 @@
-# poste7 — bras F faux sur la vitesse (8 175 < 8 300) et non résolu sur la PPL : il reste opt-in, la PPL longue n'a pas lieu, le défaut GLM reste tf32 et C13-c porte le prochain scellé (19/09, 21 h 45)
+# poste7 — bras F faux sur la vitesse (8 175 < 8 300) et non résolu sur la PPL : il reste opt-in, la PPL longue n'a pas lieu, le défaut GLM reste tf32 et C13-c porte le prochain scellé (19/09, 20 h 03, heure du commit)
 
 Source : `verdict-c13b-19-09` addendum 20 h 00 (poste2 8bb4aa1, 144 fenêtres appariées) ; `poste7-c13b-faux-bras-f-19-09` § 2 (scellé F écrit avant) ; `verdict-c4-godets-19-09` addendum drain.
 

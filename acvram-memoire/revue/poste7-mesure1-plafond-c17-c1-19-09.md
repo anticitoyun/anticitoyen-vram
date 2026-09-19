@@ -1,4 +1,4 @@
-# poste7 — Mesure 1 : ma prédiction « mma2 280-340 W » est fausse (401 W) ; sous plafond, W est une constante et l'instruction par octet se lit dans l'horloge et le temps : mma2 −12 % à u=45, −25 % à u=27 ; Mesure 2 : non ; C17 prend son objet, et C1 se chiffre d'abord sur la MMA native (19/09, 21 h 30)
+# poste7 — Mesure 1 : ma prédiction « mma2 280-340 W » est fausse (401 W) ; sous plafond, W est une constante et l'instruction par octet se lit dans l'horloge et le temps : mma2 −12 % à u=45, −25 % à u=27 ; Mesure 2 : non ; C17 prend son objet, et C1 se chiffre d'abord sur la MMA native (19/09, 20 h 01, heure du commit)
 
 Source : `verdict-mesure1-mma2-marlin-19-09` (poste1, poste1-11 bcd3c6a0) ; `poste7-c16bis-puissance-mesure1-19-09` § 2 (règle et réfutation écrites avant) ; `poste7-nsys-coder-c16-mma2-19-09` addendum 20 h 15 ; `verdict-porte-a8-19-09` (e4m3 −0,0002) ; REGLES § 9 (`kind::mxf8f6f4`).
 

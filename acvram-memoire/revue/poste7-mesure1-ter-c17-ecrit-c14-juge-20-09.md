@@ -1,4 +1,4 @@
-# poste7 — Mesure 1-ter : ma parité réfutée, `-lgc 2700` est un plafond que le limiteur de puissance passe sous Marlin (1 950-2 265 MHz à 400 W) et pas sous mma2 (2 692) → C17 s'écrit ; le contrôle d'horloge des instruments juge le verrou, pas les MHz ; C14 : noyau tenu, « jetons identiques » faux et remplacé par le juge que REGLES prescrit (20/09, 01 h 10)
+# poste7 — Mesure 1-ter : ma parité réfutée, `-lgc 2700` est un plafond que le limiteur de puissance passe sous Marlin (1 950-2 265 MHz à 400 W) et pas sous mma2 (2 692) → C17 s'écrit ; le contrôle d'horloge des instruments juge le verrou, pas les MHz ; C14 : noyau tenu, « jetons identiques » faux et remplacé par le juge que REGLES prescrit (19/09, 21 h 37, heure du commit)
 
 Source : `verdict-mesure1-mma2-marlin-19-09` § 1-ter (poste1 a6a69015) ; `verdict-c14-equivalence-19-09` ; `poste7-c17-scelle-mesure1-ter-20-09` § 2 (règle et prédiction écrites avant) ; REGLES § 7 (bit-à-bit greedy ne prouve rien) ; `verdict-splitk-b1-19-09`, P1 (précédents).
 

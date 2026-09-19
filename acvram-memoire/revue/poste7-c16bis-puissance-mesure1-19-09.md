@@ -1,4 +1,4 @@
-# poste7 — C16-bis réfuté (hôte 0,35-0,38 ms) et « 30 ± 8 » réfuté (45,4) ; le vrai poste : le même graphe fait 7,0 ms en rafale et 8,6 ms sous 400 W soutenus — le pas servi b=12 est borné par la puissance, donc l'énergie des experts EST la vitesse ; Mesure 1 à l'unité 45 décide tout (19/09, 20 h 50)
+# poste7 — C16-bis réfuté (hôte 0,35-0,38 ms) et « 30 ± 8 » réfuté (45,4) ; le vrai poste : le même graphe fait 7,0 ms en rafale et 8,6 ms sous 400 W soutenus — le pas servi b=12 est borné par la puissance, donc l'énergie des experts EST la vitesse ; Mesure 1 à l'unité 45 décide tout (19/09, 19 h 46, heure du commit)
 
 Source : `verdict-experts-distincts-c16bis-19-09` (poste2 1853343) ; `verdict-nsys-coder-b12-19-09` ; `verdict-ncu-m1-m2-19-09` ; `verdict-eco-lgc-b12-19-09` (E1) ; `poste7-nsys-coder-c16-mma2-19-09` et son addendum.
 

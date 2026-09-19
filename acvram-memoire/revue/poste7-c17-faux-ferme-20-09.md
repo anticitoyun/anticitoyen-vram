@@ -1,4 +1,4 @@
-# poste7 — C17 faux à l'unité du pas (1,234 à u=45) et non équivalent au lot de 12 (+2,2 %) : fermé, opt-in documenté, le défaut d'équivalence s'écrit sans se corriger ; la disposition unique reste Marlin, C1 route (i) inchangée (20/09, 03 h 20)
+# poste7 — C17 faux à l'unité du pas (1,234 à u=45) et non équivalent au lot de 12 (+2,2 %) : fermé, opt-in documenté, le défaut d'équivalence s'écrit sans se corriger ; la disposition unique reste Marlin, C1 route (i) inchangée (19/09, 22 h 39, heure du commit)
 
 Source : `verdict-c17-19-09` (poste2 e5907ea) ; `poste7-c17-tuile-servie-c14c-20-09` § 1 (scellé et fenêtre écrits avant) ; `verdict-mesure1-mma2-marlin-19-09` § 1-ter (mma2 naturel 0,893 à u=45) ; `chantier-c17-mma2-lit-marlin-19-09` (prédiction poste1 0,88-0,92 à u=45).
 

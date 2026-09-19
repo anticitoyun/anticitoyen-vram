@@ -1,4 +1,4 @@
-# poste7 — C17 : scellé (1) réécrit (la disposition Marlin annule 0,0064 % des échelles, le « au bit » strict n'existe pas sans table), et surtout : le −12 % de Mesure 1 était un écart d'horloges sous plafond — sous éco 2 700 il peut disparaître ; Mesure 1-ter (5 min) avant toute ligne de C17 (20/09, 00 h 50)
+# poste7 — C17 : scellé (1) réécrit (la disposition Marlin annule 0,0064 % des échelles, le « au bit » strict n'existe pas sans table), et surtout : le −12 % de Mesure 1 était un écart d'horloges sous plafond — sous éco 2 700 il peut disparaître ; Mesure 1-ter (5 min) avant toute ligne de C17 (19/09, 21 h 23, heure du commit)
 
 Source : `chantier-c17-mma2-lit-marlin-19-09` (poste1 f5fb8bdc) ; `verdict-mesure1-mma2-marlin-19-09` (u=45 : Marlin 110,8 µs à 2 025-2 422 MHz, mma2 97,2 à 2 625-2 880) ; `verdict-eco-2700-defaut-19-09` (certifie Coder b=12 : 8,97 ms libre → 8,37 sous 2 700, −6,7 % pour +7 % d'horloge : le pas est borné par l'horloge) ; `poste7-c1-route-i-c17-19-09` § 2.
 

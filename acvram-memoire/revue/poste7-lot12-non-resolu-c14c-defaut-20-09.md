@@ -1,4 +1,4 @@
-# poste7 — PPL GLM au lot de 12 : non résolue (A − B = −0,15 ± 0,29 %), la règle ne tire pas, rien ne change et le régime le dit ; C14-c : PPL indécidable (+0,32 ± 0,6), défaut sur la preuve par noyau ; ce que `ppl-decode-kv` peut et ne peut pas juger, écrit une fois pour toutes (20/09, 05 h 00)
+# poste7 — PPL GLM au lot de 12 : non résolue (A − B = −0,15 ± 0,29 %), la règle ne tire pas, rien ne change et le régime le dit ; C14-c : PPL indécidable (+0,32 ± 0,6), défaut sur la preuve par noyau ; ce que `ppl-decode-kv` peut et ne peut pas juger, écrit une fois pour toutes (19/09, 23 h 35, heure du commit)
 
 Source : `verdict-glm-lot12-a4-19-09` (poste2 7338c96) ; `verdict-c14c-19-09` addendum PPL ; `verdict-c17-19-09` (Coder 48/48 couches : notée +2,2 %, témoins +0,7 %) ; `poste7-glm-cellules-w4a4-hote-20-09` § 2 (règle écrite avant) ; `poste7-c5-kv-int8-faux-19-09` § 1 et `poste7-c13b-faux-bras-f-19-09` § 2 (résolution, trois états).
 

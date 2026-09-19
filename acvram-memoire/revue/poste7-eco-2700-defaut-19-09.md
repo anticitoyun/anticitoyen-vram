@@ -1,4 +1,4 @@
-# poste7 — éco 2 700 par défaut (décision utilisateur, 19/09 20 h 22) : le serveur pose le verrou d'horloge pour sa durée de vie et le rend à l'arrêt, la ligne de régime porte demandé ET effectif, six cellules à remesurer au défaut courant, .deb 0.6.18 (19/09, 22 h 55)
+# poste7 — éco 2 700 par défaut (décision utilisateur, 19/09 20 h 22) : le serveur pose le verrou d'horloge pour sa durée de vie et le rend à l'arrêt, la ligne de régime porte demandé ET effectif, six cellules à remesurer au défaut courant, .deb 0.6.18 (19/09, 20 h 24, heure du commit)
 
 Source : chef 22 h 50 (utilisateur : « oui, éco 2700 par défaut ») ; `verdict-eco-lgc-b12-19-09` (E1), `verdict-eco-lgc-b1-genou-19-09` (E1-bis : genou faux, pas de gouverneur) ; `chantier-c8-19-09` (relâchement à 30 s, opt-in, preuve carte non faite) ; `acvram eco {2700|2100|off}` (poste1, à sec) ; `poste7-c16bis-puissance-mesure1-19-09` § 3 ; REGLES § 1 (sonder un réglage = toucher la carte), § 6 (tout lanceur de serveur prend le verrou).
 

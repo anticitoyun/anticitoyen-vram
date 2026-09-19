@@ -1,4 +1,4 @@
-# poste7 — C13-a tenu : TF32 niveau 1 (prefill) au défaut pour tout MLA ; niveau 2 (décodage) et le 3e produit restent opt-in jusqu'à leur mesure ; C13-b bf16 inchangé (19/09, 19 h 40)
+# poste7 — C13-a tenu : TF32 niveau 1 (prefill) au défaut pour tout MLA ; niveau 2 (décodage) et le 3e produit restent opt-in jusqu'à leur mesure ; C13-b bf16 inchangé (19/09, 19 h 25, heure du commit)
 
 Source : `verdict-c13a-19-09` (poste2 3bcc173, main a7397e2) ; `chantier-c13a-19-09` ; `mla.py:47-49` (`ACVRAM_MLA_TF32` = 0 | 1 préfill | 2 préfill + décodage), `regime.py:179` ; poste1 8ae21997 (3e produit `v_b·o_lat`) ; `poste7-m2-mma2-budgets-prefill-19-09` § 3 (C13-b).
 

@@ -1,4 +1,4 @@
-# poste7 — trois fiches d'poste1 : C5-b passe par une porte de 40 s à sec avant toute ligne ; C13-c change d'ordre — le noyau fusionné se fait d'abord en fp32 (il retire 70 Go/pas de scores, pas des bits), valable à toutes les longueurs, tf32/bf16 ensuite comme régimes ≤ 2 048 clés ; C14-b scellé sur C14-c (20/09, 02 h 40)
+# poste7 — trois fiches d'poste1 : C5-b passe par une porte de 40 s à sec avant toute ligne ; C13-c change d'ordre — le noyau fusionné se fait d'abord en fp32 (il retire 70 Go/pas de scores, pas des bits), valable à toutes les longueurs, tf32/bf16 ensuite comme régimes ≤ 2 048 clés ; C14-b scellé sur C14-c (19/09, 22 h 22, heure du commit)
 
 Source : `chantier-c5b-19-09`, `chantier-c13c-19-09`, `chantier-c14b-19-09` (poste1, poste1-11 4c305b5c) ; `verdict-tf32-8k-19-09` (dispersion ± 3-6 % à 8 192 clés sous TF32) ; `verdict-budget-prefill-glm-19-09` (cœur fp32 220 ms sur 327) ; `poste7-c5-kv-int8-faux-19-09` § 3.
 

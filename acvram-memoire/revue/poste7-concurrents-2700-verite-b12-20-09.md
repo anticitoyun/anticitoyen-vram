@@ -1,4 +1,4 @@
-# poste7 — concurrents sous 2 700 : mes prédictions fausses (−16 % / −20 % de vitesse chez eux, J −20 % / −31 %) ; à horloge égale acvram est devant à b=1, second au prefill, et à b=12 derrière vLLM Marlin en vitesse ET en énergie — la revendication se réécrit telle quelle, et le chantier qui compte est C15 (nœuds + glue) pour les deux modèles, avant C1 (20/09, 06 h 00)
+# poste7 — concurrents sous 2 700 : mes prédictions fausses (−16 % / −20 % de vitesse chez eux, J −20 % / −31 %) ; à horloge égale acvram est devant à b=1, second au prefill, et à b=12 derrière vLLM Marlin en vitesse ET en énergie — la revendication se réécrit telle quelle, et le chantier qui compte est C15 (nœuds + glue) pour les deux modèles, avant C1 (19/09, 23 h 55, heure du commit)
 
 Source : `verdict-concurrents-2700-19-09` (poste2 447d715, mêmes instruments que le 17/09, harnais égal) ; `verdict-eco-2700-defaut-19-09` (acvram 2 700) ; `verdict-nsys-coder-b12-19-09` (Coder b=12 : Marlin 3,73, glue 1,58, `_etroit` 1,06, 1,9 ms hors noyaux) ; `poste7-glm-b1-noeuds-c15-niveau3-20-09` (≈ 1 µs par nœud de graphe).
 

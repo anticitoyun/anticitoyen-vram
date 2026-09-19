@@ -1,4 +1,4 @@
-# poste7 — C1 : ma route (ii) était impossible telle qu'énoncée ; (ii-b) prédit faux avant toute mesure (30-34 ms > 27,2, ΔPPL jusqu'à +0,004) → non, pas de fausse-quant ; C1 suit la route (i) avec son contrôle ncu du tampon en premier geste carte ; la disposition unique reste Marlin et C17 reprend (19/09, 22 h 10)
+# poste7 — C1 : ma route (ii) était impossible telle qu'énoncée ; (ii-b) prédit faux avant toute mesure (30-34 ms > 27,2, ΔPPL jusqu'à +0,004) → non, pas de fausse-quant ; C1 suit la route (i) avec son contrôle ncu du tampon en premier geste carte ; la disposition unique reste Marlin et C17 reprend (19/09, 20 h 12, heure du commit)
 
 Source : `chantier-c1-routes-19-09` (poste1, poste1-11 7ba6ef66) ; `poste7-mesure1-plafond-c17-c1-19-09` § 2 ; `poste7-c1-budget-19-09` (scellé T_experts ≤ 0,55 × Marlin, tampon par groupes dans le L2 vérifié ncu) ; `verdict-budget-prefill-19-09` (49,5 ms → 27,2).
 

@@ -1,4 +1,4 @@
-# poste7 — C13-b : VB faux et bf16+VB faux restent faux ; les quatre bras disent que le coût de PPL est dans `v_b·o_lat`, pas dans bf16 → bras F = bf16 sans VB, scellé neuf, sur un instrument qui résout ± 0,001 (3 × 48 fenêtres appariées), avec le défaut tf32 rejugé au même instrument (19/09, 21 h 05)
+# poste7 — C13-b : VB faux et bf16+VB faux restent faux ; les quatre bras disent que le coût de PPL est dans `v_b·o_lat`, pas dans bf16 → bras F = bf16 sans VB, scellé neuf, sur un instrument qui résout ± 0,001 (3 × 48 fenêtres appariées), avec le défaut tf32 rejugé au même instrument (19/09, 19 h 47, heure du commit)
 
 Source : `verdict-c13b-19-09` (poste2 118b68f, main 3f97bd4) ; `poste7-c13a-defaut-19-09` § 2 et addendum ; `poste7-m2-mma2-budgets-prefill-19-09` § 3 (scellé C13-b) ; REGLES § 3 (scellé ≥ 2 × l'écart du témoin).
 

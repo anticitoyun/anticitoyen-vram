@@ -1,4 +1,4 @@
-# poste7 — feu vert 0.6.21 (trois bras tenus sur 51f55188, deux arbres refusés avant) ; NARROW_GEMM faux et inerte ; file de poste2 pour la nuit : concurrents sous 2 700 avant toute revendication d'énergie, niveau 2 GLM, C9 (20/09, 00 h 30)
+# poste7 — feu vert 0.6.21 (trois bras tenus sur 51f55188, deux arbres refusés avant) ; NARROW_GEMM faux et inerte ; file de poste2 pour la nuit : concurrents sous 2 700 avant toute revendication d'énergie, niveau 2 GLM, C9 (19/09, 21 h 14, heure du commit)
 
 Source : `verdict-verif-eco-defaut-19-09` addendum 21 h 12 (poste2 d8265b8) ; `verdict-narrow-gemm-b12-19-09` ; `verdict-statics-hybrides-19-09` ; `poste7-eco-2700-defaut-19-09` § 2 et addenda ; `poste7-c9-119b-cache-experts-19-09` (M0-M3) ; `verdict-capture-parc-19-09`.
 

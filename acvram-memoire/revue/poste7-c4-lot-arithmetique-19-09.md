@@ -1,4 +1,4 @@
-# poste7 — C4 : le scellé « mono = lot ± 0,001 » est faux et le reste, mais il jugeait l'arithmétique du lot (± 0,2 %), pas la sentinelle ; la preuve carte de C4 se refait en A/B dans le MÊME lot, fantôme rembourré par une ligne différente (19/09, 21 h 15)
+# poste7 — C4 : le scellé « mono = lot ± 0,001 » est faux et le reste, mais il jugeait l'arithmétique du lot (± 0,2 %), pas la sentinelle ; la preuve carte de C4 se refait en A/B dans le MÊME lot, fantôme rembourré par une ligne différente (19/09, 19 h 53, heure du commit)
 
 Source : `verdict-c4-godets-19-09` (poste2 8d761aa, Qwen3.8-27B, arbre fffd17c) ; `chantier-c4-19-09` (poste1 : sentinelle exportée sous `store[-1]`, Mamba2, test au bit à sec) ; REGLES § 4 (« un contrôle qui ne peut pas rendre faux ») et § 3 (témoin avant seuil).
 

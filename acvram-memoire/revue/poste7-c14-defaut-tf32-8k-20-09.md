@@ -1,4 +1,4 @@
-# poste7 — C14 au défaut (équivalence et capture tenues, −12 % du pas b=1 en processus ; la cellule servie est indécidable sous un hôte saturé, pas fausse) ; trouvaille de poste2 : TF32 au prefill d'un préfixe de 8 192 déplace la PPL de décodage de ± 3-6 % par texte — fenêtre PPL immédiate, l'hôte saturé n'y change rien (20/09, 01 h 50)
+# poste7 — C14 au défaut (équivalence et capture tenues, −12 % du pas b=1 en processus ; la cellule servie est indécidable sous un hôte saturé, pas fausse) ; trouvaille de poste2 : TF32 au prefill d'un préfixe de 8 192 déplace la PPL de décodage de ± 3-6 % par texte — fenêtre PPL immédiate, l'hôte saturé n'y change rien (19/09, 22 h 06, heure du commit)
 
 Source : `verdict-c14-etape5-19-09` (poste2 b5587c7) ; `poste7-niveau2-faux-c14-defaut-20-09` § 2 ; `verdict-c13a-19-09` (fenêtres de 2 048, prefill pur : +0,07 %) ; REGLES § 4 (la PPL survit à une contention, un débit non ; trois états).
 
