@@ -47,6 +47,15 @@ _MLA_UNE_PASSE = os.environ.get("ACVRAM_MLA_UNE_PASSE", "1") == "1"
 #   bf16 = C13-b : entrées castées en bf16, accumulation fp32 des tensor cores, sortie bf16
 #          (prédiction cœur 220 → 80-95 ms ; scellé contre fp32 : prefill ≥ 9 000 j/s ET ΔPPL
 #          géo ≤ +0,002 → défaut).
+#   flash = C13-c forme 1 (chantier-c13c-19-09 § Correction poste7 ; kernels/attn_mla_causal.py) :
+#          les deux produits, le masque et le softmax FUSIONNÉS en un noyau Triton causal, en
+#          fp32 plein (tl.dot IEEE, softmax fp32) — un lancement par couche au lieu de 8 morceaux
+#          × 5 ops, les scores ne passent plus par la HBM (≈ 70 Go/pas), la moitié masquée n'est
+#          pas calculée ; sortie = fp32 ± 8 ulp de l'amplitude par ligne, donc aucune porte de
+#          PPL et valable à TOUTES les longueurs (la règle des 2 048 clés ne le concerne pas).
+#          Scellé poste7 : cœur 220 → ≤ 110 ms, prefill GLM ≥ 9 000 j/s. Le décodage n'est pas
+#          touché. Sans Triton ni carte : repli fp32 einsum NOMMÉ (`_FLASH_REPLI`, ligne de
+#          régime `mla_core=flash(repli fp32: …)`), jamais silencieux.
 # Deux portées nommées à part, opt-in jusqu'à leur scellé (poste7-c13a-defaut § 2) :
 #   ACVRAM_MLA_CORE_VB=1 : le 3e produit du préfill, y = v_b·o_lat (8ae21997 ; scellé prefill
 #          ≥ 7 450 j/s ET ΔPPL géo ≤ +0,001 contre 2 produits) suit MLA_CORE ; 0 (défaut) = fp32 ;
@@ -56,9 +65,29 @@ _MLA_UNE_PASSE = os.environ.get("ACVRAM_MLA_UNE_PASSE", "1") == "1"
 _MLA_CORE = os.environ.get("ACVRAM_MLA_CORE", "tf32")
 _MLA_CORE_DECODE = os.environ.get("ACVRAM_MLA_CORE_DECODE", "fp32")
 _MLA_CORE_VB = os.environ.get("ACVRAM_MLA_CORE_VB", "0") == "1"
-for _nom, _val in (("ACVRAM_MLA_CORE", _MLA_CORE), ("ACVRAM_MLA_CORE_DECODE", _MLA_CORE_DECODE)):
-    if _val not in ("fp32", "tf32", "bf16"):
-        raise ValueError(f"{_nom}={_val!r} : fp32 | tf32 | bf16")
+if _MLA_CORE not in ("fp32", "tf32", "bf16", "flash"):
+    raise ValueError(f"ACVRAM_MLA_CORE={_MLA_CORE!r} : fp32 | tf32 | bf16 | flash")
+if _MLA_CORE_DECODE not in ("fp32", "tf32", "bf16"):          # flash = préfill seul
+    raise ValueError(f"ACVRAM_MLA_CORE_DECODE={_MLA_CORE_DECODE!r} : fp32 | tf32 | bf16")
+_FLASH_REPLI: str | None = None      # raison du repli fp32 sous MLA_CORE=flash, posée au premier préfill
+
+
+def regime_coeur_texte() -> str:
+    """Le mot `mla_core=…` de la ligne de régime : rien sous fp32 ; `tf32(≤2048 clés)` /
+    `bf16(≤2048 clés)` (règle des clés vues) ; `flash(fp32)` — ou `flash(repli fp32: raison)`
+    quand le noyau n'a pas pu être lancé (REGLES § 4 : le régime effectif, pas le demandé)."""
+    if _MLA_CORE == "fp32":
+        return ""
+    if _MLA_CORE == "flash":
+        if _FLASH_REPLI is not None:
+            return f"mla_core=flash(repli fp32: {_FLASH_REPLI})"
+        try:                                                  # la tuile est nommée : elle dépend de la carte
+            from ..kernels.attn_mla_causal import tuile_par_carte
+            bm, bn, w, st = tuile_par_carte("cuda:0" if torch.cuda.is_available() else "cpu")
+            return f"mla_core=flash({_FLASH_OPERANDES},{bm}x{bn}w{w}s{st})"
+        except Exception:                                     # noqa: BLE001
+            return "mla_core=flash(fp32)"
+    return f"mla_core={_MLA_CORE}(≤{_MLA_CORE_MAX_CLES} clés)"
 
 
 # poste7-c14-defaut-tf32-8k-20-09, addendum 02 h 25 (verdict-tf32-8k, poste2 c2c1e87 : max |Δ| 6,23 %
@@ -76,6 +105,8 @@ def _regime_coeur(decode: bool = False, vb: bool = False, cles: int | None = Non
         return _MLA_CORE_DECODE
     if vb and not _MLA_CORE_VB:
         return "fp32"
+    if _MLA_CORE == "flash":
+        return "flash"          # forme 1 = fp32 plein : la règle des 2 048 clés ne s'applique pas
     if cles is not None and cles > _MLA_CORE_MAX_CLES:
         return "fp32"
     return _MLA_CORE
@@ -228,6 +259,39 @@ def _extension():
     from .. import kernels
     ext = kernels.get_extension()
     return ext if ext is not None and hasattr(ext, "mla_decode") else None
+
+
+def _flash_prefill(q_eff: torch.Tensor, cache: torch.Tensor, passe: int, scale: float,
+                   rank: int):
+    """C13-c forme 2 (`poste7-c13c-forme1-faux-forme2-tf32-20-09` § 2) : sous `MLA_CORE=flash`, le cœur
+    causal fusionné en **TF32** pour les requêtes qui voient ≤ `_MLA_CORE_MAX_CLES` clés (règle des
+    2 048 clés : la requête i voit passe + i + 1 clés), le reste des requêtes reste au chemin fp32
+    par morceaux. Rend (o_lat [t_flash, nh, rank] fp32, t_flash) — t_flash = 0 quand rien n'est
+    éligible (passe ≥ 2 048) ; None quand le régime n'est pas `flash` ou après un repli nommé
+    (`_FLASH_REPLI`, ligne de régime `mla_core=flash(repli fp32: …)`), jamais silencieux."""
+    global _FLASH_REPLI
+    if _MLA_CORE != "flash" or _FLASH_REPLI is not None:
+        return None
+    t = q_eff.shape[0]
+    t_flash = max(0, min(t, _MLA_CORE_MAX_CLES - passe))
+    if t_flash == 0:
+        return torch.empty(0, q_eff.shape[1], rank, dtype=torch.float32, device=q_eff.device), 0
+    try:
+        from ..kernels import attn_mla_causal
+        if not attn_mla_causal.disponible():
+            raise RuntimeError("Triton absent ou carte sans noyau flash")
+        o = attn_mla_causal.attention_mla_causale(q_eff[:t_flash].to(torch.float32).contiguous(),
+                                                  cache[:passe + t_flash], passe, scale, rank,
+                                                  operandes=_FLASH_OPERANDES)
+        return o, t_flash
+    except Exception as ex:                                   # noqa: BLE001
+        _FLASH_REPLI = f"{type(ex).__name__}: {ex}"[:120]
+        print(f"[mla] MLA_CORE=flash : noyau indisponible, repli fp32 par morceaux pour tout le préfill "
+              f"({_FLASH_REPLI})", flush=True)
+        return None
+
+
+_FLASH_OPERANDES = os.environ.get("ACVRAM_MLA_FLASH_OPERANDES", "tf32")   # tf32 (forme 2) | fp32 (forme 1, faux sur sm_120) | tf32x3 (sonde)
 
 
 class MLAttention(nn.Module):
@@ -428,10 +492,12 @@ class MLAttention(nn.Module):
             # prefill : par tranches de requêtes, sinon les scores
             # [t, nh, total] fp32 pèsent des gigaoctets (2 Go à 4k jetons)
             passe = total - t
+            flash = _flash_prefill(q_eff, cache, passe, self.scale, self.rank)   # C13-c : None hors MLA_CORE=flash / repli
+            o_flash, t_flash = flash if flash is not None else (None, 0)
             pos_k = torch.arange(total, device=x.device)
-            morceaux = []
+            morceaux = [] if o_flash is None or t_flash == 0 else [o_flash]
             C_dt = {}                                  # cache converti par dtype, une fois
-            for d0 in range(0, t, 256):
+            for d0 in range(t_flash, t, 256):          # les requêtes au-delà de 2 048 clés vues : fp32 par morceaux
                 d1 = min(t, d0 + 256)
                 cles = passe + d1                      # clés VUES par ce morceau (causal) : la règle ≤ 2 048
                 dt = _dt_coeur(cles=cles)
@@ -444,7 +510,7 @@ class MLAttention(nn.Module):
                 sc = sc.masked_fill(pos_k > pos_q.unsqueeze(1), float('-inf'))
                 with _tf32_coeur(cles=cles):
                     morceaux.append(torch.einsum('ths,sr->thr', sc.softmax(dim=-1).to(dt), V32))
-            o_lat = torch.cat(morceaux)
+            o_lat = torch.cat(morceaux) if len(morceaux) != 1 else morceaux[0]
             dtv = _dt_coeur(vb=True, cles=total)
             with _tf32_coeur(vb=True, cles=total):  # 3e produit du cœur au préfill (8ae21997, opt-in MLA_CORE_VB)
                 y = torch.einsum('hvr,thr->thv', self.v_b.to(dtv), o_lat.to(dtv))

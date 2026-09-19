@@ -185,7 +185,11 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MLA_GLUE", "1", ("acvram.engine.mla", "_MLA_GLUE"), "0",
              "C15 (chantier-c15-19-09) : DÉFAUT 1 depuis le 20/09 (verdict-c15 : −459 lancements/pas, jetons identiques, GLM b=1 −0,43 ms) ; 1 = glue torch du décodage MLA b=1 retirée au bit (v_b fp32 une fois, cat kvp, stack RoPE, demi-tables cos/sin, résidu différé add_norm des couches MLA : −6 lancements/couche ; MoE : tok int64 servi, eid converti une fois, x[tok] une fois, tok_g = seq : −3 Marlin / −6 distincte) | 2 = en plus b=1 par decode_static_batch_complet (mla_prep_batch, numérique du lot, ≤ 1 ulp) | 0 = témoin"),
     Variable("MLA_CORE", "tf32", ("acvram.engine.mla", "_MLA_CORE"), "tf32",
-             "C13 (poste7-c13a-defaut-19-09 § 1 + addendum) : précision des deux premiers produits du cœur d'attention MLA au PRÉFILL (scores, o_lat), softmax et noyau mla_1p en fp32 inchangés — tf32 DÉFAUT (C13-a tenu : 7 191 j/s, ΔPPL géo +0,00066) | fp32 (référence de qualité) | bf16 (C13-b : entrées bf16, acc fp32 ; scellé contre fp32 : prefill GLM ≥ 9 000 j/s ET ΔPPL géo ≤ +0,002 → défaut)"),
+             "C13 (poste7-c13a-defaut-19-09 § 1 + addendum) : précision des deux premiers produits du cœur d'attention MLA au PRÉFILL (scores, o_lat), softmax et noyau mla_1p en fp32 inchangés — tf32 DÉFAUT (C13-a tenu : 7 191 j/s, ΔPPL géo +0,00066) | fp32 (référence de qualité) | bf16 (C13-b : entrées bf16, acc fp32 ; scellé contre fp32 : prefill GLM ≥ 9 000 j/s ET ΔPPL géo ≤ +0,002 → défaut) | flash (C13-c forme 1, chantier-c13c-19-09 : noyau Triton causal fusionné kernels/attn_mla_causal.py, fp32 plein, un lancement par couche, scores jamais en HBM, moitié masquée sautée ; sortie = fp32 ± 8 ulp/ligne, aucune porte de PPL, toutes longueurs ; scellé cœur ≤ 110 ms ET prefill GLM ≥ 9 000 j/s ; sans Triton : repli fp32 nommé)"),
+    Variable("MLA_FLASH_OPERANDES", "tf32", ("acvram.engine.mla", "_FLASH_OPERANDES"), None,
+             "C13-c forme 2 : précision des opérandes du cœur flash (tf32 défaut, ≤ 2 048 clés vues ; fp32 = forme 1, 0,88 × cuBLAS mais structure ×26 ; tf32x3 sonde) — la ligne de régime nomme mla_core=flash(<operandes>,<tuile>)"),
+    Variable("MLA_FLASH_TUILE", "", None, None,
+             "C13-c diagnostic : BM,BN,warps,stages de la tuile du cœur flash (défaut : par la shared de la carte — sm_120 32,64,4,1 ; ≥ 200 Ko 64,64,8,2) ; la ligne de régime nomme la tuile"),
     Variable("MLA_CORE_VB", "0", ("acvram.engine.mla", "_MLA_CORE_VB"), "0",
              "C13 (poste7-c13a-defaut § 2) : 1 = le 3e produit du préfill y = v_b·o_lat (8ae21997) suit MLA_CORE ; 0 = fp32 ; scellé prefill ≥ 7 450 j/s ET ΔPPL géo ≤ +0,001 contre 2 produits → défaut 1"),
     Variable("MLA_CORE_DECODE", "fp32", ("acvram.engine.mla", "_MLA_CORE_DECODE"), "fp32",
@@ -361,8 +365,8 @@ def regime_ligne() -> str:
     # quand une carte est visible : à sec la ligne ne change pas.
     try:
         from .engine import mla as _mla
-        if _mla._MLA_CORE != "fp32":
-            parts.append(f"mla_core={_mla._MLA_CORE}(≤{_mla._MLA_CORE_MAX_CLES} clés)")
+        if _mla.regime_coeur_texte():                     # tf32/bf16(≤2048 clés) | flash(fp32) | flash(repli fp32: …)
+            parts.append(_mla.regime_coeur_texte())
     except Exception:                                     # noqa: BLE001
         pass
     try:
