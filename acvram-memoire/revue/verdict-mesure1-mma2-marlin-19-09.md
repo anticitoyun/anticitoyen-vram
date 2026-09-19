@@ -27,3 +27,21 @@ verdict : **Mesure 2 : NON** — la ligne t est tenue (0,88 ≤ 1,15 ; ma prédi
 * Le processus étranger 4284 (llama-server, 5,6 Gio) était sur la carte et son repos diffère entre les deux passes (48,8 W bras Marlin, 63,1 W bras naturel, contre 34,5 W carte vide le matin) : les W absolus des deux bras ne sont comparables qu'à ± 15 W. Ramenés à un repos propre (W_net + 34,5) : **mma2 370-373 W, Marlin 384 W** — la réfutation de poste7 « ≥ 380 » tiendrait alors de 7-10 W pour mma2 (non tranché à cet instrument), le seuil « ≤ 350 » reste faux dans tous les cas, donc Mesure 2 reste NON. Une remesure carte vide (3 min) lève le 372/401, elle ne change pas le verdict.
 * Unité : 45 et 27 sont des listes construites (8 distincts par jeton), pas le routage réel ; le compte réel par couche à b=12 vient de la trace C9-M1 (poste2, prédiction poste7 30 ± 8).
 * mma2 à M=96 lignes sans le tri/`bincount`/`.item()` de la glue hôte (`_forward_prefill_grouped`) : le pas servi paie cette glue, Mesure 2 la compte.
+
+## Mesure 1-bis (20:10-20:13, `donnees-mesure1-19-09/chaine-mesure1bis.sh`, u = 8 à b=1 et u = 16 à b=2, 4 s par poste, sans témoins) : **Marlin garde b=1 et b=2** (prédiction poste7 tenue)
+
+| u (b) | noyau | t noyau µs | W | cycl. | To/s |
+|---|---|---|---|---|---|
+| 8 (1) | Marlin gate·up | **15,0** | **376** | 0,98 | 0,94 |
+| 8 (1) | Marlin down | 7,2 | 402 | 0,96 | 0,98 |
+| 8 (1) | mma2 gate+up (8 tuiles) | 15,6 | 383 | 0,97 | 0,91 |
+| 8 (1) | mma2 down | 6,8 | 398 | 0,96 | 1,04 |
+| 16 (2) | Marlin gate·up | **21,2** | 400 | 0,97 | 1,34 |
+| 16 (2) | Marlin down | 11,2 | 404 | 0,96 | 1,26 |
+| 16 (2) | mma2 gate+up (16 tuiles) | 28,2 | 398 | 0,99 | 1,00 |
+| 16 (2) | mma2 down | 12,1 | 400 | 0,97 | 1,17 |
+| 8 / 16 | quant_act ×2 | 4,9 | (boucle) | 0,31 | — |
+
+Par couche : **u=8 Marlin 22,2 µs, mma2 27,3 (×1,23 ; ×1,01 sans la quantification)** ; **u=16 Marlin 32,4, mma2 45,2 (×1,40 ; ×1,24 sans)**. Le croisement est entre u=16 et u=27 (×0,75) : à 8-16 tuiles mma2 n'occupe que 8-16 blocs sur 170 SM (latence, pas débit : 28,2 µs à 16 tuiles contre 43,7 à 27 — non linéaire) ; Marlin gate·up à b=1 tourne sous le plafond (376 W). La route native ne vaut qu'à b ≥ ~4 (u ≥ ~24) ; à b=1 le GEMV Marlin reste.
+
+## Contrôle (b) de C10 (20:12, 3 s, carte) : **21 passed** — `tests/test_gemv_marlin.py` sous `ACVRAM_MARLIN_DISTINCT=1` : formes GLM ajoutées (bce00f71 : gate·up 2048×1536 act 0/1, down 1536×2048 en 3 modes, à côté des formes Coder), bloc MoE décodage par GEMV Marlin, bras cassant (échelles décalées / poids permutés). Extension = cache faf1f7b (`ACVRAM_CUDA_HOME=/usr/local/cuda-13.4` obligatoire sous `carte.sh`, sinon « Error building extension » et repli référence : le premier passage a été un 21 skipped, dit ici). Pointeur à chef : fusion de C10 opt-in (`ACVRAM_MARLIN_DISTINCT`) possible.

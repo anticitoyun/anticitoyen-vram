@@ -115,10 +115,11 @@ res = []
 # Témoins.
 src = torch.empty(1 << 30, dtype=torch.uint8, device=dev); dst = torch.empty_like(src)
 SEUL = os.environ.get("BANC_SEULEMENT")          # "mma" : postes MMA seuls ; "pas" : le pas complet seul ; "mesure1" : Marlin et mma2 à unité égale
-if SEUL != "pas":
+TEMOINS = os.environ.get("BANC_TEMOINS", "1") != "0"     # 0 : sauter les deux témoins (fenêtre courte)
+if SEUL != "pas" and TEMOINS:
     res.append(mesure("temoin copie DRAM 1 Gio (octets, ~0 instruction)", lambda: dst.copy_(src), lots=4, unite="1 copie de 1 Gio"))
 a = torch.randn(8192, 8192, dtype=torch.bfloat16, device=dev); bm = torch.randn(8192, 8192, dtype=torch.bfloat16, device=dev)
-if SEUL != "pas":
+if SEUL != "pas" and TEMOINS:
     res.append(mesure("temoin GEMM bf16 8192^3 (instructions, ~0 octet DRAM)", lambda: torch.matmul(a, bm), lots=2, unite="1 GEMM 8192^3 bf16 (1,1 TFLOP)"))
 del src, dst, a, bm
 
