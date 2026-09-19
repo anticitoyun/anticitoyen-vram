@@ -8,3 +8,11 @@ suite : poste1 (à sec, moteur) : localiser les ~8 Gio non alloués sous cublas 
 
 ## Rejouable
 `ACVRAM_PREFILL_INT8=cublas ACVRAM_ARBRE=$PWD PYTHONPATH=$PWD CUDA_VISIBLE_DEVICES=0 ACVRAM_TYPE=mesure outils/carte.sh <venv>/python scratchpad/p2-ppl-19-09/diag-memoire.py /mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c scratchpad/corpus-prive/tranches-coder/tranche0.txt` — journaux `diag-i8c.log`, `diag-i8c-expandable.log`, `ppl-i8c-tr*.log`.
+
+## Addendum 17 h 42 — sur main + poste1-11 `93d3cfb` (tête au chemin défaut, PPL par tranches de 256) : **TENU, ratio 1,0094**
+
+instrument : même `chaine.sh`, arbre `025c0c9` (= main `b336c15` + poste1-11 `5f08f05`, qui contient `93d3cfb`), prise `carte.sh` 17:41:20-17:42:03 (43 s : 3 tranches × ~14 s), `ACVRAM_PREFILL_INT8=cublas` seule variable, carte 0 vide (llama-server 8081 sur la 3080 Ti)
+scellé : ratio i8c/bf16 HF géo ≤ 1,020 ; preuve du chemin `CHEMINS_INT8`
+mesuré : PPL absolues **12,5135 / 11,3953 / 11,6547** (défaut : 12,6015 / 11,3994 / 11,7824) → ratio bf16 HF **1,0042 / 1,0112 / 1,0128, géo 1,0094** ; `CHEMINS_INT8 {'cublas': 2304, 'dequant': 48}` par tranche (2 304 = 48 couches × 4 projections × 12 fenêtres : q/k/v/o TOUS par `_int_mm` ; 48 = la tête au chemin défaut, déquant g128, 4 appels par fenêtre) ; plus d'OOM : la cause de la ligne 2 était bien la tête en W8A8 à 2 048 lignes (c62e2ef) — 93d3cfb la rend au défaut et note par tranches de 256
+verdict : **ligne 2 TENUE — 1,0094 ≤ 1,020, exactement la prédiction de poste7 (« 1,0094 attendu »), et −0,006 sous le défaut 1,0155 ; le hors-moteur (0,9947 × classé ≈ 1,0096) est confirmé dans le moteur à 2·10⁻⁴** ; les quatre lignes P2 tiennent désormais : (1) équivalence 6/5/8 ≤ 2A+2 · (2) PPL 1,0094 · (3) prefill 18 850 / 18 798 ≥ 17 500 · (4) J/jeton 0,89-0,93 × A — seule réserve, dite : |déc − pré| par tranche 2/3 (tr1 0,156 > 2 × 0,067 sur 256 positions), somme tenue
+suite : poste7 tranche « P2 au défaut » (règle : quatre lignes tenues) ou opt-in avec la réserve tr1 ; le défaut moteur ne change qu'à son mot ; chef : ligne « Coder i8c cublas : PPL 1,0094 · prefill 18 850 · J 0,89-0,93 × » au comparatif
