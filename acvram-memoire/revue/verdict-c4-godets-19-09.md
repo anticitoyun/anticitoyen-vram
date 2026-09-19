@@ -8,3 +8,6 @@ suite : poste7 : le scellé (3) doit dire ce qu'il compare — la PPL d'une séq
 
 ## Rejouable
 `ACVRAM_TYPE=mesure outils/carte.sh bash scratchpad/c4-godets-19-09/chaine.sh` (6 min) ; drain corrigé : `chaine-drain.sh`.
+
+## Addendum 19 h 58 — drain 12 → 1 rejoué sur l'arbre main `b16313e` + fffd17c (`281b522`, plafond hybride = `--max-batch`, aucun `HYBRID_SLOTS` posé) : **godets −11,5 % de temps, 5 captures de moins, 0 pas eager**
+instrument : `chaine-drain.sh` (12 invites de 256, longueurs 64..416, un moteur), prise `carte.sh` 19:57:33-19:58:16 ; mesuré : **défaut (godets)** 415 pas, **12,08 s, 29,1 ms/pas, captures 5 → 11, voies graphe 420 / eager 0** ; **`GODETS_B=0` (lot exact)** 415 pas, **13,65 s, 32,9 ms/pas, captures 5 → 16, graphe 356 / eager 64** ; lots vus 12 → 0 dans les deux ; verdict : publié non scellé — le godet sur b épargne 5 captures et 64 pas eager sur un drain de 12 à 1, −1,6 s sur 13,7 (−11,5 %) ; la première passe (plafond 4) ne voyait rien parce que 287 pas sur 415 étaient eager dans les deux bras
