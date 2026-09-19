@@ -107,10 +107,13 @@ def lire_horloge(index: int = 0, sortie: str | None = None, etat: dict | None = 
     e = _lire_etat(index) if etat is None else etat
     if e:
         cible = int(e["mode"])
-        tenu = abs(sm - cible) <= TOLERANCE_MHZ
+        # état posé : tenu ssi l'horloge ne dépasse pas la consigne (un verrou est un plafond ;
+        # sous charge le bridage de puissance peut la tenir bien en dessous) ; au repos (< 1 000)
+        # rien n'est concluant, l'état posé fait foi
+        tenu = sm <= cible + TOLERANCE_MHZ
         return {"sm_mhz": sm, "max_sm_mhz": max_sm, "verrou": tenu, "mode": str(cible),
                 "pid": e.get("pid"), "brut": brut,
-                **({} if tenu else {"erreur": f"état posé {cible} MHz mais horloge lue {sm}"})}
+                **({} if tenu else {"erreur": f"état posé {cible} MHz mais horloge lue {sm} au-dessus"})}
     if sous_charge:
         bande = next((v for v in VERROUS_CONNUS if abs(sm - int(v)) <= TOLERANCE_MHZ), None)
         if bande is not None:
@@ -359,8 +362,13 @@ class Horloge:
             # libre = sous charge l'horloge n'est dans aucune bande de verrou connue
             # (un -lgc posé à la main hors de ce processus se voit ici : poste2, bras faux)
             return self.effectif not in (None, "?") and self._dans_une_bande() is None
+        # (a) poste7-mesure1-ter-c17-ecrit-c14-juge-20-09 : -lgc est un PLAFOND — le limiteur de
+        # puissance passe SOUS le verrou (Marlin 1 950-2 265 MHz à 400 W sous -lgc 2700) et jamais
+        # au-dessus ; le verrou est effectif ssi l'horloge lue sous charge ne DÉPASSE pas la consigne
+        # (+ tolérance) ; en dessous, c'est le bridage, pas l'absence de verrou. (b) MHz et W sont
+        # publiés, jamais critères.
         try:
-            return self.effectif is not None and abs(int(self.effectif) - int(self.mode)) <= TOLERANCE_MHZ
+            return self.effectif is not None and 1000 <= int(self.effectif) <= int(self.mode) + TOLERANCE_MHZ
         except ValueError:
             return False
 

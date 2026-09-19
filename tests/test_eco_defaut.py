@@ -249,3 +249,17 @@ def test_lecture_sous_charge_attend_un_regime(isole):
     h = eco.lire_sous_charge(0, lambda index=0, sous_charge=False, **kw: _LIRE_ORIG(index, f"{next(lent)}, 3135, Not Active", sous_charge=sous_charge),
                              charge=_RIEN, attente=0.05, plafond=0.3, minimum=0.1)
     assert h["stable"] is False and len(h["lectures"]) >= 4
+
+
+def test_verrou_est_un_plafond_lecture_au_dessus_refus_en_dessous_bridage(isole):
+    """(a) poste7-mesure1-ter-c17-ecrit-c14-juge-20-09 : sous -lgc 2700 le limiteur de puissance
+    tient Marlin à 1 950-2 265 MHz (400 W) — c'est le verrou effectif ; une lecture > 2 700 + 60
+    sous charge = pas de verrou → refus ; (b) MHz et W publiés, jamais critères."""
+    faux = _Faux()
+    h = eco.Horloge("2700", 0, executer=faux, lire=_lire_fixe(2265), charge=_RIEN)   # bridé sous le verrou
+    assert h.poser() == "effectif" and h.conforme and h.etiquette() == "eco=2700(2265)"
+    h2 = eco.Horloge("2700", 0, executer=_Faux(), lire=_lire_fixe(2977), charge=_RIEN)  # au-dessus : pas de verrou
+    assert h2.poser() == "non pris" and not h2.conforme and "non pris" in h2.etiquette()
+    # lire_horloge avec état posé : en dessous tenu, au-dessus faux
+    assert eco.lire_horloge(0, "1950, 3135, Not Active", etat={"mode": "2700"})["verrou"] is True
+    assert eco.lire_horloge(0, "2977, 3135, Not Active", etat={"mode": "2700"})["verrou"] is False
