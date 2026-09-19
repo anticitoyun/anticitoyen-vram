@@ -1032,6 +1032,11 @@ class MoEBlock(nn.Module):
         if any(piles[n][0] != "nvfp4" for n in ("gate_proj", "up_proj", "down_proj") if n in piles) \
                 or "gate_proj" not in piles:
             raison = "piles non NVFP4"
+        elif piles["gate_proj"][1].device.type != "cuda":
+            # dimension « appareil » (MECANISMES) : gptq_marlin_repack n'a qu'un
+            # noyau CUDA ; à sec (tests, CUDA_VISIBLE_DEVICES vide) la pile
+            # naturelle reste le seul chemin, sans NotImplementedError.
+            raison = "pile hors CUDA (à sec) : Marlin exige la carte"
         else:
             for n in ("gate_proj", "up_proj", "down_proj"):
                 _, qw, bs, gs, k, m = piles[n]

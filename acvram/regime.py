@@ -163,6 +163,7 @@ HORS_REGIME = frozenset({
     "ACVRAM_LISTE_CLE", "ACVRAM_LISTE_PROMUS", "ACVRAM_MAX_PROMUS", "ACVRAM_ORDRE_SAC",
     "ACVRAM_ORDRE_SAC_INVERSE", "ACVRAM_GRAPHES_MUETS", "ACVRAM_MAX_GRAPHS", "ACVRAM_INSTA_MAX",
     "ACVRAM_REGIME_MUET",
+    "ACVRAM_DUMP_MOE",   # dossier de recopie des tampons MoE (diagnostic a2711bc) : n'aiguille aucun calcul
     # garde-fou d'admission, pas un chemin de calcul (poste7-reprise-ordre-18-09
     # §Suite) : Engine.__init__ refuse max_batch_size > plan.kv_planned_seqs,
     # ce flag force le lancement en connaissance de cause. Visible dans
