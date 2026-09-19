@@ -2240,6 +2240,13 @@ def _multi_utilisable(mp, x: torch.Tensor, t: int) -> bool:
 _STATIC = object()
 
 
+def _sid_fantome(sid) -> bool:
+    """Vrai pour une sentinelle de rembourrage (`graphs._bind_hybrid` : -1,
+    -2, ...). Les identités réelles viennent de `runner.Sequence.id`, un
+    compteur à partir de 0 : aucune n'est négative."""
+    return isinstance(sid, int) and sid < 0
+
+
 class DecoderLayerGDN(nn.Module):
     """Bloc à récurrence linéaire : Gated DeltaNet à la place de l'attention.
 
@@ -2352,17 +2359,29 @@ class DecoderLayerGDN(nn.Module):
         while len(self.statics) <= slot:
             self.statics.append(self._nouveau_static(max_len, dtype))
             self.static_owners.append(None)
-        if self.static_owners[slot] == sid and store.get(sid) is _STATIC:
+        # Créneau de rembourrage (godet > lot réel, `graphs._bind_hybrid`) :
+        # sid négatif, hors de tout lot. Son état n'appartient à personne : il
+        # part à ZÉRO à chaque liaison, avance avec les entrées factices du
+        # godet tant que le créneau reste du rembourrage (jamais lu, jamais
+        # exporté), et n'écrit RIEN dans le magasin. Avant le 19/09, la
+        # sentinelle passait par le chemin ordinaire : à l'éviction son état
+        # (avancé par les rejeux) était exporté sous `store[-1]`, une clé
+        # absente de tout lot, puis RECHARGÉ dans le créneau de rembourrage
+        # suivant — neutre au premier cycle seulement (chantier-c4-19-09).
+        fantome = _sid_fantome(sid)
+        if self.static_owners[slot] == sid and (fantome or store.get(sid) is _STATIC):
             return
         prev = self.static_owners[slot]
-        if prev is not None and prev != sid and store.get(prev) is _STATIC:
+        if (prev is not None and prev != sid and not _sid_fantome(prev)
+                and store.get(prev) is _STATIC):
             store[prev] = la.static_export(self.statics[slot])
         self.static_owners[slot] = None
-        etat = store.get(sid)
+        etat = None if fantome else store.get(sid)
         if etat is _STATIC:
             etat = self._reprendre(sid)
         la.static_load(self.statics[slot], etat)
-        store[sid] = _STATIC
+        if not fantome:
+            store[sid] = _STATIC
         self.static_owners[slot] = sid
 
     def decode_fixed(self, x: torch.Tensor, positions: torch.Tensor,
