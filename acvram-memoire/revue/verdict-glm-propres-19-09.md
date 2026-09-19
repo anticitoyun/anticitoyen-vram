@@ -8,3 +8,5 @@ suite : chef : comparatif « GLM b=12 servi 2 700 : 660 ± 20 · 0,32 net ; b=1 
 
 ## Rejouable
 `ACVRAM_TYPE=mesure outils/carte.sh bash scratchpad/glm-propres-19-09/chaine.sh` (9 min) ; prefill 8 192 : `prefill-abab-19-09.py $G 8192` (1 min par bras).
+
+## Correction 23 h 40 — « le b=1 servi est borné par l'hôte (≈ 3 ms hors GPU) » est FAUX : nsys graph + osrt sur `certifie` GLM b=1 (verdict-glm-b1-osrt-19-09) : hors GPU 0,64 ms (7 %), rejeu de graphe 8,57 ms pour 6,1-6,3 ms de noyaux — l'écart est dans les espaces entre nœuds du graphe (2 163 lancements), pas dans l'hôte.
