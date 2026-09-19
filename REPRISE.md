@@ -50,6 +50,9 @@ a été conservée.
   `ACVRAM_PREFILL_INT8=cublas`**, prefill 18 850 j/s (+14 %), J/jeton 0,89-0,93 × défaut,
   équivalence tenue ; PPL ligne 2 en cours (instrument `perplexity()` à aligner sur le
   chemin servi). Split-K b=1 : opt-in `ACVRAM_GEMV_SPLITK=1` (PPL +0,0042, non tranché).
+* **Spéculation n-gram déjà au défaut à b ≤ 2** (`runner.py:429`, `ACVRAM_SPECULATION_LOT_MAX=2`,
+  `GardeSpeculation` conditionnée au lot réel) : taux d'acceptation 1,61 mesuré le 13/09 sur du
+  code ; la cellule b=1 ci-dessus le contient. Invariant : jamais un jeton différent du greedy.
 * GLM-4.7-Flash (MLA) : classé 1,0143 (`-k48-calibA`), prefill 5 502 j/s ; b=12 en cours
   (G1). W4A4 experts **fermé** (deux verdicts). Modèles convertis sous
   `/mnt/2TO_2023_980PRO/Modeles/models_acvram/` (161 alias dans le catalogue), originaux
