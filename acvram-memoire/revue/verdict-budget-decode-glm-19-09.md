@@ -8,3 +8,6 @@ suite : poste1 (moteur) : (1) `mla_1p_kernel` à b=1 = 2,1 ms pour 47 couches et
 
 ## Rejouable
 `ACVRAM_TYPE=mesure outils/carte.sh bash scratchpad/nsys-budget-19-09/chaine-decode-glm.sh` (33 s) ; rapports `glm-decode-b{1,12}.nsys-rep`, CSV `*_cuda_gpu_kern_sum.csv`, journal `journal-decode-glm.log`. Lire les ms/pas = « Total Time (ns) » / 50 / 1e6 ; lancements/pas = Instances / 50.
+
+## Note 18 h 40 — réponse d'poste1 à la question ouverte
+Les deux chemins d'experts coexistent PAR COUCHE, ce n'est pas un bogue : `up_distinct` (tables AWQ gate ≠ up, `torch.equal(g, u)`, model.py ~963) se décide dans chaque `MoEBlock` — 33 couches non distinctes prennent la disposition unique Marlin (gate·up fusionné ×33 + down ×33), 13 couches distinctes sont refusées par `_construire_marlin` (d3bf9d2) et gardent la pile naturelle → `_grouped` = 3 GEMV génériques (xreg ×39 = 13 × 3 à b=1 ; mma2 ×39 à b=12). 33 + 13 = 46 couches MoE. C10 (`ACVRAM_MARLIN_DISTINCT`) unifie ; le budget tient : experts 1,14 ms sur 8,4 à b=1, le poste est `mla_1p_kernel` puis la glue.
