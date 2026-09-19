@@ -37,7 +37,7 @@ Assemblé par chef, critère 6 points `poste7-plan-completion-comparatif-17-09`.
 | moteur / régime | PPL privé | PPL public | b=12 t/s | b=12 J | prefill j/s | classé |
 |---|---|---|---|---|---|---|
 | acvram W4A16 bf16 prefill (`-vllm-direct`) | 1,0096 | — | — | — | — | oui |
-| acvram W4A16 bf16 prefill (`-k48-calibA`) P1 | 1,0120 (mesuré, B0 rejoué 1,0150 ; gain non revendiqué avant cause nommée — `poste7-p1-situ-verdict-18-09`) | 1,0281 | — | — | **5 502** | oui |
+| acvram W4A16 bf16 prefill (`-k48-calibA`) P1 | 1,0120 (mesuré, B0 rejoué 1,0150 ; gain non revendiqué avant cause nommée — `poste7-p1-situ-verdict-18-09`) | 1,0281 | — (G1 servi 155 t/s = **eager**, invalide : plafond hybrides 4 ; `certifie` 711 · 0,521 J en régime d'instrument — `verdict-glm-b12-19-09`, G1-bis sur 7aebbfa en cours) | — | **5 502** (log serveur `marlin-situ-18-09/prefill-M.log` porte un « repli eager » : le prefill n'emprunte pas les graphes, cellule gardée sous réserve de G1-bis) | oui |
 | vLLM Marlin W4A16 | 1,0164 | 1,0133 | 858 | 0,397 | 18 117 | oui |
 | llama.cpp Q4_K_M (unsloth, imatrix) | 1,0248 | 1,0397 | 702 | 0,495 | 11 293 | non (> 1,02) |
 | vLLM W4A4 (défaut) | 1,0717 | 1,0751 | 796 | 0,445 | 26 732 | non |
