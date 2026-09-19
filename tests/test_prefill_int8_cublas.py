@@ -78,3 +78,24 @@ def test_gemm_etroit_refuse_le_groupe_par_canal():
     w, t = _poids(N=64, K=2048)
     assert not gemm_etroit.eligible(t)
     assert gemm_etroit.eligible(_quantize_int8(w, group_size=128, symmetric=False))
+
+
+def test_ppl_prend_le_chemin_du_moteur_sous_cublas(monkeypatch):
+    """19/09 (verdict-p2-moteur) : sous cublas, un poids i8c à M > seuil GEMV
+    doit compter « cublas » et jamais « dequant » (compteur CHEMINS_INT8) ;
+    et la tête INT8 reçoit x en bf16 au-delà du seuil GEMV sous a8/cublas
+    seulement — jamais au défaut bf16 (logits au bit conservés)."""
+    import acvram.kernels as K
+    w, t = _poids(N=64, K=2048)
+    x = (torch.randn(96, 2048) * 0.5).to(torch.bfloat16)
+    monkeypatch.setattr(K, "_PREFILL_INT8", "cublas")
+    avant = dict(K.CHEMINS_INT8)
+    K.int8_matmul(x, t, gemv_threshold=80)
+    assert K.CHEMINS_INT8["cublas"] == avant.get("cublas", 0) + 1
+    assert K.CHEMINS_INT8["dequant"] == avant.get("dequant", 0)
+    assert K.tete_int8_entree_bf16(2047) and K.tete_int8_entree_bf16(8)
+    monkeypatch.setattr(K, "_PREFILL_INT8", "bf16")
+    assert not K.tete_int8_entree_bf16(2047) and K.tete_int8_entree_bf16(K._INT8_GEMV_MAX)
+    # témoin cassant : au défaut, le même appel compte la déquant
+    K.int8_matmul(x, t, gemv_threshold=80)
+    assert K.CHEMINS_INT8["dequant"] == avant.get("dequant", 0) + 1

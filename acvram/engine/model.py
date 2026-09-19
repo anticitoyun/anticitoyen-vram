@@ -2803,7 +2803,7 @@ class ACVRamModel(nn.Module):
                 and head_dev is not None and head_dev.is_cuda
                 and getattr(lin, "scaler", None) is None and getattr(lin, "streamed", None) is None
                 and getattr(lin, "bias", None) is None
-                and x.shape[0] <= kernels._INT8_GEMV_MAX
+                and kernels.tete_int8_entree_bf16(x.shape[0])
                 and os.environ.get("ACVRAM_TETE_FP32_ENTREE") != "1"):
             return kernels.int8_matmul(x.to(target), w, sortie_fp32=True)
         # Tête NVFP4 à b ≥ DENSE_NVFP4_MIN_M (poste7-gemm-dense-palier2-non-

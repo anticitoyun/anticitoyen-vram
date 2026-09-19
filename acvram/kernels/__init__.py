@@ -774,6 +774,24 @@ def gemm_i8c_cublas(x: torch.Tensor, t: INT8Tensor, sortie_fp32: bool = False):
 
 def prefill_int8_regime() -> str:
     return _PREFILL_INT8
+
+
+def tete_int8_entree_bf16(n_lignes: int) -> bool:
+    """La tête INT8 reçoit x en bf16 (GEMV fp32 / W8A8 / cublas) au lieu de la
+    conversion fp32 + déquant : toujours sous le seuil GEMV ; au-delà (PPL
+    `evaluate.perplexity`, logits sur toute la fenêtre) seulement sous un
+    régime int8 d'activation (a8 | cublas) — le défaut bf16 garde sa
+    conversion fp32 et ses logits au bit. 19/09 (verdict-p2-moteur) : la PPL
+    i8c passait par la déquant fp16 de la tête (`_tete` → fp32) alors que le
+    moteur servait cublas — deux chemins pour la même grandeur."""
+    return n_lignes <= _INT8_GEMV_MAX or _PREFILL_INT8 in ("a8", "cublas")
+
+
+# Compteur des chemins pris par `int8_matmul` (clé = branche) : une preuve
+# lisible par un test — « le chemin cublas a été pris, la déquant non » — au
+# lieu d'une déduction depuis une pile d'OOM (19/09).
+import collections as _collections
+CHEMINS_INT8 = _collections.Counter()
 # Linéaires NVFP4 denses à 2 ≤ b ≤ 32 : gemv (défaut, témoin : nvfp4_gemv, les
 # poids relus par séquence) | triton (kernels/gemm_dense_etroit.py, poids lus
 # une fois par pas) — défaut à basculer sur le scellé de poste7 (micro-banc
@@ -913,6 +931,7 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
     if _PREFILL_INT8 == "cublas" and x.dtype in (torch.bfloat16, torch.float16):
         y = gemm_i8c_cublas(xf, t, sortie_fp32=sortie_fp32)
         if y is not None:
+            CHEMINS_INT8["cublas"] += 1
             return y[:, : t.shape[0]].reshape(*orig_shape[:-1], t.shape[0])
     # P0 (poste7-profil-verdict-18-09) : au-delà du seuil GEMV, GEMM W8A8 sans
     # déquantification par appel — activation int8 par jeton, poids uint8
@@ -921,6 +940,7 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
             and t.qweight.shape[1] % t.group_size == 0):
         from . import gemm_w8a8
         if gemm_w8a8.disponible() and (x.is_cuda or gemm_w8a8.INTERPRETE):
+            CHEMINS_INT8["a8"] += 1
             y = gemm_w8a8.gemm_w8a8(xf, t, sortie_fp32=sortie_fp32)[:, : t.shape[0]]
             return y.reshape(*orig_shape[:-1], t.shape[0])
     dt = x.dtype if x.dtype != torch.float32 else torch.float16
@@ -941,6 +961,7 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
     # préfill — OOM après un chargement juste (poste3 0cf7fe6). Par tranches
     # de lignes de sortie : même arithmétique, mêmes valeurs (chaque tranche
     # est la même matrice restreinte), pic borné par _DEQUANT_TRANCHE_MAX.
+    CHEMINS_INT8["dequant"] += 1
     lignes = t.qweight.shape[0]
     par_ligne = t.qweight.shape[1] * (4 + dt.itemsize)     # fp32 intermédiaire + sortie
     if lignes * par_ligne > _DEQUANT_TRANCHE_MAX:
