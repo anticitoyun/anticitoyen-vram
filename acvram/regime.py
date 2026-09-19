@@ -121,6 +121,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("PA_SANS_COMPTEUR", "", None, None, "attention paginée sans compteur"),
     Variable("INT8_GEMV_WARP", "", None, None, "warps du GEMV int8 (lu dans le .cu)"),
     Variable("INT8_TRANCHE", "", None, None, "découpage du GEMV int8 (12 = ancien, témoin ; lu dans le .cu)"),
+    Variable("ECO", "", None, None,
+             "poste7-eco-2700-defaut-19-09 § 1 : mode éco d'horloge DEMANDÉ par un instrument pour ses bras A/B (2700 | 2100 | off), jamais pour le service — le service lit config.json (\"eco\": \"2700\" par défaut) ; l'effectif est sur la ligne de régime (eco=<demandé>(<effectif>)) et un instrument ne publie pas si demandé ≠ effectif"),
     Variable("DOUBLE_DISPOSITION_DIAG", "0", None, "0",
              "diagnostic seulement (bissection du biais GEMV (b), poste7-p1-situ-verdict-18-09) : 1 = les deux dispositions gardées, préfill {groupe|marlin} × décodage {naturel|marlin} sur les mêmes piles ; jamais un régime servi"),
     Variable("MOE_GEMV", "v1", ("acvram.engine.model", "_MOE_GEMV"), "v1",
@@ -348,9 +350,17 @@ def regime_ligne() -> str:
     # 19-09 § 2) est root et hors processus : aucun défaut ACVRAM_* ne bouge,
     # et un chiffre éco passerait pour un chiffre défaut. Nommée seulement
     # quand une carte est visible : à sec la ligne ne change pas.
-    horloge = _horloge()
-    if horloge is not None:
-        parts.append("horloge=" + horloge)
+    try:
+        from . import eco as _eco
+        h = _eco.horloge_du_processus()
+    except Exception:                                     # noqa: BLE001
+        h = None
+    if h is not None and h.etat != "sans carte":
+        parts.append(h.etiquette())                       # eco=<demandé>(<effectif>[: état])
+    else:
+        horloge = _horloge()
+        if horloge is not None:
+            parts.append("horloge=" + horloge)
     return "[régime] " + " ".join(parts)
 
 

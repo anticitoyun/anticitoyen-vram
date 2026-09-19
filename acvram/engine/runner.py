@@ -345,6 +345,21 @@ def _couverture_experts(model) -> str:
     return f"marlin({n_marlin}/{len(blocs)})"
 
 
+
+def _etat_eco() -> dict:
+    from .. import eco
+    return eco.etat_eco()
+
+
+def _eco_texte(e: dict) -> str:
+    """``eco=2700(2692)`` conforme, ``eco=2700(libre: refus sudo)`` sinon —
+    demandé ≠ effectif est un état nommé, jamais silencieux (poste7-eco-2700-defaut § 2)."""
+    eff = e.get("effectif") if e.get("effectif") is not None else "?"
+    if e.get("etat") == "sans carte":
+        return f"eco={e['demande']}(sans carte)"
+    return f"eco={e['demande']}({eff})" if e.get("conforme") else f"eco={e['demande']}({eff}: {e.get('etat')})"
+
+
 class Engine:
     """Détient le modèle, l'allocateur de blocs et les files de requêtes."""
 
@@ -609,6 +624,7 @@ class Engine:
             "dense": kernels.narrow_regime(),
             "gdn": _gdn_regime(),
             "noyaux": regime_noyaux()["hors_defaut"],
+            "eco": _etat_eco(),
             "kv_plan_override": self._kv_plan_override,
             # poste7-devstral-llama4-scaling-18-09 : visible meme sous le
             # plafond (non refuse ici), pour ne jamais laisser croire que le
@@ -652,7 +668,15 @@ class Engine:
                   if self.stats.sequences_ignore_eos else "")
                + f"cache_prefixe={self.stats.hit_rate:.3f} "
                f"({self.stats.cached_prompt_tokens} vram+hôte, "
-               f"{self.stats.host_kv_tokens} hôte)")
+               f"{self.stats.host_kv_tokens} hôte) "
+               + _eco_texte(r["eco"]))
+
+    def fermer(self) -> None:
+        """Arrêt du moteur : rend l'horloge éco posée par ce processus
+        (poste7-eco-2700-defaut-19-09 § 1) — le `-rgc` suit la vie du serveur.
+        Idempotent ; l'atexit et les signaux font le même geste."""
+        from .. import eco
+        eco.rendre_horloge()
 
     # -- admission -------------------------------------------------------
     def _eos_ids(self) -> set[int]:

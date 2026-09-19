@@ -41,6 +41,13 @@ def exiger_regime_nominal(engine, autoriser_piles_inconnues: bool = True) -> Non
         fautes.append(f"pile(s) d'experts en repli eager : {raison}")
     elif r["piles_ok"] is None and not autoriser_piles_inconnues:
         fautes.append("piles_ok non vérifié (pas de pas GPU avant l'appel)")
+    # Éco (poste7-eco-2700-defaut-19-09 § 2) : demandé ≠ effectif est un état nommé
+    # et un instrument NE PUBLIE PAS une cellule sous cet état (même garde que
+    # « repli eager vu ») ; « sans carte » n'est pas une faute (à sec).
+    e = r.get("eco") or {}
+    if e and e.get("etat") not in ("sans carte",) and not e.get("conforme"):
+        fautes.append(f"eco demandé {e.get('demande')} ≠ effectif {e.get('effectif')} ({e.get('etat')}) : "
+                      "cellule non publiable — `acvram doctor` (sudoers nvidia-smi) ou ACVRAM_ECO=off dit tel quel")
     if len(r["cartes"]) > 1:
         fautes.append(f"modèle réparti sur {len(r['cartes'])} cartes : {r['cartes']}")
 
