@@ -2596,6 +2596,8 @@ class DecoderLayerGDN(nn.Module):
                 ext = kernels.get_extension()
                 if ext is not None and hasattr(ext, "mla_decode_batch"):
                     ptrs, scores, len_ptrs = self._mla_lot(1)
+                    if os.environ.get("ACVRAM_MLA_ECRIT_TORCH") == "1":
+                        len_ptrs = None                # sonde niveau 2 : écriture du latent en torch (_ecrit_ligne)
                     return la.decode_static_batch_complet(h, self.statics[:1], self.static_bucket,
                                                           ptrs, scores, len_ptrs)
             return un(h, self.static)

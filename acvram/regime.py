@@ -180,6 +180,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MLA_BUCKET", "128", ("acvram.engine.mla", "MLA_BUCKET")),
     Variable("MLA_UNE_PASSE", "1", ("acvram.engine.mla", "_MLA_UNE_PASSE"), "0"),
     Variable("MLA_PREP_NOYAU", "1", ("acvram.engine.mla", "_MLA_PREP_NOYAU"), "0"),
+    Variable("MLA_ECRIT_TORCH", "", None, "1",
+             "sonde C15 niveau 2 (diagnostic) : 1 = à b=1 sous MLA_GLUE=2, l'écriture du latent passe par _ecrit_ligne (torch) au lieu de mla_ecrit_latent — isole ce noyau sous rejeu de graphe"),
     Variable("MLA_GLUE", "1", ("acvram.engine.mla", "_MLA_GLUE"), "0",
              "C15 (chantier-c15-19-09) : DÉFAUT 1 depuis le 20/09 (verdict-c15 : −459 lancements/pas, jetons identiques, GLM b=1 −0,43 ms) ; 1 = glue torch du décodage MLA b=1 retirée au bit (v_b fp32 une fois, cat kvp, stack RoPE, demi-tables cos/sin, résidu différé add_norm des couches MLA : −6 lancements/couche ; MoE : tok int64 servi, eid converti une fois, x[tok] une fois, tok_g = seq : −3 Marlin / −6 distincte) | 2 = en plus b=1 par decode_static_batch_complet (mla_prep_batch, numérique du lot, ≤ 1 ulp) | 0 = témoin"),
     Variable("MLA_CORE", "tf32", ("acvram.engine.mla", "_MLA_CORE"), "tf32",
