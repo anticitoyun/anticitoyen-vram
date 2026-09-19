@@ -356,6 +356,12 @@ def regime_ligne() -> str:
     # et un chiffre éco passerait pour un chiffre défaut. Nommée seulement
     # quand une carte est visible : à sec la ligne ne change pas.
     try:
+        from .engine import mla as _mla
+        if _mla._MLA_CORE != "fp32":
+            parts.append(f"mla_core={_mla._MLA_CORE}(≤{_mla._MLA_CORE_MAX_CLES} clés)")
+    except Exception:                                     # noqa: BLE001
+        pass
+    try:
         from . import eco as _eco
         h = _eco.horloge_du_processus()
     except Exception:                                     # noqa: BLE001
