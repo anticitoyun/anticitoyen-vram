@@ -718,9 +718,58 @@ _INT8_GEMV_MAX = int(os.environ.get("ACVRAM_INT8_GEMV_MAX", "80"))
 # P0 : déquant entière + cutlass) | a8 (kernels/gemm_w8a8.py : activation int8
 # par jeton, tensor cores int8, sans déquant). Scellé : Coder préfill 2 048
 # ≥ 11 000 j/s, porte PPL privé ≤ 1,020 (poste7-profil-verdict-18-09).
+# | cublas (P2, poste7-marlin-ouvert-p2-18-09 : poids INT8 SYMÉTRIQUES PAR CANAL
+# — un groupe = K, zéro = 128, convertis `-qkvo-i8c` — activation A8 par
+# jeton puis `torch._int_mm` cuBLASLt int8 → int32, une échelle par ligne ×
+# une par colonne ; un tenseur affine par groupes n'y est pas éligible et
+# passe par a8/bf16 comme avant — le chemin ne change la sortie d'aucun
+# autre converti).
 _PREFILL_INT8 = os.environ.get("ACVRAM_PREFILL_INT8", "bf16")
-if _PREFILL_INT8 not in ("bf16", "a8"):
-    raise ValueError(f"ACVRAM_PREFILL_INT8={_PREFILL_INT8!r} : attendu bf16 | a8")
+if _PREFILL_INT8 not in ("bf16", "a8", "cublas"):
+    raise ValueError(f"ACVRAM_PREFILL_INT8={_PREFILL_INT8!r} : attendu bf16 | a8 | cublas")
+
+
+def _i8c_poids(t: INT8Tensor):
+    """Poids int8 signés (q − 128) [N, K_pad] d'un INT8Tensor symétrique par
+    canal, construits UNE fois et gardés sur le tenseur (copie int8 de la
+    taille du poids : q/k/v/o de Coder ≈ 0,9 Gio) ; None si le tenseur n'est
+    pas par canal symétrique (group_size ≠ K_pad ou un zéro ≠ 128)."""
+    cache = t.__dict__.get("_i8c")
+    if cache is not None:
+        return cache if cache is not False else None
+    ok = (t.group_size == t.qweight.shape[1] and t.zeros.shape[1] == 1
+          and bool((t.zeros == 128).all()))
+    if not ok:
+        t.__dict__["_i8c"] = False
+        return None
+    w = (t.qweight.to(torch.int16) - 128).to(torch.int8).contiguous()
+    t.__dict__["_i8c"] = w
+    return w
+
+
+def gemm_i8c_cublas(x: torch.Tensor, t: INT8Tensor, sortie_fp32: bool = False):
+    """``x`` [M, K] → [M, N] par `torch._int_mm` sur un poids symétrique par
+    canal : y = s_x[m] · s_w[n] · Σ_k a8[m,k]·(q[n,k] − 128), produit entier
+    exact, échelles en fp32. None si inéligible (poids affine/groupé, M ≤ 16 :
+    cuBLASLt exige M > 16, K et N multiples de 8)."""
+    w = _i8c_poids(t)
+    M, K = x.shape
+    N, k_pad = t.qweight.shape
+    if w is None or M <= 16 or k_pad % 8 or N % 8:
+        return None
+    from .gemm_w8a8 import quantifier_a8, disponible as _w8a8_dispo
+    if _w8a8_dispo() and x.is_cuda:
+        a, sx = quantifier_a8(x)
+    else:
+        # à sec (tests) : même règle que _quant_a8_kernel — absmax/127 par ligne
+        xf = x.float()
+        sx = xf.abs().amax(1).clamp_min(1e-12) / 127.0
+        a = torch.round(xf / sx[:, None]).clamp(-127, 127).to(torch.int8)
+    if K != k_pad:
+        a = torch.nn.functional.pad(a, (0, k_pad - K))
+    acc = torch._int_mm(a.contiguous(), w.t())                       # [M, N] int32
+    y = acc.to(torch.float32) * sx[:, None] * t.scales[:, 0].to(torch.float32)[None, :]
+    return y if sortie_fp32 else y.to(x.dtype)
 
 
 def prefill_int8_regime() -> str:
@@ -835,7 +884,7 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
         # d65e49e : 6,59 contre 4,86 ms/pas, k/v N=512 ×0,4)
         if narrow_choix(n, sortie_fp32) == "triton" and n <= 16 and xf.dtype == torch.bfloat16:
             from . import gemm_etroit
-            if gemm_etroit.disponible():
+            if gemm_etroit.disponible() and gemm_etroit.eligible(t):
                 y = gemm_etroit.gemm_etroit(xf.contiguous(), t, sortie_fp32)[:, : t.shape[0]]
                 return y.reshape(*orig_shape[:-1], t.shape[0])
         if k_pad != xf.shape[-1]:
@@ -858,10 +907,17 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
             return y.to(torch.float32).reshape(*orig_shape[:-1], t.shape[0])
         return y.to(x.dtype).reshape(*orig_shape[:-1], t.shape[0])
 
+    # P2 : poids symétriques par canal (convertis -qkvo-i8c) → cuBLASLt int8
+    # (`torch._int_mm`), ACVRAM_PREFILL_INT8=cublas ; un poids non éligible
+    # continue ci-dessous, et le chemin a8 sert de repli aux M ≤ 16
+    if _PREFILL_INT8 == "cublas" and x.dtype in (torch.bfloat16, torch.float16):
+        y = gemm_i8c_cublas(xf, t, sortie_fp32=sortie_fp32)
+        if y is not None:
+            return y[:, : t.shape[0]].reshape(*orig_shape[:-1], t.shape[0])
     # P0 (poste7-profil-verdict-18-09) : au-delà du seuil GEMV, GEMM W8A8 sans
     # déquantification par appel — activation int8 par jeton, poids uint8
     # tels quels, produit entier exact sur les tensor cores ; ACVRAM_PREFILL_INT8=a8
-    if (_PREFILL_INT8 == "a8" and x.dtype in (torch.bfloat16, torch.float16)
+    if (_PREFILL_INT8 in ("a8", "cublas") and x.dtype in (torch.bfloat16, torch.float16)
             and t.qweight.shape[1] % t.group_size == 0):
         from . import gemm_w8a8
         if gemm_w8a8.disponible() and (x.is_cuda or gemm_w8a8.INTERPRETE):

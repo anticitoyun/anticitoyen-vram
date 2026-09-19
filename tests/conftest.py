@@ -299,6 +299,13 @@ def _verrou_tenu_en_mesure():
             continue
         if type_ != "mesure":
             continue
+        # le detenteur est NOTRE ancetre (pytest lance SOUS carte.sh, qui
+        # exporte ACVRAM_CARTE_TENUE) : ce n'est pas la fenetre d'un pair,
+        # c'est la notre — la refuser serait refuser sa propre prise (19/09,
+        # poste1 : `carte.sh pytest tests/test_gemv_marlin.py` refuse par
+        # lui-meme, meme geste que le code 66 plus bas, mais pose ici a moitie)
+        if str(pid) == os.environ.get("ACVRAM_CARTE_TENUE", ""):
+            continue
         try:
             os.kill(pid, 0)
         except (OSError, ValueError):
