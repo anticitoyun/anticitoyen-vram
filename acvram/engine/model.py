@@ -2190,10 +2190,14 @@ _MOE_GEMV = os.environ.get("ACVRAM_MOE_GEMV", "v1")
 # ACVRAM_PREFILL_GROUPED=marlin) ou la pile NVFP4 naturelle (« naturel », témoin).
 # Défaut « marlin » avec PREFILL_GROUPED (adoption du 18/09) ; témoin : les deux à naturel/groupe.
 _GEMV_LAYOUT = os.environ.get("ACVRAM_GEMV_LAYOUT", "marlin")
-# ACVRAM_TRACE_ROUTAGE=<fichier.pt> : les routages (expert par paire, [B, top_k])
+# ACVRAM_TRACE_ROUTAGE_PT=<fichier.pt> : les routages (expert par paire, [B, top_k])
 # de chaque appel décodé hors graphe, sauvés à la sortie (torch.save d'une liste)
-# — à rejouer par outils/banc-marlin-decode-18-09.py --routages.
-_TRACE_ROUTAGE = os.environ.get("ACVRAM_TRACE_ROUTAGE", "")
+# — à rejouer par outils/banc-marlin-decode-18-09.py --routages. Nom DISTINCT
+# de ACVRAM_TRACE_ROUTAGE (journal texte par couche, memory/trace_routage.py,
+# le seul que lit `taux_de_succes`) : depuis le 18/09 les deux lisaient le même
+# nom et le torch.save d'ici, exécuté en dernier à la sortie, ÉCRASAIT le
+# journal texte d'une trace M1 (deux mécanismes sur un nom, MECANISMES ; 19/09).
+_TRACE_ROUTAGE = os.environ.get("ACVRAM_TRACE_ROUTAGE_PT", "")
 _ROUTAGES: list = []
 if _TRACE_ROUTAGE:
     import atexit as _atexit
