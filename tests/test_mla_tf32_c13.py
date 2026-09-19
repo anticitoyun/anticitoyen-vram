@@ -80,8 +80,15 @@ def test_contexte_tf32_restaure_et_identite_au_defaut(monkeypatch):
     with MLA._tf32_coeur() as c:
         assert c._actif and torch.backends.cuda.matmul.allow_tf32 is True
     assert torch.backends.cuda.matmul.allow_tf32 is False              # restauré
+    with MLA._tf32_coeur(decode=True) as c:
+        assert not c._actif                                             # niveau 1 : préfill seulement
+    monkeypatch.setattr(MLA, "_MLA_TF32", "2")
+    with MLA._tf32_coeur(decode=True) as c:
+        assert c._actif                                                 # niveau 2 (C13-déc) : décodage aussi
+    assert torch.backends.cuda.matmul.allow_tf32 is False
     from acvram import regime
     v = {x.env: x for x in regime.VARIABLES}["ACVRAM_MLA_TF32"]
     assert v.defaut == "0"
     src = (RACINE / "acvram" / "engine" / "mla.py").read_text()
     assert src.count("with _tf32_coeur():") == 4                        # scores + o_lat, chunké et non chunké
+    assert src.count("with _tf32_coeur(decode=True):") == 4             # y = v_b · o_lat des chemins de décodage (hr, bhr ×2, _v_b32)
