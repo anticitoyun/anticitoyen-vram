@@ -1,0 +1,28 @@
+# poste7 — éco 2 700 par défaut (décision utilisateur, 19/09 20 h 22) : le serveur pose le verrou d'horloge pour sa durée de vie et le rend à l'arrêt, la ligne de régime porte demandé ET effectif, six cellules à remesurer au défaut courant, .deb 0.6.18 (19/09, 22 h 55)
+
+Source : chef 22 h 50 (utilisateur : « oui, éco 2700 par défaut ») ; `verdict-eco-lgc-b12-19-09` (E1), `verdict-eco-lgc-b1-genou-19-09` (E1-bis : genou faux, pas de gouverneur) ; `chantier-c8-19-09` (relâchement à 30 s, opt-in, preuve carte non faite) ; `acvram eco {2700|2100|off}` (poste1, à sec) ; `poste7-c16bis-puissance-mesure1-19-09` § 3 ; REGLES § 1 (sonder un réglage = toucher la carte), § 6 (tout lanceur de serveur prend le verrou).
+
+## 1. Conception — quatre réponses
+1. **Qui pose 2 700 : le processus qui sert.** `acvram serve` (et `certifie`, `capture-godets`, tout instrument qui charge un moteur) pose `sudo -n nvidia-smi -i <carte servie> -lgc 2700,2700` **après** avoir pris le verrou de carte et avant le premier chargement ; il rend `-rgc` dans `Engine.fermer`, à SIGTERM/SIGINT et en `atexit` — le verrou d'horloge suit la durée de vie du serveur, pas celle du système (ni postinst, ni unité systemd, ni crochet de session). **Pas de relâchement à l'oisiveté par défaut** : un cycle rendre/reposer change le régime des premiers jetons après une pause (rafale à 3 000 MHz, puis 2 700) et coûte un aller-retour sudo par réveil ; C8 (30 s) reste opt-in `ACVRAM_GOUVERNEUR=1` jusqu'à sa preuve carte. Le genou est faux (E1-bis) : **2 700 à tous les lots**, 2 100 reste régime nommé « éco fort » sur demande.
+2. **Sans le droit sudo, on sert quand même, mais bruyamment** : la ligne de régime porte toujours `eco=<demandé>(effectif <MHz lus dans nvidia-smi -q -d CLOCK>)` ; `demandé ≠ effectif` (refus sudo, `-lgc` non pris) est un état nommé, **jamais silencieux** : `acvram doctor` le dit, le serveur l'imprime au démarrage, et **`certifie` / `capture-godets` refusent de publier** une cellule dont l'éco demandé n'est pas effectif (même garde que « repli eager vu »). Rien ne bloque le service : un refus de démarrer pour une horloge serait pire que l'horloge libre.
+3. **Configuration** : `config.json` `"eco": "2700"` par défaut (`"2100"`, `"off"` acceptés) ; `acvram eco off` l'écrit et rend l'horloge tout de suite si un serveur tourne ; variable `ACVRAM_ECO` dans `regime.VARIABLES` pour les bras A/B seulement, jamais pour le service. Tests à sec : faux `nvidia-smi` (script) qui enregistre les appels — pose au démarrage, rendu à `fermer`, rendu sur signal, refus → état nommé ; l'épreuve doit casser si on retire le `-rgc` de `fermer`.
+4. **Paquet** : `.deb` **0.6.18** — `/etc/sudoers.d/acvram-nvidia-smi` restreint aux deux formes exactes (`nvidia-smi -i * -lgc *,*` et `-rgc`), `visudo -c` dans postinst, retiré à la purge ; `install.sh` imprime la ligne au lieu de l'installer (arbre de dev : acte de l'utilisateur) ; `acvram doctor` vérifie le droit ET l'effet (`-lgc` puis lecture) sous le verrou ; GUI : sélecteur éco (2700 / 2100 / off) dans les options. Un artefact par numéro, jamais installé par une session.
+
+## 2. Cellules — ce qui se remesure, avec la prédiction et l'issue qui gênerait
+Les lignes éco publiées sont sur 0.6.13 (avant P2, avant tf32) : **le défaut 0.6.18 = éco 2 700 sur le défaut courant**, six cellules au harnais égal (ctx 1 024, cartes `[0]`, en-tête avec plafond, horloge SM moyenne, `eco=2700(effectif 2700)`), et `certifie` pour les cellules moteur, chacune deux passes :
+
+| cellule | défaut off (publié) | prédiction éco 2 700 | issue qui gênerait |
+|---|---|---|---|
+| Coder b=12 t/s · J net | 1 365 · 0,2243 | **1 340-1 365 · 0,200-0,207** | J > 0,215 : E1 ne se transporte pas à P2 |
+| Coder b=1 | 363 · — | **350-360 · −25 % J** | < 340 (llama.cpp) |
+| Coder prefill j/s · J | 18 850 | **17 000-18 300 (−3 à −10 %) · −10 à −15 % J** | < 16 400 : le prefill, borné par le calcul, paie l'horloge — à porter à l'utilisateur avec le chiffre, le défaut est le sien |
+| GLM b=12 | 725 · 0,389 | **700-725 · 0,34-0,36** | J > 0,38 |
+| GLM b=1 | 113 · 1,37 | **108-113 · −20 % J** | < 105 |
+| GLM prefill (tf32) | 7 188 · 0,0466 | **6 600-7 100 · −10 % J** | < 6 500 |
+
+PPL : ne dépend pas de l'horloge — contrôle d'une ligne, une tranche Coder sous 2 700 identique à la quatrième décimale (REGLES § 4 : « la perplexité survit… », vérifié ici pour l'horloge) ; si elle bouge, un noyau choisit autrement selon l'horloge et tout le comparatif PPL est à rejouer. Comparatif : chaque ligne « défaut 0.6.18 » porte « éco 2 700 » dans son nom ; les lignes « off » restent publiées comme régime nommé.
+
+## Ordre
+* **poste1** — code § 1 (serve/instruments : pose, rendu, état nommé, `config.json`, `doctor`, tests à sec avec faux `nvidia-smi`), ≤ 1 h 30, commit + pointeur ; **avant C17** ; C14/C15 sous-agents continuent.
+* **poste2** — après le ncu du tampon C1 : les six cellules § 2 avec `acvram eco 2700` sous le verrou dès maintenant (le code du serveur n'est pas requis pour mesurer : la ligne de régime lit déjà l'horloge), plus le contrôle PPL d'une tranche ; verdict avec la table ; `-lgc`/`-rgc` uniquement sous `carte.sh`.
+* **chef** — ETAT + REGLES § 1 (décision utilisateur, mot pour mot, heure machine) ; à la fusion d'poste1 : .deb 0.6.18 (sudoers, doctor, GUI), comparatif « défaut 0.6.18 = éco 2 700 » avec les six cellules, revendications réécrites sur ces chiffres ; **si le prefill Coder tombe sous 16 400, le dire à l'utilisateur avec le chiffre** avant de publier le défaut ; INDEX ; commit + push.
