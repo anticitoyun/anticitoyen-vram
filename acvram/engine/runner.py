@@ -28,7 +28,7 @@ import torch
 
 from ..memory.kvcache import BLOCK_SIZE, BlockAllocator
 from .loader import LoadedModel
-from .model import ForwardBatch
+from .model import _DUMP_MOE, ForwardBatch
 from .sampler import SamplingParams, besoin_historique, sample
 from .speculative import GardeSpeculation, Proposal, verify_proposal
 
@@ -364,6 +364,30 @@ class Engine:
                 f"max_concurrent_seqs={max_batch_size}, ou poser "
                 f"ACVRAM_KV_PLAN_OVERRIDE=1 pour forcer en connaissance de cause.")
 
+        # poste7-devstral-llama4-scaling-18-09 : `llama_4_scaling_beta` (yarn
+        # ministral3/Devstral) est porté sur q par model.Attention
+        # (`_echelle_llama4`, après le RoPE, préfill et décodage) quand le
+        # spec le porte À LA CONSTRUCTION du modèle. Un spec modifié après
+        # coup (beta > 0 que nulle Attention ne sert) au-delà de
+        # `original_max_position_embeddings` reste un REFUS NOMMÉ plutôt qu'un
+        # no-op silencieux (67aa280) ; sous le plafond la formule vaut 1.
+        rs = getattr(self.spec, "rope_scaling", None) or {}
+        self._llama4_scaling_beta = float(rs.get("llama_4_scaling_beta") or 0.0)
+        self._llama4_scaling_plafond = int(rs.get("original_max_position_embeddings") or 0)
+        from .model import Attention as _Attn
+        self._llama4_servi = any(getattr(m, "llama4", None) is not None
+                                 for m in self.model.modules() if isinstance(m, _Attn))
+        if (str(rs.get("rope_type") or rs.get("type") or "") == "yarn"
+                and self._llama4_scaling_beta > 0 and self._llama4_scaling_plafond
+                and not self._llama4_servi and max_model_len > self._llama4_scaling_plafond):
+            raise ValueError(
+                f"llama_4_scaling_beta non servi : max_model_len={max_model_len} "
+                f"> original_max_position_embeddings={self._llama4_scaling_plafond} "
+                f"(rope yarn, beta={self._llama4_scaling_beta}) -- aucune Attention du "
+                f"modèle ne porte le scaling (spec sans rope_scaling à la construction) ; "
+                f"au-delà de ce plafond la formule 1+beta*log(1+floor(position/"
+                f"{self._llama4_scaling_plafond})) n'est plus 1,0.")
+
         # Hybrides à récurrence linéaire : l'état GDN vit par séquence, hors
         # du cache paginé ; le cache de préfixe n'aurait pas de sens (les
         # blocs KV ne suffisent pas à restaurer l'état), on le coupe.
@@ -556,15 +580,19 @@ class Engine:
             "prefill": kernels.prefill_regime(),
             # linéaires INT8 du préfill (P0) : bf16 | a8 — toujours écrit
             "prefill_int8": kernels.prefill_int8_regime(),
-            # P1 : experts en deux dispositions (NVFP4 pour le GEMV, repack
-            # Marlin pour la GEMM groupée du préfill) — « double » | « simple »
-            "experts_layout": "double" if any(getattr(m, "_stacks_marlin", None) is not None
-                                              for m in self.model.modules() if isinstance(m, MoEBlock)) else "simple",
+            # P1 disposition unique : « marlin » (pile Marlin seule, préfill et
+            # décodage, la pile NVFP4 rendue) | « naturel » (pile NVFP4 seule)
+            "experts_layout": next((getattr(m, "experts_layout") for m in self.model.modules()
+                                    if isinstance(m, MoEBlock) and getattr(m, "experts_layout", None)), "naturel"),
             # linéaires INT8 du décodage : triton≥b|cuda (poste C, bascule mesurée)
             "dense": kernels.narrow_regime(),
             "gdn": _gdn_regime(),
             "noyaux": regime_noyaux()["hors_defaut"],
             "kv_plan_override": self._kv_plan_override,
+            # poste7-devstral-llama4-scaling-18-09 : visible meme sous le
+            # plafond (non refuse ici), pour ne jamais laisser croire que le
+            # scaling est applique alors qu'il ne l'est nulle part.
+            "llama4_scaling_beta": self._llama4_scaling_beta or None,
         }
 
     def regime_ligne(self) -> str:
@@ -593,6 +621,9 @@ class Engine:
                + (f"noyaux={r['noyaux']} " if r["noyaux"] else "")
                + f"kv_budget={self.allocator.num_blocks * BLOCK_SIZE}/{kv_seqs} "
                + (f"kv_plan_override=1 " if r["kv_plan_override"] else "")
+               + (f"llama4_scaling_beta={r['llama4_scaling_beta']}"
+                  f"({'servi' if self._llama4_servi else 'non_servi'}) "
+                  if r["llama4_scaling_beta"] else "")
                + (f"ignore_eos={self.stats.sequences_ignore_eos} "
                   if self.stats.sequences_ignore_eos else "")
                + f"cache_prefixe={self.stats.hit_rate:.3f} "
@@ -957,6 +988,24 @@ class Engine:
     # -- the step --------------------------------------------------------
     def step(self) -> list[GenerationOutput]:
         """Exécute une passe avant et rend ce qu'elle a produit."""
+        outputs = self._step()
+        if _DUMP_MOE:
+            self._sauver_dump_moe()
+        return outputs
+
+    def _sauver_dump_moe(self) -> None:
+        """ACVRAM_DUMP_MOE (model._DUMP_MOE) : tous les tampons statiques de
+        sortie MoE, par couche et par forme, après chaque pas (eager ou rejeu)."""
+        from .model import MoEBlock
+        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        n = self.__dict__.get("_dump_pas", 0)
+        self.__dict__["_dump_pas"] = n + 1
+        blocs = [m for m in self.model.modules() if isinstance(m, MoEBlock)]
+        d = {i: {f"{cle[0]}": b.detach().cpu().clone() for cle, b in m.__dict__.get("_dump_bufs", {}).items()}
+             for i, m in enumerate(blocs)}
+        torch.save(d, os.path.join(_DUMP_MOE, f"pas-{n:05d}.pt"))
+
+    def _step(self) -> list[GenerationOutput]:
         new = self._admit()
         if new:
             self.stats.pas_avec_prefill += 1

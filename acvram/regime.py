@@ -72,6 +72,10 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("GROUPED_OLD", "", None, "1", "témoin : l'ancien noyau groupé à 4 lignes par bloc"),
     Variable("GROUPED_XREG", "down", None, "0",
              "GEMV groupée des experts, K ≤ 2048 : down (défaut depuis verdict-gemv-experts-xreg-down-18-09 : ABAB × 0,944 nu, Coder b=12 1 307 t/s) = x en registres par tranche sur la projection down seule | 1 = gate/up aussi (témoin réfuté : 96 registres, 2 blocs/SM, +19 %) | 0 = x relu en shared (témoin) ; sortie identique au bit dans tous les cas"),
+    Variable("GEMV_LAYOUT", "marlin", ("acvram.engine.model", "_GEMV_LAYOUT"), "marlin",
+             "P1 disposition UNIQUE (forme (b)), DÉFAUT depuis l'adoption du 18/09 : marlin = pile Marlin seule (préfill GEMM classe Marlin ET GEMV du décodage relisant les tuiles 16 k × 64 n ; la pile NVFP4 est rendue après le repack, experts_layout=marlin ; va avec PREFILL_GROUPED=marlin, sinon refus à l import ; scellé ≤ 0,97 × GEMV à b=1 et b=12, fp32 par ligne) | naturel = pile NVFP4 seule (témoin, avec PREFILL_GROUPED=groupe ; b=1 366 t/s contre 351 en marlin)"),
+    Variable("DOUBLE_DISPOSITION_DIAG", "0", None, "0",
+             "diagnostic seulement (bissection du biais GEMV (b), poste7-p1-situ-verdict-18-09) : 1 = les deux dispositions gardées, préfill {groupe|marlin} × décodage {naturel|marlin} sur les mêmes piles ; jamais un régime servi"),
     Variable("MOE_GEMV", "v1", ("acvram.engine.model", "_MOE_GEMV"), "v1",
              "GEMV groupée du décodage MoE : v1 (une passe de poids par paire expert-jeton) | v2 (paires triées par expert, poids lus une fois pour ≤ 4 jetons, sortie identique au bit)"),
     Variable("MULTI_PROJ", "0", ("acvram.engine.model", "_MULTI_PROJ"), "0",
@@ -80,8 +84,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("NARROW_ROWS", "32", ("acvram.kernels", "_NARROW_ROWS")),
     Variable("NARROW_MLA", "1", None, "0"),
     Variable("SEUIL_FUSION", "256", ("acvram.engine.model", "SEUIL_FUSION")),
-    Variable("PREFILL_GROUPED", "groupe", ("acvram.engine.model", "_PREFILL_GROUPED"), "groupe",
-             "GEMM groupée du prefill MoE : groupe (B0 Triton bf16 persistant, défaut depuis poste7-b0-et-cause-lm4-17-09) | w4a16 (B1, NVFP4 lu dans la tuile, opt-in jusqu'au scellé) | grouped_mm (torch, ancien défaut, témoin) | bmm par seaux (réfuté 0edc3b9)"),
+    Variable("PREFILL_GROUPED", "marlin", ("acvram.engine.model", "_PREFILL_GROUPED"), "marlin",
+             "GEMM groupée du prefill MoE : marlin (P1, classe Marlin sur la disposition unique, défaut depuis l'adoption du 18/09 : Coder 15 987 j/s, GLM 5 502) | groupe (B0 Triton bf16 persistant, défaut du 17/09 au 18/09, témoin) | w4a16 (B1, NVFP4 lu dans la tuile, opt-in jusqu'au scellé) | grouped_mm (torch, ancien défaut, témoin) | bmm par seaux (réfuté 0edc3b9)"),
     Variable("PREFILL_A4", "off", ("acvram.engine.model", "_PREFILL_A4"), None,
              "porte qualité W4A4 du prefill MoE : fausse quantification NVFP4 des activations en torch — off | gateup (entrée de gate/up) | both (+ entrée de down) ; poste7-lecture-profils-coder-17-09"),
     Variable("SANS_FUSION", "", None, "1"),
@@ -210,7 +214,11 @@ def regime_ligne() -> str:
     """Une ligne pour l'en-tête d'une mesure : ce qui diffère du défaut,
     puis extension et masques. « défaut » seul veut dire : tout au défaut."""
     r = regime_noyaux()
-    parts = [f"{k}={v if v else repr('')}" for k, v in r["hors_defaut"].items()] or ["défaut"]
+    parts = [f"{k}={v if v else repr('')}" for k, v in r["hors_defaut"].items()
+             if k != "ACVRAM_GEMV_LAYOUT"] or ["défaut"]
+    # la disposition lue par le GEMV des experts est toujours nommée (P1
+    # disposition unique, poste7-p1-disposition-unique-18-09) : marlin | naturel
+    parts.append("ACVRAM_GEMV_LAYOUT=" + str(r["variables"].get("ACVRAM_GEMV_LAYOUT", "?")))
     # la voie GDN est toujours nommée, défaut compris : c'est elle qui sépare
     # 97 de 621 j/s sur Qwen3.8 (poste7, 17/09), et « fla » demandé ne vaut
     # rien si fla est absent ou la carte aussi — la voie EFFECTIVE est écrite

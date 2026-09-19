@@ -61,6 +61,12 @@ class ConversionOptions:
     group_size: int = 128
     keep_sensitive_16bit: bool = True  # normalisations, routeur, plongements
     lm_head_format: Optional[str] = None
+    # poste7-p2-qkvo-int8-canal-18-09 : q/k/v/o restent int8, mais symetrique
+    # PAR CANAL (une echelle par ligne de sortie, sans point-zero variable)
+    # au lieu du groupe de 128 affine du reste du modele -- format cible de
+    # torch._int_mm/cuBLASLt. Le reste de la conversion (awq=False, group_
+    # size=128 ailleurs, mixed_precision, snr_floor) reste inchange.
+    attn_qkvo_int8_canal: bool = False
     # Table de niveaux q3n de CE modèle (huit flottants, symétrique, bornes
     # ±1) — écrite dans chaque entrée q3n du manifeste. None : TABLE_Q3N de
     # la spécification. Les niveaux s'ajustent par modèle (Lloyd-Max sur
@@ -285,6 +291,18 @@ SENSITIVE_SUFFIXES = (
     "shared_expert_gate.weight",  # porte de l'expert partagé : 1 ligne
     "embed_tokens.weight",
 )
+
+
+def _est_projection_attn(name: str) -> bool:
+    """poste7-p2-qkvo-int8-canal-18-09, generalise le 18/09 pour GLM (MLA) :
+    q/k/v/o couvre l'attention GQA de Coder, mais GLM nomme ses projections
+    q_a_proj/q_b_proj/kv_a_proj_with_mqa/kv_b_proj/o_proj -- aucun suffixe
+    fixe ne les couvre tous. Toute pondération sous `.self_attn.` qui n'est
+    PAS une norme (q_a_layernorm, kv_a_layernorm) est une projection ;
+    k_b_proj/v_b_proj y passent aussi mais restent bf16 (SENSITIVE_SUFFIXES,
+    absorptions MLA 3D) donc jamais gênés par le filtre fmt=="int8" en aval."""
+    return (".self_attn." in name and name.endswith(".weight")
+           and "norm" not in name)
 
 
 class TensorRouter:
@@ -1243,6 +1261,10 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             "bits_par_poids_cible": round(bpw_cible, 3),
             "bascule_anti_grossissement": bool(bascule_faite),
         },
+        # poste7-p2-qkvo-int8-canal-18-09 : nom du regime d'attention porte au
+        # niveau du manifeste, pas seulement sur chaque tenseur -- "canal"
+        # distingue ce converti de la pile classee (q/k/v/o groupe-128).
+        "attn_int8": "canal" if opts.attn_qkvo_int8_canal else "groupe",
         "tensors": {},
     }
 
@@ -1398,9 +1420,15 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         # quantification, SANS echelle AWQ sur ces tenseurs (les deux
         # mecanismes ne se cumulent pas ici, l'un remplace l'autre a l'essai).
         experts_hadamard = est_expert and opts.hadamard_experts and fmt == "nvfp4"
+        # poste7-p2-qkvo-int8-canal-18-09 : q/k/v/o seuls, et seulement si le
+        # routeur les a places en int8 -- le reste du modele garde le groupe
+        # de 128 affine (opts.group_size) sans y toucher.
+        attn_canal = (opts.attn_qkvo_int8_canal and fmt == "int8"
+                     and _est_projection_attn(name))
+        group_size_tenseur = tensor.shape[1] if attn_canal else opts.group_size
         qt, scaler, metrics = _quantize_on(
             qdev, tensor, fmt, st,
-            group_size=opts.group_size,
+            group_size=group_size_tenseur,
             use_hadamard=router.wants_hadamard(name, fmt) or experts_hadamard,
             use_awq=opts.awq and fmt == "nvfp4" and not experts_hadamard,
             n_grid=opts.n_grid, garder_grille=opts.garder_grille,
@@ -1409,6 +1437,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             forced_scale=alpha_commun.get(name),
             quantize_activation_nvfp4=est_expert and fmt == "nvfp4" and not experts_hadamard,
             hadamard_block=512 if experts_hadamard else None,
+            symmetric=attn_canal,
         )
         if est_expert and scaler.scale is None and not experts_hadamard:
             scaler = ChannelScaler(
@@ -1437,13 +1466,14 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             tenseurs_replies.append((name, etendue))
             qt, scaler, metrics = _quantize_on(
                 qdev, tensor, fmt, None,
-                group_size=opts.group_size,
+                group_size=group_size_tenseur,
                 use_hadamard=router.wants_hadamard(name, fmt) or experts_hadamard,
                 use_awq=False,
                 n_grid=opts.n_grid, garder_grille=opts.garder_grille,
                 table=opts.q3n_table if fmt == "q3n" else None,
                 mesurer_kld=opts.mesurer_kld,
                 hadamard_block=512 if experts_hadamard else None,
+                symmetric=attn_canal,
             )
             if est_expert and scaler.scale is None:
                 scaler = ChannelScaler(
@@ -1455,13 +1485,14 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 tenseurs_replies.append((name, r))
                 qt, scaler, metrics = _quantize_on(
                     qdev, tensor, fmt, None,
-                    group_size=opts.group_size,
+                    group_size=group_size_tenseur,
                     use_hadamard=router.wants_hadamard(name, fmt) or experts_hadamard,
                     use_awq=False,
                     n_grid=opts.n_grid, garder_grille=opts.garder_grille,
                     table=opts.q3n_table if fmt == "q3n" else None,
                     mesurer_kld=opts.mesurer_kld,
                     hadamard_block=512 if experts_hadamard else None,
+                    symmetric=attn_canal,
                 )
                 if est_expert and scaler.scale is None:
                     scaler = ChannelScaler(
@@ -1542,18 +1573,31 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                      <= opts.promotion_cout_max_mib)
                 and len(report.promotions) < opts.max_promotions * max(1, len(keys) + 1)):
             wider = PROMOTE[fmt]
+            # poste7-p2-qkvo-int8-canal-18-09 : sur Qwen3-Coder, q/k/v/o partent
+            # en nvfp4 (20,5-20,7 dB, sous le plancher) et n'ATTEIGNENT l'int8
+            # QUE PAR CETTE PROMOTION -- `attn_canal`/`group_size_tenseur`
+            # calcules plus haut valaient donc faux (fmt="nvfp4" a ce moment).
+            # Refaits ici sur `wider`, le format candidat ; n'ecrasent les
+            # variables du manifeste que si la promotion est ACCEPTEE
+            # plus bas, sinon le tenseur reste nvfp4 et group_size=largeur
+            # entiere y serait un mensonge de bilan.
+            attn_canal_candidat = (opts.attn_qkvo_int8_canal and wider == "int8"
+                                   and _est_projection_attn(name))
+            group_size_candidat = tensor.shape[1] if attn_canal_candidat else opts.group_size
             q2, s2, m2 = _quantize_on(
                 qdev, tensor, wider, st,
-                group_size=opts.group_size,
+                group_size=group_size_candidat,
                 use_hadamard=router.wants_hadamard(name, wider),
                 use_awq=opts.awq and wider == "nvfp4", n_grid=opts.n_grid,
-                garder_grille=opts.garder_grille)
+                garder_grille=opts.garder_grille,
+                symmetric=attn_canal_candidat)
             if m2["out_snr_db"] > metrics["out_snr_db"] + 1.0:
                 report.promotions.append({
                     "name": name, "from": fmt, "to": wider,
                     "before": round(metrics["out_snr_db"], 2),
                     "after": round(m2["out_snr_db"], 2)})
                 fmt, qt, scaler, metrics = wider, q2, s2, m2
+                attn_canal, group_size_tenseur = attn_canal_candidat, group_size_candidat
                 entry["format"] = fmt
                 entry["promoted_from"] = report.promotions[-1]["from"]
                 # Le SNR d'AVANT, celui pris dans `promoted_from`. Sans lui,
@@ -1607,7 +1651,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                 writer.add(k, v)
         entry.update({
             "keys": list(sd.keys()),
-            "group_size": opts.group_size,
+            "group_size": group_size_tenseur,
+            **({"symmetrique": True} if attn_canal else {}),
             "hadamard_block": scaler.hadamard_block,
             "has_act_scale": scaler.scale is not None,
             "bpw": round(metrics["bpw"], 3),
