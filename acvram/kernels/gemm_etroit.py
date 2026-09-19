@@ -81,6 +81,19 @@ def _programmes(device) -> int:
     return 4
 
 
+G_MAX = 128
+
+
+def eligible(t) -> bool:
+    """Le noyau étroit prend le GROUPE comme tuile K : un poids symétrique par
+    canal (group_size = K, convertis -qkvo-i8c, P2) demanderait 393 Kio de
+    mémoire partagée pour 101 Kio disponibles (OutOfResources en service,
+    19/09, godet 2 et préfill chunké) — dimension « taille de groupe » jamais
+    posée (MECANISMES). Refusé au-delà de G_MAX : l'appelant prend narrow_gemm
+    CUDA ou le GEMV, sortie inchangée pour tout poids à groupes de 128."""
+    return t.group_size <= G_MAX
+
+
 def gemm_etroit(x: torch.Tensor, t, sortie_fp32: bool = False) -> torch.Tensor:
     """``x`` [M ≤ 16, K] bf16 (fp16 sous l'interpréteur), ``t`` INT8Tensor
     → [M, N] dans le dtype de x, ou fp32 (tête)."""

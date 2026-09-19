@@ -1,0 +1,80 @@
+"""P2 (poste7-reprise-rapide-19-09 § 2) : chemin `ACVRAM_PREFILL_INT8=cublas` —
+`torch._int_mm` sur les poids INT8 symétriques par canal (convertis -qkvo-i8c).
+À sec : `_int_mm` a une implémentation CPU, le produit entier est exact, donc
+le chemin se juge contre sa propre arithmétique en fp64 (au bit près de la
+sortie bf16) et contre la déquantification fp32 (erreur = celle de l'A8 par
+jeton seulement). Témoins cassants : un poids affine par groupes n'est PAS
+éligible (None, repli), un point-zéro ≠ 128 non plus, M ≤ 16 non plus."""
+import os
+import sys
+import pathlib
+
+import pytest
+import torch
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from acvram.kernels import gemm_i8c_cublas, _i8c_poids                       # noqa: E402
+from acvram.quant.formats import INT8Tensor, _dequantize_int8, _quantize_int8   # noqa: E402
+
+
+def _poids(N=64, K=256, seed=1):
+    torch.manual_seed(seed)
+    w = torch.randn(N, K) * 0.02
+    return w, _quantize_int8(w, group_size=K, symmetric=True)
+
+
+def test_i8c_cublas_egal_a_son_arithmetique_et_proche_de_la_dequant():
+    w, t = _poids()
+    x = (torch.randn(40, 256) * 0.5).to(torch.bfloat16)
+    y = gemm_i8c_cublas(x, t, sortie_fp32=True)
+    assert y is not None and y.shape == (40, 64)
+    # même arithmétique en fp64 : A8 par jeton (absmax/127), produit entier, échelles
+    xf = x.float()                                    # l'A8 se calcule en fp32, comme le chemin
+    sx = xf.abs().amax(1).clamp_min(1e-12) / 127.0
+    a = torch.round(xf / sx[:, None]).clamp(-127, 127).double()
+    ref = (a @ (t.qweight.double() - 128).T) * sx.double()[:, None] * t.scales[:, 0].double()[None, :]
+    assert (y.double() - ref).norm() / ref.norm() < 1e-5          # fp32 vs fp64, même entier
+    # contre la déquantification fp32 : seule l'erreur A8 sépare les deux
+    deq = x.float() @ _dequantize_int8(t, torch.float32).T
+    assert (y - deq).norm() / deq.norm() < 0.02
+    # ce que l'ancien chemin rendait (bf16 déquant) reste la référence de forme/dtype
+    yb = gemm_i8c_cublas(x, t)
+    assert yb.dtype == torch.bfloat16 and yb.shape == (40, 64)
+
+
+def test_temoins_cassants_affine_zero_et_petit_m():
+    w, t = _poids()
+    x = (torch.randn(40, 256) * 0.5).to(torch.bfloat16)
+    assert gemm_i8c_cublas(x[:16], t) is None                      # M ≤ 16 : cuBLASLt refuse
+    t_aff = _quantize_int8(w, group_size=128, symmetric=False)     # affine par groupes
+    assert _i8c_poids(t_aff) is None and gemm_i8c_cublas(x, t_aff) is None
+    z = t.zeros.clone(); z[3, 0] = 127                              # un zéro ≠ 128
+    t_z = INT8Tensor(t.qweight, t.scales, z, t.group_size, t.shape, t.format)
+    assert _i8c_poids(t_z) is None
+    # la copie int8 est faite une fois et gardée
+    assert _i8c_poids(t) is _i8c_poids(t) and _i8c_poids(t).dtype == torch.int8
+
+
+def test_int8_matmul_prend_cublas_sous_regime(monkeypatch):
+    """Le dispatcher `int8_matmul` prend le chemin cublas sous
+    ACVRAM_PREFILL_INT8=cublas (variable lue à l'import : posée sur le
+    module), et rend la même chose que l'appel direct."""
+    import acvram.kernels as K
+    w, t = _poids()
+    x = (torch.randn(96, 256) * 0.5).to(torch.bfloat16)
+    monkeypatch.setattr(K, "_PREFILL_INT8", "cublas")
+    y = K.int8_matmul(x, t, gemv_threshold=1)
+    assert torch.equal(y, gemm_i8c_cublas(x, t))
+    monkeypatch.setattr(K, "_PREFILL_INT8", "bf16")
+    yb = K.int8_matmul(x, t, gemv_threshold=1)
+    assert (y.float() - yb.float()).norm() / yb.float().norm() < 0.02
+
+
+def test_gemm_etroit_refuse_le_groupe_par_canal():
+    """Le GEMM étroit Triton (Poste C) tuile K par groupe : G = K = 2048 le
+    fait sortir de la mémoire partagée (19/09, i8c, godet 2). Refusé par
+    `eligible`, accepté pour les groupes de 128 (sortie du classé inchangée)."""
+    from acvram.kernels import gemm_etroit
+    w, t = _poids(N=64, K=2048)
+    assert not gemm_etroit.eligible(t)
+    assert gemm_etroit.eligible(_quantize_int8(w, group_size=128, symmetric=False))
