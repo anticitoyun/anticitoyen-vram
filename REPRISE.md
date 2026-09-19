@@ -28,21 +28,39 @@ jamais appelé, fonctions de lecture de VRAM non câblées, et un `/dev/emuv` qu
 renvoyait en texte les nombres passés en paramètres du module. Aucune ligne n'en
 a été conservée.
 
-## 2. État actuel
+## 2. État actuel (19/09/2026, 0.6.14)
 
-* Version **0.3.0**.
-* **81 tests** ; la base tourne sur processeur, les graphes CUDA et les
-  noyaux exigent la machine cible.
-* Sur la machine cible depuis le 31 août : noyaux compilés (sm_120 + sm_86),
-  graphes CUDA au décodage, sources GGUF, Qwen3-14B servi à 27 jetons/s.
-  Modèles convertis sous /media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram/
-  (SSD ; le HDD /mnt/4TO_SATACMR_2022/Modeles garde les originaux et un lien
-  models_acvram vers le SSD).
-* Le dépôt est sur `https://outils.nuages.noho.st/gitlab/anticitoyen/anticitoyen-vram`
-  (privé).
-* Développé sur un portable i5-3230M / GT 740M / pilote 470 : **aucun code CUDA
-  n'a jamais été compilé ni exécuté**. Les noyaux processeur, eux, sont compilés
-  et testés.
+* Version **0.6.14** (`acvram/__init__.py`), `.deb` reconstruit avec `cuda-toolkit[nvcc,cccl]`
+  (sans cccl, le nvcc des roues pip n'a pas `nv/target` : doctor rendait « repli noyaux
+  de référence »). ~1 500 tests dont ~150 sur processeur ; les noyaux, les graphes CUDA et
+  toute mesure exigent la machine cible (RTX 5090 bridée à 400 W, RTX 3080 Ti à 275 W —
+  tous les chiffres ci-dessous sont mesurés dans cet état).
+* **Régime livré par défaut** (`regime.py`, `regime_ligne()` imprimée par chaque
+  instrument) : prefill `bf16` + GEMM groupée Marlin (`PREFILL_GROUPED=marlin`), décodage
+  GEMV lisant la disposition Marlin (`GEMV_LAYOUT=marlin`, disposition unique, 0 couche
+  exilée sur Coder-30B), `chemin_moe=mma`, attention paginée Triton, graphes CUDA ;
+  contrôlé sans variable le 19/09 (`verdict-controle-p1-defaut-19-09`).
+* **Coder-30B-A3B, harnais égal contre llama.cpp Q4_K_M** (`comparatif-cinq-moteurs-17-09`) :
+  b=1 363,3 t/s · 0,798 J (llama.cpp 340,1 · 1,151) ; b=12 1 361 t/s · 0,2265 J net
+  (1 066 · 0,2136) ; prefill 16 426 j/s (15 717) ; PPL privée 1,0155 géo (classé ≤ 1,02).
+  Devant en vitesse partout ; derrière de 6 % en J net à b=12 au régime libre — le **mode
+  éco `-lgc 2700`** (E1, 19/09) rend 1 339 t/s · 0,2071 J net : devant en vitesse ET en
+  énergie à b=12 ; `-lgc 2100` : 1 138 · 0,1739 (−19 % de J).
+* **P2** (projections q/k/v/o int8 par canal, `torch._int_mm`) : **opt-in
+  `ACVRAM_PREFILL_INT8=cublas`**, prefill 18 850 j/s (+14 %), J/jeton 0,89-0,93 × défaut,
+  équivalence tenue ; PPL ligne 2 en cours (instrument `perplexity()` à aligner sur le
+  chemin servi). Split-K b=1 : opt-in `ACVRAM_GEMV_SPLITK=1` (PPL +0,0042, non tranché).
+* **Spéculation n-gram déjà au défaut à b ≤ 2** (`runner.py:429`, `ACVRAM_SPECULATION_LOT_MAX=2`,
+  `GardeSpeculation` conditionnée au lot réel) : taux d'acceptation 1,61 mesuré le 13/09 sur du
+  code ; la cellule b=1 ci-dessus le contient. Invariant : jamais un jeton différent du greedy.
+* GLM-4.7-Flash (MLA) : classé 1,0143 (`-k48-calibA`), prefill 5 502 j/s ; b=12 en cours
+  (G1). W4A4 experts **fermé** (deux verdicts). Modèles convertis sous
+  `/mnt/2TO_2023_980PRO/Modeles/models_acvram/` (161 alias dans le catalogue), originaux
+  sur `/mnt/4TO_SATACMR_2022/Modeles/`.
+* Équipe : poste7 (décide, `revue/poste7-*.md`), chef (fusions, catalogue, lien utilisateur),
+  poste1 (noyaux/code), poste2 (mesure/PPL) ; la carte est une file unique, le verrou
+  `outils/carte.sh` est la seule vérité (REGLES § 2). Dépôt :
+  `https://outils.nuages.noho.st/gitlab/anticitoyen/anticitoyen-vram` (privé).
 
 ## 3. Matériel cible
 
@@ -212,20 +230,44 @@ mais le reste est écrit à l'aveugle.
 * **Dépôt privé** par défaut. Le projet ne contient aucun secret, mais la
   visibilité est une décision qui appartient au propriétaire.
 
-## 10. Ce qui vient ensuite
+## 10. Ce qui vient ensuite (19/09/2026 — `revue/poste7-pistes-evolutions-19-09`)
 
-Par ordre de valeur, détaillé dans [`docs/FEUILLE-DE-ROUTE.md`](docs/FEUILLE-DE-ROUTE.md) :
+**La borne à connaître avant toute piste de prefill** (`poste7-nuit-sens2-19-09` § 1, corrigée par
+`poste7-poursuite-chantiers-19-09` § 0) : Coder-30B fait ≈ 12,4 TFLOP par pas de prefill de 2 047
+jetons ; la RTX 5090 rend 209,5 TFLOPS bf16 denses (acc. fp32) → plancher 59 ms = 34 700 j/s,
+et le défaut mesure 124,6 ms = 16 426 : **47 % du plancher** (une première version disait 95 %
+avec 105 TFLOPS : faux d'un facteur 2). Conséquence : **il reste ~2× à prendre au prefill sans
+quantifier les activations** — le poste est le noyau Marlin lui-même (déquantification refaite
+par tuile de M, conçu pour M petit), pas le débit des tensor cores. D'où C2 en tête ; W4A8 (C1)
+vient ensuite, pour le J autant que pour les j/s.
 
-1. Noyau CUDA d'attention paginée — la plus grosse inefficacité restante.
-2. Cache LRU d'experts fréquents — modélisé par le planificateur, pas implémenté.
-3. Prefill par morceaux — la machinerie existe, l'ordonnanceur ne découpe pas.
-4. Spéculation à la EAGLE.
-5. GEMM groupé pour les MoE.
-6. Compensation d'erreur à la GPTQ.
+**Chantiers ouverts le 19/09 au soir** (utilisateur : « les chantiers non terminables démarrent
+maintenant »), un fichier `revue/chantier-c<N>-19-09.md` chacun, pointés dans INDEX : C2 prefill
+par déquant transitoire + `_grouped_mm` · C1 W4A8 experts · C3 MTP GLM · C4 godets sur `b` ·
+C5 KV int8 · C6 conversion GPTQ + Hadamard · C7 GLM MLA FP8 · C8 gouverneur d'horloge par lot.
 
-Pistes notées et NON engagées (18/09, chantier GEMV des experts clos à
-1 262 t/s nu, `poste7-gemv-experts-clos-18-09`) : gate/up en « x en registres »
-borné par `__launch_bounds__(256, 4)` (≤ 64 registres — le compilateur
-déverse ou replie, à lire dans `-Xptxas -v` avant toute mesure) ; refusée
-pour l'instant, le levier plafonne (down seul : −12 %, adopté si l'ABAB
-tient ≤ 0,97×).
+Par ordre de valeur, chacune avec la mesure qui la rendrait fausse :
+
+1. **Mode éco `-lgc`** — tenu à b=12 (`verdict-eco-lgc-b12-19-09` : 2700 = −10 % J à
+   débit égal, 2100 = −25 % J pour −15 % t/s) ; reste E1-bis (b=1, genou), la commande
+   `acvram eco {2700|2100|off}`, puis un gouverneur d'horloge par lot (libre b ≤ 2,
+   2 700 b 3-7, 2 100 b ≥ 8). Faux si b=1 à 2700 < 340,1 t/s.
+2. **Prefill W4A8 experts** (MMA int8/FP8 avec échelle E4M3 par bloc 16) — 18 850 →
+   26 000-30 000 j/s attendus, J prefill −30 % ; porte à sec d'abord (`ACVRAM_PREFILL_A8`,
+   `verdict-porte-a8-19-09`, faux si PPL fausse-quant − 1,0155 > 0,004), noyau 3-5 jours.
+   Le seul ×2 du prefill.
+3. **Décodage, instructions par octet** — nos GEMV font 1,3-2,6 instr/octet DRAM contre
+   0,18 pour un GEMM vLLM et saturent seuls 400 W : projections q/k/v/o à b ≥ 8 par
+   `narrow_gemm`/MMA, après ncu M1/M2 (`verdict-ncu-m1/m2-19-09`). −10 à −20 % J à b=12.
+4. **Spéculation exacte** — MTP de GLM-4.7-Flash (tête livrée), n-gram code (taux 1,61
+   mesuré) : b=1 +30 à +60 % t/s sur code ; invariant : jamais un jeton différent du greedy.
+5. **GLM : MLA en FP8 au prefill** (porte fausse-quant à sec d'abord ; l'int8 par canal a
+   réfuté, REGLES § 9). 6. **Godets sur `b`** (prérequis `_bind_hybrid`, MECANISMES).
+7. **Cache d'experts** (modèles > VRAM : Devstral, 119B — suspendu utilisateur).
+8. **Conversion : GPTQ + Hadamard sur Coder** (1,0155 → 1,010, de la marge pour A8).
+9. **Cache KV int8** (×2 séquences à VRAM égale). 10. **Produit** : `.deb`, lanceurs
+   refusant sans verrou, `acvram eco`, GUI (32 langues, vedettes), PPL sur le chemin servi.
+
+**Ce qui ne se fera pas** (pour ne pas y revenir) : W4A4 experts (plancher E2M1 ≈ 9 %
+d'erreur par GEMM, PPL +0,010 contre 0,0045 de marge) ; horloge mémoire, split-K b=1 au défaut, lm_head
+int8 à b=12, exil par expert à b=12 — tous réfutés par mesure, verdicts dans INDEX.
