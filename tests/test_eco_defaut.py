@@ -263,3 +263,19 @@ def test_verrou_est_un_plafond_lecture_au_dessus_refus_en_dessous_bridage(isole)
     # lire_horloge avec état posé : en dessous tenu, au-dessus faux
     assert eco.lire_horloge(0, "1950, 3135, Not Active", etat={"mode": "2700"})["verrou"] is True
     assert eco.lire_horloge(0, "2977, 3135, Not Active", etat={"mode": "2700"})["verrou"] is False
+
+
+def test_une_montee_qui_traverse_une_bande_n_est_pas_un_verrou(isole):
+    """poste2 858298c : `eco etat` pendant une montée a lu [690×3, 435×3, 2062, 2062] → « lgc2100? »
+    à tort ; sans consigne il faut TROIS lectures à ± 30 avant de conclure ; la montée continue
+    (2 977, 2 985) rend « libre » ; un vrai verrou 2 100 (2 062 ×3) rend bien lgc2100?."""
+    def lecteur(seq):
+        it = iter(list(seq) + [seq[-1]] * 40)
+        return lambda index=0, sous_charge=False, **kw: _LIRE_ORIG(index, f"{next(it)}, 3135, Not Active", sous_charge=sous_charge)
+    h = eco.lire_sous_charge(0, lecteur([690] * 3 + [435] * 3 + [2062, 2062, 2977, 2985, 2985]), charge=_RIEN, attente=0.05)
+    assert h["stable"] and eco.etiquette_horloge(h) == "libre" and h["sm_mhz"] == 2985
+    h = eco.lire_sous_charge(0, lecteur([690] * 3 + [435] * 3 + [2062, 2062, 2062]), charge=_RIEN, attente=0.05)
+    assert h["stable"] and eco.etiquette_horloge(h) == "lgc2100?"
+    # avec consigne 2700 posée par ce processus : deux lectures dans la bande suffisent (arrivée)
+    h = eco.lire_sous_charge(0, lecteur([225, 1102, 2692, 2692]), charge=_RIEN, attente=0.05, cible=2700)
+    assert h["stable"] and h["lectures"] == [225, 1102, 2692, 2692]

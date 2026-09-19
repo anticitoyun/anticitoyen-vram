@@ -704,6 +704,26 @@ class RotaryEmbedding(nn.Module):
         self._ensure(max_pos, device, dtype)
         if getattr(self, "_cos32", None) is not None:
             self.tables32(max_pos, device)
+        if getattr(self, "_cs_demi", None) is not None:
+            self.tables_demi(None, device, dtype, max_pos)
+
+    def tables_demi(self, positions: Optional[torch.Tensor], device, dtype,
+                    max_pos: int) -> Optional[torch.Tensor]:
+        """C15 (MLA, RoPE « norm » : paires 2i, 2i+1) : les demi-tables
+        ``cos[:, :d/2]`` et ``sin[:, :d/2]`` empilées en ``[n, 2, d/2]``, pour
+        UNE indexation par pas au lieu de deux — mêmes valeurs bf16 que
+        ``forward`` (découpées après coup). ``positions`` None : construit
+        seulement (``reserver``, hors capture) ; rend la ligne indexée sinon."""
+        self._ensure(max_pos, device, dtype)
+        cs = getattr(self, "_cs_demi", None)
+        if cs is None or cs.shape[0] != self._cos.shape[0] or cs.device != device or cs.dtype != dtype:
+            if cs is not None and torch.cuda.is_current_stream_capturing():
+                raise RuntimeError("demi-tables RoPE réallouées pendant une capture de "
+                                   "graphe — appeler reserver() avant la capture")
+            half = self._cos.shape[-1] // 2
+            self._cs_demi = torch.stack((self._cos[:, :half], self._sin[:, :half]), dim=1).contiguous()
+            cs = self._cs_demi
+        return None if positions is None else cs[positions]
 
     def tables32(self, max_pos: int, device):
         """Tables cos/sin complètes en fp32, pour le noyau fusionné : lui
