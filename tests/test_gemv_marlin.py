@@ -220,14 +220,44 @@ def test_le_bloc_moe_decode_prend_gemv_marlin(monkeypatch):
 
 
 @CARTE
+def test_splitk_vaut_un_au_defaut():
+    """poste7 19/09 (verdict-splitk-b1-19-09) : le split-K n'entre PAS au défaut.
+    Sans ACVRAM_GEMV_SPLITK, S = 1 pour toute forme, y compris celle qui le
+    déclencherait en opt-in (gate/up Coder b=1 : 96 blocs). Ce test casse si
+    le défaut change de sortie."""
+    ext = get_extension()
+    assert "ACVRAM_GEMV_SPLITK" not in os.environ or os.environ["ACVRAM_GEMV_SPLITK"] == "0"
+    assert ext.nvfp4_gemv_marlin_splitk(2048, 768, 8) == 1      # gate/up b=1
+    assert ext.nvfp4_gemv_marlin_splitk(768, 2048, 8) == 1      # down b=1
+    assert ext.nvfp4_gemv_marlin_splitk(2048, 768, 96) == 1     # b=12
+
+
+@CARTE
+def test_splitk_opt_in_sous_processus():
+    """ACVRAM_GEMV_SPLITK=1 : S auto (4 à b=1 gate/up, 2 à b=2, 1 dès b=4) et le
+    noyau passe le juge sur ces lots — dans un PROCESSUS à part, la variable
+    étant lue une fois par processus (comme GROUPED_RPW). Le verrou est celui
+    de cette session (ACVRAM_CARTE_TENUE hérité)."""
+    import subprocess
+    env = dict(os.environ, ACVRAM_GEMV_SPLITK="1", ACVRAM_CARTE_TENUE=os.environ.get("ACVRAM_CARTE_TENUE", str(os.getpid())))
+    r = subprocess.run([sys.executable, "-m", "pytest", __file__, "-q", "-p", "no:cacheprovider",
+                        "-k", "_splitk_auto_"], env=env, capture_output=True, text=True, timeout=900)
+    assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-2000:]
+    assert "passed" in r.stdout
+
+
+@CARTE
+@pytest.mark.skipif(os.environ.get("ACVRAM_GEMV_SPLITK") != "1", reason="opt-in : lancé par test_splitk_opt_in_sous_processus")
 @pytest.mark.parametrize("b,mode", [(1, "aleatoire"), (2, "aleatoire"), (4, "aleatoire"), (2, "fantomes")])
-def test_b_splitk_par_lot(b, mode):
+def test_b_splitk_auto_par_lot(b, mode):
     """Split-K par lot (poste b=1, verdict-profil-b1-b-18-09) : gate/up Coder
     (K=2048, N=768, top_k=8) à b=1 → 96 blocs → S=4 ; b=2 → S=2 ; b=4 → S=1
     (chemin d'origine). Chaque S passe le juge fp32 par ligne, les fantômes
     rendent zéro sous S>1, et deux appels sont identiques au bit (réduction
     du dernier bloc dans l'ordre z fixe)."""
     ext = get_extension()
+    attendu = {1: 4, 2: 2, 4: 1}[b]
+    assert ext.nvfp4_gemv_marlin_splitk(2048, 768, b * 8) == attendu
     E, k, K, N = 16, 8, 2048, 768
     qg, bg, gsg, wg32 = _pile(E, N, K, 31); qu, bu, gsu, wu32 = _pile(E, N, K, 32)
     mg, mu = _marlin(qg, bg, gsg), _marlin(qu, bu, gsu)

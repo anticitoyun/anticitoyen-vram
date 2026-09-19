@@ -2087,11 +2087,13 @@ __global__ void __launch_bounds__(MB_WARPS * WARP) nvfp4_gemv_marlin_kernel(
     if (threadIdx.x == 0) cpt[g * NT + nt] = 0u;         // prêt pour le rejeu suivant
 }
 
-// Split-K par lot (régime, pas une variable : décidé du nombre de blocs) :
-// S doublé tant que la grille reste sous MB_BLOCS_MIN et que chaque bloc
-// garde ≥ MB_WARPS tuiles k (b=1 gate/up Coder : 96 blocs → S = 4, 384 ;
-// b=2 → S = 2 ; b ≥ 4 et le down (256 blocs à b=1) → S = 1, chemin d'origine).
-// ACVRAM_MARLIN_SPLITK=<n> force S (témoin : 1 = noyau d'avant).
+// Split-K par lot — OPT-IN (poste7, 19/09, verdict-splitk-b1-19-09) :
+// ACVRAM_GEMV_SPLITK=0 (défaut) : S = 1, noyau d'avant, sortie inchangée ;
+// =1 : S doublé tant que la grille reste sous MB_BLOCS_MIN et que chaque bloc
+// garde ≥ MB_WARPS tuiles k (b=1 gate/up Coder : 96 blocs → S = 4 ; b=2 → 2 ;
+// b ≥ 4 → 1) — mesuré b=1 +3,1 % t/s, PPL décodage +0,0042 contre un témoin
+// graphes/eager de 0,0026 : non tranché, donc pas au défaut ; =n ≥ 2 : S forcé
+// (diagnostic). Lu une fois par processus (comme GROUPED_RPW).
 constexpr int MB_BLOCS_MIN = 384;
 // Tampons du split-K, statiques par appareil : `cpt` est remis à zéro par le
 // dernier bloc de chaque colonne, donc zéroté UNE fois à l'allocation (pas de
@@ -2108,8 +2110,9 @@ static std::pair<float *, unsigned int *> mb_tampons(const torch::Tensor &ref, l
     return {parts[d].data_ptr<float>(), reinterpret_cast<unsigned int *>(cpts[d].data_ptr<int>())};
 }
 static int mb_splitk(int NT, int G, int KT) {
-    static const int force = std::getenv("ACVRAM_MARLIN_SPLITK") ? atoi(std::getenv("ACVRAM_MARLIN_SPLITK")) : 0;
-    if (force > 0) return force;
+    static const int mode = std::getenv("ACVRAM_GEMV_SPLITK") ? atoi(std::getenv("ACVRAM_GEMV_SPLITK")) : 0;
+    if (mode <= 0) return 1;
+    if (mode >= 2) return mode;
     int S = 1;
     while (NT * G * S < MB_BLOCS_MIN && KT / (2 * S) >= MB_WARPS && 2 * S <= 8) S *= 2;
     return S;
@@ -2152,6 +2155,12 @@ torch::Tensor nvfp4_gemv_marlin(torch::Tensor w, torch::Tensor s, torch::Tensor 
     #undef MB_L
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return out;
+}
+
+// Le S que prendrait un appel (K, N, G) : testable sans lancer le noyau
+// (tests/test_gemv_marlin.py : 1 au défaut quel que soit le lot).
+int64_t nvfp4_gemv_marlin_splitk(int64_t K, int64_t N, int64_t G) {
+    return mb_splitk((int)(N / MB_TN), (int)G, (int)(K / MB_TK));
 }
 
 torch::Tensor nvfp4_gemv_marlin_gateup(torch::Tensor wg, torch::Tensor sg, torch::Tensor gg,
@@ -6170,6 +6179,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("w"), py::arg("s"), py::arg("g"), py::arg("expert_ids"), py::arg("token_ids"),
           py::arg("x"), py::arg("K"), py::arg("N"),
           "NVFP4 : GEMV groupée lisant la DISPOSITION MARLIN (forme (b), P1 disposition unique)");
+    m.def("nvfp4_gemv_marlin_splitk", &nvfp4_gemv_marlin_splitk,
+          "S du split-K que prendrait nvfp4_gemv_marlin(K, N, G) : 1 sauf ACVRAM_GEMV_SPLITK");
     m.def("nvfp4_gemv_marlin_gateup", &nvfp4_gemv_marlin_gateup,
           py::arg("wg"), py::arg("sg"), py::arg("gg"), py::arg("wu"), py::arg("su"), py::arg("gu"),
           py::arg("expert_ids"), py::arg("token_ids"), py::arg("x"), py::arg("K"), py::arg("N"), py::arg("act") = 0,

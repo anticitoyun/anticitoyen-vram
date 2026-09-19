@@ -72,6 +72,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("GROUPED_OLD", "", None, "1", "témoin : l'ancien noyau groupé à 4 lignes par bloc"),
     Variable("GROUPED_XREG", "down", None, "0",
              "GEMV groupée des experts, K ≤ 2048 : down (défaut depuis verdict-gemv-experts-xreg-down-18-09 : ABAB × 0,944 nu, Coder b=12 1 307 t/s) = x en registres par tranche sur la projection down seule | 1 = gate/up aussi (témoin réfuté : 96 registres, 2 blocs/SM, +19 %) | 0 = x relu en shared (témoin) ; sortie identique au bit dans tous les cas"),
+    Variable("GEMV_SPLITK", "0", None, "0",
+             "GEMV Marlin (b) : split-K par lot aux petits lots (gate/up b=1 : 96 → 384 blocs, réduction du dernier bloc, déterministe) ; 0 défaut = noyau d'avant | 1 = opt-in : +3,1 % b=1 (385,6 contre 374,1 t/s ABAB), PPL décodage +0,0042 vs témoin graphes/eager 0,0026, non tranché 19/09 (verdict-splitk-b1-19-09) | n ≥ 2 = S forcé (diagnostic) ; lue une fois par processus"),
     Variable("GEMV_LAYOUT", "marlin", ("acvram.engine.model", "_GEMV_LAYOUT"), "marlin",
              "P1 disposition UNIQUE (forme (b)), DÉFAUT depuis l'adoption du 18/09 : marlin = pile Marlin seule (préfill GEMM classe Marlin ET GEMV du décodage relisant les tuiles 16 k × 64 n ; la pile NVFP4 est rendue après le repack, experts_layout=marlin ; va avec PREFILL_GROUPED=marlin, sinon refus à l import ; scellé ≤ 0,97 × GEMV à b=1 et b=12, fp32 par ligne) | naturel = pile NVFP4 seule (témoin, avec PREFILL_GROUPED=groupe ; b=1 366 t/s contre 351 en marlin)"),
     Variable("DOUBLE_DISPOSITION_DIAG", "0", None, "0",
