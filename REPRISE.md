@@ -48,8 +48,10 @@ a été conservée.
   énergie à b=12 ; `-lgc 2100` : 1 138 · 0,1739 (−19 % de J).
 * **P2** (projections q/k/v/o int8 par canal, `torch._int_mm`) : **opt-in
   `ACVRAM_PREFILL_INT8=cublas`**, prefill 18 850 j/s (+14 %), J/jeton 0,89-0,93 × défaut,
-  équivalence tenue ; **PPL 1,0094 géo (4/4 tenu le 19/09, `verdict-p2-ppl-19-09`)** ; passe au
-  défaut si le scellé P2-déc tient (b=1 ≥ 356, b=12 ≥ 1 334 t/s, J ≤ 1,02 ×). Split-K b=1 : opt-in `ACVRAM_GEMV_SPLITK=1` (PPL +0,0042, non tranché).
+  équivalence tenue ; **PPL 1,0094 géo** ; décodage b=1 396,0 tenu, **b=12 1 062,6 faux** (−21 %) → régime
+  nommé, pas au défaut (`poste7-p2-dec-c11-c6-19-09`). Le classé Coder lit **déjà** q/k/v/o en
+  int8 g128 : l'i8c ne change que l'échelle (par canal), et à 2 ≤ M ≤ 16 aucun noyau ne la
+  prend (chantier C11). Split-K b=1 : opt-in `ACVRAM_GEMV_SPLITK=1` (PPL +0,0042, non tranché).
 * **Spéculation n-gram déjà au défaut à b ≤ 2** (`runner.py:429`, `ACVRAM_SPECULATION_LOT_MAX=2`,
   `GardeSpeculation` conditionnée au lot réel) : taux d'acceptation 1,61 mesuré le 13/09 sur du
   code ; la cellule b=1 ci-dessus le contient. Invariant : jamais un jeton différent du greedy.
