@@ -414,6 +414,7 @@ class Attention(nn.Module):
         # rope_inplace puis kv_write_int8 ; sans diagnostic lm4 (positions).
         if (_ROPE_KV and self.rope is not None and q.is_cuda and q.dtype == torch.bfloat16
                 and cache.cfg.dtype == "int8" and cache.k_scale is not None
+                and not getattr(cache, "canal", False)      # C5-b : rope_kv écrit par jeton
                 and not kv_lm4.diagnostic_actif()):
             r = self._rope_kv_fusee(q, k, v, positions, max_pos, slots, cache)
             if r is not None:

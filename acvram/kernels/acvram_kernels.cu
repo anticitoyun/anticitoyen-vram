@@ -940,13 +940,24 @@ extern "C" __attribute__((used)) const unsigned long long acvram_src_hash
 constexpr int PA_CHUNK = 512;
 constexpr int PA_WARPS = 4;
 
-template <int D, typename QT, typename OT>
+// CANAL (C5-b, chantier-c5b-19-09) : les clés portent en plus une échelle
+// E4M3 par (bloc, tête, canal) — sc [NB, HKV, D] — qui se replie dans q UNE
+// fois par bloc de 16 jetons (qs = q·scale ⊙ sc_bloc, PER_LANE valeurs par
+// voie, en registres), puis le produit scalaire int8 n'a plus qu'un facteur
+// par jeton (ks, comme aujourd'hui : 0 octet de plus par jeton, 128 o E4M3
+// de plus par bloc). Le bloc COURANT d'une séquence (tampon_de[bloc] >= 0) est
+// lu en bf16 dans la réserve `tampon` [R, 16, HKV, D], sans échelle. Hors
+// CANAL les trois pointeurs sont nuls et le noyau est celui d'avant.
+template <int D, typename QT, typename OT, bool CANAL>
 __global__ void paged_attn_partial_kernel(
     const QT *__restrict__ q,             // [B*QL, HQ, D]
     const signed char *__restrict__ kc,   // [NB, 16, HKV, D]
     const __half *__restrict__ ks,        // [NB, 16, HKV]
     const signed char *__restrict__ vc,
     const __half *__restrict__ vs,
+    const unsigned char *__restrict__ sc, // CANAL : [NB, HKV, D] E4M3
+    const __nv_bfloat16 *__restrict__ tampon,   // CANAL : [R, 16, HKV, D]
+    const int *__restrict__ tampon_de,    // CANAL : [NB] ligne du bloc courant ou < 0
     const long *__restrict__ tables,      // [B, N]
     const long *__restrict__ seq_lens,    // [B]  longueur TOTALE (dernier jeton inclus)
     float *__restrict__ part,             // [B*QL, HQ, C, D]  acc non normalisé
@@ -1039,6 +1050,13 @@ __global__ void paged_attn_partial_kernel(
 
     for (int i = 0; i < PER_LANE; ++i) acc[i] = 0.f;
 
+    // CANAL : q ⊙ sc du bloc en cours, rechargé quand le warp change de bloc
+    // (PA_WARPS divise 16 : le warp voit 16/PA_WARPS jetons par bloc).
+    float qs[PER_LANE];
+    long bloc_qs = -1;
+    #pragma unroll
+    for (int i = 0; i < PER_LANE; ++i) qs[i] = 0.f;
+
     const long end = min(slen, (long)(c + 1) * chunk);
     for (long t = start + wid; t < end; t += PA_WARPS) {
         const long blk = tables[(long)b * N + (t >> 4)];
@@ -1046,15 +1064,48 @@ __global__ void paged_attn_partial_kernel(
         const signed char *kp = kc + cell * D;
 
         float partial = 0.f;
-        #pragma unroll
-        for (int i = 0; i < PER_LANE; ++i)
-            partial += sq[lane * PER_LANE + i]
-                       * static_cast<float>(kp[lane * PER_LANE + i]);
-        #pragma unroll
-        for (int off = WARP / 2; off > 0; off >>= 1)
-            partial += __shfl_down_sync(0xffffffffu, partial, off);
-        const float score = __shfl_sync(0xffffffffu, partial, 0)
-                            * __half2float(ks[cell]);
+        float score;
+        if (CANAL) {
+            const int rang = tampon_de[blk];          // uniforme dans le warp
+            if (rang >= 0) {
+                // bloc courant : K bf16 exact dans la réserve, pas d'échelle
+                const __nv_bfloat16 *kb = tampon
+                    + (((long)rang * 16 + (t & 15)) * HKV + hkv) * D;
+                #pragma unroll
+                for (int i = 0; i < PER_LANE; ++i)
+                    partial += sq[lane * PER_LANE + i]
+                               * __bfloat162float(kb[lane * PER_LANE + i]);
+                #pragma unroll
+                for (int off = WARP / 2; off > 0; off >>= 1)
+                    partial += __shfl_down_sync(0xffffffffu, partial, off);
+                score = __shfl_sync(0xffffffffu, partial, 0);
+            } else {
+                if (blk != bloc_qs) {
+                    const unsigned char *sp = sc + (blk * HKV + hkv) * D;
+                    #pragma unroll
+                    for (int i = 0; i < PER_LANE; ++i)
+                        qs[i] = sq[lane * PER_LANE + i]
+                                * e4m3_to_float(sp[lane * PER_LANE + i]);
+                    bloc_qs = blk;
+                }
+                #pragma unroll
+                for (int i = 0; i < PER_LANE; ++i)
+                    partial += qs[i] * static_cast<float>(kp[lane * PER_LANE + i]);
+                #pragma unroll
+                for (int off = WARP / 2; off > 0; off >>= 1)
+                    partial += __shfl_down_sync(0xffffffffu, partial, off);
+                score = __shfl_sync(0xffffffffu, partial, 0) * __half2float(ks[cell]);
+            }
+        } else {
+            #pragma unroll
+            for (int i = 0; i < PER_LANE; ++i)
+                partial += sq[lane * PER_LANE + i]
+                           * static_cast<float>(kp[lane * PER_LANE + i]);
+            #pragma unroll
+            for (int off = WARP / 2; off > 0; off >>= 1)
+                partial += __shfl_down_sync(0xffffffffu, partial, off);
+            score = __shfl_sync(0xffffffffu, partial, 0) * __half2float(ks[cell]);
+        }
 
         const float m_new = fmaxf(m, score);
         const float corr = __expf(m - m_new);
@@ -3831,6 +3882,273 @@ void kv_write_int8(torch::Tensor k, torch::Tensor v, torch::Tensor slots,
 }
 
 
+// --------------------------------------------------------------------------
+// C5-b (chantier-c5b-19-09, jumeau : memory/kv_canal.py) — clés int8 à échelle
+// PAR CANAL et par tête sur chaque bloc de 16 jetons. Déquantification d'une
+// cellule, uniforme : k = code × ks[jeton, tête] (half) × sc[bloc, tête, canal]
+// (E4M3). Bloc fermé par canal : sc = E4M3↑(amax_canal × 16 / 127), ks = 2^-4 ;
+// bloc par jeton (repli) : sc = 1, ks = amax/127 — le chemin d'aujourd'hui.
+// Au décodage les jetons arrivent un par un et l'échelle par canal d'un bloc
+// n'est connue qu'à sa fermeture : le bloc COURANT garde ses clés en bf16 dans
+// une ligne d'une réserve (tampon [R, 16, HKV, D]), tampon_de[bloc] = ligne
+// (ou -1 fermé, -2 par jeton) ; à la 16e écriture la ligne est quantifiée par
+// canal et rendue à la pile des lignes libres. Trois lancements par appel,
+// tous sur l'appareil (capturables) : rôles → écriture → fermeture. Les
+// allocations (pop) n'ont lieu que dans le premier, les restitutions (push)
+// que dans le troisième : jamais les deux dans un même noyau, la pile n'a
+// donc besoin que d'un atomique sur son sommet.
+// V reste par jeton (lu après le softmax : son échelle par canal ne se
+// replie pas dans q).
+// --------------------------------------------------------------------------
+constexpr int KVC_ROLE_RIEN = 0, KVC_ROLE_DIRECT = 1, KVC_ROLE_TAMPON = 2,
+              KVC_ROLE_PAR_JETON = 3;
+constexpr unsigned char KVC_SC_PAR_JETON = 0x38;   // E4M3 de 1,0
+constexpr float KVC_KS_CANAL = 0.0625f;            // 2^-4, exact en half
+
+// Plus petit E4M3 >= x (x >= 0 fini) : arrondi vers le HAUT pour qu'aucun code
+// ne sature ; 0 -> 2^-9 (jamais d'échelle nulle) ; >= 448 -> 448 (amax >= 3556 :
+// saturation, à borner par le test carte). Arithmétique entière identique à
+// kv_canal.e4m3_haut : les deux côtés rendent le même octet.
+__device__ __forceinline__ unsigned char e4m3_haut(float x) {
+    if (!(x > 0.f)) return 1;
+    if (x >= 448.f) return 0x7E;
+    const unsigned int u = __float_as_uint(x);
+    const int fe = (int)((u >> 23) & 0xFFu) - 127;
+    if (fe < -6) {                                   // sous-normal : multiples de 2^-9
+        unsigned int b = (unsigned int)floorf(x * 512.f);
+        if ((float)b * 0.001953125f < x) b += 1u;    // 8 = 0x08 = 2^-6 : report juste
+        return (unsigned char)b;
+    }
+    unsigned int b = ((unsigned int)(fe + 7) << 3) | ((u >> 20) & 7u);
+    if (u & 0xFFFFFu) b += 1u;
+    return (unsigned char)(b > 0x7Eu ? 0x7Eu : b);
+}
+
+// Une ligne [D] bf16 -> codes int8 + une échelle half (amax/127) : le chemin
+// par jeton de kv_write_int8_kernel, en fonction ; blockDim multiple de 32.
+__device__ __forceinline__ void kvc_quant_par_jeton(
+    const __nv_bfloat16 *__restrict__ src, signed char *__restrict__ dst,
+    __half *__restrict__ echelle, float *red, int D) {
+    float amax = 0.f;
+    for (int i = threadIdx.x; i < D; i += blockDim.x)
+        amax = fmaxf(amax, fabsf(__bfloat162float(src[i])));
+    for (int o = 16; o > 0; o >>= 1)
+        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+    const int nw = (blockDim.x + 31) >> 5;
+    if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = amax;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float m = 0.f;
+        for (int i = 0; i < nw; ++i) m = fmaxf(m, red[i]);
+        red[0] = fmaxf(m / 127.f, 1e-8f);
+    }
+    __syncthreads();
+    const float sc = red[0], inv = 1.f / sc;
+    for (int i = threadIdx.x; i < D; i += blockDim.x) {
+        const int q = __float2int_rn(__bfloat162float(src[i]) * inv);
+        dst[i] = (signed char)max(-127, min(127, q));
+    }
+    if (threadIdx.x == 0) *echelle = __float2half(sc);
+    __syncthreads();
+}
+
+// Un bloc entier [16, HKV, D] d'une tête, quantifié PAR CANAL : le fil d porte
+// le canal d (amax sur les 16 jetons, échelle E4M3 vers le haut, codes en
+// division IEEE — --use_fast_math rendrait la division approchée et le jumeau
+// torch ne tomberait plus au bit). src : jeton j à src + j*stride ; dst : codes
+// de la cellule (bloc, j, tête) à dst + j*H*D ; ks : (bloc, j, tête) = 2^-4.
+__device__ __forceinline__ void kvc_quant_bloc_canal(
+    const __nv_bfloat16 *__restrict__ src, long stride,
+    signed char *__restrict__ dst, __half *__restrict__ ks,
+    unsigned char *__restrict__ sc, int H, int D, int bs) {
+    for (int d = threadIdx.x; d < D; d += blockDim.x) {
+        float amax = 0.f;
+        for (int j = 0; j < bs; ++j)
+            amax = fmaxf(amax, fabsf(__bfloat162float(src[(long)j * stride + d])));
+        const unsigned char bits = e4m3_haut(__fdiv_rn(amax * 16.f, 127.f));
+        sc[d] = bits;
+        const float s = e4m3_to_float(bits);
+        for (int j = 0; j < bs; ++j) {
+            const float x16 = __bfloat162float(src[(long)j * stride + d]) * 16.f;
+            const int q = __float2int_rn(__fdiv_rn(x16, s));
+            dst[(long)j * H * D + d] = (signed char)max(-127, min(127, q));
+        }
+    }
+    if (threadIdx.x < bs) ks[(long)threadIdx.x * H] = __float2half(KVC_KS_CANAL);
+}
+
+// (1) Rôles : un fil par jeton. Meneur = le jeton au décalage 0 de son bloc
+// dans CET appel (les jetons d'une séquence ont des emplacements consécutifs
+// au préfill, runner._build_batch) ; run plein (16 jetons) -> DIRECT pour le
+// meneur, RIEN pour les 15 autres ; run partiel -> TAMPON, le meneur alloue
+// la ligne (ou réemploie celle restée attachée à un bloc abandonné) ; pas de
+// meneur dans l'appel -> le bloc est déjà ouvert : sa ligne, ou par jeton.
+__global__ void kv_canal_plan_kernel(
+    const long *__restrict__ slots, int T, int bs,
+    int *__restrict__ tampon_de, int *__restrict__ libres, int *__restrict__ sommet,
+    unsigned char *__restrict__ sc, int H, int D,
+    int *__restrict__ role, int *__restrict__ rang) {
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= T) return;
+    const long slot = slots[t];
+    role[t] = KVC_ROLE_RIEN; rang[t] = -1;
+    if (slot < 0) return;
+    const long blk = slot / bs, off = slot % bs, base = slot - off;
+    const int t0 = t - (int)off;
+    const bool meneur_ici = (t0 >= 0 && slots[t0] == base);
+    if (meneur_ici) {
+        const bool plein = (t0 + bs - 1 < T && slots[t0 + bs - 1] == base + bs - 1);
+        if (plein) {
+            if (t == t0) { role[t] = KVC_ROLE_DIRECT; rang[t] = tampon_de[blk]; tampon_de[blk] = -1; }
+            return;
+        }
+        if (t == t0) {
+            int r = tampon_de[blk];
+            if (r < 0) {
+                const int idx = atomicSub(sommet, 1) - 1;
+                if (idx >= 0) {
+                    r = libres[idx];
+                } else {
+                    atomicAdd(sommet, 1);
+                    r = -2;                              // réserve épuisée : par jeton
+                    for (int i = 0; i < H * D; ++i) sc[blk * H * D + i] = KVC_SC_PAR_JETON;
+                }
+                tampon_de[blk] = r;
+            }
+        }
+        role[t] = KVC_ROLE_TAMPON;
+        return;
+    }
+    const int r = tampon_de[blk];
+    if (r >= 0) { role[t] = KVC_ROLE_TAMPON; return; }
+    if (r == -1) {                                       // bloc jamais ouvert par ce chemin
+        tampon_de[blk] = -2;
+        for (int i = 0; i < H * D; ++i) sc[blk * H * D + i] = KVC_SC_PAR_JETON;
+    }
+    role[t] = KVC_ROLE_PAR_JETON;
+}
+
+// (2) Écriture : un bloc par (jeton, tête). V par jeton toujours ; K selon le
+// rôle — DIRECT : les 16 jetons du run (à partir de ce jeton) par canal ;
+// TAMPON : la ligne bf16 du bloc (ou par jeton si le meneur n'a pas eu de
+// ligne : tampon_de[blk] < 0, relu ici, après le noyau des rôles).
+__global__ void kv_canal_write_kernel(
+    const __nv_bfloat16 *__restrict__ k, const __nv_bfloat16 *__restrict__ v,
+    const long *__restrict__ slots, const int *__restrict__ role,
+    signed char *__restrict__ kc, signed char *__restrict__ vc,
+    __half *__restrict__ ks, __half *__restrict__ vs,
+    unsigned char *__restrict__ sc, __nv_bfloat16 *__restrict__ tampon,
+    const int *__restrict__ tampon_de, int H, int D, int bs) {
+    __shared__ float red[8];
+    const int t = blockIdx.x, h = blockIdx.y;
+    const long slot = slots[t];
+    if (slot < 0) return;
+    const long blk = slot / bs, off = slot % bs;
+    const long cell = blk * bs + off;
+    kvc_quant_par_jeton(v + ((long)t * H + h) * D, vc + (cell * H + h) * D,
+                        vs + cell * H + h, red, D);
+    const int ro = role[t];
+    if (ro == KVC_ROLE_RIEN) return;
+    const __nv_bfloat16 *src = k + ((long)t * H + h) * D;
+    if (ro == KVC_ROLE_DIRECT) {
+        kvc_quant_bloc_canal(src, (long)H * D, kc + (blk * bs * H + h) * D,
+                             ks + blk * bs * H + h, sc + (blk * H + h) * D, H, D, bs);
+        return;
+    }
+    const int r = (ro == KVC_ROLE_TAMPON) ? tampon_de[blk] : -2;
+    if (r >= 0) {
+        __nv_bfloat16 *dst = tampon + (((long)r * bs + off) * H + h) * D;
+        for (int i = threadIdx.x; i < D; i += blockDim.x) dst[i] = src[i];
+        return;
+    }
+    kvc_quant_par_jeton(src, kc + (cell * H + h) * D, ks + cell * H + h, red, D);
+}
+
+// (3) Fermeture : un bloc par (jeton, tête). Le 16e jeton d'un bloc TAMPON
+// quantifie la ligne par canal et la rend ; un meneur DIRECT rend la ligne
+// périmée que le bloc gardait. Aucune allocation ici (voir l'en-tête).
+__global__ void kv_canal_close_kernel(
+    const long *__restrict__ slots, const int *__restrict__ role,
+    const int *__restrict__ rang, signed char *__restrict__ kc,
+    __half *__restrict__ ks, unsigned char *__restrict__ sc,
+    const __nv_bfloat16 *__restrict__ tampon, int *__restrict__ tampon_de,
+    int *__restrict__ libres, int *__restrict__ sommet, int H, int D, int bs) {
+    const int t = blockIdx.x, h = blockIdx.y;
+    const long slot = slots[t];
+    if (slot < 0) return;
+    const int ro = role[t];
+    const long blk = slot / bs, off = slot % bs;
+    if (ro == KVC_ROLE_DIRECT) {
+        if (h == 0 && threadIdx.x == 0 && rang[t] >= 0)
+            libres[atomicAdd(sommet, 1)] = rang[t];
+        return;
+    }
+    if (ro != KVC_ROLE_TAMPON || off != bs - 1) return;
+    const int r = tampon_de[blk];
+    if (r < 0) return;
+    kvc_quant_bloc_canal(tampon + (((long)r * bs) * H + h) * D, (long)H * D,
+                         kc + (blk * bs * H + h) * D, ks + blk * bs * H + h,
+                         sc + (blk * H + h) * D, H, D, bs);
+    __syncthreads();
+    if (h == 0 && threadIdx.x == 0) {
+        tampon_de[blk] = -1;
+        libres[atomicAdd(sommet, 1)] = r;
+    }
+}
+
+void kv_write_int8_canal(torch::Tensor k, torch::Tensor v, torch::Tensor slots,
+                         torch::Tensor kc, torch::Tensor vc,
+                         torch::Tensor ks, torch::Tensor vs,
+                         torch::Tensor sc, torch::Tensor tampon,
+                         torch::Tensor tampon_de, torch::Tensor libres,
+                         torch::Tensor sommet, int64_t bs) {
+    CHECK_CUDA(k); ACVRAM_DEVICE_GUARD(k);
+    TORCH_CHECK(k.scalar_type() == torch::kBFloat16 && v.scalar_type() == torch::kBFloat16,
+                "cache KV canal : k et v en bf16");
+    TORCH_CHECK(kc.scalar_type() == torch::kChar && vc.scalar_type() == torch::kChar,
+                "cache KV canal : stockage int8");
+    TORCH_CHECK(slots.scalar_type() == torch::kLong, "cache KV canal : emplacements int64");
+    TORCH_CHECK(sc.scalar_type() == torch::kByte && tampon.scalar_type() == torch::kBFloat16
+                && tampon_de.scalar_type() == torch::kInt && libres.scalar_type() == torch::kInt
+                && sommet.scalar_type() == torch::kInt, "cache KV canal : sc uint8, tampon bf16, indices int32");
+    CHECK_CONTIG(sc); CHECK_CONTIG(tampon); CHECK_CONTIG(tampon_de); CHECK_CONTIG(libres);
+    auto kk = k.contiguous(), vv = v.contiguous(), sl = slots.contiguous();
+    const int T = kk.size(0), H = kk.size(1), D = kk.size(2);
+    TORCH_CHECK(bs <= 32 && D % 32 == 0, "cache KV canal : bloc <= 32 et D multiple de 32");
+    if (T == 0) return;
+    auto opt = torch::TensorOptions().dtype(torch::kInt).device(k.device());
+    auto plan = torch::empty({2, T}, opt);          // rôles, lignes périmées
+    int *role = plan.data_ptr<int>(), *rang = role + T;
+    auto stream = at::cuda::getCurrentCUDAStream();
+    kv_canal_plan_kernel<<<(T + 127) / 128, 128, 0, stream>>>(
+        sl.data_ptr<long>(), T, (int)bs, tampon_de.data_ptr<int>(),
+        libres.data_ptr<int>(), sommet.data_ptr<int>(),
+        sc.data_ptr<unsigned char>(), H, D, role, rang);
+    dim3 grid(T, H);
+    const int th = std::min(256, (D + 31) / 32 * 32);
+    kv_canal_write_kernel<<<grid, th, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16 *>(kk.data_ptr()),
+        reinterpret_cast<const __nv_bfloat16 *>(vv.data_ptr()),
+        sl.data_ptr<long>(), role,
+        reinterpret_cast<signed char *>(kc.data_ptr()),
+        reinterpret_cast<signed char *>(vc.data_ptr()),
+        reinterpret_cast<__half *>(ks.data_ptr()),
+        reinterpret_cast<__half *>(vs.data_ptr()),
+        sc.data_ptr<unsigned char>(),
+        reinterpret_cast<__nv_bfloat16 *>(tampon.data_ptr()),
+        tampon_de.data_ptr<int>(), H, D, (int)bs);
+    kv_canal_close_kernel<<<grid, th, 0, stream>>>(
+        sl.data_ptr<long>(), role, rang,
+        reinterpret_cast<signed char *>(kc.data_ptr()),
+        reinterpret_cast<__half *>(ks.data_ptr()),
+        sc.data_ptr<unsigned char>(),
+        reinterpret_cast<const __nv_bfloat16 *>(tampon.data_ptr()),
+        tampon_de.data_ptr<int>(), libres.data_ptr<int>(), sommet.data_ptr<int>(),
+        H, D, (int)bs);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+
 // Réduction pondérée du MoE : les top_k lignes d'un jeton, multipliées par
 // leur poids de routage et sommées. Le chemin PyTorch demandait une
 // multiplication, une réduction et une conversion — trois lancements par
@@ -4861,14 +5179,34 @@ torch::Tensor int4_gemv_grouped(torch::Tensor qw, torch::Tensor scales,
     return out;
 }
 
-torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
-                              torch::Tensor ks, torch::Tensor vc,
-                              torch::Tensor vs, torch::Tensor tables,
-                              torch::Tensor seq_lens, int64_t hkv,
-                              double scale, int64_t q_len, int64_t window) {
+// Corps commun des deux points d'entrée : CANAL (C5-b) reçoit en plus sc,
+// tampon et tampon_de ; hors CANAL ces trois tenseurs sont ignorés (nuls).
+template <bool CANAL>
+torch::Tensor paged_attention_gen(torch::Tensor q, torch::Tensor kc,
+                                  torch::Tensor ks, torch::Tensor vc,
+                                  torch::Tensor vs, torch::Tensor sc,
+                                  torch::Tensor tampon, torch::Tensor tampon_de,
+                                  torch::Tensor tables,
+                                  torch::Tensor seq_lens, int64_t hkv,
+                                  double scale, int64_t q_len, int64_t window) {
     CHECK_CUDA(q); CHECK_CUDA(kc); CHECK_CUDA(tables);
     ACVRAM_DEVICE_GUARD(q);
     CHECK_CONTIG(q); CHECK_CONTIG(kc); CHECK_CONTIG(vc);
+    const unsigned char *p_sc = nullptr;
+    const __nv_bfloat16 *p_tampon = nullptr;
+    const int *p_tampon_de = nullptr;
+    if (CANAL) {
+        CHECK_CUDA(sc); CHECK_CUDA(tampon); CHECK_CUDA(tampon_de);
+        CHECK_CONTIG(sc); CHECK_CONTIG(tampon); CHECK_CONTIG(tampon_de);
+        TORCH_CHECK(sc.scalar_type() == torch::kByte && tampon.scalar_type() == torch::kBFloat16
+                    && tampon_de.scalar_type() == torch::kInt,
+                    "attention paginee canal : sc uint8, tampon bf16, tampon_de int32");
+        TORCH_CHECK(sc.size(0) == kc.size(0) && tampon_de.size(0) == kc.size(0),
+                    "attention paginee canal : sc et tampon_de indexes par bloc");
+        p_sc = sc.data_ptr<unsigned char>();
+        p_tampon = reinterpret_cast<const __nv_bfloat16 *>(tampon.data_ptr());
+        p_tampon_de = tampon_de.data_ptr<int>();
+    }
     const int BQ = q.size(0);             // B * q_len lignes de requete
     const int B = BQ / (int)q_len;
     TORCH_CHECK(B * (int)q_len == BQ, "q.size(0) doit etre B*q_len");
@@ -4987,11 +5325,12 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
     const int threads = PA_WARPS * WARP;
 
     #define PA_LAUNCH_T(DD, QT, OT, PQ, PO) do { \
-        paged_attn_partial_kernel<DD, QT, OT><<<g1, threads, 0, stream>>>( \
+        paged_attn_partial_kernel<DD, QT, OT, CANAL><<<g1, threads, 0, stream>>>( \
             PQ, kc.data_ptr<signed char>(), \
             reinterpret_cast<const __half *>(ks.data_ptr()), \
             vc.data_ptr<signed char>(), \
             reinterpret_cast<const __half *>(vs.data_ptr()), \
+            p_sc, p_tampon, p_tampon_de, \
             tables.data_ptr<long>(), seq_lens.data_ptr<long>(), \
             part.data_ptr<float>(), pm.data_ptr<float>(), \
             pl.data_ptr<float>(), (C == 1 ? (PO) : nullptr), \
@@ -5019,6 +5358,28 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
     #undef PA_LAUNCH_T
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return out;
+}
+
+torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
+                              torch::Tensor ks, torch::Tensor vc,
+                              torch::Tensor vs, torch::Tensor tables,
+                              torch::Tensor seq_lens, int64_t hkv,
+                              double scale, int64_t q_len, int64_t window) {
+    return paged_attention_gen<false>(q, kc, ks, vc, vs, torch::Tensor(), torch::Tensor(),
+                                      torch::Tensor(), tables, seq_lens, hkv, scale,
+                                      q_len, window);
+}
+
+// C5-b : clés par canal (sc E4M3 par bloc, bloc courant bf16 dans la réserve).
+torch::Tensor paged_attention_canal(torch::Tensor q, torch::Tensor kc,
+                                    torch::Tensor ks, torch::Tensor vc,
+                                    torch::Tensor vs, torch::Tensor sc,
+                                    torch::Tensor tampon, torch::Tensor tampon_de,
+                                    torch::Tensor tables,
+                                    torch::Tensor seq_lens, int64_t hkv,
+                                    double scale, int64_t q_len, int64_t window) {
+    return paged_attention_gen<true>(q, kc, ks, vc, vs, sc, tampon, tampon_de,
+                                     tables, seq_lens, hkv, scale, q_len, window);
 }
 
 
@@ -6422,6 +6783,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "INT4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
     m.def("kv_write_int8", &kv_write_int8,
           "Cache KV : quantification INT8 et dispersion en un lancement");
+    m.def("kv_write_int8_canal", &kv_write_int8_canal,
+          "C5-b : cache KV int8, cles par canal sur chaque bloc (roles, ecriture, fermeture : "
+          "trois lancements), V par jeton ; sc E4M3 [NB,HKV,D], tampon bf16 [R,16,HKV,D], "
+          "tampon_de [NB], libres [R], sommet [1]");
+    m.def("paged_attention_canal", &paged_attention_canal,
+          "C5-b : attention de decodage fusionnee, cles int8 par canal (q x sc par bloc, "
+          "bloc courant lu en bf16 dans la reserve)");
     m.def("rope_inplace", &rope_inplace_pos, "RoPE en place sur q et k",
           py::arg("q"), py::arg("k"), py::arg("cos"), py::arg("sin"),
           py::arg("positions") = c10::optional<torch::Tensor>(),
