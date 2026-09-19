@@ -913,9 +913,9 @@ def cmd_eco(args: argparse.Namespace) -> int:
     from . import eco
     carte = eco.index_carte() if args.carte is None else args.carte
     if args.mode == "etat":
-        h = eco.lire_horloge(carte)
-        print(f"  carte {carte} : horloge={bold(eco.etiquette_horloge(h))} ; "
-              f"config : eco={eco.mode_demande({})}")
+        h = eco.lire_sous_charge(carte)                    # jamais au repos : verrouillée oisive = 225
+        print(f"  carte {carte} : horloge={bold(eco.etiquette_horloge(h))} sous charge légère "
+              f"(lectures {h.get('lectures')}, stable={h.get('stable')}) ; config : eco={eco.mode_demande({})}")
         print("  " + json.dumps(h, ensure_ascii=False))
         return 0
     chemin = eco.ecrire_config({"eco": args.mode})
