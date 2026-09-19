@@ -276,6 +276,31 @@ def js_options_convert() -> str:
 
 
 
+def mode_eco_demande() -> str:
+    """Le mode éco de config.json (2700 par défaut, décision utilisateur du 19/09)."""
+    try:
+        from acvram import eco
+        return eco.mode_demande()
+    except Exception:
+        return "2700"
+
+
+def options_eco() -> str:
+    m = mode_eco_demande()
+    libelles = {"2700": T("2700 (défaut)"), "2100": T("2100 (éco fort, lots ≥ 8)"), "off": T("off (horloge libre)")}
+    return "".join(f'<option value="{v}"{" selected" if v == m else ""}>{html.escape(l)}</option>' for v, l in libelles.items())
+
+
+def etat_eco_texte() -> str:
+    """Horloge réelle de la carte servie, par `acvram eco etat` (la carte fait foi, pas la mémoire)."""
+    try:
+        out = subprocess.run(["acvram", "eco", "etat"], capture_output=True, text=True, timeout=5).stdout
+        ligne = next((l.strip() for l in out.splitlines() if "horloge=" in l), "")
+        return ligne
+    except Exception:
+        return ""
+
+
 def proposer_options_convert(source: str) -> tuple[dict, str]:
     """Propose des options de conversion lues dans le modèle et dans le plan
     (`acvram plan --json`, sans carte) — jamais devinées : chaque proposition
@@ -362,7 +387,10 @@ def page_accueil(erreur: str = "") -> str:
   <h2>{T("options")}</h2>
   <label><input type="checkbox" id="graphes" checked> {T("graphes CUDA")}</label><br>
   <label>{T("emplacements (slots)")} <input type="number" id="slots" value="4" min="1" max="32" style="width:60px"></label><br>
-  <label>{T("contexte max")} <input type="number" id="ctx" value="8192" min="512" step="512" style="width:90px"></label>
+  <label>{T("contexte max")} <input type="number" id="ctx" value="8192" min="512" step="512" style="width:90px"></label><br>
+  <label title="{T("verrouille l'horloge de la carte pendant le service (sudo nvidia-smi -lgc) ; 2700 = défaut : même vitesse, −9 à −27 % d'énergie ; off = horloge libre")}">{T("éco d'horloge")}
+    <select id="eco" onchange="eco()">{options_eco()}</select></label>
+  <span class="note" id="eco_etat">{html.escape(etat_eco_texte())}</span>
   <p><button onclick="lancer()">{T("démarrer le serveur")}</button></p>
   <p class="note">{T("Le serveur est un sous-processus de cette fenêtre : la fermer l'arrête. Il tourne sous <code>outils/carte.sh</code> quand il est disponible, avec le verrou de la carte choisie.")}</p>
 </div>
@@ -391,6 +419,9 @@ function lancer(){{
   window.webkit.messageHandlers.acvram.postMessage(JSON.stringify({{
     action:'lancer', modele:m, carte:c, graphes:document.getElementById('graphes').checked,
     slots:document.getElementById('slots').value, ctx:document.getElementById('ctx').value}}));
+}}
+function eco(){{
+  window.webkit.messageHandlers.acvram.postMessage(JSON.stringify({{action:'eco', mode:document.getElementById('eco').value}}));
 }}
 function connecter(){{
   const p=document.getElementById('port_existant').value;
@@ -607,6 +638,8 @@ class Fenetre(Gtk.Window):
             self.lancer_conversion(d)
         elif d.get("action") == "proposer":
             self.proposer_conversion(d)
+        elif d.get("action") == "eco":
+            self.changer_eco(d)
 
     def connecter_existant(self, d: dict):
         try:
@@ -668,6 +701,26 @@ class Fenetre(Gtk.Window):
             self.ouvrir(PORT_DEFAUT)
             return False
         return True
+
+    def changer_eco(self, d: dict):
+        """`acvram eco <mode>` écrit config.json puis applique (même sous un serveur)."""
+        mode = str(d.get("mode", ""))
+        if mode not in ("2700", "2100", "off"):
+            return
+
+        def travail():
+            try:
+                out = subprocess.run(["acvram", "eco", mode], capture_output=True, text=True, timeout=15)
+                msg = (out.stdout + out.stderr).strip().splitlines()
+                texte = msg[-1] if msg else ""
+                if out.returncode != 0:
+                    texte = T("acvram eco {mode} a échoué (code {code}) : {texte}", mode=mode, code=out.returncode, texte=texte)
+            except Exception as e:
+                texte = T("acvram eco {mode} a échoué (code {code}) : {texte}", mode=mode, code="?", texte=e)
+            etat = etat_eco_texte() or texte
+            GLib.idle_add(self.web.run_javascript,
+                          f"(function(){{var e=document.getElementById('eco_etat');if(e)e.textContent={json.dumps(etat)};}})()", None, None, None)
+        threading.Thread(target=travail, daemon=True).start()
 
     def proposer_conversion(self, d: dict):
         source = d.get("source", "")

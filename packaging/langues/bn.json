@@ -47,5 +47,8 @@
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert ব্যর্থ হয়েছে (কোড {code}) — উপরের লগ দেখুন।",
  "serveur arrêté.": "সার্ভার বন্ধ।",
  "toutes les options": "সব বিকল্প",
- "proposer les options": "বিকল্প প্রস্তাব"
+ "proposer les options": "বিকল্প প্রস্তাব",
+ "éco d'horloge": "ক্লক ইকো মোড",
+ "2700 (défaut)": "2700 (ডিফল্ট)",
+ "off (horloge libre)": "বন্ধ (মুক্ত ক্লক)"
 }

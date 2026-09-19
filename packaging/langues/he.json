@@ -47,5 +47,8 @@
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert נכשל (קוד {code}) — ראו את היומן למעלה.",
  "serveur arrêté.": "השרת נעצר.",
  "toutes les options": "כל האפשרויות",
- "proposer les options": "הצע אפשרויות"
+ "proposer les options": "הצע אפשרויות",
+ "éco d'horloge": "מצב חיסכון שעון",
+ "2700 (défaut)": "2700 (ברירת מחדל)",
+ "off (horloge libre)": "כבוי (שעון חופשי)"
 }

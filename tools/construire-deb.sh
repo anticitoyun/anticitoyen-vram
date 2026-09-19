@@ -205,6 +205,21 @@ Description: serveur d'inférence LLM pour GPU hétérogènes (NVFP4 + INT4)
  ~/.local/share/acvram ; le paquet lui-même reste léger.
 CTRL
 
+# Éco d'horloge par défaut (poste7-eco-2700-defaut-19-09, décision utilisateur
+# 19/09) : le service pose `sudo -n nvidia-smi -i N -lgc 2700,2700` et rend
+# `-rgc`. Droit RESTREINT à ces deux formes, pour les membres du groupe sudo
+# (le paquet ne connaît pas l'utilisateur) ; conffile, retiré à la purge.
+install -d -m 755 "$PKG/etc/sudoers.d"
+cat > "$PKG/etc/sudoers.d/acvram-nvidia-smi" <<'SUDOERS'
+# acvram : verrou d'horloge du service (acvram eco 2700|2100|off), rien d'autre
+# Formes EXACTES (ce sudo refuse les jokers dans les arguments, visudo -c) :
+# cartes 0 et 1, modes 2700 / 2100, relâchement.
+%sudo ALL=(root) NOPASSWD: /usr/bin/nvidia-smi -i 0 -lgc 2700\,2700, /usr/bin/nvidia-smi -i 0 -lgc 2100\,2100, /usr/bin/nvidia-smi -i 0 -rgc, /usr/bin/nvidia-smi -i 1 -lgc 2700\,2700, /usr/bin/nvidia-smi -i 1 -lgc 2100\,2100, /usr/bin/nvidia-smi -i 1 -rgc
+SUDOERS
+chmod 440 "$PKG/etc/sudoers.d/acvram-nvidia-smi"
+visudo -cf "$PKG/etc/sudoers.d/acvram-nvidia-smi" >/dev/null || { echo "sudoers invalide" >&2; exit 1; }
+echo "/etc/sudoers.d/acvram-nvidia-smi" > "$PKG/DEBIAN/conffiles"
+
 cat > "$PKG/DEBIAN/postinst" <<'POSTINST'
 #!/bin/sh
 set -e

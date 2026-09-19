@@ -47,5 +47,8 @@
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert が失敗しました（コード {code}）— 上のログを参照。",
  "serveur arrêté.": "サーバーが停止しました。",
  "toutes les options": "すべてのオプション",
- "proposer les options": "オプションを提案"
+ "proposer les options": "オプションを提案",
+ "éco d'horloge": "クロック省エネモード",
+ "2700 (défaut)": "2700（既定）",
+ "off (horloge libre)": "オフ（フリークロック）"
 }

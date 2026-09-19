@@ -47,5 +47,8 @@
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert selhal (kód {code}) — viz log výše.",
  "serveur arrêté.": "server zastaven.",
  "toutes les options": "všechny volby",
- "proposer les options": "navrhnout volby"
+ "proposer les options": "navrhnout volby",
+ "éco d'horloge": "eko režim taktu",
+ "2700 (défaut)": "2700 (výchozí)",
+ "off (horloge libre)": "vyp. (volný takt)"
 }

@@ -47,5 +47,8 @@
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert mislykkedes (kode {code}) — se loggen ovenfor.",
  "serveur arrêté.": "server stoppet.",
  "toutes les options": "alle indstillinger",
- "proposer les options": "foreslå indstillinger"
+ "proposer les options": "foreslå indstillinger",
+ "éco d'horloge": "ur-økotilstand",
+ "2700 (défaut)": "2700 (standard)",
+ "off (horloge libre)": "fra (frit ur)"
 }

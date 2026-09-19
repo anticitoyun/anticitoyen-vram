@@ -47,5 +47,8 @@
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert epäonnistui (koodi {code}) — katso yllä oleva loki.",
  "serveur arrêté.": "palvelin pysäytetty.",
  "toutes les options": "kaikki asetukset",
- "proposer les options": "ehdota asetuksia"
+ "proposer les options": "ehdota asetuksia",
+ "éco d'horloge": "kellon ekotila",
+ "2700 (défaut)": "2700 (oletus)",
+ "off (horloge libre)": "pois (vapaa kello)"
 }

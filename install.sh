@@ -172,6 +172,7 @@ if command -v nvidia-smi >/dev/null 2>&1 && ! sudo -n -l nvidia-smi >/dev/null 2
     echo "  eco 2700 : pas de droit sudo -n sur nvidia-smi — le service tournera a l'horloge libre"
     echo "  (eco=2700(libre: refus sudo), aucune cellule publiable). Pour l'accorder :"
     echo "    sudo visudo -f /etc/sudoers.d/acvram-nvidia-smi"
-    echo "    $(id -un) ALL=(root) NOPASSWD: /usr/bin/nvidia-smi -i * -lgc *\\,*, /usr/bin/nvidia-smi -i * -rgc"
+    echo "    $(id -un) ALL=(root) NOPASSWD: /usr/bin/nvidia-smi -i 0 -lgc 2700\\,2700, /usr/bin/nvidia-smi -i 0 -lgc 2100\\,2100, /usr/bin/nvidia-smi -i 0 -rgc"
+    echo "  (formes exactes : ce sudo refuse les jokers dans les arguments ; ajouter -i 1 pour la seconde carte)"
     echo "  puis : acvram doctor (verifie le droit ET l'effet)."
 fi
