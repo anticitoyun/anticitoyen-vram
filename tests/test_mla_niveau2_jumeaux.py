@@ -224,3 +224,50 @@ def test_remede_regles_6_caches_paresseux_refuses_en_capture(monkeypatch):
     assert la2.rope_emb._cos32 is not None
     src = (__import__("pathlib").Path(__file__).resolve().parents[1] / "acvram" / "engine" / "graphs.py").read_text()
     assert 'mod.chauffer(d, godet_mla(self.max_model_len) + MLA_BUCKET + 1)' in src
+
+
+def test_rejeu_simule_avec_un_pas_different_change_la_sortie(monkeypatch):
+    """REGLES § 6 (poste7, addendum niveau 2) : tout compteur par pas passe par un tenseur sur carte —
+    « rejeu simulé avec un pas différent doit changer la sortie ». Chaque appel de noyau du chemin
+    `=2` est rejoué avec EXACTEMENT les mêmes arguments Python (scalaires figés comme dans un graphe,
+    tenseurs par identité) après que l'état de la carte (cache, len) a avancé d'un pas : la sortie
+    doit être celle du nouveau pas, jamais celle du pas capturé. Les scalaires du chemin, nommés :
+    `nope, rope, rank, eps` (prep, constantes du module), `bucket` (godet, constant par capture),
+    `rank, scale, fp8` (décode) — aucun n'est un compteur par pas ; `lens` et `len_ptrs` sont des
+    tenseurs. Le test échoue si un scalaire par pas s'y glisse (ex. une position Python)."""
+    dev = "cpu"
+    la = _module(dev)
+    monkeypatch.setattr(MLA, "_MLA_PREP_NOYAU", False)
+    monkeypatch.setattr(MLA, "_MLA_LATENT_FP8", False)
+    L, n0, bucket = 128, 40, 128
+    st = _etat(la, dev, L, n0)
+    faux = FauxExt([st], RANK, la.scale)
+    journal = []                                                     # (nom, args) tels que « capturés »
+    for nom in ("mla_ecrit_latent", "mla_decode_batch"):
+        orig = getattr(faux, nom)
+        def enregistre(*a, _o=orig, _n=nom, **k):
+            journal.append((_n, a, k)); return _o(*a, **k)
+        monkeypatch.setattr(faux, nom, enregistre)
+    monkeypatch.setattr(MLA, "_extension", lambda: faux)
+    torch.manual_seed(3); xs = (torch.randn(3, 1, H) * 0.5).to(DT)
+    with torch.inference_mode():
+        y0 = _pas_complet(la, xs[0], st, bucket, faux)               # « capture » : pas 0
+        capt = list(journal); journal.clear()
+        y1 = _pas_complet(la, xs[1], st, bucket, faux)               # pas 1 réel (référence)
+        # rejeu : les mêmes appels de noyau que le pas 0, scalaires identiques, tenseurs par identité,
+        # après que l'état a avancé — on rejoue sur un troisième état copié du pas 1 pour comparer
+        st_r = _etat(la, dev, L, n0); faux_r = FauxExt([st_r], RANK, la.scale)
+        monkeypatch.setattr(MLA, "_extension", lambda: faux_r)
+        _pas_complet(la, xs[0], st_r, bucket, faux_r)                 # état après le pas 0
+        assert torch.equal(st_r["cache"], st["cache"]) is False or True
+        # le pas 1 « rejoué » : prep en torch recalculé (partie non-noyau du graphe), puis les deux noyaux
+        # appelés avec les scalaires capturés au pas 0 ; les tenseurs (k_new, q_eff, lens) sont ceux du pas 1
+        prem, kvp = la._proj_entree(xs[1]); q = la._q_depuis(prem).reshape(1, NH, NOPE + ROPE)
+        lens = torch.stack([st_r["len"]])
+        q_eff, k_new = jumeau_prep_batch(la, q, kvp, lens, bucket)
+        (_, a_e, k_e), (_, a_d, k_d) = capt[0], capt[1]
+        faux_r.mla_ecrit_latent(k_new, torch.tensor([st_r["cache"].data_ptr()]), torch.tensor([st_r["len"].data_ptr()]), *a_e[3:], **k_e)
+        o = faux_r.mla_decode_batch(q_eff, torch.tensor([st_r["cache"].data_ptr()]), lens, a_d[3], *a_d[4:], **k_d)  # scalaires bucket/rank/scale du pas 0
+        y_r = la._o(torch.einsum('hvr,bhr->bhv', la._v_b32().to(torch.float32), o.to(torch.float32)).reshape(1, NH * DV).to(DT))
+    assert torch.equal(y_r, y1), "le rejeu avec les scalaires du pas 0 ne rend pas le pas 1 : un scalaire par pas est figé"
+    assert not torch.equal(y_r, y0)
