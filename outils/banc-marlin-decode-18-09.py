@@ -25,7 +25,7 @@ b = 12 ET à b = 1, chaque chemin contre fp32 (part hors 2⁻⁷ ≤ 5·10⁻⁴
 du GEMV) ; faux → P1 fermé VRAM, verdict daté. Prédiction poste4 (à sec,
 SASS : (b) 8,9 instr/octet contre ≈ 8,5 pour v1, mais 4 LDS par 64 o au lieu
 de 128 — le poste ncu) : b = 12 5,0-6,5 ms/pas, b = 1 2,2-2,9 ms.
-`--routages fichier.pt` : liste de tenseurs [B, top_k] (ACVRAM_TRACE_ROUTAGE
+`--routages fichier.pt` : liste de tenseurs [B, top_k] (ACVRAM_TRACE_ROUTAGE_PT
 sur un décodage réel) rejoués à la place du tirage uniforme.
 """
 import json
