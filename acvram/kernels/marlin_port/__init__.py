@@ -156,20 +156,25 @@ def traiter_echelle_globale(g: torch.Tensor, facteur: float) -> torch.Tensor:
     return (g.float() * (2.0 ** (126 - 7))) / facteur
 
 
-def preparer_pile(qw: torch.Tensor, bs: torch.Tensor, gs: torch.Tensor):
+def preparer_pile(qw: torch.Tensor, bs: torch.Tensor, gs: torch.Tensor, repack=None):
     """Pile NVFP4 acvram → format Marlin. ``qw`` [E, N, K/2] uint8 (paires
     E2M1, bas d'abord = ModelOpt), ``bs`` [E, N, K/16] E4M3, ``gs`` [E] fp32.
     Rend (w_marlin [E, K/16, N·2] int32 repacké, s_marlin [E, K/16, N] E4M3
-    S0E5M3, g_marlin [E] fp32). K multiple de 64, N multiple de 64."""
-    ops = charger()
+    S0E5M3, g_marlin [E] fp32). K multiple de 64, N multiple de 64.
+    ``repack`` : (q [K/8, N] int32, K, N) → [K/16, 2N] ; défaut l'op CUDA
+    `gptq_marlin_repack` (carte) — `repack_torch` à sec (même disposition,
+    tests/test_depaqueter_marlin.py)."""
     E, N, K2 = qw.shape
     K = K2 * 2
     assert K % 64 == 0 and N % 64 == 0, (K, N)
-    perm = torch.empty(0, dtype=torch.int, device=qw.device)
+    if repack is None:
+        ops = charger()
+        perm = torch.empty(0, dtype=torch.int, device=qw.device)
+        repack = lambda q, K, N: ops.gptq_marlin_repack(q, perm, K, N, 4, False)   # noqa: E731
     w_out = None
     for e in range(E):
         q = qw[e].contiguous().view(torch.int32).T.contiguous()      # [K/8, N] int32 (GPTQ : K empaqueté)
-        m = ops.gptq_marlin_repack(q, perm, K, N, 4, False)
+        m = repack(q, K, N)
         if w_out is None:
             w_out = torch.empty((E, *m.shape), dtype=m.dtype, device=m.device)
         w_out[e] = m
@@ -182,6 +187,165 @@ def preparer_pile(qw: torch.Tensor, bs: torch.Tensor, gs: torch.Tensor):
     s_out = torch.stack(s_list)
     g_out = traiter_echelle_globale(gs.float().reshape(-1), facteur).contiguous()
     return w_out, s_out, g_out
+
+
+# --- disposition Marlin ↔ poids bf16, en torch (chantier C2, revue/chantier-c2-19-09) ---
+#
+# Le repack CUDA (gptq_marlin_repack.cu:122-209 : num_bits = 4, sans perm,
+# activation 16 bits) range chaque tuile 16 k × 64 n en 128 mots int32 : le
+# mot t·4 + w (t = voie 0..31, w = warp 0..3) porte les colonnes n = w·16 + t/4
+# et n + 8 aux k = (t % 4)·2 + {0, 1, 8, 9} ; quartets du mot, bas d'abord
+# (pack_idx {0, 2, 4, 6, 1, 3, 5, 7}) : (n,k0) (n,k8) | (n+8,k0) (n+8,k8) |
+# (n,k1) (n,k9) | (n+8,k1) (n+8,k9) — c'est aussi ce que documente et lit
+# `nvfp4_gemv_marlin_kernel` (acvram_kernels.cu, en-tête « GEMV groupée sur la
+# DISPOSITION MARLIN »). Les échelles (permuter_echelles puis le [0, 2, 1, 3]
+# de traiter_echelles_nvfp4) : la colonne o de la tuile est à l'octet
+# 8·(o % 8) + swap4(o / 8), swap4 = (q & ~3) | {0, 2, 1, 3}[q & 3].
+# À sec, tout se prouve par repack_torch → depaqueter_marlin = identité et par
+# l'égalité AU BIT avec dequantize_nvfp4 (tests/test_depaqueter_marlin.py) ;
+# l'égalité de repack_torch avec l'op CUDA elle-même reste à faire sur carte.
+
+_PACK_IDX = (0, 2, 4, 6, 1, 3, 5, 7)
+_TC_OFFSETS = (0, 1, 8, 9)
+_SWAP4 = (0, 2, 1, 3)
+# code E2M1 signé (bit 3) → valeur, -0.0 compris (dequantize_nvfp4 rend -0.0 pour le code 8)
+_NIVEAUX16 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
+_INDICES: dict = {}
+
+
+def _indices(device):
+    """Indices fixes d'une tuile, calculés une fois par appareil :
+    ``repack`` [32, 4, 8] = source (kl·64 + nl) de chaque quartet du mot
+    (t, w) ; ``depaquet`` [64, 16] = quartet plat (t, w, octet, moitié) de
+    chaque (nl, kl) ; ``echelles`` [64] = octet d'échelle de la colonne o ;
+    ``niveaux`` [16] fp32."""
+    cle = str(device)
+    if cle in _INDICES:
+        return _INDICES[cle]
+    t = torch.arange(32).view(32, 1, 1)
+    w = torch.arange(4).view(1, 4, 1)
+    v = torch.tensor(_PACK_IDX).view(1, 1, 8)
+    nl = w * 16 + t // 4 + 8 * (v // 4)
+    kl = (t % 4) * 2 + torch.tensor(_TC_OFFSETS)[v % 4]
+    repack = (kl * 64 + nl).to(torch.long)
+    nl = torch.arange(64).view(64, 1)
+    kl = torch.arange(16).view(1, 16)
+    w, r = nl // 16, nl % 16
+    h, c = r // 8, r % 8
+    j, rem = kl // 8, kl % 8
+    tm4, kk = rem // 2, rem % 2
+    tt, b = c * 4 + tm4, kk * 2 + h
+    depaquet = (((tt * 4 + w) * 4 + b) * 2 + j).to(torch.long)
+    o = torch.arange(64)
+    q = o // 8
+    echelles = (8 * (o % 8) + ((q & ~3) | torch.tensor(_SWAP4)[q & 3])).to(torch.long)
+    niveaux = torch.tensor(_NIVEAUX16, dtype=torch.float32)
+    res = tuple(x.to(device) for x in (repack, depaquet, echelles, niveaux))
+    _INDICES[cle] = res
+    return res
+
+
+def repack_torch(q: torch.Tensor, K: int, N: int) -> torch.Tensor:
+    """Jumeau torch de `ops.gptq_marlin_repack(q, ∅, K, N, 4, False)` : ``q``
+    [K/8, N] int32 GPTQ (le quartet k aux bits 4·(k % 8) du mot k/8) →
+    [K/16, 2N] int32, tuiles 16 × 64 de 128 mots. Sert à sec (preparer_pile
+    (repack=repack_torch)) ; vérifié contre depaqueter_marlin, pas encore
+    contre l'op CUDA."""
+    assert tuple(q.shape) == (K // 8, N) and K % 64 == 0 and N % 64 == 0, (tuple(q.shape), K, N)
+    idx, _, _, _ = _indices(q.device)
+    dec = (torch.arange(8, device=q.device, dtype=torch.int32) * 4).view(1, 8, 1)
+    codes = ((q.to(torch.int32).unsqueeze(1) >> dec) & 0xF).to(torch.uint8)           # [K/8, 8, N] = [K, N]
+    tuiles = codes.view(K // 16, 16, N // 64, 64).permute(0, 2, 1, 3).reshape(K // 16, N // 64, 1024)
+    quartets = tuiles[:, :, idx.view(-1)].view(K // 16, N // 64, 32, 4, 4, 2)          # [.., t, w, octet, moitié]
+    octets = quartets[..., 0] | (quartets[..., 1] << 4)
+    return octets.contiguous().view(torch.int32).view(K // 16, 2 * N)
+
+
+def depaqueter_marlin(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, K: int, N: int,
+                      out: torch.Tensor = None, par: int = 16, noyau: str = "auto") -> torch.Tensor:
+    """Disposition Marlin (preparer_pile) → poids bf16 [N, K], ou [E, N, K]
+    pour une pile ([E, K/16, 2N], [E, K/16, N], [E]). EXACTEMENT les valeurs
+    de `dequantize_nvfp4` sur la pile NVFP4 d'origine : mêmes opérations fp32
+    dans le même ordre (échelle de bloc × globale, puis × code, puis arrondi
+    bf16) — l'octet S0E5M3 décodé vaut s·facteur et g_marlin vaut g·2¹¹⁹/facteur,
+    leur produit fp32 est fl(s·g)·2¹¹⁹ (puissances de deux) ; seule exception,
+    les échelles que le repack a annulées (s·facteur·2⁷ < 2) restent nulles.
+    ``out`` : tampon bf16 réutilisé ([E·N·K] ou [E, N, K]), rempli par tranches
+    de ``par`` experts (pic transitoire borné, jamais la pile entière en fp32).
+    ``noyau`` : torch (référence, toute machine) | triton (une passe, un
+    programme par tuile : le chemin de la carte, `_depaqueter_kernel`) | auto
+    = triton sur CUDA quand Triton est là, torch sinon."""
+    pile = w_marlin.dim() == 3
+    w = w_marlin if pile else w_marlin.unsqueeze(0)
+    s = s_marlin if pile else s_marlin.unsqueeze(0)
+    E = w.shape[0]
+    assert tuple(w.shape) == (E, K // 16, 2 * N) and tuple(s.shape) == (E, K // 16, N), (tuple(w.shape), tuple(s.shape), K, N)
+    g = torch.as_tensor(g_marlin, dtype=torch.float32, device=w.device).reshape(-1)
+    if g.numel() == 1 and E > 1:
+        g = g.expand(E)
+    if out is None:
+        out = torch.empty(E, N, K, dtype=torch.bfloat16, device=w.device)
+    res = out.view(E, N, K)
+    if noyau == "auto":
+        noyau = "triton" if (w.device.type == "cuda" and triton is not None) else "torch"
+    if noyau == "triton":
+        _depaqueter_triton(w, s, g, res, K, N)
+        return res if pile else res[0]
+    if noyau != "torch":
+        raise ValueError(f"depaqueter_marlin : noyau {noyau!r}, attendu auto | torch | triton")
+    _, idx, perm_e, niveaux = _indices(w.device)
+    for e0 in range(0, E, max(1, par)):
+        e1 = min(E, e0 + max(1, par))
+        octets = w[e0:e1].contiguous().view(torch.uint8).view(e1 - e0, K // 16, N // 64, 512)
+        quartets = torch.stack((octets & 0xF, octets >> 4), dim=-1).view(e1 - e0, K // 16, N // 64, 1024)
+        codes = quartets[..., idx.view(-1)].view(e1 - e0, K // 16, N // 64, 64, 16).permute(0, 2, 3, 1, 4)   # [e, nt, nl, kt, kl]
+        vals = niveaux[codes.to(torch.int32)]                                                             # fp32, -0.0 conservé
+        s8 = s[e0:e1].contiguous().view(torch.uint8).view(e1 - e0, K // 16, N // 64, 64)[..., perm_e]     # [e, kt, nt, o]
+        s_dec = ((s8.to(torch.int32) << 20) + 0x34800000).view(torch.float32)                             # = s·facteur
+        s_dec = torch.where(s8 == 0, torch.zeros_like(s_dec), s_dec)                                      # annulée : 0, pas 2⁻²²
+        echelle = (s_dec * g[e0:e1].view(-1, 1, 1, 1)) * 2.0 ** -119                                      # = fl(s·g), au bit
+        res[e0:e1] = (vals * echelle.permute(0, 2, 3, 1).unsqueeze(-1)).reshape(e1 - e0, N, K).to(torch.bfloat16)
+    return res if pile else res[0]
+
+
+def gemv_marlin_torch(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, expert_ids: torch.Tensor,
+                      token_ids: torch.Tensor, x: torch.Tensor, K: int, N: int) -> torch.Tensor:
+    """Jumeau torch (à sec, chantier C10) de `nvfp4_gemv_marlin` (acvram_kernels.cu,
+    `nvfp4_gemv_marlin_kernel<XT, 1>`) : lit la DISPOSITION MARLIN d'une pile
+    ([E, K/16, 2N], [E, K/16, N], [E]) aux mêmes places que le noyau (quartets
+    `_indices().depaquet`, octets d'échelle `_indices().echelles`) et rend
+    [G, N] fp32, ligne g = paire (expert_ids[g], token_ids[g]), dans le
+    GROUPEMENT du noyau : par tuile k, Σ_k code·x en fp32, × échelle S0E5M3
+    décodée ((b << 20) + 0x34800000 — l'octet 0 vaut 2⁻²² comme dans
+    `s0e5m3_octet`, pas 0), Σ sur les tuiles, × g_marlin·2⁻¹¹⁹. Ce qu'il ne
+    reproduit pas : l'ordre des FMA du noyau (4 voies, 8 warps) — le juge est
+    fp32 par ligne ≤ 2⁻⁷·max|y| (tests/test_gemv_marlin.py), pas le bit.
+    Créneau fantôme (expert < 0) : ligne nulle, aucun poids lu."""
+    E = w_marlin.shape[0]
+    assert tuple(w_marlin.shape) == (E, K // 16, 2 * N) and tuple(s_marlin.shape) == (E, K // 16, N)
+    g = torch.as_tensor(g_marlin, dtype=torch.float32, device=w_marlin.device).reshape(-1)
+    _, idx, perm_e, niveaux = _indices(w_marlin.device)
+    KT, NT = K // 16, N // 64
+    xf = x.reshape(-1, x.shape[-1]).to(torch.float32)
+    if xf.shape[1] != K:
+        xf = torch.nn.functional.pad(xf, (0, K - xf.shape[1]))
+    out = torch.zeros(expert_ids.numel(), N, dtype=torch.float32, device=w_marlin.device)
+    cache: dict = {}
+    for gi, (e, t) in enumerate(zip(expert_ids.tolist(), token_ids.tolist())):
+        if e < 0:
+            continue
+        if e not in cache:
+            octets = w_marlin[e].contiguous().view(torch.uint8).view(KT, NT, 512)
+            quartets = torch.stack((octets & 0xF, octets >> 4), dim=-1).view(KT, NT, 1024)
+            codes = quartets[:, :, idx.view(-1)].view(KT, NT, 64, 16).permute(1, 2, 0, 3)   # [nt, nl, kt, kl]
+            vals = niveaux[codes.to(torch.int32)].reshape(N, KT, 16)
+            s8 = s_marlin[e].contiguous().view(torch.uint8).view(KT, NT, 64)[..., perm_e]  # [kt, nt, o]
+            s_dec = ((s8.to(torch.int32) << 20) + 0x34800000).view(torch.float32)          # octet 0 → 2⁻²², comme le noyau
+            cache[e] = (vals, s_dec.permute(1, 2, 0).reshape(N, KT))
+        vals, s_dec = cache[e]
+        partiel = torch.einsum("nkl,kl->nk", vals, xf[t].view(KT, 16))                  # Σ_k code·x par tuile, fp32
+        out[gi] = (partiel * s_dec).sum(dim=1) * (g[e] * 2.0 ** -119)
+    return out
 
 
 # --- alignement des jetons par blocs d'expert (moe_align_block_size, en torch) ---
@@ -284,6 +448,68 @@ if triton is not None:
         e_b = tl.sum(sel_b * j[None, :], 1)
         tl.store(expert_ptr + b, e_b.to(tl.int32), mask=masque_b)
         tl.store(npost_ptr + tl.arange(0, 1), tl.full((1,), 0, tl.int32) + total)
+
+    @triton.jit
+    def _e2m1_valeur(c):
+        """Code E2M1 signé (4 bits) → fp32, -0.0 pour le code 8 (comme dequantize_nvfp4)."""
+        m = (c & 1).to(tl.float32)
+        ex = (c >> 1) & 3
+        mult = tl.where(ex == 3, 4.0, tl.where(ex == 2, 2.0, 1.0))
+        v = tl.where(ex == 0, 0.5 * m, (1.0 + 0.5 * m) * mult)
+        return tl.where((c & 8) != 0, -v, v)
+
+    @triton.jit
+    def _bf16_rne(x):
+        """fp32 → motif binaire bf16 (int16), arrondi au plus proche pair — ce que
+        fait cvt.rn.bf16.f32 sur carte ; explicite ici parce que l'interpréteur
+        Triton TRONQUE (`.to(tl.bfloat16)` sous TRITON_INTERPRET=1 : 1,015625
+        → 1,0078125), et que le juge est au bit (tests/test_depaqueter_marlin.py)."""
+        b = x.to(tl.int32, bitcast=True)
+        b = b + 0x7FFF + ((b >> 16) & 1)
+        return (b >> 16).to(tl.int16)
+
+    @triton.jit
+    def _depaqueter_kernel(w_ptr, s_ptr, g_ptr, out_ptr, KT, NT, K, N, DEUX_MOINS_119: tl.constexpr):
+        """Un programme par tuile Marlin (expert e, tuile k kt, tuile n nt) :
+        512 octets de codes + 64 octets d'échelle → 1 024 poids bf16 [16 k ×
+        64 n] écrits à leur place dans out [E, N, K] (vu en int16). Même
+        arithmétique que la version torch de depaqueter_marlin : fl(s·g) puis
+        × code en fp32, arrondi bf16 au plus proche pair."""
+        pid = tl.program_id(0)
+        nt = pid % NT
+        kt = (pid // NT) % KT
+        e = pid // (NT * KT)
+        bi = tl.arange(0, 512)
+        octets = tl.load(w_ptr + (e * KT + kt) * (NT * 512) + nt * 512 + bi).to(tl.int32)
+        mot = bi // 4
+        b = bi % 4
+        t = mot // 4
+        w = mot % 4
+        n = w * 16 + t // 4 + 8 * (b & 1)                     # colonne locale du quartet (0..63)
+        k0 = (t % 4) * 2 + (b >> 1)                            # k local du quartet bas ; + 8 pour le haut
+        q = n // 8
+        p = 8 * (n % 8) + ((q & 4) | ((q & 1) << 1) | ((q >> 1) & 1))   # octet d'échelle de la colonne n
+        sb = tl.load(s_ptr + (e * KT + kt) * N + nt * 64 + p).to(tl.int32)
+        s_dec = ((sb << 20) + 0x34800000).to(tl.float32, bitcast=True)   # = s·facteur (S0E5M3)
+        s_dec = tl.where(sb == 0, 0.0, s_dec)
+        g = tl.load(g_ptr + e)
+        ech = (s_dec * g) * DEUX_MOINS_119                    # × 2⁻¹¹⁹ (passé par l'hôte) : fl(s·g) au bit
+        base = out_ptr + (e * N + nt * 64 + n) * K + kt * 16 + k0
+        tl.store(base, _bf16_rne(_e2m1_valeur(octets & 0xF) * ech))
+        tl.store(base + 8, _bf16_rne(_e2m1_valeur(octets >> 4) * ech))
+
+
+def _depaqueter_triton(w: torch.Tensor, s: torch.Tensor, g: torch.Tensor, out: torch.Tensor, K: int, N: int) -> None:
+    """``w`` [E, K/16, 2N] int32, ``s`` [E, K/16, N] E4M3 (octets), ``g`` [E]
+    fp32, ``out`` [E, N, K] bf16 contigu — un lancement, E·K/16·N/64 programmes."""
+    if triton is None:
+        raise RuntimeError("depaqueter_marlin(noyau='triton') : Triton absent")
+    E = w.shape[0]
+    KT, NT = K // 16, N // 64
+    assert out.is_contiguous() and tuple(out.shape) == (E, N, K)
+    _depaqueter_kernel[(E * KT * NT,)](w.contiguous().view(torch.uint8), s.contiguous().view(torch.uint8),
+                                       g.contiguous(), out.view(torch.int16), KT, NT, K, N,
+                                       DEUX_MOINS_119=2.0 ** -119, num_warps=4)
 
 
 def aligner_blocs_capturable(flat_e: torch.Tensor, block_size: int, num_experts: int, tampons=None):
