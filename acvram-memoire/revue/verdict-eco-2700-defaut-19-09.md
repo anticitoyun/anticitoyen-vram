@@ -17,3 +17,5 @@ suite : chef — comparatif « défaut 0.6.18 = éco 2 700 » : les six lignes c
 
 ## Rejouable
 `ACVRAM_TYPE=mesure outils/carte.sh bash scratchpad/eco-2700-defaut-19-09/chaine.sh` (14 min ; trap `-rgc`) ; `banc-*`, `prefill-*`, `cert-*`, `ppl-coder-tr1-2700.json`.
+
+## Addendum 20 h 56 — réserve de charge : un indexeur `leann` (383 % CPU, pas à moi) tourne depuis 20:38 ; les secondes passes GLM (b=12 678,4 ; b=1 104,8) ont couru sous charge 5-6 (premières passes à charge 1-3 : **700,3** et **107,8**, toutes deux dans ou au bord des fourchettes 700-725 / 108-113). Le certifie (hôte peu sollicité) n'en souffre pas ; le harnais (HTTP) oui. Les moyennes publiées restent celles des deux passes, avec cette ligne.
