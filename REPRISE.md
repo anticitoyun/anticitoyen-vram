@@ -28,9 +28,12 @@ jamais appelé, fonctions de lecture de VRAM non câblées, et un `/dev/emuv` qu
 renvoyait en texte les nombres passés en paramètres du module. Aucune ligne n'en
 a été conservée.
 
-## 2. État actuel (19/09/2026, 0.6.14)
+## 2. État actuel (19/09/2026, 0.6.15)
 
-* Version **0.6.14** (`acvram/__init__.py`), `.deb` reconstruit avec `cuda-toolkit[nvcc,cccl]`
+* Version **0.6.15** (`acvram/__init__.py`) : **régime livré = P2** pour les convertis `attn_int8: canal`
+  (`ACVRAM_PREFILL_INT8=cublas` par défaut, 0ccd17c ; six lignes tenues, `revue/poste7-p2-au-defaut-19-09`),
+  GUI en 32 langues, `.deb` avec `cuda-toolkit[nvcc,cccl]==13.0.*` — l'épingle est obligatoire :
+  nvcc 13.4 contre le runtime 13.0 de torch cu130 rend `cuda_toolkit.h:41 #error` (19/09, doctor)
   (sans cccl, le nvcc des roues pip n'a pas `nv/target` : doctor rendait « repli noyaux
   de référence »). ~1 500 tests dont ~150 sur processeur ; les noyaux, les graphes CUDA et
   toute mesure exigent la machine cible (RTX 5090 bridée à 400 W, RTX 3080 Ti à 275 W —
@@ -46,12 +49,11 @@ a été conservée.
   Devant en vitesse partout ; derrière de 6 % en J net à b=12 au régime libre — le **mode
   éco `-lgc 2700`** (E1, 19/09) rend 1 339 t/s · 0,2071 J net : devant en vitesse ET en
   énergie à b=12 ; `-lgc 2100` : 1 138 · 0,1739 (−19 % de J).
-* **P2** (projections q/k/v/o int8 par canal, `torch._int_mm`) : **opt-in
-  `ACVRAM_PREFILL_INT8=cublas`**, prefill 18 850 j/s (+14 %), J/jeton 0,89-0,93 × défaut,
-  équivalence tenue ; **PPL 1,0094 géo** ; décodage b=1 396,0 tenu, **b=12 1 062,6 faux** (−21 %) → régime
-  nommé, pas au défaut (`poste7-p2-dec-c11-c6-19-09`). Le classé Coder lit **déjà** q/k/v/o en
-  int8 g128 : l'i8c ne change que l'échelle (par canal), et à 2 ≤ M ≤ 16 aucun noyau ne la
-  prend (chantier C11). Split-K b=1 : opt-in `ACVRAM_GEMV_SPLITK=1` (PPL +0,0042, non tranché).
+* **P2 au défaut** (projections q/k/v/o int8 par canal, cublas `_int_mm` au prefill,
+  vue g128 `etroit_triton` à 2 ≤ M ≤ 16 — C11, c17ea89) : PPL **1,0094 géo**, prefill 18 850 j/s
+  (+14 %), b=1 396,0, b=12 1 365 t/s · 0,2243 J net, J prefill 0,89-0,93 ×, équivalence tenue
+  (`poste7-p2-au-defaut-19-09`). Un poids inéligible garde la déquant bf16 (jamais W8A8 en
+  silence). Le classé Coder lisait **déjà** q/k/v/o en int8 g128 : l'i8c ne change que l'échelle. Split-K b=1 : opt-in `ACVRAM_GEMV_SPLITK=1` (PPL +0,0042, non tranché).
 * **Spéculation n-gram déjà au défaut à b ≤ 2** (`runner.py:429`, `ACVRAM_SPECULATION_LOT_MAX=2`,
   `GardeSpeculation` conditionnée au lot réel) : taux d'acceptation 1,61 mesuré le 13/09 sur du
   code ; la cellule b=1 ci-dessus le contient. Invariant : jamais un jeton différent du greedy.
@@ -240,8 +242,10 @@ jetons ; la RTX 5090 rend 209,5 TFLOPS bf16 denses (acc. fp32) → plancher 59 m
 et le défaut mesure 124,6 ms = 16 426 : **47 % du plancher** (une première version disait 95 %
 avec 105 TFLOPS : faux d'un facteur 2). Conséquence : **il reste ~2× à prendre au prefill sans
 quantifier les activations** — le poste est le noyau Marlin lui-même (déquantification refaite
-par tuile de M, conçu pour M petit), pas le débit des tensor cores. D'où C2 en tête ; W4A8 (C1)
-vient ensuite, pour le J autant que pour les j/s.
+par tuile de M, conçu pour M petit), pas le débit des tensor cores. Correctif du soir (`poste7-c2-c4-c5-tranches-19-09`) : la déquant transitoire vers un tampon bf16
+en DRAM coûte 50,8 ms/prefill et tue C2 comme produit — **C2 = infrastructure de C1, C1 (W4A8)
+seul chantier prefill**, scellé T_experts ≤ 0,55 × Marlin au budget nsys (`poste7-c1-budget-19-09`).
+**P2 et C11 sont clos : au défaut 0.6.15** (§ 2).
 
 **Chantiers ouverts le 19/09 au soir** (utilisateur : « les chantiers non terminables démarrent
 maintenant »), un fichier `revue/chantier-c<N>-19-09.md` chacun, pointés dans INDEX : C2 prefill
@@ -263,11 +267,14 @@ Par ordre de valeur, chacune avec la mesure qui la rendrait fausse :
    `narrow_gemm`/MMA, après ncu M1/M2 (`verdict-ncu-m1/m2-19-09`). −10 à −20 % J à b=12.
 4. **Spéculation exacte** — MTP de GLM-4.7-Flash (tête livrée), n-gram code (taux 1,61
    mesuré) : b=1 +30 à +60 % t/s sur code ; invariant : jamais un jeton différent du greedy.
-5. **GLM : MLA en FP8 au prefill** (porte fausse-quant à sec d'abord ; l'int8 par canal a
-   réfuté, REGLES § 9). 6. **Godets sur `b`** (prérequis `_bind_hybrid`, MECANISMES).
+5. **GLM : C7 (MLA en FP8) fermé comme levier** — les projections MLA des convertis sont déjà
+   int8 g128/i8c et FP8 ×6 l'erreur ; le poste est le **cœur d'attention en fp32 sans TF32**
+   (8,6 TFLOP/pas ≥ 82 ms/372) → **C13** : C13-a TF32 scoped, C13-b noyau bf16 après nsys GLM
+   (`poste7-c7-clos-c13-attention-glm-19-09`). 6. **Godets sur `b`** : faits depuis le 11/09 ;
+   C4 a corrigé le vrai défaut (`static_bind` store[-1], Mamba2).
 7. **Cache d'experts** (modèles > VRAM : Devstral, 119B — suspendu utilisateur).
 8. **Conversion : GPTQ + Hadamard sur Coder** (1,0155 → 1,010, de la marge pour A8).
-9. **Cache KV int8** (×2 séquences à VRAM égale). 10. **Produit** : `.deb`, lanceurs
+9. **Cache KV int8** : déjà le défaut effectif (`kvcache.py:241`) — C5 ne fait que le nommer (`regime_ligne()`). 10. **Produit** : `.deb`, lanceurs
    refusant sans verrou, `acvram eco`, GUI (32 langues, vedettes), PPL sur le chemin servi.
 
 **Ce qui ne se fera pas** (pour ne pas y revenir) : W4A4 experts (plancher E2M1 ≈ 9 %
