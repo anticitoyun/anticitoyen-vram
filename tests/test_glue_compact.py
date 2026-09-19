@@ -67,6 +67,65 @@ def test_attention_triton_lit_q_par_ses_pas_au_bit():
     assert not torch.equal(a, autre)
 
 
+def _ulp_max(a, b):
+    """Écart max en ulp du dtype 16 bits de la référence a (b comparé)."""
+    a32, b32 = a.float(), b.float()
+    mant = 7 if a.dtype == torch.bfloat16 else 10
+    ulp = torch.where(a32 != 0, 2.0 ** (torch.floor(torch.log2(a32.abs().clamp_min(1e-30))) - mant),
+                      torch.full_like(a32, 2.0 ** -(126 + mant)))
+    return float(((a32 - b32).abs() / ulp).max())
+
+
+@pytest.mark.parametrize("lens", [[37, 0, 300], [1], [2048, 17], [16, 32, 33, 1]])
+def test_attention_un_noyau_egale_deux_noyaux(lens):
+    """Item 4 : `_partiel_reduit_kernel` (réduction par le dernier programme,
+    ordre 0..C−1) contre `_partiel` + `_reduce` : ≤ 1 ulp 16 bits par valeur
+    (seul l'ordre de la somme de `lg` peut différer), fantômes nuls, et les
+    compteurs revenus à zéro après le lancement."""
+    ap = _ap()
+    c, tables, L = _cache([max(n, 1) for n in lens])
+    L = torch.tensor(lens, device=DEV)
+    hkv, n_rep, d = 2, 8, 128
+    dt = torch.bfloat16 if DEV == "cuda" else torch.float16
+    torch.manual_seed(3)
+    q = torch.randn(len(lens), hkv * n_rep, d, device=DEV).to(dt)
+    scale = 1 / math.sqrt(d)
+    deux = ap.paged_attention(q, c.k, c.k_scale, c.v, c.v_scale, tables, L, hkv, scale, compact=False)
+    un = ap.paged_attention(q, c.k, c.k_scale, c.v, c.v_scale, tables, L, hkv, scale, compact=True)
+    assert torch.isfinite(un.float()).all()
+    assert _ulp_max(deux, un) <= 1.0, _ulp_max(deux, un)
+    for b, n in enumerate(lens):
+        if n == 0:
+            assert not un[b].float().any()
+    cnt = ap._COMPTEURS[(len(lens) * hkv, str(q.device))]
+    assert not cnt.any(), cnt
+
+
+def test_attention_un_noyau_le_compteur_porte_la_reduction():
+    """Le bras qui doit casser : un compteur qui ne repart pas de zéro (la
+    faute que l'auto-remise à zéro évite) fait réduire un programme qui n'est
+    pas le dernier — la sortie du groupe est fausse ; remis à zéro, elle
+    redevient celle du témoin."""
+    ap = _ap()
+    c, tables, L = _cache([300, 300])
+    hkv, n_rep, d = 2, 8, 128
+    C, _ = ap._tranches(tables.shape[1], 2, hkv, tables.device)
+    if C < 2:
+        pytest.skip("une seule tranche : pas de réduction à fausser")
+    dt = torch.bfloat16 if DEV == "cuda" else torch.float16
+    q = torch.randn(2, hkv * n_rep, d, device=DEV).to(dt)
+    scale = 1 / math.sqrt(d)
+    ref = ap.paged_attention(q, c.k, c.k_scale, c.v, c.v_scale, tables, L, hkv, scale, compact=False)
+    cnt = ap._compteur(2 * hkv, q.device)
+    cnt[1] = 1                                              # groupe (b=0, hkv=1) : compteur faussé
+    faux = ap.paged_attention(q, c.k, c.k_scale, c.v, c.v_scale, tables, L, hkv, scale, compact=True)
+    assert _ulp_max(ref[0, n_rep:2 * n_rep], faux[0, n_rep:2 * n_rep]) > 1.0
+    assert _ulp_max(ref[1], faux[1]) <= 1.0                 # les autres groupes, intacts
+    cnt.zero_()
+    bon = ap.paged_attention(q, c.k, c.k_scale, c.v, c.v_scale, tables, L, hkv, scale, compact=True)
+    assert _ulp_max(ref, bon) <= 1.0
+
+
 def test_lanceur_ne_recopie_q_que_sous_le_temoin(monkeypatch):
     """kernels.paged_attention : sous GLUE_COMPACT=1 la vue passe telle
     quelle ; sous 0 (témoin) une copie contiguë — les nœuds d'avant."""

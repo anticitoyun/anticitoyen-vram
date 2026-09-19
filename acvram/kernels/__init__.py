@@ -1256,7 +1256,7 @@ def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
             return attn_paginee.paged_attention(
                 qq, cache.k, cache.k_scale, cache.v, cache.v_scale,
                 tables.contiguous(), seq_lens.contiguous(), cache.cfg.num_kv_heads,
-                float(scale), int(window))
+                float(scale), int(window), compact=compact)
     return ext.paged_attention(
         q.contiguous(), cache.k, cache.k_scale,
         cache.v, cache.v_scale, tables.contiguous(),
