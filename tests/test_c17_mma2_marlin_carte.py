@@ -32,7 +32,7 @@ def test_mma2_sur_marlin_egal_au_naturel_hors_echelles_annulees(E, N, K, G):
         pytest.skip("MMA FP4 indisponible")
     dev = torch.device("cuda:0")
     qw, bs, gs = _pile(E, N, K, 3, dev)
-    w_m, s_m, g_m = MP.preparer_pile(qw, bs, gs)
+    w_m, s_m, g_m = MP.preparer_pile(qw, bs.view(torch.float8_e4m3fn), gs)   # preparer_pile lit bs en E4M3 (pas les octets)
     facteur = gs.float()[0].item() * 2.0 ** 119 / g_m[0].item()
     import math
     decal = 15 + int(round(math.log2(facteur)))
@@ -82,27 +82,38 @@ def test_bloc_moe_decode_prend_mma2_sur_marlin(monkeypatch):
     dev = torch.device("cuda:0")
     E, H, I, top_k, T = 8, 256, 128, 2, 12
     bloc = _bloc_moe_jouet(E, H, I, top_k)
-    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "marlin")
-    assert bloc._try_build_stacks() and bloc._stacks_marlin is not None and bloc._stacks["gate_proj"][1] is None
     torch.manual_seed(T)
     x = (torch.randn(T, H, device=dev) * 0.5).to(torch.bfloat16)
     topw, topi = torch.topk(torch.softmax(bloc.router(x).float(), -1), top_k, dim=-1)
     topw = (topw / topw.sum(-1, keepdim=True)).float()
     from acvram.quant.nvfp4 import dequantize_nvfp4 as dq
-    ref = torch.zeros(T, H, device=dev)
+    ref = torch.zeros(T, H, device=dev)                       # AVANT la disposition unique (la pile naturelle est rendue ensuite)
     for t in range(T):
         for j in range(top_k):
             e = int(topi[t, j]); m = bloc.experts[e]
             wg, wu, wd = (dq(getattr(m, n).qweight, torch.float32).to(dev) for n in ("gate_proj", "up_proj", "down_proj"))
             a = torch.nn.functional.silu(x[t].float() @ wg.T) * (x[t].float() @ wu.T)
             ref[t] += topw[t, j] * (a.to(torch.bfloat16).float() @ wd.T)
+    # référence du CHEMIN : le même décodage par la MMA sur la pile naturelle (même A4, même
+    # arithmétique) — la référence fp32 des GEMV (W4A16) ne juge pas un chemin W4A4
+    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "naturel"); monkeypatch.setattr(MD, "_PREFILL_GROUPED", "groupe")
+    assert bloc._try_build_stacks() and bloc._stacks_marlin is None
+    y_nat = bloc._forward_grouped_mma(x, topw, topi.to(torch.int32))
+    assert y_nat is not None
+    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "marlin")
+    bloc._stacks_marlin = bloc._construire_marlin(bloc._stacks, bloc._stacks_awq, bloc._stacks_awq.get("hadamard", {}))
+    assert bloc._stacks_marlin is not None
+    bloc._liberer_pile_naturelle()
+    assert bloc._stacks["gate_proj"][1] is None
     monkeypatch.setattr(MD, "_MOE_DECODE_MMA_MARLIN", False)
     assert bloc._forward_grouped_mma(x, topw, topi.to(torch.int32)) is None       # défaut : pile rendue, None
     monkeypatch.setattr(MD, "_MOE_DECODE_MMA_MARLIN", True)
     y = bloc._forward_grouped_mma(x, topw, topi.to(torch.int32))
     assert y is not None
     attendre_chemin(bloc, "decode_mma_marlin")
-    yb = bloc._forward_grouped(x, topw, topi.to(torch.int32))                     # GEMV Marlin, même disposition
+    egal = (y == y_nat).float().mean().item()
+    ecart = (y.float() - y_nat.float()).abs().amax().item(); amp = y_nat.float().abs().amax().item()
+    assert egal > 0.99 and ecart <= 2 * 2 ** -8 * amp, (egal, ecart, amp)         # au bit hors échelles annulées, ≤ 2 ulp bf16
+    yb = bloc._forward_grouped(x, topw, topi.to(torch.int32))                     # GEMV Marlin (W4A16) sous le juge fp32
     attendre_chemin(bloc, "gemv_marlin")
-    h, hb = _hors_par_ligne(y.float(), ref), _hors_par_ligne(yb.float(), ref)
-    assert h <= TOL_HORS * ref.numel() and hb <= TOL_HORS * ref.numel(), (h, hb)
+    assert _hors_par_ligne(yb.float(), ref) <= TOL_HORS * ref.numel()
