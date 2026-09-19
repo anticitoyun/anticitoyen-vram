@@ -86,9 +86,12 @@ def tuile_par_carte(device) -> tuple:
 RANK_TUILES_MAX = 8        # accumulateurs explicites : rank ≤ 8 × BK = 512 (GLM : 512)
 LOG2E = 1.4426950408889634
 
-# Forme 1 : opérandes fp32, produit IEEE. Les autres entrées sont la forme 2 (réservée).
-_PRECISION = {"fp32": "ieee"}
-_FORME2 = ("tf32", "bf16")
+# Forme 1 : opérandes fp32, produit IEEE — FAUSSE sur sm_120 (verdict-c13c-19-09 : tl.dot fp32 IEEE
+# est émulé, × 26 et 27 ulp du fp64). Forme 2 (poste7-c13c-forme1-faux-forme2-tf32-20-09 § 2) : le
+# MÊME noyau en TF32 (tensor cores), sous la règle des 2 048 clés vues, jugé contre l'einsum TF32
+# qu'il remplace ; « tf32x3 » (3 passes TF32 ≈ fp32) réservé à la sonde § 3. bf16 = F, non écrit.
+_PRECISION = {"fp32": "ieee", "tf32": "tf32", "tf32x3": "tf32x3"}
+_FORME2 = ("bf16",)
 
 
 def disponible() -> bool:
@@ -223,12 +226,12 @@ def attention_mla_causale(q_eff: torch.Tensor, C: torch.Tensor, passe: int, scal
     (bf16 ou fp32, converti en fp32 dans la tuile), ``passe`` = total − t (la
     requête i voit les clés 0..passe+i) → ``o_lat`` [t, nh, rank] fp32.
 
-    ``operandes`` : "fp32" (forme 1, IEEE). "tf32" | "bf16" = forme 2, réservée
-    (signature prête, pas implémentée) : lève NotImplementedError."""
+    ``operandes`` : "fp32" (forme 1, IEEE : émulé sur sm_120, faux), "tf32" (forme 2 : tensor
+    cores TF32, le défaut candidat sous ≤ 2 048 clés), "tf32x3" (sonde § 3). "bf16" : non écrit."""
     if operandes in _FORME2:
-        raise NotImplementedError(f"attention_mla_causale : operandes={operandes!r} = forme 2 de C13-c, non écrite (forme 1 = fp32)")
+        raise NotImplementedError(f"attention_mla_causale : operandes={operandes!r} : bf16 (= bras F) non écrit")
     if operandes not in _PRECISION:
-        raise ValueError(f"attention_mla_causale : operandes={operandes!r} : fp32 | tf32 | bf16")
+        raise ValueError(f"attention_mla_causale : operandes={operandes!r} : fp32 | tf32 | tf32x3 | bf16")
     t, nh, W = q_eff.shape
     total = C.shape[0]
     bm_c, bn_c, w_c, s_c = tuile_par_carte(q_eff.device)

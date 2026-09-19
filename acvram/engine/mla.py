@@ -253,26 +253,34 @@ def _extension():
 
 
 def _flash_prefill(q_eff: torch.Tensor, cache: torch.Tensor, passe: int, scale: float,
-                   rank: int) -> Optional[torch.Tensor]:
-    """C13-c forme 1 : sous MLA_CORE=flash, o_lat [t, nh, rank] fp32 par le noyau Triton
-    causal fusionné (kernels/attn_mla_causal.py), un lancement par couche. None quand le
-    régime n'est pas flash — ou quand le noyau ne peut pas tourner (Triton absent, ni
-    carte ni TRITON_INTERPRET) : le repli fp32 est alors NOMMÉ une fois (`_FLASH_REPLI`,
-    avertissement, ligne de régime `flash(repli fp32: …)`), jamais silencieux."""
+                   rank: int):
+    """C13-c forme 2 (`poste7-c13c-forme1-faux-forme2-tf32-20-09` § 2) : sous `MLA_CORE=flash`, le cœur
+    causal fusionné en **TF32** pour les requêtes qui voient ≤ `_MLA_CORE_MAX_CLES` clés (règle des
+    2 048 clés : la requête i voit passe + i + 1 clés), le reste des requêtes reste au chemin fp32
+    par morceaux. Rend (o_lat [t_flash, nh, rank] fp32, t_flash) — t_flash = 0 quand rien n'est
+    éligible (passe ≥ 2 048) ; None quand le régime n'est pas `flash` ou après un repli nommé
+    (`_FLASH_REPLI`, ligne de régime `mla_core=flash(repli fp32: …)`), jamais silencieux."""
     global _FLASH_REPLI
     if _MLA_CORE != "flash" or _FLASH_REPLI is not None:
         return None
+    t = q_eff.shape[0]
+    t_flash = max(0, min(t, _MLA_CORE_MAX_CLES - passe))
+    if t_flash == 0:
+        return torch.empty(0, q_eff.shape[1], rank, dtype=torch.float32, device=q_eff.device), 0
     try:
         from ..kernels import attn_mla_causal
-        if not attn_mla_causal.disponible():
-            raise RuntimeError("Triton absent ou ni carte ni TRITON_INTERPRET=1")
-        return attn_mla_causal.attention_mla_causale(q_eff.to(torch.float32), cache, passe, scale, rank,
-                                                     operandes="fp32")
-    except Exception as ex:                                  # noqa: BLE001
+        o = attn_mla_causal.attention_mla_causale(q_eff[:t_flash].to(torch.float32).contiguous(),
+                                                  cache[:passe + t_flash], passe, scale, rank,
+                                                  operandes=_FLASH_OPERANDES)
+        return o, t_flash
+    except Exception as ex:                                   # noqa: BLE001
         _FLASH_REPLI = f"{type(ex).__name__}: {ex}"[:120]
-        print(f"[mla] ACVRAM_MLA_CORE=flash : noyau causal indisponible → repli fp32 einsum "
+        print(f"[mla] MLA_CORE=flash : noyau indisponible, repli fp32 par morceaux pour tout le préfill "
               f"({_FLASH_REPLI})", flush=True)
         return None
+
+
+_FLASH_OPERANDES = os.environ.get("ACVRAM_MLA_FLASH_OPERANDES", "tf32")   # tf32 (forme 2) | fp32 (forme 1, faux sur sm_120) | tf32x3 (sonde)
 
 
 class MLAttention(nn.Module):
@@ -473,11 +481,12 @@ class MLAttention(nn.Module):
             # prefill : par tranches de requêtes, sinon les scores
             # [t, nh, total] fp32 pèsent des gigaoctets (2 Go à 4k jetons)
             passe = total - t
-            o_lat = _flash_prefill(q_eff, cache, passe, self.scale, self.rank)   # C13-c : None hors MLA_CORE=flash / repli
+            flash = _flash_prefill(q_eff, cache, passe, self.scale, self.rank)   # C13-c : None hors MLA_CORE=flash / repli
+            o_flash, t_flash = flash if flash is not None else (None, 0)
             pos_k = torch.arange(total, device=x.device)
-            morceaux = []
+            morceaux = [] if o_flash is None or t_flash == 0 else [o_flash]
             C_dt = {}                                  # cache converti par dtype, une fois
-            for d0 in range(0, t, 256) if o_lat is None else ():
+            for d0 in range(t_flash, t, 256):          # les requêtes au-delà de 2 048 clés vues : fp32 par morceaux
                 d1 = min(t, d0 + 256)
                 cles = passe + d1                      # clés VUES par ce morceau (causal) : la règle ≤ 2 048
                 dt = _dt_coeur(cles=cles)
