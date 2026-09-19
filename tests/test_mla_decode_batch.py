@@ -94,7 +94,8 @@ def test_module_batch_bit_identique(B, lens):
         assert torch.equal(a["cache"], b["cache"]) and torch.equal(a["len"], b["len"])
 
 
-@pytest.mark.parametrize("B,lens", [(12, [0, 3, 40, 127, 5, 5, 60, 99, 1, 0, 120, 33]), (4, [10, 0, 0, 0])])
+@pytest.mark.parametrize("B,lens", [(12, [0, 3, 40, 127, 5, 5, 60, 99, 1, 0, 120, 33]), (4, [10, 0, 0, 0]),
+                                    (1, [40])])   # C15 niveau 2 : b=1 par le chemin complet
 def test_module_batch_complet(B, lens):
     """``decode_static_batch_complet`` (projections batchées) : bit-identique à
     ``forward_batch`` (même numérique de lot), et à un ulp bf16 de la boucle

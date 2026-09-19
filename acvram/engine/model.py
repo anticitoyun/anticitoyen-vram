@@ -2243,6 +2243,14 @@ if not _DOUBLE_DIAG and (_GEMV_LAYOUT == "marlin") != (_PREFILL_GROUPED == "marl
 # séquence par séquence) ; 1 = noyau d'attention seul batché ; 0 = boucle.
 _MLA_BATCH = int(os.environ.get("ACVRAM_MLA_BATCH", "2"))
 
+
+def _mla_glue() -> int:
+    """C15 : niveau de glue MLA (engine/mla.py `_MLA_GLUE`, variable
+    ACVRAM_MLA_GLUE) lu au moment de l'appel — le module mla n'est importé que
+    par le chargeur, et un test masque l'attribut sans réimporter."""
+    from . import mla as _mla
+    return _mla._MLA_GLUE
+
 # P0 (poste7-profil-verdict-18-09) : colle du préfill MoE (tri des paires par
 # expert + grille de tuiles) en deux lancements Triton au lieu d'argsort
 # (radix, 8 lancements) + bincount + ~10 lancements de _tuiles ; mêmes
@@ -2435,6 +2443,28 @@ class DecoderLayerGDN(nn.Module):
             return x
         return self._mlp(x)
 
+    def decode_fixed_res(self, x: torch.Tensor, delta: Optional[torch.Tensor],
+                         positions: torch.Tensor, slots: torch.Tensor,
+                         block_tables: torch.Tensor, seq_lens: torch.Tensor,
+                         max_pos: int, cache, q_len: int = 1):
+        """C15 : ``decode_fixed`` à résidu différé pour les couches MLA (le
+        même contrat que ``DecoderLayer.decode_fixed_res``) : la somme
+        résiduelle de la couche précédente est absorbée par la première norme
+        (``add_norm`` = rmsnorm_bf16 avec résidu, acvram_kernels.cu
+        ``rmsnorm_bf16_kernel`` : ``bf16(fp32(res) + fp32(y))`` — l'addition
+        bf16 de torch, au bit), celle de l'attention par la seconde : deux
+        lancements de moins par couche. Pris par ``ACVRamModel._res_differe``
+        sous ACVRAM_MLA_GLUE ≥ 1 seulement."""
+        if delta is None:
+            h = self.input_layernorm(x)
+        else:
+            x, h = add_norm(x, delta, self.input_layernorm)
+        y = self._la_decode(h, q_len).to(x.dtype)
+        if self.mlp is None:
+            return x, y
+        x, h2 = add_norm(x, y, self.post_attention_layernorm)
+        return x, self.mlp(h2)
+
     def _la_decode(self, h: torch.Tensor, q_len: int) -> torch.Tensor:
         """Attention linéaire sur les tampons fixes ; ``q_len`` > 1 (lot de
         vérification spéculative) déroule les jetons un à un et photographie
@@ -2459,6 +2489,15 @@ class DecoderLayerGDN(nn.Module):
                     return la.decode_static_batch(h, self.statics[:b], self.static_bucket, ptrs, scores)
             return torch.cat([un(h[i:i + 1], self.statics[i]) for i in range(b)], dim=0)
         if q_len == 1:
+            if hasattr(la, "rank") and _mla_glue() >= 2:
+                # C15, niveau 2 : à b=1 aussi, la préparation en un noyau
+                # (mla_prep_batch) et l'écriture du latent en un lancement —
+                # la numérique du lot (servie à b=12), pas celle de la boucle
+                ext = kernels.get_extension()
+                if ext is not None and hasattr(ext, "mla_decode_batch"):
+                    ptrs, scores, len_ptrs = self._mla_lot(1)
+                    return la.decode_static_batch_complet(h, self.statics[:1], self.static_bucket,
+                                                          ptrs, scores, len_ptrs)
             return un(h, self.static)
         hist = self.ensure_hist(q_len)
         ys = []
@@ -2955,7 +2994,7 @@ class ACVRamModel(nn.Module):
                     x, delta, positions, slots, block_tables, seq_lens,
                     max_pos, self.caches.get(i), q_len)
             x, h = add_norm(x, delta, self.norm,
-                            self.layers[-1].residual_multiplier)
+                            getattr(self.layers[-1], "residual_multiplier", 1.0))
             if self.mtp is not None:
                 self._garder_hidden(x)
             return self._logits_finaux(self._tete(h))
@@ -3018,9 +3057,19 @@ class ACVRamModel(nn.Module):
         leurs propres enchaînements de normes."""
         v = getattr(self, "_res_ok", None)
         if v is None:
-            v = all(type(l) is DecoderLayer and l.self_attn is not None
-                    and l.mlp is not None and l.mlp_device == l.device
-                    and hasattr(l, "decode_fixed_res") for l in self.layers) \
+            def ordinaire(l) -> bool:
+                return (type(l) is DecoderLayer and l.self_attn is not None
+                        and l.mlp is not None and l.mlp_device == l.device
+                        and hasattr(l, "decode_fixed_res"))
+
+            def mla_glue(l) -> bool:
+                # C15 : couche MLA (GLM, DeepSeek) sous ACVRAM_MLA_GLUE ≥ 1 —
+                # jamais GDN/Mamba ni les blocs parallèles, qui gardent leurs
+                # enchaînements de normes
+                return (type(l) is DecoderLayerGDN and hasattr(l.linear_attn, "rank")
+                        and l.mlp is not None and l.mlp_device == l.device)
+            glue = _mla_glue() >= 1
+            v = all(ordinaire(l) or (glue and mla_glue(l)) for l in self.layers) \
                 and type(self.norm).__name__ == "RMSNorm"
             self._res_ok = v
         return v

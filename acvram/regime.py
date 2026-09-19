@@ -176,6 +176,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MLA_BUCKET", "128", ("acvram.engine.mla", "MLA_BUCKET")),
     Variable("MLA_UNE_PASSE", "1", ("acvram.engine.mla", "_MLA_UNE_PASSE"), "0"),
     Variable("MLA_PREP_NOYAU", "1", ("acvram.engine.mla", "_MLA_PREP_NOYAU"), "0"),
+    Variable("MLA_GLUE", "0", ("acvram.engine.mla", "_MLA_GLUE"), "0",
+             "C15 (chantier-c15-19-09) : 1 = glue torch du décodage MLA b=1 retirée au bit (v_b fp32 une fois, cat kvp, stack RoPE, demi-tables cos/sin, résidu différé add_norm des couches MLA : −6 lancements/couche) | 2 = en plus b=1 par decode_static_batch_complet (mla_prep_batch, numérique du lot, ≤ 1 ulp) | 0 = témoin"),
     Variable("MLA_TF32", "0", ("acvram.engine.mla", "_MLA_TF32"), "0",
              "C13 (poste7-c7-clos-c13-attention-glm-19-09, poste7-glm-decode-budget-c14-c15-19-09) : 1 = TF32 autour des deux einsum du cœur d'attention MLA au préfill (scores, o_lat ; entrées 10 bits de mantisse, acc fp32) | 2 = aussi les einsum v_b·o_lat du décodage (le sgemm fp32 de 1,5 ms/pas à b=12) ; 0 défaut = fp32 plein jusqu'au verdict (PPL ± 0,001, prefill GLM ≥ 6 200)"),
     Variable("MLA_A8", "off", ("acvram.engine.mla", "_MLA_A8"), None,
