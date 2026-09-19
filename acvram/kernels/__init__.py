@@ -941,7 +941,8 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
             from . import gemm_etroit
             if gemm_etroit.disponible() and gemm_etroit.eligible(t):
                 CHEMINS_INT8["etroit_triton"] += 1
-                y = gemm_etroit.gemm_etroit(xf.contiguous(), t, sortie_fp32)[:, : t.shape[0]]
+                y = gemm_etroit.gemm_etroit(xf.contiguous(), t, sortie_fp32,
+                                            compact=glue_compact())[:, : t.shape[0]]
                 return y.reshape(*orig_shape[:-1], t.shape[0])
         if k_pad != xf.shape[-1]:
             xf = torch.nn.functional.pad(xf, (0, k_pad - xf.shape[-1]))
