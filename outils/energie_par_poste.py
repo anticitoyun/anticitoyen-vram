@@ -112,7 +112,7 @@ exiger_regime_nominal(eng, autoriser_piles_inconnues=False)
 res = []
 # Témoins.
 src = torch.empty(1 << 30, dtype=torch.uint8, device=dev); dst = torch.empty_like(src)
-SEUL = os.environ.get("BANC_SEULEMENT")          # "mma" : postes MMA seuls ; "pas" : le pas complet seul
+SEUL = os.environ.get("BANC_SEULEMENT")          # "mma" : postes MMA seuls ; "pas" : le pas complet seul ; "mesure1" : Marlin et mma2 à unité égale
 if SEUL != "pas":
     res.append(mesure("temoin copie DRAM 1 Gio (octets, ~0 instruction)", lambda: dst.copy_(src), lots=4, unite="1 copie de 1 Gio"))
 a = torch.randn(8192, 8192, dtype=torch.bfloat16, device=dev); bm = torch.randn(8192, 8192, dtype=torch.bfloat16, device=dev)
@@ -167,18 +167,18 @@ class Tour:
     def __call__(self):
         self.i += 1; return self.i
 t_gu, t_dn, t_moe, t_qkv, t_o, t_norm, t_mma, t_mmac = (Tour() for _ in range(8))
-if SEUL not in ("mma", "pas"):
+if SEUL not in ("mma", "pas", "mesure1"):
     res.append(mesure("MoE gate·up GEMV (%s)" % ("nvfp4_gemv_marlin_gateup" if MARLIN else "nvfp4_gemv_grouped_gateup"),
                       lambda: gateup_c(t_gu()), lots=48, unite=U_MOE))
     res.append(mesure("MoE down GEMV (%s)" % ("nvfp4_gemv_marlin" if MARLIN else "_grouped down_proj"),
                       lambda: down_c(t_dn()), lots=48, unite=U_MOE))
-if SEUL != "pas":
+if SEUL not in ("pas", "mesure1"):
     res.append(mesure("MoE complet (_forward_grouped : gate·up + down + reduce)",
                       lambda: couches[t_moe() % nc].mlp._forward_grouped(x, topw, topi), lots=48, unite=U_MOE))
 # Le même MoE par le chemin GEMM groupée MMA FP4 (celui du prefill) à t=B jetons :
 # quant_act + gate + up + moe_act + quant_act + down + reduce_trie — étape (iii) de poste7
 # (revue/poste7-moe-mma-decodage-14-09.md). Tuile ACVRAM_MOE_MMA_BT (16 conseillé à M≈3).
-if SEUL != "pas" and not MARLIN and moe._forward_prefill_grouped(x, topw, topi) is not None:
+if SEUL not in ("pas", "mesure1") and not MARLIN and moe._forward_prefill_grouped(x, topw, topi) is not None:
     # (sous la disposition unique Marlin, `_gemm_mma` lirait une pile rendue : section sautée)
     # Les 3 GEMM MMA seules (gate, up, down), tuiles et activations quantifiées une
     # fois : W du noyau sans la glue hôte (argsort, bincount, .item()) qui borne la
@@ -200,7 +200,7 @@ if SEUL != "pas" and not MARLIN and moe._forward_prefill_grouped(x, topw, topi) 
     res.append(mesure("quant_act x2 (E2M1 bloc 16)", lambda: (ext.nvfp4_quant_act(xs), ext.nvfp4_quant_act(a3)), lots=100, unite="2 quantifications, %d lignes" % (B * moe.top_k)))
     res.append(mesure("MoE complet MMA (_forward_prefill_grouped, BT=%s)" % os.environ.get("ACVRAM_MOE_MMA_BT", "64"),
                       lambda: couches[t_mmac() % nc].mlp._forward_prefill_grouped(x, topw, topi), lots=48, unite=U_MOE))
-if SEUL not in ("mma", "pas"):
+if SEUL not in ("mma", "pas", "mesure1"):
     if getattr(attn, "qkv_proj", None) is not None:
         res.append(mesure("projections q/k/v int8 empilées (qkv_proj)", lambda: couches[t_qkv() % nc].self_attn.qkv_proj(x), lots=96, unite=U_COUCHE))
     else:
@@ -210,6 +210,69 @@ if SEUL not in ("mma", "pas"):
     lm = model.lm_head
     res.append(mesure("lm_head int8", lambda: lm(x), lots=50, unite="%d jetons (vocabulaire entier)" % B))
     res.append(mesure("norme RMS (input_layernorm)", lambda: couches[t_norm() % nc].input_layernorm(x), lots=192, unite=U_COUCHE))
+
+# Mesure 1 à unité égale (poste7-nsys-coder-c16-mma2-19-09, addendum 20 h 15) : les deux noyaux
+# du MoE — mma2 (GEMM groupée MMA, chemin du prefill, M=B lignes) et Marlin GEMV — sur la
+# MÊME liste d'experts, à deux unités de distincts par couche (27 = le harnais synthétique
+# de ncu M2, 55 = l'uniforme rabattu), t + W + rapport cyclique par noyau → t et J par octet
+# à octets égaux. Règle de décision (poste7) : mma2 gagne si W_mma2 × t_mma2 ≤ 0,85 × 398 × t_marlin
+# à la même unité. Exige les DEUX dispositions en mémoire : ACVRAM_DOUBLE_DISPOSITION_DIAG=1
+# (régime diagnostic, dit sur la ligne de régime) ; sinon refus nommé.
+if SEUL == "mesure1":
+    if not (marlins[0] is not None and pg[1] is not None):
+        raise SystemExit("mesure1 : il faut les deux dispositions (ACVRAM_DOUBLE_DISPOSITION_DIAG=1) — "
+                         f"marlin={marlins[0] is not None} naturelle={pg[1] is not None}")
+    import torch.nn.functional as F
+    E = len(moe.experts)
+    def liste_experts(u):
+        """B jetons × top_k, exactement u experts distincts (u ≤ B·top_k), chaque jeton
+        8 experts distincts : les u premiers slots reçoivent 0..u-1, les autres rebouclent."""
+        assert moe.top_k <= u <= B * moe.top_k and u <= E
+        g2 = torch.Generator(device="cpu").manual_seed(11)
+        perm = torch.randperm(E, generator=g2)[:u]
+        t = torch.empty(B, moe.top_k, dtype=torch.int64)
+        n = 0
+        for b in range(B):
+            for k in range(moe.top_k):
+                t[b, k] = perm[n % u]; n += 1
+        assert all(len(set(t[b].tolist())) == moe.top_k for b in range(B))
+        assert len(set(t.reshape(-1).tolist())) == u
+        return t.to(dev)
+    unites = [int(v) for v in os.environ.get("BANC_DISTINCTS", "27,55").split(",")]
+    bt = int(os.environ.get("ACVRAM_MOE_MMA_BT", "16"))
+    t_m1 = {k: Tour() for k in ("mgu", "mdn", "mma_gu", "mma_dn")}
+    for u in unites:
+        topi_u = liste_experts(u)
+        eid_u = topi_u.reshape(-1).to(torch.int32)
+        unite = "1 couche MoE, %d jetons x top_k %d = %d lignes, %d experts DISTINCTS (meme liste pour les 4 noyaux)" % (B, moe.top_k, B * moe.top_k, u)
+        # Marlin GEMV (décodage) : gate·up puis down, sur eid_u
+        def m_gu(i, eid_u=eid_u):
+            mg, mu = marlins[i % nc]["gate_proj"], marlins[i % nc]["up_proj"]
+            return ext.nvfp4_gemv_marlin_gateup(mg[0], mg[1], mg[2], mu[0], mu[1], mu[2], eid_u, tok, x, mg[3], mg[4], 0)
+        act_u = m_gu(0)[:, :pg[5]].contiguous()
+        def m_dn(i, eid_u=eid_u, act_u=act_u):
+            md = marlins[i % nc]["down_proj"]
+            return ext.nvfp4_gemv_marlin(md[0], md[1], md[2], eid_u, seq, act_u, md[3], md[4])
+        # mma2 (GEMM groupée MMA FP4, M=B·top_k lignes triées par expert) : gate+up puis down
+        flat_e = topi_u.reshape(-1).to(torch.int64); ordre = torch.argsort(flat_e, stable=True)
+        cnt = torch.bincount(flat_e, minlength=E); tiles = moe._tuiles(cnt, bt)
+        xs = x[torch.arange(B, device=dev).repeat_interleave(moe.top_k)[ordre]].to(torch.bfloat16).contiguous()
+        if xs.shape[1] != pg[4]: xs = F.pad(xs, (0, pg[4] - xs.shape[1])).contiguous()
+        xq, xsf = ext.nvfp4_quant_act(xs)
+        g_ = moe._gemm_mma(pg, xq, xsf, tiles, brut=True); u_ = moe._gemm_mma(pu, xq, xsf, tiles, brut=True)
+        a3 = ext.moe_act(g_, u_, pg[5], pd[4], 0); aq, asf = ext.nvfp4_quant_act(a3)
+        def mma_gu(i, xq=xq, xsf=xsf, tiles=tiles):
+            cpg, cpu_, _ = piles[i % nc]
+            moe._gemm_mma(cpg, xq, xsf, tiles, brut=True); moe._gemm_mma(cpu_, xq, xsf, tiles, brut=True)
+        def mma_dn(i, aq=aq, asf=asf, tiles=tiles):
+            moe._gemm_mma(piles[i % nc][2], aq, asf, tiles, brut=True)
+        nt = int(tiles[0].numel())
+        res.append(mesure("M1 u=%d Marlin gate·up GEMV (nvfp4_gemv_marlin_gateup)" % u, lambda: m_gu(t_m1["mgu"]()), lots=48, unite=unite))
+        res.append(mesure("M1 u=%d Marlin down GEMV (nvfp4_gemv_marlin)" % u, lambda: m_dn(t_m1["mdn"]()), lots=48, unite=unite))
+        res.append(mesure("M1 u=%d mma2 gate+up (2 GEMM groupees MMA, BT=%d, %d tuiles)" % (u, bt, nt), lambda: mma_gu(t_m1["mma_gu"]()), lots=48, unite=unite))
+        res.append(mesure("M1 u=%d mma2 down (GEMM groupee MMA, BT=%d, %d tuiles)" % (u, bt, nt), lambda: mma_dn(t_m1["mma_dn"]()), lots=48, unite=unite))
+    print("RESULTAT " + json.dumps({"B": B, "repos_W": round(repos_w, 1), "mode": "mesure1", "distincts": unites, "postes": res}, ensure_ascii=False))
+    raise SystemExit(0)
 
 def pas_complet():
     # Les séquences finissent (max_model_len) : réadmettre un lot dès que le moteur se
