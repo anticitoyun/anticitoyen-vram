@@ -144,6 +144,16 @@ Choisissez un modèle et une carte : la console s'ouvrira dès que le serveur r�
   <label>port <input type="number" id="port_existant" value="{PORT_DEFAUT}" min="1" max="65535" style="width:90px"></label>
   <p><button onclick="connecter()">se connecter</button></p>
 </div>
+<div class="carte">
+  <h2>convertir un modèle</h2>
+  <p class="note">Lance <code>acvram convert</code> sur un répertoire HF (avec <code>config.json</code>) —
+  pas de suggestion de chemin : le répertoire source doit exister.</p>
+  <label>répertoire source <input type="text" id="conv_source" placeholder="/chemin/vers/le/modele-hf" style="width:100%"></label><br>
+  <label>nom de sortie <input type="text" id="conv_nom" placeholder="(defaut : nom du repertoire)" style="width:60%"></label><br>
+  <label>profil <input type="text" id="conv_profil" placeholder="(optionnel)" style="width:40%"></label><br>
+  <label><input type="checkbox" id="conv_essai"> --dry-run (planifie sans convertir)</label>
+  <p><button onclick="convertir()">convertir</button></p>
+</div>
 <script>
 function lancer(){{
   const m=document.getElementById('modele').value, c=document.getElementById('carte').value;
@@ -155,6 +165,14 @@ function connecter(){{
   const p=document.getElementById('port_existant').value;
   window.webkit.messageHandlers.acvram.postMessage(JSON.stringify({{action:'connecter', port:p}}));
 }}
+function convertir(){{
+  const src=document.getElementById('conv_source').value;
+  if(!src){{return;}}
+  window.webkit.messageHandlers.acvram.postMessage(JSON.stringify({{
+    action:'convertir', source:src, nom:document.getElementById('conv_nom').value,
+    profil:document.getElementById('conv_profil').value,
+    essai:document.getElementById('conv_essai').checked}}));
+}}
 </script></body></html>"""
 
 
@@ -162,6 +180,13 @@ def page_attente(modele: str) -> str:
     return f"""<!doctype html><html><head><meta charset="utf-8"><style>{CSS}</style></head><body>
 <h1>acvram</h1><div class="carte"><h2>chargement de <code>{os.path.basename(modele)}</code>…</h2>
 <p class="note" id="j">le journal du serveur défile ci-dessous</p><pre id="log" style="font-size:11px;color:#c98fae;max-height:60vh;overflow:auto"></pre></div>
+</body></html>"""
+
+
+def page_conversion(source: str) -> str:
+    return f"""<!doctype html><html><head><meta charset="utf-8"><style>{CSS}</style></head><body>
+<h1>acvram</h1><div class="carte"><h2>conversion de <code>{os.path.basename(source.rstrip("/"))}</code>…</h2>
+<p class="note" id="j">le journal de <code>acvram convert</code> défile ci-dessous</p><pre id="log" style="font-size:11px;color:#c98fae;max-height:60vh;overflow:auto"></pre></div>
 </body></html>"""
 
 
@@ -276,6 +301,8 @@ class Fenetre(Gtk.Window):
             self.lancer_serveur(d)
         elif d.get("action") == "connecter":
             self.connecter_existant(d)
+        elif d.get("action") == "convertir":
+            self.lancer_conversion(d)
 
     def connecter_existant(self, d: dict):
         try:
@@ -337,6 +364,42 @@ class Fenetre(Gtk.Window):
             self.ouvrir(PORT_DEFAUT)
             return False
         return True
+
+    def lancer_conversion(self, d: dict):
+        source = d.get("source", "")
+        if not os.path.isdir(source):
+            self.web.load_html(page_accueil(
+                f"répertoire source introuvable : {source}"), "file:///")
+            return
+        cmd = ["acvram", "convert", source]
+        if d.get("nom"):
+            cmd += ["--name", d["nom"]]
+        if d.get("profil"):
+            cmd += ["--profile", d["profil"]]
+        if d.get("essai"):
+            cmd += ["--dry-run"]
+        self.web.load_html(page_conversion(source), "file:///")
+        try:
+            self.proc = subprocess.Popen(cmd, env=dict(os.environ), stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT, text=True,
+                                         start_new_session=True)
+        except OSError as e:
+            self.web.load_html(page_accueil(f"impossible de lancer acvram convert : {e}"), "file:///")
+            return
+        threading.Thread(target=self.suivre_journal, daemon=True).start()
+        GLib.timeout_add_seconds(2, self.attendre_conversion)
+
+    def attendre_conversion(self) -> bool:
+        if self.proc is None or self.proc.poll() is None:
+            return True
+        code = self.proc.returncode
+        self.proc = None
+        if code == 0:
+            self.web.load_html(page_accueil("conversion terminée — voir models_acvram."), "file:///")
+        else:
+            self.web.load_html(page_accueil(
+                f"acvram convert a échoué (code {code}) — voir le journal ci-dessus."), "file:///")
+        return False
 
     def arreter_serveur(self, *_):
         if self.proc and self.proc.poll() is None:
