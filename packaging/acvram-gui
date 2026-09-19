@@ -43,6 +43,27 @@ PARC = os.environ.get("ACVRAM_PARC", os.path.expanduser("~/Modeles/models_acvram
 PARCS_CONNUS = [PARC, "/mnt/4TO_SATACMR_2022/Modeles/models_acvram",
                 os.path.expanduser("~/models_acvram")]
 PORT_DEFAUT = int(os.environ.get("ACVRAM_PORT", "8765"))
+SOUTIEN_URL = "https://buymeacoffee.com/anticitoyen"
+
+
+def version_acvram() -> str:
+    """Version du paquet : le module s'il est importable (venv, .deb), sinon le
+    pyproject.toml du dépôt à côté du script, sinon « ? » — jamais devinée."""
+    try:
+        from acvram import __version__
+        return __version__
+    except Exception:
+        pass
+    import re
+    for cand in (os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])), "..", "pyproject.toml"),
+                 "/usr/share/acvram/pyproject.toml"):
+        try:
+            m = re.search(r'^version\s*=\s*"([^"]+)"', open(cand, encoding="utf-8").read(), re.M)
+            if m:
+                return m.group(1)
+        except OSError:
+            continue
+    return "?"
 
 # Le thème de la page, repris pour les écrans natifs (accueil, erreurs) afin
 # que rien ne détonne : mêmes nuances, même police.
@@ -154,6 +175,7 @@ Choisissez un modèle et une carte : la console s'ouvrira dès que le serveur r�
   <label><input type="checkbox" id="conv_essai"> --dry-run (planifie sans convertir)</label>
   <p><button onclick="convertir()">convertir</button></p>
 </div>
+<p class="note" style="margin-top:28px">acvram {version_acvram()} · <a href="{SOUTIEN_URL}" target="_blank" style="color:var(--rose-clair)">Soutenir le projet</a></p>
 <script>
 function lancer(){{
   const m=document.getElementById('modele').value, c=document.getElementById('carte').value;
@@ -239,7 +261,16 @@ class Fenetre(Gtk.Window):
         self.etat = Gtk.Label(xalign=0)
         self.etat.set_margin_start(10); self.etat.set_margin_end(10)
         self.etat.set_margin_top(3); self.etat.set_margin_bottom(3)
-        boite.pack_start(self.etat, False, False, 0)
+        pied = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        pied.pack_start(self.etat, True, True, 0)
+        version = Gtk.Label(xalign=1)
+        version.set_markup(f'<span size="small" foreground="#c98fae">acvram {version_acvram()}</span>')
+        pied.pack_end(version, False, False, 4)
+        soutien = Gtk.LinkButton.new_with_label(SOUTIEN_URL, "Soutenir")
+        soutien.set_tooltip_text(SOUTIEN_URL)
+        soutien.set_relief(Gtk.ReliefStyle.NONE)
+        pied.pack_end(soutien, False, False, 0)
+        boite.pack_start(pied, False, False, 0)
 
         self.connect("key-press-event", self.touche)
         self.connect("destroy", self.fermer)
@@ -268,9 +299,19 @@ class Fenetre(Gtk.Window):
     def zoom(self, d: float):
         self.web.set_zoom_level(max(0.5, min(3.0, self.web.get_zoom_level() + d)))
 
-    def nouvelle_fenetre(self, web_view, _navigation_action):
+    def nouvelle_fenetre(self, web_view, navigation_action):
         """Fournit la fenetre qu'une navigation target="_blank" (ou
-        window.open) demande — sans ca WebKitGTK n'ouvre rien du tout."""
+        window.open) demande — sans ca WebKitGTK n'ouvre rien du tout.
+        Une adresse externe (le lien de soutien) part dans le navigateur
+        du systeme : une page publique n'a rien a faire dans la console."""
+        try:
+            uri = navigation_action.get_request().get_uri()
+        except Exception:
+            uri = ""
+        if uri.startswith("http") and "127.0.0.1" not in uri and "localhost" not in uri:
+            from gi.repository import Gdk
+            Gtk.show_uri_on_window(self, uri, Gdk.CURRENT_TIME)
+            return None
         nouvelle = WebKit2.WebView.new_with_related_view(web_view)
         fenetre = Gtk.Window(title="acvram")
         fenetre.set_default_size(1100, 800)
