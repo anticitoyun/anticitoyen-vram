@@ -84,7 +84,7 @@ def regime_coeur_texte() -> str:
         try:                                                  # la tuile est nommée : elle dépend de la carte
             from ..kernels.attn_mla_causal import tuile_par_carte
             bm, bn, w, st = tuile_par_carte("cuda:0" if torch.cuda.is_available() else "cpu")
-            return f"mla_core=flash(fp32,{bm}x{bn}w{w}s{st})"
+            return f"mla_core=flash({_FLASH_OPERANDES},{bm}x{bn}w{w}s{st})"
         except Exception:                                     # noqa: BLE001
             return "mla_core=flash(fp32)"
     return f"mla_core={_MLA_CORE}(≤{_MLA_CORE_MAX_CLES} clés)"
@@ -269,6 +269,8 @@ def _flash_prefill(q_eff: torch.Tensor, cache: torch.Tensor, passe: int, scale: 
         return torch.empty(0, q_eff.shape[1], rank, dtype=torch.float32, device=q_eff.device), 0
     try:
         from ..kernels import attn_mla_causal
+        if not attn_mla_causal.disponible():
+            raise RuntimeError("Triton absent ou carte sans noyau flash")
         o = attn_mla_causal.attention_mla_causale(q_eff[:t_flash].to(torch.float32).contiguous(),
                                                   cache[:passe + t_flash], passe, scale, rank,
                                                   operandes=_FLASH_OPERANDES)
@@ -499,8 +501,7 @@ class MLAttention(nn.Module):
                 sc = sc.masked_fill(pos_k > pos_q.unsqueeze(1), float('-inf'))
                 with _tf32_coeur(cles=cles):
                     morceaux.append(torch.einsum('ths,sr->thr', sc.softmax(dim=-1).to(dt), V32))
-            if o_lat is None:
-                o_lat = torch.cat(morceaux)
+            o_lat = torch.cat(morceaux) if len(morceaux) != 1 else morceaux[0]
             dtv = _dt_coeur(vb=True, cles=total)
             with _tf32_coeur(vb=True, cles=total):  # 3e produit du cœur au préfill (8ae21997, opt-in MLA_CORE_VB)
                 y = torch.einsum('hvr,thr->thv', self.v_b.to(dtv), o_lat.to(dtv))

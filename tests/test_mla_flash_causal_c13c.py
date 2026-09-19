@@ -210,10 +210,10 @@ def test_forme_1_fp32_plein_et_forme_2_reservee():
     assert k._PRECISION["fp32"] == "ieee" and k._PRECISION.get("tf32") == "tf32"     # forme 2 : tf32 (poste2 f2dec8cf : 0,92 x cuBLAS tf32)
     dots = re.findall(r"tl\.dot\(([^\n]*)\)", src)
     assert len(dots) == 9 and all("input_precision=PRECISION" in d for d in dots), dots
-    assert "allow_tf32=True" not in src and 'input_precision="tf32"' not in src
-    assert '_FORME2 = ("tf32", "bf16")' in src and 'input_precision="tf32"' not in src
+    assert "allow_tf32=True" not in src                                    # la précision passe par input_precision, jamais par le drapeau global
+    assert '_FORME2 = ("bf16",)' in src                                   # forme 2 = tf32 ecrite ; bf16 (F) non
     q, C, scale = _montage(128, 0)
-    for op in ("tf32", "bf16"):
+    for op in ("bf16",):                                               # tf32 = forme 2 écrite
         with pytest.raises(NotImplementedError):
             k.attention_mla_causale(q, C, 0, scale, 64, operandes=op)
     with pytest.raises(ValueError):
@@ -233,8 +233,8 @@ def test_regime_flash_dans_la_table_et_la_ligne(monkeypatch):
     monkeypatch.setattr(M_mla, "_FLASH_REPLI", None)
     monkeypatch.setattr(M_mla, "_MLA_CORE_VB", False)
     monkeypatch.setattr(M_mla, "_MLA_CORE_DECODE", "fp32")
-    assert M_mla.regime_coeur_texte().startswith("mla_core=flash(fp32")     # la tuile est nommée derrière
-    assert "mla_core=flash(fp32" in regime.regime_ligne()
+    assert M_mla.regime_coeur_texte().startswith("mla_core=flash(")     # la tuile est nommée derrière
+    assert "mla_core=flash(" in regime.regime_ligne()
     assert M_mla._regime_coeur(cles=8192) == "flash" and M_mla._dt_coeur(cles=8192) is torch.float32
     assert M_mla._regime_coeur(vb=True, cles=2047) == "fp32" and M_mla._regime_coeur(decode=True) == "fp32"
     with M_mla._tf32_coeur(cles=256) as c:
@@ -291,6 +291,7 @@ def test_mla_forward_prefill_flash_egal_fp32(monkeypatch):
     assert [o is None for o, *_ in o_lats["fp32"]] == [True, True]              # fp32 : jamais le noyau
     assert [o is not None for o, *_ in o_lats["flash"]] == [True, True] and M_mla._FLASH_REPLI is None
     o, q_eff, cache, passe = o_lats["flash"][1]
+    o = o[0] if isinstance(o, tuple) else o                                # forme 2 : (o_lat[:t_flash], t_flash)
     assert passe == 100 and o.shape == (200, NH, RANK)
     assert _juge(o, _reference(q_eff.float(), cache, passe, mod.scale, RANK), _fp64(q_eff.float(), cache, passe, mod.scale, RANK))[0]
     y32, y16 = sorties["fp32"][0].float(), sorties["flash"][0].float()
