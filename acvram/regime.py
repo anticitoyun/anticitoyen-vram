@@ -129,6 +129,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MLA_BUCKET", "128", ("acvram.engine.mla", "MLA_BUCKET")),
     Variable("MLA_UNE_PASSE", "1", ("acvram.engine.mla", "_MLA_UNE_PASSE"), "0"),
     Variable("MLA_PREP_NOYAU", "1", ("acvram.engine.mla", "_MLA_PREP_NOYAU"), "0"),
+    Variable("MLA_A8", "off", ("acvram.engine.mla", "_MLA_A8"), None,
+             "porte qualité FP8-MLA (poste7-cloture-23h59-19-09) : fausse quantification torch de l'ENTRÉE de q_b, kv_a et o — off | e4m3 (E4M3 bloc 16, format de la MMA mxf8f6f4) | int8 (par jeton, témoin) ; aucun noyau"),
     Variable("MLA_LATENT_FP8", "0", ("acvram.engine.mla", "_MLA_LATENT_FP8"), "0"),
     Variable("KV_LM4_SEUL", "", None, None, "diagnostic lm4 (kvcache.write) : lm4 sur k ou v seulement, int8 ailleurs"),
     Variable("KV_LM4_PUITS", "", None, None, "diagnostic lm4 : positions < N gardées int8 ; 0 = contrôle (lm4 partout par le diagnostic)"),

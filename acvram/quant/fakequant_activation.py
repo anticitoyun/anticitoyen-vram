@@ -30,7 +30,23 @@ from .nvfp4 import BLOCK, dequantize_nvfp4, quantize_nvfp4
 __all__ = [
     "fake_quantize_nvfp4_activation",
     "fake_quantize_e4m3_activation",
+    "fake_quantize_a8",
 ]
+
+
+def fake_quantize_a8(x: torch.Tensor, fmt: str = "int8") -> torch.Tensor:
+    """Porte W4A8 / FP8-MLA (19/09) : ``int8`` = par jeton, amax/127, arrondi
+    à demi éloigné de zéro (`quantifier_a8_torch`, au bit du noyau
+    `_quant_a8_kernel` des chemins a8/cublas) ; ``e4m3`` = E4M3 par bloc de 16
+    (`fake_quantize_e4m3_activation`, le format d'activation de la MMA
+    mxf8f6f4). Sortie dans le dtype et la forme de x. Torch pur."""
+    if fmt == "e4m3":
+        return fake_quantize_e4m3_activation(x)
+    if fmt != "int8":
+        raise ValueError(f"fake_quantize_a8 : format {fmt!r}, attendu int8 | e4m3")
+    from ..kernels.gemm_w8a8 import quantifier_a8_torch
+    a, s = quantifier_a8_torch(x)
+    return (a.to(torch.float32) * s[:, None]).view(x.shape).to(x.dtype)
 
 
 def fake_quantize_nvfp4_activation(x: torch.Tensor, block: int = BLOCK) -> torch.Tensor:

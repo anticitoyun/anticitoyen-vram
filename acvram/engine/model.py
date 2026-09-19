@@ -2031,18 +2031,11 @@ _E2M1_MILIEUX = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
 
 
 def fausse_quant_a8(x: torch.Tensor, fmt: str = "int8") -> torch.Tensor:
-    """x [G, K] → x arrondi comme le ferait un GEMM W4A8 : `int8` = par jeton,
-    échelle amax/127 et arrondi à demi éloigné de zéro (`quantifier_a8_torch`,
-    au bit du noyau `_quant_a8_kernel`) ; `e4m3` = E4M3 par bloc de 16
-    (`fake_quantize_e4m3_activation`). Sortie dans le dtype de x. Torch pur."""
-    if fmt == "e4m3":
-        from ..quant.fakequant_activation import fake_quantize_e4m3_activation
-        return fake_quantize_e4m3_activation(x)
-    if fmt != "int8":
-        raise ValueError(f"fausse_quant_a8 : format {fmt!r}, attendu int8 | e4m3")
-    from ..kernels.gemm_w8a8 import quantifier_a8_torch
-    a, s = quantifier_a8_torch(x)
-    return (a.to(torch.float32) * s[:, None]).view(x.shape).to(x.dtype)
+    """x [G, K] → x arrondi comme le ferait un GEMM W4A8 (`int8` par jeton au
+    bit du noyau a8, ou `e4m3` bloc 16) — `quant.fakequant_activation.
+    fake_quantize_a8`, partagée avec la porte FP8-MLA (engine/mla.py)."""
+    from ..quant.fakequant_activation import fake_quantize_a8
+    return fake_quantize_a8(x, fmt)
 
 
 def fausse_quant_nvfp4(x: torch.Tensor) -> torch.Tensor:
