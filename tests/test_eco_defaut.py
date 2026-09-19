@@ -220,22 +220,32 @@ def test_verrouillee_oisive_au_chargement_et_verrou_exterieur_sous_off(isole, mo
     assert e["conforme"] and _eco_texte(e) == "eco=2700(2692)" and lu["n"] >= 2
 
 
-def test_lecture_sous_charge_attend_la_stabilite(isole):
-    """Carte froide (poste2, main b820901b) : 225 → 1 980 → 2 977 → 2 985 ; une lecture
-    unique dirait 225 ou 1 980 (sous la bande, ou « non pris ») — on lit jusqu'à deux
-    lectures consécutives à ± 30 MHz (plafond 2 s) ; verrouillée : 225 → 2 692 → 2 692."""
+def test_lecture_sous_charge_attend_un_regime(isole):
+    """Carte froide (poste2, verdict-verif-eco-defaut addendum 21 h 08) : deux lectures
+    égales sur un palier de montée (1 102) ne sont pas un régime. Stable = après ≥ 0,8 s
+    de charge, deux lectures à ± 30 et ≥ 1 000 ; ou, cible demandée, deux lectures dans
+    sa bande (arrivée sur la consigne). Séquences de chef : [1102, 1102, 2692, 2692…]
+    → 2692 ; [870×4, 487×4, 2872, 2872…] → libre."""
     def lecteur(seq):
-        it = iter(seq)
+        it = iter(list(seq) + [seq[-1]] * 40)                        # la dernière valeur tient
         return lambda index=0, sous_charge=False, **kw: _LIRE_ORIG(index, f"{next(it)}, 3135, Not Active", sous_charge=sous_charge)
-    h = eco.lire_sous_charge(0, lecteur([225, 1980, 2977, 2985, 2985]), charge=_RIEN, attente=0.005)
-    assert h["lectures"] == [225, 1980, 2977, 2985] and h["stable"] and eco.etiquette_horloge(h) == "libre"
-    h = eco.lire_sous_charge(0, lecteur([225, 2692, 2692, 2692]), charge=_RIEN, attente=0.005)
-    assert h["lectures"] == [225, 2692, 2692] and eco.etiquette_horloge(h) == "lgc2700?"     # posé hors processus
-    # une Horloge posée par ce processus, lue pendant la montée : conforme au bout, pas « non pris »
-    hz = eco.Horloge("2700", 0, executer=_Faux(), lire=lecteur([225, 225, 1980, 2655, 2692, 2692, 2692]), charge=_RIEN)
+    # cible demandée (serveur verrouillé, carte froide) : les 1 102 n'arrêtent pas, 2 692 ×2 oui
+    h = eco.lire_sous_charge(0, lecteur([1102, 1102, 2692, 2692]), charge=_RIEN, attente=0.05, cible=2700)
+    assert h["lectures"] == [1102, 1102, 2692, 2692] and h["stable"] and h["sm_mhz"] == 2692
+    # libre, montée lente : rien n'est cru avant 0,8 s, puis 2 872 ×2
+    h = eco.lire_sous_charge(0, lecteur([870] * 4 + [487] * 4 + [2872, 2872]), charge=_RIEN, attente=0.05)
+    assert h["stable"] and h["sm_mhz"] == 2872 and eco.etiquette_horloge(h) == "libre"
+    # libre, palier de montée à 1 102 tenu deux lectures AVANT 0,8 s : pas cru
+    h = eco.lire_sous_charge(0, lecteur([225, 1102, 1102, 1980, 2977, 2985]), charge=_RIEN, attente=0.05)
+    assert h["stable"] and h["sm_mhz"] == 2985 and eco.etiquette_horloge(h) == "libre"
+    # verrouillée hors processus, sans cible : 2 692 tenu après le minimum
+    h = eco.lire_sous_charge(0, lecteur([225, 1102, 1102, 2692]), charge=_RIEN, attente=0.05)
+    assert h["stable"] and eco.etiquette_horloge(h) == "lgc2700?"
+    # une Horloge posée par ce processus, lue pendant la montée : « effectif », pas « non pris »
+    hz = eco.Horloge("2700", 0, executer=_Faux(), lire=lecteur([225, 225, 1102, 1102, 1980, 2655, 2692]), charge=_RIEN)
     assert hz.poser() == "effectif" and hz.effectif == "2692"
     # jamais stable dans le plafond : dit, effectif = dernière lecture
-    lent = iter(range(300, 4000, 100))
+    lent = iter(range(300, 9000, 100))
     h = eco.lire_sous_charge(0, lambda index=0, sous_charge=False, **kw: _LIRE_ORIG(index, f"{next(lent)}, 3135, Not Active", sous_charge=sous_charge),
-                             charge=_RIEN, attente=0.05, plafond=0.3)
+                             charge=_RIEN, attente=0.05, plafond=0.3, minimum=0.1)
     assert h["stable"] is False and len(h["lectures"]) >= 4
