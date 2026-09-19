@@ -451,7 +451,7 @@ class Engine:
                                                if not enable_cuda_graphs else None)
         if enable_cuda_graphs:
             from .graphs import GraphRunner
-            gr = GraphRunner(self.model, max_model_len)
+            gr = GraphRunner(self.model, max_model_len, max_batch_size=self.max_batch_size)
             self.graphs = gr if gr.enabled else None
             if not gr.enabled:
                 self._graphes_raison = gr.raison or "raison non nommée"
@@ -563,6 +563,7 @@ class Engine:
             # la ligne disait `graphes=on` sur des bras entièrement en eager
             # (poste7-kv-lm4-clos-17-09 § 1)
             "graphes": self.graphs is not None and bool(self.graphs.enabled),
+            "slots_hybrides": getattr(self.graphs, "max_slots", None) if self.graphs is not None else None,
             "graphes_demandes": self._graphes_demandes,
             "graphes_raison": (self._graphes_raison if self.graphs is None
                                else (None if self.graphs.enabled
@@ -612,7 +613,9 @@ class Engine:
             # 15/09 sur un GLM converti --format bf16, pris pour un bogue).
             piles_txt += " (" + " ; ".join(r["piles_raison"]) + ")"
         kv_seqs = getattr(self.loaded.plan, "kv_planned_seqs", 0) or "?"
-        return (f"régime {etat} — graphes={'on' if r['graphes'] else 'off'} "
+        slots = r.get("slots_hybrides")
+        return (f"régime {etat} — graphes={'on' if r['graphes'] else 'off'}"
+                f"{'' if slots is None else f'(hybrides≤{slots})'} "
                f"couches_exilées={r['couches_exilees']}/{r['couches_total']} "
                f"experts_exilés={r['experts_exiles']}/{r['experts_total']} "
                f"{piles_txt} cartes={r['cartes']} "

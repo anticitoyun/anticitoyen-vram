@@ -36,6 +36,32 @@ _MLA_UNE_PASSE = os.environ.get("ACVRAM_MLA_UNE_PASSE", "1") == "1"
 # ENTRÉES de q_b, kv_a et o (les trois projections que garde bf16 la règle « jamais NVFP4
 # sur MLA », REGLES § 9) arrondies en E4M3 bloc 16 (ou int8 par jeton, témoin) avant la
 # projection, torch pur ; aucun noyau : la perte qu'un GEMM FP8 imposerait, pas sa vitesse.
+# ACVRAM_MLA_TF32=1 (C13-a, poste7-c7-clos-c13-attention-glm-19-09) : TF32 à PORTÉE LIMITÉE
+# autour des deux einsum du cœur d'attention (scores q·C et o_lat = probs·V), entrées
+# fp32 arrondies à 10 bits de mantisse par les tensor cores (> bf16), accumulation fp32
+# — le cœur fp32 sans TF32 = 8,6 TFLOP/pas ≥ 82 ms des 372 ms de GLM. Défaut 0 jusqu'au
+# verdict (PPL ± 0,001, prefill ≥ 6 200) ; rien d'autre ne change de précision.
+_MLA_TF32 = os.environ.get("ACVRAM_MLA_TF32", "0")
+if _MLA_TF32 not in ("0", "1"):
+    raise ValueError(f"ACVRAM_MLA_TF32={_MLA_TF32!r} : 0 | 1")
+
+
+class _tf32_coeur:
+    """Contexte : TF32 pour les matmuls fp32 pendant le bloc, drapeau restauré
+    après — la portée est le cœur d'attention, pas le processus."""
+    def __enter__(self):
+        self._actif = _MLA_TF32 == "1" and torch.cuda.is_available()
+        if self._actif:
+            self._avant = torch.backends.cuda.matmul.allow_tf32
+            torch.backends.cuda.matmul.allow_tf32 = True
+        return self
+
+    def __exit__(self, *exc):
+        if self._actif:
+            torch.backends.cuda.matmul.allow_tf32 = self._avant
+        return False
+
+
 _MLA_A8 = os.environ.get("ACVRAM_MLA_A8", "off")
 if _MLA_A8 not in ("off", "e4m3", "int8"):
     raise ValueError(f"ACVRAM_MLA_A8={_MLA_A8!r} : off | e4m3 | int8")
@@ -314,22 +340,26 @@ class MLAttention(nn.Module):
             morceaux = []
             for d0 in range(0, t, 256):
                 d1 = min(t, d0 + 256)
-                sc = torch.einsum('thr,sr->ths', q_eff[d0:d1].to(torch.float32),
-                                  C32) * self.scale
+                with _tf32_coeur():
+                    sc = torch.einsum('thr,sr->ths', q_eff[d0:d1].to(torch.float32),
+                                      C32) * self.scale
                 pos_q = torch.arange(d0, d1, device=x.device).unsqueeze(-1) + passe
                 sc = sc.masked_fill(pos_k > pos_q.unsqueeze(1), float('-inf'))
-                morceaux.append(torch.einsum('ths,sr->thr', sc.softmax(dim=-1), V32))
+                with _tf32_coeur():
+                    morceaux.append(torch.einsum('ths,sr->thr', sc.softmax(dim=-1), V32))
             o_lat = torch.cat(morceaux)
             y = torch.einsum('hvr,thr->thv', self.v_b.to(torch.float32), o_lat)
             y = y.reshape(t, self.nh * self.dv).to(x.dtype)
             return self._o(y), cache
-        scores = torch.einsum('thr,sr->ths', q_eff.to(torch.float32),
-                              C.to(torch.float32)) * self.scale
+        with _tf32_coeur():
+            scores = torch.einsum('thr,sr->ths', q_eff.to(torch.float32),
+                                  C.to(torch.float32)) * self.scale
         scores = scores.masked_fill(masque, float('-inf'))
         probs = scores.softmax(dim=-1)
 
-        o_lat = torch.einsum('ths,sr->thr', probs,
-                             C[:, :self.rank].to(torch.float32))
+        with _tf32_coeur():
+            o_lat = torch.einsum('ths,sr->thr', probs,
+                                 C[:, :self.rank].to(torch.float32))
         y = torch.einsum('hvr,thr->thv', self.v_b.to(torch.float32), o_lat)
         y = y.reshape(t, self.nh * self.dv).to(x.dtype)
         return self._o(y), cache
