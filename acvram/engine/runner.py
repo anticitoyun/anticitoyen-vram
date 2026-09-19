@@ -347,8 +347,10 @@ def _couverture_experts(model) -> str:
 
 
 def _etat_eco() -> dict:
+    """Relecture SOUS CHARGE à chaque `regime()` : le moteur est chargé, la carte
+    répond ; au chargement seul (carte verrouillée oisive) l'effectif lirait 225."""
     from .. import eco
-    return eco.etat_eco()
+    return eco.etat_eco(relire=True)
 
 
 def _eco_texte(e: dict) -> str:

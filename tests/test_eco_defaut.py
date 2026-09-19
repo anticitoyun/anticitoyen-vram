@@ -33,10 +33,18 @@ class _Faux:
 
 
 _LIRE_ORIG = eco.lire_horloge
+_RIEN = lambda: None                                   # pas de charge CUDA à sec
 
 
-def _lire_fixe(sm):
-    return lambda index=0, **kw: _LIRE_ORIG(index, f"{sm}, 3135, Not Active", etat={"mode": "2700"} if sm > 1000 else {})
+def _lire_fixe(sm, sm_repos=None):
+    """Horloge lue : `sm` sous charge, `sm_repos` (défaut : 225) au repos — une carte
+    verrouillée oisive lit 225, c'est la lecture sous charge qui compte."""
+    repos = 225 if sm_repos is None else sm_repos
+
+    def lire(index=0, sous_charge=False, **kw):
+        v = sm if sous_charge else repos
+        return _LIRE_ORIG(index, f"{v}, 3135, {'Not Active' if sous_charge else 'Active'}", sous_charge=sous_charge)
+    return lire
 
 
 @pytest.fixture
@@ -68,7 +76,9 @@ def test_lecture_par_etat_pose_et_clocks_sm(isole):
     assert h["verrou"] is False and "≠" in eco.etiquette_horloge(h)
     # sans état : libre ; carte oisive à haute horloge = verrou posé ailleurs, incertain
     assert eco.etiquette_horloge(eco.lire_horloge(0, "225, 3135, Active", etat={})) == "libre"
-    assert eco.etiquette_horloge(eco.lire_horloge(0, "2692, 3135, Active", etat={})) == "lgc2692?"
+    assert eco.etiquette_horloge(eco.lire_horloge(0, "2692, 3135, Not Active", etat={})) == "libre"          # au repos : rien de concluant
+    assert eco.etiquette_horloge(eco.lire_horloge(0, "2692, 3135, Not Active", etat={}, sous_charge=True)) == "lgc2700?"
+    assert eco.etiquette_horloge(eco.lire_horloge(0, "3030, 3135, Not Active", etat={}, sous_charge=True)) == "libre"
     # l'état posé vient du fichier quand `etat` n'est pas donné
     eco._ecrire_etat(0, "2700")
     assert eco.lire_horloge(0, "2692, 3135, Not Active")["verrou"] is True
@@ -79,7 +89,7 @@ def test_lecture_par_etat_pose_et_clocks_sm(isole):
 
 def test_pose_rendu_idempotent_et_etat_fichier(isole):
     faux = _Faux()
-    h = eco.Horloge("2700", 0, executer=faux, lire=_lire_fixe(2692))
+    h = eco.Horloge("2700", 0, executer=faux, lire=_lire_fixe(2692), charge=_RIEN)
     assert h.poser() == "effectif" and h.conforme and h.etiquette() == "eco=2700(2692)"
     assert faux.appels == [["sudo", "-n", "nvidia-smi", "-i", "0", "-lgc", "2700,2700"]]
     assert json.load(open(eco.ETAT_ECO.format(index=0)))["mode"] == "2700"
@@ -90,13 +100,13 @@ def test_pose_rendu_idempotent_et_etat_fichier(isole):
 
 def test_refus_sudo_est_un_etat_nomme_sans_rgc(isole, capsys):
     faux = _Faux(rc={"-lgc": 1})
-    h = eco.Horloge("2700", 0, executer=faux, lire=_lire_fixe(225))
+    h = eco.Horloge("2700", 0, executer=faux, lire=_lire_fixe(3030), charge=_RIEN)
     assert h.poser() == "refus sudo" and not h.posee and not h.conforme
-    assert h.etiquette() == "eco=2700(libre: refus sudo)"
+    assert h.etiquette() == "eco=2700(3030: refus sudo)"        # l'horloge lue sous charge, libre au boost
     assert "refus" in capsys.readouterr().err
     assert h.rendre() is False and all("-rgc" not in a for a in faux.appels)   # rien à rendre
-    h2 = eco.Horloge("off", 0, executer=faux, lire=_lire_fixe(225))
-    assert h2.poser() == "libre" and h2.conforme and h2.etiquette() == "eco=off(libre)"
+    h2 = eco.Horloge("off", 0, executer=faux, lire=_lire_fixe(3030), charge=_RIEN)
+    assert h2.poser() == "libre" and h2.conforme and h2.etiquette() == "eco=off(3030)"
 
 
 def test_engine_fermer_rend_l_horloge_et_la_ligne_de_regime_la_nomme(isole, monkeypatch):
@@ -104,7 +114,7 @@ def test_engine_fermer_rend_l_horloge_et_la_ligne_de_regime_la_nomme(isole, monk
     from acvram import regime
     faux = _Faux()
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
-    h = eco.poser_pour_ce_processus(index=0, executer=faux, lire=_lire_fixe(2692))
+    h = eco.poser_pour_ce_processus(index=0, executer=faux, lire=_lire_fixe(2692), charge=_RIEN)
     assert h.posee and eco.poser_pour_ce_processus() is h              # une fois par processus
     e = eco.etat_eco()
     assert e["conforme"] and _eco_texte(e) == "eco=2700(2692)"
@@ -113,8 +123,8 @@ def test_engine_fermer_rend_l_horloge_et_la_ligne_de_regime_la_nomme(isole, monk
     assert faux.appels[-1][-1] == "-rgc", "Engine.fermer ne rend plus l'horloge"
     # non conforme : l'étiquette nomme l'état, l'instrument refuse
     faux2 = _Faux(rc={"-lgc": 1}); monkeypatch.setattr(eco, "_HORLOGE", None)
-    eco.poser_pour_ce_processus(index=0, executer=faux2, lire=_lire_fixe(225))
-    assert _eco_texte(eco.etat_eco()) == "eco=2700(libre: refus sudo)"
+    eco.poser_pour_ce_processus(index=0, executer=faux2, lire=_lire_fixe(3030), charge=_RIEN)
+    assert _eco_texte(eco.etat_eco()) == "eco=2700(3030: refus sudo)"
     sys.path.insert(0, str(RACINE / "outils"))
     import importlib; reg = importlib.import_module("regime")
     r = {"graphes": True, "graphes_demandes": True, "couches_exilees": 0, "experts_exiles": 0,
@@ -167,7 +177,7 @@ def test_acvram_eco_ecrit_la_config_et_off_rend_sous_un_serveur(isole, monkeypat
     appels = []
     monkeypatch.setattr(eco.subprocess, "run", lambda cmd, **kw: (appels.append(list(cmd)),
                         types.SimpleNamespace(returncode=0, stdout="", stderr=""))[1])
-    monkeypatch.setattr(eco, "lire_horloge", _lire_fixe(2692))
+    monkeypatch.setattr(eco, "lire_horloge", _lire_fixe(2692)); monkeypatch.setattr(eco, "_charge_cuda", _RIEN)
     eco._ecrire_etat(0, "2700")
     assert cli.cmd_eco(argparse.Namespace(mode="2100", carte=0)) == 0
     assert eco.mode_demande({}) == "2100" and appels == []             # différé : pas de -lgc sous un pair
@@ -178,3 +188,33 @@ def test_acvram_eco_ecrit_la_config_et_off_rend_sous_un_serveur(isole, monkeypat
     monkeypatch.setattr(eco, "_tenue_par_un_pair", lambda index: None)
     assert cli.cmd_eco(argparse.Namespace(mode="2700", carte=0)) == 0 # carte libre : appliqué
     assert appels[-1][-2:] == ["-lgc", "2700,2700"] and eco.mode_demande({}) == "2700"
+
+
+def test_verrouillee_oisive_au_chargement_et_verrou_exterieur_sous_off(isole, monkeypatch):
+    """Les deux bras faux de verdict-verif-eco-defaut-19-09 (poste2 16ea8b0) :
+    (1) au chargement la carte verrouillée est OISIVE (225 MHz) — l'effectif se lit
+    sous charge (2 692) : conforme, pas « non pris » ; (2) `-lgc 2700` posé à la main
+    puis `ACVRAM_ECO=off` : sous charge la carte reste à 2 692 au lieu du boost —
+    état nommé « verrou 2700 posé hors processus », jamais `eco=off(libre)`."""
+    from acvram.engine.runner import _eco_texte
+    faux = _Faux()
+    h = eco.Horloge("2700", 0, executer=faux, lire=_lire_fixe(2692, sm_repos=225), charge=_RIEN)
+    assert h.poser() == "effectif" and h.etiquette() == "eco=2700(2692)"
+    assert h.relire(sous_charge=False) == "225"                         # ce que la carte oisive dit
+    assert h.relire() == "2692" and h.conforme                          # ce qui compte
+    h.rendre(); n = len(faux.appels)
+    h2 = eco.Horloge("off", 0, executer=faux, lire=_lire_fixe(2655, sm_repos=870), charge=_RIEN)
+    assert h2.poser() == "verrou 2700 posé hors processus" and not h2.conforme
+    assert h2.etiquette() == "eco=off(2655: verrou 2700 posé hors processus)"
+    assert h2.rendre() is False and len(faux.appels) == n                # on ne rend pas ce qu'on n'a pas posé
+    h3 = eco.Horloge("off", 0, executer=faux, lire=_lire_fixe(3030, sm_repos=225), charge=_RIEN)
+    assert h3.poser() == "libre" and h3.conforme and h3.etiquette() == "eco=off(3030)"
+    # etat_eco(relire=True) : ce que Engine.regime() fait après le chargement
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0"); monkeypatch.setattr(eco, "_HORLOGE", None)
+    lu = {"n": 0}
+    def lire(index=0, sous_charge=False, **kw):
+        lu["n"] += 1
+        return _LIRE_ORIG(index, "2692, 3135, Not Active" if sous_charge else "225, 3135, Active", sous_charge=sous_charge)
+    eco.poser_pour_ce_processus(index=0, executer=_Faux(), lire=lire, charge=_RIEN)
+    e = eco.etat_eco(relire=True)
+    assert e["conforme"] and _eco_texte(e) == "eco=2700(2692)" and lu["n"] >= 2
