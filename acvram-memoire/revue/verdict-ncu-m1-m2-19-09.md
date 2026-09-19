@@ -9,3 +9,13 @@ verdict : (1) sous P1 les GEMV Marlin sont au **plafond de puissance** (398 W) c
 
 ## Non vérifié
 * Rapport cyclique des boucles M1 (à ajouter à `energie_par_poste`) ; W de mma2 ; les 7 dernières couches du pas (plafond 1 200 lancements) — ramenées par proportion, non mesurées.
+
+## Réconciliation (poste7, 19/09 soir) — « 45 × 48 × 2,65 Mo » contre 3,49 Go mesurés
+
+Les deux chiffres ne décrivent pas la même chose : **45 était une estimation écrite dans la lecture du scellé, jamais mesurée** ; 3,49 Go est la somme `dram__bytes_read` des 144 lancements `mma2` (3 par couche : gate, up, down ; 41 couches profilées × 48/41). 45 × 48 × 2,655 Mo = **5,73 Go**, soit 64 % de plus que le mesuré — l'estimation est fausse, pas la mesure.
+
+Ce que les octets disent : un expert Coder = gate + up + down = 3 × (2 048 × 768 × ½ o + 98 304 o d'échelles E4M3 par bloc de 16) = 3 × 884 736 o = **2,654 Mo** (le `mlp_bytes / E` de `poste7-cache-experts-13-09`, retrouvé par les formes) ; `mma2` lit l'expert entier dès qu'une ligne le vise (tuile BT=16 sur les lignes, jamais sur K ni N) ; chaud/froid = 0,99 → toutes les lectures sont obligatoires, rien n'est servi par le L2. Donc **3,49 Go / (48 × 2,654 Mo) = 27,4 experts distincts par couche et par pas** (activations de 12 lignes × 2 048 × ½ o négligeables : 0,04 %). Cohérent avec `poste7-moe-mma-decodage-14-09` (« ≈ 30 experts », 3,8 Go = 30 × 48 × 2,65) et avec le budget Marlin de `poste7-lecture-profils-coder-17-09` ramené à 27 : 27 × 48 × 2,654 = 3,44 Go, 1,9 ms à 1,79 To/s pour le seul MoE.
+
+Pourquoi 27 et pas 45-68 (128 experts, 96 tirages uniformes donneraient 67,6 distincts) : le harnais M2 est `banc_decodage_moe.py:49` — 12 séquences d'identifiants arithmétiques `(1000 + 7919·rep + 101·b + 13·i) mod 150 000`, pas du texte ; le routage sur ce bruit se concentre sur peu d'experts, et les 12 séquences se ressemblent (même pas 13, décalage 101). Le chiffre 27,4 vaut **pour ce harnais** ; sur du texte réel (tranches privées), les distincts par pas sont ceux de la trace C9-M1 (`rapport_m1`, `distincts_par_pas`), à lire sur la carte — non fait à sec.
+
+Contrôle qui peut rendre faux (à la prochaine fenêtre carte, 2 min) : `ACVRAM_TRACE_ROUTAGE=1` sur le même harnais synthétique b=12, `distincts_par_pas()` médiane par couche ; **attendu 27 ± 3** ; hors de cette bande, ce sont les octets ncu ou le motif de lecture de `mma2` (expert entier par tuile) qui sont faux, et la ligne « 0,15 inst/octet, DRAM-bornée » tombe avec eux.
