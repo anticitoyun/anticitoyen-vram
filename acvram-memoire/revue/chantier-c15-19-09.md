@@ -74,3 +74,8 @@ Arbre = celui qui contient la chaîne (cette branche fusionnée main) ; `outils/
 2. **(b) 256 pas greedy**, invite = 256 premiers jetons de `corpus-prefixe-glm/prive-tr0.txt`, graphes ON, `jetons-glue{0,1,2}.json` : **`=1` identiques à `=0` exigés** (divergence = bogue, retirer) ; `=2` informatif (q_abs ≤ 1 ulp : des jetons peuvent bouger, c'est la PPL qui juge).
 3. **(c) PPL de décodage** `ppl-decode-kv-17-09.py` GLM corpus préfixé, 8 192 + 512 notés, `=0` contre `=2` : **± 0,001 (géo sur 3 tranches)** — à 1 tranche c'est indicatif (résolution ~± 0,005), dit par le script.
 4. ms/pas (`RESULTAT ms_par_pas` de decode-nsys, sous nsys : ordre de grandeur seulement ; le scellé −0,8 ms se prend hors nsys, ABAB, chaîne harnais à écrire si (a) tient). Réfutation poste7 : < 0,5 ms gagnée pour 18 noyaux → le coût n'est pas le lancement, arrêter.
+
+
+## Juges par niveau (poste7 `poste7-c15-niveaux-20-09`) — chaîne corrigée (ce commit)
+* `=1` (au bit à sec) : **jetons identiques 256 pas** contre `=0`, compte nsys ≤ 2 200, capture 5/5, pas b=1 GLM ≤ défaut − 0,3 ms, Coder b=12 ≤ défaut − 0,2 ms → défaut à la fusion.
+* `=2` (noyaux fusionnés, ordre de somme différent) : **pas les jetons** — `logits.py` : teacher forcing sur la suite de `=1` (invite 256 + ses 256 jetons, `jetons-glue1.json`), logits bf16 de chaque pas écrits (`logits-glue<n>.pt`), écart max par pas en ulp bf16 de la référence, **scellé ≤ 1 ulp bf16 par pas** (TENU/FAUX imprimé, `logits-glue2-vs-glue1.json`) ; + `ppl-decode-kv` `=0` contre `=2` ± 0,002 (partie (c)) ; capture 5/5 ; pas b=1 GLM ≤ `=1` − 0,5 ms → défaut.
