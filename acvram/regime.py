@@ -78,6 +78,49 @@ VARIABLES: tuple[Variable, ...] = (
              "P1 disposition UNIQUE (forme (b)), DÉFAUT depuis l'adoption du 18/09 : marlin = pile Marlin seule (préfill GEMM classe Marlin ET GEMV du décodage relisant les tuiles 16 k × 64 n ; la pile NVFP4 est rendue après le repack, experts_layout=marlin ; va avec PREFILL_GROUPED=marlin, sinon refus à l import ; scellé ≤ 0,97 × GEMV à b=1 et b=12, fp32 par ligne) | naturel = pile NVFP4 seule (témoin, avec PREFILL_GROUPED=groupe ; b=1 366 t/s contre 351 en marlin)"),
     Variable("MARLIN_DISTINCT", "0", ("acvram.engine.model", "_MARLIN_DISTINCT"), "0",
              "C10 : 1 = la disposition unique Marlin sert aussi les MoE à gate/up distincts (tables AWQ séparées : GLM k48-calibA) — décodage par le GEMV Marlin à une projection, gate puis up ; 0 défaut = refus nommé, pile naturelle gardée, chemin d'avant (verdict-glm-b12-19-09) ; scellé GLM b=12 ≥ chemin d'avant × 1,05"),
+    # --- capacités, plafonds, modes du moteur (19/09 : sortis de HORS_REGIME, poste7) ---
+    Variable("HYBRID_SLOTS", "", None, None,
+             "plafond des créneaux hybrides (GDN/KDA/Mamba2/MLA) par graphe ; vide = le --max-batch du moteur (≥ 4, graphs.py plafond_hybride) ; posé = valeur fixe (l'ancien défaut 4 mettait GLM en eager dès b=5)"),
+    Variable("DENSE_SLOTS", "4", None, None, "créneaux denses par graphe"),
+    Variable("WARM_SPEC", "1", None, None, "chauffe des graphes spéculatifs"),
+    Variable("PLAN_FIGE", "", None, None, "1 = le plan de placement ne se recalcule pas"),
+    Variable("SANS_REPLAN", "", None, None, "1 = pas de replanification au chargement"),
+    Variable("SANS_PRECHARGE", "", None, None, "1 = pas de préchargement des couches exilées"),
+    Variable("POOL_SYNC", "", None, None, "1 = pool d'experts synchrone"),
+    Variable("PIPELINE", "", None, None, "1 = lot préparé pendant le rejeu (runner)"),
+    Variable("PREFILL_BATCH", "", None, None, "prefills groupés"),
+    Variable("SPECULATION_LOT_MAX", "2", None, None, "lot maximal sous spéculation"),
+    Variable("MTP", "", None, None, "tête MTP (auto | none | mtp)"),
+    Variable("DEQUANT_TRANCHE_MAX", "268435456", None, None, "pic (octets) d'une tranche de déquantification"),
+    Variable("DENSE_ETROIT_BN", "64", None, None, "tuile N du GEMM dense étroit Triton"),
+    Variable("DENSE_ETROIT_BK", "128", None, None, "tuile K du GEMM dense étroit Triton"),
+    Variable("DENSE_ETROIT_WARPS", "4", None, None, "warps du GEMM dense étroit Triton"),
+    Variable("DENSE_ETROIT_STAGES", "3", None, None, "étages du GEMM dense étroit Triton"),
+    Variable("INSTA_PAS", "256", None, None, "pas entre deux relevés instantanés"),
+    Variable("GRAPHES_TABLE", "", None, None, "graphes sur les piles à table (placement par expert)"),
+    Variable("MLP_HOTE_CPU", "", None, None, "1 = MLP exilé calculé sur le processeur"),
+    Variable("KDA_CHUNK", "1", None, None, "taille de bloc KDA"),
+    Variable("MAMBA_CHUNK", "1", None, None, "taille de bloc Mamba2"),
+    Variable("ALLOC_EXTENSIBLE", "", None, None, "1 = allocateur CUDA à segments extensibles"),
+    Variable("BUDGET_JETONS", "0", None, None, "budget de jetons du prefill (0 = illimité)"),
+    Variable("EXIL_COUCHES", "", None, None, "couches exilées forcées"),
+    Variable("EXIL_EXPERTS_FRACTION", "", None, None, "fraction d'experts exilés forcée"),
+    Variable("SEUIL_EXIL", "0.20", None, None, "seuil d'exil du planificateur"),
+    Variable("REPIN", "64", None, None, "période (pas) du ré-épinglage des experts"),
+    Variable("MAX_GRAPHS", "16", None, None, "graphes CUDA gardés (éviction au-delà)"),
+    Variable("INSTA_MAX", "3", None, None, "relevés instantanés gardés"),
+    Variable("KV_PLAN_OVERRIDE", "", None, None, "budget KV forcé (plan)"),
+    Variable("LISTE_CLE", "", None, None, "clé de la liste de promotion"),
+    Variable("LISTE_PROMUS", "", None, None, "tenseurs promus en int8 forcés"),
+    Variable("MAX_PROMUS", "0", None, None, "plafond de tenseurs promus (0 = illimité)"),
+    Variable("ORDRE_SAC", "snr", None, None, "ordre du sac à dos de placement (snr | …)"),
+    Variable("ORDRE_SAC_INVERSE", "", None, None, "1 = sac à dos inversé"),
+    Variable("PAGED_ALLOC", "", None, None, "allocateur paginé"),
+    Variable("PA_CHUNK", "", None, None, "bloc de l'attention paginée"),
+    Variable("PA_ETAPE", "", None, None, "étape de l'attention paginée"),
+    Variable("PA_SANS_COMPTEUR", "", None, None, "attention paginée sans compteur"),
+    Variable("INT8_GEMV_WARP", "", None, None, "warps du GEMV int8 (lu dans le .cu)"),
+    Variable("INT8_TRANCHE", "", None, None, "découpage du GEMV int8 (12 = ancien, témoin ; lu dans le .cu)"),
     Variable("DOUBLE_DISPOSITION_DIAG", "0", None, "0",
              "diagnostic seulement (bissection du biais GEMV (b), poste7-p1-situ-verdict-18-09) : 1 = les deux dispositions gardées, préfill {groupe|marlin} × décodage {naturel|marlin} sur les mêmes piles ; jamais un régime servi"),
     Variable("MOE_GEMV", "v1", ("acvram.engine.model", "_MOE_GEMV"), "v1",
@@ -160,34 +203,39 @@ VARIABLES: tuple[Variable, ...] = (
 # Variables ACVRAM_* qui ne choisissent PAS un chemin de calcul : le test
 # `test_regime_noyaux.py` exige que toute autre variable lue soit dans VARIABLES.
 HORS_REGIME = frozenset({
-    "ACVRAM_MODELS_DIR", "ACVRAM_TRACEBACK", "ACVRAM_VERBOSE_BUILD",
+    # (19/09, poste7) : ici SEULEMENT ce qui observe, compile ou nomme un chemin de fichier —
+    # jamais une capacité, un plafond, un mode : ceux-là vont dans VARIABLES (HYBRID_SLOTS y
+    # manquait : le régime servi de GLM — eager dès b=5 — était invisible dans regime_ligne).
+    # tests/test_regime_noyaux.py::test_hors_regime_ne_cache_aucun_regime le garde.
+    "ACVRAM_MODELS_DIR", "ACVRAM_TRACEBACK", "ACVRAM_VERBOSE_BUILD", "ACVRAM_WARM_GRAPHS",
+    "ACVRAM_GRAPHES_MUETS", "ACVRAM_REGIME_MUET", "ACVRAM_MARLIN_CACHE",          # journaux et cache : observation
     "ACVRAM_TRACE_CRENEAUX", "ACVRAM_TRACE_ENTREES", "ACVRAM_TRACE_PTRS",
     "ACVRAM_TRACE_ROUTAGE", "ACVRAM_TRACE_ROUTAGE_PT", "ACVRAM_TRACE_STEPS", "ACVRAM_TRACE_COUCHES", "ACVRAM_CHRONO_SYNC", "ACVRAM_SYNC_COUCHES",
-    "ACVRAM_WARM_GRAPHS", "ACVRAM_WARM_SPEC", "ACVRAM_PLAN_FIGE", "ACVRAM_SANS_REPLAN",
-    "ACVRAM_SANS_PRECHARGE", "ACVRAM_POOL_SYNC", "ACVRAM_PIPELINE", "ACVRAM_PREFILL_BATCH", "ACVRAM_PPL_TRANCHE",
-    "ACVRAM_SPECULATION_LOT_MAX", "ACVRAM_MTP", "ACVRAM_HYBRID_SLOTS", "ACVRAM_DENSE_SLOTS", "ACVRAM_DEQUANT_TRANCHE_MAX",
-    "ACVRAM_DENSE_ETROIT_BN", "ACVRAM_DENSE_ETROIT_BK", "ACVRAM_DENSE_ETROIT_WARPS", "ACVRAM_DENSE_ETROIT_STAGES", "ACVRAM_INSTA_PAS",
-    "ACVRAM_GRAPHES_TABLE", "ACVRAM_MLP_HOTE_CPU", "ACVRAM_KDA_CHUNK", "ACVRAM_MAMBA_CHUNK",
+    
+    "ACVRAM_PPL_TRANCHE",
+    
+    
+    
     # compilation, placement, parc, mémoire : pas des chemins de calcul
-    "ACVRAM_ALLOC_EXTENSIBLE", "ACVRAM_ARCH_FAMILY", "ACVRAM_CUDA_HOME", "ACVRAM_GW_WARPS",
-    "ACVRAM_KERNEL_CACHE", "ACVRAM_BANC_ACCEPTE_REPLAN", "ACVRAM_BUDGET_JETONS",
-    "ACVRAM_EXIL_COUCHES", "ACVRAM_EXIL_EXPERTS_FRACTION", "ACVRAM_SEUIL_EXIL", "ACVRAM_REPIN",
+    "ACVRAM_ARCH_FAMILY", "ACVRAM_CUDA_HOME", "ACVRAM_GW_WARPS",
+    "ACVRAM_KERNEL_CACHE", "ACVRAM_BANC_ACCEPTE_REPLAN", 
+    
     "ACVRAM_FOND_COOL", "ACVRAM_FOND_ZEN", "ACVRAM_GALERIE_DIR", "ACVRAM_MODELES", "ACVRAM_PARC",
     "ACVRAM_VERROU_GLOB",   # test seul (ajout GUI n°1) : chemin du glob, pas un chemin de calcul
-    "ACVRAM_LISTE_CLE", "ACVRAM_LISTE_PROMUS", "ACVRAM_MAX_PROMUS", "ACVRAM_ORDRE_SAC",
-    "ACVRAM_ORDRE_SAC_INVERSE", "ACVRAM_GRAPHES_MUETS", "ACVRAM_MAX_GRAPHS", "ACVRAM_INSTA_MAX",
-    "ACVRAM_REGIME_MUET",
+    
+    
+    
     "ACVRAM_DUMP_MOE",   # dossier de recopie des tampons MoE (diagnostic a2711bc) : n'aiguille aucun calcul
     # garde-fou d'admission, pas un chemin de calcul (poste7-reprise-ordre-18-09
     # §Suite) : Engine.__init__ refuse max_batch_size > plan.kv_planned_seqs,
     # ce flag force le lancement en connaissance de cause. Visible dans
     # regime_ligne() par kv_plan_override=1 quand posé, pas ici.
-    "ACVRAM_KV_PLAN_OVERRIDE",
+    
     # lues dans acvram_kernels.cu (getenv) : témoins A/B et réglages d'instrument,
     # jamais mesurés comme défaut — à monter dans VARIABLES le jour où l'un l'est
-    "ACVRAM_INT8_GEMV_WARP", "ACVRAM_INT8_TRANCHE", "ACVRAM_PA_CHUNK", "ACVRAM_PA_ETAPE",
-    "ACVRAM_PAGED_ALLOC", "ACVRAM_PA_SANS_COMPTEUR",
-    "ACVRAM_MARLIN_CACHE",       # dossier de compilation du port Marlin (P1), pas un chemin de calcul
+    
+    
+          # dossier de compilation du port Marlin (P1), pas un chemin de calcul
     # exportée par outils/carte.sh à ce qu'il lance (son PID) : eco.py s'en sert
     # pour ne pas refuser sa propre prise de la carte ; n'aiguille aucun calcul
     "ACVRAM_CARTE_TENUE",

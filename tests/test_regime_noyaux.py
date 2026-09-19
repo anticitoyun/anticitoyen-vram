@@ -128,3 +128,23 @@ def test_masquer_disable_kernels_apres_import_eteint_l_extension(monkeypatch, ma
     assert kernels.get_extension() is None and kernels._ERROR
     r = regime.regime_noyaux()
     assert r["extension"] is False and r["hors_defaut"]["ACVRAM_DISABLE_KERNELS"] == "1"
+
+
+def test_hors_regime_ne_cache_aucun_regime():
+    """poste7 19/09 : HORS_REGIME ne contient que ce qui observe, compile ou
+    nomme un fichier — jamais une capacité, un plafond ou un mode (HYBRID_SLOTS
+    y était : le régime servi de GLM, eager dès b=5, était invisible dans
+    regime_ligne). Un nom hors de ces familles casse le test."""
+    familles = ("TRACE_", "VERBOSE", "TRACEBACK", "MODELS_DIR", "MODELES", "PARC", "GALERIE", "FOND_",
+                "CHRONO", "SYNC_", "KERNEL_CACHE", "CUDA_HOME", "ARCH_FAMILY", "GW_WARPS", "TESTS_",
+                "CARTE_", "PPL_TRANCHE", "QA_", "WARM_GRAPHS", "BANC_", "SESSION", "VERROU", "DUMP_",
+                "TETE_FP32_ENTREE", "MOE_DECODE_MASQUES", "DISABLE_", "TYPE", "ARBRE", "PROFIL", "LOG",
+                "CHARGE_OK", "ECO_", "SERVEUR", "PORT", "CACHE_PREFIXE", "HOTE", "MUET", "MARLIN_CACHE")
+    hors = []
+    for nom in regime.HORS_REGIME:
+        court = nom[len("ACVRAM_"):]
+        if not any(f in court for f in familles):
+            hors.append(nom)
+    assert not hors, f"variables de régime cachées dans HORS_REGIME : {sorted(hors)}"
+    for v in ("ACVRAM_HYBRID_SLOTS", "ACVRAM_DENSE_SLOTS", "ACVRAM_MTP", "ACVRAM_PIPELINE"):
+        assert v in {x.env for x in regime.VARIABLES}
