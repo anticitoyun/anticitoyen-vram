@@ -12,11 +12,7 @@ Assemblé par chef, critère 6 points `poste7-plan-completion-comparatif-17-09`.
 
 | moteur / régime | PPL privé | PPL public | b=1 t/s | b=1 J | b=12 t/s | b=12 J | prefill j/s | classé | source |
 |---|---|---|---|---|---|---|---|---|---|
-<<<<<<< HEAD
-| acvram W4A16 (nvfp4, bf16 prefill, **défaut P1 18/09** : GEMV_LAYOUT=marlin + PREFILL_GROUPED=marlin) | 1,0155 géo (Δ+0,0007 vs 302025e) | 1,0099 | **351** | — | **1 239** | **0,303** | **15 987** | oui | verdict-p1-situ-complet-18-09;verdict-juge-stat-b-18-09;poste7-p1-situ-verdict-18-09 |
-=======
-| acvram W4A16 (nvfp4, bf16 prefill) P1 | 1,0155 géo | 1,0099 | **350,9** | **0,856** | **1 239** | **0,303** | **15 987** | oui | verdict-p1-situ-complet-18-09 |
->>>>>>> poste8
+| acvram W4A16 (nvfp4, bf16 prefill, **défaut P1 18/09** : GEMV_LAYOUT=marlin + PREFILL_GROUPED=marlin) | 1,0155 géo (Δ+0,0007 vs 302025e) | 1,0099 | **350,9** | **0,856** | **1 239** | **0,303** | **15 987** | oui | verdict-p1-situ-complet-18-09;verdict-juge-stat-b-18-09;poste7-p1-situ-verdict-18-09 |
 | EXL3 4,25 bpw (exllamav3, TabbyAPI) | 1,0006 | 1,0004 | 168,0 | 1,546 | 855,7 | 0,362 | 10 656 | oui | verdict-coder-exl3-vitesses-17-09 |
 | llama.cpp Q4_K_M | 1,0103 | 1,0146 | 344,0 | 1,151 | 971–1 066 | 0,278–0,306 | 15 717 | oui | verdict-harnais-egal-coder-18-09-b;verdict-llamacpp-coder-16-09 |
 | vLLM W4A16 Marlin (ModelOpt communautaire) | 1,1227 | 1,0876 | 302,9 | — | 2 031,4 | 0,197 | 20 988 | non | verdict-coder-vllm-17-09 |
@@ -25,18 +21,14 @@ Assemblé par chef, critère 6 points `poste7-plan-completion-comparatif-17-09`.
 
 **Statut vLLM/TRT-LLM Coder : ModelOpt propre = refus accepté**, deux blocages fichier:ligne indépendants et documentés (`unified_export_hf.py:419-422` Qwen3MoeExperts non supporté transformers 5 ; `nvfp4_tensor.py:84` déport CPU/GPU casse le calcul NVFP4 sous transformers 4, modèle > 32 Gio VRAM). Cellule remplie par le checkpoint communautaire (1,16-1,30), non classée — scellé du protocole réfuté : le checkpoint porte ~12 % de la perte, les activations 4 bits ~3 %, Marlin bat CUTLASS en décodage.
 
-<<<<<<< HEAD
 **Revendication Coder (mise à jour 18/09, P1 adopté — `verdict-p1-situ-complet-18-09`, `poste7-p1-situ-verdict-18-09` §6)** : comparaison contre la PLUS HAUTE passe llama.cpp (1 065,7 t/s · 0,278 J brut), pas leur moyenne. Prefill : 15 987 contre 15 717 j/s — parité de peu (+1,7%), l'ancien retrait de « −37% » est daté et retiré. b=12 : 1 239 t/s contre 1 065,7 (+16% t/s), mais 0,303 J brut contre 0,278 — encore derrière de 9% (« J sous llama.cpp » ne s'écrit pas). b=1 : 351 t/s contre 344 à 1 024 (+2%), coût du régime P1 adopté (−1,2% vs ancien défaut acvram 366,4 — poste ouvert chez poste4, banc 0,909× mais in situ 0,988×, manque hors noyau). Qualité : PPL prefill géo 1,0155 (Δ+0,0007 vs 302025e, tenu). vLLM/TRT-LLM non comparables sur le privé (checkpoint non classé). Ancienne revendication harnais-égal (18/09, avant P1) retirée — comparait un régime pré-P1.
-=======
-**Revendication Coder P1 (18/09 situ complet, `verdict-p1-situ-complet-18-09`)** : acvram devant à b=1 légèrement au harnais égal (CUDA_VISIBLE_DEVICES=0, SSE 256+1024). b=1 : 350,9 t/s · 0,856 J brut contre llama.cpp 344,0 · 1,151 J (+1,9% t/s, −25,7% J brut). b=12 : 1 239 t/s · 0,303 J brut contre llama.cpp 971–1 066 · 0,278–0,306 (+21,6% t/s, +8,5–9% J brut — énergie acvram supérieure à llama.cpp). Qualité P1 privée 1,0155 (décodage jugé équivalent au grain). Plages llama.cpp 3 passes stables (±4,7%). Poste b=12 énergie inversé vs P0 (1 126–1 147 · 0,342–0,347) : réoptimisation GEMV_LAYOUT=marlin perd ~0,04 J/T en décodage. Ancienne revendication (P0, «llama.cpp +19%») retirée. vLLM/TRT-LLM non comparables (checkpoint non classé).
->>>>>>> poste8
 
 ## Table GLM-4.7-Flash (poids GadflyII, sauf mention)
 
 | moteur / régime | PPL privé | PPL public | b=12 t/s | b=12 J | prefill j/s | classé |
 |---|---|---|---|---|---|---|
 | acvram W4A16 bf16 prefill (`-vllm-direct`) | 1,0096 | — | — | — | — | oui |
-| acvram W4A16 bf16 prefill (`-k48-calibA`) P1 | 1,0120 | 1,0281 | — | — | **5 502** | oui |
+| acvram W4A16 bf16 prefill (`-k48-calibA`) P1 | 1,0120 (mesuré, B0 rejoué 1,0150 ; gain non revendiqué avant cause nommée — `poste7-p1-situ-verdict-18-09`) | 1,0281 | — | — | **5 502** | oui |
 | vLLM Marlin W4A16 | 1,0164 | 1,0133 | 858 | 0,397 | 18 117 | oui |
 | llama.cpp Q4_K_M (unsloth, imatrix) | 1,0248 | 1,0397 | 702 | 0,495 | 11 293 | non (> 1,02) |
 | vLLM W4A4 (défaut) | 1,0717 | 1,0751 | 796 | 0,445 | 26 732 | non |
