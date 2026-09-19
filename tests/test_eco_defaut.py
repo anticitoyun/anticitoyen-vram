@@ -218,3 +218,24 @@ def test_verrouillee_oisive_au_chargement_et_verrou_exterieur_sous_off(isole, mo
     eco.poser_pour_ce_processus(index=0, executer=_Faux(), lire=lire, charge=_RIEN)
     e = eco.etat_eco(relire=True)
     assert e["conforme"] and _eco_texte(e) == "eco=2700(2692)" and lu["n"] >= 2
+
+
+def test_lecture_sous_charge_attend_la_stabilite(isole):
+    """Carte froide (poste2, main b820901b) : 225 → 1 980 → 2 977 → 2 985 ; une lecture
+    unique dirait 225 ou 1 980 (sous la bande, ou « non pris ») — on lit jusqu'à deux
+    lectures consécutives à ± 30 MHz (plafond 2 s) ; verrouillée : 225 → 2 692 → 2 692."""
+    def lecteur(seq):
+        it = iter(seq)
+        return lambda index=0, sous_charge=False, **kw: _LIRE_ORIG(index, f"{next(it)}, 3135, Not Active", sous_charge=sous_charge)
+    h = eco.lire_sous_charge(0, lecteur([225, 1980, 2977, 2985, 2985]), charge=_RIEN, attente=0.005)
+    assert h["lectures"] == [225, 1980, 2977, 2985] and h["stable"] and eco.etiquette_horloge(h) == "libre"
+    h = eco.lire_sous_charge(0, lecteur([225, 2692, 2692, 2692]), charge=_RIEN, attente=0.005)
+    assert h["lectures"] == [225, 2692, 2692] and eco.etiquette_horloge(h) == "lgc2700?"     # posé hors processus
+    # une Horloge posée par ce processus, lue pendant la montée : conforme au bout, pas « non pris »
+    hz = eco.Horloge("2700", 0, executer=_Faux(), lire=lecteur([225, 225, 1980, 2655, 2692, 2692, 2692]), charge=_RIEN)
+    assert hz.poser() == "effectif" and hz.effectif == "2692"
+    # jamais stable dans le plafond : dit, effectif = dernière lecture
+    lent = iter(range(300, 4000, 100))
+    h = eco.lire_sous_charge(0, lambda index=0, sous_charge=False, **kw: _LIRE_ORIG(index, f"{next(lent)}, 3135, Not Active", sous_charge=sous_charge),
+                             charge=_RIEN, attente=0.05, plafond=0.3)
+    assert h["stable"] is False and len(h["lectures"]) >= 4
