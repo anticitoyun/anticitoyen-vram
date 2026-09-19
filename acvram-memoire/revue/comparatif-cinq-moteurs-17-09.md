@@ -12,7 +12,7 @@ Assemblé par chef, critère 6 points `poste7-plan-completion-comparatif-17-09`.
 
 | moteur / régime | PPL privé | PPL public | b=1 t/s | b=1 J | b=12 t/s | b=12 J | prefill j/s | classé | source |
 |---|---|---|---|---|---|---|---|---|---|
-| acvram W4A16 (nvfp4, bf16 prefill) | 1,0148 géo (302025e) | 1,0099 | **366,4** | **0,907** | **1 126–1 147** | **0,342–0,347** | **9 913** | oui | verdict-coder-acvram-w4a16-17-09;poste7-b0-et-cause-lm4-17-09;verdict-harnais-egal-coder-18-09-b |
+| acvram W4A16 (nvfp4, bf16 prefill, **défaut P1 18/09** : GEMV_LAYOUT=marlin + PREFILL_GROUPED=marlin) | 1,0155 géo (Δ+0,0007 vs 302025e) | 1,0099 | **351** | — | **1 239** | **0,303** | **15 987** | oui | verdict-p1-situ-complet-18-09;verdict-juge-stat-b-18-09;poste7-p1-situ-verdict-18-09 |
 | EXL3 4,25 bpw (exllamav3, TabbyAPI) | 1,0006 | 1,0004 | 168,0 | 1,546 | 855,7 | 0,362 | 10 656 | oui | verdict-coder-exl3-vitesses-17-09 |
 | llama.cpp Q4_K_M | 1,0103 | 1,0146 | 344,0 | 1,151 | 971–1 066 | 0,278–0,306 | 15 717 | oui | verdict-harnais-egal-coder-18-09-b;verdict-llamacpp-coder-16-09 |
 | vLLM W4A16 Marlin (ModelOpt communautaire) | 1,1227 | 1,0876 | 302,9 | — | 2 031,4 | 0,197 | 20 988 | non | verdict-coder-vllm-17-09 |
@@ -21,7 +21,7 @@ Assemblé par chef, critère 6 points `poste7-plan-completion-comparatif-17-09`.
 
 **Statut vLLM/TRT-LLM Coder : ModelOpt propre = refus accepté**, deux blocages fichier:ligne indépendants et documentés (`unified_export_hf.py:419-422` Qwen3MoeExperts non supporté transformers 5 ; `nvfp4_tensor.py:84` déport CPU/GPU casse le calcul NVFP4 sous transformers 4, modèle > 32 Gio VRAM). Cellule remplie par le checkpoint communautaire (1,16-1,30), non classée — scellé du protocole réfuté : le checkpoint porte ~12 % de la perte, les activations 4 bits ~3 %, Marlin bat CUTLASS en décodage.
 
-**Revendication Coder (mise à jour 18/09 harnais égal jumelle, `verdict-harnais-egal-coder-18-09-b`)** : acvram devant à b=1 ET b=12 au harnais égal (CUDA_VISIBLE_DEVICES=0). b=1 : 366,4 t/s · 0,907 J contre llama.cpp 344,0 · 1,151 J (+6,5% t/s, −21% J). b=12 : 1 126–1 147 t/s · 0,342–0,347 J brut / 0,273–0,282 net contre llama.cpp 971–1 066 · 0,278–0,306 / 0,206–0,226 (+5,7% t/s bas/haut, +25% J brut, +37% J net). Ancienne revendication « llama.cpp +19% à b=1 » comparait régimes inégaux (instrument, contexte, cartes) — retirée. Qualité identique (1,0148 géo classé, 302025e). Plages : 2 passes acvram, 3 passes llama.cpp stables (±4,7%). Poste b=12 énergie ouvert (acvram derrière +25–37%). vLLM/TRT-LLM non comparables sur le privé (checkpoint non classé).
+**Revendication Coder (mise à jour 18/09, P1 adopté — `verdict-p1-situ-complet-18-09`, `poste7-p1-situ-verdict-18-09` §6)** : comparaison contre la PLUS HAUTE passe llama.cpp (1 065,7 t/s · 0,278 J brut), pas leur moyenne. Prefill : 15 987 contre 15 717 j/s — parité de peu (+1,7%), l'ancien retrait de « −37% » est daté et retiré. b=12 : 1 239 t/s contre 1 065,7 (+16% t/s), mais 0,303 J brut contre 0,278 — encore derrière de 9% (« J sous llama.cpp » ne s'écrit pas). b=1 : 351 t/s contre 344 à 1 024 (+2%), coût du régime P1 adopté (−1,2% vs ancien défaut acvram 366,4 — poste ouvert chez poste4, banc 0,909× mais in situ 0,988×, manque hors noyau). Qualité : PPL prefill géo 1,0155 (Δ+0,0007 vs 302025e, tenu). vLLM/TRT-LLM non comparables sur le privé (checkpoint non classé). Ancienne revendication harnais-égal (18/09, avant P1) retirée — comparait un régime pré-P1.
 
 ## Table GLM-4.7-Flash (poids GadflyII, sauf mention)
 

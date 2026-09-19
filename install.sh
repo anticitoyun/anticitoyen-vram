@@ -63,6 +63,7 @@ pip install --quiet -e '.[dev]'
 # ---- verification -----------------------------------------------------------------
 say ""
 acvram doctor || warn "doctor a signale des problemes ; voir ci-dessus"
+acvram convert --help >/dev/null 2>&1 || warn "acvram convert indisponible ; la gui (acvram-gui) ne pourra pas convertir"
 say ""
 say "activez avec :  source $VENV/bin/activate"
 say "puis essayez :   acvram detect"
@@ -121,7 +122,7 @@ if [ "${1:-}" = "--outils-terminal" ] || [ "${ACVRAM_INSTALL_OUTILS:-0}" = 1 ]; 
     # et signale ; il ne devine jamais un nouveau chemin a la place de
     # l'utilisateur — un alias sans dossier reel est un modele a reconvertir
     # ou une ligne a retirer, pas quelque chose a corriger seul.
-    TSV="${ACVRAM_CHEMINS_TSV:-$HOME/.kimi-code/acvram-chemins.tsv}"
+    TSV="${ACVRAM_CHEMINS_TSV:-$HOME/TSV/acvram-chemins.tsv}"
     if [ -f "$TSV" ]; then
         say ""
         say "catalogue de modeles : controle de $TSV"
