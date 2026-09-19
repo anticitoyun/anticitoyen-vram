@@ -1247,8 +1247,14 @@ def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
             and q.shape[1] // cache.cfg.num_kv_heads <= 16):
         from . import attn_paginee
         if attn_paginee.disponible():
+            # C15 niveau 3 : le noyau Triton lit q par ses pas (stride_qb,
+            # stride_qh) — la tranche q de la projection empilée passe sans
+            # copie (un nœud par couche) ; le témoin recopie comme avant.
+            compact = glue_compact()
+            qq = q if (compact and q.stride(2) == 1 and q.stride(1) == q.shape[2]) \
+                else q.contiguous()
             return attn_paginee.paged_attention(
-                q.contiguous(), cache.k, cache.k_scale, cache.v, cache.v_scale,
+                qq, cache.k, cache.k_scale, cache.v, cache.v_scale,
                 tables.contiguous(), seq_lens.contiguous(), cache.cfg.num_kv_heads,
                 float(scale), int(window))
     return ext.paged_attention(

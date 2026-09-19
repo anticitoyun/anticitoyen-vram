@@ -3771,7 +3771,7 @@ __global__ void kv_write_int8_kernel(
     const __nv_bfloat16 *__restrict__ k, const __nv_bfloat16 *__restrict__ v,
     const long *__restrict__ slots, signed char *__restrict__ kc,
     signed char *__restrict__ vc, __half *__restrict__ ks, __half *__restrict__ vs,
-    int H, int D, int bs) {
+    int H, int D, int bs, long sk, long sv) {
     __shared__ float red[8];
     const int t = blockIdx.x, h = blockIdx.y;
     const long slot = slots[t];
@@ -3779,7 +3779,10 @@ __global__ void kv_write_int8_kernel(
     const long pos = (slot / bs) * bs + (slot % bs);   // index à plat [bloc, offset]
     #pragma unroll 1
     for (int quel = 0; quel < 2; ++quel) {
-        const __nv_bfloat16 *src = (quel ? v : k) + ((long)t * H + h) * D;
+        // sk / sv : pas d'un jeton (C15 niveau 3 : k et v sont des tranches de
+        // la projection q/k/v empilée, lues en place au lieu d'être recopiées
+        // contiguës — deux nœuds de graphe par couche)
+        const __nv_bfloat16 *src = (quel ? v : k) + (long)t * (quel ? sv : sk) + (long)h * D;
         float amax = 0.f;
         for (int i = threadIdx.x; i < D; i += blockDim.x)
             amax = fmaxf(amax, fabsf(__bfloat162float(src[i])));
@@ -3815,8 +3818,17 @@ void kv_write_int8(torch::Tensor k, torch::Tensor v, torch::Tensor slots,
     TORCH_CHECK(kc.scalar_type() == torch::kChar && vc.scalar_type() == torch::kChar,
                 "cache KV : stockage int8");
     TORCH_CHECK(slots.scalar_type() == torch::kLong, "cache KV : emplacements int64");
-    auto kk = k.contiguous(), vv = v.contiguous();
+    TORCH_CHECK(k.dim() == 3 && v.dim() == 3, "cache KV : k et v [T, H, D]");
+    // Une tête est lue contiguë ([H, D] à pas (D, 1)) ; le pas du jeton est
+    // libre : une tranche de la projection empilée passe sans copie (C15
+    // niveau 3). Tout autre agencement est recopié comme avant.
+    auto contigu_par_tete = [](const torch::Tensor &x) {
+        return x.stride(2) == 1 && x.stride(1) == x.size(2);
+    };
+    auto kk = contigu_par_tete(k) ? k : k.contiguous();
+    auto vv = contigu_par_tete(v) ? v : v.contiguous();
     const int T = kk.size(0), H = kk.size(1), D = kk.size(2);
+    TORCH_CHECK(vv.size(0) == T && vv.size(1) == H && vv.size(2) == D, "cache KV : k et v de même forme");
     dim3 grid(T, H);
     const int th = std::min(256, (D + 31) / 32 * 32);
     kv_write_int8_kernel<<<grid, th, 0, at::cuda::getCurrentCUDAStream()>>>(
@@ -3826,7 +3838,8 @@ void kv_write_int8(torch::Tensor k, torch::Tensor v, torch::Tensor slots,
         reinterpret_cast<signed char *>(kc.data_ptr()),
         reinterpret_cast<signed char *>(vc.data_ptr()),
         reinterpret_cast<__half *>(ks.data_ptr()),
-        reinterpret_cast<__half *>(vs.data_ptr()), H, D, (int)bs);
+        reinterpret_cast<__half *>(vs.data_ptr()), H, D, (int)bs,
+        (long)kk.stride(0), (long)vv.stride(0));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

@@ -2768,10 +2768,13 @@ class DecoderLayer(nn.Module):
     def decode_fixed_res(self, x: torch.Tensor, delta: Optional[torch.Tensor],
                          positions: torch.Tensor, slots: torch.Tensor,
                          block_tables: torch.Tensor, seq_lens: torch.Tensor,
-                         max_pos: int, cache: PagedKVCache, q_len: int = 1):
+                         max_pos: int, cache: PagedKVCache, q_len: int = 1,
+                         valid: Optional[torch.Tensor] = None):
         """Pas de décodage à résidu différé : reçoit (x, delta) et rend
         (x, delta). La somme résiduelle de la couche précédente est absorbée
-        par la première normalisation — un lancement de moins par couche."""
+        par la première normalisation — un lancement de moins par couche.
+        ``valid`` (= ``slots >= 0``, C15 niveau 3) est calculé une fois par pas
+        par le modèle au lieu d'une fois par couche."""
         r = self.residual_multiplier
         a = None
         if (_NORME_FUSEE and delta is not None and x.is_cuda and x.dtype == torch.bfloat16
@@ -2792,8 +2795,10 @@ class DecoderLayer(nn.Module):
                                             seq_lens, max_pos, cache, q_len)
         x, h2 = add_norm(x, a, self.post_attention_layernorm, r)
         # Créneaux fantômes : même garde que decode_fixed ci-dessus.
-        y = (self.mlp(h2, valid=slots >= 0) if isinstance(self.mlp, MoEBlock)
-             else self.mlp(h2))
+        if isinstance(self.mlp, MoEBlock):
+            y = self.mlp(h2, valid=(slots >= 0) if valid is None else valid)
+        else:
+            y = self.mlp(h2)
         return x, y
 
     def prefetch(self) -> None:
@@ -3126,7 +3131,16 @@ class ACVRamModel(nn.Module):
         """
         if self._res_differe():
             delta = None
+            # C15 niveau 3 : `slots >= 0` (fantômes du godet) une fois par pas
+            # au lieu d'une fois par couche (48 nœuds → 1) ; témoin : None,
+            # chaque couche le recalcule.
+            valid = (slots >= 0) if kernels.glue_compact() else None
             for i, layer in enumerate(self.layers):
+                if valid is not None and type(layer) is DecoderLayer:
+                    x, delta = layer.decode_fixed_res(
+                        x, delta, positions, slots, block_tables, seq_lens,
+                        max_pos, self.caches.get(i), q_len, valid=valid)
+                    continue
                 x, delta = layer.decode_fixed_res(
                     x, delta, positions, slots, block_tables, seq_lens,
                     max_pos, self.caches.get(i), q_len)
