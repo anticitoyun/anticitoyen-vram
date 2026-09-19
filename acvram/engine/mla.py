@@ -138,8 +138,12 @@ _MLA_PREP_NOYAU = os.environ.get("ACVRAM_MLA_PREP_NOYAU", "1") == "1"
 #  2 = en plus, b=1 passe par decode_static_batch_complet (mla_prep_batch,
 #      la numérique servie à b=12 : q_abs à ≤ 1 ulp bf16 de cuBLAS, PAS au bit
 #      avec decode_static) ; non vérifié à sec (noyau CUDA) ;
-#  0 = chemin inchangé (témoin).
-_MLA_GLUE = int(os.environ.get("ACVRAM_MLA_GLUE", "0"))
+#  0 = chemin d'avant (témoin).
+#  DÉFAUT 1 depuis le 20/09 (verdict-c15-19-09, poste2, poste7-c15-niveaux-20-09 § Ordre
+#  04 h 20) : 2 622 → 2 163 lancements/pas, jetons identiques 256 pas, GLM b=1 servi
+#  116,4 → 122,5 t/s (−0,43 ms/pas), capture 5/5 ; le niveau 2 est FAUX (1 552
+#  lancements, PPL +3,3 % sur 1 tranche) et reste opt-in.
+_MLA_GLUE = int(os.environ.get("ACVRAM_MLA_GLUE", "1"))
 if _MLA_GLUE not in (0, 1, 2):
     raise ValueError(f"ACVRAM_MLA_GLUE={_MLA_GLUE!r} : 0 | 1 | 2")
 # Cache latent des créneaux en fp8 E4M3 par ligne (poste7-avis-exterieur-16-09
