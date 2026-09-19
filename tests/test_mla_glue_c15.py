@@ -358,3 +358,14 @@ def test_moe_glue_temoin_qui_casse(monkeypatch):
     monkeypatch.setattr(M_rp, "index_jetons_long", lambda t, k, d: (orig(t, k, d) + 1) % t)
     y_faux, _ = _moe_pas(monkeypatch, 1, True, True, t=2)
     assert torch.equal(y_vrai, y_ref) and not torch.equal(y_faux, y_ref)
+
+
+def test_le_defaut_est_le_niveau_1():
+    """poste7-c15-niveaux-20-09 § Ordre 04 h 20 : niveau 1 tenu sur carte (verdict-c15) → défaut ;
+    la table de régime et le module lisent le même défaut ; 2 reste opt-in."""
+    from pathlib import Path
+    from acvram import regime
+    v = {x.env: x for x in regime.VARIABLES}["ACVRAM_MLA_GLUE"]
+    assert v.defaut == "1" and v.torch == "0"
+    src = (Path(__file__).resolve().parents[1] / "acvram" / "engine" / "mla.py").read_text()
+    assert 'os.environ.get("ACVRAM_MLA_GLUE", "1")' in src
