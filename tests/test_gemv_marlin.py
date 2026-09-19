@@ -108,7 +108,7 @@ def _marlin(qw, bs, gs):
 
 @CARTE
 @pytest.mark.parametrize("mode", ["aleatoire", "un_expert", "fantomes"])
-@pytest.mark.parametrize("K,N", [(2048, 768), (768, 2048), (128, 64)])      # gate/up et down de Coder, une tuile
+@pytest.mark.parametrize("K,N", [(2048, 768), (768, 2048), (128, 64), (2048, 1536), (1536, 2048)])   # gate/up et down de Coder, une tuile, gate/up et down de GLM (C10, contrôle (b))
 def test_b_down_contre_fp32_par_ligne(mode, K, N):
     ext = get_extension()
     E, b, k = 8, 6, 2
@@ -132,9 +132,10 @@ def test_b_down_contre_fp32_par_ligne(mode, K, N):
 
 @CARTE
 @pytest.mark.parametrize("act", [0, 1])
-def test_b_gateup_contre_fp32_par_ligne(act):
+@pytest.mark.parametrize("K,N", [(2048, 768), (2048, 1536)])                  # Coder ; GLM (C10, contrôle (b))
+def test_b_gateup_contre_fp32_par_ligne(act, K, N):
     ext = get_extension()
-    E, b, k, K, N = 8, 6, 2, 2048, 768
+    E, b, k = 8, 6, 2
     qg, bg, gsg, wg32 = _pile(E, N, K, 11); qu, bu, gsu, wu32 = _pile(E, N, K, 12)
     mg, mu = _marlin(qg, bg, gsg), _marlin(qu, bu, gsu)
     eid, tok = _routage(b, k, E, 5)
