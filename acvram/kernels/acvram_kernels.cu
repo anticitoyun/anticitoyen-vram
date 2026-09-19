@@ -5406,8 +5406,18 @@ void mla_ecrit_latent(torch::Tensor k_new, torch::Tensor cache_ptrs, torch::Tens
 //
 // Mémoire partagée : q fp32 [H][W] + tuile bf16 [TL][W+8] + S, P [HMAX][TL] +
 // m, l, alpha [HMAX] + échelles et table fp8 — 89 968 o (88 Ko) à H=20,
-// W=576, TL=32 (formule du lanceur) ; 67 Ko à TL=16 : UN CTA par SM dans
-// les deux cas (C14 : la grille doit donc venir du nombre de tranches).
+// W=576, TL=32 (formule du lanceur) : UN CTA par SM (C14 : la grille doit
+// donc venir du nombre de tranches).
+// C14-c (verdict-c14-bis) : à b ≤ 2 la grille venait des seules tranches —
+// 32 blocs pour 170 SM à L=512 (warps actifs 20 %). Les têtes sont
+// indépendantes dans ce noyau (même tuile, q et o par tête) : la grille a
+// une troisième dimension G = ⌈H/HMAX⌉ GROUPES DE TÊTES, le bloc (b, s, g)
+// traite les têtes [g·HMAX, g·HMAX+HMAX) de la tranche s et écrit ses
+// partiels aux mêmes places de ws [B, S, H, R+2] — le combine ne voit pas la
+// répartition. Régime fin (b ≤ 2, H ≤ 20) : <5, 8, 1, FP8, MINB=2> :
+// 256 blocs à L=512, 22 Ko de shared, chaîne d'un bloc = q 5 têtes (11,5 Ko)
+// + tuile 8 lignes (9,2 Ko) + 8 scores × 5 têtes. Régime b ≥ 3 : inchangé
+// (<20,32,4>, G=1).
 // Scores : chaque warp prend RW lignes à la fois, les lanes se partagent W
 // (paires bf16), q lu une fois pour RW lignes, réduction par __shfl_xor.
 // o_lat : un fil = deux colonnes de R, toutes les têtes en registres.
@@ -5425,9 +5435,17 @@ constexpr int MLA1P_S_MAX = 1024;
 // latence mémoire par tour ; PF=4 en émet quatre à la fois. Pure copie :
 // aucune arithmétique, sortie identique au bit.
 constexpr int MLA1P_PF = 4;
+// C14-c : têtes par bloc et lignes par tuile du régime fin (b ≤ 2, H ≤ 20) ;
+// la règle de grille (mla_1p_tranches_fin) suppose 2 blocs résidents par SM
+// pour cette instanciation — __launch_bounds__(256, 2) (MINB=2) le garantit côté registres (≤ 128), la shared (22 Ko) en laisse 4.
+// Le cinquième paramètre MINB est le second argument de __launch_bounds__ :
+// 2 pour le régime fin, 0 (= non spécifié) pour les autres — un « 1 »
+// explicite change l'allocation de ptxas (<20,32,4> passait de 170 à 232
+// registres), 0 laisse les bornes d'avant.
+constexpr int MLA1P_FIN_HMAX = 5, MLA1P_FIN_TL = 8, MLA1P_FIN_BLOCS_SM = 2;
 
-template <int HMAX, int TL, int RW, bool FP8>
-__global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
+template <int HMAX, int TL, int RW, bool FP8, int MINB>
+__global__ void __launch_bounds__(MLA1P_FILS, MINB) mla_1p_kernel(
     const float *__restrict__ q,              // [B, H, W] fp32
     const int64_t *__restrict__ cache_ptrs,   // [B] (ou nullptr : cache0)
     const __nv_bfloat16 *__restrict__ cache0, // [L, W] si B = 1 sans table
@@ -5441,14 +5459,22 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
     static_assert(HMAX <= 32, "HMAX <= 32 : une lane par tete pour l'ecriture des scores");
     const int b = blockIdx.x, s = blockIdx.y, tid = threadIdx.x;
     const int warp = tid >> 5, lane = tid & 31;
+    // C14-c : groupe de têtes de ce bloc — h0 = g·HMAX, Hb têtes (≤ HMAX) ;
+    // H reste le nombre total de têtes (foulées de q et de ws). Hors régime
+    // fin (HMAX ≥ 20 : G=1) h0 et Hb sont fixés À LA COMPILATION à 0 et H,
+    // pour que <20,32,4> et <32,16,2> gardent le SASS d'avant (avec h0/Hb
+    // dynamiques ptxas passait de 170 à 232 registres sur <20,32,4>).
+    constexpr bool GROUPES = HMAX <= MLA1P_FIN_HMAX;
+    const int h0 = GROUPES ? (int)blockIdx.z * HMAX : 0;
+    const int Hb = GROUPES ? min(HMAX, H - h0) : H;
     // foulée d'une ligne de tuile : W+8 éléments bf16 (1 168 o) ou, en FP8,
     // W+16 OCTETS — un multiple de 16 o dans les deux cas, condition des
     // lectures uint4 en shared (W+8 octets = 584 : adresse mal alignée,
     // CUDA_ERROR_MISALIGNED_ADDRESS, t-qa 89bb888)
     const int WP = FP8 ? W + 16 : W + 8;
     extern __shared__ __align__(16) unsigned char mla_smem[];
-    float *q_s = reinterpret_cast<float *>(mla_smem);                        // [H][W]
-    __nv_bfloat16 *tile = reinterpret_cast<__nv_bfloat16 *>(q_s + (size_t)H * W);   // [TL][WP] bf16 ou codes
+    float *q_s = reinterpret_cast<float *>(mla_smem);                        // [Hb][W]
+    __nv_bfloat16 *tile = reinterpret_cast<__nv_bfloat16 *>(q_s + (size_t)Hb * W);   // [TL][WP] bf16 ou codes
     unsigned char *tile8 = reinterpret_cast<unsigned char *>(tile);          // FP8 : [TL][WP] codes
     const size_t tuile_octets = FP8 ? (size_t)TL * WP : (size_t)TL * WP * sizeof(__nv_bfloat16);
     float *S_s = reinterpret_cast<float *>(reinterpret_cast<unsigned char *>(tile) + tuile_octets);   // [HMAX][TL]
@@ -5463,19 +5489,19 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
     if (FP8) for (int i = tid; i < 256; i += MLA1P_FILS) lut[i] = e4m3_to_float((unsigned char)i);
     const int valide = min((int)lens[b] + 1, L);
     const int r0 = s * rows_par_cta, r1 = min(r0 + rows_par_cta, valide);
-    float *out = ws + ((size_t)(b * S + s) * H) * (R + 2);
+    float *out = ws + ((size_t)(b * S + s) * H + h0) * (R + 2);   // têtes h0..h0+Hb-1, contiguës
     if (r0 >= r1) {                                              // tranche vide
-        for (int i = tid; i < H * (R + 2); i += MLA1P_FILS) {
+        for (int i = tid; i < Hb * (R + 2); i += MLA1P_FILS) {
             const int h = i / (R + 2), c = i - h * (R + 2);
             out[i] = c == R ? -INFINITY : 0.f;
         }
         return;
     }
-    // q en mémoire partagée (float4), MLA1P_PF lectures en vol par fil
+    // q des Hb têtes du bloc en mémoire partagée (float4), MLA1P_PF lectures en vol par fil
     {
-        const float4 *src = reinterpret_cast<const float4 *>(q + (size_t)b * H * W);
+        const float4 *src = reinterpret_cast<const float4 *>(q + ((size_t)b * H + h0) * W);
         float4 *dst = reinterpret_cast<float4 *>(q_s);
-        const int n4 = H * W / 4;
+        const int n4 = Hb * W / 4;
         for (int i0 = tid; i0 < n4; i0 += MLA1P_PF * MLA1P_FILS) {
             float4 v[MLA1P_PF];
             #pragma unroll
@@ -5544,7 +5570,7 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
                 }
                 #pragma unroll
                 for (int h = 0; h < HMAX; ++h) {
-                    if (h < H) {
+                    if (h < Hb) {
                         const float2 q2 = *reinterpret_cast<const float2 *>(q_s + (size_t)h * W + 2 * j);
                         #pragma unroll
                         for (int i = 0; i < RW; ++i) part[h][i] += q2.x * k2[i].x + q2.y * k2[i].y;
@@ -5558,14 +5584,14 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
                     float v = part[h][i];
                     #pragma unroll
                     for (int off = 16; off > 0; off >>= 1) v += __shfl_xor_sync(0xffffffffu, v, off);
-                    if (lane == h && h < H && rb + i < n)
+                    if (lane == h && h < Hb && rb + i < n)
                         S_s[h * TL + rb + i] = FP8 ? v * sc_s[rb + i] * scale : v * scale;
                 }
             }
         }
         __syncthreads();
         // --- softmax en ligne, un fil par tête ---
-        if (tid < H) {
+        if (tid < Hb) {
             const float *Sh = S_s + tid * TL;
             float mt = -INFINITY;
             for (int r = 0; r < n; ++r) mt = fmaxf(mt, Sh[r]);
@@ -5587,7 +5613,7 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
         if (c0 < R) {
             #pragma unroll
             for (int h = 0; h < HMAX; ++h) {
-                if (h < H) { const float a = a_s[h]; o[h][0] *= a; o[h][1] *= a; }
+                if (h < Hb) { const float a = a_s[h]; o[h][0] *= a; o[h][1] *= a; }
             }
             for (int r = 0; r < n; ++r) {
                 float2 v2;
@@ -5595,7 +5621,7 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
                 else v2 = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(tile + (size_t)r * WP + c0));
                 #pragma unroll
                 for (int h = 0; h < HMAX; ++h) {
-                    if (h < H) {
+                    if (h < Hb) {
                         const float p = P_s[h * TL + r];
                         o[h][0] += p * v2.x; o[h][1] += p * v2.y;
                     }
@@ -5607,43 +5633,101 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
     if (c0 < R) {
         #pragma unroll
         for (int h = 0; h < HMAX; ++h)
-            if (h < H) { float *oh = out + (size_t)h * (R + 2) + c0; oh[0] = o[h][0]; oh[1] = o[h][1]; }
+            if (h < Hb) { float *oh = out + (size_t)h * (R + 2) + c0; oh[0] = o[h][0]; oh[1] = o[h][1]; }
     }
-    if (tid < H) { out[(size_t)tid * (R + 2) + R] = m_s[tid]; out[(size_t)tid * (R + 2) + R + 1] = l_s[tid]; }
+    if (tid < Hb) { out[(size_t)tid * (R + 2) + R] = m_s[tid]; out[(size_t)tid * (R + 2) + R + 1] = l_s[tid]; }
 }
 
 // Recombinaison des S tranches : o = Σ_s o_s·e^{m_s−M} / Σ_s l_s·e^{m_s−M}.
-__global__ void mla_1p_combine_kernel(const float *__restrict__ ws,   // [B, S, H, R+2]
-                                      float *__restrict__ o,          // [B, H, R]
-                                      int H, int R, int S) {
-    // C14 : S peut monter jusqu'à MLA1P_S_MAX ; le poids e^{m_s−M} de chaque
-    // tranche est calculé UNE fois (un fil par tranche) et mis en shared, au
-    // lieu de S·R/128 __expf par fil — même __expf(m − M), mêmes produits,
-    // même ordre de somme : sortie identique au bit à l'ancien combine.
+//
+// C14-c (verdict-c14-bis : 20 blocs de 128 fils, décrochage short-scoreboard,
+// 8,4 µs/couche à S=32). L'ancien combine faisait, PAR FIL et PAR COLONNE,
+// une boucle sérielle sur S avec un `if (m != −inf)` par tranche : 2·S
+// lectures dépendantes du test par colonne (m relu S fois par colonne), et
+// 20 blocs seulement à b=1. Ici :
+//  - grille (B·H, ⌈R/CH⌉), 256 fils = SL voies de tranches × CH colonnes
+//    (SL ∈ {1, 2, 4, 8}, CH = 256/SL, choisi par le lanceur pour que chaque
+//    fil lise ≈ S/SL ≤ 8 partiels) : 320 blocs à b=1, S=64, R=512 ;
+//  - m et l sont lus UNE fois par bloc (un fil par tranche), M et Σ l·w par
+//    réduction de bloc, les poids w_s en shared ;
+//  - la voie sl lit o_s[c] pour s ≡ sl (mod SL) : un warp = 32 colonnes
+//    contiguës d'une même tranche (128 o coalescés), aucun test dans la
+//    boucle (tranche vide : w = 0 et o_s = 0, écrits par le noyau), lectures
+//    indépendantes émises en vol ; puis réduction des SL voies en shared.
+// Chargements émis par (b, h) — avant : R·2·S (o et m par colonne) +
+// 128 fils × 3·S (M, Lsum relus par chaque fil) ; après : R·S (o, une fois)
+// + (R/CH)·2·S (m, l par bloc de colonnes). R=512 : S=64 → 90 176 → 34 816
+// (−61 %) ; S=32 → 45 056 → 16 896. Octets utiles inchangés : S·H·(R+2)·4 =
+// 2,63 Mo à S=64, 1,32 Mo à S=32 (b=1, H=20).
+// Ordre des sommes : par voie puis réduction — pas identique au bit à
+// l'ancien combine (test à sec : ≤ 8 ulp d'amplitude, indépendant de SL).
+constexpr int MLA1P_CMB_FILS = 256;
+template <int SL>
+__global__ void __launch_bounds__(MLA1P_CMB_FILS) mla_1p_combine_kernel(
+        const float *__restrict__ ws,   // [B, S, H, R+2]
+        float *__restrict__ o,          // [B, H, R]
+        int H, int R, int S) {
+    constexpr int CH = MLA1P_CMB_FILS / SL;
     __shared__ float w_s[MLA1P_S_MAX];
-    const int b = blockIdx.x, h = blockIdx.y;
-    const float *base = ws + ((size_t)b * S * H + h) * (R + 2);
-    const size_t pas = (size_t)H * (R + 2);
-    float M = -INFINITY;
-    for (int s = 0; s < S; ++s) M = fmaxf(M, base[s * pas + R]);
-    for (int s = threadIdx.x; s < S; s += blockDim.x) {
+    __shared__ float red[MLA1P_CMB_FILS / 32];
+    __shared__ float part[SL][CH];
+    const int bh = blockIdx.x, tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    const int col = blockIdx.y * CH + (tid % CH), sl = tid / CH;
+    const int b = bh / H, h = bh - b * H;
+    const float *base = ws + ((size_t)b * S * H + h) * (R + 2);   // tranche 0 de (b, h)
+    const size_t pas = (size_t)H * (R + 2);                       // d'une tranche à la suivante
+    // --- M = max_s m_s (réduction de bloc) ---
+    float mloc = -INFINITY;
+    for (int s = tid; s < S; s += MLA1P_CMB_FILS) mloc = fmaxf(mloc, base[s * pas + R]);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) mloc = fmaxf(mloc, __shfl_xor_sync(0xffffffffu, mloc, off));
+    if (lane == 0) red[warp] = mloc;
+    __syncthreads();
+    float M = red[0];
+    #pragma unroll
+    for (int w = 1; w < MLA1P_CMB_FILS / 32; ++w) M = fmaxf(M, red[w]);
+    __syncthreads();                                    // red réutilisé ci-dessous
+    // --- w_s = e^{m_s−M} (0 si tranche vide), Lsum = Σ l_s·w_s ---
+    float lloc = 0.f;
+    for (int s = tid; s < S; s += MLA1P_CMB_FILS) {
         const float m = base[s * pas + R];
-        w_s[s] = m != -INFINITY ? __expf(m - M) : 0.f;   // tranche vide : o = 0, l = 0
+        const float w = m != -INFINITY ? __expf(m - M) : 0.f;
+        w_s[s] = w;
+        lloc += base[s * pas + R + 1] * w;
     }
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) lloc += __shfl_xor_sync(0xffffffffu, lloc, off);
+    if (lane == 0) red[warp] = lloc;
     __syncthreads();
     float Lsum = 0.f;
-    for (int s = 0; s < S; ++s) {
-        const float m = base[s * pas + R];
-        if (m != -INFINITY) Lsum += base[s * pas + R + 1] * w_s[s];
-    }
+    #pragma unroll
+    for (int w = 0; w < MLA1P_CMB_FILS / 32; ++w) Lsum += red[w];
     const float inv = Lsum > 0.f ? 1.f / Lsum : 0.f;
-    for (int c = threadIdx.x; c < R; c += blockDim.x) {
-        float acc = 0.f;
-        for (int s = 0; s < S; ++s) {
-            const float m = base[s * pas + R];
-            if (m != -INFINITY) acc += base[s * pas + c] * w_s[s];
+    // --- Σ_s o_s[col]·w_s sur la voie sl, lectures coalescées et en vol ---
+    float acc = 0.f;
+    if (col < R) {
+        const float *oc = base + col;
+        int s = sl;
+        for (; s + 7 * SL < S; s += 8 * SL) {
+            float v[8];
+            #pragma unroll
+            for (int k = 0; k < 8; ++k) v[k] = oc[(size_t)(s + k * SL) * pas];
+            #pragma unroll
+            for (int k = 0; k < 8; ++k) acc += v[k] * w_s[s + k * SL];
         }
-        o[((size_t)b * H + h) * R + c] = acc * inv;
+        for (; s < S; s += SL) acc += oc[(size_t)s * pas] * w_s[s];
+    }
+    if (SL == 1) {
+        if (col < R) o[(size_t)bh * R + col] = acc * inv;
+        return;
+    }
+    part[sl][tid % CH] = acc;
+    __syncthreads();
+    if (tid < CH && col < R) {
+        float t = 0.f;
+        #pragma unroll
+        for (int k = 0; k < SL; ++k) t += part[k][tid];
+        o[(size_t)bh * R + col] = t * inv;
     }
 }
 
@@ -5690,6 +5774,34 @@ static int mla_1p_tranches(int L, int TL, int B) {
     return S;
 }
 
+// C14-c (verdict-c14-bis-occupation-19-09) : régime FIN, b ≤ 2 et H ≤ 20.
+// La règle ci-dessus donnait 32 blocs pour 170 SM à L=512 (une tranche de
+// 16 lignes par bloc, 1 CTA/SM par la shared) ; ici la grille est
+// B × S × G avec G = ⌈H/5⌉ groupes de têtes (4 à H=20) et des tranches de
+// TL=8 lignes, S = min(⌈L/8⌉, ⌊2·SM / (B·G)⌋) puis le même point fixe sur
+// rows (tranches non vides). Le plafond 2·SM/(B·G) : DEUX blocs résidents
+// par SM (22 Ko de shared, __launch_bounds__(256, 2) → ≤ 128 registres),
+// donc B·S·G ≤ 2·SM tient en une vague ; il borne aussi le combine (S ≤ 85
+// à b=1) et ws (B·S·G·… ≤ 2·SM·H/G·(R+2)·4 o = 7 Mo).
+// Blocs = B·S·G (SM = 170, H = 20) :
+//   b=1 : L=512 → S=64, rows=8  → 256 blocs (32 avant) ; L=1 024 → S=64,
+//         rows=16 → 256 ; L=2 048 → S=64, rows=32 → 256 ; L=4 096 → S=74,
+//         rows=56 → 296 ; L=128 → S=16 → 64 (contexte court : un bloc
+//         coûte sa latence, pas sa grille).
+//   b=2 : L=512 → S=32, rows=16 → 256 ; L=2 048 → S=37, rows=56 → 296.
+// b ≥ 3 : mla_1p_tranches et <20,32,4> inchangés (b=12 : S=8, 96 blocs).
+static int mla_1p_groupes_fin(int H) { return (H + MLA1P_FIN_HMAX - 1) / MLA1P_FIN_HMAX; }
+static int mla_1p_tranches_fin(int L, int B, int G) {
+    const int TL = MLA1P_FIN_TL;
+    const int tuiles = (L + TL - 1) / TL;
+    const int cap = MLA1P_FIN_BLOCS_SM * mla_1p_sm_count() / max(1, B * G);
+    int S = max(1, min(tuiles, cap));
+    S = min(S, MLA1P_S_MAX);
+    const int rows = ((((L + S - 1) / S) + TL - 1) / TL) * TL;   // même arrondi que le lanceur
+    S = max(1, (L + rows - 1) / rows);                            // tranches non vides seulement
+    return S;
+}
+
 torch::Tensor mla_decode_1p(torch::Tensor q_eff, c10::optional<torch::Tensor> cache_ptrs,
                             c10::optional<torch::Tensor> cache, torch::Tensor lens,
                             int64_t L, int64_t rank, double scale, bool fp8) {
@@ -5720,40 +5832,57 @@ torch::Tensor mla_decode_1p(torch::Tensor q_eff, c10::optional<torch::Tensor> ca
         }
         cache0 = reinterpret_cast<const __nv_bfloat16 *>(cache->data_ptr());
     }
-    // C14, demi-tuile : à H ≤ 20 la tuile est de 32 lignes (RW=4) ; quand le
-    // lot est petit (B ≤ 2) et que des tuiles de 16 lignes tiennent encore en
-    // une vague (ceil(L/16) ≤ SM/B), on passe à TL=16 (RW=2 : 8 warps × 2
-    // lignes = 16) — deux fois plus de CTA, une chaîne deux fois plus courte
-    // par CTA (16 lignes × W à lire, 16 scores par tête, softmax sur 16).
-    // Sinon la demi-tuile n'achète rien : même grille, une boucle de plus.
-    const bool demi = H <= 20 && B <= 2 && ((int)L + 15) / 16 <= mla_1p_sm_count() / B;
-    const int TL = H <= 20 ? (demi ? 16 : 32) : 16;
-    const int S = mla_1p_tranches((int)L, TL, B);
+    // C14-c : régime FIN à b ≤ 2 et H ≤ 20 — <5, 8, 1> (5 têtes par bloc,
+    // tuile de 8 lignes, RW=1 : 8 warps × 1 ligne), grille B × S × G ; il
+    // remplace la demi-tuile <20,16,2> de C14 (32 blocs à L=512, verdict
+    // C14-bis). b ≥ 3 : <20,32,4> et mla_1p_tranches inchangés ; H > 20 :
+    // <32,16,2> inchangé (G=1).
+    const bool fin = H <= 20 && B <= 2;
+    const int HMAX = fin ? MLA1P_FIN_HMAX : (H <= 20 ? 20 : 32);
+    const int TL = fin ? MLA1P_FIN_TL : (H <= 20 ? 32 : 16);
+    const int G = fin ? mla_1p_groupes_fin(H) : 1;
+    const int S = fin ? mla_1p_tranches_fin((int)L, B, G) : mla_1p_tranches((int)L, TL, B);
     const int rows = ((((int)L + S - 1) / S) + TL - 1) / TL * TL;
     auto ws = torch::empty({(long)B * S * H * (R + 2)}, q_eff.options());
     auto o = torch::empty({B, H, (long)rank}, q_eff.options());
     auto stream = at::cuda::getCurrentCUDAStream();
-    const int HMAX = H <= 20 ? 20 : 32;
-    // tuile : TL lignes de (W+8) bf16 ; en fp8 TL lignes de (W+16) octets, plus petite
-    const size_t shm = (size_t)H * W * sizeof(float) + (size_t)TL * (W + 8) * sizeof(__nv_bfloat16)
+    // shared d'un bloc : q de ses Hb ≤ HMAX têtes, tuile de TL lignes de (W+8)
+    // bf16 (en fp8 TL lignes de (W+16) octets, plus petite), S/P, m/l/a,
+    // échelles et table fp8
+    const int Hb = min(H, HMAX);
+    const size_t shm = (size_t)Hb * W * sizeof(float) + (size_t)TL * (W + 8) * sizeof(__nv_bfloat16)
                        + (size_t)2 * HMAX * TL * sizeof(float) + 3 * HMAX * sizeof(float)
                        + (size_t)(TL + 256) * sizeof(float);
-    dim3 grid(B, S);
-    #define MLA1P_LANCE(HM, T, RWW, F8) do { \
+    dim3 grid(B, S, G);
+    #define MLA1P_LANCE_K(HM, T, RWW, F8, MB) do { \
         static size_t autorise = 0; \
-        if (shm > autorise) { cudaFuncSetAttribute(mla_1p_kernel<HM, T, RWW, F8>, \
+        if (shm > autorise) { cudaFuncSetAttribute(mla_1p_kernel<HM, T, RWW, F8, MB>, \
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm); autorise = shm; } \
-        mla_1p_kernel<HM, T, RWW, F8><<<grid, MLA1P_FILS, shm, stream>>>( \
+        mla_1p_kernel<HM, T, RWW, F8, MB><<<grid, MLA1P_FILS, shm, stream>>>( \
             q_eff.data_ptr<float>(), ptrs, cache0, lens.data_ptr<long>(), ws.data_ptr<float>(), \
             H, (int)L, W, R, S, rows, (float)scale); } while (0)
+    #define MLA1P_LANCE(HM, T, RWW, F8) MLA1P_LANCE_K(HM, T, RWW, F8, 0)
+    #define MLA1P_LANCE_FIN(HM, T, RWW, F8) MLA1P_LANCE_K(HM, T, RWW, F8, MLA1P_FIN_BLOCS_SM)
     TORCH_CHECK(shm <= 99 * 1024, "MLA 1p : memoire partagee > 99 Ko (H, W trop grands)");
-    if (HMAX == 20 && TL == 32) { if (fp8) MLA1P_LANCE(20, 32, 4, true); else MLA1P_LANCE(20, 32, 4, false); }
-    else if (HMAX == 20)        { if (fp8) MLA1P_LANCE(20, 16, 2, true); else MLA1P_LANCE(20, 16, 2, false); }
-    else                        { if (fp8) MLA1P_LANCE(32, 16, 2, true); else MLA1P_LANCE(32, 16, 2, false); }
+    if (fin)             { if (fp8) MLA1P_LANCE_FIN(5, 8, 1, true); else MLA1P_LANCE_FIN(5, 8, 1, false); }
+    else if (HMAX == 20) { if (fp8) MLA1P_LANCE(20, 32, 4, true); else MLA1P_LANCE(20, 32, 4, false); }
+    else                 { if (fp8) MLA1P_LANCE(32, 16, 2, true); else MLA1P_LANCE(32, 16, 2, false); }
+    #undef MLA1P_LANCE_FIN
     #undef MLA1P_LANCE
+    #undef MLA1P_LANCE_K
     TORCH_CHECK(S <= MLA1P_S_MAX, "MLA 1p : S > MLA1P_S_MAX");
-    dim3 g2(B, H);
-    mla_1p_combine_kernel<<<g2, 128, 0, stream>>>(ws.data_ptr<float>(), o.data_ptr<float>(), H, R, S);
+    // Combine C14-c : SL voies de tranches par bloc, ≈ S/SL ≤ 8 partiels par
+    // fil ; grille (B·H, ⌈R/CH⌉) — b=1, S=64, R=512 : SL=8, CH=32, 320 blocs ;
+    // b=12, S=8 : SL=1, CH=256, 480 blocs (240 de 128 fils avant).
+    const int SL = S >= 64 ? 8 : S >= 32 ? 4 : S >= 16 ? 2 : 1;
+    const int CH = MLA1P_CMB_FILS / SL;
+    dim3 g2(B * H, (R + CH - 1) / CH);
+    switch (SL) {
+        case 8:  mla_1p_combine_kernel<8><<<g2, MLA1P_CMB_FILS, 0, stream>>>(ws.data_ptr<float>(), o.data_ptr<float>(), H, R, S); break;
+        case 4:  mla_1p_combine_kernel<4><<<g2, MLA1P_CMB_FILS, 0, stream>>>(ws.data_ptr<float>(), o.data_ptr<float>(), H, R, S); break;
+        case 2:  mla_1p_combine_kernel<2><<<g2, MLA1P_CMB_FILS, 0, stream>>>(ws.data_ptr<float>(), o.data_ptr<float>(), H, R, S); break;
+        default: mla_1p_combine_kernel<1><<<g2, MLA1P_CMB_FILS, 0, stream>>>(ws.data_ptr<float>(), o.data_ptr<float>(), H, R, S); break;
+    }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return o;
 }
