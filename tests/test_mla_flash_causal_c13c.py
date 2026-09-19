@@ -68,7 +68,7 @@ def _fp64(q, C, passe, scale, rank, decalage=0):
     return torch.cat(out)
 
 
-JUGE_EXCES_LIGNE = 4.0        # ulp fp32 : excès par ligne toléré au noyau sur la référence, contre fp64
+JUGE_EXCES_LIGNE = 6.0        # ulp fp32 (poste7 § 1 bis) : 2 × le témoin à sec (excès max 3,0 sur 15/512 lignes), publié à côté du seuil
 
 
 def _juge(o, ref, v64):
@@ -79,13 +79,14 @@ def _juge(o, ref, v64):
     de somme légitimes : 3 % des lignes ont le noyau plus loin que la référence de 1,3-3,0 ulp
     (t=128 : 15/512, excès max 3,0 ; t=256 : 3/1024, 1,3) alors qu'il est PLUS PROCHE en médiane
     (1,40 contre 1,64 ; 1,53 contre 2,44) et au max (3,9 contre 7,4). Juge retenu : par ligne
-    d(noyau, fp64) ≤ d(référence, fp64) + 4 ulp, ET en distribution médiane(noyau) ≤ médiane(réf)
+    d(noyau, fp64) ≤ d(référence, fp64) + 6 ulp (poste7 § 1 bis : 2 × le témoin), ET en distribution médiane(noyau) ≤ médiane(réf)
     ET max(noyau) ≤ max(réf) + 1 — le noyau n'est jamais pire que le chemin qu'il remplace.
     Rend (tenu, d_ref max, d_fp64 max, lignes en excès > 4 ulp)."""
     d_ref, d_n64, d_r64 = _ulp_lignes(o, ref), _ulp_lignes(o, v64), _ulp_lignes(ref, v64)
     pires = d_n64 > d_r64 + JUGE_EXCES_LIGNE
     tenu = bool((~pires).all()) and float(d_n64.median()) <= float(d_r64.median()) \
         and float(d_n64.amax()) <= float(d_r64.amax()) + 1.0
+    print(f"[juge] seuil +{JUGE_EXCES_LIGNE:.0f} ulp par ligne ; témoin excès max noyau−réf = {float((d_n64 - d_r64).amax()):.2f} ulp")
     return tenu, float(d_ref.amax()), float(d_n64.amax()), int(pires.sum())
 
 
@@ -128,7 +129,7 @@ def test_flash_causal_egal_fp32_a_8_ulp_par_ligne(t, passe):
     ref = _reference(q, C, passe, scale, 64)
     assert o.shape == (t, 4, 64) and o.dtype is torch.float32 and not o.isnan().any()
     tenu, d_ref, d_64, n_arb = _juge(o, ref, _fp64(q, C, passe, scale, 64))
-    assert tenu, f"t={t} passe={passe} : {d_ref:.2f} ulp contre fp32, {d_64:.2f} contre fp64, {n_arb} lignes plus loin que la référence de > 4 ulp"
+    assert tenu, f"t={t} passe={passe} : {d_ref:.2f} ulp contre fp32, {d_64:.2f} contre fp64, {n_arb} lignes plus loin que la référence de > 6 ulp (témoin à sec : excès max 3,0)"
     # la référence du module est bien ce chemin (c'est elle que la chaîne carte rejoue)
     assert torch.equal(k.reference_fp32(q, C, passe, scale, 64), ref)
 
