@@ -12,7 +12,8 @@ import pathlib
 import pytest
 import torch
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+RACINE = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(RACINE))
 from acvram.kernels import gemm_i8c_cublas, _i8c_poids                       # noqa: E402
 from acvram.quant.formats import INT8Tensor, _dequantize_int8, _quantize_int8   # noqa: E402
 
@@ -100,3 +101,47 @@ def test_ppl_prend_le_chemin_du_moteur_sous_cublas(monkeypatch):
     # témoin cassant : au défaut, le même appel compte la déquant
     K.int8_matmul(x, t, gemv_threshold=80)
     assert K.CHEMINS_INT8["dequant"] == avant.get("dequant", 0) + 1
+
+
+def test_c11_vue_g128_du_poids_par_canal():
+    """C11 : la vue g128 d'un i8c partage les codes, répète l'échelle de ligne
+    sur K/128 groupes, zéros à 128 ; sa déquantification est IDENTIQUE à celle
+    du tenseur d'origine (mêmes valeurs) ; construite une fois ; un g128 ou
+    un affine par groupes est rendu tel quel (identité)."""
+    from acvram.kernels import vue_g128
+    w, t = _poids(N=64, K=2048)
+    v = vue_g128(t)
+    assert v is not t and v.group_size == 128 and v.qweight is t.qweight
+    assert v.scales.shape == (64, 16) and torch.equal(v.scales[:, 0], t.scales[:, 0]) and torch.all(v.scales == t.scales)
+    assert v.zeros.shape == (64, 16) and torch.all(v.zeros == 128)
+    assert torch.equal(_dequantize_int8(v, torch.float32), _dequantize_int8(t, torch.float32))
+    assert vue_g128(t) is v                                        # cache
+    from acvram.kernels import gemm_etroit
+    assert gemm_etroit.eligible(v) and not gemm_etroit.eligible(t)
+    t128 = _quantize_int8(w, group_size=128, symmetric=False)
+    assert vue_g128(t128) is t128                                  # identité pour le g128 du classé
+    z = t.zeros.clone(); z[0, 0] = 127
+    t_z = INT8Tensor(t.qweight, t.scales, z, t.group_size, t.shape, t.format)
+    assert vue_g128(t_z) is t_z                                    # pas symétrique : pas de vue
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise : gemm_etroit rend des valeurs fausses sous TRITON_INTERPRET (vérifié 19/09, aussi sur un g128 classé) — REGLES § 7, un Triton vert à sec ne prouve rien")
+def test_c11_gemm_etroit_sur_la_vue_egale_la_reference_sur_carte():
+    """Sur carte : le noyau étroit Triton sur la vue g128 d'un i8c rend x @ W.T
+    à l'erreur bf16 près, ET la même chose qu'un vrai g128 aux mêmes codes et
+    échelles (bit à bit : mêmes entrées, même noyau) ; témoin cassant :
+    échelles décalées d'une ligne."""
+    from acvram.kernels import gemm_etroit, vue_g128, get_extension
+    if get_extension() is None or not gemm_etroit.disponible():
+        pytest.skip("extension ou Triton absents")
+    w, t = _poids(N=64, K=2048)
+    t = INT8Tensor(t.qweight.cuda(), t.scales.cuda(), t.zeros.cuda(), t.group_size, t.shape, t.format)
+    x = (torch.randn(8, 2048, device="cuda") * 0.5).to(torch.bfloat16)
+    v = vue_g128(t)
+    y = gemm_etroit.gemm_etroit(x, v, False)[:, :64]
+    ref = x.float() @ _dequantize_int8(t, torch.float32).T
+    assert (y.float() - ref).norm() / ref.norm() < 1e-2
+    vrai = INT8Tensor(v.qweight, v.scales.clone(), v.zeros.clone(), 128, v.shape, v.format)
+    assert torch.equal(y, gemm_etroit.gemm_etroit(x, vrai, False)[:, :64])
+    v2 = INT8Tensor(v.qweight, torch.roll(v.scales, 1, dims=0).contiguous(), v.zeros, 128, v.shape, v.format)
+    assert (gemm_etroit.gemm_etroit(x, v2, False)[:, :64].float() - ref).norm() / ref.norm() > 1e-2

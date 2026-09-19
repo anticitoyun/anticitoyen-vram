@@ -747,6 +747,34 @@ def _i8c_poids(t: INT8Tensor):
     return w
 
 
+def vue_g128(t: INT8Tensor) -> INT8Tensor:
+    """C11 (poste7-p2-dec-c11-c6-19-09) : un poids INT8 symétrique PAR CANAL
+    (groupe = K, zéro = 128 : convertis -qkvo-i8c) vu comme un poids à
+    groupes de 128 — mêmes codes (le tenseur qweight est partagé, aucune
+    copie), échelle de la ligne répétée sur K/128 groupes, zéros à 128. Les
+    chemins étroits (gemm_etroit Triton, tuile K = 128 ; narrow_gemm CUDA) le
+    servent alors comme le g128 du classé, à l'arithmétique près de l'ordre
+    des sommes par groupe (× la même échelle). Construite une fois par
+    tenseur ([N, K/128] fp16 + uint8 : 4096 × 16 × 3 o = 192 Kio pour q_proj).
+    Rend t lui-même s'il n'est pas par canal."""
+    cache = t.__dict__.get("_g128")
+    if cache is not None:
+        return cache if cache is not False else t
+    N, k_pad = t.qweight.shape
+    if t.group_size == 128 or t.group_size != k_pad or k_pad % 128 or t.zeros.shape[1] != 1 \
+            or not bool((t.zeros == 128).all()):
+        t.__dict__["_g128"] = False
+        return t
+    ng = k_pad // 128
+    vue = INT8Tensor(t.qweight, t.scales.expand(N, ng).contiguous(), t.zeros.expand(N, ng).contiguous(),
+                     128, t.shape, t.format)
+    for k in ("etroit",):                       # désignations portées par le tenseur d'origine
+        if k in t.__dict__:
+            vue.__dict__[k] = t.__dict__[k]
+    t.__dict__["_g128"] = vue
+    return vue
+
+
 def gemm_i8c_cublas(x: torch.Tensor, t: INT8Tensor, sortie_fp32: bool = False):
     """``x`` [M, K] → [M, N] par `torch._int_mm` sur un poids symétrique par
     canal : y = s_x[m] · s_w[n] · Σ_k a8[m,k]·(q[n,k] − 128), produit entier
@@ -892,6 +920,11 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
     k_pad = t.qweight.shape[1]
 
     if ext is not None and t.qweight.is_cuda and n <= gemv_threshold:
+        if n >= 2:
+            # C11 : un poids par canal (i8c) prend les chemins étroits par sa vue
+            # g128 (mêmes codes, échelle répétée) — sinon 2 ≤ M ≤ 16 n'avait
+            # que le repli déquant (P2-déc b=12 1 062 t/s contre 1 334)
+            t = vue_g128(t)
         # Poste C (poste7-profil-verdict-17-09) : GEMM étroit W8A16 Triton pour
         # b ≤ 16, linéaires denses ET tête (fp32) ; opt-in jusqu'au scellé
         # (dense b=12 ≤ 1,0 ms/pas, sortie = chemin actuel ± 2⁻⁸)
@@ -901,6 +934,7 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
         if narrow_choix(n, sortie_fp32) == "triton" and n <= 16 and xf.dtype == torch.bfloat16:
             from . import gemm_etroit
             if gemm_etroit.disponible() and gemm_etroit.eligible(t):
+                CHEMINS_INT8["etroit_triton"] += 1
                 y = gemm_etroit.gemm_etroit(xf.contiguous(), t, sortie_fp32)[:, : t.shape[0]]
                 return y.reshape(*orig_shape[:-1], t.shape[0])
         if k_pad != xf.shape[-1]:
@@ -911,9 +945,11 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
         etroit = _NARROW_GEMM or getattr(t, "etroit", False)
         if (etroit and not sortie_fp32 and _NARROW_MIN <= n <= 16 and k_pad % 64 == 0
                 and t.group_size % 64 == 0 and xf.dtype == torch.bfloat16 and hasattr(ext, "narrow_gemm")):
+            CHEMINS_INT8["narrow_cuda"] += 1
             y = ext.narrow_gemm(t.qweight.contiguous(), None, t.scales.contiguous(), t.zeros.contiguous(),
                                 xf.contiguous(), k_pad, t.group_size, 1.0, _narrow_rows(t.qweight.shape[0]))
             return y.to(x.dtype).reshape(*orig_shape[:-1], t.qweight.shape[0])
+        CHEMINS_INT8["gemv"] += 1
         y = ext.int8_gemv(
             t.qweight.contiguous(), t.scales.contiguous(), t.zeros.contiguous(),
             xf.contiguous(), t.group_size, sortie_fp32)
