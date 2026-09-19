@@ -580,6 +580,8 @@ class Engine:
             # la ligne disait `graphes=on` sur des bras entièrement en eager
             # (poste7-kv-lm4-clos-17-09 § 1)
             "graphes": self.graphs is not None and bool(self.graphs.enabled),
+            "repli_eager": int(getattr(self.graphs, "replis_eager", 0)) if self.graphs is not None else 0,
+            "replis_eager_raisons": sorted(getattr(self.graphs, "_raisons_eager_vues", set())) if self.graphs is not None else [],
             "slots_hybrides": getattr(self.graphs, "max_slots", None) if self.graphs is not None else None,
             "graphes_demandes": self._graphes_demandes,
             "graphes_raison": (self._graphes_raison if self.graphs is None
@@ -634,6 +636,7 @@ class Engine:
         slots = r.get("slots_hybrides")
         return (f"régime {etat} — graphes={'on' if r['graphes'] else 'off'}"
                 f"{'' if slots is None else f'(hybrides≤{slots})'} "
+                f"repli_eager={r.get('repli_eager', 0)} "
                f"couches_exilées={r['couches_exilees']}/{r['couches_total']} "
                f"experts_exilés={r['experts_exiles']}/{r['experts_total']} "
                f"{piles_txt} cartes={r['cartes']} "

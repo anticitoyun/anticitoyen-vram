@@ -191,6 +191,14 @@ if n_tronquees:
               "b_demande": B, "sequences_tronquees_budget": n_tronquees,
               "preuve": preuve}, open(SORTIE, "w"), indent=1)
     raise SystemExit(1)
+# (19/09, poste7) un repli eager pendant la fenetre = la cellule n'a pas tourne au regime annonce
+n_replis = int(engine.regime().get("repli_eager", 0)) if not preuve["eager"] else 0
+if n_replis:
+    print(f"[CERT {BRAS}] REFUS : {n_replis} pas retombe(s) en eager pendant la mesure "
+          f"({', '.join(engine.regime().get('replis_eager_raisons', []))}) -- {engine.regime_ligne()} -- cellule invalide.", flush=True)
+    json.dump({"invalide": True, "cause": "repli eager pendant la mesure", "repli_eager": n_replis,
+               "raisons": engine.regime().get("replis_eager_raisons", []), "preuve": preuve}, open(SORTIE, "w"), indent=1)
+    raise SystemExit(1)
 # deux instruments pour la duree (biais b11b8a3 : energie.py relevait apres le join)
 ecart_duree = abs(e.duree - duree_hote)
 res = {"en_tete": {"instrument": "energie.py compteur TotalEnergyConsumption",

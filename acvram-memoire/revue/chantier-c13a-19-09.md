@@ -17,3 +17,25 @@ TF32 émulé (mantisse tronquée à 10 bits = borne haute de l'arrondi matériel
 * Le temps réel (allow_tf32 sur `einsum` → cuBLAS TF32 sur sm_120 : à vérifier par nsys que les noyaux `*tf32*` apparaissent, sinon la variable est inerte — REGLES § 4, contrôle qui peut rendre faux).
 * La PPL sous TF32 (poste2 : `ppl-acvram` GLM 3 tranches, `[gMASK]<sop>`, contre le défaut du même arbre).
 * C13-b (cœur bf16 sur noyau) après le nsys GLM.
+
+## C13-b (19/09 soir, à sec, commit `poste1-11 6bd11a13`) — `ACVRAM_MLA_CORE=fp32|tf32|bf16` remplace le booléen `ACVRAM_MLA_TF32`
+
+Geste (`poste7-m2-mma2-budgets-prefill-19-09` § 3) : une seule variable de régime, trois bras. `mla.py:48-70` : `_MLA_CORE` lu une fois (valeur hors {fp32, tf32, bf16} → `ValueError` à l'import), `_dt_coeur()` (bf16 sous `bf16`, fp32 sinon), `_tf32_coeur(decode=)` inchangé mais armé seulement sous `tf32`. Les opérandes des trois produits du cœur (scores q·C, o_lat = probs·V, y = v_b·o_lat) sont transtypés en `_dt_coeur()` aux 5 sites de préfill (`mla.py:351-375`) et aux 4 sites de décodage (`mla.py:341, 485`) ; la sortie est refloatée avant la suite — la capture graphes ne change pas (mêmes tenseurs d'entrée/sortie, un cast de plus dans le graphe). `regime.py` : `Variable("MLA_CORE", "fp32", …)` ; `cli.py` : garde mise à jour. Hors défaut, `regime_ligne()` imprime `ACVRAM_MLA_CORE=bf16`.
+
+Preuve à sec (`tests/test_mla_tf32_c13.py`, 3 tests, 32 passed / 23 skipped sur les 8 fichiers MLA/régime) : `test_coeur_bf16_borne_a_2_moins_7_par_ligne_formes_reelles` — formes GLM réelles (nh 20, r 512, rope 64, **L = 2047**, t = 64 requêtes), v_b réel du converti si présent sinon aléatoire fixé une fois pour les deux bras, bras bf16 contre fp32 : |Δ| ≤ 2⁻⁷ · max|ligne| sur **chaque ligne** des scores, de o_lat et de y ; **bras qui doit différer** : une ligne de y perturbée de 2⁻⁶ fait rendre « faux » à la borne. `test_contexte_tf32_restaure_et_identite_au_defaut` : sous `fp32` le contexte ne touche pas `allow_tf32`, sous `tf32` il le pose puis le restaure.
+
+Reste (carte, poste2) : bras `bf16` scellé avant mesure par poste7 — prefill GLM **≥ 9 000 j/s ET ΔPPL ≤ +0,002** → devient le défaut ; sinon `tf32` (C13-a) reste le candidat. Non vérifié à sec : la vitesse (bf16 double le débit des tensor cores contre TF32, prédiction ≥ +5 % sur le préfill GLM si les 82 ms du cœur sont bien la part dominante) ; l'effet sur la PPL en décodage (2 sites, teacher forcing b=1).
+
+## Défaut tf32 (19/09 soir, `poste7-c13a-defaut-19-09` § 1 + addendum 20 h 05) — commit sur `poste1-11`, à fusionner par chef
+
+Trois variables pour trois portées, chacune dans `regime.VARIABLES` et sur la ligne de régime hors défaut ; `ACVRAM_MLA_TF32` disparaît sans alias.
+
+| variable | défaut | portée | ouvre |
+|---|---|---|---|
+| `ACVRAM_MLA_CORE` | **`tf32`** (depuis ce commit ; C13-a tenu : 7 191 ≥ 6 200 j/s, ΔPPL géo +0,00066 ≤ 0,001, poste2 3bcc173 / main a7397e2) | les deux einsum du préfill, scores q·C et o_lat = probs·V (`mla.py`, chunké et non chunké : 4 sites) | `fp32` référence de qualité · `bf16` bras C13-b |
+| `ACVRAM_MLA_CORE_VB` | `0` (fp32) | le 3e produit du préfill y = v_b·o_lat (8ae21997, 2 sites) suit `MLA_CORE` sous `1` | scellé § 2 : prefill ≥ 7 450 j/s ET ΔPPL géo ≤ +0,001 contre 2 produits → défaut `1` |
+| `ACVRAM_MLA_CORE_DECODE` | `fp32` | le cœur du décodage y = v_b·o_lat (4 sites, sgemm 1,5 ms/pas à b=12), **indépendant de `MLA_CORE`** | niveau 2, scellé § 2 : sgemm ≤ 0,6 ms ET ppl-decode-kv ± 0,001 ET capture 5/5 → défaut |
+
+Preuve à sec (`tests/test_mla_tf32_c13.py::test_defaut_tf32_prefill_seul_et_portees_opt_in`, 43 passed / 23 skipped sur les fichiers MLA/régime) : sans variable, `_tf32_coeur()` pose `allow_tf32` pendant le bloc et le rend après ; `_tf32_coeur(vb=True)` et `_tf32_coeur(decode=True)` restent inertes au défaut, et chacun s'ouvre par sa seule variable (bras qui doivent différer) ; `bf16` au préfill n'atteint ni le 3e produit sans VB ni le décodage ; comptes de sites vérifiés dans la source (4 / 2 / 4), aucun `ACVRAM_MLA_TF32` restant. Le test bf16 ≤ 2⁻⁷ par ligne (C13-b) est inchangé.
+
+Bras de poste2, à écrire tels quels : défaut = `tf32` ; addendum 8ae21997 = `ACVRAM_MLA_CORE_VB=1` ; niveau 2 = `ACVRAM_MLA_CORE_DECODE=tf32` ; C13-b complet (trois produits) = `ACVRAM_MLA_CORE=bf16 ACVRAM_MLA_CORE_VB=1`, contre `tf32` (défaut) ET contre `fp32` (qualité).

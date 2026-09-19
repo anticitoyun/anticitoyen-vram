@@ -193,6 +193,7 @@ class GraphRunner:
         self.captures = 0
         self._last_key: Optional[tuple[int, int]] = None
         self._raisons_eager_vues: set = set()
+        self.replis_eager = 0                  # pas retombés en eager depuis le démarrage
         # Posée AVANT _eligible, qui la remplit : l'initialiser après
         # l'effacerait à chaque fois, et le message aurait annoncé
         # « raison non nommée » pour tous les cas nommés.
@@ -336,6 +337,12 @@ class GraphRunner:
         serveur qui replie à chaque pas sur le même motif ne doit pas noyer
         sa propre sortie.
         """
+        # compte TOUT repli en service, pas seulement la première raison :
+        # trois replis silencieux en une soirée (plafond hybride, capture
+        # aveugle, MLA spéculatif — 19/09) ; `/metrics.repli_eager`,
+        # `regime_ligne()` porte `repli_eager=N`, certifie/capture rendent
+        # faux si N > 0 (poste7)
+        self.replis_eager = getattr(self, "replis_eager", 0) + 1
         if raison in self._raisons_eager_vues:
             return
         self._raisons_eager_vues.add(raison)
