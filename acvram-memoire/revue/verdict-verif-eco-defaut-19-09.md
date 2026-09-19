@@ -8,3 +8,7 @@ suite : poste1 : (a) lire l'effectif après le premier pas (ou le relire à la p
 
 ## Rejouable
 `ACVRAM_TYPE=mesure outils/carte.sh bash scratchpad/verif-eco-19-09/chaine.sh` (40 s ; trap `-rgc`).
+
+## Addendum 21 h 08 — rejeu sur main `b199c5c9` (lecture sous charge jusqu'à stabilité, arbre `7da6b60`) : **bras 2 et SIGTERM conformes, bras 1 encore non conforme** — (1) serve réel : ligne **`eco=2700(1102: non pris)`** (deux lectures à 1 102 pendant la montée d'une carte froide ont satisfait « stable ± 30 hors palier ≥ 1 000 » : un palier de montée n'est pas un régime) alors que SM = 2 692 dès la première requête ; SIGTERM → `acvram eco etat` **libre** (lectures [870 ×4, 487 ×4, 2 872, 2 872], stable) et état effacé ✓ ; (2) `-lgc 2700` à la main + `ACVRAM_ECO=off` → **`eco=off(2692: verrou 2700 posé hors processus)`** ✓ (le bras qui devait rendre faux rend juste), après SIGTERM `lgc2700?` (verrou manuel, juste) ; `-rgc` rc=0
+instrument : même `chaine.sh` (étiquette entière relevée), prise `carte.sh` 21:07:58-21:08:46 ; **verdict : 2 lignes sur 3 tenues ; la ligne au chargement dit encore « non pris » sur une carte froide — le critère de stabilité doit exiger que la lecture ne monte plus (3 lectures décroissantes ou égales à ± 30) ou attendre ≥ 0,8 s de charge avant la première lecture ; 0.6.20 attend ce dernier geste (règle de poste7 : les trois bras)**
+suite : poste1 : stabilité = « plus de montée » (delta ≤ +30 sur 3 lectures) ou lecture différée ; chef : dpkg -i après le rejeu du bras 1 (40 s) ; ma file : C13-c à sa fenêtre
