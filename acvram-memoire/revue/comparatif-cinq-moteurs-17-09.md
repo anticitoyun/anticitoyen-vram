@@ -24,6 +24,7 @@ Assemblé par chef, critère 6 points `poste7-plan-completion-comparatif-17-09`.
 | llama.cpp Q4_K_M — **`-lgc 2700`, harnais égal** (`verdict-concurrents-2700` poste2 447d7156) | = | = | **316,7 · 0,724 net** | — | **890,4** | **0,170 net** | **15 532** | oui | poste7-concurrents-2700-verite-b12-20-09 |
 | vLLM **W4A16 Marlin** (configuration nommée : pas FP4/FlashInfer) — **horloge libre** | — | — | — | — | **2 031** | — | — | oui | verdict-concurrents-2700 |
 | vLLM **W4A16 Marlin** — **`-lgc 2700`, harnais égal** | — | — | **290,2 · 0,622 net** | — | **1 626** | **0,136 net** | **20 824** | oui | poste7-concurrents-2700-verite-b12-20-09 |
+| **llama.cpp Mistral-Small-4-119B UD-Q4_K_M, experts en RAM (`--override-tensor exps=CPU`), 5090 seule, `-lgc 2700` — référence machine pour C9** (`verdict-c9-llamacpp-119b-19-09`, poste2 c337520c) | — | — | **b=1 23,1 j/s** (24,2 à 16 fils) | — | — | — | **488** | — | poste7-c9-barre-24-20-09 : acvram par PCIe × 8 (22,6 Go/s) plafonne à 11,9 sans cache, parité seulement à h ≥ 0,55 → C9 en pause |
 | vLLM W4A16 Marlin (ModelOpt communautaire) | 1,1227 | 1,0876 | 302,9 | — | 2 031,4 | 0,197 | 20 988 | non | verdict-coder-vllm-17-09 |
 | vLLM W4A4 CUTLASS (ModelOpt communautaire) | 1,1554 | 1,1160 | 200,9 | — | 1 621,7 | 0,227 | 35 241 | non | verdict-coder-vllm-17-09 |
 | TRT-LLM W4A4 (même ModelOpt, KV fp8) | 1,2313 | 1,1376 | 234,9 | 1,481 | 2 104,7 | 0,177 | 55 419 | non | verdict-coder-trtllm-17-09 |
