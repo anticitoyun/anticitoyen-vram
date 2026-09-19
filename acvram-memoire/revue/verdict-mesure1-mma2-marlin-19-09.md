@@ -45,3 +45,19 @@ verdict : **Mesure 2 : NON** — la ligne t est tenue (0,88 ≤ 1,15 ; ma prédi
 Par couche : **u=8 Marlin 22,2 µs, mma2 27,3 (×1,23 ; ×1,01 sans la quantification)** ; **u=16 Marlin 32,4, mma2 45,2 (×1,40 ; ×1,24 sans)**. Le croisement est entre u=16 et u=27 (×0,75) : à 8-16 tuiles mma2 n'occupe que 8-16 blocs sur 170 SM (latence, pas débit : 28,2 µs à 16 tuiles contre 43,7 à 27 — non linéaire) ; Marlin gate·up à b=1 tourne sous le plafond (376 W). La route native ne vaut qu'à b ≥ ~4 (u ≥ ~24) ; à b=1 le GEMV Marlin reste.
 
 ## Contrôle (b) de C10 (20:12, 3 s, carte) : **21 passed** — `tests/test_gemv_marlin.py` sous `ACVRAM_MARLIN_DISTINCT=1` : formes GLM ajoutées (bce00f71 : gate·up 2048×1536 act 0/1, down 1536×2048 en 3 modes, à côté des formes Coder), bloc MoE décodage par GEMV Marlin, bras cassant (échelles décalées / poids permutés). Extension = cache faf1f7b (`ACVRAM_CUDA_HOME=/usr/local/cuda-13.4` obligatoire sous `carte.sh`, sinon « Error building extension » et repli référence : le premier passage a été un 21 skipped, dit ici). Pointeur à chef : fusion de C10 opt-in (`ACVRAM_MARLIN_DISTINCT`) possible.
+
+## Mesure 1-ter (21:23-21:25, sous éco 2 700 posé par l'instrument, `eco=2700(2685)` sur les deux bras ; `donnees-mesure1-19-09/chaine-mesure1ter.sh`, journaux `mesure1ter-*.log`) : **le -lgc 2700 est un plafond, pas un plancher — Marlin reste bridé par la puissance sous 2 700, mma2 tient 2 692 : 0,893 à u=45, 0,771 à u=27**
+
+| u | noyau | t noyau µs | W | MHz | cycl. | To/s |
+|---|---|---|---|---|---|---|
+| 45 | Marlin gate·up | 74,0 | 397,6 | **2 265** | 0,94 | 1,08 |
+| 45 | Marlin down | 36,9 | 401,3 | **1 950** | 0,91 | 1,08 |
+| 45 | mma2 gate+up | 64,8 | 388,6 | **2 692** | 0,99 | 1,23 |
+| 45 | mma2 down | 28,8 | 398,2 | 2 692 | 0,98 | 1,38 |
+| 45 | quant_act ×2 | 5,4 | (boucle) | 2 692 | 0,27 | — |
+| 27 | Marlin gate·up | 55,2 | 403,9 | 1 942 | 0,90 | 0,87 |
+| 27 | Marlin down | 33,6 | 397,3 | 2 040 | 0,91 | 0,71 |
+| 27 | mma2 gate+up | 44,2 | **358,0** | 2 692 | 0,98 | 1,08 |
+| 27 | mma2 down | 18,9 | 383,9 | 2 692 | 0,99 | 1,27 |
+
+Par couche : u=45 Marlin 110,9 µs, mma2 99,0 (**×0,893**) ; u=27 88,8 contre 68,5 (**×0,771**). Scellé poste7 (`poste7-c17-scelle-mesure1-ter-20-09`, prédiction 0,95-1,04 : **réfutée** ; C17 s'écrit si ≤ 0,92 : **tenu**) ; ma prédiction 0,93-0,98 réfutée aussi. Mon contrôle « MHz des quatre noyaux à 2 640-2 700, sinon éco non effectif, non publiable » rend **faux pour Marlin (1 942-2 265 MHz)** — mais la cause est physique et vérifiée dans le même processus : l'éco est effectif (2 685 lu sous charge légère, mma2 à 2 692 sous 390 W), c'est **le plafond de puissance qui tire Marlin sous le verrou** (398-404 W à 2 000 MHz : ses instructions par octet le rendent co-limité, `c16bis` § 2) ; `-lgc` ne peut pas tenir une horloge que le bridage refuse. Lecture : sous le défaut servi (éco 2 700), l'écart mma2/Marlin n'est PAS un écart d'horloges qu'on égalise, c'est l'écart de ce que chaque noyau obtient sous 400 W ; le −11 % (u=45) est le chiffre du régime servi. poste7 tranche C17 avec ce chiffre ; mma2 à u=27 tombe à 358 W (sous le plafond) : le seul poste qui rend des watts.

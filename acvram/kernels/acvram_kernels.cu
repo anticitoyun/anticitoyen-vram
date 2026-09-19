@@ -3261,20 +3261,49 @@ __device__ __forceinline__ void cp_async8(void *smem, const void *gmem) {
 // (deux MMA par fragment et moitié de __syncthreads, foulée 80 o : 20g+tq
 // donne 32 bancs distincts). Les échelles d'un étage tiennent en KS/16 octets
 // par ligne : un mot de 4 par MMA.
-template <int BT, int S, int KS>
+// C17 (chantier-c17-mma2-lit-marlin-19-09, scellé poste7-c17-scelle-mesure1-ter) : MARLIN = le
+// même noyau lisant la DISPOSITION MARLIN des experts (P1, disposition unique) au lieu de la
+// pile naturelle — aucune copie, aucun repack : les tuiles 16 k × 64 n de 512 o (`table_qw` =
+// w_marlin [K/16, 2N] int32 par expert) arrivent en shared par les mêmes cp.async coalescés
+// (une tuile = 32 voies × 16 o), et le fragment B de la MMA (8 k consécutifs d'une colonne
+// par mot) est rassemblé depuis 4 mots de 4 voies (marlin_port._indices : voie t = 4·c + j
+// porte les colonnes w·16 + c (+8) aux k 2·j + {0, 1, 8, 9}, quartets dans l'ordre
+// _PACK_IDX = 0 2 4 6 1 3 5 7 : positions p0 n0:k, p1 n0:k+8, p2 n8:k, p3 n8:k+8, p4 n0:k+1,
+// p5 n0:k+9, p6 n8:k+1, p7 n8:k+9). Les échelles Marlin (`table_bscale` = s_marlin [K/16, N]
+// octets « S0E5M3 » = moitié haute de half(s·facteur·2^7) << 1, colonnes permutées
+// 8·(o%8) + swap4(o/8) par tuile de 64) sont reconverties en UE4M3 dans le fil :
+// champ d'exposant (octet >> 3) − (15 + log2 facteur) (= `decal`), forme sous-normale
+// reconstruite quand l'exposant tombe à ≤ 0 ; les échelles que le repack a annulées
+// (s·facteur·2^7 < 2, 0,0064 % sur Coder) restent nulles — c'est ce que la GEMV Marlin
+// calcule déjà. Même arithmétique MMA, même épilogue (gscales = échelle globale naturelle).
+__device__ __forceinline__ unsigned gm2_ue4m3_depuis_marlin(unsigned b, int decal) {
+    if (b == 0u) return 0u;
+    const int E = (int)(b >> 3) - decal;               // exposant UE4M3 (biais 7) reconstitué
+    const unsigned m = b & 7u;
+    if (E >= 1) return ((unsigned)E << 3) | m;
+    if (E >= -2) return (8u | m) >> (1 - E);             // sous-normal UE4M3 : 2^-6 · 0.M
+    return 0u;
+}
+
+template <int BT, int S, int KS, bool MARLIN = false>
 __global__ void __launch_bounds__(GM2_FILS) nvfp4_gemm_grouped_mma2_kernel(
     const float *__restrict__ gscales, const float *__restrict__ grow,
     const unsigned char *__restrict__ xq, const unsigned char *__restrict__ xsf,
     const int *__restrict__ tile_e, const int *__restrict__ tile_t0,
     const int *__restrict__ tile_n, const int64_t *__restrict__ table_qw,
     const int64_t *__restrict__ table_bscale,
-    __nv_bfloat16 *__restrict__ y, int M, int K) {
+    __nv_bfloat16 *__restrict__ y, int M, int K, int decal) {
 #ifdef ACVRAM_MMA_FP4
     constexpr int MF = BT / 16;
     constexpr int LD = KS / 2 + 16;          // 48 ou 80 octets par ligne
     constexpr int NM = KS / GM_KB;           // MMA par fragment et par étage
     constexpr int SB = KS / 16;              // octets d'échelles par ligne et par étage
     constexpr int CH = KS / 32;              // chargements de 16 o par ligne et par étage
+    // MARLIN : par étage, (KS/16) tuiles de k × 2 tuiles de n (BM = 128 = 2 × 64), 512 o chacune,
+    // foulée 528 (16 o de bourrage : cp.async 16 o aligné ; 132 mots ≡ 4 mod 32 bancs) ; échelles
+    // (KS/16) × 2 × 64 o = BM · SB, comme la pile naturelle.
+    constexpr int NTK = KS / 16;             // tuiles de 16 k par étage
+    constexpr int TUILE = 528;
     extern __shared__ __align__(16) unsigned char gm2_smem[];
     typedef unsigned char (*TA)[BT * LD];
     typedef unsigned char (*TB)[GM2_BM * LD];
@@ -3308,18 +3337,35 @@ __global__ void __launch_bounds__(GM2_FILS) nvfp4_gemm_grouped_mma2_kernel(
             const long src = (long)(t0 + min(r, nt - 1)) * half_k + kb + 16 * h;
             cp_async16(&sA[st][r * LD + 16 * h], xq + src);
         }
-        for (int c = tid; c < CH * GM2_BM; c += GM2_FILS) {
-            const int r = c / CH, h = c % CH;
-            const long src = (long)min(row0 + r, M - 1) * half_k + kb + 16 * h;
-            cp_async16(&sB[st][r * LD + 16 * h], qw_e + src);
+        if constexpr (!MARLIN) {
+            for (int c = tid; c < CH * GM2_BM; c += GM2_FILS) {
+                const int r = c / CH, h = c % CH;
+                const long src = (long)min(row0 + r, M - 1) * half_k + kb + 16 * h;
+                cp_async16(&sB[st][r * LD + 16 * h], qw_e + src);
+            }
+        } else {
+            // tuile (kt, nt) de w_marlin [K/16, 2N] int32 : octets kt · 8N + nt · 512 ; les deux
+            // tuiles de n du bloc sont row0/64 et +1 (N multiple de 64, BM = 128)
+            const int nt0 = row0 >> 6;
+            for (int c = tid; c < NTK * 2 * 32; c += GM2_FILS) {
+                const int ti = c >> 5, lc = c & 31, ktl = ti >> 1, ntl = ti & 1;
+                const long src = ((long)(ks + ktl) * 8 * (long)M) + (long)(nt0 + ntl) * 512 + lc * 16;
+                cp_async16(&sB[st][ti * TUILE + lc * 16], qw_e + src);
+            }
         }
         if (tid < BT) {
             const unsigned char *src = xsf + (long)(t0 + min(tid, nt - 1)) * nblk + ks;
             if constexpr (SB == 4) cp_async4(&sSA[st][tid * SB], src); else cp_async8(&sSA[st][tid * SB], src);
-        } else if (tid < BT + GM2_BM) {
+        } else if (!MARLIN && tid < BT + GM2_BM) {
             const int r = tid - BT;
             const unsigned char *src = bs_e + (long)min(row0 + r, M - 1) * nblk + ks;
             if constexpr (SB == 4) cp_async4(&sSB[st][r * SB], src); else cp_async8(&sSB[st][r * SB], src);
+        } else if (MARLIN && tid < BT + NTK * 2 * 4) {
+            // échelles Marlin : ligne kt de s_marlin [K/16, N] octets, 64 o par tuile de n ;
+            // rangées en shared par (ktl, ntl) : 64 o chacune, 4 morceaux de 16 o
+            const int c = tid - BT, ti = c >> 2, part = c & 3, ktl = ti >> 1, ntl = ti & 1;
+            const unsigned char *src = bs_e + (long)(ks + ktl) * M + (long)((row0 >> 6) + ntl) * 64 + part * 16;
+            cp_async16(&sSB[st][ti * 64 + part * 16], src);
         }
     };
 
@@ -3368,13 +3414,46 @@ __global__ void __launch_bounds__(GM2_FILS) nvfp4_gemm_grouped_mma2_kernel(
             for (int nf = 0; nf < 2; ++nf) {
                 const int r = warp * 16 + nf * 8 + g;
                 const bool ok = row0 + r < M;
-                const unsigned char *p = &sB[st][r * LD + ko + 4 * tq];
-                const unsigned lo = *reinterpret_cast<const unsigned *>(p);
-                const unsigned hi = *reinterpret_cast<const unsigned *>(p + 16);
-                b[nf][0] = ok ? lo : 0u;
-                b[nf][1] = ok ? hi : 0u;
-                const unsigned sv = *reinterpret_cast<const unsigned *>(&sSB[st][r * SB + 4 * m]);
-                sfb[nf] = ok ? sv : 0u;
+                if constexpr (!MARLIN) {
+                    const unsigned char *p = &sB[st][r * LD + ko + 4 * tq];
+                    const unsigned lo = *reinterpret_cast<const unsigned *>(p);
+                    const unsigned hi = *reinterpret_cast<const unsigned *>(p + 16);
+                    b[nf][0] = ok ? lo : 0u;
+                    b[nf][1] = ok ? hi : 0u;
+                    const unsigned sv = *reinterpret_cast<const unsigned *>(&sSB[st][r * SB + 4 * m]);
+                    sfb[nf] = ok ? sv : 0u;
+                } else {
+                    // colonne n = row0 + r : tuile de n ntl = r/64, o = r%64 ; dans la tuile Marlin
+                    // w = o/16 (mot), h = (o%16)/8 (moitié n0 / n8), c = o%8 (voie t = 4c + j)
+                    const int o = r & 63, ntl = r >> 6, w = o >> 4, h = (o >> 3) & 1, c = o & 7;
+                    // le mot lo de la MMA m couvre k = 64m + 8tq..+7 : tuile de k ktl = 4m + tq/2,
+                    // moitié kb = 8·(tq&1) ; hi = +32 k : ktl + 2
+                    #pragma unroll
+                    for (int half = 0; half < 2; ++half) {
+                        const int ktl = 4 * m + (tq >> 1) + 2 * half, kb = tq & 1;
+                        const unsigned char *tuile = &sB[st][(ktl * 2 + ntl) * TUILE];
+                        const int pA = kb + 2 * h;             // quartet k (pair) ; +4 = k+1 (impair)
+                        unsigned mot = 0u;
+                        #pragma unroll
+                        for (int i = 0; i < 4; ++i) {
+                            const int j = (i + g) & 3;         // ordre tourné par g : bancs distincts
+                            const unsigned W = *reinterpret_cast<const unsigned *>(tuile + (4 * c + j) * 16 + w * 4);
+                            const unsigned nl = (W >> (4 * pA)) & 0xFu, nh = (W >> (4 * (pA + 4))) & 0xFu;
+                            mot |= (nl | (nh << 4)) << (8 * j);    // octet j = paire (2j, 2j+1), pair en bas
+                        }
+                        b[nf][half] = ok ? mot : 0u;
+                    }
+                    // échelles : 4 tuiles de k de la MMA m, octet permuté 8·(o%8) + swap4(o/8) dans la
+                    // tuile de 64, reconverties S0E5M3 → UE4M3
+                    const int q = o >> 3, bidx = 8 * (o & 7) + ((q & ~3) | ((q & 1) << 1) | ((q >> 1) & 1));
+                    unsigned sv = 0u;
+                    #pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        const unsigned by = sSB[st][((4 * m + i) * 2 + ntl) * 64 + bidx];
+                        sv |= gm2_ue4m3_depuis_marlin(by, decal) << (8 * i);
+                    }
+                    sfb[nf] = ok ? sv : 0u;
+                }
             }
             #pragma unroll
             for (int mf = 0; mf < MF; ++mf)
@@ -3490,8 +3569,12 @@ torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table
                                      torch::Tensor xsf, torch::Tensor tile_e,
                                      torch::Tensor tile_t0, torch::Tensor tile_n,
                                      int64_t M, int64_t K, int64_t bt, int64_t etages, int64_t ks,
-                                     c10::optional<torch::Tensor> grow) {
+                                     c10::optional<torch::Tensor> grow, int64_t marlin) {
     CHECK_CUDA(xq); ACVRAM_DEVICE_GUARD(xq);
+    // C17 : marlin >= 0 = table_qw/table_bscale pointent la DISPOSITION MARLIN (w_marlin, s_marlin),
+    // `marlin` = decal d'exposant des echelles (15 + log2 facteur) ; -1 = pile naturelle
+    TORCH_CHECK(marlin < 0 || (etages > 0 && M % 128 == 0),
+                "GEMM groupee MMA sur disposition Marlin : etages > 0 et N multiple de 128 (deux tuiles de n par bloc)");
     const float *grow_p = nullptr;
     if (grow.has_value() && grow->defined()) {
         CHECK_CUDA(*grow); CHECK_CONTIG(*grow);
@@ -3527,6 +3610,7 @@ torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table
         tile_e.data_ptr<int>(), tile_t0.data_ptr<int>(), tile_n.data_ptr<int>(), \
         table_qw.data_ptr<int64_t>(), table_bscale.data_ptr<int64_t>(), \
         reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), (int)M, (int)K
+    #define GM_ARGS2 GM_ARGS, (int)marlin
     if (etages == 0) {
         dim3 grid((M + GM_BM - 1) / GM_BM, T);
         #define GM_L(BT) nvfp4_gemm_grouped_mma_kernel<BT><<<grid, 128, 0, stream>>>(GM_ARGS)
@@ -3536,9 +3620,15 @@ torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table
         dim3 grid((M + GM2_BM - 1) / GM2_BM, T);
         const size_t shm = (size_t)etages * ((bt + GM2_BM) * (ks / 2 + 16) + (bt + GM2_BM) * (ks / 16));
         #define GM_L2(BT, S, KS) do { \
-            if (shm > 48 * 1024) cudaFuncSetAttribute(nvfp4_gemm_grouped_mma2_kernel<BT, S, KS>, \
-                                                      cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm); \
-            nvfp4_gemm_grouped_mma2_kernel<BT, S, KS><<<grid, GM2_FILS, shm, stream>>>(GM_ARGS); } while (0)
+            if (marlin < 0) { \
+                if (shm > 48 * 1024) cudaFuncSetAttribute(nvfp4_gemm_grouped_mma2_kernel<BT, S, KS, false>, \
+                                                          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm); \
+                nvfp4_gemm_grouped_mma2_kernel<BT, S, KS, false><<<grid, GM2_FILS, shm, stream>>>(GM_ARGS2); \
+            } else { \
+                if (shm > 48 * 1024) cudaFuncSetAttribute(nvfp4_gemm_grouped_mma2_kernel<BT, S, KS, true>, \
+                                                          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm); \
+                nvfp4_gemm_grouped_mma2_kernel<BT, S, KS, true><<<grid, GM2_FILS, shm, stream>>>(GM_ARGS2); \
+            } } while (0)
         #define GM_LS(S, KS) do { if (bt == 16) GM_L2(16, S, KS); else if (bt == 32) GM_L2(32, S, KS); \
                                   else if (bt == 64) GM_L2(64, S, KS); else GM_L2(128, S, KS); } while (0)
         #define GM_LK(KS) do { if (etages == 2) GM_LS(2, KS); else if (etages == 3) GM_LS(3, KS); else GM_LS(4, KS); } while (0)
@@ -3547,6 +3637,7 @@ torch::Tensor nvfp4_gemm_grouped_mma(torch::Tensor table_qw, torch::Tensor table
         #undef GM_LS
         #undef GM_L2
     }
+    #undef GM_ARGS2
     #undef GM_ARGS
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return y;
@@ -5314,7 +5405,9 @@ void mla_ecrit_latent(torch::Tensor k_new, torch::Tensor cache_ptrs, torch::Tens
 // calcul (≈ 25 GFMA/pas) reste sous la lecture (1,3 Go/pas).
 //
 // Mémoire partagée : q fp32 [H][W] + tuile bf16 [TL][W+8] + S, P [HMAX][TL] +
-// m, l, alpha [HMAX] — 83 Ko à H=20, W=576, TL=32 ; un CTA par SM.
+// m, l, alpha [HMAX] + échelles et table fp8 — 89 968 o (88 Ko) à H=20,
+// W=576, TL=32 (formule du lanceur) ; 67 Ko à TL=16 : UN CTA par SM dans
+// les deux cas (C14 : la grille doit donc venir du nombre de tranches).
 // Scores : chaque warp prend RW lignes à la fois, les lanes se partagent W
 // (paires bf16), q lu une fois pour RW lignes, réduction par __shfl_xor.
 // o_lat : un fil = deux colonnes de R, toutes les têtes en registres.
@@ -5322,6 +5415,16 @@ void mla_ecrit_latent(torch::Tensor k_new, torch::Tensor cache_ptrs, torch::Tens
 // mla_scores ; les tranches entièrement au-delà écrivent m = −inf, l = 0.
 // ============================================================================
 constexpr int MLA1P_FILS = 256;
+// C14 : borne de S (tranches par séquence) — les poids de recombinaison de
+// mla_1p_combine tiennent en shared (4 Ko) ; mla_1p_tranches n'y arrive
+// jamais (S ≤ SM/B ≤ 170 en pratique), la borne protège le combine.
+constexpr int MLA1P_S_MAX = 1024;
+// C14 : lectures globales groupées par PF par fil (registres d'abord, stores
+// shared ensuite) : la copie q → shared (2 880 float4 à H=20, 12 tours) et
+// la copie de la tuile (2 304 uint4 à TL=32, 9 tours) n'enchaînaient qu'une
+// latence mémoire par tour ; PF=4 en émet quatre à la fois. Pure copie :
+// aucune arithmétique, sortie identique au bit.
+constexpr int MLA1P_PF = 4;
 
 template <int HMAX, int TL, int RW, bool FP8>
 __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
@@ -5368,11 +5471,18 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
         }
         return;
     }
-    // q en mémoire partagée (float4)
+    // q en mémoire partagée (float4), MLA1P_PF lectures en vol par fil
     {
         const float4 *src = reinterpret_cast<const float4 *>(q + (size_t)b * H * W);
         float4 *dst = reinterpret_cast<float4 *>(q_s);
-        for (int i = tid; i < H * W / 4; i += MLA1P_FILS) dst[i] = src[i];
+        const int n4 = H * W / 4;
+        for (int i0 = tid; i0 < n4; i0 += MLA1P_PF * MLA1P_FILS) {
+            float4 v[MLA1P_PF];
+            #pragma unroll
+            for (int k = 0; k < MLA1P_PF; ++k) { const int i = i0 + k * MLA1P_FILS; if (i < n4) v[k] = src[i]; }
+            #pragma unroll
+            for (int k = 0; k < MLA1P_PF; ++k) { const int i = i0 + k * MLA1P_FILS; if (i < n4) dst[i] = v[k]; }
+        }
     }
     if (tid < HMAX) { m_s[tid] = -INFINITY; l_s[tid] = 0.f; a_s[tid] = 1.f; }
     float o[HMAX][2];
@@ -5384,15 +5494,29 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
     for (int t0 = r0; t0 < r1; t0 += TL) {
         const int n = min(TL, r1 - t0);
         __syncthreads();                                         // la tuile précédente est consommée
-        // --- tuile [n][W] : lecture vectorisée 16 o ---
-        for (int i = tid; i < n * chunks_par_ligne; i += MLA1P_FILS) {
-            const int r = i / chunks_par_ligne, c = i - r * chunks_par_ligne;
-            if (FP8) {
-                const uint4 v = *reinterpret_cast<const uint4 *>(cache8 + (t0 + r) * foulee8 + c * 16);
-                *reinterpret_cast<uint4 *>(tile8 + (size_t)r * WP + c * 16) = v;
-            } else {
-                const uint4 v = *reinterpret_cast<const uint4 *>(cache + (size_t)(t0 + r) * W + c * 8);
-                *reinterpret_cast<uint4 *>(tile + (size_t)r * WP + c * 8) = v;
+        // --- tuile [n][W] : lecture vectorisée 16 o, MLA1P_PF en vol par fil ---
+        {
+            const int nc = n * chunks_par_ligne;
+            for (int i0 = tid; i0 < nc; i0 += MLA1P_PF * MLA1P_FILS) {
+                uint4 v[MLA1P_PF];
+                #pragma unroll
+                for (int k = 0; k < MLA1P_PF; ++k) {
+                    const int i = i0 + k * MLA1P_FILS;
+                    if (i < nc) {
+                        const int r = i / chunks_par_ligne, c = i - r * chunks_par_ligne;
+                        v[k] = FP8 ? *reinterpret_cast<const uint4 *>(cache8 + (t0 + r) * foulee8 + c * 16)
+                                   : *reinterpret_cast<const uint4 *>(cache + (size_t)(t0 + r) * W + c * 8);
+                    }
+                }
+                #pragma unroll
+                for (int k = 0; k < MLA1P_PF; ++k) {
+                    const int i = i0 + k * MLA1P_FILS;
+                    if (i < nc) {
+                        const int r = i / chunks_par_ligne, c = i - r * chunks_par_ligne;
+                        if (FP8) *reinterpret_cast<uint4 *>(tile8 + (size_t)r * WP + c * 16) = v[k];
+                        else     *reinterpret_cast<uint4 *>(tile + (size_t)r * WP + c * 8) = v[k];
+                    }
+                }
             }
         }
         if (FP8 && tid < n) sc_s[tid] = *reinterpret_cast<const float *>(cache8 + (t0 + tid) * foulee8 + W);
@@ -5492,32 +5616,78 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
 __global__ void mla_1p_combine_kernel(const float *__restrict__ ws,   // [B, S, H, R+2]
                                       float *__restrict__ o,          // [B, H, R]
                                       int H, int R, int S) {
+    // C14 : S peut monter jusqu'à MLA1P_S_MAX ; le poids e^{m_s−M} de chaque
+    // tranche est calculé UNE fois (un fil par tranche) et mis en shared, au
+    // lieu de S·R/128 __expf par fil — même __expf(m − M), mêmes produits,
+    // même ordre de somme : sortie identique au bit à l'ancien combine.
+    __shared__ float w_s[MLA1P_S_MAX];
     const int b = blockIdx.x, h = blockIdx.y;
     const float *base = ws + ((size_t)b * S * H + h) * (R + 2);
     const size_t pas = (size_t)H * (R + 2);
     float M = -INFINITY;
     for (int s = 0; s < S; ++s) M = fmaxf(M, base[s * pas + R]);
+    for (int s = threadIdx.x; s < S; s += blockDim.x) {
+        const float m = base[s * pas + R];
+        w_s[s] = m != -INFINITY ? __expf(m - M) : 0.f;   // tranche vide : o = 0, l = 0
+    }
+    __syncthreads();
     float Lsum = 0.f;
     for (int s = 0; s < S; ++s) {
         const float m = base[s * pas + R];
-        if (m != -INFINITY) Lsum += base[s * pas + R + 1] * __expf(m - M);
+        if (m != -INFINITY) Lsum += base[s * pas + R + 1] * w_s[s];
     }
     const float inv = Lsum > 0.f ? 1.f / Lsum : 0.f;
     for (int c = threadIdx.x; c < R; c += blockDim.x) {
         float acc = 0.f;
         for (int s = 0; s < S; ++s) {
             const float m = base[s * pas + R];
-            if (m != -INFINITY) acc += base[s * pas + c] * __expf(m - M);
+            if (m != -INFINITY) acc += base[s * pas + c] * w_s[s];
         }
         o[((size_t)b * H + h) * R + c] = acc * inv;
     }
 }
 
-static int mla_1p_tranches(int L, int TL) {
-    // ≈ 64 lignes par CTA (2 tuiles), 32 tranches au plus : à b=12, L=2 048
-    // → 384 CTA (2 par SM) ; à L=128 → 2
+// Nombre de SM de la carte courante (lu une fois par carte) : la grille de
+// mla_1p se dimensionne dessus, pas sur une constante.
+static int mla_1p_sm_count() {
+    static int cache[16] = {0};
+    int dev = 0; cudaGetDevice(&dev);
+    if (dev < 0 || dev >= 16) return 170;
+    if (cache[dev] == 0) {
+        int n = 0;
+        if (cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess || n <= 0) n = 170;
+        cache[dev] = n;
+    }
+    return cache[dev];
+}
+
+// Chantier C14 (poste7-glm-decode-budget-c14-c15-19-09) : l'ancienne règle
+// « ≈ 64 lignes par CTA, S ≤ 32 » supposait 2 CTA par SM — faux : 88 Ko de
+// mémoire partagée à H=20, TL=32 (formule du lanceur) n'en laissent qu'UN
+// par SM (≤ 100 ou 128 Ko par SM selon la génération, ≤ 99 Ko par bloc). À
+// b=1 sur le godet 512 mesuré par nsys (256 jetons d'invite + 70 pas,
+// graphs.py:397) elle lançait 8 CTA sur 170 SM, chacun enchaînant 2 tuiles :
+// 44 µs par couche, la même durée à b=12 (96 CTA, une vague) — le noyau est
+// borné par la chaîne de latence d'un CTA, pas par les octets.
+// Règle : autant de tranches que possible tant que le LOT tient en une vague
+// (B·S ≤ SM, 1 CTA/SM), au plus une tranche par tuile, puis S ramené au
+// nombre de tranches réellement non vides (rows arrondi à TL). Le même
+// arrondi est refait par le lanceur pour rows_par_cta.
+//   b=1  : L=512 → S=tuiles (16 à TL=32, 32 à TL=16) ; L=1 024 → 32 / 64 ;
+//          L=2 048 → 64 / 128 ; L=4 096 → 128 (TL=32).
+//   b=12 : L=512 → 8 (inchangé) ; L=2 048 → 13 (5 tuiles par CTA, une vague,
+//          contre 384 CTA en 2,3 vagues avant).
+// Plafond de S : rien d'autre ne le borne — ws vaut B·S·H·(R+2) floats
+// (≤ SM·H·(R+2)·4 o = 7 Mo à H=20, R=512), mla_1p_combine boucle sur S sans
+// borne (poids en shared : MLA1P_S_MAX), blockIdx.y ≤ 65 535.
+static int mla_1p_tranches(int L, int TL, int B) {
     const int tuiles = (L + TL - 1) / TL;
-    return max(1, min(32, (tuiles + 1) / 2));
+    const int sm = mla_1p_sm_count();
+    int S = max(1, min(tuiles, sm / max(1, B)));
+    S = min(S, MLA1P_S_MAX);
+    const int rows = ((((L + S - 1) / S) + TL - 1) / TL) * TL;   // même arrondi que le lanceur
+    S = max(1, (L + rows - 1) / rows);                            // tranches non vides seulement
+    return S;
 }
 
 torch::Tensor mla_decode_1p(torch::Tensor q_eff, c10::optional<torch::Tensor> cache_ptrs,
@@ -5550,8 +5720,15 @@ torch::Tensor mla_decode_1p(torch::Tensor q_eff, c10::optional<torch::Tensor> ca
         }
         cache0 = reinterpret_cast<const __nv_bfloat16 *>(cache->data_ptr());
     }
-    const int TL = H <= 20 ? 32 : 16;
-    const int S = mla_1p_tranches((int)L, TL);
+    // C14, demi-tuile : à H ≤ 20 la tuile est de 32 lignes (RW=4) ; quand le
+    // lot est petit (B ≤ 2) et que des tuiles de 16 lignes tiennent encore en
+    // une vague (ceil(L/16) ≤ SM/B), on passe à TL=16 (RW=2 : 8 warps × 2
+    // lignes = 16) — deux fois plus de CTA, une chaîne deux fois plus courte
+    // par CTA (16 lignes × W à lire, 16 scores par tête, softmax sur 16).
+    // Sinon la demi-tuile n'achète rien : même grille, une boucle de plus.
+    const bool demi = H <= 20 && B <= 2 && ((int)L + 15) / 16 <= mla_1p_sm_count() / B;
+    const int TL = H <= 20 ? (demi ? 16 : 32) : 16;
+    const int S = mla_1p_tranches((int)L, TL, B);
     const int rows = ((((int)L + S - 1) / S) + TL - 1) / TL * TL;
     auto ws = torch::empty({(long)B * S * H * (R + 2)}, q_eff.options());
     auto o = torch::empty({B, H, (long)rank}, q_eff.options());
@@ -5570,9 +5747,11 @@ torch::Tensor mla_decode_1p(torch::Tensor q_eff, c10::optional<torch::Tensor> ca
             q_eff.data_ptr<float>(), ptrs, cache0, lens.data_ptr<long>(), ws.data_ptr<float>(), \
             H, (int)L, W, R, S, rows, (float)scale); } while (0)
     TORCH_CHECK(shm <= 99 * 1024, "MLA 1p : memoire partagee > 99 Ko (H, W trop grands)");
-    if (HMAX == 20) { if (fp8) MLA1P_LANCE(20, 32, 4, true); else MLA1P_LANCE(20, 32, 4, false); }
-    else            { if (fp8) MLA1P_LANCE(32, 16, 2, true); else MLA1P_LANCE(32, 16, 2, false); }
+    if (HMAX == 20 && TL == 32) { if (fp8) MLA1P_LANCE(20, 32, 4, true); else MLA1P_LANCE(20, 32, 4, false); }
+    else if (HMAX == 20)        { if (fp8) MLA1P_LANCE(20, 16, 2, true); else MLA1P_LANCE(20, 16, 2, false); }
+    else                        { if (fp8) MLA1P_LANCE(32, 16, 2, true); else MLA1P_LANCE(32, 16, 2, false); }
     #undef MLA1P_LANCE
+    TORCH_CHECK(S <= MLA1P_S_MAX, "MLA 1p : S > MLA1P_S_MAX");
     dim3 g2(B, H);
     mla_1p_combine_kernel<<<g2, 128, 0, stream>>>(ws.data_ptr<float>(), o.data_ptr<float>(), H, R, S);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -6228,9 +6407,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("table_qw"), py::arg("table_bscale"), py::arg("gscales"), py::arg("xq"),
           py::arg("xsf"), py::arg("tile_e"), py::arg("tile_t0"), py::arg("tile_n"),
           py::arg("M"), py::arg("K"), py::arg("bt"), py::arg("etages") = 0, py::arg("ks") = 64,
-          py::arg("grow") = py::none(),
+          py::arg("grow") = py::none(), py::arg("marlin") = -1,
           "MoE NVFP4 : GEMM groupee W4A4 sur la MMA FP4 native de sm_120 (mxf4nvf4) ; "
-          "etages 0 = chargements directs, 2-4 = pipeline cp.async en shared ; ks 64 ou 128 par etage");
+          "etages 0 = chargements directs, 2-4 = pipeline cp.async en shared ; ks 64 ou 128 par etage ; "
+          "marlin >= 0 (C17) : tables = disposition Marlin (w_marlin, s_marlin), valeur = decal d'exposant des echelles");
     m.def("nvfp4_gemm_grouped_mma_disponible", &nvfp4_gemm_grouped_mma_disponible,
           "vrai si la carte courante est sm_120 et le noyau MMA FP4 compile");
     m.def("nvfp4_quant_act", &nvfp4_quant_act,
