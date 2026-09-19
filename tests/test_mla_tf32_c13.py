@@ -90,5 +90,5 @@ def test_contexte_tf32_restaure_et_identite_au_defaut(monkeypatch):
     v = {x.env: x for x in regime.VARIABLES}["ACVRAM_MLA_TF32"]
     assert v.defaut == "0"
     src = (RACINE / "acvram" / "engine" / "mla.py").read_text()
-    assert src.count("with _tf32_coeur():") == 4                        # scores + o_lat, chunké et non chunké
+    assert src.count("with _tf32_coeur():") == 5                        # scores, o_lat, v_b·o_lat (chunké : 3 sites ; non chunké : 2)
     assert src.count("with _tf32_coeur(decode=True):") == 4             # y = v_b · o_lat des chemins de décodage (hr, bhr ×2, _v_b32)
