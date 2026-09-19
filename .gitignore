@@ -29,3 +29,6 @@ acvram_*.deb
 .beads/issues.jsonl
 externes/
 scratchpad/ncu-tampon-c1-19-09/home-ncu/
+scratchpad/c14c-carte-19-09/tmp-build/
+scratchpad/c14c-carte-19-09/nsys-tmp/
+scratchpad/c14c-carte-19-09/sortie/
