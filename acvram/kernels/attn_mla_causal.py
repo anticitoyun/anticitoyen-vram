@@ -54,6 +54,35 @@ except Exception:                                        # noqa: BLE001
 BK = 64                    # tranche de la dimension W (q·kᵀ) et de rank (p·v)
 BM_DEFAUT = 64             # requêtes par tuile (acc = RANK_TUILES × [BM, BK] fp32 en registres)
 BN_DEFAUT = 64             # clés par tuile
+# Tuile par carte (poste2, 20/09, `sonde-tuiles.py` sur sm_120) : à 64-64-w8-s2 Triton demande 319 488 o de
+# shared contre 101 376 max par bloc (sm_120 : 99 Ko en opt-in) → OutOfResources ; les tuiles lancées :
+# 32-64-w4-s1 (la plus grosse), 32-32, 16-64, 16-32, 32-16. La tuile se choisit donc par la shared de la
+# carte, jamais par un défaut aveugle ; « nommé » = la ligne de régime dit la tuile.
+_TUILES_PAR_SHARED = (              # (shared max par bloc ≥, BM, BN, num_warps, num_stages)
+    (200 * 1024, 64, 64, 8, 2),     # H100/B200 (228 Ko) : la tuile d'origine
+    (96 * 1024, 32, 64, 4, 1),      # sm_120 (99 Ko) : mesuré, se lance
+    (0, 16, 32, 4, 1),              # tout le reste : la plus petite lancée
+)
+_CHOIX = {}
+
+
+def tuile_par_carte(device) -> tuple:
+    """(BM, BN, num_warps, num_stages) selon `shared_memory_per_block_optin` de la carte ;
+    ACVRAM_MLA_FLASH_TUILE=BM,BN,warps,stages force (bancs, diagnostic)."""
+    forcee = os.environ.get("ACVRAM_MLA_FLASH_TUILE")
+    if forcee:
+        bm, bn, w, st = (int(v) for v in forcee.split(","))
+        return bm, bn, w, st
+    cle = str(device)
+    if cle not in _CHOIX:
+        shared = 0
+        try:
+            if torch.cuda.is_available() and torch.device(device).type == "cuda":
+                shared = torch.cuda.get_device_properties(device).shared_memory_per_block_optin
+        except Exception:                                     # noqa: BLE001
+            shared = 0
+        _CHOIX[cle] = next(t[1:] for t in _TUILES_PAR_SHARED if shared >= t[0])
+    return _CHOIX[cle]
 RANK_TUILES_MAX = 8        # accumulateurs explicites : rank ≤ 8 × BK = 512 (GLM : 512)
 LOG2E = 1.4426950408889634
 
@@ -188,8 +217,8 @@ if triton is not None:
 
 def attention_mla_causale(q_eff: torch.Tensor, C: torch.Tensor, passe: int, scale: float,
                           rank: int, operandes: str = "fp32",
-                          BM: int = BM_DEFAUT, BN: int = BN_DEFAUT,
-                          num_warps: int = 8, num_stages: int = 2) -> torch.Tensor:
+                          BM: int | None = None, BN: int | None = None,
+                          num_warps: int | None = None, num_stages: int | None = None) -> torch.Tensor:
     """``q_eff`` [t, nh, W] fp32 (W = rank + rope), ``C`` [total, W] cache latent
     (bf16 ou fp32, converti en fp32 dans la tuile), ``passe`` = total − t (la
     requête i voit les clés 0..passe+i) → ``o_lat`` [t, nh, rank] fp32.
@@ -202,6 +231,9 @@ def attention_mla_causale(q_eff: torch.Tensor, C: torch.Tensor, passe: int, scal
         raise ValueError(f"attention_mla_causale : operandes={operandes!r} : fp32 | tf32 | bf16")
     t, nh, W = q_eff.shape
     total = C.shape[0]
+    bm_c, bn_c, w_c, s_c = tuile_par_carte(q_eff.device)
+    BM = bm_c if BM is None else BM; BN = bn_c if BN is None else BN
+    num_warps = w_c if num_warps is None else num_warps; num_stages = s_c if num_stages is None else num_stages
     assert C.shape[1] == W and C.stride(1) == 1 and q_eff.stride(2) == 1, (q_eff.shape, q_eff.stride(), C.shape, C.stride())
     assert total == passe + t, f"passe={passe} : attendu total − t = {total - t}"
     assert rank % BK == 0 and 1 <= rank // BK <= RANK_TUILES_MAX and rank <= W, (rank, W)

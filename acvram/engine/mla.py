@@ -79,7 +79,14 @@ def regime_coeur_texte() -> str:
     if _MLA_CORE == "fp32":
         return ""
     if _MLA_CORE == "flash":
-        return "mla_core=flash(fp32)" if _FLASH_REPLI is None else f"mla_core=flash(repli fp32: {_FLASH_REPLI})"
+        if _FLASH_REPLI is not None:
+            return f"mla_core=flash(repli fp32: {_FLASH_REPLI})"
+        try:                                                  # la tuile est nommée : elle dépend de la carte
+            from ..kernels.attn_mla_causal import tuile_par_carte
+            bm, bn, w, st = tuile_par_carte("cuda:0" if torch.cuda.is_available() else "cpu")
+            return f"mla_core=flash(fp32,{bm}x{bn}w{w}s{st})"
+        except Exception:                                     # noqa: BLE001
+            return "mla_core=flash(fp32)"
     return f"mla_core={_MLA_CORE}(≤{_MLA_CORE_MAX_CLES} clés)"
 
 

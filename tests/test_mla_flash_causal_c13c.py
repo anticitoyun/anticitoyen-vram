@@ -233,8 +233,8 @@ def test_regime_flash_dans_la_table_et_la_ligne(monkeypatch):
     monkeypatch.setattr(M_mla, "_FLASH_REPLI", None)
     monkeypatch.setattr(M_mla, "_MLA_CORE_VB", False)
     monkeypatch.setattr(M_mla, "_MLA_CORE_DECODE", "fp32")
-    assert M_mla.regime_coeur_texte() == "mla_core=flash(fp32)"
-    assert "mla_core=flash(fp32)" in regime.regime_ligne()
+    assert M_mla.regime_coeur_texte().startswith("mla_core=flash(fp32")     # la tuile est nommée derrière
+    assert "mla_core=flash(fp32" in regime.regime_ligne()
     assert M_mla._regime_coeur(cles=8192) == "flash" and M_mla._dt_coeur(cles=8192) is torch.float32
     assert M_mla._regime_coeur(vb=True, cles=2047) == "fp32" and M_mla._regime_coeur(decode=True) == "fp32"
     with M_mla._tf32_coeur(cles=256) as c:
@@ -305,3 +305,23 @@ def test_mla_forward_prefill_flash_egal_fp32(monkeypatch):
     torch.set_grad_enabled(True)
     assert torch.equal(y_repli, sorties["fp32"][0]) and M_mla._FLASH_REPLI.startswith("RuntimeError: Triton absent")
     assert M_mla.regime_coeur_texte().startswith("mla_core=flash(repli fp32: RuntimeError")
+
+
+def test_tuile_choisie_par_la_shared_de_la_carte(monkeypatch):
+    """poste2 20/09 : 64-64-w8-s2 demande 319 488 o de shared contre 101 376 sur sm_120 (OutOfResources) ;
+    la tuile se choisit par `shared_memory_per_block_optin`, jamais par un défaut aveugle."""
+    from acvram.kernels import attn_mla_causal as k
+    k._CHOIX.clear()
+    monkeypatch.delenv("ACVRAM_MLA_FLASH_TUILE", raising=False)
+    class P:
+        def __init__(self, v): self.shared_memory_per_block_optin = v
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda d: P(101376))     # sm_120
+    assert k.tuile_par_carte("cuda:0") == (32, 64, 4, 1)
+    k._CHOIX.clear(); monkeypatch.setattr(torch.cuda, "get_device_properties", lambda d: P(232448))   # H100
+    assert k.tuile_par_carte("cuda:0") == (64, 64, 8, 2)
+    k._CHOIX.clear(); monkeypatch.setattr(torch.cuda, "get_device_properties", lambda d: P(48 * 1024))
+    assert k.tuile_par_carte("cuda:0") == (16, 32, 4, 1)
+    monkeypatch.setenv("ACVRAM_MLA_FLASH_TUILE", "32,32,4,1")
+    assert k.tuile_par_carte("cuda:0") == (32, 32, 4, 1)
+    k._CHOIX.clear()
