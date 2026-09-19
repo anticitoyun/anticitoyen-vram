@@ -301,8 +301,9 @@ def _horloge() -> Optional[str]:
         return None
     try:
         from . import eco
-        lire = eco.lire_horloge if _LIRE_HORLOGE is None else _LIRE_HORLOGE
-        return eco.etiquette_horloge(lire(eco.index_carte()))
+        if _LIRE_HORLOGE is not None:
+            return eco.etiquette_horloge(_LIRE_HORLOGE(eco.index_carte()))
+        return eco.etiquette_horloge(eco.lire_sous_charge(eco.index_carte()))   # jamais au repos
     except Exception:                                     # noqa: BLE001
         return "?"
 

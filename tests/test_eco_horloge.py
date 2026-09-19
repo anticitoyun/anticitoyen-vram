@@ -21,8 +21,10 @@ def test_lire_horloge_reconnait_un_verrou_lgc():
     h = eco.lire_horloge(sortie="2692, 3135, Not Active\n", etat={"mode": "2700"})
     assert h["verrou"] is True and h["sm_mhz"] == 2692 and h["max_sm_mhz"] == 3135
     assert eco.etiquette_horloge(h) == "lgc2700"
-    # sans état posé, une carte OISIVE à 2 692 MHz porte un -lgc posé ailleurs : dit incertain
-    assert eco.etiquette_horloge(eco.lire_horloge(sortie="2692, 3135, Active\n", etat={})) == "lgc2692?"
+    # sans état posé, une carte à 2 692 MHz SOUS CHARGE LÉGÈRE (au lieu du boost ≥ 2 900)
+    # porte un -lgc posé ailleurs : dit incertain ; au repos rien n'est concluant
+    assert eco.etiquette_horloge(eco.lire_horloge(sortie="2692, 3135, Not Active\n", etat={}, sous_charge=True)) == "lgc2700?"
+    assert eco.etiquette_horloge(eco.lire_horloge(sortie="2692, 3135, Active\n", etat={})) == "libre"
 
 
 def test_lire_horloge_reconnait_une_carte_libre():

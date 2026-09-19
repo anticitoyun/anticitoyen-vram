@@ -33,7 +33,8 @@ CHAMPS = "clocks.sm,clocks.max.sm,clocks_event_reasons.gpu_idle"
 # état posé par ce poste (acvram eco / le serveur) : {"mode", "pid", "depuis"} — la seule
 # mémoire du verrou d'horloge lisible sans sudo ; vérifié contre clocks.sm à chaque lecture
 ETAT_ECO = "/tmp/acvram-eco-{index}.json"
-TOLERANCE_MHZ = 30          # -lgc 2700 se lit 2 692 (pas de 15 MHz du pilote)
+TOLERANCE_MHZ = 60          # -lgc 2700 se lit 2 655-2 692 sous charge (poste2, 19/09 : pas de 15 MHz, palier bas)
+VERROUS_CONNUS = ("2700", "2100")   # les consignes que ce poste pose : bandes reconnues sous charge
 # fichier d'information du verrou de carte.sh : « PID pris_a nom type »
 VERROU_QUI = "/tmp/acvram-carte-{index}.lock.qui"
 
@@ -73,15 +74,18 @@ def _ecrire_etat(index: int, mode: str | None) -> None:
         print(f"acvram eco : état non écrit ({chemin}) : {exc}", file=sys.stderr)
 
 
-def lire_horloge(index: int = 0, sortie: str | None = None, etat: dict | None = None) -> dict:
+def lire_horloge(index: int = 0, sortie: str | None = None, etat: dict | None = None,
+                 sous_charge: bool = False) -> dict:
     """Horloge SM de la carte `index`, lue sans sudo. `sortie` : chaîne
     simulée à la place de nvidia-smi (tests) ; `etat` : état posé simulé.
     Ne lève jamais : sans nvidia-smi, ou sur une sortie illisible, ``verrou``
     vaut None et ``erreur`` dit pourquoi. ``verrou`` True quand un état posé
     (ETAT_ECO) existe ET que clocks.sm est à ± TOLERANCE_MHZ de son mode ;
-    ``mode`` = ce mode. Sans état posé : ``verrou`` False (libre) — sauf carte
-    oisive à > 1 000 MHz (signature d'un -lgc posé hors de ce poste), verrou
-    True et mode = l'horloge lue, dit ``incertain``."""
+    ``mode`` = ce mode. Sans état posé : ``verrou`` False (libre) — sauf, lue
+    SOUS CHARGE (`sous_charge=True`, cf. `_charge_cuda`), une horloge dans la
+    bande d'une consigne connue (2 700 | 2 100 ± TOLERANCE_MHZ : un -lgc posé
+    hors de ce poste), verrou True, mode = la consigne, dit ``incertain``. Au
+    repos rien n'est concluant (225 MHz verrouillé ou non)."""
     if sortie is None:
         cmd = ["nvidia-smi", "-i", str(index), f"--query-gpu={CHAMPS}",
                "--format=csv,noheader,nounits"]
@@ -107,10 +111,12 @@ def lire_horloge(index: int = 0, sortie: str | None = None, etat: dict | None = 
         return {"sm_mhz": sm, "max_sm_mhz": max_sm, "verrou": tenu, "mode": str(cible),
                 "pid": e.get("pid"), "brut": brut,
                 **({} if tenu else {"erreur": f"état posé {cible} MHz mais horloge lue {sm}"})}
-    if oisive and sm > 1000:
-        return {"sm_mhz": sm, "max_sm_mhz": max_sm, "verrou": True, "mode": str(sm),
-                "incertain": True, "brut": brut}
-    return {"sm_mhz": sm, "max_sm_mhz": max_sm, "verrou": False, "brut": brut}
+    if sous_charge:
+        bande = next((v for v in VERROUS_CONNUS if abs(sm - int(v)) <= TOLERANCE_MHZ), None)
+        if bande is not None:
+            return {"sm_mhz": sm, "max_sm_mhz": max_sm, "verrou": True, "mode": bande,
+                    "incertain": True, "brut": brut}
+    return {"sm_mhz": sm, "max_sm_mhz": max_sm, "verrou": False, "oisive": oisive, "brut": brut}
 
 
 def etiquette_horloge(h: dict) -> str:
@@ -231,16 +237,61 @@ def mode_demande(env: dict | None = None, chemin: str | None = None) -> str:
     return v
 
 
+def _charge_cuda(duree: float = 0.35, device: str = "cuda:0") -> None:
+    """Occupe LÉGÈREMENT la carte `duree` s (matmuls bf16 1024², synchronisés) :
+    une carte verrouillée OISIVE lit 225 MHz et ne monte à sa consigne qu'au
+    premier contexte — l'effectif se lit pendant une charge, jamais au repos
+    (poste2, verdict-verif-eco-defaut-19-09). La charge est légère à dessein :
+    sous une charge lourde une carte LIBRE tombe au plafond de puissance
+    (2 524 MHz moyens à 400 W, c16bis) et se confond avec un -lgc 2700 ; légère,
+    elle monte au boost (≥ 2 900) et s'en distingue. Le pilote 595 n'expose
+    aucun état de verrou (`-q -d CLOCK` : Applications Clocks dépréciées, Max
+    Clocks 3 135 verrouillé ou non ; applications_clocks_setting Not Active
+    sous -lgc) : l'horloge sous charge légère est le seul instrument. Ne lève
+    jamais : sans torch/CUDA, rien."""
+    import time
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return
+        a = torch.randn(1024, 1024, dtype=torch.bfloat16, device=device)
+        t0 = time.time()
+        while time.time() - t0 < duree:
+            a = a @ a
+            a = a / (a.norm() + 1.0)
+            torch.cuda.synchronize(device)
+        torch.cuda.synchronize(device)
+    except Exception as exc:                                     # noqa: BLE001
+        print(f"acvram eco : charge de lecture impossible ({type(exc).__name__}: {exc})", file=sys.stderr)
+
+
+def lire_sous_charge(index: int = 0, lire=None, charge=None, attente: float = 0.12) -> dict:
+    """`lire(index)` pendant que `charge()` occupe la carte dans un fil : la
+    lecture part après `attente` s, quand l'horloge a rejoint sa consigne."""
+    import threading, time
+    lire = lire_horloge if lire is None else lire
+    charge = _charge_cuda if charge is None else charge
+    fil = threading.Thread(target=charge, daemon=True); fil.start()
+    time.sleep(attente)
+    try:
+        h = lire(index, sous_charge=True)
+    except TypeError:                                   # lecteur de test sans le paramètre
+        h = lire(index)
+    fil.join(timeout=5)
+    return h
+
+
 class Horloge:
     """L'horloge posée par CE processus : `poser()` une fois, `rendre()`
     idempotent, enregistré en atexit et sur SIGTERM/SIGINT. `etat` est nommé :
     effectif | libre (off) | refus sudo | non pris | sans carte | inconnu.
     `executer` et `lire` remplacent subprocess.run et lire_horloge (tests)."""
 
-    def __init__(self, mode: str, index: int = 0, executer=None, lire=None):
+    def __init__(self, mode: str, index: int = 0, executer=None, lire=None, charge=None):
         self.mode, self.index = mode, index
         self._executer = subprocess.run if executer is None else executer
         self._lire = lire_horloge if lire is None else lire
+        self._charge = charge                     # None : matmuls CUDA (_charge_cuda) ; tests : fonction
         self.effectif: str | None = None
         self.etat = "inconnu"
         self.posee = False
@@ -248,22 +299,30 @@ class Horloge:
         self._anciens = {}
 
     # -- lecture --------------------------------------------------------
-    def relire(self) -> str:
-        """effectif = l'horloge SM LUE (clocks.sm), jamais la mémoire d'un réglage."""
-        h = self._lire(self.index)
-        if h.get("verrou") is None or "sm_mhz" not in h:
-            self.effectif = "?"
-        elif h["verrou"] or h.get("mode") is not None:     # verrou tenu, ou état posé non tenu : le chiffre
-            self.effectif = str(h["sm_mhz"])
-        else:
-            self.effectif = "libre"
+    def relire(self, sous_charge: bool = True) -> str:
+        """effectif = l'horloge SM LUE (clocks.sm) PENDANT une charge, jamais la
+        mémoire d'un réglage ni une lecture au repos (225 MHz sous verrou oisif).
+        Chiffre toujours ; « libre » seulement quand rien n'est lisible."""
+        h = lire_sous_charge(self.index, self._lire, self._charge) if sous_charge else self._lire(self.index)
+        self._lecture = h
+        self.effectif = str(h["sm_mhz"]) if "sm_mhz" in h else "?"
         return self.effectif
+
+    def _dans_une_bande(self) -> str | None:
+        """la consigne connue (2700 | 2100) à ± TOLERANCE_MHZ de l'effectif, sinon None."""
+        try:
+            sm = int(self.effectif)
+        except (TypeError, ValueError):
+            return None
+        return next((v for v in VERROUS_CONNUS if abs(sm - int(v)) <= TOLERANCE_MHZ), None)
 
     @property
     def conforme(self) -> bool:
         """demandé == effectif : ce qu'un instrument exige avant de publier."""
         if self.mode == "off":
-            return self.effectif == "libre"
+            # libre = sous charge l'horloge n'est dans aucune bande de verrou connue
+            # (un -lgc posé à la main hors de ce processus se voit ici : poste2, bras faux)
+            return self.effectif not in (None, "?") and self._dans_une_bande() is None
         try:
             return self.effectif is not None and abs(int(self.effectif) - int(self.mode)) <= TOLERANCE_MHZ
         except ValueError:
@@ -289,7 +348,13 @@ class Horloge:
     def poser(self) -> str:
         """Pose `-lgc mode,mode` (rien sous `off`) puis relit ; rend `etat`."""
         if self.mode == "off":
-            self.etat = "libre"; self.relire(); return self.etat
+            self.relire()
+            bande = self._dans_une_bande()
+            self.etat = "libre" if bande is None else f"verrou {bande} posé hors processus"
+            if bande is not None:
+                print(f"acvram eco : {self.etiquette()} — la carte est verrouillée par un autre "
+                      f"(`sudo nvidia-smi -i {self.index} -rgc` pour la rendre)", file=sys.stderr)
+            return self.etat
         ok, msg = self._nvidia_smi("-lgc", f"{self.mode},{self.mode}")
         if not ok:
             self.etat = "refus sudo"; self.relire()
@@ -303,7 +368,7 @@ class Horloge:
         self.relire()
         self.etat = "effectif" if self.conforme else "non pris"
         if self.etat == "non pris":
-            print(f"acvram eco : {self.etiquette()} — `-lgc` accepté mais l'horloge lue ne suit pas",
+            print(f"acvram eco : {self.etiquette()} — `-lgc` accepté mais l'horloge lue sous charge ne suit pas",
                   file=sys.stderr)
         self._armer()
         return self.etat
@@ -350,7 +415,7 @@ class Horloge:
 _HORLOGE: Horloge | None = None
 
 
-def poser_pour_ce_processus(index: int | None = None, executer=None, lire=None) -> Horloge:
+def poser_pour_ce_processus(index: int | None = None, executer=None, lire=None, charge=None) -> Horloge:
     """Le geste du serveur et des instruments : une fois par processus, mode
     demandé (`mode_demande()`), carte servie. Sans carte (CUDA invisible) :
     horloge « sans carte », rien n'est exécuté."""
@@ -359,9 +424,9 @@ def poser_pour_ce_processus(index: int | None = None, executer=None, lire=None) 
         return _HORLOGE
     mode = mode_demande()
     if os.environ.get("CUDA_VISIBLE_DEVICES") == "":
-        h = Horloge(mode, 0, executer, lire); h.etat = "sans carte"; h.effectif = "?"
+        h = Horloge(mode, 0, executer, lire, charge); h.etat = "sans carte"; h.effectif = "?"
         _HORLOGE = h; return h
-    h = Horloge(mode, index_carte() if index is None else index, executer, lire)
+    h = Horloge(mode, index_carte() if index is None else index, executer, lire, charge)
     h.poser()
     _HORLOGE = h
     return h
@@ -376,9 +441,15 @@ def rendre_horloge() -> bool:
     return _HORLOGE.rendre() if _HORLOGE is not None else False
 
 
-def etat_eco() -> dict:
-    """Pour `regime()` et les instruments : demandé, effectif, état, conforme."""
+def etat_eco(relire: bool = False) -> dict:
+    """Pour `regime()` et les instruments : demandé, effectif, état, conforme.
+    `relire=True` : relecture sous charge maintenant (le moteur est chargé,
+    la carte répond) — `Engine.regime()` le fait, pas la ligne à sec."""
     h = _HORLOGE
+    if relire and h is not None and h.etat not in ("sans carte", "refus sudo"):
+        h.relire()
+        if h.mode != "off":
+            h.etat = "effectif" if h.conforme else "non pris"
     if h is None:
         return {"demande": mode_demande(), "effectif": None, "etat": "non posé", "conforme": False}
     return {"demande": h.mode, "effectif": h.effectif, "etat": h.etat, "conforme": h.conforme}
