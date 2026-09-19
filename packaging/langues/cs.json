@@ -46,5 +46,6 @@
  "conversion terminée — voir models_acvram.": "převod dokončen — viz models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert selhal (kód {code}) — viz log výše.",
  "serveur arrêté.": "server zastaven.",
- "toutes les options": "všechny volby"
+ "toutes les options": "všechny volby",
+ "proposer les options": "navrhnout volby"
 }

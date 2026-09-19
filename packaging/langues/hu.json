@@ -46,5 +46,6 @@
  "conversion terminée — voir models_acvram.": "átalakítás kész — lásd: models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "az acvram convert sikertelen (kód: {code}) — lásd a fenti naplót.",
  "serveur arrêté.": "kiszolgáló leállítva.",
- "toutes les options": "minden beállítás"
+ "toutes les options": "minden beállítás",
+ "proposer les options": "beállítások javaslata"
 }

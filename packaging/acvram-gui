@@ -276,6 +276,65 @@ def js_options_convert() -> str:
 
 
 
+def proposer_options_convert(source: str) -> tuple[dict, str]:
+    """Propose des options de conversion lues dans le modèle et dans le plan
+    (`acvram plan --json`, sans carte) — jamais devinées : chaque proposition
+    cite ce qui la fonde, et l'utilisateur garde la main sur chaque champ.
+
+    Retour : ({drapeau: valeur}, résumé lisible du plan)."""
+    props: dict = {}
+    raisons: list[str] = []
+    cfg: dict = {}
+    try:
+        with open(os.path.join(source, "config.json"), encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except OSError:
+        pass
+    qc = cfg.get("quantization_config") or {}
+    qm = str(qc.get("quant_method", "")).lower()
+    fmt_src = json.dumps(qc).lower()
+    if "nvfp4" in fmt_src or qm == "modelopt":
+        props["--passage-direct"] = True
+        raisons.append(T("source déjà NVFP4 ({qm}) : passage direct, poids de vLLM servis à l'identique", qm=qm or "nvfp4"))
+    try:
+        out = subprocess.run(["acvram", "plan", source, "--json"], capture_output=True, text=True, timeout=300)
+        j = json.loads(out.stdout) if out.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        j = None
+    if j is None:
+        return props, T("acvram plan a échoué — seules les options lues dans config.json sont proposées")
+    spec, plan = j.get("spec", {}), j.get("plan", {})
+    is_moe = bool(spec.get("is_moe")) or any(l.get("is_moe") for l in plan.get("layers", []))
+    mla = int(spec.get("kv_lora_rank") or 0) > 0
+    if is_moe and not mla:
+        # P2 au défaut (poste7-p2-au-defaut-19-09) : six lignes tenues sur Coder ;
+        # jamais sur MLA (REGLES § 9 : kv_a/q_b jamais int8 par canal).
+        props["--attn-qkvo-int8-canal"] = True
+        raisons.append(T("MoE sans MLA : q/k/v/o en int8 par canal (P2, régime livré 0.6.15)"))
+    elif mla:
+        raisons.append(T("attention MLA : int8 par canal exclu (REGLES § 9)"))
+    gpus = sorted({int(t["device_index"]) for t in plan.get("tiers", []) if str(t.get("name", "")).startswith("cuda")})
+    if gpus:
+        props["--gpus"] = ",".join(str(g) for g in gpus)
+        raisons.append(T("cartes du plan : {g}", g=props["--gpus"]))
+    fmts = [l.get("fmt") for l in plan.get("layers", []) if l.get("fmt")]
+    if fmts and len(set(fmts)) == 1:
+        props["--format"] = fmts[0]
+        raisons.append(T("un seul format dans le plan : {f}", f=fmts[0]))
+    elif fmts:
+        raisons.append(T("formats mêlés dans le plan ({n}) : --format laissé au planificateur", n=", ".join(sorted(set(fmts)))))
+    if plan.get("kv_planned_seqs"):
+        props["--max-seqs"] = str(plan["kv_planned_seqs"])
+    if plan.get("overflowed"):
+        raisons.append(T("le plan DÉBORDE : --force serait nécessaire, non proposé"))
+    resume = T("décodage estimé {d} t/s · prefill {p} j/s · poids {w} Gio · KV {k} jetons",
+               d=plan.get("est_decode_tok_s", "?"), p=plan.get("est_prefill_tok_s", "?"),
+               w=round((plan.get("total_weight_bytes") or 0) / 2**30, 1), k=plan.get("kv_max_tokens", "?"))
+    for w in plan.get("warnings", [])[:4]:
+        raisons.append(str(w))
+    return props, resume + "\n" + "\n".join("· " + x for x in raisons)
+
+
 def page_accueil(erreur: str = "") -> str:
     opts = "".join(f'<option value="{c}">{n}</option>' for n, c in modeles_du_parc())
     if not opts:
@@ -322,7 +381,8 @@ def page_accueil(erreur: str = "") -> str:
   <details style="margin-top:8px"><summary>{T("toutes les options")}</summary>
   <p class="note" style="font-size:11px">{html_options_convert()}</p>
   </details>
-  <p><button onclick="convertir()">{T("convertir")}</button></p>
+  <p><button onclick="proposer()">{T("proposer les options")}</button> <button onclick="convertir()">{T("convertir")}</button></p>
+  <pre id="conv_proposition" class="note" style="font-size:11px;white-space:pre-wrap"></pre>
 </div>
 <p class="note" style="margin-top:28px">acvram {version_acvram()} · <a href="{SOUTIEN_URL}" target="_blank" style="color:var(--rose-clair)">{T("Soutenir le projet")}</a></p>
 <script>
@@ -335,6 +395,21 @@ function lancer(){{
 function connecter(){{
   const p=document.getElementById('port_existant').value;
   window.webkit.messageHandlers.acvram.postMessage(JSON.stringify({{action:'connecter', port:p}}));
+}}
+function proposer(){{
+  const src=document.getElementById('conv_source').value;
+  if(!src){{return;}}
+  document.getElementById('conv_proposition').textContent='…';
+  window.webkit.messageHandlers.acvram.postMessage(JSON.stringify({{action:'proposer', source:src}}));
+}}
+function appliquerProposition(props, resume){{
+  for(const [flag,v] of Object.entries(props)){{
+    const e=document.getElementById('opt_'+flag.replace(/^-+/,'').replace(/-/g,'_'));
+    if(!e) continue;
+    if(e.type==='checkbox') e.checked=!!v; else e.value=v;
+  }}
+  document.querySelector('details').open=true;
+  document.getElementById('conv_proposition').textContent=resume;
 }}
 function convertir(){{
   const src=document.getElementById('conv_source').value;
@@ -530,6 +605,8 @@ class Fenetre(Gtk.Window):
             self.connecter_existant(d)
         elif d.get("action") == "convertir":
             self.lancer_conversion(d)
+        elif d.get("action") == "proposer":
+            self.proposer_conversion(d)
 
     def connecter_existant(self, d: dict):
         try:
@@ -591,6 +668,18 @@ class Fenetre(Gtk.Window):
             self.ouvrir(PORT_DEFAUT)
             return False
         return True
+
+    def proposer_conversion(self, d: dict):
+        source = d.get("source", "")
+        if not os.path.isdir(source):
+            self.web.run_javascript(f"appliquerProposition({{}}, {json.dumps(T('répertoire source introuvable : {source}', source=source))})", None, None, None)
+            return
+
+        def travail():
+            props, resume = proposer_options_convert(source)
+            GLib.idle_add(self.web.run_javascript,
+                          f"appliquerProposition({json.dumps(props)}, {json.dumps(resume)})", None, None, None)
+        threading.Thread(target=travail, daemon=True).start()
 
     def lancer_conversion(self, d: dict):
         source = d.get("source", "")

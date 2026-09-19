@@ -46,5 +46,6 @@
  "conversion terminée — voir models_acvram.": "конвертацію завершено — див. models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert завершився з помилкою (код {code}) — див. журнал вище.",
  "serveur arrêté.": "сервер зупинено.",
- "toutes les options": "усі параметри"
+ "toutes les options": "усі параметри",
+ "proposer les options": "запропонувати параметри"
 }

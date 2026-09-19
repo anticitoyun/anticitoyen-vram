@@ -46,5 +46,6 @@
  "conversion terminée — voir models_acvram.": "conversión terminada — ver models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert falló (código {code}) — ver el registro arriba.",
  "serveur arrêté.": "servidor detenido.",
- "toutes les options": "todas las opciones"
+ "toutes les options": "todas las opciones",
+ "proposer les options": "proponer opciones"
 }

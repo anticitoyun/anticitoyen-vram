@@ -46,5 +46,6 @@
  "conversion terminée — voir models_acvram.": "chuyển đổi hoàn tất — xem models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert thất bại (mã {code}) — xem nhật ký bên trên.",
  "serveur arrêté.": "máy chủ đã dừng.",
- "toutes les options": "tất cả tùy chọn"
+ "toutes les options": "tất cả tùy chọn",
+ "proposer les options": "đề xuất tùy chọn"
 }

@@ -46,5 +46,6 @@
  "conversion terminée — voir models_acvram.": "dönüştürme tamamlandı — models_acvram dizinine bakın.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert başarısız oldu (kod {code}) — yukarıdaki günlüğe bakın.",
  "serveur arrêté.": "sunucu durduruldu.",
- "toutes les options": "tüm seçenekler"
+ "toutes les options": "tüm seçenekler",
+ "proposer les options": "seçenekleri öner"
 }

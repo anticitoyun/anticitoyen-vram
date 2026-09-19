@@ -46,5 +46,6 @@
  "conversion terminée — voir models_acvram.": "konvertado finita — vidu models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert malsukcesis (kodo {code}) — vidu la protokolon supre.",
  "serveur arrêté.": "servilo haltigita.",
- "toutes les options": "ĉiuj opcioj"
+ "toutes les options": "ĉiuj opcioj",
+ "proposer les options": "proponi opciojn"
 }

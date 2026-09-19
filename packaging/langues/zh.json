@@ -46,5 +46,6 @@
  "conversion terminée — voir models_acvram.": "转换完成 — 见 models_acvram。",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert 失败（代码 {code}）— 见上方日志。",
  "serveur arrêté.": "服务器已停止。",
- "toutes les options": "所有选项"
+ "toutes les options": "所有选项",
+ "proposer les options": "自动建议选项"
 }

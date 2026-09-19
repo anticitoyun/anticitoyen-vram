@@ -46,5 +46,6 @@
  "conversion terminée — voir models_acvram.": "konverteringen är klar — se models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert misslyckades (kod {code}) — se loggen ovan.",
  "serveur arrêté.": "servern stoppad.",
- "toutes les options": "alla alternativ"
+ "toutes les options": "alla alternativ",
+ "proposer les options": "föreslå alternativ"
 }

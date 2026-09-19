@@ -46,5 +46,6 @@
  "conversion terminée — voir models_acvram.": "konversi selesai — lihat models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert gagal (kode {code}) — lihat log di atas.",
  "serveur arrêté.": "server dihentikan.",
- "toutes les options": "semua opsi"
+ "toutes les options": "semua opsi",
+ "proposer les options": "usulkan opsi"
 }

@@ -46,5 +46,6 @@
  "conversion terminée — voir models_acvram.": "conversie voltooid — zie models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert is mislukt (code {code}) — zie het logboek hierboven.",
  "serveur arrêté.": "server gestopt.",
- "toutes les options": "alle opties"
+ "toutes les options": "alle opties",
+ "proposer les options": "opties voorstellen"
 }

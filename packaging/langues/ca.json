@@ -46,5 +46,6 @@
  "conversion terminée — voir models_acvram.": "conversió acabada — vegeu models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert ha fallat (codi {code}) — vegeu el registre de dalt.",
  "serveur arrêté.": "servidor aturat.",
- "toutes les options": "totes les opcions"
+ "toutes les options": "totes les opcions",
+ "proposer les options": "proposar opcions"
 }

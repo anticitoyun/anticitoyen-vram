@@ -46,5 +46,6 @@
  "conversion terminée — voir models_acvram.": "परिवर्तन पूर्ण — models_acvram देखें।",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert विफल रहा (कोड {code}) — ऊपर लॉग देखें।",
  "serveur arrêté.": "सर्वर रुका हुआ।",
- "toutes les options": "सभी विकल्प"
+ "toutes les options": "सभी विकल्प",
+ "proposer les options": "विकल्प सुझाएँ"
 }
