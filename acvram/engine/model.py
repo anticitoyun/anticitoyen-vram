@@ -1885,6 +1885,25 @@ class MoEBlock(nn.Module):
             return F.linear(x.to(dtype_voulu), w)
         return self.router(x).to(dtype_voulu)
 
+    def _routeur_compact(self, x: torch.Tensor):
+        """C15 niveau 3 : (poids du routeur [E, H] au dtype de x, arrondi bf16
+        des logits ?) pour `route_logits_fusee`, ou None si le routeur n'est
+        pas un poids plein de ce dtype (le témoin `_router_logits` reste)."""
+        if x.dtype != torch.bfloat16 or not hasattr(self.router.qweight, "weight"):
+            return None
+        w = getattr(self, "_router_w_compact", None)
+        if w is None:
+            w = self.router.qweight.weight
+            if w.dtype != torch.bfloat16 or w.dim() != 2:
+                return None
+            w = w.contiguous()
+            self._router_w_compact = w
+        if w.shape[1] != x.shape[1] or w.shape[0] > 1024:
+            return None
+        # _router_logits : fp32 seulement pour sigmoid + biais, bf16 sinon
+        arrondi = not (self.scoring == "sigmoid" and self.score_bias is not None)
+        return w, arrondi
+
     def _route(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Poids et indices des top-k experts par jeton."""
         logits = self._router_logits(x)
@@ -1933,11 +1952,25 @@ class MoEBlock(nn.Module):
         if fusee:
             from ..kernels import route_prep as _rp
             fusee = _rp.disponible()
-        if fusee:
+        compact = None
+        if fusee and kernels.glue_compact():
+            # C15 niveau 3 : logits DANS le noyau de sélection (route_logits_fusee)
+            # — ni F.linear, ni cast fp32 : 2-3 nœuds → 1 par couche. Poids du
+            # routeur bf16 [E, H] contigu exigé ; arrondi bf16 des logits rejoué
+            # quand le témoin les sortait en bf16 (_router_logits : softmax sans
+            # biais), fp32 sinon (sigmoid + biais). Témoin : ACVRAM_GLUE_COMPACT=0.
+            compact = self._routeur_compact(x)
+        if fusee and compact is None:
             logits = self._router_logits(x)
             if logits.shape[-1] > 1024:
                 fusee = False
-        if fusee:
+        if fusee and compact is not None:
+            w, arrondi = compact
+            topw, topi, eid = _rp.route_logits_fusee(
+                x, w, self.score_bias if self.scoring == "sigmoid" else None, self.top_k,
+                self.scoring == "sigmoid", bool(self.norm_topk_prob), float(self.routed_scale),
+                valid, self._usage_routage, arrondi_bf16=arrondi)
+        elif fusee:
             topw, topi, eid = _rp.route_fusee(
                 logits, self.score_bias if self.scoring == "sigmoid" else None, self.top_k,
                 self.scoring == "sigmoid", bool(self.norm_topk_prob), float(self.routed_scale),

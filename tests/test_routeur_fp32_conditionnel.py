@@ -38,6 +38,20 @@ def test_sigmoid_avec_biais_passe_en_fp32():
     assert logits.dtype == torch.float32
 
 
+def test_c15_routeur_compact_suit_le_dtype_du_temoin():
+    """C15 niveau 3 (route_logits_fusee) : l'arrondi bf16 des logits dans le
+    noyau est rejoué exactement là où `_router_logits` les sort en bf16 —
+    softmax, sigmoid sans biais — et pas pour sigmoid + biais (fp32)."""
+    x = torch.randn(3, 16, dtype=torch.bfloat16)
+    for scoring, biais, arrondi in (("softmax", None, True), ("sigmoid", None, True),
+                                    ("sigmoid", torch.zeros(4, dtype=torch.float32), False)):
+        bloc = _moe(scoring, biais)
+        w, a = bloc._routeur_compact(x)
+        assert a == arrondi and w.shape == (4, 16) and w.dtype == torch.bfloat16 and w.is_contiguous()
+        assert (bloc._router_logits(x).dtype == torch.float32) == (not a)
+    assert _moe("softmax", None)._routeur_compact(x.float()) is None     # entrée fp32 : témoin
+
+
 def test_sigmoid_sans_biais_reste_en_bf16():
     """Le critère est sigmoid ET biais, pas sigmoid seul (lfm2/lfm2_moe
     routent en sigmoid sans nécessairement avoir de biais — pas de raison

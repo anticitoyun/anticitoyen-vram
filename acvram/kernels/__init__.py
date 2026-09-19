@@ -1203,6 +1203,22 @@ _PAGED_ATTN = os.environ.get("ACVRAM_PAGED_ATTN", "triton")
 if _PAGED_ATTN not in ("cuda", "triton"):
     raise ValueError(f"ACVRAM_PAGED_ATTN={_PAGED_ATTN!r} : attendu cuda ou triton")
 
+# C15 niveau 3 (revue/chantier-c15-niveau3-coder-20-09) : nœuds de graphe du
+# pas de décodage GQA/MoE réduits par fusions, chacune débranchable par cette
+# seule variable (0 = témoin, le chemin d'avant, au bit) : routeur MoE en un
+# noyau (logits + top-k, route_prep.route_logits_fusee), GEMM étroit int8 sans
+# somme torch des tranches split-K (réduction par le dernier programme,
+# gemm_etroit), attention paginée sans second noyau de réduction
+# (attn_paginee). Défaut 0 tant que le scellé n'est pas mesuré sur carte.
+_GLUE_COMPACT = int(os.environ.get("ACVRAM_GLUE_COMPACT", "0"))
+if _GLUE_COMPACT not in (0, 1):
+    raise ValueError(f"ACVRAM_GLUE_COMPACT={_GLUE_COMPACT!r} : attendu 0 ou 1")
+
+
+def glue_compact() -> bool:
+    """Lu à l'appel (pas à l'import) : `regime.masquer` réécrit l'attribut."""
+    return bool(_GLUE_COMPACT)
+
 
 def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
                     seq_lens: torch.Tensor, n_rep: int,

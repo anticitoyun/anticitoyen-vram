@@ -124,3 +124,83 @@ def test_f2_un_biais_change_la_selection_mais_pas_les_poids():
     assert (ti == 7).any(1).all()
     probs = torch.sigmoid(lg)
     assert torch.allclose(tw, probs.gather(-1, ti.long()), atol=2 ** -20)
+
+
+# --- C15 niveau 3 : logits du routeur DANS le noyau (route_logits_fusee) ----
+# Sous l'interpréteur les entrées sont fp16 (bf16 n'y est pas porté : dot et
+# arrondi rendent n'importe quoi, mesuré le 20/09) et l'arrondi bf16 des logits
+# n'est pas rejoué ; sur carte, bf16 et arrondi comme en service. Le bras
+# bf16 + ARRONDI_BF16 n'a donc de preuve que sur carte (REGLES § 7).
+
+def _dtype_essai():
+    return torch.bfloat16 if torch.cuda.is_available() else torch.float16
+
+
+@pytest.mark.parametrize("sigmoide,biais,renorm,scale", [(False, False, True, 1.0), (True, True, True, 2.5),
+                                                          (True, False, False, 1.0)])
+@pytest.mark.parametrize("E,k,H", [(128, 8, 256), (60, 6, 96), (256, 8, 64)])
+def test_c15_logits_fusee_egale_linear_puis_route_fusee(sigmoide, biais, renorm, scale, E, k, H):
+    """Témoin : F.linear (produits exacts, somme fp32) puis `route_fusee`.
+    Mêmes experts, mêmes eid et compteur au bit, poids à 2⁻¹⁶ près (ordre de
+    la somme fp32 des logits, puis exp) ; godet 20 (2 programmes) avec 4
+    fantômes masqués par `valid`."""
+    rp = _rp()
+    dt = _dtype_essai()
+    torch.manual_seed(E + k + H)
+    T = 20
+    x = (torch.randn(T, H) * 0.5).to(DEV, dt)
+    w = (torch.randn(E, H) * 0.05).to(DEV, dt)
+    bias = (torch.randn(E) * 0.2).to(DEV) if biais else None
+    valid = torch.ones(T, dtype=torch.bool, device=DEV); valid[16:] = False
+    u = torch.zeros(E, dtype=torch.int64, device=DEV)
+    tw, ti, eid = rp.route_logits_fusee(x, w, bias, k, sigmoide, renorm, scale, valid, u, arrondi_bf16=False)
+    lg = torch.nn.functional.linear(x.float(), w.float())
+    u2 = torch.zeros(E, dtype=torch.int64, device=DEV)
+    rw, ri, reid = rp.route_fusee(lg, bias, k, sigmoide, renorm, scale, valid, u2)
+    assert torch.equal(ti, ri), (ti[:3], ri[:3])
+    assert torch.equal(eid, reid) and (eid.view(T, k)[16:] == -1).all()
+    assert torch.equal(u, u2)
+    assert (tw - rw).abs().max() < 2 ** -16 * max(1.0, scale), float((tw - rw).abs().max())
+
+
+def test_c15_logits_fusee_un_poids_deplace_change_la_selection():
+    """Le bras qui doit casser : la ligne 0 du routeur remplacée par la ligne
+    de l'expert le plus choisi — logits égaux, l'égalité va à l'indice le
+    plus bas (moe_route) : la sélection suit les poids lus (pas un cache, pas
+    un index de programme), l'expert 0 passe devant lui partout où il était
+    choisi, et le compteur ne le perd pas."""
+    rp = _rp()
+    dt = _dtype_essai()
+    torch.manual_seed(7)
+    T, H, E, k = 12, 128, 64, 4
+    x = (torch.randn(T, H) * 0.5).to(DEV, dt)
+    w = (torch.randn(E, H) * 0.05).to(DEV, dt)
+    u = torch.zeros(E, dtype=torch.int64, device=DEV)
+    _, ti, _ = rp.route_logits_fusee(x, w, None, k, False, True, 1.0, None, u, arrondi_bf16=False)
+    favori = int(u[1:].argmax()) + 1
+    w2 = w.clone(); w2[0] = w[favori]
+    u2 = torch.zeros(E, dtype=torch.int64, device=DEV)
+    _, ti2, _ = rp.route_logits_fusee(x, w2, None, k, False, True, 1.0, None, u2, arrondi_bf16=False)
+    assert not torch.equal(ti, ti2) and int(u2[0]) >= int(u[0])
+    choisi = (ti == favori).any(1)                         # sur ces lignes, 0 est classé avant favori
+    rang0 = (ti2 == 0).int().argmax(1); rangf = (ti2 == favori).int().argmax(1)
+    assert ((rang0 < rangf) | ~(ti2 == favori).any(1))[choisi].all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="arrondi bf16 : carte seulement")
+def test_c15_logits_fusee_arrondi_bf16_comme_cublas():
+    """Sur carte : ARRONDI_BF16 rejoue la sortie bf16 de F.linear — mêmes
+    experts (hors égalité à l'ulp : aucune sur cette graine) et poids top-k
+    à 2⁻¹² près de cuBLAS puis route_fusee."""
+    rp = _rp()
+    torch.manual_seed(3)
+    T, H, E, k = 12, 2048, 128, 8
+    x = (torch.randn(T, H) * 0.5).to(DEV, torch.bfloat16)
+    w = (torch.randn(E, H) * 0.02).to(DEV, torch.bfloat16)
+    u = torch.zeros(E, dtype=torch.int64, device=DEV)
+    tw, ti, _ = rp.route_logits_fusee(x, w, None, k, False, False, 1.0, None, u, arrondi_bf16=True)
+    lg = torch.nn.functional.linear(x, w)
+    u2 = torch.zeros(E, dtype=torch.int64, device=DEV)
+    rw, ri, _ = rp.route_fusee(lg, None, k, False, False, 1.0, None, u2)
+    assert torch.equal(ti, ri)
+    assert (tw - rw).abs().max() < 2 ** -12, float((tw - rw).abs().max())
