@@ -1964,17 +1964,22 @@ class MoEBlock(nn.Module):
             logits = self._router_logits(x)
             if logits.shape[-1] > 1024:
                 fusee = False
-        if fusee and compact is not None:
-            w, arrondi = compact
-            topw, topi, eid = _rp.route_logits_fusee(
-                x, w, self.score_bias if self.scoring == "sigmoid" else None, self.top_k,
-                self.scoring == "sigmoid", bool(self.norm_topk_prob), float(self.routed_scale),
-                valid, self._usage_routage, arrondi_bf16=arrondi)
-        elif fusee:
-            topw, topi, eid = _rp.route_fusee(
-                logits, self.score_bias if self.scoring == "sigmoid" else None, self.top_k,
-                self.scoring == "sigmoid", bool(self.norm_topk_prob), float(self.routed_scale),
-                valid, self._usage_routage)
+        if fusee:
+            # C15-3b : les deux routeurs alimentent le MÊME chemin d'experts —
+            # le compact n'est plus une branche à part qui retombait dans
+            # `_route` (cuBLAS + moe_route + route_prep rejoués, verdict-c15-
+            # niveau3-coder-19-09 : 96 lancements/pas de trop, Triton perdu)
+            if compact is not None:
+                w, arrondi = compact
+                topw, topi, eid = _rp.route_logits_fusee(
+                    x, w, self.score_bias if self.scoring == "sigmoid" else None, self.top_k,
+                    self.scoring == "sigmoid", bool(self.norm_topk_prob), float(self.routed_scale),
+                    valid, self._usage_routage, arrondi_bf16=arrondi)
+            else:
+                topw, topi, eid = _rp.route_fusee(
+                    logits, self.score_bias if self.scoring == "sigmoid" else None, self.top_k,
+                    self.scoring == "sigmoid", bool(self.norm_topk_prob), float(self.routed_scale),
+                    valid, self._usage_routage)
             if _trace_routage.actif():
                 _trace_routage.noter(self.index_couche, topi)
             if valid is not None:

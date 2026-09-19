@@ -198,6 +198,55 @@ def test_kv_write_int8_par_tranches_au_bit_sur_carte():
     assert not torch.equal(faux.k, a.k)
 
 
+@pytest.mark.parametrize("compact", [1, 0])
+def test_c15_3b_le_routeur_triton_remplace_cublas_il_ne_s_ajoute_pas(monkeypatch, compact):
+    """verdict-c15-niveau3-coder-19-09 (a) : sous GLUE_COMPACT=1 le nsys B
+    montrait `_route_logits_fusee` ET cuBLAS + moe_route + route_prep par
+    couche — la branche compacte retombait dans `_route` (model.py, forward).
+    Ici : par couche, COMPACT=1 → 1 route_logits_fusee, 0 F.linear, 0 `_route`,
+    et les experts reçoivent les poids du Triton ; COMPACT=0 → 1 F.linear +
+    1 route_fusee, 0 route_logits_fusee, 0 `_route`."""
+    import torch.nn.functional as F
+    from acvram import kernels
+    from acvram.engine import model as M
+    from acvram.kernels import route_prep as rp
+    if not torch.cuda.is_available():
+        os.environ.setdefault("TRITON_INTERPRET", "1")
+    if not rp.disponible():
+        pytest.skip("Triton indisponible")
+    from acvram.engine.layers import QuantLinear
+    from acvram.quant.formats import PlainTensor
+    E, H = 4, 64
+
+    def plain(n, k):
+        t = torch.randn(n, k, dtype=torch.bfloat16) * 0.02
+        return QuantLinear(PlainTensor(t, tuple(t.shape), "bf16"), out_features=n, in_features=k)
+    bloc = M.MoEBlock(plain(E, H), [M.MLP(plain(32, H), plain(32, H), plain(H, 32)) for _ in range(E)],
+                      top_k=2, scoring="softmax", score_bias=None)
+    bloc._usage_routage = torch.zeros(E, dtype=torch.int64)
+    bloc._stack_state = "oui"
+    appels = {"linear": 0, "fusee": 0, "logits_fusee": 0, "_route": 0, "grouped": []}
+    vrai_linear, vrai_fusee, vrai_lf = F.linear, rp.route_fusee, rp.route_logits_fusee
+    monkeypatch.setattr(F, "linear", lambda *a, **k: appels.__setitem__("linear", appels["linear"] + 1) or vrai_linear(*a, **k))
+    monkeypatch.setattr(rp, "route_fusee", lambda *a, **k: appels.__setitem__("fusee", appels["fusee"] + 1) or vrai_fusee(*a, **k))
+    monkeypatch.setattr(rp, "route_logits_fusee", lambda *a, **k: appels.__setitem__("logits_fusee", appels["logits_fusee"] + 1) or vrai_lf(*a, **k))
+    monkeypatch.setattr(M.MoEBlock, "_route", lambda self, x: appels.__setitem__("_route", appels["_route"] + 1) or (None, None))
+    monkeypatch.setattr(M.MoEBlock, "_forward_grouped_mma", lambda self, x, tw, ti: None)
+    monkeypatch.setattr(M.MoEBlock, "_forward_grouped", lambda self, x, tw, ti, eid=None: appels["grouped"].append((tw, ti, eid)) or x)
+    monkeypatch.setattr(M, "_ROUTE_PREP", 2)
+    monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
+    monkeypatch.setattr(kernels, "_GLUE_COMPACT", compact)
+    x = torch.randn(12, H).to(torch.bfloat16)
+    y = bloc.forward(x, valid=torch.ones(12, dtype=torch.bool))
+    assert y is x and len(appels["grouped"]) == 1 and appels["_route"] == 0
+    tw, ti, eid = appels["grouped"][0]
+    assert tw.shape == (12, 2) and ti.shape == (12, 2) and eid.shape == (24,) and tw.dtype == torch.float32
+    if compact:
+        assert (appels["logits_fusee"], appels["fusee"], appels["linear"]) == (1, 0, 0), appels
+    else:
+        assert (appels["logits_fusee"], appels["fusee"], appels["linear"]) == (0, 1, 1), appels
+
+
 def test_valid_une_fois_par_pas_est_transmis(monkeypatch):
     """DecoderLayer.decode_fixed_res : `valid` reçu est donné tel quel au
     MoE ; sans lui, la couche calcule `slots >= 0` elle-même (témoin)."""
