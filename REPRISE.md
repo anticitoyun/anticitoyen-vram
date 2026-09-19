@@ -232,12 +232,19 @@ mais le reste est écrit à l'aveugle.
 
 ## 10. Ce qui vient ensuite (19/09/2026 — `revue/poste7-pistes-evolutions-19-09`)
 
-**La borne à connaître avant toute piste de prefill** (`poste7-nuit-sens2-19-09` § 1) :
-Coder-30B fait ≈ 12,4 TFLOP par pas de prefill de 2 047 jetons ; les tensor cores bf16
-denses (~105 TFLOPS) bornent le pas à 118 ms = 17 300 j/s, et le défaut mesure 16 426 :
-**95 % du plancher**. Aucune optimisation de lecture des poids ne gagnera plus de 5 % ;
-le ×2 exige des experts qui calculent en FP8/FP4 sur les tensor cores, donc des
-activations quantifiées — d'où la porte A8 ci-dessous.
+**La borne à connaître avant toute piste de prefill** (`poste7-nuit-sens2-19-09` § 1, corrigée par
+`poste7-poursuite-chantiers-19-09` § 0) : Coder-30B fait ≈ 12,4 TFLOP par pas de prefill de 2 047
+jetons ; la RTX 5090 rend 209,5 TFLOPS bf16 denses (acc. fp32) → plancher 59 ms = 34 700 j/s,
+et le défaut mesure 124,6 ms = 16 426 : **47 % du plancher** (une première version disait 95 %
+avec 105 TFLOPS : faux d'un facteur 2). Conséquence : **il reste ~2× à prendre au prefill sans
+quantifier les activations** — le poste est le noyau Marlin lui-même (déquantification refaite
+par tuile de M, conçu pour M petit), pas le débit des tensor cores. D'où C2 en tête ; W4A8 (C1)
+vient ensuite, pour le J autant que pour les j/s.
+
+**Chantiers ouverts le 19/09 au soir** (utilisateur : « les chantiers non terminables démarrent
+maintenant »), un fichier `revue/chantier-c<N>-19-09.md` chacun, pointés dans INDEX : C2 prefill
+par déquant transitoire + `_grouped_mm` · C1 W4A8 experts · C3 MTP GLM · C4 godets sur `b` ·
+C5 KV int8 · C6 conversion GPTQ + Hadamard · C7 GLM MLA FP8 · C8 gouverneur d'horloge par lot.
 
 Par ordre de valeur, chacune avec la mesure qui la rendrait fausse :
 
@@ -262,6 +269,5 @@ Par ordre de valeur, chacune avec la mesure qui la rendrait fausse :
    refusant sans verrou, `acvram eco`, GUI (32 langues, vedettes), PPL sur le chemin servi.
 
 **Ce qui ne se fera pas** (pour ne pas y revenir) : W4A4 experts (plancher E2M1 ≈ 9 %
-d'erreur par GEMM, PPL +0,010 contre 0,0045 de marge) ; « lire les poids une fois au lieu
-de deux » au prefill (±0 % trois fois) ; horloge mémoire, split-K b=1 au défaut, lm_head
+d'erreur par GEMM, PPL +0,010 contre 0,0045 de marge) ; horloge mémoire, split-K b=1 au défaut, lm_head
 int8 à b=12, exil par expert à b=12 — tous réfutés par mesure, verdicts dans INDEX.
