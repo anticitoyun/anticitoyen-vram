@@ -177,6 +177,8 @@ install -m 755 packaging/acvram-console "$PKG/usr/bin/acvram-console"
 # dans sa fenetre, et une barre d'etat qui lit les capteurs. Elle a besoin de
 # carte.sh pour prendre le verrou de la carte qu'elle sert.
 install -m 755 packaging/acvram-gui "$PKG/usr/bin/acvram-gui"
+install -d "$PKG/usr/share/acvram/langues"
+install -m 644 packaging/langues/*.json "$PKG/usr/share/acvram/langues/"   # traductions de la GUI
 install -D -m 755 outils/carte.sh "$PKG/usr/share/acvram/carte.sh"
 install -m 644 packaging/acvram.desktop "$PKG/usr/share/applications/acvram.desktop"
 install -m 644 packaging/acvram.svg \
