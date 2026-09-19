@@ -266,13 +266,17 @@ def _charge_cuda(duree: float = 0.15, device: str = "cuda:0") -> None:
 
 
 def lire_sous_charge(index: int = 0, lire=None, charge=None, attente: float = 0.12,
-                     plafond: float = 2.0, stable_mhz: int = 30) -> dict:
+                     plafond: float = 2.5, stable_mhz: int = 30, minimum: float = 0.8,
+                     cible: int | None = None) -> dict:
     """`lire(index)` pendant que `charge()` occupe la carte dans un fil, **jusqu'à
-    stabilité** : deux lectures consécutives à ± `stable_mhz`, plafond `plafond` s.
-    Une carte froide monte par paliers (225 → 1 980 → 2 977 sur 3 × 0,35 s, poste2
-    19/09) : une seule lecture à 0,35 s dit 225 ou 1 980 et tomberait sous une
-    bande. La charge tourne pendant toute la lecture ; `stable` et `lectures`
-    sont rendus avec l'horloge (stable False = plafond atteint, dit)."""
+    un régime** : une carte froide monte par paliers (225 → 1 102 → 1 980 → 2 977,
+    poste2 19/09) et deux lectures égales sur un palier de montée ne sont pas un
+    régime. Stable = après ≥ `minimum` s de charge (0,8 s : la montée de la
+    5090 dure ≈ 1 s), deux lectures consécutives à ± `stable_mhz` et ≥ 1 000 MHz
+    (un palier tenu AVANT le minimum n'est pas cru) ; ou,
+    quand une `cible` est demandée, deux lectures consécutives dans sa bande
+    (≥ cible − TOLERANCE_MHZ : la carte verrouillée est arrivée). Plafond
+    `plafond` s (stable False, dit). `stable` et `lectures` sont rendus."""
     import threading, time
     lire = lire_horloge if lire is None else lire
     charge = _charge_cuda if charge is None else charge
@@ -294,11 +298,14 @@ def lire_sous_charge(index: int = 0, lire=None, charge=None, attente: float = 0.
             if sm is None:
                 break
             lectures.append(sm)
-            # stable = deux lectures à ± stable_mhz ET hors du palier de repos (< 1 000 MHz :
-            # une carte sous charge n'y reste pas ; deux 225 de suite = la montée n'a pas commencé)
-            if len(lectures) >= 2 and abs(lectures[-1] - lectures[-2]) <= stable_mhz and sm >= 1000:
-                h["stable"] = True; break
-            if time.time() - t0 > plafond:
+            ecoule = time.time() - t0
+            if cible is not None and len(lectures) >= 2 and all(
+                    abs(v - cible) <= TOLERANCE_MHZ for v in lectures[-2:]):
+                h["stable"] = True; break                   # arrivée sur la consigne
+            if (ecoule >= minimum and len(lectures) >= 2 and sm >= 1000
+                    and abs(lectures[-1] - lectures[-2]) <= stable_mhz):
+                h["stable"] = True; break                   # ne monte plus, après le minimum de charge
+            if ecoule > plafond:
                 h["stable"] = False; break
     finally:
         arret.set(); fil.join(timeout=5)
@@ -328,11 +335,12 @@ class Horloge:
         """effectif = l'horloge SM LUE (clocks.sm) PENDANT une charge, jamais la
         mémoire d'un réglage ni une lecture au repos (225 MHz sous verrou oisif).
         Chiffre toujours ; « libre » seulement quand rien n'est lisible."""
-        h = lire_sous_charge(self.index, self._lire, self._charge) if sous_charge else self._lire(self.index)
+        cible = None if self.mode == "off" else int(self.mode)
+        h = lire_sous_charge(self.index, self._lire, self._charge, cible=cible) if sous_charge else self._lire(self.index)
         self._lecture = h
         self.effectif = str(h["sm_mhz"]) if "sm_mhz" in h else "?"
         if sous_charge and h.get("stable") is False:
-            print(f"acvram eco : horloge non stabilisée en 2 s sous charge (lectures {h.get('lectures')}) — "
+            print(f"acvram eco : horloge non stabilisée en 2,5 s sous charge (lectures {h.get('lectures')}) — "
                   f"effectif {self.effectif} pris tel quel", file=sys.stderr)
         return self.effectif
 
