@@ -61,19 +61,29 @@ for _nom, _val in (("ACVRAM_MLA_CORE", _MLA_CORE), ("ACVRAM_MLA_CORE_DECODE", _M
         raise ValueError(f"{_nom}={_val!r} : fp32 | tf32 | bf16")
 
 
-def _regime_coeur(decode: bool = False, vb: bool = False) -> str:
+# poste7-c14-defaut-tf32-8k-20-09, addendum 02 h 25 (verdict-tf32-8k, poste2 c2c1e87 : max |Δ| 6,23 %
+# à 8 k > 2 %, géo −0,22 %) : le régime réduit (tf32, bf16) ne vaut que quand le morceau de
+# préfill VOIT ≤ 2 048 clés (pas sa taille) ; au-delà, fp32 pour ce morceau. Même règle pour F
+# (bf16) et C13-c. Ligne de régime : `mla_core=tf32(≤2048 clés)`.
+_MLA_CORE_MAX_CLES = 2048
+
+
+def _regime_coeur(decode: bool = False, vb: bool = False, cles: int | None = None) -> str:
     """Le régime qui s'applique à un produit du cœur : décodage → MLA_CORE_DECODE ;
-    3e produit du préfill → MLA_CORE si MLA_CORE_VB, sinon fp32 ; sinon MLA_CORE."""
+    3e produit du préfill → MLA_CORE si MLA_CORE_VB, sinon fp32 ; sinon MLA_CORE —
+    et fp32 dès que le morceau voit plus de _MLA_CORE_MAX_CLES clés (`cles`)."""
     if decode:
         return _MLA_CORE_DECODE
     if vb and not _MLA_CORE_VB:
         return "fp32"
+    if cles is not None and cles > _MLA_CORE_MAX_CLES:
+        return "fp32"
     return _MLA_CORE
 
 
-def _dt_coeur(decode: bool = False, vb: bool = False) -> torch.dtype:
+def _dt_coeur(decode: bool = False, vb: bool = False, cles: int | None = None) -> torch.dtype:
     """dtype des opérandes du produit : bf16 sous le régime bf16, fp32 sinon."""
-    return torch.bfloat16 if _regime_coeur(decode, vb) == "bf16" else torch.float32
+    return torch.bfloat16 if _regime_coeur(decode, vb, cles) == "bf16" else torch.float32
 
 
 class _tf32_coeur:
@@ -81,11 +91,11 @@ class _tf32_coeur:
     produit (décodage / 3e produit / préfill) est tf32, drapeau restauré après —
     la portée est le produit du cœur, pas le processus. Sous fp32 et bf16 : inerte
     (bf16 n'a pas besoin du drapeau)."""
-    def __init__(self, decode: bool = False, vb: bool = False):
-        self._decode, self._vb = decode, vb
+    def __init__(self, decode: bool = False, vb: bool = False, cles: int | None = None):
+        self._decode, self._vb, self._cles = decode, vb, cles
 
     def __enter__(self):
-        self._actif = _regime_coeur(self._decode, self._vb) == "tf32" and torch.cuda.is_available()
+        self._actif = _regime_coeur(self._decode, self._vb, self._cles) == "tf32" and torch.cuda.is_available()
         if self._actif:
             self._avant = torch.backends.cuda.matmul.allow_tf32
             torch.backends.cuda.matmul.allow_tf32 = True
@@ -370,35 +380,39 @@ class MLAttention(nn.Module):
             # prefill : par tranches de requêtes, sinon les scores
             # [t, nh, total] fp32 pèsent des gigaoctets (2 Go à 4k jetons)
             passe = total - t
-            dt = _dt_coeur()
-            C32 = cache.to(dt)
-            V32 = C32[:, :self.rank]
             pos_k = torch.arange(total, device=x.device)
             morceaux = []
+            C_dt = {}                                  # cache converti par dtype, une fois
             for d0 in range(0, t, 256):
                 d1 = min(t, d0 + 256)
-                with _tf32_coeur():
+                cles = passe + d1                      # clés VUES par ce morceau (causal) : la règle ≤ 2 048
+                dt = _dt_coeur(cles=cles)
+                if dt not in C_dt:
+                    C_dt[dt] = cache.to(dt)
+                C32 = C_dt[dt]; V32 = C32[:, :self.rank]
+                with _tf32_coeur(cles=cles):
                     sc = torch.einsum('thr,sr->ths', q_eff[d0:d1].to(dt), C32).to(torch.float32) * self.scale
                 pos_q = torch.arange(d0, d1, device=x.device).unsqueeze(-1) + passe
                 sc = sc.masked_fill(pos_k > pos_q.unsqueeze(1), float('-inf'))
-                with _tf32_coeur():
+                with _tf32_coeur(cles=cles):
                     morceaux.append(torch.einsum('ths,sr->thr', sc.softmax(dim=-1).to(dt), V32))
             o_lat = torch.cat(morceaux)
-            dtv = _dt_coeur(vb=True)
-            with _tf32_coeur(vb=True):             # 3e produit du cœur au préfill (8ae21997, opt-in MLA_CORE_VB)
+            dtv = _dt_coeur(vb=True, cles=total)
+            with _tf32_coeur(vb=True, cles=total):  # 3e produit du cœur au préfill (8ae21997, opt-in MLA_CORE_VB)
                 y = torch.einsum('hvr,thr->thv', self.v_b.to(dtv), o_lat.to(dtv))
             y = y.reshape(t, self.nh * self.dv).to(x.dtype)
             return self._o(y), cache
-        dt = _dt_coeur()
-        with _tf32_coeur():
+        cles = int(total)                              # clés vues (causal jusqu'à total)
+        dt = _dt_coeur(cles=cles)
+        with _tf32_coeur(cles=cles):
             scores = torch.einsum('thr,sr->ths', q_eff.to(dt), C.to(dt)).to(torch.float32) * self.scale
         scores = scores.masked_fill(masque, float('-inf'))
         probs = scores.softmax(dim=-1)
 
-        with _tf32_coeur():
+        with _tf32_coeur(cles=cles):
             o_lat = torch.einsum('ths,sr->thr', probs.to(dt), C[:, :self.rank].to(dt))
-        dtv = _dt_coeur(vb=True)
-        with _tf32_coeur(vb=True):                 # 3e produit (8ae21997, opt-in MLA_CORE_VB)
+        dtv = _dt_coeur(vb=True, cles=cles)
+        with _tf32_coeur(vb=True, cles=cles):      # 3e produit (8ae21997, opt-in MLA_CORE_VB)
             y = torch.einsum('hvr,thr->thv', self.v_b.to(dtv), o_lat.to(dtv))
         y = y.reshape(t, self.nh * self.dv).to(x.dtype)
         return self._o(y), cache
