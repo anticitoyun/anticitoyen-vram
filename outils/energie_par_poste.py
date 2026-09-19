@@ -60,7 +60,7 @@ def _t_noyau(fn, lancements):
     return total / lancements, [(k[:60], round(v / total, 3)) for k, v in noyaux] if total else []
 
 
-def mesure(nom, fn, lots=20, unite=""):
+def mesure(nom, fn, lots=20, unite="", octets=None):
     """fn() lance un lot de travail ; on boucle DUREE s, énergie NVML. `unite` dit ce
     qu'est UN lancement (la grandeur que divise mJ_par_lancement). Après la boucle, le
     rapport cyclique Σ t_noyau / t_mur (§ poste7 poste7-c10-scelle-retire-m1 : < 0,9 → le W
@@ -81,6 +81,8 @@ def mesure(nom, fn, lots=20, unite=""):
          "s": round(e.duree, 2), "lancements": n, "us_par_lancement": round(us_mur, 1),
          "us_noyau_par_lancement": round(us_noyau, 1), "rapport_cyclique": round(us_noyau / us_mur, 3),
          "noyaux": noyaux,
+         "Go_par_lancement": None if octets is None else round(octets / 1e9, 4),
+         "Go_s_noyau": None if octets is None or us_noyau <= 0 else round(octets / us_noyau / 1e3, 1),
          "mJ_par_lancement": round(1e3 * e.joules / n, 3), "MHz": sorted(horloges)[len(horloges) // 2],
          "bridages": sorted(e.bridages)}
     print("POSTE " + json.dumps(r, ensure_ascii=False), flush=True)
@@ -238,9 +240,17 @@ if SEUL == "mesure1":
         assert all(len(set(t[b].tolist())) == moe.top_k for b in range(B))
         assert len(set(t.reshape(-1).tolist())) == u
         return t.to(dev)
-    unites = [int(v) for v in os.environ.get("BANC_DISTINCTS", "27,55").split(",")]
+    unites = [int(v) for v in os.environ.get("BANC_DISTINCTS", "45,27").split(",")]
     bt = int(os.environ.get("ACVRAM_MOE_MMA_BT", "16"))
     t_m1 = {k: Tour() for k in ("mgu", "mdn", "mma_gu", "mma_dn")}
+    def octets_par_expert(pile):
+        """poids + échelles de bloc d'UN expert, depuis les tenseurs de la pile (E en tête)."""
+        return sum(t.numel() * t.element_size() for t in pile if torch.is_tensor(t) and t.dim() >= 2) / E
+    o_nat = {n: octets_par_expert(piles[0][i][1:3]) for i, n in enumerate(("gate", "up", "down"))}
+    o_mar = {n: octets_par_expert(marlins[0][n + "_proj"][:2]) for n in ("gate", "up", "down")}
+    print("OCTETS_PAR_EXPERT " + json.dumps({"naturel_Mo": {k: round(v / 1e6, 3) for k, v in o_nat.items()},
+                                             "marlin_Mo": {k: round(v / 1e6, 3) for k, v in o_mar.items()}}), flush=True)
+    bilan = {}
     for u in unites:
         topi_u = liste_experts(u)
         eid_u = topi_u.reshape(-1).to(torch.int32)
@@ -267,11 +277,27 @@ if SEUL == "mesure1":
         def mma_dn(i, aq=aq, asf=asf, tiles=tiles):
             moe._gemm_mma(piles[i % nc][2], aq, asf, tiles, brut=True)
         nt = int(tiles[0].numel())
-        res.append(mesure("M1 u=%d Marlin gate·up GEMV (nvfp4_gemv_marlin_gateup)" % u, lambda: m_gu(t_m1["mgu"]()), lots=48, unite=unite))
-        res.append(mesure("M1 u=%d Marlin down GEMV (nvfp4_gemv_marlin)" % u, lambda: m_dn(t_m1["mdn"]()), lots=48, unite=unite))
-        res.append(mesure("M1 u=%d mma2 gate+up (2 GEMM groupees MMA, BT=%d, %d tuiles)" % (u, bt, nt), lambda: mma_gu(t_m1["mma_gu"]()), lots=48, unite=unite))
-        res.append(mesure("M1 u=%d mma2 down (GEMM groupee MMA, BT=%d, %d tuiles)" % (u, bt, nt), lambda: mma_dn(t_m1["mma_dn"]()), lots=48, unite=unite))
-    print("RESULTAT " + json.dumps({"B": B, "repos_W": round(repos_w, 1), "mode": "mesure1", "distincts": unites, "postes": res}, ensure_ascii=False))
+        r1 = mesure("M1 u=%d Marlin gate·up GEMV (nvfp4_gemv_marlin_gateup)" % u, lambda: m_gu(t_m1["mgu"]()), lots=48, unite=unite, octets=u * (o_mar["gate"] + o_mar["up"]))
+        r2 = mesure("M1 u=%d Marlin down GEMV (nvfp4_gemv_marlin)" % u, lambda: m_dn(t_m1["mdn"]()), lots=48, unite=unite, octets=u * o_mar["down"])
+        r3 = mesure("M1 u=%d mma2 gate+up (2 GEMM groupees MMA, BT=%d, %d tuiles)" % (u, bt, nt), lambda: mma_gu(t_m1["mma_gu"]()), lots=48, unite=unite, octets=u * (o_nat["gate"] + o_nat["up"]))
+        r4 = mesure("M1 u=%d mma2 down (GEMM groupee MMA, BT=%d, %d tuiles)" % (u, bt, nt), lambda: mma_dn(t_m1["mma_dn"]()), lots=48, unite=unite, octets=u * o_nat["down"])
+        r5 = mesure("M1 u=%d quant_act x2 (E2M1 bloc 16, entrees de gate/up et de down)" % u, lambda: (ext.nvfp4_quant_act(xs), ext.nvfp4_quant_act(a3)), lots=100, unite=unite, octets=float(xs.numel() * 2 + a3.numel() * 2))
+        res += [r1, r2, r3, r4, r5]
+        # t par couche (temps noyau, pas la boucle), W max des noyaux d'experts, règle de poste7
+        # (poste7-c16bis-puissance-mesure1-19-09 § 2) : Mesure 2 si t_mma2 ≤ 1,15 × t_marlin ET W_mma2 ≤ 350
+        t_mar = r1["us_noyau_par_lancement"] + r2["us_noyau_par_lancement"]
+        t_mma = r3["us_noyau_par_lancement"] + r4["us_noyau_par_lancement"] + r5["us_noyau_par_lancement"]
+        w_mma = max(r3["W"], r4["W"])
+        cyc_min = min(r["rapport_cyclique"] for r in (r1, r2, r3, r4))
+        bilan[u] = {"t_marlin_us_couche": round(t_mar, 1), "t_mma2_us_couche": round(t_mma, 1),
+                    "t_mma2_sur_t_marlin": round(t_mma / t_mar, 3) if t_mar else None,
+                    "W_marlin_max": max(r1["W"], r2["W"]), "W_mma2_max": w_mma, "rapport_cyclique_min": cyc_min,
+                    "J_couche_marlin_mJ": round(sum(r["mJ_par_lancement"] for r in (r1, r2)), 3),
+                    "J_couche_mma2_mJ": round(sum(r["mJ_par_lancement"] for r in (r3, r4, r5)), 3),
+                    "mesure2": bool(t_mar and t_mma <= 1.15 * t_mar and w_mma <= 350),
+                    "cyclique_ok": cyc_min >= 0.9}
+        print("BILAN u=%d %s" % (u, json.dumps(bilan[u], ensure_ascii=False)), flush=True)
+    print("RESULTAT " + json.dumps({"B": B, "repos_W": round(repos_w, 1), "mode": "mesure1", "distincts": unites, "bilan": bilan, "postes": res}, ensure_ascii=False))
     raise SystemExit(0)
 
 def pas_complet():
