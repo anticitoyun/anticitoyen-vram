@@ -99,6 +99,19 @@ def quantifier_a8(x: torch.Tensor):
     return a, s
 
 
+def quantifier_a8_torch(x: torch.Tensor):
+    """Le MÊME arrondi que `_quant_a8_kernel`, en torch pur (à sec, fausse quant,
+    repli cublas sans Triton) : s = max(amax, 1e-8)/127 par ligne en fp32,
+    arrondi au plus proche À DEMI ÉLOIGNÉ DE ZÉRO (floor(v + 0,5) selon le
+    signe — pas `torch.round`, qui arrondit au pair), borne ± 127.
+    `tests/test_prefill_a8_porte.py` le tient au bit contre le noyau."""
+    xf = x.reshape(-1, x.shape[-1]).to(torch.float32)
+    s = torch.clamp_min(xf.abs().amax(dim=1), 1e-8) / 127.0
+    v = xf / s[:, None]
+    r = torch.where(v >= 0, torch.floor(v + 0.5), -torch.floor(-v + 0.5)).clamp(-127.0, 127.0)
+    return r.to(torch.int8), s
+
+
 def gemm_w8a8(x: torch.Tensor, t, sortie_fp32: bool = False) -> torch.Tensor:
     """``x`` [M, K], ``t`` INT8Tensor (qweight uint8 [N, K_pad], scales fp16
     [N, NG], zeros uint8 [N, NG], group_size G) → [M, N] dans le dtype de x."""

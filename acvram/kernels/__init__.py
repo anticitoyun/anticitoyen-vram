@@ -757,14 +757,11 @@ def gemm_i8c_cublas(x: torch.Tensor, t: INT8Tensor, sortie_fp32: bool = False):
     N, k_pad = t.qweight.shape
     if w is None or M <= 16 or k_pad % 8 or N % 8:
         return None
-    from .gemm_w8a8 import quantifier_a8, disponible as _w8a8_dispo
+    from .gemm_w8a8 import quantifier_a8, quantifier_a8_torch, disponible as _w8a8_dispo
     if _w8a8_dispo() and x.is_cuda:
         a, sx = quantifier_a8(x)
     else:
-        # à sec (tests) : même règle que _quant_a8_kernel — absmax/127 par ligne
-        xf = x.float()
-        sx = xf.abs().amax(1).clamp_min(1e-12) / 127.0
-        a = torch.round(xf / sx[:, None]).clamp(-127, 127).to(torch.int8)
+        a, sx = quantifier_a8_torch(x)           # à sec : le même arrondi que le noyau, au bit
     if K != k_pad:
         a = torch.nn.functional.pad(a, (0, k_pad - K))
     acc = torch._int_mm(a.contiguous(), w.t())                       # [M, N] int32
