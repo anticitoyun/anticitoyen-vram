@@ -59,9 +59,14 @@ def _etat(c):
                 sommet=int(c.tampon_sommet[0]), libres=c.tampon_libres.clone())
 
 
-def _memes(a, b, ou=""):
+def _memes(a, b, ou="", ecrites=None):
     """Tout au bit sauf V (± 1 code) ; le contenu des lignes de la réserve ne
-    compte que pour les blocs ouverts (les lignes rendues gardent du vieux)."""
+    compte que pour les blocs ouverts, et seulement sur leurs lignes ÉCRITES
+    (``ecrites`` : bloc → nombre de lignes) — une ligne reprise à la pile garde
+    au-delà ce que son bloc précédent y avait laissé, et deux caches qui ont
+    recyclé leurs lignes différemment (un par un : blocs 0 et 1 fermés par la
+    réserve ; un seul appel : blocs 0 et 1 directs) n'ont pas le même vieux.
+    Vu sur carte le 20/09 (« un par un ligne du bloc 2 »)."""
     for nom in ("k", "sc", "ks", "tampon_de"):
         assert torch.equal(a[nom], b[nom]), f"{ou} {nom} : {(a[nom] != b[nom]).sum().item()} cellules"
     assert a["sommet"] == b["sommet"], ou
@@ -70,7 +75,8 @@ def _memes(a, b, ou=""):
     assert torch.equal(a["vs"], b["vs"]), ou
     for blk, r in enumerate(a["tampon_de"].tolist()):
         if r >= 0:
-            assert torch.equal(a["tampon"][r], b["tampon"][b["tampon_de"][blk]]), f"{ou} ligne du bloc {blk}"
+            n = BS if ecrites is None else ecrites[blk]
+            assert torch.equal(a["tampon"][r, :n], b["tampon"][b["tampon_de"][blk], :n]), f"{ou} ligne du bloc {blk}"
 
 
 def _jumeau_ecrire(c, slots, k, v):
@@ -99,8 +105,8 @@ def test_ecriture_prefill_un_par_un_et_decoupe_au_bit_contre_le_jumeau():
     for lo, hi in ((0, 10), (10, 28), (28, 40)):
         dec.write(slots[lo:hi], k[lo:hi], v[lo:hi])
     torch.cuda.synchronize()
-    _memes(_etat(un), _etat(noyau), "un par un")
-    _memes(_etat(dec), _etat(noyau), "découpé")
+    _memes(_etat(un), _etat(noyau), "un par un", ecrites={2: 8})
+    _memes(_etat(dec), _etat(noyau), "découpé", ecrites={2: 8})
     # fermeture du bloc 2 par le noyau (jetons 40..47) : la ligne rendue, codes par canal
     k2, v2 = _kv(8, 11)
     noyau.write(torch.arange(40, 48, device="cuda"), k2, v2)
