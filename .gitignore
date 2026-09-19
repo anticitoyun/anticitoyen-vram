@@ -28,3 +28,4 @@ acvram_*.deb
 # de chaque issue. Le test d identite le refuserait ; il n a rien a faire dans l histoire.
 .beads/issues.jsonl
 externes/
+scratchpad/ncu-tampon-c1-19-09/home-ncu/
