@@ -1262,6 +1262,40 @@ class MoEBlock(nn.Module):
             qw.shape[1], k, bt or _MOE_MMA_BT, _MOE_MMA_ETAGES, _MOE_MMA_KS, grow)
         return y if brut else y[:, :m]
 
+    def _decal_marlin(self, nom: str) -> int:
+        """`decal` d'exposant des échelles Marlin de la pile `nom` : 15 + log2 facteur,
+        facteur = g_naturel · 2¹¹⁹ / g_marlin (traiter_echelle_globale), une puissance
+        de 2 par pile — calculé une fois."""
+        cache = self.__dict__.setdefault("_decals_marlin", {})
+        if nom not in cache:
+            import math
+            g_nat = self._stacks[nom][3].reshape(-1)[0].item()
+            g_mar = self._stacks_marlin[nom][2].reshape(-1)[0].item()
+            facteur = g_nat * (2.0 ** 119) / g_mar
+            lf = int(round(math.log2(facteur)))
+            if 2.0 ** lf != facteur:
+                raise RuntimeError(f"C17 : facteur Marlin de {nom} n'est pas une puissance de 2 ({facteur})")
+            cache[nom] = 15 + lf
+        return cache[nom]
+
+    def _gemm_mma_marlin(self, nom: str, xq, xsf, tiles, grow=None, bt=None):
+        """C17 : la GEMM groupée MMA (mma2) sur la DISPOSITION MARLIN de la pile `nom`
+        (w_marlin [E, K/16, 2N] int32, s_marlin [E, K/16, N]), échelle globale
+        NATURELLE à l'épilogue ; rend y [G, N] bf16 (N rembourré de la pile)."""
+        w, sc, _, k, m = self._stacks_marlin[nom]
+        gs = self._stacks[nom][3]
+        cle = ("marlin", w.data_ptr(), sc.data_ptr())
+        cache = self.__dict__.setdefault("_tables_mma", {})
+        if cle not in cache:
+            ar = torch.arange(w.shape[0], dtype=torch.int64)
+            cache[cle] = ((w.data_ptr() + ar * w.stride(0) * w.element_size()).to(w.device),
+                          (sc.data_ptr() + ar * sc.stride(0)).to(w.device))
+        tq, tb = cache[cle]
+        N = w.shape[2] // 2
+        return kernels.get_extension().nvfp4_gemm_grouped_mma(
+            tq, tb, gs, xq, xsf, tiles[0], tiles[1], tiles[2],
+            N, k, bt or 16, _MOE_MMA_ETAGES, _MOE_MMA_KS, grow, self._decal_marlin(nom))
+
     def _chemin(self, nom: str) -> None:
         """Compteur du chemin RÉELLEMENT pris au préfill (REGLES § 7 : « noyau
         atteint, pas fonction appelée » — trois tests d'équivalence ont
@@ -1531,8 +1565,17 @@ class MoEBlock(nn.Module):
         pg, pu, pd = (st[n] for n in ("gate_proj", "up_proj", "down_proj"))
         if any(p[0] != "nvfp4" for p in (pg, pu, pd)):
             return None
+        marlin_c17 = False
         if pg[1] is None:                              # disposition unique : la pile naturelle est rendue
-            return None
+            st_m = getattr(self, "_stacks_marlin", None)
+            awq0 = getattr(self, "_stacks_awq", {})
+            if not (_MOE_DECODE_MMA_MARLIN and st_m is not None
+                    and all(n in st_m for n in ("gate_proj", "up_proj", "down_proj"))
+                    and awq0.get("gate_proj") is None and awq0.get("down_proj") is None
+                    and not awq0.get("hadamard", {}).get("gate_proj", 0) and not awq0.get("hadamard", {}).get("down_proj", 0)
+                    and pd[1] is None):
+                return None
+            marlin_c17 = True                          # C17 : mma2 lit les tuiles Marlin
         ext = kernels.get_extension()
         if (ext is None or not hasattr(ext, "nvfp4_gemm_grouped_mma")
                 or not hasattr(ext, "moe_act") or not hasattr(ext, "moe_reduce_trie")
@@ -1599,7 +1642,7 @@ class MoEBlock(nn.Module):
         xq2, xsf2, gr2 = ((xq, xsf, gr) if (xs2 is xs and awq_u is awq_g)
                           else ext.nvfp4_quant_act(xs2, awq_u, es32, cpt, hd_x))
         code_act = 1 if self.act == "gelu_tanh" else 0
-        if (_MOE_DECODE_FUSED and hasattr(ext, "nvfp4_moe_fused") and bt == 16 and awq_d is None
+        if (_MOE_DECODE_FUSED and not marlin_c17 and hasattr(ext, "nvfp4_moe_fused") and bt == 16 and awq_d is None
                 and not hd_x and not hd_d and xs2 is xs and awq_u is awq_g
                 and pg[4] % 128 == 0 and pg[5] == pd[4] and pd[4] % _MOE_FUSED_TN == 0 and pd[5] % 128 == 0):
             # Port de b12x (poste7-reprise-15-09-b § 3-4) : gate+up+act+quant en
@@ -1610,6 +1653,13 @@ class MoEBlock(nn.Module):
                 y = self._moe_fused(pg, pu, pd, xq, xsf, tiles, code_act, ordre=ordre, tw=tw, k=k, t=t, grow=gr)
                 return y if x.dtype == torch.bfloat16 else y.to(x.dtype)
             d = self._moe_fused(pg, pu, pd, xq, xsf, tiles, code_act, grow=gr)
+        elif marlin_c17:
+            self._chemin("decode_mma_marlin")
+            g = self._gemm_mma_marlin("gate_proj", xq, xsf, tiles, grow=gr, bt=bt)
+            u = self._gemm_mma_marlin("up_proj", xq2, xsf2, tiles, grow=gr2, bt=bt)
+            act = ext.moe_act(g, u, pg[5], pd[4], code_act)
+            aq, asf, gra = ext.nvfp4_quant_act(act, awq_d, es32, cpt, hd_d)
+            d = self._gemm_mma_marlin("down_proj", aq, asf, tiles, grow=gra, bt=bt)
         else:
             g = self._gemm_mma(pg, xq, xsf, tiles, brut=True, bt=bt, grow=gr)
             u = self._gemm_mma(pu, xq2, xsf2, tiles, brut=True, bt=bt, grow=gr2)
@@ -2201,6 +2251,14 @@ _MOE_GEMV = os.environ.get("ACVRAM_MOE_GEMV", "v1")
 # ACVRAM_PREFILL_GROUPED=marlin) ou la pile NVFP4 naturelle (« naturel », témoin).
 # Défaut « marlin » avec PREFILL_GROUPED (adoption du 18/09) ; témoin : les deux à naturel/groupe.
 _GEMV_LAYOUT = os.environ.get("ACVRAM_GEMV_LAYOUT", "marlin")
+# C17 (chantier-c17-mma2-lit-marlin-19-09, scellé poste7-c17-scelle-mesure1-ter) : sous la
+# disposition unique Marlin (pile naturelle rendue), le décodage MoE par la MMA groupée
+# (`_forward_grouped_mma`, MOE_DECODE_MMA, t ≥ MIN_T) lit les TUILES MARLIN au lieu de rendre
+# None — même noyau que le préfill naturel, aucune copie. Mesure 1-ter sous 2 700 : ×0,893 du
+# temps de Marlin à 45 distincts, ×0,771 à 27 ; ×1,23 à u=8 et ×1,40 à u=16 : sous MIN_T le
+# GEMV Marlin reste. 0 (défaut jusqu'au scellé : capture 5/5, ppl-decode-kv ± 0,002, pas b=12
+# ≤ défaut − 0,35 ms) = jamais, la GEMV Marlin sert.
+_MOE_DECODE_MMA_MARLIN = os.environ.get("ACVRAM_MOE_DECODE_MMA_MARLIN", "0") == "1"
 # C10 (poste7-c9-119b-cache-experts-19-09 § Ordre (3)) : ACVRAM_MARLIN_DISTINCT=1 lève le
 # refus « gate/up à entrées distinctes » de la disposition unique — le décodage prend alors
 # le GEMV Marlin à UNE projection deux fois (gate puis up, activation torch), le préfill
