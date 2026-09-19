@@ -7,6 +7,10 @@ import os
 # torch) avant que le premier test Triton ne la pose, et un @triton.jit
 # décoré sans elle rend « Cannot call @triton.jit'd outside of the scope of
 # a kernel » (vu en suite complète seulement, pas en fichier isolé).
+# Éco d'horloge (poste7-eco-2700-defaut-19-09) : un test qui charge un moteur sur
+# carte ne pose pas `-lgc` de lui-même — la suite n'est pas un service ; un
+# test d'éco pose ACVRAM_ECO explicitement.
+os.environ.setdefault("ACVRAM_ECO", "off")
 if os.environ.get("CUDA_VISIBLE_DEVICES") == "":
     os.environ.setdefault("TRITON_INTERPRET", "1")
     # Les noyaux `fla` (flash-linear-attention) sont autoréglés : sans

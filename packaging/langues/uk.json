@@ -47,5 +47,8 @@
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert завершився з помилкою (код {code}) — див. журнал вище.",
  "serveur arrêté.": "сервер зупинено.",
  "toutes les options": "усі параметри",
- "proposer les options": "запропонувати параметри"
+ "proposer les options": "запропонувати параметри",
+ "éco d'horloge": "еко-режим частоти",
+ "2700 (défaut)": "2700 (типово)",
+ "off (horloge libre)": "вимк (вільна частота)"
 }

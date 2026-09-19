@@ -121,6 +121,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("PA_SANS_COMPTEUR", "", None, None, "attention paginée sans compteur"),
     Variable("INT8_GEMV_WARP", "", None, None, "warps du GEMV int8 (lu dans le .cu)"),
     Variable("INT8_TRANCHE", "", None, None, "découpage du GEMV int8 (12 = ancien, témoin ; lu dans le .cu)"),
+    Variable("ECO", "", None, None,
+             "poste7-eco-2700-defaut-19-09 § 1 : mode éco d'horloge DEMANDÉ par un instrument pour ses bras A/B (2700 | 2100 | off), jamais pour le service — le service lit config.json (\"eco\": \"2700\" par défaut) ; l'effectif est sur la ligne de régime (eco=<demandé>(<effectif>)) et un instrument ne publie pas si demandé ≠ effectif"),
     Variable("DOUBLE_DISPOSITION_DIAG", "0", None, "0",
              "diagnostic seulement (bissection du biais GEMV (b), poste7-p1-situ-verdict-18-09) : 1 = les deux dispositions gardées, préfill {groupe|marlin} × décodage {naturel|marlin} sur les mêmes piles ; jamais un régime servi"),
     Variable("MOE_GEMV", "v1", ("acvram.engine.model", "_MOE_GEMV"), "v1",
@@ -200,6 +202,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("FUSION_PARTIELLE", "0", None, "0"),
     Variable("LOGITS_BF16", "", None, "", "1 : tête en bf16 (précision-de-sortie-invisible-à-la-PPL)"),
     Variable("GRAPHS_EAGER", "", None, "1"),
+    Variable("GODETS_B", "1", ("acvram.engine.graphs", "_GODETS_B"), "0",
+             "clé de graphe CUDA, dimension b : 1 = lot arrondi au godet (puissances de deux, plafond HYBRID_SLOTS ; en place depuis le 11/09) | 0 = lot exact, témoin de mesure du chantier C4 (revue/chantier-c4-19-09) ; même sortie dans les deux cas"),
     Variable("PA_ARM", "A", None, "A"),
     Variable("SCALER_SANS_CACHE", "", None, "1"),
 )
@@ -348,9 +352,17 @@ def regime_ligne() -> str:
     # 19-09 § 2) est root et hors processus : aucun défaut ACVRAM_* ne bouge,
     # et un chiffre éco passerait pour un chiffre défaut. Nommée seulement
     # quand une carte est visible : à sec la ligne ne change pas.
-    horloge = _horloge()
-    if horloge is not None:
-        parts.append("horloge=" + horloge)
+    try:
+        from . import eco as _eco
+        h = _eco.horloge_du_processus()
+    except Exception:                                     # noqa: BLE001
+        h = None
+    if h is not None and h.etat != "sans carte":
+        parts.append(h.etiquette())                       # eco=<demandé>(<effectif>[: état])
+    else:
+        horloge = _horloge()
+        if horloge is not None:
+            parts.append("horloge=" + horloge)
     return "[régime] " + " ".join(parts)
 
 

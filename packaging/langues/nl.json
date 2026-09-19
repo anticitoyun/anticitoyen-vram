@@ -47,5 +47,8 @@
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert is mislukt (code {code}) — zie het logboek hierboven.",
  "serveur arrêté.": "server gestopt.",
  "toutes les options": "alle opties",
- "proposer les options": "opties voorstellen"
+ "proposer les options": "opties voorstellen",
+ "éco d'horloge": "klok-ecomodus",
+ "2700 (défaut)": "2700 (standaard)",
+ "off (horloge libre)": "uit (vrije klok)"
 }

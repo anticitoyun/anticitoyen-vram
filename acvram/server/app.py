@@ -206,6 +206,8 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
     async def _shutdown() -> None:
         service.stop()
         app.state.anneau_energie.stop()
+        if hasattr(engine, "fermer"):
+            engine.fermer()                               # rend l'horloge éco (-rgc)
 
     # -- console ----------------------------------------------------------
     # Le paquet s'installait sans rien de visible : ni entree de menu, ni

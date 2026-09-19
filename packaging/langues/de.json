@@ -47,5 +47,8 @@
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert ist fehlgeschlagen (Code {code}) — siehe Protokoll oben.",
  "serveur arrêté.": "Server angehalten.",
  "toutes les options": "alle Optionen",
- "proposer les options": "Optionen vorschlagen"
+ "proposer les options": "Optionen vorschlagen",
+ "éco d'horloge": "Takt-Sparmodus",
+ "2700 (défaut)": "2700 (Standard)",
+ "off (horloge libre)": "aus (freier Takt)"
 }

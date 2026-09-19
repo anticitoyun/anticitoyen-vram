@@ -126,12 +126,16 @@ VARIABLES_LUES = {
     "ACVRAM_DISABLE_FP4_GEMM",
     "ACVRAM_DISABLE_KERNELS",
     "ACVRAM_DISABLE_PAGED_ATTN",
+    "ACVRAM_DOUBLE_DISPOSITION_DIAG",
+    "ACVRAM_DUMP_MOE",
     "ACVRAM_EXIL_COUCHES",
     "ACVRAM_EXIL_EXPERTS_FRACTION",
     "ACVRAM_FUSION_NVFP4",
     "ACVRAM_FUSION_PARTIELLE",
     "ACVRAM_GC_FREEZE",
     "ACVRAM_GDN",
+    "ACVRAM_GEMV_LAYOUT",
+    "ACVRAM_GODETS_B",
     "ACVRAM_GRAPHES_MUETS",
     "ACVRAM_GRAPHES_TABLE",
     "ACVRAM_GROUPED_OLD",
@@ -226,7 +230,7 @@ VARIABLES_LUES = {
     "ACVRAM_WARM_SPEC",
     # exportee par outils/carte.sh (son PID) a ce qu'il lance ; lue par eco.py
     # pour ne pas refuser sa propre prise de la carte
-    "ACVRAM_CARTE_TENUE",
+    "ACVRAM_CARTE_TENUE", "ACVRAM_ECO",
 }
 
 
@@ -430,7 +434,48 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if rig.host.total and rig.host.total < 32 * 1024 ** 3:
         print(f"  {yellow('alerte')} {_h(rig.host.total)} de memoire vive limitent "
               f"l'etage hote")
+    _doctor_eco(cuda_ok=torch.cuda.is_available())
     return 0 if ok else 1
+
+
+def _doctor_eco(cuda_ok: bool) -> None:
+    """Éco par défaut (poste7-eco-2700-defaut-19-09 § 4) : le droit sudo ET
+    l'effet — `-lgc` puis lecture puis `-rgc`, sous le verrou de carte seulement
+    (jamais pendant la mesure d'un pair) ; sans carte ou carte tenue : le droit
+    seul (`sudo -n -l`)."""
+    from . import eco
+    mode = eco.mode_demande()
+    print(f"  {dim('eco')}   mode demande : {mode} (config {eco.CONFIG}"
+          f"{', ACVRAM_ECO pose' if os.environ.get('ACVRAM_ECO') else ''})")
+    try:
+        r = subprocess.run(["sudo", "-n", "-l", "nvidia-smi"], capture_output=True, text=True, timeout=15)
+        droit = r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        droit = False
+    if not droit:
+        print(f"  {yellow('alerte')} pas de droit sudo -n sur nvidia-smi : le service tournera a "
+              f"l'horloge libre, eco={mode}(libre: refus sudo), aucune cellule publiable.\n"
+              f"        ligne sudoers (visudo -f /etc/sudoers.d/acvram-nvidia-smi) :\n"
+              f"        {os.environ.get('USER', 'utilisateur')} ALL=(root) NOPASSWD: "
+              f"/usr/bin/nvidia-smi -i * -lgc *\\,*, /usr/bin/nvidia-smi -i * -rgc")
+        return
+    print(f"  {green('ok')}    sudo -n nvidia-smi autorise")
+    if not cuda_ok or mode == "off":
+        return
+    index = eco.index_carte()
+    if eco._tenue_par_un_pair(index) is not None:
+        print(f"  {yellow('alerte')} carte {index} tenue par un pair : l'effet de -lgc n'est pas "
+              f"verifie (relancer sous outils/carte.sh quand elle est libre)")
+        return
+    h = eco.Horloge(mode, index)
+    etat = h.poser()
+    lu = h.effectif
+    h.rendre()
+    if etat == "effectif":
+        print(f"  {green('ok')}    -lgc {mode},{mode} pris (lu {lu} MHz), -rgc rendu")
+    else:
+        print(f"  {red('ECHEC')} -lgc {mode},{mode} : {etat} (lu {lu}) — eco demande ≠ effectif, "
+              f"aucune cellule publiable")
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
@@ -864,15 +909,31 @@ def cmd_profiles(args: argparse.Namespace) -> int:
 
 
 def cmd_eco(args: argparse.Namespace) -> int:
-    """Mode eco d'horloge (poste7-e1-eco-tenu-19-09 § 2) : verrouille l'horloge
-    SM par `sudo -n nvidia-smi -lgc`, la libere (-rgc), ou la lit (etat)."""
+    """Mode eco d'horloge (poste7-e1-eco-tenu-19-09 § 2, poste7-eco-2700-defaut-
+    19-09 § 3) : `etat` lit ; 2700 | 2100 | off ECRIT config.json (le service
+    le lit a son prochain demarrage) puis applique tout de suite quand la
+    carte est libre ; `off` s'applique aussi sous un serveur qui tourne
+    (l'utilisateur rend l'horloge), en le nommant."""
     from . import eco
     carte = eco.index_carte() if args.carte is None else args.carte
     if args.mode == "etat":
         h = eco.lire_horloge(carte)
-        print(f"  carte {carte} : horloge={bold(eco.etiquette_horloge(h))}")
+        print(f"  carte {carte} : horloge={bold(eco.etiquette_horloge(h))} ; "
+              f"config : eco={eco.mode_demande({})}")
         print("  " + json.dumps(h, ensure_ascii=False))
         return 0
+    chemin = eco.ecrire_config({"eco": args.mode})
+    print(f"  {chemin} : \"eco\": \"{args.mode}\" (lu par le prochain `acvram serve`)")
+    pair = eco._tenue_par_un_pair(carte)
+    if pair is not None and args.mode != "off":
+        print(f"  carte {carte} tenue par PID {pair} : le reglage {args.mode} s'appliquera a son "
+              f"prochain demarrage (un -lgc pendant la manche d'un autre change son regime)")
+        return 0
+    if pair is not None:
+        print(f"  carte {carte} tenue par PID {pair} : -rgc applique quand meme (demande de l'utilisateur), "
+              f"le serveur en cours passe a l'horloge libre — sa ligne de regime le dira")
+        h = eco.Horloge("2700", carte); h.posee = True          # rendre() n'agit que sur une horloge posee
+        return 0 if h.rendre() else 3
     return eco.regler(args.mode, carte)
 
 
@@ -1103,10 +1164,12 @@ def build_parser() -> argparse.ArgumentParser:
     ec = sub.add_parser("eco", help="mode eco d'horloge : verrouille l'horloge SM de la "
                                     "carte (sudo -n nvidia-smi -lgc), la libere, ou la lit")
     ec.add_argument("mode", choices=["2700", "2100", "off", "etat"],
-                    help="2700 | 2100 : verrouille l'horloge SM a cette frequence (MHz) ; "
-                         "off : la libere (-rgc) ; etat : lit l'horloge sans rien changer. "
-                         "Un reglage se fait sous le verrou outils/carte.sh (REGLES 1) et "
-                         "s'affiche dans la ligne de regime (horloge=lgc2692 | libre | ?)")
+                    help="2700 (defaut du service) | 2100 : ecrit config.json et verrouille "
+                         "l'horloge SM a cette frequence (MHz) si la carte est libre ; "
+                         "off : ecrit config.json et libere (-rgc), meme sous un serveur ; "
+                         "etat : lit l'horloge sans rien changer. Le service pose son eco "
+                         "lui-meme au chargement et le rend a l'arret ; la ligne de regime "
+                         "porte eco=<demande>(<effectif>)")
     ec.add_argument("--carte", type=int, default=None,
                     help="index nvidia-smi de la carte (defaut : premier index de "
                          "CUDA_VISIBLE_DEVICES, sinon 0)")

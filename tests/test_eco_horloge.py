@@ -15,13 +15,18 @@ from acvram import eco, regime
 # ------------------------------------------------------------------ (a) lire
 
 def test_lire_horloge_reconnait_un_verrou_lgc():
-    h = eco.lire_horloge(sortie="2692, 3135, Active\n")
+    """Le verrou vient de l'état posé (ETAT_ECO) vérifié contre clocks.sm :
+    applications_clocks_setting reste « Not Active » sous -lgc (poste2, 19/09 23 h),
+    le 3e champ est désormais la raison « idle »."""
+    h = eco.lire_horloge(sortie="2692, 3135, Not Active\n", etat={"mode": "2700"})
     assert h["verrou"] is True and h["sm_mhz"] == 2692 and h["max_sm_mhz"] == 3135
-    assert eco.etiquette_horloge(h) == "lgc2692"
+    assert eco.etiquette_horloge(h) == "lgc2700"
+    # sans état posé, une carte OISIVE à 2 692 MHz porte un -lgc posé ailleurs : dit incertain
+    assert eco.etiquette_horloge(eco.lire_horloge(sortie="2692, 3135, Active\n", etat={})) == "lgc2692?"
 
 
 def test_lire_horloge_reconnait_une_carte_libre():
-    h = eco.lire_horloge(sortie="225, 3135, Not Active\n")
+    h = eco.lire_horloge(sortie="225, 3135, Not Active\n", etat={})
     assert h["verrou"] is False and h["sm_mhz"] == 225
     assert eco.etiquette_horloge(h) == "libre"
 
@@ -62,11 +67,12 @@ def carte_libre(monkeypatch, tmp_path):
     """Aucun .qui : personne ne tient la carte ; la relecture d'horloge est
     simulée (aucun nvidia-smi réel) et comptée."""
     monkeypatch.setattr(eco, "VERROU_QUI", str(tmp_path / "acvram-carte-{index}.lock.qui"))
+    monkeypatch.setattr(eco, "ETAT_ECO", str(tmp_path / "acvram-eco-{index}.json"))
     relectures, original = [], eco.lire_horloge
 
     def lire(index=0):
         relectures.append(index)
-        return original(sortie="2692, 3135, Active")
+        return original(index, sortie="2692, 3135, Not Active")     # l'état posé par regler() décide
     monkeypatch.setattr(eco, "lire_horloge", lire)
     return relectures
 
@@ -76,7 +82,7 @@ def test_regler_2700_verrouille_par_sudo_n(carte_libre, capsys):
     assert eco.regler("2700", executer=ex) == 0
     assert ex.appels == [["sudo", "-n", "nvidia-smi", "-i", "0", "-lgc", "2700,2700"]]
     assert carte_libre == [0]                      # relue après le réglage
-    assert "horloge=lgc2692" in capsys.readouterr().out
+    assert "horloge=lgc2700" in capsys.readouterr().out       # état posé 2700, relu 2 692
 
 
 def test_regler_off_libere_par_rgc(carte_libre):

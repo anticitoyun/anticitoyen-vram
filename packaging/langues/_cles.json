@@ -56,5 +56,11 @@
  "le plan DÉBORDE : --force serait nécessaire, non proposé",
  "proposer les options",
  "source déjà NVFP4 ({qm}) : passage direct, poids de vLLM servis à l'identique",
- "un seul format dans le plan : {f}"
+ "un seul format dans le plan : {f}",
+ "2100 (éco fort, lots ≥ 8)",
+ "2700 (défaut)",
+ "acvram eco {mode} a échoué (code {code}) : {texte}",
+ "off (horloge libre)",
+ "verrouille l'horloge de la carte pendant le service (sudo nvidia-smi -lgc) ; 2700 = défaut : même vitesse, −9 à −27 % d'énergie ; off = horloge libre",
+ "éco d'horloge"
 ]

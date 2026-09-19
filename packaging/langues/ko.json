@@ -47,5 +47,8 @@
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert 실패 (코드 {code}) — 위 로그 참조.",
  "serveur arrêté.": "서버 중지됨.",
  "toutes les options": "모든 옵션",
- "proposer les options": "옵션 제안"
+ "proposer les options": "옵션 제안",
+ "éco d'horloge": "클럭 절전 모드",
+ "2700 (défaut)": "2700 (기본)",
+ "off (horloge libre)": "끄기 (자유 클럭)"
 }

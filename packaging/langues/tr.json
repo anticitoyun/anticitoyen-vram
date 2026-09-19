@@ -47,5 +47,8 @@
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert başarısız oldu (kod {code}) — yukarıdaki günlüğe bakın.",
  "serveur arrêté.": "sunucu durduruldu.",
  "toutes les options": "tüm seçenekler",
- "proposer les options": "seçenekleri öner"
+ "proposer les options": "seçenekleri öner",
+ "éco d'horloge": "saat eko modu",
+ "2700 (défaut)": "2700 (varsayılan)",
+ "off (horloge libre)": "kapalı (serbest saat)"
 }

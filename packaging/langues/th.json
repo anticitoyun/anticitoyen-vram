@@ -47,5 +47,8 @@
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert ล้มเหลว (รหัส {code}) — ดูบันทึกด้านบน",
  "serveur arrêté.": "เซิร์ฟเวอร์หยุดแล้ว",
  "toutes les options": "ตัวเลือกทั้งหมด",
- "proposer les options": "เสนอตัวเลือก"
+ "proposer les options": "เสนอตัวเลือก",
+ "éco d'horloge": "โหมดประหยัดสัญญาณนาฬิกา",
+ "2700 (défaut)": "2700 (ค่าเริ่มต้น)",
+ "off (horloge libre)": "ปิด (นาฬิกาอิสระ)"
 }

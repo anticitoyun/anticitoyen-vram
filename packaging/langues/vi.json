@@ -47,5 +47,8 @@
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert thất bại (mã {code}) — xem nhật ký bên trên.",
  "serveur arrêté.": "máy chủ đã dừng.",
  "toutes les options": "tất cả tùy chọn",
- "proposer les options": "đề xuất tùy chọn"
+ "proposer les options": "đề xuất tùy chọn",
+ "éco d'horloge": "chế độ tiết kiệm xung nhịp",
+ "2700 (défaut)": "2700 (mặc định)",
+ "off (horloge libre)": "tắt (xung nhịp tự do)"
 }
