@@ -42,8 +42,29 @@ dev = torch.device("cuda:0")
 h = nvml().cartes[0][1]
 
 
-def mesure(nom, fn, lots=20):
-    """fn() lance un lot de travail ; on boucle DUREE s, énergie NVML."""
+def _t_noyau(fn, lancements):
+    """Σ durée GPU des noyaux (CUPTI, torch.profiler) sur `lancements` appels de fn(),
+    en µs par lancement, et les noyaux par part décroissante. Passe séparée, APRÈS
+    la boucle d'énergie : le profileur charge l'hôte et fausserait W et t_mur."""
+    from torch.profiler import profile, ProfilerActivity
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        for _ in range(lancements): fn()
+        torch.cuda.synchronize()
+    par_noyau = {}
+    for ev in prof.events():
+        if ev.device_type.name == "CUDA" and ev.device_time > 0:
+            par_noyau[ev.name] = par_noyau.get(ev.name, 0.0) + ev.device_time
+    total = sum(par_noyau.values())
+    noyaux = sorted(par_noyau.items(), key=lambda kv: -kv[1])[:4]
+    return total / lancements, [(k[:60], round(v / total, 3)) for k, v in noyaux] if total else []
+
+
+def mesure(nom, fn, lots=20, unite=""):
+    """fn() lance un lot de travail ; on boucle DUREE s, énergie NVML. `unite` dit ce
+    qu'est UN lancement (la grandeur que divise mJ_par_lancement). Après la boucle, le
+    rapport cyclique Σ t_noyau / t_mur (§ poste7 poste7-c10-scelle-retire-m1 : < 0,9 → le W
+    est celui de la boucle, pas du noyau)."""
     for _ in range(3): fn()
     torch.cuda.synchronize()
     n = 0; horloges = []
@@ -54,8 +75,12 @@ def mesure(nom, fn, lots=20):
             torch.cuda.synchronize(); n += lots
             horloges.append(nvml().horloge_sm(h))
     w = e.moyenne
-    r = {"poste": nom, "W": round(w, 1), "W_net": round(w - repos_w, 1), "J": round(e.joules, 1),
-         "s": round(e.duree, 2), "lancements": n, "us_par_lancement": round(1e6 * e.duree / n, 1),
+    us_mur = 1e6 * e.duree / n
+    us_noyau, noyaux = _t_noyau(fn, max(lots, min(n, 200)))
+    r = {"poste": nom, "unite": unite, "W": round(w, 1), "W_net": round(w - repos_w, 1), "J": round(e.joules, 1),
+         "s": round(e.duree, 2), "lancements": n, "us_par_lancement": round(us_mur, 1),
+         "us_noyau_par_lancement": round(us_noyau, 1), "rapport_cyclique": round(us_noyau / us_mur, 3),
+         "noyaux": noyaux,
          "mJ_par_lancement": round(1e3 * e.joules / n, 3), "MHz": sorted(horloges)[len(horloges) // 2],
          "bridages": sorted(e.bridages)}
     print("POSTE " + json.dumps(r, ensure_ascii=False), flush=True)
@@ -89,10 +114,10 @@ res = []
 src = torch.empty(1 << 30, dtype=torch.uint8, device=dev); dst = torch.empty_like(src)
 SEUL = os.environ.get("BANC_SEULEMENT")          # "mma" : postes MMA seuls ; "pas" : le pas complet seul
 if SEUL != "pas":
-    res.append(mesure("temoin copie DRAM 1 Gio (octets, ~0 instruction)", lambda: dst.copy_(src), lots=4))
+    res.append(mesure("temoin copie DRAM 1 Gio (octets, ~0 instruction)", lambda: dst.copy_(src), lots=4, unite="1 copie de 1 Gio"))
 a = torch.randn(8192, 8192, dtype=torch.bfloat16, device=dev); bm = torch.randn(8192, 8192, dtype=torch.bfloat16, device=dev)
 if SEUL != "pas":
-    res.append(mesure("temoin GEMM bf16 8192^3 (instructions, ~0 octet DRAM)", lambda: torch.matmul(a, bm), lots=2))
+    res.append(mesure("temoin GEMM bf16 8192^3 (instructions, ~0 octet DRAM)", lambda: torch.matmul(a, bm), lots=2, unite="1 GEMM 8192^3 bf16 (1,1 TFLOP)"))
 del src, dst, a, bm
 
 # Postes du pas, couche 5, tenseurs de la forme réelle du décodage b=B.
@@ -113,6 +138,8 @@ g = torch.Generator(device="cpu").manual_seed(7)
 topi = torch.stack([torch.randperm(len(moe.experts), generator=g)[:moe.top_k] for _ in range(B)]).to(dev)
 topw = torch.softmax(torch.randn(B, moe.top_k, generator=g), -1).to(dev).to(torch.bfloat16)
 eid = topi.reshape(-1).to(torch.int32)
+U_COUCHE = "1 couche, %d jetons" % B
+U_MOE = "1 couche MoE, %d jetons x top_k %d = %d lignes d'expert" % (B, moe.top_k, B * moe.top_k)
 tok = torch.arange(B, device=dev, dtype=torch.int32).repeat_interleave(moe.top_k)
 seq = torch.arange(eid.shape[0], device=dev, dtype=torch.int32)
 piles = [(c.mlp._stacks["gate_proj"], c.mlp._stacks["up_proj"], c.mlp._stacks["down_proj"]) for c in couches]
@@ -142,12 +169,12 @@ class Tour:
 t_gu, t_dn, t_moe, t_qkv, t_o, t_norm, t_mma, t_mmac = (Tour() for _ in range(8))
 if SEUL not in ("mma", "pas"):
     res.append(mesure("MoE gate·up GEMV (%s)" % ("nvfp4_gemv_marlin_gateup" if MARLIN else "nvfp4_gemv_grouped_gateup"),
-                      lambda: gateup_c(t_gu()), lots=48))
+                      lambda: gateup_c(t_gu()), lots=48, unite=U_MOE))
     res.append(mesure("MoE down GEMV (%s)" % ("nvfp4_gemv_marlin" if MARLIN else "_grouped down_proj"),
-                      lambda: down_c(t_dn()), lots=48))
+                      lambda: down_c(t_dn()), lots=48, unite=U_MOE))
 if SEUL != "pas":
     res.append(mesure("MoE complet (_forward_grouped : gate·up + down + reduce)",
-                      lambda: couches[t_moe() % nc].mlp._forward_grouped(x, topw, topi), lots=48))
+                      lambda: couches[t_moe() % nc].mlp._forward_grouped(x, topw, topi), lots=48, unite=U_MOE))
 # Le même MoE par le chemin GEMM groupée MMA FP4 (celui du prefill) à t=B jetons :
 # quant_act + gate + up + moe_act + quant_act + down + reduce_trie — étape (iii) de poste7
 # (revue/poste7-moe-mma-decodage-14-09.md). Tuile ACVRAM_MOE_MMA_BT (16 conseillé à M≈3).
@@ -169,20 +196,20 @@ if SEUL != "pas" and not MARLIN and moe._forward_prefill_grouped(x, topw, topi) 
         cpg, cpu_, cpd = piles[t_mma() % nc]
         moe._gemm_mma(cpg, xq, xsf, tiles, brut=True); moe._gemm_mma(cpu_, xq, xsf, tiles, brut=True)
         moe._gemm_mma(cpd, aq, asf, tiles, brut=True)
-    res.append(mesure("MoE 3 GEMM MMA seules (gate+up+down, BT=%d, %d tuiles)" % (bt, int(tiles[0].numel())), trois_gemm, lots=48))
-    res.append(mesure("quant_act x2 (E2M1 bloc 16)", lambda: (ext.nvfp4_quant_act(xs), ext.nvfp4_quant_act(a3)), lots=100))
+    res.append(mesure("MoE 3 GEMM MMA seules (gate+up+down, BT=%d, %d tuiles)" % (bt, int(tiles[0].numel())), trois_gemm, lots=48, unite=U_MOE))
+    res.append(mesure("quant_act x2 (E2M1 bloc 16)", lambda: (ext.nvfp4_quant_act(xs), ext.nvfp4_quant_act(a3)), lots=100, unite="2 quantifications, %d lignes" % (B * moe.top_k)))
     res.append(mesure("MoE complet MMA (_forward_prefill_grouped, BT=%s)" % os.environ.get("ACVRAM_MOE_MMA_BT", "64"),
-                      lambda: couches[t_mmac() % nc].mlp._forward_prefill_grouped(x, topw, topi), lots=48))
+                      lambda: couches[t_mmac() % nc].mlp._forward_prefill_grouped(x, topw, topi), lots=48, unite=U_MOE))
 if SEUL not in ("mma", "pas"):
     if getattr(attn, "qkv_proj", None) is not None:
-        res.append(mesure("projections q/k/v int8 empilées (qkv_proj)", lambda: couches[t_qkv() % nc].self_attn.qkv_proj(x), lots=96))
+        res.append(mesure("projections q/k/v int8 empilées (qkv_proj)", lambda: couches[t_qkv() % nc].self_attn.qkv_proj(x), lots=96, unite=U_COUCHE))
     else:
-        res.append(mesure("projection q int8", lambda: couches[t_qkv() % nc].self_attn.q_proj(x), lots=96))
+        res.append(mesure("projection q int8", lambda: couches[t_qkv() % nc].self_attn.q_proj(x), lots=96, unite=U_COUCHE))
     xo = torch.randn(B, attn.o_proj.qweight.shape[1] if hasattr(attn.o_proj, "qweight") else 4096, dtype=torch.bfloat16, device=dev)
-    res.append(mesure("projection o int8 (o_proj)", lambda: couches[t_o() % nc].self_attn.o_proj(xo), lots=96))
+    res.append(mesure("projection o int8 (o_proj)", lambda: couches[t_o() % nc].self_attn.o_proj(xo), lots=96, unite=U_COUCHE))
     lm = model.lm_head
-    res.append(mesure("lm_head int8", lambda: lm(x), lots=50))
-    res.append(mesure("norme RMS (input_layernorm)", lambda: couches[t_norm() % nc].input_layernorm(x), lots=192))
+    res.append(mesure("lm_head int8", lambda: lm(x), lots=50, unite="%d jetons (vocabulaire entier)" % B))
+    res.append(mesure("norme RMS (input_layernorm)", lambda: couches[t_norm() % nc].input_layernorm(x), lots=192, unite=U_COUCHE))
 
 def pas_complet():
     # Les séquences finissent (max_model_len) : réadmettre un lot dès que le moteur se
@@ -193,5 +220,5 @@ def pas_complet():
         while any(not s.prefilled for s in eng.running) or eng.waiting:
             eng.step()
     eng.step()
-res.append(mesure("PAS COMPLET b=%d rejeu (Engine.step)" % B, pas_complet, lots=10))
+res.append(mesure("PAS COMPLET b=%d rejeu (Engine.step)" % B, pas_complet, lots=10, unite="1 pas de décodage, %d jetons, %d couches" % (B, nc)))
 print("RESULTAT " + json.dumps({"B": B, "repos_W": round(repos_w, 1), "postes": res}, ensure_ascii=False))

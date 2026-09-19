@@ -36,29 +36,34 @@ _MLA_UNE_PASSE = os.environ.get("ACVRAM_MLA_UNE_PASSE", "1") == "1"
 # ENTRÉES de q_b, kv_a et o (les trois projections que garde bf16 la règle « jamais NVFP4
 # sur MLA », REGLES § 9) arrondies en E4M3 bloc 16 (ou int8 par jeton, témoin) avant la
 # projection, torch pur ; aucun noyau : la perte qu'un GEMM FP8 imposerait, pas sa vitesse.
-# ACVRAM_MLA_TF32=1 (C13-a, poste7-c7-clos-c13-attention-glm-19-09) : TF32 à PORTÉE LIMITÉE
-# autour des deux einsum du cœur d'attention (scores q·C et o_lat = probs·V), entrées
-# fp32 arrondies à 10 bits de mantisse par les tensor cores (> bf16), accumulation fp32
-# — le cœur fp32 sans TF32 = 8,6 TFLOP/pas ≥ 82 ms des 372 ms de GLM. Défaut 0 jusqu'au
-# verdict (PPL ± 0,001, prefill ≥ 6 200) ; rien d'autre ne change de précision.
-# =2 (C13-déc, poste7-glm-decode-budget-c14-c15-19-09) : la portée s'étend aux einsum fp32
-# du DÉCODAGE (y = v_b · o_lat, le « sgemm fp32 » de 1,5 ms/pas à b=12 dans le budget nsys) ;
-# le noyau mla_1p (CUDA, fp32) n'est pas concerné — il ne passe pas par cuBLAS.
-_MLA_TF32 = os.environ.get("ACVRAM_MLA_TF32", "0")
-if _MLA_TF32 not in ("0", "1", "2"):
-    raise ValueError(f"ACVRAM_MLA_TF32={_MLA_TF32!r} : 0 | 1 (préfill) | 2 (préfill + décodage)")
+# ACVRAM_MLA_CORE=fp32|tf32|bf16 (C13, poste7-c7-clos-c13-attention-glm-19-09, poste7-m2-mma2-
+# budgets-prefill-19-09 § 3) : précision des TROIS produits du cœur d'attention MLA — scores
+# q·C, o_lat = probs·V, y = v_b·o_lat — au préfill (einsum chunké/non chunké) ET au décodage
+# (le sgemm fp32 de 1,5 ms/pas à b=12) ; le softmax, le masque et le noyau CUDA mla_1p
+# restent en fp32. fp32 (défaut) = SIMT fp32 plein (GLM prefill : 220 ms/pas, 67 %) ;
+# tf32 = mêmes einsum fp32 sous tensor cores TF32 (entrées 10 bits, acc fp32 ; −20 % mesuré,
+# C13-a) ; bf16 = entrées castées en bf16, accumulation fp32 des tensor cores, sortie bf16
+# (C13-b : prédiction cœur 220 → 80-95 ms ; vLLM et llama.cpp calculent ce cœur en bf16).
+# Scellé : prefill ≥ 9 000 j/s ET ΔPPL ≤ +0,002 → défaut.
+_MLA_CORE = os.environ.get("ACVRAM_MLA_CORE", "fp32")
+if _MLA_CORE not in ("fp32", "tf32", "bf16"):
+    raise ValueError(f"ACVRAM_MLA_CORE={_MLA_CORE!r} : fp32 | tf32 | bf16")
+
+
+def _dt_coeur() -> torch.dtype:
+    """dtype des opérandes des produits du cœur : bf16 sous MLA_CORE=bf16, fp32 sinon."""
+    return torch.bfloat16 if _MLA_CORE == "bf16" else torch.float32
 
 
 class _tf32_coeur:
-    """Contexte : TF32 pour les matmuls fp32 pendant le bloc, drapeau restauré
-    après — la portée est le cœur d'attention, pas le processus. ``decode``
-    marque un site du décodage (v_b · o_lat), actif seulement au niveau 2."""
+    """Contexte : TF32 pour les matmuls fp32 pendant le bloc (MLA_CORE=tf32),
+    drapeau restauré après — la portée est le cœur d'attention, pas le
+    processus. Sous fp32 et bf16 : inerte (bf16 n'a pas besoin du drapeau)."""
     def __init__(self, decode: bool = False):
         self._decode = decode
 
     def __enter__(self):
-        niveau = _MLA_TF32
-        self._actif = torch.cuda.is_available() and (niveau == "2" or (niveau == "1" and not self._decode))
+        self._actif = _MLA_CORE == "tf32" and torch.cuda.is_available()
         if self._actif:
             self._avant = torch.backends.cuda.matmul.allow_tf32
             torch.backends.cuda.matmul.allow_tf32 = True
@@ -334,7 +339,7 @@ class MLAttention(nn.Module):
                           f"abs_med={ecart.median().item():.4e} "
                           f"o_lat_norm={o_lat.norm().item():.4e}", flush=True)
                 with _tf32_coeur(decode=True):
-                    y = torch.einsum('hvr,hr->hv', self.v_b.to(torch.float32), o_lat)
+                    y = torch.einsum('hvr,hr->hv', self.v_b.to(_dt_coeur()), o_lat.to(_dt_coeur()))
                 y = y.reshape(t, self.nh * self.dv).to(x.dtype)
                 return self._o(y), cache
             pos = torch.arange(bucket, device=x.device)
@@ -343,34 +348,33 @@ class MLAttention(nn.Module):
             # prefill : par tranches de requêtes, sinon les scores
             # [t, nh, total] fp32 pèsent des gigaoctets (2 Go à 4k jetons)
             passe = total - t
-            C32 = cache.to(torch.float32)
+            dt = _dt_coeur()
+            C32 = cache.to(dt)
             V32 = C32[:, :self.rank]
             pos_k = torch.arange(total, device=x.device)
             morceaux = []
             for d0 in range(0, t, 256):
                 d1 = min(t, d0 + 256)
                 with _tf32_coeur():
-                    sc = torch.einsum('thr,sr->ths', q_eff[d0:d1].to(torch.float32),
-                                      C32) * self.scale
+                    sc = torch.einsum('thr,sr->ths', q_eff[d0:d1].to(dt), C32).to(torch.float32) * self.scale
                 pos_q = torch.arange(d0, d1, device=x.device).unsqueeze(-1) + passe
                 sc = sc.masked_fill(pos_k > pos_q.unsqueeze(1), float('-inf'))
                 with _tf32_coeur():
-                    morceaux.append(torch.einsum('ths,sr->thr', sc.softmax(dim=-1), V32))
+                    morceaux.append(torch.einsum('ths,sr->thr', sc.softmax(dim=-1).to(dt), V32))
             o_lat = torch.cat(morceaux)
             with _tf32_coeur():                    # 3e produit du cœur au préfill (simt_sgemm_128x32 ×47, poste2)
-                y = torch.einsum('hvr,thr->thv', self.v_b.to(torch.float32), o_lat)
+                y = torch.einsum('hvr,thr->thv', self.v_b.to(dt), o_lat.to(dt))
             y = y.reshape(t, self.nh * self.dv).to(x.dtype)
             return self._o(y), cache
+        dt = _dt_coeur()
         with _tf32_coeur():
-            scores = torch.einsum('thr,sr->ths', q_eff.to(torch.float32),
-                                  C.to(torch.float32)) * self.scale
+            scores = torch.einsum('thr,sr->ths', q_eff.to(dt), C.to(dt)).to(torch.float32) * self.scale
         scores = scores.masked_fill(masque, float('-inf'))
         probs = scores.softmax(dim=-1)
 
         with _tf32_coeur():
-            o_lat = torch.einsum('ths,sr->thr', probs,
-                                 C[:, :self.rank].to(torch.float32))
-            y = torch.einsum('hvr,thr->thv', self.v_b.to(torch.float32), o_lat)
+            o_lat = torch.einsum('ths,sr->thr', probs.to(dt), C[:, :self.rank].to(dt))
+            y = torch.einsum('hvr,thr->thv', self.v_b.to(dt), o_lat.to(dt))
         y = y.reshape(t, self.nh * self.dv).to(x.dtype)
         return self._o(y), cache
 
@@ -479,7 +483,7 @@ class MLAttention(nn.Module):
 
     def _sortie_decode(self, x: torch.Tensor, st: dict, o_lat: torch.Tensor) -> torch.Tensor:
         with _tf32_coeur(decode=True):
-            y = torch.einsum('hvr,hr->hv', self.v_b.to(torch.float32), o_lat)
+            y = torch.einsum('hvr,hr->hv', self.v_b.to(_dt_coeur()), o_lat.to(_dt_coeur()))
         st["len"].add_(1)
         return self._o(y.reshape(1, self.nh * self.dv).to(x.dtype))
 
@@ -562,7 +566,7 @@ class MLAttention(nn.Module):
         o_lat = _mla_decode_batch(ext, q_eff.contiguous(), cache_ptrs, lens,
                                   scores_batch, bucket, self.rank, self.scale, fp8)  # [B, nh, rank]
         with _tf32_coeur(decode=True):
-            y = torch.einsum('hvr,bhr->bhv', self._v_b32(), o_lat)
+            y = torch.einsum('hvr,bhr->bhv', self._v_b32().to(_dt_coeur()), o_lat.to(_dt_coeur()))
         if not un_lancement:
             for st in sts:
                 st["len"].add_(1)
@@ -650,6 +654,6 @@ class MLAttention(nn.Module):
 
         o_lat_batch = torch.stack(o_lats, dim=0)              # [b, nh, rank]
         with _tf32_coeur(decode=True):
-            y = torch.einsum('hvr,bhr->bhv', self.v_b.to(torch.float32), o_lat_batch)
+            y = torch.einsum('hvr,bhr->bhv', self.v_b.to(_dt_coeur()), o_lat_batch.to(_dt_coeur()))
         y = y.reshape(b, self.nh * self.dv).to(x.dtype)
         return self._o(y), nouvelles_caches
