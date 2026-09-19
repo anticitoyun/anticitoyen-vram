@@ -5314,7 +5314,9 @@ void mla_ecrit_latent(torch::Tensor k_new, torch::Tensor cache_ptrs, torch::Tens
 // calcul (≈ 25 GFMA/pas) reste sous la lecture (1,3 Go/pas).
 //
 // Mémoire partagée : q fp32 [H][W] + tuile bf16 [TL][W+8] + S, P [HMAX][TL] +
-// m, l, alpha [HMAX] — 83 Ko à H=20, W=576, TL=32 ; un CTA par SM.
+// m, l, alpha [HMAX] + échelles et table fp8 — 89 968 o (88 Ko) à H=20,
+// W=576, TL=32 (formule du lanceur) ; 67 Ko à TL=16 : UN CTA par SM dans
+// les deux cas (C14 : la grille doit donc venir du nombre de tranches).
 // Scores : chaque warp prend RW lignes à la fois, les lanes se partagent W
 // (paires bf16), q lu une fois pour RW lignes, réduction par __shfl_xor.
 // o_lat : un fil = deux colonnes de R, toutes les têtes en registres.
@@ -5322,6 +5324,16 @@ void mla_ecrit_latent(torch::Tensor k_new, torch::Tensor cache_ptrs, torch::Tens
 // mla_scores ; les tranches entièrement au-delà écrivent m = −inf, l = 0.
 // ============================================================================
 constexpr int MLA1P_FILS = 256;
+// C14 : borne de S (tranches par séquence) — les poids de recombinaison de
+// mla_1p_combine tiennent en shared (4 Ko) ; mla_1p_tranches n'y arrive
+// jamais (S ≤ SM/B ≤ 170 en pratique), la borne protège le combine.
+constexpr int MLA1P_S_MAX = 1024;
+// C14 : lectures globales groupées par PF par fil (registres d'abord, stores
+// shared ensuite) : la copie q → shared (2 880 float4 à H=20, 12 tours) et
+// la copie de la tuile (2 304 uint4 à TL=32, 9 tours) n'enchaînaient qu'une
+// latence mémoire par tour ; PF=4 en émet quatre à la fois. Pure copie :
+// aucune arithmétique, sortie identique au bit.
+constexpr int MLA1P_PF = 4;
 
 template <int HMAX, int TL, int RW, bool FP8>
 __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
@@ -5368,11 +5380,18 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
         }
         return;
     }
-    // q en mémoire partagée (float4)
+    // q en mémoire partagée (float4), MLA1P_PF lectures en vol par fil
     {
         const float4 *src = reinterpret_cast<const float4 *>(q + (size_t)b * H * W);
         float4 *dst = reinterpret_cast<float4 *>(q_s);
-        for (int i = tid; i < H * W / 4; i += MLA1P_FILS) dst[i] = src[i];
+        const int n4 = H * W / 4;
+        for (int i0 = tid; i0 < n4; i0 += MLA1P_PF * MLA1P_FILS) {
+            float4 v[MLA1P_PF];
+            #pragma unroll
+            for (int k = 0; k < MLA1P_PF; ++k) { const int i = i0 + k * MLA1P_FILS; if (i < n4) v[k] = src[i]; }
+            #pragma unroll
+            for (int k = 0; k < MLA1P_PF; ++k) { const int i = i0 + k * MLA1P_FILS; if (i < n4) dst[i] = v[k]; }
+        }
     }
     if (tid < HMAX) { m_s[tid] = -INFINITY; l_s[tid] = 0.f; a_s[tid] = 1.f; }
     float o[HMAX][2];
@@ -5384,15 +5403,29 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
     for (int t0 = r0; t0 < r1; t0 += TL) {
         const int n = min(TL, r1 - t0);
         __syncthreads();                                         // la tuile précédente est consommée
-        // --- tuile [n][W] : lecture vectorisée 16 o ---
-        for (int i = tid; i < n * chunks_par_ligne; i += MLA1P_FILS) {
-            const int r = i / chunks_par_ligne, c = i - r * chunks_par_ligne;
-            if (FP8) {
-                const uint4 v = *reinterpret_cast<const uint4 *>(cache8 + (t0 + r) * foulee8 + c * 16);
-                *reinterpret_cast<uint4 *>(tile8 + (size_t)r * WP + c * 16) = v;
-            } else {
-                const uint4 v = *reinterpret_cast<const uint4 *>(cache + (size_t)(t0 + r) * W + c * 8);
-                *reinterpret_cast<uint4 *>(tile + (size_t)r * WP + c * 8) = v;
+        // --- tuile [n][W] : lecture vectorisée 16 o, MLA1P_PF en vol par fil ---
+        {
+            const int nc = n * chunks_par_ligne;
+            for (int i0 = tid; i0 < nc; i0 += MLA1P_PF * MLA1P_FILS) {
+                uint4 v[MLA1P_PF];
+                #pragma unroll
+                for (int k = 0; k < MLA1P_PF; ++k) {
+                    const int i = i0 + k * MLA1P_FILS;
+                    if (i < nc) {
+                        const int r = i / chunks_par_ligne, c = i - r * chunks_par_ligne;
+                        v[k] = FP8 ? *reinterpret_cast<const uint4 *>(cache8 + (t0 + r) * foulee8 + c * 16)
+                                   : *reinterpret_cast<const uint4 *>(cache + (size_t)(t0 + r) * W + c * 8);
+                    }
+                }
+                #pragma unroll
+                for (int k = 0; k < MLA1P_PF; ++k) {
+                    const int i = i0 + k * MLA1P_FILS;
+                    if (i < nc) {
+                        const int r = i / chunks_par_ligne, c = i - r * chunks_par_ligne;
+                        if (FP8) *reinterpret_cast<uint4 *>(tile8 + (size_t)r * WP + c * 16) = v[k];
+                        else     *reinterpret_cast<uint4 *>(tile + (size_t)r * WP + c * 8) = v[k];
+                    }
+                }
             }
         }
         if (FP8 && tid < n) sc_s[tid] = *reinterpret_cast<const float *>(cache8 + (t0 + tid) * foulee8 + W);
@@ -5492,32 +5525,78 @@ __global__ void __launch_bounds__(MLA1P_FILS) mla_1p_kernel(
 __global__ void mla_1p_combine_kernel(const float *__restrict__ ws,   // [B, S, H, R+2]
                                       float *__restrict__ o,          // [B, H, R]
                                       int H, int R, int S) {
+    // C14 : S peut monter jusqu'à MLA1P_S_MAX ; le poids e^{m_s−M} de chaque
+    // tranche est calculé UNE fois (un fil par tranche) et mis en shared, au
+    // lieu de S·R/128 __expf par fil — même __expf(m − M), mêmes produits,
+    // même ordre de somme : sortie identique au bit à l'ancien combine.
+    __shared__ float w_s[MLA1P_S_MAX];
     const int b = blockIdx.x, h = blockIdx.y;
     const float *base = ws + ((size_t)b * S * H + h) * (R + 2);
     const size_t pas = (size_t)H * (R + 2);
     float M = -INFINITY;
     for (int s = 0; s < S; ++s) M = fmaxf(M, base[s * pas + R]);
+    for (int s = threadIdx.x; s < S; s += blockDim.x) {
+        const float m = base[s * pas + R];
+        w_s[s] = m != -INFINITY ? __expf(m - M) : 0.f;   // tranche vide : o = 0, l = 0
+    }
+    __syncthreads();
     float Lsum = 0.f;
     for (int s = 0; s < S; ++s) {
         const float m = base[s * pas + R];
-        if (m != -INFINITY) Lsum += base[s * pas + R + 1] * __expf(m - M);
+        if (m != -INFINITY) Lsum += base[s * pas + R + 1] * w_s[s];
     }
     const float inv = Lsum > 0.f ? 1.f / Lsum : 0.f;
     for (int c = threadIdx.x; c < R; c += blockDim.x) {
         float acc = 0.f;
         for (int s = 0; s < S; ++s) {
             const float m = base[s * pas + R];
-            if (m != -INFINITY) acc += base[s * pas + c] * __expf(m - M);
+            if (m != -INFINITY) acc += base[s * pas + c] * w_s[s];
         }
         o[((size_t)b * H + h) * R + c] = acc * inv;
     }
 }
 
-static int mla_1p_tranches(int L, int TL) {
-    // ≈ 64 lignes par CTA (2 tuiles), 32 tranches au plus : à b=12, L=2 048
-    // → 384 CTA (2 par SM) ; à L=128 → 2
+// Nombre de SM de la carte courante (lu une fois par carte) : la grille de
+// mla_1p se dimensionne dessus, pas sur une constante.
+static int mla_1p_sm_count() {
+    static int cache[16] = {0};
+    int dev = 0; cudaGetDevice(&dev);
+    if (dev < 0 || dev >= 16) return 170;
+    if (cache[dev] == 0) {
+        int n = 0;
+        if (cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess || n <= 0) n = 170;
+        cache[dev] = n;
+    }
+    return cache[dev];
+}
+
+// Chantier C14 (poste7-glm-decode-budget-c14-c15-19-09) : l'ancienne règle
+// « ≈ 64 lignes par CTA, S ≤ 32 » supposait 2 CTA par SM — faux : 88 Ko de
+// mémoire partagée à H=20, TL=32 (formule du lanceur) n'en laissent qu'UN
+// par SM (≤ 100 ou 128 Ko par SM selon la génération, ≤ 99 Ko par bloc). À
+// b=1 sur le godet 512 mesuré par nsys (256 jetons d'invite + 70 pas,
+// graphs.py:397) elle lançait 8 CTA sur 170 SM, chacun enchaînant 2 tuiles :
+// 44 µs par couche, la même durée à b=12 (96 CTA, une vague) — le noyau est
+// borné par la chaîne de latence d'un CTA, pas par les octets.
+// Règle : autant de tranches que possible tant que le LOT tient en une vague
+// (B·S ≤ SM, 1 CTA/SM), au plus une tranche par tuile, puis S ramené au
+// nombre de tranches réellement non vides (rows arrondi à TL). Le même
+// arrondi est refait par le lanceur pour rows_par_cta.
+//   b=1  : L=512 → S=tuiles (16 à TL=32, 32 à TL=16) ; L=1 024 → 32 / 64 ;
+//          L=2 048 → 64 / 128 ; L=4 096 → 128 (TL=32).
+//   b=12 : L=512 → 8 (inchangé) ; L=2 048 → 13 (5 tuiles par CTA, une vague,
+//          contre 384 CTA en 2,3 vagues avant).
+// Plafond de S : rien d'autre ne le borne — ws vaut B·S·H·(R+2) floats
+// (≤ SM·H·(R+2)·4 o = 7 Mo à H=20, R=512), mla_1p_combine boucle sur S sans
+// borne (poids en shared : MLA1P_S_MAX), blockIdx.y ≤ 65 535.
+static int mla_1p_tranches(int L, int TL, int B) {
     const int tuiles = (L + TL - 1) / TL;
-    return max(1, min(32, (tuiles + 1) / 2));
+    const int sm = mla_1p_sm_count();
+    int S = max(1, min(tuiles, sm / max(1, B)));
+    S = min(S, MLA1P_S_MAX);
+    const int rows = ((((L + S - 1) / S) + TL - 1) / TL) * TL;   // même arrondi que le lanceur
+    S = max(1, (L + rows - 1) / rows);                            // tranches non vides seulement
+    return S;
 }
 
 torch::Tensor mla_decode_1p(torch::Tensor q_eff, c10::optional<torch::Tensor> cache_ptrs,
@@ -5550,8 +5629,15 @@ torch::Tensor mla_decode_1p(torch::Tensor q_eff, c10::optional<torch::Tensor> ca
         }
         cache0 = reinterpret_cast<const __nv_bfloat16 *>(cache->data_ptr());
     }
-    const int TL = H <= 20 ? 32 : 16;
-    const int S = mla_1p_tranches((int)L, TL);
+    // C14, demi-tuile : à H ≤ 20 la tuile est de 32 lignes (RW=4) ; quand le
+    // lot est petit (B ≤ 2) et que des tuiles de 16 lignes tiennent encore en
+    // une vague (ceil(L/16) ≤ SM/B), on passe à TL=16 (RW=2 : 8 warps × 2
+    // lignes = 16) — deux fois plus de CTA, une chaîne deux fois plus courte
+    // par CTA (16 lignes × W à lire, 16 scores par tête, softmax sur 16).
+    // Sinon la demi-tuile n'achète rien : même grille, une boucle de plus.
+    const bool demi = H <= 20 && B <= 2 && ((int)L + 15) / 16 <= mla_1p_sm_count() / B;
+    const int TL = H <= 20 ? (demi ? 16 : 32) : 16;
+    const int S = mla_1p_tranches((int)L, TL, B);
     const int rows = ((((int)L + S - 1) / S) + TL - 1) / TL * TL;
     auto ws = torch::empty({(long)B * S * H * (R + 2)}, q_eff.options());
     auto o = torch::empty({B, H, (long)rank}, q_eff.options());
@@ -5570,9 +5656,11 @@ torch::Tensor mla_decode_1p(torch::Tensor q_eff, c10::optional<torch::Tensor> ca
             q_eff.data_ptr<float>(), ptrs, cache0, lens.data_ptr<long>(), ws.data_ptr<float>(), \
             H, (int)L, W, R, S, rows, (float)scale); } while (0)
     TORCH_CHECK(shm <= 99 * 1024, "MLA 1p : memoire partagee > 99 Ko (H, W trop grands)");
-    if (HMAX == 20) { if (fp8) MLA1P_LANCE(20, 32, 4, true); else MLA1P_LANCE(20, 32, 4, false); }
-    else            { if (fp8) MLA1P_LANCE(32, 16, 2, true); else MLA1P_LANCE(32, 16, 2, false); }
+    if (HMAX == 20 && TL == 32) { if (fp8) MLA1P_LANCE(20, 32, 4, true); else MLA1P_LANCE(20, 32, 4, false); }
+    else if (HMAX == 20)        { if (fp8) MLA1P_LANCE(20, 16, 2, true); else MLA1P_LANCE(20, 16, 2, false); }
+    else                        { if (fp8) MLA1P_LANCE(32, 16, 2, true); else MLA1P_LANCE(32, 16, 2, false); }
     #undef MLA1P_LANCE
+    TORCH_CHECK(S <= MLA1P_S_MAX, "MLA 1p : S > MLA1P_S_MAX");
     dim3 g2(B, H);
     mla_1p_combine_kernel<<<g2, 128, 0, stream>>>(ws.data_ptr<float>(), o.data_ptr<float>(), H, R, S);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
