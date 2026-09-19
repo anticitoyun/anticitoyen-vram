@@ -122,11 +122,11 @@ def test_defaut_tf32_prefill_seul_et_portees_opt_in(monkeypatch):
     with MLA._tf32_coeur() as c:
         assert not c._actif and MLA._dt_coeur() is torch.float32
     src = src_defauts
-    assert src.count("with _tf32_coeur():") == 4                        # préfill : scores, o_lat (chunké, non chunké)
-    assert src.count("with _tf32_coeur(vb=True):") == 2                 # 3e produit du préfill (chunké, non chunké)
+    assert src.count("with _tf32_coeur(cles=cles):") == 4              # préfill : scores, o_lat (chunké, non chunké), règle ≤ 2 048 clés
+    assert src.count("with _tf32_coeur(vb=True, cles=") == 2            # 3e produit du préfill (chunké, non chunké)
     assert src.count("with _tf32_coeur(decode=True):") == 4             # décodage : y = v_b · o_lat
     assert src.count("_dt_coeur(decode=True)") == 8                     # chaque produit du décodage lit SON régime
-    assert src.count("_dt_coeur(vb=True)") == 2
+    assert src.count("_dt_coeur(vb=True, cles=") == 2
     assert "ACVRAM_MLA_TF32" not in src                                 # plus d'alias (addendum : une variable par régime)
 
 
@@ -162,3 +162,35 @@ def test_coeur_bf16_borne_a_2_moins_7_par_ligne_formes_reelles():
     assert borne_ligne(sc16, sc32) and borne_ligne(o16, o32) and borne_ligne(y16, y32)
     y_faux = torch.einsum('hvr,thr->thv', (vb * 2).to(torch.bfloat16), o16.to(torch.bfloat16)).float()
     assert not borne_ligne(y_faux, y32)
+
+
+def test_regime_reduit_seulement_sous_2048_cles_vues(monkeypatch):
+    """poste7-c14-defaut-tf32-8k-20-09 addendum 02 h 25 (verdict-tf32-8k : max |Δ| 6,23 % à 8 k) :
+    tf32 / bf16 seulement quand le morceau de préfill VOIT ≤ 2 048 clés ; un préfill de 4 096 en
+    morceaux de 256 : les 8 premiers morceaux (clés 256..2048) en tf32, les 8 suivants en fp32."""
+    monkeypatch.setattr(MLA, "_MLA_CORE", "tf32")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
+    t, passe = 4096, 0
+    regimes = []
+    for d0 in range(0, t, 256):
+        d1 = min(t, d0 + 256); cles = passe + d1                          # la formule du chemin chunké (mla.py)
+        with MLA._tf32_coeur(cles=cles) as c:
+            regimes.append((cles, c._actif, MLA._dt_coeur(cles=cles)))
+    assert [r[1] for r in regimes] == [True] * 8 + [False] * 8, regimes    # tf32 puis fp32
+    assert regimes[7][0] == 2048 and regimes[8][0] == 2304
+    assert torch.backends.cuda.matmul.allow_tf32 is False
+    # bf16 (bras F) : même règle — bf16 jusqu'à 2 048 clés, fp32 au-delà
+    monkeypatch.setattr(MLA, "_MLA_CORE", "bf16")
+    assert MLA._dt_coeur(cles=2048) is torch.bfloat16 and MLA._dt_coeur(cles=2049) is torch.float32
+    with MLA._tf32_coeur(cles=4096) as c:
+        assert not c._actif
+    # un préfill continué (passe > 0) : les clés vues comptent le passé
+    monkeypatch.setattr(MLA, "_MLA_CORE", "tf32")
+    with MLA._tf32_coeur(cles=1800 + 256) as c:
+        assert not c._actif                                                 # 2 056 clés > 2 048
+    # sans `cles` (décodage, 3e produit) la règle ne s'applique pas ; la ligne de régime le nomme
+    from acvram import regime
+    assert "mla_core=tf32(≤2048 clés)" in regime.regime_ligne()
+    src = (RACINE / "acvram" / "engine" / "mla.py").read_text()
+    assert src.count("_tf32_coeur(cles=cles)") == 4 and src.count("cles = passe + d1") == 1

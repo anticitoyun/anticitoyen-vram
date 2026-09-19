@@ -353,6 +353,12 @@ def _etat_eco() -> dict:
     return eco.etat_eco(relire=True)
 
 
+def _mla_core_texte() -> str:
+    """`mla_core=tf32(≤2048 clés)` hors fp32 (poste7-c14-defaut-tf32-8k addendum)."""
+    from . import mla
+    return "" if mla._MLA_CORE == "fp32" else f" mla_core={mla._MLA_CORE}(≤{mla._MLA_CORE_MAX_CLES} clés)"
+
+
 def _eco_texte(e: dict) -> str:
     """``eco=2700(2692)`` conforme, ``eco=2700(libre: refus sudo)`` sinon —
     demandé ≠ effectif est un état nommé, jamais silencieux (poste7-eco-2700-defaut § 2)."""
@@ -671,7 +677,8 @@ class Engine:
                + f"cache_prefixe={self.stats.hit_rate:.3f} "
                f"({self.stats.cached_prompt_tokens} vram+hôte, "
                f"{self.stats.host_kv_tokens} hôte) "
-               + _eco_texte(r["eco"]))
+               + _eco_texte(r["eco"])
+               + _mla_core_texte())
 
     def fermer(self) -> None:
         """Arrêt du moteur : rend l'horloge éco posée par ce processus
