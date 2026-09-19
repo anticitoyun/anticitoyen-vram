@@ -133,3 +133,57 @@ def test_pin_trace_vide_ne_fabrique_pas_de_taux(tmp_path):
     out = tr.taux_de_succes_pin(chemin, capacites=[8])
     assert out[8]["taux"] == 0.0
     assert out[8]["taux_par_couche"] == {}
+
+
+# ---- M1 étendu (poste7-c9-119b-cache-experts-19-09) ---------------------------
+
+def test_pas_de_decodage_regroupe_les_rafales_de_meme_couche(tmp_path):
+    # b=3 : trois lignes de suite par couche = un pas ; deux couches, deux pas chacune
+    lignes = [(0, 0, [1, 2]), (1, 0, [2, 3]), (2, 0, [1, 3]), (0, 1, [7, 8]), (1, 1, [7, 8]), (2, 1, [7, 9]),
+              (3, 0, [4, 5]), (4, 0, [4, 5]), (5, 0, [4, 6]), (3, 1, [7, 8]), (4, 1, [8, 9]), (5, 1, [9, 7])]
+    j = _ecrire(tmp_path, lignes)
+    pas = list(tr.pas_de_decodage(j))
+    assert [(c, len(r)) for c, r in pas] == [(0, 3), (1, 3), (0, 3), (1, 3)]
+    d = tr.distincts_par_pas(j)
+    assert d[0]["pas"] == 2 and d[0]["max"] == 3 and d[0]["lot_moyen"] == 3.0
+    # couche 0, pas 1 : {1,2,3} = 3 distincts pour 6 demandes → recouvrement 0,5 ; pas 2 : {4,5,6} idem
+    assert abs(d[0]["recouvrement"] - 0.5) < 1e-9
+    # témoin cassant : à b=1 (une ligne par couche, deux couches) il n'y a aucun recouvrement
+    (tmp_path / "b1").mkdir()
+    j1 = _ecrire(tmp_path / "b1", [(i, c, [i % 4, (i + 1) % 4]) for i in range(8) for c in (0, 1)])
+    d1 = tr.distincts_par_pas(j1)
+    assert d1[0]["pas"] == 8 and d1[0]["recouvrement"] == 0.0
+
+
+def test_lru_jugee_sur_la_seconde_moitie_et_par_pas(tmp_path):
+    # couche 0 : la première moitié (jetons 0-9) ne demande que {0,1} ; la seconde {0,1} aussi
+    # → LRU(2) chauffée sur la première moitié rend 100 % sur la seconde ; LRU(1) alterne → 0 %
+    lignes = [(i, c, [i % 2]) for i in range(20) for c in (0, 1)]
+    j = _ecrire(tmp_path, lignes)
+    assert tr.taux_de_succes_lru_juge(j, 2)["taux"] == 1.0
+    assert tr.taux_de_succes_lru_juge(j, 1)["taux"] == 0.0
+    # par pas (b=3, deux couches) : un expert demandé par 3 jetons du même pas = 1 demande
+    (tmp_path / "pas").mkdir()
+    lignes = [(k, 0, [5]) for k in range(3)] + [(k, 1, [6]) for k in range(3)] \
+        + [(3 + k, 0, [5]) for k in range(3)] + [(3 + k, 1, [6]) for k in range(3)]
+    j2 = _ecrire(tmp_path / "pas", lignes)
+    r = tr.taux_de_succes_lru_juge(j2, 1, entrainement=0.4, par_pas=True)
+    assert r["demandes_jugees"] == 2                      # le second pas : une demande distincte par couche
+    r2 = tr.taux_de_succes_lru_juge(j2, 1, entrainement=0.4, par_pas=False)
+    assert r2["demandes_jugees"] == 6
+
+
+def test_rapport_m1_rend_le_critere_de_poste7(tmp_path):
+    # 8 experts ; les jetons ne demandent que {0,1,2,3} → h(E/2 = 4) = 1 → Δh = 0,5 → cache engagé
+    lignes = [(i, c, [i % 4, (i + 1) % 4]) for i in range(40) for c in (0, 1)]
+    j = _ecrire(tmp_path, lignes)
+    r = tr.rapport_m1(j, capacites=(2, 4), nb_experts=8)
+    assert r["experts_vus"] == 8 and r["capacite_demi"] == 4
+    assert r["h_pin"][4] == 1.0 and r["h_lru"][4] == 1.0 and r["verdict_poste7"] == "cache engagé"
+    assert 0.0 < r["h_lru"][2] < 1.0                     # capacité 2 : la moitié des demandes manquent
+    # témoin cassant : routage uniforme sur 8 experts avec 2 emplacements → Δh < 0,10 → pas de cache
+    lignes = [(i, 0, [(3 * i) % 8, (3 * i + 5) % 8]) for i in range(80)]
+    (tmp_path / "plat").mkdir()
+    j2 = _ecrire(tmp_path / "plat", [(i, c, e) for i, _, e in lignes for c in (0, 1)])
+    r2 = tr.rapport_m1(j2, capacites=(2,), nb_experts=8)
+    assert r2["capacite_demi"] == 4 and r2["verdict_poste7"] != "cache engagé"

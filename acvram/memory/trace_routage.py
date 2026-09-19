@@ -316,3 +316,137 @@ def taux_de_succes_pin(chemin_journal: str, capacites: list, entrainement: float
                                 for c, (s, d) in sorted(r["par_couche"].items())},
         }
     return out
+
+
+# ---------------------------------------------------------------------------
+# M1 étendu (poste7-c9-119b-cache-experts-19-09 § 2) : ce que la trace doit
+# rendre pour décider si un cache d'experts EXISTE avant d'écrire du code.
+# ---------------------------------------------------------------------------
+
+def pas_de_decodage(chemin_journal: str):
+    """Regroupe la trace en PAS : une rafale de lignes consécutives de même
+    couche = un pas de décodage (à b=12, `noter` reçoit [B, top_k] d'un coup,
+    donc B lignes de suite pour la couche). Rend ``(couche, [experts par
+    jeton])`` par pas, dans l'ordre d'émission. À b=1 un pas = un jeton."""
+    couche_courante = None
+    jeton_prec = None
+    rafale: list = []
+    for jeton, couche, experts in relire(chemin_journal):
+        # nouveau pas : la couche change, ou le rang de jeton ne croît plus
+        # (la couche suivante du même pas réécrit les mêmes rangs ; le pas
+        # suivant repart à base + i). Une trace à UNE seule couche ne sépare
+        # pas ses pas à b=1 : les rangs y croissent sans fin — tracer toutes
+        # les couches, comme `noter` le fait en service.
+        if rafale and (couche != couche_courante or (jeton_prec is not None and jeton <= jeton_prec)):
+            yield couche_courante, rafale
+            rafale = []
+        couche_courante = couche
+        jeton_prec = jeton
+        rafale.append(experts)
+    if rafale:
+        yield couche_courante, rafale
+
+
+def distincts_par_pas(chemin_journal: str) -> dict:
+    """Experts DISTINCTS demandés par pas et par couche — c'est ce qui se
+    paie en octets PCIe (un expert demandé par trois jetons du lot se lit une
+    fois), pas la somme des top_k. Rend par couche : moyenne, médiane, max
+    des distincts, la taille de lot moyenne, et le rapport distincts / (lot ×
+    top_k) qui dit la part de recouvrement dans le lot."""
+    import statistics
+    par_couche: dict[int, list] = {}
+    lots: dict[int, list] = {}
+    for couche, rafale in pas_de_decodage(chemin_journal):
+        u = set()
+        for experts in rafale:
+            u.update(experts)
+        par_couche.setdefault(couche, []).append(len(u))
+        lots.setdefault(couche, []).append((len(rafale), sum(len(e) for e in rafale)))
+    out = {}
+    for couche, d in par_couche.items():
+        demandes = sum(t for _, t in lots[couche])
+        out[couche] = {"pas": len(d), "moyenne": statistics.fmean(d), "mediane": statistics.median(d),
+                       "max": max(d), "lot_moyen": statistics.fmean(b for b, _ in lots[couche]),
+                       "recouvrement": 1.0 - (sum(d) / demandes if demandes else 0.0)}
+    return out
+
+
+def taux_de_succes_lru_juge(chemin_journal: str, capacite: int, entrainement: float = 0.5,
+                            par_pas: bool = True) -> dict:
+    """LRU PAR COUCHE de ``capacite`` experts, chauffée sur la première
+    fraction ``entrainement`` des jetons et JUGÉE sur le reste seulement —
+    le même partage que `taux_de_succes_pin`, pour comparer h_lru et h_pin
+    sur les mêmes jetons. ``par_pas`` : un expert demandé par plusieurs jetons
+    du même pas compte une demande (celle qui coûte des octets)."""
+    from collections import OrderedDict
+    jetons = [j for j, _, _ in relire(chemin_journal)]
+    if not jetons:
+        return {"taux": 0.0, "taux_par_couche": {}, "capacite": capacite}
+    seuil = min(jetons) + (max(jetons) - min(jetons)) * entrainement
+    caches: dict[int, OrderedDict] = {}
+    succes = demandes = 0
+    par_couche: dict[int, list] = {}
+    # relecture par pas, en gardant le rang du premier jeton du pas
+    rang = 0
+    ordre = list(relire(chemin_journal))
+    i = 0
+    while i < len(ordre):
+        jeton, couche, _ = ordre[i]
+        j = i + 1
+        while j < len(ordre) and ordre[j][1] == couche and ordre[j][0] > ordre[j - 1][0]:
+            j += 1
+        rafale = [e for _, _, e in ordre[i:j]]
+        i = j
+        cache = caches.setdefault(couche, OrderedDict())
+        vus = set() if par_pas else None
+        for experts in rafale:
+            for e in experts:
+                if vus is not None:
+                    if e in vus:
+                        continue
+                    vus.add(e)
+                hit = e in cache
+                if hit:
+                    cache.move_to_end(e)
+                else:
+                    cache[e] = True
+                    if len(cache) > capacite:
+                        cache.popitem(last=False)
+                if jeton > seuil:
+                    acc = par_couche.setdefault(couche, [0, 0])
+                    succes += hit; demandes += 1
+                    acc[0] += hit; acc[1] += 1
+    return {"capacite": capacite, "taux": succes / demandes if demandes else 0.0,
+            "demandes_jugees": demandes,
+            "taux_par_couche": {c: (a / b if b else 0.0) for c, (a, b) in par_couche.items()}}
+
+
+def rapport_m1(chemin_journal: str, capacites=(16, 32, 48, 64, 96), entrainement: float = 0.5,
+               nb_experts: Optional[int] = None) -> dict:
+    """M1 : h_pin(C) et h_lru(C) par couche, apprises/chauffées sur la
+    première moitié et jugées sur la seconde, distincts par pas, et le
+    critère de poste7 : Δh = h(E/2) − 0,5 (E = nombre d'experts vus) — < 0,10
+    → pas de cache apprenant ; ≥ 0,25 → cache engagé. Un seul fichier lu."""
+    E = 0
+    n_lignes = 0
+    for _, _, experts in relire(chemin_journal):
+        n_lignes += 1
+        if experts:
+            E = max(E, max(experts) + 1)
+    if nb_experts:
+        E = max(E, int(nb_experts))            # E du config.json, pas « le plus grand index vu »
+    pin = taux_de_succes_pin(chemin_journal, list(capacites), entrainement)
+    lru = {c: taux_de_succes_lru_juge(chemin_journal, c, entrainement) for c in capacites}
+    c_demi = max(1, E // 2)
+    h_demi = {"pin": taux_de_succes_pin(chemin_journal, [c_demi], entrainement)[c_demi]["taux"],
+              "lru": taux_de_succes_lru_juge(chemin_journal, c_demi, entrainement)["taux"]}
+    meilleur = max(h_demi.values())
+    return {"experts_vus": E, "lignes": n_lignes, "capacites": list(capacites),
+            "h_pin": {c: pin[c]["taux"] for c in capacites},
+            "h_lru": {c: lru[c]["taux"] for c in capacites},
+            "h_pin_par_couche": {c: pin[c]["taux_par_couche"] for c in capacites},
+            "h_lru_par_couche": {c: lru[c]["taux_par_couche"] for c in capacites},
+            "distincts_par_pas": distincts_par_pas(chemin_journal),
+            "capacite_demi": c_demi, "h_demi": h_demi, "delta_h": meilleur - 0.5,
+            "verdict_poste7": ("cache engagé" if meilleur - 0.5 >= 0.25 else
+                             "pas de cache apprenant" if meilleur - 0.5 < 0.10 else "bande 0,10-0,25 : poste7 tranche")}

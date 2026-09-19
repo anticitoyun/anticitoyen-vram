@@ -214,6 +214,7 @@ VARIABLES_LUES = {
     "ACVRAM_TRACE_ENTREES",
     "ACVRAM_TRACE_PTRS",
     "ACVRAM_TRACE_ROUTAGE",
+    "ACVRAM_TRACE_ROUTAGE_PT",
     "ACVRAM_CHRONO_SYNC",
     "ACVRAM_TRACE_COUCHES",
     "ACVRAM_TRACE_STEPS",
@@ -221,6 +222,9 @@ VARIABLES_LUES = {
     "ACVRAM_VERROU_GLOB",
     "ACVRAM_WARM_GRAPHS",
     "ACVRAM_WARM_SPEC",
+    # exportee par outils/carte.sh (son PID) a ce qu'il lance ; lue par eco.py
+    # pour ne pas refuser sa propre prise de la carte
+    "ACVRAM_CARTE_TENUE",
 }
 
 
@@ -857,6 +861,19 @@ def cmd_profiles(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_eco(args: argparse.Namespace) -> int:
+    """Mode eco d'horloge (poste7-e1-eco-tenu-19-09 § 2) : verrouille l'horloge
+    SM par `sudo -n nvidia-smi -lgc`, la libere (-rgc), ou la lit (etat)."""
+    from . import eco
+    carte = eco.index_carte() if args.carte is None else args.carte
+    if args.mode == "etat":
+        h = eco.lire_horloge(carte)
+        print(f"  carte {carte} : horloge={bold(eco.etiquette_horloge(h))}")
+        print("  " + json.dumps(h, ensure_ascii=False))
+        return 0
+    return eco.regler(args.mode, carte)
+
+
 # --------------------------------------------------------------------------
 # parser
 # --------------------------------------------------------------------------
@@ -1080,6 +1097,18 @@ def build_parser() -> argparse.ArgumentParser:
                     choices=["all", "kernels", "bandwidth", "topology", "decode"])
     bn.add_argument("--json", action="store_true")
     bn.set_defaults(func=cmd_bench)
+
+    ec = sub.add_parser("eco", help="mode eco d'horloge : verrouille l'horloge SM de la "
+                                    "carte (sudo -n nvidia-smi -lgc), la libere, ou la lit")
+    ec.add_argument("mode", choices=["2700", "2100", "off", "etat"],
+                    help="2700 | 2100 : verrouille l'horloge SM a cette frequence (MHz) ; "
+                         "off : la libere (-rgc) ; etat : lit l'horloge sans rien changer. "
+                         "Un reglage se fait sous le verrou outils/carte.sh (REGLES 1) et "
+                         "s'affiche dans la ligne de regime (horloge=lgc2692 | libre | ?)")
+    ec.add_argument("--carte", type=int, default=None,
+                    help="index nvidia-smi de la carte (defaut : premier index de "
+                         "CUDA_VISIBLE_DEVICES, sinon 0)")
+    ec.set_defaults(func=cmd_eco)
 
     return p
 
