@@ -45,5 +45,6 @@
  "impossible de lancer acvram convert : {e}": "no se puede iniciar acvram convert: {e}",
  "conversion terminée — voir models_acvram.": "conversión terminada — ver models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert falló (código {code}) — ver el registro arriba.",
- "serveur arrêté.": "servidor detenido."
+ "serveur arrêté.": "servidor detenido.",
+ "toutes les options": "todas las opciones"
 }

@@ -45,5 +45,6 @@
  "impossible de lancer acvram convert : {e}": "kan ikke starte acvram convert: {e}",
  "conversion terminée — voir models_acvram.": "konvertering færdig — se models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert mislykkedes (kode {code}) — se loggen ovenfor.",
- "serveur arrêté.": "server stoppet."
+ "serveur arrêté.": "server stoppet.",
+ "toutes les options": "alle indstillinger"
 }

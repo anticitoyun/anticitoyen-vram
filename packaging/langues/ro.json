@@ -45,5 +45,6 @@
  "impossible de lancer acvram convert : {e}": "nu se poate porni acvram convert: {e}",
  "conversion terminée — voir models_acvram.": "conversie terminată — vezi models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "acvram convert a eșuat (cod {code}) — vezi jurnalul de mai sus.",
- "serveur arrêté.": "server oprit."
+ "serveur arrêté.": "server oprit.",
+ "toutes les options": "toate opțiunile"
 }

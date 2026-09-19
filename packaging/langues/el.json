@@ -45,5 +45,6 @@
  "impossible de lancer acvram convert : {e}": "αδύνατη η εκκίνηση του acvram convert: {e}",
  "conversion terminée — voir models_acvram.": "η μετατροπή ολοκληρώθηκε — δείτε το models_acvram.",
  "acvram convert a échoué (code {code}) — voir le journal ci-dessus.": "το acvram convert απέτυχε (κωδικός {code}) — δείτε το αρχείο καταγραφής παραπάνω.",
- "serveur arrêté.": "ο διακομιστής σταμάτησε."
+ "serveur arrêté.": "ο διακομιστής σταμάτησε.",
+ "toutes les options": "όλες οι επιλογές"
 }
