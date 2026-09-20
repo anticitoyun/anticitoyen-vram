@@ -53,14 +53,22 @@ def test_la_ligne_de_regime_nomme_la_glue_du_prefill(monkeypatch):
 
 # --- fusion 1 : épilogue i8c en un noyau ---------------------------------------
 
+# Sur carte le noyau Triton est RÉEL et lit des tenseurs CUDA ; à sec (conftest :
+# CUDA_VISIBLE_DEVICES vide → TRITON_INTERPRET=1) l'interpréteur lit des tenseurs
+# CPU. Un test qui donne des tenseurs CPU au noyau avec une carte visible est
+# faux par construction (verdict poste2 07 h 20 : « Pointer argument cannot be
+# accessed from Triton »).
+DEV = "cuda" if torch.cuda.is_available() else "cpu"
+
+
 def _acc_et_echelles(M=200, N=520, seed=3):
     torch.manual_seed(seed)
     # amplitudes du produit entier réel (|Σ| ≤ K·127·127 ≈ 3,3·10⁷ à K = 2048) :
     # au-delà de 2²⁴ la conversion int32 → fp32 ARRONDIT, c'est cet arrondi-là
     # que l'épilogue doit reproduire
-    acc = torch.randint(-40_000_000, 40_000_000, (M, N), dtype=torch.int32)
-    sx = (torch.rand(M) * 0.02 + 1e-4)
-    sw = (torch.rand(N) * 0.01 + 1e-5)
+    acc = torch.randint(-40_000_000, 40_000_000, (M, N), dtype=torch.int32, device=DEV)
+    sx = (torch.rand(M, device=DEV) * 0.02 + 1e-4)
+    sw = (torch.rand(N, device=DEV) * 0.01 + 1e-5)
     return acc, sx, sw
 
 
@@ -102,8 +110,10 @@ def test_gemm_i8c_cublas_compact_egale_le_temoin(monkeypatch):
         pytest.skip("Triton absent")
     torch.manual_seed(5)
     w = torch.randn(96, 256) * 0.02
-    t = _quantize_int8(w, group_size=256, symmetric=True)
-    x = (torch.randn(40, 256) * 0.5).to(torch.bfloat16)
+    # éligible au chemin cublas sur carte comme à sec : M = 40 > 16, K = 256 et
+    # N = 96 multiples de 8, groupe = K, zéros = 128 (symétrique par canal)
+    t = _quantize_int8(w, group_size=256, symmetric=True).to(DEV)
+    x = (torch.randn(40, 256, device=DEV) * 0.5).to(torch.bfloat16)
     appels = []
     vrai = g.epilogue_i8c
     monkeypatch.setattr(g, "epilogue_i8c", lambda *a, **k: appels.append(1) or vrai(*a, **k))
@@ -127,18 +137,27 @@ def test_gemm_i8c_cublas_compact_egale_le_temoin(monkeypatch):
 def _trois_i8c(K=256, seed=7):
     from acvram.quant.formats import _quantize_int8
     torch.manual_seed(seed)
-    return [_quantize_int8(torch.randn(N, K) * 0.02, group_size=K, symmetric=True) for N in (128, 32, 32)]
+    return [_quantize_int8(torch.randn(N, K) * 0.02, group_size=K, symmetric=True).to(DEV) for N in (128, 32, 32)]
+
+
+def _sous_le_seuil_gemv(monkeypatch):
+    """Sur carte `int8_matmul` prend le GEMV jusqu'à 80 lignes (ACVRAM_INT8_GEMV_MAX)
+    et le chemin partagé décline alors, comme il doit : les tests du chemin cublas
+    abaissent le seuil pour l'atteindre avec quelques dizaines de lignes."""
+    monkeypatch.setattr(kernels, "_INT8_GEMV_MAX", 16)
 
 
 def test_a8_partagee_egale_trois_int8_matmul(monkeypatch):
     """Les trois sorties du chemin partagé sont les octets des trois `int8_matmul`
     séparés (même A8, même produit entier, même épilogue) ; un seul quantificateur."""
     from acvram.kernels import gemm_w8a8 as g
+    _sous_le_seuil_gemv(monkeypatch)
     ts = _trois_i8c()
-    x = (torch.randn(3, 20, 256) * 0.5).to(torch.bfloat16)          # [b, t, K] : la forme est rendue
+    x = (torch.randn(3, 20, 256, device=DEV) * 0.5).to(torch.bfloat16)   # [b, t, K] : la forme est rendue
     appels = []
-    vrai = g.quantifier_a8_torch
-    monkeypatch.setattr(g, "quantifier_a8_torch", lambda *a, **k: appels.append(1) or vrai(*a, **k))
+    vrai = g.quantifier_a8_torch if DEV == "cpu" else g.quantifier_a8
+    monkeypatch.setattr(g, "quantifier_a8_torch" if DEV == "cpu" else "quantifier_a8",
+                        lambda *a, **k: appels.append(1) or vrai(*a, **k))
     refs = [kernels.int8_matmul(x, t) for t in ts]
     assert len(appels) == 3
     sorties = kernels.int8_matmul_partage(x, ts)
@@ -153,11 +172,16 @@ def test_a8_partagee_decline_ce_que_le_dispatcher_ne_prendrait_pas(monkeypatch):
     le régime bf16 — dans chaque cas None, et les projections suivent le
     chemin d'avant une par une."""
     from acvram.quant.formats import _quantize_int8
+    _sous_le_seuil_gemv(monkeypatch)
     ts = _trois_i8c()
-    x = (torch.randn(20, 256) * 0.5).to(torch.bfloat16)
+    x = (torch.randn(20, 256, device=DEV) * 0.5).to(torch.bfloat16)
+    assert kernels.int8_matmul_partage(x, ts) is not None                # le cas nominal, d'abord
     assert kernels.int8_matmul_partage(x[:16], ts) is None
-    t_aff = _quantize_int8(torch.randn(32, 256) * 0.02, group_size=128, symmetric=False)
+    t_aff = _quantize_int8(torch.randn(32, 256) * 0.02, group_size=128, symmetric=False).to(DEV)
     assert kernels.int8_matmul_partage(x, ts[:2] + [t_aff]) is None
+    monkeypatch.setattr(kernels, "_INT8_GEMV_MAX", 80)                   # sous le seuil GEMV : le dispatcher prendrait le GEMV
+    if DEV == "cuda":
+        assert kernels.int8_matmul_partage(x, ts) is None
     monkeypatch.setattr(kernels, "_PREFILL_INT8", "bf16")
     assert kernels.int8_matmul_partage(x, ts) is None
 
@@ -171,17 +195,21 @@ def test_proj_partagee_de_l_attention_suit_le_temoin(monkeypatch):
     class Faux:
         k_eq_v = False
 
+    _sous_le_seuil_gemv(monkeypatch)
     ts = _trois_i8c()
     f = Faux()
     f.q_proj, f.k_proj, f.v_proj = (QuantLinear(t) for t in ts)
-    x = (torch.randn(24, 256) * 0.5).to(torch.bfloat16)
+    x = (torch.randn(24, 256, device=DEV) * 0.5).to(torch.bfloat16)
     monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 1)
     qr, kr, vr = Attention._proj_i8c_partage(f, x)
     # à sec, `QuantLinear.forward` passe par le backend de référence (déquant fp32) :
-    # le témoin du chemin cublas est `int8_matmul` appelé directement
-    for y, t in zip((qr, kr, vr), ts):
+    # le témoin du chemin cublas est `int8_matmul` appelé directement ; sur carte
+    # c'est aussi ce que q_proj(x) fait (backend cuda-fusionne)
+    for y, t, lin in zip((qr, kr, vr), ts, (f.q_proj, f.k_proj, f.v_proj)):
         assert torch.equal(y, kernels.int8_matmul(x, t))
-    f.k_proj = QuantLinear(ts[1], bias=torch.zeros(32, dtype=torch.bfloat16))
+        if DEV == "cuda":
+            assert torch.equal(y, lin(x))
+    f.k_proj = QuantLinear(ts[1], bias=torch.zeros(32, dtype=torch.bfloat16, device=DEV))
     assert Attention._proj_i8c_partage(f, x) is None
 
 
@@ -329,6 +357,12 @@ def test_prefill_moe_marlin_compact_au_bit_avec_le_temoin(monkeypatch):
     monkeypatch.setattr(MD, "_PREFILL_GROUPED", "marlin")
     assert bloc._try_build_stacks()
     assert getattr(bloc, "_stacks_marlin", None) is not None
+    # `forward` reconstruit les piles tant que `_stack_state` vaut « ? » : la
+    # seconde construction voyait la pile naturelle déjà RENDUE (vide, hors CUDA)
+    # après le repack Marlin, refusait Marlin et partait en MMA sur une pile
+    # vide (verdict poste2 07 h 20, model.py:1301). L'état est posé comme
+    # `forward` le pose après une construction réussie.
+    bloc._stack_state = "oui"
     monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 0)
     n0 = bloc.chemins.get("marlin", 0) if hasattr(bloc, "chemins") else 0
     ref = bloc._forward_prefill_grouped(x, topw, topi32)
@@ -354,7 +388,7 @@ def test_prefill_moe_marlin_compact_au_bit_avec_le_temoin(monkeypatch):
 # --- fusion 5 : rmsnorm un warp par ligne (carte) -----------------------------
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise (noyau CUDA)")
-@pytest.mark.parametrize("H", [2048, 1024, 256, 4096, 2560])
+@pytest.mark.parametrize("H", [2048, 1024, 1536, 1000, 256, 200, 4096])
 def test_rmsnorm_warp_au_bit_avec_le_noyau_a_bloc(H):
     """Sur carte : `rmsnorm_bf16_warp` (un warp par ligne, ordre de somme rejoué)
     rend les octets de `rmsnorm_bf16` (bloc par ligne), sans et avec résidu, sur
