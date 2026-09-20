@@ -252,7 +252,7 @@ def _tranches(n_pages: int, b: int, hkv: int, device) -> tuple[int, int]:
 # C15-3d : 8 warps = 103 registres/fil et occupation 24 % (poste2 04 h 40, contre 178 et 11 % à 4),
 # durée inchangée 17,8 µs — et le bras B tire 369 W contre 349 (J +2,6 %, addendum 05 h 03) :
 # ACVRAM_ATTN_WARPS_COMPACT=4 est le bras qui dit si ce sont ces warps (energie_par_poste).
-WARPS_COMPACT = int(os.environ.get("ACVRAM_ATTN_WARPS_COMPACT", "8"))
+WARPS_COMPACT = int(os.environ.get("ACVRAM_ATTN_WARPS_COMPACT", "4"))   # 4 = les warps du témoin (poste7 05 h 02 : W ≤ témoin)
 assert WARPS_COMPACT in (1, 2, 4, 8, 16), WARPS_COMPACT
 
 _COMPTEURS: dict = {}
