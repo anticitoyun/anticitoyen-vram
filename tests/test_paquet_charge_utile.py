@@ -21,7 +21,12 @@ import subprocess
 import pytest
 
 RACINE = pathlib.Path(__file__).resolve().parent.parent
-DEB = RACINE / "acvram_0.6.0_amd64.deb"
+# Le .deb du dépôt porte la version courante (acvram/__init__.py) : une cible
+# en dur (« acvram_0.6.0 ») validait toujours un vieux paquet (poste2, 20/09,
+# verdict-paquet-0623-19-09).
+import importlib
+_VERSION = importlib.import_module("acvram").__version__
+DEB = RACINE / f"acvram_{_VERSION}_amd64.deb"
 
 INTERDITS = (
     "acvram-memoire/",
