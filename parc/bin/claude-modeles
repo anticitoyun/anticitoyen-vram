@@ -1336,7 +1336,7 @@ def appliquer_habillage():
 
 class Application(Adw.Application):
     def __init__(self):
-        super().__init__(application_id="org.acvram.ClaudeModeles",
+        super().__init__(application_id="fr.anticitoyen.ClaudeModeles",
                          flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
 
     def do_activate(self):

@@ -125,6 +125,23 @@ telecharge() {
   return 1
 }
 
+# --a-sec : montre ce qui serait fait, n'écrit NULLE PART (ni journal, ni disque) ; rc 0
+A_SEC=0
+if [ "${1:-}" = --a-sec ]; then A_SEC=1; shift; JOURNAL=/dev/null; fi
+# arguments validés avant la première ligne de journal : un appel sans argument n'écrit rien
+if [ "${1:-}" = --file ]; then
+  [ -n "${2:-}" ] && [ -f "$2" ] || { echo "usage : telecharger-modele [--a-sec] --file liste.tsv" >&2; exit 2; }
+elif [ -z "${1:-}" ] || [ -z "${2:-}" ]; then
+  echo "usage : telecharger-modele [--a-sec] <dépôt> <dossier-destination> [fichier…]" >&2; exit 2
+fi
+if [ "$A_SEC" = 1 ]; then
+  if [ "${1:-}" = --file ]; then
+    while IFS=$'\t' read -r depot dest fichiers; do case "$depot" in ''|\#*) continue ;; esac; echo "à sec : $depot → $dest ${fichiers:+($fichiers)}"; done < "$2"
+  else
+    echo "à sec : $1 → $2 ${3:+(${*:3})}"
+  fi
+  echo "à sec : journal $RACINE/telechargements.log non touché, hf=$HF"; exit 0
+fi
 dire "── $(date '+%F %H:%M') ──"
 if [ "${1:-}" = --file ]; then
   liste=$2
