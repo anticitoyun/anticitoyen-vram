@@ -5,6 +5,8 @@ compris ; (b) la sortie du bloc est identique avec et sans le noyau ;
 (c) compte de lancements par couche : casse si le routage torch revient."""
 import os
 import pytest
+
+pytestmark = pytest.mark.pile_naturelle   # lit _stacks[nom][1], rendu (None) sous Marlin, défaut servi (T4 20/09)
 import torch
 
 from tests.test_moe_decode_mma_graphe import _bloc, _entree, CUDA, N_EXPERTS, TOP_K, T, CACHE

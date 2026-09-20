@@ -5,6 +5,8 @@ lignes rassemblées (route+pack / moe_act pour le chemin MMA, x[tok]/s[e] pour
 le GEMV b<9). Contrat : pile == boucle par expert (QuantLinear.forward :
 x / s en bf16) à ≤ 1 ulp bf16 ; route+pack avec AWQ == torch au bit."""
 import pytest
+
+pytestmark = pytest.mark.pile_naturelle   # lit _stacks[nom][1], rendu (None) sous Marlin, défaut servi (T4 20/09)
 import torch
 
 from acvram.quant.nvfp4 import quantize_nvfp4

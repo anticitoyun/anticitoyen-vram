@@ -47,6 +47,7 @@ def test_bras_cassant_compte_faux():
     assert not all(torch.equal(x, y) for x, y in zip(a, b))
 
 
+@pytest.mark.a_sec
 def test_la_tuile_de_creneaux_est_bornee_et_la_grille_couvre_t_max():
     """T4 20/09 : BT_MAX = 2 048 constexpr dans un seul programme faisait boucler LLVM (9 min) ; le noyau est
     borné à BT_BLOC ≤ 512 créneaux par programme et la grille couvre t_max — un bt = 16 sur 16 384 paires

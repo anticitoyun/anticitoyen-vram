@@ -39,6 +39,7 @@ def _bloc_distinct(E=8, H=256, I=128, top_k=4):
     return MoEBlock(routeur, experts, top_k).to("cpu")
 
 
+@pytest.mark.sans_extension
 def test_refus_nomme_pile_gardee_et_decodage_sans_typeerror(monkeypatch):
     monkeypatch.setattr(MD, "_GEMV_LAYOUT", "marlin")
     monkeypatch.setattr(MD, "_PREFILL_GROUPED", "marlin")

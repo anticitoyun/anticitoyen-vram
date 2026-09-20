@@ -52,4 +52,7 @@ filterwarnings = ["ignore::DeprecationWarning"]
 markers = [
     "gpu_requis: exige une carte CUDA avec au moins 4 Gio libres (sinon ignore)",
     "debit_requis: mesure un debit — exige une carte au repos (sinon ignore)",
+    "a_sec: noyaux Triton interpretes (TRITON_INTERPRET) — carte visible, ignore ; passe CUDA_VISIBLE_DEVICES=",
+    "sans_extension: repli torch force (get_extension() -> None), tenseurs CPU, carte ou pas",
+    "pile_naturelle: disposition naturelle des experts (_stacks), pas Marlin (defaut servi depuis le 18/09)",
 ]

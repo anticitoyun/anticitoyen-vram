@@ -260,6 +260,7 @@ def test_le_plan_bmm_borne_le_travail_inutile_et_couvre_chaque_ligne(comptes):
 from test_moe_grouped import tiny_moe  # noqa: E402,F401  (fixture de session, réutilisée)
 
 
+@pytest.mark.sans_extension
 def test_prefill_groupe_bmm_egale_grouped_mm_et_la_boucle_sur_le_mini_moe(tiny_moe, monkeypatch):
     """Bout en bout sur le mini-MoE du conftest, processeur : le chemin
     `_forward_prefill_grouped` en `bmm` (réfuté, témoin) contre le défaut
@@ -406,6 +407,7 @@ def test_b1_un_offset_decale_d_une_ligne_casse():
     assert hors > 0
 
 
+@pytest.mark.a_sec
 def test_b1_nvfp4_linear_egale_la_dequant_bf16_sur_un_tenseur_fusionne():
     """Le chemin non groupé (`ACVRAM_PREFILL=w4a16`, nvfp4_matmul) : un
     NVFP4Tensor avec échelle globale PAR LIGNE (q/k/v fusionnés) et une

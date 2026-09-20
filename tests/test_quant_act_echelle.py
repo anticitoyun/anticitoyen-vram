@@ -12,6 +12,8 @@ comprise) ; 0 saturé quelle que soit l'amplitude ; invariance d'échelle par
 ligne ; les compteurs le prouvent ; la pile reste près de la boucle W4A16 sur
 des activations petites (là où l'ancien noyau rendait ~100 % d'erreur)."""
 import pytest
+
+pytestmark = pytest.mark.pile_naturelle   # lit _stacks[nom][1], rendu (None) sous Marlin, défaut servi (T4 20/09)
 import torch
 
 from tests.test_gemm_grouped_mma import quant_act_ref, dequant_act_ref

@@ -8,6 +8,8 @@
 (c) fantômes : contribution nulle et finie ; (d) tn 64 et 128 concordent au bit
     entre eux ? non (ordre des tranches différent) — chacun contre float64."""
 import pytest
+
+pytestmark = pytest.mark.pile_naturelle   # lit _stacks[nom][1], rendu (None) sous Marlin, défaut servi (T4 20/09)
 import torch
 
 from tests.test_moe_decode_mma_graphe import _bloc, _entree, CUDA, N_EXPERTS, TOP_K, T, CACHE, INTER

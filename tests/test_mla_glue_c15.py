@@ -13,6 +13,8 @@ from collections import Counter
 from types import SimpleNamespace
 
 import pytest
+
+pytestmark = pytest.mark.sans_extension   # tests à sec (device cpu) : repli torch même carte visible (T4 20/09)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
