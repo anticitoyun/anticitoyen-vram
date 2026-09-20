@@ -105,7 +105,17 @@ class TourVision:
         """Une image → ``[n, hidden]`` bf16 ; ``n_attendu`` (fin − debut) vérifié ; ``supplement`` =
         les annexes du processeur pour CETTE image (Gemma 4 : ``image_position_ids`` — sans elles
         ``get_image_features`` casse, poste2 14 h 40 ; Qwen3-VL : ``image_grid_thw``), passées en kwargs
-        au calcul, jamais nommées ici."""
+        au calcul, jamais nommées ici. Les niveaux deepstack, s'il y en a, sont ignorés ici :
+        `traits_niveaux` les rend."""
+        return self.traits_niveaux(pixel_values, n_attendu, supplement)[0]
+
+    @torch.no_grad()
+    def traits_niveaux(self, pixel_values: Any, n_attendu: Optional[int] = None,
+                       supplement: Optional[dict] = None) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Comme `traits`, et rend ``(traits [n, hidden], niveaux [k, n, hidden] bf16 | None)`` :
+        les niveaux deepstack de Qwen3-VL (``deepstack_features`` de la sortie de la tour, un par
+        ``deepstack_visual_indexes``, déjà projetés par leur merger), None pour une tour qui n'en
+        rend pas (Gemma 4 : chemin inchangé)."""
         if isinstance(pixel_values, torch.Tensor):
             pixel_values = pixel_values.to(self.device)
         supp = {k: (v.to(self.device) if isinstance(v, torch.Tensor) else v) for k, v in (supplement or {}).items()}
@@ -115,6 +125,7 @@ class TourVision:
             if supp and "unexpected keyword" in str(exc):
                 raise TypeError(f"tour de vision : le calcul refuse les annexes du processeur {sorted(supp)} ({exc})") from exc
             raise
+        niveaux = niveaux_deepstack(out)
         out = traits_projetes(out)
         out = out.reshape(-1, out.shape[-1]).to(torch.bfloat16)
         if self.hidden is not None and out.shape[-1] != self.hidden:
@@ -123,7 +134,12 @@ class TourVision:
         if n_attendu is not None and out.shape[0] != n_attendu:
             raise ValueError(f"tour de vision : {out.shape[0]} traits pour une plage de "
                              f"{n_attendu} jetons image")
-        return out
+        if niveaux is not None:
+            niveaux = niveaux.to(torch.bfloat16)
+            if niveaux.shape[1:] != out.shape:
+                raise ValueError(f"tour de vision : niveaux deepstack {tuple(niveaux.shape)} pour des traits "
+                                 f"{tuple(out.shape)} (attendu (k, {out.shape[0]}, {out.shape[1]}))")
+        return out, niveaux
 
     @classmethod
     def depuis_dossier(cls, path: str, manifest: dict,
@@ -213,6 +229,13 @@ class TourVision:
             return modele.get_image_features(pixel_values=pv, **supplement)
 
         tcfg = getattr(cfg, "text_config", None) or cfg
+        # Deepstack (Qwen3-VL) : le nombre de niveaux est celui de la config de la tour
+        # (`deepstack_visual_indexes`), déclaré à la ligne de régime ; la config prime sur le manifeste
+        vcfg = getattr(cfg, "vision_config", None)
+        idx = getattr(vcfg, "deepstack_visual_indexes", None) if vcfg is not None else None
+        if idx is not None:
+            from .. import regime as _regime
+            _regime.declarer_deepstack(len(idx))
         return cls(calcul, device, nom=f"transformers {transformers.__version__}",
                    hidden=int(getattr(tcfg, "hidden_size", 0)) or None)
 
@@ -272,6 +295,24 @@ def traits_projetes(out: Any) -> torch.Tensor:
     if not isinstance(out, torch.Tensor):
         raise TypeError(f"tour de vision : sortie {type(out).__name__}, tenseur attendu")
     return out
+
+
+def niveaux_deepstack(out: Any) -> Optional[torch.Tensor]:
+    """Les niveaux deepstack de la sortie de la tour, empilés ``[k, n, h]``, ou None : Qwen3-VL
+    (transformers 5) rend ``BaseModelOutputWithDeepstackFeatures.deepstack_features`` = liste de k
+    tenseurs ``[n, h]`` (un par ``deepstack_visual_indexes``, chacun passé par son merger) ; un tuple
+    ``(embeds, deepstack)`` (forme ancienne) porte la liste en second ; Gemma 4 (pooler seul) → None.
+    Une liste vide → None (tour sans deepstack, jamais un tenseur à zéro niveau)."""
+    ds = getattr(out, "deepstack_features", None)
+    if ds is None and isinstance(out, (tuple, list)) and len(out) == 2 \
+            and isinstance(out[1], (tuple, list)) and out[1] \
+            and all(isinstance(t, torch.Tensor) for t in out[1]):
+        ds = out[1]
+    if ds is None or (isinstance(ds, (tuple, list)) and not ds):
+        return None
+    if isinstance(ds, torch.Tensor):
+        return ds if ds.ndim == 3 else ds.reshape(1, -1, ds.shape[-1])
+    return torch.stack([t.reshape(-1, t.shape[-1]) for t in ds], 0)
 
 
 def forme_pour_la_tour(pv: torch.Tensor) -> torch.Tensor:

@@ -60,6 +60,9 @@ class Sequence:
     # leurs traits (debut, fin, embeds bf16 [fin − debut, hidden]).
     images: list = field(default_factory=list)
     image_embeds: Optional[list] = None
+    # Deepstack (Qwen3-VL) : à côté des traits, (debut, fin, niveaux bf16
+    # [n_niveaux, fin − debut, hidden]) par image ; None quand la tour n'en rend pas.
+    image_niveaux: Optional[list] = None
 
     @property
     def prefilled(self) -> bool:
@@ -823,11 +826,19 @@ class Engine:
                 # la requête, nommément.
                 if seq.images and seq.image_embeds is None:
                     try:
-                        seq.image_embeds = [
+                        rendus = [
                             (im.debut, im.fin,
-                             self.vision.traits(im.pixel_values, im.fin - im.debut,
-                                                supplement=getattr(im, "supplement", None)))
+                             *self.vision.traits_niveaux(im.pixel_values, im.fin - im.debut,
+                                                         supplement=getattr(im, "supplement", None)))
                             for im in seq.images]
+                        seq.image_embeds = [(d, f, e) for d, f, e, _ in rendus]
+                        # Deepstack : les niveaux suivent les traits, tous ou aucun
+                        # (une tour rend le même nombre de niveaux pour chaque image)
+                        seq.image_niveaux = ([(d, f, n) for d, f, _, n in rendus]
+                                             if all(n is not None for *_, n in rendus) else None)
+                        if seq.image_niveaux is None and any(n is not None for *_, n in rendus):
+                            raise ValueError("tour de vision : niveaux deepstack rendus pour une partie "
+                                             "des images seulement")
                         # Le journal dit que la tour a tourné (poste2 15 h 00 : « aucune ligne tour ») —
                         # une somme des traits par image, pour qu'une image différente se voie
                         print("[engine] tour : " + " ; ".join(
@@ -1135,8 +1146,11 @@ class Engine:
         # Multimodal P1 : traits d'image par séquence au prefill seulement ;
         # None pour tout le lot quand aucune n'en porte (chemin texte au bit).
         images = None
+        deepstack = None
         if prefill and any(s.image_embeds for s in seqs):
             images = [list(s.image_embeds) if s.image_embeds else None for s in seqs]
+            if any(s.image_niveaux for s in seqs):
+                deepstack = [list(s.image_niveaux) if s.image_niveaux else None for s in seqs]
 
         return ForwardBatch(
             tokens=torch.tensor(tokens, dtype=torch.long),
@@ -1146,7 +1160,7 @@ class Engine:
             slot_mapping=torch.tensor(slots, dtype=torch.long),
             is_prefill=prefill,
             seq_ids=[s.id for s in seqs], gdn_store=self.gdn_states,
-            images=images)
+            images=images, deepstack=deepstack)
 
     @staticmethod
     def _eviter_coupe_image(seq: Sequence, fin: Optional[int]) -> Optional[int]:

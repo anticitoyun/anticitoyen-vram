@@ -99,6 +99,11 @@ class ForwardBatch:
     # positions absolues de l'invite ; None pour tout le lot = chemin texte
     # inchangé au bit. Rempli au prefill seulement (jamais au décodage).
     images: Optional[list] = None
+    # Qwen3-VL deepstack (poste7-go-qwen3vl-parallele-20-09 § 2, pièce c) : par
+    # séquence, None ou liste de (debut, fin, niveaux bf16 [n_niveaux, fin − debut,
+    # hidden]) ; le niveau k est AJOUTÉ après la couche k du LM aux seules lignes
+    # image. None pour tout le lot = aucun tenseur touché. Prefill seulement.
+    deepstack: Optional[list] = None
 
     def images_de(self, i: int) -> list:
         """Plages (debut, fin) de la séquence i, [] sans image."""
@@ -3163,6 +3168,55 @@ def disperser_images(x: torch.Tensor, batch: ForwardBatch) -> torch.Tensor:
     return x
 
 
+def niveaux_deepstack(batch: ForwardBatch) -> int:
+    """Nombre de niveaux deepstack portés par le lot (0 sans) ; toutes les
+    entrées en portent le même nombre, sinon erreur nommée."""
+    if batch.deepstack is None:
+        return 0
+    if len(batch.deepstack) != len(batch.query_lens):
+        raise ValueError(f"deepstack : {len(batch.deepstack)} entrées pour "
+                         f"{len(batch.query_lens)} séquences")
+    ks = {int(n.shape[0]) for entrees in batch.deepstack for _, _, n in (entrees or [])}
+    if len(ks) > 1:
+        raise ValueError(f"deepstack : nombres de niveaux différents dans le lot {sorted(ks)}")
+    return ks.pop() if ks else 0
+
+
+def ajouter_deepstack(x: torch.Tensor, delta: Optional[torch.Tensor],
+                      batch: ForwardBatch, k: int):
+    """Ajoute le niveau ``k`` des traits deepstack aux lignes image, après la
+    couche ``k`` du LM — la référence est ``Qwen3VLTextModel._deepstack_process`` :
+    ``hidden[mask] = hidden[mask] + niveaux[k]`` en bf16, sur l'état de sortie
+    de la couche (résidu + MLP déjà sommés).
+
+    Résidu différé (x, delta) : l'état vrai est ``x + delta`` et l'ajout se fait
+    sur CETTE SOMME, jamais sur ``x`` seul — bf16((x + v) + delta) ≠
+    bf16((x + delta) + v), l'addition bf16 n'est pas associative. Aux seules
+    lignes image : ``x ← (x + delta) + v`` et ``delta ← 0`` ; la couche suivante
+    fait ``add_norm(x, delta)`` = bf16(fp32(x) + 0) = x, au bit, sans changer
+    de noyau ; les lignes texte ne sont pas touchées. Rend (x, delta).
+    Même règle d'intersection avec le morceau que `disperser_images`."""
+    r = 0
+    for i, qlen in enumerate(batch.query_lens):
+        offset = batch.seq_lens[i] - qlen
+        for d, f, niv in (batch.deepstack[i] or []):
+            d, f = int(d), int(f)
+            if niv.ndim != 3 or niv.shape[1] != f - d or niv.shape[2] != x.shape[1]:
+                raise ValueError(f"deepstack [{d}, {f}) : forme {tuple(niv.shape)}, "
+                                 f"attendu (n_niveaux, {f - d}, {x.shape[1]})")
+            a, b = max(d, offset), min(f, offset + qlen)
+            if a < b:
+                lignes = slice(r + a - offset, r + b - offset)
+                v = niv[k, a - d: b - d].to(x.device, x.dtype)
+                if delta is None:
+                    x[lignes] = x[lignes] + v
+                else:
+                    x[lignes] = (x[lignes] + delta[lignes]) + v
+                    delta[lignes] = 0
+        r += qlen
+    return x, delta
+
+
 class ACVRamModel(nn.Module):
     """Le modèle assemblé, ses couches réparties sur plusieurs appareils."""
 
@@ -3218,6 +3272,9 @@ class ACVRamModel(nn.Module):
             type(l) is DecoderLayer and l.self_attn is not None and l.mlp is not None
             and l.mlp_device == l.device and l.residual_multiplier == 1.0 for l in self.layers)
         delta = None
+        # Deepstack (Qwen3-VL) : n niveaux à ajouter après les couches 0..n−1
+        # aux lignes image ; 0 sans image, un entier comparé par couche.
+        n_deep = niveaux_deepstack(batch) if batch.deepstack is not None else 0
         for i, layer in enumerate(self.layers):
             if layer.device != current:
                 if delta is not None:
@@ -3233,6 +3290,8 @@ class ACVRamModel(nn.Module):
                 x, delta = layer.forward_res(x, delta, batch, self.caches.get(i))
             else:
                 x = layer(x, batch, self.caches.get(i))
+            if i < n_deep:
+                x, delta = ajouter_deepstack(x, delta, batch, i)
             _trace_couche("forward", i, layer)
             if _SYNC_COUCHES:
                 # Diagnostic : une faute CUDA asynchrone remonte au premier

@@ -365,13 +365,49 @@ def _horloge() -> Optional[str]:
 _VISION_CHARGEE: Optional[str] = None
 
 
+# Deepstack (Qwen3-VL, poste7-go-qwen3vl-parallele-20-09 § 2) : nombre de niveaux du modèle chargé,
+# None quand rien ne le dit — le mot `deepstack=N` n'apparaît que déclaré.
+_DEEPSTACK_CHARGE: Optional[int] = None
+
+
 def declarer_modele_charge(manifest: Optional[dict]) -> None:
     """Le chargeur déclare le manifeste du modèle qu'il vient de charger ; la
     ligne de régime en tire `vision=bf16(eager)` (manifeste `vision: oui`,
     contrat poste7-go-multimodal-organisation-20-09 § 2) ou `vision=off`.
-    None : plus de modèle chargé, le mot disparaît."""
+    None : plus de modèle chargé, le mot disparaît. Le manifeste dit aussi le
+    deepstack : `deepstack: 3` (nombre) ou `deepstack: oui` avec
+    `deepstack_niveaux` (sinon 3, les `deepstack_visual_indexes` par défaut de
+    Qwen3-VL) ; absent ou « non » : pas de mot."""
     global _VISION_CHARGEE
     _VISION_CHARGEE = None if manifest is None else str(manifest.get("vision", "non"))
+    declarer_deepstack(_deepstack_du_manifeste(manifest))
+
+
+def _deepstack_du_manifeste(manifest: Optional[dict]) -> Optional[int]:
+    if not manifest:
+        return None
+    decl = manifest.get("deepstack")
+    if decl is None or decl is False:
+        return None
+    if isinstance(decl, bool) or (isinstance(decl, str) and decl.strip().lower() in ("oui", "yes", "true")):
+        n = manifest.get("deepstack_niveaux")
+        idx = manifest.get("deepstack_visual_indexes")
+        return int(n) if n is not None else (len(idx) if idx else 3)
+    if isinstance(decl, (list, tuple)):
+        return len(decl) or None
+    if isinstance(decl, int) or (isinstance(decl, str) and decl.strip().isdigit()):
+        return int(decl) or None
+    return None
+
+
+def declarer_deepstack(n: Optional[int]) -> None:
+    """`deepstack=n` sur la ligne (n ≥ 1) ; None ou 0 : le mot disparaît."""
+    global _DEEPSTACK_CHARGE
+    _DEEPSTACK_CHARGE = int(n) if n else None
+
+
+def deepstack_texte() -> Optional[str]:
+    return f"deepstack={_DEEPSTACK_CHARGE}" if _DEEPSTACK_CHARGE else None
 
 
 def vision_texte() -> Optional[str]:
@@ -488,6 +524,8 @@ def regime_ligne() -> str:
         parts.append("vision=declaree(tour absente)")     # manifeste oui, tour non chargée : jamais « bf16(eager) » sans tour
     elif vision_texte():
         parts.append("vision=off")
+    if deepstack_texte():
+        parts.append(deepstack_texte())                   # deepstack=3 : seulement déclaré (manifeste / config de la tour)
     # C5-b : le format des clés est nommé dès qu'il n'est plus celui d'aujourd'hui
     # (int8 par jeton) — la variable dit ce qui est DEMANDÉ, cette étiquette ce
     # que le cache int8 fait de ses clés.
