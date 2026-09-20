@@ -202,6 +202,8 @@ VARIABLES: tuple[Variable, ...] = (
              "C13-c diagnostic : BM,BN,warps,stages de la tuile du cœur flash (défaut : par la shared de la carte — sm_120 32,64,4,1 ; ≥ 200 Ko 64,64,8,2) ; la ligne de régime nomme la tuile"),
     Variable("MLA_CORE_VB", "0", ("acvram.engine.mla", "_MLA_CORE_VB"), "0",
              "C13 (poste7-c13a-defaut § 2) : 1 = le 3e produit du préfill y = v_b·o_lat (8ae21997) suit MLA_CORE ; 0 = fp32 ; scellé prefill ≥ 7 450 j/s ET ΔPPL géo ≤ +0,001 contre 2 produits → défaut 1"),
+    Variable("MLA_CORE_MAX_CLES", "2048", ("acvram.engine.mla", "_MLA_CORE_MAX_CLES"), "2048",
+             "diagnostic (prise à 36 tranches, poste2 20/09) : seuil de la règle des clés vues au préfill — au-delà, fp32 pour le morceau ; 0 = règle neutralisée (tf32/bf16 à toutes longueurs, ligne mla_core=tf32(sans règle des clés)) ; 2048 = défaut servi"),
     Variable("MLA_CORE_DECODE", "fp32", ("acvram.engine.mla", "_MLA_CORE_DECODE"), "fp32",
              "C13 niveau 2 (poste7-c13a-defaut § 2) : régime du cœur au DÉCODAGE (y = v_b·o_lat, sgemm fp32 1,5 ms/pas à b=12), indépendant de MLA_CORE — fp32 défaut | tf32 | bf16 ; scellé sgemm ≤ 0,6 ms ET ppl-decode-kv 3 tranches ± 0,001 ET capture {1,2,8,12,16} 5/5 → défaut"),
     Variable("MLA_A8", "off", ("acvram.engine.mla", "_MLA_A8"), None,

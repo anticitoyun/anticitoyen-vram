@@ -194,3 +194,21 @@ def test_regime_reduit_seulement_sous_2048_cles_vues(monkeypatch):
     assert "mla_core=tf32(≤2048 clés)" in regime.regime_ligne()
     src = (RACINE / "acvram" / "engine" / "mla.py").read_text()
     assert src.count("_tf32_coeur(cles=cles)") == 4 and src.count("cles = passe + d1") == 1
+
+
+def test_regle_des_cles_neutralisee_par_max_cles_zero(monkeypatch):
+    """ACVRAM_MLA_CORE_MAX_CLES=0 (bras « règle neutralisée » de la prise à 36 tranches, poste2 20/09) :
+    aucune longueur ne bascule en fp32 et la ligne le dit ; 2048 = défaut servi (témoin)."""
+    import importlib
+    monkeypatch.setenv("ACVRAM_MLA_CORE", "bf16")           # bf16 : le dtype dit le régime à sec (tf32 = fp32 émulé)
+    monkeypatch.setenv("ACVRAM_MLA_CORE_MAX_CLES", "0")
+    importlib.reload(MLA)
+    try:
+        assert MLA._dt_coeur(cles=2049) is torch.bfloat16 and MLA._dt_coeur(cles=1 << 20) is torch.bfloat16
+        assert MLA.regime_coeur_texte() == "mla_core=bf16(sans règle des clés)"
+        monkeypatch.setenv("ACVRAM_MLA_CORE_MAX_CLES", "2048")
+        importlib.reload(MLA)
+        assert MLA._dt_coeur(cles=2049) is torch.float32 and "≤2048 clés" in MLA.regime_coeur_texte()
+    finally:
+        monkeypatch.delenv("ACVRAM_MLA_CORE_MAX_CLES", raising=False); monkeypatch.delenv("ACVRAM_MLA_CORE", raising=False)
+        importlib.reload(MLA)
