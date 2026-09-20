@@ -1224,6 +1224,19 @@ def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
     d = q.shape[-1]
     if d not in (32, 64, 128, 256, 512):
         return None
+    # C5-b : clés par canal (kv_canal) — seule la variante CANAL du noyau CUDA
+    # sait lire sc E4M3 par bloc et le bloc courant bf16 ; le noyau Triton du
+    # poste E ne le sait pas. Sans le symbole : None → gather_fixed (qui lit
+    # la réserve) + decode_attention_fixed, jamais un noyau qui lirait des
+    # codes par canal avec des échelles par jeton.
+    if getattr(cache, "canal", False):
+        if not hasattr(ext, "paged_attention_canal"):
+            return None
+        return ext.paged_attention_canal(
+            q.contiguous(), cache.k, cache.k_scale, cache.v, cache.v_scale,
+            cache.k_scale_canal.view(torch.uint8), cache.tampon, cache.tampon_de,
+            tables.contiguous(), seq_lens.contiguous(), cache.cfg.num_kv_heads,
+            float(scale), int(q_len), int(window))
     # Poste E (poste7-b0-et-cause-lm4-17-09) : noyau Triton par groupe GQA,
     # opt-in tant que le scellé (≤ 1,5 ms b=12 ctx 2048 ET ≤ 0,72 ms b=1,
     # sortie = noyau CUDA ± 2⁻⁸) n'est pas mesuré ; décodage q_len = 1 seul.

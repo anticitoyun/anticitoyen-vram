@@ -203,6 +203,14 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("KV_LM4_PUITS", "", None, None, "diagnostic lm4 : positions < N gardées int8 ; 0 = contrôle (lm4 partout par le diagnostic)"),
     Variable("KV_FORMAT", "", ("acvram.memory.tiering", "_KV_FORMAT"), None,
              "cache KV des paliers carte : vide = capacités (int8) | lm4 4 bits par rotation | lm3, lm2 témoins"),
+    Variable("KV_INT8_CANAL", "0", ("acvram.memory.kv_canal", "ACTIF"), "0",
+             "C5-b (chantier-c5b-19-09) : 1 = clés int8 à échelle E4M3 par canal et par tête sur chaque bloc de 16 "
+             "(bloc courant en bf16 dans une réserve, quantifié à sa fermeture ; V par jeton ; lecture par le noyau "
+             "CUDA paginé variante CANAL, q ⊙ s_bloc) ; 0 = par jeton (défaut jusqu'au scellé : ΔPPL 3 × 2 048 ≤ +0,002 "
+             "contre bf16 ET pas b=12 ≥ défaut − 1 % ET capture 5/5) ; ligne de régime kv=int8-canal16"),
+    Variable("KV_CANAL_RANGS", "64", ("acvram.memory.kv_canal", "RANGS"), None,
+             "C5-b : lignes bf16 de la réserve des blocs courants par couche (16 Kio chacune pour Coder) ; "
+             "épuisée → le bloc repart par jeton"),
     Variable("MLA_NORME_NOYAU", "1", None, "0"),
     Variable("MLA_EAGER_TORCH", "", None, "1"),
     Variable("MLA_DEBUG_ECART", "", None),
@@ -369,6 +377,15 @@ def regime_ligne() -> str:
         from .engine import mla as _mla
         if _mla.regime_coeur_texte():                     # tf32/bf16(≤2048 clés) | flash(fp32) | flash(repli fp32: …)
             parts.append(_mla.regime_coeur_texte())
+    except Exception:                                     # noqa: BLE001
+        pass
+    # C5-b : le format des clés est nommé dès qu'il n'est plus celui d'aujourd'hui
+    # (int8 par jeton) — la variable dit ce qui est DEMANDÉ, cette étiquette ce
+    # que le cache int8 fait de ses clés.
+    try:
+        from .memory import kv_canal as _kvc
+        if _kvc.ACTIF:
+            parts.append("kv=int8-canal16")
     except Exception:                                     # noqa: BLE001
         pass
     try:
