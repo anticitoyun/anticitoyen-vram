@@ -374,3 +374,72 @@ def test_les_annexes_du_processeur_suivent_l_image_jusqu_a_la_tour():
     tour2 = TourVision(lambda pv: torch.zeros(1, 3, 8), torch.device("cpu"), nom="factice-sans")
     with pytest.raises(TypeError, match="refuse les annexes"):
         tour2.traits(im.pixel_values, 3, supplement={"image_position_ids": pos})   # tour sans kwargs : nommé
+
+
+@pytest.mark.parametrize("forme,attendue", [((1, 2520, 768), (1, 2520, 768)),    # patches lotis Gemma 4 : inchangé
+                                            ((3, 896, 896), (1, 3, 896, 896)),    # image CHW nue : dimension image
+                                            ((1, 3, 896, 896), (1, 3, 896, 896)),  # déjà lotie : inchangé
+                                            ((2, 2520, 768), (2, 2520, 768))])    # deux images de patches : inchangé
+def test_la_forme_du_fragment_va_a_la_tour_telle_quelle(forme, attendue):
+    """poste2 14 h 55 (3e essai de (c) sur gemma-4-31B) : `if pv.ndim == 3: unsqueeze(0)` faisait de
+    [1, 2520, 768] (patches lotis) une image 4-D fausse. Le fragment garde la dimension image du
+    processeur ; seule une image CHW nue [3, H, W] en reçoit une."""
+    from acvram.engine.vision import forme_pour_la_tour
+    out = forme_pour_la_tour(torch.zeros(*forme, dtype=torch.bfloat16))
+    assert tuple(out.shape) == attendue
+
+
+def test_ce_qui_entre_dans_le_lm_est_la_sortie_projetee_de_la_tour():
+    """Gemma 4 (transformers 5.17) : get_image_features rend un ModelOutput — pooler_output = tuple par
+    image des traits PROJETÉS (embed_vision, [n, hidden]), last_hidden_state = la tour brute [1, patches,
+    1152] (références de poste2). Le moteur prend pooler_output ; un tenseur nu passe ; une tour qui rend
+    la dimension brute au lieu de celle du LM est REFUSÉE nommément (jamais dispersée en silence)."""
+    from acvram.engine.vision import TourVision, traits_projetes
+
+    class Sortie:                                   # BaseModelOutputWithPooling minimal
+        def __init__(self, lhs, po): self.last_hidden_state, self.pooler_output = lhs, po
+    lhs = torch.zeros(1, 16, 1152); po = (torch.ones(4, 8), torch.full((2, 8), 2.0))
+    out = traits_projetes(Sortie(lhs, po))
+    assert out.shape == (6, 8) and out[0, 0] == 1 and out[5, 0] == 2
+    assert traits_projetes(torch.zeros(3, 8)).shape == (3, 8)
+    assert traits_projetes((torch.zeros(3, 8), None)).shape == (3, 8)
+    tour = TourVision(lambda pv: Sortie(lhs, (torch.ones(4, 8),)), torch.device("cpu"), nom="factice", hidden=8)
+    assert tour.traits(torch.zeros(1, 16, 3), 4).shape == (4, 8)
+    brute = TourVision(lambda pv: Sortie(lhs, None), torch.device("cpu"), nom="factice-brute", hidden=8)
+    with pytest.raises(ValueError, match="non projetée"):
+        brute.traits(torch.zeros(1, 16, 3), 16)
+
+
+def test_les_tampons_non_persistants_de_la_tour_sont_reconstruits():
+    """20/09 14 h 48, tour réelle Gemma 4 : construite sur meta puis to_empty, `encoder.rotary_emb.inv_freq`
+    (tampon NON persistant, absent du state_dict) restait en mémoire non initialisée — traits faux en
+    silence (cos 0,13-0,53 contre la référence de poste2). Le sous-module qui porte de tels tampons est
+    reconstruit par son constructeur (config, device=) ; un module sans constructeur connu est refusé."""
+    import torch.nn as nn
+    from acvram.engine.vision import rematerialiser_tampons
+
+    class Cfg:
+        base = 3.0
+
+    class Rot(nn.Module):
+        def __init__(self, config, device=None):
+            super().__init__(); self.config = config
+            self.inv_freq = nn.Buffer(torch.full((4,), config.base, device=device), persistent=False)
+
+    class Tour(nn.Module):
+        def __init__(self):
+            super().__init__(); self.lin = nn.Linear(4, 4); self.enc = nn.Module(); self.enc.rot = Rot(Cfg())
+    with torch.device("meta"):
+        t = Tour()
+    t.to_empty(device="cpu")
+    t.enc.rot.inv_freq.fill_(-1.0)                          # la mémoire « non initialisée », rendue visible
+    refaits = rematerialiser_tampons(t, torch.device("cpu"))
+    assert refaits == ["enc.rot"] and torch.equal(t.enc.rot.inv_freq, torch.full((4,), 3.0))
+    assert t.lin.weight.shape == (4, 4)                     # les paramètres (chargés ensuite) ne sont pas touchés
+
+    class Sans(nn.Module):                                  # tampon non persistant, constructeur inconnu → refus
+        def __init__(self, k):
+            super().__init__(); self.b = nn.Buffer(torch.zeros(k), persistent=False)
+    m = nn.Module(); m.s = Sans(2)
+    with pytest.raises(RuntimeError, match="constructeur inconnu"):
+        rematerialiser_tampons(m, torch.device("cpu"))

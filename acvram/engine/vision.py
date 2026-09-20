@@ -91,10 +91,11 @@ class TourVision:
     """Tour de vision + projection : ``pixel_values`` → traits bf16 ``[n, h]``."""
 
     def __init__(self, calcul: Callable[[Any], torch.Tensor], device: torch.device,
-                 nom: str = "transformers") -> None:
+                 nom: str = "transformers", hidden: Optional[int] = None) -> None:
         self._calcul = calcul
         self.device = torch.device(device)
         self.nom = nom
+        self.hidden = hidden          # dimension du LM : un trait d'une autre dimension (tour NON projetée) est refusé
         global _CHARGEE
         _CHARGEE = nom
 
@@ -114,11 +115,11 @@ class TourVision:
             if supp and "unexpected keyword" in str(exc):
                 raise TypeError(f"tour de vision : le calcul refuse les annexes du processeur {sorted(supp)} ({exc})") from exc
             raise
-        if isinstance(out, (tuple, list)):
-            out = out[0]
-        if not isinstance(out, torch.Tensor):
-            raise TypeError(f"tour de vision : sortie {type(out).__name__}, tenseur attendu")
+        out = traits_projetes(out)
         out = out.reshape(-1, out.shape[-1]).to(torch.bfloat16)
+        if self.hidden is not None and out.shape[-1] != self.hidden:
+            raise ValueError(f"tour de vision : traits de dimension {out.shape[-1]}, le LM attend {self.hidden} "
+                             "(sortie de la tour non projetée : embed_vision / merger absent du calcul)")
         if n_attendu is not None and out.shape[0] != n_attendu:
             raise ValueError(f"tour de vision : {out.shape[0]} traits pour une plage de "
                              f"{n_attendu} jetons image")
@@ -163,6 +164,7 @@ class TourVision:
                 if hasattr(racine, p.split(".")[1])]
         for sm in sous:
             sm.to_empty(device=device)
+            rematerialiser_tampons(sm, device)
         etat = {}
         for n in noms:
             cle = n[len("model."):]
@@ -176,14 +178,81 @@ class TourVision:
             sm.eval()
 
         def calcul(pv: Any, **supplement: Any) -> torch.Tensor:
-            pv = pv.to(device=device, dtype=torch.bfloat16)
-            if pv.ndim == 3:
-                pv = pv.unsqueeze(0)
+            pv = forme_pour_la_tour(pv.to(device=device, dtype=torch.bfloat16))
             # les annexes du processeur (image_position_ids Gemma 4, image_grid_thw Qwen3-VL) vont à
             # get_image_features telles quelles : c'est le modèle qui sait ce qu'il lui faut
             return modele.get_image_features(pixel_values=pv, **supplement)
 
-        return cls(calcul, device, nom=f"transformers {transformers.__version__}")
+        tcfg = getattr(cfg, "text_config", None) or cfg
+        return cls(calcul, device, nom=f"transformers {transformers.__version__}",
+                   hidden=int(getattr(tcfg, "hidden_size", 0)) or None)
+
+
+def rematerialiser_tampons(module: torch.nn.Module, device: torch.device) -> list[str]:
+    """Un module construit sur « meta » puis ``to_empty`` garde ses tampons NON persistants (absents du
+    state_dict : ``inv_freq`` du RoPE de la tour Gemma 4) en mémoire NON initialisée — la tour tourne et
+    rend des traits faux en silence (cos 0,13-0,53 contre la référence, 20/09 14 h 48). Chaque sous-module
+    qui en possède est reconstruit sur ``device`` par son propre constructeur (``type(mod)(config,
+    device=)`` — la convention des modules de position de transformers) et remplacé chez son parent ;
+    un module qu'on ne sait pas reconstruire est un refus nommé, jamais un tampon aléatoire. Rend les
+    noms des modules reconstruits."""
+    refaits = []
+    for nom, mod in list(module.named_modules()):
+        persistants = set(mod.state_dict(keep_vars=True).keys())
+        propres = [n for n, _ in mod.named_buffers(recurse=False) if n not in persistants]
+        if not propres:
+            continue
+        cfg = getattr(mod, "config", None)
+        neuf = None
+        for essai in ((lambda: type(mod)(cfg, device=device)), (lambda: type(mod)(cfg)), (lambda: type(mod)(config=cfg))):
+            try:
+                neuf = essai()
+                break
+            except TypeError:
+                continue
+            except Exception as exc:                        # noqa: BLE001
+                raise RuntimeError(f"tour de vision : tampons non persistants {propres} de {nom or '<racine>'} "
+                                   f"({type(mod).__name__}) non reconstruits ({type(exc).__name__}: {exc})") from exc
+        if neuf is None:
+            raise RuntimeError(f"tour de vision : tampons non persistants {propres} de {nom or '<racine>'} "
+                               f"({type(mod).__name__}) : constructeur inconnu, tour refusée")
+        neuf = neuf.to(device)
+        if nom == "":
+            raise RuntimeError("tour de vision : le module racine porte des tampons non persistants, non reconstruisible")
+        parent_nom, _, feuille = nom.rpartition(".")
+        parent = module.get_submodule(parent_nom) if parent_nom else module
+        setattr(parent, feuille, neuf)
+        refaits.append(nom)
+    return refaits
+
+
+def traits_projetes(out: Any) -> torch.Tensor:
+    """Ce qui ENTRE dans le LM, quelle que soit la forme de sortie de la tour : Gemma 4
+    ``get_image_features`` rend un ``BaseModelOutputWithPooling`` dont ``pooler_output`` = tuple par
+    image des traits PROJETÉS par ``embed_vision`` ([n, 5376]) et ``last_hidden_state`` = la tour brute
+    ([1, patches, 1152], jamais servie au LM — références de poste2, references-tour.py) ; un tuple/liste
+    (Qwen3-VL, transformers ≤ 4) = premier élément ; un tenseur = tel quel."""
+    po = getattr(out, "pooler_output", None)
+    if po is not None:
+        return torch.cat([t.reshape(-1, t.shape[-1]) for t in po], 0) if isinstance(po, (tuple, list)) else po
+    if isinstance(out, (tuple, list)):
+        out = out[0]
+    lhs = getattr(out, "last_hidden_state", None)
+    if lhs is not None and not isinstance(out, torch.Tensor):
+        return lhs
+    if not isinstance(out, torch.Tensor):
+        raise TypeError(f"tour de vision : sortie {type(out).__name__}, tenseur attendu")
+    return out
+
+
+def forme_pour_la_tour(pv: torch.Tensor) -> torch.Tensor:
+    """Le fragment garde la dimension image du processeur (``pv[i:i+1]``) : Gemma 4 rend des PATCHES
+    déjà lotis ``[images, patches, dim]`` = [1, 2520, 768] — un unsqueeze « si 3-D » en faisait une image
+    4-D fausse (« size of tensor a (16) must match … (2520) », poste2 14 h 55, 3e essai de (c)). Seule une
+    image CHW NUE ``[3, H, W]`` reçoit sa dimension image ; aucune autre heuristique de forme."""
+    if pv.ndim == 3 and pv.shape[0] == 3 and pv.shape[1] > 3 and pv.shape[2] > 3:
+        return pv.unsqueeze(0)
+    return pv
 
 
 def regime_texte() -> str:
