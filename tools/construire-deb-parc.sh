@@ -23,7 +23,7 @@ for d in parc/share/desktop/*.desktop; do install -m 644 "$d" "$PKG/usr/share/ap
 install -m 644 parc/GUIDE.md "$PKG/usr/share/doc/acvram-parc/README.md" 2>/dev/null || true
 sed "s/@VERSION@/$VERSION/" parc/DEBIAN/control > "$PKG/DEBIAN/control"
 find "$PKG" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
-MOTIFS='/mnt/|/opt/ia|/home/[a-z]+|anticitoyen(lm|partage|u)|linuxbrew'
+MOTIFS='/mnt/|/opt/ia|/home/[a-z]+|/media/'   # chemins seulement : le nom d'auteur n'en est pas un (poste7 20/09)
 if trouve=$(grep -rnE "$MOTIFS" "$PKG/usr" 2>/dev/null); then
     echo "REFUS : chemin de machine dans le paquet :" >&2; echo "$trouve" | sed "s|$PKG||" | head -20 >&2; exit 1
 fi
