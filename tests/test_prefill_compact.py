@@ -290,6 +290,23 @@ def test_aligner_blocs_tries_egale_aligner_blocs(bloc, vides):
     assert not (torch.equal(s3[:total], s[:total]) and torch.equal(e3[: total // bloc], e[: total // bloc]))
 
 
+def test_a_sec_le_compte_d_usage_n_est_jamais_differe(monkeypatch):
+    """Sans carte le chemin groupé n'existe pas : sous PREFILL_COMPACT=1 le compte
+    d'usage reste celui de `_compter_routage`, égal au témoin, sans drapeau laissé."""
+    from test_marlin_prefill_p1 import _bloc_moe_jouet
+    bloc = _bloc_moe_jouet(4, 64, 32, 2, dev="cpu")
+    torch.manual_seed(1)
+    x = (torch.randn(40, 64) * 0.5).to(torch.bfloat16)
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 0)
+    ref = bloc(x)
+    usage = bloc._usage_routage.clone()
+    bloc._usage_routage.zero_()
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 1)
+    y = bloc(x)
+    assert torch.equal(y, ref) and torch.equal(bloc._usage_routage, usage) and int(usage.sum()) == 80
+    assert "_compte_en_attente" not in bloc.__dict__
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise (noyaux Marlin)")
 def test_prefill_moe_marlin_compact_au_bit_avec_le_temoin(monkeypatch):
     """Sur carte : `_forward_prefill_grouped` (marlin) sous PREFILL_COMPACT=1
@@ -321,6 +338,17 @@ def test_prefill_moe_marlin_compact_au_bit_avec_le_temoin(monkeypatch):
     y = bloc._forward_prefill_grouped(x, topw, topi32)
     attendre_chemin(bloc, "marlin", avant=n0 + 1)
     assert torch.equal(y, ref)
+    # par `forward` (routage réel, compte d'usage différé sous « permut ») : mêmes
+    # octets et le même compteur d'usage que le témoin
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 0)
+    bloc._usage_routage = None
+    ref_f = bloc(x)
+    usage_a = bloc._usage_routage.clone()
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 1)
+    bloc._usage_routage.zero_()
+    y_f = bloc(x)
+    assert torch.equal(y_f, ref_f) and torch.equal(bloc._usage_routage, usage_a)
+    assert int(usage_a.sum()) == T * top_k and "_compte_en_attente" not in bloc.__dict__
 
 
 def test_une_valeur_hors_domaine_est_refusee():

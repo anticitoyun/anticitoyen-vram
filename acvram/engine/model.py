@@ -1382,6 +1382,8 @@ class MoEBlock(nn.Module):
             ordre = torch.argsort(flat_e, stable=True)
             e_sorted = flat_e[ordre]
             cnt = _comptes_tries(e_sorted, E)
+            if self.__dict__.pop("_compte_en_attente", False):
+                self._usage_routage.add_(cnt)          # = scatter_add des uns de `_compter_routage`
             xs = x[torch.div(ordre, k, rounding_mode="floor")].to(torch.bfloat16).contiguous()
         else:
             flat_e = topi.reshape(-1).to(torch.int64)
@@ -2091,7 +2093,18 @@ class MoEBlock(nn.Module):
         # Ici, pas dans _route : `_route` est surchargée (MoEBlockGemma) sans
         # appeler super(), alors que `forward` est le seul point que tous les
         # chemins de routage traversent une fois topi connu.
-        self._compter_routage(topi)
+        # C15-prefill (« permut ») : au préfill groupé le compte est fait par
+        # `_forward_prefill_grouped` depuis les comptes par expert qu'il calcule
+        # déjà (un `add_` au lieu de cinq petits noyaux : copie int64, ≥ 0, to,
+        # clamp, scatter_add) — les mêmes entiers, aucun -1 sans `valid`. Si ce
+        # chemin décline (None), le compte est fait ici après coup.
+        compte_differe = (kernels.prefill_compact("permut") and valid is None and x.is_cuda
+                          and self._stack_state == "oui" and t > _MOE_GROUPED_MAX
+                          and self._usage_routage is not None)
+        if compte_differe:
+            self.__dict__["_compte_en_attente"] = True
+        else:
+            self._compter_routage(topi)
 
         # Chemin groupé : trois lancements pour toute la couche, quel que soit
         # le nombre d'experts touchés. La boucle par expert reste le chemin des
@@ -2119,6 +2132,8 @@ class MoEBlock(nn.Module):
                     if self.shared is not None:
                         y = y + self._shared_out(x)
                     return y
+        if self.__dict__.pop("_compte_en_attente", False):
+            self._compter_routage(topi)                # le chemin groupé a décliné
 
         if t == 1 and not os.environ.get("ACVRAM_MOE_DECODE_MASQUES"):
             # Décodage, un jeton : les masques par expert (nonzero, index)
