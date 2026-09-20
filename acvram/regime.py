@@ -186,6 +186,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MLA_PREP_NOYAU", "1", ("acvram.engine.mla", "_MLA_PREP_NOYAU"), "0"),
     Variable("MLA_ECRIT_TORCH", "", None, "1",
              "sonde C15 niveau 2 (diagnostic) : 1 = à b=1 sous MLA_GLUE=2, l'écriture du latent passe par _ecrit_ligne (torch) au lieu de mla_ecrit_latent — isole ce noyau sous rejeu de graphe"),
+    Variable("MLA_QABS_DEUX_MOITIES", "0", ("acvram.engine.mla", "_MLA_QABS_DEUX_MOITIES"), "0",
+             "sonde (β) niveau 2 (diagnostic) : 1 = le chemin =1 calcule q_abs en deux moitiés fp32 puis arrondit (autre ordre de somme, ≤ 1 ulp, sans noyau) — PPL 8 192 + 512 : +1-3 % → le modèle est instable à la marge ; 0 = témoin"),
     Variable("MLA_PREP_TEMOIN", "0", ("acvram.engine.mla", "_MLA_PREP_TEMOIN"), "0",
              "sonde C15 niveau 2 (diagnostic, scratchpad/c15-temoin-20-09) : 1 = clones capturés des entrées/sorties de mla_prep_batch et de q_eff avant l'attention, lus après rejeu par temoin.py ; 0 = témoin"),
     Variable("MLA_GLUE", "1", ("acvram.engine.mla", "_MLA_GLUE"), "0",
