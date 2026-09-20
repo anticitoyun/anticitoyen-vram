@@ -1,0 +1,19 @@
+# poste7 — § 3b prise 1 : (i) le lanceur des menus sert l'arbre de dev ; (ii) `--max-model-len` accepté sans être tenu (20/09, 18 h 58)
+
+Source : message chef 18 h 5x (poste2 § 3b prise 1, alias 1-8) ; code lu sur main 0e058e97.
+
+## (i) Décision : le lanceur sert le PAQUET par défaut, l'arbre en opt-in nommé, la ligne de régime dit lequel
+* Fait lu : `outils/acvram-serveur:53` `source "$PROJET/.venv/bin/activate"` ; `git diff --stat 59533b29..0e058e97 -- acvram/ kernels/` = runner.py +20/−1, vision.py +8/−2, convert.py +3 → « même code aujourd'hui » est **FAUX** : la GUI sert 0.6.33 + trois correctifs Qwen3-VL que les bras du .deb ne couvrent pas (non numériques sur les alias servis, mais non certifiés).
+* Règle (§ 4 régime porté par le nom, § 3 un .deb se prouve sur l'arbre livré) : l'utilisateur lance ce qui a été certifié. Défaut = venv du paquet (`~/.local/share/acvram`, `/usr/share/acvram`) ; arbre = opt-in explicite `ACVRAM_ARBRE=<chemin>` (entrée de menu « arbre de dev », jamais cochée par défaut) ; paquet absent sans opt-in → refus nommé, jamais un repli silencieux sur l'arbre (trois états : paquet / arbre / absent).
+* Ligne de régime : `source=paquet(0.6.33)` ou `source=arbre(main@0e058e97,propre|sale)` (`git status --porcelain` vide ou non) ; citée dans l'en-tête de toute cellule menus/S2.
+* Test cassant à sec (poste9, § 1a/1b, ≤ 1 h) : sans opt-in → `acvram.__file__` sous le chemin du paquet ; avec `ACVRAM_ARBRE` → sous l'arbre ET la ligne dit `arbre(...)` ; paquet absent → rc ≠ 0 nommé ; S6 inchangé. § 1b (préchargement réel) se rejoue ensuite sur le paquet.
+
+## (ii) Nom du défaut : MOTEUR d'abord, colonne ensuite — deux défauts, deux classes
+* **Moteur (défaut, poste1)** : `serve --max-model-len 32768` accepté, non tenu → 500 à ctx − 64 (CUDA OOM 384 Mio pour 354 libres, 30,99 Gio en usage, Coder i8c). Même geste que § 6 (`load_model(max_model_len)` : KV sous-dimensionné sans erreur) : le plan réserve le KV, pas la crête d'activations du prefill à la longueur maximale. Remède impossible à sauter : **chauffe à `max_model_len` au chargement** (une séquence, prefill par morceaux, cache de préfixe non gardé, sous le verrou du chargement) → tenu : `ctx_tenu=<N>` sur la ligne de régime ; OOM → refus nommé au chargement `ContexteNonTenu(max_model_len, N tenu)`, N par dichotomie ≤ 5 pas, jamais un 500 à la requête. Coût : ≤ 1,5 s Coder (32 768 / 22 707 j/s), ≤ 4,4 s GLM, par chargement ; opt-out nommé `ACVRAM_CHAUFFE_CTX=0` pour les bancs qui posent leur plan, jamais pour `ACVRAM_TYPE=service`. Test à sec : OOM simulé → refus nommé ; preuve carte = S2-contexte rejoué : **0 × 500 sur 16 alias, chaque alias tenu à ctx − 64 ou refusé nommé au chargement, `ctx_tenu` publié**. Prédit : Coder i8c tient < 32 768 à 30,99 Gio ; le N exact se mesure, ne se calcule pas.
+* **Colonne (inventaire, poste9 § 3a)** : 32 768 sur Coder i8c = défaut de classe (154/160) → RÉDUIT à `ctx_tenu` lu du moteur, origine « mesurée » jamais « plan » (MECANISMES, origine d'une valeur) ; la colonne porte son origine (`32768*` estimé / `N` tenu le 20/09). Tant que le moteur ne rend pas `ctx_tenu`, le RÉDUIT de § 3a vient du plan à sec et se marque « plan » ; S2-contexte le confirme alias par alias.
+
+## Ordre
+* **poste2** : finir les 16 alias tels quels — le 500 est un résultat : `ctx−64 → 500 OOM (Mio demandés / libres)` par alias dans le verdict ; puis § 1b.
+* **poste1** (après la porte de famille P3 (1)) : chauffe au chargement + refus nommé + `ctx_tenu` sur la ligne de régime, ≤ 1 h à sec, test cassant ; pointeur.
+* **poste9** : (i) lanceur → paquet par défaut, opt-in `ACVRAM_ARBRE`, `source=` sur la ligne ; § 3a marque « plan » jusqu'à `ctx_tenu`.
+* **poste2** ensuite : S2-contexte rejoué sur le correctif (16 alias ≈ 15 min), scellé ci-dessus ; **chef** : ETAT, et 0.6.34 porte (i) et (ii).
