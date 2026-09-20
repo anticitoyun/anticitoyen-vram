@@ -466,3 +466,13 @@ def test_la_ligne_du_moteur_porte_vision_et_sans_tour_une_image_est_refusee(conv
     engine.step()
     out = capsys.readouterr().out
     assert "[engine] tour : [1,4) (3, " in out and "sha=sha-abcd" in out
+
+
+def test_les_prefixes_de_la_tour_couvrent_ceux_de_la_conversion():
+    """20/09 17:48 (Qwen3-VL-2B servi dans un trou) : la conversion gardait model.visual.* (VISION_PREFIXES) mais le
+    moteur (PREFIXES_TOUR) ne le connaissait pas → « tour déclarée mais aucun tenseur … dans le manifeste ». Tout
+    préfixe que la conversion garde, le moteur sait le charger — les deux listes ne divergent plus en silence."""
+    from acvram.engine.vision import PREFIXES_TOUR
+    from acvram.quant.convert import VISION_PREFIXES
+    manquent = sorted(set(VISION_PREFIXES) - set(PREFIXES_TOUR))
+    assert not manquent, f"préfixes gardés par la conversion, inconnus du moteur : {manquent}"
