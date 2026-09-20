@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 import sys
 
 MODES = ("2700", "2100", "off")
@@ -501,3 +502,84 @@ def etat_eco(relire: bool = False) -> dict:
     if h is None:
         return {"demande": mode_demande(), "effectif": None, "etat": "non posé", "conforme": False}
     return {"demande": h.mode, "effectif": h.effectif, "etat": h.etat, "conforme": h.conforme}
+
+
+# ---------------------------------------------------------------------------
+# Régime SOUS LA CHARGE MESURÉE (poste7-niveau2-clos-retrait-regles-20-09 § 2) : sous
+# -lgc 2700 le b=12 Coder tourne à 387-401 W, médiane 2 550 MHz, 95 % des échantillons
+# sous 2 650, seule raison `sw_power_cap` — le plafond de puissance mord sous le plafond
+# d'horloge. `eco=2700(2685)` lit une horloge à vide : la ligne de régime d'une mesure
+# porte la médiane d'horloge PENDANT la fenêtre et la raison de bridage, relevées par
+# l'instrument, pas au chargement.
+CHAMPS_CHARGE = ("clocks.sm,power.draw,clocks_event_reasons.sw_power_cap,"
+                 "clocks_event_reasons.hw_slowdown,clocks_event_reasons.sw_thermal_slowdown,"
+                 "clocks_event_reasons.hw_thermal_slowdown")
+RAISONS = ("sw_power_cap", "hw_slowdown", "sw_thermal_slowdown", "hw_thermal_slowdown")
+
+
+def _lire_charge(index: int = 0) -> list[str] | None:
+    try:
+        out = subprocess.run(["nvidia-smi", "-i", str(index), f"--query-gpu={CHAMPS_CHARGE}",
+                              "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    champs = [c.strip() for c in out.strip().split(",")]
+    return champs if len(champs) == 6 else None
+
+
+class SondeCharge:
+    """Échantillonne horloge SM, puissance et raisons de bridage pendant une
+    fenêtre de mesure (fil, une lecture par `pas` s). ``bilan()`` → médiane
+    d'horloge, puissance médiane, raison dominante et sa part ; ``etiquette``
+    → ``eco=2700(plafond 400 W : méd. 2 550 MHz)`` — le régime réellement
+    tenu, à mettre sur la ligne de régime de la cellule. `lire` : lecteur
+    simulé (tests)."""
+
+    def __init__(self, index: int = 0, pas: float = 0.5, lire=None):
+        self.index, self.pas, self._lire = index, pas, lire or (lambda: _lire_charge(index))
+        self.releves: list[list[str]] = []
+        self._stop = threading.Event()
+        self._fil: threading.Thread | None = None
+
+    def _boucle(self) -> None:
+        while not self._stop.is_set():
+            r = self._lire()
+            if r is not None:
+                self.releves.append(r)
+            self._stop.wait(self.pas)
+
+    def __enter__(self):
+        self._fil = threading.Thread(target=self._boucle, daemon=True)
+        self._fil.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        if self._fil is not None:
+            self._fil.join(timeout=self.pas + 5)
+
+    def bilan(self) -> dict | None:
+        rel = [r for r in self.releves if r[0].isdigit()]
+        if not rel:
+            return None
+        mhz = sorted(int(r[0]) for r in rel)
+        watts = sorted(float(r[1]) for r in rel if r[1].replace(".", "", 1).isdigit())
+        parts = {nom: sum(1 for r in rel if r[2 + i] == "Active") / len(rel) for i, nom in enumerate(RAISONS)}
+        raison, part = max(parts.items(), key=lambda kv: kv[1])
+        return {"n": len(rel), "sm_mediane": mhz[len(mhz) // 2], "sm_p95": mhz[min(len(mhz) - 1, int(0.95 * len(mhz)))],
+                "watts_mediane": watts[len(watts) // 2] if watts else None,
+                "raison": raison if part > 0 else "aucune", "part": part}
+
+    def etiquette(self, mode: str | None) -> str:
+        """``eco=<mode>(<raison> : méd. <MHz> MHz)`` ; sans relevé ``eco=<mode>(sous charge : ?)``."""
+        b = self.bilan()
+        tete = f"eco={mode or 'off'}"
+        if b is None:
+            return f"{tete}(sous charge : ?)"
+        if b["raison"] == "sw_power_cap":
+            raison = f"plafond {b['watts_mediane']:.0f} W" if b["watts_mediane"] else "plafond de puissance"
+        elif b["raison"] == "aucune":
+            raison = "sans bridage"
+        else:
+            raison = b["raison"]
+        return f"{tete}({raison} : méd. {b['sm_mediane']} MHz, {int(b['part'] * 100)} % des {b['n']} relevés)"
