@@ -60,6 +60,11 @@ class Sequence:
     # leurs traits (debut, fin, embeds bf16 [fin − debut, hidden]).
     images: list = field(default_factory=list)
     image_embeds: Optional[list] = None
+    # M-RoPE (Qwen3-VL, engine/mrope) : positions [3, len(prompt_ids)] de
+    # l'invite et le décalage entier du décodage (rope_deltas de transformers,
+    # ≤ 0). None / 0 : RoPE 1-D — texte seul, ou modèle sans mrope_section.
+    mrope_positions: Optional[torch.Tensor] = None
+    rope_delta: int = 0
 
     @property
     def prefilled(self) -> bool:
@@ -442,6 +447,10 @@ class Engine:
         # `original_max_position_embeddings` reste un REFUS NOMMÉ plutôt qu'un
         # no-op silencieux (67aa280) ; sous le plafond la formule vaut 1.
         rs = getattr(self.spec, "rope_scaling", None) or {}
+        # M-RoPE : section (t, h, w) et fusion spatiale de la tour, lues une fois ;
+        # None = les positions restent 1-D pour toute séquence
+        self._mrope_section = getattr(self.spec, "mrope_section", None)
+        self._mrope_merge = int(getattr(self.spec, "spatial_merge_size", 0) or 0)
         self._llama4_scaling_beta = float(rs.get("llama_4_scaling_beta") or 0.0)
         self._llama4_scaling_plafond = int(rs.get("original_max_position_embeddings") or 0)
         from .model import Attention as _Attn
@@ -823,6 +832,15 @@ class Engine:
                 # la requête, nommément.
                 if seq.images and seq.image_embeds is None:
                     try:
+                        # M-RoPE (engine/mrope) : positions [3, T] et delta de
+                        # l'invite depuis (debut, fin, supplement["image_grid_thw"])
+                        # de chaque image — avant la tour, elles n'en dépendent pas
+                        if self._mrope_section is not None:
+                            from .mrope import grille_de, positions_mrope
+                            seq.mrope_positions, seq.rope_delta = positions_mrope(
+                                len(seq.prompt_ids),
+                                [(im.debut, im.fin, grille_de(im)) for im in seq.images],
+                                self._mrope_merge)
                         seq.image_embeds = [
                             (im.debut, im.fin,
                              self.vision.traits(im.pixel_values, im.fin - im.debut,
@@ -1125,7 +1143,7 @@ class Engine:
             for j, tok in enumerate(ids):
                 pos = start + j
                 tokens.append(tok)
-                positions.append(pos)
+                positions.append(pos if prefill else self._pos_decodage(seq, pos))
                 slots.append(seq.blocks[pos // BLOCK_SIZE] * BLOCK_SIZE
                              + pos % BLOCK_SIZE)
             query_lens.append(len(ids))
@@ -1146,7 +1164,35 @@ class Engine:
             slot_mapping=torch.tensor(slots, dtype=torch.long),
             is_prefill=prefill,
             seq_ids=[s.id for s in seqs], gdn_store=self.gdn_states,
-            images=images)
+            images=images, **self._mrope_du_lot(seqs, prefill, query_lens, seq_lens))
+
+    @staticmethod
+    def _mrope_du_lot(seqs: list[Sequence], prefill: bool, query_lens: list[int],
+                      seq_lens: list[int]) -> dict:
+        """Champs M-RoPE du lot : {} tant qu'aucune séquence n'a de positions
+        3-D (texte, modèle sans mrope : le lot est celui d'avant, au bit).
+        Prefill : ``positions_3d`` [3, t] — la tranche [début, fin) de chaque
+        séquence à positions 3-D (morceau, reprise après le cache de préfixe),
+        ses positions 1-D ×3 pour une séquence texte du même lot. Décodage :
+        rien — ``positions`` porte déjà le delta (voir ``_pos_decodage``)."""
+        if not prefill or not any(s.mrope_positions is not None for s in seqs):
+            return {}
+        morceaux = []
+        for s, ql, sl in zip(seqs, query_lens, seq_lens):
+            debut = sl - ql
+            if s.mrope_positions is not None:
+                morceaux.append(s.mrope_positions[:, debut:sl])
+            else:
+                morceaux.append(torch.arange(debut, sl, dtype=torch.long).view(1, -1).expand(3, -1))
+        return {"positions_3d": torch.cat(morceaux, dim=1).contiguous(),
+                "rope_delta": [s.rope_delta for s in seqs]}
+
+    @staticmethod
+    def _pos_decodage(seq: Sequence, pos: int) -> int:
+        """La position que le RoPE lit au décodage : 1-D + ``rope_delta`` de la
+        séquence (les trois axes M-RoPE valent max + 1 après l'image, un seul
+        entier par créneau) ; 0 pour le texte, l'ancien chemin au bit."""
+        return pos + seq.rope_delta
 
     @staticmethod
     def _eviter_coupe_image(seq: Sequence, fin: Optional[int]) -> Optional[int]:
@@ -1413,7 +1459,7 @@ class Engine:
         block_tables: list[torch.Tensor] = []
         for seq in seqs:
             pos = seq.length
-            positions.append(pos)
+            positions.append(self._pos_decodage(seq, pos))
             slots.append(seq.blocks[pos // BLOCK_SIZE] * BLOCK_SIZE
                          + pos % BLOCK_SIZE)
             query_lens.append(1)
@@ -1641,7 +1687,7 @@ class Engine:
             for j, tok in enumerate(block):
                 pos = start + j
                 tokens.append(tok)
-                positions.append(pos)
+                positions.append(self._pos_decodage(seq, pos))
                 slots.append(seq.blocks[pos // BLOCK_SIZE] * BLOCK_SIZE
                              + pos % BLOCK_SIZE)
             query_lens.append(len(block))

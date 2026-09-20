@@ -363,15 +363,27 @@ def _horloge() -> Optional[str]:
 # Modèle chargé : « vision » de son acvram_manifest.json ("oui" | "non"), ou None
 # tant qu'aucun chargeur ne l'a déclaré (ligne construite à sec, sans modèle).
 _VISION_CHARGEE: Optional[str] = None
+# M-RoPE (Qwen3-VL) : True quand le modèle chargé porte `mrope_section` dans
+# son rope_scaling (manifeste `model`) — le mot `mrope=on` sur la ligne ; sinon rien.
+_MROPE_CHARGE: bool = False
 
 
 def declarer_modele_charge(manifest: Optional[dict]) -> None:
     """Le chargeur déclare le manifeste du modèle qu'il vient de charger ; la
     ligne de régime en tire `vision=bf16(eager)` (manifeste `vision: oui`,
-    contrat poste7-go-multimodal-organisation-20-09 § 2) ou `vision=off`.
-    None : plus de modèle chargé, le mot disparaît."""
-    global _VISION_CHARGEE
+    contrat poste7-go-multimodal-organisation-20-09 § 2) ou `vision=off`, et
+    `mrope=on` quand le modèle porte des sections M-RoPE.
+    None : plus de modèle chargé, les mots disparaissent."""
+    global _VISION_CHARGEE, _MROPE_CHARGE
     _VISION_CHARGEE = None if manifest is None else str(manifest.get("vision", "non"))
+    rs = ((manifest or {}).get("model") or {}).get("rope_scaling") or {}
+    _MROPE_CHARGE = bool(isinstance(rs, dict) and rs.get("mrope_section"))
+
+
+def mrope_texte() -> Optional[str]:
+    """`mrope=on` quand le modèle chargé a des positions à trois axes (engine/mrope),
+    None sinon — un modèle texte ou sans modèle n'ajoute aucun mot."""
+    return "mrope=on" if _MROPE_CHARGE else None
 
 
 def vision_texte() -> Optional[str]:
@@ -488,6 +500,8 @@ def regime_ligne() -> str:
         parts.append("vision=declaree(tour absente)")     # manifeste oui, tour non chargée : jamais « bf16(eager) » sans tour
     elif vision_texte():
         parts.append("vision=off")
+    if mrope_texte():
+        parts.append(mrope_texte())                       # M-RoPE Qwen3-VL (engine/mrope), contrat poste7-go-qwen3vl § 2
     # C5-b : le format des clés est nommé dès qu'il n'est plus celui d'aujourd'hui
     # (int8 par jeton) — la variable dit ce qui est DEMANDÉ, cette étiquette ce
     # que le cache int8 fait de ses clés.

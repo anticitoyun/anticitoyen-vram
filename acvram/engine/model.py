@@ -99,6 +99,17 @@ class ForwardBatch:
     # positions absolues de l'invite ; None pour tout le lot = chemin texte
     # inchangé au bit. Rempli au prefill seulement (jamais au décodage).
     images: Optional[list] = None
+    # M-RoPE (Qwen3-VL, engine/mrope, contrat poste7-go-qwen3vl-parallele-20-09 § 2) :
+    # positions à trois axes [3, total_tokens] (t, h, w) d'un PREFILL sur un
+    # modèle à mrope_section — None = RoPE 1-D sur ``positions`` (texte, modèle
+    # sans mrope : rien ne change). Le décodage reste 1-D : ``positions`` y porte
+    # déjà « position 1-D + rope_delta » de la séquence (runner._build_batch),
+    # ce que ``positions_on`` rend tel quel et que les graphes rejouent sans
+    # rien savoir.
+    positions_3d: Optional[torch.Tensor] = None
+    # ``rope_delta`` par séquence (= rope_deltas de transformers, ≤ 0 ; 0 pour
+    # le texte) — informatif : déjà appliqué dans ``positions`` au décodage.
+    rope_delta: Optional[list] = None
 
     def images_de(self, i: int) -> list:
         """Plages (debut, fin) de la séquence i, [] sans image."""
@@ -120,6 +131,17 @@ class ForwardBatch:
         t = cache.get(device)
         if t is None:
             t = cache[device] = self.positions.to(device, non_blocking=True)
+        return t
+
+    def positions_rope_on(self, device: torch.device) -> torch.Tensor:
+        """Les positions que le RoPE lit : ``positions_3d`` [3, t] au prefill
+        M-RoPE, sinon ``positions_on`` (1-D, delta compris au décodage)."""
+        if self.positions_3d is None:
+            return self.positions_on(device)
+        cache = self.__dict__.setdefault("_pos3_cache", {})
+        t = cache.get(device)
+        if t is None:
+            t = cache[device] = self.positions_3d.to(device, non_blocking=True)
         return t
 
     def fixed_decode_views(self, device: torch.device
@@ -379,7 +401,11 @@ class Attention(nn.Module):
         if self.rope is not None:
             pos = batch.positions_on(x.device)
             mx = max(batch.seq_lens)
-            r = rope_fusee(q, k, self.rope, pos, mx, self.q_norm, self.k_norm)
+            # M-RoPE : positions [3, t] → tables par axe (layers.forward_mrope),
+            # hors du noyau fusionné qui n'indexe qu'une position par jeton.
+            pos_rope = batch.positions_rope_on(x.device)
+            if pos_rope is pos:
+                r = rope_fusee(q, k, self.rope, pos, mx, self.q_norm, self.k_norm)
         if r is not None:
             q, k = r                       # normes par tête comprises
         else:
@@ -388,7 +414,7 @@ class Attention(nn.Module):
             if self.k_norm is not None:
                 k = self.k_norm(k)
             if self.rope is not None:
-                cos, sin = self.rope(pos, x.device, x.dtype, max_pos=mx)
+                cos, sin = self.rope(pos_rope, x.device, x.dtype, max_pos=mx)
                 q, k = apply_rope(q, k, cos, sin)
         if self.llama4 is not None:
             q = self._echelle_llama4(q, pos)
