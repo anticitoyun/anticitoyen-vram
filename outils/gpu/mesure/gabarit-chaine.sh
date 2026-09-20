@@ -19,6 +19,13 @@
 #   chaine_fin
 set -u
 [ -n "${ACVRAM_CARTE_TENUE:-}" ] && { echo "ECHEC : chaîne lancée sous un verrou tenu (chaque étape prend carte.sh)"; exit 3; }
+# Racine du parc (M3, poste2 11:59) : les chaînes effacent ACVRAM_* avant de sourcer ce gabarit, et les
+# instruments (juge-2a.py, ppl-decode-kv.py…) relisent ACVRAM_MODELES dont le repli 980PRO n'existe plus ;
+# la racine du moment vient de outils/racine_modeles.py (variable → ~/.config/acvram/modeles → littéral).
+if [ -z "${ACVRAM_MODELES:-}" ]; then
+  ACVRAM_MODELES=$("$(dirname "${BASH_SOURCE[0]}")/../../racine_modeles.py") || { echo "ECHEC : racine_modeles.py"; exit 3; }
+fi
+export ACVRAM_MODELES
 _CH_NOM=; _CH_O=; _CH_ETAT=tenu; _CH_JOURNAL=
 chaine_debut() {   # chaine_debut <nom> <dossier de sortie>
   _CH_NOM=$1; _CH_O=$2; mkdir -p "$_CH_O"; _CH_JOURNAL=$_CH_O/chaine.tsv
