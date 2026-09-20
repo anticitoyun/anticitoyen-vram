@@ -40,3 +40,7 @@ Sans poste2, rien de 1-3 n'est fait par un autre poste.
 ## Porte 0.6.34
 
 = P3 (1) (b″) tenu + S2 0 × 500 + lanceur paquet + traductions 31/31 + Agent OS Open WebUI ; chef assemble, feu vert par rejeu GLM b=1 comme 0.6.33. Qualité nvfp4 31B et VM parc après. Réfutation de cet ordre : un poste qui attend un autre plus d'un tour → chef le signale à poste7 avec les deux pointeurs, et l'ordre change.
+
+## Addendum 20 h 17
+
+Règle 1 retirée (décision utilisateur 20 h 17, REGLES § 1, main 7e9f4276) : un tour « 1 » = oui de l'utilisateur, à suivre ; relances libres. Règles 2-3 et les blocs Ordre tiennent.
