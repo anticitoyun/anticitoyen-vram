@@ -50,5 +50,9 @@
  "proposer les options": "suggest options",
  "éco d'horloge": "clock eco mode",
  "2700 (défaut)": "2700 (default)",
- "off (horloge libre)": "off (free clock)"
+ "off (horloge libre)": "off (free clock)",
+ "Serveur": "Server",
+ "Convertir": "Convert",
+ "À propos": "About",
+ "Thème": "Theme"
 }

@@ -53,3 +53,11 @@ verdict : **TENU (0,80 × le témoin)** — la prédiction de poste7 est juste :
 suite : poste7 : défaut + .deb 0.6.24 (chef) ; REGLES § 9 : « change la sortie » se juge contre le témoin ON/OFF sur les MoE ; poste1 : `equiv-b12.py` : tronquer aux jetons réels avant `torch.equal` ; ma file : vide — carte disponible pour le bilan (05:25)
 
 Rejouable : `ACVRAM_ROUTAGE_TEMOIN=1 ACVRAM_GLUE_COMPACT=0 GRAPHES=0 BRAS=A … equiv-b12.py 256 256` puis le calcul de taux (dans `journal`/addendum) sur `3dbis/routage-*.pt`.
+
+## Addendum 20/09 07:29 — sélection par rang (poste1 32412cf2, `_route_rang_kernel`, `ACVRAM_ROUTE_SELECTION=rang`) : **4,83 µs sous ncu contre ≤ 3 scellés → FAUX** (prédit 1,5-2,5 ; « ≥ 5 = spills » : 163 registres/fil, à la limite) ; micro-banc routeur A 19,35 / B (sérielle 1 warp) 19,58 / **R 19,18 µs** — aucun gain visible : le cuBLAS domine ; experts égaux B et R True ; pas de fenêtre servie (règle)
+instrument : `scratchpad/c15-niveau3-20-09/ncu-routeur.sh` 32412cf2 (micro-banc cudaEvent 200 × 5, ncu `--set full --launch-count 3` sur `_route_fusee_kernel` A/B et `_route_rang_kernel`, `_partiel_reduit`), worktree `poste2-n3`, prises `carte.sh` 07:23-07:28
+scellé (poste1, avant) : rang ≤ 3 µs (prédit 1,5-2,5 ; ≥ 5 = spills) ; si tenu, fenêtre servie b=12 avec `ROUTE_SELECTION=rang`
+mesuré : ncu sélection A **8,74 µs** (36 registres, occupation 8,1 %) ; B **7,46** (34, 2,1 %) ; **rang 4,83 µs, 163 registres/fil, occupation 8,3 %, grille 12** ; attention `_partiel_reduit` 17,34 µs (103 registres, 25,1 %) ; micro-banc A 19,35 / B 19,58 / R 19,18 µs, |Δtopw| 1,5 × 10⁻⁸
+verdict : **FAUX** — la passe par rang divise la sélection par 1,8 (8,7 → 4,8 µs) mais reste à 12 programmes et 163 registres (le tri en une passe coûte des registres, pas du parallélisme) ; sur le routeur complet (cuBLAS + sélection) le gain est de 0,2 µs sur 19 : invisible ; ≤ 3 µs demande ≥ 128 programmes (une ligne de jetons par bloc, ou experts × jetons), pas un autre tri
+durée : prise 5 min 26 s (07:23:14-07:28:40), rédaction 2 min
+suite : poste1 : sélection à ≥ 128 programmes ou rien ; défaut reste `serie` ; poste7 : rang clos ; chef : indexer ; ma file : main/d01eb2cb sur tranches-9 (18 prises, ≈ 18 min, sous la règle des 30 min)

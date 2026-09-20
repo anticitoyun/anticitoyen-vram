@@ -92,6 +92,87 @@ def dossiers_langues() -> list[str]:
             "/usr/share/acvram/langues"]
 
 
+def logo_data_uri() -> str:
+    """Le logo (packaging/logo-acvram.jpg, ou /usr/share/acvram/) en data URI :
+    la page est chargée depuis file:/// sans base, un chemin relatif ne
+    résout pas. Vide si absent (la page reste servie sans image)."""
+    import base64
+    ici = os.path.dirname(os.path.realpath(sys.argv[0]))
+    for c in (os.path.join(ici, "logo-acvram.jpg"), os.path.join(ici, "..", "share", "acvram", "logo-acvram.jpg"),
+              "/usr/share/acvram/logo-acvram.jpg"):
+        try:
+            with open(c, "rb") as fh:
+                return "data:image/jpeg;base64," + base64.b64encode(fh.read()).decode()
+        except OSError:
+            continue
+    return ""
+
+
+LOGO = logo_data_uri()
+
+# Quatre propositions de mise en page du logo (demande utilisateur, 20/09) :
+# l'utilisateur a choisi « A + B » (20/09) : bandeau en tête ET arrière-plan
+# voilé ; les autres restent dans le menu « Thème », choix mémorisé dans
+# ~/.config/acvram/theme.
+THEMES = {
+    "ab": "A + B · bandeau en tête + arrière-plan voilé (choix utilisateur 20/09)",
+    "bandeau": "A · bandeau en tête (fond uni)",
+    "fond": "B · logo en arrière-plan plein écran, voile sombre",
+    "filigrane": "C · filigrane en bas à droite",
+    "flou": "D · arrière-plan flouté, cartes translucides",
+}
+FICHIER_THEME = os.path.expanduser("~/.config/acvram/theme")
+
+
+def theme_courant() -> str:
+    try:
+        with open(FICHIER_THEME, encoding="utf-8") as fh:
+            t = fh.read().strip()
+        return t if t in THEMES else "ab"
+    except OSError:
+        return "ab"
+
+
+THEME = theme_courant()
+
+
+def css_theme() -> str:
+    """Le CSS propre au thème choisi ; sans logo, rien."""
+    if not LOGO:
+        return ""
+    u = f"url('{LOGO}')"
+    if THEME in ("fond", "ab"):
+        return (f"body{{background:linear-gradient(rgba(18,10,16,.55),rgba(18,10,16,.8)),{u} center/cover fixed no-repeat}}"
+                ".carte{background:rgba(28,16,24,.82);backdrop-filter:blur(2px)}")
+    if THEME == "filigrane":
+        return (f"body::after{{content:'';position:fixed;right:12px;bottom:12px;width:320px;height:213px;"
+                f"background:{u} center/cover no-repeat;opacity:.35;border-radius:12px;pointer-events:none;z-index:0}}"
+                ".carte{position:relative;z-index:1}")
+    if THEME == "flou":
+        return (f"body::before{{content:'';position:fixed;inset:-20px;background:{u} center/cover no-repeat;"
+                "filter:blur(10px) brightness(.55);z-index:-1}}"
+                ".carte{background:rgba(28,16,24,.86)}")
+    return ""   # bandeau : l'image est dans le corps (html_bandeau)
+
+
+def html_bandeau() -> str:
+    if not LOGO or THEME not in ("bandeau", "ab"):
+        return ""
+    return (f'<div style="margin:-28px -28px 16px;height:170px;background:url(\'{LOGO}\') center 30%/cover no-repeat;'
+            'border-bottom:1px solid var(--bord);position:relative">'
+            '<div style="position:absolute;inset:0;background:linear-gradient(rgba(18,10,16,.1),var(--fond))"></div></div>')
+
+
+def changer_theme(nom: str) -> None:
+    global THEME
+    if nom not in THEMES:
+        return
+    THEME = nom
+    os.makedirs(os.path.dirname(FICHIER_THEME), exist_ok=True)
+    with open(FICHIER_THEME, "w", encoding="utf-8") as fh:
+        fh.write(nom)
+
+
 def charger_traductions() -> dict[str, dict[str, str]]:
     """{code: {source_fr: traduction}} depuis les fichiers trouvés ; fr = source."""
     out: dict[str, dict[str, str]] = {"fr": {}}
@@ -164,6 +245,11 @@ button{cursor:pointer;background:var(--rose-nuit);border-color:var(--rose-vif)}
 button:hover{background:var(--rose-vif)}
 code{color:var(--rose-clair)}
 .ko{color:var(--alerte)}
+.onglets{display:flex;gap:6px;margin:8px 0 4px;border-bottom:1px solid var(--bord)}
+.onglets button{background:transparent;border:1px solid transparent;border-bottom:none;border-radius:10px 10px 0 0;
+color:var(--texte-2);padding:8px 14px}
+.onglets button.actif{background:var(--carte);border-color:var(--bord);color:var(--rose-clair)}
+.onglet{display:none}.onglet.actif{display:block}
 """
 
 
@@ -292,11 +378,23 @@ def options_eco() -> str:
 
 
 def etat_eco_texte() -> str:
-    """Horloge réelle de la carte servie, par `acvram eco etat` (la carte fait foi, pas la mémoire)."""
+    """Mode demandé (config.json) SANS toucher la carte : `acvram eco etat` lit
+    l'horloge sous une charge légère (0,35 s de matmuls) — interdit sous une
+    fenêtre de mesure d'un pair (verrou carte.sh). La lecture réelle n'a lieu
+    qu'après un changement explicite de mode (bouton), pas au rendu de la page."""
     try:
-        out = subprocess.run(["acvram", "eco", "etat"], capture_output=True, text=True, timeout=5).stdout
-        ligne = next((l.strip() for l in out.splitlines() if "horloge=" in l), "")
-        return ligne
+        from acvram import eco
+        return T("config : eco={m} (horloge lue après un changement de mode)", m=eco.mode_demande())
+    except Exception:
+        return ""
+
+
+def etat_eco_carte() -> str:
+    """Horloge réelle par `acvram eco etat` (charge légère) — appelée seulement
+    après une action explicite de l'utilisateur."""
+    try:
+        out = subprocess.run(["acvram", "eco", "etat"], capture_output=True, text=True, timeout=8).stdout
+        return next((l.strip() for l in out.splitlines() if "horloge=" in l), "")
     except Exception:
         return ""
 
@@ -375,8 +473,15 @@ def page_accueil(erreur: str = "") -> str:
     except Exception:
         cartes = f'<option value="">{T("nvidia-smi indisponible")}</option>'
     err = f'<p class="ko">{erreur}</p>' if erreur else ""
-    return f"""<!doctype html><html lang="{LANGUE}"{dir_html()}><head><meta charset="utf-8"><style>{CSS}</style></head><body>
+    return f"""<!doctype html><html lang="{LANGUE}"{dir_html()}><head><meta charset="utf-8"><style>{CSS}{css_theme()}</style></head><body>
+{html_bandeau()}
 <h1>acvram</h1>
+<div class="onglets">
+  <button id="ong_serveur" class="actif" onclick="onglet('serveur')">{T("Serveur")}</button>
+  <button id="ong_convertir" onclick="onglet('convertir')">{T("Convertir")}</button>
+  <button id="ong_apropos" onclick="onglet('apropos')">{T("À propos")}</button>
+</div>
+<div id="serveur" class="onglet actif">
 <p class="note">{T("Aucun serveur acvram ne répond sur les ports {ports}. Choisissez un modèle et une carte : la console s'ouvrira dès que le serveur répond.", ports=" ".join(map(str, PORTS)))}</p>
 {err}
 <div class="carte">
@@ -400,6 +505,8 @@ def page_accueil(erreur: str = "") -> str:
   <label>{T("port")} <input type="number" id="port_existant" value="{PORT_DEFAUT}" min="1" max="65535" style="width:90px"></label>
   <p><button onclick="connecter()">{T("se connecter")}</button></p>
 </div>
+</div>
+<div id="convertir" class="onglet">
 <div class="carte">
   <h2>{T("convertir un modèle")}</h2>
   <p class="note">{T("Lance <code>acvram convert</code> sur un répertoire HF (avec <code>config.json</code>) — pas de suggestion de chemin : le répertoire source doit exister.")}</p>
@@ -412,8 +519,20 @@ def page_accueil(erreur: str = "") -> str:
   <p><button onclick="proposer()">{T("proposer les options")}</button> <button onclick="convertir()">{T("convertir")}</button></p>
   <pre id="conv_proposition" class="note" style="font-size:11px;white-space:pre-wrap"></pre>
 </div>
+</div>
+<div id="apropos" class="onglet">
+<div class="carte">
+  <h2>acvram {version_acvram()}</h2>
+  {'<img src="' + LOGO + '" style="width:100%;max-width:640px;border-radius:12px;display:block;margin:8px 0">' if LOGO else ''}
+  <p class="note">{T("Serveur d'inférence pour GPU hétérogènes (NVFP4 + INT4) — le thème du logo se choisit dans le menu « Thème » de la barre.")}</p>
+</div>
+</div>
 <p class="note" style="margin-top:28px">acvram {version_acvram()} · <a href="{SOUTIEN_URL}" target="_blank" style="color:var(--rose-clair)">{T("Soutenir le projet")}</a></p>
 <script>
+function onglet(n){{
+  for(const o of document.querySelectorAll('.onglet')) o.classList.toggle('actif', o.id===n);
+  for(const b of document.querySelectorAll('.onglets button')) b.classList.toggle('actif', b.id==='ong_'+n);
+}}
 function lancer(){{
   const m=document.getElementById('modele').value, c=document.getElementById('carte').value;
   window.webkit.messageHandlers.acvram.postMessage(JSON.stringify({{
@@ -454,15 +573,15 @@ function convertir(){{
 
 
 def page_attente(modele: str) -> str:
-    return f"""<!doctype html><html lang="{LANGUE}"{dir_html()}><head><meta charset="utf-8"><style>{CSS}</style></head><body>
-<h1>acvram</h1><div class="carte"><h2>{T("chargement de")} <code>{os.path.basename(modele)}</code>…</h2>
+    return f"""<!doctype html><html lang="{LANGUE}"{dir_html()}><head><meta charset="utf-8"><style>{CSS}{css_theme()}</style></head><body>
+{html_bandeau()}<h1>acvram</h1><div class="carte"><h2>{T("chargement de")} <code>{os.path.basename(modele)}</code>…</h2>
 <p class="note" id="j">{T("le journal du serveur défile ci-dessous")}</p><pre id="log" style="font-size:11px;color:#c98fae;max-height:60vh;overflow:auto"></pre></div>
 </body></html>"""
 
 
 def page_conversion(source: str) -> str:
-    return f"""<!doctype html><html lang="{LANGUE}"{dir_html()}><head><meta charset="utf-8"><style>{CSS}</style></head><body>
-<h1>acvram</h1><div class="carte"><h2>{T("conversion de")} <code>{os.path.basename(source.rstrip("/"))}</code>…</h2>
+    return f"""<!doctype html><html lang="{LANGUE}"{dir_html()}><head><meta charset="utf-8"><style>{CSS}{css_theme()}</style></head><body>
+{html_bandeau()}<h1>acvram</h1><div class="carte"><h2>{T("conversion de")} <code>{os.path.basename(source.rstrip("/"))}</code>…</h2>
 <p class="note" id="j">{T("le journal de <code>acvram convert</code> défile ci-dessous")}</p><pre id="log" style="font-size:11px;color:#c98fae;max-height:60vh;overflow:auto"></pre></div>
 </body></html>"""
 
@@ -483,10 +602,20 @@ class Fenetre(Gtk.Window):
         barre = Gtk.HeaderBar(show_close_button=True, title="acvram")
         self.set_titlebar(barre)
         self.boutons = []
+        # Le logo remplace les boutons zoom (Ctrl +/−/0 restent au clavier).
+        chemin_logo = next((c for c in (os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])), "logo-acvram.jpg"),
+                                        "/usr/share/acvram/logo-acvram.jpg") if os.path.isfile(c)), None)
+        if chemin_logo:
+            try:
+                from gi.repository import GdkPixbuf
+                pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(chemin_logo, -1, 30, True)
+                img = Gtk.Image.new_from_pixbuf(pb)
+                img.set_tooltip_text("acvram")
+                barre.pack_start(img)
+            except Exception:
+                pass
         for ico, tip, cb in (("view-refresh", "recharger (F5)", self.recharger),
                              ("view-fullscreen", "plein écran (F11)", self.plein_ecran),
-                             ("zoom-in", "zoom + (Ctrl +)", lambda *_: self.zoom(0.1)),
-                             ("zoom-out", "zoom − (Ctrl −)", lambda *_: self.zoom(-0.1)),
                              ("process-stop", "arrêter le serveur lancé ici", self.arreter_serveur)):
             b = Gtk.Button.new_from_icon_name(ico, Gtk.IconSize.BUTTON)
             b.set_tooltip_text(T(tip))
@@ -496,6 +625,18 @@ class Fenetre(Gtk.Window):
         # Langue : menu dans la barre ; le choix est mémorisé et la page
         # d'accueil (native) est regénérée ; la console servie reste telle
         # que le serveur la rend.
+        # Thème du logo : quatre propositions, choix mémorisé (~/.config/acvram/theme).
+        self.menu_theme = Gtk.MenuButton()
+        self.menu_theme.set_tooltip_text(T("Thème"))
+        self.menu_theme.set_image(Gtk.Image.new_from_icon_name("preferences-desktop-wallpaper", Gtk.IconSize.BUTTON))
+        m = Gtk.Menu()
+        for code, libelle in THEMES.items():
+            it = Gtk.MenuItem(label=libelle + ("  ✓" if code == THEME else ""))
+            it.connect("activate", lambda _w, c=code: self.changer_theme(c))
+            m.append(it)
+        m.show_all()
+        self.menu_theme.set_popup(m)
+        barre.pack_end(self.menu_theme)
         self.menu_langue = Gtk.MenuButton()
         self.menu_langue.set_tooltip_text(T("Langue"))
         self.menu_langue.add(Gtk.Label(label=LANGUES[LANGUE]))
@@ -587,6 +728,20 @@ class Fenetre(Gtk.Window):
             self.unfullscreen(); self._fs = False
         else:
             self.fullscreen(); self._fs = True
+
+    def changer_theme(self, code: str):
+        changer_theme(code)
+        m = Gtk.Menu()
+        for c, libelle in THEMES.items():
+            it = Gtk.MenuItem(label=libelle + ("  ✓" if c == THEME else ""))
+            it.connect("activate", lambda _w, cc=c: self.changer_theme(cc))
+            m.append(it)
+        m.show_all()
+        self.menu_theme.set_popup(m)
+        # La page d'accueil est native : on la regénère (reload() rejouerait le
+        # même HTML) ; la console servie reste telle quelle.
+        if self.port is None and self.proc is None:
+            self.web.load_html(page_accueil(), "file:///")
 
     def zoom(self, d: float):
         self.web.set_zoom_level(max(0.5, min(3.0, self.web.get_zoom_level() + d)))
@@ -717,7 +872,7 @@ class Fenetre(Gtk.Window):
                     texte = T("acvram eco {mode} a échoué (code {code}) : {texte}", mode=mode, code=out.returncode, texte=texte)
             except Exception as e:
                 texte = T("acvram eco {mode} a échoué (code {code}) : {texte}", mode=mode, code="?", texte=e)
-            etat = etat_eco_texte() or texte
+            etat = etat_eco_carte() or texte
             GLib.idle_add(self.web.run_javascript,
                           f"(function(){{var e=document.getElementById('eco_etat');if(e)e.textContent={json.dumps(etat)};}})()", None, None, None)
         threading.Thread(target=travail, daemon=True).start()

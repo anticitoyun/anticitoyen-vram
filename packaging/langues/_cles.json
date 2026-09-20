@@ -62,5 +62,11 @@
  "acvram eco {mode} a échoué (code {code}) : {texte}",
  "off (horloge libre)",
  "verrouille l'horloge de la carte pendant le service (sudo nvidia-smi -lgc) ; 2700 = défaut : même vitesse, −9 à −27 % d'énergie ; off = horloge libre",
- "éco d'horloge"
+ "éco d'horloge",
+ "Convertir",
+ "Serveur",
+ "Serveur d'inférence pour GPU hétérogènes (NVFP4 + INT4) — le thème du logo se choisit dans le menu « Thème » de la barre.",
+ "Thème",
+ "À propos",
+ "config : eco={m} (horloge lue après un changement de mode)"
 ]

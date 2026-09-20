@@ -615,6 +615,10 @@ class Engine:
             "repli_eager": int(getattr(self.graphs, "replis_eager", 0)) if self.graphs is not None else 0,
             "replis_eager_raisons": sorted(getattr(self.graphs, "_raisons_eager_vues", set())) if self.graphs is not None else [],
             "slots_hybrides": getattr(self.graphs, "max_slots", None) if self.graphs is not None else None,
+            # photos VRAM (octets) prises par GraphRunner avant sa première capture
+            # et après un échec (chantier-gemma-capture-godet1-20-09) ; None à sec
+            "graphes_memoire_avant_capture": getattr(self.graphs, "memoire_avant_capture", None) if self.graphs is not None else None,
+            "graphes_memoire_apres_echec": getattr(self.graphs, "memoire_apres_echec", None) if self.graphs is not None else None,
             "graphes_demandes": self._graphes_demandes,
             "graphes_raison": (self._graphes_raison if self.graphs is None
                                else (None if self.graphs.enabled
