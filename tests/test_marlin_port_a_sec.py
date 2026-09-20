@@ -4,6 +4,8 @@ moe_align_block_size), traitement des échelles S0E5M3 (formes, zéro sous 2,
 monotone), permutation des échelles (bijection). L'extension CUDA se
 compile et se juge sur carte (outils/banc-marlin-p1-18-09.py)."""
 import pytest
+
+pytestmark = pytest.mark.a_sec          # Triton interprété : carte visible → ignoré (T4 20/09)
 import torch
 
 from acvram.kernels import marlin_port as MP

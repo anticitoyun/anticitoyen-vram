@@ -103,6 +103,7 @@ def test_attention_un_noyau_egale_deux_noyaux(lens):
     assert not cnt.any(), cnt
 
 
+@pytest.mark.a_sec
 def test_attention_un_noyau_le_compteur_porte_la_reduction():
     """Le bras qui doit casser : un compteur qui ne repart pas de zéro (la
     faute que l'auto-remise à zéro évite) fait réduire un programme qui n'est
@@ -201,6 +202,7 @@ def test_kv_write_int8_par_tranches_au_bit_sur_carte():
 
 
 @pytest.mark.parametrize("compact", [1, 0])
+@pytest.mark.a_sec
 def test_c15_3b_le_routeur_triton_remplace_cublas_il_ne_s_ajoute_pas(monkeypatch, compact):
     """verdict-c15-niveau3-coder-19-09 (a) : sous GLUE_COMPACT=1 le nsys B
     montrait `_route_logits_fusee` ET cuBLAS + moe_route + route_prep par

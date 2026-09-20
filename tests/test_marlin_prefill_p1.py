@@ -190,6 +190,7 @@ def test_marlin_et_groupe_contre_fp32_et_le_bras_casse(monkeypatch, awq, T):
     topi32 = topi.to(torch.int32)
     monkeypatch.setattr(MD, "_PREFILL_GROUPED", "groupe")
     monkeypatch.setattr(MD, "_GEMV_LAYOUT", "naturel")            # témoin : pile naturelle gardée (défaut marlin depuis le 18/09)
+    monkeypatch.setattr(MD, "_MOE_MMA", False)                     # sinon la MMA FP4 prime sur « groupe » (T4 20/09 : chemin pris mma)
     # à petit T (96 : 24 lignes par expert ≤ _MOE_GEMM_MAX 48) `direct` prend
     # le pas sur `groupe` : le témoin serait inatteignable — on force groupe
     monkeypatch.setattr(MD, "_MOE_GEMM_MAX", 0)

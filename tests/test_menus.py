@@ -25,6 +25,7 @@ codées ici ; ailleurs que sur le poste, `skip`.
 import csv
 import json
 import os
+import sys
 import re
 import subprocess
 from pathlib import Path
@@ -32,6 +33,8 @@ from pathlib import Path
 import pytest
 
 REVUE = Path(__file__).resolve().parent.parent / "acvram-memoire" / "revue"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "outils"))
+from racine_modeles import racine_modeles  # noqa: E402
 MENU_MOTEURS = REVUE / "claude-modeles.md"
 MENU_USAGES = REVUE / "kimi-modeles.md"
 INVENTAIRE = REVUE / "inventaire-disque-brut.tsv"
@@ -75,6 +78,13 @@ def racines_du_tsv(chemin_tsv):
     racines ; ce qu'elles contiennent se lit sur le disque."""
     with open(chemin_tsv, newline="") as f:
         lignes = list(csv.DictReader(f, delimiter="\t"))
+    # Le parc acvram change de disque (980 PRO USB → SATA CMR → AI_GENERATOR) : sa
+    # racine du moment est racine_modeles(), le TSV ne garde que le nom du dossier
+    # (T4 20/09 : 16 + 95 « écarts » n'étaient que l'ancien préfixe).
+    for r in lignes:
+        p = Path(r["Chemin"])
+        if p.parent.name == "models_acvram":
+            r["Chemin"] = str(Path(racine_modeles()) / p.name)
     racines = {}
     for r in lignes:
         p = Path(r["Chemin"]).parent

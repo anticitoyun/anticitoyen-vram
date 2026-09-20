@@ -137,6 +137,24 @@ def _dtype_essai():
     return torch.bfloat16 if torch.cuda.is_available() else torch.float16
 
 
+def _poids_fp64(lg, k, sigmoide, renorm, scale, topi):
+    """Les poids de `_route_torch` en fp64 pour la sélection `topi` DÉJÀ jugée identique
+    (les égalités se tranchent en fp32 ; la référence ne re-sélectionne pas)."""
+    probs = torch.sigmoid(lg.double()) if sigmoide else torch.softmax(lg.double(), dim=-1)
+    topw = probs.gather(-1, topi)
+    if renorm:
+        topw = topw / topw.sum(dim=-1, keepdim=True)
+    return topw * scale
+
+
+def _ulp32_de(x, ref64):
+    """Distance de x (fp32) à la référence fp64, en ulp fp32 de la référence, par élément."""
+    r = ref64.to(torch.float64)
+    ulp = torch.where(r != 0, 2.0 ** (torch.floor(torch.log2(r.abs().clamp_min(1e-300))) - 23),
+                      torch.full_like(r, 2.0 ** -149))
+    return (x.double() - r).abs() / ulp
+
+
 def _ulp32_max(a, b):
     a32, b32 = a.float(), b.float()
     ulp = torch.where(a32 != 0, 2.0 ** (torch.floor(torch.log2(a32.abs().clamp_min(1e-30))) - 23),
@@ -167,7 +185,13 @@ def test_c15_3c_routage_identique_au_temoin_sur_512_jetons(w_fp32, sigmoide, bia
     u2 = torch.zeros(E, dtype=torch.int64, device=DEV)
     tw, ti, eid = rp.route_logits_fusee(x, w, bias, k, sigmoide, renorm, scale, valid, u2)
     assert torch.equal(ti, ri) and torch.equal(eid, reid) and torch.equal(u, u2)
-    assert _ulp32_max(rw, tw) <= 4.0, _ulp32_max(rw, tw)
+    # REGLES § 7 (poste7-t4-tri-69-20-09) : deux approximations fp32 ne se jugent pas
+    # l'une contre l'autre (T4 20/09 : 5 ulp entre elles, aucune fautive) ; chacune
+    # contre la référence fp64 de la même sélection, et l'écart des deux ≤ 6 ulp.
+    ref64 = _poids_fp64(lg, k, sigmoide, renorm, scale, ri.long())
+    d_a, d_b = _ulp32_de(rw, ref64), _ulp32_de(tw, ref64)
+    assert float((d_b - d_a).max()) <= 6.0 and float((d_a - d_b).max()) <= 6.0, \
+        f"témoin {float(d_a.max()):.2f} ulp, fusé {float(d_b.max()):.2f} ulp contre fp64 ; écart max {float((d_b - d_a).abs().max()):.2f} > 6"
 
 
 def test_c15_3c_un_poids_deplace_change_la_selection():

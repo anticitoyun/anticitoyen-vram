@@ -215,6 +215,7 @@ def test_c15_un_noeud_egale_zeros_noyau_somme_cast(m, n, k, programmes):
     assert not cnt.any(), "compteurs remis à zéro par le dernier programme"
 
 
+@pytest.mark.a_sec
 def test_c15_un_noeud_le_compteur_porte_la_reduction():
     """Le bras qui doit casser : un compteur qui ne repart pas de zéro fait
     réduire un programme qui n'est pas le dernier — la tuile est fausse

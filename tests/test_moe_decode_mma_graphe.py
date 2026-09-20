@@ -4,6 +4,8 @@ lot ; (b) créneaux fantômes (topi = -1) → contribution nulle et finie, les
 autres lignes inchangées ; (c) capturable dans un vrai ``torch.cuda.graph``
 et le rejeu rend la même sortie que l'eager (aucun ``.item()``)."""
 import pytest
+
+pytestmark = pytest.mark.pile_naturelle   # lit _stacks[nom][1], rendu (None) sous Marlin, défaut servi (T4 20/09)
 import torch
 
 from acvram.quant.nvfp4 import quantize_nvfp4

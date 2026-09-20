@@ -165,6 +165,8 @@ def carte_visible(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(kernels, "get_extension", lambda: None)
     monkeypatch.setattr(kernels, "_ERROR", "simulé")
+    from acvram import eco
+    monkeypatch.setattr(eco, "horloge_du_processus", lambda: None)   # sous carte.sh l'état éco prend la place de « horloge= » (T4 20/09)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
 
 

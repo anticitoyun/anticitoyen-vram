@@ -84,7 +84,11 @@ def _converted_mla(tmp_path, target_rig, max_concurrent_seqs=2, max_model_len=51
 
 def test_budget_mla_vient_du_plan_pas_du_defaut(tmp_path, target_rig):
     out, plan = _converted_mla(tmp_path, target_rig, max_concurrent_seqs=2, max_model_len=512)
-    loaded = load_model(out, dtype=torch.float32, device_override="cpu")
+    # Carte présente, le chargeur REPLANIFIE sur le rig réel (loader._replanifier,
+    # plancher de contexte 2048 : 2 × 2048 = 4 096 jetons = 256 blocs, T4 20/09) ;
+    # le test parle du plan de la conversion : il le redemande tel quel.
+    loaded = load_model(out, dtype=torch.float32, device_override="cpu",
+                        max_model_len=512, max_concurrent_seqs=2)
     assert not loaded.model.caches, \
         "un MLA pur ne doit rien enregistrer dans .caches (sinon ce test ne teste rien)"
 

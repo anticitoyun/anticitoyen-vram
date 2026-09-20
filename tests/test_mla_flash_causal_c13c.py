@@ -119,7 +119,13 @@ def _reference(q, C, passe, scale, rank, decalage=0, tuile_sautee=None, BN=64):
     return torch.cat(out)
 
 
+XFAIL_CARTE = pytest.mark.xfail(
+    torch.cuda.is_available(), strict=True,
+    reason="poste7-t4-tri-69-20-09 (20/09) : C13-c flash causal opt-in CLOS ; juge de 8 ulp calibré à sec "
+           "(interpréteur, excès max 3,0), sur carte 6,5-9,5 ulp par ligne — attendu rouge tant que le noyau est clos")
+
 @pytest.mark.parametrize("t,passe", [(128, 0), (128, 100), (256, 0), (256, 100), (200, 100)])
+@XFAIL_CARTE
 def test_flash_causal_egal_fp32_a_8_ulp_par_ligne(t, passe):
     """Sortie = chemin fp32 actuel ± 8 ulp de l'amplitude par ligne, passe 0 et 100,
     t multiple de la tuile (128, 256) et non (200 : lignes hors t masquées au store)."""
@@ -134,6 +140,7 @@ def test_flash_causal_egal_fp32_a_8_ulp_par_ligne(t, passe):
     assert torch.equal(k.reference_fp32(q, C, passe, scale, 64), ref)
 
 
+@XFAIL_CARTE
 def test_temoins_cassants_masque_passe_tuile():
     """Trois fautes que le juge DOIT voir : (1) masque décalé d'UNE position (une
     clé de plus ou de moins par ligne) ; (2) passe faux d'une unité (le noyau lancé
@@ -171,6 +178,7 @@ def test_temoins_cassants_masque_passe_tuile():
     assert d > 100 * JUGE_ULP, f"tuile [0, 64) sautée : {d:.1f} ulp"
 
 
+@XFAIL_CARTE
 def test_cache_fp32_et_amplitude_des_scores():
     """Cache latent fp32 (même valeurs que bf16 converti) : même juge. Et la limite
     du juge, mesurée contre un arbitre float64 : à |scores| ≈ 5 le noyau et la
@@ -242,11 +250,12 @@ def test_regime_flash_dans_la_table_et_la_ligne(monkeypatch):
     monkeypatch.setattr(M_mla, "_FLASH_REPLI", "RuntimeError: Triton absent")
     assert regime.regime_ligne().count("mla_core=flash(repli fp32: RuntimeError: Triton absent)") == 1
     from acvram.engine import runner
-    assert runner._mla_core_texte() == " mla_core=flash(repli fp32: RuntimeError: Triton absent)"
+    assert runner._mla_core_texte().startswith(" mla_core=flash(repli fp32: RuntimeError: Triton absent)")   # puis mla_prep=… (C14-b)
     monkeypatch.setattr(M_mla, "_MLA_CORE", "fp32")
     assert M_mla.regime_coeur_texte() == "" and "mla_core=" not in regime.regime_ligne()
 
 
+@XFAIL_CARTE
 def test_mla_forward_prefill_flash_egal_fp32(monkeypatch):
     """Le branchement dans `MLAttention.forward` : préfill jouet (t = 200, cache de
     100 jetons, nh 4, rank 64, rope 16, bf16 comme au service) sous MLA_CORE=flash

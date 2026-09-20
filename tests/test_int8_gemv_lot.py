@@ -73,11 +73,18 @@ def test_int8_gemv_warp_contre_blocs(M, K, N):
 
 @pytest.mark.parametrize("M,K", [(151936, 2048), (5120, 2048)])
 @pytest.mark.parametrize("N", [1, 12, 16])
-def test_sortie_fp32_egale_au_bit_au_chemin_x_fp32(M, K, N):
+def test_sortie_fp32_egale_au_bit_au_chemin_x_fp32(M, K, N, monkeypatch):
     """Tête lm_head (poste7-duel-verdict § 14 (ii)) : x bf16 + sortie_fp32 rend
     exactement les logits du chemin x.to(float32) (mêmes produits, même ordre
     de sommes, sans conversion de h) — et pas ceux du chemin bf16, qui arrondit
-    la sortie (l'argmax basculait, § 13)."""
+    la sortie (l'argmax basculait, § 13).
+
+    T4 20/09 : à 2 ≤ b ≤ 16 le chemin SERVI de `int8_matmul` est le GEMM étroit
+    Triton (ACVRAM_NARROW_KERNEL=mixte depuis le 16/09, C15 niveau 3 (3) : split-K
+    réduit par le dernier programme), un autre ordre de sommes fp32 : il ne peut
+    pas être « au bit » avec int8_gemv. Le bit se juge sur le chemin int8_gemv
+    (régime posé) ; le chemin servi se juge contre le même x fp32 en ulp fp32
+    (REGLES § 7 : une approximation contre sa référence, pas contre l'autre)."""
     ext = _ext()
     torch.manual_seed(M + K + N + 7)
     w = torch.randn(M, K, device="cuda") * 0.05
@@ -90,7 +97,24 @@ def test_sortie_fp32_egale_au_bit_au_chemin_x_fp32(M, K, N):
     assert torch.equal(y32, ref), f"{int((y32 != ref).sum())} logits différents du chemin x fp32"
     y16 = ext.int8_gemv(*args, x, t.group_size)
     assert y16.dtype == torch.bfloat16 and not torch.equal(y16.float(), ref)
-    # et par int8_matmul (le chemin de MoEModel._tete)
+    # et par int8_matmul (le chemin de MoEModel._tete), régime int8_gemv posé
+    import acvram.kernels as K
     from acvram.kernels import int8_matmul
+    monkeypatch.setattr(K, "_NARROW_KERNEL", "cuda")
     z = int8_matmul(x, t, sortie_fp32=True)
     assert z.dtype == torch.float32 and torch.equal(z, ref[:, :t.shape[0]])
+    # le chemin servi (mixte : Triton dès b ≥ 2) au juge des termes (poste7, C14) contre
+    # la somme fp64 des mêmes produits : |z − z64| < 1 ulp fp32(z64) + 32·eps32·Σ|termes| ;
+    # l'arrondi bf16 de la sortie (§ 13, ≈ 2⁻⁸ relatif) le fait échouer, un autre ordre
+    # de sommes fp32 non
+    monkeypatch.setattr(K, "_NARROW_KERNEL", "mixte")
+    zs = int8_matmul(x, t, sortie_fp32=True)
+    assert zs.dtype == torch.float32
+    from acvram.kernels import int8_dequant
+    w64 = int8_dequant(t, torch.float32).double()[: t.shape[0]]
+    x64 = x.double()
+    z64 = x64 @ w64.T
+    termes = x64.abs() @ w64.abs().T
+    ulp = torch.where(z64 != 0, 2.0 ** (torch.floor(torch.log2(z64.abs().clamp_min(1e-300))) - 23), torch.full_like(z64, 2.0 ** -149))
+    ratio = ((zs.double() - z64).abs() / (ulp + 32 * 2.0 ** -24 * termes))
+    assert ratio.max().item() < 1.0, f"chemin servi (étroit Triton) : ratio max {ratio.max().item():.3f} au juge des termes (int8_gemv : {((z.double() - z64).abs() / (ulp + 32 * 2.0 ** -24 * termes)).max().item():.3f})"

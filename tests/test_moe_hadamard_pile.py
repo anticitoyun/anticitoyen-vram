@@ -8,6 +8,8 @@ Python au bit (FWHT puis E2M1) ; la pile GEMV (W4A16) rend la boucle à ≤ 1 ul
 avec des experts tournés ; les chemins W4A4 restent au bruit de quantification
 (≤ 1,25× le cas non tourné) ; x·H·(W·H)ᵀ = x·Wᵀ (orthogonalité, fp32)."""
 import pytest
+
+pytestmark = pytest.mark.pile_naturelle   # lit _stacks[nom][1], rendu (None) sous Marlin, défaut servi (T4 20/09)
 import torch
 
 from tests.test_gemm_grouped_mma import quant_act_ref

@@ -4,6 +4,11 @@ faisait 3 677). Exige le modèle Coder-30B et la carte (sous carte.sh) —
 sauté sinon. Mesuré le 15/09 : 1 517 (39 noyaux)."""
 import os
 import pytest
+
+@pytest.fixture(autouse=True)
+def _lot_du_test_pas_du_plan(monkeypatch):
+    """Le converti du disque porte son plan (kv_planned_seqs) ; le test dimensionne son lot (T4 20/09)."""
+    monkeypatch.setenv("ACVRAM_KV_PLAN_OVERRIDE", "1")
 import torch
 import os as _os, sys as _sys  # noqa: E401
 _sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '../outils'))

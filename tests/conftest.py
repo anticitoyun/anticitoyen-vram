@@ -179,6 +179,33 @@ def _carte_disponible(request):
                     "4 requis — mesure en cours ailleurs ?")
 
 
+@pytest.fixture(autouse=True)
+def _regime_des_marqueurs(request, monkeypatch):
+    """T4 20/09 11 h 40 sous enveloppe (carte visible) : 46 rouges de fixture —
+    des tests écrits à sec dont le régime tenait à l'ABSENCE de carte. Un
+    test porte son régime par son marqueur, pas par le poste qui le joue.
+    - a_sec : noyaux Triton interprétés ; TRITON_INTERPRET se pose avant
+      l'import de triton (tête de ce fichier), donc carte visible → ignoré,
+      pas rouge ; la passe CUDA_VISIBLE_DEVICES= le joue.
+    - sans_extension : repli torch (get_extension() → None) sur tenseurs CPU,
+      carte ou pas — « d/q/g doit résider sur un périphérique CUDA » ×8.
+    - pile_naturelle : `_stacks[nom][1]` lu par les tests de la pile, que la
+      disposition Marlin (défaut servi depuis le 18/09) rend (None) — NoneType
+      / tenseur de taille 0 ×20."""
+    marqueurs = {m.name for m in request.node.iter_markers()}
+    if "a_sec" in marqueurs and torch.cuda.is_available():
+        pytest.skip("test à sec (Triton interprété) : carte visible — passe CUDA_VISIBLE_DEVICES=")
+    if "sans_extension" in marqueurs:
+        from acvram import kernels as K
+        monkeypatch.setattr(K, "get_extension", lambda: None)
+    if "pile_naturelle" in marqueurs:
+        from acvram.engine import model as M
+        monkeypatch.setattr(M, "_GEMV_LAYOUT", "naturel")
+        monkeypatch.setattr(M, "_PREFILL_GROUPED", "grouped_mm")
+        monkeypatch.setenv("ACVRAM_GEMV_LAYOUT", "naturel")
+        monkeypatch.setenv("ACVRAM_PREFILL_GROUPED", "grouped_mm")
+
+
 # Au-dela de cette occupation, un debit mesure n'est plus celui du code teste.
 OCCUPATION_MAX = 50
 
