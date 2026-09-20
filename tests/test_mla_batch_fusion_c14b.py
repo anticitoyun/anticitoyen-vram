@@ -243,6 +243,40 @@ def test_annulation_fait_des_milliers_d_ulp_de_y64_sans_faute():
     assert max(max(k, e) for k, e in pires) > 1000 and plus_de_6 > 0 and inverse > 0
 
 
+def _juge_termes_jumeau(y, y_64, vb, o_lat):
+    """Le juge des termes sur un y quelconque [B, nh, dv] bf16 : (lignes fautives, ratio max)."""
+    somme_abs = torch.einsum('hvr,bhr->bhv', vb.double().abs(), o_lat.double().abs())
+    borne = 2.0 ** (torch.floor(torch.log2(y_64.abs().clamp_min(1e-30))) - 7) + 32 * 2.0 ** -23 * somme_abs
+    r = ((y.double() - y_64).abs() / borne).amax(dim=-1)
+    return (r > 1).sum().item(), r.max().item(), r
+
+
+def test_le_juge_des_termes_casse_sur_une_faute_construite_a_sec():
+    """poste7 09 h 25 : un juge qui ne casse que sur NaN n'est pas un contrôle. Jumeau torch (fp32, ordre
+    de l'einsum) : v_b avec UNE tête permutée (h ↔ h+1) ou UNE colonne de rank permutée (r ↔ r+1) →
+    les lignes touchées passent à ratio ≫ 1, verdict FAUX ; le jumeau sain reste ≤ 1 sur toutes les
+    lignes (et son ratio max est publié : ici ≪ 0,1)."""
+    torch.manual_seed(4)
+    B, nh, dv, rank = 4, 6, 32, 128
+    vb = (torch.randn(nh, dv, rank) * 0.05).to(DT)
+    o = torch.randn(B, nh, rank) * 3
+    y64 = torch.einsum('hvr,bhr->bhv', vb.double(), o.double())
+    y_sain = torch.einsum('hvr,bhr->bhv', vb.float(), o).to(DT)
+    f0, r0, _ = _juge_termes_jumeau(y_sain, y64, vb, o)
+    assert f0 == 0 and r0 <= 1, (f0, r0)
+    # faute 1 : une tête permutée dans v_b → les lignes (b, 0) et (b, 1) fautives, les autres non
+    vb_h = vb.clone(); vb_h[[0, 1]] = vb[[1, 0]]
+    y_h = torch.einsum('hvr,bhr->bhv', vb_h.float(), o).to(DT)
+    f1, r1, rr = _juge_termes_jumeau(y_h, y64, vb, o)
+    assert f1 == 2 * B and r1 > 10 and bool((rr[:, 2:] <= 1).all()), (f1, r1)
+    # faute 2 : une colonne de rank permutée (r ↔ r+1) → toutes les lignes fautives, ratio > 1
+    vb_r = vb.clone(); vb_r[..., [5, 6]] = vb[..., [6, 5]]
+    y_r = torch.einsum('hvr,bhr->bhv', vb_r.float(), o).to(DT)
+    f2, r2, _ = _juge_termes_jumeau(y_r, y64, vb, o)
+    assert f2 == B * nh and r2 > 1, (f2, r2)
+    print(f"\nsain : ratio max {r0:.4f} ; tête permutée : {f1} lignes, ratio max {r1:.1f} ; colonne permutée : {f2} lignes, ratio max {r2:.1f}")
+
+
 # ---- carte ------------------------------------------------------------------------------------
 def _ext_carte():
     if not torch.cuda.is_available():
@@ -307,11 +341,25 @@ def test_combine_fusionne_contre_einsum_sur_carte(B, L, n):
           f"noyau vs f64 {e_k64:.2f}, einsum vs f64 {e_e64:.2f} ulp bf16 (max par ligne) ; "
           f"pire d(noyau) − d(einsum) par ligne {(d_k - d_e).max().item():+.2f}")
     f_k, f_e, r_k, r_e = _juge_termes(y, y_e, y_64, vb, o_lat)
-    print(f"  juge à l'échelle des termes : lignes fautives noyau {f_k}, einsum {f_e} ; ratio max noyau {r_k:.3f}, einsum {r_e:.3f}")
+    # part d'accumulation seule (fp32 de l'einsum avant l'arrondi bf16, contre 32·eps32·Σ|termes|) : le ratio
+    # complet vaut ≈ 0,5 au plancher par le seul arrondi de sortie (½ ulp sur 1 ulp) ; c'est CE ratio-ci qui dit
+    # si le 32 masque (> 0,1 : à dire, poste7 09 h 25)
+    y32_e = torch.einsum('hvr,bhr->bhv', vb.float(), o_lat)
+    somme_abs = torch.einsum('hvr,bhr->bhv', vb.double().abs(), o_lat.double().abs())
+    r_acc = ((y32_e.double() - y_64).abs() / (32 * 2.0 ** -23 * somme_abs)).max().item()
+    print(f"  RESULTAT juge des termes : lignes fautives noyau {f_k}, einsum {f_e} ; ratio_max_noyau {r_k:.4f}, ratio_max_einsum {r_e:.4f} "
+          f"(plancher ≈ 0,5 = arrondi bf16 de sortie) ; accumulation seule de l'einsum fp32 : {r_acc:.4f} du 32·eps32"
+          + (" — > 0,1 : le 32 masque, à dire" if r_acc > 0.1 else ""))
     assert e_ke <= 1, f"noyau vs einsum {e_ke:.2f} ulp bf16 > 1"
     assert bool((d_k <= d_e + 6).all()), f"juge fp64 par ligne : d(noyau) > d(einsum) + 6 ulp sur {(d_k > d_e + 6).sum().item()} lignes"
     assert f_k == 0 and f_e == 0, (f_k, f_e)
-    # témoin cassant : un v_b décalé d'une tête doit se voir
-    vb2 = torch.roll(vb, 1, dims=0).contiguous()
+    # faute construite (poste7 09 h 25) : v_b avec une tête permutée (0 ↔ 1) passé au noyau, jugé contre
+    # la référence saine → les lignes (b, 0) et (b, 1) à ratio > 1, verdict FAUX ; les autres têtes ≤ 1
+    vb2 = vb.clone(); vb2[[0, 1]] = vb[[1, 0]]; vb2 = vb2.contiguous()
     y2 = ext.mla_decode_1p(q, ptrs, None, lens, L, RANK, scale, False, vb2)
-    assert not torch.equal(y, y2)
+    f2, _, r2, _ = _juge_termes(y2, y_e, y_64, vb, o_lat)
+    somme_abs = torch.einsum('hvr,bhr->bhv', vb.double().abs(), o_lat.double().abs())
+    borne = 2.0 ** (torch.floor(torch.log2(y_64.abs().clamp_min(1e-30))) - 7) + 32 * 2.0 ** -23 * somme_abs
+    rr = ((y2.double() - y_64).abs() / borne).amax(dim=-1)
+    print(f"  faute construite (tête 0 ↔ 1) : {f2} lignes fautives (attendu {2 * B}), ratio max {r2:.1f}, autres têtes max {rr[:, 2:].max().item():.3f}")
+    assert f2 == 2 * B and r2 > 1 and bool((rr[:, 2:] <= 1).all()), (f2, r2)
