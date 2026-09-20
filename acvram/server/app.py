@@ -36,12 +36,13 @@ from ..engine.runner import Engine, GenerationOutput
 from ..engine.sampler import SamplingParams
 from .chat import Tokenizer, render_chat
 from .chat import extraire_appels, messages_pour_gabarit
+from .chat import ProcesseurVision, charger_processeur_vision, preparer_images
 from .protocol import (ChatChoice, ChatCompletionChunk, ChatCompletionRequest,
                        ChatCompletionResponse, ChoiceMessage, ChunkChoice,
                        CompletionChoice, CompletionRequest, CompletionResponse,
                        DeltaMessage, EmbeddingData, EmbeddingRequest,
                        EmbeddingResponse, ErrorResponse, ModelCard, ModelList,
-                       Usage, new_id)
+                       Usage, charger_image, new_id)
 
 __all__ = ["create_app", "EngineService"]
 
@@ -142,15 +143,34 @@ class EngineService:
             self._loop.call_soon_threadsafe(q.put_nowait, exc)
 
     # -- request lifecycle -------------------------------------------------
-    async def submit(self, prompt_ids: list[int], params: SamplingParams
-                     ) -> tuple[str, asyncio.Queue]:
+    async def submit(self, prompt_ids: list[int], params: SamplingParams,
+                     images: Optional[list] = None) -> tuple[str, asyncio.Queue]:
         self.ensure_started()
         request_id = new_id("req")
         q: asyncio.Queue = asyncio.Queue()
         with self._lock:
             self._queues[request_id] = q
-        self.engine.add_request(prompt_ids, params, request_id)
+        if images:
+            self.engine.add_request(prompt_ids, params, request_id, images=images)
+        else:
+            self.engine.add_request(prompt_ids, params, request_id)
         return request_id, q
+
+    # -- images ------------------------------------------------------------
+    def vision_servie(self) -> bool:
+        """Le manifeste de l'alias servi porte ``vision: oui`` (pièce (a))."""
+        man = getattr(getattr(self.engine, "loaded", None), "manifest", None) or {}
+        v = man.get("vision")
+        return str(v).strip().lower() in ("oui", "true", "1")
+
+    def processeur_vision(self) -> ProcesseurVision:
+        """Chargé au premier ``image_url``, jamais sur le chemin texte."""
+        pv = getattr(self, "_processeur_vision", None)
+        if pv is None:
+            chemin = getattr(getattr(self.engine, "loaded", None), "path", "") or ""
+            pv = charger_processeur_vision(chemin)
+            self._processeur_vision = pv
+        return pv
 
     def release(self, request_id: str) -> None:
         with self._lock:
@@ -917,14 +937,31 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
     @app.post("/v1/chat/completions")
     async def chat_completions(req: ChatCompletionRequest, raw: Request):
         signaler_champs_inconnus(req, "/v1/chat/completions")
-        messages = messages_pour_gabarit(req.messages)
+        # Trois états pour une image, jamais un silence : acceptée (alias
+        # vision), refus nommé (source, dépassement), alias sans vision.
+        urls = [u for m in req.messages for u in m.images()]
+        if urls and not service.vision_servie():
+            raise HTTPException(400, f"modèle sans tour de vision : l'alias « {model_name} » "
+                                     "ne porte pas vision: oui dans son manifeste, "
+                                     f"{len(urls)} image_url refusée(s)")
+        messages = messages_pour_gabarit(req.messages, avec_images=bool(urls))
         extra = dict(req.chat_template_kwargs or {})
         if req.tools:
             extra["tools"] = req.tools          # les gabarits HF les rendent eux-mêmes
         prompt = render_chat(tokenizer, messages, req.add_generation_prompt, extra)
-        prompt_ids = _encode(tokenizer, prompt)
+        images = None
+        if urls:
+            octets = [charger_image(u) for u in urls]           # ImageRefusee -> 400
+            prompt_ids, images = preparer_images(service.processeur_vision(), prompt, octets)
+            n_img = sum(f.n_jetons for f in images)
+            if len(prompt_ids) >= engine.max_model_len:
+                raise HTTPException(400, f"invite de {len(prompt_ids)} jetons dont {n_img} "
+                                         f"jetons image ({len(images)} image(s)) au-delà de "
+                                         f"max_model_len {engine.max_model_len}")
+        else:
+            prompt_ids = _encode(tokenizer, prompt)
         params = _params_from(req, 512)
-        request_id, q = await service.submit(prompt_ids, params)
+        request_id, q = await service.submit(prompt_ids, params, images)
 
         if req.stream:
             return StreamingResponse(

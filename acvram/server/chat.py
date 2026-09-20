@@ -16,7 +16,8 @@ import sys
 import re
 from typing import Any, Optional
 
-__all__ = ["Tokenizer", "load_tokenizer", "render_chat"]
+__all__ = ["Tokenizer", "load_tokenizer", "render_chat",
+           "ProcesseurVision", "charger_processeur_vision", "preparer_images"]
 
 
 class Tokenizer:
@@ -243,13 +244,19 @@ def _valeur(v: str):
         return v
 
 
-def messages_pour_gabarit(messages: list) -> list[dict]:
+def messages_pour_gabarit(messages: list, avec_images: bool = False) -> list[dict]:
     """Les messages tels que les gabarits HF les attendent : rôle et texte,
     plus ``name``, ``tool_calls`` et ``tool_call_id`` quand ils existent —
-    sans eux un second tour d'outil ne se rend pas."""
+    sans eux un second tour d'outil ne se rend pas.
+
+    ``avec_images`` : le contenu reste une liste de fragments
+    (``{"type": "image"}`` / ``{"type": "text"}``), forme que les gabarits
+    multimodaux lisent pour poser leur jeton d'image. Faux par défaut : le
+    chemin texte rend exactement ce qu'il rendait."""
     out = []
     for m in messages:
-        d = {"role": m.role, "content": m.text()}
+        d = {"role": m.role,
+             "content": m.fragments() if avec_images else m.text()}
         for k in ("name", "tool_calls", "tool_call_id"):
             v = getattr(m, k, None)
             if v is not None:
@@ -288,3 +295,149 @@ def extraire_appels(texte: str) -> tuple[str, list[dict]]:
     garder.append(texte[pos:])
     reste = "".join(garder).strip() if appels else texte
     return reste, appels
+
+
+# -- images : AutoProcessor -> requête interne ---------------------------------
+class ProcesseurVision:
+    """L'``AutoProcessor`` d'un dossier converti, et ce qu'il faut autour :
+    ``ouvrir`` (octets -> image telle que le processeur la lit, Pillow) et
+    ``image_token_id`` (le jeton que le processeur expanse en N jetons image).
+    Le serveur ne le charge qu'au premier ``image_url``, jamais sur le chemin
+    texte."""
+
+    def __init__(self, processeur: Any, image_token_id: int,
+                 ouvrir: Any = None) -> None:
+        self.processeur = processeur
+        self.image_token_id = int(image_token_id)
+        self.ouvrir = ouvrir or _ouvrir_pillow
+
+    def __call__(self, prompt: str, images: list[Any]) -> dict:
+        return self.processeur(text=prompt, images=images, return_tensors="pt",
+                               add_special_tokens=False)
+
+
+def _ouvrir_pillow(octets: bytes) -> Any:
+    import io
+    try:
+        from PIL import Image
+    except ImportError:
+        raise ValueError("image refusée : le paquet Python Pillow (PIL) n'est pas "
+                         f"installé dans cet interpréteur ({sys.executable})") from None
+    try:
+        img = Image.open(io.BytesIO(octets))
+        img.load()
+    except Exception as exc:                                    # noqa: BLE001
+        raise ValueError(f"image refusée : octets illisibles comme image ({exc})") from None
+    return img.convert("RGB")
+
+
+def _image_token_id(proc: Any, path: str) -> Optional[int]:
+    v = getattr(proc, "image_token_id", None)
+    if isinstance(v, int):
+        return v
+    tok = getattr(proc, "tokenizer", None)
+    nom = getattr(proc, "image_token", None)
+    if tok is not None and isinstance(nom, str):
+        try:
+            i = tok.convert_tokens_to_ids(nom)
+            if isinstance(i, int) and i >= 0:
+                return i
+        except Exception:                                       # noqa: BLE001
+            pass
+    cfg_path = os.path.join(path, "config.json")
+    if os.path.isfile(cfg_path):
+        with open(cfg_path, "r", encoding="utf-8") as fh:
+            cfg = json.load(fh)
+        for k in ("image_token_id", "image_token_index"):
+            if isinstance(cfg.get(k), int):
+                return cfg[k]
+    return None
+
+
+def charger_processeur_vision(path: str) -> ProcesseurVision:
+    """Charge l'``AutoProcessor`` du dossier (``processor_config.json`` /
+    ``preprocessor_config.json`` copiés par la conversion). Chaque manque
+    est nommé : paquet absent, fichier absent, jeton d'image introuvable."""
+    try:
+        from transformers import AutoProcessor
+    except ImportError:
+        raise ValueError("modèle avec tour de vision mais AutoProcessor indisponible : "
+                         "le paquet Python transformers n'est pas installé dans cet "
+                         f"interpréteur ({sys.executable})") from None
+    if not any(os.path.isfile(os.path.join(path, f))
+               for f in ("processor_config.json", "preprocessor_config.json")):
+        raise ValueError("modèle avec tour de vision mais ni processor_config.json ni "
+                         f"preprocessor_config.json dans {path}")
+    try:
+        proc = AutoProcessor.from_pretrained(path)
+    except Exception as exc:                                    # noqa: BLE001
+        raise ValueError(f"AutoProcessor illisible dans {path} : {exc}") from None
+    tid = _image_token_id(proc, path)
+    if tid is None:
+        raise ValueError(f"jeton d'image introuvable (processeur, tokeniseur, config.json) dans {path}")
+    return ProcesseurVision(proc, tid)
+
+
+def _plages(ids: list[int], jeton: int) -> list[tuple[int, int]]:
+    """Les plages [debut, fin) des suites contiguës de ``jeton`` dans ``ids``."""
+    plages, debut = [], -1
+    for i, t in enumerate(ids + [None]):
+        if t == jeton and debut < 0:
+            debut = i
+        elif t != jeton and debut >= 0:
+            plages.append((debut, i)); debut = -1
+    return plages
+
+
+def _par_image(sortie: dict, n: int) -> list[tuple[Any, dict]]:
+    """``pixel_values`` (et annexes) découpés par image : une ligne par image
+    (Gemma, forme [n, 3, H, W]) ou par ``image_grid_thw`` (Qwen, patches
+    concaténés). Sinon, refus : on ne devine pas une découpe."""
+    pv = sortie.get("pixel_values")
+    if pv is None:
+        raise ValueError("le processeur n'a rendu aucun pixel_values")
+    thw = sortie.get("image_grid_thw")
+    if thw is not None and len(thw) == n:
+        out, pos = [], 0
+        for i in range(n):
+            k = int(thw[i].prod()) if hasattr(thw[i], "prod") else int(
+                thw[i][0] * thw[i][1] * thw[i][2])
+            out.append((pv[pos:pos + k], {"image_grid_thw": thw[i:i + 1]}))
+            pos += k
+        if pos != pv.shape[0]:
+            raise ValueError(f"image_grid_thw couvre {pos} patches, pixel_values en porte {pv.shape[0]}")
+        return out
+    if pv.shape[0] == n:
+        return [(pv[i:i + 1], {}) for i in range(n)]
+    if n == 1:
+        return [(pv, {})]
+    raise ValueError(f"{n} images mais pixel_values de forme {tuple(pv.shape)} "
+                     "sans image_grid_thw : découpe par image inconnue")
+
+
+def preparer_images(pv: ProcesseurVision, prompt: str, octets: list[bytes]
+                    ) -> tuple[list[int], list]:
+    """La requête interne d'une invite à images : ``(prompt_ids, fragments)``.
+
+    ``prompt_ids`` vient de l'``AutoProcessor`` (jetons image DÉJÀ expansés
+    en N par image) ; ``fragments`` : un ``ImageFragment`` par image, dans
+    l'ordre, avec sa plage, ses pixels et leur sha256."""
+    from ..engine.images import ImageFragment
+
+    images = [pv.ouvrir(o) for o in octets]
+    sortie = pv(prompt, images)
+    ids = sortie["input_ids"]
+    if hasattr(ids, "tolist"):
+        ids = ids.tolist()
+    if ids and isinstance(ids[0], list):
+        ids = ids[0]
+    ids = [int(t) for t in ids]
+    plages = _plages(ids, pv.image_token_id)
+    if len(plages) != len(images):
+        raise ValueError(f"{len(images)} images envoyées, {len(plages)} plages de jetons "
+                         f"image (id {pv.image_token_id}) dans l'invite rendue : le gabarit "
+                         "de conversation ne pose pas un jeton d'image par image")
+    fragments = []
+    for (debut, fin), (pix, supp) in zip(plages, _par_image(sortie, len(images))):
+        fragments.append(ImageFragment(debut, fin, pix, supplement=supp))
+    return ids, fragments
