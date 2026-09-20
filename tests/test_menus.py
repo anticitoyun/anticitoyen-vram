@@ -23,6 +23,7 @@ est lui-même contrôlé contre le disque. Les racines sont lues dans le TSV, pa
 codées ici ; ailleurs que sur le poste, `skip`.
 """
 import csv
+import functools
 import json
 import os
 import sys
@@ -106,6 +107,49 @@ def lister_disque(racines):
     return disque
 
 
+# REGLES § 4, trois états d'un alias acvram (poste7 12 h 30, poste7-t4-tri-69-20-09) : « présent » (dossier sous
+# racine_modeles()), « absent » (nulle part : effacé ou disque non monté), « relocalisé hors racine » (retrouvé
+# sous une autre racine connue — transfert USB → nvme3 en cours). Absent et relocalisé sont des ÉTATS du menu,
+# pas des rouges (48 alias le 20/09) ; rouge seulement si un alias présent ne résout pas, ou résout hors racine.
+# Même recherche que ~/.local/bin/modeles-a-jour (RACINES, profondeur 4, deux derniers composants puis le dernier).
+RACINES_CONNUES = ["/mnt/AI_GENERATOR/models_acvram", "/mnt/2TO_2023_980PRO/Modeles",
+                   "/mnt/4TO_SATACMR_2022/Modeles", "/mnt/2TO_SSD_2025_IA"]
+PROFONDEUR = 4
+
+
+@functools.lru_cache(maxsize=None)
+def _index_racines():
+    un = {}
+    for racine in RACINES_CONNUES:
+        if not os.path.isdir(racine):
+            continue
+        base = racine.rstrip("/").count("/")
+        for dossier, sous, fichiers in os.walk(racine):
+            if dossier.count("/") - base >= PROFONDEUR:
+                sous[:] = []
+            for nom in sous + fichiers:
+                un.setdefault(nom, []).append(os.path.join(dossier, nom))
+    return un
+
+
+def etat_alias(nom, racine):
+    """'present' | 'absent' | 'relocalise' (hors racine) | 'hors-racine' (présent mais résout ailleurs = rouge)."""
+    chemin = Path(racine) / nom
+    if chemin.exists() or chemin.is_symlink():
+        if chemin.is_symlink() and not str(chemin.resolve()).startswith(str(Path(racine).resolve()) + "/"):
+            return "hors-racine"
+        return "present"
+    ailleurs = [c for c in _index_racines().get(nom, []) if not c.startswith(str(racine) + "/")]
+    return "relocalise" if ailleurs else "absent"
+
+
+def alias_absents(menu, racines):
+    """Les alias acvram du menu dont l'état est absent ou relocalisé : exclus des contrôles a/b/l/e."""
+    r = racines.get("models_acvram")
+    return frozenset(n for n, (_, racine, _) in menu.items()
+                     if racine == "models_acvram" and r is not None and etat_alias(n, r) in ("absent", "relocalise"))
+
+
 def formats_manifeste(dossier):
     with open(dossier / "acvram_manifest.json") as f:
         tenseurs = json.load(f)["tensors"]
@@ -128,15 +172,21 @@ def tailles_du(chemins):
 # ---- les contrôles, sous forme de fonctions qui RENDENT une liste de fautes,
 # ---- pour que (d) puisse les exercer sur un disque fabriqué.
 
-def controle_a(menu, racines):
+def controle_a(menu, racines, absents=frozenset()):
     """(a) chaque entrée existe SOUS LA RACINE DE SA SECTION ; un converti
-    acvram a un manifeste lisible avec des tenseurs."""
+    acvram a un manifeste lisible avec des tenseurs ; un alias acvram absent ou
+    relocalisé (état § 4) est ignoré, un alias qui résout hors racine est une faute."""
     fautes = []
     for nom, (_, racine, _) in menu.items():
         if racine is None:
             fautes.append(f"{nom} : hors de toute section « Moteur : … »")
             continue
+        if nom in absents:
+            continue
         chemin = racines[racine] / nom
+        if racine == "models_acvram" and etat_alias(nom, racines[racine]) == "hors-racine":
+            fautes.append(f"{nom} : résout hors de racine_modeles() ({chemin.resolve()})")
+            continue
         if not chemin.exists() and not chemin.is_symlink():
             fautes.append(f"{nom} : absent de {racines[racine]}")
             continue
@@ -149,10 +199,10 @@ def controle_a(menu, racines):
     return fautes
 
 
-def controle_b(menu, disque):
-    """(b) les deux différences, chacune doit être vide."""
+def controle_b(menu, disque, absents=frozenset()):
+    """(b) les deux différences, chacune doit être vide (les alias à l'état absent/relocalisé exceptés)."""
     return ([f"sur disque, absent du menu : {n} ({disque[n]})" for n in sorted(set(disque) - set(menu))]
-            + [f"au menu, absent du disque : {n}" for n in sorted(set(menu) - set(disque))])
+            + [f"au menu, absent du disque : {n}" for n in sorted(set(menu) - set(disque) - absents)])
 
 
 def controle_c(menu, racines, tailles):
@@ -221,23 +271,28 @@ def poste():
     usages = lire_menu(MENU_USAGES.read_text(), doublons=True)
     disque = lister_disque(racines)
     tailles = tailles_du(sorted(disque.values()))
-    return racines, lignes, menu, usages, disque, tailles
+    absents = alias_absents(menu, racines) | alias_absents({r["Modèle"]: (None, "models_acvram", "") for r in lignes
+                                                            if Path(r["Chemin"]).parent.name == "models_acvram"}, racines)
+    etats = {n: etat_alias(n, racines["models_acvram"]) for n in sorted(absents)}
+    print(f"[menus] alias acvram à l'état absent/relocalisé (§ 4, exclus des contrôles) : {len(absents)} — "
+          + ", ".join(f"{n}:{e}" for n, e in etats.items()))
+    return racines, lignes, menu, usages, disque, tailles, absents
 
 
 def test_a_chaque_entree_existe_sous_sa_racine_et_son_manifeste_se_lit(poste):
-    racines, _, menu, _, _, _ = poste
-    fautes = controle_a(menu, racines)
+    racines, _, menu, _, _, _, absents = poste
+    fautes = controle_a(menu, racines, absents=absents)
     assert not fautes, f"{len(fautes)} entrée(s) :\n  " + "\n  ".join(fautes)
 
 
 def test_b_disque_et_menu_dans_les_deux_sens(poste):
-    _, _, menu, _, disque, _ = poste
-    fautes = controle_b(menu, disque)
+    _, _, menu, _, disque, _, absents = poste
+    fautes = controle_b(menu, disque, absents=absents)
     assert not fautes, f"{len(fautes)} écart(s) :\n  " + "\n  ".join(fautes)
 
 
 def test_c_taille_et_format_suivent_du_et_le_manifeste(poste):
-    racines, _, menu, _, _, tailles = poste
+    racines, _, menu, _, _, tailles, _ = poste
     fautes = controle_c(menu, racines, tailles)
     assert not fautes, f"{len(fautes)} écart(s) :\n  " + "\n  ".join(fautes)
     sans_taille = [n for n, (t, r, _) in menu.items() if t is None and not (racines[r] / n).is_symlink()]
@@ -245,7 +300,7 @@ def test_c_taille_et_format_suivent_du_et_le_manifeste(poste):
 
 
 def test_le_menu_par_usage_est_un_sous_ensemble_du_menu_par_moteur(poste):
-    _, _, menu, usages, _, _ = poste
+    _, _, menu, usages, _, _, _ = poste
     inconnus = sorted(set(usages) - set(menu))
     assert not inconnus, f"au menu par usage, absents du menu par moteur : {inconnus}"
     tailles = [(n, usages[n][0], menu[n][0]) for n in usages
@@ -256,9 +311,9 @@ def test_le_menu_par_usage_est_un_sous_ensemble_du_menu_par_moteur(poste):
 def test_l_inventaire_tsv_suit_le_disque(poste):
     """Le TSV est une photo à la main : il doit dire ce que le disque dit,
     sinon on le retire."""
-    racines, lignes, _, _, disque, tailles = poste
+    racines, lignes, _, _, disque, tailles, absents = poste
     tsv = {r["Modèle"]: r for r in lignes}
-    fautes = controle_b(tsv, disque)
+    fautes = controle_b(tsv, disque, absents=absents)
     for nom, r in tsv.items():
         if nom in disque and Path(r["Chemin"]) != disque[nom]:
             fautes.append(f"{nom} : TSV {r['Chemin']}, disque {disque[nom]}")
@@ -379,7 +434,7 @@ def test_e_le_tsv_enrichi_suit_les_fichiers(poste, enrichi_brut):
     manque. La première version (24feac3) disait vision=yes sur 42 modèles
     sans vision_config (Qwen3-Coder, GLM, Llama…) et tools=no sur 31 dont le
     gabarit contient « tools » : aucun test ne lisait la source."""
-    _, lignes, _, _, _, _ = poste
+    _, lignes, _, _, _, _, absents = poste
     par_nom = {r["Modèle"]: r for r in lignes}
     enr = _enrichir()
     fautes = []
@@ -387,6 +442,8 @@ def test_e_le_tsv_enrichi_suit_les_fichiers(poste, enrichi_brut):
         src = par_nom.get(r["model"])
         if src is None:
             fautes.append(f"{r['model']} : absent de l'inventaire brut")
+            continue
+        if r["model"] in absents:
             continue
         attendu = enr.enrichir(src["Chemin"], src["Format"], r["model"])
         for col in enr.COLONNES:
@@ -396,7 +453,7 @@ def test_e_le_tsv_enrichi_suit_les_fichiers(poste, enrichi_brut):
 
 
 def test_g_le_tsv_enrichi_couvre_exactement_l_inventaire(poste, enrichi_brut):
-    _, lignes, _, _, _, _ = poste
+    _, lignes, _, _, _, _, _ = poste
     a, b = {r["Modèle"] for r in lignes}, {r["model"] for r in enrichi_brut}
     assert a == b, (sorted(a - b), sorted(b - a))
 
@@ -432,10 +489,10 @@ def test_h_une_valeur_fabriquee_dans_le_tsv_casse_e(poste, enrichi_brut):
     """(h) Le contrôle (e) doit dire « faux » : une ligne du TSV modifiée sur
     chaque colonne (vision inversée, tools inversé, bpw inventé, model_type
     inventé) est vue, et seule elle."""
-    _, lignes, _, _, _, _ = poste
+    _, lignes, _, _, _, _, absents = poste
     par_nom = {r["Modèle"]: r for r in lignes}
     enr = _enrichir()
-    r = next(x for x in enrichi_brut if x["format"] == "NVFP4_acvram")
+    r = next(x for x in enrichi_brut if x["format"] == "NVFP4_acvram" and x["model"] not in absents)   # un alias présent
     src = par_nom[r["model"]]
     for col, faux in (("vision", "yes" if r["vision"] != "yes" else "no"), ("tools", "maybe"),
                       ("bpw", "W2A2"), ("model_type", "zzz-fiction"), ("thinking", "yes")):
