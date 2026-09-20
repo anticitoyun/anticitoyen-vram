@@ -33,12 +33,17 @@ import sys
 from pathlib import Path
 
 import torch
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '.'))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 
 RACINE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RACINE))
 sys.path.insert(0, str(RACINE / "tests"))
 
-MOD = Path("/mnt/2TO_2023_980PRO/Modeles/models_acvram")
+MOD = Path(_RACINE)
 CONVERTIS = {
     "alpha-commun": MOD / "GLM-4.7-Flash-srcbf16-nvfp4",
     "sans-awq": MOD / "GLM-4.7-Flash-srcbf16-nvfp4-sansawq",

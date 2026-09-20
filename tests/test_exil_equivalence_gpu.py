@@ -19,6 +19,11 @@ import os
 
 import pytest
 import torch
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '../outils'))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 
 CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise")
 
@@ -27,7 +32,7 @@ CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise")
 # de la taille du modèle.
 MODELE = os.environ.get(
     "ACVRAM_TEST_EXIL_MODELE",
-    "/mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-14B-nvfp4")
+    _RACINE + "/Qwen3-14B-nvfp4")
 CORPUS = os.environ.get(
     "ACVRAM_TEST_EXIL_CORPUS",
     "acvram/data/calibration-anglais.txt")
@@ -83,6 +88,7 @@ def _logits_64(model_dir: str, env_exil: dict) -> torch.Tensor:
 
 
 @CUDA
+@pytest.mark.skipif(not os.path.isdir(MODELE), reason=f"alias absent sous racine_modeles() : {MODELE}")
 def test_exil_18_couches_rend_les_memes_logits_que_resident():
     """Témoin de poste7 (REGLES §5) : E1 (exil seul) contre R (résident). Un
     écart désigne la voie d'exil elle-même (pas la conversion, déjà
@@ -103,6 +109,7 @@ def test_exil_18_couches_rend_les_memes_logits_que_resident():
 
 
 @CUDA
+@pytest.mark.skipif(not os.path.isdir(MODELE), reason=f"alias absent sous racine_modeles() : {MODELE}")
 def test_exil_d_une_seule_couche_isole_la_faute_par_couche():
     """E4 du protocole de poste7 : une seule couche exilée doit aussi coller
     au résident. Si CE test passe mais le précédent (18 couches) échoue, la

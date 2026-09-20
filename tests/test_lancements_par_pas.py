@@ -5,11 +5,16 @@ sauté sinon. Mesuré le 15/09 : 1 517 (39 noyaux)."""
 import os
 import pytest
 import torch
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '../outils'))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
 
-MODELE = os.path.join(os.environ.get("ACVRAM_MODELES", "/mnt/2TO_2023_980PRO/Modeles/models_acvram"),
+
+MODELE = os.path.join(os.environ.get("ACVRAM_MODELES", _RACINE),
                       "Qwen3-Coder-30B-A3B-nvfp4")
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available() or not os.path.isdir(MODELE),
-                                reason="carte et Coder-30B requis")
+                                reason=f"carte requise ; alias absent sous racine_modeles() : {MODELE}")
 
 
 def test_lancements_par_pas_b12_sous_graphes():

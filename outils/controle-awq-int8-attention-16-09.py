@@ -35,6 +35,11 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '.'))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
@@ -42,7 +47,7 @@ import torch
 from safetensors import safe_open
 
 SOURCE = "/mnt/4TO_SATACMR_2022/Modeles/GLM-4.7-Flash-bf16"
-INT8_CONVERTI = ("/mnt/2TO_2023_980PRO/Modeles/models_acvram/"
+INT8_CONVERTI = (_RACINE + "/"
                  "GLM-4.7-Flash-srcbf16-nvfp4-avant-noawq-experts")
 SCRATCH = Path("/tmp/glm-awq-int8-attn")
 MINI = SCRATCH / "mini-hf"

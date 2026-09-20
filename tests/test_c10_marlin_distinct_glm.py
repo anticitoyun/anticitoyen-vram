@@ -20,6 +20,11 @@ import sys
 
 import pytest
 import torch
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '../outils'))
+from racine_modeles import racine_modeles as _racine_modeles, alias_absent as _alias_absent  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -33,7 +38,7 @@ from acvram.quant.nvfp4 import NVFP4Tensor, dequantize_nvfp4, quantize_nvfp4    
 
 torch.set_num_threads(min(8, torch.get_num_threads()))
 TOL_HORS = 5e-4                       # part de valeurs hors 2⁻⁷ par ligne tolérée (P1, test_gemv_marlin.py)
-GLM = "/mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-srcbf16-nvfp4-k48-calibA"
+GLM = _RACINE + "/GLM-4.7-Flash-srcbf16-nvfp4-k48-calibA"
 COUCHE_GLM = 1                        # première couche distincte (13 : 1 2 4 6 9 11 12 13 16 17 19 20 23)
 
 
@@ -189,6 +194,8 @@ def _couche_glm():
     return bloc
 
 
+@pytest.mark.skipif(bool(_alias_absent("GLM-4.7-Flash-srcbf16-nvfp4-k48-calibA")),
+                    reason=_alias_absent("GLM-4.7-Flash-srcbf16-nvfp4-k48-calibA"))
 @pytest.mark.parametrize("t", [1, 12])
 def test_c10_couche_glm_reelle_egale_le_chemin_d_avant(monkeypatch, t):
     """Couche 1 de GLM-4.7-Flash k48-calibA (lue par le manifeste, `_linear`

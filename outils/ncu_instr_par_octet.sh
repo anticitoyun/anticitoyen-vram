@@ -13,7 +13,7 @@ set -euo pipefail
 NCU_SORTIE=${NCU_SORTIE:-/tmp/ncu-acvram}; mkdir -p "$NCU_SORTIE"
 MOTEUR=${1:-acvram}; B=${2:-12}
 ICI=$(dirname "$(readlink -f "$0")")
-MODELE=${BANC_MODELE_CHEMIN:-/mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4}
+MODELE=${BANC_MODELE_CHEMIN:-$("$(dirname "$0")/racine_modeles.py")/Qwen3-Coder-30B-A3B-nvfp4}
 VLLM_MODELE=${VLLM_MODELE:-/mnt/4TO_SATACMR_2022/Modeles/models_vllm/Qwen3-Coder-30B-A3B-Instruct-FP4}
 export ACVRAM_TYPE=mesure BANC_PAS_NCU=${BANC_PAS_NCU:-1}
 # Chaque noyau est rejoue par ncu avec sauvegarde/restauration de TOUTE la memoire

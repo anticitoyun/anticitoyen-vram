@@ -9,12 +9,17 @@ import os
 import json
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '.'))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 
 # Racines du parc, dans l'ordre de priorite. La premiere suit le montage
 # reel du SSD (12/09/2026 : passage Mint→Ubuntu, changement de point de montage).
 PARC_ROOTS = [
-    '/mnt/2TO_2023_980PRO/Modeles/models_acvram',
-    '/mnt/2TO_2023_980PRO/Modeles/models_acvram',
+    _RACINE,
+    _RACINE,
 ]
 
 # Surcharge par variable d'env, deux formes acceptees :

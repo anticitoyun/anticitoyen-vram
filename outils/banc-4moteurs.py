@@ -25,7 +25,7 @@ sur mon premier essai).
 
 Modèles, un par moteur (même modèle de base ; NVFP4 pour acvram et vLLM,
 GGUF Q4_K_M pour llama.cpp — son seul format) :
-  acvram     /mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4
+  acvram     $(outils/racine_modeles.py)/Qwen3-Coder-30B-A3B-nvfp4
   vLLM       /mnt/4TO_SATACMR_2022/Modeles/models_vllm/Qwen3-Coder-30B-A3B-Instruct-FP4
              (NVFP4/Qwen3-Coder-30B-A3B-Instruct-FP4, NVIDIA ModelOpt,
              téléchargé le 14/09 avec accord explicite — 18,1 Gio)

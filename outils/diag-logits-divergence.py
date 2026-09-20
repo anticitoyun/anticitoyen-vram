@@ -4,6 +4,11 @@
 candidats en tete -- ecart d'un ulp bf16 (bruit numerique legitime) ou ecart
 franc (bogue reel) ?"""
 import os, sys
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '.'))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 sys.path.insert(0, "~/Bureau/Claude/travail/poste1")
 os.environ["ACVRAM_REPIN"] = "0"
 
@@ -12,7 +17,7 @@ from acvram.engine.loader import load_model
 from acvram.engine.runner import Engine
 from acvram.engine.sampler import SamplingParams
 
-MODEL = "/mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4"
+MODEL = _RACINE + "/Qwen3-Coder-30B-A3B-nvfp4"
 N_SEQ_INIT = 11
 
 

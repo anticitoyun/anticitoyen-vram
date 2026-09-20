@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Racine du parc de modeles convertis, surchargeable par ACVRAM_MODELES.
 
 Le SSD a change de point de montage au passage Ubuntu (12/09) : plutot que
@@ -37,3 +38,17 @@ def racine_modeles() -> str:
 
 
 MODELES = racine_modeles()
+
+
+def alias(nom: str) -> str:
+    """Chemin d'un converti nommé sous la racine du moment."""
+    return os.path.join(racine_modeles(), nom)
+
+
+def alias_absent(nom: str) -> str:
+    """Raison de skip pytest, vide si le dossier existe (nom stable : grep « alias absent »)."""
+    return "" if os.path.isdir(alias(nom)) else f"alias absent sous racine_modeles() : {alias(nom)}"
+
+
+if __name__ == "__main__":
+    print(MODELES)

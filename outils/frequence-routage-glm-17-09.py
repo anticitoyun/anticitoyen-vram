@@ -18,12 +18,17 @@ import os
 import sys
 import time
 from pathlib import Path
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '.'))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 import torch
 
-MODEL = "/mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-srcbf16-nvfp4"
+MODEL = _RACINE + "/GLM-4.7-Flash-srcbf16-nvfp4"
 CORPUS = "/mnt/4TO_SATACMR_2022/Modeles/corpus/wiki-gptq.txt"
 N_JETONS = int(sys.argv[1]) if len(sys.argv) > 1 else 512
 MAX_MODEL_LEN = N_JETONS + 64

@@ -11,6 +11,11 @@ import pathlib
 
 import pytest
 import torch
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '../outils'))
+from racine_modeles import racine_modeles as _racine_modeles, alias_absent as _alias_absent  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 
 RACINE = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(RACINE))
@@ -147,8 +152,8 @@ def test_c11_gemm_etroit_sur_la_vue_egale_la_reference_sur_carte():
     assert (gemm_etroit.gemm_etroit(x, v2, False)[:, :64].float() - ref).norm() / ref.norm() > 1e-2
 
 
-CLASSES = ["/mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4",
-           "/mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-srcbf16-nvfp4-k48-calibA"]
+CLASSES = [pytest.param(_RACINE + "/" + a, marks=pytest.mark.skipif(bool(_alias_absent(a)), reason=_alias_absent(a)))
+           for a in ("Qwen3-Coder-30B-A3B-nvfp4", "GLM-4.7-Flash-srcbf16-nvfp4-k48-calibA")]
 
 
 def _premier_int8(dossier):

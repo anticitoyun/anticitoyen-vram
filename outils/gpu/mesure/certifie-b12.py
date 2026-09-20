@@ -7,6 +7,11 @@ t/s, J/jeton brut, W, en-tete REGLES §3, preuve du bras lue dans le module.
 Usage : certifie-b12-15-09.py NOM_BRAS SORTIE.json [B=12]
 """
 import json, os, subprocess, sys, time
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '../..'))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 MAIN_REPO = os.environ.get("ACVRAM_ARBRE", "~/Bureau/Claude/anticitoyen-vram")
 sys.path.insert(0, MAIN_REPO)
 sys.path.insert(0, "~/Bureau/Claude/travail/poste3/outils/gpu/mesure")
@@ -21,7 +26,7 @@ from energie import Energie, nvml  # type: ignore  # noqa: E402
 BRAS, SORTIE = sys.argv[1:3]
 B_ARG = int(sys.argv[3]) if len(sys.argv) > 3 else 12
 MODEL = os.environ.get("ACVRAM_MODELE_MESURE",
-                       "/mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4")
+                       _RACINE + "/Qwen3-Coder-30B-A3B-nvfp4")
 B, CTX, PROMPT_LEN, CIBLE_S, REPOS_S = B_ARG, 2048, 256, 20.0, 30.0
 if os.environ.get("CERT_PUR", "0") == "1":
     # CTX doit etre pose AVANT load_model (max_model_len) : 2560 -> 2300 pas >= 22 s meme a 9 ms/pas

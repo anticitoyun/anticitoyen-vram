@@ -1,7 +1,7 @@
 """Rien de ce qui part dans le paquet ne doit identifier la machine.
 
 Le 9/09/2026, `cli.py` portait en dur
-`/mnt/2TO_2023_980PRO/Modeles/models_acvram` comme repli du
+le parc du 980 PRO (littéral `_DEFAUT` de outils/racine_modeles.py depuis le 20/09) comme repli du
 dossier de sortie. `tools/construire-deb.sh` copie `acvram/` tel quel : le
 chemin, et le nom d utilisateur dedans, seraient partis chez quiconque
 installe le paquet. Ce n est pas un secret cryptographique, c est une fuite

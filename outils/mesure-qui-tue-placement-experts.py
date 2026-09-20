@@ -21,7 +21,7 @@ l'exil par couche vaut 3-4 (mémoire : « l'exil d'une couche est une falaise »
 
 Usage :
     outils/carte.sh .venv/bin/python outils/mesure-qui-tue-placement-experts.py \\
-        --model /mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4 \\
+        --model "$(outils/racine_modeles.py)"/Qwen3-Coder-30B-A3B-nvfp4 \\
         --sortie mesure-qui-tue-13-09.json
 """
 from __future__ import annotations
