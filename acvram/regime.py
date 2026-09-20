@@ -98,6 +98,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("DENSE_ETROIT_STAGES", "3", None, None, "étages du GEMM dense étroit Triton"),
     Variable("INSTA_PAS", "256", None, None, "pas entre deux relevés instantanés"),
     Variable("GRAPHES_TABLE", "", None, None, "graphes sur les piles à table (placement par expert)"),
+    Variable("PILE_SANS_RENDU", "", None, "1",
+             "1 = témoin : le cache de l'allocateur n'est pas rendu après chaque pile d'experts construite (bras A de gemma-capture-20-09 : première capture en OOM, Triton en OOM)"),
     Variable("MLP_HOTE_CPU", "", None, None, "1 = MLP exilé calculé sur le processeur"),
     Variable("KDA_CHUNK", "1", None, None, "taille de bloc KDA"),
     Variable("MAMBA_CHUNK", "1", None, None, "taille de bloc Mamba2"),

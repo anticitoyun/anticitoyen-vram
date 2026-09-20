@@ -39,10 +39,20 @@ for B in GODETS:
         r["replis_eager"] = sorted(getattr(eng.graphs, "_raisons_eager_vues", set())) if eng.graphs is not None else ["graphes absents"]
         r["n_replis_eager"] = int(getattr(eng.graphs, "replis_eager", 0)) if eng.graphs is not None else 0
         r["ok"] = bool(r["graphes_on"]) and r["lot"] == B and not r["replis_eager"] and r["n_replis_eager"] == 0
+        # photos VRAM du GraphRunner (chantier-gemma-capture-godet1-20-09) : octets
+        # libres / réservés / alloués avant la première capture, et après un échec
+        r["memoire_avant_capture"] = eng.regime().get("graphes_memoire_avant_capture")
+        r["memoire_apres_echec"] = eng.regime().get("graphes_memoire_apres_echec")
         del eng; torch.cuda.empty_cache()
     except Exception as e:
-        r["ok"] = False; r["erreur"] = f"{type(e).__name__}: {str(e)[:200]}"; r["trace"] = traceback.format_exc()[-800:]
+        # ACVRAM_TRACEBACK=1 (même interrupteur que le CLI) : pile ENTIÈRE, au journal
+        # aussi — 800 caractères ne montraient pas quel noyau Triton tombait (Ornith)
+        pile = traceback.format_exc()
+        r["ok"] = False; r["erreur"] = f"{type(e).__name__}: {str(e)[:200]}"
+        r["trace"] = pile if os.environ.get("ACVRAM_TRACEBACK") else pile[-800:]
         print("ERREUR godet", B, r["erreur"], flush=True)
+        if os.environ.get("ACVRAM_TRACEBACK"):
+            print(pile, flush=True)
         res["godets"][str(B)] = r; break   # erreur CUDA collante : le processus ne vaut plus rien
     res["godets"][str(B)] = r
     print("GODET", json.dumps({k: v for k, v in r.items() if k not in ("trace", "engine_regime")}), flush=True)

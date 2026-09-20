@@ -220,6 +220,15 @@ class GraphRunner:
         self._last_key: Optional[tuple[int, int]] = None
         self._raisons_eager_vues: set = set()
         self.replis_eager = 0                  # pas retombés en eager depuis le démarrage
+        # Instrument (gemma-4-26B-A4B, capture du godet 1 en OOM alors que les
+        # godets 2/8/16 se capturent : chantier-gemma-capture-godet1-20-09) :
+        # photographie de la VRAM juste AVANT la première capture du moteur, et
+        # juste après un échec — libre (pilote), réservé et alloué (allocateur).
+        # Un OOM de capture avec `réservé − alloué` grand n'est pas un manque
+        # de VRAM : c'est du cache que l'allocateur ne rend pas pendant une
+        # capture (le bassin privé du graphe exige des segments neufs).
+        self.memoire_avant_capture: Optional[dict] = None
+        self.memoire_apres_echec: Optional[dict] = None
         # Posée AVANT _eligible, qui la remplit : l'initialiser après
         # l'effacerait à chaque fois, et le message aurait annoncé
         # « raison non nommée » pour tous les cas nommés.
@@ -353,6 +362,48 @@ class GraphRunner:
                 return nom
         return "module inconnu"
 
+    # -- mémoire autour de la première capture ----------------------------
+    def _photo_memoire(self) -> Optional[dict]:
+        """Octets : ``libre`` (pilote, `mem_get_info`), ``reserve`` et
+        ``alloue`` (allocateur PyTorch) sur l'appareil des graphes ; ``None``
+        sans CUDA (à sec) — la photo n'est jamais un chiffre inventé."""
+        if self.device is None or not torch.cuda.is_available():
+            return None
+        try:
+            libre, total = torch.cuda.mem_get_info(self.device)
+            return {"libre": int(libre), "total": int(total),
+                    "reserve": int(torch.cuda.memory_reserved(self.device)),
+                    "alloue": int(torch.cuda.memory_allocated(self.device))}
+        except Exception:                                   # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _ligne_memoire(photo: dict) -> str:
+        g = 2 ** 30
+        return (f"libre {photo['libre'] / g:.2f} Gio, réservé {photo['reserve'] / g:.2f}, "
+                f"alloué {photo['alloue'] / g:.2f} "
+                f"(cache non rendu {(photo['reserve'] - photo['alloue']) / g:.2f})")
+
+    def _avant_premiere_capture(self) -> None:
+        """Une ligne au journal avant la PREMIÈRE capture du moteur, et la photo
+        sous `regime()['graphes_memoire_avant_capture']`. Une seule fois."""
+        if self.captures or self.memoire_avant_capture is not None:
+            return
+        photo = self._photo_memoire()
+        if photo is None:
+            return
+        self.memoire_avant_capture = photo
+        print(f"[graphe] mémoire avant capture : {self._ligne_memoire(photo)}", flush=True)
+
+    def _apres_echec_capture(self) -> None:
+        """Même photo juste après un échec de capture, AVANT `empty_cache` :
+        c'est l'état qui a fait échouer, pas celui d'après le ménage."""
+        photo = self._photo_memoire()
+        if photo is None:
+            return
+        self.memoire_apres_echec = photo
+        print(f"[graphe] mémoire après l'échec : {self._ligne_memoire(photo)}", flush=True)
+
     # -- exécution -------------------------------------------------------
     def _eager(self, raison: str) -> None:
         """Un lot qui retombe en eager le dit — une fois par raison distincte.
@@ -446,6 +497,7 @@ class GraphRunner:
                     print(f"[graphe] limite {MAX_GRAPHS} atteinte, clé {key} : eager",
                           flush=True)
                 return False
+            self._avant_premiere_capture()
             try:
                 entry = self._capture(b, ql, nblk, batch)
             except Exception as e:                        # noqa: BLE001
@@ -480,6 +532,7 @@ class GraphRunner:
                              if extensible else ""), flush=True)
                 self.enabled = False
                 self.graphs.clear()
+                self._apres_echec_capture()           # avant le ménage : l'état fautif
                 torch.cuda.empty_cache()
                 # gemma-4-26B-A4B (verdict-capture-parc-19-09) : capture du godet 1
                 # impossible (OOM), le service tournait en eager 2,9 × plus lent
