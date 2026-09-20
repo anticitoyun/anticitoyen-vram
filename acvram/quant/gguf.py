@@ -96,6 +96,19 @@ def _garde_rope_sections(arch: str, sections) -> None:
 
 
 
+def mmproj_a_cote(path: str) -> Optional[str]:
+    """Le projecteur multimodal (``mmproj-*.gguf``) rangé à côté d'un GGUF,
+    ou None. La voie GGUF-mmproj est hors périmètre : `convert_checkpoint`
+    le nomme dans un refus et convertit le modèle de langue seul."""
+    d = path if os.path.isdir(path) else os.path.dirname(path) or "."
+    try:
+        cands = sorted(f for f in os.listdir(d)
+                       if f.startswith("mmproj") and f.endswith(".gguf"))
+    except OSError:
+        return None
+    return cands[0] if cands else None
+
+
 def find_gguf(path: str) -> Optional[str]:
     """Le fichier .gguf d'un répertoire.
 

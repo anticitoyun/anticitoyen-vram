@@ -293,6 +293,20 @@ SENSITIVE_SUFFIXES = (
 )
 
 
+# Tour visuelle (contrat poste7-go-multimodal-organisation-20-09 § 2, pièce (a)) :
+# Gemma 4 range l'encodeur sous model.vision_tower.* et son projecteur sous
+# model.embed_vision.*, Qwen3-VL sous model.visual.*. Ces tenseurs sont GARDÉS
+# EN BF16 SOUS LEUR NOM SOURCE, jamais quantifiés (même règle que les
+# projections MLA, REGLES § 9) : le plan de placement ne connaît que les
+# couches texte, et `model.vision_tower.*.layers.N.*` porte un indice de
+# couche qui n'est pas le sien. Un alias sans ces tenseurs = texte seul.
+VISION_PREFIXES = ("model.vision_tower.", "model.embed_vision.", "model.visual.")
+
+
+def est_tenseur_vision(name: str) -> bool:
+    return name.startswith(VISION_PREFIXES)
+
+
 def _est_projection_attn(name: str) -> bool:
     """poste7-p2-qkvo-int8-canal-18-09, generalise le 18/09 pour GLM (MLA) :
     q/k/v/o couvre l'attention GQA de Coder, mais GLM nomme ses projections
@@ -326,6 +340,10 @@ class TensorRouter:
 
     def format_for(self, name: str) -> str:
         """Le format d'un tenseur est celui de l'appareil où sa couche s'exécute."""
+        if est_tenseur_vision(name):
+            # jamais quantifiée, jamais fp16 même sous --format fp16 : le
+            # contrat multimodal sert la tour en bf16 eager (VISION_PREFIXES)
+            return "bf16"
         if name.endswith("e_score_correction_bias"):
             # fp32 INCONDITIONNEL, pas seulement "16 bits protégés" : ce biais
             # porte une grande valeur commune (~9 pour GLM-4.7-Flash) et une
@@ -641,16 +659,33 @@ def _nemotron_h_valeur(dst: str, t: torch.Tensor) -> torch.Tensor:
 
 def _adapt_hf(source: Iterator[tuple[str, torch.Tensor]], spec
               ) -> Iterator[tuple[str, torch.Tensor]]:
-    mt = str(getattr(spec, "model_type", "") or spec.raw.get("model_type", ""))
+    """Enrobages multimodaux HF : le modèle de langue vit sous
+    model.language_model. et va aux adaptateurs par architecture ; la tour
+    visuelle (VISION_PREFIXES) passe INTACTE, nom et valeurs, sans jamais
+    traverser un renommage texte. Tour audio et `visual.` nu (Qwen2-VL)
+    restent écartés : alias texte seul."""
+    en_attente: list[tuple[str, torch.Tensor]] = []
 
     def _texte_seul(src):
-        # enrobages multimodaux HF : le modèle de langue vit sous
-        # model.language_model., la tour visuelle n'est pas servie
         for n, t in src:
-            if n.startswith(("model.visual.", "visual.", "model.vision_tower.", "model.audio_tower.")):
+            if est_tenseur_vision(n):
+                en_attente.append((n, t))
+                continue
+            if n.startswith(("visual.", "model.audio_tower.")):
                 continue
             yield n.replace("model.language_model.", "model."), t
-    source = _texte_seul(source)
+
+    for item in _adapt_texte(_texte_seul(source), spec):
+        while en_attente:
+            yield en_attente.pop(0)
+        yield item
+    while en_attente:
+        yield en_attente.pop(0)
+
+
+def _adapt_texte(source: Iterator[tuple[str, torch.Tensor]], spec
+                 ) -> Iterator[tuple[str, torch.Tensor]]:
+    mt = str(getattr(spec, "model_type", "") or spec.raw.get("model_type", ""))
     if mt == "muse_glimmer":
         yield from _adapt_muse(source, spec)
         return
@@ -1313,6 +1348,13 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
 
     from .hfquant import is_hfquant
     source_quantifiee = opts.passage_direct and is_hfquant(model_path)
+    vision_bytes = 0                     # Σ octets des tenseurs VISION_PREFIXES gardés
+    from .gguf import is_gguf, mmproj_a_cote
+    if is_gguf(model_path) and mmproj_a_cote(model_path):
+        print(f"[acvram] refus nommé : {mmproj_a_cote(model_path)} ignoré, la voie "
+              f"GGUF-mmproj est hors périmètre (contrat multimodal § 2 pièce (a), "
+              f"seule la voie safetensors HF porte la tour) ; alias texte seul",
+              flush=True)
     for name, tensor in _adapt_hf(_iter_checkpoint(model_path, opts.passage_direct), spec):
         report.tensors += 1
         if progress and report.tensors % 25 == 0:
@@ -1358,6 +1400,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             entry["keys"] = [name]
             report.per_format[fmt] = report.per_format.get(fmt, 0) + \
                 out.numel() * out.element_size()
+            if est_tenseur_vision(name):
+                vision_bytes += out.numel() * out.element_size()
             manifest["tensors"][name] = entry
             keys.append(name)
             continue
@@ -2224,6 +2268,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
 
     _verifier_homogeneite_moe(manifest["tensors"], spec.num_layers)
     manifest["diagnostic_fusion"] = _diagnostic_fusion(manifest["tensors"])
+    manifest["vision_bytes"] = vision_bytes
+    manifest["vision"] = "oui" if vision_bytes else "non"
     if not opts.dry_run:
         _verifier_formats_declares(manifest, writer.weight_map)
 
@@ -2268,7 +2314,10 @@ def _copy_tokenizer(src: str, dst: str) -> None:
     import shutil
     for fn in ("tokenizer.json", "tokenizer_config.json", "tokenizer.model",
                "special_tokens_map.json", "generation_config.json", "config.json",
-               "chat_template.jinja"):
+               "chat_template.jinja",
+               # multimodal : le processeur d'images accompagne la tour
+               "processor_config.json", "preprocessor_config.json",
+               "video_preprocessor_config.json"):
         p = os.path.join(src, fn)
         if os.path.isfile(p):
             shutil.copy2(p, os.path.join(dst, fn))

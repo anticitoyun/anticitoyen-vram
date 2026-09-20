@@ -99,8 +99,10 @@ class EXL3Checkpoint:
 
         for name, (f, k) in self.plain.items():
             out = self._rename(name)
-            if out.startswith(("visual.", "model.visual.", "mmproj")):
-                continue                       # la tour visuelle n'est pas servie
+            if out.startswith(("visual.", "mmproj")):
+                continue                       # `visual.` nu (Qwen2-VL) : texte seul
+            # model.visual.* / model.vision_tower.* / model.embed_vision.* passent
+            # tels quels : `_adapt_hf` (VISION_PREFIXES) les garde en bf16
             yield out, get(f, k)
 
         for stem, parts in self.quant.items():
