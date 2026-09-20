@@ -61,8 +61,14 @@ def test_prep_regrille_au_bit_contre_temoin_sur_carte(B, rope):
     k_b = (torch.randn(NH, RANK, NOPE, device="cuda") * 0.05).to(DT).contiguous()
     w_norm = (torch.rand(RANK, device="cuda") + 0.5).to(DT).contiguous()
     if rope:
-        ang = torch.arange(2048, device="cuda", dtype=torch.float32)[:, None] * (0.01 * torch.arange(ROPE // 2, device="cuda")[None, :])
-        cos32, sin32 = torch.cos(ang).to(DT).float().contiguous(), torch.sin(ang).to(DT).float().contiguous()
+        # les tables du noyau sont celles de RotaryEmbedding.tables32 (layers.py `_ensure` : emb = cat(freqs, freqs)
+        # → [max_pos, rope] en PLEINE largeur, cos/sin bf16 puis fp32 ; le noyau lit cos32[pos·rope + j], j < rope/2) —
+        # une demi-table [max_pos, rope/2] est refusée par le TORCH_CHECK du lanceur (poste2, 20/09 08 h 10)
+        inv_freq = 1.0 / (10000.0 ** (torch.arange(0, ROPE, 2, device="cuda", dtype=torch.float32) / ROPE))
+        freqs = torch.outer(torch.arange(2048, device="cuda", dtype=torch.float32), inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)                                              # [2048, rope]
+        cos32, sin32 = emb.cos().to(DT).float().contiguous(), emb.sin().to(DT).float().contiguous()
+        assert cos32.shape == (2048, ROPE) and cos32.dtype == torch.float32
     else:
         cos32 = sin32 = None
     a = ext.mla_prep_batch(q, kvp, lens, cos32, sin32, k_b, w_norm, NOPE, ROPE, RANK, 1e-5)

@@ -6,8 +6,8 @@ tests/test_mla_prep_regrille_c14b.py.)
 
 À sec : la glue (le chemin de lot passe v_b au noyau seulement quand tout s'y prête, et retombe
 sur l'einsum sinon), la variable de régime nommée sur la ligne, la source CUDA. Sur carte : le combine
-fusionné contre l'einsum (≤ 1 ulp bf16 de la sortie, les deux à ≤ 1 ulp bf16 d'une référence
-float64 — le fp32 n'est jamais matérialisé par le noyau) sur les formes réelles (b=12, nh=20,
+fusionné contre l'einsum (≤ 1 ulp bf16 de la sortie ; juge fp64 par ligne RELATIF : d(noyau) ≤
+d(einsum) + 6 ulp bf16 — le fp32 n'est jamais matérialisé par le noyau) sur les formes réelles (b=12, nh=20,
 rank=512, dv=128, S=8 → SL=1 ; b=3, L=4 096 → SL=4).
 """
 import os
@@ -185,9 +185,12 @@ def _lot(B, L, n, seed=1):
 @pytest.mark.parametrize("B,L,n", [(12, 512, 300), (12, 128, 128), (3, 4096, 3900), (1, 4096, 4000)])
 def test_combine_fusionne_contre_einsum_sur_carte(B, L, n):
     """b=12, L=512 (S=8, SL=1) ; b=3, L=4 096 (S≥32, SL≥2 : le morceau de colonnes en boucle) ;
-    b=1 (régime FIN). Sortie bf16 du noyau contre bf16(einsum fp32 de v_b32 · o_lat) : ≤ 1 ulp
-    bf16, et les deux à ≤ 1 ulp bf16 d'une référence float64 de v_b·o_lat (o_lat = celui du
-    noyau) ; le nombre de positions ≠ est affiché (elles sont aux frontières d'arrondi bf16)."""
+    b=1 (régime FIN). Juge (d) (poste7 07 h 50, forme précisée par poste2 08 h 10) : sortie bf16 du
+    noyau contre bf16(einsum fp32 de v_b32 · o_lat) ≤ 1 ulp bf16 (absolu) ET juge fp64 PAR LIGNE,
+    RELATIF à la référence (REGLES § 7) : d(noyau, fp64) ≤ d(einsum, fp64) + 6 ulp bf16 — pas
+    « ≤ 1 absolu » : sur la carte le noyau est à 2,0 ulp de fp64 là où l'einsum l'est aussi (c'est
+    la résolution bf16 de la sortie, pas le combine). Les trois écarts (noyau/einsum, noyau/fp64,
+    einsum/fp64) sont imprimés AVANT l'assertion ; positions ≠ comptées (frontières d'arrondi)."""
     ext = _ext_carte()
     caches, lens, ptrs, q = _lot(B, L, n)
     scale = 1.0 / (NOPE + ROPE) ** 0.5
@@ -197,11 +200,16 @@ def test_combine_fusionne_contre_einsum_sur_carte(B, L, n):
     assert y.dtype == DT and y.shape == (B, NH, DV)
     y_e = torch.einsum('hvr,bhr->bhv', vb.float(), o_lat).to(DT)
     y_64 = torch.einsum('hvr,bhr->bhv', vb.double(), o_lat.double())
-    e_ke, e_k64, e_e64 = _ulp_bf16(y_e, y), _ulp_bf16(y_64.to(DT), y), _ulp_bf16(y_64.to(DT), y_e)
+    u = 2.0 ** (torch.floor(torch.log2(y_64.abs().clamp_min(1e-30))) - 7)         # ulp bf16 de la référence
+    d_k = ((y.double() - y_64).abs() / u).amax(dim=-1)                                # [B, nh] par ligne (b, h)
+    d_e = ((y_e.double() - y_64).abs() / u).amax(dim=-1)
+    e_ke, e_k64, e_e64 = _ulp_bf16(y_e, y), d_k.max().item(), d_e.max().item()
     diff = (y != y_e).sum().item()
-    print(f"\nB={B} L={L} : noyau vs einsum {e_ke:.2f} ulp bf16 ({diff}/{y.numel()} positions ≠), "
-          f"noyau vs f64 {e_k64:.2f}, einsum vs f64 {e_e64:.2f}")
-    assert e_ke <= 1 and e_k64 <= 1 and e_e64 <= 1
+    print(f"\nB={B} L={L} : noyau vs einsum {e_ke:.2f} ulp bf16 ({diff}/{y.numel()} positions ≠) ; "
+          f"noyau vs f64 {e_k64:.2f}, einsum vs f64 {e_e64:.2f} ulp bf16 (max par ligne) ; "
+          f"pire d(noyau) − d(einsum) par ligne {(d_k - d_e).max().item():+.2f}")
+    assert e_ke <= 1, f"noyau vs einsum {e_ke:.2f} ulp bf16 > 1"
+    assert bool((d_k <= d_e + 6).all()), f"juge fp64 par ligne : d(noyau) > d(einsum) + 6 ulp sur {(d_k > d_e + 6).sum().item()} lignes"
     # témoin cassant : un v_b décalé d'une tête doit se voir
     vb2 = torch.roll(vb, 1, dims=0).contiguous()
     y2 = ext.mla_decode_1p(q, ptrs, None, lens, L, RANK, scale, False, vb2)
