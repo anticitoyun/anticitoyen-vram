@@ -1,0 +1,11 @@
+# Verdict — preuve P4 « texte au bit » (poste7/chef 13 h 46) : l'arbre multimodal main 6201cff3 (⊇ 2735ee6a = P0 conversion + P1 moteur + P2 API) contre 1f1d96bf (0.6.32 servi), mêmes alias, même godet, même régime par défaut : **TENU** — (1) jetons argmax b=12 sur 64 pas forcés **identiques 100 %** (sha256 `2bb5e8c07226ab39` Coder, `732a48717dfa6876` GLM, PPL au bit 22,512332654359522 / 18,9885812406399) ; (2) certifie ABAB GLM : **b=1 pas +0,53 %** (A 6,019 / 6,085, B 6,077 / 6,091 ms), **J +0,00 %** ; **b=12 pas −0,01 %** (A 16,907 / 16,918, B 16,931 / 16,892), **J +0,05 %** — tout dans ± 3 % : le code multimodal ne touche pas le chemin texte
+
+instrument : `scratchpad/p4-texte-20-09/chaine.sh` (nue, un `carte.sh` par bras, `ACVRAM_CPUS=0-15`), `equiv-arbre.py` (= `equiv-b12.py` sans l'assertion de glue : deux ARBRES au même défaut, 12 fenêtres × (256 + 64) jetons de tranche0, décodage forcé, sha256 des argmax, PPL) et `certifie-b12.py` b=1 / b=12 (1 787 pas) ; arbres `poste2-0632` = 1f1d96bf et `poste2-0631` = main 6201cff3 ; 14:21:20-14:37:32 ; **hôte : copie de gemma-4-31B-it-bf16 (59 Go, 4TO → nvme3, nice/ionice) en parallèle** → premier chargement Coder 5,5 min au lieu de 1 (disque), sans effet sur les chiffres (A et B alternés) ; 3080 Ti pid 4286 (pair) ; lignes de régime : `hote=thp,omp8,cpus0-15 mla_glue=2` des deux côtés, aucune ligne `vision=` (alias texte)
+scellé (poste7/chef, avant) : jetons 100 % identiques ; pas b=1 / b=12 ± 3 % ; J ± 3 %
+mesuré : voir en tête ; b=1 J A 1,3999 / 1,3998, B 1,3979 / 1,4018 ; b=12 J A 0,4144 / 0,4157, B 0,4147 / 0,4158 ; W 230-232 (b=1), 294-295 (b=12)
+verdict : P0 + P1 + P2 sont neutres sur le texte au bit et au pas : la dispersion après `model.py:3162`, le masque et la clé de cache ne s'exécutent que sur `images` non vide ; feu vert P4 de mon côté (scellé d'poste1 tenu)
+durée : 16,2 min de carte (14:21:20-14:37:32)
+suite : chef : indexer ; ma file : (c) coût nvfp4 du 31B (mesure-c.py sur gemma-4-31B-it-nvfp4-vision puis sur gemma-4-31B-it-bf16 étagé dès la copie finie) → duel (c') contre 0,665 s / 316 / 94
+
+## Rejouable
+`ARBRE_A=<worktree 1f1d96bf> ARBRE_B=<worktree main> O=<sortie> ACVRAM_MODELES=/mnt/AI_GENERATOR/models_acvram PYA=<python venv> bash scratchpad/p4-texte-20-09/chaine.sh` (16 min ; `equiv-*/equiv-*.json`, `cert-*.json`).
