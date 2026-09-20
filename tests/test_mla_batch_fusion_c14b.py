@@ -60,7 +60,9 @@ class _Ext:
 
 
 def _module():
-    from tests.test_mla_niveau2_jumeaux import _module
+    import importlib.util, pathlib
+    _spec = importlib.util.spec_from_file_location("test_mla_niveau2_jumeaux", pathlib.Path(__file__).with_name("test_mla_niveau2_jumeaux.py"))
+    _m = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_m); _module = _m._module
     return _module("cpu")
 
 

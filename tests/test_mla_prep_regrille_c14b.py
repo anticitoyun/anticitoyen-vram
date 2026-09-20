@@ -45,12 +45,17 @@ def test_cablage_variable_prep_grille(monkeypatch, grille):
     (grille d'avant) ; déclarée dans regime.py (lue à l'import, nommée sur la ligne dès 1) et cli.VARIABLES_LUES."""
     from acvram import cli, regime
     from acvram.engine import mla as MLA
-    from tests.test_mla_niveau2_jumeaux import _module, jumeau_prep_batch
+    import importlib.util, pathlib
+    # `tests` n'est pas un paquet (pas de __init__) : import par chemin, comme pytest le fait (rootdir)
+    _spec = importlib.util.spec_from_file_location("test_mla_niveau2_jumeaux", pathlib.Path(__file__).with_name("test_mla_niveau2_jumeaux.py"))
+    _m = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_m)
+    _module, jumeau_prep_batch = _m._module, _m.jumeau_prep_batch
     v = {x.nom: x for x in regime.VARIABLES}["MLA_PREP_GRILLE"]
-    assert v.defaut == "0" and v.lu_a == ("acvram.engine.mla", "_MLA_PREP_GRILLE") and v.torch == "0"
+    assert v.defaut == "1" and v.lu_a == ("acvram.engine.mla", "_MLA_PREP_GRILLE") and v.torch == "0"   # défaut 1 en 0.6.31 (M1 bis)
     assert "ACVRAM_MLA_PREP_GRILLE" in cli.VARIABLES_LUES
     monkeypatch.setattr(MLA, "_MLA_PREP_GRILLE", grille)
-    assert ("ACVRAM_MLA_PREP_GRILLE" in regime.regime_noyaux()["hors_defaut"]) == grille
+    assert ("ACVRAM_MLA_PREP_GRILLE" in regime.regime_noyaux()["hors_defaut"]) == (not grille)
+    assert MLA.regime_prep_texte() == ("mla_prep=grille" if grille else "mla_prep=temoin")
     la = _module("cpu")
     vus = []
 

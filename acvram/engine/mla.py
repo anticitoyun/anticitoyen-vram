@@ -72,6 +72,12 @@ if _MLA_CORE_DECODE not in ("fp32", "tf32", "bf16"):          # flash = préfill
 _FLASH_REPLI: str | None = None      # raison du repli fp32 sous MLA_CORE=flash, posée au premier préfill
 
 
+def regime_prep_texte() -> str:
+    """`mla_prep=grille` (défaut 0.6.31 : mla_prep_batch regrillé, 492 blocs à b=12, au bit) | `mla_prep=temoin`
+    (grille d'avant, 172 blocs) — nommé défaut compris (REGLES § 4)."""
+    return "mla_prep=grille" if _MLA_PREP_GRILLE else "mla_prep=temoin"
+
+
 def regime_coeur_texte() -> str:
     """Le mot `mla_core=…` de la ligne de régime : rien sous fp32 ; `tf32(≤2048 clés)` /
     `bf16(≤2048 clés)` (règle des clés vues) ; `flash(fp32)` — ou `flash(repli fp32: raison)`
@@ -227,7 +233,7 @@ _MLA_BATCH_FUSION = os.environ.get("ACVRAM_MLA_BATCH_FUSION", "0") == "1"
 # d'avant (temoin=True, nh·NR + B blocs). Les deux sont AU BIT (prep_faux 0 sur 799
 # couches-pas, verdict poste2 09 h 00) : la variable ne porte que le temps — défaut 1 après
 # (a) ≤ 8 µs/couche ET pas b=12 non perdu. Indépendante de MLA_BATCH_FUSION (le combine).
-_MLA_PREP_GRILLE = os.environ.get("ACVRAM_MLA_PREP_GRILLE", "0") == "1"
+_MLA_PREP_GRILLE = os.environ.get("ACVRAM_MLA_PREP_GRILLE", "1") == "1"   # DÉFAUT 1 (0.6.31) si M1 bis tient : (a) ≤ 8 µs/couche, pas b=12 non perdu
 FP8_PAD = 16
 
 
