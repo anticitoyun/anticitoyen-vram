@@ -129,5 +129,13 @@ def test_triton_egale_le_noyau_cuda_actuel():
             cuda = ext.paged_attention(q.contiguous(), c.k, c.k_scale, c.v, c.v_scale, tables.contiguous(),
                                        L.contiguous(), 2, float(scale), 1, int(window))
             vivants = [b for b, n in enumerate(lens) if n]
+            # Chacun contre la référence fp64, pas l'un contre l'autre : deux noyaux à
+            # 0,94 et 0,89 × la borne de part et d'autre de la référence sont à 1,83 ×
+            # entre eux et tous deux conformes (poste2, poste E, 20/09 : [37, 0, 300],
+            # séquence 0, tête 15 — le test se cassait par construction).
+            ref = _reference(c, tables, L, q, 8, scale, window=window)[vivants]   # n_rep = 16 têtes q / 2 kv
+            for nom, out in (("triton", tri), ("cuda", cuda)):
+                hors, pire = _hors(out[vivants], ref)
+                assert hors == 0, (nom, lens, window, hors, pire)
             hors, pire = _hors(tri[vivants], cuda[vivants].double())
-            assert hors == 0, (lens, window, hors, pire)
+            assert pire <= 2.0, (lens, window, hors, pire)     # entre eux : au plus 2 × TOL
