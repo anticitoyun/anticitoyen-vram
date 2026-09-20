@@ -156,6 +156,8 @@ if [ ! -x "$VENV/bin/acvram" ]; then
     # transformers, version EPINGLEE = celle qui charge gemma4 sur le poste (5.17.0) ; import
     # paresseux dans acvram/engine/vision.py : un alias texte ne l importe jamais.
     pip install --quiet "transformers==5.17.0" pillow
+    # processing_gemma4 importe torchvision : la version accordée à torch (même index cu*), jamais une autre
+    pip install --quiet --index-url "$INDEX" torchvision
     # /usr/share est en lecture seule : construire depuis une copie, sinon
     # setuptools échoue en voulant y écrire acvram.egg-info
     COPIE="$BASE/src"
