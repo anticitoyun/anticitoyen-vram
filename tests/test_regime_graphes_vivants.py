@@ -59,6 +59,25 @@ def test_graphes_off_apres_une_capture_ratee_meme_objet(converted):
     assert r["graphes_raison"] == "OutOfMemoryError: capture ratée (test)"
     assert "graphes=off" in engine.regime_ligne()
     assert "graphes=on" not in engine.regime_ligne()
+    # gemma-4-26B-A4B (poste7-cloture-nuit-0540-20-09 rang 3) : la CAUSE est sur la ligne
+    assert "graphes=off(repli eager: OutOfMemoryError: capture ratée (test))" in engine.regime_ligne()
+
+
+def test_graphes_off_demande_ne_porte_pas_de_cause(converted):
+    engine = _engine(converted)            # enable_cuda_graphs=False : off demandé, pas un repli
+    assert "graphes=off " in engine.regime_ligne() and "repli eager" not in engine.regime_ligne()
+
+
+def test_une_capture_ratee_est_un_repli_compte_et_nomme():
+    """`GraphRunner._capture` en échec : `enabled=False` ET un repli compté avec sa raison —
+    avant, `repli_eager=0` et `replis_eager_raisons=[]` sur un service entièrement en eager."""
+    from acvram.engine import graphs as G
+    g = G.GraphRunner.__new__(G.GraphRunner)
+    g._raisons_eager_vues = set(); g.replis_eager = 0
+    g._eager("capture impossible (godet b=1, ql=1) : AcceleratorError: CUDA error: out of memory")
+    g._eager("capture impossible (godet b=1, ql=1) : AcceleratorError: CUDA error: out of memory")
+    assert g.replis_eager == 2 and len(g._raisons_eager_vues) == 1
+    assert any("capture impossible (godet b=1" in r for r in g._raisons_eager_vues)
 
 
 def test_la_clause_graphes_du_calcul_nominal_suit_enabled(converted):

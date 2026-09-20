@@ -481,6 +481,12 @@ class GraphRunner:
                 self.enabled = False
                 self.graphs.clear()
                 torch.cuda.empty_cache()
+                # gemma-4-26B-A4B (verdict-capture-parc-19-09) : capture du godet 1
+                # impossible (OOM), le service tournait en eager 2,9 × plus lent
+                # sans que `repli_eager` ni ses raisons ne le portent — la ligne de
+                # régime disait `graphes=off` sans cause, /metrics `repli_eager=0`.
+                # C'est un repli comme les autres : compté, nommé, une fois.
+                self._eager(f"capture impossible (godet b={b}, ql={ql}) : {self.raison}")
                 return False
             self.graphs[key] = entry
             if os.environ.get("ACVRAM_TRACE_PTRS"):

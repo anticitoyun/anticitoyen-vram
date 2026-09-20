@@ -667,7 +667,12 @@ class Engine:
             piles_txt += " (" + " ; ".join(r["piles_raison"]) + ")"
         kv_seqs = getattr(self.loaded.plan, "kv_planned_seqs", 0) or "?"
         slots = r.get("slots_hybrides")
-        return (f"régime {etat} — graphes={'on' if r['graphes'] else 'off'}"
+        # graphes demandés mais retombés (capture impossible) : la CAUSE est sur la
+        # ligne — `graphes=off(repli eager: AcceleratorError: CUDA error: out of memory)`
+        # (gemma b=1, poste7-cloture-nuit-0540-20-09 rang 3) ; off demandé : `graphes=off`
+        raison_off = (f"(repli eager: {r['graphes_raison']})"
+                      if not r["graphes"] and r.get("graphes_demandes") and r.get("graphes_raison") else "")
+        return (f"régime {etat} — graphes={'on' if r['graphes'] else 'off' + raison_off}"
                 f"{'' if slots is None else f'(hybrides≤{slots})'} "
                 f"repli_eager={r.get('repli_eager', 0)} "
                f"couches_exilées={r['couches_exilees']}/{r['couches_total']} "
