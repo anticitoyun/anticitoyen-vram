@@ -1211,7 +1211,7 @@ if _PAGED_ATTN not in ("cuda", "triton"):
 # somme torch des tranches split-K (réduction par le dernier programme,
 # gemm_etroit), attention paginée sans second noyau de réduction
 # (attn_paginee). Défaut 0 tant que le scellé n'est pas mesuré sur carte.
-_GLUE_COMPACT = int(os.environ.get("ACVRAM_GLUE_COMPACT", "0"))
+_GLUE_COMPACT = int(os.environ.get("ACVRAM_GLUE_COMPACT", "1"))   # défaut 1 depuis le 20/09 (C15-3d bis)
 if _GLUE_COMPACT not in (0, 1):
     raise ValueError(f"ACVRAM_GLUE_COMPACT={_GLUE_COMPACT!r} : attendu 0 ou 1")
 # C15-3b : bissection par fusion — sous GLUE_COMPACT=1, la liste des fusions
