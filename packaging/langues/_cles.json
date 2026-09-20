@@ -68,5 +68,15 @@
  "Serveur d'inférence pour GPU hétérogènes (NVFP4 + INT4) — le thème du logo se choisit dans le menu « Thème » de la barre.",
  "Thème",
  "À propos",
- "config : eco={m} (horloge lue après un changement de mode)"
+ "config : eco={m} (horloge lue après un changement de mode)",
+ "Faire agir le modèle sur le système",
+ "acvram ne fait que servir le modèle (API OpenAI, port {port}). Pour qu'il lise des fichiers, lance des commandes ou administre la machine, il faut un agent : un programme qui reçoit ses réponses, exécute les outils qu'il demande (shell, fichiers) et lui renvoie le résultat. Exemple ci-dessous : acvram + Qwen3-Coder + OpenClaw sur Ubuntu.",
+ "Servir un modèle qui sait appeler des outils (Qwen3-Coder-30B-A3B, GLM-4.7-Flash…) : onglet Serveur, contexte max ≥ 16384, port {port}. acvram transmet les <code>tools</code> de la requête au gabarit du modèle et rend les <code>tool_calls</code> (OpenAI).",
+ "Installer l'agent : OpenClaw (<code>~/.local/bin/openclaw</code>, Node ≥ 26) ou tout agent compatible OpenAI (Open Interpreter, Aider, Continue…). Il tourne sous <b>votre</b> utilisateur, jamais root.",
+ "Déclarer acvram comme fournisseur de l'agent : <code>openclaw configure</code> → fournisseur personnalisé, API <code>openai-completions</code>, base <code>http://127.0.0.1:{port}/v1</code>, clé quelconque (acvram n'en vérifie pas), modèle <code>acvram</code>, fenêtre de contexte = celle du serveur.",
+ "Donner les outils système à l'agent : profil d'outils <code>full</code> (shell, fichiers, réseau local) dans <code>openclaw.json</code>, un espace de travail dédié (<code>workspace</code>) où il a le droit d'écrire, et la confirmation demandée avant toute commande destructrice.",
+ "Lancer : <code>openclaw gateway start</code> (service utilisateur) puis <code>openclaw chat</code> (terminal) ou <code>openclaw agent -m \"liste les fichiers de ~/Documents et résume-les\"</code>. Le modèle répond par des appels d'outils, l'agent les exécute sur Ubuntu, le modèle lit les résultats et poursuit.",
+ "Vérifier : <code>openclaw doctor</code> (passerelle, fournisseur, outils) ; dans la console acvram, la ligne de régime du serveur et les requêtes <code>/v1/chat/completions</code> qui arrivent de l'agent.",
+ "Prudence : un modèle local qui a le shell a tous vos droits. Gardez l'agent sous un utilisateur ordinaire, un espace de travail borné, des sauvegardes, et lisez ce qu'il propose avant d'accepter une commande <code>rm</code>, <code>sudo</code> ou un envoi réseau. Un modèle qui n'a pas été entraîné aux outils (chat pur) rendra du texte au lieu d'appels : choisissez un modèle « instruct » récent.",
+ "Agent OS"
 ]
