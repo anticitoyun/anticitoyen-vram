@@ -63,6 +63,22 @@ DEFAUTS_PAR_VERSION = {
         },
         "mla_core=tf32(≤2048 clés) mla_prep=grille mla_glue=2 glue=compact(8) prefill_glue=compact",
     ),
+    "0.6.34": (                                                          # 0.6.33 + porte de famille du masque image, chauffe de contexte, lanceur paquet, Agent OS Open WebUI (20/09 soir)
+        {
+            "GLUE_COMPACT": "1", "ATTN_WARPS_COMPACT": "8", "PREFILL_COMPACT": "1",
+            "MLA_CORE": "tf32", "MLA_CORE_MAX_CLES": "2048", "MLA_GLUE": "2",
+            "MARLIN_DISTINCT": "0", "MOE_DECODE_MMA": "1", "MOE_DECODE_MMA_MARLIN": "0",
+            "KV_INT8_CANAL": "0", "GODETS_B": "1", "GEMV_LAYOUT": "marlin", "PILE_SANS_RENDU": "",
+            "CPUS": "", "MLA_PREP_GRILLE": "1",
+            # Aucune variable nouvelle non plus : masque_images= (famille du manifeste), ctx_tenu= (chauffe au chargement,
+            # opt-out ACVRAM_CHAUFFE_CTX=0 hors service) et source= (lanceur) sont des lectures, pas des défauts ;
+            # candidat NON installé tant que P3 (1) (b″) et S2 0 × 500 ne sont pas tenus (poste2). La tour de vision se sert quand le manifeste la déclare
+            # (`vision=bf16(eager)` dans la ligne AVEC modèle, regime.py:454), rien dans le défaut nu ;
+            # KV int8 gardé avec image (bande ≤ +1 %, verdict-decode-pas-31b-kv-20-09). Qwen3-VL : code
+            # présent, aucun alias servi ni publié (P3 (1) non joué) — 0.6.34.
+        },
+        "mla_core=tf32(≤2048 clés) mla_prep=grille mla_glue=2 glue=compact(8) prefill_glue=compact",
+    ),
 }
 
 
