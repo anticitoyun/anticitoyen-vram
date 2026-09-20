@@ -126,74 +126,54 @@ def test_f2_un_biais_change_la_selection_mais_pas_les_poids():
     assert torch.allclose(tw, probs.gather(-1, ti.long()), atol=2 ** -20)
 
 
-# --- C15 niveau 3 : logits du routeur DANS le noyau (route_logits_fusee) ----
-# Sous l'interpréteur les entrées sont fp16 (bf16 n'y est pas porté : dot et
-# arrondi rendent n'importe quoi, mesuré le 20/09) et l'arrondi bf16 des logits
-# n'est pas rejoué ; sur carte, bf16 et arrondi comme en service. Le bras
-# bf16 + ARRONDI_BF16 n'a donc de preuve que sur carte (REGLES § 7).
+# --- C15-3c : routeur compact = mêmes logits que le témoin + sélection à 1 warp ----
+# (verdict-c15-niveau3-coder-19-09 addendum 03 h 17 : les versions Triton du GEMM
+# des logits — 0ca85673, 3e62a9b5 — donnaient |Δtopw| 10⁻³ et des experts ≠ A :
+# le témoin sort ses logits en bf16 (`_router_logits`, model.py : dtype_voulu = x.dtype
+# pour softmax sans biais), toute différence d'ordre de somme fp32 devient un saut de
+# 2⁻⁸ à une frontière d'arrondi ; seul le MÊME appel cuBLAS donne les mêmes logits.)
 
 def _dtype_essai():
     return torch.bfloat16 if torch.cuda.is_available() else torch.float16
 
 
-@pytest.mark.parametrize("sigmoide,biais,renorm,scale", [(False, False, True, 1.0), (True, True, True, 2.5),
-                                                          (True, False, False, 1.0)])
-@pytest.mark.parametrize("E,k,H", [(128, 8, 256), (60, 6, 96), (256, 8, 64), (128, 8, 2048), (40, 4, 700)])
-def test_c15_logits_fusee_egale_linear_puis_route_fusee(sigmoide, biais, renorm, scale, E, k, H):
-    """Témoin : F.linear (produits exacts, somme fp32) puis `route_fusee`.
-    Mêmes experts, mêmes eid et compteur au bit, poids à 2⁻¹⁶ près (ordre de
-    la somme fp32 des logits, puis exp) ; godet 20 (2 programmes) avec 4
-    fantômes masqués par `valid`."""
-    rp = _rp()
-    dt = _dtype_essai()
-    torch.manual_seed(E + k + H)
-    T = 20
-    x = (torch.randn(T, H) * 0.5).to(DEV, dt)
-    w = (torch.randn(E, H) * 0.05).to(DEV, dt)
-    bias = (torch.randn(E) * 0.2).to(DEV) if biais else None
-    valid = torch.ones(T, dtype=torch.bool, device=DEV); valid[16:] = False
-    u = torch.zeros(E, dtype=torch.int64, device=DEV)
-    tw, ti, eid = rp.route_logits_fusee(x, w, bias, k, sigmoide, renorm, scale, valid, u, arrondi_bf16=False)
-    lg = torch.nn.functional.linear(x.float(), w.float())
-    u2 = torch.zeros(E, dtype=torch.int64, device=DEV)
-    rw, ri, reid = rp.route_fusee(lg, bias, k, sigmoide, renorm, scale, valid, u2)
-    assert torch.equal(ti, ri), (ti[:3], ri[:3])
-    assert torch.equal(eid, reid) and (eid.view(T, k)[16:] == -1).all()
-    assert torch.equal(u, u2)
-    assert (tw - rw).abs().max() < 2 ** -16 * max(1.0, scale), float((tw - rw).abs().max())
-    assert not rp._COMPTEURS[(2, str(x.device))].any(), "compteurs remis à zéro par le dernier programme"
+def _ulp32_max(a, b):
+    a32, b32 = a.float(), b.float()
+    ulp = torch.where(a32 != 0, 2.0 ** (torch.floor(torch.log2(a32.abs().clamp_min(1e-30))) - 23),
+                      torch.full_like(a32, 2.0 ** -149))
+    return float(((a32 - b32).abs() / ulp).max())
 
 
-def test_c15_3b_le_compteur_porte_la_somme_des_partiels():
-    """Le bras qui doit casser (grille 1 × 4 × 8 = 32 programmes sur la forme
-    de Coder) : un compteur qui ne repart pas de zéro fait sélectionner un
-    programme qui n'est pas le dernier, sur des logits partiels — experts
-    faux ; remis à zéro, la sélection redevient celle du témoin."""
+@pytest.mark.parametrize("w_fp32", [False, True])
+@pytest.mark.parametrize("sigmoide,biais,renorm,scale", [(False, False, True, 1.0), (True, True, True, 2.5)])
+def test_c15_3c_routage_identique_au_temoin_sur_512_jetons(w_fp32, sigmoide, biais, renorm, scale):
+    """Témoin A = `_router_logits` (F.linear au dtype du poids : bf16 — fp16 à
+    sec — ou fp32) puis `route_fusee` (4 warps) ; B = `route_logits_fusee` (le
+    même F.linear, sélection à 1 warp). 512 jetons de bruit, E 128, H 2 048 :
+    experts (topi) et eid IDENTIQUES, compteur au bit, |Δtopw| ≤ 4 ulp fp32
+    (deux dispositions de la même somme fp32 du softmax ; à sec, l'interpréteur
+    ne connaît pas les warps : 0 ulp)."""
     rp = _rp()
-    dt = _dtype_essai()
-    torch.manual_seed(11)
-    T, H, E, k = 12, 2048, 128, 8
-    x = (torch.randn(T, H) * 0.5).to(DEV, dt)
+    dt = torch.float32 if w_fp32 else _dtype_essai()
+    torch.manual_seed(512 + int(w_fp32) + int(sigmoide))
+    T, H, E, k = 512, 2048, 128, 8
+    x = (torch.randn(T, H) * 0.5).to(DEV, _dtype_essai())
     w = (torch.randn(E, H) * 0.02).to(DEV, dt)
+    bias = (torch.randn(E) * 0.2).to(DEV) if biais else None
+    valid = torch.ones(T, dtype=torch.bool, device=DEV); valid[500:] = False
+    lg = torch.nn.functional.linear(x.to(dt), w)                   # _router_logits, au bit
     u = torch.zeros(E, dtype=torch.int64, device=DEV)
-    _, ri, _ = rp.route_fusee(torch.nn.functional.linear(x.float(), w.float()), None, k, False, True, 1.0, None, u)
-    cnt = rp._compteur(1, x.device)
-    cnt[0] = 5
+    rw, ri, reid = rp.route_fusee(lg, bias, k, sigmoide, renorm, scale, valid, u)
     u2 = torch.zeros(E, dtype=torch.int64, device=DEV)
-    _, ti, _ = rp.route_logits_fusee(x, w, None, k, False, True, 1.0, None, u2, arrondi_bf16=False)
-    assert not torch.equal(ti, ri)
-    cnt.zero_()
-    u3 = torch.zeros(E, dtype=torch.int64, device=DEV)
-    _, ti2, _ = rp.route_logits_fusee(x, w, None, k, False, True, 1.0, None, u3, arrondi_bf16=False)
-    assert torch.equal(ti2, ri) and not cnt.any()
+    tw, ti, eid = rp.route_logits_fusee(x, w, bias, k, sigmoide, renorm, scale, valid, u2)
+    assert torch.equal(ti, ri) and torch.equal(eid, reid) and torch.equal(u, u2)
+    assert _ulp32_max(rw, tw) <= 4.0, _ulp32_max(rw, tw)
 
 
-def test_c15_logits_fusee_un_poids_deplace_change_la_selection():
+def test_c15_3c_un_poids_deplace_change_la_selection():
     """Le bras qui doit casser : la ligne 0 du routeur remplacée par la ligne
     de l'expert le plus choisi — logits égaux, l'égalité va à l'indice le
-    plus bas (moe_route) : la sélection suit les poids lus (pas un cache, pas
-    un index de programme), l'expert 0 passe devant lui partout où il était
-    choisi, et le compteur ne le perd pas."""
+    plus bas : la sélection suit les poids lus, l'expert 0 passe devant lui."""
     rp = _rp()
     dt = _dtype_essai()
     torch.manual_seed(7)
@@ -201,31 +181,38 @@ def test_c15_logits_fusee_un_poids_deplace_change_la_selection():
     x = (torch.randn(T, H) * 0.5).to(DEV, dt)
     w = (torch.randn(E, H) * 0.05).to(DEV, dt)
     u = torch.zeros(E, dtype=torch.int64, device=DEV)
-    _, ti, _ = rp.route_logits_fusee(x, w, None, k, False, True, 1.0, None, u, arrondi_bf16=False)
+    _, ti, _ = rp.route_logits_fusee(x, w, None, k, False, True, 1.0, None, u)
     favori = int(u[1:].argmax()) + 1
     w2 = w.clone(); w2[0] = w[favori]
     u2 = torch.zeros(E, dtype=torch.int64, device=DEV)
-    _, ti2, _ = rp.route_logits_fusee(x, w2, None, k, False, True, 1.0, None, u2, arrondi_bf16=False)
+    _, ti2, _ = rp.route_logits_fusee(x, w2, None, k, False, True, 1.0, None, u2)
     assert not torch.equal(ti, ti2) and int(u2[0]) >= int(u[0])
-    choisi = (ti == favori).any(1)                         # sur ces lignes, 0 est classé avant favori
+    choisi = (ti == favori).any(1)
     rang0 = (ti2 == 0).int().argmax(1); rangf = (ti2 == favori).int().argmax(1)
     assert ((rang0 < rangf) | ~(ti2 == favori).any(1))[choisi].all()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="arrondi bf16 : carte seulement")
-def test_c15_logits_fusee_arrondi_bf16_comme_cublas():
-    """Sur carte : ARRONDI_BF16 rejoue la sortie bf16 de F.linear — mêmes
-    experts (hors égalité à l'ulp : aucune sur cette graine) et poids top-k
-    à 2⁻¹² près de cuBLAS puis route_fusee."""
-    rp = _rp()
+def test_c15_3c_le_temoin_rend_visible_tout_ecart_de_somme_a_2_moins_8():
+    """Pourquoi un GEMM Triton des logits ne peut pas rendre le routage du
+    témoin : le témoin arrondit ses logits en bf16 (`_router_logits`) ; un
+    autre ordre de somme fp32 fait basculer, à une frontière d'arrondi, UN
+    logit d'un ulp bf16 (2⁻⁸ relatif) — et ce seul ulp déplace le poids top-k
+    de ~10⁻³ (le |Δtopw| 1,06 × 10⁻³ du 19/09) ; à égalité proche il change
+    l'expert. Arithmétique torch seule (softmax fp32 du témoin)."""
     torch.manual_seed(3)
-    T, H, E, k = 12, 2048, 128, 8
-    x = (torch.randn(T, H) * 0.5).to(DEV, torch.bfloat16)
-    w = (torch.randn(E, H) * 0.02).to(DEV, torch.bfloat16)
-    u = torch.zeros(E, dtype=torch.int64, device=DEV)
-    tw, ti, _ = rp.route_logits_fusee(x, w, None, k, False, False, 1.0, None, u, arrondi_bf16=True)
-    lg = torch.nn.functional.linear(x, w)
-    u2 = torch.zeros(E, dtype=torch.int64, device=DEV)
-    rw, ri, _ = rp.route_fusee(lg, None, k, False, False, 1.0, None, u2)
-    assert torch.equal(ti, ri)
-    assert (tw - rw).abs().max() < 2 ** -12, float((tw - rw).abs().max())
+    lg = (torch.randn(512, 128) * 1.5).to(torch.bfloat16)
+    probs = torch.softmax(lg.float(), -1)
+    tw, ti = probs.topk(8, -1)
+    lg2 = lg.clone()
+    i0 = ti[:, 0]                                             # le meilleur expert de chaque jeton : + 1 ulp bf16
+    v = lg2[torch.arange(512), i0].float()
+    ulp = 2.0 ** (torch.floor(torch.log2(v.abs().clamp_min(1e-30))) - 7)
+    lg2[torch.arange(512), i0] = (v + ulp).to(torch.bfloat16)
+    assert (lg2 != lg).sum() == 512
+    tw2, _ = torch.softmax(lg2.float(), -1).topk(8, -1)
+    assert float((tw2 - tw).abs().max()) > 5e-4 and float((tw2[:, 0] - tw[:, 0]).abs().median()) > 1e-4
+    # ... et sur 65 536 logits, une somme fp32 dans un autre ordre en fait basculer au moins un :
+    x = (torch.randn(512, 2048) * 0.5).to(torch.bfloat16); w = (torch.randn(128, 2048) * 0.02).to(torch.bfloat16)
+    a = torch.nn.functional.linear(x.float(), w.float()).to(torch.bfloat16)                  # une somme fp32
+    b = torch.nn.functional.linear(x.double(), w.double()).to(torch.bfloat16)                # la somme exacte
+    assert int((a != b).sum()) > 0

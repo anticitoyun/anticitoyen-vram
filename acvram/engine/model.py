@@ -1886,23 +1886,26 @@ class MoEBlock(nn.Module):
         return self.router(x).to(dtype_voulu)
 
     def _routeur_compact(self, x: torch.Tensor):
-        """C15 niveau 3 : (poids du routeur [E, H] au dtype de x, arrondi bf16
-        des logits ?) pour `route_logits_fusee`, ou None si le routeur n'est
-        pas un poids plein de ce dtype (le témoin `_router_logits` reste)."""
-        if x.dtype != torch.bfloat16 or not hasattr(self.router.qweight, "weight"):
+        """C15-3c : (poids du routeur AU DTYPE DU TÉMOIN, arrondi bf16 ?) pour
+        `route_logits_fusee` — le même tenseur `_router_w[dtype_voulu]` que
+        `_router_logits`, donc le même appel cuBLAS et les mêmes logits au bit ;
+        None si le routeur n'est pas un poids plein (le témoin reste)."""
+        if not hasattr(self.router.qweight, "weight"):
             return None
-        w = getattr(self, "_router_w_compact", None)
+        dtype_voulu = (torch.float32
+                      if self.scoring == "sigmoid" and self.score_bias is not None
+                      else x.dtype)
+        cache = getattr(self, "_router_w", None)
+        if cache is None:
+            cache = {}
+            self._router_w = cache
+        w = cache.get(dtype_voulu)
         if w is None:
-            w = self.router.qweight.weight
-            if w.dtype != torch.bfloat16 or w.dim() != 2:
-                return None
-            w = w.contiguous()
-            self._router_w_compact = w
-        if w.shape[1] != x.shape[1] or w.shape[0] > 1024:
+            w = self.router.qweight.weight.to(dtype_voulu)
+            cache[dtype_voulu] = w
+        if w.dim() != 2 or w.shape[1] != x.shape[1] or w.shape[0] > 1024:
             return None
-        # _router_logits : fp32 seulement pour sigmoid + biais, bf16 sinon
-        arrondi = not (self.scoring == "sigmoid" and self.score_bias is not None)
-        return w, arrondi
+        return w, dtype_voulu == torch.bfloat16
 
     def _route(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Poids et indices des top-k experts par jeton."""
@@ -1954,11 +1957,10 @@ class MoEBlock(nn.Module):
             fusee = _rp.disponible()
         compact = None
         if fusee and kernels.glue_compact("routeur"):
-            # C15 niveau 3 : logits DANS le noyau de sélection (route_logits_fusee)
-            # — ni F.linear, ni cast fp32 : 2-3 nœuds → 1 par couche. Poids du
-            # routeur bf16 [E, H] contigu exigé ; arrondi bf16 des logits rejoué
-            # quand le témoin les sortait en bf16 (_router_logits : softmax sans
-            # biais), fp32 sinon (sigmoid + biais). Témoin : ACVRAM_GLUE_COMPACT=0.
+            # C15-3c : mêmes logits que _router_logits (même F.linear cuBLAS sur
+            # le même poids), sélection `_route_fusee_kernel` à num_warps=1
+            # (réductions intra-warp) : routage identique au témoin, sélection
+            # plus courte ; même nombre de lancements. Témoin : GLUE_COMPACT=0.
             compact = self._routeur_compact(x)
         if fusee and compact is None:
             logits = self._router_logits(x)

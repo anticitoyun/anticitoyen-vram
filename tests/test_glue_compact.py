@@ -94,6 +94,8 @@ def test_attention_un_noyau_egale_deux_noyaux(lens):
     un = ap.paged_attention(q, c.k, c.k_scale, c.v, c.v_scale, tables, L, hkv, scale, compact=True)
     assert torch.isfinite(un.float()).all()
     assert _ulp_max(deux, un) <= 1.0, _ulp_max(deux, un)
+    if not torch.cuda.is_available():
+        assert torch.equal(deux, un), "à sec (une seule disposition) : au bit, 8 warps compris"
     for b, n in enumerate(lens):
         if n == 0:
             assert not un[b].float().any()
@@ -203,9 +205,10 @@ def test_c15_3b_le_routeur_triton_remplace_cublas_il_ne_s_ajoute_pas(monkeypatch
     """verdict-c15-niveau3-coder-19-09 (a) : sous GLUE_COMPACT=1 le nsys B
     montrait `_route_logits_fusee` ET cuBLAS + moe_route + route_prep par
     couche — la branche compacte retombait dans `_route` (model.py, forward).
-    Ici : par couche, COMPACT=1 → 1 route_logits_fusee, 0 F.linear, 0 `_route`,
-    et les experts reçoivent les poids du Triton ; COMPACT=0 → 1 F.linear +
-    1 route_fusee, 0 route_logits_fusee, 0 `_route`."""
+    Ici : par couche, COMPACT=1 → 1 route_logits_fusee (= 1 F.linear, le même
+    que le témoin, + 1 route_fusee à num_warps=1), 0 `_route`, et les experts
+    reçoivent ses poids ; COMPACT=0 → 1 F.linear + 1 route_fusee (4 warps),
+    0 route_logits_fusee, 0 `_route`. Le routeur ne tourne qu'UNE fois."""
     import torch.nn.functional as F
     from acvram import kernels
     from acvram.engine import model as M
@@ -225,10 +228,11 @@ def test_c15_3b_le_routeur_triton_remplace_cublas_il_ne_s_ajoute_pas(monkeypatch
                       top_k=2, scoring="softmax", score_bias=None)
     bloc._usage_routage = torch.zeros(E, dtype=torch.int64)
     bloc._stack_state = "oui"
-    appels = {"linear": 0, "fusee": 0, "logits_fusee": 0, "_route": 0, "grouped": []}
+    appels = {"linear": 0, "fusee": 0, "logits_fusee": 0, "_route": 0, "grouped": [], "warps": []}
     vrai_linear, vrai_fusee, vrai_lf = F.linear, rp.route_fusee, rp.route_logits_fusee
     monkeypatch.setattr(F, "linear", lambda *a, **k: appels.__setitem__("linear", appels["linear"] + 1) or vrai_linear(*a, **k))
-    monkeypatch.setattr(rp, "route_fusee", lambda *a, **k: appels.__setitem__("fusee", appels["fusee"] + 1) or vrai_fusee(*a, **k))
+    monkeypatch.setattr(rp, "route_fusee", lambda *a, **k: (appels.__setitem__("fusee", appels["fusee"] + 1),
+                                                            appels["warps"].append(k.get("num_warps", 4))) and vrai_fusee(*a, **k))
     monkeypatch.setattr(rp, "route_logits_fusee", lambda *a, **k: appels.__setitem__("logits_fusee", appels["logits_fusee"] + 1) or vrai_lf(*a, **k))
     monkeypatch.setattr(M.MoEBlock, "_route", lambda self, x: appels.__setitem__("_route", appels["_route"] + 1) or (None, None))
     monkeypatch.setattr(M.MoEBlock, "_forward_grouped_mma", lambda self, x, tw, ti: None)
@@ -241,10 +245,8 @@ def test_c15_3b_le_routeur_triton_remplace_cublas_il_ne_s_ajoute_pas(monkeypatch
     assert y is x and len(appels["grouped"]) == 1 and appels["_route"] == 0
     tw, ti, eid = appels["grouped"][0]
     assert tw.shape == (12, 2) and ti.shape == (12, 2) and eid.shape == (24,) and tw.dtype == torch.float32
-    if compact:
-        assert (appels["logits_fusee"], appels["fusee"], appels["linear"]) == (1, 0, 0), appels
-    else:
-        assert (appels["logits_fusee"], appels["fusee"], appels["linear"]) == (0, 1, 1), appels
+    assert (appels["fusee"], appels["linear"]) == (1, 1), appels            # le routeur une seule fois
+    assert (appels["logits_fusee"], appels["warps"]) == ((1, [1]) if compact else (0, [4])), appels
 
 
 def test_c15_3b_items_debranche_chaque_fusion_seule(monkeypatch):

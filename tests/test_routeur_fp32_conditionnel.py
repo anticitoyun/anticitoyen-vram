@@ -47,9 +47,11 @@ def test_c15_routeur_compact_suit_le_dtype_du_temoin():
                                     ("sigmoid", torch.zeros(4, dtype=torch.float32), False)):
         bloc = _moe(scoring, biais)
         w, a = bloc._routeur_compact(x)
-        assert a == arrondi and w.shape == (4, 16) and w.dtype == torch.bfloat16 and w.is_contiguous()
-        assert (bloc._router_logits(x).dtype == torch.float32) == (not a)
-    assert _moe("softmax", None)._routeur_compact(x.float()) is None     # entrée fp32 : témoin
+        assert a == arrondi and w.shape == (4, 16)
+        # C15-3c : le MÊME tenseur que _router_logits (cache _router_w), au dtype du témoin
+        lg = bloc._router_logits(x)
+        assert w is bloc._router_w[lg.dtype] and w.dtype == lg.dtype and (lg.dtype == torch.float32) == (not a)
+        assert torch.equal(torch.nn.functional.linear(x.to(w.dtype), w), lg)
 
 
 def test_sigmoid_sans_biais_reste_en_bf16():
