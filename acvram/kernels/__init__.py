@@ -1317,6 +1317,10 @@ if _PREFILL_COMPACT not in (0, 1):
     raise ValueError(f"ACVRAM_PREFILL_COMPACT={_PREFILL_COMPACT!r} : attendu 0 ou 1")
 # bissection par fusion, comme GLUE_COMPACT_ITEMS : vide = toutes
 PREFILL_COMPACT_FUSIONS = ("epilogue", "a8", "residu", "permut", "norm", "attn")
+# « norm » (rmsnorm un warp par ligne) n'est PAS dans le défaut : mesurée par
+# poste2 le 20/09 à 3,82 ms contre 2,12 pour le bloc (edd44987, +1,7 ms), le
+# noyau reste en opt-in (ITEMS=…,norm) tant qu'il n'a pas battu le bloc
+PREFILL_COMPACT_DEFAUT = ("epilogue", "a8", "residu", "permut", "attn")
 _PREFILL_COMPACT_ITEMS = os.environ.get("ACVRAM_PREFILL_COMPACT_ITEMS", "")
 for _f in filter(None, _PREFILL_COMPACT_ITEMS.split(",")):
     if _f not in PREFILL_COMPACT_FUSIONS:
@@ -1330,9 +1334,11 @@ def prefill_compact(fusion: str = "") -> bool:
     que la fusion n'est pas écartée par PREFILL_COMPACT_ITEMS."""
     if not _PREFILL_COMPACT:
         return False
-    if fusion and _PREFILL_COMPACT_ITEMS:
+    if fusion:
         assert fusion in PREFILL_COMPACT_FUSIONS, fusion
-        return fusion in _PREFILL_COMPACT_ITEMS.split(",")
+        if _PREFILL_COMPACT_ITEMS:
+            return fusion in _PREFILL_COMPACT_ITEMS.split(",")
+        return fusion in PREFILL_COMPACT_DEFAUT
     return True
 
 

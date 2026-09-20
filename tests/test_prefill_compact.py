@@ -44,6 +44,10 @@ def test_la_ligne_de_regime_nomme_la_glue_du_prefill(monkeypatch):
     monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 1)
     assert regime.prefill_glue_texte() == "prefill_glue=compact"
     assert kernels.prefill_compact() and kernels.prefill_compact("permut")
+    # « norm » hors défaut (3,82 ms contre 2,12 pour le bloc, poste2 20/09) : opt-in seulement
+    assert not kernels.prefill_compact("norm")
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT_ITEMS", "permut,norm")
+    assert kernels.prefill_compact("norm") and not kernels.prefill_compact("epilogue")
     monkeypatch.setattr(kernels, "_PREFILL_COMPACT_ITEMS", "epilogue,a8")
     assert regime.prefill_glue_texte() == "prefill_glue=compact(items=epilogue,a8)"
     assert kernels.prefill_compact("epilogue") and not kernels.prefill_compact("residu")
@@ -425,6 +429,8 @@ def test_norme_warp_reservee_au_prefill(monkeypatch):
 
     monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 1)
     monkeypatch.setattr(kernels, "_PREFILL_COMPACT_ITEMS", "")
+    assert not L._norme_warp(Ext(), torch.empty(2047, 2048, dtype=torch.bfloat16))   # hors défaut
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT_ITEMS", "norm")
     assert L._norme_warp(Ext(), torch.empty(2047, 2048, dtype=torch.bfloat16))
     assert not L._norme_warp(Ext(), torch.empty(16, 2048, dtype=torch.bfloat16))
     assert not L._norme_warp(Ext(), torch.empty(2047, 4096, dtype=torch.bfloat16))   # GLM : le bloc
