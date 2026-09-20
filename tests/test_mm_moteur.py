@@ -290,6 +290,7 @@ def test_tour_factice_dans_le_runner_end_to_end(converted):
         return torch.full((1, int(pv), h), float(pv))    # [1, n, h] comme HF
 
     engine.vision = TourVision(calcul, torch.device("cpu"), nom="factice")
+    engine.spec.raw = {**(getattr(engine.spec, "raw", None) or {}), "architectures": ["Gemma4ForConditionalGeneration"]}   # famille du masque (20/09 19:01) : le jouet Llama n'en a pas
     assert regime_texte() == "vision=bf16(eager,factice)"
     vus = []
     orig = engine._build_batch
@@ -311,6 +312,7 @@ def test_tour_factice_dans_le_runner_end_to_end(converted):
     assert all(b.images is None for b in vus if not b.is_prefill)   # jamais au décodage
     # tour en échec → refus nommé, pas de silence
     engine.vision = TourVision(lambda pv: torch.zeros(1, 99, h), torch.device("cpu"))
+    engine.spec.raw = {**(getattr(engine.spec, "raw", None) or {}), "architectures": ["Gemma4ForConditionalGeneration"]}   # famille du masque (20/09 19:01) : le jouet Llama n'en a pas
     sorties = list(engine.generate(prompt, SamplingParams(max_tokens=2),
                                    images=[(2, 5, torch.tensor(3.0), "sha-2")]))
     assert sorties and sorties[-1].finish_reason == "refus"
@@ -460,6 +462,7 @@ def test_la_ligne_du_moteur_porte_vision_et_sans_tour_une_image_est_refusee(conv
                            images=[(1, 4, torch.tensor(3.0), "sha-x")])
     h = loaded.spec.hidden_size
     engine.vision = TourVision(lambda pv: torch.full((1, 3, h), 0.5), torch.device("cpu"), nom="factice")
+    engine.spec.raw = {**(getattr(engine.spec, "raw", None) or {}), "architectures": ["Gemma4ForConditionalGeneration"]}   # famille du masque (20/09 19:01)
     assert " vision=bf16(eager,factice)" in engine.regime_ligne()
     engine.add_request([1, 2, 3, 4, 5, 6], SamplingParams(temperature=0.0, max_tokens=1),
                        images=[(1, 4, torch.tensor(3.0), "sha-abcdef12")])
@@ -502,8 +505,8 @@ def test_la_ligne_du_moteur_porte_mrope_et_deepstack_lus_sur_le_modele(converted
 def _spec_archi(archs):
     from acvram.engine.config import ModelSpec
     s = ModelSpec(name="t", architecture="llama", hidden_size=H, intermediate_size=H, num_layers=1,
-                  num_attention_heads=NH, num_key_value_heads=NH, vocab_size=16, max_position_embeddings=64,
-                  rms_norm_eps=1e-6, rope_theta=1e4, head_dim=H // NH)
+                  num_attention_heads=2, num_key_value_heads=2, vocab_size=16, max_position_embeddings=64,
+                  rms_norm_eps=1e-6, rope_theta=1e4, head_dim=H // 2)
     s.raw = {"architectures": archs}
     return s
 
