@@ -87,6 +87,8 @@ def regime_coeur_texte() -> str:
             return f"mla_core=flash({_FLASH_OPERANDES},{bm}x{bn}w{w}s{st})"
         except Exception:                                     # noqa: BLE001
             return "mla_core=flash(fp32)"
+    if _MLA_CORE_MAX_CLES >= (1 << 62):
+        return f"mla_core={_MLA_CORE}(sans règle des clés)"
     return f"mla_core={_MLA_CORE}(≤{_MLA_CORE_MAX_CLES} clés)"
 
 
@@ -94,7 +96,11 @@ def regime_coeur_texte() -> str:
 # à 8 k > 2 %, géo −0,22 %) : le régime réduit (tf32, bf16) ne vaut que quand le morceau de
 # préfill VOIT ≤ 2 048 clés (pas sa taille) ; au-delà, fp32 pour ce morceau. Même règle pour F
 # (bf16) et C13-c. Ligne de régime : `mla_core=tf32(≤2048 clés)`.
-_MLA_CORE_MAX_CLES = 2048
+# ACVRAM_MLA_CORE_MAX_CLES (diagnostic, poste2 20/09 08 h : bras « règle neutralisée » de la prise à 36
+# tranches) : 0 = aucune règle (tf32/bf16 à toutes longueurs, comme d01eb2cb) ; défaut 2048 = la règle.
+_MLA_CORE_MAX_CLES = int(os.environ.get("ACVRAM_MLA_CORE_MAX_CLES", "2048"))
+if _MLA_CORE_MAX_CLES <= 0:
+    _MLA_CORE_MAX_CLES = 1 << 62                     # « ≤ ∞ clés » : la règle ne bascule jamais en fp32
 
 
 def _regime_coeur(decode: bool = False, vb: bool = False, cles: int | None = None) -> str:
