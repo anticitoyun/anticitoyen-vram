@@ -1987,6 +1987,14 @@ class MoEBlock(nn.Module):
                 _trace_routage.noter(self.index_couche, topi)
             if valid is not None:
                 topi = eid.view(t, self.top_k)
+            if _ROUTAGE_TEMOIN:
+                tm = self.__dict__.get("_temoin_topi")
+                if tm is None or tm.shape != topi.shape:
+                    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+                        raise RuntimeError("témoin de routage alloué pendant une capture de graphe")
+                    tm = self.__dict__["_temoin_topi"] = torch.empty_like(topi)
+                    _TEMOINS_ROUTAGE[id(self)] = tm       # préfill [t·b, k] puis godet [16, k] : le dernier seul
+                tm.copy_(topi)
             mma_ok = _MOE_DECODE_MMA and t >= _MOE_DECODE_MMA_MIN_T
             y = (self._forward_grouped_mma(x, topw, topi) if mma_ok else None)
             if y is None:
@@ -2339,6 +2347,16 @@ if _MARLIN_DISTINCT not in ("0", "1"):
 # journal texte d'une trace M1 (deux mécanismes sur un nom, MECANISMES ; 19/09).
 _TRACE_ROUTAGE = os.environ.get("ACVRAM_TRACE_ROUTAGE_PT", "")
 _ROUTAGES: list = []
+# ACVRAM_ROUTAGE_TEMOIN=1 (C15-3d, contrôle « experts égaux » SOUS GRAPHES) : chaque couche
+# MoE copie topi dans un tampon persistant (alloué hors capture ; sous capture la copie est
+# dans le graphe) — lu après chaque pas par equiv-b12.py, comparé au bit entre bras.
+_ROUTAGE_TEMOIN = os.environ.get("ACVRAM_ROUTAGE_TEMOIN", "0") == "1"
+_TEMOINS_ROUTAGE: dict = {}      # id(couche) → tampon [t, top_k] int32 (remplacé si la forme change)
+
+
+def temoins_routage() -> list:
+    """Les tampons témoins, dans l'ordre du premier appel des couches."""
+    return list(_TEMOINS_ROUTAGE.values())
 if _TRACE_ROUTAGE:
     import atexit as _atexit
     _atexit.register(lambda: torch.save(_ROUTAGES, _TRACE_ROUTAGE) if _ROUTAGES else None)
