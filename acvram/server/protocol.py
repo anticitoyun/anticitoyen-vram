@@ -11,7 +11,11 @@ complet quel que soit le serveur.
 
 from __future__ import annotations
 
+import base64
+import os
 import time
+import urllib.parse
+import urllib.request
 import uuid
 from typing import Any, Literal, Optional, Union
 
@@ -22,6 +26,7 @@ __all__ = [
     "ChatCompletionChunk", "CompletionRequest", "CompletionResponse",
     "EmbeddingRequest", "EmbeddingResponse", "ModelList", "ModelCard",
     "Usage", "ErrorResponse", "new_id",
+    "ImageRefusee", "charger_image", "VAR_DOSSIER_IMAGES",
 ]
 
 
@@ -53,6 +58,128 @@ class ChatMessage(BaseModel):
             if part.get("type") == "text":
                 parts.append(part.get("text", ""))
         return "".join(parts)
+
+    def images(self) -> list[str]:
+        """Les URL des fragments ``image_url`` dans l'ordre ; [] pour un
+        contenu chaîne. Un fragment ``image_url`` sans ``url`` est refusé,
+        pas ignoré : un client qui envoie une image doit savoir ce qu'elle
+        devient (trois états, jamais un silence)."""
+        if not isinstance(self.content, list):
+            return []
+        urls = []
+        for part in self.content:
+            if part.get("type") != "image_url":
+                continue
+            iu = part.get("image_url")
+            url = iu.get("url") if isinstance(iu, dict) else iu
+            if not isinstance(url, str) or not url:
+                raise ImageRefusee("fragment image_url sans url")
+            urls.append(url)
+        return urls
+
+    def fragments(self) -> list[dict[str, Any]]:
+        """Le contenu sous la forme que les gabarits multimodaux HF lisent :
+        ``{"type": "text", "text": …}`` et ``{"type": "image"}`` dans l'ordre."""
+        if self.content is None:
+            return []
+        if isinstance(self.content, str):
+            return [{"type": "text", "text": self.content}]
+        out = []
+        for part in self.content:
+            t = part.get("type")
+            if t == "text":
+                out.append({"type": "text", "text": part.get("text", "")})
+            elif t == "image_url":
+                out.append({"type": "image"})
+        return out
+
+
+# -- sources d'image ----------------------------------------------------------
+# Trois sources, chacune bornée, et un refus qui dit lequel des trois a
+# échoué : `data:` (octets dans la requête), `file://` sous le seul dossier
+# ACVRAM_IMAGES_DIR (chemin résolu par realpath, `..` refusé avant résolution),
+# `http(s)://` vers 127.0.0.1 ou localhost seulement — jamais une origine
+# distante depuis le serveur.
+VAR_DOSSIER_IMAGES = "ACVRAM_IMAGES_DIR"
+_HOTES_LOCAUX = {"127.0.0.1", "localhost", "::1", "[::1]"}
+_MAX_OCTETS = 32 * 1024 * 1024
+
+
+class ImageRefusee(ValueError):
+    """Refus nommé d'une image : rendu en HTTP 400 par le serveur."""
+
+
+def _refus(source: str, pourquoi: str) -> ImageRefusee:
+    return ImageRefusee(f"image refusée ({source}) : {pourquoi}")
+
+
+def _depuis_data(url: str) -> bytes:
+    tete, sep, corps = url.partition(",")
+    if not sep:
+        raise _refus("data", "pas de virgule entre l'en-tête et les données")
+    if not tete[5:].startswith("image/"):
+        raise _refus("data", f"type MIME « {tete[5:].split(';')[0]} » : image/* attendu")
+    if not tete.endswith(";base64"):
+        raise _refus("data", "seul l'encodage base64 est lu")
+    try:
+        octets = base64.b64decode(corps, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise _refus("data", f"base64 illisible : {exc}") from None
+    if not octets:
+        raise _refus("data", "image vide")
+    if len(octets) > _MAX_OCTETS:
+        raise _refus("data", f"{len(octets)} octets, plus de {_MAX_OCTETS}")
+    return octets
+
+
+def _depuis_fichier(url: str) -> bytes:
+    dossier = os.environ.get(VAR_DOSSIER_IMAGES, "")
+    if not dossier:
+        raise _refus("file", f"{VAR_DOSSIER_IMAGES} n'est pas défini : aucun dossier autorisé")
+    parsed = urllib.parse.urlparse(url)
+    if parsed.netloc not in ("", "localhost"):
+        raise _refus("file", f"hôte « {parsed.netloc} » : seul un chemin local est lu")
+    chemin = urllib.parse.unquote(parsed.path)
+    if ".." in chemin.split("/"):
+        raise _refus("file", "« .. » dans le chemin")
+    racine = os.path.realpath(dossier)
+    reel = os.path.realpath(chemin)
+    if os.path.commonpath([racine, reel]) != racine:
+        raise _refus("file", f"{chemin} hors du dossier autorisé {VAR_DOSSIER_IMAGES}={dossier}")
+    if not os.path.isfile(reel):
+        raise _refus("file", f"{chemin} n'est pas un fichier")
+    if os.path.getsize(reel) > _MAX_OCTETS:
+        raise _refus("file", f"{chemin} : plus de {_MAX_OCTETS} octets")
+    with open(reel, "rb") as fh:
+        return fh.read()
+
+
+def _depuis_http(url: str) -> bytes:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.hostname not in _HOTES_LOCAUX:
+        raise _refus("http", f"hôte « {parsed.hostname} » : seuls 127.0.0.1 et localhost sont lus")
+    try:
+        with urllib.request.urlopen(url, timeout=10) as rep:   # noqa: S310 — hôte local vérifié
+            octets = rep.read(_MAX_OCTETS + 1)
+    except Exception as exc:                                    # noqa: BLE001
+        raise _refus("http", f"{url} : {exc}") from None
+    if not octets:
+        raise _refus("http", f"{url} : réponse vide")
+    if len(octets) > _MAX_OCTETS:
+        raise _refus("http", f"{url} : plus de {_MAX_OCTETS} octets")
+    return octets
+
+
+def charger_image(url: str) -> bytes:
+    """Les octets d'une image d'après son URL, ou ``ImageRefusee`` nommée."""
+    if url.startswith("data:"):
+        return _depuis_data(url)
+    if url.startswith("file://"):
+        return _depuis_fichier(url)
+    if url.startswith(("http://", "https://")):
+        return _depuis_http(url)
+    schema = url.split(":", 1)[0] if ":" in url else "(aucun)"
+    raise _refus("url", f"schéma « {schema} » : data:, file:// ou http(s)://127.0.0.1 attendu")
 
 
 class _SamplingFields(BaseModel):
