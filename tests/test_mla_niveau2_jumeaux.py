@@ -143,7 +143,8 @@ def test_composition_des_jumeaux_egale_decode_static_a_sec(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise")
-def test_chaque_noyau_contre_son_jumeau_sur_carte(monkeypatch):
+@pytest.mark.parametrize("graine", [3, 11, 29])          # trois graines (poste7 13 h 28) : la marge −0,00 tient-elle ?
+def test_chaque_noyau_contre_son_jumeau_sur_carte(monkeypatch, graine):
     """Sur carte : (1) mla_prep_batch réel vs jumeau (mêmes q, kvp, lens) ; (2) mla_ecrit_latent réel
     vs jumeau (mêmes états) ; (3) mla_decode_batch réel vs jumeau (mêmes q_eff, caches) ; puis (4)
     le chemin complet réel (=2, servi depuis M3) et decode_static (=1), 32 pas, CHACUN contre le jumeau
@@ -155,11 +156,11 @@ def test_chaque_noyau_contre_son_jumeau_sur_carte(monkeypatch):
     if ext is None or not hasattr(ext, "mla_prep_batch"):
         pytest.skip("extension sans mla_prep_batch")
     dev = "cuda"
-    la = _module(dev)
+    la = _module(dev, seed=graine)
     monkeypatch.setattr(MLA, "_MLA_LATENT_FP8", False)
     L, n0, bucket = 128, 40, 128
     st = _etat(la, dev, L, n0)
-    torch.manual_seed(9); x = (torch.randn(1, H, device=dev) * 0.5).to(DT)
+    torch.manual_seed(9 + graine); x = (torch.randn(1, H, device=dev) * 0.5).to(DT)
     ulp = lambda a, b: ((a.float() - b.float()).abs() / (2.0 ** (torch.floor(torch.log2(a.float().abs().clamp_min(1e-30))) - 7))).max().item()
     with torch.inference_mode():
         prem, kvp = la._proj_entree(x)
@@ -254,7 +255,7 @@ def test_chaque_noyau_contre_son_jumeau_sur_carte(monkeypatch):
                 o = super().mla_decode_batch(q, *a); o[:, 0] *= 1.02; return o
 
         st_a, st_b = _etat(la, dev, L, n0), _etat(la, dev, L, n0)
-        xs = (torch.randn(32, 1, H, device=dev) * 0.5).to(DT)
+        torch.manual_seed(100 + graine); xs = (torch.randn(32, 1, H, device=dev) * 0.5).to(DT)
         pire_y, pire_ratio, pire_diff = 0.0, 0.0, -1e9
         temoins = {"q_abs": 0.0, "q_pe": 0.0, "k_c": 0.0, "k_pe": 0.0, "attention": 0.0}   # mesurés, max sur les pas
         for pas in range(32):
