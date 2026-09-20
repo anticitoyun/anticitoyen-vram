@@ -209,7 +209,8 @@ VARIABLES_LUES = {
     "ACVRAM_MLA_FLASH_OPERANDES", "ACVRAM_MLA_FLASH_TUILE",
     "ACVRAM_MLA_ECRIT_TORCH", "ACVRAM_MLA_PREP_TEMOIN", "ACVRAM_MLA_QABS_DEUX_MOITIES",
     "ACVRAM_GLUE_COMPACT", "ACVRAM_GLUE_COMPACT_ITEMS", "ACVRAM_ATTN_WARPS_COMPACT", "ACVRAM_ROUTAGE_TEMOIN",
-    "ACVRAM_PILE_SANS_RENDU",                          # gemma (c48c2b2c) : témoin de _rendre_le_cache_apres_la_pile
+    "ACVRAM_PILE_SANS_RENDU",
+    "ACVRAM_CPUS",                                    # 0.6.31 : affinité (acvram/hote.py)                          # gemma (c48c2b2c) : témoin de _rendre_le_cache_apres_la_pile
     "ACVRAM_PREFILL_W8R",
     "ACVRAM_MARLIN_DISTINCT",
     "ACVRAM_PREFILL_A8_FMT",
