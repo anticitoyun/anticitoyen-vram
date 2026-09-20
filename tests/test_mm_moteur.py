@@ -495,3 +495,82 @@ def test_la_ligne_du_moteur_porte_mrope_et_deepstack_lus_sur_le_modele(converted
     engine.vision = tour
     ligne = engine.regime_ligne()
     assert " mrope=[24,20,20](interleaved)" in ligne and " deepstack=3" in ligne, ligne
+
+
+# ---- porte de famille du masque de la plage image (poste7, poste7-p3-1-scelle-temoin-20-09 ; 20/09 18:57) ----
+
+def _spec_archi(archs):
+    from acvram.engine.config import ModelSpec
+    s = ModelSpec(name="t", architecture="llama", hidden_size=H, intermediate_size=H, num_layers=1,
+                  num_attention_heads=NH, num_key_value_heads=NH, vocab_size=16, max_position_embeddings=64,
+                  rms_norm_eps=1e-6, rope_theta=1e4, head_dim=H // NH)
+    s.raw = {"architectures": archs}
+    return s
+
+
+def test_masque_images_famille_gemma_bidir_qwen_causal_inconnu_refuse():
+    from acvram.engine.vision import MasqueImageInconnu, masque_images_famille
+    assert masque_images_famille(_spec_archi(["Gemma4ForConditionalGeneration"])) == "bidir"
+    assert masque_images_famille(_spec_archi(["Gemma4UnifiedForConditionalGeneration"])) == "bidir"
+    assert masque_images_famille(_spec_archi(["Gemma3ForConditionalGeneration"])) == "bidir"
+    assert masque_images_famille(_spec_archi(["Qwen3VLForConditionalGeneration"])) == "causal"
+    assert masque_images_famille(_spec_archi(["Qwen3VLMoeForConditionalGeneration"])) == "causal"
+    with pytest.raises(MasqueImageInconnu, match="architectures="):
+        masque_images_famille(_spec_archi(["LlavaForConditionalGeneration"]))    # famille absente : refus nommé
+    with pytest.raises(MasqueImageInconnu):
+        masque_images_famille(_spec_archi([]))
+
+
+def _logits_prefill(converted, archs, plages_ignorees=False):
+    """Logits du prefill d'une requête à image (tour factice, embeds constants) sur le converti jouet, la famille
+    du config.json remplacée par ``archs`` ; ``plages_ignorees`` : masque causal pur (référence)."""
+    from acvram.engine.loader import load_model
+    from acvram.engine.sampler import SamplingParams
+    from acvram.engine.vision import TourVision, masque_images_famille
+    loaded = load_model(converted, dtype=torch.float32, device_override="cpu")
+    loaded.spec.raw = {**(loaded.spec.raw or {}), "architectures": archs}
+    engine = Engine(loaded, None, max_batch_size=1, max_model_len=64, enable_cuda_graphs=False)
+    h = loaded.spec.hidden_size
+    engine.vision = TourVision(lambda pv: torch.full((1, 3, h), 0.25), torch.device("cpu"), nom="factice")
+    engine.masque_images = masque_images_famille(loaded.spec)
+    if plages_ignorees:
+        for l in loaded.model.layers:
+            l.self_attn._masque_images = "causal"
+    vus = {}
+
+    def force(lg, seqs):
+        vus["logits"] = lg[0].float().clone()
+        return torch.tensor([1], device=lg.device, dtype=torch.long), torch.zeros(1, device=lg.device)
+    engine._sample_only = force
+    engine.add_request([1, 2, 3, 4, 5, 6, 7, 8], SamplingParams(temperature=0.0, max_tokens=1),
+                       images=[(2, 5, torch.tensor(1.0), "sha-1")])
+    engine.step()
+    return vus["logits"], engine
+
+
+def test_qwen_plage_image_aucune_cellule_ouverte_gemma_ouvertes(converted):
+    """poste7 : « Qwen3-VL + plage → aucune cellule ouverte » (= masque causal pur, au bit) ; « Gemma + plage →
+    ouvertes » (le bloc bidirectionnel change la sortie). La porte agit au site model.py où les plages sont lues."""
+    qwen, eng_q = _logits_prefill(converted, ["Qwen3VLForConditionalGeneration"])
+    causal, _ = _logits_prefill(converted, ["Qwen3VLForConditionalGeneration"], plages_ignorees=True)
+    assert torch.equal(qwen, causal), "Qwen3-VL : la plage image a ouvert des cellules (masque non causal)"
+    gemma, eng_g = _logits_prefill(converted, ["Gemma4ForConditionalGeneration"])
+    assert not torch.equal(gemma, causal), "Gemma : le bloc bidirectionnel n'a rien ouvert"
+    assert " masque_images=causal" in eng_q.regime_ligne() and " masque_images=bidir" in eng_g.regime_ligne()
+
+
+def test_alias_a_images_de_famille_inconnue_refuse_au_chargement(converted, monkeypatch):
+    """Une tour servie (manifeste vision: oui) sur une famille sans masque connu : MasqueImageInconnu à la
+    construction de l'Engine — jamais un bloc bidirectionnel appliqué par défaut."""
+    import json, os, shutil
+    from acvram.engine.loader import load_model
+    from acvram.engine.vision import MasqueImageInconnu, TourVision
+    d = os.path.join(os.path.dirname(converted), "inconnu_vision"); shutil.copytree(converted, d, dirs_exist_ok=True)
+    man = json.load(open(os.path.join(d, "acvram_manifest.json"))); man["vision"] = "oui"
+    json.dump(man, open(os.path.join(d, "acvram_manifest.json"), "w"))
+    loaded = load_model(d, dtype=torch.float32, device_override="cpu")
+    loaded.spec.raw = {**(loaded.spec.raw or {}), "architectures": ["LlavaForConditionalGeneration"]}
+    h = loaded.spec.hidden_size
+    monkeypatch.setattr(TourVision, "depuis_dossier", classmethod(lambda cls, p, m, dev: cls(lambda pv: torch.zeros(1, 3, h), dev, nom="factice")))
+    with pytest.raises(MasqueImageInconnu, match="Llava"):
+        Engine(loaded, None, max_batch_size=1, max_model_len=64, enable_cuda_graphs=False)
