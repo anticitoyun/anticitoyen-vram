@@ -40,3 +40,5 @@ scratchpad/**/*.log
 scratchpad/**/*.out
 outils/gpu/hors-verrou.log
 scratchpad/t4-20-09/pytest-T4-11h40.txt
+.webui_secret_key
+*.deb
