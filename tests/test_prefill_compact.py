@@ -268,20 +268,26 @@ def test_ordre_sur_k_egale_flat_t_ordre():
 @pytest.mark.parametrize("vides", [False, True])
 def test_aligner_blocs_tries_egale_aligner_blocs(bloc, vides):
     """Mêmes sorted_ids / expert_ids / num_post que `aligner_blocs` sur la
-    liste triée (ce que le préfill lui donnait) ; témoin cassant : des comptes
-    faux (décalés d'un expert) changent les sorties."""
+    liste triée (ce que le préfill lui donnait) sur les `total` premières
+    entrées ; au-delà (taille fixe P, aucun scalaire hôte) : sentinelle G et
+    −1, ce que le noyau ne visite jamais. Témoin cassant : des comptes faux
+    (décalés d'un expert) changent les sorties."""
     from acvram.kernels import marlin_port as MP
     E = 128
     flat_e = _paires(vides=vides).reshape(-1)
+    G = flat_e.numel()
     e_sorted = flat_e[torch.argsort(flat_e, stable=True)]
     cnt = torch.bincount(e_sorted, minlength=E)
     s, e, n = MP.aligner_blocs(e_sorted.unsqueeze(1), bloc, E)
     s2, e2, n2 = MP.aligner_blocs_tries(e_sorted, cnt, bloc, E)
-    assert torch.equal(s, s2) and torch.equal(e, e2) and torch.equal(n, n2)
+    total = int(n)
+    assert torch.equal(n, n2) and s2.numel() >= total and s2.numel() % bloc == 0
+    assert torch.equal(s[:total], s2[:total]) and torch.equal(e[: total // bloc], e2[: total // bloc])
+    assert bool((s2[total:] == G).all()) and bool((e2[total // bloc:] == -1).all())
     assert s2.dtype == e2.dtype == n2.dtype == torch.int32
     faux = torch.roll(cnt, 1)
     s3, e3, _ = MP.aligner_blocs_tries(e_sorted, faux, bloc, E)
-    assert not (s3.shape == s.shape and torch.equal(s3, s) and torch.equal(e3, e))
+    assert not (torch.equal(s3[:total], s[:total]) and torch.equal(e3[: total // bloc], e[: total // bloc]))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise (noyaux Marlin)")
