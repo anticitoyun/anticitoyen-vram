@@ -9,3 +9,7 @@ suite : poste7 : C14-b clos (combine_vb opt-in) ; PREP_GRILLE : (a) faux au seui
 
 ## Rejouable
 `cd ~/travail/poste2-c14b && git checkout dfa310ec && git apply scratchpad/c14b-m1-20-09/patch-local-assert353.diff && ETAPES=P1 ACVRAM_ARBRE=$PWD PYA=<python venv> bash scratchpad/c14b-20-09/chaine.sh` (1 min, extension en cache ; sorties `scratchpad/c14b-20-09/sortie/`, copies sur poste2 `scratchpad/c14b-m1-20-09/`).
+
+## Addendum 09 h 52 — rejouée sur **a985c71d** (poste1 : les deux juges ulp-de-|y| retirés du scellé du test, patch local caduc) : mêmes verdicts sur un SHA propre
+instrument : même chaîne, `ETAPES=P1`, sans patch, 09:50:47-09:51:43 (56 s de carte)
+mesuré : tests 23 passed ; (d) réel identique (0 / 0 fautive, ratio 0,4994, faute construite 24/24) ; nsys A 1 576 lancements · 13,60 ms noyaux, B 1 435 · 13,44 ; prep regrillé 12,8 µs/couche, combine_vb 22,1 µs/couche — (a) FAUX, (b) FAUX, C14-b clos ; copies `scratchpad/c14b-m1-20-09/nsys-*-familles-a985c71d.txt`, `journal-M1-a985c71d.log`
