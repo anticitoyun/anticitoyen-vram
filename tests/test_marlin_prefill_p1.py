@@ -76,7 +76,10 @@ def test_le_regime_nomme_la_disposition(converted):
     from acvram.engine.runner import Engine
     engine = Engine(load_model(converted, dtype=torch.float32, device_override="cpu"), None,
                     max_batch_size=2, max_model_len=256)
-    assert "experts_layout=naturel" in engine.regime_ligne()
+    # 790c995c (couverture Marlin PAR COUCHE) : un modèle sans couche MoE dit « aucun »,
+    # pas « naturel » — le jouet `converted` est dense ; la disposition « naturel » se
+    # nomme sur un MoE (test_glue_compact / marlin_prefill sur carte)
+    assert "experts_layout=aucun" in engine.regime_ligne()
 
 
 CARTE = pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise (noyaux Marlin)")

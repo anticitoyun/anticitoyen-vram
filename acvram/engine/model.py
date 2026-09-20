@@ -3164,7 +3164,11 @@ class ACVRamModel(nn.Module):
             # C15 niveau 3 : `slots >= 0` (fantômes du godet) une fois par pas
             # au lieu d'une fois par couche (48 nœuds → 1) ; témoin : None,
             # chaque couche le recalcule.
-            valid = (slots >= 0) if kernels.glue_compact("kv") else None
+            # (sans couche MoE — jouet dense ou MLA seul — ce `ge` serait un nœud de plus,
+            # pas de moins : test_mla_glue_c15 le comptait, 20/09)
+            if "_a_des_moe" not in self.__dict__:
+                self.__dict__["_a_des_moe"] = any(isinstance(l.mlp, MoEBlock) for l in self.layers)
+            valid = (slots >= 0) if kernels.glue_compact("kv") and self.__dict__["_a_des_moe"] else None
             for i, layer in enumerate(self.layers):
                 if valid is not None and type(layer) is DecoderLayer:
                     x, delta = layer.decode_fixed_res(
