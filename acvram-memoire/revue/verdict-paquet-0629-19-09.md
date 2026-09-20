@@ -4,6 +4,7 @@ instrument : `scratchpad/verif-eco-19-09/chaine.sh`, 07:16:13-07:16:54, prises `
 scellé (chef 07 h 14 / REGLES § 3, avant) : régime `eco=2700(...)` juste, `-rgc` à l'arrêt, pas de charge résiduelle
 mesuré : (1) réel : `eco=2700(2685)`, `etat {"mode": "2700", "pid": 288266}`, requête à 2 677 MHz, après SIGTERM `horloge=libre` (615-2 842, stable) ; (2) `-lgc` main + `ECO=off` : `eco=off(2677: verrou 2700 posé hors processus)`, requête à 2 670, après SIGTERM `lgc2700?` (posé hors acvram, non rendu : juste) ; `-rgc` rendu par moi à la fin
 verdict : **TENU** ; charge utile non rejouée (le `.deb` 0.6.29 n'est pas dans l'arbre poste2 — chef l'a construit sur main ; même charge utile que 0.6.27 par construction)
+durée : 41 s (07:16:13-07:16:54) + prise écartée 1 min 06 s, rédaction 2 min
 suite : chef : feu vert confirmé ; ma file : C15-prefill d17a719d partie 1 → partie 2 → sélection par rang → main/d01eb2cb tranches-9 ; verdict β à écrire d'abord (journal `journal-beta-9tranches.log`)
 
 ## Rejouable
