@@ -64,5 +64,7 @@
  "Lancer : <code>openclaw gateway start</code> (service utilisateur) puis <code>openclaw chat</code> (terminal) ou <code>openclaw agent -m \"liste les fichiers de ~/Documents et résume-les\"</code>. Le modèle répond par des appels d'outils, l'agent les exécute sur Ubuntu, le modèle lit les résultats et poursuit.": "실행: <code>openclaw gateway start</code>(사용자 서비스), 이어서 <code>openclaw chat</code>(터미널) 또는 <code>openclaw agent -m \"~/Documents의 파일을 나열하고 요약해\"</code>. 모델은 도구 호출로 응답하고, 에이전트가 Ubuntu에서 실행하며, 모델이 결과를 읽고 계속합니다.",
  "Vérifier : <code>openclaw doctor</code> (passerelle, fournisseur, outils) ; dans la console acvram, la ligne de régime du serveur et les requêtes <code>/v1/chat/completions</code> qui arrivent de l'agent.": "확인: <code>openclaw doctor</code>(게이트웨이, 제공자, 도구); acvram 콘솔에서 서버의 레짐 줄과 에이전트에서 오는 <code>/v1/chat/completions</code> 요청.",
  "Prudence : un modèle local qui a le shell a tous vos droits. Gardez l'agent sous un utilisateur ordinaire, un espace de travail borné, des sauvegardes, et lisez ce qu'il propose avant d'accepter une commande <code>rm</code>, <code>sudo</code> ou un envoi réseau. Un modèle qui n'a pas été entraîné aux outils (chat pur) rendra du texte au lieu d'appels : choisissez un modèle « instruct » récent.": "주의: 셸을 가진 로컬 모델은 당신의 모든 권한을 갖습니다. 에이전트를 일반 사용자, 제한된 작업 공간, 백업 아래에 두고 <code>rm</code>, <code>sudo</code> 또는 네트워크 전송을 수락하기 전에 제안을 읽으세요. 도구 학습이 안 된 모델(순수 채팅)은 호출 대신 텍스트를 반환합니다: 최신 “instruct” 모델을 고르세요.",
- "Agent OS": "OS 에이전트"
+ "Agent OS": "OS 에이전트",
+ "Galerie": "갤러리",
+ "{n} images de l'auteur — cliquer pour agrandir, ← → pour passer, Échap pour fermer.": "작가의 이미지 {n}장 — 클릭하여 확대, ← → 로 이동, Esc로 닫기."
 }

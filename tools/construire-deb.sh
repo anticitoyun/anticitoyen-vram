@@ -184,6 +184,7 @@ install -m 755 packaging/acvram-gui "$PKG/usr/bin/acvram-gui"
 install -d "$PKG/usr/share/acvram/langues"
 install -m 644 packaging/langues/*.json "$PKG/usr/share/acvram/langues/"   # traductions de la GUI
 install -m 644 packaging/logo-acvram.jpg "$PKG/usr/share/acvram/logo-acvram.jpg"   # logo de la GUI (barre, bandeau, fond)
+install -d "$PKG/usr/share/acvram/galerie" && install -m 644 packaging/galerie/*.jpg "$PKG/usr/share/acvram/galerie/"   # galerie de la section À propos
 install -D -m 755 outils/carte.sh "$PKG/usr/share/acvram/carte.sh"
 install -m 644 packaging/acvram.desktop "$PKG/usr/share/applications/acvram.desktop"
 install -m 644 packaging/acvram.svg \

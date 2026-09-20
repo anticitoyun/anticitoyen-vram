@@ -64,5 +64,7 @@
  "Lancer : <code>openclaw gateway start</code> (service utilisateur) puis <code>openclaw chat</code> (terminal) ou <code>openclaw agent -m \"liste les fichiers de ~/Documents et résume-les\"</code>. Le modèle répond par des appels d'outils, l'agent les exécute sur Ubuntu, le modèle lit les résultats et poursuit.": "启动：<code>openclaw gateway start</code>（用户服务），然后 <code>openclaw chat</code>（终端）或 <code>openclaw agent -m \"列出 ~/Documents 中的文件并做摘要\"</code>。模型以工具调用作答，代理在 Ubuntu 上执行，模型读取结果后继续。",
  "Vérifier : <code>openclaw doctor</code> (passerelle, fournisseur, outils) ; dans la console acvram, la ligne de régime du serveur et les requêtes <code>/v1/chat/completions</code> qui arrivent de l'agent.": "检查：<code>openclaw doctor</code>（网关、提供方、工具）；在 acvram 控制台中查看服务器的运行状态行以及来自代理的 <code>/v1/chat/completions</code> 请求。",
  "Prudence : un modèle local qui a le shell a tous vos droits. Gardez l'agent sous un utilisateur ordinaire, un espace de travail borné, des sauvegardes, et lisez ce qu'il propose avant d'accepter une commande <code>rm</code>, <code>sudo</code> ou un envoi réseau. Un modèle qui n'a pas été entraîné aux outils (chat pur) rendra du texte au lieu d'appels : choisissez un modèle « instruct » récent.": "注意：拥有 shell 的本地模型拥有您的全部权限。让代理运行在普通用户下、受限的工作区内，做好备份，并在接受 <code>rm</code>、<code>sudo</code> 或网络发送之前阅读它的提议。未经工具训练的模型（纯聊天）会返回文本而不是调用：请选择较新的 “instruct” 模型。",
- "Agent OS": "系统代理"
+ "Agent OS": "系统代理",
+ "Galerie": "图库",
+ "{n} images de l'auteur — cliquer pour agrandir, ← → pour passer, Échap pour fermer.": "作者的 {n} 张图片——点击放大，← → 切换，Esc 关闭。"
 }

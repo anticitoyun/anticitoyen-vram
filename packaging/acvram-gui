@@ -92,6 +92,39 @@ def dossiers_langues() -> list[str]:
             "/usr/share/acvram/langues"]
 
 
+def dossier_galerie() -> str:
+    """packaging/galerie (dépôt) ou /usr/share/acvram/galerie (paquet) : les
+    images de l'auteur (vignettes ≤ 720 px, jpg), servies en file:// — la
+    page est chargée depuis file:///, WebKit l'autorise avec le réglage
+    allow_file_access_from_file_urls posé dans la fenêtre."""
+    ici = os.path.dirname(os.path.realpath(sys.argv[0]))
+    for c in (os.path.join(ici, "galerie"), os.path.join(ici, "..", "share", "acvram", "galerie"),
+              "/usr/share/acvram/galerie"):
+        if os.path.isdir(c):
+            return c
+    return ""
+
+
+def images_galerie() -> list[str]:
+    d = dossier_galerie()
+    if not d:
+        return []
+    return sorted(os.path.join(d, f) for f in os.listdir(d) if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp")))
+
+
+def html_galerie() -> str:
+    """Grille de vignettes ; un clic ouvre l'image en grand (visionneuse
+    dans la page, flèches ← → et Échap), rien ne sort de la fenêtre."""
+    imgs = images_galerie()
+    if not imgs:
+        return ""
+    vign = "".join(f'<img src="file://{html.escape(c)}" loading="lazy" onclick="galerie({i})" alt="">' for i, c in enumerate(imgs))
+    return f"""<h2>{T("Galerie")}</h2>
+<p class="note">{T("{n} images de l'auteur — cliquer pour agrandir, ← → pour passer, Échap pour fermer.", n=len(imgs))}</p>
+<div class="galerie">{vign}</div>
+<div id="visionneuse" onclick="fermer_galerie()"><img id="vis_img" src="" alt=""><span id="vis_pos"></span></div>"""
+
+
 def logo_data_uri() -> str:
     """Le logo (packaging/logo-acvram.jpg, ou /usr/share/acvram/) en data URI :
     la page est chargée depuis file:/// sans base, un chemin relatif ne
@@ -245,6 +278,12 @@ button{cursor:pointer;background:var(--rose-nuit);border-color:var(--rose-vif)}
 button:hover{background:var(--rose-vif)}
 code{color:var(--rose-clair)}
 .ko{color:var(--alerte)}
+.galerie{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin:8px 0}
+.galerie img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:10px;cursor:zoom-in;border:1px solid var(--bord)}
+#visionneuse{display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:50;align-items:center;justify-content:center;cursor:zoom-out}
+#visionneuse.actif{display:flex}
+#visionneuse img{max-width:96vw;max-height:92vh;border-radius:8px}
+#vis_pos{position:fixed;right:16px;bottom:12px;color:#ddd;font-size:12px}
 .onglets{display:flex;gap:6px;margin:8px 0 4px;border-bottom:1px solid var(--bord)}
 .onglets button{background:transparent;border:1px solid transparent;border-bottom:none;border-radius:10px 10px 0 0;
 color:var(--texte-2);padding:8px 14px}
@@ -542,9 +581,16 @@ def page_accueil(erreur: str = "") -> str:
   {'<img src="' + LOGO + '" style="width:100%;max-width:640px;border-radius:12px;display:block;margin:8px 0">' if LOGO else ''}
   <p class="note">{T("Serveur d'inférence pour GPU hétérogènes (NVFP4 + INT4) — le thème du logo se choisit dans le menu « Thème » de la barre.")}</p>
 </div>
+<div class="carte">
+{html_galerie()}
+</div>
 </div>
 <p class="note" style="margin-top:28px">acvram {version_acvram()} · <a href="{SOUTIEN_URL}" target="_blank" style="color:var(--rose-clair)">{T("Soutenir le projet")}</a></p>
 <script>
+const GALERIE=[...document.querySelectorAll('.galerie img')].map(i=>i.src); let vis=-1;
+function galerie(i){{ vis=i; document.getElementById('vis_img').src=GALERIE[i]; document.getElementById('vis_pos').textContent=(i+1)+' / '+GALERIE.length; document.getElementById('visionneuse').classList.add('actif'); }}
+function fermer_galerie(){{ vis=-1; document.getElementById('visionneuse').classList.remove('actif'); }}
+document.addEventListener('keydown', e=>{{ if(vis<0) return; if(e.key==='Escape') fermer_galerie(); else if(e.key==='ArrowRight') galerie((vis+1)%GALERIE.length); else if(e.key==='ArrowLeft') galerie((vis-1+GALERIE.length)%GALERIE.length); }});
 function onglet(n){{
   for(const o of document.querySelectorAll('.onglet')) o.classList.toggle('actif', o.id===n);
   for(const b of document.querySelectorAll('.onglets button')) b.classList.toggle('actif', b.id==='ong_'+n);
@@ -669,6 +715,7 @@ class Fenetre(Gtk.Window):
         reglages = self.web.get_settings()
         reglages.set_enable_developer_extras(True)
         reglages.set_enable_javascript(True)
+        reglages.set_allow_file_access_from_file_urls(True)   # galerie : images en file:// depuis une page file:///
         # Sans ce reglage, une ouverture non declenchee par un geste utilisateur
         # DIRECT (verifie a sec : un clic simule via JS compte comme tel) est
         # refusee silencieusement — un vrai clic humain sur "galerie" passe

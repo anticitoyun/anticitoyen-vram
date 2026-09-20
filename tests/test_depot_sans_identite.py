@@ -192,7 +192,7 @@ EXEMPTES_SESSION: set[str] = set()
 # .npy/.raw (memes dumps numeriques, meme risque).
 # .deb : le paquet suivi est binaire ; lu comme texte il rend des faux
 # courriels et des faux chemins (20/09, 0.6.29).
-_EXTENSIONS_BINAIRES = {".pt", ".npy", ".raw", ".safetensors", ".bin", ".deb"}
+_EXTENSIONS_BINAIRES = {".pt", ".npy", ".raw", ".safetensors", ".bin", ".deb", ".jpg", ".jpeg", ".png"}
 
 
 def _suivis():
