@@ -50,5 +50,9 @@
  "proposer les options": "föreslå alternativ",
  "éco d'horloge": "klock-ekoläge",
  "2700 (défaut)": "2700 (standard)",
- "off (horloge libre)": "av (fri klocka)"
+ "off (horloge libre)": "av (fri klocka)",
+ "Serveur": "Server",
+ "Convertir": "Konvertera",
+ "À propos": "Om",
+ "Thème": "Tema"
 }

@@ -50,5 +50,9 @@
  "proposer les options": "옵션 제안",
  "éco d'horloge": "클럭 절전 모드",
  "2700 (défaut)": "2700 (기본)",
- "off (horloge libre)": "끄기 (자유 클럭)"
+ "off (horloge libre)": "끄기 (자유 클럭)",
+ "Serveur": "서버",
+ "Convertir": "변환",
+ "À propos": "정보",
+ "Thème": "테마"
 }

@@ -50,5 +50,9 @@
  "proposer les options": "ehdota asetuksia",
  "éco d'horloge": "kellon ekotila",
  "2700 (défaut)": "2700 (oletus)",
- "off (horloge libre)": "pois (vapaa kello)"
+ "off (horloge libre)": "pois (vapaa kello)",
+ "Serveur": "Palvelin",
+ "Convertir": "Muunna",
+ "À propos": "Tietoja",
+ "Thème": "Teema"
 }
