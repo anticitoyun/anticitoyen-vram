@@ -340,17 +340,52 @@ def test_config_lit_mrope_section_et_spatial_merge(tmp_path):
     assert spec3.mrope_section == SECTION and spec3.spatial_merge_size == 2
 
 
-def test_regime_mot_mrope_on(monkeypatch):
+def test_regime_mot_mrope_section_entrelacee():
+    """`mrope=[24,20,20](interleaved)` : lu du manifeste écrit par la conversion
+    (pièce (a) : `mrope_section` / `mrope_interleaved`), sinon du rope_scaling du
+    spec ; rien sur un modèle texte, rien sans modèle (test_defaut_servi)."""
     from acvram import regime
-    regime.declarer_modele_charge({"vision": "oui", "model": {"rope_scaling": SCALING}})
+    MOT = "mrope=[24,20,20](interleaved)"
     try:
-        assert regime.mrope_texte() == "mrope=on"
-        assert "mrope=on" in regime.regime_ligne().split()
+        regime.declarer_modele_charge({"vision": "oui", "mrope_section": SECTION, "mrope_interleaved": True,
+                                       "model": {"rope_scaling": {}}})
+        assert regime.mrope_texte() == MOT and MOT in regime.regime_ligne().split()
+        regime.declarer_modele_charge({"vision": "oui", "model": {"rope_scaling": SCALING}})
+        assert regime.mrope_texte() == MOT
+        regime.declarer_modele_charge({"vision": "oui", "mrope_section": [16, 24, 24], "mrope_interleaved": False})
+        assert regime.mrope_texte() == "mrope=[16,24,24](blocs)"
         regime.declarer_modele_charge({"vision": "non", "model": {"rope_scaling": {"rope_type": "yarn"}}})
-        assert regime.mrope_texte() is None and "mrope=on" not in regime.regime_ligne()
+        assert regime.mrope_texte() is None and "mrope=" not in regime.regime_ligne()
     finally:
         regime.declarer_modele_charge(None)
-    assert regime.mrope_texte() is None
+    assert regime.mrope_texte() is None and "mrope=" not in regime.regime_ligne()
+
+
+@pytest.mark.skipif(bool(alias_absent(_QVL_NOM := "Qwen3-VL-2B-Instruct-bf16")), reason=alias_absent("Qwen3-VL-2B-Instruct-bf16") or "présent")
+def test_dossier_qwen3_vl_2b_config_lue_et_ligne_de_regime():
+    """Le VRAI dossier, sans manifeste : la lecture que le moteur fait (config.json,
+    text_config dépliée) rend mrope_section [24, 20, 20] ET mrope_interleaved,
+    spatial_merge_size 2, theta 5e6 — LUS, pas déclarés — et la ligne de régime
+    les porte une fois le modèle déclaré (manifeste comme la conversion l'écrit)."""
+    from acvram import regime
+    from acvram.engine.config import load_model_spec
+    chemin = alias(_QVL_NOM)
+    assert not os.path.exists(os.path.join(chemin, "acvram_manifest.json"))
+    spec = load_model_spec(chemin, _QVL_NOM)
+    assert spec.architecture in ("llama",) and spec.head_dim == 128
+    assert spec.mrope_section == [24, 20, 20]
+    assert spec.rope_scaling["mrope_interleaved"] is True and spec.rope_scaling["rope_type"] == "default"
+    assert spec.spatial_merge_size == 2 and spec.rope_theta == 5_000_000
+    rope = RotaryEmbedding(spec.head_dim, spec.max_position_embeddings, spec.rope_theta, spec.rope_scaling)
+    assert rope.mrope_section == [24, 20, 20]
+    manifeste = {"vision": "oui", "model": spec.to_dict(),
+                 "mrope_section": [int(x) for x in spec.rope_scaling["mrope_section"]],
+                 "mrope_interleaved": bool(spec.rope_scaling["mrope_interleaved"])}
+    try:
+        regime.declarer_modele_charge(manifeste)
+        assert "mrope=[24,20,20](interleaved)" in regime.regime_ligne().split()
+    finally:
+        regime.declarer_modele_charge(None)
 
 
 # --------------------------------------------------------------------------

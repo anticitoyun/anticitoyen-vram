@@ -145,6 +145,282 @@ TEMOIN_TEXTE = {
 }
 
 
+# Témoin de l'alias texte du mini-modèle Qwen3-VL MoE srcAWQ (ci-dessous), produit par le
+# code d'ORIGINE (b4ef64e3, base de la branche) : voie HFQuantCheckpoint, à sec.
+TEMOIN_QVL_MOE_TEXTE = {
+    "lm_head.weight.block_scale":
+        "2406eb97bf6d794481618f7663527c9b8dea9847e738f31d0e9323b0bc58a3eb",
+    "lm_head.weight.global_scale":
+        "0f1be68273451dfde36cc6aede6ce97d97437396b67b4d0934be3f7cbb020c09",
+    "lm_head.weight.qweight":
+        "6090cf953d200da1882f6ac7c9b571fcec82649626ae92aa9932e8ee3dd44151",
+    "model.embed_tokens.weight":
+        "dd3adff573a6f52f4e50938037a84e72f4137238e28728368da457ad8b4d1a6d",
+    "model.layers.0.input_layernorm.weight":
+        "d16217b910541669d4ee5a39c34dcb8c6cc3bf1cd201fa011e145b69f7a21b8c",
+    "model.layers.0.mlp.experts.0.down_proj.weight.act_scale":
+        "971f236f54d23c5f57784f3654486f988ff3ba7562ce3557279a4b01d74d5e92",
+    "model.layers.0.mlp.experts.0.down_proj.weight.block_scale":
+        "0722d6b821faa088bf3e6c9558c4611d1db587074a63772ff6c43ff72a8b6356",
+    "model.layers.0.mlp.experts.0.down_proj.weight.global_scale":
+        "5d088fb0194b0732a32d5334d5e5fc23f3ec169cf3bb9a1f2811895acf6df87f",
+    "model.layers.0.mlp.experts.0.down_proj.weight.qweight":
+        "56fbf725886f2383ecb4794824990a64ee921b6b0052246ea5b3e9cf03596e16",
+    "model.layers.0.mlp.experts.0.gate_proj.weight.act_scale":
+        "298cc135f9c60098d5759a62b249037e398fa5faee86180b8bc9077897007278",
+    "model.layers.0.mlp.experts.0.gate_proj.weight.block_scale":
+        "5ba1388c5ec1fd432d0a6b68c35418700825ac95d81bdcab1aa0639754f5d2d2",
+    "model.layers.0.mlp.experts.0.gate_proj.weight.global_scale":
+        "ab33b53a0498952cf8c6890041884130439a72f359740d2697417594d1f8bb7b",
+    "model.layers.0.mlp.experts.0.gate_proj.weight.qweight":
+        "a59abb5627d2951710b0e155ab0b5ca9cd860617cb3516a52e9f36889b08b961",
+    "model.layers.0.mlp.experts.0.up_proj.weight.act_scale":
+        "298cc135f9c60098d5759a62b249037e398fa5faee86180b8bc9077897007278",
+    "model.layers.0.mlp.experts.0.up_proj.weight.block_scale":
+        "aac2b4847be7af197b69236e950c9d796b9761f2ce4e18f709ff8415b4bf8ab5",
+    "model.layers.0.mlp.experts.0.up_proj.weight.global_scale":
+        "4cdc2a6ffc257f46e9fe85321ef93b3c2f273f9346d51d6b070291f52d73ce97",
+    "model.layers.0.mlp.experts.0.up_proj.weight.qweight":
+        "2e391f0c90ff47d47573c18324f394844a4f2265118637202f99b4fefbfd3c22",
+    "model.layers.0.mlp.experts.1.down_proj.weight.act_scale":
+        "971f236f54d23c5f57784f3654486f988ff3ba7562ce3557279a4b01d74d5e92",
+    "model.layers.0.mlp.experts.1.down_proj.weight.block_scale":
+        "e86c13845aa1a97733c5dab9cf742bd68dbad0817fc15e35cde017c7698ea442",
+    "model.layers.0.mlp.experts.1.down_proj.weight.global_scale":
+        "861177c7b84cd836c8e86e9a81287d02fcdbe2220e683131abd88aabc1ce4356",
+    "model.layers.0.mlp.experts.1.down_proj.weight.qweight":
+        "87f77d4d28df61fd3f8da77d6735902b8ca725b1690bb3875fb1632264b4643c",
+    "model.layers.0.mlp.experts.1.gate_proj.weight.act_scale":
+        "298cc135f9c60098d5759a62b249037e398fa5faee86180b8bc9077897007278",
+    "model.layers.0.mlp.experts.1.gate_proj.weight.block_scale":
+        "c7eb45012f564754267143ee62dfd977e517d927cfa76b33561821eca4a6fbbf",
+    "model.layers.0.mlp.experts.1.gate_proj.weight.global_scale":
+        "c844cbd4ea99e6dc4c0f2b48320ed5df765050a0019e6296615279f171ebde01",
+    "model.layers.0.mlp.experts.1.gate_proj.weight.qweight":
+        "401d463589e60f6c2f66f18bbb84d5072fca9c22981b5de79f03d52a759aa9ff",
+    "model.layers.0.mlp.experts.1.up_proj.weight.act_scale":
+        "298cc135f9c60098d5759a62b249037e398fa5faee86180b8bc9077897007278",
+    "model.layers.0.mlp.experts.1.up_proj.weight.block_scale":
+        "bfaaaefc406b16c29da1df212c9c10cd949f65556f7dfebc43898401cd6a9d0e",
+    "model.layers.0.mlp.experts.1.up_proj.weight.global_scale":
+        "8167cf27e90ebb811abe992f74f1371ee40ca8f12f9b914cca7a83f0a33c0039",
+    "model.layers.0.mlp.experts.1.up_proj.weight.qweight":
+        "1dc456da6deeaa08458beee87f1c57cc2a1118b0b6cbcdbd5c0da672a320009b",
+    "model.layers.0.mlp.experts.2.down_proj.weight.act_scale":
+        "971f236f54d23c5f57784f3654486f988ff3ba7562ce3557279a4b01d74d5e92",
+    "model.layers.0.mlp.experts.2.down_proj.weight.block_scale":
+        "fb2283540cd7c230b34eb3041a71b54c0b7dd67b10d8469d82a4e1a0b0894cfe",
+    "model.layers.0.mlp.experts.2.down_proj.weight.global_scale":
+        "c4ce584365f30d25b35a92451642bf76e34812a8f1e52be23654c386edc087d4",
+    "model.layers.0.mlp.experts.2.down_proj.weight.qweight":
+        "7dea17aef1866eee56992e161fe1a983d7e9359c28277265c4eff40ab4ca06e2",
+    "model.layers.0.mlp.experts.2.gate_proj.weight.act_scale":
+        "298cc135f9c60098d5759a62b249037e398fa5faee86180b8bc9077897007278",
+    "model.layers.0.mlp.experts.2.gate_proj.weight.block_scale":
+        "693eb58c6dbfd1fdb9c3f4a4e2cb570efb451c5ede79a356df2a12ab3d30c1ff",
+    "model.layers.0.mlp.experts.2.gate_proj.weight.global_scale":
+        "df96ca3019353bad08323ffae0a3a1b0495aa63d5675a0597f87dba3d917d87d",
+    "model.layers.0.mlp.experts.2.gate_proj.weight.qweight":
+        "f4cc4fbe225f90368ebaf12f0ab670506a0323b6d5ab3c094fb735df0bba6b32",
+    "model.layers.0.mlp.experts.2.up_proj.weight.act_scale":
+        "298cc135f9c60098d5759a62b249037e398fa5faee86180b8bc9077897007278",
+    "model.layers.0.mlp.experts.2.up_proj.weight.block_scale":
+        "356aeb562f13191c1c7c7351f33eba961afaa852833411f53df7fdc907448475",
+    "model.layers.0.mlp.experts.2.up_proj.weight.global_scale":
+        "df96ca3019353bad08323ffae0a3a1b0495aa63d5675a0597f87dba3d917d87d",
+    "model.layers.0.mlp.experts.2.up_proj.weight.qweight":
+        "ab82594cd609f111776ae2075122372885f94312d9c43a48353eda68ac797230",
+    "model.layers.0.mlp.experts.3.down_proj.weight.act_scale":
+        "971f236f54d23c5f57784f3654486f988ff3ba7562ce3557279a4b01d74d5e92",
+    "model.layers.0.mlp.experts.3.down_proj.weight.block_scale":
+        "a777785e9b8772a01a0f8586957cd4e816faacd71f56f3e0a60fa1c59e62c9dc",
+    "model.layers.0.mlp.experts.3.down_proj.weight.global_scale":
+        "267a8166cff7bad7b6a5357f31a0e867b40fb87077806c1a81b65184d23ff65d",
+    "model.layers.0.mlp.experts.3.down_proj.weight.qweight":
+        "36e1cef279876c054f88d1b13595d683136d080b3b08dcd61cddf2984d562384",
+    "model.layers.0.mlp.experts.3.gate_proj.weight.act_scale":
+        "298cc135f9c60098d5759a62b249037e398fa5faee86180b8bc9077897007278",
+    "model.layers.0.mlp.experts.3.gate_proj.weight.block_scale":
+        "a58042c36c25d183f99b76f62640717040331b567048b7279f75c00a3419d587",
+    "model.layers.0.mlp.experts.3.gate_proj.weight.global_scale":
+        "373ead1549aea137a44d7aa51394cd41af6ce0708db03eab9dfb8d96e76eaf80",
+    "model.layers.0.mlp.experts.3.gate_proj.weight.qweight":
+        "d79bf9f1b6abbcb76af70e667fb2ce01048e5b04408b06310c44ed9b4f757fee",
+    "model.layers.0.mlp.experts.3.up_proj.weight.act_scale":
+        "298cc135f9c60098d5759a62b249037e398fa5faee86180b8bc9077897007278",
+    "model.layers.0.mlp.experts.3.up_proj.weight.block_scale":
+        "be099ee94ac5d39532b796fef845d40c1b5d4f9a0dcdd8f1b66f43a50a485c4b",
+    "model.layers.0.mlp.experts.3.up_proj.weight.global_scale":
+        "5d088fb0194b0732a32d5334d5e5fc23f3ec169cf3bb9a1f2811895acf6df87f",
+    "model.layers.0.mlp.experts.3.up_proj.weight.qweight":
+        "13a8a214591d95f5df8353f9aded585570676752e19e9916ad85b79032b7c8a6",
+    "model.layers.0.mlp.gate.weight":
+        "ce0e54d3e3dbb27b7e55163617c84e43c43ff29df9fff9a3df0e55710e099857",
+    "model.layers.0.post_attention_layernorm.weight":
+        "d16217b910541669d4ee5a39c34dcb8c6cc3bf1cd201fa011e145b69f7a21b8c",
+    "model.layers.0.self_attn.k_norm.weight":
+        "29d48a64f07cc074051a975431366f9ac17ee3dbc9f6f735628ee43d64cf25bf",
+    "model.layers.0.self_attn.k_proj.weight.block_scale":
+        "825183efa28fe75830e1ab78013b5905dbdf04682213e59e32d0915f2a77d338",
+    "model.layers.0.self_attn.k_proj.weight.global_scale":
+        "62fbee03a90cc93c9e3ca42f8503acc798e8ac4e240ae2becb9002ab3e3efe4c",
+    "model.layers.0.self_attn.k_proj.weight.qweight":
+        "018d63cca783bd169cb6162d4020c626fca261a37149b523c06eadb221b0c8c7",
+    "model.layers.0.self_attn.o_proj.weight.block_scale":
+        "9bdbd06593dffcdde250d5936c671d22de89937440b6493a0dad72482e560f7e",
+    "model.layers.0.self_attn.o_proj.weight.global_scale":
+        "636157ad34de53c3fb680f0e57bd8069d5ebe2e2b68ca0c97000a17c85f92fac",
+    "model.layers.0.self_attn.o_proj.weight.qweight":
+        "92d4f32f0b3b0e2f407a6973649072c15f3ef806f498f9fb46a3ffe65c9f601b",
+    "model.layers.0.self_attn.q_norm.weight":
+        "29d48a64f07cc074051a975431366f9ac17ee3dbc9f6f735628ee43d64cf25bf",
+    "model.layers.0.self_attn.q_proj.weight.block_scale":
+        "f0167da19c6fa4416b4075df07c61f035f7a521783dd0d37a1eae840ccd9ad39",
+    "model.layers.0.self_attn.q_proj.weight.global_scale":
+        "58cb3fe221867809216c7a1d9f7f10e3d56ecb3489a7e7dcb90a3365a353aeaa",
+    "model.layers.0.self_attn.q_proj.weight.qweight":
+        "b99238dffad6e9f85c0baf3fce4230f2a19d75ae155a2fb57c4aaf219b7737a8",
+    "model.layers.0.self_attn.v_proj.weight.block_scale":
+        "d0fced84fed4014ec53dc58599c3e29c943dd733a83d2c2bae2d7a0506db96ad",
+    "model.layers.0.self_attn.v_proj.weight.global_scale":
+        "57e5a74d82270e6f3a11d8fb129094fb54d06020f322913320fe968187be9521",
+    "model.layers.0.self_attn.v_proj.weight.qweight":
+        "4b4203cfa6cfcec778616133a3e9d8cc0125505e6b343588cebeaf8540d40b02",
+    "model.layers.1.input_layernorm.weight":
+        "d16217b910541669d4ee5a39c34dcb8c6cc3bf1cd201fa011e145b69f7a21b8c",
+    "model.layers.1.mlp.experts.0.down_proj.weight.act_scale":
+        "971f236f54d23c5f57784f3654486f988ff3ba7562ce3557279a4b01d74d5e92",
+    "model.layers.1.mlp.experts.0.down_proj.weight.block_scale":
+        "b6f7e674b724d43cf0c41302a41958d839f5659f803fda12851ed34787f82bc7",
+    "model.layers.1.mlp.experts.0.down_proj.weight.global_scale":
+        "79e7747c7871339edd8bfe662e91d7aa74e583cd21eff031ca57a79f147e2fab",
+    "model.layers.1.mlp.experts.0.down_proj.weight.qweight":
+        "c665433f52d7d4764f70560595b6cce06f327bf0cd12b2be2022defe11b98418",
+    "model.layers.1.mlp.experts.0.gate_proj.weight.act_scale":
+        "298cc135f9c60098d5759a62b249037e398fa5faee86180b8bc9077897007278",
+    "model.layers.1.mlp.experts.0.gate_proj.weight.block_scale":
+        "eab114f365920b325e4e1618ee3051392caa90f35882188f3f27f3b178984f0a",
+    "model.layers.1.mlp.experts.0.gate_proj.weight.global_scale":
+        "d50056fb7e0da6a5fc28d14328d6abab94f1019331c95506f11358eb172b0cd6",
+    "model.layers.1.mlp.experts.0.gate_proj.weight.qweight":
+        "cf1ba091f874f8a58368c63a08604451d0cd53785f552c0a77bff36fa04240de",
+    "model.layers.1.mlp.experts.0.up_proj.weight.act_scale":
+        "298cc135f9c60098d5759a62b249037e398fa5faee86180b8bc9077897007278",
+    "model.layers.1.mlp.experts.0.up_proj.weight.block_scale":
+        "6addf8e35ef53e53a7e3eb4300a40f1a96ff107f5344e952a2190d7ce78b6332",
+    "model.layers.1.mlp.experts.0.up_proj.weight.global_scale":
+        "7d2d472e95d2e7434fbcb9bf1da44cdbf65d18175e1d7ceca1fa938ef79a85ed",
+    "model.layers.1.mlp.experts.0.up_proj.weight.qweight":
+        "8ae447e504838378d0f4f668c124c4f1128bd22363d1e3d290786a24b88cf065",
+    "model.layers.1.mlp.experts.1.down_proj.weight.act_scale":
+        "971f236f54d23c5f57784f3654486f988ff3ba7562ce3557279a4b01d74d5e92",
+    "model.layers.1.mlp.experts.1.down_proj.weight.block_scale":
+        "da46d726d2be974271af7711421b2f57c86165b9b6661067b4741ba2c87bd4d1",
+    "model.layers.1.mlp.experts.1.down_proj.weight.global_scale":
+        "0d1ac0c23d750443dc7c184db7f2bc18a654f1f4c0d9fbb01732e16322af3294",
+    "model.layers.1.mlp.experts.1.down_proj.weight.qweight":
+        "8488a4529c2775bb2c37a2df200c1f3bf07bbe33c0c155c09fe4877151266b0a",
+    "model.layers.1.mlp.experts.1.gate_proj.weight.act_scale":
+        "298cc135f9c60098d5759a62b249037e398fa5faee86180b8bc9077897007278",
+    "model.layers.1.mlp.experts.1.gate_proj.weight.block_scale":
+        "fba4b0ddb84825f20734e9f04207f49899e76566d4dc5b50dfb6586f27c7d256",
+    "model.layers.1.mlp.experts.1.gate_proj.weight.global_scale":
+        "13bf8dee265d893ac63701d9b5f89c9a7c59f50744e7556f0bc8bbc5dd588138",
+    "model.layers.1.mlp.experts.1.gate_proj.weight.qweight":
+        "8cbf9a072ddbc296aabb69e744a7a5e6ec6238aa1667396e16bd2c11e8db9d5c",
+    "model.layers.1.mlp.experts.1.up_proj.weight.act_scale":
+        "298cc135f9c60098d5759a62b249037e398fa5faee86180b8bc9077897007278",
+    "model.layers.1.mlp.experts.1.up_proj.weight.block_scale":
+        "acc29a9722cbbf887c2ef7c288f415b13633901155838053fd61ab60e53059e3",
+    "model.layers.1.mlp.experts.1.up_proj.weight.global_scale":
+        "bab3e0e6b9291918fbaf7c1857d1cd077986eeb8fe5e378b71cb1e22a24d43d9",
+    "model.layers.1.mlp.experts.1.up_proj.weight.qweight":
+        "7447c31b3befb44fd03139ff80e6e11bd1b5ddade4edb5ff49d96dc2d77a43bf",
+    "model.layers.1.mlp.experts.2.down_proj.weight.act_scale":
+        "971f236f54d23c5f57784f3654486f988ff3ba7562ce3557279a4b01d74d5e92",
+    "model.layers.1.mlp.experts.2.down_proj.weight.block_scale":
+        "f8cecc73aecc7f111be7436fd2b8e8be53ae4f3cf194c28cd776354ce3aa1bb4",
+    "model.layers.1.mlp.experts.2.down_proj.weight.global_scale":
+        "a83e5b5614dc002e42ad3c0682c86998a5732863e775460f5ed5e6901abdcfd6",
+    "model.layers.1.mlp.experts.2.down_proj.weight.qweight":
+        "c828f9af3666db041b3b949104ff14a9beb47f7a5af7d50b01369a2d6f2e3b5e",
+    "model.layers.1.mlp.experts.2.gate_proj.weight.act_scale":
+        "298cc135f9c60098d5759a62b249037e398fa5faee86180b8bc9077897007278",
+    "model.layers.1.mlp.experts.2.gate_proj.weight.block_scale":
+        "9b875b42dcb92e8ec1e3a4421c2f02663ee209d28461370f0c9a49a5fa2ddc75",
+    "model.layers.1.mlp.experts.2.gate_proj.weight.global_scale":
+        "636157ad34de53c3fb680f0e57bd8069d5ebe2e2b68ca0c97000a17c85f92fac",
+    "model.layers.1.mlp.experts.2.gate_proj.weight.qweight":
+        "bf232c44bd1aac380200d2c6eeebd8c13dfb5b4e7058f4a0980515d930b56569",
+    "model.layers.1.mlp.experts.2.up_proj.weight.act_scale":
+        "298cc135f9c60098d5759a62b249037e398fa5faee86180b8bc9077897007278",
+    "model.layers.1.mlp.experts.2.up_proj.weight.block_scale":
+        "77844f3aa305496e9fd206073797a85edecc7fab0ec5d46ba8d0405d88c57bce",
+    "model.layers.1.mlp.experts.2.up_proj.weight.global_scale":
+        "13bf8dee265d893ac63701d9b5f89c9a7c59f50744e7556f0bc8bbc5dd588138",
+    "model.layers.1.mlp.experts.2.up_proj.weight.qweight":
+        "c4d64d2b7f46260602b4279994ad3c56f710ef83aff175a073f64019020d3256",
+    "model.layers.1.mlp.experts.3.down_proj.weight.act_scale":
+        "971f236f54d23c5f57784f3654486f988ff3ba7562ce3557279a4b01d74d5e92",
+    "model.layers.1.mlp.experts.3.down_proj.weight.block_scale":
+        "116eb21a634cf1839709ebfdbcb8bb1b00f52e4170f2259db4ad048f0e63b331",
+    "model.layers.1.mlp.experts.3.down_proj.weight.global_scale":
+        "8167cf27e90ebb811abe992f74f1371ee40ca8f12f9b914cca7a83f0a33c0039",
+    "model.layers.1.mlp.experts.3.down_proj.weight.qweight":
+        "51de2f13d71697eec284c75533b8a30df54cd1b1e0179cde25a430c88a059f44",
+    "model.layers.1.mlp.experts.3.gate_proj.weight.act_scale":
+        "298cc135f9c60098d5759a62b249037e398fa5faee86180b8bc9077897007278",
+    "model.layers.1.mlp.experts.3.gate_proj.weight.block_scale":
+        "580ecbf12680e82246d0d5223ea1513ec5d09cf71bd32602a1d69fbe3f7597c6",
+    "model.layers.1.mlp.experts.3.gate_proj.weight.global_scale":
+        "cdc0bdefab93352334c80a8f8e54353b6aaad42d8b2a7eb98fa5de114927ac41",
+    "model.layers.1.mlp.experts.3.gate_proj.weight.qweight":
+        "b841e11575be3bf58f65b73a140df146336aeac9f051b5175687d5563c3ec445",
+    "model.layers.1.mlp.experts.3.up_proj.weight.act_scale":
+        "298cc135f9c60098d5759a62b249037e398fa5faee86180b8bc9077897007278",
+    "model.layers.1.mlp.experts.3.up_proj.weight.block_scale":
+        "adafb0472999a2192d161944e8b35ac9ed8bb41ea20074555cf06f8f9a9823fb",
+    "model.layers.1.mlp.experts.3.up_proj.weight.global_scale":
+        "636157ad34de53c3fb680f0e57bd8069d5ebe2e2b68ca0c97000a17c85f92fac",
+    "model.layers.1.mlp.experts.3.up_proj.weight.qweight":
+        "5900741326fbb3d577b87eca2f7afa22a9575fc2f6cb6ffe2b48a9ec7e7394f9",
+    "model.layers.1.mlp.gate.weight":
+        "6574fa09a8307d552a30278153a610eb3839c55da4e3d129155319f5b4dd2893",
+    "model.layers.1.post_attention_layernorm.weight":
+        "d16217b910541669d4ee5a39c34dcb8c6cc3bf1cd201fa011e145b69f7a21b8c",
+    "model.layers.1.self_attn.k_norm.weight":
+        "29d48a64f07cc074051a975431366f9ac17ee3dbc9f6f735628ee43d64cf25bf",
+    "model.layers.1.self_attn.k_proj.weight.block_scale":
+        "908bad69197d9689acc60b6b0c35e4d39280c5c6c80ff4e496186ec8c5bbf143",
+    "model.layers.1.self_attn.k_proj.weight.global_scale":
+        "b6e782b75abbb3fb1a02a430c0ffcc4d151b567de253d7a3700c8ea78752bc4d",
+    "model.layers.1.self_attn.k_proj.weight.qweight":
+        "4cfcc96a56977da04b7f0ba9f8b6fa1e897a0a11338815b6a14865dbb11a7c2a",
+    "model.layers.1.self_attn.o_proj.weight.block_scale":
+        "31f3a70cd5e0b91dc3a4dbdb910d1d5b34ff4eb4fa88cc953daa09a03ec04661",
+    "model.layers.1.self_attn.o_proj.weight.global_scale":
+        "0d1ac0c23d750443dc7c184db7f2bc18a654f1f4c0d9fbb01732e16322af3294",
+    "model.layers.1.self_attn.o_proj.weight.qweight":
+        "e052dd5bf5222533fd1661807b9e50cf85c0a866941487b626472eb0a8d739ee",
+    "model.layers.1.self_attn.q_norm.weight":
+        "29d48a64f07cc074051a975431366f9ac17ee3dbc9f6f735628ee43d64cf25bf",
+    "model.layers.1.self_attn.q_proj.weight.block_scale":
+        "8d983c92dc98be368eb74b1b3d0ba5b78244efd3a03a4ae8544b0c760c72714c",
+    "model.layers.1.self_attn.q_proj.weight.global_scale":
+        "bab3e0e6b9291918fbaf7c1857d1cd077986eeb8fe5e378b71cb1e22a24d43d9",
+    "model.layers.1.self_attn.q_proj.weight.qweight":
+        "65affe60edc897e531332ff3d4918e75656fee05f9ab12f75f46312de2661e9c",
+    "model.layers.1.self_attn.v_proj.weight.block_scale":
+        "ab566748c11a7b64a469f1ecc78d7f575e947c41df7a58d4699c4654cfeab91e",
+    "model.layers.1.self_attn.v_proj.weight.global_scale":
+        "e745d07605139e8a807dacf4c781d796f97a95658dd2e1b2ab040f70647c5b4c",
+    "model.layers.1.self_attn.v_proj.weight.qweight":
+        "e4dc9c42677e3e9f8d574b16d8e46470841ff815a63aaf0ae89797f7ce3c60cd",
+    "model.norm.weight":
+        "d16217b910541669d4ee5a39c34dcb8c6cc3bf1cd201fa011e145b69f7a21b8c",
+}
+
+
 def _texte_config() -> dict:
     return {
         "model_type": "qwen3_vl_text", "hidden_size": H, "intermediate_size": INTER,
@@ -372,16 +648,6 @@ def test_la_ligne_de_regime_nomme_la_vision_seulement_modele_charge():
     assert "vision=" not in regime.regime_ligne()
 
 
-if __name__ == "__main__":                       # génère le témoin : voir TEMOIN_TEXTE
-    import pathlib
-    import sys
-    from acvram.hardware.profiles import load_profile
-    base = pathlib.Path(sys.argv[1])
-    src = _ecrire_source(base / "src_texte", vision=False)
-    out = _convertir(src, str(base / "out_texte"), load_profile("rig-14900k-5090-3080ti"))
-    print(json.dumps(_empreintes(out), indent=4, sort_keys=True))
-
-
 # ---- gemma4_unified (12B, 20/09 : poste2) : vision = model.vision_embedder.* + model.embed_vision, PAS de SigLIP ;
 # ---- audio (model.embed_audio.*) non servi : écarté ET nommé (manifeste audio: "non servi"), jamais en silence.
 
@@ -417,3 +683,271 @@ def test_unified_garde_l_embedder_de_patches_et_nomme_l_audio_non_servi(tmp_path
     assert "model.embed_audio.embedding_projection.weight" not in sortie      # audio : pas gardé…
     assert man.get("audio") == "non servi"                                     # … mais nommé au manifeste
     assert "audio non servi" in capsys.readouterr().out                         # … et au journal
+
+
+# ---- Qwen3-VL MoE (30B-A3B, contrat poste7-go-qwen3vl-parallele-20-09 § 2, pièce (a)) : tour
+# ---- model.visual.* + model.visual.merger.* + model.visual.deepstack_merger_list.{0,1,2}.* gardés
+# ---- bf16 au bit sous leur nom source, depuis une source bf16 ET depuis la source du parc
+# ---- (« srcAWQ » = compressed-tensors pack-quantized : weight_packed/weight_scale/weight_shape,
+# ---- tour dans `ignore` donc bf16 en clair — voie HFQuantCheckpoint) ; manifeste deepstack +
+# ---- deepstack_visual_indexes + mrope_section + mrope_interleaved lus de la config, jamais devinés.
+
+E, EI, GS = 4, 32, 32                         # experts, largeur d'expert, groupe int4
+DEEPSTACK_IDX = [8, 16, 24]
+MROPE = [24, 20, 20]
+DEEPSTACK_PREFIX = "model.visual.deepstack_merger_list."
+QUANT_CT = {"quant_method": "compressed-tensors", "format": "pack-quantized",
+            "quantization_status": "compressed", "version": "0.14.0",
+            "config_groups": {"group_0": {"format": "pack-quantized", "targets": ["Linear"],
+                                          "weights": {"num_bits": 4, "group_size": GS, "strategy": "group",
+                                                      "symmetric": True, "type": "int"}}},
+            "ignore": ["lm_head"]}
+
+
+def _config_qvl_moe(vision: bool, awq: bool) -> dict:
+    txt = {**_texte_config(), "model_type": "qwen3_vl_moe_text", "head_dim": H // NH,
+           "num_experts": E, "num_experts_per_tok": 2, "moe_intermediate_size": EI,
+           "decoder_sparse_step": 1, "mlp_only_layers": [], "norm_topk_prob": True,
+           "rope_theta": 5000000, "rope_scaling": {"mrope_interleaved": True, "mrope_section": MROPE,
+                                                   "rope_type": "default"}}
+    cfg = {"architectures": ["Qwen3VLMoeForConditionalGeneration"], "model_type": "qwen3_vl_moe",
+           "text_config": txt, "dtype": "bfloat16", "tie_word_embeddings": False}
+    if vision:
+        cfg["vision_config"] = {"model_type": "qwen3_vl_moe", "hidden_size": VH, "depth": 1, "num_heads": 2,
+                                "patch_size": 16, "in_channels": 3, "out_hidden_size": H, "spatial_merge_size": 2,
+                                "temporal_patch_size": 2, "deepstack_visual_indexes": DEEPSTACK_IDX}
+    if awq:
+        cfg["quantization_config"] = QUANT_CT
+    return cfg
+
+
+def _tenseurs_texte_moe() -> dict[str, torch.Tensor]:
+    g = torch.Generator().manual_seed(GRAINE + 3)
+
+    def w(*shape):
+        return (torch.randn(*shape, generator=g) * 0.02).to(torch.bfloat16)
+
+    hd = H // NH
+    p = "model.language_model."
+    sd = {p + "embed_tokens.weight": w(V, H)}
+    for i in range(L):
+        q = f"{p}layers.{i}."
+        sd[q + "self_attn.q_proj.weight"] = w(NH * hd, H)
+        sd[q + "self_attn.k_proj.weight"] = w(NKV * hd, H)
+        sd[q + "self_attn.v_proj.weight"] = w(NKV * hd, H)
+        sd[q + "self_attn.o_proj.weight"] = w(H, NH * hd)
+        sd[q + "self_attn.q_norm.weight"] = torch.ones(hd, dtype=torch.bfloat16)
+        sd[q + "self_attn.k_norm.weight"] = torch.ones(hd, dtype=torch.bfloat16)
+        sd[q + "mlp.gate.weight"] = w(E, H)
+        for e in range(E):
+            sd[q + f"mlp.experts.{e}.gate_proj.weight"] = w(EI, H)
+            sd[q + f"mlp.experts.{e}.up_proj.weight"] = w(EI, H)
+            sd[q + f"mlp.experts.{e}.down_proj.weight"] = w(H, EI)
+        sd[q + "input_layernorm.weight"] = torch.ones(H, dtype=torch.bfloat16)
+        sd[q + "post_attention_layernorm.weight"] = torch.ones(H, dtype=torch.bfloat16)
+    sd[p + "norm.weight"] = torch.ones(H, dtype=torch.bfloat16)
+    sd["lm_head.weight"] = w(V, H)
+    return sd
+
+
+def _tenseurs_vision_qvl() -> dict[str, torch.Tensor]:
+    """Les familles de clés de la source réelle (index.json de
+    Qwen3-VL-30B-A3B-abliterated-AWQ, lu le 20/09) : patch_embed, pos_embed,
+    blocks.N.{attn.qkv, attn.proj, mlp.linear_fc1, mlp.linear_fc2, norm1, norm2}
+    weight+bias, merger.{norm, linear_fc1, linear_fc2}, deepstack_merger_list.N idem."""
+    g = torch.Generator().manual_seed(GRAINE + 4)
+
+    def w(*shape):
+        return (torch.randn(*shape, generator=g) * 0.05).to(torch.bfloat16)
+
+    sd = {"model.visual.patch_embed.proj.weight": w(VH, 3, 2, 16, 16),
+          "model.visual.patch_embed.proj.bias": w(VH),
+          "model.visual.pos_embed.weight": w(9, VH)}
+    b = "model.visual.blocks.0."
+    for nom, forme in (("attn.qkv", (3 * VH, VH)), ("attn.proj", (VH, VH)),
+                       ("mlp.linear_fc1", (4 * VH, VH)), ("mlp.linear_fc2", (VH, 4 * VH))):
+        sd[b + nom + ".weight"] = w(*forme)
+        sd[b + nom + ".bias"] = w(forme[0])
+    for nom in ("norm1", "norm2"):
+        sd[b + nom + ".weight"] = torch.ones(VH, dtype=torch.bfloat16)
+        sd[b + nom + ".bias"] = w(VH)
+    for m in ["model.visual.merger."] + [f"{DEEPSTACK_PREFIX}{i}." for i in range(len(DEEPSTACK_IDX))]:
+        sd[m + "norm.weight"] = torch.ones(4 * VH, dtype=torch.bfloat16)
+        sd[m + "norm.bias"] = w(4 * VH)
+        sd[m + "linear_fc1.weight"] = w(4 * VH, 4 * VH)
+        sd[m + "linear_fc1.bias"] = w(4 * VH)
+        sd[m + "linear_fc2.weight"] = w(H, 4 * VH)
+        sd[m + "linear_fc2.bias"] = w(H)
+    return sd
+
+
+def _empaqueter_ct(wt: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """bf16 [out, in] → (weight_packed int32 [out, in/8], weight_scale bf16
+    [out, in/GS], weight_shape int64 [2]), convention compressed-tensors
+    pack_to_int32 : entiers signés décalés de +8, nibble faible d'abord."""
+    w = wt.float()
+    out, inn = w.shape
+    grp = w.reshape(out, inn // GS, GS)
+    scale = (grp.abs().amax(-1) / 7.0).clamp(min=1e-8).to(torch.bfloat16)
+    q = (grp / scale.float()[..., None]).round().clamp(-8, 7).to(torch.int32).reshape(out, inn) + 8
+    packed = torch.zeros(out, inn // 8, dtype=torch.int32)
+    for j in range(8):
+        packed |= q[:, j::8] << (4 * j)
+    return packed, scale, torch.tensor([out, inn], dtype=torch.int64)
+
+
+def _dequantifier_ct(packed: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """Référence indépendante de hfquant._ct_int4 (même arithmétique, écrite ici)."""
+    n = packed.shape[1] * 8
+    q = torch.stack([(packed >> (4 * j)) & 0xF for j in range(8)], -1).reshape(packed.shape[0], n)
+    return ((q.float() - 8.0) * scale.float().repeat_interleave(GS, 1)).to(torch.bfloat16)
+
+
+def _est_lineaire_texte(k: str) -> bool:
+    return k.startswith("model.language_model.layers.") and k.endswith(".weight") \
+        and ("_proj." in k)                      # q/k/v/o et experts ; mlp.gate, normes, lm_head en clair (ignore)
+
+
+def _ecrire_source_qvl(d, vision: bool, awq: bool, dequantifie: bool = False) -> str:
+    """`awq` : texte empaqueté compressed-tensors (la source du parc) ;
+    `dequantifie` : source bf16 dont les projections valent EXACTEMENT le
+    déquantifié de la source awq (le clair que la voie HFQuant doit rendre)."""
+    d.mkdir(parents=True, exist_ok=True)
+    json.dump(_config_qvl_moe(vision, awq), open(d / "config.json", "w"))
+    sd = {}
+    for k, t in _tenseurs_texte_moe().items():
+        if _est_lineaire_texte(k) and (awq or dequantifie):
+            packed, scale, shape = _empaqueter_ct(t)
+            if awq:
+                base = k[:-len(".weight")]
+                sd[base + ".weight_packed"], sd[base + ".weight_scale"], sd[base + ".weight_shape"] = packed, scale, shape
+            else:
+                sd[k] = _dequantifier_ct(packed, scale)
+        else:
+            sd[k] = t
+    if vision:
+        sd.update(_tenseurs_vision_qvl())
+        (d / "preprocessor_config.json").write_text('{"patch_size": 16, "merge_size": 2}')
+        (d / "video_preprocessor_config.json").write_text('{"patch_size": 16}')
+        (d / "chat_template.jinja").write_text("{{ messages }}")
+    save_file(sd, str(d / "model.safetensors"))
+    return str(d)
+
+
+def _controle_qvl(src: str, out: str) -> list[str]:
+    """_controle_vision + le contrat Qwen3-VL : merger et deepstack tous là,
+    manifeste deepstack / indices / mrope égaux à la config SOURCE."""
+    defauts = _controle_vision(src, out)
+    cfg = json.load(open(os.path.join(src, "config.json")))
+    man = json.load(open(os.path.join(out, "acvram_manifest.json")))
+    sortie = _lire(out)
+    source = _lire(src)
+    for fam in ("model.visual.merger.", DEEPSTACK_PREFIX):
+        attendus = {k for k in source if k.startswith(fam)}
+        manquants = attendus - set(sortie)
+        if not attendus or manquants:
+            defauts.append(f"{fam}* : attendus {len(attendus)}, manquants {sorted(manquants)}")
+    idx = cfg["vision_config"]["deepstack_visual_indexes"]
+    if man.get("deepstack") != "oui" or man.get("deepstack_visual_indexes") != idx:
+        defauts.append(f"manifeste deepstack={man.get('deepstack')!r} indices={man.get('deepstack_visual_indexes')!r} ≠ {idx}")
+    rs = cfg["text_config"]["rope_scaling"]
+    if man.get("mrope_section") != rs["mrope_section"] or man.get("mrope_interleaved") is not rs["mrope_interleaved"]:
+        defauts.append(f"manifeste mrope_section={man.get('mrope_section')!r} interleaved={man.get('mrope_interleaved')!r}")
+    return defauts
+
+
+@pytest.fixture(scope="module")
+def convertis_qvl(tmp_path_factory, target_rig):
+    base = tmp_path_factory.mktemp("qvl")
+    srcs = {"clair": _ecrire_source_qvl(base / "src_clair", vision=True, awq=False, dequantifie=True),
+            "srcawq": _ecrire_source_qvl(base / "src_awq", vision=True, awq=True),
+            "texte_awq": _ecrire_source_qvl(base / "src_texte_awq", vision=False, awq=True)}
+    outs = {nom: _convertir(src, str(base / f"out_{nom}"), target_rig) for nom, src in srcs.items()}
+    return srcs, outs
+
+
+@pytest.mark.parametrize("voie", ["clair", "srcawq"])
+def test_qvl_moe_tour_merger_et_deepstack_gardes_au_bit(convertis_qvl, voie):
+    srcs, outs = convertis_qvl
+    src, out = srcs[voie], outs[voie]
+    assert _controle_qvl(src, out) == []
+    sortie = _lire(out)
+    vision = {k for k in _lire(src) if k.startswith("model.visual.")}
+    assert len(vision) == 3 + 12 + 6 * (1 + len(DEEPSTACK_IDX))              # 39 tenseurs, tous gardés
+    assert vision <= set(sortie)
+    assert len({k for k in sortie if k.startswith(DEEPSTACK_PREFIX)}) == 6 * len(DEEPSTACK_IDX)
+    man = json.load(open(os.path.join(out, "acvram_manifest.json")))
+    assert (man["vision"], man["deepstack"]) == ("oui", "oui")
+    assert man["deepstack_visual_indexes"] == DEEPSTACK_IDX and man["mrope_section"] == MROPE
+    assert man["mrope_interleaved"] is True
+    cfg = json.load(open(os.path.join(out, "config.json")))
+    assert cfg["model_type"] == "qwen3_vl_moe" and cfg["vision_config"]["deepstack_visual_indexes"] == DEEPSTACK_IDX
+    assert cfg["text_config"]["rope_scaling"]["mrope_section"] == MROPE
+    for fn in ("preprocessor_config.json", "video_preprocessor_config.json", "chat_template.jinja"):
+        assert os.path.isfile(os.path.join(out, fn)), fn
+    # le texte, lui, est quantifié : experts et projections d'attention, aucun en bf16
+    fmts = {man["tensors"][k]["format"] for k in man["tensors"]
+            if k.startswith("model.layers.") and "_proj.weight" in k}
+    assert fmts and fmts.isdisjoint({"bf16", "fp16", "fp32"}), fmts
+    assert not [k for k in sortie if k.endswith((".weight_packed", ".weight_scale", ".weight_shape"))]
+
+
+def test_qvl_moe_la_voie_srcawq_rend_le_texte_du_clair_dequantifie(convertis_qvl):
+    srcs, outs = convertis_qvl
+    texte = lambda out: {k: v for k, v in _empreintes(out).items() if not k.startswith(VISION_PREFIXES)}
+    assert texte(outs["srcawq"]) == texte(outs["clair"])       # HFQuant déquantifie exactement ce clair
+    assert texte(outs["srcawq"]) == texte(outs["texte_awq"])   # la tour n'a rien changé au texte
+    assert texte(outs["texte_awq"]) == TEMOIN_QVL_MOE_TEXTE, "l'alias texte ne donne plus les octets du code d'origine"
+    man = json.load(open(os.path.join(outs["texte_awq"], "acvram_manifest.json")))
+    assert man["vision"] == "non" and "deepstack" not in man and "mrope_section" not in man
+    assert not [k for k in _lire(outs["texte_awq"]) if k.startswith(VISION_PREFIXES)]
+
+
+@pytest.mark.parametrize("faute", ["deepstack_absent", "indices_faux", "mrope_faux"])
+def test_qvl_moe_une_faute_construite_est_vue(convertis_qvl, tmp_path, faute):
+    srcs, outs = convertis_qvl
+    faux = str(tmp_path / faute)
+    shutil.copytree(outs["srcawq"], faux)
+    man = json.load(open(os.path.join(faux, "acvram_manifest.json")))
+    if faute == "deepstack_absent":
+        fn = set(man["weight_map"].values()).pop()
+        sd = _lire(faux)
+        sd.pop(DEEPSTACK_PREFIX + "2.linear_fc2.weight")
+        save_file(sd, os.path.join(faux, fn))
+    elif faute == "indices_faux":
+        man["deepstack_visual_indexes"] = [8, 16]
+    else:
+        man["mrope_interleaved"] = False
+    json.dump(man, open(os.path.join(faux, "acvram_manifest.json"), "w"))
+    assert _controle_qvl(srcs["srcawq"], faux), faute
+
+
+def test_qvl_moe_config_et_tenseurs_deepstack_doivent_se_repondre(tmp_path, target_rig):
+    """Fusions deepstack dans les tenseurs, aucun indice dans vision_config :
+    refus nommé à la conversion, pas un converti muet."""
+    src = _ecrire_source_qvl(tmp_path / "src", vision=True, awq=True)
+    cfg = json.load(open(os.path.join(src, "config.json")))
+    del cfg["vision_config"]["deepstack_visual_indexes"]
+    json.dump(cfg, open(os.path.join(src, "config.json"), "w"))
+    with pytest.raises(ValueError, match="deepstack incohérent"):
+        _convertir(src, str(tmp_path / "out"), target_rig)
+
+
+def test_le_prefixe_deepstack_est_celui_du_contrat():
+    from acvram.quant import convert
+    assert tuple(convert.DEEPSTACK_PREFIXES) == (DEEPSTACK_PREFIX,)
+    assert convert.est_tenseur_vision(DEEPSTACK_PREFIX + "0.norm.weight")
+
+
+if __name__ == "__main__":                       # génère les témoins : TEMOIN_TEXTE, TEMOIN_QVL_MOE_TEXTE
+    import pathlib
+    import sys
+    from acvram.hardware.profiles import load_profile
+    base = pathlib.Path(sys.argv[1])
+    rig = load_profile("rig-14900k-5090-3080ti")
+    src = _ecrire_source(base / "src_texte", vision=False)
+    out = _convertir(src, str(base / "out_texte"), rig)
+    print("TEMOIN_TEXTE =", json.dumps(_empreintes(out), indent=4, sort_keys=True))
+    src = _ecrire_source_qvl(base / "src_texte_awq", vision=False, awq=True)
+    out = _convertir(src, str(base / "out_texte_awq"), rig)
+    print("TEMOIN_QVL_MOE_TEXTE =", json.dumps(_empreintes(out), indent=4, sort_keys=True))

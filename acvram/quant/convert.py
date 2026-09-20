@@ -316,6 +316,45 @@ def est_tenseur_vision(name: str) -> bool:
     return name.startswith(VISION_PREFIXES)
 
 
+# Qwen3-VL (contrat poste7-go-qwen3vl-parallele-20-09 § 2) : les fusions deepstack
+# (model.visual.deepstack_merger_list.N.*, une par indice de
+# vision_config.deepstack_visual_indexes) sont des tenseurs de la tour : gardés
+# bf16 sous leur nom source par VISION_PREFIXES, et NOMMÉS au manifeste
+# (deepstack: oui + la liste d'indices de la config), comme M-RoPE
+# (text rope_scaling.mrope_section / mrope_interleaved), pour que le chargeur
+# ne devine rien.
+DEEPSTACK_PREFIXES = ("model.visual.deepstack_merger_list.",)
+
+
+def est_tenseur_deepstack(name: str) -> bool:
+    return name.startswith(DEEPSTACK_PREFIXES)
+
+
+def _manifeste_multimodal(manifest: dict, spec) -> None:
+    """deepstack et M-RoPE au manifeste, lus de la config source (spec.raw,
+    text_config dépliée) et des tenseurs GARDÉS : jamais devinés. Config et
+    tenseurs doivent se répondre — une fusion deepstack sans indice, ou un
+    indice sans fusion, est un converti muet servi faux : refus nommé."""
+    raw = getattr(spec, "raw", None) or {}
+    vc = raw.get("vision_config") or {}
+    indices_tenseurs = sorted({int(k.split(".")[3]) for k in manifest["tensors"]
+                               if est_tenseur_deepstack(k)})
+    indices_config = vc.get("deepstack_visual_indexes")
+    manifest["deepstack"] = "oui" if indices_tenseurs else "non"
+    if indices_config is not None:
+        manifest["deepstack_visual_indexes"] = list(indices_config)
+    if bool(indices_tenseurs) != bool(indices_config) or (
+            indices_tenseurs and indices_tenseurs != list(range(len(indices_config)))):
+        raise ValueError(
+            f"deepstack incohérent : fusions gardées {indices_tenseurs} contre "
+            f"vision_config.deepstack_visual_indexes={indices_config} (une fusion "
+            f"model.visual.deepstack_merger_list.N par indice de la config)")
+    rs = raw.get("rope_scaling") or raw.get("rope_parameters") or {}
+    if isinstance(rs, dict) and rs.get("mrope_section") is not None:
+        manifest["mrope_section"] = [int(x) for x in rs["mrope_section"]]
+        manifest["mrope_interleaved"] = bool(rs.get("mrope_interleaved", False))
+
+
 def _est_projection_attn(name: str) -> bool:
     """poste7-p2-qkvo-int8-canal-18-09, generalise le 18/09 pour GLM (MLA) :
     q/k/v/o couvre l'attention GQA de Coder, mais GLM nomme ses projections
@@ -2282,6 +2321,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     manifest["diagnostic_fusion"] = _diagnostic_fusion(manifest["tensors"])
     manifest["vision_bytes"] = vision_bytes
     manifest["vision"] = "oui" if vision_bytes else "non"
+    if vision_bytes:
+        _manifeste_multimodal(manifest, spec)
     if _AUDIO_ECARTES:
         manifest["audio"] = "non servi"
         print(f"[acvram] audio non servi : {len(_AUDIO_ECARTES)} tenseur(s) de la tour audio écartés "

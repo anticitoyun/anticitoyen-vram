@@ -363,27 +363,87 @@ def _horloge() -> Optional[str]:
 # Modèle chargé : « vision » de son acvram_manifest.json ("oui" | "non"), ou None
 # tant qu'aucun chargeur ne l'a déclaré (ligne construite à sec, sans modèle).
 _VISION_CHARGEE: Optional[str] = None
-# M-RoPE (Qwen3-VL) : True quand le modèle chargé porte `mrope_section` dans
-# son rope_scaling (manifeste `model`) — le mot `mrope=on` sur la ligne ; sinon rien.
-_MROPE_CHARGE: bool = False
+# M-RoPE (Qwen3-VL) : (section, entrelacé) du modèle chargé (manifeste `mrope_section` /
+# `mrope_interleaved`, pièce (a)) — le mot `mrope=[24,20,20](interleaved)` ; None sinon.
+_MROPE_CHARGE: Optional[tuple[list[int], bool]] = None
+
+
+# Deepstack (Qwen3-VL, poste7-go-qwen3vl-parallele-20-09 § 2) : nombre de niveaux du modèle chargé,
+# None quand rien ne le dit — le mot `deepstack=N` n'apparaît que déclaré.
+_DEEPSTACK_CHARGE: Optional[int] = None
 
 
 def declarer_modele_charge(manifest: Optional[dict]) -> None:
     """Le chargeur déclare le manifeste du modèle qu'il vient de charger ; la
     ligne de régime en tire `vision=bf16(eager)` (manifeste `vision: oui`,
-    contrat poste7-go-multimodal-organisation-20-09 § 2) ou `vision=off`, et
-    `mrope=on` quand le modèle porte des sections M-RoPE.
-    None : plus de modèle chargé, les mots disparaissent."""
-    global _VISION_CHARGEE, _MROPE_CHARGE
+    contrat poste7-go-multimodal-organisation-20-09 § 2) ou `vision=off`.
+    None : plus de modèle chargé, le mot disparaît. `mrope=[24,20,20](interleaved)`
+    quand le manifeste porte `mrope_section` / `mrope_interleaved`. Le manifeste dit aussi le
+    deepstack : `deepstack: 3` (nombre) ou `deepstack: oui` avec
+    `deepstack_niveaux` (sinon 3, les `deepstack_visual_indexes` par défaut de
+    Qwen3-VL) ; absent ou « non » : pas de mot."""
+    global _VISION_CHARGEE
     _VISION_CHARGEE = None if manifest is None else str(manifest.get("vision", "non"))
-    rs = ((manifest or {}).get("model") or {}).get("rope_scaling") or {}
-    _MROPE_CHARGE = bool(isinstance(rs, dict) and rs.get("mrope_section"))
+    declarer_deepstack(_deepstack_du_manifeste(manifest))
+    declarer_mrope(_mrope_du_manifeste(manifest))
+
+
+def _deepstack_du_manifeste(manifest: Optional[dict]) -> Optional[int]:
+    if not manifest:
+        return None
+    decl = manifest.get("deepstack")
+    if decl is None or decl is False:
+        return None
+    if isinstance(decl, bool) or (isinstance(decl, str) and decl.strip().lower() in ("oui", "yes", "true")):
+        n = manifest.get("deepstack_niveaux")
+        idx = manifest.get("deepstack_visual_indexes")
+        return int(n) if n is not None else (len(idx) if idx else 3)
+    if isinstance(decl, (list, tuple)):
+        return len(decl) or None
+    if isinstance(decl, int) or (isinstance(decl, str) and decl.strip().isdigit()):
+        return int(decl) or None
+    return None
+
+
+def declarer_deepstack(n: Optional[int]) -> None:
+    """`deepstack=n` sur la ligne (n ≥ 1) ; None ou 0 : le mot disparaît."""
+    global _DEEPSTACK_CHARGE
+    _DEEPSTACK_CHARGE = int(n) if n else None
+
+
+def deepstack_texte() -> Optional[str]:
+    return f"deepstack={_DEEPSTACK_CHARGE}" if _DEEPSTACK_CHARGE else None
+
+
+def _mrope_du_manifeste(manifest: Optional[dict]) -> Optional[tuple[list[int], bool]]:
+    """(section, entrelacé) du manifeste : `mrope_section` / `mrope_interleaved`
+    écrits par la conversion (quant/convert._manifeste_multimodal), sinon le
+    rope_scaling du spec (`model`) ; None quand rien ne le dit."""
+    if not manifest:
+        return None
+    section = manifest.get("mrope_section")
+    entrelace = manifest.get("mrope_interleaved")
+    if section is None:
+        rs = (manifest.get("model") or {}).get("rope_scaling") or {}
+        if not isinstance(rs, dict) or rs.get("mrope_section") is None:
+            return None
+        section, entrelace = rs["mrope_section"], rs.get("mrope_interleaved", False)
+    return [int(x) for x in section], bool(entrelace)
+
+
+def declarer_mrope(mrope: Optional[tuple[list[int], bool]]) -> None:
+    """`mrope=[24,20,20](interleaved)` sur la ligne ; None : le mot disparaît."""
+    global _MROPE_CHARGE
+    _MROPE_CHARGE = None if mrope is None else (list(mrope[0]), bool(mrope[1]))
 
 
 def mrope_texte() -> Optional[str]:
-    """`mrope=on` quand le modèle chargé a des positions à trois axes (engine/mrope),
-    None sinon — un modèle texte ou sans modèle n'ajoute aucun mot."""
-    return "mrope=on" if _MROPE_CHARGE else None
+    """`mrope=[t,h,w](interleaved|blocs)` quand le modèle chargé a des positions à
+    trois axes (engine/mrope), None sinon — un modèle texte n'ajoute aucun mot."""
+    if _MROPE_CHARGE is None:
+        return None
+    section, entrelace = _MROPE_CHARGE
+    return f"mrope=[{','.join(str(x) for x in section)}]({'interleaved' if entrelace else 'blocs'})"
 
 
 def vision_texte() -> Optional[str]:
@@ -501,7 +561,9 @@ def regime_ligne() -> str:
     elif vision_texte():
         parts.append("vision=off")
     if mrope_texte():
-        parts.append(mrope_texte())                       # M-RoPE Qwen3-VL (engine/mrope), contrat poste7-go-qwen3vl § 2
+        parts.append(mrope_texte())                       # mrope=[24,20,20](interleaved) : M-RoPE Qwen3-VL (engine/mrope)
+    if deepstack_texte():
+        parts.append(deepstack_texte())                   # deepstack=3 : seulement déclaré (manifeste / config de la tour)
     # C5-b : le format des clés est nommé dès qu'il n'est plus celui d'aujourd'hui
     # (int8 par jeton) — la variable dit ce qui est DEMANDÉ, cette étiquette ce
     # que le cache int8 fait de ses clés.
