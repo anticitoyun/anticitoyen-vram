@@ -374,6 +374,39 @@ def aligner_blocs(topk_ids: torch.Tensor, block_size: int, num_experts: int):
     return sorted_ids, expert_ids, torch.tensor([total], dtype=torch.int32, device=topk_ids.device)
 
 
+def aligner_blocs_tries(e_sorted: torch.Tensor, comptes: torch.Tensor, block_size: int, num_experts: int):
+    """C15-prefill : `aligner_blocs` quand les paires sont DÉJÀ triées par
+    expert (``e_sorted`` [n], croissant) et leurs comptes connus (``comptes``
+    [E] int64 = bincount) — le prefill Marlin (`_forward_prefill_grouped`)
+    l'appelait sur `e_sorted` et retriait une liste triée (argsort 4 passes
+    radix + histogramme + scan, 1,0 ms et 7 lancements par prefill 2 047) :
+    l'ordre stable d'une liste triée est l'identité, sorted_ids = position de
+    chaque rang. AUCUN scalaire hôte : sorties de taille FIXE P = G + E·(bloc − 1)
+    arrondi au bloc (comme `aligner_blocs_capturable` et vLLM
+    `moe_align_block_size`), sentinelle G au-delà du total dans sorted_ids et
+    −1 dans expert_ids ; le noyau lit `num_tokens_post_padded` sur la carte
+    (ops.cu:58) et ne visite jamais ces blocs (−1 ignoré, ops.cu:116). Les
+    `total` premières entrées sont celles d'`aligner_blocs`, au bit."""
+    n = e_sorted.numel()
+    dev = e_sorted.device
+    P = -(-(n + num_experts * (block_size - 1)) // block_size) * block_size
+    rembourres = ((comptes + block_size - 1) // block_size) * block_size
+    fin_pad = torch.cumsum(rembourres, 0)                                  # fin (rembourrée) de chaque expert
+    debut_pad = fin_pad - rembourres
+    debut_tri = torch.cumsum(comptes, 0) - comptes
+    rang = torch.arange(n, device=dev)
+    pos = debut_pad[e_sorted] + (rang - debut_tri[e_sorted])
+    sorted_ids = torch.full((P,), n, dtype=torch.int32, device=dev)
+    sorted_ids[pos] = rang.to(torch.int32)
+    # expert du bloc b : le premier expert dont la fin rembourrée dépasse b·bloc
+    # (les experts vides ont une fin égale à la précédente : sautés) ; −1 au-delà
+    # du total
+    debuts_blocs = torch.arange(P // block_size, device=dev) * block_size
+    e_b = torch.searchsorted(fin_pad, debuts_blocs, right=True)
+    expert_ids = torch.where(debuts_blocs < fin_pad[-1], e_b, -1).to(torch.int32)
+    return sorted_ids, expert_ids, fin_pad[-1:].to(torch.int32)
+
+
 def choisir_block_size(M: int, top_k: int, E: int) -> int:
     for b in [8, 16, 32, 48, 64]:
         if M * top_k / E / b < 0.9:

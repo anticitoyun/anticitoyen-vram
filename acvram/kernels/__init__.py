@@ -781,26 +781,90 @@ def vue_g128(t: INT8Tensor) -> INT8Tensor:
     return vue
 
 
-def gemm_i8c_cublas(x: torch.Tensor, t: INT8Tensor, sortie_fp32: bool = False):
+def gemm_i8c_cublas(x: torch.Tensor, t: INT8Tensor, sortie_fp32: bool = False, a8=None):
     """``x`` [M, K] → [M, N] par `torch._int_mm` sur un poids symétrique par
     canal : y = s_x[m] · s_w[n] · Σ_k a8[m,k]·(q[n,k] − 128), produit entier
     exact, échelles en fp32. None si inéligible (poids affine/groupé, M ≤ 16 :
-    cuBLASLt exige M > 16, K et N multiples de 8)."""
+    cuBLASLt exige M > 16, K et N multiples de 8). ``a8`` : (a8, s_x) déjà
+    quantifiés par `quantifier_a8_i8c(x)` (C15-prefill, q/k/v partagent x)."""
     w = _i8c_poids(t)
     M, K = x.shape
     N, k_pad = t.qweight.shape
     if w is None or M <= 16 or k_pad % 8 or N % 8:
         return None
     from .gemm_w8a8 import quantifier_a8, quantifier_a8_torch, disponible as _w8a8_dispo
-    if _w8a8_dispo() and x.is_cuda:
+    if a8 is not None:
+        a, sx = a8                               # C15-prefill : A8 quantifiée une fois pour q/k/v
+    elif _w8a8_dispo() and x.is_cuda:
         a, sx = quantifier_a8(x)
     else:
         a, sx = quantifier_a8_torch(x)           # à sec : le même arrondi que le noyau, au bit
     if K != k_pad:
         a = torch.nn.functional.pad(a, (0, k_pad - K))
     acc = torch._int_mm(a.contiguous(), w.t())                       # [M, N] int32
+    if prefill_compact("epilogue") and _w8a8_dispo() and (x.is_cuda or _interprete()):
+        # C15-prefill : f32(acc)·s_x·s_w → dtype en UN noyau (gemm_w8a8.epilogue_i8c),
+        # la même chaîne d'arrondis que les quatre noyaux torch ci-dessous, au bit
+        from .gemm_w8a8 import epilogue_i8c
+        return epilogue_i8c(acc, sx, _i8c_echelles(t), torch.float32 if sortie_fp32 else x.dtype)
     y = acc.to(torch.float32) * sx[:, None] * t.scales[:, 0].to(torch.float32)[None, :]
     return y if sortie_fp32 else y.to(x.dtype)
+
+
+def _interprete() -> bool:
+    return os.environ.get("TRITON_INTERPRET") == "1"
+
+
+def _i8c_echelles(t: INT8Tensor) -> torch.Tensor:
+    """Échelle par canal en fp32 [N], convertie UNE fois (fp16 → fp32 exact,
+    les mêmes valeurs que `t.scales[:, 0].to(torch.float32)` à chaque appel :
+    une copie de moins par projection et par couche)."""
+    s = t.__dict__.get("_i8c_s32")
+    if s is None:
+        s = t.scales[:, 0].to(torch.float32).contiguous()
+        t.__dict__["_i8c_s32"] = s
+    return s
+
+
+def int8_matmul_partage(x: torch.Tensor, ts: list) -> Optional[list]:
+    """C15-prefill : ``[x @ W_i.T for W_i in ts]`` avec l'A8 par jeton quantifiée
+    UNE fois — le chemin cublas de `int8_matmul` pour chacun, au bit (même
+    quantificateur, même `_int_mm`, même épilogue). None si UN des tenseurs ne
+    prendrait pas ce chemin sous le dispatcher (alors chaque projection suit
+    `int8_matmul` seule : le témoin) — les conditions sont celles de
+    `int8_matmul` (n > seuil GEMV ou sans extension, régime cublas, dtype) et
+    de `gemm_i8c_cublas` (par canal symétrique, M > 16, K et N multiples de 8)."""
+    xf = x.reshape(-1, x.shape[-1])
+    n = xf.shape[0]
+    if _PREFILL_INT8 != "cublas" or x.dtype not in (torch.bfloat16, torch.float16) or n <= 16:
+        return None
+    ext = get_extension()
+    if ext is not None and ts[0].qweight.is_cuda and n <= _INT8_GEMV_MAX:
+        return None                                  # le dispatcher prendrait le GEMV
+    if x.is_cuda and (not ts[0].qweight.is_cuda or _bk.resolve("int8", ts[0].qweight.device)[0].name != "cuda-fusionne"):
+        return None                                  # backend masqué : la référence torch
+    for t in ts:
+        if _i8c_poids(t) is None or t.qweight.shape[1] % 8 or t.qweight.shape[0] % 8:
+            return None
+    a8 = quantifier_a8_i8c(xf)
+    sorties = []
+    for t in ts:
+        y = gemm_i8c_cublas(xf, t, sortie_fp32=False, a8=a8)
+        assert y is not None
+        CHEMINS_INT8["cublas_partage"] += 1
+        sorties.append(y[:, : t.shape[0]].reshape(*x.shape[:-1], t.shape[0]))
+    return sorties
+
+
+def quantifier_a8_i8c(x: torch.Tensor):
+    """L'activation A8 par jeton du chemin cublas, (a8 int8 [M, K], s_x fp32 [M]),
+    pour la passer à `gemm_i8c_cublas(..., a8=)` — C15-prefill : q, k et v
+    lisent la même ligne normée, la quantifier trois fois rendait trois fois
+    les mêmes octets (nsys P2 19/09 : `_quant_a8_kernel` ×4 par couche)."""
+    from .gemm_w8a8 import quantifier_a8, quantifier_a8_torch, disponible as _w8a8_dispo
+    if _w8a8_dispo() and x.is_cuda:
+        return quantifier_a8(x)
+    return quantifier_a8_torch(x)
 
 
 def prefill_int8_regime() -> str:
@@ -1235,6 +1299,46 @@ def glue_compact(fusion: str = "") -> bool:
     if fusion and _GLUE_COMPACT_ITEMS:
         assert fusion in GLUE_COMPACT_FUSIONS, fusion
         return fusion in _GLUE_COMPACT_ITEMS.split(",")
+    return True
+
+
+# C15-prefill (revue/chantier-c15-prefill-20-09) : la glue du PRÉFILL eager
+# (L > _MOE_GROUPED_MAX) réduite par fusions au bit, chacune débranchable par
+# cette seule variable (0 = témoin, le chemin d'avant) : épilogue des GEMM
+# int8 cuBLAS en un noyau (gemm_w8a8.epilogue_i8c : f32(acc)·s_x·s_w → bf16,
+# la même chaîne d'arrondis que les quatre noyaux torch), activation A8 par
+# jeton quantifiée UNE fois pour q/k/v (Attention._proj), résidu différé
+# (x + y absorbé par add_norm de la couche suivante, comme au décodage),
+# permutations MoE sans second tri ni conversions (MoEBlock._forward_prefill_
+# grouped). Défaut 0 tant que le scellé (noyaux ≤ 83 ms, ≥ 20 500 j/s, PPL au
+# bit) n'est pas mesuré sur carte.
+_PREFILL_COMPACT = int(os.environ.get("ACVRAM_PREFILL_COMPACT", "0"))
+if _PREFILL_COMPACT not in (0, 1):
+    raise ValueError(f"ACVRAM_PREFILL_COMPACT={_PREFILL_COMPACT!r} : attendu 0 ou 1")
+# bissection par fusion, comme GLUE_COMPACT_ITEMS : vide = toutes
+PREFILL_COMPACT_FUSIONS = ("epilogue", "a8", "residu", "permut", "norm", "attn")
+# « norm » (rmsnorm un warp par ligne) n'est PAS dans le défaut : mesurée par
+# poste2 le 20/09 à 3,82 ms contre 2,12 pour le bloc (edd44987, +1,7 ms), le
+# noyau reste en opt-in (ITEMS=…,norm) tant qu'il n'a pas battu le bloc
+PREFILL_COMPACT_DEFAUT = ("epilogue", "a8", "residu", "permut", "attn")
+_PREFILL_COMPACT_ITEMS = os.environ.get("ACVRAM_PREFILL_COMPACT_ITEMS", "")
+for _f in filter(None, _PREFILL_COMPACT_ITEMS.split(",")):
+    if _f not in PREFILL_COMPACT_FUSIONS:
+        raise ValueError(f"ACVRAM_PREFILL_COMPACT_ITEMS={_PREFILL_COMPACT_ITEMS!r} : fusions connues "
+                         f"{', '.join(PREFILL_COMPACT_FUSIONS)}")
+
+
+def prefill_compact(fusion: str = "") -> bool:
+    """Lu à l'appel : `regime.masquer` réécrit l'attribut. ``fusion`` : nom
+    d'une fusion (PREFILL_COMPACT_FUSIONS) — vraie si le compact est pris ET
+    que la fusion n'est pas écartée par PREFILL_COMPACT_ITEMS."""
+    if not _PREFILL_COMPACT:
+        return False
+    if fusion:
+        assert fusion in PREFILL_COMPACT_FUSIONS, fusion
+        if _PREFILL_COMPACT_ITEMS:
+            return fusion in _PREFILL_COMPACT_ITEMS.split(",")
+        return fusion in PREFILL_COMPACT_DEFAUT
     return True
 
 
