@@ -1886,6 +1886,28 @@ class MoEBlock(nn.Module):
             return F.linear(x.to(dtype_voulu), w)
         return self.router(x).to(dtype_voulu)
 
+    def _routeur_compact(self, x: torch.Tensor):
+        """C15-3c : (poids du routeur AU DTYPE DU TÉMOIN, arrondi bf16 ?) pour
+        `route_logits_fusee` — le même tenseur `_router_w[dtype_voulu]` que
+        `_router_logits`, donc le même appel cuBLAS et les mêmes logits au bit ;
+        None si le routeur n'est pas un poids plein (le témoin reste)."""
+        if not hasattr(self.router.qweight, "weight"):
+            return None
+        dtype_voulu = (torch.float32
+                      if self.scoring == "sigmoid" and self.score_bias is not None
+                      else x.dtype)
+        cache = getattr(self, "_router_w", None)
+        if cache is None:
+            cache = {}
+            self._router_w = cache
+        w = cache.get(dtype_voulu)
+        if w is None:
+            w = self.router.qweight.weight.to(dtype_voulu)
+            cache[dtype_voulu] = w
+        if w.dim() != 2 or w.shape[1] != x.shape[1] or w.shape[0] > 1024:
+            return None
+        return w, dtype_voulu == torch.bfloat16
+
     def _route(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Poids et indices des top-k experts par jeton."""
         logits = self._router_logits(x)
@@ -1934,15 +1956,33 @@ class MoEBlock(nn.Module):
         if fusee:
             from ..kernels import route_prep as _rp
             fusee = _rp.disponible()
-        if fusee:
+        compact = None
+        if fusee and kernels.glue_compact("routeur"):
+            # C15-3c : mêmes logits que _router_logits (même F.linear cuBLAS sur
+            # le même poids), sélection `_route_fusee_kernel` à num_warps=1
+            # (réductions intra-warp) : routage identique au témoin, sélection
+            # plus courte ; même nombre de lancements. Témoin : GLUE_COMPACT=0.
+            compact = self._routeur_compact(x)
+        if fusee and compact is None:
             logits = self._router_logits(x)
             if logits.shape[-1] > 1024:
                 fusee = False
         if fusee:
-            topw, topi, eid = _rp.route_fusee(
-                logits, self.score_bias if self.scoring == "sigmoid" else None, self.top_k,
-                self.scoring == "sigmoid", bool(self.norm_topk_prob), float(self.routed_scale),
-                valid, self._usage_routage)
+            # C15-3b : les deux routeurs alimentent le MÊME chemin d'experts —
+            # le compact n'est plus une branche à part qui retombait dans
+            # `_route` (cuBLAS + moe_route + route_prep rejoués, verdict-c15-
+            # niveau3-coder-19-09 : 96 lancements/pas de trop, Triton perdu)
+            if compact is not None:
+                w, arrondi = compact
+                topw, topi, eid = _rp.route_logits_fusee(
+                    x, w, self.score_bias if self.scoring == "sigmoid" else None, self.top_k,
+                    self.scoring == "sigmoid", bool(self.norm_topk_prob), float(self.routed_scale),
+                    valid, self._usage_routage, arrondi_bf16=arrondi)
+            else:
+                topw, topi, eid = _rp.route_fusee(
+                    logits, self.score_bias if self.scoring == "sigmoid" else None, self.top_k,
+                    self.scoring == "sigmoid", bool(self.norm_topk_prob), float(self.routed_scale),
+                    valid, self._usage_routage)
             if _trace_routage.actif():
                 _trace_routage.noter(self.index_couche, topi)
             if valid is not None:
@@ -2736,10 +2776,13 @@ class DecoderLayer(nn.Module):
     def decode_fixed_res(self, x: torch.Tensor, delta: Optional[torch.Tensor],
                          positions: torch.Tensor, slots: torch.Tensor,
                          block_tables: torch.Tensor, seq_lens: torch.Tensor,
-                         max_pos: int, cache: PagedKVCache, q_len: int = 1):
+                         max_pos: int, cache: PagedKVCache, q_len: int = 1,
+                         valid: Optional[torch.Tensor] = None):
         """Pas de décodage à résidu différé : reçoit (x, delta) et rend
         (x, delta). La somme résiduelle de la couche précédente est absorbée
-        par la première normalisation — un lancement de moins par couche."""
+        par la première normalisation — un lancement de moins par couche.
+        ``valid`` (= ``slots >= 0``, C15 niveau 3) est calculé une fois par pas
+        par le modèle au lieu d'une fois par couche."""
         r = self.residual_multiplier
         a = None
         if (_NORME_FUSEE and delta is not None and x.is_cuda and x.dtype == torch.bfloat16
@@ -2760,8 +2803,10 @@ class DecoderLayer(nn.Module):
                                             seq_lens, max_pos, cache, q_len)
         x, h2 = add_norm(x, a, self.post_attention_layernorm, r)
         # Créneaux fantômes : même garde que decode_fixed ci-dessus.
-        y = (self.mlp(h2, valid=slots >= 0) if isinstance(self.mlp, MoEBlock)
-             else self.mlp(h2))
+        if isinstance(self.mlp, MoEBlock):
+            y = self.mlp(h2, valid=(slots >= 0) if valid is None else valid)
+        else:
+            y = self.mlp(h2)
         return x, y
 
     def prefetch(self) -> None:
@@ -3094,7 +3139,16 @@ class ACVRamModel(nn.Module):
         """
         if self._res_differe():
             delta = None
+            # C15 niveau 3 : `slots >= 0` (fantômes du godet) une fois par pas
+            # au lieu d'une fois par couche (48 nœuds → 1) ; témoin : None,
+            # chaque couche le recalcule.
+            valid = (slots >= 0) if kernels.glue_compact("kv") else None
             for i, layer in enumerate(self.layers):
+                if valid is not None and type(layer) is DecoderLayer:
+                    x, delta = layer.decode_fixed_res(
+                        x, delta, positions, slots, block_tables, seq_lens,
+                        max_pos, self.caches.get(i), q_len, valid=valid)
+                    continue
                 x, delta = layer.decode_fixed_res(
                     x, delta, positions, slots, block_tables, seq_lens,
                     max_pos, self.caches.get(i), q_len)

@@ -483,6 +483,13 @@ class PagedKVCache:
             if ext is not None and hasattr(ext, "kv_write_int8"):
                 sm = slot_mapping if slot_mapping.dtype == torch.int64 \
                     else slot_mapping.to(torch.int64)
+                # C15 niveau 3 : k et v sont des tranches de la projection
+                # q/k/v empilée ([T, H, D] à pas de jeton libre) — le noyau
+                # les lit en place ; le témoin (ACVRAM_GLUE_COMPACT=0) garde
+                # les deux copies contiguës d'avant (2 nœuds par couche).
+                from ..kernels import glue_compact
+                if not glue_compact("kv"):
+                    k, v = k.contiguous(), v.contiguous()
                 ext.kv_write_int8(k, v, sm, self.k.view(-1, *self.k.shape[2:]),
                                   self.v.view(-1, *self.v.shape[2:]),
                                   self.k_scale.view(-1, self.k_scale.shape[-1]),
