@@ -210,7 +210,7 @@ def main(argv=None) -> None:
     c0 = next(iter(loaded.model.caches.values()), None)   # MLA (GLM) : pas de cache paginé par couche → champs KV à None
     cfg = getattr(c0, "cfg", None)
     base = {"kv_format_env": os.environ.get("ACVRAM_KV_FORMAT", ""), "regime_ligne": acvram.regime_ligne(),
-            "modele": args.modele, "acvram": acvram.__file__, "engine_regime": engine.regime_ligne(),
+            "modele": args.modele, "acvram": os.path.relpath(acvram.__file__, os.path.dirname(os.path.dirname(acvram.__file__))),  # relatif : jamais un /home dans un artefact suivi (cliquet 20/09) "engine_regime": engine.regime_ligne(),
             "kv_dtype_effectif": cfg.dtype if cfg else None, "bytes_per_block": cfg.bytes_per_block() if cfg else None,
             "block_size": cfg.block_size if cfg else None, "num_blocks": cfg.num_blocks if cfg else None,
             "capacity_tokens": cfg.capacity_tokens if cfg else None,
