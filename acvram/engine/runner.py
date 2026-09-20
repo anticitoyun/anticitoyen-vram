@@ -55,6 +55,9 @@ class Sequence:
     hashes: list[int] = field(default_factory=list)
     n_accepted: int = 0                 # jetons spéculatifs acceptés
     n_proposed: int = 0
+    # Fragments d'image (acvram/engine/images.py), dans l'ordre des jetons ;
+    # None pour une requête texte — chemin texte inchangé.
+    images: Optional[list] = None
 
     @property
     def prefilled(self) -> bool:
@@ -743,12 +746,14 @@ class Engine:
         return ids
 
     def add_request(self, prompt_ids: list[int], params: SamplingParams,
-                    request_id: str = "") -> Sequence:
+                    request_id: str = "", images: Optional[list] = None) -> Sequence:
         if len(prompt_ids) >= self.max_model_len:
             raise ValueError(
                 f"invite de {len(prompt_ids)} jetons au-delà de max_model_len "
                 f"{self.max_model_len}")
         seq = Sequence(list(prompt_ids), params, request_id)
+        if images:
+            seq.images = list(images)
         if params.ignore_eos:
             self.stats.sequences_ignore_eos += 1
         with self._lock:
