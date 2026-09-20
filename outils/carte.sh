@@ -182,7 +182,12 @@ AVANT=$(etat_carte)
 # CUDA_VISIBLE_DEVICES="" ne voit donc la carte qu'a l'INTERIEUR d'un carte.sh,
 # jamais avant, jamais par accident dans un sous-processus qui l'aurait heritee.
 _TIMEOUT="$VERROU.timeout.$$"
-CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" "$@" 9>&- &
+# Lot poste 20/09 : affinite P-cores si ACVRAM_CPUS est pose (ex. 0-15) ; sinon rien ne change.
+if [ -n "${ACVRAM_CPUS:-}" ] && command -v taskset >/dev/null; then
+  CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" taskset -c "$ACVRAM_CPUS" "$@" 9>&- &
+else
+  CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" "$@" 9>&- &
+fi
 _fils=$!
 _garde=
 if [ "$DUREE_MAX" -gt 0 ]; then
