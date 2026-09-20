@@ -57,15 +57,20 @@ if triton is not None:
         j = tl.arange(0, E)
         tl.store(cnt_ptr + j, tl.where(j == 0, h - h0, h))
 
+    # Un programme par bloc de BT_BLOC créneaux (T4 20/09, chef : à bt = 16, t_max = 1 152 → BT_MAX = 2 048
+    # constexpr et un tenseur [2 048, 128] déroulé dans UN programme : make_llir ne finissait jamais, 9 min à 104 %
+    # CPU). Chaque programme refait les deux cumsum sur E (128 valeurs : gratuit) et sert ses BT_BLOC créneaux.
+    BT_BLOC = 256
+
     @triton.jit
     def _tuiles_kernel(cnt_ptr, te_ptr, t0_ptr, tn_ptr, t_max, bt,
-                       BE: tl.constexpr, BT_MAX: tl.constexpr):
+                       BE: tl.constexpr, BT_BLOC: tl.constexpr):
         j = tl.arange(0, BE)                       # experts (E ≤ BE)
         cnt = tl.load(cnt_ptr + j)                  # [BE] (E = BE exigé)
         starts = tl.cumsum(cnt, 0) - cnt
         ntiles = (cnt + bt - 1) // bt
         base = tl.cumsum(ntiles, 0) - ntiles
-        s = tl.arange(0, BT_MAX)                    # créneaux de tuiles
+        s = tl.program_id(0) * BT_BLOC + tl.arange(0, BT_BLOC)   # créneaux de tuiles de ce programme
         masque_s = s < t_max
         # searchsorted(base, s, right=True) - 1 : nombre de base ≤ s, moins un
         n_le = tl.sum((base[None, :] <= s[:, None]).to(tl.int32), 1)
@@ -105,12 +110,10 @@ def tuiles(cnt: torch.Tensor, bt: int, t_max: int):
     """La grille (tile_e, t0, n) int32 de `MoEBlock._tuiles(cnt, bt, t_max)`."""
     E = cnt.numel()
     assert E & (E - 1) == 0, "E puissance de 2 (128, 64, 256…)"
-    BT = 1
-    while BT < t_max:
-        BT *= 2
     te = torch.empty(t_max, dtype=torch.int32, device=cnt.device)
     t0 = torch.empty_like(te)
     tn = torch.empty_like(te)
-    _tuiles_kernel[(1,)](cnt.to(torch.int32).contiguous(), te, t0, tn, t_max, bt,
-                         BE=E, BT_MAX=max(BT, 16), num_warps=4)
+    grille = (max(1, -(-t_max // BT_BLOC)),)
+    _tuiles_kernel[grille](cnt.to(torch.int32).contiguous(), te, t0, tn, t_max, bt,
+                           BE=E, BT_BLOC=BT_BLOC, num_warps=4)
     return te, t0, tn

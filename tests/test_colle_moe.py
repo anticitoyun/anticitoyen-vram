@@ -45,3 +45,37 @@ def test_bras_cassant_compte_faux():
     t_max = -(-flat_e.numel() // 16) + 128
     a = C.tuiles(cnt, 16, t_max); b = C.tuiles(faux, 16, t_max)
     assert not all(torch.equal(x, y) for x, y in zip(a, b))
+
+
+def test_la_tuile_de_creneaux_est_bornee_et_la_grille_couvre_t_max():
+    """T4 20/09 : BT_MAX = 2 048 constexpr dans un seul programme faisait boucler LLVM (9 min) ; le noyau est
+    borné à BT_BLOC ≤ 512 créneaux par programme et la grille couvre t_max — un bt = 16 sur 16 384 paires
+    (t_max 1 152) reste un noyau de 5 programmes de 256, pas un déroulé de 2 048 × 128."""
+    import torch
+    C = pytest.importorskip("acvram.kernels.colle_moe")
+    assert 16 <= C.BT_BLOC <= 512
+    cnt = torch.tensor([300, 5, 0, 1000] + [0] * 124, dtype=torch.int32)
+    for bt, t_max in ((16, 1152), (128, 140), (16, 1)):
+        te, t0, tn = C.tuiles(cnt, bt, t_max)
+        attendu = MoEBlock._tuiles(cnt, bt, t_max=t_max)
+        assert te.shape[0] == t_max and all(torch.equal(a.to(torch.int32), b) for a, b in zip(attendu, (te, t0, tn)))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="compilation Triton réelle : carte requise")
+def test_la_compilation_du_noyau_tuiles_tient_en_60_s():
+    """T4 : l'ancien constexpr BT_MAX = 2 048 sur un seul programme ne sortait pas de make_llir (9 min) ; avec
+    BT_BLOC = 256 la compilation à bt = 16 / t_max = 1 152 doit tenir en 60 s — sinon faux (thread de garde)."""
+    import threading, time
+    cnt = torch.tensor([300, 5, 0, 1000] + [0] * 124, dtype=torch.int32, device="cuda")
+    fini = threading.Event(); erreur = []
+
+    def compile_et_lance():
+        try:
+            C.tuiles(cnt, 16, 1152); torch.cuda.synchronize()
+        except Exception as e:                       # noqa: BLE001
+            erreur.append(e)
+        fini.set()
+    t0 = time.perf_counter(); threading.Thread(target=compile_et_lance, daemon=True).start()
+    assert fini.wait(60), f"compilation/lancement > 60 s (T4 : LLVM ne sort pas d'un déroulé BT_MAX constexpr)"
+    assert not erreur, erreur
+    print(f"compilation + lancement : {time.perf_counter() - t0:.1f} s")

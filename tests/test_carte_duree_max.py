@@ -13,7 +13,10 @@ CARTE = pathlib.Path(__file__).resolve().parent.parent / "outils" / "carte.sh"
 
 def _lance(tmp_path, duree_max, cmd, type_="etat"):
     verrou = tmp_path / "verrou.lock"
-    env = dict(os.environ, ACVRAM_DUREE_MAX=str(duree_max), ACVRAM_VERROU=str(verrou), ACVRAM_TYPE=type_,
+    # hermétique (poste7 T4) : verrou propre ET aucun marqueur d'enveloppe hérité — sous `carte.sh pytest …` le
+    # carte.sh du test refusait « DEJA tenue par cette chaine » (ACVRAM_CARTE_TENUE du parent, carte.sh:122)
+    env = {k: v for k, v in os.environ.items() if k not in ("ACVRAM_CARTE_TENUE", "ACVRAM_VERROU", "ACVRAM_CARTE")}
+    env.update(ACVRAM_DUREE_MAX=str(duree_max), ACVRAM_VERROU=str(verrou), ACVRAM_TYPE=type_,
                ACVRAM_NOM="test-duree-max", CUDA_VISIBLE_DEVICES="")
     t0 = time.time()
     r = subprocess.run(["bash", str(CARTE), *cmd], env=env, capture_output=True, text=True, timeout=120)
