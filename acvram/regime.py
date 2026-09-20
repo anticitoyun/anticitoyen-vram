@@ -336,6 +336,22 @@ def _horloge() -> Optional[str]:
         return "?"
 
 
+def glue_texte() -> str:
+    """C15-3d (défaut le 20/09) : la glue compacte est nommée sur la ligne, défaut compris —
+    ``glue=compact(8)`` (attention fusionnée à 8 warps), ``glue=compact(8,items=attn,kv)``
+    en bissection, ``glue=temoin`` sous GLUE_COMPACT=0 : la cellule 0.6.24 (poste7 05 h 40)
+    portait une ligne qui ne disait pas le régime servi."""
+    try:
+        from . import kernels as _k
+        from .kernels import attn_paginee as _ap
+        if not getattr(_k, "_GLUE_COMPACT", 0):
+            return "glue=temoin"
+        items = getattr(_k, "_GLUE_COMPACT_ITEMS", None) or ""
+        return f"glue=compact({_ap.WARPS_COMPACT}" + (f",items={items}" if items else "") + ")"
+    except Exception as exc:                              # noqa: BLE001
+        return f"glue=?({type(exc).__name__})"
+
+
 def regime_ligne() -> str:
     """Une ligne pour l'en-tête d'une mesure : ce qui diffère du défaut,
     puis extension et masques. « défaut » seul veut dire : tout au défaut."""
@@ -396,6 +412,7 @@ def regime_ligne() -> str:
             parts.append("kv=int8-canal16")
     except Exception:                                     # noqa: BLE001
         pass
+    parts.append(glue_texte())
     try:
         from . import eco as _eco
         h = _eco.horloge_du_processus()

@@ -26,3 +26,20 @@ def test_les_modules_lisent_les_memes_defauts_sans_variable():
     out = subprocess.run([sys.executable, "-c", "from acvram import kernels; from acvram.kernels import attn_paginee as a; "
                           "print(kernels._GLUE_COMPACT, a.WARPS_COMPACT)"], env=env, capture_output=True, text=True, timeout=120)
     assert out.stdout.split() == ["1", "8"], out.stdout + out.stderr[-500:]
+
+
+def test_la_ligne_de_regime_nomme_la_glue_compacte():
+    """poste7 (0.6.24, 05 h 40) : la ligne ne disait pas le régime servi ; défaut compris."""
+    ligne = regime.regime_ligne()
+    assert "glue=compact(8)" in ligne, ligne
+    assert regime.glue_texte() == "glue=compact(8)"
+
+
+def test_le_temoin_et_la_bissection_sont_nommes(monkeypatch):
+    from acvram import kernels
+    from acvram.kernels import attn_paginee
+    monkeypatch.setattr(kernels, "_GLUE_COMPACT", 0)
+    assert regime.glue_texte() == "glue=temoin"
+    monkeypatch.setattr(kernels, "_GLUE_COMPACT", 1); monkeypatch.setattr(kernels, "_GLUE_COMPACT_ITEMS", "attn,kv")
+    monkeypatch.setattr(attn_paginee, "WARPS_COMPACT", 4)
+    assert regime.glue_texte() == "glue=compact(4,items=attn,kv)"
