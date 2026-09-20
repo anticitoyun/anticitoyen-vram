@@ -385,3 +385,62 @@ def test_regime_ligne_deepstack_seulement_declare():
     finally:
         regime.declarer_modele_charge(None)
     assert "deepstack=" not in regime.regime_ligne()
+
+
+# --------------------------------------------------------------------------
+# (7) un vrai Qwen3-VL-2B bf16 sur le CPU : la lecture de la tour au bit
+# --------------------------------------------------------------------------
+def _dossier_qwen3vl():
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../outils"))
+    from racine_modeles import racine_modeles
+    return os.path.join(racine_modeles(), "Qwen3-VL-2B-Instruct-bf16")
+
+
+@pytest.mark.a_sec
+def test_tour_reelle_qwen3vl_2b_traits_et_niveaux_au_bit():
+    """Qwen3-VL-2B-Instruct bf16 chargé sur le CPU (jamais la carte) : une image
+    224×224 de bruit déterministe passe par le processeur du dossier puis par
+    ``get_image_features`` ; ``traits_niveaux`` rend (image_embeds concaténés,
+    deepstack_image_embeds empilés) au bit, k = len(deepstack_visual_indexes),
+    n = grille / merge², h = hidden du LM. Un chargement > 60 s est signalé."""
+    import os
+    import time
+    dossier = _dossier_qwen3vl()
+    if not os.path.isdir(dossier):
+        pytest.skip(f"Qwen3-VL-2B-Instruct-bf16 absent sous racine_modeles() : {dossier}")
+    from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+    t0 = time.monotonic()
+    modele = Qwen3VLForConditionalGeneration.from_pretrained(dossier, dtype=torch.bfloat16).eval()
+    duree = time.monotonic() - t0
+    if duree > 60:
+        print(f"[test] chargement CPU de Qwen3-VL-2B : {duree:.0f} s (> 60 s)", flush=True)
+    proc = AutoProcessor.from_pretrained(dossier)
+    g = torch.Generator().manual_seed(7)
+    image = (torch.rand(224, 224, 3, generator=g) * 255).to(torch.uint8).numpy()
+    entrees = proc.image_processor(images=[image], return_tensors="pt")
+    pv, grille = entrees["pixel_values"], entrees["image_grid_thw"]
+    vcfg = modele.config.vision_config
+    k = len(vcfg.deepstack_visual_indexes)
+    n = int(grille.prod(-1).sum()) // vcfg.spatial_merge_size ** 2
+    h = modele.config.text_config.hidden_size
+
+    with torch.no_grad():
+        ref = modele.model.get_image_features(pixel_values=pv, image_grid_thw=grille)
+        image_embeds = torch.cat(list(ref.pooler_output), 0)
+        deepstack_image_embeds = ref.deepstack_features
+    assert len(deepstack_image_embeds) == k and image_embeds.shape == (n, h)
+
+    tour = TourVision(lambda p, **s: modele.model.get_image_features(pixel_values=p, **s),
+                      torch.device("cpu"), hidden=h)
+    with torch.no_grad():
+        traits, niveaux = tour.traits_niveaux(pv, n, supplement={"image_grid_thw": grille})
+    assert traits.shape == (n, h) and niveaux.shape == (k, n, h)
+    assert traits.dtype == torch.bfloat16 and niveaux.dtype == torch.bfloat16
+    assert torch.equal(traits, image_embeds.to(torch.bfloat16))
+    for i in range(k):
+        assert torch.equal(niveaux[i], deepstack_image_embeds[i].to(torch.bfloat16))
+    assert not torch.equal(niveaux[0], niveaux[1])                     # deux niveaux distincts : un contrôle qui peut dire faux
+    print(f"[test] Qwen3-VL-2B CPU : chargement {duree:.1f} s, grille {grille.tolist()}, n={n}, k={k}, h={h}",
+          flush=True)
