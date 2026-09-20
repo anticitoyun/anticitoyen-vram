@@ -1238,6 +1238,40 @@ def glue_compact(fusion: str = "") -> bool:
     return True
 
 
+# C15-prefill (revue/chantier-c15-prefill-20-09) : la glue du PRÉFILL eager
+# (L > _MOE_GROUPED_MAX) réduite par fusions au bit, chacune débranchable par
+# cette seule variable (0 = témoin, le chemin d'avant) : épilogue des GEMM
+# int8 cuBLAS en un noyau (gemm_w8a8.epilogue_i8c : f32(acc)·s_x·s_w → bf16,
+# la même chaîne d'arrondis que les quatre noyaux torch), activation A8 par
+# jeton quantifiée UNE fois pour q/k/v (Attention._proj), résidu différé
+# (x + y absorbé par add_norm de la couche suivante, comme au décodage),
+# permutations MoE sans second tri ni conversions (MoEBlock._forward_prefill_
+# grouped). Défaut 0 tant que le scellé (noyaux ≤ 83 ms, ≥ 20 500 j/s, PPL au
+# bit) n'est pas mesuré sur carte.
+_PREFILL_COMPACT = int(os.environ.get("ACVRAM_PREFILL_COMPACT", "0"))
+if _PREFILL_COMPACT not in (0, 1):
+    raise ValueError(f"ACVRAM_PREFILL_COMPACT={_PREFILL_COMPACT!r} : attendu 0 ou 1")
+# bissection par fusion, comme GLUE_COMPACT_ITEMS : vide = toutes
+PREFILL_COMPACT_FUSIONS = ("epilogue", "a8", "residu", "permut")
+_PREFILL_COMPACT_ITEMS = os.environ.get("ACVRAM_PREFILL_COMPACT_ITEMS", "")
+for _f in filter(None, _PREFILL_COMPACT_ITEMS.split(",")):
+    if _f not in PREFILL_COMPACT_FUSIONS:
+        raise ValueError(f"ACVRAM_PREFILL_COMPACT_ITEMS={_PREFILL_COMPACT_ITEMS!r} : fusions connues "
+                         f"{', '.join(PREFILL_COMPACT_FUSIONS)}")
+
+
+def prefill_compact(fusion: str = "") -> bool:
+    """Lu à l'appel : `regime.masquer` réécrit l'attribut. ``fusion`` : nom
+    d'une fusion (PREFILL_COMPACT_FUSIONS) — vraie si le compact est pris ET
+    que la fusion n'est pas écartée par PREFILL_COMPACT_ITEMS."""
+    if not _PREFILL_COMPACT:
+        return False
+    if fusion and _PREFILL_COMPACT_ITEMS:
+        assert fusion in PREFILL_COMPACT_FUSIONS, fusion
+        return fusion in _PREFILL_COMPACT_ITEMS.split(",")
+    return True
+
+
 def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
                     seq_lens: torch.Tensor, n_rep: int,
                     scale: float, q_len: int = 1,

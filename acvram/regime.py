@@ -165,6 +165,10 @@ VARIABLES: tuple[Variable, ...] = (
              "C15-3d (chantier-c15-niveau3-coder-20-09) : DÉFAUT 1 depuis le 20/09 (verdict-c15-niveau3-coder-19-09 addendum 05 h 15 : Coder b=12 servi sous éco 2 700 +11,5 % t/s, J 0,966 × le témoin, capture 5/5, experts égaux ≤ 1,2 × le taux du témoin A ON/OFF) ; 1 = 641 lancements/pas au lieu de 1 169 : logits du routeur par le MÊME cuBLAS que le témoin (routage au bit) + sélection top-k en un noyau à 1 warp, glue KV/q/valid au bit (kv_write_int8 par pas, q sans copie), GEMM étroit int8 réduit par son dernier programme (4 → 1 nœud), attention paginée réduite par son dernier programme (2 → 1, ATTN_WARPS_COMPACT) | 0 = témoin (le chemin d'avant)"),
     Variable("GLUE_COMPACT_ITEMS", "", ("acvram.kernels", "_GLUE_COMPACT_ITEMS"), None,
              "C15-3b (bissection) : sous GLUE_COMPACT=1, liste des fusions prises, séparées par des virgules — routeur | attn | etroit | kv ; vide = toutes ; une fusion absente suit le témoin"),
+    Variable("PREFILL_COMPACT", "0", ("acvram.kernels", "_PREFILL_COMPACT"), "0",
+             "C15-prefill (chantier-c15-prefill-20-09) : glue du préfill eager réduite par fusions AU BIT — 1 = épilogue des GEMM int8 cuBLAS en un noyau Triton (f32(acc)·s_x·s_w → bf16, gemm_w8a8.epilogue_i8c), A8 par jeton quantifiée une fois pour q/k/v, résidu différé (x + y absorbé par add_norm de la couche suivante), permutations MoE sans second tri ni conversions | 0 = témoin (le chemin d'avant) ; DÉFAUT 0 tant que le scellé (noyaux 96,8 → ≤ 83 ms, servi ≥ 20 500 j/s, PPL au bit sur 3 tranches, capture 5/5) n'est pas mesuré sur carte"),
+    Variable("PREFILL_COMPACT_ITEMS", "", ("acvram.kernels", "_PREFILL_COMPACT_ITEMS"), None,
+             "C15-prefill (bissection) : sous PREFILL_COMPACT=1, liste des fusions prises — epilogue | a8 | residu | permut ; vide = toutes ; une fusion absente suit le témoin"),
     Variable("ROUTE_PREP", "2", ("acvram.engine.model", "_ROUTE_PREP"), "0",
              "poste F : 2 = moe_route + route_prep fusionnés (F2, défaut, verdict-f2-topk-17-09) | 1 = route_prep seul (F1) | 0 = torch"),
     Variable("MOE_DECODE_FUSED", "0", ("acvram.engine.model", "_MOE_DECODE_FUSED"), "0"),
@@ -352,6 +356,21 @@ def glue_texte() -> str:
         return f"glue=?({type(exc).__name__})"
 
 
+def prefill_glue_texte() -> str:
+    """C15-prefill : la glue du préfill est nommée sur la ligne, défaut compris —
+    ``prefill_glue=temoin`` (PREFILL_COMPACT=0, défaut), ``prefill_glue=compact``,
+    ``prefill_glue=compact(items=epilogue,a8)`` en bissection. Un chiffre de
+    préfill sans cette étiquette ne dit pas quel chemin l'a produit."""
+    try:
+        from . import kernels as _k
+        if not getattr(_k, "_PREFILL_COMPACT", 0):
+            return "prefill_glue=temoin"
+        items = getattr(_k, "_PREFILL_COMPACT_ITEMS", None) or ""
+        return "prefill_glue=compact" + (f"(items={items})" if items else "")
+    except Exception as exc:                              # noqa: BLE001
+        return f"prefill_glue=?({type(exc).__name__})"
+
+
 def regime_ligne() -> str:
     """Une ligne pour l'en-tête d'une mesure : ce qui diffère du défaut,
     puis extension et masques. « défaut » seul veut dire : tout au défaut."""
@@ -413,6 +432,7 @@ def regime_ligne() -> str:
     except Exception:                                     # noqa: BLE001
         pass
     parts.append(glue_texte())
+    parts.append(prefill_glue_texte())
     try:
         from . import eco as _eco
         h = _eco.horloge_du_processus()
