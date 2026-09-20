@@ -143,13 +143,13 @@ def test_composition_des_jumeaux_egale_decode_static_a_sec(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise")
-@pytest.mark.xfail(torch.cuda.is_available(), strict=True,
-                   reason="poste7-t4-tri-69-20-09 (20/09) : chemin =2 (decode_static_batch_complet) CLOS ; "
-                          "DÉVIANT au pas 15 (2 ulp bf16) sur carte — attendu rouge tant que le chemin est clos")
 def test_chaque_noyau_contre_son_jumeau_sur_carte(monkeypatch):
     """Sur carte : (1) mla_prep_batch réel vs jumeau (mêmes q, kvp, lens) ; (2) mla_ecrit_latent réel
     vs jumeau (mêmes états) ; (3) mla_decode_batch réel vs jumeau (mêmes q_eff, caches) ; puis (4)
-    le chemin complet réel 32 pas vs decode_static. Le premier écart > 1 ulp bf16 nomme le déviant."""
+    le chemin complet réel (=2, servi depuis M3) et decode_static (=1), 32 pas, CHACUN contre le jumeau
+    torch, au juge § 7 (poste7-t4-tri-69-20-09 addendum 12 h 20) : deux approximations bf16 ne se
+    comparent pas au bit entre elles (T4 20/09 : « DÉVIANT au pas 15, 2 ulp » sans fautif) ; l'écart de
+    leurs distances au jumeau ≤ 6 ulp bf16 par élément, et une faute construite sur =2 le fait dire faux."""
     from acvram.kernels import get_extension
     ext = get_extension()
     if ext is None or not hasattr(ext, "mla_prep_batch"):
@@ -185,14 +185,34 @@ def test_chaque_noyau_contre_son_jumeau_sur_carte(monkeypatch):
         o_j = faux.mla_decode_batch(q_eff_j, ptrs, st["len"].reshape(1), scores, bucket, RANK, la.scale)
         e3 = ulp(o_j, o_n); print(f"(3) mla_decode_batch : {e3:.2f} ulp bf16")
         assert e3 <= 1, f"DÉVIANT : mla_decode_batch ({e3:.2f} ulp bf16)"
-        # (4) chemin complet réel 32 pas contre decode_static
-        st_a, st_b = _etat(la, dev, L, n0), _etat(la, dev, L, n0)
+        # (4) =1 et =2 contre le jumeau torch (FauxExt : prep torch, écriture et attention fp32), § 7
+        ulp_el = lambda a, r: (a.float() - r.float()).abs() / (2.0 ** (torch.floor(torch.log2(r.float().abs().clamp_min(1e-30))) - 7))
+        st_a, st_b, st_c, st_f = (_etat(la, dev, L, n0) for _ in range(4))
+        faux_c = FauxExt([st_c], RANK, la.scale)
+
+        class FauxFautif(FauxExt):                    # =2 avec l'attention de la tête 0 déréglée de 2 %
+            def mla_decode_batch(self, q, *a):
+                o = super().mla_decode_batch(q, *a); o[:, 0] *= 1.02; return o
+        faux_f = FauxFautif([st_f], RANK, la.scale)
         xs = (torch.randn(32, 1, H, device=dev) * 0.5).to(DT)
+        pire = 0.0
         for pas in range(32):
             ya = la.decode_static(xs[pas], st_a, bucket)
             yb = _pas_complet(la, xs[pas], st_b, bucket, None)
-            e = ulp(ya, yb)
-            assert e <= 1, f"DÉVIANT : chemin complet au pas {pas} ({e:.2f} ulp bf16)"
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(MLA, "_extension", lambda: faux_c)
+                yc = _pas_complet(la, xs[pas], st_c, bucket, faux_c)
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(MLA, "_extension", lambda: faux_f)
+                yf = _pas_complet(la, xs[pas], st_f, bucket, faux_f)
+            d_a, d_b = ulp_el(ya, yc), ulp_el(yb, yc)
+            ecart = (d_b - d_a).abs().max().item(); pire = max(pire, ecart)
+            assert ecart <= 6, (f"DÉVIANT au pas {pas} : =1 à {d_a.max().item():.2f}, =2 à {d_b.max().item():.2f} ulp bf16 "
+                                f"du jumeau ; écart {ecart:.2f} > 6")
+            if pas == 0:                              # la faute construite sort du juge dès le premier pas
+                d_f = ulp_el(yf, yc)
+                assert (d_f - d_a).max().item() > 6, f"le juge ne voit pas une tête déréglée de 2 % ({(d_f - d_a).max().item():.2f} ulp)"
+        print(f"(4) 32 pas : écart max =2/=1 au jumeau {pire:.2f} ulp bf16 (≤ 6)")
 
 
 def test_remede_regles_6_caches_paresseux_refuses_en_capture(monkeypatch):
