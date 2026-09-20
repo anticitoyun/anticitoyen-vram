@@ -16,7 +16,7 @@ Niveau 2 (TF32 au décodage) est **faux** : un seul site passe en `s1688`, `gemm
 
 Non vérifié : le nom exact des 233 `reduce` (nsys de poste2 les groupe : à relire par pile d'appel), la grille de `mla_prep_batch`, tout temps.
 
-## Fait le 20/09 (poste1, sous-agent à sec, 07 h 17 → 07 h 50 machine ; branche `poste1-c14b` sur `poste1-11`)
+## Fait le 20/09 (poste1, sous-agent à sec, 07 h 17 → 08 h 05 machine ; branche `poste1-c14b` sur `poste1-11`)
 
 ### 1. Ce que le chemin b=12 lance AUJOURD'HUI (lecture, fichier:ligne) — le budget de la fiche est à corriger
 Chemin : `model.py:2424` `_MLA_BATCH` défaut 2 → `:2686` `decode_static_batch_complet` (`mla.py:765`). Par couche MLA (47) :
@@ -52,11 +52,14 @@ Le combine fusionné tient en 40-48 registres (le combine d'avant en prenait 98 
 * À sec (`CUDA_VISIBLE_DEVICES=""`), `tests/test_mla_batch_fusion_c14b.py` + `tests/test_mla_prep_regrille_c14b.py` : 6 passés, 10 sautés (carte) ; `test_mla_decode_batch`, `test_mla_une_passe`, `test_mla_glue_c15`, `test_mla_niveau2_jumeaux`, `test_mla_1p_grille_c14`, `test_regime*` : 192 passés, 20 sautés — le défaut (FUSION=0) et le témoin de prep ne changent rien à sec.
 * Carte (chaîne § 5, étape 0) : `test_combine_fusionne_contre_einsum_sur_carte` ×4 formes, `test_prep_regrille_au_bit_contre_temoin_sur_carte` ×6 (B ∈ {1, 5, 12} × RoPE oui/non) — chacun avec un témoin cassant (v_b décalé d'une tête ; q d'un créneau modifié ne touche que ce créneau).
 
-### 5. Chaîne carte pour poste2 — `bash scratchpad/c14b-20-09/chaine.sh` (≈ 1 h 15)
-Bras A = `ACVRAM_MLA_BATCH_FUSION=0` (einsum ; la grille de prep est la nouvelle dans les deux bras : au bit) ; bras B = `=1`. Étapes : (0) extension + régime des deux bras, tests carte ; (1) nsys b=12 50 pas A/B → `familles.py` (gemmSN_TN, reduce, mla_prep_batch, mla_1p, combine, combine_vb, bf16_copy : lancements/pas et µs/pas contre les attendus ci-dessus, TENU/FAUX) + ncu de `mla_prep_batch` et du combine (grille, occupation, µs) ; (2) `ppl-decode-kv-3seq-19-09.py` au **lot de 12** (`PPL_REMPLISSAGES=11`, `PPL_PREFIXE='[gMASK]<sop>'`, 8 192 + 512, tranches 0-2) A puis B : |ΔPPL| ≤ 0,002 sur la notée ET sur la moyenne des 11 témoins ; (3) capture godets 1,2,8,12,16 sous B : 5/5 ; (4) ABAB serve `--max-batch 12`, `banc-llamacpp-16-09.py decode` `BANC_SLOTS=12` : ms/pas B ≤ 13,2 et ≤ A − 0,7.
+### 5. Chaîne carte pour poste2 — `bash scratchpad/c14b-20-09/chaine.sh` (3 prises ≤ 30 min, gabarit `outils/gpu/mesure/gabarit-chaine.sh`)
+poste7 07 h 50 (main `48079e76`) a **retiré** le scellé « GEMM + reduce 1,05 → ≤ 0,35 » (faux par lecture, § 1) et posé un **scellé par poste**, écrit en tête de la chaîne avant toute mesure ; branche fusionnée avec `origin/poste1-c15-elementaires-glm` (sans conflit : tranches-9, `geo-sequentiel.py`, gabarit, `carte.sh` à `ACVRAM_DUREE_MAX` 1 800 s). Bras A = `FUSION=0`, B = `FUSION=1` (le prep regrillé, au bit et sans variable, est dans les deux).
+* (a) `mla_prep_batch` ≤ 8 µs/couche (prédit ≤ 6 ; 22,0 avant) ; (b) einsum v_b retiré (`gemmSN_TN` 93 → 46/pas) ET `combine_vb` ≤ 0,32 ms/pas (6,8 µs/lancement ; prédit 6-8) ; (c) pas servi (`certifie-b12.py`, énergie NVML) B ≤ 12,9 ms contre 13,9 ET J_B ≤ J_A ; (d) ≤ 1 ulp bf16 vs bf16(einsum) ET juge fp64 par ligne d(noyau) ≤ d(réf) + 6 ulp — en ulp bf16 de la référence, la sortie étant bf16 — sur entrées réelles b=12 (`equiv-reel.py`, sans graphes, mandataire d'extension) et formes de test, prep au bit (idem) ; (e) capture {1, 2, 8, 16} 4/4 ; (f) PPL lot 12, 9 tranches `tranches-9`, préfixe 2 048 + 512 (8 192 × 12 = OOM), `geo-sequentiel.py` « non établi pire de > 0,5 % » (10 ou 13 tenu, 11 faux). Tout tenu → `FUSION=1` au défaut.
+* Prises et durées prédites : (c) compilation hors verrou 9 min (0 si le .so est là) ; **P1** tests carte 2 min + (d) réel 3 min + nsys A/B 5 min = **10 min** (arrêt si (d) tombe) ; **P2** PPL lot 12 : `ppl12-multi.py` (variante lot de `ppl-decode-kv-3seq`, un chargement par bras : `outils/gpu/mesure/ppl-decode-kv.py` **n'a pas de lot de 12**) 2 × (45 s + 9 × 13 s) ≈ **6 min** ; **P3** godets 4 min + certifie ABAB 4 × 1,7 min = **11 min**. Total carte ≈ 27 min.
+* Réfutations écrites : (a)/(b) faux → le poste n'était pas les lancements mais la lecture de k_b/v_b (ncu `dram__bytes_op_read` sur `cible-b12.py`, 3 lancements, métriques explicites) ; (c) faux avec (a)(b) tenus → espaces inter-nœuds (niveau 3, pas C14-b : partiel) ; (f) faux → ordre des sommes non neutre pour ce nvfp4 : opt-in nommé.
 
 ### 6. Ce qui reste
 * Mesures : tout (aucune carte ici). Défaut de `MLA_BATCH_FUSION` seulement après (2)-(4) tenus.
-* Le scellé poste7 « GEMM + reduce 1,05 → ≤ 0,35 » est à réécrire : `reduce` = C15-3d (déjà retiré au défaut), routeur fp32 = C15-3c ; la part C14-b est « einsum 0,53 + combine 0,14 + prep 1,03 → ≤ 0,7 » (prédit ≈ 0,55-0,65).
+* Le scellé « GEMM + reduce 1,05 → ≤ 0,35 » est retiré par poste7 (07 h 50) et remplacé par le scellé par poste du § 5 ; `reduce` = C15-3d (déjà retiré au défaut), routeur fp32 = C15-3c.
 * Si le ncu montre `mla_prep_batch` encore > 10 µs : découper n (4 quarts → 8) change l'ordre de somme (≤ 1 ulp bf16, plus au bit) — chantier séparé avec son juge PPL.
 * Le témoin `mla_prep_batch_temoin_kernel` se retire quand la chaîne a rendu son « au bit » (un commit, le test carte passe alors par le tenseur enregistré).
