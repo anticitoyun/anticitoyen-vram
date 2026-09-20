@@ -575,6 +575,8 @@ class RMSNorm(nn.Module):
                 and self.weight.dtype == torch.bfloat16:
             ext = kernels.get_extension()
             if ext is not None and hasattr(ext, "rmsnorm_bf16"):
+                if _norme_warp(ext, x):
+                    return ext.rmsnorm_bf16_warp(x, self.weight, self.eps)[0]
                 return ext.rmsnorm_bf16(x, self.weight, self.eps)[0]  # 1 lancement
         x32 = x.to(torch.float32)
         var = x32.pow(2).mean(-1, keepdim=True)
@@ -591,10 +593,27 @@ def add_norm(residu: torch.Tensor, y: torch.Tensor, norme, mult: float = 1.0):
             and norme.weight.dtype == torch.bfloat16):
         ext = kernels.get_extension()
         if ext is not None and hasattr(ext, "rmsnorm_bf16"):
+            if _norme_warp(ext, y):
+                h, x = ext.rmsnorm_bf16_warp(y, norme.weight, norme.eps, residu, mult)
+                return x, h
             h, x = ext.rmsnorm_bf16(y, norme.weight, norme.eps, residu, mult)
             return x, h
     x = residu + (y if mult == 1.0 else y * mult)
     return x, norme(x)
+
+
+# C15-prefill (fusion « norm ») : au-delà de ce nombre de lignes la RMSNorm prend
+# le noyau à un warp par ligne (rmsnorm_bf16_warp, acvram_kernels.cu : même
+# ordre de somme, au bit). En dessous — le décodage, sous graphes — le noyau à
+# bloc reste : un nœud capturé ne change pas de noyau.
+NORME_WARP_MIN_LIGNES = 256
+NORME_WARP_H_MAX = 2048          # la ligne tient en registres (64 par lane) ; au-delà, le bloc
+
+
+def _norme_warp(ext, x: torch.Tensor) -> bool:
+    return (kernels.prefill_compact("norm") and hasattr(ext, "rmsnorm_bf16_warp")
+            and x.shape[-1] <= NORME_WARP_H_MAX
+            and x.numel() // x.shape[-1] >= NORME_WARP_MIN_LIGNES)
 
 
 class LayerNorm(nn.Module):
@@ -874,15 +893,19 @@ def causal_mask(q_len: int, kv_len: int, q_offset: int, device,
 
 def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
               causal: bool = True, scale: Optional[float] = None,
-              q_offset: int = 0, window: int = 0) -> torch.Tensor:
+              q_offset: int = 0, window: int = 0, n_rep: int = 1) -> torch.Tensor:
     """Attention par produit scalaire normalisé sur des tenseurs ``[jetons, têtes, dim]``.
 
     Délègue au SDPA de PyTorch, qui choisit FlashAttention sur tout GPU qui le
-    gère. Les transpositions sont des vues, pas des copies.
+    gère. Les transpositions sont des vues, pas des copies. ``n_rep`` > 1
+    (C15-prefill, fusion « attn ») : k et v portent les têtes KV seules et SDPA
+    les diffuse (``enable_gqa``) — la tête h lit la tête KV h // n_rep, la même
+    que `repeat_kv` matérialisait (deux copies de [t, têtes, d] par couche).
     """
     qh = q.transpose(0, 1).unsqueeze(0)          # [1, heads, tq, dim]
     kh = k.transpose(0, 1).unsqueeze(0)
     vh = v.transpose(0, 1).unsqueeze(0)
+    gqa = {"enable_gqa": True} if n_rep > 1 else {}
     q_len, kv_len = q.shape[0], k.shape[0]
     if window > 0:
         # fenêtre glissante : chaque requête ne voit que les `window` derniers
@@ -893,12 +916,12 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     else:
         mask = causal_mask(q_len, kv_len, q_offset, q.device, q.dtype) if causal else None
     if mask is not None:
-        out = F.scaled_dot_product_attention(qh, kh, vh, attn_mask=mask, scale=scale)
+        out = F.scaled_dot_product_attention(qh, kh, vh, attn_mask=mask, scale=scale, **gqa)
     else:
         use_causal = bool(causal and q_len > 1 and q_offset == 0
                           and q_len == kv_len)
         out = F.scaled_dot_product_attention(qh, kh, vh, is_causal=use_causal,
-                                             scale=scale)
+                                             scale=scale, **gqa)
     return out.squeeze(0).transpose(0, 1).contiguous()
 
 
