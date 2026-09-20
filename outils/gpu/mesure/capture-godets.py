@@ -3,6 +3,11 @@
 Rend par godet : capture ok / erreur, graphes=on après le premier pas, ms/pas ; un seul processus,
 un moteur par godet (déchargé entre deux). À lancer sous carte.sh avant tout défaut de noyau de décodage."""
 import json, os, sys, time, traceback
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '../..'))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 _REPO = os.environ.get("ACVRAM_ARBRE", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, _REPO)
 import torch, acvram
@@ -10,7 +15,7 @@ from acvram.engine.loader import load_model
 from acvram.engine.runner import Engine
 from acvram.engine.sampler import SamplingParams
 SORTIE = sys.argv[1]; GODETS = [int(x) for x in (sys.argv[2] if len(sys.argv) > 2 else "1,2,8,16").split(",")]
-MODEL = os.environ.get("ACVRAM_MODELE_MESURE", "/mnt/4TO_SATACMR_2022/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4")
+MODEL = os.environ.get("ACVRAM_MODELE_MESURE", _RACINE + "/Qwen3-Coder-30B-A3B-nvfp4")
 CTX, PROMPT_LEN, N_PAS = 2048, 256, 20
 res = {"modele": MODEL, "regime_ligne": acvram.regime_ligne(), "version": getattr(acvram, "__version__", "?"), "godets": {}}
 print(res["regime_ligne"], flush=True)

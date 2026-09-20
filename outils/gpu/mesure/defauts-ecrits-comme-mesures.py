@@ -21,12 +21,17 @@ import json
 import os
 import sys
 from collections import Counter, defaultdict
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '../..'))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from acvram.engine.config import ModelSpec  # noqa: E402
 
 BASE = os.environ.get(
-    "ACVRAM_PARC", "/mnt/2TO_2023_980PRO/Modeles/models_acvram")
+    "ACVRAM_PARC", _RACINE)
 
 DEFAUTS = {}
 for ch in dataclasses.fields(ModelSpec):

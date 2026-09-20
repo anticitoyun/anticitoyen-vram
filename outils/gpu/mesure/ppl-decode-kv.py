@@ -38,6 +38,11 @@ paie leur capture dans son `t_decode` ; les tranches suivantes disent le régime
 relevée après le join »)."""
 import argparse, glob, json, math, os, subprocess, sys, time
 from pathlib import Path
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '../..'))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 
 _REPO = os.environ.get("ACVRAM_ARBRE", str(Path(__file__).resolve().parents[3]))
 if _REPO not in sys.path:
@@ -181,7 +186,7 @@ def analyser(argv=None):
     p.add_argument("--sans-cache-prefixe", action="store_true",
                    help="bras diagnostic : cache de préfixe éteint (prefill d'un morceau) ; défaut = régime servi (ON, prefill coupé à 256 sur un hybride)")
     p.add_argument("--modele", default=os.environ.get("ACVRAM_MODELE_MESURE",
-                   "/mnt/4TO_SATACMR_2022/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4"))
+                   _RACINE + "/Qwen3-Coder-30B-A3B-nvfp4"))
     p.add_argument("--depuis", type=int, default=1, help="reprise : sauter les tranches k < depuis")
     p.add_argument("--reprendre", action="store_true", help="sauter les tranches dont le JSON existe déjà")
     return p.parse_args(argv)

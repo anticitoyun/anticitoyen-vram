@@ -56,6 +56,11 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '.'))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -91,7 +96,7 @@ def invite() -> list:
 # `[gMASK]<sop>` en tete (obligatoire depuis le 16/09, sinon la comparaison
 # ne vaut rien -- modele-sans-son-prefixe-de-sequence.md).
 PROFIL_SCRATCH = Path("/tmp/glm-profil-couches")
-PROFIL_ACVRAM_BF16 = "/mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-srcbf16-bf16"
+PROFIL_ACVRAM_BF16 = _RACINE + "/GLM-4.7-Flash-srcbf16-bf16"
 PROFIL_CORPUS = str(Path(__file__).resolve().parent.parent
                     / "scratchpad/corpus-calib-k48/bras-A-anglais.txt")
 N_JETONS_PROFIL = 300           # marge confortable sur le >= 256 demande

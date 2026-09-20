@@ -20,8 +20,13 @@ import argparse
 import json
 import sys
 from pathlib import Path
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '../..'))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
 
-BASE = Path("/mnt/2TO_2023_980PRO/Modeles/models_acvram")
+
+BASE = Path(_RACINE)
 
 
 def rendre_le_cache(dossier: Path) -> int:

@@ -21,10 +21,15 @@ import os
 
 import pytest
 import torch
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '../outils'))
+from racine_modeles import racine_modeles as _racine_modeles, alias_absent as _alias_absent  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 
 pytestmark = pytest.mark.gpu_requis
 
-MODEL = "/mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4"
+MODEL = _RACINE + "/Qwen3-Coder-30B-A3B-nvfp4"
 N_SEQ_INIT = 11
 # ~1-3 ulp bf16 à la magnitude des logits observés ce soir (12-17, exposant
 # 3-4, ulp 0,0625-0,125) — marge large plutôt qu'ajustée au cas observé.
@@ -97,6 +102,8 @@ def _rejouer(engine, capturer_logits: bool):
     return tokens, logits_top2
 
 
+@pytest.mark.skipif(bool(_alias_absent("Qwen3-Coder-30B-A3B-nvfp4")),
+                    reason=_alias_absent("Qwen3-Coder-30B-A3B-nvfp4"))
 def test_pipeline_bit_identique_a_egalite_pres():
     from acvram.engine.loader import load_model
     from acvram.engine.runner import Engine

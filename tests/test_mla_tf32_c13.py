@@ -13,12 +13,17 @@ import pathlib
 
 import pytest
 import torch
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '../outils'))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 
 RACINE = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(RACINE))
 from acvram.engine import mla as MLA                                            # noqa: E402
 
-GLM = "/mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-srcbf16-nvfp4-k48-calibA"
+GLM = _RACINE + "/GLM-4.7-Flash-srcbf16-nvfp4-k48-calibA"
 
 
 def _tf32(x: torch.Tensor) -> torch.Tensor:

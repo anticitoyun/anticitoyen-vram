@@ -32,9 +32,14 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '../..'))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 
 RACINE = Path(__file__).resolve().parent.parent
-BASE = Path("/mnt/2TO_2023_980PRO/Modeles/models_acvram")
+BASE = Path(_RACINE)
 PY = "~/Bureau/Claude/anticitoyen-vram/.venv/bin/python"
 
 SONDE = r'''

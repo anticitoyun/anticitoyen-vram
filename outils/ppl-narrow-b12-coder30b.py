@@ -34,12 +34,17 @@ import math
 import os
 import sys
 from pathlib import Path
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '.'))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 
 sys.path.insert(0, os.environ.get("ACVRAM_ARBRE", str(Path(__file__).resolve().parent.parent)))
 
 os.environ.setdefault("ACVRAM_MOE_DECODE_MMA", "1")
 
-MODEL = os.environ.get("PPL_MODEL", "/mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4")
+MODEL = os.environ.get("PPL_MODEL", _RACINE + "/Qwen3-Coder-30B-A3B-nvfp4")
 CORPUS = "/mnt/4TO_SATACMR_2022/Modeles/corpus/wiki-gptq.txt"
 N_SEQ = 12
 CHUNK = 2048                      # 12 x 2048 = 24 576 jetons DE DECODAGE

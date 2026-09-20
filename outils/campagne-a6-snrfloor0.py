@@ -22,6 +22,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '.'))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 
 REPO = Path(__file__).resolve().parent.parent
 # SANS CECI, `import acvram` resout via le finder d'installation editable
@@ -39,7 +44,7 @@ from energie import Energie, repos  # noqa: E402
 
 VENV_PY = "~/Bureau/Claude/anticitoyen-vram/.venv/bin/python3"
 CORPUS = Path("/mnt/4TO_SATACMR_2022/Modeles/corpus/wiki-gptq.txt")
-SORTIE_HDD = Path("/mnt/4TO_SATACMR_2022/Modeles/models_acvram")  # SSD a 41 Gio libres
+SORTIE_HDD = Path(_RACINE)  # SSD a 41 Gio libres
 SLOTS = 12
 CTX = 2048
 N_JETONS = 200

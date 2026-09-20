@@ -12,6 +12,11 @@ présent MÊME avec ACVRAM_PIPELINE jamais activé -- ce test hérite donc de
 ses divergences tant que ce correctif n'est pas fait.
 """
 import os, sys
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '.'))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 _ICI = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_ICI))
 os.environ["ACVRAM_REPIN"] = "0"          # pas de swap pendant le test
@@ -21,7 +26,7 @@ from acvram.engine.loader import load_model
 from acvram.engine.runner import Engine
 from acvram.engine.sampler import SamplingParams
 
-MODEL = "/mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4"
+MODEL = _RACINE + "/Qwen3-Coder-30B-A3B-nvfp4"
 N_SEQ_INIT = 11
 N_PAS = 200
 

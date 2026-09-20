@@ -58,6 +58,11 @@ import struct
 import sys
 
 import torch
+import os as _os, sys as _sys  # noqa: E401
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '.'))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
+_RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
+
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -132,7 +137,7 @@ def charger_experts(chemin: str, combien: int):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("dossier", nargs="?",
-                    default="/mnt/2TO_2023_980PRO/Modeles/models_acvram/qwen3-coder-next-80b")
+                    default=_RACINE + "/qwen3-coder-next-80b")
     ap.add_argument("--experts", type=int, default=200)
     ap.add_argument("--fichier", type=int, default=3,
                     help="indice du safetensors à échantillonner")
