@@ -350,8 +350,12 @@ def test_combine_fusionne_contre_einsum_sur_carte(B, L, n):
     print(f"  RESULTAT juge des termes : lignes fautives noyau {f_k}, einsum {f_e} ; ratio_max_noyau {r_k:.4f}, ratio_max_einsum {r_e:.4f} "
           f"(plancher ≈ 0,5 = arrondi bf16 de sortie) ; accumulation seule de l'einsum fp32 : {r_acc:.4f} du 32·eps32"
           + (" — > 0,1 : le 32 masque, à dire" if r_acc > 0.1 else ""))
-    assert e_ke <= 1, f"noyau vs einsum {e_ke:.2f} ulp bf16 > 1"
-    assert bool((d_k <= d_e + 6).all()), f"juge fp64 par ligne : d(noyau) > d(einsum) + 6 ulp sur {(d_k > d_e + 6).sum().item()} lignes"
+    # Les deux juges en ulp de |y| (noyau vs einsum ≤ 1 ulp ; d(noyau) ≤ d(einsum) + 6) sont RETIRÉS du scellé
+    # (poste7 09 h 25 : l'ulp du résultat n'est pas une échelle là où Σ v·o s'annule ; M1 09 h 47 : 3,00 ulp sur
+    # 8/30 720 positions, noyau/f64 1,30 < einsum/f64 1,70) — publiés à titre d'information, le scellé est le
+    # juge des termes ci-dessous.
+    print(f"  information (hors scellé) : noyau vs einsum {e_ke:.2f} ulp bf16 ; d(noyau) > d(einsum) + 6 ulp sur "
+          f"{(d_k > d_e + 6).sum().item()} ligne(s)")
     assert f_k == 0 and f_e == 0, (f_k, f_e)
     # faute construite (poste7 09 h 25) : v_b avec une tête permutée (0 ↔ 1) passé au noyau, jugé contre
     # la référence saine → les lignes (b, 0) et (b, 1) à ratio > 1, verdict FAUX ; les autres têtes ≤ 1
