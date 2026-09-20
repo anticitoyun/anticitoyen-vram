@@ -76,7 +76,7 @@ preuve = {"regime_ligne": __import__("acvram").regime_ligne(), "engine_regime": 
           "ACVRAM_MOE_DECODE_MMA_MIN_T_env": os.environ.get("ACVRAM_MOE_DECODE_MMA_MIN_T"),
           "modele": MODEL,
           "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
-          "power_limit_w": nvml().plafond_w(_carte0()), "acvram": __import__("acvram").__file__}
+          "power_limit_w": nvml().plafond_w(_carte0()), "acvram": __import__("os").path.relpath(__import__("acvram").__file__, __import__("os").path.dirname(__import__("os").path.dirname(__import__("acvram").__file__)))}  # relatif : jamais un /home dans un artefact suivi (cliquet 20/09)
 print(f"[PREUVE] {preuve}", flush=True)
 # CERT_PLAN_LEN disparait avec le correctif du 17/09 (loader.py::_replanifier
 # ne passait que max_model_len au planificateur, jamais max_concurrent_seqs
