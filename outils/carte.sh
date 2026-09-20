@@ -51,9 +51,16 @@ NOM=${ACVRAM_NOM:-$(basename "${1:-mesure}")}
 # celui qui attend doit savoir s'il attend une manche ou un reglage.
 TYPE=${ACVRAM_TYPE:-mesure}
 case "$TYPE" in
-  mesure|etat) ;;
-  *) echo "carte.sh : ACVRAM_TYPE doit valoir 'mesure' ou 'etat'" >&2; exit 64 ;;
+  mesure|etat|service) ;;
+  *) echo "carte.sh : ACVRAM_TYPE doit valoir 'mesure', 'etat' ou 'service'" >&2; exit 64 ;;
 esac
+# PLAFOND DE PRISE (poste7-tests-30min-20-09 § 3.1, utilisateur 07 h 17 : « aucune prise > 30 min »).
+# A l'echeance : SIGTERM a la commande et a ses enfants, 10 s, SIGKILL ; -rgc si un -lgc a ete
+# pose par la commande (etat /tmp/acvram-eco-<carte>.json) ; verrou rendu par la sortie ;
+# ligne `TIMEOUT` au journal ; code 124. ACVRAM_TYPE=service (les services permanents) exempte.
+DUREE_MAX=${ACVRAM_DUREE_MAX:-1800}
+[ "$TYPE" = service ] && DUREE_MAX=0
+case "$DUREE_MAX" in ''|*[!0-9]*) echo "carte.sh : ACVRAM_DUREE_MAX doit etre un entier de secondes" >&2; exit 64 ;; esac
 
 # ETAT DE LA CARTE, RELEVE AVANT ET APRES. On ne garantit pas qu'il ne changera
 # pas — on CONSTATE apres coup ce qu'on ne pouvait pas garantir avant, comme le
@@ -174,8 +181,29 @@ AVANT=$(etat_carte)
 # shell de carte.sh, qui n'en a pas besoin. Une session dont le lanceur exporte
 # CUDA_VISIBLE_DEVICES="" ne voit donc la carte qu'a l'INTERIEUR d'un carte.sh,
 # jamais avant, jamais par accident dans un sous-processus qui l'aurait heritee.
-CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" "$@" 9>&-
-code=$?
+_TIMEOUT="$VERROU.timeout.$$"
+CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" "$@" 9>&- &
+_fils=$!
+_garde=
+if [ "$DUREE_MAX" -gt 0 ]; then
+  ( sleep "$DUREE_MAX"; touch "$_TIMEOUT"
+    pkill -TERM -P "$_fils" 2>/dev/null; kill -TERM "$_fils" 2>/dev/null; sleep 10
+    pkill -KILL -P "$_fils" 2>/dev/null; kill -KILL "$_fils" 2>/dev/null ) 9>&- &
+  _garde=$!
+fi
+wait "$_fils"; code=$?
+[ -n "$_garde" ] && { kill "$_garde" 2>/dev/null; wait "$_garde" 2>/dev/null; }
+if [ -f "$_TIMEOUT" ]; then
+  rm -f "$_TIMEOUT"
+  _eco="/tmp/acvram-eco-${ACVRAM_CARTE:-0}.json"
+  if [ -f "$_eco" ] && grep -q "\"pid\": *$_fils\b" "$_eco" 2>/dev/null; then
+    sudo -n nvidia-smi -i "${ACVRAM_CARTE:-0}" -rgc >/dev/null 2>&1 && rm -f "$_eco" \
+      && echo "carte.sh : TIMEOUT — -lgc pose par la commande rendu (-rgc)" >&2
+  fi
+  printf '%s TIMEOUT %-8s %-32s %s tenue=%ss plafond=%ss\n' "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "$(( $(date +%s) - _pris ))" "$DUREE_MAX" >> "$JOURNAL" 2>/dev/null || true
+  echo "carte.sh : TIMEOUT — prise de plus de ${DUREE_MAX}s (ACVRAM_DUREE_MAX), commande tuee, code 124" >&2
+  code=124
+fi
 APRES=$(etat_carte)
 if [ "$TYPE" = mesure ] && [ -n "$AVANT" ] && [ "$AVANT" != "$APRES" ]; then
   echo "carte.sh : ATTENTION — l'etat de la carte a CHANGE pendant la mesure" >&2
