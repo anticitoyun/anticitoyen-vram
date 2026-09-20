@@ -129,3 +129,67 @@ def gemm_w8a8(x: torch.Tensor, t, sortie_fp32: bool = False) -> torch.Tensor:
                          a.stride(0), t.qweight.stride(0), t.scales.stride(0), y.stride(0),
                          BM_=BM, BN_=BN, G=G, num_warps=_WARPS, num_stages=_STAGES)
     return y
+
+
+# --- C15-prefill : épilogue du chemin cublas (i8c) en un lancement ------------
+# `gemm_i8c_cublas` (kernels/__init__.py) rendait y = bf16(f32(acc) · s_x[m] · s_w[n])
+# par QUATRE noyaux torch sur [M, N] entiers (nsys P2 19/09 : direct_copy int32→f32
+# ×4/couche, MulFunctor<float> ×8/couche = 3,8 ms, bfloat16_copy ×4/couche = 0,7 ms —
+# 6,5 ms de noyaux et 16 lancements par couche pour 88 Mo utiles). Ici la même
+# chaîne d'arrondis dans l'ordre : cvt int32→fp32 (RN), × s_x (fp32, RN), × s_w
+# (fp32, RN), → bf16 (RNE) — chaque opération est celle de torch, dans le même
+# ordre, donc les octets sont les mêmes ; `tests/test_prefill_compact.py` le
+# tient au bit et casse si l'ordre des produits change (témoin).
+EBM, EBN = 64, 128
+
+
+if triton is not None:
+
+    @triton.jit
+    def _epilogue_i8c_kernel(acc_ptr, sx_ptr, sw_ptr, y_ptr, M, N, stride_am, stride_ym,
+                             BM_: tl.constexpr, BN_: tl.constexpr, BF16: tl.constexpr):
+        pm = tl.program_id(0)
+        pn = tl.program_id(1)
+        rows = pm * BM_ + tl.arange(0, BM_)
+        cols = pn * BN_ + tl.arange(0, BN_)
+        masque = (rows < M)[:, None] & (cols < N)[None, :]
+        acc = tl.load(acc_ptr + rows[:, None] * stride_am + cols[None, :], mask=masque, other=0)
+        sx = tl.load(sx_ptr + rows, mask=rows < M, other=0.0)
+        sw = tl.load(sw_ptr + cols, mask=cols < N, other=0.0)
+        y = acc.to(tl.float32) * sx[:, None]              # f32(acc) · s_x : premier arrondi
+        y = y * sw[None, :]                               # · s_w : second arrondi
+        ptr = y_ptr + rows[:, None] * stride_ym + cols[None, :]
+        if BF16:
+            # bf16 au plus proche, pair en cas d'égalité — la formule de
+            # c10::BFloat16 (bits + 0x7FFF + bit 16, puis >> 16), écrite en
+            # entiers : la même sur carte et sous l'interpréteur, qui, lui,
+            # TRONQUE `.to(tl.bfloat16)` (vérifié 20/09 : 659,4 → 656 au lieu
+            # de 660) ; un NaN n'arrive pas ici (produit d'un entier fini et
+            # d'échelles finies)
+            b = y.to(tl.int32, bitcast=True)
+            b = b + 0x7FFF + ((b >> 16) & 1)
+            tl.store(ptr, (b >> 16).to(tl.int16), mask=masque)
+        else:
+            tl.store(ptr, y, mask=masque)
+
+
+def epilogue_i8c(acc: torch.Tensor, sx: torch.Tensor, sw: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """``acc`` int32 [M, N] (torch._int_mm), ``sx`` fp32 [M], ``sw`` fp32 [N] →
+    ``dtype(f32(acc) · sx[:, None] · sw[None, :])`` en un lancement — au bit
+    avec `epilogue_i8c_torch` ; dtype bf16 ou fp32."""
+    M, N = acc.shape
+    assert dtype in (torch.bfloat16, torch.float32), dtype
+    assert sx.dtype == torch.float32 and sw.dtype == torch.float32 and sx.numel() == M and sw.numel() == N
+    y = torch.empty(M, N, dtype=dtype, device=acc.device)
+    bf16 = dtype == torch.bfloat16
+    grille = (-(-M // EBM), -(-N // EBN))
+    _epilogue_i8c_kernel[grille](acc, sx.contiguous(), sw.contiguous(), y.view(torch.int16) if bf16 else y,
+                                 M, N, acc.stride(0), y.stride(0), BM_=EBM, BN_=EBN, BF16=bf16, num_warps=4)
+    return y
+
+
+def epilogue_i8c_torch(acc: torch.Tensor, sx: torch.Tensor, sw: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """Le témoin : la chaîne torch d'avant C15-prefill, quatre noyaux (kernels/
+    __init__.py, `gemm_i8c_cublas` sous PREFILL_COMPACT=0)."""
+    y = acc.to(torch.float32) * sx[:, None] * sw[None, :]
+    return y if dtype == torch.float32 else y.to(dtype)

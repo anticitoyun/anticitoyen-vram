@@ -781,26 +781,60 @@ def vue_g128(t: INT8Tensor) -> INT8Tensor:
     return vue
 
 
-def gemm_i8c_cublas(x: torch.Tensor, t: INT8Tensor, sortie_fp32: bool = False):
+def gemm_i8c_cublas(x: torch.Tensor, t: INT8Tensor, sortie_fp32: bool = False, a8=None):
     """``x`` [M, K] → [M, N] par `torch._int_mm` sur un poids symétrique par
     canal : y = s_x[m] · s_w[n] · Σ_k a8[m,k]·(q[n,k] − 128), produit entier
     exact, échelles en fp32. None si inéligible (poids affine/groupé, M ≤ 16 :
-    cuBLASLt exige M > 16, K et N multiples de 8)."""
+    cuBLASLt exige M > 16, K et N multiples de 8). ``a8`` : (a8, s_x) déjà
+    quantifiés par `quantifier_a8_i8c(x)` (C15-prefill, q/k/v partagent x)."""
     w = _i8c_poids(t)
     M, K = x.shape
     N, k_pad = t.qweight.shape
     if w is None or M <= 16 or k_pad % 8 or N % 8:
         return None
     from .gemm_w8a8 import quantifier_a8, quantifier_a8_torch, disponible as _w8a8_dispo
-    if _w8a8_dispo() and x.is_cuda:
+    if a8 is not None:
+        a, sx = a8                               # C15-prefill : A8 quantifiée une fois pour q/k/v
+    elif _w8a8_dispo() and x.is_cuda:
         a, sx = quantifier_a8(x)
     else:
         a, sx = quantifier_a8_torch(x)           # à sec : le même arrondi que le noyau, au bit
     if K != k_pad:
         a = torch.nn.functional.pad(a, (0, k_pad - K))
     acc = torch._int_mm(a.contiguous(), w.t())                       # [M, N] int32
+    if prefill_compact("epilogue") and _w8a8_dispo() and (x.is_cuda or _interprete()):
+        # C15-prefill : f32(acc)·s_x·s_w → dtype en UN noyau (gemm_w8a8.epilogue_i8c),
+        # la même chaîne d'arrondis que les quatre noyaux torch ci-dessous, au bit
+        from .gemm_w8a8 import epilogue_i8c
+        return epilogue_i8c(acc, sx, _i8c_echelles(t), torch.float32 if sortie_fp32 else x.dtype)
     y = acc.to(torch.float32) * sx[:, None] * t.scales[:, 0].to(torch.float32)[None, :]
     return y if sortie_fp32 else y.to(x.dtype)
+
+
+def _interprete() -> bool:
+    return os.environ.get("TRITON_INTERPRET") == "1"
+
+
+def _i8c_echelles(t: INT8Tensor) -> torch.Tensor:
+    """Échelle par canal en fp32 [N], convertie UNE fois (fp16 → fp32 exact,
+    les mêmes valeurs que `t.scales[:, 0].to(torch.float32)` à chaque appel :
+    une copie de moins par projection et par couche)."""
+    s = t.__dict__.get("_i8c_s32")
+    if s is None:
+        s = t.scales[:, 0].to(torch.float32).contiguous()
+        t.__dict__["_i8c_s32"] = s
+    return s
+
+
+def quantifier_a8_i8c(x: torch.Tensor):
+    """L'activation A8 par jeton du chemin cublas, (a8 int8 [M, K], s_x fp32 [M]),
+    pour la passer à `gemm_i8c_cublas(..., a8=)` — C15-prefill : q, k et v
+    lisent la même ligne normée, la quantifier trois fois rendait trois fois
+    les mêmes octets (nsys P2 19/09 : `_quant_a8_kernel` ×4 par couche)."""
+    from .gemm_w8a8 import quantifier_a8, quantifier_a8_torch, disponible as _w8a8_dispo
+    if _w8a8_dispo() and x.is_cuda:
+        return quantifier_a8(x)
+    return quantifier_a8_torch(x)
 
 
 def prefill_int8_regime() -> str:

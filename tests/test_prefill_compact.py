@@ -51,6 +51,77 @@ def test_la_ligne_de_regime_nomme_la_glue_du_prefill(monkeypatch):
         kernels.prefill_compact("inconnue")
 
 
+# --- fusion 1 : épilogue i8c en un noyau ---------------------------------------
+
+def _acc_et_echelles(M=200, N=520, seed=3):
+    torch.manual_seed(seed)
+    # amplitudes du produit entier réel (|Σ| ≤ K·127·127 ≈ 3,3·10⁷ à K = 2048) :
+    # au-delà de 2²⁴ la conversion int32 → fp32 ARRONDIT, c'est cet arrondi-là
+    # que l'épilogue doit reproduire
+    acc = torch.randint(-40_000_000, 40_000_000, (M, N), dtype=torch.int32)
+    sx = (torch.rand(M) * 0.02 + 1e-4)
+    sw = (torch.rand(N) * 0.01 + 1e-5)
+    return acc, sx, sw
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_epilogue_i8c_au_bit_avec_la_chaine_torch(dtype):
+    from acvram.kernels import gemm_w8a8 as g
+    if not g.disponible():
+        pytest.skip("Triton absent")
+    acc, sx, sw = _acc_et_echelles()
+    y = g.epilogue_i8c(acc, sx, sw, dtype)
+    ref = g.epilogue_i8c_torch(acc, sx, sw, dtype)
+    assert y.dtype == dtype and y.shape == ref.shape
+    assert torch.equal(y, ref), (y.view(torch.int16 if dtype == torch.bfloat16 else torch.int32)
+                                 != ref.view(torch.int16 if dtype == torch.bfloat16 else torch.int32)).sum()
+
+
+def test_epilogue_temoins_cassants_ordre_des_produits_et_arrondi_bf16():
+    """La comparaison peut rendre faux : (1) en fp32, (f32(acc)·s_w)·s_x n'est pas
+    (f32(acc)·s_x)·s_w au bit (un tiers des éléments) ; (2) en bf16, l'arrondi
+    par troncature (ce que `.to(tl.bfloat16)` fait sous TRITON_INTERPRET, d'où
+    la formule entière du noyau) diverge de l'arrondi au plus proche sur la
+    moitié des éléments. Une régression sur l'un ou l'autre casse le test au bit."""
+    from acvram.kernels import gemm_w8a8 as g
+    acc, sx, sw = _acc_et_echelles()
+    ref32 = g.epilogue_i8c_torch(acc, sx, sw, torch.float32)
+    inverse = acc.to(torch.float32) * sw[None, :] * sx[:, None]
+    assert (inverse != ref32).float().mean() > 0.1
+    ref16 = g.epilogue_i8c_torch(acc, sx, sw, torch.bfloat16)
+    tronque = (ref32.view(torch.int32) >> 16).to(torch.int16).view(torch.bfloat16)
+    assert (tronque.view(torch.int16) != ref16.view(torch.int16)).float().mean() > 0.3
+
+
+def test_gemm_i8c_cublas_compact_egale_le_temoin(monkeypatch):
+    """Le dispatcher : sous PREFILL_COMPACT=1 le chemin passe par epilogue_i8c
+    (compté), et rend les mêmes octets que sous 0 — bf16 et fp32."""
+    from acvram.kernels import gemm_w8a8 as g
+    from acvram.quant.formats import _quantize_int8
+    if not g.disponible():
+        pytest.skip("Triton absent")
+    torch.manual_seed(5)
+    w = torch.randn(96, 256) * 0.02
+    t = _quantize_int8(w, group_size=256, symmetric=True)
+    x = (torch.randn(40, 256) * 0.5).to(torch.bfloat16)
+    appels = []
+    vrai = g.epilogue_i8c
+    monkeypatch.setattr(g, "epilogue_i8c", lambda *a, **k: appels.append(1) or vrai(*a, **k))
+    refs = {}
+    for fp32 in (False, True):
+        monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 0)
+        refs[fp32] = ref = kernels.gemm_i8c_cublas(x, t, sortie_fp32=fp32)
+        monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 1)
+        monkeypatch.setattr(kernels, "_PREFILL_COMPACT_ITEMS", "")
+        y = kernels.gemm_i8c_cublas(x, t, sortie_fp32=fp32)
+        assert ref is not None and y is not None and y.dtype == ref.dtype and torch.equal(y, ref)
+    assert len(appels) == 2, appels
+    # bissection : la fusion écartée suit le témoin (aucun appel de plus, mêmes octets)
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT_ITEMS", "a8")
+    y = kernels.gemm_i8c_cublas(x, t)
+    assert len(appels) == 2 and torch.equal(y, refs[False])
+
+
 def test_une_valeur_hors_domaine_est_refusee():
     env = dict(os.environ, ACVRAM_PREFILL_COMPACT="2", CUDA_VISIBLE_DEVICES="")
     out = subprocess.run([sys.executable, "-c", "import acvram.kernels"], env=env, capture_output=True, text=True, timeout=120)
