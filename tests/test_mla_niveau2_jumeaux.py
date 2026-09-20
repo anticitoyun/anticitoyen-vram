@@ -185,34 +185,89 @@ def test_chaque_noyau_contre_son_jumeau_sur_carte(monkeypatch):
         o_j = faux.mla_decode_batch(q_eff_j, ptrs, st["len"].reshape(1), scores, bucket, RANK, la.scale)
         e3 = ulp(o_j, o_n); print(f"(3) mla_decode_batch : {e3:.2f} ulp bf16")
         assert e3 <= 1, f"DÉVIANT : mla_decode_batch ({e3:.2f} ulp bf16)"
-        # (4) =1 et =2 contre le jumeau torch (FauxExt : prep torch, écriture et attention fp32), § 7
-        ulp_el = lambda a, r: (a.float() - r.float()).abs() / (2.0 ** (torch.floor(torch.log2(r.float().abs().clamp_min(1e-30))) - 7))
-        st_a, st_b, st_c, st_f = (_etat(la, dev, L, n0) for _ in range(4))
-        faux_c = FauxExt([st_c], RANK, la.scale)
+        # (4) 32 pas, état MAÎTRE avancé par =1 (decode_static) ; à chaque pas les noyaux de =2 rejouent sur
+        # une COPIE du même état et se jugent comme 2a-bis (M3, scratchpad/c15-temoin-20-09/juge-2a.py) :
+        # prep : juge des termes sur q_abs (Σ_n k_b·q_nope, 128 termes) ratio < 1, et d(=2) ≤ d(=1) + 6 ulp bf16
+        # de la référence fp64 sur les quatre composantes (=1 = jumeau torch) ; attention : d(=2) ≤ d(=1) + 6
+        # contre l'attention fp64 des MÊMES q_eff et cache. La sortie de couche y(=2) contre y(=1) n'est PUBLIÉE
+        # qu'en ulp bf16 : deux approximations enchaînées dans un cache bf16 (T4 20/09 : 22 ulp au pas 26) ne
+        # forment pas un contrat (§ 7) — le contrat est par noyau, ci-dessus. Une faute construite (attention de
+        # la tête 0 déréglée de 2 %) doit sortir du juge de l'attention au premier pas.
+        def rope64(x, c, sn):
+            x0, x1 = x[..., 0::2], x[..., 1::2]
+            y = torch.empty_like(x); y[..., 0::2] = x0 * c - x1 * sn; y[..., 1::2] = x0 * sn + x1 * c
+            return y
 
-        class FauxFautif(FauxExt):                    # =2 avec l'attention de la tête 0 déréglée de 2 %
+        def prep64(q, kvp, lens):
+            q_nope, q_pe = q.split([NOPE, ROPE], dim=-1)
+            c0, k_pe0 = kvp.split([RANK, ROPE], dim=-1)
+            cs = la.rope_emb.tables_demi(lens, q.device, q.dtype, bucket + 1).double()   # [B, 2, rope/2]
+            c, sn = cs[:, 0], cs[:, 1]
+            x = c0.double(); c_r = (x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + la.eps)) * la.kv_a_norm.double()
+            termes = torch.einsum('hrn,bhn->bhr', la.k_b.double().abs(), q_nope.double().abs())
+            return {"q_abs": torch.einsum('hrn,bhn->bhr', la.k_b.double(), q_nope.double()),
+                    "q_pe": rope64(q_pe.double(), c.unsqueeze(1), sn.unsqueeze(1)),
+                    "k_c": c_r, "k_pe": rope64(k_pe0.double(), c, sn)}, termes
+
+        def ulp_de(r):
+            r = r.abs().float()
+            return torch.where(r > 0, 2.0 ** (torch.floor(torch.log2(r.clamp_min(1e-30))) - 7), torch.full_like(r, 2.0 ** -133)).double()
+
+        def d_ulp(x, r64):                     # distance à fp64 en ulp bf16 de la référence, par élément
+            return (x.double() - r64).abs() / ulp_de(r64)
+
+        def att64(q_eff, cache, ln):           # attention fp64 des mêmes q_eff (fp32) et cache (bf16), un créneau
+            C = cache[:bucket].double()
+            sc = torch.einsum('hr,sr->hs', q_eff[0].double(), C) * la.scale
+            sc = sc.masked_fill(torch.arange(bucket, device=q_eff.device) > ln, float('-inf'))
+            return torch.einsum('hs,sr->hr', sc.softmax(dim=-1), C[:, :RANK]).unsqueeze(0)
+
+        class FauxFautif(FauxExt):                        # tête 0 de l'attention déréglée de 2 %
             def mla_decode_batch(self, q, *a):
                 o = super().mla_decode_batch(q, *a); o[:, 0] *= 1.02; return o
-        faux_f = FauxFautif([st_f], RANK, la.scale)
+
+        st_a, st_b = _etat(la, dev, L, n0), _etat(la, dev, L, n0)
         xs = (torch.randn(32, 1, H, device=dev) * 0.5).to(DT)
-        pire = 0.0
+        pire_y, pire_ratio, pire_diff = 0.0, 0.0, -1e9
         for pas in range(32):
-            ya = la.decode_static(xs[pas], st_a, bucket)
+            st_b["cache"].copy_(st_a["cache"]); st_b["len"].copy_(st_a["len"])            # même état de départ
+            prem, kvp = la._proj_entree(xs[pas])
+            q = la._q_depuis(prem).reshape(1, NH, NOPE + ROPE)
+            lens = st_b["len"].reshape(1)
+            # prep : noyau (=2) et jumeau torch (=1) contre fp64
+            q_eff_n, k_new_n = ext.mla_prep_batch(q.contiguous(), kvp.contiguous(), lens, cos32, sin32,
+                                                  la._k_b_c(), la.kv_a_norm, NOPE, ROPE, RANK, la.eps)
+            q_eff_j, k_new_j = jumeau_prep_batch(la, q, kvp, lens, bucket)
+            R, termes = prep64(q, kvp, lens)
+            K = {"q_abs": q_eff_n[..., :RANK], "q_pe": q_eff_n[..., RANK:], "k_c": k_new_n[..., :RANK], "k_pe": k_new_n[..., RANK:]}
+            J = {"q_abs": q_eff_j[..., :RANK], "q_pe": q_eff_j[..., RANK:], "k_c": k_new_j[..., :RANK], "k_pe": k_new_j[..., RANK:]}
+            borne = ulp_de(R["q_abs"]) + 32 * 2.0 ** -23 * termes
+            ratio = ((K["q_abs"].double() - R["q_abs"]).abs() / borne).max().item(); pire_ratio = max(pire_ratio, ratio)
+            assert ratio < 1, f"pas {pas} : mla_prep_batch q_abs au juge des termes, ratio {ratio:.3f} ≥ 1"
+            for nom in ("q_abs", "q_pe", "k_c", "k_pe"):
+                diff = (d_ulp(K[nom], R[nom]).amax(-1) - d_ulp(J[nom], R[nom]).amax(-1)).max().item()
+                pire_diff = max(pire_diff, diff)
+                assert diff <= 6, f"pas {pas} : mla_prep_batch {nom} : d(=2) − d(=1) = {diff:.2f} ulp bf16 > 6"
+            # attention : noyau (=2) et jumeau torch (=1) contre fp64, mêmes q_eff (du noyau) et cache
+            ptrs = torch.tensor([st_b["cache"].data_ptr()], dtype=torch.int64, device=dev)
+            faux_b = FauxExt([st_b], RANK, la.scale); fautif = FauxFautif([st_b], RANK, la.scale)
+            scores = torch.zeros(1, NH, bucket, device=dev)
+            o_n = MLA._mla_decode_batch(ext, q_eff_n.contiguous(), ptrs, lens, scores, bucket, RANK, la.scale)
+            o_j = faux_b.mla_decode_batch(q_eff_n, ptrs, lens, scores, bucket, RANK, la.scale)
+            o_r = att64(q_eff_n, st_b["cache"], int(lens[0]))
+            d_n, d_j = d_ulp(o_n, o_r).amax(-1), d_ulp(o_j, o_r).amax(-1)
+            diff = (d_n - d_j).max().item(); pire_diff = max(pire_diff, diff)
+            assert diff <= 6, f"pas {pas} : mla_decode_batch : d(=2) {d_n.max().item():.2f}, d(=1) {d_j.max().item():.2f} ulp bf16 de fp64 ; écart {diff:.2f} > 6"
+            if pas == 0:
+                o_f = fautif.mla_decode_batch(q_eff_n, ptrs, lens, scores, bucket, RANK, la.scale)
+                d_f = (d_ulp(o_f, o_r).amax(-1) - d_j).max().item()
+                assert d_f > 6, f"le juge ne voit pas une tête déréglée de 2 % ({d_f:.2f} ulp)"
+            # sorties de couche : =2 sur la copie, =1 avance l'état maître ; publié, pas jugé
             yb = _pas_complet(la, xs[pas], st_b, bucket, None)
-            with pytest.MonkeyPatch.context() as mp:
-                mp.setattr(MLA, "_extension", lambda: faux_c)
-                yc = _pas_complet(la, xs[pas], st_c, bucket, faux_c)
-            with pytest.MonkeyPatch.context() as mp:
-                mp.setattr(MLA, "_extension", lambda: faux_f)
-                yf = _pas_complet(la, xs[pas], st_f, bucket, faux_f)
-            d_a, d_b = ulp_el(ya, yc), ulp_el(yb, yc)
-            ecart = (d_b - d_a).abs().max().item(); pire = max(pire, ecart)
-            assert ecart <= 6, (f"DÉVIANT au pas {pas} : =1 à {d_a.max().item():.2f}, =2 à {d_b.max().item():.2f} ulp bf16 "
-                                f"du jumeau ; écart {ecart:.2f} > 6")
-            if pas == 0:                              # la faute construite sort du juge dès le premier pas
-                d_f = ulp_el(yf, yc)
-                assert (d_f - d_a).max().item() > 6, f"le juge ne voit pas une tête déréglée de 2 % ({(d_f - d_a).max().item():.2f} ulp)"
-        print(f"(4) 32 pas : écart max =2/=1 au jumeau {pire:.2f} ulp bf16 (≤ 6)")
+            ya = la.decode_static(xs[pas], st_a, bucket)
+            pire_y = max(pire_y, ulp(ya, yb))
+        print(f"(4) 32 pas : q_abs ratio max {pire_ratio:.3f} (< 1) ; d(=2) − d(=1) max {pire_diff:+.2f} ulp bf16 (≤ 6) ; "
+              f"sortie de couche =2/=1 max {pire_y:.2f} ulp bf16 (publié)")
 
 
 def test_remede_regles_6_caches_paresseux_refuses_en_capture(monkeypatch):

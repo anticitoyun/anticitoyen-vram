@@ -106,8 +106,12 @@ def test_fused_deterministe_et_juste(tn):
     # requantifie en shared sans (un CTA ne voit qu'une tranche de I) : les
     # codes E2M1 diffèrent, l'identité au bit avec B n'est plus un contrat —
     # seule la tolérance float64 l'est.
-    hors_b = int(((y1.double() - yb.double()).abs() > tol).sum())
-    assert hors_b == 0, f"{hors_b} sorties hors tolerance vs chemin B (max {(y1.double() - yb.double()).abs().max().item():.3e})"
+    # REGLES § 7 (T4 20/09 : 2 634 sorties « hors tolérance vs chemin B », max 4,5e-2, le fusionné
+    # étant DANS la tolérance float64) : deux approximations ne se jugent pas l'une contre l'autre ;
+    # le chemin B se juge, lui aussi, contre float64 — un rouge ici nomme B, pas le fusionné.
+    hors_b = int(((yb.double() - ref).abs() > tol).sum())
+    assert hors_b == 0, (f"chemin B : {hors_b} sorties hors tolerance vs float64 (max {(yb.double() - ref).abs().max().item():.3e}) ; "
+                         f"fusionné − B max {(y1.double() - yb.double()).abs().max().item():.3e}")
 
 
 @CUDA

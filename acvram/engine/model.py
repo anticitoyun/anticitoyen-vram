@@ -1426,6 +1426,8 @@ class MoEBlock(nn.Module):
         t, k = topi.shape
         E = pg[3].shape[0]                             # [E] échelles globales : survit à pg[1] = None (disposition unique)
         permut = kernels.prefill_compact("permut")
+        colle = None            # posé par la branche sans « permut » seulement ; lu plus bas par le chemin groupe
+                                # (T4 20/09 : UnboundLocalError sous PREFILL_COMPACT=1 + témoin PREFILL_GROUPED=groupe)
         if permut:
             # C15-prefill : les MÊMES ordre / cnt / xs que le chemin d'avant, en
             # moins de lancements — tri stable sur les clés int32 de topi (4
