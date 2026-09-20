@@ -8,7 +8,8 @@ Pour chaque alias des TSV (acvram-chemins, gguf-chemins, vllm-chemins) :
                  kv_max_tokens si le plan tient, sinon le refus nommé (avertissement « ne tient pas »)
   verdict      = FAUX (colonne > modèle) · RÉDUIT (colonne > plan : proposer le plus grand ctx qui tient = plan) · OK · REFUS (plan impossible)
 Sortie : ~/TSV/contexte-verifie.tsv (alias · ctx colonne · ctx modèle · ctx plan · verdict · détail).
---appliquer réécrit la colonne des TSV (sauvegarde .avant-<date>) : RÉDUIT → plan, FAUX → min(modèle, plan).
+--appliquer réécrit la colonne des TSV (sauvegarde .avant-<date>) : RÉDUIT → plan, FAUX → min(modèle, plan) ; la ligne
+réécrite porte « plan » en 6e colonne tant que ctx_tenu (moteur) n'a pas prouvé la valeur.
 Charge : un `acvram plan` par alias acvram (~s de CPU) → --lot N et --depuis pour avancer par paquets entre les prises annoncées.
 """
 from __future__ import annotations
@@ -189,7 +190,10 @@ def main() -> int:
                     elif v == "FAUX" and modele.isdigit():
                         cible = min(int(modele), int(plan)) if plan.isdigit() else int(modele)
                     if cible is not None and str(cible) != c[2]:
+                        # poste7-3b-lanceur-contexte-20-09 : une colonne posée par le plan, pas par une requête tenue,
+                        # est marquée « plan » (6e colonne) tant que ctx_tenu (moteur) n'existe pas
                         c[2] = str(cible); corriges += 1
+                        c = c[:5] + ["plan"] if len(c) >= 5 else c + [""] * (5 - len(c)) + ["plan"]
                 nouvelles.append("\t".join(c) if l and not l.startswith("#") else l)
             if nouvelles != src_lignes:
                 shutil.copy2(p, p.with_name(p.name + f".avant-{DATE}"))

@@ -84,6 +84,8 @@ def test_appliquer_reecrit_la_colonne_avec_sauvegarde(parc):
     lignes = {l.split("\t")[0]: l.split("\t") for l in (parc["tsv"] / "acvram-chemins.tsv").read_text().splitlines()}
     assert lignes["acvram-reduit-nvfp4"][2] == "16384" and lignes["acvram-faux-nvfp4"][2] == "8192" and lignes["acvram-ok-nvfp4"][2] == "32768"
     assert lignes["acvram-refus-nvfp4"][2] == "32768", "REFUS : colonne intacte, c'est à l'humain"
+    assert lignes["acvram-reduit-nvfp4"][5] == "plan" and lignes["acvram-faux-nvfp4"][5] == "plan", "colonne réécrite marquée « plan »"
+    assert len(lignes["acvram-ok-nvfp4"]) == 3 and len(lignes["acvram-refus-nvfp4"]) == 3, "colonne non réécrite : pas de marque"
     assert {l.split("\t")[0]: l.split("\t")[2] for l in (parc["tsv"] / "gguf-chemins.tsv").read_text().splitlines()}["llamacpp-petit"] == "4096"
     assert list(parc["tsv"].glob("acvram-chemins.tsv.avant-*")) and list(parc["tsv"].glob("gguf-chemins.tsv.avant-*"))
     # second passage : plus rien à corriger, verdicts OK/REFUS seulement
