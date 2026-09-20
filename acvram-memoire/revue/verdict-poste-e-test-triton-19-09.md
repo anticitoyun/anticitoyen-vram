@@ -1,0 +1,10 @@
+# Verdict — poste E, `test_attn_paginee::test_triton_egale_le_noyau_cuda_actuel` faux sur main (poste7, file (4)) : **le test est faux, pas le noyau** — à `lens [37, 0, 300]`, (séquence 0, tête 15) : Triton à **0,943 × la borne** de la référence fp64, CUDA à **0,887 ×**, de part et d'autre → **1,829 × la borne entre eux** ; aucun des deux n'est hors tolérance contre la référence (0/32) ; `[2048, 17]` : 3-4 têtes sur 32 entre eux (pire 1,42), 0 contre la référence
+
+instrument : `scratchpad/c5b-19-09/diag-poste-e.py` (le critère du test lui-même, `_hors` : écart max sur `dim` > 2⁻⁸ × max|ref| par (séquence, tête), appliqué Triton/CUDA, Triton/réf, CUDA/réf, avec `_reference(window=)` pour la fenêtre), prise `carte.sh` 03:45, arbre poste2 (main 28441096 + verdicts), `paged_attention` Triton (poste E) contre `ext.paged_attention` CUDA
+scellé (poste7, avant) : « quelle séquence, quel élément » ; hypothèses : Triton faux, CUDA faux, ou le juge
+mesuré : `[37, 0, 300]` fenêtre 0 et 100 : **hors 1/32, pire 1,829 à (séq 0, tête 15), tri/ref 0,943, cuda/ref 0,887, hors vs réf : tri 0, cuda 0, max|ref| 0,5465** ; `[2048, 17]` : hors 3/32 (fenêtre 0) et 4/32 (100), pire 1,422 à (séq 1, tête 12), tri/ref 0,714, cuda/ref 0,706, hors vs réf 0 et 0 ; `[1]` : 0/16
+verdict : **juge faux par construction** — deux noyaux chacun à ≤ 1 × TOL de la référence peuvent être à 2 × TOL l'un de l'autre ; le test exige Triton = CUDA à 1 × TOL et échoue dès qu'ils arrondissent de côtés opposés sur une tête où la référence est petite (max|ref| 0,55) ; **Triton et CUDA sont tous deux justes** (0 hors contre fp64 sur les six cas). Correctif : comparer chacun à la référence (ce que font déjà `test_la_sortie_suit_la_reference_a_2_moins_8` et les bras qui cassent) ou borner Triton/CUDA à 2 × TOL — et dire pourquoi dans le test
+suite : poste1 (poste E) : le correctif ci-dessus, 3 lignes, avec la raison ; chef : indexer ; poste7 : ligne « poste E : test faux, noyaux justes » ; ma file : vide — j'attends C15-3c (poste1, ≈ 05:00) ou un ordre ; horloge machine 03:47
+
+## Rejouable
+`ACVRAM_TYPE=mesure outils/carte.sh <python> scratchpad/c5b-19-09/diag-poste-e.py $PWD` (20 s).
