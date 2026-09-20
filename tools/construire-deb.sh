@@ -152,6 +152,10 @@ if [ ! -x "$VENV/bin/acvram" ]; then
         fi
     fi
     pip install --quiet --index-url "$INDEX" torch
+    # 0.6.33 (poste7 20/09 14 h 10) : la tour de vision (Gemma 4, Qwen3-VL) passe par les classes
+    # transformers, version EPINGLEE = celle qui charge gemma4 sur le poste (5.17.0) ; import
+    # paresseux dans acvram/engine/vision.py : un alias texte ne l importe jamais.
+    pip install --quiet "transformers==5.17.0"
     # /usr/share est en lecture seule : construire depuis une copie, sinon
     # setuptools échoue en voulant y écrire acvram.egg-info
     COPIE="$BASE/src"
