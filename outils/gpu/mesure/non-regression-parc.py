@@ -1,57 +1,85 @@
-"""Non-regression du parc : ca charge, et ca produit du texte coherent.
+"""Non-régression du parc, par alias (S2, poste7-tests-rapides-cloture-20-09 § 2 M2).
 
-Le critere est DUR — chargement, exil inattendu, charabia, plantage — pas un
-debit. A ce stade nous cherchons des regressions visibles, pas des dixiemes de
-pourcent. Et un test de texte AFFICHE le texte : un detecteur de charabia qui
-juge a notre place a deja menti une fois.
+Le critère est DUR — chargement, exil inattendu, repli eager, plantage — pas un
+débit. Par alias : chargement au régime servi (lot 12, contexte 2 304, graphes),
+UN jeton décodé au godet 1, puis `torch.cuda.memory_stats` après les piles :
+`inactive_split_bytes` publié comme chiffre, sans seuil (poste7 : « chiffre, pas
+seuil »). Trois issues, toutes écrites : OK / REPLI (annoncé : graphes absents
+ou repli eager, couches ou experts exilés) / ECHEC (exception, avec sa classe).
+Aucun texte de modèle sur la sortie standard (REGLES § 6) : l'identifiant du
+jeton va dans le JSON.
+
+    python non-regression-parc.py <alias> <sortie.json> [famille]
+
+Racine du parc : ACVRAM_MODELES (outils/racine_modeles.py), jamais un chemin
+en dur — le parc a changé de disque le 20/09.
 """
-import os, sys, torch
-sys.path.insert(0, "~/Bureau/Claude/anticitoyen-vram")
+import json, os, sys, time, torch
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+from outils.racine_modeles import MODELES
 from acvram.engine.loader import load_model
 from acvram.engine.runner import Engine
 from acvram.engine.sampler import SamplingParams
 from acvram.server.chat import load_tokenizer
 from acvram.engine.layers import QuantLinear
-A = "/mnt/2TO_2023_980PRO/Modeles/models_acvram"
-nom, famille = sys.argv[1], sys.argv[2]
-INVITE = "Explique en une phrase ce qu'est la photosynthese."
+
+nom, sortie = sys.argv[1], sys.argv[2]
+famille = sys.argv[3] if len(sys.argv) > 3 else "-"
+LOT, CTX = 12, 2304                                # le régime des cellules servies (serve --max-batch 12 --max-model-len 2304)
+INVITE = "Explique en une phrase ce qu'est la photosynthèse."
+GIO = 2.0 ** 30
+
+
+def memoire(etape):
+    s = torch.cuda.memory_stats(); libre, total = torch.cuda.mem_get_info()
+    g = lambda k: s.get(k, 0) / GIO
+    return {"etape": etape, "alloue_gio": round(g("allocated_bytes.all.current"), 3),
+            "reserve_gio": round(g("reserved_bytes.all.current"), 3),
+            "inactive_split_gio": round(g("inactive_split_bytes.all.current"), 3),
+            "inactive_split_petit_gio": round(g("inactive_split_bytes.small_pool.current"), 3),
+            "inactive_split_grand_gio": round(g("inactive_split_bytes.large_pool.current"), 3),
+            "segments": int(s.get("segment.all.current", 0)), "libre_carte_gio": round(libre / GIO, 3)}
+
+
+res = {"alias": nom, "famille": famille, "racine": MODELES, "lot": LOT, "ctx": CTX, "verdict": None}
+t0 = time.time()
 try:
-    charge = load_model(os.path.join(A, nom), max_model_len=2048)
-    tok = load_tokenizer(os.path.join(A, nom))
-    exiles = sum(1 for m in charge.model.modules()
-                 if isinstance(m, QuantLinear) and m.streamed is not None)
-    mot = Engine(charge, tok, max_batch_size=2, max_model_len=2048)
+    chemin = os.path.join(MODELES, nom)
+    charge = load_model(chemin, max_model_len=CTX, max_concurrent_seqs=LOT)
+    tok = load_tokenizer(chemin)
+    res["exiles"] = sum(1 for m in charge.model.modules() if isinstance(m, QuantLinear) and m.streamed is not None)
+    res["memoire_chargement"] = memoire("apres chargement")
+    mot = Engine(charge, tok, max_batch_size=LOT, max_model_len=CTX)
     g = getattr(mot, "graphs", None)
-    graphes = bool(getattr(g, "enabled", False))
-    # LE GABARIT DE CHAT, sans quoi on mesure « pas de gabarit » et non une
-    # regression : une invite brute a temperature 0 fait boucler ou deriver
-    # n importe quel modele d instruction. Premier essai sans lui : deux
-    # modeles sur quatre rendaient du charabia.
-    gabarit = "brut"
-    # Le garde testait `chat_template`, que notre enveloppe `Tokenizer`
-    # n a pas — alors qu elle a bien `apply_chat_template`. Attribut
-    # voisin de celui qui decide : troisieme fois aujourd hui.
+    res["graphes"] = bool(getattr(g, "enabled", False))
     if tok is not None and hasattr(tok, "apply_chat_template"):
-        # `apply_chat_template` de notre enveloppe rend du TEXTE, pas des
-        # identifiants — il faut encoder derriere.
-        ids = tok.encode(tok.apply_chat_template(
-            [{"role": "user", "content": INVITE}], True))
-        gabarit = "chat"
+        ids = tok.encode(tok.apply_chat_template([{"role": "user", "content": INVITE}], True)); res["gabarit"] = "chat"
     elif tok is not None:
-        ids = tok.encode(INVITE)
+        ids = tok.encode(INVITE); res["gabarit"] = "brut"
     else:
-        ids = [1, 2, 3, 4, 5, 6, 7, 8]
-    mot.add_request(ids, SamplingParams(temperature=0.0, max_tokens=40),
-                    request_id="r0")
+        ids = [1, 2, 3, 4, 5, 6, 7, 8]; res["gabarit"] = "aucun"
+    mot.add_request(ids, SamplingParams(temperature=0.0, max_tokens=1), request_id="r0")
     produits = []
-    for _ in range(64):
+    for _ in range(8):
         for s in (mot.step() or []):
             produits.extend(list(getattr(s, "token_ids", ()) or []))
         if not mot.running and not mot.waiting: break
-    texte = tok.decode(produits) if tok and produits else "(pas de tokenizer)"
-    print(f"{famille}\t{nom}\texil {exiles}\tgraphes {'oui' if graphes else 'NON'}\t"
-          f"{len(produits)} jetons\tgabarit {gabarit}\tOK")
-    print(f"    >>> {texte[:220]!r}")
+    torch.cuda.synchronize()
+    res["jetons"] = len(produits); res["jeton_id"] = produits[:1]
+    reg = mot.regime()                                  # état VIVANT après le pas (graphes retombe à False si une capture a échoué)
+    res["graphes"] = bool(reg.get("graphes")); res["repli_eager"] = int(reg.get("repli_eager", 0))
+    res["eager_raisons"] = list(reg.get("replis_eager_raisons", [])); res["regime"] = mot.regime_ligne()
+    res["memoire_piles"] = memoire("apres un jeton (piles construites)")
+    res["t_s"] = round(time.time() - t0, 1)
+    repli = (not res["graphes"]) or res["repli_eager"] > 0 or bool(res["eager_raisons"]) or res["exiles"] > 0 or res["jetons"] != 1
+    res["verdict"] = "REPLI" if repli else "OK"
 except Exception as exc:                                   # noqa: BLE001
     import traceback; traceback.print_exc()
-    print(f"{famille}\t{nom}\tECHEC\t{type(exc).__name__}: {str(exc)[:120]}")
+    res["verdict"] = "ECHEC"; res["exception"] = f"{type(exc).__name__}: {str(exc)[:160]}"; res["t_s"] = round(time.time() - t0, 1)
+json.dump(res, open(sortie, "w"), indent=1)
+m = res.get("memoire_piles") or {}
+print(f"RESULTAT\t{famille}\t{nom}\t{res['verdict']}\texil {res.get('exiles', '?')}\tgraphes {'oui' if res.get('graphes') else 'NON'}\t"
+      f"eager {res.get('eager_raisons', '?')}\tjetons {res.get('jetons', '?')}\t"
+      f"inactive_split {m.get('inactive_split_gio', '?')} Gio (petit {m.get('inactive_split_petit_gio', '?')}, grand {m.get('inactive_split_grand_gio', '?')})\t"
+      f"reserve {m.get('reserve_gio', '?')} alloue {m.get('alloue_gio', '?')}\t{res['t_s']} s" + (f"\t{res['exception']}" if 'exception' in res else ""))
+sys.exit(0 if res["verdict"] == "OK" else 2 if res["verdict"] == "REPLI" else 1)
