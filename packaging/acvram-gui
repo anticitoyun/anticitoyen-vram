@@ -111,9 +111,11 @@ def logo_data_uri() -> str:
 LOGO = logo_data_uri()
 
 # Quatre propositions de mise en page du logo (demande utilisateur, 20/09) :
-# l'utilisateur choisit dans le menu « Thème » de la barre, le choix est
-# mémorisé dans ~/.config/acvram/theme ; « bandeau » tant qu'il n'a pas choisi.
+# l'utilisateur a choisi « A + B » (20/09) : bandeau en tête ET arrière-plan
+# voilé ; les autres restent dans le menu « Thème », choix mémorisé dans
+# ~/.config/acvram/theme.
 THEMES = {
+    "ab": "A + B · bandeau en tête + arrière-plan voilé (choix utilisateur 20/09)",
     "bandeau": "A · bandeau en tête (fond uni)",
     "fond": "B · logo en arrière-plan plein écran, voile sombre",
     "filigrane": "C · filigrane en bas à droite",
@@ -126,9 +128,9 @@ def theme_courant() -> str:
     try:
         with open(FICHIER_THEME, encoding="utf-8") as fh:
             t = fh.read().strip()
-        return t if t in THEMES else "bandeau"
+        return t if t in THEMES else "ab"
     except OSError:
-        return "bandeau"
+        return "ab"
 
 
 THEME = theme_courant()
@@ -139,7 +141,7 @@ def css_theme() -> str:
     if not LOGO:
         return ""
     u = f"url('{LOGO}')"
-    if THEME == "fond":
+    if THEME in ("fond", "ab"):
         return (f"body{{background:linear-gradient(rgba(18,10,16,.55),rgba(18,10,16,.8)),{u} center/cover fixed no-repeat}}"
                 ".carte{background:rgba(28,16,24,.82);backdrop-filter:blur(2px)}")
     if THEME == "filigrane":
@@ -154,7 +156,7 @@ def css_theme() -> str:
 
 
 def html_bandeau() -> str:
-    if not LOGO or THEME != "bandeau":
+    if not LOGO or THEME not in ("bandeau", "ab"):
         return ""
     return (f'<div style="margin:-28px -28px 16px;height:170px;background:url(\'{LOGO}\') center 30%/cover no-repeat;'
             'border-bottom:1px solid var(--bord);position:relative">'
