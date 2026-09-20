@@ -362,12 +362,13 @@ def test_moe_glue_temoin_qui_casse(monkeypatch):
     assert torch.equal(y_vrai, y_ref) and not torch.equal(y_faux, y_ref)
 
 
-def test_le_defaut_est_le_niveau_1():
-    """poste7-c15-niveaux-20-09 § Ordre 04 h 20 : niveau 1 tenu sur carte (verdict-c15) → défaut ;
-    la table de régime et le module lisent le même défaut ; 2 reste opt-in."""
+def test_le_defaut_est_le_niveau_2():
+    """0.6.32 : niveau 2 tenu sur carte (M3 2a-bis 4/4, poste2 9ee0c00a) → défaut ; la table de régime,
+    le module et la ligne lisent le même défaut ; 1 = témoin nommé."""
     from pathlib import Path
     from acvram import regime
     v = {x.env: x for x in regime.VARIABLES}["ACVRAM_MLA_GLUE"]
-    assert v.defaut == "1" and v.torch == "0"
+    assert v.defaut == "2" and v.torch == "0"
     src = (Path(__file__).resolve().parents[1] / "acvram" / "engine" / "mla.py").read_text()
-    assert 'os.environ.get("ACVRAM_MLA_GLUE", "1")' in src
+    assert 'os.environ.get("ACVRAM_MLA_GLUE", "2")' in src
+    assert M_mla.regime_glue_texte() == {2: "mla_glue=2", 1: "mla_glue=1(temoin)", 0: "mla_glue=0"}[M_mla._MLA_GLUE]

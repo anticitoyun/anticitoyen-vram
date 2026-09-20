@@ -370,7 +370,7 @@ def _mla_core_texte() -> str:
     puis `mla_prep=grille|temoin` (C14-b geste 3)."""
     from . import mla
     txt = mla.regime_coeur_texte()
-    return (f" {txt}" if txt else "") + " " + mla.regime_prep_texte()
+    return (f" {txt}" if txt else "") + " " + mla.regime_prep_texte() + " " + mla.regime_glue_texte()
 
 
 def _eco_texte(e: dict) -> str:
