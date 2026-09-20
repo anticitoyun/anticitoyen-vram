@@ -94,6 +94,17 @@ class ForwardBatch:
     is_prefill: bool
     seq_ids: list[int] = None         # identités des séquences (états GDN)
     gdn_store: dict = None            # {layer_idx: {seq_id: état récurrent}}
+    # Multimodal P1 (poste7-go-multimodal-organisation-20-09 § 2) : par séquence,
+    # None ou liste de (debut, fin, embeds bf16 [fin − debut, hidden]) en
+    # positions absolues de l'invite ; None pour tout le lot = chemin texte
+    # inchangé au bit. Rempli au prefill seulement (jamais au décodage).
+    images: Optional[list] = None
+
+    def images_de(self, i: int) -> list:
+        """Plages (debut, fin) de la séquence i, [] sans image."""
+        if self.images is None or self.images[i] is None:
+            return []
+        return [(d, f) for d, f, *_ in self.images[i]]
 
     @property
     def batch_size(self) -> int:
@@ -548,14 +559,16 @@ class Attention(nn.Module):
                 # aller-retour de quantification sur chaque jeton de prefill, ce
                 # qui est à la fois plus rapide et un peu plus précis.
                 kk, vv = k[start:end], v[start:end]
+            plages = batch.images_de(i)          # [] sans image : masque d'avant
             if compact:
                 a = attention(q[start:end], kk, vv, True, self.scale,
-                              q_offset=offset, window=self.window, n_rep=self.n_rep)
+                              q_offset=offset, window=self.window, n_rep=self.n_rep,
+                              images=plages)
             else:
                 kk = repeat_kv(kk, self.n_rep)
                 vv = repeat_kv(vv, self.n_rep)
                 a = attention(q[start:end], kk, vv, True, self.scale,
-                              q_offset=offset, window=self.window)
+                              q_offset=offset, window=self.window, images=plages)
             if une_seq:
                 out = a
             else:
@@ -3122,6 +3135,34 @@ class DecoderLayerGemma(nn.Module):
                 m.prefetch()
 
 
+def disperser_images(x: torch.Tensor, batch: ForwardBatch) -> torch.Tensor:
+    """Remplace, ligne à ligne, l'embedding des jetons image par les traits de
+    la tour de vision (multimodal P1, un seul site d'embedding).
+
+    La séquence i occupe les lignes [r, r + query_lens[i]) de ``x`` pour les
+    positions absolues [seq_lens[i] − query_lens[i], seq_lens[i]) ; une plage
+    [debut, fin) n'est recopiée que sur son intersection avec ce morceau —
+    le prefill par morceaux, ou un préfixe servi par le cache, ne voient
+    qu'une partie de l'image. Formes vérifiées, jamais un décalage muet.
+    """
+    if len(batch.images) != len(batch.query_lens):
+        raise ValueError(f"images : {len(batch.images)} entrées pour "
+                         f"{len(batch.query_lens)} séquences")
+    r = 0
+    for i, qlen in enumerate(batch.query_lens):
+        offset = batch.seq_lens[i] - qlen
+        for d, f, e in (batch.images[i] or []):
+            d, f = int(d), int(f)
+            if e.ndim != 2 or e.shape[0] != f - d or e.shape[1] != x.shape[1]:
+                raise ValueError(f"embeds image [{d}, {f}) : forme {tuple(e.shape)}, "
+                                 f"attendu ({f - d}, {x.shape[1]})")
+            a, b = max(d, offset), min(f, offset + qlen)
+            if a < b:
+                x[r + a - offset: r + b - offset] = e[a - d: b - d].to(x.device, x.dtype)
+        r += qlen
+    return x
+
+
 class ACVRamModel(nn.Module):
     """Le modèle assemblé, ses couches réparties sur plusieurs appareils."""
 
@@ -3162,6 +3203,11 @@ class ACVRamModel(nn.Module):
         x = F.embedding(idx, self.embed_tokens).to(self.dtype)
         if self.spec.embedding_multiplier != 1.0:
             x = x * self.spec.embedding_multiplier
+        if batch.images is not None:
+            # Après le multiplicateur : HF Gemma disperse les traits d'image
+            # dans des embeddings déjà mis à l'échelle (masked_scatter), les
+            # traits eux-mêmes ne sont pas multipliés.
+            x = disperser_images(x, batch)
 
         current = None
         # C15-prefill : résidu différé au préfill eager — (x, delta) d'une couche
