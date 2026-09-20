@@ -252,6 +252,28 @@ def T(s: str, **kw) -> str:
     return r.format(**kw) if kw else r
 
 
+def svg_schema_openwebui() -> str:
+    """Schéma inline (SVG, pas une capture d'écran de la machine) : navigateur → Open WebUI (3000) → acvram (port
+    servi) → modèle sur la carte ; les libellés passent par T() comme le reste de l'onglet."""
+    b, w, a, m = T("Navigateur"), "Open WebUI", "acvram", T("modèle (carte)")
+    port = PORT_DEFAUT
+    def boite(x, titre, sous):
+        return (f'<rect x="{x}" y="22" width="150" height="56" rx="10" fill="var(--carte)" stroke="var(--rose-vif)" stroke-width="1.5"/>'
+                f'<text x="{x + 75}" y="46" text-anchor="middle" font-size="13" font-weight="600" fill="var(--texte)">{titre}</text>'
+                f'<text x="{x + 75}" y="66" text-anchor="middle" font-size="11" fill="var(--texte-2)">{sous}</text>')
+    def fleche(x1, x2, etiquette):
+        return (f'<line x1="{x1}" y1="50" x2="{x2}" y2="50" stroke="var(--rose-vif)" stroke-width="1.5" marker-end="url(#f)"/>'
+                f'<text x="{(x1 + x2) // 2}" y="42" text-anchor="middle" font-size="10" fill="var(--texte-2)">{etiquette}</text>')
+    return ('<svg viewBox="0 0 700 100" width="100%" style="max-width:700px;display:block;margin:8px 0" role="img" '
+            f'aria-label="{b} → Open WebUI → acvram → {m}">'
+            '<defs><marker id="f" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">'
+            '<path d="M0,0 L8,4 L0,8 z" fill="var(--rose-vif)"/></marker></defs>'
+            + boite(10, b, "http://127.0.0.1:3000") + fleche(160, 194, "HTTP")
+            + boite(196, w, T("Réglages → Connexions → OpenAI")) + fleche(346, 380, f"/v1 · {T('clé')} acvram-local")
+            + boite(382, a, f"http://127.0.0.1:{port}/v1") + fleche(532, 566, T("jetons + image"))
+            + boite(568, m, "acvram/acvram 👁") + '</svg>')
+
+
 def dir_html() -> str:
     return ' dir="rtl"' if LANGUE in LANGUES_RTL else ""
 
@@ -563,16 +585,17 @@ def page_accueil(erreur: str = "") -> str:
 <div id="agent" class="onglet">
 <div class="carte">
   <h2>{T("Faire agir le modèle sur le système")}</h2>
-  <p class="note">{T("acvram ne fait que servir le modèle (API OpenAI, port {port}). Pour qu'il lise des fichiers, lance des commandes ou administre la machine, il faut un agent : un programme qui reçoit ses réponses, exécute les outils qu'il demande (shell, fichiers) et lui renvoie le résultat. Exemple ci-dessous : acvram + Qwen3-Coder + OpenClaw sur Ubuntu.", port=PORT_DEFAUT)}</p>
+  <p class="note">{T("acvram ne fait que servir le modèle (API OpenAI, port {port}). Pour discuter avec lui, lui joindre des images ou lui donner des outils, il faut un client : ici Open WebUI, une interface web libre qui parle l'API OpenAI et tourne sur votre machine. Exemple ci-dessous : acvram + Open WebUI sur Ubuntu.", port=PORT_DEFAUT)}</p>
+  {svg_schema_openwebui()}
   <ol>
-    <li>{T("Servir un modèle qui sait appeler des outils (Qwen3-Coder-30B-A3B, GLM-4.7-Flash…) : onglet Serveur, contexte max ≥ 16384, port {port}. acvram transmet les <code>tools</code> de la requête au gabarit du modèle et rend les <code>tool_calls</code> (OpenAI).", port=PORT_DEFAUT)}</li>
-    <li>{T("Installer l'agent : OpenClaw (<code>~/.local/bin/openclaw</code>, Node ≥ 26) ou tout agent compatible OpenAI (Open Interpreter, Aider, Continue…). Il tourne sous <b>votre</b> utilisateur, jamais root.")}</li>
-    <li>{T("Déclarer acvram comme fournisseur de l'agent : <code>openclaw configure</code> → fournisseur personnalisé, API <code>openai-completions</code>, base <code>http://127.0.0.1:{port}/v1</code>, clé quelconque (acvram n'en vérifie pas), modèle <code>acvram</code>, fenêtre de contexte = celle du serveur.", port=PORT_DEFAUT)}</li>
-    <li>{T("Donner les outils système à l'agent : profil d'outils <code>full</code> (shell, fichiers, réseau local) dans <code>openclaw.json</code>, un espace de travail dédié (<code>workspace</code>) où il a le droit d'écrire, et la confirmation demandée avant toute commande destructrice.")}</li>
-    <li>{T("Lancer : <code>openclaw gateway start</code> (service utilisateur) puis <code>openclaw chat</code> (terminal) ou <code>openclaw agent -m \"liste les fichiers de ~/Documents et résume-les\"</code>. Le modèle répond par des appels d'outils, l'agent les exécute sur Ubuntu, le modèle lit les résultats et poursuit.")}</li>
-    <li>{T("Vérifier : <code>openclaw doctor</code> (passerelle, fournisseur, outils) ; dans la console acvram, la ligne de régime du serveur et les requêtes <code>/v1/chat/completions</code> qui arrivent de l'agent.")}</li>
+    <li>{T("Servir un modèle : onglet Serveur, port {port}. Pour les images, choisissez un alias marqué 👁 (tour de vision servie) ; pour les outils, un modèle « instruct » récent (Qwen3-Coder, GLM-4.7-Flash…).", port=PORT_DEFAUT)}</li>
+    <li>{T("Installer et lancer Open WebUI (<code>pip install open-webui</code> dans un environnement Python 3.12, puis <code>open-webui serve --port 3000</code>, ou l'image Docker officielle) : il s'ouvre sur <code>http://127.0.0.1:3000</code> ; le premier compte créé est l'administrateur.")}</li>
+    <li>{T("Brancher acvram : Open WebUI → Réglages → Connexions → OpenAI → ajouter une connexion : URL <code>http://127.0.0.1:{port}/v1</code>, clé <code>acvram-local</code> (acvram ne vérifie pas la clé, mais Open WebUI en exige une). Enregistrer : le modèle <code>acvram/acvram</code> apparaît dans le sélecteur de modèles.", port=PORT_DEFAUT)}</li>
+    <li>{T("Discuter : nouvelle conversation, modèle <code>acvram/acvram</code>. Sur un alias 👁, le trombone joint une image (PNG, JPEG, WebP) : Open WebUI l'envoie en <code>image_url</code>, acvram la passe à la tour de vision et la ligne de régime du serveur dit <code>vision=bf16(eager,…)</code> ; sur un alias texte, la requête est refusée nommément (400 « modèle sans tour de vision »), jamais ignorée.")}</li>
+    <li>{T("Outils et agents : Open WebUI porte ses propres outils (recherche, code, fichiers) ; pour un agent système (shell, fichiers), tout agent compatible OpenAI se branche sur la même URL <code>/v1</code> — il tourne sous <b>votre</b> utilisateur, jamais root.")}</li>
+    <li>{T("Vérifier : dans la console acvram, la ligne de régime du serveur et les requêtes <code>/v1/chat/completions</code> qui arrivent d'Open WebUI ; dans Open WebUI, Réglages → Connexions → « Vérifier la connexion » doit répondre.")}</li>
   </ol>
-  <p class="note">{T("Prudence : un modèle local qui a le shell a tous vos droits. Gardez l'agent sous un utilisateur ordinaire, un espace de travail borné, des sauvegardes, et lisez ce qu'il propose avant d'accepter une commande <code>rm</code>, <code>sudo</code> ou un envoi réseau. Un modèle qui n'a pas été entraîné aux outils (chat pur) rendra du texte au lieu d'appels : choisissez un modèle « instruct » récent.")}</p>
+  <p class="note">{T("Prudence : un modèle local qui reçoit des outils a tous vos droits. Gardez l'agent sous un utilisateur ordinaire, un espace de travail borné, des sauvegardes, et lisez ce qu'il propose avant d'accepter une commande <code>rm</code>, <code>sudo</code> ou un envoi réseau. Open WebUI n'écoute que sur 127.0.0.1 par défaut : ne l'exposez pas sans authentification.")}</p>
 </div>
 </div>
 <div id="apropos" class="onglet">
