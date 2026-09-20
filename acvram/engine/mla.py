@@ -204,6 +204,17 @@ _MLA_LATENT_FP8 = os.environ.get("ACVRAM_MLA_LATENT_FP8", "0") == "1"
 # comme le niveau 2, c'est le modèle (GLM nvfp4) qui est instable à la marge, pas le
 # noyau ; sinon le niveau 2 porte autre chose qu'un ordre de somme. Diagnostic seul.
 _MLA_QABS_DEUX_MOITIES = os.environ.get("ACVRAM_MLA_QABS_DEUX_MOITIES", "0") == "1"
+# C14-b (chantier-c14b-19-09, poste7-fiches-c5b-c13c-c14b-20-09 § 3) : sous
+# ACVRAM_MLA_BATCH_FUSION=1, le chemin par lot (decode_static_batch_complet)
+# demande à mla_decode_1p de rendre y = v_b·o_lat en bf16 depuis son combine
+# (mla_1p_combine_vb_kernel) : l'einsum 'hvr,bhr->bhv' fp32 — que cuBLAS sert
+# à M=12 par gemmSN_TN, 11,5 µs de latence par couche — et la conversion bf16
+# de sa sortie disparaissent. Même arithmétique (v_b bf16 → fp32 exact, produits
+# et sommes fp32, un arrondi bf16 final) à l'ordre des sommes près : ± quelques
+# ulp fp32, jamais au bit — juge ppl-decode-kv au lot de 12 ± 0,002 (REGLES
+# § 4 bis). Pris seulement sous MLA_CORE_DECODE=fp32 (le noyau ne sait pas
+# tf32/bf16) et sortie bf16. Défaut 0 tant que ce n'est pas mesuré.
+_MLA_BATCH_FUSION = os.environ.get("ACVRAM_MLA_BATCH_FUSION", "0") == "1"
 FP8_PAD = 16
 
 
@@ -246,6 +257,16 @@ def _mla_decode_batch(ext, q, cache_ptrs, lens, scores, bucket, rank, scale, fp8
     if (_MLA_UNE_PASSE or fp8) and hasattr(ext, "mla_decode_1p"):
         return ext.mla_decode_1p(q, cache_ptrs, None, lens, bucket, rank, scale, fp8)
     return ext.mla_decode_batch(q, cache_ptrs, lens, scores, bucket, rank, scale)
+
+
+def _fusion_vb_possible(ext, x: torch.Tensor, v_b: torch.Tensor, fp8: bool) -> bool:
+    """C14-b : le combine fusionné (v_b dans mla_decode_1p) s'applique quand il est demandé
+    (ACVRAM_MLA_BATCH_FUSION=1), que le noyau à une passe est le chemin pris, que v_b est bf16
+    (le noyau le convertit exactement en fp32 : ce que lisait _v_b32), que la sortie est bf16
+    et que le régime du cœur au décodage est fp32 (le noyau n'a ni tf32 ni bf16)."""
+    return (_MLA_BATCH_FUSION and (_MLA_UNE_PASSE or fp8) and ext is not None
+            and hasattr(ext, "mla_decode_1p") and v_b.dtype == torch.bfloat16
+            and x.dtype == torch.bfloat16 and _regime_coeur(decode=True) == "fp32")
 
 
 def _refuser_en_capture(quoi: str) -> None:
@@ -697,7 +718,7 @@ class MLAttention(nn.Module):
         décodage crée paresseusement — k_b contigu, v_b fp32, tables RoPE fp32 et demi-tables.
         Idempotent ; à appeler avant toute capture (graphs.py le fait avec `reserver`)."""
         if self.k_b.device.type == "cuda":
-            self._k_b_c(); self._v_b32()
+            self._k_b_c(); self._v_b32(); self._v_b_c()
         if self.rope_emb is not None:
             self.rope_emb.reserver(max_pos, device, self.k_b.dtype)
 
@@ -731,6 +752,14 @@ class MLAttention(nn.Module):
         if vb is None or vb.device != self.v_b.device:
             _refuser_en_capture("v_b fp32")
             vb = self.__dict__["_v_b32_cache"] = self.v_b.detach().to(torch.float32).contiguous()
+        return vb
+
+    def _v_b_c(self) -> torch.Tensor:
+        """``v_b`` [nh, dv, rank] bf16 contigu, une fois (C14-b : le combine fusionné le lit tel quel)."""
+        vb = self.__dict__.get("_v_b_c_cache")
+        if vb is None or vb.device != self.v_b.device:
+            _refuser_en_capture("v_b contigu")
+            vb = self.__dict__["_v_b_c_cache"] = self.v_b.detach().contiguous()
         return vb
 
     def decode_static_batch_complet(self, x: torch.Tensor, sts: list, bucket: int,
@@ -787,6 +816,14 @@ class MLAttention(nn.Module):
                 self._ecrit_ligne(st, k_new[i:i + 1])
         if _MLA_PREP_TEMOIN and "_temoin" in self.__dict__:
             self._temoin_prep({"q_eff_avant_attn": q_eff, "lens_avant_attn": lens})
+        if _fusion_vb_possible(ext, x, self.v_b, fp8):
+            # C14-b : attention + combine + v_b·o_lat en deux lancements, y bf16 [B, nh, dv]
+            y = ext.mla_decode_1p(q_eff.contiguous(), cache_ptrs, None, lens, bucket, self.rank,
+                                  self.scale, fp8, self._v_b_c())
+            if not un_lancement:
+                for st in sts:
+                    st["len"].add_(1)
+            return self._o(y.reshape(B, self.nh * self.dv))
         o_lat = _mla_decode_batch(ext, q_eff.contiguous(), cache_ptrs, lens,
                                   scores_batch, bucket, self.rank, self.scale, fp8)  # [B, nh, rank]
         if _MLA_PREP_TEMOIN and "_temoin" in self.__dict__:

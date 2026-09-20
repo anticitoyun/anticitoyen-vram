@@ -6105,6 +6105,117 @@ __global__ void __launch_bounds__(MLA1P_CMB_FILS) mla_1p_combine_kernel(
     }
 }
 
+// C14-b (chantier-c14b-19-09, poste7-fiches-c5b-c13c-c14b-20-09 § 3) : combine
+// + v_b en UN lancement — y[b,h,v] = Σ_r v_b[h,v,r]·o_lat[b,h,r], écrit en
+// bf16 [B, H, DV]. Remplace, par couche, l'einsum 'hvr,bhr->bhv' fp32 que
+// cuBLAS sert à M=12 par gemmSN_TN (SIMT, 11,5 µs de latence pour 63 MFLOP)
+// et la conversion bf16 de sa sortie. Un bloc par (b, h) : les R colonnes
+// d'o_lat sont combinées par morceaux de CH (même arithmétique que
+// mla_1p_combine_kernel, colonne par colonne : acc·inv) dans o_sh, puis
+// chaque warp fait DV/8 lignes de v_b : la voie lit 8 bf16 contigus (uint4)
+// tous les 256 r, produit fp32 (les bf16 de v_b convertis exactement — ce
+// que lisait _v_b32), somme par arbre de shuffles ; bf16 par arrondi au plus
+// proche = le .to(bf16) de torch sur le fp32 de l'einsum. Ordre des sommes ≠
+// cuBLAS : ± quelques ulp fp32 avant l'arrondi bf16, jamais au bit (juge :
+// ppl-decode-kv au lot de 12 ± 0,002 et test carte ≤ 4 ulp fp32 contre
+// l'einsum ; REGLES § 4 bis). Octets : v_b bf16 128 Kio par (b, h), 20 × 12
+// = 240 blocs lisent 2,6 Mo uniques par couche (L2 pour les 12 b).
+constexpr int MLA1P_R_MAX = 2 * MLA1P_FILS;      // R ≤ 512 (borne du lanceur) : o_sh
+template <int SL>
+__global__ void __launch_bounds__(MLA1P_CMB_FILS) mla_1p_combine_vb_kernel(
+        const float *__restrict__ ws,            // [B, S, H, R+2]
+        const __nv_bfloat16 *__restrict__ v_b,   // [H, DV, R]
+        __nv_bfloat16 *__restrict__ y,           // [B, H, DV]
+        int H, int R, int S, int DV) {
+    constexpr int CH = MLA1P_CMB_FILS / SL;
+    __shared__ float w_s[MLA1P_S_MAX];
+    __shared__ float red[MLA1P_CMB_FILS / 32];
+    __shared__ float part[SL][CH];
+    __shared__ __align__(16) float o_sh[MLA1P_R_MAX];
+    const int bh = blockIdx.x, tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    const int sl = tid / CH, cc = tid % CH;
+    const int b = bh / H, h = bh - b * H;
+    const float *base = ws + ((size_t)b * S * H + h) * (R + 2);
+    const size_t pas = (size_t)H * (R + 2);
+    // --- M, w_s, Lsum : à l'identique de mla_1p_combine_kernel ---
+    float mloc = -INFINITY;
+    for (int s = tid; s < S; s += MLA1P_CMB_FILS) mloc = fmaxf(mloc, base[s * pas + R]);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) mloc = fmaxf(mloc, __shfl_xor_sync(0xffffffffu, mloc, off));
+    if (lane == 0) red[warp] = mloc;
+    __syncthreads();
+    float M = red[0];
+    #pragma unroll
+    for (int w = 1; w < MLA1P_CMB_FILS / 32; ++w) M = fmaxf(M, red[w]);
+    __syncthreads();
+    float lloc = 0.f;
+    for (int s = tid; s < S; s += MLA1P_CMB_FILS) {
+        const float m = base[s * pas + R];
+        const float w = m != -INFINITY ? __expf(m - M) : 0.f;
+        w_s[s] = w;
+        lloc += base[s * pas + R + 1] * w;
+    }
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) lloc += __shfl_xor_sync(0xffffffffu, lloc, off);
+    if (lane == 0) red[warp] = lloc;
+    __syncthreads();
+    float Lsum = 0.f;
+    #pragma unroll
+    for (int w = 0; w < MLA1P_CMB_FILS / 32; ++w) Lsum += red[w];
+    const float inv = Lsum > 0.f ? 1.f / Lsum : 0.f;
+    // --- o_sh[col] = (Σ_s o_s[col]·w_s)·inv, par morceaux de CH colonnes ---
+    for (int c0 = 0; c0 < R; c0 += CH) {
+        const int col = c0 + cc;
+        float acc = 0.f;
+        if (col < R) {
+            const float *oc = base + col;
+            int s = sl;
+            for (; s + 7 * SL < S; s += 8 * SL) {
+                float v[8];
+                #pragma unroll
+                for (int k = 0; k < 8; ++k) v[k] = oc[(size_t)(s + k * SL) * pas];
+                #pragma unroll
+                for (int k = 0; k < 8; ++k) acc += v[k] * w_s[s + k * SL];
+            }
+            for (; s < S; s += SL) acc += oc[(size_t)s * pas] * w_s[s];
+        }
+        if (SL == 1) {
+            if (col < R) o_sh[col] = acc * inv;
+        } else {
+            part[sl][cc] = acc;
+            __syncthreads();
+            if (tid < CH && col < R) {
+                float t = 0.f;
+                #pragma unroll
+                for (int k = 0; k < SL; ++k) t += part[k][tid];
+                o_sh[col] = t * inv;
+            }
+            __syncthreads();                            // part réutilisé au morceau suivant
+        }
+    }
+    __syncthreads();
+    // --- y[b,h,v] = Σ_r v_b[h,v,r]·o_sh[r] : une ligne de v_b par warp ---
+    const __nv_bfloat16 *vb = v_b + (size_t)h * DV * R;
+    for (int v = warp; v < DV; v += MLA1P_CMB_FILS / 32) {
+        const __nv_bfloat16 *row = vb + (size_t)v * R;
+        float p = 0.f;
+        for (int r = lane * 8; r < R; r += 256) {
+            const uint4 u = *reinterpret_cast<const uint4 *>(row + r);
+            const __nv_bfloat162 *p2 = reinterpret_cast<const __nv_bfloat162 *>(&u);
+            const float4 o0 = *reinterpret_cast<const float4 *>(o_sh + r);
+            const float4 o1 = *reinterpret_cast<const float4 *>(o_sh + r + 4);
+            float2 f;
+            f = __bfloat1622float2(p2[0]); p += f.x * o0.x; p += f.y * o0.y;
+            f = __bfloat1622float2(p2[1]); p += f.x * o0.z; p += f.y * o0.w;
+            f = __bfloat1622float2(p2[2]); p += f.x * o1.x; p += f.y * o1.y;
+            f = __bfloat1622float2(p2[3]); p += f.x * o1.z; p += f.y * o1.w;
+        }
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) p += __shfl_xor_sync(0xffffffffu, p, off);
+        if (lane == 0) y[((size_t)b * H + h) * DV + v] = __float2bfloat16(p);
+    }
+}
+
 // Nombre de SM de la carte courante (lu une fois par carte) : la grille de
 // mla_1p se dimensionne dessus, pas sur une constante.
 static int mla_1p_sm_count() {
@@ -6178,7 +6289,8 @@ static int mla_1p_tranches_fin(int L, int B, int G) {
 
 torch::Tensor mla_decode_1p(torch::Tensor q_eff, c10::optional<torch::Tensor> cache_ptrs,
                             c10::optional<torch::Tensor> cache, torch::Tensor lens,
-                            int64_t L, int64_t rank, double scale, bool fp8) {
+                            int64_t L, int64_t rank, double scale, bool fp8,
+                            c10::optional<torch::Tensor> v_b) {
     CHECK_CUDA(q_eff); ACVRAM_DEVICE_GUARD(q_eff); CHECK_CONTIG(q_eff); CHECK_CONTIG(lens);
     TORCH_CHECK(q_eff.dim() == 3 && q_eff.scalar_type() == torch::kFloat, "MLA 1p : q_eff [B, H, W] fp32");
     const int B = q_eff.size(0), H = q_eff.size(1), W = q_eff.size(2), R = (int)rank;
@@ -6218,7 +6330,19 @@ torch::Tensor mla_decode_1p(torch::Tensor q_eff, c10::optional<torch::Tensor> ca
     const int S = fin ? mla_1p_tranches_fin((int)L, B, G) : mla_1p_tranches((int)L, TL, B);
     const int rows = ((((int)L + S - 1) / S) + TL - 1) / TL * TL;
     auto ws = torch::empty({(long)B * S * H * (R + 2)}, q_eff.options());
-    auto o = torch::empty({B, H, (long)rank}, q_eff.options());
+    // C14-b : avec v_b [H, DV, R] bf16, le combine rend y = v_b·o_lat en bf16
+    // [B, H, DV] (mla_1p_combine_vb_kernel) au lieu d'o_lat fp32 [B, H, R].
+    const bool fusion = v_b.has_value() && v_b->defined();
+    int DV = 0;
+    if (fusion) {
+        CHECK_CONTIG(*v_b);
+        TORCH_CHECK(v_b->dim() == 3 && v_b->size(0) == H && v_b->size(2) == R && v_b->scalar_type() == torch::kBFloat16,
+                    "MLA 1p fusion : v_b [H, DV, R] bf16 contigu");
+        TORCH_CHECK(R % 8 == 0 && R <= MLA1P_R_MAX, "MLA 1p fusion : R multiple de 8 et <= 512");
+        DV = (int)v_b->size(1);
+    }
+    auto o = fusion ? torch::empty({B, H, (long)DV}, q_eff.options().dtype(torch::kBFloat16))
+                    : torch::empty({B, H, (long)rank}, q_eff.options());
     auto stream = at::cuda::getCurrentCUDAStream();
     // shared d'un bloc : q de ses Hb ≤ HMAX têtes, tuile de TL lignes de (W+8)
     // bf16 (en fp8 TL lignes de (W+16) octets, plus petite), S/P, m/l/a,
@@ -6250,6 +6374,20 @@ torch::Tensor mla_decode_1p(torch::Tensor q_eff, c10::optional<torch::Tensor> ca
     // b=12, S=8 : SL=1, CH=256, 480 blocs (240 de 128 fils avant).
     const int SL = S >= 64 ? 8 : S >= 32 ? 4 : S >= 16 ? 2 : 1;
     const int CH = MLA1P_CMB_FILS / SL;
+    if (fusion) {
+        // C14-b : un bloc par (b, h), les R colonnes puis v_b — b=12, H=20 : 240 blocs
+        const float *w = ws.data_ptr<float>();
+        const __nv_bfloat16 *vb = reinterpret_cast<const __nv_bfloat16 *>(v_b->data_ptr());
+        __nv_bfloat16 *yy = reinterpret_cast<__nv_bfloat16 *>(o.data_ptr());
+        switch (SL) {
+            case 8:  mla_1p_combine_vb_kernel<8><<<B * H, MLA1P_CMB_FILS, 0, stream>>>(w, vb, yy, H, R, S, DV); break;
+            case 4:  mla_1p_combine_vb_kernel<4><<<B * H, MLA1P_CMB_FILS, 0, stream>>>(w, vb, yy, H, R, S, DV); break;
+            case 2:  mla_1p_combine_vb_kernel<2><<<B * H, MLA1P_CMB_FILS, 0, stream>>>(w, vb, yy, H, R, S, DV); break;
+            default: mla_1p_combine_vb_kernel<1><<<B * H, MLA1P_CMB_FILS, 0, stream>>>(w, vb, yy, H, R, S, DV); break;
+        }
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+        return o;
+    }
     dim3 g2(B * H, (R + CH - 1) / CH);
     switch (SL) {
         case 8:  mla_1p_combine_kernel<8><<<g2, MLA1P_CMB_FILS, 0, stream>>>(ws.data_ptr<float>(), o.data_ptr<float>(), H, R, S); break;
@@ -6278,8 +6416,128 @@ torch::Tensor mla_decode_1p(torch::Tensor q_eff, c10::optional<torch::Tensor> ca
 // Grille 1D : nh × (rank/64) blocs pour q (un bloc = 64 lignes de k_b[h] pour
 // tous les b ; les blocs de première tranche tournent aussi q_pe), puis B
 // blocs pour k_new (norme + RoPE d'un créneau).
-constexpr int MLAP_FILS = 256, MLAP_LIGNES = 64;
+//
+// C14-b (chantier-c14b-19-09 « Fait le 20/09 ») : cette grille faisait 172
+// blocs de 256 fils pour 170 SM à b=12 (un bloc par SM, 8 warps), chaque fil
+// lisant ses 32 bf16 de k_b un par un, à foulée 4, depuis la mémoire globale
+// (L1 après le premier b) — 20,6 µs par couche pour 2,6 Mo : latence, pas
+// débit. Le noyau ci-dessous garde la MÊME arithmétique par (b, r) (même fil
+// (r, quart), même ordre de somme sur n, mêmes deux shuffles) et change deux
+// choses : (1) la tuile k_b[h][r0..r0+64] est chargée UNE fois en shared par
+// lectures uint4 coalescées (rangées rembourrées à nope+8 : 8 rangées d'un
+// warp sur des banques distinctes), les produits lisent la shared ; (2) les B
+// créneaux sont découpés en groupes de MLAP_BG (4) : grille nh·NR·⌈B/BG⌉ + B
+// = 492 blocs à b=12 (≈ 3 par SM, 24 warps), 172 inchangés à b=1. Le noyau
+// d'avant reste sous `temoin=True` (mla_prep_batch_temoin_kernel) : le test
+// carte compare les deux au bit.
+constexpr int MLAP_FILS = 256, MLAP_LIGNES = 64, MLAP_BG = 4;
 __global__ void __launch_bounds__(MLAP_FILS) mla_prep_batch_kernel(
+    const __nv_bfloat16 *__restrict__ q,       // [B, nh, nope+rope]
+    const __nv_bfloat16 *__restrict__ kvp,     // [B, rank+rope]
+    const long *__restrict__ lens,             // [B] positions
+    const float *__restrict__ cos32,           // [max_pos, rope] (nullptr : pas de RoPE)
+    const float *__restrict__ sin32,
+    const __nv_bfloat16 *__restrict__ k_b,     // [nh, rank, nope]
+    const __nv_bfloat16 *__restrict__ w_norm,  // [rank]
+    float *__restrict__ q_eff,                 // [B, nh, rank+rope] fp32
+    __nv_bfloat16 *__restrict__ k_new,         // [B, rank+rope]
+    int B, int nh, int nope, int rope, int rank, float eps, int GB) {
+    extern __shared__ __align__(16) unsigned char mlap_smem[];
+    const int W = rank + rope, QW = nope + rope, NR = rank / MLAP_LIGNES;
+    const int tid = threadIdx.x;
+    auto rot = [&](float x0, float x1, float c, float s, float &y0, float &y1) {
+        const float a = __bfloat162float(__float2bfloat16(x0 * c));
+        const float bb = __bfloat162float(__float2bfloat16(x1 * s));
+        const float cc = __bfloat162float(__float2bfloat16(x0 * s));
+        const float d = __bfloat162float(__float2bfloat16(x1 * c));
+        y0 = __bfloat162float(__float2bfloat16(a - bb));
+        y1 = __bfloat162float(__float2bfloat16(cc + d));
+    };
+    if ((int)blockIdx.x < nh * NR * GB) {
+        const int hb = blockIdx.x / GB, g = blockIdx.x - hb * GB;
+        const int h = hb / NR, r0 = (hb - h * NR) * MLAP_LIGNES;
+        const int b0 = g * MLAP_BG, b1 = min(B, b0 + MLAP_BG);
+        const int PADR = nope + 8;                                         // rangée de la tuile (bf16)
+        __nv_bfloat16 *ks = reinterpret_cast<__nv_bfloat16 *>(mlap_smem);   // [64][PADR]
+        float *qn = reinterpret_cast<float *>(mlap_smem + (size_t)MLAP_LIGNES * PADR * sizeof(__nv_bfloat16));  // [BG][nope]
+        // tuile k_b[h][r0 .. r0+64] : 64 × nope/8 uint4, coalescés
+        const int c8 = nope / 8;
+        for (int i = tid; i < MLAP_LIGNES * c8; i += MLAP_FILS) {
+            const int r = i / c8, c = i - r * c8;
+            *reinterpret_cast<uint4 *>(ks + r * PADR + c * 8) =
+                *reinterpret_cast<const uint4 *>(k_b + ((size_t)h * rank + r0 + r) * nope + c * 8);
+        }
+        for (int i = tid; i < (b1 - b0) * nope; i += MLAP_FILS) {
+            const int b = i / nope, n = i - b * nope;
+            qn[i] = __bfloat162float(q[((size_t)(b0 + b) * nh + h) * QW + n]);
+        }
+        __syncthreads();
+        const int r = tid >> 2, quart = tid & 3;                          // 64 lignes × 4 quarts de nope
+        const __nv_bfloat16 *kr = ks + r * PADR;
+        for (int b = b0; b < b1; ++b) {
+            float acc = 0.f;
+            const float *qb = qn + (b - b0) * nope;
+            for (int n = quart; n < nope; n += 4)
+                acc += __bfloat162float(kr[n]) * qb[n];
+            acc += __shfl_xor_sync(0xffffffffu, acc, 1);
+            acc += __shfl_xor_sync(0xffffffffu, acc, 2);
+            if (quart == 0)
+                q_eff[((size_t)b * nh + h) * W + r0 + r] = __bfloat162float(__float2bfloat16(acc));
+        }
+        if (r0 == 0 && cos32 != nullptr) {                                 // q_pe tourné, les b du groupe
+            const int paires = rope / 2;
+            for (int i = tid; i < (b1 - b0) * paires; i += MLAP_FILS) {
+                const int b = b0 + i / paires, j = i - (b - b0) * paires;
+                const long pos = lens[b];
+                const __nv_bfloat16 *src = q + ((size_t)b * nh + h) * QW + nope + 2 * j;
+                float y0, y1;
+                rot(__bfloat162float(src[0]), __bfloat162float(src[1]),
+                    cos32[pos * rope + j], sin32[pos * rope + j], y0, y1);
+                float *dst = q_eff + ((size_t)b * nh + h) * W + rank + 2 * j;
+                dst[0] = y0; dst[1] = y1;
+            }
+        } else if (r0 == 0) {
+            for (int i = tid; i < (b1 - b0) * rope; i += MLAP_FILS) {
+                const int b = b0 + i / rope, j = i - (b - b0) * rope;
+                q_eff[((size_t)b * nh + h) * W + rank + j] =
+                    __bfloat162float(q[((size_t)b * nh + h) * QW + nope + j]);
+            }
+        }
+        return;
+    }
+    // --- k_new[b] : norme kv_a (rmsnorm_bf16 à 256 fils, à l'identique) + RoPE de k_pe ---
+    const int b = blockIdx.x - nh * NR * GB;
+    __shared__ float red[32];
+    const __nv_bfloat16 *xr = kvp + (size_t)b * W;
+    float ss = 0.f;
+    for (int i = tid; i < rank; i += MLAP_FILS) { const float v = __bfloat162float(xr[i]); ss += v * v; }
+    for (int o = 16; o > 0; o >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, o);
+    if ((tid & 31) == 0) red[tid >> 5] = ss;
+    __syncthreads();
+    ss = 0.f;
+    for (int k = 0; k < MLAP_FILS / 32; ++k) ss += red[k];
+    const float rs = rsqrtf(ss / (float)rank + eps);
+    __nv_bfloat16 *out = k_new + (size_t)b * W;
+    for (int i = tid; i < rank; i += MLAP_FILS) {
+        const float n = __bfloat162float(__float2bfloat16(__bfloat162float(xr[i]) * rs));
+        out[i] = __float2bfloat16(n * __bfloat162float(w_norm[i]));
+    }
+    if (cos32 != nullptr) {
+        const long pos = lens[b];
+        for (int j = tid; j < rope / 2; j += MLAP_FILS) {
+            float y0, y1;
+            rot(__bfloat162float(xr[rank + 2 * j]), __bfloat162float(xr[rank + 2 * j + 1]),
+                cos32[pos * rope + j], sin32[pos * rope + j], y0, y1);
+            out[rank + 2 * j] = __float2bfloat16(y0); out[rank + 2 * j + 1] = __float2bfloat16(y1);
+        }
+    } else {
+        for (int j = tid; j < rope; j += MLAP_FILS) out[rank + j] = xr[rank + j];
+    }
+}
+
+// Témoin C14-b : la grille d'avant (nh·NR + B blocs, k_b lu depuis la
+// mémoire globale), inchangée — lancée sous `temoin=True`, comparée au bit.
+__global__ void __launch_bounds__(MLAP_FILS) mla_prep_batch_temoin_kernel(
     const __nv_bfloat16 *__restrict__ q,       // [B, nh, nope+rope]
     const __nv_bfloat16 *__restrict__ kvp,     // [B, rank+rope]
     const long *__restrict__ lens,             // [B] positions
@@ -6374,7 +6632,7 @@ __global__ void __launch_bounds__(MLAP_FILS) mla_prep_batch_kernel(
 std::vector<torch::Tensor> mla_prep_batch(torch::Tensor q, torch::Tensor kvp, torch::Tensor lens,
                                           c10::optional<torch::Tensor> cos32, c10::optional<torch::Tensor> sin32,
                                           torch::Tensor k_b, torch::Tensor w_norm,
-                                          int64_t nope, int64_t rope, int64_t rank, double eps) {
+                                          int64_t nope, int64_t rope, int64_t rank, double eps, bool temoin) {
     CHECK_CUDA(q); ACVRAM_DEVICE_GUARD(q);
     for (auto &z : {q, kvp, lens, k_b, w_norm}) CHECK_CONTIG(z);
     TORCH_CHECK(q.dim() == 3 && q.scalar_type() == torch::kBFloat16 && q.size(2) == nope + rope,
@@ -6398,14 +6656,32 @@ std::vector<torch::Tensor> mla_prep_batch(torch::Tensor q, torch::Tensor kvp, to
     auto q_eff = torch::empty({B, nh, W}, q.options().dtype(torch::kFloat));
     auto k_new = torch::empty({B, W}, q.options());
     const int NR = (int)rank / MLAP_LIGNES;
-    const size_t shm = (size_t)B * nope * sizeof(float);
-    mla_prep_batch_kernel<<<(unsigned)(nh * NR + B), MLAP_FILS, shm, at::cuda::getCurrentCUDAStream()>>>(
+    auto stream = at::cuda::getCurrentCUDAStream();
+    if (temoin) {
+        const size_t shm = (size_t)B * nope * sizeof(float);
+        mla_prep_batch_temoin_kernel<<<(unsigned)(nh * NR + B), MLAP_FILS, shm, stream>>>(
+            reinterpret_cast<const __nv_bfloat16 *>(q.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16 *>(kvp.data_ptr()), lens.data_ptr<long>(), c32, s32,
+            reinterpret_cast<const __nv_bfloat16 *>(k_b.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16 *>(w_norm.data_ptr()),
+            q_eff.data_ptr<float>(), reinterpret_cast<__nv_bfloat16 *>(k_new.data_ptr()),
+            B, nh, (int)nope, (int)rope, (int)rank, (float)eps);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+        return {q_eff, k_new};
+    }
+    // C14-b : tuile k_b [64][nope+8] bf16 + q_nope [BG][nope] fp32 en shared
+    // (nope=128 : 17 408 + 2 048 o), groupes de MLAP_BG créneaux
+    TORCH_CHECK(nope % 8 == 0, "prep MLA : nope multiple de 8 (tuile k_b en uint4)");
+    const int GB = (B + MLAP_BG - 1) / MLAP_BG;
+    const size_t shm = (size_t)MLAP_LIGNES * (nope + 8) * sizeof(__nv_bfloat16) + (size_t)MLAP_BG * nope * sizeof(float);
+    TORCH_CHECK(shm <= 48 * 1024, "prep MLA : shared > 48 Ko (nope trop grand)");
+    mla_prep_batch_kernel<<<(unsigned)(nh * NR * GB + B), MLAP_FILS, shm, stream>>>(
         reinterpret_cast<const __nv_bfloat16 *>(q.data_ptr()),
         reinterpret_cast<const __nv_bfloat16 *>(kvp.data_ptr()), lens.data_ptr<long>(), c32, s32,
         reinterpret_cast<const __nv_bfloat16 *>(k_b.data_ptr()),
         reinterpret_cast<const __nv_bfloat16 *>(w_norm.data_ptr()),
         q_eff.data_ptr<float>(), reinterpret_cast<__nv_bfloat16 *>(k_new.data_ptr()),
-        B, nh, (int)nope, (int)rope, (int)rank, (float)eps);
+        B, nh, (int)nope, (int)rope, (int)rank, (float)eps, GB);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return {q_eff, k_new};
 }
@@ -6948,17 +7224,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("mult") = 1.0);
     m.def("kda_decode", &kda_decode, "KDA : pas de decodage fusionne (une sequence)");
     m.def("mla_decode", &mla_decode, "MLA absorbee : scores + softmax + lecture latente");
-    m.def("mla_prep_batch", &mla_prep_batch,
+    m.def("mla_prep_batch", &mla_prep_batch, py::arg("q"), py::arg("kvp"), py::arg("lens"), py::arg("cos32"),
+          py::arg("sin32"), py::arg("k_b"), py::arg("w_norm"), py::arg("nope"), py::arg("rope"), py::arg("rank"),
+          py::arg("eps"), py::arg("temoin") = false,
           "MLA decodage : q [B,nh,nope+rope] + kvp [B,rank+rope] -> (q_eff [B,nh,W] fp32, k_new [B,W] bf16) : "
-          "einsum k_b, RoPE, norme kv_a et cat en un lancement (cos32/sin32 = tables fp32 indexees par position, ou None)");
+          "einsum k_b, RoPE, norme kv_a et cat en un lancement (cos32/sin32 = tables fp32 indexees par position, ou None) ; "
+          "temoin=True : la grille d'avant C14-b (nh.NR + B blocs), meme sortie au bit");
     m.def("mla_ecrit_latent", &mla_ecrit_latent, py::arg("k_new"), py::arg("cache_ptrs"), py::arg("len_ptrs"),
           py::arg("fp8") = false,
           "MLA decodage : k_new [B, W] -> cache_b[len_b], puis len_b += 1, un lancement pour les B creneaux (tables d'adresses [B])");
     m.def("mla_decode_1p", &mla_decode_1p, py::arg("q_eff"), py::arg("cache_ptrs") = py::none(),
           py::arg("cache") = py::none(), py::arg("lens"), py::arg("L"), py::arg("rank"), py::arg("scale"),
-          py::arg("fp8") = false,
+          py::arg("fp8") = false, py::arg("v_b") = py::none(),
           "MLA absorbee a UNE PASSE (poste7-duel-verdict-16-09) : le cache latent lu une fois pour les H tetes, "
-          "softmax en ligne, tranches de L recombinees -> o_lat [B, H, rank] fp32 ; cache_ptrs [B] int64 ou cache [L, W] (B = 1)");
+          "softmax en ligne, tranches de L recombinees -> o_lat [B, H, rank] fp32 ; cache_ptrs [B] int64 ou cache [L, W] (B = 1) ; "
+          "avec v_b [H, DV, rank] bf16 (C14-b) : le combine rend y = v_b . o_lat en bf16 [B, H, DV]");
     m.def("mla_decode_batch", &mla_decode_batch,
           "MLA : decodage de B creneaux en un lancement, caches par table d'adresses [B] int64");
     m.def("paged_attention", &paged_attention,
