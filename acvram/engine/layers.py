@@ -656,6 +656,13 @@ class RotaryEmbedding(nn.Module):
         self._cos: Optional[torch.Tensor] = None
         self._sin: Optional[torch.Tensor] = None
         self._dtype = dtype
+        # M-RoPE (Qwen3-VL, engine/mrope) : axe (t, h, w) de chaque fréquence,
+        # sections ENTRELACÉES ; None = RoPE 1-D, rien ne change.
+        from .mrope import axes_interleaved, section_depuis
+        section = section_depuis(self.scaling)
+        self.mrope_section: Optional[list[int]] = section
+        self._mrope_axes: Optional[torch.Tensor] = (
+            None if section is None else axes_interleaved(section, inv_freq.shape[0]))
 
     def _build_inv_freq(self, device) -> torch.Tensor:
         dim = self.head_dim
@@ -778,7 +785,35 @@ class RotaryEmbedding(nn.Module):
         if max_pos is None:
             max_pos = int(positions.max().item()) + 1 if positions.numel() else 1
         self._ensure(max_pos, device, dtype)
+        if self._mrope_axes is not None and positions.dim() == 2:
+            return self.forward_mrope(positions, device, dtype, max_pos)
         return self._cos[positions], self._sin[positions]
+
+    def forward_mrope(self, positions: torch.Tensor, device, dtype,
+                      max_pos: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """M-RoPE : ``positions`` [3, t] (axes t, h, w) → cos/sin [t, dim].
+
+        Chaque fréquence lit la position de SON axe (sections entrelacées,
+        engine/mrope.axes_interleaved) dans les tables 1-D — les mêmes valeurs
+        que ``cos(p · inv_freq)`` de transformers (``Qwen3VLTextRotaryEmbedding``
+        puis ``recomposition_frequencies``), et, quand les trois axes sont égaux
+        (texte), exactement la ligne ``_cos[p]`` du chemin 1-D. ``max_pos`` majore
+        les trois axes : une position M-RoPE ne dépasse jamais la position 1-D."""
+        if self._mrope_axes is None:
+            raise ValueError("positions [3, t] sur un RoPE sans mrope_section")
+        if positions.shape[0] != 3:
+            raise ValueError(f"positions M-RoPE attendues en [3, t], reçu {tuple(positions.shape)}")
+        self._ensure(max_pos, device, dtype)
+        axes = self._mrope_axes
+        if axes.device != device:
+            axes = self._mrope_axes = axes.to(device)
+        half = self.inv_freq.shape[0]
+        # idx[t, i] = position de l'axe de la fréquence i au jeton t
+        idx = positions.to(device)[axes].t()                   # [t, half]
+        col = torch.arange(half, device=device).unsqueeze(0)     # [1, half]
+        cos = self._cos[idx, col]
+        sin = self._sin[idx, col]
+        return torch.cat((cos, cos), dim=-1), torch.cat((sin, sin), dim=-1)
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:

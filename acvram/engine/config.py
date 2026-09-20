@@ -151,6 +151,9 @@ class ModelSpec:
     v_head_dim: int = 0
     router_scoring: str = "softmax"
     routed_scaling_factor: float = 1.0
+    # Qwen3-VL : fusion spatiale de la tour de vision (vision_config.spatial_merge_size),
+    # le pas des grilles (t, h//merge, w//merge) des positions M-RoPE ; 0 = sans tour.
+    spatial_merge_size: int = 0
     layers: list[LayerSpec] = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
@@ -466,6 +469,12 @@ class ModelSpec:
     CLES_BRUTES_UTILES = ("gdn_a_log_negexp",)
 
     @property
+    def mrope_section(self) -> Optional[list[int]]:
+        """[t, h, w] de ``rope_scaling`` (Qwen3-VL, entrelacé), None sans M-RoPE."""
+        from .mrope import section_depuis
+        return section_depuis(self.rope_scaling)
+
+    @property
     def mlp_activation(self) -> str:
         """Le repli "silu" au POINT D USAGE, pas a l enregistrement.
 
@@ -575,6 +584,11 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         # 0 % pres seulement si aucune fenetre servie/mesuree ne depasse
         # 8192 jetons de position -- a confirmer avec poste3 avant la
         # conversion, pas suppose ici.
+        cfg = {**cfg, "rope_scaling": rp_gen}
+    if not cfg.get("rope_scaling") and isinstance(rp_gen, dict) and rp_gen.get("mrope_section"):
+        # Qwen3-VL enregistré par transformers ≥ 5 : le M-RoPE vit dans
+        # `rope_parameters` (mrope_section, mrope_interleaved, rope_type) — même
+        # dictionnaire que `rope_scaling`, lu par layers.RotaryEmbedding
         cfg = {**cfg, "rope_scaling": rp_gen}
     if cfg.get("model_type") == "gemma4_unified_text":
         cfg = {**cfg, "model_type": "gemma4_text"}     # même modèle texte
@@ -766,6 +780,8 @@ def load_model_spec(path: str, name: Optional[str] = None) -> ModelSpec:
         eos_token_id=_as_id_list(cfg.get("eos_token_id")),
         bos_token_id=(cfg.get("bos_token_id")
                       if isinstance(cfg.get("bos_token_id"), int) else None),
+        spatial_merge_size=int((cfg.get("vision_config") or {}).get("spatial_merge_size")
+                               or cfg.get("spatial_merge_size") or 0),
         raw=cfg,
     )
     _affiner_couches(spec, path)
