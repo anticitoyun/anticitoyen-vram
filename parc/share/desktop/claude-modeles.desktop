@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Claude Modèles
+Comment=Claude Code sur tout le parc de modèles locaux + pilotage de ComfyUIClaude
+GenericName=Parc de modèles IA locaux
+Exec=/usr/bin/claude-modeles
+Icon=claude-modeles
+Terminal=false
+Categories=Development;
+Keywords=claude;modeles;llama;vllm;comfyui;local;ia;
+StartupNotify=true
+
