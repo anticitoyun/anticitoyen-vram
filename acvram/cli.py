@@ -42,6 +42,8 @@ from . import __version__            # noqa: E402  (source unique de verite)
 # elles ont ete ecrites.
 VARIABLES_LUES = {
     "ACVRAM_ALLOC_EXTENSIBLE",
+    "ACVRAM_PREFILL_COMPACT",          # C15-prefill (aaf9f9c3), oubliees de la liste : test_la_liste_des_variables_lues_ne_derive_pas rouge sur main
+    "ACVRAM_PREFILL_COMPACT_ITEMS",
     "ACVRAM_BANC_ACCEPTE_REPLAN",
     "ACVRAM_KV_PLAN_OVERRIDE",
     "ACVRAM_KERNEL_CACHE",
