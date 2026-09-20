@@ -360,6 +360,28 @@ def _horloge() -> Optional[str]:
         return "?"
 
 
+# Modèle chargé : « vision » de son acvram_manifest.json ("oui" | "non"), ou None
+# tant qu'aucun chargeur ne l'a déclaré (ligne construite à sec, sans modèle).
+_VISION_CHARGEE: Optional[str] = None
+
+
+def declarer_modele_charge(manifest: Optional[dict]) -> None:
+    """Le chargeur déclare le manifeste du modèle qu'il vient de charger ; la
+    ligne de régime en tire `vision=bf16(eager)` (manifeste `vision: oui`,
+    contrat poste7-go-multimodal-organisation-20-09 § 2) ou `vision=off`.
+    None : plus de modèle chargé, le mot disparaît."""
+    global _VISION_CHARGEE
+    _VISION_CHARGEE = None if manifest is None else str(manifest.get("vision", "non"))
+
+
+def vision_texte() -> Optional[str]:
+    """`vision=bf16(eager)` | `vision=off` | None (aucun modèle déclaré : rien à
+    ajouter, la fin de ligne du défaut nu reste celle que fige test_defaut_servi)."""
+    if _VISION_CHARGEE is None:
+        return None
+    return "vision=bf16(eager)" if _VISION_CHARGEE == "oui" else "vision=off"
+
+
 def glue_texte() -> str:
     """C15-3d (défaut le 20/09) : la glue compacte est nommée sur la ligne, défaut compris —
     ``glue=compact(8)`` (attention fusionnée à 8 warps), ``glue=compact(8,items=attn,kv)``
@@ -451,6 +473,8 @@ def regime_ligne() -> str:
         parts.append(_mla.regime_glue_texte())            # mla_glue=2|1(temoin)|0 (C15 2a-bis, défaut 2 en 0.6.32)
     except Exception:                                     # noqa: BLE001
         pass
+    if vision_texte():                                    # vision=bf16(eager)|off, seulement modèle chargé
+        parts.append(vision_texte())
     # C5-b : le format des clés est nommé dès qu'il n'est plus celui d'aujourd'hui
     # (int8 par jeton) — la variable dit ce qui est DEMANDÉ, cette étiquette ce
     # que le cache int8 fait de ses clés.

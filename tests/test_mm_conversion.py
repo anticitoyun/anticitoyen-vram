@@ -356,6 +356,22 @@ def test_une_faute_construite_est_vue(convertis, tmp_path, faute):
     assert _controle_vision(src_vl, faux), faute
 
 
+def test_la_ligne_de_regime_nomme_la_vision_seulement_modele_charge():
+    from acvram import regime
+    try:
+        regime.declarer_modele_charge(None)
+        assert "vision=" not in regime.regime_ligne()
+        regime.declarer_modele_charge({"vision": "oui"})
+        assert " vision=bf16(eager) " in regime.regime_ligne() + " "
+        regime.declarer_modele_charge({"vision": "non"})
+        assert " vision=off " in regime.regime_ligne() + " "
+        regime.declarer_modele_charge({})
+        assert " vision=off " in regime.regime_ligne() + " "
+    finally:
+        regime.declarer_modele_charge(None)
+    assert "vision=" not in regime.regime_ligne()
+
+
 if __name__ == "__main__":                       # génère le témoin : voir TEMOIN_TEXTE
     import pathlib
     import sys
