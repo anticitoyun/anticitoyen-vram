@@ -33,8 +33,9 @@ DEFAUTS_PAR_VERSION = {
             "MARLIN_DISTINCT": "0", "MOE_DECODE_MMA": "1", "MOE_DECODE_MMA_MARLIN": "0",
             "KV_INT8_CANAL": "0", "GODETS_B": "1", "GEMV_LAYOUT": "marlin", "PILE_SANS_RENDU": "",
             "CPUS": "",                                                  # aucune affinité par défaut (hote=thp,omp8)
+            "MLA_PREP_GRILLE": "1",                                      # C14-b geste 3 (M1 bis) : prep regrillé au bit
         },
-        "mla_core=tf32(≤2048 clés) glue=compact(8) prefill_glue=compact",   # hote=thp,omp8 est AVANT mla_core
+        "mla_core=tf32(≤2048 clés) mla_prep=grille glue=compact(8) prefill_glue=compact",   # hote=thp,omp8 est AVANT mla_core
     ),
 }
 

@@ -190,6 +190,18 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MLA_BUCKET", "128", ("acvram.engine.mla", "MLA_BUCKET")),
     Variable("MLA_UNE_PASSE", "1", ("acvram.engine.mla", "_MLA_UNE_PASSE"), "0"),
     Variable("MLA_PREP_NOYAU", "1", ("acvram.engine.mla", "_MLA_PREP_NOYAU"), "0"),
+    Variable("MLA_PREP_GRILLE", "1", ("acvram.engine.mla", "_MLA_PREP_GRILLE"), "0",
+             "C14-b geste (3) (chantier-c14b-19-09 § Fait le 20/09) : 1 = mla_prep_batch regrillé (tuile k_b en shared, "
+             "groupes de 4 créneaux : 492 blocs à b=12 au lieu de 172), AU BIT avec 0 (grille d'avant, temoin=True, "
+             "prep_faux 0/799 sur carte) ; ne porte que le temps : DÉFAUT 1 en 0.6.31 sur M1 bis (scellé (a) ≤ 8 µs/couche ET pas b=12 non perdu) ; "
+             "ligne mla_prep=grille|temoin ; indépendante de MLA_BATCH_FUSION"),
+    Variable("MLA_BATCH_FUSION", "0", ("acvram.engine.mla", "_MLA_BATCH_FUSION"), "0",
+             "C14-b (chantier-c14b-19-09, poste7-fiches-c5b-c13c-c14b-20-09 § 3) : 1 = au décodage par lot "
+             "(decode_static_batch_complet) le combine de mla_decode_1p rend y = v_b·o_lat en bf16 "
+             "(mla_1p_combine_vb_kernel) : l'einsum fp32 'hvr,bhr->bhv' (gemmSN_TN cuBLAS, 11,5 µs/couche à M=12) "
+             "et sa conversion bf16 disparaissent ; même arithmétique à l'ordre des sommes près (± ulp fp32, pas au bit) ; "
+             "pris seulement sous MLA_CORE_DECODE=fp32 ; scellé : ppl-decode-kv lot 12 ± 0,002 ET capture 5/5 ET pas b=12 "
+             "GLM −0,7 ms → défaut | 0 = témoin (einsum)"),
     Variable("MLA_ECRIT_TORCH", "", None, "1",
              "sonde C15 niveau 2 (diagnostic) : 1 = à b=1 sous MLA_GLUE=2, l'écriture du latent passe par _ecrit_ligne (torch) au lieu de mla_ecrit_latent — isole ce noyau sous rejeu de graphe"),
     Variable("MLA_QABS_DEUX_MOITIES", "0", ("acvram.engine.mla", "_MLA_QABS_DEUX_MOITIES"), "0",
@@ -435,6 +447,7 @@ def regime_ligne() -> str:
         from .engine import mla as _mla
         if _mla.regime_coeur_texte():                     # tf32/bf16(≤2048 clés) | flash(fp32) | flash(repli fp32: …)
             parts.append(_mla.regime_coeur_texte())
+        parts.append(_mla.regime_prep_texte())            # mla_prep=grille|temoin (C14-b geste 3, défaut 1 en 0.6.31)
     except Exception:                                     # noqa: BLE001
         pass
     # C5-b : le format des clés est nommé dès qu'il n'est plus celui d'aujourd'hui

@@ -366,10 +366,11 @@ def _glue_texte() -> str:
 
 
 def _mla_core_texte() -> str:
-    """`mla_core=tf32(≤2048 clés)` hors fp32 (poste7-c14-defaut-tf32-8k addendum) ; `flash(fp32)` (C13-c)."""
+    """`mla_core=tf32(≤2048 clés)` hors fp32 (poste7-c14-defaut-tf32-8k addendum) ; `flash(fp32)` (C13-c) ;
+    puis `mla_prep=grille|temoin` (C14-b geste 3)."""
     from . import mla
     txt = mla.regime_coeur_texte()
-    return f" {txt}" if txt else ""
+    return (f" {txt}" if txt else "") + " " + mla.regime_prep_texte()
 
 
 def _eco_texte(e: dict) -> str:
