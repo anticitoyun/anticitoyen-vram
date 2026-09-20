@@ -55,32 +55,66 @@ def _quant_act_sans_echelle_globale(v: torch.Tensor) -> torch.Tensor:
     return (val * s.unsqueeze(-1)).double().reshape(-1)
 
 
-def _ref64(bloc, x, topw, topi):
-    """Référence float64 depuis les MÊMES tenseurs quantifiés que le noyau
-    fusionné : x par nvfp4_quant_act (échelle de ligne g_r, consommée par
-    l'épilogue FC1), l'activation requantifiée sans échelle globale comme
-    dans le noyau."""
+def _ref(bloc, x, topw, topi, dtype=torch.float64, inverse=False, faute=None):
+    """Référence depuis les MÊMES tenseurs quantifiés que le noyau fusionné : x par
+    nvfp4_quant_act (échelle de ligne g_r, consommée par l'épilogue FC1), l'activation
+    requantifiée sans échelle globale comme dans le noyau. ``dtype`` float64 = la
+    référence ; float32 avec ``inverse`` (experts accumulés du dernier au premier) =
+    un second ordre de somme légitime, le TÉMOIN du juge (§ 7) ; ``faute`` = (expert,
+    facteur) : la sortie de cet expert multipliée — la faute construite."""
     from tests.test_gemm_grouped_mma import dequant_act_ref, _w64
     from acvram.kernels import get_extension
     ext = get_extension()
     pg, pu, pd = (bloc._stacks[n] for n in ("gate_proj", "up_proj", "down_proj"))
-    W = {n: _w64(p[1], p[2]).reshape(p[1].shape[0], p[1].shape[1], -1) for n, p in (("g", pg), ("u", pu), ("d", pd))}
+    W = {n: _w64(p[1], p[2]).reshape(p[1].shape[0], p[1].shape[1], -1).to(dtype) for n, p in (("g", pg), ("u", pu), ("d", pd))}
     t, k = topi.shape
-    y = torch.zeros(t, pd[1].shape[1], dtype=torch.float64, device=x.device)
+    y = torch.zeros(t, pd[1].shape[1], dtype=dtype, device=x.device)
     xq, xsf, gr = ext.nvfp4_quant_act(x.to(torch.bfloat16).contiguous())
-    xa = dequant_act_ref(xq, xsf, gr)
+    xa = dequant_act_ref(xq, xsf, gr).to(dtype)
     for i in range(t):
-        for j in range(k):
+        for j in (range(k - 1, -1, -1) if inverse else range(k)):
             e = int(topi[i, j])
             if e < 0:
                 continue
-            g = (xa[i] @ W["g"][e].T) * pg[3][e].double()
-            u = (xa[i] @ W["u"][e].T) * pu[3][e].double()
-            g, u = g.to(torch.bfloat16).double(), u.to(torch.bfloat16).double()
+            g = (xa[i] @ W["g"][e].T) * pg[3][e].to(dtype)
+            u = (xa[i] @ W["u"][e].T) * pu[3][e].to(dtype)
+            g, u = g.to(torch.bfloat16).to(dtype), u.to(torch.bfloat16).to(dtype)
             act = (g / (1 + torch.exp(-g)) * u).to(torch.bfloat16)
-            aa = _quant_act_sans_echelle_globale(act)
-            y[i] += (aa @ W["d"][e].T) * pd[3][e].double() * float(topw[i, j])
+            aa = _quant_act_sans_echelle_globale(act).to(dtype)
+            contrib = (aa @ W["d"][e].T) * pd[3][e].to(dtype) * float(topw[i, j])
+            if faute is not None and e == faute[0]:
+                contrib = contrib * faute[1]
+            y[i] += contrib
     return y
+
+
+def _ref64(bloc, x, topw, topi):
+    return _ref(bloc, x, topw, topi)
+
+
+def _ulp_bf16(r):
+    r = r.abs().double()
+    return torch.where(r > 0, 2.0 ** (torch.floor(torch.log2(r.clamp_min(1e-300))) - 7), torch.full_like(r, 2.0 ** -133))
+
+
+def juge_fuse_contre_b(y_fuse, y_b, ref64, temoin):
+    """§ 7 (poste7 13 h 12) : d = |y − ref64| en ulp bf16 de l'AMPLITUDE de la ligne (max |ref| de la ligne ;
+    en ulp de chaque élément, les sorties proches de zéro rendaient 6 000 ulp sans rien dire), max par ligne ;
+    tenu si (1) d(fusé) ≤ d(B) + 2·témoin sur chaque ligne ET (2) médiane(fusé) ≤ médiane(B) ET
+    (3) max(fusé) ≤ max(B) + 1 ET (4, resserré : la clause que la faute construite casse) d(fusé) ≤ 1 + 2·témoin
+    — 1 ulp de l'amplitude = l'arrondi bf16 de la sortie, mesuré 0,83 le 20/09 ; un expert ×1,02 rend 2,97.
+    Rend (tenu, texte)."""
+    u = _ulp_bf16(ref64.abs().amax(-1, keepdim=True))
+    d_f = ((y_fuse.double() - ref64).abs() / u).amax(-1)
+    d_b = ((y_b.double() - ref64).abs() / u).amax(-1)
+    lignes = int((d_f > d_b + 2 * temoin).sum())
+    med_ok = d_f.median().item() <= d_b.median().item()
+    max_ok = d_f.max().item() <= d_b.max().item() + 1.0
+    serre = int((d_f > 1.0 + 2 * temoin).sum())
+    texte = (f"d(fusé) médiane {d_f.median().item():.2f} max {d_f.max().item():.2f} ; d(B) médiane {d_b.median().item():.2f} "
+             f"max {d_b.max().item():.2f} ulp bf16 de l'amplitude ; témoin {temoin:.3f} ; lignes fusé > d(B) + 2·témoin : "
+             f"{lignes}/{d_f.numel()} ; lignes fusé > 1 + 2·témoin : {serre}/{d_f.numel()}")
+    return lignes == 0 and med_ok and max_ok and serre == 0, texte
 
 
 @CUDA
@@ -101,17 +135,24 @@ def test_fused_deterministe_et_juste(tn):
     tol = ref.abs() * 2 ** -6 + 1e-2 * ref.abs().max()
     hors = int(((y1.double() - ref).abs() > tol).sum())
     assert hors == 0, f"{hors} sorties hors tolerance vs float64 (max {(y1.double() - ref).abs().max().item():.3e})"
-    # Le chemin B quantifie l'activation avec une échelle globale par ligne
-    # (nvfp4_quant_act, poste7-glm-pile-correctif § 7) ; le noyau fusionné la
-    # requantifie en shared sans (un CTA ne voit qu'une tranche de I) : les
-    # codes E2M1 diffèrent, l'identité au bit avec B n'est plus un contrat —
-    # seule la tolérance float64 l'est.
-    # REGLES § 7 (T4 20/09 : 2 634 sorties « hors tolérance vs chemin B », max 4,5e-2, le fusionné
-    # étant DANS la tolérance float64) : deux approximations ne se jugent pas l'une contre l'autre ;
-    # le chemin B se juge, lui aussi, contre float64 — un rouge ici nomme B, pas le fusionné.
-    hors_b = int(((yb.double() - ref).abs() > tol).sum())
-    assert hors_b == 0, (f"chemin B : {hors_b} sorties hors tolerance vs float64 (max {(yb.double() - ref).abs().max().item():.3e}) ; "
-                         f"fusionné − B max {(y1.double() - yb.double()).abs().max().item():.3e}")
+    # Le chemin B quantifie l'activation avec une échelle globale par ligne (nvfp4_quant_act,
+    # poste7-glm-pile-correctif § 7) ; le fusionné la requantifie en shared sans : les codes E2M1
+    # diffèrent, l'identité au bit avec B n'est pas un contrat. § 7 (poste7 13 h 12, après T4 20/09 :
+    # 2 634 « hors tolérance vs B ») : fusionné et B CHACUN contre float64 par ligne ; témoin = deux
+    # ordres de somme légitimes de la référence en fp32 (experts du premier au dernier / inverse).
+    r32a, r32b = _ref(bloc, x, topw, topi, torch.float32), _ref(bloc, x, topw, topi, torch.float32, inverse=True)
+    temoin = ((r32a.double() - r32b.double()).abs() / _ulp_bf16(ref.abs().amax(-1, keepdim=True))).max().item()
+    tenu, texte = juge_fuse_contre_b(y1, yb, ref, temoin)
+    print(f"\n[moe_fused tn={tn}] {texte}")
+    assert tenu, texte
+    # faute construite : la sortie d'UN expert ×1,02 (dans l'arithmétique de référence, fp32) doit casser —
+    # mesuré 20/09 : 2,97 ulp de l'amplitude (×1,05 : 7,4) contre 0,83 pour le fusionné sain ; B, qui quantifie
+    # l'activation avec une échelle globale de ligne, est à 13-23 ulp de CETTE référence (pas la sienne) : les
+    # clauses (1)-(3) ne voient pas 2 %, la clause (4) oui — résolution du juge : détecte ≥ 2 %
+    e0 = int(topi[0, 0])
+    y_faute = _ref(bloc, x, topw, topi, torch.float32, faute=(e0, 1.02))
+    casse, texte_f = juge_fuse_contre_b(y_faute, yb, ref, temoin)
+    assert not casse, f"le juge ne voit pas un expert ×1,02 : {texte_f}"
 
 
 @CUDA
