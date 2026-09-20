@@ -149,13 +149,21 @@ EXEMPTES_COURRIEL = {"scratchpad/corpus-calib-c6/calib-c6-anglais-code.txt"}
 # (6265461). Le nettoyage (helper _chemins pour ces scripts, ou deplacement
 # des journaux sous acvram-memoire/corpus/) reste a faire, hors de la portee
 # de cette passe.
-PLAFOND_CHEMINS = 2282  # 20/09 chef : 450 journaux scratchpad et 40 artefacts nsys/sqlite retires de l index
+PLAFOND_CHEMINS = 2209  # 20/09 poste7 : corpus-prive exempte par prefixe (95, copies figees de revue) et outils/gpu/hors-verrou.log sorti de l index (69) ; avant : 2282 (chef, 450 journaux scratchpad et 40 artefacts nsys/sqlite retires)
 
 # Le fichier qui NOMME les chemins pour les faire disparaitre ne doit pas
 # lui-meme les compter -- meme discipline datee que EXEMPTES_SESSION.
 EXEMPTES_CHEMINS = {
     "acvram-memoire/revue/inventaire-chemins-absolus-15-09.md",  # 16/09, poste8
 }
+# 20/09, poste7 — `scratchpad/corpus-prive/` : tranches d'evaluation qui sont des
+# COPIES FIGEES de `revue/*.md` (corpus-revue 5909d27, decoupe en fenetres
+# disjointes). Chaque chemin qu'elles contiennent est deja compte dans le
+# fichier de revue d'origine : les compter ici compte deux fois le meme texte
+# (l'instrument inclus dans son propre domaine, REGLES 4 bis). Le corpus se
+# regenere par sa fabrique, jamais a la main ; on ne « corrige » pas un corpus
+# scelle. Prefixe exempte, et le test verifie qu'il sert encore.
+EXEMPTES_PREFIXES_CHEMINS = ("scratchpad/corpus-prive/",)
 
 # EXEMPTIONS NOMMEES ET DATEES, jamais muettes, et le test verifie qu'elles
 # SERVENT ENCORE : une exemption devenue inutile finit par couvrir une faute
@@ -242,7 +250,11 @@ def test_aucun_courriel_dans_le_depot():
 
 
 def test_le_cliquet_des_chemins_absolus_ne_monte_pas():
-    trouves = {k: v for k, v in _trouve(CHEMIN).items() if k not in EXEMPTES_CHEMINS}
+    tous = _trouve(CHEMIN)
+    sous_prefixe = {k for k in tous if k.startswith(EXEMPTES_PREFIXES_CHEMINS)}
+    assert sous_prefixe, "EXEMPTES_PREFIXES_CHEMINS ne sert plus : la retirer"
+    trouves = {k: v for k, v in tous.items()
+               if k not in EXEMPTES_CHEMINS and k not in sous_prefixe}
     total = sum(len(v) for v in trouves.values())
     assert total <= PLAFOND_CHEMINS, (
         f"{total} chemins absolus nommes pour un plafond de "
