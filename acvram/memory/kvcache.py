@@ -161,21 +161,55 @@ class BlockAllocator:
 
     # -- prefix cache ----------------------------------------------------
     @staticmethod
+    def sel_images(images, a: int, b: int) -> tuple:
+        """Les sha256 des images dont la plage [debut, fin) touche [a, b),
+        dans l'ordre des positions ; () sans image (clé texte d'avant).
+
+        ``images`` : itérable de (debut, fin, sha256, …) ou d'objets à
+        attributs ``debut``, ``fin``, ``sha256`` (frontière tolérante avec la
+        pièce (b), REGLES § 4 : deux images ≠, même texte → deux clés)."""
+        if not images:
+            return ()
+        sel = []
+        for im in images:
+            if isinstance(im, (tuple, list)):
+                d, f, sha = im[0], im[1], im[2]
+            else:
+                d, f, sha = im.debut, im.fin, im.sha256
+            if int(d) < b and int(f) > a:
+                sel.append((int(d), int(f), str(sha)))
+        sel.sort()
+        return tuple(sel)
+
+    @staticmethod
+    def hash_bloc(prev: int, span: tuple, sel: tuple = ()) -> int:
+        """Hachage chaîné d'un bloc : sans image, exactement `hash((prev, span))`
+        — le texte seul garde sa clé d'avant."""
+        return hash((prev, span, sel)) if sel else hash((prev, span))
+
+    @staticmethod
     def block_hashes(token_ids: Sequence[int], block_size: int = BLOCK_SIZE,
-                     ) -> list[int]:
+                     images=None) -> list[int]:
         """Hachages chaînés, un par bloc *complet*.
 
         Le chaînage compte : un bloc contenant les mêmes 16 jetons dans deux
         contextes différents ne contient pas les mêmes clés et valeurs, puisque
         l'attention a vu une histoire différente. Hacher la seule tranche
         servirait volontiers le cache d'une séquence à une autre.
+
+        ``images`` (multimodal P1) : les jetons d'une image sont des
+        marqueurs identiques d'une image à l'autre ; sans le sha256 des
+        pixels dans la clé, le préfixe « <image> » d'une autre image rendrait
+        le KV d'une autre image sans erreur.
         """
         out: list[int] = []
         prev = 0
         n_full = len(token_ids) // block_size
         for i in range(n_full):
-            span = tuple(token_ids[i * block_size:(i + 1) * block_size])
-            prev = hash((prev, span))
+            a, b = i * block_size, (i + 1) * block_size
+            span = tuple(token_ids[a:b])
+            prev = BlockAllocator.hash_bloc(prev, span,
+                                            BlockAllocator.sel_images(images, a, b))
             out.append(prev)
         return out
 

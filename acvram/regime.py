@@ -451,6 +451,15 @@ def regime_ligne() -> str:
         parts.append(_mla.regime_glue_texte())            # mla_glue=2|1(temoin)|0 (C15 2a-bis, défaut 2 en 0.6.32)
     except Exception:                                     # noqa: BLE001
         pass
+    # Multimodal P1 : la tour de vision (eager bf16, hors graphes) nommée dès
+    # qu'une est chargée ; rien sans tour — la fin de ligne du défaut nu
+    # (tests/test_defaut_servi.py) ne bouge pas.
+    try:
+        from .engine.vision import regime_texte as _vision_texte
+        if _vision_texte():
+            parts.append(_vision_texte())
+    except Exception:                                     # noqa: BLE001
+        pass
     # C5-b : le format des clés est nommé dès qu'il n'est plus celui d'aujourd'hui
     # (int8 par jeton) — la variable dit ce qui est DEMANDÉ, cette étiquette ce
     # que le cache int8 fait de ses clés.

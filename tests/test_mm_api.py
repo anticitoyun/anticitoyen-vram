@@ -107,7 +107,18 @@ def _monter(converted, dossier: str, vision: bool, n_img: int = N_IMG):
     tokenizer = load_tokenizer(dossier)
     (img,) = tokenizer.encode("<image>")             # un seul jeton, spécial
     assert img == 1023
-    engine = Engine(loaded, tokenizer, max_batch_size=4, max_model_len=256)
+    # Pièce (c) fusionnée (19e4d525) : Engine construit la tour (TourVision.depuis_dossier) dès que le
+    # manifeste dit vision: oui — sans transformers à sec, une tour factice qui rend n_img traits
+    from acvram.engine.vision import TourVision
+    depuis_dossier = TourVision.__dict__["depuis_dossier"]
+    h = loaded.spec.hidden_size
+    if vision:
+        TourVision.depuis_dossier = classmethod(
+            lambda cls, path, man, dev: cls(lambda pv: torch.zeros(1, n_img, h), dev, nom="factice"))
+    try:
+        engine = Engine(loaded, tokenizer, max_batch_size=4, max_model_len=256)
+    finally:
+        TourVision.depuis_dossier = depuis_dossier
     appels = []                                  # (prompt_ids, images) reçus par le moteur
     original = engine.add_request
 
@@ -197,8 +208,9 @@ def test_image_sur_alias_vision_acceptee(vision):
     prompt_ids, images = vision.appels[-1]
     assert images is not None and len(images) == 1
     frag = images[0]
-    assert isinstance(frag, ImageFragment)
-    assert frag.n_jetons == N_IMG
+    # le moteur (pièce c) reçoit l'ImageFragment et le porte en ImageRequete : mêmes attributs
+    assert all(hasattr(frag, a) for a in ("debut", "fin", "pixel_values", "sha256"))
+    assert frag.fin - frag.debut == N_IMG
     assert prompt_ids[frag.debut:frag.fin] == [vision.img] * N_IMG
     assert prompt_ids[frag.fin] != vision.img and prompt_ids[frag.debut - 1] != vision.img
     assert frag.sha256 == sha256_pixel_values(frag.pixel_values)
@@ -218,7 +230,7 @@ def test_deux_images_deux_fragments_deux_sha(vision):
                                          _image(_data_url(OCTETS_B))))
     assert r.status_code == 200, r.text
     prompt_ids, images = vision.appels[-1]
-    assert [f.n_jetons for f in images] == [N_IMG, N_IMG]
+    assert [f.fin - f.debut for f in images] == [N_IMG, N_IMG]
     assert images[0].fin <= images[1].debut
     assert images[0].sha256 != images[1].sha256
     assert prompt_ids.count(vision.img) == 2 * N_IMG
@@ -292,7 +304,7 @@ def test_texte_pur_jetons_inchanges(banc, request):
             "messages": [{"role": "user", "content": contenu}]})
         assert r.status_code == 200, r.text
         prompt_ids, images = b.appels[-1]
-        assert images is None
+        assert not images                      # None (API) ou [] (Sequence, pièce c) : aucun fragment
         attendu = b.tokenizer.encode(render_chat(
             b.tokenizer, [{"role": "user", "content": "hello world"}]))
         assert prompt_ids == attendu

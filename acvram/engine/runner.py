@@ -31,6 +31,7 @@ from .loader import LoadedModel
 from .model import _DUMP_MOE, ForwardBatch
 from .sampler import SamplingParams, besoin_historique, sample
 from .speculative import GardeSpeculation, Proposal, verify_proposal
+from .vision import ImageRequete, SansTourVision, TourVision, verifier_plages
 
 __all__ = ["Sequence", "GenerationOutput", "Engine", "EngineStats"]
 
@@ -55,9 +56,10 @@ class Sequence:
     hashes: list[int] = field(default_factory=list)
     n_accepted: int = 0                 # jetons spéculatifs acceptés
     n_proposed: int = 0
-    # Fragments d'image (acvram/engine/images.py), dans l'ordre des jetons ;
-    # None pour une requête texte — chemin texte inchangé.
-    images: Optional[list] = None
+    # Multimodal P1 : images de l'invite (ImageRequete) et, après la tour,
+    # leurs traits (debut, fin, embeds bf16 [fin − debut, hidden]).
+    images: list = field(default_factory=list)
+    image_embeds: Optional[list] = None
 
     @property
     def prefilled(self) -> bool:
@@ -452,6 +454,10 @@ class Engine:
         # du cache paginé ; le cache de préfixe n'aurait pas de sens (les
         # blocs KV ne suffisent pas à restaurer l'état), on le coupe.
         self.est_hybride = bool(getattr(self.spec, "layer_types", None))
+        # Tour de vision (multimodal P1) : None sans tour (manifeste
+        # `vision: non`) ; alors toute image est refusée, nommément.
+        self.vision: Optional[TourVision] = TourVision.depuis_dossier(
+            loaded.path, loaded.manifest, self.model.embed_tokens.device)
         self.gdn_states: dict = {}
         # Hybrides à récurrence linéaire : les blocs KV ne suffisent pas à
         # reprendre une invite, l'état récurrent vit hors du cache paginé. On
@@ -746,14 +752,21 @@ class Engine:
         return ids
 
     def add_request(self, prompt_ids: list[int], params: SamplingParams,
-                    request_id: str = "", images: Optional[list] = None) -> Sequence:
+                    request_id: str = "", images: Any = None) -> Sequence:
+        """``images`` (multimodal P1) : itérable de (debut, fin, pixel_values,
+        sha256) ou d'objets à ces attributs — voir engine/vision.ImageRequete."""
         if len(prompt_ids) >= self.max_model_len:
             raise ValueError(
                 f"invite de {len(prompt_ids)} jetons au-delà de max_model_len "
                 f"{self.max_model_len}")
+        ims = [ImageRequete.depuis(i) for i in (images or [])]
+        if ims and self.vision is None:
+            raise SansTourVision(
+                f"{len(ims)} image(s) pour un modèle sans tour de vision "
+                f"(manifeste vision: non) — request_id={request_id!r}")
+        verifier_plages(ims, len(prompt_ids))
         seq = Sequence(list(prompt_ids), params, request_id)
-        if images:
-            seq.images = list(images)
+        seq.images = sorted(ims, key=lambda i: i.debut)
         if params.ignore_eos:
             self.stats.sequences_ignore_eos += 1
         with self._lock:
@@ -794,11 +807,32 @@ class Engine:
                     break
                 self.waiting.pop(0)
 
+                # Tour de vision : une passe eager par image, ici, avant le
+                # prefill et hors de tout graphe. Une tour qui échoue refuse
+                # la requête, nommément.
+                if seq.images and seq.image_embeds is None:
+                    try:
+                        seq.image_embeds = [
+                            (im.debut, im.fin,
+                             self.vision.traits(im.pixel_values, im.fin - im.debut))
+                            for im in seq.images]
+                    except Exception as exc:                 # noqa: BLE001
+                        print(f"[engine] refus : tour de vision en échec "
+                              f"({type(exc).__name__}: {exc}) request_id={seq.request_id}",
+                              flush=True)
+                        self._finish(seq, "refus")
+                        self._refusees.append(GenerationOutput(
+                            sequence_id=seq.id, request_id=seq.request_id, token_ids=[],
+                            finished=True, finish_reason="refus",
+                            prompt_tokens=len(seq.prompt_ids), completion_tokens=0))
+                        continue
+
                 # On sert les blocs de tête que le cache détient déjà. Un bloc
                 # est toujours retenu : une requête dont l'invite est
                 # entièrement en cache a tout de même besoin d'un jeton à faire
                 # traverser le modèle.
-                hashes = BlockAllocator.block_hashes(seq.prompt_ids, BLOCK_SIZE)
+                hashes = BlockAllocator.block_hashes(seq.prompt_ids, BLOCK_SIZE,
+                                                     images=seq.images)
                 limit = max(0, (len(seq.prompt_ids) - 1) // BLOCK_SIZE)
                 # Sur un hybride, les blocs KV ne valent que si l'état récurrent
                 # de la même frontière est disponible : on plafonne l'appariement
@@ -958,7 +992,9 @@ class Engine:
             i = len(seq.hashes)
             prev = seq.hashes[-1] if seq.hashes else 0
             span = _tranche(seq, i * BLOCK_SIZE, (i + 1) * BLOCK_SIZE)
-            h = hash((prev, span))
+            h = BlockAllocator.hash_bloc(
+                prev, span, BlockAllocator.sel_images(seq.images, i * BLOCK_SIZE,
+                                                      (i + 1) * BLOCK_SIZE))
             seq.hashes.append(h)
             self.allocator.register(seq.blocks[i], h)
 
@@ -1078,6 +1114,12 @@ class Engine:
             seq_lens.append(start + len(ids))
             block_tables.append(torch.tensor(seq.blocks, dtype=torch.long))
 
+        # Multimodal P1 : traits d'image par séquence au prefill seulement ;
+        # None pour tout le lot quand aucune n'en porte (chemin texte au bit).
+        images = None
+        if prefill and any(s.image_embeds for s in seqs):
+            images = [list(s.image_embeds) if s.image_embeds else None for s in seqs]
+
         return ForwardBatch(
             tokens=torch.tensor(tokens, dtype=torch.long),
             positions=torch.tensor(positions, dtype=torch.long),
@@ -1085,7 +1127,22 @@ class Engine:
             block_tables=block_tables,
             slot_mapping=torch.tensor(slots, dtype=torch.long),
             is_prefill=prefill,
-            seq_ids=[s.id for s in seqs], gdn_store=self.gdn_states)
+            seq_ids=[s.id for s in seqs], gdn_store=self.gdn_states,
+            images=images)
+
+    @staticmethod
+    def _eviter_coupe_image(seq: Sequence, fin: Optional[int]) -> Optional[int]:
+        """Une borne de fin de morceau qui tombe DANS une plage image est
+        déplacée : au début de l'image si celui-ci est encore à faire, sinon
+        à sa fin. Les jetons d'une image se voient tous (masque bidirectionnel)
+        et ne peuvent pas être calculés en deux morceaux : un morceau coupé
+        dans l'image serait refusé par `layers.masque_images`."""
+        if fin is None:
+            return None
+        for im in seq.images:
+            if im.debut < fin < im.fin:
+                return im.debut if im.debut > seq.prefill_len else im.fin
+        return fin
 
     # -- the step --------------------------------------------------------
     def step(self) -> list[GenerationOutput]:
@@ -1161,6 +1218,10 @@ class Engine:
                 # sequence : une tranche suivante est deja au-dela.
                 coupe = (self._frontiere_insta(seq)
                          if seq.prefill_len == seq.cached_len else None)
+                if coupe is not None and self._eviter_coupe_image(seq, coupe) != coupe:
+                    # La frontière d'instantané doit rester un multiple du pas :
+                    # dans une image, on renonce à l'instantané pour cette invite.
+                    coupe = None
                 if coupe is not None:
                     # Première passe jusqu'à la frontière, instantané, puis le
                     # reste : le point de reprise est ainsi le même d'une requête à
@@ -1172,6 +1233,7 @@ class Engine:
                 fin = len(seq.prompt_ids)
                 if budget:
                     fin = min(fin, seq.prefill_len + budget)
+                    fin = self._eviter_coupe_image(seq, fin)
                 batch = self._build_batch(
                     [seq], prefill=True,
                     limite=fin if fin < len(seq.prompt_ids) else None)
@@ -1740,10 +1802,10 @@ class Engine:
             return ""
 
     # -- convenience -----------------------------------------------------
-    def generate(self, prompt_ids: list[int], params: SamplingParams
-                 ) -> Iterator[GenerationOutput]:
+    def generate(self, prompt_ids: list[int], params: SamplingParams,
+                 images: Any = None) -> Iterator[GenerationOutput]:
         """Générateur bloquant pour une requête unique. Utilisé par le CLI et les tests."""
-        seq = self.add_request(prompt_ids, params)
+        seq = self.add_request(prompt_ids, params, images=images)
         while not seq.finished:
             for out in self.step():
                 if out.sequence_id == seq.id:
