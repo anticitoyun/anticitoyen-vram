@@ -830,6 +830,8 @@ def _ecrire_source_qvl(d, vision: bool, awq: bool, dequantifie: bool = False) ->
         (d / "preprocessor_config.json").write_text('{"patch_size": 16, "merge_size": 2}')
         (d / "video_preprocessor_config.json").write_text('{"patch_size": 16}')
         (d / "chat_template.jinja").write_text("{{ messages }}")
+        (d / "chat_template.json").write_text('{"chat_template": "{{ messages }}"}')   # Qwen3-VL-2B réel : gabarit en .json
+        (d / "merges.txt").write_text("#version: 0.2\n")
     save_file(sd, str(d / "model.safetensors"))
     return str(d)
 
@@ -883,7 +885,9 @@ def test_qvl_moe_tour_merger_et_deepstack_gardes_au_bit(convertis_qvl, voie):
     cfg = json.load(open(os.path.join(out, "config.json")))
     assert cfg["model_type"] == "qwen3_vl_moe" and cfg["vision_config"]["deepstack_visual_indexes"] == DEEPSTACK_IDX
     assert cfg["text_config"]["rope_scaling"]["mrope_section"] == MROPE
-    for fn in ("preprocessor_config.json", "video_preprocessor_config.json", "chat_template.jinja"):
+    # 20/09 17:48 (Qwen3-VL-2B servi) : sans chat_template.json, AutoProcessor.apply_chat_template refusait
+    # (« does not have a chat template ») ; merges.txt/vocab.json/added_tokens.json suivent aussi le tokenizer
+    for fn in ("preprocessor_config.json", "video_preprocessor_config.json", "chat_template.jinja", "chat_template.json", "merges.txt"):
         assert os.path.isfile(os.path.join(out, fn)), fn
     # le texte, lui, est quantifié : experts et projections d'attention, aucun en bf16
     fmts = {man["tensors"][k]["format"] for k in man["tensors"]
