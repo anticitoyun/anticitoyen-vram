@@ -41,8 +41,21 @@ from gi.repository import GLib, Gtk, WebKit2  # noqa: E402
 
 PORTS = [int(p) for p in os.environ.get("ACVRAM_PORTS", "8000 8081 8080 8765 8766").split()]
 PARC = os.environ.get("ACVRAM_PARC", os.path.expanduser("~/Modeles/models_acvram"))
-PARCS_CONNUS = [PARC, "/mnt/4TO_SATACMR_2022/Modeles/models_acvram",
-                os.path.expanduser("~/models_acvram")]
+def _racine_configuree() -> list[str]:
+    """La même lecture que outils/racine_modeles.py (hors paquet) : ACVRAM_MODELES, ACVRAM_MODELS_DIR, puis
+    ~/.config/acvram/modeles (première ligne non commentée qui existe) — aucun chemin de machine dans le paquet."""
+    for v in ("ACVRAM_MODELES", "ACVRAM_MODELS_DIR"):
+        if os.environ.get(v):
+            return [os.environ[v]]
+    conf = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "acvram", "modeles")
+    try:
+        with open(conf, encoding="utf-8") as f:
+            return [l.strip() for l in f if l.strip() and not l.startswith("#") and os.path.isdir(l.strip())][:1]
+    except OSError:
+        return []
+
+
+PARCS_CONNUS = [PARC, *_racine_configuree(), os.path.expanduser("~/models_acvram")]
 PORT_DEFAUT = int(os.environ.get("ACVRAM_PORT", "8765"))
 SOUTIEN_URL = "https://buymeacoffee.com/anticitoyen"
 
