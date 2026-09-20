@@ -215,6 +215,13 @@ _MLA_QABS_DEUX_MOITIES = os.environ.get("ACVRAM_MLA_QABS_DEUX_MOITIES", "0") == 
 # § 4 bis). Pris seulement sous MLA_CORE_DECODE=fp32 (le noyau ne sait pas
 # tf32/bf16) et sortie bf16. Défaut 0 tant que ce n'est pas mesuré.
 _MLA_BATCH_FUSION = os.environ.get("ACVRAM_MLA_BATCH_FUSION", "0") == "1"
+# C14-b, geste (3) (poste7 09 h 00 : variable séparée, jugée seule par le nsys (a)) : sous
+# ACVRAM_MLA_PREP_GRILLE=1, mla_prep_batch prend la grille regrillée (tuile k_b en shared,
+# groupes de 4 créneaux : 492 blocs à b=12, .cu mla_prep_batch_kernel) ; 0 = la grille
+# d'avant (temoin=True, nh·NR + B blocs). Les deux sont AU BIT (prep_faux 0 sur 799
+# couches-pas, verdict poste2 09 h 00) : la variable ne porte que le temps — défaut 1 après
+# (a) ≤ 8 µs/couche ET pas b=12 non perdu. Indépendante de MLA_BATCH_FUSION (le combine).
+_MLA_PREP_GRILLE = os.environ.get("ACVRAM_MLA_PREP_GRILLE", "0") == "1"
 FP8_PAD = 16
 
 
@@ -793,7 +800,8 @@ class MLAttention(nn.Module):
             q_c, kvp_c = q.contiguous(), kvp.contiguous()
             q_eff, k_new = ext.mla_prep_batch(q_c, kvp_c, lens, cos32, sin32,
                                               self._k_b_c(), self.kv_a_norm, self.nope, self.rope,
-                                              self.rank, self.eps)          # fp32 [B, nh, W], bf16 [B, W]
+                                              self.rank, self.eps,
+                                              not _MLA_PREP_GRILLE)          # fp32 [B, nh, W], bf16 [B, W] ; temoin = grille d'avant
             if _MLA_PREP_TEMOIN:
                 self._temoin_prep({"q": q_c, "kvp": kvp_c, "lens": lens, "q_eff": q_eff, "k_new": k_new})
         else:

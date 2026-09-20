@@ -186,6 +186,11 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MLA_BUCKET", "128", ("acvram.engine.mla", "MLA_BUCKET")),
     Variable("MLA_UNE_PASSE", "1", ("acvram.engine.mla", "_MLA_UNE_PASSE"), "0"),
     Variable("MLA_PREP_NOYAU", "1", ("acvram.engine.mla", "_MLA_PREP_NOYAU"), "0"),
+    Variable("MLA_PREP_GRILLE", "0", ("acvram.engine.mla", "_MLA_PREP_GRILLE"), "0",
+             "C14-b geste (3) (chantier-c14b-19-09 § Fait le 20/09) : 1 = mla_prep_batch regrillé (tuile k_b en shared, "
+             "groupes de 4 créneaux : 492 blocs à b=12 au lieu de 172), AU BIT avec 0 (grille d'avant, temoin=True, "
+             "prep_faux 0/799 sur carte) ; ne porte que le temps : scellé (a) ≤ 8 µs/couche ET pas b=12 non perdu → défaut 1 ; "
+             "indépendante de MLA_BATCH_FUSION"),
     Variable("MLA_BATCH_FUSION", "0", ("acvram.engine.mla", "_MLA_BATCH_FUSION"), "0",
              "C14-b (chantier-c14b-19-09, poste7-fiches-c5b-c13c-c14b-20-09 § 3) : 1 = au décodage par lot "
              "(decode_static_batch_complet) le combine de mla_decode_1p rend y = v_b·o_lat en bf16 "

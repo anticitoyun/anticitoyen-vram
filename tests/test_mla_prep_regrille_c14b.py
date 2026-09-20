@@ -38,6 +38,45 @@ def test_source_cu_porte_la_grille_et_le_temoin():
         assert "for (int n = quart; n < nope; n += 4)" in corps
 
 
+@pytest.mark.parametrize("grille", [False, True])
+def test_cablage_variable_prep_grille(monkeypatch, grille):
+    """ACVRAM_MLA_PREP_GRILLE (poste7 09 h 00 : variable séparée, défaut 0) : le chemin de lot appelle
+    `mla_prep_batch(..., temoin=not _MLA_PREP_GRILLE)` — 1 → temoin=False (grille regrillée), 0 → temoin=True
+    (grille d'avant) ; déclarée dans regime.py (lue à l'import, nommée sur la ligne dès 1) et cli.VARIABLES_LUES."""
+    from acvram import cli, regime
+    from acvram.engine import mla as MLA
+    from tests.test_mla_niveau2_jumeaux import _module, jumeau_prep_batch
+    v = {x.nom: x for x in regime.VARIABLES}["MLA_PREP_GRILLE"]
+    assert v.defaut == "0" and v.lu_a == ("acvram.engine.mla", "_MLA_PREP_GRILLE") and v.torch == "0"
+    assert "ACVRAM_MLA_PREP_GRILLE" in cli.VARIABLES_LUES
+    monkeypatch.setattr(MLA, "_MLA_PREP_GRILLE", grille)
+    assert ("ACVRAM_MLA_PREP_GRILLE" in regime.regime_noyaux()["hors_defaut"]) == grille
+    la = _module("cpu")
+    vus = []
+
+    class Ext:
+        def mla_prep_batch(self, q, kvp, lens, cos32, sin32, k_b, w_norm, nope, rope, rank, eps, temoin=False):
+            vus.append(temoin)
+            return jumeau_prep_batch(la, q, kvp, lens, 127)
+
+        def mla_ecrit_latent(self, k_new, ptrs, lptrs, fp8=False):
+            pass
+
+        def mla_decode_1p(self, q, ptrs, cache, lens, L, rank, scale, fp8=False, v_b=None):
+            return torch.zeros(q.shape[0], q.shape[1], rank)
+
+    monkeypatch.setattr(MLA, "_extension", lambda: Ext())
+    monkeypatch.setattr(MLA, "_MLA_PREP_NOYAU", True)
+    monkeypatch.setattr(MLA, "_MLA_UNE_PASSE", True)
+    monkeypatch.setattr(MLA, "_MLA_BATCH_FUSION", False)
+    st = la.new_static(torch.device("cpu"), 128, DT); st["len"].fill_(5)
+    x = torch.zeros(1, 256, dtype=DT)
+    ptrs = torch.tensor([st["cache"].data_ptr()]); lptrs = torch.tensor([st["len"].data_ptr()])
+    with torch.inference_mode():
+        la.decode_static_batch_complet(x, [st], 127, ptrs, torch.zeros(1, NH, 127), lptrs)
+    assert vus == [not grille], vus
+
+
 def _ext_carte():
     if not torch.cuda.is_available():
         pytest.skip("carte requise")
