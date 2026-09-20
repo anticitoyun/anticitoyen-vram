@@ -165,3 +165,74 @@ def test_le_noyau_ne_lit_rien_au_dela_du_godet_ni_des_poids(godet):
     assert y.shape == (godet, 200) and torch.isfinite(y.float()).all() and torch.isfinite(y32).all()
     assert _juger(y, x, t)[0] == 0 and _juger(y32, x, t)[0] == 0
     assert not y[reel:].float().any(), "une ligne fantôme (x nulle) doit rendre zéro"
+
+
+# --- C15 niveau 3, item 3 : un seul nœud (`_etroit_reduit_kernel`) ----------
+
+def _ulp_max(a, b):
+    """Écart max de b en ulp du dtype de a (bf16 : 2⁻⁷ relatif, fp16 : 2⁻¹⁰, fp32 : 2⁻²³)."""
+    a32, b32 = a.float(), b.float()
+    mant = {torch.bfloat16: 7, torch.float16: 10, torch.float32: 23}[a.dtype]
+    ulp = torch.where(a32 != 0, 2.0 ** (torch.floor(torch.log2(a32.abs().clamp_min(1e-30))) - mant),
+                      torch.full_like(a32, 2.0 ** -(126 + mant)))
+    return float(((a32 - b32).abs() / ulp).max())
+
+
+@pytest.mark.parametrize("m,n,k,programmes", [(12, 6144, 2048, 170), (12, 2048, 4096, 170), (1, 512, 4096, 170),
+                                              (12, 3000, 512, 170), (12, 3000, 512, 4), (5, 200, 2000, 12)])
+def test_c15_un_noeud_egale_zeros_noyau_somme_cast(m, n, k, programmes):
+    """`compact=True` contre le témoin (torch.zeros + noyau + y.sum(0) + cast) :
+    seul l'ordre de la somme fp32 des tranches peut différer — sortie 16 bits
+    à ≤ 1 ulp par valeur (au bit sur ces formes), sortie fp32 à 2⁻²⁰ × Σ|x·w|
+    (le bruit d'accumulation fp32, qui devient des dizaines d'ulp fp32 là où
+    la somme s'annule — un ulp fp32 n'est pas un critère à ces valeurs) ;
+    au bit quand une seule tranche ; formes de Coder b=12 (q/k/v N=6144
+    K=2048 ; o N=2048 K=4096), b=1, tête fp32 (1 tranche), et la découpe qui
+    déborde (NG 16, 6 × 3)."""
+    ge = _ge()
+    x, t = _montage(m, n, k)
+    orig = ge._programmes
+    ge._programmes = lambda device: programmes
+    try:
+        for fp32 in (False, True):
+            temoin = ge.gemm_etroit(x, t, sortie_fp32=fp32)
+            un = ge.gemm_etroit(x, t, sortie_fp32=fp32, compact=True)
+            assert un.dtype == temoin.dtype and un.shape == temoin.shape
+            if fp32:
+                w = _dequantize_int8(t, torch.float64)
+                borne = (x.double().abs() @ w.abs().T).clamp_min(1e-30)
+                assert float(((temoin.double() - un.double()).abs() / borne).max()) <= 2 ** -20
+            else:
+                assert _ulp_max(temoin, un) <= 1.0, _ulp_max(temoin, un)
+            assert _juger(un, x, t)[0] == 0
+    finally:
+        ge._programmes = orig
+    ng = t.qweight.shape[1] // t.group_size
+    tuiles_n = -(-n // ge.BN)
+    if min(ng, -(-2 * programmes // tuiles_n)) == 1:
+        assert torch.equal(temoin, un), "une tranche : au bit"
+    cnt = ge._COMPTEURS[(tuiles_n, str(x.device))]
+    assert not cnt.any(), "compteurs remis à zéro par le dernier programme"
+
+
+def test_c15_un_noeud_le_compteur_porte_la_reduction():
+    """Le bras qui doit casser : un compteur qui ne repart pas de zéro fait
+    réduire un programme qui n'est pas le dernier — la tuile est fausse
+    (hors 2⁻⁸ de la référence) ; remis à zéro, elle redevient juste."""
+    ge = _ge()
+    x, t = _montage(12, 256, 2048)                      # 4 tuiles N, 16 groupes
+    orig = ge._programmes
+    ge._programmes = lambda device: 170                 # voulu = 85 → 16 tranches de 1 groupe
+    try:
+        ref = ge.gemm_etroit(x, t)
+        cnt = ge._compteur(4, x.device)
+        cnt[2] = 1                                      # tuile 2 faussée
+        faux = ge.gemm_etroit(x, t, compact=True)
+        assert _juger(faux[:, 128:192], x, INT8Tensor(t.qweight[128:192], t.scales[128:192], t.zeros[128:192],
+                                                      t.group_size, (64, t.shape[1])))[0] > 0
+        assert _ulp_max(ref[:, :128], faux[:, :128]) <= 1.0
+        cnt.zero_()
+        bon = ge.gemm_etroit(x, t, compact=True)
+        assert _ulp_max(ref, bon) <= 1.0
+    finally:
+        ge._programmes = orig

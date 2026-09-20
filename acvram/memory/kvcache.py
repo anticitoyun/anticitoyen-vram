@@ -29,6 +29,7 @@ from typing import Optional, Sequence
 import torch
 
 from . import kv_lm4
+from . import kv_canal
 
 __all__ = ["KVCacheConfig", "PagedKVCache", "BlockAllocator"]
 
@@ -240,10 +241,33 @@ class KVCacheConfig:
     block_size: int = BLOCK_SIZE
     dtype: str = "int8"                 # int8 | fp8_e4m3 | fp16 | bf16 | lm4 (lm3, lm2 : témoins)
     device: str = "cuda:0"
+    # C5-b : clés int8 à échelle par canal sur chaque bloc (kv_canal) ; None =
+    # ACVRAM_KV_INT8_CANAL, et seulement en int8. `rangs` = lignes bf16 de la
+    # réserve des blocs courants, par couche (None = ACVRAM_KV_CANAL_RANGS).
+    canal: Optional[bool] = None
+    rangs: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.canal is None:
+            self.canal = kv_canal.ACTIF
+        self.canal = bool(self.canal) and self.dtype == "int8"
+        if self.rangs is None:
+            self.rangs = kv_canal.RANGS
 
     @property
     def quantized(self) -> bool:
         return self.dtype in ("int8", "fp8_e4m3") or self.rotated
+
+    @property
+    def nom_format(self) -> str:
+        """Le format tel que la ligne de régime le nomme."""
+        return "int8-canal16" if self.canal else self.dtype
+
+    def octets_tampon(self) -> int:
+        """Réserve bf16 des blocs courants (K seul) + pile des lignes libres."""
+        if not self.canal:
+            return 0
+        return self.rangs * self.block_size * self.num_kv_heads * self.head_dim * 2 + self.rangs * 4
 
     @property
     def rotated(self) -> bool:
@@ -271,10 +295,13 @@ class KVCacheConfig:
         width = 0.5 if self.rotated else 1 if self.quantized else 2
         scale_bytes = (2 * self.block_size * self.num_kv_heads * 2
                        if self.quantized else 0)
+        if self.canal:
+            # sc E4M3 [HKV, D] par bloc (128 o par tête pour D = 128) + tampon_de int32
+            scale_bytes += self.num_kv_heads * self.head_dim + 4
         return int(elems * width) + scale_bytes
 
     def total_bytes(self) -> int:
-        return self.bytes_per_block() * self.num_blocks * self.num_layers
+        return (self.bytes_per_block() * self.num_blocks + self.octets_tampon()) * self.num_layers
 
     @property
     def capacity_tokens(self) -> int:
@@ -357,6 +384,25 @@ class PagedKVCache:
             self.v_scale = torch.zeros(sshape, dtype=torch.float16, device=self.device)
         else:
             self.k_scale = self.v_scale = None
+        # C5-b (kv_canal) : échelles de K par canal, réserve bf16 des blocs
+        # courants et sa pile de lignes libres — tout sur l'appareil, adresses
+        # fixes : les noyaux d'écriture allouent et rendent les lignes eux-mêmes
+        # (capturable). Un bloc jamais écrit lit sc = 1 (par jeton) et ks = 0.
+        self.k_scale_canal = self.tampon = self.tampon_de = None
+        self.tampon_libres = self.tampon_sommet = None
+        if cfg.canal:
+            self.k_scale_canal = torch.full((cfg.num_blocks, cfg.num_kv_heads, cfg.head_dim),
+                                            kv_canal.SC_PAR_JETON, dtype=torch.uint8,
+                                            device=self.device).view(torch.float8_e4m3fn)
+            self.tampon = torch.zeros((cfg.rangs, cfg.block_size, cfg.num_kv_heads, cfg.head_dim),
+                                      dtype=torch.bfloat16, device=self.device)
+            self.tampon_de = torch.full((cfg.num_blocks,), -1, dtype=torch.int32, device=self.device)
+            self.tampon_libres = torch.arange(cfg.rangs, dtype=torch.int32, device=self.device)
+            self.tampon_sommet = torch.full((1,), cfg.rangs, dtype=torch.int32, device=self.device)
+
+    @property
+    def canal(self) -> bool:
+        return self.k_scale_canal is not None
 
     # -- quantization ----------------------------------------------------
     def _quantize(self, x: torch.Tensor) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -406,6 +452,26 @@ class PagedKVCache:
         if kv_lm4.diagnostic_actif():
             k = kv_lm4.quantifier_diagnostic(k, "k", positions)
             v = kv_lm4.quantifier_diagnostic(v, "v", positions)
+        # C5-b : clés par canal (kv_canal) — trois noyaux (rôles, écriture,
+        # fermeture) sur carte, le jumeau torch ailleurs ; V par jeton dans
+        # les deux cas. La sentinelle (slot < 0) est portée par les deux.
+        if self.canal:
+            if k.is_cuda and k.dtype == torch.bfloat16 and v.dtype == torch.bfloat16:
+                from ..kernels import get_extension
+                ext = get_extension()
+                if ext is not None and hasattr(ext, "kv_write_int8_canal"):
+                    sm = slot_mapping if slot_mapping.dtype == torch.int64 \
+                        else slot_mapping.to(torch.int64)
+                    ext.kv_write_int8_canal(
+                        k, v, sm, self.k.view(-1, *self.k.shape[2:]),
+                        self.v.view(-1, *self.v.shape[2:]),
+                        self.k_scale.view(-1, self.k_scale.shape[-1]),
+                        self.v_scale.view(-1, self.v_scale.shape[-1]),
+                        self.k_scale_canal.view(torch.uint8), self.tampon, self.tampon_de,
+                        self.tampon_libres, self.tampon_sommet, bs)
+                    return
+            kv_canal.ecrire(self, slot_mapping, k, v)
+            return
         # Chemin fusionné : amax, quantification et dispersion en un noyau.
         # Le chemin PyTorch demandait une vingtaine de lancements par couche
         # sur des tenseurs de quelques centaines de valeurs.
@@ -417,6 +483,13 @@ class PagedKVCache:
             if ext is not None and hasattr(ext, "kv_write_int8"):
                 sm = slot_mapping if slot_mapping.dtype == torch.int64 \
                     else slot_mapping.to(torch.int64)
+                # C15 niveau 3 : k et v sont des tranches de la projection
+                # q/k/v empilée ([T, H, D] à pas de jeton libre) — le noyau
+                # les lit en place ; le témoin (ACVRAM_GLUE_COMPACT=0) garde
+                # les deux copies contiguës d'avant (2 nœuds par couche).
+                from ..kernels import glue_compact
+                if not glue_compact("kv"):
+                    k, v = k.contiguous(), v.contiguous()
                 ext.kv_write_int8(k, v, sm, self.k.view(-1, *self.k.shape[2:]),
                                   self.v.view(-1, *self.v.shape[2:]),
                                   self.k_scale.view(-1, self.k_scale.shape[-1]),
@@ -467,6 +540,10 @@ class PagedKVCache:
             ks = self.k_scale[blocks].reshape(-1, self.cfg.num_kv_heads)
             vs = self.v_scale[blocks].reshape(-1, self.cfg.num_kv_heads)
             ks, vs = ks[:length], vs[:length]
+        if self.canal:
+            kd = kv_canal.dequantifier_cache(self, blocks, dtype)
+            return (kd.reshape(-1, self.cfg.num_kv_heads, self.cfg.head_dim)[:length],
+                    self._dequantize(v[:length], vs, dtype))
         return (self._dequantize(k[:length], ks, dtype),
                 self._dequantize(v[:length], vs, dtype))
 
@@ -475,17 +552,23 @@ class PagedKVCache:
         def pin(t):
             return t.detach().to("cpu", non_blocking=False).pin_memory() \
                 if t.is_cuda else t.detach().clone()
+        # Seuls des blocs COMPLETS (publiés) descendent : jamais de bloc courant,
+        # donc jamais de ligne de la réserve ; les échelles par canal suivent.
         return (pin(self.k[blk]), pin(self.v[blk]),
                 None if self.k_scale is None else pin(self.k_scale[blk]),
-                None if self.v_scale is None else pin(self.v_scale[blk]))
+                None if self.v_scale is None else pin(self.v_scale[blk]),
+                None if self.k_scale_canal is None else pin(self.k_scale_canal[blk].view(torch.uint8)))
 
     def import_block(self, blk: int, data: tuple) -> None:
-        k, v, ks, vs = data
+        k, v, ks, vs = data[:4]
         self.k[blk].copy_(k, non_blocking=True)
         self.v[blk].copy_(v, non_blocking=True)
         if self.k_scale is not None and ks is not None:
             self.k_scale[blk].copy_(ks, non_blocking=True)
             self.v_scale[blk].copy_(vs, non_blocking=True)
+        if self.k_scale_canal is not None and len(data) > 4 and data[4] is not None:
+            self.k_scale_canal.view(torch.uint8)[blk].copy_(data[4], non_blocking=True)
+            self.tampon_de[blk] = -1
 
     def gather_fixed(self, block_tables: torch.Tensor,
                      dtype: torch.dtype = torch.float16
@@ -509,6 +592,10 @@ class PagedKVCache:
         if self.k_scale is not None:
             ks = self.k_scale[block_tables].reshape(b, -1, self.cfg.num_kv_heads)
             vs = self.v_scale[block_tables].reshape(b, -1, self.cfg.num_kv_heads)
+        if self.canal:
+            kd = kv_canal.dequantifier_cache(self, block_tables, dtype)
+            return (kd.reshape(b, n * self.cfg.block_size, self.cfg.num_kv_heads, self.cfg.head_dim),
+                    self._dequantize(v, vs, dtype))
         return (self._dequantize(k, ks, dtype), self._dequantize(v, vs, dtype))
 
     @property
@@ -516,4 +603,7 @@ class PagedKVCache:
         n = self.k.numel() * self.k.element_size() * 2
         if self.k_scale is not None:
             n += self.k_scale.numel() * 2 * 2
+        if self.canal:
+            n += (self.k_scale_canal.numel() + self.tampon_de.numel() * 4
+                  + self.tampon.numel() * 2 + self.tampon_libres.numel() * 4 + 4)
         return n

@@ -143,9 +143,11 @@ def route_prep(topi: torch.Tensor, valid, usage: torch.Tensor) -> torch.Tensor:
 
 
 def route_fusee(logits: torch.Tensor, bias, k: int, sigmoide: bool, renorm: bool, scale: float,
-                valid, usage: torch.Tensor):
+                valid, usage: torch.Tensor, num_warps: int = 4):
     """``logits`` [T, E] → (topw fp32 [T, k], topi int32 [T, k], eid int32 [T·k])
-    — `moe_route` + `route_prep` en un lancement (F2)."""
+    — `moe_route` + `route_prep` en un lancement (F2). ``num_warps`` : 4 = le
+    témoin (défaut Triton) ; 1 = C15-3c (réductions intra-warp), même
+    arithmétique, ordre des sommes fp32 de la disposition à 1 warp."""
     T, E = logits.shape
     assert E <= 1024 and k <= 32, (E, k)
     BE = 1
@@ -162,5 +164,29 @@ def route_fusee(logits: torch.Tensor, bias, k: int, sigmoide: bool, renorm: bool
     _route_fusee_kernel[(T,)](
         lg, b, v, topw, topi, eid, usage, E, float(scale),
         K=k, BE=max(BE, 32), SIGMOIDE=sigmoide, RENORM=renorm,
-        AVEC_BIAIS=bias is not None and bias.numel() > 0, AVEC_VALID=valid is not None)
+        AVEC_BIAIS=bias is not None and bias.numel() > 0, AVEC_VALID=valid is not None, num_warps=num_warps)
     return topw, topi, eid
+
+
+def route_logits_fusee(x: torch.Tensor, w: torch.Tensor, bias, k: int, sigmoide: bool, renorm: bool,
+                       scale: float, valid, usage: torch.Tensor, arrondi_bf16: bool = True):
+    """C15-3c : le routeur compact = les logits par le MÊME appel cuBLAS que
+    `_router_logits` (F.linear sur ``w`` — bf16 pour Coder, fp32 pour GLM :
+    logits identiques au bit au témoin, donc routage identique) puis
+    `_route_fusee_kernel` lancé à num_warps=1 : un jeton par programme, les
+    128 experts dans UN warp — les 3 × k réductions de la sélection deviennent
+    des shuffles intra-warp au lieu de passer par la mémoire partagée et des
+    barrières (route_fusee : 7 µs/appel pour 12 jetons, verdict du 19/09).
+    Même nombre de lancements que le témoin (wmma + splitKreduce + sélection :
+    cuBLAS décide seul du split-K) : le gain visé est le temps de la sélection.
+    ``arrondi_bf16`` : dtype des logits = celui de ``w`` (comme `_router_logits`).
+    Les versions 0ca85673 (1 programme, 21,5 µs) et 3e62a9b5 (32 programmes,
+    13 µs, latence d'un bloc par SM) calculaient les logits en Triton — routage
+    ≠ témoin par construction (la sortie bf16 du témoin rend toute différence
+    d'ordre de somme fp32 visible à 2⁻⁸ : |Δtopw| 10⁻³, experts qui basculent,
+    verdict-c15-niveau3-coder-19-09 addendum 03 h 17) : retirées."""
+    T, H = x.shape
+    E, H2 = w.shape
+    assert H == H2 and E <= 1024 and k <= 32, (x.shape, w.shape, k)
+    logits = torch.nn.functional.linear(x.to(w.dtype), w)
+    return route_fusee(logits, bias, k, sigmoide, renorm, scale, valid, usage, num_warps=1)

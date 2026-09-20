@@ -941,7 +941,8 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
             from . import gemm_etroit
             if gemm_etroit.disponible() and gemm_etroit.eligible(t):
                 CHEMINS_INT8["etroit_triton"] += 1
-                y = gemm_etroit.gemm_etroit(xf.contiguous(), t, sortie_fp32)[:, : t.shape[0]]
+                y = gemm_etroit.gemm_etroit(xf.contiguous(), t, sortie_fp32,
+                                            compact=glue_compact("etroit"))[:, : t.shape[0]]
                 return y.reshape(*orig_shape[:-1], t.shape[0])
         if k_pad != xf.shape[-1]:
             xf = torch.nn.functional.pad(xf, (0, k_pad - xf.shape[-1]))
@@ -1203,6 +1204,39 @@ _PAGED_ATTN = os.environ.get("ACVRAM_PAGED_ATTN", "triton")
 if _PAGED_ATTN not in ("cuda", "triton"):
     raise ValueError(f"ACVRAM_PAGED_ATTN={_PAGED_ATTN!r} : attendu cuda ou triton")
 
+# C15 niveau 3 (revue/chantier-c15-niveau3-coder-20-09) : nœuds de graphe du
+# pas de décodage GQA/MoE réduits par fusions, chacune débranchable par cette
+# seule variable (0 = témoin, le chemin d'avant, au bit) : routeur MoE en un
+# noyau (logits + top-k, route_prep.route_logits_fusee), GEMM étroit int8 sans
+# somme torch des tranches split-K (réduction par le dernier programme,
+# gemm_etroit), attention paginée sans second noyau de réduction
+# (attn_paginee). Défaut 0 tant que le scellé n'est pas mesuré sur carte.
+_GLUE_COMPACT = int(os.environ.get("ACVRAM_GLUE_COMPACT", "1"))   # défaut 1 depuis le 20/09 (C15-3d bis)
+if _GLUE_COMPACT not in (0, 1):
+    raise ValueError(f"ACVRAM_GLUE_COMPACT={_GLUE_COMPACT!r} : attendu 0 ou 1")
+# C15-3b : bissection par fusion — sous GLUE_COMPACT=1, la liste des fusions
+# prises (vide = toutes) : routeur | attn | etroit | kv (kv_write par tranches,
+# q sans copie, valid une fois par pas). Une fusion absente de la liste suit
+# le témoin. Sans effet sous GLUE_COMPACT=0.
+GLUE_COMPACT_FUSIONS = ("routeur", "attn", "etroit", "kv")
+_GLUE_COMPACT_ITEMS = os.environ.get("ACVRAM_GLUE_COMPACT_ITEMS", "")
+for _f in filter(None, _GLUE_COMPACT_ITEMS.split(",")):
+    if _f not in GLUE_COMPACT_FUSIONS:
+        raise ValueError(f"ACVRAM_GLUE_COMPACT_ITEMS={_GLUE_COMPACT_ITEMS!r} : fusions connues "
+                         f"{', '.join(GLUE_COMPACT_FUSIONS)}")
+
+
+def glue_compact(fusion: str = "") -> bool:
+    """Lu à l'appel (pas à l'import) : `regime.masquer` réécrit l'attribut.
+    ``fusion`` : nom d'une fusion (GLUE_COMPACT_FUSIONS) — vraie si le niveau
+    3 est pris ET que la fusion n'est pas écartée par GLUE_COMPACT_ITEMS."""
+    if not _GLUE_COMPACT:
+        return False
+    if fusion and _GLUE_COMPACT_ITEMS:
+        assert fusion in GLUE_COMPACT_FUSIONS, fusion
+        return fusion in _GLUE_COMPACT_ITEMS.split(",")
+    return True
+
 
 def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
                     seq_lens: torch.Tensor, n_rep: int,
@@ -1224,6 +1258,19 @@ def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
     d = q.shape[-1]
     if d not in (32, 64, 128, 256, 512):
         return None
+    # C5-b : clés par canal (kv_canal) — seule la variante CANAL du noyau CUDA
+    # sait lire sc E4M3 par bloc et le bloc courant bf16 ; le noyau Triton du
+    # poste E ne le sait pas. Sans le symbole : None → gather_fixed (qui lit
+    # la réserve) + decode_attention_fixed, jamais un noyau qui lirait des
+    # codes par canal avec des échelles par jeton.
+    if getattr(cache, "canal", False):
+        if not hasattr(ext, "paged_attention_canal"):
+            return None
+        return ext.paged_attention_canal(
+            q.contiguous(), cache.k, cache.k_scale, cache.v, cache.v_scale,
+            cache.k_scale_canal.view(torch.uint8), cache.tampon, cache.tampon_de,
+            tables.contiguous(), seq_lens.contiguous(), cache.cfg.num_kv_heads,
+            float(scale), int(q_len), int(window))
     # Poste E (poste7-b0-et-cause-lm4-17-09) : noyau Triton par groupe GQA,
     # opt-in tant que le scellé (≤ 1,5 ms b=12 ctx 2048 ET ≤ 0,72 ms b=1,
     # sortie = noyau CUDA ± 2⁻⁸) n'est pas mesuré ; décodage q_len = 1 seul.
@@ -1231,10 +1278,16 @@ def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
             and q.shape[1] // cache.cfg.num_kv_heads <= 16):
         from . import attn_paginee
         if attn_paginee.disponible():
+            # C15 niveau 3 : le noyau Triton lit q par ses pas (stride_qb,
+            # stride_qh) — la tranche q de la projection empilée passe sans
+            # copie (un nœud par couche) ; le témoin recopie comme avant.
+            compact = glue_compact("attn")
+            qq = q if (glue_compact("kv") and q.stride(2) == 1 and q.stride(1) == q.shape[2]) \
+                else q.contiguous()
             return attn_paginee.paged_attention(
-                q.contiguous(), cache.k, cache.k_scale, cache.v, cache.v_scale,
+                qq, cache.k, cache.k_scale, cache.v, cache.v_scale,
                 tables.contiguous(), seq_lens.contiguous(), cache.cfg.num_kv_heads,
-                float(scale), int(window))
+                float(scale), int(window), compact=compact)
     return ext.paged_attention(
         q.contiguous(), cache.k, cache.k_scale,
         cache.v, cache.v_scale, tables.contiguous(),

@@ -62,6 +62,10 @@ VARIABLES_LUES = {
     "ACVRAM_MLA_EAGER_TORCH",
     "ACVRAM_MLA_LATENT_FP8",
     "ACVRAM_KV_FORMAT",
+    # C5-b (memory/kv_canal.py) : clés int8 par canal, et la taille de la
+    # réserve bf16 des blocs courants.
+    "ACVRAM_KV_INT8_CANAL",
+    "ACVRAM_KV_CANAL_RANGS",
     "ACVRAM_PREFILL_GROUPED",
     "ACVRAM_PAGED_ATTN",
     "ACVRAM_NARROW_KERNEL",

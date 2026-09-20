@@ -331,6 +331,17 @@ class ModelSpec:
         per_layer = 2 * self.num_key_value_heads * self.head_dim * kv_bits / 8
         # échelles groupées du KV quantifié : un fp16 par tête, par jeton, par kv
         overhead = 0.0 if kv_bits >= 16 else 2 * self.num_key_value_heads * 2
+        # C5-b (REGLES § 6 : le régime porte la taille de bloc) : sous
+        # ACVRAM_KV_INT8_CANAL=1 chaque bloc int8 porte en plus sc E4M3 [HKV, D]
+        # et tampon_de int32 (`KVCacheConfig.bytes_per_block`) ; budgété en
+        # octets « par jeton » sans ce terme, le planificateur accordait 3,1 %
+        # de blocs en moins (Coder : 23 824 jetons pour 12 × 2 048 demandés,
+        # une séquence tronquée, `certifie` refusait — poste2, 20/09).
+        if kv_bits == 8:
+            from ..memory import kv_canal
+            from ..memory.kvcache import BLOCK_SIZE
+            if kv_canal.ACTIF:
+                overhead += (self.num_key_value_heads * self.head_dim + 4) / BLOCK_SIZE
         return int((per_layer + overhead) * self.couches_avec_kv)
 
     def activations_prefill_bytes(self, n_jetons: int) -> int:

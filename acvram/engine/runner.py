@@ -353,10 +353,17 @@ def _etat_eco() -> dict:
     return eco.etat_eco(relire=True)
 
 
+def _glue_texte() -> str:
+    """`glue=compact(8)` | `glue=temoin` (C15-3d, regime.glue_texte)."""
+    from ..regime import glue_texte
+    return glue_texte()
+
+
 def _mla_core_texte() -> str:
-    """`mla_core=tf32(≤2048 clés)` hors fp32 (poste7-c14-defaut-tf32-8k addendum)."""
+    """`mla_core=tf32(≤2048 clés)` hors fp32 (poste7-c14-defaut-tf32-8k addendum) ; `flash(fp32)` (C13-c)."""
     from . import mla
-    return "" if mla._MLA_CORE == "fp32" else f" mla_core={mla._MLA_CORE}(≤{mla._MLA_CORE_MAX_CLES} clés)"
+    txt = mla.regime_coeur_texte()
+    return f" {txt}" if txt else ""
 
 
 def _eco_texte(e: dict) -> str:
@@ -680,7 +687,8 @@ class Engine:
                f"({self.stats.cached_prompt_tokens} vram+hôte, "
                f"{self.stats.host_kv_tokens} hôte) "
                + _eco_texte(r["eco"])
-               + _mla_core_texte())
+               + _mla_core_texte()
+               + " " + _glue_texte())
 
     def fermer(self) -> None:
         """Arrêt du moteur : rend l'horloge éco posée par ce processus

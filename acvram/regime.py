@@ -161,6 +161,10 @@ VARIABLES: tuple[Variable, ...] = (
              "poste F (3b) : norme d'entrée dans le GEMV int8 q/k/v — RÉFUTÉ 6dbb1bb (+0,31 ms/pas, norme recalculée par bloc), témoin"),
     Variable("ROPE_KV", "0", ("acvram.engine.model", "_ROPE_KV"), "0",
              "poste F (3a) : normes + RoPE + kv_write int8 en un noyau Triton — RÉFUTÉ a3f1b7e (corrompt sous graphe / codes ≠ kv_write_int8), témoin"),
+    Variable("GLUE_COMPACT", "1", ("acvram.kernels", "_GLUE_COMPACT"), "0",
+             "C15-3d (chantier-c15-niveau3-coder-20-09) : DÉFAUT 1 depuis le 20/09 (verdict-c15-niveau3-coder-19-09 addendum 05 h 15 : Coder b=12 servi sous éco 2 700 +11,5 % t/s, J 0,966 × le témoin, capture 5/5, experts égaux ≤ 1,2 × le taux du témoin A ON/OFF) ; 1 = 641 lancements/pas au lieu de 1 169 : logits du routeur par le MÊME cuBLAS que le témoin (routage au bit) + sélection top-k en un noyau à 1 warp, glue KV/q/valid au bit (kv_write_int8 par pas, q sans copie), GEMM étroit int8 réduit par son dernier programme (4 → 1 nœud), attention paginée réduite par son dernier programme (2 → 1, ATTN_WARPS_COMPACT) | 0 = témoin (le chemin d'avant)"),
+    Variable("GLUE_COMPACT_ITEMS", "", ("acvram.kernels", "_GLUE_COMPACT_ITEMS"), None,
+             "C15-3b (bissection) : sous GLUE_COMPACT=1, liste des fusions prises, séparées par des virgules — routeur | attn | etroit | kv ; vide = toutes ; une fusion absente suit le témoin"),
     Variable("ROUTE_PREP", "2", ("acvram.engine.model", "_ROUTE_PREP"), "0",
              "poste F : 2 = moe_route + route_prep fusionnés (F2, défaut, verdict-f2-topk-17-09) | 1 = route_prep seul (F1) | 0 = torch"),
     Variable("MOE_DECODE_FUSED", "0", ("acvram.engine.model", "_MOE_DECODE_FUSED"), "0"),
@@ -182,10 +186,16 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MLA_PREP_NOYAU", "1", ("acvram.engine.mla", "_MLA_PREP_NOYAU"), "0"),
     Variable("MLA_ECRIT_TORCH", "", None, "1",
              "sonde C15 niveau 2 (diagnostic) : 1 = à b=1 sous MLA_GLUE=2, l'écriture du latent passe par _ecrit_ligne (torch) au lieu de mla_ecrit_latent — isole ce noyau sous rejeu de graphe"),
+    Variable("MLA_PREP_TEMOIN", "0", ("acvram.engine.mla", "_MLA_PREP_TEMOIN"), "0",
+             "sonde C15 niveau 2 (diagnostic, scratchpad/c15-temoin-20-09) : 1 = clones capturés des entrées/sorties de mla_prep_batch et de q_eff avant l'attention, lus après rejeu par temoin.py ; 0 = témoin"),
     Variable("MLA_GLUE", "1", ("acvram.engine.mla", "_MLA_GLUE"), "0",
              "C15 (chantier-c15-19-09) : DÉFAUT 1 depuis le 20/09 (verdict-c15 : −459 lancements/pas, jetons identiques, GLM b=1 −0,43 ms) ; 1 = glue torch du décodage MLA b=1 retirée au bit (v_b fp32 une fois, cat kvp, stack RoPE, demi-tables cos/sin, résidu différé add_norm des couches MLA : −6 lancements/couche ; MoE : tok int64 servi, eid converti une fois, x[tok] une fois, tok_g = seq : −3 Marlin / −6 distincte) | 2 = en plus b=1 par decode_static_batch_complet (mla_prep_batch, numérique du lot, ≤ 1 ulp) | 0 = témoin"),
     Variable("MLA_CORE", "tf32", ("acvram.engine.mla", "_MLA_CORE"), "tf32",
-             "C13 (poste7-c13a-defaut-19-09 § 1 + addendum) : précision des deux premiers produits du cœur d'attention MLA au PRÉFILL (scores, o_lat), softmax et noyau mla_1p en fp32 inchangés — tf32 DÉFAUT (C13-a tenu : 7 191 j/s, ΔPPL géo +0,00066) | fp32 (référence de qualité) | bf16 (C13-b : entrées bf16, acc fp32 ; scellé contre fp32 : prefill GLM ≥ 9 000 j/s ET ΔPPL géo ≤ +0,002 → défaut)"),
+             "C13 (poste7-c13a-defaut-19-09 § 1 + addendum) : précision des deux premiers produits du cœur d'attention MLA au PRÉFILL (scores, o_lat), softmax et noyau mla_1p en fp32 inchangés — tf32 DÉFAUT (C13-a tenu : 7 191 j/s, ΔPPL géo +0,00066) | fp32 (référence de qualité) | bf16 (C13-b : entrées bf16, acc fp32 ; scellé contre fp32 : prefill GLM ≥ 9 000 j/s ET ΔPPL géo ≤ +0,002 → défaut) | flash (C13-c forme 1, chantier-c13c-19-09 : noyau Triton causal fusionné kernels/attn_mla_causal.py, fp32 plein, un lancement par couche, scores jamais en HBM, moitié masquée sautée ; sortie = fp32 ± 8 ulp/ligne, aucune porte de PPL, toutes longueurs ; scellé cœur ≤ 110 ms ET prefill GLM ≥ 9 000 j/s ; sans Triton : repli fp32 nommé)"),
+    Variable("MLA_FLASH_OPERANDES", "tf32", ("acvram.engine.mla", "_FLASH_OPERANDES"), None,
+             "C13-c forme 2 : précision des opérandes du cœur flash (tf32 défaut, ≤ 2 048 clés vues ; fp32 = forme 1, 0,88 × cuBLAS mais structure ×26 ; tf32x3 sonde) — la ligne de régime nomme mla_core=flash(<operandes>,<tuile>)"),
+    Variable("MLA_FLASH_TUILE", "", None, None,
+             "C13-c diagnostic : BM,BN,warps,stages de la tuile du cœur flash (défaut : par la shared de la carte — sm_120 32,64,4,1 ; ≥ 200 Ko 64,64,8,2) ; la ligne de régime nomme la tuile"),
     Variable("MLA_CORE_VB", "0", ("acvram.engine.mla", "_MLA_CORE_VB"), "0",
              "C13 (poste7-c13a-defaut § 2) : 1 = le 3e produit du préfill y = v_b·o_lat (8ae21997) suit MLA_CORE ; 0 = fp32 ; scellé prefill ≥ 7 450 j/s ET ΔPPL géo ≤ +0,001 contre 2 produits → défaut 1"),
     Variable("MLA_CORE_DECODE", "fp32", ("acvram.engine.mla", "_MLA_CORE_DECODE"), "fp32",
@@ -197,6 +207,14 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("KV_LM4_PUITS", "", None, None, "diagnostic lm4 : positions < N gardées int8 ; 0 = contrôle (lm4 partout par le diagnostic)"),
     Variable("KV_FORMAT", "", ("acvram.memory.tiering", "_KV_FORMAT"), None,
              "cache KV des paliers carte : vide = capacités (int8) | lm4 4 bits par rotation | lm3, lm2 témoins"),
+    Variable("KV_INT8_CANAL", "0", ("acvram.memory.kv_canal", "ACTIF"), "0",
+             "C5-b (chantier-c5b-19-09) : 1 = clés int8 à échelle E4M3 par canal et par tête sur chaque bloc de 16 "
+             "(bloc courant en bf16 dans une réserve, quantifié à sa fermeture ; V par jeton ; lecture par le noyau "
+             "CUDA paginé variante CANAL, q ⊙ s_bloc) ; 0 = par jeton (défaut jusqu'au scellé : ΔPPL 3 × 2 048 ≤ +0,002 "
+             "contre bf16 ET pas b=12 ≥ défaut − 1 % ET capture 5/5) ; ligne de régime kv=int8-canal16"),
+    Variable("KV_CANAL_RANGS", "64", ("acvram.memory.kv_canal", "RANGS"), None,
+             "C5-b : lignes bf16 de la réserve des blocs courants par couche (16 Kio chacune pour Coder) ; "
+             "épuisée → le bloc repart par jeton"),
     Variable("MLA_NORME_NOYAU", "1", None, "0"),
     Variable("MLA_EAGER_TORCH", "", None, "1"),
     Variable("MLA_DEBUG_ECART", "", None),
@@ -208,6 +226,10 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("FUSION_PARTIELLE", "0", None, "0"),
     Variable("LOGITS_BF16", "", None, "", "1 : tête en bf16 (précision-de-sortie-invisible-à-la-PPL)"),
     Variable("GRAPHS_EAGER", "", None, "1"),
+    Variable("ATTN_WARPS_COMPACT", "8", ("acvram.kernels.attn_paginee", "WARPS_COMPACT"), "4",
+             "C15-3d bis : warps du noyau d attention paginée fusionné (GLUE_COMPACT=1) ; DÉFAUT 8 (poste2 05 h 15, ABAB : B8 1 417 t·s⁻¹ · 0,2073 J = +11,5 % · 0,966 × A ; B4 1 386 · 0,2116 : 4 warps ne rend rien en W, 369 = 369, et perd 2 %) ; 4 = bras"),
+    Variable("ROUTAGE_TEMOIN", "0", ("acvram.engine.model", "_ROUTAGE_TEMOIN"), "0",
+             "diagnostic C15-3d : 1 = chaque couche MoE copie topi dans un tampon persistant (lisible sous graphes, equiv-b12.py « experts égaux ») ; 0 = témoin"),
     Variable("GODETS_B", "1", ("acvram.engine.graphs", "_GODETS_B"), "0",
              "clé de graphe CUDA, dimension b : 1 = lot arrondi au godet (puissances de deux, plafond HYBRID_SLOTS ; en place depuis le 11/09) | 0 = lot exact, témoin de mesure du chantier C4 (revue/chantier-c4-19-09) ; même sortie dans les deux cas"),
     Variable("PA_ARM", "A", None, "A"),
@@ -314,6 +336,22 @@ def _horloge() -> Optional[str]:
         return "?"
 
 
+def glue_texte() -> str:
+    """C15-3d (défaut le 20/09) : la glue compacte est nommée sur la ligne, défaut compris —
+    ``glue=compact(8)`` (attention fusionnée à 8 warps), ``glue=compact(8,items=attn,kv)``
+    en bissection, ``glue=temoin`` sous GLUE_COMPACT=0 : la cellule 0.6.24 (poste7 05 h 40)
+    portait une ligne qui ne disait pas le régime servi."""
+    try:
+        from . import kernels as _k
+        from .kernels import attn_paginee as _ap
+        if not getattr(_k, "_GLUE_COMPACT", 0):
+            return "glue=temoin"
+        items = getattr(_k, "_GLUE_COMPACT_ITEMS", None) or ""
+        return f"glue=compact({_ap.WARPS_COMPACT}" + (f",items={items}" if items else "") + ")"
+    except Exception as exc:                              # noqa: BLE001
+        return f"glue=?({type(exc).__name__})"
+
+
 def regime_ligne() -> str:
     """Une ligne pour l'en-tête d'une mesure : ce qui diffère du défaut,
     puis extension et masques. « défaut » seul veut dire : tout au défaut."""
@@ -361,10 +399,20 @@ def regime_ligne() -> str:
     # quand une carte est visible : à sec la ligne ne change pas.
     try:
         from .engine import mla as _mla
-        if _mla._MLA_CORE != "fp32":
-            parts.append(f"mla_core={_mla._MLA_CORE}(≤{_mla._MLA_CORE_MAX_CLES} clés)")
+        if _mla.regime_coeur_texte():                     # tf32/bf16(≤2048 clés) | flash(fp32) | flash(repli fp32: …)
+            parts.append(_mla.regime_coeur_texte())
     except Exception:                                     # noqa: BLE001
         pass
+    # C5-b : le format des clés est nommé dès qu'il n'est plus celui d'aujourd'hui
+    # (int8 par jeton) — la variable dit ce qui est DEMANDÉ, cette étiquette ce
+    # que le cache int8 fait de ses clés.
+    try:
+        from .memory import kv_canal as _kvc
+        if _kvc.ACTIF:
+            parts.append("kv=int8-canal16")
+    except Exception:                                     # noqa: BLE001
+        pass
+    parts.append(glue_texte())
     try:
         from . import eco as _eco
         h = _eco.horloge_du_processus()
