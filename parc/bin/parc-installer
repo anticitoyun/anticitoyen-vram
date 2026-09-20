@@ -208,7 +208,8 @@ def classer(d: Path) -> tuple[str, str, int | None] | None:
         except Exception:
             cfg = {}
         ctx = cfg.get("max_position_embeddings") or (cfg.get("text_config") or {}).get("max_position_embeddings")
-        if "acvram.json" in noms or any(n.startswith("manifeste") for n in noms):
+        if ("acvram_manifest.json" in noms or "acvram.json" in noms or any(n.startswith("manifeste") for n in noms)
+                or any(n.startswith("acvram-") and n.endswith(".safetensors") for n in noms)):
             return ("acvram", "nvfp4", ctx)
         q = cfg.get("quantization_config") or {}
         meth = str(q.get("quant_method", "")).lower()
