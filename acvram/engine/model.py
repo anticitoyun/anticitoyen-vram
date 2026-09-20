@@ -2796,6 +2796,24 @@ class DecoderLayer(nn.Module):
             y = self.mlp(h)
         return x + (y if r == 1.0 else y * r)
 
+    def forward_res(self, x: torch.Tensor, delta: Optional[torch.Tensor],
+                    batch: ForwardBatch, cache: Optional[PagedKVCache]):
+        """C15-prefill : `forward` à résidu différé — reçoit (x, delta) et rend
+        (x, y) ; la somme ``x + delta`` de la couche précédente est absorbée par
+        la première normalisation (`add_norm`, un lancement de moins et 8,4 Mo
+        de moins relus par couche à L = 2 047), comme `decode_fixed_res` au
+        décodage. Même arithmétique que `forward` : bf16(fp32(x) + fp32(delta))
+        puis la norme (rmsnorm_bf16_kernel avec résidu, mult = 1 — réservé au
+        multiplicateur 1,0 : y·r puis + arrondit deux fois, le noyau une)."""
+        assert self.residual_multiplier == 1.0
+        if delta is None:
+            h = self.input_layernorm(x)
+        else:
+            x, h = add_norm(x, delta, self.input_layernorm, 1.0)
+        a = self.self_attn(h, batch, cache)
+        x, h2 = add_norm(x, a, self.post_attention_layernorm, 1.0)
+        return x, self.mlp(h2)
+
     def decode_fixed(self, x: torch.Tensor, positions: torch.Tensor,
                      slots: torch.Tensor, block_tables: torch.Tensor,
                      seq_lens: torch.Tensor, max_pos: int,
@@ -3029,8 +3047,18 @@ class ACVRamModel(nn.Module):
             x = x * self.spec.embedding_multiplier
 
         current = None
+        # C15-prefill : résidu différé au préfill eager — (x, delta) d'une couche
+        # à la suivante, la somme faite par add_norm de la couche suivante (et
+        # par celle de la norme finale) ; réservé aux blocs ordinaires à
+        # multiplicateur 1,0, sinon `forward` (le chemin d'avant, au bit).
+        differe = kernels.prefill_compact("residu") and all(
+            type(l) is DecoderLayer and l.self_attn is not None and l.mlp is not None
+            and l.mlp_device == l.device and l.residual_multiplier == 1.0 for l in self.layers)
+        delta = None
         for i, layer in enumerate(self.layers):
             if layer.device != current:
+                if delta is not None:
+                    x, delta = x + delta, None
                 x = x.to(layer.device, non_blocking=True)
                 current = layer.device
             # On lance le transfert de la couche suivante avant d'exécuter
@@ -3038,7 +3066,10 @@ class ACVRamModel(nn.Module):
             # vive se cache derrière du vrai travail.
             if i + 1 < len(self.layers):
                 self.layers[i + 1].prefetch()
-            x = layer(x, batch, self.caches.get(i))
+            if differe:
+                x, delta = layer.forward_res(x, delta, batch, self.caches.get(i))
+            else:
+                x = layer(x, batch, self.caches.get(i))
             _trace_couche("forward", i, layer)
             if _SYNC_COUCHES:
                 # Diagnostic : une faute CUDA asynchrone remonte au premier
@@ -3050,8 +3081,15 @@ class ACVRamModel(nn.Module):
                     raise RuntimeError(f"faute CUDA après la couche {i} "
                                        f"({type(layer).__name__} sur {layer.device}) : {exc}") from exc
 
-        brut = x
-        x = self.norm(x.to(self.norm.weight.device))
+        if delta is None:
+            brut = x
+            x = self.norm(x.to(self.norm.weight.device))
+        elif x.device == self.norm.weight.device:
+            # résidu différé : la dernière somme dans la norme finale
+            brut, x = add_norm(x, delta, self.norm, 1.0)
+        else:
+            brut = x + delta
+            x = self.norm(brut.to(self.norm.weight.device))
         if return_hidden:
             return x
         if self.mtp is not None:

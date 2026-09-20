@@ -185,6 +185,51 @@ def test_proj_partagee_de_l_attention_suit_le_temoin(monkeypatch):
     assert Attention._proj_i8c_partage(f, x) is None
 
 
+# --- fusion 3 : résidu différé au préfill -------------------------------------
+
+def _prefill(model, prompt):
+    from acvram.engine.model import ForwardBatch
+    from acvram.memory.kvcache import BLOCK_SIZE, BlockAllocator
+    n = len(prompt)
+    alloc = BlockAllocator(model.caches[0].cfg.num_blocks)
+    blocks = alloc.allocate((n + BLOCK_SIZE - 1) // BLOCK_SIZE + 1)
+    slots = torch.tensor([blocks[i // BLOCK_SIZE] * BLOCK_SIZE + i % BLOCK_SIZE for i in range(n)])
+    batch = ForwardBatch(torch.tensor(prompt), torch.arange(n), [n], [n], [torch.tensor(blocks)], slots, True)
+    return model(batch, logits_positions=torch.arange(n))
+
+
+def test_residu_differe_au_prefill_rend_les_logits_du_temoin(converted, monkeypatch):
+    """Tiny llama à sec : sous PREFILL_COMPACT=1 le préfill passe par `forward_res`
+    (compté) et rend, sur TOUS les jetons, les octets des logits du témoin ; le
+    dernier delta va dans la norme finale. À sec `add_norm` est le repli torch
+    (add puis norme = le chemin d'avant) : ce test tient la plomberie ; l'égalité
+    du noyau rmsnorm_bf16 avec résidu est celle du décodage (model.py, docstring
+    de decode_fixed_res) et se relit sur carte par la PPL au bit de la chaîne."""
+    from acvram.engine.loader import load_model
+    from acvram.engine.model import DecoderLayer
+    loaded = load_model(converted, dtype=torch.float32, device_override="cpu")
+    model = loaded.model
+    prompt = [5, 42, 7, 99, 13, 8, 21, 3]
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 0)
+    ref = _prefill(model, prompt)
+    appels = []
+    vrai = DecoderLayer.forward_res
+    monkeypatch.setattr(DecoderLayer, "forward_res", lambda self, *a: appels.append(1) or vrai(self, *a))
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 1)
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT_ITEMS", "")
+    y = _prefill(model, prompt)
+    assert len(appels) == len(model.layers) and y.shape == ref.shape and torch.equal(y, ref)
+    # bissection : sans « residu », le chemin d'avant, aucun forward_res
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT_ITEMS", "epilogue")
+    y = _prefill(model, prompt)
+    assert len(appels) == len(model.layers) and torch.equal(y, ref)
+    # témoin cassant : un multiplicateur résiduel ≠ 1 (granite) écarte le chemin
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT_ITEMS", "")
+    monkeypatch.setattr(model.layers[1], "residual_multiplier", 0.5)
+    _prefill(model, prompt)
+    assert len(appels) == len(model.layers)
+
+
 def test_une_valeur_hors_domaine_est_refusee():
     env = dict(os.environ, ACVRAM_PREFILL_COMPACT="2", CUDA_VISIBLE_DEVICES="")
     out = subprocess.run([sys.executable, "-c", "import acvram.kernels"], env=env, capture_output=True, text=True, timeout=120)
