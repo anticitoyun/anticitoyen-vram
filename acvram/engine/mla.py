@@ -197,6 +197,13 @@ if _MLA_GLUE not in (0, 1, 2):
 # mla_decode_1p seulement (les deux noyaux d'avant restent bf16). Réfuté si
 # la PPL sort de ± 0,004 → bf16 gardé ; défaut 0 tant que ce n'est pas mesuré.
 _MLA_LATENT_FP8 = os.environ.get("ACVRAM_MLA_LATENT_FP8", "0") == "1"
+# Sonde (β) du niveau 2 (verdict-c15 addendum 05 h 08, poste2) : sous
+# ACVRAM_MLA_QABS_DEUX_MOITIES=1 le chemin =1 (decode_static, au bit avec torch) calcule
+# q_abs en deux moitiés de nope accumulées en fp32 puis arrondies une fois — un autre
+# ordre de somme, ≤ 1 ulp bf16, sans noyau. Si la PPL 8 192 + 512 bouge de +1 à +3 %
+# comme le niveau 2, c'est le modèle (GLM nvfp4) qui est instable à la marge, pas le
+# noyau ; sinon le niveau 2 porte autre chose qu'un ordre de somme. Diagnostic seul.
+_MLA_QABS_DEUX_MOITIES = os.environ.get("ACVRAM_MLA_QABS_DEUX_MOITIES", "0") == "1"
 FP8_PAD = 16
 
 
@@ -647,7 +654,13 @@ class MLAttention(nn.Module):
                 kvp = torch.cat([c, k_pe_r], dim=-1)
                 c, k_pe = kvp.split([self.rank, self.rope], dim=-1)
         c = self._norme(c, self.kv_a_norm)
-        q_abs = torch.einsum('hrn,thn->thr', self.k_b.to(x.dtype), q_nope)
+        if _MLA_QABS_DEUX_MOITIES:
+            m = self.nope // 2
+            kb = self.k_b.to(torch.float32); qn = q_nope.to(torch.float32)
+            q_abs = (torch.einsum('hrn,thn->thr', kb[..., :m], qn[..., :m])
+                     + torch.einsum('hrn,thn->thr', kb[..., m:], qn[..., m:])).to(x.dtype)
+        else:
+            q_abs = torch.einsum('hrn,thn->thr', self.k_b.to(x.dtype), q_nope)
         q_eff = torch.cat([q_abs, q_pe], dim=-1)             # [1, nh, rank+rope]
         k_new = torch.cat([c, k_pe], dim=-1)                 # [1, rank+rope]
         self._ecrit_ligne(st, k_new)
