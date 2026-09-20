@@ -238,10 +238,10 @@ class Modele(GObject.Object):
 
     @property
     def debit(self):
-        try:
-            return int(re.sub(r"[^0-9]", "", self.tps or "")) or -1
-        except ValueError:
-            return -1
+        # Le premier nombre de la cellule, pas ses chiffres concaténés : « 134,9* » (débit
+        # mesuré avant le 20/09, marqué d'une étoile) vaut 134,9, jamais 1349.
+        m = re.match(r"\s*(\d+(?:[.,]\d+)?)", self.tps or "")
+        return float(m.group(1).replace(",", ".")) if m else -1
 
     @property
     def outils_etat(self):
@@ -655,7 +655,7 @@ class Fenetre(Adw.ApplicationWindow):
             self._colonne("Moteur", lambda l, m: l.set_text(MOTEURS[m.provider].nom),
                           lambda m: ORDRE_MOTEUR.get(m.provider, 9), 104),
             self._colonne("Qualité", rendu_qual, rang_qualite_de := (lambda m: rang_qualite(m.qual)), 88),
-            self._colonne("tok/s", lambda l, m: l.set_text(str(m.tps or "?")),
+            self._colonne("tok/s (* avant 20/09)", lambda l, m: l.set_text(str(m.tps or "?")),
                           lambda m: m.debit, 62),
             self._colonne("Refus", rendu_refus, lambda m: rang_refus(m.refus), 88),
             self._colonne("Usage", rendu_usage, lambda m: (m.usage or "").lower(), 112),

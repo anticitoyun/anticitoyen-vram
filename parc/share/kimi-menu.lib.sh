@@ -56,6 +56,7 @@ choisir_alias() {
         "${refus[$i]}" "${usage[$i]}" "$c_d" "${modeles[$i]:0:34}" "${ctx[$i]}" "$c_0" >&2
     done
     [ -n "$charge" ] && printf '  %s● = modèle actuellement chargé%s\n' "$c_d" "$c_0" >&2
+    printf '  %s* après un débit = mesuré avant le 20/09 (poste précédent), sans mise à l’échelle%s\n' "$c_d" "$c_0" >&2
 
     printf '\n%sNuméro, texte pour filtrer (code, créatif, nsfw…), entrée = %s > %s' \
       "$c_t" "${alias[${vus[0]}]}" "$c_0" >&2
