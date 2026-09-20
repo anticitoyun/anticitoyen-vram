@@ -410,6 +410,11 @@ def _ctx_texte(engine) -> str:
     return " ctx_tenu=non-verifie" if v is None else (f" ctx_tenu={v}" if v != "absent" else " ctx_tenu=non-chauffe")
 
 
+def _masque_images_texte(masque) -> str:
+    """`masque_images=bidir|causal` sur la ligne dès qu'une tour est servie (famille lue au chargement)."""
+    return f" masque_images={masque}" if masque else ""
+
+
 def _vision_texte(tour) -> str:
     """Le mot ``vision=`` de la ligne du moteur (poste2 15 h 00 : la ligne de l'Engine ne le portait pas,
     seule celle de regime.py l'avait) : `vision=bf16(eager,transformers=5.17.0)` avec la tour, `vision=off`
@@ -512,6 +517,12 @@ class Engine:
         _regime.declarer_modele_charge(loaded.manifest)          # vision=off sur la ligne d'un alias texte (pièce a)
         self.vision: Optional[TourVision] = TourVision.depuis_dossier(
             loaded.path, loaded.manifest, self.model.embed_tokens.device)
+        # Une tour servie exige un masque de plage image connu pour sa famille : refus NOMMÉ au chargement
+        # (MasqueImageInconnu), jamais un bloc bidirectionnel appliqué par défaut (Qwen3-VL, 20/09 18:57)
+        self.masque_images: Optional[str] = None
+        if self.vision is not None:
+            from .vision import masque_images_famille
+            self.masque_images = masque_images_famille(self.spec)
         self.gdn_states: dict = {}
         # Hybrides à récurrence linéaire : les blocs KV ne suffisent pas à
         # reprendre une invite, l'état récurrent vit hors du cache paginé. On
@@ -796,6 +807,7 @@ class Engine:
                + " " + _hote_texte()
                + _vision_texte(self.vision)
                + _ctx_texte(self)
+               + _masque_images_texte(self.masque_images)
                + _mrope_texte(self.spec)
                + _deepstack_texte(self.vision))
 

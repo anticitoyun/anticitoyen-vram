@@ -244,6 +244,31 @@ class TourVision:
         return tour
 
 
+class MasqueImageInconnu(RuntimeError):
+    """Famille de modèle à images dont le masque du LM sur la plage image n'est pas connu : refus nommé."""
+
+
+# Masque du LM sur la plage image, PAR FAMILLE (poste7, poste7-p3-1-scelle-temoin-20-09) : Gemma 3/4 — les jetons image
+# se voient tous (bloc bidirectionnel, HF token_type_ids) ; Qwen2-VL / Qwen2.5-VL / Qwen3-VL — causal (HF
+# create_causal_mask, la non-causalité est dans la tour seulement). Trouvé le 20/09 18:57 : le bloc de Gemma
+# appliqué à Qwen3-VL rendait des lignes image fausses dès la couche 0 (diff-couches img02, au bit sous masque
+# causal). Une famille absente = refus nommé, jamais un défaut de classe.
+_MASQUE_PAR_FAMILLE = (("Gemma3", "bidir"), ("Gemma4", "bidir"),
+                       ("Qwen2VL", "causal"), ("Qwen2_5_VL", "causal"), ("Qwen3VL", "causal"))
+
+
+def masque_images_famille(spec: Any) -> str:
+    """'bidir' | 'causal' d'après ``architectures`` du config.json du modèle chargé (spec.raw) ; MasqueImageInconnu sinon."""
+    raw = getattr(spec, "raw", None) or {}
+    archs = [str(a) for a in (raw.get("architectures") or [])]
+    for a in archs:
+        for prefixe, masque in _MASQUE_PAR_FAMILLE:
+            if a.startswith(prefixe):
+                return masque
+    raise MasqueImageInconnu(f"masque de la plage image inconnu pour architectures={archs or '(absent)'} "
+                             f"(familles connues : {', '.join(p for p, _ in _MASQUE_PAR_FAMILLE)}) — alias à images refusé")
+
+
 def rematerialiser_tampons(module: torch.nn.Module, device: torch.device) -> list[str]:
     """Un module construit sur « meta » puis ``to_empty`` garde ses tampons NON persistants (absents du
     state_dict : ``inv_freq`` du RoPE de la tour Gemma 4) en mémoire NON initialisée — la tour tourne et
