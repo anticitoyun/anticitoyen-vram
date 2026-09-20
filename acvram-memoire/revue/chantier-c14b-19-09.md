@@ -1,5 +1,10 @@
 # Chantier C14-b — porter le noyau de C14 (grille par couche, partiels + combine) au décodage b=12 de GLM : GEMM mince + reduce + prep (2 ms/pas) ; fiche seule (`poste7-niveau2-faux-c14-defaut-20-09` § 1 ; aucune ligne de code)
 
+## État à la pause (09:08 machine, 20/09, utilisateur « pause du groupe ») — branche `poste1-c14b` (poste2 00f6fd06 fusionné), rien à moitié écrit dans le .cu
+* **combine_vb, les 37 lignes** : FAIT — cause trouvée par lecture et rejeu à sec : **l'annulation**, pas la tranche vide (témoin `.cu:6068/6079` = fusionné `.cu:6154/6165`, même garde ; jumeau à tranches vides fini, témoin cassant NaN ; rejeu de 200 lignes d'annulation : milliers d'ulp de |y64| dans les deux sens, juge des termes tenu). Juge (d) réécrit à l'échelle des termes (§ 7) dans le test carte (formes à lens inégaux ajoutées) et `equiv-reel.py` (lignes fautives nommées, compte inverse). À FAIRE : P1 de poste2 rejouée sur `2b077ad8` pour confirmer (attendu : ratio des termes < 1 partout, compte inverse ≈ compte direct ; une ligne fautive à len_b court ET ratio > 1 remettrait la tranche vide en cause).
+* **`ACVRAM_MLA_PREP_GRILLE`** : FAIT — variable séparée (défaut 0, `mla.py` `temoin = not _MLA_PREP_GRILLE`, `regime.py`, `cli.VARIABLES_LUES`, test de câblage à sec vert), chaîne A = 0/0, B = 1/1, `familles.py` attend le témoin en A. À FAIRE : le nsys (a) de poste2 (≤ 8 µs/couche, pas b=12 non perdu) → défaut 1 (commit séparé).
+* **En cours : rien.** Prochain geste : P1 (10 min) puis P2/P3 par poste2 ; à la reprise, lire (c) (+0,42 ms sous 310 W) à la lumière de (a)(b).
+
 ## Scellé provisoire (poste7, recopié)
 Niveau 2 (TF32 au décodage) est **faux** : un seul site passe en `s1688`, `gemmSN_TN` fp32 0,53 ms + `reduce` 0,52 restent (cuBLAS sert ces GEMM minces à M=12 par un noyau SIMT que `allow_tf32` n'atteint pas) ; ce qui reste du poste : **1,05 ms (GEMM mince + reduce) + 0,97 (`mla_prep_batch`) = 2,0 ms/pas b=12** (14 % du pas 13,9 ms). C14-b : ces 1,05 + 0,97 → **≤ 0,8 ms**, `ppl-decode-kv` au lot de 12 contre l'ancien chemin Δ ≤ +0,002, capture 5/5. Contrôle de poste2 (REGLES § 4 bis) : une PPL à b=1 ne juge pas un chemin pris à b > 4.
 
