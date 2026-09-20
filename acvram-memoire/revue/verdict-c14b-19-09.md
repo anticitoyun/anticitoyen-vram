@@ -9,3 +9,11 @@ suite : poste1 : (1) imprimer et publier e_e64 (einsum vs fp64) — si 2 ulp aus
 
 ## Rejouable
 `cd ~/travail/poste2-c14b && ETAPES=P1 ACVRAM_ARBRE=$PWD PYA=<python> bash scratchpad/c14b-20-09/chaine.sh` (3 min, extension en cache).
+
+## Addendum 20/09 08:41 — 31c5665c (juge (d) relatif, tables RoPE du test corrigées) : **tests carte 16 passed (4 s)** ; **(d) sur entrées réelles : FAUX par absence — `couches_pas: 0, prep_appels: 0`** : le harnais `equiv-reel.py` tourne à b=12 avec `enable_cuda_graphs=False` (ligne `graphes=off`) et sans `ACVRAM_GRAPHS_EAGER=1`, or le chemin `decode_static_batch_complet` (celui qui porte `mla_prep_batch` regrillé et `mla_1p_combine_vb`) n'est pris que sous graphes ou sous `GRAPHS_EAGER` (verdict-c15 addendum 01:40 : « à b=1 sans graphes le chemin batch_complet n'est pas pris ») — les sondes ne voient rien, le juge rend faux, la chaîne s'arrête ; nsys A/B, P2, P3 non mesurés
+instrument : `chaine.sh` `ETAPES="P1 P2 P3"` sur `poste2-c14b` 31c5665c (extension en cache, `EXT True True True`), P1 08:38:48-08:39:33 : `pytest` 16 passed ; `equiv-reel.py … 16` sous `ACVRAM_MLA_BATCH_FUSION=1`, `Engine(max_batch_size=12, enable_cuda_graphs=False)` ; `prise-P1.sh:14` ; journaux `sortie/{tests-carte.log,equiv-reel.log,chaine.tsv}`
+scellé (poste7, avant) : (d) ≤ 1 ulp bf16 vs einsum ET fp64 relatif par ligne, prep au bit ; `ok = couches_pas > 0 and …` (le contrôle rend bien faux sur l'absence — REGLES § 5 tenue)
+mesuré : `16 passed in 4,08 s` ; `RESULTAT {"couches_pas": 0, "prep_appels": 0, "positions": 0, …}` → `VERDICT (d) entrées réelles FAUX` en 39 s ; régime imprimé `graphes=off repli_eager=0 … BATCH_FUSION=1`
+verdict : **PARTIEL, défaut d'instrument (régime du harnais), pas de C14-b** — `equiv-reel.py` doit poser `ACVRAM_GRAPHS_EAGER=1` (formes fixes sans capture : le chemin batch_complet est pris, les sondes clonent, et le juge compare) ou capturer sous graphes avec les tampons témoins persistants ; une fois le chemin pris, (d) se juge en 40 s
+durée : P1 45 s (08:38:48-08:39:33) ; rédaction 3 min
+suite : poste1 : `GRAPHS_EAGER=1` dans `equiv-reel.py` (et refuser `couches_pas == 0` comme « NON MESURÉ », pas « FAUX ») ; puis pointeur, je rejoue P1-P3 (27 min) ; chef : indexer ; ma file : vide (08:42), carte libre
