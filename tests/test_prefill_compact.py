@@ -392,11 +392,17 @@ def test_prefill_moe_marlin_compact_au_bit_avec_le_temoin(monkeypatch):
 def test_rmsnorm_warp_au_bit_avec_le_noyau_a_bloc(H):
     """Sur carte : `rmsnorm_bf16_warp` (un warp par ligne, ordre de somme rejoué)
     rend les octets de `rmsnorm_bf16` (bloc par ligne), sans et avec résidu, sur
-    les formes du préfill et d'autres découpes TH ; témoin cassant : eps décalé."""
+    les formes du préfill et les autres découpes TH / EPT (H non multiple de TH
+    compris) ; témoin cassant : eps décalé ; H > 2 048 est refusé (le bloc)."""
     ext = kernels.get_extension()
     if ext is None or not hasattr(ext, "rmsnorm_bf16_warp"):
         pytest.skip("extension sans rmsnorm_bf16_warp")
     torch.manual_seed(H)
+    if H > 2048:
+        x = torch.randn(4, H, device="cuda").to(torch.bfloat16)
+        with pytest.raises(RuntimeError):
+            ext.rmsnorm_bf16_warp(x, torch.ones(H, device="cuda", dtype=torch.bfloat16), 1e-6)
+        return
     for R in (2047, 300, 9):
         x = (torch.randn(R, H, device="cuda") * 2.0).to(torch.bfloat16)
         res = (torch.randn(R, H, device="cuda") * 2.0).to(torch.bfloat16)
@@ -421,6 +427,7 @@ def test_norme_warp_reservee_au_prefill(monkeypatch):
     monkeypatch.setattr(kernels, "_PREFILL_COMPACT_ITEMS", "")
     assert L._norme_warp(Ext(), torch.empty(2047, 2048, dtype=torch.bfloat16))
     assert not L._norme_warp(Ext(), torch.empty(16, 2048, dtype=torch.bfloat16))
+    assert not L._norme_warp(Ext(), torch.empty(2047, 4096, dtype=torch.bfloat16))   # GLM : le bloc
     monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 0)
     assert not L._norme_warp(Ext(), torch.empty(2047, 2048, dtype=torch.bfloat16))
 

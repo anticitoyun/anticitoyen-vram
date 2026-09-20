@@ -6503,42 +6503,76 @@ std::vector<torch::Tensor> rmsnorm_bf16(torch::Tensor x, torch::Tensor w, double
 // rmsnorm_bf16_kernel (juge : tests/test_prefill_compact.py sur carte, puis la
 // PPL au bit). Le résidu suit la même formule que le noyau à bloc (écrit dans
 // xn puis relu, __syncwarp entre les deux).
-template <int TH>
+// Première version (a3a79e70, mesurée par poste2 07 h 22 : 26,4 µs par appel,
+// PLUS LENTE que le bloc à 21,9) : une boucle `#pragma unroll 1` sur les 32
+// warps rejoués, deux chargements par tour puis l'arbre — 32 latences de
+// mémoire en série par ligne, et 2 048 warps pour 170 SM (12 par SM) ne
+// couvrent rien. Ici la ligne entière est chargée d'abord dans des registres
+// (EPT = éléments par fil rejoué, H / 32 flottants par lane : 64 à H = 2048,
+// chargements indépendants émis d'un bloc), puis la somme est faite dans le
+// même ordre qu'avant depuis les registres ; la phase de sortie relit les
+// registres au lieu de la mémoire. Réservé à H ≤ 2 048 (au-delà, le bloc).
+template <int TH, int EPT>
 __global__ void rmsnorm_bf16_warp_kernel(const __nv_bfloat16 *__restrict__ x,
                                          const __nv_bfloat16 *__restrict__ w,
                                          __nv_bfloat16 *__restrict__ y,
                                          const __nv_bfloat16 *__restrict__ res,
                                          __nv_bfloat16 *__restrict__ xn,
                                          float mult, int H, float eps, long R) {
+    constexpr int NW = TH / 32;                        // warps rejoués du bloc
     const int lane = threadIdx.x & 31;
     const long row = (long)blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
     if (row >= R) return;
     const __nv_bfloat16 *xr = x + row * H;
     __nv_bfloat16 *yr = y + row * H;
+    float v[NW * EPT];                                 // v[wq * EPT + r] = x[32·wq + lane + TH·r]
+#pragma unroll
+    for (int wq = 0; wq < NW; ++wq)
+#pragma unroll
+        for (int r = 0; r < EPT; ++r) {
+            const int i = 32 * wq + lane + TH * r;
+            v[wq * EPT + r] = (i < H) ? __bfloat162float(xr[i]) : 0.f;
+        }
     if (res != nullptr) {
+        // la somme bf16(res + mult·x) comme le bloc (FFMA), écrite dans xn et
+        // gardée en registres — la valeur relue par le bloc est celle-ci
         const __nv_bfloat16 *rr = res + row * H;
         __nv_bfloat16 *nr = xn + row * H;
-        for (int i = lane; i < H; i += 32)
-            nr[i] = __float2bfloat16(__bfloat162float(rr[i])
-                                     + mult * __bfloat162float(xr[i]));
-        __syncwarp();
-        xr = nr;
+#pragma unroll
+        for (int wq = 0; wq < NW; ++wq)
+#pragma unroll
+            for (int r = 0; r < EPT; ++r) {
+                const int i = 32 * wq + lane + TH * r;
+                if (i < H) {
+                    const __nv_bfloat16 s = __float2bfloat16(__bfloat162float(rr[i]) + mult * v[wq * EPT + r]);
+                    nr[i] = s;
+                    v[wq * EPT + r] = __bfloat162float(s);
+                }
+            }
     }
     float ss = 0.f;
-#pragma unroll 1
-    for (int wq = 0; wq < TH / 32; ++wq) {
+#pragma unroll
+    for (int wq = 0; wq < NW; ++wq) {
         float p = 0.f;
-        for (int i = 32 * wq + lane; i < H; i += TH) {
-            const float v = __bfloat162float(xr[i]); p += v * v;
+#pragma unroll
+        for (int r = 0; r < EPT; ++r) {
+            const int i = 32 * wq + lane + TH * r;
+            if (i < H) { const float t = v[wq * EPT + r]; p += t * t; }
         }
         for (int o = 16; o > 0; o >>= 1) p += __shfl_xor_sync(0xffffffffu, p, o);
         ss += __shfl_sync(0xffffffffu, p, 0);          // red[wq] : la valeur du fil 0 du warp
     }
     const float rs = rsqrtf(ss / (float)H + eps);
-    for (int i = lane; i < H; i += 32) {
-        const float n = __bfloat162float(__float2bfloat16(__bfloat162float(xr[i]) * rs));
-        yr[i] = __float2bfloat16(n * __bfloat162float(w[i]));
-    }
+#pragma unroll
+    for (int wq = 0; wq < NW; ++wq)
+#pragma unroll
+        for (int r = 0; r < EPT; ++r) {
+            const int i = 32 * wq + lane + TH * r;
+            if (i < H) {
+                const float n = __bfloat162float(__float2bfloat16(v[wq * EPT + r] * rs));
+                yr[i] = __float2bfloat16(n * __bfloat162float(w[i]));
+            }
+        }
 }
 
 std::vector<torch::Tensor> rmsnorm_bf16_warp(torch::Tensor x, torch::Tensor w, double eps,
@@ -6567,14 +6601,18 @@ std::vector<torch::Tensor> rmsnorm_bf16_warp(torch::Tensor x, torch::Tensor w, d
     auto pw = reinterpret_cast<const __nv_bfloat16 *>(w.contiguous().data_ptr());
     auto py = reinterpret_cast<__nv_bfloat16 *>(y.data_ptr());
     auto flux = at::cuda::getCurrentCUDAStream();
+    const float m = (float)mult, e = (float)eps;
     // la découpe TH du noyau à bloc (1024 / 512 / 256 selon H) : c'est elle qui
-    // fixe l'ordre de la somme, elle est rejouée telle quelle
-    if (H >= 2048)
-        rmsnorm_bf16_warp_kernel<1024><<<blocs, 256, 0, flux>>>(px, pw, py, pres, pxn, (float)mult, H, (float)eps, R);
-    else if (H >= 1024)
-        rmsnorm_bf16_warp_kernel<512><<<blocs, 256, 0, flux>>>(px, pw, py, pres, pxn, (float)mult, H, (float)eps, R);
-    else
-        rmsnorm_bf16_warp_kernel<256><<<blocs, 256, 0, flux>>>(px, pw, py, pres, pxn, (float)mult, H, (float)eps, R);
+    // fixe l'ordre de la somme, elle est rejouée telle quelle ; EPT = éléments
+    // par fil rejoué = ceil(H / TH) ≤ 4 (H ≤ 2 048 : 64 registres par lane)
+    const int TH = H >= 2048 ? 1024 : (H >= 1024 ? 512 : 256);
+    const int EPT = (H + TH - 1) / TH;
+    TORCH_CHECK(H <= 2048 && EPT <= 4, "rmsnorm_bf16_warp : H <= 2048 attendu (au-dela : rmsnorm_bf16)");
+#define ACVRAM_RMSW(TH_, EPT_) rmsnorm_bf16_warp_kernel<TH_, EPT_><<<blocs, 256, 0, flux>>>(px, pw, py, pres, pxn, m, H, e, R)
+    if (TH == 1024) ACVRAM_RMSW(1024, 2);
+    else if (TH == 512) { if (EPT == 2) ACVRAM_RMSW(512, 2); else if (EPT == 3) ACVRAM_RMSW(512, 3); else ACVRAM_RMSW(512, 4); }
+    else { if (EPT == 1) ACVRAM_RMSW(256, 1); else if (EPT == 2) ACVRAM_RMSW(256, 2); else if (EPT == 3) ACVRAM_RMSW(256, 3); else ACVRAM_RMSW(256, 4); }
+#undef ACVRAM_RMSW
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     if (res.has_value()) return {y, xn};
     return {y};

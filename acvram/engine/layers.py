@@ -607,10 +607,12 @@ def add_norm(residu: torch.Tensor, y: torch.Tensor, norme, mult: float = 1.0):
 # ordre de somme, au bit). En dessous — le décodage, sous graphes — le noyau à
 # bloc reste : un nœud capturé ne change pas de noyau.
 NORME_WARP_MIN_LIGNES = 256
+NORME_WARP_H_MAX = 2048          # la ligne tient en registres (64 par lane) ; au-delà, le bloc
 
 
 def _norme_warp(ext, x: torch.Tensor) -> bool:
     return (kernels.prefill_compact("norm") and hasattr(ext, "rmsnorm_bf16_warp")
+            and x.shape[-1] <= NORME_WARP_H_MAX
             and x.numel() // x.shape[-1] >= NORME_WARP_MIN_LIGNES)
 
 
