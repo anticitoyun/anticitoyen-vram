@@ -231,6 +231,8 @@ class Attention(nn.Module):
         self.k_eq_v = k_eq_v
         self.window = window
         self.rope = rope
+        self.spec = spec
+        self._masque_images: Optional[str] = None     # 'bidir' | 'causal' (vision.masque_images_famille), posé au premier lot à images
         # Scaling « llama 4 » de ministral3/Devstral (transformers
         # modeling_ministral3.get_llama_4_attn_scale) : q ← q · (1 + β·ln(1 +
         # ⌊pos/plafond⌋)) après le RoPE, par jeton, sous rope yarn avec
@@ -591,6 +593,14 @@ class Attention(nn.Module):
                 # qui est à la fois plus rapide et un peu plus précis.
                 kk, vv = k[start:end], v[start:end]
             plages = batch.images_de(i)          # [] sans image : masque d'avant
+            if plages:
+                # porte de famille (vision.masque_images_famille) : Gemma → bloc bidirectionnel, Qwen → causal ;
+                # inconnu → MasqueImageInconnu (déjà levé au chargement quand une tour est servie)
+                if self._masque_images is None:
+                    from .vision import masque_images_famille
+                    self._masque_images = masque_images_famille(self.spec)
+                if self._masque_images != "bidir":
+                    plages = []
             if compact:
                 a = attention(q[start:end], kk, vv, True, self.scale,
                               q_offset=offset, window=self.window, n_rep=self.n_rep,
