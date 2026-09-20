@@ -977,7 +977,47 @@ class MoEBlock(nn.Module):
                 self.__dict__["experts_layout"] = "double(diag)"
             else:
                 self._liberer_pile_naturelle()
+        self._rendre_le_cache_apres_la_pile()
         return True
+
+    @staticmethod
+    def _rendre_le_cache_apres_la_pile() -> None:
+        """Rend au pilote les blocs libérés par la construction de la pile.
+
+        gemma-4-26B-A4B (chantier-gemma-capture-godet1-20-09) : la pile se
+        construit PARESSEUSEMENT, dans `GraphRunner._eligible` du premier
+        moteur (graphs.py) ou au premier `forward`. Chaque couche empile ses
+        experts (copie), les repacke en Marlin (seconde copie) puis rend les
+        sources et la pile naturelle — mais « rend » à l'allocateur PyTorch,
+        qui garde les segments en cache : sur gemma, 3 840 experts de moins
+        d'un Mio par projection (704 × 2 816 / 2 = 991 Kio) vivent dans le
+        bassin des petits blocs (segments de 2 Mio), inutilisable pour toute
+        autre demande. Au moment de la première capture, `mem_get_info` ne
+        voit presque rien de libre alors que `reserved − allocated` porte
+        des Gio (Ornith, journal du 19/09 : 376 Mio libres sur 31,4 Gio pour
+        ~19 Gio de poids + KV d'après le manifeste — ≥ 11 Gio en cache). Or
+        l'allocateur NE rend PAS son cache pendant une capture (garde
+        `captures_underway` de CUDACachingAllocator::malloc) : le bassin
+        privé du graphe exige des segments neufs, cudaMalloc échoue, la
+        capture échoue — seul le PREMIER moteur, celui qui a construit les
+        piles ; les suivants passent parce que capture-godets.py fait
+        `empty_cache()` entre deux moteurs. Même cause pour Triton (Ornith :
+        `Triton Error [CUDA]: out of memory` dans l'autotune de fla) : le
+        pilote alloue hors de l'allocateur PyTorch, donc hors de son cache.
+        Un `empty_cache()` ici, après chaque pile construite, coûte une
+        synchronisation par couche au chargement et rien en service.
+
+        `ACVRAM_PILE_SANS_RENDU=1` : témoin de mesure (bras A de la chaîne
+        carte, sans le correctif) — nommé une fois au journal, jamais un
+        défaut."""
+        if os.environ.get("ACVRAM_PILE_SANS_RENDU") == "1":
+            if not getattr(MoEBlock, "_sans_rendu_dit", False):
+                MoEBlock._sans_rendu_dit = True
+                print("[acvram] TÉMOIN ACVRAM_PILE_SANS_RENDU=1 : cache non rendu après "
+                      "les piles (bras sans correctif)", flush=True)
+            return
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def _liberer_pile_naturelle(self) -> None:
         """Disposition UNIQUE (poste7-p1-disposition-unique-18-09) : la pile
