@@ -816,7 +816,8 @@ class Engine:
                     try:
                         seq.image_embeds = [
                             (im.debut, im.fin,
-                             self.vision.traits(im.pixel_values, im.fin - im.debut))
+                             self.vision.traits(im.pixel_values, im.fin - im.debut,
+                                                supplement=getattr(im, "supplement", None)))
                             for im in seq.images]
                     except Exception as exc:                 # noqa: BLE001
                         print(f"[engine] refus : tour de vision en échec "

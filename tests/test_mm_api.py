@@ -75,7 +75,11 @@ class FauxProcesseur:
             ids.extend([img] * self.n if t == img else [t])
         pv = torch.stack([torch.tensor([b / 255.0 for b in o[:12]]).reshape(3, 2, 2)
                           for o in images])
-        return {"input_ids": torch.tensor([ids]), "pixel_values": pv}
+        # annexes façon Gemma4Processor (poste2 14 h 40) : image_position_ids [n_images, patches, 2] que
+        # get_image_features exige, mm_token_type_ids [1, T] qui n'est PAS une entrée de la tour
+        pos = torch.stack([torch.tensor([[i, p] for p in range(4)]) for i in range(len(images))])
+        return {"input_ids": torch.tensor([ids]), "pixel_values": pv, "image_position_ids": pos,
+                "mm_token_type_ids": torch.tensor([[1 if t == img else 0 for t in ids]])}
 
 
 class _Banc:
@@ -214,6 +218,9 @@ def test_image_sur_alias_vision_acceptee(vision):
     assert prompt_ids[frag.debut:frag.fin] == [vision.img] * N_IMG
     assert prompt_ids[frag.fin] != vision.img and prompt_ids[frag.debut - 1] != vision.img
     assert frag.sha256 == sha256_pixel_values(frag.pixel_values)
+    # les annexes du processeur suivent l'image (supplement), découpées par image, sans les hors-tour
+    assert set(frag.supplement) == {"image_position_ids"}, frag.supplement.keys()
+    assert tuple(frag.supplement["image_position_ids"].shape) == (1, 4, 2)
     assert tuple(frag.pixel_values.shape) == (1, 3, 2, 2)
     # N jetons comptés : l'invite rendue porte un <image>, expansé en N
     gabarit = render_chat(vision.tokenizer, [{"role": "user", "content": [
@@ -231,6 +238,7 @@ def test_deux_images_deux_fragments_deux_sha(vision):
     assert r.status_code == 200, r.text
     prompt_ids, images = vision.appels[-1]
     assert [f.fin - f.debut for f in images] == [N_IMG, N_IMG]
+    assert [int(f.supplement["image_position_ids"][0, 0, 0]) for f in images] == [0, 1]   # chaque image SES positions
     assert images[0].fin <= images[1].debut
     assert images[0].sha256 != images[1].sha256
     assert prompt_ids.count(vision.img) == 2 * N_IMG

@@ -389,28 +389,51 @@ def _plages(ids: list[int], jeton: int) -> list[tuple[int, int]]:
     return plages
 
 
+# Annexes du processeur qui accompagnent pixel_values IMAGE PAR IMAGE, de même première dimension
+# (Gemma 4 : image_position_ids [n, patches, 2] — sans elles get_image_features casse, poste2 14 h 40 ;
+# Qwen3-VL : image_grid_thw). Tout ce qui n'est pas une entrée du modèle (mm_token_type_ids, input_ids,
+# attention_mask) reste ici. Un nom inconnu de même forme est transmis aussi : c'est la tour qui sait.
+_ANNEXES_HORS_TOUR = {"pixel_values", "input_ids", "attention_mask", "token_type_ids", "mm_token_type_ids",
+                      "pixel_values_videos", "video_grid_thw"}
+
+
+def _annexes(sortie: dict, n: int) -> dict:
+    """{nom: tenseur [n, …]} des annexes découpables par image (même première dimension que le nombre d'images)."""
+    out = {}
+    for k, v in sortie.items():
+        if k in _ANNEXES_HORS_TOUR or k == "image_grid_thw" or not hasattr(v, "shape") or v.ndim == 0:
+            continue
+        if v.shape[0] == n:
+            out[k] = v
+    return out
+
+
 def _par_image(sortie: dict, n: int) -> list[tuple[Any, dict]]:
     """``pixel_values`` (et annexes) découpés par image : une ligne par image
-    (Gemma, forme [n, 3, H, W]) ou par ``image_grid_thw`` (Qwen, patches
-    concaténés). Sinon, refus : on ne devine pas une découpe."""
+    (Gemma, forme [n, patches, d] ou [n, 3, H, W]) ou par ``image_grid_thw``
+    (Qwen, patches concaténés). Sinon, refus : on ne devine pas une découpe.
+    Le ``supplement`` de chaque image porte ses annexes (``image_position_ids``,
+    ``image_grid_thw``…), que la tour reçoit en kwargs."""
     pv = sortie.get("pixel_values")
     if pv is None:
         raise ValueError("le processeur n'a rendu aucun pixel_values")
+    annexes = _annexes(sortie, n)
     thw = sortie.get("image_grid_thw")
     if thw is not None and len(thw) == n:
         out, pos = [], 0
         for i in range(n):
             k = int(thw[i].prod()) if hasattr(thw[i], "prod") else int(
                 thw[i][0] * thw[i][1] * thw[i][2])
-            out.append((pv[pos:pos + k], {"image_grid_thw": thw[i:i + 1]}))
+            supp = {"image_grid_thw": thw[i:i + 1], **{a: v[i:i + 1] for a, v in annexes.items()}}
+            out.append((pv[pos:pos + k], supp))
             pos += k
         if pos != pv.shape[0]:
             raise ValueError(f"image_grid_thw couvre {pos} patches, pixel_values en porte {pv.shape[0]}")
         return out
     if pv.shape[0] == n:
-        return [(pv[i:i + 1], {}) for i in range(n)]
+        return [(pv[i:i + 1], {a: v[i:i + 1] for a, v in annexes.items()}) for i in range(n)]
     if n == 1:
-        return [(pv, {})]
+        return [(pv, dict(annexes))]
     raise ValueError(f"{n} images mais pixel_values de forme {tuple(pv.shape)} "
                      "sans image_grid_thw : découpe par image inconnue")
 

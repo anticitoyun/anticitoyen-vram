@@ -345,3 +345,32 @@ def test_sans_transformers_un_alias_texte_se_charge_et_la_tour_le_nomme(converte
     # la version relevée sur la ligne : le nom d'une tour réelle est « transformers <version> »
     vision.TourVision(lambda pv: pv, torch.device("cpu"), nom="transformers 5.17.0")
     assert vision.regime_texte() == "vision=bf16(eager,transformers=5.17.0)"
+
+
+def test_les_annexes_du_processeur_suivent_l_image_jusqu_a_la_tour():
+    """poste2 14 h 40 sur gemma-4-31B-it-nvfp4-vision : « 'bool' object has no attribute 'all' » —
+    Gemma4Model.get_image_features(pixel_values, image_position_ids=…) exige les positions que le
+    processeur rend à côté de pixel_values ; la tour ne les recevait pas. Ici une tour factice qui
+    EXIGE image_position_ids : (1) une ImageRequete avec supplement les lui porte (kwargs, aucun nom
+    Gemma en dur dans le moteur) ; (2) sans supplement elle rend une TypeError nommée (jamais un
+    silence) ; (3) un tuple (frontière ancienne) porte un supplement vide ; (4) un objet à attributs
+    porte le sien tel quel."""
+    from acvram.engine.vision import ImageRequete, TourVision
+    recus = []
+
+    def calcul(pv, *, image_position_ids):
+        recus.append(image_position_ids)
+        return torch.zeros(1, int(image_position_ids.shape[1]), 8)
+    tour = TourVision(calcul, torch.device("cpu"), nom="factice-gemma")
+    pos = torch.tensor([[[0, 0], [0, 1], [0, 2]]])
+    im = ImageRequete.depuis(type("Frag", (), {"debut": 2, "fin": 5, "pixel_values": torch.zeros(1, 4),
+                                                "sha256": "s", "supplement": {"image_position_ids": pos}})())
+    assert im.supplement.keys() == {"image_position_ids"}
+    out = tour.traits(im.pixel_values, im.fin - im.debut, supplement=im.supplement)
+    assert out.shape == (3, 8) and torch.equal(recus[0], pos)
+    with pytest.raises(TypeError):
+        tour.traits(im.pixel_values, 3)                                       # positions manquantes : nommé
+    assert ImageRequete.depuis((2, 5, torch.zeros(1, 4), "s")).supplement == {}
+    tour2 = TourVision(lambda pv: torch.zeros(1, 3, 8), torch.device("cpu"), nom="factice-sans")
+    with pytest.raises(TypeError, match="refuse les annexes"):
+        tour2.traits(im.pixel_values, 3, supplement={"image_position_ids": pos})   # tour sans kwargs : nommé

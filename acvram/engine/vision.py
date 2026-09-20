@@ -15,7 +15,7 @@ une mini-tour factice, sans ``transformers``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import torch
@@ -48,6 +48,8 @@ class ImageRequete:
     fin: int
     pixel_values: Any
     sha256: str
+    supplement: dict = field(default_factory=dict)   # annexes du processeur PAR IMAGE (Gemma 4 : image_position_ids ;
+                                                     # Qwen3-VL : image_grid_thw), passées telles quelles à la tour
 
     @classmethod
     def depuis(cls, obj: Any) -> "ImageRequete":
@@ -58,16 +60,18 @@ class ImageRequete:
                 raise ValueError(f"image : tuple de {len(obj)} éléments, attendu "
                                  "(debut, fin, pixel_values, sha256)")
             d, f, pv, sha = obj
+            supp = {}
         else:
             try:
                 d, f, pv, sha = obj.debut, obj.fin, obj.pixel_values, obj.sha256
             except AttributeError as exc:
                 raise ValueError(f"image : objet {type(obj).__name__} sans attributs "
                                  "debut/fin/pixel_values/sha256") from exc
+            supp = dict(getattr(obj, "supplement", None) or {})
         d, f = int(d), int(f)
         if not (0 <= d < f):
             raise ValueError(f"image : plage [{d}, {f}) vide ou négative")
-        return cls(d, f, pv, str(sha))
+        return cls(d, f, pv, str(sha), supp)
 
 
 def verifier_plages(images: list[ImageRequete], n_prompt: int) -> None:
@@ -95,11 +99,21 @@ class TourVision:
         _CHARGEE = nom
 
     @torch.no_grad()
-    def traits(self, pixel_values: Any, n_attendu: Optional[int] = None) -> torch.Tensor:
-        """Une image → ``[n, hidden]`` bf16 ; ``n_attendu`` (fin − debut) vérifié."""
+    def traits(self, pixel_values: Any, n_attendu: Optional[int] = None,
+               supplement: Optional[dict] = None) -> torch.Tensor:
+        """Une image → ``[n, hidden]`` bf16 ; ``n_attendu`` (fin − debut) vérifié ; ``supplement`` =
+        les annexes du processeur pour CETTE image (Gemma 4 : ``image_position_ids`` — sans elles
+        ``get_image_features`` casse, poste2 14 h 40 ; Qwen3-VL : ``image_grid_thw``), passées en kwargs
+        au calcul, jamais nommées ici."""
         if isinstance(pixel_values, torch.Tensor):
             pixel_values = pixel_values.to(self.device)
-        out = self._calcul(pixel_values)
+        supp = {k: (v.to(self.device) if isinstance(v, torch.Tensor) else v) for k, v in (supplement or {}).items()}
+        try:
+            out = self._calcul(pixel_values, **supp) if supp else self._calcul(pixel_values)
+        except TypeError as exc:
+            if supp and "unexpected keyword" in str(exc):
+                raise TypeError(f"tour de vision : le calcul refuse les annexes du processeur {sorted(supp)} ({exc})") from exc
+            raise
         if isinstance(out, (tuple, list)):
             out = out[0]
         if not isinstance(out, torch.Tensor):
@@ -161,11 +175,13 @@ class TourVision:
         for sm in sous:
             sm.eval()
 
-        def calcul(pv: Any) -> torch.Tensor:
+        def calcul(pv: Any, **supplement: Any) -> torch.Tensor:
             pv = pv.to(device=device, dtype=torch.bfloat16)
             if pv.ndim == 3:
                 pv = pv.unsqueeze(0)
-            return modele.get_image_features(pixel_values=pv)
+            # les annexes du processeur (image_position_ids Gemma 4, image_grid_thw Qwen3-VL) vont à
+            # get_image_features telles quelles : c'est le modèle qui sait ce qu'il lui faut
+            return modele.get_image_features(pixel_values=pv, **supplement)
 
         return cls(calcul, device, nom=f"transformers {transformers.__version__}")
 
