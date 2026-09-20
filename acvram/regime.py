@@ -168,7 +168,7 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("PREFILL_COMPACT", "0", ("acvram.kernels", "_PREFILL_COMPACT"), "0",
              "C15-prefill (chantier-c15-prefill-20-09) : glue du préfill eager réduite par fusions AU BIT — 1 = épilogue des GEMM int8 cuBLAS en un noyau Triton (f32(acc)·s_x·s_w → bf16, gemm_w8a8.epilogue_i8c), A8 par jeton quantifiée une fois pour q/k/v, résidu différé (x + y absorbé par add_norm de la couche suivante), permutations MoE sans second tri ni conversions | 0 = témoin (le chemin d'avant) ; DÉFAUT 0 tant que le scellé (noyaux 96,8 → ≤ 83 ms, servi ≥ 20 500 j/s, PPL au bit sur 3 tranches, capture 5/5) n'est pas mesuré sur carte"),
     Variable("PREFILL_COMPACT_ITEMS", "", ("acvram.kernels", "_PREFILL_COMPACT_ITEMS"), None,
-             "C15-prefill (bissection) : sous PREFILL_COMPACT=1, liste des fusions prises — epilogue | a8 | residu | permut ; vide = toutes ; une fusion absente suit le témoin"),
+             "C15-prefill (bissection) : sous PREFILL_COMPACT=1, liste des fusions prises — epilogue | a8 | residu | permut | norm (rmsnorm un warp par ligne, même ordre de somme) | attn (SDPA enable_gqa sans copie ×n_rep de K/V, sortie sans tampon à une séquence) ; vide = toutes ; une fusion absente suit le témoin"),
     Variable("ROUTE_PREP", "2", ("acvram.engine.model", "_ROUTE_PREP"), "0",
              "poste F : 2 = moe_route + route_prep fusionnés (F2, défaut, verdict-f2-topk-17-09) | 1 = route_prep seul (F1) | 0 = torch"),
     Variable("MOE_DECODE_FUSED", "0", ("acvram.engine.model", "_MOE_DECODE_FUSED"), "0"),

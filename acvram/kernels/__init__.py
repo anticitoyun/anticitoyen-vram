@@ -1316,7 +1316,7 @@ _PREFILL_COMPACT = int(os.environ.get("ACVRAM_PREFILL_COMPACT", "0"))
 if _PREFILL_COMPACT not in (0, 1):
     raise ValueError(f"ACVRAM_PREFILL_COMPACT={_PREFILL_COMPACT!r} : attendu 0 ou 1")
 # bissection par fusion, comme GLUE_COMPACT_ITEMS : vide = toutes
-PREFILL_COMPACT_FUSIONS = ("epilogue", "a8", "residu", "permut")
+PREFILL_COMPACT_FUSIONS = ("epilogue", "a8", "residu", "permut", "norm", "attn")
 _PREFILL_COMPACT_ITEMS = os.environ.get("ACVRAM_PREFILL_COMPACT_ITEMS", "")
 for _f in filter(None, _PREFILL_COMPACT_ITEMS.split(",")):
     if _f not in PREFILL_COMPACT_FUSIONS:

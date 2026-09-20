@@ -575,6 +575,8 @@ class RMSNorm(nn.Module):
                 and self.weight.dtype == torch.bfloat16:
             ext = kernels.get_extension()
             if ext is not None and hasattr(ext, "rmsnorm_bf16"):
+                if _norme_warp(ext, x):
+                    return ext.rmsnorm_bf16_warp(x, self.weight, self.eps)[0]
                 return ext.rmsnorm_bf16(x, self.weight, self.eps)[0]  # 1 lancement
         x32 = x.to(torch.float32)
         var = x32.pow(2).mean(-1, keepdim=True)
@@ -591,10 +593,25 @@ def add_norm(residu: torch.Tensor, y: torch.Tensor, norme, mult: float = 1.0):
             and norme.weight.dtype == torch.bfloat16):
         ext = kernels.get_extension()
         if ext is not None and hasattr(ext, "rmsnorm_bf16"):
+            if _norme_warp(ext, y):
+                h, x = ext.rmsnorm_bf16_warp(y, norme.weight, norme.eps, residu, mult)
+                return x, h
             h, x = ext.rmsnorm_bf16(y, norme.weight, norme.eps, residu, mult)
             return x, h
     x = residu + (y if mult == 1.0 else y * mult)
     return x, norme(x)
+
+
+# C15-prefill (fusion « norm ») : au-delà de ce nombre de lignes la RMSNorm prend
+# le noyau à un warp par ligne (rmsnorm_bf16_warp, acvram_kernels.cu : même
+# ordre de somme, au bit). En dessous — le décodage, sous graphes — le noyau à
+# bloc reste : un nœud capturé ne change pas de noyau.
+NORME_WARP_MIN_LIGNES = 256
+
+
+def _norme_warp(ext, x: torch.Tensor) -> bool:
+    return (kernels.prefill_compact("norm") and hasattr(ext, "rmsnorm_bf16_warp")
+            and x.numel() // x.shape[-1] >= NORME_WARP_MIN_LIGNES)
 
 
 class LayerNorm(nn.Module):

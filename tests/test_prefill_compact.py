@@ -351,6 +351,46 @@ def test_prefill_moe_marlin_compact_au_bit_avec_le_temoin(monkeypatch):
     assert int(usage_a.sum()) == T * top_k and "_compte_en_attente" not in bloc.__dict__
 
 
+# --- fusion 5 : rmsnorm un warp par ligne (carte) -----------------------------
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise (noyau CUDA)")
+@pytest.mark.parametrize("H", [2048, 1024, 256, 4096, 2560])
+def test_rmsnorm_warp_au_bit_avec_le_noyau_a_bloc(H):
+    """Sur carte : `rmsnorm_bf16_warp` (un warp par ligne, ordre de somme rejoué)
+    rend les octets de `rmsnorm_bf16` (bloc par ligne), sans et avec résidu, sur
+    les formes du préfill et d'autres découpes TH ; témoin cassant : eps décalé."""
+    ext = kernels.get_extension()
+    if ext is None or not hasattr(ext, "rmsnorm_bf16_warp"):
+        pytest.skip("extension sans rmsnorm_bf16_warp")
+    torch.manual_seed(H)
+    for R in (2047, 300, 9):
+        x = (torch.randn(R, H, device="cuda") * 2.0).to(torch.bfloat16)
+        res = (torch.randn(R, H, device="cuda") * 2.0).to(torch.bfloat16)
+        w = (1.0 + 0.1 * torch.randn(H, device="cuda")).to(torch.bfloat16)
+        y_bloc = ext.rmsnorm_bf16(x, w, 1e-6)[0]
+        y_warp = ext.rmsnorm_bf16_warp(x, w, 1e-6)[0]
+        assert torch.equal(y_bloc, y_warp), (H, R, int((y_bloc != y_warp).sum()))
+        hb, xb = ext.rmsnorm_bf16(x, w, 1e-6, res, 1.0)
+        hw, xw = ext.rmsnorm_bf16_warp(x, w, 1e-6, res, 1.0)
+        assert torch.equal(xb, xw) and torch.equal(hb, hw), (H, R)
+        assert not torch.equal(ext.rmsnorm_bf16_warp(x, w, 1e-3)[0], y_bloc)
+
+
+def test_norme_warp_reservee_au_prefill(monkeypatch):
+    """Le seuil : sous 256 lignes (décodage, graphes) le noyau à bloc reste."""
+    from acvram.engine import layers as L
+
+    class Ext:
+        rmsnorm_bf16_warp = True
+
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 1)
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT_ITEMS", "")
+    assert L._norme_warp(Ext(), torch.empty(2047, 2048, dtype=torch.bfloat16))
+    assert not L._norme_warp(Ext(), torch.empty(16, 2048, dtype=torch.bfloat16))
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 0)
+    assert not L._norme_warp(Ext(), torch.empty(2047, 2048, dtype=torch.bfloat16))
+
+
 def test_une_valeur_hors_domaine_est_refusee():
     env = dict(os.environ, ACVRAM_PREFILL_COMPACT="2", CUDA_VISIBLE_DEVICES="")
     out = subprocess.run([sys.executable, "-c", "import acvram.kernels"], env=env, capture_output=True, text=True, timeout=120)

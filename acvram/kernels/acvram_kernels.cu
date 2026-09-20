@@ -6490,6 +6490,96 @@ std::vector<torch::Tensor> rmsnorm_bf16(torch::Tensor x, torch::Tensor w, double
     return {y};
 }
 
+// C15-prefill (chantier-c15-prefill-20-09) : la MÊME RMSNorm, un WARP par ligne
+// au lieu d'un bloc. Au préfill (R = 2 047 lignes de H = 2 048) le noyau à bloc
+// lance 2 047 blocs de 1 024 fils qui lisent chacun 4 Kio, avec deux
+// __syncthreads et un tampon partagé : 21,9 µs par appel, 0,77 To/s (nsys P2
+// 19/09). Ici huit lignes par bloc de 256 fils, sans mémoire partagée. La somme
+// des carrés REJOUE l'ordre exact du noyau à bloc de TH fils : partiels par fil
+// t = 32·wq + lane (éléments t, t + TH, …, la même expression `ss += v * v` —
+// contractée en FFMA par les mêmes drapeaux), arbre xor par warp (les mêmes
+// décalages 16, 8, 4, 2, 1), somme séquentielle des TH/32 warps depuis 0 ;
+// rsqrtf(ss / H + eps) écrit à l'identique : mêmes flottants, mêmes bits que
+// rmsnorm_bf16_kernel (juge : tests/test_prefill_compact.py sur carte, puis la
+// PPL au bit). Le résidu suit la même formule que le noyau à bloc (écrit dans
+// xn puis relu, __syncwarp entre les deux).
+template <int TH>
+__global__ void rmsnorm_bf16_warp_kernel(const __nv_bfloat16 *__restrict__ x,
+                                         const __nv_bfloat16 *__restrict__ w,
+                                         __nv_bfloat16 *__restrict__ y,
+                                         const __nv_bfloat16 *__restrict__ res,
+                                         __nv_bfloat16 *__restrict__ xn,
+                                         float mult, int H, float eps, long R) {
+    const int lane = threadIdx.x & 31;
+    const long row = (long)blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
+    if (row >= R) return;
+    const __nv_bfloat16 *xr = x + row * H;
+    __nv_bfloat16 *yr = y + row * H;
+    if (res != nullptr) {
+        const __nv_bfloat16 *rr = res + row * H;
+        __nv_bfloat16 *nr = xn + row * H;
+        for (int i = lane; i < H; i += 32)
+            nr[i] = __float2bfloat16(__bfloat162float(rr[i])
+                                     + mult * __bfloat162float(xr[i]));
+        __syncwarp();
+        xr = nr;
+    }
+    float ss = 0.f;
+#pragma unroll 1
+    for (int wq = 0; wq < TH / 32; ++wq) {
+        float p = 0.f;
+        for (int i = 32 * wq + lane; i < H; i += TH) {
+            const float v = __bfloat162float(xr[i]); p += v * v;
+        }
+        for (int o = 16; o > 0; o >>= 1) p += __shfl_xor_sync(0xffffffffu, p, o);
+        ss += __shfl_sync(0xffffffffu, p, 0);          // red[wq] : la valeur du fil 0 du warp
+    }
+    const float rs = rsqrtf(ss / (float)H + eps);
+    for (int i = lane; i < H; i += 32) {
+        const float n = __bfloat162float(__float2bfloat16(__bfloat162float(xr[i]) * rs));
+        yr[i] = __float2bfloat16(n * __bfloat162float(w[i]));
+    }
+}
+
+std::vector<torch::Tensor> rmsnorm_bf16_warp(torch::Tensor x, torch::Tensor w, double eps,
+                                             c10::optional<torch::Tensor> res,
+                                             double mult) {
+    CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(x);
+    TORCH_CHECK(x.scalar_type() == torch::kBFloat16 && w.scalar_type() == torch::kBFloat16,
+                "rmsnorm_bf16_warp : bf16 attendu");
+    auto xc = x.contiguous();
+    const int H = xc.size(-1);
+    const long R = xc.numel() / H;
+    auto y = torch::empty_like(xc);
+    torch::Tensor xn;
+    const __nv_bfloat16 *pres = nullptr;
+    __nv_bfloat16 *pxn = nullptr;
+    torch::Tensor rc;
+    if (res.has_value()) {
+        rc = res->contiguous();
+        TORCH_CHECK(rc.numel() == xc.numel(), "rmsnorm_bf16_warp : residu de meme taille");
+        xn = torch::empty_like(xc);
+        pres = reinterpret_cast<const __nv_bfloat16 *>(rc.data_ptr());
+        pxn = reinterpret_cast<__nv_bfloat16 *>(xn.data_ptr());
+    }
+    const unsigned blocs = (unsigned)((R + 7) / 8);        // 8 warps (lignes) par bloc de 256 fils
+    auto px = reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr());
+    auto pw = reinterpret_cast<const __nv_bfloat16 *>(w.contiguous().data_ptr());
+    auto py = reinterpret_cast<__nv_bfloat16 *>(y.data_ptr());
+    auto flux = at::cuda::getCurrentCUDAStream();
+    // la découpe TH du noyau à bloc (1024 / 512 / 256 selon H) : c'est elle qui
+    // fixe l'ordre de la somme, elle est rejouée telle quelle
+    if (H >= 2048)
+        rmsnorm_bf16_warp_kernel<1024><<<blocs, 256, 0, flux>>>(px, pw, py, pres, pxn, (float)mult, H, (float)eps, R);
+    else if (H >= 1024)
+        rmsnorm_bf16_warp_kernel<512><<<blocs, 256, 0, flux>>>(px, pw, py, pres, pxn, (float)mult, H, (float)eps, R);
+    else
+        rmsnorm_bf16_warp_kernel<256><<<blocs, 256, 0, flux>>>(px, pw, py, pres, pxn, (float)mult, H, (float)eps, R);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    if (res.has_value()) return {y, xn};
+    return {y};
+}
+
 
 // ============================================================================
 // Routage MoE en un lancement : scores (softmax ou sigmoïde), biais de
@@ -6943,6 +7033,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("moe_route", &moe_route, "routage MoE : scores, biais, top-k, poids");
     m.def("rmsnorm_bf16", &rmsnorm_bf16,
           "RMSNorm bf16 fusionnee (variance fp32), residu optionnel",
+          py::arg("x"), py::arg("w"), py::arg("eps"),
+          py::arg("residu") = c10::optional<torch::Tensor>(),
+          py::arg("mult") = 1.0);
+    m.def("rmsnorm_bf16_warp", &rmsnorm_bf16_warp,
+          "C15-prefill : rmsnorm_bf16 un warp par ligne, meme ordre de somme (au bit)",
           py::arg("x"), py::arg("w"), py::arg("eps"),
           py::arg("residu") = c10::optional<torch::Tensor>(),
           py::arg("mult") = 1.0);
