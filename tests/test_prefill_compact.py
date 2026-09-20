@@ -391,6 +391,46 @@ def test_norme_warp_reservee_au_prefill(monkeypatch):
     assert not L._norme_warp(Ext(), torch.empty(2047, 2048, dtype=torch.bfloat16))
 
 
+# --- fusion 6 : attention du préfill sans copie ×n_rep de K/V ----------------
+
+@pytest.mark.parametrize("cas", ["causal", "decale", "fenetre"])
+def test_attention_gqa_egale_repeat_kv(cas):
+    """`attention(..., n_rep)` (SDPA enable_gqa) rend les octets de
+    `attention(q, repeat_kv(k), repeat_kv(v))` — causal, requête décalée
+    (masque), fenêtre glissante ; témoin cassant : n_rep faux."""
+    from acvram.engine.layers import attention, repeat_kv
+    torch.manual_seed(3)
+    t, hq, hkv, d = 40, 8, 2, 32
+    q = torch.randn(t, hq, d); k = torch.randn(t + 8, hkv, d); v = torch.randn(t + 8, hkv, d)
+    kw = dict(causal=True, scale=d ** -0.5)
+    if cas == "causal":
+        k, v = k[:t], v[:t]
+    elif cas == "decale":
+        kw["q_offset"] = 8
+    else:
+        k, v = k[:t], v[:t]
+        kw["window"] = 16
+    ref = attention(q, repeat_kv(k, hq // hkv), repeat_kv(v, hq // hkv), **kw)
+    y = attention(q, k, v, n_rep=hq // hkv, **kw)
+    assert y.shape == ref.shape and torch.equal(y, ref)
+    faux = attention(q, k.flip(1), v.flip(1), n_rep=hq // hkv, **kw)   # têtes KV échangées
+    assert not torch.equal(faux, ref)
+
+
+def test_prefill_attn_compact_rend_les_logits_du_temoin(converted, monkeypatch):
+    """Tiny llama (8 têtes, 2 KV) à sec : fusion « attn » seule, logits de tous
+    les jetons au bit ; une séquence (sans tampon `out`) et deux séquences."""
+    from acvram.engine.loader import load_model
+    loaded = load_model(converted, dtype=torch.float32, device_override="cpu")
+    model = loaded.model
+    prompt = [5, 42, 7, 99, 13, 8, 21, 3, 77, 1]
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 0)
+    ref = _prefill(model, prompt)
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 1)
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT_ITEMS", "attn")
+    assert torch.equal(_prefill(model, prompt), ref)
+
+
 def test_une_valeur_hors_domaine_est_refusee():
     env = dict(os.environ, ACVRAM_PREFILL_COMPACT="2", CUDA_VISIBLE_DEVICES="")
     out = subprocess.run([sys.executable, "-c", "import acvram.kernels"], env=env, capture_output=True, text=True, timeout=120)

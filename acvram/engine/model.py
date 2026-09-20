@@ -524,7 +524,14 @@ class Attention(nn.Module):
     def _prefill(self, q, k, v, batch: ForwardBatch,
                  cache: Optional[PagedKVCache], t: int,
                  gate=None) -> torch.Tensor:
-        out = torch.empty_like(q)
+        # C15-prefill (fusion « attn ») : les têtes KV diffusées par SDPA
+        # (enable_gqa) au lieu de `repeat_kv` qui matérialisait K et V ×n_rep
+        # ([t, têtes, d] bf16 deux fois par couche : 0,98 ms au budget nsys P2
+        # du 19/09), et, à une séquence, la sortie rendue telle quelle au lieu
+        # d'être recopiée dans `out` (16,8 Mo de plus par couche à L = 2 047).
+        compact = kernels.prefill_compact("attn")
+        une_seq = compact and len(batch.query_lens) == 1
+        out = None if une_seq else torch.empty_like(q)
         start = 0
         for i, qlen in enumerate(batch.query_lens):
             end = start + qlen
@@ -541,10 +548,18 @@ class Attention(nn.Module):
                 # aller-retour de quantification sur chaque jeton de prefill, ce
                 # qui est à la fois plus rapide et un peu plus précis.
                 kk, vv = k[start:end], v[start:end]
-            kk = repeat_kv(kk, self.n_rep)
-            vv = repeat_kv(vv, self.n_rep)
-            out[start:end] = attention(q[start:end], kk, vv, True, self.scale,
-                                       q_offset=offset, window=self.window)
+            if compact:
+                a = attention(q[start:end], kk, vv, True, self.scale,
+                              q_offset=offset, window=self.window, n_rep=self.n_rep)
+            else:
+                kk = repeat_kv(kk, self.n_rep)
+                vv = repeat_kv(vv, self.n_rep)
+                a = attention(q[start:end], kk, vv, True, self.scale,
+                              q_offset=offset, window=self.window)
+            if une_seq:
+                out = a
+            else:
+                out[start:end] = a
             start = end
         out = self._gated(out, gate, t)
         return self.o_proj(out.reshape(t, self.n_heads * self.head_dim))
