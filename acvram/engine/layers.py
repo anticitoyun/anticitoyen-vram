@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import os
 import time
@@ -891,9 +891,43 @@ def causal_mask(q_len: int, kv_len: int, q_offset: int, device,
     return mask.masked_fill(~allowed, float("-inf"))
 
 
+def masque_images(q_len: int, kv_len: int, q_offset: int,
+                  images: Sequence[tuple[int, int]], device) -> Optional[torch.Tensor]:
+    """Cellules (requête, clé) que les plages image ouvrent EN PLUS du causal.
+
+    Gemma 4 (multimodal P1, poste7-go-multimodal-organisation-20-09 § 2) : les
+    jetons d'une même image [debut, fin) se voient tous entre eux, y compris
+    vers l'avant ; deux images distinctes ne s'ouvrent pas l'une à l'autre.
+    Positions absolues dans la séquence ; les clés sont les positions
+    [0, kv_len), les requêtes [q_offset, q_offset + q_len). Rend None quand
+    aucune plage ne touche le bloc de requêtes (le masque causal suffit).
+
+    Prefill par morceaux : une requête image dont l'image se prolonge AU-DELÀ
+    des clés existantes (fin > kv_len) ne peut pas voir ses jetons à venir ;
+    le masque serait faux en silence — refus nommé, c'est au moteur de ne pas
+    couper un morceau dans une image (`Engine._eviter_coupe_image`).
+    """
+    plages = [(int(d), int(f)) for d, f in images
+              if int(d) < q_offset + q_len and int(f) > q_offset]
+    if not plages:
+        return None
+    for d, f in plages:
+        if f > kv_len:
+            raise RuntimeError(
+                f"plage image [{d}, {f}) coupée par un morceau de prefill : clés "
+                f"jusqu'à {kv_len} seulement, requêtes [{q_offset}, {q_offset + q_len})")
+    rows = torch.arange(q_offset, q_offset + q_len, device=device).unsqueeze(1)
+    cols = torch.arange(kv_len, device=device).unsqueeze(0)
+    ouvert = torch.zeros(q_len, kv_len, dtype=torch.bool, device=device)
+    for d, f in plages:
+        ouvert |= ((rows >= d) & (rows < f)) & ((cols >= d) & (cols < f))
+    return ouvert
+
+
 def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
               causal: bool = True, scale: Optional[float] = None,
-              q_offset: int = 0, window: int = 0, n_rep: int = 1) -> torch.Tensor:
+              q_offset: int = 0, window: int = 0, n_rep: int = 1,
+              images: Optional[Sequence[tuple[int, int]]] = None) -> torch.Tensor:
     """Attention par produit scalaire normalisé sur des tenseurs ``[jetons, têtes, dim]``.
 
     Délègue au SDPA de PyTorch, qui choisit FlashAttention sur tout GPU qui le
@@ -907,12 +941,22 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     vh = v.transpose(0, 1).unsqueeze(0)
     gqa = {"enable_gqa": True} if n_rep > 1 else {}
     q_len, kv_len = q.shape[0], k.shape[0]
+    ouvert = (masque_images(q_len, kv_len, q_offset, images, q.device)
+              if images and causal else None)
     if window > 0:
         # fenêtre glissante : chaque requête ne voit que les `window` derniers
         qpos = torch.arange(q_len, device=q.device) + q_offset
         kpos = torch.arange(kv_len, device=q.device)
         mask = ((kpos[None, :] <= qpos[:, None])
                 & (kpos[None, :] > qpos[:, None] - window))
+        if ouvert is not None:
+            mask = mask | ouvert           # HF Gemma : or_mask sur la fenêtre aussi
+    elif ouvert is not None:
+        rows = torch.arange(q_offset, q_offset + q_len, device=q.device).unsqueeze(1)
+        cols = torch.arange(kv_len, device=q.device).unsqueeze(0)
+        allowed = (cols <= rows) | ouvert
+        mask = torch.zeros(q_len, kv_len, device=q.device, dtype=q.dtype)
+        mask = mask.masked_fill(~allowed, float("-inf"))
     else:
         mask = causal_mask(q_len, kv_len, q_offset, q.device, q.dtype) if causal else None
     if mask is not None:

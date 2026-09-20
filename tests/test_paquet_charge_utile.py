@@ -120,3 +120,19 @@ def test_le_control_declare_bien_la_version_et_l_architecture():
     assert _champ_control("Package") == "acvram"
     assert _champ_control("Version"), "Version manquante dans control"
     assert _champ_control("Architecture") == "amd64"
+
+
+def test_le_lanceur_epingle_transformers_a_la_version_du_moteur():
+    """poste7 14 h 10 : transformers est une dépendance du moteur (tour de vision), épinglée ; le lanceur
+    du .deb (tools/construire-deb.sh) et acvram/engine/vision.py portent LA MÊME version, et vision.py
+    n'importe transformers que quand une tour est demandée (import paresseux : un alias texte n'en
+    charge rien — tests/test_mm_moteur.py le prouve à sec)."""
+    from acvram.engine import vision
+    lanceur = (RACINE / "tools" / "construire-deb.sh").read_text(encoding="utf-8")
+    assert f'"transformers=={vision.VERSION_TRANSFORMERS}"' in lanceur, \
+        f"le lanceur n'épingle pas transformers=={vision.VERSION_TRANSFORMERS}"
+    src = pathlib.Path(vision.__file__).read_text(encoding="utf-8").split("\n")
+    tete = [l for l in src if l.startswith(("import ", "from ")) and "transformers" in l]
+    assert not tete, f"import de transformers en tête de vision.py : {tete}"
+    assert any("import transformers" in l and l.startswith("            ") for l in src), \
+        "l'import de transformers doit vivre dans TourVision.depuis_dossier (tour demandée)"

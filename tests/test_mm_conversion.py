@@ -362,7 +362,7 @@ def test_la_ligne_de_regime_nomme_la_vision_seulement_modele_charge():
         regime.declarer_modele_charge(None)
         assert "vision=" not in regime.regime_ligne()
         regime.declarer_modele_charge({"vision": "oui"})
-        assert " vision=bf16(eager) " in regime.regime_ligne() + " "
+        assert " vision=declaree(tour absente) " in regime.regime_ligne() + " "   # oui sans tour chargée (engine/vision) : nommé
         regime.declarer_modele_charge({"vision": "non"})
         assert " vision=off " in regime.regime_ligne() + " "
         regime.declarer_modele_charge({})

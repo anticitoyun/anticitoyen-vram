@@ -379,7 +379,7 @@ def vision_texte() -> Optional[str]:
     ajouter, la fin de ligne du défaut nu reste celle que fige test_defaut_servi)."""
     if _VISION_CHARGEE is None:
         return None
-    return "vision=bf16(eager)" if _VISION_CHARGEE == "oui" else "vision=off"
+    return "vision=bf16(eager)" if _VISION_CHARGEE == "oui" else "vision=off"   # la ligne préfère la tour réelle (engine/vision) quand elle est chargée
 
 
 def glue_texte() -> str:
@@ -473,8 +473,21 @@ def regime_ligne() -> str:
         parts.append(_mla.regime_glue_texte())            # mla_glue=2|1(temoin)|0 (C15 2a-bis, défaut 2 en 0.6.32)
     except Exception:                                     # noqa: BLE001
         pass
-    if vision_texte():                                    # vision=bf16(eager)|off, seulement modèle chargé
-        parts.append(vision_texte())
+    # Multimodal : la tour de vision (eager bf16, hors graphes, engine/vision) nommée avec la version
+    # relevée dès qu'une est chargée ; sinon « vision=off » si un modèle est DÉCLARÉ (manifeste lu par
+    # le moteur, declarer_modele_charge) ; rien sans modèle — la fin de ligne du défaut nu
+    # (tests/test_defaut_servi.py) ne bouge pas. Contrat § 2 : vision=bf16(eager)|off.
+    try:
+        from .engine.vision import regime_texte as _vision_texte
+        tour = _vision_texte()
+    except Exception:                                     # noqa: BLE001
+        tour = ""
+    if tour:
+        parts.append(tour)
+    elif _VISION_CHARGEE == "oui":
+        parts.append("vision=declaree(tour absente)")     # manifeste oui, tour non chargée : jamais « bf16(eager) » sans tour
+    elif vision_texte():
+        parts.append("vision=off")
     # C5-b : le format des clés est nommé dès qu'il n'est plus celui d'aujourd'hui
     # (int8 par jeton) — la variable dit ce qui est DEMANDÉ, cette étiquette ce
     # que le cache int8 fait de ses clés.
