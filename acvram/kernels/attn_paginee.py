@@ -241,6 +241,16 @@ def _tranches(n_pages: int, b: int, hkv: int, device) -> tuple[int, int]:
     return c, pages_par_tranche * PAGE
 
 
+# C15-3c : le noyau fusionné à 8 warps (le témoin `_partiel_kernel` reste à 4) —
+# les mêmes tuiles (k, v [64, 128] int8 → 16 bits, acc [16, 128] fp32, scores
+# [16, 64]) réparties sur deux fois plus de fils : 178 registres/fil et 11 %
+# d'occupation mesurés à 4 warps (verdict-c15-niveau3-coder-19-09 addendum
+# 03 h 17) → prédit ≤ 110 registres, occupation ×2. Arithmétique inchangée
+# (mêmes tuiles, mêmes tl.dot) ; seul l'ordre des réductions croisées (tl.sum
+# de p, de l·w) peut suivre une autre disposition : au bit sous l'interpréteur,
+# ≤ 1 ulp 16 bits sur carte (juge : tests/test_glue_compact.py).
+WARPS_COMPACT = 8
+
 _COMPTEURS: dict = {}
 
 
@@ -289,7 +299,7 @@ def paged_attention(q: torch.Tensor, kc: torch.Tensor, ks: torch.Tensor,
             q.stride(0), q.stride(1), kc.stride(0) // D, kc.stride(1) // D, kc.stride(2) // D,
             ks.stride(0), ks.stride(1), out.stride(0), out.stride(1),
             NREP=n_rep, D=D, BN=PAGE * PAGES_PAR_TUILE, PAGE_C=PAGE, NREP_T=NREP_TUILE, CT=max(CT, 2),
-            num_warps=4, num_stages=2)
+            num_warps=WARPS_COMPACT, num_stages=2)
         return out
     _partiel_kernel[(B, n_kv, C)](
         q, kc, ks, vc, vs, tables, seq_lens, part, pm, pl,
