@@ -247,6 +247,7 @@ def test_runner_delta_par_sequence_et_positions_3d_au_prefill(converted):
     engine._mrope_section, engine._mrope_merge = [6, 5, 5], MERGE
     h = loaded.spec.hidden_size
     engine.vision = TourVision(lambda pv, **_: torch.full((1, int(pv), h), 0.5), CPU, nom="factice")
+    engine.spec.raw = {**(getattr(engine.spec, "raw", None) or {}), "architectures": ["Qwen3VLForConditionalGeneration"]}   # famille du masque (20/09 19:01)
     vus = []
     orig = engine._build_batch
 
@@ -290,6 +291,7 @@ def test_runner_grille_absente_refus_nomme(converted, capsys):
     engine._mrope_section, engine._mrope_merge = [6, 5, 5], MERGE
     h = loaded.spec.hidden_size
     engine.vision = TourVision(lambda pv, **_: torch.full((1, int(pv), h), 0.5), CPU, nom="factice")
+    engine.spec.raw = {**(getattr(engine.spec, "raw", None) or {}), "architectures": ["Qwen3VLForConditionalGeneration"]}   # famille du masque (20/09 19:01)
     sorties = list(engine.generate(list(range(1, 15)), SamplingParams(max_tokens=2),
                                    images=[(3, 7, torch.tensor(4.0), "sha-sans-grille")]))
     assert sorties and sorties[-1].finish_reason == "refus"

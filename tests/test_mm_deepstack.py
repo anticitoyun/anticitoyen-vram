@@ -335,6 +335,7 @@ def test_runner_porte_les_niveaux_au_prefill_seulement(converted):
         return _SortieQwen((torch.full((n, h), 1.0),), [torch.full((n, h), float(k + 2)) for k in range(K)])
 
     engine.vision = TourVision(calcul, torch.device("cpu"), nom="factice")
+    engine.spec.raw = {**(getattr(engine.spec, "raw", None) or {}), "architectures": ["Gemma4ForConditionalGeneration"]}   # famille du masque (20/09 19:01) : le jouet Llama n'en a pas
     vus = []
     orig = engine._build_batch
 
@@ -356,6 +357,7 @@ def test_runner_porte_les_niveaux_au_prefill_seulement(converted):
     vus.clear()
     engine.vision = TourVision(lambda pv: _SortieGemma((torch.full((int(pv), h), 1.0),)),
                                torch.device("cpu"), nom="factice")
+    engine.spec.raw = {**(getattr(engine.spec, "raw", None) or {}), "architectures": ["Gemma4ForConditionalGeneration"]}   # famille du masque (20/09 19:01) : le jouet Llama n'en a pas
     for _ in engine.generate(list(range(1, 9)), SamplingParams(temperature=0.0, max_tokens=1),
                              images=[(2, 5, torch.tensor(3.0), "sha-g")]):
         pass
