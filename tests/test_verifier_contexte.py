@@ -40,6 +40,7 @@ def parc(tmp_path):
     for nom, ctx in (("ok-nvfp4", 131072), ("reduit-nvfp4", 131072), ("faux-nvfp4", 8192), ("refus-nvfp4", 131072)):
         (m / nom).mkdir(parents=True); (m / nom / "config.json").write_text(json.dumps({"text_config": {"max_position_embeddings": ctx}}))
     (m / "petit-gguf").mkdir(); _gguf(m / "petit-gguf" / "petit.gguf", 4096)
+    (m / "petit-gguf" / "mmproj-petit.gguf").write_bytes(b"GGUF" + b"\0" * 40)   # projecteur sans context_length : à ignorer
     (tsv / "acvram-chemins.tsv").write_text("".join(f"acvram-{n}\t{m / n}\t32768\n" for n in ("ok-nvfp4", "reduit-nvfp4", "faux-nvfp4", "refus-nvfp4")))
     (tsv / "gguf-chemins.tsv").write_text(f"llamacpp-petit\t{m / 'petit-gguf'}\t8192\n")
     env = {**os.environ, "PATH": f"{binf}:{os.environ['PATH']}", "MARQUE_APPELS": str(tmp_path / "appels.txt")}

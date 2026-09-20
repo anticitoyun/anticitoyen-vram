@@ -68,9 +68,11 @@ def ctx_modele(chemin: Path) -> tuple[int | None, str]:
                 if isinstance(bloc, dict) and bloc.get("max_position_embeddings"):
                     return int(bloc["max_position_embeddings"]), "config.json:max_position_embeddings"
             return None, "config.json sans max_position_embeddings"
-        ggufs = sorted(chemin.glob("*.gguf"))
+        # le GGUF du modèle, pas le projecteur multimodal (mmproj-*) : le premier fragment ou, sinon, le plus gros
+        ggufs = [g for g in sorted(chemin.glob("*.gguf")) if "mmproj" not in g.name.lower()]
         if ggufs:
-            c = lire_ctx_gguf(ggufs[0]); return c, "gguf:context_length" if c else "gguf sans context_length"
+            premier = [g for g in ggufs if "-00001-of-" in g.name] or sorted(ggufs, key=lambda g: g.stat().st_size, reverse=True)
+            c = lire_ctx_gguf(premier[0]); return c, "gguf:context_length" if c else f"gguf sans context_length ({premier[0].name})"
         return None, "ni config.json ni gguf"
     return None, "chemin absent"
 
