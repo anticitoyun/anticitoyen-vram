@@ -136,3 +136,25 @@ def test_top_p_never_empties_the_distribution():
     logits = torch.randn(1, 1000) * 5
     tok, _ = sample(logits, [SamplingParams(temperature=1.0, top_p=0.01)])
     assert 0 <= int(tok.item()) < 1000
+
+
+def test_la_ligne_du_moteur_nomme_le_format_kv_servi(converted, monkeypatch):
+    """20/09 (chef, prise (b) 12B vision) : la ligne de régime n'imprimait aucun kv= — le palier cuda:0 du
+    manifeste servait le KV en int8 sans le dire (regime.py ne nommait que int8-canal16). Le mot `kv=` vient des
+    caches CONSTRUITS (format servi), jamais d'une variable : int8 par le plan, bf16 sous ACVRAM_KV_FORMAT=bf16."""
+    import torch
+    from acvram.engine.loader import load_model
+    from acvram.engine.runner import Engine
+    from acvram.memory import tiering
+    loaded = load_model(converted, dtype=torch.float32, device_override="cpu")
+    eng = Engine(loaded, None, max_batch_size=1, max_model_len=64, enable_cuda_graphs=False)
+    ligne = eng.regime_ligne()
+    assert " kv=" in ligne, ligne
+    assert f" kv={eng.kv_format_servi()} " in ligne
+    fmt = {str(c.cfg.dtype) for c in loaded.model.caches.values()}
+    assert eng.kv_format_servi() in fmt or not loaded.model.caches, (eng.kv_format_servi(), fmt)
+    monkeypatch.setattr(tiering, "_KV_FORMAT", "bf16")
+    loaded2 = load_model(converted, dtype=torch.float32, device_override="cpu")
+    eng2 = Engine(loaded2, None, max_batch_size=1, max_model_len=64, enable_cuda_graphs=False)
+    assert " kv=bf16 " in eng2.regime_ligne(), eng2.regime_ligne()
+    assert eng.kv_format_servi() != "bf16", "le défaut du plan est déjà bf16 : le témoin ne distingue rien"
