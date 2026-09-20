@@ -25,6 +25,9 @@ PREFIXES_TOUR = ("model.vision_tower.", "model.embed_vision.",
 
 # La ligne de régime (acvram/regime.py) nomme la tour dès qu'une est chargée.
 _CHARGEE: Optional[str] = None
+# Dépendance ÉPINGLÉE du moteur (poste7 14 h 10) : la version qui charge gemma4 sur le poste, la même que
+# le lanceur du .deb installe (tools/construire-deb.sh) — tests/test_paquet_charge_utile.py les tient égales.
+VERSION_TRANSFORMERS = "5.17.0"
 
 
 class SansTourVision(ValueError):
@@ -123,6 +126,9 @@ class TourVision:
         except ImportError as exc:
             raise RuntimeError("tour de vision déclarée par le manifeste mais "
                                "transformers absent du venv") from exc
+        if transformers.__version__ != VERSION_TRANSFORMERS:
+            print(f"[acvram] transformers {transformers.__version__} au lieu de {VERSION_TRANSFORMERS} "
+                  f"(épinglé) : la ligne de régime porte la version relevée", flush=True)
         from .loader import _ShardReader
         try:
             cfg = AutoConfig.from_pretrained(path)
@@ -165,5 +171,12 @@ class TourVision:
 
 
 def regime_texte() -> str:
-    """« vision=bf16(eager) » quand une tour est chargée, sinon ''."""
-    return "vision=bf16(eager)" if _CHARGEE else ""
+    """« vision=bf16(eager,transformers=5.17.0) » quand une tour est chargée (la version RELEVÉE sur le
+    module importé, poste7 14 h 10 : transformers est une dépendance épinglée du moteur, jamais devinée),
+    « vision=bf16(eager,<nom de la tour factice>) » pour une tour de test, sinon ''."""
+    if not _CHARGEE:
+        return ""
+    nom = str(_CHARGEE)
+    if nom.startswith("transformers "):
+        nom = "transformers=" + nom[len("transformers "):]
+    return f"vision=bf16(eager,{nom})"

@@ -290,7 +290,7 @@ def test_tour_factice_dans_le_runner_end_to_end(converted):
         return torch.full((1, int(pv), h), float(pv))    # [1, n, h] comme HF
 
     engine.vision = TourVision(calcul, torch.device("cpu"), nom="factice")
-    assert regime_texte() == "vision=bf16(eager)"
+    assert regime_texte() == "vision=bf16(eager,factice)"
     vus = []
     orig = engine._build_batch
 
@@ -314,3 +314,34 @@ def test_tour_factice_dans_le_runner_end_to_end(converted):
     sorties = list(engine.generate(prompt, SamplingParams(max_tokens=2),
                                    images=[(2, 5, torch.tensor(3.0), "sha-2")]))
     assert sorties and sorties[-1].finish_reason == "refus"
+
+
+@pytest.fixture(autouse=True)
+def _tour_oubliee():
+    """`vision._CHARGEE` est un état de processus (la tour nommée sur la ligne de régime) : remis à
+    zéro avant et après chaque test, sinon la tour factice d'un test nomme la ligne du suivant."""
+    from acvram.engine import vision
+    vision._CHARGEE = None
+    yield
+    vision._CHARGEE = None
+
+
+def test_sans_transformers_un_alias_texte_se_charge_et_la_tour_le_nomme(converted, monkeypatch):
+    """poste7 14 h 10 : transformers est une dépendance ÉPINGLÉE du moteur (5.17.0), importée
+    paresseusement — un alias texte n'en importe rien au chargement ; une tour demandée sans
+    transformers rend un refus nommé (pas un ImportError anonyme) ; la version relevée porte la ligne."""
+    import sys
+    from acvram.engine import vision
+    monkeypatch.setitem(sys.modules, "transformers", None)          # import transformers → ImportError
+    src = open(vision.__file__, encoding="utf-8").read().split("\n")
+    tete = [l for l in src if l.startswith(("import ", "from ")) and "transformers" in l]
+    assert not tete, f"import de transformers en tête de vision.py : {tete}"
+    from acvram.engine.loader import load_model
+    loaded = load_model(converted, dtype=torch.float32, device_override="cpu")    # alias texte : charge
+    engine = Engine(loaded, None, max_batch_size=1, max_model_len=64, enable_cuda_graphs=False)
+    assert engine.vision is None and vision.regime_texte() == ""
+    with pytest.raises(RuntimeError, match="transformers absent"):
+        vision.TourVision.depuis_dossier(converted, {"vision": "oui"}, torch.device("cpu"))
+    # la version relevée sur la ligne : le nom d'une tour réelle est « transformers <version> »
+    vision.TourVision(lambda pv: pv, torch.device("cpu"), nom="transformers 5.17.0")
+    assert vision.regime_texte() == "vision=bf16(eager,transformers=5.17.0)"
