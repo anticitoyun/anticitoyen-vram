@@ -374,6 +374,32 @@ def aligner_blocs(topk_ids: torch.Tensor, block_size: int, num_experts: int):
     return sorted_ids, expert_ids, torch.tensor([total], dtype=torch.int32, device=topk_ids.device)
 
 
+def aligner_blocs_tries(e_sorted: torch.Tensor, comptes: torch.Tensor, block_size: int, num_experts: int):
+    """C15-prefill : `aligner_blocs` quand les paires sont DÉJÀ triées par
+    expert (``e_sorted`` [n], croissant) et leurs comptes connus (``comptes``
+    [E] int64 = bincount) — le prefill Marlin (`_forward_prefill_grouped`)
+    l'appelait sur `e_sorted` et retriait une liste triée (argsort 4 passes
+    radix + histogramme + scan, 1,0 ms et 7 lancements par prefill 2 047) :
+    l'ordre stable d'une liste triée est l'identité, sorted_ids = position de
+    chaque rang. Mêmes trois tenseurs, au bit ; UN scalaire hôte (le total
+    rembourré, la taille des sorties) au lieu de deux."""
+    n = e_sorted.numel()
+    dev = e_sorted.device
+    rembourres = ((comptes + block_size - 1) // block_size) * block_size
+    total = int(rembourres.sum())
+    sorted_ids = torch.full((max(total, block_size),), n, dtype=torch.int32, device=dev)
+    expert_ids = torch.zeros((max(total, block_size)) // block_size, dtype=torch.int32, device=dev)
+    debut_pad = torch.cumsum(rembourres, 0) - rembourres
+    debut_tri = torch.cumsum(comptes, 0) - comptes
+    rang = torch.arange(n, device=dev)
+    pos = debut_pad[e_sorted] + (rang - debut_tri[e_sorted])
+    sorted_ids[pos] = rang.to(torch.int32)
+    blocs = rembourres // block_size
+    expert_ids[: total // block_size] = torch.repeat_interleave(
+        torch.arange(num_experts, device=dev, dtype=torch.int32), blocs)
+    return sorted_ids, expert_ids, torch.tensor([total], dtype=torch.int32, device=dev)
+
+
 def choisir_block_size(M: int, top_k: int, E: int) -> int:
     for b in [8, 16, 32, 48, 64]:
         if M * top_k / E / b < 0.9:

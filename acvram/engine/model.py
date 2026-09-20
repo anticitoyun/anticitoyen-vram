@@ -1370,22 +1370,36 @@ class MoEBlock(nn.Module):
             return None
         t, k = topi.shape
         E = pg[3].shape[0]                             # [E] échelles globales : survit à pg[1] = None (disposition unique)
-        flat_e = topi.reshape(-1).to(torch.int64)
-        flat_t = torch.arange(t, device=x.device).repeat_interleave(k)
-        colle = _colle_moe_triton(flat_e.numel(), E, x.device)
-        if colle is not None:
-            # P0 : tri + histogramme en UN lancement (colle_moe.trier_paires),
-            # mêmes ordre/cnt qu'argsort stable + bincount (tests/test_colle_moe.py)
-            ordre, _, cnt = colle.trier_paires(flat_e, E)
-        else:
+        permut = kernels.prefill_compact("permut")
+        if permut:
+            # C15-prefill : les MÊMES ordre / cnt / xs que le chemin d'avant, en
+            # moins de lancements — tri stable sur les clés int32 de topi (4
+            # passes radix au lieu de 8 sur leur copie int64), comptes par
+            # `searchsorted` sur la liste triée (deux petits noyaux au lieu de
+            # l'histogramme à atomiques), lignes de x par `ordre // k` (flat_t
+            # [i] = i // k : ni arange, ni repeat_interleave, ni gather d'index).
+            flat_e = topi.reshape(-1)
             ordre = torch.argsort(flat_e, stable=True)
-            cnt = torch.bincount(flat_e, minlength=E)
-        xs = x[flat_t[ordre]].to(torch.bfloat16).contiguous()        # [G, H]
+            e_sorted = flat_e[ordre]
+            cnt = _comptes_tries(e_sorted, E)
+            xs = x[torch.div(ordre, k, rounding_mode="floor")].to(torch.bfloat16).contiguous()
+        else:
+            flat_e = topi.reshape(-1).to(torch.int64)
+            flat_t = torch.arange(t, device=x.device).repeat_interleave(k)
+            colle = _colle_moe_triton(flat_e.numel(), E, x.device)
+            if colle is not None:
+                # P0 : tri + histogramme en UN lancement (colle_moe.trier_paires),
+                # mêmes ordre/cnt qu'argsort stable + bincount (tests/test_colle_moe.py)
+                ordre, _, cnt = colle.trier_paires(flat_e, E)
+            else:
+                ordre = torch.argsort(flat_e, stable=True)
+                cnt = torch.bincount(flat_e, minlength=E)
+            xs = x[flat_t[ordre]].to(torch.bfloat16).contiguous()        # [G, H]
+            e_sorted = flat_e[ordre]
         # échelle AWQ par expert (poste7-glm-awq-pile-15-09) : x_ligne / s[e]
         # comme ChannelScaler.apply en boucle — au prefill aussi, sinon la
         # sortie change en silence dès que les experts portent une échelle
         awq = getattr(self, "_stacks_awq", {})
-        e_sorted = flat_e[ordre]
         xs_u = xs
         awq_g = awq.get("gate_proj")
         awq_u = awq.get("up_proj") if awq.get("up_distinct") else awq_g
@@ -1484,7 +1498,12 @@ class MoEBlock(nn.Module):
             G = xs.shape[0]
             mg, mu, md = (self._stacks_marlin[n] for n in ("gate_proj", "up_proj", "down_proj"))
             bloc = MP.choisir_block_size(t, k, E)
-            s_ids, e_ids, n_post = MP.aligner_blocs(e_sorted.to(torch.int32).unsqueeze(1), bloc, E)
+            if permut:
+                # C15-prefill : e_sorted est déjà trié et cnt connu — les mêmes
+                # sorted_ids / expert_ids sans second tri ni second histogramme
+                s_ids, e_ids, n_post = MP.aligner_blocs_tries(e_sorted, cnt, bloc, E)
+            else:
+                s_ids, e_ids, n_post = MP.aligner_blocs(e_sorted.to(torch.int32).unsqueeze(1), bloc, E)
             ws = self._marlin_workspace(x.device)
             uns = self._marlin_uns(G, x.device)
             xs_m = xs if xs.shape[1] == mg[3] else F.pad(xs, (0, mg[3] - xs.shape[1]))
@@ -1550,6 +1569,14 @@ class MoEBlock(nn.Module):
             act = _activation(g, u, pg[5], pd[4])
             wd = self._pile_bf16(pd); d = self._grouped_bmm(act, wd, plan); del wd
         m_out = pd[5]
+        if permut and glue and d.dtype == torch.bfloat16 and x.dtype == torch.bfloat16:
+            # C15-prefill : la permutation inverse écrite en int32 d'emblée (le
+            # noyau la lit ainsi) — une conversion de moins ; mêmes valeurs
+            inv = torch.empty(ordre.numel(), dtype=torch.int32, device=x.device)
+            inv[ordre] = torch.arange(ordre.numel(), dtype=torch.int32, device=x.device)
+            tw = topw.reshape(-1)
+            tw = tw if tw.dtype == torch.float32 else tw.to(torch.float32)
+            return ext.moe_reduce_trie(d, tw.contiguous(), inv, m_out, k)
         inv = torch.empty_like(ordre); inv[ordre] = torch.arange(ordre.numel(), device=x.device)
         if glue and d.dtype == torch.bfloat16 and x.dtype == torch.bfloat16:
             tw = topw.reshape(-1)
@@ -2423,6 +2450,24 @@ def _mla_glue() -> int:
 _COLLE_MOE = os.environ.get("ACVRAM_COLLE_MOE", "torch")
 if _COLLE_MOE not in ("torch", "triton"):
     raise ValueError(f"ACVRAM_COLLE_MOE={_COLLE_MOE!r} : torch | triton")
+
+
+_BORNES_EXPERTS: dict = {}
+
+
+def _comptes_tries(e_sorted: torch.Tensor, E: int) -> torch.Tensor:
+    """C15-prefill : ``bincount(e_sorted, minlength=E)`` (int64 [E]) pour une
+    liste d'experts déjà TRIÉE — les bornes de chaque expert par recherche
+    dichotomique (`searchsorted` sur 0..E) puis leur différence : deux petits
+    noyaux au lieu de l'histogramme à atomiques (11,6 µs à G = 16 376). Les
+    mêmes comptes ; `tests/test_prefill_compact.py` le tient contre bincount
+    et casse si la liste n'est pas triée."""
+    cle = (str(e_sorted.device), E, e_sorted.dtype)
+    bornes = _BORNES_EXPERTS.get(cle)
+    if bornes is None:
+        bornes = torch.arange(E + 1, dtype=e_sorted.dtype, device=e_sorted.device)
+        _BORNES_EXPERTS[cle] = bornes
+    return torch.diff(torch.searchsorted(e_sorted, bornes))
 
 
 def _colle_moe_triton(G: int, E: int, device):

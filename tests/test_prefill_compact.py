@@ -230,6 +230,93 @@ def test_residu_differe_au_prefill_rend_les_logits_du_temoin(converted, monkeypa
     assert len(appels) == len(model.layers)
 
 
+# --- fusion 4 : permutations MoE du préfill sans second tri ------------------
+
+def _paires(t=300, k=8, E=128, seed=11, vides=True):
+    torch.manual_seed(seed)
+    topi = torch.randint(0, E, (t, k), dtype=torch.int32)
+    if vides:                                           # des experts sans aucune paire
+        topi[topi % 7 == 3] = 5
+    return topi
+
+
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+def test_comptes_tries_egalent_bincount_et_cassent_sans_tri(dtype):
+    from acvram.engine.model import _comptes_tries
+    E = 128
+    flat_e = _paires().reshape(-1).to(dtype)
+    e_sorted = flat_e[torch.argsort(flat_e, stable=True)]
+    cnt = _comptes_tries(e_sorted, E)
+    ref = torch.bincount(flat_e, minlength=E)
+    assert cnt.dtype == ref.dtype == torch.int64 and torch.equal(cnt, ref)
+    assert int((cnt == 0).sum()) > 0                    # les experts vides comptent zéro
+    assert not torch.equal(_comptes_tries(flat_e, E), ref)   # une liste non triée rend faux
+
+
+def test_ordre_sur_k_egale_flat_t_ordre():
+    """flat_t[ordre] (arange.repeat_interleave puis gather) = ordre // k."""
+    t, k = 300, 8
+    flat_e = _paires(t, k).reshape(-1)
+    ordre = torch.argsort(flat_e, stable=True)
+    flat_t = torch.arange(t).repeat_interleave(k)
+    assert torch.equal(flat_t[ordre], torch.div(ordre, k, rounding_mode="floor"))
+    # le tri sur les clés int32 rend le même ordre que sur leur copie int64
+    assert torch.equal(ordre, torch.argsort(flat_e.to(torch.int64), stable=True))
+
+
+@pytest.mark.parametrize("bloc", [8, 16, 64])
+@pytest.mark.parametrize("vides", [False, True])
+def test_aligner_blocs_tries_egale_aligner_blocs(bloc, vides):
+    """Mêmes sorted_ids / expert_ids / num_post que `aligner_blocs` sur la
+    liste triée (ce que le préfill lui donnait) ; témoin cassant : des comptes
+    faux (décalés d'un expert) changent les sorties."""
+    from acvram.kernels import marlin_port as MP
+    E = 128
+    flat_e = _paires(vides=vides).reshape(-1)
+    e_sorted = flat_e[torch.argsort(flat_e, stable=True)]
+    cnt = torch.bincount(e_sorted, minlength=E)
+    s, e, n = MP.aligner_blocs(e_sorted.unsqueeze(1), bloc, E)
+    s2, e2, n2 = MP.aligner_blocs_tries(e_sorted, cnt, bloc, E)
+    assert torch.equal(s, s2) and torch.equal(e, e2) and torch.equal(n, n2)
+    assert s2.dtype == e2.dtype == n2.dtype == torch.int32
+    faux = torch.roll(cnt, 1)
+    s3, e3, _ = MP.aligner_blocs_tries(e_sorted, faux, bloc, E)
+    assert not (s3.shape == s.shape and torch.equal(s3, s) and torch.equal(e3, e))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise (noyaux Marlin)")
+def test_prefill_moe_marlin_compact_au_bit_avec_le_temoin(monkeypatch):
+    """Sur carte : `_forward_prefill_grouped` (marlin) sous PREFILL_COMPACT=1
+    rend les OCTETS du témoin — mêmes lignes triées, mêmes blocs, même
+    réduction ; seule la glue change."""
+    from conftest import attendre_chemin
+    from test_marlin_prefill_p1 import _bloc_moe_jouet
+    from acvram.engine import model as MD
+    from acvram.kernels import marlin_port as MP
+    if MP.charger(compiler=False) is None:
+        pytest.skip("extension Marlin non compilée")
+    E, H, I, top_k, T = 8, 256, 128, 2, 1024
+    bloc = _bloc_moe_jouet(E, H, I, top_k)
+    torch.manual_seed(T)
+    x = (torch.randn(T, H, device="cuda") * 0.5).to(torch.bfloat16)
+    logits = bloc.router(x).float()
+    topw, topi = torch.topk(torch.softmax(logits, -1), top_k, dim=-1)
+    topw = topw / topw.sum(-1, keepdim=True)
+    topi32 = topi.to(torch.int32)
+    monkeypatch.setattr(MD, "_PREFILL_GROUPED", "marlin")
+    assert bloc._try_build_stacks()
+    assert getattr(bloc, "_stacks_marlin", None) is not None
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 0)
+    n0 = bloc.chemins.get("marlin", 0) if hasattr(bloc, "chemins") else 0
+    ref = bloc._forward_prefill_grouped(x, topw, topi32)
+    attendre_chemin(bloc, "marlin", avant=n0)
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 1)
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT_ITEMS", "permut")
+    y = bloc._forward_prefill_grouped(x, topw, topi32)
+    attendre_chemin(bloc, "marlin", avant=n0 + 1)
+    assert torch.equal(y, ref)
+
+
 def test_une_valeur_hors_domaine_est_refusee():
     env = dict(os.environ, ACVRAM_PREFILL_COMPACT="2", CUDA_VISIBLE_DEVICES="")
     out = subprocess.run([sys.executable, "-c", "import acvram.kernels"], env=env, capture_output=True, text=True, timeout=120)
