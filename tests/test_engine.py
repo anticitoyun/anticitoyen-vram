@@ -158,3 +158,55 @@ def test_la_ligne_du_moteur_nomme_le_format_kv_servi(converted, monkeypatch):
     eng2 = Engine(loaded2, None, max_batch_size=1, max_model_len=64, enable_cuda_graphs=False)
     assert " kv=bf16 " in eng2.regime_ligne(), eng2.regime_ligne()
     assert eng.kv_format_servi() != "bf16", "le défaut du plan est déjà bf16 : le témoin ne distingue rien"
+
+
+def _engine_cpu(converted, max_model_len=64):
+    import torch
+    from acvram.engine.loader import load_model
+    from acvram.engine.runner import Engine
+    loaded = load_model(converted, dtype=torch.float32, device_override="cpu", max_model_len=max_model_len, max_concurrent_seqs=2)
+    return Engine(loaded, None, max_batch_size=1, max_model_len=max_model_len, enable_cuda_graphs=False)
+
+
+def test_la_chauffe_prouve_le_contexte_et_la_ligne_le_dit(converted, monkeypatch):
+    """poste7 poste7-3b-lanceur-contexte-20-09 (ii) : max_model_len se prouve au chargement par un prefill plein dans
+    le régime servi ; tenu → ctx_tenu=N sur la ligne ; la séquence de chauffe n'est pas gardée par le cache de
+    préfixe (un vrai préfixe de « 1 » n'y trouverait rien) ; avant la chauffe la ligne dit non-chauffe."""
+    monkeypatch.delenv("ACVRAM_CHAUFFE_CTX", raising=False)
+    eng = _engine_cpu(converted)
+    assert " ctx_tenu=non-chauffe" in eng.regime_ligne()
+    assert eng.chauffer_contexte(pas=8) == 64
+    assert " ctx_tenu=64 " in eng.regime_ligne() + " "
+    assert eng.allocator.num_free == eng.allocator.num_blocks, "les blocs de la chauffe n'ont pas été rendus"
+    assert eng.stats.cached_prompt_tokens == 0 and not eng.running and not eng.waiting
+
+
+def test_un_contexte_non_tenu_est_refuse_nomme_avec_la_longueur_tenue(converted, monkeypatch):
+    """OOM simulé au-delà de 40 jetons (torch.OutOfMemoryError) : dichotomie (≤ 5 pas, multiples de 8) → 40 tenus,
+    ContexteNonTenu(64, 40) nommé, blocs rendus, moteur réutilisable."""
+    import torch
+    import pytest
+    from acvram.engine.runner import ContexteNonTenu
+    monkeypatch.delenv("ACVRAM_CHAUFFE_CTX", raising=False)
+    eng = _engine_cpu(converted)
+    vrai = eng.generate
+
+    def faux(prompt_ids, params, images=None):
+        if len(prompt_ids) + 2 > 40:
+            raise torch.OutOfMemoryError("CUDA out of memory (simulé : 384 Mio demandés, 354 libres)")
+        return vrai(prompt_ids, params, images=images)
+    monkeypatch.setattr(eng, "generate", faux)
+    with pytest.raises(ContexteNonTenu, match="max_model_len=64 demandé, 40 jetons tenus") as e:
+        eng.chauffer_contexte(pas=8)
+    assert (e.value.demande, e.value.tenu) == (64, 40) and eng.ctx_tenu == 40
+    assert " ctx_tenu=40 " in eng.regime_ligne() + " "
+    assert eng.allocator.num_free == eng.allocator.num_blocks and not eng.running
+
+
+def test_opt_out_nomme_de_la_chauffe_jamais_en_service(converted, monkeypatch):
+    monkeypatch.setenv("ACVRAM_CHAUFFE_CTX", "0"); monkeypatch.delenv("ACVRAM_TYPE", raising=False)
+    eng = _engine_cpu(converted)
+    assert eng.chauffer_contexte(pas=8) is None and " ctx_tenu=non-verifie" in eng.regime_ligne()
+    monkeypatch.setenv("ACVRAM_TYPE", "service")
+    eng2 = _engine_cpu(converted)
+    assert eng2.chauffer_contexte(pas=8) == 64, "un service prouve son contexte malgré l'opt-out"

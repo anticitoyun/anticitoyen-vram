@@ -774,6 +774,15 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if engine.graphs is not None:
         n = engine.warm_graphs(int(os.environ.get("ACVRAM_WARM_GRAPHS", "2048")))
         print(f"  graphes CUDA : actifs (decodage), {n} godets capturés d'avance")
+    # Le contexte demandé se PROUVE au chargement (poste7-3b-lanceur-contexte-20-09 (ii)) : un prefill plein dans le
+    # régime servi ; non tenu → refus nommé ici, jamais un 500 CUDA OOM à la requête (Coder i8c 32 768, 20/09)
+    from .engine.runner import ContexteNonTenu
+    try:
+        tenu = engine.chauffer_contexte()
+    except ContexteNonTenu as exc:
+        print(red(f"  {exc}"))
+        return 2
+    print(f"  contexte      : {'non vérifié (ACVRAM_CHAUFFE_CTX=0)' if tenu is None else f'{tenu} jetons tenus (chauffe)'}")
     # Le tas est énorme après le chargement (manifeste, tokenizer, modules) :
     # une collecte de génération 2 le parcourt entier — plus de 100 ms toutes
     # les quelques dizaines de pas. Geler ces objets les sort du parcours.

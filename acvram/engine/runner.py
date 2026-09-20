@@ -394,6 +394,22 @@ def _deepstack_texte(tour) -> str:
     return f" deepstack={k}" if k else ""
 
 
+class ContexteNonTenu(RuntimeError):
+    """`max_model_len` demandé mais non tenu par la chauffe au chargement : refus nommé, pas un 500 à la requête."""
+
+    def __init__(self, demande: int, tenu: int) -> None:
+        self.demande, self.tenu = int(demande), int(tenu)
+        super().__init__(f"contexte non tenu : max_model_len={self.demande} demandé, {self.tenu} jetons tenus par la "
+                         f"chauffe (prefill d'une séquence pleine dans le régime servi) — relancer avec "
+                         f"--max-model-len {self.tenu} ou moins ; ACVRAM_CHAUFFE_CTX=0 pour un banc qui pose son plan")
+
+
+def _ctx_texte(engine) -> str:
+    """`ctx_tenu=N` (chauffe tenue) | `ctx_tenu=non-verifie` (opt-out nommé) | `ctx_tenu=non-chauffe` (pas encore)."""
+    v = getattr(engine, "ctx_tenu", "absent")
+    return " ctx_tenu=non-verifie" if v is None else (f" ctx_tenu={v}" if v != "absent" else " ctx_tenu=non-chauffe")
+
+
 def _vision_texte(tour) -> str:
     """Le mot ``vision=`` de la ligne du moteur (poste2 15 h 00 : la ligne de l'Engine ne le portait pas,
     seule celle de regime.py l'avait) : `vision=bf16(eager,transformers=5.17.0)` avec la tour, `vision=off`
@@ -779,6 +795,7 @@ class Engine:
                + " " + _glue_texte()
                + " " + _hote_texte()
                + _vision_texte(self.vision)
+               + _ctx_texte(self)
                + _mrope_texte(self.spec)
                + _deepstack_texte(self.vision))
 
@@ -1931,6 +1948,75 @@ class Engine:
                     yield out
             if not self.running and not self.waiting:
                 break
+
+    def chauffer_contexte(self, pas: int = 256) -> Optional[int]:
+        """Prouve ``max_model_len`` AU CHARGEMENT (poste7, poste7-3b-lanceur-contexte-20-09 (ii)) : une séquence de
+        ``max_model_len − 2`` jetons passe le prefill dans le RÉGIME SERVI (même chemin, même budget de morceau,
+        même cache), puis ses blocs sont rendus et le cache de préfixe ne la garde pas. Tenu → ``self.ctx_tenu``
+        (ligne de régime ``ctx_tenu=N``). OOM → longueur tenue N par dichotomie (≤ 5 pas, multiples de ``pas``)
+        et ``ContexteNonTenu(max_model_len, N)`` : le serveur refuse au chargement, jamais un 500 à la requête
+        (Coder i8c 32 768 : 500 CUDA OOM à ctx − 64, 384 Mio demandés pour 354 libres — le plan réserve le KV,
+        pas la crête d'activations du prefill). Opt-out nommé ``ACVRAM_CHAUFFE_CTX=0`` (bancs qui posent leur
+        plan) → ``ctx_tenu=non-verifie`` ; jamais sous ``ACVRAM_TYPE=service``."""
+        n = int(self.max_model_len)
+        if os.environ.get("ACVRAM_CHAUFFE_CTX") == "0":
+            if os.environ.get("ACVRAM_TYPE") == "service":
+                print("[acvram] ACVRAM_CHAUFFE_CTX=0 ignoré : un service prouve son contexte", flush=True)
+            else:
+                self.ctx_tenu = None
+                return None
+
+        def essai(L: int) -> bool:
+            try:
+                for _ in self.generate([1] * (L - 2), SamplingParams(max_tokens=1, temperature=0.0)):
+                    pass
+                return True
+            except Exception as exc:                                     # noqa: BLE001
+                oom = isinstance(exc, getattr(torch, "OutOfMemoryError", ())) or "out of memory" in str(exc).lower() \
+                    or "blocs KV" in str(exc)
+                if not oom:
+                    raise
+                self._apres_oom_de_chauffe()
+                return False
+
+        t0 = time.time()
+        tenu: Optional[int]
+        if essai(n):
+            tenu = n
+        else:
+            bas, haut = 0, n                                              # bas tenu (0 : rien), haut non tenu
+            for _ in range(5):
+                milieu = max(pas, ((bas + haut) // 2) // pas * pas)
+                if milieu <= bas or milieu >= haut:
+                    break
+                if essai(milieu):
+                    bas = milieu
+                else:
+                    haut = milieu
+            tenu = bas
+        self._oublier_la_chauffe()
+        self.ctx_tenu = tenu
+        print(f"[acvram] chauffe du contexte : {tenu}/{n} jetons tenus en {time.time() - t0:.1f} s", flush=True)
+        if tenu < n:
+            raise ContexteNonTenu(n, tenu)
+        return tenu
+
+    def _apres_oom_de_chauffe(self) -> None:
+        """Après un OOM de chauffe : séquences en cours abandonnées, blocs rendus, allocateur neuf, cache CUDA vidé."""
+        for seq in list(self.running) + list(self.waiting):
+            try:
+                self._finish(seq, "chauffe")
+            except Exception:                                            # noqa: BLE001
+                pass
+        self.running.clear(); self.waiting.clear()
+        self._oublier_la_chauffe()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def _oublier_la_chauffe(self) -> None:
+        """Le cache de préfixe ne garde pas la séquence de chauffe (des « 1 » : un vrai préfixe de 1 y trouverait un
+        KV) : l'allocateur est recréé à l'identique (mêmes blocs, même mode)."""
+        self.allocator = BlockAllocator(self.allocator.num_blocks, self.allocator.enable_prefix_cache)
 
     def warm_graphs(self, max_len: int = 2048) -> int:
         """Capture d'avance les graphes de décodage des godets jusqu'à
