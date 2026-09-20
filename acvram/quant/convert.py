@@ -2373,6 +2373,9 @@ def _copy_tokenizer(src: str, dst: str) -> None:
     for fn in ("tokenizer.json", "tokenizer_config.json", "tokenizer.model",
                "special_tokens_map.json", "generation_config.json", "config.json",
                "chat_template.jinja",
+               # Qwen3-VL (2B, 20/09) : le gabarit vit dans chat_template.json (format transformers ≤ 4) ; sans lui
+               # AutoProcessor.apply_chat_template refuse (« does not have a chat template ») et l'API image ne rend rien
+               "chat_template.json", "added_tokens.json", "merges.txt", "vocab.json",
                # multimodal : le processeur d'images accompagne la tour
                "processor_config.json", "preprocessor_config.json",
                "video_preprocessor_config.json"):
