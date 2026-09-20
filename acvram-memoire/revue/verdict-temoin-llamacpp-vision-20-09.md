@@ -9,3 +9,11 @@ suite : poste7 : accepter le corpus synthétique ou nommer 20 photos libres (sha
 
 ## Rejouable
 `cd <worktree poste2> && POSTE=20-09-1030 ACVRAM_ARBRE=$PWD PYA=<python venv> bash scratchpad/mm-temoin-20-09/chaine.sh` (3 min, disque chaud ; `temoin-gemma4-31b.json` avec les 20 réponses, `-serveur.log`). Images : `/opt/ia/vLLM/.venv/bin/python scratchpad/mm-temoin-20-09/fabrique-images-20.py scratchpad/corpus-prive/images-20` (PIL) ; légendes : `fabrique-legendes-50.py`.
+
+## Addendum 13 h 35 — témoin rejoué au scellé réécrit de poste7 (13 h 55 : `max_tokens=48` fixé pour les deux moteurs, J net publié aussi sur la fenêtre TTFT) et référence bf16 de la tour
+instrument : même chaîne, `temoin-llamacpp-vision.py` corrigé (chauffe exclue par construction ; `joules_ttft` = compteur NVML lu au premier jeton, `joules_depuis()`), 13:30:14-13:33:5x, `-lgc 2700`, fils 0-15 ; référence tour : `references-tour.py` (transformers 5.17, tour SigLIP + `embed_vision` sur la carte, LM en RAM non appelé, 4 s), `references-tour-gemma4-31b-bf16.pt` 67 Mo + `.sha256`
+scellé (poste7 13 h 55, avant) : (1) TTFT acvram ≤ médiane des 19 froides ; (2) J net ≤ celui de llama.cpp par requête à 48 jetons ET sur la fenêtre TTFT ; (3) 8 jetons greedy = transformers bf16 ≥ 16/20 ET log-prob des 20 descriptions géo ≤ +3 % (poste7 14 h 25 : chemin prouvé sur gemma-4-12B-it bf16, coût nvfp4 du 31B contre acvram bf16 étagé)
+mesuré (19 froides, 48 jetons de sortie chacune) : **TTFT méd 0,665 s** (moy 0,672, min 0,649, max 0,807) ; total méd 1,33 s ; **J par requête 408 brut / 316 net** ; **J fenêtre TTFT 141 brut / 94 net** ; repos 70,0 W ; tour bf16 : 20 images, 279 jetons d'invite, embeds SigLIP [256, 1152] et projetés [256, 5376] par image
+verdict : les deux chiffres du duel sont posés : **TTFT ≤ 0,665 s** et **J net ≤ 316 par requête (48 jetons) / ≤ 94 sur la fenêtre TTFT** ; la référence (a) de la tour est scellée ; **(b) attend une source bf16 de gemma-4-12B-it : absente du poste** (seulement exl3 4bpw et GGUF Q4) → téléchargement HF ≈ 24 Go sur mot de l'utilisateur ; **(c) attend P0 fusionné + acvram bf16 étagé** (prédit 3-5 s/passe)
+durée : 3,6 min de carte (témoin 3,5 + tour 0,1)
+suite : chef : le mot pour le 12B ; poste1 : P0 ; ma file : (c) dès le pointeur ; test_chaine_b_contre_fp64 (poste7 13 h 45) dans le trou d'attente
