@@ -1310,9 +1310,11 @@ def glue_compact(fusion: str = "") -> bool:
 # jeton quantifiée UNE fois pour q/k/v (Attention._proj), résidu différé
 # (x + y absorbé par add_norm de la couche suivante, comme au décodage),
 # permutations MoE sans second tri ni conversions (MoEBlock._forward_prefill_
-# grouped). Défaut 0 tant que le scellé (noyaux ≤ 83 ms, ≥ 20 500 j/s, PPL au
-# bit) n'est pas mesuré sur carte.
-_PREFILL_COMPACT = int(os.environ.get("ACVRAM_PREFILL_COMPACT", "0"))
+# grouped). DÉFAUT 1 depuis le 20/09 (verdict-c15-prefill-19-09, poste2 bcd7a73b, 93b4e586 :
+# PPL au bit sur 3 tranches, capture 4/4, prefill Coder servi 22 748 / 22 683 contre
+# 17 609 / 16 981 j/s = × 1,29-1,34, noyaux 89,37 contre 101,67 ms) ; sans `norm`
+# (rmsnorm un warp par ligne 3,82 ms contre le bloc 2,12 : opt-in ITEMS=…,norm).
+_PREFILL_COMPACT = int(os.environ.get("ACVRAM_PREFILL_COMPACT", "1"))
 if _PREFILL_COMPACT not in (0, 1):
     raise ValueError(f"ACVRAM_PREFILL_COMPACT={_PREFILL_COMPACT!r} : attendu 0 ou 1")
 # bissection par fusion, comme GLUE_COMPACT_ITEMS : vide = toutes

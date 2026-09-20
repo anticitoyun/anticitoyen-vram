@@ -20,10 +20,12 @@ def _var(nom):
 
 # --- régime ----------------------------------------------------------------
 
-def test_le_defaut_est_le_temoin():
-    """Défaut 0 tant que le scellé n'est pas mesuré sur carte (poste7, C15-prefill)."""
-    assert _var("PREFILL_COMPACT").defaut == "0" and _var("PREFILL_COMPACT").torch == "0"
+def test_le_defaut_est_compact_sans_norm():
+    """DÉFAUT 1 depuis le 20/09 (verdict-c15-prefill-19-09, poste2 bcd7a73b : au bit 3 tranches, capture 4/4,
+    prefill servi × 1,29-1,34) ; le témoin reste 0 ; `norm` hors défaut (3,82 ms contre 2,12 au bloc)."""
+    assert _var("PREFILL_COMPACT").defaut == "1" and _var("PREFILL_COMPACT").torch == "0"
     assert _var("PREFILL_COMPACT_ITEMS").defaut == ""
+    assert "norm" not in kernels.PREFILL_COMPACT_DEFAUT and set(kernels.PREFILL_COMPACT_DEFAUT) >= {"epilogue", "a8", "residu", "permut", "attn"}
 
 
 def test_le_module_lit_le_defaut_sans_variable():
@@ -31,7 +33,7 @@ def test_le_module_lit_le_defaut_sans_variable():
     env["CUDA_VISIBLE_DEVICES"] = ""
     out = subprocess.run([sys.executable, "-c", "from acvram import kernels; print(kernels._PREFILL_COMPACT)"],
                          env=env, capture_output=True, text=True, timeout=120)
-    assert out.stdout.split() == ["0"], out.stdout + out.stderr[-500:]
+    assert out.stdout.split() == ["1"], out.stdout + out.stderr[-500:]
 
 
 def test_la_ligne_de_regime_nomme_la_glue_du_prefill(monkeypatch):
