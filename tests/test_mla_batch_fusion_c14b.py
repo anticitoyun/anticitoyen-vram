@@ -10,6 +10,7 @@ fusionné contre l'einsum (≤ 1 ulp bf16 de la sortie ; juge fp64 par ligne REL
 d(einsum) + 6 ulp bf16 — le fp32 n'est jamais matérialisé par le noyau) sur les formes réelles (b=12, nh=20,
 rank=512, dv=128, S=8 → SL=1 ; b=3, L=4 096 → SL=4).
 """
+import math
 import os
 import re
 
@@ -162,6 +163,86 @@ def test_source_cu_porte_le_combine_fusionne():
     assert "for (int c0 = 0; c0 < R; c0 += CH)" in noyau             # toutes les colonnes dans le bloc
 
 
+# ---- à sec : tranche vide et annulation (verdict poste2 09 h 00 : 37 lignes / 191 760 à > 6 ulp de |y64|) ----------
+def _combine_jumeau(ws, garde=True):
+    """Arithmétique du combine (témoin .cu:6040 = fusionné .cu:6125, colonne par colonne) : ws [B, S, H, R+2]
+    (o_s, m_s, l_s par tranche) → o [B, H, R] ; `garde=False` = le témoin cassant qui oublie w = 0 sur une
+    tranche vide (m = −inf : exp(−inf − M) vaut 0 mais 0·o_s avec o_s = 0 est 0… sauf que M = −inf si TOUTES les
+    tranches sont vides ; ici la faute cassante est l'absence du test l > 0 : inv = 1/0)."""
+    o_s, m_s, l_s = ws[..., :-2], ws[..., -2], ws[..., -1]                    # [B,S,H,R], [B,S,H], [B,S,H]
+    M = m_s.amax(dim=1, keepdim=True)                                         # [B,1,H]
+    w = torch.where(m_s != float("-inf"), torch.exp(m_s - M), torch.zeros_like(m_s)) if garde else torch.exp(m_s - M)
+    Lsum = (l_s * w).sum(dim=1)                                               # [B,H]
+    inv = torch.where(Lsum > 0, 1.0 / Lsum, torch.zeros_like(Lsum)) if garde else 1.0 / Lsum
+    return (o_s * w[..., None]).sum(dim=1) * inv[..., None]
+
+
+def _ws_avec_tranches_vides(B=3, S=4, H=2, R=8, seed=0):
+    torch.manual_seed(seed)
+    ws = torch.randn(B, S, H, R + 2)
+    ws[..., -2] = torch.rand(B, S, H) * 2 - 1                                  # m_s
+    ws[..., -1] = torch.rand(B, S, H) + 0.5                                    # l_s
+    vides = [(1, 2), (1, 3), (2, 1), (2, 2), (2, 3)]                          # (b, s) : b=1 court, b=2 très court
+    for b, s_ in vides:
+        ws[b, s_, :, :-2] = 0; ws[b, s_, :, -2] = float("-inf"); ws[b, s_, :, -1] = 0
+    return ws, vides
+
+
+def test_tranche_vide_combinee_a_poids_nul_a_sec():
+    """La prédiction de poste7 (09 h 00) : les 37 lignes viendraient d'une tranche VIDE mal combinée. Par lecture,
+    témoin et fusionné écrivent la même garde (`w = m != -INFINITY ? exp(m − M) : 0` .cu:6068 / :6154, `inv = Lsum
+    > 0 ? 1/Lsum : 0` :6079 / :6165) sur les tranches que mla_1p_kernel marque vides (m = −inf, l = 0, o = 0,
+    .cu:5867). Ici : le jumeau de cette arithmétique sur des (b, h) à tranches vides rend un o fini, égal à la
+    combinaison des seules tranches pleines ; le témoin cassant sans garde rend NaN — la garde est bien ce qui
+    compte, et elle est dans les deux noyaux. Le test carte (lens inégaux) exerce les vrais noyaux."""
+    ws, vides = _ws_avec_tranches_vides()
+    o = _combine_jumeau(ws)
+    assert torch.isfinite(o).all()
+    # même résultat que la combinaison restreinte aux tranches pleines
+    for b in range(ws.shape[0]):
+        pleines = [s_ for s_ in range(ws.shape[1]) if (b, s_) not in vides]
+        o_pleines = _combine_jumeau(ws[b:b + 1, pleines])
+        assert torch.allclose(o[b:b + 1], o_pleines, rtol=1e-6, atol=1e-7), b
+    # témoin cassant : sans la garde, une tranche vide fait exp(−inf − M) = 0 (inoffensif) mais un b dont TOUTES les
+    # tranches sauf une sont vides garde Lsum > 0… la faute qui casse vraiment : b entièrement vide → 1/0
+    ws2 = ws.clone(); ws2[2, :, :, -2] = float("-inf"); ws2[2, :, :, -1] = 0; ws2[2, :, :, :-2] = 0
+    assert torch.isfinite(_combine_jumeau(ws2)).all()
+    assert not torch.isfinite(_combine_jumeau(ws2, garde=False)).all()
+
+
+def test_annulation_fait_des_milliers_d_ulp_de_y64_sans_faute():
+    """Ce que valent « 2 296 ulp bf16 de |y64| » : sur une ligne où Σ_r v·o s'annule (|y64| ≪ Σ|v·o|), deux ordres
+    de somme fp32 EXACTS À LEUR BORNE diffèrent de milliers d'ulp de |y64| — l'ulp du résultat n'est pas une
+    échelle là où le résultat s'annule (leçon « un rapport ne classe pas deux objets »). Ici : 512 produits
+    fp32, deux ordres (séquentiel = l'einsum ; par 8 voies puis arbre = le noyau), ligne d'annulation forcée :
+    d_k et d_e en ulp bf16 de |y64| dépassent 1 000 et se classent au hasard, alors que le juge à l'échelle des
+    termes (1 ulp bf16 + 32·eps32·Σ|termes|) est tenu par les deux. Le juge carte est donc celui des termes."""
+    torch.manual_seed(1)
+    n, essais = 512, 200
+    pires = []
+    for _ in range(essais):
+        v = torch.randn(n, dtype=torch.float32) * 0.05
+        o = torch.randn(n, dtype=torch.float32) * 30
+        # annulation : le dernier terme compense la somme des autres à 1e-6 près
+        o[-1] = -(v[:-1].double() * o[:-1].double()).sum().item() / v[-1].item() * (1 + 1e-6)
+        prod64 = v.double() * o.double(); y64 = prod64.sum()
+        y_seq = torch.zeros((), dtype=torch.float32)
+        for k in range(n): y_seq = y_seq + v[k] * o[k]                         # ordre séquentiel (cuBLAS SIMT)
+        voies = [torch.zeros((), dtype=torch.float32) for _ in range(32)]
+        for k in range(n): voies[(k // 8) % 32] = voies[(k // 8) % 32] + v[k] * o[k]   # 32 voies de 8 (le noyau)
+        while len(voies) > 1: voies = [voies[i] + voies[i + 1] for i in range(0, len(voies), 2)]
+        y_noy = voies[0]
+        u = 2.0 ** (math.floor(math.log2(abs(y64.item()))) - 7)
+        d_k, d_e = abs(y_noy.to(DT).double() - y64).item() / u, abs(y_seq.to(DT).double() - y64).item() / u
+        borne = u + 32 * 2.0 ** -23 * prod64.abs().sum().item()
+        assert abs(y_noy.to(DT).double() - y64).item() <= borne and abs(y_seq.to(DT).double() - y64).item() <= borne
+        pires.append((d_k, d_e))
+    plus_de_6 = sum(1 for k, e in pires if k > e + 6); inverse = sum(1 for k, e in pires if e > k + 6)
+    print(f"\n{essais} lignes d'annulation : max d_k {max(k for k, _ in pires):.0f}, max d_e {max(e for _, e in pires):.0f} ulp bf16 de |y64| ; "
+          f"d_k > d_e + 6 : {plus_de_6}, d_e > d_k + 6 : {inverse} — juge des termes tenu partout")
+    assert max(max(k, e) for k, e in pires) > 1000 and plus_de_6 > 0 and inverse > 0
+
+
 # ---- carte ------------------------------------------------------------------------------------
 def _ext_carte():
     if not torch.cuda.is_available():
@@ -176,16 +257,33 @@ def _ext_carte():
 def _lot(B, L, n, seed=1):
     torch.manual_seed(seed)
     caches = [(torch.randn(L, W, device="cuda") * 0.3).to(DT) for _ in range(B)]
-    lens = torch.full((B,), n, dtype=torch.int64, device="cuda")
+    lens = torch.tensor(n if isinstance(n, (list, tuple)) else [n] * B, dtype=torch.int64, device="cuda")
     ptrs = torch.tensor([c.data_ptr() for c in caches], dtype=torch.int64, device="cuda")
     q = torch.randn(B, NH, W, device="cuda") * 0.5
     return caches, lens, ptrs, q
 
 
-@pytest.mark.parametrize("B,L,n", [(12, 512, 300), (12, 128, 128), (3, 4096, 3900), (1, 4096, 4000)])
+def _juge_termes(y, y_e, y_64, vb, o_lat):
+    """Juge fp64 à l'ÉCHELLE DES TERMES (poste2 09 h 00, 37 lignes à > 6 ulp de |y64| sur 191 760 : là où la
+    somme s'annule, l'ulp de |y64| n'est pas une échelle — « un rapport ne classe pas deux objets ») :
+    |y − y64| ≤ 1 ulp bf16(|y64|) (l'arrondi de sortie, exposant compris) + 32·eps32·Σ_r |v_b[h,v,r]·o[b,h,r]|
+    (l'accumulation fp32 de 512 produits, quel que soit l'ordre : borne (n−1)·eps, typique √n·eps). Rend (lignes fautives noyau, lignes fautives einsum, max ratio noyau,
+    max ratio einsum) — ratio = |y − y64| / borne, par ligne (b, h)."""
+    somme_abs = torch.einsum('hvr,bhr->bhv', vb.double().abs(), o_lat.double().abs())
+    borne = 2.0 ** (torch.floor(torch.log2(y_64.abs().clamp_min(1e-30))) - 7) + 32 * 2.0 ** -23 * somme_abs
+    r_k = ((y.double() - y_64).abs() / borne).amax(dim=-1)
+    r_e = ((y_e.double() - y_64).abs() / borne).amax(dim=-1)
+    return (r_k > 1).sum().item(), (r_e > 1).sum().item(), r_k.max().item(), r_e.max().item()
+
+
+@pytest.mark.parametrize("B,L,n", [(12, 512, 300), (12, 128, 128), (3, 4096, 3900), (1, 4096, 4000),
+                                   (3, 4096, [3900, 40, 700]), (12, 512, [300, 3, 511, 64, 1, 200, 300, 17, 400, 9, 128, 256])])
 def test_combine_fusionne_contre_einsum_sur_carte(B, L, n):
     """b=12, L=512 (S=8, SL=1) ; b=3, L=4 096 (S≥32, SL≥2 : le morceau de colonnes en boucle) ;
-    b=1 (régime FIN). Juge (d) (poste7 07 h 50, forme précisée par poste2 08 h 10) : sortie bf16 du
+    b=1 (régime FIN) ; lens INÉGAUX (b=3 : [3900, 40, 700] à L=4 096 → S ≥ 32 tranches dont la plupart VIDES pour
+    b=1 et b=2 ; b=12 : lens de 1 à 511 à S=8) : la tranche vide (m = −inf, l = 0, o = 0 écrits par mla_1p_kernel
+    .cu:5867) est combinée à poids 0 par le témoin (.cu:6068) comme par le fusionné (.cu:6154), à l'identique.
+    Juge (d) (poste7 07 h 50, forme précisée par poste2 08 h 10) : sortie bf16 du
     noyau contre bf16(einsum fp32 de v_b32 · o_lat) ≤ 1 ulp bf16 (absolu) ET juge fp64 PAR LIGNE,
     RELATIF à la référence (REGLES § 7) : d(noyau, fp64) ≤ d(einsum, fp64) + 6 ulp bf16 — pas
     « ≤ 1 absolu » : sur la carte le noyau est à 2,0 ulp de fp64 là où l'einsum l'est aussi (c'est
@@ -208,8 +306,11 @@ def test_combine_fusionne_contre_einsum_sur_carte(B, L, n):
     print(f"\nB={B} L={L} : noyau vs einsum {e_ke:.2f} ulp bf16 ({diff}/{y.numel()} positions ≠) ; "
           f"noyau vs f64 {e_k64:.2f}, einsum vs f64 {e_e64:.2f} ulp bf16 (max par ligne) ; "
           f"pire d(noyau) − d(einsum) par ligne {(d_k - d_e).max().item():+.2f}")
+    f_k, f_e, r_k, r_e = _juge_termes(y, y_e, y_64, vb, o_lat)
+    print(f"  juge à l'échelle des termes : lignes fautives noyau {f_k}, einsum {f_e} ; ratio max noyau {r_k:.3f}, einsum {r_e:.3f}")
     assert e_ke <= 1, f"noyau vs einsum {e_ke:.2f} ulp bf16 > 1"
     assert bool((d_k <= d_e + 6).all()), f"juge fp64 par ligne : d(noyau) > d(einsum) + 6 ulp sur {(d_k > d_e + 6).sum().item()} lignes"
+    assert f_k == 0 and f_e == 0, (f_k, f_e)
     # témoin cassant : un v_b décalé d'une tête doit se voir
     vb2 = torch.roll(vb, 1, dims=0).contiguous()
     y2 = ext.mla_decode_1p(q, ptrs, None, lens, L, RANK, scale, False, vb2)
