@@ -6,6 +6,8 @@
 # (ou « PARTIEL » : code 2 = mesuré mais non tranché : la chaîne continue et le dit) ; la chaîne s'arrête au premier
 # scellé réfuté et rend PARTIEL (code 1). Une chaîne qui rend « tenu » partout sans avoir pu rendre faux (scellé
 # absent) n'entre pas dans INDEX : ici une étape sans scellé est REFUSÉE (code 64).
+# L'étape PPL apparie ses tranches et s'arrête par outils/gpu/mesure/geo-sequentiel.py (3.3 : NMIN 5, SE plancher
+# 1,97 %/√n, codes 10/11/12/13 ; l'étape rend 0 si 10, 1 si 11, 2 = partiel si 13).
 # Chaque étape prend elle-même outils/carte.sh (plafond ACVRAM_DUREE_MAX, 3.1) ; jamais lancer la chaîne sous un
 # verrou tenu (ACVRAM_CARTE_TENUE → refus).
 # Usage dans une chaîne :
