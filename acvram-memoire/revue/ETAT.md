@@ -2,7 +2,7 @@
 
 Équipe à quatre : **poste7** (décide, `revue/poste7-*.md`, effort max), **chef** (fusions, fichiers, lien utilisateur), **poste1** (noyaux/code), **poste2** (mesure, tient la file de carte). Fin de l'abonnement **dimanche 20/09 08 h 00** ; bilan poste7 écrit (`poste7-bilan-nuit-20-09`), dernier push chef 07 h 45 machine. Toute heure écrite est lue sur `date`.
 
-## Servi ce matin — défaut 0.6.24 (main 6c7bb533 ; 0.6.25 à 07 h 15 pour la ligne de régime `glue=compact(8)`)
+## Servi ce matin — défaut 0.6.24 (main 6c7bb533 ; **0.6.25 construit à 06 h 0x** sur main = ligne de régime `glue=compact(8)` + repli eager annoncé + `ensure_hist` ; .cu inchangé depuis 0.6.24 → pas de recompilation ; trois bras + charge utile chez poste2 → feu vert)
 - **Éco 2 700** (utilisateur 20 h 22) : le processus qui sert pose `-lgc 2700` et rend à l'arrêt ; étiquette lue sous charge jusqu'à stabilité ; sudoers restreint dans le .deb ; trois bras carte sur chaque arbre livré (deux arbres refusés avant). À b=12 le régime réel est **400 W** (médiane 2 550 MHz, `sw_power_cap`).
 - **P2** (i8c + cublas) au défaut ; **TF32 sur le cœur MLA au prefill ≤ 2 048 clés** (± 3-6 % par texte à 8 192 → limité) ; **C14 + C14-c** (`mla_1p` 44,5 → 5,2 µs/couche, GLM b=1 noyaux −21 %) ; **C15 niveau 1** (2 622 → 2 163 lancements, au bit) ; **C15-3d** glue compacte 8 warps (1 169 → 641 nœuds, experts égaux jugés contre le témoin 0,80 ≤ 1,2).
 - Opt-in nommés : C4 sentinelles, C10 (b) `MARLIN_DISTINCT`, C5-b `KV_INT8_CANAL` (qualité seule : +43 % de temps), C17 `MOE_DECODE_MMA_MARLIN`, C13-c `MLA_CORE=flash` (faux), niveau 2 `MLA_GLUE=2` (faux), éco 2100, gouverneur C8 ; `chemin_moe=mma-a4` nommé.
@@ -14,7 +14,7 @@
 | Coder b=1 | **354 · 0,446** | 316,7 · 0,724 | 290,2 · 0,622 |
 | Coder b=12 | **1 397 ± 1,5 % · 0,210** (0.6.24) | 890 · 0,170 | **1 626 · 0,136** (W4A16 Marlin) |
 | Coder prefill | 17 784 | 15 532 | **20 824** |
-| Coder PPL privé | **1,0094** | 1,0103 | — |
+| Coder PPL privé | **1,0094** (KV int8 +0,63 % à 8 k) | 1,0103 | KV fp8 +0,18 % ± 0,47 (indécidable) |
 | GLM b=12 / b=1 / prefill 2 048 / 8 192 | 660 ± 20 · 0,320 / 122,5 / 7 268 / 1 905 | — | 858 · 0,397 / 183,5 / 18 117 (libre) |
 | 119B b=1 | non chargé (PCIe × 8 = 22,6 Go/s : parité au mieux) | **24,2** experts en RAM | — |
 **Revendication, mot pour mot** (`poste7-concurrents-2700-verite-b12` § 1) : devant les deux à b=1 en vitesse et en énergie ; à b=12 devant llama.cpp en vitesse et derrière en énergie, **derrière vLLM Marlin sur les deux** ; prefill second ; PPL devant. **L'objectif « plus performant et plus économe que tous » n'est pas atteint à b=12 ni au prefill ; il l'est à b=1.**
