@@ -44,7 +44,7 @@ def poste(tmp_path, monkeypatch):
     (d1 / "Petit-7B-Q4_K_M").mkdir(parents=True); _gguf(d1 / "Petit-7B-Q4_K_M" / "petit-7b-q4_k_m.gguf", 8192)
     (d2 / "Moyen-nvfp4").mkdir(parents=True)
     (d2 / "Moyen-nvfp4" / "config.json").write_text(json.dumps({"model_type": "llama", "max_position_embeddings": 32768}))
-    (d2 / "Moyen-nvfp4" / "model.safetensors").write_bytes(b"\0" * 16); (d2 / "Moyen-nvfp4" / "acvram.json").write_text("{}")
+    (d2 / "Moyen-nvfp4" / "acvram-00000.safetensors").write_bytes(b"\0" * 16); (d2 / "Moyen-nvfp4" / "acvram_manifest.json").write_text("{}")  # forme réelle d'un dossier converti
     (d2 / "Grand-AWQ").mkdir()
     (d2 / "Grand-AWQ" / "config.json").write_text(json.dumps({"model_type": "qwen2", "max_position_embeddings": 131072, "quantization_config": {"quant_method": "awq"}}))
     (d2 / "Grand-AWQ" / "model.safetensors").write_bytes(b"\0" * 16)
