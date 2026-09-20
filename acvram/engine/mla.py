@@ -662,6 +662,10 @@ class MLAttention(nn.Module):
                 and self.kv_a_norm.dtype == torch.bfloat16):
             if self.rope_emb is not None:
                 cos32, sin32 = self.rope_emb.tables32(bucket + 1, x.device)
+                # le noyau lit cos32[pos·rope + j] sans garde et pos < bucket : la table
+                # doit couvrir le godet (poste2 03:36 : une lecture hors table ne lève rien)
+                if cos32.shape[0] <= bucket:
+                    raise RuntimeError(f"tables RoPE fp32 de {cos32.shape[0]} lignes pour un godet de {bucket}")
             else:
                 cos32 = sin32 = None
             q_c, kvp_c = q.contiguous(), kvp.contiguous()
@@ -692,6 +696,8 @@ class MLAttention(nn.Module):
             self._temoin_prep({"q_eff_avant_attn": q_eff, "lens_avant_attn": lens})
         o_lat = _mla_decode_batch(ext, q_eff.contiguous(), cache_ptrs, lens,
                                   scores_batch, bucket, self.rank, self.scale, fp8)  # [B, nh, rank]
+        if _MLA_PREP_TEMOIN and "_temoin" in self.__dict__:
+            self._temoin_prep({"o_lat": o_lat})
         with _tf32_coeur(decode=True):
             y = torch.einsum('hvr,bhr->bhv', self._v_b32().to(_dt_coeur(decode=True)), o_lat.to(_dt_coeur(decode=True)))
         if not un_lancement:
