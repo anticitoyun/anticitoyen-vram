@@ -826,6 +826,36 @@ def _i8c_echelles(t: INT8Tensor) -> torch.Tensor:
     return s
 
 
+def int8_matmul_partage(x: torch.Tensor, ts: list) -> Optional[list]:
+    """C15-prefill : ``[x @ W_i.T for W_i in ts]`` avec l'A8 par jeton quantifiée
+    UNE fois — le chemin cublas de `int8_matmul` pour chacun, au bit (même
+    quantificateur, même `_int_mm`, même épilogue). None si UN des tenseurs ne
+    prendrait pas ce chemin sous le dispatcher (alors chaque projection suit
+    `int8_matmul` seule : le témoin) — les conditions sont celles de
+    `int8_matmul` (n > seuil GEMV ou sans extension, régime cublas, dtype) et
+    de `gemm_i8c_cublas` (par canal symétrique, M > 16, K et N multiples de 8)."""
+    xf = x.reshape(-1, x.shape[-1])
+    n = xf.shape[0]
+    if _PREFILL_INT8 != "cublas" or x.dtype not in (torch.bfloat16, torch.float16) or n <= 16:
+        return None
+    ext = get_extension()
+    if ext is not None and ts[0].qweight.is_cuda and n <= _INT8_GEMV_MAX:
+        return None                                  # le dispatcher prendrait le GEMV
+    if x.is_cuda and (not ts[0].qweight.is_cuda or _bk.resolve("int8", ts[0].qweight.device)[0].name != "cuda-fusionne"):
+        return None                                  # backend masqué : la référence torch
+    for t in ts:
+        if _i8c_poids(t) is None or t.qweight.shape[1] % 8 or t.qweight.shape[0] % 8:
+            return None
+    a8 = quantifier_a8_i8c(xf)
+    sorties = []
+    for t in ts:
+        y = gemm_i8c_cublas(xf, t, sortie_fp32=False, a8=a8)
+        assert y is not None
+        CHEMINS_INT8["cublas_partage"] += 1
+        sorties.append(y[:, : t.shape[0]].reshape(*x.shape[:-1], t.shape[0]))
+    return sorties
+
+
 def quantifier_a8_i8c(x: torch.Tensor):
     """L'activation A8 par jeton du chemin cublas, (a8 int8 [M, K], s_x fp32 [M]),
     pour la passer à `gemm_i8c_cublas(..., a8=)` — C15-prefill : q, k et v

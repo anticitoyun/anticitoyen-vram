@@ -292,6 +292,27 @@ class Attention(nn.Module):
         self.qkv_tailles = tuple(l.qweight.shape[0] for l in lins)
         return True
 
+    def _proj_i8c_partage(self, x: torch.Tensor):
+        """C15-prefill : q, k, v INT8 par canal (convertis -qkvo-i8c) lus sur la
+        MÊME ligne normée — l'A8 par jeton quantifiée une fois pour les trois
+        (`kernels.int8_matmul_partage`), au lieu d'une fois par projection
+        (nsys P2 19/09 : `_quant_a8_kernel` ×4 par couche, trois fois les mêmes
+        octets). None si une projection n'est pas un INT8 plein sans échelle ni
+        biais ni exil, ou si le dispatcher ne prendrait pas le chemin cublas :
+        le chemin d'avant (trois forwards) reste, au bit."""
+        from ..quant.formats import INT8Tensor
+        lins = [self.q_proj, self.k_proj] + ([] if self.k_eq_v else [self.v_proj])
+        for lin in lins:
+            if (not isinstance(lin, QuantLinear) or not isinstance(lin.qweight, INT8Tensor)
+                    or lin.streamed is not None or lin.bias is not None
+                    or (lin.scaler is not None and not lin.scaler.is_identity)):
+                return None
+        sorties = kernels.int8_matmul_partage(x, [lin.qweight for lin in lins])
+        if sorties is None:
+            return None
+        qr, kr = sorties[0], sorties[1]
+        return qr, kr, (kr if self.k_eq_v else sorties[2])
+
     def _proj(self, x: torch.Tensor, t: int, qkv=None):
         """q, k, v (et la porte de sortie) : une GEMV empilée si possible ;
         ``qkv`` déjà calculé (3b : norme absorbée par le GEMV) est découpé tel quel."""
@@ -315,8 +336,12 @@ class Attention(nn.Module):
             sorties[i], sorties[j], sorties[reste] = deux[0], deux[1], seul
             qr, kr, vr = sorties
         else:
-            qr, kr = self.q_proj(x), self.k_proj(x)
-            vr = kr if self.k_eq_v else self.v_proj(x)
+            partage = self._proj_i8c_partage(x) if kernels.prefill_compact("a8") else None
+            if partage is not None:
+                qr, kr, vr = partage
+            else:
+                qr, kr = self.q_proj(x), self.k_proj(x)
+                vr = kr if self.k_eq_v else self.v_proj(x)
         gate = None
         if self.output_gate:
             # par tête : [q_h | porte_h] — l'ordre du point de contrôle HF,

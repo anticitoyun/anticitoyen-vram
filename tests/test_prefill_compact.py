@@ -122,6 +122,69 @@ def test_gemm_i8c_cublas_compact_egale_le_temoin(monkeypatch):
     assert len(appels) == 2 and torch.equal(y, refs[False])
 
 
+# --- fusion 2 : A8 quantifiée une fois pour q/k/v ----------------------------
+
+def _trois_i8c(K=256, seed=7):
+    from acvram.quant.formats import _quantize_int8
+    torch.manual_seed(seed)
+    return [_quantize_int8(torch.randn(N, K) * 0.02, group_size=K, symmetric=True) for N in (128, 32, 32)]
+
+
+def test_a8_partagee_egale_trois_int8_matmul(monkeypatch):
+    """Les trois sorties du chemin partagé sont les octets des trois `int8_matmul`
+    séparés (même A8, même produit entier, même épilogue) ; un seul quantificateur."""
+    from acvram.kernels import gemm_w8a8 as g
+    ts = _trois_i8c()
+    x = (torch.randn(3, 20, 256) * 0.5).to(torch.bfloat16)          # [b, t, K] : la forme est rendue
+    appels = []
+    vrai = g.quantifier_a8_torch
+    monkeypatch.setattr(g, "quantifier_a8_torch", lambda *a, **k: appels.append(1) or vrai(*a, **k))
+    refs = [kernels.int8_matmul(x, t) for t in ts]
+    assert len(appels) == 3
+    sorties = kernels.int8_matmul_partage(x, ts)
+    assert sorties is not None and len(appels) == 4
+    for y, r, t in zip(sorties, refs, ts):
+        assert y.shape == (3, 20, t.shape[0]) and y.dtype == r.dtype and torch.equal(y, r)
+    assert kernels.CHEMINS_INT8["cublas_partage"] >= 3
+
+
+def test_a8_partagee_decline_ce_que_le_dispatcher_ne_prendrait_pas(monkeypatch):
+    """Témoins cassants : M ≤ 16 (cuBLASLt refuse), un poids affine par groupes,
+    le régime bf16 — dans chaque cas None, et les projections suivent le
+    chemin d'avant une par une."""
+    from acvram.quant.formats import _quantize_int8
+    ts = _trois_i8c()
+    x = (torch.randn(20, 256) * 0.5).to(torch.bfloat16)
+    assert kernels.int8_matmul_partage(x[:16], ts) is None
+    t_aff = _quantize_int8(torch.randn(32, 256) * 0.02, group_size=128, symmetric=False)
+    assert kernels.int8_matmul_partage(x, ts[:2] + [t_aff]) is None
+    monkeypatch.setattr(kernels, "_PREFILL_INT8", "bf16")
+    assert kernels.int8_matmul_partage(x, ts) is None
+
+
+def test_proj_partagee_de_l_attention_suit_le_temoin(monkeypatch):
+    """`Attention._proj_i8c_partage` sur trois QuantLinear INT8 : mêmes octets que
+    q_proj(x), k_proj(x), v_proj(x) ; un biais ou une échelle de canal rend None."""
+    from acvram.engine.layers import QuantLinear
+    from acvram.engine.model import Attention
+
+    class Faux:
+        k_eq_v = False
+
+    ts = _trois_i8c()
+    f = Faux()
+    f.q_proj, f.k_proj, f.v_proj = (QuantLinear(t) for t in ts)
+    x = (torch.randn(24, 256) * 0.5).to(torch.bfloat16)
+    monkeypatch.setattr(kernels, "_PREFILL_COMPACT", 1)
+    qr, kr, vr = Attention._proj_i8c_partage(f, x)
+    # à sec, `QuantLinear.forward` passe par le backend de référence (déquant fp32) :
+    # le témoin du chemin cublas est `int8_matmul` appelé directement
+    for y, t in zip((qr, kr, vr), ts):
+        assert torch.equal(y, kernels.int8_matmul(x, t))
+    f.k_proj = QuantLinear(ts[1], bias=torch.zeros(32, dtype=torch.bfloat16))
+    assert Attention._proj_i8c_partage(f, x) is None
+
+
 def test_une_valeur_hors_domaine_est_refusee():
     env = dict(os.environ, ACVRAM_PREFILL_COMPACT="2", CUDA_VISIBLE_DEVICES="")
     out = subprocess.run([sys.executable, "-c", "import acvram.kernels"], env=env, capture_output=True, text=True, timeout=120)
