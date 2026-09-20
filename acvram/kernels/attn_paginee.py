@@ -249,7 +249,11 @@ def _tranches(n_pages: int, b: int, hkv: int, device) -> tuple[int, int]:
 # (mêmes tuiles, mêmes tl.dot) ; seul l'ordre des réductions croisées (tl.sum
 # de p, de l·w) peut suivre une autre disposition : au bit sous l'interpréteur,
 # ≤ 1 ulp 16 bits sur carte (juge : tests/test_glue_compact.py).
-WARPS_COMPACT = 8
+# C15-3d : 8 warps = 103 registres/fil et occupation 24 % (poste2 04 h 40, contre 178 et 11 % à 4),
+# durée inchangée 17,8 µs — et le bras B tire 369 W contre 349 (J +2,6 %, addendum 05 h 03) :
+# ACVRAM_ATTN_WARPS_COMPACT=4 est le bras qui dit si ce sont ces warps (energie_par_poste).
+WARPS_COMPACT = int(os.environ.get("ACVRAM_ATTN_WARPS_COMPACT", "8"))
+assert WARPS_COMPACT in (1, 2, 4, 8, 16), WARPS_COMPACT
 
 _COMPTEURS: dict = {}
 

@@ -212,6 +212,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("FUSION_PARTIELLE", "0", None, "0"),
     Variable("LOGITS_BF16", "", None, "", "1 : tête en bf16 (précision-de-sortie-invisible-à-la-PPL)"),
     Variable("GRAPHS_EAGER", "", None, "1"),
+    Variable("ATTN_WARPS_COMPACT", "8", ("acvram.kernels.attn_paginee", "WARPS_COMPACT"), "8",
+             "C15-3d : warps du noyau d'attention paginée fusionné (GLUE_COMPACT=1) ; 8 = 103 registres, occupation 24 % ; 4 = bras énergie (B +20 W à 8, poste2 05 h 03)"),
     Variable("ROUTAGE_TEMOIN", "0", ("acvram.engine.model", "_ROUTAGE_TEMOIN"), "0",
              "diagnostic C15-3d : 1 = chaque couche MoE copie topi dans un tampon persistant (lisible sous graphes, equiv-b12.py « experts égaux ») ; 0 = témoin"),
     Variable("GODETS_B", "1", ("acvram.engine.graphs", "_GODETS_B"), "0",
