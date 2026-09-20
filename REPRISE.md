@@ -234,6 +234,25 @@ mais le reste est écrit à l'aveugle.
 * **Dépôt privé** par défaut. Le projet ne contient aucun secret, mais la
   visibilité est une décision qui appartient au propriétaire.
 
+## 11. Terminé — définition (20/09/2026, `revue/poste7-tests-rapides-cloture-20-09`, mot pour mot)
+
+État servi au 20/09 09 h 23 : **0.6.30** (`acvram_0.6.30_amd64.deb` à la racine ; C15-prefill au défaut, capture gemma, éco 2 700) ; l'état vivant est `acvram-memoire/revue/ETAT.md`. Le § 2 ci-dessus décrit 0.6.15 (19/09) et reste vrai pour ce qu'il nomme ; les versions 0.6.16-0.6.30 sont dans `revue/INDEX.md` (verdicts `verdict-paquet-*`).
+
+### 11.1 « Terminé » — quatre conditions, chacune rendue par une prise ou un fichier
+| | condition | rendu par | état |
+|---|---|---|---|
+| T1 | comparatif Coder + GLM à harnais égal, `-lgc 2700`, régime d'horloge dans chaque cellule, revendication mot pour mot (devant / derrière par cellule) | INDEX + REPRISE.md | Coder : fait (08 h 43) ; **GLM : cellules vLLM sans régime nommé (858 · 0,397, prefill « libre ») → une prise de 10 min si elles ne sont pas à 2 700, sinon T1 est fait** |
+| T2 | toute cellule où acvram est derrière porte SOIT une pièce de cette note avec scellé et prise ≤ 15 min, SOIT « hors périmètre, cause chiffrée » (§ 3) | cette note, § 2 et § 3 | écrit ci-dessous |
+| T3 | paquet servi installé (`dpkg -s acvram` = 0.6.30), trois bras éco tenus sur l'arbre livré, **parc S2 : un jeton décodé par alias au godet 1, ok / repli / échec publié** | `verdict-paquet-0630` (fait) + S2 (une prise 15 min) | S2 à faire sur 0.6.30 |
+| T4 | `pytest -q` vert à sec sur main ; suite carte du gabarit ≤ 30 min ; aucune branche hors main sans verdict (fusionnée ou close « opt-in ») | poste1 / chef | 3 rouges signalés 08 h 00 → à relire sur main 572fd9ae |
+**Terminé = T1-T4 tenus.** Un « faux » publié ferme une pièce autant qu'un « tenu » : le projet se termine avec ses derrières nommés, pas avec un chiffre reconstruit. Prédiction : T1-T4 tenus **demain 21/09 avant midi** si les prises de § 2 tiennent leur durée ; pièce 3 est la seule qui coûte plus d'une heure de code.
+
+### 11.2 Hors périmètre de « terminé » — publié avec sa cause, pas de chantier
+* **Coder b=12 énergie** : 0,210 contre vLLM Marlin 0,136 J/jeton — experts Marlin à 400 W = 54 % du pas, W constante sous plafond (MECANISMES), **aucun chemin connu** ; **vitesse** 1 397 contre 1 626 (−14 %) : sélection C15-3d faux (4,83 µs), reste la bande Marlin 1,07 contre 1,24-1,41 To/s = noyau à réécrire, ≥ 3 jours, prédiction × 1,10-1,15 au mieux, ne rattrape pas 0,136 J.
+* **GLM prefill** 7 268 contre 18 117 (× 2,5) : structure du flash `tl.dot` sur sm_120 (tuile 32×64, × 26 forme 1) ; C13-c réécrit ≈ 10 000 prédit = encore × 1,8 derrière, ≥ 2 jours. **GLM b=12** 660 contre 858 : C14-b (M1) et niveau 3 (M3-M4) sont les seules pièces courtes ; l'écart restant (≈ −20 %) est publié tel quel.
+* **119B** : (c) tenu tant que l'utilisateur n'a pas répondu a/b/c/d ; parité PCIe × 8 au mieux (22,6 Go/s).
+* Ce qui reste opt-in nommé (C4, C10 b, C5-b, C17, C13-c flash, `MLA_GLUE=2` si M3 tombe, `MLA_BATCH_FUSION`) est listé dans REPRISE.md avec son chiffre — c'est une fermeture, pas une dette.
+
 ## 10. Ce qui vient ensuite (19/09/2026 — `revue/poste7-pistes-evolutions-19-09`)
 
 **La borne à connaître avant toute piste de prefill** (`poste7-nuit-sens2-19-09` § 1, corrigée par
