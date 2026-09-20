@@ -1,0 +1,55 @@
+# Exemple : parc.toml de ce poste (i9-14900K, 5090 + 3080 Ti) au 20/09/2026 — hors paquet, sert aux tests locaux :
+#   ACVRAM_PARC_CONFIG=parc/exemples/parc-poste-20-09.toml claude-modeles
+[chemins]
+kimi_dir = "~/.kimi-code"
+tsv_dir = "~/TSV"
+secrets = "~/.config/ia-secrets.env"
+bin = "~/.local/bin"
+mcp_claude = "~/.config/claude-local/mcp.json"
+icone_claude = "~/.local/share/icons/hicolor/256x256/apps/claude-local.png"
+dossiers_lancement = ["~/Bureau/Claude", "~/Bureau/Kimi"]
+lib = "~/.local/bin/kimi-menu.lib.sh"
+
+[racines]
+modeles = ["/mnt/AI_GENERATOR/models_acvram", "/mnt/2TO_2023_980PRO/Modeles", "/mnt/4TO_SATACMR_2022/Modeles", "/mnt/2TO_SSD_2025_IA"]
+profondeur = 4
+
+[outils]
+kimi = "~/.kimi-code/bin/kimi"
+claude = "~/.local/bin/claude"
+hf = "/home/linuxbrew/.linuxbrew/bin/hf"
+
+[moteurs.acvram]
+present = true
+port = 8090
+journal = "/tmp/acvram-serveur.log"
+[moteurs.vllm]
+present = true
+port = 8000
+journal = "/mnt/AI_GENERATOR/vLLM/serveur.log"
+[moteurs.rapide]
+present = true
+nom = "appoint 3080 Ti"
+port = 8081
+cle_defaut = "rapide-3080ti-4f7a"
+journal = "/mnt/AI_GENERATOR/llamacpp/appoint.log"
+[moteurs.llamacpp]
+present = true
+port = 8080
+cle_defaut = "llamacpp-9c1f4c1e6f2a4d0f"
+journal = "/mnt/AI_GENERATOR/llamacpp/serveur.log"
+[moteurs.tabby]
+present = true
+port = 5000
+tokens = "/opt/ia/TabbyAPI/api_tokens.yml"
+[moteurs.yals]
+present = true
+port = 5011
+
+[extras]
+comfy_start = "/mnt/AI_GENERATOR/lanceurs/comfyui.sh"
+comfy_url = "http://127.0.0.1:8188"
+openwebui_dir = "/mnt/AI_GENERATOR/openwebui"
+ctx_actuel = "/mnt/AI_GENERATOR/llamacpp/ctx-actuel"
+port_web_kimi = 58627
+racine_telechargement = "/mnt/4TO_SATACMR_2022/Modeles"

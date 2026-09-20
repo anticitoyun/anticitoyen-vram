@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="fond" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#312e81"/><stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0.3" cy="0.25" r="0.8">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="6" y="6" width="116" height="116" rx="28" fill="url(#fond)"/>
+  <rect x="6" y="6" width="116" height="116" rx="28" fill="url(#halo)"/>
+  <!-- chevron de terminal -->
+  <path d="M30 42 L56 62 L30 82" fill="none" stroke="#ffffff" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- curseur -->
+  <rect x="62" y="74" width="26" height="9" rx="3" fill="#fbbf24"/>
+  <!-- étincelle -->
+  <path d="M96 22 C97.5 31 100 33.5 109 35 C100 36.5 97.5 39 96 48 C94.5 39 92 36.5 83 35 C92 33.5 94.5 31 96 22 Z" fill="#fde68a"/>
+  <path d="M78 46 C78.7 50 79.9 51.2 84 52 C79.9 52.8 78.7 54 78 58 C77.3 54 76.1 52.8 72 52 C76.1 51.2 77.3 50 78 46 Z" fill="#fde68a" opacity="0.85"/>
+  <!-- badge LOCAL -->
+  <rect x="18" y="94" width="92" height="20" rx="10" fill="#0f172a" opacity="0.75"/>
+  <circle cx="30" cy="104" r="4.5" fill="#22c55e"/>
+  <text x="40" y="109" font-family="Noto Sans, DejaVu Sans, sans-serif" font-size="12" font-weight="700" letter-spacing="0.8" fill="#e2e8f0">MODÈLES</text>
+</svg>

@@ -1,0 +1,156 @@
+#!/usr/bin/python3
+"""integrite-modeles — détecte la corruption silencieuse des poids de modèles.
+
+Le disque des modèles accumule des erreurs de liaison SATA : un fichier peut se
+corrompre sans que rien ne le signale, et le modèle ne devient inutilisable qu'au
+moment où on en a besoin. Ce script prend l'empreinte des fichiers et compare aux
+empreintes précédentes.
+
+  integrite-modeles                 contrôle les modèles déjà enregistrés
+  integrite-modeles --enregistrer   (ré)enregistre les empreintes de référence
+  integrite-modeles --tout          n'échantillonne pas : lit les fichiers en entier
+
+Par défaut l'empreinte est un ÉCHANTILLON (premier et dernier mégaoctet, plus
+quelques blocs répartis) : lire 2,7 To à chaque contrôle serait absurde, alors
+qu'un échantillon attrape la très grande majorité des corruptions réelles.
+Les fichiers GGUF/safetensors ont en plus un en-tête vérifiable, contrôlé ici.
+"""
+import hashlib
+import json
+import os
+import sys
+import time
+
+# parc.toml (acvram-parc) : racines et TSV du poste
+sys.path.insert(0, "/usr/share/acvram-parc/lib")
+_LIB_LOCALE = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "lib")
+if os.path.exists(os.path.join(_LIB_LOCALE, "acvram_parc.py")):
+    sys.path.insert(0, _LIB_LOCALE)
+from acvram_parc import charger as _charger_parc  # noqa: E402
+PARC = _charger_parc()
+RACINES = [str(r) for r in PARC.racines]
+EXTENSIONS = (".gguf", ".safetensors", ".onnx", ".pt", ".bin")
+ETAT = os.path.expanduser("~/.local/share/integrite-modeles")
+REF = os.path.join(ETAT, "empreintes.json")
+BLOC = 1024 * 1024
+MIN_TAILLE = 50 * 1024 * 1024      # sous 50 Mo, ce ne sont pas des poids qui comptent
+
+
+def empreinte(chemin, complet=False):
+    """Empreinte + contrôle de l'en-tête. (hash, taille, entete_ok)"""
+    taille = os.path.getsize(chemin)
+    h = hashlib.blake2b(digest_size=16)
+    entete_ok = True
+    with open(chemin, "rb") as f:
+        debut = f.read(BLOC)
+        h.update(debut)
+        # en-tête : un fichier tronqué ou écrasé se voit tout de suite
+        if chemin.endswith(".gguf"):
+            entete_ok = debut[:4] == b"GGUF"
+        elif chemin.endswith(".safetensors"):
+            try:
+                n = int.from_bytes(debut[:8], "little")
+                entete_ok = 0 < n < taille and debut[8:9] == b"{"
+            except Exception:
+                entete_ok = False
+        if complet:
+            while True:
+                m = f.read(BLOC * 8)
+                if not m:
+                    break
+                h.update(m)
+        else:
+            # échantillons répartis + dernier mégaoctet
+            for i in range(1, 8):
+                pos = taille * i // 8
+                f.seek(pos)
+                h.update(f.read(BLOC))
+            if taille > BLOC:
+                f.seek(max(0, taille - BLOC))
+                h.update(f.read(BLOC))
+    return h.hexdigest(), taille, entete_ok
+
+
+def parcourir():
+    for racine in RACINES:
+        if not os.path.isdir(racine):
+            continue
+        for d, _, fichiers in os.walk(racine):
+            for n in fichiers:
+                if not n.endswith(EXTENSIONS):
+                    continue
+                p = os.path.join(d, n)
+                try:
+                    if os.path.getsize(p) >= MIN_TAILLE:
+                        yield p
+                except OSError:
+                    continue
+
+
+def main():
+    os.makedirs(ETAT, exist_ok=True)
+    enregistrer = "--enregistrer" in sys.argv
+    complet = "--tout" in sys.argv
+    ref = {}
+    if os.path.exists(REF):
+        try:
+            ref = json.load(open(REF))
+        except Exception:
+            ref = {}
+    if not ref and not enregistrer:
+        print("Aucune empreinte de référence — lance « integrite-modeles --enregistrer ».",
+              file=sys.stderr)
+        return 1
+
+    t0 = time.time()
+    nouveau, vus = {}, 0
+    corrompus, disparus, ajoutes, illisibles = [], [], [], []
+
+    for p in parcourir():
+        vus += 1
+        try:
+            h, taille, entete = empreinte(p, complet)
+        except OSError as e:
+            illisibles.append((p, str(e)[:60]))
+            continue
+        nouveau[p] = {"h": h, "taille": taille}
+        if not entete:
+            corrompus.append((p, "en-tête invalide"))
+            continue
+        if not enregistrer and p in ref:
+            if ref[p]["taille"] != taille:
+                corrompus.append((p, "taille changée : %d → %d" % (ref[p]["taille"], taille)))
+            elif ref[p]["h"] != h:
+                corrompus.append((p, "contenu modifié à taille identique — corruption probable"))
+        elif not enregistrer:
+            ajoutes.append(p)
+
+    if not enregistrer:
+        disparus = [p for p in ref if p not in nouveau]
+
+    if enregistrer:
+        json.dump(nouveau, open(REF, "w"))
+        print("Empreintes enregistrées : %d fichiers, %.1f Go, en %.0f s."
+              % (len(nouveau), sum(v["taille"] for v in nouveau.values()) / 1e9, time.time() - t0))
+        return 0
+
+    print("Contrôle de %d fichiers (%.1f Go) en %.0f s.\n"
+          % (vus, sum(v["taille"] for v in nouveau.values()) / 1e9, time.time() - t0))
+    for p, raison in illisibles:
+        print("  ILLISIBLE  %s — %s" % (p, raison))
+    for p, raison in corrompus:
+        print("  CORROMPU   %s — %s" % (p, raison))
+    if disparus:
+        print("  %d fichier(s) disparu(s) depuis l'enregistrement :" % len(disparus))
+        for p in disparus[:5]:
+            print("             %s" % p)
+    if ajoutes:
+        print("  %d nouveau(x) fichier(s) — relance « --enregistrer » pour les inclure."
+              % len(ajoutes))
+    if not corrompus and not illisibles:
+        print("  Aucune corruption détectée.")
+    return 1 if (corrompus or illisibles) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
