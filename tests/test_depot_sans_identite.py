@@ -45,6 +45,9 @@ SESSION = re.compile(
 COURRIEL = re.compile(
     r"[A-Za-z0-9._%+-]+@(?!\d)[A-Za-z0-9.-]+\.(?!service\b)[A-Za-z]{2,}")
 COURRIEL_TOLERE = ("noreply", "example")
+# Corpus de calibration cite la documentation Python (argparse) avec les
+# adresses de ses auteurs : texte public, pas notre identite (20/09, chef).
+EXEMPTES_COURRIEL = {"scratchpad/corpus-calib-c6/calib-c6-anglais-code.txt"}
 
 # CLIQUET. Mesuré le 10/09/2026 sur 309 fichiers suivis. Il ne monte pas : un
 # nouvel outil lit son chemin dans une variable d'environnement ou n'entre pas.
@@ -146,7 +149,7 @@ COURRIEL_TOLERE = ("noreply", "example")
 # (6265461). Le nettoyage (helper _chemins pour ces scripts, ou deplacement
 # des journaux sous acvram-memoire/corpus/) reste a faire, hors de la portee
 # de cette passe.
-PLAFOND_CHEMINS = 2342
+PLAFOND_CHEMINS = 2282  # 20/09 chef : 450 journaux scratchpad et 40 artefacts nsys/sqlite retires de l index
 
 # Le fichier qui NOMME les chemins pour les faire disparaitre ne doit pas
 # lui-meme les compter -- meme discipline datee que EXEMPTES_SESSION.
@@ -179,7 +182,9 @@ EXEMPTES_SESSION: set[str] = set()
 # motif aveugle sur du texte n'a rien a dire d'un binaire ; exclu par
 # extension plutot que par nom de fichier, pour couvrir aussi les futurs
 # .npy/.raw (memes dumps numeriques, meme risque).
-_EXTENSIONS_BINAIRES = {".pt", ".npy", ".raw", ".safetensors", ".bin"}
+# .deb : le paquet suivi est binaire ; lu comme texte il rend des faux
+# courriels et des faux chemins (20/09, 0.6.29).
+_EXTENSIONS_BINAIRES = {".pt", ".npy", ".raw", ".safetensors", ".bin", ".deb"}
 
 
 def _suivis():
@@ -229,7 +234,8 @@ def test_aucun_identifiant_de_session_dans_le_depot():
 
 
 def test_aucun_courriel_dans_le_depot():
-    trouves = _trouve(COURRIEL, COURRIEL_TOLERE)
+    trouves = {k: v for k, v in _trouve(COURRIEL, COURRIEL_TOLERE).items()
+               if k not in EXEMPTES_COURRIEL}
     assert not trouves, ("courriels dans des fichiers suivis :\n  "
                          + "\n  ".join(f"{k} -> {v[:3]}"
                                        for k, v in trouves.items()))

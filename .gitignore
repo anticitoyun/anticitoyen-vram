@@ -32,3 +32,9 @@ scratchpad/ncu-tampon-c1-19-09/home-ncu/
 scratchpad/c14c-carte-19-09/tmp-build/
 scratchpad/c14c-carte-19-09/nsys-tmp/
 scratchpad/c14c-carte-19-09/sortie/
+
+# artefacts de mesure : jamais suivis (identifiants de session, volume)
+scratchpad/**/*.nsys-rep
+scratchpad/**/*.sqlite
+scratchpad/**/*.log
+scratchpad/**/*.out
