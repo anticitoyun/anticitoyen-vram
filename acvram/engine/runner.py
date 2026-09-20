@@ -694,6 +694,27 @@ class Engine:
             "llama4_scaling_beta": self._llama4_scaling_beta or None,
         }
 
+    def kv_format_servi(self) -> str:
+        """Le format du cache KV SERVI, lu sur les caches construits (pas sur une variable) : `int8`, `bf16`, `fp16`,
+        `fp8_e4m3`, … ; `int8-canal16` sous C5-b ; `latent-bf16` / `latent-fp8` pour un MLA pur (cache latent contigu,
+        aucun cache paginé). 20/09 (chef, prise (b) 12B vision) : la ligne ne disait pas que le palier cuda:0 du
+        manifeste servait le KV en int8 — un chiffre de log-prob comparé à transformers (KV bf16) sans le savoir."""
+        try:
+            if self.model.caches:
+                fmts = sorted({str(c.cfg.dtype) for c in self.model.caches.values()})
+                fmt = fmts[0] if len(fmts) == 1 else "|".join(fmts)
+                try:
+                    from ..memory import kv_canal as _kvc
+                    if _kvc.ACTIF and fmt == "int8":
+                        fmt = "int8-canal16"
+                except Exception:                                    # noqa: BLE001
+                    pass
+                return fmt
+            from . import mla as _mla
+            return "latent-fp8" if getattr(_mla, "_MLA_LATENT_FP8", False) else "latent-bf16"
+        except Exception as exc:                                    # noqa: BLE001
+            return f"?({type(exc).__name__})"
+
     def regime_ligne(self) -> str:
         """Une ligne, pour le log au chargement et `acvram serve --regime`."""
         r = self.regime()
@@ -727,6 +748,7 @@ class Engine:
                f"ACVRAM_GDN={r['gdn']} experts_layout={r['experts_layout']} "
                + (f"noyaux={r['noyaux']} " if r["noyaux"] else "")
                + f"kv_budget={self.allocator.num_blocks * BLOCK_SIZE}/{kv_seqs} "
+               + f"kv={self.kv_format_servi()} "
                + (f"kv_plan_override=1 " if r["kv_plan_override"] else "")
                + (f"llama4_scaling_beta={r['llama4_scaling_beta']}"
                   f"({'servi' if self._llama4_servi else 'non_servi'}) "
