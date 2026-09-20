@@ -21,7 +21,8 @@ from typing import Any, Callable, Optional
 import torch
 
 PREFIXES_TOUR = ("model.vision_tower.", "model.embed_vision.",
-                 "model.multi_modal_projector.", "model.vision_embedder.")   # vision_embedder : gemma4_unified
+                 "model.multi_modal_projector.", "model.vision_embedder.",   # vision_embedder : gemma4_unified
+                 "model.visual.")                                            # Qwen3-VL : tour + merger + deepstack_merger_list
 
 # La ligne de régime (acvram/regime.py) nomme la tour dès qu'une est chargée.
 _CHARGEE: Optional[str] = None
