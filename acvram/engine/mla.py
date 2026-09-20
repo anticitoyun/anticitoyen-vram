@@ -78,6 +78,13 @@ def regime_prep_texte() -> str:
     return "mla_prep=grille" if _MLA_PREP_GRILLE else "mla_prep=temoin"
 
 
+def regime_glue_texte() -> str:
+    """`mla_glue=2` (défaut 0.6.32 : b=1 par decode_static_batch_complet, M3 tenu : −611 nœuds, pas b=1
+    −0,819 ms, J −4,4 %, PPL non établi pire) | `mla_glue=1(temoin)` (glue torch retirée, chemin =1 d'avant)
+    | `mla_glue=0` — nommé défaut compris (REGLES § 4)."""
+    return {2: "mla_glue=2", 1: "mla_glue=1(temoin)"}.get(_MLA_GLUE, "mla_glue=0")
+
+
 def regime_coeur_texte() -> str:
     """Le mot `mla_core=…` de la ligne de régime : rien sous fp32 ; `tf32(≤2048 clés)` /
     `bf16(≤2048 clés)` (règle des clés vues) ; `flash(fp32)` — ou `flash(repli fp32: raison)`
@@ -200,7 +207,7 @@ def temoins_prep() -> list:
 #  04 h 20) : 2 622 → 2 163 lancements/pas, jetons identiques 256 pas, GLM b=1 servi
 #  116,4 → 122,5 t/s (−0,43 ms/pas), capture 5/5 ; le niveau 2 est FAUX (1 552
 #  lancements, PPL +3,3 % sur 1 tranche) et reste opt-in.
-_MLA_GLUE = int(os.environ.get("ACVRAM_MLA_GLUE", "1"))
+_MLA_GLUE = int(os.environ.get("ACVRAM_MLA_GLUE", "2"))   # 0.6.32 : =2 servi (M3 2a-bis tenu 4/4, poste2 9ee0c00a) ; 1 = témoin
 if _MLA_GLUE not in (0, 1, 2):
     raise ValueError(f"ACVRAM_MLA_GLUE={_MLA_GLUE!r} : 0 | 1 | 2")
 # Cache latent des créneaux en fp8 E4M3 par ligne (poste7-avis-exterieur-16-09

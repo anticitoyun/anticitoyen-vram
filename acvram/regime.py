@@ -208,8 +208,8 @@ VARIABLES: tuple[Variable, ...] = (
              "sonde (β) niveau 2 (diagnostic) : 1 = le chemin =1 calcule q_abs en deux moitiés fp32 puis arrondit (autre ordre de somme, ≤ 1 ulp, sans noyau) — PPL 8 192 + 512 : +1-3 % → le modèle est instable à la marge ; 0 = témoin"),
     Variable("MLA_PREP_TEMOIN", "0", ("acvram.engine.mla", "_MLA_PREP_TEMOIN"), "0",
              "sonde C15 niveau 2 (diagnostic, scratchpad/c15-temoin-20-09) : 1 = clones capturés des entrées/sorties de mla_prep_batch et de q_eff avant l'attention, lus après rejeu par temoin.py ; 0 = témoin"),
-    Variable("MLA_GLUE", "1", ("acvram.engine.mla", "_MLA_GLUE"), "0",
-             "C15 (chantier-c15-19-09) : DÉFAUT 1 depuis le 20/09 (verdict-c15 : −459 lancements/pas, jetons identiques, GLM b=1 −0,43 ms) ; 1 = glue torch du décodage MLA b=1 retirée au bit (v_b fp32 une fois, cat kvp, stack RoPE, demi-tables cos/sin, résidu différé add_norm des couches MLA : −6 lancements/couche ; MoE : tok int64 servi, eid converti une fois, x[tok] une fois, tok_g = seq : −3 Marlin / −6 distincte) | 2 = en plus b=1 par decode_static_batch_complet (mla_prep_batch, numérique du lot, ≤ 1 ulp) | 0 = témoin"),
+    Variable("MLA_GLUE", "2", ("acvram.engine.mla", "_MLA_GLUE"), "0",
+             "C15 (chantier-c15-19-09) : DÉFAUT 2 depuis 0.6.32 (M3 2a-bis tenu 4/4 le 20/09 : ratio < 1 sur 7 520 lignes, −611 nœuds, pas b=1 −0,819 ms, J −4,4 %, PPL non établi pire ; 1 = témoin) ; DÉFAUT 1 du 20/09 matin (verdict-c15 : −459 lancements/pas, jetons identiques, GLM b=1 −0,43 ms) ; 1 = glue torch du décodage MLA b=1 retirée au bit (v_b fp32 une fois, cat kvp, stack RoPE, demi-tables cos/sin, résidu différé add_norm des couches MLA : −6 lancements/couche ; MoE : tok int64 servi, eid converti une fois, x[tok] une fois, tok_g = seq : −3 Marlin / −6 distincte) | 2 = en plus b=1 par decode_static_batch_complet (mla_prep_batch, numérique du lot, ≤ 1 ulp) | 0 = témoin"),
     Variable("MLA_CORE", "tf32", ("acvram.engine.mla", "_MLA_CORE"), "tf32",
              "C13 (poste7-c13a-defaut-19-09 § 1 + addendum) : précision des deux premiers produits du cœur d'attention MLA au PRÉFILL (scores, o_lat), softmax et noyau mla_1p en fp32 inchangés — tf32 DÉFAUT (C13-a tenu : 7 191 j/s, ΔPPL géo +0,00066) | fp32 (référence de qualité) | bf16 (C13-b : entrées bf16, acc fp32 ; scellé contre fp32 : prefill GLM ≥ 9 000 j/s ET ΔPPL géo ≤ +0,002 → défaut) | flash (C13-c forme 1, chantier-c13c-19-09 : noyau Triton causal fusionné kernels/attn_mla_causal.py, fp32 plein, un lancement par couche, scores jamais en HBM, moitié masquée sautée ; sortie = fp32 ± 8 ulp/ligne, aucune porte de PPL, toutes longueurs ; scellé cœur ≤ 110 ms ET prefill GLM ≥ 9 000 j/s ; sans Triton : repli fp32 nommé)"),
     Variable("MLA_FLASH_OPERANDES", "tf32", ("acvram.engine.mla", "_FLASH_OPERANDES"), None,
@@ -448,6 +448,7 @@ def regime_ligne() -> str:
         if _mla.regime_coeur_texte():                     # tf32/bf16(≤2048 clés) | flash(fp32) | flash(repli fp32: …)
             parts.append(_mla.regime_coeur_texte())
         parts.append(_mla.regime_prep_texte())            # mla_prep=grille|temoin (C14-b geste 3, défaut 1 en 0.6.31)
+        parts.append(_mla.regime_glue_texte())            # mla_glue=2|1(temoin)|0 (C15 2a-bis, défaut 2 en 0.6.32)
     except Exception:                                     # noqa: BLE001
         pass
     # C5-b : le format des clés est nommé dès qu'il n'est plus celui d'aujourd'hui

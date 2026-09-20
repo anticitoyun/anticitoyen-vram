@@ -37,6 +37,18 @@ DEFAUTS_PAR_VERSION = {
         },
         "mla_core=tf32(≤2048 clés) mla_prep=grille glue=compact(8) prefill_glue=compact",   # hote=thp,omp8 est AVANT mla_core
     ),
+    "0.6.32": (                                                          # 0.6.31 + MLA_GLUE=2 servi (M3 2a-bis tenu 4/4, 20/09)
+        {
+            "GLUE_COMPACT": "1", "ATTN_WARPS_COMPACT": "8", "PREFILL_COMPACT": "1",
+            "MLA_CORE": "tf32", "MLA_CORE_MAX_CLES": "2048",
+            "MLA_GLUE": "2",                                             # b=1 par decode_static_batch_complet ; 1 = témoin
+            "MARLIN_DISTINCT": "0", "MOE_DECODE_MMA": "1", "MOE_DECODE_MMA_MARLIN": "0",
+            "KV_INT8_CANAL": "0", "GODETS_B": "1", "GEMV_LAYOUT": "marlin", "PILE_SANS_RENDU": "",
+            "CPUS": "", "MLA_PREP_GRILLE": "1",
+            # ROUTEUR_FUSE (pièce 3, route_x) : à ajouter ici SI M4 tenu, avant le .deb — un seul .deb 0.6.32
+        },
+        "mla_core=tf32(≤2048 clés) mla_prep=grille mla_glue=2 glue=compact(8) prefill_glue=compact",
+    ),
 }
 
 
