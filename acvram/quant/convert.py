@@ -300,7 +300,16 @@ SENSITIVE_SUFFIXES = (
 # projections MLA, REGLES § 9) : le plan de placement ne connaît que les
 # couches texte, et `model.vision_tower.*.layers.N.*` porte un indice de
 # couche qui n'est pas le sien. Un alias sans ces tenseurs = texte seul.
-VISION_PREFIXES = ("model.vision_tower.", "model.embed_vision.", "model.visual.")
+VISION_PREFIXES = ("model.vision_tower.", "model.embed_vision.", "model.visual.",
+                   "model.vision_embedder.")     # gemma4_unified (12B) : embedder de patches, sans SigLIP (20/09)
+# Audio (gemma4_unified : model.embed_audio.*, model.audio_tower.*) : NON servi — écarté, mais nommé
+# (journal + manifeste audio: "non servi"), jamais en silence.
+AUDIO_PREFIXES = ("model.embed_audio.", "model.audio_tower.")
+_AUDIO_ECARTES: list[str] = []
+
+
+def est_tenseur_audio(name: str) -> bool:
+    return name.startswith(AUDIO_PREFIXES)
 
 
 def est_tenseur_vision(name: str) -> bool:
@@ -671,7 +680,10 @@ def _adapt_hf(source: Iterator[tuple[str, torch.Tensor]], spec
             if est_tenseur_vision(n):
                 en_attente.append((n, t))
                 continue
-            if n.startswith(("visual.", "model.audio_tower.")):
+            if est_tenseur_audio(n):
+                _AUDIO_ECARTES.append(n)        # refus nommé « audio non servi » au manifeste et au journal
+                continue
+            if n.startswith("visual."):
                 continue
             yield n.replace("model.language_model.", "model."), t
 
@@ -2270,6 +2282,11 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     manifest["diagnostic_fusion"] = _diagnostic_fusion(manifest["tensors"])
     manifest["vision_bytes"] = vision_bytes
     manifest["vision"] = "oui" if vision_bytes else "non"
+    if _AUDIO_ECARTES:
+        manifest["audio"] = "non servi"
+        print(f"[acvram] audio non servi : {len(_AUDIO_ECARTES)} tenseur(s) de la tour audio écartés "
+              f"(ex. {_AUDIO_ECARTES[0]}) — alias texte + vision", flush=True)
+        _AUDIO_ECARTES.clear()
     if not opts.dry_run:
         _verifier_formats_declares(manifest, writer.weight_map)
 

@@ -370,6 +370,14 @@ def _glue_texte() -> str:
     return glue_texte()
 
 
+def _vision_texte(tour) -> str:
+    """Le mot ``vision=`` de la ligne du moteur (poste2 15 h 00 : la ligne de l'Engine ne le portait pas,
+    seule celle de regime.py l'avait) : `vision=bf16(eager,transformers=5.17.0)` avec la tour, `vision=off`
+    sans — la ligne dit ce que le moteur SERT."""
+    from .vision import regime_texte
+    return " " + (regime_texte() if tour is not None else "vision=off")
+
+
 def _mla_core_texte() -> str:
     """`mla_core=tf32(≤2048 clés)` hors fp32 (poste7-c14-defaut-tf32-8k addendum) ; `flash(fp32)` (C13-c) ;
     puis `mla_prep=grille|temoin` (C14-b geste 3)."""
@@ -719,7 +727,8 @@ class Engine:
                + _eco_texte(r["eco"])
                + _mla_core_texte()
                + " " + _glue_texte()
-               + " " + _hote_texte())
+               + " " + _hote_texte()
+               + _vision_texte(self.vision))
 
     def fermer(self) -> None:
         """Arrêt du moteur : rend l'horloge éco posée par ce processus
@@ -819,6 +828,12 @@ class Engine:
                              self.vision.traits(im.pixel_values, im.fin - im.debut,
                                                 supplement=getattr(im, "supplement", None)))
                             for im in seq.images]
+                        # Le journal dit que la tour a tourné (poste2 15 h 00 : « aucune ligne tour ») —
+                        # une somme des traits par image, pour qu'une image différente se voie
+                        print("[engine] tour : " + " ; ".join(
+                            f"[{d},{f}) {tuple(e.shape)} sha={im.sha256[:8]} Σ={float(e.float().abs().sum()):.4g}"
+                            for (d, f, e), im in zip(seq.image_embeds, seq.images))
+                              + f" request_id={seq.request_id}", flush=True)
                     except Exception as exc:                 # noqa: BLE001
                         print(f"[engine] refus : tour de vision en échec "
                               f"({type(exc).__name__}: {exc}) request_id={seq.request_id}",

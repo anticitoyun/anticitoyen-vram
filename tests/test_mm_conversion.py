@@ -27,7 +27,7 @@ from acvram.quant.convert import ConversionOptions, convert_checkpoint
 
 # Les préfixes du contrat, écrits ICI (le test est le contrat, pas le code) ;
 # test_les_prefixes_sont_ceux_du_contrat les confronte à convert.VISION_PREFIXES.
-VISION_PREFIXES = ("model.vision_tower.", "model.embed_vision.", "model.visual.")
+VISION_PREFIXES = ("model.vision_tower.", "model.embed_vision.", "model.visual.", "model.vision_embedder.")
 
 H, INTER, L, NH, NKV, V = 64, 128, 2, 4, 2, 500
 VH = 32                                                      # largeur de la tour
@@ -380,3 +380,40 @@ if __name__ == "__main__":                       # génère le témoin : voir TE
     src = _ecrire_source(base / "src_texte", vision=False)
     out = _convertir(src, str(base / "out_texte"), load_profile("rig-14900k-5090-3080ti"))
     print(json.dumps(_empreintes(out), indent=4, sort_keys=True))
+
+
+# ---- gemma4_unified (12B, 20/09 : poste2) : vision = model.vision_embedder.* + model.embed_vision, PAS de SigLIP ;
+# ---- audio (model.embed_audio.*) non servi : écarté ET nommé (manifeste audio: "non servi"), jamais en silence.
+
+def _source_unified(d) -> str:
+    d.mkdir(parents=True, exist_ok=True)
+    cfg = _config(False)
+    cfg.update({"architectures": ["Gemma4UnifiedForConditionalGeneration"], "model_type": "gemma4_unified",
+                "vision_config": {"model_type": "gemma4_unified_vision", "hidden_size": VH},
+                "audio_config": {"model_type": "gemma4_unified_audio", "hidden_size": 8}})
+    json.dump(cfg, open(d / "config.json", "w"))
+    g = torch.Generator().manual_seed(GRAINE + 7)
+    w = lambda *sh: (torch.randn(*sh, generator=g) * 0.05).to(torch.bfloat16)
+    sd = _tenseurs_texte()
+    sd.update({"model.vision_embedder.patch_dense.weight": w(VH, 3 * 14 * 14), "model.vision_embedder.patch_dense.bias": w(VH),
+               "model.vision_embedder.patch_ln1.weight": w(3 * 14 * 14), "model.vision_embedder.pos_embedding": w(64, VH),
+               "model.embed_vision.embedding_projection.weight": w(H, VH),
+               "model.embed_audio.embedding_projection.weight": w(H, 8)})
+    (d / "processor_config.json").write_text('{"processor_class": "Gemma4Processor"}')
+    save_file(sd, str(d / "model.safetensors"))
+    return str(d)
+
+
+def test_unified_garde_l_embedder_de_patches_et_nomme_l_audio_non_servi(tmp_path, target_rig, capsys):
+    src = _source_unified(tmp_path / "src_u")
+    out = _convertir(src, str(tmp_path / "out_u"), target_rig)
+    man = json.load(open(os.path.join(out, "acvram_manifest.json")))
+    sortie = _lire(out)
+    vision = {k: t for k, t in _lire(src).items() if k.startswith(VISION_PREFIXES)}
+    assert len(vision) == 5
+    for k, t in vision.items():                         # tous gardés, au bit, bf16, nom source
+        assert k in sortie and sortie[k].dtype is torch.bfloat16 and torch.equal(sortie[k], t), k
+    assert man["vision"] == "oui" and man["vision_bytes"] == sum(t.numel() * 2 for t in vision.values())
+    assert "model.embed_audio.embedding_projection.weight" not in sortie      # audio : pas gardé…
+    assert man.get("audio") == "non servi"                                     # … mais nommé au manifeste
+    assert "audio non servi" in capsys.readouterr().out                         # … et au journal

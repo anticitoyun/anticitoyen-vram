@@ -443,3 +443,26 @@ def test_les_tampons_non_persistants_de_la_tour_sont_reconstruits():
     m = nn.Module(); m.s = Sans(2)
     with pytest.raises(RuntimeError, match="constructeur inconnu"):
         rematerialiser_tampons(m, torch.device("cpu"))
+
+
+def test_la_ligne_du_moteur_porte_vision_et_sans_tour_une_image_est_refusee(converted, capsys):
+    """poste2 15 h 00 sur le 31B : la ligne de régime de l'Engine ne portait pas « vision= » et le journal
+    n'avait aucune ligne « tour ». (1) Engine.regime_ligne() dit vision=off sans tour et
+    vision=bf16(eager,…) avec ; (2) add_request(images=) sur un Engine SANS tour → SansTourVision, jamais
+    une réponse texte ; (3) avec tour, l'admission écrit « [engine] tour : … sha=… Σ=… » au journal."""
+    from acvram.engine.loader import load_model
+    from acvram.engine.vision import SansTourVision, TourVision
+    loaded = load_model(converted, dtype=torch.float32, device_override="cpu")
+    engine = Engine(loaded, None, max_batch_size=1, max_model_len=64, enable_cuda_graphs=False)
+    assert engine.vision is None and " vision=off" in engine.regime_ligne()
+    with pytest.raises(SansTourVision):
+        engine.add_request([1, 2, 3, 4, 5, 6], SamplingParams(temperature=0.0, max_tokens=1),
+                           images=[(1, 4, torch.tensor(3.0), "sha-x")])
+    h = loaded.spec.hidden_size
+    engine.vision = TourVision(lambda pv: torch.full((1, 3, h), 0.5), torch.device("cpu"), nom="factice")
+    assert " vision=bf16(eager,factice)" in engine.regime_ligne()
+    engine.add_request([1, 2, 3, 4, 5, 6], SamplingParams(temperature=0.0, max_tokens=1),
+                       images=[(1, 4, torch.tensor(3.0), "sha-abcdef12")])
+    engine.step()
+    out = capsys.readouterr().out
+    assert "[engine] tour : [1,4) (3, " in out and "sha=sha-abcd" in out

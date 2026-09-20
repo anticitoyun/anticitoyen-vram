@@ -21,7 +21,7 @@ from typing import Any, Callable, Optional
 import torch
 
 PREFIXES_TOUR = ("model.vision_tower.", "model.embed_vision.",
-                 "model.multi_modal_projector.")
+                 "model.multi_modal_projector.", "model.vision_embedder.")   # vision_embedder : gemma4_unified
 
 # La ligne de régime (acvram/regime.py) nomme la tour dès qu'une est chargée.
 _CHARGEE: Optional[str] = None
@@ -159,18 +159,47 @@ class TourVision:
         reader = _ShardReader(path, manifest["weight_map"])
         # Seuls les sous-modules de la tour sont matérialisés ; le reste du
         # modèle HF reste sur « meta » et n'est jamais appelé.
+        archi = (getattr(cfg, "architectures", None) or [None])[0]
+        if archi and type(modele).__name__ != archi:
+            raise RuntimeError(f"tour de vision : config.json déclare {archi}, transformers a construit "
+                               f"{type(modele).__name__} — chemin get_image_features inconnu, tour refusée")
         racine = getattr(modele, "model", modele)
-        sous = [getattr(racine, p.split(".")[1]) for p in PREFIXES_TOUR
-                if hasattr(racine, p.split(".")[1])]
+        # Les noms SOURCE (gardés tels quels par la conversion) deviennent les noms des modules HF par
+        # le mapping de transformers (gemma4_unified : model.vision_embedder.* → embed_vision.*,
+        # model.embed_vision.embedding_projection → embed_vision.multimodal_embedder.…) ; sans mapping,
+        # le nom source privé de « model. » est le nom du module (Gemma4 SigLIP).
+        renommeurs = []
+        try:
+            from transformers import conversion_mapping as _cm
+            renommeurs = list(_cm.get_checkpoint_conversion_mapping(str(getattr(cfg, "model_type", ""))) or [])
+        except Exception:                                   # noqa: BLE001
+            renommeurs = []
+
+        def nom_module(n: str) -> str:
+            for r in renommeurs:
+                try:
+                    neuf = r.rename_source_key(n)
+                except Exception:                           # noqa: BLE001
+                    continue
+                neuf = neuf[0] if isinstance(neuf, tuple) else neuf
+                if neuf and neuf != n:
+                    n = neuf
+                    break
+            return n[len("model."):] if n.startswith("model.") else n
+        cles = {n: nom_module(n) for n in noms}
+        sous_noms = sorted({c.split(".")[0] for c in cles.values()})
+        sous = [getattr(racine, s) for s in sous_noms if hasattr(racine, s)]
+        if len(sous) != len(sous_noms):
+            raise RuntimeError(f"tour de vision : modules {sous_noms} attendus sur {type(racine).__name__}, "
+                               f"présents {[n for n, _ in racine.named_children()]}")
         for sm in sous:
             sm.to_empty(device=device)
             rematerialiser_tampons(sm, device)
         etat = {}
         for n in noms:
-            cle = n[len("model."):]
-            etat[cle] = reader.get(n).to(device=device, dtype=torch.bfloat16)
+            etat[cles[n]] = reader.get(n).to(device=device, dtype=torch.bfloat16)
         manque, inattendu = racine.load_state_dict(etat, strict=False)
-        manque = [m for m in manque if m.startswith(tuple(p[len("model."):] for p in PREFIXES_TOUR))]
+        manque = [m for m in manque if m.startswith(tuple(f"{s}." for s in sous_noms))]
         if manque or inattendu:
             raise RuntimeError(f"tour de vision : {len(manque)} poids manquants, "
                                f"{len(inattendu)} inattendus (ex. {(manque + list(inattendu))[:3]})")
