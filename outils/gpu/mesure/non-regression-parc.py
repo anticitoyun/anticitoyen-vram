@@ -15,7 +15,7 @@ Racine du parc : ACVRAM_MODELES (outils/racine_modeles.py), jamais un chemin
 en dur — le parc a changé de disque le 20/09.
 """
 import json, os, sys, time, torch
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))   # APRÈS PYTHONPATH : le paquet mesuré (/usr/share/acvram) passe avant l'arbre
 from outils.racine_modeles import MODELES
 from acvram.engine.loader import load_model
 from acvram.engine.runner import Engine
