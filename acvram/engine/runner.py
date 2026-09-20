@@ -378,6 +378,22 @@ def _glue_texte() -> str:
     return glue_texte()
 
 
+def _mrope_texte(spec) -> str:
+    """`mrope=[24,20,20](interleaved)` lu sur le MODÈLE chargé (spec.mrope_section, rope_scaling du config.json),
+    rien sans M-RoPE — la ligne de l'Engine ne le portait pas (seule celle de regime.py, 20/09 17:50)."""
+    section = getattr(spec, "mrope_section", None)
+    if not section:
+        return ""
+    rs = getattr(spec, "rope_scaling", None) or {}
+    return f" mrope=[{','.join(str(int(x)) for x in section)}]({'interleaved' if rs.get('mrope_interleaved') else 'non-entrelace'})"
+
+
+def _deepstack_texte(tour) -> str:
+    """`deepstack=k` lu sur la TOUR chargée (config vision : deepstack_visual_indexes), rien sans niveaux."""
+    k = int(getattr(tour, "niveaux_deepstack", 0) or 0) if tour is not None else 0
+    return f" deepstack={k}" if k else ""
+
+
 def _vision_texte(tour) -> str:
     """Le mot ``vision=`` de la ligne du moteur (poste2 15 h 00 : la ligne de l'Engine ne le portait pas,
     seule celle de regime.py l'avait) : `vision=bf16(eager,transformers=5.17.0)` avec la tour, `vision=off`
@@ -762,7 +778,9 @@ class Engine:
                + _mla_core_texte()
                + " " + _glue_texte()
                + " " + _hote_texte()
-               + _vision_texte(self.vision))
+               + _vision_texte(self.vision)
+               + _mrope_texte(self.spec)
+               + _deepstack_texte(self.vision))
 
     def fermer(self) -> None:
         """Arrêt du moteur : rend l'horloge éco posée par ce processus

@@ -466,3 +466,22 @@ def test_la_ligne_du_moteur_porte_vision_et_sans_tour_une_image_est_refusee(conv
     engine.step()
     out = capsys.readouterr().out
     assert "[engine] tour : [1,4) (3, " in out and "sha=sha-abcd" in out
+
+
+def test_la_ligne_du_moteur_porte_mrope_et_deepstack_lus_sur_le_modele(converted, monkeypatch):
+    """20/09 17:50 (Qwen3-VL-2B servi) : la ligne de l'Engine disait vision= et kv= mais ni mrope= ni deepstack=
+    (seule la ligne de regime.py, depuis le manifeste, les avait). Ils viennent du MODÈLE chargé : mrope de
+    spec.mrope_section / rope_scaling, deepstack de la tour (config de la tour, niveaux_deepstack) ; absents sinon."""
+    from acvram.engine.loader import load_model
+    from acvram.engine.vision import TourVision
+    loaded = load_model(converted, dtype=torch.float32, device_override="cpu")
+    engine = Engine(loaded, None, max_batch_size=1, max_model_len=64, enable_cuda_graphs=False)
+    ligne = engine.regime_ligne()
+    assert " mrope=" not in ligne and " deepstack=" not in ligne, ligne          # modèle texte 1-D, sans tour
+    monkeypatch.setattr(type(loaded.spec), "mrope_section", property(lambda self: [24, 20, 20]), raising=False)
+    monkeypatch.setattr(loaded.spec, "rope_scaling", {"mrope_section": [24, 20, 20], "mrope_interleaved": True}, raising=False)
+    tour = TourVision(lambda pv: torch.zeros(1, 4, loaded.spec.hidden_size), torch.device("cpu"), nom="factice")
+    tour.niveaux_deepstack = 3
+    engine.vision = tour
+    ligne = engine.regime_ligne()
+    assert " mrope=[24,20,20](interleaved)" in ligne and " deepstack=3" in ligne, ligne

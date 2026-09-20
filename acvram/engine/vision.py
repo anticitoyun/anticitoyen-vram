@@ -97,6 +97,7 @@ class TourVision:
         self.device = torch.device(device)
         self.nom = nom
         self.hidden = hidden          # dimension du LM : un trait d'une autre dimension (tour NON projetée) est refusé
+        self.niveaux_deepstack = 0    # k niveaux deepstack (Qwen3-VL), posé par depuis_dossier depuis la config de la tour
         global _CHARGEE
         _CHARGEE = nom
 
@@ -237,8 +238,10 @@ class TourVision:
         if idx is not None:
             from .. import regime as _regime
             _regime.declarer_deepstack(len(idx))
-        return cls(calcul, device, nom=f"transformers {transformers.__version__}",
+        tour = cls(calcul, device, nom=f"transformers {transformers.__version__}",
                    hidden=int(getattr(tcfg, "hidden_size", 0)) or None)
+        tour.niveaux_deepstack = len(idx) if idx is not None else 0       # lu sur la CONFIG de la tour chargée
+        return tour
 
 
 def rematerialiser_tampons(module: torch.nn.Module, device: torch.device) -> list[str]:
