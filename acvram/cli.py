@@ -42,6 +42,8 @@ from . import __version__            # noqa: E402  (source unique de verite)
 # elles ont ete ecrites.
 VARIABLES_LUES = {
     "ACVRAM_ALLOC_EXTENSIBLE",
+    "ACVRAM_PREFILL_COMPACT",          # C15-prefill (aaf9f9c3), oubliees de la liste : test_la_liste_des_variables_lues_ne_derive_pas rouge sur main
+    "ACVRAM_PREFILL_COMPACT_ITEMS",
     "ACVRAM_BANC_ACCEPTE_REPLAN",
     "ACVRAM_KV_PLAN_OVERRIDE",
     "ACVRAM_KERNEL_CACHE",
@@ -204,11 +206,13 @@ VARIABLES_LUES = {
     "ACVRAM_PREFILL_A4",
     "ACVRAM_PREFILL_A8",
     "ACVRAM_MLA_A8",
-    "ACVRAM_MLA_CORE", "ACVRAM_MLA_CORE_VB", "ACVRAM_MLA_CORE_DECODE",
+    "ACVRAM_MLA_CORE", "ACVRAM_MLA_CORE_VB", "ACVRAM_MLA_CORE_DECODE", "ACVRAM_MLA_CORE_MAX_CLES",
     # C13-c (flash), sondes niveau 2, C15-3d (glue compacte) — 20/09
     "ACVRAM_MLA_FLASH_OPERANDES", "ACVRAM_MLA_FLASH_TUILE",
     "ACVRAM_MLA_ECRIT_TORCH", "ACVRAM_MLA_PREP_TEMOIN", "ACVRAM_MLA_QABS_DEUX_MOITIES",
     "ACVRAM_GLUE_COMPACT", "ACVRAM_GLUE_COMPACT_ITEMS", "ACVRAM_ATTN_WARPS_COMPACT", "ACVRAM_ROUTAGE_TEMOIN",
+    "ACVRAM_PILE_SANS_RENDU",
+    "ACVRAM_CPUS",                                    # 0.6.31 : affinité (acvram/hote.py)                          # gemma (c48c2b2c) : témoin de _rendre_le_cache_apres_la_pile
     "ACVRAM_PREFILL_W8R",
     "ACVRAM_MARLIN_DISTINCT",
     "ACVRAM_PREFILL_A8_FMT",

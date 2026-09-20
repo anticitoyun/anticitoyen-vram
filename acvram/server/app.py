@@ -10,6 +10,7 @@ en flux de partager un seul pipeline réparti sur deux GPU et la mémoire vive.
 
 from __future__ import annotations
 
+import logging
 import asyncio
 import glob
 import os
@@ -167,6 +168,24 @@ class EngineService:
                     return
         finally:
             self.release(request_id)
+
+
+_CHAMPS_SIGNALES: set[str] = set()
+
+
+def signaler_champs_inconnus(req: Any, route: str) -> list[str]:
+    """Journalise (une fois par nom de champ, niveau WARNING) les champs de la
+    requête que le serveur ne lit pas, et les rend. Un client qui envoie
+    « temprature » ou « reasoning_effort » doit pouvoir le voir dans le journal
+    du service, sinon il croit régler ce que le moteur sert au défaut."""
+    inconnus = req.champs_inconnus()
+    nouveaux = [c for c in inconnus if c not in _CHAMPS_SIGNALES]
+    if nouveaux:
+        _CHAMPS_SIGNALES.update(nouveaux)
+        logging.getLogger("acvram.server").warning(
+            "%s : champs ignorés par ce serveur (sans effet sur la réponse) : %s",
+            route, ", ".join(nouveaux))
+    return inconnus
 
 
 def _params_from(req: Any, default_max: int) -> SamplingParams:
@@ -897,6 +916,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
     # -- chat -------------------------------------------------------------
     @app.post("/v1/chat/completions")
     async def chat_completions(req: ChatCompletionRequest, raw: Request):
+        signaler_champs_inconnus(req, "/v1/chat/completions")
         messages = messages_pour_gabarit(req.messages)
         extra = dict(req.chat_template_kwargs or {})
         if req.tools:
@@ -1017,6 +1037,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
     # -- legacy completions ------------------------------------------------
     @app.post("/v1/completions")
     async def completions(req: CompletionRequest):
+        signaler_champs_inconnus(req, "/v1/completions")
         prompt = req.prompt
         if isinstance(prompt, list) and prompt and isinstance(prompt[0], int):
             prompt_ids = list(prompt)

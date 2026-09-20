@@ -19,6 +19,10 @@ install -d "$PKG/usr/share/acvram" "$PKG/usr/bin" "$PKG/DEBIAN" \
            "$PKG/usr/share/applications" \
            "$PKG/usr/share/icons/hicolor/scalable/apps"
 cp -r acvram pyproject.toml install.sh README.md LICENSE "$PKG/usr/share/acvram/"
+# Lot poste 20/09 : outils de vérification du poste (documentation, aucun chemin de machine imposé).
+install -d "$PKG/usr/share/acvram/poste" && cp -r outils/poste/. "$PKG/usr/share/acvram/poste/"
+# Le chemin des modèles du poste de développement ne part pas dans le paquet : gabarit à remplir.
+sed -i "s#=/mnt/[^ ]*models_acvram#=<racine des modeles convertis>#" "$PKG/usr/share/acvram/poste/environment.d/"*.conf
 # docs/ contenait 8 fichiers de mesure INTERNE — comparatifs, rebancs,
 # releves de repetabilite — qui n'ont rien a faire dans un paquet distribue,
 # et FEUILLE-DE-ROUTE.md y porte le chemin et le nom d'utilisateur de la

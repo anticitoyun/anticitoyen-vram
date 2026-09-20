@@ -292,6 +292,27 @@ class Attention(nn.Module):
         self.qkv_tailles = tuple(l.qweight.shape[0] for l in lins)
         return True
 
+    def _proj_i8c_partage(self, x: torch.Tensor):
+        """C15-prefill : q, k, v INT8 par canal (convertis -qkvo-i8c) lus sur la
+        MÊME ligne normée — l'A8 par jeton quantifiée une fois pour les trois
+        (`kernels.int8_matmul_partage`), au lieu d'une fois par projection
+        (nsys P2 19/09 : `_quant_a8_kernel` ×4 par couche, trois fois les mêmes
+        octets). None si une projection n'est pas un INT8 plein sans échelle ni
+        biais ni exil, ou si le dispatcher ne prendrait pas le chemin cublas :
+        le chemin d'avant (trois forwards) reste, au bit."""
+        from ..quant.formats import INT8Tensor
+        lins = [self.q_proj, self.k_proj] + ([] if self.k_eq_v else [self.v_proj])
+        for lin in lins:
+            if (not isinstance(lin, QuantLinear) or not isinstance(lin.qweight, INT8Tensor)
+                    or lin.streamed is not None or lin.bias is not None
+                    or (lin.scaler is not None and not lin.scaler.is_identity)):
+                return None
+        sorties = kernels.int8_matmul_partage(x, [lin.qweight for lin in lins])
+        if sorties is None:
+            return None
+        qr, kr = sorties[0], sorties[1]
+        return qr, kr, (kr if self.k_eq_v else sorties[2])
+
     def _proj(self, x: torch.Tensor, t: int, qkv=None):
         """q, k, v (et la porte de sortie) : une GEMV empilée si possible ;
         ``qkv`` déjà calculé (3b : norme absorbée par le GEMV) est découpé tel quel."""
@@ -315,8 +336,12 @@ class Attention(nn.Module):
             sorties[i], sorties[j], sorties[reste] = deux[0], deux[1], seul
             qr, kr, vr = sorties
         else:
-            qr, kr = self.q_proj(x), self.k_proj(x)
-            vr = kr if self.k_eq_v else self.v_proj(x)
+            partage = self._proj_i8c_partage(x) if kernels.prefill_compact("a8") else None
+            if partage is not None:
+                qr, kr, vr = partage
+            else:
+                qr, kr = self.q_proj(x), self.k_proj(x)
+                vr = kr if self.k_eq_v else self.v_proj(x)
         gate = None
         if self.output_gate:
             # par tête : [q_h | porte_h] — l'ordre du point de contrôle HF,
@@ -499,7 +524,14 @@ class Attention(nn.Module):
     def _prefill(self, q, k, v, batch: ForwardBatch,
                  cache: Optional[PagedKVCache], t: int,
                  gate=None) -> torch.Tensor:
-        out = torch.empty_like(q)
+        # C15-prefill (fusion « attn ») : les têtes KV diffusées par SDPA
+        # (enable_gqa) au lieu de `repeat_kv` qui matérialisait K et V ×n_rep
+        # ([t, têtes, d] bf16 deux fois par couche : 0,98 ms au budget nsys P2
+        # du 19/09), et, à une séquence, la sortie rendue telle quelle au lieu
+        # d'être recopiée dans `out` (16,8 Mo de plus par couche à L = 2 047).
+        compact = kernels.prefill_compact("attn")
+        une_seq = compact and len(batch.query_lens) == 1
+        out = None if une_seq else torch.empty_like(q)
         start = 0
         for i, qlen in enumerate(batch.query_lens):
             end = start + qlen
@@ -516,10 +548,18 @@ class Attention(nn.Module):
                 # aller-retour de quantification sur chaque jeton de prefill, ce
                 # qui est à la fois plus rapide et un peu plus précis.
                 kk, vv = k[start:end], v[start:end]
-            kk = repeat_kv(kk, self.n_rep)
-            vv = repeat_kv(vv, self.n_rep)
-            out[start:end] = attention(q[start:end], kk, vv, True, self.scale,
-                                       q_offset=offset, window=self.window)
+            if compact:
+                a = attention(q[start:end], kk, vv, True, self.scale,
+                              q_offset=offset, window=self.window, n_rep=self.n_rep)
+            else:
+                kk = repeat_kv(kk, self.n_rep)
+                vv = repeat_kv(vv, self.n_rep)
+                a = attention(q[start:end], kk, vv, True, self.scale,
+                              q_offset=offset, window=self.window)
+            if une_seq:
+                out = a
+            else:
+                out[start:end] = a
             start = end
         out = self._gated(out, gate, t)
         return self.o_proj(out.reshape(t, self.n_heads * self.head_dim))
@@ -1385,22 +1425,38 @@ class MoEBlock(nn.Module):
             return None
         t, k = topi.shape
         E = pg[3].shape[0]                             # [E] échelles globales : survit à pg[1] = None (disposition unique)
-        flat_e = topi.reshape(-1).to(torch.int64)
-        flat_t = torch.arange(t, device=x.device).repeat_interleave(k)
-        colle = _colle_moe_triton(flat_e.numel(), E, x.device)
-        if colle is not None:
-            # P0 : tri + histogramme en UN lancement (colle_moe.trier_paires),
-            # mêmes ordre/cnt qu'argsort stable + bincount (tests/test_colle_moe.py)
-            ordre, _, cnt = colle.trier_paires(flat_e, E)
-        else:
+        permut = kernels.prefill_compact("permut")
+        if permut:
+            # C15-prefill : les MÊMES ordre / cnt / xs que le chemin d'avant, en
+            # moins de lancements — tri stable sur les clés int32 de topi (4
+            # passes radix au lieu de 8 sur leur copie int64), comptes par
+            # `searchsorted` sur la liste triée (deux petits noyaux au lieu de
+            # l'histogramme à atomiques), lignes de x par `ordre // k` (flat_t
+            # [i] = i // k : ni arange, ni repeat_interleave, ni gather d'index).
+            flat_e = topi.reshape(-1)
             ordre = torch.argsort(flat_e, stable=True)
-            cnt = torch.bincount(flat_e, minlength=E)
-        xs = x[flat_t[ordre]].to(torch.bfloat16).contiguous()        # [G, H]
+            e_sorted = flat_e[ordre]
+            cnt = _comptes_tries(e_sorted, E)
+            if self.__dict__.pop("_compte_en_attente", False):
+                self._usage_routage.add_(cnt)          # = scatter_add des uns de `_compter_routage`
+            xs = x[torch.div(ordre, k, rounding_mode="floor")].to(torch.bfloat16).contiguous()
+        else:
+            flat_e = topi.reshape(-1).to(torch.int64)
+            flat_t = torch.arange(t, device=x.device).repeat_interleave(k)
+            colle = _colle_moe_triton(flat_e.numel(), E, x.device)
+            if colle is not None:
+                # P0 : tri + histogramme en UN lancement (colle_moe.trier_paires),
+                # mêmes ordre/cnt qu'argsort stable + bincount (tests/test_colle_moe.py)
+                ordre, _, cnt = colle.trier_paires(flat_e, E)
+            else:
+                ordre = torch.argsort(flat_e, stable=True)
+                cnt = torch.bincount(flat_e, minlength=E)
+            xs = x[flat_t[ordre]].to(torch.bfloat16).contiguous()        # [G, H]
+            e_sorted = flat_e[ordre]
         # échelle AWQ par expert (poste7-glm-awq-pile-15-09) : x_ligne / s[e]
         # comme ChannelScaler.apply en boucle — au prefill aussi, sinon la
         # sortie change en silence dès que les experts portent une échelle
         awq = getattr(self, "_stacks_awq", {})
-        e_sorted = flat_e[ordre]
         xs_u = xs
         awq_g = awq.get("gate_proj")
         awq_u = awq.get("up_proj") if awq.get("up_distinct") else awq_g
@@ -1499,7 +1555,12 @@ class MoEBlock(nn.Module):
             G = xs.shape[0]
             mg, mu, md = (self._stacks_marlin[n] for n in ("gate_proj", "up_proj", "down_proj"))
             bloc = MP.choisir_block_size(t, k, E)
-            s_ids, e_ids, n_post = MP.aligner_blocs(e_sorted.to(torch.int32).unsqueeze(1), bloc, E)
+            if permut:
+                # C15-prefill : e_sorted est déjà trié et cnt connu — les mêmes
+                # sorted_ids / expert_ids sans second tri ni second histogramme
+                s_ids, e_ids, n_post = MP.aligner_blocs_tries(e_sorted, cnt, bloc, E)
+            else:
+                s_ids, e_ids, n_post = MP.aligner_blocs(e_sorted.to(torch.int32).unsqueeze(1), bloc, E)
             ws = self._marlin_workspace(x.device)
             uns = self._marlin_uns(G, x.device)
             xs_m = xs if xs.shape[1] == mg[3] else F.pad(xs, (0, mg[3] - xs.shape[1]))
@@ -1565,6 +1626,14 @@ class MoEBlock(nn.Module):
             act = _activation(g, u, pg[5], pd[4])
             wd = self._pile_bf16(pd); d = self._grouped_bmm(act, wd, plan); del wd
         m_out = pd[5]
+        if permut and glue and d.dtype == torch.bfloat16 and x.dtype == torch.bfloat16:
+            # C15-prefill : la permutation inverse écrite en int32 d'emblée (le
+            # noyau la lit ainsi) — une conversion de moins ; mêmes valeurs
+            inv = torch.empty(ordre.numel(), dtype=torch.int32, device=x.device)
+            inv[ordre] = torch.arange(ordre.numel(), dtype=torch.int32, device=x.device)
+            tw = topw.reshape(-1)
+            tw = tw if tw.dtype == torch.float32 else tw.to(torch.float32)
+            return ext.moe_reduce_trie(d, tw.contiguous(), inv, m_out, k)
         inv = torch.empty_like(ordre); inv[ordre] = torch.arange(ordre.numel(), device=x.device)
         if glue and d.dtype == torch.bfloat16 and x.dtype == torch.bfloat16:
             tw = topw.reshape(-1)
@@ -2079,7 +2148,18 @@ class MoEBlock(nn.Module):
         # Ici, pas dans _route : `_route` est surchargée (MoEBlockGemma) sans
         # appeler super(), alors que `forward` est le seul point que tous les
         # chemins de routage traversent une fois topi connu.
-        self._compter_routage(topi)
+        # C15-prefill (« permut ») : au préfill groupé le compte est fait par
+        # `_forward_prefill_grouped` depuis les comptes par expert qu'il calcule
+        # déjà (un `add_` au lieu de cinq petits noyaux : copie int64, ≥ 0, to,
+        # clamp, scatter_add) — les mêmes entiers, aucun -1 sans `valid`. Si ce
+        # chemin décline (None), le compte est fait ici après coup.
+        compte_differe = (kernels.prefill_compact("permut") and valid is None and x.is_cuda
+                          and self._stack_state == "oui" and t > _MOE_GROUPED_MAX
+                          and self._usage_routage is not None)
+        if compte_differe:
+            self.__dict__["_compte_en_attente"] = True
+        else:
+            self._compter_routage(topi)
 
         # Chemin groupé : trois lancements pour toute la couche, quel que soit
         # le nombre d'experts touchés. La boucle par expert reste le chemin des
@@ -2107,6 +2187,8 @@ class MoEBlock(nn.Module):
                     if self.shared is not None:
                         y = y + self._shared_out(x)
                     return y
+        if self.__dict__.pop("_compte_en_attente", False):
+            self._compter_routage(topi)                # le chemin groupé a décliné
 
         if t == 1 and not os.environ.get("ACVRAM_MOE_DECODE_MASQUES"):
             # Décodage, un jeton : les masques par expert (nonzero, index)
@@ -2438,6 +2520,24 @@ def _mla_glue() -> int:
 _COLLE_MOE = os.environ.get("ACVRAM_COLLE_MOE", "torch")
 if _COLLE_MOE not in ("torch", "triton"):
     raise ValueError(f"ACVRAM_COLLE_MOE={_COLLE_MOE!r} : torch | triton")
+
+
+_BORNES_EXPERTS: dict = {}
+
+
+def _comptes_tries(e_sorted: torch.Tensor, E: int) -> torch.Tensor:
+    """C15-prefill : ``bincount(e_sorted, minlength=E)`` (int64 [E]) pour une
+    liste d'experts déjà TRIÉE — les bornes de chaque expert par recherche
+    dichotomique (`searchsorted` sur 0..E) puis leur différence : deux petits
+    noyaux au lieu de l'histogramme à atomiques (11,6 µs à G = 16 376). Les
+    mêmes comptes ; `tests/test_prefill_compact.py` le tient contre bincount
+    et casse si la liste n'est pas triée."""
+    cle = (str(e_sorted.device), E, e_sorted.dtype)
+    bornes = _BORNES_EXPERTS.get(cle)
+    if bornes is None:
+        bornes = torch.arange(E + 1, dtype=e_sorted.dtype, device=e_sorted.device)
+        _BORNES_EXPERTS[cle] = bornes
+    return torch.diff(torch.searchsorted(e_sorted, bornes))
 
 
 def _colle_moe_triton(G: int, E: int, device):
@@ -2811,6 +2911,24 @@ class DecoderLayer(nn.Module):
             y = self.mlp(h)
         return x + (y if r == 1.0 else y * r)
 
+    def forward_res(self, x: torch.Tensor, delta: Optional[torch.Tensor],
+                    batch: ForwardBatch, cache: Optional[PagedKVCache]):
+        """C15-prefill : `forward` à résidu différé — reçoit (x, delta) et rend
+        (x, y) ; la somme ``x + delta`` de la couche précédente est absorbée par
+        la première normalisation (`add_norm`, un lancement de moins et 8,4 Mo
+        de moins relus par couche à L = 2 047), comme `decode_fixed_res` au
+        décodage. Même arithmétique que `forward` : bf16(fp32(x) + fp32(delta))
+        puis la norme (rmsnorm_bf16_kernel avec résidu, mult = 1 — réservé au
+        multiplicateur 1,0 : y·r puis + arrondit deux fois, le noyau une)."""
+        assert self.residual_multiplier == 1.0
+        if delta is None:
+            h = self.input_layernorm(x)
+        else:
+            x, h = add_norm(x, delta, self.input_layernorm, 1.0)
+        a = self.self_attn(h, batch, cache)
+        x, h2 = add_norm(x, a, self.post_attention_layernorm, 1.0)
+        return x, self.mlp(h2)
+
     def decode_fixed(self, x: torch.Tensor, positions: torch.Tensor,
                      slots: torch.Tensor, block_tables: torch.Tensor,
                      seq_lens: torch.Tensor, max_pos: int,
@@ -3044,8 +3162,18 @@ class ACVRamModel(nn.Module):
             x = x * self.spec.embedding_multiplier
 
         current = None
+        # C15-prefill : résidu différé au préfill eager — (x, delta) d'une couche
+        # à la suivante, la somme faite par add_norm de la couche suivante (et
+        # par celle de la norme finale) ; réservé aux blocs ordinaires à
+        # multiplicateur 1,0, sinon `forward` (le chemin d'avant, au bit).
+        differe = kernels.prefill_compact("residu") and all(
+            type(l) is DecoderLayer and l.self_attn is not None and l.mlp is not None
+            and l.mlp_device == l.device and l.residual_multiplier == 1.0 for l in self.layers)
+        delta = None
         for i, layer in enumerate(self.layers):
             if layer.device != current:
+                if delta is not None:
+                    x, delta = x + delta, None
                 x = x.to(layer.device, non_blocking=True)
                 current = layer.device
             # On lance le transfert de la couche suivante avant d'exécuter
@@ -3053,7 +3181,10 @@ class ACVRamModel(nn.Module):
             # vive se cache derrière du vrai travail.
             if i + 1 < len(self.layers):
                 self.layers[i + 1].prefetch()
-            x = layer(x, batch, self.caches.get(i))
+            if differe:
+                x, delta = layer.forward_res(x, delta, batch, self.caches.get(i))
+            else:
+                x = layer(x, batch, self.caches.get(i))
             _trace_couche("forward", i, layer)
             if _SYNC_COUCHES:
                 # Diagnostic : une faute CUDA asynchrone remonte au premier
@@ -3065,8 +3196,15 @@ class ACVRamModel(nn.Module):
                     raise RuntimeError(f"faute CUDA après la couche {i} "
                                        f"({type(layer).__name__} sur {layer.device}) : {exc}") from exc
 
-        brut = x
-        x = self.norm(x.to(self.norm.weight.device))
+        if delta is None:
+            brut = x
+            x = self.norm(x.to(self.norm.weight.device))
+        elif x.device == self.norm.weight.device:
+            # résidu différé : la dernière somme dans la norme finale
+            brut, x = add_norm(x, delta, self.norm, 1.0)
+        else:
+            brut = x + delta
+            x = self.norm(brut.to(self.norm.weight.device))
         if return_hidden:
             return x
         if self.mtp is not None:

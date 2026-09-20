@@ -250,3 +250,16 @@ def test_extraire_appels_xml_qwen3_coder():
     assert reste == "" and appels[0]["function"]["name"] == "meteo"
     import json
     assert json.loads(appels[0]["function"]["arguments"]) == {"ville": "Lyon", "jours": 3}
+
+
+def test_un_champ_inconnu_passe_et_est_journalise(client, caplog):
+    """Le contrat OpenAI tient (200, même réponse) et le journal nomme le champ."""
+    import logging
+    from acvram.server import app as serveur
+    serveur._CHAMPS_SIGNALES.discard("temprature")
+    with caplog.at_level(logging.WARNING, logger="acvram.server"):
+        r = client.post("/v1/chat/completions", json={
+            "model": "tiny", "messages": [{"role": "user", "content": "hello world"}],
+            "max_tokens": 5, "temperature": 0, "temprature": 0.7})
+    assert r.status_code == 200 and r.json()["usage"]["completion_tokens"] == 5
+    assert any("temprature" in rec.getMessage() for rec in caplog.records)

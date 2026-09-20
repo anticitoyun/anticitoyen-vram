@@ -30,6 +30,12 @@ etape() {          # etape <N> <nom> <scellé> <cmd…>  → continue si 0 ou 2 
   [ -n "$scelle" ] || { echo "REFUS étape $n « $nom » : scellé absent (un contrôle qui ne peut rendre faux n'est pas un contrôle)"; exit 64; }
   local deb; deb=$(date +%T); echo "=== ($n) $nom — scellé : $scelle — $deb"
   "$@" > "$_CH_O/etape-$n.log" 2>&1; local code=$?
+  # Un juge qui IMPRIME « FAUX » et rend 0 est un défaut d'instrument (verdict-n3-piece2a-19-09 : juge-2a.py
+  # « VERDICT 2a FAUX » puis « (0) tenu (code 0) ») : l'étape est fausse par ce qu'elle a écrit, code 65, quel
+  # que soit son rc. Convention : une ligne VERDICT/RESULTAT/JUGE tenue n'écrit jamais le mot FAUX en capitales.
+  if [ "$code" = 0 ] && grep -aqE '^(VERDICT|RESULTAT|JUGE)\b.*\bFAUX\b|"verdict": *"FAUX"' "$_CH_O/etape-$n.log"; then
+    code=65; echo "DEFAUT D'INSTRUMENT : l'étape a imprimé FAUX et rendu 0 — comptée fausse (code 65)"
+  fi
   local verdict
   case $code in 0) verdict=tenu ;; 2) verdict=partiel ;; *) verdict=faux ;; esac
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$nom" "$scelle" "$deb" "$(date +%T)" "$code" "$verdict" >> "$_CH_JOURNAL"

@@ -167,6 +167,10 @@ VARIABLES: tuple[Variable, ...] = (
              "C15-3d (chantier-c15-niveau3-coder-20-09) : DÉFAUT 1 depuis le 20/09 (verdict-c15-niveau3-coder-19-09 addendum 05 h 15 : Coder b=12 servi sous éco 2 700 +11,5 % t/s, J 0,966 × le témoin, capture 5/5, experts égaux ≤ 1,2 × le taux du témoin A ON/OFF) ; 1 = 641 lancements/pas au lieu de 1 169 : logits du routeur par le MÊME cuBLAS que le témoin (routage au bit) + sélection top-k en un noyau à 1 warp, glue KV/q/valid au bit (kv_write_int8 par pas, q sans copie), GEMM étroit int8 réduit par son dernier programme (4 → 1 nœud), attention paginée réduite par son dernier programme (2 → 1, ATTN_WARPS_COMPACT) | 0 = témoin (le chemin d'avant)"),
     Variable("GLUE_COMPACT_ITEMS", "", ("acvram.kernels", "_GLUE_COMPACT_ITEMS"), None,
              "C15-3b (bissection) : sous GLUE_COMPACT=1, liste des fusions prises, séparées par des virgules — routeur | attn | etroit | kv ; vide = toutes ; une fusion absente suit le témoin"),
+    Variable("PREFILL_COMPACT", "1", ("acvram.kernels", "_PREFILL_COMPACT"), "0",
+             "C15-prefill (chantier-c15-prefill-20-09) : glue du préfill eager réduite par fusions AU BIT — 1 = épilogue des GEMM int8 cuBLAS en un noyau Triton (f32(acc)·s_x·s_w → bf16, gemm_w8a8.epilogue_i8c), A8 par jeton quantifiée une fois pour q/k/v, résidu différé (x + y absorbé par add_norm de la couche suivante), permutations MoE sans second tri ni conversions | 0 = témoin (le chemin d'avant) ; DÉFAUT 1 depuis le 20/09 (verdict-c15-prefill-19-09, poste2 bcd7a73b sur 93b4e586 : PPL au bit sur 3 tranches, capture 4/4, prefill Coder servi 22 748 / 22 683 contre 17 609 / 16 981 j/s = × 1,29-1,34, noyaux 89,37 contre 101,67 ms — le « ≤ 83 » du scellé initial reposait sur une prémisse fausse, dit par poste7) ; sans norm (rmsnorm un warp par ligne : 3,82 ms contre 2,12 au bloc, opt-in ITEMS=…,norm)"),
+    Variable("PREFILL_COMPACT_ITEMS", "", ("acvram.kernels", "_PREFILL_COMPACT_ITEMS"), None,
+             "C15-prefill (bissection) : sous PREFILL_COMPACT=1, liste des fusions prises — epilogue | a8 | residu | permut | attn (SDPA enable_gqa sans copie ×n_rep de K/V, sortie sans tampon à une séquence) | norm (rmsnorm un warp par ligne, même ordre de somme : HORS DÉFAUT, 3,82 ms contre 2,12 pour le bloc le 20/09, opt-in seulement) ; vide = le défaut (toutes sauf norm) ; une fusion absente suit le témoin"),
     Variable("ROUTE_PREP", "2", ("acvram.engine.model", "_ROUTE_PREP"), "0",
              "poste F : 2 = moe_route + route_prep fusionnés (F2, défaut, verdict-f2-topk-17-09) | 1 = route_prep seul (F1) | 0 = torch"),
     Variable("MOE_DECODE_FUSED", "0", ("acvram.engine.model", "_MOE_DECODE_FUSED"), "0"),
@@ -214,6 +218,8 @@ VARIABLES: tuple[Variable, ...] = (
              "C13-c diagnostic : BM,BN,warps,stages de la tuile du cœur flash (défaut : par la shared de la carte — sm_120 32,64,4,1 ; ≥ 200 Ko 64,64,8,2) ; la ligne de régime nomme la tuile"),
     Variable("MLA_CORE_VB", "0", ("acvram.engine.mla", "_MLA_CORE_VB"), "0",
              "C13 (poste7-c13a-defaut § 2) : 1 = le 3e produit du préfill y = v_b·o_lat (8ae21997) suit MLA_CORE ; 0 = fp32 ; scellé prefill ≥ 7 450 j/s ET ΔPPL géo ≤ +0,001 contre 2 produits → défaut 1"),
+    Variable("MLA_CORE_MAX_CLES", "2048", ("acvram.engine.mla", "_MLA_CORE_MAX_CLES"), "2048",
+             "diagnostic (prise à 36 tranches, poste2 20/09) : seuil de la règle des clés vues au préfill — au-delà, fp32 pour le morceau ; 0 = règle neutralisée (tf32/bf16 à toutes longueurs, ligne mla_core=tf32(sans règle des clés)) ; 2048 = défaut servi"),
     Variable("MLA_CORE_DECODE", "fp32", ("acvram.engine.mla", "_MLA_CORE_DECODE"), "fp32",
              "C13 niveau 2 (poste7-c13a-defaut § 2) : régime du cœur au DÉCODAGE (y = v_b·o_lat, sgemm fp32 1,5 ms/pas à b=12), indépendant de MLA_CORE — fp32 défaut | tf32 | bf16 ; scellé sgemm ≤ 0,6 ms ET ppl-decode-kv 3 tranches ± 0,001 ET capture {1,2,8,12,16} 5/5 → défaut"),
     Variable("MLA_A8", "off", ("acvram.engine.mla", "_MLA_A8"), None,
@@ -242,6 +248,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("FUSION_PARTIELLE", "0", None, "0"),
     Variable("LOGITS_BF16", "", None, "", "1 : tête en bf16 (précision-de-sortie-invisible-à-la-PPL)"),
     Variable("GRAPHS_EAGER", "", None, "1"),
+    Variable("CPUS", "", None, "",
+             "0.6.31 (acvram/hote.py) : affinité CPU du processus (`0-15`, `0-3,8`), posée par os.sched_setaffinity à l'import et à la construction d'Engine ; vide = aucune affinité (défaut) ; la ligne porte hote=…,cpus<plages relues>"),
     Variable("ATTN_WARPS_COMPACT", "8", ("acvram.kernels.attn_paginee", "WARPS_COMPACT"), "4",
              "C15-3d bis : warps du noyau d attention paginée fusionné (GLUE_COMPACT=1) ; DÉFAUT 8 (poste2 05 h 15, ABAB : B8 1 417 t·s⁻¹ · 0,2073 J = +11,5 % · 0,966 × A ; B4 1 386 · 0,2116 : 4 warps ne rend rien en W, 369 = 369, et perd 2 %) ; 4 = bras"),
     Variable("ROUTAGE_TEMOIN", "0", ("acvram.engine.model", "_ROUTAGE_TEMOIN"), "0",
@@ -368,6 +376,21 @@ def glue_texte() -> str:
         return f"glue=?({type(exc).__name__})"
 
 
+def prefill_glue_texte() -> str:
+    """C15-prefill : la glue du préfill est nommée sur la ligne, défaut compris —
+    ``prefill_glue=temoin`` (PREFILL_COMPACT=0), ``prefill_glue=compact`` (défaut depuis le 20/09),
+    ``prefill_glue=compact(items=epilogue,a8)`` en bissection. Un chiffre de
+    préfill sans cette étiquette ne dit pas quel chemin l'a produit."""
+    try:
+        from . import kernels as _k
+        if not getattr(_k, "_PREFILL_COMPACT", 0):
+            return "prefill_glue=temoin"
+        items = getattr(_k, "_PREFILL_COMPACT_ITEMS", None) or ""
+        return "prefill_glue=compact" + (f"(items={items})" if items else "")
+    except Exception as exc:                              # noqa: BLE001
+        return f"prefill_glue=?({type(exc).__name__})"
+
+
 def regime_ligne() -> str:
     """Une ligne pour l'en-tête d'une mesure : ce qui diffère du défaut,
     puis extension et masques. « défaut » seul veut dire : tout au défaut."""
@@ -409,6 +432,13 @@ def regime_ligne() -> str:
         parts.append("fla=" + getattr(fla, "__version__", "?"))
     except Exception:
         parts.append("fla=absent")
+    # 0.6.31 : l'hôte effectif (THP, fils OpenMP, affinité) — un chiffre d'hôte sans cette étiquette compare
+    # deux régimes sans le savoir (poste7 : OMP est le premier suspect si le prefill perd > 3 %)
+    try:
+        from .hote import hote_texte
+        parts.append(hote_texte())
+    except Exception as exc:                              # noqa: BLE001
+        parts.append(f"hote=?({type(exc).__name__})")
     # L'horloge SM verrouillée (`nvidia-smi -lgc`, mode éco, poste7-e1-eco-tenu-
     # 19-09 § 2) est root et hors processus : aucun défaut ACVRAM_* ne bouge,
     # et un chiffre éco passerait pour un chiffre défaut. Nommée seulement
@@ -429,6 +459,7 @@ def regime_ligne() -> str:
     except Exception:                                     # noqa: BLE001
         pass
     parts.append(glue_texte())
+    parts.append(prefill_glue_texte())
     try:
         from . import eco as _eco
         h = _eco.horloge_du_processus()

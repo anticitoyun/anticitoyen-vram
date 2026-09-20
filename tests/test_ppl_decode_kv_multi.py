@@ -156,7 +156,9 @@ def test_cache_de_prefixe_desactive_a_la_construction_du_moteur():
     appels = [n for n in ast.walk(arbre) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "Engine"]
     assert len(appels) == 1
     kw = {k.arg: k.value for k in appels[0].keywords}
-    assert isinstance(kw["enable_prefix_cache"], ast.Constant) and kw["enable_prefix_cache"].value is False
+    # défaut = régime servi (cache ON : poste2 07 h 55, −1,2 % cache éteint = _frontiere_insta) ; --sans-cache-prefixe = bras
+    src = ast.unparse(kw["enable_prefix_cache"])
+    assert src == "not args.sans_cache_prefixe", src
 
 
 def test_analyser_arguments_et_repli_env(outil, monkeypatch):

@@ -39,3 +39,21 @@ def test_refus_sous_un_verrou_tenu(tmp_path):
     script = tmp_path / "c.sh"; script.write_text(f'. "{GABARIT}"\n')
     r = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=dict(os.environ, ACVRAM_CARTE_TENUE="1"))
     assert r.returncode == 3
+
+
+def test_un_juge_qui_imprime_faux_et_rend_zero_est_compte_faux(tmp_path):
+    """verdict-n3-piece2a-19-09 : `juge-2a.py` écrivait « VERDICT 2a FAUX » puis rendait 0 et la chaîne codait
+    l'étape « tenu ». Le gabarit lit le journal : FAUX imprimé + rc 0 = code 65, l'étape est fausse et la
+    chaîne s'arrête ; un juge tenu (« 0 ligne fausse ») ne déclenche rien."""
+    r, tsv = _chaine(tmp_path, 'etape 0 a "s0" bash -c "echo RESULTAT 0 ligne fausse; exit 0"\n'
+                               'etape 1 b "s1" bash -c "echo VERDICT 2a FAUX max 8 ulp; exit 0"\n'
+                               'etape 2 c "s2" true')
+    assert r.returncode == 1 and "DEFAUT D'INSTRUMENT" in r.stdout and "ARRÊT au premier scellé réfuté : étape 1" in r.stdout
+    lignes = tsv.read_text().splitlines()
+    assert [l.split("\t")[-2:] for l in lignes[1:]] == [["0", "tenu"], ["65", "faux"]]
+
+
+def test_un_verdict_json_faux_est_compte_faux(tmp_path):
+    r, _ = _chaine(tmp_path, """etape 0 a "s0" bash -c 'echo "{\\"verdict\\": \\"FAUX\\"}"; exit 0'""")
+    assert r.returncode == 1 and "code 65" in r.stdout
+

@@ -16,7 +16,7 @@ La surface publique est la ligne de commande (`acvram`) et le serveur
 compatible avec l'API OpenAI.
 """
 
-__version__ = "0.6.29"
+__version__ = "0.6.30"
 
 # Segments extensibles de l'allocateur CUDA, sur demande seulement. Posé ici
 # parce que la variable n'est lue qu'une fois, à la première allocation, avant
@@ -40,6 +40,10 @@ __version__ = "0.6.29"
 #
 # `ACVRAM_ALLOC_EXTENSIBLE=1` l'active.
 import os as _os
+# 0.6.31 : réglages hôte génériques (THP, OMP 8, affinité optionnelle) posés AVANT torch, par le paquet
+# — donc par tout lanceur, serveur ou instrument (acvram/hote.py) ; rejoués à la construction d'Engine.
+from .hote import regler_hote as _regler_hote  # noqa: E402
+_regler_hote()
 
 if _os.environ.get("ACVRAM_ALLOC_EXTENSIBLE"):
     _os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")

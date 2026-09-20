@@ -17,11 +17,15 @@ Repli d'environnement (chaînes existantes) : ACVRAM_MODELE_MESURE, PPL_DECODE_C
 (une seule tranche si `--tranches` absent), PPL_PREFIXE. Régime : aucun posé ici
 (leçon régime-par-défaut, 19/09) ; l'appelant pose ACVRAM_KV_FORMAT et le reste.
 
-Ce qui survit d'une requête à l'autre dans le moteur (lecture runner.py, 20/09) :
-les blocs KV sont rendus à `_finish` (runner.py:985) mais PUBLIÉS au cache de
-préfixe juste avant (:984) → un second passage sur le même préfixe sauterait le
-prefill : le cache de préfixe est donc DÉSACTIVÉ ici (`enable_prefix_cache=False`,
-runner.py:383). Les états des couches à tampons fixes (GDN/KDA/Mamba, MLA de GLM)
+Cache de préfixe : GARDÉ au défaut servi (`enable_prefix_cache=True`, runner.py:383) —
+contrôle de poste2 (20/09 07 h 55, tranche0, k = 1) : cache désactivé 14,7888 contre 14,9613
+avec l'ancien script (−1,2 %), mêmes ids, même régime ; la cause est `_frontiere_insta`
+(runner.py:839) : sur un hybride (GLM : créneaux MLA) le cache de préfixe COUPE le prefill à
+un multiple de 256 (8 192 → 7 936 + 256) pour photographier l'état, et un prefill en deux
+morceaux n'a pas la numérique d'un prefill d'un morceau. Le serveur livré a le cache ON :
+c'est ce régime qu'on mesure ; `--sans-cache-prefixe` = l'autre bras, nommé dans RESULTAT
+(`enable_prefix_cache`). Deux tranches différentes ne partagent aucun bloc (clé = hash
+chaîné des ids, runner.py:918-933) ; un état ne survit donc pas d'une tranche à l'autre Les états des couches à tampons fixes (GDN/KDA/Mamba, MLA de GLM)
 sont retirés du magasin à `_finish` (runner.py:994-995) et le créneau est remis à
 zéro au premier forward de la requête suivante (`static_load(st, None)` :
 gdn.py:212-214 zéro conv et S ; mla.py:613-614 `len` à 0, les lignes du cache
@@ -174,6 +178,8 @@ def analyser(argv=None):
     p.add_argument("--prefixe", type=int, default=8192, help="P : jetons en prefill, préfixe de séquence compris")
     p.add_argument("--notes", type=int, default=512, help="N : jetons notés un par pas")
     p.add_argument("--prefixe-seq", default=os.environ.get("PPL_PREFIXE", ""), help="ex. '[gMASK]<sop>' (GLM)")
+    p.add_argument("--sans-cache-prefixe", action="store_true",
+                   help="bras diagnostic : cache de préfixe éteint (prefill d'un morceau) ; défaut = régime servi (ON, prefill coupé à 256 sur un hybride)")
     p.add_argument("--modele", default=os.environ.get("ACVRAM_MODELE_MESURE",
                    "/mnt/4TO_SATACMR_2022/Modeles/models_acvram/Qwen3-Coder-30B-A3B-nvfp4"))
     p.add_argument("--depuis", type=int, default=1, help="reprise : sauter les tranches k < depuis")
@@ -198,20 +204,20 @@ def main(argv=None) -> None:
     loaded = load_model(args.modele, dtype=torch.bfloat16, max_model_len=max_model_len)
     _sync(torch); t1 = time.perf_counter()
     engine = Engine(loaded, tokenizer, max_batch_size=1, max_model_len=max_model_len,
-                    enable_cuda_graphs=True, enable_prefix_cache=False)
+                    enable_cuda_graphs=True, enable_prefix_cache=not args.sans_cache_prefixe)
     engine._eos = set()
     _sync(torch); t2 = time.perf_counter()
     c0 = next(iter(loaded.model.caches.values()), None)   # MLA (GLM) : pas de cache paginé par couche → champs KV à None
     cfg = getattr(c0, "cfg", None)
     base = {"kv_format_env": os.environ.get("ACVRAM_KV_FORMAT", ""), "regime_ligne": acvram.regime_ligne(),
-            "modele": args.modele, "acvram": acvram.__file__, "engine_regime": engine.regime_ligne(),
+            "modele": args.modele, "acvram": os.path.relpath(acvram.__file__, os.path.dirname(os.path.dirname(acvram.__file__))),  # relatif : jamais un /home dans un artefact suivi (cliquet 20/09) "engine_regime": engine.regime_ligne(),
             "kv_dtype_effectif": cfg.dtype if cfg else None, "bytes_per_block": cfg.bytes_per_block() if cfg else None,
             "block_size": cfg.block_size if cfg else None, "num_blocks": cfg.num_blocks if cfg else None,
             "capacity_tokens": cfg.capacity_tokens if cfg else None,
             "kv_total_bytes_par_couche": cfg.bytes_per_block() * cfg.num_blocks if cfg else None,
             "n_caches": len(loaded.model.caches), "smi_memory_used_mib_apres_chargement": _smi("memory.used"),
             "t_charge_modele": round(t1 - t0, 3), "t_moteur": round(t2 - t1, 3), "t_charge": round(t2 - t0, 3),
-            "n_tranches": len(tranches), "enable_prefix_cache": False}
+            "n_tranches": len(tranches), "enable_prefix_cache": not args.sans_cache_prefixe}
     print("REGIME", json.dumps({c: base[c] for c in ("regime_ligne", "kv_dtype_effectif", "bytes_per_block", "num_blocks",
                                                       "capacity_tokens", "smi_memory_used_mib_apres_chargement",
                                                       "t_charge_modele", "t_moteur", "t_charge")}), flush=True)
