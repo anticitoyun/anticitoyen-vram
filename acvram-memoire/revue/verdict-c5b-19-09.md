@@ -8,3 +8,5 @@ suite : poste1 : (a) `test_ecriture_prefill_un_par_un…` : lire l'assertion « 
 
 ## Rejouable
 `cd ~/travail/poste2-c5b && PYA=<python venv> bash scratchpad/c5b-carte-19-09/chaine.sh` (20 min, .so en cache) ; tests carte : `ACVRAM_TYPE=mesure outils/carte.sh <python> -m pytest tests/test_kv_canal_c5b_carte.py tests/test_attn_paginee.py -q`.
+
+## Addendum 20/09 03:42 — d3a07614 (trois correctifs d'poste1) : **les deux tests rejoués sont verts** — carte `test_kv_canal_c5b_carte.py` **9 passed** (dont `test_ecriture_prefill_un_par_un_et_decoupe_au_bit_contre_le_jumeau`, faux à 01:11 : `_memes(ecrites)` ne compare plus la ligne LIFO recyclée) ; à sec `test_kv_canal_budget_c5b.py` **3 passed** (`test_octets_par_jeton_egalent_le_bloc_du_format` 16 640 / 17 156, `test_le_surcout_canal_est_celui_du_bloc`) et `test_kv_canal_c5b.py` 9 passed ; prise `carte.sh` 03:41 (`tests-carte-d3a07614.log`), .cu inchangé depuis a77eb722 → **C5-b peut se fusionner en opt-in** (poste7) ; le terme vitesse (certifie B au budget 17 156 o/bloc) reste pour la reprise
