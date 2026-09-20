@@ -2699,9 +2699,13 @@ class DecoderLayerGDN(nn.Module):
                 print(f"[hist] couche {self.index} : allocation de static_hist({q_len}), "
                       f"ancien={self.static_hist_len}, pendant une capture : "
                       f"{torch.cuda.is_current_stream_capturing()}", flush=True)
+            # `static["lot"]` (lot_etats.nouveau_static : (numéro de lot, rang)) est un
+            # tuple, pas un tenseur : le décodage spéculatif sur un hybride GDN mourait ici
+            # (`AttributeError: 'tuple' object has no attribute 'shape'`, verdict-mtp-exact-
+            # 19-09) — seuls les tenseurs d'état ont un historique
             self.static_hist = {
                 k: torch.zeros((q_len,) + tuple(v.shape), dtype=v.dtype, device=v.device)
-                for k, v in self.static.items() if k not in ("cache", "scores")}
+                for k, v in self.static.items() if k not in ("cache", "scores") and isinstance(v, torch.Tensor)}
             self.static_hist_len = q_len
         return self.static_hist
 
