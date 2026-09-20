@@ -167,8 +167,8 @@ VARIABLES: tuple[Variable, ...] = (
              "C15-3d (chantier-c15-niveau3-coder-20-09) : DÉFAUT 1 depuis le 20/09 (verdict-c15-niveau3-coder-19-09 addendum 05 h 15 : Coder b=12 servi sous éco 2 700 +11,5 % t/s, J 0,966 × le témoin, capture 5/5, experts égaux ≤ 1,2 × le taux du témoin A ON/OFF) ; 1 = 641 lancements/pas au lieu de 1 169 : logits du routeur par le MÊME cuBLAS que le témoin (routage au bit) + sélection top-k en un noyau à 1 warp, glue KV/q/valid au bit (kv_write_int8 par pas, q sans copie), GEMM étroit int8 réduit par son dernier programme (4 → 1 nœud), attention paginée réduite par son dernier programme (2 → 1, ATTN_WARPS_COMPACT) | 0 = témoin (le chemin d'avant)"),
     Variable("GLUE_COMPACT_ITEMS", "", ("acvram.kernels", "_GLUE_COMPACT_ITEMS"), None,
              "C15-3b (bissection) : sous GLUE_COMPACT=1, liste des fusions prises, séparées par des virgules — routeur | attn | etroit | kv ; vide = toutes ; une fusion absente suit le témoin"),
-    Variable("PREFILL_COMPACT", "0", ("acvram.kernels", "_PREFILL_COMPACT"), "0",
-             "C15-prefill (chantier-c15-prefill-20-09) : glue du préfill eager réduite par fusions AU BIT — 1 = épilogue des GEMM int8 cuBLAS en un noyau Triton (f32(acc)·s_x·s_w → bf16, gemm_w8a8.epilogue_i8c), A8 par jeton quantifiée une fois pour q/k/v, résidu différé (x + y absorbé par add_norm de la couche suivante), permutations MoE sans second tri ni conversions | 0 = témoin (le chemin d'avant) ; DÉFAUT 0 tant que le scellé (noyaux 96,8 → ≤ 83 ms, servi ≥ 20 500 j/s, PPL au bit sur 3 tranches, capture 5/5) n'est pas mesuré sur carte"),
+    Variable("PREFILL_COMPACT", "1", ("acvram.kernels", "_PREFILL_COMPACT"), "0",
+             "C15-prefill (chantier-c15-prefill-20-09) : glue du préfill eager réduite par fusions AU BIT — 1 = épilogue des GEMM int8 cuBLAS en un noyau Triton (f32(acc)·s_x·s_w → bf16, gemm_w8a8.epilogue_i8c), A8 par jeton quantifiée une fois pour q/k/v, résidu différé (x + y absorbé par add_norm de la couche suivante), permutations MoE sans second tri ni conversions | 0 = témoin (le chemin d'avant) ; DÉFAUT 1 depuis le 20/09 (verdict-c15-prefill-19-09, poste2 bcd7a73b sur 93b4e586 : PPL au bit sur 3 tranches, capture 4/4, prefill Coder servi 22 748 / 22 683 contre 17 609 / 16 981 j/s = × 1,29-1,34, noyaux 89,37 contre 101,67 ms — le « ≤ 83 » du scellé initial reposait sur une prémisse fausse, dit par poste7) ; sans norm (rmsnorm un warp par ligne : 3,82 ms contre 2,12 au bloc, opt-in ITEMS=…,norm)"),
     Variable("PREFILL_COMPACT_ITEMS", "", ("acvram.kernels", "_PREFILL_COMPACT_ITEMS"), None,
              "C15-prefill (bissection) : sous PREFILL_COMPACT=1, liste des fusions prises — epilogue | a8 | residu | permut | attn (SDPA enable_gqa sans copie ×n_rep de K/V, sortie sans tampon à une séquence) | norm (rmsnorm un warp par ligne, même ordre de somme : HORS DÉFAUT, 3,82 ms contre 2,12 pour le bloc le 20/09, opt-in seulement) ; vide = le défaut (toutes sauf norm) ; une fusion absente suit le témoin"),
     Variable("ROUTE_PREP", "2", ("acvram.engine.model", "_ROUTE_PREP"), "0",
@@ -364,7 +364,7 @@ def glue_texte() -> str:
 
 def prefill_glue_texte() -> str:
     """C15-prefill : la glue du préfill est nommée sur la ligne, défaut compris —
-    ``prefill_glue=temoin`` (PREFILL_COMPACT=0, défaut), ``prefill_glue=compact``,
+    ``prefill_glue=temoin`` (PREFILL_COMPACT=0), ``prefill_glue=compact`` (défaut depuis le 20/09),
     ``prefill_glue=compact(items=epilogue,a8)`` en bissection. Un chiffre de
     préfill sans cette étiquette ne dit pas quel chemin l'a produit."""
     try:
