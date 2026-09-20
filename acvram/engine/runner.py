@@ -633,7 +633,7 @@ class Engine:
             "chemin_moe": chemin_moe,
             # régime du prefill NVFP4 non groupé : bf16 (W4A16) | w8a8 | w4a4 —
             # jamais plus tacite (poste7-prefill-a8-verdict-17-09)
-            "prefill": kernels.prefill_regime(),
+            "prefill": kernels.prefill_regime() + self._prefill_coupe_texte(),
             # linéaires INT8 du préfill (P0) : bf16 | a8 — toujours écrit
             "prefill_int8": kernels.prefill_int8_regime(),
             # P1 disposition unique : « marlin » (pile Marlin seule, préfill et
@@ -828,6 +828,16 @@ class Engine:
         return admitted
 
     # -- instantanés d'état récurrent -------------------------------------
+    def _prefill_coupe_texte(self) -> str:
+        """« (coupé@256) » derrière `prefill=` quand le régime servi coupe le prefill à la
+        frontière d'instantané (`_frontiere_insta` : hybride ET cache de préfixe ON) — un
+        prefill en deux morceaux n'a pas la numérique d'un morceau (MECANISMES, 20/09 :
+        contrôle 3.2, 14,9613 contre 14,7888 sur GLM 8 192 + 512). Dense, ou cache OFF :
+        rien. Le pas est celui lu (`ACVRAM_INSTA_PAS`), pas une constante."""
+        if self.est_hybride and self.allocator.enable_prefix_cache:
+            return f"(coupé@{self._pas_insta})"
+        return ""
+
     def _frontiere_insta(self, seq: Sequence) -> Optional[int]:
         """Position où couper le prefill pour photographier l'état, ou None.
 
