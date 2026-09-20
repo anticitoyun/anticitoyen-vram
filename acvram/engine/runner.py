@@ -353,6 +353,12 @@ def _etat_eco() -> dict:
     return eco.etat_eco(relire=True)
 
 
+def _hote_texte() -> str:
+    """`hote=thp,omp8[,cpus…]` effectif (acvram/hote.py)."""
+    from ..hote import hote_texte
+    return hote_texte()
+
+
 def _glue_texte() -> str:
     """`glue=compact(8)` | `glue=temoin` (C15-3d, regime.glue_texte)."""
     from ..regime import glue_texte
@@ -384,6 +390,9 @@ class Engine:
                  speculator: Any = None, spec_k: int = 4,
                  enable_cuda_graphs: bool = True,
                  host_kv_gib: float = 0.0) -> None:
+        # 0.6.31 : réglages hôte rejoués ici (idempotent) — serveur ET instruments (acvram/hote.py)
+        from ..hote import regler_hote
+        regler_hote()
         self.loaded = loaded
         self.model = loaded.model
         self.spec = loaded.spec
@@ -697,7 +706,8 @@ class Engine:
                f"{self.stats.host_kv_tokens} hôte) "
                + _eco_texte(r["eco"])
                + _mla_core_texte()
-               + " " + _glue_texte())
+               + " " + _glue_texte()
+               + " " + _hote_texte())
 
     def fermer(self) -> None:
         """Arrêt du moteur : rend l'horloge éco posée par ce processus

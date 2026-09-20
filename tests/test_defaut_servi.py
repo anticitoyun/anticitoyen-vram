@@ -26,6 +26,16 @@ DEFAUTS_PAR_VERSION = {
         },
         "mla_core=tf32(≤2048 clés) glue=compact(8) prefill_glue=compact",
     ),
+    "0.6.31": (                                                          # 0.6.30 + réglages hôte (acvram/hote.py)
+        {
+            "GLUE_COMPACT": "1", "ATTN_WARPS_COMPACT": "8", "PREFILL_COMPACT": "1",
+            "MLA_CORE": "tf32", "MLA_CORE_MAX_CLES": "2048", "MLA_GLUE": "1",
+            "MARLIN_DISTINCT": "0", "MOE_DECODE_MMA": "1", "MOE_DECODE_MMA_MARLIN": "0",
+            "KV_INT8_CANAL": "0", "GODETS_B": "1", "GEMV_LAYOUT": "marlin", "PILE_SANS_RENDU": "",
+            "CPUS": "",                                                  # aucune affinité par défaut (hote=thp,omp8)
+        },
+        "mla_core=tf32(≤2048 clés) glue=compact(8) prefill_glue=compact",   # hote=thp,omp8 est AVANT mla_core
+    ),
 }
 
 

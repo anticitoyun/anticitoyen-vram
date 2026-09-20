@@ -236,6 +236,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("FUSION_PARTIELLE", "0", None, "0"),
     Variable("LOGITS_BF16", "", None, "", "1 : tête en bf16 (précision-de-sortie-invisible-à-la-PPL)"),
     Variable("GRAPHS_EAGER", "", None, "1"),
+    Variable("CPUS", "", None, "",
+             "0.6.31 (acvram/hote.py) : affinité CPU du processus (`0-15`, `0-3,8`), posée par os.sched_setaffinity à l'import et à la construction d'Engine ; vide = aucune affinité (défaut) ; la ligne porte hote=…,cpus<plages relues>"),
     Variable("ATTN_WARPS_COMPACT", "8", ("acvram.kernels.attn_paginee", "WARPS_COMPACT"), "4",
              "C15-3d bis : warps du noyau d attention paginée fusionné (GLUE_COMPACT=1) ; DÉFAUT 8 (poste2 05 h 15, ABAB : B8 1 417 t·s⁻¹ · 0,2073 J = +11,5 % · 0,966 × A ; B4 1 386 · 0,2116 : 4 warps ne rend rien en W, 369 = 369, et perd 2 %) ; 4 = bras"),
     Variable("ROUTAGE_TEMOIN", "0", ("acvram.engine.model", "_ROUTAGE_TEMOIN"), "0",
@@ -418,6 +420,13 @@ def regime_ligne() -> str:
         parts.append("fla=" + getattr(fla, "__version__", "?"))
     except Exception:
         parts.append("fla=absent")
+    # 0.6.31 : l'hôte effectif (THP, fils OpenMP, affinité) — un chiffre d'hôte sans cette étiquette compare
+    # deux régimes sans le savoir (poste7 : OMP est le premier suspect si le prefill perd > 3 %)
+    try:
+        from .hote import hote_texte
+        parts.append(hote_texte())
+    except Exception as exc:                              # noqa: BLE001
+        parts.append(f"hote=?({type(exc).__name__})")
     # L'horloge SM verrouillée (`nvidia-smi -lgc`, mode éco, poste7-e1-eco-tenu-
     # 19-09 § 2) est root et hors processus : aucun défaut ACVRAM_* ne bouge,
     # et un chiffre éco passerait pour un chiffre défaut. Nommée seulement
