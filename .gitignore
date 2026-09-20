@@ -38,3 +38,4 @@ scratchpad/**/*.nsys-rep
 scratchpad/**/*.sqlite
 scratchpad/**/*.log
 scratchpad/**/*.out
+outils/gpu/hors-verrou.log

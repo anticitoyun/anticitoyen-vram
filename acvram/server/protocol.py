@@ -15,7 +15,7 @@ import time
 import uuid
 from typing import Any, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "ChatMessage", "ChatCompletionRequest", "ChatCompletionResponse",
@@ -56,6 +56,15 @@ class ChatMessage(BaseModel):
 
 
 class _SamplingFields(BaseModel):
+    # Un champ inconnu (faute de frappe « temprature », option d'un autre
+    # serveur « reasoning_effort ») était accepté et IGNORÉ en silence : le
+    # client croyait régler quelque chose, le moteur servait le défaut, et rien
+    # ne le disait (MECANISMES : « champs inconnus acceptés en silence »). On
+    # les garde (`extra="allow"`) pour les NOMMER : `champs_inconnus()` les rend,
+    # le serveur les journalise une fois par nom. Le contrat OpenAI est
+    # inchangé : la requête passe, les champs connus gardent leur effet.
+    model_config = ConfigDict(extra="allow")
+
     temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = 0
@@ -78,6 +87,10 @@ class _SamplingFields(BaseModel):
     # côté llama.cpp fait tomber le lot acvram sous b pendant la fenêtre —
     # asymétrie non neutre, pas un réglage de confort.
     ignore_eos: bool = False
+
+    def champs_inconnus(self) -> list[str]:
+        """Noms des champs reçus que ce serveur ne lit pas, triés ; [] sinon."""
+        return sorted((self.model_extra or {}).keys())
 
     def stop_list(self) -> list[str]:
         if self.stop is None:
