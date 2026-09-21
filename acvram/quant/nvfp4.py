@@ -128,6 +128,9 @@ class NVFP4Tensor:
     # empilé (q, k et v en un) : chaque segment garde la sienne, sans le
     # réarrondi qu'imposerait une échelle commune.
     global_scale_rows: Optional[torch.Tensor] = None
+    # Q1 : {"echelle", "blocs", "amax4", "clampes"} posé par `quantize_nvfp4` — part des blocs ayant choisi amax/4
+    # et part des blocs dont amax/6 sature l E4M3 (candidats confondus) ; publié au manifeste, jamais un tenseur
+    echelle_stats: Optional[dict] = None
 
     format = "nvfp4"
 
@@ -184,6 +187,7 @@ class NVFP4Tensor:
             global_scale=self.global_scale.to(device, non_blocking=non_blocking),
             shape=self.shape,
             padded_in=self.padded_in,
+            echelle_stats=self.echelle_stats,
         )
 
     def state_dict(self, prefix: str = "") -> dict[str, torch.Tensor]:
@@ -295,6 +299,7 @@ def quantize_nvfp4(
         eff = e4m3.to(torch.float32) * gs                 # échelle effective
         return e4m3, eff, _coder(wb, eff)
     bs_e4m3, bs, codes = candidat(E2M1_MAX)
+    stats = {"echelle": echelle, "blocs": int(block_amax.numel()), "amax4": 0, "clampes": 0}
     if echelle == "4sur6":
         # Le bloc dont amax/6 sature déjà l E4M3 (celui qui fixe g) a ses deux candidats clampés à la même
         # valeur : 4sur6 = max6 pour lui, par construction. Le MSE se juge sur l échelle E4M3 arrondie.
@@ -303,6 +308,12 @@ def quantize_nvfp4(
         bs_e4m3 = torch.where(mieux, e4, bs_e4m3)
         bs = torch.where(mieux, b4, bs)
         codes = torch.where(mieux.unsqueeze(-1), c4, codes)
+        # amax4 = blocs où amax/4 est RÉELLEMENT l échelle (candidat non clampé) : c est ce que relit
+        # outils/part-amax4.py dans les codes (plus grand code = niveau 4) — un candidat 4 clampé à 448 n est ni l un
+        # ni l autre, il compte dans « clampés »
+        stats["amax4"] = int((mieux & (e4.to(torch.float32) < E4M3_MAX)).sum())
+    # clampés = échelle de bloc finale == E4M3_MAX : les deux candidats y sont confondus ou tronqués, 4sur6 sans effet
+    stats["clampes"] = int((bs_e4m3.to(torch.float32) >= E4M3_MAX).sum())
     sign = (wb < 0).to(torch.uint8) << 3
     codes = codes | sign
     codes = codes.reshape(out_f, k)
@@ -313,6 +324,7 @@ def quantize_nvfp4(
         global_scale=gs.clone(),
         shape=orig_shape,
         padded_in=k,
+        echelle_stats=stats,
     )
 
 

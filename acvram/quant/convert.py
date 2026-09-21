@@ -1238,6 +1238,23 @@ def _octets_du_checkpoint(chemin: str) -> int:
     return total
 
 
+def _noter_echelle_nvfp4(manifest: dict, entry: dict, qt: Any) -> None:
+    """Q1 : part des blocs ayant choisi amax/4 et part des blocs clampés (amax/6 = E4M3_MAX : candidats confondus),
+    par tenseur (`entry["echelle"]`) et cumulées (`manifest["echelle_nvfp4"]`) — écrit AVANT toute mesure : si le
+    scellé E est réfuté, la ligne existe déjà et nomme la cause. Contrôle indépendant : outils/part-amax4.py relit
+    les codes stockés (bloc dont le plus grand code vaut 6 = amax/6, vaut 4 = amax/4)."""
+    st = getattr(qt, "echelle_stats", None)
+    if not st or not st.get("blocs"):
+        return
+    n = st["blocs"]
+    entry["echelle"] = {"regle": st["echelle"], "blocs": n, "part_amax4": round(st["amax4"] / n, 4),
+                        "part_clampes": round(st["clampes"] / n, 4)}
+    tot = manifest.setdefault("echelle_nvfp4", {"regle": st["echelle"], "blocs": 0, "amax4": 0, "clampes": 0})
+    tot["blocs"] += n; tot["amax4"] += st["amax4"]; tot["clampes"] += st["clampes"]
+    tot["part_amax4"] = round(tot["amax4"] / tot["blocs"], 4)
+    tot["part_clampes"] = round(tot["clampes"] / tot["blocs"], 4)
+
+
 def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                        spec: Optional[ModelSpec] = None,
                        stats: Optional[dict[str, ActStats]] = None,
@@ -1721,6 +1738,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         # manifeste pour le protocole A/B, a cote du SNR qui reste le critere.
         if "out_kld_bits" in metrics:
             entry["kld_bits"] = round(float(metrics["out_kld_bits"]), 6)
+        _noter_echelle_nvfp4(manifest, entry, qt)
         sd = qt.state_dict(prefix=f"{name}.")
         sd.update(scaler.state_dict(prefix=f"{name}."))
         # Les fragments s'ecrivent depuis la memoire hote : on redescend ce que
