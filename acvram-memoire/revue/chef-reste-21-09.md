@@ -4,12 +4,12 @@ Objectif : plus rapide et moins de joules que llama.cpp, vLLM, TensorRT-LLM. Ten
 
 ## A — porte immédiate (utilisateur)
 1. `sudo dpkg -i acvram_0.6.34_amd64.deb` (racine du dépôt, sha256 dans poste3.md) — feu vert donné, non installé.
-2. Vibe série 2 (Q2.1-Q2.5 en fin de `~/Bureau/Vibe/qr.md`) sans réponse — relancer Vibe.
+2. Vibe série 2 : répondue (qrvibe01.md), verdicts 2.1-2.5 en fin de qr.md — 2.4 (ordre des leviers) et 2.5 (protocole énergie) intégrés ci-dessous.
 3. Questions ouvertes (pièce 12) : C9 119B et bf16 30B (60 Go) — oui/non de l'utilisateur.
 
 ## B — objectif b=12 (poste1, poste2, poste4)
 4. Chaîne ABBA sampler (poste4 226bf4da, ≈ 8 min, poste2) : tranche H1 ordre/dérive ; le protocole intercalé devient la règle des cellules A/B.
-5. Leviers frontière de pas 0,43 ms (poste1) : estimation en µs/pas avant code — échantillonnage dans le graphe (Vibe R4 (1)), recouvrement admission/émission ; chaque levier = test au bit + cellule ABBA.
+5. Frontière de pas 0,43 ms (poste1) : d'abord la décomposer (tête, argmax 55 µs, copie ids, lancement du graphe suivant, hôte), puis leviers dans l'ordre capture de l'échantillonnage dans le graphe → argmax fusionné (plafond ≈ 0,1 ms ≈ 1,3 % : insuffisant seul, verdict 2.4) ; tête nvfp4 exclue ; chaque levier = test au bit + cellule ABBA.
 6. Cellule b=12 finale ≥ 1 596 ou écart nommé comme résultat.
 
 ## C — 30B-VL (défaut de conversion, pas du moteur)
@@ -22,7 +22,7 @@ Objectif : plus rapide et moins de joules que llama.cpp, vLLM, TensorRT-LLM. Ten
 
 ## E — énergie et TensorRT-LLM (pièces 10-11)
 11. TRT-LLM : import complet + run minimal sous carte.sh (poste3, trou avec carte) ; cellules b=1/b=12/prefill.
-12. J/jeton 4 moteurs (banc-4moteurs.py, NVML, ≥ 20 s, protocole Vibe Q2.5 à recevoir) ; colonne J/jeton du README à remettre.
+12. J/jeton 4 moteurs (banc-4moteurs.py) selon verdict 2.5 : J net = ∫(P − P_repos), ≥ 6 fenêtres ≥ 20 s alternées, rejet charge > 5 % / sd > 10 % / throttle actif, horloge médiane par fenêtre écart ≤ 3 %, en-tête TSV ; colonne J/jeton du README à remettre.
 
 ## F — modularisation (4 bis, à sec)
 13. model.py 2-5 : deepstack, attention, couches, moe (2-3 en stash poste1 ; moe touche 4 tests carte → rejeu poste2).
