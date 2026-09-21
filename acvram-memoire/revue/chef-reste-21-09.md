@@ -13,7 +13,7 @@ Objectif : plus rapide et moins de joules que llama.cpp, vLLM, TensorRT-LLM. Ten
 6. Cellule b=12 finale ≥ 1 596 ou écart nommé comme résultat.
 
 ## C — 30B-VL (défaut de conversion, pas du moteur)
-7. Reconvertir Qwen3-VL-30B sous carte.sh, contrôler `plan.tiers[].weight_format` = nvfp4, rejouer P3 (4) puis (3) (poste2, ≈ 15 min). Prédit : TTFT ≤ 0,3 s, J ≤ 60, haut_2se ≤ 3 % ; sinon plafond de la source AWQ sur la fiche.
+7. ~~Reconversion~~ FAITE (3b785f52) : P3 (4) TTFT 0,114 s / J 41,1 tenus ; P3 (3) RÉFUTÉ 26,1 % — **calibration AWQ jamais collectée** (experts_sans_stats 18 432/18 432, cli.py:654 « 0 tenseurs », setStorage en échec) → **7 bis (poste1, première pièce à la remise)** : quant/collect.py doit voir les experts groupés du hub ≥ 5 (même scission que 3b785f52 côté collecte, ou crochets sur le module fusionné) + test « 0 expert sans stats sur un MoE hub ≥ 5 » ; puis reconversion et P3 (3) rejoué (poste2).
 8. Fiche alias 30B-VL mise à jour ; --decoder parc (pièce 6) après.
 
 ## D — 31B 4sur6 (qualité nvfp4)
