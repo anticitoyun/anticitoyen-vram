@@ -1,5 +1,7 @@
 # anticitoyen VRAM/RAM (`acvram`)
 
+> Soutenir : [buymeacoffee.com/anticitoyen](https://buymeacoffee.com/anticitoyen)
+
 Une passerelle d'inférence compatible avec l'API OpenAI, qui traite la mémoire
 comme une hiérarchie et donne à chaque GPU le format numérique que son silicium
 sait le mieux lire.
@@ -279,6 +281,11 @@ un modèle chargé en régime dégradé le dit et n'entre pas dans un duel.
 640 tests (`pytest -q`, une minute sur processeur ; les tests GPU ne tournent
 que sous `carte.sh`). Suivi du travail : `acvram-memoire/` (règles, annuaire,
 carnets, revue de 180 notes).
+
+## Soutenir
+
+Le développement d'acvram est mené sur du matériel personnel. Si le projet vous
+est utile : **Soutenir : [buymeacoffee.com/anticitoyen](https://buymeacoffee.com/anticitoyen)**.
 
 ## Licence
 

@@ -431,6 +431,7 @@ class Fenetre(Adw.ApplicationWindow):
         menu.append("Arrêter le moteur actif", "win.arreter")
         menu.append("Libérer la VRAM", "win.liberer")
         menu.append("Copier la commande", "win.copier")
+        menu.append("Soutenir : buymeacoffee.com/anticitoyen", "win.soutenir")
         b_menu = Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu)
         entete.pack_end(b_menu)
 
@@ -561,6 +562,7 @@ class Fenetre(Adw.ApplicationWindow):
 
         for nom, fn in [("journal", self.voir_journal), ("arreter", self.arreter_moteur),
                         ("liberer", self.liberer_vram), ("copier", self.copier_commande),
+                        ("soutenir", lambda: Gtk.show_uri(self, "https://buymeacoffee.com/anticitoyen", Gdk.CURRENT_TIME)),
                         ("banc_outils", lambda: self.banc("outils")),
                         ("banc_refus", lambda: self.banc("refus"))]:
             a = Gio.SimpleAction.new(nom, None)

@@ -982,10 +982,12 @@ def cmd_eco(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="acvram",
-        description="anticitoyen VRAM/RAM — inference etagee, quantifiee par GPU",
+        description="anticitoyen VRAM/RAM — inference etagee, quantifiee par GPU\n"
+                    "Soutenir : buymeacoffee.com/anticitoyen",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__)
-    p.add_argument("--version", action="version", version=f"acvram {__version__}")
+    p.add_argument("--version", action="version",
+                   version=f"acvram {__version__}\nSoutenir : buymeacoffee.com/anticitoyen")
     sub = p.add_subparsers(dest="command", required=True)
 
     d = sub.add_parser("detect", help="rapporte le materiel local")
