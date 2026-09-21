@@ -119,6 +119,8 @@ def _monter(converted, dossier: str, vision: bool, n_img: int = N_IMG):
     if vision:
         TourVision.depuis_dossier = classmethod(
             lambda cls, path, man, dev: cls(lambda pv: torch.zeros(1, n_img, h), dev, nom="factice"))
+    if vision:   # famille du masque des plages image (20/09, masque par famille) : le jouet Llama n en a pas
+        loaded.spec.raw = {**(getattr(loaded.spec, "raw", None) or {}), "architectures": ["Gemma4ForConditionalGeneration"]}
     try:
         engine = Engine(loaded, tokenizer, max_batch_size=4, max_model_len=256)
     finally:

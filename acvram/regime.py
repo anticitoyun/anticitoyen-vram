@@ -388,6 +388,12 @@ def declarer_modele_charge(manifest: Optional[dict]) -> None:
     Qwen3-VL) ; absent ou « non » : pas de mot."""
     global _VISION_CHARGEE
     _VISION_CHARGEE = None if manifest is None else str(manifest.get("vision", "non"))
+    if _VISION_CHARGEE != "oui":                          # pas de tour pour ce modèle : la précédente ne survit pas
+        try:
+            from .engine.vision import oublier_la_tour
+            oublier_la_tour()
+        except Exception:                                 # noqa: BLE001
+            pass
     declarer_deepstack(_deepstack_du_manifeste(manifest))
     declarer_mrope(_mrope_du_manifeste(manifest))
 
