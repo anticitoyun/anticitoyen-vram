@@ -1,0 +1,11 @@
+# fixture usage
+acvram-coder-agent-30b	inconnu	non mesuré	non mesuré	code
+acvram-mistral-safe-long	faible	120*	★★★	≈Fable · usage général
+acvram-story-writer-13b	moyen	90*	★★	récit
+acvram-rp-erp-13b	élevé	80*	★★	rp adulte
+acvram-r1-math-32b	inconnu	60*	★★★	raisonnement
+acvram-translate-7b	faible	150*	★★	traduction
+acvram-rag-summary-7b	faible	140*	★★	rag
+llamacpp-gemma-vision	moyen	70*	★★★	vision langage
+acvram-heretic-uncensored-7b	élevé	100*	★★	sans filtre
+acvram-hardcore-porn-7b	élevé	85*	★	adulte explicite
