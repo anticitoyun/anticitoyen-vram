@@ -289,11 +289,51 @@ def test_la_capture_des_graphes_vient_apres_le_clamp_et_a_sa_taille(converted, m
         journal.append(("chauffe", len(prompt_ids) + 2, eng.graphs))
         return vrai(prompt_ids, params, images=images)
     monkeypatch.setattr(eng, "generate", faux)
-    tenu, captures = eng.demarrer_service(warm_max_len=32)
+    tenu, captures = eng.demarrer_service(warm_max_len=32, pas_confirmation=8)
     assert tenu == 40 and eng.max_model_len == 40 and faux_graphes.max_model_len == 40
-    assert all(g is None for (_, _, g) in [j for j in journal if j[0] == "chauffe"]), "graphes visibles pendant la chauffe"
-    assert eng.graphs is faux_graphes and not [j for j in journal if j[0] == "run"], journal
-    assert " ctx_tenu=40(demandé 64) " in eng.regime_ligne() + " "
+    passes = [(L, g) for (k, L, g) in journal if k == "chauffe"]
+    assert all(g is None for _, g in passes[:-1]), "graphes visibles pendant la dichotomie"
+    assert passes[-1] == (40, faux_graphes), "la confirmation se fait AU TENU, graphes actifs, après la capture"
+    assert eng.graphs is faux_graphes and " ctx_tenu=40(demandé 64) " in eng.regime_ligne() + " "
+
+
+def test_la_confirmation_avec_graphes_baisse_le_tenu_de_deux_pas_puis_charge(converted, monkeypatch):
+    """chef 21/09 : des graphes qui « coûtent » 2 pas (OOM avec graphes au-dessus de tenu − 16, pas 8) ⇒
+    confirmation échouée deux fois, recapture à chaque baisse, tenu final = 40 − 16 = 24, chargement réussi ;
+    des graphes qui coûtent 3 pas ⇒ refus nommé."""
+    import torch
+    import pytest
+    from types import SimpleNamespace
+    from acvram.engine import runner
+    monkeypatch.delenv("ACVRAM_CHAUFFE_CTX", raising=False)
+    monkeypatch.setattr(runner, "CTX_TENU_MIN", 8)
+
+    def moteur(cout_pas: int):
+        eng = _engine_cpu(converted)
+        faux_graphes = SimpleNamespace(max_model_len=64, captures=0, run=lambda batch: None)
+        eng.graphs = faux_graphes
+        vrai = eng.generate
+        recaptures = []
+
+        def faux(prompt_ids, params, images=None):
+            L = len(prompt_ids) + 2
+            if L > 40 or (eng.graphs is not None and L > 40 - 8 * cout_pas):
+                raise torch.OutOfMemoryError("CUDA out of memory (simulé)")
+            return vrai(prompt_ids, params, images=images)
+
+        def recapturer(warm_max_len):
+            recaptures.append(eng.max_model_len); faux_graphes.max_model_len = eng.max_model_len; eng.graphs = faux_graphes
+            return 0
+        monkeypatch.setattr(eng, "generate", faux); monkeypatch.setattr(eng, "_recapturer", recapturer)
+        return eng, faux_graphes, recaptures
+    eng, fg, rec = moteur(2)
+    tenu, _ = eng.demarrer_service(warm_max_len=32, pas_confirmation=8)
+    assert tenu == 24 and eng.max_model_len == 24 and fg.max_model_len == 24 and rec == [32, 24], (tenu, rec)
+    assert " ctx_tenu=24(demandé 64) " in eng.regime_ligne() + " "
+    eng3, _, rec3 = moteur(3)
+    with pytest.raises(runner.ContexteNonTenu):
+        eng3.demarrer_service(warm_max_len=32, pas_confirmation=8)
+    assert rec3 == [32, 24], "deux baisses au plus avant le refus"
 
 
 def test_chaque_pas_de_chauffe_part_d_un_allocateur_vide(converted, monkeypatch):

@@ -1987,6 +1987,30 @@ class Engine:
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
+    def _essai_de_chauffe(self, L: int, max_tokens: int = 1) -> bool:
+        """Une passe de chauffe de ``L`` jetons dans le régime courant : tenue ssi pas d OOM ET ≥ max(5 %, 64 Mio)
+        libres après elle. ``max_tokens=2`` force un pas de décodage (les graphes, s ils sont actifs, rejouent)."""
+        self._avant_essai_de_chauffe()                                   # (3) chaque pas part d un allocateur vide
+        try:
+            for _ in self.generate(self.sequence_de_chauffe(L - 2), SamplingParams(max_tokens=max_tokens, temperature=0.0)):
+                pass
+        except Exception as exc:                                         # noqa: BLE001
+            oom = isinstance(exc, getattr(torch, "OutOfMemoryError", ())) or "out of memory" in str(exc).lower() \
+                or "blocs KV" in str(exc)
+            if not oom:
+                raise
+            self._apres_oom_de_chauffe()
+            return False
+        libre, total = self._libre_apres_chauffe()
+        seuil = max(total * 5 // 100, 64 << 20)
+        self._oublier_la_chauffe()
+        if libre < seuil:                                                # (b) : tenu sans réserve = non tenu
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            return False
+        self.reserve_chauffe = (libre, seuil)
+        return True
+
     def _libre_apres_chauffe(self) -> tuple[int, int]:
         """(libre, total) octets du pilote après la passe, avant tout `empty_cache` : le réservé du prefill y est
         encore compté. Hors carte : (total, total) — la réserve ne se juge que sur carte."""
@@ -2045,27 +2069,7 @@ class Engine:
         # le contexte tenu (voir la fin).
         graphes, self.graphs = self.graphs, None
 
-        def essai(L: int) -> bool:
-            self._avant_essai_de_chauffe()                               # (3) chaque pas part d un allocateur vide
-            try:
-                for _ in self.generate(self.sequence_de_chauffe(L - 2), SamplingParams(max_tokens=1, temperature=0.0)):
-                    pass
-            except Exception as exc:                                     # noqa: BLE001
-                oom = isinstance(exc, getattr(torch, "OutOfMemoryError", ())) or "out of memory" in str(exc).lower() \
-                    or "blocs KV" in str(exc)
-                if not oom:
-                    raise
-                self._apres_oom_de_chauffe()
-                return False
-            libre, total = self._libre_apres_chauffe()
-            seuil = max(total * 5 // 100, 64 << 20)
-            self._oublier_la_chauffe()
-            if libre < seuil:                                            # (b) : tenu sans réserve = non tenu
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                return False
-            self.reserve_chauffe = (libre, seuil)
-            return True
+        essai = self._essai_de_chauffe
 
         t0 = time.time()
         tenu: Optional[int]
@@ -2099,13 +2103,41 @@ class Engine:
                   flush=True)
         return tenu
 
-    def demarrer_service(self, strict: bool = False, warm_max_len: int = 2048) -> tuple[Optional[int], int]:
-        """La séquence de chargement d un service, dans l ordre qui ne peut pas mentir : chauffe (clamp du contexte
-        au tenu, graphes masqués) PUIS capture des graphes au contexte tenu. Rend (ctx_tenu, captures).
-        Test cassant : ctx demandé > tenu ⇒ la capture voit le clampé et le chargement réussit."""
+    def _recapturer(self, warm_max_len: int) -> int:
+        """Graphes neufs au ``max_model_len`` courant (les captures précédentes sont rendues), puis capture d avance."""
+        from .graphs import GraphRunner
+        self.graphs = None
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(); torch.cuda.empty_cache()
+        gr = GraphRunner(self.model, self.max_model_len, max_batch_size=self.max_batch_size)
+        self.graphs = gr if gr.enabled else None
+        return self.warm_graphs(warm_max_len) if self.graphs is not None else 0
+
+    def demarrer_service(self, strict: bool = False, warm_max_len: int = 2048,
+                         pas_confirmation: int = 1024) -> tuple[Optional[int], int]:
+        """La séquence de chargement d un service, dans l ordre qui ne peut pas mentir (chef 21/09) :
+        plan → clamp → dichotomie SANS graphes → capture au tenu → passe de CONFIRMATION au tenu, graphes actifs
+        (la requête réelle tourne avec leurs réserves : c est le contrôle qui peut rendre faux). Confirmation
+        échouée → tenu − ``pas_confirmation``, recapture, deux fois au plus, puis refus nommé. Rend (ctx_tenu,
+        captures). Test cassant : faux graphes qui coûtent 2 pas ⇒ tenu final = tenu − 2·pas, chargement réussi."""
         tenu = self.chauffer_contexte(strict=strict)
         captures = self.warm_graphs(warm_max_len) if self.graphs is not None else 0
-        return tenu, captures
+        if tenu is None or self.graphs is None:
+            return tenu, captures
+        for baisse in range(3):
+            if self._essai_de_chauffe(int(self.max_model_len), max_tokens=2):
+                if baisse:
+                    print(f"[acvram] confirmation avec graphes : {self.ctx_tenu} tenus après {baisse} baisse(s)", flush=True)
+                self._oublier_la_chauffe()
+                return self.ctx_tenu, captures
+            nouveau = int(self.max_model_len) - pas_confirmation
+            if baisse == 2 or strict or nouveau < CTX_TENU_MIN:
+                raise ContexteNonTenu(self.ctx_demande, nouveau if baisse < 2 else int(self.max_model_len))
+            print(f"[acvram] confirmation avec graphes échouée à {self.max_model_len} : contexte {nouveau}, recapture",
+                  flush=True)
+            self.max_model_len = self.ctx_tenu = nouveau
+            captures = self._recapturer(warm_max_len)
+        return self.ctx_tenu, captures                                   # jamais atteint
 
     def _apres_oom_de_chauffe(self) -> None:
         """Après un OOM de chauffe : séquences en cours abandonnées, blocs rendus, allocateur neuf, cache CUDA vidé."""
