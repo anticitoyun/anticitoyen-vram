@@ -199,9 +199,37 @@ def controle_a(menu, racines, absents=frozenset()):
     return fautes
 
 
-def controle_b(menu, disque, absents=frozenset()):
-    """(b) les deux différences, chacune doit être vide (les alias à l'état absent/relocalisé exceptés)."""
-    return ([f"sur disque, absent du menu : {n} ({disque[n]})" for n in sorted(set(disque) - set(menu))]
+TSV_DIR = Path(os.environ.get("ACVRAM_TSV_DIR", Path.home() / "TSV"))
+
+
+@functools.lru_cache(maxsize=None)
+def alias_servis():
+    """{nom de dossier} présent en 2e colonne d'un TSV servi (acvram/gguf/vllm-chemins) —
+    dénominateur de « alias servi », distinct du nom d'alias (1re colonne, préfixé/en
+    minuscule) et de l'inventaire enrichi de poste8 (REGLES : ce dernier catalogue tout le
+    disque, celui-ci ne catalogue que ce qu'un lanceur sert réellement)."""
+    noms = set()
+    for tsv in TSV_DIR.glob("*-chemins.tsv"):
+        with open(tsv, newline="") as f:
+            for r in csv.DictReader(f, delimiter="\t", fieldnames=["alias", "chemin", "ctx", "_", "_2", "regime"]):
+                if r["chemin"]:
+                    noms.add(Path(r["chemin"]).name)
+    return frozenset(noms)
+
+
+def temoins_sans_fiche(disque, menu):
+    """Un dossier du disque absent du menu ET absent de tout TSV servi = une source brute
+    (bf16, ablation) gardée comme témoin de qualité, pas un alias servi — REGLES d'entrée
+    au menu : fiche avec verdict qualité ET pas un doublon. Absent de menu ET servi ailleurs
+    reste une vraie faute (mesuré 21/09 : 2/8 candidats l'étaient, cf. poste3-suite-21-09)."""
+    return frozenset(n for n in disque if n not in menu and n not in alias_servis())
+
+
+def controle_b(menu, disque, absents=frozenset(), temoins=frozenset()):
+    """(b) les deux différences, chacune doit être vide (les alias à l'état absent/relocalisé
+    et les témoins sans fiche exceptés)."""
+    return ([f"sur disque, absent du menu : {n} ({disque[n]})"
+             for n in sorted(set(disque) - set(menu) - temoins)]
             + [f"au menu, absent du disque : {n}" for n in sorted(set(menu) - set(disque) - absents)])
 
 
@@ -276,23 +304,26 @@ def poste():
     etats = {n: etat_alias(n, racines["models_acvram"]) for n in sorted(absents)}
     print(f"[menus] alias acvram à l'état absent/relocalisé (§ 4, exclus des contrôles) : {len(absents)} — "
           + ", ".join(f"{n}:{e}" for n, e in etats.items()))
-    return racines, lignes, menu, usages, disque, tailles, absents
+    temoins = temoins_sans_fiche(disque, menu)
+    if temoins:
+        print(f"[menus] témoins sans fiche verdict (hors menu, exclus de (b)) : {len(temoins)} — {sorted(temoins)}")
+    return racines, lignes, menu, usages, disque, tailles, absents, temoins
 
 
 def test_a_chaque_entree_existe_sous_sa_racine_et_son_manifeste_se_lit(poste):
-    racines, _, menu, _, _, _, absents = poste
+    racines, _, menu, _, _, _, absents, _ = poste
     fautes = controle_a(menu, racines, absents=absents)
     assert not fautes, f"{len(fautes)} entrée(s) :\n  " + "\n  ".join(fautes)
 
 
 def test_b_disque_et_menu_dans_les_deux_sens(poste):
-    _, _, menu, _, disque, _, absents = poste
-    fautes = controle_b(menu, disque, absents=absents)
+    _, _, menu, _, disque, _, absents, temoins = poste
+    fautes = controle_b(menu, disque, absents=absents, temoins=temoins)
     assert not fautes, f"{len(fautes)} écart(s) :\n  " + "\n  ".join(fautes)
 
 
 def test_c_taille_et_format_suivent_du_et_le_manifeste(poste):
-    racines, _, menu, _, _, tailles, _ = poste
+    racines, _, menu, _, _, tailles, _, _ = poste
     fautes = controle_c(menu, racines, tailles)
     assert not fautes, f"{len(fautes)} écart(s) :\n  " + "\n  ".join(fautes)
     sans_taille = [n for n, (t, r, _) in menu.items() if t is None and not (racines[r] / n).is_symlink()]
@@ -300,7 +331,7 @@ def test_c_taille_et_format_suivent_du_et_le_manifeste(poste):
 
 
 def test_le_menu_par_usage_est_un_sous_ensemble_du_menu_par_moteur(poste):
-    _, _, menu, usages, _, _, _ = poste
+    _, _, menu, usages, _, _, _, _ = poste
     inconnus = sorted(set(usages) - set(menu))
     assert not inconnus, f"au menu par usage, absents du menu par moteur : {inconnus}"
     tailles = [(n, usages[n][0], menu[n][0]) for n in usages
@@ -311,9 +342,9 @@ def test_le_menu_par_usage_est_un_sous_ensemble_du_menu_par_moteur(poste):
 def test_l_inventaire_tsv_suit_le_disque(poste):
     """Le TSV est une photo à la main : il doit dire ce que le disque dit,
     sinon on le retire."""
-    racines, lignes, _, _, disque, tailles, absents = poste
+    racines, lignes, _, _, disque, tailles, absents, temoins = poste
     tsv = {r["Modèle"]: r for r in lignes}
-    fautes = controle_b(tsv, disque, absents=absents)
+    fautes = controle_b(tsv, disque, absents=absents, temoins=temoins)
     for nom, r in tsv.items():
         if nom in disque and Path(r["Chemin"]) != disque[nom]:
             fautes.append(f"{nom} : TSV {r['Chemin']}, disque {disque[nom]}")
@@ -434,7 +465,7 @@ def test_e_le_tsv_enrichi_suit_les_fichiers(poste, enrichi_brut):
     manque. La première version (24feac3) disait vision=yes sur 42 modèles
     sans vision_config (Qwen3-Coder, GLM, Llama…) et tools=no sur 31 dont le
     gabarit contient « tools » : aucun test ne lisait la source."""
-    _, lignes, _, _, _, _, absents = poste
+    _, lignes, _, _, _, _, absents, _ = poste
     par_nom = {r["Modèle"]: r for r in lignes}
     enr = _enrichir()
     fautes = []
@@ -453,7 +484,7 @@ def test_e_le_tsv_enrichi_suit_les_fichiers(poste, enrichi_brut):
 
 
 def test_g_le_tsv_enrichi_couvre_exactement_l_inventaire(poste, enrichi_brut):
-    _, lignes, _, _, _, _, _ = poste
+    _, lignes, _, _, _, _, _, _ = poste
     a, b = {r["Modèle"] for r in lignes}, {r["model"] for r in enrichi_brut}
     assert a == b, (sorted(a - b), sorted(b - a))
 
@@ -489,7 +520,7 @@ def test_h_une_valeur_fabriquee_dans_le_tsv_casse_e(poste, enrichi_brut):
     """(h) Le contrôle (e) doit dire « faux » : une ligne du TSV modifiée sur
     chaque colonne (vision inversée, tools inversé, bpw inventé, model_type
     inventé) est vue, et seule elle."""
-    _, lignes, _, _, _, _, absents = poste
+    _, lignes, _, _, _, _, absents, _ = poste
     par_nom = {r["Modèle"]: r for r in lignes}
     enr = _enrichir()
     r = next(x for x in enrichi_brut if x["format"] == "NVFP4_acvram" and x["model"] not in absents)   # un alias présent
