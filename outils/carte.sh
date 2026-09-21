@@ -130,6 +130,22 @@ fi
 export ACVRAM_CARTE_TENUE=$$
 exec 9>"$VERROU" || { echo "carte.sh : $VERROU inaccessible" >&2; exit 65; }
 if ! flock -n 9; then
+  # REFUS MUTUEL NOMME service <-> mesure. Un service permanent ne rend jamais
+  # le verrou de lui-meme : une mesure qui l'attendrait perdrait ses 30 min pour
+  # rien, et un service qui attendrait une mesure bloquerait un serveur. Quand
+  # les deux natures s'opposent, on refuse TOUT DE SUITE en nommant le detenteur
+  # (code 4), au lieu d'entrer dans l'attente. Deux prises de meme nature, ou un
+  # reglage d'etat, attendent normalement : c'est ce que le verrou serialise.
+  _dp=""; _dt=""
+  [ -r "$INFO" ] && read -r _dp _ _dn _dt < "$INFO" 2>/dev/null
+  if [ -n "${_dp:-}" ] && kill -0 "$_dp" 2>/dev/null \
+     && { { [ "$TYPE" = service ] && [ "$_dt" = mesure ]; } \
+       || { [ "$TYPE" = mesure ] && [ "$_dt" = service ]; }; }; then
+    echo "carte.sh : REFUS — prise '$TYPE' demandee, carte tenue par $(qui_tient)." >&2
+    echo "  Un service et une mesure ne partagent pas la carte et n'attendent" >&2
+    echo "  pas l'un l'autre. Arretez le detenteur (PID $_dp) ou changez de carte." >&2
+    exit 4
+  fi
   echo "carte occupee par $(qui_tient) — attente (max ${ATTENTE} s)" >&2
   debut=$(date +%s)
   while :; do
@@ -146,6 +162,34 @@ if ! flock -n 9; then
     echo "  ... $(( $(date +%s) - debut )) s, toujours $(qui_tient)" >&2
   done
   echo "carte obtenue apres $(( $(date +%s) - debut )) s" >&2
+fi
+
+# ── MODE SERVICE : le serveur DETACHE tient le verrou lui-meme ───────────────
+# Un serveur permanent ne peut pas etre la commande synchrone d'un carte.sh : il
+# ne rend jamais la main, et l'envelopper bloquerait le lanceur. On le DETACHE
+# en lui laissant HERITER le descripteur 9 : tant qu'un processus a ce fd,
+# `flock` tient ; a la mort du dernier, il tombe tout seul. C'est l'exact oppose
+# du `9>&-` d'une mesure (plus bas). carte.sh sort aussitot ; le lanceur rend la
+# main ; le serveur vit seul, verrou compris. Une mesure ne le croira donc plus
+# libre (le trou du 21/09 : les lanceurs allouaient en `setsid nohup` sans
+# verrou). Un gardien detache — SANS le fd, pour ne pas prolonger le verrou —
+# efface le `.qui` a la mort du serveur, pour que `qui_tient()` ne mente pas.
+# Le `.qui` garde le format 4 champs `<pid> <epoch> <nom> service` (contrat lu
+# par la route /verrou et par qui_tient) : <pid> est celui du SERVEUR.
+if [ "$TYPE" = service ]; then
+  _log=${ACVRAM_SERVICE_LOG:-/tmp/acvram-service.log}
+  _jour="$VERROU.journal"
+  if [ -n "${ACVRAM_CPUS:-}" ] && command -v taskset >/dev/null; then
+    setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" taskset -c "$ACVRAM_CPUS" "$@" >> "$_log" 2>&1 < /dev/null &
+  else
+    setsid env CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" "$@" >> "$_log" 2>&1 < /dev/null &
+  fi
+  _srv=$!
+  printf '%s %s %s %s\n' "$_srv" "$(date +%s)" "$NOM" "$TYPE" > "$INFO"
+  printf '%s prise   %-8s %-32s %s (detache, verrou herite)\n' "$(date +%FT%T)" "$_srv" "$NOM" "$TYPE" >> "$_jour" 2>/dev/null || true
+  setsid sh -c 'while kill -0 '"$_srv"' 2>/dev/null; do sleep 5; done; rm -f "'"$INFO"'"; printf "%s rendue  %-8s %-32s %s (service mort)\n" "$(date +%FT%T)" "'"$_srv"'" "'"$NOM"'" "'"$TYPE"'" >> "'"$_jour"'" 2>/dev/null' 9>&- >/dev/null 2>&1 < /dev/null &
+  echo "$_srv"                                   # le lanceur lit le PID du serveur
+  exit 0
 fi
 printf '%s %s %s %s\n' "$$" "$(date +%s)" "$NOM" "$TYPE" > "$INFO"
 
