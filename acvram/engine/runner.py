@@ -28,6 +28,7 @@ import torch
 
 from ..memory.kvcache import BLOCK_SIZE, BlockAllocator
 from .contexte import CTX_TENU_MIN, ChauffeContexte, ContexteNonTenu, _ctx_texte   # noqa: F401  (4 bis : réexport)
+from .graphes import GraphesMoteur
 from .loader import LoadedModel
 from .model import _DUMP_MOE, ForwardBatch
 from .sampler import sampler_texte, SamplingParams, besoin_historique, sample
@@ -426,7 +427,7 @@ def _eco_texte(e: dict) -> str:
     return f"eco={e['demande']}({eff})" if e.get("conforme") else f"eco={e['demande']}({eff}: {e.get('etat')})"
 
 
-class Engine(ChauffeContexte):
+class Engine(ChauffeContexte, GraphesMoteur):
     """Détient le modèle, l'allocateur de blocs et les files de requêtes."""
 
     def __init__(self, loaded: LoadedModel, tokenizer: Any = None,
@@ -1817,26 +1818,6 @@ class Engine(ChauffeContexte):
             prompt_tokens=len(seq.prompt_ids),
             completion_tokens=len(seq.output_ids))
 
-    def _sonde_eager(self, batch: ForwardBatch) -> None:
-        """ACVRAM_TRACE_ENTREES=1 : le pendant eager de graphs._sonde_entrees —
-        jetons, positions, seq_lens et le plongement que le modèle va calculer."""
-        if not os.environ.get("ACVRAM_TRACE_ENTREES"):
-            return
-        torch.cuda.synchronize()
-        n = min(4, batch.batch_size)
-        m = self.model
-        idx = batch.tokens[:n]
-        if torch.is_tensor(idx):
-            idx = idx.to(m.embed_tokens.device)
-        else:
-            idx = torch.tensor(list(idx), device=m.embed_tokens.device)
-        x = torch.nn.functional.embedding(idx, m.embed_tokens).to(m.dtype)
-        if m.spec.embedding_multiplier != 1.0:
-            x = x * m.spec.embedding_multiplier
-        print(f"[ENTREES-EAGER] jetons={idx.tolist()} positions={batch.positions[:n].tolist()} "
-              f"seq_lens={list(batch.seq_lens[:n])} | x[:4]={[[round(v, 5) for v in r] for r in x[:, :4].float().tolist()]}",
-              flush=True)
-
     def _sample_only(self, logits: torch.Tensor,
                      seqs: list[Sequence]) -> tuple[torch.Tensor, torch.Tensor]:
         """La moitié de `_emit` qui reste SUR DEVICE — aucun `.tolist()`/
@@ -1957,32 +1938,6 @@ class Engine(ChauffeContexte):
                     yield out
             if not self.running and not self.waiting:
                 break
-
-    def warm_graphs(self, max_len: int = 2048) -> int:
-        """Capture d'avance les graphes de décodage des godets jusqu'à
-        ``max_len`` jetons : une capture coûte 40 à 130 ms, mieux vaut la
-        payer au démarrage qu'au milieu d'une réponse. Rend le nombre de
-        captures faites."""
-        if self.graphs is None:
-            return 0
-        avant = self.graphs.captures
-        L = 128
-        while L <= min(max_len, self.max_model_len - 4):
-            # longueur choisie pour que prefill + 2 jetons restent dans le
-            # godet de L/16 blocs (puissance de deux)
-            for _ in self.generate([1] * (L - 2), SamplingParams(max_tokens=2,
-                                                                 temperature=0.0)):
-                pass
-            if (self.est_hybride and self.speculator is not None
-                    and os.environ.get("ACVRAM_WARM_SPEC", "1") != "0"):
-                # motif répété : le proposeur n-gramme spécule dès le
-                # premier pas, d'où la capture du graphe de forme k+1
-                ids = ([5, 6, 7, 8] * (L // 4))[:L - 2]
-                for _ in self.generate(ids, SamplingParams(max_tokens=self.spec_k + 2,
-                                                           temperature=0.0)):
-                    pass
-            L *= 2
-        return self.graphs.captures - avant
 
     @property
     def idle(self) -> bool:
