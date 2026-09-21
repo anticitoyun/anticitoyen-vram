@@ -208,7 +208,7 @@ class Modele(GObject.Object):
     __gtype_name__ = "ClaudeModele"
 
     def __init__(self, alias, provider, nom, ctx, refus, tps, qual, usage,
-                 dossier="", ctx_service=0, gabarit="", capacites=()):
+                 dossier="", ctx_service=0, gabarit="", capacites=(), vision_status=""):
         super().__init__()
         self.alias = alias
         self.provider = provider
@@ -222,6 +222,7 @@ class Modele(GObject.Object):
         self.ctx_service = int(ctx_service or 0)
         self.gabarit = gabarit
         self.capacites = tuple(capacites or ())
+        self.vision_status = vision_status          # "vision", "texte-seul" ou ""
         self.charge = False
         self.taille = None                          # calculée à la demande
 
@@ -265,7 +266,9 @@ class Modele(GObject.Object):
     def texte_recherche(self):
         # synonymes lisibles des capacités techniques (image_in → « vision »…)
         lisibles = []
-        if "image_in" in self.capacites or "vision" in self.capacites:
+        # Le VISION_TSV (modeles-a-jour) dit si le moteur sert réellement des images
+        # Un VL converti « texte-seul » a image_in mais ne doit pas sortir sur « vision »
+        if self.vision_status == "vision":
             lisibles += ["vision", "voit images"]
         if "video_in" in self.capacites:
             lisibles += ["voit vidéos"]
@@ -344,7 +347,7 @@ def charger_parc():
             ctx_service = 65536          # défaut de llamacpp-appoint, jamais surchargé
         parc.append(Modele(alias, p, m.get("model", "?"), m.get("max_context_size", 0),
                            n[0], n[1], n[2], n[3], dossier, ctx_service, gab,
-                           m.get("capabilities", [])))
+                           m.get("capabilities", []), vs))
     parc.sort(key=lambda x: (ORDRE_MOTEUR.get(x.provider, 9), x.alias))
     # S1/S3 (poste7-menus-cloture-19-09) : le compte est le contrôle, pas la lecture
     print(f"parc : {len(parc)} modèles, {len(sans_fiche)} alias sans fiche, "
