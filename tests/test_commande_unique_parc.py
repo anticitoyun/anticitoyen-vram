@@ -10,16 +10,16 @@ import pytest
 
 RACINE = Path(__file__).resolve().parents[1]
 PARC = RACINE / "parc"
-FAUX_EXEC = "#!/bin/bash\nprintf 'commande :'; printf ' %q' \"$@\"; printf '\\n'\n"   # ce que l'exec reçoit, même format
+FAUX_EXEC = "#!/bin/bash\nprintf 'recu :'; printf ' %q' \"$@\"; printf '\\n'\n"   # ce que l'exec reçoit, même format %q
 
 
 def _exe(chemin: Path, corps: str) -> Path:
     chemin.write_text(corps); chemin.chmod(chemin.stat().st_mode | stat.S_IEXEC); return chemin
 
 
-def _ligne(sortie: str) -> str:
-    lignes = [l for l in sortie.splitlines() if l.startswith("commande :")]
-    assert len(lignes) == 1, sortie[-800:]
+def _ligne(sortie: str, prefixe: str = "commande :") -> str:
+    lignes = [l[len(prefixe):] for l in sortie.splitlines() if l.startswith(prefixe)]
+    assert len(lignes) == 1, (prefixe, sortie[-800:])
     return lignes[0]
 
 
@@ -42,7 +42,7 @@ def test_acvram_serveur_imprime_ce_qu_il_execute(tmp_path, faux):
     recu = subprocess.run(["bash", str(PARC / "bin" / "acvram-serveur"), str(dossier)], capture_output=True, text=True,
                           env={**env, "ACVRAM_EXEC": str(faux / "faux-exec")}, timeout=30)
     assert a_sec.returncode == 0 and recu.returncode == 0, a_sec.stderr + recu.stderr
-    imprimee, recue = _ligne(a_sec.stdout), _ligne(recu.stdout)
+    imprimee, recue = _ligne(a_sec.stdout), _ligne(recu.stdout, "recu :")
     assert imprimee == recue, (imprimee, recue)
     assert "--speculative mtp" in recue and "--no-cuda-graphs" in recue and "--max-model-len 4096" in recue
 
@@ -65,6 +65,6 @@ def test_claude_modele_imprime_ce_qu_il_execute_pour_les_quatre_moteurs(tmp_path
     recu = subprocess.run(["bash", str(PARC / "bin" / "claude-modele"), alias, "--verbose"],
                           capture_output=True, text=True, env={**env, "PARC_EXEC": str(faux / "faux-exec")}, timeout=60)
     assert affiche.returncode == 0 and recu.returncode == 0, affiche.stderr[-600:] + recu.stderr[-600:]
-    imprimee, recue = _ligne(affiche.stdout), _ligne(recu.stdout)
+    imprimee, recue = _ligne(affiche.stdout), _ligne(recu.stdout, "recu :")
     assert imprimee == recue, (imprimee, recue)
     assert imprimee.endswith(" --verbose") and "--mcp-config" in imprimee
