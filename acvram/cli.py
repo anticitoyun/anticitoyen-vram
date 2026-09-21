@@ -1225,6 +1225,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(red(f"{type(exc).__name__}: {exc}"), file=sys.stderr)
         if os.environ.get("ACVRAM_TRACEBACK"):
             raise
+        if getattr(args, "func", None) is cmd_serve:
+            # un serveur qui meurt au chargement n a que son journal pour le dire : `str(e)` seul y laissait
+            # « size of tensor a (256) must match b (257) » sans site (P3 (4) 30B, poste2 21/09) — la pile s imprime
+            import traceback
+            traceback.print_exc(file=sys.stderr)
         return 1
 
 
