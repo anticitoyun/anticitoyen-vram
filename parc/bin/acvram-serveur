@@ -64,12 +64,20 @@ else
     SOURCE="paquet($("$ACVRAM_BIN" --version 2>/dev/null | awk '{print $NF}'))"
 fi
 echo "acvram : source=$SOURCE"
-[ "${ACVRAM_SERVEUR_A_SEC:-0}" = 1 ] && { echo "à sec : $ACVRAM_BIN serve $dossier --port $PORT --served-name $alias_nom --max-model-len $CTX"; exit 0; }
-setsid nohup "$ACVRAM_BIN" serve "$dossier" --port "$PORT" \
-    --served-name "$alias_nom" --max-model-len "$CTX" \
-    --speculative "${SPECULATIF:-ngram}" \
-    ${GRAPHES:+--no-cuda-graphs} \
-    >> /tmp/acvram-serveur.log 2>&1 < /dev/null &
+# UN SEUL constructeur : la ligne imprimée est, octet pour octet, celle que l'exec reçoit
+# (poste7 21/09 : l'ancien « à sec » omettait --speculative et --no-cuda-graphs). Test :
+# ACVRAM_EXEC=<programme> reçoit le tableau au premier plan à la place de setsid nohup.
+commande_serve() {
+    CMD=("$ACVRAM_BIN" serve "$dossier" --port "$PORT" --served-name "$alias_nom" --max-model-len "$CTX"
+         --speculative "${SPECULATIF:-ngram}")
+    [ -n "${GRAPHES:-}" ] && CMD+=(--no-cuda-graphs)
+    return 0
+}
+commande_serve
+printf 'commande :'; printf ' %q' "${CMD[@]}"; printf '\n'
+[ "${ACVRAM_SERVEUR_A_SEC:-0}" = 1 ] && exit 0
+if [ -n "${ACVRAM_EXEC:-}" ]; then exec "$ACVRAM_EXEC" "${CMD[@]}"; fi
+setsid nohup "${CMD[@]}" >> /tmp/acvram-serveur.log 2>&1 < /dev/null &
 
 for _ in $(seq 1 120); do
     curl -s -m 2 "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1 \
