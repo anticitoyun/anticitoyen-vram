@@ -68,3 +68,55 @@ def test_comfyui_verrou_refuse_spawn(tmp_path):
         assert rc == 0 and result["spawns"] == [] and any("verrou acvram" in t for t in result.get("toasts", []))
     finally:
         verrou_path.unlink(missing_ok=True)
+
+
+def _parc_fixture(tmp_path):
+    """Parc minimal : moteur acvram present, 4 modeles dont 2 SERVENT des images
+    (vision_status=vision) — l'un porte « Vision » dans son NOM — et 1 converti
+    texte-seul dont l'ALIAS contient « vision » (le piege que le substring ramenait
+    a tort). Rend (parc.toml, nb_vision_attendu)."""
+    kimi = tmp_path / "kimi"; kimi.mkdir()
+    tsv = tmp_path / "tsv"; tsv.mkdir()
+    (kimi / "config.toml").write_text(
+        '[models.acvram-alpha-vision]\nprovider="acvram"\nmodel="Alpha"\n'
+        '[models.acvram-beta]\nprovider="acvram"\nmodel="Beta-Vision-8B"\n'
+        '[models.acvram-gamma-vision]\nprovider="acvram"\nmodel="Gamma"\n'
+        '[models.acvram-delta]\nprovider="acvram"\nmodel="Delta"\n')
+    (tsv / "vision-modeles.tsv").write_text(
+        "acvram-alpha-vision\tvision\n"
+        "acvram-beta\tvision\n"
+        "acvram-gamma-vision\ttexte-seul\n")
+    parc = tmp_path / "parc.toml"
+    parc.write_text(f'[chemins]\nkimi_dir="{kimi}"\ntsv_dir="{tsv}"\n[moteurs.acvram]\npresent=true\n')
+    return parc, 2
+
+
+def test_filtre_vision_egale_les_alias_vision_du_tsv(tmp_path):
+    """Decision chef (a), 21/09 : « vision » ne sort QUE les modeles qui
+    servent des images (vision_status), pas ceux qui portent le mot dans leur
+    alias ou leur nom. Cassant : avant, le substring ramenait aussi le converti
+    texte-seul acvram-gamma-vision → 3 au lieu de 2."""
+    parc, attendu = _parc_fixture(tmp_path)
+    env = {**os.environ, "ACVRAM_GUI_TEST": "filtre:vision", "ACVRAM_PARC_CONFIG": str(parc),
+           "CUDA_VISIBLE_DEVICES": "", "PYTHONPATH": os.path.join(ICI, "parc", "lib")}
+    env.pop("XDG_CONFIG_HOME", None)
+    r = subprocess.run(["xvfb-run", "-a", PY, GUI], capture_output=True, text=True, env=env, timeout=120)
+    lignes = [l for l in r.stdout.splitlines() if l.startswith("GUI_TEST ")]
+    assert len(lignes) == 1, r.stdout[-500:] + r.stderr[-500:]
+    result = json.loads(lignes[0][len("GUI_TEST "):])
+    assert result["visibles"] == attendu == 2, result
+    assert result["total"] == 4, result
+
+
+def test_les_deux_gui_ont_le_filtre_vision_semantique():
+    """La correction (a) doit vivre dans les DEUX menus : claude-modeles et
+    kimi-modeles partagent le code de filtre (aux 4 zones divergentes pres).
+    On verifie le predicat semantique dans les deux, et qu'aucun ne remet
+    « vision » parmi les synonymes cherches en substring. (kimi-modeles ne
+    demarre pas encore sous Xvfb — defaut prealable signale a part —, ce controle
+    de source garantit malgre tout la parite du filtre.)"""
+    import pathlib
+    for nom in ("claude-modeles", "kimi-modeles"):
+        src = pathlib.Path(ICI, "parc", "bin", nom).read_text()
+        assert 'if m.vision_status != "vision"' in src, f"{nom} : predicat vision absent"
+        assert 'lisibles += ["vision"' not in src, f"{nom} : « vision » encore en substring"
