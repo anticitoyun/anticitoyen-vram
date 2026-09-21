@@ -27,6 +27,9 @@ def _blocs_de_code(texte: str) -> list[str]:
     return re.findall(r"```.*?```", texte, re.S)
 
 
+LOGO = '<p align="center"><img src="logo-acvram.png" alt="acvram" width="420"></p>'
+
+
 def _titres(texte: str) -> int:
     return sum(1 for l in texte.splitlines() if re.match(r"^#{1,6} ", l))
 
@@ -59,7 +62,10 @@ def test_chaque_traduction_existe_et_garde_la_structure_du_readme():
         assert p.exists(), f"docs/README.{code}.md absent"
         t = p.read_text(encoding="utf-8")
         assert SOUTIEN in t, f"{code} : lien de soutien absent"
-        assert t.splitlines()[0].startswith("#"), f"{code} : pas de titre en tête"
+        # 21/09 utilisateur : le logo officiel ouvre chaque README, centré, AVANT le titre.
+        lignes = t.splitlines()
+        assert lignes[0] == LOGO, f"{code} : logo officiel absent ou différent en tête"
+        assert lignes[2].startswith("#"), f"{code} : pas de titre sous le logo"
         assert any(l.startswith("🌐") and "README.md" in l for l in t.splitlines()[:8]), f"{code} : barre de langues (retour vers README.md) absente en tête"
         assert _blocs_de_code(t) == blocs, f"{code} : blocs de code modifiés ou manquants (ils ne se traduisent pas)"
         assert _titres(t) == titres, f"{code} : nombre de titres {_titres(t)} ≠ {titres}"
