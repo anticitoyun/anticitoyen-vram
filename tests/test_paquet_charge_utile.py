@@ -136,3 +136,14 @@ def test_le_lanceur_epingle_transformers_a_la_version_du_moteur():
     assert not tete, f"import de transformers en tête de vision.py : {tete}"
     assert any("import transformers" in l and l.startswith("            ") for l in src), \
         "l'import de transformers doit vivre dans TourVision.depuis_dossier (tour demandée)"
+
+
+def test_le_deb_contient_les_sources_marlin_port():
+    """Les noyaux marlin_port (acvram/kernels/marlin_port/bindings.cpp et
+    dépendances) doivent être inclus dans le .deb — sinon un alias acvram-coder-i8c
+    servira sans les sources compilées de son runtime."""
+    files = list(_contenu())
+    marlin_bindings = [f for f in files if "marlin_port" in f and "bindings.cpp" in f]
+    assert marlin_bindings, (
+        "kernels/marlin_port/bindings.cpp manquant du .deb — "
+        "vérifier pyproject.toml:package-data inclut kernels/**/*.cpp")

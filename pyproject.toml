@@ -41,7 +41,7 @@ acvram = "acvram.cli:main"
 include = ["acvram*"]
 
 [tool.setuptools.package-data]
-acvram = ["kernels/*.cu", "kernels/*.cuh", "kernels/*.cpp", "config/*.yaml", "data/*.txt"]
+acvram = ["kernels/**/*.cu", "kernels/**/*.cuh", "kernels/**/*.cpp", "kernels/**/*.h", "config/*.yaml", "data/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
