@@ -130,7 +130,7 @@ VARIABLES: tuple[Variable, ...] = (
              "diagnostic seulement (bissection du biais GEMV (b), poste7-p1-situ-verdict-18-09) : 1 = les deux dispositions gardées, préfill {groupe|marlin} × décodage {naturel|marlin} sur les mêmes piles ; jamais un régime servi"),
     Variable("MOE_GEMV", "v1", ("acvram.engine.model", "_MOE_GEMV"), "v1",
              "GEMV groupée du décodage MoE : v1 (une passe de poids par paire expert-jeton) | v2 (paires triées par expert, poids lus une fois pour ≤ 4 jetons, sortie identique au bit)"),
-    Variable("MULTI_PROJ", "0", ("acvram.engine.model", "_MULTI_PROJ"), "0",
+    Variable("MULTI_PROJ", "0", ("acvram.engine.attention", "_MULTI_PROJ"), "0",
              "témoin (palier 2 non ouvert, 0,88 To/s) : q/k/v et qkv/gate/α/β du GDN en un lancement, chacune avec son scaler"),
     Variable("NARROW_MIN_M", "2", ("acvram.kernels", "_NARROW_MIN")),
     Variable("NARROW_ROWS", "32", ("acvram.kernels", "_NARROW_ROWS")),
