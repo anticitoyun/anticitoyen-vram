@@ -114,7 +114,7 @@ EXEMPTES_COURRIEL = {"scratchpad/corpus-calib-c6/calib-c6-anglais-code.txt"}
 # (verifie : mon nouveau outils/ppl-decode-mma-coder30b.py utilise des
 # chemins /mnt/... hors du motif CHEMIN, donc +0). Mesure directe.
 # 15/09 (poste2) : +1 -- carnet de pause (acvram-memoire/poste2.md), une
-# commande de reprise `cd ~/...`. Mesure directe.
+# commande de reprise `cd /home/<utilisateur>/...`. Mesure directe.
 # 15/09 soir (poste2) : releve a 411 apres rebase sur main -- travail
 # d'autres sessions fusionne (PAUSE 8, correctifs GLM/collect.py
 # d'poste1, 1aj D/E, modes energie de poste3), aucun de mes propres
@@ -150,7 +150,7 @@ EXEMPTES_COURRIEL = {"scratchpad/corpus-calib-c6/calib-c6-anglais-code.txt"}
 # des journaux sous acvram-memoire/corpus/) reste a faire, hors de la portee
 # de cette passe.
 # 21/09 (poste3) : DESCEND a 2180 (-29) apres depersonnalisation des 28 scripts
-# outils/ (chemins ~… codes en dur -> ACVRAM_PY/ACVRAM_ARBRE/
+# outils/ (chemins personnels codés en dur -> ACVRAM_PY/ACVRAM_ARBRE/
 # LLAMACPP_LMSTUDIO_BIN/$HOME, racine via git rev-parse ou dirname relatif). Un
 # outil au chemin machine code en dur ne tourne pour personne d'autre ; il lit
 # maintenant son chemin dans une variable, repli relatif au depot.
