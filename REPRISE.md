@@ -1,5 +1,8 @@
 # Reprendre ce projet — note de passation
 
+> Soutenir : buymeacoffee.com/anticitoyen
+
+
 Ce fichier existe pour qu'une nouvelle session Claude, sur n'importe quelle
 machine, puisse reprendre le travail sans rien deviner. Il se lit en premier.
 

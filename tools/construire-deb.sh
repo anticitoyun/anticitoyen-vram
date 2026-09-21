@@ -215,6 +215,8 @@ Description: serveur d'inférence LLM pour GPU hétérogènes (NVFP4 + INT4)
  .
  L'environnement Python (torch inclus) s'amorce au premier lancement dans
  ~/.local/share/acvram ; le paquet lui-même reste léger.
+ .
+ Soutenir : https://buymeacoffee.com/anticitoyen
 CTRL
 
 # Éco d'horloge par défaut (poste7-eco-2700-defaut-19-09, décision utilisateur
