@@ -613,10 +613,12 @@ class Engine:
         # d'interface avec poste4). `_pipeline_pendiente` porte le résultat
         # DÉJÀ REJOUÉ mais pas encore rapatrié d'un pas antérieur :
         # {"seqs", "tokens_dev", "logprobs_dev", "event"}. None = rien en vol
-        # (au repos, ou juste après une recomposition du lot). Défaut OFF :
-        # `ACVRAM_PIPELINE=1` pour l'activer, le temps du verdict A/B.
+        # (au repos, ou juste après une recomposition du lot). Défaut ON depuis
+        # 0.6.34 (chef 21/09, verdict A/B rendu : ids identiques au bit) ;
+        # `ACVRAM_PIPELINE=0` = témoin sans recouvrement. La ligne de régime
+        # porte `pipeline=1|0`.
         self._pipeline_pendiente: Optional[dict] = None
-        self.pipeline_actif = bool(os.environ.get("ACVRAM_PIPELINE"))
+        self.pipeline_actif = os.environ.get("ACVRAM_PIPELINE", "1") not in ("0", "")
         # `evenement_jetons` de GraphRunner ne borne QUE le rejeu — enregistré
         # par `rejouer_suivant()` avant que `_sample_only` (l'argmax) soit
         # même lancé. Le synchroniser au pas suivant garantirait le rejeu,
@@ -802,6 +804,7 @@ class Engine:
                + (f"noyaux={r['noyaux']} " if r["noyaux"] else "")
                + f"kv_budget={self.allocator.num_blocks * BLOCK_SIZE}/{kv_seqs} "
                + f"kv={self.kv_format_servi()} "
+               + f"pipeline={int(bool(self.pipeline_actif and self.graphs is not None))} "   # effectif : demandé ET graphes
                + (f"kv_plan_override=1 " if r["kv_plan_override"] else "")
                + (f"llama4_scaling_beta={r['llama4_scaling_beta']}"
                   f"({'servi' if self._llama4_servi else 'non_servi'}) "
