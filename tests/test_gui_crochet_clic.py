@@ -41,3 +41,30 @@ def test_comfyui_non_configure_refuse_sans_rien_lancer(tmp_path):
 def test_filtre_sans_resultat(tmp_path):
     rc, r = jouer("filtre:zzzz-rien", tmp_path)
     assert rc == 0 and r["visibles"] == 0
+
+
+def test_comfyui_verrou_refuse_spawn(tmp_path):
+    import pathlib
+    # Config : écrire COMFY_START
+    config_dir = tmp_path / "xdg" / "acvram"
+    config_dir.mkdir(parents=True)
+    script = tmp_path / "comfyui.sh"
+    script.write_text("#!/bin/bash\necho spawn\n")
+    script.chmod(0o755)
+    (config_dir / "parc.toml").write_text(f'[extras]\ncomfy_start = "{script}"\n')
+
+    # Créer le verrou non-vide
+    verrou_path = pathlib.Path("/tmp/acvram-carte-0.lock.qui")
+    verrou_path.write_text("mesure en cours")
+
+    try:
+        env = {**os.environ, "ACVRAM_GUI_TEST": "clic:b_web", "XDG_CONFIG_HOME": str(config_dir.parent),
+               "CUDA_VISIBLE_DEVICES": "", "PYTHONPATH": os.path.join(ICI, "parc", "lib")}
+        env.pop("ACVRAM_PARC_CONFIG", None)
+        r = subprocess.run(["xvfb-run", "-a", PY, GUI], capture_output=True, text=True, env=env, timeout=120)
+        lignes = [l for l in r.stdout.splitlines() if l.startswith("GUI_TEST ")]
+        assert len(lignes) == 1, r.stdout[-500:] + r.stderr[-500:]
+        rc, result = r.returncode, json.loads(lignes[0][len("GUI_TEST "):])
+        assert rc == 0 and result["spawns"] == [] and any("verrou acvram" in t for t in result.get("toasts", []))
+    finally:
+        verrou_path.unlink(missing_ok=True)
