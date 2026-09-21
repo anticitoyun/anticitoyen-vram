@@ -154,7 +154,13 @@ EXEMPTES_COURRIEL = {"scratchpad/corpus-calib-c6/calib-c6-anglais-code.txt"}
 # LLAMACPP_LMSTUDIO_BIN/$HOME, racine via git rev-parse ou dirname relatif). Un
 # outil au chemin machine code en dur ne tourne pour personne d'autre ; il lit
 # maintenant son chemin dans une variable, repli relatif au depot.
-PLAFOND_CHEMINS = 2180  # 20/09 poste7 : corpus-prive exempte par prefixe (95, copies figees de revue) et outils/gpu/hors-verrou.log sorti de l index (69) ; avant : 2282 (chef, 450 journaux scratchpad et 40 artefacts nsys/sqlite retires)
+# 21/09 (poste3) : 2209 -> 2180 (-29) apres depersonnalisation des 28 scripts outils/
+# (chemins machine codes en dur -> ACVRAM_PY/ACVRAM_ARBRE/LLAMACPP_LMSTUDIO_BIN/$HOME,
+# racine via git rev-parse ou dirname relatif) ; puis 2180 -> 2182 (+2) apres rebase
+# sur main -- README 31 langues et registre/ETAT d'autres sessions apportent 2 chemins
+# nommes ; mes verdicts de session n'en portent aucun (verdict-depersonnalisation
+# depersonnalise : ses exemples /home/... -> /home/<utilisateur>).
+PLAFOND_CHEMINS = 2182  # 20/09 poste7 : corpus-prive exempte par prefixe (95, copies figees de revue) et outils/gpu/hors-verrou.log sorti de l index (69) ; avant : 2282 (chef, 450 journaux scratchpad et 40 artefacts nsys/sqlite retires)
 
 # Le fichier qui NOMME les chemins pour les faire disparaitre ne doit pas
 # lui-meme les compter -- meme discipline datee que EXEMPTES_SESSION.
