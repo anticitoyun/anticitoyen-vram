@@ -169,6 +169,22 @@ def test_conversion_porte_l_echelle_dans_le_manifeste(tiny_checkpoint, target_ri
     assert echelle_courante() == "4sur6", "la règle n a pas été posée sur le module pendant la conversion"
     m = json.load(open(os.path.join(tmp_path, "acvram_manifest.json")))
     assert m["options"]["echelle_nvfp4"] == "4sur6"
-    # et la conversion par défaut la remet à max6 (un alias converti ensuite ne l hérite pas)
+    # part des blocs amax/4 et clampés : au manifeste (total + par tenseur), écrite avant toute mesure
+    tot = m["echelle_nvfp4"]
+    assert tot["regle"] == "4sur6" and tot["blocs"] > 0 and 0 < tot["part_amax4"] <= 1 and 0 <= tot["part_clampes"] < 1
+    par_t = [e["echelle"] for e in m["tensors"].values() if e.get("format") == "nvfp4" and "echelle" in e]
+    assert par_t and sum(e["blocs"] for e in par_t) == tot["blocs"]
+    # contrôle indépendant : outils/part-amax4.py relit les codes stockés — même part, blocs égaux
+    import subprocess, sys
+    r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "outils", "part-amax4.py"), str(tmp_path)],
+                       capture_output=True, text=True, env={**os.environ, "CUDA_VISIBLE_DEVICES": ""})
+    assert r.returncode == 0, r.stdout + r.stderr
+    res = json.loads(r.stdout.split("RESULTAT ", 1)[1])
+    assert res["ecart_manifeste"] == {"blocs_amax4": 0, "blocs_clampes": 0, "blocs": 0} and res["part_autres"] == 0.0, res
+    # et la conversion par défaut la remet à max6 (un alias converti ensuite ne l hérite pas) ; l outil y lit 0 amax/4
     convert_checkpoint(tiny_checkpoint, plan, ConversionOptions(out_dir=str(tmp_path / "b")), spec=spec)
     assert echelle_courante() == "max6"
+    r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "outils", "part-amax4.py"), str(tmp_path / "b")],
+                       capture_output=True, text=True, env={**os.environ, "CUDA_VISIBLE_DEVICES": ""})
+    res = json.loads(r.stdout.split("RESULTAT ", 1)[1])
+    assert res["part_amax4"] == 0.0 and res["part_max6"] + res["part_nuls"] + res["part_clampes"] == pytest.approx(1.0, abs=1e-3), res
