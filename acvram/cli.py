@@ -610,6 +610,11 @@ def cmd_convert(args: argparse.Namespace) -> int:
         print(red("conversion refusee : le modele ne tient pas. "
                   "Relancez avec --force pour ecrire les fragments malgre tout."))
         return 2
+    from .quant.convert import refus_nvfp4_sans_gpu
+    refus = refus_nvfp4_sans_gpu(plan, args.out, args.format)
+    if refus:                                   # le nom ne peut plus mentir sur le format (30B « nvfp4-vision » int4_awq)
+        print(red(refus))
+        return 2
 
     # AWQ sans statistiques d'activation est inopérant : la recherche sur
     # grille n'a rien pour pondérer les canaux et se fixe sur une échelle plate.

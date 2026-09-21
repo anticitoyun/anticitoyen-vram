@@ -1238,6 +1238,26 @@ def _octets_du_checkpoint(chemin: str) -> int:
     return total
 
 
+def refus_nvfp4_sans_gpu(plan: Any, out_dir: str, format_impose: Optional[str]) -> Optional[str]:
+    """Garde (chef 21/09, `poste1-hypotheses-qvl-30b-21-09`) : un nom de sortie ou un format demandé qui dit
+    `nvfp4` alors que le plan n a AUCUN palier GPU est refusé, nommément. Sans carte visible à la conversion,
+    `memory/tiering.py:360-366` (`build_tiers`) n émet que le palier hôte et le format retombe sur `int4_awq`
+    (tiering.py:397, 514, 542) : le 30B « -nvfp4-vision » du 20/09 était un int4_awq planifié processeur —
+    TTFT 4,28 s, J ×4,4, P3 (3) 21,8 %. Rend le message de refus, None si tout va bien."""
+    tiers = list(getattr(plan, "tiers", []) or [])
+    if any(getattr(t, "kind", "") == "gpu" for t in tiers):
+        return None
+    dit_nvfp4 = "nvfp4" in os.path.basename(os.path.normpath(out_dir)).lower() or (format_impose == "nvfp4")
+    if not dit_nvfp4:
+        return None
+    formats = sorted({getattr(t, "weight_format", "?") for t in tiers}) or ["aucun palier"]
+    return (f"conversion refusée : « {os.path.basename(os.path.normpath(out_dir))} »"
+            f"{' / --format nvfp4' if format_impose == 'nvfp4' else ''} annonce nvfp4 mais le plan n a aucun palier GPU "
+            f"(paliers : {', '.join(formats)}) — sans carte visible, memory/tiering.py:360-366 build_tiers ne "
+            f"planifie que l hôte et le format retombe sur int4_awq (tiering.py:397/514/542). Convertir carte "
+            f"visible (outils/carte.sh env CUDA_VISIBLE_DEVICES=0 …) ou nommer la sortie par son vrai format.")
+
+
 def _noter_echelle_nvfp4(manifest: dict, entry: dict, qt: Any) -> None:
     """Q1 : part des blocs ayant choisi amax/4 et part des blocs clampés (amax/6 = E4M3_MAX : candidats confondus),
     par tenseur (`entry["echelle"]`) et cumulées (`manifest["echelle_nvfp4"]`) — écrit AVANT toute mesure : si le
