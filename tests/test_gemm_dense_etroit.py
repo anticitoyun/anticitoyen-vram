@@ -149,7 +149,7 @@ def test_le_gdn_projette_en_un_lancement_sous_dense_nvfp4_triton(monkeypatch):
                            dt_bias=torch.rand(NV) - 0.5, a_log=torch.rand(NV) * 3 - 2,
                            norm_weight=torch.ones(DV), num_k_heads=NK, num_v_heads=NV, head_k_dim=DK, head_v_dim=DV).to(DEV)
     x = torch.randn(12, H).to(DT).to(DEV)
-    from acvram.engine import model as MD
+    from acvram.engine import attention as MD   # `_MULTI_PROJ` vit dans attention.py (scission 21/09)
     monkeypatch.setattr(kernels, "_DENSE_NVFP4", "gemv")
     with torch.no_grad():
         y_sep, _ = couche(x, None)
