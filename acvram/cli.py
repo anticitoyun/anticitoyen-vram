@@ -432,13 +432,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"           {row['device']:<8} {row['format']:<9} -> "
               f"{' > '.join(row['backends'])}")
 
-    for mod in ("safetensors", "fastapi", "uvicorn", "tokenizers", "jinja2"):
+    # (module importe, paquet pip) : PIL s'importe ainsi mais s'installe « pillow ».
+    # transformers + pillow sont l'extra vision, inclus par defaut par install.sh
+    # et le .deb : leur absence est un ECHEC, pas une alerte (la tour de vision
+    # echoue au chargement sans eux — trou P3 du 21/09).
+    for mod, paquet in (("safetensors", "safetensors"), ("fastapi", "fastapi"),
+                        ("uvicorn", "uvicorn"), ("tokenizers", "tokenizers"),
+                        ("jinja2", "jinja2"), ("transformers", "transformers"),
+                        ("PIL", "pillow")):
         try:
             __import__(mod)
             print(f"  {green('ok')}    {mod}")
         except ImportError:
             ok = False
-            print(f"  {red('ECHEC')} {mod} est absent (pip install {mod})")
+            print(f"  {red('ECHEC')} {mod} est absent (pip install {paquet})")
 
     from .engine.gdn import gdn_available
     if gdn_available():

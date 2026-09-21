@@ -64,7 +64,9 @@ if [ "${NVCC_WHEEL:-0}" = 1 ]; then
 fi
 
 say "installation d'acvram"
-pip install --quiet -e '.[dev]'
+# extra vision inclus par defaut : transformers + pillow, indispensables a la tour
+# multimodale (sans eux, un modele vision echoue au chargement et P3 casse).
+pip install --quiet -e '.[dev,vision]'
 
 # ---- verification -----------------------------------------------------------------
 say ""
