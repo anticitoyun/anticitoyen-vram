@@ -2114,13 +2114,13 @@ class Engine:
         return self.warm_graphs(warm_max_len) if self.graphs is not None else 0
 
     def demarrer_service(self, strict: bool = False, warm_max_len: int = 2048,
-                         pas_confirmation: int = 1024) -> tuple[Optional[int], int]:
+                         pas: int = 1024, pas_confirmation: int = 1024) -> tuple[Optional[int], int]:
         """La séquence de chargement d un service, dans l ordre qui ne peut pas mentir (chef 21/09) :
         plan → clamp → dichotomie SANS graphes → capture au tenu → passe de CONFIRMATION au tenu, graphes actifs
         (la requête réelle tourne avec leurs réserves : c est le contrôle qui peut rendre faux). Confirmation
         échouée → tenu − ``pas_confirmation``, recapture, deux fois au plus, puis refus nommé. Rend (ctx_tenu,
         captures). Test cassant : faux graphes qui coûtent 2 pas ⇒ tenu final = tenu − 2·pas, chargement réussi."""
-        tenu = self.chauffer_contexte(strict=strict)
+        tenu = self.chauffer_contexte(pas=pas, strict=strict)
         captures = self.warm_graphs(warm_max_len) if self.graphs is not None else 0
         if tenu is None or self.graphs is None:
             return tenu, captures

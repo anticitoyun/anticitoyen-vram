@@ -279,7 +279,7 @@ def test_la_capture_des_graphes_vient_apres_le_clamp_et_a_sa_taille(converted, m
     monkeypatch.setattr(runner, "CTX_TENU_MIN", 8)
     eng = _engine_cpu(converted)
     journal = []
-    faux_graphes = SimpleNamespace(max_model_len=64, captures=0, run=lambda batch: journal.append(("run", eng.max_model_len)) or None)
+    faux_graphes = SimpleNamespace(max_model_len=64, captures=0, enabled=True, run=lambda batch: journal.append(("run", eng.max_model_len, None)) or None)
     eng.graphs = faux_graphes
     vrai = eng.generate
 
@@ -289,7 +289,7 @@ def test_la_capture_des_graphes_vient_apres_le_clamp_et_a_sa_taille(converted, m
         journal.append(("chauffe", len(prompt_ids) + 2, eng.graphs))
         return vrai(prompt_ids, params, images=images)
     monkeypatch.setattr(eng, "generate", faux)
-    tenu, captures = eng.demarrer_service(warm_max_len=32, pas_confirmation=8)
+    tenu, captures = eng.demarrer_service(warm_max_len=32, pas=8, pas_confirmation=8)
     assert tenu == 40 and eng.max_model_len == 40 and faux_graphes.max_model_len == 40
     passes = [(L, g) for (k, L, g) in journal if k == "chauffe"]
     assert all(g is None for _, g in passes[:-1]), "graphes visibles pendant la dichotomie"
@@ -310,7 +310,7 @@ def test_la_confirmation_avec_graphes_baisse_le_tenu_de_deux_pas_puis_charge(con
 
     def moteur(cout_pas: int):
         eng = _engine_cpu(converted)
-        faux_graphes = SimpleNamespace(max_model_len=64, captures=0, run=lambda batch: None)
+        faux_graphes = SimpleNamespace(max_model_len=64, captures=0, enabled=True, run=lambda batch: None)
         eng.graphs = faux_graphes
         vrai = eng.generate
         recaptures = []
@@ -327,12 +327,12 @@ def test_la_confirmation_avec_graphes_baisse_le_tenu_de_deux_pas_puis_charge(con
         monkeypatch.setattr(eng, "generate", faux); monkeypatch.setattr(eng, "_recapturer", recapturer)
         return eng, faux_graphes, recaptures
     eng, fg, rec = moteur(2)
-    tenu, _ = eng.demarrer_service(warm_max_len=32, pas_confirmation=8)
+    tenu, _ = eng.demarrer_service(warm_max_len=32, pas=8, pas_confirmation=8)
     assert tenu == 24 and eng.max_model_len == 24 and fg.max_model_len == 24 and rec == [32, 24], (tenu, rec)
     assert " ctx_tenu=24(demandé 64) " in eng.regime_ligne() + " "
     eng3, _, rec3 = moteur(3)
     with pytest.raises(runner.ContexteNonTenu):
-        eng3.demarrer_service(warm_max_len=32, pas_confirmation=8)
+        eng3.demarrer_service(warm_max_len=32, pas=8, pas_confirmation=8)
     assert rec3 == [32, 24], "deux baisses au plus avant le refus"
 
 
