@@ -1,5 +1,7 @@
 # anticitoyen VRAM/RAM (`acvram`)
 
+🌐 Traductions : [العربية](docs/README.ar.md) · [বাংলা](docs/README.bn.md) · [Català](docs/README.ca.md) · [Čeština](docs/README.cs.md) · [Dansk](docs/README.da.md) · [Deutsch](docs/README.de.md) · [Ελληνικά](docs/README.el.md) · [English](docs/README.en.md) · [Esperanto](docs/README.eo.md) · [Español](docs/README.es.md) · [فارسی](docs/README.fa.md) · [Suomi](docs/README.fi.md) · [עברית](docs/README.he.md) · [हिन्दी](docs/README.hi.md) · [Magyar](docs/README.hu.md) · [Bahasa Indonesia](docs/README.id.md) · [Italiano](docs/README.it.md) · [日本語](docs/README.ja.md) · [한국어](docs/README.ko.md) · [Norsk bokmål](docs/README.nb.md) · [Nederlands](docs/README.nl.md) · [Polski](docs/README.pl.md) · [Português](docs/README.pt.md) · [Română](docs/README.ro.md) · [Русский](docs/README.ru.md) · [Svenska](docs/README.sv.md) · [ไทย](docs/README.th.md) · [Türkçe](docs/README.tr.md) · [Українська](docs/README.uk.md) · [Tiếng Việt](docs/README.vi.md) · [中文](docs/README.zh.md)
+
 > Soutenir : [buymeacoffee.com/anticitoyen](https://buymeacoffee.com/anticitoyen)
 
 Une passerelle d'inférence compatible avec l'API OpenAI, qui traite la mémoire
