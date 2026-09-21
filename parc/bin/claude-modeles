@@ -40,154 +40,22 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
-# ─── parc.toml (acvram-parc) : le seul endroit où vivent chemins, ports et moteurs ───
+# ─── parc et commun des deux menus (parc/lib/menu_modeles) ───
 sys.path.insert(0, "/usr/share/acvram-parc/lib")
 _LIB_LOCALE = Path(__file__).resolve().parent.parent / "lib"
 if (_LIB_LOCALE / "acvram_parc.py").exists():
     sys.path.insert(0, str(_LIB_LOCALE))
-from acvram_parc import charger as _charger_parc, ORDRE_MOTEUR as _ORDRE_PARC  # noqa: E402
+from menu_modeles.config import (PARC, MAISON, KIMI_DIR, TSV_DIR, CONFIG, NOTES, GGUF_TSV,  # noqa: E402
+                                 VLLM_TSV, ACVRAM_TSV, VISION_TSV, SECRETS, BIN,
+                                 DOSSIERS_LANCEMENT, DOSSIER_LANCEMENT_DEFAUT, ANSI, GUI_TEST,
+                                 MOTEURS, ORDRE_MOTEUR, FICHE_ABSENTE, NOTE_MOTS, REFUS_RANG)
+from menu_modeles.moteur import (Moteur, secrets, cle_moteur, modele_servi, vram, pid_du_port)  # noqa: E402,F401
 
-PARC = _charger_parc()
-MAISON = Path.home()
-KIMI_DIR = PARC.kimi_dir
-TSV_DIR = PARC.tsv_dir
-CONFIG = PARC.config_kimi
-NOTES = PARC.tsv("notes")
-GGUF_TSV = PARC.tsv("gguf")
-VLLM_TSV = PARC.tsv("vllm")
-ACVRAM_TSV = PARC.tsv("acvram")
-VISION_TSV = PARC.tsv("vision")   # alias → vision | texte-seul (modeles-a-jour)
-SECRETS = PARC.secrets
-BIN = PARC.bin
+# Divergences propres à claude-modeles (S5) : icône et bouton web « Ouvrir ComfyUI ».
 ICONE = PARC.icone_claude
 COMFY_START = Path(PARC.extras["comfy_start"]) if PARC.extras.get("comfy_start") else None   # extras.comfy_start, sinon bouton inactif
-# Test en processus, sans clic ni X pilotable (Broadway rend un canvas noir, xdotool exige sudo) :
-# ACVRAM_GUI_TEST=clic:<attribut du bouton>[@<alias>] | filtre:<texte> — le gestionnaire est appelé comme par un clic,
-# À SEC (aucun processus lancé, aucune URI ouverte : argv et URI journalisés), le retour est imprimé en une ligne
-# `GUI_TEST {…}` puis la fenêtre quitte ; rc 2 si le bouton n'existe pas. poste3 le joue sous Xephyr/Xvfb.
-GUI_TEST = os.environ.get("ACVRAM_GUI_TEST")
 COMFY_URL = str(PARC.extras.get("comfy_url", "http://127.0.0.1:8188"))
 PORT_WEB = int(PARC.extras.get("port_web_kimi", 58627))   # serveur kimi web local
-DOSSIERS_LANCEMENT = list(PARC.dossiers_lancement)
-DOSSIER_LANCEMENT_DEFAUT = DOSSIERS_LANCEMENT[0]
-
-ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-
-
-# ─── moteurs ──────────────────────────────────────────────────────────────────
-class Moteur:
-    """Un serveur d'inférence : son port, sa clé, et par où on lit le modèle servi."""
-
-    def __init__(self, cle_config, nom, port, route, var_cle, cle_defaut, journal=None, tokens=""):
-        self.cle_config = cle_config
-        self.nom = nom
-        self.port = port
-        self.route = route
-        self.var_cle = var_cle
-        self.cle_defaut = cle_defaut
-        self.journal = Path(journal) if journal else None
-        self.tokens = tokens   # api_tokens.yml (TabbyAPI), depuis parc.toml
-
-
-# Moteurs déclarés présents dans parc.toml, et eux seuls : un moteur absent n'a
-# ni alias ni port sondé.
-MOTEURS = {
-    cle: Moteur(cle, m["nom"], int(m["port"]), m["route"], m["var_cle"], m["cle_defaut"],
-                m.get("journal") or None, m.get("tokens") or "")
-    for cle, m in PARC.moteurs.items()
-}
-ORDRE_MOTEUR = {cle: _ORDRE_PARC.get(cle, 9) for cle in MOTEURS}
-# alias sans fiche dans notes-modeles.tsv : jamais « ? » (poste7-menus-cloture-19-09 § 1)
-FICHE_ABSENTE = ["inconnu", "non mesuré", "non mesuré", "inconnu"]
-
-
-def secrets():
-    """Clés d'API du fichier unique en 0600. Jamais affichées, jamais journalisées."""
-    d = {}
-    try:
-        for ligne in SECRETS.read_text().splitlines():
-            ligne = ligne.strip()
-            if ligne and not ligne.startswith("#") and "=" in ligne:
-                k, v = ligne.split("=", 1)
-                d[k.strip()] = v.strip().strip('"').strip("'")
-    except OSError:
-        pass
-    return d
-
-
-def cle_moteur(m, coffre=None):
-    coffre = coffre if coffre is not None else secrets()
-    if m.cle_config == "tabby" and not coffre.get(m.var_cle) and m.tokens:
-        try:
-            for ligne in Path(m.tokens).read_text().splitlines():
-                if ligne.startswith("api_key:"):
-                    return ligne.split(":", 1)[1].strip()
-        except OSError:
-            return ""
-    if m.cle_config == "yals" and not coffre.get(m.var_cle):
-        try:
-            return tomllib.load(CONFIG.open("rb")).get("providers", {}).get("yals", {}).get("api_key", "")
-        except Exception:
-            return ""
-    return coffre.get(m.var_cle, m.cle_defaut)
-
-
-def modele_servi(m, coffre=None, delai=1.5):
-    """Identifiant du modèle actuellement chargé par ce moteur, ou None s'il dort."""
-    req = urllib.request.Request(f"http://127.0.0.1:{m.port}{m.route}")
-    c = cle_moteur(m, coffre)
-    if c:
-        req.add_header("Authorization", f"Bearer {c}")
-    try:
-        with urllib.request.urlopen(req, timeout=delai) as r:
-            import json
-
-            d = json.load(r)
-    except Exception:
-        return None
-    if isinstance(d, dict) and "data" in d:
-        liste = d.get("data") or []
-        return liste[0].get("id") if liste else None
-    return (d or {}).get("id") or None
-
-
-def vram():
-    """(utilisée, totale) en Mio, tous GPU confondus ; (None, None) sans nvidia-smi."""
-    try:
-        s = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.used,memory.total",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5)
-        u = t = 0
-        for ligne in s.stdout.strip().splitlines():
-            a, b = (x.strip() for x in ligne.split(","))
-            u += int(a)
-            t += int(b)
-        return (u, t) if t else (None, None)
-    except Exception:
-        return (None, None)
-
-
-def pid_du_port(port):
-    """Vrai propriétaire du port : les fichiers .pid des lanceurs mentent parfois
-    (setsid dans un shell non interactif enregistre le pid du wrapper)."""
-    try:
-        s = subprocess.run(["ss", "-tlnp"], capture_output=True, text=True, timeout=5)
-    except Exception:
-        return None
-    for ligne in s.stdout.splitlines():
-        if f"127.0.0.1:{port}" in ligne:
-            m = re.search(r"pid=(\d+)", ligne)
-            if m:
-                return int(m.group(1))
-    return None
-
-
-# ─── données ──────────────────────────────────────────────────────────────────
-NOTE_MOTS = {"★★★★★": 5, "★★★★": 4, "★★★": 3, "★★": 2, "★": 1,
-             "excellent": 5, "très bon": 4, "tres bon": 4, "bon": 3, "moyen": 2}
-REFUS_RANG = {"aucun": 0, "nul": 0, "rares": 1, "très faible": 1, "tres faible": 1,
-              "faible": 2, "moyen": 3, "élevé": 4, "eleve": 4}
 
 
 def rang_qualite(txt):
