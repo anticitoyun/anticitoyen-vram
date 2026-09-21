@@ -689,6 +689,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         autoriser_grossissement=args.autoriser_grossissement,
         quant_device=args.quant_device, bits_budget_gib=args.bits_budget,
         garder_grille=args.grille_erreurs,
+        echelle_nvfp4=args.echelle,
         promotion_cout_max_mib=args.promotion_cout_max,
         format_impose=args.format, mesurer_kld=args.mesurer_kld,
         alpha_commun_gate_up=args.alpha_commun_gate_up,
@@ -1040,6 +1041,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="simple arrondi au plus proche, sans mise a l'echelle AWQ")
     cv.add_argument("--hadamard", choices=["auto", "always", "never"],
                     default="auto")
+    cv.add_argument("--echelle", choices=["max6", "4sur6"], default="max6",
+                    help="echelle de bloc nvfp4 : max6 (amax/6, classique) ou 4sur6 (par bloc, "
+                         "amax/6 contre amax/4 au moindre MSE, arXiv 2512.02010 ; format et noyaux inchanges)")
     cv.add_argument("--grid", type=int, default=20,
                     help="finesse de la grille de recherche AWQ")
     cv.add_argument("--lm-head-format", help="format de la projection de sortie")

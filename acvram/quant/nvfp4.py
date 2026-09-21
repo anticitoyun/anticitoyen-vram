@@ -35,6 +35,7 @@ import torch
 
 __all__ = [
     "E2M1_LEVELS",
+    "ECHELLES", "regler_echelle", "echelle_courante",
     "E4M3_MAX",
     "E2M1_MAX",
     "NVFP4Tensor",
@@ -213,18 +214,61 @@ def _pad_k(w: torch.Tensor, block: int) -> tuple[torch.Tensor, int]:
     return torch.nn.functional.pad(w, (0, pad)), k
 
 
+# Règle d'échelle de bloc (chef 21/09, pièce Q1, arXiv 2512.02010 « Four Over Six ») :
+#   max6  : échelle = amax/6, le plus grand du bloc tombe sur 6 (classique, tout le parc jusqu'ici) ;
+#   4sur6 : par bloc, deux candidats amax/6 et amax/4 (le plus grand tombe sur 4 : pas de saturation, les
+#           autres éléments profitent des niveaux fins 0,5/1/1,5/2/3 sur une échelle plus grande) ; le
+#           moindre MSE de reconstruction gagne, égalité → max6. Format E2M1 + E4M3 et noyaux inchangés :
+#           seule la VALEUR de l'échelle de bloc change, elle reste arrondie en E4M3 avant le choix.
+# Le défaut du module est posé par `regler_echelle` (CLI `--echelle`) : la recherche AWQ et la
+# quantification finale passent toutes deux par `quantize_nvfp4`, donc par la même règle.
+ECHELLES = ("max6", "4sur6")
+_CANDIDATS_4SUR6 = (E2M1_MAX, 4.0)
+_echelle_defaut = "max6"
+
+
+def regler_echelle(nom: str) -> str:
+    global _echelle_defaut
+    if nom not in ECHELLES:
+        raise ValueError(f"échelle de bloc inconnue : {nom!r} (attendu : {', '.join(ECHELLES)})")
+    _echelle_defaut = nom
+    return nom
+
+
+def echelle_courante() -> str:
+    return _echelle_defaut
+
+
+def _coder(wb: torch.Tensor, bs: torch.Tensor) -> torch.Tensor:
+    """Codes E2M1 (3 bits de magnitude) de ``wb`` [sortie, blocs, bloc] pour l échelle effective ``bs`` [sortie, blocs]."""
+    safe = bs.clamp(min=torch.finfo(torch.float32).tiny)
+    codes = round_to_e2m1(wb / safe.unsqueeze(-1))
+    return torch.where((bs.unsqueeze(-1) > 0), codes, torch.zeros_like(codes))
+
+
+def _mse_bloc(wb: torch.Tensor, codes: torch.Tensor, bs: torch.Tensor) -> torch.Tensor:
+    """Erreur quadratique par bloc de la reconstruction |w| ≈ niveau[code] × bs (les signes sont portés à part)."""
+    vals = _levels_tensor(wb.device)[codes.long()] * bs.unsqueeze(-1)
+    return ((wb.abs() - vals) ** 2).sum(dim=-1)
+
+
 def quantize_nvfp4(
     weight: torch.Tensor,
     block: int = BLOCK,
     global_scale: Optional[torch.Tensor] = None,
+    echelle: Optional[str] = None,
 ) -> NVFP4Tensor:
     """Quantifie en NVFP4 un poids 2-D ``[sorties, entrées]``.
 
     Les blocs courent le long des entrées, c'est-à-dire de la dimension de
     réduction, ce qu'attend un produit matriciel orienté K : chaque tranche de
     16 porte sa propre échelle, si bien qu'un unique canal aberrant ne peut pas
-    aplatir toute une ligne.
+    aplatir toute une ligne. ``echelle`` : max6 | 4sur6 (voir ``ECHELLES``),
+    défaut = celui du module.
     """
+    echelle = echelle or _echelle_defaut
+    if echelle not in ECHELLES:
+        raise ValueError(f"échelle de bloc inconnue : {echelle!r}")
     if weight.dim() != 2:
         raise ValueError(f"poids 2-D attendu, reçu {tuple(weight.shape)}")
     orig_shape = tuple(weight.shape)
@@ -244,16 +288,21 @@ def quantize_nvfp4(
     gs = global_scale.to(torch.float32).reshape(())
 
     block_amax = wb.abs().amax(dim=-1)                    # [sortie, k/bloc]
-    ideal = block_amax / E2M1_MAX                         # échelle exacte par bloc
     # On représente l'échelle de bloc en E4M3 : c'est un arrondi réel et avec
     # perte, et le noyau doit utiliser la valeur *arrondie*, jamais `ideal`.
-    bs_e4m3 = (ideal / gs).clamp(max=E4M3_MAX).to(torch.float8_e4m3fn)
-    bs = bs_e4m3.to(torch.float32) * gs                   # échelle effective
-
-    safe = bs.clamp(min=torch.finfo(torch.float32).tiny)
-    normed = wb / safe.unsqueeze(-1)
-    codes = round_to_e2m1(normed)
-    codes = torch.where((bs.unsqueeze(-1) > 0), codes, torch.zeros_like(codes))
+    def candidat(div: float):
+        e4m3 = (block_amax / div / gs).clamp(max=E4M3_MAX).to(torch.float8_e4m3fn)
+        eff = e4m3.to(torch.float32) * gs                 # échelle effective
+        return e4m3, eff, _coder(wb, eff)
+    bs_e4m3, bs, codes = candidat(E2M1_MAX)
+    if echelle == "4sur6":
+        # Le bloc dont amax/6 sature déjà l E4M3 (celui qui fixe g) a ses deux candidats clampés à la même
+        # valeur : 4sur6 = max6 pour lui, par construction. Le MSE se juge sur l échelle E4M3 arrondie.
+        e4, b4, c4 = candidat(_CANDIDATS_4SUR6[1])
+        mieux = (_mse_bloc(wb, c4, b4) < _mse_bloc(wb, codes, bs))     # strict : égalité → max6
+        bs_e4m3 = torch.where(mieux, e4, bs_e4m3)
+        bs = torch.where(mieux, b4, bs)
+        codes = torch.where(mieux.unsqueeze(-1), c4, codes)
     sign = (wb < 0).to(torch.uint8) << 3
     codes = codes | sign
     codes = codes.reshape(out_f, k)

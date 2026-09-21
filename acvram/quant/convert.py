@@ -59,6 +59,9 @@ class ConversionOptions:
     garder_grille: bool = False
     awq: bool = True
     group_size: int = 128
+    # Q1 (chef 21/09, arXiv 2512.02010) : règle d'échelle de bloc nvfp4, max6 | 4sur6 — posée sur le module
+    # `quant.nvfp4` au début de la conversion, donc lue par la recherche AWQ ET la quantification finale
+    echelle_nvfp4: str = "max6"
     keep_sensitive_16bit: bool = True  # normalisations, routeur, plongements
     lm_head_format: Optional[str] = None
     # poste7-p2-qkvo-int8-canal-18-09 : q/k/v/o restent int8, mais symetrique
@@ -1242,6 +1245,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
                        ) -> ConversionReport:
     """Quantifie chaque tenseur dans le format qu'attend son appareil de destination."""
     t0 = time.time()
+    from .nvfp4 import regler_echelle
+    regler_echelle(opts.echelle_nvfp4)
     spec = spec or load_model_spec(model_path)
     bpw_cible = max((bpw_nominal(t.weight_format, opts.group_size)
                      for t in plan.tiers if t.kind == "gpu"), default=4.5)
