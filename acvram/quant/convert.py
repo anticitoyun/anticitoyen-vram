@@ -737,9 +737,44 @@ def _adapt_hf(source: Iterator[tuple[str, torch.Tensor]], spec
         yield en_attente.pop(0)
 
 
+_EXPERTS_GROUPES_HUB = (".mlp.experts.gate_up_proj", ".mlp.experts.down_proj")
+
+
+def _scinder_experts_groupes(source: Iterator[tuple[str, torch.Tensor]]
+                             ) -> Iterator[tuple[str, torch.Tensor]]:
+    """Disposition hub transformers ≥ 5 des experts MoE (Qwen3-VL-MoE, vérifiée
+    sur l'en-tête safetensors officiel le 21/09 : `experts.gate_up_proj`
+    [E, H, 2I], `experts.down_proj` [E, I, H], sans index ni `.weight`) →
+    un `nn.Linear` par expert et par projection, `experts.{e}.gate_proj.weight`
+    [I, H] · `up_proj.weight` [I, H] · `down_proj.weight` [H, I], gate PUIS up
+    (le module fait `linear(x, w).chunk(2)`).
+
+    C'est la forme que TOUT le reste du convertisseur connaît (pile groupée
+    `_verifier_experts_homogenes`, stats AWQ par expert, contrôle final
+    `attendus`) : sans cette scission, la reconversion 30B-VL du 21/09
+    (`verdict-reconversion-30b-bloquee-21-09`) quantifiait trois blobs 3D par
+    couche sous un nom que ni le manifeste ni le chargeur ne comprennent, et
+    le contrôle final refusait — pour la bonne raison. On aligne la source sur
+    le contrat, pas le contrôle sur la dérive."""
+    for name, t in source:
+        if not name.endswith(_EXPERTS_GROUPES_HUB) or t.dim() != 3:
+            yield name, t
+            continue
+        prefixe = name[: name.rindex(".")]          # …mlp.experts
+        if name.endswith("gate_up_proj"):
+            inter = t.shape[2] // 2
+            for e in range(t.shape[0]):
+                yield f"{prefixe}.{e}.gate_proj.weight", t[e, :, :inter].t().contiguous()
+                yield f"{prefixe}.{e}.up_proj.weight", t[e, :, inter:].t().contiguous()
+        else:
+            for e in range(t.shape[0]):
+                yield f"{prefixe}.{e}.down_proj.weight", t[e].t().contiguous()
+
+
 def _adapt_texte(source: Iterator[tuple[str, torch.Tensor]], spec
                  ) -> Iterator[tuple[str, torch.Tensor]]:
     mt = str(getattr(spec, "model_type", "") or spec.raw.get("model_type", ""))
+    source = _scinder_experts_groupes(source)
     if mt == "muse_glimmer":
         yield from _adapt_muse(source, spec)
         return
