@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(_ICI, "gpu", "mesure"))
 import httpx  # noqa: E402
 from energie import Energie, nvml  # noqa: E402
 
-BIN_DIR = "~/.lmstudio/extensions/backends/llama.cpp-linux-x86_64-nvidia-cuda12-avx2-2.22.0"
+BIN_DIR = os.environ.get("LLAMACPP_LMSTUDIO_BIN", os.path.expanduser("~/.lmstudio/extensions/backends/llama.cpp-linux-x86_64-nvidia-cuda12-avx2-2.22.0"))
 GGUF = os.environ.get("GGUF", "/mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M/"
                       "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf")
 PORT = int(os.environ.get("PORT", "8092")); HOTE = f"http://127.0.0.1:{PORT}"

@@ -21,7 +21,7 @@
 # une seule comme le banc SM seul.
 set -u
 S="$(cd "$(dirname "$0")/../../.." && pwd)"
-PY=~/Bureau/Claude/anticitoyen-vram/.venv/bin/python3
+PY=${ACVRAM_PY:-$S/../../anticitoyen-vram/.venv/bin/python3}
 MODEL=$("$(dirname "$0")/../../racine_modeles.py")/Qwen3-Coder-30B-A3B-Instruct-srcQ4_K_M-nvfp4
 SCRIPT="$S/outils/gpu/mesure/banc-horloge-decodage.py"
 SORTIE_DIR="$S/scratchpad/horloge-memoire-14-09"

@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import sys
 from types import SimpleNamespace
 
-sys.path.insert(0, "~/Bureau/Claude/travail/poste3")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from acvram.engine.speculative import NGramProposer  # noqa: E402
 

@@ -68,7 +68,7 @@ SOURCE = "/mnt/4TO_SATACMR_2022/Modeles/GLM-4.7-Flash-bf16"
 SCRATCH = Path("/tmp/glm-equivalence-2couches")
 MINI = SCRATCH / "mini-hf"
 CONVERTI = SCRATCH / "mini-acvram"
-VENV_PROJET = "~/Bureau/Claude/anticitoyen-vram/.venv/bin/python"
+VENV_PROJET = os.environ.get("ACVRAM_PY", f"{Path(__file__).resolve().parents[1]}/../../anticitoyen-vram/.venv/bin/python")
 VENV_VLLM = "/opt/ia/vLLM/.venv/bin/python"
 N_JETONS = 16
 VOCAB_SUR = 150000  # marge sous vocab_size=154880, evite les ids speciaux (154820+)

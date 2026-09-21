@@ -15,7 +15,7 @@ set -euo pipefail
 NCU_SORTIE=${NCU_SORTIE:-/tmp/ncu-acvram}; mkdir -p "$NCU_SORTIE"
 B=${1:-12}; RPW=${ACVRAM_GROUPED_RPW:-4}
 ICI=$(dirname "$(readlink -f "$0")"); REPO=$(dirname "$ICI")
-PY=${PY:-~/Bureau/Claude/anticitoyen-vram/.venv/bin/python3}
+PY=${ACVRAM_PY:-$REPO/../../anticitoyen-vram/.venv/bin/python3}
 OUT=${NCU_SORTIE}/ncu-gemv-rpw${RPW}.csv
 XREG=${ACVRAM_GROUPED_XREG:-down}
 OUT=${NCU_SORTIE}/ncu-gemv-rpw${RPW}-xreg${XREG}.csv

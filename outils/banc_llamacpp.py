@@ -28,6 +28,7 @@ binaire. Mesure PAS FAITE — bloquée par ce bogue, pas par la méthode.
     outils/carte.sh python outils/banc_llamacpp.py
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -38,8 +39,10 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent / "gpu" / "mesure"))
 from energie import Energie, repos  # noqa: E402
 
-BINAIRE_DIR = Path("~/.lmstudio/extensions/backends"
-                   "/llama.cpp-linux-x86_64-nvidia-cuda12-avx2-2.22.0")
+BINAIRE_DIR = Path(os.environ.get(
+    "LLAMACPP_LMSTUDIO_BIN",
+    os.path.expanduser("~/.lmstudio/extensions/backends"
+                       "/llama.cpp-linux-x86_64-nvidia-cuda12-avx2-2.22.0")))
 BINAIRE = BINAIRE_DIR / "llama-server"
 LD_PATH = f"{BINAIRE_DIR}:/usr/local/lib/ollama/cuda_v12"
 GGUF = ("/mnt/4TO_SATACMR_2022/Modeles/models_gguf"

@@ -9,7 +9,7 @@ _sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 
 from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
 _RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
 
-sys.path.insert(0, "~/Bureau/Claude/travail/poste1")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["ACVRAM_REPIN"] = "0"
 
 import torch

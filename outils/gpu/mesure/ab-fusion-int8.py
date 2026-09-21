@@ -40,7 +40,7 @@ _RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → 
 
 RACINE = Path(__file__).resolve().parent.parent
 BASE = Path(_RACINE)
-PY = "~/Bureau/Claude/anticitoyen-vram/.venv/bin/python"
+PY = os.environ.get("ACVRAM_PY", f"{Path(__file__).resolve().parents[3]}/../../anticitoyen-vram/.venv/bin/python")
 
 SONDE = r'''
 import json, os, sys, torch
