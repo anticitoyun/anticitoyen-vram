@@ -458,6 +458,10 @@ class GraphRunner:
         nblk = bucket_blocks(max(t.shape[0] for t in batch.block_tables))
         if nblk * BLOCK_SIZE > self.max_model_len + BLOCK_SIZE:
             nblk = bucket_blocks((self.max_model_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
+        if any(t.shape[0] > nblk for t in batch.block_tables):
+            # une table plus longue que le godet ne se copie pas (a (256) ≠ b (257)) : un pas eager nommé, pas un 500
+            self._eager(f"table de {max(t.shape[0] for t in batch.block_tables)} blocs au-dela du godet {nblk}")
+            return False
         lb = 0
         trace = bool(os.environ.get("ACVRAM_TRACE_STEPS"))
         t0 = time.perf_counter()

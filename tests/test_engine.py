@@ -278,6 +278,7 @@ def test_la_capture_des_graphes_vient_apres_le_clamp_et_a_sa_taille(converted, m
     monkeypatch.delenv("ACVRAM_CHAUFFE_CTX", raising=False)
     monkeypatch.setattr(runner, "CTX_TENU_MIN", 8)
     eng = _engine_cpu(converted)
+    eng.pipeline_actif = False                     # les faux graphes n ont que `run` (chemin sans recouvrement) ; rouge depuis ACVRAM_PIPELINE=1 par défaut
     journal = []
     faux_graphes = SimpleNamespace(max_model_len=64, captures=0, enabled=True, run=lambda batch: journal.append(("run", eng.max_model_len, None)) or None)
     eng.graphs = faux_graphes
@@ -310,6 +311,7 @@ def test_la_confirmation_avec_graphes_baisse_le_tenu_de_deux_pas_puis_charge(con
 
     def moteur(cout_pas: int):
         eng = _engine_cpu(converted)
+        eng.pipeline_actif = False                     # idem : faux graphes à `run` seul
         faux_graphes = SimpleNamespace(max_model_len=64, captures=0, enabled=True, run=lambda batch: None)
         eng.graphs = faux_graphes
         vrai = eng.generate
@@ -395,3 +397,24 @@ def test_le_pipeline_est_actif_par_defaut_et_la_ligne_dit_l_effectif(converted, 
     from acvram import regime
     v = next(x for x in regime.VARIABLES if x.env == "ACVRAM_PIPELINE")
     assert v.defaut == "1"
+
+
+def test_jamais_plus_de_blocs_que_le_contexte(converted):
+    """P3 (4) 30B (poste2 21/09) : la marge d admission +BLOCK_SIZE donnait 257 blocs à une invite de max_model_len − 2
+    quand le graphe est dimensionné au contexte (256) → `size of tensor a (256) must match b (257)` à la confirmation
+    avec graphes. Invariant : une séquence ne tient jamais plus de ceil(max_model_len / BLOCK_SIZE) blocs, à
+    l admission comme au dernier jeton — c est ce que le godet de graphe suppose."""
+    from acvram.engine.runner import SamplingParams
+    from acvram.memory.kvcache import BLOCK_SIZE
+    eng = _engine_cpu(converted, max_model_len=64)
+    plafond = (64 + BLOCK_SIZE - 1) // BLOCK_SIZE
+    pic = {"n": 0}
+    vrai_finish = eng._finish
+
+    def finish(seq, raison):                       # la table est libérée à la fin : on la lit juste avant
+        pic["n"] = max(pic["n"], len(seq.blocks)); return vrai_finish(seq, raison)
+    eng._finish = finish
+    seq = eng.add_request(eng.sequence_de_chauffe(62), SamplingParams(max_tokens=2, temperature=0.0))
+    while not seq.finished:
+        list(eng.step()); pic["n"] = max(pic["n"], len(seq.blocks))
+    assert seq.length == 64 and pic["n"] == plafond, f"{pic['n']} blocs pour max_model_len=64 (plafond {plafond})"
