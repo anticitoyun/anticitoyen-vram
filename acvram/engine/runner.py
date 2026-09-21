@@ -395,7 +395,9 @@ def _deepstack_texte(tour) -> str:
 
 
 class ContexteNonTenu(RuntimeError):
-    """`max_model_len` demandé mais non tenu par la chauffe au chargement : refus nommé, pas un 500 à la requête."""
+    """`max_model_len` demandé mais non tenu par la chauffe au chargement : refus nommé, pas un 500 à la requête.
+    Levé seulement si le contexte tenu est < 4096 ou sous ``--ctx-strict`` ; sinon le moteur se CLAMPE (poste7
+    poste7-s2-k48-feu-vert-21-09 § 2 (c)) et la ligne de régime dit ``ctx_tenu=N(demandé M)``."""
 
     def __init__(self, demande: int, tenu: int) -> None:
         self.demande, self.tenu = int(demande), int(tenu)
@@ -404,10 +406,18 @@ class ContexteNonTenu(RuntimeError):
                          f"--max-model-len {self.tenu} ou moins ; ACVRAM_CHAUFFE_CTX=0 pour un banc qui pose son plan")
 
 
+CTX_TENU_MIN = 4096                    # en dessous, un clamp n'est plus un service : refus nommé (poste7 § 2 (c))
+
+
 def _ctx_texte(engine) -> str:
     """`ctx_tenu=N` (chauffe tenue) | `ctx_tenu=non-verifie` (opt-out nommé) | `ctx_tenu=non-chauffe` (pas encore)."""
     v = getattr(engine, "ctx_tenu", "absent")
-    return " ctx_tenu=non-verifie" if v is None else (f" ctx_tenu={v}" if v != "absent" else " ctx_tenu=non-chauffe")
+    if v is None:
+        return " ctx_tenu=non-verifie"
+    if v == "absent":
+        return " ctx_tenu=non-chauffe"
+    demande = getattr(engine, "ctx_demande", v)
+    return f" ctx_tenu={v}" if demande == v else f" ctx_tenu={v}(demandé {demande})"
 
 
 def _masque_images_texte(masque) -> str:
@@ -1961,15 +1971,57 @@ class Engine:
             if not self.running and not self.waiting:
                 break
 
-    def chauffer_contexte(self, pas: int = 256) -> Optional[int]:
-        """Prouve ``max_model_len`` AU CHARGEMENT (poste7, poste7-3b-lanceur-contexte-20-09 (ii)) : une séquence de
-        ``max_model_len − 2`` jetons passe le prefill dans le RÉGIME SERVI (même chemin, même budget de morceau,
-        même cache), puis ses blocs sont rendus et le cache de préfixe ne la garde pas. Tenu → ``self.ctx_tenu``
-        (ligne de régime ``ctx_tenu=N``). OOM → longueur tenue N par dichotomie (≤ 5 pas, multiples de ``pas``)
-        et ``ContexteNonTenu(max_model_len, N)`` : le serveur refuse au chargement, jamais un 500 à la requête
-        (Coder i8c 32 768 : 500 CUDA OOM à ctx − 64, 384 Mio demandés pour 354 libres — le plan réserve le KV,
-        pas la crête d'activations du prefill). Opt-out nommé ``ACVRAM_CHAUFFE_CTX=0`` (bancs qui posent leur
-        plan) → ``ctx_tenu=non-verifie`` ; jamais sous ``ACVRAM_TYPE=service``."""
+    def sequence_de_chauffe(self, L: int) -> list[int]:
+        """Séquence pseudo-aléatoire sur le vocabulaire, graine fixe 0, longueur ``L`` (poste7 § 2 (a)) : une séquence
+        homogène ``[1]×N`` route tous les jetons vers les mêmes experts et sous-estime la crête d'un vrai prefill
+        (GLM k48 : chauffe TENUE 32768/32768 puis 500 CUDA OOM réel à ctx − 64, 318/298 Mio)."""
+        g = torch.Generator().manual_seed(0)
+        vocab = int(getattr(self.spec, "vocab_size", 0) or 0) or 2
+        return torch.randint(0, vocab, (L,), generator=g).tolist()
+
+    def _libre_apres_chauffe(self) -> tuple[int, int]:
+        """(libre, total) octets du pilote après la passe, avant tout `empty_cache` : le réservé du prefill y est
+        encore compté. Hors carte : (total, total) — la réserve ne se juge que sur carte."""
+        dev = self.model.embed_tokens.device
+        if torch.cuda.is_available() and dev.type == "cuda":
+            libre, total = torch.cuda.mem_get_info(dev)
+            return int(libre), int(total)
+        return (1 << 40, 1 << 40)
+
+    def _experts_sollicites(self, seq: list[int], params) -> int:
+        """Prefill de ``seq`` en comptant les experts DISTINCTS touchés par couche MoE (somme sur les couches) :
+        c'est la grandeur qui sépare ``[1]×N`` (top_k experts par couche) d'une séquence réelle (jusqu'à tous) —
+        chaque expert sollicité a ses poids mis en jeu (Marlin nvfp4 : atelier par expert actif). 0 = modèle dense."""
+        from .model import MoEBlock
+        blocs = [m for m in self.model.modules() if isinstance(m, MoEBlock)]
+        vus: dict[int, set] = {}
+        originaux = []
+        for i, m in enumerate(blocs):
+            orig = m._route
+
+            def route(x, _o=orig, _i=i):
+                topw, topi = _o(x)
+                vus.setdefault(_i, set()).update(int(e) for e in torch.unique(topi.detach().cpu()).tolist())
+                return topw, topi
+            originaux.append((m, orig)); m._route = route
+        try:
+            for _ in self.generate(seq, params):
+                pass
+        finally:
+            for m, orig in originaux:
+                m._route = orig
+        return sum(len(v) for v in vus.values())
+
+    def chauffer_contexte(self, pas: int = 1024, strict: bool = False) -> Optional[int]:
+        """Prouve ``max_model_len`` AU CHARGEMENT (poste7, poste7-3b-lanceur-contexte-20-09 (ii), resserré par
+        poste7-s2-k48-feu-vert-21-09 § 2) : une séquence PSEUDO-ALÉATOIRE (graine 0, ``sequence_de_chauffe``) de
+        ``max_model_len − 2`` jetons passe le prefill dans le RÉGIME SERVI, puis ses blocs sont rendus et le cache
+        de préfixe ne la garde pas. Tenu(L) = la passe ne lève pas d'OOM ET laisse ≥ max(5 %, 64 Mio) du pilote
+        libres après elle (réserve pour la crête d'une vraie requête). ``ctx_tenu`` = plus grand multiple de
+        ``pas`` tenu (dichotomie depuis ``max_model_len``). Non tenu → CLAMP : ``max_model_len`` prend
+        ``ctx_tenu``, la ligne dit ``ctx_tenu=N(demandé M)``, une invite au-delà reçoit un 400 nommé ; refus
+        ``ContexteNonTenu`` seulement si ``ctx_tenu < CTX_TENU_MIN`` (4096) ou ``strict`` (--ctx-strict).
+        Opt-out nommé ``ACVRAM_CHAUFFE_CTX=0`` → ``ctx_tenu=non-verifie`` ; jamais sous ``ACVRAM_TYPE=service``."""
         n = int(self.max_model_len)
         if os.environ.get("ACVRAM_CHAUFFE_CTX") == "0":
             if os.environ.get("ACVRAM_TYPE") == "service":
@@ -1977,12 +2029,12 @@ class Engine:
             else:
                 self.ctx_tenu = None
                 return None
+        self.reserve_chauffe: Optional[tuple[int, int]] = None           # (libre, seuil) de la dernière passe tenue
 
         def essai(L: int) -> bool:
             try:
-                for _ in self.generate([1] * (L - 2), SamplingParams(max_tokens=1, temperature=0.0)):
+                for _ in self.generate(self.sequence_de_chauffe(L - 2), SamplingParams(max_tokens=1, temperature=0.0)):
                     pass
-                return True
             except Exception as exc:                                     # noqa: BLE001
                 oom = isinstance(exc, getattr(torch, "OutOfMemoryError", ())) or "out of memory" in str(exc).lower() \
                     or "blocs KV" in str(exc)
@@ -1990,6 +2042,15 @@ class Engine:
                     raise
                 self._apres_oom_de_chauffe()
                 return False
+            libre, total = self._libre_apres_chauffe()
+            seuil = max(total * 5 // 100, 64 << 20)
+            self._oublier_la_chauffe()
+            if libre < seuil:                                            # (b) : tenu sans réserve = non tenu
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                return False
+            self.reserve_chauffe = (libre, seuil)
+            return True
 
         t0 = time.time()
         tenu: Optional[int]
@@ -1997,7 +2058,7 @@ class Engine:
             tenu = n
         else:
             bas, haut = 0, n                                              # bas tenu (0 : rien), haut non tenu
-            for _ in range(5):
+            for _ in range(8):
                 milieu = max(pas, ((bas + haut) // 2) // pas * pas)
                 if milieu <= bas or milieu >= haut:
                     break
@@ -2007,10 +2068,17 @@ class Engine:
                     haut = milieu
             tenu = bas
         self._oublier_la_chauffe()
+        self.ctx_demande = n
         self.ctx_tenu = tenu
-        print(f"[acvram] chauffe du contexte : {tenu}/{n} jetons tenus en {time.time() - t0:.1f} s", flush=True)
+        r = self.reserve_chauffe
+        print(f"[acvram] chauffe du contexte : {tenu}/{n} jetons tenus en {time.time() - t0:.1f} s"
+              + (f", {r[0] >> 20} Mio libres après la passe (réserve ≥ {r[1] >> 20})" if r else ""), flush=True)
         if tenu < n:
-            raise ContexteNonTenu(n, tenu)
+            if strict or tenu < CTX_TENU_MIN:
+                raise ContexteNonTenu(n, tenu)
+            self.max_model_len = tenu                                    # (c) clamp : 400 nommé au-delà, pas un 500
+            print(f"[acvram] contexte clampé à {tenu} (demandé {n}) : une invite au-delà reçoit un 400 nommé",
+                  flush=True)
         return tenu
 
     def _apres_oom_de_chauffe(self) -> None:

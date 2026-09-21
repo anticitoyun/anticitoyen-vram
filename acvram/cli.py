@@ -778,11 +778,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
     # régime servi ; non tenu → refus nommé ici, jamais un 500 CUDA OOM à la requête (Coder i8c 32 768, 20/09)
     from .engine.runner import ContexteNonTenu
     try:
-        tenu = engine.chauffer_contexte()
+        tenu = engine.chauffer_contexte(strict=bool(getattr(args, "ctx_strict", False)))
     except ContexteNonTenu as exc:
         print(red(f"  {exc}"))
         return 2
-    print(f"  contexte      : {'non vérifié (ACVRAM_CHAUFFE_CTX=0)' if tenu is None else f'{tenu} jetons tenus (chauffe)'}")
+    print("  contexte      : " + ("non vérifié (ACVRAM_CHAUFFE_CTX=0)" if tenu is None else
+                                 f"{tenu} jetons tenus (chauffe)" + (f", clampé (demandé {args.max_model_len})"
+                                                                     if tenu < args.max_model_len else "")))
     # Le tas est énorme après le chargement (manifeste, tokenizer, modules) :
     # une collecte de génération 2 le parcourt entier — plus de 100 ms toutes
     # les quelques dizaines de pas. Geler ces objets les sort du parcours.
@@ -1151,6 +1153,8 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--no-cuda-graphs", action="store_true",
                     help="rejoue chaque pas de decodage en eager plutot qu'en "
                          "graphe CUDA capture")
+    sv.add_argument("--ctx-strict", action="store_true",
+                    help="refuser (rc 2) un contexte non tenu par la chauffe au lieu de le clamper")
     sv.add_argument("--no-prefix-cache", action="store_true",
                     help="desactive la reutilisation du KV entre requetes")
     sv.set_defaults(func=cmd_serve)

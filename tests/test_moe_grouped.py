@@ -124,3 +124,4 @@ def test_moe_graph_equals_eager(tiny_moe):
         assert_logits_proches(eager, graphe.float(),
                               "graphe et eager divergent sur une couche MoE")
         e._emit(graphe, dec)
+
