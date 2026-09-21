@@ -39,14 +39,14 @@ def test_paquet_par_defaut(poste):
     r = _run(poste)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "acvram : source=paquet(9.9.9)" in r.stdout
-    assert f"à sec : {poste['paquet']} serve" in r.stdout and "--served-name acvram-essai" in r.stdout
+    assert f"commande : {poste['paquet']} serve" in r.stdout and "--served-name acvram-essai" in r.stdout
 
 
 def test_arbre_opt_in_propre_puis_sale(poste):
     sha = subprocess.run(["git", "-C", str(poste["arbre"]), "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
     r = _run(poste, ACVRAM_ARBRE=str(poste["arbre"]))
     assert r.returncode == 0 and f"acvram : source=arbre(main@{sha},propre)" in r.stdout, r.stdout + r.stderr
-    assert f"à sec : {poste['arbre']}/.venv/bin/acvram serve" in r.stdout
+    assert f"commande : {poste['arbre']}/.venv/bin/acvram serve" in r.stdout
     (poste["arbre"] / "acvram" / "x.py").write_text("# modif non commitée\n")
     r2 = _run(poste, ACVRAM_ARBRE=str(poste["arbre"]))
     assert f"source=arbre(main@{sha},sale)" in r2.stdout, r2.stdout
