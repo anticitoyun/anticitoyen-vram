@@ -1979,11 +1979,20 @@ class Engine:
         vocab = int(getattr(self.spec, "vocab_size", 0) or 0) or 2
         return torch.randint(0, vocab, (L,), generator=g).tolist()
 
+    def _avant_essai_de_chauffe(self) -> None:
+        """Entre deux pas de la dichotomie, les segments réservés par le pas précédent (plus grand, ou tenu sans
+        réserve) restent dans l allocateur CUDA : le pas suivant lit moins de libre et la recherche descend trop
+        (Coder i8c : 15 360 hier avec [1]×N, 4 096 ce matin — chef 21/09 (3)). Synchroniser, vider."""
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
     def _libre_apres_chauffe(self) -> tuple[int, int]:
         """(libre, total) octets du pilote après la passe, avant tout `empty_cache` : le réservé du prefill y est
         encore compté. Hors carte : (total, total) — la réserve ne se juge que sur carte."""
         dev = self.model.embed_tokens.device
         if torch.cuda.is_available() and dev.type == "cuda":
+            torch.cuda.synchronize(dev)                                  # la crête est passée avant la lecture
             libre, total = torch.cuda.mem_get_info(dev)
             return int(libre), int(total)
         return (1 << 40, 1 << 40)
@@ -2037,6 +2046,7 @@ class Engine:
         graphes, self.graphs = self.graphs, None
 
         def essai(L: int) -> bool:
+            self._avant_essai_de_chauffe()                               # (3) chaque pas part d un allocateur vide
             try:
                 for _ in self.generate(self.sequence_de_chauffe(L - 2), SamplingParams(max_tokens=1, temperature=0.0)):
                     pass

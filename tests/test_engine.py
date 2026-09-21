@@ -294,3 +294,51 @@ def test_la_capture_des_graphes_vient_apres_le_clamp_et_a_sa_taille(converted, m
     assert all(g is None for (_, _, g) in [j for j in journal if j[0] == "chauffe"]), "graphes visibles pendant la chauffe"
     assert eng.graphs is faux_graphes and not [j for j in journal if j[0] == "run"], journal
     assert " ctx_tenu=40(demandé 64) " in eng.regime_ligne() + " "
+
+
+def test_chaque_pas_de_chauffe_part_d_un_allocateur_vide(converted, monkeypatch):
+    """chef 21/09 (3) : sans libération entre deux pas, les fragments du pas précédent s additionnent et chaque
+    pas voit moins de libre — allocateur simulé : réservé cumulé tant que `_avant_essai_de_chauffe` ne le vide pas.
+    Avec la libération : 64 tenu (chaque pas laisse ≥ 5 %) ; sans (méthode neutralisée) : la même chauffe descend."""
+    from acvram.engine import runner
+    monkeypatch.delenv("ACVRAM_CHAUFFE_CTX", raising=False)
+    monkeypatch.setattr(runner, "CTX_TENU_MIN", 8)
+    total = 100 << 20
+    etat = {"reserve": 0, "vidages": 0, "essais": 0}
+
+    def moteur(vider: bool):
+        eng = _engine_cpu(converted)
+        vrai = eng.generate
+
+        def note(prompt_ids, params, images=None):
+            etat["essais"] += 1
+            etat["reserve"] += (len(prompt_ids) + 2) * (total // 100) // 2     # un pas de L jetons réserve L/2 % du total
+            return vrai(prompt_ids, params, images=images)
+        monkeypatch.setattr(eng, "generate", note)
+        monkeypatch.setattr(eng, "_libre_apres_chauffe", lambda: (total - etat["reserve"], total))
+        if vider:
+            def vidage():
+                etat["vidages"] += 1; etat["reserve"] = 0
+            monkeypatch.setattr(eng, "_avant_essai_de_chauffe", vidage)
+        else:
+            monkeypatch.setattr(eng, "_avant_essai_de_chauffe", lambda: None)
+        return eng
+    e1 = moteur(vider=True)
+    assert e1.chauffer_contexte(pas=8) == 64 and etat["vidages"] == etat["essais"] == 1
+    etat.update(reserve=0, vidages=0, essais=0)
+    e2 = moteur(vider=False)
+    assert e2.chauffer_contexte(pas=8) == 64, "un seul pas : rien à cumuler, le témoin doit tenir aussi"
+    # même simulation, pas de 4 % par jeton : 64 ne tient pas (32 % + 5 % ... ) → la dichotomie fait plusieurs pas
+    etat.update(reserve=0, vidages=0, essais=0)
+    e3 = moteur(vider=False)
+    monkeypatch.setattr(e3, "_libre_apres_chauffe", lambda: (total - etat["reserve"] * 3, total))
+    try:
+        sans = e3.chauffer_contexte(pas=8)
+    except runner.ContexteNonTenu as e:                                   # descend jusqu à 0 : refus nommé
+        sans = e.tenu
+    etat.update(reserve=0, vidages=0, essais=0)
+    e4 = moteur(vider=True)
+    monkeypatch.setattr(e4, "_libre_apres_chauffe", lambda: (total - etat["reserve"] * 3, total))
+    avec = e4.chauffer_contexte(pas=8)
+    assert avec > sans, (avec, sans)
+    assert etat["vidages"] == etat["essais"]
