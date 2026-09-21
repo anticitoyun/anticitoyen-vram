@@ -286,6 +286,10 @@ HORS_REGIME = frozenset({
     
     
     "ACVRAM_DUMP_MOE",   # dossier de recopie des tampons MoE (diagnostic a2711bc) : n'aiguille aucun calcul
+    # chauffe du contexte (poste7-3b-lanceur-contexte (ii), s2-k48 § 2) : CHAUFFE_CTX=0 = opt-out de la preuve, TYPE
+    # = intention du lanceur (carte.sh mesure/service) qui l ignore ; le régime servi qui en résulte est déjà sur la
+    # ligne (`ctx_tenu=N(demandé M)` | non-verifie), aucun chemin de calcul n en dépend
+    "ACVRAM_CHAUFFE_CTX", "ACVRAM_TYPE",
     # garde-fou d'admission, pas un chemin de calcul (poste7-reprise-ordre-18-09
     # §Suite) : Engine.__init__ refuse max_batch_size > plan.kv_planned_seqs,
     # ce flag force le lancement en connaissance de cause. Visible dans

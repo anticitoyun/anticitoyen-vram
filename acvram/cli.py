@@ -42,6 +42,8 @@ from . import __version__            # noqa: E402  (source unique de verite)
 # elles ont ete ecrites.
 VARIABLES_LUES = {
     "ACVRAM_ALLOC_EXTENSIBLE",
+    "ACVRAM_CHAUFFE_CTX", "ACVRAM_TYPE",   # chauffe du contexte (runner.py), oubliees de la liste le 20/09 (rouge 21/09)
+    "ACVRAM_IMAGES_DIR",                    # dossier d images du serveur (server/protocol.py, P2 multimodal)
     "ACVRAM_PREFILL_COMPACT",          # C15-prefill (aaf9f9c3), oubliees de la liste : test_la_liste_des_variables_lues_ne_derive_pas rouge sur main
     "ACVRAM_PREFILL_COMPACT_ITEMS",
     "ACVRAM_BANC_ACCEPTE_REPLAN",
