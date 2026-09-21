@@ -78,7 +78,7 @@ class PipelineDecodage:
             logits = self.model(batch)
             return self._emit(logits, decodable)
         logits = self.graphs.rejouer_suivant()
-        tokens_dev, logprobs_dev = self._sample_only(logits, decodable)
+        tokens_dev, logprobs_dev = self._sample_only(logits, decodable, depuis_graphe=True)
         evenement = torch.cuda.Event()
         evenement.record()
         self._pipeline_pendiente = {
@@ -114,7 +114,7 @@ class PipelineDecodage:
             logits = self.model(batch)
             return self._emit(logits, vivants)
         logits = self.graphs.rejouer_suivant()
-        tokens_dev2, logprobs_dev2 = self._sample_only(logits, vivants)
+        tokens_dev2, logprobs_dev2 = self._sample_only(logits, vivants, depuis_graphe=True)
         evenement = torch.cuda.Event()
         evenement.record()
         self._pipeline_pendiente = {

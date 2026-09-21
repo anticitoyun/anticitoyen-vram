@@ -33,6 +33,7 @@ from .pipeline import PipelineDecodage
 from .loader import LoadedModel
 from .model import _DUMP_MOE, ForwardBatch
 from .sampler import sampler_texte, SamplingParams, besoin_historique, sample
+from .graphs import depaqueter_logprobs
 from .speculative import GardeSpeculation, Proposal, verify_proposal
 from .vision import ImageRequete, SansTourVision, TourVision, verifier_plages
 
@@ -783,7 +784,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                + f"kv_budget={self.allocator.num_blocks * BLOCK_SIZE}/{kv_seqs} "
                + f"kv={self.kv_format_servi()} "
                + f"pipeline={int(bool(self.pipeline_actif and self.graphs is not None))} "   # effectif : demandé ET graphes
-               + f"sampler={sampler_texte()} "
+               + f"sampler={'graphe' if self.pipeline_actif and self.graphs is not None and getattr(self.graphs, 'sampler_graphe', False) else sampler_texte()} "
                + (f"kv_plan_override=1 " if r["kv_plan_override"] else "")
                + (f"llama4_scaling_beta={r['llama4_scaling_beta']}"
                   f"({'servi' if self._llama4_servi else 'non_servi'}) "
@@ -1667,8 +1668,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             prompt_tokens=len(seq.prompt_ids),
             completion_tokens=len(seq.output_ids))
 
-    def _sample_only(self, logits: torch.Tensor,
-                     seqs: list[Sequence]) -> tuple[torch.Tensor, torch.Tensor]:
+    def _sample_only(self, logits: torch.Tensor, seqs: list[Sequence],
+                     depuis_graphe: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
         """La moitié de `_emit` qui reste SUR DEVICE — aucun `.tolist()`/
         `.item()`. Partagée par le pas normal (`_emit` l'appelle puis lit
         tout de suite) et le pas recouvert (bead runner, 14/09), qui différe
@@ -1681,6 +1682,17 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # argmax AVANT de la lire, et ce travail proportionnel au contexte
         # etait entierement perdu. La condition vit dans `sampler` pour que
         # celle qui construit et celle qui lit ne puissent pas diverger.
+        if (depuis_graphe and self.graphs is not None
+                and getattr(self.graphs, "sampler_graphe", False)
+                and not besoin_historique(params) and not any(s.finished for s in seqs)):
+            # Levier 1 : le lot ENTIER est glouton sans historique — exactement
+            # la branche de `_sample_lent` que le graphe a déjà calculée
+            # (`graphs.echantillon_glouton_dans`). Une seule ligne à
+            # température, pénalité ou historique, ou finie : ancien chemin
+            # sur les logits, pour tout le lot (§ 7.2 de la note).
+            paquet = self.graphs.prendre_echantillon()
+            if paquet is not None:
+                return paquet[0], paquet[1]        # logprobs = bits fp32 en int64, vues du même clone
         history = ([s.all_ids for s in seqs] if besoin_historique(params)
                    else [() for _ in seqs])
         return sample(logits, params, history)
@@ -1697,7 +1709,16 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         (`MoEBlock.forward`, bead pds), au niveau du planificateur cette
         fois plutôt que du routage MoE."""
         out = []
-        for seq, tok, lp in zip(seqs, tokens.tolist(), logprobs.tolist()):
+        if logprobs.dtype == torch.int64:
+            # Paquet du graphe (levier 1) : ids et bits des logprobs sont deux
+            # vues du MÊME clone [2, n] → un seul rapatriement, jamais un état
+            # où les ids sont lus et les logprobs pas encore (§ 7.4).
+            base = logprobs._base if logprobs._base is not None else torch.stack((tokens, logprobs))
+            ids_lus, bits = base.tolist()
+            lps = depaqueter_logprobs(bits)
+        else:
+            ids_lus, lps = tokens.tolist(), logprobs.tolist()
+        for seq, tok, lp in zip(seqs, ids_lus, lps):
             if seq.finished:
                 continue
             seq.output_ids.append(int(tok))

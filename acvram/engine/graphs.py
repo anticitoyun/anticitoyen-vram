@@ -161,6 +161,30 @@ def _empreinte_adresses(runner, entry: dict) -> dict:
 
 
 
+def echantillon_glouton_dans(sortie: torch.Tensor, logits: torch.Tensor) -> None:
+    """Le glouton de `sampler._sample_lent` (lignes `logits.to(float32)`,
+    `argmax`, `gather − logsumexp`), MÊMES noyaux torch dans le MÊME ordre :
+    ids et logprobs au bit avec le chemin hôte. Écrit dans les `n` premières
+    colonnes d un tampon statique [2, b_godet·ql] : ligne 0 = ids, ligne 1 =
+    bits fp32 des logprobs élargis en int64 (un seul tampon, un seul clone,
+    un seul rapatriement ; `depaqueter_logprobs` les relit). Les colonnes au
+    delà de `n` (fantômes du godet) gardent leur dernière valeur et ne sont
+    jamais lues."""
+    l32 = logits.to(torch.float32)
+    ids = l32.argmax(dim=-1)
+    lp = l32.gather(1, ids.unsqueeze(-1)).squeeze(-1) - torch.logsumexp(l32, dim=-1)
+    n = ids.shape[0]
+    sortie[0, :n].copy_(ids)
+    sortie[1, :n].copy_(lp.view(torch.int32).to(torch.int64))
+
+
+def depaqueter_logprobs(bits: list[int]) -> list[float]:
+    """Inverse de la ligne 1 de `echantillon_glouton_dans`, côté hôte, après
+    `.tolist()` : int64 → int32 → fp32, sans tenseur."""
+    import struct
+    return [struct.unpack("<f", struct.pack("<i", int(b)))[0] for b in bits]
+
+
 def _avec_tokens(batch: "ForwardBatch", tokens: torch.Tensor) -> "ForwardBatch":
     """Copie superficielle du lot avec d'autres jetons (épinglés ou device)."""
     import copy
@@ -213,6 +237,13 @@ class GraphRunner:
         self._prepare = None
         self.evenement_jetons = torch.cuda.Event()
         self._pool = None
+        # Levier 1 (poste1-levier-1-conception-21-09, opt-in ACVRAM_SAMPLER_GRAPHE=1) :
+        # le glouton de `_sample_lent` (argmax, gather, logsumexp sur les
+        # logits fp32) est CAPTURÉ dans le graphe et écrit dans `entry["sortie"]`
+        # [2, b_godet·ql] int64 (ids ; bits fp32 des logprobs) ; le runner le
+        # prend par `prendre_echantillon` (un clone, une seule fois par rejeu).
+        self.sampler_graphe = os.environ.get("ACVRAM_SAMPLER_GRAPHE", "0") == "1"
+        self._echantillon = None
         self.paged_ok = False
         self.hybrid_layers: list = []
         self.replays = 0
@@ -581,6 +612,21 @@ class GraphRunner:
               f"positions_dev={entry['positions'][:n].tolist()} slots_dev={entry['slots'][:n].tolist()} "
               f"seq_lens_dev={entry['seq_lens'][:n].tolist()}", flush=True)
 
+    def prendre_echantillon(self) -> Optional[torch.Tensor]:
+        """Le paquet [2, n] (ids ; bits fp32 des logprobs) du DERNIER rejeu,
+        CLONÉ sur le flux courant — le clone est enfilé après les noyaux du
+        graphe et avant le rejeu suivant, donc l ordre du flux garantit qu il
+        lit ce rejeu-ci et pas le prochain (§ 7.3 de la note : invariant de
+        flux, pas une marge). None si le rejeu n a pas écrit de sortie
+        (opt-in absent, entrée capturée avant l opt-in). Une seule prise par
+        rejeu : la deuxième rend None, jamais un paquet périmé."""
+        e = self._echantillon
+        self._echantillon = None
+        if e is None or e[0] is None:
+            return None
+        sortie, n = e
+        return sortie[:, :n].clone()
+
     def rejouer_suivant(self) -> Optional[torch.Tensor]:
         """Rejoue le lot préparé par ``preparer`` et rend une VUE des logits
         (``entry["out"][:b*ql]`` : adresse stable pour une clé de godet
@@ -595,6 +641,7 @@ class GraphRunner:
         trace = bool(os.environ.get("ACVRAM_TRACE_STEPS"))
         if deja:
             self.evenement_jetons.record()
+            self._echantillon = (entry.get("sortie"), b_reel * ql)
             return entry["out"][:b_reel * ql]
         if trace and os.environ.get("ACVRAM_TRACE_CRENEAUX") and self.hybrid_layers:
             # Sonde (poste7 § 11) : ce que le rejeu va lire, couche 0 hybride —
@@ -634,6 +681,7 @@ class GraphRunner:
                 torch.cuda.synchronize(self.device)
         self.replays += 1
         self.evenement_jetons.record()
+        self._echantillon = (entry.get("sortie"), b_reel * ql)
         out = entry["out"][:b_reel * ql]
         t3 = time.perf_counter()
         getattr(self, "temps_bind", None) is None and setattr(self, "temps_bind", [])
@@ -777,6 +825,8 @@ class GraphRunner:
             "tables": torch.zeros(b, nblk, dtype=torch.long, device=d),
             "seq_lens": torch.zeros(b, dtype=torch.long, device=d),
         }
+        if self.sampler_graphe:
+            entry["sortie"] = torch.zeros(2, b * ql, dtype=torch.int64, device=d)
         self._fill(entry, batch)
         if os.environ.get("ACVRAM_TRACE_ENTREES"):
             self._sonde_entrees(entry, batch, entry["key"])
@@ -816,9 +866,12 @@ class GraphRunner:
                 w_.global_scale_float()
 
         def step() -> torch.Tensor:
-            return m.decode_fixed(entry["x"], entry["positions"],
-                                  entry["slots"], entry["tables"],
-                                  entry["seq_lens"], max_pos, q_len=ql)
+            out = m.decode_fixed(entry["x"], entry["positions"],
+                                 entry["slots"], entry["tables"],
+                                 entry["seq_lens"], max_pos, q_len=ql)
+            if "sortie" in entry:
+                echantillon_glouton_dans(entry["sortie"], out)
+            return out
 
         # Echauffement sur un flux annexe (exige par la capture), puis capture.
         # Les ecritures KV de ces passes sont identiques a celle du pas reel :
