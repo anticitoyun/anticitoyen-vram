@@ -91,32 +91,37 @@ def _parc_fixture(tmp_path):
     return parc, 2
 
 
-def test_filtre_vision_egale_les_alias_vision_du_tsv(tmp_path):
+@pytest.mark.parametrize("gui", ["claude-modeles", "kimi-modeles"])
+def test_filtre_vision_egale_les_alias_vision_du_tsv(tmp_path, gui):
     """Decision chef (a), 21/09 : « vision » ne sort QUE les modeles qui
     servent des images (vision_status), pas ceux qui portent le mot dans leur
     alias ou leur nom. Cassant : avant, le substring ramenait aussi le converti
-    texte-seul acvram-gamma-vision → 3 au lieu de 2."""
+    texte-seul acvram-gamma-vision → 3 au lieu de 2. Verifie dans les DEUX menus
+    (claude-modeles ET kimi-modeles), qui partagent le code de filtre."""
     parc, attendu = _parc_fixture(tmp_path)
     env = {**os.environ, "ACVRAM_GUI_TEST": "filtre:vision", "ACVRAM_PARC_CONFIG": str(parc),
            "CUDA_VISIBLE_DEVICES": "", "PYTHONPATH": os.path.join(ICI, "parc", "lib")}
     env.pop("XDG_CONFIG_HOME", None)
-    r = subprocess.run(["xvfb-run", "-a", PY, GUI], capture_output=True, text=True, env=env, timeout=120)
+    chemin = os.path.join(ICI, "parc", "bin", gui)
+    r = subprocess.run(["xvfb-run", "-a", PY, chemin], capture_output=True, text=True, env=env, timeout=120)
     lignes = [l for l in r.stdout.splitlines() if l.startswith("GUI_TEST ")]
     assert len(lignes) == 1, r.stdout[-500:] + r.stderr[-500:]
     result = json.loads(lignes[0][len("GUI_TEST "):])
-    assert result["visibles"] == attendu == 2, result
-    assert result["total"] == 4, result
+    assert result["visibles"] == attendu == 2, (gui, result)
+    assert result["total"] == 4, (gui, result)
 
 
-def test_les_deux_gui_ont_le_filtre_vision_semantique():
-    """La correction (a) doit vivre dans les DEUX menus : claude-modeles et
-    kimi-modeles partagent le code de filtre (aux 4 zones divergentes pres).
-    On verifie le predicat semantique dans les deux, et qu'aucun ne remet
-    « vision » parmi les synonymes cherches en substring. (kimi-modeles ne
-    demarre pas encore sous Xvfb — defaut prealable signale a part —, ce controle
-    de source garantit malgre tout la parite du filtre.)"""
-    import pathlib
-    for nom in ("claude-modeles", "kimi-modeles"):
-        src = pathlib.Path(ICI, "parc", "bin", nom).read_text()
-        assert 'if m.vision_status != "vision"' in src, f"{nom} : predicat vision absent"
-        assert 'lisibles += ["vision"' not in src, f"{nom} : « vision » encore en substring"
+@pytest.mark.parametrize("gui", ["claude-modeles", "kimi-modeles"])
+def test_bouton_factice_rend_2_dans_les_deux_gui(tmp_path, gui):
+    """Le crochet ACVRAM_GUI_TEST est présent et fonctionnel dans les DEUX menus :
+    un bouton inconnu rend rc 2. (Il manquait à kimi-modeles — porté le 21/09,
+    avec `import json`.)"""
+    chemin = os.path.join(ICI, "parc", "bin", gui)
+    env = {**os.environ, "ACVRAM_GUI_TEST": "clic:b_bidon", "XDG_CONFIG_HOME": str(tmp_path),
+           "CUDA_VISIBLE_DEVICES": "", "PYTHONPATH": os.path.join(ICI, "parc", "lib")}
+    env.pop("ACVRAM_PARC_CONFIG", None)
+    r = subprocess.run(["xvfb-run", "-a", PY, chemin], capture_output=True, text=True, env=env, timeout=120)
+    lignes = [l for l in r.stdout.splitlines() if l.startswith("GUI_TEST ")]
+    assert len(lignes) == 1, r.stdout[-500:] + r.stderr[-500:]
+    assert r.returncode == 2, (gui, r.returncode)
+    assert json.loads(lignes[0][len("GUI_TEST "):])["erreur"] == "bouton inconnu : b_bidon"

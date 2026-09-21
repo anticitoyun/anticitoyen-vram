@@ -12,6 +12,7 @@
 # Rien n'est dupliqué : « Ouvrir dans kimi » appelle kimi-modele dans un terminal,
 # « Précharger » appelle les lanceurs llamacpp-serveur / vllm-serveur. Un correctif
 # apporté aux scripts profite donc aussi à cette fenêtre.
+import json
 import os
 import re
 import shutil
@@ -61,6 +62,11 @@ KIMI_BIN = Path(os.path.expanduser(PARC.outils["kimi"])) if PARC.outils.get("kim
 PORT_WEB = int(PARC.extras.get("port_web_kimi", 58627))   # serveur kimi web local
 DOSSIERS_LANCEMENT = list(PARC.dossiers_lancement)
 DOSSIER_LANCEMENT_DEFAUT = DOSSIERS_LANCEMENT[0]
+# Test en processus, sans clic ni X pilotable (Broadway rend un canvas noir, xdotool exige sudo) :
+# ACVRAM_GUI_TEST=clic:<attribut du bouton>[@<alias>] | filtre:<texte> — le gestionnaire est appelé comme par un clic,
+# À SEC (aucun processus lancé, aucune URI ouverte : argv et URI journalisés), le retour est imprimé en une ligne
+# `GUI_TEST {…}` puis la fenêtre quitte ; rc 2 si le bouton n'existe pas. poste3 le joue sous Xephyr/Xvfb.
+GUI_TEST = os.environ.get("ACVRAM_GUI_TEST")
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -835,6 +841,48 @@ class Fenetre(Adw.ApplicationWindow):
     def selection_courante(self):
         return self.selection.get_selected_item()
 
+    def _selectionner(self, alias):
+        for i in range(self.selection.get_n_items()):
+            if self.selection.get_item(i).alias == alias:
+                self.selection.set_selected(i)
+                return alias
+        return None
+
+    def test_jouer(self):
+        """ACVRAM_GUI_TEST (voir l'en-tête) : joue l'action, imprime `GUI_TEST {…}`, quitte. Retour = toasts, lignes de
+        console, argv qui auraient été lancés, URI qui auraient été ouvertes, sélection, compte du filtre."""
+        r = self._test = {"test": GUI_TEST, "toasts": [], "console": [], "spawns": [], "uris": []}
+        self.toast = lambda texte: r["toasts"].append(texte)
+        dire = self.dire
+        self.dire = lambda texte, gras=False: (r["console"].append(texte), dire(texte, gras))
+        Gio.SubprocessLauncher.spawnv = lambda lanceur, argv: r["spawns"].append(list(argv))
+        Gtk.show_uri = lambda fen, uri, *_: r["uris"].append(str(uri))
+        rc = 0
+        try:
+            genre, _, arg = GUI_TEST.partition(":")
+            if genre == "filtre":
+                self.recherche.set_text(arg); self._sur_recherche(self.recherche)   # search-changed n'arrive qu'après 150 ms
+                r["visibles"], r["total"] = self.selection.get_n_items(), self.store.get_n_items()
+            elif genre == "clic":
+                nom, _, alias = arg.partition("@")
+                if alias:
+                    r["selection"] = self._selectionner(alias)
+                b = getattr(self, nom, None)
+                if not isinstance(b, Gtk.Button):
+                    r["erreur"], rc = f"bouton inconnu : {nom}", 2
+                elif isinstance(b, Gtk.ToggleButton):
+                    b.set_active(not b.get_active()); r["actif"] = b.get_active()
+                else:
+                    r["sensible"] = b.get_sensitive(); b.emit("clicked")
+            else:
+                r["erreur"], rc = f"forme inconnue : {GUI_TEST} (clic:<bouton>[@<alias>] | filtre:<texte>)", 2
+        except Exception as e:                          # le retour d'un gestionnaire qui plante est le plantage lui-même
+            r["exception"], rc = f"{type(e).__name__}: {e}", 1
+        print("GUI_TEST " + json.dumps(r, ensure_ascii=False), flush=True)
+        self.get_application().rc_test = rc
+        self.get_application().quit()
+        return False
+
     def _sur_selection(self):
         m = self.selection_courante()
         if m is None:
@@ -978,6 +1026,9 @@ class Fenetre(Adw.ApplicationWindow):
             return
         self.b_console.set_active(True)
         self.dire(f"$ {' '.join(argv)}", gras=True)
+        if GUI_TEST:                                   # à sec : la commande est le retour, rien n'est lancé
+            self._test["spawns"].append(list(argv)); self._test["env"] = dict(env or {})
+            return
         try:
             lanceur = Gio.SubprocessLauncher.new(
                 Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE)
@@ -1363,8 +1414,10 @@ def appliquer_habillage():
 
 class Application(Adw.Application):
     def __init__(self):
+        # sous test : instance non unique, sinon `run` réveille l'instance déjà ouverte de l'utilisateur par D-Bus
+        # et rend 0 sans rien jouer (vu le 21/09 : rc 0, aucune ligne GUI_TEST)
         super().__init__(application_id="fr.anticitoyen.KimiModeles",
-                         flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+                         flags=Gio.ApplicationFlags.NON_UNIQUE if GUI_TEST else Gio.ApplicationFlags.DEFAULT_FLAGS)
 
     def do_activate(self):
         appliquer_habillage()
@@ -1372,13 +1425,17 @@ class Application(Adw.Application):
         if ICONE.exists():
             Gtk.Window.set_default_icon_name("kimi-modele")
         fen.present()
+        if GUI_TEST:
+            GLib.idle_add(fen.test_jouer)
 
 
 def main():
     if not CONFIG.exists():
         print(f"config.toml introuvable : {CONFIG}", file=sys.stderr)
         return 1
-    return Application().run(sys.argv)
+    app = Application()
+    code = app.run(sys.argv)
+    return getattr(app, "rc_test", 0) or code
 
 
 if __name__ == "__main__":
