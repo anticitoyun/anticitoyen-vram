@@ -5,7 +5,7 @@ Objectif : plus rapide et moins de joules que llama.cpp, vLLM, TensorRT-LLM. Ten
 ## A — porte immédiate (utilisateur)
 1. `sudo dpkg -i acvram_0.6.34_amd64.deb` (racine du dépôt, sha256 dans poste3.md) — feu vert donné, non installé.
 2. Vibe série 2 : répondue (qrvibe01.md), verdicts 2.1-2.5 en fin de qr.md — 2.4 (ordre des leviers) et 2.5 (protocole énergie) intégrés ci-dessous.
-3. Questions ouvertes (pièce 12) : C9 119B et bf16 30B (60 Go) — oui/non de l'utilisateur.
+3. **OUI utilisateur (21/09 17 h) : C9 119B et bf16 30B (60 Go)** → pièces 19-20 ci-dessous.
 
 ## B — objectif b=12 (poste1, poste2, poste4)
 4. Chaîne ABBA sampler (poste4 226bf4da, ≈ 8 min, poste2) : tranche H1 ordre/dérive ; le protocole intercalé devient la règle des cellules A/B.
@@ -33,6 +33,10 @@ Objectif : plus rapide et moins de joules que llama.cpp, vLLM, TensorRT-LLM. Ten
 16. Après dpkg : rejeu 19/19 installé, --decoder parc, feu vert parc (pièces 4, 6).
 17. Poste THP/EPP (pièce 12, dernier : change la signature).
 18. Republier GitHub (`outils/publier-github.sh --pousser`) à chaque livraison ; release du prochain moteur.
+
+## H — ouverts par le OUI du 21/09 (après B-D, jamais avant l'objectif b=12)
+19. C9 — Mistral-Small-4-119B-2603 : cache d'experts (Vibe R9 série 1 à relire), plan mémoire par la formule du pic (M1 poste4), disque 119,4 G : conception poste1 à sec (une page : paliers, exil, prédiction t/s et J), puis prise poste2 ≤ 30 min par étape.
+20. bf16 30B (60 Go) : alias `Qwen3-VL-30B-A3B-awq-dequant-bf16` servi par acvram (référence P3 (3), déjà sur disque 62,1 Go) — fiche alias, cellule b=1 en étagé, sert de témoin qualité aux conversions nvfp4/4sur6.
 
 ## Sans pièce
 poste4 : verdict A/B quand une cellule tombe. chef : réarmer `/loop 20m` à la relance.
