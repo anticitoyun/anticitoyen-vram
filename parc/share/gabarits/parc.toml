@@ -1,0 +1,53 @@
+# ~/.config/acvram-parc/parc.toml — écrit par parc-installer, modifiable à la main.
+# Tout chemin de machine vit ici ; les scripts du paquet n'en contiennent aucun.
+[chemins]
+kimi_dir = "~/.kimi-code"                 # config.toml du CLI kimi (fusionné, jamais écrasé)
+tsv_dir = "~/TSV"                         # gguf-chemins, vllm-chemins, acvram-chemins, notes-modeles, vision-modeles
+secrets = "~/.config/ia-secrets.env"      # clés des moteurs locaux
+bin = "~/.local/bin"
+mcp_claude = "~/.config/claude-local/mcp.json"
+icone_claude = "~/.local/share/icons/hicolor/256x256/apps/claude-local.png"
+dossiers_lancement = ["~"]                # dossiers de travail proposés au lancement
+lib = "/usr/share/acvram-parc/kimi-menu.lib.sh"
+
+[racines]
+modeles = []                              # racines balayées (modeles-a-jour, integrite-modeles, telecharger-modele)
+profondeur = 4
+
+[outils]                                  # binaires hors paquet, vides = cherchés dans le PATH
+kimi = ""
+claude = ""
+hf = ""
+
+# Un bloc par moteur ; present = false (ou bloc absent) = aucun alias, port non réservé.
+[moteurs.acvram]
+present = false
+port = 8090
+[moteurs.llamacpp]
+present = false
+port = 8080
+chemin = ""                               # llama-server
+journal = ""
+[moteurs.rapide]
+present = false
+port = 8081
+[moteurs.vllm]
+present = false
+port = 8000
+[moteurs.tabby]
+present = false
+port = 5000
+tokens = ""                               # api_tokens.yml de TabbyAPI
+[moteurs.yals]
+present = false
+port = 5011
+[moteurs.jan]
+present = false
+port = 1337
+
+[extras]                                  # facultatif : ComfyUI, Open WebUI, contexte courant llama.cpp
+# comfy_start = ""
+# comfy_url = "http://127.0.0.1:8188"
+# openwebui_dir = ""
+# ctx_actuel = ""
+# port_web_kimi = 58627

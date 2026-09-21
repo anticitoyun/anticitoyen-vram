@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# acvram-serveur — sert un modèle converti acvram sur http://127.0.0.1:8090/v1.
+# Usage : acvram-serveur <alias|dossier-converti> [contexte]
+#   Un alias est résolu par ~/.kimi-code/acvram-chemins.tsv ; si le modèle
+#   demandé est déjà servi, le serveur en place est réutilisé tel quel.
+# Moteur : ~/Bureau/Claude/anticitoyen-vram (NVFP4 sur la 5090, INT4 sur la
+# 3080 Ti, graphes CUDA au décodage). Journal : /tmp/acvram-serveur.log
+set -euo pipefail
+TSV="$HOME/TSV/acvram-chemins.tsv"
+PORT=8090
+err() { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+
+[ $# -ge 1 ] || { err "Usage : acvram-serveur <alias|dossier> [contexte]"; exit 1; }
+CIBLE="$1"; CTX="${2:-${CTX:-}}"   # $2 prime, sinon la variable d'environnement (le banc la passe ainsi)
+
+if [ ! -d "$CIBLE" ]; then
+    ligne=$(grep "^$CIBLE	" "$TSV" 2>/dev/null | head -1) \
+        || { err "Alias absent de $TSV : $CIBLE"; exit 1; }
+    dossier=$(printf '%s' "$ligne" | cut -f2)
+    [ -n "$CTX" ] || CTX=$(printf '%s' "$ligne" | cut -f3)
+    alias_nom="$CIBLE"
+else
+    dossier="$CIBLE"
+    alias_nom=$(basename "$CIBLE")
+fi
+[ -d "$dossier" ] || { err "Dossier introuvable : $dossier"; exit 1; }
+CTX="${CTX:-32768}"
+
+# déjà servi ?
+servi=$(curl -s -m 2 "http://127.0.0.1:$PORT/v1/models" 2>/dev/null \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' \
+    2>/dev/null || true)
+[ "$servi" = "$alias_nom" ] && { echo "acvram sert déjà $alias_nom"; exit 0; }
+
+# remplacer le serveur en place
+pid=$(ss -tlnp 2>/dev/null | grep ":$PORT " | grep -oP 'pid=\K[0-9]+' | head -1 || true)
+[ -n "$pid" ] && { kill "$pid" 2>/dev/null || true; sleep 4; }
+
+# Epinglage par defaut, comme llamacpp-serveur (l.77) et vllm-serveur (l.225).
+# acvram etait le SEUL des trois a laisser les deux cartes visibles : le
+# planificateur recrutait alors la 3080 Ti (_replanifier, loader.py:1132), et
+# nos mesures portaient un attelage 5090+3080 Ti quand celles des concurrents
+# portaient la 5090 seule. Une surcharge explicite reste possible.
+: "${CUDA_VISIBLE_DEVICES:=0}"; : "${CUDA_DEVICE_ORDER:=PCI_BUS_ID}"
+export CUDA_VISIBLE_DEVICES CUDA_DEVICE_ORDER
+
+# Rien de ce qui decide du placement ou du regime ne doit etre choisi en
+# silence : ces trois valeurs changent ce qui est mesure.
+echo "acvram : service de $alias_nom (contexte $CTX)…"
+echo "acvram : cartes=$CUDA_VISIBLE_DEVICES  speculation=${SPECULATIF:-ngram}  plan_fige=${ACVRAM_PLAN_FIGE:-0}"
+# Source du code servi (sage-3b-lanceur-contexte-20-09) : le PAQUET installé par défaut ;
+# ACVRAM_ARBRE=<chemin du dépôt> = opt-in vers l'arbre de dev (son venv). La ligne « source= »
+# dit lequel, parce que « même code » entre l'arbre et le .deb est faux tant qu'un diff existe.
+if [ -n "${ACVRAM_ARBRE:-}" ]; then
+    [ -x "$ACVRAM_ARBRE/.venv/bin/acvram" ] || { err "ACVRAM_ARBRE=$ACVRAM_ARBRE : pas de .venv/bin/acvram"; exit 1; }
+    sha=$(git -C "$ACVRAM_ARBRE" rev-parse --short HEAD 2>/dev/null || echo inconnu)
+    br=$(git -C "$ACVRAM_ARBRE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo inconnu)
+    etat=$([ -z "$(git -C "$ACVRAM_ARBRE" status --porcelain -- acvram 2>/dev/null)" ] && echo propre || echo sale)
+    ACVRAM_BIN="$ACVRAM_ARBRE/.venv/bin/acvram"
+    SOURCE="arbre($br@$sha,$etat)"
+else
+    ACVRAM_BIN=${ACVRAM_PAQUET_BIN:-/usr/bin/acvram}
+    [ -x "$ACVRAM_BIN" ] || { err "paquet acvram absent ($ACVRAM_BIN) : sudo apt install ./acvram_<version>_amd64.deb, ou ACVRAM_ARBRE=<dépôt>"; exit 1; }
+    SOURCE="paquet($("$ACVRAM_BIN" --version 2>/dev/null | awk '{print $NF}'))"
+fi
+echo "acvram : source=$SOURCE"
+# UN SEUL constructeur : la ligne imprimée est, octet pour octet, celle que l'exec reçoit
+# (Sage 21/09 : l'ancien « à sec » omettait --speculative et --no-cuda-graphs). Test :
+# ACVRAM_EXEC=<programme> reçoit le tableau au premier plan à la place de setsid nohup.
+commande_serve() {
+    CMD=("$ACVRAM_BIN" serve "$dossier" --port "$PORT" --served-name "$alias_nom" --max-model-len "$CTX"
+         --speculative "${SPECULATIF:-ngram}")
+    [ -n "${GRAPHES:-}" ] && CMD+=(--no-cuda-graphs)
+    return 0
+}
+commande_serve
+printf 'commande :'; printf ' %q' "${CMD[@]}"; printf '\n'
+[ "${ACVRAM_SERVEUR_A_SEC:-0}" = 1 ] && exit 0
+if [ -n "${ACVRAM_EXEC:-}" ]; then exec "$ACVRAM_EXEC" "${CMD[@]}"; fi
+# Le serveur PREND LE VERROU carte.sh (mode service) : sinon une mesure le croit
+# libre (trou du 21/09, REGLES § 2). carte.sh detache le serveur en lui faisant
+# heriter le verrou (vivant tant que le serveur vit) et rend le PID. Repli sans
+# verrou si carte.sh est introuvable (paquet installe hors depot) — avec un
+# avertissement, jamais en silence.
+_ici=$(dirname "$(readlink -f "$0")")
+CARTE_SH=${ACVRAM_CARTE_SH:-$_ici/../../outils/carte.sh}
+if [ -x "$CARTE_SH" ]; then
+    srv_pid=$(ACVRAM_TYPE=service ACVRAM_NOM="$alias_nom" ACVRAM_SERVICE_LOG=/tmp/acvram-serveur.log \
+              ACVRAM_CARTE="${ACVRAM_CARTE:-$CUDA_VISIBLE_DEVICES}" \
+              "$CARTE_SH" "${CMD[@]}") \
+        || { err "carte.sh a refuse le verrou de la carte (voir ci-dessus)"; exit 1; }
+else
+    err "avertissement : carte.sh introuvable ($CARTE_SH) — serveur lance SANS verrou carte"
+    setsid nohup "${CMD[@]}" >> /tmp/acvram-serveur.log 2>&1 < /dev/null &
+fi
+
+for _ in $(seq 1 120); do
+    curl -s -m 2 "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1 \
+        && { echo "acvram prêt sur 127.0.0.1:$PORT ($alias_nom)"; exit 0; }
+    sleep 2
+done
+err "acvram n'a pas démarré (voir /tmp/acvram-serveur.log)"
+exit 1

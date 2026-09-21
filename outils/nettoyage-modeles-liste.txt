@@ -1,0 +1,199 @@
+# Liste de nettoyage — un chemin par ligne, '#' = commentaire. DÉCOCHER = retirer le '# ' en tête de ligne.
+# Tout est coché-commenté par défaut : rien ne bouge tant que la ligne commence par '#'.
+# Phase 1 : outils/nettoyage-modeles.sh outils/nettoyage-modeles-liste.txt  (déplace en corbeille, réversible)
+# Phase 2 : outils/nettoyage-modeles.sh --purger <disque>/corbeille-<date> --oui  (efface)
+# Détail et raisons : acvram-memoire/revue/sage-nettoyage-modeles-20-09.md
+
+## A — models_acvram_hdd : 54 convertis double-quantifiés, jamais servis (le MTP-srcQ5_K_M est gardé : chaîne MTP-exact)
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/G4-MeroMero-31B-uncensored-heretic-srcexl3_6_00bpw-nvfp4    #   22.8 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Gemma-4-Gembrain-31B-uncensored-heretic-srcEXL3_6_0bpw-nvfp4    #   22.8 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Ornith-1.5-35B-A3B-Heretic-APEX-I-Quality-nvfp4    #   21.9 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/muse-glimmer-30b-nvfp4    #   21.0 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/AgentWorld-35B-A3B-Heretic-srcQ4_K_M-nvfp4    #   20.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Huihui-Qwen3.6-35B-A3B-Opus-abl-srcQ4_K_M-nvfp4    #   20.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Huihui-Nex-N2-mini-abliterated-srcQ4_K_M-nvfp4    #   20.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Huihui-Qwen3.6-35B-A3B-abliterated-srcQ4_K_M-nvfp4    #   20.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/KAT-Coder-V2.5-Dev-srcQ4_K_M-nvfp4    #   20.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3.6-35B-A3B-uncensored-heretic-APEX-I-Quality-nvfp4    #   20.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/artemis-31b-srcexl3-nvfp4    #   20.1 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3.6-27B-Heretic-GLM52-Q5-nvfp4    #   19.9 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/DeepSeek-R1-Distill-Qwen-32B-srcQ4_K_M-nvfp4    #   19.6 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3-VL-32B-Instruct-heretic-v2-srcGGUF-nvfp4    #   19.6 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/AWAXIS-Think-31B-nvfp4    #   19.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Skyfall-31B-v4.2-heretic-srcexl3_4_0bpw-nvfp4    #   18.6 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/nemotron-lightning-heretic-srcexl3-nvfp4    #   18.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Nemotron-3.5-Lightning-30B-A3B-Heretic-Uncensored-srcQ6_K-nvfp4    #   18.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Nemotron-Cascade-2-30B-A3B-heretic-ara-srcQ5_K_M-nvfp4    #   18.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/NVIDIA-Nemotron-3-Nano-30B-A3B-heretic-srcQ5_K_M-nvfp4    #   18.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Nemotron-Lightning-30B-nvfp4    #   18.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3-VL-30B-A3B-abliterated-srcAWQ-nvfp4    #   17.7 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3-Coder-30B-abliterated-srcEXL3_5_0bpw-nvfp4    #   17.7 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3-30B-A3B-abliterated-erotic-srcAWQ-nvfp4    #   17.7 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3-30B-A3B-Thinking-2507-srcAWQ-nvfp4    #   17.7 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3.6-27B-Fable-Fusion-Uncensored-Heretic-srcEXL3_4_15bpw-nvfp4    #   17.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3.8-27B-ABLITERATED-srcEXL3_3_75bpw-nvfp4    #   17.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Huihui-Qwen3.8-27B-abliterated-srcQ5_K-nvfp4    #   17.2 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3.8-27B-Dominatrix-srcQ4_K_M-nvfp4    #   17.2 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3.8-27B-Fable-Distill-Heretic-ara-srcQ5_K_M-nvfp4    #   17.2 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3.8-27B-heretic-ara-srcQ6_K-nvfp4    #   17.2 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen-3.8-27B-Heretic-srci1_Q5_K_M-nvfp4    #   17.2 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3.8-27B-Heretic-RVN-vision-srcQ5_K_M-nvfp4    #   17.0 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3.8-27B-Uncensored-noMTP-srcQ5_K_M-nvfp4    #   17.0 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3.6-27B-Fable-Fusion-711-Heretic-srcQ5_K_M-nvfp4    #   17.0 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3.6-27B-NEO-CODE-HERE-2T-OT-srcQ4_K_M-nvfp4    #   17.0 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/ThinkingCap-Qwen3.6-27B-heretic-srcQ4_K_M-nvfp4    #   17.0 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3.8-27B-Heretic-Abliterated-srcQ5_K_M-nvfp4    #   17.0 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Cydonia-24B-srcexl3-nvfp4    #   16.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/devstral-24b-srcawq-nvfp4    #   16.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/gemma-4-26B-A4B-it-ultra-uncensored-heretic-srcQ4_K_XL-nvfp4    #   15.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Cydonia-Magnum-Diamond-24B-srcEXL3_6_0bpw-nvfp4    #   14.2 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/ariel-alloy-v1-24b-heretic-srcq4_k_m-nvfp4    #   14.2 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Llama-2-7b-hf    #   13.5 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/starcoder2-15b-int8    #   12.5 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/gemma4-12b-abliterated-exl3    #   10.8 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/gemma4-12b-heretic-gguf    #    9.5 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Nemo-12B-Claude-nvfp4    #    8.9 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3.6-12B-IQ-srcQ5_K_M-nvfp4    #    8.4 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Mistral-Nemo-12B-Heretic-nvfp4    #    7.9 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/qwen35-9b-abliterated-srcexl3-nvfp4    #    7.5 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/QwenPaw-Flash-9B-heretic-srcQ4_K_L-nvfp4    #    6.5 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-srcQ4_K_M-nvfp4    #    6.5 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_acvram_hdd/Qwen3.5-4B-NSFW-Heretic-Literotica-srcQ6_K-nvfp4    #    3.7 Go
+
+## A — SSD models_acvram : variantes d'étapes closes, doubles quantifications, campagne quota
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-srcbf16-nvfp4-avant-alpha-experts-fix    #   19.7 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-srcbf16-nvfp4-avant-echelle-fix    #   19.8 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-srcbf16-nvfp4-avant-mtp-fix    #   19.8 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-srcbf16-nvfp4-avant-noawq-experts    #   19.8 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-srcbf16-nvfp4-hadamard512    #   19.7 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-srcbf16-nvfp4-sansawq    #   19.7 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-srcbf16-nvfp4-k48-calibB    #   19.8 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-srcbf16-nvfp4-k48-calibA-verif17-09    #   19.8 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-srcbf16-nvfp4-k48-w4a4    #   19.8 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-vllm-direct    #   20.5 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-vllm-direct-v1-attention-nvfp4    #   18.8 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-nvfp4    #   17.6 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/Nemotron-3.5-Lightning-30B-A3B-nvfp4-calibA-etendue4096-repli8    #   19.8 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/Nemotron-3.5-Lightning-30B-A3B-nvfp4-calibA-repli135-INVALIDE-plancher-median-fautif    #   19.8 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/Nemotron-3.5-Lightning-30B-A3B-nvfp4-calibA-sansdown    #   19.8 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/Nemotron-3.5-Lightning-30B-A3B-nvfp4-precision-officielle    #   19.8 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/Nemotron-3.5-Lightning-30B-A3B-srcexl3_6bpw-nvfp4    #   18.3 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3.8-27B-srcexl3_6_00bpw-nvfp4    #   17.3 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3-Coder-30B-A3B-Instruct-srcQ4_K_M-nvfp4    #   17.7 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/Llama-2-7b-alphacommun-int8    #    7.0 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/Llama-2-7b-int8    #    7.0 Go
+
+## A — restes : bf16 en GGUF (le HF bf16 est sur le HDD), état ModelOpt, dossier de travail, janhq (NOTE : janhq contient Jan-v2-VL-max 19G, source du converti servi — ne cocher que Jan-v2-VL-med : voir ligne suivante)
+# /mnt/2TO_2023_980PRO/Modeles/models_gguf_tmp/Qwen3.8-27B-bf16.gguf    #   54.7 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_modelopt/Qwen3-Coder-30B-A3B-Instruct-ModelOpt-etat-quantifie.pt    #   24.3 Go
+# /mnt/2TO_2023_980PRO/Modeles/models_exl3/_work-coder    #   26.2 Go
+ /mnt/4TO_SATACMR_2022/Modeles/models_gguf/janhq    #   25.8 Go
+
+ /mnt/4TO_SATACMR_2022/Modeles/models_gguf/janhq/Jan-v2-VL-med-Q4_K_M    #   5.8 Go
+
+## A — hors des deux disques (le script refuse ces chemins sauf ACVRAM_NETTOYAGE_RACINES étendu : les traiter à la main après accord)
+ /mnt/AI_GENERATOR/hors-depot/p2-hf-18-09    # 230 Go — exports P2 clos, régénérables
+ /mnt/2TO_SSD_2025_IA/gguf/Qwen2.5-Coder-14B-bf16-pur    #  27.5 Go — bf16 GGUF, HF bf16 sur le HDD
+ ${HOME}/.var/app/ai.jan.Jan/data/Jan/data/llamacpp/models    #   5.4 Go — application Jan, ancien home
+ ~/.cache/huggingface/hub    #   5.2 Go — cache de téléchargement
+
+## B — jamais cités, jamais servis, retéléchargeables
+ /mnt/2TO_2023_980PRO/Modeles/sources_hf_temporaire/Kimi-Linear-48B-A3B-Instruct-bf16    #   98.3 Go
+ /mnt/4TO_SATACMR_2022/Modeles/models/Qwen3.6-35B-A3B-bf16    #   71.9 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models/Mistral-Nemo-2407-12B-Thinking-Claude-Gemini-GPT5.2-Uncensored-HERETIC    #   24.5 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_awq/Qwen3-VL-30B-A3B-abliterated-AWQ    #   19.2 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_awq/Qwen3-30B-A3B-Thinking-2507-AWQ    #   16.8 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_awq/Qwen3-30B-A3B-abliterated-erotic-AWQ    #   16.8 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models/Qwen2.5-Coder-7B-Instruct    #   15.2 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_awq/ERNIE-4.5-21B-A3B-Thinking-AWQ    #   14.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_awq/Devstral-Small-2507-AWQ    #   14.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_awq/Dolphin-Mistral-24B-Venice-AWQ    #   14.3 Go
+# /mnt/2TO_2023_980PRO/Modeles/sources_hf_temporaire/gpt-oss-20b-mxfp4    #   13.8 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models/deepseek-coder-6.7b-instruct    #   13.5 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models/Qwen2.5-Coder-3B-Instruct    #    6.2 Go
+
+# /mnt/AI_GENERATOR/colibri-modeles/qwen36-35b-a3b-i4-gs64    #  21 Go — projet colibri, hors disques
+
+## C — Qwen3.8-27B en GGUF, 12 variantes à 52-76 j/s (suggestion : en garder 3)
+ /mnt/4TO_SATACMR_2022/Modeles/models_gguf/.hf-Qwen3.8-27B-Uncensored-GGUF.log    #    0.0 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_gguf/Huihui-Qwen3.8-27B-abliterated-Q5_K    #   19.5 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen-3.8-27B-Heretic-i1-Q5_K_M    #   19.5 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3.8-27B-Dominatrix-Q4_K_M    #   16.8 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3.8-27B-Fable-Distill-Heretic-ara-Q5_K_M    #   20.1 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3.8-27B-Heretic-Abliterated-Q5_K_M    #   19.2 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3.8-27B-heretic-ara-Q6_K    #   22.4 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3.8-27B-Heretic-RVN-Q5_K_M-vision    #   21.6 Go   <- suggestion : GARDER
+ /mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3.8-27B-Q4_K_M-laure    #   16.8 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3.8-27B-Q6_K-lmstudio    #   22.4 Go   <- suggestion : GARDER
+ /mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3.8-27B-Q8_0-atomicchat    #   28.9 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3.8-27B-Uncensored-GGUF    #   17.7 Go   <- suggestion : GARDER
+# /mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3.8-27B-Uncensored-noMTP-Q5_K_M    #   19.2 Go
+
+## C — Qwen3.6-27B en GGUF, 5 variantes à 64-75 j/s (suggestion : en garder 2)
+ /mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3.6-27B-Fable-Fusion-711-Heretic-MTP-Q5_K_M    #   21.2 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3.6-27B-Fable-Fusion-711-Heretic-Q5_K_M    #   21.7 Go   <- suggestion : GARDER
+# /mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3.6-27B-Heretic-GLM52-Q5    #   20.3 Go
+ /mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3.6-27B-NEO-CODE-HERE-2T-OT-Q4_K_M    #   16.9 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_gguf/ThinkingCap-Qwen3.6-27B-heretic-Q4_K_M    #   17.5 Go   <- suggestion : GARDER
+
+## C — autres denses lents en GGUF (64-95 j/s ; convertis nvfp4 équivalents sur le SSD)
+# /mnt/4TO_SATACMR_2022/Modeles/models_gguf/ariel-alloy-v1-24b-heretic-q4_k_m    #   14.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_gguf/Dolphin-Mistral-GLM47-24B-Venice-Q5_K_M    #   16.8 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_gguf/gemma-4-31B-it-uncensored-heretic-Q4_K_M    #   19.9 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_gguf/granite-4.1-30b-heretic-Q5_K_M    #   20.5 Go
+
+## C — EXL3 denses lents (46-65 j/s, TabbyAPI seulement) — les rapides (Nemotron, Qwen3.6-35B-Opus, Coder-abl, Qwen3.5-9B-GDN, Fable-Fusion-Uncensored) ne sont pas listés
+# /mnt/4TO_SATACMR_2022/Modeles/models_exl3/Artemis-31B-v1.1-exl3-4.00bpw    #   19.7 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_exl3/Cydonia-Magnum-Diamond-24B-EXL3-6.0bpw    #   18.7 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_exl3/G4-MeroMero-31B-uncensored-heretic-exl3-6.00bpw    #   27.4 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_exl3/gemma-4-12B-it-abliterated-uncensored-exl3-4bpw    #    8.4 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_exl3/Gemma-4-Gembrain-31B-uncensored-heretic-EXL3-6.0bpw    #   27.4 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_exl3/LFM2.5-8B-A1B-uncensored-abliterated-exl3-6.0bpw    #    7.0 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_exl3/Muse-Glimmer-30B-heretic-exl3    #   26.5 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_exl3/Poe-8B-GLM5-HERETIC-EXL3-6.0bpw    #    8.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_exl3/Qwen3.5-4B-heretic-exl3-4.0bpw    #    4.4 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_exl3/Qwen3.6-27B-uncensored-heretic-v2-exl3-6.0bpw_h6    #   22.8 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_exl3/Qwen3.8-27B-ABLITERATED-EXL3-3.75bpw    #   16.1 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_exl3/Skyfall-31B-v4.2-heretic-exl3-4.0bpw    #   17.1 Go
+
+## C — 70B Q4 (> 32 Go de VRAM, débit jamais mesuré)
+ /mnt/4TO_SATACMR_2022/Modeles/models_gguf/DeepSeek-R1-Distill-Llama-70B-heretic.i1-Q4_K_M    #   42.5 Go
+ /mnt/4TO_SATACMR_2022/Modeles/models_gguf/Hermes-4-70B-heretic.i1-Q4_K_M    #   42.5 Go
+ /mnt/4TO_SATACMR_2022/Modeles/models_gguf/Llama-3.3-70B-Instruct-heretic.i1-Q4_K_M    #   42.5 Go
+
+ /mnt/2TO_2023_980PRO/Modeles/models_acvram/Llama-3.3-70B-Instruct-heretic-srci1_Q4_K_M-nvfp4    #  40.4 Go — 70B double-quantifié
+
+## C — vision (hors acvram : llama.cpp mmproj / ComfyUI) — à garder si tu t'en sers
+# /mnt/4TO_SATACMR_2022/Modeles/models_vision/Qwen2.5-VL-32B-Instruct-abliterated-i1-GGUF    #   20.6 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_vision/Qwen2.5-VL-7B-Abliterated-Caption-it-i1-GGUF    #    5.5 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_vision/Qwen2.5-VL-7B-Instruct-abliterated-i1-GGUF    #    5.5 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_vision/Qwen2.5-VL-7B-Instruct-GGUF    #    5.5 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_vision/Qwen2.5-VL-7B-NSFW-Caption-V3-abliterated-i1-GGUF    #    5.5 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_vision/Qwen3-VL-2B-Instruct-GGUF    #    2.3 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_vision/Qwen3-VL-30B-A3B-Instruct-Q8_0-GGUF    #   33.2 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_vision/Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking.Q5_K_M    #   23.2 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_vision/Qwen3-VL-8B-NSFW-Caption-V4.5-heretic-i1-GGUF    #    6.2 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_vision/Qwen3-VL-8B-NSFW-Caption-V4.5.f16    #   16.4 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_vision/Qwen3.6-35B-A3B-uncensored-heretic-GGUF    #   25.7 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models_vision/Qwen3VL-8B-Uncensored-HauhauCS-Aggressive-Q4_K_M    #    5.0 Go
+
+# /mnt/4TO_SATACMR_2022/Modeles/Modeles_HERETIC/Qwen3-VL-32B-Instruct-heretic-v2-GGUF    #  21.0 Go
+# /mnt/4TO_SATACMR_2022/Modeles/models/Nemotron-Nano-9B-v2-abliterated-bf16    #  17.8 Go
+
+## C — 119B / 120B : selon ta réponse C9 (a/b/c/d) ; avec (c) : cocher NVFP4, eagle et gpt-oss-120b, garder le GGUF
+# /mnt/2TO_2023_980PRO/Modeles/originaux/Mistral-Small-4-119B-2603-NVFP4    #  70.8 Go
+ /mnt/2TO_2023_980PRO/Modeles/originaux/Mistral-Small-4-119B-2603-eagle    #   0.4 Go
+# /mnt/2TO_2023_980PRO/Modeles/originaux/Mistral-Small-4-119B-2603-GGUF    #  73.8 Go — référence llama.cpp 24,2 j/s
+# /mnt/2TO_2023_980PRO/Modeles/sources_hf_temporaire/gpt-oss-120b    #  70.6 Go
+
+## C — références et paires (garder la paire ou aucun des deux)
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/GLM-4.7-Flash-srcbf16-bf16    #  61.1 Go — référence bf16 sur SSD (l'étalon peut se rejouer sur le HF bf16 du HDD)
+# /mnt/2TO_2023_980PRO/Modeles/models_acvram/qwen3-coder-next-80b    #  46.3 Go — converti (10 cit.)
+ /mnt/2TO_2023_980PRO/Modeles/sources_hf_temporaire/Qwen3-Coder-Next-FP8    #  80.4 Go — sa source
+
+## D — à DÉPLACER, pas à supprimer (à la main, après accord) : téléphone → /mnt/4TO_SATACMR_2022/Modeles/mobile/ ; EXL3 du SSD → HDD ; GLM bf16 de la racine → models/
+ mv ~/Bureau/Claude/ChatterUI-models ~/Bureau/Claude/gemma-4-E4B-it-ultra-uncensored-heretic-litertlm ~/Bureau/Claude/localdream-models /mnt/4TO_SATACMR_2022/Modeles/mobile/    # 51 Go
+ mv /mnt/2TO_2023_980PRO/Modeles/models_exl3/Qwen3-Coder-30B-A3B-Instruct-EXL3-4.25bpw /mnt/4TO_SATACMR_2022/Modeles/models_exl3/    # 16 Go
+ mv /mnt/4TO_SATACMR_2022/Modeles/GLM-4.7-Flash-bf16 /mnt/4TO_SATACMR_2022/Modeles/models/    # 62 Go
+# ComfyUI (/mnt/AI_GENERATOR/ComfyUI_PARTAGE/models/LLM, llm_gguf, text_encoders ≈ 115 Go) : recommandation = laisser à ComfyUI
+
