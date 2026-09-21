@@ -226,9 +226,9 @@ def test_un_contexte_non_tenu_est_clampe_et_la_ligne_le_dit(converted, monkeypat
     ``ctx_tenu=40(demandé 64)`` exacte, pas de refus (CTX_TENU_MIN abaissé pour le jouet) ; --ctx-strict refuse."""
     import torch
     import pytest
-    from acvram.engine import runner
+    from acvram.engine import contexte, runner
     monkeypatch.delenv("ACVRAM_CHAUFFE_CTX", raising=False)
-    monkeypatch.setattr(runner, "CTX_TENU_MIN", 8)
+    monkeypatch.setattr(contexte, "CTX_TENU_MIN", 8)   # 4 bis : la constante vit dans engine/contexte.py
     eng = _engine_cpu(converted)
     vrai = eng.generate
 
@@ -249,9 +249,9 @@ def test_un_contexte_non_tenu_est_clampe_et_la_ligne_le_dit(converted, monkeypat
 def test_un_contexte_tenu_sans_reserve_n_est_pas_tenu(converted, monkeypatch):
     """§ 2 (b) : la passe réussit mais laisse moins de max(5 %, 64 Mio) libres au-delà de 40 jetons → ctx_tenu=40 ;
     le témoin (réserve pleine) rend 64 : le seuil de réserve seul fait la différence."""
-    from acvram.engine import runner
+    from acvram.engine import contexte, runner
     monkeypatch.delenv("ACVRAM_CHAUFFE_CTX", raising=False)
-    monkeypatch.setattr(runner, "CTX_TENU_MIN", 8)
+    monkeypatch.setattr(contexte, "CTX_TENU_MIN", 8)   # 4 bis : la constante vit dans engine/contexte.py
     total = 32 << 30
     eng = _engine_cpu(converted)
     vu = []
@@ -274,9 +274,9 @@ def test_la_capture_des_graphes_vient_apres_le_clamp_et_a_sa_taille(converted, m
     64 > tenu 40 ⇒ graphs.max_model_len == 40, run jamais appelé avant le clamp, chargement réussi."""
     import torch
     from types import SimpleNamespace
-    from acvram.engine import runner
+    from acvram.engine import contexte, runner
     monkeypatch.delenv("ACVRAM_CHAUFFE_CTX", raising=False)
-    monkeypatch.setattr(runner, "CTX_TENU_MIN", 8)
+    monkeypatch.setattr(contexte, "CTX_TENU_MIN", 8)   # 4 bis : la constante vit dans engine/contexte.py
     eng = _engine_cpu(converted)
     eng.pipeline_actif = False                     # les faux graphes n ont que `run` (chemin sans recouvrement) ; rouge depuis ACVRAM_PIPELINE=1 par défaut
     journal = []
@@ -305,9 +305,9 @@ def test_la_confirmation_avec_graphes_baisse_le_tenu_de_deux_pas_puis_charge(con
     import torch
     import pytest
     from types import SimpleNamespace
-    from acvram.engine import runner
+    from acvram.engine import contexte, runner
     monkeypatch.delenv("ACVRAM_CHAUFFE_CTX", raising=False)
-    monkeypatch.setattr(runner, "CTX_TENU_MIN", 8)
+    monkeypatch.setattr(contexte, "CTX_TENU_MIN", 8)   # 4 bis : la constante vit dans engine/contexte.py
 
     def moteur(cout_pas: int):
         eng = _engine_cpu(converted)
@@ -342,9 +342,9 @@ def test_chaque_pas_de_chauffe_part_d_un_allocateur_vide(converted, monkeypatch)
     """chef 21/09 (3) : sans libération entre deux pas, les fragments du pas précédent s additionnent et chaque
     pas voit moins de libre — allocateur simulé : réservé cumulé tant que `_avant_essai_de_chauffe` ne le vide pas.
     Avec la libération : 64 tenu (chaque pas laisse ≥ 5 %) ; sans (méthode neutralisée) : la même chauffe descend."""
-    from acvram.engine import runner
+    from acvram.engine import contexte, runner
     monkeypatch.delenv("ACVRAM_CHAUFFE_CTX", raising=False)
-    monkeypatch.setattr(runner, "CTX_TENU_MIN", 8)
+    monkeypatch.setattr(contexte, "CTX_TENU_MIN", 8)   # 4 bis : la constante vit dans engine/contexte.py
     total = 100 << 20
     etat = {"reserve": 0, "vidages": 0, "essais": 0}
 

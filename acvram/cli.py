@@ -202,6 +202,7 @@ VARIABLES_LUES = {
     "ACVRAM_MULTI_PROJ",
     "ACVRAM_NVFP4_GEMV_MAX",
     "ACVRAM_PIPELINE",
+    "ACVRAM_SAMPLER_LOT",       # sampler vectorisé en opt-in (665eeacc)
     "ACVRAM_PLAN_FIGE",
     "ACVRAM_POOL_SYNC",
     "ACVRAM_PREFILL",

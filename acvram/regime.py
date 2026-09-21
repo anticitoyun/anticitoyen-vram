@@ -88,6 +88,7 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("SANS_PRECHARGE", "", None, None, "1 = pas de préchargement des couches exilées"),
     Variable("POOL_SYNC", "", None, None, "1 = pool d'experts synchrone"),
     Variable("PIPELINE", "1", None, "0", "lot préparé pendant le rejeu (runner) : 1 défaut depuis 0.6.34 (ids au bit b=1 et b=12) | 0 témoin"),
+    Variable("SAMPLER_LOT", "0", None, "1", "échantillonnage vectorisé sur le lot (sampler) : 0 défaut = ancienne boucle par ligne (verdict eea064fe : le lot ralentit b=12 de 2,2 %) | 1 opt-in"),
     Variable("PREFILL_BATCH", "", None, None, "prefills groupés"),
     Variable("SPECULATION_LOT_MAX", "2", None, None, "lot maximal sous spéculation"),
     Variable("MTP", "", None, None, "tête MTP (auto | none | mtp)"),
