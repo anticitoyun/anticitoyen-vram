@@ -35,7 +35,7 @@ Objectif : plus rapide et moins de joules que llama.cpp, vLLM, TensorRT-LLM. Ten
 18. Republier GitHub (`outils/publier-github.sh --pousser`) à chaque livraison ; release du prochain moteur.
 
 ## H — ouverts par le OUI du 21/09 (après B-D, jamais avant l'objectif b=12)
-19. C9 — conception FAITE (poste1-c9-conception-21-09 : S3 mixte ≈ 43 j/s à h=0,41, arrêt écrit) ; mesures M-HÔTE (≤ 5 min) et M-TRACE (≤ 10 min) par poste2 après le scellé E ; puis 3 commits du premier run (spec, table de noms + import nvfp4 compressed-tensors au bit, charge tout-hôte).
+19. C9 — conception FAITE ; ALARME poste1 21 h 2x : noyau hôte nvfp4 scalaire (2,2 Go/s par fil) → M-HÔTE probablement > 1,2 ms → arrêt (a) ; S2/S3 exigeraient un noyau hôte AVX-512 (plusieurs jours) ; tranché à la mesure c9-m-hote à vide (≤ 3 min). Conception FAITE (poste1-c9-conception-21-09 : S3 mixte ≈ 43 j/s à h=0,41, arrêt écrit) ; mesures M-HÔTE (≤ 5 min) et M-TRACE (≤ 10 min) par poste2 après le scellé E ; puis 3 commits du premier run (spec, table de noms + import nvfp4 compressed-tensors au bit, charge tout-hôte).
 20. bf16 30B (60 Go) : alias `Qwen3-VL-30B-A3B-awq-dequant-bf16` servi par acvram (référence P3 (3), déjà sur disque 62,1 Go) — fiche alias, cellule b=1 en étagé, sert de témoin qualité aux conversions nvfp4/4sur6.
 
 ## Sans pièce
