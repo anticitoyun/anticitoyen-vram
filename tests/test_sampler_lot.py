@@ -1,10 +1,15 @@
-"""`sample` vectorisé sur le lot == `_sample_lent` (témoin : l ancienne boucle par ligne, ACVRAM_SAMPLER_LENT=1) :
+"""`sample` vectorisé sur le lot (opt-in ACVRAM_SAMPLER_LOT=1) == `_sample_lent` (l ancienne boucle par ligne, défaut) :
 mêmes ids à générateur identique sur un lot factice mêlant glouton, top_k, top_p, min_p, température, pénalités ;
 mêmes logprobs quand ils sont demandés ; glouton pur = argmax seul, zéros sans demande. À sec (processeur)."""
 import copy, torch, pytest
 from acvram.engine.sampler import SamplingParams, sample, _sample_lent
 
 V = 4096
+
+
+@pytest.fixture(autouse=True)
+def _lot_actif(monkeypatch):
+    monkeypatch.setenv("ACVRAM_SAMPLER_LOT", "1")     # les tests d équivalence jouent le vectorisé ; le défaut est testé à part
 
 
 def _lot(seed=0):
@@ -30,12 +35,20 @@ def test_memes_ids_que_le_temoin_a_generateur_identique(seed):
     assert torch.equal(la, lb), "logprobs demandés par une ligne : calculés pour tout le lot, au bit"
 
 
-def test_temoin_sous_variable(monkeypatch):
-    logits, params, history = _lot(5)
-    monkeypatch.setenv("ACVRAM_SAMPLER_LENT", "1")
-    ta, _ = sample(logits.clone(), params, history, generator=torch.Generator().manual_seed(7))
-    tb, _ = _sample_lent(logits.clone(), params, history, generator=torch.Generator().manual_seed(7))
-    assert torch.equal(ta, tb)
+def test_defaut_lent_et_opt_in_lot(monkeypatch):
+    """Défaut = lent (verdict eea064fe) : sans variable, `sample` EST `_sample_lent` (mêmes logprobs, jamais zéros) ;
+    ACVRAM_SAMPLER_LOT=1 bascule sur le vectorisé (glouton pur → zéros sans demande)."""
+    from acvram.engine.sampler import sampler_texte
+    logits = torch.randn(12, V); params = [SamplingParams(temperature=0.0)] * 12
+    monkeypatch.delenv("ACVRAM_SAMPLER_LOT", raising=False)
+    assert sampler_texte() == "lent"
+    ta, la = sample(logits.clone(), params, [() for _ in params])
+    tb, lb = _sample_lent(logits.clone(), params, [() for _ in params])
+    assert torch.equal(ta, tb) and torch.equal(la, lb) and la.any()
+    monkeypatch.setenv("ACVRAM_SAMPLER_LOT", "1")
+    assert sampler_texte() == "lot"
+    tc, lc = sample(logits.clone(), params, [() for _ in params])
+    assert torch.equal(tc, tb) and not lc.any()
 
 
 def test_glouton_pur_argmax_seul_et_zeros_sans_demande():

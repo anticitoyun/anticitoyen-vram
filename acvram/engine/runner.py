@@ -29,7 +29,7 @@ import torch
 from ..memory.kvcache import BLOCK_SIZE, BlockAllocator
 from .loader import LoadedModel
 from .model import _DUMP_MOE, ForwardBatch
-from .sampler import SamplingParams, besoin_historique, sample
+from .sampler import sampler_texte, SamplingParams, besoin_historique, sample
 from .speculative import GardeSpeculation, Proposal, verify_proposal
 from .vision import ImageRequete, SansTourVision, TourVision, verifier_plages
 
@@ -805,6 +805,7 @@ class Engine:
                + f"kv_budget={self.allocator.num_blocks * BLOCK_SIZE}/{kv_seqs} "
                + f"kv={self.kv_format_servi()} "
                + f"pipeline={int(bool(self.pipeline_actif and self.graphs is not None))} "   # effectif : demandé ET graphes
+               + f"sampler={sampler_texte()} "
                + (f"kv_plan_override=1 " if r["kv_plan_override"] else "")
                + (f"llama4_scaling_beta={r['llama4_scaling_beta']}"
                   f"({'servi' if self._llama4_servi else 'non_servi'}) "

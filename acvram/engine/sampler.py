@@ -14,7 +14,7 @@ from typing import Optional
 
 import torch
 
-__all__ = ["SamplingParams", "sample"]
+__all__ = ["SamplingParams", "sample", "sampler_lot_actif", "sampler_texte"]
 
 
 @dataclass
@@ -85,6 +85,17 @@ def besoin_historique(params) -> bool:
 
 
 
+def sampler_lot_actif() -> bool:
+    """Chemin vectorisé en OPT-IN (`ACVRAM_SAMPLER_LOT=1`) : verdict poste2 21/09 (eea064fe, 6 fenêtres) — b=12 lot 1 506,2
+    contre lent 1 540,4 t/s, B/A 0,978, RÉFUTÉ ; GLM b=1 +0,9 % seulement. Le défaut reste l ancienne fonction
+    (`_sample_lent`) tant que la cause n est pas nommée sur carte ; la ligne de régime porte `sampler=lent|lot`."""
+    return os.environ.get("ACVRAM_SAMPLER_LOT", "0") == "1"
+
+
+def sampler_texte() -> str:
+    return "lot" if sampler_lot_actif() else "lent"
+
+
 def _colonne(valeurs, device, dtype=torch.float32) -> torch.Tensor:
     return torch.tensor(valeurs, device=device, dtype=dtype).unsqueeze(-1)
 
@@ -99,9 +110,9 @@ def sample(logits: torch.Tensor, params: list[SamplingParams],
     à b=12, pas de glue MoE) : un topk, un softmax, un tri, un multinomial pour tout le lot, jamais une boucle par
     ligne. Chemin glouton (le décodage mesuré) : un argmax dans le dtype des logits, sans cast fp32 ni logsumexp ;
     les logprobs ne se calculent que si une séquence les demande (`params.logprobs`), sinon zéros — le serveur ne
-    les sert pas. Équivalence : ids au bit avec `_sample_lent` (témoin, ACVRAM_SAMPLER_LENT=1) à générateur
-    identique, tests/test_sampler_lot.py."""
-    if os.environ.get("ACVRAM_SAMPLER_LENT") == "1":
+    les sert pas. Équivalence : ids au bit avec `_sample_lent` à générateur identique, tests/test_sampler_lot.py.
+    OPT-IN `ACVRAM_SAMPLER_LOT=1` (réfuté en service le 21/09, voir `sampler_lot_actif`)."""
+    if not sampler_lot_actif():
         return _sample_lent(logits, params, history, generator)
     penalites = history is not None and any(
         p.repetition_penalty != 1.0 or p.presence_penalty or p.frequency_penalty
@@ -160,8 +171,8 @@ def _sample_lent(logits: torch.Tensor, params: list[SamplingParams],
            history: Optional[list[list[int]]] = None,
            generator: Optional[torch.Generator] = None
            ) -> tuple[torch.Tensor, torch.Tensor]:
-    """TÉMOIN (ACVRAM_SAMPLER_LENT=1) : l ancienne fonction, une boucle par ligne du lot — gardée telle quelle pour le
-    test d équivalence de `sample` (mêmes ids à générateur identique) ; jamais en service.""" 
+    """L ancienne fonction, une boucle par ligne du lot — LE DÉFAUT EN SERVICE (verdict eea064fe) et le témoin du test
+    d équivalence de `sample` (mêmes ids à générateur identique).""" 
     penalites = history is not None and any(
         p.repetition_penalty != 1.0 or p.presence_penalty or p.frequency_penalty
         for p in params)

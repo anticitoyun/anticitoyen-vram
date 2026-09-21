@@ -418,3 +418,12 @@ def test_jamais_plus_de_blocs_que_le_contexte(converted):
     while not seq.finished:
         list(eng.step()); pic["n"] = max(pic["n"], len(seq.blocks))
     assert seq.length == 64 and pic["n"] == plafond, f"{pic['n']} blocs pour max_model_len=64 (plafond {plafond})"
+
+
+def test_la_ligne_de_regime_porte_le_sampler(converted, monkeypatch):
+    """`sampler=lent` par défaut (verdict eea064fe : le vectorisé ralentit b=12 de 2,2 %), `sampler=lot` sous ACVRAM_SAMPLER_LOT=1."""
+    monkeypatch.delenv("ACVRAM_SAMPLER_LOT", raising=False)
+    eng = _engine_cpu(converted)
+    assert " sampler=lent " in eng.regime_ligne() + " "
+    monkeypatch.setenv("ACVRAM_SAMPLER_LOT", "1")
+    assert " sampler=lot " in eng.regime_ligne() + " "
