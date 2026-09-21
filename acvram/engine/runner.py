@@ -2030,6 +2030,11 @@ class Engine:
                 self.ctx_tenu = None
                 return None
         self.reserve_chauffe: Optional[tuple[int, int]] = None           # (libre, seuil) de la dernière passe tenue
+        # Ordre imposé (chef 21/09, GLM k48 : OOM à la CAPTURE, avant la chauffe — la capture alloue au ctx
+        # demandé) : plan → clamp → capture → chauffe. Les graphes sont masqués pendant les essais : aucune
+        # capture ne peut se faire à un contexte que la chauffe n a pas encore tenu ; la taille de capture prend
+        # le contexte tenu (voir la fin).
+        graphes, self.graphs = self.graphs, None
 
         def essai(L: int) -> bool:
             try:
@@ -2068,6 +2073,7 @@ class Engine:
                     haut = milieu
             tenu = bas
         self._oublier_la_chauffe()
+        self.graphs = graphes
         self.ctx_demande = n
         self.ctx_tenu = tenu
         r = self.reserve_chauffe
@@ -2077,9 +2083,19 @@ class Engine:
             if strict or tenu < CTX_TENU_MIN:
                 raise ContexteNonTenu(n, tenu)
             self.max_model_len = tenu                                    # (c) clamp : 400 nommé au-delà, pas un 500
+            if self.graphs is not None:
+                self.graphs.max_model_len = tenu                         # la capture se dimensionne au tenu
             print(f"[acvram] contexte clampé à {tenu} (demandé {n}) : une invite au-delà reçoit un 400 nommé",
                   flush=True)
         return tenu
+
+    def demarrer_service(self, strict: bool = False, warm_max_len: int = 2048) -> tuple[Optional[int], int]:
+        """La séquence de chargement d un service, dans l ordre qui ne peut pas mentir : chauffe (clamp du contexte
+        au tenu, graphes masqués) PUIS capture des graphes au contexte tenu. Rend (ctx_tenu, captures).
+        Test cassant : ctx demandé > tenu ⇒ la capture voit le clampé et le chargement réussit."""
+        tenu = self.chauffer_contexte(strict=strict)
+        captures = self.warm_graphs(warm_max_len) if self.graphs is not None else 0
+        return tenu, captures
 
     def _apres_oom_de_chauffe(self) -> None:
         """Après un OOM de chauffe : séquences en cours abandonnées, blocs rendus, allocateur neuf, cache CUDA vidé."""

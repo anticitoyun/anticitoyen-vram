@@ -266,3 +266,31 @@ def test_un_contexte_tenu_sans_reserve_n_est_pas_tenu(converted, monkeypatch):
     eng2 = _engine_cpu(converted)
     monkeypatch.setattr(eng2, "_libre_apres_chauffe", lambda: (total // 2, total))
     assert eng2.chauffer_contexte(pas=8) == 64
+
+
+def test_la_capture_des_graphes_vient_apres_le_clamp_et_a_sa_taille(converted, monkeypatch):
+    """chef 21/09 (GLM k48 : OOM à la capture au ctx demandé, avant la chauffe) : demarrer_service = chauffe
+    (graphes masqués : aucun run pendant les essais) → clamp → capture au contexte TENU. Faux graphes : ctx demandé
+    64 > tenu 40 ⇒ graphs.max_model_len == 40, run jamais appelé avant le clamp, chargement réussi."""
+    import torch
+    from types import SimpleNamespace
+    from acvram.engine import runner
+    monkeypatch.delenv("ACVRAM_CHAUFFE_CTX", raising=False)
+    monkeypatch.setattr(runner, "CTX_TENU_MIN", 8)
+    eng = _engine_cpu(converted)
+    journal = []
+    faux_graphes = SimpleNamespace(max_model_len=64, captures=0, run=lambda batch: journal.append(("run", eng.max_model_len)) or None)
+    eng.graphs = faux_graphes
+    vrai = eng.generate
+
+    def faux(prompt_ids, params, images=None):
+        if len(prompt_ids) + 2 > 40:
+            raise torch.OutOfMemoryError("CUDA out of memory (simulé)")
+        journal.append(("chauffe", len(prompt_ids) + 2, eng.graphs))
+        return vrai(prompt_ids, params, images=images)
+    monkeypatch.setattr(eng, "generate", faux)
+    tenu, captures = eng.demarrer_service(warm_max_len=32)
+    assert tenu == 40 and eng.max_model_len == 40 and faux_graphes.max_model_len == 40
+    assert all(g is None for (_, _, g) in [j for j in journal if j[0] == "chauffe"]), "graphes visibles pendant la chauffe"
+    assert eng.graphs is faux_graphes and not [j for j in journal if j[0] == "run"], journal
+    assert " ctx_tenu=40(demandé 64) " in eng.regime_ligne() + " "
