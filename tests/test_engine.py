@@ -210,3 +210,59 @@ def test_opt_out_nomme_de_la_chauffe_jamais_en_service(converted, monkeypatch):
     monkeypatch.setenv("ACVRAM_TYPE", "service")
     eng2 = _engine_cpu(converted)
     assert eng2.chauffer_contexte(pas=8) == 64, "un service prouve son contexte malgré l'opt-out"
+
+
+def test_la_sequence_de_chauffe_est_pseudo_aleatoire_graine_fixe(converted):
+    """poste7 poste7-s2-k48-feu-vert-21-09 § 2 (a) : la chauffe ne passe plus ``[1]×N`` mais une séquence sur le
+    vocabulaire, graine 0, reproductible d'un chargement à l'autre (même séquence = même crête mesurée)."""
+    eng = _engine_cpu(converted)
+    a, b = eng.sequence_de_chauffe(62), eng.sequence_de_chauffe(62)
+    assert a == b and len(a) == 62 and a != [1] * 62 and len(set(a)) > 8
+    assert all(0 <= t < eng.spec.vocab_size for t in a)
+
+
+def test_un_contexte_non_tenu_est_clampe_et_la_ligne_le_dit(converted, monkeypatch):
+    """§ 2 (c) : OOM simulé au-delà de 40 → ctx_tenu=40, max_model_len clampé à 40, ligne
+    ``ctx_tenu=40(demandé 64)`` exacte, pas de refus (CTX_TENU_MIN abaissé pour le jouet) ; --ctx-strict refuse."""
+    import torch
+    import pytest
+    from acvram.engine import runner
+    monkeypatch.delenv("ACVRAM_CHAUFFE_CTX", raising=False)
+    monkeypatch.setattr(runner, "CTX_TENU_MIN", 8)
+    eng = _engine_cpu(converted)
+    vrai = eng.generate
+
+    def faux(prompt_ids, params, images=None):
+        if len(prompt_ids) + 2 > 40:
+            raise torch.OutOfMemoryError("CUDA out of memory (simulé)")
+        return vrai(prompt_ids, params, images=images)
+    monkeypatch.setattr(eng, "generate", faux)
+    assert eng.chauffer_contexte(pas=8) == 40
+    assert eng.max_model_len == 40 and eng.ctx_demande == 64
+    assert " ctx_tenu=40(demandé 64) " in eng.regime_ligne() + " ", eng.regime_ligne()
+    eng2 = _engine_cpu(converted)
+    monkeypatch.setattr(eng2, "generate", faux)
+    with pytest.raises(runner.ContexteNonTenu):
+        eng2.chauffer_contexte(pas=8, strict=True)
+
+
+def test_un_contexte_tenu_sans_reserve_n_est_pas_tenu(converted, monkeypatch):
+    """§ 2 (b) : la passe réussit mais laisse moins de max(5 %, 64 Mio) libres au-delà de 40 jetons → ctx_tenu=40 ;
+    le témoin (réserve pleine) rend 64 : le seuil de réserve seul fait la différence."""
+    from acvram.engine import runner
+    monkeypatch.delenv("ACVRAM_CHAUFFE_CTX", raising=False)
+    monkeypatch.setattr(runner, "CTX_TENU_MIN", 8)
+    total = 32 << 30
+    eng = _engine_cpu(converted)
+    vu = []
+    vrai = eng.generate
+
+    def note(prompt_ids, params, images=None):
+        vu.append(len(prompt_ids) + 2)
+        return vrai(prompt_ids, params, images=images)
+    monkeypatch.setattr(eng, "generate", note)
+    monkeypatch.setattr(eng, "_libre_apres_chauffe", lambda: ((total * 4 // 100) if vu[-1] > 40 else total // 2, total))
+    assert eng.chauffer_contexte(pas=8) == 40 and eng.reserve_chauffe[1] == total * 5 // 100
+    eng2 = _engine_cpu(converted)
+    monkeypatch.setattr(eng2, "_libre_apres_chauffe", lambda: (total // 2, total))
+    assert eng2.chauffer_contexte(pas=8) == 64

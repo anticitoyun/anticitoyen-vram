@@ -208,6 +208,16 @@ def signaler_champs_inconnus(req: Any, route: str) -> list[str]:
     return inconnus
 
 
+def _garde_contexte(engine, prompt_ids: list[int], detail: str = "") -> None:
+    """400 NOMMÉ pour une invite au-delà de ``max_model_len`` (jamais un 500 CUDA OOM) ; quand la chauffe a clampé
+    le contexte, le message porte le demandé et le tenu (poste7 poste7-s2-k48-feu-vert-21-09 § 2 (c))."""
+    if len(prompt_ids) >= engine.max_model_len:
+        demande = getattr(engine, "ctx_demande", None)
+        clamp = f" (demandé {demande}, tenu par la chauffe)" if demande not in (None, engine.max_model_len) else ""
+        raise HTTPException(400, f"invite de {len(prompt_ids)} jetons{detail} au-delà de max_model_len "
+                                 f"{engine.max_model_len}{clamp}")
+
+
 def _params_from(req: Any, default_max: int) -> SamplingParams:
     return SamplingParams(
         temperature=req.temperature,
@@ -954,12 +964,10 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             octets = [charger_image(u) for u in urls]           # ImageRefusee -> 400
             prompt_ids, images = preparer_images(service.processeur_vision(), prompt, octets)
             n_img = sum(f.n_jetons for f in images)
-            if len(prompt_ids) >= engine.max_model_len:
-                raise HTTPException(400, f"invite de {len(prompt_ids)} jetons dont {n_img} "
-                                         f"jetons image ({len(images)} image(s)) au-delà de "
-                                         f"max_model_len {engine.max_model_len}")
+            _garde_contexte(engine, prompt_ids, f" dont {n_img} jetons image ({len(images)} image(s))")
         else:
             prompt_ids = _encode(tokenizer, prompt)
+            _garde_contexte(engine, prompt_ids)
         params = _params_from(req, 512)
         request_id, q = await service.submit(prompt_ids, params, images)
 
@@ -1017,6 +1025,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             max_tokens=int(req.get("max_tokens", 512)),
             stop=list(req.get("stop_sequences") or []),
         )
+        _garde_contexte(engine, prompt_ids)
         request_id, q = await service.submit(prompt_ids, params)
         mid = new_id("msg")
 
@@ -1083,6 +1092,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             prompt_text = prompt[0] if isinstance(prompt, list) else prompt
             prompt_ids = _encode(tokenizer, str(prompt_text), brut=True)
         params = _params_from(req, 256)
+        _garde_contexte(engine, prompt_ids)
         request_id, q = await service.submit(prompt_ids, params)
 
         if req.stream:
