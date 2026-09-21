@@ -246,16 +246,21 @@ Deux constats issus de ces mesures ont changé les valeurs par défaut :
 * [`docs/FEUILLE-DE-ROUTE.md`](docs/FEUILLE-DE-ROUTE.md) — **ce qui n'est pas fait**, à lire en premier
 * [`CONVENTIONS.md`](CONVENTIONS.md) — conventions de travail sur le code (langue, style, contrôles avant de pousser)
 
-## Résultats mesurés (15/09/2026, RTX 5090 à 400 W, régime ≥ 20 s au compteur d'énergie)
+## Résultats mesurés (21/09/2026, RTX 5090 à 400 W, régime ≥ 20 s au compteur d'énergie)
 
 Qwen3-Coder-30B-A3B en NVFP4 (experts) + INT8 (attention, tête), même
 protocole pour tous les moteurs (`outils/`, une carte, `energie.py`) :
 
-| | acvram 0.6.5 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram 0.6.34 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| décodage 12 séquences | **934 t/s · 0,426 J/jeton** | 1 198-1 437 t/s · 0,271 J | — |
-| décodage 1 séquence | 232,7 t/s · 1,46 J/jeton | 197 t/s · 1,43 J | 1,17-1,39 J |
-| prefill pp2048 | 19 148 jetons/s | 34 788 | 8 671 (TabbyAPI, retiré) |
+| décodage 12 séquences | **1 540 t/s** | 1 596 t/s | — |
+| décodage 1 séquence | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
+| prefill pp2048 | **22 707 jetons/s** | 21 054 | 8 671 (TabbyAPI, retiré) |
+
+Débits du jour (poste 1030, régime éco `-lgc 2700`, pipeline en service). Le
+J/jeton à horloge égale contre les trois moteurs est en cours de remesure pour
+0.6.34 (`outils/gpu/mesure/banc-4moteurs.py`) et n'est donc pas publié ici — un
+chiffre sans régime n'est pas publié.
 
 Le 14/09 au matin acvram était à 630 t/s et 0,619 J/jeton sur la même
 cellule : les gains viennent de la MMA FP4 native de Blackwell
@@ -266,13 +271,14 @@ sa note dans `acvram-memoire/revue/` avec la prédiction scellée avant la
 mesure, l'instrument et son régime — un chiffre sans régime n'est pas publié.
 
 Où acvram est devant : modèles MLA (GLM-4.7-Flash) en NVFP4 natif sm_120, que
-vLLM ne sert qu'en FP8 ; et les modèles qui ne tiennent pas en VRAM. Où il ne
-l'est pas : le décodage à grand lot d'un MoE qui tient en VRAM, où vLLM garde
-×1,05 en débit et ×1,14 en énergie.
+vLLM ne sert qu'en FP8 (b=1 : 165,35 t/s en service) ; et les modèles qui ne
+tiennent pas en VRAM. Où il ne l'est pas : le décodage à grand lot d'un MoE qui
+tient en VRAM, où vLLM garde ×1,04 en débit (1 596 contre 1 540, écart 3,5 %) ;
+l'écart en énergie est à remesurer pour 0.6.34.
 
 ## État
 
-Version 0.6.5. Tout tourne sur la 5090 : noyaux CUDA compilés pour `sm_120a`
+Version 0.6.34. Tout tourne sur la 5090 : noyaux CUDA compilés pour `sm_120a`
 (FP4 natif) et `sm_86`, graphes CUDA, quantification NVFP4/INT8/INT4, serveur
 HTTP. Garde-fous en place : la carte est invisible aux sessions de travail
 (`CUDA_VISIBLE_DEVICES` vide) et seul `outils/carte.sh` la prête, sous verrou,
