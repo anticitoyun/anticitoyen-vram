@@ -28,6 +28,7 @@ est tenu par une prise en cours ; « sauté » est alors la seule ligne imprimé
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 
@@ -116,6 +117,18 @@ def _vision(alias, chemin):
     return ("vision", f"config.json:{mt or arch}")
 
 
+def _usages():
+    """Dérive la colonne « usage » de notes-modeles.tsv et le journal de preuves
+    usage-sources.tsv — APRÈS _ecrire_vision(), dont le tag « vision » dépend.
+    La table n'est jamais écrite à la main : elle se régénère ici. Le dériveur
+    (outils/usages-modeles.py) est un outil du dépôt, absent du paquet parc
+    installé : on l'ignore alors sans échouer, comme les lanceurs pour carte.sh."""
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "..", "..", "outils", "usages-modeles.py")
+    if os.path.exists(script):
+        subprocess.run([sys.executable, script], check=False)
+
+
 def _ecrire_vision():
     lignes = []
     for tsv in TSVS:
@@ -200,6 +213,7 @@ def main():
     un, deux = _index()
     rc = 0
     _ecrire_vision()
+    _usages()   # dérive la colonne usage + usage-sources.tsv, après le VISION_TSV
     for tsv in TSVS:
         if not os.path.exists(tsv):
             continue
