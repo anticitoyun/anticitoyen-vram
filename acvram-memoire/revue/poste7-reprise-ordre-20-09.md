@@ -44,3 +44,7 @@ Sans poste2, rien de 1-3 n'est fait par un autre poste.
 ## Addendum 20 h 17
 
 Règle 1 retirée (décision utilisateur 20 h 17, REGLES § 1, main 7e9f4276) : un tour « 1 » = oui de l'utilisateur, à suivre ; relances libres. Règles 2-3 et les blocs Ordre tiennent.
+
+## Addendum 20 h 2x — chef
+
+« Ni Chromium ni chef » (poste9 4) retiré : chef est membre du circuit (utilisateur 20 h 18). Pièce confiée : relecture témoin des 31 traductions trad-0634 (onglet Agent OS Open WebUI, 04ebb4db) — par langue, un appel `vibe -p` borné (`--max-turns 1 --max-price 0.05`), entrée = les 27 chaînes de la langue, sortie = seuls les numéros des chaînes qui ne sont pas dans cette langue ou gardent un mot français/anglais non traduit. Contrôle qui peut rendre faux : chef plante une chaîne française dans 3 langues sur 31 avant l'envoi ; 3/3 rattrapées = lecture valide, sinon la relecture ne compte pas. Coût plafond 31 × 0,05 ; résultat = liste (langue, n°) dans `chef.md`, corrections dans un commit, poste1 non mobilisée.
