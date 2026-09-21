@@ -1151,6 +1151,10 @@ class Fenetre(Adw.ApplicationWindow):
             self.toast("ComfyUI non configuré (extras.comfy_start de parc.toml)" if COMFY_START is None
                        else f"Script absent : {COMFY_START}")
             return
+        verrou = Path("/tmp/acvram-carte-0.lock.qui")
+        if verrou.exists() and verrou.read_text().strip():
+            self.toast("ComfyUI : une mesure est en cours (verrou acvram)")
+            return
         try:
             # le script démarre ComfyUIClaude (GPU 1), attend le port 8188 puis ouvre le navigateur
             Gio.SubprocessLauncher.new(Gio.SubprocessFlags.NONE).spawnv(["bash", str(COMFY_START)])

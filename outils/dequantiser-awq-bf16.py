@@ -8,13 +8,15 @@ instancier le modèle, et la référence standard (`references-transformers.py`,
 
     python outils/dequantiser-awq-bf16.py <source AWQ> <destination>      # venv avec safetensors + torch ; ≈ 60 Go écrits
     python outils/dequantiser-awq-bf16.py --test [<source AWQ>]           # test cassant : ma déquantification == compressed-tensors
+    python outils/dequantiser-awq-bf16.py --verifier <destination>        # clés et formes contre le modèle sur meta (rc 4 sinon)
 
-Noms de tenseurs conservés 1:1 (`X.weight_packed` + `X.weight_scale` + `X.weight_shape` → `X.weight`), `config.json` sans
+Noms de tenseurs conservés 1:1 (`X.weight_packed` + `X.weight_scale` + `X.weight_shape` → `X.weight`) SAUF les experts MoE,
+fusionnés par couche à la disposition du hub (`fusionner_experts`, FUSION_EXPERTS=1 par défaut pour Qwen3VLMoe), `config.json` sans
 `quantization_config`, fichiers du tokenizer et du processeur copiés, `acvram_source.json` = provenance (source, sha256 des
 shards, méthode). PAS d'`acvram_manifest.json` : un dossier qui en porte un est un alias acvram attendu au menu
 (tests/test_menus.py:211-222) et lu par le chargeur — celui-ci est une source brute bf16, témoin hors menu.
 """
-import os, sys, json, glob, shutil, hashlib, time
+import os, re, sys, json, glob, shutil, hashlib, time
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -38,6 +40,22 @@ def dequantiser(packed: torch.Tensor, scale: torch.Tensor, shape) -> torch.Tenso
     assert g * scale.shape[1] == C, (C, tuple(scale.shape))
     w = q.to(scale.dtype).view(R, scale.shape[1], g) * scale.unsqueeze(-1)
     return w.reshape(R, C).contiguous()
+
+
+EXPERT = re.compile(r"^(.*\.mlp\.experts)\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$")
+
+
+def fusionner_experts(prefixe: str, experts: dict) -> dict:
+    """Disposition du checkpoint officiel Qwen3-VL-MoE (hub Qwen/Qwen3-VL-30B-A3B-Instruct, en-tête safetensors lu le
+    21/09) : `experts.gate_up_proj` [E, H, 2I] et `experts.down_proj` [E, I, H], sans suffixe .weight — transformers
+    5.x n a de conversion par expert → fusionné que pour qwen2_moe/qwen3_moe (conversion_mapping.py), pas pour
+    qwen3_vl_moe (Transpose(1, 2) seulement) ; l AWQ par expert ne se chargeait que par le quantizer compressed-tensors.
+    Module : gate_up_proj[e] [2I, H], `linear(x, w).chunk(2)` → gate PUIS up ; hub = transposé [H, 2I]."""
+    E = len(experts)
+    assert sorted(experts) == list(range(E)), f"{prefixe} : experts {sorted(experts)[:3]}… ≠ 0..{E - 1}"
+    gu = torch.stack([torch.cat([experts[e]["gate_proj"], experts[e]["up_proj"]], 0).t() for e in range(E)]).contiguous()
+    dn = torch.stack([experts[e]["down_proj"].t() for e in range(E)]).contiguous()
+    return {prefixe + ".gate_up_proj": gu, prefixe + ".down_proj": dn}
 
 
 def reference(packed, scale, shape, num_bits=4, group_size=32):
@@ -75,6 +93,14 @@ def test(source=None):
         a, b = dequantiser(packed, scale, shape), reference(packed, scale, shape)
         assert torch.equal(a, b), "%s : divergence avec compressed-tensors" % k
         print("test réel : %s %s au bit == compressed-tensors" % (k, tuple(a.shape)))
+    # fusion des experts : gate PUIS up, transposé ; down transposé
+    ex = {e: {"gate_proj": torch.randn(4, 6).bfloat16(), "up_proj": torch.randn(4, 6).bfloat16(), "down_proj": torch.randn(6, 4).bfloat16()} for e in range(3)}
+    fu = fusionner_experts("m.experts", ex)
+    assert tuple(fu["m.experts.gate_up_proj"].shape) == (3, 6, 8) and tuple(fu["m.experts.down_proj"].shape) == (3, 4, 6)
+    for e in range(3):
+        assert torch.equal(fu["m.experts.gate_up_proj"][e][:, :4].t(), ex[e]["gate_proj"]) and torch.equal(fu["m.experts.gate_up_proj"][e][:, 4:].t(), ex[e]["up_proj"])
+        assert torch.equal(fu["m.experts.down_proj"][e].t(), ex[e]["down_proj"])
+    print("test fusion experts : [E, H, 2I] gate|up transposé, [E, I, H] down transposé")
     # bout en bout sur une source factice à deux shards (scale dans l autre shard que packed, un tenseur clair, config)
     import tempfile
     d = tempfile.mkdtemp(); src, dst = os.path.join(d, "src"), os.path.join(d, "dst"); os.makedirs(src)
@@ -108,8 +134,11 @@ def convertir(source, dest):
     if libre < min_go * 1024 ** 3:
         print("ECHEC : %.0f Go libres < %g Go sous %s" % (libre / 1e9, min_go, dest)); return 3
     os.makedirs(dest, exist_ok=True)
-    t0 = time.time(); shard, taille, n_shard, carte, n_deq, n_copie = {}, 0, 0, {}, 0, 0
-    sortie = []
+    fusion = os.environ.get("FUSION_EXPERTS", "1" if "Qwen3VLMoe" in "".join(cfg.get("architectures", [])) else "0") == "1"
+    n_experts = int(cfg.get("text_config", cfg).get("num_experts", 0) or 0)
+    assert not fusion or n_experts > 0, "FUSION_EXPERTS=1 mais num_experts absent de la config"
+    t0 = time.time(); shard, taille, n_shard, carte, n_deq, n_copie, n_fus = {}, 0, 0, {}, 0, 0, 0
+    sortie = []; tampon = {}                                                    # préfixe de couche → {e: {proj: W}}
 
     def flush():
         nonlocal shard, taille, n_shard
@@ -131,8 +160,19 @@ def convertir(source, dest):
                     t = dequantiser(f.get_tensor(k), lire(p + "weight_scale"), lire(p + "weight_shape")); k = p + "weight"; n_deq += 1
                 else:
                     t = f.get_tensor(k); n_copie += 1
-                shard[k] = t; taille += t.numel() * t.element_size()
+                m = EXPERT.match(k) if fusion else None
+                if m:                                                          # par expert → fusionné quand la couche est complète
+                    tampon.setdefault(m.group(1), {}).setdefault(int(m.group(2)), {})[m.group(3)] = t
+                    couche = tampon[m.group(1)]
+                    if len(couche) == n_experts and all(len(v) == 3 for v in couche.values()):
+                        for k2, t2 in fusionner_experts(m.group(1), tampon.pop(m.group(1))).items():
+                            shard[k2] = t2; taille += t2.numel() * t2.element_size(); n_fus += 1
+                    else:
+                        continue
+                else:
+                    shard[k] = t; taille += t.numel() * t.element_size()
                 if taille >= TAILLE_SHARD: flush()
+    assert not tampon, "couches d experts incomplètes : " + ", ".join(f"{p} ({len(v)} experts)" for p, v in tampon.items())
     flush()
     total = sum(os.path.getsize(os.path.join(dest, n)) for n in sortie)
     json.dump({"metadata": {"total_size": total}, "weight_map": carte}, open(os.path.join(dest, "model.safetensors.index.json"), "w"), indent=1)
@@ -144,14 +184,43 @@ def convertir(source, dest):
                        "sha256": {n: sha256_fichier(os.path.join(source, n)) for n in fichiers}},
             "methode": "outils/dequantiser-awq-bf16.py : nibbles int4 → (q − 8) × scale par groupe, produit bf16 (== compressed-tensors PackedQuantizationCompressor.decompress au bit)",
             "sortie": {"shards": {n: sha256_fichier(os.path.join(dest, n)) for n in sortie}, "octets": total,
-                       "tenseurs_dequantises": n_deq, "tenseurs_copies": n_copie, "duree_s": round(time.time() - t0)}}
+                       "tenseurs_dequantises": n_deq, "tenseurs_copies": n_copie, "tenseurs_experts_fusionnes": n_fus, "duree_s": round(time.time() - t0)}}
     json.dump(prov, open(os.path.join(dest, "acvram_source.json"), "w"), indent=1, ensure_ascii=False)
-    print("RESULTAT " + json.dumps({"dest": dest, "shards": len(sortie), "octets": total, "dequantises": n_deq, "copies": n_copie,
+    print("RESULTAT " + json.dumps({"dest": dest, "shards": len(sortie), "octets": total, "dequantises": n_deq, "copies": n_copie, "experts_fusionnes": n_fus,
                                     "duree_s": prov["sortie"]["duree_s"], "sha256_sortie": {n: h[:12] for n, h in prov["sortie"]["shards"].items()}}))
     return 0
 
 
+def verifier(dest):
+    """Clés et formes de l index écrit contre le modèle instancié sur `meta` (aucun poids lu) : experts fusionnés
+    comparés transposés (1, 2), comme le convertisseur de transformers les lit. Rend 0 si tout correspond."""
+    from transformers import AutoConfig, AutoModelForImageTextToText
+    from safetensors import safe_open
+    cfg = AutoConfig.from_pretrained(dest)
+    with torch.device("meta"):
+        modele = AutoModelForImageTextToText.from_config(cfg)
+    attendu = {k: tuple(v.shape) for k, v in modele.state_dict().items()}
+    idx = json.load(open(os.path.join(dest, "model.safetensors.index.json")))["weight_map"]
+    ecrit = {}
+    for fichier in sorted(set(idx.values())):
+        with safe_open(os.path.join(dest, fichier), "pt") as f:
+            for k in f.keys():
+                ecrit[k] = tuple(f.get_slice(k).get_shape())
+    manque, en_trop, formes = sorted(set(attendu) - set(ecrit)), sorted(set(ecrit) - set(attendu)), []
+    for k in set(attendu) & set(ecrit):
+        e = ecrit[k]
+        if k.endswith(("experts.gate_up_proj", "experts.down_proj")) and len(e) == 3:
+            e = (e[0], e[2], e[1])
+        if e != attendu[k]:
+            formes.append((k, ecrit[k], attendu[k]))
+    print("RESULTAT verifier " + json.dumps({"clefs_ecrites": len(ecrit), "attendues": len(attendu), "manquantes": manque[:5], "en_trop": en_trop[:5],
+                                             "formes_differentes": formes[:5], "n_manquantes": len(manque), "n_en_trop": len(en_trop), "n_formes": len(formes)}))
+    return 0 if not (manque or en_trop or formes) else 4
+
+
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--verifier":
+        sys.exit(verifier(sys.argv[2]))
     if len(sys.argv) >= 2 and sys.argv[1] == "--test":
         sys.exit(test(sys.argv[2] if len(sys.argv) > 2 else None))
     if len(sys.argv) != 3:

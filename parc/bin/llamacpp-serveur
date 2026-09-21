@@ -128,12 +128,26 @@ esac
 
 printf '%sDémarrage llama-server : %s (ctx %s)%s\n' "$c_d" "$(basename "$MODELE")" "$CTX" "$c_0"
 export LD_LIBRARY_PATH="$(dirname "$BIN")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-setsid nohup "$BIN" --model "$MODELE" --host 127.0.0.1 --port "$PORT" \
-  --ctx-size "$CTX" --jinja --api-key "$CLE" --alias "$(basename "$MODELE")" \
-  --cache-type-k "$CK" --cache-type-v "$CV" --flash-attn on --cache-reuse 256 -np 1 \
-  "${RAISON[@]}" "${TMPL[@]}" "${MMPROJ[@]}" \
-  "${gpu_args[@]}" >> "$DIR/serveur.log" 2>&1 < /dev/null &
-echo $! > "$DIR/serveur.pid"
+CMD=("$BIN" --model "$MODELE" --host 127.0.0.1 --port "$PORT"
+  --ctx-size "$CTX" --jinja --api-key "$CLE" --alias "$(basename "$MODELE")"
+  --cache-type-k "$CK" --cache-type-v "$CV" --flash-attn on --cache-reuse 256 -np 1
+  "${RAISON[@]}" "${TMPL[@]}" "${MMPROJ[@]}" "${gpu_args[@]}")
+# Le serveur PREND LE VERROU carte.sh (mode service) : sinon une mesure le croit
+# libre (trou du 21/09, REGLES § 2). Repli sans verrou, avec avertissement, si
+# carte.sh est introuvable. NB deux-gpu : le verrou ne couvre que la carte 0.
+_ici=$(dirname "$(readlink -f "$0")")
+CARTE_SH=${ACVRAM_CARTE_SH:-$_ici/../../outils/carte.sh}
+if [ -x "$CARTE_SH" ]; then
+  srv_pid=$(ACVRAM_TYPE=service ACVRAM_NOM="$(basename "$MODELE")" ACVRAM_SERVICE_LOG="$DIR/serveur.log" \
+            ACVRAM_CARTE="${ACVRAM_CARTE:-${CUDA_VISIBLE_DEVICES:-0}}" \
+            "$CARTE_SH" "${CMD[@]}") \
+      || { err "carte.sh a refuse le verrou de la carte (voir ci-dessus)"; exit 1; }
+  echo "$srv_pid" > "$DIR/serveur.pid"
+else
+  err "avertissement : carte.sh introuvable ($CARTE_SH) — serveur lance SANS verrou carte"
+  setsid nohup "${CMD[@]}" >> "$DIR/serveur.log" 2>&1 < /dev/null &
+  echo $! > "$DIR/serveur.pid"
+fi
 echo "$CTX" > "$DIR/ctx-actuel"
 
 for _ in $(seq 1 450); do

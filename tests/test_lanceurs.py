@@ -32,3 +32,21 @@ def test_lanceurs_existent_dans_parc_bin():
         lanceur = PARC_BIN / nom
         assert lanceur.is_file(), f"{nom} manquant dans {PARC_BIN}"
         assert lanceur.stat().st_mode & 0o111, f"{nom} n'est pas exécutable"
+
+
+def test_les_trois_serveurs_prennent_le_verrou_carte():
+    """Cassant (trou du 21/09, REGLES § 2) : acvram/llamacpp/vllm-serveur lancent
+    leur serveur via carte.sh en mode service (ACVRAM_TYPE=service), jamais par un
+    `setsid nohup` nu qui laisserait une mesure croire la carte libre. Le repli
+    `setsid nohup` reste permis SEULEMENT dans la branche « carte.sh introuvable »."""
+    for nom in ("acvram-serveur", "llamacpp-serveur", "vllm-serveur"):
+        src = (PARC_BIN / nom).read_text()
+        assert "ACVRAM_TYPE=service" in src and "CARTE_SH" in src, \
+            f"{nom} ne prend pas le verrou carte.sh en mode service"
+        # tout `setsid nohup` EXECUTE (hors commentaire) doit suivre l'avertissement « SANS verrou »
+        lignes = src.splitlines()
+        for i, ligne in enumerate(lignes):
+            if "setsid nohup" in ligne and not ligne.lstrip().startswith("#"):
+                contexte = "\n".join(lignes[max(0, i - 3):i + 1])
+                assert "SANS verrou" in contexte, \
+                    f"{nom}:{i+1} garde un `setsid nohup` hors de la branche de repli :\n{contexte}"
