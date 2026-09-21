@@ -26,7 +26,7 @@ Objectif : plus rapide et moins de joules que llama.cpp, vLLM, TensorRT-LLM. Ten
 
 ## F — modularisation (4 bis, à sec)
 13. model.py 2-5 : deepstack, attention, couches, moe (2-3 en stash poste1 ; moe touche 4 tests carte → rejeu poste2).
-14. GUI module 3 fenetre.py (fait chez poste3, preuve Xvfb à jouer, puis commit) ; écart GLib.shell_quote à trancher.
+14. ~~GUI module 3~~ FAIT (c365094d, 4 bis GUI clos : lanceurs 80/78 l.).
 15. Ensuite : convert.py (2 398), loader.py (1 749), layers.py (1 449), kernels/__init__.py (1 401).
 
 ## G — livraison
