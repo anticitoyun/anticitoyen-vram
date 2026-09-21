@@ -89,8 +89,8 @@ def test(source=None):
         idx = json.load(open(os.path.join(source, "model.safetensors.index.json")))["weight_map"]
         k = sorted(k for k in idx if k.endswith(".weight_packed"))[0]; p = k[: -len("weight_packed")]
         lire = lambda n: safe_open(os.path.join(source, idx[n]), "pt").get_tensor(n)
-        packed, scale, shape = lire(k), lire(p + "weight_scale"), lire(p + "weight_shape")
-        a, b = dequantiser(packed, scale, shape), reference(packed, scale, shape)
+        pk, sc, sh = lire(k), lire(p + "weight_scale"), lire(p + "weight_shape")    # noms distincts : `packed` sert encore ci-dessous
+        a, b = dequantiser(pk, sc, sh), reference(pk, sc, sh)
         assert torch.equal(a, b), "%s : divergence avec compressed-tensors" % k
         print("test réel : %s %s au bit == compressed-tensors" % (k, tuple(a.shape)))
     # fusion des experts : gate PUIS up, transposé ; down transposé
