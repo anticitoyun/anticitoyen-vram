@@ -12,3 +12,6 @@ Un ordre = une ligne ; « livré » = sha ou verdict ; « écart » = ce qui n'a
 | 12 h 3x | poste3 | ComfyUI verrou → § 1a crochet → buymeacoffee → dépersonnalisation → usage ; nvcc au trou | — | — |
 | 12 h 3x | poste1 | H2 glue après verdict NVTX de poste4 | — | — |
 | 12 h 3x | poste4 | verdict NVTX/H2 dès les sorties de poste2 | — | — |
+| 13 h 01 | poste2 | NVTX → 4 alias (8a92ffbc) → … (ordre 12 h 35) | rien depuis 12 h 35 | `sleep 1800` dans son shell depuis 12 h 35 (attente aveugle de 30 min au lieu d'une prise) — rappel envoyé |
+| 13 h 01 | poste3 | cinq pièces à sec (12 h 35), rappel 12 h 44 | rien depuis 9456ce40 | **écart répété** : idle sans livrer, signalé à l'utilisateur |
+| 13 h 01 | poste1, poste4 | attendent NVTX (dépend de poste2) | — | aucun |
