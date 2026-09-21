@@ -893,7 +893,7 @@ class Engine:
                 # On réserve l'invite plus un peu de marge, pour que les
                 # premières étapes de décodage n'aient pas besoin aussitôt d'un
                 # bloc supplémentaire.
-                need = seq.blocks_needed(extra=BLOCK_SIZE)
+                need = min(seq.blocks_needed(extra=BLOCK_SIZE), self._blocs_plafond())
                 if need > self.allocator.num_blocks:
                     # Jamais admissible, même carte vide : la garder en file
                     # laissait le moteur tourner à vide sans une ligne (70B
@@ -1152,8 +1152,15 @@ class Engine:
         self._finish(seq, "length")
         return sortie
 
+    def _blocs_plafond(self) -> int:
+        """Jamais plus de blocs qu il n en faut pour ``max_model_len`` (une séquence n écrit aucune position au-delà :
+        `length >= max_model_len` finit la séquence). La marge d admission ``+BLOCK_SIZE`` au-delà donnait une table de
+        257 blocs à un graphe dimensionné au contexte (256) : P3 (4) 30B, confirmation avec graphes à 4096 →
+        ``size of tensor a (256) must match b (257)`` — et le même 500 pour toute invite > max_model_len − 16 sous graphes."""
+        return (int(self.max_model_len) + BLOCK_SIZE - 1) // BLOCK_SIZE
+
     def _grow(self, seq: Sequence, extra: int = 0) -> bool:
-        need = seq.blocks_needed(extra=extra)
+        need = min(seq.blocks_needed(extra=extra), self._blocs_plafond())
         if need <= len(seq.blocks):
             return True
         if self.allocator.num_free < need - len(seq.blocks):
