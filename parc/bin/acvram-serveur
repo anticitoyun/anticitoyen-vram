@@ -77,7 +77,22 @@ commande_serve
 printf 'commande :'; printf ' %q' "${CMD[@]}"; printf '\n'
 [ "${ACVRAM_SERVEUR_A_SEC:-0}" = 1 ] && exit 0
 if [ -n "${ACVRAM_EXEC:-}" ]; then exec "$ACVRAM_EXEC" "${CMD[@]}"; fi
-setsid nohup "${CMD[@]}" >> /tmp/acvram-serveur.log 2>&1 < /dev/null &
+# Le serveur PREND LE VERROU carte.sh (mode service) : sinon une mesure le croit
+# libre (trou du 21/09, REGLES § 2). carte.sh detache le serveur en lui faisant
+# heriter le verrou (vivant tant que le serveur vit) et rend le PID. Repli sans
+# verrou si carte.sh est introuvable (paquet installe hors depot) — avec un
+# avertissement, jamais en silence.
+_ici=$(dirname "$(readlink -f "$0")")
+CARTE_SH=${ACVRAM_CARTE_SH:-$_ici/../../outils/carte.sh}
+if [ -x "$CARTE_SH" ]; then
+    srv_pid=$(ACVRAM_TYPE=service ACVRAM_NOM="$alias_nom" ACVRAM_SERVICE_LOG=/tmp/acvram-serveur.log \
+              ACVRAM_CARTE="${ACVRAM_CARTE:-$CUDA_VISIBLE_DEVICES}" \
+              "$CARTE_SH" "${CMD[@]}") \
+        || { err "carte.sh a refuse le verrou de la carte (voir ci-dessus)"; exit 1; }
+else
+    err "avertissement : carte.sh introuvable ($CARTE_SH) — serveur lance SANS verrou carte"
+    setsid nohup "${CMD[@]}" >> /tmp/acvram-serveur.log 2>&1 < /dev/null &
+fi
 
 for _ in $(seq 1 120); do
     curl -s -m 2 "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1 \
