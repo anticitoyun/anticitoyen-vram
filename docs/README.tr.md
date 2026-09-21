@@ -240,16 +240,18 @@ Bu ölçümlerden çıkan iki bulgu varsayılanları değiştirdi:
 * [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **yapılmamış olanlar**, önce okuyun
 * [`CONVENTIONS.md`](../CONVENTIONS.md) — kod üzerinde çalışma kuralları (dil, biçem, push öncesi denetimler)
 
-## Ölçülen sonuçlar (15/09/2026, 400 W'ta RTX 5090, enerji sayacında ≥ 20 s rejim)
+## Ölçülen sonuçlar (21/09/2026, 400 W'ta RTX 5090, enerji sayacında ≥ 20 s rejim)
 
 NVFP4 (uzmanlar) + INT8 (dikkat, baş) olarak Qwen3-Coder-30B-A3B, tüm
 motorlar için aynı protokol (`outils/`, tek kart, `energie.py`):
 
-| | acvram 0.6.5 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram 0.6.34 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| çözümleme, 12 dizi | **934 j/s · 0,426 J/jeton** | 1 198-1 437 j/s · 0,271 J | — |
-| çözümleme, 1 dizi | 232,7 j/s · 1,46 J/jeton | 197 j/s · 1,43 J | 1,17-1,39 J |
-| prefill pp2048 | 19 148 jeton/s | 34 788 | 8 671 (TabbyAPI, geri çekildi) |
+| çözümleme, 12 dizi | **1 540 j/s** | 1 596 j/s | — |
+| çözümleme, 1 dizi | **380,8 j/s** | 290,6 j/s | 323,6 j/s |
+| prefill pp2048 | **22 707** jeton/s | 21 054 | 8 671 (TabbyAPI, geri çekildi) |
+
+Günün verimi (tezgâh 1030, eko rejim `-lgc 2700`, hizmetteki ardışık düzen). Üç motora karşı eşit saat frekansında J/jeton, 0.6.34 için yeniden ölçülüyor (`outils/gpu/mesure/banc-4moteurs.py`) ve bu yüzden burada yayımlanmıyor — rejimi olmayan bir sayı yayımlanmaz.
 
 14/09 sabahı acvram aynı hücrede 630 j/s ve 0,619 J/jeton'daydı: kazanımlar
 Blackwell'in yerli FP4 MMA'sından (`mma.sync … kind::mxf4nvf4`, bf16'ya göre
@@ -260,13 +262,14 @@ tensör çekirdeği GEMM'inden gelir. Her rakamın `acvram-memoire/revue/` için
 rejimsiz bir rakam yayımlanmaz.
 
 acvram'ın önde olduğu yer: vLLM'in yalnızca FP8'de sunduğu, yerli sm_120
-NVFP4'teki MLA modelleri (GLM-4.7-Flash); ve VRAM'e sığmayan modeller. Önde
-olmadığı yer: VRAM'e sığan bir MoE'nin büyük yığınlı çözümlemesi; burada vLLM
-verimde ×1,05 ve enerjide ×1,14 tutar.
+NVFP4'teki MLA modelleri (GLM-4.7-Flash, b=1: hizmette 165,35 j/s); ve VRAM'e
+sığmayan modeller. Önde olmadığı yer: VRAM'e sığan bir MoE'nin büyük yığınlı
+çözümlemesi; burada vLLM verimde ×1,04 tutar (1 596'ya karşı 1 540, %3,5 fark);
+enerjideki fark 0.6.34 için yeniden ölçülecek.
 
 ## Durum
 
-Sürüm 0.6.5. Her şey 5090'da çalışır: `sm_120a` (yerli FP4) ve `sm_86` için
+Sürüm 0.6.34. Her şey 5090'da çalışır: `sm_120a` (yerli FP4) ve `sm_86` için
 derlenmiş CUDA çekirdekleri, CUDA grafları, NVFP4/INT8/INT4 kuantizasyonu,
 HTTP sunucusu. Korkuluklar yerinde: kart çalışma oturumlarına görünmez
 (`CUDA_VISIBLE_DEVICES` boş) ve yalnızca `outils/carte.sh` onu kilit altında

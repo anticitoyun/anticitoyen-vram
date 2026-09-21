@@ -245,16 +245,21 @@ Kaksi näistä mittauksista saatua havaintoa muutti oletusarvoja:
 * [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **mitä ei ole tehty**, lue ensin
 * [`CONVENTIONS.md`](../CONVENTIONS.md) — koodin työskentelykäytännöt (kieli, tyyli, tarkistukset ennen pushia)
 
-## Mitatut tulokset (15.9.2026, RTX 5090 400 W:ssa, ≥ 20 s:n ajo energiamittarilla)
+## Mitatut tulokset (21.9.2026, RTX 5090 400 W:ssa, ≥ 20 s:n ajo energiamittarilla)
 
 Qwen3-Coder-30B-A3B NVFP4:nä (asiantuntijat) + INT8:na (huomio, pää), sama
 protokolla kaikille moottoreille (`outils/`, yksi kortti, `energie.py`):
 
-| | acvram 0.6.5 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram 0.6.34 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| dekoodaus, 12 sekvenssiä | **934 t/s · 0,426 J/token** | 1 198-1 437 t/s · 0,271 J | — |
-| dekoodaus, 1 sekvenssi | 232,7 t/s · 1,46 J/token | 197 t/s · 1,43 J | 1,17-1,39 J |
-| prefill pp2048 | 19 148 tokenia/s | 34 788 | 8 671 (TabbyAPI, vedetty pois) |
+| dekoodaus, 12 sekvenssiä | **1 540 t/s** | 1 596 t/s | — |
+| dekoodaus, 1 sekvenssi | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
+| prefill pp2048 | **22 707 tokenia/s** | 21 054 | 8 671 (TabbyAPI, vedetty pois) |
+
+Päivän läpimenot (asema 1030, säästöajotila `-lgc 2700`, liukuhihna palvelussa).
+J/token samalla kellotaajuudella kolmea moottoria vastaan mitataan parhaillaan
+uudelleen versiolle 0.6.34 (`outils/gpu/mesure/banc-4moteurs.py`), joten sitä ei
+julkaista tässä — lukua ilman ajotilaa ei julkaista.
 
 Aamulla 14.9. acvram oli samassa solussa 630 t/s ja 0,619 J/token: parannukset
 tulevat Blackwellin natiivista FP4-MMA:sta (`mma.sync … kind::mxf4nvf4`, ×7,9
@@ -265,14 +270,15 @@ hakemistossa `acvram-memoire/revue/` ennen mittausta sinetöityine
 ennusteineen, instrumentteineen ja ajotiloineen — lukua ilman ajotilaa ei
 julkaista.
 
-Missä acvram on edellä: MLA-mallit (GLM-4.7-Flash) natiivina sm_120-NVFP4:nä,
-joita vLLM tarjoilee vain FP8:na; ja mallit, jotka eivät mahdu VRAM-muistiin.
-Missä ei: VRAM-muistiin mahtuvan MoE:n suurten erien dekoodaus, jossa vLLM
-säilyttää ×1,05 läpimenossa ja ×1,14 energiassa.
+Missä acvram on edellä: MLA-mallit (GLM-4.7-Flash) natiivina sm_120-NVFP4:nä
+(b=1: 165,35 t/s palvelussa), joita vLLM tarjoilee vain FP8:na; ja mallit, jotka
+eivät mahdu VRAM-muistiin. Missä ei: VRAM-muistiin mahtuvan MoE:n suurten erien
+dekoodaus, jossa vLLM säilyttää ×1,04 läpimenossa (1 596 vs. 1 540, ero 3,5 %);
+energiaero on mitattava uudelleen versiolle 0.6.34.
 
 ## Tila
 
-Versio 0.6.5. Kaikki pyörii 5090:llä: CUDA-ytimet käännetty `sm_120a`:lle
+Versio 0.6.34. Kaikki pyörii 5090:llä: CUDA-ytimet käännetty `sm_120a`:lle
 (natiivi FP4) ja `sm_86`:lle, CUDA-graafit, NVFP4/INT8/INT4-kvantisointi,
 HTTP-palvelin. Suojakaiteet paikoillaan: kortti on näkymätön työistunnoille
 (`CUDA_VISIBLE_DEVICES` tyhjä) ja vain `outils/carte.sh` lainaa sen lukon

@@ -246,16 +246,21 @@ Două constatări din aceste măsurători au schimbat valorile implicite:
 * [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **ce nu este făcut**, de citit primul
 * [`CONVENTIONS.md`](../CONVENTIONS.md) — convenții de lucru asupra codului (limbă, stil, controale înainte de push)
 
-## Rezultate măsurate (15/09/2026, RTX 5090 la 400 W, regim ≥ 20 s la contorul de energie)
+## Rezultate măsurate (21/09/2026, RTX 5090 la 400 W, regim ≥ 20 s la contorul de energie)
 
 Qwen3-Coder-30B-A3B în NVFP4 (experți) + INT8 (atenție, cap), același
 protocol pentru toate motoarele (`outils/`, o placă, `energie.py`):
 
-| | acvram 0.6.5 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram 0.6.34 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| decodare 12 secvențe | **934 t/s · 0,426 J/token** | 1 198-1 437 t/s · 0,271 J | — |
-| decodare 1 secvență | 232,7 t/s · 1,46 J/token | 197 t/s · 1,43 J | 1,17-1,39 J |
-| prefill pp2048 | 19 148 tokeni/s | 34 788 | 8 671 (TabbyAPI, retras) |
+| decodare 12 secvențe | **1 540 t/s** | 1 596 t/s | — |
+| decodare 1 secvență | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
+| prefill pp2048 | **22 707 tokeni/s** | 21 054 | 8 671 (TabbyAPI, retras) |
+
+Debite din ziua curentă (post 1030, regim eco `-lgc 2700`, pipeline în
+serviciu). J/token la ceas egal față de cele trei motoare este în curs de
+remăsurare pentru 0.6.34 (`outils/gpu/mesure/banc-4moteurs.py`) și deci nu este
+publicat aici — o cifră fără regim nu se publică.
 
 În dimineața de 14/09 acvram era la 630 t/s și 0,619 J/token pe aceeași
 celulă: câștigurile vin din MMA FP4 nativă a lui Blackwell (`mma.sync …
@@ -266,13 +271,14 @@ sa în `acvram-memoire/revue/` cu predicția sigilată înainte de măsurare,
 instrumentul și regimul său — o cifră fără regim nu se publică.
 
 Unde acvram este în față: modelele MLA (GLM-4.7-Flash) în NVFP4 nativ sm_120,
-pe care vLLM le servește doar în FP8; și modelele care nu încap în VRAM. Unde
-nu este: decodarea cu lot mare a unui MoE care încape în VRAM, unde vLLM
-păstrează ×1,05 în debit și ×1,14 în energie.
+pe care vLLM le servește doar în FP8 (b=1: 165,35 t/s în serviciu); și modelele
+care nu încap în VRAM. Unde nu este: decodarea cu lot mare a unui MoE care încape
+în VRAM, unde vLLM păstrează ×1,04 în debit (1 596 față de 1 540, diferență
+3,5 %); diferența în energie este de remăsurat pentru 0.6.34.
 
 ## Stare
 
-Versiunea 0.6.5. Totul rulează pe 5090: kerneluri CUDA compilate pentru
+Versiunea 0.6.34. Totul rulează pe 5090: kerneluri CUDA compilate pentru
 `sm_120a` (FP4 nativ) și `sm_86`, grafuri CUDA, cuantizare NVFP4/INT8/INT4,
 server HTTP. Garduri de protecție la locul lor: placa este invizibilă pentru
 sesiunile de lucru (`CUDA_VISIBLE_DEVICES` gol) și doar `outils/carte.sh` o

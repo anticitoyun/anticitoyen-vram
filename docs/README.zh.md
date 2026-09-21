@@ -216,16 +216,18 @@ $ acvram eval ~/acv/qwen3-32b-nvfp4 ~/acv/qwen3-32b-int4
 * [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **尚未完成的事**，请先读
 * [`CONVENTIONS.md`](../CONVENTIONS.md) — 代码工作约定（语言、风格、推送前的检查）
 
-## 实测结果（2026/09/15，RTX 5090 于 400 W，电能表上 ≥ 20 s 的工况）
+## 实测结果（2026/09/21，RTX 5090 于 400 W，电能表上 ≥ 20 s 的工况）
 
 Qwen3-Coder-30B-A3B 采用 NVFP4（专家）+ INT8（注意力、头），所有引擎同一协议
 （`outils/`，单卡，`energie.py`）：
 
-| | acvram 0.6.5 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram 0.6.34 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| 解码 12 个序列 | **934 t/s · 0,426 J/token** | 1 198-1 437 t/s · 0,271 J | — |
-| 解码 1 个序列 | 232,7 t/s · 1,46 J/token | 197 t/s · 1,43 J | 1,17-1,39 J |
-| prefill pp2048 | 19 148 token/s | 34 788 | 8 671（TabbyAPI，已撤回） |
+| 解码 12 个序列 | **1 540 t/s** | 1 596 t/s | — |
+| 解码 1 个序列 | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
+| prefill pp2048 | **22 707** token/s | 21 054 | 8 671（TabbyAPI，已撤回） |
+
+当日吞吐（1030 号机，节能工况 `-lgc 2700`，服务中的流水线）。相同频率下对三个引擎的 J/token 正在为 0.6.34 重新测量（`outils/gpu/mesure/banc-4moteurs.py`），因此此处不予公布——没有工况的数字不公布。
 
 09/14 早上 acvram 在同一单元格是 630 t/s 和 0,619 J/token：增益来自 Blackwell
 原生 FP4 MMA（`mma.sync … kind::mxf4nvf4`，相对 bf16 ×7,9）、按批次桶分组的
@@ -233,13 +235,13 @@ GEMM 形式 MoE、单核函数路由（每步 3 677 → 1 517 次启动）以及
 GEMM。每个数字在 `acvram-memoire/revue/` 都有其记录，附测量前封存的预测、
 仪器及其工况 — 没有工况的数字不发布。
 
-acvram 领先之处：sm_120 原生 NVFP4 的 MLA 模型（GLM-4.7-Flash，vLLM 只能以 FP8
+acvram 领先之处：sm_120 原生 NVFP4 的 MLA 模型（GLM-4.7-Flash，服务中 b=1：165,35 t/s，vLLM 只能以 FP8
 提供）；以及装不进显存的模型。不领先之处：装得进显存的 MoE 的大批次解码，vLLM
-在吞吐上保持 ×1,05，在能耗上保持 ×1,14。
+在吞吐上保持 ×1,04（1 596 对 1 540，差距 3,5 %）；能耗上的差距正在为 0.6.34 重新测量。
 
 ## 状态
 
-版本 0.6.5。一切都在 5090 上运行：为 `sm_120a`（原生 FP4）和 `sm_86` 编译的
+版本 0.6.34。一切都在 5090 上运行：为 `sm_120a`（原生 FP4）和 `sm_86` 编译的
 CUDA 核函数、CUDA 图、NVFP4/INT8/INT4 量化、HTTP 服务器。护栏已就位：显卡对
 工作会话不可见（`CUDA_VISIBLE_DEVICES` 为空），只有 `outils/carte.sh` 在锁下一次
 借给一个测量；守望者记录锁外的每次访问；覆盖多于一块卡或少于 10 s 的能耗测量
