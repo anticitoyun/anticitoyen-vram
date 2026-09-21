@@ -18,6 +18,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -26,6 +27,7 @@ from pathlib import Path
 
 TSV_DIR = Path(os.environ.get("ACVRAM_TSV_DIR", Path.home() / "TSV"))
 CLASSES = {"acvram-chemins.tsv": "acvram", "gguf-chemins.tsv": "llamacpp", "vllm-chemins.tsv": "vllm"}
+JOURNAL_SERVICE = Path(os.environ.get("ACVRAM_JOURNAL_SERVICE", "/tmp/acvram-serveur.log"))
 DATE = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
@@ -103,7 +105,30 @@ def ctx_plan(chemin: Path, colonne: int, acvram: str, timeout: int = 600) -> tup
     return int(kv), avert[:200]
 
 
-def verdict(colonne: int, modele: int | None, plan: int | None, plan_detail: str, classe: str) -> tuple[str, str]:
+def ctx_servi_par_alias(journal: Path | None = None) -> dict[str, int]:
+    """{alias: N} — dernière ctx_tenu=N numérique du dernier bloc de service de l'alias
+    (poste7-s2-k48-feu-vert-21-09 § 2b(c)) : une colonne ne portant pas cette valeur est FAUX,
+    même si le modèle et le plan la laisseraient passer — la ligne servie fait foi."""
+    journal = JOURNAL_SERVICE if journal is None else journal
+    try:
+        texte = journal.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    bornes = [(m.start(), m.group(1)) for m in re.finditer(r"acvram : service de (\S+)", texte)]
+    resultat: dict[str, int] = {}
+    for i, (pos, alias) in enumerate(bornes):
+        fin = bornes[i + 1][0] if i + 1 < len(bornes) else len(texte)
+        vals = re.findall(r"ctx_tenu=(\d+)\b", texte[pos:fin])
+        if vals:
+            resultat[alias] = int(vals[-1])
+    return resultat
+
+
+def verdict(colonne: int, modele: int | None, plan: int | None, plan_detail: str, classe: str,
+           servi: int | None = None) -> tuple[str, str]:
+    if servi is not None:
+        # une valeur réellement servie fait foi avant le modèle et le plan (§ 2b(c))
+        return ("OK", f"servi={servi}") if colonne == servi else ("FAUX", f"colonne {colonne} ≠ servi {servi}")
     if modele is not None and colonne > modele:
         return "FAUX", f"colonne {colonne} > modèle {modele}"
     if classe == "acvram":
@@ -134,6 +159,7 @@ def main() -> int:
     sortie = a.sortie or a.tsv_dir / "contexte-verifie.tsv"
     anciens = {l[0]: l for l in lire_tsv(sortie)}
     lignes: dict[str, list[str]] = dict(anciens)
+    ctx_servi = ctx_servi_par_alias()  # § 2b(c) : une valeur réellement servie prime sur modèle/plan
     plans_faits = 0
     entrees = []
     for nom, classe in CLASSES.items():
@@ -159,8 +185,9 @@ def main() -> int:
                 lignes[al] = [al, str(colonne), str(modele or "?"), "?", "?", f"{src} ; plan à faire (lot)"]; bilan["?"] += 1
                 continue
             plan, detail_plan = ctx_plan(chemin, colonne, a.acvram); plans_faits += 1
-        v, det = verdict(colonne, modele, plan, detail_plan, classe)
-        if classe != "acvram" or a.sans_plan:
+        servi = ctx_servi.get(al)
+        v, det = verdict(colonne, modele, plan, detail_plan, classe, servi)
+        if servi is None and (classe != "acvram" or a.sans_plan):
             v = "FAUX" if (modele is not None and colonne > modele) else ("OK" if modele is not None else "?")
             det = f"{src}" + ("" if modele is not None else " : ctx modèle inconnu")
         lignes[al] = [al, str(colonne), str(modele if modele is not None else "?"), str(plan if plan is not None else ("-" if classe != "acvram" else "?")), v, det]

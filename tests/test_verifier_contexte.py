@@ -43,8 +43,10 @@ def parc(tmp_path):
     (m / "petit-gguf" / "mmproj-petit.gguf").write_bytes(b"GGUF" + b"\0" * 40)   # projecteur sans context_length : à ignorer
     (tsv / "acvram-chemins.tsv").write_text("".join(f"acvram-{n}\t{m / n}\t32768\n" for n in ("ok-nvfp4", "reduit-nvfp4", "faux-nvfp4", "refus-nvfp4")))
     (tsv / "gguf-chemins.tsv").write_text(f"llamacpp-petit\t{m / 'petit-gguf'}\t8192\n")
-    env = {**os.environ, "PATH": f"{binf}:{os.environ['PATH']}", "MARQUE_APPELS": str(tmp_path / "appels.txt")}
-    return {"tsv": tsv, "env": env, "appels": tmp_path / "appels.txt", "m": m}
+    journal = tmp_path / "acvram-serveur.log"; journal.write_text("")
+    env = {**os.environ, "PATH": f"{binf}:{os.environ['PATH']}", "MARQUE_APPELS": str(tmp_path / "appels.txt"),
+          "ACVRAM_JOURNAL_SERVICE": str(journal)}
+    return {"tsv": tsv, "env": env, "appels": tmp_path / "appels.txt", "m": m, "journal": journal}
 
 
 def _run(p, *args):
@@ -114,3 +116,38 @@ def test_faute_construite_colonne_non_numerique(parc):
     (parc["tsv"] / "acvram-chemins.tsv").write_text(f"acvram-bizarre\t{parc['m'] / 'ok-nvfp4'}\tbeaucoup\n")
     _run(parc, "--sans-plan")
     assert _verdicts(parc)["acvram-bizarre"][4] == "?" and "non numérique" in _verdicts(parc)["acvram-bizarre"][5]
+
+
+def test_valeur_servie_prime_sur_modele_et_plan(parc):
+    """§ 2b(c) : une colonne qui correspond à la ligne servie est OK même si le plan dirait RÉDUIT ;
+    une colonne qui EN diverge est FAUX même si le modèle et le plan la laisseraient passer."""
+    # colonne fixée à 32768 dans la fixture pour les quatre alias acvram
+    parc["journal"].write_text(
+        "acvram : service de acvram-reduit-nvfp4 (contexte 32768)…\n"
+        "kv=int8 ctx_tenu=32768\n"  # servi À LA valeur de colonne : le plan aurait dit RÉDUIT (16384), ici OK
+        "acvram : service de acvram-ok-nvfp4 (contexte 32768)…\n"
+        "kv=int8 ctx_tenu=65536\n"  # servi à une AUTRE valeur que la colonne (32768) : FAUX, même si modèle/plan diraient OK
+    )
+    r = _run(parc, "--sans-plan")
+    v = _verdicts(parc)
+    assert v["acvram-reduit-nvfp4"][4] == "OK" and "servi=32768" in v["acvram-reduit-nvfp4"][5]
+    assert v["acvram-ok-nvfp4"][4] == "FAUX" and "≠ servi 65536" in v["acvram-ok-nvfp4"][5]
+    assert r.returncode == 1, "au moins un FAUX/REFUS -> rc 1"
+
+
+def test_alias_non_servi_retombe_sur_modele_plan(parc):
+    """Un alias absent du journal suit la logique modèle/plan habituelle, inchangée."""
+    parc["journal"].write_text("acvram : service de acvram-reduit-nvfp4 (contexte 131072)…\nctx_tenu=131072\n")
+    _run(parc)
+    v = _verdicts(parc)
+    assert v["acvram-faux-nvfp4"][4] == "FAUX" and "servi" not in v["acvram-faux-nvfp4"][5]
+    assert v["acvram-refus-nvfp4"][4] == "REFUS"
+
+
+def test_faute_construite_journal_absent_ne_casse_rien(parc):
+    """Journal de service inexistant (poste jamais servi) : lecture silencieuse, comportement inchangé."""
+    parc["env"]["ACVRAM_JOURNAL_SERVICE"] = str(parc["journal"].parent / "jamais-cree.log")
+    r = _run(parc)
+    assert r.returncode in (0, 1)
+    v = _verdicts(parc)
+    assert "servi" not in v["acvram-ok-nvfp4"][5]

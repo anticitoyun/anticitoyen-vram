@@ -14,8 +14,19 @@ Un chemin absent se cherche par ses deux derniers composants puis le dernier
 sous les racines connues ; une correspondance unique = relocalisable, zéro =
 ABSENT (modèle effacé ou disque non monté : à décider par l'utilisateur),
 plusieurs = AMBIGU (jamais réécrit).
+
+Colonne ctx (poste7-s2-k48-feu-vert-21-09 § 2b) : la colonne ne porte QUE des
+valeurs servies. À chaque passage (hors du flag --appliquer, qui ne concerne
+que les chemins ci-dessus) le journal de service (JOURNAL_SERVICE, un bloc
+par démarrage introduit par « acvram : service de <alias> ») est relu ; la
+dernière ligne de régime « ctx_tenu=N » (N numérique) de chaque alias devient
+sa colonne, avec sauvegarde datée si elle diffère. Aucune lecture de disque
+modèle, aucun autre TSV touché par cette étape. Le tout SAUTE, sans rien lire
+ni écrire, si le verrou de carte (.qui) n'est pas vide — /tmp/.../<n>.lock.qui
+est tenu par une prise en cours ; « sauté » est alors la seule ligne imprimée.
 """
 import os
+import re
 import shutil
 import sys
 import time
@@ -31,6 +42,9 @@ MAISON = os.path.expanduser("~")
 TSVS = [str(PARC.tsv(k)) for k in ("acvram", "gguf", "vllm")]
 RACINES = [str(r) for r in PARC.racines]
 PROFONDEUR = PARC.profondeur
+QUI = "/tmp/acvram-carte-0.lock.qui"
+JOURNAL_SERVICE = "/tmp/acvram-serveur.log"
+CTX_TSV = str(PARC.tsv("acvram"))
 
 
 def _index():
@@ -123,8 +137,66 @@ def _ecrire_vision():
         print(f"VISION\t{VISION_TSV}\t{len(lignes)} alias")
 
 
+def _qui_non_vide():
+    try:
+        return bool(open(QUI, encoding="utf-8").read().strip())
+    except OSError:
+        return False
+
+
+def _ctx_tenu_par_alias():
+    # relit JOURNAL_SERVICE au moment de l'appel (jamais en défaut de paramètre :
+    # un module rechargé/monkeypatché pour les tests doit voir la valeur du jour)
+    journal = JOURNAL_SERVICE
+    """{alias: N} — dernière ctx_tenu=N numérique du dernier bloc de service de chaque alias
+    dans le journal (un bloc = tout ce qui suit une ligne « acvram : service de <alias> »,
+    jusqu'au bloc suivant). ctx_tenu=non-verifie / non-chauffe : ignoré (pas une valeur servie)."""
+    try:
+        texte = open(journal, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return {}
+    debut_alias = re.compile(r"acvram : service de (\S+)")
+    bornes = [(m.start(), m.group(1)) for m in debut_alias.finditer(texte)]
+    ctx_tenu = re.compile(r"ctx_tenu=(\d+)\b")
+    resultat = {}
+    for i, (pos, alias) in enumerate(bornes):
+        fin = bornes[i + 1][0] if i + 1 < len(bornes) else len(texte)
+        bloc = texte[pos:fin]
+        vals = ctx_tenu.findall(bloc)
+        if vals:
+            resultat[alias] = int(vals[-1])
+    return resultat
+
+
+def _recopier_ctx_tenu():
+    """Colonne = valeur servie (poste7-s2-k48-feu-vert-21-09 § 2b) ; sauvegarde datée si ça change."""
+    mesures = _ctx_tenu_par_alias()
+    if not mesures or not os.path.exists(CTX_TSV):
+        return
+    lignes = open(CTX_TSV, encoding="utf-8").read().split("\n")
+    neuves, changes = [], 0
+    for ligne in lignes:
+        c = ligne.split("\t")
+        if len(c) >= 3 and c[0] in mesures and c[2] != str(mesures[c[0]]):
+            print(f"CTX_SERVI\t{c[0]}\t{c[2]}\t->\t{mesures[c[0]]}")
+            c[2] = str(mesures[c[0]])
+            changes += 1
+            ligne = "\t".join(c)
+        neuves.append(ligne)
+    if changes:
+        sauvegarde = f"{CTX_TSV}.avant-{time.strftime('%Y%m%d-%H%M%S')}"
+        shutil.copy2(CTX_TSV, sauvegarde)
+        with open(CTX_TSV, "w", encoding="utf-8") as f:
+            f.write("\n".join(neuves))
+        print(f"ECRIT\t{CTX_TSV}\t{changes} colonne(s) ctx recopiée(s) du service\tsauvegarde {sauvegarde}")
+
+
 def main():
+    if _qui_non_vide():
+        print(f"SAUTÉ\t{time.strftime('%Y-%m-%d %H:%M:%S')}\t.qui non vide, aucune lecture des dossiers modèles")
+        return 0
     appliquer = "--appliquer" in sys.argv[1:]
+    _recopier_ctx_tenu()  # colonne ctx = servie ; toujours fait, jamais gardé par --appliquer
     un, deux = _index()
     rc = 0
     _ecrire_vision()
