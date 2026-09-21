@@ -78,10 +78,13 @@ def ctx_modele(chemin: Path) -> tuple[int | None, str]:
     return None, "chemin absent"
 
 
-def ctx_plan(chemin: Path, colonne: int, acvram: str, timeout: int = 600) -> tuple[int | None, str]:
+def ctx_plan(chemin: Path, colonne: int, acvram: str, timeout: int = 600, profile: str = "") -> tuple[int | None, str]:
     """(kv_max_tokens, détail) via `acvram plan --json` à sec ; (None, refus nommé) si rien ne tient."""
     env = {**os.environ, "CUDA_VISIBLE_DEVICES": ""}
-    cmd = ["nice", "-n", "19", "ionice", "-c3", acvram, "plan", str(chemin), "--max-model-len", str(colonne), "--json"]
+    # à sec, la carte est cachée : sans --profile le plan ne voit aucune carte et rend kv_max_tokens = 0 (poste9 21/09,
+    # 161 alias « RÉDUIT ») ; le profil déclaré planifie pour la machine, la carte reste à poste2
+    cmd = ["nice", "-n", "19", "ionice", "-c3", acvram, "plan", str(chemin), "--max-model-len", str(colonne), "--json"] \
+        + (["--profile", profile] if profile else [])
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -96,7 +99,7 @@ def ctx_plan(chemin: Path, colonne: int, acvram: str, timeout: int = 600) -> tup
     plan = d.get("plan", {})
     kv = plan.get("kv_max_tokens")
     avert = " ; ".join(plan.get("warnings", []) or [])
-    if any("ne tient pas" in w for w in plan.get("warnings", []) or []):
+    if any("ne tient pas" in w or "aucune carte visible" in w for w in plan.get("warnings", []) or []):
         return None, avert[:200]
     if kv is None:
         return None, "plan sans kv_max_tokens"
@@ -125,6 +128,8 @@ def main() -> int:
     ap.add_argument("--tsv-dir", type=Path, default=TSV_DIR)
     ap.add_argument("--sortie", type=Path, default=None, help="défaut : <tsv-dir>/contexte-verifie.tsv")
     ap.add_argument("--acvram", default=shutil.which("acvram") or "acvram")
+    ap.add_argument("--profile", default="rig-14900k-5090-3080ti",
+                    help="profil déclaré pour planifier à sec (carte cachée) ; '' = sonder la machine")
     ap.add_argument("--alias", action="append", default=[], help="ne traiter que ces alias (répétable)")
     ap.add_argument("--lot", type=int, default=0, help="nombre d'alias acvram à planifier ce passage (0 = tous)")
     ap.add_argument("--depuis", type=int, default=0, help="indice de départ dans la liste des alias (reprise par lots)")
@@ -158,7 +163,7 @@ def main() -> int:
                     continue
                 lignes[al] = [al, str(colonne), str(modele or "?"), "?", "?", f"{src} ; plan à faire (lot)"]; bilan["?"] += 1
                 continue
-            plan, detail_plan = ctx_plan(chemin, colonne, a.acvram); plans_faits += 1
+            plan, detail_plan = ctx_plan(chemin, colonne, a.acvram, profile=a.profile); plans_faits += 1
         v, det = verdict(colonne, modele, plan, detail_plan, classe)
         if classe != "acvram" or a.sans_plan:
             v = "FAUX" if (modele is not None and colonne > modele) else ("OK" if modele is not None else "?")

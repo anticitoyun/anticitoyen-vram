@@ -429,7 +429,9 @@ def plan_placement(spec: ModelSpec, rig: Rig,
     plan = Plan(model=spec.name, tiers=tiers)
 
     if not gpu_tiers:
-        plan.warnings.append("aucun peripherique CUDA detecte ; plan pour processeur seul")
+        plan.warnings.append("aucun peripherique CUDA detecte ; plan pour processeur seul "
+                             "(kv_max_tokens = 0 : aucune carte visible, pas un contexte ; "
+                             "a sec, --profile planifie pour une machine declaree)")
         gpu_tiers = []
 
     remaining = {t.name: float(t.capacity) for t in tiers}
@@ -909,19 +911,24 @@ def auto_plan(spec: ModelSpec, rig: Rig,
         # plan inexécutable.
         fits = [t for t in trials if not t["overflow"]]
         if fits:
+            # La question n'est plus « ce contexte tient-il ? » (non) mais
+            # « combien tiennent ? » (poste7 poste7-s2-k48-feu-vert-21-09, addendum) :
+            # tout ce que la VRAM laisse après les poids va au cache, au pas de
+            # 1024 jetons. Prendre la plus petite fraction (0,06) rendait 3 938
+            # jetons au 31B vision pour 24 576 possibles ; sans carte visible
+            # (CUDA_VISIBLE_DEVICES vide, sans --profile) le plan rend 0 et le dit.
             best = max(fits, key=lambda t: t["decode_tok_s"])
-            o = PlannerOptions(**{**base.__dict__,
-                                  "kv_vram_fraction": best["kv_fraction"]})
             sub = _subset_rig(rig, best["gpus"])
-            p = plan_placement(spec, sub, o)
+            p = _plan_kv_maximal(spec, sub, base, best["kv_fraction"])
             p.warnings.append(
                 f"aucune configuration ne tient un contexte complet de "
-                f"{base.max_model_len:,} jetons ; le cache a ete raccourci a "
-                f"{p.kv_max_tokens:,} jetons pour que les poids logent")
+                f"{base.max_model_len:,} jetons ; le cache tient "
+                f"{p.kv_max_tokens:,} jetons (maximum apres les poids, pas de 1024)")
             return p, trials
 
         # Cela ne tient nulle part. Disons ce qu'il faudrait.
         p = plan_placement(spec, rig, base)
+        p.kv_max_tokens, p.kv_budget = 0, {}     # les poids ne logent pas : aucun contexte, pas un budget fictif
         capacity = sum(t.capacity for t in p.tiers)
         short = p.total_weight_bytes - capacity
         need_bpw = capacity * 8 / max(1, spec.total_params)
@@ -981,6 +988,36 @@ def auto_plan(spec: ModelSpec, rig: Rig,
             f"retenu {best_rec['gpus']} GPU, kv_fraction={best_rec['kv_fraction']} "
             f"parmi {len(trials)} candidats")
     return best_plan, trials
+
+
+KV_PAS_JETONS = 1024
+
+
+def _plan_kv_maximal(spec: ModelSpec, rig: Rig, base: PlannerOptions, fraction_min: float) -> Plan:
+    """Le plus grand cache KV qui laisse les poids loger : dichotomie sur ``kv_vram_fraction`` entre
+    ``fraction_min`` (tient) et 0,98, puis ``kv_max_tokens`` arrondi au multiple inferieur de
+    ``KV_PAS_JETONS`` et budget reduit d'autant ; aucun poids exile de plus que le plan a ``fraction_min``
+    (libre ÷ KV/jeton, les poids restant ou ils logent). 0 seulement si rien ne tient a ``fraction_min``."""
+    def essai(f: float) -> Plan:
+        return plan_placement(spec, rig, PlannerOptions(**{**base.__dict__, "kv_vram_fraction": f}))
+    lo, hi = fraction_min, 0.98
+    p = essai(lo)
+    if p.overflowed:
+        return p
+    hote = p.bytes_per_tier.get("cpu", 0)     # le cache ne doit exiler aucun poids de plus que le plan qui tient
+    for _ in range(14):                       # resolution < 1e-4 sur la fraction
+        mid = (lo + hi) / 2
+        q = essai(mid)
+        if q.overflowed or q.bytes_per_tier.get("cpu", 0) > hote:
+            hi = mid
+        else:
+            lo, p = mid, q
+    n = p.kv_max_tokens // KV_PAS_JETONS * KV_PAS_JETONS
+    if 0 < n < p.kv_max_tokens:
+        r = n / p.kv_max_tokens
+        p.kv_budget = {k: int(v * r) for k, v in p.kv_budget.items()}
+        p.kv_max_tokens = n
+    return p
 
 
 def _subset_rig(rig: Rig, n_gpus: int) -> Rig:

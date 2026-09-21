@@ -194,3 +194,26 @@ def test_signal_exil_ecrit_un_avertissement_chiffre():
     plan = _plan_nemotron(8)
     _signaler_cout_exil(plan)
     assert any("exil" in w and "ms/jeton" in w for w in plan.warnings)
+
+
+def test_le_plan_rend_le_maximum_de_contexte_qui_tient_pas_le_plus_petit(tmp_path, target_rig):
+    """poste7 poste7-s2-k48-feu-vert-21-09 (addendum) : la colonne 262 144 ne demande pas « tient-il ? » mais
+    « combien tiennent ? » — kv_max_tokens > 0, multiple de 1024, plus grand que le plan à la plus petite fraction
+    (0,06, l'ancien repli), sans exiler un poids de plus. Cassant : l'ancien repli rendait le 0,06."""
+    spec = _spec(tmp_path, "seventy", hidden_size=8192, intermediate_size=28672, num_hidden_layers=80)
+    petit = plan_placement(spec, target_rig, PlannerOptions(max_model_len=262144, kv_vram_fraction=0.06))
+    plan, _ = auto_plan(spec, target_rig, PlannerOptions(max_model_len=262144))
+    assert plan.kv_max_tokens > 0 and plan.kv_max_tokens % 1024 == 0 and not plan.overflowed
+    assert plan.kv_max_tokens > petit.kv_max_tokens, (plan.kv_max_tokens, petit.kv_max_tokens)
+    assert plan.bytes_per_tier.get("cpu", 0) <= petit.bytes_per_tier.get("cpu", 0)
+    assert any("maximum apres les poids" in w for w in plan.warnings)
+
+
+def test_zero_jeton_seulement_si_les_poids_ne_tiennent_pas_ou_sans_carte(tmp_path, target_rig):
+    from acvram.hardware.detect import Rig
+    huge = _spec(tmp_path, "huge", hidden_size=16384, intermediate_size=53248, num_hidden_layers=126)
+    plan, _ = auto_plan(huge, target_rig, PlannerOptions(max_model_len=262144))
+    assert plan.kv_max_tokens == 0 and any("ne tient pas sur cette machine" in w for w in plan.warnings)
+    sans_carte = Rig(host=target_rig.host)
+    plan2, _ = auto_plan(_spec(tmp_path, "petit"), sans_carte, PlannerOptions(max_model_len=262144))
+    assert plan2.kv_max_tokens == 0 and any("aucune carte visible" in w for w in plan2.warnings)
