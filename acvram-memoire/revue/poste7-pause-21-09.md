@@ -10,3 +10,9 @@ Utilisateur, mot pour mot : « passage en pause du groupe des que possible ».
 4. Rien d'autre : pas de nouvelle tâche, pas de mesure « pour finir ».
 
 Réfutation : un commit sur main après la tête PAUSE, ou un PID hors verrou à la fermeture = pause non tenue, à écrire dans ETAT.
+
+## Addendum 08 h 4x — deux faits du `verdict-4-alias-chauffe-clampee-21-09` à mettre en tête de la reprise
+
+1. **GLM k48 ne charge plus** : OOM à la capture des graphes CUDA, avant la chauffe. La capture alloue le KV au ctx **demandé** (32768) : l'ordre est faux — plan → clamp → capture → chauffe (qui confirme), jamais capture avant clamp. poste1, à sec ≤ 30 min, test cassant : ctx demandé > tenu → capture au ctx clampé, chargement réussi. Prédiction : k48 charge et tient 31744.
+2. **i8c clampé à 4096** (prédit 15360, hier [1]×N tenait 15360) : la chauffe aléatoire ne coûte pas 4× plus de KV ; hypothèse la plus probable = les essais descendants laissent des fragments (pas d'`empty_cache` + `synchronize` entre deux pas), chaque pas voit moins de libre et le clamp s'effondre. Prédiction : avec libération entre pas (ou recherche depuis le bas), i8c ≥ 12288 ; sinon le mécanisme est autre et se nomme avant toute colonne. Colonne : 4096 est une valeur servie (règle 2b), datée et marquée « clamp sévère, à rejouer » — pas un défaut de la colonne, un défaut du .deb : **0.6.34 ne part pas avec i8c à 4096**. Porte inchangée + un critère : clamp à ≤ 10 % de la chauffe homogène d'hier pour les 4, ou l'écart expliqué.
+3. Branche `poste1-commande-unique` (cc47482c) : première fusion à la reprise, après ses 5 tests au trou.
