@@ -68,7 +68,7 @@ PY
 
 # point vert du menu : modèle servi par le gros moteur actif, sinon l'appoint
 modele_charge() {
-  local id
+  local id=""
   # seuls les moteurs présents dans parc.toml sont sondés
   [ -n "${PARC_PORT_LLAMACPP:-}" ] && id=$(curl -s -m 1 -H "Authorization: Bearer ${CLE_LLAMACPP:-${PARC_CLE_LLAMACPP:-}}" \
     "http://127.0.0.1:$PARC_PORT_LLAMACPP/v1/models" 2>/dev/null \
@@ -97,6 +97,8 @@ if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
 fi
 if [ -z "$choix" ]; then
   choix=$(choisir_alias "Modèles locaux (vLLM · llama.cpp · TabbyAPI · appoint 3080 Ti)" "$(modele_charge)") || exit 1
+  # parc vide (rc 0, message déjà nommé par choisir_alias) : rien à lancer, sortie propre
+  [ -n "$choix" ] || exit 0
 fi
 
 # mode Auto dès le démarrage, sauf en mode prompt (-p) où kimi le refuse

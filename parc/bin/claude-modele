@@ -74,7 +74,7 @@ modele_servi() {  # $1 url  $2 clé
     | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null
 }
 modele_charge() {
-  local id
+  local id=""
   # seuls les moteurs présents dans parc.toml sont sondés
   [ -n "${PARC_PORT_LLAMACPP:-}" ] && { id=$(modele_servi "http://127.0.0.1:$PARC_PORT_LLAMACPP" "$CLE_LLAMACPP"); [ -n "$id" ] && { basename "${id%.gguf}"; return; }; }
   [ -n "${PARC_PORT_VLLM:-}" ] && { id=$(modele_servi "http://127.0.0.1:$PARC_PORT_VLLM" "$CLE_VLLM"); [ -n "$id" ] && { echo "$id"; return; }; }
@@ -114,6 +114,8 @@ AFFICHER=0
 if [ $# -gt 0 ] && [[ "$1" != -* ]]; then choix="$1"; shift; fi
 if [ -z "$choix" ]; then
   choix=$(choisir_alias "Claude local — parc de modèles (vLLM · llama.cpp · appoint 3080 Ti)" "$(modele_charge)") || exit 1
+  # parc vide (rc 0, message déjà nommé par choisir_alias) : rien à lancer, sortie propre
+  [ -n "$choix" ] || exit 0
 fi
 
 case "$choix" in

@@ -10,12 +10,15 @@ vram_libre() {
 
 choisir_alias() {
   local titre="$1" charge="${2:-}"
-  local -a alias modeles ctx refus tps qual usage
+  local -a alias=() modeles=() ctx=() refus=() tps=() qual=() usage=()
   local a m c r t q u
   while IFS=$'\t' read -r a m c r t q u; do
     alias+=("$a"); modeles+=("$m"); ctx+=("$c"); refus+=("$r"); tps+=("$t"); qual+=("$q"); usage+=("$u")
   done < <(lister_alias)
-  [ "${#alias[@]}" -gt 0 ] || { err "Aucun modèle dans $CONFIG"; return 1; }
+  # parc vide (premier lancement, aucun moteur/modèle dans parc.toml/config.toml) :
+  # ce n'est pas une erreur, rc 0, le message le nomme pour que l'appelant sache
+  # s'arrêter proprement (parc-installer n'a pas encore tourné).
+  [ "${#alias[@]}" -gt 0 ] || { err "parc vide : aucun modèle dans $CONFIG (lancez parc-installer)"; return 0; }
 
   local filtre="" choix i n point bas
   while :; do
