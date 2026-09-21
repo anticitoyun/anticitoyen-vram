@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterator, Optional
@@ -82,6 +83,13 @@ class ConversionOptions:
     # GPU la rend une dizaine de fois plus rapide qu'un i9. "auto" prend le
     # premier GPU disponible, "cpu" force l'ancien chemin.
     quant_device: str = "auto"
+    # Journal une ligne par tenseur sur stderr (heure, rang, nom, forme,
+    # secondes) : None = automatique, actif quand la quantification tourne
+    # sur le processeur (poste2 21/09 : 31B `--quant-device cpu`, 96 min par
+    # shard et RIEN d incrémental — `progress` ne parle que tous les 25
+    # tenseurs, soit des dizaines de minutes à ce rythme) ou sous
+    # ACVRAM_JOURNAL_TENSEURS=1 ; False le tait, True le force.
+    journal_tenseurs: Optional[bool] = None
     dry_run: bool = False
     mixed_precision: str = "auto"     # auto | off
     # dB de rapport signal/bruit en sortie de couche sous lequel un tenseur est
@@ -578,6 +586,28 @@ def _quantize_on(dev: torch.device, tensor: torch.Tensor, fmt: str,
         except torch.OutOfMemoryError:
             torch.cuda.empty_cache()
     return quantize_with_calibration(tensor.to(torch.float32), fmt, st, **kw)
+
+
+def _journal_tenseurs(opts: ConversionOptions, qdev: torch.device):
+    """Rend un écrivain `(nom, forme, rang)` appelé au DÉBUT de chaque tenseur —
+    il journalise le PRÉCÉDENT avec sa durée (toutes les sorties de boucle
+    confondues) — ou None. Le dernier tenseur se journalise par `(None, None,
+    rang)` après la boucle. Une ligne = heure, rang, nom, forme, secondes ;
+    un `tail -f` du journal suffit à savoir où en est une conversion."""
+    actif = opts.journal_tenseurs
+    if actif is None:
+        actif = qdev.type == "cpu" or os.environ.get("ACVRAM_JOURNAL_TENSEURS") == "1"
+    if not actif:
+        return None
+    etat = {"nom": None, "forme": None, "rang": 0, "t": time.perf_counter()}
+
+    def ecrire(nom, forme, rang):
+        maintenant = time.perf_counter()
+        if etat["nom"] is not None:
+            print(f"[convert] {time.strftime('%H:%M:%S')} #{etat['rang']:<6d} {etat['nom']} {list(etat['forme'])} "
+                  f"{maintenant - etat['t']:.2f} s", file=sys.stderr, flush=True)
+        etat.update(nom=nom, forme=forme, rang=rang, t=maintenant)
+    return ecrire
 
 
 def _resolve_quant_device(choice: str) -> torch.device:
@@ -1498,7 +1528,10 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
               f"GGUF-mmproj est hors périmètre (contrat multimodal § 2 pièce (a), "
               f"seule la voie safetensors HF porte la tour) ; alias texte seul",
               flush=True)
+    journal = _journal_tenseurs(opts, qdev)
     for name, tensor in _adapt_hf(_iter_checkpoint(model_path, opts.passage_direct), spec):
+        if journal:
+            journal(name, tuple(tensor.shape), report.tensors)
         report.tensors += 1
         if progress and report.tensors % 25 == 0:
             progress(name, report.tensors, 0)
@@ -1862,6 +1895,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         keys.append(name)
 
     # ---- sac à dos : depenser le budget la ou chaque octet paie le plus ----
+    if journal:
+        journal(None, None, report.tensors)      # le dernier tenseur
     if budget_candidats:
         deja = sum(report.per_format.values()) + \
             sum(c["nbytes_base"] for c in budget_candidats)
