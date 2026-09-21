@@ -99,12 +99,16 @@ lancer_claude() {  # $1 base_url  $2 clé  $3 modèle servi  $4 contexte  [$@ ar
   export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_NON_ESSENTIAL_MODEL_CALLS=1
   [ -n "$ctx" ] && export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$ctx"   # fenêtre réelle du moteur
   printf '\n%s→ claude sur %s (%s)%s\n\n' "$c_t" "$modele" "$url" "$c_0"
+  # UN SEUL constructeur : --afficher imprime le tableau que l'exec reçoit (poste7 21/09) ;
+  # PARC_EXEC=<programme> le reçoit à la place de claude (test à sec, quatre moteurs).
+  local CMD=("${PARC_CLAUDE/#\~/$HOME}" --mcp-config "$MCP" --model "$modele" --fallback-model "$modele" "$@")
   if [ "${AFFICHER:-0}" = 1 ]; then   # claude-modele --afficher <alias> : montre sans lancer
     env | grep -E '^(ANTHROPIC_|DISABLE_|CLAUDE_CODE_)' | sort
-    printf 'claude --mcp-config %s --model %s --fallback-model %s %s\n' "$MCP" "$modele" "$modele" "$*"
+    printf 'commande :'; printf ' %q' "${CMD[@]}"; printf '\n'
     exit 0
   fi
-  exec "${PARC_CLAUDE/#\~/$HOME}" --mcp-config "$MCP" --model "$modele" --fallback-model "$modele" "$@"
+  [ -n "${PARC_EXEC:-}" ] && exec "$PARC_EXEC" "${CMD[@]}"
+  exec "${CMD[@]}"
 }
 
 . "$PARC_LIB"

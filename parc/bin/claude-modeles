@@ -1073,7 +1073,7 @@ class Fenetre(Adw.ApplicationWindow):
         # sous-shell : kimi-modele finit par exec, sans les parenthèses la pause
         # de fin ne serait jamais atteinte et la fenêtre se fermerait d'un coup.
         cmd = (f'cd {GLib.shell_quote(str(self.dossier_lancement))} && '
-               f'({BIN}/claude-modele {GLib.shell_quote(m.alias)}); echo; read -rp "Entrée pour fermer… "')
+               f'({BIN}/{self.commande_claude(m)}); echo; read -rp "Entrée pour fermer… "')
         argv = term + ["bash", "-lc", cmd]
         try:
             Gio.SubprocessLauncher.new(Gio.SubprocessFlags.NONE).spawnv(argv)
@@ -1281,11 +1281,17 @@ class Fenetre(Adw.ApplicationWindow):
             return
         self.executer([str(outil)], "libération de la VRAM")
 
+    @staticmethod
+    def commande_claude(m):
+        """La commande « Ouvrir dans Claude » — une seule construction pour le bouton, le presse-papier et
+        l'affichage (poste7 21/09 : deux constructeurs = une ligne qui peut mentir)."""
+        return f"claude-modele {GLib.shell_quote(m.alias)}"
+
     def copier_commande(self):
         m = self.selection_courante()
         if m is None:
             return
-        cmd = f"claude-modele {m.alias}"
+        cmd = self.commande_claude(m)
         Gdk.Display.get_default().get_clipboard().set(cmd)
         self.toast(f"Copié : {cmd}")
 
