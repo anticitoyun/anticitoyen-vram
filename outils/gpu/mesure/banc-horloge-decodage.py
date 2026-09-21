@@ -27,7 +27,7 @@ import time
 # Sans ceci, `import acvram` retombe sur le venv partage (copie hors
 # worktree) plutot que sur ce checkout (piege du 13/09, cf.
 # correctif-godet-hybride-13-09.md).
-sys.path.insert(0, "~/Bureau/Claude/travail/poste3")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", ".."))                # outils/ -- regime.py

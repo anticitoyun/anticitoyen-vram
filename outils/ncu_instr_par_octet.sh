@@ -13,6 +13,7 @@ set -euo pipefail
 NCU_SORTIE=${NCU_SORTIE:-/tmp/ncu-acvram}; mkdir -p "$NCU_SORTIE"
 MOTEUR=${1:-acvram}; B=${2:-12}
 ICI=$(dirname "$(readlink -f "$0")")
+REPO=$(git -C "$ICI" rev-parse --show-toplevel 2>/dev/null || dirname "$ICI")
 MODELE=${BANC_MODELE_CHEMIN:-$("$(dirname "$0")/racine_modeles.py")/Qwen3-Coder-30B-A3B-nvfp4}
 VLLM_MODELE=${VLLM_MODELE:-/mnt/4TO_SATACMR_2022/Modeles/models_vllm/Qwen3-Coder-30B-A3B-Instruct-FP4}
 export ACVRAM_TYPE=mesure BANC_PAS_NCU=${BANC_PAS_NCU:-1}
@@ -21,7 +22,7 @@ export ACVRAM_TYPE=mesure BANC_PAS_NCU=${BANC_PAS_NCU:-1}
 # seul pas (~600 noyaux). sm__throughput (composite, beaucoup de passes) est en
 # option : NCU_METRIQUES=... pour l'ajouter.
 case "$MOTEUR" in
-  acvram) PY=${PY:-~/Bureau/Claude/anticitoyen-vram/.venv/bin/python3}
+  acvram) PY=${ACVRAM_PY:-$REPO/../../anticitoyen-vram/.venv/bin/python3}
           export BANC_GRAPHES=${BANC_GRAPHES:-1} BANC_JETONS=8
           CMD=("$PY" "$ICI/banc_decodage_moe.py" ncu "$B") ;;
   vllm)   PY=/opt/ia/vLLM/.venv/bin/python; export BANC_SLOTS=$B

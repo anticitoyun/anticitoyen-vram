@@ -13,7 +13,7 @@
 # Code 0 : personne n'importe l'arbre, la fusion est sans risque.
 # Code 1 : au moins un processus l'importe — attendre, ou lui demander.
 set -u
-ARBRE=${1:-~/Bureau/Claude/anticitoyen-vram}
+ARBRE=${1:-${ACVRAM_ARBRE:-$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null)/../../anticitoyen-vram}}
 ARBRE=$(readlink -f "$ARBRE")
 # LE DETECTEUR SE VOYAIT LUI-MEME. Premiere version : le shell qui invoque ce
 # script porte le TEXTE du script dans sa ligne de commande, donc le chemin de

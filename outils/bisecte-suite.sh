@@ -12,7 +12,7 @@
 # collecte de pytest — c est cet ordre-la qui compte, pas l ordre alphabetique.
 set -u
 S="$(cd "$(dirname "$0")" && pwd)"; R="$(dirname "$S")"
-PY=~/Bureau/Claude/anticitoyen-vram/.venv/bin/python
+PY=${ACVRAM_PY:-$R/../../anticitoyen-vram/.venv/bin/python}
 export PYTHONPATH="$R" CUDA_VISIBLE_DEVICES=0
 CIBLE=${1:?usage: bisecte-suite.sh <cible>}
 FICHIER=${CIBLE%%::*}

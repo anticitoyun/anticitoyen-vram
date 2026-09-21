@@ -42,7 +42,7 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "gpu" / "mesure"))
 from energie import Energie, repos  # noqa: E402
 
-VENV_PY = "~/Bureau/Claude/anticitoyen-vram/.venv/bin/python3"
+VENV_PY = _os.environ.get("ACVRAM_PY", f"{Path(__file__).resolve().parents[1]}/../../anticitoyen-vram/.venv/bin/python3")
 CORPUS = Path("/mnt/4TO_SATACMR_2022/Modeles/corpus/wiki-gptq.txt")
 SORTIE_HDD = Path(_RACINE)  # SSD a 41 Gio libres
 SLOTS = 12

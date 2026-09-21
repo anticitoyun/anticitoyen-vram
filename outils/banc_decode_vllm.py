@@ -11,7 +11,7 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, "~/Bureau/Claude/travail/poste2/outils/gpu/mesure")
+sys.path.insert(0, str(Path(__file__).resolve().parent / "gpu" / "mesure"))
 from energie import Energie, repos  # noqa: E402
 
 from vllm import LLM, SamplingParams  # noqa: E402

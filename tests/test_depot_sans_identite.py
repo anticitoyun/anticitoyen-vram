@@ -149,7 +149,12 @@ EXEMPTES_COURRIEL = {"scratchpad/corpus-calib-c6/calib-c6-anglais-code.txt"}
 # (6265461). Le nettoyage (helper _chemins pour ces scripts, ou deplacement
 # des journaux sous acvram-memoire/corpus/) reste a faire, hors de la portee
 # de cette passe.
-PLAFOND_CHEMINS = 2209  # 20/09 poste7 : corpus-prive exempte par prefixe (95, copies figees de revue) et outils/gpu/hors-verrou.log sorti de l index (69) ; avant : 2282 (chef, 450 journaux scratchpad et 40 artefacts nsys/sqlite retires)
+# 21/09 (poste3) : DESCEND a 2180 (-29) apres depersonnalisation des 28 scripts
+# outils/ (chemins ~… codes en dur -> ACVRAM_PY/ACVRAM_ARBRE/
+# LLAMACPP_LMSTUDIO_BIN/$HOME, racine via git rev-parse ou dirname relatif). Un
+# outil au chemin machine code en dur ne tourne pour personne d'autre ; il lit
+# maintenant son chemin dans une variable, repli relatif au depot.
+PLAFOND_CHEMINS = 2180  # 20/09 poste7 : corpus-prive exempte par prefixe (95, copies figees de revue) et outils/gpu/hors-verrou.log sorti de l index (69) ; avant : 2282 (chef, 450 journaux scratchpad et 40 artefacts nsys/sqlite retires)
 
 # Le fichier qui NOMME les chemins pour les faire disparaitre ne doit pas
 # lui-meme les compter -- meme discipline datee que EXEMPTES_SESSION.

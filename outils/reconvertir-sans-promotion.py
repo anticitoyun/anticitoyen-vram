@@ -8,7 +8,7 @@ modèle déjà à zéro promotion est sauté.
 import json, os, shutil, subprocess, sys, time
 
 S = os.path.dirname(os.path.abspath(__file__))
-RACINE = "~/Bureau/Claude/anticitoyen-vram"
+RACINE = os.environ.get("ACVRAM_ARBRE", subprocess.run(["git", "-C", S, "rev-parse", "--show-toplevel"], capture_output=True, text=True).stdout.strip() + "/../../anticitoyen-vram")
 PY = f"{RACINE}/.venv/bin/python"
 JOURNAL = f"{S}/reconv-journal.tsv"
 

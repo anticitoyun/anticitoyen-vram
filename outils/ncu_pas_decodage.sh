@@ -11,7 +11,7 @@ set -euo pipefail
 NCU_SORTIE=${NCU_SORTIE:-/tmp/ncu-acvram}; mkdir -p "$NCU_SORTIE"
 B=${1:-12}; BRAS=${2:-gemv}
 ICI=$(dirname "$(readlink -f "$0")"); REPO=$(dirname "$ICI")
-PY=${PY:-~/Bureau/Claude/anticitoyen-vram/.venv/bin/python3}
+PY=${ACVRAM_PY:-$REPO/../../anticitoyen-vram/.venv/bin/python3}
 OUT=${NCU_SORTIE}/ncu-pas-${BRAS}.csv
 export ACVRAM_TYPE=mesure BANC_JETONS=8
 /usr/local/cuda/bin/ncu --csv --target-processes all \

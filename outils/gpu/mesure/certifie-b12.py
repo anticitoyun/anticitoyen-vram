@@ -12,9 +12,9 @@ _sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 
 from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
 _RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
 
-MAIN_REPO = os.environ.get("ACVRAM_ARBRE", "~/Bureau/Claude/anticitoyen-vram")
+MAIN_REPO = os.environ.get("ACVRAM_ARBRE", subprocess.run(["git", "-C", os.path.dirname(os.path.abspath(__file__)), "rev-parse", "--show-toplevel"], capture_output=True, text=True).stdout.strip() + "/../../anticitoyen-vram")
 sys.path.insert(0, MAIN_REPO)
-sys.path.insert(0, "~/Bureau/Claude/travail/poste3/outils/gpu/mesure")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 import torch  # noqa: E402
 import acvram.engine.model as modele  # noqa: E402

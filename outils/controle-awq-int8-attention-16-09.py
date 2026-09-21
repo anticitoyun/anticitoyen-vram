@@ -53,7 +53,7 @@ SCRATCH = Path("/tmp/glm-awq-int8-attn")
 MINI = SCRATCH / "mini-hf"
 CONVERTI_BF16 = SCRATCH / "mini-acvram-bf16"
 REPO = Path(__file__).resolve().parent.parent
-VENV_PROJET = "~/Bureau/Claude/anticitoyen-vram/.venv/bin/python"
+VENV_PROJET = os.environ.get("ACVRAM_PY", f"{REPO}/../../anticitoyen-vram/.venv/bin/python")
 
 N_COUCHES = 7          # 0..6, pour atteindre la couche 6 (q+kv reels ensemble)
 LAYER = 6

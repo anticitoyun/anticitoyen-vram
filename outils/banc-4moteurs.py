@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -87,8 +88,7 @@ def _lancer_et_parser(cmd: list, cwd: Path) -> dict:
 
 def _mesurer_acvram() -> dict:
     idle = mesurer_idle(GPU)
-    venv_python = Path("~/Bureau/Claude/anticitoyen-vram"
-                       "/.venv/bin/python3")
+    venv_python = Path(os.environ.get("ACVRAM_PY", f"{REPO}/../../anticitoyen-vram/.venv/bin/python3"))
     cmd = [str(venv_python), "outils/banc_prefill_chaud.py", "m64e4", str(PP_LEN)]
     res, w, n, _med = mesurer_pendant(lambda: _lancer_et_parser(cmd, REPO), gpu=GPU)
     if "echec" in res:
@@ -102,8 +102,7 @@ def _mesurer_acvram() -> dict:
 def _mesurer_llamacpp() -> dict:
     # Serveur llama-server lance et arrete PAR le banc (comme un client
     # reel) ; puissance et energie mesurees dedans, meme raison que vLLM.
-    venv_python = Path("~/Bureau/Claude/anticitoyen-vram"
-                       "/.venv/bin/python3")
+    venv_python = Path(os.environ.get("ACVRAM_PY", f"{REPO}/../../anticitoyen-vram/.venv/bin/python3"))
     cmd = [str(venv_python), "outils/banc_llamacpp_reel.py"]
     res = _lancer_et_parser(cmd, REPO)
     if "echec" in res:

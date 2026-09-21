@@ -23,12 +23,13 @@
 set -u
 S="$(cd "$(dirname "$0")" && pwd)"
 R="$(dirname "$S")"
+RACINE=$(git -C "$S" rev-parse --show-toplevel 2>/dev/null || (cd "$S/../../.." && pwd))
 # Le worktree n'a pas de venv : l'interpreteur est celui du depot principal.
 # MAIS son acvram installe pointe sur LE DEPOT PRINCIPAL — sans PYTHONPATH on
 # mesurerait un autre code que celui qu'on vient d'ecrire, et le controle
 # d'empreinte du .so ne le verrait pas : le .cu de l'autre arbre est coherent
 # avec son propre binaire. On execute le code, pas l'artefact.
-PY=~/Bureau/Claude/anticitoyen-vram/.venv/bin/python
+PY=${ACVRAM_PY:-$RACINE/../../anticitoyen-vram/.venv/bin/python}
 export PYTHONPATH="$R${PYTHONPATH:+:$PYTHONPATH}"
 [ -x "$PY" ] || { echo "ARRET : interpreteur introuvable ($PY)"; exit 3; }
 M=$("$(dirname "$0")/../../racine_modeles.py")/Qwen3-Coder-30B-A3B-Instruct-srcQ4_K_M-nvfp4

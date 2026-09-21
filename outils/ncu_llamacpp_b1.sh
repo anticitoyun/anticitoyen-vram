@@ -11,7 +11,7 @@ set -euo pipefail
 PAS=${1:-3}
 ICI=$(dirname "$(readlink -f "$0")")
 NCU_SORTIE=${NCU_SORTIE:-/tmp/ncu-acvram}; mkdir -p "$NCU_SORTIE"
-BIN_DIR=~/.lmstudio/extensions/backends/llama.cpp-linux-x86_64-nvidia-cuda12-avx2-2.22.0
+BIN_DIR=${LLAMACPP_LMSTUDIO_BIN:-$HOME/.lmstudio/extensions/backends/llama.cpp-linux-x86_64-nvidia-cuda12-avx2-2.22.0}
 GGUF=${GGUF:-/mnt/4TO_SATACMR_2022/Modeles/models_gguf/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf}
 PORT=${PORT:-8091}
 OUT=$NCU_SORTIE/ncu-ipo-llamacpp.csv

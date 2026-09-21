@@ -26,8 +26,10 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent / "gpu" / "mesure"))
 from energie import Energie, repos  # noqa: E402
 
-BINAIRE = Path("~/Bureau/Claude/externes/llama.cpp"
-              "/build/bin/llama-server")
+BINAIRE = Path(os.environ.get(
+    "LLAMACPP_BIN",
+    str(Path(__file__).resolve().parents[1].parent.parent
+        / "externes/llama.cpp/build/bin/llama-server")))
 GGUF = ("/mnt/4TO_SATACMR_2022/Modeles/models_gguf"
        "/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M"
        "/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf")
