@@ -382,3 +382,16 @@ def test_chaque_pas_de_chauffe_part_d_un_allocateur_vide(converted, monkeypatch)
     avec = e4.chauffer_contexte(pas=8)
     assert avec > sans, (avec, sans)
     assert etat["vidages"] == etat["essais"]
+
+
+def test_le_pipeline_est_actif_par_defaut_et_la_ligne_dit_l_effectif(converted, monkeypatch):
+    """0.6.34 (chef 21/09) : ACVRAM_PIPELINE=1 par défaut, 0 = témoin ; la ligne porte `pipeline=` EFFECTIF
+    (demandé ET graphes) : sans graphes (CPU) elle dit 0 même demandé, pour ne pas nommer un recouvrement absent."""
+    monkeypatch.delenv("ACVRAM_PIPELINE", raising=False)
+    eng = _engine_cpu(converted)
+    assert eng.pipeline_actif is True and " pipeline=0 " in eng.regime_ligne() + " "     # graphes off à sec
+    monkeypatch.setenv("ACVRAM_PIPELINE", "0")
+    assert _engine_cpu(converted).pipeline_actif is False
+    from acvram import regime
+    v = next(x for x in regime.VARIABLES if x.env == "ACVRAM_PIPELINE")
+    assert v.defaut == "1"

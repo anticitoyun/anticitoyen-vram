@@ -150,3 +150,37 @@ def test_pipeline_bit_identique_a_egalite_pres():
         "divergence(s) FRANCHE(S) (pas un tie bf16) entre PIPELINE=0 et 1 : "
         + ", ".join(f"{rid}[{i}] {ta} vs {tb} (écart top1/top2 = {e})"
                     for rid, i, ta, tb, e in franches))
+
+
+@pytest.mark.parametrize("b", [1, 12])
+@pytest.mark.skipif(bool(_alias_absent("Qwen3-Coder-30B-A3B-nvfp4")),
+                    reason=_alias_absent("Qwen3-Coder-30B-A3B-nvfp4"))
+def test_pipeline_par_defaut_ids_au_bit_b1_et_b12(b):
+    """chef 21/09 (0.6.34) : ACVRAM_PIPELINE=1 par défaut ; contre le témoin ACVRAM_PIPELINE=0, MÊME forme de
+    lot (b séquences, même invite, 48 jetons greedy), les ids sont identiques AU BIT — pas « à égalité près » :
+    le pipeline rejoue le même graphe sur le même lot, seul l ordre des copies change."""
+    from acvram.engine.loader import load_model
+    from acvram.engine.runner import Engine
+    from acvram.engine.sampler import SamplingParams
+
+    os.environ["ACVRAM_REPIN"] = "0"
+    loaded = load_model(MODEL, dtype=torch.bfloat16, max_model_len=1024)
+
+    def rejouer(actif: bool):
+        engine = Engine(loaded, None, max_batch_size=b, max_model_len=1024)
+        engine.pipeline_actif = actif
+        assert (" pipeline=1 " in engine.regime_ligne() + " ") == actif or engine.graphs is None
+        engine._eos = set()
+        ids = {}
+        for k in range(b):
+            seq = engine.add_request(_invite(k, 96), SamplingParams(temperature=0.0, max_tokens=48))
+            ids[seq.sequence_id] = []
+        while engine.running or engine.waiting:
+            for out in engine.step():
+                ids[out.sequence_id].extend(out.token_ids)
+        del engine
+        torch.cuda.empty_cache()
+        return ids
+    temoin, pipeline = rejouer(False), rejouer(True)
+    assert list(temoin.values()) == list(pipeline.values()), \
+        [(k, next((i for i, (x, y) in enumerate(zip(temoin[k], pipeline[k])) if x != y), None)) for k in temoin]
