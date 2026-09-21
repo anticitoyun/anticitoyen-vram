@@ -40,7 +40,7 @@ _MOTS = [
 _CENSURE = [
     ("sans-censure", r"abliterated|ablitérated|(?<![a-z])abl(?![a-z])|heretic|uncensored|unfiltered|décensuré|decensure"),
     ("nsfw",         r"nsfw|adult|(?<![a-z])18\+"),
-    ("explicite",    r"(?<![a-z])erp(?![a-z])|nsfw-finetune|erotica|érotique|erotique|lewd"),
+    ("explicite",    r"(?<![a-z])erp(?![a-z])|nsfw-finetune|[eé]roti|lewd"),
     ("porno",        r"porn|xxx|hardcore"),
 ]
 _ORDRE_CENSURE = ["sans-censure", "nsfw", "explicite", "porno"]
