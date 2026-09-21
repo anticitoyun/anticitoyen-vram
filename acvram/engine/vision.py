@@ -354,6 +354,14 @@ def forme_pour_la_tour(pv: torch.Tensor) -> torch.Tensor:
     return pv
 
 
+def oublier_la_tour() -> None:
+    """Aucune tour chargée : appelé quand un modèle est déclaré sans vision (ou aucun modèle) — sinon le nom de la
+    dernière tour (réelle ou factice) survivait au modèle et la ligne disait « vision=bf16(eager,…) » sur un alias
+    texte (rouge test_mm_conversion dans la suite complète, 21/09)."""
+    global _CHARGEE
+    _CHARGEE = None
+
+
 def regime_texte() -> str:
     """« vision=bf16(eager,transformers=5.17.0) » quand une tour est chargée (la version RELEVÉE sur le
     module importé, poste7 14 h 10 : transformers est une dépendance épinglée du moteur, jamais devinée),
