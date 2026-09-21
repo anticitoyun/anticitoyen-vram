@@ -33,6 +33,13 @@ nvml = ["nvidia-ml-py>=12.560"]
 # fla est absent — dependance optionnelle, aucune raison de l'imposer aux
 # deploiements qui ne servent pas ces familles.
 gdn = ["transformers>=4.57", "flash-linear-attention>=0.5"]
+# Tour de vision (`engine/vision.py` : AutoModelForImageTextToText ; `server/chat.py`
+# : PIL pour décoder les images). transformers y est INDISPENSABLE, pas optionnel
+# comme pour gdn : un modèle multimodal servi sans transformers échoue au chargement.
+# install.sh et le .deb incluent cet extra par défaut (le .deb épingle 5.17.0, la
+# version testée qui charge gemma4). Sans lui, `import transformers` manque au .venv
+# reconstruit et P3 échoue (trou du 21/09).
+vision = ["transformers>=4.57", "pillow>=10"]
 
 [project.scripts]
 acvram = "acvram.cli:main"
