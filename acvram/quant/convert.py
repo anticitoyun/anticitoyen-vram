@@ -761,14 +761,29 @@ def _scinder_experts_groupes(source: Iterator[tuple[str, torch.Tensor]]
             yield name, t
             continue
         prefixe = name[: name.rindex(".")]          # …mlp.experts
-        if name.endswith("gate_up_proj"):
-            inter = t.shape[2] // 2
-            for e in range(t.shape[0]):
-                yield f"{prefixe}.{e}.gate_proj.weight", t[e, :, :inter].t().contiguous()
-                yield f"{prefixe}.{e}.up_proj.weight", t[e, :, inter:].t().contiguous()
-        else:
-            for e in range(t.shape[0]):
-                yield f"{prefixe}.{e}.down_proj.weight", t[e].t().contiguous()
+        for e in range(t.shape[0]):
+            for proj in _projections_du_blob(name):
+                yield f"{prefixe}.{e}.{proj}.weight", _expert_depuis_blob(proj, t[e])
+
+
+def _projections_du_blob(nom_blob: str) -> tuple[str, ...]:
+    """Projections par expert contenues dans un blob hub (`gate_up_proj` en
+    porte deux, `down_proj` une)."""
+    return ("gate_proj", "up_proj") if nom_blob.endswith("gate_up_proj") else ("down_proj",)
+
+
+def _expert_depuis_blob(proj: str, tranche: torch.Tensor) -> torch.Tensor:
+    """Le poids `nn.Linear` d'UN expert depuis sa tranche de blob hub :
+    `gate_up_proj[e]` [H, 2I] → gate = colonnes [:I], up = [I:], transposées
+    en [I, H] ; `down_proj[e]` [I, H] → [H, I]. Seule définition de l'ordre
+    gate/up et de la transposition, partagée par le flux principal et la
+    collecte de calibration (`collect.py`) : les deux DOIVENT lire le même
+    poids sous le même nom, sinon les statistiques AWQ vont au mauvais tenseur."""
+    if proj == "down_proj":
+        return tranche.t().contiguous()
+    inter = tranche.shape[1] // 2
+    tr = tranche[:, :inter] if proj == "gate_proj" else tranche[:, inter:]
+    return tr.t().contiguous()
 
 
 def _adapt_texte(source: Iterator[tuple[str, torch.Tensor]], spec

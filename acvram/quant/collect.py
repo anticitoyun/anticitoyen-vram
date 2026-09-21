@@ -40,8 +40,9 @@ from ..engine.model import (Attention, DecoderLayer, DecoderLayerGDN,
                            ForwardBatch, MLP, MLP2, MoEBlock)
 from ..quant.formats import PlainTensor
 from .calibrate import ActStats
-from .convert import (_NORMES_ZERO_CENTREES, _QWEN35_HF, _QWEN35_RENOMMAGE,
-                      _nemotron_h_rename, _nemotron_h_valeur)
+from .convert import (_EXPERTS_GROUPES_HUB, _NORMES_ZERO_CENTREES, _QWEN35_HF,
+                      _QWEN35_RENOMMAGE, _expert_depuis_blob, _nemotron_h_rename,
+                      _nemotron_h_valeur, _projections_du_blob)
 
 __all__ = ["collect_activation_stats", "DEFAULT_CALIB_FILE", "default_calib_path", "load_calib_ids"]
 
@@ -198,10 +199,28 @@ def collect_activation_stats(
                         if src in nom:
                             nom = nom.replace(src, dst)
                             break
+            if nom.endswith(_EXPERTS_GROUPES_HUB) and len(h.get_slice(k).get_shape()) == 3:
+                # Experts groupés du hub transformers ≥ 5 (Qwen3-VL-30B, 21/09,
+                # `verdict-p3-3-30b-reconv-21-09` : 18 432/18 432 experts sans
+                # stats) : `_build_bf16_layer` cherche `experts.{e}.gate_proj.
+                # weight`, le blob s'appelle `experts.gate_up_proj` [E, H, 2I]
+                # — KeyError à e = 0, MoE à zéro expert, passe en échec, la
+                # couche entière perdait ses statistiques. Même scission que
+                # `convert.py::_scinder_experts_groupes` sur le flux principal,
+                # tranche par expert (`get_slice`, jamais le blob entier).
+                prefixe = nom[: nom.rindex(".")]
+                for e in range(h.get_slice(k).get_shape()[0]):
+                    for proj in _projections_du_blob(nom):
+                        location[f"{prefixe}.{e}.{proj}.weight"] = (fn, k, e, proj)
+                continue
             location[nom] = (fn, k)
 
     def get(key: str) -> torch.Tensor:
-        fn, reelle = location[key]
+        loc = location[key]
+        if len(loc) == 4:
+            fn, reelle, e, proj = loc
+            return _expert_depuis_blob(proj, handles[fn].get_slice(reelle)[e])
+        fn, reelle = loc
         t = handles[fn].get_tensor(reelle)
         if qwen35:
             if key.endswith("linear_attn.conv1d.weight") and t.dim() == 3:
