@@ -246,16 +246,21 @@ E mérések két megállapítása megváltoztatta az alapértelmezéseket:
 * [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **ami nincs kész**, ezt olvasd először
 * [`CONVENTIONS.md`](../CONVENTIONS.md) — a kód munkakonvenciói (nyelv, stílus, ellenőrzések push előtt)
 
-## Mért eredmények (2026. 09. 15., RTX 5090 400 W-on, ≥ 20 s-os üzem az energiamérőn)
+## Mért eredmények (2026. 09. 21., RTX 5090 400 W-on, ≥ 20 s-os üzem az energiamérőn)
 
 Qwen3-Coder-30B-A3B NVFP4-ben (szakértők) + INT8-ban (figyelem, fej), azonos
 protokoll minden motorra (`outils/`, egy kártya, `energie.py`):
 
-| | acvram 0.6.5 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram 0.6.34 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| dekódolás, 12 szekvencia | **934 t/s · 0,426 J/token** | 1 198-1 437 t/s · 0,271 J | — |
-| dekódolás, 1 szekvencia | 232,7 t/s · 1,46 J/token | 197 t/s · 1,43 J | 1,17-1,39 J |
-| prefill pp2048 | 19 148 token/s | 34 788 | 8 671 (TabbyAPI, visszavonva) |
+| dekódolás, 12 szekvencia | **1 540 t/s** | 1 596 t/s | — |
+| dekódolás, 1 szekvencia | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
+| prefill pp2048 | **22 707 token/s** | 21 054 | 8 671 (TabbyAPI, visszavonva) |
+
+A napi átbocsátások (1030-as állomás, `-lgc 2700` takarékos üzem, szolgálatban
+lévő futószalag). A J/tokent azonos órajelen a három motorral szemben most mérik
+újra a 0.6.34-hez (`outils/gpu/mesure/banc-4moteurs.py`), ezért itt nem jelenik
+meg — üzem nélküli szám nem jelenik meg.
 
 09. 14. reggelén az acvram ugyanebben a cellában 630 t/s-on és 0,619
 J/tokenen állt: a nyereség a Blackwell natív FP4 MMA-jából
@@ -266,14 +271,15 @@ tensormagos GEMM-ből jön. Minden számnak megvan a jegyzete az
 `acvram-memoire/revue/` alatt a mérés előtt lepecsételt előrejelzéssel, a
 műszerrel és annak üzemével — üzem nélküli szám nem jelenik meg.
 
-Ahol az acvram elöl jár: MLA-modellek (GLM-4.7-Flash) natív sm_120 NVFP4-ben,
-amelyeket a vLLM csak FP8-ban szolgál ki; és a VRAM-ba nem férő modellek. Ahol
-nem: egy VRAM-ba férő MoE nagy kötegű dekódolása, ahol a vLLM ×1,05-öt tart
-átbocsátásban és ×1,14-et energiában.
+Ahol az acvram elöl jár: MLA-modellek (GLM-4.7-Flash) natív sm_120 NVFP4-ben
+(b=1: 165,35 t/s szolgálatban), amelyeket a vLLM csak FP8-ban szolgál ki; és a
+VRAM-ba nem férő modellek. Ahol nem: egy VRAM-ba férő MoE nagy kötegű dekódolása,
+ahol a vLLM ×1,04-et tart átbocsátásban (1 596 az 1 540-nel szemben, 3,5%-os
+eltérés); az energiában mutatkozó eltérést a 0.6.34-hez újra kell mérni.
 
 ## Állapot
 
-0.6.5-ös verzió. Minden az 5090-en fut: `sm_120a`-ra (natív FP4) és
+0.6.34-es verzió. Minden az 5090-en fut: `sm_120a`-ra (natív FP4) és
 `sm_86`-ra fordított CUDA-kernelek, CUDA-gráfok, NVFP4/INT8/INT4 kvantálás,
 HTTP-szerver. Korlátok a helyükön: a kártya láthatatlan a munkameneteknek
 (`CUDA_VISIBLE_DEVICES` üres), és csak az `outils/carte.sh` adja kölcsön,

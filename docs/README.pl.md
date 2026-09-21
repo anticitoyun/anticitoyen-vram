@@ -242,16 +242,21 @@ Dwa spostrzeżenia z tych pomiarów zmieniły wartości domyślne:
 * [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **czego nie zrobiono**, czytać najpierw
 * [`CONVENTIONS.md`](../CONVENTIONS.md) — konwencje pracy nad kodem (język, styl, kontrole przed wypchnięciem)
 
-## Zmierzone wyniki (15.09.2026, RTX 5090 przy 400 W, reżim ≥ 20 s na liczniku energii)
+## Zmierzone wyniki (21.09.2026, RTX 5090 przy 400 W, reżim ≥ 20 s na liczniku energii)
 
 Qwen3-Coder-30B-A3B w NVFP4 (eksperci) + INT8 (uwaga, głowica), ten sam
 protokół dla wszystkich silników (`outils/`, jedna karta, `energie.py`):
 
-| | acvram 0.6.5 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram 0.6.34 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| dekodowanie 12 sekwencji | **934 t/s · 0,426 J/token** | 1 198-1 437 t/s · 0,271 J | — |
-| dekodowanie 1 sekwencji | 232,7 t/s · 1,46 J/token | 197 t/s · 1,43 J | 1,17-1,39 J |
-| prefill pp2048 | 19 148 tokenów/s | 34 788 | 8 671 (TabbyAPI, wycofane) |
+| dekodowanie 12 sekwencji | **1 540 t/s** | 1 596 t/s | — |
+| dekodowanie 1 sekwencji | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
+| prefill pp2048 | **22 707 tokenów/s** | 21 054 | 8 671 (TabbyAPI, wycofane) |
+
+Przepustowość dnia (stanowisko 1030, reżim eko `-lgc 2700`, potok w działaniu).
+J/token przy równym zegarze wobec trzech silników jest ponownie mierzony dla
+0.6.34 (`outils/gpu/mesure/banc-4moteurs.py`) i dlatego nie jest tu publikowany —
+liczba bez reżimu nie jest publikowana.
 
 Rankiem 14.09 acvram miał w tej samej komórce 630 t/s i 0,619 J/token: zyski
 pochodzą z natywnego MMA FP4 Blackwella (`mma.sync … kind::mxf4nvf4`, ×7,9
@@ -262,13 +267,14 @@ na rdzeniach tensorowych dla projekcji. Każda liczba ma swoją notatkę w
 instrumentem i jego reżimem — liczby bez reżimu się nie publikuje.
 
 Gdzie acvram jest z przodu: modele MLA (GLM-4.7-Flash) w natywnym NVFP4
-sm_120, które vLLM serwuje tylko w FP8; oraz modele niemieszczące się w VRAM.
-Gdzie nie jest: dekodowanie dużych partii MoE mieszczącego się w VRAM, gdzie
-vLLM zachowuje ×1,05 w przepustowości i ×1,14 w energii.
+sm_120, które vLLM serwuje tylko w FP8 (b=1: 165,35 t/s w działaniu); oraz
+modele niemieszczące się w VRAM. Gdzie nie jest: dekodowanie dużych partii MoE
+mieszczącego się w VRAM, gdzie vLLM zachowuje ×1,04 w przepustowości (1 596 do
+1 540, różnica 3,5 %); różnicę w energii trzeba zmierzyć ponownie dla 0.6.34.
 
 ## Stan
 
-Wersja 0.6.5. Wszystko działa na 5090: jądra CUDA skompilowane dla `sm_120a`
+Wersja 0.6.34. Wszystko działa na 5090: jądra CUDA skompilowane dla `sm_120a`
 (natywne FP4) i `sm_86`, grafy CUDA, kwantyzacja NVFP4/INT8/INT4, serwer
 HTTP. Zabezpieczenia na miejscu: karta jest niewidoczna dla sesji roboczych
 (`CUDA_VISIBLE_DEVICES` puste) i tylko `outils/carte.sh` wypożycza ją, pod

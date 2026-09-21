@@ -243,16 +243,21 @@ To iagttagelser fra disse målinger har ændret standardværdierne:
 * [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **det, der ikke er gjort**, læs først
 * [`CONVENTIONS.md`](../CONVENTIONS.md) — arbejdskonventioner for koden (sprog, stil, kontroller før push)
 
-## Målte resultater (15/09/2026, RTX 5090 ved 400 W, regime ≥ 20 s på energimåleren)
+## Målte resultater (21/09/2026, RTX 5090 ved 400 W, regime ≥ 20 s på energimåleren)
 
 Qwen3-Coder-30B-A3B i NVFP4 (eksperter) + INT8 (attention, hoved), samme
 protokol for alle motorer (`outils/`, ét kort, `energie.py`):
 
-| | acvram 0.6.5 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram 0.6.34 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| dekodning, 12 sekvenser | **934 t/s · 0,426 J/token** | 1 198-1 437 t/s · 0,271 J | — |
-| dekodning, 1 sekvens | 232,7 t/s · 1,46 J/token | 197 t/s · 1,43 J | 1,17-1,39 J |
-| prefill pp2048 | 19 148 tokens/s | 34 788 | 8 671 (TabbyAPI, trukket tilbage) |
+| dekodning, 12 sekvenser | **1 540 t/s** | 1 596 t/s | — |
+| dekodning, 1 sekvens | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
+| prefill pp2048 | **22 707 tokens/s** | 21 054 | 8 671 (TabbyAPI, trukket tilbage) |
+
+Dagens gennemløb (station 1030, øko-regime `-lgc 2700`, pipeline i drift).
+J/token ved samme takt mod de tre motorer måles igen for 0.6.34
+(`outils/gpu/mesure/banc-4moteurs.py`) og offentliggøres derfor ikke her — et
+tal uden regime offentliggøres ikke.
 
 Om morgenen den 14/09 lå acvram på 630 t/s og 0,619 J/token i samme celle:
 gevinsterne kommer fra Blackwells native FP4-MMA (`mma.sync …
@@ -263,13 +268,14 @@ tensorkerne-GEMM til projektionerne. Hvert tal har sin note i
 og dets regime — et tal uden regime offentliggøres ikke.
 
 Hvor acvram er foran: MLA-modeller (GLM-4.7-Flash) i native sm_120-NVFP4, som
-vLLM kun serverer i FP8; og modeller, der ikke passer i VRAM. Hvor den ikke
-er: stor-batch-dekodning af en MoE, der passer i VRAM, hvor vLLM beholder
-×1,05 i gennemløb og ×1,14 i energi.
+vLLM kun serverer i FP8 (b=1: 165,35 t/s i drift); og modeller, der ikke passer
+i VRAM. Hvor den ikke er: stor-batch-dekodning af en MoE, der passer i VRAM,
+hvor vLLM beholder ×1,04 i gennemløb (1 596 mod 1 540, 3,5 % forskel);
+energiforskellen skal måles igen for 0.6.34.
 
 ## Status
 
-Version 0.6.5. Alt kører på 5090: CUDA-kerner kompileret til `sm_120a`
+Version 0.6.34. Alt kører på 5090: CUDA-kerner kompileret til `sm_120a`
 (native FP4) og `sm_86`, CUDA-grafer, NVFP4/INT8/INT4-kvantisering,
 HTTP-server. Værn på plads: kortet er usynligt for arbejdssessioner
 (`CUDA_VISIBLE_DEVICES` tom), og kun `outils/carte.sh` udlåner det, under lås,

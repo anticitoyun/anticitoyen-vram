@@ -239,16 +239,21 @@ Two findings from these measurements changed the defaults:
 * [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **what is not done**, read first
 * [`CONVENTIONS.md`](../CONVENTIONS.md) — working conventions for the code (language, style, checks before pushing)
 
-## Measured results (15/09/2026, RTX 5090 at 400 W, ≥ 20 s regime on the energy meter)
+## Measured results (21/09/2026, RTX 5090 at 400 W, ≥ 20 s regime on the energy meter)
 
 Qwen3-Coder-30B-A3B in NVFP4 (experts) + INT8 (attention, head), same
 protocol for every engine (`outils/`, one card, `energie.py`):
 
-| | acvram 0.6.5 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram 0.6.34 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| decode, 12 sequences | **934 t/s · 0.426 J/token** | 1,198-1,437 t/s · 0.271 J | — |
-| decode, 1 sequence | 232.7 t/s · 1.46 J/token | 197 t/s · 1.43 J | 1.17-1.39 J |
-| prefill pp2048 | 19,148 tokens/s | 34,788 | 8,671 (TabbyAPI, withdrawn) |
+| decode, 12 sequences | **1,540 t/s** | 1,596 t/s | — |
+| decode, 1 sequence | **380.8 t/s** | 290.6 t/s | 323.6 t/s |
+| prefill pp2048 | **22,707 tokens/s** | 21,054 | 8,671 (TabbyAPI, withdrawn) |
+
+Throughput of the day (station 1030, eco regime `-lgc 2700`, pipeline in
+service). J/token at equal clock against the three engines is being re-measured
+for 0.6.34 (`outils/gpu/mesure/banc-4moteurs.py`) and is therefore not published
+here — a figure without a regime is not published.
 
 On the morning of 14/09 acvram was at 630 t/s and 0.619 J/token on the same
 cell: the gains come from Blackwell's native FP4 MMA
@@ -260,13 +265,14 @@ measurement, the instrument and its regime — a figure without a regime is not
 published.
 
 Where acvram is ahead: MLA models (GLM-4.7-Flash) in native sm_120 NVFP4,
-which vLLM only serves in FP8; and models that do not fit in VRAM. Where it is
-not: large-batch decoding of a MoE that fits in VRAM, where vLLM keeps ×1.05
-in throughput and ×1.14 in energy.
+which vLLM only serves in FP8 (b=1: 165.35 t/s in service); and models that do
+not fit in VRAM. Where it is not: large-batch decoding of a MoE that fits in
+VRAM, where vLLM keeps ×1.04 in throughput (1,596 against 1,540, 3.5 % gap);
+the energy gap is to be re-measured for 0.6.34.
 
 ## Status
 
-Version 0.6.5. Everything runs on the 5090: CUDA kernels compiled for
+Version 0.6.34. Everything runs on the 5090: CUDA kernels compiled for
 `sm_120a` (native FP4) and `sm_86`, CUDA graphs, NVFP4/INT8/INT4
 quantization, HTTP server. Guard rails in place: the card is invisible to
 working sessions (`CUDA_VISIBLE_DEVICES` empty) and only `outils/carte.sh`

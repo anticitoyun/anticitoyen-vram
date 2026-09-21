@@ -237,16 +237,18 @@ Hai nhận xét từ các phép đo này đã thay đổi giá trị mặc đị
 * [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **những gì chưa làm**, đọc trước
 * [`CONVENTIONS.md`](../CONVENTIONS.md) — quy ước làm việc với mã (ngôn ngữ, phong cách, kiểm tra trước khi push)
 
-## Kết quả đo được (15/09/2026, RTX 5090 ở 400 W, chế độ ≥ 20 s trên đồng hồ năng lượng)
+## Kết quả đo được (21/09/2026, RTX 5090 ở 400 W, chế độ ≥ 20 s trên đồng hồ năng lượng)
 
 Qwen3-Coder-30B-A3B ở NVFP4 (chuyên gia) + INT8 (chú ý, đầu), cùng giao
 thức cho mọi engine (`outils/`, một card, `energie.py`):
 
-| | acvram 0.6.5 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram 0.6.34 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| giải mã 12 chuỗi | **934 t/s · 0,426 J/token** | 1 198-1 437 t/s · 0,271 J | — |
-| giải mã 1 chuỗi | 232,7 t/s · 1,46 J/token | 197 t/s · 1,43 J | 1,17-1,39 J |
-| prefill pp2048 | 19 148 token/s | 34 788 | 8 671 (TabbyAPI, đã rút) |
+| giải mã 12 chuỗi | **1 540 t/s** | 1 596 t/s | — |
+| giải mã 1 chuỗi | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
+| prefill pp2048 | **22 707** token/s | 21 054 | 8 671 (TabbyAPI, đã rút) |
+
+Thông lượng trong ngày (giàn 1030, chế độ tiết kiệm `-lgc 2700`, pipeline đang phục vụ). J/token ở cùng xung nhịp so với ba engine đang được đo lại cho 0.6.34 (`outils/gpu/mesure/banc-4moteurs.py`) nên chưa công bố ở đây — một con số không có chế độ thì không công bố.
 
 Sáng 14/09 acvram ở 630 t/s và 0,619 J/token trên cùng ô: mức tăng đến từ
 MMA FP4 gốc của Blackwell (`mma.sync … kind::mxf4nvf4`, ×7,9 so với bf16),
@@ -256,14 +258,15 @@ tensor cho các phép chiếu. Mỗi con số có ghi chú trong `acvram-memoire
 với dự đoán được niêm phong trước khi đo, dụng cụ và chế độ của nó — một con
 số không có chế độ thì không được công bố.
 
-Nơi acvram dẫn trước: các mô hình MLA (GLM-4.7-Flash) ở NVFP4 gốc sm_120, mà
-vLLM chỉ phục vụ ở FP8; và các mô hình không vừa VRAM. Nơi nó không dẫn: giải
-mã lô lớn của một MoE vừa VRAM, nơi vLLM giữ ×1,05 về thông lượng và ×1,14 về
-năng lượng.
+Nơi acvram dẫn trước: các mô hình MLA (GLM-4.7-Flash) ở NVFP4 gốc sm_120
+(b=1: 165,35 t/s đang phục vụ), mà vLLM chỉ phục vụ ở FP8; và các mô hình không
+vừa VRAM. Nơi nó không dẫn: giải mã lô lớn của một MoE vừa VRAM, nơi vLLM giữ
+×1,04 về thông lượng (1 596 so với 1 540, chênh 3,5 %); chênh lệch về năng lượng
+đang được đo lại cho 0.6.34.
 
 ## Trạng thái
 
-Phiên bản 0.6.5. Mọi thứ chạy trên 5090: kernel CUDA biên dịch cho `sm_120a`
+Phiên bản 0.6.34. Mọi thứ chạy trên 5090: kernel CUDA biên dịch cho `sm_120a`
 (FP4 gốc) và `sm_86`, đồ thị CUDA, lượng tử hóa NVFP4/INT8/INT4, máy chủ
 HTTP. Rào chắn đã có: card vô hình với các phiên làm việc
 (`CUDA_VISIBLE_DEVICES` trống) và chỉ `outils/carte.sh` cho mượn nó, dưới
