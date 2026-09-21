@@ -173,8 +173,8 @@ def test_pipeline_par_defaut_ids_au_bit_b1_et_b12(b):
         engine._eos = set()
         ids = {}
         for k in range(b):
-            seq = engine.add_request(_invite(k, 96), SamplingParams(temperature=0.0, max_tokens=48))
-            ids[seq.sequence_id] = []
+            seq = engine.add_request(_invite(k, 96), SamplingParams(temperature=0.0, max_tokens=48), request_id=f"s{k}")
+            ids[seq.id] = []
         while engine.running or engine.waiting:
             for out in engine.step():
                 ids[out.sequence_id].extend(out.token_ids)
