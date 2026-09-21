@@ -207,13 +207,21 @@ def alias_servis():
     """{nom de dossier} présent en 2e colonne d'un TSV servi (acvram/gguf/vllm-chemins) —
     dénominateur de « alias servi », distinct du nom d'alias (1re colonne, préfixé/en
     minuscule) et de l'inventaire enrichi de poste8 (REGLES : ce dernier catalogue tout le
-    disque, celui-ci ne catalogue que ce qu'un lanceur sert réellement)."""
+    disque, celui-ci ne catalogue que ce qu'un lanceur sert réellement). Pour acvram-chemins.tsv
+    seulement : un dossier sans `acvram_manifest.json` est une SOURCE brute (HF, bf16 externe),
+    jamais un alias servi, même si une ligne de TSV pointe dessus (chef, 21/09 — mesuré sur
+    gemma-4-12B-it-bf16 : `model.safetensors` HF, aucun manifeste acvram)."""
     noms = set()
     for tsv in TSV_DIR.glob("*-chemins.tsv"):
+        exige_manifeste = tsv.name == "acvram-chemins.tsv"
         with open(tsv, newline="") as f:
             for r in csv.DictReader(f, delimiter="\t", fieldnames=["alias", "chemin", "ctx", "_", "_2", "regime"]):
-                if r["chemin"]:
-                    noms.add(Path(r["chemin"]).name)
+                if not r["chemin"]:
+                    continue
+                chemin = Path(r["chemin"])
+                if exige_manifeste and not (chemin / "acvram_manifest.json").is_file():
+                    continue
+                noms.add(chemin.name)
     return frozenset(noms)
 
 
