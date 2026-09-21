@@ -266,3 +266,119 @@ def test_un_contexte_tenu_sans_reserve_n_est_pas_tenu(converted, monkeypatch):
     eng2 = _engine_cpu(converted)
     monkeypatch.setattr(eng2, "_libre_apres_chauffe", lambda: (total // 2, total))
     assert eng2.chauffer_contexte(pas=8) == 64
+
+
+def test_la_capture_des_graphes_vient_apres_le_clamp_et_a_sa_taille(converted, monkeypatch):
+    """chef 21/09 (GLM k48 : OOM à la capture au ctx demandé, avant la chauffe) : demarrer_service = chauffe
+    (graphes masqués : aucun run pendant les essais) → clamp → capture au contexte TENU. Faux graphes : ctx demandé
+    64 > tenu 40 ⇒ graphs.max_model_len == 40, run jamais appelé avant le clamp, chargement réussi."""
+    import torch
+    from types import SimpleNamespace
+    from acvram.engine import runner
+    monkeypatch.delenv("ACVRAM_CHAUFFE_CTX", raising=False)
+    monkeypatch.setattr(runner, "CTX_TENU_MIN", 8)
+    eng = _engine_cpu(converted)
+    journal = []
+    faux_graphes = SimpleNamespace(max_model_len=64, captures=0, enabled=True, run=lambda batch: journal.append(("run", eng.max_model_len, None)) or None)
+    eng.graphs = faux_graphes
+    vrai = eng.generate
+
+    def faux(prompt_ids, params, images=None):
+        if len(prompt_ids) + 2 > 40:
+            raise torch.OutOfMemoryError("CUDA out of memory (simulé)")
+        journal.append(("chauffe", len(prompt_ids) + 2, eng.graphs))
+        return vrai(prompt_ids, params, images=images)
+    monkeypatch.setattr(eng, "generate", faux)
+    tenu, captures = eng.demarrer_service(warm_max_len=32, pas=8, pas_confirmation=8)
+    assert tenu == 40 and eng.max_model_len == 40 and faux_graphes.max_model_len == 40
+    passes = [(L, g) for (k, L, g) in journal if k == "chauffe"]
+    assert all(g is None for _, g in passes[:-1]), "graphes visibles pendant la dichotomie"
+    assert passes[-1] == (40, faux_graphes), "la confirmation se fait AU TENU, graphes actifs, après la capture"
+    assert eng.graphs is faux_graphes and " ctx_tenu=40(demandé 64) " in eng.regime_ligne() + " "
+
+
+def test_la_confirmation_avec_graphes_baisse_le_tenu_de_deux_pas_puis_charge(converted, monkeypatch):
+    """chef 21/09 : des graphes qui « coûtent » 2 pas (OOM avec graphes au-dessus de tenu − 16, pas 8) ⇒
+    confirmation échouée deux fois, recapture à chaque baisse, tenu final = 40 − 16 = 24, chargement réussi ;
+    des graphes qui coûtent 3 pas ⇒ refus nommé."""
+    import torch
+    import pytest
+    from types import SimpleNamespace
+    from acvram.engine import runner
+    monkeypatch.delenv("ACVRAM_CHAUFFE_CTX", raising=False)
+    monkeypatch.setattr(runner, "CTX_TENU_MIN", 8)
+
+    def moteur(cout_pas: int):
+        eng = _engine_cpu(converted)
+        faux_graphes = SimpleNamespace(max_model_len=64, captures=0, enabled=True, run=lambda batch: None)
+        eng.graphs = faux_graphes
+        vrai = eng.generate
+        recaptures = []
+
+        def faux(prompt_ids, params, images=None):
+            L = len(prompt_ids) + 2
+            if L > 40 or (eng.graphs is not None and L > 40 - 8 * cout_pas):
+                raise torch.OutOfMemoryError("CUDA out of memory (simulé)")
+            return vrai(prompt_ids, params, images=images)
+
+        def recapturer(warm_max_len):
+            recaptures.append(eng.max_model_len); faux_graphes.max_model_len = eng.max_model_len; eng.graphs = faux_graphes
+            return 0
+        monkeypatch.setattr(eng, "generate", faux); monkeypatch.setattr(eng, "_recapturer", recapturer)
+        return eng, faux_graphes, recaptures
+    eng, fg, rec = moteur(2)
+    tenu, _ = eng.demarrer_service(warm_max_len=32, pas=8, pas_confirmation=8)
+    assert tenu == 24 and eng.max_model_len == 24 and fg.max_model_len == 24 and rec == [32, 24], (tenu, rec)
+    assert " ctx_tenu=24(demandé 64) " in eng.regime_ligne() + " "
+    eng3, _, rec3 = moteur(3)
+    with pytest.raises(runner.ContexteNonTenu):
+        eng3.demarrer_service(warm_max_len=32, pas=8, pas_confirmation=8)
+    assert rec3 == [32, 24], "deux baisses au plus avant le refus"
+
+
+def test_chaque_pas_de_chauffe_part_d_un_allocateur_vide(converted, monkeypatch):
+    """chef 21/09 (3) : sans libération entre deux pas, les fragments du pas précédent s additionnent et chaque
+    pas voit moins de libre — allocateur simulé : réservé cumulé tant que `_avant_essai_de_chauffe` ne le vide pas.
+    Avec la libération : 64 tenu (chaque pas laisse ≥ 5 %) ; sans (méthode neutralisée) : la même chauffe descend."""
+    from acvram.engine import runner
+    monkeypatch.delenv("ACVRAM_CHAUFFE_CTX", raising=False)
+    monkeypatch.setattr(runner, "CTX_TENU_MIN", 8)
+    total = 100 << 20
+    etat = {"reserve": 0, "vidages": 0, "essais": 0}
+
+    def moteur(vider: bool):
+        eng = _engine_cpu(converted)
+        vrai = eng.generate
+
+        def note(prompt_ids, params, images=None):
+            etat["essais"] += 1
+            etat["reserve"] += (len(prompt_ids) + 2) * (total // 100) // 2     # un pas de L jetons réserve L/2 % du total
+            return vrai(prompt_ids, params, images=images)
+        monkeypatch.setattr(eng, "generate", note)
+        monkeypatch.setattr(eng, "_libre_apres_chauffe", lambda: (total - etat["reserve"], total))
+        if vider:
+            def vidage():
+                etat["vidages"] += 1; etat["reserve"] = 0
+            monkeypatch.setattr(eng, "_avant_essai_de_chauffe", vidage)
+        else:
+            monkeypatch.setattr(eng, "_avant_essai_de_chauffe", lambda: None)
+        return eng
+    e1 = moteur(vider=True)
+    assert e1.chauffer_contexte(pas=8) == 64 and etat["vidages"] == etat["essais"] == 1
+    etat.update(reserve=0, vidages=0, essais=0)
+    e2 = moteur(vider=False)
+    assert e2.chauffer_contexte(pas=8) == 64, "un seul pas : rien à cumuler, le témoin doit tenir aussi"
+    # même simulation, pas de 4 % par jeton : 64 ne tient pas (32 % + 5 % ... ) → la dichotomie fait plusieurs pas
+    etat.update(reserve=0, vidages=0, essais=0)
+    e3 = moteur(vider=False)
+    monkeypatch.setattr(e3, "_libre_apres_chauffe", lambda: (total - etat["reserve"] * 3, total))
+    try:
+        sans = e3.chauffer_contexte(pas=8)
+    except runner.ContexteNonTenu as e:                                   # descend jusqu à 0 : refus nommé
+        sans = e.tenu
+    etat.update(reserve=0, vidages=0, essais=0)
+    e4 = moteur(vider=True)
+    monkeypatch.setattr(e4, "_libre_apres_chauffe", lambda: (total - etat["reserve"] * 3, total))
+    avec = e4.chauffer_contexte(pas=8)
+    assert avec > sans, (avec, sans)
+    assert etat["vidages"] == etat["essais"]
