@@ -1,5 +1,15 @@
 # Ce qui est fait et ce qui ne l'est pas
 
+> **Lecture.** Journal en ordre chronologique inversé : les entrées datées sont
+> en tête, les sections sans date (« Fait depuis la version 0.1.0 », « Avant la
+> machine cible », « Reste à faire », « Limites connues ») datent d'avant la
+> première exécution sur la machine cible (30 août 2026) et sont conservées
+> telles quelles. L'état courant tient en une page : README, « Résultats
+> mesurés ». Reste à faire au 21 septembre 2026 : combler l'écart de 3,5 % à
+> b=12 face à vLLM (1 540 contre 1 596 t/s), mesurer les joules par jeton
+> contre llama.cpp, vLLM et TensorRT-LLM, réparer la calibration AWQ des
+> experts groupés (Qwen3-VL-30B), qualité NVFP4 du 31B par échelle adaptative.
+
 Écrit sans complaisance, parce que le projet que celui-ci remplace annonçait une
 extension de mémoire GPU fonctionnelle et livrait un module noyau qui se
 contentait d'afficher les nombres passés en paramètres.
@@ -227,7 +237,14 @@ morceaux produisent tous deux un bloc de requêtes décalé, et le drapeau inté
 aurait masqué les mauvaises cellules — silencieusement, avec une sortie
 plausible. Un test affirme que les deux diffèrent.
 
-## Toujours jamais exécuté sur la machine cible
+## Avant la machine cible — état au 30 août 2026 (journal, dépassé)
+
+> **Dépassé depuis le 31 août 2026.** Cette section décrit l'état du code avant
+> sa première exécution sur la RTX 5090 ; elle est conservée comme journal.
+> Depuis : les noyaux CUDA sont compilés et servent (sm_120), les débits sont
+> mesurés (README, « Résultats mesurés », 21/09 : 380,8 t/s à b=1, 1 540 t/s à
+> b=12, 22 707 j/s en prefill), le chemin FP4 tensor cores est lié, l'AVX2 tourne.
+> Ce qui reste réellement à faire est en tête de ce fichier.
 
 Tout a été écrit et testé sur un portable à i5-3230M et GeForce GT 740M en
 pilote 470 : ni CUDA, ni Blackwell, ni Ampere.
