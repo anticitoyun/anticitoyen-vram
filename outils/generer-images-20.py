@@ -5,13 +5,42 @@ poste7 peut y substituer 20 photos libres, le sha256 change et se date.  Usage :
 Les png ne sont PAS dans le dépôt (perdus avec un worktree le 21/09) : ce script les régénère au bit près
 (graine 20260920, DejaVuSans-Bold 72, PIL `optimize=True`) — contrôle : `sha256sum -c scratchpad/corpus-prive/images-20/images-20.sha256`
 dans le dossier généré (20/20 OK le 21/09, 3 régénérations). Il écrit aussi descriptions.tsv et images-20.sha256 : générer dans un
-dossier neuf, jamais directement dans corpus-prive/images-20 (les fichiers scellés y sont suivis par git)."""
+dossier neuf, jamais directement dans corpus-prive/images-20 (les fichiers scellés y sont suivis par git).
+Le bit près dépend de la bibliothèque, pas seulement du script (poste2 21/09 : 3/20 avec un autre venv) : les octets d un png
+dépendent du rendu du texte (FreeType) ET de la compression (zlib, `optimize=True`). Environnement qui reproduit le scellé :
+python 3.12.14 (.venv acvram), Pillow 12.3.0, FreeType 2.14.3, zlib 1.3.1, DejaVuSans-Bold.ttf sha256 e1d733afbbfce842…
+Tout écart est un REFUS nommé (rc 3) avant d écrire ; ACVRAM_IMAGES_FORCER=1 génère quand même (sha à re-sceller, daté)."""
 import os, sys, random, hashlib, math
 from PIL import Image, ImageDraw, ImageFont
+ATTENDU = {"Pillow": "12.3.0", "freetype2": "2.14.3", "zlib": "1.3.1", "police": "e1d733afbbfce842"}
+POLICE = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+
+def environnement() -> dict:
+    import PIL
+    from PIL import features
+    return {"Pillow": PIL.__version__, "freetype2": features.version("freetype2"), "zlib": features.version("zlib"),
+            "police": hashlib.sha256(open(POLICE, "rb").read()).hexdigest()[:16] if os.path.exists(POLICE) else "absente"}
+
+
+def ecarts() -> dict:
+    """{clé: (attendu, trouvé)} pour tout ce qui diffère de l environnement scellé ; vide = reproductible au bit."""
+    env = environnement()
+    return {k: (v, env[k]) for k, v in ATTENDU.items() if env[k] != v}
+
+
+if __name__ == "__main__" and len(sys.argv) == 2 and sys.argv[1] == "--environnement":
+    print(environnement()); sys.exit(0)
+if __name__ == "__main__":
+    diff = ecarts()
+    if diff and os.environ.get("ACVRAM_IMAGES_FORCER") != "1":
+        print("REFUS : environnement ≠ scellé, les png ne seraient pas au bit — " +
+              ", ".join(f"{k} attendu {a} trouvé {t}" for k, (a, t) in diff.items()) + " (ACVRAM_IMAGES_FORCER=1 pour générer un v2 à re-sceller)")
+        sys.exit(3)
 D = sys.argv[1]; os.makedirs(D, exist_ok=True); rnd = random.Random(20260920); S = 896
 COULEURS = {"rouge": (220, 40, 40), "vert": (40, 170, 60), "bleu": (40, 80, 220), "jaune": (240, 210, 30), "orange": (245, 130, 20),
             "violet": (140, 60, 200), "noir": (20, 20, 20), "blanc": (245, 245, 245), "cyan": (30, 200, 210), "rose": (240, 100, 170)}
-try: F = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 72)
+try: F = ImageFont.truetype(POLICE, 72)
 except Exception: F = ImageFont.load_default()
 def fond(): return Image.new("RGB", (S, S), tuple(rnd.randint(200, 255) for _ in range(3)))
 def formes(im, n):
