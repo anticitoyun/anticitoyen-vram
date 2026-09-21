@@ -9,3 +9,6 @@ suite : chef : la réserve kv=int8 reste posée, aucun changement en 0.6.34/0.6.
 
 ## Rejouable
 `ACVRAM_ARBRE=<poste2-qvl 829a7ef0> ACVRAM_MODELE_MESURE=<Qwen3-VL-2B-Instruct-bf16-vision> [ACVRAM_KV_FORMAT=bf16] MAX_LEN=2048 IMAGES_MAX=20 N_GREEDY=8 <venv>/bin/python <poste2>/scratchpad/mm-c-20-09/mesure-c.py <images-20> <sortie.json>` — refaire une seule fois suffit, le moteur est déterministe.
+
+## Addendum 09:07 — en-tête manquant, recouvrement signalé par chef
+Cette prise n'a pas imprimé d'en-tête charge/cpu (script ad hoc sans le préambule habituel de `chaine.sh`) — défaut de ma part, noté. chef signale que la suite de tests de poste3 (261 s) a couru 09:00-09:05, chevauchant possiblement la fin de cette prise (fichiers écrits 08:58-08:59, mais le `carte.sh` englobant a pu tenir le verrou plus tard). Sans en-tête, la contamination éventuelle ne peut être ni confirmée ni exclue pour ce résultat précis — de toute façon disqualifié pour la raison statistique ci-dessus (répétitions identiques au bit) : aucune conséquence sur le verdict rendu. Le n = 40 réel (légendes distinctes) qui suit imprimera son en-tête et sera pris sur une carte vérifiée calme.
