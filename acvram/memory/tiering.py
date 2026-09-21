@@ -928,6 +928,7 @@ def auto_plan(spec: ModelSpec, rig: Rig,
 
         # Cela ne tient nulle part. Disons ce qu'il faudrait.
         p = plan_placement(spec, rig, base)
+        p.kv_max_tokens, p.kv_budget = 0, {}     # les poids ne logent pas : aucun contexte, pas un budget fictif
         capacity = sum(t.capacity for t in p.tiers)
         short = p.total_weight_bytes - capacity
         need_bpw = capacity * 8 / max(1, spec.total_params)
