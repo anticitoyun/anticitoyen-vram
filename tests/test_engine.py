@@ -199,7 +199,7 @@ def test_un_contexte_non_tenu_est_refuse_nomme_avec_la_longueur_tenue(converted,
     with pytest.raises(ContexteNonTenu, match="max_model_len=64 demandé, 40 jetons tenus") as e:
         eng.chauffer_contexte(pas=8)
     assert (e.value.demande, e.value.tenu) == (64, 40) and eng.ctx_tenu == 40
-    assert " ctx_tenu=40 " in eng.regime_ligne() + " "
+    assert " ctx_tenu=40(demandé 64) " in eng.regime_ligne() + " "     # refus : la ligne porte demandé et tenu
     assert eng.allocator.num_free == eng.allocator.num_blocks and not eng.running
 
 

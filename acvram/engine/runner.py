@@ -1982,7 +1982,7 @@ class Engine:
     def _libre_apres_chauffe(self) -> tuple[int, int]:
         """(libre, total) octets du pilote après la passe, avant tout `empty_cache` : le réservé du prefill y est
         encore compté. Hors carte : (total, total) — la réserve ne se juge que sur carte."""
-        dev = self.model.embed_tokens.weight.device
+        dev = self.model.embed_tokens.device
         if torch.cuda.is_available() and dev.type == "cuda":
             libre, total = torch.cuda.mem_get_info(dev)
             return int(libre), int(total)
