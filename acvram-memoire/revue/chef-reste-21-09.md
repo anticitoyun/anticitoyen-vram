@@ -8,8 +8,8 @@ Objectif : plus rapide et moins de joules que llama.cpp, vLLM, TensorRT-LLM. Ten
 3. **OUI utilisateur (21/09 17 h) : C9 119B et bf16 30B (60 Go)** → pièces 19-20 ci-dessous.
 
 ## B — objectif b=12 (poste1, poste2, poste4)
-4. Chaîne ABBA sampler (poste4 226bf4da, ≈ 8 min, poste2) : tranche H1 ordre/dérive ; le protocole intercalé devient la règle des cellules A/B.
-5. Frontière de pas 0,43 ms (poste1) : d'abord la décomposer (tête, argmax 55 µs, copie ids, lancement du graphe suivant, hôte), puis leviers dans l'ordre capture de l'échantillonnage dans le graphe → argmax fusionné (plafond ≈ 0,1 ms ≈ 1,3 % : insuffisant seul, verdict 2.4) ; tête nvfp4 exclue ; chaque levier = test au bit + cellule ABBA.
+4. ~~ABBA sampler~~ FAIT : H1 (ordre/dérive) confirmée ; levier 1 (échantillonnage dans le graphe) TENU et DÉFAUT (13de908e) ; protocole A B B A A B B A avec horloges = règle.
+5. Frontière : décomposée (frontiere-pas.py) ; levier 2 (rapatriement épinglé, double tampon contigu) TENU 2 passes (+6,84 % / +3,22 %, B 1 641 / 1 607 t/s) — verdict poste4 puis défaut ; levier 3 = modules B (prêt, compilé) et C (fusions d'épilogue MoE, −0,20 à −0,30 ms) après la table nsys.
 6. Cellule b=12 finale ≥ 1 596 ou écart nommé comme résultat.
 
 ## C — 30B-VL (défaut de conversion, pas du moteur)
@@ -18,7 +18,7 @@ Objectif : plus rapide et moins de joules que llama.cpp, vLLM, TensorRT-LLM. Ten
 
 ## D — 31B 4sur6 (qualité nvfp4)
 9. Reconversion gemma-4-31B `--echelle=4sur6` en mode service (≈ 75 min, tuée à 24/60 par DUREE_MAX 1800) ; weight_format contrôlé.
-10. Scellé E : chaîne à composer sur decode-pas.py (verdict-decode-pas-31b-kv-20-09), A/B/T, KL max ≤ 1,2, part amax/4 publiée.
+10. ~~Scellé E~~ RÉFUTÉ (B 4sur6 1,39 > 1,2 ; A max/6 recalibré 0,87) ; complément PPL relative A/B (≤ 20 min, poste2) avant retrait de l'option 4sur6.
 
 ## E — énergie et TensorRT-LLM (pièces 10-11)
 11. TRT-LLM : run minimal TENU (8d7706f6, temoin-3B 187,6 t/s indicatif) ; cellules b=1/b=12/prefill sur le checkpoint hub NVFP4 (liste de contrôle 3.4) — poste3, après 30B-VL de poste2.
