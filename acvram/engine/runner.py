@@ -34,6 +34,7 @@ from .loader import LoadedModel
 from .model import _DUMP_MOE, ForwardBatch
 from .sampler import sampler_texte, SamplingParams, besoin_historique, sample
 from .graphs import depaqueter_logprobs, rapatriement_epingle_actif
+from ..kernels.gemm_etroit import etroites_texte
 from .speculative import GardeSpeculation, Proposal, verify_proposal
 from .vision import ImageRequete, SansTourVision, TourVision, verifier_plages
 
@@ -820,6 +821,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                + f"kv={self.kv_format_servi()} "
                + f"pipeline={int(bool(self.pipeline_actif and self.graphs is not None))} "   # effectif : demandé ET graphes
                + f"sampler={'graphe' if self.pipeline_actif and self.graphs is not None and getattr(self.graphs, 'sampler_graphe', False) else sampler_texte()} "
+               + f"etroites={etroites_texte()} "
                + f"rapatriement={'epingle' if self.pipeline_actif and self.graphs is not None and getattr(self.graphs, 'sampler_graphe', False) and self.rapatriement_epingle else 'flux'} "
                + (f"kv_plan_override=1 " if r["kv_plan_override"] else "")
                + (f"llama4_scaling_beta={r['llama4_scaling_beta']}"

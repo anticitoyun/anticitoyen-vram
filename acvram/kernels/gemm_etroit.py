@@ -18,6 +18,7 @@ carte : ``TRITON_INTERPRET=1`` en fp16.
 from __future__ import annotations
 
 import os
+from typing import Optional
 
 import torch
 
@@ -162,6 +163,57 @@ def _compteur(n: int, device) -> torch.Tensor:
     return c
 
 
+# Opt-in « ± 1 ulp » (REGLES § 1, décision utilisateur 22/09) : facteur de
+# programmes par SM du split-K. 2 = le défaut, AU BIT avec le chemin d avant
+# (même `voulu`, mêmes tranches, même ordre des sommes fp32). Un autre
+# facteur change le nombre de tranches, donc la PARTITION de K et l ordre
+# fp32 des partiels sommés par le dernier programme : sortie à ± 1 ulp bf16,
+# jugée par `banc-etroites-splitk` (ulp max, part d éléments ≠) puis PPL à
+# 2 SE et KL contre le chemin exact ; jamais activé par un lanceur ; ligne
+# `etroites=serie|splitk±1ulp(F)`. Conception : poste1-etroites-splitk-conception-22-09.
+FACTEUR_DEFAUT = 2.0
+_FACTEUR: Optional[float] = None
+
+
+def facteur_splitk() -> float:
+    if _FACTEUR is not None:
+        return _FACTEUR
+    v = os.environ.get("ACVRAM_ETROITES_SPLITK", "")
+    return float(v) if v else FACTEUR_DEFAUT
+
+
+def regler_tranches(facteur: Optional[float]) -> None:
+    """Banc : impose le facteur (None = relire l environnement / le défaut)."""
+    global _FACTEUR
+    _FACTEUR = facteur
+
+
+def decouper_k(ng: int, tuiles_n: int, device) -> tuple[int, int]:
+    """(tranches, groupes par tranche) : `facteur` programmes par SM voulus,
+    borné par le nombre de groupes ; arithmétique du 17/09 inchangée à F = 2."""
+    voulu = -(-int(round(facteur_splitk() * _programmes(device))) // tuiles_n)
+    tranches = max(1, min(ng, voulu))
+    gpt = -(-ng // tranches)
+    return -(-ng // gpt), gpt
+
+
+def tranches_de(x: torch.Tensor, t) -> int:
+    N, k_pad = t.qweight.shape
+    return decouper_k(k_pad // t.group_size, -(-N // BN), x.device)[0]
+
+
+def programmes_de(x: torch.Tensor, t) -> int:
+    N, k_pad = t.qweight.shape
+    tuiles_n = -(-N // BN)
+    return tuiles_n * decouper_k(k_pad // t.group_size, tuiles_n, x.device)[0]
+
+
+def etroites_texte() -> str:
+    """Pour la ligne de régime : `serie` au bit (F = 2), sinon `splitk±1ulp(F)`."""
+    f = facteur_splitk()
+    return "serie" if f == FACTEUR_DEFAUT else f"splitk±1ulp(F={f:g})"
+
+
 def gemm_etroit(x: torch.Tensor, t, sortie_fp32: bool = False, compact: bool = False) -> torch.Tensor:
     """``x`` [M ≤ 16, K] bf16 (fp16 sous l'interpréteur), ``t`` INT8Tensor
     → [M, N] dans le dtype de x, ou fp32 (tête). ``compact`` (C15 niveau 3,
@@ -174,10 +226,7 @@ def gemm_etroit(x: torch.Tensor, t, sortie_fp32: bool = False, compact: bool = F
     ng = k_pad // G
     assert t.scales.shape == (N, ng) and t.zeros.shape == (N, ng), (t.scales.shape, t.zeros.shape, N, ng)
     tuiles_n = -(-N // BN)
-    voulu = -(-2 * _programmes(x.device) // tuiles_n)
-    tranches = max(1, min(ng, voulu))
-    gpt = -(-ng // tranches)
-    tranches = -(-ng // gpt)
+    tranches, gpt = decouper_k(ng, tuiles_n, x.device)
     if compact:
         y = torch.empty(tranches, M, N, dtype=torch.float32, device=x.device)
         out = torch.empty(M, N, dtype=torch.float32 if sortie_fp32 else x.dtype, device=x.device)
