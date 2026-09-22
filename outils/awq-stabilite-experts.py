@@ -59,6 +59,49 @@ def decouper(calib: list[list[int]], jetons: int) -> list[list[int]]:
     return out
 
 
+class LecteurPoids:
+    """Le poids `nn.Linear` d un expert nommé `model.layers.L.mlp.experts.E.{gate,up,down}_proj.weight`,
+    quelle que soit la disposition des shards : (1) par expert, tel quel ;
+    (2) sous `model.language_model.` (enrobage multimodal) ; (3) blob hub
+    ≥ 5 `experts.gate_up_proj` [E, H, 2I] / `experts.down_proj` [E, I, H],
+    découpé par `convert._expert_depuis_blob` (la même définition que le
+    convertisseur et la collecte : même poids sous le même nom). None si
+    aucune des trois — l appelant compte et refuse à zéro."""
+    def __init__(self, dossier: str):
+        from safetensors import safe_open
+        self._open = safe_open
+        self.dossier = dossier
+        self.index = {}
+        for fn in sorted(os.listdir(dossier)):
+            if fn.endswith(".safetensors"):
+                with safe_open(os.path.join(dossier, fn), framework="pt", device="cpu") as fh:
+                    for k in fh.keys():
+                        self.index[k] = fn
+        self._blobs: dict = {}
+
+    def _lire(self, cle: str):
+        with self._open(os.path.join(self.dossier, self.index[cle]), framework="pt", device="cpu") as fh:
+            return fh.get_tensor(cle)
+
+    def charger(self, nom: str):
+        m = RE_EXPERT.match(nom)
+        if not m:
+            return None
+        for cle in (nom, nom.replace("model.", "model.language_model.", 1)):
+            if cle in self.index:
+                return self._lire(cle)
+        from acvram.quant.convert import _expert_depuis_blob
+        couche, e, proj = m.group(1), int(m.group(2)), m.group(3)
+        blob_nom = "gate_up_proj" if proj in ("gate_proj", "up_proj") else "down_proj"
+        for prefixe in ("model.", "model.language_model."):
+            cle = f"{prefixe}layers.{couche}.mlp.experts.{blob_nom}"
+            if cle in self.index:
+                if cle not in self._blobs:
+                    self._blobs = {cle: self._lire(cle)}          # un blob à la fois en mémoire (jusqu à 200 Mo)
+                return _expert_depuis_blob(proj, self._blobs[cle][e])
+        return None
+
+
 def echelles(poids: "torch.Tensor", st, fmt: str, group_size: int, quant_act: bool):
     from acvram.quant.calibrate import search_channel_scales
     scaler, err = search_channel_scales(poids, st, fmt, group_size=group_size, n_grid=20,
@@ -99,20 +142,18 @@ def mesurer(a) -> dict:
     for cl, noms in par_classe.items():
         rng.shuffle(noms)
         retenus += noms[:par_cl]
-    # poids des experts retenus, lus aux shards
-    index = {}
-    for fn in os.listdir(a.model):
-        if fn.endswith(".safetensors"):
-            with safe_open(os.path.join(a.model, fn), framework="pt", device="cpu") as fh:
-                for k in fh.keys():
-                    index[k] = fn
+    # poids des experts retenus, lus aux shards par `charger_poids` (par expert,
+    # préfixe multimodal, ou blob hub ≥ 5 découpé — 22/09 : 0 expert lu sur
+    # 17 235 parce que la source déquantifiée porte `experts.gate_up_proj` [E, H, 2I])
+    lecteur = LecteurPoids(a.model)
     lignes = []
+    non_lus = []
     for i, nom in enumerate(retenus):
-        cle = nom if nom in index else nom.replace("model.", "model.language_model.", 1)
-        if cle not in index:
+        w = lecteur.charger(nom)
+        if w is None:
+            non_lus.append(nom)
             continue
-        with safe_open(os.path.join(a.model, index[cle]), framework="pt", device="cpu") as fh:
-            w = fh.get_tensor(cle).to(a.device)
+        w = w.to(a.device)
         s_ref, err_ref = echelles(w, ref[nom], "nvfp4", a.group_size, True)
         ligne = {"expert": nom, "n_ref": int(ref[nom].n_samples), "classe_ref": classe_de(int(ref[nom].n_samples)),
                  "err_ref": err_ref, "par_taille": {}}
@@ -128,8 +169,13 @@ def mesurer(a) -> dict:
         lignes.append(ligne)
         if (i + 1) % 40 == 0:
             print(f"[stabilite] {i + 1}/{len(retenus)} experts", flush=True)
+    if not lignes:
+        sys.exit(f"INVALIDE : 0 expert lu sur {len(retenus)} retenus (premier : {non_lus[0] if non_lus else '?'}) — "
+                 f"disposition des poids non reconnue par LecteurPoids ; classes vues : {sorted(par_classe)}")
     return {"modele": a.model, "jetons": tailles, "tolerance": a.tolerance, "experts_mesures": len(lignes),
-            "experts_total_ref": len(experts_ref), "lignes": lignes, **courbe(lignes, a.tolerance)}
+            "experts_non_lus": len(non_lus), "experts_total_ref": len(experts_ref),
+            "par_classe_ref": {cl: len(v) for cl, v in par_classe.items()},
+            "lignes": lignes, **courbe(lignes, a.tolerance)}
 
 
 def courbe(lignes: list, tolerance: float) -> dict:

@@ -145,3 +145,40 @@ def test_stabilite_decoupe_courbe_et_seuil():
     assert r["courbe"]["1-7"]["ecart_mediane"] == 0.45 and r["seuil_stabilite"] == "32-127" and r["verdict"].startswith("TENU")
     assert m.courbe([{"par_taille": {100: {"n": 2, "classe": "1-7", "ecart": 0.02}}}], 0.10)["verdict"].startswith("RÉFUTÉ : stable dès")
     assert m.courbe([{"par_taille": {100: {"n": 900, "classe": ">=512", "ecart": 0.3}}}], 0.10)["verdict"].startswith("RÉFUTÉ : l échelle")
+
+
+def test_stabilite_lecteur_de_poids_trois_dispositions(tmp_path):
+    """verdict-piece25a-stabilite-awq-22-09 : 0 expert lu sur 17 235 — la source
+    déquantifiée porte la disposition hub ≥ 5 (`experts.gate_up_proj` [E, H, 2I],
+    `down_proj` [E, I, H]) et l instrument ne cherchait que les clés par expert.
+    Le lecteur lit les trois dispositions et rend le MÊME poids ; un dossier
+    sans aucune des trois rend None (et `mesurer` refuse à zéro au lieu de
+    rendre « courbe: {} »)."""
+    from safetensors.torch import save_file
+    m = _module("outils/awq-stabilite-experts.py")
+    E, H, I = 3, 8, 4
+    torch.manual_seed(2)
+    par_expert = {}
+    for e in range(E):
+        par_expert[f"model.layers.0.mlp.experts.{e}.gate_proj.weight"] = torch.randn(I, H, dtype=torch.bfloat16)
+        par_expert[f"model.layers.0.mlp.experts.{e}.up_proj.weight"] = torch.randn(I, H, dtype=torch.bfloat16)
+        par_expert[f"model.layers.0.mlp.experts.{e}.down_proj.weight"] = torch.randn(H, I, dtype=torch.bfloat16)
+    p = "model.layers.0.mlp.experts."
+    hub = {"model.language_model.layers.0.mlp.experts.gate_up_proj": torch.stack([
+               torch.cat([par_expert[p + f"{e}.gate_proj.weight"], par_expert[p + f"{e}.up_proj.weight"]], 0).t()
+               for e in range(E)]).contiguous(),
+           "model.language_model.layers.0.mlp.experts.down_proj": torch.stack(
+               [par_expert[p + f"{e}.down_proj.weight"].t() for e in range(E)]).contiguous()}
+    mm = {"model.language_model." + k[len("model."):]: v for k, v in par_expert.items()}
+    dossiers = {}
+    for nom, sd in (("par_expert", par_expert), ("hub", hub), ("multimodal", mm), ("vide", {"lm_head.weight": torch.zeros(2, 2)})):
+        d = tmp_path / nom
+        d.mkdir()
+        save_file(sd, str(d / "model.safetensors"))
+        dossiers[nom] = m.LecteurPoids(str(d))
+    for k, w in par_expert.items():
+        for nom in ("par_expert", "hub", "multimodal"):
+            lu = dossiers[nom].charger(k)
+            assert lu is not None and torch.equal(lu, w), (nom, k)
+        assert dossiers["vide"].charger(k) is None
+    assert dossiers["hub"].charger("lm_head.weight") is None
