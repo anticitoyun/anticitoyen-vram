@@ -1010,14 +1010,11 @@ def main():
 # vit). L'orchestration GPU (`mesurer_fenetre_protocole25`/`comparer_alternee`)
 # les appelle mais n'a pas de logique propre à tester hors carte.
 #
-# « charge étrangère » : qr.md § 2.5 donne un seuil en % de P_max (puissance
-# plafond) que je n'ai pas pu confronter au texte source (qr.md absent de cet
-# arbre) — faute de définition vérifiée, je réutilise le critère déjà
-# instrumenté et REGLES §2 (`Energie.invalidations()`, charge CPU pic
-# load1 > nproc/2, PID hors verrou identifié) plutôt que d'inventer un calcul
-# de puissance non testé. **À confirmer par qui a écrit qr.md § 2.5** : si le
-# seuil visé est bien un pic de puissance instantanée (P_tick − P_repos) >
-# 0,05 × plafond_w, `_valider_charge` est à remplacer, pas à côté.
+# « charge étrangère » : substitution CONFIRMÉE (chef 22/09) — le « 5 %
+# P_max » venait d'un avis extérieur (qr.md, hors dépôt, ~/Bureau/Vibe, pas
+# une note du groupe) ; le critère qui compte est REGLES §2, déjà instrumenté
+# ici : charge CPU par processus (pic load1 > nproc/2) ET puissance < 395 W
+# (`Energie.invalidations()`/`plafond`) — `_valider_charge` reste tel quel.
 
 def _sd_relatif_pct(debits: list) -> float:
     """Même définition que `mesurer()` (pstdev/moyenne, en %) — pas
@@ -1071,9 +1068,10 @@ def _valider_fenetre(agg: dict) -> list:
 
 
 def _valider_charge(charge_pct) -> list:
-    """Voir le commentaire de tête : substitut REGLES §2 (load1 pic / nproc,
-    en %) faute de la définition qr.md § 2.5 vérifiée. ``None`` = non mesuré,
-    ne rejette pas (silencieux, pas un TENU)."""
+    """Voir le commentaire de tête : critère REGLES §2 (load1 pic / nproc, en
+    %), confirmé par la chef — le « % P_max » d'un avis extérieur n'est
+    pas retenu. ``None`` = non mesuré, ne rejette pas (silencieux, pas un
+    TENU)."""
     if charge_pct is None:
         return []
     return [] if charge_pct <= 5.0 else [f"charge étrangère {charge_pct:.1f} % > 5 %"]
