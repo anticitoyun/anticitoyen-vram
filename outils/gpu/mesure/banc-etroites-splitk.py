@@ -65,7 +65,7 @@ def poids_int8(n: int, k: int, graine: int, device):
     if not isinstance(t, INT8Tensor):
         raise TypeError(f"quantize(int8) a rendu {type(t).__name__}, pas un INT8Tensor")
     t = t.to(device)
-    if t.qweight.device != torch.device(device) or t.scales.device != torch.device(device):
+    if t.qweight.device.type != torch.device(device).type or t.scales.device.type != torch.device(device).type:
         raise RuntimeError(f"poids int8 pas sur {device} : {t.qweight.device} / {t.scales.device}")
     return t
 
@@ -93,7 +93,7 @@ def chrono(fn, rep: int) -> list[float]:
 
 def mesurer(tranches: list[int], rep: int) -> dict:
     from acvram.kernels import gemm_etroit as GE
-    dev = torch.device("cuda")
+    dev = torch.device("cuda", torch.cuda.current_device())     # indexé : `cuda` ≠ `cuda:0` en égalité stricte (poste2)
     r = {"tranches_balayees": tranches, "rep": rep, "b": B, "formes": {}}
     for nom, (n, k) in FORMES.items():
         t = poids_int8(n, k, graine=hash(nom) % 1000, device=dev)
