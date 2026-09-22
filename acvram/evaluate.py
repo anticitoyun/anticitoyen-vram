@@ -201,7 +201,16 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
     from .server.chat import load_tokenizer
 
     t0 = time.time()
-    loaded = load_model(model_dir, dtype=dtype, device_override=device)
+    # 22/09 (`verdict-ppl-31b-ab-22-09`) : sans `max_model_len` ni
+    # `max_concurrent_seqs`, `_replanifier` (loader.py) dimensionne le cache KV
+    # comme un SERVEUR — `kv_planned_seqs` (8) × `kv_max_tokens` (9 791) du
+    # manifeste, 4,5 Gio — et la réserve de préfill sur 9 791 jetons (2,9 Gio) :
+    # 23,8 Gio de poids + 7,4 Gio de budget > 29,5 Gio libres → 11 MLP exilés,
+    # 619 % de PCIe, PPL aberrante (5 446) sur un 31B qui tient seul. L évaluation
+    # ne traite qu UNE fenêtre à la fois : le budget est 1 séquence de
+    # `window` (+ un bloc pour l allocateur, `blocks_per_window`), 1,7 Gio.
+    loaded = load_model(model_dir, dtype=dtype, device_override=device,
+                        max_model_len=window + BLOCK_SIZE, max_concurrent_seqs=1)
     tokenizer = load_tokenizer(model_dir)
     if tokenizer is None:
         from .server.chat import pourquoi_pas_de_tokenizer
