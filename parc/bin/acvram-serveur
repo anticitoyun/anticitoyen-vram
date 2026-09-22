@@ -18,13 +18,35 @@ if [ ! -d "$CIBLE" ]; then
         || { err "Alias absent de $TSV : $CIBLE"; exit 1; }
     dossier=$(printf '%s' "$ligne" | cut -f2)
     [ -n "$CTX" ] || CTX=$(printf '%s' "$ligne" | cut -f3)
+    ctx_client_min=$(printf '%s' "$ligne" | cut -f4)   # optionnel : ctx min requis par le client
     alias_nom="$CIBLE"
 else
     dossier="$CIBLE"
     alias_nom=$(basename "$CIBLE")
+    ctx_client_min=""
 fi
 [ -d "$dossier" ] || { err "Dossier introuvable : $dossier"; exit 1; }
 CTX="${CTX:-32768}"
+
+# Si le client exige plus de contexte que CTX, tenter d'adapter ou refuser
+if [ -n "$ctx_client_min" ] && [ "$ctx_client_min" -gt "${CTX:-0}" ] 2>/dev/null; then
+    ctx_max_modele=$(python3 -c "
+import json, pathlib, sys
+cfg = pathlib.Path('$dossier') / 'config.json'
+if cfg.exists():
+    d = json.loads(cfg.read_text())
+    print(d.get('max_position_embeddings', 0))
+else:
+    print(0)
+" 2>/dev/null || echo 0)
+    if [ "$ctx_client_min" -le "$ctx_max_modele" ] 2>/dev/null; then
+        echo "acvram : ctx ajusté $CTX → $ctx_client_min (ctx_client_min=$ctx_client_min, modèle supporte jusqu'à $ctx_max_modele)"
+        CTX="$ctx_client_min"
+    else
+        err "Alias refusé : client requiert ctx≥$ctx_client_min, modèle limité à $ctx_max_modele (ctx demandé=$CTX)"
+        exit 1
+    fi
+fi
 
 # déjà servi ?
 servi=$(curl -s -m 2 "http://127.0.0.1:$PORT/v1/models" 2>/dev/null \
