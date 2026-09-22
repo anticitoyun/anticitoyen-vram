@@ -95,6 +95,20 @@ class Tokenizer:
             bos = bos.get("content")
         return bos or ""
 
+    def bos_id(self) -> Optional[int]:
+        """L identifiant du BOS que le GABARIT pose en tête de toute conversation
+        (`{{ bos_token }}` chez Gemma, encodé comme jeton spécial), ou None :
+        le post-traitement de tokenizer.json ne le pose PAS toujours
+        (Gemma 4 : `TemplateProcessing` sans jeton spécial), `encode(...,
+        add_special_tokens=True)` rend alors une suite sans BOS — et un modèle
+        entraîné avec BOS s effondre sans lui (22/09, `acvram eval` 31B : PPL
+        936 au lieu de 10-20, `verdict-ppl-31b-ab-v2`)."""
+        bos = self.bos_token
+        if not bos:
+            return None
+        ident = self.backend.token_to_id(bos)
+        return int(ident) if ident is not None else None
+
     # -- chat -------------------------------------------------------------
     def apply_chat_template(self, messages: list[dict], add_generation_prompt: bool,
                             extra: Optional[dict] = None) -> str:

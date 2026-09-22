@@ -60,6 +60,7 @@ class EvalResult:
     nll: float = 0.0
     tokens: int = 0
     windows: int = 0
+    bos: Optional[int] = None            # BOS posé en tête de chaque fenêtre (None : le tokeniseur n en a pas)
     # Perplexite par tranche de contexte : {jetons de contexte disponibles au
     # minimum: (somme des nll, positions)}. Un modele sain coute une dizaine de
     # nats sur son premier jeton et moins de deux au millieme ; melanger les
@@ -260,10 +261,25 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
     blocks_per_window = (window + BLOCK_SIZE - 1) // BLOCK_SIZE + 1
     total_nll = 0.0
     counted = 0
+    # 22/09 (`verdict-ppl-31b-ab-v2`) : Gemma 4 31B rendait PPL 936-5 446 au
+    # lieu de 10-20, identique avant et après le correctif d exil — aucune
+    # fenêtre ne commençait par le BOS. Le gabarit de conversation le pose
+    # (`{{ bos_token }}`), pas le post-traitement de tokenizer.json, et un
+    # modèle entraîné avec BOS n a sans lui aucun puits d attention (même
+    # effondrement que GLM sans `[gMASK]<sop>`, poste7 § 10). Protocole : chaque
+    # fenêtre = [BOS] + (window − 1) jetons du corpus quand le tokeniseur en
+    # a un (llama-perplexity fait de même, add_bos par bloc) ; le BOS n est
+    # jamais une cible, il est compté dans le contexte. Sans BOS (Qwen) : rien
+    # ne change, au bit.
+    bos = getattr(tokenizer, "bos_id", lambda: None)()
+    result.bos = bos
+    corps = window - 1 if bos is not None else window
     n_windows = max(1, (len(ids) - 1 + stride - 1) // stride)
 
     for w, start in enumerate(range(0, len(ids) - 1, stride)):
-        chunk = ids[start:start + window]
+        chunk = ids[start:start + corps]
+        if bos is not None:
+            chunk = [bos] + chunk
         if len(chunk) < 2:
             break
         alloc = BlockAllocator(blocks_per_window, enable_prefix_cache=False)
@@ -424,6 +440,11 @@ def render(results: list[EvalResult]) -> str:
     if len(cadres) == 1:
         w, mc = next(iter(cadres))
         lines.append(f"  cadrage : fenetre {w}, contexte minimal {mc} jeton(s)")
+        bos = {r.bos for r in results}
+        lines.append("  bos     : " + (", ".join(f"{r.model}={'aucun' if r.bos is None else r.bos}" for r in results)
+                                       if len(bos) > 1 else
+                                       ("aucun (le tokeniseur n en pose pas)" if bos == {None}
+                                        else f"{next(iter(bos))} en tête de chaque fenêtre")))
         lines.append("")
     lines.append(f"  {'modele':<{width}}  {'ppl':>9}  {'bpp':>6}  {'taille':>10}  "
                  f"{'jetons':>8}")
