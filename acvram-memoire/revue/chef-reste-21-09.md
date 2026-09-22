@@ -96,3 +96,5 @@ dépaquetage (émission saturée → MMA mxf4nvf4 native + échelles swizzlées,
 **Pièce 44 — CLOSE 22/09 21 h (poste5 7e860933)** : H2 et H7 réfutées, cause = garde de spéculation n-gram.
 ## Pièce 49 — spéculation visible (poste3) — OUVERTE : `speculation=` + état de la garde, ligne de régime et /metrics, test cassé une fois.
 ## Pièce 50 — cellule b=1 sans spéculation (poste2) — OUVERTE : `--speculative none`, prédit 270-280 t/s ; b=12 idem si la spéculation y est active.
+
+**Pièce 49 — CLOSE 22/09 21 h 4x (poste3 224e0b05)** : `speculation=` + état de la garde sur la ligne de régime et /metrics ; 2 tests verts sur main, cassure /metrics vérifiée. Relu : garde `lot_max` = 2 par défaut (runner.py:623) → la spéculation n'est jamais éligible à b=12 : la cellule b=12 est à armes égales, seule b=1 est touchée.
