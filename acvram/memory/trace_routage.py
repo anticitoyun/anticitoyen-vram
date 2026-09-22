@@ -55,7 +55,7 @@ import os
 import threading
 from typing import Optional
 
-__all__ = ["actif", "noter", "fermer", "chemin", "taux_de_succes",
+__all__ = ["actif", "noter", "fermer", "chemin", "poser_modalites", "modalites_du_lot", "relire_modalites", "taux_de_succes",
            "taux_de_succes_par_couche", "taux_de_succes_pin"]
 
 _CHEMIN: Optional[str] = os.environ.get("ACVRAM_TRACE_ROUTAGE") or None
@@ -81,12 +81,49 @@ def _fichier():
         # Tampon de 1 Mio : une trace fait des centaines de milliers de lignes,
         # et une écriture par ligne coûterait plus que le routage lui-même.
         _FICHIER = open(_CHEMIN, "w", buffering=1 << 20)
-        _FICHIER.write("# jeton couche experts\n")
+        _FICHIER.write("# jeton couche [modalite] experts[:poids]  (v2 : modalite et poids si le lot les porte)\n")
         atexit.register(fermer)
     return _FICHIER
 
 
-def noter(couche: int, indices) -> None:
+# Pièce 27(a) : modalité par position de la passe courante — "t" (texte),
+# "i" (image), "s" (spécial/autre), posée par `ACVRamModel.forward` depuis le
+# lot RÉELLEMENT fourni (jetons image du processeur) quand la trace est
+# active, effacée à la fin de la passe. None : trace v1, modalité inconnue.
+_MODALITES: Optional[list] = None
+
+
+def poser_modalites(modalites) -> None:
+    """Le masque de modalité de la passe (une lettre par position du lot), ou
+    None. Ne fait RIEN hors trace : coût nul quand personne ne trace."""
+    global _MODALITES
+    if not _ACTIF:
+        return
+    _MODALITES = list(modalites) if modalites is not None else None
+
+
+def modalites_du_lot(tokens, image_token_id=None, plages=None) -> list:
+    """Une lettre par position : "i" si la position est un jeton image (id du
+    processeur, ou dans une plage [début, fin) rendue par le lot), "s" si
+    l identifiant est un jeton spécial connu du lot (négatif ou hors vocab),
+    "t" sinon. Pur, testable sans modèle."""
+    ids = [int(x) for x in (tokens.tolist() if hasattr(tokens, "tolist") else tokens)]
+    dans = [False] * len(ids)
+    for d, f in (plages or []):
+        for i in range(max(0, int(d)), min(len(ids), int(f))):
+            dans[i] = True
+    out = []
+    for i, x in enumerate(ids):
+        if dans[i] or (image_token_id is not None and x == int(image_token_id)):
+            out.append("i")
+        elif x < 0:
+            out.append("s")
+        else:
+            out.append("t")
+    return out
+
+
+def noter(couche: int, indices, poids=None) -> None:
     """Enregistre les experts routés d'une couche pour le jeton courant.
 
     ``indices`` est le tenseur des index d'experts, de forme [jetons, top_k].
@@ -118,9 +155,21 @@ def noter(couche: int, indices) -> None:
             _BASE = _JETON
             _JETON += len(lignes)
         base = _BASE
+        pw = None
+        if poids is not None:
+            try:
+                pw = poids.detach().to("cpu").tolist()
+                if pw and not isinstance(pw[0], list):
+                    pw = [pw]
+            except Exception:                           # noqa: BLE001
+                pw = None
         for i, experts in enumerate(lignes):
-            f.write(f"{base + i} {couche} "
-                    + ",".join(str(int(e)) for e in experts) + "\n")
+            # v1 : `jeton couche e1,e2,…` ; v2 (pièce 27) : `jeton couche m e1:w1,…`
+            # — `relire` rend les deux, `relire_modalites` n accepte que v2.
+            m = (_MODALITES[i] if _MODALITES is not None and i < len(_MODALITES) else None)
+            corps = (",".join(f"{int(e)}:{pw[i][j]:.6g}" for j, e in enumerate(experts))
+                     if pw is not None and i < len(pw) else ",".join(str(int(e)) for e in experts))
+            f.write(f"{base + i} {couche} " + (f"{m} " if m else "") + corps + "\n")
 
 
 def fermer() -> None:
@@ -143,7 +192,34 @@ def relire(chemin_journal: str):
             if ligne.startswith("#") or not ligne.strip():
                 continue
             a, b, c = ligne.split(None, 2)
-            yield int(a), int(b), [int(e) for e in c.strip().split(",") if e]
+            c = c.strip()
+            if c[:1] in ("t", "i", "s") and (len(c) == 1 or c[1] == " "):
+                c = c[2:].strip() if len(c) > 1 else ""      # v2 : la modalité précède les experts
+            yield int(a), int(b), [int(e.split(":")[0]) for e in c.split(",") if e]
+
+
+def relire_modalites(chemin_journal: str):
+    """Trace v2 : ``(jeton, couche, modalité, [(expert, poids)])`` — poids de
+    porte quand la trace les porte, 0.0 sinon. Lève sur une trace v1 : une
+    table par modalité ne se reconstruit pas d une trace qui ne la porte pas
+    (pièce 27(a) : jamais un chiffre inventé)."""
+    with open(chemin_journal) as f:
+        for n, ligne in enumerate(f):
+            if ligne.startswith("#") or not ligne.strip():
+                continue
+            a, b, c = ligne.split(None, 2)
+            c = c.strip()
+            if not (c[:1] in ("t", "i", "s") and len(c) > 1 and c[1] == " "):
+                raise ValueError(f"{chemin_journal}:{n + 1} : trace v1 (sans modalité) — "
+                                 f"rejouer sous ACVRAM_TRACE_ROUTAGE avec un lot multimodal")
+            m, reste = c[0], c[2:].strip()
+            paires = []
+            for e in reste.split(","):
+                if not e:
+                    continue
+                t = e.split(":")
+                paires.append((int(t[0]), float(t[1]) if len(t) > 1 else 0.0))
+            yield int(a), int(b), m, paires
 
 
 def taux_de_succes(chemin_journal: str, capacite: int,

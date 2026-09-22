@@ -1395,7 +1395,7 @@ class MoEBlock(nn.Module):
         # module ne touche a rien de plus. Sous trace, elle synchronise — c'est
         # le prix d'une mesure d'ordre, et elle n'est jamais active en service.
         if _trace_routage.actif():
-            _trace_routage.noter(self.index_couche, topi)
+            _trace_routage.noter(self.index_couche, topi, topw)
         return topw, topi
 
     def forward(self, x: torch.Tensor,
@@ -1441,7 +1441,7 @@ class MoEBlock(nn.Module):
                     self.scoring == "sigmoid", bool(self.norm_topk_prob), float(self.routed_scale),
                     valid, self._usage_routage)
             if _trace_routage.actif():
-                _trace_routage.noter(self.index_couche, topi)
+                _trace_routage.noter(self.index_couche, topi, topw)
             if valid is not None:
                 topi = eid.view(t, self.top_k)
             if _ROUTAGE_TEMOIN:
@@ -2469,6 +2469,12 @@ class ACVRamModel(nn.Module):
         matriciel le plus coûteux du modèle : plonger un document coûte donc
         nettement moins que d'engendrer à partir de lui.
         """
+        if _trace_routage.actif():
+            # Pièce 27(a) : masque de modalité de CETTE passe (image/texte/spécial),
+            # aligné sur la séquence réellement fournie ; lu par `noter`.
+            _trace_routage.poser_modalites(_trace_routage.modalites_du_lot(
+                batch.tokens, getattr(self.spec, "image_token_id", None),
+                [p for i in range(len(batch.seq_lens)) for p in (batch.images_de(i) or [])]))
         idx = batch.tokens.to(self.embed_tokens.device)
         x = F.embedding(idx, self.embed_tokens).to(self.dtype)
         if self.spec.embedding_multiplier != 1.0:
