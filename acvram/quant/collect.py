@@ -65,8 +65,15 @@ def default_calib_path() -> str:
 
 
 def load_calib_ids(tokenizer, path: Optional[str], n_seqs: int,
-                   seq_len: int, vocab_size: int) -> list[list[int]]:
-    """Tokenise le corpus de calibration, ou échoue plutôt que de rendre du bruit."""
+                   seq_len: int, vocab_size: int, gabarit: bool = False) -> list[list[int]]:
+    """Tokenise le corpus de calibration, ou échoue plutôt que de rendre du bruit.
+
+    ``gabarit`` (pièce 55, 22/09) : chaque tranche est passée par le gabarit de
+    conversation du modèle — première moitié en tour utilisateur, seconde en
+    tour assistant — avant d être encodée. Un modèle « -it » ne lit pas le texte
+    brut (gemma-4-31B : PPL 10^4 sur HF lui-même, pièce 37) ; le calibrer dessus
+    relève des statistiques d activation d un régime qu il ne sert jamais. Sans
+    gabarit dans le modèle, on REFUSE (pas de repli ChatML muet)."""
     texts: list[str] = []
     if path and not os.path.isfile(path):
         raise FileNotFoundError(f"fichier de calibration introuvable : {path}")
@@ -84,8 +91,19 @@ def load_calib_ids(tokenizer, path: Optional[str], n_seqs: int,
             "la calibration exige un tokeniseur ; aucun n'a été trouvé dans le "
             "répertoire du modèle. Passez --no-awq pour convertir sans lui.")
 
+    if gabarit and not getattr(tokenizer, "template", None):
+        raise ValueError("--calib-gabarit demandé mais le modèle n a pas de chat template "
+                         "(tokenizer_config.json / chat_template.jinja) : calibration refusée")
     out = []
     for text in texts:
+        if gabarit:
+            # la tranche brute fait ~23 Ko pour 512 jetons gardés : sans la borner, le tour
+            # assistant tomberait toujours après la coupe et ne serait jamais calibré.
+            text = text[: max(64, seq_len * 3)]
+            demi = len(text) // 2
+            text = tokenizer.apply_chat_template(
+                [{"role": "user", "content": text[:demi]}, {"role": "assistant", "content": text[demi:]}],
+                add_generation_prompt=False)
         ids = tokenizer.encode(text)[:seq_len]
         if len(ids) >= 8:
             out.append(ids)
