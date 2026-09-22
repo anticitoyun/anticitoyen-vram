@@ -32,3 +32,31 @@ et watts par b. La FORME tranche :
 Verdict : si trtllm remonte à ≥ 300 t/s dans une variante praticable, la cellule b=1
 se rejoue ; sinon on publie 46 t/s AVEC la cause (H1 attendue : régime à faible batch
 de trtllm, intrinsèque, hors ressort du client). Le prefill reste hors chaîne (dit au verdict).
+
+## Résultat débit(b) 08:03-08:16 — H1 INFIRMÉE, scheduler à batch plein
+
+| b | total t/s | t/s/séq | watts | MHz | lots | durée |
+|---|---|---|---|---|---|---|
+| 1 | 46,3 | 46,3 | 399,7 | 2533 | 1 | 22,1 s |
+| 2 | 49,1 | 24,6 | 399,4 | 2462 | 1 | 41,7 s |
+| 4 | 50,6 | 12,7 | 399,7 | 2393 | 1 | 80,9 s |
+
+b=8/12 NON atteints : à ~50 t/s, un lot de b=4 (4096 jetons) dure déjà 81 s, la
+fenêtre de 20 s est dépassée par un seul lot ; b=8/12 auraient dépassé DUREE_MAX.
+
+**Lecture** : le débit TOTAL est PLAT (~50 t/s) de b=1 à b=4, à 400 W constants ;
+chaque lot de N requêtes de 1024 jetons dure ~N×22 s → trtllm **sérialise** les
+requêtes à faible charge (elles ne se recouvrent pas). **H1 (GEMM/MoE sous-alimenté,
+sur-linéaire dès b=2) est INFIRMÉE** : à bas batch le débit ne monte pas du tout.
+**H2 partiellement confirmée** (overhead/sérialisation par tour), MAIS le b=12 = 1 997 t/s
+de la cellule montre que trtllm bat efficacement PRÈS de `max_batch_size` (12) :
+le débit n'explose qu'à batch quasi plein (transition entre b=4 et b=12, à confirmer
+par b=8). Cause de l'effondrement b=1 : **le scheduler de trtllm-serve
+(GUARANTEED_NO_EVICT, `max_batch_size=12`) ne recouvre pas les petites charges** —
+il est taillé pour le débit à batch plein, pas la latence à requête unique. Ce n'est
+pas un défaut du client (acvram, même client, fait 390 t/s à b=1).
+
+**Suite** : confirmer la transition avec b=8 (fenêtre courte : BANC_JETONS=256 pour
+que les lots tiennent, ou mesurer le temps du 1er lot seulement). La cellule b=1 = 46
+se publie AVEC cette cause (scheduler à batch plein), reproductible sur 3 instruments
+(débit-b, cellule, charge.py).
