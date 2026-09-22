@@ -2043,8 +2043,12 @@ __global__ void __launch_bounds__(MB_WARPS * WARP) nvfp4_gemv_marlin_kernel(
     // Pièce 47 : l'échelle AWQ par expert (x / s[e]) se faisait en torch devant
     // le GEMV — un gather, une division et un cast par projection et par
     // couche, 8 lancements et 0,473 ms/pas à b=12 (poste1-piece42-glue-22-09).
-    // Ici elle est lue une fois par élément de x, au même endroit que le
-    // chargement en mémoire partagée, et sans octet de plus à lire.
+    // Ici elle est lue au même endroit que le chargement en mémoire partagée,
+    // sans lancement. MESURÉ (pièce 47, 22/09) : la glue tombe de 0,964 à
+    // 0,492 ms/pas mais le GEMV monte de 3,965 à 4,334 — la table [E, K] est
+    // relue par CHACUN des N/64 blocs de la grille, comme x lui-même. Gain net
+    // 0,21 ms/pas sur le mur, pas 0,47 : l'octet relu mange la moitié du
+    // lancement épargné.
     // AU BIT contre `(x.to(bf16) / table).to(dtype)` : PyTorch promeut en
     // float, divise et arrondit UNE fois en bf16 ; une entrée fp32 (le down)
     // est arrondie en bf16 AVANT la division, comme `act.to(torch.bfloat16)`.

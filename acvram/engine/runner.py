@@ -902,6 +902,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                f"{piles_txt} cartes={r['cartes']} "
                f"chemin_moe={r['chemin_moe']} prefill={r['prefill']} prefill_int8={r['prefill_int8']} dense={r['dense']} "
                f"ACVRAM_GDN={r['gdn']} experts_layout={r['experts_layout']} "
+               f"echelle_awq={r['echelle_awq']} "
                + (f"noyaux={r['noyaux']} " if r["noyaux"] else "")
                + f"kv_budget={self.allocator.num_blocks * BLOCK_SIZE}/{kv_seqs} "
                + f"kv={self.kv_format_servi()} "
