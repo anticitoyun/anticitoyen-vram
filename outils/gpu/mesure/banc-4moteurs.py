@@ -1072,18 +1072,29 @@ def _agreger_fenetre(sous_passages: list) -> dict:
     # `Energie.temperatures` est déjà ordonnée) : premier/dernier échantillon
     # bornent la dérive thermique de la fenêtre, indépendamment de `temp_max`.
     temperatures = [t for p in sous_passages for t in p.get("temperatures", []) if t and t >= 0]
-    throttle = any(p.get("bridages") for p in sous_passages)
+    # Le bridage PUISSANCE (SwPowerCap, nom "puissance" dans energie.py) est
+    # l'état NORMAL d'un moteur rapide au plafond 400 W -- il ne rejette rien,
+    # publié à titre d'information (REGLES : « publier W et MHz »). Seuls les
+    # bridages thermiques (HW/SW thermal slowdown) rejettent la fenêtre : ils
+    # signalent une carte qui dérive, pas un moteur qui tient le plafond
+    # (chef 22/09, 2e passage : acvram rejeté à tort pour ce motif).
+    _BRIDAGES_REJETES = {"thermique_materiel", "thermique_logiciel"}
+    toutes_bridages = {b for p in sous_passages for b in (p.get("bridages") or set())}
+    throttle = bool(toutes_bridages & _BRIDAGES_REJETES)
+    bridage_puissance = "puissance" in toutes_bridages
     pics_charge = [100 * p["load1_pic"] / p["nproc"] for p in sous_passages
                   if p.get("load1_pic") is not None and p.get("nproc")]
     return {
         "n": n_total, "duree": round(duree_totale, 2), "joules": round(joules_totales, 1),
         "t_s": round(n_total / duree_totale, 1) if duree_totale else 0.0,
+        "watts_moy": round(joules_totales / duree_totale, 1) if duree_totale else 0.0,
         "sd_pct": round(_sd_relatif_pct(debits), 2),
         "horloge_med": statistics.median(horloges) if horloges else -1,
         "temp_max": max(temperatures) if temperatures else -1,
         "temp_debut": temperatures[0] if temperatures else -1,
         "temp_fin": temperatures[-1] if temperatures else -1,
         "throttle": throttle,
+        "bridage_puissance": bridage_puissance,
         "charge_pic_pct": round(max(pics_charge), 1) if pics_charge else None,
     }
 
@@ -1213,14 +1224,20 @@ def comparer_alternee(moteurs, sha, n_fenetres=6, fenetre_s=20.0, sortie_tsv="/d
         for f in (a, b):
             f["raisons"] = f["raisons"] + raisons_paire
     with open(sortie_tsv, "w") as fh:
-        fh.write("moteur\tsha\thorloge\ttemp\tcharge\tJ\tt_s\tdate\tduree\tvalide\traisons\n")
+        # `watts_moy` en fin de ligne, avant `raisons` : le bridage puissance
+        # (SwPowerCap) ne rejette plus une fenêtre (voir `_agreger_fenetre`),
+        # donc son lecteur a besoin de W à côté de MHz pour juger le régime
+        # (REGLES : « publier W et MHz »), sans déplacer les colonnes de
+        # l'en-tête EXACT demandé initialement.
+        fh.write("moteur\tsha\thorloge\ttemp\tcharge\tJ\tt_s\tdate\tduree\tvalide\twatts_moy\traisons\n")
         for f in fenetres:
             valide = not f["raisons"]
             charge = f["charge_pct"] if f["charge_pct"] is not None else "?"
             fh.write(f"{f['moteur']}\t{sha}\t{f['horloge_med']}\t{f['temp_max']}\t"
                     f"{charge}\t{f['joules_net']}\t{f['t_s']}\t"
                     f"{time.strftime('%Y-%m-%dT%H:%M:%S')}\t{f['duree']}\t"
-                    f"{'oui' if valide else 'non'}\t{' ; '.join(f['raisons']) or 'aucune'}\n")
+                    f"{'oui' if valide else 'non'}\t{f.get('watts_moy', '?')}\t"
+                    f"{' ; '.join(f['raisons']) or 'aucune'}\n")
     # Valeur publiée par moteur, à part du détail par fenêtre : un fichier
     # sœur plutôt que des lignes hétérogènes dans le TSV ci-dessus, dont le
     # lecteur (`en-tête EXACT demandé`) ne doit pas changer de forme.
