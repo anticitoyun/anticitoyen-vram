@@ -16,6 +16,20 @@ KL max. Testé à sec sur faux serveurs logprobs (biais 0,4 → KL 0,1534 cohér
 W4A4 (trtllm) : **KL max 0,5-2 nat** contre nvfp4 W4A16 (acvram) **~0,9**.
 Repères scellé E (gemma-31B, réf bf16 HF local) : A=0,867, B=1,394, témoin cassé 2,12.
 
+## Décision (chef 22/09)
+
+- Qualité jugée sur **Qwen3-Coder-30B-A3B** (le modèle des cellules).
+- **Aucune source bf16 du Coder sur disque** au moment du run → KL **RELATIVE**
+  TRT-LLM (W4A4 hub) ↔ acvram (**nvfp4-qkvo-i8c**, celui des cellules), teacher
+  forcing sur les **8 jetons gloutons d'acvram** (acvram = pivot `--ref`), **sans
+  référence absolue** — limite écrite EN TÊTE du verdict.
+- 3e bras optionnel : llama.cpp (GGUF de T1) s'il est servi dans le même créneau
+  (pas une référence non plus).
+- **Référence absolue bf16** : download 60 Go `Qwen/Qwen3-Coder-30B-A3B-Instruct`
+  lancé en fond (feu utilisateur), vers `…/Qwen3-Coder-30B-A3B-Instruct-bf16-hub/`.
+  Une fois là, servi par acvram (étagé/exil) = 3e/4e bras, référence absolue de la KL.
+- Corpus : `invites-kl-texte.txt` (5 invites de programmation, texte seul).
+
 ## Points de conception à TRANCHER avant la mesure carte
 
 1. **Référence bf16** : le scellé E était gemma-31B via HF LOCAL. Par API il faut un
