@@ -19,12 +19,15 @@ from __future__ import annotations
 import json
 import os
 import struct
+import sys
 from typing import Any, Iterator, Optional
 
 import numpy as np
 import torch
 
 __all__ = ["GGUFFile", "is_gguf", "find_gguf"]
+
+_ROPE_AVERTI = False        # averti une fois par processus (repli rotary 0.25 non muet)
 
 _KV_FMT = {0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i", 6: "f",
            7: "?", 10: "Q", 11: "q", 12: "d"}
@@ -578,8 +581,16 @@ class GGUFFile:
             try:
                 rf = self.load("rope_freqs.weight")
                 cfg["partial_rotary_factor_full"] = int((rf < 1e6).sum()) / float(rf.numel())
-            except Exception:                    # noqa: BLE001
+                cfg["partial_rotary_source"] = "mesuré"
+            except Exception as exc:             # noqa: BLE001
+                # Repli 0.25 : sortie inchangée, mais NON muet (pièce 38, 22/09).
                 cfg["partial_rotary_factor_full"] = 0.25
+                cfg["partial_rotary_source"] = "repli0.25"
+                global _ROPE_AVERTI
+                if not _ROPE_AVERTI:
+                    _ROPE_AVERTI = True
+                    print(f"acvram: rope_freqs.weight illisible ({type(exc).__name__}: {exc}) "
+                          "→ partial_rotary_factor_full=0.25 par défaut (rotary=repli0.25)", file=sys.stderr)
             cfg["final_logit_softcapping"] = float(g("final_logit_softcapping", 0.0) or 0.0)
             cfg["hidden_activation"] = "gelu_pytorch_tanh"
             globales = {i for i, x in enumerate(swa) if not x}

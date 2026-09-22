@@ -23,6 +23,8 @@ __all__ = ["Tokenizer", "load_tokenizer", "render_chat",
 class Tokenizer:
     """Fine enveloppe autour de ``tokenizers.Tokenizer``, avec gabarits."""
 
+    _repli_averti = False        # averti une fois par processus (repli ChatML non muet)
+
     def __init__(self, backend: Any, config: dict, template: Optional[str],
                  template_source: str) -> None:
         self.backend = backend
@@ -30,6 +32,10 @@ class Tokenizer:
         self.template = template
         self.template_source = template_source
         self._env = None
+        # gabarit réellement appliqué au rendu, lisible pour la ligne de régime :
+        # "jinja" (gabarit du modèle), "chatml" (pas de gabarit → ChatML natif),
+        # "chatml-repli" (jinja présent mais illisible → repli, cf. render_chat).
+        self.gabarit_effectif = "jinja" if template else "chatml"
 
     # -- encode / decode --------------------------------------------------
     def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
@@ -114,9 +120,18 @@ class Tokenizer:
                             extra: Optional[dict] = None) -> str:
         if self.template:
             try:
-                return self._render_jinja(messages, add_generation_prompt, extra)
-            except Exception:                        # noqa: BLE001
-                pass
+                r = self._render_jinja(messages, add_generation_prompt, extra)
+                self.gabarit_effectif = "jinja"
+                return r
+            except Exception as exc:                 # noqa: BLE001
+                # Repli ChatML : sortie inchangée, mais NON muet (repli silencieux
+                # trouvé le 22/09, pièce 38). Averti une fois par processus ; le
+                # gabarit effectif reste lisible via `gabarit_effectif`.
+                if not Tokenizer._repli_averti:
+                    Tokenizer._repli_averti = True
+                    print(f"acvram: gabarit jinja illisible ({type(exc).__name__}: {exc}) "
+                          "→ repli ChatML (gabarit=chatml-repli)", file=sys.stderr)
+                self.gabarit_effectif = "chatml-repli"
         return _chatml(messages, add_generation_prompt)
 
     def _render_jinja(self, messages: list[dict], add_generation_prompt: bool,
