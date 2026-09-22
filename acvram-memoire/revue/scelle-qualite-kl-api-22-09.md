@@ -44,3 +44,27 @@ Repères scellé E (gemma-31B, réf bf16 HF local) : A=0,867, B=1,394, témoin c
    borne INFÉRIEURE de la vraie KL. Suffit pour classer aux seuils 0,5/1,0/1,2.
 
 Rien sur carte tant que 1-2 ne sont pas tranchés (quel bf16, quel modèle).
+
+## BLOCAGE (22/09, 08:20) — acvram serve ne renvoie pas de logprobs
+
+Tentative KL par API arrêtée dès la 1re capture : acvram serve rend « token_ids/echo
+non rendus ». Cause vérifiée dans le code (pas le client) :
+- `acvram/server/app.py:1116-1117` : la réponse `/v1/completions` non-stream construit
+  `CompletionChoice(text=text, finish_reason=reason)` **sans jamais peupler `logprobs`**.
+- `app.py:1111` : `echo` se contente de préfixer le texte du prompt (`text = prompt_text + text`),
+  il ne retourne AUCUN logprob par position.
+- Le champ `logprobs` existe au schéma (`protocol.py:302`) mais n'est jamais rempli.
+
+Donc **la KL par API (teacher forcing echo + top-K logprobs) est impossible côté
+acvram** : le serveur ne calcule/expose pas les logprobs. Ce n'est pas résoluble par
+le client. Options (choix chef) :
+- **(a) KL en LOCAL** via `decode-pas.py` (accès direct aux logits d'acvram, comme le
+  scellé E) : donne acvram-vs-bf16 nativement ; trtllm-vs-bf16 demanderait l'API python
+  TRT-LLM (`generate` avec logits de génération), un instrument séparé.
+- **(b) Ajouter les logprobs à acvram serve** : peupler `CompletionChoice.logprobs`
+  (+ `echo` renvoyant les logprobs du prompt), avec test — modif serveur, rend la KL
+  par API possible pour tous les moteurs OpenAI.
+- **(c) Renoncer à la KL par API** ; juger la qualité W4A4 par PPL locale ou decode-pas.
+
+Le débit (cellule + b=1 + débit(b)) est complet et publié ; seule la qualité KL bute
+sur cet instrument. kl-api.py + kl-3bras.sh restent prêts pour l'option (b).
