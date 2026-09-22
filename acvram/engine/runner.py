@@ -598,6 +598,12 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # porte `pipeline=1|0`.
         self._pipeline_pendiente: Optional[dict] = None
         self.pipeline_actif = os.environ.get("ACVRAM_PIPELINE", "1") not in ("0", "")
+        # Levier 2 (opt-in ACVRAM_RAPATRIEMENT_EPINGLE=1) : rapatriement des ids
+        # du pas par tampon hôte épinglé à double parité (`_apres_echantillon`) ;
+        # ligne `rapatriement=epingle|flux`.
+        self.rapatriement_epingle = os.environ.get("ACVRAM_RAPATRIEMENT_EPINGLE", "0") == "1"
+        self._epingles: list = [None, None]
+        self._parite_epingle = 0
         # `evenement_jetons` de GraphRunner ne borne QUE le rejeu — enregistré
         # par `rejouer_suivant()` avant que `_sample_only` (l'argmax) soit
         # même lancé. Le synchroniser au pas suivant garantirait le rejeu,
@@ -785,6 +791,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                + f"kv={self.kv_format_servi()} "
                + f"pipeline={int(bool(self.pipeline_actif and self.graphs is not None))} "   # effectif : demandé ET graphes
                + f"sampler={'graphe' if self.pipeline_actif and self.graphs is not None and getattr(self.graphs, 'sampler_graphe', False) else sampler_texte()} "
+               + f"rapatriement={'epingle' if self.pipeline_actif and self.graphs is not None and getattr(self.graphs, 'sampler_graphe', False) and self.rapatriement_epingle else 'flux'} "
                + (f"kv_plan_override=1 " if r["kv_plan_override"] else "")
                + (f"llama4_scaling_beta={r['llama4_scaling_beta']}"
                   f"({'servi' if self._llama4_servi else 'non_servi'}) "
@@ -1698,7 +1705,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         return sample(logits, params, history)
 
     def _consommer(self, tokens: torch.Tensor, logprobs: torch.Tensor,
-                   seqs: list[Sequence]) -> list[GenerationOutput]:
+                   seqs: list[Sequence], epingle: Optional[dict] = None) -> list[GenerationOutput]:
         """Le corps de `_emit` après l'échantillonnage — LE seul `.tolist()`
         du pas, qu'il soit immédiat (`_emit`) ou différé d'un pas (pipeline).
 
@@ -1709,7 +1716,13 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         (`MoEBlock.forward`, bead pds), au niveau du planificateur cette
         fois plutôt que du routage MoE."""
         out = []
-        if logprobs.dtype == torch.int64:
+        if epingle is not None:
+            # Levier 2 : l événement du pas a été attendu par l appelant, la
+            # copie épinglée est faite — lecture hôte, rien n est enfilé.
+            ids_lus, bits = epingle["tenseur"][:, :epingle["n"]].tolist()
+            lps = depaqueter_logprobs(bits)
+            epingle["lu"] = True
+        elif logprobs.dtype == torch.int64:
             # Paquet du graphe (levier 1) : ids et bits des logprobs sont deux
             # vues du MÊME clone [2, n] → un seul rapatriement, jamais un état
             # où les ids sont lus et les logprobs pas encore (§ 7.4).
