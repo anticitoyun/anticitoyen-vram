@@ -33,7 +33,7 @@ def _trace(chemin, pas=7, couches=2):
                            ("void at::native::vectorized_elementwise_kernel<...>", 2_000),
                            ("void at::native::reduce_kernel<...>", 2_000)):
                 lignes.append((t, d, nom)); t += d + 1_000
-        lignes.append((t, 120_000, "void cutlass::Kernel2<cutlass_80_tensorop_bf16_...>")); t += 120_000
+        lignes.append((t, 120_000, "tete_wmma_kernel")); t += 120_000
         t = debut + 1_000_000
     with open(chemin, "w", newline="") as f:
         w = csv.writer(f)
@@ -61,9 +61,26 @@ def test_familles_par_pas(tmp_path):
 
 def test_famille_de():
     m = _module()
+    # 22/09 (verdict-nsys-familles) : l attention compacte tombait dans `autres`, le GEMM du routeur dans `tete`
+    assert m.famille_de("_partiel_reduit_kernel") == "attention"
+    assert m.famille_de("void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x64_32x6_tn_align8>(...)") == "routeur_gemm"
+    assert m.famille_de("nvfp4_quant_act_kernel(...)") == "experts_quant_a4"
+    assert m.famille_de("void moe_route_pack_kernel<__nv_bfloat16, int>(...)") == "experts_glue"
+    assert m.famille_de("moe_reduce_trie_kernel") == "experts_glue"
+    assert m.famille_de("void nvfp4_gemm_grouped_mma_kernel<16>(...)") == "experts_marlin"
     assert m.famille_de("void marlin_moe_wna16::Marlin<(long)1>(const int4 *)") == "experts_marlin"
     assert m.famille_de("void <unnamed>::int8_gemv_kernel<...>") == "proj_etroites_int8"
     assert m.famille_de("void pytorch_flash::flash_fwd_splitkv_kernel<...>") == "attention"
     assert m.famille_de("[CUDA memcpy Device-to-Host]") == "copies"
     assert m.famille_de("kv_write_int8_kernel") == "rope_kv"
     assert m.famille_de("un_noyau_inconnu") == "autres"
+
+
+def test_detail_par_noyau(tmp_path):
+    m = _module()
+    p = str(tmp_path / "trace.csv")
+    _trace(p)
+    d = m.detailler(p, "experts_marlin", couches=2)
+    assert len(d) == 2
+    marlin = next(v for k, v in d.items() if "marlin_moe_wna16" in k)
+    assert marlin == {"ms_pas": 0.1, "lancements_pas": 2, "us_par_lancement": 50.0}

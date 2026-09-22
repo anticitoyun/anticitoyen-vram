@@ -718,6 +718,10 @@ class MoEBlock(nn.Module):
             tq, tb, gs, xq, xsf, tiles[0], tiles[1], tiles[2],
             N, k, bt or 16, _MOE_MMA_ETAGES, _MOE_MMA_KS, grow, self._decal_marlin(nom))
 
+    # Chemins de DÉCODAGE MoE, tels que `_chemin` les compte : la ligne de régime
+    # imprime celui qui a été atteint (runner.chemin_moe_atteint), jamais l env.
+    CHEMINS_DECODAGE = ("gemv_marlin", "gemv_v1", "decode_mma", "decode_mma_marlin", "bmm")
+
     def _chemin(self, nom: str) -> None:
         """Compteur du chemin RÉELLEMENT pris au préfill (REGLES § 7 : « noyau
         atteint, pas fonction appelée » — trois tests d'équivalence ont
@@ -1114,6 +1118,7 @@ class MoEBlock(nn.Module):
             aq, asf, gra = ext.nvfp4_quant_act(act, awq_d, es32, cpt, hd_d)
             d = self._gemm_mma_marlin("down_proj", aq, asf, tiles, grow=gra, bt=bt)
         else:
+            self._chemin("decode_mma")             # le chemin mma-a4 du décodage, compté comme les autres
             g = self._gemm_mma(pg, xq, xsf, tiles, brut=True, bt=bt, grow=gr)
             u = self._gemm_mma(pu, xq2, xsf2, tiles, brut=True, bt=bt, grow=gr2)
             act = ext.moe_act(g, u, pg[5], pd[4], code_act)
