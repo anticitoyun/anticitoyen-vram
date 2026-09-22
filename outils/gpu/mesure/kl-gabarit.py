@@ -73,7 +73,14 @@ def _forward(loaded, tok, ids: list[int], positions: torch.Tensor):
     eng._admit()
     batch = eng._build_batch([eng.running[0]], prefill=True)
     with torch.inference_mode():
-        return loaded.model(batch, logits_positions=positions).float()
+        out = loaded.model(batch, logits_positions=positions).float()
+    # UN Engine par invite garde son cache KV tant que le ramasse-miettes ne passe pas (cycles) :
+    # sur l alias attention-int8 (+4 Gio) la 3e invite tombait en OOM (23/09). On libère tout de suite.
+    del eng, batch
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    return out
 
 
 def mode_acvram(alias: str, dossier: str) -> None:
