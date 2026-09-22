@@ -361,6 +361,7 @@ def main() -> int:
             if a.ids and a.reponse_depuis:
                 d0 = max(a.reponse_depuis - 1, 0)
                 r["nll_reponse_moy"] = {b: round(sum(v[d0:]) / len(v[d0:]), 4) for b, v in (("eval", e), ("serve", s), ("hf", h)) if len(v) > d0}
+                r["ecarts_confiants"] = ecarts_confiants(e, h)
             r["ids_propres_en_tete"] = brut.get("ids_propres_en_tete")
             r["ids_nos_en_tete"] = brut.get("ids_nos_en_tete")
     r["controle_eval_ppl_le_30"] = r["ppl_eval"] <= 30
@@ -379,27 +380,54 @@ def main() -> int:
     return 0
 
 
+SEUIL_CONFIANT_NATS = 2.0     # une position « confiante » : NLL_hf ≤ 2 nats (p ≥ 0,135)
+
+
+def ecarts_confiants(e: list[float], h: list[float], seuil: float = SEUIL_CONFIANT_NATS) -> dict:
+    """|Δ| eval−hf sur les positions où hf est confiant. Dans la queue (NLL 15-25 nats,
+    p ≈ 1e-7..1e-11) deux moteurs justes diffèrent de plusieurs nats sans qu aucun soit
+    faux — un 1er contrôle « |Δ| ≥ 1 nat à une position quelconque » rendait faux 128/202
+    positions d invite d un forward par ailleurs à 0,002 nat de médiane sur la réponse
+    (22/09, pièce 37) : le seuil ne portait pas le régime de la position."""
+    idx = [i for i in range(min(len(e), len(h))) if h[i] <= seuil]
+    dd = sorted(abs(e[i] - h[i]) for i in idx)
+    if not dd:
+        return {"n": 0}
+    return {"n": len(dd), "mediane": round(dd[len(dd) // 2], 4), "moyenne": round(sum(dd) / len(dd), 4),
+            "part_ge_1nat": round(sum(1 for x in dd if x >= 1.0) / len(dd), 4), "max": round(dd[-1], 3),
+            "premiere_ge_1nat": next((i + 1 for i in idx if abs(e[i] - h[i]) >= 1.0), None)}
+
+
+def verdict_gabarit(r: dict) -> str:
+    """SOUS GABARIT (pièce 37) : la PPL absolue des ids d invite ne juge rien (tour
+    utilisateur, queue à 15-25 nats) ; ce qui juge, c est l accord avec hf sur les
+    positions CONFIANTES (NLL_hf ≤ 2 nats) et la NLL de la réponse gloutonne."""
+    m = r["nll_reponse_moy"]
+    c = r.get("ecarts_confiants") or {}
+    if r["div_eval_serve"] is not None and r["div_eval_serve"] < 8:
+        return f"P2 : eval ≠ serve dès la position {r['div_eval_serve']} — la ForwardBatch d évaluation diffère du service (champs {r['champs_batch_serve']})"
+    if c.get("n", 0) < 20:
+        return f"INDÉCIDABLE : {c.get('n', 0)} positions confiantes seulement (< 20) — allonger la réponse"
+    if c["mediane"] > 0.05 or c["part_ge_1nat"] > 0.10:
+        return (f"G3 : sous gabarit, acvram ≠ hf sur les positions confiantes (n={c['n']} : |Δ| médian {c['mediane']}, "
+                f"{100 * c['part_ge_1nat']:.1f} % à ≥ 1 nat, 1re à {c['premiere_ge_1nat']}) — défaut du forward acvram, à nommer par couche")
+    if m.get("eval", 9) > 1.0:
+        return f"G4 : positions confiantes tenues mais NLL de la réponse eval {m['eval']} > 1 nat (hf {m.get('hf')}) — conversion abîmée"
+    return (f"G1 : moteur juste sous gabarit — positions confiantes n={c['n']} : |Δ| médian {c['mediane']}, "
+            f"{100 * c['part_ge_1nat']:.1f} % à ≥ 1 nat (seuils 0,05 / 10 %) ; NLL réponse eval {m['eval']} · serve {m.get('serve')} · hf {m.get('hf')} "
+            f"(coût de la quantification : {round(m['eval'] - m.get('hf', 0), 3)} nat/jeton)")
+
+
 def verdict(r: dict) -> str:
     if r.get("reference_valide") is False:
         return ("RÉFÉRENCE INVALIDE (ids ou chargement) : " + " ; ".join(r["reference_motifs"])
                 + f" — suite produite : {r.get('suite_texte', '')!r}. Le moteur n est PAS jugé : "
                   "corriger la référence (gabarit, BOS, tokeniseur, offload) avant toute conclusion.")
+    if r.get("nll_reponse_moy"):
+        return verdict_gabarit(r)
     if "ppl_decode" in r and not r["montage_decode_ok"]:
         return (f"INVALIDE (bras decode) : à la position 1, contexte d un seul jeton, decode et eval devraient "
                 f"coïncider — Δ = {r['delta_position_1']} > 1e-2. Le bras est mal monté, il ne juge rien.")
-    if r.get("nll_reponse_moy"):
-        # SOUS GABARIT (pièce 37) : la PPL absolue des ids d invite ne juge rien (tour utilisateur) ;
-        # ce qui juge, c est l égalité position par position avec hf et la NLL de la réponse.
-        m = r["nll_reponse_moy"]
-        if r["div_eval_serve"] is not None and r["div_eval_serve"] < 8:
-            return f"P2 : eval ≠ serve dès la position {r['div_eval_serve']} — la ForwardBatch d évaluation diffère du service (champs {r['champs_batch_serve']})"
-        if r.get("div_serve_hf") is not None or r.get("div_eval_hf") is not None:
-            return (f"G3 : sous gabarit, acvram ≠ hf dès la position {r.get('div_serve_hf', r.get('div_eval_hf'))} "
-                    f"(|Δ| ≥ 1 nat ; médiane |Δ| eval/hf {r.get('delta_eval_hf_med')}) — défaut du forward acvram, à nommer par couche")
-        if m.get("eval", 9) > 1.0:
-            return f"G4 : sous gabarit, aucune divergence nette mais NLL de la réponse eval {m['eval']} > 1 nat (hf {m.get('hf')}) — conversion abîmée"
-        return (f"G1 : moteur juste sous gabarit — aucune position à |Δ| ≥ 1 nat contre hf sur {r['jetons']} ids "
-                f"(médiane |Δ| {r.get('delta_eval_hf_med')}), NLL réponse eval {m['eval']} · serve {m.get('serve')} · hf {m.get('hf')}")
     if "ppl_decode" in r and r["ppl_eval"] > 30:
         if r["ppl_decode"] <= 30:
             return (f"P5 : le DÉCODAGE est juste (PPL {r['ppl_decode']} ≤ 30, NLL médiane {r['nll_decode_mediane']}) "
