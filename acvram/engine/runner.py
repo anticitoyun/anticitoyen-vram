@@ -42,6 +42,24 @@ __all__ = ["Sequence", "GenerationOutput", "Engine", "EngineStats"]
 _ids = itertools.count(1)
 
 
+def chemin_moe_atteint(compteurs: list[dict]) -> str:
+    """`atteint=<chemin>` depuis les compteurs `_chemin` des blocs MoE : le
+    chemin de décodage le plus compté (`MoEBlock.CHEMINS_DECODAGE`), suivi de
+    `+<autre>` si plusieurs ont été atteints (couches différentes, ou chauffe
+    et service sur deux chemins) ; `non-atteint` avant tout pas de décodage
+    (prefill seul, chauffe sans décodage). Pur, testable sans modèle."""
+    from .model import MoEBlock
+    total: dict[str, int] = {}
+    for c in compteurs:
+        for nom, n in c.items():
+            if nom in MoEBlock.CHEMINS_DECODAGE and n:
+                total[nom] = total.get(nom, 0) + int(n)
+    if not total:
+        return "atteint=non-atteint"
+    ordre = sorted(total, key=lambda k: -total[k])
+    return "atteint=" + "+".join(ordre)
+
+
 @dataclass
 class Sequence:
     prompt_ids: list[int]
@@ -682,6 +700,13 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # (W4A4) — le nom porte le régime de précision (poste7-glm-cellules-w4a4-hote-20-09)
         chemin_moe = ("mma-a4" if os.environ.get("ACVRAM_MOE_MMA", "1") not in ("0", "")
                      else "gemv")
+        # 22/09 (verdict-nsys-familles) : la ligne disait `mma-a4` alors que le
+        # pas servi était `gemv_marlin` (`_forward_grouped_mma` rend None sur la
+        # disposition unique sans MMA_MARLIN) — deux modules conçus pour un
+        # chemin mort. La ligne porte désormais le chemin ATTEINT, compté par
+        # `MoEBlock._chemin` (REGLES § 7 : noyau atteint, pas fonction appelée).
+        chemin_moe += "(" + chemin_moe_atteint(
+            [m.__dict__.get("chemins", {}) for m in self.model.modules() if isinstance(m, MoEBlock)]) + ")"
         if os.environ.get("ACVRAM_GRAPHES_TABLE") == "0":
             chemin_moe += "+pile" if piles_ok else "+pile(désactivé)"
 

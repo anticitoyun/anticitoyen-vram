@@ -25,14 +25,16 @@ import sys
 from collections import defaultdict
 
 FAMILLES = [
-    ("experts_marlin", r"marlin_moe_wna16::Marlin|nvfp4_gemv_marlin_kernel|marlin_gemm|gemm_grouped"),
-    ("experts_glue", r"moe_reduce_kernel|moe_act|moe_pack|_colle_moe"),
-    ("routage", r"_route_fusee_kernel|moe_route_kernel|radix_sort|radixSort|Histogram|DeviceScan"),
+    ("experts_marlin", r"marlin_moe_wna16::Marlin|nvfp4_gemv_marlin|nvfp4_gemv_grouped|marlin_gemm|gemm_grouped_mma"),
+    ("experts_quant_a4", r"nvfp4_quant_act|moe_act_quant|moe_route_pack_quant"),     # chemin mma-a4 seulement (absents du pas servi Marlin, 22/09)
+    ("experts_glue", r"moe_reduce|moe_act|moe_pack|_colle_moe|moe_route_pack"),
+    ("routage", r"_route_fusee_kernel|route_logits_fusee|moe_route_kernel|radix_sort|radixSort|Histogram|DeviceScan"),
+    ("routeur_gemm", r"cutlass::Kernel2|cutlass_80_tensorop"),                       # le GEMM des logits du routeur (1/couche), pas la tête
     ("proj_etroites_int8", r"_etroit|int8_gemv_kernel|int8_dequant_kernel|etroit_triton|splitKreduce|gemvx::kernel"),
-    ("attention", r"_partiel_kernel|_reduce_kernel|flash_fwd|paged_attention|decode_attention"),
+    ("attention", r"_partiel|_reduce_kernel\b|flash_fwd|paged_attention|decode_attention|attn_"),   # 22/09 : `_partiel_reduit_kernel` (compact) tombait dans `autres`
     ("normes", r"rmsnorm|add_norm|layer_norm"),
     ("rope_kv", r"rope_inplace_kernel|kv_write|rope_kernel"),
-    ("tete", r"cutlass::Kernel2|cutlass_80_tensorop|lm_head|tete_"),
+    ("tete", r"lm_head|tete_|wmma"),
     ("copies", r"CUDA memcpy|CUDA memset"),
     ("glue_torch", r"at::native::|at_cuda_detail|elementwise_kernel|direct_copy|CatArrayBatchedCopy|arange"),
 ]
