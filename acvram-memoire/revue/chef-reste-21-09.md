@@ -1,6 +1,6 @@
 # Reste à faire — 21/09 17 h (pause)
 
-Objectif : plus rapide et moins de joules que llama.cpp, vLLM, TensorRT-LLM. Tenu : b=1 380,8 (vLLM 290,6), prefill 22 707 (vLLM 21 054). **Non tenu : b=12 1 540 contre vLLM 1 596 (−3,5 %) ; énergie jamais mesurée à 4 moteurs.**
+Objectif : plus rapide et moins de joules que llama.cpp, vLLM, TensorRT-LLM. **Vitesse : tenue sur les trois cellules** — b=1 380,8 (vLLM 290,6), prefill 22 707 (vLLM 21 054), b=12 1 625,5 (vLLM 1 596,1, 22/09). **Reste : énergie J/jeton à 4 moteurs (banc au protocole 2.5, cellules TRT-LLM) et la cellule A/V vLLM rejouée.**
 
 ## A — porte immédiate (utilisateur)
 1. `sudo dpkg -i acvram_0.6.34_amd64.deb` (racine du dépôt, sha256 dans poste3.md) — feu vert donné, non installé.
