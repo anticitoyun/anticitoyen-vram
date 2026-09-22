@@ -89,7 +89,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("POOL_SYNC", "", None, None, "1 = pool d'experts synchrone"),
     Variable("PIPELINE", "1", None, "0", "lot préparé pendant le rejeu (runner) : 1 défaut depuis 0.6.34 (ids au bit b=1 et b=12) | 0 témoin"),
     Variable("SAMPLER_LOT", "0", None, "1", "échantillonnage vectorisé sur le lot (sampler) : 0 défaut = ancienne boucle par ligne (verdict eea064fe : le lot ralentit b=12 de 2,2 %) | 1 opt-in"),
-    Variable("SAMPLER_GRAPHE", "0", None, "1", "levier 1 (poste1-levier-1-conception-21-09) : le glouton de _sample_lent capturé dans le graphe CUDA, un clone + un rapatriement par pas (graphs.echantillon_glouton_dans) : 0 défaut | 1 opt-in, ligne sampler=graphe si pipeline et graphes"),
+    Variable("SAMPLER_LENT", "0", None, "1", "levier 1 (poste1-levier-1-conception-21-09, défaut depuis le verdict poste4 d145bf0d) : 0 défaut = glouton capturé dans le graphe (graphs.echantillon_glouton_dans, sampler=graphe si pipeline et graphes) | 1 témoin = ancien chemin hôte (_sample_lent hors graphe)"),
+    Variable("SAMPLER_GRAPHE", "", None, None, "REMPLACÉE par SAMPLER_LENT (22/09) : encore lue avec avertissement, =0 vaut SAMPLER_LENT=1"),
     Variable("PREFILL_BATCH", "", None, None, "prefills groupés"),
     Variable("SPECULATION_LOT_MAX", "2", None, None, "lot maximal sous spéculation"),
     Variable("MTP", "", None, None, "tête MTP (auto | none | mtp)"),
@@ -271,6 +272,7 @@ HORS_REGIME = frozenset({
     # tests/test_regime_noyaux.py::test_hors_regime_ne_cache_aucun_regime le garde.
     "ACVRAM_MODELS_DIR", "ACVRAM_TRACEBACK", "ACVRAM_VERBOSE_BUILD", "ACVRAM_WARM_GRAPHS",
     "ACVRAM_GRAPHES_MUETS", "ACVRAM_REGIME_MUET", "ACVRAM_MARLIN_CACHE",          # journaux et cache : observation
+    "ACVRAM_JOURNAL_TENSEURS",                                                    # journal de conversion (cf97a3a0) : observation
     "ACVRAM_TRACE_CRENEAUX", "ACVRAM_TRACE_ENTREES", "ACVRAM_TRACE_PTRS",
     "ACVRAM_TRACE_ROUTAGE", "ACVRAM_TRACE_ROUTAGE_PT", "ACVRAM_TRACE_STEPS", "ACVRAM_TRACE_COUCHES", "ACVRAM_CHRONO_SYNC", "ACVRAM_SYNC_COUCHES",
     

@@ -1,5 +1,5 @@
 """Levier 1 (revue/poste1-levier-1-conception-21-09 § 4 et § 7) : le glouton
-de `_sample_lent` capturé dans le graphe, opt-in `ACVRAM_SAMPLER_GRAPHE=1`.
+de `_sample_lent` capturé dans le graphe, DÉFAUT depuis d145bf0d ; témoin `ACVRAM_SAMPLER_LENT=1`.
 Tests à sec (tenseurs CPU, faux graphes) ; ids/logprobs au bit sur carte et
 frontière A/B : poste2. Ce qui doit casser : un noyau qui diverge de
 `_sample_lent` (ids ou bits des logprobs), un tampon lu au-delà du lot réel
@@ -144,14 +144,24 @@ def test_lot_glouton_prend_le_paquet_un_seul_rapatriement_ids_puis_logprobs(monk
     assert [s.cumulative_logprob for s in seqs] == ref_lp.tolist()          # les logprobs, au bit, avec les ids
 
 
-def test_ligne_de_regime_et_defaut_inchange(monkeypatch):
+def test_defaut_graphe_et_temoin_lent(monkeypatch, capsys):
+    """Défaut = graphe (verdict poste4 d145bf0d) ; ACVRAM_SAMPLER_LENT=1 =
+    témoin ; l ancien nom ACVRAM_SAMPLER_GRAPHE est encore lu, avec un
+    avertissement une fois (=1 : défaut ; =0 : témoin)."""
     from acvram.engine import graphs as G
     monkeypatch.delenv("ACVRAM_SAMPLER_GRAPHE", raising=False)
-    gr = GraphRunner.__new__(GraphRunner)
-    # le défaut : pas d opt-in → aucune sortie capturée, aucune prise
-    assert os.environ.get("ACVRAM_SAMPLER_GRAPHE", "0") != "1"
-    gr.sampler_graphe = os.environ.get("ACVRAM_SAMPLER_GRAPHE", "0") == "1"
-    assert gr.sampler_graphe is False
+    monkeypatch.delenv("ACVRAM_SAMPLER_LENT", raising=False)
+    assert G.sampler_graphe_actif() is True
+    monkeypatch.setenv("ACVRAM_SAMPLER_LENT", "1")
+    assert G.sampler_graphe_actif() is False
+    monkeypatch.delenv("ACVRAM_SAMPLER_LENT")
+    monkeypatch.setattr(G, "_AVERTI_SAMPLER_GRAPHE", False)
+    monkeypatch.setenv("ACVRAM_SAMPLER_GRAPHE", "0")
+    assert G.sampler_graphe_actif() is False
+    assert "ACVRAM_SAMPLER_LENT=1" in capsys.readouterr().out
+    monkeypatch.setenv("ACVRAM_SAMPLER_GRAPHE", "1")
+    assert G.sampler_graphe_actif() is True and capsys.readouterr().out == ""   # averti une fois
+    # le témoin : aucune prise, ancien chemin au bit
     eng = _moteur_nu()
     eng.graphs = _FauxGraphes(torch.zeros(2, 4, dtype=torch.int64), 4, actif=False)
     logits = _logits(4, graine=6)
@@ -164,7 +174,7 @@ def test_ligne_de_regime_et_defaut_inchange(monkeypatch):
 def test_ligne_de_regime_graphe_seulement_pipeline_et_graphes_et_opt_in(converted):
     from test_engine import _engine_cpu
     eng = _engine_cpu(converted)
-    assert " sampler=lent " in eng.regime_ligne() + " "                     # défaut : ni graphes ni opt-in
+    assert " sampler=lent " in eng.regime_ligne() + " "                     # sans graphes : lent, même par défaut
     eng.graphs = SimpleNamespace(sampler_graphe=True, enabled=True, raison="")
     eng.pipeline_actif = True
     assert " sampler=graphe " in eng.regime_ligne() + " "

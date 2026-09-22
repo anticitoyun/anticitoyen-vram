@@ -140,7 +140,7 @@ def test_hors_regime_ne_cache_aucun_regime():
                 "CARTE_", "PPL_TRANCHE", "QA_", "WARM_GRAPHS", "BANC_", "SESSION", "VERROU", "DUMP_",
                 "TETE_FP32_ENTREE", "MOE_DECODE_MASQUES", "DISABLE_", "TYPE", "ARBRE", "PROFIL", "LOG",
                 "CHARGE_OK", "ECO_", "SERVEUR", "PORT", "CACHE_PREFIXE", "HOTE", "MUET", "MARLIN_CACHE",
-                "CHAUFFE_CTX")   # opt-out de la PREUVE du contexte, visible sur la ligne (ctx_tenu=non-verifie)
+                "CHAUFFE_CTX", "JOURNAL_")   # JOURNAL_ : journaux de conversion (observation) ; CHAUFFE_CTX : opt-out de la PREUVE du contexte, visible sur la ligne (ctx_tenu=non-verifie)
     hors = []
     for nom in regime.HORS_REGIME:
         court = nom[len("ACVRAM_"):]
