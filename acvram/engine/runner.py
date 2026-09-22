@@ -723,6 +723,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # la ligne disait `graphes=on` sur des bras entièrement en eager
             # (poste7-kv-lm4-clos-17-09 § 1)
             "graphes": self.graphs is not None and bool(self.graphs.enabled),
+            "graphes_abandon": getattr(self.graphs, "abandon_capture", None) if self.graphs is not None else None,
             "repli_eager": int(getattr(self.graphs, "replis_eager", 0)) if self.graphs is not None else 0,
             "replis_eager_raisons": sorted(getattr(self.graphs, "_raisons_eager_vues", set())) if self.graphs is not None else [],
             "slots_hybrides": getattr(self.graphs, "max_slots", None) if self.graphs is not None else None,
@@ -808,7 +809,9 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # (gemma b=1, poste7-cloture-nuit-0540-20-09 rang 3) ; off demandé : `graphes=off`
         raison_off = (f"(repli eager: {r['graphes_raison']})"
                       if not r["graphes"] and r.get("graphes_demandes") and r.get("graphes_raison") else "")
-        return (f"régime {etat} — graphes={'on' if r['graphes'] else 'off' + raison_off}"
+        if r.get("graphes_abandon"):
+            raison_off = f"abandon({r['graphes_abandon']})"        # capture au-delà du délai : eager assumé
+        return (f"régime {etat} — graphes={'on' if r['graphes'] and not r.get('graphes_abandon') else 'off' + raison_off}"
                 f"{'' if slots is None else f'(hybrides≤{slots})'} "
                 f"repli_eager={r.get('repli_eager', 0)} "
                f"couches_exilées={r['couches_exilees']}/{r['couches_total']} "

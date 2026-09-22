@@ -274,6 +274,7 @@ class GraphRunner:
         # pipeline (runner, ACVRAM_PIPELINE=1) : lot préparé en attente de
         # rejeu, et événement enregistré après chaque rejeu
         self._prepare = None
+        self.abandon_capture: Optional[str] = None     # cause d un dépassement de délai : captures suivantes refusées
         self.evenement_jetons = torch.cuda.Event()
         self._pool = None
         # Levier 1 (poste1-levier-1-conception-21-09) : le glouton de
@@ -457,6 +458,47 @@ class GraphRunner:
                 f"alloué {photo['alloue'] / g:.2f} "
                 f"(cache non rendu {(photo['reserve'] - photo['alloue']) / g:.2f})")
 
+    # Interblocage de capture (poste2 22/09, `acvram serve` b=12 : 21 min muet
+    # PENDANT la capture, 3,34 Gio libres, processus vivant, GPU oisif) :
+    # une allocation qui manque de mémoire DANS la capture pousse l allocateur
+    # de PyTorch à libérer des segments d un autre pool (`release_cached_blocks`
+    # → `cudaFree` + attente d événements), ce que le pilote ne peut pas faire
+    # tant que la capture est ouverte — ni abandon ni erreur : une attente sans
+    # fin. Deux gardes, préventive et diagnostique, faute de pouvoir
+    # interrompre une capture bloquée depuis son propre fil.
+    MEM_MIN_CAPTURE = int(os.environ.get("ACVRAM_CAPTURE_MEM_MIN_MIO", "1024")) * 2 ** 20
+    DELAI_CAPTURE_S = float(os.environ.get("ACVRAM_CAPTURE_DELAI_S", "120"))
+
+    def _garde_capture(self, cle) -> Optional[str]:
+        """Refuse la capture (raison) si la mémoire libre est sous le seuil, ou
+        si une capture précédente a dépassé le délai : après un dépassement, le
+        moteur sert en eager plutôt que de risquer l attente sans fin."""
+        if getattr(self, "abandon_capture", None):
+            return self.abandon_capture
+        photo = self._photo_memoire()
+        if photo is not None and photo["libre"] < self.MEM_MIN_CAPTURE:
+            return (f"mémoire libre {photo['libre'] / 2 ** 20:.0f} Mio < "
+                    f"{self.MEM_MIN_CAPTURE / 2 ** 20:.0f} Mio : capture refusée (interblocage possible)")
+        return None
+
+    def _surveiller_capture(self, cle):
+        """Fil de surveillance : au-delà du délai, écrit la photo mémoire et la
+        pile de TOUS les fils (la capture bloquée y est lisible), et arme
+        l abandon des captures suivantes."""
+        import faulthandler
+        import threading
+
+        def alerte():
+            photo = self._photo_memoire()
+            self.abandon_capture = f"capture clé {cle} au-delà de {self.DELAI_CAPTURE_S:.0f} s"
+            print(f"[graphe] ALERTE : {self.abandon_capture} — mémoire {self._ligne_memoire(photo) if photo else '?'} ; "
+                  f"captures suivantes refusées (eager)", flush=True)
+            faulthandler.dump_traceback()
+        t = threading.Timer(self.DELAI_CAPTURE_S, alerte)
+        t.daemon = True
+        t.start()
+        return t
+
     def _avant_premiere_capture(self) -> None:
         """Une ligne au journal avant la PREMIÈRE capture du moteur, et la photo
         sous `regime()['graphes_memoire_avant_capture']`. Une seule fois."""
@@ -574,9 +616,15 @@ class GraphRunner:
                     print(f"[graphe] limite {MAX_GRAPHS} atteinte, clé {key} : eager",
                           flush=True)
                 return False
+            refus = self._garde_capture(key)
+            if refus is not None:
+                self._eager(refus)
+                return False
             self._avant_premiere_capture()
+            veille = self._surveiller_capture(key)
             try:
                 entry = self._capture(b, ql, nblk, batch)
+                veille.cancel()
             except Exception as e:                        # noqa: BLE001
                 # UNE CAPTURE QUI ECHOUE NE DOIT PAS TUER LE SERVEUR, quelle
                 # qu'en soit la cause. Le filtre precedent ne relachait que
@@ -593,6 +641,7 @@ class GraphRunner:
                 # ne repasse normalement pas ici — mais si un jour un chemin
                 # reessaie, un serveur qui refuse la capture a chaque pas
                 # noierait sa propre sortie. Le drapeau coute un attribut.
+                veille.cancel()
                 self.raison = f"{type(e).__name__}: {str(e).splitlines()[0][:160]}"
                 # NOMMER L'ALLOCATEUR quand il est en cause, apport de main a
                 # ne pas perdre : les segments extensibles sont en tension avec

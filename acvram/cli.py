@@ -205,6 +205,7 @@ VARIABLES_LUES = {
     "ACVRAM_SAMPLER_LOT",       # sampler vectorisé en opt-in (665eeacc)
     "ACVRAM_SAMPLER_LENT", "ACVRAM_SAMPLER_GRAPHE",             # levier 1 (défaut graphe, témoin lent, ancien nom lu)
     "ACVRAM_RAPATRIEMENT_FLUX", "ACVRAM_RAPATRIEMENT_EPINGLE",  # levier 2 (défaut épinglé, témoin flux, ancien nom lu)
+    "ACVRAM_CAPTURE_MEM_MIN_MIO", "ACVRAM_CAPTURE_DELAI_S",   # gardes d interblocage de capture (22/09)
     "ACVRAM_ETROITES_SPLITK",   # opt-in ± 1 ulp : facteur de programmes par SM du split-K étroit (22/09)
     "ACVRAM_JOURNAL_TENSEURS",  # journal par tenseur de convert (cf97a3a0) — oubliées de la liste le 22/09 (rouge sur main)
     "ACVRAM_PLAN_FIGE",
