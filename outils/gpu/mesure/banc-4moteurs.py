@@ -993,5 +993,158 @@ def main():
         sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# Protocole 2.5 (qr.md § 2.5, demande chef 22/09) : alternance stricte
+# entre moteurs, J net = ∫(P − P_repos) dt / jetons (P_repos pris UNE FOIS,
+# 5 s avant la fenêtre, pas par sous-passage), ≥ 6 fenêtres ≥ 20 s, rejet si
+# sd (pstdev/moyenne des débits, MÊME définition que `mesurer()` ci-dessus,
+# seuil resserré à 10 %) > 10 %, throttle actif (`Energie.bridages`), ou
+# écart de charge étrangère hors ligne — et par PAIRE (une fenêtre par
+# moteur, dans l'ordre d'alternance) : écart d'horloge médiane ≤ 3 %, sinon
+# la PAIRE entière est invalidée (les deux fenêtres, pas une seule).
+#
+# La logique d'agrégation/validation est SÉPARÉE de l'E/S GPU (`generer`,
+# `repos`) : `_agreger_fenetre`/`_valider_*` sont des fonctions pures, testées
+# à sec sur des traces synthétiques (`tests/test_banc_4moteurs_protocole25.py`
+# côté dépôt principal, ou directement ici en scratchpad selon où ce fichier
+# vit). L'orchestration GPU (`mesurer_fenetre_protocole25`/`comparer_alternee`)
+# les appelle mais n'a pas de logique propre à tester hors carte.
+#
+# « charge étrangère » : qr.md § 2.5 donne un seuil en % de P_max (puissance
+# plafond) que je n'ai pas pu confronter au texte source (qr.md absent de cet
+# arbre) — faute de définition vérifiée, je réutilise le critère déjà
+# instrumenté et REGLES §2 (`Energie.invalidations()`, charge CPU pic
+# load1 > nproc/2, PID hors verrou identifié) plutôt que d'inventer un calcul
+# de puissance non testé. **À confirmer par qui a écrit qr.md § 2.5** : si le
+# seuil visé est bien un pic de puissance instantanée (P_tick − P_repos) >
+# 0,05 × plafond_w, `_valider_charge` est à remplacer, pas à côté.
+
+def _sd_relatif_pct(debits: list) -> float:
+    """Même définition que `mesurer()` (pstdev/moyenne, en %) — pas
+    `_dispersion_rel` (étendue/médiane) : la protocole 2.5 demande un sd, pas
+    une étendue."""
+    if len(debits) < 2:
+        return 0.0
+    moy = statistics.mean(debits)
+    return 100 * statistics.pstdev(debits) / moy if moy else 0.0
+
+
+def _agreger_fenetre(sous_passages: list) -> dict:
+    """Fusionne N sous-passages d'un même moteur (chacun le retour d'un
+    `generer()`, additif : J et durée s'additionnent, horloges/températures se
+    concatènent) en UNE fenêtre ≥ 20 s. Fonction pure — pas d'accès carte.
+
+    ``sous_passages`` : liste de dicts {n, duree, joules, horloges,
+    temperatures, bridages, debit} — la forme que rend `generer()` + son
+    `Energie` (voir `mesurer_fenetre_protocole25`)."""
+    n_total = sum(p["n"] for p in sous_passages)
+    duree_totale = sum(p["duree"] for p in sous_passages)
+    joules_totales = sum(p["joules"] for p in sous_passages)
+    debits = [p["debit"] for p in sous_passages]
+    horloges = [h for p in sous_passages for h in p.get("horloges", []) if h and h >= 0]
+    temperatures = [t for p in sous_passages for t in p.get("temperatures", []) if t and t >= 0]
+    throttle = any(p.get("bridages") for p in sous_passages)
+    return {
+        "n": n_total, "duree": round(duree_totale, 2), "joules": round(joules_totales, 1),
+        "t_s": round(n_total / duree_totale, 1) if duree_totale else 0.0,
+        "sd_pct": round(_sd_relatif_pct(debits), 2),
+        "horloge_med": statistics.median(horloges) if horloges else -1,
+        "temp_max": max(temperatures) if temperatures else -1,
+        "throttle": throttle,
+    }
+
+
+def _joules_net(agg: dict, watts_repos: float) -> float:
+    """J net = joules_mesures − P_repos × durée (P_repos pris UNE fois, AVANT
+    la fenêtre entière — pas par sous-passage : qr.md § 2.5)."""
+    return round(max(agg["joules"] - watts_repos * agg["duree"], 0.0), 1)
+
+
+def _valider_fenetre(agg: dict) -> list:
+    """sd > 10 % ou throttle actif → la fenêtre seule est rejetée."""
+    raisons = []
+    if agg["sd_pct"] > 10.0:
+        raisons.append(f"sd {agg['sd_pct']:.1f} % > 10 %")
+    if agg["throttle"]:
+        raisons.append("throttle actif")
+    return raisons
+
+
+def _valider_charge(charge_pct) -> list:
+    """Voir le commentaire de tête : substitut REGLES §2 (load1 pic / nproc,
+    en %) faute de la définition qr.md § 2.5 vérifiée. ``None`` = non mesuré,
+    ne rejette pas (silencieux, pas un TENU)."""
+    if charge_pct is None:
+        return []
+    return [] if charge_pct <= 5.0 else [f"charge étrangère {charge_pct:.1f} % > 5 %"]
+
+
+def _valider_paire(horloge_a: float, horloge_b: float) -> list:
+    """Écart d'horloge médiane entre les DEUX fenêtres d'une paire (un
+    moteur, puis l'autre, consécutives dans l'alternance) : > 3 % invalide LA
+    PAIRE entière, pas une fenêtre seule — l'écart de vitesse ne jugerait
+    alors rien (même règle que `chaine-sampler-abba.sh`, REGLES § 3)."""
+    if horloge_a is None or horloge_b is None or horloge_a <= 0 or horloge_b <= 0:
+        return ["horloge indisponible sur au moins une fenêtre de la paire"]
+    ecart = 100 * abs(horloge_a - horloge_b) / horloge_a
+    return [] if ecart <= 3.0 else [f"écart horloge {ecart:.1f} % > 3 %"]
+
+
+def mesurer_fenetre_protocole25(moteur, fenetre_s=20.0, repos_avant_s=5.0, charge_pct=None):
+    """Une fenêtre ≥ ``fenetre_s`` pour ``moteur`` (accès carte : `generer`,
+    `repos`) : `repos()` UNE fois avant, puis `generer()` en boucle jusqu'à
+    la durée demandée (chaque appel garde son propre `Energie` — additif,
+    jamais imbriqué), agrégé par `_agreger_fenetre` (pure, testée à part)."""
+    base = repos(secondes=repos_avant_s)
+    sous_passages = []
+    t0 = time.time()
+    while time.time() - t0 < fenetre_s:
+        n, ttft, dt, e, texte, morceaux, source = generer(moteur)
+        tps = (n - 1) / dt if n > 1 else 0.0
+        sous_passages.append({
+            "n": n, "duree": e.duree, "joules": e.joules,
+            "horloges": list(e.horloges), "temperatures": list(e.temperatures),
+            "bridages": set(e.bridages), "debit": tps,
+        })
+    agg = _agreger_fenetre(sous_passages)
+    agg["joules_net"] = _joules_net(agg, base.moyenne)
+    agg["charge_pct"] = charge_pct
+    agg["raisons"] = _valider_fenetre(agg) + _valider_charge(charge_pct)
+    agg["moteur"] = moteur
+    return agg
+
+
+def comparer_alternee(moteurs, sha, n_fenetres=6, fenetre_s=20.0, sortie_tsv="/dev/stdout"):
+    """Alternance stricte `moteurs[0], moteurs[1], moteurs[0], moteurs[1], …`
+    (round-robin sur la liste, 2 moteurs typiquement), N ≥ 6 fenêtres, une
+    paire = deux fenêtres consécutives de moteurs différents. Écrit le TSV
+    avec l'en-tête EXACT demandé : moteur/sha/horloge/temp/charge/J/t/s/date/
+    durée, plus deux colonnes de diagnostic en fin (valide/raisons) — sans
+    quoi une fenêtre rejetée disparaîtrait sans laisser de trace."""
+    assert n_fenetres >= 6, "protocole 2.5 : au moins 6 fenêtres"
+    lignes = []
+    fenetres = []
+    for i in range(n_fenetres):
+        moteur = moteurs[i % len(moteurs)]
+        agg = mesurer_fenetre_protocole25(moteur, fenetre_s=fenetre_s)
+        fenetres.append(agg)
+    # validation par paire (i, i+1) sur l'horloge médiane
+    for i in range(0, n_fenetres - 1, 2):
+        a, b = fenetres[i], fenetres[i + 1]
+        raisons_paire = _valider_paire(a["horloge_med"], b["horloge_med"])
+        for f in (a, b):
+            f["raisons"] = f["raisons"] + raisons_paire
+    with open(sortie_tsv, "w") as fh:
+        fh.write("moteur\tsha\thorloge\ttemp\tcharge\tJ\tt_s\tdate\tduree\tvalide\traisons\n")
+        for f in fenetres:
+            valide = not f["raisons"]
+            charge = f["charge_pct"] if f["charge_pct"] is not None else "?"
+            fh.write(f"{f['moteur']}\t{sha}\t{f['horloge_med']}\t{f['temp_max']}\t"
+                    f"{charge}\t{f['joules_net']}\t{f['t_s']}\t"
+                    f"{time.strftime('%Y-%m-%dT%H:%M:%S')}\t{f['duree']}\t"
+                    f"{'oui' if valide else 'non'}\t{' ; '.join(f['raisons']) or 'aucune'}\n")
+    return fenetres
+
+
 if __name__ == "__main__":
     main()
