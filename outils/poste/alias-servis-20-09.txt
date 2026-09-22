@@ -1,0 +1,18 @@
+# Alias servis a copier du 980 PRO (USB) vers /mnt/AI_GENERATOR/models_acvram — 20/09/2026, lot poste (sage-poste-lot-20-09)
+# = fiche-service + cellules du comparatif (Coder i8c, GLM calibA) + parc S2/capture (10 MoE) + temoins (Coder nvfp4, GLM k48/base, Qwen3.8 calibA, Coder-14B pur). Taille totale 257 G.
+Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c
+Qwen3-Coder-30B-A3B-nvfp4
+GLM-4.7-Flash-srcbf16-nvfp4-k48-calibA
+GLM-4.7-Flash-srcbf16-nvfp4-k48
+GLM-4.7-Flash-srcbf16-nvfp4
+DeepSeek-Coder-V2-Lite-Instruct-nvfp4
+gemma-4-26B-A4B-heretic-APEX-I-Quality-nvfp4
+GLM-4.7-Grande-Heretic-42B-srcQ4_K_M-nvfp4
+Jan-v2-VL-max-srcQ4_K_M-nvfp4
+Kimi-Linear-35B-kda-nvfp4
+LFM2.5-8B-A1B-nvfp4
+Nemotron-3.5-Lightning-30B-A3B-srcexl3_6bpw-nvfp4
+Ornith-1.0-35B-kimi-nvfp4
+Qwen3.5-35B-A3B-srcQ4_K_M-nvfp4
+Qwen3.8-27B-nvfp4-calibA
+Qwen2.5-Coder-14B-pur-nvfp4

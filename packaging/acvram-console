@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Ouvre la console web d'acvram, et démarre le serveur s'il n'y en a pas.
+#
+# POURQUOI CE LANCEUR EXISTE. Une entrée de menu qui appellerait `acvram serve`
+# directement échouerait : `serve` exige un répertoire de modèle en argument
+# (cli.py:792), et il n'y a pas de modèle par défaut — le parc en contient plus
+# de cent et aucun n'est « le bon ». Cliquer sur une icône ne peut donc pas
+# démarrer un serveur sans avoir demandé quoi servir.
+#
+# CE QU'IL FAIT DONC. Il cherche un serveur DEJA en marche et ouvre sa console.
+# S'il n'en trouve aucun, il ne devine pas : il affiche les modèles disponibles
+# et la commande exacte à lancer. Deviner le modèle serait pire que ne rien
+# faire — un serveur démarré sur un modèle de 42 Gio parce que c'était le
+# premier par ordre alphabétique est une panne, pas un service.
+set -uo pipefail
+
+PORTS_CONNUS="${ACVRAM_PORTS:-8000 8081 8080}"
+NAVIGATEUR="${BROWSER:-xdg-open}"
+
+# UN SERVEUR ACVRAM SE RECONNAIT A /v1/models, PAS A /health.
+#
+# Premiere version de ce test : `/health` contenant "status". Elle a trouve un
+# « serveur acvram » sur le port 8081 — qui porte un llama-server permanent.
+# llama.cpp expose lui aussi /health et repond lui aussi {"status":"ok"} : le
+# controle etait donc incapable de rendre faux sur le cas qu'il devait exclure,
+# et il aurait ouvert la console sur un service etranger.
+#
+# Le discriminant sûr est le champ `acvram` que notre ModelCard ajoute dans
+# /v1/models (app.py) : aucun autre serveur compatible OpenAI ne le porte.
+trouve=""
+for p in $PORTS_CONNUS; do
+    if curl -fsS --max-time 1 "http://127.0.0.1:$p/v1/models" 2>/dev/null \
+       | grep -q '"acvram"'; then
+        trouve="$p"
+        break
+    fi
+done
+
+if [ -n "$trouve" ]; then
+    exec "$NAVIGATEUR" "http://127.0.0.1:$trouve/"
+fi
+
+# ---- aucun serveur : dire quoi faire, sans rien deviner ---------------------
+PARC="${ACVRAM_PARC:-$HOME/Modeles/models_acvram}"
+liste=""
+if [ -d "$PARC" ]; then
+    liste=$(find "$PARC" -maxdepth 2 -name acvram_manifest.json -printf '%h\n' \
+            2>/dev/null | sed "s|^$PARC/||" | sort | head -12)
+fi
+
+MESSAGE="Aucun serveur acvram ne répond sur les ports $PORTS_CONNUS.
+
+Pour en démarrer un, choisissez un modèle converti :
+
+    acvram serve <repertoire-du-modele>
+
+puis relancez cette entrée de menu — elle ouvrira la console.
+
+Vérifier l'installation :   acvram doctor
+Convertir un modele    :   acvram convert <source> --out <destination>
+"
+if [ -n "$liste" ]; then
+    MESSAGE="$MESSAGE
+Modeles trouves dans $PARC :
+$liste"
+else
+    MESSAGE="$MESSAGE
+Aucun modele trouve dans $PARC.
+Posez ACVRAM_PARC sur le repertoire de vos modeles convertis."
+fi
+
+# Trois façons d'afficher, de la plus riche à la plus sûre — ET LA SORTIE
+# STANDARD EST TOUJOURS ECRITE, quoi qu'il arrive.
+#
+# Premiere version : un `if/elif/else` qui appelait zenity s'il EXISTE. Or
+# zenity existe et echoue quand il n'y a pas de DISPLAY — session distante,
+# console texte, appel depuis un script. Le message partait alors dans le
+# /dev/null de son erreur et l'utilisateur ne voyait RIEN : le lanceur
+# paraissait ne rien faire, ce qui est exactement le defaut qu'il repare.
+#
+# « Exister » n'est pas « pouvoir afficher ». On tente, et on verifie que la
+# tentative a REUSSI avant de considerer le message comme delivre.
+printf '%s\n' "$MESSAGE"
+
+if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --info --width=520 --title="acvram" --text="$MESSAGE" 2>/dev/null && exit 1
+    fi
+    if command -v x-terminal-emulator >/dev/null 2>&1; then
+        x-terminal-emulator -e bash -c \
+            "printf '%s\n' \"$MESSAGE\"; read -rp 'Entree pour fermer…'" && exit 1
+    fi
+fi
+exit 1
