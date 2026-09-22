@@ -683,6 +683,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         return 2
 
     opts = ConversionOptions(
+        repli_experts=args.repli_experts,
         out_dir=args.out, awq=use_awq, use_hadamard=args.hadamard,
         group_size=args.group_size, n_grid=args.grid,
         lm_head_format=args.lm_head_format, dry_run=args.dry_run,
@@ -1070,6 +1071,9 @@ def build_parser() -> argparse.ArgumentParser:
     cv.add_argument("--calib-len", type=int, default=512)
     cv.add_argument("--calib-device", default="cuda:0",
                     help="appareil sur lequel executer les passes de calibration")
+    cv.add_argument("--repli-experts", default="identite", choices=("identite", "mediane_couche"),
+                    help="experts MoE routés < 8 fois par le corpus : identite (défaut, aucune échelle) "
+                         "ou mediane_couche (statistique = médiane des experts calibrés de la couche ; pièce 25)")
     cv.add_argument("--promotion-cout-max", type=float, default=0.0, metavar="MIO",
                     help="prix plafond d'une promotion, en Mio ajoutes "
                          "(0 = aucun) : ecarte les gros tenseurs, dont la "
