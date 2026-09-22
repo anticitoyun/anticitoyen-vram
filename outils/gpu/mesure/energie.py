@@ -35,6 +35,7 @@ import subprocess
 import sys
 import threading
 import time
+from itertools import groupby
 
 # nvmlClocksThrottleReasons : les deux qui changent le régime d'une carte
 BRIDAGE_PUISSANCE = 0x0000000000000004   # SW Power Cap
@@ -228,6 +229,45 @@ def _marquer_charge_deliberee() -> None:
         pass
 
 
+def _dedupliquer_puissances(paires: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Réduit chaque PALIER de puissance consécutive à ses deux bords.
+
+    NVML tient son propre compteur interne, moins fréquent que notre
+    période de sondage (``periode``) : plusieurs appels rapprochés à
+    ``nvmlDeviceGetPowerUsage`` rendent alors la même valeur -- pas
+    plusieurs mesures, un seul palier NVML relu plusieurs fois (« même
+    horodatage NVML » : même échantillon côté carte, même si l'horloge
+    hôte a avancé entre nos appels). Garder les DEUX bords d'un palier
+    (premier ET dernier échantillon de même valeur) laisse l'intégration
+    trapézoïdale exacte -- un palier plat n'a besoin que de ses deux
+    extrémités -- tout en gardant son bord de départ disponible pour le
+    trapèze qui le relie au palier précédent. Fusionner seulement le
+    DERNIER échantillon (sans garder le premier) perdrait la durée entière
+    du palier : c'est le bogue que ce choix évite."""
+    if not paires:
+        return []
+    fusionnees: list[tuple[float, float]] = []
+    for _, groupe in groupby(paires, key=lambda p: p[1]):
+        palier = list(groupe)
+        fusionnees.append(palier[0])
+        if len(palier) > 1:
+            fusionnees.append(palier[-1])
+    return fusionnees
+
+
+def _integrer_trapezes(paires: list[tuple[float, float]]) -> float | None:
+    """Aire sous la courbe puissance(t), par trapèzes -- en joules.
+
+    ``None`` sous deux points : un seul échantillon ne borne aucune durée,
+    ce n'est pas 0 J (0 J affirmerait une énergie nulle mesurée)."""
+    if len(paires) < 2:
+        return None
+    aire = 0.0
+    for (ta, wa), (tb, wb) in zip(paires, paires[1:]):
+        aire += (wa + wb) / 2.0 * (tb - ta)
+    return aire
+
+
 class Energie:
     """Fenêtre de mesure : énergie exacte, régime de la carte, invalidations.
 
@@ -248,6 +288,7 @@ class Energie:
         self.horloges: list[int] = []
         self.temperatures: list[int] = []
         self.puissances: list[float] = []
+        self.puissances_t: list[float] = []
         self.duree = 0.0
         self._stop = False
         self._t: threading.Thread | None = None
@@ -286,6 +327,7 @@ class Energie:
                     self.horloges.append(n.horloge_sm(h))
                     self.temperatures.append(n.temperature(h))
                     self.puissances.append(n.puissance_w(h))
+                    self.puissances_t.append(time.time())
                 self.charges1.append(os.getloadavg()[0])
                 time.sleep(self.periode)
 
@@ -331,6 +373,19 @@ class Energie:
     def moyenne(self) -> float:
         """Puissance moyenne de la fenêtre, en watts — énergie sur durée."""
         return self.joules / self.duree if self.duree > 0 else 0.0
+
+    @property
+    def joules_trapeze(self) -> float | None:
+        """Contrôle croisé de ``joules`` : intégration trapézoïdale des
+        échantillons de puissance (``puissances``/``puissances_t``), après
+        dédoublonnage des paliers NVML répétés. N'entre dans AUCUN calcul
+        publié -- ``joules`` (le compteur NVML monotone) reste la seule
+        source de vérité de l'énergie ; un écart entre les deux se lit,
+        il ne se corrige pas ici."""
+        t = getattr(self, "puissances_t", None) or []
+        w = getattr(self, "puissances", None) or []
+        paires = _dedupliquer_puissances(list(zip(t, w)))
+        return _integrer_trapezes(paires)
 
     @property
     def plafond(self) -> float:
@@ -439,8 +494,10 @@ class Energie:
     def resume(self) -> dict:
         h = [v for v in self.horloges if v >= 0]
         t = [v for v in self.temperatures if v >= 0]
+        jt = self.joules_trapeze
         return {
             "joules": round(self.joules, 1),
+            "joules_trapeze": round(jt, 1) if jt is not None else None,
             "watts": round(self.moyenne, 1),
             "duree_s": round(self.duree, 2),
             "cartes": sorted(self.debut),
