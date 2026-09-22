@@ -79,6 +79,20 @@ DEFAUTS_PAR_VERSION = {
         },
         "mla_core=tf32(≤2048 clés) mla_prep=grille mla_glue=2 glue=compact(8) prefill_glue=compact",
     ),
+    "0.6.35": (                                                          # 0.6.34 + levier 1 (échantillonnage dans le graphe, opt-out ACVRAM_SAMPLER_LENT=1),
+        {                                                                # levier 2 (rapatriement épinglé, opt-out ACVRAM_RAPATRIEMENT_FLUX=1), verrou partagé,
+            "GLUE_COMPACT": "1", "ATTN_WARPS_COMPACT": "8", "PREFILL_COMPACT": "1",    # garde de capture (mémoire minimale, délai) — 22/09
+            "MLA_CORE": "tf32", "MLA_CORE_MAX_CLES": "2048", "MLA_GLUE": "2",
+            "MARLIN_DISTINCT": "0", "MOE_DECODE_MMA": "1", "MOE_DECODE_MMA_MARLIN": "0",
+            "KV_INT8_CANAL": "0", "GODETS_B": "1", "GEMV_LAYOUT": "marlin", "PILE_SANS_RENDU": "",
+            "CPUS": "", "MLA_PREP_GRILLE": "1",
+            "SAMPLER_LENT": "0", "RAPATRIEMENT_FLUX": "0", "ETROITES_FORME": "",
+            "CAPTURE_MEM_MIN_MIO": "1024", "CAPTURE_DELAI_S": "120",
+            # sampler=graphe et rapatriement=epingle n'apparaissent que dans la ligne AVEC modèle (b ≥ 2, carte) ; le défaut nu
+            # ne change pas de fin de ligne. Split-K étroites retiré (RÉFUTÉ b08a3d34) ; ETROITES_FORME vide = 4,3 au bit.
+        },
+        "mla_core=tf32(≤2048 clés) mla_prep=grille mla_glue=2 glue=compact(8) prefill_glue=compact",
+    ),
 }
 
 

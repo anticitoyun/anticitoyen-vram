@@ -399,9 +399,11 @@ def _couverture_experts(model) -> str:
     for (i, m), d in zip(numerotes, dispositions):
         if d == "marlin":
             continue
-        r = (getattr(m, "_raison_marlin", "") or getattr(m, "_raison_repli", "") or "raison non relevée")
-        refus.append(f"c{i}:{r.split(' — ')[0][:70]}")
-    return f"marlin({n_marlin}/{len(numerotes)}) refus=[{' | '.join(refus[:4])}]"
+        r = getattr(m, "_raison_marlin", "") or getattr(m, "_raison_repli", "")
+        if r:  # une couche sans raison relevée (chargement partiel, exil) ne fabrique pas un refus
+            refus.append(f"c{i}:{r.split(' — ')[0][:70]}")
+    base = f"marlin({n_marlin}/{len(numerotes)})"
+    return f"{base} refus=[{' | '.join(refus[:4])}]" if refus else base
 
 
 
