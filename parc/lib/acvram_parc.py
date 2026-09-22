@@ -63,6 +63,10 @@ class Parc:
         self.icone_claude = _p(ch["icone_claude"])
         self.mcp_claude = _p(ch["mcp_claude"])
         self.lib = _p(ch["lib"])
+        if self.lib and not self.lib.exists():
+            _cand = Path(__file__).parent.parent / "share" / "kimi-menu.lib.sh"
+            if _cand.exists():
+                self.lib = _cand
         self.dossiers_lancement = [_p(d) for d in ch["dossiers_lancement"]] or [Path.home()]
         ra = {**DEFAUTS["racines"], **brut.get("racines", {})}
         self.racines = [_p(r) for r in ra["modeles"]]

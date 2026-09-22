@@ -97,6 +97,12 @@ lancer_claude() {  # $1 base_url  $2 clé  $3 modèle servi  $4 contexte  [$@ ar
   export ANTHROPIC_MODEL="$modele" ANTHROPIC_SMALL_FAST_MODEL="$modele"
   export ANTHROPIC_DEFAULT_OPUS_MODEL="$modele" ANTHROPIC_DEFAULT_SONNET_MODEL="$modele" ANTHROPIC_DEFAULT_HAIKU_MODEL="$modele"
   export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_NON_ESSENTIAL_MODEL_CALLS=1
+  # Prompt de démarrage de claude CLI mesuré à sec (22/09, ~12 682 tokens tiktoken cl100k).
+  # Marge ×1.2 pour les variations de session (MCP, outils) + budget réponse minimal.
+  local PROMPT_BASE=15000 MIN_REPONSE=4096
+  if [ -n "$ctx" ] && [ "$ctx" -lt $(( PROMPT_BASE + MIN_REPONSE )) ] 2>/dev/null; then
+    err "alias $modele : contexte $ctx tokens insuffisant (prompt de démarrage ~${PROMPT_BASE}, réponse mini ${MIN_REPONSE} — il faut ≥ $(( PROMPT_BASE + MIN_REPONSE )) tokens)"; exit 1
+  fi
   [ -n "$ctx" ] && export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$ctx"   # fenêtre réelle du moteur
   printf '\n%s→ claude sur %s (%s)%s\n\n' "$c_t" "$modele" "$url" "$c_0"
   # UN SEUL constructeur : --afficher imprime le tableau que l'exec reçoit (poste7 21/09) ;

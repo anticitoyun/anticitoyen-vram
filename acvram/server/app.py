@@ -25,6 +25,7 @@ import time
 from typing import Any, AsyncIterator, Optional
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                StreamingResponse)
@@ -1206,6 +1207,15 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
         return EmbeddingResponse(data=data, model=model_name,
                                  usage=Usage(prompt_tokens=total,
                                              total_tokens=total))
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+        detail = "; ".join(
+            f"{'.'.join(str(l) for l in e['loc'])}: {e['msg']}"
+            for e in exc.errors()
+        )
+        return JSONResponse(status_code=400,
+                            content=ErrorResponse.make(f"requête invalide — {detail}").model_dump())
 
     @app.exception_handler(ValueError)
     async def _value_error(_: Request, exc: ValueError) -> JSONResponse:
