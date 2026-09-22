@@ -299,3 +299,32 @@ def test_completions_logprobs_top_cpu(client):
     lp = r.json()["choices"][0]["logprobs"]
     gen_top = [t for t in lp["top_logprobs"] if t is not None]
     assert gen_top and all(isinstance(d, dict) and d for d in gen_top)
+
+
+def test_speculation_visible_dans_metrics(client):
+    """Pièce 49 : /metrics expose 'speculation' avec les clés attendues —
+    le régime se porte par le nom, pas par la vigilance (REGLES §6)."""
+    r = client.get("/metrics")
+    assert r.status_code == 200
+    j = r.json()
+    # champ présent et non-None
+    assert "speculation" in j, "/metrics doit avoir la clé 'speculation'"
+    s = j["speculation"]
+    assert s is not None, "speculation ne doit pas être None"
+    # structure minimale : mode (str), garde_active (bool), lot_max (int)
+    assert isinstance(s.get("mode"), str), "speculation.mode doit être une str"
+    assert isinstance(s.get("garde_active"), bool), "speculation.garde_active doit être bool"
+    assert isinstance(s.get("lot_max"), int), "speculation.lot_max doit être int"
+
+
+def test_speculation_texte_dans_regime_ligne():
+    """Pièce 49 : le fragment 'speculation=' est présent dans engine.regime_ligne()
+    — le régime se porte par le nom (REGLES §6). Test direct sur le helper."""
+    from acvram.engine.runner import _speculation_texte
+    assert _speculation_texte(None) == " speculation=off"
+    assert _speculation_texte({"mode": "off", "garde_active": False,
+                               "gain_moyen": None, "lot_max": 0}) == " speculation=off"
+    actif = {"mode": "ngram", "garde_active": True, "gain_moyen": 1.5, "lot_max": 4}
+    frag = _speculation_texte(actif)
+    assert frag.startswith(" speculation=ngram(")
+    assert "on" in frag and "lot_max=4" in frag and "gain=1.5" in frag

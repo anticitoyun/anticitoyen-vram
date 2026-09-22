@@ -955,6 +955,9 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                 # d'une mesure (`acvram.regime_ligne`) — variables ACVRAM_*
                 # hors defaut + versions torch/triton/fla.
                 "regime_ligne": _regime_ligne(),
+                # pièce 49 : régime spéculatif visible dans /metrics (même source que
+                # regime_ligne — mode + état garde + gain moyen glissant)
+                "speculation": engine.regime().get("speculation"),
                 "version": __version__, **app.state.info}
 
     @app.get("/v1/models")
