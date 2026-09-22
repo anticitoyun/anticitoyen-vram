@@ -252,21 +252,25 @@ Zwei Befunde aus diesen Messungen haben die Standardwerte geändert:
 * [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **was nicht erledigt ist**, zuerst lesen
 * [`CONVENTIONS.md`](../CONVENTIONS.md) — Arbeitskonventionen für den Code (Sprache, Stil, Prüfungen vor dem Push)
 
-## Gemessene Ergebnisse (21.09.2026, RTX 5090 bei 400 W, Regime ≥ 20 s am Energiezähler)
+## Gemessene Ergebnisse (22.09.2026, RTX 5090 bei 400 W, Regime ≥ 20 s am Energiezähler)
 
 Qwen3-Coder-30B-A3B in NVFP4 (Experten) + INT8 (Attention, Kopf), gleiches
 Protokoll für alle Engines (`outils/`, eine Karte, `energie.py`):
 
-| | acvram 0.6.34 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| Decoding, 12 Sequenzen | **1 540 t/s** | 1 596 t/s | — |
+| Decoding, 12 Sequenzen | **1 625,5 t/s** | 1 596,1 t/s | — |
 | Decoding, 1 Sequenz | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | Prefill pp2048 | **22 707 Token/s** | 21 054 | 8 671 (TabbyAPI, zurückgezogen) |
 
-Durchsatz des Tages (Station 1030, Eco-Regime `-lgc 2700`, Pipeline im Dienst).
-J/Token bei gleichem Takt gegen die drei Engines wird für 0.6.34 neu gemessen
-(`outils/gpu/mesure/banc-4moteurs.py`) und ist daher hier nicht veröffentlicht —
-eine Zahl ohne Regime wird nicht veröffentlicht.
+Durchsatz des Tages (Station 1030, Eco-Regime `-lgc 2700`, Pipeline im Dienst;
+gieriges Sampling im CUDA-Graphen erfasst, in 0.6.35 standardmäßig aktiviert).
+Das b=12 ist die offizielle versiegelte Zelle (Median aus 6 verschachtelten
+Fenstern). Der Wert vLLM 1 596,1 ist die eingefrorene Referenz vom 21.09. (vLLM
+an diesem Tag nicht erneut ausgeführt): die +1,84 % gelten bei gleicher Referenz,
+nicht als Neumessung beider am selben Morgen. Das J/Token wird noch neu gemessen
+(`outils/gpu/mesure/banc-4moteurs.py`) — eine Zahl ohne Regime wird nicht
+veröffentlicht.
 
 Am Morgen des 14.09. lag acvram in derselben Zelle bei 630 t/s und
 0,619 J/Token: die Gewinne stammen von Blackwells nativer FP4-MMA
@@ -278,14 +282,15 @@ der Messung versiegelten Vorhersage, dem Instrument und seinem Regime — eine
 Zahl ohne Regime wird nicht veröffentlicht.
 
 Wo acvram vorn liegt: MLA-Modelle (GLM-4.7-Flash) in nativem sm_120-NVFP4,
-die vLLM nur in FP8 bedient (b=1: 165,35 t/s im Dienst); und Modelle, die nicht
-in den VRAM passen. Wo nicht: das Decoding mit großem Batch eines MoE, das in
-den VRAM passt, wo vLLM ×1,04 im Durchsatz behält (1 596 gegen 1 540, 3,5 %
-Abstand); der Energieabstand ist für 0.6.34 neu zu messen.
+die vLLM nur in FP8 bedient (b=1: 165,35 t/s im Dienst); Modelle, die nicht
+in den VRAM passen; und, seit 0.6.35, das Decoding mit großem Batch eines MoE,
+das in den VRAM passt — b=12 steigt von 1 540 (0.6.34) auf 1 625,5 t/s, also
++1,84 % vor der eingefrorenen vLLM-Referenz (1 596,1). Der Abstand bleibt eng und
+bei eingefrorener Referenz; der Energieabstand ist neu zu messen.
 
 ## Stand
 
-Version 0.6.34. Alles läuft auf der 5090: für `sm_120a` (natives FP4) und
+Version 0.6.35. Alles läuft auf der 5090: für `sm_120a` (natives FP4) und
 `sm_86` kompilierte CUDA-Kernel, CUDA-Graphen, NVFP4/INT8/INT4-Quantisierung,
 HTTP-Server. Leitplanken vorhanden: die Karte ist für Arbeitssitzungen
 unsichtbar (`CUDA_VISIBLE_DEVICES` leer), und nur `outils/carte.sh` leiht sie

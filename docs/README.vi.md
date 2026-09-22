@@ -239,18 +239,18 @@ Hai nhận xét từ các phép đo này đã thay đổi giá trị mặc đị
 * [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **những gì chưa làm**, đọc trước
 * [`CONVENTIONS.md`](../CONVENTIONS.md) — quy ước làm việc với mã (ngôn ngữ, phong cách, kiểm tra trước khi push)
 
-## Kết quả đo được (21/09/2026, RTX 5090 ở 400 W, chế độ ≥ 20 s trên đồng hồ năng lượng)
+## Kết quả đo được (22/09/2026, RTX 5090 ở 400 W, chế độ ≥ 20 s trên đồng hồ năng lượng)
 
 Qwen3-Coder-30B-A3B ở NVFP4 (chuyên gia) + INT8 (chú ý, đầu), cùng giao
 thức cho mọi engine (`outils/`, một card, `energie.py`):
 
-| | acvram 0.6.34 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| giải mã 12 chuỗi | **1 540 t/s** | 1 596 t/s | — |
+| giải mã 12 chuỗi | **1 625,5 t/s** | 1 596,1 t/s | — |
 | giải mã 1 chuỗi | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | prefill pp2048 | **22 707** token/s | 21 054 | 8 671 (TabbyAPI, đã rút) |
 
-Thông lượng trong ngày (giàn 1030, chế độ tiết kiệm `-lgc 2700`, pipeline đang phục vụ). J/token ở cùng xung nhịp so với ba engine đang được đo lại cho 0.6.34 (`outils/gpu/mesure/banc-4moteurs.py`) nên chưa công bố ở đây — một con số không có chế độ thì không công bố.
+Thông lượng trong ngày (giàn 1030, chế độ tiết kiệm `-lgc 2700`, pipeline đang phục vụ; lấy mẫu tham lam được bắt trong đồ thị CUDA, mặc định từ 0.6.35). b=12 là một ô chính thức đã niêm phong (trung vị của 6 cửa sổ đan xen, xung nhịp theo cửa sổ). Giá trị vLLM 1 596,1 là tham chiếu đóng băng từ 21/09 (vLLM không chạy lại ngày đó): chênh +1,84 % có giá trị ở tham chiếu ngang nhau, không phải như đo lại cả hai cùng một sáng. J/token ở cùng xung nhịp so với ba engine vẫn đang được đo lại (`outils/gpu/mesure/banc-4moteurs.py`) — một con số không có chế độ thì không công bố.
 
 Sáng 14/09 acvram ở 630 t/s và 0,619 J/token trên cùng ô: mức tăng đến từ
 MMA FP4 gốc của Blackwell (`mma.sync … kind::mxf4nvf4`, ×7,9 so với bf16),
@@ -261,14 +261,15 @@ với dự đoán được niêm phong trước khi đo, dụng cụ và chế �
 số không có chế độ thì không được công bố.
 
 Nơi acvram dẫn trước: các mô hình MLA (GLM-4.7-Flash) ở NVFP4 gốc sm_120
-(b=1: 165,35 t/s đang phục vụ), mà vLLM chỉ phục vụ ở FP8; và các mô hình không
-vừa VRAM. Nơi nó không dẫn: giải mã lô lớn của một MoE vừa VRAM, nơi vLLM giữ
-×1,04 về thông lượng (1 596 so với 1 540, chênh 3,5 %); chênh lệch về năng lượng
-đang được đo lại cho 0.6.34.
+(b=1: 165,35 t/s đang phục vụ), mà vLLM chỉ phục vụ ở FP8; các mô hình không
+vừa VRAM; và, từ 0.6.35, giải mã lô lớn của một MoE vừa VRAM — b=12 tăng từ
+1 540 (0.6.34) lên 1 625,5 t/s, tức +1,84 % dẫn trước tham chiếu vLLM đóng băng
+(1 596,1). Chênh lệch vẫn hẹp và ở tham chiếu đóng băng; chênh lệch về năng
+lượng còn phải đo lại.
 
 ## Trạng thái
 
-Phiên bản 0.6.34. Mọi thứ chạy trên 5090: kernel CUDA biên dịch cho `sm_120a`
+Phiên bản 0.6.35. Mọi thứ chạy trên 5090: kernel CUDA biên dịch cho `sm_120a`
 (FP4 gốc) và `sm_86`, đồ thị CUDA, lượng tử hóa NVFP4/INT8/INT4, máy chủ
 HTTP. Rào chắn đã có: card vô hình với các phiên làm việc
 (`CUDA_VISIBLE_DEVICES` trống) và chỉ `outils/carte.sh` cho mượn nó, dưới

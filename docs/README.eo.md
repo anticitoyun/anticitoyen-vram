@@ -247,21 +247,25 @@ Du konstatoj el ĉi tiuj mezuroj ŝanĝis la defaŭltajn valorojn:
 * [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **kio ne estas farita**, legenda unue
 * [`CONVENTIONS.md`](../CONVENTIONS.md) — laborkonvencioj pri la kodo (lingvo, stilo, kontroloj antaŭ puŝo)
 
-## Mezuritaj rezultoj (21/09/2026, RTX 5090 je 400 W, reĝimo ≥ 20 s ĉe la energimezurilo)
+## Mezuritaj rezultoj (22/09/2026, RTX 5090 je 400 W, reĝimo ≥ 20 s ĉe la energimezurilo)
 
 Qwen3-Coder-30B-A3B en NVFP4 (spertuloj) + INT8 (atento, kapo), sama
 protokolo por ĉiuj motoroj (`outils/`, unu karto, `energie.py`):
 
-| | acvram 0.6.34 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| malkodado 12 sekvencoj | **1 540 ĵ/s** | 1 596 ĵ/s | — |
+| malkodado 12 sekvencoj | **1 625,5 ĵ/s** | 1 596,1 ĵ/s | — |
 | malkodado 1 sekvenco | **380,8 ĵ/s** | 290,6 ĵ/s | 323,6 ĵ/s |
 | prefill pp2048 | **22 707 ĵetonoj/s** | 21 054 | 8 671 (TabbyAPI, retirita) |
 
-Trafluoj de la tago (posteno 1030, ŝparreĝimo `-lgc 2700`, dukto en servo). La
-J/ĵetono je egala horloĝo kontraŭ la tri motoroj estas remezurata por 0.6.34
-(`outils/gpu/mesure/banc-4moteurs.py`) kaj do ne estas publikigita ĉi tie —
-cifero sen reĝimo ne estas publikigita.
+Trafluoj de la tago (posteno 1030, ŝparreĝimo `-lgc 2700`, dukto en servo;
+avida specimenado kaptita en la CUDA-grafo, defaŭlto de 0.6.35). La b=12 estas
+oficiala sigelita ĉelo (mediano de 6 interplektitaj fenestroj, horloĝo laŭ
+fenestro). La vLLM-valoro 1 596,1 estas la fiksita referenco de la 21/09 (vLLM
+ne reludita tiun tagon): la diferenco +1,84 % validas je egala referenco, ne kiel
+remezuro de ambaŭ la saman matenon. La J/ĵetono je egala horloĝo kontraŭ la tri
+motoroj restas remezurata (`outils/gpu/mesure/banc-4moteurs.py`) — cifero sen
+reĝimo ne estas publikigita.
 
 La 14/09 matene acvram estis je 630 ĵ/s kaj 0,619 J/ĵetono sur la sama ĉelo:
 la gajnoj venas de la indiĝena FP4-MMA de Blackwell (`mma.sync …
@@ -271,15 +275,16 @@ GEMM sur tensorkernoj por la projekcioj. Ĉiu cifero havas sian noton en
 `acvram-memoire/revue/` kun la antaŭdiro sigelita antaŭ la mezuro, la
 instrumento kaj ĝia reĝimo — cifero sen reĝimo ne estas publikigita.
 
-Kie acvram antaŭas: MLA-modeloj (GLM-4.7-Flash) en indiĝena sm_120-NVFP4
-(b=1: 165,35 ĵ/s en servo), kiujn vLLM servas nur en FP8; kaj la modeloj, kiuj
-ne enkonvenas en VRAM. Kie ĝi ne antaŭas: la grandara malkodado de MoE, kiu
-enkonvenas en VRAM, kie vLLM konservas ×1,04 en trafluo (1 596 kontraŭ 1 540,
-diferenco 3,5 %); la diferenco en energio estas remezurenda por 0.6.34.
+Kie acvram antaŭas: MLA-modeloj (GLM-4.7-Flash) en indiĝena sm_120-NVFP4,
+kiujn vLLM servas nur en FP8 (b=1: 165,35 ĵ/s en servo); la modeloj, kiuj ne
+enkonvenas en VRAM; kaj, ekde 0.6.35, la grandara malkodado de MoE, kiu
+enkonvenas en VRAM — b=12 pasas de 1 540 (0.6.34) al 1 625,5 ĵ/s, do +1,84 %
+antaŭ la fiksita vLLM-referenco (1 596,1). La diferenco restas mallarĝa kaj je
+fiksita referenco; la diferenco en energio estas remezurenda.
 
 ## Stato
 
-Versio 0.6.34. Ĉio funkcias sur la 5090: CUDA-kernoj kompilitaj por `sm_120a`
+Versio 0.6.35. Ĉio funkcias sur la 5090: CUDA-kernoj kompilitaj por `sm_120a`
 (indiĝena FP4) kaj `sm_86`, CUDA-grafoj, NVFP4/INT8/INT4-kvantigo,
 HTTP-servilo. Sekurbariloj surloke: la karto estas nevidebla por la
 laborsesioj (`CUDA_VISIBLE_DEVICES` malplena) kaj nur `outils/carte.sh`

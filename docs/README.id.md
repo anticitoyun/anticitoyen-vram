@@ -246,21 +246,25 @@ Dua temuan dari pengukuran ini mengubah nilai bawaan:
 * [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **yang belum selesai**, baca dulu
 * [`CONVENTIONS.md`](../CONVENTIONS.md) — konvensi kerja pada kode (bahasa, gaya, pemeriksaan sebelum push)
 
-## Hasil terukur (21/09/2026, RTX 5090 pada 400 W, rezim ≥ 20 s pada meteran energi)
+## Hasil terukur (22/09/2026, RTX 5090 pada 400 W, rezim ≥ 20 s pada meteran energi)
 
 Qwen3-Coder-30B-A3B dalam NVFP4 (pakar) + INT8 (atensi, kepala), protokol
 yang sama untuk semua mesin (`outils/`, satu kartu, `energie.py`):
 
-| | acvram 0.6.34 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| dekode 12 urutan | **1 540 t/s** | 1 596 t/s | — |
+| dekode 12 urutan | **1 625,5 t/s** | 1 596,1 t/s | — |
 | dekode 1 urutan | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | prefill pp2048 | **22 707 token/s** | 21 054 | 8 671 (TabbyAPI, ditarik) |
 
 Throughput hari ini (stasiun 1030, rezim hemat `-lgc 2700`, pipeline dalam
-layanan). J/token pada clock yang sama terhadap ketiga mesin sedang diukur ulang
-untuk 0.6.34 (`outils/gpu/mesure/banc-4moteurs.py`), sehingga tidak
-dipublikasikan di sini — angka tanpa rezim tidak dipublikasikan.
+layanan; sampling serakah yang ditangkap dalam graf CUDA, bawaan 0.6.35). b=12
+adalah sel resmi tersegel (median dari 6 jendela terjalin, clock per jendela).
+Nilai vLLM 1 596,1 adalah rujukan beku 21/09 (vLLM tidak dijalankan ulang hari
+itu): selisih +1,84% berlaku pada rujukan setara, bukan sebagai pengukuran ulang
+keduanya di pagi yang sama. J/token pada clock yang sama terhadap ketiga mesin
+masih diukur ulang (`outils/gpu/mesure/banc-4moteurs.py`) — angka tanpa rezim
+tidak dipublikasikan.
 
 Pagi 14/09 acvram berada di 630 t/s dan 0,619 J/token pada sel yang sama:
 perolehan datang dari MMA FP4 asli Blackwell (`mma.sync … kind::mxf4nvf4`,
@@ -270,15 +274,16 @@ GEMM sempit pada tensor core untuk proyeksi. Setiap angka punya catatannya di
 `acvram-memoire/revue/` dengan prediksi yang disegel sebelum pengukuran,
 instrumen, dan rezimnya — angka tanpa rezim tidak dipublikasikan.
 
-Di mana acvram unggul: model MLA (GLM-4.7-Flash) dalam NVFP4 asli sm_120
-(b=1: 165,35 t/s dalam layanan), yang hanya dilayani vLLM dalam FP8; dan model
-yang tidak muat di VRAM. Di mana tidak: dekode batch besar dari MoE yang muat di
-VRAM, di mana vLLM mempertahankan ×1,04 throughput (1 596 lawan 1 540, selisih
-3,5%); selisih energi masih harus diukur ulang untuk 0.6.34.
+Di mana acvram unggul: model MLA (GLM-4.7-Flash) dalam NVFP4 asli sm_120, yang
+hanya dilayani vLLM dalam FP8 (b=1: 165,35 t/s dalam layanan); model yang tidak
+muat di VRAM; dan, sejak 0.6.35, dekode batch besar dari MoE yang muat di VRAM —
+b=12 naik dari 1 540 (0.6.34) ke 1 625,5 t/s, yaitu +1,84% di depan rujukan vLLM
+beku (1 596,1). Selisihnya tetap sempit dan pada rujukan beku; selisih energi
+masih harus diukur ulang.
 
 ## Status
 
-Versi 0.6.34. Semuanya berjalan di 5090: kernel CUDA dikompilasi untuk
+Versi 0.6.35. Semuanya berjalan di 5090: kernel CUDA dikompilasi untuk
 `sm_120a` (FP4 asli) dan `sm_86`, graf CUDA, kuantisasi NVFP4/INT8/INT4,
 server HTTP. Pagar pengaman terpasang: kartu tak terlihat oleh sesi kerja
 (`CUDA_VISIBLE_DEVICES` kosong) dan hanya `outils/carte.sh` yang
