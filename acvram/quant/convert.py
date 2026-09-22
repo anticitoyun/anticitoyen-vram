@@ -403,6 +403,30 @@ def _est_projection_attn(name: str) -> bool:
            and "norm" not in name)
 
 
+def _bilan_attn_int8(opts, tensors: dict) -> dict:
+    """Règle 6 (23/09, pièce 55) : `--attn-qkvo-int8-canal` ne rend « par canal »
+    qu'une projection d'attention DÉJÀ promue int8 (`snr_floor`, classes de
+    promotion, format imposé) — l. 1758 et 1916 : `and fmt == "int8"`. Sur
+    gemma-4-31B (o_proj 21,5 dB, snr_floor 0) aucune ne l'était et le manifeste
+    disait quand même `attn_int8 = canal` : une étiquette prise pour une preuve,
+    une conversion de 405 s jugée sur ce qu'elle n'avait pas fait. On compte, on
+    étiquette selon les faits, et l'absence d'effet est écrite dans le manifeste
+    ET imprimée — jamais tue."""
+    attn = {k: v for k, v in tensors.items() if _est_projection_attn(k)}
+    n_int8 = sum(1 for v in attn.values() if v.get("format") == "int8")
+    n_quant = sum(1 for v in attn.values() if v.get("format") not in (None, "bf16", "fp16", "fp32"))
+    if not getattr(opts, "attn_qkvo_int8_canal", False):
+        return {"attn_int8": "groupe"}
+    if n_int8 == 0:
+        msg = (f"--attn-qkvo-int8-canal SANS EFFET : 0 projection d'attention en int8 sur {n_quant} "
+               f"quantifiée(s) — l'int8 par canal ne s'applique qu'à une projection promue int8 ; "
+               f"relancer avec --snr-floor > 0, ou --promotion-classes q_proj,k_proj,v_proj,o_proj "
+               f"--max-promotions 1.0 --snr-floor 99 pour forcer l'attention en int8")
+        print(f"[acvram] AVERTISSEMENT : {msg}", flush=True)
+        return {"attn_int8": "groupe", "attn_int8_canal_demande": True, "avertissements": [msg]}
+    return {"attn_int8": "canal", "attn_int8_canal_tenseurs": n_int8}
+
+
 class TensorRouter:
     """Décide du format de stockage de chaque tenseur, à partir du plan de placement."""
 
@@ -2566,6 +2590,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             f"17/09 (échelle AWQ mal réglée par une statistique bruitée).")
 
     _verifier_homogeneite_moe(manifest["tensors"], spec.num_layers)
+    manifest.update(_bilan_attn_int8(opts, manifest["tensors"]))     # règle 6 : l'étiquette suit les faits
     manifest["diagnostic_fusion"] = _diagnostic_fusion(manifest["tensors"])
     manifest["vision_bytes"] = vision_bytes
     manifest["vision"] = "oui" if vision_bytes else "non"
