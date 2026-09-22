@@ -15,7 +15,12 @@ Trois bras sur les MÊMES ids ([BOS] + texte connu, 300 jetons par défaut) :
            lent, `enable_cuda_graphs=False`), le jeton posé à chaque pas
            étant le jeton RÉEL du texte (teacher-forcing) : les logits
            « tels que la génération les voit » à chaque position
-  hf     : transformers bf16 (offload, `HF_PYTHON` + `MAXMEM` comme
+  hf     : transformers bf16 — avec DEUX contrôles de la référence elle-même
+           (22/09 : la référence rend PPL 108 039 sur nos ids, poste2 9b757c1b) :
+           PPL ≤ 30 sur un paragraphe propre qu elle réencode avec SON
+           tokeniseur, et 20 jetons générés depuis nos ids qui ne soient pas
+           dégénérés — sinon verdict « RÉFÉRENCE INVALIDE », le moteur n est
+           pas jugé (offload, `HF_PYTHON` + `MAXMEM` comme
            decode-pas), NLL par position — la référence
 Sortie : NLL médiane par bras, |Δ| eval−serve et eval−hf par position,
 première position où |Δ| > 1 nat ; PPL(ctx ≥ 32) de chaque bras.
@@ -81,11 +86,14 @@ sys.path.insert(0, os.environ.get("ACVRAM_ARBRE", os.path.join(os.path.dirname(o
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
 import torch  # noqa: E402
 
+SEUIL_PPL_PROPRE = 30.0
+
 SCRIPT_HF = r'''
 import json, sys, torch
-from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
+from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoTokenizer
 ids = json.load(open(sys.argv[2]))
 maxmem = sys.argv[3]
+texte_propre = open(sys.argv[5], encoding="utf-8").read() if len(sys.argv) > 5 else None
 kw = {"dtype": torch.bfloat16}
 if maxmem != "cuda":
     g, c = maxmem.split(",")
@@ -103,7 +111,37 @@ with torch.no_grad():
     out = m(input_ids=x.to(dev))
 lp = torch.log_softmax(out.logits[0, :-1].float(), dim=-1)
 nll = -lp.gather(1, x[0, 1:].to(lp.device).unsqueeze(1)).squeeze(1)
-json.dump({"nll": nll.cpu().tolist()}, open(sys.argv[4], "w"))
+r = {"nll": nll.cpu().tolist()}
+
+# CONTRÔLE DE LA RÉFÉRENCE (22/09) : une référence qui rend PPL 108 039 sur
+# nos ids ne juge rien. Deux épreuves qui ne dépendent PAS de notre chaîne :
+# (1) le modèle réencode lui-même un paragraphe propre avec SON tokeniseur,
+# (2) il génère 20 jetons depuis nos ids — si le texte produit est du bruit,
+# ce sont les ids ou le chargement qui sont faux, pas le modèle mesuré.
+try:
+    tk = AutoTokenizer.from_pretrained(sys.argv[1])
+except Exception as exc:
+    tk = None
+    r["controle_erreur"] = f"tokeniseur illisible : {exc}"
+if tk is not None and texte_propre:
+    ids_hf = tk(texte_propre, return_tensors="pt").input_ids[:, :300]
+    with torch.no_grad():
+        o2 = m(input_ids=ids_hf.to(dev))
+    lp2 = torch.log_softmax(o2.logits[0, :-1].float(), dim=-1)
+    n2 = -lp2.gather(1, ids_hf[0, 1:].to(lp2.device).unsqueeze(1)).squeeze(1)
+    v = n2[32:] if n2.numel() > 32 else n2
+    r["nll_propre"] = n2.cpu().tolist()
+    r["ppl_propre"] = float(torch.exp(v.mean()))
+    r["ids_propres_en_tete"] = ids_hf[0, :4].tolist()
+    r["ids_nos_en_tete"] = ids[:4]
+if tk is not None:
+    with torch.no_grad():
+        g = m.generate(input_ids=x.to(dev), max_new_tokens=20, do_sample=False)
+    suite = g[0, x.shape[1]:]
+    r["suite_ids"] = suite.tolist()
+    r["suite_texte"] = tk.decode(suite, skip_special_tokens=True)
+    r["suite_distincts"] = len(set(suite.tolist()))
+json.dump(r, open(sys.argv[4], "w"))
 '''
 
 
@@ -176,18 +214,44 @@ def nll_decode(loaded, tok, ids: list[int]) -> list[float]:
     return nll
 
 
-def nll_hf(source: str, ids: list[int]) -> list[float] | None:
+def nll_hf(source: str, ids: list[int], texte: str = "") -> dict | None:
+    """NLL du bras HF sur NOS ids, plus les deux contrôles de la référence."""
     py = os.environ.get("HF_PYTHON", "/opt/ia/vLLM/.venv/bin/python")
     maxmem = os.environ.get("MAXMEM", "26GiB,80GiB")
     with tempfile.TemporaryDirectory() as d:
         s, i, o = os.path.join(d, "hf.py"), os.path.join(d, "ids.json"), os.path.join(d, "nll.json")
         open(s, "w").write(SCRIPT_HF)
         json.dump(ids, open(i, "w"))
-        r = subprocess.run([py, s, source, i, maxmem, o], capture_output=True, text=True, timeout=1500)
+        argv = [py, s, source, i, maxmem, o]
+        if texte:
+            t = os.path.join(d, "texte.txt")
+            open(t, "w", encoding="utf-8").write(texte[:4000])
+            argv.append(t)
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=1800)
         if r.returncode != 0:
             print(f"[diag] bras hf en échec : {r.stderr[-800:]}", flush=True)
             return None
-        return json.load(open(o))["nll"]
+        return json.load(open(o))
+
+
+def juger_reference(h: dict) -> dict:
+    """La référence est-elle en état de juger ? Seuils écrits avant : PPL ≤ 30
+    sur un paragraphe propre encodé par SON tokeniseur, et une suite de 20
+    jetons non dégénérée (≥ 5 jetons distincts). Sinon le moteur n est PAS
+    jugé : ce sont les ids ou le chargement qui sont en cause."""
+    ppl_propre = h.get("ppl_propre")
+    distincts = h.get("suite_distincts")
+    motifs = []
+    if ppl_propre is None:
+        motifs.append("pas de bras propre (tokeniseur ou texte manquant)")
+    elif ppl_propre > SEUIL_PPL_PROPRE:
+        motifs.append(f"PPL {ppl_propre:.1f} > {SEUIL_PPL_PROPRE} sur SON propre encodage")
+    if distincts is not None and distincts < 5:
+        motifs.append(f"suite dégénérée : {distincts} jetons distincts sur 20")
+    return {"ppl_propre": ppl_propre, "suite_distincts": distincts,
+            "suite_texte": (h.get("suite_texte") or "")[:200],
+            "reference_valide": not motifs,
+            "reference_motifs": motifs}
 
 
 def ppl(nll: list[float], depuis: int = 32) -> float:
@@ -252,11 +316,15 @@ def main() -> int:
             print(f"[diag] modèle acvram libéré, {libre:.1f} Gio libres avant le bras hf", flush=True)
             if libre < 20:
                 print(f"[diag] ALERTE : {libre:.1f} Gio seulement — le bras hf en offload peut échouer", flush=True)
-        h = nll_hf(a.source, ids)
-        if h is not None:
+        brut = nll_hf(a.source, ids, texte)
+        if brut is not None:
+            h = brut["nll"]
             r.update({"nll_hf": h, "ppl_hf": round(ppl(h), 3), "div_eval_hf": premiere_divergence(e, h),
                       "div_serve_hf": premiere_divergence(s, h),
                       "delta_eval_hf_med": round(sorted(abs(x - y) for x, y in zip(e, h))[len(h) // 2], 4)})
+            r.update(juger_reference(brut))
+            r["ids_propres_en_tete"] = brut.get("ids_propres_en_tete")
+            r["ids_nos_en_tete"] = brut.get("ids_nos_en_tete")
     r["controle_eval_ppl_le_30"] = r["ppl_eval"] <= 30
     r["verdict"] = verdict(r)
     if a.json:
@@ -274,6 +342,10 @@ def main() -> int:
 
 
 def verdict(r: dict) -> str:
+    if r.get("reference_valide") is False:
+        return ("RÉFÉRENCE INVALIDE (ids ou chargement) : " + " ; ".join(r["reference_motifs"])
+                + f" — suite produite : {r.get('suite_texte', '')!r}. Le moteur n est PAS jugé : "
+                  "corriger la référence (gabarit, BOS, tokeniseur, offload) avant toute conclusion.")
     if "ppl_decode" in r and not r["montage_decode_ok"]:
         return (f"INVALIDE (bras decode) : à la position 1, contexte d un seul jeton, decode et eval devraient "
                 f"coïncider — Δ = {r['delta_position_1']} > 1e-2. Le bras est mal monté, il ne juge rien.")

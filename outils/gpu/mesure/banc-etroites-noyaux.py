@@ -124,11 +124,42 @@ def bras_fp8(w: torch.Tensor, x: torch.Tensor):
     qw = (w.float() / sw).clamp(-smax, smax).to(torch.float8_e4m3fn)
     sx = x.float().abs().amax(dim=1, keepdim=True).clamp(min=1e-8) / smax
     qx = (x.float() / sx).clamp(-smax, smax).to(torch.float8_e4m3fn)
-    qwt = qw.t().contiguous().t()                      # colonne-major exigé pour B
+    # `torch._scaled_mm(A [M, K], B [K, N])` : A rangée-majeure contiguë, B
+    # COLONNE-majeure (stride(0) == 1). `qw` est [N, K] rangée-majeure, donc
+    # `qw.t()` est déjà [K, N] colonne-majeure — la vue suffit. L ancien
+    # `qw.t().contiguous().t()` rendait un [N, K] colonne-majeur dont le `.t()`
+    # redevenait rangée-majeur : B mal disposé, plantage de stride avant toute
+    # mesure (poste2 d964e2cc). Les échelles sont fp32, [M, 1] et [1, N].
+    b = qw.t()
+    sa, sb = sx.to(torch.float32).contiguous(), sw.t().to(torch.float32).contiguous()
+    _garde_scaled_mm(qx, b, sa, sb)
 
     def f():
-        return torch._scaled_mm(qx, qwt.t(), scale_a=sx, scale_b=sw.t(), out_dtype=x.dtype)
+        return torch._scaled_mm(qx, b, scale_a=sa, scale_b=sb, out_dtype=x.dtype)
     return f, octets_canal(n, k)
+
+
+def _garde_scaled_mm(a, b, sa, sb) -> None:
+    """Nomme la disposition attendue AVANT l appel : sur carte, `_scaled_mm`
+    rend une erreur de stride qui ne dit pas lequel des quatre tenseurs est en
+    cause, et le banc meurt sans mesure. Vérifiable à sec par lecture, pas par
+    exécution (aucun noyau FP8 sur processeur)."""
+    m, k = a.shape
+    k2, n = b.shape
+    exigences = [
+        (a.dtype == torch.float8_e4m3fn, f"A doit être float8_e4m3fn, pas {a.dtype}"),
+        (a.stride(1) == 1, f"A doit être rangée-majeure (stride {a.stride()})"),
+        (b.dtype == torch.float8_e4m3fn, f"B doit être float8_e4m3fn, pas {b.dtype}"),
+        (k2 == k, f"B doit être [K, N] avec K = {k}, reçu {tuple(b.shape)}"),
+        (b.stride(0) == 1, f"B doit être COLONNE-majeure, stride(0) = {b.stride(0)} "
+                           f"(prendre `qw.t()` d un poids [N, K] contigu, pas `.contiguous().t()`)"),
+        (k % 16 == 0, f"K = {k} doit être multiple de 16"),
+        (sa.dtype == torch.float32 and tuple(sa.shape) == (m, 1), f"scale_a doit être fp32 [M, 1], reçu {sa.dtype} {tuple(sa.shape)}"),
+        (sb.dtype == torch.float32 and tuple(sb.shape) == (1, n), f"scale_b doit être fp32 [1, N], reçu {sb.dtype} {tuple(sb.shape)}"),
+    ]
+    manques = [m_ for ok, m_ in exigences if not ok]
+    if manques:
+        raise RuntimeError("bras FP8 : disposition refusée par _scaled_mm — " + " ; ".join(manques))
 
 
 def mesurer(rep: int) -> dict:

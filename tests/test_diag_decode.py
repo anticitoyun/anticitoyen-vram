@@ -51,3 +51,26 @@ def test_verdict_refuse_un_bras_mal_monte():
     assert m.verdict(r).startswith("P5")
     r["ppl_decode"] = 120.0
     assert m.verdict(r).startswith("P4")
+
+
+def test_reference_hf_invalide_arrete_le_verdict():
+    """Contrôle de la RÉFÉRENCE (22/09, poste2 9b757c1b : HF rend PPL 108 039
+    sur les mêmes ids). Une référence qui échoue sur son PROPRE encodage, ou
+    qui génère du bruit, ne juge rien — le verdict doit le dire et s arrêter
+    là, au lieu d accuser le moteur."""
+    m = _module()
+    bonne = {"ppl_propre": 9.4, "suite_distincts": 17, "suite_texte": "the quick brown fox"}
+    assert m.juger_reference(bonne)["reference_valide"] is True
+    mauvaise = m.juger_reference({"ppl_propre": 108039.0, "suite_distincts": 2, "suite_texte": "!!!!"})
+    assert mauvaise["reference_valide"] is False
+    assert len(mauvaise["reference_motifs"]) == 2
+    v = m.verdict({**mauvaise, "ppl_eval": 227232.0, "ppl_decode": 227000.0,
+                   "montage_decode_ok": True, "nll_decode_mediane": 12.3, "div_eval_decode": 0})
+    assert v.startswith("RÉFÉRENCE INVALIDE"), v
+    assert "P4" not in v and "P5" not in v          # le moteur n est pas jugé
+
+
+def test_reference_sans_bras_propre_est_invalide():
+    m = _module()
+    r = m.juger_reference({"suite_distincts": 12})
+    assert r["reference_valide"] is False and "pas de bras propre" in r["reference_motifs"][0]
