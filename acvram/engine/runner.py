@@ -140,6 +140,11 @@ class GenerationOutput:
     finish_reason: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # Pièce 36 (compatibilité OpenAI) : remplis SEULEMENT si la séquence les
+    # demande (`params.logprobs`), sinon None — la sortie par défaut, le
+    # jeton choisi et son logprob cumulé ne changent pas d un bit.
+    logprob: Optional[float] = None                 # logprob du jeton choisi à ce pas
+    top_logprobs: Optional[list[tuple[int, float]]] = None      # [(id, logprob)] triés, k = params.logprobs
 
 
 @dataclass
@@ -1739,7 +1744,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         return sample(logits, params, history)
 
     def _consommer(self, tokens: torch.Tensor, logprobs: torch.Tensor,
-                   seqs: list[Sequence], epingle: Optional[dict] = None) -> list[GenerationOutput]:
+                   seqs: list[Sequence], epingle: Optional[dict] = None,
+                   tops: Optional[list] = None) -> list[GenerationOutput]:
         """Le corps de `_emit` après l'échantillonnage — LE seul `.tolist()`
         du pas, qu'il soit immédiat (`_emit`) ou différé d'un pas (pipeline).
 
@@ -1792,18 +1798,84 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
 
             if reason:
                 self._finish(seq, reason)
+            i_seq = seqs.index(seq)
+            top = None if not tops or tops[i_seq] is None else list(zip(*tops[i_seq]))
             out.append(GenerationOutput(
                 sequence_id=seq.id, request_id=seq.request_id,
                 token_ids=[int(tok)], text_delta=text,
                 finished=bool(reason), finish_reason=reason,
                 prompt_tokens=len(seq.prompt_ids),
-                completion_tokens=len(seq.output_ids)))
+                completion_tokens=len(seq.output_ids),
+                logprob=float(lp) if seq.params.logprobs else None,
+                top_logprobs=[(int(a), float(b)) for a, b in top] if top else None))
         return out
+
+    def logprobs_invite(self, prompt_ids: list[int], top_k: int = 0) -> dict:
+        """Pièce 36, `echo` : logprob de CHAQUE jeton de l invite sous le
+        modèle (teacher forcing, un seul forward de préfill), et le top-K par
+        position si `top_k > 0`. Le premier jeton n a pas de prédécesseur : son
+        logprob est None, comme le fait l API OpenAI.
+
+        Hors du chemin de décodage : ni cache KV de service, ni graphes, ni
+        échantillonnage — les jetons rendus par le serveur ne changent pas.
+        Rend {"ids", "logprobs", "top"} ; `top` = [[(id, lp)] par position] ou
+        None. Coût : un forward de `len(prompt_ids)` jetons avec les logits de
+        TOUTES les positions ([n, vocab] fp32 en tranches) : à n élevé, c est
+        le prix de `echo`, payé seulement quand il est demandé.
+        """
+        import torch as _t
+        from .model import ForwardBatch
+        from .sampler import logprobs_des, top_logprobs
+        from ..memory.kvcache import BLOCK_SIZE, BlockAllocator
+        n = len(prompt_ids)
+        if n < 2:
+            return {"ids": list(prompt_ids), "logprobs": [None] * n, "top": None}
+        nb = (n + BLOCK_SIZE - 1) // BLOCK_SIZE + 1
+        alloc = BlockAllocator(nb, enable_prefix_cache=False)
+        blocs = alloc.allocate(nb)
+        slots = _t.tensor([blocs[i // BLOCK_SIZE] * BLOCK_SIZE + i % BLOCK_SIZE for i in range(n)], dtype=_t.long)
+        batch = ForwardBatch(tokens=_t.tensor(prompt_ids, dtype=_t.long), positions=_t.arange(n, dtype=_t.long),
+                             seq_lens=[n], query_lens=[n], block_tables=[_t.tensor(blocs, dtype=_t.long)],
+                             slot_mapping=slots, is_prefill=True)
+        lps: list = [None]
+        tops: Optional[list] = ([None] if top_k > 0 else None)
+        tranche = int(os.environ.get("ACVRAM_ECHO_TRANCHE", "256"))
+        with _t.inference_mode():
+            h = self.model(batch, return_hidden=True)
+            for a in range(0, n - 1, tranche):
+                b = min(a + tranche, n - 1)
+                logits = self.model._logits_finaux(self.model._tete(h[a:b]))
+                cibles = _t.tensor(prompt_ids[a + 1:b + 1], dtype=_t.long)
+                lps += [float(v) for v in logprobs_des(logits, cibles).cpu()]
+                if tops is not None:
+                    ids, lp = top_logprobs(logits, top_k)
+                    ids, lp = ids.cpu().tolist(), lp.cpu().tolist()
+                    tops += [list(zip(ids[i], lp[i])) for i in range(len(ids))]
+                del logits
+        return {"ids": list(prompt_ids), "logprobs": lps, "top": tops}
 
     def _emit(self, logits: torch.Tensor,
               seqs: list[Sequence]) -> list[GenerationOutput]:
         tokens, logprobs = self._sample_only(logits, seqs)
-        return self._consommer(tokens, logprobs, seqs)
+        tops = self._tops_si_demande(logits, seqs)
+        return self._consommer(tokens, logprobs, seqs, tops=tops)
+
+    def _tops_si_demande(self, logits: Optional[torch.Tensor], seqs: list[Sequence]):
+        """[(ids, logprobs)] par séquence qui demande un top-K (`params.logprobs`),
+        None si personne n en demande — aucun calcul, aucune allocation sinon
+        (pièce 36). `logits` absent (chemin du graphe, levier 1 : seuls les ids
+        et le logprob du choisi sont rapatriés) → None : le serveur qui veut
+        des top-K pose `ACVRAM_SAMPLER_LENT=1` ou passe par `logprobs_invite`."""
+        k = max((int(s.params.logprobs or 0) for s in seqs), default=0)
+        if k <= 0 or logits is None:
+            return None
+        from .sampler import top_logprobs
+        ids, lp = top_logprobs(logits, k)
+        ids, lp = ids.cpu().tolist(), lp.cpu().tolist()
+        # k est le MAXIMUM demandé (un seul topk pour le lot) : chaque séquence
+        # ne garde que le sien, jamais celui d une voisine plus gourmande.
+        return [(ids[i][: int(seqs[i].params.logprobs)], lp[i][: int(seqs[i].params.logprobs)])
+                if (seqs[i].params.logprobs or 0) else None for i in range(len(seqs))]
 
     def _decode_delta(self, seq: Sequence, n_new: int = 1) -> str:
         """Décode au fil de l'eau, en respectant les séquences UTF-8 multi-jetons.

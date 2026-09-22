@@ -14,7 +14,7 @@ from typing import Optional
 
 import torch
 
-__all__ = ["SamplingParams", "sample", "sampler_lot_actif", "sampler_texte"]
+__all__ = ["top_logprobs", "logprobs_des", "SamplingParams", "sample", "sampler_lot_actif", "sampler_texte"]
 
 
 @dataclass
@@ -98,6 +98,31 @@ def sampler_texte() -> str:
 
 def _colonne(valeurs, device, dtype=torch.float32) -> torch.Tensor:
     return torch.tensor(valeurs, device=device, dtype=dtype).unsqueeze(-1)
+
+
+def top_logprobs(logits: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(ids [lot, k] int64, logprobs [lot, k] fp32)`` des ``k`` jetons les
+    plus probables, triés par probabilité décroissante — la même
+    normalisation que le logprob du choisi (`logsumexp` sur les logits fp32),
+    donc les deux se comparent sans conversion. N alloue rien tant que
+    personne ne demande de top-K : appelée seulement pour les séquences qui
+    portent `params.logprobs` (pièce 36).
+
+    Ne change RIEN au jeton choisi : la sortie par défaut est celle de
+    `sample`/`_sample_lent`, ce top-K est une lecture en plus."""
+    l32 = logits.to(torch.float32)
+    k = max(1, min(int(k), l32.shape[-1]))
+    lp = l32 - torch.logsumexp(l32, dim=-1, keepdim=True)
+    v, i = torch.topk(lp, k, dim=-1, sorted=True)
+    return i.to(torch.int64), v
+
+
+def logprobs_des(logits: torch.Tensor, cibles: torch.Tensor) -> torch.Tensor:
+    """Logprob de chaque cible sous la distribution de sa ligne de logits —
+    teacher forcing (`echo` du protocole), même normalisation que ci-dessus."""
+    l32 = logits.to(torch.float32)
+    lp = l32 - torch.logsumexp(l32, dim=-1, keepdim=True)
+    return lp.gather(1, cibles.to(lp.device).view(-1, 1)).squeeze(1)
 
 
 def sample(logits: torch.Tensor, params: list[SamplingParams],
