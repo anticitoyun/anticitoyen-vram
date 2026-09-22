@@ -10,9 +10,10 @@ import sys
 CODE = """
 import os, torch
 import acvram.engine.model as M
-seuil = M._MOE_DECODE_MMA_MIN_T
+import acvram.engine.moe as MOE
+seuil = MOE._MOE_DECODE_MMA_MIN_T
 appels = []
-class Faux(M.MoEBlock):
+class Faux(MOE.MoEBlock):
     def __init__(self): pass
     def _forward_grouped_mma(self, x, topw, topi): appels.append("mma"); return torch.zeros(1)
     def _forward_grouped(self, x, topw, topi): appels.append("gemv"); return torch.zeros(1)
@@ -26,7 +27,7 @@ class X:
     def __init__(self, t): self.shape = (t, 8); self.is_cuda = True; self.dtype = torch.bfloat16
     def __getitem__(self, i): return self
 for t in (1, 4, seuil - 1, seuil, 8, 12):
-    M.MoEBlock.forward(b, X(t))
+    MOE.MoEBlock.forward(b, X(t))
 print(seuil, ",".join(appels))
 """
 

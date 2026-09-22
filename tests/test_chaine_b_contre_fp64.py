@@ -63,12 +63,13 @@ def _entree(dev, f, graine=7):
 
 def _b(bloc, x, topw, topi):
     from acvram.engine import model as M
-    a = M._MOE_DECODE_FUSED
+    from acvram.engine import moe as MOE
+    a = MOE._MOE_DECODE_FUSED
     try:
-        M._MOE_DECODE_FUSED = False
+        MOE._MOE_DECODE_FUSED = False
         return bloc._forward_grouped_mma(x, topw, topi)
     finally:
-        M._MOE_DECODE_FUSED = a
+        MOE._MOE_DECODE_FUSED = a
 
 
 def _ref_fp64_non_quantifiee(bloc, x, topw, topi, faute_down=1.0):

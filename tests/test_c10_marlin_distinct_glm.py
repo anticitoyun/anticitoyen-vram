@@ -30,6 +30,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from acvram import kernels as K                                                  # noqa: E402
 from acvram.engine import model as MD                                            # noqa: E402
+from acvram.engine import moe as MOE_D
 from acvram.engine.layers import ChannelScaler, QuantLinear                       # noqa: E402
 from acvram.engine.model import MLP, MoEBlock                                     # noqa: E402
 from acvram.kernels import marlin_port as MP                                     # noqa: E402
@@ -129,9 +130,9 @@ def _bloc_glm_jouet(E=64, H=256, I=128, top_k=4):
 
 @pytest.mark.parametrize("t", [1, 12])
 def test_c10_jouet_glm_prend_gemv_marlin_et_egale_le_chemin_d_avant(monkeypatch, t):
-    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "marlin")
-    monkeypatch.setattr(MD, "_PREFILL_GROUPED", "marlin")
-    monkeypatch.setattr(MD, "_MARLIN_DISTINCT", "1")
+    monkeypatch.setattr(MOE_D, "_GEMV_LAYOUT", "marlin")
+    monkeypatch.setattr(MOE_D, "_PREFILL_GROUPED", "marlin")
+    monkeypatch.setattr(MOE_D, "_MARLIN_DISTINCT", "1")
     MoEBlock._marlin_refus_dit = False
     bloc = _bloc_glm_jouet()
     assert bloc._try_build_stacks(), bloc._raison_repli
@@ -156,9 +157,9 @@ def test_c10_jouet_glm_prend_gemv_marlin_et_egale_le_chemin_d_avant(monkeypatch,
 def test_c10_sans_la_variable_le_refus_distinct_tient(monkeypatch):
     """ACVRAM_MARLIN_DISTINCT=0 (défaut) : le même bloc est refusé pour la forme,
     la pile naturelle reste, et le chemin d'avant seul répond."""
-    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "marlin")
-    monkeypatch.setattr(MD, "_PREFILL_GROUPED", "marlin")
-    monkeypatch.setattr(MD, "_MARLIN_DISTINCT", "0")
+    monkeypatch.setattr(MOE_D, "_GEMV_LAYOUT", "marlin")
+    monkeypatch.setattr(MOE_D, "_PREFILL_GROUPED", "marlin")
+    monkeypatch.setattr(MOE_D, "_MARLIN_DISTINCT", "0")
     MoEBlock._marlin_refus_dit = False
     import contextlib
     import io
@@ -201,9 +202,9 @@ def test_c10_couche_glm_reelle_egale_le_chemin_d_avant(monkeypatch, t):
     """Couche 1 de GLM-4.7-Flash k48-calibA (lue par le manifeste, `_linear`
     du chargeur) : tables AWQ gate ≠ up (`up_distinct`), expert partagé int8 ;
     b=1 (4 paires) et b=12 (48 paires, le godet certifié)."""
-    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "marlin")
-    monkeypatch.setattr(MD, "_PREFILL_GROUPED", "marlin")
-    monkeypatch.setattr(MD, "_MARLIN_DISTINCT", "1")
+    monkeypatch.setattr(MOE_D, "_GEMV_LAYOUT", "marlin")
+    monkeypatch.setattr(MOE_D, "_PREFILL_GROUPED", "marlin")
+    monkeypatch.setattr(MOE_D, "_MARLIN_DISTINCT", "1")
     MoEBlock._marlin_refus_dit = False
     bloc = _couche_glm()
     assert bloc._try_build_stacks(), bloc._raison_repli

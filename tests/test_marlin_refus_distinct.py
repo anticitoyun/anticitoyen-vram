@@ -12,6 +12,7 @@ import torch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from acvram.engine import model as MD                                           # noqa: E402
+from acvram.engine import moe as MOE_D
 from acvram.engine.layers import ChannelScaler, QuantLinear                      # noqa: E402
 from acvram.engine.model import MLP, MoEBlock                                    # noqa: E402
 from acvram.quant.formats import _quantize_int8                                 # noqa: E402
@@ -41,8 +42,8 @@ def _bloc_distinct(E=8, H=256, I=128, top_k=4):
 
 @pytest.mark.sans_extension
 def test_refus_nomme_pile_gardee_et_decodage_sans_typeerror(monkeypatch):
-    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "marlin")
-    monkeypatch.setattr(MD, "_PREFILL_GROUPED", "marlin")
+    monkeypatch.setattr(MOE_D, "_GEMV_LAYOUT", "marlin")
+    monkeypatch.setattr(MOE_D, "_PREFILL_GROUPED", "marlin")
     bloc = _bloc_distinct()
     if not hasattr(bloc, "_construire_marlin"):
         pytest.skip("pas de disposition Marlin dans cet arbre")
@@ -80,8 +81,8 @@ def test_raison_distincte_avant_la_raison_cuda():
 
 def test_plus_jamais_une_pile_rendue_dans_un_noyau(monkeypatch):
     """Le repli `_grouped` sur une pile rendue lève une RuntimeError nommée."""
-    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "marlin")
-    monkeypatch.setattr(MD, "_PREFILL_GROUPED", "marlin")
+    monkeypatch.setattr(MOE_D, "_GEMV_LAYOUT", "marlin")
+    monkeypatch.setattr(MOE_D, "_PREFILL_GROUPED", "marlin")
     bloc = _bloc_distinct(top_k=2)
     assert bloc._try_build_stacks(), bloc._raison_repli
     pile = bloc._stacks["gate_proj"]
@@ -98,9 +99,9 @@ def test_c10_leve_le_refus_sous_variable(monkeypatch):
     """ACVRAM_MARLIN_DISTINCT=1 (C10) : le refus « distinct » n'est plus la
     raison — à sec la raison suivante (hors CUDA) prend le relais, ce qui
     prouve que la forme distincte n'est plus exclue par elle-même."""
-    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "marlin")
-    monkeypatch.setattr(MD, "_PREFILL_GROUPED", "marlin")
-    monkeypatch.setattr(MD, "_MARLIN_DISTINCT", "1")
+    monkeypatch.setattr(MOE_D, "_GEMV_LAYOUT", "marlin")
+    monkeypatch.setattr(MOE_D, "_PREFILL_GROUPED", "marlin")
+    monkeypatch.setattr(MOE_D, "_MARLIN_DISTINCT", "1")
     MoEBlock._marlin_refus_dit = False
     bloc = _bloc_distinct(top_k=4)
     import io, contextlib

@@ -104,6 +104,7 @@ def test_gate_up_differents_acceptes():
 @pytest.mark.parametrize("chemin", ["mma", "gemv", "prefill_mma", "prefill_direct"])
 def test_pile_egale_boucle_a_un_ulp(chemin, egales, monkeypatch):
     from acvram.engine import model as M
+    from acvram.engine import moe as MOE
     dev = torch.device("cuda:0")
     bloc = _bloc_awq(dev, gate_up_egales=egales)
     assert bloc._try_build_stacks()
@@ -111,8 +112,8 @@ def test_pile_egale_boucle_a_un_ulp(chemin, egales, monkeypatch):
     x, topw, topi = _entree(dev)
     ref = _boucle(bloc, x, topw, topi)
     if chemin.startswith("prefill"):
-        monkeypatch.setattr(M, "_MOE_MMA", chemin == "prefill_mma")
-        monkeypatch.setattr(M, "_MOE_GEMM_MAX", 1e9)
+        monkeypatch.setattr(MOE, "_MOE_MMA", chemin == "prefill_mma")
+        monkeypatch.setattr(MOE, "_MOE_GEMM_MAX", 1e9)
 
     def pile():
         if chemin == "mma":
@@ -184,7 +185,7 @@ def test_table_unite_sautee(monkeypatch):
             lin.scaler = ChannelScaler(scale=torch.ones(lin.in_features, dtype=torch.float16), hadamard_block=0)
     assert bloc._try_build_stacks()
     assert bloc._stacks_awq["gate_proj"] is None and bloc._stacks_awq["down_proj"] is None
-    monkeypatch.setattr(M, "_MOE_AWQ_TEMOIN", 2)
+    monkeypatch.setattr(MOE, "_MOE_AWQ_TEMOIN", 2)
     assert bloc._try_build_stacks()
     assert bloc._stacks_awq["gate_proj"] is not None
     assert torch.equal(bloc._stacks_awq["gate_proj"], torch.ones_like(bloc._stacks_awq["gate_proj"]))
@@ -200,7 +201,7 @@ def test_compte_de_lancements_avec_awq(egales):
     from acvram.engine import model as M
     dev = torch.device("cuda:0")
     bloc = _bloc_awq(dev, gate_up_egales=egales)
-    assert bloc._try_build_stacks() and M._MOE_ROUTE_PACK
+    assert bloc._try_build_stacks() and MOE._MOE_ROUTE_PACK
     bloc._stack_state = "oui"
     x, topw, topi = _entree(dev)
     bloc._forward_grouped_mma(x, topw, topi); torch.cuda.synchronize()

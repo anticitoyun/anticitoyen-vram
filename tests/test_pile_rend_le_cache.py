@@ -17,6 +17,7 @@ touche pas au compteur.
 import torch
 
 from acvram.engine import model as M
+from acvram.engine import moe as MOE
 from acvram.engine.loader import load_model
 
 
@@ -29,7 +30,7 @@ def _compteur(monkeypatch, disponible=True):
 
 def test_une_pile_construite_rend_le_cache(tiny_moe, monkeypatch):
     loaded = load_model(tiny_moe, dtype=torch.float32, device_override="cpu")
-    bloc = next(m for m in loaded.model.modules() if isinstance(m, M.MoEBlock))
+    bloc = next(m for m in loaded.model.modules() if isinstance(m, MOE.MoEBlock))
     appels = _compteur(monkeypatch)
     assert bloc._try_build_stacks(), bloc._raison_repli
     assert len(appels) == 1, "la pile construite doit rendre le cache une fois"
@@ -40,7 +41,7 @@ def test_une_pile_refusee_ne_rend_pas_par_ce_chemin(tiny_moe, monkeypatch):
     a le sien, ce test ne le compte pas : un refus (piles hétérogènes) sort
     avant le repack, sans rien à rendre."""
     loaded = load_model(tiny_moe, dtype=torch.float32, device_override="cpu")
-    bloc = next(m for m in loaded.model.modules() if isinstance(m, M.MoEBlock))
+    bloc = next(m for m in loaded.model.modules() if isinstance(m, MOE.MoEBlock))
     appels = _compteur(monkeypatch)
     monkeypatch.setattr(bloc, "_noms_experts", lambda: ["gate_proj", "inexistant"])
     try:
@@ -52,7 +53,7 @@ def test_une_pile_refusee_ne_rend_pas_par_ce_chemin(tiny_moe, monkeypatch):
 
 def test_sans_cuda_rien_n_est_rendu(monkeypatch):
     appels = _compteur(monkeypatch, disponible=False)
-    M.MoEBlock._rendre_le_cache_apres_la_pile()
+    MOE.MoEBlock._rendre_le_cache_apres_la_pile()
     assert appels == []
 
 
@@ -61,9 +62,9 @@ def test_temoin_sans_rendu_est_nomme_et_ne_rend_pas(monkeypatch, capsys):
     et le DIT (une fois) — un témoin muet serait un défaut déguisé."""
     appels = _compteur(monkeypatch)
     monkeypatch.setenv("ACVRAM_PILE_SANS_RENDU", "1")
-    monkeypatch.setattr(M.MoEBlock, "_sans_rendu_dit", False, raising=False)
-    M.MoEBlock._rendre_le_cache_apres_la_pile()
-    M.MoEBlock._rendre_le_cache_apres_la_pile()
+    monkeypatch.setattr(MOE.MoEBlock, "_sans_rendu_dit", False, raising=False)
+    MOE.MoEBlock._rendre_le_cache_apres_la_pile()
+    MOE.MoEBlock._rendre_le_cache_apres_la_pile()
     assert appels == []
     assert capsys.readouterr().out.count("TÉMOIN ACVRAM_PILE_SANS_RENDU=1") == 1
 

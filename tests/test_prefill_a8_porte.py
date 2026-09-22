@@ -97,12 +97,13 @@ def test_porte_w8r_en_place_par_blocs_egale_un_seul_tenant_et_refuse_inerte(monk
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
     from test_marlin_refus_distinct import _bloc_distinct
     from acvram.engine import model as MD
+    from acvram.engine import moe as MOE_D
     bloc = _bloc_distinct(top_k=2)
-    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "naturel")
-    monkeypatch.setattr(MD, "_PREFILL_GROUPED", "grouped_mm")
+    monkeypatch.setattr(MOE_D, "_GEMV_LAYOUT", "naturel")
+    monkeypatch.setattr(MOE_D, "_PREFILL_GROUPED", "grouped_mm")
     assert bloc._try_build_stacks(), bloc._raison_repli
-    monkeypatch.setattr(MD, "_PREFILL_W8R", "1")
-    monkeypatch.setattr(MD, "_MOE_MMA", True)                             # la MMA primerait : inerte
+    monkeypatch.setattr(MOE_D, "_PREFILL_W8R", "1")
+    monkeypatch.setattr(MOE_D, "_MOE_MMA", True)                             # la MMA primerait : inerte
     x = (torch.randn(4, 256) * 0.5).to(torch.bfloat16)
     logits = bloc.router(x)
     topw, topi = torch.topk(torch.softmax(logits.float(), -1), bloc.top_k, dim=-1)

@@ -175,12 +175,13 @@ def test_le_bloc_moe_decode_prend_gemv_marlin(monkeypatch):
     from conftest import attendre_chemin
     from test_marlin_prefill_p1 import _bloc_moe_jouet
     from acvram.engine import model as MD
+    from acvram.engine import moe as MOE_D
     if MP.charger(compiler=False) is None:
         pytest.skip("extension Marlin non compilée à sec")
     E, H, I, top_k, T = 8, 256, 128, 2, 6
     bloc = _bloc_moe_jouet(E, H, I, top_k)
-    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "naturel")            # témoin naturel (défaut marlin depuis le 18/09)
-    monkeypatch.setattr(MD, "_PREFILL_GROUPED", "groupe")
+    monkeypatch.setattr(MOE_D, "_GEMV_LAYOUT", "naturel")            # témoin naturel (défaut marlin depuis le 18/09)
+    monkeypatch.setattr(MOE_D, "_PREFILL_GROUPED", "groupe")
     assert bloc._try_build_stacks()
     assert bloc._stacks_marlin is None
     torch.manual_seed(T)
@@ -198,7 +199,7 @@ def test_le_bloc_moe_decode_prend_gemv_marlin(monkeypatch):
             ref[t] += topw[t, j] * (a.to(torch.bfloat16).float() @ wd.T)
     y1 = bloc._forward_grouped(x, topw, topi.to(torch.int32))
     attendre_chemin(bloc, "gemv_v1")
-    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "marlin")
+    monkeypatch.setattr(MOE_D, "_GEMV_LAYOUT", "marlin")
     bloc._stacks_marlin = bloc._construire_marlin(bloc._stacks, bloc._stacks_awq, bloc._stacks_awq.get("hadamard", {}))
     assert bloc._stacks_marlin is not None
     n_v1 = bloc.chemins["gemv_v1"]
@@ -213,7 +214,7 @@ def test_le_bloc_moe_decode_prend_gemv_marlin(monkeypatch):
     # — même sous un témoin naturel demandé après coup (rien d'autre à lire)
     bloc._liberer_pile_naturelle()
     assert bloc._stacks["gate_proj"][1] is None and bloc.experts_layout == "marlin"
-    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "naturel")
+    monkeypatch.setattr(MOE_D, "_GEMV_LAYOUT", "naturel")
     n_m = bloc.chemins["gemv_marlin"]
     yu = bloc._forward_grouped(x, topw, topi.to(torch.int32))
     attendre_chemin(bloc, "gemv_marlin", avant=n_m)

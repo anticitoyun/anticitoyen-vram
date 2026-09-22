@@ -57,16 +57,17 @@ def test_route_pack_bit_a_bit(fantomes):
 @CUDA
 def test_sortie_identique_avec_et_sans_noyau():
     from acvram.engine import model as M
+    from acvram.engine import moe as MOE
     dev = torch.device("cuda:0")
     bloc = _bloc(dev)
     x, topw, topi = _entree(dev)
     topi = topi.clone(); topi[9:] = -1; x = x.clone(); x[9:] = 0
-    ancien = M._MOE_ROUTE_PACK
+    ancien = MOE._MOE_ROUTE_PACK
     try:
-        M._MOE_ROUTE_PACK = True; y1 = bloc._forward_grouped_mma(x, topw, topi)
-        M._MOE_ROUTE_PACK = False; y0 = bloc._forward_grouped_mma(x, topw, topi)
+        MOE._MOE_ROUTE_PACK = True; y1 = bloc._forward_grouped_mma(x, topw, topi)
+        MOE._MOE_ROUTE_PACK = False; y0 = bloc._forward_grouped_mma(x, topw, topi)
     finally:
-        M._MOE_ROUTE_PACK = ancien
+        MOE._MOE_ROUTE_PACK = ancien
     assert torch.equal(y0, y1)
 
 
@@ -79,7 +80,7 @@ def test_compte_de_lancements_par_couche():
     dev = torch.device("cuda:0")
     bloc = _bloc(dev)
     x, topw, topi = _entree(dev)
-    assert M._MOE_ROUTE_PACK, "le defaut doit etre le noyau route+pack"
+    assert MOE._MOE_ROUTE_PACK, "le defaut doit etre le noyau route+pack"
     bloc._forward_grouped_mma(x, topw, topi); torch.cuda.synchronize()
     with profile(activities=[ProfilerActivity.CUDA]) as prof:
         bloc._forward_grouped_mma(x, topw, topi); torch.cuda.synchronize()

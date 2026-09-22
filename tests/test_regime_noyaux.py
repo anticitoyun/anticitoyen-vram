@@ -96,11 +96,12 @@ def masques_propres():
 
 def test_masquer_une_variable_reecrit_le_module_deja_importe(monkeypatch, masques_propres):
     import acvram.engine.model as M
+    import acvram.engine.moe as MOE
     monkeypatch.delenv("ACVRAM_MOE_MMA", raising=False)
-    monkeypatch.setattr(M, "_MOE_MMA", True)
+    monkeypatch.setattr(MOE, "_MOE_MMA", True)
     fait = regime.masquer(["MOE_MMA"])
     assert fait == {"MOE_MMA": "ACVRAM_MOE_MMA=0"}
-    assert M._MOE_MMA is False and os.environ["ACVRAM_MOE_MMA"] == "0"
+    assert MOE._MOE_MMA is False and os.environ["ACVRAM_MOE_MMA"] == "0"
     assert regime.regime_noyaux()["hors_defaut"]["ACVRAM_MOE_MMA"] == "0"
 
 

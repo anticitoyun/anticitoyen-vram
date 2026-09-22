@@ -17,22 +17,23 @@ from tests.test_moe_decode_mma_graphe import _bloc, _entree, CUDA, N_EXPERTS, TO
 
 def _fused(bloc, x, topw, topi, tn):
     from acvram.engine import model as M
-    a, b = M._MOE_DECODE_FUSED, M._MOE_FUSED_TN
+    from acvram.engine import moe as MOE
+    a, b = MOE._MOE_DECODE_FUSED, MOE._MOE_FUSED_TN
     try:
-        M._MOE_DECODE_FUSED, M._MOE_FUSED_TN = True, tn
+        MOE._MOE_DECODE_FUSED, MOE._MOE_FUSED_TN = True, tn
         return bloc._forward_grouped_mma(x, topw, topi)
     finally:
-        M._MOE_DECODE_FUSED, M._MOE_FUSED_TN = a, b
+        MOE._MOE_DECODE_FUSED, MOE._MOE_FUSED_TN = a, b
 
 
 def _b(bloc, x, topw, topi):
     from acvram.engine import model as M
-    a = M._MOE_DECODE_FUSED
+    a = MOE._MOE_DECODE_FUSED
     try:
-        M._MOE_DECODE_FUSED = False
+        MOE._MOE_DECODE_FUSED = False
         return bloc._forward_grouped_mma(x, topw, topi)
     finally:
-        M._MOE_DECODE_FUSED = a
+        MOE._MOE_DECODE_FUSED = a
 
 
 def _quant_act_sans_echelle_globale(v: torch.Tensor) -> torch.Tensor:

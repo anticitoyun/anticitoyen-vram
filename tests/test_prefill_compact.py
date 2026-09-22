@@ -349,6 +349,7 @@ def test_prefill_moe_marlin_compact_au_bit_avec_le_temoin(monkeypatch):
     from conftest import attendre_chemin
     from test_marlin_prefill_p1 import _bloc_moe_jouet
     from acvram.engine import model as MD
+    from acvram.engine import moe as MOE_D
     from acvram.kernels import marlin_port as MP
     if MP.charger(compiler=False) is None:
         pytest.skip("extension Marlin non compilée")
@@ -360,7 +361,7 @@ def test_prefill_moe_marlin_compact_au_bit_avec_le_temoin(monkeypatch):
     topw, topi = torch.topk(torch.softmax(logits, -1), top_k, dim=-1)
     topw = topw / topw.sum(-1, keepdim=True)
     topi32 = topi.to(torch.int32)
-    monkeypatch.setattr(MD, "_PREFILL_GROUPED", "marlin")
+    monkeypatch.setattr(MOE_D, "_PREFILL_GROUPED", "marlin")
     assert bloc._try_build_stacks()
     assert getattr(bloc, "_stacks_marlin", None) is not None
     # `forward` reconstruit les piles tant que `_stack_state` vaut « ? » : la

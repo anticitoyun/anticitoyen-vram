@@ -214,6 +214,7 @@ def test_c15_3b_le_routeur_triton_remplace_cublas_il_ne_s_ajoute_pas(monkeypatch
     import torch.nn.functional as F
     from acvram import kernels
     from acvram.engine import model as M
+    from acvram.engine import moe as MOE
     from acvram.kernels import route_prep as rp
     if not torch.cuda.is_available():
         os.environ.setdefault("TRITON_INTERPRET", "1")
@@ -226,7 +227,7 @@ def test_c15_3b_le_routeur_triton_remplace_cublas_il_ne_s_ajoute_pas(monkeypatch
     def plain(n, k):
         t = torch.randn(n, k, dtype=torch.bfloat16) * 0.02
         return QuantLinear(PlainTensor(t, tuple(t.shape), "bf16"), out_features=n, in_features=k)
-    bloc = M.MoEBlock(plain(E, H), [M.MLP(plain(32, H), plain(32, H), plain(H, 32)) for _ in range(E)],
+    bloc = MOE.MoEBlock(plain(E, H), [M.MLP(plain(32, H), plain(32, H), plain(H, 32)) for _ in range(E)],
                       top_k=2, scoring="softmax", score_bias=None)
     bloc._usage_routage = torch.zeros(E, dtype=torch.int64)
     bloc._stack_state = "oui"
@@ -236,10 +237,10 @@ def test_c15_3b_le_routeur_triton_remplace_cublas_il_ne_s_ajoute_pas(monkeypatch
     monkeypatch.setattr(rp, "route_fusee", lambda *a, **k: (appels.__setitem__("fusee", appels["fusee"] + 1),
                                                             appels["warps"].append(k.get("num_warps", 4))) and vrai_fusee(*a, **k))
     monkeypatch.setattr(rp, "route_logits_fusee", lambda *a, **k: appels.__setitem__("logits_fusee", appels["logits_fusee"] + 1) or vrai_lf(*a, **k))
-    monkeypatch.setattr(M.MoEBlock, "_route", lambda self, x: appels.__setitem__("_route", appels["_route"] + 1) or (None, None))
-    monkeypatch.setattr(M.MoEBlock, "_forward_grouped_mma", lambda self, x, tw, ti: None)
-    monkeypatch.setattr(M.MoEBlock, "_forward_grouped", lambda self, x, tw, ti, eid=None: appels["grouped"].append((tw, ti, eid)) or x)
-    monkeypatch.setattr(M, "_ROUTE_PREP", 2)
+    monkeypatch.setattr(MOE.MoEBlock, "_route", lambda self, x: appels.__setitem__("_route", appels["_route"] + 1) or (None, None))
+    monkeypatch.setattr(MOE.MoEBlock, "_forward_grouped_mma", lambda self, x, tw, ti: None)
+    monkeypatch.setattr(MOE.MoEBlock, "_forward_grouped", lambda self, x, tw, ti, eid=None: appels["grouped"].append((tw, ti, eid)) or x)
+    monkeypatch.setattr(MOE, "_ROUTE_PREP", 2)
     monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
     monkeypatch.setattr(kernels, "_GLUE_COMPACT", compact)
     x = torch.randn(12, H).to(torch.bfloat16)

@@ -200,8 +200,9 @@ def _regime_des_marqueurs(request, monkeypatch):
         monkeypatch.setattr(K, "get_extension", lambda: None)
     if "pile_naturelle" in marqueurs:
         from acvram.engine import model as M
-        monkeypatch.setattr(M, "_GEMV_LAYOUT", "naturel")
-        monkeypatch.setattr(M, "_PREFILL_GROUPED", "grouped_mm")
+        from acvram.engine import moe as MOE
+        monkeypatch.setattr(MOE, "_GEMV_LAYOUT", "naturel")
+        monkeypatch.setattr(MOE, "_PREFILL_GROUPED", "grouped_mm")
         monkeypatch.setenv("ACVRAM_GEMV_LAYOUT", "naturel")
         monkeypatch.setenv("ACVRAM_PREFILL_GROUPED", "grouped_mm")
 

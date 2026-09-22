@@ -76,6 +76,7 @@ def test_bloc_moe_decode_prend_mma2_sur_marlin(monkeypatch):
     from test_marlin_prefill_p1 import _bloc_moe_jouet
     from test_gemv_marlin import _hors_par_ligne, TOL_HORS
     from acvram.engine import model as MD
+    from acvram.engine import moe as MOE_D
     ext = get_extension()
     if ext is None or not hasattr(ext, "nvfp4_gemm_grouped_mma") or MP.charger(compiler=False) is None:
         pytest.skip("MMA FP4 ou extension Marlin indisponible")
@@ -96,18 +97,18 @@ def test_bloc_moe_decode_prend_mma2_sur_marlin(monkeypatch):
             ref[t] += topw[t, j] * (a.to(torch.bfloat16).float() @ wd.T)
     # référence du CHEMIN : le même décodage par la MMA sur la pile naturelle (même A4, même
     # arithmétique) — la référence fp32 des GEMV (W4A16) ne juge pas un chemin W4A4
-    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "naturel"); monkeypatch.setattr(MD, "_PREFILL_GROUPED", "groupe")
+    monkeypatch.setattr(MOE_D, "_GEMV_LAYOUT", "naturel"); monkeypatch.setattr(MOE_D, "_PREFILL_GROUPED", "groupe")
     assert bloc._try_build_stacks() and bloc._stacks_marlin is None
     y_nat = bloc._forward_grouped_mma(x, topw, topi.to(torch.int32))
     assert y_nat is not None
-    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "marlin")
+    monkeypatch.setattr(MOE_D, "_GEMV_LAYOUT", "marlin")
     bloc._stacks_marlin = bloc._construire_marlin(bloc._stacks, bloc._stacks_awq, bloc._stacks_awq.get("hadamard", {}))
     assert bloc._stacks_marlin is not None
     bloc._liberer_pile_naturelle()
     assert bloc._stacks["gate_proj"][1] is None
-    monkeypatch.setattr(MD, "_MOE_DECODE_MMA_MARLIN", False)
+    monkeypatch.setattr(MOE_D, "_MOE_DECODE_MMA_MARLIN", False)
     assert bloc._forward_grouped_mma(x, topw, topi.to(torch.int32)) is None       # défaut : pile rendue, None
-    monkeypatch.setattr(MD, "_MOE_DECODE_MMA_MARLIN", True)
+    monkeypatch.setattr(MOE_D, "_MOE_DECODE_MMA_MARLIN", True)
     y = bloc._forward_grouped_mma(x, topw, topi.to(torch.int32))
     assert y is not None
     attendre_chemin(bloc, "decode_mma_marlin")
