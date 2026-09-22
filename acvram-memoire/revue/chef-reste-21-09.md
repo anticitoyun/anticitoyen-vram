@@ -44,7 +44,7 @@ poste4 : verdict A/B quand une cellule tombe. chef : réarmer `/loop 20m` à la 
 ## I — ouverts par Vibe série 3 (21/09 22 h, verdicts en fin de qr.md)
 21. Verrou : classe PARTAGÉ « carte visible sans calcul » (second fichier flock, LOCK_SH ; EXCLUSIF = LOCK_EX sur les deux ; `.qui/<pid>` ; promesse vérifiée par compute-apps) — les conversions longues y passent (poste3, outils/carte.sh + test).
 22. Noyau hôte NVFP4 AVX-512 (table vpermb, 68 instr/64 quartets, micro-banc perf stat, test au bit) — seulement si c9-m-hote à vide réfute (> 1,2 ms).
-23. Four Over Six : profil réel de la conversion (horodatages du journal) puis vectorisation de la recherche amax/6 vs amax/4 sur [n_blocs, 16, 2] au bit (poste2 profil, poste1 vectorisation).
+23. Four Over Six : profil réel de la conversion (horodatages du journal) puis vectorisation de la recherche amax/6 vs amax/4 sur [n_blocs, 16, 2] au bit (poste2 profil, poste1 vectorisation). [FAITE 22/09 17 h 5x — 804d4714 : recherche 99 %, 4sur6 +0,8 %, vectorisation réfutée, court-circuit sans stats ×5-6 attendu ; mesure poste2]
 24. Cellules TRT-LLM : liste de contrôle du verdict 3.4 (graphes actifs des deux côtés, exclusions listées, KV FP8/int8 vérifié dans la doc 1.3, glouton, même contexte/émission, en-tête de publication).
 25. Calibration AWQ experts : instruments FAITS (poste1 7c658b08 : awq-stabilite-experts.py, `convert --repli-experts mediane_couche`, invites-experts-sans-stats.py) ; mesures poste2 : (a) stabilité ≈ 20 min → (c) sur l alias actuel → reconversion mediane_couche (≈ 25 min) → (c) + P3 (3), prédit 12,6 → 6-9 %. [22/09 12 h 2x : (a) tenu à ≥ 512 obs, (b)/(c) mediane_couche RÉFUTÉ 68e0e638 (13,2 % vs identite 12,6 %) → pièce close, la suite est la 27.]
 
