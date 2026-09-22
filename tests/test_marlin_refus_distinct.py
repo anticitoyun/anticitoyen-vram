@@ -73,7 +73,8 @@ def test_refus_nomme_pile_gardee_et_decodage_sans_typeerror(monkeypatch):
 def test_raison_distincte_avant_la_raison_cuda():
     """À sec, un MoE non distinct est refusé « hors CUDA » ; un distinct l'est
     pour la forme — l'ordre des raisons rend la seconde lisible sans carte."""
-    src = (pathlib.Path(__file__).resolve().parent.parent / "acvram" / "engine" / "model.py").read_text()
+    # scission 22/09 (module 4) : `_construire_marlin` vit dans engine/moe.py
+    src = (pathlib.Path(__file__).resolve().parent.parent / "acvram" / "engine" / "moe.py").read_text()
     i_d = src.index('elif awq.get("up_distinct") and _MARLIN_DISTINCT != "1":')
     i_c = src.index('elif piles["gate_proj"][1].device.type != "cuda":')
     assert i_d < i_c

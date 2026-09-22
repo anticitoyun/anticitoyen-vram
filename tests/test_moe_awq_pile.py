@@ -177,6 +177,7 @@ def test_table_unite_sautee(monkeypatch):
     table vaut 1 partout, le produit est sauté (poste7 § 8 : coût 0 sur un modèle
     sans AWQ) ; ACVRAM_MOE_AWQ_TEMOIN=2 force le produit (témoin du coût)."""
     from acvram.engine import model as M
+    from acvram.engine import moe as MOE
     dev = torch.device("cuda:0")
     bloc = _bloc_awq(dev)
     for m in bloc.experts:
@@ -199,6 +200,7 @@ def test_compte_de_lancements_avec_awq(egales):
     (la division AWQ vit dans nvfp4_quant_act, poste7-glm-pile-correctif § 1.4) ; distinctes : 9."""
     from torch.profiler import profile, ProfilerActivity
     from acvram.engine import model as M
+    from acvram.engine import moe as MOE
     dev = torch.device("cuda:0")
     bloc = _bloc_awq(dev, gate_up_egales=egales)
     assert bloc._try_build_stacks() and MOE._MOE_ROUTE_PACK

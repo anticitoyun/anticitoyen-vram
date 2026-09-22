@@ -6,8 +6,7 @@ import os
 import subprocess
 import sys
 
-CODE = "import acvram.engine.model as m; print(int(m_moe._MOE_DECODE_MMA))"
-import acvram.engine.moe as m_moe
+CODE = "import acvram.engine.moe as m; print(int(m._MOE_DECODE_MMA))"
 
 
 def _valeur(env_sup: dict) -> str:

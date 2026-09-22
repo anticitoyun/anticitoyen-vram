@@ -52,6 +52,7 @@ __all__ = [
     "_colle_moe_triton", "MoEBlockGemma", "_DUMP_MOE",
 ]
 
+
 class MoEBlock(nn.Module):
     """Mélange d'experts creux.
 
@@ -1658,12 +1659,16 @@ if _PREFILL_A8 != "off" and _PREFILL_A4 != "off":
     raise ValueError("ACVRAM_PREFILL_A8 et ACVRAM_PREFILL_A4 ne se cumulent pas : une porte à la fois")
 _E2M1 = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
 _E2M1_MILIEUX = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
+
+
 def fausse_quant_a8(x: torch.Tensor, fmt: str = "int8") -> torch.Tensor:
     """x [G, K] → x arrondi comme le ferait un GEMM W4A8 (`int8` par jeton au
     bit du noyau a8, ou `e4m3` bloc 16) — `quant.fakequant_activation.
     fake_quantize_a8`, partagée avec la porte FP8-MLA (engine/mla.py)."""
     from ..quant.fakequant_activation import fake_quantize_a8
     return fake_quantize_a8(x, fmt)
+
+
 def fausse_quant_nvfp4(x: torch.Tensor) -> torch.Tensor:
     """x [G, K] (K multiple de 16) → x arrondi comme le ferait nvfp4_quant_act :
     échelle globale par ligne s = amax_ligne / (448 × 6), échelle de bloc (16) en
@@ -1710,6 +1715,8 @@ _MOE_AWQ_TEMOIN = int(os.environ.get("ACVRAM_MOE_AWQ_TEMOIN", "0"))
 # poste7 sur la passe de PPL réelle (attendu 0 saturé, flush ≤ 0,01 %).
 _QA_COMPTE = os.environ.get("ACVRAM_QA_COMPTE", "0") == "1"
 _QA_COMPTEURS: dict = {}
+
+
 def _qa_compteurs(device):
     if not _QA_COMPTE:
         return None
@@ -1720,6 +1727,8 @@ def _qa_compteurs(device):
             import atexit
             atexit.register(_qa_imprime)
     return c
+
+
 def _qa_imprime():
     for dev, c in _QA_COMPTEURS.items():
         n, z, sat = (int(v) for v in c.tolist())
@@ -1789,6 +1798,8 @@ _ROUTAGES: list = []
 # dans le graphe) — lu après chaque pas par equiv-b12.py, comparé au bit entre bras.
 _ROUTAGE_TEMOIN = os.environ.get("ACVRAM_ROUTAGE_TEMOIN", "0") == "1"
 _TEMOINS_ROUTAGE: dict = {}      # id(couche) → tampon [t, top_k] int32 (remplacé si la forme change)
+
+
 def temoins_routage() -> list:
     """Les tampons témoins, dans l'ordre du premier appel des couches."""
     return list(_TEMOINS_ROUTAGE.values())
@@ -1807,6 +1818,8 @@ if not _DOUBLE_DIAG and (_GEMV_LAYOUT == "marlin") != (_PREFILL_GROUPED == "marl
     # experts_layout=double) n'existe plus (poste7-p1-disposition-unique-18-09)
     raise ValueError(f"ACVRAM_GEMV_LAYOUT={_GEMV_LAYOUT!r} et ACVRAM_PREFILL_GROUPED={_PREFILL_GROUPED!r} : "
                      "les deux à marlin (disposition unique) ou aucun (témoin naturel)")
+
+
 def _mla_glue() -> int:
     """C15 : niveau de glue MLA (engine/mla.py `_MLA_GLUE`, variable
     ACVRAM_MLA_GLUE) lu au moment de l'appel — le module mla n'est importé que
@@ -1821,6 +1834,8 @@ _COLLE_MOE = os.environ.get("ACVRAM_COLLE_MOE", "torch")
 if _COLLE_MOE not in ("torch", "triton"):
     raise ValueError(f"ACVRAM_COLLE_MOE={_COLLE_MOE!r} : torch | triton")
 _BORNES_EXPERTS: dict = {}
+
+
 def _comptes_tries(e_sorted: torch.Tensor, E: int) -> torch.Tensor:
     """C15-prefill : ``bincount(e_sorted, minlength=E)`` (int64 [E]) pour une
     liste d'experts déjà TRIÉE — les bornes de chaque expert par recherche
@@ -1834,6 +1849,8 @@ def _comptes_tries(e_sorted: torch.Tensor, E: int) -> torch.Tensor:
         bornes = torch.arange(E + 1, dtype=e_sorted.dtype, device=e_sorted.device)
         _BORNES_EXPERTS[cle] = bornes
     return torch.diff(torch.searchsorted(e_sorted, bornes))
+
+
 def _colle_moe_triton(G: int, E: int, device):
     if _COLLE_MOE != "triton" or E & (E - 1):
         return None
@@ -1843,6 +1860,8 @@ def _colle_moe_triton(G: int, E: int, device):
     if device.type != "cuda" and os.environ.get("TRITON_INTERPRET") != "1":
         return None
     return colle_moe
+
+
 class MoEBlockGemma(MoEBlock):
     """MoE de Gemma 4 (26B-A4B) : routeur sur x normalisé (RMS sans poids)
     × échelle × h^-½, softmax, top-k sans renormalisation, poids × échelle
