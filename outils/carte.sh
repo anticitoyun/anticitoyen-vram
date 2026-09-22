@@ -40,6 +40,13 @@ case "${_carte:-0}" in
 esac
 VERROU=${ACVRAM_VERROU:-/tmp/acvram-carte-$_carte.lock}
 INFO="$VERROU.qui"
+# Fichier PARTAGÉ (classe partage) : les prises « carte visible sans calcul »
+# (conversions --quant-device cpu…) prennent LOCK_SH ici et coexistent entre
+# elles ET avec un service ; une mesure prend LOCK_EX ici EN PLUS de VERROU, ce
+# qui l'exclut d'elles. Un service ne touche PAS ce fichier (flux service au bit
+# inchangé) : il coexiste naturellement avec les partagés, fichiers disjoints.
+SHARE="$VERROU.share"
+PROMESSE_MIO=${ACVRAM_PROMESSE_MIO:-512}
 ATTENTE=${ACVRAM_ATTENTE:-1800}
 NOM=${ACVRAM_NOM:-$(basename "${1:-mesure}")}
 # CE QUE LE VERROU TIENT. Un verrou d'usage exclusif ne voit pas qu'on change
@@ -51,15 +58,17 @@ NOM=${ACVRAM_NOM:-$(basename "${1:-mesure}")}
 # celui qui attend doit savoir s'il attend une manche ou un reglage.
 TYPE=${ACVRAM_TYPE:-mesure}
 case "$TYPE" in
-  mesure|etat|service) ;;
-  *) echo "carte.sh : ACVRAM_TYPE doit valoir 'mesure', 'etat' ou 'service'" >&2; exit 64 ;;
+  mesure|etat|service|partage) ;;
+  *) echo "carte.sh : ACVRAM_TYPE doit valoir 'mesure', 'etat', 'service' ou 'partage'" >&2; exit 64 ;;
 esac
 # PLAFOND DE PRISE (poste7-tests-30min-20-09 § 3.1, utilisateur 07 h 17 : « aucune prise > 30 min »).
 # A l'echeance : SIGTERM a la commande et a ses enfants, 10 s, SIGKILL ; -rgc si un -lgc a ete
 # pose par la commande (etat /tmp/acvram-eco-<carte>.json) ; verrou rendu par la sortie ;
 # ligne `TIMEOUT` au journal ; code 124. ACVRAM_TYPE=service (les services permanents) exempte.
 DUREE_MAX=${ACVRAM_DUREE_MAX:-1800}
-[ "$TYPE" = service ] && DUREE_MAX=0
+# service ET partage exemptés du plafond : un serveur permanent et une conversion
+# longue (parfois > 30 min) sont légitimes.
+case "$TYPE" in service|partage) DUREE_MAX=0 ;; esac
 case "$DUREE_MAX" in ''|*[!0-9]*) echo "carte.sh : ACVRAM_DUREE_MAX doit etre un entier de secondes" >&2; exit 64 ;; esac
 
 # ETAT DE LA CARTE, RELEVE AVANT ET APRES. On ne garantit pas qu'il ne changera
@@ -112,6 +121,40 @@ qui_tient() {
   fi
 }
 
+_lister_partages() {
+  # les .qui vivants des prises partagees, pour nommer qui gene une mesure.
+  local q pp pn out=""
+  for q in "$SHARE".*.qui; do
+    [ -e "$q" ] || continue
+    read -r pp _ pn _ < "$q" 2>/dev/null
+    [ -n "${pp:-}" ] && kill -0 "$pp" 2>/dev/null && out="$out ${pn:-?}(pid $pp)"
+  done
+  echo "partages tenus :${out:- aucun}"
+}
+
+# LA PROMESSE VERIFIEE, PAS SUPPOSEE. Une prise partagee promet : aucun calcul
+# GPU lourd (<= ACVRAM_PROMESSE_MIO). A chaque nouvelle prise (n'importe quelle
+# classe), on relit compute-apps et on compare au PID de chaque partage declare.
+# Violee -> REFUS de LA PRISE EN COURS + ligne PROMESSE-VIOLEE au journal, JAMAIS
+# de kill (REGLES : ne jamais tuer un processus GPU inconnu ; l'humain tranche).
+_verifier_promesses() {
+  local apps q pp pn mem viol=""
+  apps=$(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2>/dev/null) || return 0
+  for q in "$SHARE".*.qui; do
+    [ -e "$q" ] || continue
+    read -r pp _ pn _ < "$q" 2>/dev/null
+    { [ -n "${pp:-}" ] && kill -0 "$pp" 2>/dev/null; } || continue
+    mem=$(printf '%s\n' "$apps" | awk -v pid="$pp" -F', *' '$1==pid{s+=$2} END{print s+0}')
+    [ "${mem:-0}" -gt "$PROMESSE_MIO" ] && viol="$viol ${pn:-?}(pid $pp: ${mem} Mio)"
+  done
+  if [ -n "$viol" ]; then
+    printf '%s PROMESSE-VIOLEE %s\n' "$(date +%FT%T)" "$viol" >> "$VERROU.journal" 2>/dev/null || true
+    echo "carte.sh : REFUS — promesse partagee violee (> ${PROMESSE_MIO} Mio) :$viol" >&2
+    echo "  Aucun kill (REGLES), l'humain tranche ; la prise en cours est refusee." >&2
+    exit 5
+  fi
+}
+
 # DOUBLE PRISE : le verrou est deja tenu PAR NOUS, plus haut dans la meme
 # chaine. Le 10/09/2026, une campagne enveloppee de carte.sh lancait des
 # services qui prenaient carte.sh a leur tour : le bras interieur a attendu
@@ -128,6 +171,34 @@ if [ -n "${ACVRAM_CARTE_TENUE:-}" ]; then
     exit 66
 fi
 export ACVRAM_CARTE_TENUE=$$
+
+# ── CLASSE PARTAGE : LOCK_SH sur S, coexiste avec partages et service ────────
+# La carte est visible mais la commande PROMET de ne pas calculer dessus. Elle
+# ne touche PAS VERROU (fd 9) : un service (fd 9) et des partages (fd 8) vivent
+# donc cote a cote, fichiers disjoints. Une mesure prend LOCK_EX sur S (plus bas)
+# et l'exclut. Pas de plafond (DUREE_MAX=0). .qui par job : SHARE.<pid>.qui.
+if [ "$TYPE" = partage ]; then
+  exec 8>"$SHARE" || { echo "carte.sh : $SHARE inaccessible" >&2; exit 65; }
+  if ! flock -sn 8; then                      # SH echoue seulement si une MESURE tient S en EX
+    echo "carte.sh : REFUS — prise 'partage' : une mesure exclusive tient la carte ($(qui_tient))." >&2
+    exit 4
+  fi
+  _verifier_promesses                          # un partage deja la qui trahit sa promesse -> refus + journal
+  QP="$SHARE.$$.qui"
+  JOURNAL="$VERROU.journal"
+  printf '%s %s %s %s\n' "$$" "$(date +%s)" "$NOM" partage > "$QP"
+  _pris=$(date +%s)
+  printf '%s prise   %-8s %-32s partage\n' "$(date +%FT%T)" "$$" "$NOM" >> "$JOURNAL" 2>/dev/null || true
+  trap 'rm -f "$QP"; printf "%s rendue  %-8s %-32s partage tenue=%ss\n" "$(date +%FT%T)" "$$" "$NOM" "$(( $(date +%s) - _pris ))" >> "$JOURNAL" 2>/dev/null || true' EXIT
+  if [ -n "${ACVRAM_CPUS:-}" ] && command -v taskset >/dev/null; then
+    CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" taskset -c "$ACVRAM_CPUS" "$@" 8>&- &
+  else
+    CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" "$@" 8>&- &
+  fi
+  _fils=$!
+  wait "$_fils"; exit $?
+fi
+
 exec 9>"$VERROU" || { echo "carte.sh : $VERROU inaccessible" >&2; exit 65; }
 if ! flock -n 9; then
   # REFUS MUTUEL NOMME service <-> mesure. Un service permanent ne rend jamais
@@ -162,6 +233,21 @@ if ! flock -n 9; then
     echo "  ... $(( $(date +%s) - debut )) s, toujours $(qui_tient)" >&2
   done
   echo "carte obtenue apres $(( $(date +%s) - debut )) s" >&2
+fi
+
+# ── MESURE / ETAT : une fois P obtenu (donc AUCUNE autre mesure/service ne tient),
+# prendre LOCK_EX sur S exclut les PARTAGES. On le fait APRES P : ainsi deux
+# mesures se serialisent sur P (attente bornée) au lieu de se refuser sur S, et si
+# `flock -n 8` echoue ici c'est forcement qu'un partage tient S (pas une mesure).
+# S toujours libre sans partage -> comportement au bit inchange pour l'existant.
+if [ "$TYPE" = mesure ] || [ "$TYPE" = etat ]; then
+  exec 8>"$SHARE" || { echo "carte.sh : $SHARE inaccessible" >&2; exit 65; }
+  if ! flock -n 8; then
+    echo "carte.sh : REFUS — prise '$TYPE' : des conversions partagees tiennent la carte." >&2
+    echo "  $(_lister_partages). Attendez leur fin ou changez de carte." >&2
+    exit 4
+  fi
+  _verifier_promesses
 fi
 
 # ── MODE SERVICE : le serveur DETACHE tient le verrou lui-meme ───────────────
@@ -227,17 +313,21 @@ AVANT=$(etat_carte)
 # jamais avant, jamais par accident dans un sous-processus qui l'aurait heritee.
 _TIMEOUT="$VERROU.timeout.$$"
 # Lot poste 20/09 : affinite P-cores si ACVRAM_CPUS est pose (ex. 0-15) ; sinon rien ne change.
+# `8>&-` en plus de `9>&-` : mesure/etat tiennent aussi S (fd 8) en EX ; la
+# commande ne doit hériter ni P ni S, sinon elle prolongerait le verrou après
+# notre sortie (meme piege que le fd 9). fd 8 n'existe pas pour un service, mais
+# ce chemin n'est atteint que par mesure/etat.
 if [ -n "${ACVRAM_CPUS:-}" ] && command -v taskset >/dev/null; then
-  CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" taskset -c "$ACVRAM_CPUS" "$@" 9>&- &
+  CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" taskset -c "$ACVRAM_CPUS" "$@" 8>&- 9>&- &
 else
-  CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" "$@" 9>&- &
+  CUDA_VISIBLE_DEVICES="${ACVRAM_CARTE:-0}" "$@" 8>&- 9>&- &
 fi
 _fils=$!
 _garde=
 if [ "$DUREE_MAX" -gt 0 ]; then
   ( sleep "$DUREE_MAX"; touch "$_TIMEOUT"
     pkill -TERM -P "$_fils" 2>/dev/null; kill -TERM "$_fils" 2>/dev/null; sleep 10
-    pkill -KILL -P "$_fils" 2>/dev/null; kill -KILL "$_fils" 2>/dev/null ) 9>&- &
+    pkill -KILL -P "$_fils" 2>/dev/null; kill -KILL "$_fils" 2>/dev/null ) 8>&- 9>&- &
   _garde=$!
 fi
 wait "$_fils"; code=$?
