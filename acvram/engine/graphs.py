@@ -181,6 +181,25 @@ def sampler_graphe_actif() -> bool:
     return ancien != "0"
 
 
+_AVERTI_RAPATRIEMENT = False
+
+
+def rapatriement_epingle_actif() -> bool:
+    """Défaut : rapatriement épinglé (levier 2). Opt-out `ACVRAM_RAPATRIEMENT_FLUX=1`
+    (témoin : `.tolist()` sur le flux). L ancien opt-in `ACVRAM_RAPATRIEMENT_EPINGLE`
+    (22/09, chaînes de poste2) reste lu un temps : `=1` = le défaut, `=0` = le
+    témoin, avec un avertissement une fois."""
+    global _AVERTI_RAPATRIEMENT
+    ancien = os.environ.get("ACVRAM_RAPATRIEMENT_EPINGLE")
+    if ancien is not None and not _AVERTI_RAPATRIEMENT:
+        _AVERTI_RAPATRIEMENT = True
+        print(f"[acvram] ACVRAM_RAPATRIEMENT_EPINGLE={ancien} : variable remplacée — l épinglé est le défaut, "
+              f"le témoin s obtient par ACVRAM_RAPATRIEMENT_FLUX=1", flush=True)
+    if os.environ.get("ACVRAM_RAPATRIEMENT_FLUX", "0") == "1":
+        return False
+    return ancien != "0"
+
+
 def echantillon_glouton_dans(sortie: torch.Tensor, logits: torch.Tensor) -> None:
     """Le glouton de `sampler._sample_lent` (lignes `logits.to(float32)`,
     `argmax`, `gather − logsumexp`), MÊMES noyaux torch dans le MÊME ordre :

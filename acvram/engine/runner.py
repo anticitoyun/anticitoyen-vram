@@ -33,7 +33,7 @@ from .pipeline import PipelineDecodage
 from .loader import LoadedModel
 from .model import _DUMP_MOE, ForwardBatch
 from .sampler import sampler_texte, SamplingParams, besoin_historique, sample
-from .graphs import depaqueter_logprobs
+from .graphs import depaqueter_logprobs, rapatriement_epingle_actif
 from .speculative import GardeSpeculation, Proposal, verify_proposal
 from .vision import ImageRequete, SansTourVision, TourVision, verifier_plages
 
@@ -598,10 +598,14 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # porte `pipeline=1|0`.
         self._pipeline_pendiente: Optional[dict] = None
         self.pipeline_actif = os.environ.get("ACVRAM_PIPELINE", "1") not in ("0", "")
-        # Levier 2 (opt-in ACVRAM_RAPATRIEMENT_EPINGLE=1) : rapatriement des ids
-        # du pas par tampon hôte épinglé à double parité (`_apres_echantillon`) ;
-        # ligne `rapatriement=epingle|flux`.
-        self.rapatriement_epingle = os.environ.get("ACVRAM_RAPATRIEMENT_EPINGLE", "0") == "1"
+        # Levier 2 : rapatriement des ids du pas par tampon hôte épinglé à
+        # double parité (`_apres_echantillon`) — DÉFAUT depuis le verdict poste4
+        # (22/09 : ids/logprobs au bit 3/3, trou_gpu 165 → 24 µs, ABBA service
+        # +6,84 %, `poste1-levier-2-excedent-22-09`) ; `ACVRAM_RAPATRIEMENT_FLUX=1`
+        # = témoin (`.tolist()` sur le flux). L ancien opt-in
+        # `ACVRAM_RAPATRIEMENT_EPINGLE` reste lu un temps (=0 → témoin), averti
+        # une fois. Ligne `rapatriement=epingle|flux`.
+        self.rapatriement_epingle = rapatriement_epingle_actif()
         self._epingles: list = [None, None]
         self._parite_epingle = 0
         # `evenement_jetons` de GraphRunner ne borne QUE le rejeu — enregistré

@@ -1,6 +1,6 @@
 """Levier 2 (revue/poste1-levier-2-conception-22-09 § 3) : rapatriement des
-ids/logprobs par tampon hôte épinglé à double parité, opt-in
-`ACVRAM_RAPATRIEMENT_EPINGLE=1`. Tests à sec (tenseurs CPU, faux graphes,
+ids/logprobs par tampon hôte épinglé à double parité, DÉFAUT depuis le
+verdict poste4 22/09 ; témoin `ACVRAM_RAPATRIEMENT_FLUX=1`. Tests à sec (tenseurs CPU, faux graphes,
 faux événement) ; carte : poste2. Ce qui doit casser : ids ou logprobs qui
 divergent de `_sample_lent` sur 100 pas, un tampon de parité réutilisé avant
 lecture sans lever, une copie enfilée sur le flux pendant `_consommer`, un
@@ -191,11 +191,30 @@ def test_sans_opt_in_ou_lot_ineligible_rien_ne_change():
     assert epingle is None and lps.dtype == torch.float32 and eng._parite_epingle == 0
 
 
+def test_defaut_epingle_et_temoin_flux(monkeypatch, capsys):
+    """Défaut = épinglé (verdict poste4 22/09) ; ACVRAM_RAPATRIEMENT_FLUX=1 =
+    témoin ; l ancien ACVRAM_RAPATRIEMENT_EPINGLE encore lu, averti une fois."""
+    from acvram.engine import graphs as G
+    monkeypatch.delenv("ACVRAM_RAPATRIEMENT_EPINGLE", raising=False)
+    monkeypatch.delenv("ACVRAM_RAPATRIEMENT_FLUX", raising=False)
+    assert G.rapatriement_epingle_actif() is True
+    monkeypatch.setenv("ACVRAM_RAPATRIEMENT_FLUX", "1")
+    assert G.rapatriement_epingle_actif() is False
+    monkeypatch.delenv("ACVRAM_RAPATRIEMENT_FLUX")
+    monkeypatch.setattr(G, "_AVERTI_RAPATRIEMENT", False)
+    monkeypatch.setenv("ACVRAM_RAPATRIEMENT_EPINGLE", "0")
+    assert G.rapatriement_epingle_actif() is False and "RAPATRIEMENT_FLUX=1" in capsys.readouterr().out
+    monkeypatch.setenv("ACVRAM_RAPATRIEMENT_EPINGLE", "1")
+    assert G.rapatriement_epingle_actif() is True and capsys.readouterr().out == ""
+
+
 def test_ligne_de_regime_epingle_sous_trois_conditions(converted, monkeypatch):
     from test_engine import _engine_cpu
     monkeypatch.delenv("ACVRAM_RAPATRIEMENT_EPINGLE", raising=False)
+    monkeypatch.delenv("ACVRAM_RAPATRIEMENT_FLUX", raising=False)
     eng = _engine_cpu(converted)
-    assert eng.rapatriement_epingle is False and " rapatriement=flux " in eng.regime_ligne() + " "
+    # défaut = épinglé, mais la ligne ne le dit que sous pipeline ET graphes ET sampler=graphe : sans graphes → flux
+    assert eng.rapatriement_epingle is True and " rapatriement=flux " in eng.regime_ligne() + " "
     eng.graphs = SimpleNamespace(sampler_graphe=True, enabled=True, raison="")
     eng.pipeline_actif, eng.rapatriement_epingle = True, True
     assert " rapatriement=epingle " in eng.regime_ligne() + " "
