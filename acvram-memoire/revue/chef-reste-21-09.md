@@ -1,6 +1,6 @@
 # Reste à faire — 21/09 17 h (pause)
 
-Objectif : plus rapide et moins de joules que llama.cpp, vLLM, TensorRT-LLM. **Vitesse : tenue sur les trois cellules** — b=1 380,8 (vLLM 290,6), prefill 22 707 (vLLM 21 054), b=12 1 625,5 (vLLM 1 596,1, 22/09). **Reste : énergie J/jeton à 4 moteurs (banc au protocole 2.5, cellules TRT-LLM) et la cellule A/V vLLM rejouée.**
+Objectif : plus rapide et moins de joules que llama.cpp, vLLM, TensorRT-LLM. **Vitesse contre vLLM : tenue sur les trois cellules** — b=1 380,8 (vLLM 290,6), prefill 22 707 (vLLM 21 054), b=12 1 625,5 (vLLM 1 596,1, 22/09). **Contre TensorRT-LLM (22/09, même checkpoint NVFP4, deux bras au plafond 400 W) : b=1 tenu (390 contre 46 t/s ; 0,44 contre 7,2 J), b=12 NON tenu (1 638 contre 1 998 t/s, +22 % ; 0,196 contre 0,156 J/jeton).** Reste : énergie à 4 moteurs (banc), cellule A/V vLLM rejouée, +8-12 % au bit (poste1), qualité W4A4 de TRT-LLM (poste3), puis choix d'un opt-in hors bit pour la parité.
 
 ## A — porte immédiate (utilisateur)
 1. `sudo dpkg -i acvram_0.6.34_amd64.deb` (racine du dépôt, sha256 dans poste3.md) — feu vert donné, non installé.
