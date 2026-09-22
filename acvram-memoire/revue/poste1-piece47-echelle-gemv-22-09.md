@@ -83,3 +83,54 @@
    ne serait pas un test d'équivalence ;
 3. `familles-noyaux` sur l'alias alpha2 : lancements de `glue_torch` et ms/pas
    contre les seuils 3 et 4 ci-dessus, la ligne portant `echelle_awq=gemv(48/48)`.
+
+## Mesure sous carte — 22/09, trois prises (build 19:32, tests 19:35, mesure 20:41)
+
+* instrument : la chaîne du contrôle 2 de poste5, inchangée
+  (`frontiere-pas.py 12 60` sous `nsys --cuda-graph-trace=node`, puis
+  `familles-noyaux --detail glue_torch`) ; journaux
+  `scratchpad/poste1-p47-22-09/` ; commit mesuré **9bcb7037**, alias B
+  `…-nvfp4-qkv-alpha2-22-09`, le même que le contrôle 2.
+* régime : b=12, 60/60 pas pleins, `experts_layout=marlin`,
+  `chemin_moe=mma-a4(atteint=gemv_marlin)`, `graphes=on captures=5 replays=99` ;
+  **horloge médiane 2 692 MHz, température max 40 °C** — identique au contrôle 2
+  (2 692 MHz, ≤ 43 °C), la comparaison est à horloge ≤ 3 % ; compute-apps début
+  = fin (llama-server 8081 seul) ; 39 s de fenêtre, `tenue` sous les 30 min.
+* **équivalence au bit : TENUE.** 6/6 verts (`torch.equal`), 19,4 s.
+* **le test peut rendre faux : VÉRIFIÉ.** `__float2bfloat16_rn` retiré du
+  quotient, extension recompilée : **5 échecs sur 5** tests au bit (le sixième,
+  la garde de compatibilité, est à sec et ne dépend pas du noyau). Fichier
+  restauré, arbre propre.
+
+| | contrôle 2 (poste5) | pièce 47 | écart |
+|---|---|---|---|
+| `glue_torch` | 0,964 ms / **591** lanc. | 0,492 ms / **207** lanc. | **−0,472 ms / −384** |
+| `experts_marlin` | 3,965 ms / 96 | **4,334 ms** / 96 | **+0,369 ms** |
+| noyaux | 8,078 ms | 7,977 ms | −0,101 ms |
+| **mur** | 8,571 ms | **8,361 ms** | **−0,210 ms (−2,4 %)** |
+| lancements | 1 322 | 938 | −384 |
+
+* **seuil 3 (≈ 207 ± 10 lancements) : TENU**, à l'unité — les 8 lancements par
+  couche ont disparu, aucun autre site n'est resté sur la branche torche.
+* **seuil 4 (gain ≥ 0,35 ms/pas) : NON TENU.** Le gain réel est 0,21 ms sur le
+  mur (0,10 sur les noyaux), parce que **le GEMV paie ce que la glue économise**
+  : la table `[E, K]` est relue par **chacun** des N/64 blocs de la grille,
+  exactement comme `x`. Pour gate+up à K=2048, N=768 : 4 Ko × 12 blocs × 96
+  paires × 48 couches ≈ 221 Mo par pas, soit ≈ 0,15 ms au plancher de bande —
+  du bon ordre que les +0,369 mesurés. **Mon commentaire « sans un octet de plus
+  à lire » était faux ; il est corrigé dans le noyau par cette mesure.**
+* ce que ça dit, et que la pièce 42 disait déjà autrement : à M=12 ces noyaux
+  sont **tenus par la bande**, pas par les lancements. Retirer 384 lancements ne
+  rend que ce que les lancements coûtaient vraiment — 0,21 ms, pas 0,47.
+
+## Suite proposée (la décision est à chef)
+
+1. **Garder en l'état** : 0,21 ms/pas (−2,4 %) au bit, sur tout alias calibré,
+   sans dette. C'est acquis et honnête.
+2. **Supprimer la relecture** : replier l'échelle dans les échelles de bloc des
+   poids à la conversion (option 1 du verdict 42) — plus **aucun** octet ni
+   lancement, gain attendu ≈ 0,47 ms, mais **pas au bit** (up re-quantifié), à
+   juger par KL (seuil 1,0, référence 0,519) et PPL à 2 SE.
+3. Demi-mesure au bit : un seul lancement torch qui divise `x` une fois pour
+   les deux projections (8 → 2 par couche au lieu de 8 → 0), sans relecture par
+   bloc. Gain attendu entre les deux, à mesurer.
