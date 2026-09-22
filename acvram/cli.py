@@ -203,6 +203,9 @@ VARIABLES_LUES = {
     "ACVRAM_NVFP4_GEMV_MAX",
     "ACVRAM_PIPELINE",
     "ACVRAM_SAMPLER_LOT",       # sampler vectorisé en opt-in (665eeacc)
+    "ACVRAM_SAMPLER_LENT", "ACVRAM_SAMPLER_GRAPHE",             # levier 1 (défaut graphe, témoin lent, ancien nom lu)
+    "ACVRAM_RAPATRIEMENT_FLUX", "ACVRAM_RAPATRIEMENT_EPINGLE",  # levier 2 (défaut épinglé, témoin flux, ancien nom lu)
+    "ACVRAM_JOURNAL_TENSEURS",  # journal par tenseur de convert (cf97a3a0) — oubliées de la liste le 22/09 (rouge sur main)
     "ACVRAM_PLAN_FIGE",
     "ACVRAM_POOL_SYNC",
     "ACVRAM_PREFILL",
@@ -874,6 +877,8 @@ def cmd_eval(args: argparse.Namespace) -> int:
         pass
     print(f"  cadrage : min_context={args.min_context} window={args.window} "
           f"stride={args.stride} max_tokens={args.max_tokens}", flush=True)
+    print(f"  budget  : 1 séquence × {args.window + 16} jetons (cache KV et réserve de préfill "
+          f"dimensionnés pour l'évaluation, pas pour un serveur — 22/09)", flush=True)
     print(f"  corpus  : {os.path.basename(args.corpus)} sha256:{sha}", flush=True)
     if torch.cuda.is_available():
         libre, total = torch.cuda.mem_get_info()
