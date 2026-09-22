@@ -1235,6 +1235,11 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
         return JSONResponse(status_code=400,
                             content=ErrorResponse.make(str(exc)).model_dump())
 
+    @app.exception_handler(HTTPException)
+    async def _http_error(_: Request, exc: HTTPException) -> JSONResponse:
+        return JSONResponse(status_code=exc.status_code,
+                            content=ErrorResponse.make(str(exc.detail)).model_dump())
+
     return app
 
 
