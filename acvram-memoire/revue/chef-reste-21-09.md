@@ -56,3 +56,5 @@ poste4 : verdict A/B quand une cellule tombe. chef : réarmer `/loop 20m` à la 
 30. Cellule TRT-LLM à KV égalisé : acvram KV fp8_e4m3 (opt-in) contre TRT-LLM KV fp8, nommée « kv-fp8 », séparée de la cellule KV natif (poste3, après le b=1 ; jugée aussi par KL).
 31. Tests supplémentaires du levier 1 (duck.ai Q3.6) : slot EOS réadmis dans le même pas ; exécution avec et sans CUDA_LAUNCH_BLOCKING=1 (poste1, heure creuse).
 32. Collecte AWQ : critère d'arrêt = min d'observations par expert ≥ 256 (512 si hétérogène), distribution publiée au manifeste (pièces 25(a)/27).
+33. **Mode opt-in « rapide ± 1 ulp » (décision utilisateur 22/09 08 h 4x, REGLES § 1)** : projections étroites int8 en split-K — conception poste1 (11 h 15) → code opt-in ACVRAM_ETROITES_SPLITK → poste2 : PPL + SE et KL contre le chemin exact, cellule b=12 « ± 1 ulp » A B B A A B (prédit 1 970-2 070 t/s, parité TRT-LLM) ; jamais défaut, jamais agrégée avec la cellule exacte.
+34. PDL Marlin (au bit) : banc-marlin-plancher (poste2) → code opt-in ACVRAM_MARLIN_PDL=1 (poste1 10 h 15) → ids au bit + ABBA → défaut si tenu (prédit −0,2 ms, 1 700 → 1 750).
