@@ -90,3 +90,5 @@ d'émission, instructions ALU par octet DRAM, dram__throughput, attentes mémoir
 dépaquetage (émission saturée → MMA mxf4nvf4 native + échelles swizzlées, gros chantier) ; ou latence (émission
 < 50 %, attentes mémoire → étages et cp.async, chantier moyen, profite aussi à l'int8 servi). L'écart int8
 0,71-0,82 contre 1,81 To/s reste inexpliqué par Q(13) : c'est lui qui paie sur le format servi.
+
+**Pièce 36 — CLOSE 22/09 21 h (poste3 49304362)** : tests serveur logprobs + kl-api, 4 cassures vues.
