@@ -28,6 +28,7 @@ qu'annoncé.
 from __future__ import annotations
 
 import os
+import re
 from typing import Callable, Iterator, Optional
 
 import torch
@@ -44,7 +45,7 @@ from .convert import (_EXPERTS_GROUPES_HUB, _NORMES_ZERO_CENTREES, _QWEN35_HF,
                       _QWEN35_RENOMMAGE, _expert_depuis_blob, _nemotron_h_rename,
                       _nemotron_h_valeur, _projections_du_blob)
 
-__all__ = ["collect_activation_stats", "DEFAULT_CALIB_FILE", "default_calib_path", "load_calib_ids"]
+__all__ = ["collect_activation_stats", "rapport_observations", "observations_par_expert", "DEFAULT_CALIB_FILE", "default_calib_path", "load_calib_ids"]
 
 # Corpus de calibration intégré : Gutenberg #1342 (Orgueil et Préjugés, domaine
 # public, 738 Ko, `acvram/data/calibration-anglais.txt`) — poste7,
@@ -147,6 +148,7 @@ def collect_activation_stats(
     device: str = "cuda:0",
     dtype: torch.dtype = torch.bfloat16,
     progress: Optional[Callable[[int, int], None]] = None,
+    obs_min: int = 0,
 ) -> dict[str, ActStats]:
     """Parcourt le point de contrôle bloc par bloc, en notant les statistiques d'entrée."""
     from safetensors import safe_open
@@ -337,7 +339,53 @@ def collect_activation_stats(
 
     for h in handles.values():
         h.__exit__(None, None, None) if hasattr(h, "__exit__") else None
+    if obs_min:
+        rapport = rapport_observations(collector.stats, int(obs_min))
+        collector.stats["__observations__"] = rapport          # lu par convert, retiré avant quantification
     return collector.stats
+
+
+RE_EXPERT_OBS = re.compile(r"^model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(\w+)\.weight$")
+
+
+def observations_par_expert(stats: dict) -> dict:
+    """{(couche, expert) : observations} — le MINIMUM sur les projections de
+    l expert (gate/up/down voient les mêmes jetons ; un minimum plus bas
+    signale une projection manquante, pas un routage différent)."""
+    par = {}
+    for nom, st in stats.items():
+        m = RE_EXPERT_OBS.match(nom)
+        if not m or st is None:
+            continue
+        cle = (int(m.group(1)), int(m.group(2)))
+        n = int(getattr(st, "n_samples", 0) or 0)
+        par[cle] = n if cle not in par else min(par[cle], n)
+    return par
+
+
+def rapport_observations(stats: dict, obs_min: int = 512) -> dict:
+    """Pièce 32 : combien de jetons chaque expert a-t-il réellement vus
+    pendant la calibration ? `obs_min` = seuil de stabilité MESURÉ de
+    l échelle AWQ (25(a) : stable à ≥ 512, encore 0,128 d écart à 128-511).
+    Rend le minimum, les quantiles, la liste sous le seuil, et le facteur de
+    corpus qu il faudrait pour que le minimum l atteigne — jamais une échelle
+    de repli muette : c est l appelant qui refuse ou passe outre en le disant."""
+    par = observations_par_expert(stats)
+    if not par:
+        return {"experts": 0, "obs_min_demande": int(obs_min), "suffisant": None,
+                "raison": "aucun expert dans les statistiques (modèle dense ?)"}
+    vals = sorted(par.values())
+    sous = {f"{c}/{e}": n for (c, e), n in sorted(par.items()) if n < obs_min}
+    jamais = [k for k, n in sous.items() if n == 0]
+    mini = vals[0]
+    facteur = (obs_min / mini) if mini > 0 else None
+    return {"experts": len(par), "obs_min_demande": int(obs_min), "minimum": mini,
+            "p10": vals[int(0.1 * (len(vals) - 1))], "mediane": vals[len(vals) // 2],
+            "maximum": vals[-1], "sous_seuil": len(sous), "jamais_routes": len(jamais),
+            "part_sous_seuil": round(len(sous) / len(par), 4),
+            "facteur_corpus_pour_atteindre": (round(facteur, 2) if facteur else None),
+            "exemples_sous_seuil": dict(list(sous.items())[:12]),
+            "suffisant": len(sous) == 0}
 
 
 def _has(get, key: str) -> bool:

@@ -1583,6 +1583,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
               f"GGUF-mmproj est hors périmètre (contrat multimodal § 2 pièce (a), "
               f"seule la voie safetensors HF porte la tour) ; alias texte seul",
               flush=True)
+    observations = (stats or {}).pop("__observations__", None) if isinstance(stats, dict) else None
     journal = _journal_tenseurs(opts, qdev)
     cache_repli: dict = {}
     for name, tensor in _adapt_hf(_iter_checkpoint(model_path, opts.passage_direct), spec):
@@ -2454,6 +2455,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
               f"deux passes.", flush=True)
         manifest["quota_promotions_sature"] = True
 
+    if observations:
+        manifest["observations_experts"] = observations          # pièce 32 : ce que le corpus a réellement vu
     if report.experts_sans_stats:
         manifest["experts_sans_stats"] = report.experts_sans_stats
         # la LISTE (pièce 25 (c) : l instrument KL cible ces experts), compacte

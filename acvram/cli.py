@@ -654,9 +654,27 @@ def cmd_convert(args: argparse.Namespace) -> int:
 
             stats = collect_activation_stats(
                 args.model, spec, calib, device=args.calib_device,
-                progress=cprog)
+                progress=cprog, obs_min=args.obs_min)
             _progress_done()
+            obs = stats.pop("__observations__", None)
             print(f"  statistiques relevees pour {len(stats)} tenseurs")
+            if obs and obs.get("experts"):
+                print(f"  observations par expert : min {obs['minimum']}, p10 {obs['p10']}, médiane {obs['mediane']}, "
+                      f"max {obs['maximum']} ; {obs['sous_seuil']}/{obs['experts']} sous {obs['obs_min_demande']} "
+                      f"({obs['part_sous_seuil']:.1%}), jamais routés {obs['jamais_routes']}", flush=True)
+                if not obs["suffisant"] and args.obs_min:
+                    # Pièce 32 : le corpus ne suffit pas → refus NOMMÉ avec le
+                    # facteur manquant, jamais une échelle de repli muette
+                    # (25(a) : l échelle AWQ n est stable qu à ≥ 512 observations).
+                    f = obs["facteur_corpus_pour_atteindre"]
+                    print(red(f"  REFUS : {obs['sous_seuil']} expert(s) sous {obs['obs_min_demande']} observations "
+                              f"(minimum {obs['minimum']}, jamais routés {obs['jamais_routes']}) — "
+                              f"corpus insuffisant, il faudrait ×{f} de jetons de calibration"
+                              if f else
+                              f"  REFUS : {obs['jamais_routes']} expert(s) jamais routés par ce corpus"), flush=True)
+                    print("  (relancer avec --obs-min 0 pour convertir quand même, en le disant dans la fiche, "
+                          "ou avec --calib-seqs plus grand / un corpus qui atteint ces experts)", flush=True)
+                    return 2
         except Exception as exc:                      # noqa: BLE001
             print(yellow(f"  calibration indisponible ({exc}) ; "
                          f"repli sur l'arrondi au plus proche"))
@@ -1078,6 +1096,10 @@ def build_parser() -> argparse.ArgumentParser:
     cv.add_argument("--calib-len", type=int, default=512)
     cv.add_argument("--calib-device", default="cuda:0",
                     help="appareil sur lequel executer les passes de calibration")
+    cv.add_argument("--obs-min", type=int, default=512,
+                    help="pièce 32 : observations minimales par expert pendant la calibration (25(a) : "
+                         "l'échelle AWQ n'est stable qu'à partir de 512) ; sous le seuil la conversion REFUSE "
+                         "en nommant le facteur de corpus manquant ; 0 = pas de contrôle")
     cv.add_argument("--repli-experts", default="identite", choices=("identite", "mediane_couche"),
                     help="experts MoE routés < 8 fois par le corpus : identite (défaut, aucune échelle) "
                          "ou mediane_couche (statistique = médiane des experts calibrés de la couche ; pièce 25)")
