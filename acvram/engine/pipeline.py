@@ -80,12 +80,25 @@ class PipelineDecodage:
             slot = self._epingles[p]
             if slot is not None and not slot["lu"]:
                 raise RuntimeError(f"tampon épinglé de parité {p} réutilisé avant lecture : plus d un pas en vol")
-            if slot is None or slot["tenseur"].shape[1] < n:
-                t = torch.empty(2, max(n, 16), dtype=torch.int64)
+            # Le tampon fait EXACTEMENT [2, n] : une vue `[:, :n]` d un tampon
+            # plus large n est pas contiguë, et une copie carte → hôte non
+            # contiguë passe par un tampon paginable, donc SYNCHRONE — l hôte
+            # attendait derrière le rejeu n+1 dans `_pipeline_suite` (poste2
+            # 22/09, `verdict-levier2-2-frontiere` : suite_prep 151 → 6 860 µs,
+            # trou_gpu inchangé). Un tampon par (parité, n) ; n change à chaque
+            # recomposition, rarement.
+            if slot is None or tuple(slot["tenseur"].shape) != (2, n):
+                t = torch.empty(2, n, dtype=torch.int64)
                 if paquet.is_cuda:
                     t = t.pin_memory()
                 slot = self._epingles[p] = {"tenseur": t, "lu": True, "n": 0}
-            slot["tenseur"][:, :n].copy_(paquet, non_blocking=True)
+            cible = slot["tenseur"]
+            if not (cible.is_contiguous() and paquet.is_contiguous() and tuple(cible.shape) == tuple(paquet.shape)):
+                raise RuntimeError("rapatriement épinglé : source et cible doivent être contiguës et de même forme "
+                                   f"(sinon la copie est synchrone) — {tuple(paquet.shape)} → {tuple(cible.shape)}")
+            if paquet.is_cuda and not cible.is_pinned():
+                raise RuntimeError("rapatriement épinglé : cible non épinglée, la copie serait synchrone")
+            cible.copy_(paquet, non_blocking=True)
             slot["lu"], slot["n"] = False, n
             epingle = slot
         evenement = torch.cuda.Event()

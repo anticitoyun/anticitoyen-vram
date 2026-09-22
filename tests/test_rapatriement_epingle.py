@@ -123,6 +123,33 @@ def test_parite_double_tampon_et_garde_qui_leve():
         _pas(eng, l1, seqs)                          # parité 1, e1 jamais lu
 
 
+def test_tampon_epingle_exactement_2_n_et_contigu():
+    """poste2 22/09 (levier 2 réfuté à la frontière : suite_prep 151 → 6 860 µs) :
+    la vue `[:, :n]` d un tampon [2, 16] n est pas contiguë, la copie D2H
+    passait par un tampon paginable et devenait synchrone. Le tampon fait
+    exactement [2, n], contigu, un par (parité, n) ; une cible d une autre
+    forme est refusée, jamais copiée en silence."""
+    sortie = torch.zeros(2, 16, dtype=torch.int64)
+    eng = _moteur(sortie)
+    seqs = _seqs(12)
+    _, _, e, _ = _pas(eng, torch.randn(12, 30), seqs)
+    assert tuple(e["tenseur"].shape) == (2, 12) and e["tenseur"].is_contiguous()
+    # recomposition : n passe à 5 → nouveau tampon [2, 5] sur la parité suivante
+    e["lu"] = True
+    for s in eng._epingles:
+        if s is not None:
+            s["lu"] = True
+    _, _, e5, _ = _pas(eng, torch.randn(5, 30), _seqs(5))
+    assert tuple(e5["tenseur"].shape) == (2, 5) and e5["tenseur"].is_contiguous()
+    # garde : une cible d une autre forme lève au lieu de copier une vue non contiguë
+    eng2 = _moteur(sortie)
+    eng2._epingles = [{"tenseur": torch.zeros(2, 16, dtype=torch.int64)[:, :12], "lu": True, "n": 12}, None]
+    eng2.graphs.rejouer(torch.randn(12, 30))
+    tokens, lps = eng2._sample_only(torch.randn(12, 30), _seqs(12), depuis_graphe=True)
+    with pytest.raises(RuntimeError, match="contiguës"):
+        eng2._apres_echantillon(tokens, lps)
+
+
 def test_consommer_n_enfile_rien_sur_le_flux(monkeypatch):
     sortie = torch.zeros(2, 16, dtype=torch.int64)
     eng = _moteur(sortie)
