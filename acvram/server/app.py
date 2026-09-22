@@ -1236,9 +1236,15 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                             content=ErrorResponse.make(str(exc)).model_dump())
 
     @app.exception_handler(HTTPException)
-    async def _http_error(_: Request, exc: HTTPException) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code,
-                            content=ErrorResponse.make(str(exc.detail)).model_dump())
+    async def _http_error(req: Request, exc: HTTPException) -> JSONResponse:
+        # /v1/messages suit le format d'erreur Anthropic, les autres routes OpenAI
+        if req.url.path.startswith("/v1/messages"):
+            body = {"type": "error",
+                    "error": {"type": "invalid_request_error",
+                               "message": str(exc.detail)}}
+        else:
+            body = ErrorResponse.make(str(exc.detail)).model_dump()
+        return JSONResponse(status_code=exc.status_code, content=body)
 
     return app
 

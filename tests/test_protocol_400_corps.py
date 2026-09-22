@@ -1,10 +1,12 @@
 """D3 — les réponses 400 du serveur portent toujours un corps JSON explicatif.
 
-Requête invalide (champ obligatoire absent) → 400, pas 422, corps JSON avec
-le champ refusé nommé. Cassure : supprimer le handler RequestValidationError
-→ FastAPI renvoie 422 sans ce corps structuré.
+/v1/chat/completions → format OpenAI {"error":{"message":...}}
+/v1/messages         → format Anthropic {"type":"error","error":{"type","message"}}
+
+Cassure : supprimer les handlers d'exception → FastAPI renvoie 422/{"detail":"..."}
 """
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from acvram.server.app import create_app
@@ -54,3 +56,44 @@ def test_requete_kimi_prompt_cache_key_passe(client):
     assert resp.status_code not in (400, 422), (
         f"prompt_cache_key refusé à tort : {resp.status_code} {resp.text[:200]}"
     )
+
+
+def test_http_exception_openai_sur_chat_completions(client):
+    """HTTPException sur /v1/chat/completions → format OpenAI {"error":{...}}."""
+    from fastapi import FastAPI
+    from fastapi.responses import JSONResponse as _JR
+    from acvram.server.app import create_app as _ca
+    from acvram.server.protocol import ErrorResponse
+
+    app2 = _ca(engine=None, tokenizer=None, model_name="x")
+
+    @app2.get("/test-http-exc")
+    def _boom():
+        raise HTTPException(400, "test-message")
+
+    c2 = TestClient(app2, raise_server_exceptions=False)
+    r = c2.get("/test-http-exc")
+    assert r.status_code == 400
+    body = r.json()
+    assert "error" in body, f"format OpenAI absent : {body}"
+    assert body["error"].get("message") == "test-message"
+
+
+def test_http_exception_anthropic_sur_messages(client):
+    """HTTPException sur /v1/messages → format Anthropic {"type":"error",...}."""
+    from acvram.server.app import create_app as _ca
+    from fastapi import HTTPException as _HE
+
+    app3 = _ca(engine=None, tokenizer=None, model_name="x")
+
+    @app3.get("/v1/messages/test-exc")
+    def _boom3():
+        raise _HE(400, "prompt trop long")
+
+    c3 = TestClient(app3, raise_server_exceptions=False)
+    r = c3.get("/v1/messages/test-exc")
+    assert r.status_code == 400
+    body = r.json()
+    assert body.get("type") == "error", f"format Anthropic absent : {body}"
+    assert "error" in body
+    assert body["error"].get("message") == "prompt trop long"
