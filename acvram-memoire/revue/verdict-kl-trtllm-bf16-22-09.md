@@ -53,3 +53,31 @@ d'une suite forcée jeton-à-jeton, ou la pièce 36 côté acvram une fois les l
 
 **Bras trtllm/bf16 : OUVERT** — aucune KL trtllm publiable par cet instrument en l'état.
 Le débit (cellule b=12, b=1, débit(b)) reste complet et publié.
+
+## 4e essai (16:15, enable_block_reuse=False) : PARTIEL, 2/4 alignées
+
+Le correctif marche : `context_logits` **non tronqués** (L = prompt pour les 4 :
+38/38/47/40). Le décalage d=0 est le MAX des 5 taux pour les 4 invites (les autres
+décalages ~0) → l'offset n_prefix−1 est le bon. Mais le taux absolu reste bas
+(auto-prédiction argmax sur texte court) :
+
+| invite | taux(-2..+2) | d_opt | aligné | kl_max |
+|---|---|---|---|---|
+| 0 | 0,00 0,00 **0,34** 0,00 0,00 | 0 | SUSPECT (<0,40) | (exclue) |
+| 1 | 0,00 0,00 **0,21** 0,00 0,00 | 0 | SUSPECT | (exclue) |
+| 2 | 0,00 0,00 **0,42** 0,03 0,00 | 0 | OK | **2,077** |
+| 3 | 0,00 0,00 **0,42** 0,00 0,00 | 0 | OK | **0,30** |
+
+**kl_max_global (invites alignées) = 2,077.** Repères : seuil scellé E ≤ 1,2 ;
+bras acvram-nvfp4 = 0,519 (TENU 4/5).
+
+**Lecture (2/4, indicatif — NON concluant)** : sur les 2 invites alignées, W4A4
+donne kl_max 2,077 (invite2, > seuil 1,2 et ≫ nvfp4 0,519) et 0,30 (invite3, < nvfp4).
+Trop dispersé et trop peu d'invites (2 valides, invite2 dominée par un seul pas à
+2,07) pour trancher. Signal faible que W4A4 diverge par endroits plus que nvfp4,
+mais le taux d'alignement bas (0,21-0,42) laisse un doute sur l'instrument lui-même.
+
+**Suite** : pour un verdict qualité solide, la voie fiable est la **pièce 36** (KL par
+API, logprobs servis par acvram, tous moteurs, même chemin) — l'instrument
+context_logits de trtllm reste marginal (alignement ténu). Bras trtllm/bf16 : signal
+partiel consigné, verdict ferme reporté à la 36.
