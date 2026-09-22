@@ -56,6 +56,42 @@ class PipelineDecodage:
             is_prefill=False,
             seq_ids=[s.id for s in seqs], gdn_store=self.gdn_states)
 
+    def _apres_echantillon(self, tokens_dev: torch.Tensor, logprobs_dev: torch.Tensor):
+        """Levier 2 (poste1-levier-2-conception-22-09) : après le clone du
+        levier 1, enfiler sur le MÊME flux une copie non bloquante vers un
+        tampon HÔTE ÉPINGLÉ, puis enregistrer l événement — dernier enfilé,
+        il couvre le clone ET la copie. `_consommer` lira l épinglé sans rien
+        enfiler : aujourd hui son `.tolist()` est une copie D2H rangée
+        DERRIÈRE le rejeu n+1 lancé juste avant, et l hôte y attend 6,7 ms
+        au lieu de préparer n+2 (trou_gpu 173 µs = suite_prep + lancement).
+
+        Double tampon par PARITÉ du pas : la copie de n+1 est enfilée avant
+        la lecture de n (même `step()`), un seul tampon serait une course
+        gagnée par 6,7 ms de marge. L invariant qui porte la parité — au plus
+        un pas en vol — est rendu impossible à sauter par `lu` : cibler un
+        tampon non encore lu lève, jamais un avertissement."""
+        epingle = None
+        if (getattr(self, "rapatriement_epingle", False) and logprobs_dev.dtype == torch.int64
+                and getattr(self.graphs, "sampler_graphe", False)):
+            paquet = logprobs_dev._base if logprobs_dev._base is not None else torch.stack((tokens_dev, logprobs_dev))
+            n = paquet.shape[1]
+            p = self._parite_epingle
+            self._parite_epingle ^= 1
+            slot = self._epingles[p]
+            if slot is not None and not slot["lu"]:
+                raise RuntimeError(f"tampon épinglé de parité {p} réutilisé avant lecture : plus d un pas en vol")
+            if slot is None or slot["tenseur"].shape[1] < n:
+                t = torch.empty(2, max(n, 16), dtype=torch.int64)
+                if paquet.is_cuda:
+                    t = t.pin_memory()
+                slot = self._epingles[p] = {"tenseur": t, "lu": True, "n": 0}
+            slot["tenseur"][:, :n].copy_(paquet, non_blocking=True)
+            slot["lu"], slot["n"] = False, n
+            epingle = slot
+        evenement = torch.cuda.Event()
+        evenement.record()
+        return epingle, evenement
+
     def _pipeline_amorcer(self, decodable: list[Sequence]) -> list[GenerationOutput]:
         """Un pas NORMAL (synchrone, comme `_plain_decode_sync`), qui pose ou
         REPOSE l'état du pipeline plutôt que de le poursuivre en
@@ -79,11 +115,10 @@ class PipelineDecodage:
             return self._emit(logits, decodable)
         logits = self.graphs.rejouer_suivant()
         tokens_dev, logprobs_dev = self._sample_only(logits, decodable, depuis_graphe=True)
-        evenement = torch.cuda.Event()
-        evenement.record()
+        epingle, evenement = self._apres_echantillon(tokens_dev, logprobs_dev)
         self._pipeline_pendiente = {
             "seqs": decodable, "tokens_dev": tokens_dev,
-            "logprobs_dev": logprobs_dev, "event": evenement}
+            "logprobs_dev": logprobs_dev, "event": evenement, "epingle": epingle}
         return []
 
     def _pipeline_suite(self, roster: list[Sequence],
@@ -115,11 +150,10 @@ class PipelineDecodage:
             return self._emit(logits, vivants)
         logits = self.graphs.rejouer_suivant()
         tokens_dev2, logprobs_dev2 = self._sample_only(logits, vivants, depuis_graphe=True)
-        evenement = torch.cuda.Event()
-        evenement.record()
+        epingle, evenement = self._apres_echantillon(tokens_dev2, logprobs_dev2)
         self._pipeline_pendiente = {
             "seqs": vivants, "tokens_dev": tokens_dev2,
-            "logprobs_dev": logprobs_dev2, "event": evenement}
+            "logprobs_dev": logprobs_dev2, "event": evenement, "epingle": epingle}
         return []
 
     def _plain_decode_pipeline(self, decodable: list[Sequence]) -> list[GenerationOutput]:
@@ -152,7 +186,7 @@ class PipelineDecodage:
             # recouvrir ici — on synchronise puis on retombe sur le pas
             # normal, comme documenté.
             pend["event"].synchronize()
-            outputs = self._consommer(pend["tokens_dev"], pend["logprobs_dev"], pend["seqs"])
+            outputs = self._consommer(pend["tokens_dev"], pend["logprobs_dev"], pend["seqs"], epingle=pend.get("epingle"))
             outputs += self._pipeline_amorcer(roster_avant + nouveaux)
             return outputs
 
@@ -169,5 +203,5 @@ class PipelineDecodage:
         outputs = self._pipeline_suite(roster_avant, tokens_dev)
 
         pend["event"].synchronize()
-        outputs = self._consommer(pend["tokens_dev"], pend["logprobs_dev"], pend["seqs"]) + outputs
+        outputs = self._consommer(pend["tokens_dev"], pend["logprobs_dev"], pend["seqs"], epingle=pend.get("epingle")) + outputs
         return outputs
