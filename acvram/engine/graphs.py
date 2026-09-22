@@ -161,6 +161,26 @@ def _empreinte_adresses(runner, entry: dict) -> dict:
 
 
 
+_AVERTI_SAMPLER_GRAPHE = False
+
+
+def sampler_graphe_actif() -> bool:
+    """Défaut : glouton dans le graphe. Opt-out `ACVRAM_SAMPLER_LENT=1`
+    (témoin, ancien chemin hôte). L ancien opt-in `ACVRAM_SAMPLER_GRAPHE`
+    (21-22/09, chaînes de poste2) reste lu un temps : `=1` ne fait rien de
+    plus que le défaut, `=0` vaut le témoin — avec un avertissement une fois,
+    pour qu aucune chaîne ne porte un nom mort sans le savoir."""
+    global _AVERTI_SAMPLER_GRAPHE
+    ancien = os.environ.get("ACVRAM_SAMPLER_GRAPHE")
+    if ancien is not None and not _AVERTI_SAMPLER_GRAPHE:
+        _AVERTI_SAMPLER_GRAPHE = True
+        print(f"[acvram] ACVRAM_SAMPLER_GRAPHE={ancien} : variable remplacée — le graphe est le défaut, "
+              f"le témoin s obtient par ACVRAM_SAMPLER_LENT=1", flush=True)
+    if os.environ.get("ACVRAM_SAMPLER_LENT", "0") == "1":
+        return False
+    return ancien != "0"
+
+
 def echantillon_glouton_dans(sortie: torch.Tensor, logits: torch.Tensor) -> None:
     """Le glouton de `sampler._sample_lent` (lignes `logits.to(float32)`,
     `argmax`, `gather − logsumexp`), MÊMES noyaux torch dans le MÊME ordre :
@@ -237,12 +257,15 @@ class GraphRunner:
         self._prepare = None
         self.evenement_jetons = torch.cuda.Event()
         self._pool = None
-        # Levier 1 (poste1-levier-1-conception-21-09, opt-in ACVRAM_SAMPLER_GRAPHE=1) :
-        # le glouton de `_sample_lent` (argmax, gather, logsumexp sur les
-        # logits fp32) est CAPTURÉ dans le graphe et écrit dans `entry["sortie"]`
-        # [2, b_godet·ql] int64 (ids ; bits fp32 des logprobs) ; le runner le
-        # prend par `prendre_echantillon` (un clone, une seule fois par rejeu).
-        self.sampler_graphe = os.environ.get("ACVRAM_SAMPLER_GRAPHE", "0") == "1"
+        # Levier 1 (poste1-levier-1-conception-21-09) : le glouton de
+        # `_sample_lent` (argmax, gather, logsumexp sur les logits fp32) est
+        # CAPTURÉ dans le graphe et écrit dans `entry["sortie"]` [2, b_godet·ql]
+        # int64 (ids ; bits fp32 des logprobs) ; le runner le prend par
+        # `prendre_echantillon` (un clone, une seule fois par rejeu). DÉFAUT
+        # depuis le verdict poste4 d145bf0d (22/09 : ids/logprobs au bit
+        # b=1/b=12, frontière −54 µs, ABBA B/A 1,0124) ; `ACVRAM_SAMPLER_LENT=1`
+        # = témoin (ancien chemin hôte), voir `sampler_graphe_actif`.
+        self.sampler_graphe = sampler_graphe_actif()
         self._echantillon = None
         self.paged_ok = False
         self.hybrid_layers: list = []
