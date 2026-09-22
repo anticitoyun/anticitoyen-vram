@@ -17,3 +17,6 @@
 
 ## Suite proposée (à chef) — attention int8 SANS code, 7 min de conversion
 `--snr-floor 99 --promotion-classes q_proj,k_proj,v_proj,o_proj --max-promotions 1.0 --attn-qkvo-int8-canal` (calibration texte brut, défaut) : promeut TOUTES les projections d'attention en int8 par canal et rien d'autre (`convert.py:1897-1901`, classes = suffixes). Prédiction (borne bras M de la pièce 54) : méd. kl_max 0,3-0,5, 4/5, kl_max ≤ 1,5, invite 0 ≥ 1,2 (MLP) ; réfuté si ≤ 3/5 ou méd. > 0,8 (la promotion int8 par canal ne vaut pas le bf16 du bras M). VRAM : attention int8 ≈ +4 Gio, tient sans exil. Puis, si 4/5 tenu : le MLP reste ; un corpus de calibration en vraies paires question/réponse (réponses bf16 générées, 300 × 512 jetons ≈ 40 min de processeur à sec) est le seul levier de calibration qui reste défendable ; sinon, plus de bits sur le MLP (int8 + exil ou 6 bits).
+
+## Addendum 23 h 4x — hidden rejoué (11 s, carte rendue par poste3)
+Divergence par couche de p55 contre bf16-vision : erreur résiduelle c57 **0,436** (nvfp4-vision 0,41), finale 0,26 (0,25), mêmes sauts (52 : +0,108, 0 : +0,058, 57 : +0,050, 51 : +0,049, 56 : +0,047, 39 : +0,035) — le profil est celui de nvfp4-vision, un peu plus haut partout : la calibration sous gabarit dégrade de façon répartie, elle ne déplace rien.
