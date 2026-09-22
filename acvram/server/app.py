@@ -1159,7 +1159,8 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                     off_inv.append(cur); cur += len(t)
                 toks = dt + [t for t in lp_tok]
                 vals = list(inv["logprobs"]) + lp_val
-                itops = ([{tokenizer.decode([i]): float(v) for i, v in pos} for pos in inv["top"]]
+                itops = ([({tokenizer.decode([i]): float(v) for i, v in pos} if pos else None)
+                          for pos in inv["top"]]
                          if inv.get("top") else [None] * len(dt))
                 tops = itops + lp_top
                 base = len(str(prompt_text)) if prompt_text else cur

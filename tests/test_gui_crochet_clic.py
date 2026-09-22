@@ -45,8 +45,10 @@ def test_filtre_sans_resultat(tmp_path):
 
 def test_comfyui_verrou_refuse_spawn(tmp_path):
     import pathlib
-    # Config : écrire COMFY_START
-    config_dir = tmp_path / "xdg" / "acvram"
+    # Config : écrire COMFY_START. acvram_parc lit $XDG_CONFIG_HOME/acvram-parc/parc.toml
+    # (pas .../acvram) — sinon comfy_start reste None et le toast « non configuré »
+    # sort avant la garde de verrou.
+    config_dir = tmp_path / "xdg" / "acvram-parc"
     config_dir.mkdir(parents=True)
     script = tmp_path / "comfyui.sh"
     script.write_text("#!/bin/bash\necho spawn\n")
