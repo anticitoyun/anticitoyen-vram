@@ -256,8 +256,15 @@ protocole pour tous les moteurs (`outils/`, une carte, `energie.py`) :
 | | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
 | décodage 12 séquences | **1 634 t/s** | 1 782 t/s | — |
-| décodage 1 séquence | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
+| décodage 1 séquence | 283,6 t/s ¹ | **290,6 t/s** | **323,6 t/s** |
 | prefill pp2048 | **22 707 jetons/s** | 21 054 | 8 671 (TabbyAPI, retiré) |
+
+¹ Erratum du 22/09 : `serve` spécule par défaut (`--speculative ngram`, cli.py), les
+concurrents non ; le 380,8 t/s publié jusqu'ici était mesuré AVEC spéculation. Sans
+spéculation (`--speculative none`, même chaîne, revue/poste2-piece44-speculation-none-22-09.md) :
+283,6 t/s — acvram est **troisième** à b=1, derrière llama.cpp et vLLM. En énergie il reste
+devant llama.cpp (0,601 contre 0,700 J/jeton net). À b=12 la spéculation n'est jamais active
+(garde `lot_max=2`) : cette cellule-là était déjà à armes égales.
 
 Débits du jour (poste 1030, régime éco `-lgc 2700`, pipeline en service ;
 échantillonnage glouton capturé dans le graphe CUDA, défaut de 0.6.35). Le b=12
@@ -283,8 +290,9 @@ mesure, l'instrument et son régime — un chiffre sans régime n'est pas publi�
 
 Où acvram est devant : modèles MLA (GLM-4.7-Flash) en NVFP4 natif sm_120, que
 vLLM ne sert qu'en FP8 (b=1 : 165,35 t/s en service) ; les modèles qui ne
-tiennent pas en VRAM ; et le décodage à séquence unique (b=1 : 380,8 t/s contre
-290,6 pour vLLM). À grand lot en revanche, sur un MoE qui tient en VRAM, vLLM
+tiennent pas en VRAM . Le décodage à séquence unique n'en fait pas partie : sans spéculation, acvram y est
+troisième (283,6 t/s contre 290,6 pour vLLM et 323,6 pour llama.cpp), et ne garde
+l'avantage qu'en énergie (erratum ¹). À grand lot en revanche, sur un MoE qui tient en VRAM, vLLM
 reste devant à b=12 (1 782 contre 1 634 t/s, cf. erratum) ; acvram y a progressé
 (1 540 en 0.6.34 → 1 634) sans passer devant. L'écart en énergie est à remesurer.
 

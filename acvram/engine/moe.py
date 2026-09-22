@@ -1183,7 +1183,25 @@ class MoEBlock(nn.Module):
             x = fwht_activations(x.to(torch.bfloat16), hd_x).to(x.dtype)
         glue = _mla_glue() >= 1
         eid64 = None                                   # C15 : eid int64 une fois par couche (glue)
-        if awq.get("gate_proj") is not None or distinct:
+        # Pièce 47 : le GEMV Marlin porte lui-même `x / s[e]` (paramètre
+        # `xscale`, au bit) — on saute alors le gather, la division et le cast
+        # en torch. Condition : chemin Marlin fusionné (gate et up partagent
+        # leur table, sinon le noyau n'a qu'un x), extension à jour, et x en
+        # bf16 comme la table.
+        fuse_ech = (getattr(self, "_stacks_marlin", None) is not None
+                    and _GEMV_LAYOUT == "marlin" and ext is not None
+                    and hasattr(ext, "nvfp4_gemv_marlin_gateup")
+                    and _gemv_marlin_porte_echelle(ext) and not distinct
+                    and x.dtype == torch.bfloat16
+                    and (awq.get("gate_proj") is not None or awq.get("down_proj") is not None))
+        # Lu par la ligne de régime (`echelle_awq=`) : prouver dans le processus
+        # qui mesure que la fusion a pris, au lieu de la déduire d'un compte de
+        # lancements après coup (REGLES § 3).
+        self._echelle_awq = ("gemv" if fuse_ech else
+                             "torch" if (awq.get("gate_proj") is not None
+                                         or awq.get("down_proj") is not None or distinct)
+                             else "aucune")
+        if not fuse_ech and (awq.get("gate_proj") is not None or distinct):
             # échelle AWQ par expert : la ligne (jeton, expert) est divisée par
             # s[e] avant les projections, comme ChannelScaler.apply en boucle
             if glue:
@@ -1215,6 +1233,7 @@ class MoEBlock(nn.Module):
                 tok_g = torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
         else:
             x_g, x_u, tok_g = x, x, tok
+        ech_gu = awq.get("gate_proj") if fuse_ech else None
         # v2 : paires triées par expert (argsort stable : déterministe, sous
         # graphe) ; le noyau écrit chaque paire à sa place d'origine
         tri = None
@@ -1230,7 +1249,7 @@ class MoEBlock(nn.Module):
             self._chemin("gemv_marlin")
             act = ext.nvfp4_gemv_marlin_gateup(
                 mg[0], mg[1], mg[2], mu[0], mu[1], mu[2], eid, tok_g, x_g.contiguous(),
-                mg[3], mg[4], 1 if self.act == "gelu_tanh" else 0)[:, :pg[5]]
+                mg[3], mg[4], 1 if self.act == "gelu_tanh" else 0, ech_gu)[:, :pg[5]]
         elif marlin is not None and ext is not None and hasattr(ext, "nvfp4_gemv_marlin") and distinct:
             # gate et up ont des ENTRÉES distinctes (tables AWQ séparées : GLM
             # k48-calibA, verdict-glm-b12-19-09) : le noyau fusionné n'a qu'un
@@ -1288,17 +1307,27 @@ class MoEBlock(nn.Module):
             g = self._grouped(x32, pg, eid, tok_g)
             u = self._grouped(x32 if x_u is x_g else x_u.to(torch.float32), pu, eid, tok_g)
             act = self._act(g) * u              # [G, I] fp32
+        if fuse_ech and self.dernier_chemin != "gemv_marlin":
+            # La division `x / s[e]` a été sautée parce que le GEMV Marlin devait
+            # la porter : un autre chemin ici rendrait des sorties fausses en
+            # silence. Ce contrôle peut rendre « faux » — c'est son objet.
+            raise RuntimeError(
+                "echelle AWQ confiee au GEMV Marlin mais chemin "
+                f"'{self.dernier_chemin}' pris : sorties non echelonnees")
         seq = _seq if _seq is not None else torch.arange(eid.shape[0], device=x.device, dtype=torch.int32)
         if hd_d:
             act = fwht_activations(act.to(torch.bfloat16), hd_d).to(act.dtype)
-        if awq.get("down_proj") is not None:
+        porte_down = (fuse_ech and marlin is not None and self.dernier_chemin == "gemv_marlin"
+                      and ext is not None and hasattr(ext, "nvfp4_gemv_marlin"))
+        if awq.get("down_proj") is not None and not porte_down:
             if eid64 is None:
                 eid64 = eid.long()
             act = (act.to(torch.bfloat16) / awq["down_proj"][eid64, :act.shape[1]]).to(act.dtype)
         if marlin is not None and self.dernier_chemin == "gemv_marlin" and ext is not None \
                 and hasattr(ext, "nvfp4_gemv_marlin"):
             md = marlin["down_proj"]
-            d = ext.nvfp4_gemv_marlin(md[0], md[1], md[2], eid, seq, act.contiguous(), md[3], md[4])
+            d = ext.nvfp4_gemv_marlin(md[0], md[1], md[2], eid, seq, act.contiguous(), md[3], md[4],
+                                      awq.get("down_proj") if porte_down else None)
         else:
             d = self._grouped(act, self._stacks["down_proj"], eid, seq, tri=tri)
         # Chaque jeton possède exactement top_k lignes contiguës : une somme
@@ -1824,6 +1853,23 @@ if not _DOUBLE_DIAG and (_GEMV_LAYOUT == "marlin") != (_PREFILL_GROUPED == "marl
     # experts_layout=double) n'existe plus (poste7-p1-disposition-unique-18-09)
     raise ValueError(f"ACVRAM_GEMV_LAYOUT={_GEMV_LAYOUT!r} et ACVRAM_PREFILL_GROUPED={_PREFILL_GROUPED!r} : "
                      "les deux à marlin (disposition unique) ou aucun (témoin naturel)")
+
+
+def _gemv_marlin_porte_echelle(ext) -> bool:
+    """Vrai si l'extension compilée accepte `xscale` sur les GEMV Marlin.
+
+    Une extension d'avant la pièce 47 refuse l'argument : on garde alors la
+    division en torch plutôt que de servir des sorties non échelonnées."""
+    v = getattr(ext, "_acvram_gemv_xscale", None)
+    if v is None:
+        doc = (getattr(ext.nvfp4_gemv_marlin, "__doc__", "") or "") + \
+              (getattr(ext.nvfp4_gemv_marlin_gateup, "__doc__", "") or "")
+        v = "xscale" in doc
+        try:
+            ext._acvram_gemv_xscale = v
+        except AttributeError:
+            pass
+    return bool(v)
 
 
 def _mla_glue() -> int:

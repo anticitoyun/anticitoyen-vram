@@ -389,6 +389,25 @@ def _repin_echanger_reel(m, sortant: int, entrant: int) -> None:
             verifier_table(tbl)
 
 
+def _regime_echelle_awq(model) -> str:
+    """Porteur de l'échelle AWQ des experts, agrégé sur les couches MoE :
+    « gemv(N/M) », « torch(N/M) », « aucune », ou « mixte(...) » quand les
+    couches ne s'accordent pas — chaque valeur vient du dernier forward du
+    bloc (`MoEBlock._echelle_awq`), jamais d'une variable d'environnement."""
+    from .model import MoEBlock
+    vals = [getattr(m, "_echelle_awq", None) for m in model.modules() if isinstance(m, MoEBlock)]
+    vus = [v for v in vals if v is not None]
+    if not vus:
+        return "?"                                     # aucun forward MoE encore passé
+    distincts = sorted(set(vus))
+    if distincts == ["aucune"]:
+        return "aucune"
+    if len(distincts) == 1:
+        return f"{distincts[0]}({len(vus)}/{len(vals)})"
+    detail = ",".join(f"{v}:{vus.count(v)}" for v in distincts)
+    return f"mixte({detail})"
+
+
 def _couverture_experts(model) -> str:
     """Disposition des experts par couche MoE : « marlin » si toutes, « naturel »
     si aucune, sinon « marlin(N/M) refus=[c<i>:<raison>] » — N couches sur la
@@ -466,6 +485,17 @@ def _deepstack_texte(tour) -> str:
 def _masque_images_texte(masque) -> str:
     """`masque_images=bidir|causal` sur la ligne dès qu'une tour est servie (famille lue au chargement)."""
     return f" masque_images={masque}" if masque else ""
+
+
+def _speculation_texte(s: Optional[dict]) -> str:
+    """Fragment `speculation=<mode>(<état>,lot_max=N)` de la ligne de régime.
+    Toujours présent (off ou actif) — le régime se porte par le nom (REGLES §6)."""
+    if s is None or s.get("mode") == "off":
+        return " speculation=off"
+    etat = "on" if s.get("garde_active", True) else "désactivée"
+    gain = s.get("gain_moyen")
+    gain_txt = f",gain={gain}" if gain is not None else ""
+    return f" speculation={s['mode']}({etat}{gain_txt},lot_max={s['lot_max']})"
 
 
 def _vision_texte(tour) -> str:
@@ -804,6 +834,11 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # couverture PAR COUCHE (poste7 19/09, budget GLM : 33 couches Marlin + 13 refusées
             # « distinctes » sur la pile naturelle — « experts_layout=marlin » seul mentait)
             "experts_layout": _couverture_experts(self.model),
+            # Pièce 47 : qui porte `x / s[e]` des experts — `gemv` (dans le
+            # noyau Marlin, au bit), `torch` (gather + division devant chaque
+            # GEMV : 8 lancements et 0,47 ms/pas à b=12), `aucune` (alias sans
+            # échelles d'experts). Lu sur les blocs, pas sur une variable.
+            "echelle_awq": _regime_echelle_awq(self.model),
             # linéaires INT8 du décodage : triton≥b|cuda (poste C, bascule mesurée)
             "dense": kernels.narrow_regime(),
             "gdn": _gdn_regime(),
@@ -814,6 +849,12 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # plafond (non refuse ici), pour ne jamais laisser croire que le
             # scaling est applique alors qu'il ne l'est nulle part.
             "llama4_scaling_beta": self._llama4_scaling_beta or None,
+            # pièce 49 : régime spéculatif visible (REGLES §6 : le régime se porte
+            # par le nom, pas par la vigilance) — mode + état garde + gain moyen
+            "speculation": (self._garde_spec.etat_dict(self.speculator.name)
+                            if self.speculator is not None
+                            else {"mode": "off", "garde_active": False,
+                                  "gain_moyen": None, "lot_max": 0}),
         }
 
     def kv_format_servi(self) -> str:
@@ -878,6 +919,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                f"{piles_txt} cartes={r['cartes']} "
                f"chemin_moe={r['chemin_moe']} prefill={r['prefill']} prefill_int8={r['prefill_int8']} dense={r['dense']} "
                f"ACVRAM_GDN={r['gdn']} experts_layout={r['experts_layout']} "
+               f"echelle_awq={r['echelle_awq']} "
                + (f"noyaux={r['noyaux']} " if r["noyaux"] else "")
                + f"kv_budget={self.allocator.num_blocks * BLOCK_SIZE}/{kv_seqs} "
                + f"kv={self.kv_format_servi()} "
@@ -902,6 +944,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                + _ctx_texte(self)
                + _masque_images_texte(self.masque_images)
                + _mrope_texte(self.spec)
+               + _speculation_texte(r.get("speculation"))
                + _deepstack_texte(self.vision))
 
     def fermer(self) -> None:
