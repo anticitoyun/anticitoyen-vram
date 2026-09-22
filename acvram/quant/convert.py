@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -90,6 +91,14 @@ class ConversionOptions:
     # tenseurs, soit des dizaines de minutes à ce rythme) ou sous
     # ACVRAM_JOURNAL_TENSEURS=1 ; False le tait, True le force.
     journal_tenseurs: Optional[bool] = None
+    # Pièce 25 (b) : ce qu un expert MoE reçoit quand le corpus de calibration
+    # l a routé moins de MIN_ECHANTILLONS_AWQ fois — "identite" (défaut, le
+    # repli d avant : aucune échelle, arrondi au plus proche) ou
+    # "mediane_couche" (opt-in : statistique = médiane par canal des mean_abs
+    # des experts calibrés de la même couche et projection, puis la même
+    # recherche AWQ que les autres). 30B-VL 21/09 : 2 487/18 432 experts sans
+    # stats, P3 (3) à 12,6 % contre 3 % — c est le levier à mesurer.
+    repli_experts: str = "identite"
     dry_run: bool = False
     mixed_precision: str = "auto"     # auto | off
     # dB de rapport signal/bruit en sortie de couche sous lequel un tenseur est
@@ -202,6 +211,11 @@ class ConversionReport:
     # pile-15-09.md (poste7 a6a7436 : echelle AWQ par expert gardee dans la
     # pile, portee cote loader par poste4).
     experts_sans_stats: int = 0
+    # Pièce 25 (b) : experts sans stats ayant reçu, à la place de l identité,
+    # une statistique de repli = médiane par canal des `mean_abs` des experts
+    # de la même couche et même projection (opt-in `repli_experts`).
+    experts_repli_mediane: int = 0
+    experts_sans_stats_noms: list = field(default_factory=list)
     # poste7-awq-relu2-garde-repli-17-09 : tenseurs dont l'AWQ a ete rejete
     # (ratio de norme hors bornes) et repliés à l'identité — vide si
     # aucun. `cmd_convert` (cli.py) lit ce champ pour ajouter `-repliN` au
@@ -586,6 +600,47 @@ def _quantize_on(dev: torch.device, tensor: torch.Tensor, fmt: str,
         except torch.OutOfMemoryError:
             torch.cuda.empty_cache()
     return quantize_with_calibration(tensor.to(torch.float32), fmt, st, **kw)
+
+
+_RE_EXPERT = re.compile(r"^(model\.layers\.\d+)\.mlp\.experts\.(\d+)\.(\w+)\.weight$")
+
+
+def _experts_par_couche(noms: list) -> dict:
+    """["model.layers.3.mlp.experts.7.gate_proj.weight", …] → {"3": {"gate_proj": [7, …]}}."""
+    out: dict = {}
+    for n in noms:
+        m = _RE_EXPERT.match(n)
+        if m:
+            out.setdefault(m.group(1).rsplit(".", 1)[1], {}).setdefault(m.group(3), []).append(int(m.group(2)))
+    return out
+
+
+def _stats_repli_mediane(stats: dict, name: str, min_echantillons: int, cache: dict):
+    """Pièce 25 (b) : pour un expert sans statistique, la médiane PAR CANAL
+    des `mean_abs` des experts calibrés (n_samples >= min) de la même couche
+    et projection — le profil d activation typique de la couche, que la
+    recherche AWQ traite ensuite comme n importe quelle statistique. None
+    s il y a moins de 8 experts calibrés dans la couche (une médiane de
+    trois n est pas un profil). Mis en cache par (couche, projection)."""
+    from .calibrate import ActStats
+    m = _RE_EXPERT.match(name)
+    if not m:
+        return None
+    cle = (m.group(1), m.group(3))
+    if cle in cache:
+        return cache[cle]
+    prefixe = f"{m.group(1)}.mlp.experts."
+    suffixe = f".{m.group(3)}.weight"
+    voisins = [st for n, st in stats.items()
+               if n.startswith(prefixe) and n.endswith(suffixe) and st is not None
+               and st.n_samples >= min_echantillons]
+    if len(voisins) < 8:
+        cache[cle] = None
+        return None
+    pile = torch.stack([st.mean_abs.to(torch.float32) for st in voisins])
+    repli = ActStats(mean_abs=pile.median(dim=0).values, max_abs=None, n_samples=min_echantillons)
+    cache[cle] = repli
+    return repli
 
 
 def _journal_tenseurs(opts: ConversionOptions, qdev: torch.device):
@@ -1529,6 +1584,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
               f"seule la voie safetensors HF porte la tour) ; alias texte seul",
               flush=True)
     journal = _journal_tenseurs(opts, qdev)
+    cache_repli: dict = {}
     for name, tensor in _adapt_hf(_iter_checkpoint(model_path, opts.passage_direct), spec):
         if journal:
             journal(name, tuple(tensor.shape), report.tensors)
@@ -1609,6 +1665,11 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         est_expert = ".mlp.experts." in name
         if est_expert and st is None:
             report.experts_sans_stats += 1
+            report.experts_sans_stats_noms.append(name)
+            if opts.repli_experts == "mediane_couche" and stats:
+                st = _stats_repli_mediane(stats, name, MIN_ECHANTILLONS_AWQ, cache_repli)
+                if st is not None:
+                    report.experts_repli_mediane += 1
         # poste7 (a6a7436, 15/09 ; gate!=up 7c3698d, 16/09) : l'echelle AWQ par
         # expert reste dans la pile -- le moteur (poste4) la porte cote
         # loader ([E,K], appliquee apres route+pack), gate_proj et up_proj
@@ -2395,6 +2456,12 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
 
     if report.experts_sans_stats:
         manifest["experts_sans_stats"] = report.experts_sans_stats
+        # la LISTE (pièce 25 (c) : l instrument KL cible ces experts), compacte
+        # par couche et projection : {"3": {"gate_proj": [7, 12], ...}}
+        manifest["experts_sans_stats_liste"] = _experts_par_couche(report.experts_sans_stats_noms)
+        manifest["experts_repli"] = opts.repli_experts
+        if report.experts_repli_mediane:
+            manifest["experts_repli_mediane"] = report.experts_repli_mediane
         print(f"[acvram] {report.experts_sans_stats} expert(s) sans statistique "
              f"d'activation a la calibration (jamais routes ou trop peu sur le "
              f"corpus) — mesure du corpus de calibration. Chacun recoit une "
