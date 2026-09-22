@@ -186,6 +186,25 @@ class EngineStats:
     # cette cellule a bien tourné avec le même comportement que llama.cpp
     # `--ignore-eos` plutôt que de le supposer depuis sa propre requête.
     sequences_ignore_eos: int = 0
+    # Compteurs de graphes CUDA (pièce 44, dispersion b=1 décroissante-puis-
+    # plateau 354 → 272 t/s) : LUS EN DIRECT sur le `GraphRunner` au moment du
+    # relevé, jamais recopiés ici. Un entier recopié serait juste ou faux selon
+    # l'endroit du rafraîchissement — or `/metrics` est interrogé ENTRE deux
+    # pas, et l'hypothèse à départager (« la sonde a franchi un godet de blocs,
+    # donc elle a payé une capture ») se juge sur le rang exact du rejeu au
+    # moment du relevé. `source_graphes` rend l'objet graphes (ou None) ;
+    # graphes désactivés, repliés en eager avant toute capture, ou moteur à
+    # sec → trois zéros, qui sont la vérité et non une absence de mesure.
+    source_graphes: Any = field(default=None, repr=False, compare=False)
+
+    def compteurs_graphes(self) -> dict:
+        """`graphes_nombre` (graphes vivants), `graphes_captures`, `graphes_replays`."""
+        gr = self.source_graphes() if callable(self.source_graphes) else self.source_graphes
+        if gr is None:
+            return {"graphes_nombre": 0, "graphes_captures": 0, "graphes_replays": 0}
+        return {"graphes_nombre": len(getattr(gr, "graphs", None) or {}),
+                "graphes_captures": int(getattr(gr, "captures", 0)),
+                "graphes_replays": int(getattr(gr, "replays", 0))}
 
     @property
     def decode_tok_s(self) -> float:
@@ -227,6 +246,7 @@ class EngineStats:
             "tokens_per_step": round(self.tokens_per_step, 3),
             "sequences_tronquees_budget": self.sequences_tronquees_budget,
             "sequences_ignore_eos": self.sequences_ignore_eos,
+            **self.compteurs_graphes(),
         }
 
     @property
@@ -619,6 +639,10 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             self.graphs = gr if gr.enabled else None
             if not gr.enabled:
                 self._graphes_raison = gr.raison or "raison non nommée"
+        # Lecture paresseuse de l'attribut, pas de l'objet : `self.graphs`
+        # change encore après ce point (repli, faux runner d'un test), et une
+        # référence figée ici aurait rendu les compteurs d'un objet mort.
+        self.stats.source_graphes = lambda: self.graphs
 
         # REPIN (bead anticitoyen-vram-pds, point 3 — poste7 §4). `_pin` :
         # {index_couche: set(experts résidents)} — peuplé depuis les couches
@@ -752,6 +776,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             "repli_eager": int(getattr(self.graphs, "replis_eager", 0)) if self.graphs is not None else 0,
             "replis_eager_raisons": sorted(getattr(self.graphs, "_raisons_eager_vues", set())) if self.graphs is not None else [],
             "slots_hybrides": getattr(self.graphs, "max_slots", None) if self.graphs is not None else None,
+            # pièce 44 : mêmes trois compteurs que `/metrics`, même source
+            **self.stats.compteurs_graphes(),
             # photos VRAM (octets) prises par GraphRunner avant sa première capture
             # et après un échec (chantier-gemma-capture-godet1-20-09) ; None à sec
             "graphes_memoire_avant_capture": getattr(self.graphs, "memoire_avant_capture", None) if self.graphs is not None else None,
@@ -839,6 +865,14 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         return (f"régime {etat} — graphes={'on' if r['graphes'] and not r.get('graphes_abandon') else 'off' + raison_off}"
                 f"{'' if slots is None else f'(hybrides≤{slots})'} "
                 f"repli_eager={r.get('repli_eager', 0)} "
+                # `graphes_n=`, pas `graphes=` : la ligne porte déjà
+                # `graphes=on|off`, que trois lecteurs cherchent tel quel
+                # (`outils/gpu/mesure/capture-godets.py:41`,
+                # `tests/test_regime_graphes_vivants.py:44,61`) — deux clés
+                # du même nom auraient fait dépendre leur verdict de l'ordre
+                # de la recherche.
+                f"graphes_n={r['graphes_nombre']} captures={r['graphes_captures']} "
+                f"replays={r['graphes_replays']} "
                f"couches_exilées={r['couches_exilees']}/{r['couches_total']} "
                f"experts_exilés={r['experts_exiles']}/{r['experts_total']} "
                f"{piles_txt} cartes={r['cartes']} "
