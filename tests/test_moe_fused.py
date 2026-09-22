@@ -28,6 +28,7 @@ def _fused(bloc, x, topw, topi, tn):
 
 def _b(bloc, x, topw, topi):
     from acvram.engine import model as M
+    from acvram.engine import moe as MOE
     a = MOE._MOE_DECODE_FUSED
     try:
         MOE._MOE_DECODE_FUSED = False

@@ -287,6 +287,7 @@ def test_a_sec_la_reference_passe_son_propre_critere_avec_awq(monkeypatch, awq, 
     le critère par ligne contre `_reference_fp32` — la référence est juste
     avec AWQ, le critère tient."""
     from acvram.engine import model as MD
+    from acvram.engine import moe as MOE_D
     E, H, I, top_k = 8, 256, 128, 2
     bloc = _bloc_moe_jouet(E, H, I, top_k, dev="cpu", awq=awq)
     torch.manual_seed(T)

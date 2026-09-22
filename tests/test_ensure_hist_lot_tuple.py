@@ -8,6 +8,7 @@ import types
 import torch
 
 from acvram.engine import model as M
+from acvram.engine import couches as CO
 
 
 def _couche():
@@ -19,10 +20,10 @@ def _couche():
 
 def test_ensure_hist_ignore_l_entree_lot_et_rollback_restaure_les_tenseurs():
     c = _couche()
-    hist = M.DecoderLayerGDN.ensure_hist(c, 3)
+    hist = CO.DecoderLayerGDN.ensure_hist(c, 3)
     assert set(hist) == {"conv", "S"} and hist["conv"].shape == (3, 4, 3)
     hist["conv"][1].fill_(7.0); hist["S"][1].fill_(9.0)
-    M.DecoderLayerGDN.rollback(c, 2)
+    CO.DecoderLayerGDN.rollback(c, 2)
     assert float(c.static["conv"][0, 0]) == 7.0 and float(c.static["S"][0, 0, 0]) == 9.0 and c.static["lot"] == (0, 1)
 
 

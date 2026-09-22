@@ -164,7 +164,7 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MOE_DECODE_MMA", "1", ("acvram.engine.moe", "_MOE_DECODE_MMA"), "0"),
     Variable("MOE_DECODE_MMA_BT", "16", ("acvram.engine.moe", "_MOE_DECODE_MMA_BT")),
     Variable("MOE_DECODE_MMA_MIN_T", "5", ("acvram.engine.moe", "_MOE_DECODE_MMA_MIN_T")),
-    Variable("NORME_FUSEE", "0", ("acvram.engine.model", "_NORME_FUSEE"), "0",
+    Variable("NORME_FUSEE", "0", ("acvram.engine.couches", "_NORME_FUSEE"), "0",
              "poste F (3b) : norme d'entrée dans le GEMV int8 q/k/v — RÉFUTÉ 6dbb1bb (+0,31 ms/pas, norme recalculée par bloc), témoin"),
     Variable("ROPE_KV", "0", ("acvram.engine.attention", "_ROPE_KV"), "0",
              "poste F (3a) : normes + RoPE + kv_write int8 en un noyau Triton — RÉFUTÉ a3f1b7e (corrompt sous graphe / codes ≠ kv_write_int8), témoin"),
@@ -199,7 +199,7 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MOE_AWQ_TEMOIN", "0", ("acvram.engine.moe", "_MOE_AWQ_TEMOIN")),
     Variable("QA_COMPTE", "0", ("acvram.engine.moe", "_QA_COMPTE")),
     # --- MLA ------------------------------------------------------------
-    Variable("MLA_BATCH", "2", ("acvram.engine.model", "_MLA_BATCH"), "0"),
+    Variable("MLA_BATCH", "2", ("acvram.engine.couches", "_MLA_BATCH"), "0"),
     Variable("MLA_BUCKET", "128", ("acvram.engine.mla", "MLA_BUCKET")),
     Variable("MLA_UNE_PASSE", "1", ("acvram.engine.mla", "_MLA_UNE_PASSE"), "0"),
     Variable("MLA_PREP_NOYAU", "1", ("acvram.engine.mla", "_MLA_PREP_NOYAU"), "0"),

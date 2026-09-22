@@ -77,6 +77,7 @@ def test_compte_de_lancements_par_couche():
     par couche ; le chemin torch en lançait ~45. Casse si le routage torch revient."""
     from torch.profiler import profile, ProfilerActivity
     from acvram.engine import model as M
+    from acvram.engine import moe as MOE
     dev = torch.device("cuda:0")
     bloc = _bloc(dev)
     x, topw, topi = _entree(dev)
