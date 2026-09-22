@@ -15,11 +15,11 @@ _spec.loader.exec_module(mod)
 
 
 def _resultat(bridages="aucun", jetons_s=1500.0, horloge=2700, temp=75, watts=390.0,
-             j_par_jeton=0.2, duree=20.0):
+             j_par_jeton=0.2, duree=20.0, invalidations="aucune"):
     n = round(jetons_s * duree)
     return {"moteur": "acvram", "jetons_s": jetons_s, "horloge_moy": horloge, "temp_max": temp,
            "watts": watts, "joules_net": round(j_par_jeton * n, 1), "j_par_jeton_net": j_par_jeton,
-           "duree_mesure_s": duree, "bridages": bridages, "invalidations": "aucune"}
+           "duree_mesure_s": duree, "bridages": bridages, "invalidations": invalidations}
 
 
 def test_bridages_set_parse_la_chaine_jointe_par_virgules():
@@ -27,6 +27,35 @@ def test_bridages_set_parse_la_chaine_jointe_par_virgules():
     assert mod.bridages_set({"bridages": "puissance"}) == {"puissance"}
     assert mod.bridages_set({"bridages": "puissance,thermique_materiel"}) == \
         {"puissance", "thermique_materiel"}
+
+
+def test_charge_raison_invalidations_bridage_puissance_seul_ignore():
+    """5e passage, poste2 : charge_raison() (pas throttle()) juge la chaîne via
+    e.invalidations (energie.py:428-429), qui ajoute TOUJOURS une entrée
+    bridage même pour puissance seul -- le test qui casse si cette entrée
+    reste rejetante."""
+    d = _resultat(invalidations="bridage pendant la fenêtre : puissance")
+    assert mod.charge_raison(d) is None
+
+
+def test_charge_raison_invalidations_bridage_thermique_rejette():
+    d = _resultat(invalidations="bridage pendant la fenêtre : thermique_materiel")
+    assert mod.charge_raison(d) == "bridage pendant la fenêtre : thermique_materiel"
+
+
+def test_charge_raison_invalidations_bridage_puissance_et_autre_raison():
+    """Le bridage puissance est retiré, l'AUTRE raison (ici : processus changés)
+    doit rester -- charge_raison() ne doit pas tout effacer d'un coup."""
+    d = _resultat(invalidations="carte 0 : les processus ont changé ; "
+                                 "bridage pendant la fenêtre : puissance")
+    assert mod.charge_raison(d) == "carte 0 : les processus ont changé"
+
+
+def test_calculer_raisons_invalidations_bridage_puissance_seul_fenetre_valide():
+    fenetres = {"acvram-b12-1": _resultat(
+        invalidations="bridage pendant la fenêtre : puissance")}
+    raisons = mod.calculer_raisons(fenetres)
+    assert raisons["acvram-b12-1"] == []
 
 
 def test_throttle_bridage_puissance_seul_ne_rejette_pas():
