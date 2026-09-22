@@ -66,3 +66,54 @@ pas être publiée telle quelle. Deux pistes pour obtenir un point b=1 valide :
 2. Rejouer b=1 plusieurs fois (via `--bras`, voir commit suivant) et ne garder que
    les fenêtres qui passent le seuil sd, en acceptant qu'une partie soit perdue au
    warm-up.
+
+## Mise à jour 22/09 18 h 3x (poste4, à sec) — la chauffe réfutée, ET un bogue de lecture trouvé
+
+**Réfuté (poste2 0ba60ca4)** : chauffe posée (`jetons_chauffe` publié, 256 vus sur les
+3 nouvelles fenêtres), sd reste 12-13 % > 10 % sur les 3. Ma prédiction « sd < 5 % » ne
+tient pas.
+
+**Découverte en relisant le code, pas seulement les chiffres** : `passes_courtes_jetons_s`
+est publié APRÈS un `courtes.sort()` (`scratchpad/banc-llamacpp-16-09.py`, avant
+correctif ci-dessous). Tout ce que « marche en deux paliers » ci-dessus affirmait sur
+la FORME temporelle (lent puis rapide) était donc lu sur un tableau **trié par valeur**,
+nécessairement croissant quel que soit l'ordre réel des 7 sondes — l'observation n'était
+pas fausse sur les valeurs, mais la lecture « warm-up chronologique » n'était jamais
+vérifiable avec ces données. Corrigé (sha ci-dessous) : `passes_courtes_jetons_s` publie
+maintenant l'ordre CHRONOLOGIQUE réel, `meilleure_passe_jetons_s` calculé par `max()`
+plutôt que par le dernier élément trié (même valeur, méthode indépendante de l'ordre).
+
+**Ce qui reste vrai indépendamment du tri** (l'AMPLITUDE de la dispersion, contrairement
+à sa FORME, n'est pas affectée par `sort()`) : comparé sur le même client, la même
+fenêtre, le même jour — acvram b=1 : min 274,6, max 370,9 t/s (écart 35 %) ; llama.cpp
+b=1 : min 320,9, max 322,1 (écart 0,4 %) ; trtllm b=1 : min 46,1, max 46,6 (écart 1 %).
+La dispersion est spécifique à acvram (le même client HTTP mesure les trois moteurs),
+pas un artefact de cadence du client — confirmé aussi en lisant `decode()` : à b=1,
+`lot()` est une requête HTTP séquentielle unique (`ThreadPoolExecutor(max_workers=1)`),
+les 7 sondes s'enchaînent en boucle Python sans `sleep` ni délai imposé entre elles.
+Autre fait qui déplace la question : les 7 sondes courtes tournent APRÈS la fenêtre
+principale de 20 s (déjà chaude, 8192 jetons décodés à 392 t/s agrégé stable) et après
+la chauffe — un warm-up général du serveur ne peut donc pas expliquer une éventuelle
+lenteur initiale des sondes, puisque le serveur a déjà tourné ~26 s avant la première
+sonde courte.
+
+**Hypothèse suivante** (à départager par le prochain relevé, maintenant lisible dans
+l'ordre) : la dispersion est propre au CHEMIN des requêtes courtes (128 jetons, contre
+1 024 pour la fenêtre principale) chez acvram spécifiquement — pas un warm-up général
+du serveur, pas la cadence du client. Trois formes possibles, à distinguer par la
+FORME de la série maintenant publiée dans l'ordre :
+- **croissante** (les premières sondes plus lentes) → chemin froid propre à CETTE
+  taille de requête, indépendant de l'état déjà chaud du serveur — tester alors
+  chauffe 20 s ou fenêtre b=1 de 40 s (pistes de poste2) ;
+- **dispersée sans tendance** → pas un warm-up du tout ; chercher une gigue de
+  planification/réseau côté serveur ou client, indépendante de b (tester alors client
+  à 2 requêtes en vol pour voir si ça change la variance, autre piste de poste2) ;
+- **périodique/alternante** → signature d'un mécanisme cyclique interne (ex.
+  recapture de graphe, libération VRAM périodique) — hors des trois pistes de poste2,
+  nommé si observé.
+
+**Test minimal proposé, avant de choisir entre chauffe 20 s / fenêtre 40 s / 2
+requêtes en vol** : une seule fenêtre b=1 de plus (déjà avec chauffe, code corrigé) et
+lire `passes_courtes_jetons_s` dans l'ordre publié — la forme observée départage
+directement les trois hypothèses ci-dessus sans changer le protocole ni la carte au-delà
+de cette unique fenêtre.
