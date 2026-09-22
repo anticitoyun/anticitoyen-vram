@@ -47,3 +47,9 @@ poste4 : verdict A/B quand une cellule tombe. chef : réarmer `/loop 20m` à la 
 23. Four Over Six : profil réel de la conversion (horodatages du journal) puis vectorisation de la recherche amax/6 vs amax/4 sur [n_blocs, 16, 2] au bit (poste2 profil, poste1 vectorisation).
 24. Cellules TRT-LLM : liste de contrôle du verdict 3.4 (graphes actifs des deux côtés, exclusions listées, KV FP8/int8 vérifié dans la doc 1.3, glouton, même contexte/émission, en-tête de publication).
 25. Calibration AWQ experts : instruments FAITS (poste1 7c658b08 : awq-stabilite-experts.py, `convert --repli-experts mediane_couche`, invites-experts-sans-stats.py) ; mesures poste2 : (a) stabilité ≈ 20 min → (c) sur l alias actuel → reconversion mediane_couche (≈ 25 min) → (c) + P3 (3), prédit 12,6 → 6-9 %.
+
+## J — ouverts par Vibe série 4 (22/09 07 h 5x, verdicts en fin de qr.md)
+26. Prédicteur Four Over Six hors ligne par bloc (MSE amax/6 contre amax/4 sur les quartets réels E2M1/E4M3, part de blocs gagnants, gain moyen ; < 10 min) — doit prédire la perte du scellé E sur le 31B avant toute conversion (poste1, 09 h 15 en régime mesuré).
+27. Corpus de calibration guidé par routage : instrument de synthèse d'invites sous contrainte de score de routage + mesure de couverture (jetons par expert) — remplace le corpus générique qui n'atteint aucun expert froid (poste1 instrument, poste2 mesure ; après 25(a) qui donne le seuil).
+28. Énergie : deux périmètres publiés (carte seule NVML ; hôte + carte RAPL + NVML), note « experts sur processeur » par moteur, client isolé par soustraction (banc, après les cellules TRT-LLM b=1 réparées).
+29. Écart TRT-LLM b=12 (+22 %) : décomposition par poste1 (08 h 15) → leviers au bit ou choix de format (KV FP8 opt-in).
