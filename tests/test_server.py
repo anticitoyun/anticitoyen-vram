@@ -263,3 +263,39 @@ def test_un_champ_inconnu_passe_et_est_journalise(client, caplog):
             "max_tokens": 5, "temperature": 0, "temprature": 0.7})
     assert r.status_code == 200 and r.json()["usage"]["completion_tokens"] == 5
     assert any("temprature" in rec.getMessage() for rec in caplog.records)
+
+
+def test_completions_sans_logprobs_identique(client):
+    """Pièce 36 : sans logprobs, la réponse est inchangée (champ logprobs None) et
+    déterministe à température 0 — la sortie par défaut ne bouge pas."""
+    j = {"model": "tiny", "prompt": "hello world", "max_tokens": 4, "temperature": 0}
+    a = client.post("/v1/completions", json=j).json()
+    b = client.post("/v1/completions", json=j).json()
+    assert a["choices"][0]["logprobs"] is None
+    assert a["choices"][0]["text"] == b["choices"][0]["text"]
+
+
+def test_completions_logprobs_echo(client):
+    """Pièce 36 : logprobs=N + echo → CompletionChoice.logprobs (tokens, token_logprobs,
+    top_logprobs, text_offset) sur l'invite PUIS la génération ; 1er jeton d'invite None."""
+    r = client.post("/v1/completions", json={
+        "model": "tiny", "prompt": "hello world", "max_tokens": 3,
+        "temperature": 0, "logprobs": 3, "echo": True})
+    assert r.status_code == 200
+    lp = r.json()["choices"][0]["logprobs"]
+    assert lp is not None
+    for k in ("tokens", "token_logprobs", "top_logprobs", "text_offset"):
+        assert k in lp and len(lp[k]) == len(lp["tokens"])
+    assert lp["token_logprobs"][0] is None          # echo : 1er jeton d'invite sans prédécesseur
+    assert len(lp["tokens"]) >= 3                    # au moins les 3 jetons générés (+ invite)
+    assert lp["text_offset"] == sorted(lp["text_offset"])   # offsets croissants
+
+
+def test_completions_logprobs_top_cpu(client):
+    """Sur CPU (sampler non-graphe), les top-K logprobs sont servis (non None)."""
+    r = client.post("/v1/completions", json={
+        "model": "tiny", "prompt": "the world", "max_tokens": 2,
+        "temperature": 0, "logprobs": 2})
+    lp = r.json()["choices"][0]["logprobs"]
+    gen_top = [t for t in lp["top_logprobs"] if t is not None]
+    assert gen_top and all(isinstance(d, dict) and d for d in gen_top)
