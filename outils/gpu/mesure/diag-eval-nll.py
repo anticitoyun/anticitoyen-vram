@@ -302,6 +302,7 @@ def main() -> int:
     ap.add_argument("--jetons", type=int, default=300)
     ap.add_argument("--texte", default=None, help="fichier texte connu (défaut : acvram/data/calibration-anglais.txt)")
     ap.add_argument("--sans-decode", action="store_true", help="sauter le bras decode (n pas de décodage)")
+    ap.add_argument("--sans-serve", action="store_true", help="sauter le bras serve (tête à toutes les positions en un seul matmul : 5,25 Gio de fp32 sur un alias bf16 à vocabulaire 262 144 — OOM, 22/09)")
     ap.add_argument("--ids", default=None, help="fichier JSON d ids tels quels (gabarit compris) : remplace --texte, aucun BOS ajouté (pièce 37 : Gemma 4 -it ne se juge que sous gabarit)")
     ap.add_argument("--reponse-depuis", type=int, default=0, help="avec --ids : rang du premier id de la réponse gloutonne HF ; l épreuve de référence devient « NLL hf moyenne sur la réponse ≤ 1 nat » (gabarit), et le moteur publie la même moyenne")
     ap.add_argument("--nll-hf", default=None, help="JSON déjà produit par le bras hf (nll_hf, à sec sur processeur) : évite de le rejouer sous le verrou")
@@ -324,7 +325,7 @@ def main() -> int:
     loaded = load_model(chemin, dtype=torch.bfloat16, max_model_len=len(ids) + 32, max_concurrent_seqs=1)
     r = {"alias": chemin, "jetons": len(ids), "bos": bos, "bos_en_tete": ids[0] == bos if bos is not None else None}
     e = nll_eval(loaded, ids)
-    s, champs = nll_serve(loaded, tok, ids)
+    s, champs = (list(e), {"sans_serve": True}) if a.sans_serve else nll_serve(loaded, tok, ids)
     r.update({"nll_eval": e, "nll_serve": s, "champs_batch_serve": champs,
               "ppl_eval": round(ppl(e), 3), "ppl_serve": round(ppl(s), 3),
               "div_eval_serve": premiere_divergence(e, s),
