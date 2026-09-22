@@ -21,7 +21,7 @@ Objectif : plus rapide et moins de joules que llama.cpp, vLLM, TensorRT-LLM. Ten
 10. Scellé E : chaîne à composer sur decode-pas.py (verdict-decode-pas-31b-kv-20-09), A/B/T, KL max ≤ 1,2, part amax/4 publiée.
 
 ## E — énergie et TensorRT-LLM (pièces 10-11)
-11. TRT-LLM : import complet + run minimal sous carte.sh (poste3, trou avec carte) ; cellules b=1/b=12/prefill.
+11. TRT-LLM : run minimal TENU (8d7706f6, temoin-3B 187,6 t/s indicatif) ; cellules b=1/b=12/prefill sur le checkpoint hub NVFP4 (liste de contrôle 3.4) — poste3, après 30B-VL de poste2.
 12. J/jeton 4 moteurs (banc-4moteurs.py) selon verdict 2.5 : J net = ∫(P − P_repos), ≥ 6 fenêtres ≥ 20 s alternées, rejet charge > 5 % / sd > 10 % / throttle actif, horloge médiane par fenêtre écart ≤ 3 %, en-tête TSV ; colonne J/jeton du README à remettre.
 
 ## F — modularisation (4 bis, à sec)

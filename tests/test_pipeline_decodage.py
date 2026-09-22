@@ -77,7 +77,7 @@ def _rejouer(engine, capturer_logits: bool):
         indices_pas: dict[str, int] = {rid: 0 for rid in tokens}
         orig_sample = engine._sample_only
 
-        def sample_espion(logits, seqs):
+        def sample_espion(logits, seqs, **kw):     # **kw : `depuis_graphe` (pipeline.py, levier ACVRAM_SAMPLER_GRAPHE)
             top2 = torch.topk(logits.to(torch.float32), 2, dim=-1)
             for i, seq in enumerate(seqs):
                 rid = id_vers_rid.get(seq.id)
@@ -86,7 +86,7 @@ def _rejouer(engine, capturer_logits: bool):
                 j = indices_pas.get(rid, 0)
                 logits_top2[(rid, j)] = (top2.values[i].tolist(), top2.indices[i].tolist())
                 indices_pas[rid] = j + 1
-            return orig_sample(logits, seqs)
+            return orig_sample(logits, seqs, **kw)
         engine._sample_only = sample_espion
 
     arrivee_faite = False
