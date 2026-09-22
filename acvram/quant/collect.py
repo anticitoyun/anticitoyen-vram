@@ -99,7 +99,7 @@ def load_calib_ids(tokenizer, path: Optional[str], n_seqs: int,
         if gabarit:
             # la tranche brute fait ~23 Ko pour 512 jetons gardés : sans la borner, le tour
             # assistant tomberait toujours après la coupe et ne serait jamais calibré.
-            text = text[: max(64, seq_len * 3)]
+            text = text[: max(64, seq_len * 4)]
             demi = len(text) // 2
             text = tokenizer.apply_chat_template(
                 [{"role": "user", "content": text[:demi]}, {"role": "assistant", "content": text[demi:]}],
