@@ -342,6 +342,7 @@ class MoEBlock(nn.Module):
             return None
         self._stacks = piles
         self._stacks_awq = awq
+        self._raison_marlin = ""
         self._stacks_marlin = self._construire_marlin(piles, awq, hadamard)
         if self._stacks_marlin is not None:
             if _DOUBLE_DIAG:
@@ -469,6 +470,11 @@ class MoEBlock(nn.Module):
             if MP.charger(compiler=False) is None:
                 raison = "extension Marlin non compilée à sec (banc-marlin-p1 --compiler-seulement)"
         if raison is not None:
+            # La raison vit sur l INSTANCE (pièce 44 du 22/09) : le message
+            # n est imprimé qu une fois par session, mais `regime_ligne` doit
+            # pouvoir nommer LA couche refusée et POURQUOI — « marlin(47/48) »
+            # sans la raison a coûté une mesure de carte pour rien.
+            self._raison_marlin = raison
             if not getattr(MoEBlock, "_marlin_refus_dit", False):
                 MoEBlock._marlin_refus_dit = True
                 print(f"[acvram] disposition Marlin refusée : {raison} — pile naturelle gardée, prefill « groupe », décodage d'avant", flush=True)

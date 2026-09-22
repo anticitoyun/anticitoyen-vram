@@ -85,3 +85,45 @@ def test_le_manifeste_porte_l_option(convertis):
     _, avec = convertis
     m = json.load(open(avec / "acvram_manifest.json"))
     assert m["options"].get("alpha_commun_experts") is True
+
+
+def test_ordre_inverse_gate_up_reste_apparie(tmp_path, monkeypatch):
+    """22/09, couche 28 / expert 46 du Coder-30B : une paire sur 6 144
+    arrivait up AVANT gate. Avec une seule file d attente elle sortait de
+    l alpha commun sans rien dire, gardait deux échelles distinctes et faisait
+    refuser la disposition Marlin pour TOUTE sa couche (marlin(47/48)).
+    Ce test inverse l ordre pour UN expert et exige que la paire soit tout de
+    même appariée — il casse si l on revient à une file unique."""
+    import acvram.quant.convert as C
+    original = C._adapt_hf
+
+    def inverse(source, spec):
+        """Inverse gate et up du seul expert 1 de la couche 0."""
+        differe = {}
+        for nom, t in original(source, spec):
+            if nom.endswith("experts.1.gate_proj.weight"):
+                differe[nom] = t                      # retenu : sortira APRÈS up
+                continue
+            yield nom, t
+            if nom.endswith("experts.1.up_proj.weight"):
+                for n2, t2 in differe.items():
+                    yield n2, t2
+                differe.clear()
+        yield from differe.items()
+
+    vus: list[str] = []
+    _brut = inverse
+
+    def trace(source, spec):
+        for nom, t in _brut(source, spec):
+            if ".experts.1." in nom:
+                vus.append(nom.rsplit(".", 2)[-2])
+            yield nom, t
+
+    monkeypatch.setattr(C, "_adapt_hf", trace)
+    out = _convertir(tmp_path, "inverse", alpha_commun_experts=True)
+    # le test ne vaut que si l ordre a VRAIMENT été inversé pour cet expert
+    assert vus.index("up_proj") < vus.index("gate_proj"), vus
+    for e, (g, u) in enumerate(_paires(out, experts=(0, 1, 2))):
+        assert torch.equal(g, u), f"expert {e} : gate ≠ up malgré --alpha-commun-experts (ordre inversé)"
+    assert _up_distinct(out) is False

@@ -549,7 +549,15 @@ def _precalculer_alpha_commun_gate_up(
     scaler) comme un alpha : les deux valent une fusion, un alpha degenere a
     l'identite n'ayant rien a partager.
     """
-    en_attente: dict[str, torch.Tensor] = {}
+    # Deux files, pas une : l ordre d arrivée gate → up n est PAS garanti.
+    # Sur Qwen3-Coder-30B (22/09), une paire sur 6 144 — couche 28, expert 46 —
+    # arrivait dans l ordre inverse ; elle sortait alors de l alpha commun sans
+    # rien dire, gardait deux échelles distinctes (écart relatif 0,20) et
+    # faisait refuser la disposition Marlin pour TOUTE sa couche
+    # (`experts_layout=marlin(47/48)`). Une file par côté, appariement dès que
+    # les deux sont là : le résultat ne dépend plus de l ordre du checkpoint.
+    attente_gate: dict[str, torch.Tensor] = {}
+    attente_up: dict[str, torch.Tensor] = {}
     resultat: dict[str, torch.Tensor] = {}
     experts_vus = 0
     for name, tensor in _adapt_hf(_iter_checkpoint(model_path), spec):
@@ -560,15 +568,21 @@ def _precalculer_alpha_commun_gate_up(
                                  else not opts.alpha_commun_gate_up):
             continue
         if name.endswith("gate_proj.weight"):
-            en_attente[name[: -len("gate_proj.weight")]] = tensor
+            cle = name[: -len("gate_proj.weight")]
+            autre = attente_up.pop(cle, None)
+            if autre is None:
+                attente_gate[cle] = tensor
+                continue
+            gate_tensor, tensor = tensor, autre
+        elif name.endswith("up_proj.weight"):
+            cle = name[: -len("up_proj.weight")]
+            gate_tensor = attente_gate.pop(cle, None)
+            if gate_tensor is None:
+                attente_up[cle] = tensor
+                continue
+        else:
             continue
-        if not name.endswith("up_proj.weight"):
-            continue
-        cle = name[: -len("up_proj.weight")]
-        gate_tensor = en_attente.pop(cle, None)
-        if gate_tensor is None:
-            continue
-        gate_name, up_name = f"{cle}gate_proj.weight", name
+        gate_name, up_name = f"{cle}gate_proj.weight", f"{cle}up_proj.weight"
         fmt = router.format_for(gate_name)
         if fmt != router.format_for(up_name) or fmt in ("bf16", "fp16"):
             continue

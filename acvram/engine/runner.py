@@ -371,19 +371,37 @@ def _repin_echanger_reel(m, sortant: int, entrant: int) -> None:
 
 def _couverture_experts(model) -> str:
     """Disposition des experts par couche MoE : « marlin » si toutes, « naturel »
-    si aucune, sinon « marlin(N/M) » — N couches sur la disposition unique, M
-    couches MoE (les autres refusées, pile naturelle gardée : gate/up distincts)."""
+    si aucune, sinon « marlin(N/M) refus=[c<i>:<raison>] » — N couches sur la
+    disposition unique, M couches MoE, et POUR CHAQUE couche refusée son numéro
+    et la raison exacte (`MoEBlock._raison_marlin`).
+
+    Sans la raison, « marlin(47/48) » a coûté une mesure de carte pour trouver
+    ce qu un chargement savait déjà (22/09, alias qkv-alpha) : une couverture
+    partielle est une anomalie à nommer, pas un chiffre à contempler."""
     from .model import MoEBlock
-    blocs = [m for m in model.modules() if isinstance(m, MoEBlock)]
-    if not blocs:
+    numerotes: list[tuple[int, object]] = []
+    for i, couche in enumerate(getattr(model, "layers", []) or []):
+        for m in couche.modules():
+            if isinstance(m, MoEBlock):
+                numerotes.append((i, m))
+                break
+    if not numerotes:      # modèle sans `layers` exposées : on garde l ordre des modules
+        numerotes = list(enumerate(m for m in model.modules() if isinstance(m, MoEBlock)))
+    if not numerotes:
         return "aucun"
-    dispositions = [getattr(m, "experts_layout", None) or "naturel" for m in blocs]
+    dispositions = [getattr(m, "experts_layout", None) or "naturel" for _, m in numerotes]
     n_marlin = sum(1 for d in dispositions if d == "marlin")
-    if n_marlin == len(blocs):
+    if n_marlin == len(numerotes):
         return "marlin"
     if n_marlin == 0:
         return dispositions[0] if len(set(dispositions)) == 1 else "naturel"
-    return f"marlin({n_marlin}/{len(blocs)})"
+    refus = []
+    for (i, m), d in zip(numerotes, dispositions):
+        if d == "marlin":
+            continue
+        r = (getattr(m, "_raison_marlin", "") or getattr(m, "_raison_repli", "") or "raison non relevée")
+        refus.append(f"c{i}:{r.split(' — ')[0][:70]}")
+    return f"marlin({n_marlin}/{len(numerotes)}) refus=[{' | '.join(refus[:4])}]"
 
 
 
