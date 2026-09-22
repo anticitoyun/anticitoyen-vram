@@ -55,11 +55,19 @@ def ecart(y: torch.Tensor, ref: torch.Tensor) -> dict:
 
 
 def poids_int8(n: int, k: int, graine: int, device):
-    from acvram.quant.formats import quantize
+    """INT8Tensor synthétique SUR `device` : quantifié depuis un poids déjà
+    sur l appareil (22/09, poste2 8b68082b : un `to_device` inexistant et un
+    repli silencieux laissaient les poids sur l hôte → Triton plantait)."""
+    from acvram.quant.formats import INT8Tensor, quantize
     g = torch.Generator().manual_seed(graine)
-    w = (torch.randn(n, k, generator=g) * 0.02).to(torch.bfloat16)
+    w = (torch.randn(n, k, generator=g) * 0.02).to(torch.bfloat16).to(device)
     t = quantize(w, "int8", group_size=G)
-    return t.to_device(device) if hasattr(t, "to_device") else t
+    if not isinstance(t, INT8Tensor):
+        raise TypeError(f"quantize(int8) a rendu {type(t).__name__}, pas un INT8Tensor")
+    t = t.to(device)
+    if t.qweight.device != torch.device(device) or t.scales.device != torch.device(device):
+        raise RuntimeError(f"poids int8 pas sur {device} : {t.qweight.device} / {t.scales.device}")
+    return t
 
 
 def chrono(fn, rep: int) -> list[float]:

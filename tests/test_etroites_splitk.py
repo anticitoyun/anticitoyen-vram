@@ -59,3 +59,15 @@ def test_ulp_bf16_du_banc():
     e = m.ecart(un_ulp, ref)
     assert e["ulp_max"] == 1.0 and e["part_differents"] == 0.25
     assert m.ecart(ref, ref) == {"ulp_max": 0.0, "part_differents": 0.0, "rel_max": 0.0}
+
+
+def test_poids_int8_du_banc_sur_l_appareil_demande():
+    """poste2 8b68082b : les poids du banc restaient sur l hôte (repli silencieux) → Triton plantait."""
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outils", "gpu", "mesure", "banc-etroites-splitk.py")
+    spec = importlib.util.spec_from_file_location("banc_etroites_splitk", p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    from acvram.quant.formats import INT8Tensor
+    t = m.poids_int8(256, 512, graine=1, device=torch.device("cpu"))
+    assert isinstance(t, INT8Tensor) and t.qweight.shape == (256, 512) and t.group_size == 128
+    assert t.qweight.device.type == "cpu" and t.scales.device.type == "cpu" and t.zeros.device.type == "cpu"
