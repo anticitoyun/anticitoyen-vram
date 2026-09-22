@@ -168,6 +168,8 @@ VARIABLES: tuple[Variable, ...] = (
              "poste F (3b) : norme d'entrée dans le GEMV int8 q/k/v — RÉFUTÉ 6dbb1bb (+0,31 ms/pas, norme recalculée par bloc), témoin"),
     Variable("ROPE_KV", "0", ("acvram.engine.model", "_ROPE_KV"), "0",
              "poste F (3a) : normes + RoPE + kv_write int8 en un noyau Triton — RÉFUTÉ a3f1b7e (corrompt sous graphe / codes ≠ kv_write_int8), témoin"),
+    Variable("ECHO_TRANCHE", "256", None, None,
+             "pièce 36 : positions par tranche quand `echo` demande les logprobs de l invite (Engine.logprobs_invite) — borne la pointe de VRAM des logits [tranche, vocab] fp32"),
     Variable("ETROITES_FORME", "", None, None,
              "pièce 35 : forme du noyau étroit int8 `W,S` (warps, étages) — vide = 4,3 (défaut) ; la sortie est AU BIT quelle que soit la forme (ni l ordre des sommes en K ni celui des tranches ne changent), seule l occupation change ; ligne etroites=serie|w{W}s{S}"),
     Variable("CAPTURE_MEM_MIN_MIO", "1024", None, None,

@@ -131,7 +131,8 @@ class PipelineDecodage:
         epingle, evenement = self._apres_echantillon(tokens_dev, logprobs_dev)
         self._pipeline_pendiente = {
             "seqs": decodable, "tokens_dev": tokens_dev,
-            "logprobs_dev": logprobs_dev, "event": evenement, "epingle": epingle}
+            "logprobs_dev": logprobs_dev, "event": evenement, "epingle": epingle,
+            "tops": self._tops_si_demande(logits, decodable)}
         return []
 
     def _pipeline_suite(self, roster: list[Sequence],
@@ -166,7 +167,8 @@ class PipelineDecodage:
         epingle, evenement = self._apres_echantillon(tokens_dev2, logprobs_dev2)
         self._pipeline_pendiente = {
             "seqs": vivants, "tokens_dev": tokens_dev2,
-            "logprobs_dev": logprobs_dev2, "event": evenement, "epingle": epingle}
+            "logprobs_dev": logprobs_dev2, "event": evenement, "epingle": epingle,
+            "tops": self._tops_si_demande(logits, vivants)}
         return []
 
     def _plain_decode_pipeline(self, decodable: list[Sequence]) -> list[GenerationOutput]:
@@ -199,7 +201,7 @@ class PipelineDecodage:
             # recouvrir ici — on synchronise puis on retombe sur le pas
             # normal, comme documenté.
             pend["event"].synchronize()
-            outputs = self._consommer(pend["tokens_dev"], pend["logprobs_dev"], pend["seqs"], epingle=pend.get("epingle"))
+            outputs = self._consommer(pend["tokens_dev"], pend["logprobs_dev"], pend["seqs"], epingle=pend.get("epingle"), tops=pend.get("tops"))
             outputs += self._pipeline_amorcer(roster_avant + nouveaux)
             return outputs
 
@@ -216,5 +218,5 @@ class PipelineDecodage:
         outputs = self._pipeline_suite(roster_avant, tokens_dev)
 
         pend["event"].synchronize()
-        outputs = self._consommer(pend["tokens_dev"], pend["logprobs_dev"], pend["seqs"], epingle=pend.get("epingle")) + outputs
+        outputs = self._consommer(pend["tokens_dev"], pend["logprobs_dev"], pend["seqs"], epingle=pend.get("epingle"), tops=pend.get("tops")) + outputs
         return outputs
