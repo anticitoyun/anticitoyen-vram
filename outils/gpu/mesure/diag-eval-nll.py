@@ -10,6 +10,11 @@ Trois bras sur les MÊMES ids ([BOS] + texte connu, 300 jetons par défaut) :
            `step()` (mêmes noyaux que /v1/completions), logits de la dernière
            position seulement, et `forward(logits_positions=arange)` pour
            toutes (même forward que le service, logits à chaque position)
+  decode : le chemin de la GÉNÉRATION — `add_request` sur le seul premier
+           jeton, puis un pas de décodage par position (cache KV, sampler
+           lent, `enable_cuda_graphs=False`), le jeton posé à chaque pas
+           étant le jeton RÉEL du texte (teacher-forcing) : les logits
+           « tels que la génération les voit » à chaque position
   hf     : transformers bf16 (offload, `HF_PYTHON` + `MAXMEM` comme
            decode-pas), NLL par position — la référence
 Sortie : NLL médiane par bras, |Δ| eval−serve et eval−hf par position,
@@ -26,8 +31,38 @@ Prédictions (écrites avant) :
   P3 eval ≈ serve ≠ hf dès le début → le forward acvram diverge sur ce
      modèle hors gabarit de conversation (le scellé E ne l a vu que sous
      gabarit) — défaut moteur, à nommer par position et par couche.
+  P4 decode ≈ eval ≈ 11-12 nats (PPL decode > 30) → ni le préfill ni le
+     décodage ne sont en cause : le modèle converti est faux HORS GABARIT de
+     conversation, ou le protocole (BOS, corpus) — c est la lecture que je
+     tiens pour la plus probable (le 22/09 les NLL du préfill sont du bruit à
+     TOUTES les positions, dernière comprise : 11,77 nats médians sur 12,48
+     possibles, et le scellé E n a jamais vu ce modèle hors gabarit).
+  P5 decode 8-20 nats (PPL decode ≤ 30) alors que eval reste à ~12 → le
+     décodage est juste et le PRÉFILL de Gemma 4 est faux hors dernière
+     position : masque fenêtré ou positions du préfill, à nommer par couche.
 Contrôle qui rend « faux » : PPL(ctx ≥ 32) du bras eval ≤ 30 sur ce texte
 connu ; > 30 = eval faux, quel que soit le reste.
+Contrôle du bras decode lui-même : sa PREMIÈRE NLL (position 1, cache vide,
+un seul jeton en contexte) doit égaler celle du bras eval à 1e-2 près — les
+deux calculent le même forward sur un contexte d un jeton ; un écart là
+signe une erreur de montage du bras, pas un défaut du modèle.
+
+Softcap et échelle d attention, vérifiés dans le code (22/09) :
+  * softcap FINAL : `model.py:2653-2656` — `final_logit_softcapping` du
+    config (30,0 pour ce 31B, `config.py:761`) appliqué en fp32 après
+    `logits_scaling`. Gemma 4 le porte, il est bien appliqué.
+  * softcap d ATTENTION : `attn_logit_softcapping` N EXISTE PAS dans le
+    config de Gemma 4 (propre à Gemma 2) et n est appliqué nulle part —
+    conforme à la génération du modèle.
+  * `query_pre_attn_scalar` : absent du config de Gemma 4 également ;
+    l échelle est `head_dim ** -0.5` par couche (`attention.py:122-123`),
+    avec `head_dim` = 256 sur les couches locales et `global_head_dim` = 512
+    sur les globales (`loader.py:541-542`) — deux échelles différentes,
+    correctement séparées.
+  * QK-norm : `q_norm` / `k_norm` passés par couche (`attention.py:311-318`,
+    `404-411`) ; le config de ce 31B ne porte pas `use_qk_norm`, mais les
+    poids `self_attn.q_norm.weight` sont lus s ils existent
+    (`loader.py:551-552`) — donc pas de norme inventée ni omise.
 
 Usage : outils/carte.sh python outils/gpu/mesure/diag-eval-nll.py ALIAS [--source HF_DIR]
         [--jetons 300] [--texte FICHIER] [--json SORTIE]         (≤ 10 min avec hf ; ≤ 2 min sans)
@@ -112,6 +147,35 @@ def nll_serve(loaded, tok, ids: list[int]) -> tuple[list[float], dict]:
     return nll.cpu().tolist(), champs
 
 
+def nll_decode(loaded, tok, ids: list[int]) -> list[float]:
+    """Le chemin de la génération : un pas de décodage par position, cache KV,
+    le jeton du texte posé à chaque pas (teacher-forcing). Les logits sont
+    ceux que le sampler lent voit au pas i, donc la NLL « telle que la
+    génération la voit » à la position i + 1."""
+    from acvram.engine.runner import Engine
+    from acvram.engine.sampler import SamplingParams
+    eng = Engine(loaded, tok, max_batch_size=1, max_model_len=len(ids) + 32, enable_cuda_graphs=False)
+    eng.pipeline_actif = False
+    eng.add_request([ids[0]], SamplingParams(temperature=0.0, max_tokens=len(ids)), request_id="dec")
+    eng._admit()
+    seq = eng.running[0]
+    nll: list[float] = []
+    with torch.inference_mode():
+        batch = eng._build_batch([seq], prefill=True)            # le seul premier jeton
+        logits = loaded.model(batch)
+        seq.prefill_len = len(seq.prompt_ids)
+        for i in range(1, len(ids)):
+            lp = torch.log_softmax(logits.view(-1, logits.shape[-1])[-1].float(), dim=-1)
+            nll.append(float(-lp[ids[i]]))
+            seq.output_ids.append(ids[i])                        # teacher-forcing : le jeton RÉEL
+            if not eng._grow(seq):
+                raise RuntimeError(f"blocs épuisés à la position {i} — augmenter max_model_len")
+            if i == len(ids) - 1:
+                break
+            logits = loaded.model(eng._build_batch([seq], prefill=False))
+    return nll
+
+
 def nll_hf(source: str, ids: list[int]) -> list[float] | None:
     py = os.environ.get("HF_PYTHON", "/opt/ia/vLLM/.venv/bin/python")
     maxmem = os.environ.get("MAXMEM", "26GiB,80GiB")
@@ -144,6 +208,7 @@ def main() -> int:
     ap.add_argument("--source", help="dossier HF bf16 pour le bras hf (sinon deux bras)")
     ap.add_argument("--jetons", type=int, default=300)
     ap.add_argument("--texte", default=None, help="fichier texte connu (défaut : acvram/data/calibration-anglais.txt)")
+    ap.add_argument("--sans-decode", action="store_true", help="sauter le bras decode (n pas de décodage)")
     ap.add_argument("--json")
     a = ap.parse_args()
     from acvram.engine.loader import load_model
@@ -165,6 +230,13 @@ def main() -> int:
               "ppl_eval": round(ppl(e), 3), "ppl_serve": round(ppl(s), 3),
               "div_eval_serve": premiere_divergence(e, s),
               "delta_eval_serve_max": round(max(abs(x - y) for x, y in zip(e, s)), 4)})
+    if not a.sans_decode:
+        d = nll_decode(loaded, tok, ids)
+        r.update({"nll_decode": d, "ppl_decode": round(ppl(d), 3),
+                  "nll_decode_mediane": round(sorted(d)[len(d) // 2], 4),
+                  "div_eval_decode": premiere_divergence(e, d),
+                  "delta_eval_decode_max": round(max(abs(x - y) for x, y in zip(e, d)), 4),
+                  "montage_decode_ok": abs(d[0] - e[0]) <= 1e-2, "delta_position_1": round(abs(d[0] - e[0]), 5)})
     if a.source:
         # 22/09 (poste2) : le modèle acvram (28 Go) restait chargé pendant le
         # sous-processus HF → OOM. On le libère AVANT, et on vérifie que la
@@ -191,6 +263,10 @@ def main() -> int:
         json.dump(r, open(a.json, "w"), indent=1)
     print(f"[diag] {r['jetons']} jetons, bos {bos} en tête {r['bos_en_tete']} ; PPL(ctx≥32) eval {r['ppl_eval']} · serve {r['ppl_serve']}"
           + (f" · hf {r['ppl_hf']}" if "ppl_hf" in r else "") + f" ; champs serve {champs}")
+    if "ppl_decode" in r:
+        print(f"  bras decode : PPL(ctx≥32) {r['ppl_decode']} · NLL médiane {r['nll_decode_mediane']} nats · "
+              f"1re divergence eval/decode {r['div_eval_decode']} (|Δ| max {r['delta_eval_decode_max']}) · "
+              f"montage (position 1) {'ok' if r['montage_decode_ok'] else 'FAUX, Δ=' + str(r['delta_position_1'])}")
     print(f"  première divergence eval/serve : {r['div_eval_serve']} (|Δ| max {r['delta_eval_serve_max']})"
           + (f" ; eval/hf : {r['div_eval_hf']} ; serve/hf : {r['div_serve_hf']} ; |Δ| eval−hf médian {r['delta_eval_hf_med']}" if "ppl_hf" in r else ""))
     print(f"  contrôle PPL eval ≤ 30 : {r['controle_eval_ppl_le_30']} ; verdict : {r['verdict']}")
@@ -198,6 +274,17 @@ def main() -> int:
 
 
 def verdict(r: dict) -> str:
+    if "ppl_decode" in r and not r["montage_decode_ok"]:
+        return (f"INVALIDE (bras decode) : à la position 1, contexte d un seul jeton, decode et eval devraient "
+                f"coïncider — Δ = {r['delta_position_1']} > 1e-2. Le bras est mal monté, il ne juge rien.")
+    if "ppl_decode" in r and r["ppl_eval"] > 30:
+        if r["ppl_decode"] <= 30:
+            return (f"P5 : le DÉCODAGE est juste (PPL {r['ppl_decode']} ≤ 30, NLL médiane {r['nll_decode_mediane']}) "
+                    f"et le préfill est faux hors dernière position (PPL eval {r['ppl_eval']}) — divergence dès la "
+                    f"position {r['div_eval_decode']} : masque fenêtré ou positions du préfill, à nommer par couche")
+        return (f"P4 : decode ET préfill à ~{r['nll_decode_mediane']} nats (PPL decode {r['ppl_decode']}, eval "
+                f"{r['ppl_eval']}) — ni l un ni l autre n est en cause : le modèle converti est faux HORS GABARIT "
+                f"de conversation, ou le protocole (BOS, corpus). Suite : le même texte SOUS gabarit, et le bras hf.")
     if "ppl_hf" in r:
         if r["div_eval_hf"] is None and r["div_serve_hf"] is None and r["ppl_eval"] <= 30:
             return "P1 : forward sain (eval ≈ serve ≈ hf) — la pathologie est dans le fenêtrage/corpus de perplexity : rejouer --jetons 1500 (fenêtre locale 1 024)"
