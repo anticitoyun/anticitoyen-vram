@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# telecharger-modele — récupère un modèle depuis Hugging Face et RÉSISTE aux coupures.
+# Le réseau vers HF lâche régulièrement en pleine descente (SSL UNEXPECTED_EOF) :
+# sans reprise automatique, un lot de 80 Go meurt à la première seconde de faiblesse
+# et laisse un fichier tronqué qui SE CHARGE quand même, en produisant du charabia.
+#
+#   telecharger-modele <dépôt> <dossier-destination> [fichier…]
+#   telecharger-modele --file liste.tsv        (dépôt<TAB>destination<TAB>fichiers)
+set -uo pipefail
+
+# parc.toml (acvram-parc) : chemins, ports, clés et moteurs du poste ; rien n'est codé ici
+PARC_LIB_PY=/usr/share/acvram-parc/lib/acvram_parc.py
+_ici=$(dirname "$(readlink -f "$0")"); [ -f "$_ici/../lib/acvram_parc.py" ] && PARC_LIB_PY="$_ici/../lib/acvram_parc.py"
+set -a; eval "$(python3 "$PARC_LIB_PY" --env)"; set +a
+read -r PARC_BIN PARC_TOKENS_TABBY < <(python3 -c "import sys; sys.path.insert(0, '$(dirname "$PARC_LIB_PY")'); from acvram_parc import charger; P = charger(); print(P.bin, P.moteurs.get('tabby', {}).get('tokens') or '-')")
+export PARC_BIN PARC_TOKENS_TABBY
+HF="${PARC_HF/#\~/$HOME}"
+RACINE="${PARC_EXTRA_RACINE_TELECHARGEMENT:-$PARC_RACINE_TELECHARGEMENT}"
+JOURNAL="$RACINE/telechargements.log"
+ESSAIS=${ESSAIS:-40}
+export HF_HUB_ENABLE_HXET=0
+
+c_v=$'\e[32m'; c_r=$'\e[31m'; c_j=$'\e[33m'; c_d=$'\e[2m'; c_0=$'\e[0m'
+[ -t 1 ] || { c_v=''; c_r=''; c_j=''; c_d=''; c_0=''; }
+dire() { printf '%s\n' "$*" | tee -a "$JOURNAL" ; }
+
+# fichiers manquants : compare la liste du dépôt à ce qui est sur le disque.
+# 300 Ko de tokenizer absents sur 14 Go passent inaperçus au contrôle de taille,
+# et le modèle refuse ensuite de charger (« model_file or model_proto must be specified »).
+manquants() {
+  python3 - "$1" "$2" "$3" <<'PYEOF2' 2>/dev/null
+import json, os, sys, time, urllib.request
+depot, dest, motif = sys.argv[1], sys.argv[2], sys.argv[3]
+for _ in range(5):
+    try:
+        t = json.load(urllib.request.urlopen(
+            f"https://huggingface.co/api/models/{depot}/tree/main?recursive=1", timeout=45))
+        break
+    except Exception:
+        time.sleep(4)
+else:
+    sys.exit(1)
+absents = []
+for x in t:
+    if not isinstance(x, dict) or x.get("type") != "file":
+        continue
+    c = x.get("path", "")
+    if motif and c != motif:
+        continue
+    f = os.path.join(dest, c)
+    if not os.path.exists(f) or os.path.getsize(f) < x.get("size", 0):
+        absents.append(c)
+print(" ".join(absents[:6]))
+PYEOF2
+}
+
+# taille attendue, demandée à l'API (source de vérité pour détecter un fichier tronqué)
+attendu() {
+  python3 - "$1" "$2" <<'PY' 2>/dev/null
+import json, sys, urllib.request, time
+depot, motif = sys.argv[1], sys.argv[2]
+for _ in range(5):
+    try:
+        t = json.load(urllib.request.urlopen(
+            f"https://huggingface.co/api/models/{depot}/tree/main?recursive=1", timeout=45))
+        break
+    except Exception:
+        time.sleep(4)
+else:
+    sys.exit(1)
+tot = sum(x.get("size", 0) for x in t
+          if isinstance(x, dict) and x.get("type") == "file"
+          and (not motif or x.get("path") == motif))
+print(tot)
+PY
+}
+
+telecharge() {
+  local depot=$1 dest=$2; shift 2
+  local fichiers=("$@") n=0
+  mkdir -p "$dest"
+  local cible=0
+  if [ ${#fichiers[@]} -eq 1 ]; then cible=$(attendu "$depot" "${fichiers[0]}")
+  elif [ ${#fichiers[@]} -eq 0 ]; then cible=$(attendu "$depot" "")
+  fi
+  while [ "$n" -lt "$ESSAIS" ]; do
+    n=$((n+1))
+    if "$HF" download "$depot" "${fichiers[@]}" --local-dir "$dest" >>"$JOURNAL" 2>&1; then
+      # hf peut sortir 0 sur un fichier tronqué : on recoupe avec la taille de l'API
+      local ici; ici=$(du -sb "$dest" 2>/dev/null | cut -f1)
+      # un « succès » qui laisse un dossier quasi vide est un échec déguisé :
+      # dépôt passé en accès restreint (401) ou renommé.
+      if [ "${ici:-0}" -lt 100000000 ]; then
+        dire "${c_r}VIDE${c_0} $depot → $((ici/1000)) Ko seulement : dépôt inaccessible (401/404) ou renommé"
+        return 1
+      fi
+      if ! [ "${cible:-0}" -gt 0 ] 2>/dev/null; then
+        # sans taille de référence, on ne peut RIEN affirmer : un fichier tronqué
+        # se charge et produit « tensor data is not within the file bounds ».
+        cible=$(attendu "$depot" "${fichiers[0]:-}")
+      fi
+      if [ -n "$cible" ] && [ "$cible" -gt 0 ] 2>/dev/null; then
+        # 2 % de marge : les petits fichiers annexes ne sont pas tous comptés
+        if [ "$ici" -lt $(( cible * 98 / 100 )) ]; then
+          dire "${c_j}  incomplet ($((ici/1000000)) Mo sur $((cible/1000000)) Mo attendus) — reprise $n${c_0}"
+          sleep 5; continue
+        fi
+      fi
+      abs=$(manquants "$depot" "$dest" "${fichiers[0]:-}")
+      if [ -n "$abs" ]; then
+        dire "${c_j}  fichiers manquants ($abs) — reprise $n${c_0}"
+        sleep 5; continue
+      fi
+      if ! [ "${cible:-0}" -gt 0 ] 2>/dev/null; then
+        dire "${c_j}NON VÉRIFIÉ${c_0} $depot → $(basename "$dest") ($((ici/1000000000)) Go) — taille de référence indisponible, relancer plus tard pour contrôle"
+      else
+        dire "${c_v}OK${c_0} $depot → $(basename "$dest") ($((ici/1000000000)) Go, $n essai(s))"
+      fi
+      return 0
+    fi
+    dire "${c_d}  coupure sur $depot, reprise $n/$ESSAIS dans 10 s${c_0}"
+    sleep 10
+  done
+  dire "${c_r}ÉCHEC${c_0} $depot après $ESSAIS essais"
+  return 1
+}
+
+# --a-sec : montre ce qui serait fait, n'écrit NULLE PART (ni journal, ni disque) ; rc 0
+A_SEC=0
+if [ "${1:-}" = --a-sec ]; then A_SEC=1; shift; JOURNAL=/dev/null; fi
+# arguments validés avant la première ligne de journal : un appel sans argument n'écrit rien
+if [ "${1:-}" = --file ]; then
+  [ -n "${2:-}" ] && [ -f "$2" ] || { echo "usage : telecharger-modele [--a-sec] --file liste.tsv" >&2; exit 2; }
+elif [ -z "${1:-}" ] || [ -z "${2:-}" ]; then
+  echo "usage : telecharger-modele [--a-sec] <dépôt> <dossier-destination> [fichier…]" >&2; exit 2
+fi
+if [ "$A_SEC" = 1 ]; then
+  if [ "${1:-}" = --file ]; then
+    while IFS=$'\t' read -r depot dest fichiers; do case "$depot" in ''|\#*) continue ;; esac; echo "à sec : $depot → $dest ${fichiers:+($fichiers)}"; done < "$2"
+  else
+    echo "à sec : $1 → $2 ${3:+(${*:3})}"
+  fi
+  echo "à sec : journal $RACINE/telechargements.log non touché, hf=$HF"; exit 0
+fi
+dire "── $(date '+%F %H:%M') ──"
+if [ "${1:-}" = --file ]; then
+  liste=$2
+  while IFS=$'\t' read -r depot dest fichiers; do
+    case "$depot" in ''|\#*) continue ;; esac
+    # shellcheck disable=SC2086
+    telecharge "$depot" "$dest" $fichiers
+  done < "$liste"
+else
+  telecharge "$@"
+fi
+dire "── terminé $(date '+%H:%M') ──"

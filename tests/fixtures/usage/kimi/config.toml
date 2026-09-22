@@ -1,0 +1,33 @@
+# Fixture usage — 10 alias couvrant les 15 tags (dont heretic, rp, vision,
+# ctx 131072, un « safe »). Servie par le test test_usages_modeles.py ; jamais
+# un vrai parc. Noms de modèles fabriqués pour porter les mots-clés à dériver.
+[models.acvram-coder-agent-30b]
+provider = "acvram"
+model = "Qwen3-Coder-Agent-30B"
+[models.acvram-mistral-safe-long]
+provider = "acvram"
+model = "Mistral-Small-Instruct-2409"
+[models.acvram-story-writer-13b]
+provider = "acvram"
+model = "SomeModel-creative-story-writer"
+[models.acvram-rp-erp-13b]
+provider = "acvram"
+model = "SomeModel-roleplay-erp-lewd"
+[models.acvram-r1-math-32b]
+provider = "acvram"
+model = "DeepSeek-R1-math-thinking"
+[models.acvram-translate-7b]
+provider = "acvram"
+model = "SomeModel-translation-multilingual"
+[models.acvram-rag-summary-7b]
+provider = "acvram"
+model = "SomeModel-summarization-rag"
+[models.llamacpp-gemma-vision]
+provider = "llamacpp"
+model = "gemma-4-27B-it"
+[models.acvram-heretic-uncensored-7b]
+provider = "acvram"
+model = "Qwen-heretic-uncensored"
+[models.acvram-hardcore-porn-7b]
+provider = "acvram"
+model = "SomeModel-porn-xxx-hardcore"
