@@ -255,18 +255,23 @@ protocol pentru toate motoarele (`outils/`, o placă, `energie.py`):
 
 | | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| decodare 12 secvențe | **1 625,5 t/s** | 1 596,1 t/s | — |
+| decodare 12 secvențe | **1 634 t/s** | 1 782 t/s | — |
 | decodare 1 secvență | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | prefill pp2048 | **22 707 tokeni/s** | 21 054 | 8 671 (TabbyAPI, retras) |
 
 Debite din ziua curentă (post 1030, regim eco `-lgc 2700`, pipeline în
 serviciu; eșantionare greedy capturată în graful CUDA, implicită din 0.6.35).
 b=12 este o celulă oficială sigilată (mediana a 6 ferestre întrețesute, ceas pe
-fereastră). Valoarea vLLM 1 596,1 este referința înghețată din 21/09 (vLLM
-neruleat din nou în acea zi): diferența +1,84 % este valabilă la referință egală,
-nu ca remăsurare a ambelor în aceeași dimineață. J/token la ceas egal față de
-cele trei motoare este în curs de remăsurare
-(`outils/gpu/mesure/banc-4moteurs.py`) — o cifră fără regim nu se publică.
+fereastră).
+
+> **Erată (22/09/2026).** Prima publicare a 0.6.35 scotea « +1,84 % înaintea
+> vLLM » dintr-o referință vLLM de 1 596 t/s din 21/09 care venea dintr-o
+> **generare offline** (`LLM().generate()`), **necomparabilă cu un server**:
+> fără planificare continuă, nu calea `acvram serve`. Corectat pe 22/09 cu o
+> celulă alternată A/V (A1 V1 A2 V2 A3 V3) față de **`vllm serve`** (HTTP),
+> aceeași placă și aceeași cale ca `acvram serve`: mediana vLLM **1 782 t/s**.
+> La măsură comparabilă, **acvram (1 634 t/s) este ÎN URMA vLLM cu aproximativ
+> 8 % la b=12**, nu în față. J/token la ceas egal rămâne în remăsurare.
 
 În dimineața de 14/09 acvram era la 630 t/s și 0,619 J/token pe aceeași
 celulă: câștigurile vin din MMA FP4 nativă a lui Blackwell (`mma.sync …
@@ -278,10 +283,11 @@ instrumentul și regimul său — o cifră fără regim nu se publică.
 
 Unde acvram este în față: modelele MLA (GLM-4.7-Flash) în NVFP4 nativ sm_120,
 pe care vLLM le servește doar în FP8 (b=1: 165,35 t/s în serviciu); modelele care
-nu încap în VRAM; și, din 0.6.35, decodarea cu lot mare a unui MoE care încape în
-VRAM — b=12 crește de la 1 540 (0.6.34) la 1 625,5 t/s, adică +1,84 % înaintea
-referinței vLLM înghețate (1 596,1). Diferența rămâne strânsă și la referință
-înghețată; diferența în energie este de remăsurat.
+nu încap în VRAM; și decodarea cu o singură secvență (b=1: 380,8 t/s față de
+290,6 pentru vLLM). La lot mare, în schimb, pe un MoE care încape în VRAM, vLLM
+rămâne în față la b=12 (1 782 față de 1 634 t/s, cf. erată); acvram a progresat
+(1 540 în 0.6.34 → 1 634) fără a trece în față. Diferența în energie este de
+remăsurat.
 
 ## Stare
 

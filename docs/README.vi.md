@@ -246,11 +246,13 @@ thức cho mọi engine (`outils/`, một card, `energie.py`):
 
 | | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| giải mã 12 chuỗi | **1 625,5 t/s** | 1 596,1 t/s | — |
+| giải mã 12 chuỗi | **1 634 t/s** | 1 782 t/s | — |
 | giải mã 1 chuỗi | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | prefill pp2048 | **22 707** token/s | 21 054 | 8 671 (TabbyAPI, đã rút) |
 
-Thông lượng trong ngày (giàn 1030, chế độ tiết kiệm `-lgc 2700`, pipeline đang phục vụ; lấy mẫu tham lam được bắt trong đồ thị CUDA, mặc định từ 0.6.35). b=12 là một ô chính thức đã niêm phong (trung vị của 6 cửa sổ đan xen, xung nhịp theo cửa sổ). Giá trị vLLM 1 596,1 là tham chiếu đóng băng từ 21/09 (vLLM không chạy lại ngày đó): chênh +1,84 % có giá trị ở tham chiếu ngang nhau, không phải như đo lại cả hai cùng một sáng. J/token ở cùng xung nhịp so với ba engine vẫn đang được đo lại (`outils/gpu/mesure/banc-4moteurs.py`) — một con số không có chế độ thì không công bố.
+Thông lượng trong ngày (giàn 1030, chế độ tiết kiệm `-lgc 2700`, pipeline đang phục vụ; lấy mẫu tham lam được bắt trong đồ thị CUDA, mặc định từ 0.6.35). b=12 là một ô chính thức đã niêm phong (trung vị của 6 cửa sổ đan xen, xung nhịp theo cửa sổ).
+
+> **Đính chính (22/09/2026).** Bản công bố đầu tiên của 0.6.35 rút ra «+1,84 % dẫn trước vLLM» từ một tham chiếu vLLM 1 596 t/s ngày 21/09, vốn đến từ một **lần sinh ngoại tuyến** (`LLM().generate()`), **không so sánh được với một máy chủ**: không có lập lịch liên tục, không phải đường đi của `acvram serve`. Đã sửa ngày 22/09 bằng một ô xen kẽ A/V (A1 V1 A2 V2 A3 V3) đối chọi với **`vllm serve`** (HTTP), cùng card và cùng đường đi như `acvram serve`: trung vị vLLM **1 782 t/s**. Ở phép đo so sánh được, **acvram (1 634 t/s) ĐỨNG SAU vLLM khoảng 8 % ở b=12**, không phải dẫn trước. J/token ở cùng xung nhịp vẫn còn phải đo lại.
 
 Sáng 14/09 acvram ở 630 t/s và 0,619 J/token trên cùng ô: mức tăng đến từ
 MMA FP4 gốc của Blackwell (`mma.sync … kind::mxf4nvf4`, ×7,9 so với bf16),
@@ -260,12 +262,12 @@ tensor cho các phép chiếu. Mỗi con số có ghi chú trong `acvram-memoire
 với dự đoán được niêm phong trước khi đo, dụng cụ và chế độ của nó — một con
 số không có chế độ thì không được công bố.
 
-Nơi acvram dẫn trước: các mô hình MLA (GLM-4.7-Flash) ở NVFP4 gốc sm_120
-(b=1: 165,35 t/s đang phục vụ), mà vLLM chỉ phục vụ ở FP8; các mô hình không
-vừa VRAM; và, từ 0.6.35, giải mã lô lớn của một MoE vừa VRAM — b=12 tăng từ
-1 540 (0.6.34) lên 1 625,5 t/s, tức +1,84 % dẫn trước tham chiếu vLLM đóng băng
-(1 596,1). Chênh lệch vẫn hẹp và ở tham chiếu đóng băng; chênh lệch về năng
-lượng còn phải đo lại.
+Nơi acvram dẫn trước: các mô hình MLA (GLM-4.7-Flash) ở NVFP4 gốc sm_120,
+mà vLLM chỉ phục vụ ở FP8 (b=1: 165,35 t/s đang phục vụ); các mô hình không
+vừa VRAM; và giải mã một chuỗi duy nhất (b=1: 380,8 t/s so với 290,6 của vLLM).
+Ngược lại, ở lô lớn, trên một MoE vừa VRAM, vLLM vẫn dẫn trước ở b=12 (1 782 so
+với 1 634 t/s, xem đính chính); acvram đã tiến bộ ở đây (1 540 ở 0.6.34 → 1 634)
+nhưng không vượt lên. Chênh lệch về năng lượng còn phải đo lại.
 
 ## Trạng thái
 

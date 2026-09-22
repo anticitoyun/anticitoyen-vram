@@ -251,11 +251,13 @@ protokoll för alla motorer (`outils/`, ett kort, `energie.py`):
 
 | | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| avkodning, 12 sekvenser | **1 625,5 t/s** | 1 596,1 t/s | — |
+| avkodning, 12 sekvenser | **1 634 t/s** | 1 782 t/s | — |
 | avkodning, 1 sekvens | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | prefill pp2048 | **22 707** token/s | 21 054 | 8 671 (TabbyAPI, tillbakadraget) |
 
-Genomströmning för dagen (rigg 1030, eko-regim `-lgc 2700`, pipeline i drift; girig sampling infångad i CUDA-grafen, standard från 0.6.35). b=12 är en officiell förseglad cell (median av 6 inflätade fönster, klockfrekvens per fönster). Värdet vLLM 1 596,1 är den frysta referensen från 21/09 (vLLM kördes inte om denna dag): skillnaden +1,84 % gäller vid lika referens, inte som ommätning av båda samma morgon. J/token vid lika klockfrekvens mot de tre motorerna är fortfarande under ommätning (`outils/gpu/mesure/banc-4moteurs.py`) — ett tal utan regim publiceras inte.
+Genomströmning för dagen (rigg 1030, eko-regim `-lgc 2700`, pipeline i drift; girig sampling infångad i CUDA-grafen, standard från 0.6.35). b=12 är en officiell förseglad cell (median av 6 inflätade fönster, klockfrekvens per fönster).
+
+> **Erratum (22/09/2026).** Den första publiceringen av 0.6.35 drog «+1,84 % före vLLM» ur en vLLM-referens på 1 596 t/s från 21/09 som kom från en **offline-generering** (`LLM().generate()`), **inte jämförbar med en server**: ingen kontinuerlig schemaläggning, inte vägen för `acvram serve`. Rättat den 22/09 med en alternerande cell A/V (A1 V1 A2 V2 A3 V3) mot **`vllm serve`** (HTTP), samma kort och samma väg som `acvram serve`: vLLM-median **1 782 t/s**. Vid jämförbar mätning ligger **acvram (1 634 t/s) EFTER vLLM med omkring 8 % vid b=12**, inte före. J/token vid lika klockfrekvens återstår att mäta om.
 
 På morgonen den 14/09 låg acvram på 630 t/s och 0,619 J/token i samma cell:
 vinsterna kommer från Blackwells inbyggda FP4-MMA (`mma.sync …
@@ -266,11 +268,12 @@ smal tensorkärne-GEMM för projektionerna. Varje siffra har sin anteckning i
 instrumentet och dess regim — en siffra utan regim publiceras inte.
 
 Där acvram ligger före: MLA-modeller (GLM-4.7-Flash) i inbyggd
-sm_120-NVFP4 (b=1: 165,35 t/s i drift), som vLLM bara serverar i FP8; modeller
-som inte får plats i VRAM; och, från 0.6.35, avkodning med stor batch av en MoE
-som får plats i VRAM — b=12 går från 1 540 (0.6.34) till 1 625,5 t/s, alltså
-+1,84 % före den frysta vLLM-referensen (1 596,1). Skillnaden förblir liten och
-vid fryst referens; skillnaden i energi återstår att mäta om.
+sm_120-NVFP4, som vLLM bara serverar i FP8 (b=1: 165,35 t/s i drift); modeller
+som inte får plats i VRAM; och avkodning av en enda sekvens (b=1: 380,8 t/s mot
+290,6 för vLLM). Vid stor batch däremot, på en MoE som får plats i VRAM, ligger
+vLLM fortfarande före vid b=12 (1 782 mot 1 634 t/s, jfr erratum); acvram har där
+gått framåt (1 540 i 0.6.34 → 1 634) utan att gå om. Skillnaden i energi
+återstår att mäta om.
 
 ## Läge
 

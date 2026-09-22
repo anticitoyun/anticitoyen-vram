@@ -248,18 +248,22 @@ protocol for every engine (`outils/`, one card, `energie.py`):
 
 | | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| decode, 12 sequences | **1,625.5 t/s** | 1,596.1 t/s | — |
+| decode, 12 sequences | **1,634 t/s** | 1,782 t/s | — |
 | decode, 1 sequence | **380.8 t/s** | 290.6 t/s | 323.6 t/s |
 | prefill pp2048 | **22,707 tokens/s** | 21,054 | 8,671 (TabbyAPI, withdrawn) |
 
 Throughput of the day (station 1030, eco regime `-lgc 2700`, pipeline in
 service; greedy sampling captured in the CUDA graph, on by default in 0.6.35).
-The b=12 is the official sealed cell (median of 6 interleaved windows). The
-vLLM 1,596.1 figure is a frozen reference from 21/09 (vLLM not replayed that
-day): the +1.84 % gap holds at equal reference, not as a re-measurement of both
-the same morning. The J/token is still being re-measured
-(`outils/gpu/mesure/banc-4moteurs.py`) — a figure without a regime is not
-published.
+The b=12 is the official sealed cell (median of 6 interleaved windows).
+
+> **Erratum (22/09/2026).** The first release of 0.6.35 drew "+1.84 % ahead of
+> vLLM" from a vLLM reference of 1,596 t/s from 21/09 that came from an
+> **offline generation** (`LLM().generate()`), **not comparable to a server**:
+> no continuous scheduling, not the `acvram serve` path. Corrected on 22/09 with
+> an alternating A/V cell (A1 V1 A2 V2 A3 V3) against **`vllm serve`** (HTTP),
+> same card and same path as `acvram serve`: vLLM median **1,782 t/s**. At
+> comparable measurement, **acvram (1,634 t/s) is BEHIND vLLM by about 8 % at
+> b=12**, not ahead. The J/token at equal clock is still being re-measured.
 
 On the morning of 14/09 acvram was at 630 t/s and 0.619 J/token on the same
 cell: the gains come from Blackwell's native FP4 MMA
@@ -272,10 +276,10 @@ published.
 
 Where acvram is ahead: MLA models (GLM-4.7-Flash) in native sm_120 NVFP4,
 which vLLM only serves in FP8 (b=1: 165.35 t/s in service); models that do
-not fit in VRAM; and, since 0.6.35, large-batch decoding of a MoE that fits in
-VRAM — b=12 rises from 1,540 (0.6.34) to 1,625.5 t/s, i.e. +1.84 % ahead of the
-frozen vLLM reference (1,596.1). The gap stays narrow and at a frozen reference;
-the energy gap is to be re-measured.
+not fit in VRAM; and single-sequence decoding (b=1: 380.8 t/s versus 290.6 for
+vLLM). At large batch, however, on a MoE that fits in VRAM, vLLM stays ahead at
+b=12 (1,782 versus 1,634 t/s, see erratum); acvram has improved here (1,540 in
+0.6.34 → 1,634) without moving ahead. The energy gap is to be re-measured.
 
 ## Status
 

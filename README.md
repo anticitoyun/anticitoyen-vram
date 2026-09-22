@@ -255,17 +255,23 @@ protocole pour tous les moteurs (`outils/`, une carte, `energie.py`) :
 
 | | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| décodage 12 séquences | **1 625,5 t/s** | 1 596,1 t/s | — |
+| décodage 12 séquences | **1 634 t/s** | 1 782 t/s | — |
 | décodage 1 séquence | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | prefill pp2048 | **22 707 jetons/s** | 21 054 | 8 671 (TabbyAPI, retiré) |
 
 Débits du jour (poste 1030, régime éco `-lgc 2700`, pipeline en service ;
 échantillonnage glouton capturé dans le graphe CUDA, défaut de 0.6.35). Le b=12
-est une cellule officielle scellée (médiane de 6 fenêtres intercalées, horloge par
-fenêtre). La valeur vLLM 1 596,1 est la référence figée du 21/09 (vLLM non rejoué
-ce jour) : l'écart +1,84 % vaut à référence égale, pas comme remesure des deux le
-même matin. Le J/jeton à horloge égale contre les trois moteurs reste en remesure
-(`outils/gpu/mesure/banc-4moteurs.py`) — un chiffre sans régime n'est pas publié.
+acvram est une cellule officielle scellée (médiane de 6 fenêtres intercalées,
+horloge par fenêtre).
+
+> **Erratum (22/09/2026).** La première publication de 0.6.35 tirait « +1,84 %
+> devant vLLM » d'une référence vLLM de 1 596 t/s du 21/09 qui venait d'une
+> **génération hors ligne** (`LLM().generate()`), **non comparable à un serveur** :
+> pas d'ordonnancement continu, pas le chemin de `acvram serve`. Corrigé le 22/09
+> par une cellule alternée A/V (A1 V1 A2 V2 A3 V3) contre **`vllm serve`** (HTTP),
+> même carte et même chemin que `acvram serve` : vLLM médiane **1 782 t/s**. À
+> mesure comparable, **acvram (1 634 t/s) est DERRIÈRE vLLM d'environ 8 % à b=12**,
+> pas devant. Le J/jeton à horloge égale reste en remesure.
 
 Le 14/09 au matin acvram était à 630 t/s et 0,619 J/jeton sur la même
 cellule : les gains viennent de la MMA FP4 native de Blackwell
@@ -277,10 +283,10 @@ mesure, l'instrument et son régime — un chiffre sans régime n'est pas publi�
 
 Où acvram est devant : modèles MLA (GLM-4.7-Flash) en NVFP4 natif sm_120, que
 vLLM ne sert qu'en FP8 (b=1 : 165,35 t/s en service) ; les modèles qui ne
-tiennent pas en VRAM ; et, depuis 0.6.35, le décodage à grand lot d'un MoE qui
-tient en VRAM — b=12 passe de 1 540 (0.6.34) à 1 625,5 t/s, soit +1,84 % devant
-la référence vLLM figée (1 596,1). L'écart reste étroit et à référence figée ;
-l'écart en énergie est à remesurer.
+tiennent pas en VRAM ; et le décodage à séquence unique (b=1 : 380,8 t/s contre
+290,6 pour vLLM). À grand lot en revanche, sur un MoE qui tient en VRAM, vLLM
+reste devant à b=12 (1 782 contre 1 634 t/s, cf. erratum) ; acvram y a progressé
+(1 540 en 0.6.34 → 1 634) sans passer devant. L'écart en énergie est à remesurer.
 
 ## État
 

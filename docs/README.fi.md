@@ -254,18 +254,15 @@ protokolla kaikille moottoreille (`outils/`, yksi kortti, `energie.py`):
 
 | | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| dekoodaus, 12 sekvenssiä | **1 625,5 t/s** | 1 596,1 t/s | — |
+| dekoodaus, 12 sekvenssiä | **1 634 t/s** | 1 782 t/s | — |
 | dekoodaus, 1 sekvenssi | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | prefill pp2048 | **22 707 tokenia/s** | 21 054 | 8 671 (TabbyAPI, vedetty pois) |
 
 Päivän läpimenot (asema 1030, säästöajotila `-lgc 2700`, liukuhihna palvelussa;
 ahne otanta talletettu CUDA-graafiin, version 0.6.35 oletus). b=12 on virallinen
-sinetöity solu (6 lomitetun ikkunan mediaani, kello ikkunaa kohden). vLLM-arvo
-1 596,1 on 21.9. jäädytetty viite (vLLM:ää ei ajettu uudelleen sinä päivänä):
-ero +1,84 % pätee yhtäläisellä viitteellä, ei molempien uusintamittauksena
-samana aamuna. J/token samalla kellotaajuudella kolmea moottoria vastaan on yhä
-uusintamittauksessa (`outils/gpu/mesure/banc-4moteurs.py`) — lukua ilman ajotilaa
-ei julkaista.
+sinetöity solu (6 lomitetun ikkunan mediaani, kello ikkunaa kohden).
+
+> **Erratum (22.9.2026).** Version 0.6.35 ensimmäinen julkaisu johti tuloksen « +1,84 % vLLM:n edellä » vLLM-viitteestä 1 596 t/s (21.9.), joka tuli offline-generoinnista (`LLM().generate()`), ei vertailukelpoinen palvelimeen: ei jatkuvaa ajoitusta, ei `acvram serve` -polkua. Korjattu 22.9. vuorottelevalla A/V-solulla (A1 V1 A2 V2 A3 V3) `vllm serve` -palvelinta (HTTP) vastaan, sama kortti ja sama polku kuin `acvram serve`: vLLM:n mediaani 1 782 t/s. Vertailukelpoisella mittauksella acvram (1 634 t/s) on b=12:ssa noin 8 % vLLM:n JÄLJESSÄ, ei edellä. J/token samalla kellotaajuudella on yhä uusintamittauksessa.
 
 Aamulla 14.9. acvram oli samassa solussa 630 t/s ja 0,619 J/token: parannukset
 tulevat Blackwellin natiivista FP4-MMA:sta (`mma.sync … kind::mxf4nvf4`, ×7,9
@@ -278,10 +275,11 @@ julkaista.
 
 Missä acvram on edellä: MLA-mallit (GLM-4.7-Flash) natiivina sm_120-NVFP4:nä,
 joita vLLM tarjoilee vain FP8:na (b=1: 165,35 t/s palvelussa); mallit, jotka
-eivät mahdu VRAM-muistiin; ja, versiosta 0.6.35 lähtien, VRAM-muistiin mahtuvan
-MoE:n suurten erien dekoodaus — b=12 nousee arvosta 1 540 (0.6.34) arvoon
-1 625,5 t/s, eli +1,84 % jäädytetyn vLLM-viitteen (1 596,1) edellä. Ero pysyy
-kapeana ja jäädytetyllä viitteellä; energiaero on mitattava uudelleen.
+eivät mahdu VRAM-muistiin; ja yhden sekvenssin dekoodaus (b=1: 380,8 t/s vLLM:n
+290,6:ta vastaan). Suurilla erillä sen sijaan, VRAM-muistiin mahtuvassa MoE:ssä,
+vLLM pysyy edellä b=12:ssa (1 782 vastaan 1 634 t/s, vrt. erratum); acvram on
+siinä edistynyt (1 540 versiossa 0.6.34 → 1 634) menemättä edelle. Energiaero on
+mitattava uudelleen.
 
 ## Tila
 

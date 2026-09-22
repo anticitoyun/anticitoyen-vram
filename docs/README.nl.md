@@ -258,19 +258,24 @@ protocol voor alle engines (`outils/`, één kaart, `energie.py`):
 
 | | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| decoderen, 12 sequenties | **1 625,5 t/s** | 1 596,1 t/s | — |
+| decoderen, 12 sequenties | **1 634 t/s** | 1 782 t/s | — |
 | decoderen, 1 sequentie | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | prefill pp2048 | **22 707 tokens/s** | 21 054 | 8 671 (TabbyAPI, ingetrokken) |
 
 Doorvoer van de dag (werkstation 1030, eco-regime `-lgc 2700`, pipeline in
 bedrijf; greedy sampling vastgelegd in de CUDA-graaf, standaard sinds 0.6.35).
 b=12 is een verzegelde officiële cel (mediaan van 6 verweven vensters, klok per
-venster). De vLLM-waarde 1 596,1 is de bevroren referentie van 21/09 (vLLM die
-dag niet opnieuw uitgevoerd): het verschil +1,84 % geldt bij gelijke referentie,
-niet als hermeting van beide op dezelfde ochtend. De J/token bij gelijke klok
-tegen de drie engines wordt opnieuw gemeten
-(`outils/gpu/mesure/banc-4moteurs.py`) — een getal zonder regime wordt niet
-gepubliceerd.
+venster).
+
+> **Erratum (22/09/2026).** De eerste publicatie van 0.6.35 haalde « +1,84 %
+> vóór vLLM » uit een vLLM-referentie van 1 596 t/s van 21/09 die afkomstig was
+> van een **offline generatie** (`LLM().generate()`), **niet vergelijkbaar met
+> een server**: geen doorlopende scheduling, niet het pad van `acvram serve`.
+> Op 22/09 gecorrigeerd met een afwisselende A/V-cel (A1 V1 A2 V2 A3 V3) tegen
+> **`vllm serve`** (HTTP), dezelfde kaart en hetzelfde pad als `acvram serve`:
+> vLLM-mediaan **1 782 t/s**. Bij vergelijkbare meting zit **acvram (1 634 t/s)
+> ACHTER vLLM met ongeveer 8 % bij b=12**, niet ervoor. De J/token bij gelijke
+> klok wordt nog opnieuw gemeten.
 
 Op de ochtend van 14/09 zat acvram op 630 t/s en 0,619 J/token in dezelfde
 cel: de winst komt van Blackwells native FP4-MMA (`mma.sync …
@@ -282,10 +287,11 @@ instrument en zijn regime — een cijfer zonder regime wordt niet gepubliceerd.
 
 Waar acvram voorop loopt: MLA-modellen (GLM-4.7-Flash) in native sm_120-NVFP4,
 die vLLM alleen in FP8 bedient (b=1: 165,35 t/s in bedrijf); modellen die niet in
-VRAM passen; en, sinds 0.6.35, het decoderen met grote batch van een MoE dat in
-VRAM past — b=12 gaat van 1 540 (0.6.34) naar 1 625,5 t/s, oftewel +1,84 % vóór
-de bevroren vLLM-referentie (1 596,1). Het verschil blijft klein en bij bevroren
-referentie; het energieverschil moet opnieuw worden gemeten.
+VRAM passen; en het decoderen met één sequentie (b=1: 380,8 t/s tegen 290,6 voor
+vLLM). Bij grote batch daarentegen, op een MoE dat in VRAM past, blijft vLLM
+voorop bij b=12 (1 782 tegen 1 634 t/s, zie erratum); acvram is vooruitgegaan
+(1 540 in 0.6.34 → 1 634) zonder voorbij te gaan. Het energieverschil moet
+opnieuw worden gemeten.
 
 ## Stand van zaken
 

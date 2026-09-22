@@ -253,18 +253,15 @@ yang sama untuk semua mesin (`outils/`, satu kartu, `energie.py`):
 
 | | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| dekode 12 urutan | **1 625,5 t/s** | 1 596,1 t/s | — |
+| dekode 12 urutan | **1 634 t/s** | 1 782 t/s | — |
 | dekode 1 urutan | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | prefill pp2048 | **22 707 token/s** | 21 054 | 8 671 (TabbyAPI, ditarik) |
 
 Throughput hari ini (stasiun 1030, rezim hemat `-lgc 2700`, pipeline dalam
 layanan; sampling serakah yang ditangkap dalam graf CUDA, bawaan 0.6.35). b=12
 adalah sel resmi tersegel (median dari 6 jendela terjalin, clock per jendela).
-Nilai vLLM 1 596,1 adalah rujukan beku 21/09 (vLLM tidak dijalankan ulang hari
-itu): selisih +1,84% berlaku pada rujukan setara, bukan sebagai pengukuran ulang
-keduanya di pagi yang sama. J/token pada clock yang sama terhadap ketiga mesin
-masih diukur ulang (`outils/gpu/mesure/banc-4moteurs.py`) — angka tanpa rezim
-tidak dipublikasikan.
+
+> **Erratum (22/09/2026).** Publikasi pertama 0.6.35 menarik « +1,84% di depan vLLM » dari rujukan vLLM sebesar 1 596 t/s tanggal 21/09 yang berasal dari generasi luring (`LLM().generate()`), tidak sebanding dengan sebuah server: tanpa penjadwalan kontinu, tanpa jalur `acvram serve`. Dikoreksi pada 22/09 dengan sel berselang-seling A/V (A1 V1 A2 V2 A3 V3) melawan `vllm serve` (HTTP), kartu yang sama dan jalur yang sama seperti `acvram serve`: median vLLM 1 782 t/s. Pada pengukuran yang sebanding, acvram (1 634 t/s) berada DI BELAKANG vLLM sekitar 8% pada b=12, bukan di depan. J/token pada clock yang sama masih dalam pengukuran ulang.
 
 Pagi 14/09 acvram berada di 630 t/s dan 0,619 J/token pada sel yang sama:
 perolehan datang dari MMA FP4 asli Blackwell (`mma.sync … kind::mxf4nvf4`,
@@ -276,10 +273,11 @@ instrumen, dan rezimnya — angka tanpa rezim tidak dipublikasikan.
 
 Di mana acvram unggul: model MLA (GLM-4.7-Flash) dalam NVFP4 asli sm_120, yang
 hanya dilayani vLLM dalam FP8 (b=1: 165,35 t/s dalam layanan); model yang tidak
-muat di VRAM; dan, sejak 0.6.35, dekode batch besar dari MoE yang muat di VRAM —
-b=12 naik dari 1 540 (0.6.34) ke 1 625,5 t/s, yaitu +1,84% di depan rujukan vLLM
-beku (1 596,1). Selisihnya tetap sempit dan pada rujukan beku; selisih energi
-masih harus diukur ulang.
+muat di VRAM; dan dekode urutan tunggal (b=1: 380,8 t/s berbanding 290,6 untuk
+vLLM). Sebaliknya pada batch besar, pada MoE yang muat di VRAM, vLLM tetap unggul
+pada b=12 (1 782 berbanding 1 634 t/s, lih. erratum); acvram telah maju di sana
+(1 540 pada 0.6.34 → 1 634) tanpa melampaui. Selisih energi masih harus diukur
+ulang.
 
 ## Status
 

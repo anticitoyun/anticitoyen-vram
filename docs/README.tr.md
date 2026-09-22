@@ -249,11 +249,13 @@ motorlar için aynı protokol (`outils/`, tek kart, `energie.py`):
 
 | | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| çözümleme, 12 dizi | **1 625,5 j/s** | 1 596,1 j/s | — |
+| çözümleme, 12 dizi | **1 634 j/s** | 1 782 j/s | — |
 | çözümleme, 1 dizi | **380,8 j/s** | 290,6 j/s | 323,6 j/s |
 | prefill pp2048 | **22 707** jeton/s | 21 054 | 8 671 (TabbyAPI, geri çekildi) |
 
-Günün verimi (tezgâh 1030, eko rejim `-lgc 2700`, hizmetteki ardışık düzen; açgözlü örnekleme CUDA grafiğinde yakalanmış, 0.6.35'ten beri varsayılan). b=12, resmî mühürlü bir hücredir (6 iç içe geçmiş pencerenin medyanı, pencere başına saat frekansı). vLLM 1 596,1 değeri 21/09'dan dondurulmuş referanstır (vLLM o gün yeniden çalıştırılmadı): +1,84 % fark eşit referansta geçerlidir, ikisinin aynı sabah yeniden ölçülmesi olarak değil. Üç motora karşı eşit saat frekansında J/jeton hâlâ yeniden ölçülüyor (`outils/gpu/mesure/banc-4moteurs.py`) — rejimi olmayan bir sayı yayımlanmaz.
+Günün verimi (tezgâh 1030, eko rejim `-lgc 2700`, hizmetteki ardışık düzen; açgözlü örnekleme CUDA grafiğinde yakalanmış, 0.6.35'ten beri varsayılan). b=12, resmî mühürlü bir hücredir (6 iç içe geçmiş pencerenin medyanı, pencere başına saat frekansı).
+
+> **Erratum (22/09/2026).** 0.6.35'in ilk yayını, «vLLM'in +1,84 % önünde» ifadesini 21/09 tarihli 1 596 j/s'lik bir vLLM referansından çıkarıyordu; bu referans bir **çevrimdışı üretimden** (`LLM().generate()`) geliyordu ve **bir sunucuyla kıyaslanamaz**: sürekli zamanlama yok, `acvram serve` yolu değil. 22/09'da, `acvram serve` ile aynı kart ve aynı yol üzerinde **`vllm serve`** (HTTP) karşısında dönüşümlü bir A/V hücresiyle (A1 V1 A2 V2 A3 V3) düzeltildi: vLLM medyanı **1 782 j/s**. Kıyaslanabilir ölçümde **acvram (1 634 j/s), b=12'de vLLM'in yaklaşık 8 % GERİSİNDE**, önünde değil. Eşit saat frekansında J/jeton yeniden ölçümde kalıyor.
 
 14/09 sabahı acvram aynı hücrede 630 j/s ve 0,619 J/jeton'daydı: kazanımlar
 Blackwell'in yerli FP4 MMA'sından (`mma.sync … kind::mxf4nvf4`, bf16'ya göre
@@ -265,10 +267,10 @@ rejimsiz bir rakam yayımlanmaz.
 
 acvram'ın önde olduğu yer: vLLM'in yalnızca FP8'de sunduğu, yerli sm_120
 NVFP4'teki MLA modelleri (GLM-4.7-Flash, b=1: hizmette 165,35 j/s); VRAM'e
-sığmayan modeller; ve 0.6.35'ten beri, VRAM'e sığan bir MoE'nin büyük yığınlı
-çözümlemesi — b=12, 1 540'tan (0.6.34) 1 625,5 j/s'ye çıkar, yani dondurulmuş
-vLLM referansının (1 596,1) +1,84 % önünde. Fark dar kalır ve dondurulmuş
-referanstadır; enerjideki fark yeniden ölçülecek.
+sığmayan modeller; ve tek dizilik çözümleme (b=1: vLLM için 290,6'ya karşı
+380,8 j/s). Büyük yığında ise, VRAM'e sığan bir MoE üzerinde vLLM b=12'de önde
+kalır (1 782'ye karşı 1 634 j/s, bkz. erratum); acvram burada ilerledi (0.6.34'te
+1 540 → 1 634) ama öne geçmedi. Enerjideki fark yeniden ölçülecek.
 
 ## Durum
 

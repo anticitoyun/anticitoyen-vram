@@ -251,18 +251,23 @@ protokół dla wszystkich silników (`outils/`, jedna karta, `energie.py`):
 
 | | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| dekodowanie 12 sekwencji | **1 625,5 t/s** | 1 596,1 t/s | — |
+| dekodowanie 12 sekwencji | **1 634 t/s** | 1 782 t/s | — |
 | dekodowanie 1 sekwencji | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | prefill pp2048 | **22 707 tokenów/s** | 21 054 | 8 671 (TabbyAPI, wycofane) |
 
 Przepustowość dnia (stanowisko 1030, reżim eko `-lgc 2700`, potok w działaniu;
 próbkowanie zachłanne ujęte w grafie CUDA, domyślne od 0.6.35). b=12 to
 zapieczętowana oficjalna komórka (mediana z 6 przeplatanych okien, zegar na
-okno). Wartość vLLM 1 596,1 to zamrożone odniesienie z 21.09 (vLLM tego dnia nie
-uruchomiono ponownie): różnica +1,84 % obowiązuje przy równym odniesieniu, a nie
-jako ponowny pomiar obu tego samego ranka. J/token przy równym zegarze wobec
-trzech silników jest ponownie mierzony
-(`outils/gpu/mesure/banc-4moteurs.py`) — liczba bez reżimu nie jest publikowana.
+okno).
+
+> **Erratum (22.09.2026).** Pierwsza publikacja 0.6.35 wyciągała « +1,84 %
+> przed vLLM » z odniesienia vLLM 1 596 t/s z 21.09, które pochodziło z
+> **generacji offline** (`LLM().generate()`), **nieporównywalnej z serwerem**:
+> brak ciągłego szeregowania, nie ścieżka `acvram serve`. Poprawione 22.09
+> naprzemienną komórką A/V (A1 V1 A2 V2 A3 V3) wobec **`vllm serve`** (HTTP), ta
+> sama karta i ta sama ścieżka co `acvram serve`: mediana vLLM **1 782 t/s**.
+> Przy porównywalnym pomiarze **acvram (1 634 t/s) jest ZA vLLM o około 8 % przy
+> b=12**, nie przed. J/token przy równym zegarze pozostaje w ponownym pomiarze.
 
 Rankiem 14.09 acvram miał w tej samej komórce 630 t/s i 0,619 J/token: zyski
 pochodzą z natywnego MMA FP4 Blackwella (`mma.sync … kind::mxf4nvf4`, ×7,9
@@ -274,10 +279,11 @@ instrumentem i jego reżimem — liczby bez reżimu się nie publikuje.
 
 Gdzie acvram jest z przodu: modele MLA (GLM-4.7-Flash) w natywnym NVFP4
 sm_120, które vLLM serwuje tylko w FP8 (b=1: 165,35 t/s w działaniu); modele
-niemieszczące się w VRAM; oraz, od 0.6.35, dekodowanie dużych partii MoE
-mieszczącego się w VRAM — b=12 rośnie z 1 540 (0.6.34) do 1 625,5 t/s, czyli
-+1,84 % przed zamrożonym odniesieniem vLLM (1 596,1). Różnica pozostaje niewielka
-i przy zamrożonym odniesieniu; różnicę w energii trzeba zmierzyć ponownie.
+niemieszczące się w VRAM; oraz dekodowanie pojedynczej sekwencji (b=1: 380,8 t/s
+wobec 290,6 dla vLLM). Przy dużej partii natomiast, na MoE mieszczącym się w
+VRAM, vLLM pozostaje z przodu przy b=12 (1 782 wobec 1 634 t/s, por. erratum);
+acvram poczynił postęp (1 540 w 0.6.34 → 1 634), nie wychodząc na prowadzenie.
+Różnicę w energii trzeba zmierzyć ponownie.
 
 ## Stan
 

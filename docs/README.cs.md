@@ -248,17 +248,22 @@ protokol pro všechny motory (`outils/`, jedna karta, `energie.py`):
 
 | | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| dekódování 12 sekvencí | **1 625,5 t/s** | 1 596,1 t/s | — |
+| dekódování 12 sekvencí | **1 634 t/s** | 1 782 t/s | — |
 | dekódování 1 sekvence | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | prefill pp2048 | **22 707 tokenů/s** | 21 054 | 8 671 (TabbyAPI, staženo) |
 
 Propustnost dne (stanice 1030, úsporný režim `-lgc 2700`, pipeline v provozu;
 hladové vzorkování zachycené v grafu CUDA, ve verzi 0.6.35 zapnuté ve výchozím
 nastavení). b=12 je oficiální zapečetěná buňka (medián ze 6 prokládaných oken).
-Hodnota vLLM 1 596,1 je zmrazená reference z 21. 9. (vLLM ten den nebyl znovu
-spuštěn): rozdíl +1,84 % platí při stejné referenci, ne jako nové změření obou
-téhož rána. J/token se stále znovu měří
-(`outils/gpu/mesure/banc-4moteurs.py`) — číslo bez režimu se nepublikuje.
+
+> **Erratum (22. 9. 2026).** První zveřejnění verze 0.6.35 odvozovalo
+> „+1,84 % před vLLM“ z referenční hodnoty vLLM 1 596 t/s z 21. 9., která
+> pocházela z **offline generování** (`LLM().generate()`), **nesrovnatelného se
+> serverem**: bez průběžného plánování, bez cesty `acvram serve`. Opraveno
+> 22. 9. střídavou buňkou A/V (A1 V1 A2 V2 A3 V3) proti **`vllm serve`** (HTTP),
+> stejná karta a stejná cesta jako `acvram serve`: vLLM medián **1 782 t/s**.
+> Při srovnatelném měření je **acvram (1 634 t/s) ZA vLLM přibližně o 8 % při
+> b=12**, ne před ním. J/token při stejných hodinách se stále znovu měří.
 
 Ráno 14. 9. byl acvram ve stejné buňce na 630 t/s a 0,619 J/token: zisky
 pocházejí z nativního FP4 MMA Blackwellu (`mma.sync … kind::mxf4nvf4`, ×7,9
@@ -270,10 +275,11 @@ jeho režimem — číslo bez režimu se nezveřejňuje.
 
 Kde je acvram napřed: modely MLA (GLM-4.7-Flash) v nativním NVFP4 sm_120,
 které vLLM obsluhuje jen v FP8 (b=1: 165,35 t/s v provozu); modely, které se
-nevejdou do VRAM; a od verze 0.6.35 také dekódování velkých dávek MoE, který se
-do VRAM vejde — b=12 stoupá z 1 540 (0.6.34) na 1 625,5 t/s, tedy +1,84 % před
-zmrazenou referencí vLLM (1 596,1). Rozdíl zůstává těsný a při zmrazené
-referenci; rozdíl v energii je třeba znovu změřit.
+nevejdou do VRAM; a dekódování jediné sekvence (b=1: 380,8 t/s oproti 290,6 u
+vLLM). U velkých dávek naopak, u MoE, který se do VRAM vejde, zůstává vLLM
+napřed při b=12 (1 782 oproti 1 634 t/s, viz erratum); acvram se zde zlepšil
+(1 540 v 0.6.34 → 1 634), aniž by se dostal napřed. Rozdíl v energii je třeba
+znovu změřit.
 
 ## Stav
 

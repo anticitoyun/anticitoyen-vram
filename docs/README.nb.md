@@ -252,17 +252,24 @@ protokoll for alle motorer (`outils/`, ett kort, `energie.py`):
 
 | | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| dekoding, 12 sekvenser | **1 625,5 t/s** | 1 596,1 t/s | — |
+| dekoding, 12 sekvenser | **1 634 t/s** | 1 782 t/s | — |
 | dekoding, 1 sekvens | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | prefill pp2048 | **22 707 token/s** | 21 054 | 8 671 (TabbyAPI, trukket) |
 
 Gjennomstrømning for dagen (arbeidsstasjon 1030, øko-regime `-lgc 2700`,
 pipeline i drift; grådig sampling fanget i CUDA-grafen, standard fra 0.6.35).
 b=12 er en forseglet offisiell celle (median av 6 flettede vinduer, klokke per
-vindu). vLLM-verdien 1 596,1 er den frosne referansen fra 21/09 (vLLM ikke kjørt
-på nytt den dagen): avviket +1,84 % gjelder ved lik referanse, ikke som ny måling
-av begge samme morgen. J/token ved lik klokke mot de tre motorene måles på nytt
-(`outils/gpu/mesure/banc-4moteurs.py`) — et tall uten regime publiseres ikke.
+vindu).
+
+> **Erratum (22/09/2026).** Den første publiseringen av 0.6.35 hentet « +1,84 %
+> foran vLLM » fra en vLLM-referanse på 1 596 t/s fra 21/09 som kom fra en
+> **offline generering** (`LLM().generate()`), **ikke sammenlignbar med en
+> server**: ingen kontinuerlig planlegging, ikke stien til `acvram serve`.
+> Korrigert 22/09 med en vekslende A/V-celle (A1 V1 A2 V2 A3 V3) mot
+> **`vllm serve`** (HTTP), samme kort og samme sti som `acvram serve`: vLLM
+> median **1 782 t/s**. Ved sammenlignbar måling er **acvram (1 634 t/s) BAK
+> vLLM med omtrent 8 % ved b=12**, ikke foran. J/token ved lik klokke måles
+> fortsatt på nytt.
 
 Om morgenen 14/09 lå acvram på 630 t/s og 0,619 J/token i samme celle:
 gevinstene kommer fra Blackwells innebygde FP4-MMA (`mma.sync …
@@ -274,10 +281,10 @@ og regimet dets — et tall uten regime publiseres ikke.
 
 Der acvram ligger foran: MLA-modeller (GLM-4.7-Flash) i innebygd
 sm_120-NVFP4, som vLLM bare serverer i FP8 (b=1: 165,35 t/s i drift); modeller
-som ikke får plass i VRAM; og, fra 0.6.35, dekoding med stor batch av en MoE som
-får plass i VRAM — b=12 går fra 1 540 (0.6.34) til 1 625,5 t/s, altså +1,84 %
-foran den frosne vLLM-referansen (1 596,1). Avviket er fortsatt lite og ved
-frosen referanse; energiavviket må måles på nytt.
+som ikke får plass i VRAM; og dekoding med én sekvens (b=1: 380,8 t/s mot 290,6
+for vLLM). Ved stor batch derimot, på en MoE som får plass i VRAM, ligger vLLM
+fortsatt foran ved b=12 (1 782 mot 1 634 t/s, jf. erratum); acvram har gått fram
+(1 540 i 0.6.34 → 1 634) uten å gå forbi. Energiavviket må måles på nytt.
 
 ## Status
 
