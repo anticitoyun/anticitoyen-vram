@@ -255,18 +255,16 @@ protokoll minden motorra (`outils/`, egy kártya, `energie.py`):
 
 | | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| dekódolás, 12 szekvencia | **1 625,5 t/s** | 1 596,1 t/s | — |
+| dekódolás, 12 szekvencia | **1 634 t/s** | 1 782 t/s | — |
 | dekódolás, 1 szekvencia | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | prefill pp2048 | **22 707 token/s** | 21 054 | 8 671 (TabbyAPI, visszavonva) |
 
 A napi átbocsátások (1030-as állomás, `-lgc 2700` takarékos üzem, szolgálatban
 lévő futószalag; a CUDA-gráfba rögzített mohó mintavételezés, a 0.6.35
 alapértelmezése). A b=12 hivatalos, lepecsételt cella (6 összefésült ablak
-mediánja, ablakonkénti órajel). Az 1 596,1-es vLLM-érték a 09. 21-i befagyasztott
-referencia (a vLLM-et aznap nem futtatták újra): a +1,84%-os eltérés azonos
-referencián érvényes, nem mindkettő ugyanazon reggeli újramérésaként. A J/tokent
-azonos órajelen a három motorral szemben még mindig újramérik
-(`outils/gpu/mesure/banc-4moteurs.py`) — üzem nélküli szám nem jelenik meg.
+mediánja, ablakonkénti órajel).
+
+> **Erratum (2026. 09. 22.).** A 0.6.35 első közleménye a « +1,84%-kal a vLLM előtt » állítást egy 09. 21-i, 1 596 t/s-os vLLM-referenciából vonta le, amely offline generálásból (`LLM().generate()`) származott, és nem összevethető egy szerverrel: nincs folytonos ütemezés, nincs meg az `acvram serve` útvonala. Kijavítva 09. 22-én egy váltakozó A/V-cellával (A1 V1 A2 V2 A3 V3) a `vllm serve` (HTTP) ellenében, ugyanazon a kártyán és ugyanazon az útvonalon, mint az `acvram serve`: a vLLM mediánja 1 782 t/s. Összevethető mérésen az acvram (1 634 t/s) b=12-nél mintegy 8%-kal a vLLM MÖGÖTT van, nem előtte. A J/token azonos órajelen továbbra is újramérés alatt áll.
 
 09. 14. reggelén az acvram ugyanebben a cellában 630 t/s-on és 0,619
 J/tokenen állt: a nyereség a Blackwell natív FP4 MMA-jából
@@ -279,10 +277,11 @@ műszerrel és annak üzemével — üzem nélküli szám nem jelenik meg.
 
 Ahol az acvram elöl jár: MLA-modellek (GLM-4.7-Flash) natív sm_120 NVFP4-ben,
 amelyeket a vLLM csak FP8-ban szolgál ki (b=1: 165,35 t/s szolgálatban); a
-VRAM-ba nem férő modellek; és, a 0.6.35 óta, egy VRAM-ba férő MoE nagy kötegű
-dekódolása — a b=12 1 540-ről (0.6.34) 1 625,5 t/s-ra nő, azaz +1,84%-kal a
-befagyasztott vLLM-referencia (1 596,1) előtt. Az eltérés szűk marad és
-befagyasztott referencián; az energiában mutatkozó eltérést újra kell mérni.
+VRAM-ba nem férő modellek; és az egyetlen szekvencia dekódolása (b=1: 380,8 t/s a
+vLLM 290,6-ával szemben). Nagy kötegnél viszont, egy VRAM-ba férő MoE-n, a vLLM
+b=12-nél elöl marad (1 782 az 1 634 t/s-sal szemben, vö. erratum); az acvram itt
+előrelépett (1 540 a 0.6.34-ben → 1 634), de nem került elé. Az energiában
+mutatkozó eltérést újra kell mérni.
 
 ## Állapot
 

@@ -254,18 +254,16 @@ protokolo por ĉiuj motoroj (`outils/`, unu karto, `energie.py`):
 
 | | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| malkodado 12 sekvencoj | **1 625,5 ĵ/s** | 1 596,1 ĵ/s | — |
+| malkodado 12 sekvencoj | **1 634 ĵ/s** | 1 782 ĵ/s | — |
 | malkodado 1 sekvenco | **380,8 ĵ/s** | 290,6 ĵ/s | 323,6 ĵ/s |
 | prefill pp2048 | **22 707 ĵetonoj/s** | 21 054 | 8 671 (TabbyAPI, retirita) |
 
 Trafluoj de la tago (posteno 1030, ŝparreĝimo `-lgc 2700`, dukto en servo;
 avida specimenado kaptita en la CUDA-grafo, defaŭlto de 0.6.35). La b=12 estas
 oficiala sigelita ĉelo (mediano de 6 interplektitaj fenestroj, horloĝo laŭ
-fenestro). La vLLM-valoro 1 596,1 estas la fiksita referenco de la 21/09 (vLLM
-ne reludita tiun tagon): la diferenco +1,84 % validas je egala referenco, ne kiel
-remezuro de ambaŭ la saman matenon. La J/ĵetono je egala horloĝo kontraŭ la tri
-motoroj restas remezurata (`outils/gpu/mesure/banc-4moteurs.py`) — cifero sen
-reĝimo ne estas publikigita.
+fenestro).
+
+> **Erratum (22/09/2026).** La unua publikigo de 0.6.35 eltiris « +1,84 % antaŭ vLLM » el vLLM-referenco de 1 596 ĵ/s de la 21/09, kiu venis de senreta generado (`LLM().generate()`), ne komparebla kun servilo: sen kontinua planado, sen la vojo de `acvram serve`. Korektita la 22/09 per alterna A/V-ĉelo (A1 V1 A2 V2 A3 V3) kontraŭ `vllm serve` (HTTP), sama karto kaj sama vojo kiel `acvram serve`: vLLM mediano 1 782 ĵ/s. Je komparebla mezuro, acvram (1 634 ĵ/s) estas MALANTAŬ vLLM je ĉirkaŭ 8 % ĉe b=12, ne antaŭe. La J/ĵetono je egala horloĝo restas remezurata.
 
 La 14/09 matene acvram estis je 630 ĵ/s kaj 0,619 J/ĵetono sur la sama ĉelo:
 la gajnoj venas de la indiĝena FP4-MMA de Blackwell (`mma.sync …
@@ -277,10 +275,11 @@ instrumento kaj ĝia reĝimo — cifero sen reĝimo ne estas publikigita.
 
 Kie acvram antaŭas: MLA-modeloj (GLM-4.7-Flash) en indiĝena sm_120-NVFP4,
 kiujn vLLM servas nur en FP8 (b=1: 165,35 ĵ/s en servo); la modeloj, kiuj ne
-enkonvenas en VRAM; kaj, ekde 0.6.35, la grandara malkodado de MoE, kiu
-enkonvenas en VRAM — b=12 pasas de 1 540 (0.6.34) al 1 625,5 ĵ/s, do +1,84 %
-antaŭ la fiksita vLLM-referenco (1 596,1). La diferenco restas mallarĝa kaj je
-fiksita referenco; la diferenco en energio estas remezurenda.
+enkonvenas en VRAM; kaj la malkodado je unuopa sekvenco (b=1: 380,8 ĵ/s kontraŭ
+290,6 por vLLM). Sed je granda lot, sur MoE kiu enkonvenas en VRAM, vLLM restas
+antaŭe ĉe b=12 (1 782 kontraŭ 1 634 ĵ/s, kp. erratum); acvram tie progresis
+(1 540 en 0.6.34 → 1 634) sen preterpasi. La diferenco en energio estas
+remezurenda.
 
 ## Stato
 

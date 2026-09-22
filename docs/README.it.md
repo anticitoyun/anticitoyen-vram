@@ -260,18 +260,24 @@ protocollo per tutti i motori (`outils/`, una scheda, `energie.py`):
 
 | | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| decodifica 12 sequenze | **1 625,5 t/s** | 1 596,1 t/s | — |
+| decodifica 12 sequenze | **1 634 t/s** | 1 782 t/s | — |
 | decodifica 1 sequenza | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | prefill pp2048 | **22 707 token/s** | 21 054 | 8 671 (TabbyAPI, ritirato) |
 
 Portate del giorno (postazione 1030, regime eco `-lgc 2700`, pipeline in
 servizio; campionamento greedy catturato nel grafo CUDA, predefinito dalla
 0.6.35). Il b=12 è una cella ufficiale sigillata (mediana di 6 finestre
-interlacciate, clock per finestra). Il valore vLLM 1 596,1 è il riferimento
-congelato del 21/09 (vLLM non rieseguito quel giorno): lo scarto +1,84 % vale a
-riferimento uguale, non come rimisurazione di entrambi la stessa mattina. Il
-J/token a clock uguale contro i tre motori resta in rimisurazione
-(`outils/gpu/mesure/banc-4moteurs.py`) — una cifra senza regime non si pubblica.
+interlacciate, clock per finestra).
+
+> **Erratum (22/09/2026).** La prima pubblicazione di 0.6.35 traeva « +1,84 %
+> davanti a vLLM » da un riferimento vLLM di 1 596 t/s del 21/09 che veniva da
+> una **generazione offline** (`LLM().generate()`), **non comparabile con un
+> server**: nessuna schedulazione continua, non il percorso di `acvram serve`.
+> Corretto il 22/09 con una cella alternata A/V (A1 V1 A2 V2 A3 V3) contro
+> **`vllm serve`** (HTTP), stessa scheda e stesso percorso di `acvram serve`:
+> vLLM mediana **1 782 t/s**. A misura comparabile, **acvram (1 634 t/s) è
+> DIETRO vLLM di circa l'8 % a b=12**, non davanti. Il J/token a clock uguale
+> resta in rimisurazione.
 
 La mattina del 14/09 acvram era a 630 t/s e 0,619 J/token sulla stessa cella:
 i guadagni vengono dalla MMA FP4 nativa di Blackwell
@@ -284,10 +290,11 @@ pubblica.
 
 Dove acvram è avanti: modelli MLA (GLM-4.7-Flash) in NVFP4 nativo sm_120, che
 vLLM serve solo in FP8 (b=1: 165,35 t/s in servizio); i modelli che non ci
-stanno in VRAM; e, dalla 0.6.35, la decodifica a lotto grande di un MoE che ci
-sta in VRAM — il b=12 passa da 1 540 (0.6.34) a 1 625,5 t/s, cioè +1,84 % davanti
-al riferimento vLLM congelato (1 596,1). Lo scarto resta stretto e a riferimento
-congelato; lo scarto in energia è da rimisurare.
+stanno in VRAM; e la decodifica a sequenza singola (b=1: 380,8 t/s contro 290,6
+per vLLM). A lotto grande invece, su un MoE che ci sta in VRAM, vLLM resta
+davanti a b=12 (1 782 contro 1 634 t/s, cfr. erratum); acvram è progredito
+(1 540 in 0.6.34 → 1 634) senza passare davanti. Lo scarto in energia è da
+rimisurare.
 
 ## Stato
 
