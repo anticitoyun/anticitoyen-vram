@@ -4,6 +4,10 @@
 #
 #   outils/carte.sh outils/gpu/mesure/ncu-etroites-p48.sh <commit-attendu> [sortie]
 #
+# Compteurs réservés à root (ERR_NVGPUCTRPERM) : relancer la MÊME ligne avec
+# NCU_SUDO=1 — le sudo est appliqué à `ncu` seul, à l'intérieur. Ne JAMAIS
+# écrire `sudo outils/carte.sh …` : cela casserait le verrou pour tout le groupe.
+#
 # Bras A `_dense_etroit_kernel` (nvfp4) et C `nvfp4_gemv_marlin_kernel` sur
 # l'alias alpha2 ; bras B `etroit`/`gemm_etroit` int8 sur l'alias officiel.
 # ncu est lent (replay par noyau) : `--launch-count` borne chaque bras, les
@@ -22,6 +26,24 @@ PY=$HOME/Bureau/Claude/anticitoyen-vram/.venv/bin/python
 # refus AVANT la prise plutôt qu'un bras vide qu'on prendrait pour un résultat.
 NCU=${NCU:-/usr/local/cuda/bin/ncu}
 command -v "$NCU" >/dev/null || { echo "REFUS : ncu introuvable ($NCU)" >&2; exit 66; }
+
+# Le sudo est ICI, autour de `ncu` seulement — JAMAIS autour de `carte.sh`.
+# Sous `sudo outils/carte.sh …`, les fichiers du verrou (/tmp/acvram-carte-0.lock,
+# .qui, .journal) seraient recréés root : plus aucune session ne pourrait écrire
+# son `.qui`, et le verrou serait cassé pour tout le groupe, pas seulement pour
+# la prise en cours. Même raison pour les sorties : les redirections `>` sont
+# évaluées par CE shell, non par root, donc les CSV restent à l'utilisateur.
+# `HOME` est forcé parce que sudo le réécrit en /root selon `always_set_home` :
+# sans lui, le python du venv recompilerait l'extension dans /root/.cache
+# (2 min 30 sous la fenêtre, et un cache que l'utilisateur ne peut plus purger).
+SUDO=""
+if [ "${NCU_SUDO:-0}" = "1" ]; then
+  sudo -n true 2>/dev/null || {
+    echo "REFUS : NCU_SUDO=1 mais sudo demande un mot de passe — un script qui" >&2
+    echo "  attend une saisie sous le verrou bloque la carte pour tout le monde." >&2
+    echo "  Faire valider le sudo hors fenêtre, puis relancer." >&2; exit 78; }
+  SUDO="sudo -n -E HOME=$HOME PYTHONPATH=$PYTHONPATH"
+fi
 ALPHA2=/mnt/AI_GENERATOR/models_acvram/Qwen3-Coder-30B-A3B-nvfp4-qkv-alpha2-22-09
 OFFICIEL=/mnt/AI_GENERATOR/models_acvram/Qwen3-Coder-30B-A3B-nvfp4
 M="smsp__issue_active.avg.pct_of_peak_sustained_active,\
@@ -39,7 +61,7 @@ gpu__time_duration.sum"
 # minutes de carte pour zéro métrique (22/09, première prise de la 48). Le
 # micro-lancement ci-dessous coûte trois secondes et refuse AVANT la fenêtre.
 echo "== contrôle des compteurs (ERR_NVGPUCTRPERM)"
-if ! "$NCU" --metrics dram__bytes.sum --csv \
+if ! $SUDO "$NCU" --metrics dram__bytes.sum --csv \
         $PY -c "import torch; torch.zeros(1024, device='cuda').sum().item()" 2>&1 \
         | tee "$D/controle-compteurs.log" | grep -q "dram__bytes"; then
   echo "REFUS : compteurs ncu inaccessibles — voir $D/controle-compteurs.log" >&2
@@ -56,7 +78,7 @@ echo "== charge hôte"; ps -eo pid,pcpu,comm --sort=-pcpu | head -4
 
 bras () {                       # $1 nom, $2 alias, $3 regex de noyau, $4 lancements
   echo "== bras $1 ($3) $(date +%H:%M:%S)"
-  ACVRAM_MODELE_MESURE="$2" "$NCU" --graph-profiling node -k regex:"$3" \
+  ACVRAM_MODELE_MESURE="$2" $SUDO "$NCU" --graph-profiling node -k regex:"$3" \
       --launch-count "$4" --metrics "$M" --csv \
       $PY outils/gpu/mesure/frontiere-pas.py "$D/$1.json" 12 8 \
       > "$D/$1.csv" 2> "$D/$1.log"
