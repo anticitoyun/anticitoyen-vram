@@ -51,6 +51,27 @@ def test_occupation_depuis_la_decision_du_compilateur():
     assert r == {"registres": 47, "shared": 8192, "spill_stores": 12, "spill_loads": 8}
 
 
+def test_lecture_des_registres_triton_38_et_refus_du_repli_muet():
+    """poste2 82b070fc : `k_.cache` n existe plus en Triton 3.8 et un
+    `getattr(…, {})` rendait 0 registre → 32 blocs/SM faux partout."""
+    from types import SimpleNamespace as S
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outils", "gpu", "mesure", "banc-etroites-occupation.py")
+    spec = importlib.util.spec_from_file_location("banc_occ3", p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    k = S(device_caches={0: ({"sig": S(n_regs=139, n_spills=0, metadata=S(shared=8192))},)})
+    assert m.infos_noyau(k, S(index=0)) == {"registres": 139, "spills": 0, "shared": 8192}
+    # 139 registres × 128 fils : 3 blocs/SM, 12 warps actifs — borné registres (lecture réelle de poste2)
+    assert m.occupation(139, 8192, 4) == {"blocs_par_sm": 3, "warps_actifs": 12, "par_registres": 3, "par_shared": 28}
+    assert m.occupation(139, 8192, 2)["blocs_par_sm"] == 7 and m.occupation(139, 8192, 8)["blocs_par_sm"] == 1
+    with pytest.raises(RuntimeError, match="registres lus à 0"):
+        m.infos_noyau(S(device_caches={0: ({"sig": S(n_regs=0, n_spills=0, metadata=S(shared=0))},)}), S(index=0))
+    with pytest.raises(RuntimeError, match="aucun binaire"):
+        m.infos_noyau(S(device_caches={0: ({},)}), S(index=0))
+    with pytest.raises(RuntimeError, match="device_caches"):
+        m.infos_noyau(S(), S(index=0))
+
+
 def test_verdict_du_banc_exige_le_bit():
     p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outils", "gpu", "mesure", "banc-etroites-occupation.py")
     spec = importlib.util.spec_from_file_location("banc_etroites_occupation2", p)

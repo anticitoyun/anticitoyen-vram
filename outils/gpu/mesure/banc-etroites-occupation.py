@@ -21,13 +21,20 @@ Deux parties :
    ni l ordre des sommes en K ni celui des tranches : toute différence est un
    défaut, pas un arrondi).
 
-Prédit (écrit avant) : le défaut (4 warps, 3 étages) est à 8-16 registres de
-plus que nécessaire et à 1-2 blocs/SM ; (8, 3) ou (4, 2) doublent
-l occupation ; **gain ≥ 10 % sur `o` (11,8 → ≤ 10,6 µs)**, ≥ 5 % sur qkv.
-Réfuté : aucune forme ne gagne ≥ 5 % sur les deux (l occupation n est pas la
-cause : reste la latence de la réduction finale ou le format) ; ou une forme
-gagnante diffère du défaut d un seul bit (alors ce n est pas le même calcul,
-et la pièce change de nature).
+Prédiction RÉVISÉE (22/09, lecture réelle de poste2 : qkv à 4 warps / 2 étages
+= **139 registres par fil**, 8 Kio partagés → 3 blocs/SM, **12 warps actifs
+sur 64** : borné par les REGISTRES, pas par la mémoire partagée ni par le
+nombre de blocs). Conséquence : **plus de warps par bloc n aide pas** (8
+warps → 1 bloc/SM, 8 warps actifs : pire) ; ce qui aide, c est **moins de
+warps par bloc** (2 warps → 7 blocs/SM, 14 warps actifs) et **moins
+d étages** (chaque étage garde un tampon de plus en registres : 2 étages
+au lieu de 3 rend 20-40 registres). Prédit : **(2, 2) et (2, 3) gagnent
+≥ 10 % sur `o` (11,8 → ≤ 10,6 µs) et ≥ 5 % sur qkv** ; (8, ·) perd. Réfuté :
+aucune forme ne gagne ≥ 5 % sur les deux (l occupation n est pas la cause :
+reste la latence de la réduction finale ou le format) ; ou une forme
+gagnante diffère du défaut d un seul bit (ce n est plus le même calcul, la
+pièce change de nature) ; alarme : des déversements (`spills` > 0) sur une
+forme gagnante — le gain viendrait d un registre spillé, pas de l occupation.
 
 Usage : outils/carte.sh python outils/gpu/mesure/banc-etroites-occupation.py [--rep 200] [--json S]
         python outils/gpu/mesure/banc-etroites-occupation.py --ptxas       (à sec, sans carte)
@@ -101,6 +108,29 @@ def chrono(fn, rep: int) -> list[float]:
     return sorted(ts)
 
 
+def infos_noyau(kernel, device) -> dict:
+    """Registres/fil, déversements et mémoire partagée du DERNIER binaire
+    compilé pour cet appareil. Triton 3.8 : `JITFunction.device_caches[dev]`
+    = (cache signature → CompiledKernel, …) — `kernel.cache` n existe plus
+    (22/09, poste2 82b070fc : un `getattr(…, {})` avalait l erreur et rendait
+    0 registre, donc 32 blocs/SM partout, faux). Aucun repli muet : si la
+    lecture échoue, l appelant reçoit une erreur nommée."""
+    caches = getattr(kernel, "device_caches", None)
+    if caches is None:
+        raise RuntimeError("Triton sans `device_caches` : version inattendue, lecture des registres impossible")
+    cle = device.index if hasattr(device, "index") and device.index is not None else 0
+    entree = caches.get(cle) or next(iter(caches.values()), None)
+    binaires = list((entree[0] if isinstance(entree, (tuple, list)) else entree or {}).values())
+    if not binaires:
+        raise RuntimeError("aucun binaire Triton compilé en cache : le noyau n a pas tourné sur cet appareil")
+    c = binaires[-1]
+    regs = int(getattr(c, "n_regs", 0) or 0)
+    if regs <= 0:
+        raise RuntimeError(f"registres lus à {regs} sur {type(c).__name__} : lecture fausse, ne pas publier d occupation")
+    return {"registres": regs, "spills": int(getattr(c, "n_spills", 0) or 0),
+            "shared": int(getattr(getattr(c, "metadata", None), "shared", 0) or 0)}
+
+
 def ptxas_des_formes(formes) -> dict:
     """Compile le noyau pour chaque forme et lit `ptxas -v` (via TRITON_PRINT_AUTOTUNING
     non nécessaire : Triton expose `n_regs`, `n_spills`, `shared` sur le kernel compilé)."""
@@ -119,11 +149,7 @@ def ptxas_des_formes(formes) -> dict:
             except Exception as exc:                                  # à sec : Triton refuse sans carte
                 out[f"{nom}/{w}w{e}s"] = {"erreur": f"{type(exc).__name__}: {exc}"[:120]}
                 continue
-            k_ = GE._etroit_reduit_kernel
-            meta = getattr(getattr(k_, "cache", {}), "values", lambda: [])()
-            compile_ = next((c for d in meta for c in d.values()), None) if meta else None
-            infos = {"registres": getattr(compile_, "n_regs", 0), "spills": getattr(compile_, "n_spills", 0),
-                     "shared": getattr(compile_, "metadata", None) and getattr(compile_.metadata, "shared", 0) or 0}
+            infos = infos_noyau(GE._etroit_reduit_kernel, dev)
             out[f"{nom}/{w}w{e}s"] = {**infos, **occupation(infos["registres"], infos["shared"], w)}
     GE.regler_forme(None)
     return out
