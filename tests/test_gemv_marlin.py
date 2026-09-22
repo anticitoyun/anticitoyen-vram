@@ -282,3 +282,113 @@ def test_b_splitk_auto_par_lot(b, mode):
                         for e, t in zip(eid.tolist(), tok.tolist())])
     assert _hors_par_ligne(yd, refd) <= TOL_HORS * refd.numel()
     assert torch.equal(yd, ext.nvfp4_gemv_marlin(*md, eid, tok, xd, N, K))
+
+
+# ---------------------------------------------------------------------------
+# Pièce 47 : l'échelle AWQ par expert portée par le GEMV (`xscale`), AU BIT
+# contre la division en torch qu'elle remplace (poste1-piece42-glue-22-09 :
+# 8 lancements et 0,473 ms/pas à b=12). Le juge n'est pas une tolérance mais
+# `torch.equal` : une division faite dans un autre ordre ou sans l'arrondi bf16
+# de PyTorch le fait échouer — c'est ce que ce test doit pouvoir rendre.
+# ---------------------------------------------------------------------------
+PORTE_ECHELLE = pytest.mark.skipif(
+    get_extension() is None or "xscale" not in (getattr(getattr(get_extension(), "nvfp4_gemv_marlin", None),
+                                                        "__doc__", "") or ""),
+    reason="extension compilée sans `xscale` (pièce 47)")
+
+
+def _table_awq(E, K, seed):
+    """Comme `MoEBlock._table_pile` : bf16, [E, K], jamais nulle."""
+    g = torch.Generator().manual_seed(seed)
+    return (0.5 + torch.rand(E, K, generator=g)).to(torch.bfloat16).to(DEV)
+
+
+@CARTE
+@PORTE_ECHELLE
+@pytest.mark.parametrize("K,N", [(2048, 768), (768, 2048)])
+def test_xscale_down_au_bit_contre_la_division_torch(K, N):
+    """`act` arrive en fp32 : moe.py:1296 l'arrondit en bf16, divise, et
+    reconvertit — le noyau doit faire les deux arrondis dans le même ordre."""
+    ext = get_extension()
+    E, b, k = 8, 6, 2
+    qw, bs, gs, _ = _pile(E, N, K, 21)
+    w, s, g = _marlin(qw, bs, gs)
+    eid, tok = _routage(b, k, E, 23)
+    table = _table_awq(E, K, 24)
+    act = torch.randn(b * k, K, device=DEV) * 0.5                            # fp32, comme act(gate)·up
+    seq = torch.arange(b * k, device=DEV, dtype=torch.int32)
+    # chemin actuel : gather + division + cast en torch, puis GEMV sans échelle
+    ref_x = (act.to(torch.bfloat16) / table[eid.long(), :K]).to(act.dtype)
+    ref = ext.nvfp4_gemv_marlin(w, s, g, eid, seq, ref_x.contiguous(), K, N)
+    # chemin fusionné : le noyau lit la table
+    y = ext.nvfp4_gemv_marlin(w, s, g, eid, seq, act.contiguous(), K, N, table)
+    assert torch.equal(y, ref)
+    # et l'échelle n'est pas ignorée : sans elle la sortie diffère
+    assert not torch.equal(y, ext.nvfp4_gemv_marlin(w, s, g, eid, seq, act.contiguous(), K, N))
+
+
+@CARTE
+@PORTE_ECHELLE
+@pytest.mark.parametrize("act_code", [0, 1])
+def test_xscale_gateup_au_bit_contre_la_division_torch(act_code):
+    """gate et up partagent leur table (`not distinct`) : le noyau n'a qu'un x.
+    Ici `x` est bf16 et le GEMV lit les vrais index de jetons — le gather
+    `x[tok]` de moe.py:1199 disparaît aussi."""
+    ext = get_extension()
+    K, N, E, b, k = 2048, 768, 8, 6, 2
+    qg, bg, gsg, _ = _pile(E, N, K, 31); qu, bu, gsu, _ = _pile(E, N, K, 32)
+    mg, mu = _marlin(qg, bg, gsg), _marlin(qu, bu, gsu)
+    eid, tok = _routage(b, k, E, 33)
+    table = _table_awq(E, K, 34)
+    x = (torch.randn(b, K, device=DEV) * 0.5).to(torch.bfloat16)
+    seq = torch.arange(b * k, device=DEV, dtype=torch.int32)
+    ref_x = (x[tok.long()].to(torch.bfloat16) / table[eid.long(), :K]).to(x.dtype)
+    ref = ext.nvfp4_gemv_marlin_gateup(mg[0], mg[1], mg[2], mu[0], mu[1], mu[2],
+                                       eid, seq, ref_x.contiguous(), K, N, act_code)
+    y = ext.nvfp4_gemv_marlin_gateup(mg[0], mg[1], mg[2], mu[0], mu[1], mu[2],
+                                     eid, tok, x.contiguous(), K, N, act_code, table)
+    assert torch.equal(y, ref)
+    assert not torch.equal(y, ext.nvfp4_gemv_marlin_gateup(
+        mg[0], mg[1], mg[2], mu[0], mu[1], mu[2], eid, tok, x.contiguous(), K, N, act_code))
+
+
+@CARTE
+@PORTE_ECHELLE
+def test_xscale_table_plus_large_que_K():
+    """La table est en `padded_in` (K_in ≥ K) et moe.py la tranche `[:, :K]` :
+    le noyau doit lire la ligne avec le pas de la table, pas avec K."""
+    ext = get_extension()
+    K, N, E, b, k = 768, 2048, 8, 4, 2
+    qw, bs, gs, _ = _pile(E, N, K, 41)
+    w, s, g = _marlin(qw, bs, gs)
+    eid, tok = _routage(b, k, E, 43)
+    large = _table_awq(E, K + 256, 44)
+    x = (torch.randn(b, K, device=DEV) * 0.5).to(torch.bfloat16)
+    seq = torch.arange(b * k, device=DEV, dtype=torch.int32)
+    ref_x = (x[tok.long()] / large[eid.long(), :K]).to(x.dtype)
+    ref = ext.nvfp4_gemv_marlin(w, s, g, eid, seq, ref_x.contiguous(), K, N)
+    assert torch.equal(ext.nvfp4_gemv_marlin(w, s, g, eid, tok, x.contiguous(), K, N, large), ref)
+
+
+def test_extension_sans_xscale_garde_la_division_torch_a_sec():
+    """Garde de compatibilité : sur une extension d'avant la pièce 47, le bloc
+    MoE doit refuser la fusion — sinon il sauterait la division sans que
+    personne ne la fasse (sorties non échelonnées, en silence)."""
+    from acvram.engine.moe import _gemv_marlin_porte_echelle
+
+    class _Vieille:
+        def nvfp4_gemv_marlin(self):
+            """nvfp4_gemv_marlin(w, s, g, expert_ids, token_ids, x, K, N)"""
+
+        def nvfp4_gemv_marlin_gateup(self):
+            """nvfp4_gemv_marlin_gateup(wg, sg, gg, wu, su, gu, expert_ids, token_ids, x, K, N, act)"""
+
+    class _Neuve:
+        def nvfp4_gemv_marlin(self):
+            """nvfp4_gemv_marlin(w, s, g, expert_ids, token_ids, x, K, N, xscale)"""
+
+        def nvfp4_gemv_marlin_gateup(self):
+            """nvfp4_gemv_marlin_gateup(wg, sg, gg, wu, su, gu, expert_ids, token_ids, x, K, N, act, xscale)"""
+
+    assert _gemv_marlin_porte_echelle(_Vieille()) is False
+    assert _gemv_marlin_porte_echelle(_Neuve()) is True

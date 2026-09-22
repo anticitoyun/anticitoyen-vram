@@ -2024,7 +2024,8 @@ __global__ void __launch_bounds__(MB_WARPS * WARP) nvfp4_gemv_marlin_kernel(
     const uint4 *__restrict__ q1, const unsigned char *__restrict__ s1, const float *__restrict__ g1,
     const int *__restrict__ expert_ids, const int *__restrict__ token_ids,
     const XT *__restrict__ x, float *__restrict__ y, int N, int K, int act,
-    float *__restrict__ part, unsigned int *__restrict__ cpt) {
+    float *__restrict__ part, unsigned int *__restrict__ cpt,
+    const __nv_bfloat16 *__restrict__ xsc, int ld_sc) {
     extern __shared__ float xs[];
     float *red = xs + K;
     __shared__ bool dernier;
@@ -2039,9 +2040,21 @@ __global__ void __launch_bounds__(MB_WARPS * WARP) nvfp4_gemv_marlin_kernel(
     const XT *xn = x + (long)token_ids[g] * K;
     const int KT = K / MB_TK, NT = N / MB_TN;
     const int kt0 = z * KT / S, kt1 = (z + 1) * KT / S;     // tuiles de ce bloc
+    // Pièce 47 : l'échelle AWQ par expert (x / s[e]) se faisait en torch devant
+    // le GEMV — un gather, une division et un cast par projection et par
+    // couche, 8 lancements et 0,473 ms/pas à b=12 (poste1-piece42-glue-22-09).
+    // Ici elle est lue une fois par élément de x, au même endroit que le
+    // chargement en mémoire partagée, et sans octet de plus à lire.
+    // AU BIT contre `(x.to(bf16) / table).to(dtype)` : PyTorch promeut en
+    // float, divise et arrondit UNE fois en bf16 ; une entrée fp32 (le down)
+    // est arrondie en bf16 AVANT la division, comme `act.to(torch.bfloat16)`.
+    const __nv_bfloat16 *sce = xsc ? xsc + (long)e * ld_sc : nullptr;
     for (int i = threadIdx.x + kt0 * MB_TK; i < kt1 * MB_TK; i += blockDim.x) {
-        if constexpr (sizeof(XT) == 4) xs[i] = xn[i];
-        else xs[i] = __bfloat162float(xn[i]);
+        float v;
+        if constexpr (sizeof(XT) == 4) v = sce ? __bfloat162float(__float2bfloat16_rn(xn[i])) : xn[i];
+        else v = __bfloat162float(xn[i]);
+        if (sce) v = __bfloat162float(__float2bfloat16_rn(v / __bfloat162float(sce[i])));
+        xs[i] = v;
     }
     __syncthreads();
     const long bw = (long)e * KT * NT * (MB_TK * MB_TN / 32) + (long)nt * (MB_TK * MB_TN / 32) + lane;
@@ -2184,7 +2197,8 @@ static void mb_verifier(const torch::Tensor &w, const torch::Tensor &s, const to
 // x [T, K] bf16 ou fp32 ; sortie [G, N] fp32, ligne g = paire (expert_ids[g], token_ids[g]).
 torch::Tensor nvfp4_gemv_marlin(torch::Tensor w, torch::Tensor s, torch::Tensor g,
                                 torch::Tensor expert_ids, torch::Tensor token_ids,
-                                torch::Tensor x, int64_t K, int64_t N) {
+                                torch::Tensor x, int64_t K, int64_t N,
+                                c10::optional<torch::Tensor> xscale) {
     mb_verifier(w, s, g, K, N); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(w);
     const int G = expert_ids.size(0);
     const bool bf = x.scalar_type() == torch::kBFloat16;
@@ -2196,11 +2210,21 @@ torch::Tensor nvfp4_gemv_marlin(torch::Tensor w, torch::Tensor s, torch::Tensor 
     float *part = nullptr; unsigned int *cpt = nullptr;
     if (S > 1) std::tie(part, cpt) = mb_tampons(out, (long)S * G * N, (long)G * (N / MB_TN));
     const size_t shm = (size_t)(K + MB_WARPS * MB_TN) * sizeof(float);
+    const __nv_bfloat16 *psc = nullptr; int ldsc = 0;
+    if (xscale.has_value() && xscale->defined()) {
+        const torch::Tensor &sc = *xscale;
+        CHECK_CUDA(sc);
+        TORCH_CHECK(sc.scalar_type() == torch::kBFloat16, "échelle AWQ : bf16 attendu (table de moe.py)");
+        TORCH_CHECK(sc.dim() == 2 && sc.size(1) >= K, "échelle AWQ [E, ≥ K]");
+        TORCH_CHECK(sc.stride(1) == 1, "échelle AWQ : lignes contiguës");
+        psc = reinterpret_cast<const __nv_bfloat16 *>(sc.data_ptr());
+        ldsc = (int)sc.stride(0);
+    }
     auto stream = at::cuda::getCurrentCUDAStream();
     #define MB_L(XT, PX) nvfp4_gemv_marlin_kernel<XT, 1><<<grid, MB_WARPS * WARP, shm, stream>>>( \
         reinterpret_cast<const uint4 *>(w.data_ptr()), static_cast<const unsigned char *>(s.data_ptr()), g.data_ptr<float>(), \
         nullptr, nullptr, nullptr, expert_ids.data_ptr<int>(), token_ids.data_ptr<int>(), PX, out.data_ptr<float>(), (int)N, (int)K, 0, \
-        part, cpt)
+        part, cpt, psc, ldsc)
     if (bf) { MB_L(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
     else { MB_L(float, xc.data_ptr<float>()); }
     #undef MB_L
@@ -2217,7 +2241,8 @@ int64_t nvfp4_gemv_marlin_splitk(int64_t K, int64_t N, int64_t G) {
 torch::Tensor nvfp4_gemv_marlin_gateup(torch::Tensor wg, torch::Tensor sg, torch::Tensor gg,
                                        torch::Tensor wu, torch::Tensor su, torch::Tensor gu,
                                        torch::Tensor expert_ids, torch::Tensor token_ids,
-                                       torch::Tensor x, int64_t K, int64_t N, int64_t act) {
+                                       torch::Tensor x, int64_t K, int64_t N, int64_t act,
+                                       c10::optional<torch::Tensor> xscale) {
     mb_verifier(wg, sg, gg, K, N); mb_verifier(wu, su, gu, K, N); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(wg);
     const int G = expert_ids.size(0);
     const bool bf = x.scalar_type() == torch::kBFloat16;
@@ -2229,12 +2254,22 @@ torch::Tensor nvfp4_gemv_marlin_gateup(torch::Tensor wg, torch::Tensor sg, torch
     float *part = nullptr; unsigned int *cpt = nullptr;
     if (S > 1) std::tie(part, cpt) = mb_tampons(out, (long)S * 2 * G * N, (long)G * (N / MB_TN));
     const size_t shm = (size_t)(K + 2 * MB_WARPS * MB_TN) * sizeof(float);
+    const __nv_bfloat16 *psc = nullptr; int ldsc = 0;
+    if (xscale.has_value() && xscale->defined()) {
+        const torch::Tensor &sc = *xscale;
+        CHECK_CUDA(sc);
+        TORCH_CHECK(sc.scalar_type() == torch::kBFloat16, "échelle AWQ : bf16 attendu (table de moe.py)");
+        TORCH_CHECK(sc.dim() == 2 && sc.size(1) >= K, "échelle AWQ [E, ≥ K]");
+        TORCH_CHECK(sc.stride(1) == 1, "échelle AWQ : lignes contiguës");
+        psc = reinterpret_cast<const __nv_bfloat16 *>(sc.data_ptr());
+        ldsc = (int)sc.stride(0);
+    }
     auto stream = at::cuda::getCurrentCUDAStream();
     #define MB_L(XT, PX) nvfp4_gemv_marlin_kernel<XT, 2><<<grid, MB_WARPS * WARP, shm, stream>>>( \
         reinterpret_cast<const uint4 *>(wg.data_ptr()), static_cast<const unsigned char *>(sg.data_ptr()), gg.data_ptr<float>(), \
         reinterpret_cast<const uint4 *>(wu.data_ptr()), static_cast<const unsigned char *>(su.data_ptr()), gu.data_ptr<float>(), \
         expert_ids.data_ptr<int>(), token_ids.data_ptr<int>(), PX, out.data_ptr<float>(), (int)N, (int)K, (int)act, \
-        part, cpt)
+        part, cpt, psc, ldsc)
     if (bf) { MB_L(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
     else { MB_L(float, xc.data_ptr<float>()); }
     #undef MB_L
@@ -7263,13 +7298,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "NVFP4 : gate/up fusionnés v2, paires triées par expert");
     m.def("nvfp4_gemv_marlin", &nvfp4_gemv_marlin,
           py::arg("w"), py::arg("s"), py::arg("g"), py::arg("expert_ids"), py::arg("token_ids"),
-          py::arg("x"), py::arg("K"), py::arg("N"),
+          py::arg("x"), py::arg("K"), py::arg("N"), py::arg("xscale") = c10::nullopt,
           "NVFP4 : GEMV groupée lisant la DISPOSITION MARLIN (forme (b), P1 disposition unique)");
     m.def("nvfp4_gemv_marlin_splitk", &nvfp4_gemv_marlin_splitk,
           "S du split-K que prendrait nvfp4_gemv_marlin(K, N, G) : 1 sauf ACVRAM_GEMV_SPLITK");
     m.def("nvfp4_gemv_marlin_gateup", &nvfp4_gemv_marlin_gateup,
           py::arg("wg"), py::arg("sg"), py::arg("gg"), py::arg("wu"), py::arg("su"), py::arg("gu"),
           py::arg("expert_ids"), py::arg("token_ids"), py::arg("x"), py::arg("K"), py::arg("N"), py::arg("act") = 0,
+          py::arg("xscale") = c10::nullopt,
           "NVFP4 : gate et up fusionnés sur la disposition Marlin, sortie act(gate)*up");
     m.def("nvfp4_gemv_grouped_gateup", &nvfp4_gemv_grouped_gateup,
           py::arg("qg"), py::arg("bg"), py::arg("gsg"), py::arg("qu"), py::arg("bu"),

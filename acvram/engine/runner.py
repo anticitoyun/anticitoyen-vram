@@ -389,6 +389,25 @@ def _repin_echanger_reel(m, sortant: int, entrant: int) -> None:
             verifier_table(tbl)
 
 
+def _regime_echelle_awq(model) -> str:
+    """Porteur de l'échelle AWQ des experts, agrégé sur les couches MoE :
+    « gemv(N/M) », « torch(N/M) », « aucune », ou « mixte(...) » quand les
+    couches ne s'accordent pas — chaque valeur vient du dernier forward du
+    bloc (`MoEBlock._echelle_awq`), jamais d'une variable d'environnement."""
+    from .model import MoEBlock
+    vals = [getattr(m, "_echelle_awq", None) for m in model.modules() if isinstance(m, MoEBlock)]
+    vus = [v for v in vals if v is not None]
+    if not vus:
+        return "?"                                     # aucun forward MoE encore passé
+    distincts = sorted(set(vus))
+    if distincts == ["aucune"]:
+        return "aucune"
+    if len(distincts) == 1:
+        return f"{distincts[0]}({len(vus)}/{len(vals)})"
+    detail = ",".join(f"{v}:{vus.count(v)}" for v in distincts)
+    return f"mixte({detail})"
+
+
 def _couverture_experts(model) -> str:
     """Disposition des experts par couche MoE : « marlin » si toutes, « naturel »
     si aucune, sinon « marlin(N/M) refus=[c<i>:<raison>] » — N couches sur la
@@ -804,6 +823,11 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # couverture PAR COUCHE (poste7 19/09, budget GLM : 33 couches Marlin + 13 refusées
             # « distinctes » sur la pile naturelle — « experts_layout=marlin » seul mentait)
             "experts_layout": _couverture_experts(self.model),
+            # Pièce 47 : qui porte `x / s[e]` des experts — `gemv` (dans le
+            # noyau Marlin, au bit), `torch` (gather + division devant chaque
+            # GEMV : 8 lancements et 0,47 ms/pas à b=12), `aucune` (alias sans
+            # échelles d'experts). Lu sur les blocs, pas sur une variable.
+            "echelle_awq": _regime_echelle_awq(self.model),
             # linéaires INT8 du décodage : triton≥b|cuda (poste C, bascule mesurée)
             "dense": kernels.narrow_regime(),
             "gdn": _gdn_regime(),
