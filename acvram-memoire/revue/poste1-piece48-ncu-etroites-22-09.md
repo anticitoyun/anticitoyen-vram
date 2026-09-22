@@ -77,3 +77,44 @@ choisir l'issue la plus commode.
 
 Le script de prise est écrit et versionné ; il ne demande que la carte, après
 poste5. Aucun code du moteur n'est touché par cette pièce.
+
+## Prise du 22/09 21 h 55 — **BLOQUÉE** : les compteurs ncu sont refusés à l'utilisateur
+
+* instrument : `outils/gpu/mesure/ncu-etroites-p48.sh 7e5f6b1c`, sous
+  `carte.sh` (`ACVRAM_NOM=poste1-p48-ncu`), journaux
+  `scratchpad/poste1-p48-ncu/`. Quatre bras lancés, 21:55:47 → 22:00:39,
+  **4 min 52 s de carte**. compute-apps début = fin (llama-server 8081 seul).
+* **résultat : aucune métrique, sur aucun bras.** `ncu` se connecte au
+  processus, le modèle charge, le régime s'imprime — puis :
+  `ERR_NVGPUCTRPERM — The user does not have permission to access NVIDIA GPU
+  Performance Counters on the target device 0`. Les quatre bras rendent
+  `rc=1` et 22 lignes de journal sans une seule mesure.
+* cause, vérifiée : `NVreg_RestrictProfilingToAdminUsers` n'apparaît pas dans
+  `/proc/driver/nvidia/params` (donc à 1, la valeur par défaut) et
+  `/etc/modprobe.d/99-optim-nvidia.conf` ne le pose pas. Le pilote réserve les
+  compteurs à root ; **aucune des quatre issues de la pièce ne peut être lue**
+  tant que c'est le cas. Ce n'est pas un défaut du script : `nsys` (qui n'a
+  jamais eu besoin des compteurs) fonctionne, `ncu` seul est concerné.
+* **première prise, 21 h 30, perdue autrement** : `ncu` n'est pas dans le PATH
+  des sessions (`rc=127` quatre fois, zéro seconde de carte consommée). Corrigé
+  par un chemin explicite et un refus si le binaire manque — et par un bras qui
+  dit « BRAS VIDE » au lieu de laisser un CSV de zéro ligne passer pour un
+  résultat.
+* **correctif appliqué au script** : un micro-lancement `ncu` de trois secondes
+  contrôle les compteurs **avant** de prendre la fenêtre, et refuse avec le
+  code 77 en nommant le remède. Les cinq minutes perdues ce soir ne peuvent
+  plus l'être.
+
+## Ce qui débloque la pièce — décision de l'utilisateur, elle engage la machine
+
+`NVreg_RestrictProfilingToAdminUsers=0` dans `/etc/modprobe.d/99-optim-nvidia.conf`,
+puis `update-initramfs -u` et **un redémarrage** (le module `nvidia` ne se
+recharge pas à chaud, les services 8081-8083 le tiennent). Alternative sans
+redémarrage : lancer la prise sous `sudo`, ce qu'aucune session ne peut faire
+seule. Tant que l'un ou l'autre n'est pas fait, la pièce 48 reste **ouverte et
+non mesurable** ; les quatre issues et leurs seuils restent valides tels quels.
+
+Ce que la pièce ne doit PAS devenir en attendant : un diagnostic reconstruit
+depuis `nsys`. `nsys` donne des durées, pas des taux d'émission ni des raisons
+de blocage — les quatre issues se distinguent précisément par ce que `nsys` ne
+mesure pas. Un chiffre reconstruit pour combler ce trou serait pire que le trou.

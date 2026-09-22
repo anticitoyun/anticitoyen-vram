@@ -33,6 +33,23 @@ smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct,\
 sm__inst_executed.sum,\
 gpu__time_duration.sum"
 
+# Les compteurs de performance NVIDIA sont réservés à root par défaut
+# (NVreg_RestrictProfilingToAdminUsers=1) : sans ce contrôle, les quatre bras
+# chargent le modèle, tournent cinq minutes et rendent ERR_NVGPUCTRPERM — cinq
+# minutes de carte pour zéro métrique (22/09, première prise de la 48). Le
+# micro-lancement ci-dessous coûte trois secondes et refuse AVANT la fenêtre.
+echo "== contrôle des compteurs (ERR_NVGPUCTRPERM)"
+if ! "$NCU" --metrics dram__bytes.sum --csv \
+        $PY -c "import torch; torch.zeros(1024, device='cuda').sum().item()" 2>&1 \
+        | tee "$D/controle-compteurs.log" | grep -q "dram__bytes"; then
+  echo "REFUS : compteurs ncu inaccessibles — voir $D/controle-compteurs.log" >&2
+  grep -o "ERR_NVGPUCTRPERM" "$D/controle-compteurs.log" | head -1 >&2
+  echo "  remède (engage la machine, décision de l'utilisateur) :" >&2
+  echo "  NVreg_RestrictProfilingToAdminUsers=0 dans /etc/modprobe.d/99-optim-nvidia.conf," >&2
+  echo "  puis update-initramfs -u et redémarrage ; ou lancer ce script sous sudo." >&2
+  exit 77
+fi
+
 echo "== compute-apps début $(date +%H:%M:%S)"
 nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader
 echo "== charge hôte"; ps -eo pid,pcpu,comm --sort=-pcpu | head -4
