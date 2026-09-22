@@ -480,6 +480,13 @@ class Energie:
                 f"-- ACVRAM_CHARGE_OK=1 si délibérée")
         return raisons
 
+    @property
+    def load1_max(self) -> float | None:
+        """Alias public de `_load1_max()` -- un appelant hors de cette
+        classe (`banc-4moteurs.py`, protocole 2.5) n'a pas à lire un nom
+        préfixé d'un tiret bas pour obtenir le pic REGLES §2."""
+        return self._load1_max()
+
     def _load1_max(self) -> float | None:
         """Le pic de `load1` pendant la fenêtre — la boucle par tic
         (`charges1`) s'il a tourné, sinon les deux bouts (`charge_avant`/
