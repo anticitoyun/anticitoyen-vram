@@ -92,3 +92,7 @@ dépaquetage (émission saturée → MMA mxf4nvf4 native + échelles swizzlées,
 0,71-0,82 contre 1,81 To/s reste inexpliqué par Q(13) : c'est lui qui paie sur le format servi.
 
 **Pièce 36 — CLOSE 22/09 21 h (poste3 49304362)** : tests serveur logprobs + kl-api, 4 cassures vues.
+
+**Pièce 44 — CLOSE 22/09 21 h (poste5 7e860933)** : H2 et H7 réfutées, cause = garde de spéculation n-gram.
+## Pièce 49 — spéculation visible (poste3) — OUVERTE : `speculation=` + état de la garde, ligne de régime et /metrics, test cassé une fois.
+## Pièce 50 — cellule b=1 sans spéculation (poste2) — OUVERTE : `--speculative none`, prédit 270-280 t/s ; b=12 idem si la spéculation y est active.
