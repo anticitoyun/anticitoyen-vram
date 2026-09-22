@@ -53,3 +53,6 @@ poste4 : verdict A/B quand une cellule tombe. chef : réarmer `/loop 20m` à la 
 27. Corpus de calibration guidé par routage : instrument de synthèse d'invites sous contrainte de score de routage + mesure de couverture (jetons par expert) — remplace le corpus générique qui n'atteint aucun expert froid (poste1 instrument, poste2 mesure ; après 25(a) qui donne le seuil).
 28. Énergie : deux périmètres publiés (carte seule NVML ; hôte + carte RAPL + NVML), note « experts sur processeur » par moteur, client isolé par soustraction (banc, après les cellules TRT-LLM b=1 réparées).
 29. Écart TRT-LLM b=12 (+22 %) : décomposition par poste1 (08 h 15) → leviers au bit ou choix de format (KV FP8 opt-in).
+30. Cellule TRT-LLM à KV égalisé : acvram KV fp8_e4m3 (opt-in) contre TRT-LLM KV fp8, nommée « kv-fp8 », séparée de la cellule KV natif (poste3, après le b=1 ; jugée aussi par KL).
+31. Tests supplémentaires du levier 1 (duck.ai Q3.6) : slot EOS réadmis dans le même pas ; exécution avec et sans CUDA_LAUNCH_BLOCKING=1 (poste1, heure creuse).
+32. Collecte AWQ : critère d'arrêt = min d'observations par expert ≥ 256 (512 si hétérogène), distribution publiée au manifeste (pièces 25(a)/27).
