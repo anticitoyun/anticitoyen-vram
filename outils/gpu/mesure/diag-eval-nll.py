@@ -89,29 +89,37 @@ import torch  # noqa: E402
 SEUIL_PPL_PROPRE = 30.0
 
 SCRIPT_HF = r'''
-import json, sys, torch
+import json, os, sys, torch
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoTokenizer
 ids = json.load(open(sys.argv[2]))
 maxmem = sys.argv[3]
 texte_propre = open(sys.argv[5], encoding="utf-8").read() if len(sys.argv) > 5 else None
-kw = {"dtype": torch.bfloat16}
-if maxmem != "cuda":
+kw = {"dtype": torch.bfloat16, "attn_implementation": "eager", "output_loading_info": True}
+if maxmem == "cpu":                      # pièce 37 : processeur seul, zéro offload, zéro carte (59 Go de RAM, ~100 s / 300 jetons)
+    torch.set_num_threads(int(os.environ.get("HF_THREADS", "8")))
+    kw.update(device_map="cpu")
+elif maxmem != "cuda":
     g, c = maxmem.split(",")
     kw.update(device_map="auto", max_memory={0: g, "cpu": c})
 else:
     kw.update(device_map="cuda")
 try:
-    m = AutoModelForImageTextToText.from_pretrained(sys.argv[1], **kw)
+    m, info = AutoModelForImageTextToText.from_pretrained(sys.argv[1], **kw)
 except Exception:
-    m = AutoModelForCausalLM.from_pretrained(sys.argv[1], **kw)
+    m, info = AutoModelForCausalLM.from_pretrained(sys.argv[1], **kw)
 m.eval()
+# GARDE DE CHARGEMENT (Q(12), 22/09) : une clé manquante ou un paramètre resté sur `meta` fait un modèle
+# à poids vides qui génère du bruit en silence ; on le dit AVANT de juger quoi que ce soit.
+chargement = {"classe": type(m).__name__, "manquantes": len(info.get("missing_keys", [])),
+              "inattendues": len(info.get("unexpected_keys", [])), "mal_formees": len(info.get("mismatched_keys", [])),
+              "meta": sum(1 for p in m.parameters() if p.device.type == "meta")}
 x = torch.tensor([ids])
 dev = next(m.parameters()).device
 with torch.no_grad():
     out = m(input_ids=x.to(dev))
 lp = torch.log_softmax(out.logits[0, :-1].float(), dim=-1)
 nll = -lp.gather(1, x[0, 1:].to(lp.device).unsqueeze(1)).squeeze(1)
-r = {"nll": nll.cpu().tolist()}
+r = {"nll": nll.cpu().tolist(), "chargement": chargement}
 
 # CONTRÔLE DE LA RÉFÉRENCE (22/09) : une référence qui rend PPL 108 039 sur
 # nos ids ne juge rien. Deux épreuves qui ne dépendent PAS de notre chaîne :
@@ -273,6 +281,8 @@ def main() -> int:
     ap.add_argument("--jetons", type=int, default=300)
     ap.add_argument("--texte", default=None, help="fichier texte connu (défaut : acvram/data/calibration-anglais.txt)")
     ap.add_argument("--sans-decode", action="store_true", help="sauter le bras decode (n pas de décodage)")
+    ap.add_argument("--ids", default=None, help="fichier JSON d ids tels quels (gabarit compris) : remplace --texte, aucun BOS ajouté (pièce 37 : Gemma 4 -it ne se juge que sous gabarit)")
+    ap.add_argument("--nll-hf", default=None, help="JSON déjà produit par le bras hf (nll_hf, à sec sur processeur) : évite de le rejouer sous le verrou")
     ap.add_argument("--json")
     a = ap.parse_args()
     from acvram.engine.loader import load_model
@@ -282,10 +292,13 @@ def main() -> int:
     tok = load_tokenizer(chemin)
     texte = open(a.texte or os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../acvram/data/calibration-anglais.txt"),
                  encoding="utf-8").read()
-    ids = tok.encode(texte)[: a.jetons - 1]
     bos = tok.bos_id()
-    if bos is not None:
-        ids = [bos] + ids
+    if a.ids:
+        ids = json.load(open(a.ids))[: a.jetons]
+    else:
+        ids = tok.encode(texte)[: a.jetons - 1]
+        if bos is not None:
+            ids = [bos] + ids
     loaded = load_model(chemin, dtype=torch.bfloat16, max_model_len=len(ids) + 32, max_concurrent_seqs=1)
     r = {"alias": chemin, "jetons": len(ids), "bos": bos, "bos_en_tete": ids[0] == bos if bos is not None else None}
     e = nll_eval(loaded, ids)
@@ -316,7 +329,7 @@ def main() -> int:
             print(f"[diag] modèle acvram libéré, {libre:.1f} Gio libres avant le bras hf", flush=True)
             if libre < 20:
                 print(f"[diag] ALERTE : {libre:.1f} Gio seulement — le bras hf en offload peut échouer", flush=True)
-        brut = nll_hf(a.source, ids, texte)
+        brut = json.load(open(a.nll_hf)) if a.nll_hf else nll_hf(a.source, ids, texte)
         if brut is not None:
             h = brut["nll"]
             r.update({"nll_hf": h, "ppl_hf": round(ppl(h), 3), "div_eval_hf": premiere_divergence(e, h),
