@@ -13,12 +13,16 @@ ICI = os.path.dirname(os.path.abspath(__file__))
 OUTIL = os.path.join(ICI, "..", "outils", "gpu", "mesure", "part-tete-sampler.py")
 
 
-def _trace(chemin, pas=8, couches=2, tete_us=130, ech=(20, 8, 4)):
+def _trace(chemin, pas=8, couches=2, tete_us=130, ech=(20, 8, 4), routeur_cutlass=True):
+    """Chaque couche porte AUSSI un `cutlass…wmma` (le GEMM du routeur, 2,7 µs) :
+    c est ce qui a fait prendre le premier pour la tête (poste2 63767f45)."""
     t, lignes = 0, []
     for _ in range(pas):
         debut = t
         for _ in range(couches):
-            for nom, d in (("_route_fusee_kernel", 7_000), ("void marlin_moe_wna16::Marlin<...>", 50_000)):
+            for nom, d in (("_route_fusee_kernel", 7_000),
+                           *((("void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16>(...)", 2_700),) if routeur_cutlass else ()),
+                           ("void marlin_moe_wna16::Marlin<...>", 50_000)):
                 lignes.append((t, d, nom)); t += d
         lignes.append((t, tete_us * 1000, "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16>(...)")); t += tete_us * 1000
         for i, d in enumerate(ech):
@@ -44,6 +48,7 @@ def test_part_tete_et_echantillon(tmp_path):
     assert r.returncode == 0, r.stderr
     d = json.load(open(j))
     assert d["pas_juges"] == 4 and d["us"]["total"] == 1000.0      # 8 pas → 7 fenêtres, 2 de tête et 1 de queue exclues
+    # la tête = le DERNIER cutlass du pas (les couches en portent chacune un : le routeur)
     assert d["us"]["tete"] == 130.0 and abs(d["part_tete"] - 0.13) < 1e-6
     assert d["us"]["echantillon"] == 32.0 and abs(d["part_echantillon"] - 0.032) < 1e-6
     assert d["lancements_apres_tete"] == 3 and len(d["noyaux_apres_tete"]) == 3
