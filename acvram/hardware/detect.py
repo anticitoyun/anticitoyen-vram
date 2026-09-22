@@ -65,7 +65,8 @@ class GpuCaps:
     machine cible : il n'est vrai que pour Blackwell (sm_100/103/120 et
     au-delà). Tout le reste doit atteindre une empreinte de 4 bits par une
     quantification *des poids seuls*, c'est-à-dire stocker 4 bits et
-    déquantifier vers un format que les tensor cores savent traiter.
+    déquantifier vers un format que les tensor
+ cores savent traiter.
     """
 
     sm: int
@@ -117,7 +118,8 @@ def capabilities_for_sm(sm: int) -> GpuCaps:
     # (jeton, tête), l'INT8 atteint environ 44 dB contre 32 pour le FP8 E4M3 à
     # taille identique, parce que la mise à l'échelle par tête fournit déjà la
     # plage dynamique pour laquelle le FP8 dépense des bits d'exposant, tandis
-    # que l'INT8 conserve une grille uniforme. Le FP8 reste intéressant lorsque
+    # que l'INT8 conserve une grille uniforme. Le FP8 reste intéressant lorsqu
+e
     # le noyau d'attention sait le consommer sans déquantifier — un argument de
     # débit, pas de précision — donc il demeure accessible.
     if fp4:
@@ -183,7 +185,8 @@ class Gpu:
     def host_link_gbps(self) -> float:
         """Bande passante hôte-appareil en Go/s : mesurée si possible, sinon estimée.
 
-        La génération PCIe rapportée au repos est celle de l'économie d'énergie
+        La gé
+nération PCIe rapportée au repos est celle de l'économie d'énergie
         (une 3080 Ti se déclare en gen1 et remonte en gen4 sous charge) : s'y
         fier ferait croire à un lien de 1,7 Go/s là où la mesure dit 12. Si
         ``acvram bench --what topology`` est passé sur cette machine, son
@@ -221,7 +224,8 @@ class Gpu:
         inatteignable. Utiliser le pic ici sous-estimait le coût de l'exil
         d'un facteur 1,7 dans `estimer_cout_exil` (memory/tiering.py) : un
         régime confondu avec un autre (règle 6), pas une approximation fine.
-        Les autres cartes du tableau restent au pic de plaque, faute d'une
+        Les autres cartes du tabl
+eau restent au pic de plaque, faute d'une
         mesure en lecture seule équivalente — à corriger quand elle existera,
         pas à deviner ici."""
         table = {
@@ -289,7 +293,8 @@ class Rig:
         for g in self.gpus:
             if g.index == i:
                 return g
-        raise KeyError(f"no GPU with index {i}")
+        raise KeyEr
+ror(f"no GPU with index {i}")
 
     def to_dict(self) -> dict:
         return {
@@ -351,7 +356,8 @@ def _probe_gpus_smi() -> tuple[list[Gpu], str]:
             except (ValueError, KeyError):
                 return default
 
-        cc = rec.get("compute_cap", "")
+        cc = rec.get("compute_cap", ""
+)
         sm = 0
         m = re.match(r"^(\d+)\.(\d+)$", cc)
         if m:
@@ -409,10 +415,14 @@ def _probe_p2p(n: int) -> list[list[bool]]:
     try:
         import torch
         if torch.cuda.is_available():
-            return [[bool(i == j or torch.cuda.can_device_access_peer(i, j))
+            return [[bool(i == j or torch.cuda.can_d
+evice_access_peer(i, j))
                      for j in range(n)] for i in range(n)]
-    except Exception:
-        pass
+    except Exception as exc:                 # noqa: BLE001
+        # Sans ce message, un échec de sonde est indiscernable d'une détection
+        # qui a réellement conclu « pas de P2P » (audit du 8/09, point détect).
+        print(f"[acvram] sonde P2P en échec ({exc}) : pas de P2P supposé",
+              flush=True)
     return [[i == j for j in range(n)] for i in range(n)]
 
 
@@ -466,7 +476,8 @@ def _probe_cpu() -> Cpu:
             if not m:
                 continue
             n = int(m.group(1))
-            sib_path = os.path.join(base, entry, "topology/thread_siblings_list")
+            sib_path = os.path.join(base, e
+ntry, "topology/thread_siblings_list")
             try:
                 with open(sib_path, "r", encoding="utf-8") as fh:
                     sibs = fh.read().strip()
@@ -533,7 +544,8 @@ def _probe_distro() -> str:
 def _filtrer_visibles(gpus: list[Gpu]) -> list[Gpu]:
     """Ne garde que les cartes que CUDA_VISIBLE_DEVICES laisse voir, reindexees.
 
-    nvidia-smi ignore cette variable : il enumere toujours le materiel entier.
+  
+  nvidia-smi ignore cette variable : il enumere toujours le materiel entier.
     Le planificateur batissait donc un plan qui nommait « cuda:1 » pendant que
     le processus n'avait qu'une carte, et le chargement tombait sur « invalid
     device ordinal ». Le 8/09/2026, trois sessions se partageaient la machine
@@ -583,7 +595,8 @@ def detect_rig(profile: Optional[str] = None) -> Rig:
     rig = Rig()
     gpus, driver = _probe_gpus_smi()
     rig.source = "nvidia-smi"
-    if not gpus:
+    if
+ not gpus:
         gpus, cuda = _probe_gpus_torch()
         rig.source = "torch" if gpus else "none"
     gpus = _filtrer_visibles(gpus)

@@ -36,7 +36,8 @@ a été conservée.
 * Version **0.6.15** (`acvram/__init__.py`) : **régime livré = P2** pour les convertis `attn_int8: canal`
   (`ACVRAM_PREFILL_INT8=cublas` par défaut, 0ccd17c ; six lignes tenues, `revue/sage-p2-au-defaut-19-09`),
   GUI en 32 langues, `.deb` avec `cuda-toolkit[nvcc,cccl]==13.0.*` — l'épingle est obligatoire :
-  nvcc 13.4 contre le runtime 13.0 de torch cu130 rend `cuda_toolkit.h:41 #error` (19/09, doctor)
+  nvcc 13.4 contre le r
+untime 13.0 de torch cu130 rend `cuda_toolkit.h:41 #error` (19/09, doctor)
   (sans cccl, le nvcc des roues pip n'a pas `nv/target` : doctor rendait « repli noyaux
   de référence »). ~1 500 tests dont ~150 sur processeur ; les noyaux, les graphes CUDA et
   toute mesure exigent la machine cible (RTX 5090 bridée à 400 W, RTX 3080 Ti à 275 W —
@@ -58,7 +59,8 @@ a été conservée.
   (`sage-p2-au-defaut-19-09`). Un poids inéligible garde la déquant bf16 (jamais W8A8 en
   silence). Le classé Coder lisait **déjà** q/k/v/o en int8 g128 : l'i8c ne change que l'échelle. Split-K b=1 : opt-in `ACVRAM_GEMV_SPLITK=1` (PPL +0,0042, non tranché).
 * **Spéculation n-gram déjà au défaut à b ≤ 2** (`runner.py:429`, `ACVRAM_SPECULATION_LOT_MAX=2`,
-  `GardeSpeculation` conditionnée au lot réel) : taux d'acceptation 1,61 mesuré le 13/09 sur du
+  `GardeSpeculation` conditionnée au lot r
+éel) : taux d'acceptation 1,61 mesuré le 13/09 sur du
   code ; la cellule b=1 ci-dessus le contient. Invariant : jamais un jeton différent du greedy.
 * GLM-4.7-Flash (MLA) : classé 1,0143 (`-k48-calibA`), prefill 5 502 j/s ; b=12 en cours
   (G1). W4A4 experts **fermé** (deux verdicts). Modèles convertis sous
@@ -92,6 +94,11 @@ installe torch pour CUDA 12.8, sinon cu124, sinon la version processeur. Sans
 GPU, tout fonctionne quand même par le chemin de référence — lent, mais
 numériquement identique, et c'est ainsi que ce projet a été développé.
 
+> **Miroir public (22/09/2026).** Un instantané de `main` est publié sur
+> GitHub : `https://github.com/anticitoyun/anticitoyen-vram` — un seul commit,
+> sans historique. Le dépôt de travail reste le GitLab privé ci-dessous ; le
+> miroir se lit, il ne pousse pas.
+
 ### Accès au dépôt
 
 Le jeton GitLab est chiffré en AES-256 sous une phrase de passe, dans
@@ -100,6 +107,7 @@ déchiffre à la demande, et **uniquement** pour l'hôte `outils.nuages.noho.st`
 `https` :
 
 ```
+
 ~/.config/acvram/git-credential-acvram    l'auxiliaire
 ~/.config/acvram/chiffrer-jeton.sh        à lancer une fois, pose la phrase de passe
 ```
@@ -140,6 +148,7 @@ acvram/
   kernels/__init__.py         compilation à la volée, avec repli PyTorch
   memory/tiering.py      le planificateur de placement  <- le fichier intéressant
   memory/kvcache.py      cache KV paginé et quantifié + cache de préfixe
+
   engine/config.py       ModelSpec depuis config.json
   engine/layers.py       QuantLinear, StreamedWeight, RoPE, RMSNorm, masques
   engine/model.py        attention, MLP, MoE, le modèle assemblé
@@ -173,6 +182,7 @@ acvram/
 * **Une mise à l'échelle s'applique à l'activation, jamais repliée dans le
   poids.** Le repli défait exactement ce pour quoi elle avait été cherchée.
 * **Une optimisation ne doit pas changer la sortie.** Le cache de préfixe, le
+
   décodage spéculatif et l'attention groupée ont chacun un test affirmant qu'ils
   produisent exactement ce que produit le chemin lent. Si vous en ajoutez une,
   ajoutez son test d'équivalence dans le même commit.
@@ -208,7 +218,8 @@ mais le reste est écrit à l'aveugle.
   est désormais initialisée à `torch.manual_seed(20260830)`.
 * **`tty` écrit « pas un tty » sur sa sortie standard** quand elle échoue, si
   bien qu'un `GPG_TTY=$(tty 2>/dev/null)` naïf affecte cette phrase et casse la
-  saisie de la phrase de passe. L'auxiliaire d'identifiants vérifie que le
+  saisie de la phrase de passe. L'auxiliaire d'ide
+ntifiants vérifie que le
   résultat est un périphérique caractère.
 * **AWQ jugé sur la mauvaise métrique.** AWQ dégrade volontairement l'erreur de
   reconstruction des *poids* pour améliorer l'erreur en *sortie de couche*. Le
@@ -239,7 +250,8 @@ mais le reste est écrit à l'aveugle.
 
 ## 11. Terminé — définition (20/09/2026, `revue/sage-tests-rapides-cloture-20-09`, mot pour mot)
 
-État servi au 20/09 09 h 23 : **0.6.30** (`acvram_0.6.30_amd64.deb` à la racine ; C15-prefill au défaut, capture gemma, éco 2 700) ; l'état vivant est `acvram-memoire/revue/ETAT.md`. Le § 2 ci-dessus décrit 0.6.15 (19/09) et reste vrai pour ce qu'il nomme ; les versions 0.6.16-0.6.30 sont dans `revue/INDEX.md` (verdicts `verdict-paquet-*`).
+État servi au 20/09 09 h 23 : **0.6.30** (`acvram_0.6.30_amd64.deb` à la racine ; C15-prefill au défaut, capture gemma, éco 2 700) ; l'état vivant est `acvram-memoire/revue/ETAT.md`. Le § 2 ci-dessus décrit 0.6.
+15 (19/09) et reste vrai pour ce qu'il nomme ; les versions 0.6.16-0.6.30 sont dans `revue/INDEX.md` (verdicts `verdict-paquet-*`).
 
 ### 11.1 « Terminé » — quatre conditions, chacune rendue par une prise ou un fichier
 | | condition | rendu par | état |
@@ -251,7 +263,8 @@ mais le reste est écrit à l'aveugle.
 **Terminé = T1-T4 tenus.** Un « faux » publié ferme une pièce autant qu'un « tenu » : le projet se termine avec ses derrières nommés, pas avec un chiffre reconstruit. Prédiction : T1-T4 tenus **demain 21/09 avant midi** si les prises de § 2 tiennent leur durée ; pièce 3 est la seule qui coûte plus d'une heure de code.
 
 ### 11.2 Hors périmètre de « terminé » — publié avec sa cause, pas de chantier
-* **Coder b=12 énergie** : 0,210 contre vLLM Marlin 0,136 J/jeton — experts Marlin à 400 W = 54 % du pas, W constante sous plafond (MECANISMES), **aucun chemin connu** ; **vitesse** 1 397 contre 1 626 (−14 %) : sélection C15-3d faux (4,83 µs), reste la bande Marlin 1,07 contre 1,24-1,41 To/s = noyau à réécrire, ≥ 3 jours, prédiction × 1,10-1,15 au mieux, ne rattrape pas 0,136 J.
+* **Coder b=12 énergie** : 0,210 contre vLLM Marlin 0,136 J/jeton — experts Marlin à 400 W = 54 % du pas, W constante sous plafond (MECANISMES), **aucun chemin connu** ; **vitesse** 1 397 contre 1 626 (−14 %) : sélection C15-3d faux (4,83 µs), reste la bande Marlin 1,07 contre 1,24-1,41 To/s = no
+yau à réécrire, ≥ 3 jours, prédiction × 1,10-1,15 au mieux, ne rattrape pas 0,136 J.
 * **GLM prefill** 7 268 contre 18 117 (× 2,5) : structure du flash `tl.dot` sur sm_120 (tuile 32×64, × 26 forme 1) ; C13-c réécrit ≈ 10 000 prédit = encore × 1,8 derrière, ≥ 2 jours. **GLM b=12** 660 contre 858 : C14-b (M1) et niveau 3 (M3-M4) sont les seules pièces courtes ; l'écart restant (≈ −20 %) est publié tel quel.
 * **119B** : (c) tenu tant que l'utilisateur n'a pas répondu a/b/c/d ; parité PCIe × 8 au mieux (22,6 Go/s).
 * Ce qui reste opt-in nommé (C4, C10 b, C5-b, C17, C13-c flash, `MLA_GLUE=2` si M3 tombe, `MLA_BATCH_FUSION`) est listé dans REPRISE.md avec son chiffre — c'est une fermeture, pas une dette.
@@ -271,7 +284,8 @@ seul chantier prefill**, scellé T_experts ≤ 0,55 × Marlin au budget nsys (`s
 
 **Chantiers ouverts le 19/09 au soir** (utilisateur : « les chantiers non terminables démarrent
 maintenant »), un fichier `revue/chantier-c<N>-19-09.md` chacun, pointés dans INDEX : C2 prefill
-par déquant transitoire + `_grouped_mm` · C1 W4A8 experts · C3 MTP GLM · C4 godets sur `b` ·
+par déquant transitoire + `_grouped
+_mm` · C1 W4A8 experts · C3 MTP GLM · C4 godets sur `b` ·
 C5 KV int8 · C6 conversion GPTQ + Hadamard · C7 GLM MLA FP8 · C8 gouverneur d'horloge par lot.
 
 Par ordre de valeur, chacune avec la mesure qui la rendrait fausse :
@@ -296,7 +310,8 @@ Par ordre de valeur, chacune avec la mesure qui la rendrait fausse :
    C4 a corrigé le vrai défaut (`static_bind` store[-1], Mamba2).
 7. **Cache d'experts** (modèles > VRAM : Devstral, 119B — suspendu utilisateur).
 8. **Conversion : GPTQ + Hadamard sur Coder** (1,0155 → 1,010, de la marge pour A8).
-9. **Cache KV int8** : déjà le défaut effectif (`kvcache.py:241`) — C5 ne fait que le nommer (`regime_ligne()`). 10. **Produit** : `.deb`, lanceurs
+9. **Cache KV int8** : déjà le défaut effectif (`kvcache.py:241`) — C5 ne fait que le nommer (`regime_ligne()`). 10. **P
+roduit** : `.deb`, lanceurs
    refusant sans verrou, `acvram eco`, GUI (32 langues, vedettes), PPL sur le chemin servi.
 
 **Ce qui ne se fera pas** (pour ne pas y revenir) : W4A4 experts (plancher E2M1 ≈ 9 %

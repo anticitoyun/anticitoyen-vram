@@ -25,7 +25,8 @@ Conçue pour une machine précise :
 
 **Un format par GPU.** La RTX 5090 possède des tensor cores FP4 ; la RTX 3080 Ti
 n'en a pas, et n'a pas non plus de FP8. Aligner les deux sur un format commun
-gâcherait la 5090. Le convertisseur écrit donc *deux fois le même modèle*, dans
+gâcherait la 5090. Le convertisseur écrit donc *deux fois le mêm
+e modèle*, dans
 le format que chaque destination sait réellement exploiter :
 
 | | RTX 5090 | RTX 3080 Ti |
@@ -79,7 +80,8 @@ client.chat.completions.create(model="qwen3-32b",
 
 ## Ce que dit `acvram plan`
 
-Le planificateur mérite d'être lancé avant tout téléchargement. Il répond aux
+Le planificateur mérite d'être lancé avant tout téléchargeme
+nt. Il répond aux
 questions qui décident si un modèle est utilisable sur cette machine :
 
 ```
@@ -126,7 +128,8 @@ proposés lit ces mêmes poids **une seule fois**. Deux propositeurs :
 
 * `ngram` (par défaut) — cherche le suffixe courant plus tôt dans le contexte et
   propose ce qui suivait. Ne coûte rien, ne demande aucun modèle. Rentable quand
-  la sortie recopie l'entrée : édition de code, RAG, résumé.
+  la sort
+ie recopie l'entrée : édition de code, RAG, résumé.
 * `draft` — un petit modèle sur un second appareil. Sur ce rig, cet appareil est
   la RTX 3080 Ti, que le planificateur laisse volontairement oisive pour tout
   modèle qui tient sur la 5090.
@@ -166,7 +169,8 @@ mêmes octets : le plus rapide est celui dont le bus est le plus large — le PC
 calculer sur place laisse en outre le GPU libre au lieu de le faire attendre une
 copie.
 
-Cela ne vaut que si le processeur lit directement les poids empaquetés sur
+Cela ne vaut que
+ si le processeur lit directement les poids empaquetés sur
 4 bits. D'où un petit noyau C++ avec un chemin AVX2 (`acvram_cpu.cpp`, chargé
 par ctypes, sans en-têtes Python ni ninja). Même sur sa branche **scalaire** de
 repli, il bat `dequantize() @ x` d'un facteur 1,44 en INT4 et 3,21 en NVFP4,
@@ -208,7 +212,8 @@ $ acvram eval ~/acv/qwen3-32b-nvfp4 ~/acv/qwen3-32b-int4
 |---|---|
 | `POST /v1/chat/completions` | flux SSE ou réponse unique ; utilise le gabarit de conversation du modèle |
 | `POST /v1/completions` | invite en texte ou en identifiants de jetons |
-| `POST /v1/embeddings` | états cachés finaux moyennés, normalisés L2, `dimensions` respecté |
+| `POST /v1/embeddings` | états cachés finaux moyenné
+s, normalisés L2, `dimensions` respecté |
 | `GET /v1/models` | plus un bloc `acvram` : formats, appareils, capacité du cache KV |
 | `GET /health`, `GET /metrics` | débit de décodage, occupation des blocs KV |
 
@@ -248,7 +253,8 @@ Deux constats issus de ces mesures ont changé les valeurs par défaut :
 * [`docs/FEUILLE-DE-ROUTE.md`](docs/FEUILLE-DE-ROUTE.md) — **ce qui n'est pas fait**, à lire en premier
 * [`CONVENTIONS.md`](CONVENTIONS.md) — conventions de travail sur le code (langue, style, contrôles avant de pousser)
 
-## Résultats mesurés (22/09/2026, RTX 5090 à 400 W, régime ≥ 20 s au compteur d'énergie)
+#
+# Résultats mesurés (22/09/2026, RTX 5090 à 400 W, régime ≥ 20 s au compteur d'énergie)
 
 Qwen3-Coder-30B-A3B en NVFP4 (experts) + INT8 (attention, tête), même
 protocole pour tous les moteurs (`outils/`, une carte, `energie.py`) :
@@ -278,11 +284,12 @@ cellule : les gains viennent de la MMA FP4 native de Blackwell
 (`mma.sync … kind::mxf4nvf4`, ×7,9 sur le bf16), du MoE en GEMM groupée par
 godet de lot, d'un routage en un seul noyau (3 677 → 1 517 lancements par
 pas) et d'un GEMM étroit sur tensor cores pour les projections. Chaque chiffre a
-sa note dans `acvram-memoire/revue/` avec la prédiction scellée avant la
+sa note dans `revue/` avec la prédiction scellée avant la
 mesure, l'instrument et son régime — un chiffre sans régime n'est pas publié.
 
 Où acvram est devant : modèles MLA (GLM-4.7-Flash) en NVFP4 natif sm_120, que
-vLLM ne sert qu'en FP8 (b=1 : 165,35 t/s en service) ; les modèles qui ne
+vLLM ne
+ sert qu'en FP8 (b=1 : 165,35 t/s en service) ; les modèles qui ne
 tiennent pas en VRAM ; et le décodage à séquence unique (b=1 : 380,8 t/s contre
 290,6 pour vLLM). À grand lot en revanche, sur un MoE qui tient en VRAM, vLLM
 reste devant à b=12 (1 782 contre 1 634 t/s, cf. erratum) ; acvram y a progressé
@@ -299,8 +306,8 @@ mesure d'énergie couvrant plus d'une carte ou moins de 10 s est invalidée ;
 un modèle chargé en régime dégradé le dit et n'entre pas dans un duel.
 
 640 tests (`pytest -q`, une minute sur processeur ; les tests GPU ne tournent
-que sous `carte.sh`). Suivi du travail : `acvram-memoire/` (règles, annuaire,
-carnets, revue de 180 notes).
+que sous `carte.sh`). Suivi du travail : `revue/` (notes de mesure : prédiction scellée
+avant la mesure, instrument et son régime).
 
 ## Soutenir
 
