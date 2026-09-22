@@ -8,3 +8,5 @@
 
 ## Suite
 Avant l'ABBA prévu : établir pourquoi ce nouvel alias charge en `experts_layout=naturel` (repack Marlin échoué ou non tenté — condition à poste1, `model.py:429` et voisinage). Sans ce point réglé, tout chiffre de débit comparerait deux régimes différents, pas le format qkv seul.
+
+**Complément (à sec)** : les experts sont **au format `nvfp4` identique sur les deux alias** (vérifié manifeste, `model.layers.0.mlp.experts.0.gate_proj.weight` : `nvfp4, bpw 4.5` sur -qkvo-i8c ET sur qkv-22-09) — le format sur disque n'est PAS la cause. `_liberer_pile_naturelle()` (`model.py:401-424`) ne repack en Marlin que si `self._stacks[nom][0] == "nvfp4"` — une propriété construite EN MÉMOIRE au chargement, distincte du manifeste ; la divergence se situe donc dans la construction de `_stacks` au chargement (`experts_repli=identite` du nouveau manifeste, ou un autre champ, à isoler par poste1), pas dans la conversion elle-même.
