@@ -347,7 +347,18 @@ def search_channel_scales(
     # dans ces erreurs, sans une conversion de plus.
     grille: list[float] = []
 
-    for i in range(n_grid + 1):
+    # Pièce 23 (22/09) : quand la magnitude par canal est CONSTANTE — c est le
+    # cas dès que `stats is None`, donc pour tout expert que le corpus n a pas
+    # routé — `s = act^alpha / mean(act^alpha)` vaut 1 pour TOUTE valeur
+    # d alpha : les n_grid+1 évaluations sont identiques, et leur résultat est
+    # connu d avance (l identité). On en fait UNE, pour l erreur rendue, et la
+    # grille est remplie de cette même valeur : sortie au bit, journal
+    # identique, n_grid+1 fois moins de quantifications. Sur le 30B-VL du
+    # 22/09, 5 235 experts sans statistique sur 6 144, soit ~85 % des tenseurs
+    # quantifiés, prenaient ce chemin pour rien.
+    plat = bool(torch.allclose(act, act.reshape(-1)[0].expand_as(act)))
+    n_eval = 1 if plat else n_grid + 1
+    for i in range(n_eval):
         alpha = i / n_grid
         s = act.pow(alpha)
         s = s / s.mean().clamp(min=1e-12)            # garde l'échelle centrée
@@ -361,11 +372,14 @@ def search_channel_scales(
         grille.append(err)
         if err < best_err:
             best_err, best_scale = err, s.clone()
+    if plat:
+        grille = grille * (n_grid + 1)               # le journal ne change pas
 
     assert best_scale is not None
     if journal is not None:
         journal["erreurs_grille"] = [round(e, 8) for e in grille]
         journal["alpha_retenu"] = round(grille.index(best_err) / n_grid, 4)
+        journal["grille_plate"] = plat
     identity = torch.ones_like(best_scale)
     if torch.allclose(best_scale, identity, atol=1e-3):
         best_scale = None
