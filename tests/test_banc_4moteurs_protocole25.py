@@ -39,10 +39,48 @@ def test_agreger_fenetre_horloge_mediane_et_temp_max():
     assert agg["temp_max"] == 62
 
 
-def test_agreger_fenetre_throttle_si_un_seul_sous_passage_bride():
-    sp = [_sous_passage(bridages=frozenset()), _sous_passage(bridages=frozenset({"SwPowerCap"}))]
+def test_agreger_fenetre_throttle_si_un_seul_sous_passage_bride_thermique():
+    """Bridage THERMIQUE (nom réel `energie.py` : "thermique_materiel") : un
+    seul sous-passage suffit à rejeter toute la fenêtre — une carte qui dérive
+    dérive pour tout le monde, pas seulement le sous-passage où on l'a vue."""
+    sp = [_sous_passage(bridages=frozenset()), _sous_passage(bridages=frozenset({"thermique_materiel"}))]
     agg = banc._agreger_fenetre(sp)
     assert agg["throttle"] is True
+
+
+def test_agreger_fenetre_bridage_puissance_seul_ne_declenche_pas_throttle():
+    """Contrôle de conformité qr.md § 2.5 (chef 22/09, 2e passage) : le
+    bridage PUISSANCE (SwPowerCap, nom réel "puissance") est l'état normal
+    d'un moteur rapide au plafond 400 W -- il ne doit JAMAIS déclencher
+    `throttle`, à la différence des bridages thermiques."""
+    sp = [_sous_passage(bridages=frozenset({"puissance"})),
+          _sous_passage(bridages=frozenset({"puissance"}))]
+    agg = banc._agreger_fenetre(sp)
+    assert agg["throttle"] is False
+    assert agg["bridage_puissance"] is True
+
+
+def test_valider_fenetre_ne_rejette_pas_le_bridage_puissance():
+    """Le test qui casse si une fenêtre bridée PUISSANCE est rejetée à tort."""
+    sp = [_sous_passage(debit=10.0, bridages=frozenset({"puissance"})),
+          _sous_passage(debit=10.0, bridages=frozenset({"puissance"}))]
+    agg = banc._agreger_fenetre(sp)
+    assert banc._valider_fenetre(agg) == []
+
+
+def test_valider_fenetre_rejette_le_bridage_thermique():
+    """Le test qui casse si une fenêtre bridée THERMIQUE passe à tort."""
+    sp = [_sous_passage(debit=10.0, bridages=frozenset({"thermique_logiciel"})),
+          _sous_passage(debit=10.0)]
+    agg = banc._agreger_fenetre(sp)
+    raisons = banc._valider_fenetre(agg)
+    assert any("throttle" in r for r in raisons)
+
+
+def test_agreger_fenetre_watts_moy():
+    sp = [_sous_passage(duree=10.0, joules=500.0), _sous_passage(duree=10.0, joules=300.0)]
+    agg = banc._agreger_fenetre(sp)
+    assert agg["watts_moy"] == pytest.approx(800.0 / 20.0)  # 40.0 W
 
 
 def test_agreger_fenetre_ignore_horloges_negatives():
@@ -86,7 +124,7 @@ def test_sd_relatif_rejette_au_dessus_de_10_pourcent():
 
 
 def test_valider_fenetre_throttle_rejette_meme_avec_sd_nul():
-    sp = [_sous_passage(debit=10.0, bridages=frozenset({"HwSlowdown"})),
+    sp = [_sous_passage(debit=10.0, bridages=frozenset({"thermique_materiel"})),
           _sous_passage(debit=10.0)]
     agg = banc._agreger_fenetre(sp)
     raisons = banc._valider_fenetre(agg)
@@ -94,7 +132,7 @@ def test_valider_fenetre_throttle_rejette_meme_avec_sd_nul():
 
 
 def test_valider_fenetre_cumule_sd_et_throttle():
-    sp = [_sous_passage(debit=8.0, bridages=frozenset({"HwSlowdown"})),
+    sp = [_sous_passage(debit=8.0, bridages=frozenset({"thermique_materiel"})),
           _sous_passage(debit=12.0)]
     agg = banc._agreger_fenetre(sp)
     raisons = banc._valider_fenetre(agg)
@@ -148,7 +186,7 @@ def test_comparer_alternee_ordre_et_tsv(tmp_path, monkeypatch):
     assert appels == ["acvram", "vllm", "acvram", "vllm", "acvram", "vllm"]
     assert all(not f["raisons"] for f in fenetres)          # écart d'horloge 1,85 % : aucune paire rejetée
     lignes = sortie.read_text().splitlines()
-    assert lignes[0] == "moteur\tsha\thorloge\ttemp\tcharge\tJ\tt_s\tdate\tduree\tvalide\traisons"
+    assert lignes[0] == "moteur\tsha\thorloge\ttemp\tcharge\tJ\tt_s\tdate\tduree\tvalide\twatts_moy\traisons"
     assert len(lignes) == 7                                  # en-tête + 6 fenêtres
     assert lignes[1].split("\t")[0] == "acvram" and lignes[1].split("\t")[1] == "abc1234"
 
@@ -166,7 +204,7 @@ def test_comparer_alternee_paire_invalidee_par_horloge(tmp_path, monkeypatch):
                                       sortie_tsv=str(sortie))
     assert all(f["raisons"] for f in fenetres)               # toutes les paires invalidées (écart constant)
     lignes = sortie.read_text().splitlines()
-    assert all(l.split("\t")[-2] == "non" for l in lignes[1:])   # colonne "valide" = non partout
+    assert all(l.split("\t")[-3] == "non" for l in lignes[1:])   # colonne "valide" = non partout
 
 
 def test_comparer_alternee_refuse_moins_de_6_fenetres():
