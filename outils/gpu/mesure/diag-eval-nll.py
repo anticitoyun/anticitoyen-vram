@@ -166,6 +166,20 @@ def main() -> int:
               "div_eval_serve": premiere_divergence(e, s),
               "delta_eval_serve_max": round(max(abs(x - y) for x, y in zip(e, s)), 4)})
     if a.source:
+        # 22/09 (poste2) : le modèle acvram (28 Go) restait chargé pendant le
+        # sous-processus HF → OOM. On le libère AVANT, et on vérifie que la
+        # carte est bien rendue : un bras hf qui tombe sur l OOM ne dit rien.
+        del loaded
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            libre = torch.cuda.mem_get_info()[0] / 2 ** 30
+            r["vram_libre_avant_hf_gio"] = round(libre, 2)
+            print(f"[diag] modèle acvram libéré, {libre:.1f} Gio libres avant le bras hf", flush=True)
+            if libre < 20:
+                print(f"[diag] ALERTE : {libre:.1f} Gio seulement — le bras hf en offload peut échouer", flush=True)
         h = nll_hf(a.source, ids)
         if h is not None:
             r.update({"nll_hf": h, "ppl_hf": round(ppl(h), 3), "div_eval_hf": premiere_divergence(e, h),
