@@ -82,3 +82,11 @@ calibré la paie, int8 compris. Remède : échelle optionnelle passée aux deux 
 Prédit : −0,47 ms/pas, glue ramenée vers ~207 lancements. Carte après la 44 de poste5. La 42 (b) se rejoue
 sur l'arbre qui contient la 47 : tant qu'elle n'est pas faite, A et B diffèrent de deux axes et « exacte
 mais sans gain » ne peut pas se sceller.
+
+## Pièce 48 — noyau étroit : où part le débit à M=12 (22/09 21 h, après Q(13)) — OUVERTE, après la 47 et la 44
+
+Diagnostic d'abord (ncu ≤ 5 min, noyaux en l'état) : `_dense_etroit_kernel` (nvfp4) ET `gemm_etroit` int8, taux
+d'émission, instructions ALU par octet DRAM, dram__throughput, attentes mémoire. Deux issues nommées : pénalité de
+dépaquetage (émission saturée → MMA mxf4nvf4 native + échelles swizzlées, gros chantier) ; ou latence (émission
+< 50 %, attentes mémoire → étages et cp.async, chantier moyen, profite aussi à l'int8 servi). L'écart int8
+0,71-0,82 contre 1,81 To/s reste inexpliqué par Q(13) : c'est lui qui paie sur le format servi.
