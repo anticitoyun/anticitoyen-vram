@@ -154,7 +154,11 @@ def mesurer(nom, rep):
         tc = occ.chrono(fn_chaud, rep); tf = lat.chrono_froid(fns_froid, max(20, rep // 10))
         mf = tf[len(tf) // 2]
         return {"us_chaud": round(tc[len(tc) // 2], 2), "us_froid": round(mf, 2), "to_s_froid": round(octets / (mf * 1e-6) / 1e12, 3), "octets": octets}
-    r["bras"]["servi W8A16"] = {**ligne([(lambda t=t: GE.gemm_etroit(x, t, compact=True)) for t in copies], lambda: GE.gemm_etroit(x, t0, compact=True), octets_i8), "au_bit": True}
+    ref32 = x.float() @ _dequant(t0).float().t()                 # référence fp32 sur les poids déquantifiés du servi
+    def rms_rel(y):                                              # ||y − ref|| / ||ref|| : insensible aux passages par zéro (l écart relatif par élément y explose)
+        return float((y.float() - ref32).norm() / ref32.norm())
+    r["bras"]["servi W8A16"] = {**ligne([(lambda t=t: GE.gemm_etroit(x, t, compact=True)) for t in copies], lambda: GE.gemm_etroit(x, t0, compact=True), octets_i8), "au_bit": True,
+                                "ecart_rms_rel": rms_rel(ref)}
     try:
         ya = gemm_a(x, t0)
         r["bras"]["(a) W8A16 échelles hors boucle"] = {**ligne([(lambda t=t: gemm_a(x, t)) for t in copies], lambda: gemm_a(x, t0), octets_i8),
@@ -169,7 +173,7 @@ def mesurer(nom, rep):
         octets_fp8 = n * k + n * 4
         err = ((yb.float() - p0.ref).abs() / p0.ref.abs().clamp_min(1e-3))
         r["bras"]["(b) W8A8 FP8 e4m3"] = {**ligne([(lambda p=p: gemm_fp8(p, B)) for p in ps], lambda: gemm_fp8(p0, B), octets_fp8),
-                                          "au_bit": False, "ecart_rel_median": float(err.median()), "ecart_rel_p99": float(err.flatten().kthvalue(int(err.numel() * 0.99)).values),
+                                          "au_bit": False, "ecart_rms_rel": rms_rel(yb), "ecart_rel_median": float(err.median()), "ecart_rel_p99": float(err.flatten().kthvalue(int(err.numel() * 0.99)).values),
                                           "ecart_rel_max": float(err.max())}
     except Exception as exc:
         r["bras"]["(b) W8A8 FP8 e4m3"] = {"erreur": f"{type(exc).__name__}: {exc}"[:160]}
