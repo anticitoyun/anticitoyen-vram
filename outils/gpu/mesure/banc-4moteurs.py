@@ -298,6 +298,35 @@ def poids_mio(dossier):
     return total // (1024 * 1024)
 
 
+def sha256_modele(dossier: str) -> str:
+    """Identité rejouable d'un modèle : SHA-256 d'un MANIFESTE trié
+    (chemin relatif + taille) des fichiers de poids, pas du contenu —
+    hasher plusieurs dizaines de Go à chaque fenêtre coûterait plus cher
+    que la mesure elle-même (qr.md § 2.5 : « fichiers réellement utilisés
+    ou un manifeste trié chemins+tailles+hashes »). Détecte un remplacement,
+    un ajout ou un retrait de shard ; ne détecte PAS une corruption interne
+    à taille égale — hors du besoin ici (identité de campagne, pas
+    intégrité disque). Chaîne vide si le dossier n'existe pas ou n'a
+    aucun poids reconnu."""
+    entrees = []
+    try:
+        for rep, _, fichiers in os.walk(dossier):
+            for f in fichiers:
+                if f.endswith((".safetensors", ".gguf", ".bin")):
+                    chemin = os.path.join(rep, f)
+                    try:
+                        taille = os.path.getsize(chemin)
+                    except OSError:
+                        continue
+                    entrees.append((os.path.relpath(chemin, dossier), taille))
+    except OSError:
+        return ""
+    if not entrees:
+        return ""
+    manifeste = "\n".join(f"{p}\t{t}" for p, t in sorted(entrees))
+    return hashlib.sha256(manifeste.encode()).hexdigest()
+
+
 def attendre_memoire(secondes=90, marge=200):
     """Attend que la memoire des cartes cesse de bouger avant de charger.
 
@@ -1039,15 +1068,23 @@ def _agreger_fenetre(sous_passages: list) -> dict:
     joules_totales = sum(p["joules"] for p in sous_passages)
     debits = [p["debit"] for p in sous_passages]
     horloges = [h for p in sous_passages for h in p.get("horloges", []) if h and h >= 0]
+    # Ordre chronologique préservé (les sous-passages s'enchaînent, et chaque
+    # `Energie.temperatures` est déjà ordonnée) : premier/dernier échantillon
+    # bornent la dérive thermique de la fenêtre, indépendamment de `temp_max`.
     temperatures = [t for p in sous_passages for t in p.get("temperatures", []) if t and t >= 0]
     throttle = any(p.get("bridages") for p in sous_passages)
+    pics_charge = [100 * p["load1_pic"] / p["nproc"] for p in sous_passages
+                  if p.get("load1_pic") is not None and p.get("nproc")]
     return {
         "n": n_total, "duree": round(duree_totale, 2), "joules": round(joules_totales, 1),
         "t_s": round(n_total / duree_totale, 1) if duree_totale else 0.0,
         "sd_pct": round(_sd_relatif_pct(debits), 2),
         "horloge_med": statistics.median(horloges) if horloges else -1,
         "temp_max": max(temperatures) if temperatures else -1,
+        "temp_debut": temperatures[0] if temperatures else -1,
+        "temp_fin": temperatures[-1] if temperatures else -1,
         "throttle": throttle,
+        "charge_pic_pct": round(max(pics_charge), 1) if pics_charge else None,
     }
 
 
@@ -1057,13 +1094,28 @@ def _joules_net(agg: dict, watts_repos: float) -> float:
     return round(max(agg["joules"] - watts_repos * agg["duree"], 0.0), 1)
 
 
+def _valider_derive_thermique(temp_debut: float, temp_fin: float, seuil: float = 5.0) -> list:
+    """Dérive thermique BRUTE (début/fin de fenêtre), distincte du throttle
+    (`bridages`) : la carte peut dériver de plusieurs °C sans jamais
+    franchir son seuil matériel de throttle -- qr.md § 2.5 (Gemma 4 31B,
+    gpt-oss 120B : rejet si l'écart dépasse un seuil, 5°C par défaut ici).
+    ``-1`` (non mesuré) ne rejette pas."""
+    if temp_debut < 0 or temp_fin < 0:
+        return []
+    ecart = abs(temp_fin - temp_debut)
+    return [] if ecart <= seuil else [f"dérive thermique {ecart:.0f} °C > {seuil:.0f} °C"]
+
+
 def _valider_fenetre(agg: dict) -> list:
-    """sd > 10 % ou throttle actif → la fenêtre seule est rejetée."""
+    """sd > 10 %, throttle actif, ou dérive thermique > 5°C → la fenêtre
+    seule est rejetée (la dérive d'horloge, elle, se juge PAR PAIRE : voir
+    `_valider_paire`)."""
     raisons = []
     if agg["sd_pct"] > 10.0:
         raisons.append(f"sd {agg['sd_pct']:.1f} % > 10 %")
     if agg["throttle"]:
         raisons.append("throttle actif")
+    raisons += _valider_derive_thermique(agg.get("temp_debut", -1), agg.get("temp_fin", -1))
     return raisons
 
 
@@ -1103,13 +1155,41 @@ def mesurer_fenetre_protocole25(moteur, fenetre_s=20.0, repos_avant_s=5.0, charg
             "n": n, "duree": e.duree, "joules": e.joules,
             "horloges": list(e.horloges), "temperatures": list(e.temperatures),
             "bridages": set(e.bridages), "debit": tps,
+            # pic REGLES §2 de CE sous-passage : jusqu'ici jamais lu, donc
+            # `charge_pct` restait toujours None et `_valider_charge`
+            # toujours un no-op muet (qr.md § 2.5, contrôle de conformité).
+            "load1_pic": e.load1_max, "nproc": e.nproc,
         })
     agg = _agreger_fenetre(sous_passages)
     agg["joules_net"] = _joules_net(agg, base.moyenne)
+    # ``charge_pct`` explicite (tests, appel manuel) prime sur la mesure
+    # automatique ; sinon le pic déjà calculé par `_agreger_fenetre`.
+    if charge_pct is None:
+        charge_pct = agg["charge_pic_pct"]
     agg["charge_pct"] = charge_pct
     agg["raisons"] = _valider_fenetre(agg) + _valider_charge(charge_pct)
     agg["moteur"] = moteur
     return agg
+
+
+def resumer_moteur(fenetres: list, moteur: str) -> dict | None:
+    """Valeur PUBLIÉE par moteur (qr.md § 2.5) : médiane du J/jeton net et
+    du débit sur les fenêtres VALIDES de ce moteur (`raisons` vide) —
+    jamais la moyenne, et jamais med(J)/med(N) sauf si tous les N
+    coïncident. Jusqu'ici `comparer_alternee` n'écrivait que les fenêtres
+    brutes, sans jamais agréger de valeur finale par moteur. `None` (pas
+    0) si aucune fenêtre valide."""
+    valides = [f for f in fenetres if f["moteur"] == moteur and not f["raisons"]]
+    j_par_jeton = [f["joules_net"] / f["n"] for f in valides if f["n"]]
+    if not j_par_jeton:
+        return None
+    debits = [f["t_s"] for f in valides]
+    return {
+        "moteur": moteur,
+        "n_fenetres_valides": len(valides),
+        "j_par_jeton_med": round(statistics.median(j_par_jeton), 4),
+        "t_s_med": round(statistics.median(debits), 1),
+    }
 
 
 def comparer_alternee(moteurs, sha, n_fenetres=6, fenetre_s=20.0, sortie_tsv="/dev/stdout"):
@@ -1141,6 +1221,22 @@ def comparer_alternee(moteurs, sha, n_fenetres=6, fenetre_s=20.0, sortie_tsv="/d
                     f"{charge}\t{f['joules_net']}\t{f['t_s']}\t"
                     f"{time.strftime('%Y-%m-%dT%H:%M:%S')}\t{f['duree']}\t"
                     f"{'oui' if valide else 'non'}\t{' ; '.join(f['raisons']) or 'aucune'}\n")
+    # Valeur publiée par moteur, à part du détail par fenêtre : un fichier
+    # sœur plutôt que des lignes hétérogènes dans le TSV ci-dessus, dont le
+    # lecteur (`en-tête EXACT demandé`) ne doit pas changer de forme.
+    if sortie_tsv != "/dev/stdout":
+        with open(sortie_tsv + ".resume.tsv", "w") as fh:
+            fh.write("moteur\tn_fenetres_valides\tj_par_jeton_med\tt_s_med\n")
+            for moteur in dict.fromkeys(moteurs):
+                r = resumer_moteur(fenetres, moteur)
+                if r is None:
+                    fh.write(f"{moteur}\t0\t?\t?\n")
+                    log(f"           {moteur} : aucune fenêtre valide, pas de médiane publiable")
+                else:
+                    fh.write(f"{r['moteur']}\t{r['n_fenetres_valides']}\t"
+                            f"{r['j_par_jeton_med']}\t{r['t_s_med']}\n")
+                    log(f"           {moteur} : médiane {r['j_par_jeton_med']} J/jeton net, "
+                        f"{r['t_s_med']} t/s sur {r['n_fenetres_valides']} fenêtre(s) valide(s)")
     return fenetres
 
 
