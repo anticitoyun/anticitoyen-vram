@@ -25,7 +25,7 @@ Objectif : plus rapide et moins de joules que llama.cpp, vLLM, TensorRT-LLM. **V
 12. J/jeton 4 moteurs (banc-4moteurs.py) selon verdict 2.5 : J net = ∫(P − P_repos), ≥ 6 fenêtres ≥ 20 s alternées, rejet charge > 5 % / sd > 10 % / throttle actif, horloge médiane par fenêtre écart ≤ 3 %, en-tête TSV ; colonne J/jeton du README à remettre.
 
 ## F — modularisation (4 bis, à sec)
-13. model.py : 2-3 FAITS (5aca3424, 2 912 l.) ; 4-5 (moe.py, couches.py) reportés après b=12 — 95 monkeypatchs de tests sur `engine.model` à repointer par script + test-garde, 2 commits, suite complète au trou. [étape 4 FAITE 22/09 17 h 1x — b6047cc9 moe.py, au bit ; étape 5 couches.py à suivre]
+13. model.py : 2-3 FAITS (5aca3424, 2 912 l.) ; 4-5 (moe.py, couches.py) reportés après b=12 — 95 monkeypatchs de tests sur `engine.model` à repointer par script + test-garde, 2 commits, suite complète au trou. [étape 4 FAITE 22/09 17 h 1x — b6047cc9 moe.py, au bit ; étape 5 couches.py à suivre] [étape 5 FAITE cc848d87 — model.py 557 l. ; pièce 13 close ; restent 15 (convert.py, loader.py, layers.py, kernels/__init__.py)]
 14. ~~GUI module 3~~ FAIT (c365094d, 4 bis GUI clos : lanceurs 80/78 l.).
 15. Ensuite : convert.py (2 398), loader.py (1 749), layers.py (1 449), kernels/__init__.py (1 401).
 
