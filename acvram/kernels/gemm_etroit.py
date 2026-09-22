@@ -163,35 +163,42 @@ def _compteur(n: int, device) -> torch.Tensor:
     return c
 
 
-# Opt-in « ± 1 ulp » (REGLES § 1, décision utilisateur 22/09) : facteur de
-# programmes par SM du split-K. 2 = le défaut, AU BIT avec le chemin d avant
-# (même `voulu`, mêmes tranches, même ordre des sommes fp32). Un autre
-# facteur change le nombre de tranches, donc la PARTITION de K et l ordre
-# fp32 des partiels sommés par le dernier programme : sortie à ± 1 ulp bf16,
-# jugée par `banc-etroites-splitk` (ulp max, part d éléments ≠) puis PPL à
-# 2 SE et KL contre le chemin exact ; jamais activé par un lanceur ; ligne
-# `etroites=serie|splitk±1ulp(F)`. Conception : poste1-etroites-splitk-conception-22-09.
-FACTEUR_DEFAUT = 2.0
-_FACTEUR: Optional[float] = None
+# Forme du noyau (BM/BN fixes ; `warps` et `etages` réglables pour
+# l occupation — pièce 35, verdict croisé Q(3) : `o` [2048, 4096] tourne à
+# 0,71 To/s, hypothèse = occupation par programme, pas partition de K ; le
+# split-K à facteur variable a été RÉFUTÉ au banc (poste2 b08a3d34) et son
+# crochet est retiré ici). Changer warps ou étages ne change NI l ordre des
+# sommes en K (même boucle par groupe), NI l ordre des tranches (même
+# `tranches`) : la sortie est AU BIT — test dans le même commit.
+_FORME: Optional[tuple] = None
 
 
-def facteur_splitk() -> float:
-    if _FACTEUR is not None:
-        return _FACTEUR
-    v = os.environ.get("ACVRAM_ETROITES_SPLITK", "")
-    return float(v) if v else FACTEUR_DEFAUT
+def forme_noyau() -> tuple[int, int]:
+    """(warps, étages) du lancement : défaut (4, 3), ou `ACVRAM_ETROITES_FORME=W,S`."""
+    if _FORME is not None:
+        return _FORME
+    v = os.environ.get("ACVRAM_ETROITES_FORME", "")
+    if v:
+        w, e = v.split(",")
+        return int(w), int(e)
+    return _WARPS, _STAGES
 
 
-def regler_tranches(facteur: Optional[float]) -> None:
-    """Banc : impose le facteur (None = relire l environnement / le défaut)."""
-    global _FACTEUR
-    _FACTEUR = facteur
+def regler_forme(forme: Optional[tuple]) -> None:
+    """Banc : impose (warps, étages) ; None = relire l environnement / le défaut."""
+    global _FORME
+    _FORME = forme
+
+
+def etroites_texte() -> str:
+    """Ligne de régime : `serie` au défaut (4 warps, 3 étages), sinon `w{W}s{S}`."""
+    w, e = forme_noyau()
+    return "serie" if (w, e) == (_WARPS, _STAGES) else f"w{w}s{e}"
 
 
 def decouper_k(ng: int, tuiles_n: int, device) -> tuple[int, int]:
-    """(tranches, groupes par tranche) : `facteur` programmes par SM voulus,
-    borné par le nombre de groupes ; arithmétique du 17/09 inchangée à F = 2."""
-    voulu = -(-int(round(facteur_splitk() * _programmes(device))) // tuiles_n)
+    """(tranches, groupes par tranche) — 2 programmes par SM visés, arithmétique du 17/09."""
+    voulu = -(-2 * _programmes(device) // tuiles_n)
     tranches = max(1, min(ng, voulu))
     gpt = -(-ng // tranches)
     return -(-ng // gpt), gpt
@@ -206,12 +213,6 @@ def programmes_de(x: torch.Tensor, t) -> int:
     N, k_pad = t.qweight.shape
     tuiles_n = -(-N // BN)
     return tuiles_n * decouper_k(k_pad // t.group_size, tuiles_n, x.device)[0]
-
-
-def etroites_texte() -> str:
-    """Pour la ligne de régime : `serie` au bit (F = 2), sinon `splitk±1ulp(F)`."""
-    f = facteur_splitk()
-    return "serie" if f == FACTEUR_DEFAUT else f"splitk±1ulp(F={f:g})"
 
 
 def gemm_etroit(x: torch.Tensor, t, sortie_fp32: bool = False, compact: bool = False) -> torch.Tensor:
@@ -233,12 +234,12 @@ def gemm_etroit(x: torch.Tensor, t, sortie_fp32: bool = False, compact: bool = F
         _etroit_reduit_kernel[(tuiles_n, tranches)](
             x, t.qweight, t.scales, t.zeros, y, _compteur(tuiles_n, x.device), out, M, N, K, ng, gpt, tranches,
             x.stride(0), t.qweight.stride(0), t.scales.stride(0), y.stride(0), y.stride(1), out.stride(0),
-            BM_=BM, BN_=BN, G=G, num_warps=_WARPS, num_stages=_STAGES)
+            BM_=BM, BN_=BN, G=G, num_warps=forme_noyau()[0], num_stages=forme_noyau()[1])
         return out
     y = torch.zeros(tranches, M, N, dtype=torch.float32, device=x.device)
     _etroit_kernel[(tuiles_n, tranches)](
         x, t.qweight, t.scales, t.zeros, y, M, N, K, ng, gpt,
         x.stride(0), t.qweight.stride(0), t.scales.stride(0), y.stride(0), y.stride(1),
-        BM_=BM, BN_=BN, G=G, num_warps=_WARPS, num_stages=_STAGES)
+        BM_=BM, BN_=BN, G=G, num_warps=forme_noyau()[0], num_stages=forme_noyau()[1])
     out = y.sum(0) if tranches > 1 else y[0]
     return out if sortie_fp32 else out.to(x.dtype)
