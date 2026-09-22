@@ -5,10 +5,12 @@
 > machine cible », « Reste à faire », « Limites connues ») datent d'avant la
 > première exécution sur la machine cible (30 août 2026) et sont conservées
 > telles quelles. L'état courant tient en une page : README, « Résultats
-> mesurés ». Reste à faire au 21 septembre 2026 : combler l'écart de 3,5 % à
-> b=12 face à vLLM (1 540 contre 1 596 t/s), mesurer les joules par jeton
-> contre llama.cpp, vLLM et TensorRT-LLM, réparer la calibration AWQ des
-> experts groupés (Qwen3-VL-30B), qualité NVFP4 du 31B par échelle adaptative.
+> mesurés ». Reste à faire au 22 septembre 2026 (erratum du même jour) : combler
+> l'écart de 8 % à b=12 face à vLLM servi (1 634 contre 1 782 t/s) et de 18 %
+> face à TensorRT-LLM (1 998 t/s, 0,156 J contre 0,196 J au plafond 400 W),
+> réparer la calibration AWQ des experts groupés (Qwen3-VL-30B : repli
+> `mediane_couche` livré, à juger), qualité NVFP4 du 31B (eval PPL à réparer
+> avant tout verdict).
 
 Écrit sans complaisance, parce que le projet que celui-ci remplace annonçait une
 extension de mémoire GPU fonctionnelle et livrait un module noyau qui se
