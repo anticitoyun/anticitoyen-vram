@@ -17,6 +17,11 @@ D=${2:-scratchpad/poste1-p48-ncu}
 mkdir -p "$D"
 export PYTHONPATH=$PWD
 PY=$HOME/Bureau/Claude/anticitoyen-vram/.venv/bin/python
+# `ncu` n'est pas dans le PATH des sessions (CUDA hors PATH) : le premier jeu
+# de bras a rendu rc=127 quatre fois sans rien mesurer. Chemin explicite, et
+# refus AVANT la prise plutôt qu'un bras vide qu'on prendrait pour un résultat.
+NCU=${NCU:-/usr/local/cuda/bin/ncu}
+command -v "$NCU" >/dev/null || { echo "REFUS : ncu introuvable ($NCU)" >&2; exit 66; }
 ALPHA2=/mnt/AI_GENERATOR/models_acvram/Qwen3-Coder-30B-A3B-nvfp4-qkv-alpha2-22-09
 OFFICIEL=/mnt/AI_GENERATOR/models_acvram/Qwen3-Coder-30B-A3B-nvfp4
 M="smsp__issue_active.avg.pct_of_peak_sustained_active,\
@@ -34,12 +39,15 @@ echo "== charge hôte"; ps -eo pid,pcpu,comm --sort=-pcpu | head -4
 
 bras () {                       # $1 nom, $2 alias, $3 regex de noyau, $4 lancements
   echo "== bras $1 ($3) $(date +%H:%M:%S)"
-  ACVRAM_MODELE_MESURE="$2" ncu --graph-profiling node -k regex:"$3" \
+  ACVRAM_MODELE_MESURE="$2" "$NCU" --graph-profiling node -k regex:"$3" \
       --launch-count "$4" --metrics "$M" --csv \
       $PY outils/gpu/mesure/frontiere-pas.py "$D/$1.json" 12 8 \
       > "$D/$1.csv" 2> "$D/$1.log"
   local rc=$?
-  echo "   rc=$rc  lignes=$(wc -l < "$D/$1.csv" 2>/dev/null || echo 0)"
+  local n=$(wc -l < "$D/$1.csv" 2>/dev/null || echo 0)
+  echo "   rc=$rc  lignes=$n"
+  # un bras qui ne mesure rien n'est pas un bras : le dire ici, pas au résumé
+  [ "$rc" -eq 0 ] && [ "$n" -lt 2 ] && { echo "   BRAS VIDE — 3 dernières lignes du log :"; tail -3 "$D/$1.log"; }
   # ncu refuse parfois le profilage sous graphe : le dire, ne pas le masquer
   grep -qi "graph" "$D/$1.log" && grep -i "graph" "$D/$1.log" | head -2
   return 0
