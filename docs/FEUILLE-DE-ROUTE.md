@@ -16,6 +16,16 @@
 extension de mémoire GPU fonctionnelle et livrait un module noyau qui se
 contentait d'afficher les nombres passés en paramètres.
 
+## 22 septembre 2026 — b=12 devant vLLM au bit mais derrière au plafond, trois leviers étroits clos
+
+**Mesuré.** Débit(b) TensorRT-LLM plat jusqu'à b=8 (46/49/51/50,6 t/s) puis ×40 au lot plein (1 998, sérialisation du lanceur sous lot plein, pas du client — acvram tient 390 t/s à b=1). Énergie 4 moteurs à b=12 (protocole 2.5 corrigé, fenêtres du 5e passage, NVML, ABBA) : TensorRT-LLM 0,154 J/jeton (2 036 t/s, 374 W) · vLLM 0,163 (1 881 t/s, 371 W) · **acvram 0,197 (1 627 t/s, 389 W)** · llama.cpp 0,206 (1 054 t/s, 281 W) — acvram 3e sur 4, −21 % contre vLLM, −28 % contre TensorRT-LLM en J/jeton. Qualité : KL acvram/bf16 sur le Coder **TENU 5/5** (max 0,519, seuil 1,0, teacher forcing 8 pas) ; KL TensorRT-LLM/bf16 indicatif seulement (2,077 et 0,30 sur deux invites, deux autres exclues par l'alignement) — trop dispersé pour un verdict, attend la pièce 36 (logprobs par API, même instrument pour tous les moteurs).
+
+**Réfuté.** Split-K des projections étroites (le seul découpage exact est plus lent, tout découpage plus rapide dépasse la tolérance au bit) ; PDL et l'occupation par warps/étages (balayage 2/4/8 warps × 2/3 étages : le défaut est déjà le meilleur, +1 % au mieux, la prédiction « borné registres » contredite) — trois leviers « étroites » clos ; l'écart avec TensorRT-LLM sur ces GEMM (0,50 contre 1,34 ms) est désormais isolé au NOYAU (nvfp4 contre notre int8), pièce 42. Le prédicteur MSE hors ligne du repli Four Over Six (le critère est positif par construction : annonce +15,7 % de gain là où la KL mesure une perte de 1,39 contre 0,87). Le repli `mediane_couche` des experts froids du 30B-VL (13,2 % contre 12,6 % pour `identite`, pas mieux à 2 487 experts sans stats) — la voie « repli statistique » se ferme.
+
+**Livré.** Replis silencieux rendus non muets ; garde contre l'interblocage de capture de graphes CUDA sous mémoire basse (refus + minuteur d'abandon) ; refus nommé de la calibration AWQ sous 512 observations par expert ; logprobs moteur (top-K + echo de l'invite) et côté serveur (écrit, tests non lancés, en attente de carte) ; cas limites du sampler glouton au bit (lots partiels, slot EOS, température, égalité déterministe) ; correctif du juge énergie (le bridage puissance seul n'invalide plus une fenêtre) ; fenêtres suffixées par passage de lancement et chauffe au même b avant la mesure NVML.
+
+**Reste.** Les projections qkv/o en nvfp4 sont en cours de mesure (prédit −5,2 à −6,3 % à b=12, jugé par KL contre le seuil 0,519) ; au-delà, un noyau étroit int8/fp8 à ≥ 1,5 To/s reste à écrire pour combler l'écart réel (×2,7 avec TensorRT-LLM, pièce 43) ; le préfill brut de gemma-4-31B reste en bruit à toutes les positions sauf la dernière (NLL 227 232 quasi partout, Coder sain à PPL 8,434) — cause non isolée, aucun verdict de qualité 31B publiable tant que ce n'est pas tranché ; les experts froids du 30B-VL n'ont plus que la voie du diagnostic image/texte par corpus multimodal (pièce 27), le repli statistique étant fermé.
+
 ## 8 septembre 2026 — les joules à côté des secondes
 
 Le planificateur optimisait des **secondes**. L'objectif posé est double :
