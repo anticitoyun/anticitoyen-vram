@@ -91,20 +91,61 @@ def decomposer(chemin: str, couches: int = 48, marqueur: str = MARQUEUR, exclure
             "trou_ms_pas": round(mur - total, 3), "lancements_pas": sum(t["lancements_pas"] for t in table.values())}
 
 
+def detailler(chemin: str, famille: str, couches: int = 48, marqueur: str = MARQUEUR, exclure=(2, 1)) -> dict:
+    """Une famille par noyau (nom court + grille GrdX×GrdY, quand la trace la
+    porte) : ms/pas, lancements/pas, µs par lancement — pour situer chaque
+    forme contre son plancher de bande (q, kv, o des étroites ne se jugent pas
+    ensemble : 22/09, 1,335 ms/145 lancements sans savoir lesquels)."""
+    with open(chemin) as f:
+        r = csv.DictReader(f)
+        nom_col = "Name" if "Name" in r.fieldnames else "Kernel Name"
+        grille = all(c in r.fieldnames for c in ("GrdX", "GrdY"))
+        noyaux = []
+        for row in r:
+            n = row[nom_col]
+            if famille_de(n) != famille:
+                continue
+            court = re.sub(r"\(.*", "", n).replace("void ", "")[:60]
+            if grille:
+                court += f" [{row['GrdX']}x{row['GrdY']}]"
+            noyaux.append((int(float(row["Start (ns)"])), int(float(row["Duration (ns)"])), court))
+    bornes = [t for t, _, n in sorted(lire(chemin)) if marqueur in n][::couches]
+    fenetres = list(zip(bornes[:-1], bornes[1:]))[exclure[0]: len(bornes) - 1 - exclure[1]]
+    noyaux.sort()
+    par_nom: dict[str, list[list[float]]] = defaultdict(lambda: [[0.0, 0] for _ in fenetres])
+    for t, d, n in noyaux:
+        for i, (a, b) in enumerate(fenetres):
+            if a <= t < b:
+                par_nom[n][i][0] += d / 1e6
+                par_nom[n][i][1] += 1
+                break
+    out = {}
+    for n, v in par_nom.items():
+        ms = sorted(x[0] for x in v)[len(v) // 2]
+        k = sorted(x[1] for x in v)[len(v) // 2]
+        out[n] = {"ms_pas": round(ms, 3), "lancements_pas": k, "us_par_lancement": round(ms * 1e3 / k, 1) if k else 0.0}
+    return dict(sorted(out.items(), key=lambda kv: -kv[1]["ms_pas"]))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("trace")
     ap.add_argument("--couches", type=int, default=48)
     ap.add_argument("--marqueur", default=MARQUEUR)
     ap.add_argument("--json")
+    ap.add_argument("--detail", default="", help="famille à détailler par noyau (nom + grille) : ms/pas, lancements, µs par lancement")
     a = ap.parse_args()
     r = decomposer(a.trace, a.couches, a.marqueur)
+    if a.detail:
+        r["detail"] = detailler(a.trace, a.detail, a.couches, a.marqueur)
     if a.json:
         json.dump(r, open(a.json, "w"), indent=1)
     print(f"[familles] {r['pas_juges']} pas jugés · noyaux {r['noyaux_ms_pas']} ms/pas · mur {r['mur_ms_pas']} "
           f"· trou {r['trou_ms_pas']} · {r['lancements_pas']} lancements/pas")
     for f, t in r["familles"].items():
         print(f"  {f:20s} {t['ms_pas']:7.3f} ms  {t['part']:6.1%}  {t['lancements_pas']:5d} lancements")
+    for nom, t in r.get("detail", {}).items():
+        print(f"    {nom[:70]:70s} {t['ms_pas']:7.3f} ms  {t['lancements_pas']:4d} × {t['us_par_lancement']:6.1f} µs")
     return 0
 
 

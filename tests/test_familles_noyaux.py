@@ -74,3 +74,13 @@ def test_famille_de():
     assert m.famille_de("[CUDA memcpy Device-to-Host]") == "copies"
     assert m.famille_de("kv_write_int8_kernel") == "rope_kv"
     assert m.famille_de("un_noyau_inconnu") == "autres"
+
+
+def test_detail_par_noyau(tmp_path):
+    m = _module()
+    p = str(tmp_path / "trace.csv")
+    _trace(p)
+    d = m.detailler(p, "experts_marlin", couches=2)
+    assert len(d) == 2
+    marlin = next(v for k, v in d.items() if "marlin_moe_wna16" in k)
+    assert marlin == {"ms_pas": 0.1, "lancements_pas": 2, "us_par_lancement": 50.0}
