@@ -393,6 +393,7 @@ def search_channel_scales_commun(
     n_grid: int = 20,
     calib_x: Optional[torch.Tensor] = None,
     journal: Optional[dict] = None,
+    quantize_activation_nvfp4: bool = False,
 ) -> tuple[ChannelScaler, list[float]]:
     """Comme `search_channel_scales`, mais un SEUL alpha pour plusieurs
     tenseurs qui lisent la MEME entree (gate_proj/up_proj d'un bloc MLP,
@@ -449,9 +450,16 @@ def search_channel_scales_commun(
         s = s / s.mean().clamp(min=1e-12)
         s = s.clamp(min=1e-4, max=1e4)
         erreurs = []
+        xa = x / s
+        # Même régime que la recherche par tenseur : les experts MoE sont
+        # servis en W4A4 (activation quantifiée par le noyau), et un alpha
+        # cherché sans cette quantification est choisi pour un autre chemin
+        # que celui qui le consommera (`search_channel_scales`, l.357).
+        if quantize_activation_nvfp4:
+            xa = fake_quantize_nvfp4_activation(xa)
         for w, y_ref, ref_norm in zip(ws, y_refs, ref_norms):
             wq = _quant_dequant(w * s.unsqueeze(0), fmt, group_size)
-            y = (x / s) @ wq.t()
+            y = xa @ wq.t()
             erreurs.append(((y - y_ref).norm() / ref_norm).item())
         somme = sum(erreurs)
         grille_somme.append(somme)
@@ -479,6 +487,7 @@ def alpha_commun_gate_up(
     use_hadamard: bool = False,
     n_grid: int = 20,
     journal: Optional[dict] = None,
+    quantize_activation_nvfp4: bool = False,
 ) -> tuple[Optional[torch.Tensor], int]:
     """Alpha commun A7, cablage `convert.py` : replique la rotation de
     Hadamard de `quantize_with_calibration` avant `search_channel_scales_commun`,
@@ -500,7 +509,8 @@ def alpha_commun_gate_up(
         else:
             had_block = 0
     scaler, _ = search_channel_scales_commun(
-        ws, stats, fmt, group_size, n_grid, journal=journal)
+        ws, stats, fmt, group_size, n_grid, journal=journal,
+        quantize_activation_nvfp4=quantize_activation_nvfp4)
     return scaler.scale, had_block
 
 

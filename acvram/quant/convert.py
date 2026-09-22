@@ -162,6 +162,17 @@ class ConversionOptions:
     # conversion par defaut sans mesure (revue/prediction-a7-alpha-commun-
     # gateup-14-09.md).
     alpha_commun_gate_up: bool = False
+    # 22/09 (`poste1-disposition-naturel-qkv-22-09`) : le MÊME alpha commun,
+    # mais PAR EXPERT MoE — les experts en étaient exclus (« leur pile groupée
+    # obéit à une autre règle »), or c'est l'inverse : la pile groupée EXIGE
+    # que gate et up partagent leur échelle, sinon `_try_build_stacks` ne
+    # fusionne pas les tables (`engine/moe.py:336-337`, `torch.equal` global
+    # sur [E, K]) et `_construire_marlin` refuse la disposition Marlin
+    # (`moe.py:446`) : Qwen3-Coder-30B-A3B-nvfp4-qkv-22-09 charge en
+    # `experts_layout=naturel`, 8,62 ms/pas contre 6,7. Opt-in tant que la
+    # mesure n'est pas faite : coût = une seconde recherche AWQ par paire
+    # d'experts à la conversion.
+    alpha_commun_experts: bool = False
     # poste7 (`poste7-hadamard-16-09.md`, 16/09) : la métrique W4A4 des experts
     # (`quantize_activation_nvfp4`, cb2784b) RÉFUTÉE plus mauvaise (1,0229)
     # que sans elle (1,0183) — le défaut n'est pas l'alpha choisi mais le
@@ -540,13 +551,18 @@ def _precalculer_alpha_commun_gate_up(
     """
     en_attente: dict[str, torch.Tensor] = {}
     resultat: dict[str, torch.Tensor] = {}
+    experts_vus = 0
     for name, tensor in _adapt_hf(_iter_checkpoint(model_path), spec):
-        if ".mlp.experts." in name or tensor.dim() != 2:
+        est_expert = ".mlp.experts." in name
+        # Les deux portes sont indépendantes : `--alpha-commun-experts` seul
+        # ne touche pas les paires denses, et réciproquement.
+        if tensor.dim() != 2 or (not opts.alpha_commun_experts if est_expert
+                                 else not opts.alpha_commun_gate_up):
             continue
-        if name.endswith(".mlp.gate_proj.weight"):
+        if name.endswith("gate_proj.weight"):
             en_attente[name[: -len("gate_proj.weight")]] = tensor
             continue
-        if not name.endswith(".mlp.up_proj.weight"):
+        if not name.endswith("up_proj.weight"):
             continue
         cle = name[: -len("up_proj.weight")]
         gate_tensor = en_attente.pop(cle, None)
@@ -561,21 +577,39 @@ def _precalculer_alpha_commun_gate_up(
         up_t = tensor.to(qdev, dtype=torch.float32)
         st_dev = None if st is None else ActStats(
             st.mean_abs.to(qdev), None, st.n_samples)
+        # Le même régime que la recherche par tenseur qui consommera l'alpha
+        # (boucle principale : `quantize_activation_nvfp4=est_expert and
+        # fmt == "nvfp4"`) — un alpha cherché en W4A16 puis servi en W4A4
+        # n'est pas celui qu'on croit.
+        a4 = ".mlp.experts." in gate_name and fmt == "nvfp4" and not opts.hadamard_experts
         try:
             scale, _ = alpha_commun_gate_up(
                 [gate_t, up_t], st_dev, fmt, group_size=opts.group_size,
                 use_hadamard=router.wants_hadamard(gate_name, fmt),
-                n_grid=opts.n_grid)
+                n_grid=opts.n_grid, quantize_activation_nvfp4=a4)
         except torch.OutOfMemoryError:
             torch.cuda.empty_cache()
             scale, _ = alpha_commun_gate_up(
                 [gate_tensor.to(torch.float32), tensor.to(torch.float32)],
                 st, fmt, group_size=opts.group_size,
                 use_hadamard=router.wants_hadamard(gate_name, fmt),
-                n_grid=opts.n_grid)
+                n_grid=opts.n_grid, quantize_activation_nvfp4=a4)
+        if ".mlp.experts." in gate_name:
+            experts_vus += 1
         if scale is not None:
-            resultat[gate_name] = scale.cpu()
-            resultat[up_name] = scale.cpu()
+            # DEUX tenseurs, pas deux références au même : sur processeur
+            # `.cpu()` rend l'objet tel quel, et safetensors refuse d'écrire
+            # deux clés qui partagent leur mémoire (rencontré à sec le 22/09
+            # sur le MoE jouet ; invisible sur carte, où `.cpu()` copie).
+            resultat[gate_name] = scale.detach().cpu().clone()
+            resultat[up_name] = scale.detach().cpu().clone()
+        elif ".mlp.experts." in gate_name:
+            # Alpha effondré à l'identité : la boucle principale écrira une
+            # échelle d'unité explicite pour les experts (l. ~1727), la même
+            # des deux côtés — la table reste fusionnable.
+            resultat[gate_name] = torch.ones(gate_tensor.shape[1], dtype=torch.float32)
+            resultat[up_name] = torch.ones(gate_tensor.shape[1], dtype=torch.float32)
+    resultat["__experts_paires__"] = experts_vus       # compte, retiré par l'appelant
     return resultat
 
 
@@ -1561,11 +1595,13 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     budget_candidats: list[dict] = []
 
     alpha_commun: dict[str, torch.Tensor] = {}
-    if opts.alpha_commun_gate_up:
+    if opts.alpha_commun_gate_up or opts.alpha_commun_experts:
         alpha_commun = _precalculer_alpha_commun_gate_up(
             model_path, spec, router, stats, opts, qdev)
+        paires_experts = alpha_commun.pop("__experts_paires__", 0)
         print(f"[acvram] alpha commun gate/up : {len(alpha_commun) // 2} "
-              f"paires fusionnees", flush=True)
+              f"paires fusionnees" + (f", dont {paires_experts} paires d'experts MoE"
+                                      if opts.alpha_commun_experts else ""), flush=True)
     # poste7 (gate!=up, main 7c3698d) : `_try_build_stacks` ne force plus
     # gate_proj == up_proj -- il fusionne quand la recherche les rend egaux,
     # garde une seconde ligne/quantification sinon. L'echelle forcee a

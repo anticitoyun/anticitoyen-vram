@@ -723,6 +723,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         promotion_cout_max_mib=args.promotion_cout_max,
         format_impose=args.format, mesurer_kld=args.mesurer_kld,
         alpha_commun_gate_up=args.alpha_commun_gate_up,
+        alpha_commun_experts=args.alpha_commun_experts,
         hadamard_experts=args.hadamard_experts,
         passage_direct=args.passage_direct,
         calib_source=calib_source,
@@ -1146,6 +1147,17 @@ def build_parser() -> argparse.ArgumentParser:
                          "duck.ai 12/09) au manifeste, a cote du SNR. "
                          "N'AFFECTE AUCUNE DECISION : le convertisseur promeut "
                          "toujours sur le SNR. Sert au protocole A/B")
+    cv.add_argument("--alpha-commun-experts", action="store_true",
+                    help="le meme alpha AWQ commun, mais PAR EXPERT MoE : "
+                         "gate_proj et up_proj d'un expert lisent la meme "
+                         "entree, et la pile groupee EXIGE qu'ils partagent "
+                         "leur echelle — sinon engine/moe.py ne fusionne pas "
+                         "les tables ([E, K], torch.equal global) et la "
+                         "disposition Marlin est refusee : experts_layout="
+                         "naturel, 8,62 ms/pas contre 6,7 sur le Coder-30B "
+                         "(revue/poste1-disposition-naturel-qkv-22-09.md). "
+                         "Opt-in tant que la mesure n'est pas faite ; coute "
+                         "une seconde recherche AWQ par paire d'experts.")
     cv.add_argument("--alpha-commun-gate-up", action="store_true",
                     help="item A7 (audit poste7, 14/09) : un SEUL alpha AWQ "
                          "pour chaque paire gate_proj/up_proj admissible, au "
