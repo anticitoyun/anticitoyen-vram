@@ -643,7 +643,13 @@ def cmd_convert(args: argparse.Namespace) -> int:
         from .server.chat import load_tokenizer
         try:
             tokenizer = load_tokenizer(args.model)
-            calib = load_calib_ids(tokenizer, args.calib_file, args.calib_seqs,
+            # Pièce 45 : `--corpus-jetons` fixe le TOTAL et dérive le nombre
+            # de séquences — c est le chiffre que le rapport d observations
+            # rend (« jetons_pour_p10 »), pas un nombre de séquences.
+            n_seqs = args.calib_seqs
+            if args.corpus_jetons:
+                n_seqs = max(1, -(-int(args.corpus_jetons) // args.calib_len))
+            calib = load_calib_ids(tokenizer, args.calib_file, n_seqs,
                                    args.calib_len, spec.vocab_size)
             calib_reel = (len(calib), sum(len(c) for c in calib))
             print(f"  calibration sur {calib_reel[0]} sequences "
@@ -659,21 +665,37 @@ def cmd_convert(args: argparse.Namespace) -> int:
             obs = stats.pop("__observations__", None)
             print(f"  statistiques relevees pour {len(stats)} tenseurs")
             if obs and obs.get("experts"):
-                print(f"  observations par expert : min {obs['minimum']}, p10 {obs['p10']}, médiane {obs['mediane']}, "
-                      f"max {obs['maximum']} ; {obs['sous_seuil']}/{obs['experts']} sous {obs['obs_min_demande']} "
-                      f"({obs['part_sous_seuil']:.1%}), jamais routés {obs['jamais_routes']}", flush=True)
+                # Pièce 45 : trois populations séparées. Les experts que le
+                # corpus n atteint pas (< seuil de routage) ne comptent PAS
+                # dans le facteur : plus de jetons ne les corrige pas.
+                print(f"  observations par expert : {obs.get('atteints', 0)}/{obs['experts']} atteints "
+                      f"(≥ {obs.get('seuil_expert_route')} jetons) — p10 {obs.get('p10_atteints')}, "
+                      f"médiane {obs.get('mediane_atteints')}, max {obs.get('maximum')} ; "
+                      f"non atteints {obs.get('jamais_routes', 0)} jamais + "
+                      f"{obs.get('quasi_jamais_routes', 0)} quasi jamais "
+                      f"({obs.get('part_non_atteints', 0):.1%})", flush=True)
+                if obs.get("renvoi"):
+                    print(f"  {obs['renvoi']}", flush=True)
                 if not obs["suffisant"] and args.obs_min:
-                    # Pièce 32 : le corpus ne suffit pas → refus NOMMÉ avec le
-                    # facteur manquant, jamais une échelle de repli muette
-                    # (25(a) : l échelle AWQ n est stable qu à ≥ 512 observations).
-                    f = obs["facteur_corpus_pour_atteindre"]
-                    print(red(f"  REFUS : {obs['sous_seuil']} expert(s) sous {obs['obs_min_demande']} observations "
-                              f"(minimum {obs['minimum']}, jamais routés {obs['jamais_routes']}) — "
-                              f"corpus insuffisant, il faudrait ×{f} de jetons de calibration"
-                              if f else
-                              f"  REFUS : {obs['jamais_routes']} expert(s) jamais routés par ce corpus"), flush=True)
-                    print("  (relancer avec --obs-min 0 pour convertir quand même, en le disant dans la fiche, "
-                          "ou avec --calib-seqs plus grand / un corpus qui atteint ces experts)", flush=True)
+                    # Le refus porte sur le p10 des ATTEINTS, seul chiffre
+                    # qu un corpus plus grand peut corriger (25(a) : l échelle
+                    # AWQ n est stable qu à ≥ 512 observations).
+                    f = obs.get("facteur_corpus_pour_atteindre")
+                    if f:
+                        combien = f"il faudrait ×{f} de jetons"
+                        if obs.get("jetons_pour_p10"):
+                            combien += f" ({obs['jetons_pour_p10']} au lieu de {obs['corpus_jetons']}"
+                            if obs.get("minutes_pour_p10"):
+                                combien += f", ~{obs['minutes_pour_p10']} min de collecte à ce rythme"
+                            combien += ")"
+                        print(red(f"  REFUS : p10 des experts atteints = {obs['p10_atteints']} < "
+                                  f"{obs['obs_min_demande']} — {combien}"), flush=True)
+                        if obs.get("jetons_pour_p10"):
+                            print(f"  (relancer avec --corpus-jetons {obs['jetons_pour_p10']})", flush=True)
+                    else:
+                        print(red(f"  REFUS : {obs.get('raison', 'aucun expert atteint par ce corpus')}"), flush=True)
+                    print("  (ou --obs-min 0 pour convertir quand même, en le disant dans la fiche ; "
+                          "les experts NON ATTEINTS relèvent du routage, pas du volume — pièce 27)", flush=True)
                     return 2
         except Exception as exc:                      # noqa: BLE001
             print(yellow(f"  calibration indisponible ({exc}) ; "
@@ -1094,6 +1116,10 @@ def build_parser() -> argparse.ArgumentParser:
     cv.add_argument("--calib-file", help="fichier texte de calibration (par defaut : "
                                          "acvram/data/calibration-anglais.txt, Gutenberg #1342)")
     cv.add_argument("--calib-seqs", type=int, default=32)
+    cv.add_argument("--corpus-jetons", type=int, default=0, metavar="N",
+                    help="pièce 45 : total de jetons de calibration (dérive --calib-seqs de --calib-len) ; "
+                         "c'est le chiffre que le rapport d'observations rend quand il refuse "
+                         "(« relancer avec --corpus-jetons N ») ; 0 = utiliser --calib-seqs")
     cv.add_argument("--calib-len", type=int, default=512)
     cv.add_argument("--calib-device", default="cuda:0",
                     help="appareil sur lequel executer les passes de calibration")
