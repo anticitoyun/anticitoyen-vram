@@ -487,6 +487,17 @@ def _masque_images_texte(masque) -> str:
     return f" masque_images={masque}" if masque else ""
 
 
+def _speculation_texte(s: Optional[dict]) -> str:
+    """Fragment `speculation=<mode>(<état>,lot_max=N)` de la ligne de régime.
+    Toujours présent (off ou actif) — le régime se porte par le nom (REGLES §6)."""
+    if s is None or s.get("mode") == "off":
+        return " speculation=off"
+    etat = "on" if s.get("garde_active", True) else "désactivée"
+    gain = s.get("gain_moyen")
+    gain_txt = f",gain={gain}" if gain is not None else ""
+    return f" speculation={s['mode']}({etat}{gain_txt},lot_max={s['lot_max']})"
+
+
 def _vision_texte(tour) -> str:
     """Le mot ``vision=`` de la ligne du moteur (poste2 15 h 00 : la ligne de l'Engine ne le portait pas,
     seule celle de regime.py l'avait) : `vision=bf16(eager,transformers=5.17.0)` avec la tour, `vision=off`
@@ -838,6 +849,12 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # plafond (non refuse ici), pour ne jamais laisser croire que le
             # scaling est applique alors qu'il ne l'est nulle part.
             "llama4_scaling_beta": self._llama4_scaling_beta or None,
+            # pièce 49 : régime spéculatif visible (REGLES §6 : le régime se porte
+            # par le nom, pas par la vigilance) — mode + état garde + gain moyen
+            "speculation": (self._garde_spec.etat_dict(self.speculator.name)
+                            if self.speculator is not None
+                            else {"mode": "off", "garde_active": False,
+                                  "gain_moyen": None, "lot_max": 0}),
         }
 
     def kv_format_servi(self) -> str:
@@ -927,6 +944,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                + _ctx_texte(self)
                + _masque_images_texte(self.masque_images)
                + _mrope_texte(self.spec)
+               + _speculation_texte(r.get("speculation"))
                + _deepstack_texte(self.vision))
 
     def fermer(self) -> None:
