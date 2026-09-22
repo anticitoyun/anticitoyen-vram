@@ -249,21 +249,24 @@ defecte:
 * [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **el que no està fet**, a llegir primer
 * [`CONVENTIONS.md`](../CONVENTIONS.md) — convencions de treball sobre el codi (llengua, estil, controls abans d'empènyer)
 
-## Resultats mesurats (21/09/2026, RTX 5090 a 400 W, règim ≥ 20 s al comptador d'energia)
+## Resultats mesurats (22/09/2026, RTX 5090 a 400 W, règim ≥ 20 s al comptador d'energia)
 
 Qwen3-Coder-30B-A3B en NVFP4 (experts) + INT8 (atenció, cap), mateix
 protocol per a tots els motors (`outils/`, una targeta, `energie.py`):
 
-| | acvram 0.6.34 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| descodificació 12 seqüències | **1 540 t/s** | 1 596 t/s | — |
+| descodificació 12 seqüències | **1 625,5 t/s** | 1 596,1 t/s | — |
 | descodificació 1 seqüència | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | prefill pp2048 | **22 707 tokens/s** | 21 054 | 8 671 (TabbyAPI, retirat) |
 
-Cabal del dia (estació 1030, règim eco `-lgc 2700`, pipeline en servei). El
-J/token a rellotge igual contra els tres motors s'està tornant a mesurar per a
-0.6.34 (`outils/gpu/mesure/banc-4moteurs.py`) i per això no es publica aquí —
-una xifra sense règim no es publica.
+Cabal del dia (estació 1030, règim eco `-lgc 2700`, pipeline en servei;
+mostreig cobejós capturat al graf CUDA, activat per defecte a 0.6.35). El b=12
+és la cel·la oficial segellada (mediana de 6 finestres intercalades). El valor
+vLLM 1 596,1 és la referència congelada del 21/09 (vLLM no reproduït aquell
+dia): la diferència +1,84 % val a referència igual, no com a nova mesura de tots
+dos el mateix matí. El J/token encara s'està tornant a mesurar
+(`outils/gpu/mesure/banc-4moteurs.py`) — una xifra sense règim no es publica.
 
 El matí del 14/09 acvram era a 630 t/s i 0,619 J/token a la mateixa cel·la:
 els guanys vénen de la MMA FP4 nativa de Blackwell (`mma.sync …
@@ -274,14 +277,15 @@ seva nota a `acvram-memoire/revue/` amb la predicció segellada abans de la
 mesura, l'instrument i el seu règim — una xifra sense règim no es publica.
 
 On acvram va al davant: models MLA (GLM-4.7-Flash) en NVFP4 natiu sm_120, que
-vLLM només serveix en FP8 (b=1: 165,35 t/s en servei); i els models que no
-caben a la VRAM. On no: la descodificació amb lot gran d'un MoE que cap a la
-VRAM, on vLLM conserva ×1,04 en cabal (1 596 contra 1 540, 3,5 % de diferència);
-la diferència en energia s'ha de tornar a mesurar per a 0.6.34.
+vLLM només serveix en FP8 (b=1: 165,35 t/s en servei); els models que no
+caben a la VRAM; i, des de 0.6.35, la descodificació amb lot gran d'un MoE que
+cap a la VRAM — b=12 passa de 1 540 (0.6.34) a 1 625,5 t/s, és a dir +1,84 %
+davant de la referència vLLM congelada (1 596,1). La diferència es manté estreta
+i a referència congelada; la diferència en energia s'ha de tornar a mesurar.
 
 ## Estat
 
-Versió 0.6.34. Tot funciona a la 5090: nuclis CUDA compilats per a `sm_120a`
+Versió 0.6.35. Tot funciona a la 5090: nuclis CUDA compilats per a `sm_120a`
 (FP4 natiu) i `sm_86`, grafs CUDA, quantització NVFP4/INT8/INT4, servidor
 HTTP. Salvaguardes en marxa: la targeta és invisible per a les sessions de
 treball (`CUDA_VISIBLE_DEVICES` buit) i només `outils/carte.sh` la presta,

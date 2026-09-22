@@ -244,21 +244,25 @@ Duas constatações destas medidas mudaram os valores por omissão:
 * [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **o que não está feito**, a ler primeiro
 * [`CONVENTIONS.md`](../CONVENTIONS.md) — convenções de trabalho no código (língua, estilo, controlos antes de enviar)
 
-## Resultados medidos (21/09/2026, RTX 5090 a 400 W, regime ≥ 20 s no contador de energia)
+## Resultados medidos (22/09/2026, RTX 5090 a 400 W, regime ≥ 20 s no contador de energia)
 
 Qwen3-Coder-30B-A3B em NVFP4 (peritos) + INT8 (atenção, cabeça), mesmo
 protocolo para todos os motores (`outils/`, uma placa, `energie.py`):
 
-| | acvram 0.6.34 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| descodificação 12 sequências | **1 540 t/s** | 1 596 t/s | — |
+| descodificação 12 sequências | **1 625,5 t/s** | 1 596,1 t/s | — |
 | descodificação 1 sequência | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | prefill pp2048 | **22 707 tokens/s** | 21 054 | 8 671 (TabbyAPI, retirado) |
 
-Débitos do dia (posto 1030, regime eco `-lgc 2700`, pipeline em serviço). O
-J/token a relógio igual contra os três motores está a ser remedido para a 0.6.34
-(`outils/gpu/mesure/banc-4moteurs.py`) e portanto não é publicado aqui — um valor
-sem regime não se publica.
+Débitos do dia (posto 1030, regime eco `-lgc 2700`, pipeline em serviço;
+amostragem gulosa capturada no grafo CUDA, predefinição da 0.6.35). O b=12 é uma
+célula oficial selada (mediana de 6 janelas intercaladas, relógio por janela). O
+valor vLLM 1 596,1 é a referência congelada de 21/09 (vLLM não reexecutado nesse
+dia): a diferença +1,84 % vale a referência igual, não como remedição de ambos na
+mesma manhã. O J/token a relógio igual contra os três motores continua em
+remedição (`outils/gpu/mesure/banc-4moteurs.py`) — um valor sem regime não se
+publica.
 
 Na manhã de 14/09 o acvram estava a 630 t/s e 0,619 J/token na mesma célula:
 os ganhos vêm da MMA FP4 nativa de Blackwell (`mma.sync … kind::mxf4nvf4`,
@@ -269,14 +273,15 @@ GEMM estreita em tensor cores para as projeções. Cada número tem a sua nota e
 o seu regime — um número sem regime não é publicado.
 
 Onde o acvram está à frente: modelos MLA (GLM-4.7-Flash) em NVFP4 nativo
-sm_120, que o vLLM só serve em FP8 (b=1: 165,35 t/s em serviço); e os modelos
-que não cabem em VRAM. Onde não está: a descodificação de lote grande de um MoE
-que cabe em VRAM, onde o vLLM mantém ×1,04 em débito (1 596 contra 1 540,
-diferença 3,5 %); a diferença em energia está por remedir para a 0.6.34.
+sm_120, que o vLLM só serve em FP8 (b=1: 165,35 t/s em serviço); os modelos que
+não cabem em VRAM; e, desde a 0.6.35, a descodificação de lote grande de um MoE
+que cabe em VRAM — o b=12 passa de 1 540 (0.6.34) a 1 625,5 t/s, ou seja +1,84 %
+à frente da referência vLLM congelada (1 596,1). A diferença mantém-se estreita e
+a referência congelada; a diferença em energia está por remedir.
 
 ## Estado
 
-Versão 0.6.34. Tudo corre na 5090: kernels CUDA compilados para `sm_120a` (FP4
+Versão 0.6.35. Tudo corre na 5090: kernels CUDA compilados para `sm_120a` (FP4
 nativo) e `sm_86`, grafos CUDA, quantização NVFP4/INT8/INT4, servidor HTTP.
 Salvaguardas no lugar: a placa é invisível às sessões de trabalho
 (`CUDA_VISIBLE_DEVICES` vazio) e só `outils/carte.sh` a empresta, sob

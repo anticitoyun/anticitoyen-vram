@@ -241,21 +241,24 @@ Dvě zjištění z těchto měření změnila výchozí hodnoty:
 * [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **co není hotové**, číst jako první
 * [`CONVENTIONS.md`](../CONVENTIONS.md) — pracovní konvence pro kód (jazyk, styl, kontroly před pushem)
 
-## Naměřené výsledky (21. 9. 2026, RTX 5090 při 400 W, režim ≥ 20 s na měřiči energie)
+## Naměřené výsledky (22. 9. 2026, RTX 5090 při 400 W, režim ≥ 20 s na měřiči energie)
 
 Qwen3-Coder-30B-A3B v NVFP4 (experti) + INT8 (attention, hlava), stejný
 protokol pro všechny motory (`outils/`, jedna karta, `energie.py`):
 
-| | acvram 0.6.34 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| dekódování 12 sekvencí | **1 540 t/s** | 1 596 t/s | — |
+| dekódování 12 sekvencí | **1 625,5 t/s** | 1 596,1 t/s | — |
 | dekódování 1 sekvence | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | prefill pp2048 | **22 707 tokenů/s** | 21 054 | 8 671 (TabbyAPI, staženo) |
 
-Propustnost dne (stanice 1030, úsporný režim `-lgc 2700`, pipeline v provozu).
-J/token při stejném taktu proti třem motorům se pro 0.6.34 znovu měří
-(`outils/gpu/mesure/banc-4moteurs.py`), a proto se zde nepublikuje — číslo bez
-režimu se nepublikuje.
+Propustnost dne (stanice 1030, úsporný režim `-lgc 2700`, pipeline v provozu;
+hladové vzorkování zachycené v grafu CUDA, ve verzi 0.6.35 zapnuté ve výchozím
+nastavení). b=12 je oficiální zapečetěná buňka (medián ze 6 prokládaných oken).
+Hodnota vLLM 1 596,1 je zmrazená reference z 21. 9. (vLLM ten den nebyl znovu
+spuštěn): rozdíl +1,84 % platí při stejné referenci, ne jako nové změření obou
+téhož rána. J/token se stále znovu měří
+(`outils/gpu/mesure/banc-4moteurs.py`) — číslo bez režimu se nepublikuje.
 
 Ráno 14. 9. byl acvram ve stejné buňce na 630 t/s a 0,619 J/token: zisky
 pocházejí z nativního FP4 MMA Blackwellu (`mma.sync … kind::mxf4nvf4`, ×7,9
@@ -266,14 +269,15 @@ tensorových jádrech pro projekce. Každé číslo má svou poznámku v
 jeho režimem — číslo bez režimu se nezveřejňuje.
 
 Kde je acvram napřed: modely MLA (GLM-4.7-Flash) v nativním NVFP4 sm_120,
-které vLLM obsluhuje jen v FP8 (b=1: 165,35 t/s v provozu); a modely, které se
-nevejdou do VRAM. Kde není: dekódování velkých dávek MoE, který se do VRAM
-vejde, kde si vLLM drží ×1,04 v propustnosti (1 596 proti 1 540, rozdíl 3,5 %);
-rozdíl v energii je třeba pro 0.6.34 znovu změřit.
+které vLLM obsluhuje jen v FP8 (b=1: 165,35 t/s v provozu); modely, které se
+nevejdou do VRAM; a od verze 0.6.35 také dekódování velkých dávek MoE, který se
+do VRAM vejde — b=12 stoupá z 1 540 (0.6.34) na 1 625,5 t/s, tedy +1,84 % před
+zmrazenou referencí vLLM (1 596,1). Rozdíl zůstává těsný a při zmrazené
+referenci; rozdíl v energii je třeba znovu změřit.
 
 ## Stav
 
-Verze 0.6.34. Vše běží na 5090: jádra CUDA zkompilovaná pro `sm_120a`
+Verze 0.6.35. Vše běží na 5090: jádra CUDA zkompilovaná pro `sm_120a`
 (nativní FP4) a `sm_86`, grafy CUDA, kvantizace NVFP4/INT8/INT4, HTTP server.
 Zábrany na místě: karta je pro pracovní relace neviditelná
 (`CUDA_VISIBLE_DEVICES` prázdné) a jen `outils/carte.sh` ji pod zámkem

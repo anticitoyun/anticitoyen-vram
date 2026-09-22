@@ -251,21 +251,26 @@ Twee bevindingen uit deze metingen hebben de standaardwaarden veranderd:
 * [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **wat niet gedaan is**, eerst lezen
 * [`CONVENTIONS.md`](../CONVENTIONS.md) — werkafspraken voor de code (taal, stijl, controles vóór het pushen)
 
-## Gemeten resultaten (21/09/2026, RTX 5090 op 400 W, regime ≥ 20 s op de energiemeter)
+## Gemeten resultaten (22/09/2026, RTX 5090 op 400 W, regime ≥ 20 s op de energiemeter)
 
 Qwen3-Coder-30B-A3B in NVFP4 (experts) + INT8 (attentie, kop), hetzelfde
 protocol voor alle engines (`outils/`, één kaart, `energie.py`):
 
-| | acvram 0.6.34 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| decoderen, 12 sequenties | **1 540 t/s** | 1 596 t/s | — |
+| decoderen, 12 sequenties | **1 625,5 t/s** | 1 596,1 t/s | — |
 | decoderen, 1 sequentie | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | prefill pp2048 | **22 707 tokens/s** | 21 054 | 8 671 (TabbyAPI, ingetrokken) |
 
 Doorvoer van de dag (werkstation 1030, eco-regime `-lgc 2700`, pipeline in
-bedrijf). De J/token bij gelijke klok tegen de drie engines wordt opnieuw
-gemeten voor 0.6.34 (`outils/gpu/mesure/banc-4moteurs.py`) en wordt hier dus
-niet gepubliceerd — een getal zonder regime wordt niet gepubliceerd.
+bedrijf; greedy sampling vastgelegd in de CUDA-graaf, standaard sinds 0.6.35).
+b=12 is een verzegelde officiële cel (mediaan van 6 verweven vensters, klok per
+venster). De vLLM-waarde 1 596,1 is de bevroren referentie van 21/09 (vLLM die
+dag niet opnieuw uitgevoerd): het verschil +1,84 % geldt bij gelijke referentie,
+niet als hermeting van beide op dezelfde ochtend. De J/token bij gelijke klok
+tegen de drie engines wordt opnieuw gemeten
+(`outils/gpu/mesure/banc-4moteurs.py`) — een getal zonder regime wordt niet
+gepubliceerd.
 
 Op de ochtend van 14/09 zat acvram op 630 t/s en 0,619 J/token in dezelfde
 cel: de winst komt van Blackwells native FP4-MMA (`mma.sync …
@@ -276,14 +281,15 @@ in `acvram-memoire/revue/` met de vóór de meting verzegelde voorspelling, het
 instrument en zijn regime — een cijfer zonder regime wordt niet gepubliceerd.
 
 Waar acvram voorop loopt: MLA-modellen (GLM-4.7-Flash) in native sm_120-NVFP4,
-die vLLM alleen in FP8 bedient (b=1: 165,35 t/s in bedrijf); en modellen die
-niet in VRAM passen. Waar niet: het decoderen met grote batch van een MoE dat in
-VRAM past, waar vLLM ×1,04 in doorvoer behoudt (1 596 tegen 1 540, verschil
-3,5 %); het energieverschil moet opnieuw worden gemeten voor 0.6.34.
+die vLLM alleen in FP8 bedient (b=1: 165,35 t/s in bedrijf); modellen die niet in
+VRAM passen; en, sinds 0.6.35, het decoderen met grote batch van een MoE dat in
+VRAM past — b=12 gaat van 1 540 (0.6.34) naar 1 625,5 t/s, oftewel +1,84 % vóór
+de bevroren vLLM-referentie (1 596,1). Het verschil blijft klein en bij bevroren
+referentie; het energieverschil moet opnieuw worden gemeten.
 
 ## Stand van zaken
 
-Versie 0.6.34. Alles draait op de 5090: CUDA-kernels gecompileerd voor
+Versie 0.6.35. Alles draait op de 5090: CUDA-kernels gecompileerd voor
 `sm_120a` (native FP4) en `sm_86`, CUDA-grafen, NVFP4/INT8/INT4-kwantisatie,
 HTTP-server. Vangrails aanwezig: de kaart is onzichtbaar voor werksessies
 (`CUDA_VISIBLE_DEVICES` leeg) en alleen `outils/carte.sh` leent haar, onder

@@ -253,21 +253,25 @@ predefiniti:
 * [`docs/FEUILLE-DE-ROUTE.md`](FEUILLE-DE-ROUTE.md) — **ciò che non è fatto**, da leggere per primo
 * [`CONVENTIONS.md`](../CONVENTIONS.md) — convenzioni di lavoro sul codice (lingua, stile, controlli prima del push)
 
-## Risultati misurati (21/09/2026, RTX 5090 a 400 W, regime ≥ 20 s al contatore di energia)
+## Risultati misurati (22/09/2026, RTX 5090 a 400 W, regime ≥ 20 s al contatore di energia)
 
 Qwen3-Coder-30B-A3B in NVFP4 (esperti) + INT8 (attenzione, testa), stesso
 protocollo per tutti i motori (`outils/`, una scheda, `energie.py`):
 
-| | acvram 0.6.34 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
+| | acvram 0.6.35 | vLLM 0.29 (CUTLASS FP4) | llama.cpp (sm_120) |
 |---|---|---|---|
-| decodifica 12 sequenze | **1 540 t/s** | 1 596 t/s | — |
+| decodifica 12 sequenze | **1 625,5 t/s** | 1 596,1 t/s | — |
 | decodifica 1 sequenza | **380,8 t/s** | 290,6 t/s | 323,6 t/s |
 | prefill pp2048 | **22 707 token/s** | 21 054 | 8 671 (TabbyAPI, ritirato) |
 
 Portate del giorno (postazione 1030, regime eco `-lgc 2700`, pipeline in
-servizio). Il J/token a clock uguale contro i tre motori è in corso di
-rimisurazione per la 0.6.34 (`outils/gpu/mesure/banc-4moteurs.py`) e quindi non
-è pubblicato qui — una cifra senza regime non si pubblica.
+servizio; campionamento greedy catturato nel grafo CUDA, predefinito dalla
+0.6.35). Il b=12 è una cella ufficiale sigillata (mediana di 6 finestre
+interlacciate, clock per finestra). Il valore vLLM 1 596,1 è il riferimento
+congelato del 21/09 (vLLM non rieseguito quel giorno): lo scarto +1,84 % vale a
+riferimento uguale, non come rimisurazione di entrambi la stessa mattina. Il
+J/token a clock uguale contro i tre motori resta in rimisurazione
+(`outils/gpu/mesure/banc-4moteurs.py`) — una cifra senza regime non si pubblica.
 
 La mattina del 14/09 acvram era a 630 t/s e 0,619 J/token sulla stessa cella:
 i guadagni vengono dalla MMA FP4 nativa di Blackwell
@@ -279,14 +283,15 @@ della misura, lo strumento e il suo regime — una cifra senza regime non si
 pubblica.
 
 Dove acvram è avanti: modelli MLA (GLM-4.7-Flash) in NVFP4 nativo sm_120, che
-vLLM serve solo in FP8 (b=1: 165,35 t/s in servizio); e i modelli che non ci
-stanno in VRAM. Dove non lo è: la decodifica a lotto grande di un MoE che ci sta
-in VRAM, dove vLLM mantiene ×1,04 in portata (1 596 contro 1 540, scarto 3,5 %);
-lo scarto in energia è da rimisurare per la 0.6.34.
+vLLM serve solo in FP8 (b=1: 165,35 t/s in servizio); i modelli che non ci
+stanno in VRAM; e, dalla 0.6.35, la decodifica a lotto grande di un MoE che ci
+sta in VRAM — il b=12 passa da 1 540 (0.6.34) a 1 625,5 t/s, cioè +1,84 % davanti
+al riferimento vLLM congelato (1 596,1). Lo scarto resta stretto e a riferimento
+congelato; lo scarto in energia è da rimisurare.
 
 ## Stato
 
-Versione 0.6.34. Tutto gira sulla 5090: kernel CUDA compilati per `sm_120a`
+Versione 0.6.35. Tutto gira sulla 5090: kernel CUDA compilati per `sm_120a`
 (FP4 nativo) e `sm_86`, grafi CUDA, quantizzazione NVFP4/INT8/INT4, server
 HTTP. Protezioni in essere: la scheda è invisibile alle sessioni di lavoro
 (`CUDA_VISIBLE_DEVICES` vuoto) e solo `outils/carte.sh` la presta, sotto
