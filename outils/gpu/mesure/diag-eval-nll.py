@@ -242,6 +242,27 @@ def nll_hf(source: str, ids: list[int], texte: str = "") -> dict | None:
         return json.load(open(o))
 
 
+def juger_reference_gabarit(h: dict, depuis: int, seuil: float = 1.0) -> dict:
+    """Épreuve de la référence SOUS GABARIT (pièce 37, 22/09) : un Gemma 4 -it ne
+    prédit pas la suite d un texte brut (PPL 10^4 sur HF lui-même, T1-T4), il
+    prédit des jetons de tour ; la seule épreuve qui rend « faux » pour la bonne
+    raison est la NLL moyenne de SA PROPRE réponse gloutonne (ids[depuis:]),
+    ≤ `seuil` nat pour un chargement sain, plus la garde de chargement."""
+    nll = h.get("nll") or []
+    rep = nll[max(depuis - 1, 0):]
+    moy = sum(rep) / len(rep) if rep else None
+    ch = h.get("chargement") or {}
+    motifs = []
+    if moy is None:
+        motifs.append("aucune position de réponse (depuis trop grand)")
+    elif moy > seuil:
+        motifs.append(f"NLL moyenne {moy:.3f} > {seuil} nat sur SA propre réponse gloutonne")
+    if ch and (ch.get("manquantes") or ch.get("meta") or ch.get("mal_formees")):
+        motifs.append(f"chargement : {ch}")
+    return {"nll_reponse_hf_moy": None if moy is None else round(moy, 4), "chargement_hf": ch,
+            "reference_valide": not motifs, "reference_motifs": motifs}
+
+
 def juger_reference(h: dict) -> dict:
     """La référence est-elle en état de juger ? Seuils écrits avant : PPL ≤ 30
     sur un paragraphe propre encodé par SON tokeniseur, et une suite de 20
@@ -282,6 +303,7 @@ def main() -> int:
     ap.add_argument("--texte", default=None, help="fichier texte connu (défaut : acvram/data/calibration-anglais.txt)")
     ap.add_argument("--sans-decode", action="store_true", help="sauter le bras decode (n pas de décodage)")
     ap.add_argument("--ids", default=None, help="fichier JSON d ids tels quels (gabarit compris) : remplace --texte, aucun BOS ajouté (pièce 37 : Gemma 4 -it ne se juge que sous gabarit)")
+    ap.add_argument("--reponse-depuis", type=int, default=0, help="avec --ids : rang du premier id de la réponse gloutonne HF ; l épreuve de référence devient « NLL hf moyenne sur la réponse ≤ 1 nat » (gabarit), et le moteur publie la même moyenne")
     ap.add_argument("--nll-hf", default=None, help="JSON déjà produit par le bras hf (nll_hf, à sec sur processeur) : évite de le rejouer sous le verrou")
     ap.add_argument("--json")
     a = ap.parse_args()
@@ -335,7 +357,10 @@ def main() -> int:
             r.update({"nll_hf": h, "ppl_hf": round(ppl(h), 3), "div_eval_hf": premiere_divergence(e, h),
                       "div_serve_hf": premiere_divergence(s, h),
                       "delta_eval_hf_med": round(sorted(abs(x - y) for x, y in zip(e, h))[len(h) // 2], 4)})
-            r.update(juger_reference(brut))
+            r.update(juger_reference_gabarit(brut, a.reponse_depuis) if a.ids and a.reponse_depuis else juger_reference(brut))
+            if a.ids and a.reponse_depuis:
+                d0 = max(a.reponse_depuis - 1, 0)
+                r["nll_reponse_moy"] = {b: round(sum(v[d0:]) / len(v[d0:]), 4) for b, v in (("eval", e), ("serve", s), ("hf", h)) if len(v) > d0}
             r["ids_propres_en_tete"] = brut.get("ids_propres_en_tete")
             r["ids_nos_en_tete"] = brut.get("ids_nos_en_tete")
     r["controle_eval_ppl_le_30"] = r["ppl_eval"] <= 30
@@ -362,6 +387,19 @@ def verdict(r: dict) -> str:
     if "ppl_decode" in r and not r["montage_decode_ok"]:
         return (f"INVALIDE (bras decode) : à la position 1, contexte d un seul jeton, decode et eval devraient "
                 f"coïncider — Δ = {r['delta_position_1']} > 1e-2. Le bras est mal monté, il ne juge rien.")
+    if r.get("nll_reponse_moy"):
+        # SOUS GABARIT (pièce 37) : la PPL absolue des ids d invite ne juge rien (tour utilisateur) ;
+        # ce qui juge, c est l égalité position par position avec hf et la NLL de la réponse.
+        m = r["nll_reponse_moy"]
+        if r["div_eval_serve"] is not None and r["div_eval_serve"] < 8:
+            return f"P2 : eval ≠ serve dès la position {r['div_eval_serve']} — la ForwardBatch d évaluation diffère du service (champs {r['champs_batch_serve']})"
+        if r.get("div_serve_hf") is not None or r.get("div_eval_hf") is not None:
+            return (f"G3 : sous gabarit, acvram ≠ hf dès la position {r.get('div_serve_hf', r.get('div_eval_hf'))} "
+                    f"(|Δ| ≥ 1 nat ; médiane |Δ| eval/hf {r.get('delta_eval_hf_med')}) — défaut du forward acvram, à nommer par couche")
+        if m.get("eval", 9) > 1.0:
+            return f"G4 : sous gabarit, aucune divergence nette mais NLL de la réponse eval {m['eval']} > 1 nat (hf {m.get('hf')}) — conversion abîmée"
+        return (f"G1 : moteur juste sous gabarit — aucune position à |Δ| ≥ 1 nat contre hf sur {r['jetons']} ids "
+                f"(médiane |Δ| {r.get('delta_eval_hf_med')}), NLL réponse eval {m['eval']} · serve {m.get('serve')} · hf {m.get('hf')}")
     if "ppl_decode" in r and r["ppl_eval"] > 30:
         if r["ppl_decode"] <= 30:
             return (f"P5 : le DÉCODAGE est juste (PPL {r['ppl_decode']} ≤ 30, NLL médiane {r['nll_decode_mediane']}) "
