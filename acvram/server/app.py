@@ -14,6 +14,7 @@ import logging
 import asyncio
 import glob
 import os
+import sys
 import json
 import re
 import signal
@@ -232,7 +233,34 @@ def _params_from(req: Any, default_max: int) -> SamplingParams:
         seed=req.seed,
         n=req.n,
         ignore_eos=req.ignore_eos,
+        logprobs=_n_logprobs(getattr(req, "logprobs", None)),
     )
+
+
+def _n_logprobs(v: Any) -> Optional[int]:
+    """Nombre de top-logprobs demandé (pièce 36). /v1/completions : entier ;
+    /v1/chat : booléen (+ top_logprobs). None si non demandé. True → 0 (le
+    logprob du jeton choisi, sans top-K)."""
+    if v is None or v is False:
+        return None
+    if v is True:
+        return 0
+    return int(v)
+
+
+_LOGPROBS_GRAPHE_AVERTI = False
+
+
+def _avertir_logprobs_graphe() -> None:
+    """Sous le défaut sampler=graphe, les top-K logprobs ne sont pas rapatriés
+    (None). Le logprob du jeton choisi reste servi ; pour les top-K, relancer le
+    serveur avec ACVRAM_SAMPLER_LENT=1. Averti une fois (ligne de régime)."""
+    global _LOGPROBS_GRAPHE_AVERTI
+    if not _LOGPROBS_GRAPHE_AVERTI:
+        _LOGPROBS_GRAPHE_AVERTI = True
+        print("acvram: top-K logprobs demandés sous sampler=graphe → indisponibles "
+              "(top_logprobs=null) ; relancer avec ACVRAM_SAMPLER_LENT=1 pour les servir "
+              "(logprobs=graphe-sans-topk)", file=sys.stderr)
 
 
 def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
@@ -1102,17 +1130,50 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                                    bool((req.stream_options or {}).get("include_usage"))),
                 media_type="text/event-stream")
 
+        nlp = _n_logprobs(getattr(req, "logprobs", None))
         text, reason, n_out = "", "stop", 0
+        # Pièce 36 : logprobs par pas de décodage, remplis SEULEMENT si demandés
+        # (sinon la sortie est identique au bit — cf. sampler `veut_logprobs`).
+        lp_tok: list[str] = []; lp_val: list = []; lp_top: list = []; lp_off: list = []
         async for out in service.collect(request_id, q):
+            if nlp is not None and out.text_delta:
+                lp_off.append(len(text)); lp_tok.append(out.text_delta)
+                lp_val.append(getattr(out, "logprob", None))
+                top = getattr(out, "top_logprobs", None)
+                lp_top.append({tokenizer.decode([i]): float(v) for i, v in top} if top else None)
             text += out.text_delta
             n_out = out.completion_tokens
             if out.finished:
                 reason = out.finish_reason or "stop"
+
+        logprobs_champ = None
+        if nlp is not None:
+            # decode → offsets et jetons de génération sont posés au fil de la boucle,
+            # sur le texte de génération. echo : préfixer par les logprobs de l'invite.
+            toks, vals, tops, offs = lp_tok, lp_val, lp_top, lp_off
+            if req.echo and prompt_ids:
+                inv = engine.logprobs_invite(prompt_ids, top_k=nlp)
+                dt = [tokenizer.decode([i]) for i in inv["ids"]]
+                off_inv, cur = [], 0
+                for t in dt:
+                    off_inv.append(cur); cur += len(t)
+                toks = dt + [t for t in lp_tok]
+                vals = list(inv["logprobs"]) + lp_val
+                itops = ([{tokenizer.decode([i]): float(v) for i, v in pos} for pos in inv["top"]]
+                         if inv.get("top") else [None] * len(dt))
+                tops = itops + lp_top
+                base = len(str(prompt_text)) if prompt_text else cur
+                offs = off_inv + [base + o for o in lp_off]
+            logprobs_champ = {"tokens": toks, "token_logprobs": vals,
+                              "top_logprobs": tops, "text_offset": offs}
+            if nlp > 0 and any(t is None for t in lp_top):
+                _avertir_logprobs_graphe()
+
         if req.echo:
             text = str(prompt_text) + text
         return CompletionResponse(
             model=model_name,
-            choices=[CompletionChoice(text=text, finish_reason=reason)],
+            choices=[CompletionChoice(text=text, finish_reason=reason, logprobs=logprobs_champ)],
             usage=Usage(prompt_tokens=len(prompt_ids), completion_tokens=n_out,
                         total_tokens=len(prompt_ids) + n_out))
 
