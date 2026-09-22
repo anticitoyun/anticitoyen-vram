@@ -9,7 +9,7 @@ Objectif du projet : acvram plus rapide et plus économe (J/jeton) que llama.cpp
 | Prefill | TENUE | 22 707 j/s (vLLM 21 054) |
 | b=12 décode | NON TENUE | acvram 1 634 · vLLM 1 782 (−8 %) · TRT-LLM 1 998 (−18 %) |
 | J/jeton b=12 | NON TENUE (= débit au plafond 400 W) | acvram 0,196 · TRT-LLM 0,156 · llama.cpp 0,206-0,216 ; vLLM à mesurer (5e chaîne en cours) |
-| Qualité W4A4 (Coder) | TENUE 4/5 | KL max 0,519 vs bf16 (seuil 1,0) ; TRT-LLM 0,965 sur 1 invite (à compléter) |
+| Qualité W4A4 (Coder) | TENUE 5/5 | KL max 0,519 vs bf16 (seuil 1,0) ; TRT-LLM 0,965 sur 1 invite (à compléter) |
 | Qualité 31B 4sur6 | NON JUGEABLE | eval PPL cassée (53 202) — diag-eval-nll à exécuter (pièce 37) |
 | 30B-VL qualité | NON TENUE | P3(3) 12,6 % (repli mediane_couche réfuté) — reste la pièce 27 |
 | Livraison | 0.6.35 publiée + erratum | 0.6.36 à publier (feu) |
