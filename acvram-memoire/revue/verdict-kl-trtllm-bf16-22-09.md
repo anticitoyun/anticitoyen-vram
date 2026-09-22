@@ -27,10 +27,29 @@ qualité attend les 4.
   décalé effondre ce taux (~0) ; en dessous du seuil, l'alignement est SUSPECT et le
   kl_max de l'invite est EXCLU de l'agrégat. Le taux `argmax_prefixe` est imprimé par invite.
 
-## Suite
+## Verdict FINAL de l'instrument (3e essai, 15:57) : NON CONCLUANT
 
-Relance ≤ 10 min au créneau après la 5e chaîne de poste2 (invite4 + chaîne ~35 min),
-sur son « carte rendue » et `nvidia-smi` propre (seul le llama-server 4453 de
-l'utilisateur). Si l'alignement passe (≥ 0,90) sur les 4 : verdict qualité complet
-(kl_max W4A4 vs 0,519 nvfp4 vs seuil 1,2). Sinon : l'instrument est déclaré non
-concluant et le bras trtllm/bf16 reste ouvert.
+Le discriminant d'alignement a fait son travail — il a rendu FAUX. Sur les 4 invites,
+le taux argmax(context_logits[i]) = prompt[i+1] est **≤ 0,31 pour tous les décalages
+d ∈ {−2..+2}** (invite0 : 0,00/0,00/0,31/0,00/0,00 ; invite1-3 : 0,00 partout) —
+très en dessous du 0,4-0,7 attendu d'un bon alignement. **Toutes les invites SUSPECT,
+exclues ; kl_max_global = 0.** Les kl_max bruts (2,35 · 28,5 · 38,6 · 37,3) sont des
+ARTEFACTS d'un alignement faux, **non publiables**. Le contrôle a empêché un faux
+verdict « W4A4 diverge énormément ».
+
+**Cause probable** : trtllm renvoie des `context_logits` tronqués/désalignés — 3/4
+invites ont L < len(prompt) (35<38, 39<47, 37<40), signature du **prefix caching**
+(`kv_cache_config enable_block_reuse=True` dans les LLM Args) : les positions dont
+les blocs KV sont réutilisés ne sont pas recalculées, donc `context_logits` ne couvre
+pas tout le prompt et l'indexation position→token est fausse. Même invite0 (L=38=prompt,
+non tronquée) n'atteint que 0,31 : l'ordre ou la sémantique des context_logits n'est
+pas [position i prédit token i+1] comme supposé.
+
+**Correctif à tester (sur feu)** : relancer trtllm avec `enable_block_reuse=False`
+(SamplingParams/LLM args) pour que context_logits couvre tout le prompt ; le
+discriminant restera le juge (≥ 0,4 et écart ≥ 0,3). Si le taux ne monte pas, la
+sémantique des context_logits diffère et il faudra une autre voie (logits de génération
+d'une suite forcée jeton-à-jeton, ou la pièce 36 côté acvram une fois les logprobs servis).
+
+**Bras trtllm/bf16 : OUVERT** — aucune KL trtllm publiable par cet instrument en l'état.
+Le débit (cellule b=12, b=1, débit(b)) reste complet et publié.
