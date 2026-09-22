@@ -103,7 +103,8 @@ def test_grille_fixe_large_t0_hors_tampon():
     bloc = _bloc(dev)
     x, topw, topi = _entree(dev)
     from acvram.engine import model as M
-    ancien = M._MOE_DECODE_MMA_BT
+    from acvram.engine import moe as MOE
+    ancien = MOE._MOE_DECODE_MMA_BT
     y_exact = bloc._forward_prefill_grouped(x, topw, topi)
     y = bloc._forward_grouped_mma(x, topw, topi)
     torch.cuda.synchronize()

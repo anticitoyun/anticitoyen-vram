@@ -124,26 +124,27 @@ def test_pile_petites_activations_pres_de_la_boucle():
     pile corrigée reste dans la marge W4A4, sans saturation, avec un flush
     résiduel négligeable — les compteurs le disent."""
     from acvram.engine import model as M
+    from acvram.engine import moe as MOE
     dev = torch.device("cuda:0")
     bloc = _bloc_awq(dev)
     assert bloc._try_build_stacks()
     bloc._stack_state = "oui"
     x, topw, topi = _entree(dev)
-    compte = M._QA_COMPTE
-    M._QA_COMPTE = True
+    compte = MOE._QA_COMPTE
+    MOE._QA_COMPTE = True
     try:
         res = {}
         for nom, f in (("normal", 1.0), ("petit", 2 ** -4)):
             xf = (x.float() * f).to(torch.bfloat16)
             ref = _boucle(bloc, xf, topw, topi).float()
-            M._QA_COMPTEURS.clear()
+            MOE._QA_COMPTEURS.clear()
             y = bloc._forward_grouped_mma(xf, topw, topi).float()
             torch.cuda.synchronize()
-            n, z, sat = (int(v) for v in M._QA_COMPTEURS[x.device].tolist())
+            n, z, sat = (int(v) for v in MOE._QA_COMPTEURS[x.device].tolist())
             res[nom] = (((y - ref).norm() / ref.norm()).item(), n, z, sat)
     finally:
-        M._QA_COMPTE = compte
-        M._QA_COMPTEURS.clear()
+        MOE._QA_COMPTE = compte
+        MOE._QA_COMPTEURS.clear()
     n_act = x.shape[0] * TOP_K * INTER // 16
     for nom, (e, n, z, sat) in res.items():
         assert sat == 0, f"{nom} : {sat} blocs saturés"

@@ -177,6 +177,7 @@ def test_marlin_et_groupe_contre_fp32_et_le_bras_casse(monkeypatch, awq, T):
     bloc de gate décalées d'un rang (vue uint8) → rouge."""
     from conftest import attendre_chemin
     from acvram.engine import model as MD
+    from acvram.engine import moe as MOE_D
     from acvram.kernels import marlin_port as MP
     if MP.charger(compiler=False) is None:
         pytest.skip("extension Marlin non compilée à sec")
@@ -188,12 +189,12 @@ def test_marlin_et_groupe_contre_fp32_et_le_bras_casse(monkeypatch, awq, T):
     topw, topi = torch.topk(torch.softmax(logits, -1), top_k, dim=-1)
     topw = topw / topw.sum(-1, keepdim=True)
     topi32 = topi.to(torch.int32)
-    monkeypatch.setattr(MD, "_PREFILL_GROUPED", "groupe")
-    monkeypatch.setattr(MD, "_GEMV_LAYOUT", "naturel")            # témoin : pile naturelle gardée (défaut marlin depuis le 18/09)
-    monkeypatch.setattr(MD, "_MOE_MMA", False)                     # sinon la MMA FP4 prime sur « groupe » (T4 20/09 : chemin pris mma)
+    monkeypatch.setattr(MOE_D, "_PREFILL_GROUPED", "groupe")
+    monkeypatch.setattr(MOE_D, "_GEMV_LAYOUT", "naturel")            # témoin : pile naturelle gardée (défaut marlin depuis le 18/09)
+    monkeypatch.setattr(MOE_D, "_MOE_MMA", False)                     # sinon la MMA FP4 prime sur « groupe » (T4 20/09 : chemin pris mma)
     # à petit T (96 : 24 lignes par expert ≤ _MOE_GEMM_MAX 48) `direct` prend
     # le pas sur `groupe` : le témoin serait inatteignable — on force groupe
-    monkeypatch.setattr(MD, "_MOE_GEMM_MAX", 0)
+    monkeypatch.setattr(MOE_D, "_MOE_GEMM_MAX", 0)
     assert bloc._try_build_stacks()
     assert (bloc._stacks_awq.get("gate_proj") is not None) == awq
     ref = _reference_fp32(bloc, x, topw, topi)                    # après les piles : consomme la table AWQ du moteur
@@ -201,7 +202,7 @@ def test_marlin_et_groupe_contre_fp32_et_le_bras_casse(monkeypatch, awq, T):
     attendre_chemin(bloc, "groupe")
     hors_groupe = _hors_par_ligne(y_groupe, ref)
     assert hors_groupe <= TOL_HORS * ref.numel(), hors_groupe
-    monkeypatch.setattr(MD, "_PREFILL_GROUPED", "marlin")
+    monkeypatch.setattr(MOE_D, "_PREFILL_GROUPED", "marlin")
     bloc._stacks_marlin = bloc._construire_marlin(bloc._stacks, bloc._stacks_awq, bloc._stacks_awq.get("hadamard", {}))
     assert bloc._stacks_marlin is not None
     n0 = bloc.chemins.get("marlin", 0)
@@ -293,7 +294,7 @@ def test_a_sec_la_reference_passe_son_propre_critere_avec_awq(monkeypatch, awq, 
     logits = bloc.router(x).float()
     topw, topi = torch.topk(torch.softmax(logits, -1), top_k, dim=-1)
     topw = topw / topw.sum(-1, keepdim=True)
-    monkeypatch.setattr(MD, "_PREFILL_GROUPED", "groupe")
+    monkeypatch.setattr(MOE_D, "_PREFILL_GROUPED", "groupe")
     with torch.no_grad():
         assert bloc._try_build_stacks()
         assert (bloc._stacks_awq.get("gate_proj") is not None) == awq

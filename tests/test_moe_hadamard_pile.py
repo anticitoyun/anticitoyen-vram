@@ -82,6 +82,7 @@ def _bloc_tourne(dev, hd_x=512, hd_d=256):
 @pytest.mark.parametrize("chemin", ["gemv", "mma", "prefill_mma", "prefill_direct"])
 def test_pile_tournee_egale_boucle(chemin, monkeypatch):
     from acvram.engine import model as M
+    from acvram.engine import moe as MOE
     dev = torch.device("cuda:0")
     bloc = _bloc_tourne(dev)
     assert bloc._try_build_stacks(), bloc._raison_repli
@@ -90,8 +91,8 @@ def test_pile_tournee_egale_boucle(chemin, monkeypatch):
     x, topw, topi = _entree(dev)
     ref = _boucle(bloc, x, topw, topi)                     # ChannelScaler.apply tourne l'entrée
     if chemin.startswith("prefill"):
-        monkeypatch.setattr(M, "_MOE_MMA", chemin == "prefill_mma")
-        monkeypatch.setattr(M, "_MOE_GEMM_MAX", 1e9)
+        monkeypatch.setattr(MOE, "_MOE_MMA", chemin == "prefill_mma")
+        monkeypatch.setattr(MOE, "_MOE_GEMM_MAX", 1e9)
     if chemin == "mma":
         y = bloc._forward_grouped_mma(x, topw, topi)
     elif chemin == "gemv":

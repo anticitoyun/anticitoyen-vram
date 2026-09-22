@@ -267,9 +267,10 @@ def test_prefill_groupe_bmm_egale_grouped_mm_et_la_boucle_sur_le_mini_moe(tiny_m
     `grouped_mm` et contre la boucle par expert (`forward` sur CPU), même
     routage, t = 64 > _MOE_GROUPED_MAX."""
     from acvram.engine import model as M
+    from acvram.engine import moe as MOE
     from acvram.engine.loader import load_model
     loaded = load_model(tiny_moe, dtype=torch.float32, device_override="cpu")
-    blocs = [m for m in loaded.model.modules() if isinstance(m, M.MoEBlock)]
+    blocs = [m for m in loaded.model.modules() if isinstance(m, MOE.MoEBlock)]
     bloc = blocs[0]
     assert bloc._try_build_stacks(), "pile refusée sur le mini-MoE"
     torch.manual_seed(3)
@@ -284,7 +285,7 @@ def test_prefill_groupe_bmm_egale_grouped_mm_et_la_boucle_sur_le_mini_moe(tiny_m
     for chemin in ("bmm", "grouped_mm"):
         if chemin == "grouped_mm" and not hasattr(torch, "_grouped_mm"):
             continue
-        monkeypatch.setattr(M, "_PREFILL_GROUPED", chemin)
+        monkeypatch.setattr(MOE, "_PREFILL_GROUPED", chemin)
         y = bloc._forward_prefill_grouped(x, topw, topi)
         assert y is not None, f"chemin {chemin} non pris"
         sorties[chemin] = y.float()
