@@ -136,6 +136,8 @@ case "$choix" in
     # /v1/messages (API Anthropic) expose nativement par le serveur
     "$PARC_BIN/acvram-serveur" "$choix" || exit 1
     ctx=$(grep "^$choix	" "$PARC_ACVRAM_TSV" 2>/dev/null | cut -f3)
+    ctx_client=$(grep "^$choix	" "$PARC_ACVRAM_TSV" 2>/dev/null | cut -f4)
+    [ -n "$ctx_client" ] && [ "$ctx_client" -gt "${ctx:-0}" ] 2>/dev/null && ctx="$ctx_client"
     lancer_claude "http://127.0.0.1:${PARC_PORT_ACVRAM:-8090}" "$CLE_ACVRAM" "$choix" "${ctx:-32768}" "$@" ;;
   tabby-*)
     err "TabbyAPI n'expose pas l'API Anthropic : choisir un alias llamacpp-*, rapide-*, vllm-* ou acvram-*."; exit 1 ;;
