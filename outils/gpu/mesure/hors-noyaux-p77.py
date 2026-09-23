@@ -85,7 +85,8 @@ def nue(modele: str, sortie: str) -> dict:
 
         def __init__(self, keep_graph=True):
             super().__init__(keep_graph=True)
-    torch.cuda.CUDAGraph = _GrapheGarde
+    if os.environ.get("P77_GARDER_GRAPHE", "1") == "1":           # 79 : sans le crochet, pour comparer à serve
+        torch.cuda.CUDAGraph = _GrapheGarde
     sys.path.insert(0, os.getcwd())
     from acvram.engine.loader import load_model
     from acvram.engine.runner import Engine
@@ -140,6 +141,9 @@ def nue(modele: str, sortie: str) -> dict:
     duree = time.perf_counter() - t0
     noeuds = {}
     for cle, entree in eng.graphs.graphs.items():
+        if torch.cuda.CUDAGraph is not _GrapheGarde:
+            noeuds[str(cle)] = "non compté (graphe non gardé)"
+            continue
         try:
             noeuds[str(cle)] = compter_noeuds(entree["graph"])
         except Exception as exc:                             # noqa: BLE001

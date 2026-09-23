@@ -33,3 +33,75 @@ Lecture : `familles-comparees.py` en mode acvram-contre-acvram (fenêtres de 48 
   que les trous sont ailleurs, entre les nœuds du graphe, là où `frontiere-pas` ne regarde pas.
 * **si « oui, les bancs Engine sont pessimistes »** (K ou T avec un écart ≥ 0,25 ms/pas) : liste des chiffres publiés
   qui en dépendaient, tirée du dépôt (README, ETAT, verdicts), pas de mémoire.
+
+## Verdict — 23/09 09 h 5x (poste1)
+
+* **instrument** : `scratchpad/poste1-p79-23-09/prise.sh` (S : `nsys launch/start/stop` autour du client ; N : `nsys profile` de la boucle nue, sans `keep_graph`) ; lecture sur le **plus long train continu de décodage** de chaque trace (coupé à toute fenêtre > 1,5 × la médiane : préfill, fin de lot, changement de godet de blocs), `familles-train.json`
+* **commit** : fusion de main du 23/09 09 h 5x dans `poste1-alpha-experts` ; alias `Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c`
+* **régime** : -lgc 2700, horloge 2 654 (client) ; sous nsys : servi 1 796,4 t/s, nu 1 758,4 ; compute-apps début = fin = llama-server 4627
+* **scellé** : K si Δ noyaux ≥ 0,25 ; T si \|Δ noyaux\| ≤ 0,08 et Δ trous ≥ 0,25 ; R si \|Δ mur\| ≤ 0,10 (commit précédent)
+* **mesuré** (ms/pas, train de **509 pas** des deux côtés, même position dans le lot de 1 024) :
+
+| | serve (S) | boucle nue (N) | N − S |
+|---|---|---|---|
+| mur | 6,129 | 6,429 | **+0,300** |
+| noyaux | 5,838 | 6,140 | **+0,302** |
+| **Marlin MoE** | **2,877** (144 × 19,98 µs = **59,9 µs/couche**) | **3,176** (144 × 22,06 µs = 66,2 µs/couche) | **+0,299 (+10,4 %)** |
+| toutes les autres familles | 2,961 | 2,964 | +0,003 (aucune au-delà de ±0,005) |
+| mur − noyaux (trous) | 0,291 | 0,289 | −0,002 |
+
+  Le mur est stable par tiers du train (S 6,121 · 6,122 · 6,144 ; N 6,424 · 6,438 · 6,426) : ce n'est pas une dérive.
+* **verdict : K**, et plus étroit que prévu. Hors de `serve`, le moteur exécute **le même graphe, avec les mêmes
+  lancements et les mêmes trous** ; seul le **noyau Marlin MoE** y est plus lent de 10,4 %. **(i) est réfutée** (trous
+  égaux à 2 µs près). La moitié « attention » de ma prédiction est fausse (+0,002) : l'écart de +0,10 vu d'abord sur
+  toutes les fenêtres venait du contexte (chauffe et passes courtes du client), et la lecture par train l'a retiré.
+* **durée** : prévue ≤ 3 min ; tenue **1 min 51** (`carte.sh`, tenue=111 s), après les prises de poste2
+
+## Ce que cela veut dire, et ce qui reste ouvert
+
+Un Marlin 10 % plus rapide sur le même graphe, c'est soit **moins d'octets lus**, soit **les mêmes octets mieux
+servis** :
+
+* **(ii′) le travail diffère** : les jetons générés, donc le routage. Même invite en ids, glouton des deux côtés,
+  mais le chemin HTTP (`/v1/completions`) peut changer la suite (jeton de début, traitement des ids, arrêt).
+  D'autres jetons donnent d'autres experts distincts, donc un autre nombre d'octets de MoE. C'est l'hypothèse la
+  plus probable : seul le Marlin bouge, et le Marlin est la seule famille dont le coût dépend du **nombre
+  d'experts distincts**, les autres ne dépendant que de b et du contexte.
+* **(iii) la mémoire** : mêmes experts, mais placement ou état de la L2 différents.
+
+**Test qui départage, ≤ 2 min** : le crochet de la 74 (experts distincts par appel à M = 12) posé dans les deux
+chemins, `serve` et boucle nue. S'il y a moins d'experts distincts sous `serve`, c'est (ii′) ; à nombre égal, c'est
+(iii).
+
+## « Nos bancs Engine sont-ils pessimistes d'environ 6 % ? »
+
+**Oui, de 4,9 % dans ce régime** (0,300 sur 6,129 ms/pas), et **uniquement par le Marlin MoE**. Si (ii′) se
+confirme, il faudra dire « le banc et le service ne décodent pas le même texte » plutôt que « le banc ment », et
+décider lequel des deux textes représente le service.
+
+Chiffres qui en dépendaient, relevés dans le dépôt :
+
+* **README : aucun.** Toutes les cellules publiées (b=12 1 831,7, b=1 310,8 et 283,6, énergie) sont servies en HTTP
+  par le client de cellule.
+* **Décompositions internes, à requalifier** :
+  * p73 : « notre Marlin à 1,37 To/s en service, 64,6 µs/couche » venait de `frontiere-pas`, donc d'Engine direct.
+    **Sous `serve`, 59,9 µs/couche**, soit ≈ 1,48 To/s sur les 88,6 Mo/couche de la 73.
+  * p75 : « notre service colle au banc (64,6 contre 66,8) » est faux pour la même raison. En service, notre Marlin
+    **passe sous le banc** (59,9 contre 66,8 pour A3), **comme celui de vLLM** (56,9 contre 62,4) : les deux moteurs
+    se comportent de la même façon.
+  * p76 : table des familles (trace p73, Engine direct, autre alias) ; son MoE +0,316 devient ≈ +0,15 (2,877 contre
+    2,729, alias et commit à la réserve près).
+  * p77 : (d) ≥ 0,215 et « servi contre boucle nue » : l'anomalie est désormais localisée.
+* **Seuils choisis par ABBA en Engine direct, à relire** : p65, `MOE_TENSOR_MIN_T = 8` (« chaîne p65, frontière
+  200 pas »). La comparaison était relative, dans le même harnais. Mais si le biais vient du routage (ii′), il pèse
+  sur les deux bras MoE de façon inégale : le GEMV par paire et la GEMM groupée ne dépendent pas de la même façon du
+  nombre d'experts distincts.
+* **Cellules `certifie-b12`** (inventaire du 18/09) : absolues, Engine direct, pessimistes du même ordre si elles
+  sont citées quelque part comme chiffre de service.
+
+## Pour la question du Marlin (chef, recherche de poste4)
+
+« Le nôtre fait l'inverse de vLLM » (62,2 au banc, 64,6 en service) était un **artefact d'instrument** : le 64,6 est
+un chiffre d'Engine direct. Sous `serve`, notre Marlin fait **59,9 µs/couche**, sous le banc, comme le leur. À même
+régime, nous sommes à 59,9 en 3 lancements contre 56,9 en 2 pour eux ; la fusion w13 (−4,6 µs/couche au banc de la
+75) nous mettrait à ≈ 55, à égalité avec vLLM ou devant.
