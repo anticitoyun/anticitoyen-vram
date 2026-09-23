@@ -4214,13 +4214,22 @@ __global__ void kv_write_int8_kernel(
         if (threadIdx.x == 0) {
             float m = 0.f;
             for (int i = 0; i < nw; ++i) m = fmaxf(m, red[i]);
-            red[0] = fmaxf(m / 127.f, 1e-8f);
+            // anticitoyen-vram-thf : sous --use_fast_math, `/` et `1.f/sc` (puis
+            // multiplier par l'inverse) rendent une division APPROCHEE — le
+            // jumeau torch (kvcache.py, `x / scale`) reste en division IEEE
+            // correctement arrondie. __fdiv_rn force la meme arithmetique que
+            // le jumeau, meme sous fast_math (precedent : pieces 61/104,
+            // kv_write_k8v4_kernel `:4300-4326`).
+            red[0] = fmaxf(__fdiv_rn(m, 127.f), 1e-8f);
         }
         __syncthreads();
-        const float sc = red[0], inv = 1.f / sc;
+        const float sc = red[0];
         signed char *dst = (quel ? vc : kc) + (pos * H + h) * D;
         for (int i = threadIdx.x; i < D; i += blockDim.x) {
-            const int q = __float2int_rn(__bfloat162float(src[i]) * inv);
+            // division directe (__fdiv_rn), jamais x * (1/sc) : le jumeau divise,
+            // il ne multiplie pas par un inverse precalcule (memes deux ecarts
+            // que le premier, en cascade sur la reciproque ET sur le produit).
+            const int q = __float2int_rn(__fdiv_rn(__bfloat162float(src[i]), sc));
             dst[i] = (signed char)max(-127, min(127, q));
         }
         if (threadIdx.x == 0)
@@ -4429,12 +4438,15 @@ __device__ __forceinline__ void kvc_quant_par_jeton(
     if (threadIdx.x == 0) {
         float m = 0.f;
         for (int i = 0; i < nw; ++i) m = fmaxf(m, red[i]);
-        red[0] = fmaxf(m / 127.f, 1e-8f);
+        // anticitoyen-vram-thf : meme correctif que kv_write_int8_kernel — cette
+        // fonction en est la copie pour V du chemin canal (C5-b), avec le meme
+        // ecart de division approchee sous --use_fast_math.
+        red[0] = fmaxf(__fdiv_rn(m, 127.f), 1e-8f);
     }
     __syncthreads();
-    const float sc = red[0], inv = 1.f / sc;
+    const float sc = red[0];
     for (int i = threadIdx.x; i < D; i += blockDim.x) {
-        const int q = __float2int_rn(__bfloat162float(src[i]) * inv);
+        const int q = __float2int_rn(__fdiv_rn(__bfloat162float(src[i]), sc));
         dst[i] = (signed char)max(-127, min(127, q));
     }
     if (threadIdx.x == 0) *echelle = __float2half(sc);
