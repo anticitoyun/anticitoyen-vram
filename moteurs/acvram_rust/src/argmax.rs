@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use cudarc::driver::{CudaContext, CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
-use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
+use std::ffi::CString;
+
+use cudarc::nvrtc::{result as nvrtc, sys as nvrtc_sys, Ptx};
 
 use crate::{erreur, Resultat};
 
@@ -40,15 +42,36 @@ extern "C" __global__ void argmax_f32(const float *x, int n, int *sortie) {
 }
 "#;
 
+/// SASS sm_120 et non PTX : le PTX de NVRTC 13.4 est refusé par un pilote plus ancien (595.91, CUDA 13.2 :
+/// CUDA_ERROR_UNSUPPORTED_PTX_VERSION, première prise release du 24/09) ; un cubin d'une version mineure plus
+/// récente se charge dans la même version majeure.
+fn cubin_sm120() -> Resultat<Vec<u8>> {
+    let src = CString::new(SOURCE).map_err(|e| erreur!("{e}"))?;
+    let prog = nvrtc::create_program(&src, None).map_err(|e| erreur!("NVRTC argmax : {e:?}"))?;
+    // SAFETY : `prog` créé ci-dessus, détruit une seule fois à la fin, quelle que soit l'issue.
+    unsafe {
+        let res = nvrtc::compile_program(prog, &["--gpu-architecture=sm_120"])
+            .map_err(|e| erreur!("NVRTC argmax : {e:?} {}", String::from_utf8_lossy(
+                &nvrtc::get_program_log(prog).unwrap_or_default().iter().map(|&c| c as u8).collect::<Vec<_>>())))
+            .and_then(|_| {
+                let mut n = 0usize;
+                nvrtc_sys::nvrtcGetCUBINSize(prog, &mut n).result().map_err(|e| erreur!("{e:?}"))?;
+                let mut cubin = vec![0u8; n];
+                nvrtc_sys::nvrtcGetCUBIN(prog, cubin.as_mut_ptr().cast()).result().map_err(|e| erreur!("{e:?}"))?;
+                Ok(cubin)
+            });
+        let _ = nvrtc::destroy_program(prog);
+        res
+    }
+}
+
 pub struct Argmax {
     f: CudaFunction,
 }
 
 impl Argmax {
     pub fn charger(ctx: &Arc<CudaContext>) -> Resultat<Self> {
-        let ptx = compile_ptx_with_opts(SOURCE, CompileOptions { arch: Some("sm_120"), ..Default::default() })
-            .map_err(|e| erreur!("NVRTC argmax : {e:?}"))?;
-        let m = ctx.load_module(ptx).map_err(|e| erreur!("module argmax : {e:?}"))?;
+        let m = ctx.load_module(Ptx::from_binary(cubin_sm120()?)).map_err(|e| erreur!("module argmax : {e:?}"))?;
         Ok(Self { f: m.load_function("argmax_f32").map_err(|e| erreur!("{e:?}"))? })
     }
 
@@ -61,5 +84,15 @@ impl Argmax {
         unsafe { l.launch(LaunchConfig { grid_dim: (1, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 }) }
             .map(|_| ())
             .map_err(|e| erreur!("lancement argmax : {e:?}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// À sec (NVRTC seul, aucune carte) : le module est un ELF (SASS), jamais un texte PTX que le pilote devrait JIT.
+    #[test]
+    fn argmax_compile_en_sass() {
+        let c = super::cubin_sm120().expect("NVRTC");
+        assert_eq!(&c[..4], b"\x7fELF");
     }
 }
