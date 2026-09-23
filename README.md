@@ -301,11 +301,11 @@ mesure, l'instrument et son régime — un chiffre sans régime n'est pas publi�
 Où acvram est devant : modèles MLA (GLM-4.7-Flash) en NVFP4 natif sm_120, que
 vLLM ne sert qu'en FP8 (b=1 : 165,35 t/s en service) ; les modèles qui ne
 tiennent pas en VRAM . Le décodage à séquence unique n'en fait pas partie : sans spéculation, acvram y est
-devant vLLM de 9,4 % (note ³), derrière llama.cpp de 5,8 % en débit mais devant lui de 13,4 % en
+devant vLLM de 9,7 % (note ³), derrière llama.cpp de 5,8 % en débit mais devant lui de 13,4 % en
 énergie (note ⁴). À grand lot, sur un MoE qui tient en VRAM, vLLM
-reste devant à b=12 (2 014,3 contre 1 916,1 t/s, et 6,4 % de J/jeton en moins, même
-séance et même instrument, note ²) ; acvram y a progressé (1 540 en 0.6.34 → 1 916,1 en
-0.6.37) sans passer devant.
+reste devant à b=12 (2 026,5 contre 1 931,2 t/s, et 6,8 % de J/jeton en moins, même
+séance et même instrument, au-delà de 2 σ, note ²) ; acvram y a progressé (1 540 en 0.6.34 →
+1 931,2 en 0.6.37) sans passer devant.
 
 ## État
 
