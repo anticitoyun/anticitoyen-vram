@@ -29,7 +29,7 @@ import acvram  # noqa: E402
 
 ALIAS, LISTE, SORTIE, N = sys.argv[1], sys.argv[2], sys.argv[3], 8
 assert os.path.realpath(acvram.__file__).startswith(os.path.realpath(os.getcwd()) + os.sep), acvram.__file__
-DUMPS = [l.rstrip("\n").split("\t") for l in open(LISTE) if l.strip() and not l.startswith("#")]
+DUMPS = [(n, os.path.expanduser(c)) for n, c in (l.rstrip("\n").split("\t") for l in open(LISTE) if l.strip() and not l.startswith("#"))]
 chemin = os.path.join(racine_modeles(), ALIAS)
 tok = load_tokenizer(chemin)
 loaded = load_model(chemin, dtype=torch.bfloat16, max_model_len=2048, max_concurrent_seqs=16)
@@ -37,9 +37,17 @@ print("REGIME", regime.regime_ligne(), flush=True)
 attn = [m for m in loaded.model.modules() if hasattr(m, "qkv_proj")]
 piles_qkv = sum(1 for m in attn if m.qkv_proj is not None)
 print(f"PILES_QKV {piles_qkv}/{len(attn)}", flush=True)
-regles = tok.encode("".join(open(os.path.join(os.getcwd(), "acvram-memoire", f), encoding="utf-8").read() for f in ("REGLES.md", "MECANISMES.md")))
-readme = tok.encode(open(os.path.join(os.getcwd(), "README.md"), encoding="utf-8").read() * 6)
-assert len(regles) > 30000 and len(readme) > 6000, (len(regles), len(readme))
+JEU = os.environ.get("P100_JEU", "E")            # E : prise 2 (REGLES+MECANISMES, README) ; F : prise 3 (corpus et lots jamais vus)
+if JEU == "E":
+    regles = tok.encode("".join(open(os.path.join(os.getcwd(), "acvram-memoire", f), encoding="utf-8").read() for f in ("REGLES.md", "MECANISMES.md")))
+    readme = tok.encode(open(os.path.join(os.getcwd(), "README.md"), encoding="utf-8").read() * 6)
+    assert len(regles) > 30000 and len(readme) > 6000, (len(regles), len(readme))
+    ETRANGER = ["acvram-memoire/REGLES.md + MECANISMES.md", "README.md x6"]
+else:
+    F_FICHIERS = ("REPRISE.md", "CLAUDE.md", "acvram-memoire/ANNUAIRE.md", "acvram-memoire/revue/organisation-22-09.md")
+    corpus_f = tok.encode("".join(open(os.path.join(os.getcwd(), f), encoding="utf-8").read() for f in F_FICHIERS))
+    assert len(corpus_f) > 14000, len(corpus_f)
+    ETRANGER = list(F_FICHIERS)
 
 
 def lancer(prompts, cibles):
@@ -93,28 +101,42 @@ def segments(src, base, n, longueurs):
 
 
 res = {"alias": ALIAS, "n_pas": N, "piles_qkv": f"{piles_qkv}/{len(attn)}", "regime": regime.regime_ligne(),
-       "etranger": ["acvram-memoire/REGLES.md + MECANISMES.md", "README.md x6"], "invites": []}
+       "etranger": ETRANGER, "jeu": JEU, "invites": []}
 nom0, ch0 = DUMPS[0]
 _st = torch.load(ch0, weights_only=False)
 _ids = list(_st["ids"])
 lancer([_ids], list(_st["cibles"]))
-lancer([_ids] + [_ids[:len(_ids) - 5 * j] for j in (1, 2, 3)], list(_st["cibles"]))
+lancer([_ids] + [_ids[:len(_ids) - 4 * j] for j in (1, 2, 3, 4)], list(_st["cibles"]))
 print("CHAUFFE faite", flush=True)
 for i, (nom, ch) in enumerate(DUMPS):
     st = torch.load(ch, weights_only=False)
     ids, cibles, lg_hf = list(st["ids"]), list(st["cibles"]), st["logits"].double()
     L = len(ids)
-    base = 1000 * i
-    e2 = segments(regles, base, 3, [L - 5, L - 11, L - 17])
-    e3 = segments(regles, base + 5000, 7, [L - 3, L - 6, L - 9, L - 12, L - 15, L - 18, L - 21])
-    e4 = segments(readme, (base // 2) % 2000, 6, [L - 4, L - 8, L - 12, L - 16, L - 20, L - 24]) + \
-        segments(regles, base + 12000, 5, [L - 2, L - 7, L - 13, L - 19, L - 23])
-    comp = {"C1": [ids],
-            "E1": [ids, ids[:L - 5], ids[:L - 11], ids[:L - 17]],
-            "E2": [ids] + e2,
-            "E3": [ids] + e3,
-            "E4": [ids] + e4}
-    assert all(len(p) == {"C1": 1, "E1": 4, "E2": 4, "E3": 8, "E4": 12}[c] for c, p in comp.items())
+    if JEU == "E":
+        base = 1000 * i
+        e2 = segments(regles, base, 3, [L - 5, L - 11, L - 17])
+        e3 = segments(regles, base + 5000, 7, [L - 3, L - 6, L - 9, L - 12, L - 15, L - 18, L - 21])
+        e4 = segments(readme, (base // 2) % 2000, 6, [L - 4, L - 8, L - 12, L - 16, L - 20, L - 24]) + \
+            segments(regles, base + 12000, 5, [L - 2, L - 7, L - 13, L - 19, L - 23])
+        comp = {"C1": [ids],
+                "E1": [ids, ids[:L - 5], ids[:L - 11], ids[:L - 17]],
+                "E2": [ids] + e2,
+                "E3": [ids] + e3,
+                "E4": [ids] + e4}
+        tailles = {"C1": 1, "E1": 4, "E2": 4, "E3": 8, "E4": 12}
+    else:
+        base = 500 * i
+        f2 = segments(corpus_f, base, 5, [L - 3, L - 7, L - 10, L - 14, L - 18])
+        f3 = segments(corpus_f, base + 6000, 9, [L - 2, L - 4, L - 6, L - 8, L - 10, L - 12, L - 14, L - 16, L - 18])
+        f4 = segments(corpus_f, base + 9000, 11, [L - 1, L - 3, L - 5, L - 7, L - 9, L - 11, L - 13, L - 15, L - 17, L - 19, L - 21])
+        comp = {"C1": [ids],
+                "F1": [ids, ids[:L - 4], ids[:L - 9], ids[:L - 15], ids[:L - 22]],
+                "F2": [ids] + f2,
+                "F3": [ids] + f3,
+                "F4": [ids] + f4}
+        tailles = {"C1": 1, "F1": 5, "F2": 6, "F3": 10, "F4": 12}
+    assert all(len(p) == tailles[c] for c, p in comp.items())
+    LOTS = [c for c in comp if c != "C1"]
     out = {c: lancer(p, cibles) for c, p in comp.items()}
     rejeu = {c: max(ecart(lancer(p, cibles), out[c])) for c, p in comp.items()}
     rep = {"invite": nom, "L": L,
@@ -123,7 +145,7 @@ for i, (nom, ch) in enumerate(DUMPS):
            "kl_moy": {c: round(sum(kl(x, lg_hf)) / N, 4) for c, x in out.items()},
            "argmax_egaux_hf": {c: sum(int(x[k].argmax() == lg_hf[k].argmax()) for k in range(N)) for c, x in out.items()},
            "rejeu_ulp_max": rejeu,
-           "ecart_ulp_C1_vs": {c: max(ecart(out[c], out["C1"])) for c in ("E1", "E2", "E3", "E4")}}
+           "ecart_ulp_C1_vs": {c: max(ecart(out[c], out["C1"])) for c in LOTS}}
     res["invites"].append(rep)
     print(json.dumps(rep, ensure_ascii=False), flush=True)
 res["kl_max_b1"] = max(r["kl_max"]["C1"] for r in res["invites"])
