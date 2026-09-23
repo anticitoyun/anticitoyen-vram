@@ -527,7 +527,9 @@ def _speculation_texte(s: Optional[dict]) -> str:
     etat = "on" if s.get("garde_active", True) else "désactivée"
     gain = s.get("gain_moyen")
     gain_txt = f",gain={gain}" if gain is not None else ""
-    return f" speculation={s['mode']}({etat}{gain_txt},lot_max={s['lot_max']})"
+    # pièce 105 : un repli (auto → ngram faute de tête MTP) est NOMMÉ, jamais muet
+    repli = f"{s['repli']}," if s.get("repli") else ""
+    return f" speculation={s['mode']}({repli}{etat}{gain_txt},lot_max={s['lot_max']})"
 
 
 def _vision_texte(tour) -> str:
@@ -903,7 +905,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             "llama4_scaling_beta": self._llama4_scaling_beta or None,
             # pièce 49 : régime spéculatif visible (REGLES §6 : le régime se porte
             # par le nom, pas par la vigilance) — mode + état garde + gain moyen
-            "speculation": (self._garde_spec.etat_dict(self.speculator.name)
+            "speculation": (dict(self._garde_spec.etat_dict(self.speculator.name),
+                                 repli=getattr(self.speculator, "repli", None))
                             if self.speculator is not None
                             else {"mode": "off", "garde_active": False,
                                   "gain_moyen": None, "lot_max": 0}),

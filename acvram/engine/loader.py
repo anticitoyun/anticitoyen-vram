@@ -951,11 +951,12 @@ def load_model(path: str, plan: Optional[Plan] = None,
         # projection en prend une copie quantifiée, qui coûte de la place mais
         # divise sa lecture par deux (int8) ou par trois et demi (nvfp4).
         lm_head = QuantLinear(_tete_liee(embed.to(head_dev)))
-    tetes_mtp = _charger_mtp(manifest, reader, spec, plan, group_size, dtype,
-                             head_dev, rope, kv_blocks)
+    tetes_mtp, raison_mtp = _charger_mtp(manifest, reader, spec, plan, group_size, dtype,
+                                         head_dev, rope, kv_blocks)
     reader.close()
 
     model = ACVRamModel(spec, embed, layers, norm, lm_head, caches, dtype)
+    model.mtp_raison = raison_mtp        # pièce 105 : pourquoi il n'y a pas de tête (ligne de régime, repli nommé)
     if tetes_mtp:
         model.mtp = tetes_mtp[0]
         print(f"[acvram] tête de prédiction multi-jetons chargée "
@@ -965,45 +966,54 @@ def load_model(path: str, plan: Optional[Plan] = None,
 
 def _charger_mtp(manifest: dict, reader: "_ShardReader", spec: ModelSpec,
                  plan: Plan, group_size: int, dtype: torch.dtype,
-                 device: torch.device, rope, kv_blocks: dict[str, int]) -> list:
+                 device: torch.device, rope, kv_blocks: dict[str, int]) -> tuple[list, str]:
     """Construit les têtes ``nextn`` que la conversion a conservées.
 
     Absentes de la plupart des modèles ; leur absence n'est pas une erreur. Une
     tête coûte un bloc de transformeur — sur un 27B de soixante-quatre couches,
     un soixante-quatrième du modèle — et sert de brouillon spéculatif.
     """
-    from .mtp import MTPHead, cles_mtp
+    from .mtp import MTPHead, cles_mtp, norme_mtp, noms_mtp
 
     indices = cles_mtp(manifest)
-    if not indices or os.environ.get("ACVRAM_MTP") == "non":
-        return []
+    if not indices:
+        return [], "aucune tête dans le manifeste"
+    if os.environ.get("ACVRAM_MTP") == "non":
+        return [], "ACVRAM_MTP=non"
 
-    tetes = []
+    tetes, incompletes = [], []
     for n in indices:
-        p = f"model.mtp.{n}."
+        noms = noms_mtp(manifest, n)
+        p = noms["bloc"]
 
-        def lin(suffix: str):
-            m = _linear(p + suffix, manifest, reader, group_size)
+        def lin_nom(cle: str):
+            m = _linear(cle, manifest, reader, group_size)
             return None if m is None else m.to_device(device)
 
-        def norme(suffix: str):
-            cle = p + suffix
+        def lin(suffix: str):
+            return lin_nom(p + suffix)
+
+        def norme_nom(cle: str):
             if not reader.has(cle):
                 return None
-            return RMSNorm(reader.get(cle).to(dtype).to(device),
-                           spec.rms_norm_eps)
+            t = norme_mtp(cle, reader.get(cle), noms["convention"], manifest)
+            return RMSNorm(t.to(dtype).to(device), spec.rms_norm_eps)
+
+        def norme(suffix: str):
+            return norme_nom(p + suffix)
 
         q, k, v, o = (lin("self_attn.q_proj.weight"), lin("self_attn.k_proj.weight"),
                       lin("self_attn.v_proj.weight"), lin("self_attn.o_proj.weight"))
-        eh = lin("eh_proj.weight")
+        eh = lin_nom(noms["eh"])
         in_norm, post_norm = norme("input_layernorm.weight"), norme("post_attention_layernorm.weight")
-        enorm, hnorm = norme("enorm.weight"), norme("hnorm.weight")
-        fin = norme("shared_head_norm.weight") or norme("norm.weight")
+        enorm, hnorm = norme_nom(noms["enorm"]), norme_nom(noms["hnorm"])
+        fin = next((f for f in (norme_nom(c) for c in noms["fin"]) if f is not None), None)
         gate, up, down = (lin("mlp.gate_proj.weight"), lin("mlp.up_proj.weight"),
                           lin("mlp.down_proj.weight"))
         if None in (q, k, v, o, eh, in_norm, post_norm, enorm, hnorm, fin,
                     gate, up, down):
             print(f"[acvram] tête MTP {n} incomplète, ignorée")
+            incompletes.append(n)
             continue
 
         attn = Attention(spec, q, k, v, o, rope,
@@ -1019,7 +1029,7 @@ def _charger_mtp(manifest: dict, reader: "_ShardReader", spec: ModelSpec,
             head_dim=spec.head_dim, num_blocks=n_blocks,
             dtype=_kv_format(plan, str(device)), device=str(device)))
         tetes.append(MTPHead(couche, enorm, hnorm, eh, fin, cache, device))
-    return tetes
+    return tetes, ("" if tetes else f"tête(s) {incompletes} incomplète(s)")
 
 
 # Format de la projection de sortie quand elle partage la table des
