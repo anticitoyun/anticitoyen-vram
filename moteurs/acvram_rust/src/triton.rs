@@ -1,12 +1,13 @@
 //! Noyaux Triton compilés par le moteur servi, lancés depuis Rust sans Triton.
 //!
-//! Le vidage (`outils/vidage_tables.py`) livre chaque variante RÉELLEMENT compilée : cubin, signature
-//! (nom → type), constexpr (dont les entiers spécialisés à 1, absents des arguments), attributs de
-//! divisibilité par 16, warps, mémoire partagée. Une variante se choisit sur ces clés — jamais par le seul
-//! nom — et son nombre de paramètres se vérifie au chargement (`cuFuncGetParamInfo`) : un écart d'ABI est un
-//! refus, pas un lancement.
+//! Le vidage (`outils/vidage_tables.py`) livre chaque variante RÉELLEMENT compilée : cubin, noms des
+//! paramètres (signature, ordre conservé), warps, mémoire partagée, et la CLÉ de cache Triton 3.8 —
+//! `[('*bf16', 'D'), ('i32', ''), ('fp32', None), ('constexpr', 4), …]` — qui dit, paramètre par paramètre,
+//! le type, la divisibilité par 16 supposée à la compilation (`'D'`) et la valeur de chaque constexpr (y compris
+//! les entiers spécialisés à 1, absents des arguments). Une variante se choisit sur cette clé, jamais par le seul
+//! nom, et le nombre de paramètres du cubin se vérifie au chargement : un écart d'ABI est un refus.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::ffi::{c_void, CString};
 use std::path::Path;
 
@@ -32,9 +33,53 @@ impl Arg {
             Arg::F32(_) => false,
         }
     }
-    fn vaut_un(&self) -> bool {
-        matches!(*self, Arg::I32(1) | Arg::I64(1))
+    fn entier(&self) -> Option<i64> {
+        match *self {
+            Arg::I32(v) => Some(v as i64),
+            Arg::I64(v) => Some(v),
+            _ => None,
+        }
     }
+}
+
+/// Un paramètre de la clé de cache.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Param {
+    /// argument passé au lancement : type Triton, divisibilité par 16 supposée (None pour un flottant)
+    Execution { ty: String, div16: Option<bool> },
+    /// valeur fixée à la compilation
+    Constante(i64),
+}
+
+/// Lit la clé `[('*bf16', 'D'), ('i32', ''), ('fp32', None), ('constexpr', True), …]{…}`.
+pub fn lire_cle(cle: &str) -> Resultat<Vec<Param>> {
+    let corps = cle
+        .strip_prefix("[(")
+        .and_then(|s| s.split(")]").next())
+        .ok_or_else(|| erreur!("clé Triton illisible : {}", &cle[..cle.len().min(60)]))?;
+    let mut v = Vec::new();
+    for item in corps.split("), (") {
+        let (ty, spec) = item.split_once(", ").ok_or_else(|| erreur!("clé Triton : élément {item:?}"))?;
+        let ty = ty.trim_matches('\'').to_string();
+        let spec = spec.trim();
+        if ty == "constexpr" {
+            let val = match spec {
+                "True" => 1,
+                "False" => 0,
+                s => s.parse::<i64>().map_err(|_| erreur!("constexpr non entier : {s}"))?,
+            };
+            v.push(Param::Constante(val));
+        } else {
+            let div16 = match spec {
+                "None" => None,
+                "'D'" => Some(true),
+                "''" => Some(false),
+                s => return Err(erreur!("spécialisation inconnue {s} pour {ty}")),
+            };
+            v.push(Param::Execution { ty, div16 });
+        }
+    }
+    Ok(v)
 }
 
 pub struct Variante {
@@ -42,12 +87,9 @@ pub struct Variante {
     fonction: sys::CUfunction,
     pub num_warps: u32,
     pub shared: u32,
-    /// noms des paramètres dans l'ordre de la signature, et leur type Triton
-    signature: Vec<(String, String)>,
-    /// indices de la signature fixés à la compilation (constexpr déclarés ou entiers spécialisés)
-    constexprs: HashMap<usize, serde_json::Value>,
-    div16: BTreeSet<usize>,
-    /// arguments de brouillon ajoutés en fin par Triton (global_scratch, profile_scratch)
+    noms: Vec<String>,
+    params: Vec<Param>,
+    /// arguments de brouillon ajoutés en fin par Triton (global_scratch, profile_scratch), passés nuls
     brouillons: usize,
 }
 
@@ -59,21 +101,6 @@ unsafe impl Sync for Variante {}
 pub struct NoyauTriton {
     pub nom: String,
     pub variantes: Vec<Variante>,
-}
-
-fn indices_divisibilite(attrs: &str) -> BTreeSet<usize> {
-    // forme `{(0,): [['tt.divisibility', 16]], (7,): [['tt.divisibility', 16]], ...}`
-    let mut s = BTreeSet::new();
-    for morceau in attrs.split('(').skip(1) {
-        if let Some((idx, reste)) = morceau.split_once(",)") {
-            if reste.contains("tt.divisibility") && reste.split(']').next().is_some_and(|r| r.contains("16")) {
-                if let Ok(i) = idx.trim().parse::<usize>() {
-                    s.insert(i);
-                }
-            }
-        }
-    }
-    s
 }
 
 impl NoyauTriton {
@@ -90,42 +117,29 @@ impl NoyauTriton {
             let hash = v["hash"].as_str().unwrap_or_default().to_string();
             let cubin = std::fs::read(dossier.join("triton").join(format!("{hash}.cubin")))
                 .map_err(|e| erreur!("cubin {hash} : {e}"))?;
-            let signature: Vec<(String, String)> = v["signature"]
+            let noms: Vec<String> = v["signature"]
                 .as_object()
                 .ok_or_else(|| erreur!("{hash} : signature absente"))?
-                .iter()
-                .map(|(k, t)| (k.clone(), t.as_str().unwrap_or_default().to_string()))
+                .keys()
+                .cloned()
                 .collect();
-            let constexprs: HashMap<usize, serde_json::Value> = v["constexprs"]
-                .as_object()
-                .map(|o| {
-                    o.iter()
-                        .filter_map(|(k, val)| {
-                            let i = k.trim_matches(|c| c == '(' || c == ')' || c == ',').trim().parse::<usize>().ok()?;
-                            Some((i, val.clone()))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let div16 = indices_divisibilite(v["attrs"].as_str().unwrap_or_default());
-            let brouillons = ["global_scratch_size", "profile_scratch_size"]
-                .iter()
-                .filter(|k| !v[**k].is_null())
-                .count();
-            let fonction_cu = charger_cubin(&cubin, &nom)?;
-            let attendus = signature.iter().enumerate().filter(|(i, (_, t))| t != "constexpr" && !constexprs.contains_key(i)).count() + brouillons;
-            let n = nombre_de_parametres(fonction_cu);
-            if n != attendus {
-                return Err(erreur!("{nom} {hash} : {n} paramètres dans le cubin, {attendus} attendus d'après la signature"));
+            let params = lire_cle(v["cle"].as_str().unwrap_or_default())?;
+            if params.len() != noms.len() {
+                return Err(erreur!("{nom} {hash} : clé de {} paramètres, signature de {}", params.len(), noms.len()));
             }
+            let fonction_cu = charger_cubin(&cubin, &nom)?;
+            let execution = params.iter().filter(|p| matches!(p, Param::Execution { .. })).count();
+            let n = nombre_de_parametres(fonction_cu);
+            let brouillons = n.checked_sub(execution).filter(|b| *b <= 2).ok_or_else(|| {
+                erreur!("{nom} {hash} : {n} paramètres dans le cubin, {execution} arguments d'exécution")
+            })?;
             variantes.push(Variante {
                 hash,
                 fonction: fonction_cu,
                 num_warps: v["num_warps"].as_u64().unwrap_or(4) as u32,
                 shared: v["shared"].as_u64().unwrap_or(0) as u32,
-                signature,
-                constexprs,
-                div16,
+                noms,
+                params,
                 brouillons,
             });
         }
@@ -135,38 +149,51 @@ impl NoyauTriton {
         Ok(Self { nom, variantes })
     }
 
-    /// Lance la variante dont les constexpr et la divisibilité correspondent exactement à `args`
-    /// (nom de paramètre → valeur ; `ct` = valeur attendue des constexpr nommés).
+    /// Lance l'unique variante compatible : chaque constexpr égal à `constantes` (ou, pour un paramètre absent
+    /// de `constantes`, à la valeur entière de `args` — cas des entiers spécialisés à 1), chaque argument
+    /// d'exécution de la même divisibilité par 16 qu'à la compilation.
     pub fn lancer(&self, flux: sys::CUstream, grille: (u32, u32, u32), args: &HashMap<&str, Arg>,
                   constantes: &HashMap<&str, i64>) -> Resultat<&str> {
-        let mut choix = None;
-        'v: for v in &self.variantes {
-            for (i, (nom, t)) in v.signature.iter().enumerate() {
-                if t == "constexpr" {
-                    if let Some(&c) = constantes.get(nom.as_str()) {
-                        if v.constexprs.get(&i).and_then(|x| x.as_i64()) != Some(c) {
-                            continue 'v;
+        let compatible = |v: &Variante| -> Resultat<bool> {
+            for (nom, p) in v.noms.iter().zip(&v.params) {
+                match p {
+                    Param::Constante(c) => {
+                        let attendu = match constantes.get(nom.as_str()) {
+                            Some(&x) => Some(x),
+                            None => args.get(nom.as_str()).and_then(Arg::entier),
+                        };
+                        if attendu != Some(*c) {
+                            return Ok(false);
                         }
                     }
-                    continue;
-                }
-                let a = args.get(nom.as_str()).ok_or_else(|| erreur!("{} : argument {nom} manquant", self.nom))?;
-                if v.constexprs.contains_key(&i) != a.vaut_un() || v.div16.contains(&i) != a.divisible_16() {
-                    continue 'v;
+                    Param::Execution { div16, .. } => {
+                        let a = args.get(nom.as_str()).ok_or_else(|| erreur!("{} : argument {nom} manquant", self.nom))?;
+                        if let Some(d) = div16 {
+                            if *d != a.divisible_16() {
+                                return Ok(false);
+                            }
+                        }
+                    }
                 }
             }
-            choix = Some(v);
-            break;
+            Ok(true)
+        };
+        let mut choix = None;
+        for v in &self.variantes {
+            if compatible(v)? {
+                if choix.is_some() {
+                    return Err(erreur!("{} : deux variantes compatibles, choix ambigu", self.nom));
+                }
+                choix = Some(v);
+            }
         }
         let v = choix.ok_or_else(|| erreur!("{} : aucune variante compilée ne correspond à ces arguments", self.nom))?;
         let mut valeurs: Vec<[u8; 8]> = Vec::new();
-        for (i, (nom, t)) in v.signature.iter().enumerate() {
-            if t == "constexpr" || v.constexprs.contains_key(&i) {
-                continue;
-            }
+        for (nom, p) in v.noms.iter().zip(&v.params) {
+            let Param::Execution { ty, .. } = p else { continue };
             let mut b = [0u8; 8];
-            match (args[nom.as_str()], t.as_str()) {
-                (Arg::Ptr(p), t) if t.starts_with('*') => b.copy_from_slice(&p.to_le_bytes()),
+            match (args[nom.as_str()], ty.as_str()) {
+                (Arg::Ptr(x), t) if t.starts_with('*') => b.copy_from_slice(&x.to_le_bytes()),
                 (Arg::I32(x), "i32") => b[..4].copy_from_slice(&x.to_le_bytes()),
                 (Arg::I64(x), "i64") => b.copy_from_slice(&x.to_le_bytes()),
                 (Arg::F32(x), "fp32") => b[..4].copy_from_slice(&x.to_le_bytes()),
@@ -221,12 +248,16 @@ fn nombre_de_parametres(f: sys::CUfunction) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::indices_divisibilite;
+    use super::{lire_cle, Param};
 
     #[test]
-    fn divisibilite_lue_dans_les_attributs() {
-        let a = "{(0,): [['tt.divisibility', 16]], (3,): [['tt.divisibility', 16]], (12,): [['tt.divisibility', 16]]}";
-        assert_eq!(indices_divisibilite(a).into_iter().collect::<Vec<_>>(), vec![0, 3, 12]);
-        assert!(indices_divisibilite("{}").is_empty());
+    fn cle_de_cache_lue() {
+        let c = "[('*bf16', 'D'), ('i32', ''), ('fp32', None), ('constexpr', 1), ('constexpr', 16), ('constexpr', True)]{'num_warps': 8}";
+        let p = lire_cle(c).unwrap();
+        assert_eq!(p[0], Param::Execution { ty: "*bf16".into(), div16: Some(true) });
+        assert_eq!(p[1], Param::Execution { ty: "i32".into(), div16: Some(false) });
+        assert_eq!(p[2], Param::Execution { ty: "fp32".into(), div16: None });
+        assert_eq!(&p[3..], &[Param::Constante(1), Param::Constante(16), Param::Constante(1)]);
+        assert!(lire_cle("{}").is_err());
     }
 }

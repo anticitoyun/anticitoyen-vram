@@ -319,7 +319,7 @@ impl Moteur {
             ]);
             let constantes: HashMap<&str, i64> = HashMap::from([
                 ("NREP", (hq / hkv) as i64), ("D", d as i64), ("BN", 64), ("PAGE_C", BLOC as i64),
-                ("NREP_T", NREP_TUILE as i64), ("CT", ct as i64),
+                ("NREP_T", NREP_TUILE as i64), ("CT", ct as i64), ("DEROULE", 1),
             ]);
             let h = self.attention.lancer(s.cu_stream(), (1, hkv, c), &args, &constantes)?.to_string();
             *self.variantes_lancees.entry(h).or_default() += 1;
