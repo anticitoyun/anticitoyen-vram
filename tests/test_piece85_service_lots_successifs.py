@@ -40,3 +40,12 @@ def test_plafond_max_graphs_compte_et_nomme_le_repli(capsys):
     assert gr.replis_eager == 2                  # chaque pas refusé compte
     assert any("MAX_GRAPHS" in r for r in gr._raisons_eager_vues)
     assert capsys.readouterr().out.count("repli eager") == 1   # nommé une fois
+
+
+def test_defaut_couvre_les_cles_denses_d_un_service_a_lots_successifs():
+    """b = 1..12 et contexte jusqu'à 2 304 : toutes les clés (godet b, nblk) denses
+    tiennent sous le plafond par défaut — à 16, elles n'y tenaient pas (30)."""
+    from acvram.memory.kvcache import BLOCK_SIZE, bucket_blocks
+    cles = {(G.godet_lot(b), bucket_blocks(n)) for b in range(1, 13)
+            for n in range(1, (2304 + BLOCK_SIZE - 1) // BLOCK_SIZE + 1)}
+    assert len(cles) == 30 and len(cles) <= G.MAX_GRAPHS
