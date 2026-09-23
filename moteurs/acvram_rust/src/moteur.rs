@@ -9,6 +9,7 @@ use std::sync::Arc;
 use cudarc::driver::{CudaContext, CudaFunction, CudaSlice, CudaStream, DevicePtr};
 use safetensors::SafeTensors;
 
+use crate::argmax::Argmax;
 use crate::chargement::Chargeur;
 use crate::decodage::{nblk_du_pas, tranches, Couche, GateUp, Lineaire, Qkv};
 use crate::lanceurs::{self as l, cles, Ptr, NUL};
@@ -62,6 +63,7 @@ struct Tampons {
     lens: Ptr,
     pos: Ptr,
     slot: Ptr,
+    jeton: Ptr,
 }
 
 pub struct Moteur {
@@ -73,6 +75,7 @@ pub struct Moteur {
     flux: Arc<CudaStream>,
     f: Fonctions,
     attention: NoyauTriton,
+    argmax_carte: Argmax,
     couches: Vec<Couche>,
     embed: Ptr,
     norme_finale: Ptr,
@@ -135,6 +138,7 @@ impl Moteur {
         };
         ctx.bind_to_thread().map_err(|e| erreur!("{e:?}"))?;
         let attention = NoyauTriton::charger(vidage, "_partiel_reduit_kernel")?;
+        let argmax_carte = Argmax::charger(&ctx)?;
         let sms = ctx
             .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
             .map_err(|e| erreur!("{e:?}"))? as u32;
@@ -195,6 +199,7 @@ impl Moteur {
             lens: zeros(&flux, &mut tenus, 8)?,
             pos: zeros(&flux, &mut tenus, 8)?,
             slot: zeros(&flux, &mut tenus, 8)?,
+            jeton: zeros(&flux, &mut tenus, 8)?,
         };
         tenus.append(&mut ch.tenus);
         let octets_carte = tenus.iter().map(|s| s.len()).sum::<usize>();
@@ -202,7 +207,7 @@ impl Moteur {
         drop(ch);
         flux.synchronize().map_err(|e| erreur!("{e:?}"))?;
         Ok(Self {
-            manifeste, tokeniseur, noyaux, dossier: dossier.to_path_buf(), ctx, flux, f, attention, couches, embed,
+            manifeste, tokeniseur, noyaux, dossier: dossier.to_path_buf(), ctx, flux, f, attention, argmax_carte, couches, embed,
             norme_finale, tete, cos, sin, rope_d, kv, t, sms, blocs, _tenus: tenus, octets_carte, empreintes,
             variantes_lancees: HashMap::new(),
             journal_logits: None,
@@ -282,8 +287,31 @@ impl Moteur {
 
     /// Un pas : le jeton `jeton` à la position `p` ; rend l'argmax des logits.
     pub fn pas(&mut self, jeton: u32, p: u32) -> Resultat<u32> {
-        let logits = self.pas_logits(jeton, p)?;
-        argmax(&logits).map(|i| i as u32).ok_or_else(|| erreur!("logits vides"))
+        if self.journal_logits.is_some() {
+            // porte au bit : logits à l'hôte (journal), ET l'argmax de la carte vérifié contre celui de l'hôte
+            let logits = self.pas_logits(jeton, p)?;
+            let hote = argmax(&logits).ok_or_else(|| erreur!("logits vides"))? as u32;
+            let carte = self.argmax_sur_carte()?;
+            if hote != carte {
+                return Err(erreur!("argmax carte {carte} ≠ hôte {hote} à la position {p}"));
+            }
+            return Ok(hote);
+        }
+        self.calculer(jeton, p)?;
+        self.argmax_sur_carte()
+    }
+
+    /// Argmax des logits du dernier pas sur la carte ; 4 octets reviennent (copie synchrone).
+    fn argmax_sur_carte(&self) -> Resultat<u32> {
+        let v = self.manifeste.model.vocab_size.min(self.tete.m() as usize) as u32;
+        self.argmax_carte.lancer(&self.flux, self.t.logits, v, self.t.jeton)?;
+        let mut j = [0i32; 1];
+        // SAFETY : copie synchrone de l'indice (int32) écrit par le noyau, sur le flux par défaut.
+        let r = unsafe { cudarc::driver::sys::cuMemcpyDtoH_v2(j.as_mut_ptr() as *mut _, self.t.jeton, 4) };
+        if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS || j[0] < 0 {
+            return Err(erreur!("argmax carte : {r:?} indice {}", j[0]));
+        }
+        Ok(j[0] as u32)
     }
 
     /// Préfill v1 (scellé `revue/poste5-rust-prefill-kl-scelle-24-09.md`) : les jetons de l'invite passent un par
@@ -304,6 +332,29 @@ impl Moteur {
 
     /// Un pas : logits fp32 du vocabulaire (copiés vers l'hôte).
     pub fn pas_logits(&mut self, jeton: u32, p: u32) -> Resultat<Vec<f32>> {
+        self.calculer(jeton, p)?;
+        let s = self.flux.clone();
+        let v = self.manifeste.model.vocab_size;
+        let mut logits = vec![0f32; self.tete.m() as usize];
+        s.synchronize().map_err(|e| erreur!("{e:?}"))?;
+        // SAFETY : tampon de logits du moteur, taille m·4 octets.
+        let r = unsafe {
+            cudarc::driver::sys::cuMemcpyDtoH_v2(logits.as_mut_ptr() as *mut _, self.t.logits, logits.len() * 4)
+        };
+        if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+            return Err(erreur!("logits vers l'hôte : {r:?}"));
+        }
+        logits.truncate(v.min(logits.len()));
+        if let Some(j) = self.journal_logits.as_mut() {
+            use sha2::{Digest, Sha256};
+            let octets: Vec<u8> = logits.iter().flat_map(|x| x.to_le_bytes()).collect();
+            j.push(format!("{:x}", Sha256::digest(&octets)));
+        }
+        Ok(logits)
+    }
+
+    /// Les lancements d'un pas, jusqu'aux logits fp32 dans leur tampon (aucune synchronisation).
+    fn calculer(&mut self, jeton: u32, p: u32) -> Resultat<()> {
         let spec = &self.manifeste.model;
         let (hsz, hq, hkv, d) = (spec.hidden_size as u32, spec.num_attention_heads as u32,
                                  spec.num_key_value_heads as u32, spec.head_dim as u32);
@@ -389,23 +440,7 @@ impl Moteur {
         }
         l::rmsnorm(&self.f.rmsnorm, &s, t.delta, self.norme_finale, t.h, t.x[xi], t.x[1 - xi], 1.0, hsz, eps)?;
         self.gemv(&self.tete, t.h, t.logits, true)?;
-        let v = spec.vocab_size;
-        let mut logits = vec![0f32; self.tete.m() as usize];
-        s.synchronize().map_err(|e| erreur!("{e:?}"))?;
-        // SAFETY : tampon de logits du moteur, taille m·4 octets.
-        let r = unsafe {
-            cudarc::driver::sys::cuMemcpyDtoH_v2(logits.as_mut_ptr() as *mut _, t.logits, logits.len() * 4)
-        };
-        if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-            return Err(erreur!("logits vers l'hôte : {r:?}"));
-        }
-        logits.truncate(v.min(logits.len()));
-        if let Some(j) = self.journal_logits.as_mut() {
-            use sha2::{Digest, Sha256};
-            let octets: Vec<u8> = logits.iter().flat_map(|x| x.to_le_bytes()).collect();
-            j.push(format!("{:x}", Sha256::digest(&octets)));
-        }
-        Ok(logits)
+        Ok(())
     }
 
     /// Porte de l'étape 1 (option A) : KV de l'invite et premier jeton du Python, puis décodage glouton.
@@ -424,14 +459,38 @@ impl Moteur {
 
     /// Génération gloutonne complète : préfill v1 puis décodage ; rend les jetons générés, EOS compris.
     pub fn generer(&mut self, ids: &[u32], max: usize) -> Resultat<Vec<u32>> {
-        let logits = self.prefill(ids)?;
-        let mut jeton = argmax(&logits).ok_or_else(|| erreur!("logits vides"))? as u32;
-        let mut sortie = vec![jeton];
-        while sortie.len() < max && !self.est_fin(jeton) {
-            jeton = self.pas(jeton, (ids.len() + sortie.len() - 1) as u32)?;
-            sortie.push(jeton);
-        }
+        let mut sortie = Vec::new();
+        self.generer_flux(ids, max, false, |j| {
+            sortie.push(j);
+            true
+        })?;
         Ok(sortie)
+    }
+
+    /// Génération gloutonne en flux : `rappel(jeton)` à chaque jeton (false = arrêt demandé par le client).
+    /// Chemin de service : aucun logit ne revient à l'hôte (préfill sans copie, argmax sur la carte).
+    /// `ignore_eos` : l'EOS ne termine pas (sémantique du banc, `banc-llamacpp-16-09.py`).
+    pub fn generer_flux(&mut self, ids: &[u32], max: usize, ignore_eos: bool,
+                        mut rappel: impl FnMut(u32) -> bool) -> Resultat<usize> {
+        if ids.is_empty() || max == 0 {
+            return Ok(0);
+        }
+        for (p, &id) in ids.iter().enumerate() {
+            self.calculer(id, p as u32).map_err(|e| erreur!("préfill position {p} : {e}"))?;
+        }
+        let mut jeton = self.argmax_sur_carte()?;
+        let mut n = 1;
+        if !rappel(jeton) {
+            return Ok(n);
+        }
+        while n < max && (ignore_eos || !self.est_fin(jeton)) {
+            jeton = self.pas(jeton, (ids.len() + n - 1) as u32)?;
+            n += 1;
+            if !rappel(jeton) {
+                break;
+            }
+        }
+        Ok(n)
     }
 
     pub fn tenseurs_carte(&self) -> usize {
