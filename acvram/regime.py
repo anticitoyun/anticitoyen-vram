@@ -253,6 +253,9 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MLA_LATENT_FP8", "0", ("acvram.engine.mla", "_MLA_LATENT_FP8"), "0"),
     Variable("KV_LM4_SEUL", "", None, None, "diagnostic lm4 (kvcache.write) : lm4 sur k ou v seulement, int8 ailleurs"),
     Variable("KV_LM4_PUITS", "", None, None, "diagnostic lm4 : positions < N gardées int8 ; 0 = contrôle (lm4 partout par le diagnostic)"),
+    Variable("MTP_ETAT", "brut", None, None,
+             "pièce 105 : état caché lu par la tête MTP — brut (avant la norme finale, DeepSeek, défaut) | norme (après) | "
+             "auto (selon la convention de la tête : qwen35 → norme, deepseek → brut)"),
     Variable("KV_FORMAT", "", ("acvram.memory.tiering", "_KV_FORMAT"), None,
              "cache KV des paliers carte : vide = capacités (int8) | k8v4 (pièce 104 : K int8 par jeton, V int4 "
              "par groupe de 32 canaux, −22 % d'octets, opt-in jugé KL 5/5 ≤ 0,74 et ppl-decode-kv 8 k ≤ +0,30 %) "

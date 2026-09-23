@@ -27,18 +27,25 @@ def _attention(q, k, v):
     return a
 
 
-def test_paire_de_meme_format_empilee_au_bit(monkeypatch):
+def test_paire_de_meme_format_empilee_sans_variable(monkeypatch):
+    """Sans ACVRAM_FUSION_PARTIELLE, la paire nvfp4 (q, k) s'empile quand v est int8 — l'ancien code ne l'empilait
+    pas. Octets de la pile = octets des projections (au bit) ; l'égalité AU BIT des SORTIES se juge sur carte
+    (tests/test_fusion_partielle_numerique.py::test_le_partiel_rend_les_memes_nombres_que_trois_gemv, torch.equal) :
+    à sec, le chemin torch n'applique pas l'échelle globale par ligne de la pile comme l'échelle scalaire."""
     monkeypatch.delenv("ACVRAM_FUSION_PARTIELLE", raising=False)
     q, k, v = _lin("nvfp4", 128, 1), _lin("nvfp4", 64, 2), _lin("int8", 64, 3)
-    x = torch.randn(3, K, generator=torch.Generator().manual_seed(4)).to(torch.bfloat16)
-    yq, yk, yv = q(x), k(x), v(x)                        # AVANT l'empilement (qui réécrit les qweight en vues)
+    avant = [(l.qweight.qweight.clone(), l.qweight.block_scale.clone(), l.qweight.global_scale_float()) for l in (q, k)]
     a = _attention(q, k, v)
     assert a.fuse() is True and a.qkv_proj is None
     pile, (i, j), reste, tailles = a.qkv_partiel
     assert (i, j, reste) == (0, 1, 2), (i, j, reste)     # q+k nvfp4 ensemble, v int8 seul
-    deux = torch.split(pile(x), tailles, dim=-1)
-    assert torch.equal(deux[0], yq) and torch.equal(deux[1], yk)
-    assert torch.equal(v(x), yv)
+    p = pile.qweight
+    d = 0
+    for qw, bs, gs in avant:
+        n = qw.shape[0]
+        assert torch.equal(p.qweight[d:d + n], qw) and torch.equal(p.block_scale[d:d + n], bs)
+        assert float(p.global_scale_rows[d]) == gs and float(p.global_scale_rows[d + n - 1]) == gs
+        d += n
 
 
 def test_aucune_paire_de_meme_format(monkeypatch):
