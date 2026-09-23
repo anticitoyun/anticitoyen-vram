@@ -793,6 +793,14 @@ def cmd_convert(args: argparse.Namespace) -> int:
     return 0
 
 
+def repli_speculatif(model) -> tuple[str, "str | None"]:
+    """``--speculative auto`` : (mode, repli). ``mtp`` si le modèle porte une tête, sinon ``ngram`` avec le repli
+    nommé ``mtp absent : <raison>`` (raison posée par le chargeur, `model.mtp_raison`)."""
+    if getattr(model, "mtp", None) is not None:
+        return "mtp", None
+    return "ngram", "mtp absent : " + (getattr(model, "mtp_raison", "") or "raison inconnue")
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     import torch
     import uvicorn
@@ -811,13 +819,15 @@ def cmd_serve(args: argparse.Namespace) -> int:
                         device_override=args.device)
     tokenizer = load_tokenizer(args.model)
     speculator = None
+    repli = None
     if args.speculative == "auto":
-        # La tete du modele si elle existe, le n-gramme sinon.
-        args.speculative = "mtp" if getattr(loaded.model, "mtp", None) is not None \
-            else "ngram"
+        # La tete du modele si elle existe, le n-gramme sinon — repli NOMMÉ (pièce 105 : les têtes MTP de
+        # Qwen3.8 étaient converties mais jamais chargées, et rien ne le disait).
+        args.speculative, repli = repli_speculatif(loaded.model)
     if args.speculative == "ngram":
         from .engine.speculative import NGramProposer
         speculator = NGramProposer()
+        speculator.repli = repli
     elif args.speculative == "draft":
         if not args.draft_model:
             print(red("--speculative draft exige --draft-model"))

@@ -63,13 +63,43 @@ class MTPHead(nn.Module):
         return self.final_norm(x)
 
 
-def cles_mtp(manifest: dict) -> list[str]:
-    """Indices des têtes MTP présentes dans un manifeste, dans l'ordre."""
+def cles_mtp(manifest: dict) -> list[int]:
+    """Indices des têtes MTP présentes dans un manifeste, dans l'ordre. Deux conventions :
+    ``model.mtp.<n>.`` (GGUF renommé par quant/gguf.py, DeepSeek) et, pièce 105, celle des checkpoints HF de la
+    famille Qwen3.5 (``mtp.layers.<n>.`` + ``mtp.fc``/``mtp.norm``/``mtp.pre_fc_norm_*`` partagés) — sans elle, les
+    15 tenseurs MTP de Qwen3.8-27B étaient convertis mais jamais chargés, et ``auto`` retombait sur n-gram."""
     vus = set()
     for nom in manifest.get("tensors", ()):
-        if nom.startswith("model.mtp."):
+        if nom.startswith("model.mtp.") or nom.startswith("mtp.layers."):
             try:
                 vus.add(int(nom.split(".")[2]))
             except (IndexError, ValueError):
                 continue
     return sorted(vus)
+
+
+# Normes « zéro-centrées » (x·(1 + w) dans la référence Qwen3.5) hors couche : la conversion (quant/convert.py,
+# _NORMES_ZERO_CENTREES, par suffixe) décale celles de mtp.layers.<n>.* mais PAS ces trois-là. Décalées ici, au
+# chargement, sauf si un manifeste futur déclare les avoir décalées (`mtp_normes_decalees`).
+NORMES_QWEN35_A_DECALER = ("mtp.norm.weight", "mtp.pre_fc_norm_embedding.weight", "mtp.pre_fc_norm_hidden.weight")
+
+
+def noms_mtp(manifest: dict, n: int) -> dict:
+    """Noms des tenseurs de la tête ``n`` selon la convention du manifeste : ``bloc`` (préfixe de la couche de
+    transformeur), ``eh`` (projection [plongement ; état caché]), ``enorm``, ``hnorm``, ``fin`` (candidats de la
+    norme finale, dans l'ordre), ``convention`` (deepseek | qwen35)."""
+    p = f"model.mtp.{n}."
+    if any(k.startswith(p) for k in manifest.get("tensors", ())):
+        return {"convention": "deepseek", "bloc": p, "eh": p + "eh_proj.weight", "enorm": p + "enorm.weight",
+                "hnorm": p + "hnorm.weight", "fin": (p + "shared_head_norm.weight", p + "norm.weight")}
+    return {"convention": "qwen35", "bloc": f"mtp.layers.{n}.", "eh": "mtp.fc.weight",
+            "enorm": "mtp.pre_fc_norm_embedding.weight", "hnorm": "mtp.pre_fc_norm_hidden.weight",
+            "fin": ("mtp.norm.weight",)}
+
+
+def norme_mtp(nom: str, t: torch.Tensor, convention: str, manifest: dict) -> torch.Tensor:
+    """Poids d'une norme MTP prêt pour notre RMSNorm (x·w) : +1 sur les trois normes Qwen3.5 hors couche
+    (voir NORMES_QWEN35_A_DECALER), inchangé ailleurs."""
+    if convention == "qwen35" and nom in NORMES_QWEN35_A_DECALER and not manifest.get("mtp_normes_decalees"):
+        return (t.to(torch.float32) + 1.0).to(t.dtype)
+    return t
