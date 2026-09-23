@@ -43,11 +43,16 @@ if JEU == "E":
     readme = tok.encode(open(os.path.join(os.getcwd(), "README.md"), encoding="utf-8").read() * 6)
     assert len(regles) > 30000 and len(readme) > 6000, (len(regles), len(readme))
     ETRANGER = ["acvram-memoire/REGLES.md + MECANISMES.md", "README.md x6"]
-else:
+elif JEU == "F":
     F_FICHIERS = ("REPRISE.md", "CLAUDE.md", "acvram-memoire/ANNUAIRE.md", "acvram-memoire/revue/organisation-22-09.md")
     corpus_f = tok.encode("".join(open(os.path.join(os.getcwd(), f), encoding="utf-8").read() for f in F_FICHIERS))
     assert len(corpus_f) > 14000, len(corpus_f)
     ETRANGER = list(F_FICHIERS)
+else:                                            # G (107 bis) : prose française (Germinal, Gutenberg #5711), lots 7 / 3 / 9 / 12
+    G_FICHIER = os.environ.get("P100_CORPUS_G", "scratchpad/poste6-p107-23-09/prose-fr.txt")
+    corpus_g = tok.encode(open(os.path.join(os.getcwd(), G_FICHIER), encoding="utf-8").read())
+    assert len(corpus_g) > 60000, len(corpus_g)
+    ETRANGER = [G_FICHIER + " (Germinal, Gutenberg #5711)"]
 
 
 def lancer(prompts, cibles):
@@ -124,6 +129,17 @@ for i, (nom, ch) in enumerate(DUMPS):
                 "E3": [ids] + e3,
                 "E4": [ids] + e4}
         tailles = {"C1": 1, "E1": 4, "E2": 4, "E3": 8, "E4": 12}
+    elif JEU == "G":
+        base = 3000 * i
+        g2 = segments(corpus_g, base, 2, [L - 6, L - 13])
+        g3 = segments(corpus_g, base + 1000, 8, [L - 2, L - 5, L - 8, L - 11, L - 14, L - 17, L - 20, L - 23])
+        g4 = segments(corpus_g, base + 2000, 11, [L - 1, L - 4, L - 7, L - 9, L - 12, L - 15, L - 18, L - 21, L - 24, L - 26, L - 28])
+        comp = {"C1": [ids],
+                "G1": [ids, ids[:L - 3], ids[:L - 8], ids[:L - 12], ids[:L - 16], ids[:L - 20], ids[:L - 25]],
+                "G2": [ids] + g2,
+                "G3": [ids] + g3,
+                "G4": [ids] + g4}
+        tailles = {"C1": 1, "G1": 7, "G2": 3, "G3": 9, "G4": 12}
     else:
         base = 500 * i
         f2 = segments(corpus_f, base, 5, [L - 3, L - 7, L - 10, L - 14, L - 18])

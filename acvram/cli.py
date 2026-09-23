@@ -886,6 +886,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
     print(f"  speculation   : {args.speculative}"
           f"{'' if args.speculative == 'none' else f', k={args.spec_k}, '
                                                    f'lot_max={engine._garde_spec.lot_max}'}")
+    if repli:
+        # pièce 117 : le repli de `--speculative auto` était posé sur
+        # `speculator.repli` (pièce 105) mais jamais imprimé ici — seule la
+        # ligne de régime (`_speculation_texte`, engine/runner.py) le
+        # portait. Même texte, jamais une seconde formulation du repli.
+        from .engine.runner import _speculation_texte
+        print(f" {_speculation_texte(engine.regime()['speculation']).strip()}")
     if tokenizer:
         print(f"  gabarit chat  : {tokenizer.template_source}")
     else:
@@ -1249,8 +1256,16 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--speculative", choices=["none", "ngram", "draft", "mtp", "auto"],
                     default="ngram",
                     help="ngram ne coute rien et paie quand la sortie recopie "
-                         "l'entree ; draft exige --draft-model. N'importe "
-                         "quel propositeur reste soumis a la garde de lot "
+                         "l'entree ; draft exige --draft-model ; mtp utilise "
+                         "la tete nextn du modele charge si elle porte une "
+                         "convention reconnue (Qwen3.5 et suivants, DeepSeek "
+                         "-- voir noms_mtp dans engine/mtp.py), non rentable "
+                         "en l'etat (docs/ARCHITECTURE.md) ; auto choisit mtp "
+                         "si la tete est reconnue, sinon retombe sur ngram "
+                         "avec un repli NOMME pose sur speculator.repli "
+                         "(repli_speculatif, cli.py) -- rien ne l'imprime "
+                         "encore au demarrage. N'importe quel propositeur "
+                         "reste soumis a la garde de lot "
                          "ACVRAM_SPECULATION_LOT_MAX (defaut 2) : au-dela, "
                          "la carte est deja pleine a largeur 1 par sequence "
                          "et verifier plus large coute plus qu'il ne rend "
