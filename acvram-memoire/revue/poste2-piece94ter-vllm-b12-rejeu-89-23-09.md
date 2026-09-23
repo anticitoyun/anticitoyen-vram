@@ -1,4 +1,4 @@
-# Pièce 96 — rejeu vLLM b=12 (pièce 89) aux nouveaux défauts (poste2, 23/09, ordre chef)
+# Pièce 94 ter — rejeu vLLM b=12 (pièce 89) aux nouveaux défauts (poste2, 23/09, ordre chef)
 
 instrument : `scratchpad/poste2-piece96-vllm-rejeu-23-09/bloc.sh 12 ABBA`, copie exacte du script de
   la 89 (acvram serve défaut / vllm serve --attention-backend TRITON_ATTN, -lgc 2700 explicite autour

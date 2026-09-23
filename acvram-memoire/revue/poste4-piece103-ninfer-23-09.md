@@ -68,8 +68,28 @@ forme différente de NInfer D=256 — comparaison à l'élément, pas à la lign
 * Sur 4 têtes KV × 48 couches : 51 456 → 38 592 o/jeton, **gain ≈ 12,6 Kio/jeton (25 %) de trafic KV en écriture
   ET lecture** — c'est V (passage int8 → nvfp4) qui porte tout le gain, K est déjà proche de l'équivalent FP8.
 
+## 5. Question duck.ai — coût de précision V int4 (group=32, échelle half) vs V int8, K int8 inchangé
+
+Réponses complètes : `~/Bureau/Vibe/duck-reponses-23-09.md` § Pièce 103. Trois modèles en désaccord marqué :
+**Luna** 1-3 % typique (0-1 % favorable, 3-5 % si couche sensible, cite KIVI arXiv 2402.02750 qui valide notre
+choix K-par-canal / V-par-jeton) ; **gpt-oss** 3-7 % (≈4 % en pratique), répartit la cause granularité≈50 % /
+clipping échelle fp16≈30 % / accumulation le reste ; **Gemma** < 1 %, argument que l'accumulation sur V est un
+moyennage (pas de divergence exponentielle comme le softmax des scores), donc stable à 8192 jetons.
+
+**Recoupement avec le § 5 de la pièce 104 de poste5** (scellé géo(k8v4/int8) + 2 SE ≤ +0,30 %, prédiction propre
+de poste5 +0,10 à +0,25 %) : **aucun des trois modèles ne s'aligne sur ce seuil**. Luna et gpt-oss, s'ils ont
+raison, réfutent le scellé avant toute mesure carte ; seul Gemma (< 1 %) est cohérent avec l'ordre de grandeur de
+poste5, et son mécanisme (moyennage sur V) corrobore son raisonnement propre (« V par jeton portait un tiers du
+coût int8, l'int4 par groupe en rajoute ≈2× sur cette moitié »). Aucun modèle ne connaissait le détail exact de
+notre implémentation (bloc 16 pour K, groupe 32 pour V, pas de fenêtre résiduelle FP16) — le désaccord reflète de
+la littérature générale, pas notre géométrie précise. **La mesure de la pièce 104 (KL b=1 5/5, PPL 3×12 fenêtres
+à 8192+512) tranche, le vote entre modèles ne tranche pas** : si la PPL mesurée dépasse +0,30 %, ça confirme
+Luna/gpt-oss et réfute le scellé tel quel (v1b min/max ou alternative B, comme prévu par poste5) ; si elle reste
+sous ce seuil, ça confirme Gemma et le mécanisme de moyennage.
+
 ## Note de méthode
 
 Aucune mesure carte, aucun code écrit. Les deux fusions (1) et (4) sont des leviers réels et chiffrés ; (2) est
 déjà testée et écartée chez nous ; (3) ne s'applique pas à Coder sans adaptation de géométrie — nommé, non
-chiffré.
+chiffré. La question duck.ai (§5) est un recoupement de littérature, pas une preuve — le scellé de la pièce 104
+reste seul juge.
