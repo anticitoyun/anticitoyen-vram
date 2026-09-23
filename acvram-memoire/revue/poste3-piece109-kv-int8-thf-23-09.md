@@ -70,3 +70,29 @@ atteint le tour de file).
    seuils à écrire avant la mesure, en fin de file carte.
 4. Tant que 1-3 ne sont pas faits : le correctif reste un candidat lu et partiellement
    prouvé, PAS un changement de défaut servi.
+
+## diag2.py joué (23/09 22 h 43, reprise, ordre chef) — allocateur écarté, hypothèse changée
+
+- instrument : `scratchpad/poste3-thf-23-09/diag2.py`, sur carte, `outils/carte.sh` tenu
+- commit : `7000a101` (worktree `poste3`, fusion `a6826809` avant prise)
+- régime : plein (compteur remis à zéro, REGLES § 1)
+- scellé : aucun avant cette prise — étape de diagnostic, pas de mesure publiée
+- mesuré : boucle des 5 graines rejouée deux fois de suite (même run) : rejeu identique
+  déterministe intra-process (« deux écritures identiques : True ») ; MAIS l'écart change
+  de graine d'un run à l'autre — le test unitaire d'hier situait l'écart en graine 103, ce
+  rejeu le situe en graines 101 et 104 (103 est ici sans écart). Sens de l'erreur non
+  systématique : cas 1 (t=2,h=0,d=103) `x/sc=-63,515…` → arrondi correct = -64, **obs=-63
+  (faux)** ; cas 2 (t=14,h=0,d=108) `x/sc=63,517…` → arrondi correct = 64, **obs=64
+  (correct), ref=63 (faux, côté Python/_quantize)**. Les deux cas sont à un code de la
+  frontière d'arrondi (`x/sc` à ± 0,02 de la demi-unité), jamais ailleurs.
+- verdict : PAS l'allocateur (hypothèse 1 écartée — rejeu intra-process reproductible au
+  bit, donc pas un état mémoire non initialisé qui varierait entre deux écritures
+  identiques). L'écart change d'un run à l'autre pour LA MÊME graine : ni un biais fixe du
+  noyau CUDA (`__fdiv_rn`), ni un défaut de la référence Python seuls — les deux camps se
+  trompent une fois chacun, toujours à la frontière d'arrondi. Hypothèse restante la plus
+  probable, NON vérifiée : ordre de sommation/FMA non déterministe du noyau (registre vs
+  mémoire, fusion multiply-add) selon l'état du JIT/cache entre runs — à distinguer d'un
+  bruit de seed en isolant chaque graine dans un process séparé (`subprocess`, point 2 du
+  plan déjà écrit). Le correctif de code reste posé, la sortie par défaut ne change pas
+  (test à 5 tirages toujours rouge, cause non expliquée).
+- durée : prévue 10 min, tenue ~8 min (une commande, un rejeu)
