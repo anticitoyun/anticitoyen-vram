@@ -44,3 +44,61 @@ l'ordre et je la prédis comme les autres.
   l'attention, et le levier n° 1 que j'y ai écrit tomberait.
 * **Pièce visée par la plus grosse part** : (c) → couche service (émission SSE groupée par pas, boucle moteur
   hors du fil asyncio) ; (a) → fusion de nœuds, Q(15) ; (b) → frontière ; (d) → noyau d'attention à contexte long.
+
+## Verdict — 23/09 09 h 1x (poste1)
+
+* **instrument** : `outils/gpu/mesure/hors-noyaux-p77.py` (témoin, boucle nue, compte des nœuds), `frontiere-pas.py 12 1024` (sans nsys) et `12 60` (sous nsys, **noyaux seuls**), `serve` + `banc-llamacpp-16-09.py decode` (comme la 64), `/metrics` en fin de fenêtre ; chaînes `scratchpad/poste1-p77-23-09/prise{1..5}.sh`
+* **commit** : 2fe9b7c9 ; alias **`Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c`** (celui de la 64) dans tous les bras
+* **régime** : -lgc 2700, horloge médiane sous charge 2 640-2 661 MHz dans tous les bras (servi 2 642 et 2 661, nu 2 647), bridage puissance nominal, ACVRAM_CPUS 0-15 ; compute-apps début = fin = llama-server 4627
+* **scellé** : table « Prédictions » ci-dessus, commitée avant la première prise (ce fichier, commit précédent)
+* **mesuré** :
+
+| grandeur | valeur | source |
+|---|---|---|
+| **servi**, pas moyen | **1 940,5 puis 1 995,5 t/s → 6,18 puis 6,01 ms/pas** ; `/metrics` : 60 780 jetons de décodage en 5 090 pas (11,94 par pas), **5,97 ms/pas de décodage**, 0 jeton spéculé | `banc-servi*.log`, `metrics-fin.txt` |
+| **boucle nue**, même moteur, mêmes lots | **1 836,5 · 1 837,0 (KV hôte 8 Gio) · 1 848,0 t/s → 6,49-6,53 ms/pas** ; pas de décodage seuls 6,34-6,35 ms | `nue*.json` |
+| frontiere-pas 1 024 pas, sans nsys | pas 6 335 µs (médiane) / 6 491 (moyenne) ; rejeu 6 305 / 6 275 ; trou carte 24 / 212 | `frontiere-1024.json` |
+| noyaux seuls, 60 pas sous nsys | **5,831 ms/pas** (798 lancements) ; rejeu du graphe sous nsys 6 091 µs | `familles60.json`, `frontiere-60-nsys.json` |
+| nœuds du graphe b = 12 (godet 16) | **789** = 784 noyaux + 3 memsets + 2 copies (godet 1 : 597) | `nue.json` |
+| témoin, noyaux Triton vides | **0,391 µs/nœud** (1 → 5,5 µs ; 800 → 320 µs) | `temoin.json` |
+
+* **verdict par part** :
+  * **(a) nœuds × latence : 789 × 0,391 = 0,31 ms/pas** (majorant). La lecture directe sous nsys donne 6,091 − 5,831 = **0,26**. Prédiction (a) 0,25-0,35 **tenue**. Pente prédite 0,8-1,5 µs **réfutée** : 0,39 µs, un noyau vide ne coûte presque rien au-delà de son lancement, donc le majorant est serré.
+  * **(b) frontière : 30 µs en médiane** (6 335 − 6 305), prédite 0,02-0,06, **tenue**. La moyenne (0,215) est portée par des trous rares (trou carte moyen 212 µs contre 24 en médiane).
+  * **(d) contexte long : ≥ 0,215 ms/pas** (rejeu 6 305 sans nsys à 1 024 pas, contre 6 091 sous nsys à 60 pas ; nsys gonfle le second, donc c'est un minorant). Prédit 0,10-0,20 : **dépassé, sans atteindre le seuil de réfutation de 0,30 dans ce que l'on sait borner**.
+  * **(c) couche service : NÉGATIVE, de −0,33 à −0,52 ms/pas.** Le service est **plus rapide** que la boucle moteur nue, au même commit, sur le même alias et à la même horloge, deux fois côté servi et trois fois côté nu. Prédiction 0,20-0,40 **réfutée** (< 0,10), dans le sens que je n'avais pas nommé.
+* **durée** : prévue ≤ 10 min en deux prises ; tenue **5 min 35 en cinq prises** (52 + 80 + 44 + 93 + 66 s, `carte.sh`). Les prises 3 à 5 n'étaient pas prévues : un bras raté (`functools.partial` sur `CUDAGraph`), puis deux contrôles pour départager l'anomalie de (c).
+
+## Ce que la 77 renverse
+
+1. **La prémisse « 0,842 ms/pas hors noyaux » de la 76 est fausse (erratum 76).** Elle soustrayait au pas servi de la
+   64 (6,551 ms, alias `qkvo-i8c`, contexte long, commit de 06 h) les noyaux d'**un autre alias** (`…-nvfp4`, p73) sur
+   **un contexte court**. Au même alias, au même commit, dans la même heure : pas servi **6,01** contre noyaux courts
+   **5,83**. Tout ce qui n'est pas noyau court tient dans **≤ 0,18 ms/pas**, contexte compris. Ce reste est plus petit
+   que celui de vLLM (0,477 à la 76), pas plus gros.
+2. **Notre servi du jour est à 1 940-1 995 t/s** ; la 64 donnait 1 829-1 834 ce matin (vLLM 1 970-2 028). Je ne
+   revendique **aucune** parité : ce n'est ni la même séance ni un ABBA, et mes deux bras servis s'écartent déjà de
+   2,8 % entre eux. **Il faut rejouer l'ABBA de la 64 aujourd'hui** (poste2, même chaîne) avant de rouvrir la question
+   de la porte b=12.
+3. **Anomalie d'instrument, à fort enjeu** : le même moteur, piloté hors de `serve` (`frontiere-pas`, boucle nue,
+   donc probablement `certifie-b12` et toutes nos traces « Engine direct »), rejoue le même graphe b=16 **0,35 ms/pas
+   plus lentement** que sous `serve` : rejeu à 6,31 ms, alors que `serve` décode à 5,97 ms par pas. Lignes de régime
+   identiques octet pour octet, horloge identique, KV hôte écarté (1 837 contre 1 848). Ce n'est pas le godet
+   (le Coder est dense, godet 16 des deux côtés, `graphs.py:68`). **Non expliqué.** Hypothèses, par ordre de
+   probabilité :
+   * (i) l'état du processus : moteur dans un fil sous `serve`, fil principal ailleurs ;
+   * (ii) les graphes eux-mêmes : 13 captures sous `serve` contre 8 dans la boucle nue — les lots qui se remplissent
+     par HTTP passent par d'autres godets ;
+   * (iii) la mémoire (adresses et pool des graphes).
+   Test qui départage, ≤ 3 min : nsys **noyaux seuls** sur `serve` contre la boucle nue. Si les noyaux diffèrent,
+   c'est (ii) ou (iii) ; s'ils sont égaux, c'est un trou entre nœuds, donc (i).
+
+## Plus grosse part et pièce qui la vise
+
+* Parmi (a), (b), (c) telles que posées, **la plus grosse est (a), 0,26-0,31 ms/pas**, structurelle (789 nœuds). Elle
+  relève de la fusion de nœuds (Q(15)). **Gain prédit modeste** : 0,33 µs par nœud retiré ; une fusion réaliste
+  (rope + écriture KV, normes dans leurs voisins, ≈ 100-150 nœuds) rend **0,03-0,05 ms/pas** (0,5-0,8 %). vLLM a un
+  nombre de lancements du même ordre (≈ 830 par pas à la 76), donc ce n'est pas là qu'est l'écart.
+* **Ce qui mérite la carte avant tout** : (1) l'ABBA de la 64 rejoué aujourd'hui (le vrai écart restant) ; (2) le
+  test qui départage l'anomalie (3). Si l'état de `serve` rend 0,35 ms, nos bancs « Engine direct » sous-estiment
+  le service d'environ 6 % depuis leur création, et plusieurs seuils écrits sur eux sont à relire.
