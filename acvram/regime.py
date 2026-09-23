@@ -70,6 +70,10 @@ VARIABLES: tuple[Variable, ...] = (
              "globale par colonne pour q/k/v empilés) aux godets ≥ PROJ_MARLIN_MIN_M ; M = 1 garde nvfp4_gemv | 0 témoin"),
     Variable("PROJ_MARLIN_MIN_M", "2", ("acvram.kernels", "_PROJ_MARLIN_MIN_M")),
     Variable("PROJ_MARLIN_MIN_NK", "1024", ("acvram.kernels", "_PROJ_MARLIN_MIN_NK")),
+    Variable("AWQ_TENSOR", "0", ("acvram.engine.moe", "_AWQ_TENSOR"), None,
+             "pièce 123 (24/09, opt-in, jamais posé par un lanceur) : 1 = experts à tables AWQ d'activation sur le chemin "
+             "tensor (échelle fondue dans moe_aligner_petit, xs) au lieu du repli GEMV nommé ; hors défaut : 123-quater "
+             "FAUX au critère relatif (écart S1b/i8c 1,38-1,52 > 1,25 à b=12) | 0 défaut"),
     # lues dans acvram_kernels.cu (getenv, figées au premier lancement : un
     # PROCESSUS par valeur — poste7-gemv-experts-rpw-18-09)
     Variable("GROUPED_RPW", "4", None, None,
