@@ -155,6 +155,38 @@ _verifier_promesses() {
   fi
 }
 
+# anticitoyen-vram-c7w : un `acvram serve` lance par la commande sous
+# `setsid` (sa propre session) survit au TERM/KILL de la commande — la 115
+# bis de poste2, rendue par TIMEOUT le 23/09 a 23h00, a laisse 28,5 Gio
+# occupes et fait tomber la prise suivante de poste5 en OOM. `pkill -P`
+# (PID) rate ce cas : un enfant deja reparente (mort intermediaire) ou lance
+# depuis un sous-shell n'a plus le PPID attendu au moment du signal. La
+# CHAINE, elle, ne bouge pas : `ACVRAM_CARTE_TENUE=$$` (pose plus haut,
+# exporte) est herite par TOUT descendant, setsid ou non, jusque dans son
+# `/proc/<pid>/environ` — c'est la seule marque qui survit a un
+# reparentage. A distinguer de `_verifier_promesses` : la, un processus GPU
+# INCONNU n'est jamais tue (l'humain tranche) ; ici, on ne cible QUE nos
+# propres descendants prouves par cette chaine, jamais un pid etranger.
+_reaper_setsid_orphelins() {
+  local moi=$1 journal=$2 nom=$3
+  local marque="ACVRAM_CARTE_TENUE=$moi"
+  local pids p vu
+  pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null) || return 0
+  for p in $pids; do
+    p=${p//[[:space:]]/}
+    [ -n "$p" ] && [ -r "/proc/$p/environ" ] || continue
+    vu=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -Fx "$marque") || continue
+    [ -n "$vu" ] || continue
+    printf '%s ORPHELIN %-8s %-32s mesure setsid pid %s TERM (c7w)\n' "$(date +%FT%T)" "$moi" "$nom" "$p" >> "$journal" 2>/dev/null || true
+    kill -TERM "$p" 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$p" 2>/dev/null || break; sleep 1; done
+    if kill -0 "$p" 2>/dev/null; then
+      kill -KILL "$p" 2>/dev/null
+      printf '%s ORPHELIN %-8s %-32s mesure setsid pid %s KILL (c7w)\n' "$(date +%FT%T)" "$moi" "$nom" "$p" >> "$journal" 2>/dev/null || true
+    fi
+  done
+}
+
 # DOUBLE PRISE : le verrou est deja tenu PAR NOUS, plus haut dans la meme
 # chaine. Le 10/09/2026, une campagne enveloppee de carte.sh lancait des
 # services qui prenaient carte.sh a leur tour : le bras interieur a attendu
@@ -311,7 +343,7 @@ printf '%s prise   %-8s %-32s %s\n' "$(date +%FT%T)" "$$" "$NOM" "$TYPE" >> "$JO
 # profondeur, flock devrait deja l'empecher), et une trace ANOMALIE si jamais
 # ce trap trouvait un .qui qui n'est plus le sien — pour laisser une preuve la
 # prochaine fois, au lieu d'un silence.
-trap 'p=; read -r p _ < "$INFO" 2>/dev/null; if [ "$p" = "$$" ]; then rm -f "$INFO"; printf "%s rendue  %-8s %-32s %s tenue=%ss\n" "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "$(( $(date +%s) - _pris ))" >> "$JOURNAL" 2>/dev/null || true; else printf "%s ANOMALIE %-8s %-32s %s .qui deja repris par pid %s (jxm), non efface\n" "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "${p:-?}" >> "$JOURNAL" 2>/dev/null || true; fi' EXIT
+trap '_reaper_setsid_orphelins "$$" "$JOURNAL" "$NOM"; p=; read -r p _ < "$INFO" 2>/dev/null; if [ "$p" = "$$" ]; then rm -f "$INFO"; printf "%s rendue  %-8s %-32s %s tenue=%ss\n" "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "$(( $(date +%s) - _pris ))" >> "$JOURNAL" 2>/dev/null || true; else printf "%s ANOMALIE %-8s %-32s %s .qui deja repris par pid %s (jxm), non efface\n" "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "${p:-?}" >> "$JOURNAL" 2>/dev/null || true; fi' EXIT
 AVANT=$(etat_carte)
 # `9>&-` FERME LE DESCRIPTEUR POUR LA COMMANDE SEULE. Sans lui, l'enfant en
 # herite et `flock` ne tombe que quand TOUS les descripteurs sont fermes : tuer
@@ -363,6 +395,11 @@ if [ -f "$_TIMEOUT" ]; then
     sudo -n nvidia-smi -i "${ACVRAM_CARTE:-0}" -rgc >/dev/null 2>&1 && rm -f "$_eco" \
       && echo "carte.sh : TIMEOUT — -lgc pose par la commande rendu (-rgc)" >&2
   fi
+  # c7w : reperer et achever les setsid orphelins de LA COMMANDE tuee, AVANT
+  # de journaliser TIMEOUT — "et seulement ensuite rendre" (le rendu reel se
+  # fait dans le trap EXIT plus bas, mais la memoire doit etre libre ici deja,
+  # la prise suivante peut demarrer des la sortie de ce script).
+  _reaper_setsid_orphelins "$$" "$JOURNAL" "$NOM"
   printf '%s TIMEOUT %-8s %-32s %s tenue=%ss plafond=%ss\n' "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "$(( $(date +%s) - _pris ))" "$DUREE_MAX" >> "$JOURNAL" 2>/dev/null || true
   echo "carte.sh : TIMEOUT — prise de plus de ${DUREE_MAX}s (ACVRAM_DUREE_MAX), commande tuee, code 124" >&2
   code=124
