@@ -22,6 +22,10 @@ loaded = load_model(MODELE, dtype=torch.bfloat16, max_model_len=2304, max_concur
 eng = Engine(loaded, tok, max_batch_size=1, max_model_len=2304, enable_prefix_cache=False, speculator=None,
              enable_cuda_graphs=True)
 eng.demarrer_service(strict=False, warm_max_len=2048)
+# Le pipeline recouvert reprend le jeton suivant SUR LA CARTE (échantillonneur capturé) : le forçage par le retour
+# de `_sample_only` ne l'atteindrait pas. Sans pipeline, le lot suivant se bâtit sur `seq.output_ids` (hôte) ;
+# le pas reste celui des graphes (`decode_fixed`).
+eng.pipeline_actif = False
 modele = loaded.model
 force: list = []
 _orig = Engine._sample_only
@@ -43,7 +47,11 @@ for inv in json.load(open(INVITES, encoding="utf-8")):
     seq = eng.add_request(list(ids[:1]), SamplingParams(temperature=0.0, max_tokens=L + 1, ignore_eos=True), request_id=inv["nom"])
     while not seq.finished and len(seq.output_ids) < L:
         eng.step()
-    assert list(seq.output_ids[:L - 1]) == list(ids[1:]), "forçage non tenu"
+    obtenu = list(seq.output_ids[:L - 1])
+    if obtenu != list(ids[1:]):
+        i = next((j for j, (a, b) in enumerate(zip(obtenu, ids[1:])) if a != b), min(len(obtenu), L - 1))
+        raise SystemExit(f"forçage non tenu ({inv['nom']}) : {len(obtenu)} jetons, 1re divergence {i}, "
+                         f"obtenu {obtenu[i:i + 3]} attendu {list(ids[1:])[i:i + 3]}, pipeline={eng.pipeline_actif}")
     blocs = list(seq.blocks)
     bs = modele.caches.get(0).cfg.block_size
     ib = torch.tensor([blocs[p // bs] for p in range(L)])
