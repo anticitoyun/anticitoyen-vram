@@ -272,12 +272,6 @@ WARPS_COMPACT = int(os.environ.get("ACVRAM_ATTN_WARPS_COMPACT", "8"))   # 8 : B8
 # −1,9 % sur la moyenne du lot b=12 (15,46 → 15,17 µs/couche), −8,7 % à b=1 ctx 2 048. Témoin : =0.
 REDUC_DEROULEE = os.environ.get("ACVRAM_ATTN_REDUC_DEROULEE", "1") == "1"
 assert WARPS_COMPACT in (1, 2, 4, 8, 16), WARPS_COMPACT
-# Pièce 97 (23/09) : warps aux godets B ≤ 4, OPT-IN. 4 warps y gagnent −0,7 à −1,5 µs/couche au banc (pièce 96) mais
-# ne sont PAS au bit du défaut sur un lot à longueurs mêlées (1 ulp bf16, réductions croisées entre warps ; test
-# test_warps_petits_godets_ulp) : jugés par le critère ulp contre témoin + KL. Défaut = WARPS_COMPACT (inchangé).
-WARPS_PETITS = int(os.environ.get("ACVRAM_ATTN_WARPS_PETITS", str(WARPS_COMPACT)))
-GODET_PETIT = 4
-assert WARPS_PETITS in (1, 2, 4, 8, 16), WARPS_PETITS
 
 _COMPTEURS: dict = {}
 
@@ -327,7 +321,7 @@ def paged_attention(q: torch.Tensor, kc: torch.Tensor, ks: torch.Tensor,
             q.stride(0), q.stride(1), kc.stride(0) // D, kc.stride(1) // D, kc.stride(2) // D,
             ks.stride(0), ks.stride(1), out.stride(0), out.stride(1),
             NREP=n_rep, D=D, BN=PAGE * PAGES_PAR_TUILE, PAGE_C=PAGE, NREP_T=NREP_TUILE, CT=max(CT, 2),
-            DEROULE=REDUC_DEROULEE, num_warps=WARPS_PETITS if B <= GODET_PETIT else WARPS_COMPACT, num_stages=2)
+            DEROULE=REDUC_DEROULEE, num_warps=WARPS_COMPACT, num_stages=2)
         return out
     _partiel_kernel[(B, n_kv, C)](
         q, kc, ks, vc, vs, tables, seq_lens, part, pm, pl,

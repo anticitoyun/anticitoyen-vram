@@ -323,37 +323,3 @@ def test_reduction_deroulee_au_bit(b, ctx, monkeypatch):
     monkeypatch.setattr(ap, "REDUC_DEROULEE", True)
     y1 = f()
     assert torch.equal(y0, y1), (b, ctx, (y0.float() - y1.float()).abs().max().item())
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise")
-@pytest.mark.parametrize("b,ctx", [(1, 768), (2, 768), (4, 768), (4, 2048), (3, 40)])
-def test_warps_petits_godets_ulp(b, ctx, monkeypatch):
-    """Pièce 97 : le défaut (WARPS_PETITS = WARPS_COMPACT) reste au bit du chemin d'avant ; le bras 4 warps
-    ne change la sortie qu'à l'ordre des réductions croisées entre warps : ≤ 1 ulp bf16 de la valeur (lot à
-    longueurs mêlées, où il n'est PAS au bit — 23/09 : 1 ulp à b=2 et b=4, ctx 768). Bras qui doit casser : une
-    tuile de 16 (PAGES_PAR_TUILE = 1) change l'ordre du softmax en ligne et sort de la borne ou du bit."""
-    from acvram.kernels import attn_paginee as ap
-    from acvram.memory.kvcache import KVCacheConfig, PagedKVCache, bucket_blocks
-    assert b <= ap.GODET_PETIT and ap.WARPS_PETITS == ap.WARPS_COMPACT, "défaut changé : ce test juge l'opt-in"
-    g = torch.Generator(device="cuda").manual_seed(97 + ctx + b)
-    nblk = -(-ctx // 16)
-    c = PagedKVCache(KVCacheConfig(num_layers=1, num_kv_heads=4, head_dim=128, num_blocks=b * nblk + 1,
-                                   dtype="int8", device="cuda"))
-    c.k.random_(-127, 128, generator=g); c.v.random_(-127, 128, generator=g)
-    c.k_scale.uniform_(0.01, 0.05, generator=g); c.v_scale.uniform_(0.01, 0.05, generator=g)
-    t = torch.zeros(b, bucket_blocks(nblk), dtype=torch.long, device="cuda")
-    t[:, :nblk] = torch.randperm(b * nblk, device="cuda", generator=g).view(b, nblk) + 1
-    lens = torch.tensor([max(1, ctx - 7 * i) for i in range(b)], dtype=torch.long, device="cuda")
-    q = torch.randn(b, 32, 128, device="cuda", generator=g).to(torch.bfloat16)
-    f = lambda: ap.paged_attention(q, c.k, c.k_scale, c.v, c.v_scale, t, lens, 4, 0.088, 0, compact=True)
-    y_def = f()
-    monkeypatch.setattr(ap, "WARPS_PETITS", 8)
-    assert torch.equal(f(), y_def), "le défaut n'est plus le chemin à 8 warps"
-    monkeypatch.setattr(ap, "WARPS_PETITS", 4)
-    y4 = f().float()
-    ulp = 2.0 ** (torch.floor(torch.log2(y_def.float().abs().clamp_min(2.0 ** -60))) - 7)
-    assert ((y4 - y_def.float()).abs() <= ulp).all(), float(((y4 - y_def.float()).abs() / ulp).max())
-    if ctx > 64:
-        monkeypatch.setattr(ap, "PAGES_PAR_TUILE", 1)
-        y16 = f().float()
-        assert not torch.equal(y16, y_def.float()), "le bras BN 16 rend les mêmes bits : le test ne distingue plus l'ordre"
