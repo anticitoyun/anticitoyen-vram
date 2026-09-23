@@ -195,7 +195,7 @@ impl Moteur {
             slot: zeros(&flux, &mut tenus, 8)?,
         };
         tenus.append(&mut ch.tenus);
-        let octets_carte = ch.octets + tenus.iter().map(|s| s.len()).sum::<usize>();
+        let octets_carte = tenus.iter().map(|s| s.len()).sum::<usize>();
         let empreintes = std::mem::take(&mut ch.empreintes);
         drop(ch);
         flux.synchronize().map_err(|e| erreur!("{e:?}"))?;
