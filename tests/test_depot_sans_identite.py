@@ -266,6 +266,8 @@ def test_le_cliquet_des_chemins_absolus_ne_monte_pas():
         # instantané public (publier-github.sh, 23/09) : ni scratchpad/ ni mémoire privée ; les notes de
         # revue y sont copiées chemins réécrits. Cliquet à ZÉRO, aucune exemption : un chemin qui
         # arrive ici est publié.
+        # /home/linuxbrew est le préfixe standard de Homebrew sous Linux, pas un compte
+        tous = {k: v for k, v in tous.items() if any(x != "/home/linuxbrew" for x in v)}
         assert not tous, ("chemins personnels dans l'instantané public :\n  "
                           + "\n  ".join(f"{k} -> {v[:3]}" for k, v in tous.items()))
         return
