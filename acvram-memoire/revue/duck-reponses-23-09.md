@@ -90,16 +90,28 @@ Discussion : « Contexte : Graphe CUDA de ~600 nœuds… »
 
 ### Q(16) — NVFP4 W4A16 Gemma 4 31B KL hors gabarit
 
-**Non posée** — pause groupe reçue avant envoi.
+**Contexte envoyé (23/09, reprise) :** Gemma 4 31B-it en NVFP4 (W4A16, blocs de 16, échelles e4m3) : KL contre bf16 sous gabarit échoue (2/5 invites < 1,0). Erreur répartie sur toutes les couches, partagée attention/MLP (~45/55). Attention int8 W8A8 et calibration AWQ sous gabarit n'aident pas. Question : quelles méthodes post-entraînement récupèrent ce cas (GPTQ, rotations Hadamard QuaRot/SpinQuant, mixte FP8), laquelle a un coût de conversion < 1 h sur une seule 5090 ?
+
+**Réponse gpt-oss (complète, get_page_text) :**
+
+Ne cite pas GPTQ/QuaRot/SpinQuant nommément ; analyse convergente sur la cause (granularité W4A16+e4m3 trop agressive, erreur homogène = pas d'outlier isolable, échec AWQ = calibration par canal insuffisante). Propositions : passer à W5A16/W6A16 ou mixte précision (attention en précision plus haute, MLP en W4A16 — **ordre inverse de Luna**, qui visait FP8 sur attention+FFN down) ; échelles e5m2/e5m3 pour un dynamic range plus large ; recalibration AWQ per-layer sur corpus représentatif plutôt que globale ; GPTQ ou « OOQ » (optimal-order quantisation) comme méthodes post-training moins sensibles au gabarit ; fine-tuning léger LoRA en FP16 avant quantification. Checklist : reconfigurer, régénérer les échelles, calibrer sur 256 exemples, viser > 2/5 ≥ 1,0, vérifier que la part d'attention dans l'erreur descend sous 35 %. Pas de chiffrage de coût de conversion.
 
 ---
 
-## Modèle 3 — Gemma 4 31B
+## Modèle 3 — Gemma 4 31B (natif duck.ai)
 
-**Non interrogé** — pause groupe reçue avant ouverture de la discussion.
+Discussion : « Contexte : Gemma 4 31B-it en NVFP4… » (nouvelle discussion, modèle Gemma 4 31B sélectionné)
+
+### Q(16) — NVFP4 W4A16 Gemma 4 31B KL hors gabarit
+
+**Contexte envoyé :** identique à Q(16) gpt-oss ci-dessus.
+
+**Réponse Gemma 4 31B (complète, get_page_text, raisonnement 19s) :**
+
+L'erreur homogène sur toutes les couches et le partage attention/MLP (~45/55), combinés à l'échec de la calibration AWQ et à l'absence d'effet du W8A8 sur l'attention, indiquent un bruit de quantification systémique plutôt que des valeurs aberrantes (outliers) isolables — ce qui rend les méthodes ciblées par canal (AWQ, mixed-precision localisée) peu efficaces ici. Piste principale : le bloc de quantification (16) est trop grossier pour un modèle de la taille de Gemma 4 31B ; réduire à 8 ou 4 permettrait une adaptation plus fine des échelles e4m3 et réduirait la KL. Piste secondaire : un écrêtage (clipping) e4m3 trop agressif sur les queues de distribution des poids introduirait un biais cumulatif à travers les couches ; tester un seuil d'écrêtage optimisé ou un schéma de quantification différent sur les couches les plus sensibles. Ne traite pas explicitement GPTQ/QuaRot/SpinQuant ni de coût de conversion chiffré.
 
 ---
 
 ## Note de session
 
-Pause groupe ordonnée par chef (23/09/2026) avant la fin du cycle complet. Q(16) gpt-oss et Gemma 4 31B (Q15+Q16) restent à faire à la reprise. La réponse Luna Q(15) est partielle (filtrage extension sur offsets 63000-70000).
+Pause groupe du 23/09 08-10h (chef) : cycle interrompu après Q(16) Luna seul. Reprise 23/09 (chef, relance poste4) : Q(16) posée à gpt-oss et Gemma 4 31B, synthèse à jour dans `~/Bureau/Vibe/qr.md` (Verdict 16, 3/3 modèles, désaccord Gemma 4 31B noté). La réponse Luna Q(15) reste partielle (filtrage extension sur offsets 63000-70000).
