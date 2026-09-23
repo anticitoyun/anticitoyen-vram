@@ -122,7 +122,7 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("EXIL_EXPERTS_FRACTION", "", None, None, "fraction d'experts exilés forcée"),
     Variable("SEUIL_EXIL", "0.20", None, None, "seuil d'exil du planificateur"),
     Variable("REPIN", "64", None, None, "période (pas) du ré-épinglage des experts"),
-    Variable("MAX_GRAPHS", "16", None, None, "graphes CUDA gardés (éviction au-delà)"),
+    Variable("MAX_GRAPHS", "64", None, None, "graphes CUDA gardés (au-delà : eager, aucune éviction)"),
     Variable("INSTA_MAX", "3", None, None, "relevés instantanés gardés"),
     Variable("KV_PLAN_OVERRIDE", "", None, None, "budget KV forcé (plan)"),
     Variable("LISTE_CLE", "", None, None, "clé de la liste de promotion"),

@@ -118,9 +118,15 @@ __all__ = ["GraphRunner", "bucket_batch", "godet_hybride", "godet_lot"]
 # l'autre. Piste mesuree le 10/09 pour notre dispersion de 26 a 37 % contre
 # 1,5 a 1,8 % chez llama.cpp.
 #
-# Configurable pour pouvoir mesurer ce que coute ce plafond, sans le deplacer
-# par defaut : le defaut reste 16, et une campagne qui le bouge doit le dire.
-MAX_GRAPHS = int(os.environ.get("ACVRAM_MAX_GRAPHS", "16"))
+# Defaut 64 depuis la piece 85 (23/09) : a 16, un serveur qui sert b = 2, 4, 8
+# puis 12 remplissait les seize places au palier 8 (5 captures d'avance a b=1,
+# puis une forme par (godet, nblk) rencontree) ; tout le reste de sa vie en
+# eager, b=12 536 t/s et 135 W contre 1 802 t/s a 64 (21 graphes pris, meme
+# sequence, scratchpad/poste1-p85-23-09). L'espace des cles denses tient
+# largement : godets b {1,2,4,8,16} x nblk {8..256} = 30 a 2 304 jetons.
+# Les graphes partagent un pool (`_capture`) : un graphe de plus ne retient
+# que ses sorties. Le refus au-dela reste compte et nomme (`_eager`).
+MAX_GRAPHS = int(os.environ.get("ACVRAM_MAX_GRAPHS", "64"))
 
 
 def _empreinte_adresses(runner, entry: dict) -> dict:
@@ -612,6 +618,10 @@ class GraphRunner:
         entry = self.graphs.get(key)
         if entry is None:
             if len(self.graphs) >= MAX_GRAPHS:
+                # Pièce 85 : ce refus rendait False SANS `_eager` — ni compté
+                # (`repli_eager` restait 0), ni nommé hors ACVRAM_TRACE_STEPS.
+                self._eager(f"plafond ACVRAM_MAX_GRAPHS={MAX_GRAPHS} atteint : "
+                            f"forme nouvelle en eager")
                 if trace:
                     print(f"[graphe] limite {MAX_GRAPHS} atteinte, clé {key} : eager",
                           flush=True)
