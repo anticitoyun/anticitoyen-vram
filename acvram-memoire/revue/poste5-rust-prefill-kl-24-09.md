@@ -21,3 +21,32 @@ durée : prévu ≤ 900 s ; tenu ≈ 5 min (vidage compris)
   position. Ce qui trancherait l'hypothèse : des écarts d'au plus ± 1 code, répartis sur toutes les couches → prix
   du préfill par GEMV sur un cache int8, et le remède est un préfill Rust par les mêmes noyaux que le Python (option
   B du 23/09) ; un écart concentré (une couche, une position, > 1 code) → défaut du préfill Rust, à corriger.
+
+## Bisection (issue nommée au scellé) — 24/09 00 h 47 → 01 h 15, cpu-safe=off (max_perf_pct 100 au début et à la fin des deux dernières prises)
+
+| comparaison du KV de l'invite (5 invites, 36 couches) | codes K différents | codes V différents | fichier |
+|---|---|---|---|
+| préfill Python servi ↔ préfill Rust | 33-51 % | 71-82 % | `kv.txt` |
+| même couche 0 | **0** | **0** | `ecriture.txt` |
+| préfill Python ↔ ses propres K/V en vol (entrée de `cache.write`) | quantification seule, 1-2,4 % L2 | 0,8-1,1 % L2 | `ecriture.txt` |
+| **décodage forcé Python** (même moteur servi, jetons de l'invite imposés un par un) ↔ préfill Python | 32-51 % | 70-81 % | `decode-force.txt` |
+| décodage forcé Python ↔ préfill Rust | 14-18 % | 42-50 % | `decode-force.txt` |
+| décodage forcé Python ↔ préfill Rust **avec la ligne 0 du Python** | **0 — au bit 5/5** | **0** | `ligne0.txt` |
+
+* Pas une permutation (appariement ligne à ligne = identité, `comparer_kv.py`).
+* **Le préfill Rust reproduit AU BIT le chemin de décodage d'acvram** dès que la ligne 0 est la même ; la seule
+  différence restante vient de la ligne 0, que le Python calcule par son préfill (un jeton) et le Rust par son pas.
+* **L'échec du scellé mesure donc un écart INTERNE à acvram** : son préfill (GEMM, attention flash sur K/V bf16) et
+  son décodage (GEMV, attention paginée sur KV int8) remplissent le cache de l'invite différemment — jusqu'à 19 %
+  L2 sur V dès la couche 1, et une KL de forçage jusqu'à 0,12 nat. Une perturbation de 3 codes sur la seule ligne 0
+  suffit à déplacer 14-18 % des codes K de toute l'invite : le cache int8 amplifie les écarts d'arrondi.
+* Lequel des deux chemins est le plus juste n'est PAS mesuré ici (il faudrait une référence bf16 non quantifiée).
+
+## Décision demandée au chef (deux options, une ligne chacune)
+
+* **B** : préfill Rust par les MÊMES noyaux que le préfill Python (cuBLASLt du venv, attention flash de libtorch) —
+  seul moyen d'atteindre le scellé tel qu'écrit ; + 1 à 2 jours, fragile (option B du 23/09).
+* **A'** : nouveau scellé, écrit avant, relatif au témoin : KL(Rust ‖ préfill Python) ≤ KL(décodage forcé Python ‖
+  préfill Python) + marge — le préfill Rust est déjà AU BIT du décodage forcé, ligne 0 comprise mise à part.
+* À signaler en plus : l'écart préfill/décodage d'acvram (KV de l'invite) mériterait sa propre pièce (qui est le
+  plus juste contre une référence bf16 ; effet sur la PPL et la KL servies).
