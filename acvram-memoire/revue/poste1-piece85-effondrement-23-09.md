@@ -29,3 +29,30 @@ le plafond, et je le dis.
 
 Instrument : `scratchpad/banc-llamacpp-16-09.py` (celui de la prise invalide, même paramètres), /metrics relevé
 chaque seconde par `scratchpad/poste1-p85-23-09/releve-metrics.sh`. -lgc 2700. Prise ≤ 12 min, deux bras.
+
+## Verdict
+
+instrument : `scratchpad/banc-llamacpp-16-09.py` (HTTP/SSE, un serveur par bras, paliers 2→4→8→12 enchaînés) + `/metrics` toutes les 2 s, `scratchpad/poste1-p85-23-09/prise.sh`
+commit : 1f8df367 (bras A/B), a383f677 (preuve D, défaut) ; alias Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c
+régime : -lgc 2700 (horloge moyenne 2 636-2 678), plafond 400 W, max-batch 12, max-model-len 2 304
+scellé : H1 réfutée si graphes_nombre < 16 au palier effondré, ou replays/pas ≥ 0,9 pendant l'effondrement, ou B < 1 500 t/s à b=12 (f43ed4c8, avant la prise)
+mesuré : b=12 — A (16) 536,3 t/s, 135 W ; B (64) 1 802,4 ; D (défaut 64, sans variable) 1 742,0, 0,145 J/jeton net. b=8 — A 291,9 ; B 1 262,5 ; D 1 325,0
+verdict : H1 TENUE. A : 16 places prises au palier 8, puis replays figés à 3 186 pendant que repli_eager monte de 0 à 3 009 ; B : 21 graphes, D : 23, repli_eager 0
+durée : prévu ≤ 12 min / tenu 141 s (prise 1, contaminée) + 351 s + 149 s (journal `tenue=`)
+
+Cause 1 (le constat de chef) : `acvram/engine/graphs.py:123` MAX_GRAPHS=16 sans éviction, et `graphs.py:614-618` refusait
+sans `_eager` (repli muet, `repli_eager` = 0). Correctif : refus compté et nommé (1f8df367), défaut 64 (a383f677).
+Cause 2, trouvée par ma première prise : `/metrics` → `Engine.regime()` (appelé 4 fois) → `_etat_eco()` → relecture
+SOUS CHARGE (`eco.py:244-269`, matmuls + `synchronize` dans un fil) dans le processus de service. Un synchronize d'un
+autre fil pendant une capture l'invalide : « operation failed due to a previous error during capture », graphes coupés
+à vie (godet 16). Toute supervision qui interroge `/metrics` (tableau de bord, GUI) pouvait tuer les graphes. Correctif
+`runner.py:_etat_eco` : relecture sous charge au premier `regime()` seulement (1f8df367). La prise 1 est donc invalide
+(elle mesurait mon instrument) et le dit.
+Tests qui cassaient : `tests/test_piece85_service_lots_successifs.py` (3 tests ; rouges sur l'ancien code ou avec
+ACVRAM_MAX_GRAPHS=16).
+
+Restes, nommés : (a) D b=12 1 742 reste à 8-12 % sous le serveur neuf du jour (1 940-1 995, pièce 77) : 429 pas hors
+graphe sur 10 942 et les captures en cours de palier (23 × 40-130 ms) n'expliquent pas tout — à mesurer par poste2, serveur
+neuf contre lots successifs, même séance. (b) b=2 anormal dans les trois bras (99,8 à 247,5 t/s, sous b=1 = 311) :
+spéculation n-gramme (lot_max 2) soupçonnée, non prouvée — pièce à ouvrir. (c) Cellule publiable = poste2 (REGLES § 3,
+l'auteur de la méthode ne produit pas la mesure qui la couronne).
