@@ -178,6 +178,26 @@ def bras_acvram(res):
                       "REDUC_DEROULEE": ap.REDUC_DEROULEE, "WARPS_COMPACT": ap.WARPS_COMPACT}
     print(f"acvram : {ap.__file__} · triton {triton.__version__} · déroulée {ap.REDUC_DEROULEE} · "
           f"warps {ap.WARPS_COMPACT}", flush=True)
+    # Pièce 96 : variantes de NOTRE noyau (tuile BN = 16 × PAGES_PAR_TUILE, warps, C) — `servi` d'abord, référence
+    # de l'écart au bit ; `C4` = C et chunk du servi (calculés à PAGES_PAR_TUILE = 4) quelle que soit la tuile.
+    tranches_servi = ap._tranches
+
+    def tranches_c4(n, b, h, dev):
+        ppt, ap.PAGES_PAR_TUILE = ap.PAGES_PAR_TUILE, 4
+        try:
+            return tranches_servi(n, b, h, dev)
+        finally:
+            ap.PAGES_PAR_TUILE = ppt
+
+    w0 = ap.WARPS_COMPACT
+    variantes = {"servi": (4, w0, tranches_servi), "bn16w4": (1, 4, tranches_c4), "bn16w4-Crecalc": (1, 4, tranches_servi),
+                 "bn16w8": (1, w0, tranches_c4), "bn64w4": (4, 4, tranches_servi)}
+    noms = os.environ.get("ACVRAM_BANC_VARIANTES", "servi").split(",")
+    assert noms[0] == "servi" and all(n in variantes for n in noms), noms
+
+    def poser(v):
+        ap.PAGES_PAR_TUILE, ap.WARPS_COMPACT, ap._tranches = variantes[v]
+
     scale = 1 / math.sqrt(D)
     g = torch.Generator(device="cuda").manual_seed(23)
     for b, ctx in CELLULES:
@@ -197,16 +217,31 @@ def bras_acvram(res):
             sortie[:] = [ap.paged_attention(q[i], kc[i], ks[i], vc[i], vs[i], t64, lens64, HKV, scale, 0,
                                             compact=True) for i in range(COUCHES)]
 
-        pas_c()
-        C, chunk = ap._tranches(t64.shape[1], b, HKV, q[0].device)
         ref = reference64(lambda bl, sl: kc[0][bl, sl].double() * ks[0][bl, sl].double()[..., None],
                           lambda bl, sl: vc[0][bl, sl].double() * vs[0][bl, sl].double()[..., None],
                           t64, lens64, q[0], scale)
-        ligne = {"b": b, "ctx": ctx, "godet": t64.shape[1], "C": C, "chunk": chunk,
-                 "c": {**erreur(sortie[0], ref), "us": round(chrono_graphe(pas_c), 2), "noyaux_us": round(noyaux_us(pas_c), 2)}}
+        ligne = {"b": b, "ctx": ctx, "godet": t64.shape[1]}
+        y0 = d0 = None
+        for v in noms:
+            poser(v)
+            pas_c()
+            y = sortie[0].double()
+            dv = (y - ref).norm(dim=-1) / ref.norm(dim=-1).clamp(min=1e-12)
+            if y0 is None:
+                y0, d0 = y, dv
+            C, chunk = ap._tranches(t64.shape[1], b, HKV, q[0].device)
+            ecart = ((y - y0).abs().amax(-1) / y0.abs().amax(-1).clamp(min=1e-6) / 2 ** -8).max().item()
+            cle = "c" if v == "servi" else v
+            ligne[cle] = {**erreur(sortie[0], ref), "C": C, "chunk": chunk, "bn": 16 * ap.PAGES_PAR_TUILE,
+                          "warps": ap.WARPS_COMPACT, "au_bit": bool(torch.equal(y, y0)), "ecart_2m8": round(ecart, 3),
+                          "part_le_1_1": round(float((dv <= 1.1 * d0).float().mean()), 4),
+                          "us": round(chrono_graphe(pas_c), 2), "noyaux_us": round(noyaux_us(pas_c), 2)}
+            x = ligne[cle]
+            print(f"b={b:2d} ctx={ctx:5d}  {v:15s} {x['us']:6.2f} µs (noyaux {x['noyaux_us']:6.2f})  C={C:2d} "
+                  f"chunk={chunk:4d} bn={x['bn']:2d} w={x['warps']}  err {x['err_rel_max']:.2e}  "
+                  f"écart {x['ecart_2m8']:.3f}·2⁻⁸  ≤1,1× {x['part_le_1_1']:.4f}  au bit {x['au_bit']}", flush=True)
+        poser("servi")
         res["cellules"].append(ligne)
-        print(f"b={b:2d} ctx={ctx:5d}  (c) {ligne['c']['us']:6.2f} µs  err {ligne['c']['err_rel_max']:.2e}"
-              f"  C={C} chunk={chunk}   noyaux (c) {ligne['c']['noyaux_us']:6.2f}", flush=True)
         del kc, vc, ks, vs, q, sortie
         torch.cuda.empty_cache()
 
