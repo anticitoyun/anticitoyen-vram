@@ -173,6 +173,7 @@ class EngineStats:
     cached_prompt_tokens: int = 0
     accepted_tokens: int = 0
     proposed_tokens: int = 0
+    spec_longueurs_melees: int = 0   # pas spéculatifs rendus au décodage simple (pièce 86)
     spec_steps: int = 0
     # Séquences terminées par `_finish_budget_epuise` (budget KV épuisé avant
     # `max_tokens`), jamais par un `EOS`/`max_tokens` normal. Compté pour que
@@ -242,6 +243,7 @@ class EngineStats:
             "kv_refills": self.kv_refills,
             "accepted_tokens": self.accepted_tokens,
             "proposed_tokens": self.proposed_tokens,
+            "spec_longueurs_melees": self.spec_longueurs_melees,
             "acceptance_rate": round(self.acceptance_rate, 3),
             "tokens_per_step": round(self.tokens_per_step, 3),
             "sequences_tronquees_budget": self.sequences_tronquees_budget,
@@ -1726,7 +1728,21 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                                 None if prop.probs is None
                                 else prop.probs[:max(0, room)])
             proposals[seq.id] = prop
-            if not self._grow(seq, extra=len(prop)):
+        # Pièce 86 (23/09) : en dense, des propositions de longueurs différentes
+        # donnent des `query_lens` mêlés, que le graphe refuse (graphs.py,
+        # « longueurs mixtes ») : la vérification tombait en eager complet,
+        # ~40 ms le pas contre ~5 en graphe, sans compteur, et la garde (qui
+        # compte des jetons par pas, pas du temps) la gardait active — b=2 servi
+        # 293,8 t/s contre 407,6 sans spéculation. Sous graphe, un lot à
+        # longueurs mêlées décode donc sans spéculer, compté. Avant `_grow` :
+        # aucun bloc n'est réservé pour des propositions qu'on n'essaie pas.
+        if (not hyb and len(decodable) > 1 and self.graphs is not None
+                and self.graphs.enabled
+                and len({len(proposals[s.id]) for s in decodable}) > 1):
+            self.stats.spec_longueurs_melees += 1
+            return self._plain_decode(decodable)
+        for seq in decodable:
+            if not self._grow(seq, extra=len(proposals[seq.id])):
                 self._finish_budget_epuise(seq)
 
         decodable = [s for s in decodable if not s.finished]
