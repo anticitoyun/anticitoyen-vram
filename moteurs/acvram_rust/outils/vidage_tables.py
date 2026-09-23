@@ -54,15 +54,17 @@ for nom in dir(attn_paginee):
     for dev, tup in caches.items():
         for cle, ck in tup[0].items():
             md = ck.metadata
+            src = getattr(ck, "src", None)
             chemin = os.path.join(SORTIE, "triton", f"{ck.hash}.cubin")
             with open(chemin, "wb") as fh:
                 fh.write(ck.asm["cubin"])
             inventaire.append({
                 "fonction": nom, "nom": ck.name, "hash": ck.hash, "cle": str(cle),
-                "signature": {str(k): str(v) for k, v in ck.src.signature.items()},
+                "signature": {str(k): str(v) for k, v in getattr(src, "signature", {}).items()},
                 "constexprs": {str(k): (v if isinstance(v, (int, float, bool, str)) else str(v))
-                               for k, v in ck.src.constexprs.items()},
-                "attrs": str(ck.src.attrs),
+                               for k, v in getattr(src, "constexprs", {}).items()},
+                "attrs": str(getattr(src, "attrs", None)),
+                "src_attributs": sorted(vars(src).keys()) if src is not None else None,
                 "num_warps": md.num_warps, "num_stages": md.num_stages, "shared": md.shared,
                 "global_scratch_size": getattr(md, "global_scratch_size", None),
                 "profile_scratch_size": getattr(md, "profile_scratch_size", None),

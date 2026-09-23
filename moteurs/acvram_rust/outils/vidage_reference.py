@@ -29,7 +29,7 @@ os.makedirs(SORTIE, exist_ok=True)
 
 
 def sha(t: torch.Tensor) -> str:
-    return hashlib.sha256(t.detach().contiguous().cpu().view(torch.uint8).numpy().tobytes()).hexdigest()
+    return hashlib.sha256(t.detach().contiguous().cpu().reshape(-1).view(torch.uint8).numpy().tobytes()).hexdigest()
 
 
 def sha_ids(ids) -> str:
@@ -92,7 +92,7 @@ for inv in json.load(open(INVITES, encoding="utf-8")):
     sortie = [int(x) for x in seq.output_ids]
     r = {"nom": inv["nom"], "longueur_invite": L, "sha256_invite": sha_ids(ids), "premier_jeton": premier,
          "sortie": sortie, "sha256_sortie": sha_ids(sortie), "fin": seq.finish_reason if hasattr(seq, "finish_reason") else None,
-         "sha256_kv": hashlib.sha256(b"".join(v.view(torch.uint8).numpy().tobytes() for v in kv.values())).hexdigest()}
+         "sha256_kv": hashlib.sha256(b"".join(v.reshape(-1).view(torch.uint8).numpy().tobytes() for v in kv.values())).hexdigest()}
     res["invites"].append(r)
     print(r["nom"], L, len(sortie), r["sha256_sortie"][:16], flush=True)
 
