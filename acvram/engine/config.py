@@ -308,7 +308,7 @@ class ModelSpec:
         connus = _TYPES_AVEC_KV | _TYPES_RECURRENTS | _TYPES_SANS_ETAT
         return sorted({t for t in (self.layer_types or []) if t not in connus})
 
-    def kv_bytes_per_token(self, kv_bits: int = 8) -> int:
+    def kv_bytes_per_token(self, kv_bits: int = 8, fmt: Optional[str] = None) -> int:
         """Octets de cache pour un jeton, sur les couches QUI EN GARDENT UN.
 
         L'attention à requêtes groupées est déjà prise en compte : seules
@@ -331,6 +331,11 @@ class ModelSpec:
         if self.est_mla:
             latent = (self.kv_lora_rank + self.qk_rope_head_dim) * 2
             return int(latent * self.couches_avec_kv)
+        if fmt == "k8v4":
+            # pièce 104 : K int8 + half par tête, V quartets + half par groupe de 32
+            from ..memory import kv_k8v4
+            return int(kv_k8v4.octets_par_jeton_couche(self.num_key_value_heads, self.head_dim)
+                       * self.couches_avec_kv)
         per_layer = 2 * self.num_key_value_heads * self.head_dim * kv_bits / 8
         # échelles groupées du KV quantifié : un fp16 par tête, par jeton, par kv
         overhead = 0.0 if kv_bits >= 16 else 2 * self.num_key_value_heads * 2

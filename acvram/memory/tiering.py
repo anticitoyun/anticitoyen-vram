@@ -46,8 +46,8 @@ from . import kv_lm4
 # Format du cache KV des paliers carte : vide = celui des capacités détectées
 # (int8 sur Ampere+). `lm4` : 4 bits par rotation (kv_lm4), témoins lm3/lm2.
 _KV_FORMAT = os.environ.get("ACVRAM_KV_FORMAT", "").lower()
-if _KV_FORMAT and _KV_FORMAT not in ("int8", "fp8_e4m3", "fp16", "bf16", *kv_lm4.FORMATS):
-    raise ValueError(f"ACVRAM_KV_FORMAT={_KV_FORMAT!r} : attendu int8, fp8_e4m3, fp16, bf16, lm4, lm3 ou lm2")
+if _KV_FORMAT and _KV_FORMAT not in ("int8", "fp8_e4m3", "fp16", "bf16", "k8v4", *kv_lm4.FORMATS):
+    raise ValueError(f"ACVRAM_KV_FORMAT={_KV_FORMAT!r} : attendu int8, fp8_e4m3, fp16, bf16, k8v4, lm4, lm3 ou lm2")
 
 
 __all__ = ["Tier", "LayerPlacement", "Plan", "PlannerOptions", "plan_placement"]
@@ -460,9 +460,11 @@ def plan_placement(spec: ModelSpec, rig: Rig,
 
     # ---- 1. cache KV -----------------------------------------------------
     kv_bits = opts.kv_bits
-    if gpu_tiers and gpu_tiers[0].kv_format in kv_lm4.FORMATS:
-        kv_bits = kv_lm4.bits(gpu_tiers[0].kv_format)    # le budget suit le format
-    kv_per_tok = spec.kv_bytes_per_token(kv_bits)
+    kv_fmt_plan = gpu_tiers[0].kv_format if gpu_tiers else None
+    if kv_fmt_plan in kv_lm4.FORMATS:
+        kv_bits = kv_lm4.bits(kv_fmt_plan)    # le budget suit le format
+    # k8v4 (pièce 104) : budget par octets RÉELS du format (leçon C5-b), pas par bits moyens
+    kv_per_tok = spec.kv_bytes_per_token(kv_bits, fmt=kv_fmt_plan)
     plan.kv_bytes_per_token = kv_per_tok
     plan.kv_planned_seqs = opts.max_concurrent_seqs
     if gpu_tiers and kv_per_tok:

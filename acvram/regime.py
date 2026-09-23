@@ -254,7 +254,9 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("KV_LM4_SEUL", "", None, None, "diagnostic lm4 (kvcache.write) : lm4 sur k ou v seulement, int8 ailleurs"),
     Variable("KV_LM4_PUITS", "", None, None, "diagnostic lm4 : positions < N gardées int8 ; 0 = contrôle (lm4 partout par le diagnostic)"),
     Variable("KV_FORMAT", "", ("acvram.memory.tiering", "_KV_FORMAT"), None,
-             "cache KV des paliers carte : vide = capacités (int8) | lm4 4 bits par rotation | lm3, lm2 témoins"),
+             "cache KV des paliers carte : vide = capacités (int8) | k8v4 (pièce 104 : K int8 par jeton, V int4 "
+             "par groupe de 32 canaux, −22 % d'octets, opt-in jugé KL 5/5 ≤ 0,74 et ppl-decode-kv 8 k ≤ +0,30 %) "
+             "| lm4 4 bits par rotation | lm3, lm2 témoins"),
     Variable("KV_INT8_CANAL", "0", ("acvram.memory.kv_canal", "ACTIF"), "0",
              "C5-b (chantier-c5b-19-09) : 1 = clés int8 à échelle E4M3 par canal et par tête sur chaque bloc de 16 "
              "(bloc courant en bf16 dans une réserve, quantifié à sa fermeture ; V par jeton ; lecture par le noyau "

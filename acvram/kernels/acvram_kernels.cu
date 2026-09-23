@@ -948,7 +948,11 @@ constexpr int PA_WARPS = 4;
 // de plus par bloc). Le bloc COURANT d'une séquence (tampon_de[bloc] >= 0) est
 // lu en bf16 dans la réserve `tampon` [R, 16, HKV, D], sans échelle. Hors
 // CANAL les trois pointeurs sont nuls et le noyau est celui d'avant.
-template <int D, typename QT, typename OT, bool CANAL>
+// V4 (pièce 104, k8v4, jumeau memory/kv_k8v4.py) : V en quartets [cell, D/2]
+// (canal pair en bas) avec une échelle half par groupe de 32 canaux
+// [cell, D/32] ; K, softmax et réduction inchangés. Une voie tient PER_LANE
+// canaux contigus, donc un seul groupe : une échelle lue par voie et par jeton.
+template <int D, typename QT, typename OT, bool CANAL, bool V4>
 __global__ void paged_attn_partial_kernel(
     const QT *__restrict__ q,             // [B*QL, HQ, D]
     const signed char *__restrict__ kc,   // [NB, 16, HKV, D]
@@ -1110,12 +1114,23 @@ __global__ void paged_attn_partial_kernel(
         const float m_new = fmaxf(m, score);
         const float corr = __expf(m - m_new);
         const float pr = __expf(score - m_new);
-        const signed char *vp = vc + cell * D;
-        const float pv = __half2float(vs[cell]) * pr;
-        #pragma unroll
-        for (int i = 0; i < PER_LANE; ++i)
-            acc[i] = acc[i] * corr
-                     + pv * static_cast<float>(vp[lane * PER_LANE + i]);
+        if (V4) {
+            const unsigned char *vp4 = reinterpret_cast<const unsigned char *>(vc) + cell * (D / 2);
+            const float pv = __half2float(vs[cell * (D / 32) + (lane * PER_LANE) / 32]) * pr;
+            #pragma unroll
+            for (int i = 0; i < PER_LANE; ++i) {
+                const int ch = lane * PER_LANE + i;
+                const int quartet = (ch & 1) ? (vp4[ch >> 1] >> 4) : (vp4[ch >> 1] & 0xF);
+                acc[i] = acc[i] * corr + pv * (float)((quartet ^ 8) - 8);   // extension de signe
+            }
+        } else {
+            const signed char *vp = vc + cell * D;
+            const float pv = __half2float(vs[cell]) * pr;
+            #pragma unroll
+            for (int i = 0; i < PER_LANE; ++i)
+                acc[i] = acc[i] * corr
+                         + pv * static_cast<float>(vp[lane * PER_LANE + i]);
+        }
         l = l * corr + pr;
         m = m_new;
     }
@@ -4250,6 +4265,113 @@ void kv_write_int8(torch::Tensor k, torch::Tensor v, torch::Tensor slots,
 
 
 // --------------------------------------------------------------------------
+// Pièce 104 (k8v4, jumeau : memory/kv_k8v4.py) — K int8 par (jeton, tête)
+// exactement comme kv_write_int8_kernel ; V int4 symétrique par groupe de 32
+// canaux : D threads (un par canal), un warp = un groupe, amax par shuffle,
+// sv = max(half(amax/7), 2^-24), code rn(v / sv) en division IEEE (__fdiv_rn : le
+// jumeau torch divise, et --use_fast_math rendrait la division approchée),
+// clampé ± 7 ; deux codes par octet (canal pair en bas), écrits par les
+// threads pairs ; une half par groupe dans vs4 [pos, H, D/32].
+// --------------------------------------------------------------------------
+__global__ void kv_write_k8v4_kernel(
+    const __nv_bfloat16 *__restrict__ k, const __nv_bfloat16 *__restrict__ v,
+    const long *__restrict__ slots, signed char *__restrict__ kc,
+    unsigned char *__restrict__ vc4, __half *__restrict__ ks, __half *__restrict__ vs4,
+    int H, int D, int bs, long sk, long sv) {
+    __shared__ float red[32];
+    const int t = blockIdx.x, h = blockIdx.y;
+    const long slot = slots[t];
+    if (slot < 0) return;                                  // sentinelle : ligne de rembourrage
+    const long pos = (slot / bs) * bs + (slot % bs);
+    const int lane = threadIdx.x & 31, w = threadIdx.x >> 5, nw = blockDim.x >> 5;
+    // ---- K : chemin int8 par jeton, au bit avec kv_write_int8_kernel ----
+    {
+        const __nv_bfloat16 *src = k + (long)t * sk + (long)h * D;
+        float amax = 0.f;
+        for (int i = threadIdx.x; i < D; i += blockDim.x)
+            amax = fmaxf(amax, fabsf(__bfloat162float(src[i])));
+        for (int o = 16; o > 0; o >>= 1)
+            amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+        if (lane == 0) red[w] = amax;
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            float m = 0.f;
+            for (int i = 0; i < nw; ++i) m = fmaxf(m, red[i]);
+            red[0] = fmaxf(__fdiv_rn(m, 127.f), 1e-8f);
+        }
+        __syncthreads();
+        // Division IEEE (le jumeau torch divise) : kv_write_int8_kernel multiplie
+        // par 1/sc et diffère du jumeau de ± 1 code (C5-b l'avait mesuré) ;
+        // ici le format est neuf, le critère est « au bit contre le jumeau ».
+        const float sc = red[0];
+        signed char *dst = kc + (pos * H + h) * D;
+        for (int i = threadIdx.x; i < D; i += blockDim.x) {
+            const int q = __float2int_rn(__fdiv_rn(__bfloat162float(src[i]), sc));
+            dst[i] = (signed char)max(-127, min(127, q));
+        }
+        if (threadIdx.x == 0) ks[pos * H + h] = __float2half(sc);
+        __syncthreads();
+    }
+    // ---- V : int4 par groupe de 32 (blockDim.x == D, thread = canal) ----
+    {
+        const __nv_bfloat16 *src = v + (long)t * sv + (long)h * D;
+        const int ch = threadIdx.x;
+        const float x = __bfloat162float(src[ch]);
+        float amax = fabsf(x);
+        for (int o = 16; o > 0; o >>= 1)
+            amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+        // échelle arrondie en half AVANT de quantifier (celle qui sera lue),
+        // plancher 2^-24 = plus petit half non nul (jamais x / 0)
+        const float s = fmaxf(__half2float(__float2half(__fdiv_rn(amax, 7.f))), 5.9604645e-8f);
+        int q = __float2int_rn(__fdiv_rn(x, s));
+        q = max(-7, min(7, q));
+        const int voisin = __shfl_down_sync(0xffffffffu, q, 1);   // canal impair du même octet
+        if ((ch & 1) == 0)
+            vc4[(pos * H + h) * (D / 2) + (ch >> 1)] =
+                (unsigned char)((q & 0xF) | ((voisin & 0xF) << 4));
+        if (lane == 0) vs4[(pos * H + h) * (D / 32) + w] = __float2half(s);
+    }
+}
+
+void kv_write_k8v4(torch::Tensor k, torch::Tensor v, torch::Tensor slots,
+                   torch::Tensor kc, torch::Tensor vc4,
+                   torch::Tensor ks, torch::Tensor vs4, int64_t bs) {
+    CHECK_CUDA(k); ACVRAM_DEVICE_GUARD(k);
+    TORCH_CHECK(k.scalar_type() == torch::kBFloat16 && v.scalar_type() == torch::kBFloat16,
+                "cache KV k8v4 : k et v en bf16");
+    TORCH_CHECK(kc.scalar_type() == torch::kChar && vc4.scalar_type() == torch::kByte,
+                "cache KV k8v4 : K int8, V uint8 (quartets)");
+    TORCH_CHECK(ks.scalar_type() == torch::kHalf && vs4.scalar_type() == torch::kHalf,
+                "cache KV k8v4 : echelles half");
+    TORCH_CHECK(slots.scalar_type() == torch::kLong, "cache KV : emplacements int64");
+    TORCH_CHECK(k.dim() == 3 && v.dim() == 3, "cache KV : k et v [T, H, D]");
+    auto contigu_par_tete = [](const torch::Tensor &x) {
+        return x.stride(2) == 1 && x.stride(1) == x.size(2);
+    };
+    auto kk = contigu_par_tete(k) ? k : k.contiguous();
+    auto vv = contigu_par_tete(v) ? v : v.contiguous();
+    const int T = kk.size(0), H = kk.size(1), D = kk.size(2);
+    TORCH_CHECK(vv.size(0) == T && vv.size(1) == H && vv.size(2) == D, "cache KV : k et v de même forme");
+    TORCH_CHECK(D % 32 == 0 && D <= 1024, "cache KV k8v4 : D multiple de 32 et <= 1024");
+    TORCH_CHECK(vc4.size(-1) == D / 2 && vs4.size(-1) == D / 32,
+                "cache KV k8v4 : vc4 [.., D/2], vs4 [.., D/32]");
+    CHECK_CONTIG(kc); CHECK_CONTIG(vc4); CHECK_CONTIG(ks); CHECK_CONTIG(vs4);
+    if (T == 0) return;
+    dim3 grid(T, H);
+    kv_write_k8v4_kernel<<<grid, D, 0, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const __nv_bfloat16 *>(kk.data_ptr()),
+        reinterpret_cast<const __nv_bfloat16 *>(vv.data_ptr()),
+        slots.contiguous().data_ptr<long>(),
+        reinterpret_cast<signed char *>(kc.data_ptr()),
+        vc4.data_ptr<unsigned char>(),
+        reinterpret_cast<__half *>(ks.data_ptr()),
+        reinterpret_cast<__half *>(vs4.data_ptr()), H, D, (int)bs,
+        (long)kk.stride(0), (long)vv.stride(0));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+
+// --------------------------------------------------------------------------
 // C5-b (chantier-c5b-19-09, jumeau : memory/kv_canal.py) — clés int8 à échelle
 // PAR CANAL et par tête sur chaque bloc de 16 jetons. Déquantification d'une
 // cellule, uniforme : k = code × ks[jeton, tête] (half) × sc[bloc, tête, canal]
@@ -5637,7 +5759,8 @@ torch::Tensor int4_gemv_grouped(torch::Tensor qw, torch::Tensor scales,
 
 // Corps commun des deux points d'entrée : CANAL (C5-b) reçoit en plus sc,
 // tampon et tampon_de ; hors CANAL ces trois tenseurs sont ignorés (nuls).
-template <bool CANAL>
+// V4 (k8v4) : vc uint8 [NB, 16, HKV, D/2], vs half [NB, 16, HKV, D/32].
+template <bool CANAL, bool V4>
 torch::Tensor paged_attention_gen(torch::Tensor q, torch::Tensor kc,
                                   torch::Tensor ks, torch::Tensor vc,
                                   torch::Tensor vs, torch::Tensor sc,
@@ -5648,6 +5771,16 @@ torch::Tensor paged_attention_gen(torch::Tensor q, torch::Tensor kc,
     CHECK_CUDA(q); CHECK_CUDA(kc); CHECK_CUDA(tables);
     ACVRAM_DEVICE_GUARD(q);
     CHECK_CONTIG(q); CHECK_CONTIG(kc); CHECK_CONTIG(vc);
+    if (V4) {
+        CHECK_CONTIG(vs);
+        TORCH_CHECK(vc.scalar_type() == torch::kByte && vs.scalar_type() == torch::kHalf,
+                    "attention paginee k8v4 : vc uint8 (quartets), vs half par groupe");
+        TORCH_CHECK(vc.dim() == 4 && vs.dim() == 4 && vc.size(3) * 2 == q.size(2)
+                    && vs.size(3) * 32 == q.size(2) && q.size(2) % 32 == 0,
+                    "attention paginee k8v4 : vc [NB,16,HKV,D/2], vs [NB,16,HKV,D/32], D % 32 == 0");
+    } else {
+        TORCH_CHECK(vc.scalar_type() == torch::kChar, "attention paginee : vc int8");
+    }
     const unsigned char *p_sc = nullptr;
     const __nv_bfloat16 *p_tampon = nullptr;
     const int *p_tampon_de = nullptr;
@@ -5781,10 +5914,10 @@ torch::Tensor paged_attention_gen(torch::Tensor q, torch::Tensor kc,
     const int threads = PA_WARPS * WARP;
 
     #define PA_LAUNCH_T(DD, QT, OT, PQ, PO) do { \
-        paged_attn_partial_kernel<DD, QT, OT, CANAL><<<g1, threads, 0, stream>>>( \
+        paged_attn_partial_kernel<DD, QT, OT, CANAL, V4><<<g1, threads, 0, stream>>>( \
             PQ, kc.data_ptr<signed char>(), \
             reinterpret_cast<const __half *>(ks.data_ptr()), \
-            vc.data_ptr<signed char>(), \
+            reinterpret_cast<const signed char *>(vc.data_ptr()), \
             reinterpret_cast<const __half *>(vs.data_ptr()), \
             p_sc, p_tampon, p_tampon_de, \
             tables.data_ptr<long>(), seq_lens.data_ptr<long>(), \
@@ -5821,9 +5954,20 @@ torch::Tensor paged_attention(torch::Tensor q, torch::Tensor kc,
                               torch::Tensor vs, torch::Tensor tables,
                               torch::Tensor seq_lens, int64_t hkv,
                               double scale, int64_t q_len, int64_t window) {
-    return paged_attention_gen<false>(q, kc, ks, vc, vs, torch::Tensor(), torch::Tensor(),
-                                      torch::Tensor(), tables, seq_lens, hkv, scale,
-                                      q_len, window);
+    return paged_attention_gen<false, false>(q, kc, ks, vc, vs, torch::Tensor(), torch::Tensor(),
+                                             torch::Tensor(), tables, seq_lens, hkv, scale,
+                                             q_len, window);
+}
+
+// Pièce 104 (k8v4) : clés int8 par jeton, valeurs int4 par groupe de 32 canaux.
+torch::Tensor paged_attention_k8v4(torch::Tensor q, torch::Tensor kc,
+                                   torch::Tensor ks, torch::Tensor vc,
+                                   torch::Tensor vs, torch::Tensor tables,
+                                   torch::Tensor seq_lens, int64_t hkv,
+                                   double scale, int64_t q_len, int64_t window) {
+    return paged_attention_gen<false, true>(q, kc, ks, vc, vs, torch::Tensor(), torch::Tensor(),
+                                            torch::Tensor(), tables, seq_lens, hkv, scale,
+                                            q_len, window);
 }
 
 // C5-b : clés par canal (sc E4M3 par bloc, bloc courant bf16 dans la réserve).
@@ -5834,8 +5978,8 @@ torch::Tensor paged_attention_canal(torch::Tensor q, torch::Tensor kc,
                                     torch::Tensor tables,
                                     torch::Tensor seq_lens, int64_t hkv,
                                     double scale, int64_t q_len, int64_t window) {
-    return paged_attention_gen<true>(q, kc, ks, vc, vs, sc, tampon, tampon_de,
-                                     tables, seq_lens, hkv, scale, q_len, window);
+    return paged_attention_gen<true, false>(q, kc, ks, vc, vs, sc, tampon, tampon_de,
+                                            tables, seq_lens, hkv, scale, q_len, window);
 }
 
 
@@ -7790,6 +7934,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "INT4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
     m.def("kv_write_int8", &kv_write_int8,
           "Cache KV : quantification INT8 et dispersion en un lancement");
+    m.def("kv_write_k8v4", &kv_write_k8v4,
+          "Piece 104 : cache KV k8v4, K int8 par jeton + V int4 par groupe de 32 canaux, "
+          "un lancement ; vc4 uint8 [.., D/2], vs4 half [.., D/32]");
+    m.def("paged_attention_k8v4", &paged_attention_k8v4,
+          "Piece 104 : attention de decodage fusionnee, K int8 par jeton, V int4 par groupe de 32");
     m.def("kv_write_int8_canal", &kv_write_int8_canal,
           "C5-b : cache KV int8, cles par canal sur chaque bloc (roles, ecriture, fermeture : "
           "trois lancements), V par jeton ; sc E4M3 [NB,HKV,D], tampon bf16 [R,16,HKV,D], "

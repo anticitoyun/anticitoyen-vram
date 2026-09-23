@@ -30,6 +30,7 @@ import torch
 
 from . import kv_lm4
 from . import kv_canal
+from . import kv_k8v4
 
 __all__ = ["KVCacheConfig", "PagedKVCache", "BlockAllocator"]
 
@@ -273,7 +274,7 @@ class KVCacheConfig:
     head_dim: int
     num_blocks: int
     block_size: int = BLOCK_SIZE
-    dtype: str = "int8"                 # int8 | fp8_e4m3 | fp16 | bf16 | lm4 (lm3, lm2 : témoins)
+    dtype: str = "int8"                 # int8 | fp8_e4m3 | fp16 | bf16 | lm4 (lm3, lm2 : témoins) | k8v4 (pièce 104)
     device: str = "cuda:0"
     # C5-b : clés int8 à échelle par canal sur chaque bloc (kv_canal) ; None =
     # ACVRAM_KV_INT8_CANAL, et seulement en int8. `rangs` = lignes bf16 de la
@@ -290,7 +291,12 @@ class KVCacheConfig:
 
     @property
     def quantized(self) -> bool:
-        return self.dtype in ("int8", "fp8_e4m3") or self.rotated
+        return self.dtype in ("int8", "fp8_e4m3", kv_k8v4.FORMAT) or self.rotated
+
+    @property
+    def k8v4(self) -> bool:
+        """Pièce 104 : K int8 par jeton (chemin int8 intact), V int4 par groupe de 32 (`kv_k8v4`)."""
+        return self.dtype == kv_k8v4.FORMAT
 
     @property
     def nom_format(self) -> str:
@@ -317,14 +323,32 @@ class KVCacheConfig:
             "fp16": torch.float16,
             "bf16": torch.bfloat16,
             "lm4": torch.uint8, "lm3": torch.uint8, "lm2": torch.uint8,
+            kv_k8v4.FORMAT: torch.int8,          # K ; V : `torch_dtype_v`
         }[self.dtype]
+
+    @property
+    def torch_dtype_v(self) -> torch.dtype:
+        """Type de stockage de V : celui de K, sauf k8v4 (quartets emballés)."""
+        return torch.uint8 if self.k8v4 else self.torch_dtype
 
     @property
     def storage_dim(self) -> int:
         """Dernière dimension des tenseurs k/v : D, ou D/2 emballé."""
         return self.head_dim // 2 if self.rotated else self.head_dim
 
+    @property
+    def storage_dim_v(self) -> int:
+        """Dernière dimension de V : `storage_dim`, sauf k8v4 (D/2, deux codes par octet)."""
+        return self.head_dim // 2 if self.k8v4 else self.storage_dim
+
+    @property
+    def echelles_v(self) -> tuple[int, ...]:
+        """Forme des échelles de V au-delà de (bloc, jeton, tête) : () par jeton, (D/32,) en k8v4."""
+        return (kv_k8v4.groupes(self.head_dim),) if self.k8v4 else ()
+
     def bytes_per_block(self) -> int:
+        if self.k8v4:
+            return self.block_size * kv_k8v4.octets_par_jeton_couche(self.num_kv_heads, self.head_dim)
         elems = 2 * self.block_size * self.num_kv_heads * self.head_dim
         width = 0.5 if self.rotated else 1 if self.quantized else 2
         scale_bytes = (2 * self.block_size * self.num_kv_heads * 2
@@ -411,11 +435,15 @@ class PagedKVCache:
         shape = (cfg.num_blocks, cfg.block_size, cfg.num_kv_heads, cfg.storage_dim)
         dt = cfg.torch_dtype
         self.k = torch.zeros(shape, dtype=dt, device=self.device)
-        self.v = torch.zeros(shape, dtype=dt, device=self.device)
+        # k8v4 : V emballé [.., D/2] uint8 et une échelle par groupe de 32 canaux ;
+        # partout ailleurs V a la forme de K.
+        self.v = torch.zeros(shape[:-1] + (cfg.storage_dim_v,), dtype=cfg.torch_dtype_v,
+                             device=self.device)
         if cfg.quantized:
             sshape = (cfg.num_blocks, cfg.block_size, cfg.num_kv_heads)
             self.k_scale = torch.zeros(sshape, dtype=torch.float16, device=self.device)
-            self.v_scale = torch.zeros(sshape, dtype=torch.float16, device=self.device)
+            self.v_scale = torch.zeros(sshape + cfg.echelles_v, dtype=torch.float16,
+                                       device=self.device)
         else:
             self.k_scale = self.v_scale = None
         # C5-b (kv_canal) : échelles de K par canal, réserve bf16 des blocs
@@ -445,6 +473,8 @@ class PagedKVCache:
             return x.to(self.cfg.torch_dtype), None
         if self.cfg.rotated:
             return kv_lm4.quantifier(x, self.cfg.dtype)
+        if self.cfg.k8v4:
+            return kv_k8v4.quantifier_k(x)       # int8 par jeton, division IEEE (au bit du noyau)
         amax = x.abs().amax(dim=-1, keepdim=True).to(torch.float32)
         if self.cfg.dtype == "int8":
             scale = (amax / 127.0).clamp(min=1e-8)
@@ -462,6 +492,18 @@ class PagedKVCache:
         if self.cfg.rotated:
             return kv_lm4.dequantifier(q, scale, self.cfg.dtype, dtype)
         return (q.to(torch.float32) * scale.to(torch.float32).unsqueeze(-1)).to(dtype)
+
+    # k8v4 : K suit le chemin int8 (`_quantize`/`_dequantize`), V le jumeau par groupe.
+    def _quantize_v(self, x: torch.Tensor) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if self.cfg.k8v4:
+            return kv_k8v4.quantifier_v(x)
+        return self._quantize(x)
+
+    def _dequantize_v(self, q: torch.Tensor, scale: Optional[torch.Tensor],
+                      dtype: torch.dtype) -> torch.Tensor:
+        if self.cfg.k8v4:
+            return kv_k8v4.dequantifier_v(q, scale, dtype)
+        return self._dequantize(q, scale, dtype)
 
     # -- I/O -------------------------------------------------------------
     def write(self, slot_mapping: torch.Tensor, k: torch.Tensor,
@@ -506,6 +548,23 @@ class PagedKVCache:
                     return
             kv_canal.ecrire(self, slot_mapping, k, v)
             return
+        # k8v4 (pièce 104) : un noyau, K int8 par jeton + V int4 par groupe de 32 ;
+        # sans le symbole, le jumeau torch (chemin de repli ci-dessous) écrit la
+        # même chose au bit.
+        if (self.cfg.k8v4 and k.is_cuda and k.dtype == torch.bfloat16
+                and v.dtype == torch.bfloat16):
+            from ..kernels import get_extension, glue_compact
+            ext = get_extension()
+            if ext is not None and hasattr(ext, "kv_write_k8v4"):
+                sm = slot_mapping if slot_mapping.dtype == torch.int64 \
+                    else slot_mapping.to(torch.int64)
+                if not glue_compact("kv"):
+                    k, v = k.contiguous(), v.contiguous()
+                ext.kv_write_k8v4(k, v, sm, self.k.view(-1, *self.k.shape[2:]),
+                                  self.v.view(-1, *self.v.shape[2:]),
+                                  self.k_scale.view(-1, self.k_scale.shape[-1]),
+                                  self.v_scale.view(-1, *self.v_scale.shape[2:]), bs)
+                return
         # Chemin fusionné : amax, quantification et dispersion en un noyau.
         # Le chemin PyTorch demandait une vingtaine de lancements par couche
         # sur des tenseurs de quelques centaines de valeurs.
@@ -552,7 +611,7 @@ class PagedKVCache:
             if slot_mapping.numel() == 0:
                 return
         kq, ks = self._quantize(k)
-        vq, vs = self._quantize(v)
+        vq, vs = self._quantize_v(v)
         blk = torch.div(slot_mapping, bs, rounding_mode="floor")
         off = slot_mapping % bs
         self.k[blk, off] = kq
@@ -568,18 +627,18 @@ class PagedKVCache:
         n_blocks = (length + bs - 1) // bs
         blocks = block_table[:n_blocks]
         k = self.k[blocks].reshape(-1, self.cfg.num_kv_heads, self.cfg.storage_dim)
-        v = self.v[blocks].reshape(-1, self.cfg.num_kv_heads, self.cfg.storage_dim)
+        v = self.v[blocks].reshape(-1, self.cfg.num_kv_heads, self.cfg.storage_dim_v)
         ks = vs = None
         if self.k_scale is not None:
             ks = self.k_scale[blocks].reshape(-1, self.cfg.num_kv_heads)
-            vs = self.v_scale[blocks].reshape(-1, self.cfg.num_kv_heads)
+            vs = self.v_scale[blocks].reshape(-1, self.cfg.num_kv_heads, *self.cfg.echelles_v)
             ks, vs = ks[:length], vs[:length]
         if self.canal:
             kd = kv_canal.dequantifier_cache(self, blocks, dtype)
             return (kd.reshape(-1, self.cfg.num_kv_heads, self.cfg.head_dim)[:length],
-                    self._dequantize(v[:length], vs, dtype))
+                    self._dequantize_v(v[:length], vs, dtype))
         return (self._dequantize(k[:length], ks, dtype),
-                self._dequantize(v[:length], vs, dtype))
+                self._dequantize_v(v[:length], vs, dtype))
 
     def export_block(self, blk: int) -> tuple:
         """Copie un bloc vers l'hôte (mémoire épinglée), échelles comprises."""
@@ -621,22 +680,23 @@ class PagedKVCache:
         k = k.reshape(b, n * self.cfg.block_size, self.cfg.num_kv_heads,
                       self.cfg.storage_dim)
         v = v.reshape(b, n * self.cfg.block_size, self.cfg.num_kv_heads,
-                      self.cfg.storage_dim)
+                      self.cfg.storage_dim_v)
         ks = vs = None
         if self.k_scale is not None:
             ks = self.k_scale[block_tables].reshape(b, -1, self.cfg.num_kv_heads)
-            vs = self.v_scale[block_tables].reshape(b, -1, self.cfg.num_kv_heads)
+            vs = self.v_scale[block_tables].reshape(b, -1, self.cfg.num_kv_heads,
+                                                    *self.cfg.echelles_v)
         if self.canal:
             kd = kv_canal.dequantifier_cache(self, block_tables, dtype)
             return (kd.reshape(b, n * self.cfg.block_size, self.cfg.num_kv_heads, self.cfg.head_dim),
-                    self._dequantize(v, vs, dtype))
-        return (self._dequantize(k, ks, dtype), self._dequantize(v, vs, dtype))
+                    self._dequantize_v(v, vs, dtype))
+        return (self._dequantize(k, ks, dtype), self._dequantize_v(v, vs, dtype))
 
     @property
     def nbytes(self) -> int:
-        n = self.k.numel() * self.k.element_size() * 2
+        n = self.k.numel() * self.k.element_size() + self.v.numel() * self.v.element_size()
         if self.k_scale is not None:
-            n += self.k_scale.numel() * 2 * 2
+            n += (self.k_scale.numel() + self.v_scale.numel()) * 2
         if self.canal:
             n += (self.k_scale_canal.numel() + self.tampon_de.numel() * 4
                   + self.tampon.numel() * 2 + self.tampon_libres.numel() * 4 + 4)
