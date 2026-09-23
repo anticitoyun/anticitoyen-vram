@@ -26,6 +26,8 @@ tokenizers = "=0.23.2"
 minijinja = { version = "2", features = ["loader", "json"] }
 minijinja-contrib = { version = "2", features = ["pycompat"] }
 axum = "0.8.9"
+# déjà tiré par axum (même version) : `stream::unfold` pour le flux SSE de /v1/completions
+futures-util = { version = "0.3.34", default-features = false }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "sync"] }
 object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }
 sha2 = "0.10"
