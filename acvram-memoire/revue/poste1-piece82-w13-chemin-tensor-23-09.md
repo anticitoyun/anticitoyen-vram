@@ -88,3 +88,17 @@ La 71 bis (poste5) a mesuré w13 au banc (−4,0 µs/couche), mais n'a pas pu le
    la GEMM séparée. Prédiction : KL = témoin à 10⁻³ près. Au bit contre les GEMM séparées si l'ordre de réduction
    du Marlin ne dépend pas de N ; sinon ±1 ulp, à mesurer. Même gain de vitesse attendu. Coût : une modification
    du noyau vendu (vLLM, Apache), ≈ 2 h.
+
+## Seuil `MOE_TENSOR_MIN_T = 8` relu sur le SERVI — prédiction écrite avant la prise (23/09 10 h 4x)
+
+La p65 a posé 8 sur la **frontière Engine direct** (b = 4 : GEMV plus rapide de 9,5 % ; b = 8 : tensor de 4,3 %).
+La 79 montre que le Marlin MoE est **~10 % plus rapide sous `serve`** qu'en Engine direct. Le GEMV par paire n'y a pas
+été mesuré, mais il ne dépend pas du nombre d'experts distincts de la même façon.
+
+* **instrument** : `serve` (alias `qkvo-i8c`, sans w13), client de cellule `BANC_SLOTS=2,4,8,12`, 1 024 jetons,
+  fenêtre 10 s par b ; bras **T** `ACVRAM_MOE_TENSOR_MIN_T=2` (tensor à tout godet ≥ 2) contre bras **G**
+  `MIN_T=99` (GEMV partout) ; ordre T puis G, -lgc 2700.
+* **prédiction** : b = 2, G devant (≥ 5 %) ; **b = 4, à égalité à ±3 %** (le point qui bouge) ; b = 8 et 12, T devant
+  (≥ 4 %).
+* **décision écrite d'avance** : MIN_T passe à 4 si T ≥ G + 2 % à b = 4 ; reste à 8 si \|T − G\| < 2 % à b = 4 ; monte si
+  G ≥ T + 2 % à b = 8. **Réserve** : AB sans BA ; un écart < 3 % ne décide rien sans le rejeu BA.
