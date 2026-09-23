@@ -213,9 +213,15 @@ privé de ce jeton — ce qui est exact, et non une approximation.
   Mesuré ici, il fait tomber le débit de 152 à 30 t/s malgré 78 % d'acceptation
   sur du code : le brouillon coûte trop cher pour ce qu'il rapporte.
 - **tête MTP** (`engine/mtp.py`) : la couche `nextn` que portent Qwen3.5 et
-  suivants, DeepSeek compris, et que la conversion jetait. Elle mélange le
-  plongement du jeton émis et l'état caché de la position précédente, puis
-  applique un bloc de transformeur :
+  suivants, DeepSeek compris. Deux conventions de noms de tenseurs sont
+  reconnues (`engine/mtp.py:83-96`, `noms_mtp`) : `model.mtp.<n>.` (GGUF
+  renommé, DeepSeek) et `mtp.layers.<n>.` + `mtp.fc`/`mtp.norm`/
+  `mtp.pre_fc_norm_*` partagés (Qwen3.5, `engine/mtp.py:65-76`, `cles_mtp`) —
+  avant la pièce 105, cette seconde convention n'était pas reconnue : les
+  tenseurs MTP de Qwen3.8-27B étaient convertis mais jamais chargés, et
+  `--speculative auto` retombait sur les n-grammes sans le dire. La tête
+  mélange le plongement du jeton émis et l'état caché de la position
+  précédente, puis applique un bloc de transformeur :
 
   ```
   h' = eh_proj( [ enorm(plongement(t)) ; hnorm(h) ] )
@@ -228,6 +234,13 @@ privé de ce jeton — ce qui est exact, et non une approximation.
   rentable en l'état : son cache se pollue de ses propres états au fil du
   brouillonnage, et chaque jeton proposé traverse `lm_head` en entier, hors
   graphe CUDA. Disponible par `--speculative mtp`, non activée par défaut.
+  `--speculative auto` (`cli.py:796-801`, `repli_speculatif`) choisit `mtp` si
+  le modèle chargé porte une tête reconnue, sinon retombe sur `ngram` avec un
+  repli **nommé**, jamais un `None` silencieux : la raison vient de
+  `model.mtp_raison` (posée par le chargeur) et est portée sur
+  `speculator.repli` (`cli.py:830`). Reste : rien ne lit `speculator.repli`
+  ailleurs dans le dépôt — la bannière de démarrage (`cli.py:886-888`)
+  n'imprime que `args.speculative`, pas la raison du repli.
 
 ## L'étage hôte comme appareil de calcul
 
