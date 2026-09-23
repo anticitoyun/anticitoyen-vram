@@ -4694,7 +4694,8 @@ __global__ void moe_aligner_petit_kernel(const int *__restrict__ eid, int G, int
                                          int *__restrict__ num_post,
                                          const __nv_bfloat16 *__restrict__ x = nullptr,
                                          const __nv_bfloat16 *__restrict__ table = nullptr,
-                                         __nv_bfloat16 *__restrict__ xs = nullptr, int K = 0, int top_k = 1) {
+                                         __nv_bfloat16 *__restrict__ xs = nullptr, int K = 0, int top_k = 1,
+                                         long ld_table = 0) {
     // Pièce 123 : blocs 1.. (lancés seulement si xs est demandé) — entrée AWQ PAR PAIRE du chemin tensor,
     // xs[g, k] = bf16(x[g / top_k, k] / table[e(g), k]), division IEEE (__fdiv_rn : --use_fast_math rendrait
     // l'approchée ; le témoin torch divise en IEEE) — ligne par ligne celle de moe.py (x[tok] / s[eid], bf16).
@@ -4705,7 +4706,7 @@ __global__ void moe_aligner_petit_kernel(const int *__restrict__ eid, int G, int
             const int g = (int)(i / K), k = (int)(i - (long)g * K);
             const int e = max(eid[g], 0);
             const float v = __bfloat162float(x[(long)(g / top_k) * K + k]);
-            const float sc = __bfloat162float(table[(long)e * K + k]);
+            const float sc = __bfloat162float(table[(long)e * ld_table + k]);   // table [E, ≥ K] : pas de ligne réel
             xs[i] = __float2bfloat16(__fdiv_rn(v, sc));
         }
         return;
@@ -4794,7 +4795,7 @@ void moe_aligner_petit_xs(torch::Tensor eid, int64_t E, int64_t bloc,
         sorted_ids.data_ptr<int>(), expert_ids.data_ptr<int>(), num_post.data_ptr<int>(),
         reinterpret_cast<const __nv_bfloat16 *>(x.data_ptr()),
         reinterpret_cast<const __nv_bfloat16 *>(table.data_ptr()),
-        reinterpret_cast<__nv_bfloat16 *>(xs.data_ptr()), K, (int)top_k);
+        reinterpret_cast<__nv_bfloat16 *>(xs.data_ptr()), K, (int)top_k, (long)table.stride(0));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
