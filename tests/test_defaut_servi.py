@@ -138,24 +138,6 @@ DEFAUTS_PAR_VERSION = {
         },
         "mla_core=tf32(≤2048 clés) mla_prep=grille mla_glue=2 glue=compact(8) prefill_glue=compact",
     ),
-    "0.6.39": (                                                          # 0.6.38 + 4 warps d attention aux godets ≤ 4 (pièce 97,
-        {                                                                # 23/09 : au bit, −0,7 à −1,5 µs/couche au banc)
-            "GLUE_COMPACT": "1", "ATTN_WARPS_COMPACT": "8", "PREFILL_COMPACT": "1",
-            "MLA_CORE": "tf32", "MLA_CORE_MAX_CLES": "2048", "MLA_GLUE": "2",
-            "MARLIN_DISTINCT": "0", "MOE_DECODE_MMA": "1", "MOE_DECODE_MMA_MARLIN": "0",
-            "KV_INT8_CANAL": "0", "GODETS_B": "1", "GEMV_LAYOUT": "marlin", "PILE_SANS_RENDU": "",
-            "CPUS": "", "MLA_PREP_GRILLE": "1",
-            "SAMPLER_LENT": "0", "RAPATRIEMENT_FLUX": "0", "ETROITES_FORME": "",
-            "CAPTURE_MEM_MIN_MIO": "1024", "CAPTURE_DELAI_S": "120",
-            "MOE_TENSOR": "1", "MOE_TENSOR_FUSION": "1", "MOE_TENSOR_MIN_T": "8",
-            "GEMV_SPLITK": "1",
-            "MOE_W13": "1",                                              # w13 au décodage, préfill séparé — pièce 82 ter
-            "MAX_GRAPHS": "64",                                          # plafond relevé, sans éviction — pièce 85
-            "ATTN_REDUC_DEROULEE": "1",                                  # réduction déroulée, au bit (−1,9 %) — pièce 92
-            "ATTN_WARPS_PETITS": "4",                                    # godets ≤ 4, au bit — pièce 97
-        },
-        "mla_core=tf32(≤2048 clés) mla_prep=grille mla_glue=2 glue=compact(8,petits=4) prefill_glue=compact",
-    ),
 }
 
 

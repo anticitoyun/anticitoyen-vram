@@ -273,9 +273,6 @@ VARIABLES: tuple[Variable, ...] = (
              "0.6.31 (acvram/hote.py) : affinité CPU du processus (`0-15`, `0-3,8`), posée par os.sched_setaffinity à l'import et à la construction d'Engine ; vide = aucune affinité (défaut) ; la ligne porte hote=…,cpus<plages relues>"),
     Variable("ATTN_WARPS_COMPACT", "8", ("acvram.kernels.attn_paginee", "WARPS_COMPACT"), "4",
              "C15-3d bis : warps du noyau d attention paginée fusionné (GLUE_COMPACT=1) ; DÉFAUT 8 (poste2 05 h 15, ABAB : B8 1 417 t·s⁻¹ · 0,2073 J = +11,5 % · 0,966 × A ; B4 1 386 · 0,2116 : 4 warps ne rend rien en W, 369 = 369, et perd 2 %) ; 4 = bras"),
-    Variable("ATTN_WARPS_PETITS", "4", ("acvram.kernels.attn_paginee", "WARPS_PETITS"), "8",
-             "pièce 97 (23/09) : warps de l attention fusionnée aux godets B ≤ 4 (ATTN_WARPS_COMPACT au-delà) ; au bit du "
-             "8 (banc L2 froid 6/6 + test), −0,7 à −1,5 µs/couche aux godets 1/2/4 (pièce 96) | 8 témoin"),
     Variable("ATTN_REDUC_DEROULEE", "1", ("acvram.kernels.attn_paginee", "REDUC_DEROULEE"), "0",
              "pièce 92 (23/09) : réduction des tranches de l attention fusionnée déroulée (mêmes sommes, même ordre : au bit, 11/11 cellules du banc L2 froid + test) ; −1,9 % sur le lot b=12, −8,7 % à b=1 ctx 2 048 | 0 témoin boucle série"),
     Variable("ROUTAGE_TEMOIN", "0", ("acvram.engine.moe", "_ROUTAGE_TEMOIN"), "0",
@@ -504,10 +501,7 @@ def glue_texte() -> str:
         items = getattr(_k, "_GLUE_COMPACT_ITEMS", None) or ""
         # pièce 92 : réduction déroulée par défaut, au bit de la boucle série — seul le témoin est nommé
         serie = "" if getattr(_ap, "REDUC_DEROULEE", True) else ",reduc=serie"
-        # pièce 97 : warps des godets ≤ 4 nommés s'ils diffèrent de ceux des grands godets
-        petits = getattr(_ap, "WARPS_PETITS", _ap.WARPS_COMPACT)
-        petits = f",petits={petits}" if petits != _ap.WARPS_COMPACT else ""
-        return f"glue=compact({_ap.WARPS_COMPACT}" + petits + (f",items={items}" if items else "") + serie + ")"
+        return f"glue=compact({_ap.WARPS_COMPACT}" + (f",items={items}" if items else "") + serie + ")"
     except Exception as exc:                              # noqa: BLE001
         return f"glue=?({type(exc).__name__})"
 
