@@ -876,7 +876,9 @@ class Fenetre(Adw.ApplicationWindow):
             self.toast("ComfyUI non configuré (extras.comfy_start de parc.toml)" if comfy_start is None
                        else f"Script absent : {comfy_start}")
             return
-        verrou = Path("/tmp/acvram-carte-0.lock.qui")
+        # ACVRAM_VERROU (même variable que carte.sh et surveillance-groupe.sh) : un test pose un verrou factice
+        # ailleurs que sur le vrai — jxm 24/09 : le test du clic écrivait puis effaçait le vrai .qui en pleine mesure
+        verrou = Path(os.environ.get("ACVRAM_VERROU", "/tmp/acvram-carte-0.lock") + ".qui")
         if verrou.exists() and verrou.read_text().strip():
             self.toast("ComfyUI : une mesure est en cours (verrou acvram)")
             return
