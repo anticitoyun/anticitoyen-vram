@@ -12,7 +12,8 @@ par un compilateur différent sur la même carte, pas le coût de l'hôte.
 | faisabilité sm_120 | tenue (`acvram-memoire/revue/poste4-mojo-etape0-23-09.md`) |
 | chargement + décodage glouton b=1 + `/v1/chat/completions` | **MAX le fournit nativement** (`max serve`), pas de code moteur à écrire — c'est le point (b) : MAX EST le moteur Mojo |
 | porte (sha256 du texte, 5 invites, glouton, `tests/invites.json`) | **2/5 au bit** contre acvram (mêmes poids bf16 source, `outils/comparer.py`) |
-| KL de repli (contrat §3, si l'identité au bit est impossible) | **non écrit** — reste |
+| KL de repli (contrat §3, `outils/kl_reference.py`, dump HF `outils/dump_hf_reference.py`) | **écrite et jouée** — acvram KL_max=0,00149 (tenu, ≤0,74) ; MAX KL_max=20,01 (**NON tenu**) |
+| cellule débit/énergie (contrat étape 2, conditionnée à « si tenu ») | **ne se lance pas** — porte KL non tenue |
 
 ## Contre quoi la porte est jouée
 
@@ -26,9 +27,16 @@ en même temps sans les borner), comparés par sha256 du texte de réponse.
 
 Les deux moitiés divergent tôt (dès la deuxième phrase de la pensée `<think>`), pas seulement au bruit
 d'arrondi final : c'est cohérent avec des noyaux différents (MAX/Mojo contre nos noyaux Triton/CUDA — même
-alerte que pièce 119/120 sur Rust : c'est l'instruction émise qui compte). Le contrat prévoit ce cas
-(« sinon KL ≤ 0,74 contre la même référence HF ») — pas encore mesuré ici : demande les logprobs de
-référence HF, hors scope de ce squelette.
+alerte que pièce 119/120 sur Rust : c'est l'instruction émise qui compte).
+
+## Porte KL — jouée, NON tenue pour MAX (`acvram-memoire/revue/poste4-mojo-kl-verdict-24-09.md`)
+
+acvram KL_max = 0,00149 (tenu). MAX KL_max = 20,01 (non tenu), mais **concentré** : 7/8 jetons par invite
+sont exacts (KL≈0) contre la référence HF bf16, une seule position (après « Okay », jeton attendu `,`) porte
+tout l'écart — MAX y rend la virgule pleine chasse `，` au lieu de `,`, 5/5 invites, même position. Pas un
+bruit de noyau diffus : un point de divergence net (sampler ou table de sortie MAX sur ce jeton précis),
+à diagnostiquer avant de relancer la porte. La cellule débit/énergie (étape 2, conditionnée) ne se lance
+pas tant que cette porte n'est pas tenue.
 
 ## Environnement (épinglé, contrat §2)
 
@@ -57,5 +65,5 @@ contre le nvfp4 du parc, sur ordre du chef après l'étape 0.
 
 ## Reste
 
-KL de repli (logprobs HF de référence) ; étape 2 (question a, si demandée) : FFI Mojo vers nos noyaux —
-non commencée, pas dans ce contrat pour l'instant.
+Diagnostiquer la virgule pleine chasse (MAX) avant de rejouer la porte KL ; étape 2 (question a, si
+demandée) : FFI Mojo vers nos noyaux — non commencée, pas dans ce contrat pour l'instant.
