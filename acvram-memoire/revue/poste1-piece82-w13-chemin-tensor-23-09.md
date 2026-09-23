@@ -48,7 +48,7 @@ La 71 bis (poste5) a mesuré w13 au banc (−4,0 µs/couche), mais n'a pas pu le
 * **instrument** : code `bb6ec0c3` (noyau `nvfp4_gemv_marlin_kernel` à largeur stockée `ldn`, `nvfp4_gemv_marlin_w13`, w13 au chargement, GEMM w13 au préfill et au décodage tensor) ; `tests/test_moe_w13.py` ; empreinte GEMV contre `origin/main` ; KL par `kl-b.py` de la p81 (inchangé) ; serve sous nsys, lecture sur le train de 509 pas de la 79 (`scratchpad/poste1-p82-23-09/`)
 * **commit** : bb6ec0c3 ; alias `Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c`
 * **régime** : -lgc 2700 (2 667-2 669 MHz côté client) ; compute-apps début = fin = llama-server 4627 ; `experts_layout=marlin-w13` lu sur la ligne de régime du bras w13
-* **scellé** : table « Prédiction et seuils » ci-dessus (commit 6ae… avant tout code)
+* **scellé** : table « Prédiction et seuils » ci-dessus (commit 9419e468, avant tout code)
 * **mesuré** :
 
 | critère | prédit / seuil | mesuré | issue |
@@ -64,7 +64,7 @@ La 71 bis (poste5) a mesuré w13 au banc (−4,0 µs/couche), mais n'a pas pu le
 
 * **verdict : vitesse TENUE, qualité REFUSÉE au critère écrit.** w13 ne passe **pas** au défaut. Il reste en opt-in
   `ACVRAM_MOE_W13=1` : le code est au bit sur tout le chemin par défaut, et le GEMV w13 est au bit du chemin séparé.
-* **durée** : prévue ≤ 10 min de carte ; tenue poste1-p82-tests=tenue=41s poste1-p82-tests-r=tenue=30s poste1-p82-empreinte=tenue=27s poste1-p82-kl=tenue=33s poste1-p82-kl0=tenue=34s poste1-p82-serve=tenue=134s  (tests, empreinte, KL, témoin KL, serve).
+* **durée** : prévue ≤ 10 min de carte ; tenue **5 min 00** en six prises (`carte.sh` : tests 41 + 30 s, empreinte 27 s, KL 33 s, témoin KL 34 s, serve 134 s).
 
 ### Où est l'écart de KL, et ce qu'il dit
 
