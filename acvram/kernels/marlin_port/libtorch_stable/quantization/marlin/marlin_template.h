@@ -267,7 +267,8 @@ __global__ void Marlin(
     bool has_bias,
     bool use_atomic_add,   // whether to use atomic add to reduce
     bool use_fp32_reduce,  // whether to use fp32 global reduce
-    int max_shared_mem) {
+    int max_shared_mem,
+    int gs_par_colonne) {  // port acvram (pièce 101) : 1 = échelle globale NVFP4 par colonne (global_scale_ptr[N])
   // Each threadblock processes one "stripe" of the B matrix with (roughly) the
   // same size, which might involve multiple column "slices" (of width 16 *
   // `thread_n_blocks`). Stripes are defined as shown in the 3x3 matrix 5 SM
@@ -1653,8 +1654,25 @@ __global__ void Marlin(
     // global write patterns
     auto write = [&](int idx, float c0, float c1, FragS& s, FragS& b_bias) {
       if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
-        c0 *= global_scale_f32;
-        c1 *= global_scale_f32;
+        if (gs_par_colonne) {
+          // Port acvram (pièce 101) : échelle globale par colonne de sortie, en fp32, au même endroit que l'échelle
+          // scalaire. Colonne dans la tuile : `idx` indexe sh_red en paires (chemin normal : c0, c1 = colonnes
+          // 2h, 2h+1 d'une même ligne) ou en scalaires (m_block_size_8 : c0, c1 = même colonne, lignes r et r+1) ;
+          // une ligne de sh_red fait c_sh_stride int4 = 4·c_sh_stride paires = 8·c_sh_stride scalaires.
+          const int col0 = 16 * thread_n_blocks * slice_col;
+          if constexpr (m_block_size_8) {
+            const float g = global_scale_ptr[col0 + idx % (8 * c_sh_stride)];
+            c0 *= g;
+            c1 *= g;
+          } else {
+            const int col = col0 + 2 * (idx % (4 * c_sh_stride));
+            c0 *= global_scale_ptr[col];
+            c1 *= global_scale_ptr[col + 1];
+          }
+        } else {
+          c0 *= global_scale_f32;
+          c1 *= global_scale_f32;
+        }
       }
       c_scalar_t2 res =
           Cdtype::nums2num2(Cdtype::float2num(c0), Cdtype::float2num(c1));

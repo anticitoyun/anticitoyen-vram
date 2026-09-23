@@ -426,9 +426,24 @@ def espace_travail(device, blocs_par_sm: int = 4) -> torch.Tensor:
     return torch.zeros(sms * blocs_par_sm, dtype=torch.int32, device=device)
 
 
+def preparer_dense(t, repack=None):
+    """Pièce 101 : un poids dense NVFP4 acvram (`NVFP4Tensor` [N, K]) → (w_marlin [K/16, 2N], s_marlin [K/16, N],
+    g_marlin) pour `gemm_dense`. Si ``t`` porte `global_scale_rows` (q/k/v empilés, une échelle globale par
+    segment), g_marlin est PAR COLONNE [N] — même traitement (×2^119 / facteur, exact : puissances de deux) que
+    l'échelle scalaire, appliqué en fp32 dans l'épilogue du noyau porté (marlin_template.h, `gs_par_colonne`) ;
+    sinon [1]."""
+    w, s_, g = preparer_pile(t.qweight[None], t.block_scale[None], t.global_scale.reshape(1).float(), repack=repack)
+    gsr = getattr(t, "global_scale_rows", None)
+    if gsr is not None:
+        facteur = facteur_nvfp4(t.block_scale[None].to(torch.bfloat16))
+        g = traiter_echelle_globale(gsr.float().reshape(-1), facteur).contiguous()
+        assert g.numel() == t.qweight.shape[0], (g.numel(), t.qweight.shape)
+    return w[0], s_[0], g
+
+
 def gemm_dense(a: torch.Tensor, w_marlin, s_marlin, g_marlin, size_n: int, size_k: int, workspace) -> torch.Tensor:
-    """Pièce 101 : GEMM Marlin DENSE NVFP4 (bf16 → bf16), un poids préparé par `preparer_pile` (E = 1 : on passe
-    ``w_marlin[0]``, ``s_marlin[0]``, ``g_marlin``). Réduction fp32 déterministe (use_fp32_reduce), sans atomique —
+    """Pièce 101 : GEMM Marlin DENSE NVFP4 (bf16 → bf16), un poids préparé par `preparer_dense` (``g_marlin`` [1]
+    scalaire, ou [N] par colonne). Réduction fp32 déterministe (use_fp32_reduce), sans atomique —
     les arguments de `apply_fp4_marlin_linear` de vLLM (marlin_utils_fp4.py:157-219) à atomique coupée."""
     ops = charger()
     return ops.marlin_gemm(a, None, w_marlin, None, s_marlin, None, g_marlin, None, None, None, workspace,

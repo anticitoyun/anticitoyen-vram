@@ -332,7 +332,8 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                bool has_act_order, bool is_k_full, bool has_zp, int num_groups,
                int group_size, int dev, cudaStream_t stream, int thread_k_init,
                int thread_n_init, int sms, bool use_atomic_add,
-               bool use_fp32_reduce, bool is_zp_float) {
+               bool use_fp32_reduce, bool is_zp_float,
+               bool gs_par_colonne) {   // port acvram (pièce 101) : échelle globale NVFP4 par colonne
   bool is_a_8bit = a_type.size_bits() == 8;
   STD_TORCH_CHECK(prob_m > 0 && prob_n > 0 && prob_k > 0, "Invalid MNK = [",
                   prob_m, ", ", prob_n, ", ", prob_k, "]");
@@ -529,7 +530,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
         A_ptr, B_ptr, C_ptr, C_tmp_ptr, bias_ptr, a_s_ptr, b_s_ptr, g_s_ptr, zp_ptr,
         g_idx_ptr, num_groups,
         prob_m_split, prob_n, prob_k, lda, locks, has_bias, part_use_atomic_add,
-        use_fp32_reduce, max_shared_mem_new);
+        use_fp32_reduce, max_shared_mem_new, gs_par_colonne ? 1 : 0);
     // clang-format on
 
     bool is_a_8bit = a_type.size_bits() == 8;
@@ -872,6 +873,12 @@ torch::stable::Tensor marlin_gemm(
   STD_TORCH_CHECK(
       global_scale.scalar_type() == torch::headeronly::ScalarType::Float,
       "scalar type of global_scale must be float");
+  // Port acvram (pièce 101) : une échelle globale NVFP4 par COLONNE de sortie (q/k/v empilés, chacun sa propre
+  // échelle globale : `global_scale_rows` d'acvram), appliquée en fp32 dans l'épilogue comme l'échelle scalaire.
+  const bool gs_par_colonne = global_scale.numel() > 1;
+  if (gs_par_colonne)
+    STD_TORCH_CHECK(global_scale.numel() == size_n,
+                    "global_scale par colonne : ", global_scale.numel(), " valeurs pour size_n = ", size_n);
   if (a_type.size_bits() == 16) {
     STD_TORCH_CHECK(
         a.scalar_type() == c.scalar_type(),
@@ -888,7 +895,7 @@ torch::stable::Tensor marlin_gemm(
       workspace.mutable_data_ptr(), a_type, b_type, c_type, s_type, has_bias,
       has_act_order, is_k_full, has_zp, num_groups, group_size, device_index,
       get_current_cuda_stream(device_index), thread_k, thread_n, sms,
-      use_atomic_add, use_fp32_reduce, is_zp_float);
+      use_atomic_add, use_fp32_reduce, is_zp_float, gs_par_colonne);
 
   return c;
 }
