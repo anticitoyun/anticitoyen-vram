@@ -481,7 +481,11 @@ def main() -> int:
         chemins = {"kimi_dir": str(P.kimi_dir).replace(str(Path.home()), "~"), "tsv_dir": str(P.tsv_dir).replace(str(Path.home()), "~"),
                    "secrets": str(P.secrets).replace(str(Path.home()), "~"), "bin": str(P.bin).replace(str(Path.home()), "~"),
                    "mcp_claude": str(P.mcp_claude).replace(str(Path.home()), "~"), "icone_claude": str(P.icone_claude).replace(str(Path.home()), "~"),
-                   "dossiers_lancement": [str(d).replace(str(Path.home()), "~") for d in P.dossiers_lancement], "lib": str(P.lib)}
+                   "dossiers_lancement": [str(d).replace(str(Path.home()), "~") for d in P.dossiers_lancement],
+                   # Fallback D1 peut retourner un chemin d'arbre (/home/…) quand le paquet n'est pas
+                   # installé. On normalise vers le chemin canonique du paquet pour que le toml reste
+                   # portable ; le fallback D1 s'activera de nouveau si le paquet est absent.
+                   "lib": str(P.lib) if str(P.lib).startswith("/usr/") else "/usr/share/acvram-parc/kimi-menu.lib.sh"}
         if ecrire_parc_toml(a.config, chemins, racines, P.profondeur, moteurs, outils, P.extras):
             changes.append(a.config.name)
         # minuteur modeles-a-jour

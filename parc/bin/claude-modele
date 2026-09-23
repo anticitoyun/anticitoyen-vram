@@ -133,8 +133,9 @@ case "$choix" in
     exec "$PARC_BIN/claude-local" "$@" ;;
   acvram-*)
     # moteur acvram : NVFP4 (sm_120) / INT4 (2e carte),
-    # /v1/messages (API Anthropic) expose nativement par le serveur
-    "$PARC_BIN/acvram-serveur" "$choix" || exit 1
+    # /v1/messages (API Anthropic) expose nativement par le serveur.
+    # claude CLI charge ~19096 jetons au démarrage (PROMPT_BASE=15000 + MIN_REPONSE=4096).
+    CTX_CLIENT_MIN=19096 "$PARC_BIN/acvram-serveur" "$choix" || exit 1
     ctx=$(grep "^$choix	" "$PARC_ACVRAM_TSV" 2>/dev/null | cut -f3)
     ctx_client=$(grep "^$choix	" "$PARC_ACVRAM_TSV" 2>/dev/null | cut -f4)
     [ -n "$ctx_client" ] && [ "$ctx_client" -gt "${ctx:-0}" ] 2>/dev/null && ctx="$ctx_client"

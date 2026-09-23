@@ -51,9 +51,10 @@ def test_acvram_serveur_imprime_ce_qu_il_execute(tmp_path, faux):
 def test_claude_modele_imprime_ce_qu_il_execute_pour_les_quatre_moteurs(tmp_path, faux, alias):
     home = Path(os.environ["HOME"]); tsv = home / "TSV"; tsv.mkdir()
     dossier = tmp_path / "modele"; dossier.mkdir(); (dossier / "m.gguf").write_bytes(b"\0" * (2 << 20))
-    (tsv / "acvram-chemins.tsv").write_text(f"acvram-un\t{dossier}\t4096\n")
-    (tsv / "vllm-chemins.tsv").write_text(f"vllm-un\t{dossier}\t8192\n")
-    (tsv / "gguf-chemins.tsv").write_text(f"gguf-un\t{dossier}\t4096\t\n".replace("gguf-un", "llamacpp-un"))
+    # ctx ≥ 19096 (PROMPT_BASE=15000 + MIN_REPONSE=4096) — sinon lancer_claude refuse (D2)
+    (tsv / "acvram-chemins.tsv").write_text(f"acvram-un\t{dossier}\t32768\n")
+    (tsv / "vllm-chemins.tsv").write_text(f"vllm-un\t{dossier}\t32768\n")
+    (tsv / "gguf-chemins.tsv").write_text(f"gguf-un\t{dossier}\t32768\t\n".replace("gguf-un", "llamacpp-un"))
     for lanceur in ("acvram-serveur", "llamacpp-appoint", "vllm-serveur", "llamacpp-serveur"):
         _exe(faux / lanceur, "#!/bin/bash\nexit 0\n")
     cfg = tmp_path / "parc.toml"
