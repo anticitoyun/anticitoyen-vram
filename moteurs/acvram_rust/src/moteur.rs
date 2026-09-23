@@ -241,6 +241,29 @@ impl Moteur {
         Ok(())
     }
 
+    /// Relit les lignes KV des positions 0..longueur (blocs en identité) : (nom, octets) par couche, dans le format
+    /// du vidage Python (`couche{i}.k|v|k_scale|v_scale`) — bisection du préfill.
+    pub fn lire_kv(&self, longueur: u32) -> Resultat<Vec<(String, Vec<u8>, Vec<usize>)>> {
+        let spec = &self.manifeste.model;
+        let (hkv, d) = (spec.num_key_value_heads, spec.head_dim);
+        let l = longueur as usize;
+        let mut v = Vec::new();
+        self.flux.synchronize().map_err(|e| erreur!("{e:?}"))?;
+        for (i, c) in self.kv.iter().enumerate() {
+            for (nom, src, octets, forme) in [("k", c.kc, l * hkv * d, vec![l, hkv, d]), ("v", c.vc, l * hkv * d, vec![l, hkv, d]),
+                                              ("k_scale", c.ks, l * hkv * 2, vec![l, hkv]), ("v_scale", c.vs, l * hkv * 2, vec![l, hkv])] {
+                let mut b = vec![0u8; octets];
+                // SAFETY : régions du cache du moteur, lues après synchronisation.
+                let r = unsafe { cudarc::driver::sys::cuMemcpyDtoH_v2(b.as_mut_ptr() as *mut _, src, octets) };
+                if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+                    return Err(erreur!("KV vers l'hôte : {r:?}"));
+                }
+                v.push((format!("couche{i}.{nom}"), b, forme));
+            }
+        }
+        Ok(v)
+    }
+
     /// Place les lignes KV de l'invite (positions 0..L) vidées par le Python ; blocs en identité, donc la
     /// ligne p est à l'octet p·HKV·D du cache.
     pub fn injecter_kv(&self, fichier: &Path) -> Resultat<u32> {
