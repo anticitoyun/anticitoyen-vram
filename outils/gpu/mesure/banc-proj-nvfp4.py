@@ -9,7 +9,10 @@ Formes : qkv [N 5 120, K 2 048], o [N 2 048, K 4 096] ; M ∈ {12, 1}. L2 froid 
 information. Justesse de chaque bras : erreur relative max par ligne contre x · W déquantifié en fp64 (preuve que le
 bras calcule ce qu'il dit, pas un critère du port).
 
-    outils/carte.sh <venv>/bin/python outils/gpu/mesure/banc-proj-nvfp4.py {vllm|acvram} SORTIE.json
+Bras `acvram-nvfp4` (information, suite (1) du chef) : NOTRE nvfp4 par le même dispatcheur (`quantize_nvfp4`, une
+échelle globale par poids) — `gemm_dense_etroit` à 4 ≤ M ≤ 32, `nvfp4_gemv` en dessous ; chemin compté.
+
+    outils/carte.sh <venv>/bin/python outils/gpu/mesure/banc-proj-nvfp4.py {vllm|acvram|acvram-nvfp4} SORTIE.json
 """
 from __future__ import annotations
 
@@ -133,10 +136,55 @@ def bras_acvram(res):
         torch.cuda.empty_cache()
 
 
+def bras_acvram_nvfp4(res):
+    racine = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    sys.path.insert(0, racine)
+    from acvram import kernels as K_
+    from acvram.kernels import backends, gemm_dense_etroit as gde
+    from acvram.quant.nvfp4 import quantize_nvfp4, dequantize_nvfp4
+    import triton
+    if not os.path.realpath(K_.__file__).startswith(os.path.realpath(racine) + os.sep):
+        raise SystemExit(f"acvram importé de {K_.__file__}, pas de l'arbre {racine}")
+    appels = {"gemm_dense_etroit": 0}
+    _gde = gde.gemm_dense_etroit
+
+    def compte(*a, **k):
+        appels["gemm_dense_etroit"] += 1
+        return _gde(*a, **k)
+    gde.gemm_dense_etroit = compte
+    res["modules"] = {"kernels": K_.__file__, "triton": triton.__version__, "DENSE_NVFP4": K_._DENSE_NVFP4}
+    print(f"acvram nvfp4 : {K_.__file__} · triton {triton.__version__} · DENSE_NVFP4={K_._DENSE_NVFP4}", flush=True)
+    g = torch.Generator(device="cuda").manual_seed(100)
+    for nom, (N, K) in FORMES.items():
+        poids = []
+        for _ in range(COUCHES):
+            w = torch.randn(N, K, device="cuda", generator=g, dtype=torch.bfloat16) * 0.02
+            poids.append(quantize_nvfp4(w))
+        ref_w = dequantize_nvfp4(poids[0], torch.float32).double()[:, :K]
+        for M in LOTS:
+            x = [torch.randn(M, K, device="cuda", generator=g, dtype=torch.bfloat16) for _ in range(COUCHES)]
+            y = [None] * COUCHES
+
+            def pas():
+                for i in range(COUCHES):
+                    y[i] = backends.matmul(x[i], poids[i])
+            appels["gemm_dense_etroit"] = 0
+            pas()
+            chemin = "gemm_dense_etroit" if appels["gemm_dense_etroit"] == COUCHES else f"autre({appels['gemm_dense_etroit']} dense)"
+            err = erreur(y[0], x[0].double() @ ref_w.t())
+            cel = {"forme": nom, "N": N, "K": K, "M": M, "chemin": chemin, "us": round(chrono_graphe(pas), 2),
+                   "noyaux_us": round(noyaux_us(pas), 2), "err_rel_max": err, "octets_poids": int(poids[1].nbytes)}
+            res["cellules"].append(cel)
+            print(f"{nom:3s} M={M:2d}  nvfp4 acvram {cel['us']:6.2f} µs (noyaux {cel['noyaux_us']:6.2f})  err {err:.2e}  "
+                  f"poids {cel['octets_poids'] / 1e6:.2f} Mo  chemin {chemin}", flush=True)
+        del poids
+        torch.cuda.empty_cache()
+
+
 def main() -> int:
     mode, chemin = sys.argv[1], sys.argv[2]
     res = {"mode": mode, "torch": torch.__version__, "cellules": []}
-    {"vllm": bras_vllm, "acvram": bras_acvram}[mode](res)
+    {"vllm": bras_vllm, "acvram": bras_acvram, "acvram-nvfp4": bras_acvram_nvfp4}[mode](res)
     json.dump(res, open(chemin, "w"), ensure_ascii=False, indent=1)
     return 0
 
