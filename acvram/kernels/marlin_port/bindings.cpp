@@ -23,4 +23,13 @@ STABLE_TORCH_LIBRARY(acvram_marlin, m) {
       "bool is_full_k, bool use_atomic_add,"
       "bool use_fp32_reduce, bool is_zp_float,"
       "int thread_k, int thread_n, int blocks_per_sm) -> Tensor");
+  // Pièce 62 (23/09) : alignement des paires par blocs d expert, noyau CUDA de vLLM
+  // (csrc/libtorch_stable/moe/moe_align_sum_kernels.cu, 2 lancements ≈ 3 µs) à la place de
+  // l aligneur Triton du 18/09 (12 µs par couche : 0,57 ms/pas, tout le gain du GEMM tensor).
+  m.def(
+      "moe_align_block_size(Tensor topk_ids, int num_experts,"
+      "                     int block_size, Tensor! sorted_token_ids,"
+      "                     Tensor! experts_ids,"
+      "                     Tensor! num_tokens_post_pad,"
+      "                     Tensor? maybe_expert_map) -> ()");
 }

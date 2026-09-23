@@ -81,7 +81,8 @@ def charger(verbose: bool = False, compiler: bool = True):
         return None                      # le moteur ne compile jamais sous le verrou (REGLES § 6)
     moe = ICI / "libtorch_stable" / "moe" / "marlin_moe_wna16"
     sources = [str(ICI / "bindings.cpp"), str(moe / "ops.cu"),
-               str(ICI / "libtorch_stable" / "quantization" / "marlin" / "gptq_marlin_repack.cu")]
+               str(ICI / "libtorch_stable" / "quantization" / "marlin" / "gptq_marlin_repack.cu"),
+               str(ICI / "libtorch_stable" / "moe" / "moe_align_sum_kernels.cu")]      # pièce 62 : aligneur CUDA
     sources += sorted(glob.glob(str(moe / "sm80_kernel_*.cu")))
     cache = dossier_cache()
     cache.mkdir(parents=True, exist_ok=True)
@@ -543,6 +544,26 @@ def _depaqueter_triton(w: torch.Tensor, s: torch.Tensor, g: torch.Tensor, out: t
     _depaqueter_kernel[(E * KT * NT,)](w.contiguous().view(torch.uint8), s.contiguous().view(torch.uint8),
                                        g.contiguous(), out.view(torch.int16), KT, NT, K, N,
                                        DEUX_MOINS_119=2.0 ** -119, num_warps=4)
+
+
+def aligner_blocs_cuda(flat_e: torch.Tensor, block_size: int, num_experts: int, tampons=None):
+    """Pièce 62 (23/09) : l aligneur CUDA de vLLM (`moe_align_block_size`, 2 lancements, ≈ 3 µs) — mêmes
+    sorties que `aligner_blocs_capturable` (sorted_ids sentinelle G, expert_ids par bloc, num_post),
+    tailles FIXES, capturable, ≈ 4 × moins cher que l aligneur Triton (12 µs par couche mesurés en service).
+    ``flat_e`` [G] int32 (expert de chaque paire, ordre jeton-majeur, aucun < 0)."""
+    ops = charger(compiler=False)
+    G = flat_e.numel()
+    E = num_experts
+    P = G + E * (block_size - 1)
+    P = -(-P // block_size) * block_size
+    if tampons is None:
+        sorted_ids = torch.empty(P, dtype=torch.int32, device=flat_e.device)
+        expert_ids = torch.empty(P // block_size, dtype=torch.int32, device=flat_e.device)
+        num_post = torch.empty(1, dtype=torch.int32, device=flat_e.device)
+    else:
+        sorted_ids, expert_ids, num_post = tampons
+    ops.moe_align_block_size(flat_e.view(1, -1) if flat_e.dim() == 1 else flat_e, E, block_size, sorted_ids, expert_ids, num_post, None)
+    return sorted_ids, expert_ids, num_post
 
 
 def aligner_blocs_capturable(flat_e: torch.Tensor, block_size: int, num_experts: int, tampons=None):

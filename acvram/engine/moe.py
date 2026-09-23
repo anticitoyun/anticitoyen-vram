@@ -716,7 +716,7 @@ class MoEBlock(nn.Module):
 
     # Chemins de DÉCODAGE MoE, tels que `_chemin` les compte : la ligne de régime
     # imprime celui qui a été atteint (runner.chemin_moe_atteint), jamais l env.
-    CHEMINS_DECODAGE = ("gemv_marlin", "gemv_v1", "decode_mma", "decode_mma_marlin", "bmm")
+    CHEMINS_DECODAGE = ("gemv_marlin", "gemv_v1", "decode_mma", "decode_mma_marlin", "bmm", "marlin_tensor")
 
     def _chemin(self, nom: str) -> None:
         """Compteur du chemin RÉELLEMENT pris au préfill (REGLES § 7 : « noyau
@@ -1244,6 +1244,12 @@ class MoEBlock(nn.Module):
         tensor_ok = (_MOE_TENSOR and marlin is not None and not distinct and eid.shape[0] >= 16
                      and x_g.dtype == torch.bfloat16 and ech_gu is None and awq.get("down_proj") is None
                      and x_g.shape[0] * self.top_k == eid.shape[0])   # paires en ordre jeton-majeur (index_jetons)
+        if _MOE_TENSOR and not tensor_ok and eid.shape[0] not in self.__dict__.setdefault("_dit_tensor_refus", set()):
+            # Règle 6 : un opt-in demandé et non pris se DIT, une fois par taille de godet, avec ses raisons — jamais un repli muet.
+            self.__dict__["_dit_tensor_refus"].add(eid.shape[0])
+            print(f"[moe] ACVRAM_MOE_TENSOR=1 non pris (chemin GEMV gardé) : marlin={marlin is not None} distinct={distinct} "
+                  f"G={eid.shape[0]} T={x_g.shape[0]} k={self.top_k} dtype={x_g.dtype} ech_gu={ech_gu is not None} "
+                  f"awq_down={awq.get('down_proj') is not None}", flush=True)
         if tensor_ok:
             from ..kernels import marlin_port as MP
             if MP.charger(compiler=False) is None:
@@ -1846,7 +1852,8 @@ def gemm_experts_tensor(MP, ext, x: torch.Tensor, eid: torch.Tensor, marlin: dic
                         torch.empty(P // bloc, dtype=torch.int32, device=x.device),
                         torch.empty(1, dtype=torch.int32, device=x.device))
     eid_al = eid.clamp(min=0)                     # fantômes → expert 0 sur une ligne nulle ; poids 0 au reduce
-    s_ids, e_ids, n_post = MP.aligner_blocs_capturable(eid_al, bloc, E, tampons[cle])
+    aligner = MP.aligner_blocs_cuda if hasattr(MP.charger(compiler=False), "moe_align_block_size") else MP.aligner_blocs_capturable
+    s_ids, e_ids, n_post = aligner(eid_al, bloc, E, tampons[cle])
     mg, mu, md = marlin["gate_proj"], marlin["up_proj"], marlin["down_proj"]
     n_gu, n_d = mg[1].shape[2], md[1].shape[2]
 
