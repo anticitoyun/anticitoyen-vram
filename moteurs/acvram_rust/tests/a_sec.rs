@@ -125,3 +125,17 @@ fn regles_de_lancement_redonnent_le_releve() {
         assert_eq!(t, bloc, "{fmt} {m}×{k}");
     }
 }
+
+/// Tranches de l'attention au fil des pas : le relevé montre 2 tranches jusqu'à la position 127 puis 4
+/// (invite « code » : 30 pas à 4 tranches pour 30 + 128 jetons).
+#[test]
+fn tranches_de_l_attention_suivent_le_releve() {
+    use acvram_rust::decodage::{bucket_blocks, nblk_du_pas, tranches};
+    assert_eq!((bucket_blocks(1), bucket_blocks(8), bucket_blocks(9), bucket_blocks(33)), (8, 8, 16, 64));
+    assert_eq!((nblk_du_pas(127), nblk_du_pas(128)), (8, 16));
+    assert_eq!(tranches(8, 1, 8, 170), (2, 64));
+    assert_eq!(tranches(16, 1, 8, 170), (4, 64));
+    assert_eq!(tranches(128, 1, 8, 170), (32, 64));
+    let pas_a_4 = (30u32..30 + 128).filter(|&p| tranches(nblk_du_pas(p), 1, 8, 170).0 == 4).count();
+    assert_eq!(pas_a_4, 30);
+}
