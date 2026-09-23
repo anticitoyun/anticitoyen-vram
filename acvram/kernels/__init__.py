@@ -907,6 +907,7 @@ CHEMINS_INT8 = _collections.Counter()
 # Pièce 101 (23/09) : projections NVFP4 denses par le Marlin porté aux godets ≥ PROJ_MARLIN_MIN_M (opt-in).
 _PROJ_MARLIN = os.environ.get("ACVRAM_PROJ_MARLIN", "0") == "1"
 _PROJ_MARLIN_MIN_M = int(os.environ.get("ACVRAM_PROJ_MARLIN_MIN_M", "2"))
+_PROJ_MARLIN_MIN_NK = int(os.environ.get("ACVRAM_PROJ_MARLIN_MIN_NK", "1024"))
 CHEMINS_NVFP4 = __import__("collections").Counter()
 _MARLIN_ESPACES: dict = {}
 
@@ -918,7 +919,9 @@ def _marlin_dense(xf: torch.Tensor, t):
     prep = getattr(t, "_marlin_dense", None)
     if prep is None:
         N, k_pad = t.qweight.shape[0], t.padded_in
-        if N % 64 or k_pad % 64 or not t.qweight.is_cuda:
+        # 101 correctif : les seules formes mesurées au banc (qkv 5 120 × 2 048, o 2 048 × 4 096). Sans ce seuil, le
+        # chemin prenait aussi les linéaires étroits (190 appels par passe au lieu de 96, pas +9 à +25 %).
+        if N % 64 or k_pad % 64 or N < _PROJ_MARLIN_MIN_NK or k_pad < _PROJ_MARLIN_MIN_NK or not t.qweight.is_cuda:
             return None
         from . import marlin_port as MP
         if MP.charger(compiler=False) is None:
@@ -930,6 +933,7 @@ def _marlin_dense(xf: torch.Tensor, t):
         t._marlin_dense = prep
     from . import marlin_port as MP
     w, s_, g, N, k_pad = prep
+    CHEMINS_NVFP4[f"marlin_dense_{N}x{k_pad}"] += 1
     ws = _MARLIN_ESPACES.get(xf.device)
     if ws is None:
         ws = _MARLIN_ESPACES[xf.device] = MP.espace_travail(xf.device)

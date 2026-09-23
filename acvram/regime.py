@@ -69,6 +69,7 @@ VARIABLES: tuple[Variable, ...] = (
              "pièce 101 (23/09, opt-in) : 1 = linéaires NVFP4 denses par le Marlin porté de vLLM 0.29 (marlin_port, échelle "
              "globale par colonne pour q/k/v empilés) aux godets ≥ PROJ_MARLIN_MIN_M ; M = 1 garde nvfp4_gemv | 0 témoin"),
     Variable("PROJ_MARLIN_MIN_M", "2", ("acvram.kernels", "_PROJ_MARLIN_MIN_M")),
+    Variable("PROJ_MARLIN_MIN_NK", "1024", ("acvram.kernels", "_PROJ_MARLIN_MIN_NK")),
     # lues dans acvram_kernels.cu (getenv, figées au premier lancement : un
     # PROCESSUS par valeur — poste7-gemv-experts-rpw-18-09)
     Variable("GROUPED_RPW", "4", None, None,
