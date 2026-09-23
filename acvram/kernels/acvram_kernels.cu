@@ -4297,13 +4297,16 @@ __global__ void kv_write_k8v4_kernel(
         if (threadIdx.x == 0) {
             float m = 0.f;
             for (int i = 0; i < nw; ++i) m = fmaxf(m, red[i]);
-            red[0] = fmaxf(m / 127.f, 1e-8f);
+            red[0] = fmaxf(__fdiv_rn(m, 127.f), 1e-8f);
         }
         __syncthreads();
-        const float sc = red[0], inv = 1.f / sc;
+        // Division IEEE (le jumeau torch divise) : kv_write_int8_kernel multiplie
+        // par 1/sc et diffère du jumeau de ± 1 code (C5-b l'avait mesuré) ;
+        // ici le format est neuf, le critère est « au bit contre le jumeau ».
+        const float sc = red[0];
         signed char *dst = kc + (pos * H + h) * D;
         for (int i = threadIdx.x; i < D; i += blockDim.x) {
-            const int q = __float2int_rn(__bfloat162float(src[i]) * inv);
+            const int q = __float2int_rn(__fdiv_rn(__bfloat162float(src[i]), sc));
             dst[i] = (signed char)max(-127, min(127, q));
         }
         if (threadIdx.x == 0) ks[pos * H + h] = __float2half(sc);

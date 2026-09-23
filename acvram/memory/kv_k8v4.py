@@ -44,6 +44,19 @@ def octets_par_jeton_couche(hkv: int, d: int) -> int:
     return hkv * (d + 2) + hkv * (d // 2 + 2 * groupes(d))
 
 
+def quantifier_k(k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """K int8 par (jeton, tête), même forme que le chemin int8 — mais chaque
+    division est une VRAIE division (tenseur / tenseur) : sur carte, torch
+    remplace ``t / 127.0`` par ``t × (1/127)`` (1 ulp d'écart sur l'échelle,
+    d'où ± 1 code aux demi-entiers contre le noyau, mesuré le 23/09 sur 2
+    éléments / 18 944) ; le noyau `kv_write_k8v4_kernel` divise en IEEE."""
+    x = k.to(torch.float32)
+    amax = x.abs().amax(dim=-1, keepdim=True)
+    scale = (amax / torch.full_like(amax, 127.0)).clamp(min=1e-8)
+    q = (x / scale).round().clamp(-127, 127).to(torch.int8)
+    return q, scale.squeeze(-1).to(torch.float16)
+
+
 def quantifier_v(v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """``v`` [..., D] → (codes uint8 [..., D/2], échelles half [..., D/GROUPE])."""
     d = v.shape[-1]

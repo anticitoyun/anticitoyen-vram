@@ -70,12 +70,14 @@ def test_ecriture_au_bit_contre_le_jumeau_demi_entiers_compris():
     # demi-entiers exacts : groupe d'amax 7 → sv = 1 ; 3,5 → 4 (pair), 2,5 → 2, −0,5 → 0
     v[3, 1, :32] = 0.0
     v[3, 1, 0], v[3, 1, 1], v[3, 1, 2], v[3, 1, 3] = 7.0, 3.5, 2.5, -0.5
-    slots = torch.tensor([i * 3 % (6 * BS) for i in range(37)], device="cuda")   # dispersés
+    torch.manual_seed(3)
+    slots = torch.randperm(6 * BS)[:37].to("cuda")                 # dispersés, tous DISTINCTS
     c_n, c_j = _cache(6), _cache(6)
     c_n.write(slots, k, v)                       # noyau (dispatch k8v4 de PagedKVCache.write)
     _ecrire_jumeau(c_j, slots, k, v)
     _memes(_etat(c_n), _etat(c_j), "écriture")
-    codes = kv_k8v4.deballer(c_n.v[0, 9, 1:2].cpu())   # slot 9 = i 3
+    s3 = int(slots[3])                                   # la ligne 3 est allée au slot s3
+    codes = kv_k8v4.deballer(c_n.v[s3 // BS, s3 % BS, 1:2].cpu())
     assert codes[0, :4].tolist() == [7, 4, 2, 0]
 
 
@@ -90,7 +92,7 @@ def test_sentinelle_slot_negatif_n_ecrit_rien():
 
 def _montage(lens, graine=0):
     B = len(lens)
-    nb = max(1, (max(lens) + BS - 1) // BS)
+    nb = max(1, (max(lens) + BS - 1) // BS) + 1     # un bloc de marge : le graphe écrit 16 jetons de plus
     c = _cache(B * nb + 1)
     tables = torch.arange(1, B * nb + 1, device="cuda").view(B, nb)
     for b, n in enumerate(lens):

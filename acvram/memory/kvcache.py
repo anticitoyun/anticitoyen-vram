@@ -473,8 +473,10 @@ class PagedKVCache:
             return x.to(self.cfg.torch_dtype), None
         if self.cfg.rotated:
             return kv_lm4.quantifier(x, self.cfg.dtype)
+        if self.cfg.k8v4:
+            return kv_k8v4.quantifier_k(x)       # int8 par jeton, division IEEE (au bit du noyau)
         amax = x.abs().amax(dim=-1, keepdim=True).to(torch.float32)
-        if self.cfg.dtype in ("int8", kv_k8v4.FORMAT):      # k8v4 : K int8 par jeton
+        if self.cfg.dtype == "int8":
             scale = (amax / 127.0).clamp(min=1e-8)
             q = (x.to(torch.float32) / scale).round().clamp(-127, 127).to(torch.int8)
         else:                                        # fp8_e4m3, max 448
