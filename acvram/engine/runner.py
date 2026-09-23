@@ -446,11 +446,26 @@ def _couverture_experts(model) -> str:
 
 
 
+_ECO_RELU = False
+
+
 def _etat_eco() -> dict:
-    """Relecture SOUS CHARGE à chaque `regime()` : le moteur est chargé, la carte
-    répond ; au chargement seul (carte verrouillée oisive) l'effectif lirait 225."""
+    """Relecture SOUS CHARGE au premier `regime()` seulement (le moteur est chargé,
+    la carte répond ; au chargement seul, carte verrouillée oisive, l'effectif
+    lirait 225), l'état mémorisé ensuite.
+
+    Pièce 85 (23/09) : relue à CHAQUE `regime()`, la charge de lecture
+    (`eco._charge_cuda`, matmuls + `synchronize` dans un fil) tournait dans le
+    processus de service à chaque `/metrics` — qui appelle `regime()` quatre
+    fois —, en concurrence avec la boucle du moteur. Un `synchronize` d'un autre
+    fil pendant une capture invalide la capture (mode global) : « operation
+    failed due to a previous error during capture », graphes coupés pour la vie
+    du serveur, b=12 en eager. Le premier `regime()` est celui de la ligne de
+    régime du chargement, avant tout service : aucune boucle ne tourne encore."""
+    global _ECO_RELU
     from .. import eco
-    return eco.etat_eco(relire=True)
+    relire, _ECO_RELU = not _ECO_RELU, True
+    return eco.etat_eco(relire=relire)
 
 
 def _hote_texte() -> str:

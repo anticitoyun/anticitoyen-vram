@@ -612,6 +612,10 @@ class GraphRunner:
         entry = self.graphs.get(key)
         if entry is None:
             if len(self.graphs) >= MAX_GRAPHS:
+                # Pièce 85 : ce refus rendait False SANS `_eager` — ni compté
+                # (`repli_eager` restait 0), ni nommé hors ACVRAM_TRACE_STEPS.
+                self._eager(f"plafond ACVRAM_MAX_GRAPHS={MAX_GRAPHS} atteint : "
+                            f"forme nouvelle en eager")
                 if trace:
                     print(f"[graphe] limite {MAX_GRAPHS} atteinte, clé {key} : eager",
                           flush=True)
