@@ -93,6 +93,19 @@ DEFAUTS_PAR_VERSION = {
         },
         "mla_core=tf32(≤2048 clés) mla_prep=grille mla_glue=2 glue=compact(8) prefill_glue=compact",
     ),
+    "0.6.36": (                                                          # 0.6.35 + MoE sur tensor cores par défaut aux godets ≥ 2 (pièces 62-65, 23/09 :
+        {                                                                # port marlin_moe_wna16 vLLM 0.29, glue fusionnée reproductible ; A5 poste2 +12,2 % t/s)
+            "GLUE_COMPACT": "1", "ATTN_WARPS_COMPACT": "8", "PREFILL_COMPACT": "1",
+            "MLA_CORE": "tf32", "MLA_CORE_MAX_CLES": "2048", "MLA_GLUE": "2",
+            "MARLIN_DISTINCT": "0", "MOE_DECODE_MMA": "1", "MOE_DECODE_MMA_MARLIN": "0",
+            "KV_INT8_CANAL": "0", "GODETS_B": "1", "GEMV_LAYOUT": "marlin", "PILE_SANS_RENDU": "",
+            "CPUS": "", "MLA_PREP_GRILLE": "1",
+            "SAMPLER_LENT": "0", "RAPATRIEMENT_FLUX": "0", "ETROITES_FORME": "",
+            "CAPTURE_MEM_MIN_MIO": "1024", "CAPTURE_DELAI_S": "120",
+            "MOE_TENSOR": "1", "MOE_TENSOR_FUSION": "1", "MOE_TENSOR_MIN_T": "8",   # =0 témoins ; glue A4 (FUSION=0) jamais servie ; godets 8/12/16
+        },
+        "mla_core=tf32(≤2048 clés) mla_prep=grille mla_glue=2 glue=compact(8) prefill_glue=compact",
+    ),
 }
 
 

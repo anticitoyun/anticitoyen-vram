@@ -70,7 +70,7 @@ def _ecart(d_t, d_s, eid):
     return hors, float((a - b).abs().max()), bool(torch.isfinite(d_t).all())
 
 
-@pytest.mark.parametrize("b", [5, 12, 16])
+@pytest.mark.parametrize("b", [2, 5, 12, 16])                 # 2 : plus petit godet servi (pièce 65)
 def test_tensor_contre_gemv_servi_godet_16(b):
     kernels, MP, ext, banc = _charger()
     dev = torch.device("cuda", 0)
