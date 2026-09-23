@@ -1308,7 +1308,7 @@ class MoEBlock(nn.Module):
                                     1 if self.act == "gelu_tanh" else 0,
                                     self._marlin_workspace(x.device), self._marlin_uns(eid.shape[0], x.device),
                                     self.__dict__.setdefault("_tensor_tampons", {}), self.__dict__.setdefault("_tensor_sorties", {}),
-                                    fusion=_MOE_TENSOR_FUSION)
+                                    fusion=_MOE_TENSOR_FUSION, w13_fusionne=not _EN_PREFILL[0])
             tw = topw.reshape(-1)
             if tw.dtype != torch.float32:
                 tw = tw.to(torch.float32)
@@ -1926,11 +1926,16 @@ _MOE_TENSOR_FUSION = os.environ.get("ACVRAM_MOE_TENSOR_FUSION", "1") == "1"
 # séparé. Préfill (pièce 82 ter) : deux GEMM de largeur N sur des vues de w13 (largeur stockée `ldn` du port) — au
 # bit du chemin séparé ; la 82 y perdait la KL de fin de préfill.
 _MOE_W13 = os.environ.get("ACVRAM_MOE_W13", "0") == "1"
+# Pièce 82 ter : phase de la passe en cours, posée par le modèle (model.forward : batch.is_prefill ; decode_fixed :
+# False). Un préfill court (T ≤ _MOE_GROUPED_MAX) passe par le même `_forward_grouped` qu un pas de décodage : sans
+# ce drapeau, il prendrait la GEMM w13 de largeur 2N et changerait la fin du préfill (KL b=1 de la 82 ter, invite 3 :
+# 0,068 → 0,166). Lu en Python : sous graphe, c est la valeur à la capture (décodage seulement, graphs.py:632).
+_EN_PREFILL = [False]
 
 
 def gemm_experts_tensor(MP, ext, x: torch.Tensor, eid: torch.Tensor, marlin: dict, top_k: int, m_gate: int,
                         k_down: int, code_act: int, ws, uns, tampons: dict, sorties: dict,
-                        fusion: bool = True) -> torch.Tensor:
+                        fusion: bool = True, w13_fusionne: bool = True) -> torch.Tensor:
     """Pièce 62 A4 — experts au décodage par la GEMM groupée Marlin du port (tensor cores).
     ``x`` [T, K] bf16 (lignes du godet), ``eid`` [G = T·top_k] int32 (expert de chaque paire, ordre
     jeton-majeur, −1 = fantôme), ``marlin`` = piles servies (disposition du port : (w, s, g, K, N)).
@@ -1965,6 +1970,12 @@ def gemm_experts_tensor(MP, ext, x: torch.Tensor, eid: torch.Tensor, marlin: dic
             sorties[k] = torch.zeros(*forme, dtype=torch.bfloat16, device=x.device)
         return sorties[k]
     xm = x.contiguous()
+    if w13 is not None and not w13_fusionne:
+        # Pièce 82 ter : préfill court servi ici — gate et up lues dans w13 par des vues de largeur N, au bit du
+        # chemin séparé (même découpe de K), comme `_forward_prefill_grouped`.
+        mg = (w13[0][:, :, :2 * n_gu], w13[1][:, :, :n_gu], w13[2], w13[4], mg[4])
+        mu = (w13[0][:, :, 2 * n_gu:], w13[1][:, :, n_gu:], w13[3], w13[4], mu[4])
+        w13 = None
     if w13 is not None:
         # Pièce 82 : UNE GEMM gate‖up (N = 2·n_gu) à l échelle globale de gate ; moe_act corrige up par g_up/g_gate
         # (gs_gate = 1, gs_up = rapport ; e_sorted = l expert de chaque paire, fantômes −1 → expert 0, poids 0).

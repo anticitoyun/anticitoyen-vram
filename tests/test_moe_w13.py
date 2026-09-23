@@ -157,3 +157,26 @@ def test_gemm_marlin_refuse_une_vue_d_echelles_desaccordee():
     with pytest.raises(Exception, match="largeur stockée"):
         MP.gemm_moe(xs, w13[0][:, :, :2 * I], marlin["gate_proj"][1], w13[2], s_ids, e_ids, n_post,
                     torch.ones(G, 1, device=dev), 8, 1, G, I, K, MP.espace_travail(dev, 4))
+
+
+@pytest.mark.parametrize("t", [8, 12, 32])
+def test_prefill_court_w13_au_bit_du_separe(t):
+    """Pièce 82 ter : un préfill court (T ≤ _MOE_GROUPED_MAX) passe par `gemm_experts_tensor` ; sous w13 et
+    `w13_fusionne=False` (préfill), il doit rendre les bits du chemin séparé. Casse si la GEMM 2N y revient (82 : KL
+    b=1 +0,098 sur l invite 3) ; le témoin w13_fusionne=True, lui, doit différer."""
+    kernels, MP, ext, banc = _charger()
+    from acvram.engine.moe import gemm_experts_tensor
+    dev = torch.device("cuda", 0)
+    marlin = _piles(MP, banc, dev)
+    x = (torch.randn(t, K, generator=torch.Generator().manual_seed(29 + t)) * 0.5).to(torch.bfloat16).to(dev)
+    eid = _routage(t, t, dev)
+    fus = dict(marlin); fus["w13"] = _w13(marlin)
+    fus["gate_proj"], fus["up_proj"] = (None, None, *marlin["gate_proj"][2:]), (None, None, *marlin["up_proj"][2:])
+    ws = MP.espace_travail(dev, 4)
+    uns = torch.ones(eid.shape[0], 1, dtype=torch.float32, device=dev)
+    ref = gemm_experts_tensor(MP, ext, x, eid, marlin, TOPK, I, I, 0, ws, uns, {}, {})
+    out = gemm_experts_tensor(MP, ext, x, eid, fus, TOPK, I, I, 0, ws, uns, {}, {}, w13_fusionne=False)
+    assert torch.equal(out, ref), (t, (out.float() - ref.float()).abs().max().item())
+    temoin = gemm_experts_tensor(MP, ext, x, eid, fus, TOPK, I, I, 0, ws, uns, {}, {}, w13_fusionne=True)
+    assert not torch.equal(temoin, ref), "témoin : la GEMM 2N devrait différer du chemin séparé"
+
