@@ -49,3 +49,26 @@ journal ne trace une commande shell tapée hors carte.sh. Pas de piste rouverte 
   `fuser` sur le VERROU montre un pid vivant est en soi trompeur pour tout opérateur humain —
   pourrait valoir une pièce (afficher aussi le pid `fuser` brut en repli quand `.qui` manque),
   à proposer, pas décidée ici.
+
+## Guetteur v3 (`guet3.sh`) — fausses alertes consignées, pas signalées (ordre chef 23/09 23h2x)
+
+Deux transitions présent→absent détectées et vérifiées FAUSSES avant tout envoi (pid mort
+au moment du contrôle, jamais une vraie anomalie) — classe d'erreur du détecteur lui-même,
+pas du bug traqué :
+
+1. `photo-230737.txt` (23:07:37, guet2.sh) : deux transitions collées à un relais de file
+   normal (rendue `env` 2933260 tenue=371s → prise/rendue poste4 0s → prise poste5) — le
+   détenteur précédent était déjà mort à chaque fois. Cause : v2 ne distinguait pas relais
+   normal et anomalie. Corrigé en v3 : n'alerte que si `kill -0` réussit encore sur le
+   dernier pid vu au moment de la disparition.
+2. `anomalie-232310.txt` (23:23:10, guet3.sh v1) : pid 2985747 (`poste5-rust-a-vidage`),
+   journal confirme `rendue … tenue=25s` PILE à cet instant — rendue normale. Cause : course
+   dans le guetteur lui-même, pas dans carte.sh — le trap EXIT fait `rm -f .qui` AVANT que le
+   process finisse réellement de sortir (le reaper c7w y ajoute un peu de délai), donc
+   `kill -0` réussit encore pendant ce court intervalle après suppression. Corrigé (v3 courant) :
+   re-vérifie `kill -0` 2 s plus tard avant de photographier ; confirmé mort dans les deux cas
+   au contrôle a posteriori.
+
+Guetteur courant (pid variable selon relance, voir `guet3.sh`) armé en continu, observateur
+seul. N'écrire à chef que pour une capture qui survit à la re-vérification à 2 s (flock
+toujours tenu par un pid vivant, `.qui` absent).
