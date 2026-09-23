@@ -1406,11 +1406,21 @@ def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
     ext = get_extension()
     if ext is None or not q.is_cuda:
         return None
-    if cache.k_scale is None or cache.cfg.dtype != "int8":
+    if cache.k_scale is None or cache.cfg.dtype not in ("int8", "k8v4"):
         return None
     d = q.shape[-1]
     if d not in (32, 64, 128, 256, 512):
         return None
+    # Pièce 104 : k8v4 — seul le noyau CUDA variante V4 lit des quartets par
+    # groupe ; ni le Triton du poste E ni la variante CANAL. Sans le symbole :
+    # None → gather_fixed (jumeau kv_k8v4) + decode_attention_fixed.
+    if getattr(cache.cfg, "k8v4", False):
+        if not hasattr(ext, "paged_attention_k8v4"):
+            return None
+        return ext.paged_attention_k8v4(
+            q.contiguous(), cache.k, cache.k_scale, cache.v, cache.v_scale,
+            tables.contiguous(), seq_lens.contiguous(), cache.cfg.num_kv_heads,
+            float(scale), int(q_len), int(window))
     # C5-b : clés par canal (kv_canal) — seule la variante CANAL du noyau CUDA
     # sait lire sc E4M3 par bloc et le bloc courant bf16 ; le noyau Triton du
     # poste E ne le sait pas. Sans le symbole : None → gather_fixed (qui lit
