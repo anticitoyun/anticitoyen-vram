@@ -89,3 +89,23 @@ forme, autant de lots et d'âge que L, sans histoire de formes) ; N2 (12, témoi
 - Séance invalide si |N1 − N2| > 3 %, ou toute cellule avec `repli_eager` > 0 ou graphes capturés pendant le palier
   12 mesuré (lu dans /metrics).
 Je mets 55 % sur l'histoire des formes, 35 % sur l'usure, 10 % sur le lien b=2.
+
+## Verdict 86 + 86 bis
+
+instrument : `scratchpad/banc-llamacpp-16-09.py` (HTTP/SSE, serveur neuf par bras) + `/metrics` toutes les 2 s ; `scratchpad/poste1-p86-23-09/prise.sh`, `prise-bis.sh`
+commit : 395954d8 (rejeu 86), f2488976 (86 bis, correctif 86 inclus), bd1fb4ee (preuve) ; alias Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c
+régime : -lgc 2700 (horloge moyenne 2 642-2 679), plafond 400 W, max-batch 12, max-model-len 2 304, MAX_GRAPHS 64
+scellé : H86 réfutée si S1 b=2 < 400, ou replays/pas ≥ 0,9 en S0 (3ade45e8) ; 86 bis : formes réfutées si R ≤ N −4 %, usure réfutée si R ≥ N −2 % avec L ≤ N −4 %, séance invalide si |N1 − N2| > 3 % (f2488976)
+mesuré : b=2 — S0 avant correctif 293,8 t/s ; S1 sans spéculation 407,6 ; S0 après correctif 407,7 (replays = pas, spec_longueurs_melees 20, repli_eager 0). b=12 — N1 1 754,3 ; N2 1 733,1 ; L (1,2,4,8,12) 1 824,1 ; R (12 × 3) 1 726,1 / 1 888,6 / 1 806,1
+verdict : 86 TENUE et corrigée (b=2 +38,8 %). 86 bis : l'écart de la 87 NE SE REPRODUIT PAS — L est 4,0 % AU-DESSUS de N (moyenne N1/N2 1 743,7) ; aucune des deux hypothèses ne tient, la séance est valide (|N1 − N2| 1,2 %)
+durée : prévu ≤ 12 min + ≤ 12 min / tenu 143 s (prise 1 non concluante) + 174 s + 390 s + 79 s (journal `tenue=`)
+
+Lecture de la 86 bis : l'instrument ne tranche pas 6,7 %. À b=12, une fenêtre de 10 s = UN lot de 12 × 1 024 jetons
+(`lots` = 1). R, même serveur et même forme, varie de 1 726 à 1 889 d'un palier à l'autre (écart-type 4,5 %) ; la
+différence de deux cellules isolées a donc un écart-type d'environ 6,4 %, et les −6,72 % de la 87 font environ
+1 σ. Le scellé ± 3 % de la 87 était sous 2 × le bruit du témoin (REGLES § 3), faute de témoin mesuré avant.
+Sur le lien avec b=2 : non établi. Le correctif 86 n'était pas exercé dans L (garde éteinte dès le palier 1,
+spec_longueurs_melees 0), et L se tient pourtant au-dessus de N.
+Pour poste2 : une cellule qui compare deux serveurs à b=12 a besoin d'au moins 5 lots par bras (fenêtre ≥ 60 s), en
+ABBA, avec l'écart-type intra-bras publié. Je ne rouvre pas le chiffre de la 87 : il est réfuté comme écart, pas comme
+mesure.
