@@ -4592,15 +4592,22 @@ __global__ void moe_act_kernel(const __nv_bfloat16 *__restrict__ g,
                                const __nv_bfloat16 *__restrict__ u,
                                __nv_bfloat16 *__restrict__ out,
                                long n, int Mp, int m, int Kd, int act,
-                               const __nv_bfloat16 *__restrict__ awq, const int *__restrict__ e_sorted) {
+                               const __nv_bfloat16 *__restrict__ awq, const int *__restrict__ e_sorted,
+                               const float *__restrict__ gsg, const float *__restrict__ gsu) {
     const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const long r = i / Kd;
     const int c = (int)(i - r * Kd);
     float v = 0.f;
     if (c < m) {
-        const float x = __bfloat162float(g[r * Mp + c]);
-        const float y = __bfloat162float(u[r * Mp + c]);
+        float x = __bfloat162float(g[r * Mp + c]);
+        float y = __bfloat162float(u[r * Mp + c]);
+        if (gsg) {
+            // Pièce 71 bis : gate·up en UNE GEMM Marlin (w13, échelle globale 1) — les échelles globales par
+            // expert de gate et d up, distinctes (12/12 sur l alias officiel), s appliquent ici, avant l activation.
+            const int e = e_sorted ? max(e_sorted[r], 0) : 0;
+            x *= gsg[e]; y *= gsu[e];
+        }
         float a;
         if (act == 1) {
             // tanh en double : sous --use_fast_math, tanhf est l'approximation
@@ -4625,7 +4632,8 @@ __global__ void moe_act_kernel(const __nv_bfloat16 *__restrict__ g,
 }
 
 torch::Tensor moe_act(torch::Tensor g, torch::Tensor u, int64_t m, int64_t Kd, int64_t act,
-                      c10::optional<torch::Tensor> awq, c10::optional<torch::Tensor> e_sorted) {
+                      c10::optional<torch::Tensor> awq, c10::optional<torch::Tensor> e_sorted,
+                      c10::optional<torch::Tensor> gs_gate, c10::optional<torch::Tensor> gs_up) {
     CHECK_CUDA(g); CHECK_CUDA(u); ACVRAM_DEVICE_GUARD(g);
     TORCH_CHECK(g.scalar_type() == torch::kBFloat16 && u.scalar_type() == torch::kBFloat16,
                 "moe_act : g et u en bf16");
@@ -4643,7 +4651,9 @@ torch::Tensor moe_act(torch::Tensor g, torch::Tensor u, int64_t m, int64_t Kd, i
         reinterpret_cast<__nv_bfloat16 *>(out.data_ptr()),
         n, (int)g.stride(0), (int)m, (int)Kd, (int)act,
         awq.has_value() ? reinterpret_cast<const __nv_bfloat16 *>(awq->data_ptr()) : nullptr,
-        e_sorted.has_value() ? e_sorted->data_ptr<int>() : nullptr);
+        e_sorted.has_value() ? e_sorted->data_ptr<int>() : nullptr,
+        gs_gate.has_value() ? gs_gate->data_ptr<float>() : nullptr,
+        gs_up.has_value() ? gs_up->data_ptr<float>() : nullptr);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return out;
 }
@@ -7687,8 +7697,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("nvfp4_gemm_grouped", &nvfp4_gemm_grouped,
           "MoE NVFP4 : GEMM groupee sur tuiles de jetons, poids lus en 4 bits");
     m.def("moe_act", &moe_act, py::arg("g"), py::arg("u"), py::arg("m"), py::arg("Kd"), py::arg("act"),
-          py::arg("awq") = py::none(), py::arg("e_sorted") = py::none(),
-          "MoE prefill : act(g)*u en bf16 depuis les vues [:, :m], rembourre a Kd (act 0=SiLU, 1=GELU-tanh) ; awq [E,Kd] + e_sorted [G] : x / s[e]");
+          py::arg("awq") = py::none(), py::arg("e_sorted") = py::none(), py::arg("gs_gate") = py::none(), py::arg("gs_up") = py::none(),
+          "MoE prefill : act(g)*u en bf16 depuis les vues [:, :m], rembourre a Kd (act 0=SiLU, 1=GELU-tanh) ; awq [E,Kd] + e_sorted [G] : x / s[e] ; "
+          "gs_gate/gs_up [E] fp32 (pièce 71 bis) : g·gs_gate[e], u·gs_up[e] avant l activation");
     m.def("nvfp4_moe_fused", &nvfp4_moe_fused,
           py::arg("tq_g"), py::arg("tb_g"), py::arg("gs_g"), py::arg("tq_u"), py::arg("tb_u"), py::arg("gs_u"),
           py::arg("tq_d"), py::arg("tb_d"), py::arg("gs_d"), py::arg("xq"), py::arg("xsf"),
