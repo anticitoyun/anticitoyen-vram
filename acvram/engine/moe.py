@@ -46,7 +46,7 @@ __all__ = [
     "_QA_COMPTEURS", "_qa_compteurs", "_qa_imprime", "_MOE_DECODE_MMA_MIN_T",
     "_ROUTE_PREP", "_MOE_DECODE_FUSED", "_MOE_FUSED_TN", "_MOE_FUSED_ATOMIQUE",
     "_MOE_FUSED_ETAGES", "_MOE_ROUTE_PACK", "_MOE_GEMV", "_GEMV_LAYOUT",
-    "_MOE_DECODE_MMA_MARLIN", "_MARLIN_DISTINCT", "_TRACE_ROUTAGE", "_ROUTAGES",
+    "_MOE_DECODE_MMA_MARLIN", "_MARLIN_DISTINCT", "_MOE_W13", "_TRACE_ROUTAGE", "_ROUTAGES",
     "_ROUTAGE_TEMOIN", "_TEMOINS_ROUTAGE", "temoins_routage", "_DOUBLE_DIAG",
     "_mla_glue", "_COLLE_MOE", "_BORNES_EXPERTS", "_comptes_tries",
     "_colle_moe_triton", "MoEBlockGemma", "_DUMP_MOE",
@@ -418,7 +418,7 @@ class MoEBlock(nn.Module):
                 lin.qweight = gabarit
             _, _, _, gs, k, m = pile
             self._stacks[nom] = ("nvfp4", None, None, gs, k, m)
-        self.__dict__["experts_layout"] = "marlin"
+        self.__dict__["experts_layout"] = "marlin-w13" if "w13" in (getattr(self, "_stacks_marlin", None) or {}) else "marlin"
 
     def _raison_tensor(self) -> str:
         """Pièce 65 : raison statique du repli GEMV du chemin tensor ("" = pris en charge), depuis les piles
@@ -503,6 +503,20 @@ class MoEBlock(nn.Module):
             w, sc, g = MP.preparer_pile(qw, bs.view(torch.float8_e4m3fn) if bs.dtype == torch.uint8 else bs,
                                         gs.reshape(-1).to(torch.float32))
             out[n] = (w, sc, g, k, m)
+        if _MOE_W13 and not awq.get("up_distinct"):          # entrées distinctes : deux GEMV, pas de w13
+            wg, sg, gg, k, m = out["gate_proj"]
+            wu, su, gu, ku, mu_ = out["up_proj"]
+            if (k, m) != (ku, mu_) or wg.shape != wu.shape or sg.shape != su.shape:
+                raise ValueError(f"ACVRAM_MOE_W13 : gate {tuple(wg.shape)} et up {tuple(wu.shape)} de formes différentes")
+            # La disposition Marlin est locale par tuile de 64 colonnes : chaque ligne de tuiles de w13 porte les
+            # tuiles de gate puis celles d up — c est une pile Marlin valide de largeur 2N (pièce 75 : l inverse,
+            # un w13 vLLM découpé, sert gate et up à 8·10⁻³).
+            w13, s13 = torch.cat([wg, wu], dim=2).contiguous(), torch.cat([sg, su], dim=2).contiguous()
+            del wg, wu, sg, su
+            out["w13"] = (w13, s13, gg, gu, k, m, (gu / gg).contiguous(), torch.ones_like(gg))
+            # gate/up rendues : les champs de forme restent (K, N, échelles globales) ; poids et échelles à None,
+            # tout chemin qui les relirait casse au lieu de mesurer une double disposition.
+            out["gate_proj"], out["up_proj"] = (None, None, gg, k, m), (None, None, gu, k, m)
         return out
 
     def _grouped(self, x32: torch.Tensor, pile, expert_ids, token_ids, tri=None):
@@ -924,10 +938,17 @@ class MoEBlock(nn.Module):
             ws = self._marlin_workspace(x.device)
             uns = self._marlin_uns(G, x.device)
             xs_m = xs if xs.shape[1] == mg[3] else F.pad(xs, (0, mg[3] - xs.shape[1]))
-            g = MP.gemm_moe(xs_m.contiguous(), mg[0], mg[1], mg[2], s_ids, e_ids, n_post, uns, bloc, 1, G, mg[1].shape[2], mg[3], ws)
-            xu_m = xs_m if xs_u is xs else (xs_u if xs_u.shape[1] == mu[3] else F.pad(xs_u, (0, mu[3] - xs_u.shape[1]))).contiguous()
-            u = MP.gemm_moe(xu_m, mu[0], mu[1], mu[2], s_ids, e_ids, n_post, uns, bloc, 1, G, mu[1].shape[2], mu[3], ws)
-            act = _activation(g, u, pg[5], pd[4])
+            w13 = self._stacks_marlin.get("w13")
+            if w13 is not None:                      # pièce 82 : une GEMM gate‖up, échelle d up dans moe_act
+                n = w13[1].shape[2] // 2
+                c13 = MP.gemm_moe(xs_m.contiguous(), w13[0], w13[1], w13[2], s_ids, e_ids, n_post, uns, bloc, 1, G, 2 * n, mg[3], ws)
+                act = kernels.get_extension().moe_act(c13[:, :n], c13[:, n:], pg[5], pd[4], 0 if self.act != "gelu_tanh" else 1,
+                                                      None, e_sorted.to(torch.int32).contiguous(), w13[7], w13[6])
+            else:
+                g = MP.gemm_moe(xs_m.contiguous(), mg[0], mg[1], mg[2], s_ids, e_ids, n_post, uns, bloc, 1, G, mg[1].shape[2], mg[3], ws)
+                xu_m = xs_m if xs_u is xs else (xs_u if xs_u.shape[1] == mu[3] else F.pad(xs_u, (0, mu[3] - xs_u.shape[1]))).contiguous()
+                u = MP.gemm_moe(xu_m, mu[0], mu[1], mu[2], s_ids, e_ids, n_post, uns, bloc, 1, G, mu[1].shape[2], mu[3], ws)
+                act = _activation(g, u, pg[5], pd[4])
             d = MP.gemm_moe(act, md[0], md[1], md[2], s_ids, e_ids, n_post, uns, bloc, 1, G, md[1].shape[2], md[3], ws)
         elif direct:
             self._chemin('direct')
@@ -1040,7 +1061,7 @@ class MoEBlock(nn.Module):
             st_m = getattr(self, "_stacks_marlin", None)
             awq0 = getattr(self, "_stacks_awq", {})
             if not (_MOE_DECODE_MMA_MARLIN and st_m is not None
-                    and all(n in st_m for n in ("gate_proj", "up_proj", "down_proj"))
+                    and all(n in st_m for n in ("gate_proj", "up_proj", "down_proj")) and "w13" not in st_m
                     and awq0.get("gate_proj") is None and awq0.get("down_proj") is None
                     and not awq0.get("hadamard", {}).get("gate_proj", 0) and not awq0.get("hadamard", {}).get("down_proj", 0)
                     and pd[1] is None):
@@ -1296,9 +1317,15 @@ class MoEBlock(nn.Module):
             # des experts ; juge fp32 par ligne (tests/test_gemv_marlin.py)
             mg, mu = marlin["gate_proj"], marlin["up_proj"]
             self._chemin("gemv_marlin")
-            act = ext.nvfp4_gemv_marlin_gateup(
-                mg[0], mg[1], mg[2], mu[0], mu[1], mu[2], eid, tok_g, x_g.contiguous(),
-                mg[3], mg[4], 1 if self.act == "gelu_tanh" else 0, ech_gu)[:, :pg[5]]
+            w13 = marlin.get("w13")
+            if w13 is not None:                      # pièce 82 : gate et up lues dans w13, au bit du chemin séparé
+                act = ext.nvfp4_gemv_marlin_w13(
+                    w13[0], w13[1], w13[2], w13[3], eid, tok_g, x_g.contiguous(),
+                    w13[4], w13[5], 1 if self.act == "gelu_tanh" else 0, ech_gu)[:, :pg[5]]
+            else:
+                act = ext.nvfp4_gemv_marlin_gateup(
+                    mg[0], mg[1], mg[2], mu[0], mu[1], mu[2], eid, tok_g, x_g.contiguous(),
+                    mg[3], mg[4], 1 if self.act == "gelu_tanh" else 0, ech_gu)[:, :pg[5]]
         elif marlin is not None and ext is not None and hasattr(ext, "nvfp4_gemv_marlin") and distinct:
             # gate et up ont des ENTRÉES distinctes (tables AWQ séparées : GLM
             # k48-calibA, verdict-glm-b12-19-09) : le noyau fusionné n'a qu'un
@@ -1886,6 +1913,12 @@ def forme_tensor_refus(formats, K: int, N_gu: int, N_d: int, E: int, awq_unite: 
 # reduce lisant le bf16 sans cast) — témoin ACVRAM_MOE_TENSOR_FUSION=0 : la glue A4 (clamp + aligneur
 # vLLM + d.float()), au bit contre la fusion (tests/test_moe_tensor_glue_fusee.py).
 _MOE_TENSOR_FUSION = os.environ.get("ACVRAM_MOE_TENSOR_FUSION", "1") == "1"
+# Pièce 82 (23/09, revue/poste1-piece82-w13-chemin-tensor-23-09.md) : gate·up en UNE pile Marlin w13 (disposition
+# unique : gate et up sont rendues, même nombre d octets — la 71 bis ajoutait w13 à côté, +8,9 Go, hors mémoire).
+# Décodage tensor et préfill : une GEMM w13 à l échelle globale de gate, l échelle d up corrigée dans moe_act
+# (g_up/g_gate) — un arrondi bf16 de plus sur up : sortie au 2⁻⁷, PAS au bit, d où l opt-in. GEMV (godets < MIN_T,
+# b = 1) : `nvfp4_gemv_marlin_w13` lit gate et up dans w13 avec leurs échelles propres — au bit du chemin séparé.
+_MOE_W13 = os.environ.get("ACVRAM_MOE_W13", "0") == "1"
 
 
 def gemm_experts_tensor(MP, ext, x: torch.Tensor, eid: torch.Tensor, marlin: dict, top_k: int, m_gate: int,
@@ -1897,7 +1930,8 @@ def gemm_experts_tensor(MP, ext, x: torch.Tensor, eid: torch.Tensor, marlin: dic
     Rend d [G, N] par paire, dans l ordre des paires, pour `moe_reduce` : bf16 si ``fusion`` (reduce lit le
     bf16, pièce 63), fp32 sinon (glue A4). Capturable : aligneur en un lancement, tampons (``tampons``) et
     sorties (``sorties``) à adresses fixes."""
-    E = marlin["gate_proj"][0].shape[0]
+    w13 = marlin.get("w13")
+    E = (w13[0] if w13 is not None else marlin["gate_proj"][0]).shape[0]
     T, G = x.shape[0], eid.shape[0]
     assert G == T * top_k, (G, T, top_k)
     bloc = MP.choisir_block_size(T, top_k, E)
@@ -1916,7 +1950,7 @@ def gemm_experts_tensor(MP, ext, x: torch.Tensor, eid: torch.Tensor, marlin: dic
         aligner = MP.aligner_blocs_cuda if hasattr(MP.charger(compiler=False), "moe_align_block_size") else MP.aligner_blocs_capturable
         s_ids, e_ids, n_post = aligner(eid_al, bloc, E, tampons[cle])
     mg, mu, md = marlin["gate_proj"], marlin["up_proj"], marlin["down_proj"]
-    n_gu, n_d = mg[1].shape[2], md[1].shape[2]
+    n_gu, n_d = (w13[1].shape[2] // 2 if w13 is not None else mg[1].shape[2]), md[1].shape[2]
 
     def sortie(nom, forme):
         k = (nom, forme)
@@ -1924,6 +1958,15 @@ def gemm_experts_tensor(MP, ext, x: torch.Tensor, eid: torch.Tensor, marlin: dic
             sorties[k] = torch.zeros(*forme, dtype=torch.bfloat16, device=x.device)
         return sorties[k]
     xm = x.contiguous()
+    if w13 is not None:
+        # Pièce 82 : UNE GEMM gate‖up (N = 2·n_gu) à l échelle globale de gate ; moe_act corrige up par g_up/g_gate
+        # (gs_gate = 1, gs_up = rapport ; e_sorted = l expert de chaque paire, fantômes −1 → expert 0, poids 0).
+        c13 = MP.gemm_moe(xm, w13[0], w13[1], w13[2], s_ids, e_ids, n_post, uns, bloc, top_k, T, 2 * n_gu, w13[4], ws,
+                          c=sortie("w13", (G, 2 * n_gu)))
+        act = ext.moe_act(c13[:, :n_gu], c13[:, n_gu:], m_gate, k_down, code_act, None, eid.contiguous(), w13[7], w13[6])
+        d = MP.gemm_moe(act.contiguous(), md[0], md[1], md[2], s_ids, e_ids, n_post, uns, bloc, 1, G, n_d, md[3], ws,
+                        c=sortie("d", (G, n_d)))
+        return d if fusion else d.float()
     g = MP.gemm_moe(xm, mg[0], mg[1], mg[2], s_ids, e_ids, n_post, uns, bloc, top_k, T, n_gu, mg[3], ws, c=sortie("g", (G, n_gu)))
     u = MP.gemm_moe(xm, mu[0], mu[1], mu[2], s_ids, e_ids, n_post, uns, bloc, top_k, T, n_gu, mu[3], ws, c=sortie("u", (G, n_gu)))
     if ext is not None and hasattr(ext, "moe_act"):

@@ -2025,7 +2025,7 @@ __global__ void __launch_bounds__(MB_WARPS * WARP) nvfp4_gemv_marlin_kernel(
     const int *__restrict__ expert_ids, const int *__restrict__ token_ids,
     const XT *__restrict__ x, float *__restrict__ y, int N, int K, int act,
     float *__restrict__ part, unsigned int *__restrict__ cpt,
-    const __nv_bfloat16 *__restrict__ xsc, int ld_sc) {
+    const __nv_bfloat16 *__restrict__ xsc, int ld_sc, int ldn) {
     extern __shared__ float xs[];
     float *red = xs + K;
     __shared__ bool dernier;
@@ -2039,6 +2039,9 @@ __global__ void __launch_bounds__(MB_WARPS * WARP) nvfp4_gemv_marlin_kernel(
     }
     const XT *xn = x + (long)token_ids[g] * K;
     const int KT = K / MB_TK, NT = N / MB_TN;
+    // Pièce 82 : largeur de ligne STOCKÉE (colonnes) des poids et des échelles — N partout, 2N quand gate et up
+    // sont lues dans w13 (tuiles de gate puis d up sur chaque ligne de tuiles). La sortie reste en N.
+    const int LN = ldn / MB_TN;
     const int kt0 = z * KT / S, kt1 = (z + 1) * KT / S;     // tuiles de ce bloc
     // Pièce 47 : l'échelle AWQ par expert (x / s[e]) se faisait en torch devant
     // le GEMV — un gather, une division et un cast par projection et par
@@ -2061,22 +2064,22 @@ __global__ void __launch_bounds__(MB_WARPS * WARP) nvfp4_gemv_marlin_kernel(
         xs[i] = v;
     }
     __syncthreads();
-    const long bw = (long)e * KT * NT * (MB_TK * MB_TN / 32) + (long)nt * (MB_TK * MB_TN / 32) + lane;
+    const long bw = (long)e * KT * LN * (MB_TK * MB_TN / 32) + (long)nt * (MB_TK * MB_TN / 32) + lane;
     const int tr = (lane & 3) * 2, c = lane >> 2;
-    const long bs = (long)e * KT * N + (long)nt * MB_TN + 8 * c;
+    const long bs = (long)e * KT * ldn + (long)nt * MB_TN + 8 * c;
     float acc[NW][4][2] = {};
     int kt = kt0 + warp;
     // deux tuiles en vol par voie (les chargements des deux partent avant le calcul)
     for (; kt + MB_WARPS < kt1; kt += 2 * MB_WARPS) {
         const int k2 = kt + MB_WARPS;
-        const uint4 pa = q0[bw + (long)kt * NT * 32], pb = q0[bw + (long)k2 * NT * 32];
-        const uint2 sa = *reinterpret_cast<const uint2 *>(s0 + bs + (long)kt * N);
-        const uint2 sb = *reinterpret_cast<const uint2 *>(s0 + bs + (long)k2 * N);
+        const uint4 pa = q0[bw + (long)kt * LN * 32], pb = q0[bw + (long)k2 * LN * 32];
+        const uint2 sa = *reinterpret_cast<const uint2 *>(s0 + bs + (long)kt * ldn);
+        const uint2 sb = *reinterpret_cast<const uint2 *>(s0 + bs + (long)k2 * ldn);
         uint4 pa1, pb1; uint2 sa1, sb1;
         if constexpr (NW == 2) {
-            pa1 = q1[bw + (long)kt * NT * 32]; pb1 = q1[bw + (long)k2 * NT * 32];
-            sa1 = *reinterpret_cast<const uint2 *>(s1 + bs + (long)kt * N);
-            sb1 = *reinterpret_cast<const uint2 *>(s1 + bs + (long)k2 * N);
+            pa1 = q1[bw + (long)kt * LN * 32]; pb1 = q1[bw + (long)k2 * LN * 32];
+            sa1 = *reinterpret_cast<const uint2 *>(s1 + bs + (long)kt * ldn);
+            sb1 = *reinterpret_cast<const uint2 *>(s1 + bs + (long)k2 * ldn);
         }
         const float2 xa01 = *reinterpret_cast<const float2 *>(xs + kt * MB_TK + tr);
         const float2 xa89 = *reinterpret_cast<const float2 *>(xs + kt * MB_TK + tr + 8);
@@ -2090,14 +2093,14 @@ __global__ void __launch_bounds__(MB_WARPS * WARP) nvfp4_gemv_marlin_kernel(
         }
     }
     for (; kt < kt1; kt += MB_WARPS) {
-        const uint4 pa = q0[bw + (long)kt * NT * 32];
-        const uint2 sa = *reinterpret_cast<const uint2 *>(s0 + bs + (long)kt * N);
+        const uint4 pa = q0[bw + (long)kt * LN * 32];
+        const uint2 sa = *reinterpret_cast<const uint2 *>(s0 + bs + (long)kt * ldn);
         const float2 xa01 = *reinterpret_cast<const float2 *>(xs + kt * MB_TK + tr);
         const float2 xa89 = *reinterpret_cast<const float2 *>(xs + kt * MB_TK + tr + 8);
         mb_tuile(pa, sa, xa01, xa89, acc[0]);
         if constexpr (NW == 2) {
-            const uint4 pa1 = q1[bw + (long)kt * NT * 32];
-            const uint2 sa1 = *reinterpret_cast<const uint2 *>(s1 + bs + (long)kt * N);
+            const uint4 pa1 = q1[bw + (long)kt * LN * 32];
+            const uint2 sa1 = *reinterpret_cast<const uint2 *>(s1 + bs + (long)kt * ldn);
             mb_tuile(pa1, sa1, xa01, xa89, acc[1]);
         }
     }
@@ -2493,7 +2496,7 @@ torch::Tensor nvfp4_gemv_marlin(torch::Tensor w, torch::Tensor s, torch::Tensor 
     #define MB_L(XT, PX) nvfp4_gemv_marlin_kernel<XT, 1><<<grid, MB_WARPS * WARP, shm, stream>>>( \
         reinterpret_cast<const uint4 *>(w.data_ptr()), static_cast<const unsigned char *>(s.data_ptr()), g.data_ptr<float>(), \
         nullptr, nullptr, nullptr, expert_ids.data_ptr<int>(), token_ids.data_ptr<int>(), PX, out.data_ptr<float>(), (int)N, (int)K, 0, \
-        part, cpt, psc, ldsc)
+        part, cpt, psc, ldsc, (int)N)
     if (bf) { MB_L(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
     else { MB_L(float, xc.data_ptr<float>()); }
     #undef MB_L
@@ -2538,7 +2541,54 @@ torch::Tensor nvfp4_gemv_marlin_gateup(torch::Tensor wg, torch::Tensor sg, torch
         reinterpret_cast<const uint4 *>(wg.data_ptr()), static_cast<const unsigned char *>(sg.data_ptr()), gg.data_ptr<float>(), \
         reinterpret_cast<const uint4 *>(wu.data_ptr()), static_cast<const unsigned char *>(su.data_ptr()), gu.data_ptr<float>(), \
         expert_ids.data_ptr<int>(), token_ids.data_ptr<int>(), PX, out.data_ptr<float>(), (int)N, (int)K, (int)act, \
-        part, cpt, psc, ldsc)
+        part, cpt, psc, ldsc, (int)N)
+    if (bf) { MB_L(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
+    else { MB_L(float, xc.data_ptr<float>()); }
+    #undef MB_L
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
+// Pièce 82 : le même GEMV gate·up, lisant gate et up dans la pile w13 (disposition unique : les piles gate et up
+// sont rendues). w13 [E, K/16, 4N] int32 = sur chaque ligne de tuiles, les N/64 tuiles de gate puis celles d up ;
+// s13 [E, K/16, 2N] de même. Le noyau reçoit la largeur stockée 2N (ldn) et deux bases décalées : mêmes
+// octets, mêmes expressions, mêmes échelles globales par projection qu avec deux piles — sortie AU BIT du
+// chemin séparé (tests/test_moe_w13.py).
+torch::Tensor nvfp4_gemv_marlin_w13(torch::Tensor w13, torch::Tensor s13, torch::Tensor gg, torch::Tensor gu,
+                                    torch::Tensor expert_ids, torch::Tensor token_ids,
+                                    torch::Tensor x, int64_t K, int64_t N, int64_t act,
+                                    c10::optional<torch::Tensor> xscale) {
+    mb_verifier(w13, s13, gg, K, 2 * N); CHECK_CONTIG(gu); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(w13);
+    TORCH_CHECK(gu.scalar_type() == torch::kFloat && gu.numel() == gg.numel(), "w13 : échelle globale d up fp32 [E]");
+    const int G = expert_ids.size(0);
+    const bool bf = x.scalar_type() == torch::kBFloat16;
+    auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
+    TORCH_CHECK(xc.size(-1) == K, "x : dernière dimension K");
+    auto out = torch::empty({G, N}, xc.options().dtype(torch::kFloat));
+    const int S = mb_splitk(N / MB_TN, G, K / MB_TK);
+    dim3 grid(N / MB_TN, G, S);
+    float *part = nullptr; unsigned int *cpt = nullptr;
+    if (S > 1) std::tie(part, cpt) = mb_tampons(out, (long)S * 2 * G * N, (long)G * (N / MB_TN));
+    const size_t shm = (size_t)(K + 2 * MB_WARPS * MB_TN) * sizeof(float);
+    const __nv_bfloat16 *psc = nullptr; int ldsc = 0;
+    if (xscale.has_value() && xscale->defined()) {
+        const torch::Tensor &sc = *xscale;
+        CHECK_CUDA(sc);
+        TORCH_CHECK(sc.scalar_type() == torch::kBFloat16, "échelle AWQ : bf16 attendu (table de moe.py)");
+        TORCH_CHECK(sc.dim() == 2 && sc.size(1) >= K, "échelle AWQ [E, ≥ K]");
+        TORCH_CHECK(sc.stride(1) == 1, "échelle AWQ : lignes contiguës");
+        psc = reinterpret_cast<const __nv_bfloat16 *>(sc.data_ptr());
+        ldsc = (int)sc.stride(0);
+    }
+    const uint4 *qg = reinterpret_cast<const uint4 *>(w13.data_ptr());
+    const uint4 *qu = qg + (long)(N / MB_TN) * (MB_TK * MB_TN / 32);   // tuiles d up : après les N/64 de gate
+    const unsigned char *sgp = static_cast<const unsigned char *>(s13.data_ptr());
+    const unsigned char *sup = sgp + N;                                   // échelles d up : après les N de gate
+    auto stream = at::cuda::getCurrentCUDAStream();
+    #define MB_L(XT, PX) nvfp4_gemv_marlin_kernel<XT, 2><<<grid, MB_WARPS * WARP, shm, stream>>>( \
+        qg, sgp, gg.data_ptr<float>(), qu, sup, gu.data_ptr<float>(), \
+        expert_ids.data_ptr<int>(), token_ids.data_ptr<int>(), PX, out.data_ptr<float>(), (int)N, (int)K, (int)act, \
+        part, cpt, psc, ldsc, (int)(2 * N))
     if (bf) { MB_L(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
     else { MB_L(float, xc.data_ptr<float>()); }
     #undef MB_L
@@ -7665,6 +7715,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("expert_ids"), py::arg("token_ids"), py::arg("x"), py::arg("K"), py::arg("N"), py::arg("act") = 0,
           py::arg("xscale") = c10::nullopt,
           "NVFP4 : gate et up fusionnés sur la disposition Marlin, sortie act(gate)*up");
+    m.def("nvfp4_gemv_marlin_w13", &nvfp4_gemv_marlin_w13,
+          py::arg("w13"), py::arg("s13"), py::arg("gg"), py::arg("gu"),
+          py::arg("expert_ids"), py::arg("token_ids"), py::arg("x"), py::arg("K"), py::arg("N"), py::arg("act") = 0,
+          py::arg("xscale") = c10::nullopt,
+          "Pièce 82 : GEMV gate·up lisant la pile w13 [E, K/16, 4N] (largeur stockée 2N), au bit du chemin séparé");
     m.def("moe_slots", &moe_slots, py::arg("expert_ids"), py::arg("E"), py::arg("tpb") = 4,
           "Pièce 61 : créneaux (expert, ≤ TPB paires) à partir des paires du godet — (slot_e [G], slot_pair [G·TPB])");
     m.def("nvfp4_gemv_marlin_slots", &nvfp4_gemv_marlin_slots,
