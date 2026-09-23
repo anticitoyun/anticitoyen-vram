@@ -256,7 +256,7 @@ protocole pour tous les moteurs (`outils/`, une carte, `energie.py`) :
 | | acvram | vLLM 0.29 (`vllm serve`) | llama.cpp (sm_120) |
 |---|---|---|---|
 | décodage 12 séquences | 1 831,7 t/s ² | **1 999,0 t/s** ² | — |
-| décodage 1 séquence | 283,6 t/s ¹ | 290,6 t/s ³ | **323,6 t/s** |
+| décodage 1 séquence | 294,7 t/s ³ | 291,4 t/s ³ | **323,6 t/s** |
 | prefill pp2048 | **22 707 jetons/s** | 21 054 | 8 671 (TabbyAPI, retiré) |
 
 ¹ Erratum du 22/09 : `serve` spécule par défaut (`--speculative ngram`, cli.py), les
@@ -272,8 +272,11 @@ cellule alternée X Y Y X (revue/poste2-piece64-23-09.md). acvram 0.6.36 (expert
 tensor cores par défaut aux lots ≥ 8). **vLLM est devant de 9,1 % en débit et de 7,1 % en
 J/jeton.**
 
-³ Mesuré hors ligne (`LLM().generate()` en processus), pas par `vllm serve` : ce n'est pas le
-même instrument que les colonnes acvram et llama.cpp. Remesure par le même client en cours.
+³ 23/09, même séance et même protocole que ² (ABAB, `-lgc 2700` des deux côtés, horloges
+2 656-2 672 MHz, aucun bridage ; revue/poste2-piece67-vllm-b1-23-09.md), sans spéculation des
+deux côtés : acvram 294,7 (split-K du GEMV experts, `ACVRAM_GEMV_SPLITK=1`, défaut à partir de
+0.6.37) contre vLLM 291,4 — **égalité** (écart 1,1 %, sous le seuil de 2 %). llama.cpp 323,6 vient
+d'une autre séance (20/09, même client HTTP) : il reste devant.
 
 Débits du jour (poste 1030, régime éco `-lgc 2700`, pipeline en service ;
 échantillonnage glouton capturé dans le graphe CUDA, défaut de 0.6.35). Le b=12
@@ -298,8 +301,7 @@ mesure, l'instrument et son régime — un chiffre sans régime n'est pas publi�
 Où acvram est devant : modèles MLA (GLM-4.7-Flash) en NVFP4 natif sm_120, que
 vLLM ne sert qu'en FP8 (b=1 : 165,35 t/s en service) ; les modèles qui ne
 tiennent pas en VRAM . Le décodage à séquence unique n'en fait pas partie : sans spéculation, acvram y est
-troisième (283,6 t/s contre 290,6 pour vLLM et 323,6 pour llama.cpp), et ne garde
-l'avantage qu'en énergie (erratum ¹). À grand lot, sur un MoE qui tient en VRAM, vLLM
+à égalité avec vLLM (294,7 contre 291,4, note ³) et derrière llama.cpp (323,6). À grand lot, sur un MoE qui tient en VRAM, vLLM
 reste devant à b=12 (1 999,0 contre 1 831,7 t/s, et 7,1 % de J/jeton en moins, même
 séance et même instrument, note ²) ; acvram y a progressé (1 540 en 0.6.34 → 1 831,7 en
 0.6.36) sans passer devant.
