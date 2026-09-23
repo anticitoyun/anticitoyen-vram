@@ -4,6 +4,8 @@ Ne jamais annoter vLLM (vllm-direct, NVFP4 majuscules), llama.cpp (GGUF natif), 
 import re
 from pathlib import Path
 
+import pytest
+
 REVUE = Path(__file__).parent.parent / "acvram-memoire" / "revue"
 ANNOTATION = "avec spéculation n-gram"
 
@@ -54,6 +56,9 @@ def _est_non_acvram(alias: str) -> bool:
 
 def trouver_violations(chemin: Path) -> list[tuple[int, str]]:
     """Retourne les (numéro de ligne, contenu) qui ont une annotation interdite."""
+    if not chemin.exists():
+        # instantané public : publier-github.sh garde ces tableaux privés (ils nomment les modèles de sessions)
+        pytest.skip(f"{chemin.name} absent de cet arbre")
     violations = []
     for i, ligne in enumerate(chemin.read_text().splitlines(), 1):
         if ANNOTATION not in ligne:
