@@ -56,7 +56,7 @@ async fn conversation(State(etat): State<Arc<Etat>>, Json(r): Json<Requete>) -> 
     let max = r.max_tokens.unwrap_or(128);
     let e = etat.clone();
     let res = tokio::task::spawn_blocking(move || {
-        let m = e.moteur.lock().map_err(|_| "moteur empoisonné".to_string())?;
+        let mut m = e.moteur.lock().map_err(|_| "moteur empoisonné".to_string())?;
         let texte = m.tokeniseur.rendre(&r.messages, true).map_err(|x| x.0)?;
         let ids = m.tokeniseur.encoder(&texte).map_err(|x| x.0)?;
         let sortie = m.generer(&ids, max).map_err(|x| x.0)?;

@@ -46,6 +46,8 @@ modele = loaded.model
 # servi les échantillonne (`Engine._sample_only`, pas normal et pas recouvert du pipeline). Lecture synchrone :
 # elle ralentit le vidage, elle ne change aucune valeur.
 _journal: list = []
+_complets: list = []                       # VIDAGE_LOGITS=1 : logits fp32 complets (porte KL du préfill Rust)
+_LOGITS = os.environ.get("VIDAGE_LOGITS") == "1"
 _sample_orig = Engine._sample_only
 
 
@@ -53,6 +55,8 @@ def _espion(self, logits, seqs, depuis_graphe=False):
     ligne = logits.reshape(-1, logits.shape[-1])[0].detach()
     _journal.append({"dtype": str(ligne.dtype), "n": int(ligne.numel()),
                      "sha256": hashlib.sha256(ligne.contiguous().cpu().numpy().tobytes()).hexdigest()})
+    if _LOGITS:
+        _complets.append(ligne.to(torch.float32).cpu().clone())
     return _sample_orig(self, logits, seqs, depuis_graphe)
 
 
@@ -87,6 +91,7 @@ for inv in json.load(open(INVITES, encoding="utf-8")):
     ids = tok.encode(render_chat(tok, inv["messages"], True))
     L = len(ids)
     _journal.clear()
+    _complets.clear()
     seq = eng.add_request(list(ids), SamplingParams(temperature=0.0, max_tokens=N_JETONS), request_id=inv["nom"])
     kv, premier = None, None
     while not seq.finished:
@@ -106,6 +111,8 @@ for inv in json.load(open(INVITES, encoding="utf-8")):
                     kv[f"couche{i}.{nom_t}"] = t[idx_b.to(t.device), idx_o.to(t.device)].contiguous().cpu()
             save_file(kv, os.path.join(SORTIE, f"kv-{inv['nom']}.safetensors"))
     sortie = [int(x) for x in seq.output_ids]
+    if _LOGITS:
+        save_file({"logits": torch.stack(_complets).contiguous()}, os.path.join(SORTIE, f"logits-{inv['nom']}.safetensors"))
     r = {"nom": inv["nom"], "longueur_invite": L, "sha256_invite": sha_ids(ids), "premier_jeton": premier,
          "sortie": sortie, "sha256_sortie": sha_ids(sortie), "logits": list(_journal), "fin": seq.finish_reason if hasattr(seq, "finish_reason") else None,
          "sha256_kv": hashlib.sha256(b"".join(v.reshape(-1).view(torch.uint8).numpy().tobytes() for v in kv.values())).hexdigest()}
