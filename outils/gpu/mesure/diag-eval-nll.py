@@ -89,29 +89,37 @@ import torch  # noqa: E402
 SEUIL_PPL_PROPRE = 30.0
 
 SCRIPT_HF = r'''
-import json, sys, torch
+import json, os, sys, torch
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoTokenizer
 ids = json.load(open(sys.argv[2]))
 maxmem = sys.argv[3]
 texte_propre = open(sys.argv[5], encoding="utf-8").read() if len(sys.argv) > 5 else None
-kw = {"dtype": torch.bfloat16}
-if maxmem != "cuda":
+kw = {"dtype": torch.bfloat16, "attn_implementation": "eager", "output_loading_info": True}
+if maxmem == "cpu":                      # pièce 37 : processeur seul, zéro offload, zéro carte (59 Go de RAM, ~100 s / 300 jetons)
+    torch.set_num_threads(int(os.environ.get("HF_THREADS", "8")))
+    kw.update(device_map="cpu")
+elif maxmem != "cuda":
     g, c = maxmem.split(",")
     kw.update(device_map="auto", max_memory={0: g, "cpu": c})
 else:
     kw.update(device_map="cuda")
 try:
-    m = AutoModelForImageTextToText.from_pretrained(sys.argv[1], **kw)
+    m, info = AutoModelForImageTextToText.from_pretrained(sys.argv[1], **kw)
 except Exception:
-    m = AutoModelForCausalLM.from_pretrained(sys.argv[1], **kw)
+    m, info = AutoModelForCausalLM.from_pretrained(sys.argv[1], **kw)
 m.eval()
+# GARDE DE CHARGEMENT (Q(12), 22/09) : une clé manquante ou un paramètre resté sur `meta` fait un modèle
+# à poids vides qui génère du bruit en silence ; on le dit AVANT de juger quoi que ce soit.
+chargement = {"classe": type(m).__name__, "manquantes": len(info.get("missing_keys", [])),
+              "inattendues": len(info.get("unexpected_keys", [])), "mal_formees": len(info.get("mismatched_keys", [])),
+              "meta": sum(1 for p in m.parameters() if p.device.type == "meta")}
 x = torch.tensor([ids])
 dev = next(m.parameters()).device
 with torch.no_grad():
     out = m(input_ids=x.to(dev))
 lp = torch.log_softmax(out.logits[0, :-1].float(), dim=-1)
 nll = -lp.gather(1, x[0, 1:].to(lp.device).unsqueeze(1)).squeeze(1)
-r = {"nll": nll.cpu().tolist()}
+r = {"nll": nll.cpu().tolist(), "chargement": chargement}
 
 # CONTRÔLE DE LA RÉFÉRENCE (22/09) : une référence qui rend PPL 108 039 sur
 # nos ids ne juge rien. Deux épreuves qui ne dépendent PAS de notre chaîne :
@@ -234,6 +242,27 @@ def nll_hf(source: str, ids: list[int], texte: str = "") -> dict | None:
         return json.load(open(o))
 
 
+def juger_reference_gabarit(h: dict, depuis: int, seuil: float = 1.0) -> dict:
+    """Épreuve de la référence SOUS GABARIT (pièce 37, 22/09) : un Gemma 4 -it ne
+    prédit pas la suite d un texte brut (PPL 10^4 sur HF lui-même, T1-T4), il
+    prédit des jetons de tour ; la seule épreuve qui rend « faux » pour la bonne
+    raison est la NLL moyenne de SA PROPRE réponse gloutonne (ids[depuis:]),
+    ≤ `seuil` nat pour un chargement sain, plus la garde de chargement."""
+    nll = h.get("nll") or []
+    rep = nll[max(depuis - 1, 0):]
+    moy = sum(rep) / len(rep) if rep else None
+    ch = h.get("chargement") or {}
+    motifs = []
+    if moy is None:
+        motifs.append("aucune position de réponse (depuis trop grand)")
+    elif moy > seuil:
+        motifs.append(f"NLL moyenne {moy:.3f} > {seuil} nat sur SA propre réponse gloutonne")
+    if ch and (ch.get("manquantes") or ch.get("meta") or ch.get("mal_formees")):
+        motifs.append(f"chargement : {ch}")
+    return {"nll_reponse_hf_moy": None if moy is None else round(moy, 4), "chargement_hf": ch,
+            "reference_valide": not motifs, "reference_motifs": motifs}
+
+
 def juger_reference(h: dict) -> dict:
     """La référence est-elle en état de juger ? Seuils écrits avant : PPL ≤ 30
     sur un paragraphe propre encodé par SON tokeniseur, et une suite de 20
@@ -273,6 +302,10 @@ def main() -> int:
     ap.add_argument("--jetons", type=int, default=300)
     ap.add_argument("--texte", default=None, help="fichier texte connu (défaut : acvram/data/calibration-anglais.txt)")
     ap.add_argument("--sans-decode", action="store_true", help="sauter le bras decode (n pas de décodage)")
+    ap.add_argument("--sans-serve", action="store_true", help="sauter le bras serve (tête à toutes les positions en un seul matmul : 5,25 Gio de fp32 sur un alias bf16 à vocabulaire 262 144 — OOM, 22/09)")
+    ap.add_argument("--ids", default=None, help="fichier JSON d ids tels quels (gabarit compris) : remplace --texte, aucun BOS ajouté (pièce 37 : Gemma 4 -it ne se juge que sous gabarit)")
+    ap.add_argument("--reponse-depuis", type=int, default=0, help="avec --ids : rang du premier id de la réponse gloutonne HF ; l épreuve de référence devient « NLL hf moyenne sur la réponse ≤ 1 nat » (gabarit), et le moteur publie la même moyenne")
+    ap.add_argument("--nll-hf", default=None, help="JSON déjà produit par le bras hf (nll_hf, à sec sur processeur) : évite de le rejouer sous le verrou")
     ap.add_argument("--json")
     a = ap.parse_args()
     from acvram.engine.loader import load_model
@@ -282,14 +315,17 @@ def main() -> int:
     tok = load_tokenizer(chemin)
     texte = open(a.texte or os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../acvram/data/calibration-anglais.txt"),
                  encoding="utf-8").read()
-    ids = tok.encode(texte)[: a.jetons - 1]
     bos = tok.bos_id()
-    if bos is not None:
-        ids = [bos] + ids
+    if a.ids:
+        ids = json.load(open(a.ids))[: a.jetons]
+    else:
+        ids = tok.encode(texte)[: a.jetons - 1]
+        if bos is not None:
+            ids = [bos] + ids
     loaded = load_model(chemin, dtype=torch.bfloat16, max_model_len=len(ids) + 32, max_concurrent_seqs=1)
     r = {"alias": chemin, "jetons": len(ids), "bos": bos, "bos_en_tete": ids[0] == bos if bos is not None else None}
     e = nll_eval(loaded, ids)
-    s, champs = nll_serve(loaded, tok, ids)
+    s, champs = (list(e), {"sans_serve": True}) if a.sans_serve else nll_serve(loaded, tok, ids)
     r.update({"nll_eval": e, "nll_serve": s, "champs_batch_serve": champs,
               "ppl_eval": round(ppl(e), 3), "ppl_serve": round(ppl(s), 3),
               "div_eval_serve": premiere_divergence(e, s),
@@ -316,13 +352,17 @@ def main() -> int:
             print(f"[diag] modèle acvram libéré, {libre:.1f} Gio libres avant le bras hf", flush=True)
             if libre < 20:
                 print(f"[diag] ALERTE : {libre:.1f} Gio seulement — le bras hf en offload peut échouer", flush=True)
-        brut = nll_hf(a.source, ids, texte)
+        brut = json.load(open(a.nll_hf)) if a.nll_hf else nll_hf(a.source, ids, texte)
         if brut is not None:
             h = brut["nll"]
             r.update({"nll_hf": h, "ppl_hf": round(ppl(h), 3), "div_eval_hf": premiere_divergence(e, h),
                       "div_serve_hf": premiere_divergence(s, h),
                       "delta_eval_hf_med": round(sorted(abs(x - y) for x, y in zip(e, h))[len(h) // 2], 4)})
-            r.update(juger_reference(brut))
+            r.update(juger_reference_gabarit(brut, a.reponse_depuis) if a.ids and a.reponse_depuis else juger_reference(brut))
+            if a.ids and a.reponse_depuis:
+                d0 = max(a.reponse_depuis - 1, 0)
+                r["nll_reponse_moy"] = {b: round(sum(v[d0:]) / len(v[d0:]), 4) for b, v in (("eval", e), ("serve", s), ("hf", h)) if len(v) > d0}
+                r["ecarts_confiants"] = ecarts_confiants(e, h)
             r["ids_propres_en_tete"] = brut.get("ids_propres_en_tete")
             r["ids_nos_en_tete"] = brut.get("ids_nos_en_tete")
     r["controle_eval_ppl_le_30"] = r["ppl_eval"] <= 30
@@ -341,11 +381,51 @@ def main() -> int:
     return 0
 
 
+SEUIL_CONFIANT_NATS = 2.0     # une position « confiante » : NLL_hf ≤ 2 nats (p ≥ 0,135)
+
+
+def ecarts_confiants(e: list[float], h: list[float], seuil: float = SEUIL_CONFIANT_NATS) -> dict:
+    """|Δ| eval−hf sur les positions où hf est confiant. Dans la queue (NLL 15-25 nats,
+    p ≈ 1e-7..1e-11) deux moteurs justes diffèrent de plusieurs nats sans qu aucun soit
+    faux — un 1er contrôle « |Δ| ≥ 1 nat à une position quelconque » rendait faux 128/202
+    positions d invite d un forward par ailleurs à 0,002 nat de médiane sur la réponse
+    (22/09, pièce 37) : le seuil ne portait pas le régime de la position."""
+    idx = [i for i in range(min(len(e), len(h))) if h[i] <= seuil]
+    dd = sorted(abs(e[i] - h[i]) for i in idx)
+    if not dd:
+        return {"n": 0}
+    return {"n": len(dd), "mediane": round(dd[len(dd) // 2], 4), "moyenne": round(sum(dd) / len(dd), 4),
+            "part_ge_1nat": round(sum(1 for x in dd if x >= 1.0) / len(dd), 4), "max": round(dd[-1], 3),
+            "premiere_ge_1nat": next((i + 1 for i in idx if abs(e[i] - h[i]) >= 1.0), None)}
+
+
+def verdict_gabarit(r: dict) -> str:
+    """SOUS GABARIT (pièce 37) : la PPL absolue des ids d invite ne juge rien (tour
+    utilisateur, queue à 15-25 nats) ; ce qui juge, c est l accord avec hf sur les
+    positions CONFIANTES (NLL_hf ≤ 2 nats) et la NLL de la réponse gloutonne."""
+    m = r["nll_reponse_moy"]
+    c = r.get("ecarts_confiants") or {}
+    if r["div_eval_serve"] is not None and r["div_eval_serve"] < 8:
+        return f"P2 : eval ≠ serve dès la position {r['div_eval_serve']} — la ForwardBatch d évaluation diffère du service (champs {r['champs_batch_serve']})"
+    if c.get("n", 0) < 20:
+        return f"INDÉCIDABLE : {c.get('n', 0)} positions confiantes seulement (< 20) — allonger la réponse"
+    if c["mediane"] > 0.05 or c["part_ge_1nat"] > 0.10:
+        return (f"G3 : sous gabarit, acvram ≠ hf sur les positions confiantes (n={c['n']} : |Δ| médian {c['mediane']}, "
+                f"{100 * c['part_ge_1nat']:.1f} % à ≥ 1 nat, 1re à {c['premiere_ge_1nat']}) — défaut du forward acvram, à nommer par couche")
+    if m.get("eval", 9) > 1.0:
+        return f"G4 : positions confiantes tenues mais NLL de la réponse eval {m['eval']} > 1 nat (hf {m.get('hf')}) — conversion abîmée"
+    return (f"G1 : moteur juste sous gabarit — positions confiantes n={c['n']} : |Δ| médian {c['mediane']}, "
+            f"{100 * c['part_ge_1nat']:.1f} % à ≥ 1 nat (seuils 0,05 / 10 %) ; NLL réponse eval {m['eval']} · serve {m.get('serve')} · hf {m.get('hf')} "
+            f"(coût de la quantification : {round(m['eval'] - m.get('hf', 0), 3)} nat/jeton)")
+
+
 def verdict(r: dict) -> str:
     if r.get("reference_valide") is False:
         return ("RÉFÉRENCE INVALIDE (ids ou chargement) : " + " ; ".join(r["reference_motifs"])
                 + f" — suite produite : {r.get('suite_texte', '')!r}. Le moteur n est PAS jugé : "
                   "corriger la référence (gabarit, BOS, tokeniseur, offload) avant toute conclusion.")
+    if r.get("nll_reponse_moy"):
+        return verdict_gabarit(r)
     if "ppl_decode" in r and not r["montage_decode_ok"]:
         return (f"INVALIDE (bras decode) : à la position 1, contexte d un seul jeton, decode et eval devraient "
                 f"coïncider — Δ = {r['delta_position_1']} > 1e-2. Le bras est mal monté, il ne juge rien.")

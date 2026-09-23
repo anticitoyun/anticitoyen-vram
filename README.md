@@ -318,3 +318,5 @@ est utile : **Soutenir : [buymeacoffee.com/anticitoyen](https://buymeacoffee.com
 ## Licence
 
 GPL-3.0 ou ultérieure.
+
+`acvram/kernels/marlin_port/` contient du code porté de [vLLM](https://github.com/vllm-project/vllm) v0.29.0 (noyaux `marlin_moe_wna16`, `gptq_marlin_repack`, `moe_align_block_size`), sous licence Apache-2.0 : chaque fichier garde son en-tête d origine, la licence est dans `LICENSE-vllm` et la liste des fichiers, le commit d origine et les modifications sont dans `acvram/kernels/marlin_port/NOTICE`.

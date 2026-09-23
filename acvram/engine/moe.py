@@ -344,6 +344,7 @@ class MoEBlock(nn.Module):
         self._stacks_awq = awq
         self._raison_marlin = ""
         self._stacks_marlin = self._construire_marlin(piles, awq, hadamard)
+        self._tensor_refus = self._raison_tensor()              # pièce 65 : "" = chemin tensor pris en charge
         if self._stacks_marlin is not None:
             if _DOUBLE_DIAG:
                 self.__dict__["experts_layout"] = "double(diag)"
@@ -418,6 +419,22 @@ class MoEBlock(nn.Module):
             _, _, _, gs, k, m = pile
             self._stacks[nom] = ("nvfp4", None, None, gs, k, m)
         self.__dict__["experts_layout"] = "marlin"
+
+    def _raison_tensor(self) -> str:
+        """Pièce 65 : raison statique du repli GEMV du chemin tensor ("" = pris en charge), depuis les piles
+        et le port. Sans port compilé (à sec, CI sans carte), le défaut REPLIE au lieu de lever (chef, 23/09) :
+        un défaut ne lève jamais là où le GEMV marchait."""
+        marlin = getattr(self, "_stacks_marlin", None)
+        awq = getattr(self, "_stacks_awq", {}) or {}
+        if marlin is None:
+            return f"pas de piles Marlin ({getattr(self, '_raison_marlin', '') or 'disposition naturelle'})"
+        from ..kernels import marlin_port as MP
+        if MP.charger(compiler=False) is None:
+            return "port Marlin non compilé (à sec : python outils/banc-marlin-p1-18-09.py --compiler-seulement)"
+        mg, md = marlin["gate_proj"], marlin["down_proj"]
+        return forme_tensor_refus({"nvfp4"}, mg[3], mg[4], md[4], len(self.experts),
+                                  awq.get("gate_proj") is None and awq.get("up_proj") is None and awq.get("down_proj") is None,
+                                  awq.get("hadamard", {}).get("down_proj", 0))
 
     def _construire_marlin(self, piles, awq, hadamard):
         """P1 (poste7-p1-porte-marlin-18-09, X = 152 TFLOPS au banc) : la
@@ -716,7 +733,7 @@ class MoEBlock(nn.Module):
 
     # Chemins de DÉCODAGE MoE, tels que `_chemin` les compte : la ligne de régime
     # imprime celui qui a été atteint (runner.chemin_moe_atteint), jamais l env.
-    CHEMINS_DECODAGE = ("gemv_marlin", "gemv_v1", "decode_mma", "decode_mma_marlin", "bmm")
+    CHEMINS_DECODAGE = ("gemv_marlin", "gemv_v1", "decode_mma", "decode_mma_marlin", "bmm", "marlin_tensor")
 
     def _chemin(self, nom: str) -> None:
         """Compteur du chemin RÉELLEMENT pris au préfill (REGLES § 7 : « noyau
@@ -1241,6 +1258,38 @@ class MoEBlock(nn.Module):
         marlin = getattr(self, "_stacks_marlin", None)
         if marlin is not None and _GEMV_LAYOUT != "marlin" and pg[1] is not None:
             marlin = None                              # piles Marlin présentes mais témoin naturel demandé
+        # Pièce 65 : défaut aux godets ≥ 2 (T ≥ 2 jetons) ; repli statique nommé (`_tensor_refus`, ligne de régime),
+        # repli dynamique dit une fois par taille de godet (règle 6 : jamais un repli muet).
+        if "_tensor_refus" not in self.__dict__:               # piles posées sans _try_build_stacks (tests, outils)
+            self.__dict__["_tensor_refus"] = self._raison_tensor()
+        statique_ok = _MOE_TENSOR and marlin is not None and not self.__dict__["_tensor_refus"]
+        tensor_ok = (statique_ok and not distinct and x_g.shape[0] >= _MOE_TENSOR_MIN_T
+                     and x_g.dtype == torch.bfloat16 and ech_gu is None and awq.get("down_proj") is None
+                     and x_g.shape[0] * self.top_k == eid.shape[0])   # paires en ordre jeton-majeur (index_jetons)
+        if statique_ok and not tensor_ok and x_g.shape[0] >= _MOE_TENSOR_MIN_T and eid.shape[0] not in self.__dict__.setdefault("_dit_tensor_refus", set()):
+            self.__dict__["_dit_tensor_refus"].add(eid.shape[0])
+            print(f"[moe] chemin tensor non pris sur ce godet (GEMV gardé) : distinct={distinct} "
+                  f"G={eid.shape[0]} T={x_g.shape[0]} k={self.top_k} dtype={x_g.dtype} ech_gu={ech_gu is not None} "
+                  f"awq_down={awq.get('down_proj') is not None}", flush=True)
+        if _MOE_TENSOR and not _MOE_TENSOR_FUSION and not self.__dict__.get("_dit_glue_a4"):
+            self.__dict__["_dit_glue_a4"] = True
+            print("[moe] ACVRAM_MOE_TENSOR_FUSION=0 : glue A4 (aligneur vLLM par atomiques) — TÉMOIN, non reproductible au bit", flush=True)
+        if tensor_ok:
+            from ..kernels import marlin_port as MP                # port présent : vérifié par _raison_tensor (repli nommé sinon)
+            self._chemin("marlin_tensor")
+            pd_ = self._stacks["down_proj"]
+            d = gemm_experts_tensor(MP, ext, x_g, eid, marlin, self.top_k, pg[5], pd_[4],
+                                    1 if self.act == "gelu_tanh" else 0,
+                                    self._marlin_workspace(x.device), self._marlin_uns(eid.shape[0], x.device),
+                                    self.__dict__.setdefault("_tensor_tampons", {}), self.__dict__.setdefault("_tensor_sorties", {}),
+                                    fusion=_MOE_TENSOR_FUSION)
+            tw = topw.reshape(-1)
+            if tw.dtype != torch.float32:
+                tw = tw.to(torch.float32)
+            if ext is not None and hasattr(ext, "moe_reduce"):
+                return ext.moe_reduce(d.contiguous(), tw.contiguous(), self.top_k)
+            d = d.float() * tw.reshape(-1, 1)
+            return d.view(t, self.top_k, -1).sum(dim=1).to(x.dtype)
         if marlin is not None and ext is not None and hasattr(ext, "nvfp4_gemv_marlin_gateup") and not distinct:
             # forme (b), poste7-p1-disposition-unique-18-09 : le GEMV lit la
             # disposition Marlin (tuiles 16 k × 64 n) — une seule disposition
@@ -1799,6 +1848,93 @@ _MOE_ROUTE_PACK = os.environ.get("ACVRAM_MOE_ROUTE_PACK", "1") == "1"
 # expert, sortie identique au bit). Scellé : experts 6,6 → ≤ 5,3 ms, Coder
 # b=12 nu ≥ 1 300 t/s (faux < 1 200).
 _MOE_GEMV = os.environ.get("ACVRAM_MOE_GEMV", "v1")
+# Pièce 62 (23/09, A4) : au décodage, godet ≥ 2, les experts par la GEMM groupée Marlin du port
+# (tensor cores, `marlin_port.gemm_moe`, chemin `marlin_tensor`) au lieu du GEMV par paire
+# (cœurs CUDA, plancher de calcul à 96 paires : revue/poste5-creneaux-experts-23-09). Opt-in
+# jusqu à la cellule ABBA de poste2 (A5) ; le godet 1 reste au GEMV (Marlin 1,40 contre 0,82 ms/pas).
+# Pas au bit : arithmétique tensor-core (biais 1-2·10⁻⁴, 0 ligne hors 2⁻⁷) — jugé par ulp et KL.
+# Pièce 65 (23/09) : chemin tensor-core SERVI PAR DÉFAUT aux godets ≥ MOE_TENSOR_MIN_T (A5 poste2 : +12,2 % t/s,
+# −30 % J/jeton à b=12) ; =0 témoin GEMV scalaire partout.
+_MOE_TENSOR = os.environ.get("ACVRAM_MOE_TENSOR", "1") == "1"
+# Pièce 65 mesuré (chaine-p65, Coder b=2/4/8/12, frontière 200 pas) : tensor +12,7 % à b=2, +9,5 % à b=4,
+# −4,3 % à b=8, −10,4 % à b=12 — le GEMV par paire gagne tant que les experts distincts sont peu nombreux
+# (bande passante), la GEMM groupée à partir de 8 jetons. Seuil par godet comme MOE_DECODE_MMA_MIN_T.
+_MOE_TENSOR_MIN_T = int(os.environ.get("ACVRAM_MOE_TENSOR_MIN_T", "8"))
+# Pièce 65 : la glue A4 (aligneur vLLM par atomiques) n est PAS reproductible — jamais servie par défaut.
+TENSOR_E_MAX = 4096                                    # mémoire partagée de moe_aligner_petit (2·E + G entiers)
+
+
+def forme_tensor_refus(formats, K: int, N_gu: int, N_d: int, E: int, awq_unite: bool, hadamard_down: int = 0) -> str:
+    """Pièce 65 — règle STATIQUE d acceptation d une couche MoE par le chemin tensor-core, partagée par le
+    moteur (`MoEBlock._raison_tensor`) et le contrôle à sec (`outils/controle-moe-tensor-alias.py`) : rend ""
+    si la forme est prise en charge, sinon la raison du repli (nommée sur la ligne de régime)."""
+    formats = set(formats)
+    if formats != {"nvfp4"}:
+        return f"experts {'/'.join(sorted(formats)) or 'sans format'} (le port Marlin est NVFP4 seul)"
+    if K % 64 or N_gu % 64 or N_d % 64:
+        return f"formes K={K} N={N_gu}/{N_d} non multiples de 64 (tuiles Marlin)"
+    if E > TENSOR_E_MAX:
+        return f"E={E} > {TENSOR_E_MAX} (aligneur)"
+    if not awq_unite:
+        return "tables AWQ d activation par expert non unité (pièce 47 : gate/up distinctes → pas de piles Marlin ; sinon le chemin tensor ne les applique pas)"
+    if hadamard_down:
+        return f"rotation Hadamard ({hadamard_down}) de l entrée de down_proj (le chemin tensor ne la tourne pas)"
+    return ""
+
+
+# Pièce 63 (23/09) : glue du chemin tensor fusionnée (aligneur en un lancement qui absorbe le clamp,
+# reduce lisant le bf16 sans cast) — témoin ACVRAM_MOE_TENSOR_FUSION=0 : la glue A4 (clamp + aligneur
+# vLLM + d.float()), au bit contre la fusion (tests/test_moe_tensor_glue_fusee.py).
+_MOE_TENSOR_FUSION = os.environ.get("ACVRAM_MOE_TENSOR_FUSION", "1") == "1"
+
+
+def gemm_experts_tensor(MP, ext, x: torch.Tensor, eid: torch.Tensor, marlin: dict, top_k: int, m_gate: int,
+                        k_down: int, code_act: int, ws, uns, tampons: dict, sorties: dict,
+                        fusion: bool = True) -> torch.Tensor:
+    """Pièce 62 A4 — experts au décodage par la GEMM groupée Marlin du port (tensor cores).
+    ``x`` [T, K] bf16 (lignes du godet), ``eid`` [G = T·top_k] int32 (expert de chaque paire, ordre
+    jeton-majeur, −1 = fantôme), ``marlin`` = piles servies (disposition du port : (w, s, g, K, N)).
+    Rend d [G, N] par paire, dans l ordre des paires, pour `moe_reduce` : bf16 si ``fusion`` (reduce lit le
+    bf16, pièce 63), fp32 sinon (glue A4). Capturable : aligneur en un lancement, tampons (``tampons``) et
+    sorties (``sorties``) à adresses fixes."""
+    E = marlin["gate_proj"][0].shape[0]
+    T, G = x.shape[0], eid.shape[0]
+    assert G == T * top_k, (G, T, top_k)
+    bloc = MP.choisir_block_size(T, top_k, E)
+    cle = (G, bloc)
+    if cle not in tampons:
+        P = -(-(G + E * (bloc - 1)) // bloc) * bloc
+        tampons[cle] = (torch.empty(P, dtype=torch.int32, device=x.device),
+                        torch.empty(P // bloc, dtype=torch.int32, device=x.device),
+                        torch.empty(1, dtype=torch.int32, device=x.device))
+    fusion = fusion and ext is not None and hasattr(ext, "moe_aligner_petit")
+    if fusion:                                    # un lancement : clamp des fantômes + comptage + préfixe + dispersion
+        s_ids, e_ids, n_post = tampons[cle]
+        ext.moe_aligner_petit(eid.contiguous(), E, bloc, s_ids, e_ids, n_post)
+    else:
+        eid_al = eid.clamp(min=0)                 # fantômes → expert 0 sur une ligne nulle ; poids 0 au reduce
+        aligner = MP.aligner_blocs_cuda if hasattr(MP.charger(compiler=False), "moe_align_block_size") else MP.aligner_blocs_capturable
+        s_ids, e_ids, n_post = aligner(eid_al, bloc, E, tampons[cle])
+    mg, mu, md = marlin["gate_proj"], marlin["up_proj"], marlin["down_proj"]
+    n_gu, n_d = mg[1].shape[2], md[1].shape[2]
+
+    def sortie(nom, forme):
+        k = (nom, forme)
+        if k not in sorties:                      # zéros à la création : les lignes jamais écrites restent finies
+            sorties[k] = torch.zeros(*forme, dtype=torch.bfloat16, device=x.device)
+        return sorties[k]
+    xm = x.contiguous()
+    g = MP.gemm_moe(xm, mg[0], mg[1], mg[2], s_ids, e_ids, n_post, uns, bloc, top_k, T, n_gu, mg[3], ws, c=sortie("g", (G, n_gu)))
+    u = MP.gemm_moe(xm, mu[0], mu[1], mu[2], s_ids, e_ids, n_post, uns, bloc, top_k, T, n_gu, mu[3], ws, c=sortie("u", (G, n_gu)))
+    if ext is not None and hasattr(ext, "moe_act"):
+        act = ext.moe_act(g, u, m_gate, k_down, code_act)
+    else:
+        f = F.gelu(g[:, :m_gate].float(), approximate="tanh") if code_act == 1 else F.silu(g[:, :m_gate].float())
+        act = (f * u[:, :m_gate].float()).to(torch.bfloat16)
+        if act.shape[1] != k_down:
+            act = F.pad(act, (0, k_down - act.shape[1]))
+    d = MP.gemm_moe(act.contiguous(), md[0], md[1], md[2], s_ids, e_ids, n_post, uns, bloc, 1, G, n_d, md[3], ws, c=sortie("d", (G, n_d)))
+    return d if fusion else d.float()
 # P1 disposition unique (poste7-p1-disposition-unique-18-09, forme (b)) : le GEMV
 # du décodage lit la disposition Marlin (« marlin », exige
 # ACVRAM_PREFILL_GROUPED=marlin) ou la pile NVFP4 naturelle (« naturel », témoin).

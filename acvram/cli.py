@@ -254,6 +254,8 @@ VARIABLES_LUES = {
     # exportee par outils/carte.sh (son PID) a ce qu'il lance ; lue par eco.py
     # pour ne pas refuser sa propre prise de la carte
     "ACVRAM_CARTE_TENUE", "ACVRAM_ECO", "ACVRAM_MOE_DECODE_MMA_MARLIN",
+    # pièces 62-65 (23/09) : MoE sur tensor cores (défaut aux godets ≥ MIN_T), glue fusionnée, seuil
+    "ACVRAM_MOE_TENSOR", "ACVRAM_MOE_TENSOR_FUSION", "ACVRAM_MOE_TENSOR_MIN_T",
 }
 
 
@@ -650,7 +652,8 @@ def cmd_convert(args: argparse.Namespace) -> int:
             if args.corpus_jetons:
                 n_seqs = max(1, -(-int(args.corpus_jetons) // args.calib_len))
             calib = load_calib_ids(tokenizer, args.calib_file, n_seqs,
-                                   args.calib_len, spec.vocab_size)
+                                   args.calib_len, spec.vocab_size,
+                                   gabarit=bool(getattr(args, "calib_gabarit", False)))
             calib_reel = (len(calib), sum(len(c) for c in calib))
             print(f"  calibration sur {calib_reel[0]} sequences "
                   f"({calib_reel[1]} jetons) ...")
@@ -706,6 +709,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         calib_reel = (0, 0)
 
     calib_source = _calib_source(use_awq, args.calib_file)
+    calib_source["gabarit"] = bool(getattr(args, "calib_gabarit", False))   # pièce 55 : le manifeste le dit
 
     # poste7-diff-octet-a-octet-retire-17-09, REGLES §4 : sans le commit du
     # convertisseur, deux manifestes du meme nom peuvent venir de deux
@@ -1121,6 +1125,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "c'est le chiffre que le rapport d'observations rend quand il refuse "
                          "(« relancer avec --corpus-jetons N ») ; 0 = utiliser --calib-seqs")
     cv.add_argument("--calib-len", type=int, default=512)
+    cv.add_argument("--calib-gabarit", action="store_true",
+                    help="pièce 55 : passe chaque tranche de calibration par le gabarit de conversation du modèle "
+                         "(tour utilisateur / tour assistant) avant l encodage ; refuse si le modèle n a pas de gabarit")
     cv.add_argument("--calib-device", default="cuda:0",
                     help="appareil sur lequel executer les passes de calibration")
     cv.add_argument("--obs-min", type=int, default=512,

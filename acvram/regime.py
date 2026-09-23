@@ -76,6 +76,12 @@ VARIABLES: tuple[Variable, ...] = (
              "GEMV Marlin (b) : split-K par lot aux petits lots (gate/up b=1 : 96 → 384 blocs, réduction du dernier bloc, déterministe) ; 0 défaut = noyau d'avant | 1 = opt-in : +3,1 % b=1 (385,6 contre 374,1 t/s ABAB), PPL décodage +0,0042 vs témoin graphes/eager 0,0026, non tranché 19/09 (verdict-splitk-b1-19-09) | n ≥ 2 = S forcé (diagnostic) ; lue une fois par processus"),
     Variable("GEMV_LAYOUT", "marlin", ("acvram.engine.moe", "_GEMV_LAYOUT"), "marlin",
              "P1 disposition UNIQUE (forme (b)), DÉFAUT depuis l'adoption du 18/09 : marlin = pile Marlin seule (préfill GEMM classe Marlin ET GEMV du décodage relisant les tuiles 16 k × 64 n ; la pile NVFP4 est rendue après le repack, experts_layout=marlin ; va avec PREFILL_GROUPED=marlin, sinon refus à l import ; scellé ≤ 0,97 × GEMV à b=1 et b=12, fp32 par ligne) | naturel = pile NVFP4 seule (témoin, avec PREFILL_GROUPED=groupe ; b=1 366 t/s contre 351 en marlin)"),
+    Variable("MOE_TENSOR", "1", ("acvram.engine.moe", "_MOE_TENSOR"), "0",
+             "pièce 65 (23/09) : GEMM groupée Marlin sur tensor cores aux godets ≥ 2 (défaut, A5 +12,2 % t/s b=12) | 0 témoin GEMV scalaire"),
+    Variable("MOE_TENSOR_MIN_T", "8", ("acvram.engine.moe", "_MOE_TENSOR_MIN_T"), None,
+             "pièce 65 : godet (jetons) minimal du chemin tensor — 8 mesuré (b=4 : GEMV +9,5 % plus rapide ; b=8 : tensor −4,3 %) ; 1, 2, 4 restent en GEMV"),
+    Variable("MOE_TENSOR_FUSION", "1", ("acvram.engine.moe", "_MOE_TENSOR_FUSION"), "0",
+             "pièce 63 : glue fusionnée, reproductible (défaut) | 0 témoin glue A4 (aligneur vLLM par atomiques, NON reproductible) — jamais servi"),
     Variable("MARLIN_DISTINCT", "0", ("acvram.engine.moe", "_MARLIN_DISTINCT"), "0",
              "C10 : 1 = la disposition unique Marlin sert aussi les MoE à gate/up distincts (tables AWQ séparées : GLM k48-calibA) — décodage par le GEMV Marlin à une projection, gate puis up ; 0 défaut = refus nommé, pile naturelle gardée, chemin d'avant (verdict-glm-b12-19-09) ; scellé GLM b=12 ≥ chemin d'avant × 1,05"),
     # --- capacités, plafonds, modes du moteur (19/09 : sortis de HORS_REGIME, poste7) ---
