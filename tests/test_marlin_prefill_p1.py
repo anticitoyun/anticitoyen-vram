@@ -68,7 +68,7 @@ def test_la_pile_naturelle_est_rendue_apres_le_repack_a_sec(monkeypatch):
         assert bloc2._stacks[n][1] is None and bloc2._stacks[n][2] is None
         assert all(getattr(e, n).qweight.qweight.numel() == 0 for e in bloc2.experts)
         assert getattr(bloc2.experts[0], n).qweight.shape == getattr(bloc.experts[0], n).qweight.shape
-    assert bloc2.experts_layout == "marlin"
+    assert bloc2.experts_layout in ("marlin", "marlin-w13")
 
 
 def test_le_regime_nomme_la_disposition(converted):
@@ -203,6 +203,7 @@ def test_marlin_et_groupe_contre_fp32_et_le_bras_casse(monkeypatch, awq, T):
     hors_groupe = _hors_par_ligne(y_groupe, ref)
     assert hors_groupe <= TOL_HORS * ref.numel(), hors_groupe
     monkeypatch.setattr(MOE_D, "_PREFILL_GROUPED", "marlin")
+    monkeypatch.setattr(MOE_D, "_MOE_W13", False)   # le bras cassant décale les échelles de la pile gate SÉPARÉE (82 ter : w13 par défaut)
     bloc._stacks_marlin = bloc._construire_marlin(bloc._stacks, bloc._stacks_awq, bloc._stacks_awq.get("hadamard", {}))
     assert bloc._stacks_marlin is not None
     n0 = bloc.chemins.get("marlin", 0)

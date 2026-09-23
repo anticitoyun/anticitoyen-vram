@@ -939,16 +939,21 @@ class MoEBlock(nn.Module):
             uns = self._marlin_uns(G, x.device)
             xs_m = xs if xs.shape[1] == mg[3] else F.pad(xs, (0, mg[3] - xs.shape[1]))
             w13 = self._stacks_marlin.get("w13")
-            if w13 is not None:                      # pièce 82 : une GEMM gate‖up, échelle d up dans moe_act
+            if w13 is not None:
+                # Pièce 82 ter : au préfill, gate et up sont lues DANS w13 par deux GEMM de largeur N (vues de
+                # colonnes, largeur stockée 2N). Le Marlin découpe K selon prob_n (82 bis) : une GEMM de 2N ne
+                # serait pas au bit des deux GEMM de N, et la KL de fin de préfill le montrait (82 : 0,41 → 0,93).
+                # Mêmes octets, même découpe : au bit du chemin séparé. Seul le décodage tensor garde la GEMM 2N.
                 n = w13[1].shape[2] // 2
-                c13 = MP.gemm_moe(xs_m.contiguous(), w13[0], w13[1], w13[2], s_ids, e_ids, n_post, uns, bloc, 1, G, 2 * n, mg[3], ws)
-                act = kernels.get_extension().moe_act(c13[:, :n], c13[:, n:], pg[5], pd[4], 0 if self.act != "gelu_tanh" else 1,
-                                                      None, e_sorted.to(torch.int32).contiguous(), w13[7], w13[6])
+                bg = (w13[0][:, :, :2 * n], w13[1][:, :, :n], w13[2])
+                bu = (w13[0][:, :, 2 * n:], w13[1][:, :, n:], w13[3])
             else:
-                g = MP.gemm_moe(xs_m.contiguous(), mg[0], mg[1], mg[2], s_ids, e_ids, n_post, uns, bloc, 1, G, mg[1].shape[2], mg[3], ws)
-                xu_m = xs_m if xs_u is xs else (xs_u if xs_u.shape[1] == mu[3] else F.pad(xs_u, (0, mu[3] - xs_u.shape[1]))).contiguous()
-                u = MP.gemm_moe(xu_m, mu[0], mu[1], mu[2], s_ids, e_ids, n_post, uns, bloc, 1, G, mu[1].shape[2], mu[3], ws)
-                act = _activation(g, u, pg[5], pd[4])
+                n = mg[1].shape[2]
+                bg, bu = mg[:3], mu[:3]
+            g = MP.gemm_moe(xs_m.contiguous(), *bg, s_ids, e_ids, n_post, uns, bloc, 1, G, n, mg[3], ws)
+            xu_m = xs_m if xs_u is xs else (xs_u if xs_u.shape[1] == mu[3] else F.pad(xs_u, (0, mu[3] - xs_u.shape[1]))).contiguous()
+            u = MP.gemm_moe(xu_m, *bu, s_ids, e_ids, n_post, uns, bloc, 1, G, n, mu[3], ws)
+            act = _activation(g, u, pg[5], pd[4])
             d = MP.gemm_moe(act, md[0], md[1], md[2], s_ids, e_ids, n_post, uns, bloc, 1, G, md[1].shape[2], md[3], ws)
         elif direct:
             self._chemin('direct')
@@ -1303,7 +1308,7 @@ class MoEBlock(nn.Module):
                                     1 if self.act == "gelu_tanh" else 0,
                                     self._marlin_workspace(x.device), self._marlin_uns(eid.shape[0], x.device),
                                     self.__dict__.setdefault("_tensor_tampons", {}), self.__dict__.setdefault("_tensor_sorties", {}),
-                                    fusion=_MOE_TENSOR_FUSION)
+                                    fusion=_MOE_TENSOR_FUSION, w13_fusionne=not _EN_PREFILL[0])
             tw = topw.reshape(-1)
             if tw.dtype != torch.float32:
                 tw = tw.to(torch.float32)
@@ -1915,15 +1920,25 @@ def forme_tensor_refus(formats, K: int, N_gu: int, N_d: int, E: int, awq_unite: 
 _MOE_TENSOR_FUSION = os.environ.get("ACVRAM_MOE_TENSOR_FUSION", "1") == "1"
 # Pièce 82 (23/09, revue/poste1-piece82-w13-chemin-tensor-23-09.md) : gate·up en UNE pile Marlin w13 (disposition
 # unique : gate et up sont rendues, même nombre d octets — la 71 bis ajoutait w13 à côté, +8,9 Go, hors mémoire).
-# Décodage tensor et préfill : une GEMM w13 à l échelle globale de gate, l échelle d up corrigée dans moe_act
-# (g_up/g_gate) — un arrondi bf16 de plus sur up : sortie au 2⁻⁷, PAS au bit, d où l opt-in. GEMV (godets < MIN_T,
-# b = 1) : `nvfp4_gemv_marlin_w13` lit gate et up dans w13 avec leurs échelles propres — au bit du chemin séparé.
-_MOE_W13 = os.environ.get("ACVRAM_MOE_W13", "0") == "1"
+# Décodage tensor : une GEMM w13 à l échelle globale de gate, l échelle d up corrigée dans moe_act
+# (g_up/g_gate) — un arrondi bf16 de plus sur up et une autre découpe de K : sortie au 2⁻⁷, PAS au bit. GEMV (godets
+# < MIN_T, b = 1) : `nvfp4_gemv_marlin_w13` lit gate et up dans w13 avec leurs échelles propres — au bit du chemin
+# séparé. Préfill (pièce 82 ter) : deux GEMM de largeur N sur des vues de w13 (largeur stockée `ldn` du port) — au
+# bit du chemin séparé ; la 82 y perdait la KL de fin de préfill.
+# Défaut depuis la pièce 82 ter (23/09, ordre chef) : préfill au bit du chemin séparé, GEMV au bit, décodage
+# tensor au 2⁻⁷ ; KL Coder b=12 ≤ témoin + 0,025 et b=1 identique au témoin, jouées dans la même prise
+# (revue/poste1-piece82ter-w13-decodage-23-09.md). Témoin : ACVRAM_MOE_W13=0.
+_MOE_W13 = os.environ.get("ACVRAM_MOE_W13", "1") == "1"
+# Pièce 82 ter : phase de la passe en cours, posée par le modèle (model.forward : batch.is_prefill ; decode_fixed :
+# False). Un préfill court (T ≤ _MOE_GROUPED_MAX) passe par le même `_forward_grouped` qu un pas de décodage : sans
+# ce drapeau, il prendrait la GEMM w13 de largeur 2N et changerait la fin du préfill (KL b=1 de la 82 ter, invite 3 :
+# 0,068 → 0,166). Lu en Python : sous graphe, c est la valeur à la capture (décodage seulement, graphs.py:632).
+_EN_PREFILL = [False]
 
 
 def gemm_experts_tensor(MP, ext, x: torch.Tensor, eid: torch.Tensor, marlin: dict, top_k: int, m_gate: int,
                         k_down: int, code_act: int, ws, uns, tampons: dict, sorties: dict,
-                        fusion: bool = True) -> torch.Tensor:
+                        fusion: bool = True, w13_fusionne: bool = True) -> torch.Tensor:
     """Pièce 62 A4 — experts au décodage par la GEMM groupée Marlin du port (tensor cores).
     ``x`` [T, K] bf16 (lignes du godet), ``eid`` [G = T·top_k] int32 (expert de chaque paire, ordre
     jeton-majeur, −1 = fantôme), ``marlin`` = piles servies (disposition du port : (w, s, g, K, N)).
@@ -1958,6 +1973,12 @@ def gemm_experts_tensor(MP, ext, x: torch.Tensor, eid: torch.Tensor, marlin: dic
             sorties[k] = torch.zeros(*forme, dtype=torch.bfloat16, device=x.device)
         return sorties[k]
     xm = x.contiguous()
+    if w13 is not None and not w13_fusionne:
+        # Pièce 82 ter : préfill court servi ici — gate et up lues dans w13 par des vues de largeur N, au bit du
+        # chemin séparé (même découpe de K), comme `_forward_prefill_grouped`.
+        mg = (w13[0][:, :, :2 * n_gu], w13[1][:, :, :n_gu], w13[2], w13[4], mg[4])
+        mu = (w13[0][:, :, 2 * n_gu:], w13[1][:, :, n_gu:], w13[3], w13[4], mu[4])
+        w13 = None
     if w13 is not None:
         # Pièce 82 : UNE GEMM gate‖up (N = 2·n_gu) à l échelle globale de gate ; moe_act corrige up par g_up/g_gate
         # (gs_gate = 1, gs_up = rapport ; e_sorted = l expert de chaque paire, fantômes −1 → expert 0, poids 0).

@@ -65,6 +65,7 @@ def _trace_couche(quoi: str, i: int, layer) -> None:
 
 # Scission 22/09, module 4 : le bloc MoE vit dans engine/moe.py — réexport
 # intégral, mêmes objets. Un masquage de réglage vise acvram.engine.moe.
+from . import moe as _moe_mod
 from .moe import (   # noqa: F401
     MoEBlock, _MOE_GROUPED_MAX, _MOE_GEMM_MAX,
     _MOE_MMA, _PREFILL_GROUPED, _PREFILL_A4,
@@ -129,6 +130,7 @@ class ACVRamModel(nn.Module):
         matriciel le plus coûteux du modèle : plonger un document coûte donc
         nettement moins que d'engendrer à partir de lui.
         """
+        _moe_mod._EN_PREFILL[0] = bool(batch.is_prefill)
         if _trace_routage.actif():
             # Pièce 27(a) : masque de modalité de CETTE passe (image/texte/spécial),
             # aligné sur la séquence réellement fournie ; lu par `noter`.
@@ -326,6 +328,7 @@ class ACVRamModel(nn.Module):
         périphérique des couches : l'indexation de la table de plongement vit
         hors du graphe, sur l'appareil où elle réside.
         """
+        _moe_mod._EN_PREFILL[0] = False
         if self._res_differe():
             delta = None
             # C15 niveau 3 : `slots >= 0` (fantômes du godet) une fois par pas
