@@ -830,6 +830,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                             for m in self.model.modules() if isinstance(m, MoEBlock)} - {""})
             from .moe import _MOE_TENSOR_MIN_T
             chemin_moe += f"+tensor(b≥{_MOE_TENSOR_MIN_T}" + ("" if not refus else ",repli:" + " ; ".join(refus)) + ")"
+            if os.environ.get("ACVRAM_AWQ_TENSOR", "0") == "1":
+                chemin_moe += "+awq-tensor(opt-in)"          # pièce 123 : hors défaut, dit sur la ligne
             if os.environ.get("ACVRAM_MOE_TENSOR_FUSION", "1") != "1":
                 chemin_moe += "-glue-a4"
         else:

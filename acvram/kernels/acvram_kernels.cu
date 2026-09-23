@@ -4755,7 +4755,26 @@ torch::Tensor moe_reduce(torch::Tensor d, torch::Tensor topw, int64_t k) {
 // sortie Marlin (chaque ligne accumule seule sur K), mais un tri stable rend les tampons comparables.
 __global__ void moe_aligner_petit_kernel(const int *__restrict__ eid, int G, int E, int bloc, int P,
                                          int *__restrict__ sorted_ids, int *__restrict__ expert_ids,
-                                         int *__restrict__ num_post) {
+                                         int *__restrict__ num_post,
+                                         const __nv_bfloat16 *__restrict__ x = nullptr,
+                                         const __nv_bfloat16 *__restrict__ table = nullptr,
+                                         __nv_bfloat16 *__restrict__ xs = nullptr, int K = 0, int top_k = 1,
+                                         long ld_table = 0) {
+    // Pièce 123 : blocs 1.. (lancés seulement si xs est demandé) — entrée AWQ PAR PAIRE du chemin tensor,
+    // xs[g, k] = bf16(x[g / top_k, k] / table[e(g), k]), division IEEE (__fdiv_rn : --use_fast_math rendrait
+    // l'approchée ; le témoin torch divise en IEEE) — ligne par ligne celle de moe.py (x[tok] / s[eid], bf16).
+    // Fantômes (eid < 0) : expert 0 (leur poids est nul au reduce). Le bloc 0 aligne, comme avant.
+    if (blockIdx.x > 0) {
+        const long n = (long)G * K, pas = (long)(gridDim.x - 1) * blockDim.x;
+        for (long i = (long)(blockIdx.x - 1) * blockDim.x + threadIdx.x; i < n; i += pas) {
+            const int g = (int)(i / K), k = (int)(i - (long)g * K);
+            const int e = max(eid[g], 0);
+            const float v = __bfloat162float(x[(long)(g / top_k) * K + k]);
+            const float sc = __bfloat162float(table[(long)e * ld_table + k]);   // table [E, ≥ K] : pas de ligne réel
+            xs[i] = __float2bfloat16(__fdiv_rn(v, sc));
+        }
+        return;
+    }
     // v2 (pièce 63/2) : préfixe par balayage de warp (plus de boucle sérielle sur E), eid en mémoire
     // partagée, rembourrage écrit sur les seules positions libres (3 barrières au lieu de 5).
     extern __shared__ int sh_aligneur[];
@@ -4812,6 +4831,38 @@ void moe_aligner_petit(torch::Tensor eid, int64_t E, int64_t bloc,
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// Pièce 123 : le même aligneur, qui écrit AUSSI l'entrée AWQ par paire du chemin tensor (xs [G, K] bf16) —
+// un lancement : bloc 0 = alignement (inchangé), blocs 1.. = xs.
+void moe_aligner_petit_xs(torch::Tensor eid, int64_t E, int64_t bloc,
+                          torch::Tensor sorted_ids, torch::Tensor expert_ids, torch::Tensor num_post,
+                          torch::Tensor x, torch::Tensor table, int64_t top_k, torch::Tensor xs) {
+    CHECK_CUDA(eid); CHECK_CUDA(x); CHECK_CUDA(table); CHECK_CUDA(xs); ACVRAM_DEVICE_GUARD(eid);
+    CHECK_CONTIG(eid); CHECK_CONTIG(sorted_ids); CHECK_CONTIG(expert_ids); CHECK_CONTIG(x); CHECK_CONTIG(xs);
+    TORCH_CHECK(eid.scalar_type() == torch::kInt && sorted_ids.scalar_type() == torch::kInt
+                && expert_ids.scalar_type() == torch::kInt && num_post.scalar_type() == torch::kInt,
+                "moe_aligner_petit_xs : int32 partout");
+    TORCH_CHECK(x.scalar_type() == torch::kBFloat16 && table.scalar_type() == torch::kBFloat16
+                && xs.scalar_type() == torch::kBFloat16, "moe_aligner_petit_xs : x, table et xs en bf16");
+    const int G = (int)eid.numel(), P = (int)sorted_ids.numel(), K = (int)x.size(1);
+    TORCH_CHECK(P % bloc == 0 && P >= G + (E - 1) * (bloc - 1) && expert_ids.numel() * bloc >= P,
+                "moe_aligner_petit_xs : tampons trop petits");
+    TORCH_CHECK(E <= 4096, "moe_aligner_petit_xs : E > 4096");
+    TORCH_CHECK(x.dim() == 2 && (long)x.size(0) * top_k == G, "moe_aligner_petit_xs : x [G / top_k, K], paires jeton-majeur");
+    TORCH_CHECK(table.dim() == 2 && table.size(0) >= E && table.size(1) >= K && table.stride(1) == 1,
+                "moe_aligner_petit_xs : table [E, >= K], lignes contiguës");
+    TORCH_CHECK(xs.dim() == 2 && xs.size(0) == G && xs.size(1) == K, "moe_aligner_petit_xs : xs [G, K]");
+    const size_t shm = (2 * (size_t)E + (size_t)G) * sizeof(int);
+    const long n = (long)G * K;
+    const int blocs_xs = (int)std::min<long>((n + 255) / 256, 512);
+    moe_aligner_petit_kernel<<<1 + blocs_xs, 256, shm, at::cuda::getCurrentCUDAStream()>>>(
+        eid.data_ptr<int>(), G, (int)E, (int)bloc, P,
+        sorted_ids.data_ptr<int>(), expert_ids.data_ptr<int>(), num_post.data_ptr<int>(),
+        reinterpret_cast<const __nv_bfloat16 *>(x.data_ptr()),
+        reinterpret_cast<const __nv_bfloat16 *>(table.data_ptr()),
+        reinterpret_cast<__nv_bfloat16 *>(xs.data_ptr()), K, (int)top_k, (long)table.stride(0));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 // --------------------------------------------------------------------------
 // Glue du prefill MoE (jetons triés par expert), deux lancements au lieu de
 // douze. Le profil du 13/09 (revue/mma-fp4-native-sm120.md) donnait 25 % du
@@ -4860,7 +4911,8 @@ __global__ void moe_act_kernel(const __nv_bfloat16 *__restrict__ g,
         if (awq) {
             // échelle AWQ par expert de down_proj : même suite qu'en boucle,
             // bf16(act) / bf16(s[e]) puis arrondi bf16 (ChannelScaler.apply)
-            const float s = __bfloat162float(awq[(long)e_sorted[r] * Kd + c]);
+            // fantômes (e_sorted < 0, chemin tensor, pièce 123) : expert 0 — leur poids est nul au reduce
+            const float s = __bfloat162float(awq[(long)max(e_sorted[r], 0) * Kd + c]);
             v = __bfloat162float(__float2bfloat16(v)) / s;
         }
     }
@@ -8052,6 +8104,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("moe_aligner_petit", &moe_aligner_petit, py::arg("eid"), py::arg("E"), py::arg("bloc"),
           py::arg("sorted_ids"), py::arg("expert_ids"), py::arg("num_post"),
           "Pièce 63 : aligneur du chemin tensor en un lancement (fantômes −1 → expert 0), tampons fixes");
+    m.def("moe_aligner_petit_xs", &moe_aligner_petit_xs, py::arg("eid"), py::arg("E"), py::arg("bloc"),
+          py::arg("sorted_ids"), py::arg("expert_ids"), py::arg("num_post"), py::arg("x"), py::arg("table"),
+          py::arg("top_k"), py::arg("xs"),
+          "Pièce 123 : aligneur + entrée AWQ par paire du chemin tensor (xs = bf16(x[g/top_k] / table[e(g)]), IEEE), un lancement");
     m.def("moe_route", &moe_route, "routage MoE : scores, biais, top-k, poids");
     m.def("rmsnorm_bf16", &rmsnorm_bf16,
           "RMSNorm bf16 fusionnee (variance fp32), residu optionnel",

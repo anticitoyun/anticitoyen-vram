@@ -1028,7 +1028,9 @@ def _charger_mtp(manifest: dict, reader: "_ShardReader", spec: ModelSpec,
             num_layers=1, num_kv_heads=spec.num_key_value_heads,
             head_dim=spec.head_dim, num_blocks=n_blocks,
             dtype=_kv_format(plan, str(device)), device=str(device)))
-        tetes.append(MTPHead(couche, enorm, hnorm, eh, fin, cache, device))
+        tete = MTPHead(couche, enorm, hnorm, eh, fin, cache, device)
+        tete.convention = noms["convention"]          # pièce 105 : état caché brut (deepseek) ou normalisé (qwen35)
+        tetes.append(tete)
     return tetes, ("" if tetes else f"tête(s) {incompletes} incomplète(s)")
 
 

@@ -199,14 +199,15 @@ class ACVRamModel(nn.Module):
         if return_hidden:
             return x
         if self.mtp is not None:
-            brut = brut.to(x.device)     # la tête MTP lit l'état AVANT la norme finale
+            brut = brut.to(x.device)     # DeepSeek : la tête MTP lit l'état AVANT la norme finale
+            etat = x if self._mtp_normalise() else brut      # Qwen3.5 (vLLM) : APRÈS (pièce 105)
             if batch.is_prefill:
                 # Le brouillon MTP a besoin du contexte entier pour amorcer son
                 # propre cache : au prefill on garde tous les etats, pas
                 # seulement celui du dernier jeton.
-                self._mtp_prefill = brut.detach()
-            self._garder_hidden(brut[(batch.last_token_indices() if logits_positions
-                                      is None else logits_positions).to(brut.device)])
+                self._mtp_prefill = etat.detach()
+            self._garder_hidden(etat[(batch.last_token_indices() if logits_positions
+                                      is None else logits_positions).to(etat.device)])
         # La vérification spéculative et la perplexité ont toutes deux besoin
         # de logits ailleurs qu'à la position finale : les lignes qui atteignent
         # lm_head sont donc un paramètre. Cela compte, car lm_head est le plus
@@ -351,16 +352,16 @@ class ACVRamModel(nn.Module):
             x, h = add_norm(x, delta, self.norm,
                             getattr(self.layers[-1], "residual_multiplier", 1.0))
             if self.mtp is not None:
-                self._garder_hidden(x)
+                self._garder_hidden(h if self._mtp_normalise() else x)
             return self._logits_finaux(self._tete(h))
         for i, layer in enumerate(self.layers):
             x = layer.decode_fixed(x, positions, slots, block_tables,
                                    seq_lens, max_pos, self.caches.get(i), q_len)
             _trace_couche("décodage", i, layer)
+        xn = self.norm(x)
         if self.mtp is not None:
-            self._garder_hidden(x)
-        x = self.norm(x)
-        return self._logits_finaux(self._tete(x))
+            self._garder_hidden(xn if self._mtp_normalise() else x)
+        return self._logits_finaux(self._tete(xn))
 
     # Lignes réservées d'avance pour l'état caché que lit la tête MTP : un lot
     # de vérification spéculative en pose k+1 par séquence.
@@ -389,6 +390,18 @@ class ACVRamModel(nn.Module):
                                "appeler reserver_hidden() avant la capture")
         self._mtp_hidden = torch.zeros((cap,) + tuple(ref.shape[1:]),
                                        dtype=ref.dtype, device=ref.device)
+
+    def _mtp_normalise(self) -> bool:
+        """Pièce 105 : l'état caché que lit la tête MTP. DeepSeek-V3 passe l'état NON normalisé (sa tête le normalise,
+        `hnorm`) ; Qwen3.5 dans vLLM passe l'état APRÈS la norme finale (qwen3_next.py:726, puis
+        `pre_fc_norm_hidden`). ``ACVRAM_MTP_ETAT`` : brut (défaut d'avant la 105) | norme | auto (selon la convention
+        de la tête posée par le chargeur, `mtp.convention`). Lu côté hôte, donc figé à la capture d'un graphe."""
+        mode = os.environ.get("ACVRAM_MTP_ETAT", "brut")
+        if mode == "norme":
+            return True
+        if mode == "auto":
+            return getattr(self.mtp, "convention", "deepseek") == "qwen35"
+        return False
 
     def _garder_hidden(self, h: torch.Tensor) -> None:
         """Recopie l'état caché normalisé dans les ``n`` premières lignes du
