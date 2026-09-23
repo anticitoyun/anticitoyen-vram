@@ -92,7 +92,7 @@ def faire_forceur(ids: list[int], prefixe: int, etat: dict, torch):
     les logits fp32, et la cible est rendue comme jeton « échantillonné »."""
     n = len(ids)
 
-    def sample_force(logits, seqs):
+    def sample_force(logits, seqs, **_kw):     # 23/09 : pipeline.py passe depuis_graphe= depuis b3c15a01 (22/09) — l'outil plantait
         p = etat["pos"]; etat["pas"] += 1
         cible = ids[p + 1] if p + 1 < n else ids[p]
         lp = torch.log_softmax(logits[0].to(torch.float32), dim=-1)
