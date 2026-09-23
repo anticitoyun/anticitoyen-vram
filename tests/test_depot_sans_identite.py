@@ -160,7 +160,7 @@ EXEMPTES_COURRIEL = {"scratchpad/corpus-calib-c6/calib-c6-anglais-code.txt"}
 # sur main -- README 31 langues et registre/ETAT d'autres sessions apportent 2 chemins
 # nommes ; mes verdicts de session n'en portent aucun (verdict-depersonnalisation
 # depersonnalise : ses exemples /home/... -> /home/<utilisateur>).
-PLAFOND_CHEMINS = 2182  # 20/09 poste7 : corpus-prive exempte par prefixe (95, copies figees de revue) et outils/gpu/hors-verrou.log sorti de l index (69) ; avant : 2282 (chef, 450 journaux scratchpad et 40 artefacts nsys/sqlite retires)
+PLAFOND_CHEMINS = 2180  # 23/09 chef : -2, docs/FEUILLE-DE-ROUTE.md (/media/<utilisateur>/, sortait dans l instantané public) ; 20/09 poste7 : corpus-prive exempte par prefixe (95, copies figees de revue) et outils/gpu/hors-verrou.log sorti de l index (69) ; avant : 2282 (chef, 450 journaux scratchpad et 40 artefacts nsys/sqlite retires)
 
 # Le fichier qui NOMME les chemins pour les faire disparaitre ne doit pas
 # lui-meme les compter -- meme discipline datee que EXEMPTES_SESSION.
@@ -262,6 +262,13 @@ def test_aucun_courriel_dans_le_depot():
 
 def test_le_cliquet_des_chemins_absolus_ne_monte_pas():
     tous = _trouve(CHEMIN)
+    if not (RACINE / "scratchpad").is_dir():
+        # instantané public (publier-github.sh, 23/09) : ni scratchpad/ ni mémoire privée ; les notes de
+        # revue y sont copiées chemins réécrits. Cliquet à ZÉRO, aucune exemption : un chemin qui
+        # arrive ici est publié.
+        assert not tous, ("chemins personnels dans l'instantané public :\n  "
+                          + "\n  ".join(f"{k} -> {v[:3]}" for k, v in tous.items()))
+        return
     sous_prefixe = {k for k in tous if k.startswith(EXEMPTES_PREFIXES_CHEMINS)}
     assert sous_prefixe, "EXEMPTES_PREFIXES_CHEMINS ne sert plus : la retirer"
     trouves = {k: v for k, v in tous.items()

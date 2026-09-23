@@ -586,7 +586,7 @@ Campagne de conversion : 58 sources restantes (GGUF, EXL3, AWQ, vLLM, HF)
 modèle, MoE Gemma 4, fragments AWQ, YaRN, 70B). Parc acvram : 110
 conversions, 107 alias dans les menus ; `.deb` 0.4.24.
 
-Déplacements vers le 980 PRO (`/media/anticitoyenlm/2TO_2023_980PRO1/Modeles`,
+Déplacements vers le 980 PRO (`/media/<utilisateur>/2TO_2023_980PRO1/Modeles`,
 liens symboliques aux anciens emplacements) : 8 familles non-acvram, puis 51
 sources converties ; 4To : 1,4 To libres, 980 PRO : 25 Go libres.
 
@@ -1499,7 +1499,7 @@ Réorganisation, 3,1 Tio déplacés par `scratchpad/migrer.py` (copie dans un
 `.X.partiel`, vérification des octets et du nombre de fichiers, échange, puis
 suppression de la source ; files entrelacées selon l'espace libre) :
 
-* `/media/anticitoyenlm/2TO_2023_980PRO1/Modeles/models_acvram` — les convertis,
+* `/media/<utilisateur>/2TO_2023_980PRO1/Modeles/models_acvram` — les convertis,
   seuls occupants du SSD ; c'est aussi là que `acvram convert` écrit par défaut.
 * `/mnt/4TO_SATACMR_2022/Modeles/<catégorie>` — tous les originaux, en vrais
   dossiers ; plus aucun lien vers le SSD. Toutes les configurations passaient
