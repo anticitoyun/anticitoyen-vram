@@ -286,6 +286,11 @@ class GraphRunner:
         # b=1/b=12, frontière −54 µs, ABBA B/A 1,0124) ; `ACVRAM_SAMPLER_LENT=1`
         # = témoin (ancien chemin hôte), voir `sampler_graphe_actif`.
         self.sampler_graphe = sampler_graphe_actif()
+        # Pièce 69 (23/09) : graphe en DOUBLE (A/B) pour le godet 1 — deux captures du même pas, même piscine et
+        # mêmes tampons, rejouées en alternance, pour que la carte prépare le lancement de B pendant que A
+        # s exécute (un même graphExec relancé sur lui-même laisse ~60 µs de carte vide à b=1, trace p66).
+        self.graphe_double = os.environ.get("ACVRAM_GRAPHE_DOUBLE", "0") == "1"
+        self.graphe_double_mio = 0.0                  # mémoire réservée en plus par les seconds graphes
         self._echantillon = None
         self.paged_ok = False
         self.hybrid_layers: list = []
@@ -759,7 +764,13 @@ class GraphRunner:
                     print(f"[graphe-ADRESSES] clé {key} : {len(bouge)} tenseur(s) ont "
                           f"changé d'adresse depuis la capture : {bouge[:12]}", flush=True)
                     entry["ptrs"] = actuel
-            entry["graph"].replay()
+            if "graphes" in entry:                    # pièce 69 : alternance A/B, la sortie suit le graphe rejoué
+                t = entry["tour_graphe"]
+                entry["graphes"][t].replay()
+                entry["out"] = entry["outs"][t]
+                entry["tour_graphe"] = t ^ 1
+            else:
+                entry["graph"].replay()
             if "ptrs" in entry:
                 torch.cuda.synchronize(self.device)   # débogage : faute attribuée au bon rejeu
             elif os.environ.get("ACVRAM_CHRONO_SYNC"):
@@ -1004,6 +1015,18 @@ class GraphRunner:
                     entry["out"] = step()
         entry["graph"] = graph
         self.captures += 1
+        if self.graphe_double and b == 1:
+            torch.cuda.synchronize(d)
+            avant = torch.cuda.memory_reserved(d)
+            graph_b = torch.cuda.CUDAGraph()
+            with torch.inference_mode():
+                with torch.cuda.graph(graph_b, pool=self._pool):
+                    out_b = step()
+            self.graphe_double_mio += (torch.cuda.memory_reserved(d) - avant) / 2**20
+            entry["graphes"], entry["outs"], entry["tour_graphe"] = [graph, graph_b], [entry["out"], out_b], 0
+            self.captures += 1
+            print(f"[graphe-DOUBLE] clé {entry['key']} : second graphe capturé, +{(torch.cuda.memory_reserved(d) - avant) / 2**20:.1f} Mio réservés "
+                  f"(sortie A {entry['out'].data_ptr():#x}, B {out_b.data_ptr():#x})", flush=True)
         for l, es in instantane:
             for st, e in zip(l.statics, es):
                 l.linear_attn.static_load(st, e)

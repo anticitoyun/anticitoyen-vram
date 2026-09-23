@@ -76,6 +76,8 @@ VARIABLES: tuple[Variable, ...] = (
              "GEMV Marlin (b) : split-K par lot aux petits lots (gate/up b=1 : 96 → 384 blocs, réduction du dernier bloc, déterministe) ; 0 défaut = noyau d'avant | 1 = opt-in : +3,1 % b=1 le 19/09 (verdict-splitk-b1) ; pièce 67 (23/09) : gate·up 17,4 → 12,2 µs, frontière b=1 −7,2 %, KL 5/5 inchangée, au bit 20× — bras B de la cellule poste2 | ≥ 2 = S forcé (8 : moins bon que l'auto)"),
     Variable("GEMV_LAYOUT", "marlin", ("acvram.engine.moe", "_GEMV_LAYOUT"), "marlin",
              "P1 disposition UNIQUE (forme (b)), DÉFAUT depuis l'adoption du 18/09 : marlin = pile Marlin seule (préfill GEMM classe Marlin ET GEMV du décodage relisant les tuiles 16 k × 64 n ; la pile NVFP4 est rendue après le repack, experts_layout=marlin ; va avec PREFILL_GROUPED=marlin, sinon refus à l import ; scellé ≤ 0,97 × GEMV à b=1 et b=12, fp32 par ligne) | naturel = pile NVFP4 seule (témoin, avec PREFILL_GROUPED=groupe ; b=1 366 t/s contre 351 en marlin)"),
+    Variable("GRAPHE_DOUBLE", "0", None, "0",
+             "pièce 69 (23/09) : graphe du godet 1 capturé en double (A/B, même piscine), rejeu alterné — la carte prépare B pendant A ; 0 défaut | 1 opt-in (à mesurer : trou de frontière 61 µs → < 10 prédit)"),
     Variable("MOE_TENSOR", "1", ("acvram.engine.moe", "_MOE_TENSOR"), "0",
              "pièce 65 (23/09) : GEMM groupée Marlin sur tensor cores aux godets ≥ 2 (défaut, A5 +12,2 % t/s b=12) | 0 témoin GEMV scalaire"),
     Variable("MOE_TENSOR_MIN_T", "8", ("acvram.engine.moe", "_MOE_TENSOR_MIN_T"), None,
