@@ -992,32 +992,38 @@ class GraphRunner:
         torch.cuda.synchronize(d)
         instantane = [(l, [l.linear_attn.static_export(st) for st in l.statics[:b]])
                       for l in self.hybrid_layers]
-        side = torch.cuda.Stream(d)
-        side.wait_stream(torch.cuda.current_stream(d))
-        with torch.cuda.stream(side):
-            with torch.inference_mode():
-                for _ in range(2):
-                    step()
-        torch.cuda.current_stream(d).wait_stream(side)
+        # Pièce 88 : restauration dans un `finally`. Elle n'était que sur le
+        # chemin du succès : une capture qui échouait APRÈS l'échauffement
+        # laissait l'état avancé de deux pas, et le pas eager de repli
+        # calculait sur un état faux — sortie fausse sur les hybrides.
+        try:
+            side = torch.cuda.Stream(d)
+            side.wait_stream(torch.cuda.current_stream(d))
+            with torch.cuda.stream(side):
+                with torch.inference_mode():
+                    for _ in range(2):
+                        step()
+            torch.cuda.current_stream(d).wait_stream(side)
 
-        # Le tampon de l'état caché MTP doit exister à sa capacité finale avant
-        # la capture : alloué pendant, il appartiendrait au pool du graphe.
-        if getattr(m, "mtp", None) is not None:
-            m.reserver_hidden(b * ql, entry["x"])
-        graph = torch.cuda.CUDAGraph()
-        with torch.inference_mode():
-            if self._pool is None:
-                with torch.cuda.graph(graph):
-                    entry["out"] = step()
-                self._pool = graph.pool()
-            else:
-                with torch.cuda.graph(graph, pool=self._pool):
-                    entry["out"] = step()
-        entry["graph"] = graph
-        self.captures += 1
-        for l, es in instantane:
-            for st, e in zip(l.statics, es):
-                l.linear_attn.static_load(st, e)
+            # Le tampon de l'état caché MTP doit exister à sa capacité finale avant
+            # la capture : alloué pendant, il appartiendrait au pool du graphe.
+            if getattr(m, "mtp", None) is not None:
+                m.reserver_hidden(b * ql, entry["x"])
+            graph = torch.cuda.CUDAGraph()
+            with torch.inference_mode():
+                if self._pool is None:
+                    with torch.cuda.graph(graph):
+                        entry["out"] = step()
+                    self._pool = graph.pool()
+                else:
+                    with torch.cuda.graph(graph, pool=self._pool):
+                        entry["out"] = step()
+            entry["graph"] = graph
+            self.captures += 1
+        finally:
+            for l, es in instantane:
+                for st, e in zip(l.statics, es):
+                    l.linear_attn.static_load(st, e)
         torch.cuda.synchronize(d)
         graph.replay()                       # la capture n'execute pas : rejouer
         return entry
