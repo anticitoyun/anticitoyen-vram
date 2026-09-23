@@ -223,15 +223,15 @@ def test_le_bloc_moe_decode_prend_gemv_marlin(monkeypatch):
 
 @CARTE
 def test_splitk_vaut_un_au_defaut():
-    """poste7 19/09 (verdict-splitk-b1-19-09) : le split-K n'entre PAS au défaut.
-    Sans ACVRAM_GEMV_SPLITK, S = 1 pour toute forme, y compris celle qui le
-    déclencherait en opt-in (gate/up Coder b=1 : 96 blocs). Ce test casse si
+    """Pièce 70 (0.6.37) : ACVRAM_GEMV_SPLITK=1 est le défaut (S auto).
+    Sans variable, S est calculé selon la forme : gate/up b=1 → S=4,
+    down b=1 → S=2, b=12 → S=1 (grille ≥ MB_BLOCS_MIN=384). Ce test casse si
     le défaut change de sortie."""
     ext = get_extension()
-    assert "ACVRAM_GEMV_SPLITK" not in os.environ or os.environ["ACVRAM_GEMV_SPLITK"] == "0"
-    assert ext.nvfp4_gemv_marlin_splitk(2048, 768, 8) == 1      # gate/up b=1
-    assert ext.nvfp4_gemv_marlin_splitk(768, 2048, 8) == 1      # down b=1
-    assert ext.nvfp4_gemv_marlin_splitk(2048, 768, 96) == 1     # b=12
+    assert "ACVRAM_GEMV_SPLITK" not in os.environ or os.environ["ACVRAM_GEMV_SPLITK"] == "1"
+    assert ext.nvfp4_gemv_marlin_splitk(2048, 768, 8) == 4      # gate/up b=1 : NT=12, G=8, S auto=4
+    assert ext.nvfp4_gemv_marlin_splitk(768, 2048, 8) == 2      # down b=1 : NT=32, G=8, S auto=2
+    assert ext.nvfp4_gemv_marlin_splitk(2048, 768, 96) == 1     # b=12 : grille 1152 ≥ 384, S=1
 
 
 @CARTE

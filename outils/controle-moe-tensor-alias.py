@@ -4,7 +4,7 @@
 la même que `MoEBlock._raison_tensor`) couche par couche, et liste les couches acceptées / refusées avec la raison.
 Aucun poids chargé, aucune carte. Sortie : une ligne par alias, `--json` pour le détail.
 
-    python outils/controle-moe-tensor-alias.py [--parc /mnt/AI_GENERATOR/models_acvram] [--json sortie.json]
+    python outils/controle-moe-tensor-alias.py [--parc DOSSIER_DU_PARC] [--json sortie.json]
 
 Lecture du manifeste : format de chaque tenseur d expert (`tensors[nom].format`), tables AWQ d activation
 (`act_scale` dans `keys`) et `experts_sans_stats` (nombre de tables unité : si tous les experts à table sont
@@ -18,6 +18,9 @@ import re
 import sys
 from collections import defaultdict
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from acvram.engine.moe import forme_tensor_refus  # noqa: E402
@@ -72,7 +75,7 @@ def controler_alias(dossier: Path) -> dict | None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--parc", default=os.environ.get("ACVRAM_PARC", "/mnt/AI_GENERATOR/models_acvram"))
+    ap.add_argument("--parc", default=os.environ.get("ACVRAM_PARC") or _racine_modeles())
     ap.add_argument("--json")
     a = ap.parse_args()
     parc = Path(a.parc)

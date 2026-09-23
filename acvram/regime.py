@@ -72,8 +72,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("GROUPED_OLD", "", None, "1", "témoin : l'ancien noyau groupé à 4 lignes par bloc"),
     Variable("GROUPED_XREG", "down", None, "0",
              "GEMV groupée des experts, K ≤ 2048 : down (défaut depuis verdict-gemv-experts-xreg-down-18-09 : ABAB × 0,944 nu, Coder b=12 1 307 t/s) = x en registres par tranche sur la projection down seule | 1 = gate/up aussi (témoin réfuté : 96 registres, 2 blocs/SM, +19 %) | 0 = x relu en shared (témoin) ; sortie identique au bit dans tous les cas"),
-    Variable("GEMV_SPLITK", "0", None, "0",
-             "GEMV Marlin (b) : split-K par lot aux petits lots (gate/up b=1 : 96 → 384 blocs, réduction du dernier bloc, déterministe) ; 0 défaut = noyau d'avant | 1 = opt-in : +3,1 % b=1 le 19/09 (verdict-splitk-b1) ; pièce 67 (23/09) : gate·up 17,4 → 12,2 µs, frontière b=1 −7,2 %, KL 5/5 inchangée, au bit 20× — bras B de la cellule poste2 | ≥ 2 = S forcé (8 : moins bon que l'auto)"),
+    Variable("GEMV_SPLITK", "1", None, "0",
+             "GEMV Marlin (b) : split-K par lot aux petits lots (gate/up b=1 : 96 → 384 blocs, réduction du dernier bloc, déterministe) ; 1 défaut depuis 0.6.37 = S auto (+7,09 % b=1, KL 5/5, revue/poste2-piece67-23-09.md) | 0 = noyau d'avant (témoin) | ≥ 2 = S forcé (8 : moins bon que l'auto)"),
     Variable("GEMV_LAYOUT", "marlin", ("acvram.engine.moe", "_GEMV_LAYOUT"), "marlin",
              "P1 disposition UNIQUE (forme (b)), DÉFAUT depuis l'adoption du 18/09 : marlin = pile Marlin seule (préfill GEMM classe Marlin ET GEMV du décodage relisant les tuiles 16 k × 64 n ; la pile NVFP4 est rendue après le repack, experts_layout=marlin ; va avec PREFILL_GROUPED=marlin, sinon refus à l import ; scellé ≤ 0,97 × GEMV à b=1 et b=12, fp32 par ligne) | naturel = pile NVFP4 seule (témoin, avec PREFILL_GROUPED=groupe ; b=1 366 t/s contre 351 en marlin)"),
     Variable("MOE_TENSOR", "1", ("acvram.engine.moe", "_MOE_TENSOR"), "0",
@@ -524,6 +524,19 @@ def regime_ligne() -> str:
     # la disposition lue par le GEMV des experts est toujours nommée (P1
     # disposition unique, poste7-p1-disposition-unique-18-09) : marlin | naturel
     parts.append("ACVRAM_GEMV_LAYOUT=" + str(r["variables"].get("ACVRAM_GEMV_LAYOUT", "?")))
+    # split-K toujours nommé, défaut 1 depuis 0.6.37 (pièce 70) : S auto ou repli
+    # si le noyau manque (sans GPU, rien ne lève — pièce 70, 23/09)
+    try:
+        from . import kernels as _kernels
+        _sk_mode = int(os.environ.get("ACVRAM_GEMV_SPLITK", "1"))
+        _ext = _kernels.get_extension()
+        if _ext is not None and hasattr(_ext, "nvfp4_gemv_marlin_splitk"):
+            _sk = ("S(auto)" if _sk_mode == 1 else ("témoin(0)" if _sk_mode == 0 else f"forcé({_sk_mode})"))
+            parts.append("gemv_splitk=" + _sk)
+        else:
+            parts.append("gemv_splitk=repli(noyau absent)")
+    except Exception as exc:                                     # noqa: BLE001
+        parts.append(f"gemv_splitk=?({type(exc).__name__})")
     # la voie GDN est toujours nommée, défaut compris : c'est elle qui sépare
     # 97 de 621 j/s sur Qwen3.8 (poste7, 17/09), et « fla » demandé ne vaut
     # rien si fla est absent ou la carte aussi — la voie EFFECTIVE est écrite

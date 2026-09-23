@@ -44,8 +44,9 @@ if [ "${NCU_SUDO:-0}" = "1" ]; then
     echo "  Faire valider le sudo hors fenêtre, puis relancer." >&2; exit 78; }
   SUDO="sudo -n -E HOME=$HOME PYTHONPATH=$PYTHONPATH"
 fi
-ALPHA2=/mnt/AI_GENERATOR/models_acvram/Qwen3-Coder-30B-A3B-nvfp4-qkv-alpha2-22-09
-OFFICIEL=/mnt/AI_GENERATOR/models_acvram/Qwen3-Coder-30B-A3B-nvfp4
+PARC=${ACVRAM_MODELES:-$(python3 outils/racine_modeles.py)}
+ALPHA2=$PARC/Qwen3-Coder-30B-A3B-nvfp4-qkv-alpha2-22-09
+OFFICIEL=$PARC/Qwen3-Coder-30B-A3B-nvfp4
 M="smsp__issue_active.avg.pct_of_peak_sustained_active,\
 dram__throughput.avg.pct_of_peak_sustained_elapsed,\
 dram__bytes.sum,\
