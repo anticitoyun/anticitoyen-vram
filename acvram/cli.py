@@ -1249,8 +1249,16 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--speculative", choices=["none", "ngram", "draft", "mtp", "auto"],
                     default="ngram",
                     help="ngram ne coute rien et paie quand la sortie recopie "
-                         "l'entree ; draft exige --draft-model. N'importe "
-                         "quel propositeur reste soumis a la garde de lot "
+                         "l'entree ; draft exige --draft-model ; mtp utilise "
+                         "la tete nextn du modele charge si elle porte une "
+                         "convention reconnue (Qwen3.5 et suivants, DeepSeek "
+                         "-- voir noms_mtp dans engine/mtp.py), non rentable "
+                         "en l'etat (docs/ARCHITECTURE.md) ; auto choisit mtp "
+                         "si la tete est reconnue, sinon retombe sur ngram "
+                         "avec un repli NOMME pose sur speculator.repli "
+                         "(repli_speculatif, cli.py) -- rien ne l'imprime "
+                         "encore au demarrage. N'importe quel propositeur "
+                         "reste soumis a la garde de lot "
                          "ACVRAM_SPECULATION_LOT_MAX (defaut 2) : au-dela, "
                          "la carte est deja pleine a largeur 1 par sequence "
                          "et verifier plus large coute plus qu'il ne rend "
