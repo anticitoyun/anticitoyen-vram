@@ -10,6 +10,13 @@ from pathlib import Path
 import pytest
 import torch
 
+
+def _racine_parc() -> str:
+    """Racine du parc lue comme les outils (ACVRAM_MODELES, ~/.config/acvram/modeles), jamais en dur."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "outils"))
+    from racine_modeles import racine_modeles
+    return racine_modeles()
+
 RACINE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -35,7 +42,7 @@ def test_regle_statique_de_forme():
 
 
 def test_controle_du_parc_a_sec():
-    parc = Path(os.environ.get("ACVRAM_PARC", "/mnt/AI_GENERATOR/models_acvram"))
+    parc = Path(os.environ.get("ACVRAM_PARC") or _racine_parc())
     if not parc.is_dir():
         pytest.skip("parc absent")
     out = subprocess.run([sys.executable, str(RACINE / "outils" / "controle-moe-tensor-alias.py"), "--parc", str(parc)],
