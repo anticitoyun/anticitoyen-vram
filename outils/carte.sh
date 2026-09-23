@@ -304,7 +304,14 @@ printf '%s %s %s %s\n' "$$" "$(date +%s)" "$NOM" "$TYPE" > "$INFO"
 JOURNAL="$VERROU.journal"
 _pris=$(date +%s)
 printf '%s prise   %-8s %-32s %s\n' "$(date +%FT%T)" "$$" "$NOM" "$TYPE" >> "$JOURNAL" 2>/dev/null || true
-trap 'rm -f "$INFO"; printf "%s rendue  %-8s %-32s %s tenue=%ss\n" "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "$(( $(date +%s) - _pris ))" >> "$JOURNAL" 2>/dev/null || true' EXIT
+# anticitoyen-vram-jxm (ticket resté ouvert : deux .qui de service ont disparu
+# sans aucune prise/rendue au journal entre-temps — ce trap n'explique PAS ces
+# deux cas, mais porte la MEME classe de defaut que le gardien de service
+# (rm -f "$INFO" inconditionnel) : meme garde par symetrie (defense en
+# profondeur, flock devrait deja l'empecher), et une trace ANOMALIE si jamais
+# ce trap trouvait un .qui qui n'est plus le sien — pour laisser une preuve la
+# prochaine fois, au lieu d'un silence.
+trap 'p=; read -r p _ < "$INFO" 2>/dev/null; if [ "$p" = "$$" ]; then rm -f "$INFO"; printf "%s rendue  %-8s %-32s %s tenue=%ss\n" "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "$(( $(date +%s) - _pris ))" >> "$JOURNAL" 2>/dev/null || true; else printf "%s ANOMALIE %-8s %-32s %s .qui deja repris par pid %s (jxm), non efface\n" "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "${p:-?}" >> "$JOURNAL" 2>/dev/null || true; fi' EXIT
 AVANT=$(etat_carte)
 # `9>&-` FERME LE DESCRIPTEUR POUR LA COMMANDE SEULE. Sans lui, l'enfant en
 # herite et `flock` ne tombe que quand TOUS les descripteurs sont fermes : tuer
