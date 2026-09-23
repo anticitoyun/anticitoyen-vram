@@ -50,3 +50,10 @@ Trois corrections que la table ne porte pas :
 
 Ce qui réfuterait le modèle : une mesure isolée de la tête nvfp4 ou des étroites nvfp4 à ≥ 55 pJ/bit (le floor de 54 W
 serait faux), ou une cellule S1 à J/jeton < 0,131 (la tête nvfp4 pèserait moins que prévu).
+
+## Erratum 21 h 4x (cellule 101 de poste2, fusionnée) : A sert 1 544-1 613 t/s à b=12 contre 1 995 pour i8c
+Ma table prédisait +0,34 ms/pas pour A (−5 % de débit) ; la mesure dit −20 à −23 % (≈ +1,4 ms/pas). **Prédiction
+réfutée** : le chemin nvfp4 étroit en service coûte 4 fois ce que son débit isolé (0,45 To/s) laissait prévoir — tête
+nvfp4 à N = 151 936, lancements, ou un chemin non capturé ; l'attribution est la pièce 118 (poste2 : i8c, S1b, S8, S4).
+Conséquence : la colonne « Δ ms » de la table ne vaut que pour les noyaux isolés ; aucun alias nvfp4-projections ne
+remplace i8c avant la 118, et le bilan « S1 ≈ énergie égale » est suspendu (il dépend du temps de la tête nvfp4).
