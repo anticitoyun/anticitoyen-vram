@@ -4,6 +4,7 @@
 //! sm_120 est pris tel quel dans l'extension que le moteur Python sert (`noyaux`), pour que les deux
 //! moteurs exécutent le même SASS et que seule la partie hôte diffère.
 
+pub mod chargement;
 pub mod decodage;
 pub mod lanceurs;
 pub mod manifeste;
@@ -12,6 +13,7 @@ pub mod noyaux;
 pub mod poids;
 pub mod serveur;
 pub mod tokeniseur;
+pub mod triton;
 
 /// Erreur unique du moteur : un message en français, sans hiérarchie de types — le moteur de
 /// comparaison n'a pas d'appelant qui trie les erreurs, il les dit.
