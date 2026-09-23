@@ -122,7 +122,8 @@ bogue.
 
 Décoder un jeton avec un lot de taille 1 est limité par la mémoire : la machine
 lit tous les poids actifs pour produire un seul jeton. Vérifier K jetons
-proposés lit ces mêmes poids **une seule fois**. Deux propositeurs :
+proposés lit ces mêmes poids **une seule fois**. Trois propositeurs, plus
+`auto` :
 
 * `ngram` (par défaut) — cherche le suffixe courant plus tôt dans le contexte et
   propose ce qui suivait. Ne coûte rien, ne demande aucun modèle. Rentable quand
@@ -130,6 +131,18 @@ proposés lit ces mêmes poids **une seule fois**. Deux propositeurs :
 * `draft` — un petit modèle sur un second appareil. Sur ce rig, cet appareil est
   la RTX 3080 Ti, que le planificateur laisse volontairement oisive pour tout
   modèle qui tient sur la 5090.
+* `mtp` — la tête `nextn` du modèle chargé, quand il en porte une (Qwen3.5 et
+  suivants, DeepSeek compris ; deux conventions de noms de tenseurs reconnues,
+  `acvram/engine/mtp.py:65-96`) ; non rentable en l'état (voir
+  `docs/ARCHITECTURE.md`), non activée par défaut.
+* `auto` — choisit `mtp` si le modèle chargé porte une tête reconnue, sinon
+  retombe sur `ngram` avec un repli **nommé**, jamais silencieux :
+  `repli_speculatif` (`acvram/cli.py:796-801`) pose la raison sur
+  `speculator.repli` (`cli.py:830`) — avant la pièce 105, les tenseurs MTP de
+  Qwen3.8-27B étaient convertis mais jamais chargés, et rien ne le disait.
+  *Reste (non couvert par cette note) : `speculator.repli` n'est pour l'instant
+  lu nulle part ailleurs dans le dépôt — la bannière de démarrage
+  (`cli.py:886-888`) n'imprime que `args.speculative`, pas la raison du repli.*
 
 L'acceptation est exacte, pas approchée : une proposition est acceptée avec la
 probabilité `min(1, p/q)` et un rejet rééchantillonne dans la partie positive
@@ -239,6 +252,13 @@ Deux constats issus de ces mesures ont changé les valeurs par défaut :
   identique, parce qu'une échelle par (jeton, tête) fournit déjà la plage
   dynamique pour laquelle le FP8 dépense des bits d'exposant. Les deux cartes
   utilisent donc un cache KV en INT8, même si la 5090 saurait faire du FP8.
+  Un format opt-in `k8v4` (`ACVRAM_KV_FORMAT=k8v4`, ligne de régime `kv=k8v4`,
+  `acvram/memory/kv_k8v4.py`) garde les clés en INT8 par jeton et passe les
+  valeurs en INT4 symétrique par groupe de 32 canaux, −22 % d'octets de cache
+  (808 contre 1 040 o par jeton et par couche sur Qwen3-Coder-30B-A3B,
+  `acvram/regime.py:256-259`) — **non qualifié** : critères posés
+  (`revue/poste5-piece104-kv-k8v4-23-09.md` § 5) mais pas encore mesurés sur
+  carte, à ne pas activer en production tant que ce verdict n'est pas rendu.
 
 ## Documentation
 
