@@ -90,3 +90,28 @@ Durée prévue : 6 chargements × ~60 s + KL ≈ 7 min.
 * **107 bis, S1 contre i8c** (scellé : b=1 ≤ 0,74 sur 16/16 et ≤ i8c + 0,05 sur ≥ 13/16 ; lot mêlé littéral REGLES ≤ 3 échecs / 64 ; PPL ≤ 1,02) : b=1 **16/16 ≤ 0,74 (max 0,205), ≤ i8c + 0,05 : 13/16** (tenu de justesse : invites 0, 3, 14 au-dessus) ; **lot mêlé littéral 55/64 → 9 échecs → FAUX** (invite 0 : S1 0,09-0,15 contre i8c 0,01-0,05, l'écart est déjà à b=1 — 0,161 contre 0,008 — ; invite 14 : 0,28-0,38 contre 0,21-0,23 ; invite 15 G3 0,272) ; lecture |Δ| 55/64 aussi (invite 14 G2 +0,171, invite 15 G3 +0,149 : de vraies excursions) ; PPL absente. **Verdict 107 bis : S1 ne remplace pas i8c** (une porte tombée, sans seconde chance).
 * **S1b en information** (experts de A + projections ET tête de i8c, octets de i8c) : b=1 16/16 (max 0,164), ≤ i8c + 0,05 : **15/16** ; lot mêlé littéral **61/64 → TENU** (3 échecs : invite 9 G3 0,100, invite 15 G3 0,426 et G4 0,299 — l'invite 15 est aussi la pire de i8c sous le lot) ; |Δ| 60/64 ; PPL absente. Meilleur que i8c sur 12 invites sur 16 à b=1. **C'est S1b, pas S1, le remplaçant plausible de l'alias servi — à octets et temps identiques ; sa PPL manque.**
 * **durée** : prévue 15 min ; tenue 9 min (i8c 212 s au premier chargement — noyaux Triton recompilés —, puis 27-60 s par alias) ; PPL 3 × 13 s d'échec.
+
+## 6. PPL (prise 22 h 27-22 h 29, 88 s de carte, outil réparé e972ab44 ; compute-apps début = fin = llama-server 4627)
+
+`ppl-decode-kv`, 3 tranches Coder du corpus scellé (`scratchpad/tranches-coder/`), préfixe 8 192, 512 jetons notés par tranche,
+cache de préfixe ON (défaut servi), KV int8 ; ratio géométrique contre i8c, 2 SE sur les 3 tranches ; seuil scellé ≤ 1,02.
+
+| alias | t0 | t1 | t2 | géo / i8c | 2 SE | ≤ 1,02 |
+|---|---|---|---|---|---|---|
+| i8c | 3,4607 | 12,2212 | 6,8961 | 1 | — | témoin |
+| S1 (experts A, proj int8, **tête nvfp4**) | 3,5428 | 13,6408 | 7,2982 | **1,065** | 0,050 | **FAUX** |
+| **S1b** (idem, **tête int8**) | 3,4696 | 12,4572 | 6,9670 | **1,011** | 0,010 | **TENU** |
+| S8 (proj nvfp4 RTN, tête nvfp4) | 3,4931 | 13,8879 | 7,2498 | 1,064 | 0,070 | FAUX |
+
+* **La tête nvfp4 coûte +5 % de PPL** (S1 → S1b : seule la tête change ; 12,22 → 13,64 sur la tranche 1) — le gênant nommé
+  au scellé (« la tête nvfp4 pèse plus en PPL qu'en KL ») s'est réalisé, et il pèse plus que prédit. **Les projections nvfp4
+  RTN ne coûtent rien en PPL** (S8 1,064 = S1 1,065, même tête ; les projections diffèrent, le ratio non).
+* **107 bis, verdict final : S1 ne remplace pas i8c** (lot mêlé 55/64 ET PPL 1,065). **S1b tient les trois portes**
+  (KL b=1 16/16 et ≤ i8c + 0,05 sur 15/16 ; lot mêlé littéral 61/64 ; PPL 1,011 ± 0,010 ≤ 1,02) à octets et temps
+  identiques à i8c — c'est le remplaçant qualifié de l'alias servi, sous réserve de la 118 (poste2) ; sa PPL est +1,1 %
+  (les experts AWQ de A : meilleure KL, PPL un peu au-dessus — deux instruments, deux signes, dans la résolution).
+* **S9 = S8 + tête int8** (assemblé à sec, 0 min : experts AWQ de A, projections nvfp4 RTN sans AWQ, tête int8) : prédit
+  KL invite 11 ≈ 0,07 (comme S8) et PPL ≈ 1,01 (comme S1b) avec les octets de projections de A (−0,42 Go/pas contre i8c,
+  tête +0 Mo) — le candidat tout-nvfp4-projections cohérent, à qualifier (16 invites, lot mêlé, PPL) **après la 118**
+  (si le chemin nvfp4 étroit reste à 1 550-1 600 t/s, aucun alias à projections nvfp4 ne sert avant le noyau de la 100 A).
+* durée : prévue 4 min ; tenue 88 s (4 chargements de 21-23 s, tranches ≈ 5 s chacune)
