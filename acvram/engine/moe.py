@@ -432,9 +432,12 @@ class MoEBlock(nn.Module):
         if MP.charger(compiler=False) is None:
             return "port Marlin non compilé (à sec : python outils/banc-marlin-p1-18-09.py --compiler-seulement)"
         mg, md = marlin["gate_proj"], marlin["down_proj"]
+        ext = kernels.get_extension()
         return forme_tensor_refus({"nvfp4"}, mg[3], mg[4], md[4], len(self.experts),
                                   awq.get("gate_proj") is None and awq.get("up_proj") is None and awq.get("down_proj") is None,
-                                  awq.get("hadamard", {}).get("down_proj", 0))
+                                  awq.get("hadamard", {}).get("down_proj", 0),
+                                  awq_fondue=ext is not None and hasattr(ext, "moe_aligner_petit_xs"),
+                                  awq_distinct=bool(awq.get("up_distinct")))
 
     def _construire_marlin(self, piles, awq, hadamard):
         """P1 (poste7-p1-porte-marlin-18-09, X = 152 TFLOPS au banc) : la
@@ -1289,9 +1292,15 @@ class MoEBlock(nn.Module):
         if "_tensor_refus" not in self.__dict__:               # piles posées sans _try_build_stacks (tests, outils)
             self.__dict__["_tensor_refus"] = self._raison_tensor()
         statique_ok = _MOE_TENSOR and marlin is not None and not self.__dict__["_tensor_refus"]
+        # pièce 123 : tables AWQ (gate·up par paire, down par moe_act) portées par le chemin tensor si l'extension a
+        # l'aligneur xs ; x_g doit rester x (une ligne par jeton : échelle gate·up pas encore appliquée en torch)
+        awq_tensor = ext is not None and hasattr(ext, "moe_aligner_petit_xs")
         tensor_ok = (statique_ok and not distinct and x_g.shape[0] >= _MOE_TENSOR_MIN_T
-                     and x_g.dtype == torch.bfloat16 and ech_gu is None and awq.get("down_proj") is None
+                     and x_g.dtype == torch.bfloat16
+                     and ((ech_gu is None and awq.get("down_proj") is None) or awq_tensor)
                      and x_g.shape[0] * self.top_k == eid.shape[0])   # paires en ordre jeton-majeur (index_jetons)
+        if tensor_ok and (ech_gu is not None or awq.get("down_proj") is not None):
+            self._echelle_awq = "aligneur"                      # pièce 123 : xs par paire (gate·up) + moe_act (down)
         if statique_ok and not tensor_ok and x_g.shape[0] >= _MOE_TENSOR_MIN_T and eid.shape[0] not in self.__dict__.setdefault("_dit_tensor_refus", set()):
             self.__dict__["_dit_tensor_refus"].add(eid.shape[0])
             print(f"[moe] chemin tensor non pris sur ce godet (GEMV gardé) : distinct={distinct} "
@@ -1308,7 +1317,8 @@ class MoEBlock(nn.Module):
                                     1 if self.act == "gelu_tanh" else 0,
                                     self._marlin_workspace(x.device), self._marlin_uns(eid.shape[0], x.device),
                                     self.__dict__.setdefault("_tensor_tampons", {}), self.__dict__.setdefault("_tensor_sorties", {}),
-                                    fusion=_MOE_TENSOR_FUSION, w13_fusionne=not _EN_PREFILL[0])
+                                    fusion=_MOE_TENSOR_FUSION, w13_fusionne=not _EN_PREFILL[0],
+                                    awq_gu=(awq.get("gate_proj") if x_g is x else None), awq_d=awq.get("down_proj"))
             tw = topw.reshape(-1)
             if tw.dtype != torch.float32:
                 tw = tw.to(torch.float32)
@@ -1896,7 +1906,8 @@ _MOE_TENSOR_MIN_T = int(os.environ.get("ACVRAM_MOE_TENSOR_MIN_T", "8"))
 TENSOR_E_MAX = 4096                                    # mémoire partagée de moe_aligner_petit (2·E + G entiers)
 
 
-def forme_tensor_refus(formats, K: int, N_gu: int, N_d: int, E: int, awq_unite: bool, hadamard_down: int = 0) -> str:
+def forme_tensor_refus(formats, K: int, N_gu: int, N_d: int, E: int, awq_unite: bool, hadamard_down: int = 0,
+                       awq_fondue: bool = False, awq_distinct: bool = False) -> str:
     """Pièce 65 — règle STATIQUE d acceptation d une couche MoE par le chemin tensor-core, partagée par le
     moteur (`MoEBlock._raison_tensor`) et le contrôle à sec (`outils/controle-moe-tensor-alias.py`) : rend ""
     si la forme est prise en charge, sinon la raison du repli (nommée sur la ligne de régime)."""
@@ -1907,8 +1918,12 @@ def forme_tensor_refus(formats, K: int, N_gu: int, N_d: int, E: int, awq_unite: 
         return f"formes K={K} N={N_gu}/{N_d} non multiples de 64 (tuiles Marlin)"
     if E > TENSOR_E_MAX:
         return f"E={E} > {TENSOR_E_MAX} (aligneur)"
-    if not awq_unite:
-        return "tables AWQ d activation par expert non unité (pièce 47 : gate/up distinctes → pas de piles Marlin ; sinon le chemin tensor ne les applique pas)"
+    # Pièce 123 : l'aligneur écrit l'entrée AWQ par paire (moe_aligner_petit_xs) et moe_act divise l'entrée de down
+    # — les tables par expert ne refusent plus le chemin tensor, sauf gate/up distinctes (un seul xs par paire).
+    if not awq_unite and awq_distinct:
+        return "tables AWQ gate/up distinctes (pièce 47 : un seul xs par paire, pas de w13)"
+    if not awq_unite and not awq_fondue:
+        return "tables AWQ d activation par expert non unité (extension sans moe_aligner_petit_xs, pièce 123)"
     if hadamard_down:
         return f"rotation Hadamard ({hadamard_down}) de l entrée de down_proj (le chemin tensor ne la tourne pas)"
     return ""
@@ -1938,7 +1953,8 @@ _EN_PREFILL = [False]
 
 def gemm_experts_tensor(MP, ext, x: torch.Tensor, eid: torch.Tensor, marlin: dict, top_k: int, m_gate: int,
                         k_down: int, code_act: int, ws, uns, tampons: dict, sorties: dict,
-                        fusion: bool = True, w13_fusionne: bool = True) -> torch.Tensor:
+                        fusion: bool = True, w13_fusionne: bool = True,
+                        awq_gu: Optional[torch.Tensor] = None, awq_d: Optional[torch.Tensor] = None) -> torch.Tensor:
     """Pièce 62 A4 — experts au décodage par la GEMM groupée Marlin du port (tensor cores).
     ``x`` [T, K] bf16 (lignes du godet), ``eid`` [G = T·top_k] int32 (expert de chaque paire, ordre
     jeton-majeur, −1 = fantôme), ``marlin`` = piles servies (disposition du port : (w, s, g, K, N)).
@@ -1957,7 +1973,18 @@ def gemm_experts_tensor(MP, ext, x: torch.Tensor, eid: torch.Tensor, marlin: dic
                         torch.empty(P // bloc, dtype=torch.int32, device=x.device),
                         torch.empty(1, dtype=torch.int32, device=x.device))
     fusion = fusion and ext is not None and hasattr(ext, "moe_aligner_petit")
-    if fusion:                                    # un lancement : clamp des fantômes + comptage + préfixe + dispersion
+    xs = None
+    if awq_gu is not None:                        # pièce 123 : entrée AWQ par paire [G, K]
+        cle_xs = ("xs", G, x.shape[1])
+        if cle_xs not in tampons:
+            tampons[cle_xs] = torch.empty(G, x.shape[1], dtype=torch.bfloat16, device=x.device)
+        xs = tampons[cle_xs]
+    if fusion and xs is not None and hasattr(ext, "moe_aligner_petit_xs"):
+        # un lancement : alignement (bloc 0) + xs = bf16(x[g / top_k] / s[e(g)]) (blocs 1..), division IEEE
+        s_ids, e_ids, n_post = tampons[cle]
+        ext.moe_aligner_petit_xs(eid.contiguous(), E, bloc, s_ids, e_ids, n_post, x.contiguous(),
+                                 awq_gu, top_k, xs)
+    elif fusion:                                  # un lancement : clamp des fantômes + comptage + préfixe + dispersion
         s_ids, e_ids, n_post = tampons[cle]
         ext.moe_aligner_petit(eid.contiguous(), E, bloc, s_ids, e_ids, n_post)
     else:
@@ -1973,6 +2000,13 @@ def gemm_experts_tensor(MP, ext, x: torch.Tensor, eid: torch.Tensor, marlin: dic
             sorties[k] = torch.zeros(*forme, dtype=torch.bfloat16, device=x.device)
         return sorties[k]
     xm = x.contiguous()
+    top_k_a, m_a = top_k, T                       # lignes lues par gate·up : T jetons (top_k paires chacun)
+    if xs is not None:
+        if not (fusion and hasattr(ext, "moe_aligner_petit_xs")):     # témoin (glue A4) : xs en torch, même arithmétique
+            xs.copy_((xm.repeat_interleave(top_k, dim=0).to(torch.bfloat16)
+                      / awq_gu[eid.long().clamp(min=0), :xm.shape[1]]).to(torch.bfloat16))
+        xm, top_k_a, m_a = xs, 1, G               # une ligne par paire : chaque expert lit SON x / s[e]
+    ea = eid.contiguous() if awq_d is not None else None
     if w13 is not None and not w13_fusionne:
         # Pièce 82 ter : préfill court servi ici — gate et up lues dans w13 par des vues de largeur N, au bit du
         # chemin séparé (même découpe de K), comme `_forward_prefill_grouped`.
@@ -1982,16 +2016,16 @@ def gemm_experts_tensor(MP, ext, x: torch.Tensor, eid: torch.Tensor, marlin: dic
     if w13 is not None:
         # Pièce 82 : UNE GEMM gate‖up (N = 2·n_gu) à l échelle globale de gate ; moe_act corrige up par g_up/g_gate
         # (gs_gate = 1, gs_up = rapport ; e_sorted = l expert de chaque paire, fantômes −1 → expert 0, poids 0).
-        c13 = MP.gemm_moe(xm, w13[0], w13[1], w13[2], s_ids, e_ids, n_post, uns, bloc, top_k, T, 2 * n_gu, w13[4], ws,
+        c13 = MP.gemm_moe(xm, w13[0], w13[1], w13[2], s_ids, e_ids, n_post, uns, bloc, top_k_a, m_a, 2 * n_gu, w13[4], ws,
                           c=sortie("w13", (G, 2 * n_gu)))
-        act = ext.moe_act(c13[:, :n_gu], c13[:, n_gu:], m_gate, k_down, code_act, None, eid.contiguous(), w13[7], w13[6])
+        act = ext.moe_act(c13[:, :n_gu], c13[:, n_gu:], m_gate, k_down, code_act, awq_d, eid.contiguous(), w13[7], w13[6])
         d = MP.gemm_moe(act.contiguous(), md[0], md[1], md[2], s_ids, e_ids, n_post, uns, bloc, 1, G, n_d, md[3], ws,
                         c=sortie("d", (G, n_d)))
         return d if fusion else d.float()
-    g = MP.gemm_moe(xm, mg[0], mg[1], mg[2], s_ids, e_ids, n_post, uns, bloc, top_k, T, n_gu, mg[3], ws, c=sortie("g", (G, n_gu)))
-    u = MP.gemm_moe(xm, mu[0], mu[1], mu[2], s_ids, e_ids, n_post, uns, bloc, top_k, T, n_gu, mu[3], ws, c=sortie("u", (G, n_gu)))
+    g = MP.gemm_moe(xm, mg[0], mg[1], mg[2], s_ids, e_ids, n_post, uns, bloc, top_k_a, m_a, n_gu, mg[3], ws, c=sortie("g", (G, n_gu)))
+    u = MP.gemm_moe(xm, mu[0], mu[1], mu[2], s_ids, e_ids, n_post, uns, bloc, top_k_a, m_a, n_gu, mu[3], ws, c=sortie("u", (G, n_gu)))
     if ext is not None and hasattr(ext, "moe_act"):
-        act = ext.moe_act(g, u, m_gate, k_down, code_act)
+        act = ext.moe_act(g, u, m_gate, k_down, code_act, awq_d, ea)
     else:
         f = F.gelu(g[:, :m_gate].float(), approximate="tanh") if code_act == 1 else F.silu(g[:, :m_gate].float())
         act = (f * u[:, :m_gate].float()).to(torch.bfloat16)
