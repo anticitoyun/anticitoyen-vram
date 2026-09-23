@@ -310,7 +310,7 @@ def depaqueter_marlin(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, 
 
 
 def gemv_marlin_torch(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, expert_ids: torch.Tensor,
-                      token_ids: torch.Tensor, x: torch.Tensor, K: int, N: int) -> torch.Tensor:
+                      token_ids: torch.Tensor, x: torch.Tensor, K: int, N: int, xscale=None) -> torch.Tensor:
     """Jumeau torch (à sec, chantier C10) de `nvfp4_gemv_marlin` (acvram_kernels.cu,
     `nvfp4_gemv_marlin_kernel<XT, 1>`) : lit la DISPOSITION MARLIN d'une pile
     ([E, K/16, 2N], [E, K/16, N], [E]) aux mêmes places que le noyau (quartets
@@ -321,7 +321,8 @@ def gemv_marlin_torch(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, 
     `s0e5m3_octet`, pas 0), Σ sur les tuiles, × g_marlin·2⁻¹¹⁹. Ce qu'il ne
     reproduit pas : l'ordre des FMA du noyau (4 voies, 8 warps) — le juge est
     fp32 par ligne ≤ 2⁻⁷·max|y| (tests/test_gemv_marlin.py), pas le bit.
-    Créneau fantôme (expert < 0) : ligne nulle, aucun poids lu."""
+    Créneau fantôme (expert < 0) : ligne nulle, aucun poids lu. ``xscale`` (pièce 47, [E, ≥ K] bf16) : le
+    noyau divise x par la table de l'expert, x et le quotient arrondis en bf16 — reproduit ici tel quel."""
     E = w_marlin.shape[0]
     assert tuple(w_marlin.shape) == (E, K // 16, 2 * N) and tuple(s_marlin.shape) == (E, K // 16, N)
     g = torch.as_tensor(g_marlin, dtype=torch.float32, device=w_marlin.device).reshape(-1)
@@ -344,7 +345,10 @@ def gemv_marlin_torch(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, 
             s_dec = ((s8.to(torch.int32) << 20) + 0x34800000).view(torch.float32)          # octet 0 → 2⁻²², comme le noyau
             cache[e] = (vals, s_dec.permute(1, 2, 0).reshape(N, KT))
         vals, s_dec = cache[e]
-        partiel = torch.einsum("nkl,kl->nk", vals, xf[t].view(KT, 16))                  # Σ_k code·x par tuile, fp32
+        xt = xf[t]
+        if xscale is not None:
+            xt = (xt.to(torch.bfloat16).float() / xscale[e, :K].float()).to(torch.bfloat16).float()
+        partiel = torch.einsum("nkl,kl->nk", vals, xt.view(KT, 16))                     # Σ_k code·x par tuile, fp32
         out[gi] = (partiel * s_dec).sum(dim=1) * (g[e] * 2.0 ** -119)
     return out
 

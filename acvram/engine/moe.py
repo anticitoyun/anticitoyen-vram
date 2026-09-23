@@ -344,7 +344,7 @@ class MoEBlock(nn.Module):
         self._stacks_awq = awq
         self._raison_marlin = ""
         self._stacks_marlin = self._construire_marlin(piles, awq, hadamard)
-        self._tensor_refus = self._raison_tensor(piles, awq)    # pièce 65 : "" = chemin tensor pris en charge
+        self._tensor_refus = self._raison_tensor()              # pièce 65 : "" = chemin tensor pris en charge
         if self._stacks_marlin is not None:
             if _DOUBLE_DIAG:
                 self.__dict__["experts_layout"] = "double(diag)"
@@ -420,11 +420,18 @@ class MoEBlock(nn.Module):
             self._stacks[nom] = ("nvfp4", None, None, gs, k, m)
         self.__dict__["experts_layout"] = "marlin"
 
-    def _raison_tensor(self, piles, awq) -> str:
-        """Pièce 65 : raison statique du repli GEMV du chemin tensor ("" = pris en charge), depuis les piles."""
-        if self._stacks_marlin is None:
-            return f"pas de piles Marlin ({self._raison_marlin or 'disposition naturelle'})"
-        mg, md = self._stacks_marlin["gate_proj"], self._stacks_marlin["down_proj"]
+    def _raison_tensor(self) -> str:
+        """Pièce 65 : raison statique du repli GEMV du chemin tensor ("" = pris en charge), depuis les piles
+        et le port. Sans port compilé (à sec, CI sans carte), le défaut REPLIE au lieu de lever (chef, 23/09) :
+        un défaut ne lève jamais là où le GEMV marchait."""
+        marlin = getattr(self, "_stacks_marlin", None)
+        awq = getattr(self, "_stacks_awq", {}) or {}
+        if marlin is None:
+            return f"pas de piles Marlin ({getattr(self, '_raison_marlin', '') or 'disposition naturelle'})"
+        from ..kernels import marlin_port as MP
+        if MP.charger(compiler=False) is None:
+            return "port Marlin non compilé (à sec : python outils/banc-marlin-p1-18-09.py --compiler-seulement)"
+        mg, md = marlin["gate_proj"], marlin["down_proj"]
         return forme_tensor_refus({"nvfp4"}, mg[3], mg[4], md[4], len(self.experts),
                                   awq.get("gate_proj") is None and awq.get("up_proj") is None and awq.get("down_proj") is None,
                                   awq.get("hadamard", {}).get("down_proj", 0))
@@ -1253,7 +1260,9 @@ class MoEBlock(nn.Module):
             marlin = None                              # piles Marlin présentes mais témoin naturel demandé
         # Pièce 65 : défaut aux godets ≥ 2 (T ≥ 2 jetons) ; repli statique nommé (`_tensor_refus`, ligne de régime),
         # repli dynamique dit une fois par taille de godet (règle 6 : jamais un repli muet).
-        statique_ok = _MOE_TENSOR and marlin is not None and not getattr(self, "_tensor_refus", "piles absentes")
+        if "_tensor_refus" not in self.__dict__:               # piles posées sans _try_build_stacks (tests, outils)
+            self.__dict__["_tensor_refus"] = self._raison_tensor()
+        statique_ok = _MOE_TENSOR and marlin is not None and not self.__dict__["_tensor_refus"]
         tensor_ok = (statique_ok and not distinct and x_g.shape[0] >= _MOE_TENSOR_MIN_T
                      and x_g.dtype == torch.bfloat16 and ech_gu is None and awq.get("down_proj") is None
                      and x_g.shape[0] * self.top_k == eid.shape[0])   # paires en ordre jeton-majeur (index_jetons)
@@ -1266,10 +1275,7 @@ class MoEBlock(nn.Module):
             self.__dict__["_dit_glue_a4"] = True
             print("[moe] ACVRAM_MOE_TENSOR_FUSION=0 : glue A4 (aligneur vLLM par atomiques) — TÉMOIN, non reproductible au bit", flush=True)
         if tensor_ok:
-            from ..kernels import marlin_port as MP
-            if MP.charger(compiler=False) is None:
-                raise RuntimeError("chemin tensor (défaut, ACVRAM_MOE_TENSOR=0 pour le GEMV) : le port Marlin n est pas compilé (à sec : "
-                                   "python outils/banc-marlin-p1-18-09.py --compiler-seulement)")
+            from ..kernels import marlin_port as MP                # port présent : vérifié par _raison_tensor (repli nommé sinon)
             self._chemin("marlin_tensor")
             pd_ = self._stacks["down_proj"]
             d = gemm_experts_tensor(MP, ext, x_g, eid, marlin, self.top_k, pg[5], pd_[4],
