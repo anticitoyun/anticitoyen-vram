@@ -1260,13 +1260,14 @@ class MoEBlock(nn.Module):
             d = gemm_experts_tensor(MP, ext, x_g, eid, marlin, self.top_k, pg[5], pd_[4],
                                     1 if self.act == "gelu_tanh" else 0,
                                     self._marlin_workspace(x.device), self._marlin_uns(eid.shape[0], x.device),
-                                    self.__dict__.setdefault("_tensor_tampons", {}), self.__dict__.setdefault("_tensor_sorties", {}))
+                                    self.__dict__.setdefault("_tensor_tampons", {}), self.__dict__.setdefault("_tensor_sorties", {}),
+                                    fusion=_MOE_TENSOR_FUSION)
             tw = topw.reshape(-1)
             if tw.dtype != torch.float32:
                 tw = tw.to(torch.float32)
             if ext is not None and hasattr(ext, "moe_reduce"):
                 return ext.moe_reduce(d.contiguous(), tw.contiguous(), self.top_k)
-            d = d * tw.reshape(-1, 1).to(d.dtype)
+            d = d.float() * tw.reshape(-1, 1)
             return d.view(t, self.top_k, -1).sum(dim=1).to(x.dtype)
         if marlin is not None and ext is not None and hasattr(ext, "nvfp4_gemv_marlin_gateup") and not distinct:
             # forme (b), poste7-p1-disposition-unique-18-09 : le GEMV lit la
@@ -1834,13 +1835,21 @@ _MOE_GEMV = os.environ.get("ACVRAM_MOE_GEMV", "v1")
 _MOE_TENSOR = os.environ.get("ACVRAM_MOE_TENSOR", "0") == "1"
 
 
+# Pièce 63 (23/09) : glue du chemin tensor fusionnée (aligneur en un lancement qui absorbe le clamp,
+# reduce lisant le bf16 sans cast) — témoin ACVRAM_MOE_TENSOR_FUSION=0 : la glue A4 (clamp + aligneur
+# vLLM + d.float()), au bit contre la fusion (tests/test_moe_tensor_glue_fusee.py).
+_MOE_TENSOR_FUSION = os.environ.get("ACVRAM_MOE_TENSOR_FUSION", "1") == "1"
+
+
 def gemm_experts_tensor(MP, ext, x: torch.Tensor, eid: torch.Tensor, marlin: dict, top_k: int, m_gate: int,
-                        k_down: int, code_act: int, ws, uns, tampons: dict, sorties: dict) -> torch.Tensor:
+                        k_down: int, code_act: int, ws, uns, tampons: dict, sorties: dict,
+                        fusion: bool = True) -> torch.Tensor:
     """Pièce 62 A4 — experts au décodage par la GEMM groupée Marlin du port (tensor cores).
     ``x`` [T, K] bf16 (lignes du godet), ``eid`` [G = T·top_k] int32 (expert de chaque paire, ordre
     jeton-majeur, −1 = fantôme), ``marlin`` = piles servies (disposition du port : (w, s, g, K, N)).
-    Rend d [G, N] fp32 par paire, dans l ordre des paires, pour `moe_reduce`. Capturable : aligneur en
-    un lancement Triton, tampons (``tampons``) et sorties (``sorties``) à adresses fixes."""
+    Rend d [G, N] par paire, dans l ordre des paires, pour `moe_reduce` : bf16 si ``fusion`` (reduce lit le
+    bf16, pièce 63), fp32 sinon (glue A4). Capturable : aligneur en un lancement, tampons (``tampons``) et
+    sorties (``sorties``) à adresses fixes."""
     E = marlin["gate_proj"][0].shape[0]
     T, G = x.shape[0], eid.shape[0]
     assert G == T * top_k, (G, T, top_k)
@@ -1851,9 +1860,14 @@ def gemm_experts_tensor(MP, ext, x: torch.Tensor, eid: torch.Tensor, marlin: dic
         tampons[cle] = (torch.empty(P, dtype=torch.int32, device=x.device),
                         torch.empty(P // bloc, dtype=torch.int32, device=x.device),
                         torch.empty(1, dtype=torch.int32, device=x.device))
-    eid_al = eid.clamp(min=0)                     # fantômes → expert 0 sur une ligne nulle ; poids 0 au reduce
-    aligner = MP.aligner_blocs_cuda if hasattr(MP.charger(compiler=False), "moe_align_block_size") else MP.aligner_blocs_capturable
-    s_ids, e_ids, n_post = aligner(eid_al, bloc, E, tampons[cle])
+    fusion = fusion and ext is not None and hasattr(ext, "moe_aligner_petit")
+    if fusion:                                    # un lancement : clamp des fantômes + comptage + préfixe + dispersion
+        s_ids, e_ids, n_post = tampons[cle]
+        ext.moe_aligner_petit(eid.contiguous(), E, bloc, s_ids, e_ids, n_post)
+    else:
+        eid_al = eid.clamp(min=0)                 # fantômes → expert 0 sur une ligne nulle ; poids 0 au reduce
+        aligner = MP.aligner_blocs_cuda if hasattr(MP.charger(compiler=False), "moe_align_block_size") else MP.aligner_blocs_capturable
+        s_ids, e_ids, n_post = aligner(eid_al, bloc, E, tampons[cle])
     mg, mu, md = marlin["gate_proj"], marlin["up_proj"], marlin["down_proj"]
     n_gu, n_d = mg[1].shape[2], md[1].shape[2]
 
@@ -1873,7 +1887,7 @@ def gemm_experts_tensor(MP, ext, x: torch.Tensor, eid: torch.Tensor, marlin: dic
         if act.shape[1] != k_down:
             act = F.pad(act, (0, k_down - act.shape[1]))
     d = MP.gemm_moe(act.contiguous(), md[0], md[1], md[2], s_ids, e_ids, n_post, uns, bloc, 1, G, n_d, md[3], ws, c=sortie("d", (G, n_d)))
-    return d.float()
+    return d if fusion else d.float()
 # P1 disposition unique (poste7-p1-disposition-unique-18-09, forme (b)) : le GEMV
 # du décodage lit la disposition Marlin (« marlin », exige
 # ACVRAM_PREFILL_GROUPED=marlin) ou la pile NVFP4 naturelle (« naturel », témoin).

@@ -31,10 +31,16 @@ def test_aligneur_cuda_egal_a_triton(t):
     s2, e2, n2 = MP.aligner_blocs_cuda(eid, bloc, E)
     assert int(n1) == int(n2), (int(n1), int(n2))
     n = int(n1)
-    # sorted_ids : mêmes paires par bloc (l ordre à l intérieur d un bloc est libre : on compare bloc par bloc, triés)
-    a = s1[:n].view(-1, bloc).sort(1).values; b = s2[:n].view(-1, bloc).sort(1).values
-    assert torch.equal(a, b), "paires triées par expert différentes"
     assert torch.equal(e1[: n // bloc], e2[: n // bloc]), "experts par bloc différents"
+    # Pièce 63 : la place d une paire dans les blocs de SON expert est libre (vLLM : atomiques ; un expert sur
+    # deux blocs se répartit différemment d un appel à l autre) — l invariant lu par la GEMM : paire → expert.
+    def expert_de_chaque_paire(s, e):
+        pos = torch.nonzero(s[:n] < eid.numel()).flatten()
+        m = torch.full((eid.numel(),), -2, dtype=torch.int32, device=dev)
+        m[s[pos]] = e[pos // bloc]
+        return m
+    assert torch.equal(expert_de_chaque_paire(s1, e1), expert_de_chaque_paire(s2, e2)), "paire → expert différent"
+    assert torch.equal(expert_de_chaque_paire(s2, e2), eid), "paire → expert ≠ eid"
     assert bool((s1[n:] == eid.numel()).all()) and bool((s2[n:] == eid.numel()).all()), "sentinelle G attendue après num_post"
 
 
