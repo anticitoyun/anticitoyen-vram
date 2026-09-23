@@ -52,6 +52,7 @@ class Fenetre(Adw.ApplicationWindow):
         self.filtre_code_os = False           # code android/linux
         self.tri_multi = []              # [(idx colonne, descendant)], ordre = priorité
         self.etat = {}                   # provider → identifiant servi
+        self._dossiers_deja_proposes = False  # une seule proposition auto par session (pièce 84)
         self._construire()
         self._recharger()
         self.sonder()
@@ -76,6 +77,16 @@ class Fenetre(Adw.ApplicationWindow):
         b_maj = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Recharger (Ctrl+R)")
         b_maj.connect("clicked", lambda *_: (self._recharger(), self.sonder()))
         entete.pack_start(b_maj)
+
+        self.b_dossiers_modeles = Gtk.Button(label="Dossiers des modèles…",
+                                             tooltip_text="Choisir où sont les modèles (acvram, GGUF, HF) ; "
+                                                          "balayés automatiquement pour remplir cette liste")
+        self.b_dossiers_modeles.connect("clicked", lambda *_: self.choisir_dossiers_modeles())
+        entete.pack_start(self.b_dossiers_modeles)
+        self.b_rebalayer = Gtk.Button(icon_name="folder-symbolic",
+                                      tooltip_text="Rebalayer les dossiers de modèles déjà choisis")
+        self.b_rebalayer.connect("clicked", lambda *_: self.rebalayer())
+        entete.pack_start(self.b_rebalayer)
 
         menu = Gio.Menu()
         menu.append("Journal du moteur actif", "win.journal")
@@ -1143,6 +1154,43 @@ class Fenetre(Adw.ApplicationWindow):
         if self.selection.get_n_items():
             self.selection.set_selected(cible)
         self._sur_selection()
+        # Premier lancement (acvram-parc installé, aucun modèle balayé) : la
+        # liste est vide sans que ce soit une faute (pièce 84) — proposer le
+        # choix des dossiers directement, une seule fois par session, jamais
+        # sous GUI_TEST (Gtk.FileDialog est modal et ne rend jamais sous test).
+        if not parc and not self._dossiers_deja_proposes and not GUI_TEST:
+            self._dossiers_deja_proposes = True
+            GLib.idle_add(self.choisir_dossiers_modeles)
+
+    # ---- dossiers de modèles (pièce 84) --------------------------------------
+    def choisir_dossiers_modeles(self):
+        dialogue = Gtk.FileDialog(title="Dossiers de modèles (acvram, GGUF, HF)")
+        def fini(d, resultat):
+            try:
+                dossiers = d.select_multiple_folders_finish(resultat)
+            except GLib.Error:
+                return False
+            chemins = [dossiers.get_item(i).get_path() for i in range(dossiers.get_n_items())]
+            if chemins:
+                self._balayer_dossiers(chemins)
+            return False
+        dialogue.select_multiple_folders(self, None, fini)
+
+    def rebalayer(self):
+        self._balayer_dossiers([])
+
+    def _balayer_dossiers(self, dossiers):
+        """Lance `parc-installer --auto --sans-balayage` (le même outil que l'installation
+        manuelle, pas une réécriture) restreint aux dossiers déjà connus + ceux donnés :
+        aucun balayage automatique de tous les disques depuis un clic de menu. Persiste les
+        racines dans parc.toml (parc-installer le fait déjà), régénère les TSV et
+        ~/.kimi-code/config.toml, puis recharge la liste."""
+        outil = shutil.which("parc-installer") or "/usr/bin/parc-installer"
+        argv = [outil, "--auto", "--sans-balayage", "--sans-minuteur"]
+        for d in dossiers:
+            argv += ["--racine", d]
+        self.executer(argv, "balayage des dossiers de modèles",
+                      fini=lambda code: self._recharger())
 
 
 def appliquer_habillage(accent_bg, accent_color):

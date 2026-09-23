@@ -134,7 +134,11 @@ def lire_tsv(chemin, mini=2):
 
 
 def charger_parc():
-    """Reconstruit la liste complète depuis les fichiers, dans l'ordre du menu texte."""
+    """Reconstruit la liste complète depuis les fichiers, dans l'ordre du menu texte.
+    `CONFIG` absent (premier lancement, aucun modèle balayé) rend un parc vide, pas une
+    erreur : seul un fichier PRÉSENT mais illisible (TOML cassé) est une faute (pièce 84)."""
+    if not CONFIG.exists():
+        return []
     try:
         conf = tomllib.load(CONFIG.open("rb"))
     except Exception as e:
