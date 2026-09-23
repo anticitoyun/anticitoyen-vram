@@ -58,3 +58,26 @@ Règle du chef : **option retenue si KL(b=1, invite 11) ≤ 0,25**, écartée si
   v/o nvfp4 » (S5, assemblable) — à proposer, pas à faire sans ordre.
 
 Durée prévue : 6 chargements × ~60 s + KL ≈ 7 min.
+
+## 4. Filtre joué (20 h 34-20 h 37, carte 3 min 30, six chargements de 28-60 s) — verdict
+
+* **instrument** : `filtre.sh` → `kl-lot-mele-p100-confirmation.py` jeu F (KL b=1 + lots F1-F4, rejeu ×2), dumps existants ; commit 2fca6a0d ; compute-apps début = fin = llama-server 4627 ; rejeu 0 ulp pour les six alias
+* **mesuré** (KL max sur 8 pas, b=1 ; seuil du filtre 0,25 sur l'invite 11) :
+
+  | alias | pile qkv | **invite 11** | invite 1 | invite 8 | invite 9 | invite 15 | invite 11 sous lot (F1-F4) | filtre |
+  |---|---|---|---|---|---|---|---|---|
+  | i8c (servi) | 48/48 | 0,045 | 0,119 | 0,265 | 0,033 | 0,111 | 0,26-0,31 | témoin |
+  | A tout nvfp4 | 48/48 | **0,511** | 0,210 | 0,214 | 0,228 | 0,176 | 0,60-0,78 | écarté |
+  | **S1** A + q/k/v/o int8 | 48/48 | **0,044** | 0,089 | 0,065 | 0,017 | 0,123 | 0,06-0,18 | contrôle |
+  | S2 A + tête int8 | 48/48 | 0,300 | 0,084 | 0,210 | 0,378 | 0,248 | 0,37-0,54 | écarté |
+  | **S3** A + v/o int8 (option i) | **0/48** | **0,234** | 0,134 | 0,247 | 0,050 | 0,130 | 0,24-0,38 | **retenu (≤ 0,25)** |
+  | B A + o int8 | 48/48 | 0,333 | 0,120 | 0,129 | 0,105 | 0,109 | 0,38-0,50 | écarté |
+
+* **verdict** :
+  1. **Les projections nvfp4 portent tout l'écart de l'invite 11** : S1 (experts et tête de A, projections int8) rend 0,044 = i8c (0,045). Prédiction tenue (≤ 0,15). Et S1 fait MIEUX que i8c sur les invites 1, 8, 9 (0,089 / 0,065 / 0,017 contre 0,119 / 0,265 / 0,033) : **les experts AWQ calibrés de A sont meilleurs que ceux de i8c** — l'alias « A à projections int8 » est le meilleur des six sur cinq invites (max 0,123) ; il ne gagne aucun octet sur les projections, mais il dit que la calibration AWQ n'est pas la cause.
+  2. **La tête nvfp4 compte** : S2 (tête int8 seule) 0,511 → 0,300 — prédiction « S2 ≈ A » RÉFUTÉE ; pourtant S1 (tête nvfp4, projections int8) est à 0,044 : les erreurs des projections et de la tête se composent, aucune n'est linéaire (quasi-égalité au sommet). lm_head nvfp4 ne vaut que 78 Mo/pas (≈ 0,02 J/pas) : à rendre en int8 dans tout alias servi (S4 assemblé).
+  3. **Option (i) S3 passe le filtre, de justesse (0,234)**, prédiction « 0,25-0,45 » réfutée à la marge ; B (o seul) 0,333 écarté (prédit ≥ 0,35, marge) ; v int8 vaut 0,10 nat de plus que o seul. Mais S3 n'a **pas de pile qkv** (0/48, formats mixtes) : servi tel quel, 3 GEMM par couche (+0,9 ms/pas, pièce 42) — le gain d'énergie (−0,057 J/pas) est mangé quatre fois. **Une pile PARTIELLE (q+k nvfp4 empilés, v int8 à part, 2 lancements) est la condition de toute option mixte** : `attention.py::fuse` empile aujourd'hui [q, k, v] tout ou rien ; grouper par format et empiler chaque groupe (~25 lignes + test au bit) — pièce moteur, pas la mienne.
+  4. Option (ii) prose FR : non jouée (ordre) ; avec S1 à 0,044, la calibration n'est plus la première suspecte — la voie qui garde le plus d'octets est un mixte fin, pas une reconversion.
+
+* **Prêts à sec (0 min de carte), non mesurés** : S4 = S3 + tête int8 (51 % des octets de A, prédit ≤ 0,15 sur l'invite 11) ; **S6 = k/v int8, q/o nvfp4 (91 % des octets)** ; **S7 = v int8 seul (96 %)**. Un second filtre de 3 minutes (S4, S6, S7 + i8c témoin) dit lequel garde le plus d'octets sous 0,25 ; tous exigent la pile partielle.
+* **durée** : prévue ≈ 7 min ; tenue 3 min 30 (chargements 28-30 s, B 60 s)
