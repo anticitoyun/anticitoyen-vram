@@ -1243,7 +1243,7 @@ class MoEBlock(nn.Module):
             marlin = None                              # piles Marlin présentes mais témoin naturel demandé
         tensor_ok = (_MOE_TENSOR and marlin is not None and not distinct and eid.shape[0] >= 16
                      and x_g.dtype == torch.bfloat16 and ech_gu is None and awq.get("down_proj") is None
-                     and x_g.shape[0] * self.top_k == eid.shape[0] and _seq is None)
+                     and x_g.shape[0] * self.top_k == eid.shape[0])   # paires en ordre jeton-majeur (index_jetons)
         if tensor_ok:
             from ..kernels import marlin_port as MP
             if MP.charger(compiler=False) is None:
