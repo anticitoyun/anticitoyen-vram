@@ -915,8 +915,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         if r.get("graphes_abandon"):
             raison_off = f"abandon({r['graphes_abandon']})"        # capture au-delà du délai : eager assumé
         return (f"régime {etat} — graphes={'on' if r['graphes'] and not r.get('graphes_abandon') else 'off' + raison_off}"
-                f"{'' if slots is None else f'(hybrides≤{slots})'}"
-                f"{'+double' if self.graphs is not None and getattr(self.graphs, 'graphe_double', False) else ''} "
+                f"{'' if slots is None else f'(hybrides≤{slots})'} "
                 f"repli_eager={r.get('repli_eager', 0)} "
                 # `graphes_n=`, pas `graphes=` : la ligne porte déjà
                 # `graphes=on|off`, que trois lecteurs cherchent tel quel
