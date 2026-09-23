@@ -21,7 +21,17 @@ fn main() {
         let nom = inv["nom"].as_str().unwrap();
         let messages: Vec<Message> = serde_json::from_value(inv["messages"].clone()).unwrap();
         let ids = m.tokeniseur.encoder(&m.tokeniseur.rendre(&messages, true).unwrap()).unwrap();
-        m.prefill(&ids).expect("préfill");
+        // KV_LIGNE0_DE=<dossier> : la ligne 0 (et elle seule, les suivantes sont réécrites) vient d'un vidage Python —
+        // pour séparer l'origine de la ligne 0 (préfill Python d'un jeton) du reste du chemin de décodage.
+        match std::env::var("KV_LIGNE0_DE") {
+            Ok(d) => {
+                m.injecter_kv(&PathBuf::from(d).join(format!("kv-{nom}.safetensors"))).expect("injection");
+                m.prefill_depuis(&ids, 1).expect("préfill");
+            }
+            Err(_) => {
+                m.prefill(&ids).expect("préfill");
+            }
+        }
         let kv = m.lire_kv(ids.len() as u32).expect("KV");
         let vues: Vec<(String, TensorView)> = kv
             .iter()

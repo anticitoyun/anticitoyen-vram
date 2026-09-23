@@ -290,8 +290,13 @@ impl Moteur {
     /// un dans le pas de décodage prouvé au bit ; rend les logits fp32 du dernier (ceux du premier jeton généré).
     /// Pas au bit du Python (qui préfille par GEMM et attention flash) : jugé par KL.
     pub fn prefill(&mut self, ids: &[u32]) -> Resultat<Vec<f32>> {
+        self.prefill_depuis(ids, 0)
+    }
+
+    /// Préfill à partir de la position `debut` (les lignes KV 0..debut sont déjà en place, injectées).
+    pub fn prefill_depuis(&mut self, ids: &[u32], debut: usize) -> Resultat<Vec<f32>> {
         let mut dernier = Err(erreur!("invite vide"));
-        for (p, &id) in ids.iter().enumerate() {
+        for (p, &id) in ids.iter().enumerate().skip(debut) {
             dernier = Ok(self.pas_logits(id, p as u32).map_err(|e| erreur!("préfill position {p} : {e}"))?);
         }
         dernier
