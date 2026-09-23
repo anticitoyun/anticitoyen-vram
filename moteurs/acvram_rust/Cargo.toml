@@ -10,6 +10,10 @@ publish = false
 name = "acvram-rust"
 path = "src/main.rs"
 
+[features]
+# cassure prévue d'avance de la porte au bit (outils de contrôle seulement)
+cassure-tranches = []
+
 [dependencies]
 cudarc = { version = "=0.19.9", default-features = false, features = ["std", "driver", "nvrtc", "cuda-13030", "dynamic-loading"] }
 safetensors = "0.8.0"

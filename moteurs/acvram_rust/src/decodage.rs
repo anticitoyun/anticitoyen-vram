@@ -82,6 +82,10 @@ pub fn bucket_blocks(n: u32) -> u32 {
 /// le godet des blocs couvrant p + 1 jetons (graphs.py:645 ; confirmé par le relevé : 2 tranches jusqu'à
 /// p = 127, 4 ensuite).
 pub fn nblk_du_pas(p: u32) -> u32 {
+    // Cassure prévue d'avance de la porte au bit (feature `cassure-tranches`, jamais par défaut) : la bascule
+    // 2 → 4 tranches arrive UN pas trop tôt (position 127) — calcul valide, ordre de sommation différent.
+    #[cfg(feature = "cassure-tranches")]
+    let p = p + 1;
     bucket_blocks((p + 1).div_ceil(16))
 }
 

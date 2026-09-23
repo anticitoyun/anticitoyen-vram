@@ -61,11 +61,13 @@ fn main() {
     }
 
     let mut tenues = 0;
+    let mut bits_tenus = 0;
     let invites = reference["invites"].as_array().expect("invites");
     for inv in invites {
         let nom = inv["nom"].as_str().unwrap();
         let premier = inv["premier_jeton"].as_u64().unwrap() as u32;
         let attendu: Vec<u32> = inv["sortie"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect();
+        m.journal_logits = Some(Vec::new());
         let t0 = std::time::Instant::now();
         let sortie = match m.decoder_injecte(&vidage.join(format!("kv-{nom}.safetensors")), premier, 128) {
             Ok(s) => s,
@@ -81,8 +83,19 @@ fn main() {
         let div = sortie.iter().zip(&attendu).position(|(a, b)| a != b);
         println!("{nom} {} jetons {}/{} sha {} {} (1re divergence : {:?}) {:.2} s",
                  if ok { "TENU" } else { "FAUX" }, sortie.len(), attendu.len(), &sha[..16], &sha_ref[..16], div, dt);
+        // porte au bit : logits du pas i (Rust) contre l'entrée i + 1 du journal Python (l'entrée 0 = préfill)
+        let rust = m.journal_logits.take().unwrap_or_default();
+        let py: Vec<&str> = inv["logits"].as_array().map(|a| a.iter().filter_map(|x| x["sha256"].as_str()).collect()).unwrap_or_default();
+        let py_types: Vec<&str> = inv["logits"].as_array().map(|a| a.iter().filter_map(|x| x["dtype"].as_str()).collect()).unwrap_or_default();
+        let comparables = rust.len().min(py.len().saturating_sub(1));
+        let bit = (0..comparables).position(|i| rust[i] != py[i + 1]);
+        let tenu_bit = !py.is_empty() && comparables == rust.len() && bit.is_none();
+        bits_tenus += tenu_bit as usize;
+        println!("{nom} LOGITS {} : {comparables} pas comparés, 1er pas différent : {:?} (types Python {:?})",
+                 if tenu_bit { "AU BIT" } else { "FAUX" }, bit, py_types.first());
     }
     println!("variantes Triton lancées : {:?}", m.variantes_lancees);
     println!("PORTE {tenues}/{}", invites.len());
+    println!("PORTE AU BIT (logits) {bits_tenus}/{}", invites.len());
     std::process::exit(if tenues == invites.len() { 0 } else { 1 });
 }

@@ -89,6 +89,8 @@ pub struct Moteur {
     pub empreintes: Vec<(String, String, String)>,
     /// hash de la variante Triton lancée → nombre de lancements (au journal de la porte)
     pub variantes_lancees: HashMap<String, u64>,
+    /// porte au bit : sha256 des logits fp32 de chaque pas (None : pas de journal)
+    pub journal_logits: Option<Vec<String>>,
 }
 
 fn envoyer(flux: &Arc<CudaStream>, tenus: &mut Vec<CudaSlice<u8>>, b: &[u8]) -> Resultat<Ptr> {
@@ -203,6 +205,7 @@ impl Moteur {
             manifeste, tokeniseur, noyaux, dossier: dossier.to_path_buf(), ctx, flux, f, attention, couches, embed,
             norme_finale, tete, cos, sin, rope_d, kv, t, sms, blocs, _tenus: tenus, octets_carte, empreintes,
             variantes_lancees: HashMap::new(),
+            journal_logits: None,
         })
     }
 
@@ -351,7 +354,13 @@ impl Moteur {
         if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
             return Err(erreur!("logits vers l'hôte : {r:?}"));
         }
-        argmax(&logits[..v.min(logits.len())]).map(|i| i as u32).ok_or_else(|| erreur!("logits vides"))
+        let logits = &logits[..v.min(logits.len())];
+        if let Some(j) = self.journal_logits.as_mut() {
+            use sha2::{Digest, Sha256};
+            let octets: Vec<u8> = logits.iter().flat_map(|x| x.to_le_bytes()).collect();
+            j.push(format!("{:x}", Sha256::digest(&octets)));
+        }
+        argmax(logits).map(|i| i as u32).ok_or_else(|| erreur!("logits vides"))
     }
 
     /// Porte de l'étape 1 (option A) : KV de l'invite et premier jeton du Python, puis décodage glouton.
