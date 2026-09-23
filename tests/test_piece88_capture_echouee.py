@@ -101,3 +101,87 @@ def test_capture_reussie_restaure_comme_avant(monkeypatch):
     entry = gr._capture(1, 1, 8, batch=None)
     assert "graph" in entry and gr.captures == 1
     assert couche.statics[0]["s"].item() == 5.0
+
+
+# ---- tri des échecs de capture, par `preparer` (à sec) -----------------------
+
+def _gr_tri(monkeypatch, erreurs, sync_leve=False):
+    """`erreurs` : exceptions levées par les captures successives (None = succès)."""
+    def sync(d=None):
+        if sync_leve:
+            raise RuntimeError("CUDA error: an illegal memory access was encountered")
+    monkeypatch.setattr(torch.cuda, "synchronize", sync)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    gr = G.GraphRunner.__new__(G.GraphRunner)
+    gr.enabled, gr.paged_ok, gr.hybrid_layers = True, True, []
+    gr.max_model_len, gr.device, gr.replays = 2304, "cpu", 0
+    gr._raisons_eager_vues, gr.replis_eager = set(), 0
+    gr.abandon_capture, gr._photo_memoire = None, lambda: None
+    gr._avant_premiere_capture = lambda: None
+    gr._apres_echec_capture = lambda: None
+    gr._surveiller_capture = lambda cle: SimpleNamespace(cancel=lambda: None)
+    gr._pool = "pool-ancien"
+    gr.graphs = {("saine",): {}}
+    file = list(erreurs)
+    gr.tentatives = 0
+
+    def capture(b, ql, nblk, batch):
+        gr.tentatives += 1
+        err = file.pop(0) if file else None
+        if err is not None:
+            raise err
+        return {"graph": "g"}
+    gr._capture = capture
+    return gr
+
+
+def _lot(b=12):
+    return SimpleNamespace(is_prefill=False, query_lens=[1] * b, batch_size=b,
+                           block_tables=[torch.zeros(20, dtype=torch.int32)] * b)
+
+
+def test_transitoire_reprise_bornee_sur_pool_neuf(monkeypatch):
+    gr = _gr_tri(monkeypatch, [RuntimeError(INVALIDEE)] * 3)
+    assert gr.preparer(_lot()) is False
+    assert gr.enabled and ("saine",) in gr.graphs and gr._pool is None   # rien de sain perdu, pool abandonné
+    assert gr.tentatives == 1
+    for _ in range(G.GraphRunner.DELAI_REPRISE_CAPTURE - 1):             # attente : pas de nouvel essai
+        assert gr.preparer(_lot()) is False
+    assert gr.tentatives == 1
+    assert gr.preparer(_lot()) is False and gr.tentatives == 2          # reprise, échoue encore
+    for _ in range(G.GraphRunner.DELAI_REPRISE_CAPTURE):
+        gr.preparer(_lot())
+    assert gr.tentatives == 3                                          # 3e essai → refus définitif
+    for _ in range(3 * G.GraphRunner.DELAI_REPRISE_CAPTURE):
+        gr.preparer(_lot())
+    assert gr.tentatives == 3 and gr.enabled
+    assert any("transitoire, 3 essais" in r for r in gr._raisons_eager_vues)
+    D = G.GraphRunner.DELAI_REPRISE_CAPTURE
+    assert gr.replis_eager == 1 + (D - 1) + 1 + D + 3 * D                 # chaque pas hors graphe compte
+
+
+def test_transitoire_puis_succes_capture_la_cle(monkeypatch):
+    gr = _gr_tri(monkeypatch, [RuntimeError(INVALIDEE), None])
+    gr.preparer(_lot())
+    for _ in range(G.GraphRunner.DELAI_REPRISE_CAPTURE - 1):
+        gr.preparer(_lot())
+    assert gr.preparer(_lot()) is True and gr.tentatives == 2 and len(gr.graphs) == 2
+
+
+def test_deterministe_refuse_la_seule_cle(monkeypatch):
+    gr = _gr_tri(monkeypatch, [RuntimeError("CUDA error: out of memory"), None])
+    assert gr.preparer(_lot(12)) is False and gr.enabled
+    for _ in range(200):
+        assert gr.preparer(_lot(12)) is False
+    assert gr.tentatives == 1                                          # jamais retentée
+    assert any("déterministe" in r and "out of memory" in r for r in gr._raisons_eager_vues)
+    assert gr.preparer(_lot(1)) is True and gr.tentatives == 2          # une autre forme se capture
+    assert gr.replis_eager == 201
+
+
+def test_contexte_en_erreur_coupe_tout_comme_avant(monkeypatch, capsys):
+    gr = _gr_tri(monkeypatch, [RuntimeError("CUDA error: an illegal memory access was encountered")],
+                 sync_leve=True)
+    assert gr.preparer(_lot()) is False
+    assert gr.enabled is False and gr.graphs == {}
+    assert "graphes CUDA desactives" in capsys.readouterr().out

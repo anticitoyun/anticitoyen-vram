@@ -475,6 +475,68 @@ class GraphRunner:
     MEM_MIN_CAPTURE = int(os.environ.get("ACVRAM_CAPTURE_MEM_MIN_MIO", "1024")) * 2 ** 20
     DELAI_CAPTURE_S = float(os.environ.get("ACVRAM_CAPTURE_DELAI_S", "120"))
 
+    # Pièce 88 (23/09) : une capture qui échoue ne coupe plus tous les graphes.
+    # Avant, toute exception mettait `enabled=False` et vidait `self.graphs` —
+    # les formes saines comprises —, et un incident transitoire (un
+    # `synchronize` d'un autre fil pendant la capture, pièce 85) devenait une
+    # panne pour la vie du serveur. Trois cas :
+    #   * transitoire (capture invalidée de l'extérieur) : la clé attend
+    #     DELAI_REPRISE_CAPTURE pas, puis se retente ; ESSAIS_CAPTURE_MAX
+    #     échecs → refusée comme une déterministe ;
+    #   * déterministe (OOM, opération non capturable…) : la SEULE clé est
+    #     refusée pour la vie du serveur — réessayer reproduirait l'échec et
+    #     paierait échauffement + capture (40-130 ms) à chaque tentative ;
+    #   * contexte CUDA en erreur (le `synchronize` qui suit lève) : rien ne
+    #     peut plus être rejoué, l'ancien comportement (tout couper) reste.
+    # Dans les deux premiers cas le pool partagé est abandonné pour les
+    # captures suivantes : une capture interrompue l'a touché et rien ne prouve
+    # qu'il est resté cohérent ; les graphes vivants gardent l'ancien.
+    ESSAIS_CAPTURE_MAX = 3
+    DELAI_REPRISE_CAPTURE = 64
+    MARQUES_TRANSITOIRES = ("previous error during capture", "capture invalidated",
+                            "StreamCaptureInvalidated")
+
+    def _echecs(self) -> dict:
+        if not hasattr(self, "_etat_echecs"):
+            self._etat_echecs = {"refusees": {}, "essais": {}, "attente": {}}
+        return self._etat_echecs
+
+    def _refus_de_cle(self, cle) -> Optional[str]:
+        """La raison de ne pas capturer `cle` ce pas-ci, ou None."""
+        e = self._echecs()
+        if cle in e["refusees"]:
+            return f"capture refusée pour la clé {cle} : {e['refusees'][cle]}"
+        if cle in e["attente"]:
+            e["attente"][cle] -= 1
+            if e["attente"][cle] > 0:
+                return f"clé {cle} en attente de reprise de capture"
+            del e["attente"][cle]
+        return None
+
+    def _tri_echec_capture(self, cle, exc: BaseException) -> bool:
+        """Classe un échec de capture. Rend True si les graphes restent actifs
+        (la seule clé est mise en attente ou refusée), False si le contexte
+        CUDA est en erreur et qu'il faut tout couper."""
+        try:
+            torch.cuda.synchronize(self.device)
+        except Exception:                                  # noqa: BLE001
+            return False
+        e = self._echecs()
+        self._pool = None
+        torch.cuda.empty_cache()
+        n = e["essais"].get(cle, 0) + 1
+        e["essais"][cle] = n
+        transitoire = any(m in str(exc) for m in self.MARQUES_TRANSITOIRES)
+        if transitoire and n < self.ESSAIS_CAPTURE_MAX:
+            e["attente"][cle] = self.DELAI_REPRISE_CAPTURE
+            self._eager(f"capture invalidée (clé {cle}, essai {n}/{self.ESSAIS_CAPTURE_MAX}) : "
+                        f"reprise dans {self.DELAI_REPRISE_CAPTURE} pas — {self.raison}")
+        else:
+            nature = f"transitoire, {n} essais" if transitoire else "déterministe"
+            e["refusees"][cle] = f"{nature} — {self.raison}"
+            self._eager(f"capture refusée pour la clé {cle} ({nature}) : {self.raison}")
+        return True
+
     def _garde_capture(self, cle) -> Optional[str]:
         """Refuse la capture (raison) si la mémoire libre est sous le seuil, ou
         si une capture précédente a dépassé le délai : après un dépassement, le
@@ -627,7 +689,7 @@ class GraphRunner:
                     print(f"[graphe] limite {MAX_GRAPHS} atteinte, clé {key} : eager",
                           flush=True)
                 return False
-            refus = self._garde_capture(key)
+            refus = self._garde_capture(key) or self._refus_de_cle(key)
             if refus is not None:
                 self._eager(refus)
                 return False
@@ -648,12 +710,15 @@ class GraphRunner:
                 # ET LA CAUSE EST JOURNALISEE, jamais tue : un echec de capture
                 # silencieux est precisement ce qui nous a coute la journee. On
                 # imprime le type et le message, puis on replie en eager.
-                # UNE SEULE FOIS PAR SESSION : `enabled` passant a False, on
-                # ne repasse normalement pas ici — mais si un jour un chemin
-                # reessaie, un serveur qui refuse la capture a chaque pas
-                # noierait sa propre sortie. Le drapeau coute un attribut.
+                # Pièce 88 : l'échec est TRIÉ (`_tri_echec_capture`) — seule
+                # une erreur qui laisse le contexte CUDA inutilisable coupe
+                # encore tous les graphes ; le message ci-dessous ne s'imprime
+                # alors qu'une fois (`_dit_raison`).
                 veille.cancel()
                 self.raison = f"{type(e).__name__}: {str(e).splitlines()[0][:160]}"
+                self._apres_echec_capture()           # avant le ménage : l'état fautif
+                if self._tri_echec_capture(key, e):
+                    return False                      # les autres formes restent en graphe
                 # NOMMER L'ALLOCATEUR quand il est en cause, apport de main a
                 # ne pas perdre : les segments extensibles sont en tension avec
                 # la capture, qui exige des adresses figees. Sans cette
@@ -669,7 +734,6 @@ class GraphRunner:
                              if extensible else ""), flush=True)
                 self.enabled = False
                 self.graphs.clear()
-                self._apres_echec_capture()           # avant le ménage : l'état fautif
                 torch.cuda.empty_cache()
                 # gemma-4-26B-A4B (verdict-capture-parc-19-09) : capture du godet 1
                 # impossible (OOM), le service tournait en eager 2,9 × plus lent
