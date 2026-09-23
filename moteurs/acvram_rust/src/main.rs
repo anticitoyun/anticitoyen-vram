@@ -1,4 +1,4 @@
-//! `acvram-rust serve <dossier-modèle> --noyaux <acvram_kernels.so> [--port 8110] [--served-name nom]`
+//! `acvram-rust serve <dossier-modèle> --noyaux <acvram_kernels.so> --vidage <dossier> [--port 8110] [--served-name nom]`
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -7,7 +7,7 @@ use acvram_rust::moteur::Moteur;
 use acvram_rust::serveur::{routes, Etat};
 
 fn usage() -> ! {
-    eprintln!("usage : acvram-rust serve <dossier-modèle> --noyaux <acvram_kernels.so> [--port N] [--served-name nom]");
+    eprintln!("usage : acvram-rust serve <dossier-modèle> --noyaux <acvram_kernels.so> --vidage <dossier> [--port N] [--served-name nom]");
     std::process::exit(64)
 }
 
@@ -18,12 +18,13 @@ async fn main() {
         usage();
     }
     let dossier = PathBuf::from(&args[1]);
-    let (mut so, mut port, mut nom) = (None, 8110u16, None);
+    let (mut so, mut vidage, mut port, mut nom) = (None, None, 8110u16, None);
     let mut i = 2;
     while i < args.len() {
         let valeur = args.get(i + 1).cloned().unwrap_or_else(|| usage());
         match args[i].as_str() {
             "--noyaux" => so = Some(PathBuf::from(valeur)),
+            "--vidage" => vidage = Some(PathBuf::from(valeur)),
             "--port" => port = valeur.parse().unwrap_or_else(|_| usage()),
             "--served-name" => nom = Some(valeur),
             _ => usage(),
@@ -31,7 +32,8 @@ async fn main() {
         i += 2;
     }
     let so = so.unwrap_or_else(|| usage());
-    let moteur = match Moteur::charger(&dossier, &so) {
+    let vidage = vidage.unwrap_or_else(|| usage());
+    let moteur = match Moteur::charger(&dossier, &so, &vidage) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("acvram-rust : {e}");

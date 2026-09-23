@@ -10,12 +10,16 @@ publish = false
 name = "acvram-rust"
 path = "src/main.rs"
 
+[features]
+# cassure prévue d'avance de la porte au bit (outils de contrôle seulement)
+cassure-echelle = []
+
 [dependencies]
 cudarc = { version = "=0.19.9", default-features = false, features = ["std", "driver", "nvrtc", "cuda-13030", "dynamic-loading"] }
 safetensors = "0.8.0"
 memmap2 = "0.9.11"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 half = "2.7.1"
 # Même version que le `tokenizers` Python d'acvram : l'identité des ids d'invite en dépend.
 tokenizers = "=0.23.2"
