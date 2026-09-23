@@ -82,6 +82,8 @@ VARIABLES: tuple[Variable, ...] = (
              "pièce 65 : godet (jetons) minimal du chemin tensor — 8 mesuré (b=4 : GEMV +9,5 % plus rapide ; b=8 : tensor −4,3 %) ; 1, 2, 4 restent en GEMV"),
     Variable("MOE_TENSOR_FUSION", "1", ("acvram.engine.moe", "_MOE_TENSOR_FUSION"), "0",
              "pièce 63 : glue fusionnée, reproductible (défaut) | 0 témoin glue A4 (aligneur vLLM par atomiques, NON reproductible) — jamais servi"),
+    Variable("MOE_W13", "0", ("acvram.engine.moe", "_MOE_W13"), "0",
+             "pièce 82 (23/09) : 1 = gate·up en une pile Marlin w13 (disposition unique, gate/up rendues, experts_layout=marlin-w13) — GEMM w13 au préfill et au décodage tensor, sortie au 2⁻⁷ (up arrondi une fois de plus), GEMV au bit ; 0 défaut = gate et up séparées"),
     Variable("MARLIN_DISTINCT", "0", ("acvram.engine.moe", "_MARLIN_DISTINCT"), "0",
              "C10 : 1 = la disposition unique Marlin sert aussi les MoE à gate/up distincts (tables AWQ séparées : GLM k48-calibA) — décodage par le GEMV Marlin à une projection, gate puis up ; 0 défaut = refus nommé, pile naturelle gardée, chemin d'avant (verdict-glm-b12-19-09) ; scellé GLM b=12 ≥ chemin d'avant × 1,05"),
     # --- capacités, plafonds, modes du moteur (19/09 : sortis de HORS_REGIME, poste7) ---
