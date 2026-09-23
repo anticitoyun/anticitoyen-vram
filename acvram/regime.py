@@ -499,7 +499,9 @@ def glue_texte() -> str:
         if not getattr(_k, "_GLUE_COMPACT", 0):
             return "glue=temoin"
         items = getattr(_k, "_GLUE_COMPACT_ITEMS", None) or ""
-        return f"glue=compact({_ap.WARPS_COMPACT}" + (f",items={items}" if items else "") + ")"
+        # pièce 92 : réduction déroulée par défaut, au bit de la boucle série — seul le témoin est nommé
+        serie = "" if getattr(_ap, "REDUC_DEROULEE", True) else ",reduc=serie"
+        return f"glue=compact({_ap.WARPS_COMPACT}" + (f",items={items}" if items else "") + serie + ")"
     except Exception as exc:                              # noqa: BLE001
         return f"glue=?({type(exc).__name__})"
 
