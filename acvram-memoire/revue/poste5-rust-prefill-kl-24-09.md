@@ -50,3 +50,11 @@ durée : prévu ≤ 900 s ; tenu ≈ 5 min (vidage compris)
   préfill Python) + marge — le préfill Rust est déjà AU BIT du décodage forcé, ligne 0 comprise mise à part.
 * À signaler en plus : l'écart préfill/décodage d'acvram (KV de l'invite) mériterait sa propre pièce (qui est le
   plus juste contre une référence bf16 ; effet sur la PPL et la KL servies).
+
+## Porte A' (décision du chef 24/09, **scellée APRÈS la mesure**, ne vaut QUE pour la question (a), le langage hôte)
+
+Porte : le préfill Rust est identique AU BIT à un chemin d'acvram — le décodage forcé du moteur Python servi —, ligne 0
+commune : **TENUE 5/5** (`ligne0.txt`, 0 code différent sur 36 couches, 5 invites). Scellée après coup : elle ne se
+cite jamais comme un résultat de justesse du préfill Rust contre le préfill servi (celui-là reste FAUX au scellé
+d'origine), seulement comme preuve que l'hôte Rust exécute le calcul d'acvram. B refusé (chef). L'écart
+préfill/décodage d'acvram devient la pièce 125 (poste6).
