@@ -792,7 +792,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # Pièce 65 : chemin tensor par défaut (godets ≥ 2) ; la ligne porte le repli STATIQUE nommé par couche
         # (`MoEBlock._tensor_refus`), le témoin GEMV (=0) et le témoin de glue A4 (non reproductible).
         if os.environ.get("ACVRAM_MOE_TENSOR", "1") == "1":
-            refus = sorted({getattr(m, "_tensor_refus", "piles d experts absentes") or ""
+            refus = sorted({(m.__dict__["_tensor_refus"] if "_tensor_refus" in m.__dict__ else m._raison_tensor()) or ""
                             for m in self.model.modules() if isinstance(m, MoEBlock)} - {""})
             from .moe import _MOE_TENSOR_MIN_T
             chemin_moe += f"+tensor(b≥{_MOE_TENSOR_MIN_T}" + ("" if not refus else ",repli:" + " ; ".join(refus)) + ")"

@@ -46,6 +46,22 @@ def test_controle_du_parc_a_sec():
     assert any("calibA" in l and "AWQ" in l for l in lignes), out.stdout
 
 
+def test_sans_port_compile_le_defaut_replie_et_ne_leve_pas(monkeypatch):
+    """chef 23/09 : à sec (CI sans carte) le chemin tensor par défaut levait « port non compilé » ; un défaut ne
+    lève jamais là où le GEMV marchait — repli statique nommé `port Marlin non compilé` (ligne de régime), et le
+    forward reste sur le GEMV (test_c10_marlin_distinct_glm[12] le joue de bout en bout, à sec, b=12 ≥ MIN_T)."""
+    from acvram.engine.moe import MoEBlock
+    from acvram.kernels import marlin_port as MP
+    from test_marlin_prefill_p1 import _bloc_moe_jouet
+    monkeypatch.setattr(MoEBlock, "_construire_marlin", lambda self, p, a, h: {n: ("w", "s", "g", p[n][4], p[n][5]) for n in p})
+    monkeypatch.setattr(MP, "charger", lambda *a, **k: None)
+    bloc = _bloc_moe_jouet(4, 128, 64, 2, dev="cpu")
+    assert bloc._try_build_stacks()
+    assert "port Marlin non compilé" in bloc._tensor_refus, bloc._tensor_refus
+    del bloc.__dict__["_tensor_refus"]                       # piles posées sans _try_build_stacks : calcul paresseux
+    assert "port Marlin non compilé" in bloc._raison_tensor()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise")
 def test_chemin_servi_reproductible_au_bit():
     from test_moe_tensor_decodage import _charger, _piles, E, K, I
