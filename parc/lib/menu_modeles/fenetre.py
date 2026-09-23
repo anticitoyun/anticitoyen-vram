@@ -500,6 +500,22 @@ class Fenetre(Adw.ApplicationWindow):
                 return alias
         return None
 
+    def _textes_visibles(self):
+        """Tous les textes de Gtk.Label actuellement affichés sous la liste (DFS),
+        colonne par colonne dans l'ordre des enfants — sert au crochet `trier:`."""
+        acc = []
+
+        def parcourir(w):
+            if isinstance(w, Gtk.Label):
+                acc.append(w.get_text())
+            enfant = w.get_first_child()
+            while enfant is not None:
+                parcourir(enfant)
+                enfant = enfant.get_next_sibling()
+
+        parcourir(self.vue_liste)
+        return acc
+
     def test_jouer(self):
         """ACVRAM_GUI_TEST (voir l'en-tête) : joue l'action, imprime `GUI_TEST {…}`, quitte. Retour = toasts, lignes de
         console, argv qui auraient été lancés, URI qui auraient été ouvertes, sélection, compte du filtre."""
@@ -526,8 +542,34 @@ class Fenetre(Adw.ApplicationWindow):
                     b.set_active(not b.get_active()); r["actif"] = b.get_active()
                 else:
                     r["sensible"] = b.get_sensitive(); b.emit("clicked")
+            elif genre == "trier":
+                # Simule un clic sur l'en-tête `arg` (gtk_column_view_sort_by_column
+                # est exactement l'appel que fait le gestionnaire de clic interne du
+                # ColumnView) ; laisse deux tours de boucle pour que la disposition
+                # (et le texte des cellules) se stabilise avant/après, puis imprime
+                # et quitte lui-même (retour anticipé : pas le print/quit générique).
+                col = next((c for c in self.vue_liste.get_columns() if c.get_title() == arg), None)
+                if col is None:
+                    r["erreur"], rc = f"colonne inconnue : {arg}", 2
+                    print("GUI_TEST " + json.dumps(r, ensure_ascii=False), flush=True)
+                    self.get_application().rc_test = rc
+                    self.get_application().quit()
+                    return
+                def apres_tri():
+                    r["apres"] = self._textes_visibles()
+                    print("GUI_TEST " + json.dumps(r, ensure_ascii=False), flush=True)
+                    self.get_application().rc_test = 0
+                    self.get_application().quit()
+                    return False
+                def avant_tri():
+                    r["avant"] = self._textes_visibles()
+                    self.vue_liste.sort_by_column(col, Gtk.SortType.ASCENDING)
+                    GLib.timeout_add(200, apres_tri)
+                    return False
+                GLib.timeout_add(200, avant_tri)
+                return
             else:
-                r["erreur"], rc = f"forme inconnue : {GUI_TEST} (clic:<bouton>[@<alias>] | filtre:<texte>)", 2
+                r["erreur"], rc = f"forme inconnue : {GUI_TEST} (clic:<bouton>[@<alias>] | filtre:<texte> | trier:<titre colonne>)", 2
         except Exception as e:                          # le retour d'un gestionnaire qui plante est le plantage lui-même
             r["exception"], rc = f"{type(e).__name__}: {e}", 1
         print("GUI_TEST " + json.dumps(r, ensure_ascii=False), flush=True)

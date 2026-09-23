@@ -3,7 +3,7 @@ Version: @VERSION@
 Section: utils
 Priority: optional
 Architecture: amd64
-Depends: python3 (>= 3.11), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, curl, python3-tomli-w
+Depends: python3 (>= 3.11), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, curl
 Recommends: acvram (>= 0.6.31)
 Maintainer: Anticitoyen <anticitoyen@users.noreply.gitlab.com>
 Description: menus claude-modele(s) et kimi-modele(s), modeles-a-jour et parc-installer
