@@ -267,9 +267,10 @@ def _tranches(n_pages: int, b: int, hkv: int, device) -> tuple[int, int]:
 # durée inchangée 17,8 µs — et le bras B tire 369 W contre 349 (J +2,6 %, addendum 05 h 03) :
 # ACVRAM_ATTN_WARPS_COMPACT=4 est le bras qui dit si ce sont ces warps (energie_par_poste).
 WARPS_COMPACT = int(os.environ.get("ACVRAM_ATTN_WARPS_COMPACT", "8"))   # 8 : B8 +11,5 %, J 0,966 × ; B4 +9,1 %, 0,986 × et 369 W = 369 (poste2 05 h 15)
-# Pièce 92 (23/09) : réduction des tranches déroulée (lectures en vol ensemble, mêmes sommes dans le même ordre).
-# 0 tant que le banc n'a pas jugé ; ACVRAM_ATTN_REDUC_DEROULEE=1 l'active.
-REDUC_DEROULEE = os.environ.get("ACVRAM_ATTN_REDUC_DEROULEE", "0") == "1"
+# Pièce 92 (23/09) : réduction des tranches déroulée (lectures en vol ensemble, mêmes sommes dans le même ordre) —
+# au bit de la boucle série sur 11/11 cellules du banc L2 froid et au test (test_glue_compact : réduction déroulée),
+# −1,9 % sur la moyenne du lot b=12 (15,46 → 15,17 µs/couche), −8,7 % à b=1 ctx 2 048. Témoin : =0.
+REDUC_DEROULEE = os.environ.get("ACVRAM_ATTN_REDUC_DEROULEE", "1") == "1"
 assert WARPS_COMPACT in (1, 2, 4, 8, 16), WARPS_COMPACT
 
 _COMPTEURS: dict = {}
