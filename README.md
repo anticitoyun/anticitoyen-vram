@@ -255,8 +255,8 @@ protocole pour tous les moteurs (`outils/`, une carte, `energie.py`) :
 
 | | acvram | vLLM 0.29 (`vllm serve`) | llama.cpp (sm_120) |
 |---|---|---|---|
-| décodage 12 séquences | 1 831,7 t/s ² | **1 999,0 t/s** ² | — |
-| décodage 1 séquence | 310,8 t/s ⁴ | 291,4 t/s ³ | **329,9 t/s** ⁴ |
+| décodage 12 séquences | 1 916,1 t/s ² | **2 014,3 t/s** ² | — |
+| décodage 1 séquence | 311,2 t/s ³ ⁴ | 284,5 t/s ³ | **329,9 t/s** ⁴ |
 | prefill pp2048 | **22 707 jetons/s** | 21 054 | 8 671 (TabbyAPI, retiré) |
 
 ¹ Erratum du 22/09 : `serve` spécule par défaut (`--speculative ngram`, cli.py), les
@@ -267,20 +267,18 @@ devant llama.cpp (0,601 contre 0,700 J/jeton net). À b=12 la spéculation n'est
 (garde `lot_max=2`) : cette cellule-là était déjà à armes égales.
 
 ² 23/09, même séance, même client HTTP (`banc-llamacpp-16-09.py` contre `acvram serve` et
-`vllm serve`), `-lgc 2700` posé explicitement autour de chaque bras (horloges 2 649-2 668 MHz),
-cellule alternée X Y Y X (revue/poste2-piece64-23-09.md). acvram 0.6.36 (experts MoE sur
-tensor cores par défaut aux lots ≥ 8). **vLLM est devant de 9,1 % en débit et de 7,1 % en
-J/jeton.**
+`vllm serve`), `-lgc 2700` posé explicitement autour de chaque bras, cellule alternée A V V A
+(revue/poste2-piece78-rejeu64-vllm-b1-23-09.md). acvram 0.6.37 (experts MoE sur tensor cores aux lots
+≥ 8). **vLLM est devant de 4,9 % en débit et de 6,4 % en J/jeton.** Une première cellule le matin même
+(revue/poste2-piece64-23-09.md) donnait 9,1 % : même moteur, écart attribué à la variance de séance.
 
-³ 23/09, même séance et même protocole que ² (ABAB, `-lgc 2700` des deux côtés, horloges
-2 656-2 672 MHz, aucun bridage ; revue/poste2-piece67-vllm-b1-23-09.md), sans spéculation des
-deux côtés : acvram 294,7 (split-K du GEMV experts, `ACVRAM_GEMV_SPLITK=1`, défaut à partir de
-0.6.37) contre vLLM 291,4 — **égalité** (écart 1,1 %, sous le seuil de 2 %).
+³ 23/09, même séance que ², ABAB, sans spéculation des deux côtés : acvram 311,2 (split-K du GEMV
+experts et routage réécrit, défauts de 0.6.37) contre vLLM 284,5 — **acvram devant de 9,4 % en
+débit**, énergie à égalité (écart 1,6 %, sous le seuil de 2 %).
 
 ⁴ 23/09, même protocole contre llama.cpp (revue/poste2-piece72-llamacpp-b1-23-09.md), acvram 0.6.37 avec
 le routage réécrit (+5,6 %) : acvram 310,8 contre llama.cpp 329,9 t/s — **llama.cpp devant de 5,8 %
-en débit, acvram devant de 13,4 % en J/jeton** (0,598 contre 0,691). vLLM (291,4) a été mesuré avant
-ce routage ; la comparaison directe avec 310,8 reste à faire dans une même séance.
+en débit, acvram devant de 13,4 % en J/jeton** (0,598 contre 0,691).
 
 Débits du jour (poste 1030, régime éco `-lgc 2700`, pipeline en service ;
 échantillonnage glouton capturé dans le graphe CUDA, défaut de 0.6.35). Le b=12
@@ -305,10 +303,11 @@ mesure, l'instrument et son régime — un chiffre sans régime n'est pas publi�
 Où acvram est devant : modèles MLA (GLM-4.7-Flash) en NVFP4 natif sm_120, que
 vLLM ne sert qu'en FP8 (b=1 : 165,35 t/s en service) ; les modèles qui ne
 tiennent pas en VRAM . Le décodage à séquence unique n'en fait pas partie : sans spéculation, acvram y est
-derrière llama.cpp de 5,8 % en débit mais devant de 13,4 % en énergie (notes ³ ⁴). À grand lot, sur un MoE qui tient en VRAM, vLLM
-reste devant à b=12 (1 999,0 contre 1 831,7 t/s, et 7,1 % de J/jeton en moins, même
-séance et même instrument, note ²) ; acvram y a progressé (1 540 en 0.6.34 → 1 831,7 en
-0.6.36) sans passer devant.
+devant vLLM de 9,4 % (note ³), derrière llama.cpp de 5,8 % en débit mais devant lui de 13,4 % en
+énergie (note ⁴). À grand lot, sur un MoE qui tient en VRAM, vLLM
+reste devant à b=12 (2 014,3 contre 1 916,1 t/s, et 6,4 % de J/jeton en moins, même
+séance et même instrument, note ²) ; acvram y a progressé (1 540 en 0.6.34 → 1 916,1 en
+0.6.37) sans passer devant.
 
 ## État
 

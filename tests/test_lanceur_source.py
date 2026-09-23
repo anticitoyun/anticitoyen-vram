@@ -64,3 +64,21 @@ def test_a_sec_ne_lance_rien(poste):
     _run(poste)
     ps = subprocess.run(["pgrep", "-af", "acvram-essai"], capture_output=True, text=True).stdout
     assert "serve" not in ps, ps
+
+
+def test_garde_vram_dit_nvidia_smi_absent(poste, tmp_path):
+    """nvidia-smi absent du PATH : la garde le DIT (une ligne), ne passe plus en silence."""
+    modele = tmp_path / "Modele-nvfp4"  # créé par la fixture avec config.json = {}
+    (modele / "config.json").write_text(
+        '{"num_hidden_layers": 28, "num_key_value_heads": 8, "num_attention_heads": 32, "hidden_size": 4096}')
+    bindir = tmp_path / "bin-sans-nvidia-smi"; bindir.mkdir()
+    # le PATH réduit garde tout ce dont le lanceur a besoin, bash et env compris (shebang), sauf nvidia-smi
+    import shutil
+    for outil in ("bash", "env", "grep", "cut", "sed", "tr", "head", "cat", "dirname", "readlink",
+                  "python3", "curl", "ss", "awk"):
+        cible = shutil.which(outil)
+        if cible:
+            (bindir / outil).symlink_to(cible)
+    r = _run(poste, PATH=str(bindir))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "nvidia-smi introuvable — garde VRAM inactive" in r.stdout, r.stdout
