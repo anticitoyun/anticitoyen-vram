@@ -81,3 +81,85 @@ usage)` identique au chemin servi sur les mêmes logits, sur au moins 200 tirage
 dont des égalités exactes construites exprès. Test cassant, et la faute
 réintroduite une fois (départage vers l'indice le plus **haut**) doit le faire
 échouer — sinon ce n'est pas un test d'équivalence.
+
+## Mesure et correctif — 23/09, quatre prises courtes en alternance avec poste5
+
+### D'abord une faute d'instrument, dite avant les chiffres
+
+Le premier banc chronométrait **un** lancement par graphe : le bras `vide`
+rendait 4,77 µs et le bras `probs` sortait **au-dessus** du noyau complet, ce
+qui est impossible. `Event … g.replay() … Event` mesurait la latence de rejeu,
+pas ce que le pas paie — dans le pas, le noyau est un nœud parmi d'autres d'un
+graphe déjà lancé. Corrigé par 200 lancements **dans** le graphe, divisés :
+le plancher tombe à 0,38 µs et tout redevient cohérent. Les chiffres ci-dessous
+sont ceux du banc corrigé.
+
+### Décomposition (T = 1, E = 128, k = 8, 100 rejeux × 200 lancements)
+
+| bras | µs | lecture |
+|---|---|---|
+| `vide` (nœud de graphe) | **0,38** | le plancher : **R1 RÉFUTÉE** |
+| `probs` (softmax + somme) | 0,75 | +0,37 : **R2 RÉFUTÉE**, le softmax ne coûte rien |
+| `servi` (num_warps=1) | **4,54** | la sélection pèse **3,79 µs, 83 % du noyau** |
+| `warps4` / `warps8` | 5,40 / 5,56 | **R3 TENUE** : plus de warps est PIRE |
+
+Puis deux témoins qui isolent la cause **dans** la sélection :
+
+| témoin | µs | écart |
+|---|---|---|
+| référence (atomiques et stores en boucle) | 4,56 | — |
+| **sans les k `atomic_add` de la boucle** | **2,00** | **−2,56 µs** |
+| stores groupés hors boucle | 4,55 | −0,02 (rien) |
+
+**La cause est nommée : les k `tl.atomic_add` étaient dans la boucle de
+sélection, donc sérialisés derrière elle — 2,56 µs sur 4,56, 56 % du noyau.**
+Les stores, eux, ne coûtent rien et restent en place.
+
+### Correctif, au bit par construction
+
+Un seul atomique vectorisé après la boucle (`route_prep.py:105`) : les indices
+élus sont gardés en registres (`ti`), et `tl.atomic_add(usage_ptr + ti, 1,
+mask=mj & (v != 0))` les compte d'un coup. **L'addition entière est commutative
+et associative, et les k experts d'un jeton sont distincts par construction**
+(chaque passe retire l'élu de `sel`) : aucune collision ne se joue sur l'ordre.
+`probs`, la sélection, `topi`, `topw` et `eid` sont inchangés, ligne pour ligne.
+
+| | avant | après | écart |
+|---|---|---|---|
+| noyau servi (banc) | 4,54 µs | **2,32 µs** | **−2,22 µs, −49 %** |
+| sur 48 couches | — | — | **−107 µs/pas** |
+
+**A1 s'est déclenchée et elle avait raison** : le banc rend 4,54 µs là où la
+trace nsys du service en donne 6,3 (−28 %) — pas de contention, cache chaud,
+200 lancements du même noyau. La **décomposition** reste valide (les quatre
+bras partagent ce biais), mais **l'absolu ne l'est pas** : si le rapport se
+conserve, le gain dans le service est **≈ −148 µs/pas** ; seule une trace nsys
+b = 1 après correctif le dira. Je publie les deux et je ne choisis pas le plus
+flatteur. La fourchette de chef (−80 à −110) est tenue au banc ; la mienne
+(−120 à −170) ne l'est qu'à l'échelle nsys, et je le dis.
+
+### Le test d'équivalence ne mordait pas — trou trouvé et bouché
+
+La faute annoncée au contrat (départage vers l'indice le plus **haut**) ne
+faisait tomber **qu'un seul** test, et pas celui de l'équivalence : les égalités
+fabriquées de `test_f2_route_fusee_egale_moe_route` sont **hors du top-k**,
+donc elles ne jugeaient rien depuis le 17/09. Deux tests ajoutés où les ex-aequo
+**sont** les plus grands (six experts à égalité parfaite, k = 4 ; puis cinq
+ex-aequo par jeton sur cinq jetons, avec biais et sigmoïde).
+
+Vérification que les tests peuvent rendre « faux », deux fautes posées une à une :
+
+* **masque `jj < K` oublié** dans l'atomique groupé — la faute la plus
+  silencieuse (elle ne change ni `topi` ni `topw`, seulement le compte
+  d'usage) : **16 échecs sur 39** ;
+* **départage vers l'indice le plus haut** : **3 échecs** (1 seul avant que je
+  bouche le trou).
+
+39 verts sur l'arbre propre, 0,96 s, sous le verrou de la carte.
+
+## Reste
+
+Une trace nsys b = 1 du service après correctif, pour le chiffre publiable du
+pas (la chaîne existe : `scratchpad/poste5-p66-23-09/chaine.sh`, `familles-b1.py`).
+Elle ne m'appartient pas : poste5 ou poste2 la jouent dans une fenêtre qu'elles
+tiennent déjà, et le chiffre du banc (−107 µs) sert de prédiction à réfuter.
