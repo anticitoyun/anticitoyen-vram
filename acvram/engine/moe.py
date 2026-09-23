@@ -939,16 +939,21 @@ class MoEBlock(nn.Module):
             uns = self._marlin_uns(G, x.device)
             xs_m = xs if xs.shape[1] == mg[3] else F.pad(xs, (0, mg[3] - xs.shape[1]))
             w13 = self._stacks_marlin.get("w13")
-            if w13 is not None:                      # pièce 82 : une GEMM gate‖up, échelle d up dans moe_act
+            if w13 is not None:
+                # Pièce 82 ter : au préfill, gate et up sont lues DANS w13 par deux GEMM de largeur N (vues de
+                # colonnes, largeur stockée 2N). Le Marlin découpe K selon prob_n (82 bis) : une GEMM de 2N ne
+                # serait pas au bit des deux GEMM de N, et la KL de fin de préfill le montrait (82 : 0,41 → 0,93).
+                # Mêmes octets, même découpe : au bit du chemin séparé. Seul le décodage tensor garde la GEMM 2N.
                 n = w13[1].shape[2] // 2
-                c13 = MP.gemm_moe(xs_m.contiguous(), w13[0], w13[1], w13[2], s_ids, e_ids, n_post, uns, bloc, 1, G, 2 * n, mg[3], ws)
-                act = kernels.get_extension().moe_act(c13[:, :n], c13[:, n:], pg[5], pd[4], 0 if self.act != "gelu_tanh" else 1,
-                                                      None, e_sorted.to(torch.int32).contiguous(), w13[7], w13[6])
+                bg = (w13[0][:, :, :2 * n], w13[1][:, :, :n], w13[2])
+                bu = (w13[0][:, :, 2 * n:], w13[1][:, :, n:], w13[3])
             else:
-                g = MP.gemm_moe(xs_m.contiguous(), mg[0], mg[1], mg[2], s_ids, e_ids, n_post, uns, bloc, 1, G, mg[1].shape[2], mg[3], ws)
-                xu_m = xs_m if xs_u is xs else (xs_u if xs_u.shape[1] == mu[3] else F.pad(xs_u, (0, mu[3] - xs_u.shape[1]))).contiguous()
-                u = MP.gemm_moe(xu_m, mu[0], mu[1], mu[2], s_ids, e_ids, n_post, uns, bloc, 1, G, mu[1].shape[2], mu[3], ws)
-                act = _activation(g, u, pg[5], pd[4])
+                n = mg[1].shape[2]
+                bg, bu = mg[:3], mu[:3]
+            g = MP.gemm_moe(xs_m.contiguous(), *bg, s_ids, e_ids, n_post, uns, bloc, 1, G, n, mg[3], ws)
+            xu_m = xs_m if xs_u is xs else (xs_u if xs_u.shape[1] == mu[3] else F.pad(xs_u, (0, mu[3] - xs_u.shape[1]))).contiguous()
+            u = MP.gemm_moe(xu_m, *bu, s_ids, e_ids, n_post, uns, bloc, 1, G, n, mu[3], ws)
+            act = _activation(g, u, pg[5], pd[4])
             d = MP.gemm_moe(act, md[0], md[1], md[2], s_ids, e_ids, n_post, uns, bloc, 1, G, md[1].shape[2], md[3], ws)
         elif direct:
             self._chemin('direct')
@@ -1915,9 +1920,11 @@ def forme_tensor_refus(formats, K: int, N_gu: int, N_d: int, E: int, awq_unite: 
 _MOE_TENSOR_FUSION = os.environ.get("ACVRAM_MOE_TENSOR_FUSION", "1") == "1"
 # Pièce 82 (23/09, revue/poste1-piece82-w13-chemin-tensor-23-09.md) : gate·up en UNE pile Marlin w13 (disposition
 # unique : gate et up sont rendues, même nombre d octets — la 71 bis ajoutait w13 à côté, +8,9 Go, hors mémoire).
-# Décodage tensor et préfill : une GEMM w13 à l échelle globale de gate, l échelle d up corrigée dans moe_act
-# (g_up/g_gate) — un arrondi bf16 de plus sur up : sortie au 2⁻⁷, PAS au bit, d où l opt-in. GEMV (godets < MIN_T,
-# b = 1) : `nvfp4_gemv_marlin_w13` lit gate et up dans w13 avec leurs échelles propres — au bit du chemin séparé.
+# Décodage tensor : une GEMM w13 à l échelle globale de gate, l échelle d up corrigée dans moe_act
+# (g_up/g_gate) — un arrondi bf16 de plus sur up et une autre découpe de K : sortie au 2⁻⁷, PAS au bit. GEMV (godets
+# < MIN_T, b = 1) : `nvfp4_gemv_marlin_w13` lit gate et up dans w13 avec leurs échelles propres — au bit du chemin
+# séparé. Préfill (pièce 82 ter) : deux GEMM de largeur N sur des vues de w13 (largeur stockée `ldn` du port) — au
+# bit du chemin séparé ; la 82 y perdait la KL de fin de préfill.
 _MOE_W13 = os.environ.get("ACVRAM_MOE_W13", "0") == "1"
 
 

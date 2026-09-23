@@ -353,7 +353,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                bool has_act_order, bool is_k_full, bool has_zp, int num_groups,
                int group_size, int dev, cudaStream_t stream, int thread_k,
                int thread_n, int sms, int blocks_per_sm, bool use_atomic_add,
-               bool use_fp32_reduce, bool is_zp_float) {
+               bool use_fp32_reduce, bool is_zp_float, int ldn) {
   int thread_m_blocks = div_ceil(moe_block_size, 16);
   bool m_block_size_8 = moe_block_size == 8;
   bool is_a_8bit = a_type.size_bits() == 8;
@@ -534,7 +534,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
       A_ptr, B_ptr, C_ptr, C_tmp_ptr, bias_ptr, a_s_ptr, b_s_ptr, g_s_ptr, zp_ptr, g_idx_ptr,
       sorted_token_ids_ptr, expert_ids_ptr, num_tokens_past_padded_ptr,
       topk_weights_ptr, top_k, mul_topk_weights, num_groups, prob_m,
-      prob_n, prob_k, locks, has_bias, use_atomic_add, use_fp32_reduce);
+      prob_n, prob_k, locks, has_bias, use_atomic_add, use_fp32_reduce, ldn);
   // clang-format on
 }
 
@@ -664,10 +664,17 @@ torch::stable::Tensor moe_wna16_marlin_gemm(
   STD_TORCH_CHECK(a.is_contiguous(), "A is not contiguous");
 
   STD_TORCH_CHECK(b_q_weight.device().is_cuda(), "b_q_weight is not on GPU");
-  STD_TORCH_CHECK(b_q_weight.is_contiguous(), "b_q_weight is not contiguous");
-
   STD_TORCH_CHECK(b_scales.device().is_cuda(), "b_scales is not on GPU");
-  STD_TORCH_CHECK(b_scales.is_contiguous(), "b_scales is not contiguous");
+  // acvram (pièce 82 ter) : B et ses échelles peuvent être une VUE de colonnes d'une pile plus large (moitié gate
+  // ou up de w13) — lignes de tuiles contiguës, pas de ligne `ldn` (largeur stockée) commun aux deux tenseurs,
+  // experts empilés sans trou. Un tenseur contigu donne ldn = size_n : le chemin d'avant, octet pour octet.
+  int ldn = (int)(b_q_weight.stride(1) / MARLIN_NAMESPACE_NAME::tile_size * pack_factor);
+  STD_TORCH_CHECK(b_q_weight.stride(2) == 1 && ldn >= size_n &&
+                      b_q_weight.stride(0) == b_q_weight.size(1) * b_q_weight.stride(1),
+                  "b_q_weight : lignes non contiguës ou experts non empilés");
+  STD_TORCH_CHECK(b_scales.stride(2) == 1 && b_scales.stride(1) == ldn &&
+                      b_scales.stride(0) == b_scales.size(1) * b_scales.stride(1),
+                  "b_scales : largeur stockée ", b_scales.stride(1), " != celle de b_q_weight ", ldn);
 
   torch::stable::Tensor a_scales;
   constexpr auto kFloat = torch::headeronly::ScalarType::Float;
@@ -888,7 +895,7 @@ torch::stable::Tensor moe_wna16_marlin_gemm(
       a_type, b_type, c_type, s_type, has_bias, has_act_order, is_k_full,
       has_zp, num_groups, group_size, dev, get_current_cuda_stream(dev),
       thread_k, thread_n, sms, blocks_per_sm, use_atomic_add, use_fp32_reduce,
-      is_zp_float);
+      is_zp_float, ldn);
 
   return c;
 }

@@ -116,3 +116,44 @@ def test_tensor_w13_au_2_moins_7_du_separe(b):
     faux = dict(fus); w = list(fus["w13"]); w[6] = torch.ones_like(w[6]); faux["w13"] = tuple(w)
     hors_f, _ = _hors(_tensor(MP, ext, faux, x, eid), ref, eid)
     assert hors_f > 0, "témoin négatif non vu : le critère ne peut pas rendre faux"
+
+
+@pytest.mark.parametrize("t", [1, 16, 256, 3072])
+def test_prefill_w13_vues_au_bit_du_separe(t):
+    """Pièce 82 ter : au préfill, gate et up lues dans w13 par des VUES de colonnes (largeur stockée 2N, `ldn` du
+    port) rendent les mêmes bits que les GEMM sur les piles séparées — même découpe de K (prob_n = N). Casse si
+    `ldn` est ignoré (la vue lirait les mauvaises colonnes) ou si la GEMM 2N de la 82 revient au préfill."""
+    kernels, MP, ext, banc = _charger()
+    dev = torch.device("cuda", 0)
+    marlin = _piles(MP, banc, dev)
+    w13 = _w13(marlin)
+    g0 = torch.Generator(device="cpu").manual_seed(91 + t)
+    topi = torch.stack([torch.randperm(E, generator=g0)[:TOPK] for _ in range(t)]).to(dev)
+    e_sorted, _ = torch.sort(topi.reshape(-1))
+    G = e_sorted.numel()
+    xs = (torch.randn(G, K, generator=g0) * 0.5).to(torch.bfloat16).to(dev).contiguous()
+    bloc = MP.choisir_block_size(t, TOPK, E)
+    s_ids, e_ids, n_post = MP.aligner_blocs(e_sorted.to(torch.int32).unsqueeze(1), bloc, E)
+    ws = MP.espace_travail(dev, 4)
+    uns = torch.ones(G, 1, dtype=torch.float32, device=dev)
+    for nom, vue in (("gate_proj", (w13[0][:, :, :2 * I], w13[1][:, :, :I], w13[2])),
+                     ("up_proj", (w13[0][:, :, 2 * I:], w13[1][:, :, I:], w13[3]))):
+        assert not vue[0].is_contiguous()
+        sep = MP.gemm_moe(xs, *marlin[nom][:3], s_ids, e_ids, n_post, uns, bloc, 1, G, I, K, ws)
+        v = MP.gemm_moe(xs, *vue, s_ids, e_ids, n_post, uns, bloc, 1, G, I, K, ws)
+        assert torch.equal(v, sep), (nom, t, (v.float() - sep.float()).abs().max().item())
+
+
+def test_gemm_marlin_refuse_une_vue_d_echelles_desaccordee():
+    """Une vue de B de largeur stockée 2N avec des échelles CONTIGUËS (largeur N) : refus nommé, pas une lecture fausse."""
+    kernels, MP, ext, banc = _charger()
+    dev = torch.device("cuda", 0)
+    marlin = _piles(MP, banc, dev)
+    w13 = _w13(marlin)
+    t, G = 1, TOPK
+    e_sorted = torch.arange(TOPK, dtype=torch.int32, device=dev)
+    xs = torch.randn(G, K, device=dev).to(torch.bfloat16)
+    s_ids, e_ids, n_post = MP.aligner_blocs(e_sorted.unsqueeze(1), 8, E)
+    with pytest.raises(Exception, match="largeur stockée"):
+        MP.gemm_moe(xs, w13[0][:, :, :2 * I], marlin["gate_proj"][1], w13[2], s_ids, e_ids, n_post,
+                    torch.ones(G, 1, device=dev), 8, 1, G, I, K, MP.espace_travail(dev, 4))

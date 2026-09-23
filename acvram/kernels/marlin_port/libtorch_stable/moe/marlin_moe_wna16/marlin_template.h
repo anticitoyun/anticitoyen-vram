@@ -77,7 +77,8 @@ __global__ void Marlin(
     int prob_k,             // reduction dimension k
     int* locks,             // extra global storage for barrier synchronization
     bool use_atomic_add,    // whether to use atomic add to reduce
-    bool use_fp32_reduce    // whether to use fp32 global reduce
+    bool use_fp32_reduce,   // whether to use fp32 global reduce
+    int ldn                 // acvram : largeur stockée de B (= prob_n si contigu)
 ) {}
 
 }  // namespace MARLIN_NAMESPACE_NAME
@@ -279,7 +280,8 @@ __global__ void Marlin(
     int* locks,             // extra global storage for barrier synchronization
     bool has_bias,
     bool use_atomic_add,  // whether to use atomic add to reduce
-    bool use_fp32_reduce  // whether to use fp32 global reduce
+    bool use_fp32_reduce,  // whether to use fp32 global reduce
+    int ldn                // acvram (pièce 82 ter) : largeur stockée de B et de ses échelles
 ) {
   // Each threadblock processes one "stripe" of the B matrix with (roughly) the
   // same size, which might involve multiple column "slices" (of width 16 *
@@ -375,8 +377,11 @@ __global__ void Marlin(
   static_assert(thread_m_blocks == 1 || !m_block_size_8);
   const int group_size =
       (!has_act_order && group_blocks == -1) ? prob_k : prob_k / num_groups;
+  // acvram (pièce 82 ter) : `ldn` = largeur STOCKÉE d'une ligne de tuiles de B et de ses échelles (= prob_n pour
+  // un tenseur contigu). Elle ne sert qu'aux adresses ; le découpage du travail (n_tiles, découpe de K) reste
+  // porté par prob_n, donc une GEMM qui lit la moitié gate de w13 (ldn = 2N) est au bit de la GEMM gate seule.
   const int scales_expert_stride =
-      prob_n * prob_k / group_size / (is_8bit_scale ? 16 : 8);
+      ldn * prob_k / group_size / (is_8bit_scale ? 16 : 8);
   const int zp_expert_stride =
       is_zp_float ? prob_n * prob_k / group_size / 8
                   : prob_n * prob_k / group_size / (pack_factor * 4);
@@ -546,7 +551,7 @@ __global__ void Marlin(
       global_scale_f32 = global_scale_ptr[expert_id];
     }
 
-    B_expert_off = expert_id * prob_n * prob_k / (pack_factor * 4);
+    B_expert_off = expert_id * ldn * prob_k / (pack_factor * 4);
     scales_ptr += (expert_id - old_expert_id) * scales_expert_stride;
     if constexpr (has_zp) {
       zp_ptr += (expert_id - old_expert_id) * zp_expert_stride;
@@ -682,7 +687,7 @@ __global__ void Marlin(
   constexpr int a_sh_wr_iters = div_ceil(a_sh_stage, a_sh_wr_delta);
 
   // B sizes/strides
-  int b_gl_stride = 16 * prob_n / (pack_factor * (is_a_8bit ? 2 : 4));
+  int b_gl_stride = 16 * ldn / (pack_factor * (is_a_8bit ? 2 : 4));
   constexpr int b_sh_stride =
       ((thread_n_blocks * 16) * 16 / pack_factor) / (is_a_8bit ? 2 : 4);
   constexpr int b_thread_vecs = b_type.size_bits() == 4 ? 1 : 2;
@@ -695,7 +700,7 @@ __global__ void Marlin(
   constexpr int b_sh_wr_iters = b_sh_stage / b_sh_wr_delta;
 
   // Scale sizes/strides without act_order
-  int s_gl_stride = prob_n / (is_8bit_scale ? 16 : 8);
+  int s_gl_stride = ldn / (is_8bit_scale ? 16 : 8);
   constexpr int s_sh_stride = 16 * thread_n_blocks / (is_8bit_scale ? 16 : 8);
   constexpr int s_tb_groups =
       !has_act_order && group_blocks != -1 && group_blocks < thread_k_blocks
