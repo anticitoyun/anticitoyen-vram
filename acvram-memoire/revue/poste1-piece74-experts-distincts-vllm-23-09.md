@@ -53,3 +53,32 @@ presque identique.
 * **alarme** : si le crochet n'est appelé qu'avec M ≠ 12 (lots fusionnés,
   préfill mêlé au décodage), la moyenne ne porte pas sur le régime servi et je
   le dis au lieu d'agréger des régimes différents.
+
+## État à la pause du 23/09 08 h 2x — un bras sur deux, et ce qu'il dit déjà
+
+* **acvram : 32,46 experts distincts par couche** (moyenne sur **1 968 appels à
+  M = 12** ; médiane 32, min 22, max 56 ; 96 appels hors b comptés à part et
+  non agrégés, comme prévu). Alias `Qwen3-Coder-30B-A3B-nvfp4`, b = 12, 40 pas,
+  ids d'invite déterministes. Carte rendue, compute-apps de fin = llama-server
+  seul (autre carte).
+* **I4 écartée** : mes 32,46 contre les 33,5 de poste5 (`poste5-p60`, invites du
+  client de cellule) = **−3,1 %**, sous mon seuil de 5 %. Les deux protocoles
+  coïncident, donc mon comptage est comparable au sien et le chiffre d'octets
+  de la 73 (88,6 Mo/couche) reposait sur une base saine.
+* **vLLM : pas de chiffre.** Deux mises en route ratées, toutes deux nommées :
+  1. le crochet ne voyait rien — vLLM lance un sous-processus `EngineCore` et
+     le monkeypatch du processus parent ne l'atteint jamais. Corrigé par
+     `VLLM_ENABLE_V1_MULTIPROCESSING=0` ;
+  2. avec les graphes, la capture échoue (`cudaErrorStreamCaptureInvalidated`) ;
+     avec `enforce_eager=True`, vLLM exige **FlashInfer**, absent de ce venv.
+     Non corrigé à la pause.
+
+## Prochaine étape, à la reprise (dans l'ordre)
+
+1. Bras vLLM : garder `VLLM_ENABLE_V1_MULTIPROCESSING=0`, **retirer**
+   `enforce_eager` et poser `VLLM_ATTENTION_BACKEND=FLASH_ATTN` (ou installer
+   FlashInfer, ce qui touche l'installation : à ne pas faire sans ordre) ; si la
+   capture échoue encore, baisser `gpu_memory_utilization` à 0,70.
+2. Conclure entre I1, I2 et I3 avec le seuil de 5 % déjà écrit. **Aucune
+   conclusion sur la 73 avant ce chiffre** : tant que le bras vLLM manque, le
+   « 1,67 To/s » reste non requalifié, ni confirmé ni infirmé.
