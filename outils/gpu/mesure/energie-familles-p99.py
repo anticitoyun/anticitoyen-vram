@@ -159,7 +159,7 @@ def famille_proj(mode: str, w_repos: float) -> dict:
 def main() -> int:
     mode, dossier, sortie = sys.argv[1], sys.argv[2], sys.argv[3]
     assert mode in ("acvram", "vllm"), mode
-    res = {"mode": mode, "torch": torch.__version__, "duree_s": DUREE, "cwd": os.getcwd(), "repos": repos()}
+    res = {"mode": mode, "torch": torch.__version__, "duree_s": DUREE, "cwd": os.path.relpath(os.getcwd(), os.path.expanduser("~")), "repos": repos()}
     print(f"repos {res['repos']}", flush=True)
     w0 = res["repos"]["W"]
     res["proj"] = famille_proj(mode, w0)
@@ -170,7 +170,7 @@ def main() -> int:
               f"{f['mJ_net_appel']:.4f} mJ net/couche  horloge {f['horloge_med']}", flush=True)
     if mode == "acvram":
         import acvram
-        res["acvram_file"] = acvram.__file__
+        res["acvram_file"] = os.path.relpath(acvram.__file__, os.path.expanduser("~"))
         if not os.path.realpath(acvram.__file__).startswith(os.path.realpath(R) + os.sep):
             raise SystemExit(f"acvram importé de {acvram.__file__}, pas de l'arbre {R}")
     else:
