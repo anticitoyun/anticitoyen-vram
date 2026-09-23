@@ -47,7 +47,9 @@ SORTIE = sys.argv[1]
 B = int(sys.argv[2]) if len(sys.argv) > 2 else 12
 N_PAS = int(sys.argv[3]) if len(sys.argv) > 3 else 300
 MODEL = os.environ.get("ACVRAM_MODELE_MESURE", _racine_modeles() + "/Qwen3-Coder-30B-A3B-nvfp4")
-CTX, PROMPT_LEN, CHAUFFE = 2048, 256, 30
+# FRONTIERE_CTX / FRONTIERE_INVITE (pièce 104 § 5 : frontière à ctx 8 k) ; défaut 2048 / 256 inchangé
+CTX = int(os.environ.get("FRONTIERE_CTX", "2048"))
+PROMPT_LEN, CHAUFFE = int(os.environ.get("FRONTIERE_INVITE", "256")), 30
 
 if not torch.cuda.is_available():
     sys.exit("frontiere-pas : carte requise (sous outils/carte.sh)")
