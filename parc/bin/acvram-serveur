@@ -82,11 +82,17 @@ try:
     free_gib = free_bytes / (1024**3)
     if kv_bytes > free_bytes:
         print(f'KV estimé {kv_gib:.1f} Gio (ctx={ctx}), VRAM libre {free_gib:.1f} Gio — insuffisant')
+except FileNotFoundError:
+    print('INFO:nvidia-smi introuvable — garde VRAM inactive')
 except Exception:
     pass
 PYEOF
 )
-[ -n "$_vram_verdict" ] && { err "Alias refusé : $_vram_verdict"; exit 1; }
+case "$_vram_verdict" in
+    INFO:*) echo "acvram : ${_vram_verdict#INFO:}" ;;
+    "") ;;
+    *) err "Alias refusé : $_vram_verdict"; exit 1 ;;
+esac
 
 # déjà servi ?
 servi=$(curl -s -m 2 "http://127.0.0.1:$PORT/v1/models" 2>/dev/null \
