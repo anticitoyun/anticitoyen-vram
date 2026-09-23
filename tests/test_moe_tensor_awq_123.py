@@ -186,3 +186,30 @@ def test_gemm_xs_noyau_egal_xs_torch(t, k):
     for sans in (appel(ext), appel(ext, awq_gu=tg), appel(ext, awq_d=td)):
         assert bool((d_noyau != sans).any(1)[reelles].all()), "une table AWQ sans effet sur une paire réelle"
     assert bool((d_noyau[t * k - k:] == 0).all()) and torch.isfinite(d_noyau.float()).all()
+
+
+# ---------------------------------------------------------------- opt-in (24/09, verdict-123quater-relatif) : défaut inchangé
+
+def test_awq_tensor_hors_defaut_sous_processus():
+    """Le défaut ne doit jamais porter les tables AWQ sur le tensor : casse si ACVRAM_AWQ_TENSOR passe à "1" par défaut."""
+    import os, subprocess
+    env = {k: v for k, v in os.environ.items() if k != "ACVRAM_AWQ_TENSOR"}
+    env["CUDA_VISIBLE_DEVICES"] = ""
+    r = subprocess.run([sys.executable, "-c", "import acvram.engine.moe as m; print(m._AWQ_TENSOR)"], env=env,
+                       capture_output=True, text=True, cwd=str(Path(__file__).resolve().parents[1]))
+    assert r.stdout.strip().splitlines()[-1] == "False", r.stdout + r.stderr
+
+
+def test_raison_tensor_refuse_awq_sans_opt_in(monkeypatch):
+    import acvram.engine.moe as moe
+    from acvram import kernels
+    from acvram.kernels import marlin_port as MP
+    monkeypatch.setattr(MP, "charger", lambda *a, **k: object())
+    monkeypatch.setattr(kernels, "get_extension", lambda: SimpleNamespace(moe_aligner_petit_xs=None))
+    table = torch.ones(128, 2048, dtype=torch.bfloat16)
+    bloc = SimpleNamespace(_stacks_marlin={"gate_proj": (0, 0, 0, 2048, 768), "down_proj": (0, 0, 0, 768, 2048)},
+                           _stacks_awq={"gate_proj": table, "up_proj": table, "up_distinct": False}, experts=[0] * 128)
+    monkeypatch.setattr(moe, "_AWQ_TENSOR", False)
+    assert "ACVRAM_AWQ_TENSOR" in moe.MoEBlock._raison_tensor(bloc)          # défaut : repli GEMV nommé
+    monkeypatch.setattr(moe, "_AWQ_TENSOR", True)
+    assert moe.MoEBlock._raison_tensor(bloc) == ""                            # opt-in : chemin tensor accepté

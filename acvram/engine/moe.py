@@ -436,7 +436,7 @@ class MoEBlock(nn.Module):
         return forme_tensor_refus({"nvfp4"}, mg[3], mg[4], md[4], len(self.experts),
                                   awq.get("gate_proj") is None and awq.get("up_proj") is None and awq.get("down_proj") is None,
                                   awq.get("hadamard", {}).get("down_proj", 0),
-                                  awq_fondue=ext is not None and hasattr(ext, "moe_aligner_petit_xs"),
+                                  awq_fondue=_AWQ_TENSOR and ext is not None and hasattr(ext, "moe_aligner_petit_xs"),
                                   awq_distinct=bool(awq.get("up_distinct")))
 
     def _construire_marlin(self, piles, awq, hadamard):
@@ -1294,7 +1294,7 @@ class MoEBlock(nn.Module):
         statique_ok = _MOE_TENSOR and marlin is not None and not self.__dict__["_tensor_refus"]
         # pièce 123 : tables AWQ (gate·up par paire, down par moe_act) portées par le chemin tensor si l'extension a
         # l'aligneur xs ; x_g doit rester x (une ligne par jeton : échelle gate·up pas encore appliquée en torch)
-        awq_tensor = ext is not None and hasattr(ext, "moe_aligner_petit_xs")
+        awq_tensor = _AWQ_TENSOR and ext is not None and hasattr(ext, "moe_aligner_petit_xs")
         tensor_ok = (statique_ok and not distinct and x_g.shape[0] >= _MOE_TENSOR_MIN_T
                      and x_g.dtype == torch.bfloat16
                      and ((ech_gu is None and awq.get("down_proj") is None) or awq_tensor)
@@ -1898,6 +1898,10 @@ _MOE_GEMV = os.environ.get("ACVRAM_MOE_GEMV", "v1")
 # Pièce 65 (23/09) : chemin tensor-core SERVI PAR DÉFAUT aux godets ≥ MOE_TENSOR_MIN_T (A5 poste2 : +12,2 % t/s,
 # −30 % J/jeton à b=12) ; =0 témoin GEMV scalaire partout.
 _MOE_TENSOR = os.environ.get("ACVRAM_MOE_TENSOR", "1") == "1"
+# Pièce 123 (24/09) : tables AWQ d'activation des experts portées par le chemin tensor (aligneur xs + moe_act),
+# OPT-IN seulement — FAUX au critère relatif S1b/i8c (verdict-123quater-relatif-24-09) : le défaut garde le refus
+# (S1b servi par le GEMV, au bit d'avant la 123). Jamais activé par un lanceur.
+_AWQ_TENSOR = os.environ.get("ACVRAM_AWQ_TENSOR", "0") == "1"
 # Pièce 65 mesuré (chaine-p65, Coder b=2/4/8/12, frontière 200 pas) : tensor +12,7 % à b=2, +9,5 % à b=4,
 # −4,3 % à b=8, −10,4 % à b=12 — le GEMV par paire gagne tant que les experts distincts sont peu nombreux
 # (bande passante), la GEMM groupée à partir de 8 jetons. Seuil par godet comme MOE_DECODE_MMA_MIN_T.
@@ -1923,7 +1927,7 @@ def forme_tensor_refus(formats, K: int, N_gu: int, N_d: int, E: int, awq_unite: 
     if not awq_unite and awq_distinct:
         return "tables AWQ gate/up distinctes (pièce 47 : un seul xs par paire, pas de w13)"
     if not awq_unite and not awq_fondue:
-        return "tables AWQ d activation par expert non unité (extension sans moe_aligner_petit_xs, pièce 123)"
+        return "tables AWQ d activation par expert non unité (ACVRAM_AWQ_TENSOR=1 non posé ou extension sans moe_aligner_petit_xs, pièce 123)"
     if hadamard_down:
         return f"rotation Hadamard ({hadamard_down}) de l entrée de down_proj (le chemin tensor ne la tourne pas)"
     return ""
