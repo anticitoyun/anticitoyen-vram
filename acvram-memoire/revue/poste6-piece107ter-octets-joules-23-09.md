@@ -57,3 +57,37 @@ réfutée** : le chemin nvfp4 étroit en service coûte 4 fois ce que son débit
 nvfp4 à N = 151 936, lancements, ou un chemin non capturé ; l'attribution est la pièce 118 (poste2 : i8c, S1b, S8, S4).
 Conséquence : la colonne « Δ ms » de la table ne vaut que pour les noyaux isolés ; aucun alias nvfp4-projections ne
 remplace i8c avant la 118, et le bilan « S1 ≈ énergie égale » est suspendu (il dépend du temps de la tête nvfp4).
+
+## Addendum 22 h 4x — S1b contre i8c (cellule 118 de poste2) : le coût AWQ des experts est du CALCUL, pas de l'octet
+
+Fait (118) : S1b 1 645,6 t/s, 0,1918 J/jeton contre i8c 1 995,0 t/s, 0,1358 J/jeton ; seule différence : les experts de A
+(AWQ calibré + alpha commun, tables d'activation non unité) contre ceux de i8c (sans AWQ, tables d'unité). Régime lu dans
+mes journaux KL : i8c `chemin_moe=…(atteint=gemv_marlin+marlin_tensor)`, `echelle_awq=aucune` ; S1b
+`(atteint=gemv_marlin)+tensor(b≥8, repli : tables AWQ d'activation par expert non unité …)`, `echelle_awq=gemv(48/48)`
+(`moe.py:1911`) : **à b=12, S1b ne prend pas le chemin tensor-core, il retombe sur le GEMV** (le bras A de la pièce 62 :
+1 596 t/s, 390 W bruts, horloge bridée ~2 490 MHz, contre le tensor 1 791 t/s, 320 W, 2 664 MHz).
+
+Décomposition (b=12, par pas de 12 jetons) :
+
+| | i8c (tensor) | S1b (GEMV + échelle AWQ) | Δ |
+|---|---|---|---|
+| ms/pas | 6,02 | 7,29 | **+1,28 (+21 %)** |
+| P nette moyenne (J/jeton × t/s) | 271 W | 316 W | **+45 W (+17 %)** |
+| J/pas | 1,63 | 2,30 | **+0,67 (+41 %)** |
+| octets experts par pas | 4,29 Go (nvfp4 4,5 bpw) | 4,29 Go + tables d'activation ≤ 0,05 Go | **≤ +1 %** |
+| débit mémoire effectif du MoE (4,29 Go / t_MoE) | 1,46 To/s (2,94 ms) | ≈ 1,0 To/s (≈ 4,2 ms) | −30 % |
+
+* **Octets : ≤ 0,013 J/pas** (0,05 Go × 37 pJ/bit), soit ≤ 2 % de l'écart. Les poids d'experts sont les mêmes octets.
+* **Calcul : ≈ 0,66 J/pas**, en deux parts qui se lisent avec la formule de la 99 (J = P_net × t) : (a) le pas dure
+  1,28 ms de plus à 316 W → **+0,40 J** (le GEMV lit les mêmes octets 30 % moins vite : dequant et échelle x/s sur les
+  cœurs CUDA au lieu des tensor cores) ; (b) sur les 6,0 ms d'origine, la carte tire 45 W de plus → **+0,27 J** (chemin
+  scalaire au plafond de puissance : 390 W bruts, horloge bridée — la 62 l'avait nommé « bridage »). Le pJ/bit du MoE passe
+  de ≈ 33 (tensor, 1,14 J pour 4,29 Go) à ≈ 52 (GEMV, ≈ 1,8 J) : c'est la signature d'un noyau qui n'est plus borné mémoire.
+* **Ce que la 123 d'poste1 (échelle AWQ fusionnée dans le chemin tensor, au bit) doit rendre, écrit avant** : S1b
+  **1 950-2 000 t/s et 0,134-0,140 J/jeton** (= i8c à 2 %) si l'échelle est portée par la quantification d'activation ou
+  les poids sans lancement de plus ; **1 900-1 950 et ≤ 0,145** si elle coûte un noyau élémentaire x/s par groupe
+  d'experts (+0,05-0,10 ms/pas, +0,02-0,03 J/pas). **Réfuté** (le coût AWQ ne serait pas le repli GEMV) si S1b-tensor
+  reste ≤ 1 850 t/s : alors l'échelle coûte dans le GEMM lui-même (lecture des tables par expert, 34 × 8 Ko par couche,
+  ou un chemin `alpha commun` gate/up qui refuse la pile w13).
+* Corollaire pour la 99 : le lever « octets » ne vaut que sur le chemin tensor ; tout alias AWQ d'experts servi sans la
+  123 rend +41 % de J/jeton, quelle que soit sa qualité.
