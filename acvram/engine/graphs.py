@@ -571,7 +571,8 @@ class GraphRunner:
             return False
         ql = batch.query_lens[0]
         if any(q_ != ql for q_ in batch.query_lens):
-            return False                      # longueurs mixtes : eager
+            self._eager("longueurs de requête mêlées dans le lot")   # compté (pièce 86)
+            return False
         if ql != 1 and not self.paged_ok:
             return False                      # la verification exige le noyau
         b_reel = batch.batch_size
