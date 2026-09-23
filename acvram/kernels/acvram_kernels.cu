@@ -4466,11 +4466,17 @@ void kv_write_int8_canal(torch::Tensor k, torch::Tensor v, torch::Tensor slots,
 }
 
 
+__device__ __forceinline__ float moe_vers_f32(float v) { return v; }
+__device__ __forceinline__ float moe_vers_f32(__nv_bfloat16 v) { return __bfloat162float(v); }
+
 // Réduction pondérée du MoE : les top_k lignes d'un jeton, multipliées par
 // leur poids de routage et sommées. Le chemin PyTorch demandait une
 // multiplication, une réduction et une conversion — trois lancements par
 // couche pour quelques kilooctets.
-__global__ void moe_reduce_kernel(const float *__restrict__ d,
+// Pièce 63 (23/09) : `d` en fp32 (GEMV) ou en bf16 (GEMM Marlin du chemin tensor) — la conversion
+// bf16 → fp32 est exacte et faite en registre, même ordre de somme : au bit contre `d.float()` + fp32.
+template <typename DT>
+__global__ void moe_reduce_kernel(const DT *__restrict__ d,
                                   const float *__restrict__ topw,
                                   __nv_bfloat16 *__restrict__ y,
                                   int M, int k) {
@@ -4479,22 +4485,95 @@ __global__ void moe_reduce_kernel(const float *__restrict__ d,
     if (col >= M) return;
     float s = 0.f;
     for (int e = 0; e < k; ++e)
-        s += topw[t * k + e] * d[((long)t * k + e) * M + col];
+        s += topw[t * k + e] * moe_vers_f32(d[((long)t * k + e) * M + col]);
     y[(long)t * M + col] = __float2bfloat16(s);
 }
 
 torch::Tensor moe_reduce(torch::Tensor d, torch::Tensor topw, int64_t k) {
     CHECK_CUDA(d); ACVRAM_DEVICE_GUARD(d);
     CHECK_CONTIG(d); CHECK_CONTIG(topw);
-    TORCH_CHECK(d.scalar_type() == torch::kFloat, "moe_reduce : sorties fp32");
+    TORCH_CHECK(d.scalar_type() == torch::kFloat || d.scalar_type() == torch::kBFloat16,
+                "moe_reduce : sorties fp32 ou bf16");
     const int M = d.size(1), T = d.size(0) / (int)k;
     auto y = torch::empty({T, M}, d.options().dtype(torch::kBFloat16));
     dim3 grid((M + 255) / 256, T);
-    moe_reduce_kernel<<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
-        d.data_ptr<float>(), topw.data_ptr<float>(),
-        reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), M, (int)k);
+    if (d.scalar_type() == torch::kFloat)
+        moe_reduce_kernel<float><<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+            d.data_ptr<float>(), topw.data_ptr<float>(),
+            reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), M, (int)k);
+    else
+        moe_reduce_kernel<__nv_bfloat16><<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+            reinterpret_cast<const __nv_bfloat16 *>(d.data_ptr()), topw.data_ptr<float>(),
+            reinterpret_cast<__nv_bfloat16 *>(y.data_ptr()), M, (int)k);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return y;
+}
+
+// Pièce 63 (23/09) : aligneur du chemin tensor en UN lancement, un bloc — remplace `eid.clamp` +
+// les deux noyaux `moe_align_block_size` de vLLM (0,7 + 2,6 + 0,8 µs par couche mesurés en service).
+// Entrées : eid [G] int32 (expert de chaque paire, −1 = fantôme → expert 0 sur une ligne nulle, poids 0
+// au reduce). Sorties (tampons fixes, capturables) : sorted_ids [P] (paires groupées par expert,
+// rembourrées par bloc à la sentinelle G, puis G jusqu à P), expert_ids [P/bloc] (−1 au-delà de
+// num_post), num_post [1]. Déterministe : la place d une paire est off[e] + son rang parmi les paires
+// de même expert (aucun atomique de dispersion) — l ordre à l intérieur d un bloc n influe pas sur la
+// sortie Marlin (chaque ligne accumule seule sur K), mais un tri stable rend les tampons comparables.
+__global__ void moe_aligner_petit_kernel(const int *__restrict__ eid, int G, int E, int bloc, int P,
+                                         int *__restrict__ sorted_ids, int *__restrict__ expert_ids,
+                                         int *__restrict__ num_post) {
+    // v2 (pièce 63/2) : préfixe par balayage de warp (plus de boucle sérielle sur E), eid en mémoire
+    // partagée, rembourrage écrit sur les seules positions libres (3 barrières au lieu de 5).
+    extern __shared__ int sh_aligneur[];
+    int *cnt = sh_aligneur;           // [E] paires par expert
+    int *off = sh_aligneur + E;       // [E] début (rembourré) de chaque expert
+    int *es = sh_aligneur + 2 * E;    // [G] expert de chaque paire, fantômes ramenés à 0
+    for (int e = threadIdx.x; e < E; e += blockDim.x) cnt[e] = 0;
+    __syncthreads();
+    for (int i = threadIdx.x; i < G; i += blockDim.x) { const int e = max(eid[i], 0); es[i] = e; atomicAdd(&cnt[e], 1); }
+    __syncthreads();
+    if (threadIdx.x < 32) {                       // warp 0 : préfixe exclusif des tailles rembourrées
+        const int par_lane = (E + 31) / 32;
+        const int e0 = threadIdx.x * par_lane;
+        int local = 0;
+        for (int e = e0; e < min(e0 + par_lane, E); ++e) local += ((cnt[e] + bloc - 1) / bloc) * bloc;
+        int inclus = local;
+        for (int d = 1; d < 32; d <<= 1) { const int v = __shfl_up_sync(0xffffffffu, inclus, d); if ((int)threadIdx.x >= d) inclus += v; }
+        int acc = inclus - local;
+        for (int e = e0; e < min(e0 + par_lane, E); ++e) { off[e] = acc; acc += ((cnt[e] + bloc - 1) / bloc) * bloc; }
+        if (threadIdx.x == 31) *num_post = inclus;
+    }
+    __syncthreads();
+    const int total = *num_post;
+    for (int e = threadIdx.x; e < E; e += blockDim.x) {          // par expert : experts par bloc et rembourrage
+        const int fin = off[e] + ((cnt[e] + bloc - 1) / bloc) * bloc;
+        for (int p = off[e]; p < fin; p += bloc) expert_ids[p / bloc] = e;
+        for (int p = off[e] + cnt[e]; p < fin; ++p) sorted_ids[p] = G;
+    }
+    for (int p = total + threadIdx.x; p < P; p += blockDim.x) sorted_ids[p] = G;
+    for (int b = total / bloc + threadIdx.x; b < P / bloc; b += blockDim.x) expert_ids[b] = -1;
+    for (int i = threadIdx.x; i < G; i += blockDim.x) {          // dispersion stable : rang parmi le même expert
+        const int e = es[i];
+        int rang = 0;
+        for (int j = 0; j < i; ++j) rang += (es[j] == e);
+        sorted_ids[off[e] + rang] = i;
+    }
+}
+
+void moe_aligner_petit(torch::Tensor eid, int64_t E, int64_t bloc,
+                       torch::Tensor sorted_ids, torch::Tensor expert_ids, torch::Tensor num_post) {
+    CHECK_CUDA(eid); ACVRAM_DEVICE_GUARD(eid);
+    CHECK_CONTIG(eid); CHECK_CONTIG(sorted_ids); CHECK_CONTIG(expert_ids);
+    TORCH_CHECK(eid.scalar_type() == torch::kInt && sorted_ids.scalar_type() == torch::kInt
+                && expert_ids.scalar_type() == torch::kInt && num_post.scalar_type() == torch::kInt,
+                "moe_aligner_petit : int32 partout");
+    const int G = (int)eid.numel(), P = (int)sorted_ids.numel();
+    TORCH_CHECK(P % bloc == 0 && P >= G + (E - 1) * (bloc - 1) && expert_ids.numel() * bloc >= P,
+                "moe_aligner_petit : tampons trop petits");
+    TORCH_CHECK(E <= 4096, "moe_aligner_petit : E > 4096");
+    const size_t shm = (2 * (size_t)E + (size_t)G) * sizeof(int);
+    moe_aligner_petit_kernel<<<1, 256, shm, at::cuda::getCurrentCUDAStream()>>>(
+        eid.data_ptr<int>(), G, (int)E, (int)bloc, P,
+        sorted_ids.data_ptr<int>(), expert_ids.data_ptr<int>(), num_post.data_ptr<int>());
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 // --------------------------------------------------------------------------
@@ -7659,7 +7738,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("wk") = c10::optional<torch::Tensor>(),
           py::arg("eps") = 1e-6);
     m.def("moe_reduce", &moe_reduce,
-          "MoE : ponderation et somme des top_k sorties d'un jeton");
+          "MoE : ponderation et somme des top_k sorties d'un jeton (d fp32 ou bf16)");
+    m.def("moe_aligner_petit", &moe_aligner_petit, py::arg("eid"), py::arg("E"), py::arg("bloc"),
+          py::arg("sorted_ids"), py::arg("expert_ids"), py::arg("num_post"),
+          "Pièce 63 : aligneur du chemin tensor en un lancement (fantômes −1 → expert 0), tampons fixes");
     m.def("moe_route", &moe_route, "routage MoE : scores, biais, top-k, poids");
     m.def("rmsnorm_bf16", &rmsnorm_bf16,
           "RMSNorm bf16 fusionnee (variance fp32), residu optionnel",

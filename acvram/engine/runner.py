@@ -790,7 +790,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         if os.environ.get("ACVRAM_GRAPHES_TABLE") == "0":
             chemin_moe += "+pile" if piles_ok else "+pile(désactivé)"
         if os.environ.get("ACVRAM_MOE_TENSOR", "0") == "1":                 # pièce 62 A4 : opt-in, nommé sur la ligne
-            chemin_moe += "+tensor"
+            chemin_moe += "+tensor" + ("" if os.environ.get("ACVRAM_MOE_TENSOR_FUSION", "1") == "1" else "-glue-a4")
 
         # `self.graphs` reste le MÊME OBJET après une capture ratée en cours
         # de service (`GraphRunner._capture` bascule `enabled=False` mais ne
