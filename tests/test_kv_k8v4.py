@@ -146,3 +146,25 @@ def test_variable_regime_documentee():
     from acvram import regime
     var = next(v for v in regime.VARIABLES if v.nom == "KV_FORMAT")
     assert re.search(r"k8v4", var.note)
+
+
+def test_graphes_paged_ok_admet_k8v4_et_le_repli_est_nomme():
+    """Revue poste1 (p104 v1) : `paged_ok` exigeait dtype == "int8" — en k8v4 la
+    vérification spéculative (q_len > 1) ne se capturait jamais, et `run()`
+    rendait False sans `_eager` nommé. Deux gardes : la source du prédicat porte
+    k8v4 (casse si l'on revient à "int8" seul) ; un lot spéculatif sans noyau
+    paginé est COMPTÉ et NOMMÉ par `_eager`."""
+    import inspect
+    from acvram.engine import graphs
+    src = inspect.getsource(graphs.GraphRunner._eligible)
+    assert 'cfg.dtype in ("int8", "k8v4")' in src
+
+    class Lot:
+        is_prefill = False
+        query_lens = [4, 4]
+        batch_size = 2
+    g = graphs.GraphRunner.__new__(graphs.GraphRunner)
+    g.enabled, g.paged_ok, g._raisons_eager_vues = True, False, set()
+    assert g.preparer(Lot()) is False
+    assert g.replis_eager == 1
+    assert any("spéculative" in r for r in g._raisons_eager_vues)

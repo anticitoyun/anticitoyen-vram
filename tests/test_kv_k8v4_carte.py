@@ -141,6 +141,29 @@ def test_attention_k8v4_suit_la_reference_fp32_a_2_moins_8(lens):
                 assert not out[b].float().any(), "un fantôme du godet doit rendre zéro"
 
 
+def test_q_len_4_verification_speculative_suit_la_reference():
+    """q_len = 4 : la requête qi d'une séquence de longueur n ne voit que les
+    n − 3 + qi premières positions (causalité) ; référence fp32 par qi."""
+    ext = _ext()
+    QL = 4
+    lens = [40, 7, 300]
+    c, tables, L, _ = _montage(lens, graine=11)
+    B = len(lens)
+    torch.manual_seed(12)
+    q = torch.randn(B * QL, HKV * N_REP, D, device="cuda").to(torch.bfloat16)
+    scale = 1 / math.sqrt(D)
+    for window in (0, 20):
+        out = _attention(ext, c, q, tables, L, scale, window, q_len=QL)
+        ref = torch.zeros_like(out, dtype=torch.float32)
+        for b, n in enumerate(lens):
+            k, v = c.gather(tables[b], n, torch.float32)
+            for qi in range(QL):
+                m = n - (QL - 1) + qi
+                ref[b * QL + qi] = kv_canal.attention_reference(q[b * QL + qi], k[:m], v[:m], scale, window)
+        hors, pire = _hors(out, ref)
+        assert hors == 0, f"q_len 4, fenêtre {window} : {hors} lignes hors 2^-8, pire {pire:.2f}"
+
+
 def test_lot_mele_delta_zero_et_reproductible_20x():
     ext = _ext()
     c, tables, L, q = _montage([37, 5, 21], graine=7)

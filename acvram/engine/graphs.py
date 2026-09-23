@@ -429,8 +429,10 @@ class GraphRunner:
         self.device = next(iter(devs))
         from .. import kernels
         c0 = m.caches.get(pleines[0]) if pleines else None
+        # k8v4 (pièce 104) : même noyau paginé (variante V4) — sans lui la
+        # vérification spéculative retomberait en eager sans le dire (revue poste1).
         self.paged_ok = (c0 is not None and c0.k_scale is not None
-                         and c0.cfg.dtype == "int8"
+                         and c0.cfg.dtype in ("int8", "k8v4")
                          and all(m.caches[i].cfg.head_dim in (32, 64, 128, 256, 512)
                                  for i in pleines)
                          and kernels.get_extension() is not None)
@@ -636,6 +638,7 @@ class GraphRunner:
             self._eager("longueurs de requête mêlées dans le lot")   # compté (pièce 86)
             return False
         if ql != 1 and not self.paged_ok:
+            self._eager("vérification spéculative sans noyau paginé")   # nommé (revue p104)
             return False                      # la verification exige le noyau
         b_reel = batch.batch_size
         b = godet_lot(b_reel)                 # ACVRAM_GODETS_B : godet ou lot exact

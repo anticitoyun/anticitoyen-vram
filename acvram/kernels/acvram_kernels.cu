@@ -4319,7 +4319,7 @@ __global__ void kv_write_k8v4_kernel(
             amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
         // échelle arrondie en half AVANT de quantifier (celle qui sera lue),
         // plancher 2^-24 = plus petit half non nul (jamais x / 0)
-        const float s = fmaxf(__half2float(__float2half(amax / 7.f)), 5.9604645e-8f);
+        const float s = fmaxf(__half2float(__float2half(__fdiv_rn(amax, 7.f))), 5.9604645e-8f);
         int q = __float2int_rn(__fdiv_rn(x, s));
         q = max(-7, min(7, q));
         const int voisin = __shfl_down_sync(0xffffffffu, q, 1);   // canal impair du même octet
