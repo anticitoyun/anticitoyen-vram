@@ -34,7 +34,7 @@ SEGMENTS = 16          # triton_attn.py:54
 
 def godet(nblk: int) -> int:
     """`bucket_blocks` recopié pour le venv vLLM (vérifié égal au nôtre dans le bras acvram)."""
-    n = 1
+    n = 8
     while n < nblk:
         n *= 2
     return n
@@ -87,6 +87,19 @@ def chrono_graphe(f):
     return statistics.median(ts) * 1000 / COUCHES
 
 
+def noyaux_us(f, n=3):
+    """Somme des durées de noyaux (CUPTI) par couche, en eager : la même grandeur que les traces nsys de la p91,
+    sans les trous entre nœuds que la mesure au mur du graphe compte (deux nœuds par couche chez vLLM, un chez nous)."""
+    from torch.profiler import ProfilerActivity, profile
+    f(); torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CUDA]) as p:
+        for _ in range(n):
+            f()
+        torch.cuda.synchronize()
+    tot = sum(e.self_device_time_total for e in p.key_averages() if e.self_device_time_total > 0)
+    return tot / (n * COUCHES)
+
+
 def bras_vllm(res):
     from vllm.v1.attention.ops import triton_unified_attention as tua
     from vllm.v1.kv_cache_interface import KVQuantMode
@@ -137,15 +150,16 @@ def bras_vllm(res):
         pas_a()
         ref_a = reference64(lambda bl, sl: phys[0][bl, sl, :, :D].double() * 0.03,
                             lambda bl, sl: phys[0][bl, sl, :, D:].double() * 0.03, t64, lens64, q[0], scale)
-        ligne["a"] = {**erreur(out[0], ref_a), "us": round(chrono_graphe(pas_a), 2)}
+        ligne["a"] = {**erreur(out[0], ref_a), "us": round(chrono_graphe(pas_a), 2), "noyaux_us": round(noyaux_us(pas_a), 2)}
         pas_b()
         ref_b = reference64(lambda bl, sl: kc[0][bl, sl].double() * ks[0][bl, sl].double()[..., None],
                             lambda bl, sl: vc[0][bl, sl].double() * vs[0][bl, sl].double()[..., None],
                             t64, lens64, q[0], scale)
-        ligne["b_"] = {**erreur(out[0], ref_b), "us": round(chrono_graphe(pas_b), 2)}
+        ligne["b_"] = {**erreur(out[0], ref_b), "us": round(chrono_graphe(pas_b), 2), "noyaux_us": round(noyaux_us(pas_b), 2)}
         res["cellules"].append(ligne)
         print(f"b={b:2d} ctx={ctx:5d}  (a) {ligne['a']['us']:6.2f} µs  err {ligne['a']['err_rel_max']:.2e}"
-              f"   (b) {ligne['b_']['us']:6.2f} µs  err {ligne['b_']['err_rel_max']:.2e}", flush=True)
+              f"   (b) {ligne['b_']['us']:6.2f} µs  err {ligne['b_']['err_rel_max']:.2e}"
+              f"   noyaux (a) {ligne['a']['noyaux_us']:6.2f} (b) {ligne['b_']['noyaux_us']:6.2f}", flush=True)
         del phys, kc, vc, ks, vs, q, out
         torch.cuda.empty_cache()
 
@@ -188,10 +202,10 @@ def bras_acvram(res):
                           lambda bl, sl: vc[0][bl, sl].double() * vs[0][bl, sl].double()[..., None],
                           t64, lens64, q[0], scale)
         ligne = {"b": b, "ctx": ctx, "godet": t64.shape[1], "C": C, "chunk": chunk,
-                 "c": {**erreur(sortie[0], ref), "us": round(chrono_graphe(pas_c), 2)}}
+                 "c": {**erreur(sortie[0], ref), "us": round(chrono_graphe(pas_c), 2), "noyaux_us": round(noyaux_us(pas_c), 2)}}
         res["cellules"].append(ligne)
         print(f"b={b:2d} ctx={ctx:5d}  (c) {ligne['c']['us']:6.2f} µs  err {ligne['c']['err_rel_max']:.2e}"
-              f"  C={C} chunk={chunk}", flush=True)
+              f"  C={C} chunk={chunk}   noyaux (c) {ligne['c']['noyaux_us']:6.2f}", flush=True)
         del kc, vc, ks, vs, q, sortie
         torch.cuda.empty_cache()
 
