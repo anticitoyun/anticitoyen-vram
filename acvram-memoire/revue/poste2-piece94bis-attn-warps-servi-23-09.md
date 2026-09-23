@@ -1,4 +1,4 @@
-# Pièce 95 — attention 4 vs 8 warps, servi ABAB, ≥5 lots/bras, seuil 2σ (poste2, 23/09, ordre chef)
+# Pièce 94 bis — attention 4 vs 8 warps, servi ABAB, ≥5 lots/bras, seuil 2σ (poste2, 23/09, ordre chef)
 
 instrument : `scratchpad/poste2-piece95-attn-warps-23-09/bloc.sh <b> <ctxmax> <jetons>`, ABAB
   (X = acvram serve défaut `ATTN_WARPS_COMPACT=8`, Y = `ACVRAM_ATTN_WARPS_COMPACT=4`), même
