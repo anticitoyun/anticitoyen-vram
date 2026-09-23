@@ -2178,7 +2178,7 @@ static std::pair<float *, unsigned int *> mb_tampons(const torch::Tensor &ref, l
     return {parts[d].data_ptr<float>(), reinterpret_cast<unsigned int *>(cpts[d].data_ptr<int>())};
 }
 static int mb_splitk(int NT, int G, int KT) {
-    static const int mode = std::getenv("ACVRAM_GEMV_SPLITK") ? atoi(std::getenv("ACVRAM_GEMV_SPLITK")) : 0;
+    static const int mode = std::getenv("ACVRAM_GEMV_SPLITK") ? atoi(std::getenv("ACVRAM_GEMV_SPLITK")) : 1;
     if (mode <= 0) return 1;
     if (mode >= 2) return mode;
     int S = 1;
