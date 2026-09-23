@@ -72,9 +72,13 @@ def test_garde_vram_dit_nvidia_smi_absent(poste, tmp_path):
     (modele / "config.json").write_text(
         '{"num_hidden_layers": 28, "num_key_value_heads": 8, "num_attention_heads": 32, "hidden_size": 4096}')
     bindir = tmp_path / "bin-sans-nvidia-smi"; bindir.mkdir()
-    for outil in ("grep", "cut", "python3", "curl", "ss", "awk"):
-        cible = subprocess.run(["bash", "-c", f"command -v {outil}"], capture_output=True, text=True).stdout.strip()
-        (bindir / outil).symlink_to(cible)
+    # le PATH réduit garde tout ce dont le lanceur a besoin, bash et env compris (shebang), sauf nvidia-smi
+    import shutil
+    for outil in ("bash", "env", "grep", "cut", "sed", "tr", "head", "cat", "dirname", "readlink",
+                  "python3", "curl", "ss", "awk"):
+        cible = shutil.which(outil)
+        if cible:
+            (bindir / outil).symlink_to(cible)
     r = _run(poste, PATH=str(bindir))
     assert r.returncode == 0, r.stdout + r.stderr
     assert "nvidia-smi introuvable — garde VRAM inactive" in r.stdout, r.stdout
