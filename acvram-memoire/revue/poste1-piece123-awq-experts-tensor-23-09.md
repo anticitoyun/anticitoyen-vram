@@ -19,7 +19,7 @@ dans les experts (AWQ calibré, alpha commun gate/up).
 
 ## 2. Comment la fondre sans coût
 **Au rassemblement, dans l'aligneur (recommandé).**
-* `ext.moe_aligner_petit` (`acvram_kernels.cu:4692-4760`) parcourt déjà les G = T·top_k paires en UN lancement, au début du chemin tensor (`moe.py:1960`).
+* `ext.moe_aligner_petit` (`acvram_kernels.cu:4692-4760`) parcourt déjà les G = T·top_k paires en UN lancement, au début du chemin tensor (`moe.py:1962`).
   * Il écrirait en plus `xs[g] = bf16(x[g / top_k] / s_gate[eid[g]])` : G × K bf16, 0,39 Mo par couche à b=12.
   * La GEMM gate·up (w13 : alpha commun gate/up dans A et S1b, `up_distinct` faux) serait alors appelée sur `xs` avec **top_k = 1** et M = G, comme l'appel down le fait déjà (`moe.py:1988`, `:2000` : `…, 1, G, …`). Les paires deviennent des « jetons ».
   * Coût : zéro lancement de plus ; ≈ 0,4 Mo d'écriture et de relecture L2 par couche, soit ≈ 0,3-0,5 µs à la bande L2.
