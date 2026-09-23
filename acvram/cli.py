@@ -257,6 +257,8 @@ VARIABLES_LUES = {
     "ACVRAM_CARTE_TENUE", "ACVRAM_ECO", "ACVRAM_MOE_DECODE_MMA_MARLIN",
     # pièces 62-65 (23/09) : MoE sur tensor cores (défaut aux godets ≥ MIN_T), glue fusionnée, seuil
     "ACVRAM_MOE_TENSOR", "ACVRAM_MOE_TENSOR_FUSION", "ACVRAM_MOE_TENSOR_MIN_T",
+    # pièce 82 (23/09) : gate·up fusionnés (w13), opt-in
+    "ACVRAM_MOE_W13",
 }
 
 
