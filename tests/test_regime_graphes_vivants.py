@@ -92,3 +92,42 @@ def test_la_clause_graphes_du_calcul_nominal_suit_enabled(converted):
     engine.graphs.enabled = False
     r2 = engine.regime()
     assert (r2["graphes"] or not r2["graphes_demandes"]) is False
+
+
+def test_graphes_on_nomme_les_cles_refusees_a_cote(converted):
+    """Pièce 90 (reste de la pièce 88, poste1, `poste1-piece88-capture-echouee-23-09.md`,
+    point (c)) : une clé de graphe refusée (OOM, opération non capturable…) laisse les
+    AUTRES clés vivantes — `GraphRunner.enabled` reste True, donc `graphes=on` continue
+    de s'afficher, sans dire qu'un bras entier sert en eager. `repli_eager > 0` doit
+    porter le compte et la raison PRINCIPALE sur la ligne ET dans `/metrics`
+    (`graphes_refus_n`, `graphes_refus_principale`, lus par `server/app.py::metrics()`
+    depuis la MÊME `regime()` — pas une seconde source qui pourrait diverger)."""
+    engine = _engine(converted)
+    engine._graphes_demandes = True
+    engine.graphs = _FauxGraphRunner()
+    engine.graphs.replis_eager = 3
+    # trois clés refusées, deux raisons : « déterministe » est la plus fréquente
+    # (deux occurrences sur trois) et doit être la raison PRINCIPALE, pas la
+    # première insérée (« transitoire », vue en premier).
+    engine.graphs._etat_echecs = {"refusees": {
+        (1, 8): "transitoire, 3 essais — capture invalidée",
+        (2, 8): "déterministe — AcceleratorError: CUDA error: out of memory",
+        (1, 16): "déterministe — AcceleratorError: CUDA error: out of memory",
+    }, "essais": {}, "attente": {}}
+    engine.graphs._echecs = lambda: engine.graphs._etat_echecs
+
+    r = engine.regime()
+    assert r["graphes"] is True, "l'objet reste actif : les AUTRES clés sont vivantes"
+    assert r["graphes_refus_n"] == 3
+    assert r["graphes_refus_principale"] == "déterministe — AcceleratorError: CUDA error: out of memory"
+
+    ligne = engine.regime_ligne()
+    assert "graphes=on(refus=3:déterministe — AcceleratorError: CUDA error: out of memory)" in ligne, ligne
+    assert "graphes=on " not in ligne, "graphes=on SEUL (sans le refus) redevient un mensonge : " + ligne
+
+
+def test_graphes_on_sans_refus_reste_nu():
+    """Contrôle négatif du même test : `refusees` vide → `graphes=on` nu, comme avant
+    la pièce 90 — ce test casse si la nouvelle annotation s'affiche même sans refus."""
+    from acvram.engine.runner import _raison_principale_refus
+    assert _raison_principale_refus({}) is None

@@ -963,6 +963,11 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                 "cartes": engine.regime()["cartes"],
                 "repli_eager": engine.regime().get("repli_eager", 0),
                 "replis_eager_raisons": engine.regime().get("replis_eager_raisons", []),
+                # pièce 90 : le nombre de clés de graphe refusées et leur raison
+                # principale, structurés — pas seulement noyés dans regime_ligne
+                "graphes": engine.regime().get("graphes"),
+                "graphes_refus_n": engine.regime().get("graphes_refus_n", 0),
+                "graphes_refus_principale": engine.regime().get("graphes_refus_principale"),
                 "energie": _energie_par_jeton(),
                 # Ajout n°4 (poste7-gui-ajouts-18-09 § 4) : la meme ligne,
                 # octet pour octet, que le "[regime]" ecrit dans le JSON
