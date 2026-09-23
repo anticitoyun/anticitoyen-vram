@@ -255,7 +255,7 @@ protocole pour tous les moteurs (`outils/`, une carte, `energie.py`) :
 
 | | acvram | vLLM 0.29 (`vllm serve`) | llama.cpp (sm_120) |
 |---|---|---|---|
-| décodage 12 séquences | 1 931,2 t/s ² | **2 026,5 t/s** ² | — |
+| décodage 12 séquences | 1 995,1 t/s ² | 2 027,0 t/s ² | — |
 | décodage 1 séquence | 312,3 t/s ³ ⁴ | 284,8 t/s ³ | **329,9 t/s** ⁴ |
 | prefill pp2048 | **22 707 jetons/s** | 21 054 | 8 671 (TabbyAPI, retiré) |
 
@@ -268,8 +268,9 @@ devant llama.cpp (0,601 contre 0,700 J/jeton net). À b=12 la spéculation n'est
 
 ² 23/09, même séance, même client HTTP (`banc-llamacpp-16-09.py` contre `acvram serve` et
 `vllm serve`), `-lgc 2700` posé explicitement autour de chaque bras, cellules alternées A V V A,
-≥ 5 lots par bras, écart déclaré seulement au-delà de 2 σ (revue/poste2-piece89-vllm-sigma-95-23-09.md).
-acvram 0.6.37. **vLLM est devant de 4,7 % en débit et de 6,8 % en J/jeton** (les deux au-delà de 2 σ).
+≥ 5 lots par bras, écart déclaré seulement au-delà de 2 σ (revue/poste2-piece96-vllm-b12-rejeu-89-23-09.md).
+acvram 0.6.38 (w13 au décodage, réduction d'attention déroulée) : écart −1,6 %, **sous 2 σ : égalité de débit**.
+En J/jeton, **vLLM reste devant de 7,0 %** (au-delà de 2 σ). Avec 0.6.37 le même protocole donnait −4,7 %.
 
 ³ Même séance et même protocole que ², sans spéculation des deux côtés : acvram 312,3 contre vLLM 284,8 —
 **acvram devant de 9,7 % en débit** (au-delà de 2 σ) ; J/jeton : **égalité** (écart 0,04 %, sous 2 σ).
@@ -303,9 +304,8 @@ vLLM ne sert qu'en FP8 (b=1 : 165,35 t/s en service) ; les modèles qui ne
 tiennent pas en VRAM . Le décodage à séquence unique n'en fait pas partie : sans spéculation, acvram y est
 devant vLLM de 9,7 % (note ³), derrière llama.cpp de 5,8 % en débit mais devant lui de 13,4 % en
 énergie (note ⁴). À grand lot, sur un MoE qui tient en VRAM, vLLM
-reste devant à b=12 (2 026,5 contre 1 931,2 t/s, et 6,8 % de J/jeton en moins, même
-séance et même instrument, au-delà de 2 σ, note ²) ; acvram y a progressé (1 540 en 0.6.34 →
-1 931,2 en 0.6.37) sans passer devant.
+est à égalité de débit à b=12 (1 995,1 contre 2 027,0 t/s, sous 2 σ, note ²) mais garde 7,0 % de J/jeton
+de moins ; acvram y a progressé de 1 540 t/s (0.6.34) à 1 995 (0.6.38).
 
 ## État
 
