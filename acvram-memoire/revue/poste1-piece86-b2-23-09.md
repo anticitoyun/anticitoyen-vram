@@ -34,3 +34,58 @@ réarme qu'à une DESCENTE d'un lot > lot_max vers ≤ lot_max. Dans la 85 la ch
 puis palier 2 : réarmement. Ici B = 2, la garde désactivée à b=1 (gain 1,031 < 1,05) le reste. Rejeu : paliers 2
 puis 12 (chauffe à 12 d'abord, comme la 85), mêmes bras, même prédiction et mêmes réfutations pour le palier 2.
 Au passage : b=2 sans spéculation, en graphe = 408 t/s (4,9 ms/pas) ; b=1 à 388 porte la spéculation (gain 1,9-3,7).
+
+## Question de chef : une capture échouée doit-elle couper les graphes à vie ? (analyse à sec, non jouée)
+
+Aujourd'hui (`graphs.py:638-672`) : toute exception de capture → `enabled = False` (669), `graphs.clear()` (670) : on
+perd aussi les graphes DÉJÀ capturés et sains, pour une faute qui ne concernait qu'une clé. C'est ce qui a changé
+l'incident de la 85 (un synchronize étranger, transitoire) en panne permanente.
+
+Mon avis : ni « à vie » ni « on réessaie tout » — trier par cause, et par clé.
+1. **Transitoire** (`cudaErrorStreamCaptureInvalidated` / « previous error during capture » : un autre fil a touché
+   le flux global) : garder les graphes existants, marquer la clé « à réessayer », reprise après N pas (ex. 64) avec
+   au plus 3 essais par clé, chaque échec compté et nommé. Sûr à trois conditions : (a) `torch.cuda.synchronize()`
+   rend sans erreur après l'échec (sinon l'erreur est collante, contexte perdu : l'arrêt nommé est le seul honnête) ;
+   (b) nouveau pool pour les captures suivantes — le pool partagé (`self._pool`, 1011-1013) a vu une capture
+   interrompue, je ne sais pas prouver à sec que PyTorch l'a laissé cohérent ; les graphes vivants gardent l'ancien ;
+   (c) états récurrents restaurés (point 3).
+2. **Déterministe** (OOM, `.item()`/synchronisation DANS la capture, opération non capturable) : refuser la SEULE
+   clé, pour la vie du serveur, compté et nommé ; les autres formes restent en graphe. Réessayer reproduirait l'échec
+   et paierait 40-130 ms (échauffement + capture) à chaque tentative.
+3. **Défaut latent trouvé en lisant, indépendant de la reprise** : `_capture` photographie les états récurrents des
+   hybrides (`instantane`, 992) puis joue deux pas d'échauffement (996-999) qui les font avancer ; la restauration
+   (1017-1019) n'est que sur le chemin de SUCCÈS. Une capture qui échoue après l'échauffement laisse donc l'état GDN
+   avancé de deux pas, et le pas eager de repli calcule sur un état faux : sortie fausse pour les séquences du lot,
+   sur les modèles hybrides seulement (Qwen3-Next, Kimi-Linear…). Correctif simple : restaurer dans un `finally`.
+   Test qui casserait : un faux `linear_attn` compteur + un `step` qui lève après l'échauffement → l'état doit être
+   celui d'avant. Pièce à ouvrir (priorité haute : c'est une sortie fausse, pas une lenteur).
+Le cas de la 85 (cause 2) est désormais évité à la source ; la reprise par clé est une robustesse, pas l'urgence.
+
+## Rejeu (395954d8, 11 h 26-11 h 29) : H86 TENUE
+
+Paliers 2 puis 12 (chauffe à 12). b=2 : S0 (défaut) 293,8 t/s contre S1 (`LOT_MAX=1`) 407,6 ; pendant les pas
+spéculatifs de S0 (gain 1,5-3,5) replays figés à 1 058 et `repli_eager` = 0 ; Δreplays/Δsteps sur la fenêtre = 0,80.
+Réfutations (a) (S1 < 400) et (b) (≥ 0,9) non déclenchées → H86 tenue. Deux chiffres prédits MANQUÉS, dits : S1
+« ≥ 500 » (407,6 : b=2 sans spéculation vaut 4,9 ms/pas, je l'avais surestimé) et ratio « ≤ 0,7 » (0,80 : la garde
+coupe la spéculation au milieu de la fenêtre, gain 1,047). b=12 après b=2 : 1 871,0 (S0) / 1 838,0 (S1).
+Correctif (6926d423) : `runner.py` `_speculative_decode` — sous graphe, un lot dense à longueurs de proposition
+mêlées décode sans spéculer, compté (`spec_longueurs_melees` dans /metrics), avant toute réservation de blocs ;
+`graphs.py` nomme et compte le refus « longueurs mêlées ». Tests : `tests/test_piece86_spec_longueurs_melees.py` (3).
+Reste nommé : la garde juge en jetons/pas, pas en temps — un pas spéculatif qui coûte 2 × un pas simple et rend
+1,5 jeton la garderait active. Pièce à part.
+
+## 86 bis — l'écart de la 87 (L 1 756,4 contre N 1 883,0, −6,72 %, repli_eager 0) : prédiction avant la prise
+
+Indices déjà en main : horloge égale dans la 87 (2 671 / 2 669) ; ma séquence 2 → 12 donne 1 838-1 871, à −0,6/−2,4 %
+de N ; les séquences à paliers 4 et 8 (85-D 1 742, 87-L 1 756) sont celles qui décrochent.
+Bras, serveur neuf chacun, même séance, commit du correctif 86 : N1 (12) ; L (1,2,4,8,12) ; R (12,12,12 : même
+forme, autant de lots et d'âge que L, sans histoire de formes) ; N2 (12, témoin de dérive).
+- **Histoire des formes** (graphes 22 contre 12, ordre et pool des sorties, allocateur par forme) : prédit R ≥ N −2 %
+  et L ≤ N −4 %. Réfutée si R ≤ N −4 %.
+- **Usure / âge** (fragmentation des tables de blocs KV par le va-et-vient, état hôte qui croît, chaleur) : prédit
+  R ≤ N −4 %. Réfutée si R ≥ N −2 % alors que L ≤ N −4 %.
+- **Lien avec b=2** (vérifications eager au palier 2, allocations hors pool) : le correctif 86 les supprime ; si L ≥
+  N −3 % sur ce commit (−6,72 % pour poste2 sur 08ae6ac2), le lien est COMPATIBLE — non prouvé, deux séances.
+- Séance invalide si |N1 − N2| > 3 %, ou toute cellule avec `repli_eager` > 0 ou graphes capturés pendant le palier
+  12 mesuré (lu dans /metrics).
+Je mets 55 % sur l'histoire des formes, 35 % sur l'usure, 10 % sur le lien b=2.
