@@ -88,3 +88,47 @@ La 71 bis (poste5) a mesuré w13 au banc (−4,0 µs/couche), mais n'a pas pu le
    la GEMM séparée. Prédiction : KL = témoin à 10⁻³ près. Au bit contre les GEMM séparées si l'ordre de réduction
    du Marlin ne dépend pas de N ; sinon ±1 ulp, à mesurer. Même gain de vitesse attendu. Coût : une modification
    du noyau vendu (vLLM, Apache), ≈ 2 h.
+
+## Seuil `MOE_TENSOR_MIN_T = 8` relu sur le SERVI — prédiction écrite avant la prise (23/09 10 h 4x)
+
+La p65 a posé 8 sur la **frontière Engine direct** (b = 4 : GEMV plus rapide de 9,5 % ; b = 8 : tensor de 4,3 %).
+La 79 montre que le Marlin MoE est **~10 % plus rapide sous `serve`** qu'en Engine direct. Le GEMV par paire n'y a pas
+été mesuré, mais il ne dépend pas du nombre d'experts distincts de la même façon.
+
+* **instrument** : `serve` (alias `qkvo-i8c`, sans w13), client de cellule `BANC_SLOTS=2,4,8,12`, 1 024 jetons,
+  fenêtre 10 s par b ; bras **T** `ACVRAM_MOE_TENSOR_MIN_T=2` (tensor à tout godet ≥ 2) contre bras **G**
+  `MIN_T=99` (GEMV partout) ; ordre T puis G, -lgc 2700.
+* **prédiction** : b = 2, G devant (≥ 5 %) ; **b = 4, à égalité à ±3 %** (le point qui bouge) ; b = 8 et 12, T devant
+  (≥ 4 %).
+* **décision écrite d'avance** : MIN_T passe à 4 si T ≥ G + 2 % à b = 4 ; reste à 8 si \|T − G\| < 2 % à b = 4 ; monte si
+  G ≥ T + 2 % à b = 8. **Réserve** : AB sans BA ; un écart < 3 % ne décide rien sans le rejeu BA.
+
+## Pièce 82 bis — la forme exacte : IMPOSSIBLE au bit dans le Marlin, prouvé avant d'écrire l'épilogue (23/09 10 h 5x)
+
+* **ordre (chef)** : échelle globale par demi-colonne dans l'épilogue du port Marlin ; critère écrit : KL du témoin
+  W13=0 reproduite (invite 2 de b=12 à 0,41) et **préfill au bit du chemin séparé**, témoin joué en même temps.
+* **lecture du noyau avant code** : le découpage de K entre blocs dépend du nombre de tuiles N —
+  `marlin_template.h:388-406` : `n_tiles = prob_n / 16 / thread_n_blocks`, `global_mn_tiles = parallel × n_tiles`,
+  `iters = ⌈k_tiles × part2_mn_tiles / gridDim.x⌉`. Une GEMM w13 (N = 1 536) coupe K autrement que deux GEMM de 768,
+  donc elle réduit en fp32 dans un autre ordre. L'épilogue n'y peut rien : il vient après la réduction.
+* **contrôle qui pouvait rendre faux** (`scratchpad/poste1-p82-23-09/moitie-gate.py`, binaire actuel, tenue=3s) : la
+  moitié **gate** de la GEMM w13 reçoit **déjà** l'échelle exacte de gate. Si le découpage ne comptait pas, elle serait
+  au bit de la GEMM gate séparée. **Elle ne l'est pas** :
+
+| forme | valeurs | différentes | part |
+|---|---|---|---|
+| décodage b = 12 (routage réel de la cellule) | 73 728 | 10 | 1,4·10⁻⁴ |
+| décodage b = 8 | 49 152 | 6 | 1,2·10⁻⁴ |
+| préfill 256 jetons | 1 572 864 | 65 | 4,1·10⁻⁵ |
+| préfill 3 072 jetons | 18 874 368 | 225 | 1,2·10⁻⁵ |
+
+* **verdict : la forme exacte n'existe pas dans ce noyau.** L'échelle par demi-colonne ramènerait l'écart d'up
+  (aujourd'hui un arrondi de plus sur toutes les valeurs) au niveau de gate (~10⁻⁴ des valeurs à 1 ulp). Ce serait
+  toujours une sortie différente, donc **exclue par la règle** que chef applique. Le code d'épilogue n'est pas écrit :
+  il ne pourrait pas tenir le critère.
+* **seule voie au bit** : que le chemin séparé et w13 découpent K de la même façon, par exemple une tuile par bloc sur
+  tout K (grille ≤ nombre de tuiles). Cela change aussi la sortie du chemin **par défaut** (qui découpe aujourd'hui
+  quand les tuiles sont moins nombreuses que les SM) : même règle, même refus, sauf nouvelle référence décidée par le
+  chef.
+* **ce qui reste** : `ACVRAM_MOE_W13=1` en opt-in, au bit sur le défaut, documenté comme « sortie différente » ; la
+  82 est close côté défaut. Le gain de −0,177 ms/pas servi ne se prend pas sous la règle actuelle.
