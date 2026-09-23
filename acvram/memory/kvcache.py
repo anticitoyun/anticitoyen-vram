@@ -281,8 +281,15 @@ class KVCacheConfig:
     # réserve des blocs courants, par couche (None = ACVRAM_KV_CANAL_RANGS).
     canal: Optional[bool] = None
     rangs: Optional[int] = None
+    # Repli 104 (1) : positions puits gardées en V int8 (kv_k8v4.PUITS), k8v4 seulement ; None = ACVRAM_KV_PUITS.
+    puits: Optional[int] = None
 
     def __post_init__(self) -> None:
+        if self.puits is None:
+            self.puits = kv_k8v4.PUITS
+        self.puits = int(self.puits) if self.dtype == kv_k8v4.FORMAT else 0
+        if self.puits not in kv_k8v4.PUITS_VALEURS or (self.puits and self.puits != self.block_size):
+            raise ValueError(f"puits={self.puits} : 0 ou un bloc ({self.block_size}) seulement")
         if self.canal is None:
             self.canal = kv_canal.ACTIF
         self.canal = bool(self.canal) and self.dtype == "int8"
@@ -348,7 +355,9 @@ class KVCacheConfig:
 
     def bytes_per_block(self) -> int:
         if self.k8v4:
-            return self.block_size * kv_k8v4.octets_par_jeton_couche(self.num_kv_heads, self.head_dim)
+            # réserve des puits (v1 de mesure) : V int8 + échelle half pour chaque ligne de chaque bloc
+            reserve = self.block_size * self.num_kv_heads * (self.head_dim + 2) if self.puits else 0
+            return self.block_size * kv_k8v4.octets_par_jeton_couche(self.num_kv_heads, self.head_dim) + reserve
         elems = 2 * self.block_size * self.num_kv_heads * self.head_dim
         width = 0.5 if self.rotated else 1 if self.quantized else 2
         scale_bytes = (2 * self.block_size * self.num_kv_heads * 2
@@ -446,6 +455,11 @@ class PagedKVCache:
                                        device=self.device)
         else:
             self.k_scale = self.v_scale = None
+        # Repli 104 (1) : réserve des puits, V int8 [NB, 16, HKV, D] + échelle half [NB, 16, HKV], indexée comme K
+        self.puits_v = self.puits_vs = None
+        if cfg.puits:
+            self.puits_v = torch.zeros(shape, dtype=torch.int8, device=self.device)
+            self.puits_vs = torch.zeros(shape[:-1], dtype=torch.float16, device=self.device)
         # C5-b (kv_canal) : échelles de K par canal, réserve bf16 des blocs
         # courants et sa pile de lignes libres — tout sur l'appareil, adresses
         # fixes : les noyaux d'écriture allouent et rendent les lignes eux-mêmes
@@ -555,7 +569,23 @@ class PagedKVCache:
                 and v.dtype == torch.bfloat16):
             from ..kernels import get_extension, glue_compact
             ext = get_extension()
-            if ext is not None and hasattr(ext, "kv_write_k8v4"):
+            if self.puits_v is not None and ext is not None and hasattr(ext, "kv_write_k8v4_puits"):
+                if positions is None:
+                    raise RuntimeError("k8v4 + puits : l'écriture exige les positions absolues")
+                sm = slot_mapping if slot_mapping.dtype == torch.int64 \
+                    else slot_mapping.to(torch.int64)
+                pos = positions if positions.dtype == torch.int64 else positions.to(torch.int64)
+                if not glue_compact("kv"):
+                    k, v = k.contiguous(), v.contiguous()
+                ext.kv_write_k8v4_puits(k, v, sm, pos.reshape(-1).contiguous(),
+                                        self.k.view(-1, *self.k.shape[2:]),
+                                        self.v.view(-1, *self.v.shape[2:]),
+                                        self.k_scale.view(-1, self.k_scale.shape[-1]),
+                                        self.v_scale.view(-1, *self.v_scale.shape[2:]),
+                                        self.puits_v.view(-1, *self.puits_v.shape[2:]),
+                                        self.puits_vs.view(-1, self.puits_vs.shape[-1]), bs, self.cfg.puits)
+                return
+            if self.puits_v is None and ext is not None and hasattr(ext, "kv_write_k8v4"):
                 sm = slot_mapping if slot_mapping.dtype == torch.int64 \
                     else slot_mapping.to(torch.int64)
                 if not glue_compact("kv"):
@@ -605,9 +635,13 @@ class PagedKVCache:
         # d extension : c est la majorite des configurations, ET celle des
         # essais. Une epreuve d equivalence ecrite sur la foi du seul `.cu`
         # aurait tourne ici, sur le chemin non garde, et serait passee.
+        if self.puits_v is not None and positions is None:
+            raise RuntimeError("k8v4 + puits : l'écriture exige les positions absolues")
         if bool((slot_mapping < 0).any()):
             gardes = slot_mapping >= 0
             slot_mapping, k, v = slot_mapping[gardes], k[gardes], v[gardes]
+            if positions is not None:
+                positions = positions.reshape(-1)[gardes]
             if slot_mapping.numel() == 0:
                 return
         kq, ks = self._quantize(k)
@@ -619,6 +653,13 @@ class PagedKVCache:
         if self.k_scale is not None:
             self.k_scale[blk, off] = ks
             self.v_scale[blk, off] = vs
+        if self.puits_v is not None:
+            # jumeau du noyau : V int8 par jeton (division IEEE, comme K) aux positions < puits, EN PLUS du k8v4
+            p = positions.reshape(-1) < self.cfg.puits
+            if bool(p.any()):
+                pq, ps = kv_k8v4.quantifier_k(v[p])
+                self.puits_v[blk[p], off[p]] = pq
+                self.puits_vs[blk[p], off[p]] = ps
 
     def gather(self, block_table: torch.Tensor, length: int,
                dtype: torch.dtype = torch.float16) -> tuple[torch.Tensor, torch.Tensor]:
@@ -637,11 +678,20 @@ class PagedKVCache:
             kd = kv_canal.dequantifier_cache(self, blocks, dtype)
             return (kd.reshape(-1, self.cfg.num_kv_heads, self.cfg.head_dim)[:length],
                     self._dequantize_v(v[:length], vs, dtype))
-        return (self._dequantize(k[:length], ks, dtype),
-                self._dequantize_v(v[:length], vs, dtype))
+        vd = self._dequantize_v(v[:length], vs, dtype)
+        if self.puits_v is not None and length > 0:
+            n = min(length, self.cfg.puits)
+            pv = self.puits_v[blocks[:1]].reshape(-1, self.cfg.num_kv_heads, self.cfg.head_dim)[:n]
+            ps = self.puits_vs[blocks[:1]].reshape(-1, self.cfg.num_kv_heads)[:n]
+            vd = vd.clone()
+            vd[:n] = self._dequantize(pv, ps, dtype)
+        return (self._dequantize(k[:length], ks, dtype), vd)
 
     def export_block(self, blk: int) -> tuple:
         """Copie un bloc vers l'hôte (mémoire épinglée), échelles comprises."""
+        if self.puits_v is not None:
+            raise RuntimeError("k8v4 + puits : l'étage KV hôte n'est pas porté (la réserve des puits resterait sur la carte)")
+
         def pin(t):
             return t.detach().to("cpu", non_blocking=False).pin_memory() \
                 if t.is_cuda else t.detach().clone()
@@ -690,13 +740,21 @@ class PagedKVCache:
             kd = kv_canal.dequantifier_cache(self, block_tables, dtype)
             return (kd.reshape(b, n * self.cfg.block_size, self.cfg.num_kv_heads, self.cfg.head_dim),
                     self._dequantize_v(v, vs, dtype))
-        return (self._dequantize(k, ks, dtype), self._dequantize_v(v, vs, dtype))
+        vd = self._dequantize_v(v, vs, dtype)
+        if self.puits_v is not None:
+            p = self.cfg.puits
+            pv = self.puits_v[block_tables[:, 0]].reshape(b, p, self.cfg.num_kv_heads, self.cfg.head_dim)
+            ps = self.puits_vs[block_tables[:, 0]].reshape(b, p, self.cfg.num_kv_heads)
+            vd = torch.cat((self._dequantize(pv, ps, dtype), vd[:, p:]), dim=1)
+        return (self._dequantize(k, ks, dtype), vd)
 
     @property
     def nbytes(self) -> int:
         n = self.k.numel() * self.k.element_size() + self.v.numel() * self.v.element_size()
         if self.k_scale is not None:
             n += (self.k_scale.numel() + self.v_scale.numel()) * 2
+        if self.puits_v is not None:
+            n += self.puits_v.numel() + self.puits_vs.numel() * 2
         if self.canal:
             n += (self.k_scale_canal.numel() + self.tampon_de.numel() * 4
                   + self.tampon.numel() * 2 + self.tampon_libres.numel() * 4 + 4)
