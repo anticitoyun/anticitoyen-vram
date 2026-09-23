@@ -59,6 +59,48 @@ def _probs_kernel(logits_ptr, out_ptr, E, BE: tl.constexpr):
 INTRA = 200                       # lancements DANS le graphe (voir _chrono)
 
 
+@triton.jit
+def _select_kernel(logits_ptr, topw_ptr, topi_ptr, eid_ptr, usage_ptr, E, scale,
+                   K: tl.constexpr, BE: tl.constexpr, ATOMIQUE: tl.constexpr,
+                   STORE_BOUCLE: tl.constexpr):
+    """`_route_fusee_kernel` (softmax, sans biais ni valid) avec deux témoins :
+    ATOMIQUE=0 retire les k `atomic_add` de la boucle, STORE_BOUCLE=0 sort les
+    k `store` de la boucle et les remplace par trois stores vectorisés.
+
+    Ce ne sont PAS des candidats : ATOMIQUE=0 ne compte plus l'usage. Ils
+    bornent ce que chacun coûte, avant d'écrire une version au bit."""
+    t = tl.program_id(0)
+    i = tl.arange(0, BE)
+    masque = i < E
+    lg = tl.load(logits_ptr + t * E + i, mask=masque, other=float("-inf")).to(tl.float32)
+    m = tl.max(lg, 0)
+    ex = tl.exp(lg - m)
+    probs = tl.where(masque, ex / tl.sum(ex, 0), 0.0)
+    sel = tl.where(masque, probs, float("-inf"))
+    jj = tl.arange(0, 32)
+    mj = jj < K
+    pw = tl.zeros((32,), dtype=tl.float32)
+    ti = tl.zeros((32,), dtype=tl.int32)
+    somme = 0.0
+    for j in range(K):
+        bv = tl.max(sel, 0)
+        bi = tl.min(tl.where(sel == bv, i, BE), 0)
+        pj = tl.sum(tl.where(i == bi, probs, 0.0), 0)
+        somme += pj
+        pw = tl.where(jj == j, pj, pw)
+        ti = tl.where(jj == j, bi.to(tl.int32), ti)
+        if STORE_BOUCLE:
+            tl.store(topi_ptr + t * K + j, bi.to(tl.int32))
+            tl.store(eid_ptr + t * K + j, bi.to(tl.int32))
+        if ATOMIQUE:
+            tl.atomic_add(usage_ptr + bi, 1)
+        sel = tl.where(i == bi, float("-inf"), sel)
+    if not STORE_BOUCLE:
+        tl.store(topi_ptr + t * K + jj, ti, mask=mj)
+        tl.store(eid_ptr + t * K + jj, ti, mask=mj)
+    tl.store(topw_ptr + t * K + jj, pw * ((1.0 / somme) * scale), mask=mj)
+
+
 def _chrono(fn, rep: int, intra: int = INTRA) -> tuple[float, float]:
     """Médiane et p90 en µs PAR LANCEMENT, sous graphe CUDA.
 
@@ -116,6 +158,15 @@ def main() -> int:
     r = {"forme": {"T": T, "E": E, "k": K, "BE": BE}, "rep": a.rep, "intra": a.intra, "bras": {}}
     r["bras"]["vide"] = _chrono(lambda: _vide_kernel[(T,)](sortie, T, num_warps=1), a.rep, a.intra)
     r["bras"]["probs"] = _chrono(lambda: _probs_kernel[(T,)](logits, sortie, E, BE=BE, num_warps=1), a.rep, a.intra)
+    topw = torch.empty(T, K, dtype=torch.float32, device=dev)
+    topi = torch.empty(T, K, dtype=torch.int32, device=dev)
+    eid = torch.empty(T * K, dtype=torch.int32, device=dev)
+    for nom, at, sb in (("temoin_ref", 1, 1), ("sans_atomique", 0, 1), ("stores_groupes", 1, 0),
+                        ("ni_l_un_ni_l_autre", 0, 0)):
+        r["bras"][nom] = _chrono(
+            lambda at=at, sb=sb: _select_kernel[(T,)](
+                logits, topw, topi, eid, usage, E, 1.0, K=K, BE=BE,
+                ATOMIQUE=at, STORE_BOUCLE=sb, num_warps=1), a.rep, a.intra)
     for w in (1, 4, 8):
         nom = "servi" if w == 1 else f"warps{w}"
         r["bras"][nom] = _chrono(
@@ -124,6 +175,10 @@ def main() -> int:
     print(f"forme T={T} E={E} k={K} BE={BE} · {a.rep} rejeux × {a.intra} lancements dans le graphe")
     for nom, (med, p90) in r["bras"].items():
         print(f"  {nom:8s} {med:6.2f} µs (p90 {p90:6.2f})")
+    ref = r["bras"]["temoin_ref"][0]
+    print(f"  → dans la sélection : atomiques {ref - r['bras']['sans_atomique'][0]:+.2f} µs · "
+          f"stores en boucle {ref - r['bras']['stores_groupes'][0]:+.2f} · "
+          f"les deux {ref - r['bras']['ni_l_un_ni_l_autre'][0]:+.2f}")
     v, p, s = (r["bras"][n][0] for n in ("vide", "probs", "servi"))
     print(f"  → lancement {v:.2f} · softmax {p - v:+.2f} · sélection {s - p:+.2f} µs")
     print(f"  → sélection sur 48 couches : {(s - p) * 48:.0f} µs/pas")
