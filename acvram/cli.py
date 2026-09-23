@@ -219,7 +219,7 @@ VARIABLES_LUES = {
     # C13-c (flash), sondes niveau 2, C15-3d (glue compacte) — 20/09
     "ACVRAM_MLA_FLASH_OPERANDES", "ACVRAM_MLA_FLASH_TUILE",
     "ACVRAM_MLA_ECRIT_TORCH", "ACVRAM_MLA_PREP_TEMOIN", "ACVRAM_MLA_QABS_DEUX_MOITIES",
-    "ACVRAM_GLUE_COMPACT", "ACVRAM_GLUE_COMPACT_ITEMS", "ACVRAM_ATTN_WARPS_COMPACT", "ACVRAM_ATTN_REDUC_DEROULEE", "ACVRAM_ROUTAGE_TEMOIN",
+    "ACVRAM_GLUE_COMPACT", "ACVRAM_GLUE_COMPACT_ITEMS", "ACVRAM_ATTN_WARPS_COMPACT", "ACVRAM_ATTN_REDUC_DEROULEE", "ACVRAM_PROJ_MARLIN", "ACVRAM_PROJ_MARLIN_MIN_M", "ACVRAM_PROJ_MARLIN_MIN_NK", "ACVRAM_ROUTAGE_TEMOIN",
     "ACVRAM_PILE_SANS_RENDU",
     "ACVRAM_CPUS",                                    # 0.6.31 : affinité (acvram/hote.py)                          # gemma (c48c2b2c) : témoin de _rendre_le_cache_apres_la_pile
     "ACVRAM_PREFILL_W8R",
@@ -753,6 +753,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         format_impose=args.format, mesurer_kld=args.mesurer_kld,
         alpha_commun_gate_up=args.alpha_commun_gate_up,
         alpha_commun_experts=args.alpha_commun_experts,
+        alpha_commun_qkv=args.alpha_commun_qkv,
         hadamard_experts=args.hadamard_experts,
         passage_direct=args.passage_direct,
         calib_source=calib_source,
@@ -1194,6 +1195,12 @@ def build_parser() -> argparse.ArgumentParser:
                          "(revue/poste1-disposition-naturel-qkv-22-09.md). "
                          "Opt-in tant que la mesure n'est pas faite ; coute "
                          "une seconde recherche AWQ par paire d'experts.")
+    cv.add_argument("--alpha-commun-qkv", action="store_true",
+                    help="pièce 100 B (23/09) : un SEUL alpha AWQ pour q_proj, "
+                         "k_proj et v_proj d'une couche (même entrée), sinon "
+                         "_scaler_commun refuse la pile qkv nvfp4 et q, k, v "
+                         "partent en trois GEMM (+0,9 ms/pas, pièce 42). "
+                         "o_proj non concerné. Opt-in.")
     cv.add_argument("--alpha-commun-gate-up", action="store_true",
                     help="item A7 (audit poste7, 14/09) : un SEUL alpha AWQ "
                          "pour chaque paire gate_proj/up_proj admissible, au "

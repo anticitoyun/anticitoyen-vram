@@ -594,6 +594,15 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
         if t.padded_in != xf.shape[-1]:
             xf = torch.nn.functional.pad(xf, (0, t.padded_in - xf.shape[-1]))
         gsr = getattr(t, "global_scale_rows", None)
+        if _PROJ_MARLIN and _PROJ_MARLIN_MIN_M <= n <= 16 and xf.dtype == torch.bfloat16:
+            # Pièce 101 (opt-in) : GEMM Marlin DENSE porté de vLLM 0.29 (marlin_port, échelle globale par colonne
+            # pour q/k/v empilés) aux godets ≥ 2 ; M = 1 garde `nvfp4_gemv` ci-dessous (le plus rapide au banc :
+            # revue/poste1-piece101-bascule-godets-23-09). Seconde disposition des poids préparée au premier appel
+            # eager, jamais sous capture.
+            y = _marlin_dense(xf, t)
+            if y is not None:
+                CHEMINS_NVFP4["marlin_dense"] += 1
+                return y.reshape(*orig_shape[:-1], t.shape[0])
         if _DENSE_NVFP4 == "triton" and _DENSE_NVFP4_MIN_M <= n <= 32 and xf.dtype == torch.bfloat16:
             # GEMM dense étroite W4A16 (poste7-hybrides-etape1-close-gemm-dense-
             # 17-09 § 2) : les M lignes en registres, les poids lus UNE fois
@@ -895,6 +904,44 @@ CHEMINS_INT8 = _collections.Counter()
 # Défaut « triton » depuis verdict-gemm-dense-palier1-situ-17-09 (poste3 :
 # Qwen3.8 b=12 128 → 349 t/s, J/j ÷ 2,7, b=1 et ppl-decode-kv inchangés) ;
 # bascule à M ≥ 4 (poste7 : à M = 2 la GEMV gagne au banc, 1,50 contre 1,12 To/s).
+# Pièce 101 (23/09) : projections NVFP4 denses par le Marlin porté aux godets ≥ PROJ_MARLIN_MIN_M (opt-in).
+_PROJ_MARLIN = os.environ.get("ACVRAM_PROJ_MARLIN", "0") == "1"
+_PROJ_MARLIN_MIN_M = int(os.environ.get("ACVRAM_PROJ_MARLIN_MIN_M", "2"))
+_PROJ_MARLIN_MIN_NK = int(os.environ.get("ACVRAM_PROJ_MARLIN_MIN_NK", "1024"))
+CHEMINS_NVFP4 = __import__("collections").Counter()
+_MARLIN_ESPACES: dict = {}
+
+
+def _marlin_dense(xf: torch.Tensor, t):
+    """GEMM Marlin dense de `marlin_port` sur la disposition Marlin de ``t`` (préparée une fois, attachée au
+    tenseur). None si le port n'est pas compilé ou si ``t`` n'est pas éligible (K, N multiples de 64) —
+    l'appelant prend alors son chemin habituel."""
+    prep = getattr(t, "_marlin_dense", None)
+    if prep is None:
+        N, k_pad = t.qweight.shape[0], t.padded_in
+        # 101 correctif : les seules formes mesurées au banc (qkv 5 120 × 2 048, o 2 048 × 4 096). Sans ce seuil, le
+        # chemin prenait aussi les linéaires étroits (190 appels par passe au lieu de 96, pas +9 à +25 %).
+        if N % 64 or k_pad % 64 or N < _PROJ_MARLIN_MIN_NK or k_pad < _PROJ_MARLIN_MIN_NK or not t.qweight.is_cuda:
+            return None
+        from . import marlin_port as MP
+        if MP.charger(compiler=False) is None:
+            return None
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("marlin dense : disposition préparée pendant une capture de graphe — "
+                               "l'échauffement eager doit précéder (REGLES § 7)")
+        prep = (*MP.preparer_dense(t), N, k_pad)
+        t._marlin_dense = prep
+    from . import marlin_port as MP
+    w, s_, g, N, k_pad = prep
+    CHEMINS_NVFP4[f"marlin_dense_{N}x{k_pad}"] += 1
+    ws = _MARLIN_ESPACES.get(xf.device)
+    if ws is None:
+        ws = _MARLIN_ESPACES[xf.device] = MP.espace_travail(xf.device)
+    if xf.shape[-1] != k_pad:
+        xf = torch.nn.functional.pad(xf, (0, k_pad - xf.shape[-1]))
+    return MP.gemm_dense(xf.contiguous(), w, s_, g, N, k_pad, ws)[:, : t.shape[0]]
+
+
 _DENSE_NVFP4 = os.environ.get("ACVRAM_DENSE_NVFP4", "triton")
 _DENSE_NVFP4_MIN_M = int(os.environ.get("ACVRAM_DENSE_NVFP4_MIN_M", "4"))
 # Plafond (octets) du pic de déquantification du repli GEMM d'int8_matmul,

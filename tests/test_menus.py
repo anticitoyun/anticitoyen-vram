@@ -296,6 +296,9 @@ def _du_h(octets):
 
 @pytest.fixture(scope="module")
 def poste():
+    if not INVENTAIRE.exists():
+        # instantané public : l'inventaire du disque et les menus restent privés (publier-github.sh)
+        pytest.skip(f"{INVENTAIRE.name} absent de cet arbre")
     racines, lignes = racines_du_tsv(INVENTAIRE)
     presentes = {k: v for k, v in racines.items() if v.is_dir()}
     if not presentes:
@@ -564,6 +567,8 @@ def test_i_verdicts_cites_existent_et_contiennent_chiffres():
     # Regex : chiffre suivi de fichier verdict ou poste7
     verdict_pattern = r'([\d,]+)\s+[^—]*—\s*((verdict|poste7)-[\w-]+)'
 
+    if not all(p.exists() for p in menu_files.values()):
+        pytest.skip("menus absents de cet arbre (instantané public)")
     for menu_name, menu_path in menu_files.items():
         with open(menu_path) as f:
             content = f.read()

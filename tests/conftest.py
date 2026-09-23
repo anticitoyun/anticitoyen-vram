@@ -35,6 +35,27 @@ import torch
 import torch.nn.functional as F
 
 
+# Instantané public (GitHub, publier-github.sh) : scratchpad/ n'y est pas publié. Un test qui charge un
+# script de scratchpad/ ne peut pas y tourner ; on ne le collecte pas, au lieu de le laisser échouer à
+# l'import. Dans le dépôt complet, rien ne change (le dossier existe).
+_RACINE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SANS_SCRATCHPAD = not os.path.isdir(os.path.join(_RACINE, "scratchpad"))
+_GARDES_SANS_SCRATCHPAD = {"test_depot_sans_identite.py"}  # n'y cite que des préfixes exemptés
+
+
+def pytest_ignore_collect(collection_path, config):
+    if not _SANS_SCRATCHPAD or collection_path.suffix != ".py":
+        return None
+    if not collection_path.name.startswith("test_") or collection_path.name in _GARDES_SANS_SCRATCHPAD:
+        return None
+    try:
+        texte = collection_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    import re
+    return True if re.search(r"""["']scratchpad["'/]""", texte) else None
+
+
 @pytest.fixture(scope="session")
 def tiny_checkpoint(tmp_path_factory):
     """Un point de contrôle de 4 couches, de forme llama, assez petit pour être

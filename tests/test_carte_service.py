@@ -73,6 +73,43 @@ def test_le_qui_disparait_et_le_verrou_tombe_a_la_mort_du_serveur(tmp_path):
     assert _flock_libre(verrou), "verrou toujours tenu apres la mort du serveur"
 
 
+def test_gardien_n_efface_pas_le_qui_d_un_nouveau_detenteur(tmp_path):
+    """anticitoyen-vram-jxm : le gardien d'un service NE POLLE qu'toutes les 5 s.
+    Si, entre la mort du service et le prochain reveil du gardien, un NOUVEAU
+    detenteur a deja pris le verrou libere et ecrit SON `.qui` a la meme adresse
+    (fichier partage par carte), le gardien ne doit PAS l'effacer : il ne connait
+    QUE son propre PID de service, mort depuis. Reproduit sans attendre le vrai
+    delai de 5 s : le faux service meurt vite (sleep 1), on remplace `.qui` par
+    un nouveau detenteur AUSSITOT apres sa mort (avant le premier reveil du
+    gardien, qui n'a pas encore eu lieu), puis on attend le prochain reveil pour
+    verifier qu'il n'a rien touche."""
+    verrou = tmp_path / "verrou.lock"
+    info = tmp_path / "verrou.lock.qui"
+    r = subprocess.run(["bash", str(CARTE), "sleep", "1"],
+                       env=_env(verrou, ACVRAM_TYPE="service", ACVRAM_NOM="service-court",
+                                ACVRAM_SERVICE_LOG=str(tmp_path / "srv.log")),
+                       capture_output=True, text=True, timeout=30)
+    ancien_pid = r.stdout.strip()
+    # attendre la mort REELLE du service (~1 s), avant le premier reveil du gardien (5 s)
+    deadline = time.time() + 4
+    while time.time() < deadline and subprocess.run(["kill", "-0", ancien_pid]).returncode == 0:
+        time.sleep(0.1)
+    assert subprocess.run(["kill", "-0", ancien_pid]).returncode != 0, "le faux service (sleep 1) devrait être mort"
+    # un NOUVEAU detenteur prend la place, tout de suite : son .qui a un AUTRE pid
+    nouveau = subprocess.Popen(["sleep", "20"])
+    try:
+        info.write_text(f"{nouveau.pid} {int(time.time())} nouveau-detenteur mesure\n")
+        # laisser le temps au gardien de se reveiller au moins une fois (poll 5 s)
+        # et de constater la mort de L'ANCIEN pid — sans toucher au .qui du nouveau
+        time.sleep(7)
+        assert info.exists(), ".qui du NOUVEAU détenteur effacé par le gardien de l'ANCIEN service"
+        champs = info.read_text().split()
+        assert champs[0] == str(nouveau.pid), f".qui altéré : {champs}"
+    finally:
+        nouveau.terminate()
+        nouveau.wait(timeout=5)
+
+
 def test_mesure_refusee_nommee_pendant_qu_un_service_tient(tmp_path):
     """Une prise de mesure arrivant pendant qu'un service tient est REFUSEE tout
     de suite (code 4), nommant le detenteur, sans entrer dans l'attente de 30 min."""

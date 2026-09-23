@@ -1,0 +1,30 @@
+# Pièce 100 B — qualité des projections nvfp4 (alpha commun q/k/v) : TENUE 5/5 pour le tout-nvfp4 (0,21) ET le mixte o_proj int8 (0,14), pile qkv 48/48 — 23/09 (poste6)
+
+* **instrument** : `outils/gpu/mesure/kl-lot-mele-p100.py` (fichier suivi ; kl-b.py de la 81 + composition.py de la 98 : teacher forcing 8 pas, 5 dumps HF bf16 `kl-coder-texte-22-09/dumps`, eager, séquence 0 en ligne 0 ; compositions C1 b=1 · C3 préfixes b=4 · C5/C6 contenu étranger b=4 · C7 contenu étranger b=12 ; chaque composition jouée deux fois, écart de rejeu en ulp bf16) ; chaîne `scratchpad/poste6-p100b-23-09/kl.sh` (témoin i8c, A, B dans la même prise), porte `porte.py` ; conversions `convertir.sh A|B` en MODE SERVICE DÉCLARÉ (règle des conversions, chef 23/09 : ACVRAM_TYPE=service, ACVRAM_DUREE_MAX=2400, .qui « conversion 100 B »)
+* **commit** : 598aa653 (branche poste6 = main e8bfbafe + `--alpha-commun-qkv`, `convert.py::_precalculer_alpha_commun_qkv`, test `tests/test_alpha_commun_qkv.py` — rend faux vérifié en cassant le code : 2 échecs / 3) ; `acvram.__file__` sous l'arbre poste6 asserté par chaque processus
+* **régime** : justesse (eager, sans graphe), eco 2700 ; compute-apps début = fin = llama-server 4627 ; alias A `Qwen3-Coder-30B-A3B-nvfp4-qkv-alphaqkv-23-09` (`--alpha-commun-experts --obs-min 0 --alpha-commun-qkv`, 192 projections nvfp4, journal « alpha commun q/k/v : 48 triplets », 6 144 paires d'experts), B `…-alphaqkv-o-i8-23-09` (idem + `--snr-floor 30 --promotion-classes o_proj` : 48 o_proj int8, 144 q/k/v nvfp4) ; pile qkv construite **48/48** sur A et B (le but de l'option — la 42 en avait 0/48)
+* **scellé** : `scratchpad/poste6-p100b-23-09/scelle.md`, écrit avant : A invite0 0,60-0,85 (une chance sur deux), B invite0 0,35-0,60 tenue 5/5 ; KL(B) < KL(A) sur ≥ 4 invites (contrôle du prédicteur SNR) ; porte littérale : A échoue sur invite0 par le format, B la tient sur ≥ 4 invites ; rejeu 0 ulp ; issue gênante : A > 0,74 → le tout-nvfp4 tombe
+* **mesuré** (kl_max par invite, 8 pas, seuil 0,74 à b=1) :
+
+  | alias | invite0 | 1 | 2 | 3 | 4 | max b=1 | argmax = HF (C1) | rejeu (ulp) | porte littérale | lecture Δ(Cx−C1) |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | témoin qkvo-i8c | 0,008 | 0,119 | 0,519 | 0,068 | 0,233 | 0,519 | 8 8 7 7 7 | 0 | — | — |
+  | **A tout-nvfp4** | 0,105 | 0,210 | 0,054 | 0,063 | 0,080 | **0,210** | 8 8 8 7 8 | 0 | 12/20 | **20/20** |
+  | **B mixte o int8** | 0,127 | 0,120 | 0,066 | 0,060 | 0,139 | **0,139** | 8 8 8 8 8 | 0 | 15/20 | 19/20 |
+
+  Lot mêlé (C3/C5/C6/C7), témoin : invite2 0,68-0,85 (étendue 0,127), invite4 0,24-0,32 ; A : invite2 0,045-0,064, invite4 0,060-0,104 ; B : invite2 0,05-0,07. La porte littérale n'échoue que sur les invites 0-1, où le témoin est à 0,008-0,12 et le candidat à 0,08-0,20 : c'est l'écart de FORMAT à b=1, pas le lot (Δ(Cx − C1) de A : −0,043 à +0,027, dans la marge 20/20 ; B : un seul cas hors marge, invite1 C5, Δ +0,044 contre −0,023 + 0,05 = +0,027 admis, dépassé de 0,017). Durées des conversions : A 2 233 s, B 1 543 s (B plus courte : 48 recherches AWQ nvfp4 en moins) ; un premier essai de A tué à 1 800 s par carte.sh (3 shards sur 5 écrits, effacé).
+
+* **verdict** : **les deux alias tiennent la porte de justesse à b=1 (5/5, A 0,21 et B 0,14 contre 0,52 pour l'int8 servi)**, rejeu 0 ulp, pile qkv 48/48 : le levier énergie de la 99 ne tombe pas par la qualité. Prédictions : P1 **réfutées dans le bon sens** (A invite0 0,105 contre 0,60-0,85 prédit ; B 0,127 contre 0,35-0,60) — la KL 0,735 de la 42 ne se reproduit pas avec l'alpha commun ; **le contrôle du prédicteur SNR est FAUX** : KL(B) < KL(A) sur 1 invite sur 5 seulement — passer o_proj (la classe nvfp4 la plus abîmée au SNR, 20,5-22 dB) en int8 n'améliore pas la KL, comme la 26 pour la MSE par bloc : le SNR de poids classe les tenseurs, pas la qualité servie. Porte appariée à lot mêlé : la lecture littérale de REGLES (candidat ≤ témoin + marge) compare ici un alias à un autre et mesure le format (A 12/20, B 15/20, tous les échecs sur les invites 0-1 où le témoin est presque parfait) ; la lecture « le lot n'abîme pas le candidat plus que le témoin » (Δ contre C1) rend A 20/20 et B 19/20. **Je rends les deux ; le chef tranche la lecture qui vaut pour un changement d'ALIAS** (la 98 l'a écrite pour un changement de moteur à alias égal). Couches/projections qui coûtent : au SNR, o_proj (couches 12, 39, 15, 27, 8, 3 à 20,5-20,6 dB) puis v_proj ; mais la KL ne le confirme pas (B ≈ A) — aucune attribution par couche à la KL n'a été mesurée (48 alias mixtes, non fait). Mixte : **B n'achète pas de qualité** (0,14 contre 0,21, même bande, pire sur les invites 0 et 4) et garde 55 % des octets ; il ne vaut que par la vitesse de o_proj (100 A, J1 échoué à M=1), pas par la qualité.
+* **durée** : prévue conversions 2 × 12 min + KL 5 min ; tenue conversions 30 min (tuée) + 37 min + 26 min en service déclaré, KL 2 min 43 (trois chargements, 59 + 60 + 39 s) ; carte totale ≈ 96 min
+
+## Ce que cela ordonne
+
+* Pièce 101 : servir **A** (tout-nvfp4, −0,42 Go/pas, −0,11 J/pas prédit à la 99) si la 100 A donne un noyau dense ≥ int8 sur qkv ET o ; sinon **B** (o_proj int8, −0,06 J/pas) — les deux sont justes ; A est le seul qui ferme la porte énergie à lui seul.
+* Régler la lecture de la porte à lot mêlé pour un changement d'alias (REGLES § 1) : littérale (format compris) ou Δ contre C1 (lot seul). Sans décision, un alias meilleur que le témoin sur 3 invites et moins bon de 0,1 nat sur 2 « échoue » la porte.
+* Le prédicteur SNR par tenseur ne sert pas à choisir les classes à promouvoir (26 bis) ; une promotion se juge par KL, comme ici.
+
+## Contrôles et limites
+
+* Formats lus au manifeste après conversion (règle 6 de la 55) : A 192 nvfp4, B 144 nvfp4 + 48 int8, `alpha_commun_qkv=True` ; le journal de conversion porte « 48 triplets ».
+* La régime-ligne n'imprime pas le format des projections : la preuve du chemin servi est le manifeste + la pile qkv 48/48 + une KL différente du témoin.
+* B ≈ A sur la KL alors que B lit 2 × les octets d'o_proj : la qualité n'ordonne pas le choix A/B, seule la vitesse du noyau (100 A) le fait.

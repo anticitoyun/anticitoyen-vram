@@ -20,6 +20,12 @@ def _run_a_sec(alias: str, tsv_dir: pathlib.Path, model_dir: pathlib.Path,
     env = dict(os.environ)
     env["HOME"] = str(tsv_dir.parent)   # TSV cherché dans $HOME/TSV/
     env["ACVRAM_SERVEUR_A_SEC"] = "1"
+    # binaire factice : le vrai /usr/bin/acvram, sous un HOME neuf, crée son venv et lance pip (réseau,
+    # plusieurs minutes) juste pour « --version » ; et il est absent d'une CI sans le paquet
+    faux = tsv_dir.parent / "faux-acvram"
+    faux.write_text("#!/bin/sh\necho 'acvram 0.0.0-essai'\n")
+    faux.chmod(0o755)
+    env["ACVRAM_PAQUET_BIN"] = str(faux)
     if env_extra:
         env.update(env_extra)
     return subprocess.run(

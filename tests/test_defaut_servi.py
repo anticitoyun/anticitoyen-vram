@@ -120,6 +120,24 @@ DEFAUTS_PAR_VERSION = {
         },
         "mla_core=tf32(≤2048 clés) mla_prep=grille mla_glue=2 glue=compact(8) prefill_glue=compact",
     ),
+    "0.6.38": (                                                          # 0.6.37 + livraison 0.6.38 (23/09) : w13 au décodage
+        {                                                                # par défaut (pièce 82 ter), MAX_GRAPHS 16→64 (pièce 85),
+                                                                           # réduction d'attention déroulée (pièce 92)
+            "GLUE_COMPACT": "1", "ATTN_WARPS_COMPACT": "8", "PREFILL_COMPACT": "1",
+            "MLA_CORE": "tf32", "MLA_CORE_MAX_CLES": "2048", "MLA_GLUE": "2",
+            "MARLIN_DISTINCT": "0", "MOE_DECODE_MMA": "1", "MOE_DECODE_MMA_MARLIN": "0",
+            "KV_INT8_CANAL": "0", "GODETS_B": "1", "GEMV_LAYOUT": "marlin", "PILE_SANS_RENDU": "",
+            "CPUS": "", "MLA_PREP_GRILLE": "1",
+            "SAMPLER_LENT": "0", "RAPATRIEMENT_FLUX": "0", "ETROITES_FORME": "",
+            "CAPTURE_MEM_MIN_MIO": "1024", "CAPTURE_DELAI_S": "120",
+            "MOE_TENSOR": "1", "MOE_TENSOR_FUSION": "1", "MOE_TENSOR_MIN_T": "8",
+            "GEMV_SPLITK": "1",
+            "MOE_W13": "1",                                              # w13 au décodage, préfill séparé — pièce 82 ter
+            "MAX_GRAPHS": "64",                                          # plafond relevé, sans éviction — pièce 85
+            "ATTN_REDUC_DEROULEE": "1",                                  # réduction déroulée, au bit (−1,9 %) — pièce 92
+        },
+        "mla_core=tf32(≤2048 clés) mla_prep=grille mla_glue=2 glue=compact(8) prefill_glue=compact",
+    ),
 }
 
 

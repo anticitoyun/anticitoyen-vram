@@ -173,6 +173,13 @@ class ConversionOptions:
     # mesure n'est pas faite : coût = une seconde recherche AWQ par paire
     # d'experts à la conversion.
     alpha_commun_experts: bool = False
+    # 23/09 (pièce 100 B, poste6) : le même alpha commun pour q/k/v d'une
+    # couche d'attention — ils lisent la même entrée, et `stack_nvfp4_linears`
+    # (layers.py, `_scaler_commun`) refuse la pile qkv dès que la calibration
+    # AWQ leur donne trois échelles d'activation distinctes (pièce 42 :
+    # q, k, v servis en trois GEMM, +0,9 ms/pas). o_proj n'est pas concerné
+    # (autre entrée). Opt-in ; prix : une recherche AWQ de plus par couche.
+    alpha_commun_qkv: bool = False
     # poste7 (`poste7-hadamard-16-09.md`, 16/09) : la métrique W4A4 des experts
     # (`quantize_activation_nvfp4`, cb2784b) RÉFUTÉE plus mauvaise (1,0229)
     # que sans elle (1,0183) — le défaut n'est pas l'alpha choisi mais le
@@ -650,6 +657,54 @@ def _precalculer_alpha_commun_gate_up(
     resultat["__experts_paires__"] = experts_vus       # compte, retiré par l'appelant
     return resultat
 
+
+
+def _precalculer_alpha_commun_qkv(
+    model_path: str, spec, router: "TensorRouter",
+    stats: Optional[dict[str, ActStats]], opts: ConversionOptions,
+    qdev: torch.device) -> dict[str, torch.Tensor]:
+    """Pièce 100 B : un alpha AWQ COMMUN par triplet q_proj/k_proj/v_proj
+    (même format des trois côtés, ni bf16/fp16). Même mécanique que
+    `_precalculer_alpha_commun_gate_up` : une file par projection, appariement
+    dès que les trois sont là (l'ordre du checkpoint n'est pas garanti), une
+    seconde lecture du disque acceptée. Rend, par nom de tenseur, l'échelle
+    forcée ; rien pour un triplet dont l'alpha s'effondre à l'identité (les
+    trois scalers identité se fusionnent déjà)."""
+    attente: dict[str, dict[str, torch.Tensor]] = {}
+    resultat: dict[str, torch.Tensor] = {}
+    for name, tensor in _adapt_hf(_iter_checkpoint(model_path), spec):
+        if tensor.dim() != 2:
+            continue
+        m = re.match(r"(.*\.self_attn\.)([qkv])_proj\.weight$", name)
+        if not m:
+            continue
+        cle, proj = m.group(1), m.group(2)
+        attente.setdefault(cle, {})[proj] = tensor
+        if len(attente[cle]) < 3:
+            continue
+        trio = attente.pop(cle)
+        noms = [f"{cle}{p}_proj.weight" for p in "qkv"]
+        fmts = {router.format_for(n) for n in noms}
+        if len(fmts) != 1 or fmts & {"bf16", "fp16"}:
+            continue
+        fmt = fmts.pop()
+        st = next((stats.get(n) for n in noms if stats and stats.get(n) is not None), None)
+        ws = [trio[p].to(qdev, dtype=torch.float32) for p in "qkv"]
+        st_dev = None if st is None else ActStats(st.mean_abs.to(qdev), None, st.n_samples)
+        try:
+            scale, _ = alpha_commun_gate_up(
+                ws, st_dev, fmt, group_size=opts.group_size,
+                use_hadamard=router.wants_hadamard(noms[0], fmt), n_grid=opts.n_grid)
+        except torch.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            scale, _ = alpha_commun_gate_up(
+                [trio[p].to(torch.float32) for p in "qkv"], st, fmt,
+                group_size=opts.group_size,
+                use_hadamard=router.wants_hadamard(noms[0], fmt), n_grid=opts.n_grid)
+        if scale is not None:
+            for n in noms:
+                resultat[n] = scale.detach().cpu().clone()
+    return resultat
 
 
 def _quantize_on(dev: torch.device, tensor: torch.Tensor, fmt: str,
@@ -1640,6 +1695,10 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         print(f"[acvram] alpha commun gate/up : {len(alpha_commun) // 2} "
               f"paires fusionnees" + (f", dont {paires_experts} paires d'experts MoE"
                                       if opts.alpha_commun_experts else ""), flush=True)
+    if opts.alpha_commun_qkv:
+        commun_qkv = _precalculer_alpha_commun_qkv(model_path, spec, router, stats, opts, qdev)
+        alpha_commun.update(commun_qkv)
+        print(f"[acvram] alpha commun q/k/v : {len(commun_qkv) // 3} triplets partagent leur échelle", flush=True)
     # poste7 (gate!=up, main 7c3698d) : `_try_build_stacks` ne force plus
     # gate_proj == up_proj -- il fusionne quand la recherche les rend egaux,
     # garde une seconde ligne/quantification sinon. L'echelle forcee a
