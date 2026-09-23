@@ -338,13 +338,24 @@ fi
 _fils=$!
 _garde=
 if [ "$DUREE_MAX" -gt 0 ]; then
+  # anticitoyen-vram-575 : ce garde-fou heritait stdout/stderr de carte.sh (donc
+  # de l'appelant) sans jamais les fermer — seuls 8/9 l'etaient. Un appelant qui
+  # CAPTURE la sortie (`subprocess.run(capture_output=True)`, un pipe) attend
+  # l'EOF des DEUX tuyaux ; celui du garde ne venait qu'a l'expiration de
+  # DUREE_MAX (1800 s par defaut), meme quand la commande finissait en 1 s. Pire :
+  # `kill "$_garde"` plus bas ne tue que la sous-shell, pas le `sleep` qu'elle a
+  # lance en premier plan — sans `pkill -P`, ce sleep devient orphelin et garde
+  # les descripteurs heures apres. Deux correctifs : fermer 1/2 ici (l'appelant
+  # ne bloque plus, meme si le nettoyage rate), et tuer explicitement les
+  # enfants du garde a la sortie (plus d'orphelin).
   ( sleep "$DUREE_MAX"; touch "$_TIMEOUT"
     pkill -TERM -P "$_fils" 2>/dev/null; kill -TERM "$_fils" 2>/dev/null; sleep 10
-    pkill -KILL -P "$_fils" 2>/dev/null; kill -KILL "$_fils" 2>/dev/null ) 8>&- 9>&- &
+    pkill -KILL -P "$_fils" 2>/dev/null; kill -KILL "$_fils" 2>/dev/null
+  ) 8>&- 9>&- </dev/null >/dev/null 2>&1 &
   _garde=$!
 fi
 wait "$_fils"; code=$?
-[ -n "$_garde" ] && { kill "$_garde" 2>/dev/null; wait "$_garde" 2>/dev/null; }
+[ -n "$_garde" ] && { pkill -TERM -P "$_garde" 2>/dev/null; kill "$_garde" 2>/dev/null; wait "$_garde" 2>/dev/null; }
 if [ -f "$_TIMEOUT" ]; then
   rm -f "$_TIMEOUT"
   _eco="/tmp/acvram-eco-${ACVRAM_CARTE:-0}.json"
