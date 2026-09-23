@@ -391,6 +391,21 @@ def _repin_echanger_reel(m, sortant: int, entrant: int) -> None:
             verifier_table(tbl)
 
 
+def _raison_principale_refus(refusees: dict) -> Optional[str]:
+    """Pièce 90 (restes de la pièce 88, poste1) : une clé de graphe refusée
+    (OOM, opération non capturable…) laisse les AUTRES clés capturées —
+    `GraphRunner.enabled` reste True, `graphes=on` continue de s'afficher
+    alors qu'un bras entier sert en eager sans que la ligne ni /metrics ne
+    le disent. `refusees` (`GraphRunner._echecs()["refusees"]`) associe
+    chaque clé refusée à sa raison ; la raison PRINCIPALE est la plus
+    fréquente parmi les clés refusées (l'ordre d'insertion départage une
+    égalité, via `Counter` qui garde le premier vu)."""
+    if not refusees:
+        return None
+    from collections import Counter
+    return Counter(refusees.values()).most_common(1)[0][0]
+
+
 def _regime_echelle_awq(model) -> str:
     """Porteur de l'échelle AWQ des experts, agrégé sur les couches MoE :
     « gemv(N/M) », « torch(N/M) », « aucune », ou « mixte(...) » quand les
@@ -831,6 +846,15 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # (poste7-kv-lm4-clos-17-09 § 1)
             "graphes": self.graphs is not None and bool(self.graphs.enabled),
             "graphes_abandon": getattr(self.graphs, "abandon_capture", None) if self.graphs is not None else None,
+            # pièce 90 (restes pièce 88) : une clé refusée ne coupe pas les
+            # AUTRES clés — `graphes=on` reste vrai globalement, mais doit le
+            # dire : combien de clés sont refusées, et la raison la plus
+            # fréquente. `_echecs` est une méthode du VRAI GraphRunner ;
+            # `getattr` la rend optionnelle pour un faux GraphRunner de test.
+            "graphes_refus_n": (len(self.graphs._echecs()["refusees"])
+                                if self.graphs is not None and hasattr(self.graphs, "_echecs") else 0),
+            "graphes_refus_principale": (_raison_principale_refus(self.graphs._echecs()["refusees"])
+                                         if self.graphs is not None and hasattr(self.graphs, "_echecs") else None),
             "repli_eager": int(getattr(self.graphs, "replis_eager", 0)) if self.graphs is not None else 0,
             "replis_eager_raisons": sorted(getattr(self.graphs, "_raisons_eager_vues", set())) if self.graphs is not None else [],
             "slots_hybrides": getattr(self.graphs, "max_slots", None) if self.graphs is not None else None,
@@ -931,7 +955,14 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                       if not r["graphes"] and r.get("graphes_demandes") and r.get("graphes_raison") else "")
         if r.get("graphes_abandon"):
             raison_off = f"abandon({r['graphes_abandon']})"        # capture au-delà du délai : eager assumé
-        return (f"régime {etat} — graphes={'on' if r['graphes'] and not r.get('graphes_abandon') else 'off' + raison_off}"
+        graphes_on = r["graphes"] and not r.get("graphes_abandon")
+        # pièce 90 : `on` seul ment quand des clés sont refusées à côté des
+        # clés vivantes — la ligne porte alors combien et pourquoi, comme
+        # `graphes=off(...)` porte déjà sa cause.
+        refus_n = r.get("graphes_refus_n", 0) if graphes_on else 0
+        graphes_texte = (f"on(refus={refus_n}:{r['graphes_refus_principale']})" if refus_n
+                         else ("on" if graphes_on else "off" + raison_off))
+        return (f"régime {etat} — graphes={graphes_texte}"
                 f"{'' if slots is None else f'(hybrides≤{slots})'} "
                 f"repli_eager={r.get('repli_eager', 0)} "
                 # `graphes_n=`, pas `graphes=` : la ligne porte déjà
