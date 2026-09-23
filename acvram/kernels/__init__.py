@@ -1415,6 +1415,14 @@ def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
     # groupe ; ni le Triton du poste E ni la variante CANAL. Sans le symbole :
     # None → gather_fixed (jumeau kv_k8v4) + decode_attention_fixed.
     if getattr(cache.cfg, "k8v4", False):
+        # Repli 104 (1) : puits en V int8 — la variante qui lit la réserve, sinon le jumeau (gather_fixed)
+        if getattr(cache, "puits_v", None) is not None:
+            if not hasattr(ext, "paged_attention_k8v4_puits"):
+                return None
+            return ext.paged_attention_k8v4_puits(
+                q.contiguous(), cache.k, cache.k_scale, cache.v, cache.v_scale,
+                cache.puits_v, cache.puits_vs, tables.contiguous(), seq_lens.contiguous(),
+                cache.cfg.num_kv_heads, float(scale), int(q_len), int(window), int(cache.cfg.puits))
         if not hasattr(ext, "paged_attention_k8v4"):
             return None
         return ext.paged_attention_k8v4(
