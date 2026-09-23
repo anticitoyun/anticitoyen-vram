@@ -8,9 +8,14 @@ _sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 
 from racine_modeles import racine_modeles as _racine_modeles  # noqa: E402
 _RACINE = _racine_modeles()   # ACVRAM_MODELES → ~/.config/acvram/modeles → littéral (20/09)
 
-_REPO = os.environ.get("ACVRAM_ARBRE", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_REPO = os.environ.get("ACVRAM_ARBRE", os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 sys.path.insert(0, _REPO)
 import torch, acvram
+# 23/09 (pièce 82 ter) : la racine valait outils/gpu depuis le déplacement dans outils/gpu/mesure/ — `acvram` venait
+# alors de l'installation (l'arbre principal), pas de l'arbre mesuré, sans rien dire. Refus si ce n'est pas l'arbre.
+if not os.path.realpath(acvram.__file__).startswith(os.path.realpath(_REPO) + os.sep):
+    raise SystemExit(f"capture-godets : acvram importé de {acvram.__file__}, pas de l'arbre {_REPO}")
+print("arbre", _REPO, flush=True)
 from acvram.engine.loader import load_model
 from acvram.engine.runner import Engine
 from acvram.engine.sampler import SamplingParams
