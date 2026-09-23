@@ -56,14 +56,27 @@ def _probs_kernel(logits_ptr, out_ptr, E, BE: tl.constexpr):
     tl.store(out_ptr + t * E + i, tl.where(masque, probs, 0.0), mask=masque)
 
 
-def _chrono(fn, rep: int) -> tuple[float, float]:
-    """Médiane et p90 en µs, sous graphe CUDA (le régime du décodage)."""
+INTRA = 200                       # lancements DANS le graphe (voir _chrono)
+
+
+def _chrono(fn, rep: int, intra: int = INTRA) -> tuple[float, float]:
+    """Médiane et p90 en µs PAR LANCEMENT, sous graphe CUDA.
+
+    FAUTE CORRIGÉE (23/09, première passe de la pièce 68) : avec un seul
+    lancement dans le graphe, `Event … g.replay() … Event` mesurait la latence
+    de rejeu — le bras `vide` rendait 4,77 µs et le bras `probs` sortait PLUS
+    haut que le noyau complet, ce qui est impossible. Cette latence n'est pas
+    ce que le pas paie : dans le pas, le noyau est un nœud parmi d'autres d'un
+    graphe déjà lancé. On met donc `intra` lancements dans le graphe et on
+    divise : le plancher de rejeu est amorti d'autant, et ce qui reste est le
+    coût d'un nœud — la grandeur que `nsys` rapporte (6,3 µs, pièce 66)."""
     for _ in range(12):
         fn()
     torch.cuda.synchronize()
     g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(g):
-        fn()
+        for _ in range(intra):
+            fn()
     for _ in range(8):
         g.replay()
     torch.cuda.synchronize()
@@ -72,14 +85,16 @@ def _chrono(fn, rep: int) -> tuple[float, float]:
         d, f = torch.cuda.Event(True), torch.cuda.Event(True)
         d.record(); g.replay(); f.record()
         torch.cuda.synchronize()
-        ms.append(d.elapsed_time(f) * 1e3)
+        ms.append(d.elapsed_time(f) * 1e3 / intra)
     ms.sort()
     return statistics.median(ms), ms[int(0.9 * len(ms)) - 1]
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rep", type=int, default=300)
+    ap.add_argument("--rep", type=int, default=100)
+    ap.add_argument("--intra", type=int, default=INTRA,
+                    help="lancements dans le graphe : amortit le plancher de rejeu")
     ap.add_argument("--json")
     ap.add_argument("-T", type=int, default=1)
     ap.add_argument("-E", type=int, default=128)
@@ -98,25 +113,25 @@ def main() -> int:
         BE *= 2
     BE = max(BE, 32)
 
-    r = {"forme": {"T": T, "E": E, "k": K, "BE": BE}, "rep": a.rep, "bras": {}}
-    r["bras"]["vide"] = _chrono(lambda: _vide_kernel[(T,)](sortie, T, num_warps=1), a.rep)
-    r["bras"]["probs"] = _chrono(lambda: _probs_kernel[(T,)](logits, sortie, E, BE=BE, num_warps=1), a.rep)
+    r = {"forme": {"T": T, "E": E, "k": K, "BE": BE}, "rep": a.rep, "intra": a.intra, "bras": {}}
+    r["bras"]["vide"] = _chrono(lambda: _vide_kernel[(T,)](sortie, T, num_warps=1), a.rep, a.intra)
+    r["bras"]["probs"] = _chrono(lambda: _probs_kernel[(T,)](logits, sortie, E, BE=BE, num_warps=1), a.rep, a.intra)
     for w in (1, 4, 8):
         nom = "servi" if w == 1 else f"warps{w}"
         r["bras"][nom] = _chrono(
-            lambda w=w: RP.route_fusee(logits, None, K, False, True, 1.0, None, usage, num_warps=w), a.rep)
+            lambda w=w: RP.route_fusee(logits, None, K, False, True, 1.0, None, usage, num_warps=w), a.rep, a.intra)
 
-    print(f"forme T={T} E={E} k={K} BE={BE} · {a.rep} rejeux sous graphe")
+    print(f"forme T={T} E={E} k={K} BE={BE} · {a.rep} rejeux × {a.intra} lancements dans le graphe")
     for nom, (med, p90) in r["bras"].items():
         print(f"  {nom:8s} {med:6.2f} µs (p90 {p90:6.2f})")
     v, p, s = (r["bras"][n][0] for n in ("vide", "probs", "servi"))
     print(f"  → lancement {v:.2f} · softmax {p - v:+.2f} · sélection {s - p:+.2f} µs")
     print(f"  → sélection sur 48 couches : {(s - p) * 48:.0f} µs/pas")
     verdicts = []
-    if v >= 4.5:
-        verdicts.append("R1 TENUE : le temps est le lancement, aucune réécriture ne le rend")
-    if p >= 5.0:
-        verdicts.append("R2 TENUE : le softmax domine, et il est intouchable au bit")
+    if v >= 2.0:
+        verdicts.append("R1 TENUE : le nœud vide coûte déjà ≥ 2 µs — le plancher, pas le calcul")
+    if p - v >= 3.0:
+        verdicts.append("R2 TENUE : le softmax (≥ 3 µs au-dessus du vide) domine, et il est intouchable au bit")
     gain_warps = s - min(r["bras"]["warps4"][0], r["bras"]["warps8"][0])
     if gain_warps <= 1.0:
         verdicts.append(f"R3 TENUE : même hors du bit, les warps ne rendent que {gain_warps:.2f} µs")
