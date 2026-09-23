@@ -240,3 +240,89 @@ def test_c15_3c_le_temoin_rend_visible_tout_ecart_de_somme_a_2_moins_8():
     a = torch.nn.functional.linear(x.float(), w.float()).to(torch.bfloat16)                  # une somme fp32
     b = torch.nn.functional.linear(x.double(), w.double()).to(torch.bfloat16)                # la somme exacte
     assert int((a != b).sum()) > 0
+
+
+# ---------------------------------------------------------------------------
+# Pièce 68 : l'usage des experts est compté par UN atomique vectorisé après la
+# boucle, au lieu de k atomiques sérialisés dedans (2,56 µs sur 4,56 à b = 1,
+# revue/poste1-piece68-routage-b1-23-09.md). L'addition entière est commutative
+# et les k experts d'un jeton sont distincts : le compte doit être identique au
+# bit. Ces tests visent ce qu'un atomique groupé peut casser — le masque de
+# validité, le vecteur compté, et les créneaux j ≥ k.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("E,k", [(128, 8), (128, 32), (64, 1)])
+def test_p68_usage_groupe_au_bit_contre_le_compte_de_reference(E, k):
+    rp = _rp()
+    torch.manual_seed(900 + E + k)
+    T = 64
+    lg = (torch.randn(T, E) * 3).to(DEV)
+    lg[7, :6] = lg[7, 9]                                   # égalités fabriquées
+    valid = torch.ones(T, dtype=torch.bool, device=DEV); valid[40:] = False
+    u = torch.zeros(E, dtype=torch.int64, device=DEV)
+    _, ti, _ = rp.route_fusee(lg, None, k, False, True, 1.0, valid, u)
+    attendu = torch.zeros(E, dtype=torch.int64, device=DEV).scatter_add_(
+        0, ti.long()[:40].reshape(-1), torch.ones(40 * k, dtype=torch.int64, device=DEV))
+    assert torch.equal(u, attendu), (u.sum().item(), attendu.sum().item())
+    assert int(u.sum()) == 40 * k                          # rien pour les 24 jetons invalides
+
+
+def test_p68_aucun_jeton_valide_ne_compte_rien():
+    """Le masque de validité porte sur le vecteur entier : tout invalide → 0.
+    Un atomique groupé qui oublierait `v != 0` compterait quand même."""
+    rp = _rp()
+    torch.manual_seed(901)
+    lg = (torch.randn(8, 128) * 3).to(DEV)
+    u = torch.zeros(128, dtype=torch.int64, device=DEV)
+    rp.route_fusee(lg, None, 8, False, True, 1.0,
+                   torch.zeros(8, dtype=torch.bool, device=DEV), u)
+    assert int(u.sum()) == 0
+
+
+def test_p68_les_creneaux_au_dela_de_k_ne_comptent_pas():
+    """`ti` est un vecteur de 32 dont seules les k premières places valent
+    quelque chose ; les autres sont à zéro. Sans le masque `jj < k`, l'expert 0
+    recevrait 32 − k incréments parasites PAR JETON — c'est la faute la plus
+    facile à commettre, et la plus silencieuse (elle ne change ni topi ni topw)."""
+    rp = _rp()
+    torch.manual_seed(902)
+    T, E, k = 32, 128, 2
+    lg = (torch.randn(T, E) * 3).to(DEV)
+    u = torch.zeros(E, dtype=torch.int64, device=DEV)
+    _, ti, _ = rp.route_fusee(lg, None, k, False, True, 1.0, None, u)
+    assert int(u.sum()) == T * k, int(u.sum())
+    assert int(u[0]) == int((ti.long() == 0).sum()), (int(u[0]), int((ti.long() == 0).sum()))
+
+
+def test_p68_le_departage_des_egalites_dans_le_top_k_mord():
+    """TROU TROUVÉ le 23/09 : en inversant le départage (indice le plus HAUT),
+    la suite ne tombait que sur UN test — et pas sur celui de l'équivalence.
+    Les égalités fabriquées de `test_f2_route_fusee_egale_moe_route` sont hors
+    du top-k, donc elles ne jugeaient rien.
+
+    Ici les ex-aequo SONT les plus grands : k = 4 sur 6 experts à égalité
+    parfaite. Le contrat est « indice le plus bas », donc exactement 0,1,2,3 —
+    un départage inverse rendrait 5,4,3,2 et ce test tombe."""
+    rp = _rp()
+    E, k = 64, 4
+    lg = torch.full((1, E), -10.0, device=DEV)
+    lg[0, :6] = 3.0                                        # six ex-aequo parfaits
+    u = torch.zeros(E, dtype=torch.int64, device=DEV)
+    _, ti, eid = rp.route_fusee(lg, None, k, False, True, 1.0, None, u)
+    assert ti.view(-1).long().tolist() == [0, 1, 2, 3], ti.view(-1).tolist()
+    assert eid.long().tolist() == [0, 1, 2, 3], eid.tolist()
+    assert u[:4].tolist() == [1, 1, 1, 1] and int(u.sum()) == 4
+
+
+def test_p68_egalites_sur_plusieurs_jetons_et_avec_biais():
+    """Le même départage, mais la sélection porte sur probs + biais (sigmoïde) :
+    les ex-aequo se jouent alors sur la somme, pas sur les logits seuls."""
+    rp = _rp()
+    E, k, T = 32, 3, 5
+    lg = torch.full((T, E), -8.0, device=DEV)
+    lg[:, 4:9] = 1.5                                       # cinq ex-aequo par jeton
+    bias = torch.zeros(E, device=DEV)
+    u = torch.zeros(E, dtype=torch.int64, device=DEV)
+    _, ti, _ = rp.route_fusee(lg, bias, k, True, False, 1.0, None, u)
+    for t in range(T):
+        assert ti[t].long().tolist() == [4, 5, 6], (t, ti[t].tolist())
+    assert int(u[4]) == T and int(u[7]) == 0
