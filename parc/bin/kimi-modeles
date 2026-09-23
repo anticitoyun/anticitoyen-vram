@@ -4,6 +4,8 @@
 # Tout le commun (parc, moteurs, fiches, filtres, fenêtre) vit dans le paquet
 # parc/lib/menu_modeles/ ; ce lanceur ne porte que les divergences propres à
 # kimi (nom, icône, couleurs, bouton web « kimi web »), réunies dans PROFIL.
+#
+# Soutenir : https://buymeacoffee.com/anticitoyen
 import os
 import sys
 from pathlib import Path

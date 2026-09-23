@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from typing import Callable, Iterator, Optional
 
 import torch
@@ -64,8 +65,15 @@ def default_calib_path() -> str:
 
 
 def load_calib_ids(tokenizer, path: Optional[str], n_seqs: int,
-                   seq_len: int, vocab_size: int) -> list[list[int]]:
-    """Tokenise le corpus de calibration, ou échoue plutôt que de rendre du bruit."""
+                   seq_len: int, vocab_size: int, gabarit: bool = False) -> list[list[int]]:
+    """Tokenise le corpus de calibration, ou échoue plutôt que de rendre du bruit.
+
+    ``gabarit`` (pièce 55, 22/09) : chaque tranche est passée par le gabarit de
+    conversation du modèle — première moitié en tour utilisateur, seconde en
+    tour assistant — avant d être encodée. Un modèle « -it » ne lit pas le texte
+    brut (gemma-4-31B : PPL 10^4 sur HF lui-même, pièce 37) ; le calibrer dessus
+    relève des statistiques d activation d un régime qu il ne sert jamais. Sans
+    gabarit dans le modèle, on REFUSE (pas de repli ChatML muet)."""
     texts: list[str] = []
     if path and not os.path.isfile(path):
         raise FileNotFoundError(f"fichier de calibration introuvable : {path}")
@@ -83,8 +91,19 @@ def load_calib_ids(tokenizer, path: Optional[str], n_seqs: int,
             "la calibration exige un tokeniseur ; aucun n'a été trouvé dans le "
             "répertoire du modèle. Passez --no-awq pour convertir sans lui.")
 
+    if gabarit and not getattr(tokenizer, "template", None):
+        raise ValueError("--calib-gabarit demandé mais le modèle n a pas de chat template "
+                         "(tokenizer_config.json / chat_template.jinja) : calibration refusée")
     out = []
     for text in texts:
+        if gabarit:
+            # la tranche brute fait ~23 Ko pour 512 jetons gardés : sans la borner, le tour
+            # assistant tomberait toujours après la coupe et ne serait jamais calibré.
+            text = text[: max(64, seq_len * 4)]
+            demi = len(text) // 2
+            text = tokenizer.apply_chat_template(
+                [{"role": "user", "content": text[:demi]}, {"role": "assistant", "content": text[demi:]}],
+                add_generation_prompt=False)
         ids = tokenizer.encode(text)[:seq_len]
         if len(ids) >= 8:
             out.append(ids)
@@ -152,6 +171,7 @@ def collect_activation_stats(
 ) -> dict[str, ActStats]:
     """Parcourt le point de contrôle bloc par bloc, en notant les statistiques d'entrée."""
     from safetensors import safe_open
+    _t0_collecte = time.monotonic()
 
     dev = torch.device(device if torch.cuda.is_available()
                        or device == "cpu" else "cpu")
@@ -340,10 +360,18 @@ def collect_activation_stats(
     for h in handles.values():
         h.__exit__(None, None, None) if hasattr(h, "__exit__") else None
     if obs_min:
-        rapport = rapport_observations(collector.stats, int(obs_min))
+        rapport = rapport_observations(collector.stats, int(obs_min),
+                                       corpus_jetons=sum(len(c) for c in calib_ids),
+                                       secondes=time.monotonic() - _t0_collecte)
         collector.stats["__observations__"] = rapport          # lu par convert, retiré avant quantification
     return collector.stats
 
+
+# Un expert routé moins de fois que ce seuil ne reçoit PAS d échelle AWQ
+# (`convert.py`, MIN_ECHANTILLONS_AWQ) : le corpus n y peut rien, c est du
+# routage. Les deux valeurs doivent rester égales — `tests/test_obs_min_experts`
+# le vérifie en lisant convert.py.
+SEUIL_EXPERT_ROUTE = 8
 
 RE_EXPERT_OBS = re.compile(r"^model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(\w+)\.weight$")
 
@@ -363,29 +391,67 @@ def observations_par_expert(stats: dict) -> dict:
     return par
 
 
-def rapport_observations(stats: dict, obs_min: int = 512) -> dict:
-    """Pièce 32 : combien de jetons chaque expert a-t-il réellement vus
-    pendant la calibration ? `obs_min` = seuil de stabilité MESURÉ de
-    l échelle AWQ (25(a) : stable à ≥ 512, encore 0,128 d écart à 128-511).
-    Rend le minimum, les quantiles, la liste sous le seuil, et le facteur de
-    corpus qu il faudrait pour que le minimum l atteigne — jamais une échelle
-    de repli muette : c est l appelant qui refuse ou passe outre en le disant."""
+def rapport_observations(stats: dict, obs_min: int = 512,
+                         corpus_jetons: int = 0, secondes: float = 0.0) -> dict:
+    """Pièce 32, corrigée par la 45 (22/09) : combien de jetons chaque expert
+    a-t-il réellement vus, et que faudrait-il de corpus pour que l échelle AWQ
+    soit stable ?
+
+    Trois populations, jamais mélangées — c était la faute du 22/09, où le
+    facteur « ×512 » était tiré par des experts que le corpus n atteint
+    quasiment pas, et refusait une conversion que rien ne rendait mauvaise :
+    * `jamais` (0 jeton) et `quasi_jamais` (1 à {seuil} exclus) : ces experts
+      ne reçoivent PAS d échelle AWQ de toute façon (`convert.py:1699`,
+      MIN_ECHANTILLONS_AWQ = 8) — plus de corpus ne les corrige pas, c est une
+      question de ROUTAGE, renvoyée à la pièce 27 (invites par modalité) ;
+    * `atteints` (≥ {seuil}) : eux seuls portent le jugement. Le critère est
+      leur **p10** ≥ `obs_min`, et le facteur de corpus se calcule sur ce p10.
+
+    `corpus_jetons` et `secondes` (la collecte qui vient d avoir lieu) donnent
+    les deux chiffres qu un opérateur veut avant de relancer : jetons
+    nécessaires pour que p10 atteigne le seuil, et minutes que cela coûterait
+    au même rythme.
+    """
     par = observations_par_expert(stats)
     if not par:
         return {"experts": 0, "obs_min_demande": int(obs_min), "suffisant": None,
                 "raison": "aucun expert dans les statistiques (modèle dense ?)"}
+    seuil_route = SEUIL_EXPERT_ROUTE
+    jamais = {f"{c}/{e}": n for (c, e), n in sorted(par.items()) if n == 0}
+    quasi = {f"{c}/{e}": n for (c, e), n in sorted(par.items()) if 0 < n < seuil_route}
+    atteints = sorted(n for n in par.values() if n >= seuil_route)
     vals = sorted(par.values())
-    sous = {f"{c}/{e}": n for (c, e), n in sorted(par.items()) if n < obs_min}
-    jamais = [k for k, n in sous.items() if n == 0]
-    mini = vals[0]
-    facteur = (obs_min / mini) if mini > 0 else None
-    return {"experts": len(par), "obs_min_demande": int(obs_min), "minimum": mini,
-            "p10": vals[int(0.1 * (len(vals) - 1))], "mediane": vals[len(vals) // 2],
-            "maximum": vals[-1], "sous_seuil": len(sous), "jamais_routes": len(jamais),
-            "part_sous_seuil": round(len(sous) / len(par), 4),
-            "facteur_corpus_pour_atteindre": (round(facteur, 2) if facteur else None),
-            "exemples_sous_seuil": dict(list(sous.items())[:12]),
-            "suffisant": len(sous) == 0}
+    sous = {f"{c}/{e}": n for (c, e), n in sorted(par.items()) if seuil_route <= n < obs_min}
+    if not atteints:
+        return {"experts": len(par), "obs_min_demande": int(obs_min), "suffisant": False,
+                "seuil_expert_route": seuil_route, "atteints": 0,
+                "jamais_routes": len(jamais), "quasi_jamais_routes": len(quasi),
+                "raison": "aucun expert atteint par ce corpus : routage, pas volume (pièce 27)"}
+    p10_atteints = atteints[int(0.1 * (len(atteints) - 1))]
+    facteur = (obs_min / p10_atteints) if p10_atteints > 0 else None
+    r = {"experts": len(par), "obs_min_demande": int(obs_min), "seuil_expert_route": seuil_route,
+         "minimum": vals[0], "p10": vals[int(0.1 * (len(vals) - 1))], "mediane": vals[len(vals) // 2],
+         "maximum": vals[-1],
+         "atteints": len(atteints), "p10_atteints": p10_atteints,
+         "mediane_atteints": atteints[len(atteints) // 2],
+         "jamais_routes": len(jamais), "quasi_jamais_routes": len(quasi),
+         "part_non_atteints": round((len(jamais) + len(quasi)) / len(par), 4),
+         "sous_seuil_parmi_atteints": len(sous),
+         "part_sous_seuil_atteints": round(len(sous) / len(atteints), 4),
+         "facteur_corpus_pour_atteindre": (round(facteur, 2) if facteur else None),
+         "exemples_sous_seuil": dict(list(sous.items())[:12]),
+         "exemples_non_atteints": dict(list(jamais.items())[:6] + list(quasi.items())[:6]),
+         "renvoi": ("pièce 27 (invites par modalité) : "
+                    f"{len(jamais) + len(quasi)} experts sous {seuil_route} jetons ne sont pas une "
+                    "question de volume de corpus") if (jamais or quasi) else None,
+         "suffisant": p10_atteints >= obs_min}
+    if corpus_jetons and facteur:
+        r["corpus_jetons"] = int(corpus_jetons)
+        r["jetons_pour_p10"] = int(corpus_jetons * facteur + 0.5)
+        if secondes:
+            r["secondes_collecte"] = round(secondes, 1)
+            r["minutes_pour_p10"] = round(secondes * facteur / 60.0, 1)
+    return r
 
 
 def _has(get, key: str) -> bool:

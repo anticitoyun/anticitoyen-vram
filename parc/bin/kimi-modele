@@ -110,7 +110,8 @@ done
 case "$choix" in
   acvram-*)
     # moteur acvram : NVFP4 (sm_120) / INT4 (2e carte)
-    "$PARC_BIN/acvram-serveur" "$choix" || exit 1
+    # kimi charge ~65536 jetons de contexte MCP ; le serveur doit adapter CTX en conséquence.
+    CTX_CLIENT_MIN=65536 "$PARC_BIN/acvram-serveur" "$choix" || exit 1
     printf '\n%s→ kimi -m %s%s\n\n' "$c_t" "$choix" "$c_0"
     exec "$KIMI" "${AUTO[@]}" -m "$choix" "$@"
     ;;

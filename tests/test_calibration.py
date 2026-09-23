@@ -276,3 +276,33 @@ def test_calibration_survit_a_un_echec_de_passe_sur_une_couche(tokenized_checkpo
     for i in (0, 2, 3):
         assert any(name.startswith(f"model.layers.{i}.") for name in stats), \
             f"couche {i} : ses statistiques ont été perdues par l'échec d'une autre couche"
+
+
+class _TokGabarit:
+    """Tokeniseur factice : encode = codes des caractères ; gabarit = « § » + user + « ¶ » + assistant."""
+    template = "{{ bos_token }}…"      # non vide : le modèle « a » un gabarit
+
+    def encode(self, text, add_special_tokens=False):
+        return [ord(c) % 1024 for c in text]
+
+    def apply_chat_template(self, messages, add_generation_prompt, extra=None):
+        assert [m["role"] for m in messages] == ["user", "assistant"]
+        return "§" + messages[0]["content"] + "¶" + messages[1]["content"]
+
+
+def test_calib_gabarit_applique_le_gabarit_et_casse_sans(tmp_path):
+    """pièce 55 : avec --calib-gabarit chaque séquence PORTE le gabarit (tête § et balise ¶),
+    sans lui aucune ne le porte ; un tokeniseur sans gabarit fait refuser, jamais un repli."""
+    corpus = tmp_path / "c.txt"
+    corpus.write_text("abcdefgh" * 40, encoding="utf-8")
+    tok = _TokGabarit()
+    avec = load_calib_ids(tok, str(corpus), 4, 64, 1024, gabarit=True)
+    sans = load_calib_ids(tok, str(corpus), 4, 64, 1024)
+    assert len(avec) == 4 and len(sans) == 4
+    assert all(seq[0] == ord("§") % 1024 and ord("¶") % 1024 in seq for seq in avec)
+    assert not any(ord("§") % 1024 in seq or ord("¶") % 1024 in seq for seq in sans)
+
+    class _SansGabarit(_TokGabarit):
+        template = None
+    with pytest.raises(ValueError, match="gabarit"):
+        load_calib_ids(_SansGabarit(), str(corpus), 4, 64, 1024, gabarit=True)

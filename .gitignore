@@ -43,3 +43,4 @@ scratchpad/t4-20-09/pytest-T4-11h40.txt
 .webui_secret_key
 *.deb
 .beads.gate.lock
+scratchpad/**/*_cuda_gpu_trace.csv

@@ -403,6 +403,30 @@ def _est_projection_attn(name: str) -> bool:
            and "norm" not in name)
 
 
+def _bilan_attn_int8(opts, tensors: dict) -> dict:
+    """Règle 6 (23/09, pièce 55) : `--attn-qkvo-int8-canal` ne rend « par canal »
+    qu'une projection d'attention DÉJÀ promue int8 (`snr_floor`, classes de
+    promotion, format imposé) — l. 1758 et 1916 : `and fmt == "int8"`. Sur
+    gemma-4-31B (o_proj 21,5 dB, snr_floor 0) aucune ne l'était et le manifeste
+    disait quand même `attn_int8 = canal` : une étiquette prise pour une preuve,
+    une conversion de 405 s jugée sur ce qu'elle n'avait pas fait. On compte, on
+    étiquette selon les faits, et l'absence d'effet est écrite dans le manifeste
+    ET imprimée — jamais tue."""
+    attn = {k: v for k, v in tensors.items() if _est_projection_attn(k)}
+    n_int8 = sum(1 for v in attn.values() if v.get("format") == "int8")
+    n_quant = sum(1 for v in attn.values() if v.get("format") not in (None, "bf16", "fp16", "fp32"))
+    if not getattr(opts, "attn_qkvo_int8_canal", False):
+        return {"attn_int8": "groupe"}
+    if n_int8 == 0:
+        msg = (f"--attn-qkvo-int8-canal SANS EFFET : 0 projection d'attention en int8 sur {n_quant} "
+               f"quantifiée(s) — l'int8 par canal ne s'applique qu'à une projection promue int8 ; "
+               f"relancer avec --snr-floor > 0, ou --promotion-classes q_proj,k_proj,v_proj,o_proj "
+               f"--max-promotions 1.0 --snr-floor 99 pour forcer l'attention en int8")
+        print(f"[acvram] AVERTISSEMENT : {msg}", flush=True)
+        return {"attn_int8": "groupe", "attn_int8_canal_demande": True, "avertissements": [msg]}
+    return {"attn_int8": "canal", "attn_int8_canal_tenseurs": n_int8}
+
+
 class TensorRouter:
     """Décide du format de stockage de chaque tenseur, à partir du plan de placement."""
 
@@ -549,7 +573,15 @@ def _precalculer_alpha_commun_gate_up(
     scaler) comme un alpha : les deux valent une fusion, un alpha degenere a
     l'identite n'ayant rien a partager.
     """
-    en_attente: dict[str, torch.Tensor] = {}
+    # Deux files, pas une : l ordre d arrivée gate → up n est PAS garanti.
+    # Sur Qwen3-Coder-30B (22/09), une paire sur 6 144 — couche 28, expert 46 —
+    # arrivait dans l ordre inverse ; elle sortait alors de l alpha commun sans
+    # rien dire, gardait deux échelles distinctes (écart relatif 0,20) et
+    # faisait refuser la disposition Marlin pour TOUTE sa couche
+    # (`experts_layout=marlin(47/48)`). Une file par côté, appariement dès que
+    # les deux sont là : le résultat ne dépend plus de l ordre du checkpoint.
+    attente_gate: dict[str, torch.Tensor] = {}
+    attente_up: dict[str, torch.Tensor] = {}
     resultat: dict[str, torch.Tensor] = {}
     experts_vus = 0
     for name, tensor in _adapt_hf(_iter_checkpoint(model_path), spec):
@@ -560,15 +592,21 @@ def _precalculer_alpha_commun_gate_up(
                                  else not opts.alpha_commun_gate_up):
             continue
         if name.endswith("gate_proj.weight"):
-            en_attente[name[: -len("gate_proj.weight")]] = tensor
+            cle = name[: -len("gate_proj.weight")]
+            autre = attente_up.pop(cle, None)
+            if autre is None:
+                attente_gate[cle] = tensor
+                continue
+            gate_tensor, tensor = tensor, autre
+        elif name.endswith("up_proj.weight"):
+            cle = name[: -len("up_proj.weight")]
+            gate_tensor = attente_gate.pop(cle, None)
+            if gate_tensor is None:
+                attente_up[cle] = tensor
+                continue
+        else:
             continue
-        if not name.endswith("up_proj.weight"):
-            continue
-        cle = name[: -len("up_proj.weight")]
-        gate_tensor = en_attente.pop(cle, None)
-        if gate_tensor is None:
-            continue
-        gate_name, up_name = f"{cle}gate_proj.weight", name
+        gate_name, up_name = f"{cle}gate_proj.weight", f"{cle}up_proj.weight"
         fmt = router.format_for(gate_name)
         if fmt != router.format_for(up_name) or fmt in ("bf16", "fp16"):
             continue
@@ -2552,6 +2590,7 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             f"17/09 (échelle AWQ mal réglée par une statistique bruitée).")
 
     _verifier_homogeneite_moe(manifest["tensors"], spec.num_layers)
+    manifest.update(_bilan_attn_int8(opts, manifest["tensors"]))     # règle 6 : l'étiquette suit les faits
     manifest["diagnostic_fusion"] = _diagnostic_fusion(manifest["tensors"])
     manifest["vision_bytes"] = vision_bytes
     manifest["vision"] = "oui" if vision_bytes else "non"

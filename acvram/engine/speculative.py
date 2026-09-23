@@ -92,6 +92,18 @@ class GardeSpeculation:
             if moyenne < self.gain_min:
                 self._desactive = True
 
+    def etat_dict(self, mode: str) -> dict:
+        """État de la garde : mode, activité, gain moyen glissant, seuil de lot.
+        Destiné à la ligne de régime et à /metrics — le régime se porte par le
+        nom, pas par la vigilance (REGLES §6)."""
+        gain = round(sum(self._fenetre) / len(self._fenetre), 3) if self._fenetre else None
+        return {
+            "mode": mode,
+            "garde_active": not self._desactive,
+            "gain_moyen": gain,
+            "lot_max": self.lot_max,
+        }
+
 
 @dataclass
 class Proposal:

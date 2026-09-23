@@ -82,6 +82,7 @@ if triton is not None:
         jj = tl.arange(0, 32)
         mj = jj < K
         pw = tl.zeros((32,), dtype=tl.float32)                  # les k probabilités choisies, en registres
+        ti = tl.zeros((32,), dtype=tl.int32)                    # et leurs experts, pour l usage groupé
         somme = 0.0
         for j in range(K):
             bv = tl.max(sel, 0)
@@ -89,11 +90,19 @@ if triton is not None:
             pj = tl.sum(tl.where(i == bi, probs, 0.0), 0)
             somme += pj
             pw = tl.where(jj == j, pj, pw)
+            ti = tl.where(jj == j, bi.to(tl.int32), ti)
             tl.store(topi_ptr + t * K + j, bi.to(tl.int32))
             e = tl.where(v != 0, bi, -1)
             tl.store(eid_ptr + t * K + j, e.to(tl.int32))
-            tl.atomic_add(usage_ptr + tl.where(v != 0, bi, 0), 1, mask=v != 0)
             sel = tl.where(i == bi, float("-inf"), sel)
+        # Pièce 68 : les k `atomic_add` étaient DANS la boucle, donc sérialisés
+        # derrière la sélection — 2,56 µs sur 4,56 mesurés à b = 1 (E = 128,
+        # k = 8 ; les k `store`, eux, ne coûtent rien : 0,02 µs, ils restent en
+        # place). Un seul atomique vectorisé les remplace. AU BIT : l addition
+        # entière est commutative et associative, et les k experts d un jeton
+        # sont distincts par construction (chaque passe retire l élu de `sel`),
+        # donc aucune collision ne se joue sur l ordre.
+        tl.atomic_add(usage_ptr + ti, 1, mask=mj & (v != 0))
         if RENORM:
             f = (1.0 / somme) * scale
         else:

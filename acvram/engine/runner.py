@@ -186,6 +186,25 @@ class EngineStats:
     # cette cellule a bien tourné avec le même comportement que llama.cpp
     # `--ignore-eos` plutôt que de le supposer depuis sa propre requête.
     sequences_ignore_eos: int = 0
+    # Compteurs de graphes CUDA (pièce 44, dispersion b=1 décroissante-puis-
+    # plateau 354 → 272 t/s) : LUS EN DIRECT sur le `GraphRunner` au moment du
+    # relevé, jamais recopiés ici. Un entier recopié serait juste ou faux selon
+    # l'endroit du rafraîchissement — or `/metrics` est interrogé ENTRE deux
+    # pas, et l'hypothèse à départager (« la sonde a franchi un godet de blocs,
+    # donc elle a payé une capture ») se juge sur le rang exact du rejeu au
+    # moment du relevé. `source_graphes` rend l'objet graphes (ou None) ;
+    # graphes désactivés, repliés en eager avant toute capture, ou moteur à
+    # sec → trois zéros, qui sont la vérité et non une absence de mesure.
+    source_graphes: Any = field(default=None, repr=False, compare=False)
+
+    def compteurs_graphes(self) -> dict:
+        """`graphes_nombre` (graphes vivants), `graphes_captures`, `graphes_replays`."""
+        gr = self.source_graphes() if callable(self.source_graphes) else self.source_graphes
+        if gr is None:
+            return {"graphes_nombre": 0, "graphes_captures": 0, "graphes_replays": 0}
+        return {"graphes_nombre": len(getattr(gr, "graphs", None) or {}),
+                "graphes_captures": int(getattr(gr, "captures", 0)),
+                "graphes_replays": int(getattr(gr, "replays", 0))}
 
     @property
     def decode_tok_s(self) -> float:
@@ -227,6 +246,7 @@ class EngineStats:
             "tokens_per_step": round(self.tokens_per_step, 3),
             "sequences_tronquees_budget": self.sequences_tronquees_budget,
             "sequences_ignore_eos": self.sequences_ignore_eos,
+            **self.compteurs_graphes(),
         }
 
     @property
@@ -369,21 +389,60 @@ def _repin_echanger_reel(m, sortant: int, entrant: int) -> None:
             verifier_table(tbl)
 
 
+def _regime_echelle_awq(model) -> str:
+    """Porteur de l'échelle AWQ des experts, agrégé sur les couches MoE :
+    « gemv(N/M) », « torch(N/M) », « aucune », ou « mixte(...) » quand les
+    couches ne s'accordent pas — chaque valeur vient du dernier forward du
+    bloc (`MoEBlock._echelle_awq`), jamais d'une variable d'environnement."""
+    from .model import MoEBlock
+    vals = [getattr(m, "_echelle_awq", None) for m in model.modules() if isinstance(m, MoEBlock)]
+    vus = [v for v in vals if v is not None]
+    if not vus:
+        return "?"                                     # aucun forward MoE encore passé
+    distincts = sorted(set(vus))
+    if distincts == ["aucune"]:
+        return "aucune"
+    if len(distincts) == 1:
+        return f"{distincts[0]}({len(vus)}/{len(vals)})"
+    detail = ",".join(f"{v}:{vus.count(v)}" for v in distincts)
+    return f"mixte({detail})"
+
+
 def _couverture_experts(model) -> str:
     """Disposition des experts par couche MoE : « marlin » si toutes, « naturel »
-    si aucune, sinon « marlin(N/M) » — N couches sur la disposition unique, M
-    couches MoE (les autres refusées, pile naturelle gardée : gate/up distincts)."""
+    si aucune, sinon « marlin(N/M) refus=[c<i>:<raison>] » — N couches sur la
+    disposition unique, M couches MoE, et POUR CHAQUE couche refusée son numéro
+    et la raison exacte (`MoEBlock._raison_marlin`).
+
+    Sans la raison, « marlin(47/48) » a coûté une mesure de carte pour trouver
+    ce qu un chargement savait déjà (22/09, alias qkv-alpha) : une couverture
+    partielle est une anomalie à nommer, pas un chiffre à contempler."""
     from .model import MoEBlock
-    blocs = [m for m in model.modules() if isinstance(m, MoEBlock)]
-    if not blocs:
+    numerotes: list[tuple[int, object]] = []
+    for i, couche in enumerate(getattr(model, "layers", []) or []):
+        for m in couche.modules():
+            if isinstance(m, MoEBlock):
+                numerotes.append((i, m))
+                break
+    if not numerotes:      # modèle sans `layers` exposées : on garde l ordre des modules
+        numerotes = list(enumerate(m for m in model.modules() if isinstance(m, MoEBlock)))
+    if not numerotes:
         return "aucun"
-    dispositions = [getattr(m, "experts_layout", None) or "naturel" for m in blocs]
+    dispositions = [getattr(m, "experts_layout", None) or "naturel" for _, m in numerotes]
     n_marlin = sum(1 for d in dispositions if d == "marlin")
-    if n_marlin == len(blocs):
+    if n_marlin == len(numerotes):
         return "marlin"
     if n_marlin == 0:
         return dispositions[0] if len(set(dispositions)) == 1 else "naturel"
-    return f"marlin({n_marlin}/{len(blocs)})"
+    refus = []
+    for (i, m), d in zip(numerotes, dispositions):
+        if d == "marlin":
+            continue
+        r = getattr(m, "_raison_marlin", "") or getattr(m, "_raison_repli", "")
+        if r:  # une couche sans raison relevée (chargement partiel, exil) ne fabrique pas un refus
+            refus.append(f"c{i}:{r.split(' — ')[0][:70]}")
+    base = f"marlin({n_marlin}/{len(numerotes)})"
+    return f"{base} refus=[{' | '.join(refus[:4])}]" if refus else base
 
 
 
@@ -426,6 +485,17 @@ def _deepstack_texte(tour) -> str:
 def _masque_images_texte(masque) -> str:
     """`masque_images=bidir|causal` sur la ligne dès qu'une tour est servie (famille lue au chargement)."""
     return f" masque_images={masque}" if masque else ""
+
+
+def _speculation_texte(s: Optional[dict]) -> str:
+    """Fragment `speculation=<mode>(<état>,lot_max=N)` de la ligne de régime.
+    Toujours présent (off ou actif) — le régime se porte par le nom (REGLES §6)."""
+    if s is None or s.get("mode") == "off":
+        return " speculation=off"
+    etat = "on" if s.get("garde_active", True) else "désactivée"
+    gain = s.get("gain_moyen")
+    gain_txt = f",gain={gain}" if gain is not None else ""
+    return f" speculation={s['mode']}({etat}{gain_txt},lot_max={s['lot_max']})"
 
 
 def _vision_texte(tour) -> str:
@@ -599,6 +669,10 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             self.graphs = gr if gr.enabled else None
             if not gr.enabled:
                 self._graphes_raison = gr.raison or "raison non nommée"
+        # Lecture paresseuse de l'attribut, pas de l'objet : `self.graphs`
+        # change encore après ce point (repli, faux runner d'un test), et une
+        # référence figée ici aurait rendu les compteurs d'un objet mort.
+        self.stats.source_graphes = lambda: self.graphs
 
         # REPIN (bead anticitoyen-vram-pds, point 3 — poste7 §4). `_pin` :
         # {index_couche: set(experts résidents)} — peuplé depuis les couches
@@ -715,6 +789,17 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             [m.__dict__.get("chemins", {}) for m in self.model.modules() if isinstance(m, MoEBlock)]) + ")"
         if os.environ.get("ACVRAM_GRAPHES_TABLE") == "0":
             chemin_moe += "+pile" if piles_ok else "+pile(désactivé)"
+        # Pièce 65 : chemin tensor par défaut (godets ≥ 2) ; la ligne porte le repli STATIQUE nommé par couche
+        # (`MoEBlock._tensor_refus`), le témoin GEMV (=0) et le témoin de glue A4 (non reproductible).
+        if os.environ.get("ACVRAM_MOE_TENSOR", "1") == "1":
+            refus = sorted({(m.__dict__["_tensor_refus"] if "_tensor_refus" in m.__dict__ else m._raison_tensor()) or ""
+                            for m in self.model.modules() if isinstance(m, MoEBlock)} - {""})
+            from .moe import _MOE_TENSOR_MIN_T
+            chemin_moe += f"+tensor(b≥{_MOE_TENSOR_MIN_T}" + ("" if not refus else ",repli:" + " ; ".join(refus)) + ")"
+            if os.environ.get("ACVRAM_MOE_TENSOR_FUSION", "1") != "1":
+                chemin_moe += "-glue-a4"
+        else:
+            chemin_moe += "+tensor(off)"
 
         # `self.graphs` reste le MÊME OBJET après une capture ratée en cours
         # de service (`GraphRunner._capture` bascule `enabled=False` mais ne
@@ -732,6 +817,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             "repli_eager": int(getattr(self.graphs, "replis_eager", 0)) if self.graphs is not None else 0,
             "replis_eager_raisons": sorted(getattr(self.graphs, "_raisons_eager_vues", set())) if self.graphs is not None else [],
             "slots_hybrides": getattr(self.graphs, "max_slots", None) if self.graphs is not None else None,
+            # pièce 44 : mêmes trois compteurs que `/metrics`, même source
+            **self.stats.compteurs_graphes(),
             # photos VRAM (octets) prises par GraphRunner avant sa première capture
             # et après un échec (chantier-gemma-capture-godet1-20-09) ; None à sec
             "graphes_memoire_avant_capture": getattr(self.graphs, "memoire_avant_capture", None) if self.graphs is not None else None,
@@ -758,6 +845,11 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # couverture PAR COUCHE (poste7 19/09, budget GLM : 33 couches Marlin + 13 refusées
             # « distinctes » sur la pile naturelle — « experts_layout=marlin » seul mentait)
             "experts_layout": _couverture_experts(self.model),
+            # Pièce 47 : qui porte `x / s[e]` des experts — `gemv` (dans le
+            # noyau Marlin, au bit), `torch` (gather + division devant chaque
+            # GEMV : 8 lancements et 0,47 ms/pas à b=12), `aucune` (alias sans
+            # échelles d'experts). Lu sur les blocs, pas sur une variable.
+            "echelle_awq": _regime_echelle_awq(self.model),
             # linéaires INT8 du décodage : triton≥b|cuda (poste C, bascule mesurée)
             "dense": kernels.narrow_regime(),
             "gdn": _gdn_regime(),
@@ -768,6 +860,12 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # plafond (non refuse ici), pour ne jamais laisser croire que le
             # scaling est applique alors qu'il ne l'est nulle part.
             "llama4_scaling_beta": self._llama4_scaling_beta or None,
+            # pièce 49 : régime spéculatif visible (REGLES §6 : le régime se porte
+            # par le nom, pas par la vigilance) — mode + état garde + gain moyen
+            "speculation": (self._garde_spec.etat_dict(self.speculator.name)
+                            if self.speculator is not None
+                            else {"mode": "off", "garde_active": False,
+                                  "gain_moyen": None, "lot_max": 0}),
         }
 
     def kv_format_servi(self) -> str:
@@ -819,11 +917,20 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         return (f"régime {etat} — graphes={'on' if r['graphes'] and not r.get('graphes_abandon') else 'off' + raison_off}"
                 f"{'' if slots is None else f'(hybrides≤{slots})'} "
                 f"repli_eager={r.get('repli_eager', 0)} "
+                # `graphes_n=`, pas `graphes=` : la ligne porte déjà
+                # `graphes=on|off`, que trois lecteurs cherchent tel quel
+                # (`outils/gpu/mesure/capture-godets.py:41`,
+                # `tests/test_regime_graphes_vivants.py:44,61`) — deux clés
+                # du même nom auraient fait dépendre leur verdict de l'ordre
+                # de la recherche.
+                f"graphes_n={r['graphes_nombre']} captures={r['graphes_captures']} "
+                f"replays={r['graphes_replays']} "
                f"couches_exilées={r['couches_exilees']}/{r['couches_total']} "
                f"experts_exilés={r['experts_exiles']}/{r['experts_total']} "
                f"{piles_txt} cartes={r['cartes']} "
                f"chemin_moe={r['chemin_moe']} prefill={r['prefill']} prefill_int8={r['prefill_int8']} dense={r['dense']} "
                f"ACVRAM_GDN={r['gdn']} experts_layout={r['experts_layout']} "
+               f"echelle_awq={r['echelle_awq']} "
                + (f"noyaux={r['noyaux']} " if r["noyaux"] else "")
                + f"kv_budget={self.allocator.num_blocks * BLOCK_SIZE}/{kv_seqs} "
                + f"kv={self.kv_format_servi()} "
@@ -848,6 +955,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                + _ctx_texte(self)
                + _masque_images_texte(self.masque_images)
                + _mrope_texte(self.spec)
+               + _speculation_texte(r.get("speculation"))
                + _deepstack_texte(self.vision))
 
     def fermer(self) -> None:

@@ -14,6 +14,7 @@ import logging
 import asyncio
 import glob
 import os
+import sys
 import json
 import re
 import signal
@@ -24,6 +25,7 @@ import time
 from typing import Any, AsyncIterator, Optional
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                StreamingResponse)
@@ -194,28 +196,41 @@ _CHAMPS_SIGNALES: set[str] = set()
 
 
 def signaler_champs_inconnus(req: Any, route: str) -> list[str]:
-    """Journalise (une fois par nom de champ, niveau WARNING) les champs de la
-    requête que le serveur ne lit pas, et les rend. Un client qui envoie
-    « temprature » ou « reasoning_effort » doit pouvoir le voir dans le journal
-    du service, sinon il croit régler ce que le moteur sert au défaut."""
+    """Journalise les champs de la requête que le serveur ne lit pas.
+    WARNING à la première occurrence de chaque nom (une fois par session) ;
+    DEBUG à chaque requête qui en contient — aucun champ n'est avalé sans trace.
+    Un client qui envoie « temprature » ou « reasoning_effort » doit pouvoir
+    le voir dans le journal du service, sinon il croit régler ce que le moteur
+    sert au défaut."""
     inconnus = req.champs_inconnus()
+    if not inconnus:
+        return inconnus
+    log = logging.getLogger("acvram.server")
     nouveaux = [c for c in inconnus if c not in _CHAMPS_SIGNALES]
     if nouveaux:
         _CHAMPS_SIGNALES.update(nouveaux)
-        logging.getLogger("acvram.server").warning(
-            "%s : champs ignorés par ce serveur (sans effet sur la réponse) : %s",
-            route, ", ".join(nouveaux))
+        log.warning("%s : champs ignorés par ce serveur (sans effet sur la réponse) : %s",
+                    route, ", ".join(nouveaux))
+    else:
+        log.debug("%s : champs ignorés (déjà signalés) : %s", route, ", ".join(inconnus))
     return inconnus
 
 
-def _garde_contexte(engine, prompt_ids: list[int], detail: str = "") -> None:
+def _garde_contexte(engine, prompt_ids: list[int], detail: str = "", *,
+                    params: Optional[Any] = None) -> None:
     """400 NOMMÉ pour une invite au-delà de ``max_model_len`` (jamais un 500 CUDA OOM) ; quand la chauffe a clampé
-    le contexte, le message porte le demandé et le tenu (poste7 poste7-s2-k48-feu-vert-21-09 § 2 (c))."""
+    le contexte, le message porte le demandé et le tenu (poste7 poste7-s2-k48-feu-vert-21-09 § 2 (c)).
+    Quand ``params`` est fourni, borne ``params.max_tokens`` à ``max_model_len − len(prompt_ids)``
+    plutôt que de refuser — comme llama.cpp."""
     if len(prompt_ids) >= engine.max_model_len:
         demande = getattr(engine, "ctx_demande", None)
         clamp = f" (demandé {demande}, tenu par la chauffe)" if demande not in (None, engine.max_model_len) else ""
         raise HTTPException(400, f"invite de {len(prompt_ids)} jetons{detail} au-delà de max_model_len "
                                  f"{engine.max_model_len}{clamp}")
+    if params is not None:
+        max_restant = engine.max_model_len - len(prompt_ids)
+        if params.max_tokens > max_restant:
+            params.max_tokens = max_restant
 
 
 def _params_from(req: Any, default_max: int) -> SamplingParams:
@@ -232,7 +247,34 @@ def _params_from(req: Any, default_max: int) -> SamplingParams:
         seed=req.seed,
         n=req.n,
         ignore_eos=req.ignore_eos,
+        logprobs=_n_logprobs(getattr(req, "logprobs", None)),
     )
+
+
+def _n_logprobs(v: Any) -> Optional[int]:
+    """Nombre de top-logprobs demandé (pièce 36). /v1/completions : entier ;
+    /v1/chat : booléen (+ top_logprobs). None si non demandé. True → 0 (le
+    logprob du jeton choisi, sans top-K)."""
+    if v is None or v is False:
+        return None
+    if v is True:
+        return 0
+    return int(v)
+
+
+_LOGPROBS_GRAPHE_AVERTI = False
+
+
+def _avertir_logprobs_graphe() -> None:
+    """Sous le défaut sampler=graphe, les top-K logprobs ne sont pas rapatriés
+    (None). Le logprob du jeton choisi reste servi ; pour les top-K, relancer le
+    serveur avec ACVRAM_SAMPLER_LENT=1. Averti une fois (ligne de régime)."""
+    global _LOGPROBS_GRAPHE_AVERTI
+    if not _LOGPROBS_GRAPHE_AVERTI:
+        _LOGPROBS_GRAPHE_AVERTI = True
+        print("acvram: top-K logprobs demandés sous sampler=graphe → indisponibles "
+              "(top_logprobs=null) ; relancer avec ACVRAM_SAMPLER_LENT=1 pour les servir "
+              "(logprobs=graphe-sans-topk)", file=sys.stderr)
 
 
 def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
@@ -927,6 +969,9 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                 # d'une mesure (`acvram.regime_ligne`) — variables ACVRAM_*
                 # hors defaut + versions torch/triton/fla.
                 "regime_ligne": _regime_ligne(),
+                # pièce 49 : régime spéculatif visible dans /metrics (même source que
+                # regime_ligne — mode + état garde + gain moyen glissant)
+                "speculation": engine.regime().get("speculation"),
                 "version": __version__, **app.state.info}
 
     @app.get("/v1/models")
@@ -959,16 +1004,16 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
         if req.tools:
             extra["tools"] = req.tools          # les gabarits HF les rendent eux-mêmes
         prompt = render_chat(tokenizer, messages, req.add_generation_prompt, extra)
+        params = _params_from(req, 512)
         images = None
         if urls:
             octets = [charger_image(u) for u in urls]           # ImageRefusee -> 400
             prompt_ids, images = preparer_images(service.processeur_vision(), prompt, octets)
             n_img = sum(f.n_jetons for f in images)
-            _garde_contexte(engine, prompt_ids, f" dont {n_img} jetons image ({len(images)} image(s))")
+            _garde_contexte(engine, prompt_ids, f" dont {n_img} jetons image ({len(images)} image(s))", params=params)
         else:
             prompt_ids = _encode(tokenizer, prompt)
-            _garde_contexte(engine, prompt_ids)
-        params = _params_from(req, 512)
+            _garde_contexte(engine, prompt_ids, params=params)
         request_id, q = await service.submit(prompt_ids, params, images)
 
         if req.stream:
@@ -1025,7 +1070,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             max_tokens=int(req.get("max_tokens", 512)),
             stop=list(req.get("stop_sequences") or []),
         )
-        _garde_contexte(engine, prompt_ids)
+        _garde_contexte(engine, prompt_ids, params=params)
         request_id, q = await service.submit(prompt_ids, params)
         mid = new_id("msg")
 
@@ -1092,7 +1137,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             prompt_text = prompt[0] if isinstance(prompt, list) else prompt
             prompt_ids = _encode(tokenizer, str(prompt_text), brut=True)
         params = _params_from(req, 256)
-        _garde_contexte(engine, prompt_ids)
+        _garde_contexte(engine, prompt_ids, params=params)
         request_id, q = await service.submit(prompt_ids, params)
 
         if req.stream:
@@ -1102,17 +1147,51 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                                    bool((req.stream_options or {}).get("include_usage"))),
                 media_type="text/event-stream")
 
+        nlp = _n_logprobs(getattr(req, "logprobs", None))
         text, reason, n_out = "", "stop", 0
+        # Pièce 36 : logprobs par pas de décodage, remplis SEULEMENT si demandés
+        # (sinon la sortie est identique au bit — cf. sampler `veut_logprobs`).
+        lp_tok: list[str] = []; lp_val: list = []; lp_top: list = []; lp_off: list = []
         async for out in service.collect(request_id, q):
+            if nlp is not None and out.text_delta:
+                lp_off.append(len(text)); lp_tok.append(out.text_delta)
+                lp_val.append(getattr(out, "logprob", None))
+                top = getattr(out, "top_logprobs", None)
+                lp_top.append({tokenizer.decode([i]): float(v) for i, v in top} if top else None)
             text += out.text_delta
             n_out = out.completion_tokens
             if out.finished:
                 reason = out.finish_reason or "stop"
+
+        logprobs_champ = None
+        if nlp is not None:
+            # decode → offsets et jetons de génération sont posés au fil de la boucle,
+            # sur le texte de génération. echo : préfixer par les logprobs de l'invite.
+            toks, vals, tops, offs = lp_tok, lp_val, lp_top, lp_off
+            if req.echo and prompt_ids:
+                inv = engine.logprobs_invite(prompt_ids, top_k=nlp)
+                dt = [tokenizer.decode([i]) for i in inv["ids"]]
+                off_inv, cur = [], 0
+                for t in dt:
+                    off_inv.append(cur); cur += len(t)
+                toks = dt + [t for t in lp_tok]
+                vals = list(inv["logprobs"]) + lp_val
+                itops = ([({tokenizer.decode([i]): float(v) for i, v in pos} if pos else None)
+                          for pos in inv["top"]]
+                         if inv.get("top") else [None] * len(dt))
+                tops = itops + lp_top
+                base = len(str(prompt_text)) if prompt_text else cur
+                offs = off_inv + [base + o for o in lp_off]
+            logprobs_champ = {"tokens": toks, "token_logprobs": vals,
+                              "top_logprobs": tops, "text_offset": offs}
+            if nlp > 0 and any(t is None for t in lp_top):
+                _avertir_logprobs_graphe()
+
         if req.echo:
             text = str(prompt_text) + text
         return CompletionResponse(
             model=model_name,
-            choices=[CompletionChoice(text=text, finish_reason=reason)],
+            choices=[CompletionChoice(text=text, finish_reason=reason, logprobs=logprobs_champ)],
             usage=Usage(prompt_tokens=len(prompt_ids), completion_tokens=n_out,
                         total_tokens=len(prompt_ids) + n_out))
 
@@ -1142,10 +1221,30 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                                  usage=Usage(prompt_tokens=total,
                                              total_tokens=total))
 
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+        detail = "; ".join(
+            f"{'.'.join(str(l) for l in e['loc'])}: {e['msg']}"
+            for e in exc.errors()
+        )
+        return JSONResponse(status_code=400,
+                            content=ErrorResponse.make(f"requête invalide — {detail}").model_dump())
+
     @app.exception_handler(ValueError)
     async def _value_error(_: Request, exc: ValueError) -> JSONResponse:
         return JSONResponse(status_code=400,
                             content=ErrorResponse.make(str(exc)).model_dump())
+
+    @app.exception_handler(HTTPException)
+    async def _http_error(req: Request, exc: HTTPException) -> JSONResponse:
+        # /v1/messages suit le format d'erreur Anthropic, les autres routes OpenAI
+        if req.url.path.startswith("/v1/messages"):
+            body = {"type": "error",
+                    "error": {"type": "invalid_request_error",
+                               "message": str(exc.detail)}}
+        else:
+            body = ErrorResponse.make(str(exc.detail)).model_dump()
+        return JSONResponse(status_code=exc.status_code, content=body)
 
     return app
 

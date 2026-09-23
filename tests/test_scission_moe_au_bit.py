@@ -17,7 +17,16 @@ from __future__ import annotations
 import hashlib
 import os
 
+import pytest
 import torch
+
+# Les empreintes ci-dessous ont été relevées avec les noyaux du dépôt (défaut) ; le chemin de
+# référence (ACVRAM_DISABLE_KERNELS / _CPU_KERNELS, celui de la CI sans GPU) produit d'autres
+# octets, donc d'autres sha256 : ici on ne juge que la scission, pas le chemin de référence.
+pytestmark = pytest.mark.skipif(
+    os.environ.get("ACVRAM_DISABLE_KERNELS") or os.environ.get("ACVRAM_DISABLE_CPU_KERNELS"),
+    reason="empreintes relevées avec les noyaux du dépôt ; chemin de référence forcé",
+)
 
 # Relevées sur 30628c1c (avant le déplacement), processeur, fp32.
 EMPREINTE_MOE = "523a51e1df3d0cb1289ddfa98f8d75059482f71c144eaacc04b7f9eaed784747"

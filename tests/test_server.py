@@ -263,3 +263,68 @@ def test_un_champ_inconnu_passe_et_est_journalise(client, caplog):
             "max_tokens": 5, "temperature": 0, "temprature": 0.7})
     assert r.status_code == 200 and r.json()["usage"]["completion_tokens"] == 5
     assert any("temprature" in rec.getMessage() for rec in caplog.records)
+
+
+def test_completions_sans_logprobs_identique(client):
+    """Pièce 36 : sans logprobs, la réponse est inchangée (champ logprobs None) et
+    déterministe à température 0 — la sortie par défaut ne bouge pas."""
+    j = {"model": "tiny", "prompt": "hello world", "max_tokens": 4, "temperature": 0}
+    a = client.post("/v1/completions", json=j).json()
+    b = client.post("/v1/completions", json=j).json()
+    assert a["choices"][0]["logprobs"] is None
+    assert a["choices"][0]["text"] == b["choices"][0]["text"]
+
+
+def test_completions_logprobs_echo(client):
+    """Pièce 36 : logprobs=N + echo → CompletionChoice.logprobs (tokens, token_logprobs,
+    top_logprobs, text_offset) sur l'invite PUIS la génération ; 1er jeton d'invite None."""
+    r = client.post("/v1/completions", json={
+        "model": "tiny", "prompt": "hello world", "max_tokens": 3,
+        "temperature": 0, "logprobs": 3, "echo": True})
+    assert r.status_code == 200
+    lp = r.json()["choices"][0]["logprobs"]
+    assert lp is not None
+    for k in ("tokens", "token_logprobs", "top_logprobs", "text_offset"):
+        assert k in lp and len(lp[k]) == len(lp["tokens"])
+    assert lp["token_logprobs"][0] is None          # echo : 1er jeton d'invite sans prédécesseur
+    assert len(lp["tokens"]) >= 3                    # au moins les 3 jetons générés (+ invite)
+    assert lp["text_offset"] == sorted(lp["text_offset"])   # offsets croissants
+
+
+def test_completions_logprobs_top_cpu(client):
+    """Sur CPU (sampler non-graphe), les top-K logprobs sont servis (non None)."""
+    r = client.post("/v1/completions", json={
+        "model": "tiny", "prompt": "the world", "max_tokens": 2,
+        "temperature": 0, "logprobs": 2})
+    lp = r.json()["choices"][0]["logprobs"]
+    gen_top = [t for t in lp["top_logprobs"] if t is not None]
+    assert gen_top and all(isinstance(d, dict) and d for d in gen_top)
+
+
+def test_speculation_visible_dans_metrics(client):
+    """Pièce 49 : /metrics expose 'speculation' avec les clés attendues —
+    le régime se porte par le nom, pas par la vigilance (REGLES §6)."""
+    r = client.get("/metrics")
+    assert r.status_code == 200
+    j = r.json()
+    # champ présent et non-None
+    assert "speculation" in j, "/metrics doit avoir la clé 'speculation'"
+    s = j["speculation"]
+    assert s is not None, "speculation ne doit pas être None"
+    # structure minimale : mode (str), garde_active (bool), lot_max (int)
+    assert isinstance(s.get("mode"), str), "speculation.mode doit être une str"
+    assert isinstance(s.get("garde_active"), bool), "speculation.garde_active doit être bool"
+    assert isinstance(s.get("lot_max"), int), "speculation.lot_max doit être int"
+
+
+def test_speculation_texte_dans_regime_ligne():
+    """Pièce 49 : le fragment 'speculation=' est présent dans engine.regime_ligne()
+    — le régime se porte par le nom (REGLES §6). Test direct sur le helper."""
+    from acvram.engine.runner import _speculation_texte
+    assert _speculation_texte(None) == " speculation=off"
+    assert _speculation_texte({"mode": "off", "garde_active": False,
+                               "gain_moyen": None, "lot_max": 0}) == " speculation=off"
+    actif = {"mode": "ngram", "garde_active": True, "gain_moyen": 1.5, "lot_max": 4}
+    frag = _speculation_texte(actif)
+    assert frag.startswith(" speculation=ngram(")
+    assert "on" in frag and "lot_max=4" in frag and "gain=1.5" in frag

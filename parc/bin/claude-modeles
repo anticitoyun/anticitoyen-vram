@@ -6,6 +6,8 @@
 # Tout le commun (parc, moteurs, fiches, filtres, fenêtre) vit dans le paquet
 # parc/lib/menu_modeles/ ; ce lanceur ne porte que les divergences propres à
 # claude (nom, icône, couleurs, bouton web, refus tabby/yals), réunies dans PROFIL.
+#
+# Soutenir : https://buymeacoffee.com/anticitoyen
 import sys
 from pathlib import Path
 

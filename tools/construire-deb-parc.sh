@@ -14,6 +14,8 @@ for s in claude-modele kimi-modele claude-modeles kimi-modeles modeles-a-jour in
     install -m 755 "parc/bin/$s" "$PKG/usr/bin/$s"
 done
 install -m 644 parc/lib/acvram_parc.py "$PKG/usr/share/acvram-parc/lib/"
+install -d "$PKG/usr/share/acvram-parc/lib/menu_modeles"
+for f in parc/lib/menu_modeles/*.py; do install -m 644 "$f" "$PKG/usr/share/acvram-parc/lib/menu_modeles/"; done
 install -m 644 parc/share/kimi-menu.lib.sh "$PKG/usr/share/acvram-parc/"
 install -m 644 parc/share/gabarits/* "$PKG/usr/share/acvram-parc/gabarits/"
 install -m 644 parc/share/systemd-user/* "$PKG/usr/share/acvram-parc/systemd-user/"

@@ -1,0 +1,23 @@
+# Pièce 61/0 — plancher tensor-core sur NOS formes : `fused_marlin_moe` de vLLM 0.29 fait 67 µs par couche sous graphe (60 de noyaux Marlin + 7 de glue) contre 90 pour notre GEMV par paire, au même routage synthétique de 33 experts distincts — soit 2,9 ms/pas équivalent (noyaux 2,6) contre nos 3,92 en service : la voie tensor-core TIENT — 23/09 (poste5)
+
+* instrument : `scratchpad/poste5-p61-23-09/banc-vllm-marlin-moe.py` dans le venv vLLM (`/opt/ia/vLLM/.venv`, vLLM 0.29.0, torch 2.13) : E 128, K 2048, gate·up fusé N 1536, down 768 → 2048, b 12, k 8, poids NVFP4 groupe 16 reconditionnés par `rand_marlin_weight_nvfp4_like` (leur repack + `nvfp4_marlin_process_scales`), 8 piles en rotation (2,4 Gio, L2 froid), 200 répétitions, chrono sous graphe CUDA et par événements (hôte compris), profil torch (noyaux / glue) ; comparaison : notre noyau par paire (`sonde-reutilisation.py`, venv acvram) sur les MÊMES générateurs de routage (concentration en 1/(rang+1)^α)
+* commit : c9d411c2 (banc) + correctif espace de travail (`marlin_make_workspace_new(dev, 4)` : 170 entiers ne suffisent pas au MoE, 680 exigés — 1 prise morte, nommée)
+* régime : 4 prises de 6 + 6 + 7 + 4 s, eco 2700, compute-apps début = fin ; le banc vLLM et le nôtre ne partagent pas de venv (torch 2.13 / 2.14) : mêmes formes, mêmes routages, poids synthétiques des deux côtés
+* scellé (chef) : ≤ 2,9 ms/pas équivalent prédit ; > 3,5 → la voie tombe. Moi (poste5.md c9d411c2) : 2,4-2,8 sous graphe à ≈ 33 distincts ; réfuté si > 3,2
+* mesuré (µs par couche gate·up + down, × 48 = ms/pas équivalent) :
+
+| experts distincts (moy.) | vLLM `fused_marlin_moe` graphe | dont noyaux Marlin | vLLM par événements (hôte) | notre GEMV par paire | rapport graphe |
+|---|---|---|---|---|---|
+| ≈ 27 (α 2,0) | **57,3 → 2,75 ms** | — | 77,9 | 92,2 | 0,62 |
+| **≈ 33 (α 1,7, le réel)** | **67,3 → 3,23 ms** | **60,3 → 2,89 ms** (+ align 2,7, reduce 2,4, act 1,1, sort 0,9) | 78,4 → 3,76 | **90,4 → 4,34** | **0,74** |
+| ≈ 39 (α 1,4) | 78,8 → 3,78 | — | 84,9 | ≈ 97 | 0,81 |
+| ≈ 48 (α 1,1) | 93,2 → 4,47 | — | 99,3 | 103,8 | 0,90 |
+
+  Leur temps croît avec les experts distincts (les octets HBM : 27 → 48 distincts = × 1,6), le nôtre presque pas (92 → 104 : plancher de calcul, pièce 61/1). Rapporté au service (notre 3,92 ms/pas à 33 distincts réels) : **leur op ferait 3,92 × 0,74 = 2,9 ms/pas glue comprise, 2,6 en noyaux seuls** — ce que dit aussi leur trace de service (2,55, pièce 59).
+* verdict : **la voie tensor-core TIENT** — seuil « > 3,5 → tombe » non atteint (3,23 sous graphe à 33 distincts, 2,89 en noyaux ; le 3,73 du premier essai était à 39 distincts, pas le routage réel) ; la prédiction de chef (≤ 2,9) tient sur les noyaux, la mienne (2,4-2,8) est légèrement manquée (glue de leur chemin non comptée : 7 µs par couche). **Gain accessible sur notre pas : − 1,0 à − 1,3 ms (3,92 → 2,6-2,9), 1 634 → 1 880-1 950 t/s**, devant vLLM (1 782) parce que notre hôte coûte 0,9 ms de moins que le leur.
+* durée : 23 s de carte (4 prises), 40 min à sec ; carte LIBRE
+
+## Deux voies, coût en jours (à chef)
+**A. Porter `marlin_moe_wna16` de vLLM** (Apache 2.0 → attribution + NOTICE, GPL compatible) : `csrc/moe/marlin_moe_wna16/` (noyau template + instanciations générées, ≈ 3 000 l.) + `moe_align_block_size` + leur repack. Nos piles sont DÉJÀ en disposition Marlin pour `q` (notre `gptq_marlin_repack_kernel`) ; nos échelles de bloc sont un e5m3 maison (`s0e5m3_octet`) quand les leurs sont fp8 e4m3 + échelle globale par expert : **conversion des échelles à la conversion ou au chargement, pas au bit** (plage/précision différentes → alias distinct, jugé par KL Coder ≤ 0,74 et ulp contre témoins, comme le 15/09). L échelle AWQ d activation par expert (pièce 47, x / s[e]) n existe pas chez eux : soit en glue devant (0,47 ms, mange 40 % du gain), soit ajoutée dans leur chargement de A (≈ 50 l.). Activation : silu/gelu portés (`MoEActivation`). **3-4 jours** : port + build (2), échelles + AWQ (1), tests ± ulp + banc + KL (1). Risque faible : le plancher est mesuré (60 µs), le noyau est entretenu.
+**B. Écrire notre GEMM W4A16 par créneau sur tensor cores** (`mma.sync.m16n8k16`, notre disposition, nos échelles e5m3 et l AWQ par expert intégrés, `moe_slots` de la 61/1 réutilisé tel quel) : **3-5 jours**, risque : atteindre 60 µs demande le prefetch et le double tampon de Marlin (un premier jet vaut souvent 1,5-2 × leur temps) ; gain : pas de conversion d échelles, tout notre format, au ± ulp connu.
+Recommandation : **A**, la 61/0 en fait un chiffre mesuré et pas une prédiction ; B ne se justifie que si la conversion des échelles fait tomber la KL. Dans les deux cas : opt-in (`ACVRAM_MOE_TENSOR=1`, ligne de régime) jusqu à la cellule ABBA de poste2, puis défaut.
