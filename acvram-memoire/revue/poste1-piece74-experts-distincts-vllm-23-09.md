@@ -82,3 +82,18 @@ presque identique.
 2. Conclure entre I1, I2 et I3 avec le seuil de 5 % déjà écrit. **Aucune
    conclusion sur la 73 avant ce chiffre** : tant que le bras vLLM manque, le
    « 1,67 To/s » reste non requalifié, ni confirmé ni infirmé.
+
+## Verdict — 23/09 08 h 42 (poste1)
+
+* **instrument** : `outils/gpu/mesure/experts-distincts-p74.py` (crochet `fused_topk` dans le processus, vLLM non modifié), chaîne `scratchpad/poste1-p74-23-09/bras-vllm.sh`
+* **commit** : 1385e4a2 (arbre mesuré) ; correctif du bras : `attention_backend` (ce commit)
+* **régime** : b = 12, 40 pas, ids d'invite déterministes `invite(1000+k, 256)`, glouton, graine 0 ; -lgc 2700 posé puis -rgc ; eager des deux côtés (le crochet ne tourne pas au rejeu d'un graphe) ; vLLM 0.29.0, venv de la cellule `/opt/ia/vLLM/.venv`, alias `Qwen3-Coder-30B-A3B-Instruct-FP4-a16`, attention **TRITON_ATTN** (FlashInfer xqa absent, voir plus bas)
+* **scellé** : I1 si |écart| ≤ 5 % (prédit ≤ 2 %) ; I2 si vLLM < 30,84 (−5 % contre 32,46) ; I3 si > 34,08
+* **mesuré** : **vLLM 32,80** experts distincts/couche (1 920 appels à M = 12, 240 hors b non agrégés ; médiane 33, min 9, max 53) contre **acvram 32,46** (1 968 appels ; médiane 32, min 22, max 56) : **+1,0 %** du côté vLLM
+* **verdict** : **I1.** Les octets sont les mêmes, et vLLM en lit même 1 % de plus. Donc la pièce 73 est **un vrai écart de débit du noyau**, pas une illusion d'octets : Marlin MoE vLLM 1,67 To/s (≈ 1,69 corrigé des +1 %) contre notre 1,37, sur les mêmes arguments (73) et les mêmes experts (74). Suite : la pièce 48 (compteurs ncu, bloquée sur `NVreg_RestrictProfilingToAdminUsers`, sudo utilisateur) est la seule voie pour nommer le mécanisme.
+* **durée** : prévue ≤ 5 min ; tenue ≈ 2 min 42 de carte (08:39:54-08:41:55 échec FlashInfer, 08:42:13-08:42:34 mesure), compute-apps début et fin = llama-server 4627 seul
+
+Deux faits d'instrument, sans effet sur le verdict :
+
+1. **Mauvais venv le matin** : le premier bras tournait sous `/mnt/AI_GENERATOR/vLLM/venv` ; la cellule vLLM utilise `/opt/ia/vLLM/.venv` (`chaine-cellule-b12-vraie-vllm.sh:8`). Les deux ont vLLM 0.29.0 et FlashInfer 0.6.18, mais en eager, avec le KV fp8 du checkpoint, vLLM choisit le décodage FlashInfer **xqa** que ni l'un ni l'autre ne fournit (`RuntimeError: FlashInfer backend is not available`). D'où TRITON_ATTN. L'attention ne change le routage qu'à l'arrondi près ; au pire, elle déplace des départages de top-k, pas la moyenne de 1 %.
+2. **min 9 chez vLLM** contre 22 chez nous : au moins un pas où les douze suites gloutonnes ont convergé vers les mêmes jetons. Ce cas pèse sur le minimum, pas sur la médiane (33 contre 32), et il irait contre vLLM (moins d'octets) : il ne peut pas avoir fabriqué le +1 %.

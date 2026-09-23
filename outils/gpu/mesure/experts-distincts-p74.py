@@ -74,8 +74,12 @@ def bras_vllm(alias: str, pas: int, b: int) -> dict:
     # `enforce_eager` : la capture de graphes échouait
     # (`cudaErrorStreamCaptureInvalidated`) et elle ne change RIEN au routage —
     # les ids d'experts ne dépendent que des jetons. Déclaré au verdict.
+    # TRITON_ATTN : en eager, vLLM choisit FlashInfer, dont le décodage xqa (sm120, KV fp8)
+    # manque aux deux venvs (`RuntimeError: FlashInfer backend is not available`, 23/09) ;
+    # l'attention ne touche le routage qu'à l'arrondi près.
     llm = LLM(model=alias, max_num_seqs=b, max_model_len=2304, gpu_memory_utilization=0.80,
-              enforce_eager=True, disable_log_stats=True)
+              enforce_eager=True, disable_log_stats=True,
+              attention_backend=os.environ.get("P74_ATTENTION", "TRITON_ATTN"))
     llm.generate([{"prompt_token_ids": invite(1000 + k, 256)} for k in range(b)],
                  SamplingParams(temperature=0.0, max_tokens=pas, ignore_eos=True))
     return resume(distincts, hors, 8, b)
