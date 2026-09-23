@@ -25,3 +25,23 @@
   * À temps presque égal, lire deux fois moins d'octets peut quand même baisser les J/jeton. La prémisse de la 99, « l'écart d'énergie vient des octets », n'est pas jugée ici : ce banc ne juge que le temps.
 * **Voie non jouée, à la connaissance du chef** : notre noyau `gemm_dense_etroit.py` (W4A16 nvfp4 à petit M, Triton, déjà servi pour l'alias à projections nvfp4 de la p42) n'a pas été mis au même banc. Ce serait un bras de 5 s, à sceller avant.
 * **durée** : ≈ 45 min ; carte 7 s.
+
+## Suite (1) — notre nvfp4 au même banc (information) — 17 h 39
+* **instrument** : `banc-proj-nvfp4.py acvram-nvfp4`, dans la même prise que les bras vllm et int8 rejoués.
+* **commit** : 5d3f9a2e ; horloge 2 691 MHz ; seul 4627 au début et à la fin ; prise de 9 s.
+* **scellé** : `scratchpad/poste1-p100a-23-09/scelle-nvfp4-acvram.md`.
+* **mesuré** (µs par couche ; les bras vllm et int8 retrouvent J1 à ±0,01) :
+
+| cellule | int8 servi | Marlin (vLLM) | **nvfp4 acvram** (chemin) | prédit |
+|---|---|---|---|---|
+| qkv M=12 | 10,10 | **7,59** | 11,19 (`gemm_dense_etroit`) | 6-9 |
+| o M=12 | 11,28 | **9,62** | 10,77 (`gemm_dense_etroit`) | 6-10 |
+| qkv M=1 | 8,77 | 7,28 | **6,95** (`nvfp4_gemv`) | 6-10 |
+| o M=1 | 7,61 | 8,61 | **6,02** (`nvfp4_gemv`) | 5-9 |
+
+  Justesse : erreur relative de 1,7e-3 contre fp64. Échelle globale unique par poids ; l'alias servi a une échelle par segment q/k/v, et `gsr` passe par le même `nvfp4_gemv`.
+* **lecture** :
+  * À M=1, notre `nvfp4_gemv` est le plus rapide des trois, sur qkv (−21 % contre l'int8) comme sur o (−21 %). **Aucun port n'est nécessaire à b=1.**
+  * À M=12, notre `gemm_dense_etroit` est le plus lent sur qkv (prédiction ratée : 11,2 contre 6-9). Le Marlin y mène sur les deux formes.
+  * Conséquence pour la 101 (au chef) : une conception « qkv Marlin + o int8 » laisserait de côté le gain de b=1, alors que les deux projections gagnent 21 % par notre GEMV.
+  * Le meilleur par cellule serait : GEMV nvfp4 aux godets 1 (et 2 ? non mesuré), Marlin au-delà. Cela suppose soit deux dispositions des poids qkv (+283 Mo de VRAM pour le Coder), soit un Marlin qui tienne M=1. C'est une décision de conception à prendre avant de sceller la 101.
