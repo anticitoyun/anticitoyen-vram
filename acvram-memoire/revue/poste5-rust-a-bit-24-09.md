@@ -14,7 +14,7 @@ durée : prévu ≤ 600 s par prise ; tenu ≈ 90 s (prise 1, vidage compris) et
   jetons ajoute deux tranches VIDES, qui pèsent exactement 0 dans la réduction (m = −∞, l = 0). Le découpage n'agit
   sur les bits que par la taille de tranche, pas par leur nombre : un fait sur notre noyau, utile pour la suite (le
   godet `nblk` n'a pas à être reproduit au pas près tant que la taille de tranche reste 64, soit N ≤ 128 blocs =
-  2 048 jetons à b=1 ; à N = 256 elle passe à 128 et les bits changent).
+  2 048 jetons à b=1 ; à N = 256 elle passe à 128 — effet sur les bits non mesuré).
 * Cassure 2 : un ulp sur UN paramètre suffit à faire échouer la porte au bit à chaque pas — et à faire basculer un
   argmax en 24 pas sur « code ». La porte des ids (scellé d'origine) l'aurait attrapée sur 2 invites sur 5
   seulement ; celle des logits sur 5/5. C'est la porte au bit qui fait foi désormais.
