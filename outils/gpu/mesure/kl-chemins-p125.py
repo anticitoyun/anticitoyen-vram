@@ -55,7 +55,7 @@ def mode_hf(source: str, dossier: str) -> None:
     assert os.environ.get("CUDA_VISIBLE_DEVICES", None) == "", "bras hf : CUDA_VISIBLE_DEVICES=\"\" obligatoire (REGLES § 1)"
     torch.set_num_threads(int(os.environ.get("HF_THREADS", "8")))
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    m, info = AutoModelForCausalLM.from_pretrained(source, dtype=torch.bfloat16, device_map="cpu",
+    m, info = AutoModelForCausalLM.from_pretrained(source, dtype=torch.bfloat16,               # sans device_map : accelerate absent du venv (24/09)
                                                    attn_implementation="eager", output_loading_info=True)
     m.eval()
     garde = {"classe": type(m).__name__, "manquantes": len(info.get("missing_keys", [])),
