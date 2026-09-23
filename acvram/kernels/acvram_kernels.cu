@@ -2199,6 +2199,271 @@ static void mb_verifier(const torch::Tensor &w, const torch::Tensor &s, const to
 }
 
 // x [T, K] bf16 ou fp32 ; sortie [G, N] fp32, ligne g = paire (expert_ids[g], token_ids[g]).
+
+// ---------------------------------------------------------------------------
+// Pièce 61 (23/09) : GEMV Marlin PAR CRÉNEAU D EXPERT. Le noyau par paire
+// (ci-dessous) charge la tuile de poids d un expert une fois PAR PAIRE
+// (expert, jeton) : à b=12, 96 paires par couche pour 33 experts distincts
+// (mesuré, revue/poste5-experts-par-paire-23-09), 12,3 Go/pas de tuiles pour
+// 4,29 Go/pas de poids distincts — borné par le L2, 71 % du plancher HBM.
+// Ici un bloc = (tuile N, créneau) ; un créneau = un expert et jusqu à TPB de
+// ses paires : la tuile est lue une fois et appliquée aux TPB lignes de x
+// tenues en mémoire partagée. AU BIT contre le noyau par paire : pour chaque
+// paire, même ordre de tuiles par warp (deux en vol), mêmes fma dans le même
+// accumulateur, même réduction inter-warps, même épilogue — seule la SOURCE de
+// x change (partagée [j][K] au lieu de [K]). Sortie y[G, N] par paire,
+// inchangée. Grille STATIQUE (N/64, G) sous capture : le nombre de créneaux
+// réels varie à chaque pas (≤ G), les créneaux vides (slot_e = -2) sortent
+// avant tout chargement, les paires fantômes (e < 0) sont regroupées dans des
+// créneaux slot_e = -1 qui écrivent des zéros comme le noyau par paire.
+// Pas de split-K : les créneaux servent les godets ≥ 2, le noyau par paire
+// reste servi au godet 1 (b=1, split-K utile).
+// ---------------------------------------------------------------------------
+template <typename XT, int NW, int TPB>
+__global__ void __launch_bounds__(MB_WARPS * WARP) nvfp4_gemv_marlin_slots_kernel(
+    const uint4 *__restrict__ q0, const unsigned char *__restrict__ s0, const float *__restrict__ g0,
+    const uint4 *__restrict__ q1, const unsigned char *__restrict__ s1, const float *__restrict__ g1,
+    const int *__restrict__ slot_e, const int *__restrict__ slot_pair, const int *__restrict__ token_ids,
+    const XT *__restrict__ x, float *__restrict__ y, int N, int K, int act,
+    const __nv_bfloat16 *__restrict__ xsc, int ld_sc) {
+    extern __shared__ float xs[];                        // [TPB][K]
+    float *red = xs + (long)TPB * K;                     // [TPB][NW][MB_WARPS][MB_TN]
+    const int sl = blockIdx.y, e = slot_e[sl], nt = blockIdx.x;
+    if (e == -2) return;                                 // créneau vide : rien à écrire
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    int gp[TPB];
+    int nj = 0;
+    #pragma unroll
+    for (int j = 0; j < TPB; ++j) { gp[j] = slot_pair[sl * TPB + j]; if (gp[j] >= 0) nj = j + 1; }
+    if (e < 0) {                                         // créneau de fantômes : zéros, aucun octet de poids lu
+        if (threadIdx.x < MB_TN)
+            for (int j = 0; j < nj; ++j) y[(long)gp[j] * N + nt * MB_TN + threadIdx.x] = 0.f;
+        return;
+    }
+    const int KT = K / MB_TK, NT = N / MB_TN;
+    const __nv_bfloat16 *sce = xsc ? xsc + (long)e * ld_sc : nullptr;
+    for (int j = 0; j < nj; ++j) {                       // même chargement et même arrondi que le noyau par paire
+        const XT *xn = x + (long)token_ids[gp[j]] * K;
+        float *xj = xs + (long)j * K;
+        for (int i = threadIdx.x; i < K; i += blockDim.x) {
+            float v;
+            if constexpr (sizeof(XT) == 4) v = sce ? __bfloat162float(__float2bfloat16_rn(xn[i])) : xn[i];
+            else v = __bfloat162float(xn[i]);
+            if (sce) v = __bfloat162float(__float2bfloat16_rn(v / __bfloat162float(sce[i])));
+            xj[i] = v;
+        }
+    }
+    __syncthreads();
+    const long bw = (long)e * KT * NT * (MB_TK * MB_TN / 32) + (long)nt * (MB_TK * MB_TN / 32) + lane;
+    const int tr = (lane & 3) * 2, c = lane >> 2;
+    const long bs = (long)e * KT * N + (long)nt * MB_TN + 8 * c;
+    float acc[TPB][NW][4][2] = {};
+    int kt = warp;
+    for (; kt + MB_WARPS < KT; kt += 2 * MB_WARPS) {
+        const int k2 = kt + MB_WARPS;
+        const uint4 pa = q0[bw + (long)kt * NT * 32], pb = q0[bw + (long)k2 * NT * 32];
+        const uint2 sa = *reinterpret_cast<const uint2 *>(s0 + bs + (long)kt * N);
+        const uint2 sb = *reinterpret_cast<const uint2 *>(s0 + bs + (long)k2 * N);
+        uint4 pa1, pb1; uint2 sa1, sb1;
+        if constexpr (NW == 2) {
+            pa1 = q1[bw + (long)kt * NT * 32]; pb1 = q1[bw + (long)k2 * NT * 32];
+            sa1 = *reinterpret_cast<const uint2 *>(s1 + bs + (long)kt * N);
+            sb1 = *reinterpret_cast<const uint2 *>(s1 + bs + (long)k2 * N);
+        }
+        #pragma unroll
+        for (int j = 0; j < TPB; ++j) {
+            if (j < nj) {
+                const float *xj = xs + (long)j * K;
+                const float2 xa01 = *reinterpret_cast<const float2 *>(xj + kt * MB_TK + tr);
+                const float2 xa89 = *reinterpret_cast<const float2 *>(xj + kt * MB_TK + tr + 8);
+                const float2 xb01 = *reinterpret_cast<const float2 *>(xj + k2 * MB_TK + tr);
+                const float2 xb89 = *reinterpret_cast<const float2 *>(xj + k2 * MB_TK + tr + 8);
+                mb_tuile(pa, sa, xa01, xa89, acc[j][0]);
+                mb_tuile(pb, sb, xb01, xb89, acc[j][0]);
+                if constexpr (NW == 2) {
+                    mb_tuile(pa1, sa1, xa01, xa89, acc[j][1]);
+                    mb_tuile(pb1, sb1, xb01, xb89, acc[j][1]);
+                }
+            }
+        }
+    }
+    for (; kt < KT; kt += MB_WARPS) {
+        const uint4 pa = q0[bw + (long)kt * NT * 32];
+        const uint2 sa = *reinterpret_cast<const uint2 *>(s0 + bs + (long)kt * N);
+        uint4 pa1; uint2 sa1;
+        if constexpr (NW == 2) {
+            pa1 = q1[bw + (long)kt * NT * 32];
+            sa1 = *reinterpret_cast<const uint2 *>(s1 + bs + (long)kt * N);
+        }
+        #pragma unroll
+        for (int j = 0; j < TPB; ++j) {
+            if (j < nj) {
+                const float *xj = xs + (long)j * K;
+                const float2 xa01 = *reinterpret_cast<const float2 *>(xj + kt * MB_TK + tr);
+                const float2 xa89 = *reinterpret_cast<const float2 *>(xj + kt * MB_TK + tr + 8);
+                mb_tuile(pa, sa, xa01, xa89, acc[j][0]);
+                if constexpr (NW == 2) mb_tuile(pa1, sa1, xa01, xa89, acc[j][1]);
+            }
+        }
+    }
+    #pragma unroll
+    for (int j = 0; j < TPB; ++j) {
+        if (j < nj) {
+            #pragma unroll
+            for (int n = 0; n < NW; ++n)
+                #pragma unroll
+                for (int q = 0; q < 4; ++q)
+                    #pragma unroll
+                    for (int h = 0; h < 2; ++h) {
+                        float v = acc[j][n][q][h];
+                        v += __shfl_xor_sync(0xffffffffu, v, 1);
+                        v += __shfl_xor_sync(0xffffffffu, v, 2);
+                        if ((lane & 3) == 0) red[(((long)j * NW + n) * MB_WARPS + warp) * MB_TN + q * 16 + c + 8 * h] = v;
+                    }
+        }
+    }
+    __syncthreads();
+    if (threadIdx.x < MB_TN) {
+        const int col = threadIdx.x;
+        for (int j = 0; j < nj; ++j) {
+            float t0 = 0.f, t1 = 0.f;
+            #pragma unroll
+            for (int w = 0; w < MB_WARPS; ++w) t0 += red[(((long)j * NW) * MB_WARPS + w) * MB_TN + col];
+            if constexpr (NW == 2) {
+                #pragma unroll
+                for (int w = 0; w < MB_WARPS; ++w) t1 += red[(((long)j * NW + 1) * MB_WARPS + w) * MB_TN + col];
+            }
+            t0 *= g0[e] * 0x1p-119f;
+            if constexpr (NW == 2) t0 = acv_act(t0, act) * (t1 * (g1[e] * 0x1p-119f));
+            y[(long)gp[j] * N + nt * MB_TN + col] = t0;
+        }
+    }
+}
+
+// Constructeur des créneaux : tri par comptage sur E + 1 experts (les paires
+// fantômes e < 0 forment le groupe E, écrit slot_e = -1), rang par expert,
+// créneau = slot_start[e] + rang / TPB. Un bloc, G ≤ 1024 paires, E ≤ 1024.
+// Sorties de taille FIXE (G créneaux, G × TPB entrées) : capturable sous graphe.
+// L ordre des paires à l intérieur d un créneau n influe sur aucune sortie.
+__global__ void moe_slots_kernel(const int *__restrict__ expert_ids, int G, int E, int TPB,
+                                 int *__restrict__ slot_e, int *__restrict__ slot_pair) {
+    __shared__ int hist[1025];
+    __shared__ int start[1025];
+    __shared__ int cursor[1025];
+    for (int i = threadIdx.x; i <= E; i += blockDim.x) { hist[i] = 0; cursor[i] = 0; }
+    for (int i = threadIdx.x; i < G; i += blockDim.x) slot_e[i] = -2;
+    for (int i = threadIdx.x; i < G * TPB; i += blockDim.x) slot_pair[i] = -1;
+    __syncthreads();
+    for (int i = threadIdx.x; i < G; i += blockDim.x) {
+        const int e = expert_ids[i];
+        atomicAdd(&hist[e < 0 ? E : e], 1);
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {                                     // balayage exclusif des créneaux par expert
+        int acc = 0;
+        for (int e = 0; e <= E; ++e) { start[e] = acc; acc += (hist[e] + TPB - 1) / TPB; }
+    }
+    __syncthreads();
+    for (int i = threadIdx.x; i < G; i += blockDim.x) {
+        const int e = expert_ids[i];
+        const int ei = e < 0 ? E : e;
+        const int r = atomicAdd(&cursor[ei], 1);
+        const int sl = start[ei] + r / TPB;
+        slot_pair[sl * TPB + (r % TPB)] = i;
+        slot_e[sl] = e < 0 ? -1 : e;
+    }
+}
+
+std::tuple<torch::Tensor, torch::Tensor> moe_slots(torch::Tensor expert_ids, int64_t E, int64_t tpb) {
+    CHECK_CUDA(expert_ids); ACVRAM_DEVICE_GUARD(expert_ids);
+    TORCH_CHECK(expert_ids.scalar_type() == torch::kInt32 && expert_ids.dim() == 1, "expert_ids : int32 [G]");
+    TORCH_CHECK(tpb == 4 || tpb == 8, "TPB ∈ {4, 8}");
+    const int G = (int)expert_ids.size(0);
+    TORCH_CHECK(G >= 1 && G <= 1024 && E >= 1 && E <= 1024, "G, E ≤ 1024");
+    auto slot_e = torch::empty({G}, expert_ids.options());
+    auto slot_pair = torch::empty({G * tpb}, expert_ids.options());
+    auto stream = at::cuda::getCurrentCUDAStream();
+    moe_slots_kernel<<<1, 256, 0, stream>>>(expert_ids.data_ptr<int>(), G, (int)E, (int)tpb,
+                                            slot_e.data_ptr<int>(), slot_pair.data_ptr<int>());
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return std::make_tuple(slot_e, slot_pair);
+}
+
+template <typename XT, int NW, int TPB>
+static void mb_slots_lancer(const torch::Tensor &w0, const torch::Tensor &s0, const torch::Tensor &g0,
+                            const torch::Tensor *w1, const torch::Tensor *s1, const torch::Tensor *g1,
+                            const torch::Tensor &slot_e, const torch::Tensor &slot_pair, const torch::Tensor &token_ids,
+                            const XT *px, float *py, int N, int K, int act, const __nv_bfloat16 *psc, int ldsc,
+                            cudaStream_t stream) {
+    const size_t shm = (size_t)TPB * (K + NW * MB_WARPS * MB_TN) * sizeof(float);
+    TORCH_CHECK(shm <= 227 * 1024, "créneaux : mémoire partagée > 227 Ko (K trop grand pour ce TPB)");
+    static size_t attribut = 0;                          // plafond déjà déclaré pour cette instanciation
+    if (shm > 48 * 1024 && shm > attribut) {
+        const cudaError_t rc = cudaFuncSetAttribute(nvfp4_gemv_marlin_slots_kernel<XT, NW, TPB>,
+                                                    cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm);
+        TORCH_CHECK(rc == cudaSuccess, "créneaux : cudaFuncSetAttribute(", (long)shm, " o) : ", cudaGetErrorString(rc));
+        attribut = shm;
+    }
+    dim3 grid(N / MB_TN, (int)slot_e.size(0), 1);
+    nvfp4_gemv_marlin_slots_kernel<XT, NW, TPB><<<grid, MB_WARPS * WARP, shm, stream>>>(
+        reinterpret_cast<const uint4 *>(w0.data_ptr()), static_cast<const unsigned char *>(s0.data_ptr()), g0.data_ptr<float>(),
+        w1 ? reinterpret_cast<const uint4 *>(w1->data_ptr()) : nullptr, s1 ? static_cast<const unsigned char *>(s1->data_ptr()) : nullptr,
+        g1 ? g1->data_ptr<float>() : nullptr,
+        slot_e.data_ptr<int>(), slot_pair.data_ptr<int>(), token_ids.data_ptr<int>(), px, py, N, K, act, psc, ldsc);
+}
+
+static torch::Tensor mb_slots_commun(const torch::Tensor &w0, const torch::Tensor &s0, const torch::Tensor &g0,
+                                     const torch::Tensor *w1, const torch::Tensor *s1, const torch::Tensor *g1,
+                                     torch::Tensor slot_e, torch::Tensor slot_pair, torch::Tensor token_ids,
+                                     torch::Tensor x, int64_t K, int64_t N, int64_t act, int64_t tpb,
+                                     c10::optional<torch::Tensor> xscale) {
+    mb_verifier(w0, s0, g0, K, N); if (w1) mb_verifier(*w1, *s1, *g1, K, N);
+    CHECK_CUDA(x); CHECK_CUDA(slot_e); CHECK_CUDA(slot_pair); CHECK_CUDA(token_ids); ACVRAM_DEVICE_GUARD(w0);
+    TORCH_CHECK(tpb == 4 || tpb == 8, "TPB ∈ {4, 8}");
+    TORCH_CHECK(slot_pair.size(0) == slot_e.size(0) * tpb, "slot_pair [G × TPB]");
+    const int G = (int)slot_e.size(0);
+    const bool bf = x.scalar_type() == torch::kBFloat16;
+    auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
+    TORCH_CHECK(xc.size(-1) == K, "x : dernière dimension K");
+    auto out = torch::empty({G, N}, xc.options().dtype(torch::kFloat));
+    const __nv_bfloat16 *psc = nullptr; int ldsc = 0;
+    if (xscale.has_value() && xscale->defined()) {
+        const torch::Tensor &sc = *xscale;
+        CHECK_CUDA(sc);
+        TORCH_CHECK(sc.scalar_type() == torch::kBFloat16, "échelle AWQ : bf16 attendu (table de moe.py)");
+        TORCH_CHECK(sc.dim() == 2 && sc.size(1) >= K, "échelle AWQ [E, ≥ K]");
+        TORCH_CHECK(sc.stride(1) == 1, "échelle AWQ : lignes contiguës");
+        psc = reinterpret_cast<const __nv_bfloat16 *>(sc.data_ptr());
+        ldsc = (int)sc.stride(0);
+    }
+    auto stream = at::cuda::getCurrentCUDAStream();
+    #define MB_SL(XT, PX, NW, TPB) mb_slots_lancer<XT, NW, TPB>(w0, s0, g0, w1, s1, g1, slot_e, slot_pair, token_ids, PX, \
+                                                                 out.data_ptr<float>(), (int)N, (int)K, (int)act, psc, ldsc, stream)
+    #define MB_SL2(XT, PX) do { if (w1) { if (tpb == 4) MB_SL(XT, PX, 2, 4); else MB_SL(XT, PX, 2, 8); } \
+                                else { if (tpb == 4) MB_SL(XT, PX, 1, 4); else MB_SL(XT, PX, 1, 8); } } while (0)
+    if (bf) { MB_SL2(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
+    else { MB_SL2(float, xc.data_ptr<float>()); }
+    #undef MB_SL2
+    #undef MB_SL
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
+}
+
+torch::Tensor nvfp4_gemv_marlin_slots(torch::Tensor w, torch::Tensor s, torch::Tensor g,
+                                      torch::Tensor slot_e, torch::Tensor slot_pair, torch::Tensor token_ids,
+                                      torch::Tensor x, int64_t K, int64_t N, int64_t tpb,
+                                      c10::optional<torch::Tensor> xscale) {
+    return mb_slots_commun(w, s, g, nullptr, nullptr, nullptr, slot_e, slot_pair, token_ids, x, K, N, 0, tpb, xscale);
+}
+
+torch::Tensor nvfp4_gemv_marlin_gateup_slots(torch::Tensor wg, torch::Tensor sg, torch::Tensor gg,
+                                             torch::Tensor wu, torch::Tensor su, torch::Tensor gu,
+                                             torch::Tensor slot_e, torch::Tensor slot_pair, torch::Tensor token_ids,
+                                             torch::Tensor x, int64_t K, int64_t N, int64_t act, int64_t tpb,
+                                             c10::optional<torch::Tensor> xscale) {
+    return mb_slots_commun(wg, sg, gg, &wu, &su, &gu, slot_e, slot_pair, token_ids, x, K, N, act, tpb, xscale);
+}
+
 torch::Tensor nvfp4_gemv_marlin(torch::Tensor w, torch::Tensor s, torch::Tensor g,
                                 torch::Tensor expert_ids, torch::Tensor token_ids,
                                 torch::Tensor x, int64_t K, int64_t N,
@@ -7311,6 +7576,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("expert_ids"), py::arg("token_ids"), py::arg("x"), py::arg("K"), py::arg("N"), py::arg("act") = 0,
           py::arg("xscale") = c10::nullopt,
           "NVFP4 : gate et up fusionnés sur la disposition Marlin, sortie act(gate)*up");
+    m.def("moe_slots", &moe_slots, py::arg("expert_ids"), py::arg("E"), py::arg("tpb") = 4,
+          "Pièce 61 : créneaux (expert, ≤ TPB paires) à partir des paires du godet — (slot_e [G], slot_pair [G·TPB])");
+    m.def("nvfp4_gemv_marlin_slots", &nvfp4_gemv_marlin_slots,
+          py::arg("w"), py::arg("s"), py::arg("g"), py::arg("slot_e"), py::arg("slot_pair"), py::arg("token_ids"),
+          py::arg("x"), py::arg("K"), py::arg("N"), py::arg("tpb") = 4, py::arg("xscale") = c10::nullopt,
+          "Pièce 61 : GEMV Marlin par créneau d expert (tuile lue une fois par créneau), au bit avec nvfp4_gemv_marlin");
+    m.def("nvfp4_gemv_marlin_gateup_slots", &nvfp4_gemv_marlin_gateup_slots,
+          py::arg("wg"), py::arg("sg"), py::arg("gg"), py::arg("wu"), py::arg("su"), py::arg("gu"),
+          py::arg("slot_e"), py::arg("slot_pair"), py::arg("token_ids"), py::arg("x"), py::arg("K"), py::arg("N"),
+          py::arg("act") = 0, py::arg("tpb") = 4, py::arg("xscale") = c10::nullopt,
+          "Pièce 61 : gate et up fusionnés par créneau d expert, au bit avec nvfp4_gemv_marlin_gateup");
     m.def("nvfp4_gemv_grouped_gateup", &nvfp4_gemv_grouped_gateup,
           py::arg("qg"), py::arg("bg"), py::arg("gsg"), py::arg("qu"), py::arg("bu"),
           py::arg("gsu"), py::arg("expert_ids"), py::arg("token_ids"), py::arg("x"),
