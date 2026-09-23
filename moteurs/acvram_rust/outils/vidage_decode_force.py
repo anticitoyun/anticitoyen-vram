@@ -40,7 +40,7 @@ for inv in json.load(open(INVITES, encoding="utf-8")):
     ids = tok.encode(render_chat(tok, inv["messages"], True))
     L = len(ids)
     force[:] = list(ids[1:])
-    seq = eng.add_request(list(ids[:1]), SamplingParams(temperature=0.0, max_tokens=L + 1), request_id=inv["nom"])
+    seq = eng.add_request(list(ids[:1]), SamplingParams(temperature=0.0, max_tokens=L + 1, ignore_eos=True), request_id=inv["nom"])
     while not seq.finished and len(seq.output_ids) < L:
         eng.step()
     assert list(seq.output_ids[:L - 1]) == list(ids[1:]), "forçage non tenu"
