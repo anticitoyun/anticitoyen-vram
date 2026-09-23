@@ -38,3 +38,19 @@
   * rejouer la capture à PROJ_MARLIN=0/1 et relever les tests par fichier.
   * Prédit : 96 appels par passe, pas au godet 2 ≤ témoin − 0,15 ms.
 * L'opt-in reste **désactivé par défaut** ; rien n'est servi.
+
+## Prise corrective (feu du chef) — 19 h 29, commit 9cbbf58a, scellé `scelle-correctif.md`
+* **correctif** : `_marlin_dense` n'accepte plus que N ≥ 1 024 et K ≥ 1 024 (`ACVRAM_PROJ_MARLIN_MIN_NK`) ; compte par forme. Prise de 70 s, seul 4627 au début et à la fin.
+* **mesuré** :
+  * `test_marlin_dense.py` relevé un par un : **8/8 passés**, ce qui lève le point 1 de l'étape 2.
+  * Appels par passe (b=4, eager) : **96**, soit 47 × q [4 096 × 2 048], 48 × o [2 048 × 4 096] et 1 × qkv [5 120 × 2 048].
+  * ms/pas, PROJ_MARLIN 0 → 1, même prise : godet 2 4,620 → 4,695 (+1,6 %) · godet 4 5,699 → 5,533 (−2,9 %) · godet 8 6,813 → 6,616 (−2,9 %) · godet 16 8,859 → 8,685 (−2,0 %).
+* **verdict** : **les deux seuils sont TENUS** (96 appels ; ≤ témoin + 3 % à chaque godet).
+  * L'hypothèse est confirmée : la perte de l'étape 2 venait des linéaires étroits pris à tort.
+  * Le gain est modeste : −2 à −3 % du pas aux godets 4-16, neutre au godet 2.
+* **Fait nouveau, qui explique la modestie du gain** : sur cet alias (alpha2-22-09), q/k/v ne sont **pas empilés** dans 47 couches sur 48.
+  * Seul `q` [4 096] passe au Marlin ; k et v (N = 512, sous le seuil) restent sur l'ancien chemin, en deux appels.
+  * Le banc supposait un qkv empilé [5 120].
+  * Cause probable : des scalers AWQ différents entre q, k et v, qui bloquent la fusion (`layers.py`, « scalers differents entre projections »).
+  * L'alias A de la 100 B (alpha COMMUN q/k/v) devrait empiler q/k/v, donc passer par le chemin à échelle par colonne et rendre le gain du banc. À vérifier par le même compte (on attend 48 × 5 120 × 2 048) avant la cellule HTTP de poste2.
+* L'opt-in reste à 0 par défaut jusqu'à la décision du chef.
