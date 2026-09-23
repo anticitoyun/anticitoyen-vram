@@ -68,7 +68,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--rep", type=int, default=200); ap.add_argument("--json")
     a = ap.parse_args()
-    ext = kernels.ext if hasattr(kernels, "ext") else kernels._ext
+    ext = kernels.get_extension()
     for nom in ("moe_slots", "nvfp4_gemv_marlin_slots", "nvfp4_gemv_marlin_gateup_slots"):
         assert hasattr(ext, nom), f"extension sans {nom} : recompiler"
     dev = torch.device("cuda", 0)

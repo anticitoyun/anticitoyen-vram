@@ -2396,13 +2396,14 @@ static void mb_slots_lancer(const torch::Tensor &w0, const torch::Tensor &s0, co
                             const XT *px, float *py, int N, int K, int act, const __nv_bfloat16 *psc, int ldsc,
                             cudaStream_t stream) {
     const size_t shm = (size_t)TPB * (K + NW * MB_WARPS * MB_TN) * sizeof(float);
-    static bool attribut = false;
-    if (!attribut && shm > 48 * 1024) {
-        cudaFuncSetAttribute(nvfp4_gemv_marlin_slots_kernel<XT, NW, TPB>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, (int)(TPB * (11264 + NW * MB_WARPS * MB_TN) * sizeof(float)));
-        attribut = true;
-    }
     TORCH_CHECK(shm <= 227 * 1024, "créneaux : mémoire partagée > 227 Ko (K trop grand pour ce TPB)");
+    static size_t attribut = 0;                          // plafond déjà déclaré pour cette instanciation
+    if (shm > 48 * 1024 && shm > attribut) {
+        const cudaError_t rc = cudaFuncSetAttribute(nvfp4_gemv_marlin_slots_kernel<XT, NW, TPB>,
+                                                    cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm);
+        TORCH_CHECK(rc == cudaSuccess, "créneaux : cudaFuncSetAttribute(", (long)shm, " o) : ", cudaGetErrorString(rc));
+        attribut = shm;
+    }
     dim3 grid(N / MB_TN, (int)slot_e.size(0), 1);
     nvfp4_gemv_marlin_slots_kernel<XT, NW, TPB><<<grid, MB_WARPS * WARP, shm, stream>>>(
         reinterpret_cast<const uint4 *>(w0.data_ptr()), static_cast<const unsigned char *>(s0.data_ptr()), g0.data_ptr<float>(),
