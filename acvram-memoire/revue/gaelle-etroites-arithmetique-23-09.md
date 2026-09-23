@@ -1,0 +1,19 @@
+# Pièce 58 — arithmétique de la boucle des étroites, noyau seul, L2 froid : (a) « échelles hors boucle » au bit mais 2,2-2,5 × plus LENT ; (b) FP8 e4m3 natif (Triton) + 5 % sur qkv, + 16 % sur o, erreur RMS 3,8 % — sous le seuil d'intégration (+ 25 % sur les deux), pas de bascule — 23/09 (Gaelle)
+
+* instrument : `outils/gpu/mesure/banc-etroites-arithmetique.py` (nouveau, suivi ; harnais L2 froid de `banc-etroites-latence.py`, 24 copies en rotation, 200 répétitions) — servi `gemm_etroit(compact=True)` ; (a) `_reduit_a` : S, Z de la tranche chargés une fois ([BN, 16 groupes]) et sélectionnés par groupe dans les registres, même ordre d'opérations ; (b) `_fp8_kernel` : x e4m3 par jeton (échelle par ligne), poids e4m3 par canal tirés du même int8 déquantifié, `tl.dot` e4m3 × e4m3 → fp32, BK 128, échelles en épilogue, 4 warps, 3 étages ; écart contre la référence fp32 x_deq · w_deq, en RMS relatif (||y − ref|| / ||ref||, insensible aux passages par zéro) ; journaux `scratchpad/gaelle-p58-23-09/`
+* commit : 84d4eeae puis correctif de métrique (RMS) dans le commit de ce verdict ; b = 12, qkv [5120, 2048], o [2048, 4096]
+* régime : quatre prises de 2-4 s, eco 2700, compute-apps début = fin, carte libre
+* scellé (gaelle.md 84d4eeae, avant) : (a) ≤ + 5 %, au bit ; réfuté si ≥ + 15 %. (b) 1,3-1,6 To/s (+ 30 à + 45 %), erreur médiane ≤ 2 % ; réfuté si ≤ 1,0 To/s ; intégration (Jerome) ssi ≥ + 25 % sur qkv ET o, puis KL Coder ≤ 0,74
+* mesuré (µs froid / chaud ; To/s sur les octets froids) :
+
+| bras | qkv froid / chaud | To/s | o froid / chaud | To/s | au bit / écart |
+|---|---|---|---|---|---|
+| servi W8A16 (int8 groupe 128, bf16 dot) | **9,45** / 8,83 | 1,135 | **10,30** / 10,08 | 0,833 | au bit ; RMS 0,24 % (arrondi bf16 de la sortie) |
+| (a) W8A16 échelles hors boucle | 21,01 / 19,26 | 0,511 | 25,93 / 25,02 | 0,331 | **au bit** (écart 0, 0 ulp) |
+| (b) W8A8 FP8 e4m3 natif | **8,99** / **6,30** | **1,169** (+ 4,9 %) | **8,65** / 7,87 | **0,971** (+ 16,0 %) | RMS **3,8 %** (médian par élément 3,8 %, p99 et max non significatifs : passages par zéro) |
+
+* verdict : **(a) réfuté tel qu'écrit** — au bit, mais la sélection de la colonne du groupe dans un tableau [BN, 16] en registres (`tl.where` + somme, Triton n'indexe pas dynamiquement) coûte plus que les deux chargements scalaires qu'elle évite : + 122 à + 151 %. L'idée (charger les échelles une fois) n'est pas réalisable à gain positif en Triton avec ce contrat ; les 2 chargements par groupe ne sont pas le mur (prévu ≤ 5 % de gain, mesuré − 120 %). **(b) sous le seuil** : + 4,9 % sur qkv, + 16 % sur o, 1,17 / 0,97 To/s — ma prédiction 1,3-1,6 est réfutée sur o (≤ 1,0) et manquée sur qkv ; **pas d'intégration, pas de KL**. Mais la lecture change : à L2 CHAUD le FP8 fait 6,3 µs sur qkv (≈ 1,67 To/s-équivalent), quand le servi ne bouge presque pas entre chaud et froid (8,8 / 9,45) — le noyau int8 est borné par son calcul (pièce 57), le noyau FP8 est borné par l'accès HBM et sa latence : c'est SUR LUI que l'hypothèse I2 (étages, tuiles, TMA) a un sens, pas sur l'int8. L'écart de qualité (RMS 3,8 % contre 0,24 %) est celui du e4m3 par canal (3 bits de mantisse, échelle amax/448 par ligne et colonne sur des poids gaussiens) : il ne se juge pas ici mais par la KL Coder si un jour le débit y est.
+* durée : 11 s de carte (4 prises), 35 min à sec ; carte LIBRE
+
+## Suite (à Jerome, non jouée)
+Le seul bras qui a bougé est le FP8 : (b′) le même `_fp8_kernel` avec étages 4-6 et BN 128 (le pipeliner a maintenant quelque chose à recouvrir), et (b″) FP8 par `torch._scaled_mm` (cuBLASLt, le chemin de TRT-LLM) sur les mêmes formes, 2 prises de 5 s — prédit : (b″) ≥ 1,5 To/s si cuBLASLt fait ce que TRT-LLM fait ; si (b′) et (b″) restent ≤ 1,2, le mur est le rembourrage M = 12 → 16 et non le noyau. Puis, seulement si + 25 % sur les deux formes : conversion des projections d'attention du Coder en e4m3 par canal (chemin de conversion + chargeur, ≈ 1 jour) et KL ≤ 0,74.

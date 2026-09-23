@@ -1,0 +1,6 @@
+# Protocole — contrôle E avant défaut : Qwen2.5-Coder-14B-nvfp4 (dense GQA), PPL décodage 8 k triton / cuda et vitesse à ctx 8 192 b=1
+instrument : `scratchpad/ppl-decode-kv-17-09.py` (préfixe 8 192 + 512 notés, porteur int8, corpus wiki-gptq tokenisé par le modèle) avec et sans `ACVRAM_PAGED_ATTN=triton` ; `scratchpad/attn-reference-17-09.py 1 8100` avec `ATTN_CTX=8320` (20 pas nus puis 20 pas profilés à ctx ≈ 8 120 ; noyaux `paged_attn_*` ou `_partiel/_reduce_kernel`) — `scratchpad/e-controle-14b-17-09/`.
+commit : arbre laure (= main 91dedac + fusion à venir) ; modèle `models_acvram/Qwen2.5-Coder-14B-pur-nvfp4` (48 couches ? lu dans le JSON), régime classé.
+scellé (Sage) : PPL triton / cuda dans ± 0,002 ET pas nu b=1 ctx 8 192 triton ≤ cuda. Tenu → `ACVRAM_PAGED_ATTN=triton` défaut ; non tenu → opt-in nommé. Issue gênante : dérive au long contexte (le scellé de Coder n'a vu que ≤ 2 048).
+mes prédictions : PPL ± 0,001 (même chose que Coder-30B : 0,9983) ; noyau partiel à ctx 8 120 b=1 : cuda ≈ 2,6-3,0 ms/pas (0,713 × 4), Triton 1,9-2,3 (chunk 64 → C = 127 tranches + reduce) ; pas nu Triton ≤ cuda − 0,5 ms.
+falsification : PPL hors ± 0,002 → retour à Laurine ; Triton > cuda à ctx 8 192 → le nombre de tranches (C) ou le reduce dérive avec le contexte, opt-in seulement.

@@ -1,0 +1,9 @@
+# Verdict — profil du pas b=1 (et b=12), (b) contre v1 sous graphes (Sage §4, poste du −1,2 % à b=1) : **le poste est le gate/up de (b) à b=1 : `nvfp4_gemv_marlin_kernel<bf16>` 0,922 ms/pas contre `nvfp4_gemv_grouped_gateup_kernel` 0,713 (+0,21 ms, +29 %)** ; le down (b) = v1 (0,346 / 0,345) ; à b=12 (b) gagne 1,6 ms/pas (7,70 contre 9,34 nu, −18 %)
+
+instrument : `scratchpad/profil-b1-b-18-09/chaine.sh` — `profil-pas-coder-17-09.py b1,b12` (torch.profiler noyaux CUDA, 40 pas nus + 40 profilés sous graphes), deux exemplaires par régime, 23:12-23:27, charge 1-2, arbre 7dff172 ; `profil-{naturel,marlin}-ex{1,2}.json`
+régime : classé ; v1 = naturel/groupe ; (b) = disposition unique marlin ; graphes on ; 699 lancements/pas à b=1, 1 181 à b=12 (identiques entre régimes)
+mesuré (exemplaires concordants à 0,3 %) : **b=1** — v1 nu **3,323-3,341 ms** (GPU 3,23), (b) nu **3,527-3,549** (GPU 3,44) → **+0,21 ms (+6,3 %)** ; noyaux : gate/up **0,713 → 0,922 ms** (+0,209), down 0,345 → 0,346, int8_gemv 0,756 → 0,758, route/norme identiques ; **b=12** — v1 nu **9,336-9,349** (GPU 8,54, experts 5,13), (b) nu **7,702-7,715** (GPU 7,02, experts 3,95) → **−1,63 ms (−17,5 %)**
+verdict : **poste nommé** — à b=1 (8 paires, une par expert) le GEMV gate/up lisant les tuiles Marlin (16 k × 64 n : une ligne ne remplit pas la tuile) coûte 29 % de plus que le GEMV naturel, le down n'y perd rien ; la perte de 0,21 ms explique intégralement les 350,9 contre 366 (−4 %) ; à b=12 la même disposition rend 1,6 ms — le compromis est celui accepté par l'utilisateur ; piste (Laurine, hors urgence) : gate/up (b) avec 2 lignes par warp à b ≤ 2, ou lecture par demi-tuile pour les lots < 8
+
+## Lecture
+- Le banc noyau (0,909 × à b=1) et l'in situ (0,988 ×) divergeaient : le banc mesurait gate/up + down en somme sur routages tirés ; en situ le gate/up seul porte +29 % et le down 0 % — la moyenne du banc masquait le poste, le profil par noyau le nomme.

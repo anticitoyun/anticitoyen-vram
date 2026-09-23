@@ -1,0 +1,8 @@
+# Protocole — KV lm4, passe de cause : 4 bras sur porteur int8 (diagnostic lm4 en amont de l'écriture), mêmes 512 jetons
+
+instrument : `scratchpad/ppl-decode-kv-17-09.py` (préfixe 8 192 + 512 notés, Coder classé, NLL par jeton), `ACVRAM_KV_FORMAT=int8` (porteur, noyau paginé, graphes — même chemin d'attention dans les 4 bras) ; diagnostic branché par Manon 6a660fb / Laurine 61f9afa (`kvcache.py:406-408` → `kv_lm4.quantifier_diagnostic`) ; chaîne `scratchpad/kv-lm4-cause-17-09/chaine.sh`.
+commit : arbre laure 7ba2a49 (= main) ; référence int8 pur = 3,4536 (`verdict-kv-lm4-qualite-17-09`, mêmes ids) ; lm4 stocké = 3,5279 (1,0215).
+bras : (0) `ACVRAM_KV_LM4_PUITS=0` seul → lm4 des deux côtés via le diagnostic, puis int8 ; (1) `ACVRAM_KV_LM4_SEUL=k` ; (2) `ACVRAM_KV_LM4_SEUL=v` ; (3) `ACVRAM_KV_LM4_PUITS=16`. `regime_ligne()` doit nommer la variable posée (`cli.py:68-69`).
+scellé (Sage, `sage-kv-lm4-clos-17-09` § 1, Jérôme) : bras 0 DOIT rendre 1,0215 ± bruit (± 0,004 : l'int8 porteur ajoute son propre 0,2 %) — sinon branchement ou porteur en cause, les autres bras ne s'interprètent pas ; K seul ≥ 80 % de + 0,0215 ; V seul ≤ + 0,005 ; puits 16 réduit la perte d'au moins moitié.
+mes prédictions : bras 0 = 1,019-1,026 ; K seul 1,014-1,020 (les clés portent RoPE et l'amplification par le softmax) ; V seul 1,003-1,007 ; puits 16 = 1,012-1,017 (l'ancre pèse, mais moins de la moitié : la perte est répartie sur les 8 k clés).
+falsification : bras 0 hors [1,017 ; 1,026] → arrêt, rien d'interprété ; K + V seuls ≠ bras 0 à ± 0,004 → les erreurs ne s'additionnent pas, interaction à nommer ; puits 16 ≤ 1,011 → Sage a raison (l'ancre est la moitié) ; V seul > 1,008 → V compte, contre nous deux.

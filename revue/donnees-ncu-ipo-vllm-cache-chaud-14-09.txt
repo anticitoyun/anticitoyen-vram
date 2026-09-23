@@ -1,0 +1,16 @@
+Par pas (moyenne sur 1 pas), 481 lancements profilés, 0 valeurs illisibles
+                                                                  appels   ms/pas  Go lus    Go/s    Ginst  inst/oct tens%  fma%  lsu%   SM%   MHz
+vllm::cvt_fp16_to_fp4<__nv_bfloat16, 0>                            144.0    0.411   0.001       2    0.042     78.08   0.0   0.0   0.0   0.0  2523
+kernel_unified_attention                                            48.0    0.341   0.152     476    0.102      0.67   0.6   0.0   0.0   0.0  2465
+at::reduce_kernel                                                   49.0    0.231   0.003      30    0.006      1.88   0.0   0.0   0.0   0.0  2548
+vllm::cvt_fp16_to_fp4<__nv_bfloat16, 1>                             48.0    0.225   0.000       4    0.017     40.73   0.0   0.0   0.0   0.0  2545
+shuffleInputRowsKernel<__nv_bfloat16>                               96.0    0.193   0.000      12    0.006     56.00   0.0   0.0   0.0   0.0  2512
+reduce_segments                                                     48.0    0.172   0.001      27    0.033     29.14   0.0   0.0   0.0   0.0  2496
+cublasLt::splitKreduce_kernel<32, 16>                               48.0    0.099   0.001       8    0.000      0.47   0.0   0.0   0.0   0.0  2523
+
+Par poste
+                                                                  appels   ms/pas  Go lus    Go/s    Ginst  inst/oct tens%  fma%  lsu%   SM%   MHz
+routage + glue MoE                                                 385.0    1.158   0.005      10    0.071     14.93   0.0   0.0   0.0   0.0  2526   69.3 %
+attention paginée                                                   48.0    0.341   0.152     476    0.102      0.67   0.6   0.0   0.0   0.0  2465   20.4 %
+reste                                                               48.0    0.172   0.001      27    0.033     29.14   0.0   0.0   0.0   0.0  2496   10.3 %
+TOTAL                                                              481.0    1.671   0.158     107    0.207      1.31   0.3   0.0   0.0   0.0  2517

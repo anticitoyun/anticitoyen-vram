@@ -1,0 +1,5 @@
+# Protocole — Nemotron-3.5-Lightning-30B-A3B acvram « précision officielle » (Manon ddcbd34 : exclusions du checkpoint NVIDIA respectées, 46 projections en FP8/bf16) : PPL × bf16 + vitesses dans la même fenêtre (Sage, sage-nemotron-precision-officielle-prediction-17-09)
+
+instrument : celui de `verdict-nemotron-srcbf16-17-09` — `ppl-acvram-17-09.py` 3 tranches `tranches-glm` × bf16 géo 13,416 (déjà mesuré), `certifie-b12` b=1 ×1 / b=12 ×1, régime classé, FLA défaut ; chaîne `scratchpad/nemotron-officiel-17-09/chaine.sh` ; verdict avec sha256 du converti et liste des tenseurs hors NVFP4 (signature du régime FP8/bf16).
+scellé (Sage) : PPL 1,010-1,022 (centre 1,016) ; ≤ 1,020 classée (les exclusions étaient la cause) ; 1,020-1,035 exclusions partielles → calibration bras A ensuite (prédiction 1,015-1,025, sinon fermer) ; > 1,035 contrôle tenseur par tenseur nemotron_h contre bf16, pas de calibration ; vitesse obligatoire : b=12 689,8 → 600-680 t/s (faux < 550 : poste FP8 lent à nommer), b=1 269,7 → 240-265.
+ordre : après le chantier GEMM dense (palier 1 en cours, banc palier 2, en situ si porte).

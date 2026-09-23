@@ -1,0 +1,6 @@
+# Protocole — B0 (GEMM groupée bf16 Triton persistante, `ACVRAM_PREFILL_GROUPED=groupe`) : mêmes cellules que `verdict-prefill-bmm-a-17-09`, deux bras
+instrument : `prefill-glm-acvram-15-09.py w4a16 2048` (7 rép., processus neuf par bras) ; `ppl-acvram-17-09.py` privé 3 tranches ; `profil-pas-coder-17-09.py prefill` sous `groupe` (GEMM des experts nommée par noyau Triton, déquant, copies) — `scratchpad/prefill-groupe-17-09/`.
+commit : arbre laure e855557 (= main avec B0 83c24e1, 19/19 CPU verts) ; défaut `grouped_mm` (`model.py:1598`), `groupe` opt-in ; Triton 3.8.0.
+scellé (Sage) : GEMM experts ≤ 80 ms ; prefill Coder 2048 ≥ 11 000 j/s ; PPL = tout-torch ± 0,002 ; `regime_ligne()` nomme le bras ; > 100 ms → ncu avant B1 (refusé sur ce poste : `ERR_NVGPUCTRPERM`, à router à l'utilisateur).
+mes prédictions : GEMM experts Triton 45-90 ms (7,4 TFLOP bf16 par prefill : 18 ms à 400 TFLOPS, ×2,5-5 pour un premier Triton sm_120 à tuiles fixes) ; prefill 10 500-12 500 j/s (236 − 120 + 60 = 176 ms → 11 600) ; PPL ± 0,001 ; témoin grouped_mm 8 400-8 900.
+falsification : Triton refuse à la compilation sm_120 → dit à Laurine (boutons `_BN/_BK/_WARPS/_STAGES`) ; GEMM > 100 ms → B0 n'atteint pas les tensor cores (tuiles / stages) ; prefill < 11 000 avec GEMM ≤ 80 → le reste (déquant 52, glue) borne, B1 doit lire NVFP4 sur place.

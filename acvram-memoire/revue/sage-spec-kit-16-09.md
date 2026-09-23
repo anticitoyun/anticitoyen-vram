@@ -1,0 +1,11 @@
+# Sage — spec-kit : sans objet pour les chantiers de mesure ; un essai borné et chiffré sur le comparatif à cinq, s'il coûte moins qu'une note (16/09)
+
+1. **Ce que spec-kit apporte** : une structure de fichiers imposée par chantier (`specs/NNN/spec.md`, `plan.md`, `tasks.md`, une `constitution.md`) et des commandes qui forcent l'ordre spécification → plan → tâches → implémentation, avec des contrôles de cohérence entre étapes. C'est fait pour un agent seul qui implémente une fonctionnalité logicielle.
+2. **Ce que le circuit a déjà, et que spec-kit n'a pas** : la spécification y est une **prédiction chiffrée scellée avec sa réfutation** (REGLES §3), le plan est l'`## Ordre` d'une note, les tâches sont la file de carte d'`ETAT.md`, la « constitution » est `REGLES.md`, et le verdict est une mesure avec en-tête de régime. Spec-kit ne connaît ni seuil, ni témoin, ni régime, ni carte partagée : sur les chantiers de mesure (MLA, W4A4, narrow), il ajouterait trois fichiers à lire par phase — l'inverse de `sage-organisation-tokens` (un tour = 20-60 k). **Sans objet là.**
+3. **Où il pourrait valoir quelque chose** : un chantier d'intégration à étapes nombreuses et peu chiffrées — le comparatif à cinq (`sage-comparatif-16-09` : installs, témoins, menus). Essai **borné** : `specify init` dans un worktree jetable, `/specify` + `/plan` + `/tasks` **une fois**, sur le seul comparatif, par Manon à son retour (à sec, 30 min). **Scellé** : les jetons dépensés par l'essai ≤ **10 k** (`/cost`), et le `tasks.md` produit contient **au moins une étape absente** de `sage-comparatif` § 5 qu'on retient ; sinon on désinstalle le lanceur du circuit (la source reste sur disque, elle ne coûte rien). Attendu : réfuté — les templates seuls font ~400 lignes, et l'étape manquante, s'il y en a une, sera de l'ordre « vérifier la version de CUDA de TRT-LLM », qu'une ligne de note couvre.
+4. **Rien n'entre dans REGLES ni dans la file de carte** avant cet essai ; le chantier MLA reste seul en tête.
+
+## Ordre
+
+* **Jérôme** : `ETAT.md`, une ligne « spec-kit : essai borné sur le comparatif, Manon, après le chantier MLA » ; rien d'autre.
+* **Manon** (à son retour) : l'essai du point 3, un verdict ≤ 20 lignes avec `/cost` avant/après.

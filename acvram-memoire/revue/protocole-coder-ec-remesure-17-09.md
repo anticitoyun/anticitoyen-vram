@@ -1,0 +1,6 @@
+# Protocole — remesure unique des cellules Coder-30B acvram b=12 / b=1 sous E (`ACVRAM_PAGED_ATTN=triton` défaut, 0.6.7) et C (`ACVRAM_NARROW_KERNEL=mixte` défaut : Triton dès b ≥ 2, cuda à b=1)
+instrument : `certifie-b12-15-09.py` rondes (ctx 2048, invite 256, 20 s) : b=12 ×2, b=1 ×1 ; budget KV = slots (bacaa6c), sans béquille ; `regime_ligne()` et `engine.regime_ligne()` dans la preuve — `scratchpad/coder-ec-17-09/`.
+commit : arbre laure (= main 0d34f6b, E 8d60fcd + C 0d34f6b, 15/15 verts ; tests ciblés régime/budget 14 passed ici) ; régime classé `ACVRAM_MOE_MMA=0 ACVRAM_MOE_DECODE_MMA=0 ACVRAM_NARROW_GEMM=1`, défauts E/C (absents de la ligne : ce sont les défauts ; version 0.6.7 les porte).
+référence : 743,4 t/s · 0,538 J (b=12, `verdict-poste-d-17-09`, budget 12) ; 233,9 t/s · 1,365 J (b=1, cellule).
+mes prédictions : b=12 : E retire ≈ 2,0 ms sur l'attention moyenne de la ronde (1,1 → 4,4 ms de ctx 300 à 2 044, Triton ≈ 0,35 → 0,9) et C ≈ 1,5 ms sur le dense (3,0 → ≈ 1,5 en situ) : pas 16,1 → ≈ 12,6 ms → **920-1 000 t/s, 0,42-0,46 J** ; b=1 : C reste cuda, E gagne 0,2-0,25 ms sur 4,06 → **245-256 t/s**, J 1,26-1,32.
+falsification : b=12 < 850 → un des deux noyaux ne prend pas le chemin attendu en situ (godet, graphe) — profil de pas à refaire ; b=1 < 240 → idem pour E à b=1 ; troncature ou régime DÉGRADÉ → mesure rejetée.

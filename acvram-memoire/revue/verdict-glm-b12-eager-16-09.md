@@ -1,0 +1,13 @@
+# Verdict — pas b=12 GLM en EAGER (chemin juste, arbitre 81/84 dans le même processus) : 66,1 ms / 166 t/s / 1,24 J en rondes, 67,6 ms à lot plein — le plancher que le rejeu corrigé devra battre
+
+- **instrument** : `ties-moe-decode` eager avec chrono par pas (synchronize par pas, médiane des pas à lot plein) puis `arbitre-prefill` sur **les logits de ce même processus** ; `certifie-b12` avec `CERT_EAGER=1` (rondes ctx 2048 / invite 256 / ≥ 20 s, `energie.py` b11b8a3), ×2 ; sorties `scratchpad/eager-b12-16-09/`
+- **commit** : main **dcb09ba** (travail/laure f7d8afb) ; régime **W4A16 prefill et décodage** (`MOE_DECODE_MMA=0`, Sage § 9), `-k48`, `ACVRAM_HYBRID_SLOTS=12`, **graphes OFF**, NOMINAL 0/47 exilées
+- **régime** : une carte, -pl 400, horloge 2 932-2 955 MHz, 34-44 °C, **204-206 W** (la carte attend le lancement Python la moitié du temps), aucune invalidation
+- **scellé** (Sage § 11) : publier « temps du chemin juste, eager » ; borne : le rejeu corrigé devra faire ≤ ce temps ; dit si 17,2 ms était l'ordre de grandeur d'un chemin juste
+- **mesuré** : arbitre **81/84** (k=2 : 12/12, cos méd 1,000000) sur les logits du processus chronométré ; **pas à lot plein 67,58 ms** (254 pas, ctx ≈ 128-380) ; rondes **66,17 / 66,02 ms · 165,4 / 165,8 t/s · 1,230 / 1,241 J/jeton · 204-206 W**
+- **verdict** : **plancher eager publié : 66,1 ms / 166 t/s / 1,24 J (b=12, W4A16, ctx 256→2048)**. Le rejeu corrigé doit faire ≤ 66 ms — tout chiffre sous graphes au-dessus sera un rejeu qui n'a pas gagné son droit. 17,2 ms n'est **pas** l'ordre de grandeur mesuré d'un chemin juste : c'est l'ordre de grandeur d'un rejeu qui ne recalculait pas la bonne attention ; le rapport 66 / 17 ne se lit pas comme un gain à venir (l'eager paie 5 ms de trous par pas de plus qu'un rejeu, pas 49)
+
+## 1. Ce que le chiffre eager contient, pour ne pas le lire de travers
+- Eager à b=12 : ~2 500 lancements Python par pas ; 204 W contre 308 en rejeu à 12 créneaux (56 ms) et 355 chez vLLM : la carte est **inoccupée la moitié du temps** — le 66 ms est un plafond du chemin juste, pas son coût GPU (les noyaux, eux, tiennent en ≈ 38 ms d'après les nsys : union des noyaux à 12 créneaux, 38,5 ms — chiffre de temps, indépendant de la justesse de l'état).
+- Le duel : 56,1 ms (rejeu faux) contre 66,1 (eager juste) — l'écart avec vLLM (15,1 ms) passe de ×3,7 à **×4,4** sur un chemin juste ; le régime W4A16 au décodage (Sage § 9) est compris dans ce 66.
+- Colonne du duel à réécrire : `acvram -k48, W4A16 prefill+décodage, eager (créneaux, arbitre 81/84) : 66,1 ms · 166 t/s · 1,24 J`, en attendant le rejeu corrigé.

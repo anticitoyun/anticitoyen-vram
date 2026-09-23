@@ -1,0 +1,19 @@
+NOTICE — acvram/kernels/marlin_port
+
+Ce répertoire porte des noyaux de vLLM (https://github.com/vllm-project/vllm), version v0.29.0
+(commit 98dff2a), sous licence Apache-2.0 (texte : LICENSE-vllm). Chaque fichier porté garde son
+en-tête d origine quand il en a un, et porte sinon un en-tête « Port acvram » qui nomme le fichier
+source. Espace de noms des ops renommé `acvram_marlin`.
+
+Fichiers portés (chemins d origine dans vllm/csrc/) :
+  18/09/2026 (porte P1) : libtorch_stable/quantization/marlin/{marlin.cuh, marlin_dtypes.cuh, dequant.h,
+    marlin_mma.h, gptq_marlin_repack.cu}, libtorch_stable/moe/marlin_moe_wna16/{kernel.h, marlin_template.h,
+    ops.cu, generate_kernels.py} (+ instanciations générées NVFP4 seul), core/scalar_type.hpp,
+    libtorch_stable/torch_utils.h ; préparations Python transcrites de vllm/model_executor/layers/
+    quantization/utils/marlin_utils{,_fp4}.py et fused_moe/moe_align_block_size.py.
+  23/09/2026 (pièce 62) : libtorch_stable/moe/moe_align_sum_kernels.cu (aligneur CUDA), cuda_compat.h,
+    libtorch_stable/core/math.hpp, libtorch_stable/dispatch_utils.h, libtorch_stable/quantization/vectorization.cuh.
+
+Modifications : enregistrement des ops sous `acvram_marlin` (bindings.cpp, blocs STABLE_TORCH_LIBRARY_IMPL
+ajoutés en fin de fichier, include de torch/csrc/stable/library.h dans moe_align_sum_kernels.cu), instanciations limitées au NVFP4 (E2M1, échelle E4M3 par 16, activation bf16),
+aucune modification des noyaux eux-mêmes. Voir acvram-memoire/revue/gaelle-p62-*.md pour les mesures.

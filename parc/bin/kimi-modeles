@@ -1,0 +1,80 @@
+#!/usr/bin/python3
+# kimi-modeles — interface graphique du parc de modèles locaux (GTK4 / libadwaita).
+#
+# Tout le commun (parc, moteurs, fiches, filtres, fenêtre) vit dans le paquet
+# parc/lib/menu_modeles/ ; ce lanceur ne porte que les divergences propres à
+# kimi (nom, icône, couleurs, bouton web « kimi web »), réunies dans PROFIL.
+#
+# Soutenir : https://buymeacoffee.com/anticitoyen
+import os
+import sys
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+
+# ─── parc et commun des deux menus (parc/lib/menu_modeles) ───
+sys.path.insert(0, "/usr/share/acvram-parc/lib")
+_LIB_LOCALE = Path(__file__).resolve().parent.parent / "lib"
+if (_LIB_LOCALE / "acvram_parc.py").exists():
+    sys.path.insert(0, str(_LIB_LOCALE))
+from menu_modeles.config import PARC, KIMI_DIR, BIN, CONFIG, GUI_TEST  # noqa: E402
+from menu_modeles.fenetre import Fenetre, appliquer_habillage  # noqa: E402
+
+# ─── divergences propres à kimi-modeles (S5, sage-menus-cloture-19-09) ───
+ICONE = Path(PARC.extras["icone_kimi"]) if PARC.extras.get("icone_kimi") else BIN.parent / "share/icons/kimi-modele.png"
+KIMI_BIN = Path(os.path.expanduser(PARC.outils["kimi"])) if PARC.outils.get("kimi") else KIMI_DIR / "bin/kimi"
+PORT_WEB = int(PARC.extras.get("port_web_kimi", 58627))
+
+PROFIL = {
+    "nom": "kimi",
+    "titre_fenetre": "Kimi Modèles",
+    "cli": "kimi-modele",
+    "icone": "kimi-modele",
+    "terminal_titre": "kimi",
+    "app_id": "fr.anticitoyen.KimiModeles",
+    "accent_bg": "#e5407e",
+    "accent_color": "#ff8ab5",
+    "refuse_tabby_yals": False,
+    "web": "kimi_web",
+    "web_label": "Ouvrir dans kimi web",
+    "web_tooltip": ("Interface web dans le navigateur — le moteur "
+                    "du modèle choisi démarre au premier message"),
+    "comfy_start": None,
+    "comfy_url": None,
+    "port_web": PORT_WEB,
+    "kimi_bin": KIMI_BIN,
+}
+
+
+class Application(Adw.Application):
+    def __init__(self):
+        # sous test : instance non unique, sinon `run` réveille l'instance déjà ouverte de l'utilisateur par D-Bus
+        # et rend 0 sans rien jouer (vu le 21/09 : rc 0, aucune ligne GUI_TEST)
+        super().__init__(application_id=PROFIL["app_id"],
+                         flags=Gio.ApplicationFlags.NON_UNIQUE if GUI_TEST else Gio.ApplicationFlags.DEFAULT_FLAGS)
+
+    def do_activate(self):
+        appliquer_habillage(PROFIL["accent_bg"], PROFIL["accent_color"])
+        fen = self.props.active_window or Fenetre(self, PROFIL)
+        if ICONE.exists():
+            Gtk.Window.set_default_icon_name(PROFIL["icone"])
+        fen.present()
+        if GUI_TEST:
+            GLib.idle_add(fen.test_jouer)
+
+
+def main():
+    if not CONFIG.exists():
+        print(f"config.toml introuvable : {CONFIG}", file=sys.stderr)
+        return 1
+    app = Application()
+    code = app.run(sys.argv)
+    return getattr(app, "rc_test", 0) or code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,4 @@
+# Protocole — Nemotron-3.5-Lightning-30B-A3B acvram calibA (Manon 72ace16 : calibration bras A sur la précision officielle, 6 048 tenseurs statistiques, SNR 20,5 → 23,2 dB) : PPL × bf16 + rondes, même instrument que les deux précédents
+
+instrument : `ppl-acvram-17-09.py` 3 tranches `tranches-glm` × bf16 géo 13,416 ; `certifie-b12` b=1 ×1 / b=12 ×1 (régime classé, FLA, `DENSE_NVFP4=triton` défaut — noter que les deux précédents (srcbf16 1,0632, officiel 1,0304) ont été mesurés en régime GEMV : la PPL ne dépend pas du GEMM (équivalence ± 0,0002), les vitesses si) ; chaîne `scratchpad/nemotron-calibA-17-09/chaine.sh`.
+scellé (Sage) : PPL 1,015-1,025 ; classée si ≤ 1,020 ; repères : officiel non calibré 1,0304, srcbf16 1,0632, vLLM ModelOpt 0,987. Vitesses attendues : b=1 ≈ 209 (FP8), b=12 ≥ 799 (Triton dense en plus).

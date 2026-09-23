@@ -1,0 +1,9 @@
+# Verdict — pièce 68, routage b=1 (Océane, au bit) : TENU, +5,62 % t/s — au-delà de la prédiction haute (+4,5 %)
+
+* instrument : `scratchpad/manon-p68-23-09/run.sh` sous `outils/carte.sh` : ABAB A1,B1,A2,B2 b=1, deux worktrees dédiés (`travail/manon-p68-A`=a38cebda, juste avant la pièce 68 ; `travail/manon-p68-B`=main 18f64b6d), `PYTHONPATH=$W` + cwd=$W par bras (acvram non installé en editable, vérifié : la résolution suit le cwd/PYTHONPATH, pas le venv) ; `--speculative none --ACVRAM_GEMV_SPLITK=1` des deux côtés, `-lgc 2700,2700` explicite, même client `banc-llamacpp-16-09.py` (celui de manon-w-21-09, identique pour les deux bras)
+* commit : A=a38cebda, B=18f64b6d (= main, pièce 68 fusionnée, `0e1f46f9` — routage b=1 : un seul atomique vectorisé après la boucle, au bit) ; alias `Qwen3-Coder-30B-A3B-nvfp4-qkvo-i8c`
+* régime : compute-apps avant/après = llama-server du pair (4627) seul ; verrou tenu 05:51:53→06:01:16 (563 s, 2 chargements par worktree) ; **aucun bridage** sur les 4 bras, horloge identique (2656-2658 MHz), régime confirmé sur les 4 (`GEMV_SPLITK: 1`, `speculation=off`)
+* scellé (avant mesure) : prédiction +3,3 % (banc) à +4,5 % (si ratio nsys conservé) ; réfutée sous +1,5 %
+* mesuré : A (n=2) 294,4 / 294,5 → moy **294,45** ; B (n=2) 310,9 / 311,1 → moy **311,0**. **Gain = +5,62 %** — TENU, au-delà même de la borne haute prédite (+4,5 %). Énergie : A 0,6048 J/jeton net, B 0,6016 → −0,54 % (marginal, cohérent avec un gain de débit sans changement de régime)
+* verdict : **TENU**, mesure propre (pas de confondu horloge/bridage, deux worktrees isolés confirmés par leur commit et leur ligne de régime). Le gain observé (+5,62 %) dépasse la prédiction haute d'Océane — à noter pour la calibration banc→service de ses estimations futures, mais pas un défaut
+* durée : 563 s de carte (4 bras propres), verrou rendu 06:01:16, carte libre ; worktrees `manon-p68-A`/`manon-p68-B` laissés en place (à retirer sur ordre si non réutilisés)

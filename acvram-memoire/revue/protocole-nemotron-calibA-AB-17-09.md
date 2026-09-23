@@ -1,0 +1,4 @@
+# Protocole — Nemotron-3.5-Lightning-30B-A3B, deux convertis calibA corrigés par Manon (plancher réparé, 2 h à sec) : A `-calibA-etendue4096-repli8` (AWQ partout borné, 8/5935 hors bornes repliés, SNR 23,1 dB), B `-calibA-sansdown` (down_proj identité, SNR 20,8 dB) — PPL géo 3 tranches chacun, corpus bras A
+
+instrument : `scratchpad/nemotron-calibA-AB-17-09/chaine.sh` = montage srcbf16 / officiel / calibA / repli135 (`ppl-acvram-17-09.py`, 3 tranches `corpus-prive/tranches-glm/tranche{0,1,2}`, × bf16 15,367 / 13,315 / 11,801, géo) ; régime classé, graphes on ; la chaîne attend chaque dossier (config.json + *.safetensors stables 90 s) puis mesure, A puis B.
+scellé (Sage) : seuil unique ≤ 1,020 classé — le plus bas des deux qui tient est classé ; prédictions A 1,015-1,030, B 1,020-1,030 ; aucun ≤ 1,020 ⇒ chantier fermé pour de bon, menus = precision-officielle 1,0304. Repères : officiel 1,0304, srcbf16 1,0632, repli135 1,2634 (invalide), calibA 1,4301.

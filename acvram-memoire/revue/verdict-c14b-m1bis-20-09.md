@@ -1,0 +1,11 @@
+# Verdict — M1 bis, C14-b prep regrillé seul (`ACVRAM_MLA_PREP_GRILLE=1`, `BATCH_FUSION=0`, oceane-c14b a985c71d) : certifie b=12 GLM ABAB **TENU** — pas B 16,953 ms contre A 17,417 = **−0,465 ms** (−2,7 %), résolution 2·|A1−A2| = 0,150, prédit −0,35 ± 0,15 (dans l'intervalle) ; J brut B 0,4126 ≤ A 0,4191 (−1,6 %, prédit −2 %) → **PREP_GRILLE au défaut** (Océane bascule, 0.6.31)
+
+instrument : `scratchpad/c14b-m1bis-20-09/chaine.sh` (nue, un `carte.sh` par bras, `certifie-b12.py` GLM b=12 : 1 787 pas × 12 par bras, fenêtre 20 s après 30 s de repos), A = `PREP_GRILLE=0`, B = `=1` (preuve : `[PREUVE] regime_ligne … ACVRAM_MLA_PREP_GRILLE=1` dans cert-B1.log), sans affinité (chaîne `unset ACVRAM_*`, régime « poste 1030 sans fils » comme M00-ter), arbre `manon-c14b` a985c71d + extension en cache, `ACVRAM_MODELES=/mnt/AI_GENERATOR/models_acvram`, 10:38:36-10:43:39, hôte calme (firefox 39 %, python 10 %), 3080 Ti pid 4286 (pair) ; copies `scratchpad/c14b-m1bis-20-09/` sur manon
+scellé (Sage, addendum M1, avant) : pas B < A − 2·|A1−A2| ET J_B ≤ J_A → défaut 1 ; prédit −0,35 ± 0,15 ms, J −2 % ; issue gênante : B ≥ A − 0,15 → opt-in
+mesuré : A1 17,455 ms · 687,5 t/s · 0,4156 J · 285,7 W ; B1 16,944 · 708,2 · 0,4108 · 291,0 ; A2 17,380 · 690,5 · 0,4225 · 291,7 ; B2 16,961 · 707,5 · 0,4143 · 293,1 ; moyennes A 17,417 / B 16,953 ; |A1−A2| 0,075, |B1−B2| 0,017
+verdict : le −0,44 ms/pas de noyaux mesuré en M1 (prep 1 043 → 601 µs) devient **−0,465 ms de pas certifié** : le prep regrillé est sur le chemin critique du pas b=12 à 100 %, sans surcoût caché ; l'écart tient 3 × la résolution ; J suit (−1,6 %) ; (a) reste faux au seuil de 8 µs/couche (12,8 mesurés) mais le seuil jugeait un noyau, le scellé de M1 bis juge le pas — c'est lui qui décide du défaut
+durée : 5,1 min de carte (10:38:36-10:43:39)
+suite : Océane : `ACVRAM_MLA_PREP_GRILLE` défaut 1 (commit séparé, ligne de régime `mla_prep=grille`), 0.6.31 ; Sage : cellule GLM b=12 à rejouer sur le .deb 0.6.31 (T1 ne la couvre pas, ≈ 3 min, bras éco) ; Jérôme : indexer ; ma file : T1 en cours (10:43:46) → bras éco 0.6.31 → M2 → M3 → M4
+
+## Rejouable
+`cd ~/travail/manon-c14b && git checkout a985c71d && POSTE=20-09-1030 ACVRAM_MODELES=/mnt/AI_GENERATOR/models_acvram ACVRAM_ARBRE=$PWD PYA=<python venv> bash scratchpad/c14b-m1bis-20-09/chaine.sh` (5 min ; sorties `cert-{A1,B1,A2,B2}.json`).

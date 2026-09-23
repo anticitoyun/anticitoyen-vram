@@ -1,0 +1,46 @@
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.venv*/
+build/
+dist/
+.acvram_cache/
+models/
+*.safetensors
+*.gguf
+.pytest_cache/
+
+# credentials -- never commit these
+vacancesgitlab
+*.token
+*token*
+.env
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+acvram_*.deb
+.claude/settings.local.json
+# Export passif de beads : regenere par `bd export`, porte le courriel de l auteur
+# de chaque issue. Le test d identite le refuserait ; il n a rien a faire dans l histoire.
+.beads/issues.jsonl
+externes/
+scratchpad/ncu-tampon-c1-19-09/home-ncu/
+scratchpad/c14c-carte-19-09/tmp-build/
+scratchpad/c14c-carte-19-09/nsys-tmp/
+scratchpad/c14c-carte-19-09/sortie/
+
+# artefacts de mesure : jamais suivis (identifiants de session, volume)
+scratchpad/**/*.nsys-rep
+scratchpad/**/*.sqlite
+scratchpad/**/*.log
+scratchpad/**/*.out
+outils/gpu/hors-verrou.log
+scratchpad/t4-20-09/pytest-T4-11h40.txt
+.webui_secret_key
+*.deb
+.beads.gate.lock
+scratchpad/**/*_cuda_gpu_trace.csv

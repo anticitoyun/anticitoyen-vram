@@ -1,0 +1,11 @@
+# Verdict — contrôle (i) de l'outil 3.2 (`outils/gpu/mesure/ppl-decode-kv.py`, Océane 1756fbad : cache de préfixe ON par défaut, `--sans-cache-prefixe` = bras diagnostic) : **les deux prédictions tenues à 10⁻⁴** — tranches-9/tranche0, GLM, `MLA_GLUE=1`, 8 192 + 512 : **cache ON 14,9613** (= ancien script), **`--sans-cache-prefixe` 14,7888** (= 3.2 d'avant) ; la différence d'instrument est nommée : le cache de préfixe (régime servi) — pas une fuite d'état, pas un décalage de fenêtre
+
+instrument : 3.2 sur main c7136d06 (⊇ 1756fbad), deux prises `carte.sh` 08:02 (≈ 20 s chacune, un chargement chacune) ; `--prefixe-seq '[gMASK]<sop>'`, `--prefixe 8192 --notes 512` ; journaux `scratchpad/c15-niveau2-19-09/controle-cache-32/`
+scellé (Jérôme/Océane 08 h 00, avant) : cache ON → 14,9613 à 10⁻⁴ ; `--sans-cache-prefixe` → 14,7888 ; si le premier ne rend pas 14,9613, cause ailleurs, instrument
+mesuré : `cacheON` **14,9613** ; `sansCache` **14,7888** ; références : ancien script (`PPL_PREFIXE`, cache ON par défaut) 14,9613 (07:52) ; 3.2 d'avant 1756fbad (cache OFF) 14,7888 (07:48)
+verdict : **TENU** — 3.2 est égal à l'ancien au 10⁻⁴ dès qu'il tourne au régime servi (cache ON) ; l'hypothèse chiffrée d'Océane (`_frontiere_insta`, runner.py:839 : hybride ET cache ON → préfill coupé à 7 936 + 256) reçoit exactement les deux valeurs prédites — c'est ce que Sage demande : le fait s'écrit « régime servi = cache ON, préfill coupé à la frontière d'état (−1,2 % de PPL sur cette tranche contre le préfill d'un seul tenant) », pas « +1,2 % » ; conséquence : les 9 tranches du régime des clés (ab3bdb15) ont été notées **sans cache** (3.2 d'alors) — A/B interne valide, absolus non comparables aux prises à cache ON ; les 36 se font au régime servi
+durée : 2 prises 42 s (08:02:02-08:02:44) ; rédaction 3 min
+suite : Jérôme : indexer, 3.2 admis au comparatif (régime servi) ; Océane : rien ; Sage : la frontière d'état (7 936 + 256) est un régime à nommer sur la ligne de régime si elle change la PPL de 1,2 % ; ma file : 36 tranches (tf32/fp32 + β) maintenant
+
+## Rejouable
+`ACVRAM_MLA_GLUE=1 ACVRAM_TYPE=mesure outils/carte.sh <python> outils/gpu/mesure/ppl-decode-kv.py --modele <GLM> --tranches scratchpad/corpus-prive/tranches-9/tranche0.txt --bras x --sortie <O> --prefixe 8192 --notes 512 --prefixe-seq '[gMASK]<sop>' [--sans-cache-prefixe]` (20 s).
