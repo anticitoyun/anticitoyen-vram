@@ -886,6 +886,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
     print(f"  speculation   : {args.speculative}"
           f"{'' if args.speculative == 'none' else f', k={args.spec_k}, '
                                                    f'lot_max={engine._garde_spec.lot_max}'}")
+    if repli:
+        # pièce 117 : le repli de `--speculative auto` était posé sur
+        # `speculator.repli` (pièce 105) mais jamais imprimé ici — seule la
+        # ligne de régime (`_speculation_texte`, engine/runner.py) le
+        # portait. Même texte, jamais une seconde formulation du repli.
+        from .engine.runner import _speculation_texte
+        print(f" {_speculation_texte(engine.regime()['speculation']).strip()}")
     if tokenizer:
         print(f"  gabarit chat  : {tokenizer.template_source}")
     else:
