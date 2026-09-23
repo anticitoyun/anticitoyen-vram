@@ -33,6 +33,30 @@ NIVEAU = 7           # codes dans [−7, 7]
 PLANCHER = 2.0 ** -24   # plus petit half non nul : l'échelle stockée n'est jamais 0
 
 
+# Repli 104 (1) — puits d'attention (scellé `scratchpad/poste1-p104s5-23-09/scelle-puits.md`, écrit avant le
+# code) : les PUITS premières positions de chaque séquence gardent V en int8 par (jeton, tête) — K l'est déjà —
+# dans une réserve indexée comme K (bloc, décalage, tête). Le V k8v4 est écrit PARTOUT quand même : tout lecteur
+# qui ignore les puits reste juste (il lit du k8v4). Opt-in ``ACVRAM_KV_PUITS=16`` (0 ou 16 : 16 = un bloc, le
+# premier de chaque séquence), sous ``ACVRAM_KV_FORMAT=k8v4`` seulement. v1 DE MESURE : la réserve couvre tous
+# les blocs (octets du cache > int8) ; une réserve compacte ne se code que si le scellé tient.
+PUITS_VALEURS = (0, 16)
+
+
+def puits_demandes(env: dict | None = None) -> int:
+    import os
+    brut = (os.environ if env is None else env).get("ACVRAM_KV_PUITS", "0") or "0"
+    try:
+        n = int(brut)
+    except ValueError:
+        n = -1
+    if n not in PUITS_VALEURS:
+        raise ValueError(f"ACVRAM_KV_PUITS={brut!r} : attendu 0 ou 16 (un bloc de puits)")
+    return n
+
+
+PUITS = puits_demandes()
+
+
 def groupes(d: int) -> int:
     if d % GROUPE:
         raise ValueError(f"k8v4 : dimension de tête {d} non multiple de {GROUPE}")

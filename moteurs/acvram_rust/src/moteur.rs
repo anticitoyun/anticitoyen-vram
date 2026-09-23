@@ -89,6 +89,8 @@ pub struct Moteur {
     pub empreintes: Vec<(String, String, String)>,
     /// hash de la variante Triton lancée → nombre de lancements (au journal de la porte)
     pub variantes_lancees: HashMap<String, u64>,
+    /// porte au bit : sha256 des logits fp32 de chaque pas (None : pas de journal)
+    pub journal_logits: Option<Vec<String>>,
 }
 
 fn envoyer(flux: &Arc<CudaStream>, tenus: &mut Vec<CudaSlice<u8>>, b: &[u8]) -> Resultat<Ptr> {
@@ -203,6 +205,7 @@ impl Moteur {
             manifeste, tokeniseur, noyaux, dossier: dossier.to_path_buf(), ctx, flux, f, attention, couches, embed,
             norme_finale, tete, cos, sin, rope_d, kv, t, sms, blocs, _tenus: tenus, octets_carte, empreintes,
             variantes_lancees: HashMap::new(),
+            journal_logits: None,
         })
     }
 
@@ -310,7 +313,7 @@ impl Moteur {
                 ("pl_ptr", Arg::Ptr(t.pl)), ("cnt_ptr", Arg::Ptr(t.cnt)), ("out_ptr", Arg::Ptr(t.attn)),
                 ("HQ", Arg::I32(hq as i32)), ("HKV", Arg::I32(hkv as i32)), ("N", Arg::I32(nblk as i32)),
                 ("C", Arg::I32(c as i32)), ("chunk", Arg::I32(chunk as i32)),
-                ("scale", Arg::F32((d as f64).powf(-0.5) as f32)), ("window", Arg::I32(1 << 30)),
+                ("scale", Arg::F32(echelle_attention(d))), ("window", Arg::I32(1 << 30)),
                 ("stride_qb", Arg::I32(ld as i32)), ("stride_qh", Arg::I32(d as i32)),
                 ("stride_page", Arg::I32((BLOC * hkv) as i32)), ("stride_tok", Arg::I32(hkv as i32)),
                 ("stride_kvh", Arg::I32(1)), ("stride_sp", Arg::I32((BLOC * hkv) as i32)),
@@ -351,7 +354,13 @@ impl Moteur {
         if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
             return Err(erreur!("logits vers l'hôte : {r:?}"));
         }
-        argmax(&logits[..v.min(logits.len())]).map(|i| i as u32).ok_or_else(|| erreur!("logits vides"))
+        let logits = &logits[..v.min(logits.len())];
+        if let Some(j) = self.journal_logits.as_mut() {
+            use sha2::{Digest, Sha256};
+            let octets: Vec<u8> = logits.iter().flat_map(|x| x.to_le_bytes()).collect();
+            j.push(format!("{:x}", Sha256::digest(&octets)));
+        }
+        argmax(logits).map(|i| i as u32).ok_or_else(|| erreur!("logits vides"))
     }
 
     /// Porte de l'étape 1 (option A) : KV de l'invite et premier jeton du Python, puis décodage glouton.
@@ -383,6 +392,18 @@ impl Moteur {
     pub fn contexte(&self) -> &Arc<CudaContext> {
         &self.ctx
     }
+}
+
+/// `head_dim ** -0.5` (Python, float64) passé au noyau en fp32. Cassure prévue d'avance de la porte au bit
+/// (feature `cassure-echelle`, jamais par défaut) : UN ulp fp32 de plus — perturbation minimale d'un seul
+/// paramètre, que la porte des ids peut laisser passer et que celle des logits doit attraper.
+/// (La première cassure, bascule des tranches un pas plus tôt, était équivalente AU BIT : à la position 127 les
+/// deux tranches ajoutées sont vides et pèsent exactement 0 dans la réduction — elle ne cassait rien, 24/09.)
+pub fn echelle_attention(d: u32) -> f32 {
+    let s = (d as f64).powf(-0.5) as f32;
+    #[cfg(feature = "cassure-echelle")]
+    let s = f32::from_bits(s.to_bits() + 1);
+    s
 }
 
 /// Glouton : premier indice du maximum, comme `torch.argmax` (sampler.py:150). Un NaN gagne,

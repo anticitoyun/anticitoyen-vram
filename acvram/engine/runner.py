@@ -927,6 +927,11 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                         fmt = "int8-canal16"
                 except Exception:                                    # noqa: BLE001
                     pass
+                # Repli 104 (1) : le nombre de positions puits lu sur les caches construits — l'alarme du scellé
+                # (`scelle-puits.md`) exige qu'un bras candidat qui n'aurait AUCUN puits ne passe pas pour « k8v4+puits16 ».
+                puits = sorted({int(getattr(c.cfg, "puits", 0) or 0) for c in self.model.caches.values()})
+                if fmt == "k8v4" and any(puits):
+                    fmt += "+puits" + "|".join(map(str, puits))
                 return fmt
             from . import mla as _mla
             return "latent-fp8" if getattr(_mla, "_MLA_LATENT_FP8", False) else "latent-bf16"

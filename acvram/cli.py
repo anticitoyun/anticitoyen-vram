@@ -66,6 +66,9 @@ VARIABLES_LUES = {
     "ACVRAM_MLA_EAGER_TORCH",
     "ACVRAM_MLA_LATENT_FP8",
     "ACVRAM_KV_FORMAT",
+    # Repli 104 (1) (memory/kv_k8v4.py) : sous k8v4, les 16 premières positions de chaque séquence gardent
+    # V en int8 par jeton dans une réserve (0 ou 16) ; la ligne de régime imprime `kv=k8v4+puits16`.
+    "ACVRAM_KV_PUITS",
     # C5-b (memory/kv_canal.py) : clés int8 par canal, et la taille de la
     # réserve bf16 des blocs courants.
     "ACVRAM_KV_INT8_CANAL",

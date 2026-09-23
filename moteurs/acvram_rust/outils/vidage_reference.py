@@ -42,6 +42,21 @@ eng = Engine(loaded, tok, max_batch_size=1, max_model_len=MAX_LEN, enable_prefix
              speculator=None, enable_cuda_graphs=True)
 eng.demarrer_service(strict=False, warm_max_len=int(os.environ.get("ACVRAM_WARM_GRAPHS", "2048")))
 modele = loaded.model
+# Porte au bit (ordre du chef, option A suite 1) : le sha256 des logits fp32 de CHAQUE pas, lus là où le moteur
+# servi les échantillonne (`Engine._sample_only`, pas normal et pas recouvert du pipeline). Lecture synchrone :
+# elle ralentit le vidage, elle ne change aucune valeur.
+_journal: list = []
+_sample_orig = Engine._sample_only
+
+
+def _espion(self, logits, seqs, depuis_graphe=False):
+    ligne = logits.reshape(-1, logits.shape[-1])[0].detach()
+    _journal.append({"dtype": str(ligne.dtype), "n": int(ligne.numel()),
+                     "sha256": hashlib.sha256(ligne.contiguous().cpu().numpy().tobytes()).hexdigest()})
+    return _sample_orig(self, logits, seqs, depuis_graphe)
+
+
+Engine._sample_only = _espion
 res = {"modele": os.path.basename(MODELE.rstrip("/")), "regime": eng.regime_ligne(),
        "kv_format": eng.kv_format_servi(), "invites": []}
 
@@ -71,6 +86,7 @@ res["tete"] = {"format": type(tete).__name__, **{k: sha(v) for k, v in tete_sd.i
 for inv in json.load(open(INVITES, encoding="utf-8")):
     ids = tok.encode(render_chat(tok, inv["messages"], True))
     L = len(ids)
+    _journal.clear()
     seq = eng.add_request(list(ids), SamplingParams(temperature=0.0, max_tokens=N_JETONS), request_id=inv["nom"])
     kv, premier = None, None
     while not seq.finished:
@@ -91,7 +107,7 @@ for inv in json.load(open(INVITES, encoding="utf-8")):
             save_file(kv, os.path.join(SORTIE, f"kv-{inv['nom']}.safetensors"))
     sortie = [int(x) for x in seq.output_ids]
     r = {"nom": inv["nom"], "longueur_invite": L, "sha256_invite": sha_ids(ids), "premier_jeton": premier,
-         "sortie": sortie, "sha256_sortie": sha_ids(sortie), "fin": seq.finish_reason if hasattr(seq, "finish_reason") else None,
+         "sortie": sortie, "sha256_sortie": sha_ids(sortie), "logits": list(_journal), "fin": seq.finish_reason if hasattr(seq, "finish_reason") else None,
          "sha256_kv": hashlib.sha256(b"".join(v.reshape(-1).view(torch.uint8).numpy().tobytes() for v in kv.values())).hexdigest()}
     res["invites"].append(r)
     print(r["nom"], L, len(sortie), r["sha256_sortie"][:16], flush=True)

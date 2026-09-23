@@ -962,6 +962,9 @@ __global__ void paged_attn_partial_kernel(
     const unsigned char *__restrict__ sc, // CANAL : [NB, HKV, D] E4M3
     const __nv_bfloat16 *__restrict__ tampon,   // CANAL : [R, 16, HKV, D]
     const int *__restrict__ tampon_de,    // CANAL : [NB] ligne du bloc courant ou < 0
+    const signed char *__restrict__ puits_v,   // V4 + puits (repli 104 (1)) : V int8 [NB, 16, HKV, D], indexé comme K
+    const __half *__restrict__ puits_vs,       // V4 + puits : échelle half [NB, 16, HKV]
+    int puits,                                 // positions puits (t < puits lues en int8), 0 : aucune
     const long *__restrict__ tables,      // [B, N]
     const long *__restrict__ seq_lens,    // [B]  longueur TOTALE (dernier jeton inclus)
     float *__restrict__ part,             // [B*QL, HQ, C, D]  acc non normalisé
@@ -1114,7 +1117,14 @@ __global__ void paged_attn_partial_kernel(
         const float m_new = fmaxf(m, score);
         const float corr = __expf(m - m_new);
         const float pr = __expf(score - m_new);
-        if (V4) {
+        if (V4 && t < puits) {
+            // puits : V int8 par jeton dans la réserve (même cellule que K), uniforme dans le warp (t l'est)
+            const signed char *vp = puits_v + cell * D;
+            const float pv = __half2float(puits_vs[cell]) * pr;
+            #pragma unroll
+            for (int i = 0; i < PER_LANE; ++i)
+                acc[i] = acc[i] * corr + pv * static_cast<float>(vp[lane * PER_LANE + i]);
+        } else if (V4) {
             const unsigned char *vp4 = reinterpret_cast<const unsigned char *>(vc) + cell * (D / 2);
             const float pv = __half2float(vs[cell * (D / 32) + (lane * PER_LANE) / 32]) * pr;
             #pragma unroll
@@ -4277,7 +4287,10 @@ __global__ void kv_write_k8v4_kernel(
     const __nv_bfloat16 *__restrict__ k, const __nv_bfloat16 *__restrict__ v,
     const long *__restrict__ slots, signed char *__restrict__ kc,
     unsigned char *__restrict__ vc4, __half *__restrict__ ks, __half *__restrict__ vs4,
-    int H, int D, int bs, long sk, long sv) {
+    int H, int D, int bs, long sk, long sv,
+    // repli 104 (1) : positions absolues et réserve des puits (nuls : pas de puits)
+    const long *__restrict__ positions = nullptr, signed char *__restrict__ puits_v = nullptr,
+    __half *__restrict__ puits_vs = nullptr, int puits = 0) {
     __shared__ float red[32];
     const int t = blockIdx.x, h = blockIdx.y;
     const long slot = slots[t];
@@ -4331,11 +4344,39 @@ __global__ void kv_write_k8v4_kernel(
                 (unsigned char)((q & 0xF) | ((voisin & 0xF) << 4));
         if (lane == 0) vs4[(pos * H + h) * (D / 32) + w] = __float2half(s);
     }
+    // ---- puits : V AUSSI en int8 par jeton (chemin K ci-dessus, division IEEE), dans la réserve ----
+    // Le quartet est écrit quand même : un lecteur qui ignore les puits reste juste.
+    if (puits > 0 && positions[t] < puits) {           // uniforme dans le bloc (un jeton, une tête)
+        const __nv_bfloat16 *src = v + (long)t * sv + (long)h * D;
+        float amax = 0.f;
+        for (int i = threadIdx.x; i < D; i += blockDim.x)
+            amax = fmaxf(amax, fabsf(__bfloat162float(src[i])));
+        for (int o = 16; o > 0; o >>= 1)
+            amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+        __syncthreads();                                   // red[] relu par la section K
+        if (lane == 0) red[w] = amax;
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            float m = 0.f;
+            for (int i = 0; i < nw; ++i) m = fmaxf(m, red[i]);
+            red[0] = fmaxf(__fdiv_rn(m, 127.f), 1e-8f);
+        }
+        __syncthreads();
+        const float sc = red[0];
+        signed char *dst = puits_v + (pos * H + h) * D;
+        for (int i = threadIdx.x; i < D; i += blockDim.x) {
+            const int q = __float2int_rn(__fdiv_rn(__bfloat162float(src[i]), sc));
+            dst[i] = (signed char)max(-127, min(127, q));
+        }
+        if (threadIdx.x == 0) puits_vs[pos * H + h] = __float2half(sc);
+    }
 }
 
-void kv_write_k8v4(torch::Tensor k, torch::Tensor v, torch::Tensor slots,
-                   torch::Tensor kc, torch::Tensor vc4,
-                   torch::Tensor ks, torch::Tensor vs4, int64_t bs) {
+void kv_write_k8v4_gen(torch::Tensor k, torch::Tensor v, torch::Tensor slots,
+                       torch::Tensor kc, torch::Tensor vc4,
+                       torch::Tensor ks, torch::Tensor vs4, int64_t bs,
+                       torch::Tensor positions, torch::Tensor puits_v, torch::Tensor puits_vs,
+                       int64_t puits) {
     CHECK_CUDA(k); ACVRAM_DEVICE_GUARD(k);
     TORCH_CHECK(k.scalar_type() == torch::kBFloat16 && v.scalar_type() == torch::kBFloat16,
                 "cache KV k8v4 : k et v en bf16");
@@ -4366,8 +4407,31 @@ void kv_write_k8v4(torch::Tensor k, torch::Tensor v, torch::Tensor slots,
         vc4.data_ptr<unsigned char>(),
         reinterpret_cast<__half *>(ks.data_ptr()),
         reinterpret_cast<__half *>(vs4.data_ptr()), H, D, (int)bs,
-        (long)kk.stride(0), (long)vv.stride(0));
+        (long)kk.stride(0), (long)vv.stride(0),
+        puits > 0 ? positions.data_ptr<long>() : nullptr,
+        puits > 0 ? puits_v.data_ptr<signed char>() : nullptr,
+        puits > 0 ? reinterpret_cast<__half *>(puits_vs.data_ptr()) : nullptr, (int)puits);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void kv_write_k8v4(torch::Tensor k, torch::Tensor v, torch::Tensor slots,
+                   torch::Tensor kc, torch::Tensor vc4,
+                   torch::Tensor ks, torch::Tensor vs4, int64_t bs) {
+    kv_write_k8v4_gen(k, v, slots, kc, vc4, ks, vs4, bs, torch::Tensor(), torch::Tensor(), torch::Tensor(), 0);
+}
+
+// Repli 104 (1) : k8v4 + puits — V aussi en int8 par jeton dans la réserve aux positions < puits.
+void kv_write_k8v4_puits(torch::Tensor k, torch::Tensor v, torch::Tensor slots, torch::Tensor positions,
+                         torch::Tensor kc, torch::Tensor vc4, torch::Tensor ks, torch::Tensor vs4,
+                         torch::Tensor puits_v, torch::Tensor puits_vs, int64_t bs, int64_t puits) {
+    TORCH_CHECK(puits > 0 && puits <= bs, "kv_write_k8v4_puits : 0 < puits <= taille de bloc");
+    TORCH_CHECK(positions.scalar_type() == torch::kLong && positions.numel() == slots.numel()
+                && positions.is_contiguous(), "kv_write_k8v4_puits : une position int64 par jeton, contiguë");
+    TORCH_CHECK(puits_v.scalar_type() == torch::kChar && puits_v.sizes() == kc.sizes()
+                && puits_vs.scalar_type() == torch::kHalf && puits_vs.sizes() == ks.sizes()
+                && puits_v.is_contiguous() && puits_vs.is_contiguous(),
+                "kv_write_k8v4_puits : réserve int8 de la forme de kc, échelles half de la forme de ks");
+    kv_write_k8v4_gen(k, v, slots, kc, vc4, ks, vs4, bs, positions, puits_v, puits_vs, puits);
 }
 
 
@@ -5767,8 +5831,22 @@ torch::Tensor paged_attention_gen(torch::Tensor q, torch::Tensor kc,
                                   torch::Tensor tampon, torch::Tensor tampon_de,
                                   torch::Tensor tables,
                                   torch::Tensor seq_lens, int64_t hkv,
-                                  double scale, int64_t q_len, int64_t window) {
+                                  double scale, int64_t q_len, int64_t window,
+                                  torch::Tensor puits_v = torch::Tensor(),
+                                  torch::Tensor puits_vs = torch::Tensor(), int64_t puits = 0) {
     CHECK_CUDA(q); CHECK_CUDA(kc); CHECK_CUDA(tables);
+    const signed char *p_puits_v = nullptr;
+    const __half *p_puits_vs = nullptr;
+    if (puits > 0) {
+        TORCH_CHECK(V4, "attention paginee : puits seulement en k8v4");
+        CHECK_CUDA(puits_v); CHECK_CONTIG(puits_v); CHECK_CONTIG(puits_vs);
+        TORCH_CHECK(puits_v.scalar_type() == torch::kChar && puits_vs.scalar_type() == torch::kHalf
+                    && puits_v.sizes() == kc.sizes() && puits_vs.sizes() == ks.sizes(),
+                    "attention paginee k8v4 puits : puits_v int8 de la forme de kc, puits_vs half de la forme de ks");
+        TORCH_CHECK(puits <= 16, "attention paginee k8v4 puits : au plus un bloc");
+        p_puits_v = puits_v.data_ptr<signed char>();
+        p_puits_vs = reinterpret_cast<const __half *>(puits_vs.data_ptr());
+    }
     ACVRAM_DEVICE_GUARD(q);
     CHECK_CONTIG(q); CHECK_CONTIG(kc); CHECK_CONTIG(vc);
     if (V4) {
@@ -5919,7 +5997,7 @@ torch::Tensor paged_attention_gen(torch::Tensor q, torch::Tensor kc,
             reinterpret_cast<const __half *>(ks.data_ptr()), \
             reinterpret_cast<const signed char *>(vc.data_ptr()), \
             reinterpret_cast<const __half *>(vs.data_ptr()), \
-            p_sc, p_tampon, p_tampon_de, \
+            p_sc, p_tampon, p_tampon_de, p_puits_v, p_puits_vs, (int)puits, \
             tables.data_ptr<long>(), seq_lens.data_ptr<long>(), \
             part.data_ptr<float>(), pm.data_ptr<float>(), \
             pl.data_ptr<float>(), (C == 1 ? (PO) : nullptr), \
@@ -5968,6 +6046,19 @@ torch::Tensor paged_attention_k8v4(torch::Tensor q, torch::Tensor kc,
     return paged_attention_gen<false, true>(q, kc, ks, vc, vs, torch::Tensor(), torch::Tensor(),
                                             torch::Tensor(), tables, seq_lens, hkv, scale,
                                             q_len, window);
+}
+
+// Repli 104 (1) : k8v4 + puits — les `puits` premières positions de chaque séquence lues en V int8 dans la
+// réserve (écrite par kv_write_k8v4_puits), le reste en quartets.
+torch::Tensor paged_attention_k8v4_puits(torch::Tensor q, torch::Tensor kc,
+                                         torch::Tensor ks, torch::Tensor vc,
+                                         torch::Tensor vs, torch::Tensor puits_v, torch::Tensor puits_vs,
+                                         torch::Tensor tables, torch::Tensor seq_lens, int64_t hkv,
+                                         double scale, int64_t q_len, int64_t window, int64_t puits) {
+    TORCH_CHECK(puits > 0, "paged_attention_k8v4_puits : puits > 0 attendu");
+    return paged_attention_gen<false, true>(q, kc, ks, vc, vs, torch::Tensor(), torch::Tensor(),
+                                            torch::Tensor(), tables, seq_lens, hkv, scale,
+                                            q_len, window, puits_v, puits_vs, puits);
 }
 
 // C5-b : clés par canal (sc E4M3 par bloc, bloc courant bf16 dans la réserve).
@@ -7939,6 +8030,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "un lancement ; vc4 uint8 [.., D/2], vs4 half [.., D/32]");
     m.def("paged_attention_k8v4", &paged_attention_k8v4,
           "Piece 104 : attention de decodage fusionnee, K int8 par jeton, V int4 par groupe de 32");
+    m.def("kv_write_k8v4_puits", &kv_write_k8v4_puits,
+          "Repli 104 (1) : k8v4 + V int8 par jeton aux positions < puits, dans une reserve de la forme de K");
+    m.def("paged_attention_k8v4_puits", &paged_attention_k8v4_puits,
+          "Repli 104 (1) : attention k8v4, positions < puits lues en V int8 dans la reserve");
     m.def("kv_write_int8_canal", &kv_write_int8_canal,
           "C5-b : cache KV int8, cles par canal sur chaque bloc (roles, ecriture, fermeture : "
           "trois lancements), V par jeton ; sc E4M3 [NB,HKV,D], tampon bf16 [R,16,HKV,D], "
