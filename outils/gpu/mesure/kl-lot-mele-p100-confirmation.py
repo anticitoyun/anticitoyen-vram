@@ -29,7 +29,7 @@ import acvram  # noqa: E402
 
 ALIAS, LISTE, SORTIE, N = sys.argv[1], sys.argv[2], sys.argv[3], 8
 assert os.path.realpath(acvram.__file__).startswith(os.path.realpath(os.getcwd()) + os.sep), acvram.__file__
-DUMPS = [l.rstrip("\n").split("\t") for l in open(LISTE) if l.strip() and not l.startswith("#")]
+DUMPS = [(n, os.path.expanduser(c)) for n, c in (l.rstrip("\n").split("\t") for l in open(LISTE) if l.strip() and not l.startswith("#"))]
 chemin = os.path.join(racine_modeles(), ALIAS)
 tok = load_tokenizer(chemin)
 loaded = load_model(chemin, dtype=torch.bfloat16, max_model_len=2048, max_concurrent_seqs=16)
