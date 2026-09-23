@@ -41,6 +41,13 @@ def main() -> int:
         print(f"absents chez le donneur : {manquants[:5]}", file=sys.stderr)
         return 2
     os.makedirs(a.sortie, exist_ok=True)
+    # Un alias assemblé peut servir de base : son fragment `acvram-assemble*.safetensors` doit rester lisible, donc le
+    # nouveau fragment prend un nom libre (23/09 : S9 sur S8 écrasait le fragment de S8 par le lien, 576 clés perdues).
+    existants = {fn for fn in os.listdir(a.base) if fn.startswith("acvram-assemble")}
+    n_frag = 0
+    while (f"acvram-assemble{n_frag or ''}.safetensors") in existants:
+        n_frag += 1
+    NOUVEAU = f"acvram-assemble{n_frag or ''}.safetensors"
     tenseurs, wm = {}, dict(mb["weight_map"])
     ouverts: dict[str, object] = {}
     for n in pris:
@@ -51,12 +58,13 @@ def main() -> int:
             if fn not in ouverts:
                 ouverts[fn] = safe_open(os.path.join(a.donneur, fn), framework="pt", device="cpu")
             tenseurs[k] = ouverts[fn].get_tensor(k).contiguous()
-            wm[k] = "acvram-assemble.safetensors"
+            wm[k] = NOUVEAU
         mb["tensors"][n] = md["tensors"][n]
-    save_file(tenseurs, os.path.join(a.sortie, "acvram-assemble.safetensors"))
+    save_file(tenseurs, os.path.join(a.sortie, NOUVEAU))
     mb["weight_map"] = wm
     mb["assemblage"] = {"base": os.path.basename(os.path.normpath(a.base)), "donneur": os.path.basename(os.path.normpath(a.donneur)),
-                        "motifs": a.prendre, "tenseurs_pris": len(pris), "cles_prises": len(tenseurs)}
+                        "motifs": a.prendre, "tenseurs_pris": len(pris), "cles_prises": len(tenseurs), "fragment": NOUVEAU,
+                        "assemblage_base": mb.get("assemblage")}
     if any("self_attn" in n for n in pris):
         mb["attn_int8"] = md.get("attn_int8", mb.get("attn_int8"))
     with open(os.path.join(a.sortie, "acvram_manifest.json"), "w") as f:
