@@ -34,7 +34,7 @@ BIN = PARC.bin
 DOSSIERS_LANCEMENT = list(PARC.dossiers_lancement)
 DOSSIER_LANCEMENT_DEFAUT = DOSSIERS_LANCEMENT[0]
 # Test en processus, sans clic ni X pilotable (Broadway rend un canvas noir, xdotool exige sudo) :
-# ACVRAM_GUI_TEST=clic:<attribut du bouton>[@<alias>] | filtre:<texte> — le gestionnaire est appelé comme par un clic,
+# ACVRAM_GUI_TEST=clic:<attribut du bouton>[@<alias>] | filtre:<texte> | trier:<titre de colonne> — le gestionnaire est appelé comme par un clic,
 # À SEC (aucun processus lancé, aucune URI ouverte : argv et URI journalisés), le retour est imprimé en une ligne
 # `GUI_TEST {…}` puis la fenêtre quitte ; rc 2 si le bouton n'existe pas. poste3 le joue sous Xephyr/Xvfb.
 GUI_TEST = os.environ.get("ACVRAM_GUI_TEST")
