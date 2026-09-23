@@ -36,14 +36,43 @@ INVITES = [
 REPONSE = int(os.environ.get("KL_REPONSE", "32"))
 
 
+class _Retire:
+    def __init__(self, c, nom):
+        self.c, self.nom = c, nom
+
+    def remove(self):
+        self.c.__dict__.pop(self.nom, None)
+
+
 def _crochets(couches, capt: dict, quoi):
-    """Un crochet par couche : `quoi(sortie)` → tenseur [n, D] fp32 sur l'hôte, accumulé dans capt[i] (liste)."""
-    def f(i):
-        def g(mod, entree, sortie):
-            h = sortie[0] if isinstance(sortie, tuple) else sortie
+    """Flux résiduel APRÈS chaque couche : `quoi(h)` → tenseur [n, D] fp32 sur l'hôte, accumulé dans capt[i].
+    Un `register_forward_hook` ne suffit pas côté acvram : le préfill C15 (`forward_res`) et le décodage
+    (`decode_fixed_res`, `decode_fixed`) sont appelés directement, jamais par `layer(...)` (model.py:176, :342-357),
+    et à résidu différé la couche rend (x, y) — le résidu après la couche est x + y (couches.py:380-398).
+    Côté HF (sortie du bloc par `__call__`) seul le crochet joue. Aucun double compte : un appel = un chemin."""
+    poignees = []
+    for i, c in enumerate(couches):
+        def enreg(h, i=i):
             capt.setdefault(i, []).append(quoi(h).detach().float().cpu())
-        return g
-    return [couches[i].register_forward_hook(f(i)) for i in range(len(couches))]
+
+        def crochet(mod, entree, sortie, e=enreg):
+            e(sortie[0] if isinstance(sortie, tuple) else sortie)
+        poignees.append(c.register_forward_hook(crochet))
+        for nom in ("forward_res", "decode_fixed_res", "decode_fixed"):
+            orig = getattr(c, nom, None)
+            if orig is None:
+                continue
+
+            def envel(*a, _o=orig, _e=enreg, **k):
+                r = _o(*a, **k)
+                if isinstance(r, tuple):
+                    _e(r[0] if r[1] is None else r[0].float() + r[1].float())
+                else:
+                    _e(r)
+                return r
+            c.__dict__[nom] = envel
+            poignees.append(_Retire(c, nom))
+    return poignees
 
 
 def _empiler(capt: dict) -> dict:
