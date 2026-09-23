@@ -789,6 +789,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             [m.__dict__.get("chemins", {}) for m in self.model.modules() if isinstance(m, MoEBlock)]) + ")"
         if os.environ.get("ACVRAM_GRAPHES_TABLE") == "0":
             chemin_moe += "+pile" if piles_ok else "+pile(désactivé)"
+        if os.environ.get("ACVRAM_MOE_TENSOR", "0") == "1":                 # pièce 62 A4 : opt-in, nommé sur la ligne
+            chemin_moe += "+tensor"
 
         # `self.graphs` reste le MÊME OBJET après une capture ratée en cours
         # de service (`GraphRunner._capture` bascule `enabled=False` mais ne
