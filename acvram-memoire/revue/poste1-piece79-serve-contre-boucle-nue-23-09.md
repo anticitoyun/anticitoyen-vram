@@ -105,3 +105,22 @@ Chiffres qui en dépendaient, relevés dans le dépôt :
 un chiffre d'Engine direct. Sous `serve`, notre Marlin fait **59,9 µs/couche**, sous le banc, comme le leur. À même
 régime, nous sommes à 59,9 en 3 lancements contre 56,9 en 2 pour eux ; la fusion w13 (−4,6 µs/couche au banc de la
 75) nous mettrait à ≈ 55, à égalité avec vLLM ou devant.
+
+## Addendum — le test (ii′) contre (iii), 23/09 10 h 0x
+
+* **instrument** : `ACVRAM_TRACE_ROUTAGE_PT` dans les deux chemins, **en eager** (l'instrument n'écrit qu'hors graphe, `moe.py:1182` ; le routage ne dépend que des jetons et des mêmes noyaux) ; `scratchpad/poste1-p80-23-09/` (prise.sh, prise-serve.sh, comparaison-*.json)
+* **mesuré** (lot de 1 024 jetons, M = 12, 48 960 appels comparés) :
+  * **experts distincts par appel : serve 30,16, boucle nue 30,92 (−2,5 % sous serve)** ; par tiers du lot, serve 30,32 · 30,20 · 29,97, nue 31,64 · 30,89 · 30,24 ;
+  * **routages identiques appel par appel : 0**, même au premier pas. Couche par couche, sur tout le lot, **51,7 %** des routages par jeton sont communs aux deux chemins.
+* **lecture** : sous `serve`, les douze requêtes arrivent échelonnées par HTTP (33 pas avec préfill, contre 12-13
+  dans la boucle nue). La composition du lot diffère donc à chaque pas, le glouton n'est pas invariant au lot, et
+  les suites divergent. **Les deux chemins ne décodent pas le même texte : (ii′) est vraie**, mais elle ne pèse
+  presque rien. Un Marlin borné par la bande suit le nombre d'experts distincts : −2,5 % d'experts rendent ≈ −2,5 %,
+  pas −10,4 %. **Environ un quart de l'écart vient du texte ; les trois quarts restent inexpliqués**, compatibles
+  avec (iii) (mémoire), non démontrés.
+* **réserve** : les comptes viennent de passes en eager, qui sont d'autres tirages que les passes en graphe de la 79 ;
+  l'ordre de grandeur est le seul transport légitime.
+* **durée** : prévue ≤ 2 min ; tenue **tenue=142s tenue=92s ** (deux prises : le premier bras `serve` n'a pas écrit sa trace, SIGTERM
+  sur le groupe ne déclenche pas `atexit` ; rejoué avec SIGINT). Dépassement déclaré.
+* **conséquence pratique, inchangée** : juger sur le **servi** ce qui touche au MoE, comme l'ordre de la 82 le prévoit.
+  Les bancs Engine direct surestiment le Marlin MoE de jusqu'à 10 % à b = 12.

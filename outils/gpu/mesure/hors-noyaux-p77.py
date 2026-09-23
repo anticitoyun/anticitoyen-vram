@@ -100,7 +100,7 @@ def nue(modele: str, sortie: str) -> dict:
     charge = load_model(modele, dtype=torch.bfloat16, max_model_len=max_len, max_concurrent_seqs=b)
     # comme `serve` sans --speculative (défaut ngram, cli.py) : la 64 servait ainsi
     eng = Engine(charge, load_tokenizer(modele), max_batch_size=b, max_model_len=max_len, enable_prefix_cache=True,
-                 speculator=NGramProposer(), enable_cuda_graphs=True,
+                 speculator=NGramProposer(), enable_cuda_graphs=os.environ.get("P77_GRAPHES", "1") == "1",
                  host_kv_gib=float(os.environ.get("P77_HOST_KV_GIB", "0")))   # serve : 8,0 par défaut (cli.py --host-kv-gib)
     eng.demarrer_service(warm_max_len=int(os.environ.get("ACVRAM_WARM_GRAPHS", "2048")))
     import gc
@@ -140,7 +140,7 @@ def nue(modele: str, sortie: str) -> dict:
         n += lot(prompts, n_jetons); lots += 1
     duree = time.perf_counter() - t0
     noeuds = {}
-    for cle, entree in eng.graphs.graphs.items():
+    for cle, entree in (eng.graphs.graphs.items() if eng.graphs is not None else []):
         if torch.cuda.CUDAGraph is not _GrapheGarde:
             noeuds[str(cle)] = "non compté (graphe non gardé)"
             continue
