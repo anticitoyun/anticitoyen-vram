@@ -313,7 +313,7 @@ impl Moteur {
                 ("pl_ptr", Arg::Ptr(t.pl)), ("cnt_ptr", Arg::Ptr(t.cnt)), ("out_ptr", Arg::Ptr(t.attn)),
                 ("HQ", Arg::I32(hq as i32)), ("HKV", Arg::I32(hkv as i32)), ("N", Arg::I32(nblk as i32)),
                 ("C", Arg::I32(c as i32)), ("chunk", Arg::I32(chunk as i32)),
-                ("scale", Arg::F32((d as f64).powf(-0.5) as f32)), ("window", Arg::I32(1 << 30)),
+                ("scale", Arg::F32(echelle_attention(d))), ("window", Arg::I32(1 << 30)),
                 ("stride_qb", Arg::I32(ld as i32)), ("stride_qh", Arg::I32(d as i32)),
                 ("stride_page", Arg::I32((BLOC * hkv) as i32)), ("stride_tok", Arg::I32(hkv as i32)),
                 ("stride_kvh", Arg::I32(1)), ("stride_sp", Arg::I32((BLOC * hkv) as i32)),
@@ -392,6 +392,18 @@ impl Moteur {
     pub fn contexte(&self) -> &Arc<CudaContext> {
         &self.ctx
     }
+}
+
+/// `head_dim ** -0.5` (Python, float64) passé au noyau en fp32. Cassure prévue d'avance de la porte au bit
+/// (feature `cassure-echelle`, jamais par défaut) : UN ulp fp32 de plus — perturbation minimale d'un seul
+/// paramètre, que la porte des ids peut laisser passer et que celle des logits doit attraper.
+/// (La première cassure, bascule des tranches un pas plus tôt, était équivalente AU BIT : à la position 127 les
+/// deux tranches ajoutées sont vides et pèsent exactement 0 dans la réduction — elle ne cassait rien, 24/09.)
+pub fn echelle_attention(d: u32) -> f32 {
+    let s = (d as f64).powf(-0.5) as f32;
+    #[cfg(feature = "cassure-echelle")]
+    let s = f32::from_bits(s.to_bits() + 1);
+    s
 }
 
 /// Glouton : premier indice du maximum, comme `torch.argmax` (sampler.py:150). Un NaN gagne,

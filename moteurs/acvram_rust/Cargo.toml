@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [features]
 # cassure prévue d'avance de la porte au bit (outils de contrôle seulement)
-cassure-tranches = []
+cassure-echelle = []
 
 [dependencies]
 cudarc = { version = "=0.19.9", default-features = false, features = ["std", "driver", "nvrtc", "cuda-13030", "dynamic-loading"] }
