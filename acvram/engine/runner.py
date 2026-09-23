@@ -789,8 +789,17 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             [m.__dict__.get("chemins", {}) for m in self.model.modules() if isinstance(m, MoEBlock)]) + ")"
         if os.environ.get("ACVRAM_GRAPHES_TABLE") == "0":
             chemin_moe += "+pile" if piles_ok else "+pile(désactivé)"
-        if os.environ.get("ACVRAM_MOE_TENSOR", "0") == "1":                 # pièce 62 A4 : opt-in, nommé sur la ligne
-            chemin_moe += "+tensor" + ("" if os.environ.get("ACVRAM_MOE_TENSOR_FUSION", "1") == "1" else "-glue-a4")
+        # Pièce 65 : chemin tensor par défaut (godets ≥ 2) ; la ligne porte le repli STATIQUE nommé par couche
+        # (`MoEBlock._tensor_refus`), le témoin GEMV (=0) et le témoin de glue A4 (non reproductible).
+        if os.environ.get("ACVRAM_MOE_TENSOR", "1") == "1":
+            refus = sorted({getattr(m, "_tensor_refus", "piles d experts absentes") or ""
+                            for m in self.model.modules() if isinstance(m, MoEBlock)} - {""})
+            from .moe import _MOE_TENSOR_MIN_T
+            chemin_moe += f"+tensor(b≥{_MOE_TENSOR_MIN_T}" + ("" if not refus else ",repli:" + " ; ".join(refus)) + ")"
+            if os.environ.get("ACVRAM_MOE_TENSOR_FUSION", "1") != "1":
+                chemin_moe += "-glue-a4"
+        else:
+            chemin_moe += "+tensor(off)"
 
         # `self.graphs` reste le MÊME OBJET après une capture ratée en cours
         # de service (`GraphRunner._capture` bascule `enabled=False` mais ne
