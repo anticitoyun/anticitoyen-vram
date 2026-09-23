@@ -241,6 +241,29 @@ impl Moteur {
         Ok(())
     }
 
+    /// Relit les lignes KV des positions 0..longueur (blocs en identité) : (nom, octets) par couche, dans le format
+    /// du vidage Python (`couche{i}.k|v|k_scale|v_scale`) — bisection du préfill.
+    pub fn lire_kv(&self, longueur: u32) -> Resultat<Vec<(String, Vec<u8>, Vec<usize>)>> {
+        let spec = &self.manifeste.model;
+        let (hkv, d) = (spec.num_key_value_heads, spec.head_dim);
+        let l = longueur as usize;
+        let mut v = Vec::new();
+        self.flux.synchronize().map_err(|e| erreur!("{e:?}"))?;
+        for (i, c) in self.kv.iter().enumerate() {
+            for (nom, src, octets, forme) in [("k", c.kc, l * hkv * d, vec![l, hkv, d]), ("v", c.vc, l * hkv * d, vec![l, hkv, d]),
+                                              ("k_scale", c.ks, l * hkv * 2, vec![l, hkv]), ("v_scale", c.vs, l * hkv * 2, vec![l, hkv])] {
+                let mut b = vec![0u8; octets];
+                // SAFETY : régions du cache du moteur, lues après synchronisation.
+                let r = unsafe { cudarc::driver::sys::cuMemcpyDtoH_v2(b.as_mut_ptr() as *mut _, src, octets) };
+                if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+                    return Err(erreur!("KV vers l'hôte : {r:?}"));
+                }
+                v.push((format!("couche{i}.{nom}"), b, forme));
+            }
+        }
+        Ok(v)
+    }
+
     /// Place les lignes KV de l'invite (positions 0..L) vidées par le Python ; blocs en identité, donc la
     /// ligne p est à l'octet p·HKV·D du cache.
     pub fn injecter_kv(&self, fichier: &Path) -> Resultat<u32> {
@@ -259,6 +282,28 @@ impl Moteur {
 
     /// Un pas : le jeton `jeton` à la position `p` ; rend l'argmax des logits.
     pub fn pas(&mut self, jeton: u32, p: u32) -> Resultat<u32> {
+        let logits = self.pas_logits(jeton, p)?;
+        argmax(&logits).map(|i| i as u32).ok_or_else(|| erreur!("logits vides"))
+    }
+
+    /// Préfill v1 (scellé `revue/poste5-rust-prefill-kl-scelle-24-09.md`) : les jetons de l'invite passent un par
+    /// un dans le pas de décodage prouvé au bit ; rend les logits fp32 du dernier (ceux du premier jeton généré).
+    /// Pas au bit du Python (qui préfille par GEMM et attention flash) : jugé par KL.
+    pub fn prefill(&mut self, ids: &[u32]) -> Resultat<Vec<f32>> {
+        self.prefill_depuis(ids, 0)
+    }
+
+    /// Préfill à partir de la position `debut` (les lignes KV 0..debut sont déjà en place, injectées).
+    pub fn prefill_depuis(&mut self, ids: &[u32], debut: usize) -> Resultat<Vec<f32>> {
+        let mut dernier = Err(erreur!("invite vide"));
+        for (p, &id) in ids.iter().enumerate().skip(debut) {
+            dernier = Ok(self.pas_logits(id, p as u32).map_err(|e| erreur!("préfill position {p} : {e}"))?);
+        }
+        dernier
+    }
+
+    /// Un pas : logits fp32 du vocabulaire (copiés vers l'hôte).
+    pub fn pas_logits(&mut self, jeton: u32, p: u32) -> Resultat<Vec<f32>> {
         let spec = &self.manifeste.model;
         let (hsz, hq, hkv, d) = (spec.hidden_size as u32, spec.num_attention_heads as u32,
                                  spec.num_key_value_heads as u32, spec.head_dim as u32);
@@ -354,13 +399,13 @@ impl Moteur {
         if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
             return Err(erreur!("logits vers l'hôte : {r:?}"));
         }
-        let logits = &logits[..v.min(logits.len())];
+        logits.truncate(v.min(logits.len()));
         if let Some(j) = self.journal_logits.as_mut() {
             use sha2::{Digest, Sha256};
             let octets: Vec<u8> = logits.iter().flat_map(|x| x.to_le_bytes()).collect();
             j.push(format!("{:x}", Sha256::digest(&octets)));
         }
-        argmax(logits).map(|i| i as u32).ok_or_else(|| erreur!("logits vides"))
+        Ok(logits)
     }
 
     /// Porte de l'étape 1 (option A) : KV de l'invite et premier jeton du Python, puis décodage glouton.
@@ -377,8 +422,16 @@ impl Moteur {
         Ok(sortie)
     }
 
-    pub fn generer(&self, _ids: &[u32], _max: usize) -> Resultat<Vec<u32>> {
-        Err(erreur!("préfill Rust non écrit (option A : la porte de l'étape 1 passe par decoder_injecte)"))
+    /// Génération gloutonne complète : préfill v1 puis décodage ; rend les jetons générés, EOS compris.
+    pub fn generer(&mut self, ids: &[u32], max: usize) -> Resultat<Vec<u32>> {
+        let logits = self.prefill(ids)?;
+        let mut jeton = argmax(&logits).ok_or_else(|| erreur!("logits vides"))? as u32;
+        let mut sortie = vec![jeton];
+        while sortie.len() < max && !self.est_fin(jeton) {
+            jeton = self.pas(jeton, (ids.len() + sortie.len() - 1) as u32)?;
+            sortie.push(jeton);
+        }
+        Ok(sortie)
     }
 
     pub fn tenseurs_carte(&self) -> usize {
