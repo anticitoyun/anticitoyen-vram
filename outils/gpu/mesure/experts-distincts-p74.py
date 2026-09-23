@@ -45,6 +45,9 @@ def resume(distincts: list[int], hors: list[int], top_k: int, b: int) -> dict:
 
 
 def bras_vllm(alias: str, pas: int, b: int) -> dict:
+    # Sans ceci, vLLM lance un sous-processus `EngineCore` et le crochet posé
+    # ici ne le voit jamais (23/09 : quatre bras vides avant de le comprendre).
+    os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     from vllm import LLM, SamplingParams
     from vllm.model_executor.layers.fused_moe.router import (fused_topk_bias_router,
                                                              fused_topk_router)
@@ -68,8 +71,11 @@ def bras_vllm(alias: str, pas: int, b: int) -> dict:
 
     enrober(fused_topk_router, "fused_topk")
     enrober(fused_topk_bias_router, "fused_topk_bias")
-    llm = LLM(model=alias, max_num_seqs=b, max_model_len=2304, gpu_memory_utilization=0.85,
-              enforce_eager=False, disable_log_stats=True)
+    # `enforce_eager` : la capture de graphes échouait
+    # (`cudaErrorStreamCaptureInvalidated`) et elle ne change RIEN au routage —
+    # les ids d'experts ne dépendent que des jetons. Déclaré au verdict.
+    llm = LLM(model=alias, max_num_seqs=b, max_model_len=2304, gpu_memory_utilization=0.80,
+              enforce_eager=True, disable_log_stats=True)
     llm.generate([{"prompt_token_ids": invite(1000 + k, 256)} for k in range(b)],
                  SamplingParams(temperature=0.0, max_tokens=pas, ignore_eos=True))
     return resume(distincts, hors, 8, b)
@@ -96,7 +102,7 @@ def bras_acvram(alias: str, pas: int, b: int) -> dict:
         return vrai(self, x, topw, topi, eid)
 
     M.MoEBlock._forward_grouped = enrobee
-    charge = load_model(alias)
+    charge = load_model(alias, dtype=torch.bfloat16, max_model_len=2304, max_concurrent_seqs=b)
     eng = Engine(charge, None, max_batch_size=b, max_model_len=2304, enable_cuda_graphs=True)
     for k in range(b):
         eng.add_request(invite(1000 + k, 256),
