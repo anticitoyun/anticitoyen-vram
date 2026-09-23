@@ -273,7 +273,13 @@ if [ "$TYPE" = service ]; then
   _srv=$!
   printf '%s %s %s %s\n' "$_srv" "$(date +%s)" "$NOM" "$TYPE" > "$INFO"
   printf '%s prise   %-8s %-32s %s (detache, verrou herite)\n' "$(date +%FT%T)" "$_srv" "$NOM" "$TYPE" >> "$_jour" 2>/dev/null || true
-  setsid sh -c 'while kill -0 '"$_srv"' 2>/dev/null; do sleep 5; done; rm -f "'"$INFO"'"; printf "%s rendue  %-8s %-32s %s (service mort)\n" "$(date +%FT%T)" "'"$_srv"'" "'"$NOM"'" "'"$TYPE"'" >> "'"$_jour"'" 2>/dev/null' 9>&- >/dev/null 2>&1 < /dev/null &
+  # anticitoyen-vram-jxm : entre la mort du service et ce reveil (jusqu'a 5 s
+  # de sommeil), un NOUVEAU detenteur (mesure ou autre service) peut deja avoir
+  # pris le verrou libere et ecrit SON .qui a la meme adresse ($INFO, partagee
+  # par carte) — un `rm -f` inconditionnel effacait alors l'INFO du detenteur
+  # ACTUEL, encore vivant, flock compris (qui_tient() mentait « personne »).
+  # Ne retirer .qui que s'il porte encore CE pid de service.
+  setsid sh -c 'while kill -0 '"$_srv"' 2>/dev/null; do sleep 5; done; p=; read -r p _ < "'"$INFO"'" 2>/dev/null; [ "$p" = "'"$_srv"'" ] && rm -f "'"$INFO"'"; printf "%s rendue  %-8s %-32s %s (service mort)\n" "$(date +%FT%T)" "'"$_srv"'" "'"$NOM"'" "'"$TYPE"'" >> "'"$_jour"'" 2>/dev/null' 9>&- >/dev/null 2>&1 < /dev/null &
   echo "$_srv"                                   # le lanceur lit le PID du serveur
   exit 0
 fi
