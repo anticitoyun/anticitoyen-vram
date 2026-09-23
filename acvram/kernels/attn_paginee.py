@@ -272,6 +272,13 @@ WARPS_COMPACT = int(os.environ.get("ACVRAM_ATTN_WARPS_COMPACT", "8"))   # 8 : B8
 # −1,9 % sur la moyenne du lot b=12 (15,46 → 15,17 µs/couche), −8,7 % à b=1 ctx 2 048. Témoin : =0.
 REDUC_DEROULEE = os.environ.get("ACVRAM_ATTN_REDUC_DEROULEE", "1") == "1"
 assert WARPS_COMPACT in (1, 2, 4, 8, 16), WARPS_COMPACT
+# Pièce 97 (23/09) : aux godets B ≤ 4, 4 warps. Le défaut 8 vient de l'ABAB servi à b=12 (20/09) et n'avait jamais été
+# jugé aux petits lots ; au banc L2 froid (pièce 96, 452757fb), 4 warps y sont AU BIT et plus rapides dans 6/6
+# cellules : −0,66/−1,41 µs/couche (b=1, ctx 768/2 048), −1,16/−1,51 (b=2), −1,32/−0,90 (b=4). Mêmes tuiles, même
+# ordre des sommes. Témoin : ACVRAM_ATTN_WARPS_PETITS=8.
+WARPS_PETITS = int(os.environ.get("ACVRAM_ATTN_WARPS_PETITS", "4"))
+GODET_PETIT = 4
+assert WARPS_PETITS in (1, 2, 4, 8, 16), WARPS_PETITS
 
 _COMPTEURS: dict = {}
 
@@ -321,7 +328,7 @@ def paged_attention(q: torch.Tensor, kc: torch.Tensor, ks: torch.Tensor,
             q.stride(0), q.stride(1), kc.stride(0) // D, kc.stride(1) // D, kc.stride(2) // D,
             ks.stride(0), ks.stride(1), out.stride(0), out.stride(1),
             NREP=n_rep, D=D, BN=PAGE * PAGES_PAR_TUILE, PAGE_C=PAGE, NREP_T=NREP_TUILE, CT=max(CT, 2),
-            DEROULE=REDUC_DEROULEE, num_warps=WARPS_COMPACT, num_stages=2)
+            DEROULE=REDUC_DEROULEE, num_warps=WARPS_PETITS if B <= GODET_PETIT else WARPS_COMPACT, num_stages=2)
         return out
     _partiel_kernel[(B, n_kv, C)](
         q, kc, ks, vc, vs, tables, seq_lens, part, pm, pl,

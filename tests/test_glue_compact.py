@@ -323,3 +323,33 @@ def test_reduction_deroulee_au_bit(b, ctx, monkeypatch):
     monkeypatch.setattr(ap, "REDUC_DEROULEE", True)
     y1 = f()
     assert torch.equal(y0, y1), (b, ctx, (y0.float() - y1.float()).abs().max().item())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise")
+@pytest.mark.parametrize("b,ctx", [(1, 768), (1, 2048), (2, 768), (2, 2048), (4, 768), (4, 2048), (3, 40)])
+def test_warps_petits_godets_au_bit(b, ctx, monkeypatch):
+    """Pièce 97 : aux godets ≤ 4, 4 warps rendent les MÊMES bits que 8 (mêmes tuiles, même ordre des sommes).
+    Bras qui doit casser : une tuile de 16 (PAGES_PAR_TUILE = 1) change l'ordre de rééchelonnement du softmax et
+    doit rendre d'autres bits — s'il passait au bit, ce test ne saurait pas dire « faux »."""
+    from acvram.kernels import attn_paginee as ap
+    from acvram.memory.kvcache import KVCacheConfig, PagedKVCache, bucket_blocks
+    assert b <= ap.GODET_PETIT
+    g = torch.Generator(device="cuda").manual_seed(97 + ctx + b)
+    nblk = -(-ctx // 16)
+    c = PagedKVCache(KVCacheConfig(num_layers=1, num_kv_heads=4, head_dim=128, num_blocks=b * nblk + 1,
+                                   dtype="int8", device="cuda"))
+    c.k.random_(-127, 128, generator=g); c.v.random_(-127, 128, generator=g)
+    c.k_scale.uniform_(0.01, 0.05, generator=g); c.v_scale.uniform_(0.01, 0.05, generator=g)
+    t = torch.zeros(b, bucket_blocks(nblk), dtype=torch.long, device="cuda")
+    t[:, :nblk] = torch.randperm(b * nblk, device="cuda", generator=g).view(b, nblk) + 1
+    lens = torch.tensor([max(1, ctx - 7 * i) for i in range(b)], dtype=torch.long, device="cuda")
+    q = torch.randn(b, 32, 128, device="cuda", generator=g).to(torch.bfloat16)
+    f = lambda: ap.paged_attention(q, c.k, c.k_scale, c.v, c.v_scale, t, lens, 4, 0.088, 0, compact=True)
+    monkeypatch.setattr(ap, "WARPS_PETITS", 8)
+    y8 = f()
+    monkeypatch.setattr(ap, "WARPS_PETITS", 4)
+    y4 = f()
+    assert torch.equal(y8, y4), (b, ctx, (y8.float() - y4.float()).abs().max().item())
+    if ctx > 64:                                          # une seule tuile de 64 : BN 16 garde l'ordre, rien à casser
+        monkeypatch.setattr(ap, "PAGES_PAR_TUILE", 1)
+        assert not torch.equal(f(), y4), "le bras BN 16 rend les mêmes bits : le test ne distingue plus l'ordre"
