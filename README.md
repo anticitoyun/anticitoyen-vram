@@ -7,8 +7,8 @@
 > Soutenir : [buymeacoffee.com/anticitoyen](https://buymeacoffee.com/anticitoyen)
 
 Une passerelle d'inférence compatible avec l'API OpenAI, qui traite la mémoire
-comme une hiérarchie et donne à chaque GPU le format numérique que son silicium
-sait le mieux lire.
+comme une hiérarchie, donne à chaque GPU le format numérique que son silicium
+sait le mieux lire, et optimise chaque jeton en joules autant qu'en secondes.
 
 Conçue pour une machine précise :
 
