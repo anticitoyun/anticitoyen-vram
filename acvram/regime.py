@@ -65,6 +65,10 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("DENSE_NVFP4", "triton", ("acvram.kernels", "_DENSE_NVFP4"), "gemv",
              "linéaires NVFP4 denses (et tête) à DENSE_NVFP4_MIN_M ≤ b ≤ 32 : triton (gemm_dense_etroit, poids lus une fois par pas, défaut depuis verdict-gemm-dense-palier1-situ-17-09) | gemv (témoin, poids relus par séquence)"),
     Variable("DENSE_NVFP4_MIN_M", "4", ("acvram.kernels", "_DENSE_NVFP4_MIN_M")),
+    Variable("PROJ_MARLIN", "0", ("acvram.kernels", "_PROJ_MARLIN"), "0",
+             "pièce 101 (23/09, opt-in) : 1 = linéaires NVFP4 denses par le Marlin porté de vLLM 0.29 (marlin_port, échelle "
+             "globale par colonne pour q/k/v empilés) aux godets ≥ PROJ_MARLIN_MIN_M ; M = 1 garde nvfp4_gemv | 0 témoin"),
+    Variable("PROJ_MARLIN_MIN_M", "2", ("acvram.kernels", "_PROJ_MARLIN_MIN_M")),
     # lues dans acvram_kernels.cu (getenv, figées au premier lancement : un
     # PROCESSUS par valeur — poste7-gemv-experts-rpw-18-09)
     Variable("GROUPED_RPW", "4", None, None,
