@@ -22,6 +22,8 @@ import pathlib
 import re
 import subprocess
 
+import pytest
+
 RACINE = pathlib.Path(__file__).resolve().parent.parent
 GARDES = {"tests/test_paquet_sans_identite.py", "tests/test_depot_sans_identite.py"}
 
@@ -299,6 +301,8 @@ def test_les_fichiers_binaires_suivis_sont_ecartes():
     -- sinon ses octets binaires refont lever de faux courriels."""
     binaires = [nom for nom, _ in _suivis() if nom.endswith(".pt")]
     assert not binaires, f".pt encore scannes comme texte : {binaires}"
+    if not (RACINE / "scratchpad").is_dir():
+        pytest.skip("instantané public : le témoin .pt vit sous scratchpad/, non publié")
     reel = list((RACINE / "scratchpad").rglob("*.pt"))
     assert reel, "aucun .pt sous scratchpad/ -- le temoin ne teste plus rien"
 
