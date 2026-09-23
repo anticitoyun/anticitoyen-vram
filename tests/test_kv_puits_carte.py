@@ -57,8 +57,8 @@ def test_ecriture_au_bit_contre_le_jumeau_reserve_comprise():
     _ext()
     k, v = _kv(40, 1)
     positions = torch.tensor(list(range(12)) + list(range(10, 38)), device="cuda")   # deux séquences mêlées
-    blocs = [3, 1, 6, 4]
-    slots = torch.tensor([blocs[(i >= 12) * 2 + int(p) // BS] * BS + int(p) % BS for i, p in enumerate(positions.tolist())],
+    blocs = ([3], [6, 4, 5])                                   # séquence 1 : 12 jetons ; séquence 2 : 10..37
+    slots = torch.tensor([blocs[int(i >= 12)][int(p) // BS] * BS + int(p) % BS for i, p in enumerate(positions.tolist())],
                          device="cuda")
     a, b = _cache(8), _cache(8)
     a.write(slots, k, v, positions=positions)
