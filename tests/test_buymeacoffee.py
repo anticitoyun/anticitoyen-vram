@@ -22,10 +22,15 @@ ATTENDUS = [
     "REPRISE.md",
     "CLAUDE.md",
 ]
+# CLAUDE.md est gardé privé par publier-github.sh : dans l'instantané public (sans acvram-memoire/),
+# son absence n'est pas une perte du lien
+PRIVES = {"CLAUDE.md"}
+PUBLIC = not (RACINE / "acvram-memoire").is_dir()
 
 
 def test_chaque_point_de_contact_porte_le_lien():
-    manquants = [f for f in ATTENDUS if LIEN not in (RACINE / f).read_text()]
+    manquants = [f for f in ATTENDUS if not (PUBLIC and f in PRIVES)
+                 and LIEN not in (RACINE / f).read_text()]
     assert not manquants, f"lien de soutien absent de : {manquants}"
 
 
