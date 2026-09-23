@@ -298,3 +298,28 @@ def test_valid_une_fois_par_pas_est_transmis(monkeypatch):
     couche.decode_fixed_res(x, None, None, slots, None, None, 4, None, valid=valid)
     couche.decode_fixed_res(x, None, None, slots, None, None, 4, None)
     assert vus[0] is valid and vus[1] is not valid and torch.equal(vus[1], valid)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise")
+@pytest.mark.parametrize("b,ctx", [(12, 320), (12, 576), (12, 1088), (1, 2048), (3, 40)])
+def test_reduction_deroulee_au_bit(b, ctx, monkeypatch):
+    """Pièce 92 : la réduction des tranches déroulée (lectures en vol ensemble) rend les MÊMES bits que la boucle
+    série — mêmes sommes, même ordre. Casse si l'ordre change ou si une tranche au-delà de C est sommée."""
+    from acvram.kernels import attn_paginee as ap
+    from acvram.memory.kvcache import KVCacheConfig, PagedKVCache, bucket_blocks
+    g = torch.Generator(device="cuda").manual_seed(ctx + b)
+    nblk = -(-ctx // 16)
+    c = PagedKVCache(KVCacheConfig(num_layers=1, num_kv_heads=4, head_dim=128, num_blocks=b * nblk + 1,
+                                   dtype="int8", device="cuda"))
+    c.k.random_(-127, 128, generator=g); c.v.random_(-127, 128, generator=g)
+    c.k_scale.uniform_(0.01, 0.05, generator=g); c.v_scale.uniform_(0.01, 0.05, generator=g)
+    t = torch.zeros(b, bucket_blocks(nblk), dtype=torch.long, device="cuda")
+    t[:, :nblk] = torch.randperm(b * nblk, device="cuda", generator=g).view(b, nblk) + 1
+    lens = torch.tensor([max(1, ctx - 7 * i) for i in range(b)], dtype=torch.long, device="cuda")
+    q = torch.randn(b, 32, 128, device="cuda", generator=g).to(torch.bfloat16)
+    f = lambda: ap.paged_attention(q, c.k, c.k_scale, c.v, c.v_scale, t, lens, 4, 0.088, 0, compact=True)
+    monkeypatch.setattr(ap, "REDUC_DEROULEE", False)
+    y0 = f()
+    monkeypatch.setattr(ap, "REDUC_DEROULEE", True)
+    y1 = f()
+    assert torch.equal(y0, y1), (b, ctx, (y0.float() - y1.float()).abs().max().item())

@@ -54,24 +54,26 @@ def tranches_c(facteur: float = 1.0, une_tuile: bool = False):
     return f
 
 
-VARIANTES = {                                         # nom → (tranches, PAGES_PAR_TUILE, WARPS_COMPACT)
-    "servi": (None, None, None),
-    "C×2": (tranches_c(2.0), None, None),
-    "C×4": (tranches_c(4.0), None, None),
-    "1tuile": (tranches_c(une_tuile=True), None, None),
-    "BN32": (None, 2, None),
-    "BN32·C×2": (tranches_c(2.0), 2, None),
-    "BN32·1tuile": (tranches_c(une_tuile=True), 2, None),
-    "w4": (None, None, 4),
-    "C×2·w4": (tranches_c(2.0), None, 4),
+VARIANTES = {                                         # nom → (tranches, PAGES_PAR_TUILE, WARPS_COMPACT, réduction déroulée)
+    "servi": (None, None, None, False),
+    "C×2": (tranches_c(2.0), None, None, False),
+    "w4": (None, None, 4, False),
+    "dér": (None, None, None, True),
+    "dér·w4": (None, None, 4, True),
+    "dér·C×2": (tranches_c(2.0), None, None, True),
+    "dér·C×2·w4": (tranches_c(2.0), None, 4, True),
+    "dér·1tuile": (tranches_c(une_tuile=True), None, None, True),
+    "dér·1tuile·w4": (tranches_c(une_tuile=True), None, 4, True),
 }
+# Première prise (f7bccbf0, prise-banc.log) : C×4, BN32 et leurs croisements, tous plus lents que le servi ; retirés.
 
 
 def poser(v):
-    tr, ppt, w = VARIANTES[v]
+    tr, ppt, w, der = VARIANTES[v]
     ap._tranches = tr or _TRANCHES_SERVI
     ap.PAGES_PAR_TUILE = ppt or 4
     ap.WARPS_COMPACT = w or int(os.environ.get("ACVRAM_ATTN_WARPS_COMPACT", "8"))
+    ap.REDUC_DEROULEE = der
 
 
 def montage(b, ctx, g):
@@ -150,11 +152,13 @@ def main() -> int:
             dv = ((y - ref).norm(dim=-1) / ref.norm(dim=-1).clamp(min=1e-9)).reshape(-1)
             us = chrono_graphe(lambda: pas(caches, tables, lens, q, scale))
             ligne["variantes"][v] = {"us": round(us, 2), "C": C, "chunk": chunk, "ecart_2m8": round(ecart, 3),
+                                     "au_bit": bool(torch.equal(y, y0)),
                                      "dist_rapport_max": round(float((dv / d0.clamp(min=1e-12)).max()), 3),
                                      "part_le_1_1": round(float((dv <= 1.1 * d0).float().mean()), 4)}
         poser("servi")
         res["cellules"].append(ligne)
-        print(f"{b:3d} {ctx:5d} " + " ".join(f"{ligne['variantes'][v]['us']:12.2f}" for v in VARIANTES), flush=True)
+        print(f"{b:3d} {ctx:5d} " + " ".join(f"{ligne['variantes'][v]['us']:12.2f}" for v in VARIANTES)
+              + "   au bit : " + ",".join(v for v in VARIANTES if ligne["variantes"][v]["au_bit"]), flush=True)
         del caches, tables, q
         torch.cuda.empty_cache()
     moy = {v: statistics.mean(l["variantes"][v]["us"] for l in res["cellules"] if l["b"] == 12) for v in VARIANTES}
