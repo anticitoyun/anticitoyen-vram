@@ -273,6 +273,8 @@ VARIABLES: tuple[Variable, ...] = (
              "0.6.31 (acvram/hote.py) : affinité CPU du processus (`0-15`, `0-3,8`), posée par os.sched_setaffinity à l'import et à la construction d'Engine ; vide = aucune affinité (défaut) ; la ligne porte hote=…,cpus<plages relues>"),
     Variable("ATTN_WARPS_COMPACT", "8", ("acvram.kernels.attn_paginee", "WARPS_COMPACT"), "4",
              "C15-3d bis : warps du noyau d attention paginée fusionné (GLUE_COMPACT=1) ; DÉFAUT 8 (poste2 05 h 15, ABAB : B8 1 417 t·s⁻¹ · 0,2073 J = +11,5 % · 0,966 × A ; B4 1 386 · 0,2116 : 4 warps ne rend rien en W, 369 = 369, et perd 2 %) ; 4 = bras"),
+    Variable("ATTN_REDUC_DEROULEE", "1", ("acvram.kernels.attn_paginee", "REDUC_DEROULEE"), "0",
+             "pièce 92 (23/09) : réduction des tranches de l attention fusionnée déroulée (mêmes sommes, même ordre : au bit, 11/11 cellules du banc L2 froid + test) ; −1,9 % sur le lot b=12, −8,7 % à b=1 ctx 2 048 | 0 témoin boucle série"),
     Variable("ROUTAGE_TEMOIN", "0", ("acvram.engine.moe", "_ROUTAGE_TEMOIN"), "0",
              "diagnostic C15-3d : 1 = chaque couche MoE copie topi dans un tampon persistant (lisible sous graphes, equiv-b12.py « experts égaux ») ; 0 = témoin"),
     Variable("GODETS_B", "1", ("acvram.engine.graphs", "_GODETS_B"), "0",
@@ -497,7 +499,9 @@ def glue_texte() -> str:
         if not getattr(_k, "_GLUE_COMPACT", 0):
             return "glue=temoin"
         items = getattr(_k, "_GLUE_COMPACT_ITEMS", None) or ""
-        return f"glue=compact({_ap.WARPS_COMPACT}" + (f",items={items}" if items else "") + ")"
+        # pièce 92 : réduction déroulée par défaut, au bit de la boucle série — seul le témoin est nommé
+        serie = "" if getattr(_ap, "REDUC_DEROULEE", True) else ",reduc=serie"
+        return f"glue=compact({_ap.WARPS_COMPACT}" + (f",items={items}" if items else "") + serie + ")"
     except Exception as exc:                              # noqa: BLE001
         return f"glue=?({type(exc).__name__})"
 

@@ -167,7 +167,8 @@ if triton is not None:
                                stride_qb, stride_qh, stride_page, stride_tok, stride_kvh,
                                stride_sp, stride_st, stride_ob, stride_oh,
                                NREP: tl.constexpr, D: tl.constexpr, BN: tl.constexpr,
-                               PAGE_C: tl.constexpr, NREP_T: tl.constexpr, CT: tl.constexpr):
+                               PAGE_C: tl.constexpr, NREP_T: tl.constexpr, CT: tl.constexpr,
+                               DEROULE: tl.constexpr = False):
         """C15 niveau 3 : `_partiel_kernel` + `_reduce_kernel` en UN lancement.
         Chaque programme écrit sa tranche (m, l, acc) puis incrémente le
         compteur de son groupe (b, tête KV) ; le DERNIER arrivé (n == C − 1)
@@ -217,11 +218,24 @@ if triton is not None:
                          mask=masque_c[None, :], other=0.0, cache_modifier=".cg")
             lg = tl.sum(ll * w, 1)
             somme = tl.zeros((NREP_T, D), tl.float32)
-            for cc in range(0, C):
-                wc = tl.exp(tl.load(pm_ptr + (base0 + cc) * NREP_T + rows, cache_modifier=".cg") - mg)
-                a = tl.load(part_ptr + ((base0 + cc) * NREP_T + rows[:, None]) * D + d[None, :],
-                            cache_modifier=".cg")
-                somme += a * wc[:, None]
+            if DEROULE:
+                # Pièce 92 : la boucle série ci-dessous attend chaque tranche avant de lire la suivante — C
+                # latences L2 sur le chemin critique du dernier programme. Déroulée (CT constexpr), toutes les
+                # lectures partent ensemble ; les SOMMES restent dans l'ordre 0..C−1 et `where` laisse `somme`
+                # intact au-delà de C : même arithmétique, sortie au bit.
+                for cc in tl.static_range(CT):
+                    ok = cc < C
+                    wc = tl.exp(tl.load(pm_ptr + (base0 + cc) * NREP_T + rows, mask=ok & (rows >= 0),
+                                        other=0.0, cache_modifier=".cg") - mg)
+                    a = tl.load(part_ptr + ((base0 + cc) * NREP_T + rows[:, None]) * D + d[None, :],
+                                mask=ok & (rows[:, None] >= 0), other=0.0, cache_modifier=".cg")
+                    somme = tl.where(ok, somme + a * wc[:, None], somme)
+            else:
+                for cc in range(0, C):
+                    wc = tl.exp(tl.load(pm_ptr + (base0 + cc) * NREP_T + rows, cache_modifier=".cg") - mg)
+                    a = tl.load(part_ptr + ((base0 + cc) * NREP_T + rows[:, None]) * D + d[None, :],
+                                cache_modifier=".cg")
+                    somme += a * wc[:, None]
             out = tl.where(lg[:, None] > 0, somme / lg[:, None], 0.0)
             tl.store(out_ptr + b * stride_ob + (hkv * NREP + rows[:, None]) * stride_oh + d[None, :],
                      out.to(out_ptr.dtype.element_ty), mask=masque_h[:, None])
@@ -253,6 +267,10 @@ def _tranches(n_pages: int, b: int, hkv: int, device) -> tuple[int, int]:
 # durée inchangée 17,8 µs — et le bras B tire 369 W contre 349 (J +2,6 %, addendum 05 h 03) :
 # ACVRAM_ATTN_WARPS_COMPACT=4 est le bras qui dit si ce sont ces warps (energie_par_poste).
 WARPS_COMPACT = int(os.environ.get("ACVRAM_ATTN_WARPS_COMPACT", "8"))   # 8 : B8 +11,5 %, J 0,966 × ; B4 +9,1 %, 0,986 × et 369 W = 369 (poste2 05 h 15)
+# Pièce 92 (23/09) : réduction des tranches déroulée (lectures en vol ensemble, mêmes sommes dans le même ordre) —
+# au bit de la boucle série sur 11/11 cellules du banc L2 froid et au test (test_glue_compact : réduction déroulée),
+# −1,9 % sur la moyenne du lot b=12 (15,46 → 15,17 µs/couche), −8,7 % à b=1 ctx 2 048. Témoin : =0.
+REDUC_DEROULEE = os.environ.get("ACVRAM_ATTN_REDUC_DEROULEE", "1") == "1"
 assert WARPS_COMPACT in (1, 2, 4, 8, 16), WARPS_COMPACT
 
 _COMPTEURS: dict = {}
@@ -303,7 +321,7 @@ def paged_attention(q: torch.Tensor, kc: torch.Tensor, ks: torch.Tensor,
             q.stride(0), q.stride(1), kc.stride(0) // D, kc.stride(1) // D, kc.stride(2) // D,
             ks.stride(0), ks.stride(1), out.stride(0), out.stride(1),
             NREP=n_rep, D=D, BN=PAGE * PAGES_PAR_TUILE, PAGE_C=PAGE, NREP_T=NREP_TUILE, CT=max(CT, 2),
-            num_warps=WARPS_COMPACT, num_stages=2)
+            DEROULE=REDUC_DEROULEE, num_warps=WARPS_COMPACT, num_stages=2)
         return out
     _partiel_kernel[(B, n_kv, C)](
         q, kc, ks, vc, vs, tables, seq_lens, part, pm, pl,
