@@ -132,3 +132,24 @@ La 79 montre que le Marlin MoE est **~10 % plus rapide sous `serve`** qu'en Engi
   chef.
 * **ce qui reste** : `ACVRAM_MOE_W13=1` en opt-in, au bit sur le défaut, documenté comme « sortie différente » ; la
   82 est close côté défaut. Le gain de −0,177 ms/pas servi ne se prend pas sous la règle actuelle.
+
+### Verdict du seuil — 23/09 10 h 5x
+
+* **instrument** : `scratchpad/poste1-p82-23-09/prise-mint2.sh`, **un serveur neuf par (bras, b)**, client de cellule, b = 4 et 8, 1 024 jetons, fenêtre 10 s, `/metrics` à chaque fin
+* **commit** : 1679c0cb ; alias `qkvo-i8c`, sans w13 ; horloge 2 623-2 675 MHz
+* **première prise INVALIDE, déclarée** (`prise-mint.sh`) : un seul serveur servait b = 2, 4, 8, 12 à la suite.
+  Résultat : 516 t/s à b=12 contre 1 940-1 995 le matin, 139-303 W, courbe non monotone. Cause non prouvée : le
+  plafond `MAX_GRAPHS = 16` de la pièce 44 est l'hypothèse, mais je n'avais pas relevé `/metrics`. Ces chiffres ne
+  servent à rien.
+* **mesuré (rejeu valide)** : graphes 8 à 11, 0 repli eager, 0 jeton spéculé dans chaque bras
+
+| b | T (tensor, MIN_T=2) | G (GEMV, MIN_T=99) | T/G − 1 | Engine direct (p65) |
+|---|---|---|---|---|
+| 4 | 691,1 t/s | 744,8 t/s | **−7,2 %** | GEMV +9,5 % |
+| 8 | 1 466,1 t/s | 1 299,7 t/s | **+12,8 %** | tensor +4,3 % |
+
+* **verdict : `MOE_TENSOR_MIN_T = 8` TIENT sur le servi.** À b=4, T n'atteint pas G + 2 % ; à b=8, G n'atteint pas
+  T + 2 %. Ma prédiction « égalité à ±3 % à b = 4 » est **réfutée** : le GEMV y garde 7,2 %. Celle de b = 8 (T ≥ +4 %)
+  est tenue, avec une marge triple de l'Engine direct (+12,8 contre +4,3), cohérente avec la 79 (Marlin plus rapide
+  sous `serve`). Réserve : AB sans BA ; les deux écarts dépassent 7 %, loin du seuil de 2 %.
+* **durée** : poste1-mint-servi=tenue=487s poste1-mint-servi-2=tenue=209s 
