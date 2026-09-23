@@ -98,3 +98,30 @@ fn fatbin_de_l_extension_servie() {
     assert_eq!(u32::from_le_bytes(f[0..4].try_into().unwrap()), 0xBA55_ED50);
     assert!(f.len() > 1 << 20, "fatbin de {} o : trop petit pour 347 noyaux", f.len());
 }
+
+/// Grilles et blocs relevés sur le moteur servi (prise 1, `revue/poste5-rust-p1-releve-23-09.md`) :
+/// la réécriture des règles de lancement doit les redonner à l'identique.
+#[test]
+fn regles_de_lancement_redonnent_le_releve() {
+    use acvram_rust::lanceurs::{splits_for, threads_for, threads_for_pairs};
+    const SMS: u32 = 170; // RTX 5090
+    // (M, K, format, grille relevée, bloc relevé)
+    let cas = [
+        (19456u32, 2560u32, "nvfp4", 4864u32, 64u32), // gate·up empilés
+        (9728, 2560, "nvfp4", 2432, 64),             // gate seul
+        (9728, 2560, "int8", 2432, 128),             // up seul
+        (2560, 9728, "nvfp4", 640, 256),             // down
+        (2560, 9728, "int8", 640, 256),
+        (2560, 4096, "nvfp4", 640, 128),             // o
+        (6144, 2560, "nvfp4", 1536, 64),             // q·k·v empilés
+        (4096, 2560, "nvfp4", 1024, 64),             // q
+        (1024, 2560, "int8", 256, 128),              // k ou v
+        (151936, 2560, "int8", 37984, 128),          // tête
+    ];
+    for (m, k, fmt, grille, bloc) in cas {
+        assert_eq!(splits_for(m, k, SMS), 1, "{m}×{k}");
+        assert_eq!(m.div_ceil(4), grille, "{m}×{k}");
+        let t = if fmt == "nvfp4" { threads_for_pairs(k) } else { threads_for(k) };
+        assert_eq!(t, bloc, "{fmt} {m}×{k}");
+    }
+}

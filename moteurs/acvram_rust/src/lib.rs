@@ -4,6 +4,7 @@
 //! sm_120 est pris tel quel dans l'extension que le moteur Python sert (`noyaux`), pour que les deux
 //! moteurs exécutent le même SASS et que seule la partie hôte diffère.
 
+pub mod lanceurs;
 pub mod manifeste;
 pub mod moteur;
 pub mod noyaux;
