@@ -26,7 +26,8 @@ import sys
 import torch
 
 COUCHES, HQ, HKV, D, PAGE = 48, 32, 4, 128, 16
-CELLULES = [(12, 768), (1, 768), (12, 320), (12, 1216)]
+CELLULES = [tuple(int(x) for x in c.split(":")) for c in
+            os.environ.get("ACVRAM_BANC_CELLULES", "12:768,1:768,12:320,12:1216").split(",")]
 REPET = 30
 SEUIL_3D = 24          # capture vLLM [1, 2, 4, 8, 16, 24] la plus proche de 128 // HKV (triton_attn.py:139-151)
 SEGMENTS = 16          # triton_attn.py:54
