@@ -96,7 +96,7 @@ def _deux_chemins(bloc, x, monkeypatch):
     bloc._stacks_marlin = _disposition_a_sec(bloc)
     bloc.__dict__["_piles_naturelles"] = {n: bloc._stacks[n] for n in ("gate_proj", "up_proj", "down_proj")}
     bloc._liberer_pile_naturelle()
-    assert bloc._stacks["gate_proj"][1] is None and bloc.experts_layout == "marlin"
+    assert bloc._stacks["gate_proj"][1] is None and bloc.experts_layout in ("marlin", "marlin-w13")
     monkeypatch.setattr(MD.kernels, "get_extension", lambda: _ExtStub)
     y_c10 = bloc._forward_grouped(x, topw, topi)
     assert bloc.dernier_chemin == "gemv_marlin" and bloc.chemins["gemv_marlin"] == 1, bloc.chemins

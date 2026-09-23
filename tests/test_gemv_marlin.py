@@ -213,7 +213,7 @@ def test_le_bloc_moe_decode_prend_gemv_marlin(monkeypatch):
     # disposition unique : pile naturelle rendue, le chemin marlin reste le seul
     # — même sous un témoin naturel demandé après coup (rien d'autre à lire)
     bloc._liberer_pile_naturelle()
-    assert bloc._stacks["gate_proj"][1] is None and bloc.experts_layout == "marlin"
+    assert bloc._stacks["gate_proj"][1] is None and bloc.experts_layout in ("marlin", "marlin-w13")
     monkeypatch.setattr(MOE_D, "_GEMV_LAYOUT", "naturel")
     n_m = bloc.chemins["gemv_marlin"]
     yu = bloc._forward_grouped(x, topw, topi.to(torch.int32))

@@ -1925,7 +1925,10 @@ _MOE_TENSOR_FUSION = os.environ.get("ACVRAM_MOE_TENSOR_FUSION", "1") == "1"
 # < MIN_T, b = 1) : `nvfp4_gemv_marlin_w13` lit gate et up dans w13 avec leurs échelles propres — au bit du chemin
 # séparé. Préfill (pièce 82 ter) : deux GEMM de largeur N sur des vues de w13 (largeur stockée `ldn` du port) — au
 # bit du chemin séparé ; la 82 y perdait la KL de fin de préfill.
-_MOE_W13 = os.environ.get("ACVRAM_MOE_W13", "0") == "1"
+# Défaut depuis la pièce 82 ter (23/09, ordre chef) : préfill au bit du chemin séparé, GEMV au bit, décodage
+# tensor au 2⁻⁷ ; KL Coder b=12 ≤ témoin + 0,025 et b=1 identique au témoin, jouées dans la même prise
+# (revue/poste1-piece82ter-w13-decodage-23-09.md). Témoin : ACVRAM_MOE_W13=0.
+_MOE_W13 = os.environ.get("ACVRAM_MOE_W13", "1") == "1"
 # Pièce 82 ter : phase de la passe en cours, posée par le modèle (model.forward : batch.is_prefill ; decode_fixed :
 # False). Un préfill court (T ≤ _MOE_GROUPED_MAX) passe par le même `_forward_grouped` qu un pas de décodage : sans
 # ce drapeau, il prendrait la GEMM w13 de largeur 2N et changerait la fin du préfill (KL b=1 de la 82 ter, invite 3 :
