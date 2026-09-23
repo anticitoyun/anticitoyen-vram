@@ -225,10 +225,17 @@ def bras_acvram_marlin(res):
                     y[i] = mp.gemm_moe(x[i], poids[i][0], poids[i][1], poids[i][2], sorted_ids, expert_ids, npost,
                                        tw, bs, 1, M, N, K, ws)
 
+            def pas_dense():
+                for i in range(COUCHES):
+                    y[i] = mp.gemm_dense(x[i], poids[i][0][0], poids[i][1][0], poids[i][2], N, K, ws)
+
             def pas_gemv():
                 for i in range(COUCHES):
                     y[i] = ext.nvfp4_gemv_marlin(poids[i][0], poids[i][1], poids[i][2], eid, tok, x[i], K, N, None)
-            for bras, f in (("marlin_moe_E1", pas_moe), ("gemv_marlin_E1", pas_gemv)):
+            bras_liste = [("marlin_moe_E1", pas_moe), ("gemv_marlin_E1", pas_gemv)]
+            if hasattr(mp.charger(), "marlin_gemm"):                   # pièce 101 : Marlin dense porté
+                bras_liste.insert(0, ("marlin_dense_port", pas_dense))
+            for bras, f in bras_liste:
                 f()
                 err = erreur(y[0].reshape(M, -1)[:, :N].float(), ref)
                 cel = {"forme": nom, "N": N, "K": K, "M": M, "bras": bras, "us": round(chrono_graphe(f), 2),

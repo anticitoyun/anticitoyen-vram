@@ -26,6 +26,16 @@ STABLE_TORCH_LIBRARY(acvram_marlin, m) {
   // Pièce 62 (23/09) : alignement des paires par blocs d expert, noyau CUDA de vLLM
   // (csrc/libtorch_stable/moe/moe_align_sum_kernels.cu, 2 lancements ≈ 3 µs) à la place de
   // l aligneur Triton du 18/09 (12 µs par couche : 0,57 ms/pas, tout le gain du GEMM tensor).
+  // Pièce 101 (23/09) : GEMM Marlin DENSE (csrc/libtorch_stable/quantization/marlin/marlin.cu), schéma copié de
+  // csrc/libtorch_stable/torch_bindings.cpp ; instanciations NVFP4 bf16 seules (dense_sm80_kernel_*.cu).
+  m.def(
+      "marlin_gemm(Tensor a, Tensor? c_or_none, Tensor b_q_weight, "
+      "Tensor? b_bias_or_none,Tensor b_scales, "
+      "Tensor? a_scales, Tensor? global_scale, Tensor? b_zeros_or_none, "
+      "Tensor? "
+      "g_idx_or_none, Tensor? perm_or_none, Tensor workspace, int b_type_id, "
+      "SymInt size_m, SymInt size_n, SymInt size_k, bool is_k_full, "
+      "bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float) -> Tensor");
   m.def(
       "moe_align_block_size(Tensor topk_ids, int num_experts,"
       "                     int block_size, Tensor! sorted_token_ids,"
