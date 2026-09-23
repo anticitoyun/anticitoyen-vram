@@ -52,6 +52,7 @@ class Fenetre(Adw.ApplicationWindow):
         self.filtre_code_os = False           # code android/linux
         self.tri_multi = []              # [(idx colonne, descendant)], ordre = priorité
         self.etat = {}                   # provider → identifiant servi
+        self._dossiers_deja_proposes = False  # une seule proposition auto par session (pièce 84)
         self._construire()
         self._recharger()
         self.sonder()
@@ -76,6 +77,16 @@ class Fenetre(Adw.ApplicationWindow):
         b_maj = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Recharger (Ctrl+R)")
         b_maj.connect("clicked", lambda *_: (self._recharger(), self.sonder()))
         entete.pack_start(b_maj)
+
+        self.b_dossiers_modeles = Gtk.Button(label="Dossiers des modèles…",
+                                             tooltip_text="Choisir où sont les modèles (acvram, GGUF, HF) ; "
+                                                          "balayés automatiquement pour remplir cette liste")
+        self.b_dossiers_modeles.connect("clicked", lambda *_: self.choisir_dossiers_modeles())
+        entete.pack_start(self.b_dossiers_modeles)
+        self.b_rebalayer = Gtk.Button(icon_name="folder-symbolic",
+                                      tooltip_text="Rebalayer les dossiers de modèles déjà choisis")
+        self.b_rebalayer.connect("clicked", lambda *_: self.rebalayer())
+        entete.pack_start(self.b_rebalayer)
 
         menu = Gio.Menu()
         menu.append("Journal du moteur actif", "win.journal")
@@ -500,6 +511,22 @@ class Fenetre(Adw.ApplicationWindow):
                 return alias
         return None
 
+    def _textes_visibles(self):
+        """Tous les textes de Gtk.Label actuellement affichés sous la liste (DFS),
+        colonne par colonne dans l'ordre des enfants — sert au crochet `trier:`."""
+        acc = []
+
+        def parcourir(w):
+            if isinstance(w, Gtk.Label):
+                acc.append(w.get_text())
+            enfant = w.get_first_child()
+            while enfant is not None:
+                parcourir(enfant)
+                enfant = enfant.get_next_sibling()
+
+        parcourir(self.vue_liste)
+        return acc
+
     def test_jouer(self):
         """ACVRAM_GUI_TEST (voir l'en-tête) : joue l'action, imprime `GUI_TEST {…}`, quitte. Retour = toasts, lignes de
         console, argv qui auraient été lancés, URI qui auraient été ouvertes, sélection, compte du filtre."""
@@ -526,8 +553,34 @@ class Fenetre(Adw.ApplicationWindow):
                     b.set_active(not b.get_active()); r["actif"] = b.get_active()
                 else:
                     r["sensible"] = b.get_sensitive(); b.emit("clicked")
+            elif genre == "trier":
+                # Simule un clic sur l'en-tête `arg` (gtk_column_view_sort_by_column
+                # est exactement l'appel que fait le gestionnaire de clic interne du
+                # ColumnView) ; laisse deux tours de boucle pour que la disposition
+                # (et le texte des cellules) se stabilise avant/après, puis imprime
+                # et quitte lui-même (retour anticipé : pas le print/quit générique).
+                col = next((c for c in self.vue_liste.get_columns() if c.get_title() == arg), None)
+                if col is None:
+                    r["erreur"], rc = f"colonne inconnue : {arg}", 2
+                    print("GUI_TEST " + json.dumps(r, ensure_ascii=False), flush=True)
+                    self.get_application().rc_test = rc
+                    self.get_application().quit()
+                    return
+                def apres_tri():
+                    r["apres"] = self._textes_visibles()
+                    print("GUI_TEST " + json.dumps(r, ensure_ascii=False), flush=True)
+                    self.get_application().rc_test = 0
+                    self.get_application().quit()
+                    return False
+                def avant_tri():
+                    r["avant"] = self._textes_visibles()
+                    self.vue_liste.sort_by_column(col, Gtk.SortType.ASCENDING)
+                    GLib.timeout_add(200, apres_tri)
+                    return False
+                GLib.timeout_add(200, avant_tri)
+                return
             else:
-                r["erreur"], rc = f"forme inconnue : {GUI_TEST} (clic:<bouton>[@<alias>] | filtre:<texte>)", 2
+                r["erreur"], rc = f"forme inconnue : {GUI_TEST} (clic:<bouton>[@<alias>] | filtre:<texte> | trier:<titre colonne>)", 2
         except Exception as e:                          # le retour d'un gestionnaire qui plante est le plantage lui-même
             r["exception"], rc = f"{type(e).__name__}: {e}", 1
         print("GUI_TEST " + json.dumps(r, ensure_ascii=False), flush=True)
@@ -1101,6 +1154,43 @@ class Fenetre(Adw.ApplicationWindow):
         if self.selection.get_n_items():
             self.selection.set_selected(cible)
         self._sur_selection()
+        # Premier lancement (acvram-parc installé, aucun modèle balayé) : la
+        # liste est vide sans que ce soit une faute (pièce 84) — proposer le
+        # choix des dossiers directement, une seule fois par session, jamais
+        # sous GUI_TEST (Gtk.FileDialog est modal et ne rend jamais sous test).
+        if not parc and not self._dossiers_deja_proposes and not GUI_TEST:
+            self._dossiers_deja_proposes = True
+            GLib.idle_add(self.choisir_dossiers_modeles)
+
+    # ---- dossiers de modèles (pièce 84) --------------------------------------
+    def choisir_dossiers_modeles(self):
+        dialogue = Gtk.FileDialog(title="Dossiers de modèles (acvram, GGUF, HF)")
+        def fini(d, resultat):
+            try:
+                dossiers = d.select_multiple_folders_finish(resultat)
+            except GLib.Error:
+                return False
+            chemins = [dossiers.get_item(i).get_path() for i in range(dossiers.get_n_items())]
+            if chemins:
+                self._balayer_dossiers(chemins)
+            return False
+        dialogue.select_multiple_folders(self, None, fini)
+
+    def rebalayer(self):
+        self._balayer_dossiers([])
+
+    def _balayer_dossiers(self, dossiers):
+        """Lance `parc-installer --auto --sans-balayage` (le même outil que l'installation
+        manuelle, pas une réécriture) restreint aux dossiers déjà connus + ceux donnés :
+        aucun balayage automatique de tous les disques depuis un clic de menu. Persiste les
+        racines dans parc.toml (parc-installer le fait déjà), régénère les TSV et
+        ~/.kimi-code/config.toml, puis recharge la liste."""
+        outil = shutil.which("parc-installer") or "/usr/bin/parc-installer"
+        argv = [outil, "--auto", "--sans-balayage", "--sans-minuteur"]
+        for d in dossiers:
+            argv += ["--racine", d]
+        self.executer(argv, "balayage des dossiers de modèles",
+                      fini=lambda code: self._recharger())
 
 
 def appliquer_habillage(accent_bg, accent_color):
