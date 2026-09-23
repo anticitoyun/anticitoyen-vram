@@ -162,7 +162,7 @@ EXEMPTES_COURRIEL = {"scratchpad/corpus-calib-c6/calib-c6-anglais-code.txt"}
 # sur main -- README 31 langues et registre/ETAT d'autres sessions apportent 2 chemins
 # nommes ; mes verdicts de session n'en portent aucun (verdict-depersonnalisation
 # depersonnalise : ses exemples /home/... -> /home/<utilisateur>).
-PLAFOND_CHEMINS = 2180  # 23/09 chef : -2, docs/FEUILLE-DE-ROUTE.md (/media/<utilisateur>/, sortait dans l instantané public) ; 20/09 poste7 : corpus-prive exempte par prefixe (95, copies figees de revue) et outils/gpu/hors-verrou.log sorti de l index (69) ; avant : 2282 (chef, 450 journaux scratchpad et 40 artefacts nsys/sqlite retires)
+PLAFOND_CHEMINS = 2176  # 23/09 chef : 2 181 → 2 176 (liste-dumps de la 100 B rendue relative) ; avant : -2, docs/FEUILLE-DE-ROUTE.md (/media/<utilisateur>/, sortait dans l instantané public) ; 20/09 poste7 : corpus-prive exempte par prefixe (95, copies figees de revue) et outils/gpu/hors-verrou.log sorti de l index (69) ; avant : 2282 (chef, 450 journaux scratchpad et 40 artefacts nsys/sqlite retires)
 
 # Le fichier qui NOMME les chemins pour les faire disparaitre ne doit pas
 # lui-meme les compter -- meme discipline datee que EXEMPTES_SESSION.
