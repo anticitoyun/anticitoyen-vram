@@ -22,10 +22,10 @@ ATTENDUS = [
     "REPRISE.md",
     "CLAUDE.md",
 ]
-# CLAUDE.md est gardé privé par publier-github.sh : dans l'instantané public (sans acvram-memoire/),
-# son absence n'est pas une perte du lien
+# CLAUDE.md est gardé privé par publier-github.sh : dans l'instantané public,
+# son absence n'est pas une perte du lien (même indicateur que conftest : scratchpad/ n'y est jamais copié)
 PRIVES = {"CLAUDE.md"}
-PUBLIC = not (RACINE / "acvram-memoire").is_dir()
+PUBLIC = not (RACINE / "scratchpad").is_dir()
 
 
 def test_chaque_point_de_contact_porte_le_lien():
