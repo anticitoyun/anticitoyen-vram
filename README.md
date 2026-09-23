@@ -255,8 +255,8 @@ protocole pour tous les moteurs (`outils/`, une carte, `energie.py`) :
 
 | | acvram | vLLM 0.29 (`vllm serve`) | llama.cpp (sm_120) |
 |---|---|---|---|
-| décodage 12 séquences | 1 916,1 t/s ² | **2 014,3 t/s** ² | — |
-| décodage 1 séquence | 311,2 t/s ³ ⁴ | 284,5 t/s ³ | **329,9 t/s** ⁴ |
+| décodage 12 séquences | 1 931,2 t/s ² | **2 026,5 t/s** ² | — |
+| décodage 1 séquence | 312,3 t/s ³ ⁴ | 284,8 t/s ³ | **329,9 t/s** ⁴ |
 | prefill pp2048 | **22 707 jetons/s** | 21 054 | 8 671 (TabbyAPI, retiré) |
 
 ¹ Erratum du 22/09 : `serve` spécule par défaut (`--speculative ngram`, cli.py), les
@@ -267,14 +267,12 @@ devant llama.cpp (0,601 contre 0,700 J/jeton net). À b=12 la spéculation n'est
 (garde `lot_max=2`) : cette cellule-là était déjà à armes égales.
 
 ² 23/09, même séance, même client HTTP (`banc-llamacpp-16-09.py` contre `acvram serve` et
-`vllm serve`), `-lgc 2700` posé explicitement autour de chaque bras, cellule alternée A V V A
-(revue/poste2-piece78-rejeu64-vllm-b1-23-09.md). acvram 0.6.37 (experts MoE sur tensor cores aux lots
-≥ 8). **vLLM est devant de 4,9 % en débit et de 6,4 % en J/jeton.** Une première cellule le matin même
-(revue/poste2-piece64-23-09.md) donnait 9,1 % : même moteur, écart attribué à la variance de séance.
+`vllm serve`), `-lgc 2700` posé explicitement autour de chaque bras, cellules alternées A V V A,
+≥ 5 lots par bras, écart déclaré seulement au-delà de 2 σ (revue/poste2-piece89-vllm-sigma-95-23-09.md).
+acvram 0.6.37. **vLLM est devant de 4,7 % en débit et de 6,8 % en J/jeton** (les deux au-delà de 2 σ).
 
-³ 23/09, même séance que ², ABAB, sans spéculation des deux côtés : acvram 311,2 (split-K du GEMV
-experts et routage réécrit, défauts de 0.6.37) contre vLLM 284,5 — **acvram devant de 9,4 % en
-débit**, énergie à égalité (écart 1,6 %, sous le seuil de 2 %).
+³ Même séance et même protocole que ², sans spéculation des deux côtés : acvram 312,3 contre vLLM 284,8 —
+**acvram devant de 9,7 % en débit** (au-delà de 2 σ) ; J/jeton : **égalité** (écart 0,04 %, sous 2 σ).
 
 ⁴ 23/09, même protocole contre llama.cpp (revue/poste2-piece72-llamacpp-b1-23-09.md), acvram 0.6.37 avec
 le routage réécrit (+5,6 %) : acvram 310,8 contre llama.cpp 329,9 t/s — **llama.cpp devant de 5,8 %
