@@ -11,7 +11,7 @@
 * **verdict** :
   * **130 TENUE** : −0,58 % ≤ +3 %, gate‖up à +0,9 % (réfutation non atteinte, pas de ncu). La disposition Marlin UNIQUE est viable à b=1 : plus de 8,5 Gio doublés.
   * **Ma prédiction s'est trompée de levier** : j'attribuais gate‖up (+15 %) à l'accès à tuile unique (levier 1), or TPB = 1 est le meilleur réglage. Le gain vient du levier 2 : x lu en global, sans copie en mémoire partagée ni barrière. La queue du split-K (levier 0) garde GDN out et o_proj à +10 % : un reste nommé, 0,16 ms/pas.
-  * **KL tenue** pour les deux chemins Marlin MIXTES (≤ 0,00491). **Bras UNIQUE + v2 (B3, mesuré en tête de l'ABBA, 04:0x) : 0,005452 > 0,00491 → FAUX sur la KL** (argmax 40/40, `marlin(doubles=0,seuls=305)`). En unique, gate‖up, down et GDN out passent AUSSI au préfill par la GEMM Marlin et à M = 1 par le v2 : l'écart au défaut s'additionne sur les 65 couches, et dépasse de 11 % le seuil de 2 × témoin. La vitesse de l'ABBA reste mesurée ; le défaut unique n'est pas qualifié tel quel.
+  * **KL tenue** pour les deux chemins Marlin MIXTES (≤ 0,00491). **Bras UNIQUE + v2 (B3, mesuré en tête de l'ABBA, 04:0x) : 0,005452 > 0,00491 → FAUX sur la KL** (argmax 40/40, `marlin(doubles=0,seuls=305)`). En unique, gate‖up, down et GDN out passent AUSSI au préfill par la GEMM Marlin et à M = 1 par le v2 : l'écart au défaut s.additionne sur les 64 couches, et dépasse de 11 % le seuil de 2 × témoin. La vitesse de l'ABBA reste mesurée ; le défaut unique n'est pas qualifié tel quel.
 * **durée** : prise 130 03:51:07 → 03:54:47 ; bras cassants 03:55:19 → 04:00:30
 
 Suite : ABBA b=8 puis b=1, bras B = disposition unique + v2 (addendum au scellé, avant les lots).
