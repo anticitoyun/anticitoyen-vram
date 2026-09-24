@@ -30,12 +30,12 @@
 
 * **24/09/2026 — pièce 156 (fusions GDN)** : six fusions du décodage des couches à récurrence linéaire (GDN), toutes
   numériquement identiques (au bit ou à l'ulp) au chemin qu'elles remplacent, mesurées sur Qwen3.8-27B, b = 8, disposition
-  Marlin qualifiée. Au défaut : **F2** conv de décodage fusionnée, **F4** état GDN mis à jour en place, **F5** résidu
-  différé des couches GDN (ensemble : −7,8 % de temps de pas, revue/poste5-piece156c-verdict-24-09.md, au bit) ; **F6**
-  RMSNorm en registres (+8,1 % à b = 8 seule avec F1/F3, au bit — l'ordre de sommation d'un fil n'est pas observable en
-  sortie bf16 sur ≤ 8 carrés). En opt-in (qualité tenue mais laissée au choix, `ACVRAM_GDN_PORTES_NOYAU` / F1 et
-  `ACVRAM_GDN_NORME_FUSEE` / F3, ± 1 ulp bf16) : gain mesuré mais KL/PPL trop proches du témoin lui-même pour trancher à
-  un seuil fixe. Détail : revue/poste5-piece156c-verdict-24-09.md, revue/poste5-piece156d-verdict-24-09.md.
+  Marlin qualifiée, **toutes par défaut** (poste5, 255042e8) : **F2** conv de décodage fusionnée, **F4** état GDN mis à
+  jour en place, **F5** résidu différé des couches GDN (ensemble : −7,8 % de temps de pas,
+  revue/poste5-piece156c-verdict-24-09.md, au bit) ; **F6** RMSNorm en registres (+8,1 % à b = 8 seule avec F1/F3, au bit
+  — l'ordre de sommation d'un fil n'est pas observable en sortie bf16 sur ≤ 8 carrés) ; **F1** portes dans le noyau fla et
+  **F3** norme gated Triton (± 1 ulp bf16, KL/PPL tenues contre le témoin, initialement laissées en opt-in le temps de la
+  revue — désormais par défaut). Détail : revue/poste5-piece156c-verdict-24-09.md, revue/poste5-piece156d-verdict-24-09.md.
 
 * **24/09/2026 — pièce 147** : le dépaquetage Marlin → bf16 au préfill (disposition unique) coûtait +26 à +34 ms par
   requête (v1, un fil par tuile, copies `.contiguous()` des vues q/k/v) ; réécrit (v2, un fil par colonne, lignes
@@ -43,10 +43,9 @@
   au bit contre les chemins Triton et torch de référence. `ACVRAM_DEPAQUETAGE=auto` choisit CUDA si l'extension l'a,
   sinon Triton. Détail : revue/poste6-piece147-verdict-24-09.md.
 
-* **24/09/2026 — pièce 161 (branche `poste6-161`, PAS ENCORE fusionnée dans main)** : le `.so` compilé du port Marlin
-  était PARTAGÉ entre worktrees sous un nom de cache fixe — deux arbres aux sources différentes alternant sur la même
-  carte se recompilaient l'un l'autre (25 s de nvcc à chaque changement d'arbre, y compris hors verrou carte.sh) sans
-  jamais désigner l'autre arbre comme cause. Correctif proposé : cache keyé par empreinte sha256 des sources (comme
-  `kernels/__init__.py`, pièce antérieure sur l'extension principale), sources copiées dans le cache, le moteur en
-  service ne relance jamais ninja (charge le `.so` de son empreinte ou replie au naturel, raison imprimée). En cours de
-  revue chez le chef. Détail : voir la branche `poste6-161` (non fusionnée), `poste6-piece161-verdict-24-09.md`.
+* **24/09/2026 — pièce 161** : le `.so` compilé du port Marlin était PARTAGÉ entre worktrees sous un nom de cache fixe —
+  deux arbres aux sources différentes alternant sur la même carte se recompilaient l'un l'autre (25 s de nvcc à chaque
+  changement d'arbre, y compris hors verrou carte.sh) sans jamais désigner l'autre arbre comme cause. Corrigé : cache
+  keyé par empreinte sha256 des sources (comme `kernels/__init__.py`, pièce antérieure sur l'extension principale),
+  sources copiées dans le cache, le moteur en service ne relance jamais ninja (charge le `.so` de son empreinte ou
+  replie au naturel, raison imprimée). Détail : revue/poste6-piece161-verdict-24-09.md.

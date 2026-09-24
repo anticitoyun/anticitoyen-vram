@@ -200,17 +200,16 @@ diverge donc légèrement d'un prefill monolithique, au même titre qu'un
 changement de taille de lot.
 
 **Fusions du décodage (pièce 156)**, toutes numériquement identiques au
-chemin qu'elles remplacent (au bit ou à l'ulp, mesuré sur le modèle servi) :
-au défaut, la conv de décodage fusionnée, l'état GDN mis à jour en place et
-le résidu différé des couches GDN (`ACVRAM_GDN_CONV_FUSEE`,
-`ACVRAM_GDN_ETAT_EN_PLACE`, `ACVRAM_GDN_RES_DIFFERE`, ensemble −7,8 % de
-temps de pas à b = 8) et la RMSNorm en registres (`ACVRAM_NORME_REGISTRES`,
-+8,1 % à b = 8, au bit — l'ordre de sommation d'un fil sur ≤ 8 carrés bf16
-n'est pas observable en sortie). En opt-in, qualité tenue mais laissée au
-choix (`ACVRAM_GDN_PORTES_NOYAU`, `ACVRAM_GDN_NORME_FUSEE`, ± 1 ulp bf16) :
-le gain est mesuré, mais la KL et la PPL sont trop proches de celles du
-témoin lui-même pour trancher à un seuil fixe. Détail :
-revue/poste5-piece156c-verdict-24-09.md, revue/poste5-piece156d-verdict-24-09.md.
+chemin qu'elles remplacent (au bit ou à l'ulp, mesuré sur le modèle servi),
+**toutes par défaut** (poste5, 255042e8) : la conv de décodage fusionnée,
+l'état GDN mis à jour en place et le résidu différé des couches GDN
+(`ACVRAM_GDN_CONV_FUSEE`, `ACVRAM_GDN_ETAT_EN_PLACE`, `ACVRAM_GDN_RES_DIFFERE`,
+ensemble −7,8 % de temps de pas à b = 8), la RMSNorm en registres
+(`ACVRAM_NORME_REGISTRES`, +8,1 % à b = 8, au bit — l'ordre de sommation d'un
+fil sur ≤ 8 carrés bf16 n'est pas observable en sortie), et les portes dans
+le noyau fla et la norme gated Triton (`ACVRAM_GDN_PORTES_NOYAU`,
+`ACVRAM_GDN_NORME_FUSEE`, ± 1 ulp bf16, KL et PPL tenues contre le témoin).
+Détail : revue/poste5-piece156c-verdict-24-09.md, revue/poste5-piece156d-verdict-24-09.md.
 
 ## Décodage spéculatif
 
@@ -329,7 +328,7 @@ les chemins Triton et torch de référence. `ACVRAM_DEPAQUETAGE=auto` choisit
 CUDA si l'extension le porte, sinon Triton. Détail :
 revue/poste6-piece147-verdict-24-09.md.
 
-### Cache de compilation (pièce 161, en cours)
+### Cache de compilation (pièce 161)
 
 Le `.so` compilé du port Marlin vivait sous un nom de cache FIXE, partagé par
 tous les worktrees : deux arbres aux sources différentes alternant sur la
@@ -337,9 +336,10 @@ même machine se recompilaient l'un l'autre à chaque changement (25 s de nvcc,
 y compris hors du verrou `carte.sh`), sans qu'aucun message ne désigne
 l'autre arbre comme cause — le même défaut que corrigeait déjà
 `kernels/__init__.py` pour l'extension principale (cache keyé par
-`sha256(realpath(...))`), pas encore porté ici. Correctif à l'étude (branche
-`poste6-161`, pas encore fusionné) : cache keyé par empreinte des sources,
-sources copiées dans le cache, le moteur en service ne relance jamais ninja.
+`sha256(realpath(...))`), pas encore porté ici. Corrigé (poste6) : cache
+keyé par empreinte sha256 des sources, sources copiées dans le cache, le
+moteur en service ne relance jamais ninja (charge le `.so` de son empreinte
+ou replie au naturel, raison imprimée).
 
 ## Répartition des noyaux
 
