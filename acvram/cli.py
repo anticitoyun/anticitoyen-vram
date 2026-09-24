@@ -73,6 +73,10 @@ VARIABLES_LUES = {
     # réserve bf16 des blocs courants.
     "ACVRAM_KV_INT8_CANAL",
     "ACVRAM_KV_CANAL_RANGS",
+    "ACVRAM_ARBRE_LIBRE",       # garde d'import (__init__.py) : contournement nommé, arbre ≠ cwd
+    "ACVRAM_DEPAQUETAGE",       # kernels/marlin_port/__init__.py : auto | cuda | triton | torch
+    "ACVRAM_GDN_PREFILL_LOT",   # engine/couches.py : lot au préfill GDN
+    "ACVRAM_HFQUANT_PAR_GROUPE",  # quant/hfquant.py : dispatch par groupe du compressed-tensors mixed-precision
     "ACVRAM_PREFILL_GROUPED",
     "ACVRAM_PAGED_ATTN",
     "ACVRAM_NARROW_KERNEL",
