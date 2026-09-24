@@ -43,3 +43,9 @@ ailleurs (occupation, lancements, état GDN en fp32).
    graphes hybrides au-delà de 8. Prédit : les projections GDN passent de b × 3,13 Go à 3,13 Go.
 Condition commune : test d'équivalence (sortie au bit ou KL sous témoin) dans le même commit (REGLES : une optimisation
 qui change la sortie est un bogue).
+
+**CORRECTIF 24/09 12 h 25 (poste1, verdict 152)** : les relectures « par jeton » du point 1 sont servies par le L2, pas
+par la DRAM. Dans le déroulé, la boucle des jetons tourne DANS la couche, et seuls ≈ 65 Mo (qkv, gate, α/β, out) passent
+entre deux jetons, sous 96 Mo de L2. ABBA 152 : regrouper par poids = −0,5 %. Les « +9,4 Go » et le « ×1,65 » étaient des
+octets de l'algorithme, pas des octets DRAM : ils ne comptent pas comme levier. Le point 2 (eager b > 8) relève
+probablement du même cas. Leçon : des octets algorithmiques sans ensemble de travail rapporté au L2 ne donnent pas un levier.

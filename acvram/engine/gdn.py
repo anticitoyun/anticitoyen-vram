@@ -138,19 +138,13 @@ class GatedDeltaNet(nn.Module):
                 state: Optional[tuple] = None
                 ) -> tuple[torch.Tensor, tuple]:
         """``x`` vaut [t, hidden] pour UNE séquence ; rend (y, nouvel état)."""
-        # toute la récurrence se calcule en float32 : la règle delta cumule
-        # des produits d'état où le bfloat16 dérive vite
-        qkv, z, b, a = self._projections(x)                 # [t, conv_dim], [t, value_dim], [t, nv] × 2
-        y, etat = self._apres_projections(x, qkv, z, b, a, state)
-        return self.out_proj(y.to(x.dtype)), etat
-
-    def _apres_projections(self, x: torch.Tensor, qkv: torch.Tensor, z: torch.Tensor, b: torch.Tensor,
-                           a: torch.Tensor, state: Optional[tuple]) -> tuple[torch.Tensor, tuple]:
-        """Convolution à état, récurrence et norme à porte, de projections déjà faites ; rend (y AVANT out_proj,
-        nouvel état) — le cœur de `forward`, séparé pour la pièce 152 (`decode_static_lignes`)."""
         chunk_rule, recurrent_rule = _refs()
         t = x.shape[0]
         decode = (t == 1 and state is not None)
+
+        # toute la récurrence se calcule en float32 : la règle delta cumule
+        # des produits d'état où le bfloat16 dérive vite
+        qkv, z, b, a = self._projections(x)                 # [t, conv_dim], [t, value_dim], [t, nv] × 2
 
         # convolution causale depthwise, avec état (kernel-1 colonnes)
         seq = qkv.t().unsqueeze(0)                          # [1, conv_dim, t]
@@ -198,7 +192,7 @@ class GatedDeltaNet(nn.Module):
         core = core.reshape(-1, self.dv)
         y = self._norm_gated(core, z.reshape(-1, self.dv))
         y = y.reshape(t, self.value_dim)
-        return y, (new_conv_state, s_new)
+        return self.out_proj(y.to(x.dtype)), (new_conv_state, s_new)
 
     # -- chemin à formes fixes (graphes CUDA) --------------------------------
     # La règle delta de référence est déjà à formes fixes pour t = 1 : on la
@@ -233,28 +227,6 @@ class GatedDeltaNet(nn.Module):
     # -- décodage du lot en un lancement (fla) ------------------------------
     def peut_batcher_decode(self, h: torch.Tensor) -> bool:
         return _voie_fla(h)
-
-    def decode_static_lignes(self, h: torch.Tensor, st: dict, hist: dict) -> torch.Tensor:
-        """Pièce 152 : les q_len jetons d'UNE séquence (vérification spéculative, ngram k = 4 au défaut). Mêmes appels
-        qu'avant — chaque projection à M = 1, le noyau servi tel quel, donc AU BIT par construction — mais regroupés
-        PAR POIDS : les q_len appels de qkv s'enchaînent, puis ceux de gate, β, α ; le poids (qkv 29,5 Mo, gate et out
-        17,7 Mo sur Qwen3.8) est encore dans le L2 (96 Mo) aux appels 2..q_len, au lieu d'être relu en DRAM après que
-        les autres projections l'ont chassé (déroulé jeton par jeton : 3,13 Go × q_len par vérification, verdict 151).
-        Convolution et récurrence jeton par jeton, photographie de l'état après chacun, comme `decode_static`. Le GEMV
-        à q_len lignes, lui, n'est pas au bit de M = 1 (152, 24/09) : écarté."""
-        q = h.shape[0]
-        par_poids = lambda lin: torch.cat([lin(h[j:j + 1]).to(torch.float32) for j in range(q)])   # noqa: E731
-        qkv, z, b, a = par_poids(self.qkv), par_poids(self.gate), par_poids(self.beta_proj), par_poids(self.alpha)
-        ys = []
-        for j in range(q):
-            y, (conv, S) = self._apres_projections(h[j:j + 1], qkv[j:j + 1], z[j:j + 1], b[j:j + 1], a[j:j + 1],
-                                                   (st["conv"], st["S"]))
-            st["conv"].copy_(conv)
-            st["S"].copy_(S.to(torch.float32))
-            for k_, v_ in hist.items():
-                v_[j].copy_(st[k_])
-            ys.append(y.to(h.dtype))
-        return torch.cat([self.out_proj(y) for y in ys], dim=0)
 
     def _lot_projete(self, x: torch.Tensor, conv_state: torch.Tensor):
         """Projections, convolution causale à état et portes pour ``b``
