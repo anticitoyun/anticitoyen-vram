@@ -286,6 +286,9 @@ def depaqueter_marlin(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, 
     g = torch.as_tensor(g_marlin, dtype=torch.float32, device=w.device).reshape(-1)
     if g.numel() == 1 and E > 1:
         g = g.expand(E)
+    if E == 1 and g.numel() == N and N > 1 and noyau != "triton" and not (noyau == "auto" and w.device.type == "cuda"
+                                                                          and triton is not None):
+        raise ValueError("depaqueter_marlin : échelle globale par colonne servie par le noyau Triton seulement")
     if out is None:
         out = torch.empty(E, N, K, dtype=torch.bfloat16, device=w.device)
     res = out.view(E, N, K)
@@ -533,7 +536,8 @@ if triton is not None:
         return (b >> 16).to(tl.int16)
 
     @triton.jit
-    def _depaqueter_kernel(w_ptr, s_ptr, g_ptr, out_ptr, KT, NT, K, N, DEUX_MOINS_119: tl.constexpr):
+    def _depaqueter_kernel(w_ptr, s_ptr, g_ptr, out_ptr, KT, NT, K, N, DEUX_MOINS_119: tl.constexpr,
+                           PAR_COLONNE: tl.constexpr = False):
         """Un programme par tuile Marlin (expert e, tuile k kt, tuile n nt) :
         512 octets de codes + 64 octets d'échelle → 1 024 poids bf16 [16 k ×
         64 n] écrits à leur place dans out [E, N, K] (vu en int16). Même
@@ -556,7 +560,10 @@ if triton is not None:
         sb = tl.load(s_ptr + (e * KT + kt) * N + nt * 64 + p).to(tl.int32)
         s_dec = ((sb << 20) + 0x34800000).to(tl.float32, bitcast=True)   # = s·facteur (S0E5M3)
         s_dec = tl.where(sb == 0, 0.0, s_dec)
-        g = tl.load(g_ptr + e)
+        if PAR_COLONNE:                                       # pièce 134 : pile à échelle globale par colonne (E = 1)
+            g = tl.load(g_ptr + nt * 64 + n)
+        else:
+            g = tl.load(g_ptr + e)
         ech = (s_dec * g) * DEUX_MOINS_119                    # × 2⁻¹¹⁹ (passé par l'hôte) : fl(s·g) au bit
         base = out_ptr + (e * N + nt * 64 + n) * K + kt * 16 + k0
         tl.store(base, _bf16_rne(_e2m1_valeur(octets & 0xF) * ech))
@@ -571,9 +578,10 @@ def _depaqueter_triton(w: torch.Tensor, s: torch.Tensor, g: torch.Tensor, out: t
     E = w.shape[0]
     KT, NT = K // 16, N // 64
     assert out.is_contiguous() and tuple(out.shape) == (E, N, K)
+    par_colonne = E == 1 and g.numel() == N and N > 1           # g [N] de preparer_dense (global_scale_rows)
     _depaqueter_kernel[(E * KT * NT,)](w.contiguous().view(torch.uint8), s.contiguous().view(torch.uint8),
                                        g.contiguous(), out.view(torch.int16), KT, NT, K, N,
-                                       DEUX_MOINS_119=2.0 ** -119, num_warps=4)
+                                       DEUX_MOINS_119=2.0 ** -119, PAR_COLONNE=par_colonne, num_warps=4)
 
 
 def aligner_blocs_cuda(flat_e: torch.Tensor, block_size: int, num_experts: int, tampons=None):

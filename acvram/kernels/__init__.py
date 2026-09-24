@@ -581,6 +581,21 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
     parent = getattr(t, "_marlin_parent", None)
     if parent is not None:
         pile, d, n_lig = parent
+        m = x.reshape(-1, x.shape[-1]).shape[0]
+        if (m > _NVFP4_GEMV_MAX and prefill_regime() == "bf16" and d % 64 == 0 and n_lig % 64 == 0
+                and getattr(pile, "_marlin_unique", False)):
+            # pièce 134 : le segment seul, déquantifié exactement depuis la disposition Marlin (tuiles de 64 colonnes
+            # contiguës par ligne k), comme le défaut déquantifie la vue — au bit, au même coût
+            from . import marlin_port as MP
+            w, s_, g, N, k_pad = pile._marlin_dense
+            CHEMINS_NVFP4["marlin_depaquete_prefill_vue"] += 1
+            gv = g[d:d + n_lig] if g.numel() == N else g
+            W = MP.depaqueter_marlin(w[:, 2 * d:2 * (d + n_lig)].contiguous(), s_[:, d:d + n_lig].contiguous(), gv,
+                                     k_pad, n_lig)
+            if k_pad != t.shape[1]:
+                W = W[:, : t.shape[1]]
+            dt = x.dtype if x.dtype != torch.float32 else torch.bfloat16
+            return torch.nn.functional.linear(x, W.to(dt).to(x.dtype))
         return nvfp4_matmul(x, pile, gemv_threshold)[..., d:d + n_lig]
     if getattr(t, "_marlin_unique", False):
         return _marlin_seul(x, t)
@@ -992,6 +1007,18 @@ def _marlin_seul(x: torch.Tensor, t):
         if g.numel() != 1:
             y = y * g
         y = y.to(x.dtype)
+    elif xf.shape[0] > _NVFP4_GEMV_MAX and prefill_regime() == "bf16":
+        # Pièce 134 : au PRÉFILL (M > seuil GEMV), l'arithmétique du défaut — déquantification exacte (dépaquetage de
+        # la disposition Marlin, au bit de `nvfp4_dequant`) puis cuBLAS bf16. La GEMM Marlin y portait TOUT l'excès de
+        # KL de l'unique (0,00545 au pas 0, revue/verdict-134-kl-par-source-24-09) ; le décodage (M ≤ 32) garde Marlin.
+        CHEMINS_NVFP4["marlin_depaquete_prefill"] += 1
+        # comme le défaut (fin de nvfp4_matmul) : W [N, K] non rembourré, x d'origine, F.linear au dtype de x
+        dt = x.dtype if x.dtype != torch.float32 else torch.bfloat16
+        W = MP.depaqueter_marlin(w, s_, g, k_pad, N)
+        if k_pad != t.shape[1]:
+            W = W[:, : t.shape[1]]
+        y = torch.nn.functional.linear(x.reshape(-1, orig[-1]), W.to(dt).to(x.dtype))
+        return y[:, : t.shape[0]].reshape(*orig[:-1], t.shape[0])
     else:
         CHEMINS_NVFP4["marlin_dense_seul"] += 1
         ws = _MARLIN_ESPACES.get(xf.device)
