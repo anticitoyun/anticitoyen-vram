@@ -16,3 +16,20 @@
 ## Au chef
 Seule configuration qui tient : **UNIQUE + v2** (b=8 +57,4 %, capacité KV intacte ; KL 0,00545, NON qualifiée au seuil 0,00491).
 Le MIXTE + v2, qualifié en KL, ne tient pas en mémoire. Ce qui manque : un ABBA b=1 de l'UNIQUE + v2 (prédit 0,99-1,01, banc 130 −0,58 %), et une réponse sur la KL de l'unique — soit un témoin plus large (plus d'invites), soit la source de l'écart par couche (préfill Marlin contre cuBLAS).
+
+## Complément 24/09 04 h 4x — (a) ABBA b=1 de l'unique + v2 et (b) PPL, ordre du chef (scellé `scelle-ppl-b1.md`, commit 20cd76ab, avant la mesure)
+* **(a) b=1** (prise 04:2x → 04:37:35, copie figée du script ; bras B NOMINAL, 0/64 couche exilée, `+marlin(doubles=0,seuls=305)`) :
+  A **13,192 ms**, 75,80 t/s, 4,917 J/jeton, 372 W ; B **13,149 ms**, 76,05 t/s, **4,571 J/jeton**, 347 W (SM 2 677 contre 2 637).
+  Pas B/A **0,9967** (prédit 0,99-1,01) → **TENU** ; débit +0,33 %, J/jeton **−7,0 %** (même vitesse, moins de puissance).
+* **(b) PPL** (`acvram eval`, corpus `acvram/data/calibration-anglais.txt`, fenêtre 4 096, pas 2 048, min-context 0, 16 384
+  jetons, 7 fenêtres — celles de la 102 ; `par_fenetre` ajouté à evaluate.py sans changer le calcul) : A **4,0938**
+  (= la 102 au 10⁻⁴ : instrument inchangé), B **4,0950** → **+0,029 %** ≤ +0,5 % → **TENU**. Par fenêtre (jetons 4 095 puis
+  6 × 2 048) : +0,014 / −0,022 / +0,148 / +0,122 / −0,025 / −0,225 / +0,220 %. L'écart de KL par pas de l'unique
+  (0,00545) ne se traduit pas en PPL au-delà de ±0,23 % par fenêtre. Localisation par couche : non faite (prise de plus).
+* Invalidations communes aux deux bras (b=1) : « bridage pendant la fenêtre : puissance », « durées énergie/hôte divergent » (≈ 0,15 s / 20 s).
+
+## Bilan pour le chef
+Disposition Marlin UNIQUE + GEMV v2 (opt-in `ACVRAM_PROJ_MARLIN=1 ACVRAM_PROJ_MARLIN_DOUBLES= ACVRAM_GEMV_MARLIN_V2=1
+ACVRAM_GEMV_MARLIN_TPB=1`) sur Qwen3.8-27B-nvfp4 : **b=8 +57,4 % de débit, −41,6 % de J** ; **b=1 −0,3 % de pas, −7,0 % de
+J** ; PPL **+0,029 %** (≤ +0,5 %) ; KL par pas **0,00545 > 0,00491 : NON qualifiée** au seuil du témoin (FAUX maintenu,
+seuil non relevé) ; capacité KV intacte (aucun double). Le MIXTE, qualifié en KL, ne tient pas en mémoire (exil → refus).
