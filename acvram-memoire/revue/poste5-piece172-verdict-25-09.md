@@ -45,3 +45,9 @@ et `test_une_seule_sequence_ne_garde_rien`.
 Prédiction (`pic.py`, pic − alloué avant, Qwen3.8 à max_model_len 8 192) : 1 × 8 192 : B' − A = 0 (portée fermée) ;
 ancien comportement forcé : +0 à +232 Mio ; 8 × 1 024 : B' − A entre 0 et +232 Mio. Les activations du MLP dominent
 probablement le pic, auquel cas les deux différences sont nulles.
+**1re mesure (241d617c, 01:4x) : OOM dès le bras A (B' COUPÉ)** sur 1 × 8 192 jetons, en processus
+(`load_model(max_model_len=8192, max_concurrent_seqs=8)`) : fla `chunk_gated_delta_rule` (`wy_fast.py:269`,
+`w = k.new_empty(B, T, HV, K)`) demande 192 Mio et il en reste 152. Ce n'est pas B' : le préfill par défaut de 8 192
+jetons ne tient pas dans ce chargement. Les tampons fp32 du préfill par blocs de fla (T × têtes v × 128 × 4 o, plusieurs
+par couche) ne figurent pas dans `activations_prefill_bytes`. Tests : 20 verts. Mesure refaite aux longueurs qui passent
+(1 × 4 096, 8 × 512), prédiction inchangée.
