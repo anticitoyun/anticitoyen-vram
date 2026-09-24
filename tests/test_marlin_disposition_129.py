@@ -94,6 +94,8 @@ def test_marlin_seul_egal_naturel(n, k):
         y = boite.proj(x)
         assert y.shape == avant[m].shape
         assert _hors(y, avant[m]) == 0, f"M={m} : hors 2⁻⁷·max"
+        if m > 32:                                     # pièce 134 : préfill = arithmétique du défaut, au bit
+            assert torch.equal(y, avant[m]), f"M={m} : préfill pas au bit du défaut"
         assert torch.equal(y, boite.proj(x)), f"M={m} : non reproductible"
 
 
@@ -109,9 +111,15 @@ def test_pile_a_echelle_par_segment_et_ses_vues():
     avant = {(nom, m): getattr(boite, nom)(x) for nom in ("qkv_proj", "q_proj", "k_proj", "v_proj") for m, x in xs.items()}
     kernels.preparer_disposition_marlin(boite)
     assert pile.qweight._marlin_unique and kk.qweight._marlin_parent[1:] == (4096, 512)
+    kernels.CHEMINS_NVFP4.pop("marlin_depaquete_prefill_vue", None)
+    boite.k_proj(xs[300])
+    # pièce 134 : la vue d'une pile se déquantifie SEULE au préfill (coût du défaut), pas la pile entière puis découpe
+    assert kernels.CHEMINS_NVFP4.get("marlin_depaquete_prefill_vue", 0) == 1, "vue servie par la pile entière"
     for (nom, m), ref in avant.items():
         y = getattr(boite, nom)(xs[m])
         assert _hors(y, ref) == 0, f"{nom} M={m} : hors 2⁻⁷·max"
+        if m > 32:                                     # pièce 134 : pile (échelle par colonne) et vues, au bit
+            assert torch.equal(y, ref), f"{nom} M={m} : préfill pas au bit du défaut"
 
 
 @carte
