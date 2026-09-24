@@ -40,7 +40,10 @@ def test_reserve_du_chargeur(monkeypatch):
     monkeypatch.setattr(kernels, "_PROJ_MARLIN", False)
     assert loader._octets_marlin(man) == 0
     monkeypatch.setattr(kernels, "_PROJ_MARLIN", True)
-    assert loader._octets_marlin(man) == o(4096, 1024) + o(1024, 4096) + o(1024, 2048) + o(8192, 1024)   # + plus gros
+    # pièce 146 : les doubles seuls (gate‖up, down, gdn.out au défaut des doubles) — plus de « plus gros » transitoire
+    assert loader._octets_marlin(man) == o(4096, 1024) + o(1024, 4096) + o(1024, 2048)
+    monkeypatch.setattr(kernels, "_PROJ_MARLIN_DOUBLES", frozenset())
+    assert loader._octets_marlin(man) == 0, "disposition unique : la réserve ne coûte aucun KV"
 
 
 def test_preuve_memoire_refus_nomme(monkeypatch):

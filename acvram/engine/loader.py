@@ -275,6 +275,12 @@ def load_model(path: str, plan: Optional[Plan] = None,
     if plan is None:
         plan = _plan_from_manifest(manifest, spec, max_model_len=max_model_len,
                                    max_concurrent_seqs=max_concurrent_seqs)
+    # Pièce 146 (a) : le plan du chemin par défaut, au MÊME instant que celui de B (avant `embed_tokens` sur la carte :
+    # replanifié après, il voyait 2,6 Gio de moins — 501 blocs de référence contre 697 réels sur gemma4 31B).
+    from .. import kernels as _kernels
+    plan_ref = (_sans_marlin(lambda: _plan_from_manifest(manifest, spec, max_model_len=max_model_len,
+                                                         max_concurrent_seqs=max_concurrent_seqs))
+                if _kernels._PROJ_MARLIN and plan_du_manifeste else None)
     _avertir_noyaux()
     reader = _ShardReader(path, manifest["weight_map"])
     group_size = manifest.get("options", {}).get("group_size", 128)
@@ -338,11 +344,15 @@ def load_model(path: str, plan: Optional[Plan] = None,
     _borner_kv_avec_exil(plan, manifest, dev, spec, max_model_len,
                          reserve=_reserve_prefill(spec, max_model_len, manifest, plan))
     kv_blocks = _kv_blocks_per_device(plan, spec, max_model_len)
-    # Pièce 146 (a) : la capacité du chemin par défaut, au MÊME instant (poids pas encore chargés), référence de la garde
-    # Marlin — la disposition ne doit pas coûter de KV ; sans plan du manifeste, la garde retombe sur la demande.
-    from .. import kernels as _kernels
-    kv_ref = (_capacite_kv_sans_marlin(manifest, spec, dev, max_model_len, max_concurrent_seqs)
-              if _kernels._PROJ_MARLIN and plan_du_manifeste else None)
+    # Pièce 146 (a) : la capacité du chemin par défaut, bornée au MÊME instant que B (poids pas encore chargés),
+    # référence de la garde Marlin — la disposition ne doit pas coûter de KV ; sans plan du manifeste, la demande.
+    kv_ref = None
+    if plan_ref is not None:
+        def _borner_ref():
+            _borner_kv_avec_exil(plan_ref, manifest, dev, spec, max_model_len,
+                                 reserve=_reserve_prefill(spec, max_model_len, manifest, plan_ref))
+            return {d: int(n) for d, n in _kv_blocks_per_device(plan_ref, spec, max_model_len).items()}
+        kv_ref = _sans_marlin(_borner_ref)
 
     # Arène épinglée pour les poids exilés, dimensionnée ICI parce que le plan
     # vient d'être arrêté : avant lui, la taille exilée n'est pas connue et le
@@ -970,7 +980,15 @@ def load_model(path: str, plan: Optional[Plan] = None,
         # projection en prend une copie quantifiée, qui coûte de la place mais
         # divise sa lecture par deux (int8) ou par trois et demi (nvfp4).
         lm_head = QuantLinear(_tete_liee(embed.to(head_dev)))
-    if bilan_marlin is not None:                  # la tête : conversion après le KV, transitoire compté dans la réserve
+    if bilan_marlin is not None:                  # la tête : conversion après le KV, transitoire dans la marge de préfill
+        qt = getattr(lm_head, "qweight", None)
+        q = getattr(qt, "qweight", None)
+        if q is not None and q.is_cuda and type(qt).__name__ == "NVFP4Tensor":
+            transitoire = q.numel() * q.element_size() + qt.block_scale.numel() * qt.block_scale.element_size()
+            libre = torch.cuda.mem_get_info(q.device)[0]
+            if libre < 2 * transitoire:                  # pièce 146 : jamais un OOM de chargement muet
+                raise RuntimeError(f"ACVRAM_PROJ_MARLIN=1 : {libre / 2**30:.2f} Gio libres pour convertir la tête "
+                                   f"({transitoire / 2**30:.2f} Gio, naturelle + Marlin) — refus au chargement")
         tete = torch.nn.Module()
         tete.lm_head = lm_head
         for cle, v in _kernels.preparer_disposition_marlin(tete).items():
@@ -1277,11 +1295,9 @@ def _verifier_memoire_marlin(a_allouer: list, kv_blocks: dict, bilan: dict, dema
                                f"(ACVRAM_PROJ_MARLIN_CAPACITE) — refus au chargement")
 
 
-def _capacite_kv_sans_marlin(manifest: dict, spec: ModelSpec, dev, max_model_len: Optional[int],
-                             max_concurrent_seqs: Optional[int]) -> dict:
-    """Pièce 146 (a) : les blocs KV qu'aurait le chemin par défaut (sans la réserve de la disposition Marlin), par le
-    même chemin que `load_model` — plan du manifeste puis `_borner_kv_avec_exil` — et au même instant, poids non
-    chargés. Les lignes « borné » de ce calcul de référence sont tues (le journal ne doit nommer que le plan servi)."""
+def _sans_marlin(calcul):
+    """Pièce 146 (a) : ``calcul()`` comme sur le chemin par défaut — `kernels._PROJ_MARLIN` coupé (la réserve
+    `_octets_marlin` tombe à 0), lignes « borné »/« plan » tues : le journal ne nomme que le plan servi."""
     import contextlib
     import io
     from .. import kernels as _k
@@ -1289,11 +1305,7 @@ def _capacite_kv_sans_marlin(manifest: dict, spec: ModelSpec, dev, max_model_len
     _k._PROJ_MARLIN = False
     try:
         with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
-            ref = _plan_from_manifest(manifest, spec, max_model_len=max_model_len,
-                                      max_concurrent_seqs=max_concurrent_seqs)
-            _borner_kv_avec_exil(ref, manifest, dev, spec, max_model_len,
-                                 reserve=_reserve_prefill(spec, max_model_len, manifest, ref))
-        return {d: int(n) for d, n in _kv_blocks_per_device(ref, spec, max_model_len).items()}
+            return calcul()
     finally:
         _k._PROJ_MARLIN = garde
 
@@ -1811,22 +1823,22 @@ _SUFFIXES_DOUBLES = {"mlp.gate_up": (".mlp.gate_proj.weight", ".mlp.up_proj.weig
 
 def _octets_marlin(manifest: dict) -> int:
     """Pièce 129 (ACVRAM_PROJ_MARLIN=1) : octets à retirer du budget KV AVANT de le fixer — la seconde disposition
-    des rôles doublés (`kernels._PROJ_MARLIN_DOUBLES`, poids nvfp4 des couches, hors tête MTP) plus la plus grosse
-    conversion transitoire (naturelle + Marlin d'un même poids, la tête en général). 0 sans la variable."""
+    des rôles doublés (`kernels._PROJ_MARLIN_DOUBLES`, poids nvfp4 des couches, hors tête MTP). 0 sans la variable.
+    Pièce 146 : la plus grosse conversion transitoire N'Y EST PLUS — les couches se convertissent avant l'allocation du
+    KV (place encore libre), la tête après, dans la marge de préfill (≥ 1,5 Gio, contrôlée avant sa conversion) ; la
+    compter coûtait du KV à la disposition unique (gemma4 31B : 11 024 jetons contre 11 152 au défaut)."""
     from .. import kernels as _k
     if not _k._PROJ_MARLIN:
         return 0
     suffixes = tuple(x for r in _k._PROJ_MARLIN_DOUBLES for x in _SUFFIXES_DOUBLES.get(r, ()))
-    doubles, plus_gros = 0, 0
+    doubles = 0
     for nom, t in manifest.get("tensors", {}).items():
         if t.get("format") != "nvfp4" or len(t.get("shape", ())) != 2 or nom.startswith("mtp."):
             continue
         n, k = t["shape"]
-        octets = n * k // 2 + n * k // 16
-        plus_gros = max(plus_gros, octets)
         if nom.endswith(suffixes):
-            doubles += octets
-    return doubles + plus_gros
+            doubles += n * k // 2 + n * k // 16
+    return doubles
 
 
 def _reserve_prefill(spec, max_model_len: Optional[int], manifest: dict,
