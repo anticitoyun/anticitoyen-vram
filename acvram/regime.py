@@ -302,6 +302,15 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("HYBRID_KERNELS", "1", None, "0", "KDA / GDN : noyaux hybrides ou torch"),
     Variable("GDN", "fla", ("acvram.engine.gdn", "_GDN_VOIE"), "torch",
              "Gated DeltaNet : fla (noyaux Triton de flash-linear-attention, prefill par blocs et décodage du lot en un lancement) | torch (référence transformers, séquence par séquence) ; 0 = refus des hybrides"),
+    Variable("GDN_ETAT_EN_PLACE", "1", ("acvram.engine.gdn", "_GDN_ETAT_EN_PLACE"), "0",
+             "pièce 156 F4 (DÉFAUT depuis 156 c, au bit ; 0 = témoin) : 1 = au décodage du lot, la récurrence fla écrit son état final dans le "
+             "tampon statique (h0 = ht) au lieu d'une allocation suivie d'une copie de 25 Mo par couche (b=8, Qwen3.8)"),
+    Variable("GDN_CONV_FUSEE", "1", ("acvram.engine.gdn", "_GDN_CONV_FUSEE"), "0",
+             "pièce 156 F2 (DÉFAUT depuis 156 c, au bit ; 0 = témoin) : 1 = au décodage du lot, cast de qkv, état de conv, conv depthwise, "
+             "silu et découpe q/k/v en un noyau Triton (gdn_conv.py), q/k sans répétition des têtes"),
+    Variable("GDN_RES_DIFFERE", "1", ("acvram.engine.model", "_GDN_RES_DIFFERE"), "0",
+             "pièce 156 F5 (DÉFAUT depuis 156 c, au bit ; 0 = témoin) : 1 = le résidu différé (add_norm, C15) admis aux couches Gated DeltaNet "
+             "non MLA ; deux additions bf16 de moins par couche GDN"),
     Variable("GDN_PREFILL_LOT", "0", ("acvram.engine.couches", "_GDN_PREFILL_LOT"), "0",
              "pièce 150 bis (opt-in) : 1 = au préfill de plusieurs séquences, projections Gated DeltaNet du lot en un "
              "appel (couches.py, forward_lot), convolution et règle delta par séquence ; autre M, donc pas au bit : KL"),

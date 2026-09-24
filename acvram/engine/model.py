@@ -52,6 +52,9 @@ _SYNC_COUCHES = bool(os.environ.get("ACVRAM_SYNC_COUCHES"))
 # 17/09 : 33 min sans une ligne, GPU 0 %, pile Python illisible sans ptrace).
 # Lent (une synchronisation par couche) : diagnostic seulement.
 _TRACE_COUCHES = bool(os.environ.get("ACVRAM_TRACE_COUCHES"))
+# Pièce 156 F5 (défaut depuis le verdict 156 c, au bit ; 0 = témoin) : résidu différé aussi pour les couches Gated DeltaNet
+# non MLA (Qwen3.5/3.8) — voir `_res_differe`.
+_GDN_RES_DIFFERE = os.environ.get("ACVRAM_GDN_RES_DIFFERE", "1") == "1"
 
 
 def _trace_couche(quoi: str, i: int, layer) -> None:
@@ -436,8 +439,18 @@ class ACVRamModel(nn.Module):
                 # enchaînements de normes
                 return (type(l) is DecoderLayerGDN and hasattr(l.linear_attn, "rank")
                         and l.mlp is not None and l.mlp_device == l.device)
+            def gdn_glue(l) -> bool:
+                # Pièce 156 F5 : couche Gated DeltaNet (pas MLA, pas KDA ni
+                # Mamba) à deux RMSNorm — `decode_fixed_res` y est générique,
+                # et `add_norm` rend l'addition bf16 de torch au bit
+                # (couches.py, docstring de `decode_fixed_res`)
+                return (_GDN_RES_DIFFERE and type(l) is DecoderLayerGDN
+                        and type(l.linear_attn).__name__ == "GatedDeltaNet"
+                        and l.mlp is not None and l.mlp_device == l.device
+                        and type(l.input_layernorm).__name__ == "RMSNorm"
+                        and type(l.post_attention_layernorm).__name__ == "RMSNorm")
             glue = _mla_glue() >= 1
-            v = all(ordinaire(l) or (glue and mla_glue(l)) for l in self.layers) \
+            v = all(ordinaire(l) or (glue and mla_glue(l)) or gdn_glue(l) for l in self.layers) \
                 and type(self.norm).__name__ == "RMSNorm"
             self._res_ok = v
         return v

@@ -910,7 +910,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             "dense": kernels.narrow_regime() + (                  # pièce 129 : disposition Marlin, bilan du chargement
                 ("+marlin(" + ("moe-exclu" if b.get("portee") == "denses:moe-exclu"
                                else f"repli:{b['repli']}" if b.get("repli")
-                               else "doubles={doubles},seuls={seuls},{go:.2f}Go,kv={capacite_kv}".format(go=b["octets_doubles"] / 2**30, **{"capacite_kv": 0, **b})) + ")")
+                               else ("doubles={doubles},seuls={seuls},{go:.2f}Go,kv={capacite_kv}".format(go=b["octets_doubles"] / 2**30, **{"capacite_kv": 0, **b})
+                                     + (f",inexacts={b['inexacts']}" if b.get("inexacts") else ""))) + ")")   # 157
                 if (b := getattr(self.model, "proj_marlin_bilan", None))
                 # pièce 156 : le repli demandé est NOMMÉ (le Marlin est le défaut)
                 else "+marlin(off:ACVRAM_PROJ_MARLIN=0)" if os.environ.get("ACVRAM_PROJ_MARLIN") == "0" else ""),

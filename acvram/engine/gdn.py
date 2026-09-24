@@ -35,6 +35,13 @@ __all__ = ["GatedDeltaNet", "gdn_available", "gdn_regime"]
 # b=12 : 97 j/s pour 621 chez vLLM, poste7-priorite-apres-campagne-17-09).
 # « 1 » vaut fla, « 0 » reste le refus des hybrides (quant/gguf.py).
 _GDN_VOIE = os.environ.get("ACVRAM_GDN", "fla")
+# Pièce 156 F4 (défaut depuis le verdict 156 c, au bit ; 0 = témoin) : au décodage du lot, la récurrence fla écrit son état
+# final DANS le tampon statique au lieu d'en allouer un puis de le recopier
+# (25 Mo par couche à b=8 sur Qwen3.8). Au bit : voir `_recurrence_en_place`.
+_GDN_ETAT_EN_PLACE = os.environ.get("ACVRAM_GDN_ETAT_EN_PLACE", "1") == "1"
+# Pièce 156 F2 (défaut depuis le verdict 156 c, au bit ; 0 = témoin) : conv du décodage du lot en un noyau Triton, visé au
+# bit (`gdn_conv.py`) ; q/k sans répétition des têtes (fla les indexe).
+_GDN_CONV_FUSEE = os.environ.get("ACVRAM_GDN_CONV_FUSEE", "1") == "1"
 
 
 def _fla():
@@ -58,6 +65,27 @@ def gdn_regime() -> str:
     if not (torch.cuda.is_available() or os.environ.get("TRITON_INTERPRET") == "1"):
         return "torch(sans carte)"
     return "fla"
+
+
+def _recurrence_en_place(q, k, v, g, beta, S: torch.Tensor) -> torch.Tensor:
+    """`fused_recurrent_gated_delta_rule` (fla 0.5.2, `use_qk_l2norm_in_kernel`, échelle K^-1/2) avec ``h0 = ht =
+    S`` : même noyau, mêmes arguments que `fused_recurrent_gated_delta_rule_fwd`, seule l'adresse de l'état final
+    change. Au bit parce que `p_h0` et `p_ht` ont la même indexation et que chaque programme de la grille
+    (NV, N·HV) lit sa tuile [K, BV] une fois AVANT la boucle et l'écrit une fois APRÈS, sans lire celle d'un autre
+    (fused_recurrent.py, chargement de h0 puis `tl.store(p_ht, …)`). Rend la sortie ``o`` ; ``S`` est mis à jour."""
+    import triton
+    from fla.ops.gated_delta_rule.fused_recurrent import fused_recurrent_gated_delta_rule_fwd_kernel as noyau
+    B, T, H, K, V = *k.shape, v.shape[-1]
+    HV = v.shape[2]
+    BK, BV = triton.next_power_of_2(K), min(8, triton.next_power_of_2(V))
+    o = torch.empty_like(v)
+    with torch.cuda.device(q.device.index):
+        noyau[(triton.cdiv(V, BV), B * HV)](
+            q=q, k=k, v=v, g=g, gk=None, gv=None, beta=beta, A_log=None, dt_bias=None, o=o, h0=S, ht=S,
+            cu_seqlens=None, scale=K ** -0.5, T=T, H=H, HV=HV, K=K, V=V, BK=BK, BV=BV,
+            IS_BETA_HEADWISE=beta.ndim != v.ndim, USE_QK_L2NORM_IN_KERNEL=True, APPLY_BETA_SIGMOID=False,
+            ALLOW_NEG_EIGVAL=False, STATE_V_FIRST=False, num_warps=1, num_stages=3)
+    return o
 
 
 def _voie_fla(x: torch.Tensor) -> bool:
@@ -116,14 +144,17 @@ class GatedDeltaNet(nn.Module):
         self.multi = _multi_projection([self.qkv, self.gate, self.alpha, self.beta_proj])
         return self.multi is not None
 
-    def _projections(self, x: torch.Tensor):
-        """(qkv, z, b, a) en fp32 — un lancement si la multi-projection sert."""
+    def _projections(self, x: torch.Tensor, qkv_brut: bool = False):
+        """(qkv, z, b, a) en fp32 — un lancement si la multi-projection sert.
+        ``qkv_brut`` : qkv rendu tel que la projection le sort (F2 le lit)."""
         from .model import _multi_utilisable
         mp = getattr(self, "multi", None)
         if _multi_utilisable(mp, x, x.shape[0]):
             qkv, z, a, b = torch.split(mp(x), mp.tailles, dim=-1)
-            return qkv.to(torch.float32), z.to(torch.float32), b.to(torch.float32), a.to(torch.float32)
-        return (self.qkv(x).to(torch.float32), self.gate(x).to(torch.float32),
+            return (qkv if qkv_brut else qkv.to(torch.float32)), z.to(torch.float32), \
+                b.to(torch.float32), a.to(torch.float32)
+        qkv = self.qkv(x)
+        return ((qkv if qkv_brut else qkv.to(torch.float32)), self.gate(x).to(torch.float32),
                 self.beta_proj(x).to(torch.float32), self.alpha(x).to(torch.float32))
 
     # -- normalisation gated (RMSNorm de la sortie, porte SiLU(z)) --------
@@ -258,6 +289,14 @@ class GatedDeltaNet(nn.Module):
         jetons (un par séquence) ; ``conv_state`` [b, conv_dim, k-1] est mis
         à jour EN PLACE. Rend (q, k, v, g, beta, z) aux formes de fla."""
         b = x.shape[0]
+        if _GDN_CONV_FUSEE and x.is_cuda and conv_state.is_contiguous():
+            from .gdn_conv import conv_decode
+            qkv, z, bt, a = self._projections(x, qkv_brut=True)
+            q, k, v = conv_decode(qkv, conv_state, self.conv_weight.contiguous(), self.key_dim, self.value_dim)
+            beta = bt.sigmoid().unsqueeze(1)
+            g = (-self.a_log.exp() * F.softplus(a + self.dt_bias)).unsqueeze(1)
+            return (q.view(b, 1, self.nk, self.dk), k.view(b, 1, self.nk, self.dk), v.view(b, 1, self.nv, self.dv),
+                    g.contiguous(), beta.contiguous(), z)
         qkv, z, bt, a = self._projections(x)
         seq = torch.cat([conv_state, qkv.unsqueeze(-1)], dim=-1)   # [b, conv_dim, k]
         conv_state.copy_(seq[:, :, 1:])
@@ -299,9 +338,12 @@ class GatedDeltaNet(nn.Module):
         g_, contigu = tranches(self, statics, b, ("conv", "S_"))
         conv_state, S = g_["conv"], g_["S_"]
         q, k, v, g, beta, z = self._lot_projete(h, conv_state)
-        core, S_new = _fla()[1](q, k, v, g=g, beta=beta, initial_state=S.contiguous(),
-                                output_final_state=True, use_qk_l2norm_in_kernel=True)
-        S.copy_(S_new)
+        if _GDN_ETAT_EN_PLACE and S.is_contiguous():
+            core = _recurrence_en_place(q, k, v, g, beta, S)
+        else:
+            core, S_new = _fla()[1](q, k, v, g=g, beta=beta, initial_state=S.contiguous(),
+                                    output_final_state=True, use_qk_l2norm_in_kernel=True)
+            S.copy_(S_new)
         if not contigu:
             for i, st in enumerate(statics[:b]):
                 st["conv"].copy_(conv_state[i]); st["S"].copy_(S[i:i + 1])
