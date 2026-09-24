@@ -76,6 +76,9 @@ VARIABLES_LUES = {
     "ACVRAM_ARBRE_LIBRE",       # garde d'import (__init__.py) : contournement nommé, arbre ≠ cwd
     "ACVRAM_DEPAQUETAGE",       # kernels/marlin_port/__init__.py : auto | cuda | triton | torch
     "ACVRAM_GDN_PREFILL_LOT",   # engine/couches.py : lot au préfill GDN
+    "ACVRAM_GDN_ETAT_EN_PLACE", # engine/gdn.py : 156 F4, état GDN mis à jour en place (défaut 1)
+    "ACVRAM_GDN_CONV_FUSEE",    # engine/gdn.py : 156 F2, conv de décodage fusionnée (défaut 1)
+    "ACVRAM_GDN_RES_DIFFERE",   # engine/model.py : 156 F5, résidu différé des couches GDN (défaut 1)
     "ACVRAM_HFQUANT_PAR_GROUPE",  # quant/hfquant.py : dispatch par groupe du compressed-tensors mixed-precision
     "ACVRAM_PREFILL_GROUPED",
     "ACVRAM_PAGED_ATTN",
