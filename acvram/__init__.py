@@ -40,6 +40,37 @@ __version__ = "0.6.38"
 #
 # `ACVRAM_ALLOC_EXTENSIBLE=1` l'active.
 import os as _os
+
+
+def _garde_arbre() -> None:
+    """Refuse l'import quand le cwd est dans un AUTRE arbre acvram que celui importé.
+
+    Quatre fois (20/09, 22/09, 23/09, 24/09 — MECANISMES.md) un poste a mesuré ou testé depuis
+    son worktree le code de l'arbre principal, installé en éditable : `python script.py` met le
+    dossier du script en tête de sys.path, pas la racine du worktree. La règle écrite reposait
+    sur la vigilance ; la garde la porte. Contournement nommé : ACVRAM_ARBRE_LIBRE=1."""
+    if _os.environ.get("ACVRAM_ARBRE_LIBRE") == "1":
+        return
+    ici = _os.path.realpath(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    try:
+        d = _os.path.realpath(_os.getcwd())
+    except OSError:
+        return
+    while True:
+        if (_os.path.isfile(_os.path.join(d, "acvram", "__init__.py"))
+                and _os.path.exists(_os.path.join(d, ".git"))):
+            if d != ici:
+                raise ImportError(
+                    f"acvram importé depuis {ici} alors que le cwd est dans l'arbre {d} : "
+                    f"PYTHONPATH={d} (ou python -m depuis {d}), ou ACVRAM_ARBRE_LIBRE=1 si voulu")
+            return
+        parent = _os.path.dirname(d)
+        if parent == d:
+            return
+        d = parent
+
+
+_garde_arbre()
 # 0.6.31 : réglages hôte génériques (THP, OMP 8, affinité optionnelle) posés AVANT torch, par le paquet
 # — donc par tout lanceur, serveur ou instrument (acvram/hote.py) ; rejoués à la construction d'Engine.
 from .hote import regler_hote as _regler_hote  # noqa: E402
