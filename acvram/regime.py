@@ -429,6 +429,13 @@ _MROPE_CHARGE: Optional[tuple[list[int], bool]] = None
 # None quand rien ne le dit — le mot `deepstack=N` n'apparaît que déclaré.
 _DEEPSTACK_CHARGE: Optional[int] = None
 
+# Piece 133 (chef, meme classe que 127) : "architecture" du manifeste ("llama" | "moe"), None tant
+# qu'aucun modele n'est charge (ligne construite a sec par un banc de noyaux GEMV, ou GEMV_LAYOUT reste
+# pertinent). ACVRAM_GEMV_LAYOUT ne vit que dans moe.py et ne regle RIEN sur un modele sans MoEBlock
+# (Qwen3.8-27B dense, entre autres) -- la ligne le disait quand meme, sans effet, ce qui a trompe une
+# lecture de verdict (poste2, piece 102bis).
+_ARCHITECTURE_CHARGEE: Optional[str] = None
+
 
 def declarer_modele_charge(manifest: Optional[dict]) -> None:
     """Le chargeur déclare le manifeste du modèle qu'il vient de charger ; la
@@ -439,8 +446,9 @@ def declarer_modele_charge(manifest: Optional[dict]) -> None:
     deepstack : `deepstack: 3` (nombre) ou `deepstack: oui` avec
     `deepstack_niveaux` (sinon 3, les `deepstack_visual_indexes` par défaut de
     Qwen3-VL) ; absent ou « non » : pas de mot."""
-    global _VISION_CHARGEE
+    global _VISION_CHARGEE, _ARCHITECTURE_CHARGEE
     _VISION_CHARGEE = None if manifest is None else str(manifest.get("vision", "non"))
+    _ARCHITECTURE_CHARGEE = None if manifest is None else manifest.get("architecture")
     if _VISION_CHARGEE != "oui":                          # pas de tour pour ce modèle : la précédente ne survit pas
         try:
             from .engine.vision import oublier_la_tour
@@ -557,8 +565,14 @@ def regime_ligne() -> str:
     parts = [f"{k}={v if v else repr('')}" for k, v in r["hors_defaut"].items()
              if k != "ACVRAM_GEMV_LAYOUT"] or ["défaut"]
     # la disposition lue par le GEMV des experts est toujours nommée (P1
-    # disposition unique, poste7-p1-disposition-unique-18-09) : marlin | naturel
-    parts.append("ACVRAM_GEMV_LAYOUT=" + str(r["variables"].get("ACVRAM_GEMV_LAYOUT", "?")))
+    # disposition unique, poste7-p1-disposition-unique-18-09) : marlin | naturel —
+    # SAUF sur un modèle chargé sans MoEBlock (pièce 133) : la variable n'y règle
+    # rien (moe.py ne la lit que dans du code MoE), la nommer comme active
+    # aurait trompé une lecture (poste2, pièce 102bis, Qwen3.8-27B dense).
+    _gv = "ACVRAM_GEMV_LAYOUT=" + str(r["variables"].get("ACVRAM_GEMV_LAYOUT", "?"))
+    if _ARCHITECTURE_CHARGEE is not None and _ARCHITECTURE_CHARGEE != "moe":
+        _gv += "(inerte:modèle dense)"
+    parts.append(_gv)
     # split-K toujours nommé, défaut 1 depuis 0.6.37 (pièce 70) : S auto ou repli
     # si le noyau manque (sans GPU, rien ne lève — pièce 70, 23/09)
     try:

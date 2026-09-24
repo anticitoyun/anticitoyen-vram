@@ -60,6 +60,25 @@ def test_ligne_de_regime_nomme_ce_qui_differe(monkeypatch):
     assert "ACVRAM_PREFILL" not in acvram.regime_ligne()
 
 
+def test_gemv_layout_inerte_sur_modele_dense():
+    """Pièce 133 (chef, même classe que 127) : ACVRAM_GEMV_LAYOUT ne vit que dans
+    acvram.engine.moe, sans effet sur un modèle sans MoEBlock (Qwen3.8-27B dense
+    entre autres) — la ligne le dit, au lieu de nommer la variable comme active
+    (a trompé une lecture de verdict, poste2 pièce 102bis). Casse si l'inertie
+    redevient muette."""
+    try:
+        regime.declarer_modele_charge({"architecture": "llama", "vision": "non"})
+        assert "ACVRAM_GEMV_LAYOUT=marlin(inerte:modèle dense)" in acvram.regime_ligne()
+        regime.declarer_modele_charge({"architecture": "moe", "vision": "non"})
+        ligne_moe = acvram.regime_ligne()
+        assert "ACVRAM_GEMV_LAYOUT=marlin" in ligne_moe and "inerte" not in ligne_moe
+        regime.declarer_modele_charge(None)
+        ligne_sans = acvram.regime_ligne()
+        assert "ACVRAM_GEMV_LAYOUT=marlin" in ligne_sans and "inerte" not in ligne_sans
+    finally:
+        regime.declarer_modele_charge(None)
+
+
 def test_ligne_de_regime_porte_les_trois_versions():
     """Un pip install dans le venv de mesure change l'arithmetique sans
     qu'aucun defaut ACVRAM_* ne bouge (poste7-glm-etendue-canal-saillant-18-09
