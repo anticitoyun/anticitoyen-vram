@@ -491,14 +491,7 @@ class PagedKVCache:
             return kv_k8v4.quantifier_k(x)       # int8 par jeton, division IEEE (au bit du noyau)
         amax = x.abs().amax(dim=-1, keepdim=True).to(torch.float32)
         if self.cfg.dtype == "int8":
-            # pièce 109 (chef, 24/09) : convention SERVIE depuis toujours (repli
-            # "int8" de loader.py:196) — `amax / 127.0` semblait diviser, mais ATen
-            # compile un tenseur CUDA divisé par un scalaire Python en multiplication
-            # par le réciproque précalculé (déjà la convention voulue, mais au hasard
-            # d'une optimisation interne). Rendue EXPLICITE ici pour ne plus en
-            # dépendre : 1/127 calculé une fois en fp32 (même constante, même bits
-            # que `INV127` de kv_write_int8_kernel), multiplié — jamais divisé.
-            scale = (amax * amax.new_tensor(1.0 / 127.0)).clamp(min=1e-8)
+            scale = (amax / 127.0).clamp(min=1e-8)
             q = (x.to(torch.float32) / scale).round().clamp(-127, 127).to(torch.int8)
         else:                                        # fp8_e4m3, max 448
             scale = (amax / 448.0).clamp(min=1e-8)
