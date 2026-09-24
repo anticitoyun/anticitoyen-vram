@@ -179,3 +179,63 @@ atteint le tour de file).
   réduction `fmaxf` d'amax malgré l'intrinsèque explicite (le commentaire du fichier `:4225-4229` déjà
   fixé UNE fois ce problème pour la division de quantification — peut-être un deuxième site non couvert,
   ou une contraction du compilateur qui déjoue l'intrinsèque localement).
+
+## Prédiction écrite AVANT sonde (24/09, ordre chef, kv_write_int8_v_debug — deux hypothèses)
+
+- lu au bit AVANT de sonder : `kv_write_int8_kernel:4225-4229` utilise DÉJÀ `__fdiv_rn(m, 127.f)` pour
+  l'échelle (pas une division nue) — donc l'hypothèse (1) de chef telle que formulée (« le __fdiv_rn
+  couvre x/échelle mais pas amax/127 ») est contredite par la LECTURE du source.
+- prédiction : l'échelle fp32 rapportée par la sonde (`dbg[0]`) sera **identique** à 0,1289370059967041
+  (hex `3e040810`, calculée par diag5.py) — hypothèse (1) RÉFUTÉE par la sonde, PAS confirmée. Si la
+  sonde montre au contraire un `dbg[0]` différent d'1 ulp : (1) est CONFIRMÉE malgré la lecture du
+  source (compilateur contractant l'intrinsèque quand même — plus grave, à remonter).
+- hypothèse (2) (quelle échelle divise x, fp32 avant cast ou fp16 relue) : la sonde copie
+  littéralement `const float sc = red[0]` puis `__fdiv_rn(x, sc)` — dans le noyau réel comme dans la
+  sonde, AUCUNE relecture de la valeur fp16 stockée n'intervient avant la division (lu au bit :
+  `vs[...] = __float2half(sc)` est un STORE, pas un RELOAD, et arrive après la boucle de division).
+  Prédiction : `dbg[1]` (ratio) sera aussi -63,5 exact SI dbg[0] est correct — et si le ratio de la
+  sonde est bien -63,5 mais que `dbg[3]` (`__float2int_rn(ratio)`) rend -63 quand même, alors la cause
+  n'est NI (1) NI (2) mais `__float2int_rn` lui-même divergeant de `torch.round()` à cette tie précise
+  sous ce build (troisième possibilité, à rouvrir si les deux premières sont réfutées).
+
+## REPRISE (24/09, ordre chef) — bug de méthode découvert : diag2-diag6 testaient MAIN, pas poste3
+
+`python scratchpad/.../diagN.py` insère le dossier DU SCRIPT dans `sys.path[0]`, pas le cwd ni la racine
+du worktree. Le venv a `acvram` installé en editable pointant sur `anticitoyen-vram` (main). Résultat :
+`import acvram` dans TOUS mes diagnostics d'aujourd'hui AVANT ce point (diag2 rerun, diag3, diag4, diag5,
+diag6 premiers essais) résolvait vers **main**, pas la branche `poste3`. Vérifié au bit :
+`acvram.__file__` sans PYTHONPATH → `anticitoyen-vram/acvram` ; `main`'s `kv_write_int8_kernel`
+(`acvram_kernels.cu:4358` sur main) fait `m / 127.f` — division NUE, PAS `__fdiv_rn` (le correctif thf
+n'y est pas). Toutes les conclusions précédentes de cette section (déterminisme diag4, localisation
+-63,5 exact de diag5/diag6) caractérisaient donc **main**, pas le noyau corrigé de `poste3`. chef a posé
+une garde sur main (`a86fa1dd`) : refus d'import si le cwd est hors de l'arbre courant
+(`ACVRAM_ARBRE_LIBRE=1` pour passer outre).
+
+Le VRAI test (`pytest tests/test_kv_write_int8_thf_carte.py`, résolution correcte via `-m pytest` +
+rootdir) reste ROUGE sur `poste3` : graine=103 (pas 101/104, qui n'existaient que sur main), 2 écarts.
+
+## Localisation refaite (24/09, PYTHONPATH correct, graine=103, t=1 h=3 d=121)
+
+- diag5.py (torche, fp32) : x=6,5, amax=13,0, `scale_t` (recomposé, amax/127 fp32) = 0,10236220061779022
+  (hex `3dd1a346`). ratio = x/scale_t = **63,500003814697266** — PAS une égalité exacte cette fois
+  (63,500004 > 63,5, plus proche de 64 sans ambiguïté). `torch.round()` → 64, cohérent avec `_quantize`
+  (ref=64).
+- diag6.py (sonde `kv_write_int8_v_debug`, lit les bits RÉELS du noyau compilé) : `dbg[0]` (échelle fp32
+  interne du noyau) = **0,10236220806837082 (hex `3dd1a347`)** — **1 ULP différent** de `scale_t` fp32
+  calculé par torch (`3dd1a346`), pour la MÊME division `13,0 __fdiv_rn 127,0` sur la MÊME entrée amax.
+  `dbg[1]` (ratio interne) = 63,499996185302734 (< 63,5, côté 63 sans ambiguïté avec CETTE échelle).
+  `__float2int_rn(ratio)` = 63,0, cohérent avec `obs(kv_write_int8 reel)=63`.
+- **verdict : H1 CONFIRMÉE au bit.** `__fdiv_rn(amax, 127.f)` (déjà posé dans le source,
+  `kv_write_int8_kernel:4225` sur `poste3`) NE PRODUIT PAS le résultat IEEE correctement arrondi sous
+  cette compilation (`--use_fast_math` + arch courante) : le noyau compilé s'écarte de 1 ULP de l'IEEE
+  correct malgré l'intrinsèque explicite dans le source — soit une contraction du compilateur qui
+  déjoue `__fdiv_rn` sur ce site précis (`fmaxf(__fdiv_rn(...), 1e-8f)`, peut-être la fusion avec le
+  `fmaxf` environnant), soit un comportement de nvcc/arch spécifique. **Ce n'est PAS un test trop
+  strict, ni un problème d'arrondi ties-to-even : c'est l'échelle elle-même qui est fausse d'1 ULP.**
+  H2 (quelle échelle divise x) reste sans objet : la même échelle fausse sert aux deux (cohérence
+  sonde/noyau réel = True).
+- **reste, hors mon périmètre (à décider par chef/poste7)** : correctif nécessite un changement de
+  COMPILATION (pas seulement de code — `__fdiv_rn` est déjà posé et insuffisant ici), par ex. isoler la
+  division dans une fonction `__noinline__` pour empêcher la contraction, ou un flag de compilation
+  local (`-fmad=false` sur ce site), à valider par PTX/SASS avant de toucher au flag global (impact sur
+  les ~8000 autres lignes du fichier, hors de mon autorité).
