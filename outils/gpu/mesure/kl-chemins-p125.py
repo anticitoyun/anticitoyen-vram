@@ -13,6 +13,8 @@ codes K, jusqu'à 19 % L2 sur V dès la couche 1) sans dire lequel a raison : ic
                                                      #   chaque jeton FORCÉ un par un, comme vidage_decode_force.py) ;
                                                      #   eager par défaut (les crochets ne voient pas un graphe rejoué) ;
                                                      #   « graphes » = témoin servi sans crochets, logits seuls
+  kl-chemins-p125.py invites-longues SRC_HF COURT DOSSIER TEXTE [n]   # 125 ter (a) : invites ≥ 512 jetons, ids seuls
+  kl-chemins-p125.py paire DOSSIER ALIAS -A -B       # 125 ter : KL(A ‖ B), L2 par couche entre deux dumps préfill, sans HF
   kl-chemins-p125.py compare DOSSIER ALIAS           # à sec : KL(hf ‖ chemin) par position de réponse, erreur L2 relative
                                                      #   par couche (positions d'invite / de réponse), préfill contre
                                                      #   forcé, témoin graphes contre eager (0 ulp attendu)
@@ -182,9 +184,13 @@ def mode_prefill(alias: str, dossier: str) -> None:
         chemins = dict(CHEMINS_INT8)
     except Exception as exc:                                     # noqa: BLE001
         chemins = {"?": type(exc).__name__}
-    json.dump({"regime": regime, "chemins_int8": chemins, "env": {k: v for k, v in os.environ.items() if k.startswith("ACVRAM_")}},
+    moe: dict = {}
+    for m in loaded.model.modules():
+        for nom, n in getattr(m, "chemins", {}).items():
+            moe[nom] = moe.get(nom, 0) + n
+    json.dump({"regime": regime, "chemins_int8": chemins, "chemins_moe": moe, "env": {k: v for k, v in os.environ.items() if k.startswith("ACVRAM_")}},
               open(os.path.join(dossier, f"prefill{SUF}-{_nom(chemin)}-preuve.json"), "w"), ensure_ascii=False, indent=1)
-    print("CHEMINS_INT8 " + json.dumps(chemins), flush=True)
+    print("CHEMINS_INT8 " + json.dumps(chemins) + " CHEMINS_MOE " + json.dumps(moe), flush=True)
     print("FINI prefill " + _nom(chemin), flush=True)
 
 
@@ -326,6 +332,59 @@ def mode_compare(dossier: str, alias: str) -> None:
     print("RESULTAT " + json.dumps({"alias": nom} | res["bilan"]), flush=True)
 
 
+# ───────────────────────────── 125 ter ─────────────────────────────
+def mode_invites_longues(source: str, dossier_court: str, dossier: str, prefixe: str, n_prefixe: int = 480) -> None:
+    """Invites LONGUES (≥ 512 jetons) sans référence HF : contexte = `n_prefixe` jetons d'un texte, puis la question i,
+    réponse = celle de HF sur l'invite courte i (`dossier_court/invite{i}.pt`), pour forcer les mêmes 32 positions.
+    Dumps `invite{i}.pt` avec ids et n_invite seulement (modes prefill/force/paire ; pas compare)."""
+    from transformers import AutoTokenizer
+    tk = AutoTokenizer.from_pretrained(source)
+    texte = open(prefixe, encoding="utf-8").read()
+    ctx_ids = tk(texte, add_special_tokens=False)["input_ids"][:n_prefixe]
+    ctx = tk.decode(ctx_ids)
+    os.makedirs(dossier, exist_ok=True)
+    for i, q in enumerate(INVITES):
+        court = torch.load(os.path.join(dossier_court, f"invite{i}.pt"), weights_only=False)
+        rep = court["ids"][court["n_invite"]:]
+        msgs = [{"role": "user", "content": f"Contexte :\n{ctx}\n\nQuestion : {q}"}]
+        try:
+            ids = tk.apply_chat_template(msgs, add_generation_prompt=True, enable_thinking=False)
+        except TypeError:
+            ids = tk.apply_chat_template(msgs, add_generation_prompt=True)
+        ids = list(ids["input_ids"] if isinstance(ids, dict) else ids)
+        torch.save({"ids": ids + list(rep), "n_invite": len(ids), "hidden": {}, "prefixe_jetons": len(ctx_ids), "source_court": dossier_court},
+                   os.path.join(dossier, f"invite{i}.pt"))
+        print(json.dumps({"invite": i, "n_invite": len(ids), "n_reponse": len(rep)}), flush=True)
+    print("FINI invites-longues", flush=True)
+
+
+def mode_paire(dossier: str, alias: str, a: str, b: str) -> None:
+    """À sec, sans HF : KL(A ‖ B) par position de réponse et L2 relative par couche entre deux dumps préfill
+    (`prefill{a}-<alias>-i.pt` contre `prefill{b}-…`), A = témoin. Invite = positions 0..n_inv-1."""
+    nom = _nom(alias)
+    res = {"alias": nom, "a": a, "b": b, "invites": []}
+    for i in range(len(INVITES)):
+        d = torch.load(os.path.join(dossier, f"invite{i}.pt"), weights_only=False)
+        A = torch.load(os.path.join(dossier, f"prefill{a}-{nom}-{i}.pt"), weights_only=False)
+        B = torch.load(os.path.join(dossier, f"prefill{b}-{nom}-{i}.pt"), weights_only=False)
+        n_inv, L = d["n_invite"], len(d["ids"])
+        n = min(A["logprobs"].shape[0], B["logprobs"].shape[0])
+        lpa, lpb = A["logprobs"][:n], B["logprobs"][:n]
+        kl = _kl(lpa, lpb)
+        pos_inv, pos_rep = torch.arange(0, n_inv), torch.arange(n_inv, L - 1)
+        r = {"invite": i, "n_invite": n_inv, "n_reponse": n, "kl_a_b": {"moy": round(float(kl.mean()), 5), "max": round(float(kl.max()), 5)},
+             "argmax_egaux": f"{int((lpa.argmax(-1) == lpb.argmax(-1)).sum())}/{n}",
+             "l2_invite_b_vs_a": _l2rel(B["hidden"], A["hidden"], pos_inv), "l2_reponse_b_vs_a": _l2rel(B["hidden"], A["hidden"], pos_rep)}
+        res["invites"].append(r)
+        print(json.dumps({k: r[k] for k in ("invite", "n_invite", "kl_a_b", "argmax_egaux")} | {"l2_inv_fin": r["l2_invite_b_vs_a"][-1] if r["l2_invite_b_vs_a"] else None,
+                                                                                         "l2_inv_c0": r["l2_invite_b_vs_a"][0] if r["l2_invite_b_vs_a"] else None}), flush=True)
+    inv = res["invites"]
+    res["bilan"] = {"kl_moy": round(sum(r["kl_a_b"]["moy"] for r in inv) / len(inv), 5), "kl_max": max(r["kl_a_b"]["max"] for r in inv),
+                    "l2_inv_fin_moy": round(sum(r["l2_invite_b_vs_a"][-1] for r in inv if r["l2_invite_b_vs_a"]) / len(inv), 5)}
+    json.dump(res, open(os.path.join(dossier, f"paire{a}{b}-{nom}.json"), "w"), ensure_ascii=False, indent=1)
+    print("RESULTAT " + json.dumps({"alias": nom, "a": a, "b": b} | res["bilan"]), flush=True)
+
+
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
     if mode == "hf":
@@ -336,5 +395,9 @@ if __name__ == "__main__":
         mode_force(sys.argv[2], sys.argv[3], len(sys.argv) > 4 and sys.argv[4] == "graphes")
     elif mode == "compare":
         mode_compare(sys.argv[2], sys.argv[3])
+    elif mode == "invites-longues":
+        mode_invites_longues(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], int(sys.argv[6]) if len(sys.argv) > 6 else 480)
+    elif mode == "paire":
+        mode_paire(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
     else:
         sys.exit(__doc__)
