@@ -20,6 +20,12 @@
 #   3. le verrou meurt avec le processus, y compris tue par le superviseur —
 #      c'est `flock` sur un descripteur qui le garantit, pas un fichier temoin.
 set -u
+# anticitoyen-vram-6it (24/09, ordre chef) : file FIFO pour l'attente —
+# `flock` seul ne garantit pas l'ordre d'arrivee entre plusieurs attendeurs
+# (une attente longue affamee par un flux de prises courtes plus recentes).
+# Voir outils/carte-ticket.sh pour le principe (ticket + un seul pretendant
+# en vol a la fois vers le verrou reel).
+source "$(dirname "${BASH_SOURCE[0]}")/carte-ticket.sh"
 # LE VERROU NOMME LA CARTE REELLEMENT SERVIE, pas une constante. Le defaut
 # etait `carte-0` quelle que soit la carte, et AUCUN script du depot ne le
 # surchargeait : une mesure sur la 3080 Ti verrouillait la 5090 qu elle
@@ -251,6 +257,23 @@ if ! flock -n 9; then
   fi
   echo "carte occupee par $(qui_tient) — attente (max ${ATTENTE} s)" >&2
   debut=$(date +%s)
+  # anticitoyen-vram-6it : ticket d'abord (ordre d'arrivee), puis seulement
+  # le tour venu, tentative du verrou reel — voir carte-ticket.sh.
+  # ACVRAM_TICKET_DESACTIVE : bras cassant / secours, saute le ticket et
+  # retombe sur le flock nu d'avant (l'ordre d'arrivee n'est alors plus
+  # garanti — sert au test qui PROUVE le defaut sur ce chemin).
+  if [ -z "${ACVRAM_TICKET_DESACTIVE:-}" ]; then
+    _mon_ticket=$(_ticket_prendre "$VERROU" 12)
+    while :; do
+      reste=$(( ATTENTE - ($(date +%s) - debut) ))
+      [ "$reste" -gt 0 ] || {
+        echo "ABANDON apres $(( $(date +%s) - debut )) s : carte toujours tenue par $(qui_tient)" >&2
+        exit 3; }
+      _ticket_attendre_son_tour "$VERROU" "$_mon_ticket" "$reste" 13 && break
+      echo "  ... $(( $(date +%s) - debut )) s (ticket $_mon_ticket), toujours $(qui_tient)" >&2
+    done
+    echo "$$" > "$VERROU.servi_pid" 2>/dev/null || true
+  fi
   while :; do
     # LE PAS D'ATTENTE NE DOIT PAS DEPASSER CE QUI RESTE. Avec un `flock -w 30`
     # fixe, une borne plus courte que 30 s n'etait jamais atteinte : le pressé
@@ -264,6 +287,7 @@ if ! flock -n 9; then
     flock -w "$pas" 9 && break
     echo "  ... $(( $(date +%s) - debut )) s, toujours $(qui_tient)" >&2
   done
+  [ -z "${ACVRAM_TICKET_DESACTIVE:-}" ] && _ticket_avancer "$VERROU" "$_mon_ticket" 12
   echo "carte obtenue apres $(( $(date +%s) - debut )) s" >&2
 fi
 
