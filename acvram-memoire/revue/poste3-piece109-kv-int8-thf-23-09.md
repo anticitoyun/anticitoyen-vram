@@ -123,3 +123,33 @@ atteint le tour de file).
   code reste posé, la sortie par défaut ne change toujours pas (toujours 1 cas sur 5 tirages, jamais 0/5).
 - durée : 1er run ~7 min (dont 387 s d'attente carte), 2e run ~17,5 min (dont 1047 s d'attente carte,
   incident .qui hors sujet pendant la file) — deux prises séparées, chacune < 30 min.
+
+## Prédiction écrite AVANT mesure (24/09, ordre chef, diag4.py — MÊME entrée × 5 process séparés)
+
+- protocole : graine=101 FIXE (divergente en diag3), 5 processus python complètement séparés (même
+  `.venv`, même `.so` déjà compilé, aucune recompilation attendue), chacun calcule K/V quantifiés et
+  imprime le sha256 de (qv, sv, qk, sk). `set -euo pipefail`, à sec côté logique (pas d'aléa non
+  contrôlé — seed fixée).
+- prédiction : les 5 sha256 seront **IDENTIQUES** (5/5). Motif : diag3 (24/09 02h08) a déjà montré deux
+  runs complets séparés produisant le MÊME écart aux mêmes positions pour les graines 101 et 104 — signe
+  que le résultat est fixé par le binaire `.so` compilé, pas par un aléa d'exécution (allocateur, ordre
+  de lancement, état de flux CUDA). Si les 5 sha256 sont identiques : CONFIRME hypothèse « fixé par le
+  build », le test à 5 tirages restera 1/5 rouge de façon stable (pas un flake). Si un seul sha256
+  diffère des 4 autres : RÉFUTE, il existe bien un aléa d'exécution malgré le même `.so` (à creuser :
+  ordre de lancement de blocs, non-déterminisme atomique/registre du noyau).
+- seuil de réfutation : 1 sha256 différent parmi 5 suffit à réfuter le déterminisme par build.
+
+## Mesuré (24/09, ordre chef, carte.sh poste3-p109, tenue=5s, 1030s d'attente derrière poste4/poste6)
+
+- 5/5 sha256 **IDENTIQUES**. Prédiction CONFIRMÉE.
+- verdict : le résultat de la quantification V (graine=101, même entrée, même `.so`) est **déterministe au
+  bit** entre 5 processus complètement séparés. Aucun aléa d'exécution (allocateur, ordre de lancement,
+  flux CUDA) — cause définitivement fixée par le binaire compilé, pas par le runtime. Le test à 5 tirages
+  restera stable à 1/5 rouge (pas un flake), tant que le `.so` ne change pas. Hypothèses 1, 2 et 3 du plan
+  initial toutes ÉCARTÉES avec certitude désormais.
+- reste (hors domaine de cette pièce, pour poste7/le chef) : identifier QUEL détail de compilation
+  (ordre FMA, `--use_fast_math`, registre vs mémoire dans `__fdiv_rn`) fixe le choix d'arrondi à la
+  frontière — nécessite lecture PTX/SASS, pas engagée ici (hors plan initial, à commander explicitement).
+  Correctif de code toujours posé, sortie par défaut toujours inchangée (1/5 rouge stable et expliqué,
+  pas une régression cachée).
+- branche `poste3` reste NON fusionnée tant que le test est rouge (ordre chef).
