@@ -18,3 +18,11 @@ Les trois premières prises ont été journalisées sous le nom « env » : c'é
 Chauffe finale 8 × 2 560 au défaut (p146e) : qwen32 20 480 (pic 25,17 Gio), Qwen3.8 20 480 (20,56), gemma31 13 408 (26,96),
 8/8 finies, 0 tronquée, 0 exil, NOMINAL. Reste (bd) : deux marges KV, 5 % et 7 %. Aucun refus nouveau au défaut (décision
 utilisateur) ; la capacité sous la demande est nommée.
+
+**Addendum 35df825c (avant push)** : la suite complète a trouvé une régression de 2a24e6e5 (bissection sur test_exil). Sans
+max_model_len annoncé, le départage portait le KV au pire cas (Qwen3-14B : 14,46 Gio), et un SECOND chargement dans le même
+processus ne voyait plus que 1,1 Gio : refus (test_exil_equivalence_gpu ×2, test_lancements_par_pas_b12 ; même risque
+pour le brouillon de --speculative draft). Corrigé : départage seulement si max_model_len est annoncé
+(`PlannerOptions.kv_jusqu_a_la_demande`, loader._replanifier), comme le veut la docstring de _replanifier (sans annonce,
+comportement précédent à l'identique) ; test ajouté. Suite complète : 5 échecs, tous présents sur 38b6acdb (confiés à
+poste3) ; aucun propre à la branche.
