@@ -52,7 +52,7 @@ def test_poids_inexact_exclu_de_la_disposition(monkeypatch):
     if kernels.get_extension() is None or MP.charger(compiler=False) is None:
         pytest.skip("extension ou port Marlin absents")
     w = torch.randn(2048, 1024, device="cuda")
-    w[:, :16] *= 1e-6                                       # un bloc minuscule dans CHAQUE ligne : ligne large
+    w[:, :16] *= 1e-5                                       # un bloc SOUS-NORMAL (≈ 0,004) dans CHAQUE ligne : ligne large
     t = quantize_nvfp4(w.to(torch.bfloat16))
     assert MP.marlin_exact(t) is not None
     m = torch.nn.Module(); m.proj = QuantLinear(t)
