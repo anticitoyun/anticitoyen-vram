@@ -168,6 +168,11 @@ class PlannerOptions:
     group_size: int = 128
     pin_attention: bool = True            # keep attention off the host tier
     gpus: Optional[str] = None            # "auto" | "all" | "0" | "0,1"
+    # Pièce 146 (2) : départager les plans ex æquo par le cache KV jusqu'à la DEMANDE (max_model_len × séquences).
+    # Faux quand l'appelant n'a pas annoncé max_model_len (loader._replanifier) : la « demande » y est un pire cas
+    # (38 884 × 8 sur Qwen3-Coder-30B) qui remplirait la carte — un second chargement dans le même processus (modèle
+    # brouillon de --speculative draft, tests d'exil) n'aurait plus 1,1 Gio. Sans annonce, le plan d'avant, à l'identique.
+    kv_jusqu_a_la_demande: bool = True
     host_exec: str = "auto"               # auto | stream | cpu
     # Coût fixe d'un transfert d'expert vers la carte, en microsecondes.
     #
@@ -967,7 +972,7 @@ def auto_plan(spec: ModelSpec, rig: Rig,
     # Sans ce départage, `max` gardait le premier ex æquo, la fraction 0,06 : 1,77 Gio de KV (14 256 jetons sur un 32B
     # dense, 3 824 sur gemma4 31B) pour 20 480 demandés, 9,6 Gio restant libres — A comme B, et rien ne le signalait.
     # Le départage vient APRÈS l'exil et le débit : un cache plus grand ne repousse aucun poids et n'ajoute aucune carte.
-    demande = base.max_model_len * max(1, base.max_concurrent_seqs)
+    demande = base.max_model_len * max(1, base.max_concurrent_seqs) if base.kv_jusqu_a_la_demande else 0
 
     def _rang(pr):
         p, rec = pr
@@ -978,7 +983,7 @@ def auto_plan(spec: ModelSpec, rig: Rig,
         return (0, -exil, rec["decode_tok_s"], kv)
 
     best_plan, best_rec = max(candidates, key=_rang)
-    if best_plan.kv_max_tokens < demande and _exil(best_plan) == 0:
+    if demande and best_plan.kv_max_tokens < demande and _exil(best_plan) == 0:
         # La demande ne tient à aucune fraction essayée : tout ce que la VRAM laisse après les poids, sans exil de plus
         # (`_plan_kv_maximal`) ; la borne par la VRAM RÉELLE et la marge d'activations restent au chargement
         # (loader._borner_kv_par_la_vram, marge += _reserve_prefill).

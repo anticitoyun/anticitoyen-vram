@@ -88,3 +88,13 @@ def test_le_kv_cede_avant_tout_poids():
     _reajuster_plan(p, {"tensors": {}}, top_k=8, reserve=2 * G, kv_min={"gpu-test": 2560 * 495360})
     assert sum(l.mlp_storage == "cpu" for l in p.layers) == 0, "le KV devait céder avant les poids"
     assert 2560 * 495360 <= p.kv_budget["gpu-test"] < int(9.45 * G)
+
+
+def test_sans_max_model_len_annonce_le_plan_d_avant(rig):
+    """Pièce 146 : sans max_model_len annoncé (loader._replanifier), la « demande » est un pire cas qui remplirait la
+    carte — le plan reste celui d'avant la 146 (premier ex æquo : la plus petite fraction faisable), pour qu'un second
+    chargement dans le même processus (modèle brouillon, tests d'exil) garde sa place."""
+    p, essais = auto_plan(_spec("qwen32"), rig, PlannerOptions(max_model_len=2560, max_concurrent_seqs=8,
+                                                               kv_jusqu_a_la_demande=False))
+    premier = next(e for e in essais if e["feasible"])
+    assert p.kv_max_tokens == premier["kv_tokens"] < DEMANDE

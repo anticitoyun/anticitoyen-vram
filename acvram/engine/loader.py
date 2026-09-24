@@ -1716,7 +1716,8 @@ def _replanifier(manifest: dict, spec: "ModelSpec",
         slots = (max_concurrent_seqs if max_concurrent_seqs
                 else int(d.get("kv_planned_seqs") or 0) or PlannerOptions().max_concurrent_seqs)
         neuf, _ = auto_plan(spec, rig, PlannerOptions(max_model_len=ctx,
-                                                       max_concurrent_seqs=slots))
+                                                       max_concurrent_seqs=slots,
+                                                       kv_jusqu_a_la_demande=max_model_len is not None))
     except Exception as e:                                   # pragma: no cover
         print(f"[acvram] replanification impossible ({e}) ; plan du manifeste "
               f"conservé", flush=True)
