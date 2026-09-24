@@ -67,9 +67,19 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("DENSE_NVFP4_MIN_M", "4", ("acvram.kernels", "_DENSE_NVFP4_MIN_M")),
     Variable("PROJ_MARLIN", "0", ("acvram.kernels", "_PROJ_MARLIN"), "0",
              "pièce 101 (23/09, opt-in) : 1 = linéaires NVFP4 denses par le Marlin porté de vLLM 0.29 (marlin_port, échelle "
-             "globale par colonne pour q/k/v empilés) aux godets ≥ PROJ_MARLIN_MIN_M ; M = 1 garde nvfp4_gemv | 0 témoin"),
+             "globale par colonne pour q/k/v empilés) aux godets ≥ PROJ_MARLIN_MIN_M ; pièce 129 (24/09) : disposition préparée "
+             "AU CHARGEMENT, mixte (rôles PROJ_MARLIN_DOUBLES en deux dispositions, M = 1 par nvfp4_gemv ; les autres en Marlin "
+             "SEUL, M = 1 par nvfp4_gemv_marlin), mémoire prouvée au chargement (refus nommé) | 0 témoin"),
     Variable("PROJ_MARLIN_MIN_M", "2", ("acvram.kernels", "_PROJ_MARLIN_MIN_M")),
     Variable("PROJ_MARLIN_MIN_NK", "1024", ("acvram.kernels", "_PROJ_MARLIN_MIN_NK")),
+    Variable("PROJ_MARLIN_MIN_N", "2048", ("acvram.kernels", "_PROJ_MARLIN_MIN_N"), None,
+             "pièce 129 : N minimal d'un poids pris par la disposition Marlin (k/v à N = 1 024 plus lents en Marlin)"),
+    Variable("PROJ_MARLIN_DOUBLES", "mlp.gate_up,mlp.down,gdn.out", None, None,
+             "pièce 129 (A) : rôles gardés en DEUX dispositions (naturelle à M = 1, Marlin à M ≥ 2) ; les autres poids "
+             "éligibles passent en Marlin SEUL (naturelle libérée) — revue/verdict-129-1-gemv-marlin-m1-24-09"),
+    Variable("PROJ_MARLIN_CAPACITE", "65536", None, None,
+             "pièce 129 : capacité KV minimale (jetons) exigée au chargement sous PROJ_MARLIN=1, sinon refus nommé ; non "
+             "posée : séquences × longueur demandées par le chargement, sinon 65 536"),
     Variable("AWQ_TENSOR", "0", ("acvram.engine.moe", "_AWQ_TENSOR"), None,
              "pièce 123 (24/09, opt-in, jamais posé par un lanceur) : 1 = experts à tables AWQ d'activation sur le chemin "
              "tensor (échelle fondue dans moe_aligner_petit, xs) au lieu du repli GEMV nommé ; hors défaut : 123-quater "

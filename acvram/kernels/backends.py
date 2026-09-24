@@ -92,7 +92,8 @@ def matmul(x: torch.Tensor, w: Any) -> torch.Tensor:
     PyTorch, priorité zéro, ne décline jamais.
     """
     fmt = getattr(w, "format", "plain")
-    dev = (w.qweight.device if hasattr(w, "qweight")
+    # pièce 129 : un poids en disposition Marlin SEULE n'a plus de qweight naturel — l'appareil est celui de x
+    dev = (w.qweight.device if getattr(w, "qweight", None) is not None
            else getattr(w, "weight", x).device)
     for b in resolve(fmt, dev):
         y = b.matmul(x, w)
@@ -103,6 +104,9 @@ def matmul(x: torch.Tensor, w: Any) -> torch.Tensor:
 
 def dequant(w: Any, dtype: torch.dtype) -> torch.Tensor:
     fmt = getattr(w, "format", "plain")
+    if hasattr(w, "qweight") and w.qweight is None:
+        raise RuntimeError("déquantification d'un poids en disposition Marlin SEULE (pièce 129, ACVRAM_PROJ_MARLIN=1) : "
+                           "la disposition naturelle a été libérée au chargement")
     dev = w.qweight.device if hasattr(w, "qweight") else torch.device("cpu")
     for b in resolve(fmt, dev):
         if b.dequant is not None:
