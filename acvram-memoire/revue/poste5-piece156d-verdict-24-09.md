@@ -70,3 +70,13 @@ Instrument valide : A2 = A au bit (log-probs et NLL) sur les deux compositions. 
   mot. Avant toute bascule : suite complète sous verrou et capture des godets 1 à 8 (conditions de la 156 c).
 * Limites : Qwen3.8-27B-nvfp4 seul (mixte et Qwen3.5 non mesurés, même code) ; vitesse du préfill non mesurée (F3 et F6
   y passent, la KL les couvre) ; une seule passe par fusion seule.
+
+## Addendum 24/09 19 h 3x — F6 au défaut (décision de chef), conditions écrites AVANT la prise
+
+F6 passe à 1 par défaut (0 = témoin) ; F1 et F3 restent en opt-in (décision de l'utilisateur, soumise par chef).
+Conditions avant le push :
+1. **Suite complète** sous mon verrou, HEAD contre la base origin/main (e5c95667) dans un worktree détaché : FAUX si un
+   échec existe sur HEAD et pas sur la base. Prédit : différence vide.
+2. **Capture des godets 1 à 8** (`capture-godets.py`, Qwen3.8, défaut) : capture ok, `graphes=on`, 0 repli eager pour
+   chacun. Prédit : 8/8, ms/pas ≈ 0,30 de moins que la 156 c à chaque godet (13,05 → ≈ 12,75 à b=1, si la config
+   Marlin qualifiée d'alors vaut le défaut d'aujourd'hui, ce que je ne sais pas : chiffres relevés, pas jugés).

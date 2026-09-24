@@ -615,9 +615,10 @@ NORME_WARP_MIN_LIGNES = 256
 NORME_WARP_H_MAX = 2048          # la ligne tient en registres (64 par lane) ; au-delà, le bloc
 
 
-# Pièce 156 F6 (opt-in) : hors du noyau à warp (préfill), le noyau à bloc dont la ligne reste en registres
-# (rmsnorm_bf16_reg, acvram_kernels.cu) — même découpe, même ordre de somme : au bit par construction.
-_NORME_REGISTRES = os.environ.get("ACVRAM_NORME_REGISTRES", "0") == "1"
+# Pièce 156 F6 (DÉFAUT depuis 156 d ; 0 = témoin) : hors du noyau à warp (préfill), le noyau à bloc dont la ligne
+# reste en registres (rmsnorm_bf16_reg, acvram_kernels.cu) — même découpe, même ordre de somme : au bit (test et KL
+# de la 156 d : 16 fenêtres × 512 pas identiques).
+_NORME_REGISTRES = os.environ.get("ACVRAM_NORME_REGISTRES", "1") == "1"
 NORME_REG_H_MAX = 8192           # EPT = ceil(H / 1024) ≤ 8 éléments par fil
 
 

@@ -317,9 +317,9 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("GDN_NORME_FUSEE", "0", ("acvram.engine.gdn", "_GDN_NORME_FUSEE"), "0",
              "pièce 156 F3 (opt-in, ± ulp : KL) : 1 = norme gated de la sortie GDN en un noyau Triton (gdn_norme.py), "
              "sortie bf16 ; lot, b=1 et préfill"),
-    Variable("NORME_REGISTRES", "0", ("acvram.engine.layers", "_NORME_REGISTRES"), "0",
-             "pièce 156 F6 (opt-in, au bit visé) : 1 = RMSNorm hors préfill par rmsnorm_bf16_reg (ligne en registres, "
-             "même découpe et même ordre de somme que rmsnorm_bf16)"),
+    Variable("NORME_REGISTRES", "1", ("acvram.engine.layers", "_NORME_REGISTRES"), "0",
+             "pièce 156 F6 (DÉFAUT depuis 156 d, au bit ; 0 = témoin) : 1 = RMSNorm hors préfill par rmsnorm_bf16_reg "
+             "(ligne en registres, même découpe et même ordre de somme que rmsnorm_bf16) ; Qwen3.8 −0,30 ms/pas à b=8"),
     Variable("GDN_PREFILL_LOT", "0", ("acvram.engine.couches", "_GDN_PREFILL_LOT"), "0",
              "pièce 150 bis (opt-in) : 1 = au préfill de plusieurs séquences, projections Gated DeltaNet du lot en un "
              "appel (couches.py, forward_lot), convolution et règle delta par séquence ; autre M, donc pas au bit : KL"),
