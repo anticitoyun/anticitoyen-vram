@@ -1064,7 +1064,8 @@ def preparer_disposition_marlin(modele) -> dict:
         raise ValueError(f"ACVRAM_PROJ_MARLIN_PORTEE={_PROJ_MARLIN_PORTEE!r} : attendu global | denses")
     if _PROJ_MARLIN_PORTEE == "denses" and sous_moe:
         # garde « modèle dense » (pièce 142) : un MoE garde tout son chemin, disposition naturelle comprise
-        return {"doubles": 0, "seuls": 0, "octets_doubles": 0, "exclus": 0, "en_flux": 0, "portee": "denses:moe-exclu"}
+        return {"doubles": 0, "seuls": 0, "octets_doubles": 0, "exclus": 0, "en_flux": 0, "multi_retirees": 0,
+                "portee": "denses:moe-exclu"}
     candidats = {}                                                       # id(tenseur) -> (tenseur, rôle)
     en_flux: set = set()
     for m in modele.modules():
@@ -1122,6 +1123,19 @@ def preparer_disposition_marlin(modele) -> dict:
         pile._marlin_unique = True
         pile.qweight = pile.block_scale = None
         bilan["seuls"] += 1
+    # Pièce 146 (3) : une MultiProjection (gemm_dense_etroit, `_qw`/`_bs` « gardent les adresses vivantes ») retenait la
+    # naturelle de chaque poids passé en disposition unique — +2,11 Gio sur Qwen3.8 (GDN qkv 1,17 + gate 0,70 + échelles
+    # 0,23 : inventaire de la prise 146), +1,33 sur gemma4 31B (qkv_multi). Elle ne sert que sous ACVRAM_MULTI_PROJ=1
+    # (défaut 0) et ses pointeurs n'ont plus de sens après la conversion : retirée, les projections séparées servent.
+    bilan["multi_retirees"] = 0
+    for m in modele.modules():
+        for attr in ("multi", "qkv_multi"):
+            mp = getattr(m, attr, None)
+            if type(mp).__name__ == "MultiProjection" and any(
+                    getattr(l.qweight, "_marlin_unique", False) or getattr(l.qweight, "_marlin_parent", None) is not None
+                    for l in mp.lins):
+                setattr(m, attr, None)
+                bilan["multi_retirees"] += 1
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     return bilan

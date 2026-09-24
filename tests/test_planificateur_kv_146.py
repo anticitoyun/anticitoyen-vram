@@ -62,3 +62,29 @@ def test_une_sequence_demande_une_sequence(rig):
     """Le départage ne gonfle pas le cache au-delà de la demande : 1 × 2 560 → au plus la fraction 0,06 déjà suffisante."""
     p, _ = _plan("qwen32", rig, seqs=1)
     assert 2560 <= p.kv_max_tokens <= 2 * 2560
+
+
+def test_le_kv_cede_avant_tout_poids():
+    """Prise 146 : le départage portait le KV de gemma4 31B à 9,45 Gio et `_reajuster_plan` exilait 57 poids pour le
+    loger. Avec `kv_min` (une séquence), le KV au-dessus du plancher cède d'abord ; sans lui, l'exil d'avant."""
+    from acvram.engine.loader import _reajuster_plan
+    from acvram.memory.tiering import LayerPlacement, Plan, Tier
+    G = 2**30
+
+    def plan():
+        tier = Tier(name="gpu-test", kind="gpu", device_index=0, capacity=30 * G, weight_format="nvfp4",
+                    kv_format="int8", read_bandwidth=1790.0, link_bandwidth=21.0)
+        couches = [LayerPlacement(index=i, exec_device="gpu-test", attn_storage="gpu-test", mlp_storage="gpu-test",
+                                  fmt="nvfp4", attn_bytes=int(0.1 * G), mlp_bytes=int(0.2 * G), mlp_active_bytes=0,
+                                  is_moe=False) for i in range(60)]
+        p = Plan(model="synthetique", tiers=[tier], layers=couches)
+        p.kv_budget, p.kv_bytes_per_token = {"gpu-test": int(9.45 * G)}, 495360
+        return p                                            # 18 Gio de poids + 9,45 de KV > 30 − 2,1 − 2 de réserve
+
+    p = plan()
+    _reajuster_plan(p, {"tensors": {}}, top_k=8, reserve=2 * G)
+    assert sum(l.mlp_storage == "cpu" for l in p.layers) > 0, "montage : sans plancher, l'exil d'avant doit se produire"
+    p = plan()
+    _reajuster_plan(p, {"tensors": {}}, top_k=8, reserve=2 * G, kv_min={"gpu-test": 2560 * 495360})
+    assert sum(l.mlp_storage == "cpu" for l in p.layers) == 0, "le KV devait céder avant les poids"
+    assert 2560 * 495360 <= p.kv_budget["gpu-test"] < int(9.45 * G)

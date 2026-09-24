@@ -1348,7 +1348,8 @@ def _compter_experts_manifest(manifest: dict) -> dict:
     return n
 
 
-def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8, reserve: int = 0) -> None:
+def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8, reserve: int = 0,
+                    kv_min: Optional[dict] = None) -> None:
     """Fait descendre en RAM hôte les MLP des dernières couches d'un GPU
     dont les poids réels dépassent la capacité de l'étage.
 
@@ -1431,6 +1432,18 @@ def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8, reserve: int = 0
         # 70B chargé à 99 % tombait encore en OOM à l'allocation du KV
         marge = max(2 * 2**30, int(0.07 * capacite)) + int(reserve)
         deplacees = 0
+        # Pièce 146 : le KV AU-DESSUS du plancher (``kv_min``, une séquence de max_model_len) cède avant tout poids —
+        # jamais d'exil pour loger du cache. Sans lui, le départage par la demande (tiering._rang) portait le KV de
+        # gemma4 31B à 9,45 Gio et 57 poids partaient en RAM hôte (graphes coupés, régime DÉGRADÉ, prise 146).
+        if kv_min is not None and dev in (plan.kv_budget or {}):
+            kv = int(plan.kv_budget[dev])
+            plancher = min(kv, int(kv_min.get(dev, kv)))
+            depasse = utilise() - (capacite - marge)
+            if depasse > 0 and kv > plancher:
+                plan.kv_budget[dev] = max(plancher, kv - depasse)
+                bpt = int(getattr(plan, "kv_bytes_per_token", 0) or 0)
+                if bpt:
+                    plan.kv_max_tokens = int(sum(plan.kv_budget.values()) // bpt)
         while utilise() > capacite - marge:
             # Candidats déjà résidents (couche entière) OU déjà à moitié
             # (placement par expert antérieur, dont on peut encore réduire
@@ -1810,7 +1823,8 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
                             max_concurrent_seqs=max_concurrent_seqs)
         if neuf is not None:
             _reajuster_plan(neuf, manifest, top_k=spec.num_experts_per_tok or 8,
-                            reserve=_reserve_prefill(spec, max_model_len, manifest, neuf))
+                            reserve=_reserve_prefill(spec, max_model_len, manifest, neuf),
+                            kv_min={d: _kv_plancher(neuf, spec, max_model_len, d) for d in (neuf.kv_budget or {})})
             _exil_demande(neuf)
             _exil_experts_demande(neuf, manifest)
             return neuf
