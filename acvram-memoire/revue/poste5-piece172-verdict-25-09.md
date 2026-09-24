@@ -33,3 +33,15 @@ Toutes les prédictions sont tenues. Forward : A B' B' A en processus, médiane 
 
 ### Suite complète (f81483c1 contre la base ea85b7e7, 01:14:03-01:29:58, sous mon verrou)
 HEAD 0 échec, 2 765 verts ; base 0 échec, 2 764 verts ; aucun échec propre. **TENU.**
+
+## Addendum (25/09 01 h 5x, AVANT la mesure) — le pic de B' est-il dans le compte du planificateur ? (question de chef)
+Lecture : la réserve de préfill (`config.py:355` `activations_prefill_bytes`, via `loader.py:1887` `_reserve_prefill`
+→ `loader.py:1173` `_marge_carte`) comptait UNE matrice déquantifiée, la plus grosse (Qwen3.8 : MLP 17 408 × 5 120 ×
+2 = 178 Mio). Sous B', une couche GDN garde ses cinq poids ensemble (232 Mio) : **+54 Mio hors compte**, et même pour
+une seule séquence, où il n'y a rien à partager. Corrigé avant la mesure : (1) portée fermée pour une séquence
+(`couches.py`) ; (2) la réserve prend max(plus grosse matrice, somme des poids d'une couche linéaire)
+(`config.py`, `poids_bf16_couche_lineaire_bytes`). Tests : `test_reserve_depaq_172.py`, qui casse si le terme est retiré,
+et `test_une_seule_sequence_ne_garde_rien`.
+Prédiction (`pic.py`, pic − alloué avant, Qwen3.8 à max_model_len 8 192) : 1 × 8 192 : B' − A = 0 (portée fermée) ;
+ancien comportement forcé : +0 à +232 Mio ; 8 × 1 024 : B' − A entre 0 et +232 Mio. Les activations du MLP dominent
+probablement le pic, auquel cas les deux différences sont nulles.

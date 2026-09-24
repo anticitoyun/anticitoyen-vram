@@ -110,3 +110,15 @@ def test_couche_gdn_partage_au_bit(monkeypatch):
     assert kernels.CHEMINS_NVFP4["depaquetage_partage_reutilise"] - c0 == len(lens) - 1, "partage non pris par la couche"
     monkeypatch.setattr(couches, "_GDN_PREFILL_LOT", True)            # GEMM groupée : doit différer
     assert not torch.equal(_passe(couche, x, lens), ref)
+
+
+def test_une_seule_sequence_ne_garde_rien(monkeypatch):
+    """Portée fermée pour UNE séquence (chef, 25/09) : aucun poids retenu, aucun pic en plus au long préfill."""
+    lin, x = _lineaire(False), _x([300])
+    ident = nn.Identity()
+    couche = DecoderLayerGDN(index=0, gdn=_AttnLineaire(lin), mlp=None, input_norm=ident, post_norm=ident, device=DEV)
+    monkeypatch.setattr(couches, "_GDN_PREFILL_LOT", False)
+    monkeypatch.setattr(kernels, "_DEPAQ_PARTAGE", True)
+    c0 = kernels.CHEMINS_NVFP4["depaquetage_partage_fabrique"]
+    _passe(couche, x, [300])
+    assert kernels.CHEMINS_NVFP4["depaquetage_partage_fabrique"] == c0

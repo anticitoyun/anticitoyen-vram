@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+import contextlib
 import os
 import torch
 import torch.nn as nn
@@ -144,8 +145,9 @@ class DecoderLayerGDN(nn.Module):
         sorties = []
         start = 0
         # Pièce 172 (B') : les séquences de la boucle partagent le poids déquantifié de chaque linéaire (au bit :
-        # kernels.depaquetage_partage) ; les GEMM restent une par séquence.
-        with kernels.depaquetage_partage():
+        # kernels.depaquetage_partage) ; les GEMM restent une par séquence. Une seule séquence : rien à partager, et
+        # garder les poids de la couche vivants ne ferait que monter le pic (chef, 25/09) — portée fermée.
+        with (kernels.depaquetage_partage() if len(batch.query_lens) > 1 else contextlib.nullcontext()):
             for i, ql in enumerate(batch.query_lens):
                 sid = batch.seq_ids[i] if batch.seq_ids else i
                 etat = store.get(sid)
