@@ -903,7 +903,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             "echelle_awq": _regime_echelle_awq(self.model),
             # linéaires INT8 du décodage : triton≥b|cuda (poste C, bascule mesurée)
             "dense": kernels.narrow_regime() + (                  # pièce 129 : disposition Marlin (opt-in), bilan du chargement
-                "+marlin(doubles={doubles},seuls={seuls},{go:.2f}Go)".format(go=b["octets_doubles"] / 2**30, **b)
+                "+marlin(doubles={doubles},seuls={seuls},{go:.2f}Go,kv={capacite_kv})".format(go=b["octets_doubles"] / 2**30, **b)
                 if (b := getattr(self.model, "proj_marlin_bilan", None)) else ""),
             "gdn": _gdn_regime(),
             "noyaux": regime_noyaux()["hors_defaut"],
