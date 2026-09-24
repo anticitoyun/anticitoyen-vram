@@ -153,3 +153,29 @@ atteint le tour de file).
   Correctif de code toujours posé, sortie par défaut toujours inchangée (1/5 rouge stable et expliqué,
   pas une régression cachée).
 - branche `poste3` reste NON fusionnée tant que le test est rouge (ordre chef).
+
+## Localisation (24/09, ordre chef, diag5.py, carte.sh poste3-p109-localise, tenue=1s, 356s attente)
+
+- même cas (graine=101, V, t=2 h=0 d=103), recomposé étape par étape en fp32 (précision exacte du
+  noyau ET de `_quantize`, PAS le float64 des diagnostics précédents qui n'est l'arithmétique d'aucun
+  des deux camps).
+- **amax** = 16,375 (fp32 exact, hex `41830000`).
+- **échelle** (amax/127, fp32, AVANT le cast fp16 de stockage) = 0,1289370059967041 (hex `3e040810`).
+  Stockée en fp16 dans les deux camps : 0,12890625 — identique, ce n'est PAS là que ça diverge (le
+  cast fp16 est une compression de stockage, la division de quantification utilise l'échelle fp32
+  complète des deux côtés, lu au bit dans `kv_write_int8_kernel` : `sc = red[0]` avant tout cast).
+- **ratio = x/échelle** (fp32, `_quantize`, torch) = **-63,5 EXACTEMENT** (hex `c27e0000`) — une vraie
+  égalité à mi-chemin, pas une approximation de fin de calcul (confirmé : `ratio*2 == round(ratio*2)`).
+  `torch.round()` (ties-to-even) tranche vers **-64** (pair) → `ref=-64`, cohérent avec IEEE 754.
+- **le noyau rend -63.** Si son ratio interne était, lui aussi, exactement -63,5, `__float2int_rn`
+  (ties-to-even par la norme PTX `cvt.rn.s32.f32`, même convention que torch) donnerait -64 aussi — pas
+  -63. Le noyau ne peut donc PAS calculer exactement -63,5 en interne, malgré la même formule apparente
+  (même amax, même division `x/échelle` en `__fdiv_rn`) : quelque chose déplace son ratio hors de
+  l'égalité stricte, côté noyau seulement.
+- **verdict : PAS « test trop strict ».** C'est une divergence réelle et reproductible à une égalité de
+  mi-chemin exacte — le test a raison de la voir. La cause n'est PAS le seuil du test ni l'arrondi de
+  `_quantize` (IEEE correct, cohérent). Reste à prouver en PTX/SASS (hors cette pièce, à commander) :
+  la piste la plus probable est `--use_fast_math` contractant une FMA autour du `__fdiv_rn` ou de la
+  réduction `fmaxf` d'amax malgré l'intrinsèque explicite (le commentaire du fichier `:4225-4229` déjà
+  fixé UNE fois ce problème pour la division de quantification — peut-être un deuxième site non couvert,
+  ou une contraction du compilateur qui déjoue l'intrinsèque localement).
