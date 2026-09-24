@@ -338,7 +338,9 @@ class GatedDeltaNet(nn.Module):
         g_, contigu = tranches(self, statics, b, ("conv", "S_"))
         conv_state, S = g_["conv"], g_["S_"]
         q, k, v, g, beta, z = self._lot_projete(h, conv_state)
-        if _GDN_ETAT_EN_PLACE and S.is_contiguous():
+        # F4 (156 c) : la récurrence en place est un noyau de carte ; sur processeur (CI publique,
+        # machine sans GPU) le chemin fla de référence reste seul valable.
+        if _GDN_ETAT_EN_PLACE and S.is_cuda and S.is_contiguous():
             core = _recurrence_en_place(q, k, v, g, beta, S)
         else:
             core, S_new = _fla()[1](q, k, v, g=g, beta=beta, initial_state=S.contiguous(),
