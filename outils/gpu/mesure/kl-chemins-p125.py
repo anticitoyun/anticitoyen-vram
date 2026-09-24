@@ -176,6 +176,15 @@ def mode_prefill(alias: str, dossier: str) -> None:
                    os.path.join(dossier, f"prefill{SUF}-{_nom(chemin)}-{i}.pt"))
         print(json.dumps({"invite": i, "chemin": "prefill", "couches": len(capt), "positions": L}), flush=True)
         _liberer(eng, batch, lg)
+    # preuve dans le processus (REGLES § 3) : par quel noyau les linéaires int8 sont passées — cublas (W8A8) | gemv (W8A16) | …
+    try:
+        from acvram.kernels import CHEMINS_INT8
+        chemins = dict(CHEMINS_INT8)
+    except Exception as exc:                                     # noqa: BLE001
+        chemins = {"?": type(exc).__name__}
+    json.dump({"regime": regime, "chemins_int8": chemins, "env": {k: v for k, v in os.environ.items() if k.startswith("ACVRAM_")}},
+              open(os.path.join(dossier, f"prefill{SUF}-{_nom(chemin)}-preuve.json"), "w"), ensure_ascii=False, indent=1)
+    print("CHEMINS_INT8 " + json.dumps(chemins), flush=True)
     print("FINI prefill " + _nom(chemin), flush=True)
 
 

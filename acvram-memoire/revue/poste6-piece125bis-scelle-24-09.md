@@ -36,3 +36,15 @@ contre HF, et KL(cublas ‖ bf16) directement.
 ## Durée et régime
 Une prise ≤ 5 min (2 chargements de 21-60 s + 5 invites chacun) ; carte tenue par poste2 (102, b=1) au moment du scellé :
 la prise passe juste après, poste2 prévenue. cpu-safe=off ; relevés au début et à la fin.
+
+## Addendum 02 h 1x — témoin remplacé AVANT la remesure (prise 02:11 nulle pour le bras bf16, rc 4)
+`ACVRAM_PREFILL_INT8=bf16` n'existe pas pour i8c sur carte : le repli GEMM CUDA refuse `group_size=2048 != 128`
+(`kernels/__init__.py:1105`, NotImplementedError à n=85). Le bras cublas de cette prise (02:11:56) n'est pas retenu :
+les deux bras se rejouent dans la même prise. **Nouveau témoin = W8A16 par le GEMV int8** (`ACVRAM_INT8_GEMV_MAX=4096` :
+les linéaires int8 du préfill passent par `ext.int8_gemv` sur la vue g128, activation bf16 — l'arithmétique du chemin de
+décodage, `kernels/__init__.py:1041-1080`) contre le défaut cublas (W8A8). La tête (32 lignes de réponse) est déjà GEMV dans
+les deux bras (n = 32 ≤ 80) : seul le W8A8 des projections change. Preuve dans le processus : `CHEMINS_INT8` du bras
+(`prefill-<suffixe>-…-preuve.json`) — bras cublas : `cublas` > 0 et `gemv` limité à la tête ; bras gemv : `cublas` = 0.
+Seuils, prédiction, issues **inchangés** (ratio cublas / gemv à la place de cublas / bf16). Alarme ajoutée : le noyau GEMV
+n'est exercé en production que jusqu'à n = 80 (ici n = 85-121, boucle `default: I8N(8)`) — si KL_moy(gemv) > 2 × cublas sur
+une invite, je soupçonne le noyau hors de sa plage, pas l'arithmétique, et je le dis avant tout verdict.
