@@ -94,6 +94,8 @@ def test_marlin_seul_egal_naturel(n, k):
         y = boite.proj(x)
         assert y.shape == avant[m].shape
         assert _hors(y, avant[m]) == 0, f"M={m} : hors 2⁻⁷·max"
+        if m > 32:                                     # pièce 134 : préfill = arithmétique du défaut, au bit
+            assert torch.equal(y, avant[m]), f"M={m} : préfill pas au bit du défaut"
         assert torch.equal(y, boite.proj(x)), f"M={m} : non reproductible"
 
 
@@ -112,6 +114,8 @@ def test_pile_a_echelle_par_segment_et_ses_vues():
     for (nom, m), ref in avant.items():
         y = getattr(boite, nom)(xs[m])
         assert _hors(y, ref) == 0, f"{nom} M={m} : hors 2⁻⁷·max"
+        if m > 32:                                     # pièce 134 : pile (échelle par colonne) et vues, au bit
+            assert torch.equal(y, ref), f"{nom} M={m} : préfill pas au bit du défaut"
 
 
 @carte
