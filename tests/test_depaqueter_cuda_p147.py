@@ -84,7 +84,7 @@ def test_vue_de_pile_sans_copie_au_bit():
     K, N = 5376, 16384
     w, s, g = _entrees(1, K, N, 99, par_colonne=True)
     d, n_lig = 8192, 4096
-    wv, sv, gv = w[:, 2 * d:2 * (d + n_lig)], s[:, d:d + n_lig], g[d:d + n_lig].contiguous()
+    wv, sv, gv = w[0][:, 2 * d:2 * (d + n_lig)], s[0][:, d:d + n_lig], g[d:d + n_lig].contiguous()   # vues 2-D comme _marlin_parent
     assert not wv.is_contiguous()
     cu = MP.depaqueter_marlin(wv, sv, gv, K, n_lig, noyau="cuda")
     ref = MP.depaqueter_marlin(wv.contiguous(), sv.contiguous(), gv, K, n_lig, noyau="triton")
