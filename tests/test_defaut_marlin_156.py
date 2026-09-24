@@ -62,4 +62,6 @@ def test_moe_reste_au_naturel_par_defaut(monkeypatch):
     bilan = kernels.preparer_disposition_marlin(boite)
     assert bilan.get("portee") == "denses:moe-exclu" and bilan["seuls"] == 0
     assert boite.proj.qweight.qweight is not None and not hasattr(boite.proj.qweight, "_marlin_dense")
-    assert kernels._PROJ_MARLIN is False, "le Marlin paresseux (2 ≤ M ≤ 16) resterait actif sur le MoE"
+    assert kernels._PROJ_MARLIN is True, "l'exclusion d'un MoE ne doit pas couper le Marlin du PROCESSUS"
+    assert getattr(boite.proj.qweight, "_marlin_interdit", False), "le Marlin paresseux (2 ≤ M ≤ 16) resterait actif"
+    assert kernels._marlin_dense(torch.randn(4, 1024, device="cuda", dtype=torch.bfloat16), boite.proj.qweight) is None

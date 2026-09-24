@@ -129,10 +129,11 @@ def test_pile_a_echelle_par_segment_et_ses_vues():
 
 
 @carte
-def test_role_double_garde_la_naturelle_au_bit():
+def test_role_double_garde_la_naturelle_au_bit(monkeypatch):
     kernels = _pret()
     from acvram.engine.attention import MLP
     mlp = MLP(_lin(4096, 2048, 4), _lin(4096, 2048, 5), _lin(2048, 4096, 6))     # N ≥ 2 048 partout
+    monkeypatch.setattr(kernels, "_PROJ_MARLIN_DOUBLES", frozenset({"mlp.gate_up", "mlp.down", "gdn.out"}))   # 156 : défaut vide
     mlp.fuse()
     x1 = torch.randn(1, 2048, device="cuda", dtype=torch.bfloat16)
     avant = mlp(x1)

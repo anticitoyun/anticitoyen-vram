@@ -119,7 +119,7 @@ seulement par un chronomètre : une optimisation qui change la réponse est un
 bogue.
 
 Les linéaires NVFP4 des modèles denses passent par défaut par la disposition Marlin (+57 à +90 % de débit à b = 8, TTFT
-+27 à 33 ms en cours de réduction ; repli `ACVRAM_PROJ_MARLIN=0`, voir [CHANGELOG.md](CHANGELOG.md)).
++2 à +4 ms selon revue/poste6-piece147-verdict-24-09.md ; repli `ACVRAM_PROJ_MARLIN=0`, voir [CHANGELOG.md](CHANGELOG.md)).
 
 ### Décodage spéculatif (`--speculative`)
 

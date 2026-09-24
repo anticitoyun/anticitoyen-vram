@@ -987,7 +987,9 @@ def load_model(path: str, plan: Optional[Plan] = None,
         # projection en prend une copie quantifiée, qui coûte de la place mais
         # divise sa lecture par deux (int8) ou par trois et demi (nvfp4).
         lm_head = QuantLinear(_tete_liee(embed.to(head_dev)))
-    if bilan_marlin is not None and not bilan_marlin.get("portee") and not bilan_marlin.get("repli"):   # tête (156 : pas d'un MoE)
+    if bilan_marlin is not None and (bilan_marlin.get("portee") or bilan_marlin.get("repli")):   # 156 : tête d'un exclu
+        _kernels.interdire_marlin(torch.nn.ModuleList([lm_head]))
+    elif bilan_marlin is not None:                # la tête : conversion après le KV, transitoire dans la marge de préfill
         qt = getattr(lm_head, "qweight", None)
         q = getattr(qt, "qweight", None)
         if q is not None and q.is_cuda and type(qt).__name__ == "NVFP4Tensor":

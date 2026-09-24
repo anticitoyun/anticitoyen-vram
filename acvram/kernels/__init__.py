@@ -954,6 +954,8 @@ def _marlin_dense(xf: torch.Tensor, t):
     l'appelant prend alors son chemin habituel."""
     prep = getattr(t, "_marlin_dense", None)
     if prep is None:
+        if getattr(t, "_marlin_interdit", False):    # pièce 156 : poids d'un modèle exclu (MoE, repli) — le naturel
+            return None
         N, k_pad = t.qweight.shape[0], t.padded_in
         # 101 correctif : les seules formes mesurées au banc (qkv 5 120 × 2 048, o 2 048 × 4 096). Sans ce seuil, le
         # chemin prenait aussi les linéaires étroits (190 appels par passe au lieu de 96, pas +9 à +25 %).
@@ -1064,6 +1066,17 @@ def role_marlin(module, attr: str) -> str:
     return ""
 
 
+def interdire_marlin(modele) -> None:
+    """Pièce 156 : marque les poids NVFP4 d'un modèle exclu (MoE à la portée « denses », repli) — le Marlin paresseux
+    (`_marlin_dense`) les laisse au naturel. Par MODÈLE, jamais par l'état du processus : couper `_PROJ_MARLIN` faisait
+    dépendre les chargements et les tests suivants du premier MoE chargé."""
+    from ..quant.nvfp4 import NVFP4Tensor
+    for m in modele.modules():
+        t = getattr(m, "qweight", None)
+        if isinstance(t, NVFP4Tensor):
+            t._marlin_interdit = True
+
+
 def preparer_disposition_marlin(modele) -> dict:
     """Pièce 129 (opt-in ACVRAM_PROJ_MARLIN=1), appelée par le chargeur APRÈS les fusions et AVANT l'allocation du
     KV : chaque poids NVFP4 dense éligible (N ≥ ACVRAM_PROJ_MARLIN_MIN_N, K et N multiples de 64, hors MoE et hors
@@ -1072,7 +1085,6 @@ def preparer_disposition_marlin(modele) -> dict:
     passent par la pile. Rend le bilan (octets doublés, nombre de poids par mode) pour la ligne de régime."""
     from ..quant.nvfp4 import NVFP4Tensor
     from . import marlin_port as MP
-    global _PROJ_MARLIN
     vide = {"doubles": 0, "seuls": 0, "octets_doubles": 0, "exclus": 0, "en_flux": 0, "multi_retirees": 0}
     ext = get_extension()
     manque = ("port Marlin non compilé (outils/banc-marlin-p1-18-09.py --compiler-seulement)"
@@ -1081,7 +1093,7 @@ def preparer_disposition_marlin(modele) -> dict:
     if manque:
         if _PROJ_MARLIN_POSEE == "1":
             raise RuntimeError(f"ACVRAM_PROJ_MARLIN=1 : {manque} — la disposition Marlin est refusée au chargement")
-        _PROJ_MARLIN = False                   # pièce 156 : au défaut, repli NOMMÉ au naturel, jamais un refus
+        interdire_marlin(modele)               # pièce 156 : au défaut, repli NOMMÉ au naturel, jamais un refus
         return {**vide, "repli": manque.split(" (")[0]}
     sous_moe = set()
     for m in modele.modules():
@@ -1090,7 +1102,7 @@ def preparer_disposition_marlin(modele) -> dict:
     if _PROJ_MARLIN_PORTEE not in ("global", "denses"):
         raise ValueError(f"ACVRAM_PROJ_MARLIN_PORTEE={_PROJ_MARLIN_PORTEE!r} : attendu global | denses")
     if _PROJ_MARLIN_PORTEE == "denses" and sous_moe:
-        _PROJ_MARLIN = False     # pièce 156 : ni disposition ni Marlin paresseux (_marlin_dense à 2 ≤ M ≤ 16) sur un MoE
+        interdire_marlin(modele)   # pièce 156 : ni disposition ni Marlin paresseux (_marlin_dense, 2 ≤ M ≤ 16) sur un MoE
         # garde « modèle dense » (pièce 142) : un MoE garde tout son chemin, disposition naturelle comprise
         return {"doubles": 0, "seuls": 0, "octets_doubles": 0, "exclus": 0, "en_flux": 0, "multi_retirees": 0,
                 "portee": "denses:moe-exclu"}
