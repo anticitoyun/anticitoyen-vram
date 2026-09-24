@@ -114,6 +114,18 @@ disputeraient les mêmes appareils sans ajouter de parallélisme. La concurrence
 vient du lot, pas des fils. Le serveur asynchrone fait le lien avec un fil
 d'arrière-plan et une file par requête.
 
+**Requêtes closes au bon moment (pièce 146).** Une séquence tronquée par
+épuisement du budget KV (chemins pipeline et spéculatif) n'était jamais
+livrée à sa requête HTTP : la sortie finie était jetée sans clore la requête,
+qui restait en attente indéfiniment. Corrigé : les séquences épuisées sont
+livrées par `step` dans le pas même où il les détecte, jamais différé.
+Preuve bout en bout (serveur réel, graphes + pipeline) : rouge avant, vert
+après. Deux autres défauts du budget KV par défaut corrigés dans la même
+pièce — un départage qui laissait tomber la capacité KV à 6 % de la VRAM dès
+qu'une seule séquence y tenait, et un OOM à la chauffe par tête liée
+convertie en fp32 sans libérer d'abord le cache de l'allocateur. Détail :
+revue/verdict-146-kv-defaut-24-09.md.
+
 ## Poids streamés
 
 `engine/layers.py:StreamedWeight`. Les poids résidant en RAM vivent en mémoire
@@ -187,6 +199,18 @@ Le découpage du prefill change l'ordre des calculs récurrents ; la sortie
 diverge donc légèrement d'un prefill monolithique, au même titre qu'un
 changement de taille de lot.
 
+**Fusions du décodage (pièce 156)**, toutes numériquement identiques au
+chemin qu'elles remplacent (au bit ou à l'ulp, mesuré sur le modèle servi),
+**toutes par défaut** (poste5, 255042e8) : la conv de décodage fusionnée,
+l'état GDN mis à jour en place et le résidu différé des couches GDN
+(`ACVRAM_GDN_CONV_FUSEE`, `ACVRAM_GDN_ETAT_EN_PLACE`, `ACVRAM_GDN_RES_DIFFERE`,
+ensemble −7,8 % de temps de pas à b = 8), la RMSNorm en registres
+(`ACVRAM_NORME_REGISTRES`, +8,1 % à b = 8, au bit — l'ordre de sommation d'un
+fil sur ≤ 8 carrés bf16 n'est pas observable en sortie), et les portes dans
+le noyau fla et la norme gated Triton (`ACVRAM_GDN_PORTES_NOYAU`,
+`ACVRAM_GDN_NORME_FUSEE`, ± 1 ulp bf16, KL et PPL tenues contre le témoin).
+Détail : revue/poste5-piece156c-verdict-24-09.md, revue/poste5-piece156d-verdict-24-09.md.
+
 ## Décodage spéculatif
 
 `engine/speculative.py`. Le lot de vérification est `[dernier jeton produit] +
@@ -253,6 +277,69 @@ gigaoctets de poids.
 La décision se prend dans `plan_placement`, en comparant le lien hôte mesuré du
 GPU exécutant à `PlannerOptions.host_compute_gb_s`. `acvram bench --what
 bandwidth` affiche les deux nombres et la recommandation qui en découle.
+
+## Disposition Marlin (linéaires denses)
+
+Depuis la pièce 156, les linéaires NVFP4 des modèles **denses** (attention et
+MLP hors bloc `MoEBlock`) sont servis par défaut par le port Marlin de vLLM
+0.29 (`kernels/marlin_port`), préparé AU CHARGEMENT plutôt que reconstruit à
+chaque pas : +57 à +90 % de débit de décodage à b = 8, coût de préfill ramené
+à +2 à +4 ms par la réécriture du dépaquetage (pièce 147, ci-dessous).
+
+Cinq variables pilotent le mécanisme (`acvram/regime.py`) :
+
+| variable | défaut | rôle |
+|---|---|---|
+| `ACVRAM_PROJ_MARLIN` | `1` | disposition Marlin unique aux godets éligibles ; `0` = repli naturel |
+| `ACVRAM_PROJ_MARLIN_PORTEE` | `denses` | `denses` : un modèle à `MoEBlock` garde tout son chemin naturel (ses linéaires hors experts sont éligibles mais non mesurés — 32 alias du menu touchés, revue/poste1-piece142-inventaire-denses-24-09.md) ; `global` : tout poids dense éligible, MoE compris |
+| `ACVRAM_GEMV_MARLIN_V2` | `1` | GEMV Marlin v2 (tuiles de colonnes, x en mémoire globale) contre v1 (x en mémoire partagée) |
+| `ACVRAM_GEMV_MARLIN_TPB` | `0` | tuiles de 64 colonnes par bloc ; `0` = choisi par forme |
+| `ACVRAM_GEMV_MARLIN_S` | `0` | split-K forcé ; `0` = règle automatique de v1 |
+
+**Replis nommés**, jamais un `None` silencieux : capacité KV ou mémoire
+insuffisante au chargement refuse explicitement (`ACVRAM_PROJ_MARLIN_CAPACITE`,
+`loader._verifier_memoire_marlin`) plutôt que d'exiler des poids en silence ;
+un poids dont l'échelle ne tient pas dans le format S0E5M3 de Marlin (voir
+« échelles sous-normales » ci-dessous) est retiré de la disposition et rendu
+au chemin naturel, raison nommée sur la ligne de régime.
+
+### Échelles sous-normales (pièce 157)
+
+Le format d'échelle de bloc de Marlin, S0E5M3, n'a qu'environ 2^14,8 de plage
+contre 2^17,8 pour l'E4M3 d'origine du NVFP4. Un poids dont les échelles de
+bloc mêlent une valeur proche du plafond (448) et des sous-normales perdait
+des blocs de 16 poids entiers, mis à zéro plutôt que représentés — touché au
+défaut servi côté MoE (max|Δ logits| = 4,52 sur un modèle réel). Corrigé par
+un facteur d'échelle **par ligne** (plutôt que par tenseur ou par pile
+d'experts entière) pour les poids denses, et par l'exclusion pure et simple
+d'un poids qui écrase encore après ce correctif. Preuve au bit contre le
+chemin naturel après correctif. Détail :
+revue/verdict-157-marlin-sous-normales-24-09.md.
+
+### Dépaquetage au préfill (pièce 147)
+
+La disposition unique n'a pas de chemin de préfill natif : elle dépaquette en
+bf16 puis laisse cuBLAS faire le produit, comme `*_dequant` (voir « Noyaux de
+calcul » ci-dessus). La première implémentation (un fil par tuile) coûtait
++26 à +34 ms par requête ; réécrite (un fil par colonne, lignes entières en
+deux `uint4`, vues à pas libre sans copie de transposition), elle coûte +2 à
++4 ms à toute longueur d'invite mesurée (512 à 4 096 jetons), au bit contre
+les chemins Triton et torch de référence. `ACVRAM_DEPAQUETAGE=auto` choisit
+CUDA si l'extension le porte, sinon Triton. Détail :
+revue/poste6-piece147-verdict-24-09.md.
+
+### Cache de compilation (pièce 161)
+
+Le `.so` compilé du port Marlin vivait sous un nom de cache FIXE, partagé par
+tous les worktrees : deux arbres aux sources différentes alternant sur la
+même machine se recompilaient l'un l'autre à chaque changement (25 s de nvcc,
+y compris hors du verrou `carte.sh`), sans qu'aucun message ne désigne
+l'autre arbre comme cause — le même défaut que corrigeait déjà
+`kernels/__init__.py` pour l'extension principale (cache keyé par
+`sha256(realpath(...))`), pas encore porté ici. Corrigé (poste6) : cache
+keyé par empreinte sha256 des sources, sources copiées dans le cache, le
+moteur en service ne relance jamais ninja (charge le `.so` de son empreinte
+ou replie au naturel, raison imprimée).
 
 ## Répartition des noyaux
 
