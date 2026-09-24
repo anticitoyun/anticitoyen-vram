@@ -265,3 +265,24 @@ Python est fausse.
 **Aucun changement de code fait sur ce point.** Correctif proposé par chef (référence en vraie
 division + test à 5 tirages vert + bras cassant en inverse qui doit rougir) : en attente de son feu vert
 avant implémentation, vu l'impact sur une sortie servie par défaut.
+
+## Décision A appliquée et vérifiée (24/09, ordre chef) — PIÈCE CLOSE
+
+1. Revert propre (`git revert`, pas reset) des deux commits fautifs (`52914a37`, `a7a704a4`).
+2. `kv_write_int8_kernel` revenu AU BIT au code de `main` (`m / 127.f`, `x * (1.f/sc)`, plus de
+   `__fdiv_rn` du tout) — vérifié **0/1000 écarts** vs `main` (codes ET échelles, mêmes graines
+   200-1199).
+3. `kvcache.py:494` laissé inchangé (déjà accordé par l'optimisation ATen, sans rapport avec le
+   noyau).
+4. EPSILON calibré empiriquement (`calibre_epsilon.py`) : sur les 569 écarts mesurés entre le
+   noyau IEEE-exact (aujourd'hui réfuté) et le noyau servi, la distance max à une frontière
+   d'arrondi = 0,02545 ; EPSILON = 2× cette marge = 0,051.
+5. Test réécrit (`tests/test_kv_write_int8_thf_carte.py`) : compare au bit, tolère (et consigne,
+   jamais silencieux) un écart près d'une frontière, échoue dur hors bande. Bras cassant
+   (diviseur /126 au lieu de /127) confirmé : détecté hors bande, `pytest.raises` vert.
+6. **3/3 tests verts** sous carte (`poste3-p109-test-final2`). Écarts tolérés observés et
+   consignés : 1er test K=0 V=1 ; 5 tirages K/V=1 sur 4 des 5 graines (jamais >1 par graine/côté)
+   — cohérent avec l'imprécision de `rcp.approx` sous `--use_fast_math`, jamais une vraie faute.
+
+**Aucun changement de sortie servie** (0/1000 au bit contre `main`). Branche `poste3` : à fusionner
+sur décision de chef (le test passe désormais, plus de blocage technique de mon côté).
