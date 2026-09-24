@@ -104,3 +104,47 @@ Accord unanime sur un point : éviter le dépaquetage global séparé, privilég
 - Réponses obtenues en mode Raisonnement pour les trois modèles.
 - Luna a mobilisé une recherche externe avec citations (GitHub, man7.org, nvidia.com, arXiv, unsloth.ai) ; ces sources n'ont pas été vérifiées indépendamment dans cette revue et servent d'indices à recouper, pas de preuves.
 - Le point le plus significatif pour la suite du travail sur ce dépôt est le désaccord de la question 1 : avant d'interpréter une PPL de 344805 comme un simple effet de gabarit manquant, vérifier le chemin d'inférence text-only et l'alignement logits/labels, comme le suggère Luna.
+
+## Suivi (ordre chef) — vérification directe du ticket cité par Luna (question 1)
+
+* URL exacte obtenue de Luna sur nouvelle relance, PUIS lue directement (page GitHub,
+  pas la description de Luna) : https://github.com/huggingface/transformers/issues/46531
+  — **réelle, existe, contenu vérifié au mot près, pas inventée.**
+* `[Gemma 4] Gemma4UnifiedForConditionalGeneration text-only inference produces degenerate
+  output (token repetition collapse)`, ouverte sur `google/gemma-4-12B-it` (12B, pas 31B),
+  transformers `5.10.0.dev0` (main, testé 2026-06-08), reproduit CPU/fp32/eager comme MPS —
+  cross-entropy ≈17,9 sur "The capital of France is" en texte brut, contre ≈2-3 attendu ;
+  onze composants du forward écartés un par un par les auteurs (RoPE par type, masque par
+  type, mise à l'échelle de l'attention, embed_scale, softcap final, convention RMSNorm+1,
+  layer_scalar, v_norm) — **aucun ne recrée le défaut seul.**
+* **résolution documentée dans le fil, ce que le résumé initial de Luna ratait
+  (« Closed, sans résolution technique documentée » — FAUX, il y a bien une résolution) :**
+  un mainteneur (`zucchini-nlp`) applique le gabarit de conversation
+  (`tok.apply_chat_template`) au lieu du texte brut → sortie cohérente immédiatement.
+  L'auteur du ticket confirme, referme en acceptant que le texte brut sans gabarit est
+  hors distribution pour un modèle `-it`, et annonce basculer son évaluation de PPL vers
+  le modèle DE BASE (`google/gemma-4-12B`, non `-it`) — **exactement la même conclusion que
+  notre verdict-etalon-hf-avec-bos.md, indépendamment, par un tiers, sur le même symptôme.**
+* transformers installé dans notre venv : **5.17.0** (`python -c "import transformers;
+  print(transformers.__version__)"`) — postérieur à la fermeture du ticket (5.10.0.dev0,
+  06/2026) et à sa résolution ; comme la cause n'était pas un bogue de code mais un usage
+  hors gabarit, la question « notre version est-elle touchée » ne se pose plus au sens où
+  chef la posait — il n'y a rien à corriger dans transformers, le comportement est celui
+  attendu d'un modèle -it sans gabarit, à toute version.
+* onze composants écartés dans le ticket incluent RoPE par type et le softcap final — les
+  MÊMES catégories que nos propres pistes réfutées à sec dans la priorité 1
+  (`verdict-logits-std.md`, `verdict-decode-pur.md`) — convergence supplémentaire,
+  vérification k_eq_v/partial_rotary jugée sans objet vu la résolution réelle du ticket
+  (pas un bogue interne, donc rien à chercher fichier:ligne côté acvram sur ce point).
+* pas la même taille de modèle (12B ici, 31B pour nous) : ticket connexe trouvé et lu,
+  `google-deepmind/gemma#622` — « Gemma 4 token repetition collapse during long
+  generation — affects both 31b Dense and 26b MoE », **ENCORE OUVERT**, mais décrit un
+  phénomène DIFFÉRENT : répétition de jetons en GÉNÉRATION longue, surtout sous sortie
+  structurée (JSON contraint), pas une PPL catastrophique en teacher-forcing sur texte brut
+  — un accident de génération sous contrainte de grammaire, pas notre défaut de mesure PPL.
+  Non pertinent pour notre priorité 1 (protocole différent), gardé ici pour mémoire du dépôt.
+* **verdict du suivi : le ticket cité par Luna est réel, pertinent, et son contenu
+  confirme — via un tiers, indépendamment — notre propre conclusion (gemma4-it hors gabarit
+  de conversation = PPL/loss dégénérée, pas un bogue de calcul). La priorité 1 reste close.
+  La seule correction à apporter à la synthèse précédente : le ticket A une résolution
+  documentée, contrairement à ce que Luna avait résumé.**
