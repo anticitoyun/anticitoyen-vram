@@ -620,7 +620,10 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
         if t.padded_in != xf.shape[-1]:
             xf = torch.nn.functional.pad(xf, (0, t.padded_in - xf.shape[-1]))
         gsr = getattr(t, "global_scale_rows", None)
-        if _PROJ_MARLIN and _PROJ_MARLIN_MIN_M <= n <= 16 and xf.dtype == torch.bfloat16:
+        # Pièce 156 : le Marlin PARESSEUX (seconde disposition préparée au 1er appel, poids non convertis au chargement)
+        # reste un opt-in explicite (ACVRAM_PROJ_MARLIN=1 posé) — au défaut, un poids que la passe n'a pas converti
+        # (k/v sous N = 2 048, poids hors modèle chargé) garde le chemin naturel, sans seconde copie.
+        if _PROJ_MARLIN and _PROJ_MARLIN_POSEE == "1" and _PROJ_MARLIN_MIN_M <= n <= 16 and xf.dtype == torch.bfloat16:
             # Pièce 101 (opt-in) : GEMM Marlin DENSE porté de vLLM 0.29 (marlin_port, échelle globale par colonne
             # pour q/k/v empilés) aux godets ≥ 2 ; M = 1 garde `nvfp4_gemv` ci-dessous (le plus rapide au banc :
             # revue/poste1-piece101-bascule-godets-23-09). Seconde disposition des poids préparée au premier appel
@@ -1122,6 +1125,11 @@ def preparer_disposition_marlin(modele) -> dict:
             ancien = candidats.get(id(t))
             candidats[id(t)] = (t, ancien[1] if ancien and ancien[1] else role)
     # parents (tenseur qui possède sa mémoire) et vues (sources d'un empilement), par stockage
+    if en_flux and _PROJ_MARLIN_POSEE != "1":
+        # Pièce 156 : au DÉFAUT, un modèle exilé (poids en flux depuis l'hôte : 70B, carte partagée) garde le chemin
+        # naturel — repli NOMMÉ, jamais un refus ; ACVRAM_PROJ_MARLIN=1 posé garde le refus de la 129.
+        interdire_marlin(modele)
+        return {**vide, "repli": f"exil ({len(en_flux)} poids en flux)"}
     par_stockage = {}
     for t, role in candidats.values():
         par_stockage.setdefault(t.qweight.untyped_storage().data_ptr(), []).append((t, role))
