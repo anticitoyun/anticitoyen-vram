@@ -161,13 +161,48 @@ def test_pipeline_bit_identique_a_egalite_pres():
                     for rid, i, ta, tb, e in franches))
 
 
+def _divergences_franches(temoin: dict, pipeline: dict, logits_temoin: dict, tolerance: float) -> list:
+    """Pièce 159 : mêmes règles que `_rejouer`/`franches` de
+    `test_pipeline_bit_identique_a_egalite_pres` — une divergence de jeton
+    n'est TOLÉRÉE que si, au point de divergence, le TÉMOIN (PIPELINE=0,
+    seule sortie qu'on tient pour la référence) montre un écart top1/top2
+    inférieur à `tolerance` (quasi-égalité départagée par l'arrondi, pas
+    une contamination). `logits_temoin` : {(rid, i): (valeurs_top2, ...)}.
+    Bras cassant testé par `test_divergences_franches_bras_casse_a_tolerance_0`
+    (mesure réelle pièce 159, sans carte : k=0 pas=0, écart témoin 0,02685)."""
+    franches = []
+    for rid in temoin:
+        n = min(len(temoin[rid]), len(pipeline[rid]))
+        for i in range(n):
+            if temoin[rid][i] == pipeline[rid][i]:
+                continue
+            vals, _idx = logits_temoin.get((rid, i), (None, None))
+            ecart = None if vals is None else vals[0] - vals[1]
+            if ecart is None or ecart > tolerance:
+                franches.append((rid, i, temoin[rid][i], pipeline[rid][i], ecart))
+            break
+    return franches
+
+
+def test_divergences_franches_bras_casse_a_tolerance_0():
+    """Bras cassant, hors carte : `_divergences_franches` DOIT rougir à
+    tolérance 0 sur une quasi-égalité réelle mesurée pièce 159 (k=0, pas=0,
+    Qwen3-Coder-30B-A3B-nvfp4, écart témoin top1/top2 = 0,02685). Un garde
+    qui ne peut jamais rendre « faux » n'est pas un garde."""
+    temoin = {"s0": [220]}
+    pipeline = {"s0": [62]}
+    logits_temoin = {("s0", 0): ([12.23619, 12.20933], [220, 62])}
+    assert _divergences_franches(temoin, pipeline, logits_temoin, tolerance=0.0)
+    assert not _divergences_franches(temoin, pipeline, logits_temoin, tolerance=TOLERANCE_ULP)
+
+
 @pytest.mark.parametrize("b", [1, 12])
 @pytest.mark.skipif(bool(_alias_absent("Qwen3-Coder-30B-A3B-nvfp4")),
                     reason=_alias_absent("Qwen3-Coder-30B-A3B-nvfp4"))
 def test_pipeline_par_defaut_ids_au_bit_b1_et_b12(b):
     """chef 21/09 (0.6.34) : ACVRAM_PIPELINE=1 par défaut ; contre le témoin ACVRAM_PIPELINE=0, MÊME forme de
-    lot (b séquences, même invite, 48 jetons greedy), les ids sont identiques AU BIT — pas « à égalité près » :
-    le pipeline rejoue le même graphe sur le même lot, seul l ordre des copies change."""
+    lot (b séquences, même invite, 48 jetons greedy), les ids sont identiques — sauf quasi-égalité départagée par
+    l'arrondi au point de divergence (pièce 159, mêmes règles que test_pipeline_bit_identique_a_egalite_pres)."""
     from acvram.engine.loader import load_model
     from acvram.engine.runner import Engine
     from acvram.engine.sampler import SamplingParams
@@ -175,7 +210,7 @@ def test_pipeline_par_defaut_ids_au_bit_b1_et_b12(b):
     os.environ["ACVRAM_REPIN"] = "0"
     loaded = load_model(MODEL, dtype=torch.bfloat16, max_model_len=1024)
 
-    def rejouer(actif: bool):
+    def rejouer(actif: bool, capturer_logits: bool):
         engine = Engine(loaded, None, max_batch_size=b, max_model_len=1024)
         engine.pipeline_actif = actif
         assert (" pipeline=1 " in engine.regime_ligne() + " ") == actif or engine.graphs is None
@@ -187,23 +222,41 @@ def test_pipeline_par_defaut_ids_au_bit_b1_et_b12(b):
             seq = engine.add_request(_invite(k, 96), SamplingParams(temperature=0.0, max_tokens=48), request_id=rid)
             ids[rid] = []
             id_vers_rid[seq.id] = rid
+        logits_top2: dict[tuple, tuple] = {}
+        if capturer_logits:
+            indices_pas: dict[str, int] = {rid: 0 for rid in ids}
+            orig_sample = engine._sample_only
+
+            def sample_espion(logits, seqs, **kw):
+                top2 = torch.topk(logits.to(torch.float32), 2, dim=-1)
+                for i, seq in enumerate(seqs):
+                    rid = id_vers_rid.get(seq.id)
+                    if rid is None:
+                        continue
+                    j = indices_pas.get(rid, 0)
+                    logits_top2[(rid, j)] = (top2.values[i].tolist(), top2.indices[i].tolist())
+                    indices_pas[rid] = j + 1
+                return orig_sample(logits, seqs, **kw)
+            engine._sample_only = sample_espion
         while engine.running or engine.waiting:
             for out in engine.step():
                 ids[id_vers_rid[out.sequence_id]].extend(out.token_ids)
         del engine
         torch.cuda.empty_cache()
-        return ids
-    temoin, pipeline = rejouer(False), rejouer(True)
+        return ids, logits_top2
+    # Pièce 159 : logits capturés côté TÉMOIN (PIPELINE=0), seule sortie
+    # tenue pour référence — c'est SON écart top1/top2 qui dit si le point
+    # de divergence est une quasi-égalité, pas celui du pipeline.
+    temoin, logits_temoin = rejouer(False, capturer_logits=True)
+    pipeline, _ = rejouer(True, capturer_logits=False)
     # Pièce 159 : voir test_pipeline_bit_identique_a_egalite_pres — même 30B,
     # même défaut (loaded jamais libéré, cycle de références).
     del loaded
     gc.collect()
     torch.cuda.empty_cache()
-    # Pièce 159 : `ids` était keyé par seq.id (compteur GLOBAL au process,
-    # acvram/engine/runner.py:43) — temoin et pipeline sont deux Engine
-    # séparés, leurs seq.id ne se recoupent jamais ; le message d'erreur
-    # plantait (KeyError) au lieu de rapporter. Keyé par request_id
-    # maintenant, comme _rejouer (id_vers_rid, ligne 58). L'assertion
-    # elle-même (comparaison positionnelle des valeurs) est inchangée.
-    assert list(temoin.values()) == list(pipeline.values()), \
-        [(k, next((i for i, (x, y) in enumerate(zip(temoin[k], pipeline[k])) if x != y), None)) for k in temoin]
+    assert temoin.keys() == pipeline.keys()
+    franches = _divergences_franches(temoin, pipeline, logits_temoin, TOLERANCE_ULP)
+    assert not franches, (
+        "divergence(s) FRANCHE(S) (pas un tie bf16) entre PIPELINE=0 et 1 : "
+        + ", ".join(f"{rid}[{i}] {ta} vs {tb} (écart top1/top2 = {e})"
+                    for rid, i, ta, tb, e in franches))
