@@ -15,18 +15,20 @@ def poids(monkeypatch):
     from acvram import kernels
     from acvram.engine.layers import QuantLinear
     from acvram.kernels import marlin_port as MP
-    from acvram.quant.nvfp4 import quantize_nvfp4
+    from acvram.quant.nvfp4 import dequantize_nvfp4, quantize_nvfp4
     if kernels.get_extension() is None or MP.charger(compiler=False) is None:
         pytest.skip("extension ou port Marlin absents")
     monkeypatch.setattr(kernels, "_PROJ_MARLIN", True)
     monkeypatch.setattr(kernels, "_PROJ_MARLIN_DOUBLES", frozenset())
     torch.manual_seed(147)
     boite = torch.nn.Module()
-    boite.proj = QuantLinear(quantize_nvfp4(torch.randn(2048, 4096, device="cuda", dtype=torch.bfloat16) * 0.02))
+    qt = quantize_nvfp4(torch.randn(2048, 4096, device="cuda", dtype=torch.bfloat16) * 0.02)
+    w_ref = dequantize_nvfp4(qt, torch.float32).clone()      # AVANT la disposition : la naturelle est libérée après
+    boite.proj = QuantLinear(qt)
     bilan = kernels.preparer_disposition_marlin(boite)
     assert bilan["seuls"] == 1 and getattr(boite.proj.qweight, "_marlin_unique", False), bilan
     x = torch.randn(640, 4096, device="cuda", dtype=torch.bfloat16)
-    return boite.proj.qweight, x
+    return boite.proj.qweight, x, w_ref
 
 
 def _passe(t, x, regime, monkeypatch):
@@ -41,7 +43,7 @@ def _passe(t, x, regime, monkeypatch):
 
 def test_le_chemin_est_celui_demande(poids, monkeypatch):
     from acvram import kernels
-    t, x = poids
+    t, x, w_ref = poids
     _, d = _passe(t, x, "bf16", monkeypatch)
     assert d == {"marlin_depaquete_prefill": 1}, d
     _, d = _passe(t, x, "marlin", monkeypatch)
@@ -55,11 +57,10 @@ def test_le_chemin_est_celui_demande(poids, monkeypatch):
 
 
 def test_proche_du_defaut_pas_au_bit(poids, monkeypatch):
-    from acvram.quant.nvfp4 import dequantize_nvfp4
-    t, x = poids
+    t, x, w_ref = poids
     y_b, _ = _passe(t, x, "bf16", monkeypatch)
     y_m, _ = _passe(t, x, "marlin", monkeypatch)
-    ref = x.float() @ dequantize_nvfp4(t, torch.float32).t()
+    ref = x.float() @ w_ref.t()
     e_b, e_m = _ecart(y_b, ref), _ecart(y_m, ref)
     assert e_m <= 2 * e_b + 1e-3, (e_m, e_b)
     assert _ecart(y_m, y_b) < 2e-2, _ecart(y_m, y_b)
@@ -67,7 +68,7 @@ def test_proche_du_defaut_pas_au_bit(poids, monkeypatch):
 
 
 def test_bras_cassant_la_gemm_lit_les_tuiles(poids, monkeypatch):
-    t, x = poids
+    t, x, w_ref = poids
     y_m, _ = _passe(t, x, "marlin", monkeypatch)
     w = t._marlin_dense[0]
     vue = w.view(torch.uint8)
