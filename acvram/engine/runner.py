@@ -821,6 +821,12 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # `MoEBlock._chemin` (REGLES § 7 : noyau atteint, pas fonction appelée).
         chemin_moe += "(" + chemin_moe_atteint(
             [m.__dict__.get("chemins", {}) for m in self.model.modules() if isinstance(m, MoEBlock)]) + ")"
+        # Piece 127 (poste6) : variable de regime posee mais sans effet (disposition unique) ->
+        # la ligne le dit, au lieu de laisser croire qu'elle a agi.
+        inertes_moe = sorted(set().union(
+            *(m.__dict__.get("_inertes", set()) for m in self.model.modules() if isinstance(m, MoEBlock))))
+        if inertes_moe:
+            chemin_moe += "+" + "+".join(inertes_moe)
         if os.environ.get("ACVRAM_GRAPHES_TABLE") == "0":
             chemin_moe += "+pile" if piles_ok else "+pile(désactivé)"
         # Pièce 65 : chemin tensor par défaut (godets ≥ 2) ; la ligne porte le repli STATIQUE nommé par couche
