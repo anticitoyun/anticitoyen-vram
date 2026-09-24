@@ -168,7 +168,7 @@ def _lancer_ninja(cache: pathlib.Path, verbose: bool, load) -> None:
     dense = SRC / "libtorch_stable" / "quantization" / "marlin"                       # pièce 101 : Marlin dense
     sources += [str(dense / "marlin.cu")] + sorted(glob.glob(str(dense / "dense_sm80_kernel_*.cu")))
     from .. import _arch_flags
-    empreinte = f"-DACVRAM_MARLIN_EMPREINTE={empreinte_sources()}"   # 161 : ccache ne rend jamais un objet d'une autre version
+    empreinte = f"-DMARLIN_PORT_EMPREINTE={empreinte_sources()}"   # 161 : ccache ne rend jamais un objet d'une autre version
     load(name="acvram_marlin", sources=sources, is_python_module=False, verbose=verbose,   # ninja, une fois par empreinte
          build_directory=str(cache),
          extra_include_paths=[str(SRC)],
