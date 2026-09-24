@@ -253,8 +253,15 @@ class MasqueImageInconnu(RuntimeError):
 # create_causal_mask, la non-causalité est dans la tour seulement). Trouvé le 20/09 18:57 : le bloc de Gemma
 # appliqué à Qwen3-VL rendait des lignes image fausses dès la couche 0 (diff-couches img02, au bit sous masque
 # causal). Une famille absente = refus nommé, jamais un défaut de classe.
+# Qwen3.5 / Qwen3.5-MoE (pièce anticitoyen-vram-xus, 24/09, preuve au code HF ce venv) : même
+# convention "causal" — tour bidirectionnelle (transformers/models/qwen3_5/modeling_qwen3_5.py
+# is_causal=False lignes 1023/1063/1082 ; qwen3_5_moe/modeling_qwen3_5_moe.py lignes 1116/1156/1175),
+# décodeur texte purement causal (create_causal_mask seul, qwen3_5 ligne 1284 / qwen3_5_moe ligne 1392 —
+# mm_token_type_ids ne sert qu'au calcul mRoPE, jamais à une exception de masque). "Qwen3_5" couvre les
+# deux classes HF Qwen3_5ForConditionalGeneration et Qwen3_5MoeForConditionalGeneration (préfixe commun).
 _MASQUE_PAR_FAMILLE = (("Gemma3", "bidir"), ("Gemma4", "bidir"),
-                       ("Qwen2VL", "causal"), ("Qwen2_5_VL", "causal"), ("Qwen3VL", "causal"))
+                       ("Qwen2VL", "causal"), ("Qwen2_5_VL", "causal"), ("Qwen3VL", "causal"),
+                       ("Qwen3_5", "causal"))
 
 
 def masque_images_famille(spec: Any) -> str:
