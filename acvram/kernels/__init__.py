@@ -978,7 +978,16 @@ _PROJ_MARLIN_DOUBLES = frozenset(r for r in os.environ.get(
 # Pièce 130 (opt-in) : GEMV Marlin v2 à M = 1 pour les poids en disposition Marlin seule — TPB tuiles de colonnes par
 # bloc, x en global (K libre : down en un lancement) ; S = 0 : règle de v1 (mb_splitk) sur N/64/TPB blocs.
 _GEMV_MARLIN_V2 = os.environ.get("ACVRAM_GEMV_MARLIN_V2", "0") == "1"
-_GEMV_MARLIN_TPB = int(os.environ.get("ACVRAM_GEMV_MARLIN_TPB", "2"))
+# TPB = 0 (défaut, pièce 142 famille 24B) : PAR FORME — 2 si N ≥ 49 152, sinon 1. gate‖up 65 536 × 5 120 : +15,8 % à TPB 1,
+# +1,5 % à TPB 2 ; Qwen3.8 (N ≤ 34 816) : TPB 1 le meilleur (130). Au bit de TPB 1 : à N ≥ 49 152, TPB 1 et 2 lancent
+# chacun ≥ 384 blocs (MB_BLOCS_MIN), donc S = 1 des deux côtés, et v2 est au bit entre TPB à S égal (tests 130).
+_GEMV_MARLIN_TPB = int(os.environ.get("ACVRAM_GEMV_MARLIN_TPB", "0"))
+_GEMV_MARLIN_TPB_SEUIL_N = 49152
+
+
+def _tpb_marlin(N: int) -> int:
+    t = _GEMV_MARLIN_TPB or (2 if N >= _GEMV_MARLIN_TPB_SEUIL_N else 1)
+    return t if (N // 64) % t == 0 else 1
 _GEMV_MARLIN_S = int(os.environ.get("ACVRAM_GEMV_MARLIN_S", "0"))
 # Pièce 142 : portée de la disposition — "global" (défaut, inchangé : tout poids dense éligible, MoE compris pour leurs
 # linéaires hors experts) | "denses" (un modèle qui contient un MoEBlock n'est PAS converti : il garde son chemin).
@@ -1004,7 +1013,7 @@ def _marlin_seul(x: torch.Tensor, t):
         gs = g if g.numel() == 1 else t._marlin_un
         w3, s3 = w[None], s_[None]
         if _GEMV_MARLIN_V2 and hasattr(ext, "nvfp4_gemv_marlin2"):
-            tpb = _GEMV_MARLIN_TPB if (N // 64) % _GEMV_MARLIN_TPB == 0 else 1
+            tpb = _tpb_marlin(N)
             y = ext.nvfp4_gemv_marlin2(w3, s3, gs, xf, k_pad, N, tpb, _GEMV_MARLIN_S)
         elif k_pad <= _GEMV_MARLIN_KMAX:
             y = ext.nvfp4_gemv_marlin(w3, s3, gs, z, z, xf, k_pad, N)

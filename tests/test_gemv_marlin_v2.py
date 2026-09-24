@@ -58,3 +58,26 @@ def test_v2_contre_naturel_et_reproductible(n, k, tpb, S):
     hors = int(((y - ref).abs() > 2 ** -7 * ref.abs().amax(-1, keepdim=True)).sum())
     assert hors == 0, f"{hors} colonnes hors 2⁻⁷·max contre le GEMV naturel"
     assert torch.equal(y, ext.nvfp4_gemv_marlin2(w, s, gs, x, k, n, tpb, S)), "v2 non reproductible"
+
+
+def test_tpb_par_forme_choix(monkeypatch):
+    """142 famille 24B : TPB = 0 (défaut) → 2 si N ≥ 49 152 (gate‖up 65 536 : +15,8 % à TPB 1, +1,5 % à TPB 2), sinon 1
+    (Qwen3.8, N ≤ 34 816 : TPB 1 le meilleur, 130) ; un TPB explicite prime."""
+    from acvram import kernels
+    monkeypatch.setattr(kernels, "_GEMV_MARLIN_TPB", 0)
+    assert [kernels._tpb_marlin(n) for n in (65536, 49152, 49088, 34816, 5120)] == [2, 2, 1, 1, 1]
+    monkeypatch.setattr(kernels, "_GEMV_MARLIN_TPB", 4)
+    assert kernels._tpb_marlin(65536) == 4 and kernels._tpb_marlin(5120 + 64) == 1        # 81 tuiles : 4 ne divise pas
+
+
+@carte
+@pytest.mark.parametrize("n,k", [(65536, 5120), (49152, 5120), (34816, 5120), (5120, 32768), (5120, 4096)])
+def test_tpb_par_forme_au_bit_de_tpb1(n, k):
+    """Le TPB choisi par forme, à S = 0 (automatique, le défaut servi), rend la sortie AU BIT de TPB 1 : à N ≥ 49 152 les
+    deux lancent ≥ 384 blocs (MB_BLOCS_MIN), S = 1 des deux côtés ; en dessous, TPB 1 est choisi. Cassant (seuil abaissé,
+    TPB 2 aux petites N : S différent) → rouge sur (5 120, 32 768) et (5 120, 4 096)."""
+    kernels, ext, t, w, s, gs, x = _poids(n, k, 142 + n % 89)
+    tpb = kernels._tpb_marlin(n) if kernels._GEMV_MARLIN_TPB == 0 else pytest.skip("ACVRAM_GEMV_MARLIN_TPB posé")
+    y1 = ext.nvfp4_gemv_marlin2(w, s, gs, x, k, n, 1, 0)
+    yt = ext.nvfp4_gemv_marlin2(w, s, gs, x, k, n, tpb, 0)
+    assert torch.equal(y1, yt), f"TPB {tpb} ≠ TPB 1 au bit : {int((y1 != yt).sum())} colonnes (n = {n})"

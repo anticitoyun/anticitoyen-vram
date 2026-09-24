@@ -80,7 +80,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("GEMV_MARLIN_V2", "0", ("acvram.kernels", "_GEMV_MARLIN_V2"), None,
              "pièce 130 (opt-in) : GEMV Marlin v2 à M = 1 sous la disposition Marlin seule (tuiles de colonnes par bloc, x en "
              "global, down en un lancement) | 0 : v1 (x en mémoire partagée, K ≤ 11 264 en deux moitiés)"),
-    Variable("GEMV_MARLIN_TPB", "2", ("acvram.kernels", "_GEMV_MARLIN_TPB"), None, "pièce 130 : tuiles de 64 colonnes par bloc (1, 2, 4)"),
+    Variable("GEMV_MARLIN_TPB", "0", ("acvram.kernels", "_GEMV_MARLIN_TPB"), None,
+             "pièce 130 : tuiles de 64 colonnes par bloc (1, 2, 4) ; 0 = par forme (2 si N ≥ 49 152, sinon 1 — 142 24B)"),
     Variable("GEMV_MARLIN_S", "0", ("acvram.kernels", "_GEMV_MARLIN_S"), None, "pièce 130 : split-K forcé ; 0 = règle de v1"),
     Variable("PROJ_MARLIN_PORTEE", "global", ("acvram.kernels", "_PROJ_MARLIN_PORTEE"), None,
              "pièce 142 : global (défaut, tout poids dense éligible, linéaires hors experts des MoE compris) | denses (un "
