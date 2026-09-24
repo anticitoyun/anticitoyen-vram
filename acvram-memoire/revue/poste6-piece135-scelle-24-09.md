@@ -45,3 +45,6 @@ Par point : t/s (`jetons_s`), J/jeton net, W, horloge lue. Ratios r_t(h) = t/s(h
 réussi (régime NOMINAL, `dense=…+marlin(doubles=0,seuls=305)` : le bras v2 prend) ; corrigé 7bb7e39d (serveur par port + pgid).
 05:08 : prise arrêtée par moi au chargement du point 2 700 (29 s de carte) parce que main avait avancé (134 : préfill exact dans
 la disposition Marlin unique, 13474ff8) ; fusionné, la prise repart sur le commit du verdict. Aucun chiffre lu avant l'arrêt.
+05:28 : prise nulle encore (304 s de carte, 0 chiffre) — `serve --regime` imprime la ligne de régime et QUITTE (cli.py:913, rc 0/1) :
+c'était aussi la vraie cause du 04:51. Option retirée ; la preuve du bras v2 est la ligne `[acvram] régime … dense=…+marlin(…)`
+du chargement, présente au niveau warning. Seuils et prédiction inchangés.
