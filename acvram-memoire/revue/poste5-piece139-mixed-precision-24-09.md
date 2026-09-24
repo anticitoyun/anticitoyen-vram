@@ -95,3 +95,12 @@ n'ont pas de champ `format`) ; ses 208 `weight` F8 (sans `weight_scale_2`) tombe
 fp8 BRUTS, échelle perdue, **faux et muets** — même classe que le défaut de la 131. Remède d'une ligne dans la branche
 modelopt (F8 + `weight_scale` scalaire → `_fp8` existant), ou refus nommé. Change la sortie du chemin par défaut (de
 faux à juste) : à trancher par le chef.
+
+## 6. Incohérence trouvée à la carte (notée, NON traitée — bead ouverte par le chef)
+
+Une conversion Qwen3_5 neuve (`Qwen3_5ForConditionalGeneration`, source VL) GARDE la tour : `convert.py` VISION_PREFIXES
+→ 333 tenseurs `model.visual.*`, manifeste `vision: oui`. Or le chargement REFUSE ensuite toute tour de cette famille :
+`vision.py:260-268` `masque_images_famille` ne connaît que Gemma3, Gemma4, Qwen2VL, Qwen2_5_VL, Qwen3VL →
+`MasqueImageInconnu` (1re prise (a), 06:55, `scratchpad/poste5-p139-24-09/prise-ab-1.txt`). La conversion produit donc
+un alias qui ne se charge pas. L'alias 102 `Qwen3.8-27B-nvfp4` (16/09) n'a pas de tour : il a été converti avant
+que le convertisseur la garde. Contournement pour la 139 (choix du chef) : `convert --sans-vision`, alias texte seul.
