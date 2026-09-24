@@ -936,7 +936,12 @@ CHEMINS_INT8 = _collections.Counter()
 # Qwen3.8 b=12 128 → 349 t/s, J/j ÷ 2,7, b=1 et ppl-decode-kv inchangés) ;
 # bascule à M ≥ 4 (poste7 : à M = 2 la GEMV gagne au banc, 1,50 contre 1,12 To/s).
 # Pièce 101 (23/09) : projections NVFP4 denses par le Marlin porté aux godets ≥ PROJ_MARLIN_MIN_M (opt-in).
-_PROJ_MARLIN = os.environ.get("ACVRAM_PROJ_MARLIN", "0") == "1"
+# Pièce 156 (24/09, décision du chef par délégation de l'utilisateur) : DÉFAUT = disposition Marlin UNIQUE + GEMV v2 +
+# TPB par forme, portée « denses » — la configuration qualifiée par les pièces 129/130/134/142 (b=8 +57 à +90 %, b=1
+# 0,979-0,996, KL sous 2 × témoin, PPL identique). ACVRAM_PROJ_MARLIN=0 : repli NOMMÉ au chemin naturel. Posée à 1
+# explicitement, l'absence du port Marlin est un refus ; au défaut, un repli nommé (ligne de régime).
+_PROJ_MARLIN_POSEE = os.environ.get("ACVRAM_PROJ_MARLIN")
+_PROJ_MARLIN = (_PROJ_MARLIN_POSEE or "1") == "1"
 _PROJ_MARLIN_MIN_M = int(os.environ.get("ACVRAM_PROJ_MARLIN_MIN_M", "2"))
 _PROJ_MARLIN_MIN_NK = int(os.environ.get("ACVRAM_PROJ_MARLIN_MIN_NK", "1024"))
 CHEMINS_NVFP4 = __import__("collections").Counter()
@@ -977,10 +982,10 @@ _PROJ_MARLIN_MIN_N = int(os.environ.get("ACVRAM_PROJ_MARLIN_MIN_N", "2048"))    
 # Pièce 129 (A) : rôles gardés en DEUX dispositions (naturelle pour M = 1, Marlin pour M ≥ 2) — ceux où le GEMV
 # Marlin à M = 1 perd le plus (revue/verdict-129-1-gemv-marlin-m1-24-09 : +17 %, +17 %, +25 %) ; ailleurs Marlin SEUL.
 _PROJ_MARLIN_DOUBLES = frozenset(r for r in os.environ.get(
-    "ACVRAM_PROJ_MARLIN_DOUBLES", "mlp.gate_up,mlp.down,gdn.out").split(",") if r)
+    "ACVRAM_PROJ_MARLIN_DOUBLES", "").split(",") if r)      # 156 : vide = UNIQUE (le mixte ne tient pas en mémoire, 129)
 # Pièce 130 (opt-in) : GEMV Marlin v2 à M = 1 pour les poids en disposition Marlin seule — TPB tuiles de colonnes par
 # bloc, x en global (K libre : down en un lancement) ; S = 0 : règle de v1 (mb_splitk) sur N/64/TPB blocs.
-_GEMV_MARLIN_V2 = os.environ.get("ACVRAM_GEMV_MARLIN_V2", "0") == "1"
+_GEMV_MARLIN_V2 = os.environ.get("ACVRAM_GEMV_MARLIN_V2", "1") == "1"         # 156 : défaut (130, qualifié)
 # TPB = 0 (défaut, pièce 142 famille 24B) : PAR FORME — 2 si N ≥ 49 152, sinon 1. gate‖up 65 536 × 5 120 : +15,8 % à TPB 1,
 # +1,5 % à TPB 2 ; Qwen3.8 (N ≤ 34 816) : TPB 1 le meilleur (130). Au bit de TPB 1 : à N ≥ 49 152, TPB 1 et 2 lancent
 # chacun ≥ 384 blocs (MB_BLOCS_MIN), donc S = 1 des deux côtés, et v2 est au bit entre TPB à S égal (tests 130).
@@ -994,7 +999,7 @@ def _tpb_marlin(N: int) -> int:
 _GEMV_MARLIN_S = int(os.environ.get("ACVRAM_GEMV_MARLIN_S", "0"))
 # Pièce 142 : portée de la disposition — "global" (défaut, inchangé : tout poids dense éligible, MoE compris pour leurs
 # linéaires hors experts) | "denses" (un modèle qui contient un MoEBlock n'est PAS converti : il garde son chemin).
-_PROJ_MARLIN_PORTEE = os.environ.get("ACVRAM_PROJ_MARLIN_PORTEE", "global")
+_PROJ_MARLIN_PORTEE = os.environ.get("ACVRAM_PROJ_MARLIN_PORTEE", "denses")  # 156 : les MoE ne sont pas mesurés
 _GEMV_MARLIN_KMAX = 11264          # nvfp4_gemv_marlin : x en mémoire partagée fp32 (acvram_kernels.cu, mb_verifier)
 
 
@@ -1067,12 +1072,17 @@ def preparer_disposition_marlin(modele) -> dict:
     passent par la pile. Rend le bilan (octets doublés, nombre de poids par mode) pour la ligne de régime."""
     from ..quant.nvfp4 import NVFP4Tensor
     from . import marlin_port as MP
-    if MP.charger(compiler=False) is None:
-        raise RuntimeError("ACVRAM_PROJ_MARLIN=1 : port Marlin non compilé (outils/banc-marlin-p1-18-09.py "
-                           "--compiler-seulement) — la disposition Marlin est refusée au chargement")
+    global _PROJ_MARLIN
+    vide = {"doubles": 0, "seuls": 0, "octets_doubles": 0, "exclus": 0, "en_flux": 0, "multi_retirees": 0}
     ext = get_extension()
-    if ext is None or not hasattr(ext, "nvfp4_gemv_marlin"):
-        raise RuntimeError("ACVRAM_PROJ_MARLIN=1 : extension sans nvfp4_gemv_marlin — disposition Marlin refusée")
+    manque = ("port Marlin non compilé (outils/banc-marlin-p1-18-09.py --compiler-seulement)"
+              if MP.charger(compiler=False) is None else
+              "extension sans nvfp4_gemv_marlin" if ext is None or not hasattr(ext, "nvfp4_gemv_marlin2") else None)
+    if manque:
+        if _PROJ_MARLIN_POSEE == "1":
+            raise RuntimeError(f"ACVRAM_PROJ_MARLIN=1 : {manque} — la disposition Marlin est refusée au chargement")
+        _PROJ_MARLIN = False                   # pièce 156 : au défaut, repli NOMMÉ au naturel, jamais un refus
+        return {**vide, "repli": manque.split(" (")[0]}
     sous_moe = set()
     for m in modele.modules():
         if type(m).__name__.startswith("MoEBlock"):
@@ -1080,6 +1090,7 @@ def preparer_disposition_marlin(modele) -> dict:
     if _PROJ_MARLIN_PORTEE not in ("global", "denses"):
         raise ValueError(f"ACVRAM_PROJ_MARLIN_PORTEE={_PROJ_MARLIN_PORTEE!r} : attendu global | denses")
     if _PROJ_MARLIN_PORTEE == "denses" and sous_moe:
+        _PROJ_MARLIN = False     # pièce 156 : ni disposition ni Marlin paresseux (_marlin_dense à 2 ≤ M ≤ 16) sur un MoE
         # garde « modèle dense » (pièce 142) : un MoE garde tout son chemin, disposition naturelle comprise
         return {"doubles": 0, "seuls": 0, "octets_doubles": 0, "exclus": 0, "en_flux": 0, "multi_retirees": 0,
                 "portee": "denses:moe-exclu"}

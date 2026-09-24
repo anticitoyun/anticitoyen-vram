@@ -14,9 +14,11 @@ import torch
 carte = pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise")
 
 
-def test_defaut_v1_sous_processus():
+def test_v1_pose_sous_processus():
+    """Pièce 156 : v2 est le défaut (test_defaut_marlin_156) ; ACVRAM_GEMV_MARLIN_V2=0 rend v1."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("ACVRAM_GEMV_MARLIN")}
     env["CUDA_VISIBLE_DEVICES"] = ""
+    env["ACVRAM_GEMV_MARLIN_V2"] = "0"
     r = subprocess.run([sys.executable, "-c", "import acvram.kernels as k; print(k._GEMV_MARLIN_V2)"], env=env,
                        capture_output=True, text=True, cwd=str(Path(__file__).resolve().parents[1]))
     assert r.stdout.strip().splitlines()[-1] == "False", r.stdout + r.stderr
