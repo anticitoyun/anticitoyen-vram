@@ -341,8 +341,9 @@ def load_model(path: str, plan: Optional[Plan] = None,
     # Caches KV differes : voir la fusion des projections plus bas, qui a
     # besoin de place libre au moment ou elle concatene.
     a_allouer: list = []
+    embed_charge = embed.is_cuda                 # pièce 146 (i) : déjà dans `libre`, ne pas le recompter
     _borner_kv_avec_exil(plan, manifest, dev, spec, max_model_len,
-                         reserve=_reserve_prefill(spec, max_model_len, manifest, plan))
+                         reserve=_reserve_prefill(spec, max_model_len, manifest, plan), embed_charge=embed_charge)
     kv_blocks = _kv_blocks_per_device(plan, spec, max_model_len)
     # Pièce 146 (a) : la capacité du chemin par défaut, bornée au MÊME instant que B (poids pas encore chargés),
     # référence de la garde Marlin — la disposition ne doit pas coûter de KV ; sans plan du manifeste, la demande.
@@ -350,7 +351,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
     if plan_ref is not None:
         def _borner_ref():
             _borner_kv_avec_exil(plan_ref, manifest, dev, spec, max_model_len,
-                                 reserve=_reserve_prefill(spec, max_model_len, manifest, plan_ref))
+                                 reserve=_reserve_prefill(spec, max_model_len, manifest, plan_ref),
+                                 embed_charge=embed_charge)
             return {d: int(n) for d, n in _kv_blocks_per_device(plan_ref, spec, max_model_len).items()}
         kv_ref = _sans_marlin(_borner_ref)
 
@@ -1151,7 +1153,8 @@ _KV_MARGE_MIN = 1536 * 2**20
 _KV_MARGE_PART = 0.05
 
 
-def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0) -> None:
+def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0,
+                           embed_charge: bool = False) -> None:
     """Borne le budget KV de chaque GPU par ce qu'il a réellement de libre.
 
     Le budget du manifeste vient du planificateur, qui raisonne sur des tailles
@@ -1172,7 +1175,10 @@ def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0) ->
             libre, capacite = torch.cuda.mem_get_info(d)
         except Exception:                       # noqa: BLE001
             continue
-        poids = (embed if plan.embed_device == t.name else 0) \
+        # Pièce 146 (i) : ``embed_charge`` — la table est DÉJÀ sur la carte quand load_model borne (loader, chargement
+        # d'embed_tokens avant la borne) : `libre` l'a soustraite, la recompter dans `poids` la retirait deux fois
+        # (gemma4 31B : 2,6 Gio de KV perdus, 11 152 jetons au lieu de ≈ 16 700).
+        poids = (embed if plan.embed_device == t.name and not embed_charge else 0) \
             + (head if plan.lm_head_device == t.name else 0)
         for l in plan.layers:
             poids += attn.get(l.index, l.attn_bytes) if l.attn_storage == t.name else 0
@@ -1207,7 +1213,8 @@ def _kv_plancher(plan: Plan, spec: ModelSpec, max_model_len: Optional[int], dev:
 
 
 def _borner_kv_avec_exil(plan: Plan, manifest: dict, dev, spec: ModelSpec,
-                         max_model_len: Optional[int], reserve: int = 0, tours: int = 4) -> None:
+                         max_model_len: Optional[int], reserve: int = 0, tours: int = 4,
+                         embed_charge: bool = False) -> None:
     """`_borner_kv_par_la_vram`, puis exile encore si le budget KV est passé
     SOUS le plancher d'une séquence — et refuse explicitement s'il y reste.
 
@@ -1230,7 +1237,7 @@ def _borner_kv_avec_exil(plan: Plan, manifest: dict, dev, spec: ModelSpec,
     top_k = spec.num_experts_per_tok or 8
     supplement = 0
     for tour in range(tours + 1):
-        _borner_kv_par_la_vram(plan, manifest, dev, reserve=reserve)
+        _borner_kv_par_la_vram(plan, manifest, dev, reserve=reserve, embed_charge=embed_charge)
         manque = 0
         for t in plan.tiers:
             if t.kind != "gpu" or t.name not in plan.kv_budget:
