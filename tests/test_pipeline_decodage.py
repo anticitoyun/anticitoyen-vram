@@ -17,6 +17,7 @@ règle 5) : une divergence FRANCHE (pas un tie) doit rester détectée.
 """
 from __future__ import annotations
 
+import gc
 import os
 
 import pytest
@@ -127,6 +128,14 @@ def test_pipeline_bit_identique_a_egalite_pres():
     tokens_b, logits_b = _rejouer(engine_b, capturer_logits=True)
     del engine_b
     torch.cuda.empty_cache()
+    # Pièce 159 : `loaded` (le modèle 30B) n'était jamais libéré — `del engine`
+    # seul ne suffit pas s'il reste un cycle de références (engine <-> loaded) ;
+    # sans `gc.collect()`, le refcount ne tombe pas à zéro tout seul. Empilé sur
+    # 2-3 chargements du même 30B dans ce fichier, OOM la 3e fois en suite
+    # complète.
+    del loaded
+    gc.collect()
+    torch.cuda.empty_cache()
 
     assert tokens_a.keys() == tokens_b.keys()
     franches = []
@@ -182,5 +191,10 @@ def test_pipeline_par_defaut_ids_au_bit_b1_et_b12(b):
         torch.cuda.empty_cache()
         return ids
     temoin, pipeline = rejouer(False), rejouer(True)
+    # Pièce 159 : voir test_pipeline_bit_identique_a_egalite_pres — même 30B,
+    # même défaut (loaded jamais libéré, cycle de références).
+    del loaded
+    gc.collect()
+    torch.cuda.empty_cache()
     assert list(temoin.values()) == list(pipeline.values()), \
         [(k, next((i for i, (x, y) in enumerate(zip(temoin[k], pipeline[k])) if x != y), None)) for k in temoin]

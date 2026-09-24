@@ -56,6 +56,22 @@ def pytest_ignore_collect(collection_path, config):
     return True if re.search(r"""["']scratchpad["'/]""", texte) else None
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _liberer_vram_entre_modules():
+    """Pièce 159 (chef) : le moteur rend intégralement sa VRAM dès qu'on
+    l'aide honnêtement (mesure poste3, 24/09 — 3 cycles charge/décode/del/
+    gc.collect()/empty_cache() sur Agents-A1-4B-kimi-nvfp4 : 64 Mio stables,
+    aucune croissance). La fuite en suite complète venait des fixtures de
+    module qui chargent chacune leur modèle sans jamais faire ce ménage
+    avant le fichier suivant — pas un défaut du moteur. Déclarée ici :
+    montée avant les fixtures de module des fichiers, démontée après elles."""
+    yield
+    if torch.cuda.is_available():
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
 @pytest.fixture(scope="session")
 def tiny_checkpoint(tmp_path_factory):
     """Un point de contrôle de 4 couches, de forme llama, assez petit pour être
