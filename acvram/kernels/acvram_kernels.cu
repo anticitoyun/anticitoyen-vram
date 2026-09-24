@@ -4355,22 +4355,25 @@ __global__ void kv_write_int8_kernel(
         if (threadIdx.x == 0) {
             float m = 0.f;
             for (int i = 0; i < nw; ++i) m = fmaxf(m, red[i]);
-            // anticitoyen-vram-thf : sous --use_fast_math, `/` et `1.f/sc` (puis
-            // multiplier par l'inverse) rendent une division APPROCHEE — le
-            // jumeau torch (kvcache.py, `x / scale`) reste en division IEEE
-            // correctement arrondie. __fdiv_rn force la meme arithmetique que
-            // le jumeau, meme sous fast_math (precedent : pieces 61/104,
-            // kv_write_k8v4_kernel `:4300-4326`).
-            red[0] = fmaxf(__fdiv_rn(m, 127.f), 1e-8f);
+            // anticitoyen-vram-thf, clos (piece 109, ordre chef 24/09) : le
+            // ticket croyait la division IEEE (`__fdiv_rn`) necessaire pour
+            // accorder le noyau au jumeau torch ; verifie au bit (sonde
+            // kv_write_int8_v_debug + 1000 tirages vs main), c'est l'INVERSE :
+            // la sortie SERVIE par defaut (repli "int8" de loader.py:196) suit
+            // deja la convention "multiplication par le reciproque approche
+            // sous fast_math", identique des DEUX cotes (kvcache.py:494 s'y
+            // accorde par une optimisation ATen, pas par construction). Rendre
+            // ce noyau IEEE-exact le desaccordait du jumeau ET de main (569
+            // ecarts / 1000 tirages). Code redevenu identique a main au bit ;
+            // ne pas reintroduire __fdiv_rn ici sans mesure qui le justifie
+            // (changerait une sortie servie, decision utilisateur).
+            red[0] = fmaxf(m / 127.f, 1e-8f);
         }
         __syncthreads();
-        const float sc = red[0];
+        const float sc = red[0], inv = 1.f / sc;
         signed char *dst = (quel ? vc : kc) + (pos * H + h) * D;
         for (int i = threadIdx.x; i < D; i += blockDim.x) {
-            // division directe (__fdiv_rn), jamais x * (1/sc) : le jumeau divise,
-            // il ne multiplie pas par un inverse precalcule (memes deux ecarts
-            // que le premier, en cascade sur la reciproque ET sur le produit).
-            const int q = __float2int_rn(__fdiv_rn(__bfloat162float(src[i]), sc));
+            const int q = __float2int_rn(__bfloat162float(src[i]) * inv);
             dst[i] = (signed char)max(-127, min(127, q));
         }
         if (threadIdx.x == 0)
