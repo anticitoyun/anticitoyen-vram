@@ -1097,6 +1097,8 @@ def preparer_disposition_marlin(modele) -> dict:
         if _PROJ_MARLIN_POSEE == "1":
             raise RuntimeError(f"ACVRAM_PROJ_MARLIN=1 : {manque} — la disposition Marlin est refusée au chargement")
         interdire_marlin(modele)               # pièce 156 : au défaut, repli NOMMÉ au naturel, jamais un refus
+        # pièce 161 : dit dans TOUT journal (instrument en processus compris), pas seulement sur la ligne du service
+        print(f"[acvram] disposition Marlin : REPLI au naturel — {manque} ; cache {MP.dossier_cache()}", flush=True)
         return {**vide, "repli": manque.split(" (")[0]}
     sous_moe = set()
     for m in modele.modules():
