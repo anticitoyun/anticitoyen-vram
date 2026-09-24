@@ -268,8 +268,8 @@ class DecoderLayerGDN(nn.Module):
             return un(h, self.static)
         hist = self.ensure_hist(q_len)
         if (q_len <= 8 and not hasattr(la, "rank") and hasattr(la, "decode_static_lignes")
-                and not os.environ.get("ACVRAM_GDN_LIGNES") == "0" and la.lignes_au_bit()):
-            return la.decode_static_lignes(h, self.static, hist)     # pièce 152 : une lecture des poids, pas q_len
+                and not os.environ.get("ACVRAM_GDN_LIGNES") == "0"):
+            return la.decode_static_lignes(h, self.static, hist)     # pièce 152 : appels groupés par poids (L2)
         ys = []
         for j in range(q_len):
             ys.append(un(h[j:j + 1], self.static))

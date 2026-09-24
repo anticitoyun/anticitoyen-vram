@@ -234,34 +234,19 @@ class GatedDeltaNet(nn.Module):
     def peut_batcher_decode(self, h: torch.Tensor) -> bool:
         return _voie_fla(h)
 
-    def lignes_au_bit(self) -> bool:
-        """Pièce 152 : les cinq projections sont-elles servies par le GEMV NVFP4 naturel (au bit ligne à ligne sous
-        `kernels.gemv_par_lignes`) ? Sinon (int8 promu, Marlin, poids en flux, sans extension) : l'ancien déroulé."""
-        from .. import kernels
-        from ..quant.nvfp4 import NVFP4Tensor
-        if kernels.get_extension() is None:
-            return False
-        for lin in (self.qkv, self.gate, self.alpha, self.beta_proj, self.out_proj):
-            t = getattr(lin, "qweight", None)
-            if (not isinstance(t, NVFP4Tensor) or t.qweight is None or not t.qweight.is_cuda
-                    or getattr(lin, "streamed", None) is not None or getattr(lin, "bias", None) is not None
-                    or getattr(t, "_marlin_unique", False) or getattr(t, "_marlin_parent", None) is not None
-                    or t.padded_in % 32):
-                return False
-        return True
-
     def decode_static_lignes(self, h: torch.Tensor, st: dict, hist: dict) -> torch.Tensor:
-        """Pièce 152 : les q_len jetons d'UNE séquence (vérification spéculative, ngram k = 4 au défaut) — projections
-        en UNE lecture des poids (GEMV à q_len lignes, au bit de q_len appels à M = 1), puis convolution et récurrence
-        jeton par jeton comme `decode_static` (photographie de l'état après chacun dans ``hist``), puis `out_proj` en
-        une lecture. Avant : `decode_static` par jeton relisait qkv, gate, α, β et out q_len fois (3,13 Go × 5 par
-        vérification sur Qwen3.8, verdict 151)."""
-        from .. import kernels
-        with kernels.gemv_par_lignes():
-            qkv, z, b, a = (self.qkv(h).to(torch.float32), self.gate(h).to(torch.float32),
-                            self.beta_proj(h).to(torch.float32), self.alpha(h).to(torch.float32))
+        """Pièce 152 : les q_len jetons d'UNE séquence (vérification spéculative, ngram k = 4 au défaut). Mêmes appels
+        qu'avant — chaque projection à M = 1, le noyau servi tel quel, donc AU BIT par construction — mais regroupés
+        PAR POIDS : les q_len appels de qkv s'enchaînent, puis ceux de gate, β, α ; le poids (qkv 29,5 Mo, gate et out
+        17,7 Mo sur Qwen3.8) est encore dans le L2 (96 Mo) aux appels 2..q_len, au lieu d'être relu en DRAM après que
+        les autres projections l'ont chassé (déroulé jeton par jeton : 3,13 Go × q_len par vérification, verdict 151).
+        Convolution et récurrence jeton par jeton, photographie de l'état après chacun, comme `decode_static`. Le GEMV
+        à q_len lignes, lui, n'est pas au bit de M = 1 (152, 24/09) : écarté."""
+        q = h.shape[0]
+        par_poids = lambda lin: torch.cat([lin(h[j:j + 1]).to(torch.float32) for j in range(q)])   # noqa: E731
+        qkv, z, b, a = par_poids(self.qkv), par_poids(self.gate), par_poids(self.beta_proj), par_poids(self.alpha)
         ys = []
-        for j in range(h.shape[0]):
+        for j in range(q):
             y, (conv, S) = self._apres_projections(h[j:j + 1], qkv[j:j + 1], z[j:j + 1], b[j:j + 1], a[j:j + 1],
                                                    (st["conv"], st["S"]))
             st["conv"].copy_(conv)
@@ -269,8 +254,7 @@ class GatedDeltaNet(nn.Module):
             for k_, v_ in hist.items():
                 v_[j].copy_(st[k_])
             ys.append(y.to(h.dtype))
-        with kernels.gemv_par_lignes():
-            return self.out_proj(torch.cat(ys, dim=0))
+        return torch.cat([self.out_proj(y) for y in ys], dim=0)
 
     def _lot_projete(self, x: torch.Tensor, conv_state: torch.Tensor):
         """Projections, convolution causale à état et portes pour ``b``
