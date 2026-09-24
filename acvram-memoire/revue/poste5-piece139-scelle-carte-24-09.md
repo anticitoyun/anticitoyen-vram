@@ -64,3 +64,19 @@ Changement, écrit avant : serve `--max-model-len 2048 --max-batch 8` pour (a) e
 (le banc chat envoie < 1 024 jetons de contexte ; NInfer garde `--max-context 4096`, ce qui ne change que sa réserve
 KV). (b) inchangé (`eval --window 4096`, une séquence) ; s'il ne tient pas, refus nommé au verdict, pas de fenêtre
 plus courte improvisée. Comparaison des deux alias acvram à VRAM libre égale : même prise, même llama-server présent.
+
+## Addendum 2, 24/09 08 h 0x (AVANT la prise suivante) — correction du premier addendum
+
+* ERRATUM : le llama-server de l'utilisateur (pid 4627, 5,6 Gio) est sur la **3080 Ti (index 1)**, pas sur la 5090
+  (`nvidia-smi --query-compute-apps=gpu_bus_id` : 02:00.0). La 5090 était ENTIÈREMENT à acvram ; le premier addendum
+  et sa lecture « 1,9 Gio libres à cause du llama-server » sont faux.
+* Cause des OOM (chauffe 2048 et `eval` seul, 29,16 Gio alloués par PyTorch contre 23,9 au chargement) : régime de
+  préfill int8 par défaut `cublas` (`acvram/kernels/__init__.py:765`) — `_i8c_poids` (:770-785) construit et GARDE sur
+  chaque poids int8 symétrique par canal une copie int8 signée de sa taille (conçu pour les q/k/v/o de Coder, 0,9 Gio) :
+  ici 233 tenseurs, ~10,6 Go de plus → ne tient pas. Ce régime quantifie aussi les activations en A8 au préfill : la PPL
+  mesurée sous le défaut serait W8A8 sur 40 % des paramètres, contraire à l'énoncé du scellé (« activations non
+  quantifiées »).
+* Changement, écrit avant : **`ACVRAM_PREFILL_INT8=bf16`** (régime existant : déquantification entière temporaire +
+  GEMM bf16, W8A16, sans copie persistante) pour (a), (b) et les deux bras acvram de (c). `--max-model-len` revient à
+  4096 (scellé d'origine). Prédictions inchangées. Défaut nommé, NON traité ici (poste moteur) : sous le défaut
+  `cublas`, un alias à int8 par canal au-delà des q/k/v/o double sa mémoire int8 au premier préfill.
