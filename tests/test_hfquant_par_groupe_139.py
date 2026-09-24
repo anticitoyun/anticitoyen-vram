@@ -224,3 +224,20 @@ def test_chargeur_marque_origine_fp8_et_regime_le_nomme():
     finally:
         regime.declarer_modele_charge(None)
     assert regime.prefill_i8c_texte() is None
+
+
+def test_marque_prefill_bf16_suit_la_pile_int8():
+    """Casse si la pile gate_up (stack_int8_linears) perd la marque : la copie signée revenait (OOM 08:26)."""
+    from acvram.engine.layers import QuantLinear, stack_int8_linears
+    from acvram.kernels import _i8c_poids
+    lins = []
+    for _ in range(2):
+        t = _i8c()
+        t.__dict__["prefill_bf16"] = True
+        lins.append(QuantLinear(t))
+    pile = stack_int8_linears(lins)
+    assert pile is not None and pile.qweight.__dict__.get("prefill_bf16") is True
+    assert all(l.qweight.__dict__.get("prefill_bf16") is True for l in lins)
+    assert _i8c_poids(pile.qweight) is None
+    temoin = stack_int8_linears([QuantLinear(_i8c()), QuantLinear(_i8c())])
+    assert not temoin.qweight.__dict__.get("prefill_bf16")
