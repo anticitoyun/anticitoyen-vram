@@ -39,3 +39,9 @@ Par point : t/s (`jetons_s`), J/jeton net, W, horloge lue. Ratios r_t(h) = t/s(h
 
 ## Durée
 4 points × (chargement 27B ≈ 60-90 s + 5 × 10 s + fenêtres) ≈ 12-16 min ; prévu ≤ 20 min, une prise.
+
+## Addendum 05 h 1x — deux prises nulles, main fusionné AVANT la prise (ordre chef), seuils et prédiction inchangés
+04:51 : `setsid` depuis un chef de groupe forke et rend la main → `$!` n'était pas le serveur, ECHEC à tort après un chargement
+réussi (régime NOMINAL, `dense=…+marlin(doubles=0,seuls=305)` : le bras v2 prend) ; corrigé 7bb7e39d (serveur par port + pgid).
+05:08 : prise arrêtée par moi au chargement du point 2 700 (29 s de carte) parce que main avait avancé (134 : préfill exact dans
+la disposition Marlin unique, 13474ff8) ; fusionné, la prise repart sur le commit du verdict. Aucun chiffre lu avant l'arrêt.
