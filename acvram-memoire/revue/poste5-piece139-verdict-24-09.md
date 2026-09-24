@@ -26,6 +26,11 @@
 | 8 | acvram mixte | 245,6 (0,6 ; 5) | 1,245 (0,002) | 2 554 | 381 |
 | 8 | NInfer | 463,3 (0,3 ; 5) | 0,699 (0,001) | 2 385 | 400 |
 
+**Régime du client** : le champ `regime` des lignes RESULTAT vaut « indisponible (ImportError …) » — le CLIENT
+(banc) importait acvram depuis main et la garde d'arbre (a86fa1dd) l'a refusé ; il ne touche que ce champ
+informatif. Le SERVEUR mesuré tournait sur la branche poste5 : `prefill_int8=cublas+bf16(origine fp8 ×233)` relevé
+dans son journal à chacune des 10 passes acvram (`prise-c-b1.txt`, `prise-c-b8.txt`).
+
 **Horloges** : écart 269 MHz (b=1) et 169 MHz (b=8) > 30 → au sens du scellé, cellule **non comparable à horloge
 égale**. NInfer sature le plafond de 400 W et descend à ~2 370 MHz ; acvram tient une horloge plus haute. Corriger
 l'horloge creuserait l'écart de débit au lieu de le réduire : acvram est plus lent même avec une horloge plus haute.
