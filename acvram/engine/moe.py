@@ -788,14 +788,9 @@ class MoEBlock(nn.Module):
                 "ACVRAM_PREFILL_W8R=1 inerte sur ce chemin : il faut ACVRAM_PREFILL_GROUPED=grouped_mm|bmm, "
                 "ACVRAM_GEMV_LAYOUT=naturel et ACVRAM_MOE_MMA=0 (la MMA prime sur la pile bf16) — "
                 f"ici PREFILL_GROUPED={_PREFILL_GROUPED!r}, disposition unique={unique}, MOE_MMA={_MOE_MMA}")
-        if unique and (_MOE_MMA_POSEE or _PREFILL_DEQUANT_POSEE):
-            # posee = presente dans l'environnement ; inerte car `not unique` (ligne suivante) et le
-            # chemin marlin-ou-unique (ci-dessous) bloquent mma/direct avant meme de les lire.
-            inertes = self.__dict__.setdefault("_inertes", set())
-            if _MOE_MMA_POSEE:
-                inertes.add(f"moe_mma={'1' if _MOE_MMA else '0'}(inerte:disposition unique)")
-            if _PREFILL_DEQUANT_POSEE:
-                inertes.add(f"prefill_dequant={os.environ.get('ACVRAM_PREFILL_DEQUANT')}(inerte:disposition unique)")
+        nouveaux_inertes = inertes_disposition_unique(unique)
+        if nouveaux_inertes:
+            self.__dict__.setdefault("_inertes", set()).update(nouveaux_inertes)
         mma = (_MOE_MMA and not unique and ext is not None and hasattr(ext, "nvfp4_gemm_grouped_mma")
                and not os.environ.get("ACVRAM_PREFILL_DEQUANT")
                and pg[4] % 64 == 0 and pd[4] % 64 == 0
@@ -1751,12 +1746,21 @@ _MOE_GEMM_MAX = float(os.environ.get("ACVRAM_MOE_GEMM_MAX", "48"))
 # A16, +0,919 % contre le seuil scellé +1 % (revue/verdict-moe-mma-reel-
 # qwen3-coder.md) — dans la fourchette prédite avant mesure.
 _MOE_MMA = os.environ.get("ACVRAM_MOE_MMA", "1") == "1"
-# Piece 127 (poste6, verdict-piece125-24-09) : sur la disposition UNIQUE, `mma` (ligne 791 ci-dessus)
-# est bloque par `not unique` avant meme de lire ACVRAM_MOE_MMA, et le chemin marlin-ou-unique (ligne 922)
-# ne lit jamais ACVRAM_PREFILL_DEQUANT non plus -- poser l'une ou l'autre variable y est donc INERTE et
-# MUET (faute "flag no-op"). Poses = presentes dans l'environnement, quelle que soit leur valeur.
-_MOE_MMA_POSEE = "ACVRAM_MOE_MMA" in os.environ
-_PREFILL_DEQUANT_POSEE = "ACVRAM_PREFILL_DEQUANT" in os.environ
+
+def inertes_disposition_unique(unique: bool) -> set:
+    """Piece 127 (poste6, verdict-piece125-24-09) : sur la disposition UNIQUE, `mma`
+    (`_forward_prefill_grouped`) est bloque par `not unique` avant meme de lire ACVRAM_MOE_MMA, et le
+    chemin marlin-ou-unique ne lit jamais ACVRAM_PREFILL_DEQUANT non plus -- poser l'une ou l'autre
+    variable y est donc INERTE et MUET (faute "flag no-op"). Lecture DIRECTE de os.environ (pas de
+    valeur mise en cache a l'import) pour rester testable par monkeypatch sans recharger le module."""
+    if not unique:
+        return set()
+    inertes = set()
+    if "ACVRAM_MOE_MMA" in os.environ:
+        inertes.add(f"moe_mma={os.environ['ACVRAM_MOE_MMA']}(inerte:disposition unique)")
+    if "ACVRAM_PREFILL_DEQUANT" in os.environ:
+        inertes.add(f"prefill_dequant={os.environ['ACVRAM_PREFILL_DEQUANT']}(inerte:disposition unique)")
+    return inertes
 # GEMM groupée bf16 du prefill au-delà de _MOE_GEMM_MAX jetons par expert :
 # "groupe" (B0, kernels/gemm_groupe, DÉFAUT depuis poste7-b0-et-cause-lm4-17-09 :
 # un lancement Triton persistant pour tous les experts ; Coder 9 913 j/s contre
