@@ -35,13 +35,13 @@ __all__ = ["GatedDeltaNet", "gdn_available", "gdn_regime"]
 # b=12 : 97 j/s pour 621 chez vLLM, poste7-priorite-apres-campagne-17-09).
 # « 1 » vaut fla, « 0 » reste le refus des hybrides (quant/gguf.py).
 _GDN_VOIE = os.environ.get("ACVRAM_GDN", "fla")
-# Pièce 156 F4 (opt-in) : au décodage du lot, la récurrence fla écrit son état
+# Pièce 156 F4 (défaut depuis le verdict 156 c, au bit ; 0 = témoin) : au décodage du lot, la récurrence fla écrit son état
 # final DANS le tampon statique au lieu d'en allouer un puis de le recopier
 # (25 Mo par couche à b=8 sur Qwen3.8). Au bit : voir `_recurrence_en_place`.
-_GDN_ETAT_EN_PLACE = os.environ.get("ACVRAM_GDN_ETAT_EN_PLACE", "0") == "1"
-# Pièce 156 F2 (opt-in) : conv du décodage du lot en un noyau Triton, visé au
+_GDN_ETAT_EN_PLACE = os.environ.get("ACVRAM_GDN_ETAT_EN_PLACE", "1") == "1"
+# Pièce 156 F2 (défaut depuis le verdict 156 c, au bit ; 0 = témoin) : conv du décodage du lot en un noyau Triton, visé au
 # bit (`gdn_conv.py`) ; q/k sans répétition des têtes (fla les indexe).
-_GDN_CONV_FUSEE = os.environ.get("ACVRAM_GDN_CONV_FUSEE", "0") == "1"
+_GDN_CONV_FUSEE = os.environ.get("ACVRAM_GDN_CONV_FUSEE", "1") == "1"
 
 
 def _fla():

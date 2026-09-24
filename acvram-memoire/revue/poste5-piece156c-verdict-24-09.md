@@ -39,3 +39,14 @@ Trou GPU entre pas inchangé (23,9 → 22,9 µs). A1 ≈ A2 et B1 ≈ B2 à 2 µ
   le préfill (chemins inchangés).
 * **Proposition au chef** : les trois drapeaux à 1 par défaut, après la suite CI complète et la capture des godets ;
   au bit, aucune KL n'est requise. F1, F3 et F6 (± ulp) attendent son mot.
+
+## Addendum 24/09 16 h — bascule au défaut (feu de chef), conditions et prédiction écrites AVANT la prise
+
+Les trois drapeaux passent à 1 par défaut (0 = témoin). Conditions de chef avant le push :
+1. **ABBA b=1** Qwen3.8, config Marlin, `frontiere-pas.py` B=1, 300 pas, A (trois drapeaux à 0) B (défaut). FAUX si
+   B/A > 1,01. Prédit : **B/A = 0,993-1,000**. À b=1, le créneau unique passe par `decode_static` → `forward` : F4 et F2
+   n'y sont pas prises (elles vivent dans `decode_static_batch`) ; seule F5 joue (96 additions de moins, ~1 µs chacune,
+   sur un pas de ~13 ms).
+2. **Capture des godets** 1 à 8 (`capture-godets.py`, Qwen3.8, défaut + config Marlin) : capture ok, `graphes=on`,
+   `repli_eager=0` pour chacun ; ligne de régime relevée. Prédit : 8/8.
+3. Suite complète sous mon verrou APRÈS la fusion de la bascule Marlin d'poste1 depuis main (attente de son push).

@@ -52,9 +52,9 @@ _SYNC_COUCHES = bool(os.environ.get("ACVRAM_SYNC_COUCHES"))
 # 17/09 : 33 min sans une ligne, GPU 0 %, pile Python illisible sans ptrace).
 # Lent (une synchronisation par couche) : diagnostic seulement.
 _TRACE_COUCHES = bool(os.environ.get("ACVRAM_TRACE_COUCHES"))
-# Pièce 156 F5 (opt-in) : résidu différé aussi pour les couches Gated DeltaNet
+# Pièce 156 F5 (défaut depuis le verdict 156 c, au bit ; 0 = témoin) : résidu différé aussi pour les couches Gated DeltaNet
 # non MLA (Qwen3.5/3.8) — voir `_res_differe`.
-_GDN_RES_DIFFERE = os.environ.get("ACVRAM_GDN_RES_DIFFERE", "0") == "1"
+_GDN_RES_DIFFERE = os.environ.get("ACVRAM_GDN_RES_DIFFERE", "1") == "1"
 
 
 def _trace_couche(quoi: str, i: int, layer) -> None:
