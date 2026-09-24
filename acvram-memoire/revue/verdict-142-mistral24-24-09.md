@@ -30,3 +30,14 @@
   même ABBA b=1, prédit B/A ≤ 1,02 ; Qwen3.8 inchangé (N ≤ 34 816 → TPB 1).
 * **incidence sur la bascule par défaut** : à b=1, les modèles de cette forme perdraient ≈ 4 % tant que TPB n'est pas
   choisi par forme.
+
+## 142 bis — TPB par forme (d7b14777, prise poste1-p142bis-tpb 14:26 → 14:48, scellé `scelle-tpb.md` écrit avant)
+* Code : `kernels._tpb_marlin(N)`, ACVRAM_GEMV_MARLIN_TPB=0 (nouveau défaut) → 2 si N ≥ 49 152, sinon 1. Sortie AU BIT de
+  TPB 1 : `test_tpb_par_forme_au_bit_de_tpb1`, 5 formes ; 28 tests verts. Cassant (seuil 64) **ROUGE** sur (34 816, 5 120) :
+  TPB 2 y lance 272 blocs, d'où S = 2 contre 1. Ma prédiction nommait les petites N, restées vertes, car S plafonne à 8 des
+  deux côtés : détail faux, mais le cassant est rouge.
+* ABBA b=1, médianes de 5 lots, A naturel, B unique + v2 + TPB par forme :
+  * **24B Cydonia** : A 9,748 ms, B **9,542 ms**, **B/A 0,979** (prédit 0,99-1,02 ; mieux que prédit), J/j 3,90 → 3,82.
+    Le b=1 FAUX (1,044) devient TENU (seuil du chef ≤ 1,02).
+  * **Qwen3.8** : A 13,235 ms, B 13,183 ms, **B/A 0,996** (prédit 0,985-1,005 ; 130 : 0,9967), J/j 5,10 → 4,74 (−7,3 %). TENU.
+* Conséquence : la configuration à basculer par défaut est unique + v2 + **TPB par forme** (défaut 0).
