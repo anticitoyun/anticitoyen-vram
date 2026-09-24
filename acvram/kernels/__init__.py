@@ -535,6 +535,19 @@ def nvfp4_dequant(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16,
 # 40 à plus de 64, et un seuil sous le plus petit croisement ne peut pas perdre
 # sur une forme non balayée. La variable reste comme échappement.
 _NVFP4_GEMV_MAX = int(os.environ.get("ACVRAM_NVFP4_GEMV_MAX", "32"))
+# Pièce 152 : sous `gemv_par_lignes()`, un appel NVFP4 à M ≤ 8 prend le GEMV CUDA (`nvfp4_gemv`, NV = M lignes par passe)
+# et NON le GEMM étroit (M ≥ 4) ni Marlin : chaque ligne y est rendue au bit du même appel à M = 1 (accumulation par
+# ligne indépendante, même partage des fils et des tranches K — `splits_for` ne dépend que de N et K). Posé par
+# `GatedDeltaNet.decode_static_lignes` pour projeter les q_len jetons d'une vérification en UNE lecture des poids.
+_GEMV_LIGNES = [0]
+
+
+class gemv_par_lignes:
+    def __enter__(self):
+        _GEMV_LIGNES[0] += 1
+
+    def __exit__(self, *exc):
+        _GEMV_LIGNES[0] -= 1
 PREFILL_REGIMES = ("bf16", "w4a16", "w8a8", "w4a4")
 
 
@@ -617,7 +630,8 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
         if t.padded_in != xf.shape[-1]:
             xf = torch.nn.functional.pad(xf, (0, t.padded_in - xf.shape[-1]))
         gsr = getattr(t, "global_scale_rows", None)
-        if _PROJ_MARLIN and _PROJ_MARLIN_MIN_M <= n <= 16 and xf.dtype == torch.bfloat16:
+        lignes = _GEMV_LIGNES[0] > 0 and n <= 8                       # pièce 152 : droit au GEMV, au bit de M = 1
+        if not lignes and _PROJ_MARLIN and _PROJ_MARLIN_MIN_M <= n <= 16 and xf.dtype == torch.bfloat16:
             # Pièce 101 (opt-in) : GEMM Marlin DENSE porté de vLLM 0.29 (marlin_port, échelle globale par colonne
             # pour q/k/v empilés) aux godets ≥ 2 ; M = 1 garde `nvfp4_gemv` ci-dessous (le plus rapide au banc :
             # revue/poste1-piece101-bascule-godets-23-09). Seconde disposition des poids préparée au premier appel
@@ -626,7 +640,7 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
             if y is not None:
                 CHEMINS_NVFP4["marlin_dense"] += 1
                 return y.reshape(*orig_shape[:-1], t.shape[0])
-        if _DENSE_NVFP4 == "triton" and _DENSE_NVFP4_MIN_M <= n <= 32 and xf.dtype == torch.bfloat16:
+        if not lignes and _DENSE_NVFP4 == "triton" and _DENSE_NVFP4_MIN_M <= n <= 32 and xf.dtype == torch.bfloat16:
             # GEMM dense étroite W4A16 (poste7-hybrides-etape1-close-gemm-dense-
             # 17-09 § 2) : les M lignes en registres, les poids lus UNE fois
             # par pas — la boucle GEMV ci-dessous les relit par séquence
@@ -635,7 +649,7 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
             if gemm_dense_etroit.disponible():
                 y = gemm_dense_etroit.gemm_dense_etroit(xf, t)
                 return y.reshape(*orig_shape[:-1], t.shape[0])
-        if (_NARROW_GEMM and _NARROW_NVFP4 and gsr is None and _NARROW_MIN <= n <= 16 and t.padded_in % 64 == 0
+        if (not lignes and _NARROW_GEMM and _NARROW_NVFP4 and gsr is None and _NARROW_MIN <= n <= 16 and t.padded_in % 64 == 0
                 and xf.dtype == torch.bfloat16 and hasattr(ext, "narrow_gemm")):
             # 1aj marche 2 : GEMM étroit tensor cores, poids lus une fois par
             # CTA en étages (le GEMV relisait W par tranche de 8 et ne

@@ -138,13 +138,19 @@ class GatedDeltaNet(nn.Module):
                 state: Optional[tuple] = None
                 ) -> tuple[torch.Tensor, tuple]:
         """``x`` vaut [t, hidden] pour UNE séquence ; rend (y, nouvel état)."""
-        chunk_rule, recurrent_rule = _refs()
-        t = x.shape[0]
-        decode = (t == 1 and state is not None)
-
         # toute la récurrence se calcule en float32 : la règle delta cumule
         # des produits d'état où le bfloat16 dérive vite
         qkv, z, b, a = self._projections(x)                 # [t, conv_dim], [t, value_dim], [t, nv] × 2
+        y, etat = self._apres_projections(x, qkv, z, b, a, state)
+        return self.out_proj(y.to(x.dtype)), etat
+
+    def _apres_projections(self, x: torch.Tensor, qkv: torch.Tensor, z: torch.Tensor, b: torch.Tensor,
+                           a: torch.Tensor, state: Optional[tuple]) -> tuple[torch.Tensor, tuple]:
+        """Convolution à état, récurrence et norme à porte, de projections déjà faites ; rend (y AVANT out_proj,
+        nouvel état) — le cœur de `forward`, séparé pour la pièce 152 (`decode_static_lignes`)."""
+        chunk_rule, recurrent_rule = _refs()
+        t = x.shape[0]
+        decode = (t == 1 and state is not None)
 
         # convolution causale depthwise, avec état (kernel-1 colonnes)
         seq = qkv.t().unsqueeze(0)                          # [1, conv_dim, t]
@@ -192,7 +198,7 @@ class GatedDeltaNet(nn.Module):
         core = core.reshape(-1, self.dv)
         y = self._norm_gated(core, z.reshape(-1, self.dv))
         y = y.reshape(t, self.value_dim)
-        return self.out_proj(y.to(x.dtype)), (new_conv_state, s_new)
+        return y, (new_conv_state, s_new)
 
     # -- chemin à formes fixes (graphes CUDA) --------------------------------
     # La règle delta de référence est déjà à formes fixes pour t = 1 : on la
@@ -227,6 +233,44 @@ class GatedDeltaNet(nn.Module):
     # -- décodage du lot en un lancement (fla) ------------------------------
     def peut_batcher_decode(self, h: torch.Tensor) -> bool:
         return _voie_fla(h)
+
+    def lignes_au_bit(self) -> bool:
+        """Pièce 152 : les cinq projections sont-elles servies par le GEMV NVFP4 naturel (au bit ligne à ligne sous
+        `kernels.gemv_par_lignes`) ? Sinon (int8 promu, Marlin, poids en flux, sans extension) : l'ancien déroulé."""
+        from .. import kernels
+        from ..quant.nvfp4 import NVFP4Tensor
+        if kernels.get_extension() is None:
+            return False
+        for lin in (self.qkv, self.gate, self.alpha, self.beta_proj, self.out_proj):
+            t = getattr(lin, "qweight", None)
+            if (not isinstance(t, NVFP4Tensor) or t.qweight is None or not t.qweight.is_cuda
+                    or getattr(lin, "streamed", None) is not None or getattr(lin, "bias", None) is not None
+                    or getattr(t, "_marlin_unique", False) or getattr(t, "_marlin_parent", None) is not None
+                    or t.padded_in % 32):
+                return False
+        return True
+
+    def decode_static_lignes(self, h: torch.Tensor, st: dict, hist: dict) -> torch.Tensor:
+        """Pièce 152 : les q_len jetons d'UNE séquence (vérification spéculative, ngram k = 4 au défaut) — projections
+        en UNE lecture des poids (GEMV à q_len lignes, au bit de q_len appels à M = 1), puis convolution et récurrence
+        jeton par jeton comme `decode_static` (photographie de l'état après chacun dans ``hist``), puis `out_proj` en
+        une lecture. Avant : `decode_static` par jeton relisait qkv, gate, α, β et out q_len fois (3,13 Go × 5 par
+        vérification sur Qwen3.8, verdict 151)."""
+        from .. import kernels
+        with kernels.gemv_par_lignes():
+            qkv, z, b, a = (self.qkv(h).to(torch.float32), self.gate(h).to(torch.float32),
+                            self.beta_proj(h).to(torch.float32), self.alpha(h).to(torch.float32))
+        ys = []
+        for j in range(h.shape[0]):
+            y, (conv, S) = self._apres_projections(h[j:j + 1], qkv[j:j + 1], z[j:j + 1], b[j:j + 1], a[j:j + 1],
+                                                   (st["conv"], st["S"]))
+            st["conv"].copy_(conv)
+            st["S"].copy_(S.to(torch.float32))
+            for k_, v_ in hist.items():
+                v_[j].copy_(st[k_])
+            ys.append(y.to(h.dtype))
+        with kernels.gemv_par_lignes():
+            return self.out_proj(torch.cat(ys, dim=0))
 
     def _lot_projete(self, x: torch.Tensor, conv_state: torch.Tensor):
         """Projections, convolution causale à état et portes pour ``b``
