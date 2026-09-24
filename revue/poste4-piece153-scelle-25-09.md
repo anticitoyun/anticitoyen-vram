@@ -7,31 +7,34 @@ conversion (0 octet int8, snr_floor=0.0 par défaut ne promeut rien). Protocole 
 linear_attn.beta,linear_attn.out --max-promotions 1.0 --snr-floor 99 --attn-qkvo-int8-canal
 --gdn-int8-canal --no-awq`, comme suggéré par les deux avertissements « SANS EFFET » (attn et GDN).
 
-## Témoins T1/T2 et seuil KL
+## Témoins T1/T2 et seuil KL — correction chef 25/09 : mesurés, pas empruntés
 
-Aucune mesure KL n'existe pour Qwen3.8-27B lui-même (recherché dans ETAT.md, absent). Faute de
-témoin propre au modèle, T1/T2 sont transférés du seul couple KL/format mixte déjà mesuré dans le
-projet sur le même principe (attention en int8, reste en nvfp4/int4), Coder KL max par pas contre
-bf16 (`ETAT.md` 22/09 12h2x, poste2 b2ab639a/84af7a90) :
-* **T1 = 0,519** (Coder, projections d'attention int8)
-* **T2 = 0,735** (Coder, projections d'attention nvfp4)
-* **seuil = 2 × max(T1, T2) = 1,47**
+Erreur de la première version de ce scellé : des KL de Coder ne sont pas des témoins de Qwen3.8-27B.
+**Règle fixée maintenant, chiffre calculé à la prise** : T1 = KL du bras B (153) contre HF sur la
+séquence de calibration dans son ordre normal ; T2 = même paire, ordre inversé (même corpus, même
+longueur, teacher forcing) — les deux mesurés dans LA MÊME PRISE que le bras B, sur Qwen3.8-27B nvfp4
+(102) lui-même comme référence de « bruit d'ordre » attendu à ce KL. **Seuil = 2 × max(T1, T2)**,
+appliqué au KL max par pas de 153 contre HF. Les valeurs Coder (T1=0,519 int8 / T2=0,735 nvfp4,
+`ETAT.md` 22/09 12h2x, poste2 b2ab639a/84af7a90) restent un ordre de grandeur attendu SEULEMENT — si T1/
+T2 mesurés sur Qwen3.8-27B sortent d'un facteur 3 de cette fourchette, le protocole de mesure (pas la
+conversion) est le premier suspect avant de juger 153.
 
-Réserve nommée : ce sont des témoins d'un AUTRE modèle (Coder, pas Qwen3.8-27B) et d'un régime pas
-identique (Coder n'a pas de GDN) — un proxy, pas une mesure directe. Si la 153 KL max dépasse 1,47,
-c'est un signal fort (loin au-dessus du pire témoin transféré) ; si elle est en dessous, ça ne prouve
-pas l'absence de problème sur ce modèle précis, seulement l'absence d'un problème de l'ampleur déjà vu
-ailleurs sur un mécanisme comparable.
-
-## PPL (inchangé depuis prediction-153.md)
+## PPL — référence explicite : contre HF bf16 (pas contre la 102)
 
 D'après arXiv:2609.04098 Table 1 (Qwen3.8-27B, PPL@4K/@32K) : régime « Minima » (tout quantifié, proche
 de notre 102 nvfp4 pur) +10,4 % contre HF ; régimes attention+GDN protégés (Unsloth/RadixArk) +3,0 % à
-+5,8 %. **Prédiction : écart acvram-153 vs HF dans [+3 %, +6 %]**, contre l'écart actuel de la 102
-(+11,0 % evaluate.py / +13,87 % NInfer, protocoles différents). Ce que ça rendrait si faux : ≥+8 %
-signale une perte du chemin acvram au-delà de la quantification ; <+2 % (mieux que tous les points
-calibrés du papier, alors que ceci est du RTN sans calibration, `--no-awq`) serait surprenant et
++5,8 %. **Prédiction : écart acvram-153 vs HF bf16 dans [+3 %, +6 %]** — c'est la référence HF du papier,
+PAS la 102, qui sert de base de comparaison à ce chiffre. Ce que ça rendrait si faux : ≥+8 % vs HF
+signale une perte du chemin acvram au-delà de la quantification ; <+2 % vs HF (mieux que tous les
+points calibrés du papier, alors que ceci est du RTN sans calibration, `--no-awq`) serait surprenant et
 mériterait une relecture avant d'être cru.
+
+**PPL appariée contre la 102** (l'autre comparaison demandée par chef dans l'ordre initial) — dérivée,
+pas mesurée séparément : la 102 est actuellement à +11,0 % vs HF (evaluate.py) ou +13,87 % (NInfer,
+protocole différent, cf. 143). Si 153 atteint [+3 %,+6 %] vs HF, alors **153 vs 102 devrait être une
+amélioration d'environ −4,5 % à −7,2 % de PPL relative** ((1,03 à 1,06) / 1,11 ≈ 0,928 à 0,955). Rendrait
+faux : 153 PPL ≥ 102 PPL (aucune amélioration malgré le surcoût en octets) — contredirait toute la
+prémisse de la pièce.
 
 ## Taille disque
 
@@ -49,14 +52,24 @@ Encadrement par octets lus, pas une mesure (comme la pièce 144) :
   ces seules familles ; sur l'ensemble des poids lus par pas (MLP inclus, inchangé), plancher +23,2 %
   de trafic. **Ralentissement b=1 attendu entre +23 % et +82 %** (plafond théorique si seules attn+GDN
   comptaient).
-* **b=8 (plus proche du calcul, GEMM dense)** : chaque poids lu sert 8 lignes — impact relatif du
-  surcoût devrait être PLUS FAIBLE qu'à b=1. **Aucun encadrement chiffré tenté, seulement la direction**
-  (ralentissement b=8 < ralentissement b=1, en proportion).
+* **b=8 (plus proche du calcul, GEMM dense)** — correction chef 25/09, chiffré : les poids d'une
+  couche sont lus UNE FOIS par pas quel que soit b (un GEMM batché réutilise le même poids pour les 8
+  lignes) — les +3,11 Gio supplémentaires sont donc le MÊME surcoût absolu de lecture par pas à b=1 et
+  b=8, pas un surcoût qui grossit avec b. Ce qui change : à b=8 le pas total est dominé par le calcul
+  (`gemm_dense_etroit_nvfp4` à 80,5 % du pas, `poste3-piece126-nsys-qwen38-24-09.md`), donc le même
+  surcoût absolu de lecture pèse une part BIEN PLUS PETITE d'un pas bien plus long. **Encadrement :
+  ralentissement b=8 entre +2 % et +15 %** — plancher >0 (strictement plus d'octets lus), plafond fixé
+  en supposant que le surcoût de lecture ne mord que sur la portion non couverte par le GEMM dense
+  MLP dominant (≤19,5 % du pas d'après la piece126) même s'il double cette portion. Rendrait faux :
+  <+2 % signalerait un recouvrement quasi parfait calcul/lecture (à vérifier, pas exclu) ; >+15 %
+  contredirait la dominance du GEMM MLP mesurée en 126 et signalerait un goulot ailleurs (glue,
+  synchronisation) non prévu par ce raisonnement.
 
 ## Issues nommées
 
-1. **KL/PPL au-dessus du seuil transféré (1,47 / +8 %)** — chemin acvram fautif au-delà de la
-   quantification (candidat de recherche, pas la recette elle-même, cf. prediction-153.md).
+1. **KL au-dessus du seuil calculé (2×max(T1,T2), mesuré à la prise) ou PPL ≥+8 % vs HF** — chemin
+   acvram fautif au-delà de la quantification (candidat de recherche, pas la recette elle-même, cf.
+   prediction-153.md).
 2. **int8 GDN n'apporte rien** — GDN (5,56 G paramètres/48 couches sur 27B) est peut-être déjà assez
    bien servi par nvfp4 seul (contrairement à l'attention pleine, plus concentrée sur 16 couches) : si
    la PPL avec attn seule en int8 (pas encore mesurée, hors scope 153) atteint déjà la même fourchette
