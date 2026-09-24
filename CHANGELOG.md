@@ -1,5 +1,13 @@
 # Journal des changements
 
+* **25/09/2026 — pièce 172** : au préfill de plusieurs séquences, la boucle par séquence des couches à récurrence
+  linéaire (Gated DeltaNet de Qwen3.5/3.8) déquantifie chaque poids NVFP4 UNE fois au lieu d'une fois par séquence
+  (`ACVRAM_DEPAQ_PARTAGE`, défaut 1 ; 0 = témoin). Sortie **identique au bit** : tests, bras cassants, logits de
+  Qwen3.8 et Qwen3.5-35B-A3B. Forward de préfill −12,5 % / −11,3 % sur Qwen3.8 et −3,8 % / −3,6 % sur Qwen3.5-35B ; TTFT
+  servi sous 8 requêtes −9,2 % / −8,1 % et −3,1 % / −3,4 % (8 × 78 jetons / longueurs mêlées). La cause de l'écart de
+  sortie de `GDN_PREFILL_LOT=1` est trouvée (cuBLAS bf16 réduit en bf16 selon M, pièce 169). Détail :
+  revue/poste5-piece172-verdict-25-09.md.
+
 * **24/09/2026 — pièce 166** : l'opt-in `ACVRAM_PREFILL=marlin` (pièce 147 L2, GEMM Marlin W4A16 au préfill de la disposition
   unique, sans dépaquetage) est RETIRÉ, verdict FAUX : TTFT servi b=1 +4 / +27 / +35 % à 512 / 2 048 / 4 096 jetons, J/préfill
   +5 / +28 / +36 %, KL 2,3-3 × les témoins (PPL par fenêtre tenue) — Marlin perd à grand M contre dépaquetage + cuBLAS ;

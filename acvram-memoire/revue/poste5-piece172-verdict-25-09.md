@@ -30,3 +30,6 @@ Toutes les prédictions sont tenues. Forward : A B' B' A en processus, médiane 
   cumule A et B' dans un même processus (27,0-27,5 Go sur Qwen3.8). Aucun OOM ni refus de capacité dans les 20 passes
   servies.
 * Reste à faire avant le push : la suite complète sous verrou.
+
+### Suite complète (f81483c1 contre la base ea85b7e7, 01:14:03-01:29:58, sous mon verrou)
+HEAD 0 échec, 2 765 verts ; base 0 échec, 2 764 verts ; aucun échec propre. **TENU.**
