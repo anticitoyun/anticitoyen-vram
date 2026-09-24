@@ -63,3 +63,11 @@ Les trois drapeaux passent à 1 par défaut (0 = témoin). Conditions de chef av
 3. Suite complète : en attente de la bascule Marlin d'poste1 dans main.
 
 Limite nommée : alias mixte (`Qwen3.8-27B-unsloth-mixte-i8c`) non mesuré, même code GDN.
+3. **Suite complète** (bascule Marlin d'poste1 SUSPENDUE, pièce 157 : ordre de chef, fusion de origin/main tel quel,
+   bb5fed65) sous mon verrou, 15:45:37-16:02:36 : HEAD e8b69ac5 **7 échecs, 2 689 verts** ; base bb5fed65 **7 échecs,
+   2 679 verts**. **Aucun échec propre à la branche** (différence vide dans les deux sens). Les 7 communs, préexistants
+   sur main : `test_cadrage_perplexite::test_la_liste_des_variables_lues_ne_derive_pas`,
+   `test_pipeline_decodage::test_pipeline_par_defaut_ids_au_bit_b1_et_b12[12]`,
+   `test_prefill_bf16_egale_tout_torch::test_ppl_prefill_bf16_egale_tout_torch`, `test_regressions_0_4_4x` ×2 (préfixe
+   publié), `test_scission_moe_au_bit::test_generation_dense_au_bit`,
+   `test_troncature_kv_bout_en_bout_146::test_requete_close_quand_le_kv_s_epuise_en_decodage`. **TENU.**
