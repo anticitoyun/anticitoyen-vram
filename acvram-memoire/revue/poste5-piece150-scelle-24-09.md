@@ -42,3 +42,15 @@ Sources possibles (lecture du code) :
 boucle de service pour tous les modèles. (b) Préfills > 0,5 s/lot ou > 2 pas de préfill par lot → admission : grouper
 les arrivées d'une fenêtre courte. (c) Carte oisive entre lots > 0,3 s → le coût est entre les lots, en partie un
 artefact du banc (le client attend tout le lot) : je le dirais, et un banc à lots chevauchants le rendrait réel ou non.
+
+## Addendum 24/09 12 h 3x (après la prise, avant le verdict) : deux chaînes, un pytest du chef
+
+* **Faute (poste5)** : en arrêtant ma première chaîne (ordre d'attendre poste1-p146e/p152), j'ai tué la coquille `bash -c`,
+  pas le script enfant. Il a couru : `poste5-p150-defaut` 11:58:37-12:01:33 (avant l'ordre) et `poste5-p150-mixte`
+  12:13:55-12:16:44 (après les « rendue » d'poste1-p146e 12:13:12 et d'poste1-p152 12:13:52 : ordre tenu à la lettre,
+  par hasard). La seconde chaîne a refait `defaut` à 12:24:51 et `mixte` à 12:28:06. Quatre prises au lieu de deux.
+* **pytest du chef** 12:28:05-12:28:37 pendant `mixte` de 12:28. Contrôle : ses 3 lots mesurés couvrent **12:29:00-12:29:21**
+  (20,85 s finis à 12:29:21, mtime de `service-mixte.json`), la chauffe les précède de ~4 s : **aucun lot ni chauffe dans
+  la fenêtre**, seul le chargement du modèle l'a recouvert. Lots gardés. La trace nsys du mixte vient de la prise de 12:13
+  (propre, fichiers `1213-*`), celle de 12:28 est écartée par prudence.
+* Sorties : `service-defaut*.json` = prise de 12:24 ; `service-mixte.json` = 12:28 ; `1213-service-mixte-nsys.json` = 12:13.
