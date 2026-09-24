@@ -962,6 +962,9 @@ __global__ void paged_attn_partial_kernel(
     const unsigned char *__restrict__ sc, // CANAL : [NB, HKV, D] E4M3
     const __nv_bfloat16 *__restrict__ tampon,   // CANAL : [R, 16, HKV, D]
     const int *__restrict__ tampon_de,    // CANAL : [NB] ligne du bloc courant ou < 0
+    const signed char *__restrict__ puits_v,   // V4 + puits (repli 104 (1)) : V int8 [NB, 16, HKV, D], indexé comme K
+    const __half *__restrict__ puits_vs,       // V4 + puits : échelle half [NB, 16, HKV]
+    int puits,                                 // positions puits (t < puits lues en int8), 0 : aucune
     const long *__restrict__ tables,      // [B, N]
     const long *__restrict__ seq_lens,    // [B]  longueur TOTALE (dernier jeton inclus)
     float *__restrict__ part,             // [B*QL, HQ, C, D]  acc non normalisé
@@ -1114,7 +1117,14 @@ __global__ void paged_attn_partial_kernel(
         const float m_new = fmaxf(m, score);
         const float corr = __expf(m - m_new);
         const float pr = __expf(score - m_new);
-        if (V4) {
+        if (V4 && t < puits) {
+            // puits : V int8 par jeton dans la réserve (même cellule que K), uniforme dans le warp (t l'est)
+            const signed char *vp = puits_v + cell * D;
+            const float pv = __half2float(puits_vs[cell]) * pr;
+            #pragma unroll
+            for (int i = 0; i < PER_LANE; ++i)
+                acc[i] = acc[i] * corr + pv * static_cast<float>(vp[lane * PER_LANE + i]);
+        } else if (V4) {
             const unsigned char *vp4 = reinterpret_cast<const unsigned char *>(vc) + cell * (D / 2);
             const float pv = __half2float(vs[cell * (D / 32) + (lane * PER_LANE) / 32]) * pr;
             #pragma unroll
@@ -2173,6 +2183,100 @@ __global__ void __launch_bounds__(MB_WARPS * WARP) nvfp4_gemv_marlin_kernel(
     if (threadIdx.x == 0) cpt[g * NT + nt] = 0u;         // prêt pour le rejeu suivant
 }
 
+// Pièce 130 (24/09, opt-in ACVRAM_GEMV_MARLIN_V2, derrière la disposition Marlin seule de la 129) : GEMV sur
+// disposition Marlin, E = 1, une projection (NW = 1), deux leviers du dossier revue/poste1-piece130-gemv-marlin-a-sec :
+// (1) TPB tuiles de 64 colonnes ADJACENTES par bloc — TPB × 512 o contigus par ligne k au lieu de 512 o puis un saut
+// de 8·N o ; (2) x lu en GLOBAL (deux float2 par tuile et par voie, cache L1) au lieu d'une copie en mémoire partagée
+// par bloc — plus de borne K ≤ 11 264, down en un lancement, plus de __syncthreads d'entrée. Pour CHAQUE colonne,
+// l'ordre d'accumulation est celui de v1 (mêmes tuiles k par warp, même paire (kt, kt + 8), mêmes shuffles, mêmes
+// warps dans l'ordre, même somme des S partiels) : à S égal, sortie AU BIT de v1 (tests/test_gemv_marlin_v2.py).
+template <typename XT>
+__device__ __forceinline__ float2 mb2_x2(const XT *__restrict__ x, int i) {    // i pair
+    if constexpr (sizeof(XT) == 4) return __ldg(reinterpret_cast<const float2 *>(x + i));
+    else return __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(x + i));
+}
+
+template <typename XT, int TPB>
+__global__ void __launch_bounds__(MB_WARPS * WARP) nvfp4_gemv_marlin2_kernel(
+    const uint4 *__restrict__ q0, const unsigned char *__restrict__ s0, const float *__restrict__ g0,
+    const XT *__restrict__ x, float *__restrict__ y, int N, int K,
+    float *__restrict__ part, unsigned int *__restrict__ cpt) {
+    __shared__ float red[TPB * MB_WARPS * MB_TN];
+    __shared__ bool dernier;
+    const int nb = blockIdx.x, S = gridDim.z, z = blockIdx.z;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int KT = K / MB_TK, LN = N / MB_TN;
+    const int kt0 = z * KT / S, kt1 = (z + 1) * KT / S;
+    const int tr = (lane & 3) * 2, c = lane >> 2;
+    constexpr long TUILE = MB_TK * MB_TN / 32;                  // uint4 par tuile
+    const long bw = (long)(nb * TPB) * TUILE + lane;
+    const long bs = (long)(nb * TPB) * MB_TN + 8 * c;
+    float acc[TPB][4][2] = {};
+    int kt = kt0 + warp;
+    for (; kt + MB_WARPS < kt1; kt += 2 * MB_WARPS) {
+        const int k2 = kt + MB_WARPS;
+        uint4 pa[TPB], pb[TPB]; uint2 sa[TPB], sb[TPB];
+        #pragma unroll
+        for (int j = 0; j < TPB; ++j) {
+            pa[j] = q0[bw + j * TUILE + (long)kt * LN * 32];
+            pb[j] = q0[bw + j * TUILE + (long)k2 * LN * 32];
+            sa[j] = *reinterpret_cast<const uint2 *>(s0 + bs + j * MB_TN + (long)kt * N);
+            sb[j] = *reinterpret_cast<const uint2 *>(s0 + bs + j * MB_TN + (long)k2 * N);
+        }
+        const float2 xa01 = mb2_x2(x, kt * MB_TK + tr), xa89 = mb2_x2(x, kt * MB_TK + tr + 8);
+        const float2 xb01 = mb2_x2(x, k2 * MB_TK + tr), xb89 = mb2_x2(x, k2 * MB_TK + tr + 8);
+        #pragma unroll
+        for (int j = 0; j < TPB; ++j) {
+            mb_tuile(pa[j], sa[j], xa01, xa89, acc[j]);
+            mb_tuile(pb[j], sb[j], xb01, xb89, acc[j]);
+        }
+    }
+    for (; kt < kt1; kt += MB_WARPS) {
+        const float2 xa01 = mb2_x2(x, kt * MB_TK + tr), xa89 = mb2_x2(x, kt * MB_TK + tr + 8);
+        #pragma unroll
+        for (int j = 0; j < TPB; ++j) {
+            const uint4 pa = q0[bw + j * TUILE + (long)kt * LN * 32];
+            const uint2 sa = *reinterpret_cast<const uint2 *>(s0 + bs + j * MB_TN + (long)kt * N);
+            mb_tuile(pa, sa, xa01, xa89, acc[j]);
+        }
+    }
+    #pragma unroll
+    for (int j = 0; j < TPB; ++j)
+        #pragma unroll
+        for (int q = 0; q < 4; ++q)
+            #pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                float v = acc[j][q][h];
+                v += __shfl_xor_sync(0xffffffffu, v, 1);
+                v += __shfl_xor_sync(0xffffffffu, v, 2);
+                if ((lane & 3) == 0) red[(j * MB_WARPS + warp) * MB_TN + q * 16 + c + 8 * h] = v;
+            }
+    __syncthreads();
+    for (int i = threadIdx.x; i < TPB * MB_TN; i += blockDim.x) {
+        const int j = i / MB_TN, col = i - j * MB_TN;
+        float t0 = 0.f;
+        #pragma unroll
+        for (int w = 0; w < MB_WARPS; ++w) t0 += red[(j * MB_WARPS + w) * MB_TN + col];
+        const int n = (nb * TPB + j) * MB_TN + col;
+        if (S > 1) { part[(long)z * N + n] = t0; __threadfence(); }
+        else y[n] = t0 * (g0[0] * 0x1p-119f);
+    }
+    if (S == 1) return;
+    __syncthreads();
+    if (threadIdx.x == 0) dernier = (atomicAdd(cpt + nb, 1u) == (unsigned)(S - 1));
+    __syncthreads();
+    if (!dernier) return;
+    __threadfence();
+    const volatile float *vp = part;
+    for (int i = threadIdx.x; i < TPB * MB_TN; i += blockDim.x) {
+        const int n = nb * TPB * MB_TN + i;
+        float t0 = 0.f;
+        for (int zz = 0; zz < S; ++zz) t0 += vp[(long)zz * N + n];     // ordre fixe, comme v1
+        y[n] = t0 * (g0[0] * 0x1p-119f);
+    }
+    if (threadIdx.x == 0) cpt[nb] = 0u;                              // prêt pour le rejeu suivant
+}
+
 // Split-K par lot — OPT-IN (poste7, 19/09, verdict-splitk-b1-19-09) :
 // ACVRAM_GEMV_SPLITK=0 (défaut) : S = 1, noyau d'avant, sortie inchangée ;
 // =1 : S doublé tant que la grille reste sous MB_BLOCS_MIN et que chaque bloc
@@ -2480,6 +2584,43 @@ torch::Tensor nvfp4_gemv_marlin_gateup_slots(torch::Tensor wg, torch::Tensor sg,
                                              torch::Tensor x, int64_t K, int64_t N, int64_t act, int64_t tpb,
                                              c10::optional<torch::Tensor> xscale) {
     return mb_slots_commun(wg, sg, gg, &wu, &su, &gu, slot_e, slot_pair, token_ids, x, K, N, act, tpb, xscale);
+}
+
+// Pièce 130 : hôte du GEMV Marlin v2 (E = 1, une ligne x). ``tpb`` ∈ {1, 2, 4} tuiles de colonnes par bloc ; ``S`` > 0
+// forcé, sinon la règle de v1 (mb_splitk) sur N/64/tpb blocs. Sortie [1, N] fp32, comme v1.
+static int mb_splitk(int NT, int G, int KT);
+static std::pair<float *, unsigned int *> mb_tampons(const torch::Tensor &ref, long n_part, long n_cpt);
+torch::Tensor nvfp4_gemv_marlin2(torch::Tensor w, torch::Tensor s, torch::Tensor g, torch::Tensor x,
+                                 int64_t K, int64_t N, int64_t tpb, int64_t S) {
+    CHECK_CUDA(w); CHECK_CONTIG(w); CHECK_CONTIG(s); CHECK_CONTIG(g); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(w);
+    TORCH_CHECK(w.scalar_type() == torch::kInt && g.scalar_type() == torch::kFloat, "marlin2 : poids int32, g fp32");
+    TORCH_CHECK(s.scalar_type() == torch::kByte || s.scalar_type() == torch::kFloat8_e4m3fn, "marlin2 : échelles S0E5M3");
+    TORCH_CHECK(K % 64 == 0 && N % 64 == 0, "marlin2 : K et N multiples de 64");
+    TORCH_CHECK(w.dim() == 3 && w.size(0) == 1 && w.size(1) == K / 16 && w.size(2) == N * 2, "marlin2 : poids [1, K/16, 2N]");
+    TORCH_CHECK(s.dim() == 3 && s.size(0) == 1 && s.size(1) == K / 16 && s.size(2) == N, "marlin2 : échelles [1, K/16, N]");
+    const int NT = (int)(N / MB_TN), KT = (int)(K / MB_TK);
+    TORCH_CHECK((tpb == 1 || tpb == 2 || tpb == 4) && NT % tpb == 0, "marlin2 : tpb ∈ {1, 2, 4} divisant N/64");
+    const bool bf = x.scalar_type() == torch::kBFloat16;
+    auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
+    TORCH_CHECK(xc.numel() == K, "marlin2 : x [1, K]");
+    const int nb = NT / (int)tpb;
+    const int Sx = S > 0 ? (int)S : mb_splitk(nb, 1, KT);
+    TORCH_CHECK(Sx >= 1 && KT / Sx >= 1, "marlin2 : S trop grand pour K");
+    auto out = torch::empty({1, N}, xc.options().dtype(torch::kFloat));
+    float *part = nullptr; unsigned int *cpt = nullptr;
+    if (Sx > 1) { auto pr = mb_tampons(w, (long)Sx * N, nb); part = pr.first; cpt = pr.second; }
+    dim3 grid(nb, 1, Sx);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    #define M2_L(XT, T, PX) nvfp4_gemv_marlin2_kernel<XT, T><<<grid, MB_WARPS * WARP, 0, stream>>>( \
+        reinterpret_cast<const uint4 *>(w.data_ptr<int>()), reinterpret_cast<const unsigned char *>(s.data_ptr()), \
+        g.data_ptr<float>(), PX, out.data_ptr<float>(), (int)N, (int)K, part, cpt)
+    #define M2_T(XT, PX) do { if (tpb == 1) M2_L(XT, 1, PX); else if (tpb == 2) M2_L(XT, 2, PX); else M2_L(XT, 4, PX); } while (0)
+    if (bf) { M2_T(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
+    else { M2_T(float, xc.data_ptr<float>()); }
+    #undef M2_T
+    #undef M2_L
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
 }
 
 torch::Tensor nvfp4_gemv_marlin(torch::Tensor w, torch::Tensor s, torch::Tensor g,
@@ -4277,7 +4418,10 @@ __global__ void kv_write_k8v4_kernel(
     const __nv_bfloat16 *__restrict__ k, const __nv_bfloat16 *__restrict__ v,
     const long *__restrict__ slots, signed char *__restrict__ kc,
     unsigned char *__restrict__ vc4, __half *__restrict__ ks, __half *__restrict__ vs4,
-    int H, int D, int bs, long sk, long sv) {
+    int H, int D, int bs, long sk, long sv,
+    // repli 104 (1) : positions absolues et réserve des puits (nuls : pas de puits)
+    const long *__restrict__ positions = nullptr, signed char *__restrict__ puits_v = nullptr,
+    __half *__restrict__ puits_vs = nullptr, int puits = 0) {
     __shared__ float red[32];
     const int t = blockIdx.x, h = blockIdx.y;
     const long slot = slots[t];
@@ -4331,11 +4475,39 @@ __global__ void kv_write_k8v4_kernel(
                 (unsigned char)((q & 0xF) | ((voisin & 0xF) << 4));
         if (lane == 0) vs4[(pos * H + h) * (D / 32) + w] = __float2half(s);
     }
+    // ---- puits : V AUSSI en int8 par jeton (chemin K ci-dessus, division IEEE), dans la réserve ----
+    // Le quartet est écrit quand même : un lecteur qui ignore les puits reste juste.
+    if (puits > 0 && positions[t] < puits) {           // uniforme dans le bloc (un jeton, une tête)
+        const __nv_bfloat16 *src = v + (long)t * sv + (long)h * D;
+        float amax = 0.f;
+        for (int i = threadIdx.x; i < D; i += blockDim.x)
+            amax = fmaxf(amax, fabsf(__bfloat162float(src[i])));
+        for (int o = 16; o > 0; o >>= 1)
+            amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+        __syncthreads();                                   // red[] relu par la section K
+        if (lane == 0) red[w] = amax;
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            float m = 0.f;
+            for (int i = 0; i < nw; ++i) m = fmaxf(m, red[i]);
+            red[0] = fmaxf(__fdiv_rn(m, 127.f), 1e-8f);
+        }
+        __syncthreads();
+        const float sc = red[0];
+        signed char *dst = puits_v + (pos * H + h) * D;
+        for (int i = threadIdx.x; i < D; i += blockDim.x) {
+            const int q = __float2int_rn(__fdiv_rn(__bfloat162float(src[i]), sc));
+            dst[i] = (signed char)max(-127, min(127, q));
+        }
+        if (threadIdx.x == 0) puits_vs[pos * H + h] = __float2half(sc);
+    }
 }
 
-void kv_write_k8v4(torch::Tensor k, torch::Tensor v, torch::Tensor slots,
-                   torch::Tensor kc, torch::Tensor vc4,
-                   torch::Tensor ks, torch::Tensor vs4, int64_t bs) {
+void kv_write_k8v4_gen(torch::Tensor k, torch::Tensor v, torch::Tensor slots,
+                       torch::Tensor kc, torch::Tensor vc4,
+                       torch::Tensor ks, torch::Tensor vs4, int64_t bs,
+                       torch::Tensor positions, torch::Tensor puits_v, torch::Tensor puits_vs,
+                       int64_t puits) {
     CHECK_CUDA(k); ACVRAM_DEVICE_GUARD(k);
     TORCH_CHECK(k.scalar_type() == torch::kBFloat16 && v.scalar_type() == torch::kBFloat16,
                 "cache KV k8v4 : k et v en bf16");
@@ -4366,8 +4538,31 @@ void kv_write_k8v4(torch::Tensor k, torch::Tensor v, torch::Tensor slots,
         vc4.data_ptr<unsigned char>(),
         reinterpret_cast<__half *>(ks.data_ptr()),
         reinterpret_cast<__half *>(vs4.data_ptr()), H, D, (int)bs,
-        (long)kk.stride(0), (long)vv.stride(0));
+        (long)kk.stride(0), (long)vv.stride(0),
+        puits > 0 ? positions.data_ptr<long>() : nullptr,
+        puits > 0 ? puits_v.data_ptr<signed char>() : nullptr,
+        puits > 0 ? reinterpret_cast<__half *>(puits_vs.data_ptr()) : nullptr, (int)puits);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void kv_write_k8v4(torch::Tensor k, torch::Tensor v, torch::Tensor slots,
+                   torch::Tensor kc, torch::Tensor vc4,
+                   torch::Tensor ks, torch::Tensor vs4, int64_t bs) {
+    kv_write_k8v4_gen(k, v, slots, kc, vc4, ks, vs4, bs, torch::Tensor(), torch::Tensor(), torch::Tensor(), 0);
+}
+
+// Repli 104 (1) : k8v4 + puits — V aussi en int8 par jeton dans la réserve aux positions < puits.
+void kv_write_k8v4_puits(torch::Tensor k, torch::Tensor v, torch::Tensor slots, torch::Tensor positions,
+                         torch::Tensor kc, torch::Tensor vc4, torch::Tensor ks, torch::Tensor vs4,
+                         torch::Tensor puits_v, torch::Tensor puits_vs, int64_t bs, int64_t puits) {
+    TORCH_CHECK(puits > 0 && puits <= bs, "kv_write_k8v4_puits : 0 < puits <= taille de bloc");
+    TORCH_CHECK(positions.scalar_type() == torch::kLong && positions.numel() == slots.numel()
+                && positions.is_contiguous(), "kv_write_k8v4_puits : une position int64 par jeton, contiguë");
+    TORCH_CHECK(puits_v.scalar_type() == torch::kChar && puits_v.sizes() == kc.sizes()
+                && puits_vs.scalar_type() == torch::kHalf && puits_vs.sizes() == ks.sizes()
+                && puits_v.is_contiguous() && puits_vs.is_contiguous(),
+                "kv_write_k8v4_puits : réserve int8 de la forme de kc, échelles half de la forme de ks");
+    kv_write_k8v4_gen(k, v, slots, kc, vc4, ks, vs4, bs, positions, puits_v, puits_vs, puits);
 }
 
 
@@ -4691,7 +4886,26 @@ torch::Tensor moe_reduce(torch::Tensor d, torch::Tensor topw, int64_t k) {
 // sortie Marlin (chaque ligne accumule seule sur K), mais un tri stable rend les tampons comparables.
 __global__ void moe_aligner_petit_kernel(const int *__restrict__ eid, int G, int E, int bloc, int P,
                                          int *__restrict__ sorted_ids, int *__restrict__ expert_ids,
-                                         int *__restrict__ num_post) {
+                                         int *__restrict__ num_post,
+                                         const __nv_bfloat16 *__restrict__ x = nullptr,
+                                         const __nv_bfloat16 *__restrict__ table = nullptr,
+                                         __nv_bfloat16 *__restrict__ xs = nullptr, int K = 0, int top_k = 1,
+                                         long ld_table = 0) {
+    // Pièce 123 : blocs 1.. (lancés seulement si xs est demandé) — entrée AWQ PAR PAIRE du chemin tensor,
+    // xs[g, k] = bf16(x[g / top_k, k] / table[e(g), k]), division IEEE (__fdiv_rn : --use_fast_math rendrait
+    // l'approchée ; le témoin torch divise en IEEE) — ligne par ligne celle de moe.py (x[tok] / s[eid], bf16).
+    // Fantômes (eid < 0) : expert 0 (leur poids est nul au reduce). Le bloc 0 aligne, comme avant.
+    if (blockIdx.x > 0) {
+        const long n = (long)G * K, pas = (long)(gridDim.x - 1) * blockDim.x;
+        for (long i = (long)(blockIdx.x - 1) * blockDim.x + threadIdx.x; i < n; i += pas) {
+            const int g = (int)(i / K), k = (int)(i - (long)g * K);
+            const int e = max(eid[g], 0);
+            const float v = __bfloat162float(x[(long)(g / top_k) * K + k]);
+            const float sc = __bfloat162float(table[(long)e * ld_table + k]);   // table [E, ≥ K] : pas de ligne réel
+            xs[i] = __float2bfloat16(__fdiv_rn(v, sc));
+        }
+        return;
+    }
     // v2 (pièce 63/2) : préfixe par balayage de warp (plus de boucle sérielle sur E), eid en mémoire
     // partagée, rembourrage écrit sur les seules positions libres (3 barrières au lieu de 5).
     extern __shared__ int sh_aligneur[];
@@ -4748,6 +4962,38 @@ void moe_aligner_petit(torch::Tensor eid, int64_t E, int64_t bloc,
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// Pièce 123 : le même aligneur, qui écrit AUSSI l'entrée AWQ par paire du chemin tensor (xs [G, K] bf16) —
+// un lancement : bloc 0 = alignement (inchangé), blocs 1.. = xs.
+void moe_aligner_petit_xs(torch::Tensor eid, int64_t E, int64_t bloc,
+                          torch::Tensor sorted_ids, torch::Tensor expert_ids, torch::Tensor num_post,
+                          torch::Tensor x, torch::Tensor table, int64_t top_k, torch::Tensor xs) {
+    CHECK_CUDA(eid); CHECK_CUDA(x); CHECK_CUDA(table); CHECK_CUDA(xs); ACVRAM_DEVICE_GUARD(eid);
+    CHECK_CONTIG(eid); CHECK_CONTIG(sorted_ids); CHECK_CONTIG(expert_ids); CHECK_CONTIG(x); CHECK_CONTIG(xs);
+    TORCH_CHECK(eid.scalar_type() == torch::kInt && sorted_ids.scalar_type() == torch::kInt
+                && expert_ids.scalar_type() == torch::kInt && num_post.scalar_type() == torch::kInt,
+                "moe_aligner_petit_xs : int32 partout");
+    TORCH_CHECK(x.scalar_type() == torch::kBFloat16 && table.scalar_type() == torch::kBFloat16
+                && xs.scalar_type() == torch::kBFloat16, "moe_aligner_petit_xs : x, table et xs en bf16");
+    const int G = (int)eid.numel(), P = (int)sorted_ids.numel(), K = (int)x.size(1);
+    TORCH_CHECK(P % bloc == 0 && P >= G + (E - 1) * (bloc - 1) && expert_ids.numel() * bloc >= P,
+                "moe_aligner_petit_xs : tampons trop petits");
+    TORCH_CHECK(E <= 4096, "moe_aligner_petit_xs : E > 4096");
+    TORCH_CHECK(x.dim() == 2 && (long)x.size(0) * top_k == G, "moe_aligner_petit_xs : x [G / top_k, K], paires jeton-majeur");
+    TORCH_CHECK(table.dim() == 2 && table.size(0) >= E && table.size(1) >= K && table.stride(1) == 1,
+                "moe_aligner_petit_xs : table [E, >= K], lignes contiguës");
+    TORCH_CHECK(xs.dim() == 2 && xs.size(0) == G && xs.size(1) == K, "moe_aligner_petit_xs : xs [G, K]");
+    const size_t shm = (2 * (size_t)E + (size_t)G) * sizeof(int);
+    const long n = (long)G * K;
+    const int blocs_xs = (int)std::min<long>((n + 255) / 256, 512);
+    moe_aligner_petit_kernel<<<1 + blocs_xs, 256, shm, at::cuda::getCurrentCUDAStream()>>>(
+        eid.data_ptr<int>(), G, (int)E, (int)bloc, P,
+        sorted_ids.data_ptr<int>(), expert_ids.data_ptr<int>(), num_post.data_ptr<int>(),
+        reinterpret_cast<const __nv_bfloat16 *>(x.data_ptr()),
+        reinterpret_cast<const __nv_bfloat16 *>(table.data_ptr()),
+        reinterpret_cast<__nv_bfloat16 *>(xs.data_ptr()), K, (int)top_k, (long)table.stride(0));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 // --------------------------------------------------------------------------
 // Glue du prefill MoE (jetons triés par expert), deux lancements au lieu de
 // douze. Le profil du 13/09 (revue/mma-fp4-native-sm120.md) donnait 25 % du
@@ -4796,7 +5042,8 @@ __global__ void moe_act_kernel(const __nv_bfloat16 *__restrict__ g,
         if (awq) {
             // échelle AWQ par expert de down_proj : même suite qu'en boucle,
             // bf16(act) / bf16(s[e]) puis arrondi bf16 (ChannelScaler.apply)
-            const float s = __bfloat162float(awq[(long)e_sorted[r] * Kd + c]);
+            // fantômes (e_sorted < 0, chemin tensor, pièce 123) : expert 0 — leur poids est nul au reduce
+            const float s = __bfloat162float(awq[(long)max(e_sorted[r], 0) * Kd + c]);
             v = __bfloat162float(__float2bfloat16(v)) / s;
         }
     }
@@ -5767,8 +6014,22 @@ torch::Tensor paged_attention_gen(torch::Tensor q, torch::Tensor kc,
                                   torch::Tensor tampon, torch::Tensor tampon_de,
                                   torch::Tensor tables,
                                   torch::Tensor seq_lens, int64_t hkv,
-                                  double scale, int64_t q_len, int64_t window) {
+                                  double scale, int64_t q_len, int64_t window,
+                                  torch::Tensor puits_v = torch::Tensor(),
+                                  torch::Tensor puits_vs = torch::Tensor(), int64_t puits = 0) {
     CHECK_CUDA(q); CHECK_CUDA(kc); CHECK_CUDA(tables);
+    const signed char *p_puits_v = nullptr;
+    const __half *p_puits_vs = nullptr;
+    if (puits > 0) {
+        TORCH_CHECK(V4, "attention paginee : puits seulement en k8v4");
+        CHECK_CUDA(puits_v); CHECK_CONTIG(puits_v); CHECK_CONTIG(puits_vs);
+        TORCH_CHECK(puits_v.scalar_type() == torch::kChar && puits_vs.scalar_type() == torch::kHalf
+                    && puits_v.sizes() == kc.sizes() && puits_vs.sizes() == ks.sizes(),
+                    "attention paginee k8v4 puits : puits_v int8 de la forme de kc, puits_vs half de la forme de ks");
+        TORCH_CHECK(puits <= 16, "attention paginee k8v4 puits : au plus un bloc");
+        p_puits_v = puits_v.data_ptr<signed char>();
+        p_puits_vs = reinterpret_cast<const __half *>(puits_vs.data_ptr());
+    }
     ACVRAM_DEVICE_GUARD(q);
     CHECK_CONTIG(q); CHECK_CONTIG(kc); CHECK_CONTIG(vc);
     if (V4) {
@@ -5919,7 +6180,7 @@ torch::Tensor paged_attention_gen(torch::Tensor q, torch::Tensor kc,
             reinterpret_cast<const __half *>(ks.data_ptr()), \
             reinterpret_cast<const signed char *>(vc.data_ptr()), \
             reinterpret_cast<const __half *>(vs.data_ptr()), \
-            p_sc, p_tampon, p_tampon_de, \
+            p_sc, p_tampon, p_tampon_de, p_puits_v, p_puits_vs, (int)puits, \
             tables.data_ptr<long>(), seq_lens.data_ptr<long>(), \
             part.data_ptr<float>(), pm.data_ptr<float>(), \
             pl.data_ptr<float>(), (C == 1 ? (PO) : nullptr), \
@@ -5968,6 +6229,19 @@ torch::Tensor paged_attention_k8v4(torch::Tensor q, torch::Tensor kc,
     return paged_attention_gen<false, true>(q, kc, ks, vc, vs, torch::Tensor(), torch::Tensor(),
                                             torch::Tensor(), tables, seq_lens, hkv, scale,
                                             q_len, window);
+}
+
+// Repli 104 (1) : k8v4 + puits — les `puits` premières positions de chaque séquence lues en V int8 dans la
+// réserve (écrite par kv_write_k8v4_puits), le reste en quartets.
+torch::Tensor paged_attention_k8v4_puits(torch::Tensor q, torch::Tensor kc,
+                                         torch::Tensor ks, torch::Tensor vc,
+                                         torch::Tensor vs, torch::Tensor puits_v, torch::Tensor puits_vs,
+                                         torch::Tensor tables, torch::Tensor seq_lens, int64_t hkv,
+                                         double scale, int64_t q_len, int64_t window, int64_t puits) {
+    TORCH_CHECK(puits > 0, "paged_attention_k8v4_puits : puits > 0 attendu");
+    return paged_attention_gen<false, true>(q, kc, ks, vc, vs, torch::Tensor(), torch::Tensor(),
+                                            torch::Tensor(), tables, seq_lens, hkv, scale,
+                                            q_len, window, puits_v, puits_vs, puits);
 }
 
 // C5-b : clés par canal (sc E4M3 par bloc, bloc courant bf16 dans la réserve).
@@ -7852,6 +8126,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("w"), py::arg("s"), py::arg("g"), py::arg("expert_ids"), py::arg("token_ids"),
           py::arg("x"), py::arg("K"), py::arg("N"), py::arg("xscale") = c10::nullopt,
           "NVFP4 : GEMV groupée lisant la DISPOSITION MARLIN (forme (b), P1 disposition unique)");
+    m.def("nvfp4_gemv_marlin2", &nvfp4_gemv_marlin2, py::arg("w"), py::arg("s"), py::arg("g"), py::arg("x"),
+          py::arg("K"), py::arg("N"), py::arg("tpb") = 2, py::arg("S") = -1,
+          "Pièce 130 : GEMV disposition Marlin v2 (E = 1) — tpb tuiles par bloc, x en global (K libre), S forcé si > 0 ; au bit de v1 à S égal");
     m.def("nvfp4_gemv_marlin_splitk", &nvfp4_gemv_marlin_splitk,
           "S du split-K que prendrait nvfp4_gemv_marlin(K, N, G) : 1 sauf ACVRAM_GEMV_SPLITK");
     m.def("nvfp4_gemv_marlin_gateup", &nvfp4_gemv_marlin_gateup,
@@ -7939,6 +8216,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "un lancement ; vc4 uint8 [.., D/2], vs4 half [.., D/32]");
     m.def("paged_attention_k8v4", &paged_attention_k8v4,
           "Piece 104 : attention de decodage fusionnee, K int8 par jeton, V int4 par groupe de 32");
+    m.def("kv_write_k8v4_puits", &kv_write_k8v4_puits,
+          "Repli 104 (1) : k8v4 + V int8 par jeton aux positions < puits, dans une reserve de la forme de K");
+    m.def("paged_attention_k8v4_puits", &paged_attention_k8v4_puits,
+          "Repli 104 (1) : attention k8v4, positions < puits lues en V int8 dans la reserve");
     m.def("kv_write_int8_canal", &kv_write_int8_canal,
           "C5-b : cache KV int8, cles par canal sur chaque bloc (roles, ecriture, fermeture : "
           "trois lancements), V par jeton ; sc E4M3 [NB,HKV,D], tampon bf16 [R,16,HKV,D], "
@@ -7957,6 +8238,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("moe_aligner_petit", &moe_aligner_petit, py::arg("eid"), py::arg("E"), py::arg("bloc"),
           py::arg("sorted_ids"), py::arg("expert_ids"), py::arg("num_post"),
           "Pièce 63 : aligneur du chemin tensor en un lancement (fantômes −1 → expert 0), tampons fixes");
+    m.def("moe_aligner_petit_xs", &moe_aligner_petit_xs, py::arg("eid"), py::arg("E"), py::arg("bloc"),
+          py::arg("sorted_ids"), py::arg("expert_ids"), py::arg("num_post"), py::arg("x"), py::arg("table"),
+          py::arg("top_k"), py::arg("xs"),
+          "Pièce 123 : aligneur + entrée AWQ par paire du chemin tensor (xs = bf16(x[g/top_k] / table[e(g)]), IEEE), un lancement");
     m.def("moe_route", &moe_route, "routage MoE : scores, biais, top-k, poids");
     m.def("rmsnorm_bf16", &rmsnorm_bf16,
           "RMSNorm bf16 fusionnee (variance fp32), residu optionnel",

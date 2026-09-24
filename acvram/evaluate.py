@@ -94,6 +94,9 @@ class EvalResult:
     # decroissant sur une autre. Comparer deux moteurs au meme nombre de
     # fenetres exige de connaitre ce cumul ; llama.cpp le rend, acvram non.
     cumul: dict[int, float] = field(default_factory=dict)
+    # 24/09 (pièce 130, ordre du chef) : (Σ NLL, jetons notés) de CHAQUE fenêtre, dans l'ordre — l'écart relatif par
+    # fenêtre entre deux chemins et un vrai SEM (delta method) en ont besoin ; le chiffre global n'en dépend pas.
+    par_fenetre: list = field(default_factory=list)
     # Le cadrage voyage avec le chiffre : sans lui, « 7,23 » et « 137 » ont
     # l'air de decrire le meme objet.
     min_context: int = 0
@@ -106,6 +109,7 @@ class EvalResult:
             "nll": round(self.nll, 6),
             "tokens": self.tokens,
             "windows": self.windows,
+            "par_fenetre": [[round(a, 6), b] for a, b in self.par_fenetre],
             "seconds": round(self.seconds, 2),
             "weights_bytes": self.weights_bytes,
             "bits_par_poids_en_memoire": round(self.bits_par_poids_en_memoire, 3),
@@ -172,6 +176,18 @@ def _load_corpus(path: Optional[str]) -> str:
     return DEFAULT_CORPUS
 
 
+def _identite_corpus(corpus_path: Optional[str], texte: str) -> tuple[str, int, str]:
+    """(corpus_chemin, corpus_octets, corpus_sha256) — piece 132 (chef) : le chemin ABSOLU (souvent
+    /home/<utilisateur>/...) a fait sauter le cliquet d'identite a la fusion de poste2. `corpus_sha256`
+    identifie deja le contenu sans ambiguite ; corpus_chemin ne porte plus que le NOM du fichier,
+    jamais son chemin — testee directement (tests/test_evaluate_corpus_identite.py)."""
+    if corpus_path and os.path.isfile(corpus_path):
+        return (os.path.basename(corpus_path), os.path.getsize(corpus_path),
+                hashlib.sha256(open(corpus_path, "rb").read()).hexdigest()[:24])
+    return ("(corpus par defaut, integre)", len(texte.encode("utf-8")),
+            hashlib.sha256(texte.encode("utf-8")).hexdigest()[:24])
+
+
 def perplexity(model_dir: str, corpus_path: Optional[str] = None,
                window: int = 512, stride: int = 256,
                max_tokens: int = 8192, device: Optional[str] = None,
@@ -229,16 +245,7 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
         apres_chargement(model)
     result = EvalResult(model=os.path.basename(os.path.abspath(model_dir)),
                         min_context=min_context, window=window)
-    if corpus_path and os.path.isfile(corpus_path):
-        result.corpus_chemin = os.path.abspath(corpus_path)
-        result.corpus_octets = os.path.getsize(corpus_path)
-        result.corpus_sha256 = hashlib.sha256(
-            open(corpus_path, "rb").read()).hexdigest()[:24]
-    else:
-        result.corpus_chemin = "(corpus par defaut, integre)"
-        result.corpus_octets = len(texte.encode("utf-8"))
-        result.corpus_sha256 = hashlib.sha256(
-            texte.encode("utf-8")).hexdigest()[:24]
+    result.corpus_chemin, result.corpus_octets, result.corpus_sha256 = _identite_corpus(corpus_path, texte)
     result.weights_bytes = model.nbytes
     # INDICATIF, jamais diviseur : voir la mise en garde de bench.py. Les
     # octets reellement alloues sont dans nbytes_detail.octets_stockage_uniques.
@@ -316,6 +323,7 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
         nll = pertes.sum()
         total_nll += float(nll)
         counted += int(pertes.numel())
+        result.par_fenetre.append((float(nll), int(pertes.numel())))
         del h
         if torch.cuda.is_available() and h_device_cuda(model):
             torch.cuda.empty_cache()

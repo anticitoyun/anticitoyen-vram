@@ -821,6 +821,12 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         # `MoEBlock._chemin` (REGLES § 7 : noyau atteint, pas fonction appelée).
         chemin_moe += "(" + chemin_moe_atteint(
             [m.__dict__.get("chemins", {}) for m in self.model.modules() if isinstance(m, MoEBlock)]) + ")"
+        # Piece 127 (poste6) : variable de regime posee mais sans effet (disposition unique) ->
+        # la ligne le dit, au lieu de laisser croire qu'elle a agi.
+        inertes_moe = sorted(set().union(
+            *(m.__dict__.get("_inertes", set()) for m in self.model.modules() if isinstance(m, MoEBlock))))
+        if inertes_moe:
+            chemin_moe += "+" + "+".join(inertes_moe)
         if os.environ.get("ACVRAM_GRAPHES_TABLE") == "0":
             chemin_moe += "+pile" if piles_ok else "+pile(désactivé)"
         # Pièce 65 : chemin tensor par défaut (godets ≥ 2) ; la ligne porte le repli STATIQUE nommé par couche
@@ -830,6 +836,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                             for m in self.model.modules() if isinstance(m, MoEBlock)} - {""})
             from .moe import _MOE_TENSOR_MIN_T
             chemin_moe += f"+tensor(b≥{_MOE_TENSOR_MIN_T}" + ("" if not refus else ",repli:" + " ; ".join(refus)) + ")"
+            if os.environ.get("ACVRAM_AWQ_TENSOR", "0") == "1":
+                chemin_moe += "+awq-tensor(opt-in)"          # pièce 123 : hors défaut, dit sur la ligne
             if os.environ.get("ACVRAM_MOE_TENSOR_FUSION", "1") != "1":
                 chemin_moe += "-glue-a4"
         else:
@@ -894,7 +902,9 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # échelles d'experts). Lu sur les blocs, pas sur une variable.
             "echelle_awq": _regime_echelle_awq(self.model),
             # linéaires INT8 du décodage : triton≥b|cuda (poste C, bascule mesurée)
-            "dense": kernels.narrow_regime(),
+            "dense": kernels.narrow_regime() + (                  # pièce 129 : disposition Marlin (opt-in), bilan du chargement
+                "+marlin(doubles={doubles},seuls={seuls},{go:.2f}Go,kv={capacite_kv})".format(go=b["octets_doubles"] / 2**30, **b)
+                if (b := getattr(self.model, "proj_marlin_bilan", None)) else ""),
             "gdn": _gdn_regime(),
             "noyaux": regime_noyaux()["hors_defaut"],
             "eco": _etat_eco(),
@@ -927,6 +937,11 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                         fmt = "int8-canal16"
                 except Exception:                                    # noqa: BLE001
                     pass
+                # Repli 104 (1) : le nombre de positions puits lu sur les caches construits — l'alarme du scellé
+                # (`scelle-puits.md`) exige qu'un bras candidat qui n'aurait AUCUN puits ne passe pas pour « k8v4+puits16 ».
+                puits = sorted({int(getattr(c.cfg, "puits", 0) or 0) for c in self.model.caches.values()})
+                if fmt == "k8v4" and any(puits):
+                    fmt += "+puits" + "|".join(map(str, puits))
                 return fmt
             from . import mla as _mla
             return "latent-fp8" if getattr(_mla, "_MLA_LATENT_FP8", False) else "latent-bf16"

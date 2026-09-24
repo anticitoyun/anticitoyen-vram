@@ -409,7 +409,7 @@ def test_qwen3_vl_2b_cpu_positions_3d_et_delta_contre_get_rope_index():
     from acvram.engine.config import load_model_spec
     from acvram.engine.mrope import grille_de
     from acvram.server.chat import _par_image
-    verrou = "/tmp/acvram-carte-0.lock.qui"
+    verrou = "/tmp/acvram-carte-0.lock.qui"  # lecture seule du vrai verrou : on attend, on n'y écrit jamais
     t0 = time.time()
     while os.path.exists(verrou) and os.path.getsize(verrou) > 0 and time.time() - t0 < 1200:
         time.sleep(30)                                       # une prise sur la carte : on attend

@@ -576,6 +576,29 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
     de déquantification est payé une seule fois pour tout le lot et le produit
     matriciel de cuBLAS est bien mieux réglé que tout ce qu'on écrirait ici.
     """
+    # Pièce 129 (opt-in ACVRAM_PROJ_MARLIN) : poids en disposition Marlin SEULE (naturelle libérée) — tout M passe
+    # par Marlin ; une vue d'une pile Marlin seule calcule la pile et garde ses colonnes (préfill > SEUIL_FUSION).
+    parent = getattr(t, "_marlin_parent", None)
+    if parent is not None:
+        pile, d, n_lig = parent
+        m = x.reshape(-1, x.shape[-1]).shape[0]
+        if (m > _NVFP4_GEMV_MAX and prefill_regime() == "bf16" and d % 64 == 0 and n_lig % 64 == 0
+                and getattr(pile, "_marlin_unique", False)):
+            # pièce 134 : le segment seul, déquantifié exactement depuis la disposition Marlin (tuiles de 64 colonnes
+            # contiguës par ligne k), comme le défaut déquantifie la vue — au bit, au même coût
+            from . import marlin_port as MP
+            w, s_, g, N, k_pad = pile._marlin_dense
+            CHEMINS_NVFP4["marlin_depaquete_prefill_vue"] += 1
+            gv = g[d:d + n_lig] if g.numel() == N else g
+            W = MP.depaqueter_marlin(w[:, 2 * d:2 * (d + n_lig)].contiguous(), s_[:, d:d + n_lig].contiguous(), gv,
+                                     k_pad, n_lig)
+            if k_pad != t.shape[1]:
+                W = W[:, : t.shape[1]]
+            dt = x.dtype if x.dtype != torch.float32 else torch.bfloat16
+            return torch.nn.functional.linear(x, W.to(dt).to(x.dtype))
+        return nvfp4_matmul(x, pile, gemv_threshold)[..., d:d + n_lig]
+    if getattr(t, "_marlin_unique", False):
+        return _marlin_seul(x, t)
     if not t.qweight.is_cuda:
         # Étage hôte : on lit les poids empaquetés sur place, plutôt que de les
         # copier vers le GPU ou de les étendre d'abord en 16 bits.
@@ -940,6 +963,160 @@ def _marlin_dense(xf: torch.Tensor, t):
     if xf.shape[-1] != k_pad:
         xf = torch.nn.functional.pad(xf, (0, k_pad - xf.shape[-1]))
     return MP.gemm_dense(xf.contiguous(), w, s_, g, N, k_pad, ws)[:, : t.shape[0]]
+
+
+_PROJ_MARLIN_MIN_N = int(os.environ.get("ACVRAM_PROJ_MARLIN_MIN_N", "2048"))    # k/v (N 1 024) plus lents en Marlin
+# Pièce 129 (A) : rôles gardés en DEUX dispositions (naturelle pour M = 1, Marlin pour M ≥ 2) — ceux où le GEMV
+# Marlin à M = 1 perd le plus (revue/verdict-129-1-gemv-marlin-m1-24-09 : +17 %, +17 %, +25 %) ; ailleurs Marlin SEUL.
+_PROJ_MARLIN_DOUBLES = frozenset(r for r in os.environ.get(
+    "ACVRAM_PROJ_MARLIN_DOUBLES", "mlp.gate_up,mlp.down,gdn.out").split(",") if r)
+# Pièce 130 (opt-in) : GEMV Marlin v2 à M = 1 pour les poids en disposition Marlin seule — TPB tuiles de colonnes par
+# bloc, x en global (K libre : down en un lancement) ; S = 0 : règle de v1 (mb_splitk) sur N/64/TPB blocs.
+_GEMV_MARLIN_V2 = os.environ.get("ACVRAM_GEMV_MARLIN_V2", "0") == "1"
+_GEMV_MARLIN_TPB = int(os.environ.get("ACVRAM_GEMV_MARLIN_TPB", "2"))
+_GEMV_MARLIN_S = int(os.environ.get("ACVRAM_GEMV_MARLIN_S", "0"))
+_GEMV_MARLIN_KMAX = 11264          # nvfp4_gemv_marlin : x en mémoire partagée fp32 (acvram_kernels.cu, mb_verifier)
+
+
+def _marlin_seul(x: torch.Tensor, t):
+    """Pièce 129 : ``x @ W.T`` pour un poids dont SEULE la disposition Marlin reste (`preparer_disposition_marlin`).
+    M = 1 : `nvfp4_gemv_marlin` (E = 1 ; K > 11 264 en deux moitiés de K sommées ; échelle globale par colonne des
+    piles appliquée en fp32 après coup) ; M ≥ 2 : GEMM Marlin dense, quel que soit M (préfill compris)."""
+    from . import marlin_port as MP
+    w, s_, g, N, k_pad = t._marlin_dense
+    orig = x.shape
+    xf = x.reshape(-1, orig[-1])
+    if xf.shape[-1] != k_pad:
+        xf = torch.nn.functional.pad(xf, (0, k_pad - xf.shape[-1]))
+    xf = xf.to(torch.bfloat16).contiguous()
+    if xf.shape[0] == 1:
+        ext = get_extension()
+        CHEMINS_NVFP4["marlin_gemv_seul"] += 1
+        z = t._marlin_zero
+        gs = g if g.numel() == 1 else t._marlin_un
+        w3, s3 = w[None], s_[None]
+        if _GEMV_MARLIN_V2 and hasattr(ext, "nvfp4_gemv_marlin2"):
+            tpb = _GEMV_MARLIN_TPB if (N // 64) % _GEMV_MARLIN_TPB == 0 else 1
+            y = ext.nvfp4_gemv_marlin2(w3, s3, gs, xf, k_pad, N, tpb, _GEMV_MARLIN_S)
+        elif k_pad <= _GEMV_MARLIN_KMAX:
+            y = ext.nvfp4_gemv_marlin(w3, s3, gs, z, z, xf, k_pad, N)
+        else:
+            h = (k_pad // 2) // 64 * 64
+            y = (ext.nvfp4_gemv_marlin(w3[:, : h // 16], s3[:, : h // 16], gs, z, z, xf[:, :h].contiguous(), h, N)
+                 + ext.nvfp4_gemv_marlin(w3[:, h // 16:], s3[:, h // 16:], gs, z, z, xf[:, h:].contiguous(), k_pad - h, N))
+        if g.numel() != 1:
+            y = y * g
+        y = y.to(x.dtype)
+    elif xf.shape[0] > _NVFP4_GEMV_MAX and prefill_regime() == "bf16":
+        # Pièce 134 : au PRÉFILL (M > seuil GEMV), l'arithmétique du défaut — déquantification exacte (dépaquetage de
+        # la disposition Marlin, au bit de `nvfp4_dequant`) puis cuBLAS bf16. La GEMM Marlin y portait TOUT l'excès de
+        # KL de l'unique (0,00545 au pas 0, revue/verdict-134-kl-par-source-24-09) ; le décodage (M ≤ 32) garde Marlin.
+        CHEMINS_NVFP4["marlin_depaquete_prefill"] += 1
+        # comme le défaut (fin de nvfp4_matmul) : W [N, K] non rembourré, x d'origine, F.linear au dtype de x
+        dt = x.dtype if x.dtype != torch.float32 else torch.bfloat16
+        W = MP.depaqueter_marlin(w, s_, g, k_pad, N)
+        if k_pad != t.shape[1]:
+            W = W[:, : t.shape[1]]
+        y = torch.nn.functional.linear(x.reshape(-1, orig[-1]), W.to(dt).to(x.dtype))
+        return y[:, : t.shape[0]].reshape(*orig[:-1], t.shape[0])
+    else:
+        CHEMINS_NVFP4["marlin_dense_seul"] += 1
+        ws = _MARLIN_ESPACES.get(xf.device)
+        if ws is None:
+            ws = _MARLIN_ESPACES[xf.device] = MP.espace_travail(xf.device)
+        y = MP.gemm_dense(xf, w, s_, g, N, k_pad, ws).to(x.dtype)
+    return y[:, : t.shape[0]].reshape(*orig[:-1], t.shape[0])
+
+
+def role_marlin(module, attr: str) -> str:
+    """Rôle d'un linéaire dense pour la disposition mixte : « mlp.gate_up », « mlp.down », « gdn.out », sinon ""."""
+    nom = type(module).__name__
+    if nom == "MLP":
+        return {"gate_up": "mlp.gate_up", "gate_proj": "mlp.gate_up", "up_proj": "mlp.gate_up",
+                "down_proj": "mlp.down"}.get(attr, "")
+    if nom == "GatedDeltaNet" and attr == "out_proj":
+        return "gdn.out"
+    return ""
+
+
+def preparer_disposition_marlin(modele) -> dict:
+    """Pièce 129 (opt-in ACVRAM_PROJ_MARLIN=1), appelée par le chargeur APRÈS les fusions et AVANT l'allocation du
+    KV : chaque poids NVFP4 dense éligible (N ≥ ACVRAM_PROJ_MARLIN_MIN_N, K et N multiples de 64, hors MoE et hors
+    flux) reçoit sa disposition Marlin ; les rôles de `_PROJ_MARLIN_DOUBLES` gardent aussi la naturelle, les autres
+    la LIBÈRENT (une copie de poids, jamais deux). Les vues d'une pile (sources de l'empilement, servies au préfill)
+    passent par la pile. Rend le bilan (octets doublés, nombre de poids par mode) pour la ligne de régime."""
+    from ..quant.nvfp4 import NVFP4Tensor
+    from . import marlin_port as MP
+    if MP.charger(compiler=False) is None:
+        raise RuntimeError("ACVRAM_PROJ_MARLIN=1 : port Marlin non compilé (outils/banc-marlin-p1-18-09.py "
+                           "--compiler-seulement) — la disposition Marlin est refusée au chargement")
+    ext = get_extension()
+    if ext is None or not hasattr(ext, "nvfp4_gemv_marlin"):
+        raise RuntimeError("ACVRAM_PROJ_MARLIN=1 : extension sans nvfp4_gemv_marlin — disposition Marlin refusée")
+    sous_moe = set()
+    for m in modele.modules():
+        if type(m).__name__.startswith("MoEBlock"):
+            sous_moe.update(id(x) for x in m.modules())
+    candidats = {}                                                       # id(tenseur) -> (tenseur, rôle)
+    en_flux: set = set()
+    for m in modele.modules():
+        if id(m) in sous_moe:
+            continue
+        for attr, sous in m.named_children():
+            t = getattr(sous, "qweight", None)
+            if isinstance(t, NVFP4Tensor) and getattr(sous, "streamed", None) is not None:
+                en_flux.add(id(sous))                                    # exil : compté, refusé par le chargeur
+                continue
+            if not isinstance(t, NVFP4Tensor) or not t.qweight.is_cuda:
+                continue
+            role = role_marlin(m, attr)
+            ancien = candidats.get(id(t))
+            candidats[id(t)] = (t, ancien[1] if ancien and ancien[1] else role)
+    # parents (tenseur qui possède sa mémoire) et vues (sources d'un empilement), par stockage
+    par_stockage = {}
+    for t, role in candidats.values():
+        par_stockage.setdefault(t.qweight.untyped_storage().data_ptr(), []).append((t, role))
+    # Une VUE est incluse, octet pour octet et au même K, dans une pile plus grande du même stockage ; un stockage
+    # commun sans inclusion (arène) laisse chaque poids parent de lui-même.
+    def _plage(t):
+        return t.qweight.data_ptr(), t.qweight.data_ptr() + t.qweight.shape[0] * t.qweight.stride(0) * t.qweight.element_size()
+    groupes = []
+    for membres in par_stockage.values():
+        membres.sort(key=lambda tr: -tr[0].qweight.shape[0])
+        piles = []
+        for t, r in membres:
+            a0, a1 = _plage(t)
+            hote = next((g for g in piles if g[0][0].padded_in == t.padded_in and g[0][0].qweight.stride(0) == t.qweight.stride(0)
+                         and _plage(g[0][0])[0] <= a0 and a1 <= _plage(g[0][0])[1] and t is not g[0][0]), None)
+            (hote.append((t, r)) if hote is not None else piles.append([(t, r)]))
+        groupes.extend(piles)
+    bilan = {"doubles": 0, "seuls": 0, "octets_doubles": 0, "exclus": 0, "en_flux": len(en_flux)}
+    for groupe in groupes:
+        pile, role = groupe[0]
+        role = role or next((r for _, r in groupe if r), "")
+        N, k_pad = pile.qweight.shape[0], pile.padded_in
+        if N % 64 or k_pad % 64 or N < _PROJ_MARLIN_MIN_N or k_pad < _PROJ_MARLIN_MIN_NK:
+            bilan["exclus"] += 1
+            continue
+        pile._marlin_dense = (*MP.preparer_dense(pile), N, k_pad)
+        if role in _PROJ_MARLIN_DOUBLES:
+            bilan["doubles"] += 1
+            bilan["octets_doubles"] += pile.qweight.numel() + pile.block_scale.numel()
+            continue
+        dev = pile.qweight.device
+        pile._marlin_zero = torch.zeros(1, dtype=torch.int32, device=dev)
+        pile._marlin_un = torch.ones(1, dtype=torch.float32, device=dev)
+        base = pile.qweight.data_ptr()
+        octets_ligne = pile.qweight.stride(0) * pile.qweight.element_size()
+        for vue, _ in groupe[1:]:
+            vue._marlin_parent = (pile, (vue.qweight.data_ptr() - base) // octets_ligne, vue.qweight.shape[0])
+            vue.qweight = vue.block_scale = None
+        pile._marlin_unique = True
+        pile.qweight = pile.block_scale = None
+        bilan["seuls"] += 1
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return bilan
 
 
 _DENSE_NVFP4 = os.environ.get("ACVRAM_DENSE_NVFP4", "triton")
@@ -1415,6 +1592,14 @@ def paged_attention(q: torch.Tensor, cache, tables: torch.Tensor,
     # groupe ; ni le Triton du poste E ni la variante CANAL. Sans le symbole :
     # None → gather_fixed (jumeau kv_k8v4) + decode_attention_fixed.
     if getattr(cache.cfg, "k8v4", False):
+        # Repli 104 (1) : puits en V int8 — la variante qui lit la réserve, sinon le jumeau (gather_fixed)
+        if getattr(cache, "puits_v", None) is not None:
+            if not hasattr(ext, "paged_attention_k8v4_puits"):
+                return None
+            return ext.paged_attention_k8v4_puits(
+                q.contiguous(), cache.k, cache.k_scale, cache.v, cache.v_scale,
+                cache.puits_v, cache.puits_vs, tables.contiguous(), seq_lens.contiguous(),
+                cache.cfg.num_kv_heads, float(scale), int(q_len), int(window), int(cache.cfg.puits))
         if not hasattr(ext, "paged_attention_k8v4"):
             return None
         return ext.paged_attention_k8v4(

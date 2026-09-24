@@ -66,6 +66,9 @@ VARIABLES_LUES = {
     "ACVRAM_MLA_EAGER_TORCH",
     "ACVRAM_MLA_LATENT_FP8",
     "ACVRAM_KV_FORMAT",
+    # Repli 104 (1) (memory/kv_k8v4.py) : sous k8v4, les 16 premières positions de chaque séquence gardent
+    # V en int8 par jeton dans une réserve (0 ou 16) ; la ligne de régime imprime `kv=k8v4+puits16`.
+    "ACVRAM_KV_PUITS",
     # C5-b (memory/kv_canal.py) : clés int8 par canal, et la taille de la
     # réserve bf16 des blocs courants.
     "ACVRAM_KV_INT8_CANAL",
@@ -219,7 +222,7 @@ VARIABLES_LUES = {
     # C13-c (flash), sondes niveau 2, C15-3d (glue compacte) — 20/09
     "ACVRAM_MLA_FLASH_OPERANDES", "ACVRAM_MLA_FLASH_TUILE",
     "ACVRAM_MLA_ECRIT_TORCH", "ACVRAM_MLA_PREP_TEMOIN", "ACVRAM_MLA_QABS_DEUX_MOITIES",
-    "ACVRAM_GLUE_COMPACT", "ACVRAM_GLUE_COMPACT_ITEMS", "ACVRAM_ATTN_WARPS_COMPACT", "ACVRAM_ATTN_REDUC_DEROULEE", "ACVRAM_PROJ_MARLIN", "ACVRAM_PROJ_MARLIN_MIN_M", "ACVRAM_PROJ_MARLIN_MIN_NK", "ACVRAM_ROUTAGE_TEMOIN",
+    "ACVRAM_GLUE_COMPACT", "ACVRAM_GLUE_COMPACT_ITEMS", "ACVRAM_ATTN_WARPS_COMPACT", "ACVRAM_ATTN_REDUC_DEROULEE", "ACVRAM_PROJ_MARLIN", "ACVRAM_PROJ_MARLIN_MIN_M", "ACVRAM_PROJ_MARLIN_MIN_NK", "ACVRAM_PROJ_MARLIN_MIN_N", "ACVRAM_PROJ_MARLIN_DOUBLES", "ACVRAM_PROJ_MARLIN_CAPACITE", "ACVRAM_MTP_ETAT", "ACVRAM_GEMV_MARLIN_V2", "ACVRAM_GEMV_MARLIN_TPB", "ACVRAM_GEMV_MARLIN_S", "ACVRAM_ROUTAGE_TEMOIN",
     "ACVRAM_PILE_SANS_RENDU",
     "ACVRAM_CPUS",                                    # 0.6.31 : affinité (acvram/hote.py)                          # gemma (c48c2b2c) : témoin de _rendre_le_cache_apres_la_pile
     "ACVRAM_PREFILL_W8R",
@@ -257,6 +260,8 @@ VARIABLES_LUES = {
     "ACVRAM_CARTE_TENUE", "ACVRAM_ECO", "ACVRAM_MOE_DECODE_MMA_MARLIN",
     # pièces 62-65 (23/09) : MoE sur tensor cores (défaut aux godets ≥ MIN_T), glue fusionnée, seuil
     "ACVRAM_MOE_TENSOR", "ACVRAM_MOE_TENSOR_FUSION", "ACVRAM_MOE_TENSOR_MIN_T",
+    # pièce 123 (24/09) : tables AWQ des experts sur le chemin tensor, opt-in (hors défaut, FAUX au critère relatif)
+    "ACVRAM_AWQ_TENSOR",
     # pièce 82 (23/09) : gate·up fusionnés (w13), opt-in
     "ACVRAM_MOE_W13",
 }

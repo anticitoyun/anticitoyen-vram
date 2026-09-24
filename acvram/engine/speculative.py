@@ -564,7 +564,7 @@ class MTPProposer:
                 torch.tensor([cur], dtype=torch.long, device=emb.device), emb)
             sortie = tete(e.to(h.dtype), h, self._batch(st, [cur], pos))
             logits = lm(sortie.to(lm.qweight.qweight.device
-                                  if hasattr(lm.qweight, "qweight")
+                                  if getattr(lm.qweight, "qweight", None) is not None   # 129 : tête Marlin seule
                                   else sortie.device))[0]
             if glouton:
                 tok = int(logits.argmax())

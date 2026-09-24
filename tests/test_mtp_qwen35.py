@@ -65,3 +65,20 @@ def test_le_chargeur_rend_la_raison(monkeypatch):
         ([], "aucune tête dans le manifeste")
     monkeypatch.setenv("ACVRAM_MTP", "non")
     assert _charger_mtp(_man(*QWEN35), None, None, None, 128, torch.bfloat16, None, None, {}) == ([], "ACVRAM_MTP=non")
+
+
+def test_etat_cache_mtp_selon_la_convention(monkeypatch):
+    """Pièce 105 : DeepSeek lit l'état BRUT (défaut, inchangé) ; Qwen3.5 l'état normalisé sous ACVRAM_MTP_ETAT=auto."""
+    from acvram.engine.model import ACVRamModel
+
+    class Faux:
+        def __init__(self, convention):
+            self.mtp = type("T", (), {"convention": convention})()
+    f = ACVRamModel._mtp_normalise
+    monkeypatch.delenv("ACVRAM_MTP_ETAT", raising=False)
+    assert f(Faux("deepseek")) is False and f(Faux("qwen35")) is False      # défaut : brut pour tous
+    monkeypatch.setenv("ACVRAM_MTP_ETAT", "auto")
+    assert f(Faux("deepseek")) is False                                    # le chemin DeepSeek ne bouge pas
+    assert f(Faux("qwen35")) is True
+    monkeypatch.setenv("ACVRAM_MTP_ETAT", "norme")
+    assert f(Faux("deepseek")) is True

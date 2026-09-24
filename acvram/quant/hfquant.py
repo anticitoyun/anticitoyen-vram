@@ -58,7 +58,11 @@ def is_hfquant(path: str) -> bool:
     if m == "awq":
         return True
     if m == "compressed-tensors":
-        return q.get("format") in ("pack-quantized", "nvfp4-pack-quantized")
+        # "mixed-precision" (plusieurs config_groups a formats differents,
+        # ex. nvfp4-pack-quantized + float-quantized) est bien un point de
+        # controle hfquant -- le refus NOMME (pas un format non reconnu)
+        # arrive dans HFQuantCheckpoint.__init__, pas ici (piece 131 bis).
+        return q.get("format") in ("pack-quantized", "nvfp4-pack-quantized", "mixed-precision")
     if m == "fp8":
         return True
     return m == "modelopt"
@@ -77,6 +81,18 @@ class HFQuantCheckpoint:
         self.method = self.q.get("quant_method")
         self.format = self.q.get("format")
         groups = self.q.get("config_groups") or {}
+        # Piece 131 bis (verdict piece 131, 24/09) : "mixed-precision" (ou plusieurs config_groups a
+        # formats differents dans le meme checkpoint, ex. nvfp4-pack-quantized + float-quantized) n'a
+        # AUCUN dispatch par tenseur ici -- self.method/self.format sont uniques par checkpoint. Sans ce
+        # refus, iter_tensors dequantifierait tout sous le format d'UN SEUL groupe (ou, pour les groupes
+        # non geres comme fp8 sous compressed-tensors, laisserait passer des poids NON dequantifies, faux
+        # et muets). Refus NOMME plutot qu'une conversion partielle ou silencieusement fausse.
+        formats_groupes = sorted({g.get("format") for g in groups.values() if g.get("format")})
+        if self.format == "mixed-precision" or len(formats_groupes) > 1:
+            raise NotImplementedError(
+                f"format {self.format!r} non géré : groupes {formats_groupes} — plusieurs formats de "
+                "quantification dans le même point de contrôle, aucun dispatch par tenseur dans "
+                "HFQuantCheckpoint (voir revue/poste4-piece131-mixed-precision-24-09.md)")
         g0 = next(iter(groups.values()), {}) if groups else {}
         w = g0.get("weights") or {}
         self.bits = int(self.q.get("bits") or w.get("num_bits") or 4)

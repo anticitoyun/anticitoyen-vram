@@ -67,9 +67,28 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("DENSE_NVFP4_MIN_M", "4", ("acvram.kernels", "_DENSE_NVFP4_MIN_M")),
     Variable("PROJ_MARLIN", "0", ("acvram.kernels", "_PROJ_MARLIN"), "0",
              "pièce 101 (23/09, opt-in) : 1 = linéaires NVFP4 denses par le Marlin porté de vLLM 0.29 (marlin_port, échelle "
-             "globale par colonne pour q/k/v empilés) aux godets ≥ PROJ_MARLIN_MIN_M ; M = 1 garde nvfp4_gemv | 0 témoin"),
+             "globale par colonne pour q/k/v empilés) aux godets ≥ PROJ_MARLIN_MIN_M ; pièce 129 (24/09) : disposition préparée "
+             "AU CHARGEMENT, mixte (rôles PROJ_MARLIN_DOUBLES en deux dispositions, M = 1 par nvfp4_gemv ; les autres en Marlin "
+             "SEUL, M = 1 par nvfp4_gemv_marlin), mémoire prouvée au chargement (refus nommé) | 0 témoin"),
     Variable("PROJ_MARLIN_MIN_M", "2", ("acvram.kernels", "_PROJ_MARLIN_MIN_M")),
     Variable("PROJ_MARLIN_MIN_NK", "1024", ("acvram.kernels", "_PROJ_MARLIN_MIN_NK")),
+    Variable("PROJ_MARLIN_MIN_N", "2048", ("acvram.kernels", "_PROJ_MARLIN_MIN_N"), None,
+             "pièce 129 : N minimal d'un poids pris par la disposition Marlin (k/v à N = 1 024 plus lents en Marlin)"),
+    Variable("PROJ_MARLIN_DOUBLES", "mlp.gate_up,mlp.down,gdn.out", None, None,
+             "pièce 129 (A) : rôles gardés en DEUX dispositions (naturelle à M = 1, Marlin à M ≥ 2) ; les autres poids "
+             "éligibles passent en Marlin SEUL (naturelle libérée) — revue/verdict-129-1-gemv-marlin-m1-24-09"),
+    Variable("GEMV_MARLIN_V2", "0", ("acvram.kernels", "_GEMV_MARLIN_V2"), None,
+             "pièce 130 (opt-in) : GEMV Marlin v2 à M = 1 sous la disposition Marlin seule (tuiles de colonnes par bloc, x en "
+             "global, down en un lancement) | 0 : v1 (x en mémoire partagée, K ≤ 11 264 en deux moitiés)"),
+    Variable("GEMV_MARLIN_TPB", "2", ("acvram.kernels", "_GEMV_MARLIN_TPB"), None, "pièce 130 : tuiles de 64 colonnes par bloc (1, 2, 4)"),
+    Variable("GEMV_MARLIN_S", "0", ("acvram.kernels", "_GEMV_MARLIN_S"), None, "pièce 130 : split-K forcé ; 0 = règle de v1"),
+    Variable("PROJ_MARLIN_CAPACITE", "65536", None, None,
+             "pièce 129 : capacité KV minimale (jetons) exigée au chargement sous PROJ_MARLIN=1, sinon refus nommé ; non "
+             "posée : séquences × longueur demandées par le chargement, sinon 65 536"),
+    Variable("AWQ_TENSOR", "0", ("acvram.engine.moe", "_AWQ_TENSOR"), None,
+             "pièce 123 (24/09, opt-in, jamais posé par un lanceur) : 1 = experts à tables AWQ d'activation sur le chemin "
+             "tensor (échelle fondue dans moe_aligner_petit, xs) au lieu du repli GEMV nommé ; hors défaut : 123-quater "
+             "FAUX au critère relatif (écart S1b/i8c 1,38-1,52 > 1,25 à b=12) | 0 défaut"),
     # lues dans acvram_kernels.cu (getenv, figées au premier lancement : un
     # PROCESSUS par valeur — poste7-gemv-experts-rpw-18-09)
     Variable("GROUPED_RPW", "4", None, None,
@@ -253,6 +272,9 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("MLA_LATENT_FP8", "0", ("acvram.engine.mla", "_MLA_LATENT_FP8"), "0"),
     Variable("KV_LM4_SEUL", "", None, None, "diagnostic lm4 (kvcache.write) : lm4 sur k ou v seulement, int8 ailleurs"),
     Variable("KV_LM4_PUITS", "", None, None, "diagnostic lm4 : positions < N gardées int8 ; 0 = contrôle (lm4 partout par le diagnostic)"),
+    Variable("MTP_ETAT", "brut", None, None,
+             "pièce 105 : état caché lu par la tête MTP — brut (avant la norme finale, DeepSeek, défaut) | norme (après) | "
+             "auto (selon la convention de la tête : qwen35 → norme, deepseek → brut)"),
     Variable("KV_FORMAT", "", ("acvram.memory.tiering", "_KV_FORMAT"), None,
              "cache KV des paliers carte : vide = capacités (int8) | k8v4 (pièce 104 : K int8 par jeton, V int4 "
              "par groupe de 32 canaux, −22 % d'octets, opt-in jugé KL 5/5 ≤ 0,74 et ppl-decode-kv 8 k ≤ +0,30 %) "
@@ -407,6 +429,13 @@ _MROPE_CHARGE: Optional[tuple[list[int], bool]] = None
 # None quand rien ne le dit — le mot `deepstack=N` n'apparaît que déclaré.
 _DEEPSTACK_CHARGE: Optional[int] = None
 
+# Piece 133 (chef, meme classe que 127) : "architecture" du manifeste ("llama" | "moe"), None tant
+# qu'aucun modele n'est charge (ligne construite a sec par un banc de noyaux GEMV, ou GEMV_LAYOUT reste
+# pertinent). ACVRAM_GEMV_LAYOUT ne vit que dans moe.py et ne regle RIEN sur un modele sans MoEBlock
+# (Qwen3.8-27B dense, entre autres) -- la ligne le disait quand meme, sans effet, ce qui a trompe une
+# lecture de verdict (poste2, piece 102bis).
+_ARCHITECTURE_CHARGEE: Optional[str] = None
+
 
 def declarer_modele_charge(manifest: Optional[dict]) -> None:
     """Le chargeur déclare le manifeste du modèle qu'il vient de charger ; la
@@ -417,8 +446,9 @@ def declarer_modele_charge(manifest: Optional[dict]) -> None:
     deepstack : `deepstack: 3` (nombre) ou `deepstack: oui` avec
     `deepstack_niveaux` (sinon 3, les `deepstack_visual_indexes` par défaut de
     Qwen3-VL) ; absent ou « non » : pas de mot."""
-    global _VISION_CHARGEE
+    global _VISION_CHARGEE, _ARCHITECTURE_CHARGEE
     _VISION_CHARGEE = None if manifest is None else str(manifest.get("vision", "non"))
+    _ARCHITECTURE_CHARGEE = None if manifest is None else manifest.get("architecture")
     if _VISION_CHARGEE != "oui":                          # pas de tour pour ce modèle : la précédente ne survit pas
         try:
             from .engine.vision import oublier_la_tour
@@ -535,8 +565,14 @@ def regime_ligne() -> str:
     parts = [f"{k}={v if v else repr('')}" for k, v in r["hors_defaut"].items()
              if k != "ACVRAM_GEMV_LAYOUT"] or ["défaut"]
     # la disposition lue par le GEMV des experts est toujours nommée (P1
-    # disposition unique, poste7-p1-disposition-unique-18-09) : marlin | naturel
-    parts.append("ACVRAM_GEMV_LAYOUT=" + str(r["variables"].get("ACVRAM_GEMV_LAYOUT", "?")))
+    # disposition unique, poste7-p1-disposition-unique-18-09) : marlin | naturel —
+    # SAUF sur un modèle chargé sans MoEBlock (pièce 133) : la variable n'y règle
+    # rien (moe.py ne la lit que dans du code MoE), la nommer comme active
+    # aurait trompé une lecture (poste2, pièce 102bis, Qwen3.8-27B dense).
+    _gv = "ACVRAM_GEMV_LAYOUT=" + str(r["variables"].get("ACVRAM_GEMV_LAYOUT", "?"))
+    if _ARCHITECTURE_CHARGEE is not None and _ARCHITECTURE_CHARGEE != "moe":
+        _gv += "(inerte:modèle dense)"
+    parts.append(_gv)
     # split-K toujours nommé, défaut 1 depuis 0.6.37 (pièce 70) : S auto ou repli
     # si le noyau manque (sans GPU, rien ne lève — pièce 70, 23/09)
     try:
