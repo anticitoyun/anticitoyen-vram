@@ -25,3 +25,13 @@ M ≤ 32, il prend le GEMV Marlin, un autre noyau.
 
 **FAUX** si : la première divergence n'est pas dans un linéaire de la couche 0 ; ou B' ≠ A au bit ; ou B' garde < 50 %
 du gain. Dans ce dernier cas, le gain de LOT viendrait du GEMM lui-même : pavage à M plus grand, efficacité du lot.
+
+**Ajout 25/09 00 h 4x — 1re prise (817867ca), partielle, OOM à la suite de C1** : C1 relevé avant l'OOM. **Prédiction 1
+FAUSSE** : `qkv` est égal AU BIT entre A et B ; la première divergence est `gate` (27 % des éléments, max 0,125,
+ordre de l'ulp bf16 à ces valeurs), puis `beta_proj` et `alpha` (≈ 25 %), puis out_proj et toutes les couches.
+(Mon « ulp_max » était faux : une différence d'entiers de part et d'autre de zéro n'est pas un compte d'ulp.)
+L'instrument est corrigé AVANT la 2e prise : mémoire libérée entre les compositions, `expandable_segments`, et un
+micro-test par linéaire (appel du module par séquence contre sur le lot, chemin NVFP4 pris, `F.linear` sur le W exact
+avec et sans `allow_bf16_reduced_precision_reduction`). Nouvelle prédiction, écrite avant : gate, alpha et beta prennent
+un chemin, ou un noyau cuBLAS, qui dépend de M ; qkv non. B' reste la variante au bit, et sa prédiction de gain est
+inchangée.
