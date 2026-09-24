@@ -1962,6 +1962,20 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         for seq, tok, lp in zip(seqs, ids_lus, lps):
             if seq.finished:
                 continue
+            if seq.params.max_tokens <= 0:
+                # Pièce priorité 1 (chef, 24/09) : `token_budget()` rend
+                # bien 0 depuis le correctif protocol.py, mais le jeton du
+                # prefill était échantillonné et ajouté ICI avant que la
+                # longueur atteinte (1 >= 0) ne referme la séquence au tour
+                # suivant — `max_tokens=0` produisait quand même 1 jeton.
+                self._finish(seq, "length")
+                out.append(GenerationOutput(
+                    sequence_id=seq.id, request_id=seq.request_id,
+                    token_ids=[], text_delta="",
+                    finished=True, finish_reason="length",
+                    prompt_tokens=len(seq.prompt_ids), completion_tokens=0,
+                    logprob=None, top_logprobs=None))
+                continue
             seq.output_ids.append(int(tok))
             seq.cumulative_logprob += float(lp)
             if not seq.first_token_at:
