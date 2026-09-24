@@ -296,6 +296,9 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("HYBRID_KERNELS", "1", None, "0", "KDA / GDN : noyaux hybrides ou torch"),
     Variable("GDN", "fla", ("acvram.engine.gdn", "_GDN_VOIE"), "torch",
              "Gated DeltaNet : fla (noyaux Triton de flash-linear-attention, prefill par blocs et décodage du lot en un lancement) | torch (référence transformers, séquence par séquence) ; 0 = refus des hybrides"),
+    Variable("GDN_PREFILL_LOT", "0", ("acvram.engine.couches", "_GDN_PREFILL_LOT"), "0",
+             "pièce 150 bis (opt-in) : 1 = au préfill de plusieurs séquences, projections Gated DeltaNet du lot en un "
+             "appel (couches.py, forward_lot), convolution et règle delta par séquence ; autre M, donc pas au bit : KL"),
     # --- autres chemins de calcul ----------------------------------------
     Variable("FUSION_NVFP4", "1", None, "0", "témoin de mesure : fusion gate/up NVFP4"),
     Variable("FUSION_PARTIELLE", "0", None, "0"),
