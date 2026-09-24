@@ -206,10 +206,15 @@ class INT8Tensor:
         return self.nbytes * 8 / max(1, n)
 
     def to(self, device, non_blocking: bool = False) -> "INT8Tensor":
-        return INT8Tensor(self.qweight.to(device, non_blocking=non_blocking),
-                          self.scales.to(device, non_blocking=non_blocking),
-                          self.zeros.to(device, non_blocking=non_blocking),
-                          self.group_size, self.shape)
+        t = INT8Tensor(self.qweight.to(device, non_blocking=non_blocking),
+                       self.scales.to(device, non_blocking=non_blocking),
+                       self.zeros.to(device, non_blocking=non_blocking),
+                       self.group_size, self.shape)
+        # Pièce 139 : la marque du chargeur (int8 d'origine fp8, préfill en déquant bf16) survit au passage sur la
+        # carte — perdue ici, le premier préfill reprenait la copie signée du chemin cublas (OOM du 24/09 09:1x)
+        if self.__dict__.get("prefill_bf16"):
+            t.__dict__["prefill_bf16"] = True
+        return t
 
     def state_dict(self, prefix: str = "") -> dict[str, torch.Tensor]:
         return {f"{prefix}qweight": self.qweight, f"{prefix}scales": self.scales,

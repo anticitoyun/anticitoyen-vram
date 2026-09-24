@@ -775,6 +775,11 @@ def _i8c_poids(t: INT8Tensor):
     cache = t.__dict__.get("_i8c")
     if cache is not None:
         return cache if cache is not False else None
+    if t.__dict__.get("prefill_bf16"):
+        # Pièce 139 : poids marqué par le chargeur (manifeste « origine: fp8 ») — AUCUNE copie : 233 tenseurs
+        # d'un Qwen3.8-27B mixte y perdaient ~10,6 Go au premier préfill (OOM) ; il suit la déquant bf16 (W8A16).
+        t.__dict__["_i8c"] = False
+        return None
     ok = (t.group_size == t.qweight.shape[1] and t.zeros.shape[1] == 1
           and bool((t.zeros == 128).all()))
     if not ok:
@@ -1288,6 +1293,10 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
     # extension (`_dequantize_int8`, carte absente ou processeur) gère lui
     # n'importe quel group_size -- vu par `test_int8_matmul_tranches.py`
     # (group_size=64, CPU) -- donc le refus ne vaut que pour le chemin CUDA.
+    if ext is not None and t.qweight.is_cuda and t.group_size != 128:
+        # Pièce 139 : un poids symétrique PAR CANAL (groupe = K) se déquantifie AU BIT par sa vue g128 (mêmes codes,
+        # même échelle de ligne répétée, zéros 128) : ce repli refusait tout groupe ≠ 128, jamais servi jusqu'ici.
+        t = vue_g128(t)
     if ext is not None and t.qweight.is_cuda and t.group_size != 128:
         raise NotImplementedError(
             f"int8_matmul (repli GEMM CUDA, prefill n={n} > ACVRAM_INT8_GEMV_MAX="

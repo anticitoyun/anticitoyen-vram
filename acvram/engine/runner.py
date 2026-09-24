@@ -777,7 +777,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         coexistent et ne se déduisent pas l'un de l'autre.
         """
         from .. import kernels
-        from ..regime import regime_noyaux
+        from ..regime import prefill_i8c_texte as _prefill_i8c, regime_noyaux
         from .gdn import gdn_regime as _gdn_regime
         from .model import MoEBlock
 
@@ -890,7 +890,9 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # jamais plus tacite (poste7-prefill-a8-verdict-17-09)
             "prefill": kernels.prefill_regime() + self._prefill_coupe_texte(),
             # linéaires INT8 du préfill (P0) : bf16 | a8 — toujours écrit
-            "prefill_int8": kernels.prefill_int8_regime(),
+            # pièce 139 : « cublas+bf16(origine fp8 ×233) » quand des int8 ré-encodés du fp8 passent en déquant bf16
+            "prefill_int8": kernels.prefill_int8_regime() + (
+                "+" + _prefill_i8c().split("=", 1)[1] if _prefill_i8c() else ""),
             # P1 disposition unique : « marlin » (pile Marlin seule, préfill et
             # décodage, la pile NVFP4 rendue) | « naturel » (pile NVFP4 seule)
             # couverture PAR COUCHE (poste7 19/09, budget GLM : 33 couches Marlin + 13 refusées
