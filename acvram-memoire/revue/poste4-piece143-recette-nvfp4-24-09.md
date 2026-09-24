@@ -38,9 +38,18 @@
 * **llm-compressor** (vLLM/neuralmagic) : recette par défaut `QuantizationModifier(targets="Linear",
   scheme="NVFP4", ignore=["lm_head"])`, échelles d'activation calibrées par `static_minmax` sur un
   échantillon (20 dans les exemples) — là aussi, calibration par défaut, jamais du RTN pur.
-* **`arXiv:2609.04098`** (Kozyrev & Maiboroda, sept. 2026) — **directement sur Qwen3.8-27B, 48
-  couches GDN + 16 attention, le MÊME modèle que le nôtre**. Table 1, PPL@4K (WikiText-2, vLLM
-  0.27.1, FP8 KV) :
+* **Kozyrev, S. & Maiboroda, D., « Why Gated DeltaNet Survives 4-Bit Quantization: NVFP4 W4A4 for
+  the Recurrent Half of a Hybrid 27B LLM », `arXiv:2609.04098v1 [cs.AI]`, 3 sept. 2026,
+  https://arxiv.org/abs/2609.04098 (PDF relu en entier : https://arxiv.org/pdf/2609.04098, `pdftotext
+  -layout`, sha256 du PDF téléchargé non conservé — texte relu directement, reproduit ci-dessous) —
+  **directement sur Qwen3.8-27B, 48 couches GDN + 16 attention, le MÊME modèle que le nôtre**. Table
+  1, ligne recopiée telle quelle (p. 3, « PPL @4K / @32K ↓ ») :
+
+  > `PPL @4K / @32K ↓    6.95 / 10.35    7.67 / 10.84    7.16 / 9.91    7.35 / 9.95`
+  > (colonnes : BF16, Minima, Unsloth, RadixArk — légende Table 1 : « Four models, one regime (FP8
+  > KV, vLLM 0.27.1, TP=1, one RTX PRO 6000)… PPL@32K is measured inside a 32K request. »)
+
+  soit, en écart relatif au BF16 :
 
   | modèle | PPL@4K | écart vs BF16 |
   |---|---|---|
