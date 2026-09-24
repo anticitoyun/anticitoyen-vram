@@ -74,19 +74,25 @@ def _cache():
                                       block_size=BS, dtype="int8", device="cuda", canal=False))
 
 
-def _comparer_avec_tolerance(x: torch.Tensor, sc: torch.Tensor,
-                              obs: torch.Tensor, ref: torch.Tensor) -> int:
+def _comparer_avec_tolerance(x: torch.Tensor, obs: torch.Tensor, ref: torch.Tensor) -> int:
     """Compare `obs` (codes du noyau, ou d'un bras cassant simulé) à `ref` (codes du jumeau
     torch). Toute divergence DOIT tomber à <= EPSILON d'une frontière d'arrondi (k+0,5) ; au-delà,
     échec dur (vraie faute, pas le réciproque approché). La FRACTION d'écarts tolérés (même tous
-    dans la bande) échoue dur au-delà de PLAFOND_FRACTION. Rend le nombre d'écarts tolérés."""
+    dans la bande) échoue dur au-delà de PLAFOND_FRACTION. Rend le nombre d'écarts tolérés.
+
+    L'échelle est RECALCULÉE ici en fp32 (amax/127), jamais reçue en argument : `_quantize`
+    renvoie l'échelle castée fp16 (`kvcache.py:499`) — piège trouvé le 24/09, un 1er essai qui
+    comparait au ratio fp16-cast gonflait la distance mesurée d'un facteur ~1000 (0,022 au lieu
+    de ~1e-5), pas une propriété du noyau, un artefact de mesure."""
     diff = (obs.int() - ref.int())
     idx = (diff != 0).nonzero()
     total = obs.numel()
     if idx.shape[0] == 0:
         return 0
     x32 = x.to(torch.float32)
-    ratio = x32 / sc.unsqueeze(-1).to(torch.float32)
+    amax = x32.abs().amax(dim=-1, keepdim=True)
+    sc32 = (amax / 127.0).clamp(min=1e-8)  # échelle fp32 COMPLÈTE, jamais celle (fp16) reçue
+    ratio = x32 / sc32
     n_toleres = 0
     hors_bande = []
     for i in range(idx.shape[0]):
@@ -124,8 +130,8 @@ def test_ecriture_int8_par_jeton_au_bit_ou_dans_la_bande():
 
     assert torch.equal(sk_obs, sk_ref), "échelle K hors du bit"
     assert torch.equal(sv_obs, sv_ref), "échelle V hors du bit"
-    nk = _comparer_avec_tolerance(k, sk_ref, qk_obs, qk_ref)
-    nv = _comparer_avec_tolerance(v, sv_ref, qv_obs, qv_ref)
+    nk = _comparer_avec_tolerance(k, qk_obs, qk_ref)
+    nv = _comparer_avec_tolerance(v, qv_obs, qv_ref)
     if nk or nv:
         print(f"[thf] tolérés (bande epsilon) : K={nk} V={nv}")
 
@@ -143,8 +149,8 @@ def test_plusieurs_tirages_toujours_au_bit_ou_dans_la_bande():
         qv_ref, sv_ref = cache._quantize(v)
         assert torch.equal(cache.k_scale.view(-1, HKV)[:BS], sk_ref), graine
         assert torch.equal(cache.v_scale.view(-1, HKV)[:BS], sv_ref), graine
-        nk = _comparer_avec_tolerance(k, sk_ref, cache.k.view(-1, HKV, D)[:BS], qk_ref)
-        nv = _comparer_avec_tolerance(v, sv_ref, cache.v.view(-1, HKV, D)[:BS], qv_ref)
+        nk = _comparer_avec_tolerance(k, cache.k.view(-1, HKV, D)[:BS], qk_ref)
+        nv = _comparer_avec_tolerance(v, cache.v.view(-1, HKV, D)[:BS], qv_ref)
         if nk or nv:
             print(f"[thf] graine={graine} tolérés (bande epsilon) : K={nk} V={nv}")
 
@@ -164,7 +170,7 @@ def test_bras_cassant_diviseur_faux_rougit_hors_bande():
     q_faux = (v.to(torch.float32) / scale_fausse).round().clamp(-127, 127).to(torch.int8)
 
     with pytest.raises(AssertionError, match="HORS bande"):
-        _comparer_avec_tolerance(v, sv_ref, q_faux, qv_ref)
+        _comparer_avec_tolerance(v, q_faux, qv_ref)
 
 
 def test_bras_cassant_fraction_rougit_meme_dans_la_bande():
@@ -179,14 +185,16 @@ def test_bras_cassant_fraction_rougit_meme_dans_la_bande():
     assert n_faux > 0
 
     x = torch.zeros(1, 1, n, device="cuda")
-    sc = torch.ones(1, 1, device="cuda")  # ratio = x directement (sc=1)
+    x[0, 0, -1] = 127.0  # fixe amax=127 -> échelle interne = amax/127 = 1.0, ratio = x directement
     ref = torch.zeros(1, 1, n, dtype=torch.int8, device="cuda")
+    ref[0, 0, -1] = 127
     obs = torch.zeros(1, 1, n, dtype=torch.int8, device="cuda")
+    obs[0, 0, -1] = 127
     for i in range(n_faux):
-        r = 10.5 + EPSILON / 2  # à EPSILON/2 d'une frontière, dans la bande individuellement
+        r = 10.5 + EPSILON / 2  # à EPSILON/2 d'une frontière (échelle=1 : ratio=x), dans la bande
         x[0, 0, i] = r
-        ref[0, 0, i] = 11  # arrondi correct (ties-to-even ou plus proche, ici sans ambiguïté)
+        ref[0, 0, i] = 11  # arrondi correct (sans ambiguïté)
         obs[0, 0, i] = 10  # off-by-one, comme un vrai écart de rcp.approx
 
     with pytest.raises(AssertionError, match="PLAFOND_FRACTION"):
-        _comparer_avec_tolerance(x, sc, obs, ref)
+        _comparer_avec_tolerance(x, obs, ref)
