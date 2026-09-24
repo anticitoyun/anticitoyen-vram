@@ -32,12 +32,29 @@ Ordre de reprise de chef (carnet, 24/09 12 h 5x, point (2)). Bead `anticitoyen-v
   moins par pas de préfill) et du rendement de GEMM à M = 624 ; les règles delta fla par séquence restent.
 * **Mixte** : 1,37 s/lot → **0,45-0,8 s/lot** (les GEMV int8 par canal des couches GDN passent au GEMM cuBLAS).
 * Débit du banc : défaut +1 à +3 % ; mixte +8 à +14 %.
-* Qualité : rejeu A et B à 0 ulp ; KL(A‖B) moyenne ≤ KL témoin (A-seul ‖ A-lot) moyenne de la même composition
-  + max(0,05 × témoin ; 1e-4) ; argmax A/B ≥ 99 % des positions ; |z| de ΔNLL(B−A) < 2 ou ΔNLL ≤ 0.
+* Qualité : voir « Critère KL » ci-dessous (remplace la formulation moyenne ± marge d'abord écrite ici).
+
+## Critère KL (précision demandée par chef, 24/09 13 h, écrite AVANT la prise)
+
+* **Le test d'équivalence n'est PAS au bit** : `tests/test_gdn_prefill_lot.py` compare à une tolérance relative 1e-4,
+  sur processeur en fp32. Il garde la découpe (état, convolution et frontière entre séquences ; le bras cassant rend
+  rouge), pas l'arithmétique. Sur la carte, la sortie est donc tenue pour CHANGÉE : autre M, autre noyau possible.
+* **Témoins**, mesurés dans la même prise et le même processus, sur les mêmes compositions, KL max par position contre
+  A-lot :
+  T1 = chaque séquence seule, dans son propre passage (variation que le préfill groupé déjà servi accepte) ;
+  T2 = le même lot en ordre inverse (autre ordre d'arrivée) ;
+  T3 (mixte seulement) = tout l'int8 par déquant + GEMM (`_INT8_GEMV_MAX` = 0), soit l'arithmétique que B donne aux
+  projections GDN.
+* **Seuil par composition** : KL_max(A ‖ B) ≤ **2 × max(T1, T2, T3)** ; argmax A/B ≥ 99 % des positions ; rejeu A et B
+  à 0 (écart absolu des logits). Si le max des témoins vaut 0, le seuil n'est pas utilisable et je le dirai. Aucune
+  conclusion n'est tirée de la moyenne. ΔNLL(B−A) est rapporté sans servir de porte.
+* **Si A = B au bit sur le défaut** : la KL est superflue pour cet alias, seul l'ABBA compte ; le mixte garde la KL.
+* Prédit : T1 de l'ordre de 1e-3 à 1e-2 (le MLP et les projections d'attention y changent de M) ; KL_max(A ‖ B) du même
+  ordre ; tenu sur les 3 compositions et les deux alias.
 
 ## Seuils et issues nommées
 
-* **TENU** si : défaut −0,08 s/lot ou mieux ET mixte −0,4 s/lot ou mieux, qualité tenue sur les 3 compositions, les deux
+* **TENU** si : défaut −0,08 s/lot ou mieux ET mixte −0,4 s/lot ou mieux, critère KL tenu sur les 3 compositions, les deux
   alias. Alors proposition au chef : défaut à 1 après la suite CI et la capture des godets.
 * (a) **Défaut < −0,05 s/lot** : le préfill du défaut n'est pas dans les projections GDN → le coût est dans les règles
   delta fla par séquence (8 × 48 appels) : levier suivant = fla en varlen (`cu_seqlens`), une règle pour le lot.
