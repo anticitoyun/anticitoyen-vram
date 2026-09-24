@@ -82,6 +82,9 @@ VARIABLES: tuple[Variable, ...] = (
              "global, down en un lancement) | 0 : v1 (x en mémoire partagée, K ≤ 11 264 en deux moitiés)"),
     Variable("GEMV_MARLIN_TPB", "2", ("acvram.kernels", "_GEMV_MARLIN_TPB"), None, "pièce 130 : tuiles de 64 colonnes par bloc (1, 2, 4)"),
     Variable("GEMV_MARLIN_S", "0", ("acvram.kernels", "_GEMV_MARLIN_S"), None, "pièce 130 : split-K forcé ; 0 = règle de v1"),
+    Variable("PROJ_MARLIN_PORTEE", "global", ("acvram.kernels", "_PROJ_MARLIN_PORTEE"), None,
+             "pièce 142 : global (défaut, tout poids dense éligible, linéaires hors experts des MoE compris) | denses (un "
+             "modèle à MoEBlock garde son chemin)"),
     Variable("PROJ_MARLIN_CAPACITE", "65536", None, None,
              "pièce 129 : capacité KV minimale (jetons) exigée au chargement sous PROJ_MARLIN=1, sinon refus nommé ; non "
              "posée : séquences × longueur demandées par le chargement, sinon 65 536"),

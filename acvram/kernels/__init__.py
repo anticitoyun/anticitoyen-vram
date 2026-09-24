@@ -975,6 +975,9 @@ _PROJ_MARLIN_DOUBLES = frozenset(r for r in os.environ.get(
 _GEMV_MARLIN_V2 = os.environ.get("ACVRAM_GEMV_MARLIN_V2", "0") == "1"
 _GEMV_MARLIN_TPB = int(os.environ.get("ACVRAM_GEMV_MARLIN_TPB", "2"))
 _GEMV_MARLIN_S = int(os.environ.get("ACVRAM_GEMV_MARLIN_S", "0"))
+# Pièce 142 : portée de la disposition — "global" (défaut, inchangé : tout poids dense éligible, MoE compris pour leurs
+# linéaires hors experts) | "denses" (un modèle qui contient un MoEBlock n'est PAS converti : il garde son chemin).
+_PROJ_MARLIN_PORTEE = os.environ.get("ACVRAM_PROJ_MARLIN_PORTEE", "global")
 _GEMV_MARLIN_KMAX = 11264          # nvfp4_gemv_marlin : x en mémoire partagée fp32 (acvram_kernels.cu, mb_verifier)
 
 
@@ -1057,6 +1060,11 @@ def preparer_disposition_marlin(modele) -> dict:
     for m in modele.modules():
         if type(m).__name__.startswith("MoEBlock"):
             sous_moe.update(id(x) for x in m.modules())
+    if _PROJ_MARLIN_PORTEE not in ("global", "denses"):
+        raise ValueError(f"ACVRAM_PROJ_MARLIN_PORTEE={_PROJ_MARLIN_PORTEE!r} : attendu global | denses")
+    if _PROJ_MARLIN_PORTEE == "denses" and sous_moe:
+        # garde « modèle dense » (pièce 142) : un MoE garde tout son chemin, disposition naturelle comprise
+        return {"doubles": 0, "seuls": 0, "octets_doubles": 0, "exclus": 0, "en_flux": 0, "portee": "denses:moe-exclu"}
     candidats = {}                                                       # id(tenseur) -> (tenseur, rôle)
     en_flux: set = set()
     for m in modele.modules():
