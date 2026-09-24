@@ -96,3 +96,30 @@ atteint le tour de file).
   plan déjà écrit). Le correctif de code reste posé, la sortie par défaut ne change pas
   (test à 5 tirages toujours rouge, cause non expliquée).
 - durée : prévue 10 min, tenue ~8 min (une commande, un rejeu)
+
+## diag3.py joué (24/09 02h08, ordre chef) — isolation par sous-processus : allocateur ET race JIT écartés
+
+- instrument : `scratchpad/poste3-thf-23-09/diag3.py` (une graine par process, invoqué en boucle bash par
+  `lancer_diag3.sh` — 5 processus python séparés, pas un seul boucle intra-process), sur carte, `outils/carte.sh`
+  tenu deux fois (deux prises distinctes, cf. incident guet/.qui hors sujet, résolu par le chef — corrigé dans
+  tests/test_gui_crochet_clic.py, sans rapport avec ce diagnostic).
+- commit : d11f2dc4 (worktree `poste3`, fusion origin/main avant prise)
+- régime : plein
+- mesuré : 1er run — compilation de l'extension déclenchée (« verrou de compilation orphelin retiré »),
+  puis graine=100 0 écart, graine=101 **1 écart** (t=2,h=0,d=103 : x/sc=-63,515 → arrondi correct -64, obs=-63),
+  graine=102 0 écart, graine=103 0 écart, graine=104 **1 écart** (t=14,h=0,d=108 : x/sc=63,517 → arrondi correct
+  64, obs=64 correct MAIS réf Python=63 fausse). 2e run (prise séparée, extension déjà compilée, pas de
+  recompilation) : **résultat identique au bit** — mêmes deux graines (101, 104), mêmes t/h/d, mêmes valeurs
+  observées et de référence.
+- verdict : hypothèse 1 (allocateur CUDA) et hypothèse 2/3 (race JIT/flux CUDA entre process) **ÉCARTÉES** — des
+  processus complètement séparés (nouveau contexte CUDA, nouvel import, memoire vierge) donnent exactement le
+  même écart, aux mêmes positions. Ce qui varie n'est PAS le runtime : c'est le **binaire compilé** du noyau
+  (`.so` figé une fois construit) qui fixe, de façon déterministe, lesquelles des 16×4×128 cases tombent du
+  mauvais côté d'une frontière d'arrondi à ±0,02 de la demi-unité — cohérent avec la variabilité observée ENTRE
+  sessions différentes (graine 103 dans le tout premier test, 101/104 dans le rejeu diag2 du 23/09 22h43 et ici :
+  des BUILDS différents du même noyau, chacun déterministe en soi). Reste non expliqué : QUEL détail de
+  compilation (ordre FMA, `--use_fast_math`, registre vs mémoire) fixe ce choix — piste suivante si le chef
+  demande d'aller plus loin (comparer le PTX/SASS de deux builds qui divergent différemment). Le correctif de
+  code reste posé, la sortie par défaut ne change toujours pas (toujours 1 cas sur 5 tirages, jamais 0/5).
+- durée : 1er run ~7 min (dont 387 s d'attente carte), 2e run ~17,5 min (dont 1047 s d'attente carte,
+  incident .qui hors sujet pendant la file) — deux prises séparées, chacune < 30 min.
