@@ -680,6 +680,9 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         self.stats = EngineStats(kv_blocks_total=n_blocks)
         self._lock = threading.Lock()
         self._refusees: list[GenerationOutput] = []     # admissions impossibles, rendues au pas suivant
+        # Pièce 146 (1) : fins par budget KV épuisé, livrées par `step` DANS LE PAS MÊME — `idle` ne les voit pas, une
+        # remise au pas suivant ne partirait jamais si la séquence tronquée était la dernière.
+        self._epuisees: list[GenerationOutput] = []
         self._eos = self._eos_ids()
         # Étage hôte du cache KV : les blocs de préfixe évincés descendent en
         # RAM et remontent au réemploi, au lieu d'être recalculés.
@@ -1350,6 +1353,9 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             finished=True, finish_reason="length",
             prompt_tokens=len(seq.prompt_ids), completion_tokens=len(seq.output_ids))
         self._finish(seq, "length")
+        # Pièce 146 (1) : déposée ici, pas rendue à l'appelant — trois des quatre sites (pipeline amorce et suite,
+        # spéculatif) la jetaient, et `collect` (server/app.py) attendait sans fin la requête du client.
+        self.__dict__.setdefault("_epuisees", []).append(sortie)
         return sortie
 
     def _blocs_plafond(self) -> int:
@@ -1516,6 +1522,9 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
     def step(self) -> list[GenerationOutput]:
         """Exécute une passe avant et rend ce qu'elle a produit."""
         outputs = self._step()
+        if self.__dict__.get("_epuisees"):                 # moteurs de test montés par __new__ : pas d'attribut
+            outputs += self._epuisees
+            self._epuisees = []
         if _DUMP_MOE:
             self._sauver_dump_moe()
         return outputs
@@ -1713,11 +1722,12 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
     def _plain_decode_sync(self, decodable: list[Sequence]) -> list[GenerationOutput]:
         trace = os.environ.get("ACVRAM_TRACE_STEPS")
         tg = time.perf_counter()
-        epuisees = [self._finish_budget_epuise(seq) for seq in decodable
-                   if not self._grow(seq)]
+        for seq in decodable:
+            if not self._grow(seq):
+                self._finish_budget_epuise(seq)          # livrée par `step` (pièce 146)
         decodable = [s for s in decodable if not s.finished]
         if not decodable:
-            return epuisees
+            return []
         t0 = time.perf_counter()
         batch = self._build_batch(decodable, prefill=False)
         t1 = time.perf_counter()
@@ -1740,7 +1750,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             print(f"[pas-lent] {voie} grow {(t0-tg)*1000:.1f} batch "
                   f"{(t1-t0)*1000:.1f} avant {(t2-t1)*1000:.1f} emit "
                   f"{(t3-t2)*1000:.1f} ms len={decodable[0].length}", flush=True)
-        return epuisees + outs
+        return outs
 
     def _speculative_decode(self, decodable: list[Sequence]
                             ) -> list[GenerationOutput]:

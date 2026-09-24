@@ -963,14 +963,26 @@ def auto_plan(spec: ModelSpec, rig: Rig,
                 n += lp.attn_bytes
         return n
 
+    # Pièce 146 (2) : à débit égal, le plus grand cache KV jusqu'à la DEMANDE (max_model_len × max_concurrent_seqs).
+    # Sans ce départage, `max` gardait le premier ex æquo, la fraction 0,06 : 1,77 Gio de KV (14 256 jetons sur un 32B
+    # dense, 3 824 sur gemma4 31B) pour 20 480 demandés, 9,6 Gio restant libres — A comme B, et rien ne le signalait.
+    # Le départage vient APRÈS l'exil et le débit : un cache plus grand ne repousse aucun poids et n'ajoute aucune carte.
+    demande = base.max_model_len * max(1, base.max_concurrent_seqs)
+
     def _rang(pr):
         p, rec = pr
         exil = _exil(p) / max(1, p.total_weight_bytes)
+        kv = min(rec["kv_tokens"], demande)
         if exil <= 0.0:
-            return (1, 0.0, rec["decode_tok_s"])
-        return (0, -exil, rec["decode_tok_s"])
+            return (1, 0.0, rec["decode_tok_s"], kv)
+        return (0, -exil, rec["decode_tok_s"], kv)
 
     best_plan, best_rec = max(candidates, key=_rang)
+    if best_plan.kv_max_tokens < demande and _exil(best_plan) == 0:
+        # La demande ne tient à aucune fraction essayée : tout ce que la VRAM laisse après les poids, sans exil de plus
+        # (`_plan_kv_maximal`) ; la borne par la VRAM RÉELLE et la marge d'activations restent au chargement
+        # (loader._borner_kv_par_la_vram, marge += _reserve_prefill).
+        best_plan = _plan_kv_maximal(spec, _subset_rig(rig, best_rec["gpus"]), base, best_rec["kv_fraction"])
     if best_rec["gpus"] < n_gpus:
         idle = [f"cuda:{g.index}" for g in
                 sorted(rig.gpus, key=lambda g: -g.vram_bandwidth_gbps)[best_rec["gpus"]:]]
