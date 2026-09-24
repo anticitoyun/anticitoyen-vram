@@ -518,6 +518,8 @@ def test_masque_images_famille_gemma_bidir_qwen_causal_inconnu_refuse():
     assert masque_images_famille(_spec_archi(["Gemma3ForConditionalGeneration"])) == "bidir"
     assert masque_images_famille(_spec_archi(["Qwen3VLForConditionalGeneration"])) == "causal"
     assert masque_images_famille(_spec_archi(["Qwen3VLMoeForConditionalGeneration"])) == "causal"
+    assert masque_images_famille(_spec_archi(["Qwen3_5ForConditionalGeneration"])) == "causal"
+    assert masque_images_famille(_spec_archi(["Qwen3_5MoeForConditionalGeneration"])) == "causal"
     with pytest.raises(MasqueImageInconnu, match="architectures="):
         masque_images_famille(_spec_archi(["LlavaForConditionalGeneration"]))    # famille absente : refus nommé
     with pytest.raises(MasqueImageInconnu):

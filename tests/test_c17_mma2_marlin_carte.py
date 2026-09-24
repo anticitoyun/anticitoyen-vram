@@ -98,6 +98,10 @@ def test_bloc_moe_decode_prend_mma2_sur_marlin(monkeypatch):
     # référence du CHEMIN : le même décodage par la MMA sur la pile naturelle (même A4, même
     # arithmétique) — la référence fp32 des GEMV (W4A16) ne juge pas un chemin W4A4
     monkeypatch.setattr(MOE_D, "_GEMV_LAYOUT", "naturel"); monkeypatch.setattr(MOE_D, "_PREFILL_GROUPED", "groupe")
+    # W13=False (comme test_marlin_prefill_p1.py:206) : depuis df196338 (pièce 82 ter, 23/09),
+    # W13 est le défaut au décodage, et la garde `"w13" not in st_m` (moe.py, cec13b1b) refuse
+    # alors ce chemin mma2-Marlin — pas encore compatible avec la disposition w13 fusionnée.
+    monkeypatch.setattr(MOE_D, "_MOE_W13", False)
     assert bloc._try_build_stacks() and bloc._stacks_marlin is None
     y_nat = bloc._forward_grouped_mma(x, topw, topi.to(torch.int32))
     assert y_nat is not None
