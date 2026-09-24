@@ -1,5 +1,13 @@
 # Journal des changements
 
+* **25/09/2026 — pièce 165** : `ACVRAM_GDN_PREFILL_LOT=1` est l'option TTFT des modèles Gated DeltaNet (Qwen3.5/3.8) :
+  au préfill de plusieurs séquences, les projections GDN du lot passent en un appel au lieu d'un par séquence. TTFT servi
+  sous 8 requêtes simultanées (Qwen3.8-27B-nvfp4) : **−18,6 %** (8 × 78 jetons, 431,5 → 351,1 ms) et **−15,7 %**
+  (longueurs mêlées, 466,6 → 393,6 ms). Elle reste en OPT-IN, car elle change la sortie au-delà du critère scellé :
+  accord d'argmax 98,38 % contre 99,19 % pour les séquences servies seules (Qwen3.8, 8 × 78), KL_max jusqu'à 2,2 × le
+  témoin (0,319 contre 0,146 ; 1,240 contre 0,568 sur Qwen3.5-35B-A3B). La PPL par séquence reste au niveau des témoins.
+  Détail : revue/poste5-piece165-verdict-24-09.md.
+
 * **24/09/2026 — pièce 156** : les linéaires NVFP4 des modèles DENSES sont servis par défaut en disposition Marlin unique
   (GEMV v2, TPB par forme) : +57 à +90 % de débit à b = 8, b = 1 inchangé (0,979 à 0,996), sortie qualifiée (KL sous 2 ×
   témoin, PPL identique), TTFT +2 à +4 ms (B/A 1,001 à 1,012 sur gemma4 31B et Qwen3.8-27B, invites de 512, 2 048 et
