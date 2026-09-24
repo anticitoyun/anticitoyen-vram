@@ -109,6 +109,9 @@ def test_attention_un_noyau_le_compteur_porte_la_reduction():
     faute que l'auto-remise à zéro évite) fait réduire un programme qui n'est
     pas le dernier — la sortie du groupe est fausse ; remis à zéro, elle
     redevient celle du témoin."""
+    # Graine fixée : sans elle, q dépend de l'état du générateur laissé par les tests précédents
+    # et le bras « faux > 1 ulp » pouvait tomber dans la CI publique selon l'ordre (24/09).
+    torch.manual_seed(0)
     ap = _ap()
     c, tables, L = _cache([300, 300])
     hkv, n_rep, d = 2, 8, 128
@@ -122,7 +125,9 @@ def test_attention_un_noyau_le_compteur_porte_la_reduction():
     cnt = ap._compteur(2 * hkv, q.device)
     cnt[1] = 1                                              # groupe (b=0, hkv=1) : compteur faussé
     faux = ap.paged_attention(q, c.k, c.k_scale, c.v, c.v_scale, tables, L, hkv, scale, compact=True)
-    assert _ulp_max(ref[0, n_rep:2 * n_rep], faux[0, n_rep:2 * n_rep]) > 1.0
+    # « faux » doit s'écarter : un écart NaN (−inf lu dans un tampon non réduit, selon l'état de
+    # l'allocateur laissé par les tests précédents) est un écart, pas une égalité — d'où `not <=`.
+    assert not (_ulp_max(ref[0, n_rep:2 * n_rep], faux[0, n_rep:2 * n_rep]) <= 1.0)
     assert _ulp_max(ref[1], faux[1]) <= 1.0                 # les autres groupes, intacts
     cnt.zero_()
     bon = ap.paged_attention(q, c.k, c.k_scale, c.v, c.v_scale, tables, L, hkv, scale, compact=True)
