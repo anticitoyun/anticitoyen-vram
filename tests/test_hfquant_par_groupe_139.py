@@ -132,6 +132,15 @@ def test_convert_fp8_en_int8_par_canal_jamais_bf16_clair(tmp_path, tiny_checkpoi
     from tests.test_engine import _prefill
     charge = load_model(str(out), dtype=torch.float32, device_override="cpu")
     assert torch.isfinite(_prefill(charge.model, [5, 42, 7, 99, 13])).all()
+    # bout en bout : TOUT poids int8 servi (piles gate_up et vues comprises) porte la marque préfill bf16, sinon le
+    # premier préfill sur carte reconstruit la copie signée (OOM des 24/09 08:26 et 09:1x)
+    from acvram.engine.layers import QuantLinear
+    from acvram.kernels import _i8c_poids
+    from acvram.quant.formats import INT8Tensor
+    i8 = [(n, m.qweight) for n, m in charge.model.named_modules()
+          if isinstance(m, QuantLinear) and isinstance(m.qweight, INT8Tensor)]
+    assert i8 and [n for n, q in i8 if not q.__dict__.get("prefill_bf16")] == []
+    assert all(_i8c_poids(q) is None for _, q in i8)
 
 
 def _source_modelopt(tmp_path, algo: str, fp8: bool) -> str:
@@ -241,3 +250,11 @@ def test_marque_prefill_bf16_suit_la_pile_int8():
     assert _i8c_poids(pile.qweight) is None
     temoin = stack_int8_linears([QuantLinear(_i8c()), QuantLinear(_i8c())])
     assert not temoin.qweight.__dict__.get("prefill_bf16")
+
+
+def test_marque_prefill_bf16_survit_au_deplacement():
+    """Casse si INT8Tensor.to perd la marque (le chargeur déplace les poids sur la carte après _build_quant)."""
+    t = _i8c()
+    t.__dict__["prefill_bf16"] = True
+    assert t.to("cpu").__dict__.get("prefill_bf16") is True
+    assert not _i8c().to("cpu").__dict__.get("prefill_bf16")
