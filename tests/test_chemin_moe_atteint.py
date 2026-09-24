@@ -30,3 +30,21 @@ def test_la_ligne_dit_la_divergence(converted, monkeypatch):
     assert "chemin_moe=mma-a4(atteint=gemv_marlin)" in ligne, ligne
     faux.__dict__["chemins"] = {}
     assert "chemin_moe=mma-a4(atteint=non-atteint)" in eng.regime_ligne()
+
+
+def test_la_ligne_dit_l_inertie(converted, monkeypatch):
+    """Pièce 127 (poste6, verdict-piece125-24-09) : ACVRAM_MOE_MMA/ACVRAM_PREFILL_DEQUANT posées mais
+    sans effet sur la disposition unique (moe.py:791-798) — la ligne le dit, au lieu de rester muette
+    comme si le réglage avait agi (faute « flag no-op »). Casse si l'inertie redevient muette."""
+    from test_engine import _engine_cpu
+    monkeypatch.setenv("ACVRAM_MOE_MMA", "0")
+    eng = _engine_cpu(converted)
+    faux = MoEBlock.__new__(MoEBlock)
+    faux.__dict__.update({"chemins": {"marlin": 1}, "_stack_state": "oui", "experts": [], "_raison_repli": "",
+                          "_inertes": {"moe_mma=0(inerte:disposition unique)"}})
+    modules = list(eng.model.modules()) + [faux]
+    monkeypatch.setattr(eng.model, "modules", lambda: modules)
+    ligne = eng.regime_ligne()
+    assert "moe_mma=0(inerte:disposition unique)" in ligne, ligne
+    faux.__dict__["_inertes"] = set()
+    assert "inerte" not in eng.regime_ligne()
