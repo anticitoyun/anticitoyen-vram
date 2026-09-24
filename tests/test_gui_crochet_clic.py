@@ -56,11 +56,14 @@ def test_comfyui_verrou_refuse_spawn(tmp_path):
     (config_dir / "parc.toml").write_text(f'[extras]\ncomfy_start = "{script}"\n')
 
     # Créer le verrou non-vide
-    verrou_path = pathlib.Path("/tmp/acvram-carte-0.lock.qui")
+    # JAMAIS le vrai /tmp/acvram-carte-0.lock.qui : l'écrire puis l'effacer détruisait l'étiquette d'une vraie
+    # prise en cours (jxm, 24/09 — les .qui « disparus » pendant les CI)
+    verrou_base = tmp_path / "acvram-carte-0.lock"
+    verrou_path = pathlib.Path(str(verrou_base) + ".qui")
     verrou_path.write_text("mesure en cours")
 
     try:
-        env = {**os.environ, "ACVRAM_GUI_TEST": "clic:b_web", "XDG_CONFIG_HOME": str(config_dir.parent),
+        env = {**os.environ, "ACVRAM_VERROU": str(verrou_base), "ACVRAM_GUI_TEST": "clic:b_web", "XDG_CONFIG_HOME": str(config_dir.parent),
                "CUDA_VISIBLE_DEVICES": "", "PYTHONPATH": os.path.join(ICI, "parc", "lib")}
         env.pop("ACVRAM_PARC_CONFIG", None)
         r = subprocess.run(["xvfb-run", "-a", PY, GUI], capture_output=True, text=True, env=env, timeout=120)

@@ -47,7 +47,8 @@ async fn main() {
         moteur.octets_carte, moteur.noyaux.nombre(), moteur.noyaux.sha256_fatbin
     );
     let nom = nom.unwrap_or_else(|| moteur.manifeste.model.name.clone());
-    let etat = Arc::new(Etat { nom_servi: nom, moteur: Mutex::new(moteur) });
+    let (decodeur, vocab) = (moteur.tokeniseur.copie(), moteur.manifeste.model.vocab_size);
+    let etat = Arc::new(Etat { nom_servi: nom, decodeur, vocab, moteur: Mutex::new(moteur) });
     let ecoute = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap_or_else(|e| {
         eprintln!("acvram-rust : port {port} : {e}");
         std::process::exit(1)

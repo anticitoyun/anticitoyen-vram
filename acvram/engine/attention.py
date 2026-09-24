@@ -94,6 +94,12 @@ def _multi_utilisable(mp, x: torch.Tensor, t: int) -> bool:
                  or x.dtype == torch.float16 and os.environ.get("TRITON_INTERPRET") == "1"))
 
 
+def _format_lin(lin) -> str:
+    """Format de stockage d'une projection (pièce 110 : la fusion partielle regroupe par format)."""
+    q = getattr(lin, "qweight", None)
+    return str(getattr(q, "format", type(q).__name__))
+
+
 class Attention(nn.Module):
     def __init__(self, spec: ModelSpec, q: QuantLinear, k: QuantLinear,
                  v: QuantLinear, o: QuantLinear, rope: RotaryEmbedding,
@@ -193,7 +199,12 @@ class Attention(nn.Module):
         # le decrochage n'est pas explique ET remesure, cette voie ne sert
         # personne par defaut. L'equivalence numerique, elle, tenait : 48
         # jetons identiques. Le chemin est juste, il est couteux.
-        if os.environ.get("ACVRAM_FUSION_PARTIELLE", "0") != "1":
+        # Pièce 110 (23/09) : si l'empilement complet échoue parce que les FORMATS diffèrent (alias mixtes :
+        # q+k nvfp4, v int8…), la paire de même format s'empile d'office — 0/48 couches empilées et 3 GEMM coûtaient
+        # +0,9 ms/pas (pièce 42). Les autres refus (échelles, scalers) gardent le garde-fou du 9/09.
+        formats = [_format_lin(l) for l in lins]
+        par_format = len(set(formats)) > 1
+        if not par_format and os.environ.get("ACVRAM_FUSION_PARTIELLE", "0") != "1":
             return False
         from .layers import explorer_sans_compter
         # UNE SEULE PILE CONSTRUITE. La version d'avant en batissait jusqu'a
@@ -215,6 +226,8 @@ class Attention(nn.Module):
         pile = None
         # Les tentatives ne sont pas des refus : sans ce silence, le bilan
         # compterait 240 refus la ou il y a 80 groupes.
+        if par_format:
+            paires = [ij for ij in paires if formats[ij[0]] == formats[ij[1]]]
         for i, j in paires:
             with explorer_sans_compter():
                 pile = _empiler([lins[i], lins[j]])
