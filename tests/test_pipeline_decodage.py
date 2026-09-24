@@ -181,12 +181,15 @@ def test_pipeline_par_defaut_ids_au_bit_b1_et_b12(b):
         assert (" pipeline=1 " in engine.regime_ligne() + " ") == actif or engine.graphs is None
         engine._eos = set()
         ids = {}
+        id_vers_rid = {}
         for k in range(b):
-            seq = engine.add_request(_invite(k, 96), SamplingParams(temperature=0.0, max_tokens=48), request_id=f"s{k}")
-            ids[seq.id] = []
+            rid = f"s{k}"
+            seq = engine.add_request(_invite(k, 96), SamplingParams(temperature=0.0, max_tokens=48), request_id=rid)
+            ids[rid] = []
+            id_vers_rid[seq.id] = rid
         while engine.running or engine.waiting:
             for out in engine.step():
-                ids[out.sequence_id].extend(out.token_ids)
+                ids[id_vers_rid[out.sequence_id]].extend(out.token_ids)
         del engine
         torch.cuda.empty_cache()
         return ids
@@ -196,5 +199,11 @@ def test_pipeline_par_defaut_ids_au_bit_b1_et_b12(b):
     del loaded
     gc.collect()
     torch.cuda.empty_cache()
+    # Pièce 159 : `ids` était keyé par seq.id (compteur GLOBAL au process,
+    # acvram/engine/runner.py:43) — temoin et pipeline sont deux Engine
+    # séparés, leurs seq.id ne se recoupent jamais ; le message d'erreur
+    # plantait (KeyError) au lieu de rapporter. Keyé par request_id
+    # maintenant, comme _rejouer (id_vers_rid, ligne 58). L'assertion
+    # elle-même (comparaison positionnelle des valeurs) est inchangée.
     assert list(temoin.values()) == list(pipeline.values()), \
         [(k, next((i for i, (x, y) in enumerate(zip(temoin[k], pipeline[k])) if x != y), None)) for k in temoin]
