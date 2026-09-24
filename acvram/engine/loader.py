@@ -1175,7 +1175,7 @@ def _marge_carte(capacite: int, reserve: int = 0) -> int:
 
 
 def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0,
-                           embed_charge: bool = False) -> None:
+                           embed_charge: bool = False) -> dict:
     """Borne le budget KV de chaque GPU par ce qu'il a réellement de libre.
 
     Le budget du manifeste vient du planificateur, qui raisonne sur des tailles
@@ -1184,9 +1184,14 @@ def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0,
     observé avant ce garde-fou : 50 Mio libres après le chargement d'un
     35B-A3B, capture des graphes CUDA impossible, décodage dégradé. Ici, le
     budget est ramené à ``libre − poids réels − marge`` quand il le dépasse.
+
+    Rend ``{appareil: borne brute}``, NÉGATIVE quand les poids seuls passent
+    déjà la marge : le budget, lui, s'arrête à 0 et cacherait le vrai déficit
+    à `_borner_kv_avec_exil` (pièce 156).
     """
+    bornes: dict = {}
     if not torch.cuda.is_available() or not plan.kv_budget:
-        return
+        return bornes
     attn, mlp, embed, head = _octets_reels(manifest)
     for t in plan.tiers:
         if t.kind != "gpu" or t.name not in plan.kv_budget:
@@ -1206,6 +1211,7 @@ def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0,
             poids += mlp.get(l.index, l.mlp_bytes) if l.mlp_storage == t.name else 0
         marge = _marge_carte(capacite, reserve)
         borne = libre - poids - marge
+        bornes[t.name] = borne
         budget = int(plan.kv_budget[t.name])
         if borne < budget:
             plan.kv_budget[t.name] = max(0, borne)
@@ -1213,6 +1219,7 @@ def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0,
                   f"{budget / 2**30:.2f} → {max(0, borne) / 2**30:.2f} Gio "
                   f"(libre {libre / 2**30:.1f}, poids {poids / 2**30:.1f}, "
                   f"marge {marge / 2**30:.1f} dont préfill {reserve / 2**30:.2f})", file=sys.stderr)
+    return bornes
 
 
 def _kv_plancher(plan: Plan, spec: ModelSpec, max_model_len: Optional[int], dev: str) -> int:
@@ -1258,13 +1265,18 @@ def _borner_kv_avec_exil(plan: Plan, manifest: dict, dev, spec: ModelSpec,
     top_k = spec.num_experts_per_tok or 8
     supplement = 0
     for tour in range(tours + 1):
-        _borner_kv_par_la_vram(plan, manifest, dev, reserve=reserve, embed_charge=embed_charge)
+        bornes = _borner_kv_par_la_vram(plan, manifest, dev, reserve=reserve, embed_charge=embed_charge) or {}
         manque = 0
         for t in plan.tiers:
             if t.kind != "gpu" or t.name not in plan.kv_budget:
                 continue
             plancher = _kv_plancher(plan, spec, max_model_len, t.name)
-            manque = max(manque, plancher - int(plan.kv_budget[t.name]))
+            # Pièce 156 : le déficit BRUT (borne négative comprise), pas celui
+            # du budget ramené à 0 — sinon chaque tour n'exile qu'un plancher
+            # de plus (325 Mio au 70B) et quatre tours ne rattrapent pas un
+            # écart de 2 Gio entre la capacité de l'étage et la VRAM libre.
+            dispo = min(int(plan.kv_budget[t.name]), int(bornes.get(t.name, plan.kv_budget[t.name])))
+            manque = max(manque, plancher - dispo)
         if manque <= 0:
             return
         if tour == tours:

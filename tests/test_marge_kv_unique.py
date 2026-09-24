@@ -50,3 +50,16 @@ def test_la_borne_du_kv_suit_la_marge_unique(monkeypatch):
     assert borne() == libre - 15 * GIB - LD._marge_carte(capacite)
     monkeypatch.setattr(LD, "_KV_MARGE_PART", 0.10)
     assert borne() == libre - 15 * GIB - int(0.10 * capacite), "la borne doit lire la constante"
+
+
+def test_la_borne_rend_son_deficit_brut(monkeypatch):
+    """Poids au-delà de libre − marge : le budget s'arrête à 0, la borne rendue reste négative — c'est elle que
+    `_borner_kv_avec_exil` exile d'un coup (sans elle : 4 tours de 325 Mio et refus du 70B, test_kv_plancher_exil)."""
+    libre, capacite = 16 * GIB, 32 * GIB
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda d=None: (libre, capacite))
+    plan = _plan(capacite, 10, 1.0, 0.5)         # 15 Gio de poids : 16 − 15 − 1,6 < 0
+    plan.kv_budget = {"gpu-test": GIB}
+    bornes = LD._borner_kv_par_la_vram(plan, {"tensors": {}}, lambda nom: 0)
+    assert plan.kv_budget["gpu-test"] == 0
+    assert bornes["gpu-test"] == libre - 15 * GIB - LD._marge_carte(capacite) < 0

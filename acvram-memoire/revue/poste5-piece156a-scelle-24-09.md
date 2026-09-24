@@ -40,3 +40,16 @@ Ordre de l'utilisateur relayé par chef (régler les dettes connues). Bead `anti
   passe à la valeur qui tient (7 %), je chiffre ce que Qwen3.8 et qwen32 perdent, et c'est chef qui tranche.
 * (c) Le 70B (Llama-3.3-70B-nvfp4, cause des 7 %) n'est PAS rejoué ici : la réserve de préfill le couvre sur le papier
   (`test_budget_exil_prefill`), pas sur la carte. Risque résiduel nommé.
+
+## Addendum 24/09 14 h 3x (après une première prise avortée, AVANT toute chauffe)
+
+* Prise 7fa2336b : tests 22 verts, **2 rouges** (`test_kv_plancher_exil` : le montage du 70B, « VRAM libre vue 2 Gio
+  sous la capacité de l'étage », finit en refus après 4 tours d'exil). Cassants (i) et (ii) ROUGES comme attendu.
+  Aucune chauffe : ma variable `AVANT` était écrasée par `carte.sh` (« 3135,14001,400.00 »), worktree refusé. Renommée `REF`.
+* Cause (lue, pas devinée) : avec 5 % au lieu de 7 %, le premier exil garde ~0,6 Gio de poids de plus ; la borne passe
+  sous 0 ; `_borner_kv_avec_exil` comptait le manque sur le budget RAMENÉ À 0 (plancher − 0 = 325 Mio par tour), pas sur
+  le déficit brut : 4 × 325 Mio ne rattrapent pas l'écart. C'est l'issue (b) du scellé, sur le papier.
+* Correctif (même pièce) : `_borner_kv_par_la_vram` rend ses bornes brutes (négatives comprises), la boucle exile le
+  déficit brut d'un coup. Même état final quand la borne est positive (cas des trois modèles de la chauffe). Test
+  `test_la_borne_rend_son_deficit_brut` ; cassant (iii) : manque compté sur le budget ramené à 0 → ROUGE les 2 tests du 70B.
+* Prédiction de capacité inchangée (aucun des trois modèles n'exile).
