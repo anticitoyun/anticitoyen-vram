@@ -4355,13 +4355,21 @@ __global__ void kv_write_int8_kernel(
         if (threadIdx.x == 0) {
             float m = 0.f;
             for (int i = 0; i < nw; ++i) m = fmaxf(m, red[i]);
-            // anticitoyen-vram-thf : sous --use_fast_math, `/` et `1.f/sc` (puis
-            // multiplier par l'inverse) rendent une division APPROCHEE — le
-            // jumeau torch (kvcache.py, `x / scale`) reste en division IEEE
-            // correctement arrondie. __fdiv_rn force la meme arithmetique que
-            // le jumeau, meme sous fast_math (precedent : pieces 61/104,
-            // kv_write_k8v4_kernel `:4300-4326`).
-            red[0] = fmaxf(__fdiv_rn(m, 127.f), 1e-8f);
+            // anticitoyen-vram-thf, reprise (piece 109, ordre chef 24/09) :
+            // __fdiv_rn(m, 127.f) est IEEE-correct (verifie au bit, sonde
+            // kv_write_int8_v_debug) mais DESACCORDE avec kvcache.py:494
+            // (`amax / 127.0`) — le `/` de PyTorch sur un tenseur CUDA divise
+            // par un SCALAIRE python se compile en multiplication par le
+            // reciproque precalcule (ATen), pas en division IEEE elem. par
+            // elem. ; la sortie int8 servie par defaut suit CETTE convention
+            // depuis toujours (repli "int8" de loader.py:196). Pour ne pas
+            // changer une sortie servie, on fixe la convention EXPLICITEMENT
+            // des deux cotes au lieu de la laisser au hasard de fast_math et
+            // d'ATen : `m * INV127` (reciproque calcule une fois, correctement
+            // arrondi) avec __fmul_rn, jamais __fdiv_rn ici — verifie 13.f
+            // donne 0x3dd1a346 (le convenu), pas 0x3dd1a347 (l'IEEE vrai).
+            const float INV127 = 1.0f / 127.f;
+            red[0] = fmaxf(__fmul_rn(m, INV127), 1e-8f);
         }
         __syncthreads();
         const float sc = red[0];
