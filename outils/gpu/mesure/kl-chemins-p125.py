@@ -348,10 +348,10 @@ def mode_invites_longues(source: str, dossier_court: str, dossier: str, prefixe:
         rep = court["ids"][court["n_invite"]:]
         msgs = [{"role": "user", "content": f"Contexte :\n{ctx}\n\nQuestion : {q}"}]
         try:
-            ids = tk.apply_chat_template(msgs, add_generation_prompt=True, enable_thinking=False)
+            texte_gab = tk.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False, enable_thinking=False)
         except TypeError:
-            ids = tk.apply_chat_template(msgs, add_generation_prompt=True)
-        ids = list(ids["input_ids"] if isinstance(ids, dict) else ids)
+            texte_gab = tk.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
+        ids = [int(t) for t in tk(texte_gab, add_special_tokens=False)["input_ids"]]   # texte rendu puis ids : jamais une chaîne dans le dump
         torch.save({"ids": ids + list(rep), "n_invite": len(ids), "hidden": {}, "prefixe_jetons": len(ctx_ids), "source_court": dossier_court},
                    os.path.join(dossier, f"invite{i}.pt"))
         print(json.dumps({"invite": i, "n_invite": len(ids), "n_reponse": len(rep)}), flush=True)
