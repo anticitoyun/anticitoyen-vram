@@ -1707,8 +1707,12 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     # par tenseur ci-dessous suffit (identite explicite quand elle s'effondre
     # malgre tout, ligne ~1220).
 
-    from .hfquant import is_hfquant
+    from .hfquant import is_hfquant, par_groupe_actif
     source_quantifiee = opts.passage_direct and is_hfquant(model_path)
+    # Pièce 139 : sous l'opt-in par groupe, hfquant rend les poids fp8 en fp32 exact (seuls tenseurs fp32 en 2-D
+    # de cette source) ; ils sont ré-encodés en int8 symétrique PAR CANAL — même nombre d'octets que le fp8 servi
+    # par NInfer (bf16 clair : 29,7 Go de poids par pas, ne tient pas sur la carte), +1 % d'erreur en quadrature.
+    fp8_en_int8_canal = par_groupe_actif() and is_hfquant(model_path)
     vision_bytes = 0                     # Σ octets des tenseurs VISION_PREFIXES gardés
     from .gguf import is_gguf, mmproj_a_cote
     if is_gguf(model_path) and mmproj_a_cote(model_path):
@@ -1746,7 +1750,11 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         report.in_bytes += tensor.numel() * tensor.element_size()
         fmt = router.format_for(name)
         entry: dict[str, Any] = {"format": fmt, "shape": list(tensor.shape)}
-        if (source_quantifiee and tensor.dim() == 2 and tensor.dtype in (torch.bfloat16, torch.float16)
+        origine_fp8 = fp8_en_int8_canal and tensor.dim() == 2 and tensor.dtype == torch.float32
+        if origine_fp8:
+            fmt = "int8"
+            entry = {"format": fmt, "shape": list(tensor.shape), "origine": "fp8"}
+        elif (source_quantifiee and tensor.dim() == 2 and tensor.dtype in (torch.bfloat16, torch.float16)
                 and fmt not in ("bf16", "fp16", "fp32")):
             # passage direct : une couche que la source a GARDÉE EN CLAIR
             # (ignore / exclude_modules : lm_head, plongements, routeurs,
@@ -1838,8 +1846,8 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         # poste7-p2-qkvo-int8-canal-18-09 : q/k/v/o seuls, et seulement si le
         # routeur les a places en int8 -- le reste du modele garde le groupe
         # de 128 affine (opts.group_size) sans y toucher.
-        attn_canal = (opts.attn_qkvo_int8_canal and fmt == "int8"
-                     and _est_projection_attn(name))
+        attn_canal = origine_fp8 or (opts.attn_qkvo_int8_canal and fmt == "int8"
+                                     and _est_projection_attn(name))
         group_size_tenseur = tensor.shape[1] if attn_canal else opts.group_size
         qt, scaler, metrics = _quantize_on(
             qdev, tensor, fmt, st,
