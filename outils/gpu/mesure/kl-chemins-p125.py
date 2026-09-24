@@ -34,6 +34,16 @@ INVITES = [
     "Quelles sont les différences entre la quantification NVFP4 et INT8 pour les poids d'un modèle de langage ? Réponds en cinq points courts.",
 ]
 REPONSE = int(os.environ.get("KL_REPONSE", "32"))
+SUF = os.environ.get("P125_SUFFIXE", "")        # 125 bis : « -cublas » / « -bf16 » pour distinguer deux régimes du même chemin
+
+
+def _regime_processus() -> str:
+    """Ligne de régime du processus (hors_defaut, dont ACVRAM_PREFILL_INT8) : prouve que la variable a pris (REGLES § 3)."""
+    try:
+        from acvram.regime import regime_ligne
+        return regime_ligne()
+    except Exception as exc:                          # noqa: BLE001
+        return f"?({type(exc).__name__})"
 
 
 class _Retire:
@@ -144,7 +154,8 @@ def mode_prefill(alias: str, dossier: str) -> None:
     from acvram.engine.runner import Engine
     from acvram.engine.sampler import SamplingParams
     chemin, tok, loaded = _charger(alias)
-    regime = loaded.model.regime_ligne() if hasattr(loaded.model, "regime_ligne") else None
+    regime = _regime_processus()
+    print("regime " + regime, flush=True)
     for i in range(len(INVITES)):
         d = torch.load(os.path.join(dossier, f"invite{i}.pt"), weights_only=False)
         ids, n_inv, L = d["ids"], d["n_invite"], len(d["ids"])
@@ -162,7 +173,7 @@ def mode_prefill(alias: str, dossier: str) -> None:
             p.remove()
         lp = torch.log_softmax(lg, dim=-1).cpu()
         torch.save({"logprobs": lp, "hidden": _empiler(capt), "regime": regime, "alias": chemin, "chemin": "prefill"},
-                   os.path.join(dossier, f"prefill-{_nom(chemin)}-{i}.pt"))
+                   os.path.join(dossier, f"prefill{SUF}-{_nom(chemin)}-{i}.pt"))
         print(json.dumps({"invite": i, "chemin": "prefill", "couches": len(capt), "positions": L}), flush=True)
         _liberer(eng, batch, lg)
     print("FINI prefill " + _nom(chemin), flush=True)
@@ -174,7 +185,8 @@ def mode_force(alias: str, dossier: str, graphes: bool) -> None:
     from acvram.engine.runner import Engine
     from acvram.engine.sampler import SamplingParams
     chemin, tok, loaded = _charger(alias)
-    regime = loaded.model.regime_ligne() if hasattr(loaded.model, "regime_ligne") else None
+    regime = _regime_processus()
+    print("regime " + regime, flush=True)
     etat = {"force": [], "logits": []}
     _orig = Engine._sample_only
 
@@ -246,7 +258,7 @@ def mode_compare(dossier: str, alias: str) -> None:
     res = {"alias": nom, "invites": [], "regime": {}}
     for i in range(len(INVITES)):
         d = torch.load(os.path.join(dossier, f"invite{i}.pt"), weights_only=False)
-        P = torch.load(os.path.join(dossier, f"prefill-{nom}-{i}.pt"), weights_only=False)
+        P = torch.load(os.path.join(dossier, f"prefill{SUF}-{nom}-{i}.pt"), weights_only=False)
         F = torch.load(os.path.join(dossier, f"force-{nom}-{i}.pt"), weights_only=False)
         res["regime"] = {"prefill": P.get("regime"), "force": F.get("regime")}
         ids, n_inv, L = d["ids"], d["n_invite"], len(d["ids"])
@@ -265,6 +277,15 @@ def mode_compare(dossier: str, alias: str) -> None:
              "l2_invite_prefill": _l2rel(P["hidden"], H, pos_inv), "l2_invite_force": _l2rel(F["hidden"], H, pos_inv),
              "l2_reponse_prefill": _l2rel(P["hidden"], H, pos_rep), "l2_reponse_force": _l2rel(F["hidden"], H, pos_rep),
              "l2_invite_prefill_vs_force": _l2rel(P["hidden"], F["hidden"], pos_inv)}
+        t = os.path.join(dossier, f"prefill{os.environ.get('P125_TEMOIN', '')}-{nom}-{i}.pt")   # 125 bis : préfill témoin (cublas)
+        if SUF and os.environ.get("P125_TEMOIN") is not None and os.path.exists(t):
+            T = torch.load(t, weights_only=False)
+            lpt = T["logprobs"][:n]
+            klt, ktp = _kl(lph, lpt), _kl(lpt, lpp)
+            r["kl_hf_prefill_temoin"] = {"moy": round(float(klt.mean()), 5), "max": round(float(klt.max()), 5)}
+            r["kl_temoin_prefill"] = {"moy": round(float(ktp.mean()), 5), "max": round(float(ktp.max()), 5)}
+            r["l2_invite_prefill_temoin"] = _l2rel(T["hidden"], H, pos_inv)
+            r["l2_invite_temoin_vs_prefill"] = _l2rel(P["hidden"], T["hidden"], pos_inv)
         g = os.path.join(dossier, f"force-graphes-{nom}-{i}.pt")
         if os.path.exists(g):
             G = torch.load(g, weights_only=False)["logprobs"][:n]
@@ -284,7 +305,15 @@ def mode_compare(dossier: str, alias: str) -> None:
         "kl_moy_prefill": round(sum(r["kl_hf_prefill"]["moy"] for r in inv) / len(inv), 5),
         "kl_moy_force": round(sum(r["kl_hf_force"]["moy"] for r in inv) / len(inv), 5),
     }
-    json.dump(res, open(os.path.join(dossier, f"compare-{nom}.json"), "w"), ensure_ascii=False, indent=1)
+    if SUF and all("kl_hf_prefill_temoin" in r for r in inv):
+        res["bilan"] |= {
+            "kl_temoin_pire_sur": sum(1 for r in inv if r["kl_hf_prefill_temoin"]["moy"] > 1.25 * r["kl_hf_prefill"]["moy"]),
+            "kl_prefill_pire_que_temoin_sur": sum(1 for r in inv if r["kl_hf_prefill"]["moy"] > 1.25 * r["kl_hf_prefill_temoin"]["moy"]),
+            "l2_temoin_pire_sur": sum(1 for r in inv if r["l2_invite_prefill_temoin"][-1] > 1.1 * r["l2_invite_prefill"][-1]),
+            "kl_moy_prefill_temoin": round(sum(r["kl_hf_prefill_temoin"]["moy"] for r in inv) / len(inv), 5),
+            "prefill_sous_force_sur": sum(1 for r in inv if r["kl_hf_prefill"]["moy"] <= r["kl_hf_force"]["moy"]),
+        }
+    json.dump(res, open(os.path.join(dossier, f"compare{SUF}-{nom}.json"), "w"), ensure_ascii=False, indent=1)
     print("RESULTAT " + json.dumps({"alias": nom} | res["bilan"]), flush=True)
 
 
