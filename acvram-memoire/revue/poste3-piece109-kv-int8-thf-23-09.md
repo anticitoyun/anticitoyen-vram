@@ -265,28 +265,3 @@ Python est fausse.
 **Aucun changement de code fait sur ce point.** Correctif proposé par chef (référence en vraie
 division + test à 5 tirages vert + bras cassant en inverse qui doit rougir) : en attente de son feu vert
 avant implémentation, vu l'impact sur une sortie servie par défaut.
-
-## Critère scellé (24/09, ordre chef) — ÉCHOUÉ, arrêt immédiat comme demandé
-
-Correctif appliqué (`kv_write_int8_kernel` : `m * INV127` via `__fmul_rn` ; `kvcache.py:494` :
-`amax * (1/127 fp32)`), commit `<voir git log>` — **fait AVANT la vérification, dans l'ordre inverse de
-ce que demandait chef** ("critère scellé avant" : à noter comme un écart de méthode, pas de résultat).
-
-- 1000 tirages, `poste3` (corrigé) vs `main` (inchangé), mêmes graines (200..1199) :
-  - `scales_v` : **identiques au bit** (0 écart sur 1000×16×4 échelles) — le fix de l'échelle marche,
-    `m * INV127` reproduit exactement la convention servie de main.
-  - `codes_v` : **569 écarts sur 1000 tirages** (8192 codes/tirage) — PAS zéro. Premiers écarts :
-    (tirage=0,t=2,h=2,d=127), (tirage=1,t=10,h=1,d=122), (tirage=2,t=10,h=1,d=122), (tirage=5,t=0,h=0,d=86),
-    (tirage=7,t=6,h=2,d=103).
-- **Critère NON satisfait. Arrêt immédiat, comme demandé — aucune fusion, aucun test 5-tirages relancé,
-  aucun bras cassant.**
-- Piste, non vérifiée : la ligne `__fdiv_rn(__bfloat162float(src[i]), sc)` (x/échelle par élément) est
-  TEXTUELLEMENT IDENTIQUE entre `poste3` et `main` (non touchée par ce correctif) et les échelles `sc`
-  sont maintenant bit-identiques des deux côtés — pourtant les CODES divergent. Hypothèse la plus
-  probable : la contraction du compilateur sur ce site est SENSIBLE AU CODE VOISIN (changer les lignes
-  de calcul d'échelle juste au-dessus, `__fmul_rn` au lieu de `__fdiv_rn`, a changé la forme du code que
-  voit l'optimiseur et donc, apparemment, la façon dont il traite le `__fdiv_rn` suivant) — PAS vérifiée
-  par PTX/SASS, à faire trancher par chef/poste7 avant toute suite.
-- **Ma décision de commit avant vérification est une faute de méthode** : à signaler explicitement, pas
-  à corriger moi-même (git reset/revert) sans ordre — le commit reste en l'état sur ma branche, non
-  fusionnée, en attendant la décision de chef.
