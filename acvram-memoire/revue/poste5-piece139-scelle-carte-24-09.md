@@ -50,3 +50,17 @@ NInfer 75,35 t/s / 4,365 J (b=1), 467,55 / 0,6933 (b=8) ; acvram `Qwen3.8-27B-nv
 
 Conversion à sec (processeur, nice 19, 6 cœurs, hors carte) → (a) + (b) en UNE prise (chargement, jeton, VRAM, eval :
 prévu ≤ 10 min) → (c) b=1 (≤ 15 min) → (c) b=8 (≤ 15 min). File carte : 109 poste3, 142 poste1, puis moi.
+
+## Addendum 24/09 07 h 5x (après le diagnostic mémoire, AVANT la prise suivante ; ordre chef)
+
+Diagnostic (`scratchpad/poste5-p139-24-09/diag-memoire.txt`, même prise, llama-server de l'utilisateur 5,5 Gio sur la
+carte 0, jamais touché) : mixte **22,50 Go** de stockage unique, **23,9 Gio** alloués après chargement (102 : 17,28 Go /
+19,18 Gio). (a) poids : 22,50 Go, AU-DESSUS de la fourchette prédite 21,1-22,1 (la tête MTP bf16, 0,53 Go, n'y était
+pas), sous le FAUX de 23 Go. Il reste ~1,9 Gio libres : la chauffe 4096 × b=8 rend un refus NOMMÉ (« contexte non
+tenu », `serve-a.log`) — pas un OOM muet ; le plan lit la VRAM totale (`detect.py:392`), le budget KV la VRAM libre
+(`loader.py:1143`). Pas un défaut servi.
+
+Changement, écrit avant : serve `--max-model-len 2048 --max-batch 8` pour (a) et pour les deux bras acvram de (c)
+(le banc chat envoie < 1 024 jetons de contexte ; NInfer garde `--max-context 4096`, ce qui ne change que sa réserve
+KV). (b) inchangé (`eval --window 4096`, une séquence) ; s'il ne tient pas, refus nommé au verdict, pas de fenêtre
+plus courte improvisée. Comparaison des deux alias acvram à VRAM libre égale : même prise, même llama-server présent.
