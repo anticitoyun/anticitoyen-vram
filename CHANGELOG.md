@@ -49,3 +49,14 @@
   keyé par empreinte sha256 des sources (comme `kernels/__init__.py`, pièce antérieure sur l'extension principale),
   sources copiées dans le cache, le moteur en service ne relance jamais ninja (charge le `.so` de son empreinte ou
   replie au naturel, raison imprimée). Détail : revue/poste6-piece161-verdict-24-09.md.
+
+* **24/09/2026 — pièce 162** : bilan chiffré matin/soir (`c10cfee5` contre `HEAD` `5375945b`), ABAB × 5, -lgc 2700,
+  Qwen3.8-27B-nvfp4 et gemma-4-31B-it-nvfp4-vision, b = 1 et b = 8, plus TTFT à une invite de 2 048 jetons. Débit à
+  b = 8 : Qwen3.8 **+66,66 %** (274,4 → 457,3 t/s), gemma **+56,95 %** (252,4 → 396,8 t/s, dans la bande prédite
+  57-60 %). Énergie à b = 8 (J/jeton net, BAISSE = gain) : Qwen3.8 1,164 → 0,691 J/jeton (**+40,65 %** d'économie),
+  gemma 1,265 → 0,803 J/jeton (**+36,53 %**). TTFT inchangé aux deux modèles (± 1 %, Marlin/GDN sont des leviers de
+  décodage, pas de prefill). Isolation des deux leviers (Qwen3.8, HEAD seul, b = 8, `ACVRAM_GDN_ETAT_EN_PLACE`,
+  `ACVRAM_GDN_CONV_FUSEE`, `ACVRAM_GDN_RES_DIFFERE`, `ACVRAM_GDN_PORTES_NOYAU` (F1), `ACVRAM_GDN_NORME_FUSEE` (F3),
+  `ACVRAM_NORME_REGISTRES` (F6) tous à 0) : GDN seul **+8,76 %** de débit (bande prédite 3-15 % tenue), Marlin seul
+  (déduit) **+53,5 %** ; composition vérifiée 1,535 (marlin) × 1,0876 (gdn) = 1,670 contre 1,667 mesuré directement
+  (écart 0,2 %). Détail : scratchpad/poste2-piece162-bilan-24-09/verdict-final.md.
