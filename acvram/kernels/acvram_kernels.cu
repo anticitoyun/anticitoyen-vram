@@ -4465,6 +4465,28 @@ void kv_write_int8_v_debug(torch::Tensor v_tete, torch::Tensor dbg, int64_t d_ci
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// -- pièce 109 suite (ordre chef, 24/09) : mesure DIRECTE de l'erreur de
+// `1.f/sc` (fast-math, MEME fichier/flags que kv_write_int8_kernel — le seul
+// site qui compte, `kv_write_int8_kernel:4373`) contre la division vraie
+// `__fdiv_rn(1.f, sc)`, sur un échantillon réel de sc. `sc_in` (fp32),
+// `sortie[i] = 1.f/sc_in[i]` (approx, comme le noyau reel) ; comparé côté
+// hôte à `1.0/sc` (numpy, double->float, IEEE correct) pour l'erreur
+// relative — pas un chiffre cité sans preuve, mesuré sur CE matériel/build.
+__global__ void kv_rcp_approx_debug_kernel(const float *__restrict__ sc_in,
+                                            float *__restrict__ inv_out, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) inv_out[i] = 1.f / sc_in[i];
+}
+
+void kv_rcp_approx_debug(torch::Tensor sc_in, torch::Tensor inv_out) {
+    CHECK_CUDA(sc_in); ACVRAM_DEVICE_GUARD(sc_in);
+    const int n = sc_in.numel();
+    const int th = 256, bl = (n + th - 1) / th;
+    kv_rcp_approx_debug_kernel<<<bl, th, 0, at::cuda::getCurrentCUDAStream()>>>(
+        sc_in.data_ptr<float>(), inv_out.data_ptr<float>(), n);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 
 // --------------------------------------------------------------------------
 // Pièce 104 (k8v4, jumeau : memory/kv_k8v4.py) — K int8 par (jeton, tête)
@@ -8280,6 +8302,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Piece 109 (sonde debug, ordre chef 24/09) : copie exacte de la boucle V de "
           "kv_write_int8_kernel pour UNE tete, ecrit dbg=[echelle fp32, ratio avant arrondi, "
           "echelle apres cast fp16, arrondi __float2int_rn, x, amax]");
+    m.def("kv_rcp_approx_debug", &kv_rcp_approx_debug,
+          py::arg("sc_in"), py::arg("inv_out"),
+          "Piece 109 suite (sonde debug, ordre chef 24/09) : 1.f/sc sous les memes flags que "
+          "kv_write_int8_kernel:4373 -- mesure directe de l'erreur du reciproque rapide sur un "
+          "echantillon de sc reels, contre 1.0/sc (numpy) cote hote");
     m.def("kv_write_k8v4", &kv_write_k8v4,
           "Piece 104 : cache KV k8v4, K int8 par jeton + V int4 par groupe de 32 canaux, "
           "un lancement ; vc4 uint8 [.., D/2], vs4 half [.., D/32]");
