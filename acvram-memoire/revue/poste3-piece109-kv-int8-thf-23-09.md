@@ -239,3 +239,29 @@ rootdir) reste ROUGE sur `poste3` : graine=103 (pas 101/104, qui n'existaient qu
   division dans une fonction `__noinline__` pour empêcher la contraction, ou un flag de compilation
   local (`-fmad=false` sur ce site), à valider par PTX/SASS avant de toucher au flag global (impact sur
   les ~8000 autres lignes du fichier, hors de mon autorité).
+
+## Lecture inversée (24/09, chef) — CONFIRMÉE : c'est `_quantize` (référence) qui est fausse, pas le noyau
+
+chef a vérifié au bit (numpy + torch) que `13/127` en fp32 correctement arrondi (IEEE, `__fdiv_rn`,
+`torch.div`, f64→f32) = `0x3dd1a347` — la valeur du NOYAU. `0x3dd1a346` = `13 × (1/127)`, multiplication
+par l'inverse — la valeur de `_quantize`. Le noyau `poste3` (avec `__fdiv_rn`) est JUSTE ; la référence
+Python est fausse.
+
+1. **file:ligne** : `acvram/memory/kvcache.py:494` — `scale = (amax / 127.0).clamp(min=1e-8)`. Syntaxe de
+   division vraie, mais l'opérateur `/` de PyTorch sur CUDA (tenseur ÷ scalaire Python) se compile en
+   multiplication par le réciproque précalculé (optimisation ATen connue pour la division scalaire),
+   pas en division IEEE élément par élément — d'où `0x3dd1a346`.
+2. **main l'explique** : `m / 127.f` sous `--use_fast_math` (division nue → `rcp` approché) donne
+   vraisemblablement AUSSI `346`, comme la référence Python — c'est pour ça que main paraissait « vert »
+   (deux erreurs identiques qui se masquent l'une l'autre), et `poste3` (noyau corrigé, référence
+   inchangée) « rouge » alors qu'il est le plus exact des deux.
+3. **KV int8 thf servi par défaut ? OUI** — `acvram/engine/loader.py:196` :
+   `_kv_format(...) = _KV_FORMAT or next(..., "int8")` : `"int8"` est le repli par défaut de
+   `_kv_format`, utilisé par tous les chemins de chargement (`loader.py:588,615,639,667,726,886,1048,1285`)
+   sauf format explicite (k8v4, fp8, rotated, canal). Le chemin `_quantize` int8 (kvcache.py:484-498) EST
+   donc la sortie servie par défaut — **passer la référence en vraie division change une sortie servie**,
+   décision remontée à chef, PAS appliquée par moi.
+
+**Aucun changement de code fait sur ce point.** Correctif proposé par chef (référence en vraie
+division + test à 5 tirages vert + bras cassant en inverse qui doit rougir) : en attente de son feu vert
+avant implémentation, vu l'impact sur une sortie servie par défaut.
