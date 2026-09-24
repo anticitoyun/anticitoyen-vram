@@ -24,3 +24,11 @@
 ## Leviers (non codés, au chef)
 * b=1 : masquer la latence d'un noyau court — lancement dépendant programmatique (PDL, recouvre la montée du GEMV suivant avec la queue du précédent) ou plus d'octets en vol par SM via un GEMV persistant ; gain borné par la part fixe (~3 µs sur 9 : QKVO b=1 ≈ −0,1 à −0,2 ms/pas, estimation à sceller avant).
 * b=8 : `gemm_etroit` à ≤ 96 registres (occupation ×2) — `ptxas`/Triton `maxnreg`, à sec d'abord.
+
+**ERRATUM 24/09 07 h (poste1, pièce 140 arrêtée à sec)** : le levier « b=8 : gemm_etroit à ≤ 96 registres (occupation ×2) »
+était FAUX, lu dans les compteurs de cette même mesure (ncu.csv, `_etroit_reduit_kernel`, grille 320) :
+`launch__occupancy_limit_registers` = 3 blocs/SM, `launch__occupancy_limit_shared_mem` = 3 (12 warps, 25 % théoriques),
+mais **`launch__waves_per_multiprocessor` = 0,63** — la grille (320-352 programmes) ne remplit pas une vague : ≈ 1,9 bloc
+par SM, d'où les 15-17 % de warps actifs. Les registres ne sont pas la limite active ; à 96 registres, la mémoire partagée
+bornerait encore à 3 blocs, et la grille n'en fournit que 1,9. Les réglages warps/étages/BLOCK de ce noyau sont en plus
+déjà réfutés au bit (pièce 35, ffa952d8 ; pièce 57, poste5, 36 variantes : « plus d'octets en vol = plus lent »).
