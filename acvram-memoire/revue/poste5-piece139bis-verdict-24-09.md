@@ -20,7 +20,7 @@
 * Ma décomposition à sec du scellé prédisait ≈ 5,7 ms/pas gagnés à b=8. Mesuré : 32,4 → 27,0 ms/pas, **5,4 ms**. La part
   des MLP nvfp4 à 0-55 se retrouve à 5 % près.
 * Face à NInfer (139 c, même banc, autre séance) : b=8 **296,3 contre 463,3 t/s (−36 %)**, contre −47 % sans Marlin.
-  Reste 10,7 ms/pas d'écart. Les int8 (≈ 5,8 ms d'après la décomposition du scellé) en sont maintenant la plus grosse
+  Reste 9,7 ms/pas d’écart (27,0 contre 17,3). Les int8 (≈ 5,8 ms d'après la décomposition du scellé) en sont maintenant la plus grosse
   part isolable. Le levier suivant est un GEMV/GEMM 8 bits plus rapide sur ces 10,63 Go, ou leur passage en format
   Marlin 8 bits.
 * J/jeton b=8 : 0,952 contre NInfer 0,699 (+36 %) ; b=1 : 5,15 contre 4,35 (+18 %, l'int8 lu à 1,1 To/s).
