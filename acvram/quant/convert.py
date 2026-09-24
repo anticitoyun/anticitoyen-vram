@@ -72,6 +72,10 @@ class ConversionOptions:
     # torch._int_mm/cuBLASLt. Le reste de la conversion (awq=False, group_
     # size=128 ailleurs, mixed_precision, snr_floor) reste inchange.
     attn_qkvo_int8_canal: bool = False
+    # 153 (chef 24/09) : meme regime, mais pour les cinq projections de
+    # poids du GatedDeltaNet (qkv/gate/alpha/beta/out) -- drapeau distinct,
+    # ne change pas le sens de attn_qkvo_int8_canal ci-dessus.
+    gdn_int8_canal: bool = False
     # Table de niveaux q3n de CE modèle (huit flottants, symétrique, bornes
     # ±1) — écrite dans chaque entrée q3n du manifeste. None : TABLE_Q3N de
     # la spécification. Les niveaux s'ajustent par modèle (Lloyd-Max sur
@@ -411,6 +415,17 @@ def _est_projection_attn(name: str) -> bool:
     absorptions MLA 3D) donc jamais gênés par le filtre fmt=="int8" en aval."""
     return (".self_attn." in name and name.endswith(".weight")
            and "norm" not in name)
+
+
+def _est_projection_gdn(name: str) -> bool:
+    """153 (chef 24/09) : les cinq projections de poids du GatedDeltaNet,
+    noms acvram post-renommage (_QWEN35_RENOMMAGE) -- qkv/gate/alpha/beta/out.
+    Exclus explicitement : conv1d.weight (conv depthwise, pas une projection
+    dense), a_log.weight/dt_bias.weight (vecteurs [num_v_heads], pas des
+    matrices), et toute norme."""
+    return (".linear_attn." in name and name.endswith(".weight")
+           and "norm" not in name
+           and not name.endswith(("conv1d.weight", "a_log.weight", "dt_bias.weight")))
 
 
 def _bilan_attn_int8(opts, tensors: dict) -> dict:
@@ -1854,7 +1869,9 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
         # routeur les a places en int8 -- le reste du modele garde le groupe
         # de 128 affine (opts.group_size) sans y toucher.
         attn_canal = origine_fp8 or (opts.attn_qkvo_int8_canal and fmt == "int8"
-                                     and _est_projection_attn(name))
+                                     and _est_projection_attn(name)) or (
+                                     opts.gdn_int8_canal and fmt == "int8"
+                                     and _est_projection_gdn(name))
         group_size_tenseur = tensor.shape[1] if attn_canal else opts.group_size
         qt, scaler, metrics = _quantize_on(
             qdev, tensor, fmt, st,
@@ -2012,7 +2029,9 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
             # plus bas, sinon le tenseur reste nvfp4 et group_size=largeur
             # entiere y serait un mensonge de bilan.
             attn_canal_candidat = (opts.attn_qkvo_int8_canal and wider == "int8"
-                                   and _est_projection_attn(name))
+                                   and _est_projection_attn(name)) or (
+                                   opts.gdn_int8_canal and wider == "int8"
+                                   and _est_projection_gdn(name))
             group_size_candidat = tensor.shape[1] if attn_canal_candidat else opts.group_size
             q2, s2, m2 = _quantize_on(
                 qdev, tensor, wider, st,
