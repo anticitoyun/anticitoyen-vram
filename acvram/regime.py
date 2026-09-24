@@ -57,6 +57,10 @@ VARIABLES: tuple[Variable, ...] = (
              "colle du préfill MoE : torch (argsort + bincount + _tuiles) | triton (P0 : tri + histogramme et grille en deux lancements, mêmes tenseurs)"),
     Variable("NVFP4_GEMV_MAX", "32", ("acvram.kernels", "_NVFP4_GEMV_MAX")),
     Variable("INT8_GEMV_MAX", "80", ("acvram.kernels", "_INT8_GEMV_MAX")),
+    Variable("DEPAQUETAGE", "auto", ("acvram.kernels.marlin_port", "_DEPAQUETAGE"), "torch",
+             "pièce 147 (poste6, 24/09) : noyau du dépaquetage Marlin → bf16 au préfill de la disposition unique (PROJ_MARLIN=1 "
+             "seulement) : auto (cuda si l'extension l'a, sinon triton) | cuda (lignes entières, au débit de nvfp4_dequant) | "
+             "triton (tuile par programme, 24/09 matin) | torch (juge) — tous au bit entre eux ; le défaut (PROJ_MARLIN=0) n'y passe jamais"),
     Variable("NARROW_GEMM", "0", ("acvram.kernels", "_NARROW_GEMM"), "0"),
     Variable("NARROW_KERNEL", "mixte", ("acvram.kernels", "_NARROW_KERNEL"), None,
              "linéaires INT8 à b ≤ 16 : mixte (défaut, Triton dès b≥NARROW_TRITON_MIN_B, verdict-coder-c-mixte-17-09) | cuda | triton | tete"),

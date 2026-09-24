@@ -37,3 +37,19 @@ Entrée : 145 — +47-51 ms par requête sur gemma4 31B, +38-41 ms sur Qwen3.8-2
 4. Ce qui me gênerait : que L3' plafonne à −30 ms parce que la lecture des tuiles Marlin (512 octets par tuile, permutés) coûte
    plus que la lecture linéaire de `nvfp4_dequant` — alors B resterait +15 ms au-dessus de A, et la décision « défaut » devrait
    l'assumer explicitement (à 2 048 jetons, +1,6 %).
+
+## Scellé L3' (feu chef, 11 h 4x, AVANT compilation et mesure)
+* Code : `depaqueter_marlin_kernel` (acvram_kernels.cu, avant PYBIND) — un bloc par (8 tuiles k, tuile n, expert), tuiles lues
+  en shared (coalescé), décodage avec EXACTEMENT l'arithmétique de `_depaqueter_kernel` (fp32 : bitcast((sb<<20)+0x34800000),
+  0 si sb = 0, (s_dec·g)·2⁻¹¹⁹, × E2M1 signé (−0,0 conservé), arrondi bf16 par le même calcul entier `b + 0x7FFF + ((b>>16)&1)`),
+  écriture par lignes entières (8 o par fil, 256 o contigus par warp). `depaqueter_marlin(noyau=auto)` → cuda si l'extension
+  l'a ; `ACVRAM_DEPAQUETAGE` (Variable) force cuda | triton | torch ; compteur `DEPAQUETAGES` exposé dans `/metrics`.
+  **Rien ne bouge sous PROJ_MARLIN=0** : `_marlin_seul` seul appelle le dépaquetage (test `test_le_defaut_n_appelle_pas_le_depaquetage`).
+* Test au bit : `tests/test_depaqueter_cuda_p147.py` — 11 formes (gemma q/kv/o/gate_up/down, Qwen3.8 idem, pile MoE E=8), vue à
+  échelle par colonne ; cuda = triton = torch à `torch.equal` sur les motifs int16 ; bras cassant : un octet de code ou d'échelle
+  changé → sortie différente (et le juge torch voit le même écart).
+* Prédiction : dépaquetage ≈ 48 ms sur gemma (72 Go à ~1,5 To/s) contre ≈ 95 aujourd'hui → **TTFT B − A : |Δ| ≤ 10 ms à 2 048 et
+  4 096, ≤ 15 ms à 512, 5/5 lots** (seuils de chef), sur `prise.sh gemma 1` et `qwen38 1` (A B B A A), mêmes instrument et régime
+  que la 145 (les lots A sont rejoués aussi : même séance). FAUX si Δ > 15 ms à 2 048/4 096 ou > 25 ms à 512 → le noyau reste
+  sous la bande (lecture des tuiles permutées) et la décision « défaut » l'assume. Ce qui me gênerait : Δ < −10 ms (B plus rapide
+  que A) — alors `nvfp4_dequant` lui-même n'est pas à la bande, et c'est le défaut qui a un levier.
