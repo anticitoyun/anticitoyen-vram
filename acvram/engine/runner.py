@@ -968,6 +968,10 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # 15/09 sur un GLM converti --format bf16, pris pour un bogue).
             piles_txt += " (" + " ; ".join(r["piles_raison"]) + ")"
         kv_seqs = getattr(self.loaded.plan, "kv_planned_seqs", 0) or "?"
+        # Pièce 146 (b) : une capacité KV sous la demande (séquences planifiées × max_model_len) est NOMMÉE — gemma4 31B
+        # à 8 × 2 560 servait 3 824 jetons pour 20 480 sans une ligne ; le défaut ne refuse pas (décision utilisateur).
+        kv_cap = self.allocator.num_blocks * BLOCK_SIZE
+        kv_dem = kv_seqs * int(self.max_model_len) if isinstance(kv_seqs, int) else 0
         slots = r.get("slots_hybrides")
         # graphes demandés mais retombés (capture impossible) : la CAUSE est sur la
         # ligne — `graphes=off(repli eager: AcceleratorError: CUDA error: out of memory)`
@@ -1001,7 +1005,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                f"ACVRAM_GDN={r['gdn']} experts_layout={r['experts_layout']} "
                f"echelle_awq={r['echelle_awq']} "
                + (f"noyaux={r['noyaux']} " if r["noyaux"] else "")
-               + f"kv_budget={self.allocator.num_blocks * BLOCK_SIZE}/{kv_seqs} "
+               + f"kv_budget={kv_cap}/{kv_seqs} "
+               + (f"kv_sous_demande={kv_cap}/{kv_dem} " if kv_dem and kv_cap < kv_dem else "")
                + f"kv={self.kv_format_servi()} "
                + f"pipeline={int(bool(self.pipeline_actif and self.graphs is not None))} "   # effectif : demandé ET graphes
                + f"sampler={'graphe' if self.pipeline_actif and self.graphs is not None and getattr(self.graphs, 'sampler_graphe', False) else sampler_texte()} "

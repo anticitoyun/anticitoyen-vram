@@ -271,6 +271,7 @@ def load_model(path: str, plan: Optional[Plan] = None,
               f"a_log ({indice_origine((spec.raw or {}).get('architectures'))})"
               f" : verifier une sortie de couche contre une reference avant de "
               f"servir ce modele", flush=True)
+    plan_du_manifeste = plan is None
     if plan is None:
         plan = _plan_from_manifest(manifest, spec, max_model_len=max_model_len,
                                    max_concurrent_seqs=max_concurrent_seqs)
@@ -337,6 +338,11 @@ def load_model(path: str, plan: Optional[Plan] = None,
     _borner_kv_avec_exil(plan, manifest, dev, spec, max_model_len,
                          reserve=_reserve_prefill(spec, max_model_len, manifest, plan))
     kv_blocks = _kv_blocks_per_device(plan, spec, max_model_len)
+    # Pièce 146 (a) : la capacité du chemin par défaut, au MÊME instant (poids pas encore chargés), référence de la garde
+    # Marlin — la disposition ne doit pas coûter de KV ; sans plan du manifeste, la garde retombe sur la demande.
+    from .. import kernels as _kernels
+    kv_ref = (_capacite_kv_sans_marlin(manifest, spec, dev, max_model_len, max_concurrent_seqs)
+              if _kernels._PROJ_MARLIN and plan_du_manifeste else None)
 
     # Arène épinglée pour les poids exilés, dimensionnée ICI parce que le plan
     # vient d'être arrêté : avant lui, la taille exilée n'est pas connue et le
@@ -935,7 +941,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
         bilan_marlin["capacite_kv"] = min((int(n) * BLOCK_SIZE for d, n in kv_blocks.items() if str(d).startswith("cuda")),
                                           default=0)
         _verifier_memoire_marlin(a_allouer, kv_blocks, bilan_marlin,
-                                 max_concurrent_seqs * max_model_len if max_concurrent_seqs and max_model_len else None)
+                                 max_concurrent_seqs * max_model_len if max_concurrent_seqs and max_model_len else None,
+                                 reference=kv_ref)
 
     for i, cfg in a_allouer:
         caches[i] = PagedKVCache(cfg)
@@ -1229,10 +1236,13 @@ def _borner_kv_avec_exil(plan: Plan, manifest: dict, dev, spec: ModelSpec,
         f"réduire max_model_len ou forcer l'exil (ACVRAM_EXIL_COUCHES)")
 
 
-def _verifier_memoire_marlin(a_allouer: list, kv_blocks: dict, bilan: dict, demande: Optional[int] = None) -> None:
+def _verifier_memoire_marlin(a_allouer: list, kv_blocks: dict, bilan: dict, demande: Optional[int] = None,
+                             reference: Optional[dict] = None) -> None:
     """Pièce 129 : refus NOMMÉ au chargement si la disposition mixte ne laisse pas la place du KV planifié, ou si la
-    capacité KV tombe sous la capacité exigée : ACVRAM_PROJ_MARLIN_CAPACITE si posée, sinon ce que CE chargement
-    demande (séquences × longueur), sinon 8 × 8 192."""
+    capacité KV tombe sous la capacité exigée : ACVRAM_PROJ_MARLIN_CAPACITE si posée ; sinon (pièce 146 (a), chef)
+    la capacité du chemin par défaut au même chargement (``reference``, blocs par appareil) — le but est que Marlin ne
+    coûte pas de KV, pas de refuser ce que le défaut sert (gemma4 31B : 3 824 jetons en A comme en B, B seul refusé) ;
+    sans référence, la demande (séquences × longueur), sinon 8 × 8 192."""
     import os
     # 24/09 04 h 2x (ABBA b=1, bras mixte) : la réserve des doubles avait fait EXILER 12/64 couches (poids en flux) —
     # graphes coupés, 87 ms/pas au lieu de 13, en régime « DÉGRADÉ » sans refus. Un exil sous PROJ_MARLIN est un refus.
@@ -1240,7 +1250,8 @@ def _verifier_memoire_marlin(a_allouer: list, kv_blocks: dict, bilan: dict, dema
         raise RuntimeError(f"ACVRAM_PROJ_MARLIN=1 : {bilan['en_flux']} poids nvfp4 en flux depuis l'hôte (exil) après la "
                            f"réserve de la disposition Marlin ({bilan['octets_doubles'] / 2**30:.2f} Gio doublés) — les "
                            f"graphes seraient coupés ; refus au chargement (moins de doubles : ACVRAM_PROJ_MARLIN_DOUBLES)")
-    requis = int(os.environ.get("ACVRAM_PROJ_MARLIN_CAPACITE") or demande or 8 * 8192)
+    impose = os.environ.get("ACVRAM_PROJ_MARLIN_CAPACITE")
+    requis = int(impose or demande or 8 * 8192)
     par_dev: dict = {}
     for _, cfg in a_allouer:
         par_dev[str(cfg.device)] = par_dev.get(str(cfg.device), 0) + cfg.bytes_per_block() * cfg.num_blocks * max(1, cfg.num_layers)
@@ -1253,9 +1264,38 @@ def _verifier_memoire_marlin(a_allouer: list, kv_blocks: dict, bilan: dict, dema
                                f"{bilan['octets_doubles'] / 2**30:.2f} Gio), {libre / 2**30:.2f} Gio libres sur {d} pour "
                                f"{besoin / 2**30:.2f} Gio de KV planifié — refus au chargement")
     for d, blocs in kv_blocks.items():
-        if str(d).startswith("cuda") and blocs * BLOCK_SIZE < requis:
+        if not str(d).startswith("cuda"):
+            continue
+        if not impose and reference is not None and d in reference:
+            if blocs < reference[d]:
+                raise RuntimeError(f"ACVRAM_PROJ_MARLIN=1 : capacité KV {blocs * BLOCK_SIZE} jetons sur {d} < "
+                                   f"{reference[d] * BLOCK_SIZE} du chemin par défaut — la disposition Marlin coûterait "
+                                   f"du KV ; refus au chargement")
+            continue
+        if blocs * BLOCK_SIZE < requis:
             raise RuntimeError(f"ACVRAM_PROJ_MARLIN=1 : capacité KV {blocs * BLOCK_SIZE} jetons sur {d} < {requis} "
                                f"(ACVRAM_PROJ_MARLIN_CAPACITE) — refus au chargement")
+
+
+def _capacite_kv_sans_marlin(manifest: dict, spec: ModelSpec, dev, max_model_len: Optional[int],
+                             max_concurrent_seqs: Optional[int]) -> dict:
+    """Pièce 146 (a) : les blocs KV qu'aurait le chemin par défaut (sans la réserve de la disposition Marlin), par le
+    même chemin que `load_model` — plan du manifeste puis `_borner_kv_avec_exil` — et au même instant, poids non
+    chargés. Les lignes « borné » de ce calcul de référence sont tues (le journal ne doit nommer que le plan servi)."""
+    import contextlib
+    import io
+    from .. import kernels as _k
+    garde = _k._PROJ_MARLIN
+    _k._PROJ_MARLIN = False
+    try:
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            ref = _plan_from_manifest(manifest, spec, max_model_len=max_model_len,
+                                      max_concurrent_seqs=max_concurrent_seqs)
+            _borner_kv_avec_exil(ref, manifest, dev, spec, max_model_len,
+                                 reserve=_reserve_prefill(spec, max_model_len, manifest, ref))
+        return {d: int(n) for d, n in _kv_blocks_per_device(ref, spec, max_model_len).items()}
+    finally:
+        _k._PROJ_MARLIN = garde
 
 
 def _kv_blocks_per_device(plan: Plan, spec: ModelSpec,
