@@ -1230,6 +1230,12 @@ def _verifier_memoire_marlin(a_allouer: list, kv_blocks: dict, bilan: dict, dema
     capacité KV tombe sous la capacité exigée : ACVRAM_PROJ_MARLIN_CAPACITE si posée, sinon ce que CE chargement
     demande (séquences × longueur), sinon 8 × 8 192."""
     import os
+    # 24/09 04 h 2x (ABBA b=1, bras mixte) : la réserve des doubles avait fait EXILER 12/64 couches (poids en flux) —
+    # graphes coupés, 87 ms/pas au lieu de 13, en régime « DÉGRADÉ » sans refus. Un exil sous PROJ_MARLIN est un refus.
+    if bilan.get("en_flux"):
+        raise RuntimeError(f"ACVRAM_PROJ_MARLIN=1 : {bilan['en_flux']} poids nvfp4 en flux depuis l'hôte (exil) après la "
+                           f"réserve de la disposition Marlin ({bilan['octets_doubles'] / 2**30:.2f} Gio doublés) — les "
+                           f"graphes seraient coupés ; refus au chargement (moins de doubles : ACVRAM_PROJ_MARLIN_DOUBLES)")
     requis = int(os.environ.get("ACVRAM_PROJ_MARLIN_CAPACITE") or demande or 8 * 8192)
     par_dev: dict = {}
     for _, cfg in a_allouer:

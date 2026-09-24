@@ -54,6 +54,8 @@ def test_preuve_memoire_refus_nomme(monkeypatch):
     loader._verifier_memoire_marlin([], {"cuda:0": 1024 // BLOCK_SIZE}, b, demande=1024)   # ce que le chargement demande
     with pytest.raises(RuntimeError, match="capacité KV"):
         loader._verifier_memoire_marlin([], {"cuda:0": 1024 // BLOCK_SIZE}, b, demande=8 * 8192)
+    with pytest.raises(RuntimeError, match="en flux depuis l'hôte"):                  # exil = refus (ABBA b=1, 24/09)
+        loader._verifier_memoire_marlin([], {"cuda:0": 10 ** 6}, {"doubles": 1, "octets_doubles": 1, "en_flux": 3})
 
 
 # ---------------------------------------------------------------- carte

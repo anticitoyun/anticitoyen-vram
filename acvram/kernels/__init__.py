@@ -1031,12 +1031,16 @@ def preparer_disposition_marlin(modele) -> dict:
         if type(m).__name__.startswith("MoEBlock"):
             sous_moe.update(id(x) for x in m.modules())
     candidats = {}                                                       # id(tenseur) -> (tenseur, rôle)
+    en_flux: set = set()
     for m in modele.modules():
         if id(m) in sous_moe:
             continue
         for attr, sous in m.named_children():
             t = getattr(sous, "qweight", None)
-            if not isinstance(t, NVFP4Tensor) or getattr(sous, "streamed", None) is not None or not t.qweight.is_cuda:
+            if isinstance(t, NVFP4Tensor) and getattr(sous, "streamed", None) is not None:
+                en_flux.add(id(sous))                                    # exil : compté, refusé par le chargeur
+                continue
+            if not isinstance(t, NVFP4Tensor) or not t.qweight.is_cuda:
                 continue
             role = role_marlin(m, attr)
             ancien = candidats.get(id(t))
@@ -1059,7 +1063,7 @@ def preparer_disposition_marlin(modele) -> dict:
                          and _plage(g[0][0])[0] <= a0 and a1 <= _plage(g[0][0])[1] and t is not g[0][0]), None)
             (hote.append((t, r)) if hote is not None else piles.append([(t, r)]))
         groupes.extend(piles)
-    bilan = {"doubles": 0, "seuls": 0, "octets_doubles": 0, "exclus": 0}
+    bilan = {"doubles": 0, "seuls": 0, "octets_doubles": 0, "exclus": 0, "en_flux": len(en_flux)}
     for groupe in groupes:
         pile, role = groupe[0]
         role = role or next((r for _, r in groupe if r), "")
