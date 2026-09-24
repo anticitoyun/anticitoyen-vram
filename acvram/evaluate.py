@@ -94,6 +94,9 @@ class EvalResult:
     # decroissant sur une autre. Comparer deux moteurs au meme nombre de
     # fenetres exige de connaitre ce cumul ; llama.cpp le rend, acvram non.
     cumul: dict[int, float] = field(default_factory=dict)
+    # 24/09 (pièce 130, ordre du chef) : (Σ NLL, jetons notés) de CHAQUE fenêtre, dans l'ordre — l'écart relatif par
+    # fenêtre entre deux chemins et un vrai SEM (delta method) en ont besoin ; le chiffre global n'en dépend pas.
+    par_fenetre: list = field(default_factory=list)
     # Le cadrage voyage avec le chiffre : sans lui, « 7,23 » et « 137 » ont
     # l'air de decrire le meme objet.
     min_context: int = 0
@@ -106,6 +109,7 @@ class EvalResult:
             "nll": round(self.nll, 6),
             "tokens": self.tokens,
             "windows": self.windows,
+            "par_fenetre": [[round(a, 6), b] for a, b in self.par_fenetre],
             "seconds": round(self.seconds, 2),
             "weights_bytes": self.weights_bytes,
             "bits_par_poids_en_memoire": round(self.bits_par_poids_en_memoire, 3),
@@ -316,6 +320,7 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
         nll = pertes.sum()
         total_nll += float(nll)
         counted += int(pertes.numel())
+        result.par_fenetre.append((float(nll), int(pertes.numel())))
         del h
         if torch.cuda.is_available() and h_device_cuda(model):
             torch.cuda.empty_cache()
