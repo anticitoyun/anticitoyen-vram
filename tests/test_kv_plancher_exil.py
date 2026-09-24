@@ -38,13 +38,14 @@ def _plan(n: int, capacite: int, kv: int) -> Plan:
 
 def _borne_factice(libre: int):
     """Rejoue `_borner_kv_par_la_vram` à sec : budget = libre − poids résidents − marge."""
-    def borner(plan, manifest, dev, reserve=0):
+    def borner(plan, manifest, dev, reserve=0, embed_charge=False):
         poids = sum(l.attn_bytes for l in plan.layers if l.attn_storage == "gpu-test") \
             + sum(l.mlp_bytes for l in plan.layers if l.mlp_storage == "gpu-test")
         marge = LD._KV_MARGE_MIN + reserve
         borne = libre - poids - marge
         if borne < plan.kv_budget["gpu-test"]:
             plan.kv_budget["gpu-test"] = max(0, borne)
+        return {"gpu-test": borne}                      # contrat de la vraie borne (pièce 156)
     return borner
 
 

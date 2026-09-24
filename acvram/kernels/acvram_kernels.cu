@@ -8152,7 +8152,117 @@ torch::Tensor swiglu_bf16(torch::Tensor gu) {
 }
 
 
+// ---------------------------------------------------------------------------
+// Pièce 147 (L3', poste6 24/09) — dépaquetage de la disposition Marlin au
+// débit de `nvfp4_dequant` : la version Triton (`marlin_port._depaqueter_kernel`,
+// un programme par tuile 16 k × 64 n) écrit 64 segments de 32 octets par
+// programme ; ici un bloc lit DEP_TUILES tuiles contiguës en k (coalescé),
+// décode dans la mémoire partagée puis ÉCRIT DES LIGNES ENTIÈRES (256 octets
+// contigus par ligne et par warp). MÊME ARITHMÉTIQUE, AU BIT : fl(s·g)·2⁻¹¹⁹
+// en fp32, × code E2M1 (−0,0 conservé), arrondi bf16 au plus proche pair par
+// le même calcul entier que `_bf16_rne` (juge : depaqueter_marlin(noyau="torch")).
+constexpr int DEP_TUILES = 16;                      // 16 × 16 k = 256 k par ligne et par bloc (512 o bf16 contigus)
+__device__ __forceinline__ float dep_e2m1(int c) {
+    const float mant = (float)(c & 1);
+    const int ex = (c >> 1) & 3;
+    const float mult = ex == 3 ? 4.f : (ex == 2 ? 2.f : 1.f);
+    const float v = ex == 0 ? 0.5f * mant : (1.f + 0.5f * mant) * mult;
+    return (c & 8) ? -v : v;
+}
+__device__ __forceinline__ unsigned short dep_bf16_rne(float x) {
+    int b = __float_as_int(x);
+    b = b + 0x7FFF + ((b >> 16) & 1);
+    return (unsigned short)((unsigned)b >> 16);
+}
+// v2 (11 h 5x) : plus de tampon de transposition — un fil = (colonne n, tuile t) : il lit ses 8 octets dans la tuile
+// (shared), décode 16 k contigus et les écrit en deux uint4 ; les fils voisins prennent les tuiles voisines de la MÊME
+// ligne → un warp écrit 2 lignes × 512 o contigus (lignes entières, comme nvfp4_dequant). Entrées à pas de ligne libre
+// (vues de pile q/k/v : plus de copie `.contiguous()`).
+__global__ void depaqueter_marlin_kernel(const unsigned char *__restrict__ w, long w_pas_e, long w_pas_kt,
+                                         const unsigned char *__restrict__ s, long s_pas_e, long s_pas_kt,
+                                         const float *__restrict__ g, unsigned short *__restrict__ out,
+                                         int KT, int NT, int K, int N, int par_colonne) {
+    __shared__ unsigned char codes[DEP_TUILES * 512];
+    __shared__ unsigned char sc[DEP_TUILES * 64];
+    const int e = blockIdx.z, nt = blockIdx.y, kt0 = blockIdx.x * DEP_TUILES;
+    const int ntuiles = min(DEP_TUILES, KT - kt0);
+    {   // chargement coalescé : 512 o par tuile (uint4), 64 o d'échelles
+        const uint4 *src = reinterpret_cast<const uint4 *>(w + e * w_pas_e + (long)kt0 * w_pas_kt + (long)nt * 512);
+        for (int i = threadIdx.x; i < ntuiles * 32; i += blockDim.x) {
+            const int t = i >> 5, q = i & 31;
+            reinterpret_cast<uint4 *>(codes)[t * 32 + q] =
+                *reinterpret_cast<const uint4 *>(w + e * w_pas_e + (long)(kt0 + t) * w_pas_kt + (long)nt * 512 + q * 16);
+        }
+        (void)src;
+        for (int i = threadIdx.x; i < ntuiles * 64; i += blockDim.x) {
+            const int t = i >> 6, o = i & 63;
+            sc[i] = s[e * s_pas_e + (long)(kt0 + t) * s_pas_kt + nt * 64 + o];
+        }
+    }
+    __syncthreads();
+    const float ge = par_colonne ? 0.f : g[e];
+    // (n, t) : idx = n·DEP_TUILES + t → les fils consécutifs balaient les tuiles d'une même ligne
+    for (int idx = threadIdx.x; idx < 64 * ntuiles; idx += blockDim.x) {
+        const int n = idx / DEP_TUILES, t = idx - n * DEP_TUILES;
+        if (t >= ntuiles) continue;
+        const int q = n >> 3;
+        const int p = 8 * (n & 7) + ((q & 4) | ((q & 1) << 1) | ((q >> 1) & 1));
+        const int sb = sc[t * 64 + p];
+        float s_dec = __int_as_float((sb << 20) + 0x34800000);
+        if (sb == 0) s_dec = 0.f;
+        const float gg = par_colonne ? g[nt * 64 + n] : ge;
+        const float ech = (s_dec * gg) * 0x1p-119f;
+        // les 8 octets de la colonne n : tk ∈ 0..3, bh ∈ 0..1 → bi = ((4·(n&7) + tk)·4 + (n>>4))·4 + ((n>>3)&1) + 2·bh
+        unsigned short v[16];
+        #pragma unroll
+        for (int tk = 0; tk < 4; ++tk) {
+            #pragma unroll
+            for (int bh = 0; bh < 2; ++bh) {
+                const int bi = ((4 * (n & 7) + tk) * 4 + (n >> 4)) * 4 + ((n >> 3) & 1) + 2 * bh;
+                const int oc = codes[t * 512 + bi];
+                const int k0 = tk * 2 + bh;
+                v[k0] = dep_bf16_rne(dep_e2m1(oc & 0xF) * ech);
+                v[k0 + 8] = dep_bf16_rne(dep_e2m1(oc >> 4) * ech);
+            }
+        }
+        uint4 a, b;
+        a.x = v[0] | ((unsigned)v[1] << 16); a.y = v[2] | ((unsigned)v[3] << 16); a.z = v[4] | ((unsigned)v[5] << 16); a.w = v[6] | ((unsigned)v[7] << 16);
+        b.x = v[8] | ((unsigned)v[9] << 16); b.y = v[10] | ((unsigned)v[11] << 16); b.z = v[12] | ((unsigned)v[13] << 16); b.w = v[14] | ((unsigned)v[15] << 16);
+        uint4 *dst = reinterpret_cast<uint4 *>(out + ((long)(e * N + nt * 64 + n)) * K + (long)(kt0 + t) * 16);   // 32 o alignés
+        dst[0] = a; dst[1] = b;
+    }
+}
+void depaqueter_marlin_cuda(torch::Tensor w, torch::Tensor s, torch::Tensor g, torch::Tensor out,
+                            int64_t K, int64_t N, bool par_colonne) {
+    // w : vue int32 [E, KT, 2N] ou [KT, 2N] (pas de ligne libre : tranche de colonnes d'une pile) ; s : uint8 idem [.., KT, N]
+    CHECK_CUDA(w); CHECK_CUDA(s); CHECK_CUDA(g); CHECK_CUDA(out);
+    ACVRAM_DEVICE_GUARD(out);
+    CHECK_CONTIG(g); CHECK_CONTIG(out);
+    TORCH_CHECK(w.scalar_type() == torch::kInt32 && s.scalar_type() == torch::kUInt8
+                && g.scalar_type() == torch::kFloat && out.scalar_type() == torch::kBFloat16, "depaqueter_marlin_cuda : types");
+    TORCH_CHECK(K % 16 == 0 && N % 64 == 0, "depaqueter_marlin_cuda : K % 16, N % 64");
+    const int KT = (int)K / 16, NT = (int)N / 64;
+    auto w3 = w.dim() == 2 ? w.unsqueeze(0) : w;
+    auto s3 = s.dim() == 2 ? s.unsqueeze(0) : s;
+    const int E = (int)w3.size(0);
+    TORCH_CHECK(w3.size(1) == KT && w3.size(2) == 2 * N && s3.size(1) == KT && s3.size(2) == N && (long)out.numel() == (long)E * N * K,
+                "depaqueter_marlin_cuda : formes");
+    TORCH_CHECK(w3.stride(2) == 1 && s3.stride(2) == 1, "depaqueter_marlin_cuda : dernière dimension contiguë");
+    TORCH_CHECK(par_colonne ? (E == 1 && g.numel() == N) : g.numel() == E, "depaqueter_marlin_cuda : échelle globale");
+    const long w_pas_e = w3.stride(0) * 4, w_pas_kt = w3.stride(1) * 4, s_pas_e = s3.stride(0), s_pas_kt = s3.stride(1);
+    TORCH_CHECK(w_pas_kt % 16 == 0 && ((long)w3.data_ptr() % 16) == 0, "depaqueter_marlin_cuda : lignes alignées 16 o");
+    dim3 grid((KT + DEP_TUILES - 1) / DEP_TUILES, NT, E);
+    depaqueter_marlin_kernel<<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const unsigned char *>(w3.data_ptr<int>()), w_pas_e, w_pas_kt,
+        s3.data_ptr<unsigned char>(), s_pas_e, s_pas_kt, g.data_ptr<float>(),
+        reinterpret_cast<unsigned short *>(out.data_ptr()), KT, NT, (int)K, (int)N, par_colonne ? 1 : 0);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("depaqueter_marlin_cuda", &depaqueter_marlin_cuda, py::arg("w"), py::arg("s"), py::arg("g"), py::arg("out"),
+          py::arg("K"), py::arg("N"), py::arg("par_colonne"),
+          "pièce 147 : dépaquetage Marlin → bf16 [E, N, K] par lignes entières, au bit de depaqueter_marlin(noyau='torch')");
     // Controle positif du harnais : echelle de travail connue d'avance.
     m.def("paged_attn_tampon_octets",
           [] { return acvram_pa_tampon_octets; },

@@ -276,9 +276,16 @@ def load_model(path: str, plan: Optional[Plan] = None,
               f"a_log ({indice_origine((spec.raw or {}).get('architectures'))})"
               f" : verifier une sortie de couche contre une reference avant de "
               f"servir ce modele", flush=True)
+    plan_du_manifeste = plan is None
     if plan is None:
         plan = _plan_from_manifest(manifest, spec, max_model_len=max_model_len,
                                    max_concurrent_seqs=max_concurrent_seqs)
+    # Pièce 146 (a) : le plan du chemin par défaut, au MÊME instant que celui de B (avant `embed_tokens` sur la carte :
+    # replanifié après, il voyait 2,6 Gio de moins — 501 blocs de référence contre 697 réels sur gemma4 31B).
+    from .. import kernels as _kernels
+    plan_ref = (_sans_marlin(lambda: _plan_from_manifest(manifest, spec, max_model_len=max_model_len,
+                                                         max_concurrent_seqs=max_concurrent_seqs))
+                if _kernels._PROJ_MARLIN and plan_du_manifeste else None)
     _avertir_noyaux()
     reader = _ShardReader(path, manifest["weight_map"])
     group_size = manifest.get("options", {}).get("group_size", 128)
@@ -339,9 +346,20 @@ def load_model(path: str, plan: Optional[Plan] = None,
     # Caches KV differes : voir la fusion des projections plus bas, qui a
     # besoin de place libre au moment ou elle concatene.
     a_allouer: list = []
+    embed_charge = embed.is_cuda                 # pièce 146 (i) : déjà dans `libre`, ne pas le recompter
     _borner_kv_avec_exil(plan, manifest, dev, spec, max_model_len,
-                         reserve=_reserve_prefill(spec, max_model_len, manifest, plan))
+                         reserve=_reserve_prefill(spec, max_model_len, manifest, plan), embed_charge=embed_charge)
     kv_blocks = _kv_blocks_per_device(plan, spec, max_model_len)
+    # Pièce 146 (a) : la capacité du chemin par défaut, bornée au MÊME instant que B (poids pas encore chargés),
+    # référence de la garde Marlin — la disposition ne doit pas coûter de KV ; sans plan du manifeste, la demande.
+    kv_ref = None
+    if plan_ref is not None:
+        def _borner_ref():
+            _borner_kv_avec_exil(plan_ref, manifest, dev, spec, max_model_len,
+                                 reserve=_reserve_prefill(spec, max_model_len, manifest, plan_ref),
+                                 embed_charge=embed_charge)
+            return {d: int(n) for d, n in _kv_blocks_per_device(plan_ref, spec, max_model_len).items()}
+        kv_ref = _sans_marlin(_borner_ref)
 
     # Arène épinglée pour les poids exilés, dimensionnée ICI parce que le plan
     # vient d'être arrêté : avant lui, la taille exilée n'est pas connue et le
@@ -940,7 +958,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
         bilan_marlin["capacite_kv"] = min((int(n) * BLOCK_SIZE for d, n in kv_blocks.items() if str(d).startswith("cuda")),
                                           default=0)
         _verifier_memoire_marlin(a_allouer, kv_blocks, bilan_marlin,
-                                 max_concurrent_seqs * max_model_len if max_concurrent_seqs and max_model_len else None)
+                                 max_concurrent_seqs * max_model_len if max_concurrent_seqs and max_model_len else None,
+                                 reference=kv_ref)
 
     for i, cfg in a_allouer:
         caches[i] = PagedKVCache(cfg)
@@ -968,7 +987,15 @@ def load_model(path: str, plan: Optional[Plan] = None,
         # projection en prend une copie quantifiée, qui coûte de la place mais
         # divise sa lecture par deux (int8) ou par trois et demi (nvfp4).
         lm_head = QuantLinear(_tete_liee(embed.to(head_dev)))
-    if bilan_marlin is not None:                  # la tête : conversion après le KV, transitoire compté dans la réserve
+    if bilan_marlin is not None:                  # la tête : conversion après le KV, transitoire dans la marge de préfill
+        qt = getattr(lm_head, "qweight", None)
+        q = getattr(qt, "qweight", None)
+        if q is not None and q.is_cuda and type(qt).__name__ == "NVFP4Tensor":
+            transitoire = q.numel() * q.element_size() + qt.block_scale.numel() * qt.block_scale.element_size()
+            libre = torch.cuda.mem_get_info(q.device)[0]
+            if libre < 2 * transitoire:                  # pièce 146 : jamais un OOM de chargement muet
+                raise RuntimeError(f"ACVRAM_PROJ_MARLIN=1 : {libre / 2**30:.2f} Gio libres pour convertir la tête "
+                                   f"({transitoire / 2**30:.2f} Gio, naturelle + Marlin) — refus au chargement")
         tete = torch.nn.Module()
         tete.lm_head = lm_head
         for cle, v in _kernels.preparer_disposition_marlin(tete).items():
@@ -1098,6 +1125,10 @@ def _tete_liee(embed: torch.Tensor) -> Any:
     # gather d'entrée a toujours besoin des poids en 16 bits. Sur un modèle qui
     # remplit déjà la carte, mieux vaut le débit qu'on a qu'un OOM au
     # chargement — on exige le double de la copie en mémoire libre.
+    # Pièce 146 : rendre d'abord au pilote ce que l'allocateur garde en réserve sans l'utiliser — `mem_get_info` le
+    # compte comme occupé. gemma4 31B, KV agrandi : 5,48 Gio réservés non alloués, tête laissée en bf16, puis chaque
+    # appel de la tête la convertissait en fp32 (`_ref_matmul`, 5,25 Gio) → OOM à la chauffe 8 × 2 560 (prise 146b).
+    torch.cuda.empty_cache()
     libre = torch.cuda.mem_get_info(embed.device)[0]
     besoin = embed.numel() * (1 if _TETE_LIEE == "int8" else 0.6)
     if libre < 2 * besoin:
@@ -1120,14 +1151,31 @@ def _tete_liee(embed: torch.Tensor) -> Any:
     return plein
 
 
-# Ce que la carte doit garder hors poids et hors KV : contexte CUDA, activations
-# du prefill, graphes capturés, tampons de spéculation. Mesuré sur la 5090 : la
-# capture des graphes échoue dès que moins de ~1 Gio reste libre.
+# Ce que la carte doit garder hors poids et hors KV : contexte CUDA, graphes
+# capturés, tampons de spéculation, fragmentation. Mesuré sur la 5090 : la
+# capture des graphes échoue dès que moins de ~1 Gio reste libre ; 1,5 Gio ou
+# 5 % de la carte laissent ~0,5 Gio au-dessus de ce bord. Les activations du
+# plus grand préfill n'y sont PAS : elles arrivent à part (`reserve`,
+# `ModelSpec.activations_prefill_bytes`).
+# Pièce 156 (bead ba9) : UNE marge pour les deux décisions qui la consomment,
+# la borne du KV (`_borner_kv_par_la_vram`) et l'exil des poids
+# (`_reajuster_plan`). Celle-ci prenait max(2 Gio, 7 %) depuis le 08/09 :
+# un 70B chargé à 99 % tombait en OOM au premier préfill, faute d'y compter
+# les activations. La réserve de préfill (17/09) couvre ce cas par son nom, et
+# les 2 points de plus ne faisaient plus que retirer du KV (gemma4 31B bornée à
+# 13 408 jetons par ce seul site, 146e).
 _KV_MARGE_MIN = 1536 * 2**20
 _KV_MARGE_PART = 0.05
 
 
-def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0) -> None:
+def _marge_carte(capacite: int, reserve: int = 0) -> int:
+    """Octets gardés hors poids et hors KV sur une carte de ``capacite`` octets,
+    ``reserve`` (activations du plus grand préfill) comprise."""
+    return max(_KV_MARGE_MIN, int(_KV_MARGE_PART * capacite)) + int(reserve)
+
+
+def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0,
+                           embed_charge: bool = False) -> dict:
     """Borne le budget KV de chaque GPU par ce qu'il a réellement de libre.
 
     Le budget du manifeste vient du planificateur, qui raisonne sur des tailles
@@ -1136,9 +1184,14 @@ def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0) ->
     observé avant ce garde-fou : 50 Mio libres après le chargement d'un
     35B-A3B, capture des graphes CUDA impossible, décodage dégradé. Ici, le
     budget est ramené à ``libre − poids réels − marge`` quand il le dépasse.
+
+    Rend ``{appareil: borne brute}``, NÉGATIVE quand les poids seuls passent
+    déjà la marge : le budget, lui, s'arrête à 0 et cacherait le vrai déficit
+    à `_borner_kv_avec_exil` (pièce 156).
     """
+    bornes: dict = {}
     if not torch.cuda.is_available() or not plan.kv_budget:
-        return
+        return bornes
     attn, mlp, embed, head = _octets_reels(manifest)
     for t in plan.tiers:
         if t.kind != "gpu" or t.name not in plan.kv_budget:
@@ -1148,13 +1201,17 @@ def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0) ->
             libre, capacite = torch.cuda.mem_get_info(d)
         except Exception:                       # noqa: BLE001
             continue
-        poids = (embed if plan.embed_device == t.name else 0) \
+        # Pièce 146 (i) : ``embed_charge`` — la table est DÉJÀ sur la carte quand load_model borne (loader, chargement
+        # d'embed_tokens avant la borne) : `libre` l'a soustraite, la recompter dans `poids` la retirait deux fois
+        # (gemma4 31B : 2,6 Gio de KV perdus, 11 152 jetons au lieu de ≈ 16 700).
+        poids = (embed if plan.embed_device == t.name and not embed_charge else 0) \
             + (head if plan.lm_head_device == t.name else 0)
         for l in plan.layers:
             poids += attn.get(l.index, l.attn_bytes) if l.attn_storage == t.name else 0
             poids += mlp.get(l.index, l.mlp_bytes) if l.mlp_storage == t.name else 0
-        marge = max(_KV_MARGE_MIN, int(_KV_MARGE_PART * capacite)) + int(reserve)
+        marge = _marge_carte(capacite, reserve)
         borne = libre - poids - marge
+        bornes[t.name] = borne
         budget = int(plan.kv_budget[t.name])
         if borne < budget:
             plan.kv_budget[t.name] = max(0, borne)
@@ -1162,6 +1219,7 @@ def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0) ->
                   f"{budget / 2**30:.2f} → {max(0, borne) / 2**30:.2f} Gio "
                   f"(libre {libre / 2**30:.1f}, poids {poids / 2**30:.1f}, "
                   f"marge {marge / 2**30:.1f} dont préfill {reserve / 2**30:.2f})", file=sys.stderr)
+    return bornes
 
 
 def _kv_plancher(plan: Plan, spec: ModelSpec, max_model_len: Optional[int], dev: str) -> int:
@@ -1183,7 +1241,8 @@ def _kv_plancher(plan: Plan, spec: ModelSpec, max_model_len: Optional[int], dev:
 
 
 def _borner_kv_avec_exil(plan: Plan, manifest: dict, dev, spec: ModelSpec,
-                         max_model_len: Optional[int], reserve: int = 0, tours: int = 4) -> None:
+                         max_model_len: Optional[int], reserve: int = 0, tours: int = 4,
+                         embed_charge: bool = False) -> None:
     """`_borner_kv_par_la_vram`, puis exile encore si le budget KV est passé
     SOUS le plancher d'une séquence — et refuse explicitement s'il y reste.
 
@@ -1206,13 +1265,18 @@ def _borner_kv_avec_exil(plan: Plan, manifest: dict, dev, spec: ModelSpec,
     top_k = spec.num_experts_per_tok or 8
     supplement = 0
     for tour in range(tours + 1):
-        _borner_kv_par_la_vram(plan, manifest, dev, reserve=reserve)
+        bornes = _borner_kv_par_la_vram(plan, manifest, dev, reserve=reserve, embed_charge=embed_charge) or {}
         manque = 0
         for t in plan.tiers:
             if t.kind != "gpu" or t.name not in plan.kv_budget:
                 continue
             plancher = _kv_plancher(plan, spec, max_model_len, t.name)
-            manque = max(manque, plancher - int(plan.kv_budget[t.name]))
+            # Pièce 156 : le déficit BRUT (borne négative comprise), pas celui
+            # du budget ramené à 0 — sinon chaque tour n'exile qu'un plancher
+            # de plus (325 Mio au 70B) et quatre tours ne rattrapent pas un
+            # écart de 2 Gio entre la capacité de l'étage et la VRAM libre.
+            dispo = min(int(plan.kv_budget[t.name]), int(bornes.get(t.name, plan.kv_budget[t.name])))
+            manque = max(manque, plancher - dispo)
         if manque <= 0:
             return
         if tour == tours:
@@ -1230,10 +1294,13 @@ def _borner_kv_avec_exil(plan: Plan, manifest: dict, dev, spec: ModelSpec,
         f"réduire max_model_len ou forcer l'exil (ACVRAM_EXIL_COUCHES)")
 
 
-def _verifier_memoire_marlin(a_allouer: list, kv_blocks: dict, bilan: dict, demande: Optional[int] = None) -> None:
+def _verifier_memoire_marlin(a_allouer: list, kv_blocks: dict, bilan: dict, demande: Optional[int] = None,
+                             reference: Optional[dict] = None) -> None:
     """Pièce 129 : refus NOMMÉ au chargement si la disposition mixte ne laisse pas la place du KV planifié, ou si la
-    capacité KV tombe sous la capacité exigée : ACVRAM_PROJ_MARLIN_CAPACITE si posée, sinon ce que CE chargement
-    demande (séquences × longueur), sinon 8 × 8 192."""
+    capacité KV tombe sous la capacité exigée : ACVRAM_PROJ_MARLIN_CAPACITE si posée ; sinon (pièce 146 (a), chef)
+    la capacité du chemin par défaut au même chargement (``reference``, blocs par appareil) — le but est que Marlin ne
+    coûte pas de KV, pas de refuser ce que le défaut sert (gemma4 31B : 3 824 jetons en A comme en B, B seul refusé) ;
+    sans référence, la demande (séquences × longueur), sinon 8 × 8 192."""
     import os
     # 24/09 04 h 2x (ABBA b=1, bras mixte) : la réserve des doubles avait fait EXILER 12/64 couches (poids en flux) —
     # graphes coupés, 87 ms/pas au lieu de 13, en régime « DÉGRADÉ » sans refus. Un exil sous PROJ_MARLIN est un refus.
@@ -1241,7 +1308,8 @@ def _verifier_memoire_marlin(a_allouer: list, kv_blocks: dict, bilan: dict, dema
         raise RuntimeError(f"ACVRAM_PROJ_MARLIN=1 : {bilan['en_flux']} poids nvfp4 en flux depuis l'hôte (exil) après la "
                            f"réserve de la disposition Marlin ({bilan['octets_doubles'] / 2**30:.2f} Gio doublés) — les "
                            f"graphes seraient coupés ; refus au chargement (moins de doubles : ACVRAM_PROJ_MARLIN_DOUBLES)")
-    requis = int(os.environ.get("ACVRAM_PROJ_MARLIN_CAPACITE") or demande or 8 * 8192)
+    impose = os.environ.get("ACVRAM_PROJ_MARLIN_CAPACITE")
+    requis = int(impose or demande or 8 * 8192)
     par_dev: dict = {}
     for _, cfg in a_allouer:
         par_dev[str(cfg.device)] = par_dev.get(str(cfg.device), 0) + cfg.bytes_per_block() * cfg.num_blocks * max(1, cfg.num_layers)
@@ -1254,9 +1322,32 @@ def _verifier_memoire_marlin(a_allouer: list, kv_blocks: dict, bilan: dict, dema
                                f"{bilan['octets_doubles'] / 2**30:.2f} Gio), {libre / 2**30:.2f} Gio libres sur {d} pour "
                                f"{besoin / 2**30:.2f} Gio de KV planifié — refus au chargement")
     for d, blocs in kv_blocks.items():
-        if str(d).startswith("cuda") and blocs * BLOCK_SIZE < requis:
+        if not str(d).startswith("cuda"):
+            continue
+        if not impose and reference is not None and d in reference:
+            if blocs < reference[d]:
+                raise RuntimeError(f"ACVRAM_PROJ_MARLIN=1 : capacité KV {blocs * BLOCK_SIZE} jetons sur {d} < "
+                                   f"{reference[d] * BLOCK_SIZE} du chemin par défaut — la disposition Marlin coûterait "
+                                   f"du KV ; refus au chargement")
+            continue
+        if blocs * BLOCK_SIZE < requis:
             raise RuntimeError(f"ACVRAM_PROJ_MARLIN=1 : capacité KV {blocs * BLOCK_SIZE} jetons sur {d} < {requis} "
                                f"(ACVRAM_PROJ_MARLIN_CAPACITE) — refus au chargement")
+
+
+def _sans_marlin(calcul):
+    """Pièce 146 (a) : ``calcul()`` comme sur le chemin par défaut — `kernels._PROJ_MARLIN` coupé (la réserve
+    `_octets_marlin` tombe à 0), lignes « borné »/« plan » tues : le journal ne nomme que le plan servi."""
+    import contextlib
+    import io
+    from .. import kernels as _k
+    garde = _k._PROJ_MARLIN
+    _k._PROJ_MARLIN = False
+    try:
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            return calcul()
+    finally:
+        _k._PROJ_MARLIN = garde
 
 
 def _kv_blocks_per_device(plan: Plan, spec: ModelSpec,
@@ -1353,7 +1444,8 @@ def _compter_experts_manifest(manifest: dict) -> dict:
     return n
 
 
-def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8, reserve: int = 0) -> None:
+def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8, reserve: int = 0,
+                    kv_min: Optional[dict] = None) -> None:
     """Fait descendre en RAM hôte les MLP des dernières couches d'un GPU
     dont les poids réels dépassent la capacité de l'étage.
 
@@ -1431,11 +1523,23 @@ def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8, reserve: int = 0
             capacite = min(capacite, libre)
         except Exception:                           # noqa: BLE001
             pass
-        # marge pour le contexte CUDA, les activations et les piles d'experts :
-        # la capacité de l'étage est déjà nette des réserves du plan, mais un
-        # 70B chargé à 99 % tombait encore en OOM à l'allocation du KV
-        marge = max(2 * 2**30, int(0.07 * capacite)) + int(reserve)
+        # la même marge que la borne du KV (`_marge_carte`, pièce 156). La base
+        # diffère encore : `capacite` est ici déjà nette de la réserve de
+        # build_tiers (voir plus haut), la borne lit `libre` brut.
+        marge = _marge_carte(capacite, reserve)
         deplacees = 0
+        # Pièce 146 : le KV AU-DESSUS du plancher (``kv_min``, une séquence de max_model_len) cède avant tout poids —
+        # jamais d'exil pour loger du cache. Sans lui, le départage par la demande (tiering._rang) portait le KV de
+        # gemma4 31B à 9,45 Gio et 57 poids partaient en RAM hôte (graphes coupés, régime DÉGRADÉ, prise 146).
+        if kv_min is not None and dev in (plan.kv_budget or {}):
+            kv = int(plan.kv_budget[dev])
+            plancher = min(kv, int(kv_min.get(dev, kv)))
+            depasse = utilise() - (capacite - marge)
+            if depasse > 0 and kv > plancher:
+                plan.kv_budget[dev] = max(plancher, kv - depasse)
+                bpt = int(getattr(plan, "kv_bytes_per_token", 0) or 0)
+                if bpt:
+                    plan.kv_max_tokens = int(sum(plan.kv_budget.values()) // bpt)
         while utilise() > capacite - marge:
             # Candidats déjà résidents (couche entière) OU déjà à moitié
             # (placement par expert antérieur, dont on peut encore réduire
@@ -1645,7 +1749,8 @@ def _replanifier(manifest: dict, spec: "ModelSpec",
         slots = (max_concurrent_seqs if max_concurrent_seqs
                 else int(d.get("kv_planned_seqs") or 0) or PlannerOptions().max_concurrent_seqs)
         neuf, _ = auto_plan(spec, rig, PlannerOptions(max_model_len=ctx,
-                                                       max_concurrent_seqs=slots))
+                                                       max_concurrent_seqs=slots,
+                                                       kv_jusqu_a_la_demande=max_model_len is not None))
     except Exception as e:                                   # pragma: no cover
         print(f"[acvram] replanification impossible ({e}) ; plan du manifeste "
               f"conservé", flush=True)
@@ -1759,22 +1864,22 @@ _SUFFIXES_DOUBLES = {"mlp.gate_up": (".mlp.gate_proj.weight", ".mlp.up_proj.weig
 
 def _octets_marlin(manifest: dict) -> int:
     """Pièce 129 (ACVRAM_PROJ_MARLIN=1) : octets à retirer du budget KV AVANT de le fixer — la seconde disposition
-    des rôles doublés (`kernels._PROJ_MARLIN_DOUBLES`, poids nvfp4 des couches, hors tête MTP) plus la plus grosse
-    conversion transitoire (naturelle + Marlin d'un même poids, la tête en général). 0 sans la variable."""
+    des rôles doublés (`kernels._PROJ_MARLIN_DOUBLES`, poids nvfp4 des couches, hors tête MTP). 0 sans la variable.
+    Pièce 146 : la plus grosse conversion transitoire N'Y EST PLUS — les couches se convertissent avant l'allocation du
+    KV (place encore libre), la tête après, dans la marge de préfill (≥ 1,5 Gio, contrôlée avant sa conversion) ; la
+    compter coûtait du KV à la disposition unique (gemma4 31B : 11 024 jetons contre 11 152 au défaut)."""
     from .. import kernels as _k
     if not _k._PROJ_MARLIN:
         return 0
     suffixes = tuple(x for r in _k._PROJ_MARLIN_DOUBLES for x in _SUFFIXES_DOUBLES.get(r, ()))
-    doubles, plus_gros = 0, 0
+    doubles = 0
     for nom, t in manifest.get("tensors", {}).items():
         if t.get("format") != "nvfp4" or len(t.get("shape", ())) != 2 or nom.startswith("mtp."):
             continue
         n, k = t["shape"]
-        octets = n * k // 2 + n * k // 16
-        plus_gros = max(plus_gros, octets)
         if nom.endswith(suffixes):
-            doubles += octets
-    return doubles + plus_gros
+            doubles += n * k // 2 + n * k // 16
+    return doubles
 
 
 def _reserve_prefill(spec, max_model_len: Optional[int], manifest: dict,
@@ -1815,7 +1920,8 @@ def _plan_from_manifest(manifest: dict, spec: "ModelSpec | None" = None,
                             max_concurrent_seqs=max_concurrent_seqs)
         if neuf is not None:
             _reajuster_plan(neuf, manifest, top_k=spec.num_experts_per_tok or 8,
-                            reserve=_reserve_prefill(spec, max_model_len, manifest, neuf))
+                            reserve=_reserve_prefill(spec, max_model_len, manifest, neuf),
+                            kv_min={d: _kv_plancher(neuf, spec, max_model_len, d) for d in (neuf.kv_budget or {})})
             _exil_demande(neuf)
             _exil_experts_demande(neuf, manifest)
             return neuf
