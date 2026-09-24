@@ -78,6 +78,19 @@ def test_bras_cassant_un_octet_change_se_voit():
     assert torch.equal(to.view(torch.int16), cu2.view(torch.int16))
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="noyau CUDA requis")
+def test_vue_de_pile_sans_copie_au_bit():
+    """Tranche de colonnes d'une pile q/k/v (vue non contiguë, pas de ligne 2N_total) = copie contiguë, au bit."""
+    K, N = 5376, 16384
+    w, s, g = _entrees(1, K, N, 99, par_colonne=True)
+    d, n_lig = 8192, 4096
+    wv, sv, gv = w[:, 2 * d:2 * (d + n_lig)], s[:, d:d + n_lig], g[d:d + n_lig].contiguous()
+    assert not wv.is_contiguous()
+    cu = MP.depaqueter_marlin(wv, sv, gv, K, n_lig, noyau="cuda")
+    ref = MP.depaqueter_marlin(wv.contiguous(), sv.contiguous(), gv, K, n_lig, noyau="triton")
+    assert torch.equal(cu.view(torch.int16), ref.view(torch.int16))
+
+
 def test_le_defaut_n_appelle_pas_le_depaquetage(monkeypatch):
     """PROJ_MARLIN=0 : `_marlin_seul` n'est jamais atteint — depaqueter_marlin ne doit pas être appelé par nvfp4_matmul."""
     import acvram.kernels as K

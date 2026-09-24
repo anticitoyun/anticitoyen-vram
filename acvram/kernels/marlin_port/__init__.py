@@ -604,8 +604,8 @@ def _depaqueter_cuda(w: torch.Tensor, s: torch.Tensor, g: torch.Tensor, out: tor
     E = w.shape[0]
     assert out.is_contiguous() and tuple(out.shape) == (E, N, K)
     par_colonne = E == 1 and g.numel() == N and N > 1
-    ext.depaqueter_marlin_cuda(w.contiguous().view(torch.uint8).reshape(-1), s.contiguous().view(torch.uint8).reshape(-1),
-                               g.contiguous().float(), out, K, N, par_colonne)
+    ws = w if w.dtype == torch.int32 else w.view(torch.int32)
+    ext.depaqueter_marlin_cuda(ws, s.view(torch.uint8) if s.dtype != torch.uint8 else s, g.contiguous().float(), out, K, N, par_colonne)
 
 
 def _depaqueter_triton(w: torch.Tensor, s: torch.Tensor, g: torch.Tensor, out: torch.Tensor, K: int, N: int) -> None:
