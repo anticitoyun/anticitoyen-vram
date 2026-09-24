@@ -222,7 +222,7 @@ VARIABLES_LUES = {
     # C13-c (flash), sondes niveau 2, C15-3d (glue compacte) — 20/09
     "ACVRAM_MLA_FLASH_OPERANDES", "ACVRAM_MLA_FLASH_TUILE",
     "ACVRAM_MLA_ECRIT_TORCH", "ACVRAM_MLA_PREP_TEMOIN", "ACVRAM_MLA_QABS_DEUX_MOITIES",
-    "ACVRAM_GLUE_COMPACT", "ACVRAM_GLUE_COMPACT_ITEMS", "ACVRAM_ATTN_WARPS_COMPACT", "ACVRAM_ATTN_REDUC_DEROULEE", "ACVRAM_PROJ_MARLIN", "ACVRAM_PROJ_MARLIN_MIN_M", "ACVRAM_PROJ_MARLIN_MIN_NK", "ACVRAM_PROJ_MARLIN_MIN_N", "ACVRAM_PROJ_MARLIN_DOUBLES", "ACVRAM_PROJ_MARLIN_CAPACITE", "ACVRAM_MTP_ETAT", "ACVRAM_GEMV_MARLIN_V2", "ACVRAM_GEMV_MARLIN_TPB", "ACVRAM_GEMV_MARLIN_S", "ACVRAM_ROUTAGE_TEMOIN",
+    "ACVRAM_GLUE_COMPACT", "ACVRAM_GLUE_COMPACT_ITEMS", "ACVRAM_ATTN_WARPS_COMPACT", "ACVRAM_ATTN_REDUC_DEROULEE", "ACVRAM_PROJ_MARLIN", "ACVRAM_PROJ_MARLIN_MIN_M", "ACVRAM_PROJ_MARLIN_MIN_NK", "ACVRAM_PROJ_MARLIN_MIN_N", "ACVRAM_PROJ_MARLIN_DOUBLES", "ACVRAM_PROJ_MARLIN_CAPACITE", "ACVRAM_MTP_ETAT", "ACVRAM_GEMV_MARLIN_V2", "ACVRAM_GEMV_MARLIN_TPB", "ACVRAM_GEMV_MARLIN_S", "ACVRAM_PROJ_MARLIN_PORTEE", "ACVRAM_ROUTAGE_TEMOIN",
     "ACVRAM_PILE_SANS_RENDU",
     "ACVRAM_CPUS",                                    # 0.6.31 : affinité (acvram/hote.py)                          # gemma (c48c2b2c) : témoin de _rendre_le_cache_apres_la_pile
     "ACVRAM_PREFILL_W8R",
@@ -761,6 +761,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         alpha_commun_qkv=args.alpha_commun_qkv,
         hadamard_experts=args.hadamard_experts,
         passage_direct=args.passage_direct,
+        sans_vision=args.sans_vision,
         calib_source=calib_source,
         # ce que load_calib_ids a REELLEMENT rendu (poste7, poste7-calibration-
         # verdict-17-09 : le manifeste portait les defauts de classe 16/128,
@@ -1232,6 +1233,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "Defaut faux : ne change pas la conversion sans "
                          "mesure (revue/prediction-a7-alpha-commun-gateup-"
                          "14-09.md)")
+    cv.add_argument("--sans-vision", action="store_true",
+                    help="source multimodale : n'ecrit pas la tour de vision, alias texte seul "
+                         "(manifeste vision=non)")
     cv.add_argument("--passage-direct", action="store_true",
                     help="source deja NVFP4 (modelopt, compressed-tensors "
                          "nvfp4-pack-quantized) : copie ses poids 4 bits tels "

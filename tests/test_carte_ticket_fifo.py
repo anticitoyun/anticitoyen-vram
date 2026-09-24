@@ -23,6 +23,7 @@ indépendamment du mécanisme exact de la famine réelle.
 la vraie carte partagée)."""
 from __future__ import annotations
 
+import os
 import pathlib
 import subprocess
 
@@ -32,9 +33,12 @@ SCENARIO = RACINE / "tests" / "aux" / "carte_ticket_scenario2.sh"
 
 def _rang_de_l(tmp_path, essai, ticket_desactive):
     verrou = tmp_path / f"verrou{essai}.lock"
+    # Sans la marque de chaîne tenante : lancé sous une prise carte.sh (tests du chef), le
+    # scénario refuserait sinon « attendre son propre ancêtre » (carte.sh:203).
+    env = {k: v for k, v in os.environ.items() if k != "ACVRAM_CARTE_TENUE"}
     r = subprocess.run(["bash", str(SCENARIO), str(RACINE), str(verrou),
                          "1" if ticket_desactive else "0", "20"],
-                        capture_output=True, text=True, timeout=40)
+                        capture_output=True, text=True, timeout=40, env=env)
     assert r.returncode == 0, r.stderr[-500:]
     lignes = [l for l in r.stdout.splitlines() if l]
     assert "L" in lignes, (essai, lignes, r.stderr[-300:])
