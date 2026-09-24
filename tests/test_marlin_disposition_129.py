@@ -1,0 +1,120 @@
+"""Pièce 129 (24/09) : disposition Marlin MIXTE, opt-in ACVRAM_PROJ_MARLIN=1 (`kernels.preparer_disposition_marlin`).
+
+À sec : le défaut reste hors du chemin (sous-processus), la réserve du chargeur vaut 0 sans la variable et compte les
+rôles doublés avec, la preuve mémoire refuse NOMMÉMENT une capacité KV trop petite.
+Carte : un poids en Marlin SEUL rend ce que rend le chemin naturel (≤ 2⁻⁷·max par ligne, reproductible au bit) à
+M = 1, 8, 300 — y compris K > 11 264 (deux moitiés de K) et une pile q/k/v à échelle par segment dont les SOURCES
+(vues, servies au préfill) passent par la pile ; un rôle doublé garde sa disposition naturelle, et M = 1 y reste au
+bit du chemin d'avant."""
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+import torch
+
+carte = pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise")
+RACINE = Path(__file__).resolve().parents[1]
+
+
+def test_defaut_hors_du_chemin_sous_processus():
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ACVRAM_PROJ_MARLIN")}
+    env["CUDA_VISIBLE_DEVICES"] = ""
+    r = subprocess.run([sys.executable, "-c", "import acvram.kernels as k; print(k._PROJ_MARLIN)"], env=env,
+                       capture_output=True, text=True, cwd=str(RACINE))
+    assert r.stdout.strip().splitlines()[-1] == "False", r.stdout + r.stderr
+
+
+def test_reserve_du_chargeur(monkeypatch):
+    from acvram import kernels
+    from acvram.engine import loader
+    man = {"tensors": {
+        "model.layers.0.mlp.gate_proj.weight": {"format": "nvfp4", "shape": [4096, 1024]},
+        "model.layers.0.mlp.down_proj.weight": {"format": "nvfp4", "shape": [1024, 4096]},
+        "model.layers.0.linear_attn.out.weight": {"format": "nvfp4", "shape": [1024, 2048]},
+        "model.layers.0.self_attn.q_proj.weight": {"format": "nvfp4", "shape": [8192, 1024]},
+        "mtp.layers.0.mlp.down_proj.weight": {"format": "nvfp4", "shape": [1024, 4096]},
+        "model.norm.weight": {"format": "bf16", "shape": [1024]}}}
+    o = lambda n, k: n * k // 2 + n * k // 16                                    # noqa: E731
+    monkeypatch.setattr(kernels, "_PROJ_MARLIN", False)
+    assert loader._octets_marlin(man) == 0
+    monkeypatch.setattr(kernels, "_PROJ_MARLIN", True)
+    assert loader._octets_marlin(man) == o(4096, 1024) + o(1024, 4096) + o(1024, 2048) + o(8192, 1024)   # + plus gros
+
+
+def test_preuve_memoire_refus_nomme():
+    from acvram.engine import loader
+    with pytest.raises(RuntimeError, match="ACVRAM_PROJ_MARLIN=1 : capacité KV"):
+        loader._verifier_memoire_marlin([], {"cuda:0": 10}, {"doubles": 0, "octets_doubles": 0})
+    loader._verifier_memoire_marlin([], {"cuda:0": 10 ** 6}, {"doubles": 0, "octets_doubles": 0})
+
+
+# ---------------------------------------------------------------- carte
+
+def _pret():
+    from acvram import kernels
+    from acvram.kernels import marlin_port as MP
+    ext = kernels.get_extension()
+    if ext is None or not hasattr(ext, "nvfp4_gemv_marlin") or MP.charger(compiler=False) is None:
+        pytest.skip("extension ou port Marlin absents")
+    return kernels
+
+
+def _lin(n, k, graine):
+    from acvram.engine.layers import QuantLinear
+    from acvram.quant.nvfp4 import quantize_nvfp4
+    g = torch.Generator(device="cuda").manual_seed(graine)
+    return QuantLinear(quantize_nvfp4(torch.randn(n, k, device="cuda", generator=g, dtype=torch.bfloat16) * 0.02))
+
+
+def _hors(y, ref):
+    ref = ref.float()
+    return int(((y.float() - ref).abs() > 2 ** -7 * ref.abs().amax(-1, keepdim=True)).sum())
+
+
+@carte
+@pytest.mark.parametrize("n,k", [(2048, 1024), (2048, 17408)])
+def test_marlin_seul_egal_naturel(n, k):
+    kernels = _pret()
+    boite = torch.nn.Module(); boite.proj = _lin(n, k, 7)
+    xs = {m: torch.randn(m, k, device="cuda", dtype=torch.bfloat16) for m in (1, 8, 300)}
+    avant = {m: boite.proj(x) for m, x in xs.items()}
+    bilan = kernels.preparer_disposition_marlin(boite)
+    assert bilan["seuls"] == 1 and boite.proj.qweight.qweight is None            # naturelle libérée
+    for m, x in xs.items():
+        y = boite.proj(x)
+        assert y.shape == avant[m].shape
+        assert _hors(y, avant[m]) == 0, f"M={m} : hors 2⁻⁷·max"
+        assert torch.equal(y, boite.proj(x)), f"M={m} : non reproductible"
+
+
+@carte
+def test_pile_a_echelle_par_segment_et_ses_vues():
+    kernels = _pret()
+    from acvram.engine.layers import stack_nvfp4_linears
+    q, kk, v = _lin(4096, 1024, 1), _lin(512, 1024, 2), _lin(512, 1024, 3)
+    pile = stack_nvfp4_linears([q, kk, v])
+    assert pile is not None and pile.qweight.global_scale_rows is not None
+    boite = torch.nn.Module(); boite.qkv_proj, boite.q_proj, boite.k_proj, boite.v_proj = pile, q, kk, v
+    xs = {m: torch.randn(m, 1024, device="cuda", dtype=torch.bfloat16) for m in (1, 8, 300)}
+    avant = {(nom, m): getattr(boite, nom)(x) for nom in ("qkv_proj", "q_proj", "k_proj", "v_proj") for m, x in xs.items()}
+    kernels.preparer_disposition_marlin(boite)
+    assert pile.qweight._marlin_unique and kk.qweight._marlin_parent[1:] == (4096, 512)
+    for (nom, m), ref in avant.items():
+        y = getattr(boite, nom)(xs[m])
+        assert _hors(y, ref) == 0, f"{nom} M={m} : hors 2⁻⁷·max"
+
+
+@carte
+def test_role_double_garde_la_naturelle_au_bit():
+    kernels = _pret()
+    from acvram.engine.attention import MLP
+    mlp = MLP(_lin(4096, 2048, 4), _lin(4096, 2048, 5), _lin(2048, 4096, 6))     # N ≥ 2 048 partout
+    mlp.fuse()
+    x1 = torch.randn(1, 2048, device="cuda", dtype=torch.bfloat16)
+    avant = mlp(x1)
+    bilan = kernels.preparer_disposition_marlin(mlp)
+    assert bilan["doubles"] == 2 and bilan["seuls"] == 0                         # gate‖up et down doublés
+    assert mlp.gate_up.qweight.qweight is not None and hasattr(mlp.gate_up.qweight, "_marlin_dense")
+    assert torch.equal(mlp(x1), avant), "M = 1 d'un rôle doublé : doit rester au bit du GEMV naturel"

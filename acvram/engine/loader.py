@@ -925,6 +925,15 @@ def load_model(path: str, plan: Optional[Plan] = None,
     if torch.cuda.is_available() and a_allouer:
         torch.cuda.empty_cache()
 
+    # Pièce 129 (opt-in ACVRAM_PROJ_MARLIN=1) : disposition Marlin mixte, APRÈS les fusions et AVANT le KV ; la
+    # mémoire est PROUVÉE ici (refus nommé au chargement, jamais un OOM en service) : place libre pour le KV planifié,
+    # et capacité KV ≥ ACVRAM_PROJ_MARLIN_CAPACITE jetons (8 séquences × 8 192 par défaut).
+    from .. import kernels as _kernels
+    bilan_marlin = None
+    if _kernels._PROJ_MARLIN:
+        bilan_marlin = _kernels.preparer_disposition_marlin(torch.nn.ModuleList(layers))
+        _verifier_memoire_marlin(a_allouer, kv_blocks, bilan_marlin)
+
     for i, cfg in a_allouer:
         caches[i] = PagedKVCache(cfg)
 
@@ -951,11 +960,17 @@ def load_model(path: str, plan: Optional[Plan] = None,
         # projection en prend une copie quantifiée, qui coûte de la place mais
         # divise sa lecture par deux (int8) ou par trois et demi (nvfp4).
         lm_head = QuantLinear(_tete_liee(embed.to(head_dev)))
+    if bilan_marlin is not None:                  # la tête : conversion après le KV, transitoire compté dans la réserve
+        tete = torch.nn.Module()
+        tete.lm_head = lm_head
+        for cle, v in _kernels.preparer_disposition_marlin(tete).items():
+            bilan_marlin[cle] += v
     tetes_mtp, raison_mtp = _charger_mtp(manifest, reader, spec, plan, group_size, dtype,
                                          head_dev, rope, kv_blocks)
     reader.close()
 
     model = ACVRamModel(spec, embed, layers, norm, lm_head, caches, dtype)
+    model.proj_marlin_bilan = bilan_marlin      # pièce 129 : ligne de régime (dense=…+marlin(…))
     model.mtp_raison = raison_mtp        # pièce 105 : pourquoi il n'y a pas de tête (ligne de régime, repli nommé)
     if tetes_mtp:
         model.mtp = tetes_mtp[0]
@@ -1205,6 +1220,28 @@ def _borner_kv_avec_exil(plan: Plan, manifest: dict, dev, spec: ModelSpec,
         f"{ {k: round(v / 2**30, 2) for k, v in plan.kv_budget.items()} } Gio pour un plancher "
         f"d'une séquence de {max_model_len} jetons ({manque / 2**20:.0f} Mio manquants) ; "
         f"réduire max_model_len ou forcer l'exil (ACVRAM_EXIL_COUCHES)")
+
+
+def _verifier_memoire_marlin(a_allouer: list, kv_blocks: dict, bilan: dict) -> None:
+    """Pièce 129 : refus NOMMÉ au chargement si la disposition mixte ne laisse pas la place du KV planifié, ou si la
+    capacité KV tombe sous ACVRAM_PROJ_MARLIN_CAPACITE jetons (défaut 8 × 8 192)."""
+    import os
+    requis = int(os.environ.get("ACVRAM_PROJ_MARLIN_CAPACITE", str(8 * 8192)))
+    par_dev: dict = {}
+    for _, cfg in a_allouer:
+        par_dev[str(cfg.device)] = par_dev.get(str(cfg.device), 0) + cfg.bytes_per_block() * cfg.num_blocks * max(1, cfg.num_layers)
+    for d, besoin in par_dev.items():
+        if not d.startswith("cuda"):
+            continue
+        libre = torch.cuda.mem_get_info(torch.device(d))[0]
+        if libre < besoin:
+            raise RuntimeError(f"ACVRAM_PROJ_MARLIN=1 : après la disposition Marlin ({bilan['doubles']} poids doublés, "
+                               f"{bilan['octets_doubles'] / 2**30:.2f} Gio), {libre / 2**30:.2f} Gio libres sur {d} pour "
+                               f"{besoin / 2**30:.2f} Gio de KV planifié — refus au chargement")
+    for d, blocs in kv_blocks.items():
+        if str(d).startswith("cuda") and blocs * BLOCK_SIZE < requis:
+            raise RuntimeError(f"ACVRAM_PROJ_MARLIN=1 : capacité KV {blocs * BLOCK_SIZE} jetons sur {d} < {requis} "
+                               f"(ACVRAM_PROJ_MARLIN_CAPACITE) — refus au chargement")
 
 
 def _kv_blocks_per_device(plan: Plan, spec: ModelSpec,
@@ -1701,6 +1738,30 @@ def _exil_experts_demande(plan: Plan, manifest: dict) -> None:
 _DENSE_SLOTS = int(os.environ.get("ACVRAM_DENSE_SLOTS", "4"))
 
 
+_SUFFIXES_DOUBLES = {"mlp.gate_up": (".mlp.gate_proj.weight", ".mlp.up_proj.weight"),
+                     "mlp.down": (".mlp.down_proj.weight",), "gdn.out": (".linear_attn.out.weight",)}
+
+
+def _octets_marlin(manifest: dict) -> int:
+    """Pièce 129 (ACVRAM_PROJ_MARLIN=1) : octets à retirer du budget KV AVANT de le fixer — la seconde disposition
+    des rôles doublés (`kernels._PROJ_MARLIN_DOUBLES`, poids nvfp4 des couches, hors tête MTP) plus la plus grosse
+    conversion transitoire (naturelle + Marlin d'un même poids, la tête en général). 0 sans la variable."""
+    from .. import kernels as _k
+    if not _k._PROJ_MARLIN:
+        return 0
+    suffixes = tuple(x for r in _k._PROJ_MARLIN_DOUBLES for x in _SUFFIXES_DOUBLES.get(r, ()))
+    doubles, plus_gros = 0, 0
+    for nom, t in manifest.get("tensors", {}).items():
+        if t.get("format") != "nvfp4" or len(t.get("shape", ())) != 2 or nom.startswith("mtp."):
+            continue
+        n, k = t["shape"]
+        octets = n * k // 2 + n * k // 16
+        plus_gros = max(plus_gros, octets)
+        if nom.endswith(suffixes):
+            doubles += octets
+    return doubles + plus_gros
+
+
 def _reserve_prefill(spec, max_model_len: Optional[int], manifest: dict,
                      plan: Optional[Plan] = None) -> int:
     """Octets transitoires à retirer des budgets (KV, exil) :
@@ -1717,7 +1778,7 @@ def _reserve_prefill(spec, max_model_len: Optional[int], manifest: dict,
     if spec is None:
         return 0
     ctx = int(max_model_len or 8192)
-    reserve = int(spec.activations_prefill_bytes(ctx))
+    reserve = int(spec.activations_prefill_bytes(ctx)) + _octets_marlin(manifest)
     if plan is not None and plan.layers:
         reserve += _DENSE_SLOTS * max(int(l.attn_bytes) + int(l.mlp_bytes) for l in plan.layers)
         # P1 disposition UNIQUE (poste7-p1-disposition-unique-18-09) : la pile
