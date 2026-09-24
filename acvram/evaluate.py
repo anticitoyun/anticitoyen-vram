@@ -101,6 +101,7 @@ class EvalResult:
     # l'air de decrire le meme objet.
     min_context: int = 0
     window: int = 0
+    regime: str = ""                     # pièce 170 : la ligne [régime] du chargement
 
     def to_dict(self) -> dict:
         return {
@@ -122,6 +123,7 @@ class EvalResult:
             "cumul": {str(k): round(v, 4) for k, v in sorted(self.cumul.items())},
             "min_context": self.min_context,
             "window": self.window,
+            "regime": self.regime,
             "par_contexte": {str(k): {"ppl": round(math.exp(min(v[0] / v[1], 60.0)), 4),
                                       "jetons": v[1]}
                              for k, v in sorted(self.par_contexte.items()) if v[1]},
@@ -142,6 +144,17 @@ _TRANCHES = ((0, 8), (8, 32), (32, 128), (128, 512), (512, 0))
 # positions par tranche de tête dans `perplexity` (ACVRAM_PPL_TRANCHE) : 256
 # → logits fp32 256 × 151 936 = 156 Mio par tranche au lieu de 1,2 Gio
 _PPL_TRANCHE = int(os.environ.get("ACVRAM_PPL_TRANCHE", "256"))
+
+
+def ligne_regime(model) -> str:
+    """Pièce 170 : la ligne ``[régime]`` d'une PPL, imprimée par `perplexity` juste après le chargement — la même que celle
+    des instruments KL/ABBA (`acvram.regime_ligne()`), plus la disposition Marlin du modèle chargé et son compteur de replis
+    (`kernels.marlin_bilan_texte`, partagé avec la ligne du service) et le sha du port. Sans elle, le bras B d'une PPL
+    n'était prouvé par rien dans sa propre sortie (réserve d'poste1, 142)."""
+    from . import kernels, regime_ligne
+    from .kernels import marlin_port as MP
+    return (f"{regime_ligne()} dense={kernels.narrow_regime()}{kernels.marlin_bilan_texte(model)} "
+            f"marlin_port_so={MP.sha_so()}")
 
 
 def h_device_cuda(model) -> bool:
@@ -241,10 +254,12 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
         raise ValueError("corpus trop court pour être évalué")
 
     model = loaded.model
+    regime = ligne_regime(model)                            # pièce 170 : le bras se prouve dans sa propre sortie
+    print(regime, flush=True)
     if apres_chargement is not None:
         apres_chargement(model)
     result = EvalResult(model=os.path.basename(os.path.abspath(model_dir)),
-                        min_context=min_context, window=window)
+                        min_context=min_context, window=window, regime=regime)
     result.corpus_chemin, result.corpus_octets, result.corpus_sha256 = _identite_corpus(corpus_path, texte)
     result.weights_bytes = model.nbytes
     # INDICATIF, jamais diviseur : voir la mise en garde de bench.py. Les
