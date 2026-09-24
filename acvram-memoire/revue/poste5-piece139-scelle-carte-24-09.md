@@ -80,3 +80,12 @@ plus courte improvisée. Comparaison des deux alias acvram à VRAM libre égale 
   GEMM bf16, W8A16, sans copie persistante) pour (a), (b) et les deux bras acvram de (c). `--max-model-len` revient à
   4096 (scellé d'origine). Prédictions inchangées. Défaut nommé, NON traité ici (poste moteur) : sous le défaut
   `cublas`, un alias à int8 par canal au-delà des q/k/v/o double sa mémoire int8 au premier préfill.
+
+## Addendum 3, 24/09 08 h 1x (AVANT la prise suivante) — ordre chef : défaut réglé avant fusion
+
+`ACVRAM_PREFILL_INT8=bf16` a échoué autrement (prise 07:53) : le repli bf16 refusait tout groupe ≠ 128
+(`kernels/__init__.py:1284`), donc les poids par canal. Correctif 9082007a : le chargeur marque `prefill_bf16` les int8
+« origine: fp8 » (`loader.py:_build_quant`) ; `_i8c_poids` ne leur fait AUCUNE copie ; ils prennent la déquant bf16
+par tranches via `vue_g128` (au bit du par canal, test) ; ligne de régime `prefill_int8=bf16(origine fp8 ×233)`.
+La prise revient au régime PAR DÉFAUT (aucune variable) : c'est ce qui sera servi. Format côté acvram sur ces 40 % :
+**W8A16** (préfill et décodage) contre **W8A8** chez NInfer — à écrire tel quel au verdict.
