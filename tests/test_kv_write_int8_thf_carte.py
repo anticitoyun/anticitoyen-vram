@@ -13,11 +13,31 @@ désaccordait du jumeau ET de `main` (569 écarts / 1000 tirages mesurés). Le n
 bit au code de `main` (`m / 127.f`, `x * (1.f/sc)`, jamais `__fdiv_rn`) : passer à l'IEEE partout
 changerait une sortie servie, décision réservée à l'utilisateur — non prise ici.
 
-Le test compare au bit, SAUF dans une bande epsilon autour des frontières d'arrondi
-(`|x/échelle - (k+0,5)| <= EPSILON`), où un écart d'UN SEUL code est toléré et compté (mesure
-empirique : la magnitude du réciproque approché fait dériver le ratio de jusqu'à ~0,0255 d'une
-frontière exacte sur ce jeu de données — `scratchpad/poste3-thf-23-09/calibre_epsilon.py`, 24/09 ;
-EPSILON = 2x cette marge mesurée, pas une constante citée sans preuve).
+ÉCHELLE : `kv_write_int8_kernel:4373` (`const float sc = red[0]`) et `kvcache.py:495`
+(`x.to(float32) / scale`) utilisent TOUS DEUX l'échelle fp32 COMPLÈTE pour la division par
+élément — le cast fp16 (`__float2half(sc)` côté noyau, `.to(torch.float16)` côté référence)
+n'intervient QUE pour le STOCKAGE, après coup (vérifié au bit, pas supposé). Ce n'est donc PAS
+un mésaccord fp16/fp32 qui cause les écarts tolérés ci-dessous, mais l'erreur du réciproque
+rapide `1.f/sc` (fast-math) contre la division vraie `x/scale` (tenseur/tenseur, ATen ne
+l'optimise pas en réciproque).
+
+EPSILON DÉRIVÉ (pas cité sans preuve) : sonde `kv_rcp_approx_debug`
+(`scratchpad/poste3-thf-23-09/mesure_rcp_approx.py`, 24/09) mesure `1.f/sc` (mêmes flags que
+`kv_write_int8_kernel:4373`) contre `1.0/sc` sur 64 000 échelles réelles → erreur relative max
+mesurée 7,87e-8. `δ(x/sc) ≈ (x/sc) × erreur_relative ≤ 127 × 7,87e-8 ≈ 1,0e-5` (x ≤ 127×sc par
+construction du code int8). EPSILON = 2e-5 (marge ×2 sur la mesure, formule explicite, pas un
+doublement arbitraire d'un max observé au hasard).
+
+Le test compare au bit, SAUF dans cette bande ε où un écart d'1 code est toléré ET COMPTÉ —
+jamais silencieux — et échoue si la FRACTION d'éléments tolérés dépasse PLAFOND_FRACTION (une
+faute réelle qui toucherait, disons, 5 % des éléments serait noyée si on tolérait juste "peu
+d'écarts" sans plafond chiffré).
+
+Deux bras cassants : (1) diviseur /126 (faux, hors bande — trivial), (2) troncature
+(`__float2int_rz` simulé côté Python par `.trunc()`) au lieu de l'arrondi — plus fin, teste que
+le plafond de FRACTION rougit même quand chaque écart individuel semble "proche" d'une
+frontière (la troncature déplace TOUT ratio à partie fractionnaire ∈ [0,5;1) d'un code entier,
+bien au-delà d'ε, mais en touchant une GRANDE fraction des éléments).
 
 Sauté sans CUDA ou sans extension. À lancer NU (jamais sous un verrou tenu par un autre)."""
 from __future__ import annotations
@@ -30,7 +50,8 @@ from acvram.memory.kvcache import KVCacheConfig, PagedKVCache
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="noyau CUDA requis")
 
 HKV, D, BS = 4, 128, 16
-EPSILON = 5.1e-2  # marge empirique (calibre_epsilon.py, 24/09) : max mesuré 0,02545, x2
+EPSILON = 2e-5  # dérivé (mesure_rcp_approx.py, 24/09) : 127 * erreur_relative_max_mesurée (7,87e-8), x2
+PLAFOND_FRACTION = 1e-3  # 0,1 % des éléments — généreux au-dessus du bruit attendu (~0,0016 %), strict sous 5 %
 
 
 def _ext():
@@ -55,12 +76,13 @@ def _cache():
 
 def _comparer_avec_tolerance(x: torch.Tensor, sc: torch.Tensor,
                               obs: torch.Tensor, ref: torch.Tensor) -> int:
-    """Compare `obs` (codes du noyau) à `ref` (codes du jumeau torch). Toute divergence DOIT
-    tomber à <= EPSILON d'une frontière d'arrondi (k+0,5) ; au-delà, échec dur (c'est une vraie
-    faute, pas le réciproque approché). Rend le nombre d'écarts tolérés (à consigner, jamais
-    silencieux)."""
+    """Compare `obs` (codes du noyau, ou d'un bras cassant simulé) à `ref` (codes du jumeau
+    torch). Toute divergence DOIT tomber à <= EPSILON d'une frontière d'arrondi (k+0,5) ; au-delà,
+    échec dur (vraie faute, pas le réciproque approché). La FRACTION d'écarts tolérés (même tous
+    dans la bande) échoue dur au-delà de PLAFOND_FRACTION. Rend le nombre d'écarts tolérés."""
     diff = (obs.int() - ref.int())
     idx = (diff != 0).nonzero()
+    total = obs.numel()
     if idx.shape[0] == 0:
         return 0
     x32 = x.to(torch.float32)
@@ -76,6 +98,10 @@ def _comparer_avec_tolerance(x: torch.Tensor, sc: torch.Tensor,
         else:
             hors_bande.append((t, h, d, r, dist))
     assert not hors_bande, f"écarts HORS bande epsilon (vraie faute) : {hors_bande[:5]}"
+    frac = n_toleres / total
+    assert frac <= PLAFOND_FRACTION, (
+        f"{n_toleres}/{total} ({frac:.4%}) tolérés — dépasse PLAFOND_FRACTION="
+        f"{PLAFOND_FRACTION:.4%} : trop d'écarts pour être du bruit rcp.approx, vraie faute suspectée")
     return n_toleres
 
 
@@ -100,8 +126,6 @@ def test_ecriture_int8_par_jeton_au_bit_ou_dans_la_bande():
     assert torch.equal(sv_obs, sv_ref), "échelle V hors du bit"
     nk = _comparer_avec_tolerance(k, sk_ref, qk_obs, qk_ref)
     nv = _comparer_avec_tolerance(v, sv_ref, qv_obs, qv_ref)
-    # nk/nv > 0 : toléré (bande epsilon), PAS un échec — seul `_comparer_avec_tolerance` échoue
-    # dur si un écart tombe hors bande (vraie faute). Consigné, jamais silencieux.
     if nk or nv:
         print(f"[thf] tolérés (bande epsilon) : K={nk} V={nv}")
 
@@ -126,9 +150,8 @@ def test_plusieurs_tirages_toujours_au_bit_ou_dans_la_bande():
 
 
 def test_bras_cassant_diviseur_faux_rougit_hors_bande():
-    """Bras cassant (ordre chef) : une vraie faute (diviseur /126 au lieu de /127) doit être
-    détectée par `_comparer_avec_tolerance` COMME hors bande, pas absorbée par EPSILON — sinon le
-    filet ne filtre rien et les deux tests ci-dessus ne prouveraient rien."""
+    """Bras cassant 1 (ordre chef) : une vraie faute (diviseur /126 au lieu de /127) doit être
+    détectée COMME hors bande, pas absorbée par EPSILON."""
     _ext()
     cache = _cache()
     k, v = _kv(BS, graine=1)
@@ -136,10 +159,34 @@ def test_bras_cassant_diviseur_faux_rougit_hors_bande():
     cache.write(slots, k, v)
 
     qv_ref, sv_ref = cache._quantize(v)
-    # Référence FAUSSE délibérée : diviseur 126 au lieu de 127 (vraie faute, pas un aléa de rcp).
     amax = v.abs().amax(dim=-1, keepdim=True).to(torch.float32)
     scale_fausse = (amax / 126.0).clamp(min=1e-8)
     q_faux = (v.to(torch.float32) / scale_fausse).round().clamp(-127, 127).to(torch.int8)
 
     with pytest.raises(AssertionError, match="HORS bande"):
         _comparer_avec_tolerance(v, sv_ref, q_faux, qv_ref)
+
+
+def test_bras_cassant_fraction_rougit_meme_dans_la_bande():
+    """Bras cassant 2, plus fin (ordre chef) : synthétique et direct, pour isoler
+    PLAFOND_FRACTION de la bande — construit N éléments dont le ratio est À exactement
+    EPSILON/2 d'une frontière (donc chacun INDIVIDUELLEMENT toléré) et dont le code observé
+    diffère du code de référence d'exactement 1. Un biais systématique qui toucherait une
+    fraction des éléments plus grande que PLAFOND_FRACTION, mais chacun de peu, ne doit PAS
+    passer sous silence — sinon le plafond ne sert à rien."""
+    n = 8192  # même taille qu'un tenseur K/V réel (BS*HKV*D), pour un plafond comparable
+    n_faux = int(n * (PLAFOND_FRACTION * 2))  # au-delà du plafond, chacun dans la bande
+    assert n_faux > 0
+
+    x = torch.zeros(1, 1, n, device="cuda")
+    sc = torch.ones(1, 1, device="cuda")  # ratio = x directement (sc=1)
+    ref = torch.zeros(1, 1, n, dtype=torch.int8, device="cuda")
+    obs = torch.zeros(1, 1, n, dtype=torch.int8, device="cuda")
+    for i in range(n_faux):
+        r = 10.5 + EPSILON / 2  # à EPSILON/2 d'une frontière, dans la bande individuellement
+        x[0, 0, i] = r
+        ref[0, 0, i] = 11  # arrondi correct (ties-to-even ou plus proche, ici sans ambiguïté)
+        obs[0, 0, i] = 10  # off-by-one, comme un vrai écart de rcp.approx
+
+    with pytest.raises(AssertionError, match="PLAFOND_FRACTION"):
+        _comparer_avec_tolerance(x, sc, obs, ref)
