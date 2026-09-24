@@ -50,7 +50,11 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("PAGED_ATTN", "triton", ("acvram.kernels", "_PAGED_ATTN"), "cuda",
              "attention paginée du décodage : triton (poste E, K/V lus une fois par groupe GQA, défaut depuis poste7-e-c-verdict-17-09) | cuda (ancien défaut, témoin)"),
     # --- projections NVFP4 non groupées --------------------------------
-    Variable("PREFILL", "bf16", None, "bf16", "bf16 | w4a16 (B1 Triton, NVFP4 dans la tuile) | w8a8 | w4a4 au-delà de NVFP4_GEMV_MAX lignes"),
+    Variable("PREFILL", "bf16", None, "bf16", "bf16 | w4a16 (B1 Triton, NVFP4 dans la tuile) | w8a8 | w4a4 au-delà de NVFP4_GEMV_MAX lignes | "
+             "marlin (pièce 147 L2, poste6 24/09, opt-in : GEMM Marlin W4A16 sur la disposition unique au préfill, sans dépaquetage, "
+             "jusqu'à PREFILL_MARLIN_MAX_M lignes ; ± 1 ulp, jamais au défaut sans décision de l'utilisateur)"),
+    Variable("PREFILL_MARLIN_MAX_M", "8192", ("acvram.kernels", "_PREFILL_MARLIN_MAX_M"), None,
+             "pièce 147 L2 : lignes de préfill au-delà desquelles ACVRAM_PREFILL=marlin revient au dépaquetage + cuBLAS"),
     Variable("PREFILL_INT8", "cublas", ("acvram.kernels", "_PREFILL_INT8"), "bf16",
              "linéaires INT8 au préfill : cublas (DÉFAUT depuis poste7-p2-au-defaut-19-09 : poids symétriques par canal des convertis -qkvo-i8c, A8 par jeton puis torch._int_mm cuBLASLt, M > 16 ; un poids affine par groupes — les classés — garde la déquant bf16, sortie inchangée) | bf16 (témoin : déquant entière + cutlass partout) | a8 (P0 : activation int8 par jeton, W8A8 Triton sur tout poids int8 ; poste7-profil-verdict-18-09)"),
     Variable("COLLE_MOE", "torch", ("acvram.engine.moe", "_COLLE_MOE"), "torch",

@@ -535,14 +535,25 @@ def nvfp4_dequant(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16,
 # 40 à plus de 64, et un seuil sous le plus petit croisement ne peut pas perdre
 # sur une forme non balayée. La variable reste comme échappement.
 _NVFP4_GEMV_MAX = int(os.environ.get("ACVRAM_NVFP4_GEMV_MAX", "32"))
-PREFILL_REGIMES = ("bf16", "w4a16", "w8a8", "w4a4")
+PREFILL_REGIMES = ("bf16", "w4a16", "w8a8", "w4a4", "marlin")
+# Pièce 147 L2 (opt-in ACVRAM_PREFILL=marlin) : au préfill d'un poids en disposition Marlin SEULE, la GEMM Marlin W4A16
+# (`gemm_dense`, fp32 déterministe) lit les codes fp4 dans la tuile au lieu de dépaqueter tout le poids en bf16 puis cuBLAS —
+# jusqu'à ce nombre de lignes ; au-delà, dépaquetage + cuBLAS comme le défaut. PAS au bit (l'échelle s'applique après la
+# somme partielle, 134 : KL 0,00545 au pas 0) : jamais au défaut sans décision de l'utilisateur.
+_PREFILL_MARLIN_MAX_M = int(os.environ.get("ACVRAM_PREFILL_MARLIN_MAX_M", "8192"))
+
+
+def prefill_marlin(m: int) -> bool:
+    """Vrai si ``m`` lignes de préfill passent par la GEMM Marlin (147 L2) plutôt que par le dépaquetage."""
+    return prefill_regime() == "marlin" and m <= _PREFILL_MARLIN_MAX_M
 
 
 def prefill_regime() -> str:
     """Régime du prefill NVFP4 au-delà du seuil GEMV, lu à chaque appel :
     ``bf16`` (défaut, exact : déquant puis cuBLAS), ``w4a16`` (même
     arithmétique, poids lus en 4 bits dans la tuile — kernels/gemm_groupe,
-    B1, sortie = bf16 ± 2⁻⁷), ``w8a8``, ``w4a4``. Un nom inconnu — dont les
+    B1, sortie = bf16 ± 2⁻⁷), ``w8a8``, ``w4a4``, ``marlin`` (147 L2 : GEMM Marlin
+    sur la disposition unique, poids naturels inchangés). Un nom inconnu — dont les
     anciens ``a8``/``a4`` — est une erreur, pas un repli silencieux."""
     mode = os.environ.get("ACVRAM_PREFILL", "bf16")
     if mode not in PREFILL_REGIMES:
@@ -582,8 +593,8 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
     if parent is not None:
         pile, d, n_lig = parent
         m = x.reshape(-1, x.shape[-1]).shape[0]
-        if (m > _NVFP4_GEMV_MAX and prefill_regime() == "bf16" and d % 64 == 0 and n_lig % 64 == 0
-                and getattr(pile, "_marlin_unique", False)):
+        if (m > _NVFP4_GEMV_MAX and not prefill_marlin(m) and prefill_regime() in ("bf16", "marlin")
+                and d % 64 == 0 and n_lig % 64 == 0 and getattr(pile, "_marlin_unique", False)):
             # pièce 134 : le segment seul, déquantifié exactement depuis la disposition Marlin (tuiles de 64 colonnes
             # contiguës par ligne k), comme le défaut déquantifie la vue — au bit, au même coût
             from . import marlin_port as MP
@@ -1037,7 +1048,7 @@ def _marlin_seul(x: torch.Tensor, t):
         if g.numel() != 1:
             y = y * g
         y = y.to(x.dtype)
-    elif xf.shape[0] > _NVFP4_GEMV_MAX and prefill_regime() == "bf16":
+    elif xf.shape[0] > _NVFP4_GEMV_MAX and prefill_regime() in ("bf16", "marlin") and not prefill_marlin(xf.shape[0]):
         # Pièce 134 : au PRÉFILL (M > seuil GEMV), l'arithmétique du défaut — déquantification exacte (dépaquetage de
         # la disposition Marlin, au bit de `nvfp4_dequant`) puis cuBLAS bf16. La GEMM Marlin y portait TOUT l'excès de
         # KL de l'unique (0,00545 au pas 0, revue/verdict-134-kl-par-source-24-09) ; le décodage (M ≤ 32) garde Marlin.
@@ -1050,7 +1061,7 @@ def _marlin_seul(x: torch.Tensor, t):
         y = torch.nn.functional.linear(x.reshape(-1, orig[-1]), W.to(dt).to(x.dtype))
         return y[:, : t.shape[0]].reshape(*orig[:-1], t.shape[0])
     else:
-        CHEMINS_NVFP4["marlin_dense_seul"] += 1
+        CHEMINS_NVFP4["marlin_gemm_prefill" if xf.shape[0] > _NVFP4_GEMV_MAX else "marlin_dense_seul"] += 1   # 147 L2
         ws = _MARLIN_ESPACES.get(xf.device)
         if ws is None:
             ws = _MARLIN_ESPACES[xf.device] = MP.espace_travail(xf.device)
@@ -1090,7 +1101,7 @@ def preparer_disposition_marlin(modele) -> dict:
     from . import marlin_port as MP
     vide = {"doubles": 0, "seuls": 0, "octets_doubles": 0, "exclus": 0, "en_flux": 0, "multi_retirees": 0}
     ext = get_extension()
-    manque = ("port Marlin non compilé (outils/banc-marlin-p1-18-09.py --compiler-seulement)"
+    manque = (f"port Marlin : compilation échouée ({MP.ECHEC_COMPILATION})"        # 161 : compilé une fois par empreinte
               if MP.charger(compiler=False) is None else
               "extension sans nvfp4_gemv_marlin" if ext is None or not hasattr(ext, "nvfp4_gemv_marlin2") else None)
     if manque:

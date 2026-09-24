@@ -42,6 +42,7 @@ def _kfe2m1f_id() -> int:
 
 
 _EXT = None
+ECHEC_COMPILATION = None     # pièce 161 : raison du dernier échec de compilation (repli nommé), sinon None
 VERSION_SOURCE = "vLLM v0.29.0 (csrc/libtorch_stable, commit de la balise v0.29.0)"
 COMPILE_ICI = False          # vrai si la compilation a eu lieu dans CE processus (REGLES § 6, garde b)
 
@@ -120,22 +121,44 @@ def charger(verbose: bool = False, compiler: bool = True):
     (nvcc seul, aucune carte requise : archs sm_86 + sm_120 par défaut). Si le
     binaire n'est pas en cache au moment du banc, `COMPILE_ICI` passe à vrai
     et le banc se déclare invalide."""
-    global _EXT, COMPILE_ICI
+    global _EXT, COMPILE_ICI, ECHEC_COMPILATION
     if _EXT is not None:
         return _EXT
     so = chemin_so()
-    COMPILE_ICI = not so.exists()
-    if COMPILE_ICI and not compiler:
-        return None                      # le moteur ne compile jamais sous le verrou (REGLES § 6)
-    if not compiler:
-        # Pièce 161 : le moteur ne passe JAMAIS par ninja — le .so de CETTE empreinte est chargé tel quel
-        # (c'est ce que `load(is_python_module=False)` finit par faire, sans la reconstruction qui le précède).
-        torch.ops.load_library(str(so))
-        _EXT = torch.ops.acvram_marlin
-        return _EXT
+    if not so.exists():
+        # Pièce 161 (réserve de chef, Marlin étant le DÉFAUT) : empreinte absente → compilation UNE fois par version
+        # des sources, sous un verrou de fichier propre au cache ; le cache par empreinte rend le ping-pong impossible,
+        # donc les ~25 s ne reviennent qu'à chaque nouvelle version. Seul un échec (nvcc absent…) laisse le repli, nommé.
+        # ``compiler`` est gardé pour les appelants (banc) : il ne change plus rien.
+        try:
+            _compiler(verbose)
+        except Exception as e:                             # noqa: BLE001 — la raison va sur la ligne de régime
+            ECHEC_COMPILATION = f"{type(e).__name__}: {str(e).splitlines()[0][:160] if str(e) else ''}"
+            return None
+    # Le .so de CETTE empreinte est chargé tel quel — jamais ninja quand il existe (c'est ce que
+    # `load(is_python_module=False)` finit par faire, sans la reconstruction qui le précède).
+    torch.ops.load_library(str(so))
+    _EXT = torch.ops.acvram_marlin
+    return _EXT
+
+
+def _compiler(verbose: bool = False) -> None:
+    """Compile le port dans le cache de son empreinte, sous `flock` (un seul processus compile ; les autres attendent
+    puis trouvent le .so). Pose `COMPILE_ICI` (le banc se déclare invalide si la compilation a eu lieu chez lui)."""
+    global COMPILE_ICI
+    import fcntl
     from torch.utils.cpp_extension import load
     cache = dossier_cache()
     cache.mkdir(parents=True, exist_ok=True)
+    with open(cache / ".verrou-compilation", "w") as verrou:
+        fcntl.flock(verrou, fcntl.LOCK_EX)
+        if chemin_so().exists():                           # un autre processus vient de compiler
+            return
+        COMPILE_ICI = True
+        _lancer_ninja(cache, verbose, load)
+
+
+def _lancer_ninja(cache: pathlib.Path, verbose: bool, load) -> None:
     SRC = _sources_en_cache(cache)
     moe = SRC / "libtorch_stable" / "moe" / "marlin_moe_wna16"
     sources = [str(SRC / "bindings.cpp"), str(moe / "ops.cu"),
@@ -146,7 +169,7 @@ def charger(verbose: bool = False, compiler: bool = True):
     sources += [str(dense / "marlin.cu")] + sorted(glob.glob(str(dense / "dense_sm80_kernel_*.cu")))
     from .. import _arch_flags
     empreinte = f"-DACVRAM_MARLIN_EMPREINTE={empreinte_sources()}"   # 161 : ccache ne rend jamais un objet d'une autre version
-    load(name="acvram_marlin", sources=sources, is_python_module=False, verbose=verbose,
+    load(name="acvram_marlin", sources=sources, is_python_module=False, verbose=verbose,   # ninja, une fois par empreinte
          build_directory=str(cache),
          extra_include_paths=[str(SRC)],
          # USE_CUDA : les déclarations du shim CUDA de l'ABI stable (flux courant,
@@ -159,8 +182,6 @@ def charger(verbose: bool = False, compiler: bool = True):
          # l'édition de liens rend « undefined hidden symbol Marlin<…> »
          extra_cuda_cflags=["-O3", "-std=c++20", "--expt-relaxed-constexpr", "-DENABLE_BF16", "-DUSE_CUDA",
                             "-static-global-template-stub=false", empreinte] + _arch_flags())
-    _EXT = torch.ops.acvram_marlin
-    return _EXT
 
 
 # --- préparation des poids (transcrit de marlin_utils.py / marlin_utils_fp4.py, Apache-2.0) ---
