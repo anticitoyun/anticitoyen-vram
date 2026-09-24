@@ -172,6 +172,18 @@ def _load_corpus(path: Optional[str]) -> str:
     return DEFAULT_CORPUS
 
 
+def _identite_corpus(corpus_path: Optional[str], texte: str) -> tuple[str, int, str]:
+    """(corpus_chemin, corpus_octets, corpus_sha256) — piece 132 (chef) : le chemin ABSOLU (souvent
+    /home/<utilisateur>/...) a fait sauter le cliquet d'identite a la fusion de poste2. `corpus_sha256`
+    identifie deja le contenu sans ambiguite ; corpus_chemin ne porte plus que le NOM du fichier,
+    jamais son chemin — testee directement (tests/test_evaluate_corpus_identite.py)."""
+    if corpus_path and os.path.isfile(corpus_path):
+        return (os.path.basename(corpus_path), os.path.getsize(corpus_path),
+                hashlib.sha256(open(corpus_path, "rb").read()).hexdigest()[:24])
+    return ("(corpus par defaut, integre)", len(texte.encode("utf-8")),
+            hashlib.sha256(texte.encode("utf-8")).hexdigest()[:24])
+
+
 def perplexity(model_dir: str, corpus_path: Optional[str] = None,
                window: int = 512, stride: int = 256,
                max_tokens: int = 8192, device: Optional[str] = None,
@@ -229,16 +241,7 @@ def perplexity(model_dir: str, corpus_path: Optional[str] = None,
         apres_chargement(model)
     result = EvalResult(model=os.path.basename(os.path.abspath(model_dir)),
                         min_context=min_context, window=window)
-    if corpus_path and os.path.isfile(corpus_path):
-        result.corpus_chemin = os.path.abspath(corpus_path)
-        result.corpus_octets = os.path.getsize(corpus_path)
-        result.corpus_sha256 = hashlib.sha256(
-            open(corpus_path, "rb").read()).hexdigest()[:24]
-    else:
-        result.corpus_chemin = "(corpus par defaut, integre)"
-        result.corpus_octets = len(texte.encode("utf-8"))
-        result.corpus_sha256 = hashlib.sha256(
-            texte.encode("utf-8")).hexdigest()[:24]
+    result.corpus_chemin, result.corpus_octets, result.corpus_sha256 = _identite_corpus(corpus_path, texte)
     result.weights_bytes = model.nbytes
     # INDICATIF, jamais diviseur : voir la mise en garde de bench.py. Les
     # octets reellement alloues sont dans nbytes_detail.octets_stockage_uniques.
