@@ -475,6 +475,10 @@ impl Moteur {
         if ids.is_empty() || max == 0 {
             return Ok(0);
         }
+        // Le serveur appelle depuis un fil `spawn_blocking` quelconque : sans contexte courant, la première copie rend
+        // CUDA_ERROR_INVALID_CONTEXT (première prise ABBA du 24/09, bras B entier en erreur ; la porte, elle, tourne
+        // sur le fil qui a chargé le moteur).
+        self.ctx.bind_to_thread().map_err(|e| erreur!("contexte CUDA du fil : {e:?}"))?;
         for (p, &id) in ids.iter().enumerate() {
             self.calculer(id, p as u32).map_err(|e| erreur!("préfill position {p} : {e}"))?;
         }
