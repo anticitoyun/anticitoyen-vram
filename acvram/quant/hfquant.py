@@ -140,6 +140,19 @@ class HFQuantCheckpoint:
         # non geres comme fp8 sous compressed-tensors, laisserait passer des poids NON dequantifies, faux
         # et muets). Refus NOMME plutot qu'une conversion partielle ou silencieusement fausse.
         formats_groupes = sorted({g.get("format") for g in groups.values() if g.get("format")})
+        algo = self.q.get("quant_algo")
+        hf_quant = os.path.join(path, "hf_quant_config.json")
+        if algo is None and os.path.isfile(hf_quant):
+            with open(hf_quant, "r", encoding="utf-8") as fh:
+                algo = (json.load(fh).get("quantization") or {}).get("quant_algo")
+        if self.method == "modelopt" and algo == "MIXED_PRECISION":
+            # Pièce 139 (défaut voisin) : les couches FP8 de modelopt (``weight`` F8 + ``weight_scale`` scalaire, sans
+            # ``weight_scale_2``) tomberaient au repli d'iter_tensors, BRUTES, échelle perdue — conversion qui se
+            # termine sur des poids faux et muets (Nemotron-3.5, Qwen3.6-35B, Qwen3.8-27B de NVIDIA sur disque ;
+            # aucun alias servi n'en vient, balayage du 24/09). Refus nommé tant que la 139 n'est pas qualifiée.
+            raise NotImplementedError(
+                "modelopt MIXED_PRECISION non géré : couches FP8 et NVFP4 mêlées, les FP8 sortiraient sans leur "
+                "échelle (revue/poste5-piece139-mixed-precision-24-09.md § 5)")
         self.par_groupe: Optional[_TableGroupes] = None
         if self.format == "mixed-precision" or len(formats_groupes) > 1:
             if self.method != "compressed-tensors" or not par_groupe_actif():
@@ -373,6 +386,9 @@ class HFQuantCheckpoint:
                                 continue
                             yield key, t                    # bf16 (couche gardée en clair)
                             continue
+                        if suffix == "weight" and fh.get_slice(key).get_dtype() == "F8_E4M3":
+                            raise NotImplementedError(f"{key} : FP8 modelopt sans weight_scale_2, échelle perdue "
+                                                      "si rendu brut — non géré (pièce 139)")
                     elif self.method == "fp8":
                         if suffix in ("weight_scale", "input_scale"):
                             continue

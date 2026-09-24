@@ -132,3 +132,30 @@ def test_convert_fp8_en_int8_par_canal_jamais_bf16_clair(tmp_path, tiny_checkpoi
     from tests.test_engine import _prefill
     charge = load_model(str(out), dtype=torch.float32, device_override="cpu")
     assert torch.isfinite(_prefill(charge.model, [5, 42, 7, 99, 13])).all()
+
+
+def _source_modelopt(tmp_path, algo: str, fp8: bool) -> str:
+    from safetensors.torch import save_file
+    d = tmp_path / f"modelopt-{algo}-{int(fp8)}"
+    d.mkdir()
+    w = torch.randn(32, 32)
+    sd = {"model.layers.0.self_attn.q_proj.weight": w.to(torch.float8_e4m3fn) if fp8 else w.to(torch.bfloat16),
+          "model.layers.0.self_attn.q_proj.weight_scale": torch.tensor(0.01)}
+    save_file(sd, str(d / "model.safetensors"))
+    json.dump({"quantization_config": {"quant_method": "modelopt", "quant_algo": algo}}, open(d / "config.json", "w"))
+    return str(d)
+
+
+def test_modelopt_mixed_precision_refus_nomme(tmp_path):
+    path = _source_modelopt(tmp_path, "MIXED_PRECISION", fp8=True)
+    assert is_hfquant(path)
+    with pytest.raises(NotImplementedError, match="MIXED_PRECISION non géré"):
+        HFQuantCheckpoint(path)
+
+
+def test_modelopt_fp8_brut_refus_nomme(tmp_path):
+    # hors MIXED_PRECISION, un poids F8 sans weight_scale_2 ne sort jamais brut (échelle perdue)
+    path = _source_modelopt(tmp_path, "FP8", fp8=True)
+    with pytest.raises(NotImplementedError, match="FP8 modelopt sans weight_scale_2"):
+        list(HFQuantCheckpoint(path).iter_tensors())
+    assert dict(HFQuantCheckpoint(_source_modelopt(tmp_path, "FP8", fp8=False)).iter_tensors())
