@@ -21,3 +21,8 @@ si repli eager, ou si B n'a pas `GDN_PREFILL_LOT=1` à sa ligne de régime.
 **Prédit** : TTFT du tour (le plus lent des 8), médiane : A 380-480 ms en C1 ; B/A −15 à −25 % en C1, −12 à −22 % en C2.
 **FAUX** si B/A > −8 % dans une composition. Issue nommée d'avance : les 8 requêtes admises sur deux pas de préfill
 (la 150 mesurait 1,7 pas par lot). Le gain serait alors partagé, mesurable par le nombre de pas de préfill.
+
+**Ajout 24/09 23 h 5x (après la KL, avant tout TTFT)** : 1re passe TTFT (23:45) tombée sur « aucun jeton reçu » —
+`ttft-service-p145.ttft` exige un fragment de TEXTE non vide ; avec max_tokens=1 sur des ids aléatoires, le seul jeton
+peut être vide. Prise arrêtée, aucun TTFT mesuré ; `ttft-charge.py` compte désormais le premier fragment portant
+`choices`. Critère et prédiction du TTFT inchangés. (Les résultats KL de la même prise sont dans `prise-kl.txt`.)
