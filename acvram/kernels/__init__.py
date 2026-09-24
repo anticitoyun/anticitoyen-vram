@@ -955,7 +955,7 @@ def _marlin_dense(xf: torch.Tensor, t):
         if N % 64 or k_pad % 64 or N < _PROJ_MARLIN_MIN_NK or k_pad < _PROJ_MARLIN_MIN_NK or not t.qweight.is_cuda:
             return None
         from . import marlin_port as MP
-        if MP.charger(compiler=False) is None:
+        if MP.charger(compiler=False) is None or MP.marlin_exact(t) is not None:   # 157 : inexact → le naturel
             return None
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("marlin dense : disposition préparée pendant une capture de graphe — "
@@ -1123,6 +1123,9 @@ def preparer_disposition_marlin(modele) -> dict:
         N, k_pad = pile.qweight.shape[0], pile.padded_in
         if N % 64 or k_pad % 64 or N < _PROJ_MARLIN_MIN_N or k_pad < _PROJ_MARLIN_MIN_NK:
             bilan["exclus"] += 1
+            continue
+        if MP.marlin_exact(pile) is not None:          # pièce 157 : pas représentable exactement → naturel, compté
+            bilan["inexacts"] = bilan.get("inexacts", 0) + 1
             continue
         pile._marlin_dense = (*MP.preparer_dense(pile), N, k_pad)
         if role in _PROJ_MARLIN_DOUBLES:

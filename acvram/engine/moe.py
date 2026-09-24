@@ -481,10 +481,15 @@ class MoEBlock(nn.Module):
             # naturelle reste le seul chemin, sans NotImplementedError.
             raison = "pile hors CUDA (à sec) : Marlin exige la carte"
         else:
+            from ..kernels import marlin_port as MP
             for n in ("gate_proj", "up_proj", "down_proj"):
                 _, qw, bs, gs, k, m = piles[n]
                 if k % 64 or qw.shape[1] % 64:
                     raison = f"{n} : K={k} ou N={qw.shape[1]} non multiple de 64"
+                elif (ecr := MP.echelles_ecrasees(bs.view(torch.float8_e4m3fn) if bs.dtype == torch.uint8 else bs)):
+                    # pièce 157 : un facteur commun à la pile (g par expert seulement) écraserait des sous-normales à
+                    # zéro — Qwen3-Coder-30B couches 0, 1, 2, 4 ; la pile naturelle est exacte
+                    raison = f"{n} : {ecr} échelles sous-normales non représentables en Marlin (S0E5M3)"
         if raison is None:
             from ..kernels import marlin_port as MP
             if MP.charger(compiler=False) is None:
