@@ -65,14 +65,76 @@ def test_bloc_moe_au_bit():
     _juger("MOE", _sha(y_prefill, y_decode), EMPREINTE_MOE)
 
 
-def test_generation_dense_au_bit(converted):
+@pytest.fixture(scope="module")
+def converted_cpu(tiny_checkpoint, target_rig, tmp_path_factory):
+    """Comme la fixture `converted` (conftest.py), mais `quant_device="cpu"` figé.
+
+    Pièce 154 (4) : `_resolve_quant_device("auto")` (convert.py:802-804) prend le
+    GPU s'il est visible — la quantification GPU et CPU ne sont PAS au bit
+    identiques (même défaut que 1/2, tests/test_mm_conversion.py). La fixture
+    partagée `converted` sert ~35 fichiers dont beaucoup jugent le chemin GPU
+    réel : la figer casserait leur couverture. Cette copie locale, réservée aux
+    empreintes au bit de ce fichier, ne change qu'ici. Voir le bead qui nomme
+    le défaut (GPU/CPU non bit-identiques en quantification)."""
+    from acvram.engine.config import load_model_spec
+    from acvram.memory.tiering import PlannerOptions, auto_plan
+    from acvram.quant.convert import ConversionOptions, convert_checkpoint
+
+    spec = load_model_spec(tiny_checkpoint, "tiny")
+    plan, _ = auto_plan(spec, target_rig,
+                        PlannerOptions(max_model_len=512, max_concurrent_seqs=2))
+    out = str(tmp_path_factory.mktemp("acvram_cpu"))
+    convert_checkpoint(tiny_checkpoint, plan,
+                       ConversionOptions(out_dir=out, quant_device="cpu"), spec=spec)
+    return out
+
+
+def test_generation_dense_au_bit(converted_cpu):
     """Le reste du moteur : mêmes ids ET mêmes logprobs sur le jouet dense."""
     from acvram.engine.loader import load_model
     from acvram.engine.runner import Engine
     from acvram.engine.sampler import SamplingParams
-    engine = Engine(load_model(converted, dtype=torch.float32, device_override="cpu"),
+    engine = Engine(load_model(converted_cpu, dtype=torch.float32, device_override="cpu"),
                     None, max_batch_size=2, max_model_len=256)
     sorties = list(engine.generate([5, 42, 7, 99, 13], SamplingParams(temperature=0.0, max_tokens=12, logprobs=1)))
     ids = torch.tensor([t for o in sorties for t in o.token_ids], dtype=torch.long)
     lps = torch.tensor([o.logprob if o.logprob is not None else float("nan") for o in sorties])
     _juger("DENSE", _sha(ids, lps), EMPREINTE_DENSE)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="démontre l'écart GPU/CPU : carte requise")
+def test_quantification_gpu_diverge_du_cpu_au_bit(tiny_checkpoint, target_rig, tmp_path):
+    """Témoin du défaut nommé (pièce 154 (4), bead) : `_resolve_quant_device("auto")`
+    (convert.py:802-804) choisit le GPU quand il est visible, et la quantification
+    GPU n'est PAS au bit celle du CPU — donc `ConversionOptions()` par défaut
+    (quant_device="auto") rend un résultat qui dépend de la carte, jamais du
+    seul modèle. Casserait si le calcul devenait un jour bit-identique aux deux
+    (à réviser alors, pas un signe d'échec)."""
+    from acvram.engine.config import load_model_spec
+    from acvram.memory.tiering import PlannerOptions, auto_plan
+    from acvram.quant.convert import ConversionOptions, convert_checkpoint
+
+    spec = load_model_spec(tiny_checkpoint, "tiny")
+    plan, _ = auto_plan(spec, target_rig, PlannerOptions(max_model_len=512, max_concurrent_seqs=2))
+
+    out_cpu = str(tmp_path / "out_cpu")
+    convert_checkpoint(tiny_checkpoint, plan, ConversionOptions(out_dir=out_cpu, quant_device="cpu"), spec=spec)
+    out_gpu = str(tmp_path / "out_gpu")
+    convert_checkpoint(tiny_checkpoint, plan, ConversionOptions(out_dir=out_gpu, quant_device="cuda:0"), spec=spec)
+
+    from safetensors import safe_open
+    def empreinte(dossier):
+        h = hashlib.sha256()
+        import os as _os
+        for fn in sorted(_os.listdir(dossier)):
+            if fn.endswith(".safetensors"):
+                with safe_open(_os.path.join(dossier, fn), framework="pt", device="cpu") as fh:
+                    for k in sorted(fh.keys()):
+                        t = fh.get_tensor(k).contiguous().reshape(-1)
+                        h.update(k.encode())
+                        h.update(t.view(torch.uint8).numpy().tobytes() if t.numel() else b"")
+        return h.hexdigest()
+
+    assert empreinte(out_cpu) != empreinte(out_gpu), (
+        "GPU et CPU rendent maintenant le même octet en quantification : le défaut nommé "
+        "en pièce 154 (4) n'existe plus, `converted_cpu` ci-dessus peut revenir à `converted`")
