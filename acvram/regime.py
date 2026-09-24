@@ -82,6 +82,9 @@ VARIABLES: tuple[Variable, ...] = (
              "global, down en un lancement) | 0 : v1 (x en mémoire partagée, K ≤ 11 264 en deux moitiés)"),
     Variable("GEMV_MARLIN_TPB", "2", ("acvram.kernels", "_GEMV_MARLIN_TPB"), None, "pièce 130 : tuiles de 64 colonnes par bloc (1, 2, 4)"),
     Variable("GEMV_MARLIN_S", "0", ("acvram.kernels", "_GEMV_MARLIN_S"), None, "pièce 130 : split-K forcé ; 0 = règle de v1"),
+    Variable("PROJ_MARLIN_PORTEE", "global", ("acvram.kernels", "_PROJ_MARLIN_PORTEE"), None,
+             "pièce 142 : global (défaut, tout poids dense éligible, linéaires hors experts des MoE compris) | denses (un "
+             "modèle à MoEBlock garde son chemin)"),
     Variable("PROJ_MARLIN_CAPACITE", "65536", None, None,
              "pièce 129 : capacité KV minimale (jetons) exigée au chargement sous PROJ_MARLIN=1, sinon refus nommé ; non "
              "posée : séquences × longueur demandées par le chargement, sinon 65 536"),
@@ -322,6 +325,7 @@ HORS_REGIME = frozenset({
     "ACVRAM_MODELS_DIR", "ACVRAM_TRACEBACK", "ACVRAM_VERBOSE_BUILD", "ACVRAM_WARM_GRAPHS",
     "ACVRAM_GRAPHES_MUETS", "ACVRAM_REGIME_MUET", "ACVRAM_MARLIN_CACHE",          # journaux et cache : observation
     "ACVRAM_JOURNAL_TENSEURS",                                                    # journal de conversion (cf97a3a0) : observation
+    "ACVRAM_ARBRE_LIBRE",                                                         # garde d'import (a86fa1dd) : quel arbre est importé, aucun chemin de calcul
     "ACVRAM_TRACE_CRENEAUX", "ACVRAM_TRACE_ENTREES", "ACVRAM_TRACE_PTRS",
     "ACVRAM_TRACE_ROUTAGE", "ACVRAM_TRACE_ROUTAGE_PT", "ACVRAM_TRACE_STEPS", "ACVRAM_TRACE_COUCHES", "ACVRAM_CHRONO_SYNC", "ACVRAM_SYNC_COUCHES",
     
@@ -420,6 +424,7 @@ def _horloge() -> Optional[str]:
 # Modèle chargé : « vision » de son acvram_manifest.json ("oui" | "non"), ou None
 # tant qu'aucun chargeur ne l'a déclaré (ligne construite à sec, sans modèle).
 _VISION_CHARGEE: Optional[str] = None
+_I8C_PREFILL_BF16 = 0          # pièce 139 : poids int8 « origine: fp8 » du modèle chargé, servis en déquant bf16 au préfill
 # M-RoPE (Qwen3-VL) : (section, entrelacé) du modèle chargé (manifeste `mrope_section` /
 # `mrope_interleaved`, pièce (a)) — le mot `mrope=[24,20,20](interleaved)` ; None sinon.
 _MROPE_CHARGE: Optional[tuple[list[int], bool]] = None
@@ -446,8 +451,11 @@ def declarer_modele_charge(manifest: Optional[dict]) -> None:
     deepstack : `deepstack: 3` (nombre) ou `deepstack: oui` avec
     `deepstack_niveaux` (sinon 3, les `deepstack_visual_indexes` par défaut de
     Qwen3-VL) ; absent ou « non » : pas de mot."""
-    global _VISION_CHARGEE, _ARCHITECTURE_CHARGEE
+    global _VISION_CHARGEE, _ARCHITECTURE_CHARGEE, _I8C_PREFILL_BF16
     _VISION_CHARGEE = None if manifest is None else str(manifest.get("vision", "non"))
+    _I8C_PREFILL_BF16 = 0 if manifest is None else sum(
+        1 for e in (manifest.get("tensors") or {}).values()
+        if isinstance(e, dict) and e.get("origine") == "fp8" and e.get("format") == "int8")
     _ARCHITECTURE_CHARGEE = None if manifest is None else manifest.get("architecture")
     if _VISION_CHARGEE != "oui":                          # pas de tour pour ce modèle : la précédente ne survit pas
         try:
@@ -515,6 +523,12 @@ def mrope_texte() -> Optional[str]:
         return None
     section, entrelace = _MROPE_CHARGE
     return f"mrope=[{','.join(str(x) for x in section)}]({'interleaved' if entrelace else 'blocs'})"
+
+
+def prefill_i8c_texte() -> Optional[str]:
+    """Pièce 139 : ``prefill_int8=bf16(origine fp8 ×N)`` quand le modèle chargé a des poids int8 ré-encodés du fp8 —
+    servis W8A16 au préfill (déquant bf16), pas W8A8 cublas ; None sinon (la ligne du défaut ne bouge pas)."""
+    return f"prefill_int8=bf16(origine fp8 ×{_I8C_PREFILL_BF16})" if _I8C_PREFILL_BF16 else None
 
 
 def vision_texte() -> Optional[str]:
@@ -655,7 +669,9 @@ def regime_ligne() -> str:
     if mrope_texte():
         parts.append(mrope_texte())                       # mrope=[24,20,20](interleaved) : M-RoPE Qwen3-VL (engine/mrope)
     if deepstack_texte():
-        parts.append(deepstack_texte())                   # deepstack=3 : seulement déclaré (manifeste / config de la tour)
+        parts.append(deepstack_texte())
+    if prefill_i8c_texte():
+        parts.append(prefill_i8c_texte())                   # deepstack=3 : seulement déclaré (manifeste / config de la tour)
     # C5-b : le format des clés est nommé dès qu'il n'est plus celui d'aujourd'hui
     # (int8 par jeton) — la variable dit ce qui est DEMANDÉ, cette étiquette ce
     # que le cache int8 fait de ses clés.

@@ -134,3 +134,30 @@ def test_role_double_garde_la_naturelle_au_bit():
     assert bilan["doubles"] == 2 and bilan["seuls"] == 0                         # gate‖up et down doublés
     assert mlp.gate_up.qweight.qweight is not None and hasattr(mlp.gate_up.qweight, "_marlin_dense")
     assert torch.equal(mlp(x1), avant), "M = 1 d'un rôle doublé : doit rester au bit du GEMV naturel"
+
+
+class MoEBlockFactice(torch.nn.Module):                 # le nom suffit : la passe reconnaît les MoEBlock* par leur type
+    pass
+
+
+@carte
+def test_garde_modele_dense_exclut_les_moe(monkeypatch):
+    """Pièce 142 : sous ACVRAM_PROJ_MARLIN_PORTEE=denses, un modèle qui contient un MoEBlock n'est pas converti — casse
+    si un MoE passe la garde ; en global (défaut), le même poids est converti."""
+    kernels = _pret()
+    boite = torch.nn.Module(); boite.proj = _lin(2048, 1024, 11); boite.moe = MoEBlockFactice()
+    monkeypatch.setattr(kernels, "_PROJ_MARLIN_PORTEE", "denses")
+    bilan = kernels.preparer_disposition_marlin(boite)
+    assert bilan.get("portee") == "denses:moe-exclu" and bilan["seuls"] == 0 and boite.proj.qweight.qweight is not None
+    dense = torch.nn.Module(); dense.proj = _lin(2048, 1024, 12)
+    assert kernels.preparer_disposition_marlin(dense)["seuls"] == 1               # dense : converti sous « denses »
+    monkeypatch.setattr(kernels, "_PROJ_MARLIN_PORTEE", "global")
+    assert kernels.preparer_disposition_marlin(boite)["seuls"] == 1               # global : le MoE est converti aussi
+
+
+def test_portee_defaut_global_sous_processus():
+    env = {k: v for k, v in os.environ.items() if k != "ACVRAM_PROJ_MARLIN_PORTEE"}
+    env["CUDA_VISIBLE_DEVICES"] = ""
+    r = subprocess.run([sys.executable, "-c", "import acvram.kernels as k; print(k._PROJ_MARLIN_PORTEE)"], env=env,
+                       capture_output=True, text=True, cwd=str(RACINE))
+    assert r.stdout.strip().splitlines()[-1] == "global", r.stdout + r.stderr
