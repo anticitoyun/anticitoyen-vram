@@ -180,3 +180,47 @@ def test_sans_vision_alias_texte_au_bit_de_la_conversion_vl(tmp_path, target_rig
     e_sans = _empreintes(sans)
     assert e_sans and not [k for k in e_sans if k.startswith(PREF)]
     assert e_sans == {k: v for k, v in _empreintes(avec).items() if not k.startswith(PREF)}
+
+
+def _i8c(n=64, k=256):
+    from acvram.quant.formats import _quantize_int8
+    torch.manual_seed(139)
+    return _quantize_int8(torch.randn(n, k), k, symmetric=True)
+
+
+def test_poids_origine_fp8_sans_copie_signee_au_prefill():
+    """Casse si la copie int8 signée du chemin cublas revient sur un poids marqué (OOM du 24/09 : +10,6 Go)."""
+    from acvram.kernels import _i8c_poids
+    temoin = _i8c()
+    assert _i8c_poids(temoin) is not None                    # le chemin qkvo garde sa copie, inchangé
+    t = _i8c()
+    t.__dict__["prefill_bf16"] = True
+    assert _i8c_poids(t) is None and t.__dict__["_i8c"] is False
+
+
+def test_vue_g128_dequant_au_bit_du_par_canal():
+    from acvram.kernels import vue_g128
+    from acvram.quant.formats import _dequantize_int8
+    t = _i8c()
+    v = vue_g128(t)
+    assert v.group_size == 128 and v.qweight is t.qweight
+    assert torch.equal(_dequantize_int8(v, torch.float32), _dequantize_int8(t, torch.float32))
+
+
+def test_chargeur_marque_origine_fp8_et_regime_le_nomme():
+    from acvram import regime
+    from acvram.engine.loader import _build_quant
+    t = _i8c()
+    sd = {"w.qweight": t.qweight, "w.scales": t.scales, "w.zeros": t.zeros}
+    lecteur = type("L", (), {"get": staticmethod(lambda k: sd[k])})()
+    base = {"format": "int8", "shape": list(t.shape), "keys": list(sd), "group_size": t.group_size}
+    assert _build_quant({**base, "origine": "fp8"}, "w", lecteur, 128).__dict__.get("prefill_bf16") is True
+    assert not _build_quant(base, "w", lecteur, 128).__dict__.get("prefill_bf16")
+    try:
+        regime.declarer_modele_charge({"vision": "non", "tensors": {"a": {**base, "origine": "fp8"},
+                                                                     "b": {**base, "origine": "fp8"}, "c": base}})
+        assert regime.prefill_i8c_texte() == "prefill_int8=bf16(origine fp8 ×2)"
+        assert "prefill_int8=bf16(origine fp8 ×2)" in regime.regime_ligne()
+    finally:
+        regime.declarer_modele_charge(None)
+    assert regime.prefill_i8c_texte() is None
