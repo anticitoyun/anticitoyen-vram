@@ -49,3 +49,32 @@ même défaut à b=8, ou s'il tient déjà la promesse « poids lus une fois par
 demandée : `--detail gemm_dense_etroit_nvfp4` par forme (Grd) pour situer combien de ces 401 sont
 QKVO/tête vs MLP par TAILLE de sortie (dims connues : hidden 5120, intermediate 17408 → MLP largement
 plus gros, distinguable par shape même sans instrumentation).
+
+## Suite (24/09, même trace, ordre chef) — éclatement par forme de grille
+
+`GrdX` du noyau = `tuiles_n = ceil(N/64)` (`gemm_dense_etroit.py:236,241`) : lu directement, pas déduit.
+N attendus (config `text_config`) : q_proj-attn 6144, k/v_proj-attn 1024, o_proj-attn 5120, GDN q/k_proj
+2048, GDN v_proj 6144, GDN out_proj 5120, MLP gate/up 17408 (fusionnés 34816, `attention.py:597`), MLP
+down_proj 5120, tête vocab 248320 — 16 couches attn, 48 couches GDN, comptes de lancements/pas croisés
+contre ces layer-counts pour lever l'ambiguïté quand plusieurs projections partagent le même N.
+
+| GrdX (N≈) | µs/pas | lanc/pas | % plafond | identification |
+|---|---|---|---|---|
+| 544 (34816) | 9 079,5 | 64 | 34,7 % | **MLP gate+up fusionné** — exact, seul candidat à ce N |
+| 80 (5120) | 6 440,3 | 128 | 24,6 % | o_proj-attn(16) + GDN-out_proj(48) + MLP-down_proj(64) = 128 lanc., triangulé par comptage de couches, **mélangé, non isolable plus finement** |
+| 160 (10240) | 1 836,2 | 48 | 7,0 % | non identifié avec certitude (48 lanc. ~ un poste par couche GDN, N ne correspond à aucune somme simple des projections connues) |
+| 96 (6144) | 1 323,2 | 48 | 5,1 % | **GDN v_proj**, probable — 48 lanc./pas = exactement le compte de couches GDN (q_proj-attn donnerait 16, écarté) |
+| 3880 (248320) | 883,7 | 1 | 3,4 % | **tête** — exact, seul candidat à ce N |
+| 224 (14336) | 867,1 | 16 | 3,3 % | non identifié avec certitude (16 lanc. ~ compte de couches attn, N ne correspond à aucune somme simple) |
+| 1 (64) | 637,8 | 96 | 2,4 % | non identifié (probable gating GDN à petit N — f_a/f_b/g_a/g_b/beta, 96 = 48×2, non vérifié au bit) |
+
+Total gemm_dense_etroit_nvfp4 sur ces 7 formes : 21 067,8 µs/pas (80,5 % du mur), 401 lanc./pas — cohérent
+au bit avec le poste classer.py.
+
+**Verdict pour poste1** : le seul sous-poste identifié sans ambiguïté et isolable est **MLP gate+up
+fusionné, 34,7 % du pas** — la plus grosse cible unique. Le bucket 5120 (24,6 %) mélange MLP-down_proj
+avec deux projections d'attention/GDN non-MLP et n'est PAS isolable par forme seule (les trois partagent
+N=5120) : si W4A4/Marlin cible spécifiquement le MLP, gate+up (34,7 %) est la cible sûre ; down_proj
+(inclus dans les 24,6 %, poids non isolé) reste à confirmer par instrumentation des sites d'appel si le
+gain mesuré sur gate+up seul ne suffit pas à expliquer l'écart NInfer. 12,8 % du pas (160+224+1) reste
+non identifié avec certitude — pas de conjecture au-delà de ce que corrobore le compte de lancements.
