@@ -78,8 +78,8 @@ VARIABLES_LUES = {
     "ACVRAM_GDN_PREFILL_LOT",   # engine/couches.py : lot au préfill GDN
     "ACVRAM_GDN_ETAT_EN_PLACE", # engine/gdn.py : 156 F4, état GDN mis à jour en place (défaut 1)
     "ACVRAM_GDN_CONV_FUSEE",    # engine/gdn.py : 156 F2, conv de décodage fusionnée (défaut 1)
-    "ACVRAM_GDN_PORTES_NOYAU",  # engine/gdn.py : 156 F1, portes dans le noyau fla (opt-in, ± ulp)
-    "ACVRAM_GDN_NORME_FUSEE",   # engine/gdn.py : 156 F3, norme gated Triton (opt-in, ± ulp)
+    "ACVRAM_GDN_PORTES_NOYAU",  # engine/gdn.py : 156 F1, portes dans le noyau fla (défaut 1, ± ulp)
+    "ACVRAM_GDN_NORME_FUSEE",   # engine/gdn.py : 156 F3, norme gated Triton (défaut 1, ± ulp)
     "ACVRAM_NORME_REGISTRES",   # engine/layers.py : 156 F6, RMSNorm en registres (défaut 1, au bit)
     "ACVRAM_GDN_RES_DIFFERE",   # engine/model.py : 156 F5, résidu différé des couches GDN (défaut 1)
     "ACVRAM_HFQUANT_PAR_GROUPE",  # quant/hfquant.py : dispatch par groupe du compressed-tensors mixed-precision

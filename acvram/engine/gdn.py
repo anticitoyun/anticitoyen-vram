@@ -42,11 +42,12 @@ _GDN_ETAT_EN_PLACE = os.environ.get("ACVRAM_GDN_ETAT_EN_PLACE", "1") == "1"
 # Pièce 156 F2 (défaut depuis le verdict 156 c, au bit ; 0 = témoin) : conv du décodage du lot en un noyau Triton, visé au
 # bit (`gdn_conv.py`) ; q/k sans répétition des têtes (fla les indexe).
 _GDN_CONV_FUSEE = os.environ.get("ACVRAM_GDN_CONV_FUSEE", "1") == "1"
-# Pièce 156 F1 (opt-in) : portes (softplus, exp, sigmoid) calculées dans le noyau fla de la voie F4 — ± ulp fp32
-# (softplus de fla en ex2/lg2 approchés), donc KL et non « au bit ».
-_GDN_PORTES_NOYAU = os.environ.get("ACVRAM_GDN_PORTES_NOYAU", "0") == "1"
-# Pièce 156 F3 (opt-in) : norme gated en un noyau Triton (gdn_norme.py) — ± ulp (ordre de la somme des carrés).
-_GDN_NORME_FUSEE = os.environ.get("ACVRAM_GDN_NORME_FUSEE", "0") == "1"
+# Pièce 156 F1 (DÉFAUT depuis 156 d ; 0 = témoin) : portes (softplus, exp, sigmoid) calculées dans le noyau fla de
+# la voie F4 — ± ulp fp32 (softplus de fla en ex2/lg2 approchés) : KL contre témoins tenue sur Qwen3.8 et Qwen3.5-35B.
+_GDN_PORTES_NOYAU = os.environ.get("ACVRAM_GDN_PORTES_NOYAU", "1") == "1"
+# Pièce 156 F3 (DÉFAUT depuis 156 d ; 0 = témoin) : norme gated en un noyau Triton (gdn_norme.py) — ± ulp (ordre de
+# la somme des carrés) ; même KL.
+_GDN_NORME_FUSEE = os.environ.get("ACVRAM_GDN_NORME_FUSEE", "1") == "1"
 
 
 def _fla():

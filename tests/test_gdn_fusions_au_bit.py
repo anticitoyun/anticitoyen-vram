@@ -23,7 +23,10 @@ H, NK, NV, DK, DV, KER, B = 64, 2, 4, 16, 16, 4, 6
 
 
 @pytest.fixture(autouse=True)
-def _sans_grad():
+def _sans_grad(monkeypatch):
+    # F1 (156 d, défaut) change les portes du seul bras « en place » : ± ulp, pas au bit. Ces tests jugent F4/F5/F2 AU
+    # BIT, F1 à part (test_gdn_fusions_156d.py) — elle est donc coupée ici.
+    monkeypatch.setattr(G, "_GDN_PORTES_NOYAU", False)
     with torch.no_grad():
         yield
 

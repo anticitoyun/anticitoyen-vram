@@ -311,11 +311,11 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("GDN_RES_DIFFERE", "1", ("acvram.engine.model", "_GDN_RES_DIFFERE"), "0",
              "pièce 156 F5 (DÉFAUT depuis 156 c, au bit ; 0 = témoin) : 1 = le résidu différé (add_norm, C15) admis aux couches Gated DeltaNet "
              "non MLA ; deux additions bf16 de moins par couche GDN"),
-    Variable("GDN_PORTES_NOYAU", "0", ("acvram.engine.gdn", "_GDN_PORTES_NOYAU"), "0",
-             "pièce 156 F1 (opt-in, ± ulp : KL) : 1 = au décodage du lot (voie F4), softplus, exp et sigmoid des portes dans "
+    Variable("GDN_PORTES_NOYAU", "1", ("acvram.engine.gdn", "_GDN_PORTES_NOYAU"), "0",
+             "pièce 156 F1 (DÉFAUT depuis 156 d, ± ulp, KL contre témoins sur Qwen3.8 et Qwen3.5-35B ; 0 = témoin) : 1 = au décodage du lot (voie F4), softplus, exp et sigmoid des portes dans "
              "le noyau fla (A_log, dt_bias, APPLY_BETA_SIGMOID) au lieu de six noyaux torch par couche"),
-    Variable("GDN_NORME_FUSEE", "0", ("acvram.engine.gdn", "_GDN_NORME_FUSEE"), "0",
-             "pièce 156 F3 (opt-in, ± ulp : KL) : 1 = norme gated de la sortie GDN en un noyau Triton (gdn_norme.py), "
+    Variable("GDN_NORME_FUSEE", "1", ("acvram.engine.gdn", "_GDN_NORME_FUSEE"), "0",
+             "pièce 156 F3 (DÉFAUT depuis 156 d, ± ulp, même KL ; 0 = témoin) : 1 = norme gated de la sortie GDN en un noyau Triton (gdn_norme.py), "
              "sortie bf16 ; lot, b=1 et préfill"),
     Variable("NORME_REGISTRES", "1", ("acvram.engine.layers", "_NORME_REGISTRES"), "0",
              "pièce 156 F6 (DÉFAUT depuis 156 d, au bit ; 0 = témoin) : 1 = RMSNorm hors préfill par rmsnorm_bf16_reg "
