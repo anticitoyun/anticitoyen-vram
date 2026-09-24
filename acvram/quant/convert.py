@@ -200,6 +200,9 @@ class ConversionOptions:
     # formats-16-09 § 3.1). Les couches gardées en clair par la source
     # suivent le plan comme avant.
     passage_direct: bool = False
+    # Pièce 139 : alias TEXTE depuis une source VL — la tour (VISION_PREFIXES) n'est pas écrite, manifeste
+    # vision=non. Pour une famille dont le masque de plage image n'est pas connu (Qwen3_5, vision.py:268).
+    sans_vision: bool = False
     # poste7 (`poste7-corpus-16-09.md` § 8) : nom + sha256 du fichier de
     # calibration reellement utilise (ou du corpus integre, ou une absence
     # explicite si awq=False) -- calcule par cli.py, porte au manifeste via
@@ -1723,7 +1726,11 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     observations = (stats or {}).pop("__observations__", None) if isinstance(stats, dict) else None
     journal = _journal_tenseurs(opts, qdev)
     cache_repli: dict = {}
+    vision_ecartee = 0
     for name, tensor in _adapt_hf(_iter_checkpoint(model_path, opts.passage_direct), spec):
+        if opts.sans_vision and est_tenseur_vision(name):
+            vision_ecartee += 1
+            continue
         if journal:
             journal(name, tuple(tensor.shape), report.tensors)
         report.tensors += 1
@@ -2661,6 +2668,9 @@ def convert_checkpoint(model_path: str, plan: Plan, opts: ConversionOptions,
     manifest["diagnostic_fusion"] = _diagnostic_fusion(manifest["tensors"])
     manifest["vision_bytes"] = vision_bytes
     manifest["vision"] = "oui" if vision_bytes else "non"
+    if vision_ecartee:
+        manifest["vision_ecartee"] = vision_ecartee
+        print(f"[acvram] --sans-vision : {vision_ecartee} tenseur(s) de la tour écartés, alias texte seul", flush=True)
     if vision_bytes:
         _manifeste_multimodal(manifest, spec)
     if _AUDIO_ECARTES:

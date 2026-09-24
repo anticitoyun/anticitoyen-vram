@@ -159,3 +159,24 @@ def test_modelopt_fp8_brut_refus_nomme(tmp_path):
     with pytest.raises(NotImplementedError, match="FP8 modelopt sans weight_scale_2"):
         list(HFQuantCheckpoint(path).iter_tensors())
     assert dict(HFQuantCheckpoint(_source_modelopt(tmp_path, "FP8", fp8=False)).iter_tensors())
+
+
+def test_sans_vision_alias_texte_au_bit_de_la_conversion_vl(tmp_path, target_rig):
+    """--sans-vision (ordre chef) : manifeste vision=non, aucun tenseur de la tour, et tenseurs texte identiques
+    AU BIT à ceux de la conversion qui garde la tour."""
+    from tests.test_mm_conversion import VISION_PREFIXES as PREF, _ecrire_source, _empreintes
+    from acvram.engine.config import load_model_spec
+    from acvram.memory.tiering import PlannerOptions, auto_plan
+    from acvram.quant.convert import ConversionOptions, convert_checkpoint
+    src = _ecrire_source(tmp_path / "src_vl", vision=True)
+    spec = load_model_spec(src)
+    plan, _ = auto_plan(spec, target_rig, PlannerOptions(max_model_len=512, max_concurrent_seqs=2))
+    avec, sans = str(tmp_path / "avec"), str(tmp_path / "sans")
+    convert_checkpoint(src, plan, ConversionOptions(out_dir=avec), spec=spec)
+    convert_checkpoint(src, plan, ConversionOptions(out_dir=sans, sans_vision=True), spec=spec)
+    m = json.load(open(os.path.join(sans, "acvram_manifest.json")))
+    assert m["vision"] == "non" and m["vision_bytes"] == 0 and m["vision_ecartee"] > 0
+    assert not [k for k in m["tensors"] if k.startswith(PREF)]
+    e_sans = _empreintes(sans)
+    assert e_sans and not [k for k in e_sans if k.startswith(PREF)]
+    assert e_sans == {k: v for k, v in _empreintes(avec).items() if not k.startswith(PREF)}
