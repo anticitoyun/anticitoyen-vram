@@ -411,7 +411,10 @@ def test_qwen3_vl_2b_cpu_positions_3d_et_delta_contre_get_rope_index():
     from acvram.server.chat import _par_image
     verrou = "/tmp/acvram-carte-0.lock.qui"  # lecture seule du vrai verrou : on attend, on n'y écrit jamais
     t0 = time.time()
-    while os.path.exists(verrou) and os.path.getsize(verrou) > 0 and time.time() - t0 < 1200:
+    # Sous une prise de NOTRE chaîne (ACVRAM_CARTE_TENUE : CI publique lancée sous carte.sh par le chef),
+    # attendre la carte serait attendre son propre ancêtre : le test tourne sur le CPU sans attendre.
+    while (not os.environ.get("ACVRAM_CARTE_TENUE") and os.path.exists(verrou)
+           and os.path.getsize(verrou) > 0 and time.time() - t0 < 1200):
         time.sleep(30)                                       # une prise sur la carte : on attend
     os.nice(19)
     chemin = alias(_QVL)

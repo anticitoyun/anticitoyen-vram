@@ -139,6 +139,26 @@ def facteur_nvfp4(marlin_scales: torch.Tensor) -> float:
     return 1.0
 
 
+def _facteur_depuis_max(mx: torch.Tensor) -> torch.Tensor:
+    """Le facteur de `facteur_nvfp4`, élément par élément (puissance de 2, 1 pour un max nul ou ≥ 448)."""
+    f = torch.ones_like(mx, dtype=torch.float32)
+    ok = (mx > 0) & (mx < 448)
+    f[ok] = (448.0 / mx[ok].float()).log2().floor().exp2()
+    return f
+
+
+def echelles_ecrasees(bs: torch.Tensor, par_ligne: bool = False) -> int:
+    """Pièce 157 : nombre d'échelles de bloc > 0 que la conversion Marlin (`traiter_echelles_nvfp4` : ×facteur×2⁷ en
+    demi-précision, < 2 → 0) écraserait À ZÉRO — le bloc de 16 poids avec. S0E5M3 n'a qu'environ 2^14,8 de plage contre
+    2^17,8 pour e4m3 : un poids (ou une pile d'experts, facteur commun) qui mêle 448 et des sous-normales perd les petites.
+    ``par_ligne`` : facteur par ligne de sortie (dernière dimension réduite). Qwen3-14B couche 2 down : 47 368 valeurs
+    fausses au dépaquetage (24/09), Qwen3-Coder-30B couche 0 : 0,57 % des blocs de 43 experts à zéro."""
+    s = bs.float()
+    mx = s.amax(-1, keepdim=True) if par_ligne else s.amax().reshape([1] * s.dim())
+    f = _facteur_depuis_max(mx)
+    return int(((s > 0) & (s.half().float() * f * 128 < 2)).sum())
+
+
 def traiter_echelles_nvfp4(marlin_scales: torch.Tensor, facteur: float) -> torch.Tensor:
     """E4M3 (S1E4M3) → « S0E5M3 » : demi-précision × facteur × 2⁷, < 2 → 0,
     décalage d'un bit, moitié haute des paires."""
@@ -445,13 +465,35 @@ def preparer_dense(t, repack=None):
     segment), g_marlin est PAR COLONNE [N] — même traitement (×2^119 / facteur, exact : puissances de deux) que
     l'échelle scalaire, appliqué en fp32 dans l'épilogue du noyau porté (marlin_template.h, `gs_par_colonne`) ;
     sinon [1]."""
-    w, s_, g = preparer_pile(t.qweight[None], t.block_scale[None], t.global_scale.reshape(1).float(), repack=repack)
+    bs = t.block_scale
+    N = t.qweight.shape[0]
+    f_n = None
+    if echelles_ecrasees(bs):
+        # Pièce 157 : le facteur scalaire écraserait des sous-normales — facteur PAR LIGNE (puissance de 2 ; e4m3 × 2^k ≤
+        # 448 exact), repris dans l'échelle globale PAR COLONNE (déjà servie : piles q/k/v, gemm_dense, dépaquetage
+        # PAR_COLONNE, v2 × g). Les poids qu'un facteur scalaire n'écrase pas gardent EXACTEMENT la préparation d'avant.
+        f_n = _facteur_depuis_max(bs.float().amax(-1)).to(bs.device)
+        bs = (bs.float() * f_n[:, None]).to(bs.dtype)
+        assert not echelles_ecrasees(bs), "facteur par ligne insuffisant : vérifier marlin_exact avant preparer_dense"
+    w, s_, g = preparer_pile(t.qweight[None], bs[None], t.global_scale.reshape(1).float(), repack=repack)
     gsr = getattr(t, "global_scale_rows", None)
-    if gsr is not None:
-        facteur = facteur_nvfp4(t.block_scale[None].to(torch.bfloat16))
-        g = traiter_echelle_globale(gsr.float().reshape(-1), facteur).contiguous()
-        assert g.numel() == t.qweight.shape[0], (g.numel(), t.qweight.shape)
+    if gsr is not None or f_n is not None:
+        facteur = facteur_nvfp4(bs[None].to(torch.bfloat16))
+        lignes = (gsr.float().reshape(-1) if gsr is not None
+                  else t.global_scale.float().reshape(1).expand(N).to(bs.device))
+        if f_n is not None:
+            lignes = lignes / f_n
+        g = traiter_echelle_globale(lignes, facteur).contiguous()
+        assert g.numel() == N, (g.numel(), t.qweight.shape)
     return w[0], s_[0], g
+
+
+def marlin_exact(t) -> "str | None":
+    """Pièce 157 : None si la disposition Marlin de ``t`` (dense) rend exactement ses poids — facteur scalaire, sinon par
+    ligne ; sinon la raison (le poids garde le chemin naturel, compté au bilan)."""
+    if not echelles_ecrasees(t.block_scale) or not echelles_ecrasees(t.block_scale, par_ligne=True):
+        return None
+    return f"échelles sous-normales non représentables en Marlin : {echelles_ecrasees(t.block_scale, par_ligne=True)} blocs" 
 
 
 def gemm_dense(a: torch.Tensor, w_marlin, s_marlin, g_marlin, size_n: int, size_k: int, workspace) -> torch.Tensor:

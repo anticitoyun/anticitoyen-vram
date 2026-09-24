@@ -18,9 +18,11 @@ carte = pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise"
 RACINE = Path(__file__).resolve().parents[1]
 
 
-def test_defaut_hors_du_chemin_sous_processus():
+def test_repli_nomme_hors_du_chemin_sous_processus():
+    """Pièce 156 : le Marlin est le défaut (test_defaut_marlin_156) ; ACVRAM_PROJ_MARLIN=0 le coupe."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("ACVRAM_PROJ_MARLIN")}
     env["CUDA_VISIBLE_DEVICES"] = ""
+    env["ACVRAM_PROJ_MARLIN"] = "0"
     r = subprocess.run([sys.executable, "-c", "import acvram.kernels as k; print(k._PROJ_MARLIN)"], env=env,
                        capture_output=True, text=True, cwd=str(RACINE))
     assert r.stdout.strip().splitlines()[-1] == "False", r.stdout + r.stderr
@@ -40,6 +42,7 @@ def test_reserve_du_chargeur(monkeypatch):
     monkeypatch.setattr(kernels, "_PROJ_MARLIN", False)
     assert loader._octets_marlin(man) == 0
     monkeypatch.setattr(kernels, "_PROJ_MARLIN", True)
+    monkeypatch.setattr(kernels, "_PROJ_MARLIN_DOUBLES", frozenset({"mlp.gate_up", "mlp.down", "gdn.out"}))   # le mixte (129)
     # pièce 146 : les doubles seuls (gate‖up, down, gdn.out au défaut des doubles) — plus de « plus gros » transitoire
     assert loader._octets_marlin(man) == o(4096, 1024) + o(1024, 4096) + o(1024, 2048)
     monkeypatch.setattr(kernels, "_PROJ_MARLIN_DOUBLES", frozenset())
@@ -126,10 +129,11 @@ def test_pile_a_echelle_par_segment_et_ses_vues():
 
 
 @carte
-def test_role_double_garde_la_naturelle_au_bit():
+def test_role_double_garde_la_naturelle_au_bit(monkeypatch):
     kernels = _pret()
     from acvram.engine.attention import MLP
     mlp = MLP(_lin(4096, 2048, 4), _lin(4096, 2048, 5), _lin(2048, 4096, 6))     # N ≥ 2 048 partout
+    monkeypatch.setattr(kernels, "_PROJ_MARLIN_DOUBLES", frozenset({"mlp.gate_up", "mlp.down", "gdn.out"}))   # 156 : défaut vide
     mlp.fuse()
     x1 = torch.randn(1, 2048, device="cuda", dtype=torch.bfloat16)
     avant = mlp(x1)
@@ -158,9 +162,11 @@ def test_garde_modele_dense_exclut_les_moe(monkeypatch):
     assert kernels.preparer_disposition_marlin(boite)["seuls"] == 1               # global : le MoE est converti aussi
 
 
-def test_portee_defaut_global_sous_processus():
+def test_portee_posee_global_sous_processus():
+    """Pièce 156 : le défaut est « denses » (test_defaut_marlin_156) ; « global » reste accessible par la variable."""
     env = {k: v for k, v in os.environ.items() if k != "ACVRAM_PROJ_MARLIN_PORTEE"}
     env["CUDA_VISIBLE_DEVICES"] = ""
+    env["ACVRAM_PROJ_MARLIN_PORTEE"] = "global"
     r = subprocess.run([sys.executable, "-c", "import acvram.kernels as k; print(k._PROJ_MARLIN_PORTEE)"], env=env,
                        capture_output=True, text=True, cwd=str(RACINE))
     assert r.stdout.strip().splitlines()[-1] == "global", r.stdout + r.stderr

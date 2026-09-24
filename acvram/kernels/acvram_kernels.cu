@@ -7713,6 +7713,105 @@ std::vector<torch::Tensor> rmsnorm_bf16(torch::Tensor x, torch::Tensor w, double
     return {y};
 }
 
+// Pièce 156 F6 (opt-in ACVRAM_NORME_REGISTRES) : rmsnorm_bf16_kernel au décodage (R = 1 à 8 lignes de H = 5 120 sur
+// Qwen3.8 : 3,8 µs par appel, nsys 148 bis, pour 30 Kio lus). MÊME bloc de TH fils par ligne, MÊME découpe (fil t :
+// éléments t, t + TH, …), même expression `ss += v * v`, même arbre xor, même somme séquentielle des TH/32 warps depuis 0,
+// même rsqrtf : mêmes bits. Ce qui change : la ligne (et le poids) est chargée UNE fois en registres avant tout calcul,
+// au lieu de trois allers-retours (lecture, relecture de xn après __syncthreads, relecture de x et de w pour la
+// sortie), et la somme des warps est déroulée (TH connu à la compilation). Juge : tests/test_norme_registres_156.py.
+template <int TH, int EPT>
+__global__ void __launch_bounds__(TH) rmsnorm_bf16_reg_kernel(const __nv_bfloat16 *__restrict__ x,
+                                                              const __nv_bfloat16 *__restrict__ w,
+                                                              __nv_bfloat16 *__restrict__ y,
+                                                              const __nv_bfloat16 *__restrict__ res,
+                                                              __nv_bfloat16 *__restrict__ xn,
+                                                              float mult, int H, float eps) {
+    __shared__ float red[TH / 32];
+    const int t = threadIdx.x;
+    const size_t base = (size_t)blockIdx.x * H;
+    float v[EPT], wv[EPT];
+#pragma unroll
+    for (int r = 0; r < EPT; ++r) {
+        const int i = t + TH * r;
+        v[r] = (i < H) ? __bfloat162float(x[base + i]) : 0.f;
+        wv[r] = (i < H) ? __bfloat162float(w[i]) : 0.f;
+    }
+    if (res != nullptr) {
+#pragma unroll
+        for (int r = 0; r < EPT; ++r) {
+            const int i = t + TH * r;
+            if (i < H) {
+                const __nv_bfloat16 s = __float2bfloat16(__bfloat162float(res[base + i]) + mult * v[r]);
+                xn[base + i] = s;
+                v[r] = __bfloat162float(s);
+            }
+        }
+    }
+    float ss = 0.f;
+#pragma unroll
+    for (int r = 0; r < EPT; ++r)
+        if (t + TH * r < H) ss += v[r] * v[r];
+    for (int o = 16; o > 0; o >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, o);
+    if ((t & 31) == 0) red[t >> 5] = ss;
+    __syncthreads();
+    ss = 0.f;
+#pragma unroll
+    for (int k = 0; k < TH / 32; ++k) ss += red[k];
+    const float rs = rsqrtf(ss / (float)H + eps);
+#pragma unroll
+    for (int r = 0; r < EPT; ++r) {
+        const int i = t + TH * r;
+        if (i < H) {
+            const float n = __bfloat162float(__float2bfloat16(v[r] * rs));
+            y[base + i] = __float2bfloat16(n * wv[r]);
+        }
+    }
+}
+
+std::vector<torch::Tensor> rmsnorm_bf16_reg(torch::Tensor x, torch::Tensor w, double eps,
+                                            c10::optional<torch::Tensor> res, double mult) {
+    CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(x);
+    TORCH_CHECK(x.scalar_type() == torch::kBFloat16 && w.scalar_type() == torch::kBFloat16,
+                "rmsnorm_bf16_reg : bf16 attendu");
+    auto xc = x.contiguous();
+    auto wc = w.contiguous();
+    const int H = xc.size(-1);
+    const long R = xc.numel() / H;
+    auto y = torch::empty_like(xc);
+    torch::Tensor xn, rc;
+    const __nv_bfloat16 *pres = nullptr;
+    __nv_bfloat16 *pxn = nullptr;
+    if (res.has_value()) {
+        rc = res->contiguous();
+        TORCH_CHECK(rc.numel() == xc.numel(), "rmsnorm_bf16_reg : residu de meme taille");
+        xn = torch::empty_like(xc);
+        pres = reinterpret_cast<const __nv_bfloat16 *>(rc.data_ptr());
+        pxn = reinterpret_cast<__nv_bfloat16 *>(xn.data_ptr());
+    }
+    // la découpe TH de rmsnorm_bf16 (c'est elle qui fixe l'ordre de la somme) ; EPT = ceil(H / TH) ≤ 8
+    const int TH = H >= 2048 ? 1024 : (H >= 1024 ? 512 : 256);
+    const int EPT = (H + TH - 1) / TH;
+    TORCH_CHECK(EPT <= 8, "rmsnorm_bf16_reg : H <= 8192 attendu (au-dela : rmsnorm_bf16)");
+    if (R == 0) return res.has_value() ? std::vector<torch::Tensor>{y, xn} : std::vector<torch::Tensor>{y};
+    auto px = reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr());
+    auto pw = reinterpret_cast<const __nv_bfloat16 *>(wc.data_ptr());
+    auto py = reinterpret_cast<__nv_bfloat16 *>(y.data_ptr());
+    auto flux = at::cuda::getCurrentCUDAStream();
+    const float m = (float)mult, e = (float)eps;
+#define ACVRAM_RMSR(TH_, EPT_) rmsnorm_bf16_reg_kernel<TH_, EPT_><<<(unsigned)R, TH_, 0, flux>>>(px, pw, py, pres, pxn, m, H, e)
+#define ACVRAM_RMSR_EPT(TH_) switch (EPT) { case 1: ACVRAM_RMSR(TH_, 1); break; case 2: ACVRAM_RMSR(TH_, 2); break; \
+        case 3: ACVRAM_RMSR(TH_, 3); break; case 4: ACVRAM_RMSR(TH_, 4); break; case 5: ACVRAM_RMSR(TH_, 5); break; \
+        case 6: ACVRAM_RMSR(TH_, 6); break; case 7: ACVRAM_RMSR(TH_, 7); break; default: ACVRAM_RMSR(TH_, 8); }
+    if (TH == 1024) { ACVRAM_RMSR_EPT(1024) }
+    else if (TH == 512) { ACVRAM_RMSR_EPT(512) }
+    else { ACVRAM_RMSR_EPT(256) }
+#undef ACVRAM_RMSR_EPT
+#undef ACVRAM_RMSR
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    if (res.has_value()) return {y, xn};
+    return {y};
+}
+
 // C15-prefill (chantier-c15-prefill-20-09) : la MÊME RMSNorm, un WARP par ligne
 // au lieu d'un bloc. Au préfill (R = 2 047 lignes de H = 2 048) le noyau à bloc
 // lance 2 047 blocs de 1 024 fils qui lisent chacun 4 Kio, avec deux
@@ -8451,6 +8550,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("moe_route", &moe_route, "routage MoE : scores, biais, top-k, poids");
     m.def("rmsnorm_bf16", &rmsnorm_bf16,
           "RMSNorm bf16 fusionnee (variance fp32), residu optionnel",
+          py::arg("x"), py::arg("w"), py::arg("eps"),
+          py::arg("residu") = c10::optional<torch::Tensor>(),
+          py::arg("mult") = 1.0);
+    m.def("rmsnorm_bf16_reg", &rmsnorm_bf16_reg,
+          "Piece 156 F6 : rmsnorm_bf16 ligne en registres, meme decoupe et meme ordre de somme (au bit)",
           py::arg("x"), py::arg("w"), py::arg("eps"),
           py::arg("residu") = c10::optional<torch::Tensor>(),
           py::arg("mult") = 1.0);
