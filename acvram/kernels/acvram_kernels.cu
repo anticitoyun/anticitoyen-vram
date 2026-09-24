@@ -2183,6 +2183,100 @@ __global__ void __launch_bounds__(MB_WARPS * WARP) nvfp4_gemv_marlin_kernel(
     if (threadIdx.x == 0) cpt[g * NT + nt] = 0u;         // prêt pour le rejeu suivant
 }
 
+// Pièce 130 (24/09, opt-in ACVRAM_GEMV_MARLIN_V2, derrière la disposition Marlin seule de la 129) : GEMV sur
+// disposition Marlin, E = 1, une projection (NW = 1), deux leviers du dossier revue/poste1-piece130-gemv-marlin-a-sec :
+// (1) TPB tuiles de 64 colonnes ADJACENTES par bloc — TPB × 512 o contigus par ligne k au lieu de 512 o puis un saut
+// de 8·N o ; (2) x lu en GLOBAL (deux float2 par tuile et par voie, cache L1) au lieu d'une copie en mémoire partagée
+// par bloc — plus de borne K ≤ 11 264, down en un lancement, plus de __syncthreads d'entrée. Pour CHAQUE colonne,
+// l'ordre d'accumulation est celui de v1 (mêmes tuiles k par warp, même paire (kt, kt + 8), mêmes shuffles, mêmes
+// warps dans l'ordre, même somme des S partiels) : à S égal, sortie AU BIT de v1 (tests/test_gemv_marlin_v2.py).
+template <typename XT>
+__device__ __forceinline__ float2 mb2_x2(const XT *__restrict__ x, int i) {    // i pair
+    if constexpr (sizeof(XT) == 4) return __ldg(reinterpret_cast<const float2 *>(x + i));
+    else return __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(x + i));
+}
+
+template <typename XT, int TPB>
+__global__ void __launch_bounds__(MB_WARPS * WARP) nvfp4_gemv_marlin2_kernel(
+    const uint4 *__restrict__ q0, const unsigned char *__restrict__ s0, const float *__restrict__ g0,
+    const XT *__restrict__ x, float *__restrict__ y, int N, int K,
+    float *__restrict__ part, unsigned int *__restrict__ cpt) {
+    __shared__ float red[TPB * MB_WARPS * MB_TN];
+    __shared__ bool dernier;
+    const int nb = blockIdx.x, S = gridDim.z, z = blockIdx.z;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int KT = K / MB_TK, LN = N / MB_TN;
+    const int kt0 = z * KT / S, kt1 = (z + 1) * KT / S;
+    const int tr = (lane & 3) * 2, c = lane >> 2;
+    constexpr long TUILE = MB_TK * MB_TN / 32;                  // uint4 par tuile
+    const long bw = (long)(nb * TPB) * TUILE + lane;
+    const long bs = (long)(nb * TPB) * MB_TN + 8 * c;
+    float acc[TPB][4][2] = {};
+    int kt = kt0 + warp;
+    for (; kt + MB_WARPS < kt1; kt += 2 * MB_WARPS) {
+        const int k2 = kt + MB_WARPS;
+        uint4 pa[TPB], pb[TPB]; uint2 sa[TPB], sb[TPB];
+        #pragma unroll
+        for (int j = 0; j < TPB; ++j) {
+            pa[j] = q0[bw + j * TUILE + (long)kt * LN * 32];
+            pb[j] = q0[bw + j * TUILE + (long)k2 * LN * 32];
+            sa[j] = *reinterpret_cast<const uint2 *>(s0 + bs + j * MB_TN + (long)kt * N);
+            sb[j] = *reinterpret_cast<const uint2 *>(s0 + bs + j * MB_TN + (long)k2 * N);
+        }
+        const float2 xa01 = mb2_x2(x, kt * MB_TK + tr), xa89 = mb2_x2(x, kt * MB_TK + tr + 8);
+        const float2 xb01 = mb2_x2(x, k2 * MB_TK + tr), xb89 = mb2_x2(x, k2 * MB_TK + tr + 8);
+        #pragma unroll
+        for (int j = 0; j < TPB; ++j) {
+            mb_tuile(pa[j], sa[j], xa01, xa89, acc[j]);
+            mb_tuile(pb[j], sb[j], xb01, xb89, acc[j]);
+        }
+    }
+    for (; kt < kt1; kt += MB_WARPS) {
+        const float2 xa01 = mb2_x2(x, kt * MB_TK + tr), xa89 = mb2_x2(x, kt * MB_TK + tr + 8);
+        #pragma unroll
+        for (int j = 0; j < TPB; ++j) {
+            const uint4 pa = q0[bw + j * TUILE + (long)kt * LN * 32];
+            const uint2 sa = *reinterpret_cast<const uint2 *>(s0 + bs + j * MB_TN + (long)kt * N);
+            mb_tuile(pa, sa, xa01, xa89, acc[j]);
+        }
+    }
+    #pragma unroll
+    for (int j = 0; j < TPB; ++j)
+        #pragma unroll
+        for (int q = 0; q < 4; ++q)
+            #pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                float v = acc[j][q][h];
+                v += __shfl_xor_sync(0xffffffffu, v, 1);
+                v += __shfl_xor_sync(0xffffffffu, v, 2);
+                if ((lane & 3) == 0) red[(j * MB_WARPS + warp) * MB_TN + q * 16 + c + 8 * h] = v;
+            }
+    __syncthreads();
+    for (int i = threadIdx.x; i < TPB * MB_TN; i += blockDim.x) {
+        const int j = i / MB_TN, col = i - j * MB_TN;
+        float t0 = 0.f;
+        #pragma unroll
+        for (int w = 0; w < MB_WARPS; ++w) t0 += red[(j * MB_WARPS + w) * MB_TN + col];
+        const int n = (nb * TPB + j) * MB_TN + col;
+        if (S > 1) { part[(long)z * N + n] = t0; __threadfence(); }
+        else y[n] = t0 * (g0[0] * 0x1p-119f);
+    }
+    if (S == 1) return;
+    __syncthreads();
+    if (threadIdx.x == 0) dernier = (atomicAdd(cpt + nb, 1u) == (unsigned)(S - 1));
+    __syncthreads();
+    if (!dernier) return;
+    __threadfence();
+    const volatile float *vp = part;
+    for (int i = threadIdx.x; i < TPB * MB_TN; i += blockDim.x) {
+        const int n = nb * TPB * MB_TN + i;
+        float t0 = 0.f;
+        for (int zz = 0; zz < S; ++zz) t0 += vp[(long)zz * N + n];     // ordre fixe, comme v1
+        y[n] = t0 * (g0[0] * 0x1p-119f);
+    }
+    if (threadIdx.x == 0) cpt[nb] = 0u;                              // prêt pour le rejeu suivant
+}
+
 // Split-K par lot — OPT-IN (poste7, 19/09, verdict-splitk-b1-19-09) :
 // ACVRAM_GEMV_SPLITK=0 (défaut) : S = 1, noyau d'avant, sortie inchangée ;
 // =1 : S doublé tant que la grille reste sous MB_BLOCS_MIN et que chaque bloc
@@ -2490,6 +2584,43 @@ torch::Tensor nvfp4_gemv_marlin_gateup_slots(torch::Tensor wg, torch::Tensor sg,
                                              torch::Tensor x, int64_t K, int64_t N, int64_t act, int64_t tpb,
                                              c10::optional<torch::Tensor> xscale) {
     return mb_slots_commun(wg, sg, gg, &wu, &su, &gu, slot_e, slot_pair, token_ids, x, K, N, act, tpb, xscale);
+}
+
+// Pièce 130 : hôte du GEMV Marlin v2 (E = 1, une ligne x). ``tpb`` ∈ {1, 2, 4} tuiles de colonnes par bloc ; ``S`` > 0
+// forcé, sinon la règle de v1 (mb_splitk) sur N/64/tpb blocs. Sortie [1, N] fp32, comme v1.
+static int mb_splitk(int NT, int G, int KT);
+static std::pair<float *, unsigned int *> mb_tampons(const torch::Tensor &ref, long n_part, long n_cpt);
+torch::Tensor nvfp4_gemv_marlin2(torch::Tensor w, torch::Tensor s, torch::Tensor g, torch::Tensor x,
+                                 int64_t K, int64_t N, int64_t tpb, int64_t S) {
+    CHECK_CUDA(w); CHECK_CONTIG(w); CHECK_CONTIG(s); CHECK_CONTIG(g); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(w);
+    TORCH_CHECK(w.scalar_type() == torch::kInt && g.scalar_type() == torch::kFloat, "marlin2 : poids int32, g fp32");
+    TORCH_CHECK(s.scalar_type() == torch::kByte || s.scalar_type() == torch::kFloat8_e4m3fn, "marlin2 : échelles S0E5M3");
+    TORCH_CHECK(K % 64 == 0 && N % 64 == 0, "marlin2 : K et N multiples de 64");
+    TORCH_CHECK(w.dim() == 3 && w.size(0) == 1 && w.size(1) == K / 16 && w.size(2) == N * 2, "marlin2 : poids [1, K/16, 2N]");
+    TORCH_CHECK(s.dim() == 3 && s.size(0) == 1 && s.size(1) == K / 16 && s.size(2) == N, "marlin2 : échelles [1, K/16, N]");
+    const int NT = (int)(N / MB_TN), KT = (int)(K / MB_TK);
+    TORCH_CHECK((tpb == 1 || tpb == 2 || tpb == 4) && NT % tpb == 0, "marlin2 : tpb ∈ {1, 2, 4} divisant N/64");
+    const bool bf = x.scalar_type() == torch::kBFloat16;
+    auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
+    TORCH_CHECK(xc.numel() == K, "marlin2 : x [1, K]");
+    const int nb = NT / (int)tpb;
+    const int Sx = S > 0 ? (int)S : mb_splitk(nb, 1, KT);
+    TORCH_CHECK(Sx >= 1 && KT / Sx >= 1, "marlin2 : S trop grand pour K");
+    auto out = torch::empty({1, N}, xc.options().dtype(torch::kFloat));
+    float *part = nullptr; unsigned int *cpt = nullptr;
+    if (Sx > 1) { auto pr = mb_tampons(w, (long)Sx * N, nb); part = pr.first; cpt = pr.second; }
+    dim3 grid(nb, 1, Sx);
+    auto stream = at::cuda::getCurrentCUDAStream();
+    #define M2_L(XT, T, PX) nvfp4_gemv_marlin2_kernel<XT, T><<<grid, MB_WARPS * WARP, 0, stream>>>( \
+        reinterpret_cast<const uint4 *>(w.data_ptr<int>()), reinterpret_cast<const unsigned char *>(s.data_ptr()), \
+        g.data_ptr<float>(), PX, out.data_ptr<float>(), (int)N, (int)K, part, cpt)
+    #define M2_T(XT, PX) do { if (tpb == 1) M2_L(XT, 1, PX); else if (tpb == 2) M2_L(XT, 2, PX); else M2_L(XT, 4, PX); } while (0)
+    if (bf) { M2_T(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
+    else { M2_T(float, xc.data_ptr<float>()); }
+    #undef M2_T
+    #undef M2_L
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return out;
 }
 
 torch::Tensor nvfp4_gemv_marlin(torch::Tensor w, torch::Tensor s, torch::Tensor g,
@@ -7995,6 +8126,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("w"), py::arg("s"), py::arg("g"), py::arg("expert_ids"), py::arg("token_ids"),
           py::arg("x"), py::arg("K"), py::arg("N"), py::arg("xscale") = c10::nullopt,
           "NVFP4 : GEMV groupée lisant la DISPOSITION MARLIN (forme (b), P1 disposition unique)");
+    m.def("nvfp4_gemv_marlin2", &nvfp4_gemv_marlin2, py::arg("w"), py::arg("s"), py::arg("g"), py::arg("x"),
+          py::arg("K"), py::arg("N"), py::arg("tpb") = 2, py::arg("S") = -1,
+          "Pièce 130 : GEMV disposition Marlin v2 (E = 1) — tpb tuiles par bloc, x en global (K libre), S forcé si > 0 ; au bit de v1 à S égal");
     m.def("nvfp4_gemv_marlin_splitk", &nvfp4_gemv_marlin_splitk,
           "S du split-K que prendrait nvfp4_gemv_marlin(K, N, G) : 1 sauf ACVRAM_GEMV_SPLITK");
     m.def("nvfp4_gemv_marlin_gateup", &nvfp4_gemv_marlin_gateup,

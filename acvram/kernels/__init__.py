@@ -955,6 +955,11 @@ _PROJ_MARLIN_MIN_N = int(os.environ.get("ACVRAM_PROJ_MARLIN_MIN_N", "2048"))    
 # Marlin à M = 1 perd le plus (revue/verdict-129-1-gemv-marlin-m1-24-09 : +17 %, +17 %, +25 %) ; ailleurs Marlin SEUL.
 _PROJ_MARLIN_DOUBLES = frozenset(r for r in os.environ.get(
     "ACVRAM_PROJ_MARLIN_DOUBLES", "mlp.gate_up,mlp.down,gdn.out").split(",") if r)
+# Pièce 130 (opt-in) : GEMV Marlin v2 à M = 1 pour les poids en disposition Marlin seule — TPB tuiles de colonnes par
+# bloc, x en global (K libre : down en un lancement) ; S = 0 : règle de v1 (mb_splitk) sur N/64/TPB blocs.
+_GEMV_MARLIN_V2 = os.environ.get("ACVRAM_GEMV_MARLIN_V2", "0") == "1"
+_GEMV_MARLIN_TPB = int(os.environ.get("ACVRAM_GEMV_MARLIN_TPB", "2"))
+_GEMV_MARLIN_S = int(os.environ.get("ACVRAM_GEMV_MARLIN_S", "0"))
 _GEMV_MARLIN_KMAX = 11264          # nvfp4_gemv_marlin : x en mémoire partagée fp32 (acvram_kernels.cu, mb_verifier)
 
 
@@ -975,7 +980,10 @@ def _marlin_seul(x: torch.Tensor, t):
         z = t._marlin_zero
         gs = g if g.numel() == 1 else t._marlin_un
         w3, s3 = w[None], s_[None]
-        if k_pad <= _GEMV_MARLIN_KMAX:
+        if _GEMV_MARLIN_V2 and hasattr(ext, "nvfp4_gemv_marlin2"):
+            tpb = _GEMV_MARLIN_TPB if (N // 64) % _GEMV_MARLIN_TPB == 0 else 1
+            y = ext.nvfp4_gemv_marlin2(w3, s3, gs, xf, k_pad, N, tpb, _GEMV_MARLIN_S)
+        elif k_pad <= _GEMV_MARLIN_KMAX:
             y = ext.nvfp4_gemv_marlin(w3, s3, gs, z, z, xf, k_pad, N)
         else:
             h = (k_pad // 2) // 64 * 64
