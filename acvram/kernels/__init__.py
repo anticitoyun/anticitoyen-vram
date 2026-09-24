@@ -1062,6 +1062,27 @@ def _marlin_seul(x: torch.Tensor, t):
     return y[:, : t.shape[0]].reshape(*orig[:-1], t.shape[0])
 
 
+def marlin_bilan_texte(modele_ou_bilan) -> str:
+    """Pièce 170 : le fragment ``+marlin(…)`` de la ligne de régime — UNE écriture pour le service (runner) et l'eval PPL
+    (evaluate), avec le compteur de replis (poids éligibles rendus au naturel : `inexacts`, 157 ; `exclus` = non éligibles).
+    Vide quand le bilan n'existe pas et que le Marlin n'est pas coupé ; « off » nommé quand ACVRAM_PROJ_MARLIN=0 (156)."""
+    b = modele_ou_bilan if isinstance(modele_ou_bilan, dict) or modele_ou_bilan is None \
+        else getattr(modele_ou_bilan, "proj_marlin_bilan", None)
+    if b:
+        if b.get("portee") == "denses:moe-exclu":
+            corps = "moe-exclu"
+        elif b.get("repli"):
+            corps = f"repli:{b['repli']}"
+        else:
+            corps = "doubles={doubles},seuls={seuls},{go:.2f}Go,kv={capacite_kv}".format(
+                go=b["octets_doubles"] / 2**30, **{"capacite_kv": 0, **b})
+            corps += f",exclus={b.get('exclus', 0)},replis={b.get('inexacts', 0)}"          # 157 : inexacts rendus au naturel
+        return "+marlin(" + corps + ")"
+    if os.environ.get("ACVRAM_PROJ_MARLIN") == "0":
+        return "+marlin(off:ACVRAM_PROJ_MARLIN=0)"                                        # pièce 156 : repli demandé, NOMMÉ
+    return ""
+
+
 def role_marlin(module, attr: str) -> str:
     """Rôle d'un linéaire dense pour la disposition mixte : « mlp.gate_up », « mlp.down », « gdn.out », sinon ""."""
     nom = type(module).__name__
