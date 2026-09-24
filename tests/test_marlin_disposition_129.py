@@ -43,11 +43,17 @@ def test_reserve_du_chargeur(monkeypatch):
     assert loader._octets_marlin(man) == o(4096, 1024) + o(1024, 4096) + o(1024, 2048) + o(8192, 1024)   # + plus gros
 
 
-def test_preuve_memoire_refus_nomme():
+def test_preuve_memoire_refus_nomme(monkeypatch):
     from acvram.engine import loader
+    from acvram.memory.kvcache import BLOCK_SIZE
+    monkeypatch.delenv("ACVRAM_PROJ_MARLIN_CAPACITE", raising=False)
+    b = {"doubles": 0, "octets_doubles": 0}
     with pytest.raises(RuntimeError, match="ACVRAM_PROJ_MARLIN=1 : capacité KV"):
-        loader._verifier_memoire_marlin([], {"cuda:0": 10}, {"doubles": 0, "octets_doubles": 0})
-    loader._verifier_memoire_marlin([], {"cuda:0": 10 ** 6}, {"doubles": 0, "octets_doubles": 0})
+        loader._verifier_memoire_marlin([], {"cuda:0": 10}, b)                        # défaut 8 × 8 192
+    loader._verifier_memoire_marlin([], {"cuda:0": 10 ** 6}, b)
+    loader._verifier_memoire_marlin([], {"cuda:0": 1024 // BLOCK_SIZE}, b, demande=1024)   # ce que le chargement demande
+    with pytest.raises(RuntimeError, match="capacité KV"):
+        loader._verifier_memoire_marlin([], {"cuda:0": 1024 // BLOCK_SIZE}, b, demande=8 * 8192)
 
 
 # ---------------------------------------------------------------- carte

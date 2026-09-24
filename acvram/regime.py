@@ -78,7 +78,8 @@ VARIABLES: tuple[Variable, ...] = (
              "pièce 129 (A) : rôles gardés en DEUX dispositions (naturelle à M = 1, Marlin à M ≥ 2) ; les autres poids "
              "éligibles passent en Marlin SEUL (naturelle libérée) — revue/verdict-129-1-gemv-marlin-m1-24-09"),
     Variable("PROJ_MARLIN_CAPACITE", "65536", None, None,
-             "pièce 129 : capacité KV minimale (jetons) exigée au chargement sous PROJ_MARLIN=1, sinon refus nommé"),
+             "pièce 129 : capacité KV minimale (jetons) exigée au chargement sous PROJ_MARLIN=1, sinon refus nommé ; non "
+             "posée : séquences × longueur demandées par le chargement, sinon 65 536"),
     Variable("AWQ_TENSOR", "0", ("acvram.engine.moe", "_AWQ_TENSOR"), None,
              "pièce 123 (24/09, opt-in, jamais posé par un lanceur) : 1 = experts à tables AWQ d'activation sur le chemin "
              "tensor (échelle fondue dans moe_aligner_petit, xs) au lieu du repli GEMV nommé ; hors défaut : 123-quater "

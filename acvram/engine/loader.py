@@ -932,7 +932,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
     bilan_marlin = None
     if _kernels._PROJ_MARLIN:
         bilan_marlin = _kernels.preparer_disposition_marlin(torch.nn.ModuleList(layers))
-        _verifier_memoire_marlin(a_allouer, kv_blocks, bilan_marlin)
+        _verifier_memoire_marlin(a_allouer, kv_blocks, bilan_marlin,
+                                 max_concurrent_seqs * max_model_len if max_concurrent_seqs and max_model_len else None)
 
     for i, cfg in a_allouer:
         caches[i] = PagedKVCache(cfg)
@@ -1222,11 +1223,12 @@ def _borner_kv_avec_exil(plan: Plan, manifest: dict, dev, spec: ModelSpec,
         f"réduire max_model_len ou forcer l'exil (ACVRAM_EXIL_COUCHES)")
 
 
-def _verifier_memoire_marlin(a_allouer: list, kv_blocks: dict, bilan: dict) -> None:
+def _verifier_memoire_marlin(a_allouer: list, kv_blocks: dict, bilan: dict, demande: Optional[int] = None) -> None:
     """Pièce 129 : refus NOMMÉ au chargement si la disposition mixte ne laisse pas la place du KV planifié, ou si la
-    capacité KV tombe sous ACVRAM_PROJ_MARLIN_CAPACITE jetons (défaut 8 × 8 192)."""
+    capacité KV tombe sous la capacité exigée : ACVRAM_PROJ_MARLIN_CAPACITE si posée, sinon ce que CE chargement
+    demande (séquences × longueur), sinon 8 × 8 192."""
     import os
-    requis = int(os.environ.get("ACVRAM_PROJ_MARLIN_CAPACITE", str(8 * 8192)))
+    requis = int(os.environ.get("ACVRAM_PROJ_MARLIN_CAPACITE") or demande or 8 * 8192)
     par_dev: dict = {}
     for _, cfg in a_allouer:
         par_dev[str(cfg.device)] = par_dev.get(str(cfg.device), 0) + cfg.bytes_per_block() * cfg.num_blocks * max(1, cfg.num_layers)
