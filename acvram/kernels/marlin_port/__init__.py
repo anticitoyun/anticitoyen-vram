@@ -286,9 +286,9 @@ def depaqueter_marlin(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, 
     g = torch.as_tensor(g_marlin, dtype=torch.float32, device=w.device).reshape(-1)
     if g.numel() == 1 and E > 1:
         g = g.expand(E)
-    if E == 1 and g.numel() == N and N > 1 and noyau != "triton" and not (noyau == "auto" and w.device.type == "cuda"
-                                                                          and triton is not None):
-        raise ValueError("depaqueter_marlin : échelle globale par colonne servie par le noyau Triton seulement")
+    if E == 1 and g.numel() == N and N > 1 and noyau not in ("triton", "cuda") and not (
+            noyau == "auto" and w.device.type == "cuda" and (triton is not None or _depaqueter_cuda_disponible())):
+        raise ValueError("depaqueter_marlin : échelle globale par colonne servie par les noyaux Triton et CUDA seulement")
     if out is None:
         out = torch.empty(E, N, K, dtype=torch.bfloat16, device=w.device)
     res = out.view(E, N, K)
