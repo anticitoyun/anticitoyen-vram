@@ -932,6 +932,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
     bilan_marlin = None
     if _kernels._PROJ_MARLIN:
         bilan_marlin = _kernels.preparer_disposition_marlin(torch.nn.ModuleList(layers))
+        bilan_marlin["capacite_kv"] = min((int(n) * BLOCK_SIZE for d, n in kv_blocks.items() if str(d).startswith("cuda")),
+                                          default=0)
         _verifier_memoire_marlin(a_allouer, kv_blocks, bilan_marlin,
                                  max_concurrent_seqs * max_model_len if max_concurrent_seqs and max_model_len else None)
 
