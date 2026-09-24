@@ -50,3 +50,16 @@ Les trois drapeaux passent à 1 par défaut (0 = témoin). Conditions de chef av
 2. **Capture des godets** 1 à 8 (`capture-godets.py`, Qwen3.8, défaut + config Marlin) : capture ok, `graphes=on`,
    `repli_eager=0` pour chacun ; ligne de régime relevée. Prédit : 8/8.
 3. Suite complète sous mon verrou APRÈS la fusion de la bascule Marlin d'poste1 depuis main (attente de son push).
+
+### Résultats de la bascule (prise b2c507bc, 15:42:00-15:43:22)
+
+1. **ABBA b=1** (pas GPU médian, µs) : A1 13 049,9 · B1 13 043,7 · B2 13 043,7 · A2 13 047,8 → **B/A = 0,9996** (−5 µs),
+   dans la prédiction (0,993-1,000), loin du seuil FAUX (1,01). **TENU.** Le trou GPU entre pas vaut 23,4 µs sous B contre
+   15,4 sous A. Il reste compris dans le pas, qui baisse quand même : je le note sans l'expliquer.
+2. **Godets 1 à 8** au défaut (config Marlin) : **8/8 ok**, lot = godet, 0 repli eager, `graphes=on` ; ms/pas 13,05 · 12,96
+   · 13,68 · 13,64 · 13,85 · 14,07 · 14,22 · 14,39. Ligne de régime : `ACVRAM_PROJ_MARLIN=1 … ACVRAM_GDN=fla extension=oui
+   torch=2.14.0+cu130 triton=3.8.0 fla=0.5.2 … mla_glue=2 glue=compact(8) prefill_glue=compact` (les drapeaux GDN n'y
+   figurent pas : ils sont à leur défaut). **TENU.**
+3. Suite complète : en attente de la bascule Marlin d'poste1 dans main.
+
+Limite nommée : alias mixte (`Qwen3.8-27B-unsloth-mixte-i8c`) non mesuré, même code GDN.
