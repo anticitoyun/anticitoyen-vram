@@ -8066,7 +8066,98 @@ torch::Tensor swiglu_bf16(torch::Tensor gu) {
 }
 
 
+// ---------------------------------------------------------------------------
+// Pièce 147 (L3', poste6 24/09) — dépaquetage de la disposition Marlin au
+// débit de `nvfp4_dequant` : la version Triton (`marlin_port._depaqueter_kernel`,
+// un programme par tuile 16 k × 64 n) écrit 64 segments de 32 octets par
+// programme ; ici un bloc lit DEP_TUILES tuiles contiguës en k (coalescé),
+// décode dans la mémoire partagée puis ÉCRIT DES LIGNES ENTIÈRES (256 octets
+// contigus par ligne et par warp). MÊME ARITHMÉTIQUE, AU BIT : fl(s·g)·2⁻¹¹⁹
+// en fp32, × code E2M1 (−0,0 conservé), arrondi bf16 au plus proche pair par
+// le même calcul entier que `_bf16_rne` (juge : depaqueter_marlin(noyau="torch")).
+constexpr int DEP_TUILES = 8;                       // 8 × 16 k = 128 k par ligne et par bloc
+constexpr int DEP_PAS = DEP_TUILES * 16 + 2;        // pas de ligne en shared (rembourré : moins de conflits de banc)
+__device__ __forceinline__ float dep_e2m1(int c) {
+    const float mant = (float)(c & 1);
+    const int ex = (c >> 1) & 3;
+    const float mult = ex == 3 ? 4.f : (ex == 2 ? 2.f : 1.f);
+    const float v = ex == 0 ? 0.5f * mant : (1.f + 0.5f * mant) * mult;
+    return (c & 8) ? -v : v;
+}
+__device__ __forceinline__ unsigned short dep_bf16_rne(float x) {
+    int b = __float_as_int(x);
+    b = b + 0x7FFF + ((b >> 16) & 1);
+    return (unsigned short)((unsigned)b >> 16);
+}
+__global__ void depaqueter_marlin_kernel(const unsigned char *__restrict__ w, const unsigned char *__restrict__ s,
+                                         const float *__restrict__ g, unsigned short *__restrict__ out,
+                                         int KT, int NT, int K, int N, int par_colonne) {
+    __shared__ unsigned char codes[DEP_TUILES * 512];
+    __shared__ unsigned char sc[DEP_TUILES * 64];
+    __shared__ unsigned short tuile[64 * DEP_PAS];
+    const int e = blockIdx.z, nt = blockIdx.y, kt0 = blockIdx.x * DEP_TUILES;
+    const int ntuiles = min(DEP_TUILES, KT - kt0);
+    for (int i = threadIdx.x; i < ntuiles * 512; i += blockDim.x) {
+        const int t = i >> 9, o = i & 511;
+        codes[i] = w[((long)(e * KT + kt0 + t) * NT + nt) * 512 + o];
+    }
+    for (int i = threadIdx.x; i < ntuiles * 64; i += blockDim.x) {
+        const int t = i >> 6, o = i & 63;
+        sc[i] = s[(long)(e * KT + kt0 + t) * N + nt * 64 + o];
+    }
+    __syncthreads();
+    const float ge = par_colonne ? 0.f : g[e];
+    for (int i = threadIdx.x; i < ntuiles * 512; i += blockDim.x) {
+        const int t = i >> 9, bi = i & 511;
+        const int oc = codes[i];
+        const int mot = bi >> 2, b = bi & 3, tt = mot >> 2, wq = mot & 3;
+        const int n = wq * 16 + (tt >> 2) + 8 * (b & 1);         // colonne locale (0..63)
+        const int k0 = (tt & 3) * 2 + (b >> 1);                  // k local du quartet bas ; + 8 pour le haut
+        const int q = n >> 3;
+        const int p = 8 * (n & 7) + ((q & 4) | ((q & 1) << 1) | ((q >> 1) & 1));
+        const int sb = sc[t * 64 + p];
+        float s_dec = __int_as_float((sb << 20) + 0x34800000);   // = s·facteur (S0E5M3)
+        if (sb == 0) s_dec = 0.f;                                 // annulée : 0, pas 2⁻²²
+        const float gg = par_colonne ? g[nt * 64 + n] : ge;
+        const float ech = (s_dec * gg) * 0x1p-119f;               // fl(s·g), même ordre que Triton
+        tuile[n * DEP_PAS + t * 16 + k0] = dep_bf16_rne(dep_e2m1(oc & 0xF) * ech);
+        tuile[n * DEP_PAS + t * 16 + k0 + 8] = dep_bf16_rne(dep_e2m1(oc >> 4) * ech);
+    }
+    __syncthreads();
+    const int kn = ntuiles * 16;                                  // k valides dans ce bloc (multiple de 16)
+    const int q4 = kn >> 2;                                       // quadruplets bf16 par ligne
+    for (int i = threadIdx.x; i < 64 * q4; i += blockDim.x) {
+        const int n = i / q4, c4 = (i - n * q4) * 4;
+        const unsigned short *src = tuile + n * DEP_PAS + c4;
+        uint2 v;
+        v.x = (unsigned)src[0] | ((unsigned)src[1] << 16);
+        v.y = (unsigned)src[2] | ((unsigned)src[3] << 16);
+        *reinterpret_cast<uint2 *>(out + ((long)(e * N + nt * 64 + n)) * K + kt0 * 16 + c4) = v;   // 8 o alignés (K % 16 == 0)
+    }
+}
+void depaqueter_marlin_cuda(torch::Tensor w_octets, torch::Tensor s_octets, torch::Tensor g, torch::Tensor out,
+                            int64_t K, int64_t N, bool par_colonne) {
+    CHECK_CUDA(w_octets); CHECK_CUDA(s_octets); CHECK_CUDA(g); CHECK_CUDA(out);
+    ACVRAM_DEVICE_GUARD(out);
+    CHECK_CONTIG(w_octets); CHECK_CONTIG(s_octets); CHECK_CONTIG(g); CHECK_CONTIG(out);
+    TORCH_CHECK(w_octets.scalar_type() == torch::kUInt8 && s_octets.scalar_type() == torch::kUInt8
+                && g.scalar_type() == torch::kFloat && out.scalar_type() == torch::kBFloat16, "depaqueter_marlin_cuda : types");
+    TORCH_CHECK(K % 16 == 0 && N % 64 == 0, "depaqueter_marlin_cuda : K % 16, N % 64");
+    const int E = (int)out.numel() / (int)(K * N);
+    const int KT = (int)K / 16, NT = (int)N / 64;
+    TORCH_CHECK(w_octets.numel() == (long)E * KT * NT * 512 && s_octets.numel() == (long)E * KT * N, "depaqueter_marlin_cuda : tailles");
+    TORCH_CHECK(par_colonne ? (E == 1 && g.numel() == N) : g.numel() == E, "depaqueter_marlin_cuda : échelle globale");
+    dim3 grid((KT + DEP_TUILES - 1) / DEP_TUILES, NT, E);
+    depaqueter_marlin_kernel<<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+        w_octets.data_ptr<unsigned char>(), s_octets.data_ptr<unsigned char>(), g.data_ptr<float>(),
+        reinterpret_cast<unsigned short *>(out.data_ptr()), KT, NT, (int)K, (int)N, par_colonne ? 1 : 0);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("depaqueter_marlin_cuda", &depaqueter_marlin_cuda, py::arg("w_octets"), py::arg("s_octets"), py::arg("g"), py::arg("out"),
+          py::arg("K"), py::arg("N"), py::arg("par_colonne"),
+          "pièce 147 : dépaquetage Marlin → bf16 [E, N, K] par lignes entières, au bit de depaqueter_marlin(noyau='torch')");
     // Controle positif du harnais : echelle de travail connue d'avance.
     m.def("paged_attn_tampon_octets",
           [] { return acvram_pa_tampon_octets; },

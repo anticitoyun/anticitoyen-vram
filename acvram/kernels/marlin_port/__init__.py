@@ -293,9 +293,19 @@ def depaqueter_marlin(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, 
         out = torch.empty(E, N, K, dtype=torch.bfloat16, device=w.device)
     res = out.view(E, N, K)
     if noyau == "auto":
-        noyau = "triton" if (w.device.type == "cuda" and triton is not None) else "torch"
+        noyau = _DEPAQUETAGE if _DEPAQUETAGE in ("cuda", "triton", "torch") else "auto"
+    if noyau == "auto":
+        if w.device.type == "cuda" and _depaqueter_cuda_disponible():
+            noyau = "cuda"
+        else:
+            noyau = "triton" if (w.device.type == "cuda" and triton is not None) else "torch"
+    if noyau == "cuda":
+        _depaqueter_cuda(w, s, g, res, K, N)
+        DEPAQUETAGES["cuda"] += 1
+        return res if pile else res[0]
     if noyau == "triton":
         _depaqueter_triton(w, s, g, res, K, N)
+        DEPAQUETAGES["triton"] += 1
         return res if pile else res[0]
     if noyau != "torch":
         raise ValueError(f"depaqueter_marlin : noyau {noyau!r}, attendu auto | torch | triton")
@@ -568,6 +578,34 @@ if triton is not None:
         base = out_ptr + (e * N + nt * 64 + n) * K + kt * 16 + k0
         tl.store(base, _bf16_rne(_e2m1_valeur(octets & 0xF) * ech))
         tl.store(base + 8, _bf16_rne(_e2m1_valeur(octets >> 4) * ech))
+
+
+# Pièce 147 (L3') : le dépaquetage par lignes entières de l'extension CUDA, au bit du Triton et du torch
+# (tests/test_depaqueter_cuda_p147.py). ACVRAM_DEPAQUETAGE = auto (cuda si l'extension l'a) | cuda | triton | torch —
+# ne joue que sous la disposition unique (ACVRAM_PROJ_MARLIN=1) : le défaut ne l'appelle jamais.
+_DEPAQUETAGE = os.environ.get("ACVRAM_DEPAQUETAGE", "auto")
+DEPAQUETAGES: dict = {"cuda": 0, "triton": 0}
+
+
+def _depaqueter_cuda_disponible() -> bool:
+    try:
+        from .. import get_extension
+        ext = get_extension()
+    except Exception:                                        # noqa: BLE001
+        return False
+    return ext is not None and hasattr(ext, "depaqueter_marlin_cuda")
+
+
+def _depaqueter_cuda(w: torch.Tensor, s: torch.Tensor, g: torch.Tensor, out: torch.Tensor, K: int, N: int) -> None:
+    from .. import get_extension
+    ext = get_extension()
+    if ext is None or not hasattr(ext, "depaqueter_marlin_cuda"):
+        raise RuntimeError("depaqueter_marlin(noyau='cuda') : extension sans depaqueter_marlin_cuda")
+    E = w.shape[0]
+    assert out.is_contiguous() and tuple(out.shape) == (E, N, K)
+    par_colonne = E == 1 and g.numel() == N and N > 1
+    ext.depaqueter_marlin_cuda(w.contiguous().view(torch.uint8).reshape(-1), s.contiguous().view(torch.uint8).reshape(-1),
+                               g.contiguous().float(), out, K, N, par_colonne)
 
 
 def _depaqueter_triton(w: torch.Tensor, s: torch.Tensor, g: torch.Tensor, out: torch.Tensor, K: int, N: int) -> None:
