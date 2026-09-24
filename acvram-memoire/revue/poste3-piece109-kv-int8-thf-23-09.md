@@ -286,3 +286,32 @@ avant implémentation, vu l'impact sur une sortie servie par défaut.
 
 **Aucun changement de sortie servie** (0/1000 au bit contre `main`). Branche `poste3` : à fusionner
 sur décision de chef (le test passe désormais, plus de blocage technique de mon côté).
+
+## Correction du vrai bug (24/09, ordre chef) — ε dérivé, plafond, 2e bras cassant
+
+chef a mesuré : erreur relative max de `rcp.approx` ≈ 2^-20 → `δ(x/sc) ≤ 127 × 2,4e-7 ≈ 3e-5`,
+soit ~1000× MOINS que mon epsilon empirique (0,025). Sa piste (fp16 stocké contre fp32 interne)
+était réfutée par lecture (`kv_write_int8_kernel:4373`, `kvcache.py:495` : les DEUX camps
+utilisent le fp32 complet pour la division par élément) — mais le SYMPTÔME était réel : mon
+`_comparer_avec_tolerance` calculait la distance à la frontière avec l'échelle REÇUE en
+paramètre (`sk_ref`/`sv_ref`, la valeur DÉJÀ castée fp16 par `_quantize`, `kvcache.py:499`), pas
+l'échelle fp32 réellement utilisée pour la division — un artefact de MESURE, pas une propriété
+du noyau.
+
+- Mesure directe (`kv_rcp_approx_debug`, `mesure_rcp_approx.py`) : `1.f/sc` sous les mêmes
+  flags que le noyau, contre `1.0/sc` (numpy), sur 64 000 échelles réelles → erreur relative max
+  **7,87e-8** — encore plus petite que l'estimation de chef. `EPSILON = 127 × 7,87e-8 × 2 ≈
+  2e-5` (formule dérivée, pas un doublement d'un max observé au hasard).
+- `_comparer_avec_tolerance` corrigé : recalcule l'échelle en fp32 (`amax/127`) EN INTERNE,
+  n'utilise plus la valeur reçue (fp16-cast).
+- `PLAFOND_FRACTION = 1e-3` ajouté : la fraction (pas seulement le compte) d'éléments tolérés
+  doit rester sous ce plafond, sinon échec dur — un biais systématique touchant 5 % des éléments,
+  même chacun dans la bande, ne passerait plus.
+- Bras cassant 2 (synthétique, direct) : isole le mécanisme du plafond de fraction sans dépendre
+  du comportement du GPU — construit des éléments délibérément dans la bande individuellement
+  mais en nombre excédant le plafond ; confirmé rouge sur `PLAFOND_FRACTION`.
+- **4/4 tests verts** (`poste3-p109-test-final4`), avec le epsilon désormais 1000× plus strict —
+  les écarts tolérés réels (K/V=1 par test/graine) sont bien dans la bande de 2e-5, confirmant
+  que la cause EST le réciproque rapide, rien d'autre.
+
+Pièce close, prête pour fusion (chef).
