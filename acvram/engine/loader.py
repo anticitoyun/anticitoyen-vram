@@ -1153,15 +1153,31 @@ def _tete_liee(embed: torch.Tensor) -> Any:
     return plein
 
 
-# Ce que la carte doit garder hors poids et hors KV : contexte CUDA, activations
-# du prefill, graphes capturés, tampons de spéculation. Mesuré sur la 5090 : la
-# capture des graphes échoue dès que moins de ~1 Gio reste libre.
+# Ce que la carte doit garder hors poids et hors KV : contexte CUDA, graphes
+# capturés, tampons de spéculation, fragmentation. Mesuré sur la 5090 : la
+# capture des graphes échoue dès que moins de ~1 Gio reste libre ; 1,5 Gio ou
+# 5 % de la carte laissent ~0,5 Gio au-dessus de ce bord. Les activations du
+# plus grand préfill n'y sont PAS : elles arrivent à part (`reserve`,
+# `ModelSpec.activations_prefill_bytes`).
+# Pièce 156 (bead ba9) : UNE marge pour les deux décisions qui la consomment,
+# la borne du KV (`_borner_kv_par_la_vram`) et l'exil des poids
+# (`_reajuster_plan`). Celle-ci prenait max(2 Gio, 7 %) depuis le 08/09 :
+# un 70B chargé à 99 % tombait en OOM au premier préfill, faute d'y compter
+# les activations. La réserve de préfill (17/09) couvre ce cas par son nom, et
+# les 2 points de plus ne faisaient plus que retirer du KV (gemma4 31B bornée à
+# 13 408 jetons par ce seul site, 146e).
 _KV_MARGE_MIN = 1536 * 2**20
 _KV_MARGE_PART = 0.05
 
 
+def _marge_carte(capacite: int, reserve: int = 0) -> int:
+    """Octets gardés hors poids et hors KV sur une carte de ``capacite`` octets,
+    ``reserve`` (activations du plus grand préfill) comprise."""
+    return max(_KV_MARGE_MIN, int(_KV_MARGE_PART * capacite)) + int(reserve)
+
+
 def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0,
-                           embed_charge: bool = False) -> None:
+                           embed_charge: bool = False) -> dict:
     """Borne le budget KV de chaque GPU par ce qu'il a réellement de libre.
 
     Le budget du manifeste vient du planificateur, qui raisonne sur des tailles
@@ -1170,9 +1186,14 @@ def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0,
     observé avant ce garde-fou : 50 Mio libres après le chargement d'un
     35B-A3B, capture des graphes CUDA impossible, décodage dégradé. Ici, le
     budget est ramené à ``libre − poids réels − marge`` quand il le dépasse.
+
+    Rend ``{appareil: borne brute}``, NÉGATIVE quand les poids seuls passent
+    déjà la marge : le budget, lui, s'arrête à 0 et cacherait le vrai déficit
+    à `_borner_kv_avec_exil` (pièce 156).
     """
+    bornes: dict = {}
     if not torch.cuda.is_available() or not plan.kv_budget:
-        return
+        return bornes
     attn, mlp, embed, head = _octets_reels(manifest)
     for t in plan.tiers:
         if t.kind != "gpu" or t.name not in plan.kv_budget:
@@ -1190,8 +1211,9 @@ def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0,
         for l in plan.layers:
             poids += attn.get(l.index, l.attn_bytes) if l.attn_storage == t.name else 0
             poids += mlp.get(l.index, l.mlp_bytes) if l.mlp_storage == t.name else 0
-        marge = max(_KV_MARGE_MIN, int(_KV_MARGE_PART * capacite)) + int(reserve)
+        marge = _marge_carte(capacite, reserve)
         borne = libre - poids - marge
+        bornes[t.name] = borne
         budget = int(plan.kv_budget[t.name])
         if borne < budget:
             plan.kv_budget[t.name] = max(0, borne)
@@ -1199,6 +1221,7 @@ def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0,
                   f"{budget / 2**30:.2f} → {max(0, borne) / 2**30:.2f} Gio "
                   f"(libre {libre / 2**30:.1f}, poids {poids / 2**30:.1f}, "
                   f"marge {marge / 2**30:.1f} dont préfill {reserve / 2**30:.2f})", file=sys.stderr)
+    return bornes
 
 
 def _kv_plancher(plan: Plan, spec: ModelSpec, max_model_len: Optional[int], dev: str) -> int:
@@ -1244,13 +1267,18 @@ def _borner_kv_avec_exil(plan: Plan, manifest: dict, dev, spec: ModelSpec,
     top_k = spec.num_experts_per_tok or 8
     supplement = 0
     for tour in range(tours + 1):
-        _borner_kv_par_la_vram(plan, manifest, dev, reserve=reserve, embed_charge=embed_charge)
+        bornes = _borner_kv_par_la_vram(plan, manifest, dev, reserve=reserve, embed_charge=embed_charge) or {}
         manque = 0
         for t in plan.tiers:
             if t.kind != "gpu" or t.name not in plan.kv_budget:
                 continue
             plancher = _kv_plancher(plan, spec, max_model_len, t.name)
-            manque = max(manque, plancher - int(plan.kv_budget[t.name]))
+            # Pièce 156 : le déficit BRUT (borne négative comprise), pas celui
+            # du budget ramené à 0 — sinon chaque tour n'exile qu'un plancher
+            # de plus (325 Mio au 70B) et quatre tours ne rattrapent pas un
+            # écart de 2 Gio entre la capacité de l'étage et la VRAM libre.
+            dispo = min(int(plan.kv_budget[t.name]), int(bornes.get(t.name, plan.kv_budget[t.name])))
+            manque = max(manque, plancher - dispo)
         if manque <= 0:
             return
         if tour == tours:
@@ -1497,10 +1525,10 @@ def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8, reserve: int = 0
             capacite = min(capacite, libre)
         except Exception:                           # noqa: BLE001
             pass
-        # marge pour le contexte CUDA, les activations et les piles d'experts :
-        # la capacité de l'étage est déjà nette des réserves du plan, mais un
-        # 70B chargé à 99 % tombait encore en OOM à l'allocation du KV
-        marge = max(2 * 2**30, int(0.07 * capacite)) + int(reserve)
+        # la même marge que la borne du KV (`_marge_carte`, pièce 156). La base
+        # diffère encore : `capacite` est ici déjà nette de la réserve de
+        # build_tiers (voir plus haut), la borne lit `libre` brut.
+        marge = _marge_carte(capacite, reserve)
         deplacees = 0
         # Pièce 146 : le KV AU-DESSUS du plancher (``kv_min``, une séquence de max_model_len) cède avant tout poids —
         # jamais d'exil pour loger du cache. Sans lui, le départage par la demande (tiering._rang) portait le KV de

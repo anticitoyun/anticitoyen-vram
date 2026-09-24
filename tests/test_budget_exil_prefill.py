@@ -13,7 +13,7 @@ EXACTEMENT sous `capacité − marge`, le réajustement sans réserve n'exile ri
 réserve exile — le test casse si le terme est retiré. Tier hors `cuda:N`
 pour que `mem_get_info` échoue et laisse la capacité posée."""
 from acvram.engine.config import ModelSpec
-from acvram.engine.loader import _reajuster_plan, _reserve_prefill
+from acvram.engine.loader import _marge_carte, _reajuster_plan, _reserve_prefill
 from acvram.memory.tiering import LayerPlacement, Plan, Tier
 
 GIB = 2 ** 30
@@ -49,11 +49,11 @@ def _plan(n_couches: int, mlp_gib: float, attn_gib: float, capacite: int) -> Pla
 
 
 def test_sans_la_reserve_rien_n_est_exile_avec_elle_le_prefill_a_sa_place():
-    """Poids résidents = capacité − marge exactement (marge = max(2 Gio, 7 %)) :
+    """Poids résidents = capacité − marge exactement (marge = `_marge_carte`) :
     l'ancien budget est satisfait, le préfill n'a plus un octet."""
     capacite = 30 * GIB
-    marge = max(2 * GIB, int(0.07 * capacite))
-    n, mlp, attn = 20, 1.0, 0.395
+    marge = _marge_carte(capacite)                # pièce 156 : la marge unique, plus max(2 Gio, 7 %)
+    n, mlp, attn = 20, 1.0, 0.4245            # 28,49 Gio sous 28,5 (30 − 1,5)
     poids = n * (mlp + attn) * GIB
     assert 0 <= (capacite - marge) - poids < 0.05 * GIB, "le montage doit poser les poids au bord du budget, dessous"
     plan = _plan(n, mlp, attn, capacite)
