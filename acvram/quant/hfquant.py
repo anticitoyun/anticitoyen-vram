@@ -31,12 +31,21 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Iterator, Optional
 
 import torch
 from safetensors import safe_open
 
-__all__ = ["HFQuantCheckpoint", "is_hfquant"]
+__all__ = ["HFQuantCheckpoint", "is_hfquant", "par_groupe_actif"]
+
+# Pièce 139 (revue/poste5-piece139-mixed-precision-24-09.md) : opt-in du dispatch PAR GROUPE de compressed-tensors
+# « mixed-precision » ; sans lui, le refus nommé de la 131 bis reste le défaut.
+VAR_PAR_GROUPE = "ACVRAM_HFQUANT_PAR_GROUPE"
+
+
+def par_groupe_actif() -> bool:
+    return os.environ.get(VAR_PAR_GROUPE) == "1"
 
 _E2M1 = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
                       -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0])
@@ -68,6 +77,49 @@ def is_hfquant(path: str) -> bool:
     return m == "modelopt"
 
 
+# preuve lue sur le tenseur → formats de groupe compatibles
+_PREUVE_FORMATS = {"pack": ("nvfp4-pack-quantized", "pack-quantized"), "float": ("float-quantized",)}
+
+
+class _TableGroupes:
+    """Résout le groupe d'un module par ses motifs `targets` (``re:`` = motif de ``re.match``, sinon nom exact) ET par
+    la preuve du tenseur : sur unsloth/Qwen3.8-27B-NVFP4 les MLP des couches 56-63 correspondent aux DEUX groupes, le
+    contenu (F8 sans ``weight_packed``) tranche. Aucune concordance = refus nommé, jamais un format deviné."""
+
+    def __init__(self, q: dict) -> None:
+        self.groupes = []
+        for nom, g in (q.get("config_groups") or {}).items():
+            motifs = []
+            for t in g.get("targets") or []:
+                if t.startswith("re:"):
+                    motifs.append(re.compile(t[3:]))
+                elif "." in t or t == "lm_head":
+                    motifs.append(re.compile(re.escape(t) + "$"))
+                else:
+                    # « Linear » : une CLASSE de module, que les safetensors ne portent pas
+                    raise NotImplementedError(f"groupe {nom} : cible de classe {t!r} non résoluble sans le modèle")
+            self.groupes.append((nom, g.get("format"), motifs))
+        self.ignore = [re.compile(t[3:]) if t.startswith("re:") else re.compile(re.escape(t) + "$")
+                       for t in q.get("ignore") or []]
+
+    def _candidats(self, module: str) -> list[tuple[str, str]]:
+        if any(m.match(module) for m in self.ignore):
+            return []
+        return [(nom, fmt) for nom, fmt, motifs in self.groupes if any(m.match(module) for m in motifs)]
+
+    def format_pour(self, module: str, preuve: str) -> str:
+        cands = self._candidats(module)
+        bons = [fmt for _, fmt in cands if fmt in _PREUVE_FORMATS[preuve]]
+        if len(set(bons)) != 1:
+            raise NotImplementedError(
+                f"{module} : preuve {preuve!r} sur disque, groupes candidats {cands} — aucun format concordant unique "
+                f"({VAR_PAR_GROUPE}, pièce 139)")
+        return bons[0]
+
+    def vise(self, module: str) -> bool:
+        return bool(self._candidats(module))
+
+
 def _unpack_nibbles(packed: torch.Tensor) -> torch.Tensor:
     """int32 [..., n] → int32 [..., n·8], nibble de poids faible d'abord."""
     shifts = _SHIFTS.to(packed.device)
@@ -88,11 +140,34 @@ class HFQuantCheckpoint:
         # non geres comme fp8 sous compressed-tensors, laisserait passer des poids NON dequantifies, faux
         # et muets). Refus NOMME plutot qu'une conversion partielle ou silencieusement fausse.
         formats_groupes = sorted({g.get("format") for g in groups.values() if g.get("format")})
-        if self.format == "mixed-precision" or len(formats_groupes) > 1:
+        algo = self.q.get("quant_algo")
+        hf_quant = os.path.join(path, "hf_quant_config.json")
+        if algo is None and os.path.isfile(hf_quant):
+            with open(hf_quant, "r", encoding="utf-8") as fh:
+                algo = (json.load(fh).get("quantization") or {}).get("quant_algo")
+        if self.method == "modelopt" and algo == "MIXED_PRECISION":
+            # Pièce 139 (défaut voisin) : les couches FP8 de modelopt (``weight`` F8 + ``weight_scale`` scalaire, sans
+            # ``weight_scale_2``) tomberaient au repli d'iter_tensors, BRUTES, échelle perdue — conversion qui se
+            # termine sur des poids faux et muets (Nemotron-3.5, Qwen3.6-35B, Qwen3.8-27B de NVIDIA sur disque ;
+            # aucun alias servi n'en vient, balayage du 24/09). Refus nommé tant que la 139 n'est pas qualifiée.
             raise NotImplementedError(
-                f"format {self.format!r} non géré : groupes {formats_groupes} — plusieurs formats de "
-                "quantification dans le même point de contrôle, aucun dispatch par tenseur dans "
-                "HFQuantCheckpoint (voir revue/poste4-piece131-mixed-precision-24-09.md)")
+                "modelopt MIXED_PRECISION non géré : couches FP8 et NVFP4 mêlées, les FP8 sortiraient sans leur "
+                "échelle (revue/poste5-piece139-mixed-precision-24-09.md § 5)")
+        self.par_groupe: Optional[_TableGroupes] = None
+        if self.format == "mixed-precision" or len(formats_groupes) > 1:
+            if self.method != "compressed-tensors" or not par_groupe_actif():
+                raise NotImplementedError(
+                    f"format {self.format!r} non géré : groupes {formats_groupes} — plusieurs formats de "
+                    "quantification dans le même point de contrôle, aucun dispatch par tenseur dans "
+                    "HFQuantCheckpoint (voir revue/poste4-piece131-mixed-precision-24-09.md) ; opt-in "
+                    f"{VAR_PAR_GROUPE}=1 pour compressed-tensors (pièce 139)")
+            # bits / taille de groupe / symétrie par CHECKPOINT n'ont pas de sens ici : chaque format les porte
+            # dans ses tenseurs (échelles), le contrôle « 4 bits » ci-dessous refuserait le groupe fp8
+            self.par_groupe = _TableGroupes(self.q)
+            self.bits, self.group_size, self.symmetric = 0, 0, True
+            print(f"[acvram] {VAR_PAR_GROUPE}=1 : dispatch par groupe, formats {formats_groupes} ; "
+                  "fp8 par canal déquantifié en fp32 (exact), k_scale/v_scale ignorés (KV d'acvram)", flush=True)
+            return
         g0 = next(iter(groups.values()), {}) if groups else {}
         w = g0.get("weights") or {}
         self.bits = int(self.q.get("bits") or w.get("num_bits") or 4)
@@ -184,6 +259,16 @@ class HFQuantCheckpoint:
         return (weight.to(torch.float32) * scale.to(torch.float32).reshape(())).to(torch.bfloat16)
 
     @staticmethod
+    def _fp8_canal(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """compressed-tensors float-quantized, ``strategy: channel`` : ``weight_scale`` [out, 1]. Rendu en fp32,
+        EXACT (produit de 4 et 8 bits de mantisse < 24) : un arrondi bf16 ici coûterait 0,155 % (pièce 139) — et
+        le fp32 est la marque que ``convert`` lit pour ré-encoder ces tenseurs en int8 par canal."""
+        if scale.dim() != 2 or scale.shape[1] != 1 or scale.shape[0] != weight.shape[0]:
+            raise ValueError(f"échelle fp8 {tuple(scale.shape)} pour un poids {tuple(weight.shape)} : "
+                             "par canal [out, 1] attendu")
+        return weight.to(torch.float32) * scale.to(torch.float32)
+
+    @staticmethod
     def _modelopt_nvfp4(packed: torch.Tensor, scale: torch.Tensor,
                         scale_2: torch.Tensor) -> torch.Tensor:
         """modelopt : w = fp4 · weight_scale(e4m3) · weight_scale_2(f32)."""
@@ -245,15 +330,33 @@ class HFQuantCheckpoint:
                                       "weight_global_scale", "input_global_scale",
                                       "input_scale"):
                             continue
+                        fmt = self.format
+                        if self.par_groupe is not None:
+                            if suffix in ("k_scale", "v_scale"):
+                                continue
+                            if suffix == "weight_packed":
+                                fmt = self.par_groupe.format_pour(base, "pack")
+                            elif suffix == "weight":
+                                t = fh.get_tensor(key)
+                                if t.dtype == torch.float8_e4m3fn:
+                                    self.par_groupe.format_pour(base, "float")
+                                    yield key, self._fp8_canal(t, lire(fh, base + ".weight_scale"))
+                                    continue
+                                if self.par_groupe.vise(base):
+                                    raise NotImplementedError(
+                                        f"{base} : visé par un groupe quantifié mais en clair sur disque "
+                                        f"({t.dtype}) — pièce 139")
+                                yield key, t
+                                continue
                         if suffix == "weight_packed":
-                            if direct_nvfp4 and self.format == "nvfp4-pack-quantized":
+                            if direct_nvfp4 and fmt == "nvfp4-pack-quantized":
                                 yield base + ".weight", self.nvfp4_direct(
                                     fh.get_tensor(key), lire(fh, base + ".weight_scale"),
                                     lire(fh, base + ".weight_global_scale"), inverser_global=True)
                                 continue
                             packed = fh.get_tensor(key).to(dev)
                             scale = lire(fh, base + ".weight_scale").to(dev)
-                            if self.format == "nvfp4-pack-quantized":
+                            if fmt == "nvfp4-pack-quantized":
                                 t = self._ct_nvfp4(packed, scale,
                                                    lire(fh, base + ".weight_global_scale"))
                             else:
@@ -283,6 +386,9 @@ class HFQuantCheckpoint:
                                 continue
                             yield key, t                    # bf16 (couche gardée en clair)
                             continue
+                        if suffix == "weight" and fh.get_slice(key).get_dtype() == "F8_E4M3":
+                            raise NotImplementedError(f"{key} : FP8 modelopt sans weight_scale_2, échelle perdue "
+                                                      "si rendu brut — non géré (pièce 139)")
                     elif self.method == "fp8":
                         if suffix in ("weight_scale", "input_scale"):
                             continue

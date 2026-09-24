@@ -138,13 +138,39 @@ class GatedDeltaNet(nn.Module):
                 state: Optional[tuple] = None
                 ) -> tuple[torch.Tensor, tuple]:
         """``x`` vaut [t, hidden] pour UNE séquence ; rend (y, nouvel état)."""
-        chunk_rule, recurrent_rule = _refs()
-        t = x.shape[0]
-        decode = (t == 1 and state is not None)
-
         # toute la récurrence se calcule en float32 : la règle delta cumule
         # des produits d'état où le bfloat16 dérive vite
         qkv, z, b, a = self._projections(x)                 # [t, conv_dim], [t, value_dim], [t, nv] × 2
+        y, etat = self._coeur(x, qkv, z, b, a, state)
+        return self.out_proj(y.to(x.dtype)), etat
+
+    def forward_lot(self, x: torch.Tensor, etats: list,
+                    query_lens: list[int]) -> tuple[torch.Tensor, list]:
+        """Préfill de plusieurs séquences (pièce 150 bis) : les cinq projections
+        en UN appel sur les Σ t lignes, convolution et règle delta par séquence
+        (ni la causalité ni l'état ne passent la frontière entre séquences).
+        Séquence par séquence, chaque projection tournait à M = t (78 au banc
+        chat) : un int8 par canal y prend le GEMV par tranches (≤ 80 lignes),
+        un nvfp4 relit son poids b fois. Mêmes lignes, autre M : le noyau
+        choisi peut changer, donc pas « au bit » par construction."""
+        qkv, z, b, a = self._projections(x)
+        ys, etats_new = [], []
+        d = 0
+        for ql, etat in zip(query_lens, etats):
+            f = d + ql
+            y, e = self._coeur(x[d:f], qkv[d:f], z[d:f], b[d:f], a[d:f], etat)
+            ys.append(y)
+            etats_new.append(e)
+            d = f
+        return self.out_proj(torch.cat(ys).to(x.dtype)), etats_new
+
+    def _coeur(self, x: torch.Tensor, qkv: torch.Tensor, z: torch.Tensor,
+               b: torch.Tensor, a: torch.Tensor, state: Optional[tuple]):
+        """Convolution, règle delta et norme gated d'UNE séquence, projections
+        faites ; rend (y avant out_proj, nouvel état)."""
+        chunk_rule, recurrent_rule = _refs()
+        t = x.shape[0]
+        decode = (t == 1 and state is not None)
 
         # convolution causale depthwise, avec état (kernel-1 colonnes)
         seq = qkv.t().unsqueeze(0)                          # [1, conv_dim, t]
@@ -191,8 +217,7 @@ class GatedDeltaNet(nn.Module):
 
         core = core.reshape(-1, self.dv)
         y = self._norm_gated(core, z.reshape(-1, self.dv))
-        y = y.reshape(t, self.value_dim)
-        return self.out_proj(y.to(x.dtype)), (new_conv_state, s_new)
+        return y.reshape(t, self.value_dim), (new_conv_state, s_new)
 
     # -- chemin à formes fixes (graphes CUDA) --------------------------------
     # La règle delta de référence est déjà à formes fixes pour t = 1 : on la

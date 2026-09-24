@@ -111,8 +111,13 @@ def _build_quant(entry: dict, name: str, reader: _ShardReader,
                           entry.get("group_size", group_size), shape,
                           sd["qweight"].shape[-1] * 2)
     if fmt == "int8":
-        return INT8Tensor(sd["qweight"], sd["scales"], sd["zeros"],
-                          entry.get("group_size", group_size), shape)
+        t = INT8Tensor(sd["qweight"], sd["scales"], sd["zeros"],
+                       entry.get("group_size", group_size), shape)
+        if entry.get("origine") == "fp8":
+            # Pièce 139 : préfill en déquant bf16 (W8A16), jamais la copie signée du chemin cublas
+            # (kernels._i8c_poids) — nommé sur la ligne de régime (regime.prefill_i8c_texte)
+            t.__dict__["prefill_bf16"] = True
+        return t
     if fmt == "q3n":
         from ..quant.q3n import (BLOC_DEFAUT, TABLE_Q3N, Q3NTensor,
                                  valider_table_q3n)

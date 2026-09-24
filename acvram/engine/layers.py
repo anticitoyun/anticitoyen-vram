@@ -1362,6 +1362,11 @@ def stack_int8_linears(lins: list) -> Optional["QuantLinear"]:
                    torch.cat([t.zeros for t in ts]).contiguous(),
                    ts[0].group_size,
                    (sum(t.shape[0] for t in ts), ts[0].shape[1]))
+    # Pièce 139 : la marque « préfill bf16 » (int8 d'origine fp8, loader._build_quant) suit la pile et ses vues —
+    # perdue ici, la pile gate_up des couches 56-63 reprenait la copie signée du chemin cublas (OOM du 24/09 08:26)
+    marque = any(src.__dict__.get("prefill_bf16") for src in ts)
+    if marque:
+        t.__dict__["prefill_bf16"] = True
     # LES ORIGINAUX DEVIENNENT DES VUES DE LA PILE. Le commentaire ci-dessous
     # affirmait « comme pour les poids » alors que seul le BIAIS etait repointe :
     # les poids restaient dupliques, et le `forward` garde les deux chemins
@@ -1381,6 +1386,8 @@ def stack_int8_linears(lins: list) -> Optional["QuantLinear"]:
         n = src.qweight.shape[0]
         l.qweight = INT8Tensor(t.qweight[d:d + n], t.scales[d:d + n],
                                t.zeros[d:d + n], src.group_size, src.shape)
+        if marque:
+            l.qweight.__dict__["prefill_bf16"] = True
         d += n
     pbiais = torch.cat(biais) if biais[0] is not None else None
     if pbiais is not None:

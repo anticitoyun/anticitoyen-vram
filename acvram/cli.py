@@ -761,6 +761,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         alpha_commun_qkv=args.alpha_commun_qkv,
         hadamard_experts=args.hadamard_experts,
         passage_direct=args.passage_direct,
+        sans_vision=args.sans_vision,
         calib_source=calib_source,
         # ce que load_calib_ids a REELLEMENT rendu (poste7, poste7-calibration-
         # verdict-17-09 : le manifeste portait les defauts de classe 16/128,
@@ -1232,6 +1233,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "Defaut faux : ne change pas la conversion sans "
                          "mesure (revue/prediction-a7-alpha-commun-gateup-"
                          "14-09.md)")
+    cv.add_argument("--sans-vision", action="store_true",
+                    help="source multimodale : n'ecrit pas la tour de vision, alias texte seul "
+                         "(manifeste vision=non)")
     cv.add_argument("--passage-direct", action="store_true",
                     help="source deja NVFP4 (modelopt, compressed-tensors "
                          "nvfp4-pack-quantized) : copie ses poids 4 bits tels "

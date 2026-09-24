@@ -296,6 +296,9 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("HYBRID_KERNELS", "1", None, "0", "KDA / GDN : noyaux hybrides ou torch"),
     Variable("GDN", "fla", ("acvram.engine.gdn", "_GDN_VOIE"), "torch",
              "Gated DeltaNet : fla (noyaux Triton de flash-linear-attention, prefill par blocs et décodage du lot en un lancement) | torch (référence transformers, séquence par séquence) ; 0 = refus des hybrides"),
+    Variable("GDN_PREFILL_LOT", "0", ("acvram.engine.couches", "_GDN_PREFILL_LOT"), "0",
+             "pièce 150 bis (opt-in) : 1 = au préfill de plusieurs séquences, projections Gated DeltaNet du lot en un "
+             "appel (couches.py, forward_lot), convolution et règle delta par séquence ; autre M, donc pas au bit : KL"),
     # --- autres chemins de calcul ----------------------------------------
     Variable("FUSION_NVFP4", "1", None, "0", "témoin de mesure : fusion gate/up NVFP4"),
     Variable("FUSION_PARTIELLE", "0", None, "0"),
@@ -424,6 +427,7 @@ def _horloge() -> Optional[str]:
 # Modèle chargé : « vision » de son acvram_manifest.json ("oui" | "non"), ou None
 # tant qu'aucun chargeur ne l'a déclaré (ligne construite à sec, sans modèle).
 _VISION_CHARGEE: Optional[str] = None
+_I8C_PREFILL_BF16 = 0          # pièce 139 : poids int8 « origine: fp8 » du modèle chargé, servis en déquant bf16 au préfill
 # M-RoPE (Qwen3-VL) : (section, entrelacé) du modèle chargé (manifeste `mrope_section` /
 # `mrope_interleaved`, pièce (a)) — le mot `mrope=[24,20,20](interleaved)` ; None sinon.
 _MROPE_CHARGE: Optional[tuple[list[int], bool]] = None
@@ -450,8 +454,11 @@ def declarer_modele_charge(manifest: Optional[dict]) -> None:
     deepstack : `deepstack: 3` (nombre) ou `deepstack: oui` avec
     `deepstack_niveaux` (sinon 3, les `deepstack_visual_indexes` par défaut de
     Qwen3-VL) ; absent ou « non » : pas de mot."""
-    global _VISION_CHARGEE, _ARCHITECTURE_CHARGEE
+    global _VISION_CHARGEE, _ARCHITECTURE_CHARGEE, _I8C_PREFILL_BF16
     _VISION_CHARGEE = None if manifest is None else str(manifest.get("vision", "non"))
+    _I8C_PREFILL_BF16 = 0 if manifest is None else sum(
+        1 for e in (manifest.get("tensors") or {}).values()
+        if isinstance(e, dict) and e.get("origine") == "fp8" and e.get("format") == "int8")
     _ARCHITECTURE_CHARGEE = None if manifest is None else manifest.get("architecture")
     if _VISION_CHARGEE != "oui":                          # pas de tour pour ce modèle : la précédente ne survit pas
         try:
@@ -519,6 +526,12 @@ def mrope_texte() -> Optional[str]:
         return None
     section, entrelace = _MROPE_CHARGE
     return f"mrope=[{','.join(str(x) for x in section)}]({'interleaved' if entrelace else 'blocs'})"
+
+
+def prefill_i8c_texte() -> Optional[str]:
+    """Pièce 139 : ``prefill_int8=bf16(origine fp8 ×N)`` quand le modèle chargé a des poids int8 ré-encodés du fp8 —
+    servis W8A16 au préfill (déquant bf16), pas W8A8 cublas ; None sinon (la ligne du défaut ne bouge pas)."""
+    return f"prefill_int8=bf16(origine fp8 ×{_I8C_PREFILL_BF16})" if _I8C_PREFILL_BF16 else None
 
 
 def vision_texte() -> Optional[str]:
@@ -659,7 +672,9 @@ def regime_ligne() -> str:
     if mrope_texte():
         parts.append(mrope_texte())                       # mrope=[24,20,20](interleaved) : M-RoPE Qwen3-VL (engine/mrope)
     if deepstack_texte():
-        parts.append(deepstack_texte())                   # deepstack=3 : seulement déclaré (manifeste / config de la tour)
+        parts.append(deepstack_texte())
+    if prefill_i8c_texte():
+        parts.append(prefill_i8c_texte())                   # deepstack=3 : seulement déclaré (manifeste / config de la tour)
     # C5-b : le format des clés est nommé dès qu'il n'est plus celui d'aujourd'hui
     # (int8 par jeton) — la variable dit ce qui est DEMANDÉ, cette étiquette ce
     # que le cache int8 fait de ses clés.
