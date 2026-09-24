@@ -82,6 +82,9 @@ VARIABLES: tuple[Variable, ...] = (
              "global, down en un lancement) | 0 : v1 (x en mémoire partagée, K ≤ 11 264 en deux moitiés)"),
     Variable("GEMV_MARLIN_TPB", "2", ("acvram.kernels", "_GEMV_MARLIN_TPB"), None, "pièce 130 : tuiles de 64 colonnes par bloc (1, 2, 4)"),
     Variable("GEMV_MARLIN_S", "0", ("acvram.kernels", "_GEMV_MARLIN_S"), None, "pièce 130 : split-K forcé ; 0 = règle de v1"),
+    Variable("PROJ_MARLIN_PORTEE", "global", ("acvram.kernels", "_PROJ_MARLIN_PORTEE"), None,
+             "pièce 142 : global (défaut, tout poids dense éligible, linéaires hors experts des MoE compris) | denses (un "
+             "modèle à MoEBlock garde son chemin)"),
     Variable("PROJ_MARLIN_CAPACITE", "65536", None, None,
              "pièce 129 : capacité KV minimale (jetons) exigée au chargement sous PROJ_MARLIN=1, sinon refus nommé ; non "
              "posée : séquences × longueur demandées par le chargement, sinon 65 536"),
@@ -322,6 +325,7 @@ HORS_REGIME = frozenset({
     "ACVRAM_MODELS_DIR", "ACVRAM_TRACEBACK", "ACVRAM_VERBOSE_BUILD", "ACVRAM_WARM_GRAPHS",
     "ACVRAM_GRAPHES_MUETS", "ACVRAM_REGIME_MUET", "ACVRAM_MARLIN_CACHE",          # journaux et cache : observation
     "ACVRAM_JOURNAL_TENSEURS",                                                    # journal de conversion (cf97a3a0) : observation
+    "ACVRAM_ARBRE_LIBRE",                                                         # garde d'import (a86fa1dd) : quel arbre est importé, aucun chemin de calcul
     "ACVRAM_TRACE_CRENEAUX", "ACVRAM_TRACE_ENTREES", "ACVRAM_TRACE_PTRS",
     "ACVRAM_TRACE_ROUTAGE", "ACVRAM_TRACE_ROUTAGE_PT", "ACVRAM_TRACE_STEPS", "ACVRAM_TRACE_COUCHES", "ACVRAM_CHRONO_SYNC", "ACVRAM_SYNC_COUCHES",
     
