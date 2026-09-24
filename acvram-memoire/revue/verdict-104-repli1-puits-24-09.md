@@ -15,3 +15,5 @@
 * **durée** : prise 1 (KL) 00:50:37 → 00:54:24 ; prise 1 bis (PPL int8) 00:54:50 → 01:00:35 ; prise 2 (PPL puits16 + frontière) → 01:11:18 ; toutes < 30 min, compute-apps début = fin (llama-server 4627 seul). Première prise 1 : PPL int8 arrêtée à la tranche 1 (LISEZMOI.txt pris par `--dossier`, motif corrigé), aucune donnée.
 
 Suite scellée (scelle-puits.md, issues) : repli (2) **V avec point zéro**, sous un nouveau scellé écrit avant le code. Ce repli est d'autant mieux indiqué que les puits ne portent pas l'écart : K étant en 8 bits dans les deux bras, il vient vraisemblablement du V 4 bits sur tout le contexte (inférence, non mesurée).
+
+**ERRATUM 24/09 02 h 3x (poste1)** : llama-server (PID 4627) tourne sur la RTX 3080 Ti (GPU 1), pas sur la 5090 (`nvidia-smi --query-compute-apps=gpu_uuid`). L'OOM et le lot jamais plein à ctx 8 k viennent de NOTRE processus (31,32 Gio sur la 5090 : poids + KV de 12 × 8 704 + activations du préfill), pas d'un voisin. La consigne « ne pas toucher au llama-server » reste juste, mais sa cause était fausse : la frontière à 8 k, b=12 ne tient pas sur 32 Go avec ce plan mémoire, llama-server ou non.

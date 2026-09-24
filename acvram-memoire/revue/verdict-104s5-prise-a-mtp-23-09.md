@@ -17,3 +17,5 @@
 * **durée** : prévue ≤ 15 min, tenue=132 s (journal carte 23:44:17) ; compute-apps début = fin (llama-server 4627 seul)
 
 Contrôle de configuration : le bras k8v4 imprime `kv=k8v4` 5/5 (int8 : `kv=int8` 5/5) — la variable a pris. ΔKL = 0 sur 3 invites = kl_max inchangé à 10⁻⁴ (arrondi du JSON), pas un bras inerte.
+
+**ERRATUM 24/09 02 h 3x (poste1)** : llama-server (PID 4627) tourne sur la RTX 3080 Ti (GPU 1), pas sur la 5090 (`nvidia-smi --query-compute-apps=gpu_uuid`). L'OOM et le lot jamais plein à ctx 8 k viennent de NOTRE processus (31,32 Gio sur la 5090 : poids + KV de 12 × 8 704 + activations du préfill), pas d'un voisin. La consigne « ne pas toucher au llama-server » reste juste, mais sa cause était fausse : la frontière à 8 k, b=12 ne tient pas sur 32 Go avec ce plan mémoire, llama-server ou non.
