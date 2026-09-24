@@ -1093,6 +1093,10 @@ def _tete_liee(embed: torch.Tensor) -> Any:
     # gather d'entrée a toujours besoin des poids en 16 bits. Sur un modèle qui
     # remplit déjà la carte, mieux vaut le débit qu'on a qu'un OOM au
     # chargement — on exige le double de la copie en mémoire libre.
+    # Pièce 146 : rendre d'abord au pilote ce que l'allocateur garde en réserve sans l'utiliser — `mem_get_info` le
+    # compte comme occupé. gemma4 31B, KV agrandi : 5,48 Gio réservés non alloués, tête laissée en bf16, puis chaque
+    # appel de la tête la convertissait en fp32 (`_ref_matmul`, 5,25 Gio) → OOM à la chauffe 8 × 2 560 (prise 146b).
+    torch.cuda.empty_cache()
     libre = torch.cuda.mem_get_info(embed.device)[0]
     besoin = embed.numel() * (1 if _TETE_LIEE == "int8" else 0.6)
     if libre < 2 * besoin:
