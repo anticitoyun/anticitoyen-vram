@@ -80,3 +80,14 @@ Conditions avant le push :
 2. **Capture des godets 1 à 8** (`capture-godets.py`, Qwen3.8, défaut) : capture ok, `graphes=on`, 0 repli eager pour
    chacun. Prédit : 8/8, ms/pas ≈ 0,30 de moins que la 156 c à chaque godet (13,05 → ≈ 12,75 à b=1, si la config
    Marlin qualifiée d'alors vaut le défaut d'aujourd'hui, ce que je ne sais pas : chiffres relevés, pas jugés).
+
+### Résultats de la bascule (prise 8f839888, 19:18:06-19:34:19)
+
+2. **Godets 1 à 8** au défaut : **8/8 ok**, `graphes=on`, 0 repli eager ; ms/pas 12,72 · 12,61 · 13,37 · 13,33 · 13,54 ·
+   13,76 · 13,91 · 14,08 (156 c : 13,05 … 14,39, soit −0,31 à −0,33 ms, cohérent avec F6 seule −0,30). **TENU.**
+1. **Suite complète** : HEAD 1 échec, 2 748 verts ; base e5c95667 0 échec, 2 719 verts. **FAUX à la lettre** : un échec
+   propre à la branche, `test_cadrage_perplexite::test_la_liste_des_variables_lues_ne_derive_pas`. Mes trois
+   variables n'étaient pas dans `cli.VARIABLES_LUES`. C'est la leçon d'poste1 du 24/09 01 h 50 (une variable neuve va
+   dans DEUX listes), que je n'ai pas appliquée : mes tests ciblés ne contenaient pas ce test. Corrigé dans `cli.py`, test
+   rejoué : 10/10 verts. **FAUTE** : ce rejeu a tourné avec `ACVRAM_TESTS_PENDANT_MESURE=1` HORS de mon verrou, pendant
+   qu'une autre session tenait la carte (0,05 s de test, mais la règle est absolue).
