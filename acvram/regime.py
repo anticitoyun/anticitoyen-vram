@@ -311,6 +311,15 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("GDN_RES_DIFFERE", "1", ("acvram.engine.model", "_GDN_RES_DIFFERE"), "0",
              "pièce 156 F5 (DÉFAUT depuis 156 c, au bit ; 0 = témoin) : 1 = le résidu différé (add_norm, C15) admis aux couches Gated DeltaNet "
              "non MLA ; deux additions bf16 de moins par couche GDN"),
+    Variable("GDN_PORTES_NOYAU", "0", ("acvram.engine.gdn", "_GDN_PORTES_NOYAU"), "0",
+             "pièce 156 F1 (opt-in, ± ulp : KL) : 1 = au décodage du lot (voie F4), softplus, exp et sigmoid des portes dans "
+             "le noyau fla (A_log, dt_bias, APPLY_BETA_SIGMOID) au lieu de six noyaux torch par couche"),
+    Variable("GDN_NORME_FUSEE", "0", ("acvram.engine.gdn", "_GDN_NORME_FUSEE"), "0",
+             "pièce 156 F3 (opt-in, ± ulp : KL) : 1 = norme gated de la sortie GDN en un noyau Triton (gdn_norme.py), "
+             "sortie bf16 ; lot, b=1 et préfill"),
+    Variable("NORME_REGISTRES", "0", ("acvram.engine.layers", "_NORME_REGISTRES"), "0",
+             "pièce 156 F6 (opt-in, au bit visé) : 1 = RMSNorm hors préfill par rmsnorm_bf16_reg (ligne en registres, "
+             "même découpe et même ordre de somme que rmsnorm_bf16)"),
     Variable("GDN_PREFILL_LOT", "0", ("acvram.engine.couches", "_GDN_PREFILL_LOT"), "0",
              "pièce 150 bis (opt-in) : 1 = au préfill de plusieurs séquences, projections Gated DeltaNet du lot en un "
              "appel (couches.py, forward_lot), convolution et règle delta par séquence ; autre M, donc pas au bit : KL"),

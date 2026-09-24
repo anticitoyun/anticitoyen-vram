@@ -42,6 +42,11 @@ _GDN_ETAT_EN_PLACE = os.environ.get("ACVRAM_GDN_ETAT_EN_PLACE", "1") == "1"
 # Pièce 156 F2 (défaut depuis le verdict 156 c, au bit ; 0 = témoin) : conv du décodage du lot en un noyau Triton, visé au
 # bit (`gdn_conv.py`) ; q/k sans répétition des têtes (fla les indexe).
 _GDN_CONV_FUSEE = os.environ.get("ACVRAM_GDN_CONV_FUSEE", "1") == "1"
+# Pièce 156 F1 (opt-in) : portes (softplus, exp, sigmoid) calculées dans le noyau fla de la voie F4 — ± ulp fp32
+# (softplus de fla en ex2/lg2 approchés), donc KL et non « au bit ».
+_GDN_PORTES_NOYAU = os.environ.get("ACVRAM_GDN_PORTES_NOYAU", "0") == "1"
+# Pièce 156 F3 (opt-in) : norme gated en un noyau Triton (gdn_norme.py) — ± ulp (ordre de la somme des carrés).
+_GDN_NORME_FUSEE = os.environ.get("ACVRAM_GDN_NORME_FUSEE", "0") == "1"
 
 
 def _fla():
@@ -67,12 +72,14 @@ def gdn_regime() -> str:
     return "fla"
 
 
-def _recurrence_en_place(q, k, v, g, beta, S: torch.Tensor) -> torch.Tensor:
+def _recurrence_en_place(q, k, v, g, beta, S: torch.Tensor, A_log=None, dt_bias=None) -> torch.Tensor:
     """`fused_recurrent_gated_delta_rule` (fla 0.5.2, `use_qk_l2norm_in_kernel`, échelle K^-1/2) avec ``h0 = ht =
     S`` : même noyau, mêmes arguments que `fused_recurrent_gated_delta_rule_fwd`, seule l'adresse de l'état final
     change. Au bit parce que `p_h0` et `p_ht` ont la même indexation et que chaque programme de la grille
     (NV, N·HV) lit sa tuile [K, BV] une fois AVANT la boucle et l'écrit une fois APRÈS, sans lire celle d'un autre
-    (fused_recurrent.py, chargement de h0 puis `tl.store(p_ht, …)`). Rend la sortie ``o`` ; ``S`` est mis à jour."""
+    (fused_recurrent.py, chargement de h0 puis `tl.store(p_ht, …)`). Rend la sortie ``o`` ; ``S`` est mis à jour.
+    F1 : avec ``A_log`` (et ``dt_bias``), ``g`` et ``beta`` sont les projections BRUTES ; le noyau fait
+    g = −exp(A_log)·softplus(g + dt_bias) et beta = sigmoid(beta) (fused_recurrent.py:124-135)."""
     import triton
     from fla.ops.gated_delta_rule.fused_recurrent import fused_recurrent_gated_delta_rule_fwd_kernel as noyau
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -81,9 +88,9 @@ def _recurrence_en_place(q, k, v, g, beta, S: torch.Tensor) -> torch.Tensor:
     o = torch.empty_like(v)
     with torch.cuda.device(q.device.index):
         noyau[(triton.cdiv(V, BV), B * HV)](
-            q=q, k=k, v=v, g=g, gk=None, gv=None, beta=beta, A_log=None, dt_bias=None, o=o, h0=S, ht=S,
+            q=q, k=k, v=v, g=g, gk=None, gv=None, beta=beta, A_log=A_log, dt_bias=dt_bias, o=o, h0=S, ht=S,
             cu_seqlens=None, scale=K ** -0.5, T=T, H=H, HV=HV, K=K, V=V, BK=BK, BV=BV,
-            IS_BETA_HEADWISE=beta.ndim != v.ndim, USE_QK_L2NORM_IN_KERNEL=True, APPLY_BETA_SIGMOID=False,
+            IS_BETA_HEADWISE=beta.ndim != v.ndim, USE_QK_L2NORM_IN_KERNEL=True, APPLY_BETA_SIGMOID=A_log is not None,
             ALLOW_NEG_EIGVAL=False, STATE_V_FIRST=False, num_warps=1, num_stages=3)
     return o
 
@@ -158,7 +165,12 @@ class GatedDeltaNet(nn.Module):
                 self.beta_proj(x).to(torch.float32), self.alpha(x).to(torch.float32))
 
     # -- normalisation gated (RMSNorm de la sortie, porte SiLU(z)) --------
-    def _norm_gated(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+    def _norm_gated(self, x: torch.Tensor, z: torch.Tensor, sortie: Optional[torch.dtype] = None) -> torch.Tensor:
+        """``sortie`` = dtype que l'appelant donnera à out_proj : F3 écrit directement du bf16 (le cast fp32 → bf16
+        de l'appelant devient sans effet, même arrondi au plus près)."""
+        if _GDN_NORME_FUSEE and x.is_cuda and sortie == torch.bfloat16:
+            from .gdn_norme import norme_gated
+            return norme_gated(x, z, self.norm_weight, self.eps)
         x32 = x.to(torch.float32)
         var = x32.pow(2).mean(-1, keepdim=True)
         x32 = x32 * torch.rsqrt(var + self.eps)
@@ -247,7 +259,7 @@ class GatedDeltaNet(nn.Module):
                                use_qk_l2norm_in_kernel=True)
 
         core = core.reshape(-1, self.dv)
-        y = self._norm_gated(core, z.reshape(-1, self.dv))
+        y = self._norm_gated(core, z.reshape(-1, self.dv), x.dtype)
         return y.reshape(t, self.value_dim), (new_conv_state, s_new)
 
     # -- chemin à formes fixes (graphes CUDA) --------------------------------
@@ -284,15 +296,20 @@ class GatedDeltaNet(nn.Module):
     def peut_batcher_decode(self, h: torch.Tensor) -> bool:
         return _voie_fla(h)
 
-    def _lot_projete(self, x: torch.Tensor, conv_state: torch.Tensor):
+    def _lot_projete(self, x: torch.Tensor, conv_state: torch.Tensor, portes_brutes: bool = False):
         """Projections, convolution causale à état et portes pour ``b``
         jetons (un par séquence) ; ``conv_state`` [b, conv_dim, k-1] est mis
-        à jour EN PLACE. Rend (q, k, v, g, beta, z) aux formes de fla."""
+        à jour EN PLACE. Rend (q, k, v, g, beta, z) aux formes de fla.
+        ``portes_brutes`` (F1, voie F2 seulement) : g et beta rendus AVANT
+        softplus et sigmoid, pour le noyau ; rend alors un 7e élément vrai."""
         b = x.shape[0]
         if _GDN_CONV_FUSEE and x.is_cuda and conv_state.is_contiguous():
             from .gdn_conv import conv_decode
             qkv, z, bt, a = self._projections(x, qkv_brut=True)
             q, k, v = conv_decode(qkv, conv_state, self.conv_weight.contiguous(), self.key_dim, self.value_dim)
+            if portes_brutes:
+                return (q.view(b, 1, self.nk, self.dk), k.view(b, 1, self.nk, self.dk), v.view(b, 1, self.nv, self.dv),
+                        a.unsqueeze(1).contiguous(), bt.unsqueeze(1).contiguous(), z, True)
             beta = bt.sigmoid().unsqueeze(1)
             g = (-self.a_log.exp() * F.softplus(a + self.dt_bias)).unsqueeze(1)
             return (q.view(b, 1, self.nk, self.dk), k.view(b, 1, self.nk, self.dk), v.view(b, 1, self.nv, self.dv),
@@ -311,7 +328,8 @@ class GatedDeltaNet(nn.Module):
             k = k.repeat_interleave(self.nv // self.nk, dim=2)
         beta = bt.sigmoid().unsqueeze(1)                    # [b, 1, nv]
         g = (-self.a_log.exp() * F.softplus(a + self.dt_bias)).unsqueeze(1)
-        return q.contiguous(), k.contiguous(), v.contiguous(), g.contiguous(), beta.contiguous(), z
+        out = (q.contiguous(), k.contiguous(), v.contiguous(), g.contiguous(), beta.contiguous(), z)
+        return out + (False,) if portes_brutes else out
 
     def forward_batch(self, h: torch.Tensor, etats: list) -> tuple[torch.Tensor, list]:
         """Décodage eager de ``b`` séquences (un jeton chacune) en un
@@ -326,7 +344,7 @@ class GatedDeltaNet(nn.Module):
         q, k, v, g, beta, z = self._lot_projete(h, conv_state)
         core, S_new = _fla()[1](q, k, v, g=g, beta=beta, initial_state=S.contiguous(),
                                 output_final_state=True, use_qk_l2norm_in_kernel=True)
-        y = self._norm_gated(core.reshape(-1, self.dv), z.reshape(-1, self.dv)).reshape(b, self.value_dim)
+        y = self._norm_gated(core.reshape(-1, self.dv), z.reshape(-1, self.dv), h.dtype).reshape(b, self.value_dim)
         y = self.out_proj(y.to(h.dtype))
         return y, [(conv_state[i].clone(), S_new[i:i + 1].to(torch.float32)) for i in range(b)]
 
@@ -337,11 +355,17 @@ class GatedDeltaNet(nn.Module):
         b = h.shape[0]
         g_, contigu = tranches(self, statics, b, ("conv", "S_"))
         conv_state, S = g_["conv"], g_["S_"]
-        q, k, v, g, beta, z = self._lot_projete(h, conv_state)
+        en_place = _GDN_ETAT_EN_PLACE and S.is_cuda and S.is_contiguous()
+        brutes = False
+        if en_place and _GDN_PORTES_NOYAU:
+            q, k, v, g, beta, z, brutes = self._lot_projete(h, conv_state, portes_brutes=True)
+        else:
+            q, k, v, g, beta, z = self._lot_projete(h, conv_state)
         # F4 (156 c) : la récurrence en place est un noyau de carte ; sur processeur (CI publique,
         # machine sans GPU) le chemin fla de référence reste seul valable.
-        if _GDN_ETAT_EN_PLACE and S.is_cuda and S.is_contiguous():
-            core = _recurrence_en_place(q, k, v, g, beta, S)
+        if en_place:
+            core = (_recurrence_en_place(q, k, v, g, beta, S, self.a_log, self.dt_bias) if brutes
+                    else _recurrence_en_place(q, k, v, g, beta, S))
         else:
             core, S_new = _fla()[1](q, k, v, g=g, beta=beta, initial_state=S.contiguous(),
                                     output_final_state=True, use_qk_l2norm_in_kernel=True)
@@ -349,5 +373,5 @@ class GatedDeltaNet(nn.Module):
         if not contigu:
             for i, st in enumerate(statics[:b]):
                 st["conv"].copy_(conv_state[i]); st["S"].copy_(S[i:i + 1])
-        y = self._norm_gated(core.reshape(-1, self.dv), z.reshape(-1, self.dv)).reshape(b, self.value_dim)
+        y = self._norm_gated(core.reshape(-1, self.dv), z.reshape(-1, self.dv), h.dtype).reshape(b, self.value_dim)
         return self.out_proj(y.to(h.dtype))
