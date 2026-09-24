@@ -45,6 +45,7 @@ def _borne_factice(libre: int):
         borne = libre - poids - marge
         if borne < plan.kv_budget["gpu-test"]:
             plan.kv_budget["gpu-test"] = max(0, borne)
+        return {"gpu-test": borne}                      # contrat de la vraie borne (pièce 156)
     return borner
 
 

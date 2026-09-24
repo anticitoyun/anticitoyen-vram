@@ -502,7 +502,11 @@ def _ecrire_source(d, vision: bool) -> str:
 def _convertir(src: str, out: str, target_rig) -> str:
     spec = load_model_spec(src)
     plan, _ = auto_plan(spec, target_rig, PlannerOptions(max_model_len=512, max_concurrent_seqs=2))
-    convert_checkpoint(src, plan, ConversionOptions(out_dir=out), spec=spec)
+    # quant_device="cpu" fige le périphérique : la quantification GPU et CPU
+    # ne sont pas au bit identiques (convert.py:802-804 choisit le GPU s'il est
+    # visible ; nvfp4.py documente un écart mesuré, ex. facteur 1,1216 sur
+    # k_proj). Les témoins ci-dessous ont été figés sous CPU (pièce 154).
+    convert_checkpoint(src, plan, ConversionOptions(out_dir=out, quant_device="cpu"), spec=spec)
     return out
 
 

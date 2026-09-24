@@ -590,7 +590,10 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
             w, s_, g, N, k_pad = pile._marlin_dense
             CHEMINS_NVFP4["marlin_depaquete_prefill_vue"] += 1
             gv = g[d:d + n_lig] if g.numel() == N else g
-            W = MP.depaqueter_marlin(w[:, 2 * d:2 * (d + n_lig)].contiguous(), s_[:, d:d + n_lig].contiguous(), gv,
+            # 147 : les vues passent telles quelles au noyau CUDA (pas de ligne libre) ; les autres noyaux copient
+            vue_ok = MP._depaqueter_cuda_disponible() and MP._DEPAQUETAGE in ("auto", "cuda")
+            wv, sv = w[:, 2 * d:2 * (d + n_lig)], s_[:, d:d + n_lig]
+            W = MP.depaqueter_marlin(wv if vue_ok else wv.contiguous(), sv if vue_ok else sv.contiguous(), gv,
                                      k_pad, n_lig)
             if k_pad != t.shape[1]:
                 W = W[:, : t.shape[1]]
