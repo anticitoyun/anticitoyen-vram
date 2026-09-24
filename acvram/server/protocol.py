@@ -225,7 +225,16 @@ class _SamplingFields(BaseModel):
         return [self.stop] if isinstance(self.stop, str) else list(self.stop)
 
     def token_budget(self, default: int = 512) -> int:
-        return self.max_completion_tokens or self.max_tokens or default
+        # Pièce priorité 1 (chef, 24/09) : `max_completion_tokens or max_tokens or default`
+        # traitait 0 comme absent (0 est FAUX en Python) — un `max_tokens=0` explicite (contrat
+        # OpenAI legitime avec `echo` : lm-eval-harness et consorts s'en servent pour ne lire que
+        # les logprobs de l'invite, aucune génération) retombait donc sur `default`. `is not None`
+        # distingue « absent » (None, applique le défaut) de « zéro » (généré : rien).
+        if self.max_completion_tokens is not None:
+            return self.max_completion_tokens
+        if self.max_tokens is not None:
+            return self.max_tokens
+        return default
 
 
 class ChatCompletionRequest(_SamplingFields):
