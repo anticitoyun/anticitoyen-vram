@@ -48,6 +48,7 @@ _NORME_FUSEE = os.environ.get("ACVRAM_NORME_FUSEE", "0") == "1"
 # depuis poste7-duel-verdict-16-09 § 6.2 (15 534 lancements/pas à b=12 en
 # séquence par séquence) ; 1 = noyau d'attention seul batché ; 0 = boucle.
 _MLA_BATCH = int(os.environ.get("ACVRAM_MLA_BATCH", "2"))
+_GDN_PREFILL_LOT = os.environ.get("ACVRAM_GDN_PREFILL_LOT", "0") == "1"
 # Marque, dans le magasin d'états, une séquence dont l'état réside dans les
 # tampons fixes d'une couche (chemin graphes) plutôt qu'en tuple fonctionnel.
 _STATIC = object()
@@ -120,6 +121,26 @@ class DecoderLayerGDN(nn.Module):
                 if self.mlp is None:
                     return x
                 return self._mlp(x)
+        # Préfill de plusieurs séquences (pièce 150 bis, opt-in) : projections
+        # du lot en un appel au lieu d'une par séquence ; voir forward_lot.
+        if (_GDN_PREFILL_LOT and hasattr(la, "forward_lot")
+                and len(batch.query_lens) > 1
+                and not all(ql == 1 for ql in batch.query_lens)):
+            sids = [batch.seq_ids[i] if batch.seq_ids else i
+                    for i in range(len(batch.query_lens))]
+            etats = []
+            for sid in sids:
+                etat = store.get(sid)
+                if etat is _STATIC:
+                    etat = self._reprendre(sid)
+                etats.append(etat)
+            y, etats_new = la.forward_lot(h, etats, list(batch.query_lens))
+            for sid, e in zip(sids, etats_new):
+                store[sid] = e
+            x = x + y.to(x.dtype)
+            if self.mlp is None:
+                return x
+            return self._mlp(x)
         sorties = []
         start = 0
         for i, ql in enumerate(batch.query_lens):

@@ -590,7 +590,10 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
             w, s_, g, N, k_pad = pile._marlin_dense
             CHEMINS_NVFP4["marlin_depaquete_prefill_vue"] += 1
             gv = g[d:d + n_lig] if g.numel() == N else g
-            W = MP.depaqueter_marlin(w[:, 2 * d:2 * (d + n_lig)].contiguous(), s_[:, d:d + n_lig].contiguous(), gv,
+            # 147 : les vues passent telles quelles au noyau CUDA (pas de ligne libre) ; les autres noyaux copient
+            vue_ok = MP._depaqueter_cuda_disponible() and MP._DEPAQUETAGE in ("auto", "cuda")
+            wv, sv = w[:, 2 * d:2 * (d + n_lig)], s_[:, d:d + n_lig]
+            W = MP.depaqueter_marlin(wv if vue_ok else wv.contiguous(), sv if vue_ok else sv.contiguous(), gv,
                                      k_pad, n_lig)
             if k_pad != t.shape[1]:
                 W = W[:, : t.shape[1]]
@@ -617,7 +620,10 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
         if t.padded_in != xf.shape[-1]:
             xf = torch.nn.functional.pad(xf, (0, t.padded_in - xf.shape[-1]))
         gsr = getattr(t, "global_scale_rows", None)
-        if _PROJ_MARLIN and _PROJ_MARLIN_MIN_M <= n <= 16 and xf.dtype == torch.bfloat16:
+        # Pièce 156 : le Marlin PARESSEUX (seconde disposition préparée au 1er appel, poids non convertis au chargement)
+        # reste un opt-in explicite (ACVRAM_PROJ_MARLIN=1 posé) — au défaut, un poids que la passe n'a pas converti
+        # (k/v sous N = 2 048, poids hors modèle chargé) garde le chemin naturel, sans seconde copie.
+        if _PROJ_MARLIN and _PROJ_MARLIN_POSEE == "1" and _PROJ_MARLIN_MIN_M <= n <= 16 and xf.dtype == torch.bfloat16:
             # Pièce 101 (opt-in) : GEMM Marlin DENSE porté de vLLM 0.29 (marlin_port, échelle globale par colonne
             # pour q/k/v empilés) aux godets ≥ 2 ; M = 1 garde `nvfp4_gemv` ci-dessous (le plus rapide au banc :
             # revue/poste1-piece101-bascule-godets-23-09). Seconde disposition des poids préparée au premier appel
@@ -933,7 +939,12 @@ CHEMINS_INT8 = _collections.Counter()
 # Qwen3.8 b=12 128 → 349 t/s, J/j ÷ 2,7, b=1 et ppl-decode-kv inchangés) ;
 # bascule à M ≥ 4 (poste7 : à M = 2 la GEMV gagne au banc, 1,50 contre 1,12 To/s).
 # Pièce 101 (23/09) : projections NVFP4 denses par le Marlin porté aux godets ≥ PROJ_MARLIN_MIN_M (opt-in).
-_PROJ_MARLIN = os.environ.get("ACVRAM_PROJ_MARLIN", "0") == "1"
+# Pièce 156 (24/09, décision du chef par délégation de l'utilisateur) : DÉFAUT = disposition Marlin UNIQUE + GEMV v2 +
+# TPB par forme, portée « denses » — la configuration qualifiée par les pièces 129/130/134/142 (b=8 +57 à +90 %, b=1
+# 0,979-0,996, KL sous 2 × témoin, PPL identique). ACVRAM_PROJ_MARLIN=0 : repli NOMMÉ au chemin naturel. Posée à 1
+# explicitement, l'absence du port Marlin est un refus ; au défaut, un repli nommé (ligne de régime).
+_PROJ_MARLIN_POSEE = os.environ.get("ACVRAM_PROJ_MARLIN")
+_PROJ_MARLIN = (_PROJ_MARLIN_POSEE or "1") == "1"
 _PROJ_MARLIN_MIN_M = int(os.environ.get("ACVRAM_PROJ_MARLIN_MIN_M", "2"))
 _PROJ_MARLIN_MIN_NK = int(os.environ.get("ACVRAM_PROJ_MARLIN_MIN_NK", "1024"))
 CHEMINS_NVFP4 = __import__("collections").Counter()
@@ -946,13 +957,15 @@ def _marlin_dense(xf: torch.Tensor, t):
     l'appelant prend alors son chemin habituel."""
     prep = getattr(t, "_marlin_dense", None)
     if prep is None:
+        if getattr(t, "_marlin_interdit", False):    # pièce 156 : poids d'un modèle exclu (MoE, repli) — le naturel
+            return None
         N, k_pad = t.qweight.shape[0], t.padded_in
         # 101 correctif : les seules formes mesurées au banc (qkv 5 120 × 2 048, o 2 048 × 4 096). Sans ce seuil, le
         # chemin prenait aussi les linéaires étroits (190 appels par passe au lieu de 96, pas +9 à +25 %).
         if N % 64 or k_pad % 64 or N < _PROJ_MARLIN_MIN_NK or k_pad < _PROJ_MARLIN_MIN_NK or not t.qweight.is_cuda:
             return None
         from . import marlin_port as MP
-        if MP.charger(compiler=False) is None:
+        if MP.charger(compiler=False) is None or MP.marlin_exact(t) is not None:   # 157 : inexact → le naturel
             return None
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("marlin dense : disposition préparée pendant une capture de graphe — "
@@ -974,15 +987,24 @@ _PROJ_MARLIN_MIN_N = int(os.environ.get("ACVRAM_PROJ_MARLIN_MIN_N", "2048"))    
 # Pièce 129 (A) : rôles gardés en DEUX dispositions (naturelle pour M = 1, Marlin pour M ≥ 2) — ceux où le GEMV
 # Marlin à M = 1 perd le plus (revue/verdict-129-1-gemv-marlin-m1-24-09 : +17 %, +17 %, +25 %) ; ailleurs Marlin SEUL.
 _PROJ_MARLIN_DOUBLES = frozenset(r for r in os.environ.get(
-    "ACVRAM_PROJ_MARLIN_DOUBLES", "mlp.gate_up,mlp.down,gdn.out").split(",") if r)
+    "ACVRAM_PROJ_MARLIN_DOUBLES", "").split(",") if r)      # 156 : vide = UNIQUE (le mixte ne tient pas en mémoire, 129)
 # Pièce 130 (opt-in) : GEMV Marlin v2 à M = 1 pour les poids en disposition Marlin seule — TPB tuiles de colonnes par
 # bloc, x en global (K libre : down en un lancement) ; S = 0 : règle de v1 (mb_splitk) sur N/64/TPB blocs.
-_GEMV_MARLIN_V2 = os.environ.get("ACVRAM_GEMV_MARLIN_V2", "0") == "1"
-_GEMV_MARLIN_TPB = int(os.environ.get("ACVRAM_GEMV_MARLIN_TPB", "2"))
+_GEMV_MARLIN_V2 = os.environ.get("ACVRAM_GEMV_MARLIN_V2", "1") == "1"         # 156 : défaut (130, qualifié)
+# TPB = 0 (défaut, pièce 142 famille 24B) : PAR FORME — 2 si N ≥ 49 152, sinon 1. gate‖up 65 536 × 5 120 : +15,8 % à TPB 1,
+# +1,5 % à TPB 2 ; Qwen3.8 (N ≤ 34 816) : TPB 1 le meilleur (130). Au bit de TPB 1 : à N ≥ 49 152, TPB 1 et 2 lancent
+# chacun ≥ 384 blocs (MB_BLOCS_MIN), donc S = 1 des deux côtés, et v2 est au bit entre TPB à S égal (tests 130).
+_GEMV_MARLIN_TPB = int(os.environ.get("ACVRAM_GEMV_MARLIN_TPB", "0"))
+_GEMV_MARLIN_TPB_SEUIL_N = 49152
+
+
+def _tpb_marlin(N: int) -> int:
+    t = _GEMV_MARLIN_TPB or (2 if N >= _GEMV_MARLIN_TPB_SEUIL_N else 1)
+    return t if (N // 64) % t == 0 else 1
 _GEMV_MARLIN_S = int(os.environ.get("ACVRAM_GEMV_MARLIN_S", "0"))
 # Pièce 142 : portée de la disposition — "global" (défaut, inchangé : tout poids dense éligible, MoE compris pour leurs
 # linéaires hors experts) | "denses" (un modèle qui contient un MoEBlock n'est PAS converti : il garde son chemin).
-_PROJ_MARLIN_PORTEE = os.environ.get("ACVRAM_PROJ_MARLIN_PORTEE", "global")
+_PROJ_MARLIN_PORTEE = os.environ.get("ACVRAM_PROJ_MARLIN_PORTEE", "denses")  # 156 : les MoE ne sont pas mesurés
 _GEMV_MARLIN_KMAX = 11264          # nvfp4_gemv_marlin : x en mémoire partagée fp32 (acvram_kernels.cu, mb_verifier)
 
 
@@ -1004,7 +1026,7 @@ def _marlin_seul(x: torch.Tensor, t):
         gs = g if g.numel() == 1 else t._marlin_un
         w3, s3 = w[None], s_[None]
         if _GEMV_MARLIN_V2 and hasattr(ext, "nvfp4_gemv_marlin2"):
-            tpb = _GEMV_MARLIN_TPB if (N // 64) % _GEMV_MARLIN_TPB == 0 else 1
+            tpb = _tpb_marlin(N)
             y = ext.nvfp4_gemv_marlin2(w3, s3, gs, xf, k_pad, N, tpb, _GEMV_MARLIN_S)
         elif k_pad <= _GEMV_MARLIN_KMAX:
             y = ext.nvfp4_gemv_marlin(w3, s3, gs, z, z, xf, k_pad, N)
@@ -1047,6 +1069,17 @@ def role_marlin(module, attr: str) -> str:
     return ""
 
 
+def interdire_marlin(modele) -> None:
+    """Pièce 156 : marque les poids NVFP4 d'un modèle exclu (MoE à la portée « denses », repli) — le Marlin paresseux
+    (`_marlin_dense`) les laisse au naturel. Par MODÈLE, jamais par l'état du processus : couper `_PROJ_MARLIN` faisait
+    dépendre les chargements et les tests suivants du premier MoE chargé."""
+    from ..quant.nvfp4 import NVFP4Tensor
+    for m in modele.modules():
+        t = getattr(m, "qweight", None)
+        if isinstance(t, NVFP4Tensor):
+            t._marlin_interdit = True
+
+
 def preparer_disposition_marlin(modele) -> dict:
     """Pièce 129 (opt-in ACVRAM_PROJ_MARLIN=1), appelée par le chargeur APRÈS les fusions et AVANT l'allocation du
     KV : chaque poids NVFP4 dense éligible (N ≥ ACVRAM_PROJ_MARLIN_MIN_N, K et N multiples de 64, hors MoE et hors
@@ -1055,12 +1088,16 @@ def preparer_disposition_marlin(modele) -> dict:
     passent par la pile. Rend le bilan (octets doublés, nombre de poids par mode) pour la ligne de régime."""
     from ..quant.nvfp4 import NVFP4Tensor
     from . import marlin_port as MP
-    if MP.charger(compiler=False) is None:
-        raise RuntimeError("ACVRAM_PROJ_MARLIN=1 : port Marlin non compilé (outils/banc-marlin-p1-18-09.py "
-                           "--compiler-seulement) — la disposition Marlin est refusée au chargement")
+    vide = {"doubles": 0, "seuls": 0, "octets_doubles": 0, "exclus": 0, "en_flux": 0, "multi_retirees": 0}
     ext = get_extension()
-    if ext is None or not hasattr(ext, "nvfp4_gemv_marlin"):
-        raise RuntimeError("ACVRAM_PROJ_MARLIN=1 : extension sans nvfp4_gemv_marlin — disposition Marlin refusée")
+    manque = ("port Marlin non compilé (outils/banc-marlin-p1-18-09.py --compiler-seulement)"
+              if MP.charger(compiler=False) is None else
+              "extension sans nvfp4_gemv_marlin" if ext is None or not hasattr(ext, "nvfp4_gemv_marlin2") else None)
+    if manque:
+        if _PROJ_MARLIN_POSEE == "1":
+            raise RuntimeError(f"ACVRAM_PROJ_MARLIN=1 : {manque} — la disposition Marlin est refusée au chargement")
+        interdire_marlin(modele)               # pièce 156 : au défaut, repli NOMMÉ au naturel, jamais un refus
+        return {**vide, "repli": manque.split(" (")[0]}
     sous_moe = set()
     for m in modele.modules():
         if type(m).__name__.startswith("MoEBlock"):
@@ -1068,8 +1105,10 @@ def preparer_disposition_marlin(modele) -> dict:
     if _PROJ_MARLIN_PORTEE not in ("global", "denses"):
         raise ValueError(f"ACVRAM_PROJ_MARLIN_PORTEE={_PROJ_MARLIN_PORTEE!r} : attendu global | denses")
     if _PROJ_MARLIN_PORTEE == "denses" and sous_moe:
+        interdire_marlin(modele)   # pièce 156 : ni disposition ni Marlin paresseux (_marlin_dense, 2 ≤ M ≤ 16) sur un MoE
         # garde « modèle dense » (pièce 142) : un MoE garde tout son chemin, disposition naturelle comprise
-        return {"doubles": 0, "seuls": 0, "octets_doubles": 0, "exclus": 0, "en_flux": 0, "portee": "denses:moe-exclu"}
+        return {"doubles": 0, "seuls": 0, "octets_doubles": 0, "exclus": 0, "en_flux": 0, "multi_retirees": 0,
+                "portee": "denses:moe-exclu"}
     candidats = {}                                                       # id(tenseur) -> (tenseur, rôle)
     en_flux: set = set()
     for m in modele.modules():
@@ -1086,6 +1125,11 @@ def preparer_disposition_marlin(modele) -> dict:
             ancien = candidats.get(id(t))
             candidats[id(t)] = (t, ancien[1] if ancien and ancien[1] else role)
     # parents (tenseur qui possède sa mémoire) et vues (sources d'un empilement), par stockage
+    if en_flux and _PROJ_MARLIN_POSEE != "1":
+        # Pièce 156 : au DÉFAUT, un modèle exilé (poids en flux depuis l'hôte : 70B, carte partagée) garde le chemin
+        # naturel — repli NOMMÉ, jamais un refus ; ACVRAM_PROJ_MARLIN=1 posé garde le refus de la 129.
+        interdire_marlin(modele)
+        return {**vide, "repli": f"exil ({len(en_flux)} poids en flux)"}
     par_stockage = {}
     for t, role in candidats.values():
         par_stockage.setdefault(t.qweight.untyped_storage().data_ptr(), []).append((t, role))
@@ -1111,6 +1155,9 @@ def preparer_disposition_marlin(modele) -> dict:
         if N % 64 or k_pad % 64 or N < _PROJ_MARLIN_MIN_N or k_pad < _PROJ_MARLIN_MIN_NK:
             bilan["exclus"] += 1
             continue
+        if MP.marlin_exact(pile) is not None:          # pièce 157 : pas représentable exactement → naturel, compté
+            bilan["inexacts"] = bilan.get("inexacts", 0) + 1
+            continue
         pile._marlin_dense = (*MP.preparer_dense(pile), N, k_pad)
         if role in _PROJ_MARLIN_DOUBLES:
             bilan["doubles"] += 1
@@ -1127,6 +1174,19 @@ def preparer_disposition_marlin(modele) -> dict:
         pile._marlin_unique = True
         pile.qweight = pile.block_scale = None
         bilan["seuls"] += 1
+    # Pièce 146 (3) : une MultiProjection (gemm_dense_etroit, `_qw`/`_bs` « gardent les adresses vivantes ») retenait la
+    # naturelle de chaque poids passé en disposition unique — +2,11 Gio sur Qwen3.8 (GDN qkv 1,17 + gate 0,70 + échelles
+    # 0,23 : inventaire de la prise 146), +1,33 sur gemma4 31B (qkv_multi). Elle ne sert que sous ACVRAM_MULTI_PROJ=1
+    # (défaut 0) et ses pointeurs n'ont plus de sens après la conversion : retirée, les projections séparées servent.
+    bilan["multi_retirees"] = 0
+    for m in modele.modules():
+        for attr in ("multi", "qkv_multi"):
+            mp = getattr(m, attr, None)
+            if type(mp).__name__ == "MultiProjection" and any(
+                    getattr(l.qweight, "_marlin_unique", False) or getattr(l.qweight, "_marlin_parent", None) is not None
+                    for l in mp.lins):
+                setattr(m, attr, None)
+                bilan["multi_retirees"] += 1
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     return bilan

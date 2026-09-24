@@ -57,6 +57,10 @@ VARIABLES: tuple[Variable, ...] = (
              "colle du préfill MoE : torch (argsort + bincount + _tuiles) | triton (P0 : tri + histogramme et grille en deux lancements, mêmes tenseurs)"),
     Variable("NVFP4_GEMV_MAX", "32", ("acvram.kernels", "_NVFP4_GEMV_MAX")),
     Variable("INT8_GEMV_MAX", "80", ("acvram.kernels", "_INT8_GEMV_MAX")),
+    Variable("DEPAQUETAGE", "auto", ("acvram.kernels.marlin_port", "_DEPAQUETAGE"), "torch",
+             "pièce 147 (poste6, 24/09) : noyau du dépaquetage Marlin → bf16 au préfill de la disposition unique (PROJ_MARLIN=1 "
+             "seulement) : auto (cuda si l'extension l'a, sinon triton) | cuda (lignes entières, au débit de nvfp4_dequant) | "
+             "triton (tuile par programme, 24/09 matin) | torch (juge) — tous au bit entre eux ; le défaut (PROJ_MARLIN=0) n'y passe jamais"),
     Variable("NARROW_GEMM", "0", ("acvram.kernels", "_NARROW_GEMM"), "0"),
     Variable("NARROW_KERNEL", "mixte", ("acvram.kernels", "_NARROW_KERNEL"), None,
              "linéaires INT8 à b ≤ 16 : mixte (défaut, Triton dès b≥NARROW_TRITON_MIN_B, verdict-coder-c-mixte-17-09) | cuda | triton | tete"),
@@ -65,26 +69,28 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("DENSE_NVFP4", "triton", ("acvram.kernels", "_DENSE_NVFP4"), "gemv",
              "linéaires NVFP4 denses (et tête) à DENSE_NVFP4_MIN_M ≤ b ≤ 32 : triton (gemm_dense_etroit, poids lus une fois par pas, défaut depuis verdict-gemm-dense-palier1-situ-17-09) | gemv (témoin, poids relus par séquence)"),
     Variable("DENSE_NVFP4_MIN_M", "4", ("acvram.kernels", "_DENSE_NVFP4_MIN_M")),
-    Variable("PROJ_MARLIN", "0", ("acvram.kernels", "_PROJ_MARLIN"), "0",
+    Variable("PROJ_MARLIN", "1", ("acvram.kernels", "_PROJ_MARLIN"), "0",
              "pièce 101 (23/09, opt-in) : 1 = linéaires NVFP4 denses par le Marlin porté de vLLM 0.29 (marlin_port, échelle "
              "globale par colonne pour q/k/v empilés) aux godets ≥ PROJ_MARLIN_MIN_M ; pièce 129 (24/09) : disposition préparée "
              "AU CHARGEMENT, mixte (rôles PROJ_MARLIN_DOUBLES en deux dispositions, M = 1 par nvfp4_gemv ; les autres en Marlin "
-             "SEUL, M = 1 par nvfp4_gemv_marlin), mémoire prouvée au chargement (refus nommé) | 0 témoin"),
+             "SEUL, M = 1 par nvfp4_gemv_marlin), mémoire prouvée au chargement (refus nommé) | 0 repli naturel ; "
+             "pièce 156 : DÉFAUT (unique + v2 + TPB par forme, portée denses)"),
     Variable("PROJ_MARLIN_MIN_M", "2", ("acvram.kernels", "_PROJ_MARLIN_MIN_M")),
     Variable("PROJ_MARLIN_MIN_NK", "1024", ("acvram.kernels", "_PROJ_MARLIN_MIN_NK")),
     Variable("PROJ_MARLIN_MIN_N", "2048", ("acvram.kernels", "_PROJ_MARLIN_MIN_N"), None,
              "pièce 129 : N minimal d'un poids pris par la disposition Marlin (k/v à N = 1 024 plus lents en Marlin)"),
-    Variable("PROJ_MARLIN_DOUBLES", "mlp.gate_up,mlp.down,gdn.out", None, None,
+    Variable("PROJ_MARLIN_DOUBLES", "", None, None,
              "pièce 129 (A) : rôles gardés en DEUX dispositions (naturelle à M = 1, Marlin à M ≥ 2) ; les autres poids "
              "éligibles passent en Marlin SEUL (naturelle libérée) — revue/verdict-129-1-gemv-marlin-m1-24-09"),
-    Variable("GEMV_MARLIN_V2", "0", ("acvram.kernels", "_GEMV_MARLIN_V2"), None,
+    Variable("GEMV_MARLIN_V2", "1", ("acvram.kernels", "_GEMV_MARLIN_V2"), None,
              "pièce 130 (opt-in) : GEMV Marlin v2 à M = 1 sous la disposition Marlin seule (tuiles de colonnes par bloc, x en "
              "global, down en un lancement) | 0 : v1 (x en mémoire partagée, K ≤ 11 264 en deux moitiés)"),
-    Variable("GEMV_MARLIN_TPB", "2", ("acvram.kernels", "_GEMV_MARLIN_TPB"), None, "pièce 130 : tuiles de 64 colonnes par bloc (1, 2, 4)"),
+    Variable("GEMV_MARLIN_TPB", "0", ("acvram.kernels", "_GEMV_MARLIN_TPB"), None,
+             "pièce 130 : tuiles de 64 colonnes par bloc (1, 2, 4) ; 0 = par forme (2 si N ≥ 49 152, sinon 1 — 142 24B)"),
     Variable("GEMV_MARLIN_S", "0", ("acvram.kernels", "_GEMV_MARLIN_S"), None, "pièce 130 : split-K forcé ; 0 = règle de v1"),
-    Variable("PROJ_MARLIN_PORTEE", "global", ("acvram.kernels", "_PROJ_MARLIN_PORTEE"), None,
-             "pièce 142 : global (défaut, tout poids dense éligible, linéaires hors experts des MoE compris) | denses (un "
-             "modèle à MoEBlock garde son chemin)"),
+    Variable("PROJ_MARLIN_PORTEE", "denses", ("acvram.kernels", "_PROJ_MARLIN_PORTEE"), None,
+             "pièce 142 : global (tout poids dense éligible, linéaires hors experts des MoE compris) | denses (défaut "
+             "depuis la 156 : un modèle à MoEBlock garde son chemin, les MoE ne sont pas mesurés)"),
     Variable("PROJ_MARLIN_CAPACITE", "65536", None, None,
              "pièce 129 : capacité KV minimale (jetons) exigée au chargement sous PROJ_MARLIN=1, sinon refus nommé ; non "
              "posée : séquences × longueur demandées par le chargement, sinon 65 536"),
@@ -296,6 +302,18 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("HYBRID_KERNELS", "1", None, "0", "KDA / GDN : noyaux hybrides ou torch"),
     Variable("GDN", "fla", ("acvram.engine.gdn", "_GDN_VOIE"), "torch",
              "Gated DeltaNet : fla (noyaux Triton de flash-linear-attention, prefill par blocs et décodage du lot en un lancement) | torch (référence transformers, séquence par séquence) ; 0 = refus des hybrides"),
+    Variable("GDN_ETAT_EN_PLACE", "1", ("acvram.engine.gdn", "_GDN_ETAT_EN_PLACE"), "0",
+             "pièce 156 F4 (DÉFAUT depuis 156 c, au bit ; 0 = témoin) : 1 = au décodage du lot, la récurrence fla écrit son état final dans le "
+             "tampon statique (h0 = ht) au lieu d'une allocation suivie d'une copie de 25 Mo par couche (b=8, Qwen3.8)"),
+    Variable("GDN_CONV_FUSEE", "1", ("acvram.engine.gdn", "_GDN_CONV_FUSEE"), "0",
+             "pièce 156 F2 (DÉFAUT depuis 156 c, au bit ; 0 = témoin) : 1 = au décodage du lot, cast de qkv, état de conv, conv depthwise, "
+             "silu et découpe q/k/v en un noyau Triton (gdn_conv.py), q/k sans répétition des têtes"),
+    Variable("GDN_RES_DIFFERE", "1", ("acvram.engine.model", "_GDN_RES_DIFFERE"), "0",
+             "pièce 156 F5 (DÉFAUT depuis 156 c, au bit ; 0 = témoin) : 1 = le résidu différé (add_norm, C15) admis aux couches Gated DeltaNet "
+             "non MLA ; deux additions bf16 de moins par couche GDN"),
+    Variable("GDN_PREFILL_LOT", "0", ("acvram.engine.couches", "_GDN_PREFILL_LOT"), "0",
+             "pièce 150 bis (opt-in) : 1 = au préfill de plusieurs séquences, projections Gated DeltaNet du lot en un "
+             "appel (couches.py, forward_lot), convolution et règle delta par séquence ; autre M, donc pas au bit : KL"),
     # --- autres chemins de calcul ----------------------------------------
     Variable("FUSION_NVFP4", "1", None, "0", "témoin de mesure : fusion gate/up NVFP4"),
     Variable("FUSION_PARTIELLE", "0", None, "0"),

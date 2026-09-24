@@ -139,6 +139,26 @@ def facteur_nvfp4(marlin_scales: torch.Tensor) -> float:
     return 1.0
 
 
+def _facteur_depuis_max(mx: torch.Tensor) -> torch.Tensor:
+    """Le facteur de `facteur_nvfp4`, élément par élément (puissance de 2, 1 pour un max nul ou ≥ 448)."""
+    f = torch.ones_like(mx, dtype=torch.float32)
+    ok = (mx > 0) & (mx < 448)
+    f[ok] = (448.0 / mx[ok].float()).log2().floor().exp2()
+    return f
+
+
+def echelles_ecrasees(bs: torch.Tensor, par_ligne: bool = False) -> int:
+    """Pièce 157 : nombre d'échelles de bloc > 0 que la conversion Marlin (`traiter_echelles_nvfp4` : ×facteur×2⁷ en
+    demi-précision, < 2 → 0) écraserait À ZÉRO — le bloc de 16 poids avec. S0E5M3 n'a qu'environ 2^14,8 de plage contre
+    2^17,8 pour e4m3 : un poids (ou une pile d'experts, facteur commun) qui mêle 448 et des sous-normales perd les petites.
+    ``par_ligne`` : facteur par ligne de sortie (dernière dimension réduite). Qwen3-14B couche 2 down : 47 368 valeurs
+    fausses au dépaquetage (24/09), Qwen3-Coder-30B couche 0 : 0,57 % des blocs de 43 experts à zéro."""
+    s = bs.float()
+    mx = s.amax(-1, keepdim=True) if par_ligne else s.amax().reshape([1] * s.dim())
+    f = _facteur_depuis_max(mx)
+    return int(((s > 0) & (s.half().float() * f * 128 < 2)).sum())
+
+
 def traiter_echelles_nvfp4(marlin_scales: torch.Tensor, facteur: float) -> torch.Tensor:
     """E4M3 (S1E4M3) → « S0E5M3 » : demi-précision × facteur × 2⁷, < 2 → 0,
     décalage d'un bit, moitié haute des paires."""
@@ -286,16 +306,26 @@ def depaqueter_marlin(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, 
     g = torch.as_tensor(g_marlin, dtype=torch.float32, device=w.device).reshape(-1)
     if g.numel() == 1 and E > 1:
         g = g.expand(E)
-    if E == 1 and g.numel() == N and N > 1 and noyau != "triton" and not (noyau == "auto" and w.device.type == "cuda"
-                                                                          and triton is not None):
-        raise ValueError("depaqueter_marlin : échelle globale par colonne servie par le noyau Triton seulement")
+    if E == 1 and g.numel() == N and N > 1 and noyau not in ("triton", "cuda") and not (
+            noyau == "auto" and w.device.type == "cuda" and (triton is not None or _depaqueter_cuda_disponible())):
+        raise ValueError("depaqueter_marlin : échelle globale par colonne servie par les noyaux Triton et CUDA seulement")
     if out is None:
         out = torch.empty(E, N, K, dtype=torch.bfloat16, device=w.device)
     res = out.view(E, N, K)
     if noyau == "auto":
-        noyau = "triton" if (w.device.type == "cuda" and triton is not None) else "torch"
+        noyau = _DEPAQUETAGE if _DEPAQUETAGE in ("cuda", "triton", "torch") else "auto"
+    if noyau == "auto":
+        if w.device.type == "cuda" and _depaqueter_cuda_disponible():
+            noyau = "cuda"
+        else:
+            noyau = "triton" if (w.device.type == "cuda" and triton is not None) else "torch"
+    if noyau == "cuda":
+        _depaqueter_cuda(w, s, g, res, K, N)
+        DEPAQUETAGES["cuda"] += 1
+        return res if pile else res[0]
     if noyau == "triton":
         _depaqueter_triton(w, s, g, res, K, N)
+        DEPAQUETAGES["triton"] += 1
         return res if pile else res[0]
     if noyau != "torch":
         raise ValueError(f"depaqueter_marlin : noyau {noyau!r}, attendu auto | torch | triton")
@@ -435,13 +465,35 @@ def preparer_dense(t, repack=None):
     segment), g_marlin est PAR COLONNE [N] — même traitement (×2^119 / facteur, exact : puissances de deux) que
     l'échelle scalaire, appliqué en fp32 dans l'épilogue du noyau porté (marlin_template.h, `gs_par_colonne`) ;
     sinon [1]."""
-    w, s_, g = preparer_pile(t.qweight[None], t.block_scale[None], t.global_scale.reshape(1).float(), repack=repack)
+    bs = t.block_scale
+    N = t.qweight.shape[0]
+    f_n = None
+    if echelles_ecrasees(bs):
+        # Pièce 157 : le facteur scalaire écraserait des sous-normales — facteur PAR LIGNE (puissance de 2 ; e4m3 × 2^k ≤
+        # 448 exact), repris dans l'échelle globale PAR COLONNE (déjà servie : piles q/k/v, gemm_dense, dépaquetage
+        # PAR_COLONNE, v2 × g). Les poids qu'un facteur scalaire n'écrase pas gardent EXACTEMENT la préparation d'avant.
+        f_n = _facteur_depuis_max(bs.float().amax(-1)).to(bs.device)
+        bs = (bs.float() * f_n[:, None]).to(bs.dtype)
+        assert not echelles_ecrasees(bs), "facteur par ligne insuffisant : vérifier marlin_exact avant preparer_dense"
+    w, s_, g = preparer_pile(t.qweight[None], bs[None], t.global_scale.reshape(1).float(), repack=repack)
     gsr = getattr(t, "global_scale_rows", None)
-    if gsr is not None:
-        facteur = facteur_nvfp4(t.block_scale[None].to(torch.bfloat16))
-        g = traiter_echelle_globale(gsr.float().reshape(-1), facteur).contiguous()
-        assert g.numel() == t.qweight.shape[0], (g.numel(), t.qweight.shape)
+    if gsr is not None or f_n is not None:
+        facteur = facteur_nvfp4(bs[None].to(torch.bfloat16))
+        lignes = (gsr.float().reshape(-1) if gsr is not None
+                  else t.global_scale.float().reshape(1).expand(N).to(bs.device))
+        if f_n is not None:
+            lignes = lignes / f_n
+        g = traiter_echelle_globale(lignes, facteur).contiguous()
+        assert g.numel() == N, (g.numel(), t.qweight.shape)
     return w[0], s_[0], g
+
+
+def marlin_exact(t) -> "str | None":
+    """Pièce 157 : None si la disposition Marlin de ``t`` (dense) rend exactement ses poids — facteur scalaire, sinon par
+    ligne ; sinon la raison (le poids garde le chemin naturel, compté au bilan)."""
+    if not echelles_ecrasees(t.block_scale) or not echelles_ecrasees(t.block_scale, par_ligne=True):
+        return None
+    return f"échelles sous-normales non représentables en Marlin : {echelles_ecrasees(t.block_scale, par_ligne=True)} blocs" 
 
 
 def gemm_dense(a: torch.Tensor, w_marlin, s_marlin, g_marlin, size_n: int, size_k: int, workspace) -> torch.Tensor:
@@ -568,6 +620,34 @@ if triton is not None:
         base = out_ptr + (e * N + nt * 64 + n) * K + kt * 16 + k0
         tl.store(base, _bf16_rne(_e2m1_valeur(octets & 0xF) * ech))
         tl.store(base + 8, _bf16_rne(_e2m1_valeur(octets >> 4) * ech))
+
+
+# Pièce 147 (L3') : le dépaquetage par lignes entières de l'extension CUDA, au bit du Triton et du torch
+# (tests/test_depaqueter_cuda_p147.py). ACVRAM_DEPAQUETAGE = auto (cuda si l'extension l'a) | cuda | triton | torch —
+# ne joue que sous la disposition unique (ACVRAM_PROJ_MARLIN=1) : le défaut ne l'appelle jamais.
+_DEPAQUETAGE = os.environ.get("ACVRAM_DEPAQUETAGE", "auto")
+DEPAQUETAGES: dict = {"cuda": 0, "triton": 0}
+
+
+def _depaqueter_cuda_disponible() -> bool:
+    try:
+        from .. import get_extension
+        ext = get_extension()
+    except Exception:                                        # noqa: BLE001
+        return False
+    return ext is not None and hasattr(ext, "depaqueter_marlin_cuda")
+
+
+def _depaqueter_cuda(w: torch.Tensor, s: torch.Tensor, g: torch.Tensor, out: torch.Tensor, K: int, N: int) -> None:
+    from .. import get_extension
+    ext = get_extension()
+    if ext is None or not hasattr(ext, "depaqueter_marlin_cuda"):
+        raise RuntimeError("depaqueter_marlin(noyau='cuda') : extension sans depaqueter_marlin_cuda")
+    E = w.shape[0]
+    assert out.is_contiguous() and tuple(out.shape) == (E, N, K)
+    par_colonne = E == 1 and g.numel() == N and N > 1
+    ws = w if w.dtype == torch.int32 else w.view(torch.int32)
+    ext.depaqueter_marlin_cuda(ws, s.view(torch.uint8) if s.dtype != torch.uint8 else s, g.contiguous().float(), out, K, N, par_colonne)
 
 
 def _depaqueter_triton(w: torch.Tensor, s: torch.Tensor, g: torch.Tensor, out: torch.Tensor, K: int, N: int) -> None:

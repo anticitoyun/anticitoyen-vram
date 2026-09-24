@@ -680,6 +680,9 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
         self.stats = EngineStats(kv_blocks_total=n_blocks)
         self._lock = threading.Lock()
         self._refusees: list[GenerationOutput] = []     # admissions impossibles, rendues au pas suivant
+        # Pièce 146 (1) : fins par budget KV épuisé, livrées par `step` DANS LE PAS MÊME — `idle` ne les voit pas, une
+        # remise au pas suivant ne partirait jamais si la séquence tronquée était la dernière.
+        self._epuisees: list[GenerationOutput] = []
         self._eos = self._eos_ids()
         # Étage hôte du cache KV : les blocs de préfixe évincés descendent en
         # RAM et remontent au réemploi, au lieu d'être recalculés.
@@ -904,9 +907,14 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # échelles d'experts). Lu sur les blocs, pas sur une variable.
             "echelle_awq": _regime_echelle_awq(self.model),
             # linéaires INT8 du décodage : triton≥b|cuda (poste C, bascule mesurée)
-            "dense": kernels.narrow_regime() + (                  # pièce 129 : disposition Marlin (opt-in), bilan du chargement
-                ("+marlin(" + ("moe-exclu" if b.get("portee") == "denses:moe-exclu" else "doubles={doubles},seuls={seuls},{go:.2f}Go,kv={capacite_kv}".format(go=b["octets_doubles"] / 2**30, **{"capacite_kv": 0, **b})) + ")")
-                if (b := getattr(self.model, "proj_marlin_bilan", None)) else ""),
+            "dense": kernels.narrow_regime() + (                  # pièce 129 : disposition Marlin, bilan du chargement
+                ("+marlin(" + ("moe-exclu" if b.get("portee") == "denses:moe-exclu"
+                               else f"repli:{b['repli']}" if b.get("repli")
+                               else ("doubles={doubles},seuls={seuls},{go:.2f}Go,kv={capacite_kv}".format(go=b["octets_doubles"] / 2**30, **{"capacite_kv": 0, **b})
+                                     + (f",inexacts={b['inexacts']}" if b.get("inexacts") else ""))) + ")")   # 157
+                if (b := getattr(self.model, "proj_marlin_bilan", None))
+                # pièce 156 : le repli demandé est NOMMÉ (le Marlin est le défaut)
+                else "+marlin(off:ACVRAM_PROJ_MARLIN=0)" if os.environ.get("ACVRAM_PROJ_MARLIN") == "0" else ""),
             "gdn": _gdn_regime(),
             "noyaux": regime_noyaux()["hors_defaut"],
             "eco": _etat_eco(),
@@ -967,6 +975,10 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             # 15/09 sur un GLM converti --format bf16, pris pour un bogue).
             piles_txt += " (" + " ; ".join(r["piles_raison"]) + ")"
         kv_seqs = getattr(self.loaded.plan, "kv_planned_seqs", 0) or "?"
+        # Pièce 146 (b) : une capacité KV sous la demande (séquences planifiées × max_model_len) est NOMMÉE — gemma4 31B
+        # à 8 × 2 560 servait 3 824 jetons pour 20 480 sans une ligne ; le défaut ne refuse pas (décision utilisateur).
+        kv_cap = self.allocator.num_blocks * BLOCK_SIZE
+        kv_dem = kv_seqs * int(self.max_model_len) if isinstance(kv_seqs, int) else 0
         slots = r.get("slots_hybrides")
         # graphes demandés mais retombés (capture impossible) : la CAUSE est sur la
         # ligne — `graphes=off(repli eager: AcceleratorError: CUDA error: out of memory)`
@@ -1000,7 +1012,8 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
                f"ACVRAM_GDN={r['gdn']} experts_layout={r['experts_layout']} "
                f"echelle_awq={r['echelle_awq']} "
                + (f"noyaux={r['noyaux']} " if r["noyaux"] else "")
-               + f"kv_budget={self.allocator.num_blocks * BLOCK_SIZE}/{kv_seqs} "
+               + f"kv_budget={kv_cap}/{kv_seqs} "
+               + (f"kv_sous_demande={kv_cap}/{kv_dem} " if kv_dem and kv_cap < kv_dem else "")
                + f"kv={self.kv_format_servi()} "
                + f"pipeline={int(bool(self.pipeline_actif and self.graphs is not None))} "   # effectif : demandé ET graphes
                + f"sampler={'graphe' if self.pipeline_actif and self.graphs is not None and getattr(self.graphs, 'sampler_graphe', False) else sampler_texte()} "
@@ -1352,6 +1365,9 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             finished=True, finish_reason="length",
             prompt_tokens=len(seq.prompt_ids), completion_tokens=len(seq.output_ids))
         self._finish(seq, "length")
+        # Pièce 146 (1) : déposée ici, pas rendue à l'appelant — trois des quatre sites (pipeline amorce et suite,
+        # spéculatif) la jetaient, et `collect` (server/app.py) attendait sans fin la requête du client.
+        self.__dict__.setdefault("_epuisees", []).append(sortie)
         return sortie
 
     def _blocs_plafond(self) -> int:
@@ -1518,6 +1534,9 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
     def step(self) -> list[GenerationOutput]:
         """Exécute une passe avant et rend ce qu'elle a produit."""
         outputs = self._step()
+        if self.__dict__.get("_epuisees"):                 # moteurs de test montés par __new__ : pas d'attribut
+            outputs += self._epuisees
+            self._epuisees = []
         if _DUMP_MOE:
             self._sauver_dump_moe()
         return outputs
@@ -1715,11 +1734,12 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
     def _plain_decode_sync(self, decodable: list[Sequence]) -> list[GenerationOutput]:
         trace = os.environ.get("ACVRAM_TRACE_STEPS")
         tg = time.perf_counter()
-        epuisees = [self._finish_budget_epuise(seq) for seq in decodable
-                   if not self._grow(seq)]
+        for seq in decodable:
+            if not self._grow(seq):
+                self._finish_budget_epuise(seq)          # livrée par `step` (pièce 146)
         decodable = [s for s in decodable if not s.finished]
         if not decodable:
-            return epuisees
+            return []
         t0 = time.perf_counter()
         batch = self._build_batch(decodable, prefill=False)
         t1 = time.perf_counter()
@@ -1742,7 +1762,7 @@ class Engine(ChauffeContexte, GraphesMoteur, PipelineDecodage):
             print(f"[pas-lent] {voie} grow {(t0-tg)*1000:.1f} batch "
                   f"{(t1-t0)*1000:.1f} avant {(t2-t1)*1000:.1f} emit "
                   f"{(t3-t2)*1000:.1f} ms len={decodable[0].length}", flush=True)
-        return epuisees + outs
+        return outs
 
     def _speculative_decode(self, decodable: list[Sequence]
                             ) -> list[GenerationOutput]:

@@ -118,6 +118,9 @@ Quatre optimisations, chacune vérifiée par une preuve d'équivalence et pas
 seulement par un chronomètre : une optimisation qui change la réponse est un
 bogue.
 
+Les linéaires NVFP4 des modèles denses passent par défaut par la disposition Marlin (+57 à +90 % de débit à b = 8, TTFT
++2 à +4 ms selon revue/poste6-piece147-verdict-24-09.md ; repli `ACVRAM_PROJ_MARLIN=0`, voir [CHANGELOG.md](CHANGELOG.md)).
+
 ### Décodage spéculatif (`--speculative`)
 
 Décoder un jeton avec un lot de taille 1 est limité par la mémoire : la machine

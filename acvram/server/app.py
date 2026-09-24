@@ -32,6 +32,14 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 
 from .. import __version__
 from .. import regime_ligne as _regime_ligne
+
+
+def _depaquetages() -> dict:
+    try:
+        from ..kernels import marlin_port
+        return dict(marlin_port.DEPAQUETAGES)
+    except Exception:                                            # noqa: BLE001
+        return {}
 from . import capteurs as _capteurs
 from .console import GALERIE, PAGE
 from ..engine.runner import Engine, GenerationOutput
@@ -974,6 +982,8 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
                 # d'une mesure (`acvram.regime_ligne`) — variables ACVRAM_*
                 # hors defaut + versions torch/triton/fla.
                 "regime_ligne": _regime_ligne(),
+                # pièce 147 : noyau du dépaquetage Marlin au préfill de la disposition unique (cuda | triton), compté
+                "depaquetage": _depaquetages(),
                 # pièce 49 : régime spéculatif visible dans /metrics (même source que
                 # regime_ligne — mode + état garde + gain moyen glissant)
                 "speculation": engine.regime().get("speculation"),
