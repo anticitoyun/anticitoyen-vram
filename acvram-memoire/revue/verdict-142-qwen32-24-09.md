@@ -1,7 +1,7 @@
 # Verdict — 142, famille 32B qwen2/qwen3 (`DeepSeek-R1-Distill-Qwen-32B-srcQ4_K_M-nvfp4`, 2 alias) : disposition Marlin unique + v2 + 134 contre défaut — 24/09 09 h 5x (poste1)
 
 * **instrument** : `scratchpad/poste1-p142-24-09/prise-famille.sh` — `kl-chemins.py` (T2 même prise), `acvram eval` (fenêtres de la 102), `certifie-b12.py` CERT_PUR, ABBA 5 lots par bras, -lgc 2700
-* **commit** : kl, b1 0a6319c6 ; b8 final 9f9cd6b3 (la ligne « commit » de la prise fait foi ; worktree importé)
+* **commit** : kl, b1 0a6319c6 ; b8 final b514c59b (ligne « commit » de la prise ; worktree importé)
 * **régime** : RTX 5090, cpu-safe=off (100/100) ; tous les lots NOMINAUX, 0/64 couche exilée ; B `+marlin(doubles=0,seuls=257)` ; dossier sur disque dur (chargements hors fenêtre)
 * **scellé** : `scratchpad/poste1-p142-24-09/scelle-qwen32.md` + 2 addenda (avant les relances)
 * **mesuré** :
