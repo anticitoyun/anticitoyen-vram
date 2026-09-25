@@ -1,5 +1,21 @@
 # Journal des changements
 
+* **25/09/2026 — pièce 212 (poste4, sur la 201 de poste5) : la marge de VRAM avant capture des graphes
+  DOUBLE sur les modèles à couche récurrente (GDN/KDA/mamba2/lfm2) — `warm_graphs` grossit la mémoire de
+  la carte APRÈS le chargement, hors de tout ce que la réserve de préfill voyait.**
+  `warm_graphs` (`engine/graphes.py:40`) capture un graphe CUDA par forme (`engine/graphs.py:983`) ; le
+  pool mémoire qui les porte (`graphs.py:1075-1086`, `graph.pool()`) n'est jamais libéré et grossit à
+  chaque forme nouvelle — coût mesuré (B=8, CTX=2048, 5 modèles) : Qwen3.8-27B-nvfp4 1 880 Mio,
+  -unsloth-mixte-i8c **2 734 Mio**, -attn-gdn-i8c 1 720 Mio, TOUS AU-DESSUS de l'ancienne marge fixe
+  (1 536 Mio) — pas seulement l'i8c de la 153/201. gemma-4-31B-vision et Coder-30B-A3B (aucune couche
+  récurrente) restent sous cette marge (−868 et 266 Mio). Dérivation structurelle tentée (config.json,
+  sur le modèle de 172/201) et abandonnée : les trois Qwen3.8 ci-dessus partagent un `config.json`
+  identique mais divergent de plus de 25 % — aucune fonction de l'architecture seule ne peut couvrir les
+  trois sans en sur-réserver un. Correctif : `loader._KV_MARGE_MIN_GDN` (3 072 Mio, +12 % sur le pire
+  mesuré), appliqué quand le manifeste porte une couche `.linear_attn.` (`_a_des_couches_lineaires`) ;
+  les modèles denses gardent l'ancienne marge (1 536 Mio). **Prix pour les modèles GDN** : ≈ 12 192
+  jetons de capacité KV en moins (1 536 Mio de marge en plus ÷ 132 096 o/jeton, Qwen3.8). Verdict :
+  `revue/poste4-piece212-warmgraphs-25-09.md`.
 * **25/09/2026 — pièce 209 (poste6) : piles d'experts NVFP4 à échelles sous-normales servies en MARLIN, facteur par ligne d'expert
   (`ACVRAM_MARLIN_PAR_LIGNE=1` ; 0 = témoin : préparation d'avant, piles refusées)**. Depuis la 157, une pile qu'un facteur
   Marlin commun écraserait (448 et 2⁻⁹ dans le même expert — Qwen3-Coder-30B couches 0, 1, 2, 4, 43 experts en couche 0) restait
