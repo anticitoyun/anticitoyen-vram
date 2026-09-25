@@ -173,6 +173,6 @@ def test_un_moteur_charge_a_sec_ecrit_la_voie_gdn_dans_son_regime(converted, mon
     # et le bilan doit être celui de CE chargement (à sec : 0 couche fusionnée, raison hote ou format), pas le cumul du processus.
     assert re.search(r"(^| )ACVRAM_GDN=fla( |$)", ligne), ligne
     assert voie.split(" ")[0] == "fla", voie
-    assert re.fullmatch(r"fla( ab=\w+\(0:(format|hote)×\d+\))?", voie), voie
+    assert re.fullmatch(r"fla( ab=\w+\(0(:(format|hote)×\d+)?\))?", voie), voie   # « fla ab=auto(0) » à sec : 0 couche fusionnée
     _voie(monkeypatch, "torch")
     assert re.search(r"(^| )ACVRAM_GDN=torch( |$)", engine.regime_ligne())
