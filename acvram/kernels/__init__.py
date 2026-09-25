@@ -756,7 +756,7 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
     # par _DEQUANT_TRANCHE_MAX.
     dt = x.dtype if x.dtype != torch.float32 else torch.bfloat16
     par_ligne = t.padded_in * (4 + dt.itemsize)
-    if t.shape[0] * par_ligne > _DEQUANT_TRANCHE_MAX:
+    if t.shape[0] * par_ligne > _DEQUANT_TRANCHE_MAX and _tranche_copie(t.shape[0], t.padded_in):
         pas = max(64, (_DEQUANT_TRANCHE_MAX // par_ligne) // 64 * 64)
         out = torch.empty(*x.shape[:-1], t.shape[0], dtype=x.dtype, device=x.device)
         for a in range(0, t.shape[0], pas):
@@ -1146,7 +1146,7 @@ def _marlin_seul(x: torch.Tensor, t):
         # sur GPU (cuBLAS, cf. test_nvfp4_matmul_tranches.py) ; pic borne par
         # _DEQUANT_TRANCHE_MAX.
         par_ligne = W.shape[1] * (4 + dt.itemsize)
-        if W.shape[0] * par_ligne > _DEQUANT_TRANCHE_MAX:
+        if W.shape[0] * par_ligne > _DEQUANT_TRANCHE_MAX and _tranche_copie(W.shape[0], W.shape[1]):
             pas = max(64, (_DEQUANT_TRANCHE_MAX // par_ligne) // 64 * 64)
             out = torch.empty(xr.shape[0], W.shape[0], dtype=x.dtype, device=x.device)
             for a in range(0, W.shape[0], pas):
@@ -1327,6 +1327,17 @@ _DENSE_NVFP4_MIN_M = int(os.environ.get("ACVRAM_DENSE_NVFP4_MIN_M", "4"))
 # Plafond (octets) du pic de déquantification du repli GEMM d'int8_matmul,
 # au-delà duquel la matrice est traitée par tranches de lignes.
 _DEQUANT_TRANCHE_MAX = int(os.environ.get("ACVRAM_DEQUANT_TRANCHE_MAX", str(256 * 2**20)))
+# Pièce 201 (décision chef) : les replis nvfp4 « naturel » et `_marlin_seul` (pièce 153) ne tranchent que si la copie
+# fp32 ENTIÈRE du poids dépasserait ce seuil — la tête d'un vocabulaire étendu (248 320 × 5 120 : 4,74 Gio), pour la PPL.
+# Au seuil de `_DEQUANT_TRANCHE_MAX` seul (256 Mio pour 6 o par élément), toute projection de plus de 44,7 M éléments
+# était tranchée au préfill servi, et cuBLAS y change l'ordre de réduction : logits d'un préfill 8 × 512 du mixte
+# différents de main (diag201). Plus grande projection servie : gate+up fusionné de Qwen3.8, 0,66 Gio en fp32.
+_TRANCHE_COPIE_MIN = int(os.environ.get("ACVRAM_TRANCHE_COPIE_MIN", str(2**30)))
+
+
+def _tranche_copie(n: int, k: int) -> bool:
+    """Le repli nvfp4 tranche-t-il un poids [n, k] ? Seulement si sa copie fp32 entière dépasse `_TRANCHE_COPIE_MIN`."""
+    return n * k * 4 > _TRANCHE_COPIE_MIN
 # Linéaires INT8 à b ≤ 16 (poste C, poste7-e-c-verdict-17-09 § 2) : "mixte"
 # (défaut : Triton dès b ≥ NARROW_TRITON_MIN_B, CUDA en dessous) | "cuda"
 # (narrow_gemm / int8_gemv) | "triton" (kernels/gemm_etroit.py partout) |

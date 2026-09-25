@@ -366,6 +366,10 @@ VARIABLES: tuple[Variable, ...] = (
              "diagnostic C15-3d : 1 = chaque couche MoE copie topi dans un tampon persistant (lisible sous graphes, equiv-b12.py « experts égaux ») ; 0 = témoin"),
     Variable("GODETS_B", "1", ("acvram.engine.graphs", "_GODETS_B"), "0",
              "clé de graphe CUDA, dimension b : 1 = lot arrondi au godet (puissances de deux, plafond HYBRID_SLOTS ; en place depuis le 11/09) | 0 = lot exact, témoin de mesure du chantier C4 (revue/chantier-c4-19-09) ; même sortie dans les deux cas"),
+    Variable("TRANCHE_COPIE_MIN", str(2**30), ("acvram.kernels", "_TRANCHE_COPIE_MIN"), "0",
+             "pièce 201 : octets de la copie fp32 entière d'un poids nvfp4 au-delà desquels les replis « naturel » et "
+             "_marlin_seul tranchent (la tête d'un vocabulaire étendu, PPL) ; 0 = témoin (tranche comme la 153, change la "
+             "sortie du préfill servi)"),
     Variable("PA_ARM", "A", None, "A"),
     Variable("SCALER_SANS_CACHE", "", None, "1"),
 )

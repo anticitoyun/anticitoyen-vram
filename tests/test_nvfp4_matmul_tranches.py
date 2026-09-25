@@ -45,6 +45,7 @@ def test_les_tranches_rendent_la_meme_sortie_a_une_tolerance_gemm_pres(monkeypat
     t, x = _cas()
     entier = kernels.nvfp4_matmul(x, t)
     par_ligne = t.padded_in * (4 + torch.bfloat16.itemsize)
+    monkeypatch.setattr(kernels, "_TRANCHE_COPIE_MIN", 0)                     # 201 : seuil de copie levé
     monkeypatch.setattr(kernels, "_DEQUANT_TRANCHE_MAX", 128 * par_ligne)    # tranches de 128 lignes
     appels = []
     orig = kernels.nvfp4_dequant
@@ -60,6 +61,7 @@ def test_une_tranche_sautee_se_voit(monkeypatch):
     t, x = _cas()
     entier = kernels.nvfp4_matmul(x, t)
     par_ligne = t.padded_in * (4 + torch.bfloat16.itemsize)
+    monkeypatch.setattr(kernels, "_TRANCHE_COPIE_MIN", 0)                     # 201 : seuil de copie levé
     monkeypatch.setattr(kernels, "_DEQUANT_TRANCHE_MAX", 128 * par_ligne)
     orig = kernels.nvfp4_dequant
 
@@ -116,6 +118,7 @@ def test_marlin_seul_prefill_tranche_a_une_tolerance_gemm_pres(monkeypatch):
     kernels.preparer_disposition_marlin(boite)
     assert boite.proj.qweight.qweight is None and boite.proj.qweight._marlin_unique
     par_ligne = k * (4 + torch.bfloat16.itemsize)
+    monkeypatch.setattr(kernels, "_TRANCHE_COPIE_MIN", 0)                     # 201 : seuil de copie levé
     monkeypatch.setattr(kernels, "_DEQUANT_TRANCHE_MAX", 512 * par_ligne)     # force le tranchage (n=2048 > 512)
     tranche = boite.proj(x)
     assert tranche.shape == entier.shape
