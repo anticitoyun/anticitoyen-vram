@@ -56,3 +56,5 @@ Tests `tests/test_gdn_ab_175.py` : 50 verts / 1 rouge au commit 3f0bd9d0 — `te
 Rejeu (commit d29766b1, 07:25:13, sous verrou `ACVRAM_NOM=poste6-175`, 46 s d'attente, PID hors verrou : llama-server 4242 seul,
 avant et après) : `tests/test_gdn_ab_175.py` **28/28 verts** en 1,1 s (`scratchpad/poste6-p175-25-09/prise-tests-rejeu.txt`).
 Branche poste6-175 fusionnable ; `auto` au défaut = décision de chef (issue nommée : b = 12 sans gain, les deux appels).
+Tests voisins (03087fe0, 07:31, sous verrou) : `tests/test_regime*.py`, `tests/test_cli*.py` et le fichier de la pièce, **156/156 verts**
+(`prise-tests-regime.txt`) — la prise de 06:15 comptait 51 tests sur un périmètre perdu avec la session ; celui-ci le couvre.
