@@ -229,6 +229,7 @@ VARIABLES_LUES = {
     "ACVRAM_RAPATRIEMENT_FLUX", "ACVRAM_RAPATRIEMENT_EPINGLE",  # levier 2 (défaut épinglé, témoin flux, ancien nom lu)
     "ACVRAM_CAPTURE_MEM_MIN_MIO", "ACVRAM_CAPTURE_DELAI_S",   # gardes d interblocage de capture (22/09)
     "ACVRAM_ECHO_TRANCHE", "ACVRAM_ETROITES_FORME",   # opt-in ± 1 ulp : facteur de programmes par SM du split-K étroit (22/09)
+    "ACVRAM_ETROIT_CANAL",                            # pièce 195 : opt-in hors bit, K entier par canal (défaut 0)
     "ACVRAM_JOURNAL_TENSEURS",  # journal par tenseur de convert (cf97a3a0) — oubliées de la liste le 22/09 (rouge sur main)
     "ACVRAM_PLAN_FIGE",
     "ACVRAM_POOL_SYNC",
