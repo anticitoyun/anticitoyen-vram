@@ -20,7 +20,7 @@ import json
 import os
 import threading
 import time
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, Optional
 
@@ -426,10 +426,15 @@ def _regime_echelle_awq(model) -> str:
 
 
 def _couverture_experts(model) -> str:
-    """Disposition des experts par couche MoE : « marlin » si toutes, « naturel »
-    si aucune, sinon « marlin(N/M) refus=[c<i>:<raison>] » — N couches sur la
-    disposition unique, M couches MoE, et POUR CHAQUE couche refusée son numéro
-    et la raison exacte (`MoEBlock._raison_marlin`).
+    """Disposition des experts par couche MoE : la valeur seule si toutes les couches MoE la
+    partagent (« marlin », « marlin-w13 », « naturel »…), sinon le COMPTE par disposition
+    (« marlin-w13×44+naturel×4 »), le plus fréquent en tête, et POUR CHAQUE couche non-marlin*
+    (naturelle ou repliée) son numéro et la raison exacte (`MoEBlock._raison_marlin`).
+
+    Pièce 227 (chef, sur constat 226) : avant, une couverture mixte qui ne portait aucune couche
+    littéralement « marlin » (p. ex. tout en `marlin-w13` sauf quelques `naturel`) retombait sur le
+    seul mot « naturel » — la 217 (poste3) a lu B « naturel » alors que 44 couches sur 48 étaient
+    en `marlin-w13`, 0 refus : la ligne de régime MENTAIT sur ce qui tournait réellement.
 
     Sans la raison, « marlin(47/48) » a coûté une mesure de carte pour trouver
     ce qu un chargement savait déjà (22/09, alias qkv-alpha) : une couverture
@@ -446,19 +451,18 @@ def _couverture_experts(model) -> str:
     if not numerotes:
         return "aucun"
     dispositions = [getattr(m, "experts_layout", None) or "naturel" for _, m in numerotes]
-    n_marlin = sum(1 for d in dispositions if d == "marlin")
-    if n_marlin == len(numerotes):
-        return "marlin"
-    if n_marlin == 0:
-        return dispositions[0] if len(set(dispositions)) == 1 else "naturel"
+    valeurs = set(dispositions)
+    if len(valeurs) == 1:
+        return dispositions[0]
+    comptes = Counter(dispositions)
+    base = "+".join(f"{d}×{comptes[d]}" for d in sorted(comptes, key=lambda d: (-comptes[d], d)))
     refus = []
     for (i, m), d in zip(numerotes, dispositions):
-        if d == "marlin":
+        if d.startswith("marlin"):
             continue
         r = getattr(m, "_raison_marlin", "") or getattr(m, "_raison_repli", "")
         if r:  # une couche sans raison relevée (chargement partiel, exil) ne fabrique pas un refus
             refus.append(f"c{i}:{r.split(' — ')[0][:70]}")
-    base = f"marlin({n_marlin}/{len(numerotes)})"
     return f"{base} refus=[{' | '.join(refus[:4])}]" if refus else base
 
 
