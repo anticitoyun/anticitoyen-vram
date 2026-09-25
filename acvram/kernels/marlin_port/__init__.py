@@ -42,13 +42,62 @@ def _kfe2m1f_id() -> int:
 
 
 _EXT = None
+ECHEC_COMPILATION = None     # pièce 161 : raison du dernier échec de compilation (repli nommé), sinon None
 VERSION_SOURCE = "vLLM v0.29.0 (csrc/libtorch_stable, commit de la balise v0.29.0)"
 COMPILE_ICI = False          # vrai si la compilation a eu lieu dans CE processus (REGLES § 6, garde b)
 
 
+_EMPREINTE = None
+_SUFFIXES_SOURCES = (".cu", ".cuh", ".h", ".hpp", ".cpp")
+
+
+def _fichiers_sources() -> list:
+    """Tout ce que nvcc lit dans le port (sources et en-têtes), chemins triés."""
+    return sorted(q for q in ICI.rglob("*")
+                  if q.is_file() and q.suffix in _SUFFIXES_SOURCES and "__pycache__" not in q.parts)
+
+
+def empreinte_sources() -> str:
+    """Pièce 161 : sha256 (12 hex) des sources du port — chemins relatifs et octets.
+    C'est la CLÉ du cache : deux arbres aux mêmes sources partagent un binaire, deux versions n'en partagent aucun.
+    Le 24/09 le cache était UN dossier pour tous les worktrees : chaque changement d'arbre appelant rebâtissait le
+    .so (chemin -I dans build.ninja), même sous `charger(compiler=False)` et sous le verrou d'une autre prise, et
+    pendant l'édition de liens un chargement concurrent voyait le .so ABSENT → repli « port non compilé » muet
+    (revue/poste6-piece161-verdict-24-09.md)."""
+    global _EMPREINTE
+    if _EMPREINTE is None:
+        import hashlib
+        h = hashlib.sha256()
+        for q in _fichiers_sources():
+            h.update(str(q.relative_to(ICI)).encode()); h.update(b"\0"); h.update(q.read_bytes()); h.update(b"\0")
+        # Pas les architectures : `_arch_flags()` dépend du contexte (à sec, CUDA_VISIBLE_DEVICES vide, il ne voit
+        # pas la carte) et la compilation se fait à sec AVANT la prise — la même empreinte doit sortir des deux côtés
+        # (première prise 161 : 9e4f5791 à sec contre 2eb083f8 sur carte → .so « absent », repli). Les cibles sont
+        # constantes sur un poste.
+        _EMPREINTE = h.hexdigest()[:12]
+    return _EMPREINTE
+
+
 def dossier_cache() -> pathlib.Path:
-    return pathlib.Path(os.environ.get("ACVRAM_MARLIN_CACHE",
-                                       pathlib.Path.home() / ".cache" / "acvram" / "marlin_port"))
+    """Un cache PAR EMPREINTE des sources (pièce 161), sous `~/.cache/acvram/` ou sous `ACVRAM_MARLIN_CACHE`
+    (racine, observation et tests). Jamais le dossier partagé `marlin_port/` d'avant."""
+    racine = pathlib.Path(os.environ.get("ACVRAM_MARLIN_CACHE") or (pathlib.Path.home() / ".cache" / "acvram"))
+    return racine / f"marlin_port-{empreinte_sources()}"
+
+
+def _sources_en_cache(cache: pathlib.Path) -> pathlib.Path:
+    """Copie des sources DANS le cache (`src/`), d'où ninja compile : les lignes de commande ne portent plus le
+    chemin du worktree, donc un second arbre aux mêmes sources ne rebâtit rien. L'empreinte garantit le contenu ;
+    le marqueur `.complet` garde d'une copie interrompue."""
+    import shutil
+    src = cache / "src"
+    if not (src / ".complet").exists():
+        for q in _fichiers_sources():
+            dest = src / q.relative_to(ICI)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(q, dest)
+        (src / ".complet").write_text(empreinte_sources())
+    return src
 
 
 def chemin_so() -> pathlib.Path:
@@ -72,38 +121,67 @@ def charger(verbose: bool = False, compiler: bool = True):
     (nvcc seul, aucune carte requise : archs sm_86 + sm_120 par défaut). Si le
     binaire n'est pas en cache au moment du banc, `COMPILE_ICI` passe à vrai
     et le banc se déclare invalide."""
-    global _EXT, COMPILE_ICI
+    global _EXT, COMPILE_ICI, ECHEC_COMPILATION
     if _EXT is not None:
         return _EXT
+    so = chemin_so()
+    if not so.exists():
+        # Pièce 161 (réserve de chef, Marlin étant le DÉFAUT) : empreinte absente → compilation UNE fois par version
+        # des sources, sous un verrou de fichier propre au cache ; le cache par empreinte rend le ping-pong impossible,
+        # donc les ~25 s ne reviennent qu'à chaque nouvelle version. Seul un échec (nvcc absent…) laisse le repli, nommé.
+        # ``compiler`` est gardé pour les appelants (banc) : il ne change plus rien.
+        try:
+            _compiler(verbose)
+        except Exception as e:                             # noqa: BLE001 — la raison va sur la ligne de régime
+            ECHEC_COMPILATION = f"{type(e).__name__}: {str(e).splitlines()[0][:160] if str(e) else ''}"
+            return None
+    # Le .so de CETTE empreinte est chargé tel quel — jamais ninja quand il existe (c'est ce que
+    # `load(is_python_module=False)` finit par faire, sans la reconstruction qui le précède).
+    torch.ops.load_library(str(so))
+    _EXT = torch.ops.acvram_marlin
+    return _EXT
+
+
+def _compiler(verbose: bool = False) -> None:
+    """Compile le port dans le cache de son empreinte, sous `flock` (un seul processus compile ; les autres attendent
+    puis trouvent le .so). Pose `COMPILE_ICI` (le banc se déclare invalide si la compilation a eu lieu chez lui)."""
+    global COMPILE_ICI
+    import fcntl
     from torch.utils.cpp_extension import load
-    COMPILE_ICI = not chemin_so().exists()
-    if COMPILE_ICI and not compiler:
-        return None                      # le moteur ne compile jamais sous le verrou (REGLES § 6)
-    moe = ICI / "libtorch_stable" / "moe" / "marlin_moe_wna16"
-    sources = [str(ICI / "bindings.cpp"), str(moe / "ops.cu"),
-               str(ICI / "libtorch_stable" / "quantization" / "marlin" / "gptq_marlin_repack.cu"),
-               str(ICI / "libtorch_stable" / "moe" / "moe_align_sum_kernels.cu")]      # pièce 62 : aligneur CUDA
-    sources += sorted(glob.glob(str(moe / "sm80_kernel_*.cu")))
-    dense = ICI / "libtorch_stable" / "quantization" / "marlin"                       # pièce 101 : Marlin dense
-    sources += [str(dense / "marlin.cu")] + sorted(glob.glob(str(dense / "dense_sm80_kernel_*.cu")))
     cache = dossier_cache()
     cache.mkdir(parents=True, exist_ok=True)
+    with open(cache / ".verrou-compilation", "w") as verrou:
+        fcntl.flock(verrou, fcntl.LOCK_EX)
+        if chemin_so().exists():                           # un autre processus vient de compiler
+            return
+        COMPILE_ICI = True
+        _lancer_ninja(cache, verbose, load)
+
+
+def _lancer_ninja(cache: pathlib.Path, verbose: bool, load) -> None:
+    SRC = _sources_en_cache(cache)
+    moe = SRC / "libtorch_stable" / "moe" / "marlin_moe_wna16"
+    sources = [str(SRC / "bindings.cpp"), str(moe / "ops.cu"),
+               str(SRC / "libtorch_stable" / "quantization" / "marlin" / "gptq_marlin_repack.cu"),
+               str(SRC / "libtorch_stable" / "moe" / "moe_align_sum_kernels.cu")]      # pièce 62 : aligneur CUDA
+    sources += sorted(glob.glob(str(moe / "sm80_kernel_*.cu")))
+    dense = SRC / "libtorch_stable" / "quantization" / "marlin"                       # pièce 101 : Marlin dense
+    sources += [str(dense / "marlin.cu")] + sorted(glob.glob(str(dense / "dense_sm80_kernel_*.cu")))
     from .. import _arch_flags
-    load(name="acvram_marlin", sources=sources, is_python_module=False, verbose=verbose,
+    empreinte = f"-DMARLIN_PORT_EMPREINTE={empreinte_sources()}"   # 161 : ccache ne rend jamais un objet d'une autre version
+    load(name="acvram_marlin", sources=sources, is_python_module=False, verbose=verbose,   # ninja, une fois par empreinte
          build_directory=str(cache),
-         extra_include_paths=[str(ICI)],
+         extra_include_paths=[str(SRC)],
          # USE_CUDA : les déclarations du shim CUDA de l'ABI stable (flux courant,
          # cublas) sont derrière cette garde ; l'espace de noms Marlin est posé
          # par kernel.h (moe) et par défaut (repack), pas ici
-         extra_cflags=["-O3", "-std=c++20", "-DUSE_CUDA"],
+         extra_cflags=["-O3", "-std=c++20", "-DUSE_CUDA", empreinte],
          # -static-global-template-stub=false : depuis CUDA 12.8 nvcc donne une
          # liaison INTERNE aux stubs hôte des gabarits __global__ instanciés
          # explicitement ; sans ce drapeau (que vLLM pose, CMakeLists.txt:1377)
          # l'édition de liens rend « undefined hidden symbol Marlin<…> »
          extra_cuda_cflags=["-O3", "-std=c++20", "--expt-relaxed-constexpr", "-DENABLE_BF16", "-DUSE_CUDA",
-                            "-static-global-template-stub=false"] + _arch_flags())
-    _EXT = torch.ops.acvram_marlin
-    return _EXT
+                            "-static-global-template-stub=false", empreinte] + _arch_flags())
 
 
 # --- préparation des poids (transcrit de marlin_utils.py / marlin_utils_fp4.py, Apache-2.0) ---

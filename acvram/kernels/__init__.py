@@ -536,6 +536,10 @@ def nvfp4_dequant(t: NVFP4Tensor, dtype: torch.dtype = torch.bfloat16,
 # sur une forme non balayée. La variable reste comme échappement.
 _NVFP4_GEMV_MAX = int(os.environ.get("ACVRAM_NVFP4_GEMV_MAX", "32"))
 PREFILL_REGIMES = ("bf16", "w4a16", "w8a8", "w4a4")
+# Pièce 147 L2 (24/09, poste6) : « marlin » — la GEMM Marlin W4A16 au préfill de la disposition unique, sans dépaquetage —
+# a été mesurée FAUSSE et retirée (166) : TTFT servi b=1 +4 / +27 / +35 % à 512 / 2 048 / 4 096, J +5 / +28 / +36 %, KL 2,3-3 ×
+# les témoins (revue/poste6-piece147L2-verdict-24-09.md). Marlin perd à grand M contre dépaquetage + cuBLAS ; ne pas rouvrir
+# sans un noyau W4A16 sur tensor cores Blackwell.
 
 
 def prefill_regime() -> str:
@@ -1058,6 +1062,27 @@ def _marlin_seul(x: torch.Tensor, t):
     return y[:, : t.shape[0]].reshape(*orig[:-1], t.shape[0])
 
 
+def marlin_bilan_texte(modele_ou_bilan) -> str:
+    """Pièce 170 : le fragment ``+marlin(…)`` de la ligne de régime — UNE écriture pour le service (runner) et l'eval PPL
+    (evaluate), avec le compteur de replis (poids éligibles rendus au naturel : `inexacts`, 157 ; `exclus` = non éligibles).
+    Vide quand le bilan n'existe pas et que le Marlin n'est pas coupé ; « off » nommé quand ACVRAM_PROJ_MARLIN=0 (156)."""
+    b = modele_ou_bilan if isinstance(modele_ou_bilan, dict) or modele_ou_bilan is None \
+        else getattr(modele_ou_bilan, "proj_marlin_bilan", None)
+    if b:
+        if b.get("portee") == "denses:moe-exclu":
+            corps = "moe-exclu"
+        elif b.get("repli"):
+            corps = f"repli:{b['repli']}"
+        else:
+            corps = "doubles={doubles},seuls={seuls},{go:.2f}Go,kv={capacite_kv}".format(
+                go=b["octets_doubles"] / 2**30, **{"capacite_kv": 0, **b})
+            corps += f",exclus={b.get('exclus', 0)},replis={b.get('inexacts', 0)}"          # 157 : inexacts rendus au naturel
+        return "+marlin(" + corps + ")"
+    if os.environ.get("ACVRAM_PROJ_MARLIN") == "0":
+        return "+marlin(off:ACVRAM_PROJ_MARLIN=0)"                                        # pièce 156 : repli demandé, NOMMÉ
+    return ""
+
+
 def role_marlin(module, attr: str) -> str:
     """Rôle d'un linéaire dense pour la disposition mixte : « mlp.gate_up », « mlp.down », « gdn.out », sinon ""."""
     nom = type(module).__name__
@@ -1090,13 +1115,15 @@ def preparer_disposition_marlin(modele) -> dict:
     from . import marlin_port as MP
     vide = {"doubles": 0, "seuls": 0, "octets_doubles": 0, "exclus": 0, "en_flux": 0, "multi_retirees": 0}
     ext = get_extension()
-    manque = ("port Marlin non compilé (outils/banc-marlin-p1-18-09.py --compiler-seulement)"
+    manque = (f"port Marlin : compilation échouée ({MP.ECHEC_COMPILATION})"        # 161 : compilé une fois par empreinte
               if MP.charger(compiler=False) is None else
               "extension sans nvfp4_gemv_marlin" if ext is None or not hasattr(ext, "nvfp4_gemv_marlin2") else None)
     if manque:
         if _PROJ_MARLIN_POSEE == "1":
             raise RuntimeError(f"ACVRAM_PROJ_MARLIN=1 : {manque} — la disposition Marlin est refusée au chargement")
         interdire_marlin(modele)               # pièce 156 : au défaut, repli NOMMÉ au naturel, jamais un refus
+        # pièce 161 : dit dans TOUT journal (instrument en processus compris), pas seulement sur la ligne du service
+        print(f"[acvram] disposition Marlin : REPLI au naturel — {manque} ; cache {MP.dossier_cache()}", flush=True)
         return {**vide, "repli": manque.split(" (")[0]}
     sous_moe = set()
     for m in modele.modules():

@@ -1,5 +1,18 @@
 # Journal des changements
 
+* **24/09/2026 — pièce 166** : l'opt-in `ACVRAM_PREFILL=marlin` (pièce 147 L2, GEMM Marlin W4A16 au préfill de la disposition
+  unique, sans dépaquetage) est RETIRÉ, verdict FAUX : TTFT servi b=1 +4 / +27 / +35 % à 512 / 2 048 / 4 096 jetons, J/préfill
+  +5 / +28 / +36 %, KL 2,3-3 × les témoins (PPL par fenêtre tenue) — Marlin perd à grand M contre dépaquetage + cuBLAS ;
+  `ACVRAM_PREFILL` revient à `bf16 | w4a16 | w8a8 | w4a4`, `ACVRAM_PREFILL_MARLIN_MAX_M` disparaît. Détail :
+  revue/poste6-piece147L2-verdict-24-09.md ; mécanisme : acvram-memoire/MECANISMES.md.
+* **25/09/2026 — pièce 165** : `ACVRAM_GDN_PREFILL_LOT=1` est l'option TTFT des modèles Gated DeltaNet (Qwen3.5/3.8) :
+  au préfill de plusieurs séquences, les projections GDN du lot passent en un appel au lieu d'un par séquence. TTFT servi
+  sous 8 requêtes simultanées (Qwen3.8-27B-nvfp4) : **−18,6 %** (8 × 78 jetons, 431,5 → 351,1 ms) et **−15,7 %**
+  (longueurs mêlées, 466,6 → 393,6 ms). Elle reste en OPT-IN, car elle change la sortie au-delà du critère scellé :
+  accord d'argmax 98,38 % contre 99,19 % pour les séquences servies seules (Qwen3.8, 8 × 78), KL_max jusqu'à 2,2 × le
+  témoin (0,319 contre 0,146 ; 1,240 contre 0,568 sur Qwen3.5-35B-A3B). La PPL par séquence reste au niveau des témoins.
+  Détail : revue/poste5-piece165-verdict-24-09.md.
+
 * **24/09/2026 — pièce 156** : les linéaires NVFP4 des modèles DENSES sont servis par défaut en disposition Marlin unique
   (GEMV v2, TPB par forme) : +57 à +90 % de débit à b = 8, b = 1 inchangé (0,979 à 0,996), sortie qualifiée (KL sous 2 ×
   témoin, PPL identique), TTFT +2 à +4 ms (B/A 1,001 à 1,012 sur gemma4 31B et Qwen3.8-27B, invites de 512, 2 048 et
@@ -49,3 +62,14 @@
   keyé par empreinte sha256 des sources (comme `kernels/__init__.py`, pièce antérieure sur l'extension principale),
   sources copiées dans le cache, le moteur en service ne relance jamais ninja (charge le `.so` de son empreinte ou
   replie au naturel, raison imprimée). Détail : revue/poste6-piece161-verdict-24-09.md.
+
+* **24/09/2026 — pièce 162** : bilan chiffré matin/soir (`c10cfee5` contre `HEAD` `5375945b`), ABAB × 5, -lgc 2700,
+  Qwen3.8-27B-nvfp4 et gemma-4-31B-it-nvfp4-vision, b = 1 et b = 8, plus TTFT à une invite de 2 048 jetons. Débit à
+  b = 8 : Qwen3.8 **+66,66 %** (274,4 → 457,3 t/s), gemma **+56,95 %** (252,4 → 396,8 t/s, dans la bande prédite
+  57-60 %). Énergie à b = 8 (J/jeton net, BAISSE = gain) : Qwen3.8 1,164 → 0,691 J/jeton (**+40,65 %** d'économie),
+  gemma 1,265 → 0,803 J/jeton (**+36,53 %**). TTFT inchangé aux deux modèles (± 1 %, Marlin/GDN sont des leviers de
+  décodage, pas de prefill). Isolation des deux leviers (Qwen3.8, HEAD seul, b = 8, `ACVRAM_GDN_ETAT_EN_PLACE`,
+  `ACVRAM_GDN_CONV_FUSEE`, `ACVRAM_GDN_RES_DIFFERE`, `ACVRAM_GDN_PORTES_NOYAU` (F1), `ACVRAM_GDN_NORME_FUSEE` (F3),
+  `ACVRAM_NORME_REGISTRES` (F6) tous à 0) : GDN seul **+8,76 %** de débit (bande prédite 3-15 % tenue), Marlin seul
+  (déduit) **+53,5 %** ; composition vérifiée 1,535 (marlin) × 1,0876 (gdn) = 1,670 contre 1,667 mesuré directement
+  (écart 0,2 %). Détail : scratchpad/poste2-piece162-bilan-24-09/verdict-final.md.
