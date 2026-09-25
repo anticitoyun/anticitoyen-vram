@@ -83,6 +83,7 @@ VARIABLES_LUES = {
     "ACVRAM_DEPAQ_PARTAGE",     # kernels : 172, poids déquantifié partagé par la boucle par séquence (défaut 1, au bit)
     "ACVRAM_GDN_PORTES_NOYAU",  # engine/gdn.py : 156 F1, portes dans le noyau fla (défaut 1, ± ulp)
     "ACVRAM_GDN_NORME_FUSEE",   # engine/gdn.py : 156 F3, norme gated Triton (défaut 1, ± ulp)
+    "ACVRAM_GDN_AB_FLUX",       # engine/gdn.py : 194 b2, β‖α sur un second flux pendant qkv‖gate (défaut 1, au bit ; 0 témoin)
     "ACVRAM_GDN_Z_BF16",        # engine/gdn.py : 182, z sans cast fp32 au décodage (défaut 1, au bit)
     "ACVRAM_GDN_QKV_GATE",      # engine/gdn.py : 176, qkv‖gate INT8 en une pile au décodage (défaut 1, au bit)
     "ACVRAM_NORME_REGISTRES",   # engine/layers.py : 156 F6, RMSNorm en registres (défaut 1, au bit)
