@@ -34,3 +34,12 @@ construction, gain non chiffré. Le docstring d'`int8_matmul` (« tranche de 8 �
 Ma prémisse (NV↑) était fausse deux fois : la tranche réelle, puis le sens du levier. Un témoin existant
 (`ACVRAM_INT8_TRANCHE=12`) a tranché en 3 min de carte, sans une ligne de code. Relire l'occupation (ptxas) AVANT de
 chiffrer un levier « lire W moins souvent ».
+
+## Bascule au défaut (feu de chef, 1793f434)
+Défaut 6/6 dans `acvram_kernels.cu` (`int8_tranches()`, exposé dans l'extension), la table de régime et le CHANGELOG ;
+docstring d'`int8_matmul` corrigé. `test_defaut_tranche_6_et_temoins` : cassant (défaut remis à 16) ROUGE.
+Capture aux godets 1/2/8/16 (`capture-godets.py`, 09:20) : mixte-i8c et Coder-30B nvfp4, **8/8 ok**, lot = godet,
+0 repli eager. Suite complète sous verrou (09:28:01-09:34:54) : **2 801 passés, 1 échec** : `test_octets_retenus_dans_la_reserve`
+(179). Rejoué seul à 09:35, il est vert avec la tranche 6 comme avec 16 : l'échec dépend de l'ordre de la suite
+(allocations retenues par les tests précédents, même classe que la leçon de la 179) et ne vient pas de la 187. Il n'est
+pas corrigé ici.
