@@ -63,6 +63,13 @@ return b"\n".join(gardees).rstrip(b"\n") + b"\n"
 # (poussée puis annulée par 0bc30c13), qui portaient des chemins /home/… — retirés plutôt que réécrits.
 CHEMINS_RETIRES=(--path scratchpad/poste3-effaceur-23-09 --path scratchpad/poste3-thf-23-09
                  --path-glob 'scratchpad/poste3-piece116-*' --path-glob 'scratchpad/poste3-piece126-*')
+# Binaires qui portent le chemin personnel (traces .nsys-rep, .sqlite sous le seuil) : `--replace-text` ne touche pas un blob binaire,
+# ils sont retirés de l'historique (chef, 25/09 : absents de main, rien n'est perdu — le contrôle d'arbre le rend faux sinon).
+# Lus commit par commit (pickaxe puis grep du blob à ce commit), jamais par extension : un binaire sans le chemin reste.
+BINAIRES=$(git -C "$M" log --all -S"/home/$UTILISATEUR" --numstat --format=%H | awk 'NF==1 {c=$1; next} $1=="-" && $2=="-" {print c, $3}' \
+           | while read -r c f; do git -C "$M" grep -a -q -e "/home/$UTILISATEUR" "$c" -- "$f" 2>/dev/null && echo "$f"; done | sort -u)
+N_BINAIRES=$(printf '%s\n' "$BINAIRES" | grep -c . || true)
+for f in $BINAIRES; do CHEMINS_RETIRES+=(--path "$f"); done
 # Seules les branches (et tags) sont réécrites : refs/dolt/data (beads) garde ses objets et son hash — `--refs` = mode partiel,
 # sans gc ni expiration automatiques (faits plus bas), sans retrait du remote.
 REFS=$(git -C "$M" for-each-ref --format='%(refname)' refs/heads refs/tags)
@@ -117,12 +124,30 @@ T_APRES=$(taille); P_APRES=$(compte)      # après le gc : en mode partiel, filt
   echo "supprimés hors attendus : ${D_HORS:-aucun} · attendus non supprimés : ${D_MANQUANTS:-aucun} · lignes ajoutées sans remplacement : $LIGNES_HORS"
   echo; echo "## Binaires de main qui portent encore /home/$UTILISATEUR (replace-text ne touche pas les binaires) : $(printf '%s\n' "$BIN_HOME" | grep -c . || true)"
   [ -n "$BIN_HOME" ] && printf '%s\n' "$BIN_HOME" | sed 's/^/* /'
+  echo; echo "## Binaires retirés de l'historique parce qu'ils portaient /home/$UTILISATEUR ($N_BINAIRES)"; printf '%s\n' "$BINAIRES" | sed 's/^/* /'
   echo; echo "## Commits devenus vides, retirés ($N_VIDES)"; printf '%s\n' "$VIDES" | sed 's/^/* /'
   echo; echo "## Blobs retirés ($N_GROS)"; printf '%s\n' "$GROS" | sed 's/^/* /'
   echo; echo "## Diff d'arbre main (source → réécrit) — attendu : seulement les blobs retirés et les fichiers dont un chemin a été remplacé"
   echo '```'; printf '%s\n' "$DIFF"; echo '```'
   echo; echo "Chemins retirés de l'historique : scratchpad/poste3-effaceur-23-09, poste3-thf-23-09, poste3-piece116-*, poste3-piece126-* (fusion c392fe08, annulée par 0bc30c13)."
   echo "Remplacements : \`/home/$UTILISATEUR\` → \`~\`, \`/tmp/claude-<uid>/-home-…\` → \`/tmp/claude-session\` (blobs texte seulement : filter-repo laisse les binaires)."
+  cat <<'PROCEDURE'
+
+## Reprise des postes après la purge RÉELLE (chaque poste, une fois ; le chef d'abord)
+La purge réécrit toutes les branches distantes (`push --mirror`) ; `refs/dolt/data` (beads) est poussée telle quelle, son hash ne change pas.
+Conditions avant : pause complète du circuit, TOUT poussé (aucun commit local non poussé : ce qui ne l'est pas devra être rebasé à la main).
+1. Dépôt principal : `git fetch --prune origin` puis `git reset --hard origin/main` (les anciens commits ne sont plus joignables depuis origin).
+2. Chaque worktree (`git worktree list`) : `git -C <worktree> reset --hard origin/<branche>` ; branches locales sans distante (worktree-agent-*,
+   branches déjà fusionnées) : `git worktree remove <chemin>` puis `git branch -D <branche>` ; `git worktree prune`.
+3. Commit local non poussé sur une branche réécrite : `git rebase --onto origin/<b> <ancien origin/<b>> <b>` (l'ancien sha se lit dans
+   `filter-repo/commit-map` du miroir : ancien → nouveau) ; en cas de doute, recloner et réappliquer le diff (`git diff` sauvé avant).
+4. Beads : rien à faire (`refs/dolt/data` inchangée, `.beads/` local intact) ; `bd dolt pull` doit être sans effet.
+5. Purger les anciens objets locaux : `git reflog expire --expire=now --all && git gc --prune=now` (sinon le 1 G reste sur disque, sans danger).
+6. Contrôle : `git rev-list --count --all` = « commits après » du rapport ; `git cat-file -t <ancien sha de main>` échoue après le gc ;
+   `git ls-remote origin refs/dolt/data` = le hash du rapport.
+7. GitHub public : instantané sans historique, à rejouer par `outils/publier-github.sh --pousser` (rien à rebaser là-bas).
+8. Sessions : chaque poste est relancé neuf (`rafraichir-poste`), son worktree refait depuis le nouveau main ; le chef vérifie la reprise.
+PROCEDURE
 } > "$R"
 echo "rapport : $R"; sed -n '1,12p' "$R"
 
