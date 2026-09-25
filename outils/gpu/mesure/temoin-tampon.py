@@ -10,6 +10,9 @@ DEUX CHOSES A PROUVER, pas une :
      n'est pas un remede.
 """
 import os, sys, zlib, torch
+# Pièce 211 : racine dérivée de __file__ — sans ceci, l'import acvram retombe sur l'installation
+# editable et la garde a86fa1dd refuse depuis un worktree (constat poste5, 25/09, comme la 168).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 if torch.cuda.device_count() != 1:
     raise SystemExit("REFUS : une seule carte doit etre visible")
 from acvram.engine.loader import load_model

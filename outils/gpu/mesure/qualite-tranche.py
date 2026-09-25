@@ -19,6 +19,9 @@ Ce qui compte est l'amplitude, comparee a une reference qui ne doit rien au
 decoupage — l'ecart entre deux appels IDENTIQUES, qui donne le bruit du noyau.
 """
 import os, sys, torch
+# Pièce 211 : racine dérivée de __file__ — sans ceci, l'import acvram retombe sur l'installation
+# editable et la garde a86fa1dd refuse depuis un worktree (constat poste5, 25/09, comme la 168).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 if torch.cuda.device_count() != 1:
     raise SystemExit(f"REFUS : {torch.cuda.device_count()} cartes visibles")
 os.environ.pop("ACVRAM_PA_CHUNK", None)

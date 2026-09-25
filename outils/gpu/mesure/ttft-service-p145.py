@@ -14,7 +14,12 @@ import time
 
 import httpx
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Pièce 211 (garde d'import a86fa1dd, comme la 168) : la racine doit venir de CE script, jamais
+# de l'installation editable — sinon la sonde de regime d'energie.py importe l'arbre principal
+# depuis un worktree et la garde refuse, nommement, « indisponible » (constat poste5, 25/09).
+_ICI = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_ICI))))
+sys.path.insert(0, _ICI)
 from energie import Energie, repos  # noqa: E402
 
 URL = os.environ["TTFT_URL"].rstrip("/")
