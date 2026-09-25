@@ -5,7 +5,7 @@ Ordre de chef (registre 05 h 36) : « 183 : INT8_GEMV_MAX abaissé (sortie chang
 contre 439 ms en déquant partagée + GEMM à L = 92.
 
 ## Code
-`kernels.int8_matmul` (kernels/__init__.py) : `ACVRAM_INT8_GEMV_MAX_PARTAGE` (vide = coupé, défaut inchangé). Dans la
+`kernels.int8_matmul` (kernels/__init__.py) : `ACVRAM_INT8_GEMV_MAX_PARTAGE` (0 = coupé, défaut inchangé). Dans la
 portée de B' seulement (`_W_PARTAGES` non nul : boucle par séquence d'une couche à récurrence linéaire), seuil
 = min(80, valeur). Hors portée (séquence seule, décodage, couches sans récurrence) : rien ne change. Variable dans
 `regime.VARIABLES` et `cli.VARIABLES_LUES`. Valeur essayée : 16 (non optimisée ; limite).

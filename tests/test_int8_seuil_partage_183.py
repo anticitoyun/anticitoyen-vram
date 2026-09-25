@@ -37,7 +37,7 @@ def _chemins(f):
 
 def test_dans_la_portee_deq_partagee_hors_portee_gemv(monkeypatch):
     lin, x = _lin(), _x()
-    monkeypatch.setattr(kernels, "_INT8_GEMV_MAX_PARTAGE", None)
+    monkeypatch.setattr(kernels, "_INT8_GEMV_MAX_PARTAGE", 0)
     ref, ch_ref = _chemins(lambda: lin(x))
     assert ch_ref.get("gemv") == 1 and "dequant" not in ch_ref
     monkeypatch.setattr(kernels, "_INT8_GEMV_MAX_PARTAGE", 16)
