@@ -35,6 +35,26 @@ def _couche(monkeypatch, mode, device="cuda"):
     return c, wa, wb
 
 
+def test_le_defaut_est_auto():
+    """175 b (chef, 25/09) : le gain (b=8 mixte −12 % par pas, au bit à chaque M) est SERVI — rouge si le défaut revient à
+    separe, dans le module comme dans la table de régime (la ligne [régime] et `acvram doctor` lisent la table)."""
+    import os
+    from acvram import regime
+    v = next(v for v in regime.VARIABLES if v.nom == "GDN_AB")
+    assert (gdn.AB_DEFAUT, v.defaut, v.torch) == ("auto", "auto", "separe")
+    if "ACVRAM_GDN_AB" not in os.environ:
+        assert gdn._GDN_AB == "auto"
+
+
+def test_le_bilan_se_remet_a_zero(monkeypatch):
+    """175 b : `ab_bilan_reinit` (appelée par le chargeur avant sa passe de fusion) efface le cumul des chargements précédents."""
+    monkeypatch.setitem(gdn.AB_BILAN, "fusionnees", 28)
+    monkeypatch.setitem(gdn.AB_BILAN, "raisons", {"scaler": 1})
+    gdn.ab_bilan_reinit()
+    assert gdn.AB_BILAN == {"fusionnees": 0, "raisons": {}}
+    assert gdn._ab_texte() in ("", " ab=auto(0)", f" ab={gdn._GDN_AB}(0)")
+
+
 def test_a_sec_ou_separe_rien_ne_change(monkeypatch):
     c, _, _ = _couche(monkeypatch, "concat", device="cpu")       # pas sur la carte : pas de fusion
     assert c.ab is None and "ab" not in type(c).__dict__, "un `ab` de classe masquerait le sous-module (prises 1-2)"
