@@ -389,7 +389,19 @@ class ModelSpec:
             im = self.intermediate_size
             par_jeton += 3 * im * 2 + im * 4
             plus_grosse = max(im * H, qkv * H) * 2
-        return T * par_jeton + plus_grosse
+        # Pièce 172 (B', `kernels.depaquetage_partage`) : au préfill de PLUSIEURS séquences, une couche à récurrence
+        # linéaire garde vivants, le temps de sa boucle, TOUS ses poids déquantifiés (qkv, gate, alpha, beta, out),
+        # et non plus un seul à la fois : sur Qwen3.8, 232 Mio contre les 178 de la plus grosse matrice ci-dessus.
+        return T * par_jeton + max(plus_grosse, self.poids_bf16_couche_lineaire_bytes())
+
+    def poids_bf16_couche_lineaire_bytes(self) -> int:
+        """Octets bf16 des linéaires d'UNE couche Gated DeltaNet déquantifiés ensemble (pièce 172) ; 0 sans couche
+        linéaire. qkv = 2·(têtes k·dk) + têtes v·dv, gate = têtes v·dv, alpha et beta = têtes v, out = têtes v·dv."""
+        nv, nk = self.linear_num_value_heads, self.linear_num_key_heads
+        if not nv:
+            return 0
+        kd, vd = nk * self.linear_key_head_dim, nv * self.linear_value_head_dim
+        return ((2 * kd + vd) + vd + 2 * nv + vd) * self.hidden_size * 2
 
     def etat_recurrent_bytes(self, max_batch: int = 16) -> int:
         """Octets d'état récurrent à provisionner, toutes couches linéaires.
