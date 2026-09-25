@@ -604,7 +604,11 @@ def generer(moteur):
                         dernier = maintenant
                         n += 1
     if premier is None:
-        raise RuntimeError("aucun jeton reçu")
+        # Pièce 210b : en CHAT, le premier fragment est souvent le rôle seul ({"role": "assistant", "content": ""}) —
+        # le TTFT se prend donc au premier CONTENU, à dessein (pas comme ttft-service-p145, où tout fragment à
+        # `choices` est un jeton). Mais « aucun jeton reçu » mentait quand le moteur en annonce : on le dit.
+        nj = (usage or {}).get("completion_tokens") or 0
+        raise RuntimeError(f"aucun texte reçu, {nj} jetons annoncés par le moteur" if nj else "aucun jeton reçu")
     morceaux = n
     # Le banc a compté les morceaux du flux ; le moteur, lui, annonce SON
     # nombre de jetons. On garde le sien pour le débit — c'est la grandeur que
