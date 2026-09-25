@@ -1431,8 +1431,8 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
 
     if ext is not None and t.qweight.is_cuda and n <= gemv_threshold:
         if n >= 2:
-            # Pièce 195 (opt-in ACVRAM_ETROIT_CANAL, hors bit) : par canal, K entier par programme,
-            # AVANT la vue g128 — jamais au défaut (ordre des sommes ≠ tranches du noyau servi)
+            # Pièce 195 (ACVRAM_ETROIT_CANAL, défaut 1 depuis le 25/09, hors bit) : par canal, K entier par
+            # programme, AVANT la vue g128 ; 0 = témoin nommé (ordre des sommes ≠ tranches du noyau d'avant)
             if n <= 16 and not sortie_fp32 and xf.dtype == torch.bfloat16:
                 from . import gemm_etroit
                 geo = gemm_etroit.geometrie_canal(*t.qweight.shape) if gemm_etroit.canal_actif() else None
