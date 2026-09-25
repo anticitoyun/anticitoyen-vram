@@ -4355,18 +4355,6 @@ __global__ void kv_write_int8_kernel(
         if (threadIdx.x == 0) {
             float m = 0.f;
             for (int i = 0; i < nw; ++i) m = fmaxf(m, red[i]);
-            // anticitoyen-vram-thf, clos (piece 109, ordre chef 24/09) : le
-            // ticket croyait la division IEEE (`__fdiv_rn`) necessaire pour
-            // accorder le noyau au jumeau torch ; verifie au bit (sonde
-            // kv_write_int8_v_debug + 1000 tirages vs main), c'est l'INVERSE :
-            // la sortie SERVIE par defaut (repli "int8" de loader.py:196) suit
-            // deja la convention "multiplication par le reciproque approche
-            // sous fast_math", identique des DEUX cotes (kvcache.py:494 s'y
-            // accorde par une optimisation ATen, pas par construction). Rendre
-            // ce noyau IEEE-exact le desaccordait du jumeau ET de main (569
-            // ecarts / 1000 tirages). Code redevenu identique a main au bit ;
-            // ne pas reintroduire __fdiv_rn ici sans mesure qui le justifie
-            // (changerait une sortie servie, decision utilisateur).
             red[0] = fmaxf(m / 127.f, 1e-8f);
         }
         __syncthreads();
@@ -4413,77 +4401,6 @@ void kv_write_int8(torch::Tensor k, torch::Tensor v, torch::Tensor slots,
         reinterpret_cast<__half *>(ks.data_ptr()),
         reinterpret_cast<__half *>(vs.data_ptr()), H, D, (int)bs,
         (long)kk.stride(0), (long)vv.stride(0));
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-}
-
-// -- pièce 109 (ordre chef, 24/09) : sonde de débogage opt-in, copie EXACTE
-// de la boucle V de kv_write_int8_kernel (même .cu, mêmes flags de
-// compilation, donc même comportement de contraction éventuelle), UN seul
-// bloc/une seule tête, qui écrit en plus les bits fp32 de l'échelle (avant
-// cast fp16) et du ratio x/échelle (avant l'arrondi __float2int_rn) pour
-// l'élément [d]. Ne touche à aucun chemin existant : nouveau nom de noyau,
-// nouvelle fonction hôte, aucun appelant Python actuel ne la voit.
-__global__ void kv_write_int8_v_debug_kernel(
-    const __nv_bfloat16 *__restrict__ v, float *__restrict__ dbg,
-    int D, int d_cible) {
-    __shared__ float red[8];
-    float amax = 0.f;
-    for (int i = threadIdx.x; i < D; i += blockDim.x)
-        amax = fmaxf(amax, fabsf(__bfloat162float(v[i])));
-    for (int o = 16; o > 0; o >>= 1)
-        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
-    const int nw = (blockDim.x + 31) >> 5;
-    if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = amax;
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        float m = 0.f;
-        for (int i = 0; i < nw; ++i) m = fmaxf(m, red[i]);
-        red[0] = fmaxf(__fdiv_rn(m, 127.f), 1e-8f);
-    }
-    __syncthreads();
-    const float sc = red[0];
-    if (threadIdx.x == d_cible) {
-        const float x = __bfloat162float(v[d_cible]);
-        const float ratio = __fdiv_rn(x, sc);
-        dbg[0] = sc;               // échelle fp32 complète, telle qu'utilisée par la division
-        dbg[1] = ratio;            // ratio avant __float2int_rn
-        dbg[2] = __half2float(__float2half(sc));  // échelle après cast fp16 (stockage)
-        dbg[3] = (float)__float2int_rn(ratio);     // arrondi réel du noyau
-        dbg[4] = x;
-        dbg[5] = amax;             // amax du warp local (avant réduction inter-warp finale, pour ce thread)
-    }
-}
-
-void kv_write_int8_v_debug(torch::Tensor v_tete, torch::Tensor dbg, int64_t d_cible) {
-    CHECK_CUDA(v_tete); ACVRAM_DEVICE_GUARD(v_tete);
-    TORCH_CHECK(v_tete.dim() == 1, "sonde 109 : v_tete = [D] bf16 d'une seule tete");
-    const int D = v_tete.size(0);
-    const int th = std::min(256, (D + 31) / 32 * 32);
-    kv_write_int8_v_debug_kernel<<<1, th, 0, at::cuda::getCurrentCUDAStream()>>>(
-        reinterpret_cast<const __nv_bfloat16 *>(v_tete.contiguous().data_ptr()),
-        dbg.data_ptr<float>(), D, (int)d_cible);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-}
-
-// -- pièce 109 suite (ordre chef, 24/09) : mesure DIRECTE de l'erreur de
-// `1.f/sc` (fast-math, MEME fichier/flags que kv_write_int8_kernel — le seul
-// site qui compte, `kv_write_int8_kernel:4373`) contre la division vraie
-// `__fdiv_rn(1.f, sc)`, sur un échantillon réel de sc. `sc_in` (fp32),
-// `sortie[i] = 1.f/sc_in[i]` (approx, comme le noyau reel) ; comparé côté
-// hôte à `1.0/sc` (numpy, double->float, IEEE correct) pour l'erreur
-// relative — pas un chiffre cité sans preuve, mesuré sur CE matériel/build.
-__global__ void kv_rcp_approx_debug_kernel(const float *__restrict__ sc_in,
-                                            float *__restrict__ inv_out, int n) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) inv_out[i] = 1.f / sc_in[i];
-}
-
-void kv_rcp_approx_debug(torch::Tensor sc_in, torch::Tensor inv_out) {
-    CHECK_CUDA(sc_in); ACVRAM_DEVICE_GUARD(sc_in);
-    const int n = sc_in.numel();
-    const int th = 256, bl = (n + th - 1) / th;
-    kv_rcp_approx_debug_kernel<<<bl, th, 0, at::cuda::getCurrentCUDAStream()>>>(
-        sc_in.data_ptr<float>(), inv_out.data_ptr<float>(), n);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -4707,15 +4624,12 @@ __device__ __forceinline__ void kvc_quant_par_jeton(
     if (threadIdx.x == 0) {
         float m = 0.f;
         for (int i = 0; i < nw; ++i) m = fmaxf(m, red[i]);
-        // anticitoyen-vram-thf : meme correctif que kv_write_int8_kernel — cette
-        // fonction en est la copie pour V du chemin canal (C5-b), avec le meme
-        // ecart de division approchee sous --use_fast_math.
-        red[0] = fmaxf(__fdiv_rn(m, 127.f), 1e-8f);
+        red[0] = fmaxf(m / 127.f, 1e-8f);
     }
     __syncthreads();
-    const float sc = red[0];
+    const float sc = red[0], inv = 1.f / sc;
     for (int i = threadIdx.x; i < D; i += blockDim.x) {
-        const int q = __float2int_rn(__fdiv_rn(__bfloat162float(src[i]), sc));
+        const int q = __float2int_rn(__bfloat162float(src[i]) * inv);
         dst[i] = (signed char)max(-127, min(127, q));
     }
     if (threadIdx.x == 0) *echelle = __float2half(sc);
@@ -8506,16 +8420,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "INT4 : GEMV pour tous les experts actifs d'une couche, en un lancement");
     m.def("kv_write_int8", &kv_write_int8,
           "Cache KV : quantification INT8 et dispersion en un lancement");
-    m.def("kv_write_int8_v_debug", &kv_write_int8_v_debug,
-          py::arg("v_tete"), py::arg("dbg"), py::arg("d_cible"),
-          "Piece 109 (sonde debug, ordre chef 24/09) : copie exacte de la boucle V de "
-          "kv_write_int8_kernel pour UNE tete, ecrit dbg=[echelle fp32, ratio avant arrondi, "
-          "echelle apres cast fp16, arrondi __float2int_rn, x, amax]");
-    m.def("kv_rcp_approx_debug", &kv_rcp_approx_debug,
-          py::arg("sc_in"), py::arg("inv_out"),
-          "Piece 109 suite (sonde debug, ordre chef 24/09) : 1.f/sc sous les memes flags que "
-          "kv_write_int8_kernel:4373 -- mesure directe de l'erreur du reciproque rapide sur un "
-          "echantillon de sc reels, contre 1.0/sc (numpy) cote hote");
     m.def("kv_write_k8v4", &kv_write_k8v4,
           "Piece 104 : cache KV k8v4, K int8 par jeton + V int4 par groupe de 32 canaux, "
           "un lancement ; vc4 uint8 [.., D/2], vs4 half [.., D/32]");
