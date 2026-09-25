@@ -66,11 +66,15 @@ def test_octets_retenus_dans_la_reserve(monkeypatch):
     lins = [(_lin(10240, 5120, 1), 5120), (_lin(6144, 5120, 2), 5120), (_lin(48, 5120, 3), 5120),
             (_lin(48, 5120, 4), 5120), (_lin(5120, 6144, 5), 6144)]
     monkeypatch.setattr(kernels, "_DEPAQ_PARTAGE", True)
+    # Retenu = ce que la SORTIE de la portée rend. « après − avant » comptait aussi les allocations persistantes
+    # faites pendant la portée (espace de travail cuBLAS au premier GEMM d'une forme) : vert seul, rouge dans la
+    # suite complète (179, 25/09).
     torch.cuda.synchronize()
     with kernels.depaquetage_partage():
-        avant = torch.cuda.memory_allocated()
         for lin, k in lins:
             lin(_x(k)[:92]); lin(_x(k)[92:184])
         torch.cuda.synchronize()
-        retenu = torch.cuda.memory_allocated() - avant
+        dedans = torch.cuda.memory_allocated()
+    torch.cuda.synchronize()
+    retenu = dedans - torch.cuda.memory_allocated()
     assert 0 < retenu <= spec.poids_bf16_couche_lineaire_bytes(), (retenu, spec.poids_bf16_couche_lineaire_bytes())
