@@ -1,5 +1,11 @@
 # Journal des changements
 
+* **25/09/2026 — pièce 187** : le GEMV int8 traite ses activations par tranches de **6** au lieu de 16
+  (`ACVRAM_INT8_TRANCHE` pour N ≤ 16, `ACVRAM_INT8_TRANCHE_PREFILL` au-delà ; 16 = témoin d'avant). Sortie **identique au
+  bit** : test sur les poids réels du mixte (N 2-80, bf16 et fp32) et bras cassant. À NV ≤ 6, le noyau tient en 128
+  registres, soit 2 blocs par SM au lieu d'un, ce qui l'emporte sur les relectures des poids. GEMV −22 à −44 % de 16 à 78
+  jetons ; servi sur Qwen3.8-27B mixte-i8c : **+6,65 %** au banc chat b=8, **+10,93 %** à b=16, J/jeton −3 à −5 % ;
+  Qwen3.8-27B-nvfp4 (pas d'int8 servi) inchangé. Détail : revue/poste5-piece187-verdict-25-09.md.
 * **25/09/2026 — pièce 179** : (1) B' (172) couvre aussi la déquantification int8 du préfill (`int8_matmul` au-delà de
   `ACVRAM_INT8_GEMV_MAX` = 80 lignes) : au bit (tests, bras cassant, logits de l'alias mixte) ; préfill 8 × 92 −51 %,
   8 × 120 −49 % sur l'alias mixte ; sans effet sous 80 jetons par invite (GEMV). (2) **Fenêtre d'admission au défaut**

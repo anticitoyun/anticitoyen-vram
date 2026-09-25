@@ -171,7 +171,10 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("PA_ETAPE", "", None, None, "étape de l'attention paginée"),
     Variable("PA_SANS_COMPTEUR", "", None, None, "attention paginée sans compteur"),
     Variable("INT8_GEMV_WARP", "", None, None, "warps du GEMV int8 (lu dans le .cu)"),
-    Variable("INT8_TRANCHE", "", None, None, "découpage du GEMV int8 (12 = ancien, témoin ; lu dans le .cu)"),
+    Variable("INT8_TRANCHE", "", None, None, "découpage du GEMV int8 à N ≤ 16 : 4/6/8/10/12/16 (vide = 6, DÉFAUT depuis la "
+             "pièce 187, au bit ; 16 = témoin d'avant, 12 = témoin du 14/09 ; lu dans le .cu, `ext.int8_tranches()`)"),
+    Variable("INT8_TRANCHE_PREFILL", "", None, None, "pièce 187 : découpage du GEMV int8 à N > 16 (préfill ≤ INT8_GEMV_MAX), "
+             "4/6/8/10/12/16 (vide = INT8_TRANCHE) ; au bit ; lu dans le .cu"),
     Variable("ECO", "", None, None,
              "poste7-eco-2700-defaut-19-09 § 1 : mode éco d'horloge DEMANDÉ par un instrument pour ses bras A/B (2700 | 2100 | off), jamais pour le service — le service lit config.json (\"eco\": \"2700\" par défaut) ; l'effectif est sur la ligne de régime (eco=<demandé>(<effectif>)) et un instrument ne publie pas si demandé ≠ effectif"),
     Variable("DOUBLE_DISPOSITION_DIAG", "0", None, "0",
