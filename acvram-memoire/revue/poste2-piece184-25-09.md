@@ -34,3 +34,64 @@
   2 des 3 (lot 1 et lot 2), donc partiellement gênant : un mécanisme reste ouvert, prédiction (1)/(3)/(4) toutes
   réfutées ou sans objet, sans remplaçant confirmé.
 * **durée** : prise à sec sur trace existante, < 10 min, aucune carte utilisée.
+
+## Reprise (ordre chef) — prise réelle < 15 min de banc (attente carte hors budget, poste5 179b)
+
+* **instrument** : instrument 181 (`serveur-trace.py`, inchangé) + `ACVRAM_TRACE_STEPS=1` (existant,
+  `runner.py:1654-1659`). Rejeu identique (mixte, chat b=8, `-lgc 2700`), `poste2-p184-25-09/prise.sh`.
+* **commit** : `poste2-p184` (worktree depuis `origin/main`). **scellé** : `scratchpad/poste2-p184-25-09/scelle.md`
+  (prédiction avant). **durée mesurée** : 25,1 s de banc ; la file d'attente du verrou (poste5, 179b) a coûté
+  ≈ 10 min hors budget de la pièce elle-même.
+* **régime** : `pipeline=1` (`ACVRAM_PIPELINE`, décodage à un pas de retard), `graphes_n=0 captures=0 replays=0`
+  — **aucun graphe CUDA engagé cette prise** : le chemin de décodage est `_plain_decode_pipeline`
+  (`acvram/engine/pipeline.py:174`), pas `_plain_decode_sync`. Ma prédiction (surcoût dans `avant`/graphe,
+  `runner.py:1740-1745`) était **FAUSSE de fait** : ce chemin n'est jamais emprunté sous pipeline actif ; aucun
+  graphe n'a été capturé ni rejoué (`captures=0`), donc « rejeu ou capture de graphe » est sans objet ici.
+* **rejeu de la même trace** : les 3 pas ≈86-91 ms réapparaissent aux mêmes positions relatives (63, 255,
+  dernier), même écart 255−63 = 192 = 3 × 64.
+
+### type `run=8 att=0 fin=0` (2 occurrences, idx 63 et 255, gap exact 192 = 3×64)
+
+Chemin : lot stable → branche `_plain_decode_pipeline` sans recomposition, `acvram/engine/pipeline.py:208-222`
+(`_pipeline_suite` + `event.synchronize()` + `_consommer`). Rien dans ce chemin ne dépend de run/att/fin.
+
+**Candidat identifié par la périodicité (192 = 3 × 64)** : `runner.py:1665` (`self._repin_pass()`, appelé à la
+FIN de chaque pas) avec cadence par défaut `ACVRAM_REPIN=64` jetons décodés (`runner.py:1677`, `1684`,
+`cadence_atteinte` dans `memory/repin.py`) — un gap exactement multiple de 64 sur deux occurrences n'est
+raisonnablement pas un hasard. Le corps (`runner.py:1693-1719`) parcourt toutes les couches MoE et fait un
+rapatriement hôte (`m._usage_routage.detach().to("cpu").tolist()`, `runner.py:1702-1703`) — un vrai aller-retour
+carte→hôte, périodique, indépendant de run/att/fin : cohérent avec le profil observé.
+**Non confirmé au bit** : `self._pin` (`runner.py:721`) doit être non vide pour que le corps s'exécute
+(`runner.py:1691`, sinon retour immédiat, quasi gratuit) ; `couches_exilées=0/64` dans la ligne de régime ne dit
+pas si `_pin` est vide ou juste sans échange à faire. **Test qui tranche, non fait ici (hors budget)** :
+`ACVRAM_REPIN=0` sur le même banc → si les deux pas ≈90 ms disparaissent, confirmé ; sinon, cadence 64
+coïncidente, à rouvrir.
+
+### type `run=0 att=0 fin>0` (confirmé, mécanisme identifié précisément)
+
+Chemin exact : `acvram/engine/pipeline.py:198-206` — quand la composition du lot pendant change (ici les 4
+séquences en vol finissent toutes, `roster_avant` devient vide), `_plain_decode_pipeline` ne fait pas UN pas
+mais DEUX empaquetés dans le même `step()` : `pend["event"].synchronize()` + `_consommer(...)` (qui appelle
+`_finish` par séquence finissante, `runner.py:1383-1401`, hash des blocs pleins + libération allocator) **PUIS**
+`_pipeline_amorcer(...)` (`pipeline.py:108-136`, un décodage complet : `_build_batch`, `graphs.preparer`,
+rejeu ou eager) pour amorcer le pas suivant. Le coût n'est donc pas dominé par le nombre de séquences qui
+finissent (ma première lecture, 184-a) mais par la **compression de deux pas de décodage en un seul**,
+mécanique de la pièce 14/09 (bead runner, doc en tête de fonction `pipeline.py:174-184`).
+
+### chiffrage révisé
+
+* type `run=8/fin=0` (repin, candidat) : ≈ +67 ms, 2 fois par 4 lots mesurés → ≈ 34 ms/lot en moyenne (0,5 %).
+* type `fin>0` (double pas, confirmé mécanisme) : ≈ +72 ms, 1 fois par 4 lots (recomposition à la fin d'un lot,
+  quand toutes les séquences finissent ensemble — le cas de ce banc, 8 requêtes synchrones) → ≈ 18 ms/lot en
+  moyenne (0,3 %). **Ce n'est PAS "jusqu'à 150 ms par lot"** (hypothèse de chef) : un seul pas de recomposition
+  par lot ici, pas un par séquence — le double-pas ne se répète pas par séquence finissante, seulement à la
+  transition de composition.
+* **total mesuré : ≈ 0,8 % du lot**, cohérent avec la 181 (9,8 ms/lot moyen sur 4 lots, dominé par ces 3 pas
+  isolés) — **inférieur à tout le hors-calcul de la 181** (question de chef tranchée par la mesure : non).
+* **levier** : pour le type confirmé, éviter le double-pas à la recomposition coûterait un redesign du
+  pipeline (hors budget, gain < 0,3 %/lot) — non prioritaire. Pour le type candidat (repin), `ACVRAM_REPIN=0`
+  l'élimine si confirmé, au prix de perdre le réajustement à chaud du pin (compromis, pas un gain net).
+* **issue qui m'aurait gêné** : confirmée en partie — ma prédiction sur le graphe CUDA était fausse par
+  construction du chemin (pipeline actif ⇒ jamais `_plain_decode_sync`), pas par une mesure qui l'aurait
+  réfutée ; noté pour ne pas prédire sur un chemin sans vérifier au préalable lequel des deux (`sync` vs
+  `pipeline`) est actif dans le régime servi.
