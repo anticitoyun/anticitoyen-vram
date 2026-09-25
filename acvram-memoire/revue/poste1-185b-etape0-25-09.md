@@ -29,3 +29,25 @@ Suite (étape 1, au bit, chaque levier seul) : (a) diagnostic direct de H : mêm
 programmes, µs par octet contre max/moy (≤ 2 min, aucun code moteur) ; (b) épilogue : réduction du dernier arrivé
 déroulée (même ordre de somme) ; (c) segments GDN : grille compacte des 864 programmes actifs (160 vides aujourd'hui),
 les plus longs d'abord.
+
+## Étape 1 — à sec (gel du 25/09 : purge GitLab, aucun code neuf) ; à prendre après la purge, dans cet ordre
+**(a) Test direct de H, sans code moteur (banc, ≤ 2 min).** Même K = 6144 (ng = 48), `decouper_k` servi, N choisi :
+| N | tuiles × tranches = prog | gpt | max prog/SM | octets int8 max par SM | octets totaux |
+|---|---|---|---|---|---|
+| 2560 | 40 × 8 = 320 | 6 | 2 | 98 304 | 15,7 Mo |
+| 5120 (servi) | 80 × 5 = 400 | 10 | 3 | 245 760 | 31,5 Mo |
+| 5440 | 85 × 4 = 340 | 12 | 2 | 196 608 | 33,4 Mo |
+| 6400 | 100 × 4 = 400 | 12 | 3 | 294 912 | 39,3 Mo |
+Couple décisif : 5440 contre 6400, même gpt. Par les octets seuls, t(5440)/t(6400) = 0,85 ; si H vaut (charge du SM le
+plus chargé), 0,67. **H validée si le rapport est ≤ 0,75, réfutée s'il est ≥ 0,82.** Contrôle : 5120 contre 5440
+(servi contre 2 prog/SM exacts), où H prédit 5440 plus RAPIDE malgré 6 % d'octets en plus.
+**(b) Épilogue déroulé (au bit).** La réduction du dernier arrivé lit ses `tranches` partiels dans une boucle
+dynamique (`gemm_etroit.py`, `_etroit_reduit_kernel`, `for t in range(0, tranches)`, lectures `.cg`), probablement
+une latence L2 par itération. Variante : `tranches` en constexpr, lectures émises d'un bloc, somme dans le même ordre
+0..T−1. Prédit : −0,3 à −0,5 µs par tranche au-delà de la première, soit ≈ −0,15 ms/pas (o/out 64 × 5 tranches,
+segments 48 × 4). Sondes à mesurer d'abord : noyau sans épilogue (store seul) et noyau sans lecture (acc nul).
+**(c) Segments GDN (au bit).** Grille 256 × 4 = 1 024 programmes, dont 160 vides : les tuiles qkv ont 3 tranches de
+14 groupes, les tuiles gate 4 tranches de 10. Grille compacte des 864 actifs, programmes de 14 groupes d'abord
+(ordonnancement du plus long au plus court) : même arithmétique par programme, même réduction. Prédit −3 à −5 µs
+par appel × 48 ≈ −0,15 à −0,25 ms/pas.
+Chaque levier sera seul dans son commit, avec son test au bit et son ABBA servi (ordre de chef).
