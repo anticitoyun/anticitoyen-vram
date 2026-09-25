@@ -237,3 +237,53 @@ def test_c15_un_noeud_le_compteur_porte_la_reduction():
         assert _ulp_max(ref, bon) <= 1.0
     finally:
         ge._programmes = orig
+
+
+# --- pièce 195 : noyau K entier par canal, opt-in ACVRAM_ETROIT_CANAL (hors bit, jamais au défaut) ---
+
+def _montage_canal(m, n, k, graine=0):
+    """INT8 symétrique par canal (échelle [N, 1], zéro 128, groupe = K), comme les tenseurs de l'alias mixte-i8c."""
+    torch.manual_seed(graine)
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    q = torch.randint(0, 256, (n, k), dtype=torch.uint8, device=dev)
+    s = (torch.rand(n, 1) * 0.01 + 0.005).to(torch.float16).to(dev)
+    t = INT8Tensor(q, s, torch.full((n, 1), 128, dtype=torch.uint8, device=dev), k, (n, k))
+    x = (torch.randn(m, k) * torch.logspace(-1, 1, m).unsqueeze(1)).to(dev)
+    return x.to(torch.bfloat16 if dev == "cuda" else torch.float16), t
+
+
+@pytest.mark.parametrize("m,n,k,geo", [(8, 5120, 6144, (32, 512, 8, 3)), (16, 1000, 640, (16, 128, 4, 2)), (2, 100, 200, (64, 256, 4, 4))])
+def test_195_le_canal_k_entier_suit_la_reference(m, n, k, geo):
+    ge = _ge()
+    x, t = _montage_canal(m, n, k)
+    assert ge.canal_eligible(t)
+    y = ge.gemm_canal(x, t, geo)
+    assert y.shape == (m, n) and y.dtype == x.dtype
+    w = (t.qweight.double() - 128) * t.scales.double()
+    ref = x.double() @ w.T
+    borne = x.double().abs() @ w.abs().T
+    assert int(((y.double() - ref).abs() > TOL * borne).sum()) == 0
+
+
+def test_195_le_canal_refuse_ce_qui_n_est_pas_par_canal():
+    ge = _ge()
+    _, t = _montage(4, 256, 512)                      # groupes de 128 : pas par canal
+    assert not ge.canal_eligible(t)
+    _, t = _montage_canal(4, 256, 512)
+    t.zeros[3, 0] = 127                               # un zéro ≠ 128 : refusé aussi
+    assert not ge.canal_eligible(t)
+
+
+def test_195_l_opt_in_est_ferme_au_defaut_et_le_regime_l_imprime(monkeypatch):
+    ge = _ge()
+    monkeypatch.delenv("ACVRAM_ETROIT_CANAL", raising=False)
+    monkeypatch.delenv("ACVRAM_ETROITES_FORME", raising=False)
+    ge.regler_forme(None)
+    assert not ge.canal_actif() and ge.etroites_texte() == "serie"
+    from acvram import regime
+    assert any(v.nom == "ETROIT_CANAL" and v.defaut == "0" for v in regime.VARIABLES)
+    monkeypatch.setenv("ACVRAM_ETROIT_CANAL", "1")
+    assert ge.canal_actif() and ge.etroites_texte() == "serie+canal(table)"
+    assert ge.geometrie_canal(1, 2) is None                              # forme non mesurée : reste sur le servi
+    monkeypatch.setenv("ACVRAM_ETROIT_CANAL", "32,512,8,3")
+    assert ge.geometrie_canal(5120, 6144) == (32, 512, 8, 3) and ge.etroites_texte() == "serie+canal(32x512x8x3)"

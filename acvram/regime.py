@@ -219,6 +219,8 @@ VARIABLES: tuple[Variable, ...] = (
              "pièce 36 : positions par tranche quand `echo` demande les logprobs de l invite (Engine.logprobs_invite) — borne la pointe de VRAM des logits [tranche, vocab] fp32"),
     Variable("ETROITES_FORME", "", None, None,
              "pièce 35 : forme du noyau étroit int8 `W,S` (warps, étages) — vide = 4,3 (défaut) ; la sortie est AU BIT quelle que soit la forme (ni l ordre des sommes en K ni celui des tranches ne changent), seule l occupation change ; ligne etroites=serie|w{W}s{S}"),
+    Variable("ETROIT_CANAL", "0", None, None,
+             "pièce 195 (opt-in, HORS BIT « ± 1 ulp ») : linéaires int8 symétriques par canal à 2 ≤ b ≤ 16 servies par `_etroit_canal_kernel` (K entier par programme, géométrie NInfer) — 0 = servi (vue g128, tranches) ; 1 = table par forme GEOMETRIE_CANAL ; `BN,BK,W,S` = géométrie imposée ; ligne etroites=…+canal(...) ; jamais au défaut, jamais posée par un lanceur du parc"),
     Variable("CAPTURE_MEM_MIN_MIO", "1024", None, None,
              "garde d interblocage de capture (22/09) : mémoire libre minimale (Mio) sous laquelle une capture de graphe est refusée (eager) — une allocation manquante DANS la capture attend sans fin"),
     Variable("CAPTURE_DELAI_S", "120", None, None,

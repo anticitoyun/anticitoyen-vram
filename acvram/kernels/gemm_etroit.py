@@ -357,9 +357,8 @@ if triton is not None:
 
 
 # (N, K) → (BN, BK, warps, étages), mesuré par `scratchpad/poste6-p195-25-09/banc-canal.py` (L2 froid, M = 8) ;
-# une forme absente prend _GEOMETRIE_CANAL_DEFAUT. Vide tant que le banc n'a pas parlé (scellé avant la mesure).
+# une forme absente reste sur le noyau servi. Vide tant que le banc n'a pas parlé (scellé avant la mesure).
 GEOMETRIE_CANAL: dict = {}
-_GEOMETRIE_CANAL_DEFAUT = (32, 512, 8, 3)
 
 
 def canal_actif() -> bool:
@@ -371,12 +370,14 @@ def canal_texte() -> str:
     return "table" if v == "1" else v.replace(",", "x")
 
 
-def geometrie_canal(N: int, k_pad: int) -> tuple[int, int, int, int]:
+def geometrie_canal(N: int, k_pad: int) -> Optional[tuple[int, int, int, int]]:
+    """Géométrie imposée (`BN,BK,W,S`), sinon celle de la table pour cette forme, sinon None : une forme que le banc
+    n'a pas mesurée (α/β int8 48 × 5120 de l'alias attn-gdn-i8c : 2 programmes à K entier) reste sur le noyau servi."""
     v = os.environ.get("ACVRAM_ETROIT_CANAL", "0")
     if "," in v:
         bn, bk, w, e = (int(t) for t in v.split(","))
         return bn, bk, w, e
-    return GEOMETRIE_CANAL.get((N, k_pad), _GEOMETRIE_CANAL_DEFAUT)
+    return GEOMETRIE_CANAL.get((N, k_pad))
 
 
 def canal_eligible(t) -> bool:
@@ -395,7 +396,9 @@ def gemm_canal(x: torch.Tensor, t, geometrie: Optional[tuple] = None) -> torch.T
     M, K = x.shape
     N, k_pad = t.qweight.shape
     assert M <= BM and K <= k_pad, (M, K, k_pad)
-    bn, bk, w, e = geometrie or geometrie_canal(N, k_pad)
+    geo = geometrie or geometrie_canal(N, k_pad)
+    assert geo is not None, ("forme sans géométrie mesurée", N, k_pad)
+    bn, bk, w, e = geo
     out = torch.empty(M, N, dtype=x.dtype, device=x.device)
     _etroit_canal_kernel[(-(-N // bn),)](
         x, t.qweight, t.scales, out, M, N, K, x.stride(0), t.qweight.stride(0), out.stride(0),

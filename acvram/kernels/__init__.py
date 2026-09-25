@@ -1368,9 +1368,10 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
             # AVANT la vue g128 — jamais au défaut (ordre des sommes ≠ tranches du noyau servi)
             if n <= 16 and not sortie_fp32 and xf.dtype == torch.bfloat16:
                 from . import gemm_etroit
-                if gemm_etroit.canal_actif() and gemm_etroit.disponible() and gemm_etroit.canal_eligible(t):
+                geo = gemm_etroit.geometrie_canal(*t.qweight.shape) if gemm_etroit.canal_actif() else None
+                if geo is not None and gemm_etroit.disponible() and gemm_etroit.canal_eligible(t):
                     CHEMINS_INT8["etroit_canal"] += 1
-                    y = gemm_etroit.gemm_canal(xf.contiguous(), t)[:, : t.shape[0]]
+                    y = gemm_etroit.gemm_canal(xf.contiguous(), t, geo)[:, : t.shape[0]]
                     return y.reshape(*orig_shape[:-1], t.shape[0])
             # C11 : un poids par canal (i8c) prend les chemins étroits par sa vue
             # g128 (mêmes codes, échelle répétée) — sinon 2 ≤ M ≤ 16 n'avait
