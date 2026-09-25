@@ -1886,6 +1886,27 @@ def _octets_marlin(manifest: dict) -> int:
     return doubles
 
 
+def _plus_grosse_nvfp4_marlin_bytes(manifest: dict) -> int:
+    """Pièce 153 (25/09) : le plus gros tenseur nvfp4 2D du manifeste (hors `lm_head`/`embed_tokens`,
+    couverts à part, et `mtp.*`), déquantifié en bf16 -- ce que `_marlin_seul` (kernels/__init__.py:
+    1121, pièce 134, disposition Marlin SEULE = défaut depuis la pièce 156) matérialise d'un coup dans
+    `depaqueter_marlin` à CHAQUE préfill de plus de 32 jetons, pas seulement au chargement. Absent de
+    `ModelSpec.activations_prefill_bytes` (qui ne connaît que l'architecture, pas la conversion : un
+    gate+up fusionné en un seul tenseur double la taille attendue d'un seul projecteur — 340 Mio
+    observés contre 170 prévus, échec b=8, 265,94 Mio libres, `poste4-p153-25-09/decode-b8.log`).
+    Lu ici et non dans `ModelSpec` : blanchir ce terme à toute architecture dense aurait sur-réservé
+    un modèle jamais fusionné (le 70B de poste3, verdict-palier1-bloc6-17-09) de +448 Mio pour rien."""
+    plus_gros = 0
+    for nom, t in manifest.get("tensors", {}).items():
+        if t.get("format") != "nvfp4" or len(t.get("shape", ())) != 2 or nom.startswith("mtp."):
+            continue
+        if nom in ("lm_head.weight", "model.embed_tokens.weight"):
+            continue
+        n, k = t["shape"]
+        plus_gros = max(plus_gros, n * k)
+    return plus_gros * 2                                            # bf16 dequant
+
+
 def _reserve_prefill(spec, max_model_len: Optional[int], manifest: dict,
                      plan: Optional[Plan] = None) -> int:
     """Octets transitoires à retirer des budgets (KV, exil) :
@@ -1902,7 +1923,8 @@ def _reserve_prefill(spec, max_model_len: Optional[int], manifest: dict,
     if spec is None:
         return 0
     ctx = int(max_model_len or 8192)
-    reserve = int(spec.activations_prefill_bytes(ctx)) + _octets_marlin(manifest)
+    reserve = int(spec.activations_prefill_bytes(ctx)) + _octets_marlin(manifest) \
+        + _plus_grosse_nvfp4_marlin_bytes(manifest)
     if plan is not None and plan.layers:
         reserve += _DENSE_SLOTS * max(int(l.attn_bytes) + int(l.mlp_bytes) for l in plan.layers)
         # P1 disposition UNIQUE (poste7-p1-disposition-unique-18-09) : la pile

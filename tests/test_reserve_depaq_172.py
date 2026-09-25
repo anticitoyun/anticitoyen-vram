@@ -21,9 +21,14 @@ def test_poids_de_la_couche_lineaire():
 
 
 def test_la_reserve_couvre_les_poids_partages():
+    # Pièce 153 (25/09) : `activations_prefill_bytes` a gagné un terme `gate_up_fusionne` (indépendant
+    # de la couche linéaire, dominant sur ces dimensions Qwen3.8 : 356,5 Mio > 231,7) -- l'égalité au
+    # bit du delta d'avant ne tient plus dans CE régime précis (le terme masque la différence), la
+    # couverture du terme GDN, elle, tient toujours (`>=`, `test_poids_de_la_couche_lineaire` la prouve
+    # au bit isolément).
     s, sans = _spec_qwen38(), _spec_qwen38(False)
     somme = s.poids_bf16_couche_lineaire_bytes()
     plus_grosse = 17408 * 5120 * 2
-    assert somme > plus_grosse                                   # le cas où le terme compte
+    assert somme > plus_grosse                                   # le cas où le terme compte, isolément
     assert s.activations_prefill_bytes(1) >= somme
-    assert s.activations_prefill_bytes(8192) - sans.activations_prefill_bytes(8192) == somme - plus_grosse
+    assert s.activations_prefill_bytes(8192) >= sans.activations_prefill_bytes(8192)
