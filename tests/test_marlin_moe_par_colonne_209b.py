@@ -211,14 +211,12 @@ def test_mma2_sur_marlin_refuse_une_pile_par_ligne(monkeypatch):
     bloc = _bloc_moe_jouet(E_, H, I_, top_k)
     monkeypatch.setattr(MOE_D, "_GEMV_LAYOUT", "marlin"); monkeypatch.setattr(MOE_D, "_PREFILL_GROUPED", "marlin")
     monkeypatch.setattr(MOE_D, "_MOE_W13", False); monkeypatch.setattr(MOE_D, "_MOE_DECODE_MMA_MARLIN", True)
-    assert bloc._try_build_stacks()
-    bloc._stacks_marlin = bloc._construire_marlin(bloc._stacks, bloc._stacks_awq, bloc._stacks_awq.get("hadamard", {}))
-    assert bloc._stacks_marlin is not None
+    assert bloc._try_build_stacks()                   # sous la disposition Marlin : piles Marlin construites, naturelle rendue
+    assert bloc._stacks_marlin is not None and bloc._stacks["gate_proj"][1] is None
     # la même pile, forcée par colonne (g[e] recopié) : ce que rend preparer_pile pour une pile à sous-normales
     for n in ("gate_proj", "up_proj", "down_proj"):
         w, sc, g, k, m = bloc._stacks_marlin[n]
         bloc._stacks_marlin[n] = (w, sc, g.reshape(-1, 1).expand(-1, w.shape[2] // 2).contiguous(), k, m)
-    bloc._liberer_pile_naturelle()
     torch.manual_seed(T)
     x = (torch.randn(T, H, device=dev) * 0.5).to(torch.bfloat16)
     topw, topi = torch.topk(torch.softmax(bloc.router(x).float(), -1), top_k, dim=-1)
