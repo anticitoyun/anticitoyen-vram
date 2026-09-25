@@ -1121,7 +1121,26 @@ def _marlin_seul(x: torch.Tensor, t):
         W = _w_partage(("marlin", id(t), k_pad, N), lambda: MP.depaqueter_marlin(w, s_, g, k_pad, N))
         if k_pad != t.shape[1]:
             W = W[:, : t.shape[1]]
-        y = torch.nn.functional.linear(x.reshape(-1, orig[-1]), W.to(dt).to(x.dtype))
+        xr = x.reshape(-1, orig[-1])
+        # Piece 153 (poste4 25/09) : `W.to(dt).to(x.dtype)` sur les N lignes
+        # ENTIERES d'un coup materialisait une deuxieme copie plein tenseur en
+        # x.dtype (tete a vocabulaire etendu 248 320 x 5 120 : 4,74 Gio) apres
+        # le depaquetage deja mis en cache par `_w_partage` -- OOM sur un
+        # modele deja serre en marge (meme mecanisme que le repli nvfp4
+        # "naturel" plus haut, meme borne). Le cast final par tranches de
+        # lignes de sortie, meme arithmetique et memes valeurs -- PAS au bit
+        # sur GPU (cuBLAS, cf. test_nvfp4_matmul_tranches.py) ; pic borne par
+        # _DEQUANT_TRANCHE_MAX.
+        par_ligne = W.shape[1] * (4 + dt.itemsize)
+        if W.shape[0] * par_ligne > _DEQUANT_TRANCHE_MAX:
+            pas = max(64, (_DEQUANT_TRANCHE_MAX // par_ligne) // 64 * 64)
+            out = torch.empty(xr.shape[0], W.shape[0], dtype=x.dtype, device=x.device)
+            for a in range(0, W.shape[0], pas):
+                b = min(a + pas, W.shape[0])
+                out[:, a:b] = torch.nn.functional.linear(xr, W[a:b].to(x.dtype))
+            y = out
+        else:
+            y = torch.nn.functional.linear(xr, W.to(dt).to(x.dtype))
         return y[:, : t.shape[0]].reshape(*orig[:-1], t.shape[0])
     else:
         CHEMINS_NVFP4["marlin_dense_seul"] += 1
