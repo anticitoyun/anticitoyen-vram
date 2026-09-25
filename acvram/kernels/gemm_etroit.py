@@ -366,6 +366,11 @@ GEOMETRIE_CANAL: dict = {
     (5120, 6144): (32, 128, 4, 4),        # o_proj attention, out GDN (64 appels/pas)
     (14336, 5120): (32, 256, 4, 3),       # q‖k‖v attention empilé (gain ≈ 0 : 49,80 contre 50,30)
     (16384, 5120): (64, 256, 8, 2),       # qkv‖gate GDN empilé (176)
+    # Segments de cette pile pris SÉPARÉMENT (qkv 10240, gate 6144) : jamais servis au décodage (176 : pile au défaut),
+    # mais la géométrie doit être CELLE DE LA PILE pour que la pile reste au bit des deux appels (test 176) — à K entier,
+    # chaque colonne ne dépend que de sa propre partition K (même BK, mêmes warps), pas de sa tuile N.
+    (10240, 5120): (64, 256, 8, 2),
+    (6144, 5120): (64, 256, 8, 2),
     (5120, 17408): (64, 512, 8, 3),       # down int8 (couches MLP int8 du mixte)
     (34816, 5120): (64, 256, 4, 2),       # gate‖up int8
 }
