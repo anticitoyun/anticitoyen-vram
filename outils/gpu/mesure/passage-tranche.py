@@ -22,6 +22,9 @@ debit ne dit rien. Ce controle manquait, et son absence a rendu une mesure
 entiere ininterpretable.
 """
 import os, sys, statistics as st, zlib, torch
+# Pièce 211 : racine dérivée de __file__ — sans ceci, l'import acvram retombe sur l'installation
+# editable et la garde a86fa1dd refuse depuis un worktree (constat poste5, 25/09, comme la 168).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 chemin, lm, reglage, npass = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4])
 if reglage != "auto":

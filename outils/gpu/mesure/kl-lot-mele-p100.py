@@ -17,8 +17,11 @@ import sys
 
 import torch
 
-sys.path.insert(0, os.getcwd())
-sys.path.insert(0, os.path.join(os.getcwd(), "outils"))
+# Pièce 211 : racine dérivée de __file__, pas du cwd (garde a86fa1dd refusait depuis un
+# worktree si le cwd n'était pas la racine, constat poste5 25/09).
+_RACINE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, _RACINE)
+sys.path.insert(0, os.path.join(_RACINE, "outils"))
 from racine_modeles import racine_modeles  # noqa: E402
 from acvram import regime  # noqa: E402
 from acvram.engine.loader import load_model  # noqa: E402
