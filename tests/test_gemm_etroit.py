@@ -287,3 +287,52 @@ def test_195_l_opt_in_est_ferme_au_defaut_et_le_regime_l_imprime(monkeypatch):
     assert ge.geometrie_canal(1, 2) is None                              # forme non mesurée : reste sur le servi
     monkeypatch.setenv("ACVRAM_ETROIT_CANAL", "32,512,8,3")
     assert ge.geometrie_canal(5120, 6144) == (32, 512, 8, 3) and ge.etroites_texte() == "serie+canal(32x512x8x3)"
+
+
+@pytest.mark.parametrize("m,n,k,geo", [(8, 300, 640, (32, 128, 4, 2)), (2, 100, 200, (16, 128, 4, 2))])
+def test_195_le_zero_point_et_k_entier_sont_juges(m, n, k, geo):
+    """Pièce 198 (poste2) : la tolérance de `_juger` laissait passer un zéro à ±1 (Σx ≈ 0 sur un x centré) et un K tronqué
+    sur la plus petite forme. Ici x a une moyenne non nulle et le juge est serré ; les deux bras cassants (zéro 127, K/2)
+    doivent être REFUSÉS par le même juge, sinon le test ne juge rien."""
+    ge = _ge()
+    x, t = _montage_canal(m, n, k)
+    x = (x.float().abs() * 0.5 + 0.5).to(x.dtype)                 # Σx ≫ 0 : un zéro faux pèse s·Σx par colonne
+    y = ge.gemm_canal(x, t, geo).double()
+    q, s = t.qweight.double(), t.scales.double()
+    ref = x.double() @ ((q - 128) * s).T
+    tol = 2 ** -7 * ref.abs().max()
+    assert (y - ref).abs().max() <= tol
+    faux_zero = x.double() @ ((q - 127) * s).T
+    assert (y - faux_zero).abs().max() > tol, "le juge ne voit pas un zéro à ±1"
+    k_tronque = x[:, : k // 2].double() @ ((q[:, : k // 2] - 128) * s).T
+    assert (y - k_tronque).abs().max() > tol, "le juge ne voit pas K tronqué de moitié"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="chemin servi : extension CUDA")
+def test_195_le_defaut_est_au_bit_du_chemin_servi_et_l_opt_in_prend(monkeypatch):
+    """(a) de chef (198) : sans ACVRAM_ETROIT_CANAL (ou à 0), `int8_matmul` rend EXACTEMENT la sortie du noyau servi
+    (vue g128, `gemm_etroit` compact) et ne compte aucun `etroit_canal` ; à 1, le chemin canal est pris (compteur) sur une
+    forme de la table et sa sortie reste dans ± 2⁻⁷ de la référence fp64 (hors bit : jamais comparée au bit au servi)."""
+    from acvram import kernels
+    ge = _ge()
+    if kernels.get_extension() is None:
+        pytest.skip("extension CUDA absente")
+    x, t = _montage_canal(8, 5120, 6144, graine=3)                # forme de GEOMETRIE_CANAL (o_proj / out GDN)
+    servi = ge.gemm_etroit(x, kernels.vue_g128(t), compact=kernels.glue_compact("etroit"))
+    for valeur in (None, "0"):
+        if valeur is None:
+            monkeypatch.delenv("ACVRAM_ETROIT_CANAL", raising=False)
+        else:
+            monkeypatch.setenv("ACVRAM_ETROIT_CANAL", valeur)
+        kernels.CHEMINS_INT8.clear()
+        y = kernels.int8_matmul(x, t)
+        assert torch.equal(y, servi), valeur
+        assert kernels.CHEMINS_INT8["etroit_canal"] == 0 and kernels.CHEMINS_INT8["etroit_triton"] == 1
+    monkeypatch.setenv("ACVRAM_ETROIT_CANAL", "1")
+    kernels.CHEMINS_INT8.clear()
+    y1 = kernels.int8_matmul(x, t)
+    assert kernels.CHEMINS_INT8["etroit_canal"] == 1 and kernels.CHEMINS_INT8["etroit_triton"] == 0
+    ref = x.double() @ ((t.qweight.double() - 128) * t.scales.double()).T
+    assert (y1.double() - ref).abs().max() <= 2 ** -7 * ref.abs().max()
+    monkeypatch.setenv("ACVRAM_ETROIT_CANAL", "0")
+    assert torch.equal(kernels.int8_matmul(x, t), servi)          # l'opt-in se referme sans trace

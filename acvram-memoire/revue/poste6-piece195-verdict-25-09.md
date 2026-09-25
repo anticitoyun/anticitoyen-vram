@@ -70,3 +70,14 @@ Contre la cellule 190 (394,8 t/s, poste2 11 h 26) : A 397,7 la reproduit à +0,7
 (i) défaut : NON au critère scellé (mixte) ; (ii) témoin à échantillon égal (8 × b=1) si le critère doit être rejugé ; (iii) reste
 hors bit et hors table : α/β int8 48 × 5120 (poste4) et la tête fp32 ; (iv) 194 b2 d'poste1 est orthogonale (gdn.py, second flux).
 sha256 : kl-Qwen3.8-27B-unsloth-mixte-i8c-logits.pt d7c59562051848a0… · kl-Qwen3.8-27B-nvfp4-attn-gdn-i8c-logits.pt 0996f96c5775c0b2…
+
+## 6. Relecture 198 (poste2) et ordre de chef : trois trous comblés (13 h 2x, commit ci-dessous)
+* (a) **au bit du défaut** : `test_195_le_defaut_est_au_bit_du_chemin_servi_et_l_opt_in_prend` — sans variable et à `0`,
+  `int8_matmul` sur un poids par canal 5120 × 6144 = `gemm_etroit(vue_g128, compact)` **au bit** (`torch.equal`), compteur
+  `etroit_canal` = 0 ; à `1`, compteur = 1 et sortie dans ± 2⁻⁷ de la référence fp64 ; retour à `0` : au bit de nouveau.
+  Passé sur carte (prise poste6-p195-tests-bit, `tests-bit.log` : 27 verts, 1 skip préexistant).
+* (b) **zéro-point ± 1** et (c) **K tronqué sur la plus petite forme** : `test_195_le_zero_point_et_k_entier_sont_juges`
+  (x de moyenne non nulle, juge ± 2⁻⁷ du max de la référence, formes 8 × 300 × 640 et 2 × 100 × 200) exige en plus que les
+  deux bras faux (zéro 127, K/2) soient REFUSÉS par le même juge. Fautes injectées à sec une fois puis annulées (arbre
+  restauré, `git status` propre) : zéro 127 → 2 échecs (les deux formes) ; `range(0, K // 2, BK)` → 4 échecs, dont
+  2 × 100 × 200 ; noyau restauré → 7/7 verts.
