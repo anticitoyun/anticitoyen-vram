@@ -1197,6 +1197,7 @@ def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0,
     if not torch.cuda.is_available() or not plan.kv_budget:
         return bornes
     attn, mlp, embed, head = _octets_reels(manifest)
+    annexes = _octets_annexes(manifest)
     for t in plan.tiers:
         if t.kind != "gpu" or t.name not in plan.kv_budget:
             continue
@@ -1209,7 +1210,8 @@ def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0,
         # d'embed_tokens avant la borne) : `libre` l'a soustraite, la recompter dans `poids` la retirait deux fois
         # (gemma4 31B : 2,6 Gio de KV perdus, 11 152 jetons au lieu de ≈ 16 700).
         poids = (embed if plan.embed_device == t.name and not embed_charge else 0) \
-            + (head if plan.lm_head_device == t.name else 0)
+            + (head if plan.lm_head_device == t.name else 0) \
+            + (annexes if plan.lm_head_device == t.name else 0)
         for l in plan.layers:
             poids += attn.get(l.index, l.attn_bytes) if l.attn_storage == t.name else 0
             poids += mlp.get(l.index, l.mlp_bytes) if l.mlp_storage == t.name else 0
@@ -1400,12 +1402,7 @@ def _octets_reels(manifest: dict) -> tuple[dict, dict, int, int]:
     for nom, e in manifest["tensors"].items():
         if not isinstance(e, dict):
             continue
-        shape = e.get("shape") or []
-        n = 1
-        for x in shape:
-            n *= int(x)
-        bpw = float(e.get("bpw") or (16.0 if e.get("format") in ("bf16", "fp16", None) else 4.5))
-        octets = int(n * bpw / 8)
+        octets = _octets_tenseur(e)
         if nom.startswith("model.layers."):
             i = int(nom.split(".")[2])
             if ".mlp." in nom:
@@ -1431,6 +1428,37 @@ def _octets_reels(manifest: dict) -> tuple[dict, dict, int, int]:
         except Exception:                                   # noqa: BLE001
             pass
     return attn, mlp, embed, head
+
+
+def _octets_tenseur(e: dict) -> int:
+    """Octets d'un tenseur du manifeste à son format réel (``bpw``), 16 bits sans format déclaré."""
+    n = 1
+    for x in e.get("shape") or []:
+        n *= int(x)
+    bpw = float(e.get("bpw") or (16.0 if e.get("format") in ("bf16", "fp16", None) else 4.5))
+    return int(n * bpw / 8)
+
+
+def _octets_annexes(manifest: dict) -> int:
+    """Octets des poids du manifeste hors couches, embed et tête, que le chargement met sur la carte APRÈS la borne du
+    KV : tour de vision (runner, `TourVision.depuis_dossier`), têtes MTP (`_charger_mtp`), et tout bloc à venir.
+
+    Pièce 201 : `_octets_reels` ne connaissait que ``model.layers.*``, ``embed_tokens`` et ``lm_head`` ; sur
+    Qwen3.8-27B (vision 878,8 Mio, MTP 343,5 Mio), 1,19 Gio chargés après la borne mangeaient la marge — 148 Mio
+    libres, capture refusée, OOM au premier pas, 0/64 couches exilées. Le compte se fait par EXCLUSION, pas par une
+    liste de préfixes : un bloc nouveau est compté d'office. Seuls sont retirés les blocs que leur chargeur refuse
+    par déclaration (manifeste ``vision: non``, ``ACVRAM_MTP=non``) — mêmes prédicats que les chargeurs."""
+    from .mtp import est_tenseur_mtp
+    from .vision import PREFIXES_TOUR, tour_declaree
+    vision, mtp = tour_declaree(manifest), os.environ.get("ACVRAM_MTP") != "non"
+    total = 0
+    for nom, e in manifest["tensors"].items():
+        if not isinstance(e, dict) or nom.startswith(("model.layers.", "model.embed_tokens", "lm_head")):
+            continue
+        if (not vision and nom.startswith(PREFIXES_TOUR)) or (not mtp and est_tenseur_mtp(nom)):
+            continue
+        total += _octets_tenseur(e)
+    return total
 
 
 def _compter_experts_manifest(manifest: dict) -> dict:
@@ -1467,6 +1495,7 @@ def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8, reserve: int = 0
     ENTIÈRE reste le seul geste — c'est le comportement d'avant ce bead.
     """
     attn, mlp, embed, head = _octets_reels(manifest)
+    annexes = _octets_annexes(manifest)          # pièce 201 : vision, MTP — la même base que la borne du KV
     n_experts = _compter_experts_manifest(manifest)
     for t in plan.tiers:
         if t.kind != "gpu":
@@ -1483,7 +1512,7 @@ def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8, reserve: int = 0
         def utilise() -> int:
             u = int((plan.kv_budget or {}).get(dev, 0))
             u += embed if plan.embed_device == dev else 0
-            u += head if plan.lm_head_device == dev else 0
+            u += head + annexes if plan.lm_head_device == dev else 0
             for l in plan.layers:
                 u += l.attn_bytes if l.attn_storage == dev else 0
                 if l.mlp_storage != dev:
