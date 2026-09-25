@@ -1,5 +1,15 @@
 # Journal des changements
 
+* **25/09/2026 — pièce 209 (poste6) : piles d'experts NVFP4 à échelles sous-normales servies en MARLIN, facteur par ligne d'expert
+  (`ACVRAM_MARLIN_PAR_LIGNE=1` ; 0 = témoin : préparation d'avant, piles refusées)**. Depuis la 157, une pile qu'un facteur
+  Marlin commun écraserait (448 et 2⁻⁹ dans le même expert — Qwen3-Coder-30B couches 0, 1, 2, 4, 43 experts en couche 0) restait
+  naturelle : `decode_mma` W4A4 à b=8, GEMV naturel à b=1, préfill « groupe ». Le facteur devient PAR (expert, ligne) et l'échelle
+  globale par (expert, colonne) [E, N] : `preparer_pile` (`marlin_port/__init__.py`), épilogue du Marlin MoE porté (`gs_par_colonne`,
+  geste du dense 101), GEMV Marlin CUDA (`gs_ld`), w13 par colonne. **Exact au bit des poids** (8 piles réelles : 0 valeur fausse /
+  70,8 M, tests 209 a/b) ; les piles sans écrasement gardent leur préparation au bit. **La sortie servie du Coder change** (4 couches
+  sur 48) : KL de décodage b=8 max 0,324 ≤ 2 × témoin 0,286 (témoins à échantillon égal), argmax 0,961 ≥ 0,957, PPL 12,80 → 12,61.
+  Servi, banc chat ABBA ×5 : Coder b=8 1 669,9 → 1 766,3 t/s (**+5,77 %**), J/jeton net −8,58 % ; b=1 +0,52 %.
+  `revue/poste6-piece209{a,b,c}-verdict-25-09.md`. Ligne de régime : `experts_layout=marlin-w13`, plus aucun « pas de piles Marlin ».
 * **25/09/2026 — pièce 195 (poste6) : GEMM int8 étroit à K ENTIER PAR CANAL, AU DÉFAUT** (`ACVRAM_ETROIT_CANAL=1` ;
   0 = témoin nommé, le noyau à tranches d'avant ; décision déléguée par l'utilisateur). Les linéaires int8 symétriques par
   canal (tous les int8 du mixte-i8c, attention et GDN de `Qwen3.8-27B-nvfp4-attn-gdn-i8c`) à 2 ≤ b ≤ 16 sont servies par
