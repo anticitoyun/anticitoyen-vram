@@ -6,6 +6,7 @@ Qwen3.8-27B-nvfp4-attn-gdn-i8c, fabriqués au warm, après la borne du KV : OOM,
 (prise) : copie regardée sur le tenseur → rouge."""
 import json
 import os
+import sys
 
 import pytest
 import torch
@@ -16,7 +17,11 @@ from acvram.quant.formats import INT8Tensor, _quantize_int8
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="carte requise")
 DEV = torch.device("cuda:0")
-I8C = os.environ.get("ACVRAM_MODELE_I8C", "/mnt/2TO_2023_980PRO/Modeles/models_acvram/Qwen3.8-27B-nvfp4-attn-gdn-i8c")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outils"))
+from racine_modeles import alias  # noqa: E402
+
+# Le converti i8c de la 153 vit hors de la racine du parc (disque USB) : ACVRAM_MODELE_I8C le désigne, sinon l'alias.
+I8C = os.environ.get("ACVRAM_MODELE_I8C") or alias("Qwen3.8-27B-nvfp4-attn-gdn-i8c")
 
 
 @pytest.fixture(autouse=True)

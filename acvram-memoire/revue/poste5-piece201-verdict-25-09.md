@@ -59,6 +59,10 @@ b=1 70,51 / 70,50 t/s, b=8 507,85 / 507,75 t/s. À d5b9e1c45 (seuil de tranche, 
 0 OOM ; b=1 70,51 / 70,52, b=8 508,59 / 508,41. PPL de poste4 (i8c, fenêtre 2048/2048, wiki-gptq) : **7,2157**, 8 188
 jetons, 0 OOM — la même valeur qu'à 13 h (la tête reste tranchée au-delà de 1 Gio).
 
+## Suite complète (prise 13, après fusion d'origin/main 3b65d8f7c, sous verrou)
+3 971 verts, 1 rouge : `test_racine_modeles` — mon test i8c codait en dur le chemin du parc ; corrigé (alias ou
+`ACVRAM_MODELE_I8C`), prise 14 : garde verte, test i8c 3/3 avec le modèle posé (le réel est sauté sans lui).
+
 ## Incident
 15:39:51 : déconnexion USB de sde (`/mnt/2TO_2023_980PRO`, porte l'i8c), ext4 arrêté puis remonté à 15:42:16. Relecture
 intégrale (prise 11) : 5 safetensors, 2 207 tenseurs, en-têtes et bornes corrects, manifeste complet — INTACT. Aucune
