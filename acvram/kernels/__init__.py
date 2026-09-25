@@ -847,26 +847,40 @@ if _PREFILL_INT8 not in ("bf16", "a8", "cublas"):
     raise ValueError(f"ACVRAM_PREFILL_INT8={_PREFILL_INT8!r} : attendu bf16 | a8 | cublas")
 
 
-def _i8c_poids(t: INT8Tensor):
-    """Poids int8 signés (q − 128) [N, K_pad] d'un INT8Tensor symétrique par
-    canal, construits UNE fois et gardés sur le tenseur (copie int8 de la
-    taille du poids : q/k/v/o de Coder ≈ 0,9 Gio) ; None si le tenseur n'est
-    pas par canal symétrique (group_size ≠ K_pad ou un zéro ≠ 128)."""
-    cache = t.__dict__.get("_i8c")
-    if cache is not None:
-        return cache if cache is not False else None
-    if t.__dict__.get("prefill_bf16"):
+def _i8c_eligible(t: INT8Tensor) -> bool:
+    """Poids symétrique par canal (group_size = K_pad, zéros tous à 128) servi par cuBLASLt int8 ; décidé une fois
+    et gardé sur le tenseur (le test des zéros synchronise la carte)."""
+    ok = t.__dict__.get("_i8c")
+    if ok is None:
         # Pièce 139 : poids marqué par le chargeur (manifeste « origine: fp8 ») — AUCUNE copie : 233 tenseurs
         # d'un Qwen3.8-27B mixte y perdaient ~10,6 Go au premier préfill (OOM) ; il suit la déquant bf16 (W8A16).
-        t.__dict__["_i8c"] = False
+        ok = (not t.__dict__.get("prefill_bf16") and t.group_size == t.qweight.shape[1]
+              and t.zeros.shape[1] == 1 and bool((t.zeros == 128).all()))
+        t.__dict__["_i8c"] = ok
+    return ok
+
+
+def _i8c_poids(t: INT8Tensor):
+    """Poids int8 signés (q − 128) [N, K_pad] d'un INT8Tensor symétrique par canal ; None s'il n'est pas éligible.
+
+    Pièce 201 : TRANSITOIRE. La copie était gardée à vie sur le tenseur dès le premier préfill : 6,84 Gio sur
+    Qwen3.8-27B-nvfp4-attn-gdn-i8c (308 poids par canal), fabriqués pendant `warm_graphs`, après la borne du KV —
+    OOM au warm, service impossible. Elle est maintenant fabriquée par appel, ou une fois par portée
+    `depaquetage_partage` (la boucle par séquence d'une couche GDN, pièce 179), puis rendue. Mêmes octets, même
+    `_int_mm` : au bit par construction. Le pic transitoire est dans la réserve de préfill
+    (`ModelSpec.octets_transitoires_i8c_bytes`)."""
+    if not _i8c_eligible(t):
         return None
-    ok = (t.group_size == t.qweight.shape[1] and t.zeros.shape[1] == 1
-          and bool((t.zeros == 128).all()))
-    if not ok:
-        t.__dict__["_i8c"] = False
-        return None
-    w = (t.qweight.to(torch.int16) - 128).to(torch.int8).contiguous()
-    t.__dict__["_i8c"] = w
+    c = _W_PARTAGES
+    cle = ("i8c", t.qweight.data_ptr(), tuple(t.qweight.shape))
+    w = c.get(cle) if c is not None else None
+    if w is None:
+        CHEMINS_INT8["i8c_fabrique"] += 1
+        w = (t.qweight.to(torch.int16) - 128).to(torch.int8).contiguous()
+        if c is not None:
+            c[cle] = w
+    else:
+        CHEMINS_INT8["i8c_reutilise"] += 1
     return w
 
 
@@ -904,11 +918,11 @@ def gemm_i8c_cublas(x: torch.Tensor, t: INT8Tensor, sortie_fp32: bool = False, a
     exact, échelles en fp32. None si inéligible (poids affine/groupé, M ≤ 16 :
     cuBLASLt exige M > 16, K et N multiples de 8). ``a8`` : (a8, s_x) déjà
     quantifiés par `quantifier_a8_i8c(x)` (C15-prefill, q/k/v partagent x)."""
-    w = _i8c_poids(t)
     M, K = x.shape
     N, k_pad = t.qweight.shape
-    if w is None or M <= 16 or k_pad % 8 or N % 8:
+    if M <= 16 or k_pad % 8 or N % 8 or not _i8c_eligible(t):
         return None
+    w = _i8c_poids(t)                        # pièce 201 : transitoire, fabriqué seulement si le chemin est pris
     from .gemm_w8a8 import quantifier_a8, quantifier_a8_torch, disponible as _w8a8_dispo
     if a8 is not None:
         a, sx = a8                               # C15-prefill : A8 quantifiée une fois pour q/k/v
@@ -961,7 +975,7 @@ def int8_matmul_partage(x: torch.Tensor, ts: list) -> Optional[list]:
     if x.is_cuda and (not ts[0].qweight.is_cuda or _bk.resolve("int8", ts[0].qweight.device)[0].name != "cuda-fusionne"):
         return None                                  # backend masqué : la référence torch
     for t in ts:
-        if _i8c_poids(t) is None or t.qweight.shape[1] % 8 or t.qweight.shape[0] % 8:
+        if not _i8c_eligible(t) or t.qweight.shape[1] % 8 or t.qweight.shape[0] % 8:
             return None
     a8 = quantifier_a8_i8c(xf)
     sorties = []
