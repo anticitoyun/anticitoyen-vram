@@ -10,8 +10,11 @@ Deux precautions apprises aujourd hui :
 """
 import os
 import json, sys, time, torch
-from acvram.kernels import get_extension
-from acvram.quant.nvfp4 import quantize_nvfp4
+# Pièce 211 : racine dérivée de __file__ — sans ceci, l'import acvram retombe sur l'installation
+# editable et la garde a86fa1dd refuse depuis un worktree (constat poste5, 25/09, comme la 168).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from acvram.kernels import get_extension  # noqa: E402
+from acvram.quant.nvfp4 import quantize_nvfp4  # noqa: E402
 
 ext = get_extension()
 dev = "cuda:0"

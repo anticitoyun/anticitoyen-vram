@@ -2,7 +2,10 @@
 de piles en rotation = L2 froid) — chemin tensor actuel (gate, up : 2 GEMM + moe_act + down) contre w13 (1 GEMM gate‖up
 + moe_act à échelles + down), sur les formes Coder E=128 K=2048 I=768 k=8. Graphe CUDA des 20 appels, rejoué."""
 import json, os, sys, time, torch
-sys.path.insert(0, "tests"); sys.path.insert(0, ".")
+# Pièce 211 : racine dérivée de __file__, pas du cwd — "." et "tests" en dur cassaient
+# nommément (garde a86fa1dd) dès que le script était lancé d'ailleurs que la racine (poste5, 25/09).
+_RACINE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(_RACINE, "tests")); sys.path.insert(0, _RACINE)
 from test_moe_tensor_decodage import _charger
 from acvram.engine.moe import gemm_experts_tensor
 E, K, I, k, b, PILES = 128, 2048, 768, 8, 12, 8

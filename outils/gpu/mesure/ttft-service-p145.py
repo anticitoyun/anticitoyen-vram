@@ -2,7 +2,7 @@
 """Pièce 145 (poste6, 24/09) : TTFT et énergie du PRÉFILL en service, b=1, contre un `acvram serve` déjà lancé
 (`--no-prefix-cache`, sinon la 2e invite ne préfille rien). Pour chaque longueur L : des invites DISTINCTES de L ids
 (`invite(k, L)` du banc, mêmes ids d'un bras à l'autre), une requête à la fois, `max_tokens=1`, flux SSE ; TTFT = temps
-jusqu'au premier fragment portant du texte ; fenêtre ≥ FENETRE_S secondes et ≥ N_MIN requêtes sous `Energie` ; ligne de
+jusqu'au premier fragment portant un jeton (texte vide compris, pièce 210) ; fenêtre ≥ FENETRE_S secondes et ≥ N_MIN requêtes sous `Energie` ; ligne de
 base `repos(8 s)` APRÈS la fenêtre (serveur chargé, inactif) ; J par préfill = (joules − repos × durée) / n.
   TTFT_URL=http://127.0.0.1:PORT TTFT_MODELE=<served-name> ttft-service-p145.py 512,2048,4096 > sortie.log
 Sortie : une ligne `RESULTAT {json}` par longueur (ttft_med_ms, ttft_min/max, n, j_par_prefill_net, watts, jetons_s_prefill)."""
@@ -14,7 +14,12 @@ import time
 
 import httpx
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Pièce 211 (garde d'import a86fa1dd, comme la 168) : la racine doit venir de CE script, jamais
+# de l'installation editable — sinon la sonde de regime d'energie.py importe l'arbre principal
+# depuis un worktree et la garde refuse, nommement, « indisponible » (constat poste5, 25/09).
+_ICI = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_ICI))))
+sys.path.insert(0, _ICI)
 from energie import Energie, repos  # noqa: E402
 
 URL = os.environ["TTFT_URL"].rstrip("/")
@@ -29,8 +34,19 @@ def invite(k: int, n: int) -> list:
     return [(k * 104729 + i * 7919) % (VOCAB_APPROX - 100) + 10 for i in range(n)]
 
 
+VIDES = [0]          # premiers jetons dont le texte est vide (compte de la fenêtre, rendu dans RESULTAT)
+
+
+def premier_fragment(d: dict) -> bool:
+    """Un fragment SSE porte-t-il le premier jeton ? Pièce 210 : tout fragment à `choices`, texte VIDE compris. Le jeton
+    unique (max_tokens=1) d'une invite d'ids synthétiques peut se décoder en "" (octet UTF-8 partiel, jeton spécial) :
+    le service l'a généré (`completion_tokens` = 1), et l'exiger non vide levait « aucun jeton reçu » — toutes les
+    passes L = 512 du mixte et de l'i8c (201, prise 8) et la 1re passe de la 165 (24/09) rendues nulles."""
+    return bool(d.get("choices")) and "error" not in d
+
+
 def ttft(client: httpx.Client, ids: list) -> tuple[float, int]:
-    """Temps (s) jusqu'au premier fragment de texte ; nombre de fragments d'erreur."""
+    """Temps (s) jusqu'au premier fragment portant un jeton (`premier_fragment`) ; nombre de fragments d'erreur."""
     t0 = time.perf_counter()
     premier = None
     err = 0
@@ -43,8 +59,9 @@ def ttft(client: httpx.Client, ids: list) -> tuple[float, int]:
             d = json.loads(ligne[6:])
             if "error" in d:
                 err += 1
-            elif premier is None and d.get("choices") and d["choices"][0].get("text"):
+            elif premier is None and premier_fragment(d):
                 premier = time.perf_counter() - t0
+                VIDES[0] += not d["choices"][0].get("text")
     if premier is None:
         raise RuntimeError(f"aucun jeton reçu (erreurs {err})")
     return premier, err
@@ -59,6 +76,7 @@ def main(longueurs: list[int]) -> None:
         for k in (1, 2):
             ttft(client, invite(9000 + k, L))
         temps = []
+        VIDES[0] = 0
         with Energie() as e:
             t0 = time.perf_counter()
             k = 0
@@ -78,7 +96,7 @@ def main(longueurs: list[int]) -> None:
                "duree_fenetre_s": round(duree, 2), "fenetre_valide": duree >= FENETRE_S,
                "joules": round(e.joules, 1), "joules_net": round(joules_net, 1),
                "j_par_prefill_net": round(joules_net / len(temps), 3), "j_par_jeton_prefill_net": round(joules_net / (len(temps) * L), 5),
-               "watts_repos": round(base.moyenne, 1), **e.resume()}
+               "jetons_texte_vide": VIDES[0], "watts_repos": round(base.moyenne, 1), **e.resume()}
         print("RESULTAT " + json.dumps(res, ensure_ascii=False), flush=True)
 
 
