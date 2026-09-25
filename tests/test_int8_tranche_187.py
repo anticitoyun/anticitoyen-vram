@@ -79,3 +79,22 @@ def test_tranche_au_bit_contre_16(dec, pre):
     assert len(ref) >= 2 * len(NS)
     diff = sorted(k for k in ref if ref[k] != autre[k])
     assert not diff, diff
+
+
+def _tranches(**env):
+    e = {k: v for k, v in os.environ.items() if k not in ("ACVRAM_INT8_TRANCHE", "ACVRAM_INT8_TRANCHE_PREFILL")}
+    e.update(env, PYTHONPATH=RACINE)
+    r = subprocess.run([sys.executable, "-c", "from acvram import kernels; print('TR', tuple(kernels.get_extension().int8_tranches()))"],
+                       cwd=RACINE, env=e, capture_output=True, text=True, timeout=600)
+    lignes = [l for l in r.stdout.splitlines() if l.startswith("TR")]
+    assert r.returncode == 0 and lignes, r.stderr[-2000:]
+    return eval(lignes[-1][3:])
+
+
+def test_defaut_tranche_6_et_temoins():
+    """Pièce 187 : le défaut est 6/6 (casse s'il revient à 16) ; 16 reste le témoin ; le préfill suit le décodage
+    sauf s'il est posé ; une valeur hors liste retombe sur le défaut."""
+    assert _tranches() == (6, 6)
+    assert _tranches(ACVRAM_INT8_TRANCHE="16") == (16, 16)
+    assert _tranches(ACVRAM_INT8_TRANCHE="16", ACVRAM_INT8_TRANCHE_PREFILL="6") == (16, 6)
+    assert _tranches(ACVRAM_INT8_TRANCHE="7") == (6, 6)

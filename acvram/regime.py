@@ -168,8 +168,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("PA_ETAPE", "", None, None, "étape de l'attention paginée"),
     Variable("PA_SANS_COMPTEUR", "", None, None, "attention paginée sans compteur"),
     Variable("INT8_GEMV_WARP", "", None, None, "warps du GEMV int8 (lu dans le .cu)"),
-    Variable("INT8_TRANCHE", "", None, None, "découpage du GEMV int8 à N ≤ 16 : 4/6/8/10/12/16 (vide = 16 ; 12 = ancien, "
-             "témoin ; lu dans le .cu ; pièce 187)"),
+    Variable("INT8_TRANCHE", "", None, None, "découpage du GEMV int8 à N ≤ 16 : 4/6/8/10/12/16 (vide = 6, DÉFAUT depuis la "
+             "pièce 187, au bit ; 16 = témoin d'avant, 12 = témoin du 14/09 ; lu dans le .cu, `ext.int8_tranches()`)"),
     Variable("INT8_TRANCHE_PREFILL", "", None, None, "pièce 187 : découpage du GEMV int8 à N > 16 (préfill ≤ INT8_GEMV_MAX), "
              "4/6/8/10/12/16 (vide = INT8_TRANCHE) ; au bit ; lu dans le .cu"),
     Variable("ECO", "", None, None,
