@@ -69,6 +69,27 @@ tel quel plutôt que de le cacher sous `torch.equal`. **À ton arbitrage** : ce 
 jamais servi (n≤12 en service, seuil GEMV jamais franchi) — accepter l'écart nommé pour PPL/KL seulement,
 ou une autre piste (algo cuBLAS déterministe, buffer combiné) si tu préfères le bit strict même ici.
 
+## 25/09 13 h — mesure du scellé après correctif (arbitrage chef accepté)
+
+**PPL fenêtre 2048/2048, wiki-gptq réel (correction : chemin corpus faux dans ma 1ère prise, corrigé
+`/mnt/4TO_SATACMR_2022/Modeles/corpus/wiki-gptq.txt`, PAS `/mnt/AI_GENERATOR/...`) : RÉUSSIE, plus d'OOM.**
+`perplexity: 7.2157`, 8188 jetons, 4 fenêtres, régime nominal. KL T1/T2 contre HF pas encore tentée
+(pas d'instrument prêt dans ce dépôt pour ce protocole précis — à écrire si tu veux ce chiffre).
+
+**ABBA b=1/b=8, graphes=on : régime confirmé `graphes=on` aux DEUX bras (hybrides≤4 et ≤8), mais les
+deux CRASHENT avant toute mesure de débit** — pas un repli eager, un OOM différent, à chaque bras :
+- b=1 : `acvram/kernels/__init__.py:868` (`_i8c_poids`, projections attention int8 partagées),
+  120 Mio demandés, 37,94 Mio libres.
+- b=8 : `acvram/kernels/__init__.py:1121` (mon propre correctif, `_marlin_seul` prefill) — cette fois
+  c'est `MP.depaqueter_marlin` lui-même (son buffer initial, PAS le cast que j'ai tranché) qui échoue :
+  340 Mio demandés, 265,94 Mio libres.
+
+Les deux OOM confirment le diagnostic du 25/09 11h (pas de nouveauté) : à ce point de la mesure, 31,08-
+31,30 Gio sur 31,36 sont déjà pris — quelques centaines de Mio de marge, insuffisants pour presque
+n'importe quelle allocation transitoire. Mes deux correctifs (naturel + marlin_seul) réparent la
+matérialisation EN DOUBLE d'un tenseur DÉJÀ TROP GROS ; ils ne créent pas de marge. J'arrête ici comme
+demandé — pas de nouvel essai, pas de mesure de débit à donner.
+
 ## Suite proposée
 
 Le format mixte lui-même est plus lourd, pas le planificateur. Options avant nouvelle mesure : (a)
