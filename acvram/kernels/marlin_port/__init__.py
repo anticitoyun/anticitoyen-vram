@@ -257,11 +257,16 @@ def traiter_echelle_globale(g: torch.Tensor, facteur: float) -> torch.Tensor:
     return (g.float() * (2.0 ** (126 - 7))) / facteur
 
 
-def preparer_pile(qw: torch.Tensor, bs: torch.Tensor, gs: torch.Tensor, repack=None):
+def preparer_pile(qw: torch.Tensor, bs: torch.Tensor, gs: torch.Tensor, repack=None, par_ligne: bool = True):
     """Pile NVFP4 acvram → format Marlin. ``qw`` [E, N, K/2] uint8 (paires
     E2M1, bas d'abord = ModelOpt), ``bs`` [E, N, K/16] E4M3, ``gs`` [E] fp32.
     Rend (w_marlin [E, K/16, N·2] int32 repacké, s_marlin [E, K/16, N] E4M3
-    S0E5M3, g_marlin [E] fp32). K multiple de 64, N multiple de 64.
+    S0E5M3, g_marlin [E] fp32 — ou **[E, N]** par (expert, colonne) quand un facteur
+    commun écraserait des sous-normales : pièce 209, facteur PAR LIGNE d'expert
+    (puissance de 2, e4m3 exact), g divisé d'autant ; fl((s·f)·(g/f)) = fl(s·g) au
+    bit. Une pile qu'un facteur commun n'écrase pas garde EXACTEMENT la
+    préparation d'avant. ``par_ligne=False`` : l'ancien comportement (témoin des
+    tests cassants). K multiple de 64, N multiple de 64.
     ``repack`` : (q [K/8, N] int32, K, N) → [K/16, 2N] ; défaut l'op CUDA
     `gptq_marlin_repack` (carte) — `repack_torch` à sec (même disposition,
     tests/test_depaqueter_marlin.py)."""
@@ -279,6 +284,12 @@ def preparer_pile(qw: torch.Tensor, bs: torch.Tensor, gs: torch.Tensor, repack=N
         if w_out is None:
             w_out = torch.empty((E, *m.shape), dtype=m.dtype, device=m.device)
         w_out[e] = m
+    f_en = None
+    if par_ligne and echelles_ecrasees(bs):
+        # Pièce 209 (157 pour les denses) : Coder-30B couches 0, 1, 2, 4 — 43 experts portent 448 et 2⁻⁹ ensemble
+        f_en = _facteur_depuis_max(bs.float().amax(-1)).to(bs.device)     # [E, N]
+        bs = (bs.float() * f_en[..., None]).to(bs.dtype)
+        assert not echelles_ecrasees(bs), "facteur par ligne insuffisant : une ligne d'expert dépasse S0E5M3"
     scales = bs.to(torch.bfloat16)                                       # [E, N, K/16]
     facteur = facteur_nvfp4(scales)
     s_list = []
@@ -286,7 +297,10 @@ def preparer_pile(qw: torch.Tensor, bs: torch.Tensor, gs: torch.Tensor, repack=N
         s = permuter_echelles(scales[e].T, K, N, GROUP_SIZE)              # [K/16, N]
         s_list.append(traiter_echelles_nvfp4(s, facteur))
     s_out = torch.stack(s_list)
-    g_out = traiter_echelle_globale(gs.float().reshape(-1), facteur).contiguous()
+    if f_en is None:
+        g_out = traiter_echelle_globale(gs.float().reshape(-1), facteur).contiguous()
+    else:
+        g_out = traiter_echelle_globale(gs.float().reshape(-1, 1).to(f_en.device) / f_en, facteur).reshape(E, N).contiguous()
     return w_out, s_out, g_out
 
 
@@ -384,9 +398,12 @@ def depaqueter_marlin(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, 
     g = torch.as_tensor(g_marlin, dtype=torch.float32, device=w.device).reshape(-1)
     if g.numel() == 1 and E > 1:
         g = g.expand(E)
-    if E == 1 and g.numel() == N and N > 1 and noyau not in ("triton", "cuda") and not (
+    par_colonne = g.numel() == E * N and N > 1                 # [N] (134, E = 1) ou [E, N] (209, pile à facteur par ligne)
+    if par_colonne and E == 1 and noyau not in ("triton", "cuda", "torch") and not (
             noyau == "auto" and w.device.type == "cuda" and (triton is not None or _depaqueter_cuda_disponible())):
-        raise ValueError("depaqueter_marlin : échelle globale par colonne servie par les noyaux Triton et CUDA seulement")
+        raise ValueError("depaqueter_marlin : échelle globale par colonne servie par les noyaux Triton, CUDA et torch")
+    if par_colonne and noyau == "cuda":
+        raise ValueError("depaqueter_marlin : échelle globale par colonne d'une pile (E > 1) : noyau triton ou torch")
     if out is None:
         out = torch.empty(E, N, K, dtype=torch.bfloat16, device=w.device)
     res = out.view(E, N, K)
@@ -417,7 +434,9 @@ def depaqueter_marlin(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, 
         s8 = s[e0:e1].contiguous().view(torch.uint8).view(e1 - e0, K // 16, N // 64, 64)[..., perm_e]     # [e, kt, nt, o]
         s_dec = ((s8.to(torch.int32) << 20) + 0x34800000).view(torch.float32)                             # = s·facteur
         s_dec = torch.where(s8 == 0, torch.zeros_like(s_dec), s_dec)                                      # annulée : 0, pas 2⁻²²
-        echelle = (s_dec * g[e0:e1].view(-1, 1, 1, 1)) * 2.0 ** -119                                      # = fl(s·g), au bit
+        g_e = (g.view(E, N)[e0:e1].view(e1 - e0, 1, N // 64, 64) if par_colonne             # 209 : g par (expert, colonne)
+               else g[e0:e1].view(-1, 1, 1, 1))
+        echelle = (s_dec * g_e) * 2.0 ** -119                                                             # = fl(s·g), au bit
         res[e0:e1] = (vals * echelle.permute(0, 2, 3, 1).unsqueeze(-1)).reshape(e1 - e0, N, K).to(torch.bfloat16)
     return res if pile else res[0]
 
@@ -438,7 +457,9 @@ def gemv_marlin_torch(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, 
     noyau divise x par la table de l'expert, x et le quotient arrondis en bf16 — reproduit ici tel quel."""
     E = w_marlin.shape[0]
     assert tuple(w_marlin.shape) == (E, K // 16, 2 * N) and tuple(s_marlin.shape) == (E, K // 16, N)
-    g = torch.as_tensor(g_marlin, dtype=torch.float32, device=w_marlin.device).reshape(-1)
+    g2 = torch.as_tensor(g_marlin, dtype=torch.float32, device=w_marlin.device)
+    par_colonne = g2.dim() == 2                                       # 209 : g [E, ≥ N] par (expert, colonne)
+    g = g2 if par_colonne else g2.reshape(-1)
     _, idx, perm_e, niveaux = _indices(w_marlin.device)
     KT, NT = K // 16, N // 64
     xf = x.reshape(-1, x.shape[-1]).to(torch.float32)
@@ -462,7 +483,7 @@ def gemv_marlin_torch(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, 
         if xscale is not None:
             xt = (xt.to(torch.bfloat16).float() / xscale[e, :K].float()).to(torch.bfloat16).float()
         partiel = torch.einsum("nkl,kl->nk", vals, xt.view(KT, 16))                     # Σ_k code·x par tuile, fp32
-        out[gi] = (partiel * s_dec).sum(dim=1) * (g[e] * 2.0 ** -119)
+        out[gi] = (partiel * s_dec).sum(dim=1) * ((g[e, :N] if par_colonne else g[e]) * 2.0 ** -119)
     return out
 
 
@@ -690,8 +711,8 @@ if triton is not None:
         sb = tl.load(s_ptr + (e * KT + kt) * N + nt * 64 + p).to(tl.int32)
         s_dec = ((sb << 20) + 0x34800000).to(tl.float32, bitcast=True)   # = s·facteur (S0E5M3)
         s_dec = tl.where(sb == 0, 0.0, s_dec)
-        if PAR_COLONNE:                                       # pièce 134 : pile à échelle globale par colonne (E = 1)
-            g = tl.load(g_ptr + nt * 64 + n)
+        if PAR_COLONNE:                                       # pièce 134 (E = 1) et 209 (E > 1) : g par (expert, colonne)
+            g = tl.load(g_ptr + e * N + nt * 64 + n)
         else:
             g = tl.load(g_ptr + e)
         ech = (s_dec * g) * DEUX_MOINS_119                    # × 2⁻¹¹⁹ (passé par l'hôte) : fl(s·g) au bit
@@ -736,7 +757,7 @@ def _depaqueter_triton(w: torch.Tensor, s: torch.Tensor, g: torch.Tensor, out: t
     E = w.shape[0]
     KT, NT = K // 16, N // 64
     assert out.is_contiguous() and tuple(out.shape) == (E, N, K)
-    par_colonne = E == 1 and g.numel() == N and N > 1           # g [N] de preparer_dense (global_scale_rows)
+    par_colonne = g.numel() == E * N and N > 1                  # g [N] de preparer_dense (134) ou [E, N] (209)
     _depaqueter_kernel[(E * KT * NT,)](w.contiguous().view(torch.uint8), s.contiguous().view(torch.uint8),
                                        g.contiguous(), out.view(torch.int16), KT, NT, K, N,
                                        DEUX_MOINS_119=2.0 ** -119, PAR_COLONNE=par_colonne, num_warps=4)

@@ -32,7 +32,10 @@ def test_mma2_sur_marlin_egal_au_naturel_hors_echelles_annulees(E, N, K, G):
         pytest.skip("MMA FP4 indisponible")
     dev = torch.device("cuda:0")
     qw, bs, gs = _pile(E, N, K, 3, dev)
-    w_m, s_m, g_m = MP.preparer_pile(qw, bs.view(torch.float8_e4m3fn), gs)   # preparer_pile lit bs en E4M3 (pas les octets)
+    # preparer_pile lit bs en E4M3 (pas les octets) ; par_ligne=False : ce test juge l'ANNULATION des sous-normales par le
+    # repack à facteur commun (témoin de la 209 — au défaut, une telle pile prend un facteur par ligne, g [E, N], et le
+    # chemin mma2-Marlin la refuse : test_marlin_moe_par_colonne_209b)
+    w_m, s_m, g_m = MP.preparer_pile(qw, bs.view(torch.float8_e4m3fn), gs, par_ligne=False)
     facteur = gs.float()[0].item() * 2.0 ** 119 / g_m[0].item()
     import math
     decal = 15 + int(round(math.log2(facteur)))
