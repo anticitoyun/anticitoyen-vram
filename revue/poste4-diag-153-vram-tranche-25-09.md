@@ -30,6 +30,24 @@ même genre sur un i8c). Un tranche de 256 = 256×151936×4o ≈ 155 Mio, pas 2,
 même déficit de marge que le point 1 (mixte int8/nvfp4/bf16 laisse ~0,4-0,6 Gio libres avant même
 l'évaluation) plutôt qu'un bogue de `_pertes_par_tranches`.
 
+## 25/09 11 h — prises sous feu chef (deux conditions), poste4-p153-*
+
+**Condition 1 (PPL/KL fenêtre 2048/2048, wiki-gptq) : OOM identique, ARRÊTÉ (pas de nouvel essai).**
+Même échec exact qu'à window=4096 : tentative d'allouer 5 085 593 600 o (4,74 Gio), 1,32 Gio libres sur
+31,36 Gio, 30,02 Gio déjà utilisés. **Octets IDENTIQUES entre 4096 et 2048** — l'allocation qui échoue
+ne dépend donc PAS de `window` : ni un effet de tranchage PPL, ni un effet de taille de fenêtre. Cause
+encore non identifiée, mais le champ des hypothèses est réduit à quelque chose de fixe (chargement du
+modèle mixte lui-même, ou une allocation à taille constante indépendante de l'éval). Ligne de régime
+complète (avant l'échec) :
+`[régime] ACVRAM_CPUS=0-15 ACVRAM_GEMV_LAYOUT=marlin gemv_splitk=S(auto) ACVRAM_GDN=fla ab=auto(0:format×48) extension=oui torch=2.14.0+cu130 triton=3.8.0 fla=0.5.2 hote=thp,omp8,cpus0-15 mla_core=tf32(≤2048 clés) mla_prep=grille mla_glue=2 glue=compact(8) prefill_glue=compact eco=2700(2670) dense=triton≥2|cuda+marlin(doubles=0,seuls=129,0.00Go,kv=2064,exclus=0,replis=0) marlin_port_so=732b95dea8675d33`
+KL T1/T2 non tentés (bloqués par le même OOM, comme prévu par le scellé).
+
+**Condition 2 (ABBA b=1/b=8, graphes=on) : NON MESURÉE — carte jamais obtenue.** Trafic circuit dense
+(poste2-p190, poste5-191, poste1-p185c, poste6-p193 en file continue) : attente 1801 s (30 min, plafond
+`carte.sh`), ABANDON sans avoir chargé le modèle une seule fois. Pas de deuxième essai identique lancé
+(règle « on ne relance pas à l'identique » + plafond de prise) — en attente d'un créneau ou d'un arbitrage
+de priorité de chef.
+
 ## Suite proposée
 
 Le format mixte lui-même est plus lourd, pas le planificateur. Options avant nouvelle mesure : (a)
