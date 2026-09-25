@@ -579,6 +579,7 @@ def _narrow_rows(n_sortie: int) -> int:
 # déterministe), mêmes appels cuBLAS. Grouper les GEMM (GDN_PREFILL_LOT=1) rendrait le gain entier mais change la
 # sortie : cuBLAS bf16 découpe sa réduction selon M (pièce 169). Coût : le W bf16 d'une couche reste vivant le temps de
 # la boucle (≈ 230 Mo sur Qwen3.8), au lieu d'être rendu après chaque appel.
+# Pièce 179 : la déquantification int8 du préfill (`int8_matmul`, M > ACVRAM_INT8_GEMV_MAX) y passe aussi.
 _DEPAQ_PARTAGE = os.environ.get("ACVRAM_DEPAQ_PARTAGE", "1") == "1"
 _W_PARTAGES: Optional[dict] = None
 
@@ -1353,6 +1354,7 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
     """
     if gemv_threshold <= 0:
         gemv_threshold = _INT8_GEMV_MAX
+    t_servi = t               # pièce 179 : le poids servi, avant `vue_g128` (objet neuf à chaque appel)
     ext = get_extension()
     orig_shape = x.shape
     xf = x.reshape(-1, x.shape[-1])
@@ -1441,6 +1443,10 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
     # de lignes de sortie : même arithmétique, mêmes valeurs (chaque tranche
     # est la même matrice restreinte), pic borné par _DEQUANT_TRANCHE_MAX.
     CHEMINS_INT8["dequant"] += 1
+    # Pièce 179 : clé du partage B' — adresses et formes des codes, échelles et zéros du poids SERVI, pas l'identité
+    # d'un objet Python qu'un temporaire pourrait reprendre
+    cle_int8 = ("int8", t_servi.qweight.data_ptr(), tuple(t_servi.qweight.shape), t_servi.scales.data_ptr(),
+                t_servi.zeros.data_ptr(), t_servi.group_size)
     lignes = t.qweight.shape[0]
     par_ligne = t.qweight.shape[1] * (4 + dt.itemsize)     # fp32 intermédiaire + sortie
     if lignes * par_ligne > _DEQUANT_TRANCHE_MAX:
@@ -1450,10 +1456,12 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
             b = min(a + pas, t.shape[0])
             tr = INT8Tensor(t.qweight[a:b], t.scales[a:b], t.zeros[a:b], t.group_size,
                             (b - a, t.shape[1]), t.format)
-            w = int8_dequant(tr, dt)
+            w = _w_partage(cle_int8 + (dt, a, b), lambda tr=tr: int8_dequant(tr, dt))
             out[..., a:b] = torch.nn.functional.linear(x, w.to(x.dtype))
         return out
-    w = int8_dequant(t, dt)
+    # Pièce 179 : B' (172) étendu à la déquantification int8 — dans la boucle par séquence d'une couche à récurrence
+    # linéaire, le poids bf16 est fabriqué une fois ; mêmes valeurs, mêmes appels : au bit.
+    w = _w_partage(cle_int8 + (dt,), lambda: int8_dequant(t, dt))
     return torch.nn.functional.linear(x, w.to(x.dtype))
 
 
