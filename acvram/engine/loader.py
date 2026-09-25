@@ -1170,12 +1170,52 @@ def _tete_liee(embed: torch.Tensor) -> Any:
 # 13 408 jetons par ce seul site, 146e).
 _KV_MARGE_MIN = 1536 * 2**20
 _KV_MARGE_PART = 0.05
+# Pièce 212 (25/09, ordre chef) : le pool mémoire des graphes CUDA (`engine/graphs.py:1075-1086`,
+# `_pool = graph.pool()` au premier appel, jamais libéré) grossit pendant `warm_graphs`
+# (`engine/graphes.py:40`) APRÈS le chargement, hors de tout ce que `_reserve_prefill` couvre (qui ne
+# voit qu'UN forward transitoire AVANT chargement). Mesuré sur 5 modèles (B=8, CTX=2048,
+# `poste4-p212-25-09/mesure-warmgraphs.py`) : Qwen3.8-27B-nvfp4 1 880 Mio, -unsloth-mixte-i8c
+# 2 734 Mio, -attn-gdn-i8c 1 720 Mio — les TROIS dépassent `_KV_MARGE_MIN` (1 536 Mio) ; gemma-4-31B
+# -868 (libère) et Coder-30B-A3B 266 restent sous la marge.
+#
+# Tentative de dérivation STRUCTURELLE (ordre initial de chef, sur le modèle de 172/201, à partir de
+# `config.json` et du nombre de godets capturés) : ABANDONNÉE — preuve par l'absurde. Les trois modèles
+# Qwen3.8 ci-dessus ont un `config.json` IDENTIQUE (5120/64/GDN 48×16×128×128) : toute estimation
+# fonction de la seule architecture rendrait la MÊME valeur E pour les trois. Le test demandé (E ≥ mesuré
+# ET E ≤ 1,25 × mesuré, PAR modèle) exige alors E ≥ 2 734 (mixte) ET E ≤ 1,25 × 1 720 = 2 150 (i8c) —
+# bornes incompatibles, aucun E ne les satisfait. L'écart entre mixte et i8c (mêmes couches promues, la
+# 153b/153c) vient du FORMAT de conversion (poids par canal, tailles de tenseurs promus — mixte : 233
+# tenseurs int8 mais 10,62 Gio, contre 308 tenseurs et 7,34 Gio pour i8c, la promotion couvrant plus de
+# MLP), lisible au manifeste, pas à `config.json` — et même ainsi, i8c (promu) coûte MOINS que le nvfp4
+# pur (1 720 contre 1 880), sans corrélation monotone évidente avec les octets promus sur ce seul
+# échantillon de 3. Dérivation en fichier:ligne non trouvée avec confiance dans le temps imparti : repli
+# sur (a), constante nommée, par REGLES l'échappatoire que chef a lui-même posée.
+#
+# Repli (a) : marge conditionnée à la présence de couches à récurrence linéaire (GDN/KDA/mamba2/lfm2,
+# `spec.layer_types`) — seul signal qui sépare proprement les 3 modèles au-dessus de la marge des 2
+# en-dessous. Valeur : pire mesuré (2 734 Mio) + marge de sécurité (l'échantillon de 3 n'est pas monotone
+# avec les octets promus : une variante non mesurée peut coûter plus) → 3 072 Mio (3 Gio), rond, +12 %
+# sur le pire connu. Les modèles sans GDN gardent `_KV_MARGE_MIN` (1 536 Mio) : gemma31 et Coder-30B ne
+# dépassaient déjà pas, l'élargir pour eux ne ferait que retirer du KV pour rien.
+_KV_MARGE_MIN_GDN = 3072 * 2**20
 
 
-def _marge_carte(capacite: int, reserve: int = 0) -> int:
+def _a_des_couches_lineaires(manifest: Optional[dict]) -> bool:
+    """Vrai si le manifeste porte une couche à récurrence linéaire (GDN/KDA/mamba2/lfm2) —
+    même test que `_octets_marlin`/`_reserve_prefill` : lu au manifeste, pas à `ModelSpec`,
+    pour ne pas ajouter un paramètre `spec` à toute la chaîne d'appel de `_marge_carte`."""
+    if not manifest:
+        return False
+    return any(".linear_attn." in nom for nom in manifest.get("tensors", {}))
+
+
+def _marge_carte(capacite: int, reserve: int = 0, manifest: Optional[dict] = None) -> int:
     """Octets gardés hors poids et hors KV sur une carte de ``capacite`` octets,
-    ``reserve`` (activations du plus grand préfill) comprise."""
-    return max(_KV_MARGE_MIN, int(_KV_MARGE_PART * capacite)) + int(reserve)
+    ``reserve`` (activations du plus grand préfill) comprise. ``manifest`` (pièce 212) :
+    une marge plus large quand le modèle a des couches à récurrence linéaire — voir
+    le commentaire de `_KV_MARGE_MIN_GDN` ci-dessus (coût de `warm_graphs`)."""
+    plancher = _KV_MARGE_MIN_GDN if _a_des_couches_lineaires(manifest) else _KV_MARGE_MIN
+    return max(plancher, int(_KV_MARGE_PART * capacite)) + int(reserve)
 
 
 def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0,
@@ -1215,7 +1255,7 @@ def _borner_kv_par_la_vram(plan: Plan, manifest: dict, dev, reserve: int = 0,
         for l in plan.layers:
             poids += attn.get(l.index, l.attn_bytes) if l.attn_storage == t.name else 0
             poids += mlp.get(l.index, l.mlp_bytes) if l.mlp_storage == t.name else 0
-        marge = _marge_carte(capacite, reserve)
+        marge = _marge_carte(capacite, reserve, manifest)
         borne = libre - poids - marge
         bornes[t.name] = borne
         budget = int(plan.kv_budget[t.name])
@@ -1559,7 +1599,7 @@ def _reajuster_plan(plan: Plan, manifest: dict, top_k: int = 8, reserve: int = 0
         # la même marge que la borne du KV (`_marge_carte`, pièce 156). La base
         # diffère encore : `capacite` est ici déjà nette de la réserve de
         # build_tiers (voir plus haut), la borne lit `libre` brut.
-        marge = _marge_carte(capacite, reserve)
+        marge = _marge_carte(capacite, reserve, manifest)
         deplacees = 0
         # Pièce 146 : le KV AU-DESSUS du plancher (``kv_min``, une séquence de max_model_len) cède avant tout poids —
         # jamais d'exil pour loger du cache. Sans lui, le départage par la demande (tiering._rang) portait le KV de
