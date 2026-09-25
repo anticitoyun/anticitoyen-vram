@@ -14,4 +14,13 @@ J/jeton — **TENU, dans la fourchette, aucun falsificateur**.
 ABAB×5. Débit médian A 402,3 t/s, B 406,2 t/s → **+0,97 %**. J/jeton net médian A 0,7944, B
 0,7819 → **−1,57 %**. Prédiction scellé : NEUTRE 0 ± 2 % — **TENU, aucune des cinq pièces sources
 ne touche ce chemin, cohérent avec le rôle de falsificateur direct que lui donnait le scellé**.
+
+## Qwen3.8-27B-unsloth-mixte-i8c, b=1 — 25/09 12h19
+ABAB×5. Débit médian A 62,2 t/s, B 64,3 t/s → **+3,38 %**, dans la fourchette prédite (+1 à
++4 %). J/jeton net médian A 4,8628, B 4,8604 → **−0,05 %**, quasi plat — la prédiction (−2 à
+−6 %) n'est pas tenue sur l'énergie à ce B (le poste dominant à b=1 est la puissance de repos,
+pas le débit ; pas un falsificateur du mécanisme, juste hors de portée du gain énergie observé
+à b=8). **Bilan des quatre cellules 190 clos** : mixte b=8 falsificateur attribué (175b+187 hors
+périmètre), nvfp4 b=8 TENU, gemma31 b=8 TENU (falsificateur neutre confirmé), mixte b=1 TENU en
+débit / plat en énergie.
 durée : prévu ≤ 15 min, tenu par carte.sh — 4 prises consécutives 11:03→11:22 (~19 min, file d'attente ~13 min avant la 1ʳᵉ prise incluse dans le journal, hors prise)
