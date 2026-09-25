@@ -367,8 +367,29 @@ printf '%s prise   %-8s %-32s %s\n' "$(date +%FT%T)" "$$" "$NOM" "$TYPE" >> "$JO
 # profondeur, flock devrait deja l'empecher), et une trace ANOMALIE si jamais
 # ce trap trouvait un .qui qui n'est plus le sien — pour laisser une preuve la
 # prochaine fois, au lieu d'un silence.
-trap '_reaper_setsid_orphelins "$$" "$JOURNAL" "$NOM"; p=; read -r p _ < "$INFO" 2>/dev/null; if [ "$p" = "$$" ]; then rm -f "$INFO"; printf "%s rendue  %-8s %-32s %s tenue=%ss\n" "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "$(( $(date +%s) - _pris ))" >> "$JOURNAL" 2>/dev/null || true; else printf "%s ANOMALIE %-8s %-32s %s .qui deja repris par pid %s (jxm), non efface\n" "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "${p:-?}" >> "$JOURNAL" 2>/dev/null || true; fi' EXIT
+trap '[ -n "${_charge_pid:-}" ] && kill "$_charge_pid" 2>/dev/null; _reaper_setsid_orphelins "$$" "$JOURNAL" "$NOM"; p=; read -r p _ < "$INFO" 2>/dev/null; if [ "$p" = "$$" ]; then rm -f "$INFO"; printf "%s rendue  %-8s %-32s %s tenue=%ss\n" "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "$(( $(date +%s) - _pris ))" >> "$JOURNAL" 2>/dev/null || true; else printf "%s ANOMALIE %-8s %-32s %s .qui deja repris par pid %s (jxm), non efface\n" "$(date +%FT%T)" "$$" "$NOM" "$TYPE" "${p:-?}" >> "$JOURNAL" 2>/dev/null || true; fi' EXIT
 AVANT=$(etat_carte)
+
+# CHARGE HOTE, PENDANT LA PRISE (189, ordre chef, apres la 186 : « une mesure
+# doit porter sa propre preuve de charge hote ») — sans elle, un A/B fausse par
+# une charge externe reste indecidable, comme les 341 ms de la 186 avant l'ABBA.
+# 1 Hz, /proc/loadavg seul (charge globale du systeme, y compris les processus
+# hors carte.sh) : suffisant pour dater une contention a la minute pres au
+# croisement avec le journal ; vmstat aurait ajoute une dependance externe pour
+# le meme besoin. `mesure` SEULEMENT (etat/partage/service ne calculent pas ou
+# echappent au plafond) ; arret garanti par le trap EXIT ci-dessus, meme sur
+# TIMEOUT ou signal — jamais laisse tourner apres la restitution du verrou.
+if [ "$TYPE" = mesure ]; then
+  CHARGE_DIR="${ACVRAM_CHARGE_DIR:-$HOME/.cache/acvram/charge}"
+  mkdir -p "$CHARGE_DIR" 2>/dev/null
+  _nom_fs=$(printf '%s' "$NOM" | tr -c 'A-Za-z0-9_.-' '_')
+  CHARGE_FICHIER="$CHARGE_DIR/$_nom_fs.$$.tsv"
+  ( while :; do
+      printf '%s\t%s\n' "$(date +%FT%T)" "$(cut -d' ' -f1-3 /proc/loadavg)" >> "$CHARGE_FICHIER" 2>/dev/null
+      sleep 1
+    done ) 8>&- 9>&- </dev/null >/dev/null 2>&1 &
+  _charge_pid=$!
+fi
 # `9>&-` FERME LE DESCRIPTEUR POUR LA COMMANDE SEULE. Sans lui, l'enfant en
 # herite et `flock` ne tombe que quand TOUS les descripteurs sont fermes : tuer
 # ce script en -9 laissait alors le verrou tenu par son propre enfant, et le
