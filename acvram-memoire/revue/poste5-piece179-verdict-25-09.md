@@ -44,3 +44,17 @@ Mais GEMV et GEMM n'ont pas la même arithmétique : la sortie change, et il fau
 * B' int8 : **au bit, tenu** ; gain nul à ce banc (invites ≤ 80), −49 à −52 % du préfill au-delà de 80 jetons.
 * Fenêtre d'admission : +2,5 à +2,7 % de débit servi, opt-in ; défaut sur décision.
 * Levier suivant proposé : seuil GEMV/GEMM int8 abaissé sous B' (KL requise).
+
+### Suite complète (2a6ef690 contre la base, 05:0x-05:24:26)
+HEAD 1 échec, 2 794 verts ; base 0 échec, 2 793 verts. L'échec propre à la branche était
+`test_octets_retenus_dans_la_reserve` : vert seul, rouge dans la suite, parce que la différence « après − avant »
+comptait des allocations persistantes faites pendant la portée (espace de travail cuBLAS au premier GEMM d'une forme ;
+le compte exact tombait pile sur le terme de la réserve, 231,7 Mio). Corrigé : le retenu se mesure à la SORTIE de la
+portée, ce qu'elle rend. Rejeu sous verrou (e79527fb) : 2/2 seul, 39/39 au milieu des tests GPU voisins. La suite
+complète n'a pas été rejouée sur ce correctif, qui ne touche qu'un test.
+
+### Relais de la 181 (poste1) : coût réel de l'admission en deux pas
+La 181 mesure un préfill servi de 1,30 à 1,46 s par lot, contre « 0,907 s groupé ». Ce 0,907 vient de mon iso de la 177
+à L = 92, qui est faux (L réel = 78). Au moteur, avec l'invite réelle, le lot groupé en UN pas coûte **1,19 s**
+(`eng179`). L'admission en deux pas coûte donc **0,11 à 0,27 s par lot**, et non 0,4 à 0,5. C'est cohérent avec le
+gain de la fenêtre de 5 ms : +2,7 % ≈ 0,17 s par lot.
