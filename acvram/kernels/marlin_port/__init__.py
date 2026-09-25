@@ -457,7 +457,9 @@ def gemv_marlin_torch(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, 
     noyau divise x par la table de l'expert, x et le quotient arrondis en bf16 — reproduit ici tel quel."""
     E = w_marlin.shape[0]
     assert tuple(w_marlin.shape) == (E, K // 16, 2 * N) and tuple(s_marlin.shape) == (E, K // 16, N)
-    g = torch.as_tensor(g_marlin, dtype=torch.float32, device=w_marlin.device).reshape(-1)
+    g2 = torch.as_tensor(g_marlin, dtype=torch.float32, device=w_marlin.device)
+    par_colonne = g2.dim() == 2                                       # 209 : g [E, ≥ N] par (expert, colonne)
+    g = g2 if par_colonne else g2.reshape(-1)
     _, idx, perm_e, niveaux = _indices(w_marlin.device)
     KT, NT = K // 16, N // 64
     xf = x.reshape(-1, x.shape[-1]).to(torch.float32)
@@ -481,7 +483,7 @@ def gemv_marlin_torch(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, 
         if xscale is not None:
             xt = (xt.to(torch.bfloat16).float() / xscale[e, :K].float()).to(torch.bfloat16).float()
         partiel = torch.einsum("nkl,kl->nk", vals, xt.view(KT, 16))                     # Σ_k code·x par tuile, fp32
-        out[gi] = (partiel * s_dec).sum(dim=1) * (g[e] * 2.0 ** -119)
+        out[gi] = (partiel * s_dec).sum(dim=1) * ((g[e, :N] if par_colonne else g[e]) * 2.0 ** -119)
     return out
 
 

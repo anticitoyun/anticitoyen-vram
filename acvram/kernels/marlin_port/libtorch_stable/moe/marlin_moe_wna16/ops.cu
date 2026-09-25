@@ -353,7 +353,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                bool has_act_order, bool is_k_full, bool has_zp, int num_groups,
                int group_size, int dev, cudaStream_t stream, int thread_k,
                int thread_n, int sms, int blocks_per_sm, bool use_atomic_add,
-               bool use_fp32_reduce, bool is_zp_float, int ldn) {
+               bool use_fp32_reduce, bool is_zp_float, int ldn, int gs_par_colonne) {
   int thread_m_blocks = div_ceil(moe_block_size, 16);
   bool m_block_size_8 = moe_block_size == 8;
   bool is_a_8bit = a_type.size_bits() == 8;
@@ -534,7 +534,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
       A_ptr, B_ptr, C_ptr, C_tmp_ptr, bias_ptr, a_s_ptr, b_s_ptr, g_s_ptr, zp_ptr, g_idx_ptr,
       sorted_token_ids_ptr, expert_ids_ptr, num_tokens_past_padded_ptr,
       topk_weights_ptr, top_k, mul_topk_weights, num_groups, prob_m,
-      prob_n, prob_k, locks, has_bias, use_atomic_add, use_fp32_reduce, ldn);
+      prob_n, prob_k, locks, has_bias, use_atomic_add, use_fp32_reduce, ldn, gs_par_colonne);
   // clang-format on
 }
 
@@ -675,6 +675,10 @@ torch::stable::Tensor moe_wna16_marlin_gemm(
   STD_TORCH_CHECK(b_scales.stride(2) == 1 && b_scales.stride(1) == ldn &&
                       b_scales.stride(0) == b_scales.size(1) * b_scales.stride(1),
                   "b_scales : largeur stockée ", b_scales.stride(1), " != celle de b_q_weight ", ldn);
+  if (gs_par_colonne) {
+    STD_TORCH_CHECK(global_scale.size(1) >= size_n && global_scale.stride(1) == 1 && global_scale.stride(0) == ldn,
+                    "global_scale par colonne : [E, ≥ N] de stride ", ldn, " (largeur stockée)");
+  }
 
   torch::stable::Tensor a_scales;
   constexpr auto kFloat = torch::headeronly::ScalarType::Float;
@@ -782,10 +786,14 @@ torch::stable::Tensor moe_wna16_marlin_gemm(
   }
 
   torch::stable::Tensor global_scale;
+  int gs_par_colonne = 0;
   if (global_scale_or_none.has_value()) {
     global_scale = global_scale_or_none.value();
     STD_TORCH_CHECK(b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn,
                     "global_scale can only be used for nvfp4 format.");
+    // acvram (pièce 209) : échelle globale par (expert, colonne) [E, ≥ N] — vue de colonnes admise (moitié d'up de
+    // w13), stride(0) = largeur stockée ldn ; [E] = par expert, chemin d'avant au bit.
+    if (global_scale.dim() == 2) gs_par_colonne = 1;
   } else {
     global_scale = torch::stable::new_empty(a, {0}, kFloat);
     STD_TORCH_CHECK(
@@ -895,7 +903,7 @@ torch::stable::Tensor moe_wna16_marlin_gemm(
       a_type, b_type, c_type, s_type, has_bias, has_act_order, is_k_full,
       has_zp, num_groups, group_size, dev, get_current_cuda_stream(dev),
       thread_k, thread_n, sms, blocks_per_sm, use_atomic_add, use_fp32_reduce,
-      is_zp_float, ldn);
+      is_zp_float, ldn, gs_par_colonne);
 
   return c;
 }

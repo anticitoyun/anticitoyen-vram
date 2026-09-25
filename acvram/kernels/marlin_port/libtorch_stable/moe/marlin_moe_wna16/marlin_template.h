@@ -548,7 +548,9 @@ __global__ void Marlin(
     expert_id = expert_ids_ptr[block_id];
 
     if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
-      global_scale_f32 = global_scale_ptr[expert_id];
+      // acvram (pièce 209) : par colonne, l'échelle s'applique dans `write` (g[expert·ldn + col]) — jamais ici ni
+      // sur le poids top-k
+      global_scale_f32 = gs_par_colonne ? 1.0f : global_scale_ptr[expert_id];
     }
 
     B_expert_off = expert_id * ldn * prob_k / (pack_factor * 4);
@@ -1799,7 +1801,22 @@ __global__ void Marlin(
     // global write patterns
     auto write = [&](int idx, float c0, float c1, FragS& s, FragS& b_bias) {
       if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
-        if (!mul_topk_weights) {
+        if (gs_par_colonne) {
+          // Port acvram (pièce 209, même geste que le dense 101) : échelle globale par (expert, colonne), fp32,
+          // au même endroit que l'échelle scalaire ; colonne dans la tuile comme dans le dense (idx en paires,
+          // ou en scalaires sous m_block_size_8).
+          const float* gsl = global_scale_ptr + (long)expert_id * ldn;
+          const int col0 = 16 * thread_n_blocks * slice_col;
+          if constexpr (m_block_size_8) {
+            const float g = gsl[col0 + idx % (8 * c_sh_stride)];
+            c0 *= g;
+            c1 *= g;
+          } else {
+            const int col = col0 + 2 * (idx % (4 * c_sh_stride));
+            c0 *= gsl[col];
+            c1 *= gsl[col + 1];
+          }
+        } else if (!mul_topk_weights) {
           c0 *= global_scale_f32;
           c1 *= global_scale_f32;
         }

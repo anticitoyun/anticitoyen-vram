@@ -486,10 +486,12 @@ class MoEBlock(nn.Module):
                 _, qw, bs, gs, k, m = piles[n]
                 if k % 64 or qw.shape[1] % 64:
                     raison = f"{n} : K={k} ou N={qw.shape[1]} non multiple de 64"
-                elif (ecr := MP.echelles_ecrasees(bs.view(torch.float8_e4m3fn) if bs.dtype == torch.uint8 else bs)):
-                    # pièce 157 : un facteur commun à la pile (g par expert seulement) écraserait des sous-normales à
-                    # zéro — Qwen3-Coder-30B couches 0, 1, 2, 4 ; la pile naturelle est exacte
-                    raison = f"{n} : {ecr} échelles sous-normales non représentables en Marlin (S0E5M3)"
+                elif (ecr := MP.echelles_ecrasees(bs.view(torch.float8_e4m3fn) if bs.dtype == torch.uint8 else bs,
+                                                  par_ligne=True)):
+                    # pièce 157 : un facteur commun écraserait des sous-normales ; pièce 209 : `preparer_pile` prend
+                    # alors un facteur PAR LIGNE d'expert (g par (expert, colonne)) — refus seulement si une ligne
+                    # dépasse à elle seule la plage S0E5M3
+                    raison = f"{n} : {ecr} échelles sous-normales non représentables en Marlin même par ligne (S0E5M3)"
         if raison is None:
             from ..kernels import marlin_port as MP
             if MP.charger(compiler=False) is None:
@@ -521,7 +523,17 @@ class MoEBlock(nn.Module):
             # un w13 vLLM découpé, sert gate et up à 8·10⁻³).
             w13, s13 = torch.cat([wg, wu], dim=2).contiguous(), torch.cat([sg, su], dim=2).contiguous()
             del wg, wu, sg, su
-            out["w13"] = (w13, s13, gg, gu, k, m, (gu / gg).contiguous(), torch.ones_like(gg))
+            if gg.dim() == 2 or gu.dim() == 2:
+                # Pièce 209 : facteur par ligne sur gate ou up → échelle globale par (expert, colonne) [E, 2N] ;
+                # l épilogue Marlin (et le GEMV w13) l applique colonne par colonne, gate et up chacune avec la sienne :
+                # rien à corriger dans moe_act (rapport gu/gg = None). La moitié d up est une VUE de g13 (stride 2N).
+                ng = s13.shape[2] // 2
+                gg2 = gg if gg.dim() == 2 else gg.reshape(-1, 1).expand(-1, ng)
+                gu2 = gu if gu.dim() == 2 else gu.reshape(-1, 1).expand(-1, ng)
+                g13 = torch.cat([gg2, gu2], dim=1).contiguous()
+                out["w13"] = (w13, s13, g13, g13[:, ng:], k, m, None, None)
+            else:
+                out["w13"] = (w13, s13, gg, gu, k, m, (gu / gg).contiguous(), torch.ones_like(gg))
             # gate/up rendues : les champs de forme restent (K, N, échelles globales) ; poids et échelles à None,
             # tout chemin qui les relirait casse au lieu de mesurer une double disposition.
             out["gate_proj"], out["up_proj"] = (None, None, gg, k, m), (None, None, gu, k, m)

@@ -2194,7 +2194,9 @@ __global__ void __launch_bounds__(MB_WARPS * WARP) nvfp4_gemv_marlin_kernel(
     const int *__restrict__ expert_ids, const int *__restrict__ token_ids,
     const XT *__restrict__ x, float *__restrict__ y, int N, int K, int act,
     float *__restrict__ part, unsigned int *__restrict__ cpt,
-    const __nv_bfloat16 *__restrict__ xsc, int ld_sc, int ldn) {
+    const __nv_bfloat16 *__restrict__ xsc, int ld_sc, int ldn, int gs_ld0, int gs_ld1) {
+    // Pièce 209 : gs_ld = 0 → échelle globale par expert (g[e], chemin d'avant, au bit) ; gs_ld > 0 → par (expert,
+    // colonne) : g[e·gs_ld + colonne] (piles à facteur par ligne, 157/209 : Coder-30B couches 0, 1, 2, 4).
     extern __shared__ float xs[];
     float *red = xs + K;
     __shared__ bool dernier;
@@ -2301,8 +2303,8 @@ __global__ void __launch_bounds__(MB_WARPS * WARP) nvfp4_gemv_marlin_kernel(
             if constexpr (NW == 2) part[((long)(z * NW + 1) * gridDim.y + g) * N + nt * MB_TN + col] = t1;
             __threadfence();
         } else {
-            t0 *= g0[e] * 0x1p-119f;
-            if constexpr (NW == 2) t0 = acv_act(t0, act) * (t1 * (g1[e] * 0x1p-119f));
+            t0 *= g0[gs_ld0 ? (long)e * gs_ld0 + nt * MB_TN + col : e] * 0x1p-119f;
+            if constexpr (NW == 2) t0 = acv_act(t0, act) * (t1 * (g1[gs_ld1 ? (long)e * gs_ld1 + nt * MB_TN + col : e] * 0x1p-119f));
             y[(long)g * N + nt * MB_TN + col] = t0;
         }
     }
@@ -2320,8 +2322,8 @@ __global__ void __launch_bounds__(MB_WARPS * WARP) nvfp4_gemv_marlin_kernel(
             t0 += vp[((long)(zz * NW) * gridDim.y + g) * N + nt * MB_TN + col];
             if constexpr (NW == 2) t1 += vp[((long)(zz * NW + 1) * gridDim.y + g) * N + nt * MB_TN + col];
         }
-        t0 *= g0[e] * 0x1p-119f;
-        if constexpr (NW == 2) t0 = acv_act(t0, act) * (t1 * (g1[e] * 0x1p-119f));
+        t0 *= g0[gs_ld0 ? (long)e * gs_ld0 + nt * MB_TN + col : e] * 0x1p-119f;
+        if constexpr (NW == 2) t0 = acv_act(t0, act) * (t1 * (g1[gs_ld1 ? (long)e * gs_ld1 + nt * MB_TN + col : e] * 0x1p-119f));
         y[(long)g * N + nt * MB_TN + col] = t0;
     }
     if (threadIdx.x == 0) cpt[g * NT + nt] = 0u;         // prêt pour le rejeu suivant
@@ -2452,8 +2454,17 @@ static int mb_splitk(int NT, int G, int KT) {
     return S;
 }
 
+// Pièce 209 : ld de l'échelle globale — 0 pour [E] (par expert), stride(0) pour [E, ≥ N] (par colonne, vue admise :
+// moitié d'up de w13, lignes contiguës).
+static int mb_gs_ld(const torch::Tensor &g, int64_t N) {
+    if (g.dim() == 1) return 0;
+    TORCH_CHECK(g.dim() == 2 && g.size(1) >= N && g.stride(1) == 1, "échelle globale Marlin par colonne : [E, ≥ N], lignes contiguës");
+    return (int)g.stride(0);
+}
+
 static void mb_verifier(const torch::Tensor &w, const torch::Tensor &s, const torch::Tensor &g, int64_t K, int64_t N) {
-    CHECK_CUDA(w); CHECK_CONTIG(w); CHECK_CONTIG(s); CHECK_CONTIG(g);
+    CHECK_CUDA(w); CHECK_CONTIG(w); CHECK_CONTIG(s);
+    if (g.dim() == 1) { CHECK_CONTIG(g); } else { mb_gs_ld(g, N); }
     TORCH_CHECK(w.scalar_type() == torch::kInt, "disposition Marlin : poids int32 repackés");
     TORCH_CHECK(s.scalar_type() == torch::kByte || s.scalar_type() == torch::kFloat8_e4m3fn,
                 "disposition Marlin : échelles S0E5M3 (uint8 ou float8_e4m3fn)");
@@ -2796,7 +2807,7 @@ torch::Tensor nvfp4_gemv_marlin(torch::Tensor w, torch::Tensor s, torch::Tensor 
     #define MB_L(XT, PX) nvfp4_gemv_marlin_kernel<XT, 1><<<grid, MB_WARPS * WARP, shm, stream>>>( \
         reinterpret_cast<const uint4 *>(w.data_ptr()), static_cast<const unsigned char *>(s.data_ptr()), g.data_ptr<float>(), \
         nullptr, nullptr, nullptr, expert_ids.data_ptr<int>(), token_ids.data_ptr<int>(), PX, out.data_ptr<float>(), (int)N, (int)K, 0, \
-        part, cpt, psc, ldsc, (int)N)
+        part, cpt, psc, ldsc, (int)N, mb_gs_ld(g, N), 0)
     if (bf) { MB_L(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
     else { MB_L(float, xc.data_ptr<float>()); }
     #undef MB_L
@@ -2841,7 +2852,7 @@ torch::Tensor nvfp4_gemv_marlin_gateup(torch::Tensor wg, torch::Tensor sg, torch
         reinterpret_cast<const uint4 *>(wg.data_ptr()), static_cast<const unsigned char *>(sg.data_ptr()), gg.data_ptr<float>(), \
         reinterpret_cast<const uint4 *>(wu.data_ptr()), static_cast<const unsigned char *>(su.data_ptr()), gu.data_ptr<float>(), \
         expert_ids.data_ptr<int>(), token_ids.data_ptr<int>(), PX, out.data_ptr<float>(), (int)N, (int)K, (int)act, \
-        part, cpt, psc, ldsc, (int)N)
+        part, cpt, psc, ldsc, (int)N, mb_gs_ld(gg, N), mb_gs_ld(gu, N))
     if (bf) { MB_L(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
     else { MB_L(float, xc.data_ptr<float>()); }
     #undef MB_L
@@ -2858,8 +2869,10 @@ torch::Tensor nvfp4_gemv_marlin_w13(torch::Tensor w13, torch::Tensor s13, torch:
                                     torch::Tensor expert_ids, torch::Tensor token_ids,
                                     torch::Tensor x, int64_t K, int64_t N, int64_t act,
                                     c10::optional<torch::Tensor> xscale) {
-    mb_verifier(w13, s13, gg, K, 2 * N); CHECK_CONTIG(gu); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(w13);
-    TORCH_CHECK(gu.scalar_type() == torch::kFloat && gu.numel() == gg.numel(), "w13 : échelle globale d up fp32 [E]");
+    mb_verifier(w13, s13, gg, K, 2 * N); CHECK_CUDA(x); ACVRAM_DEVICE_GUARD(w13);
+    if (gu.dim() == 1) { CHECK_CONTIG(gu); TORCH_CHECK(gu.numel() == gg.numel(), "w13 : échelle globale d up fp32 [E]"); }
+    else { mb_gs_ld(gu, N); }                          // 209 : vue [E, N] (stride 2N) de la moitié d up de g13
+    TORCH_CHECK(gu.scalar_type() == torch::kFloat, "w13 : échelle globale d up fp32");
     const int G = expert_ids.size(0);
     const bool bf = x.scalar_type() == torch::kBFloat16;
     auto xc = (bf ? x : x.to(torch::kFloat)).contiguous();
@@ -2888,7 +2901,7 @@ torch::Tensor nvfp4_gemv_marlin_w13(torch::Tensor w13, torch::Tensor s13, torch:
     #define MB_L(XT, PX) nvfp4_gemv_marlin_kernel<XT, 2><<<grid, MB_WARPS * WARP, shm, stream>>>( \
         qg, sgp, gg.data_ptr<float>(), qu, sup, gu.data_ptr<float>(), \
         expert_ids.data_ptr<int>(), token_ids.data_ptr<int>(), PX, out.data_ptr<float>(), (int)N, (int)K, (int)act, \
-        part, cpt, psc, ldsc, (int)(2 * N))
+        part, cpt, psc, ldsc, (int)(2 * N), mb_gs_ld(gg, N), mb_gs_ld(gu, N))
     if (bf) { MB_L(__nv_bfloat16, reinterpret_cast<const __nv_bfloat16 *>(xc.data_ptr())); }
     else { MB_L(float, xc.data_ptr<float>()); }
     #undef MB_L
