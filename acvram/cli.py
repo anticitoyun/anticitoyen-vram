@@ -78,6 +78,7 @@ VARIABLES_LUES = {
     "ACVRAM_GDN_PREFILL_LOT",   # engine/couches.py : lot au préfill GDN
     "ACVRAM_GDN_ETAT_EN_PLACE", # engine/gdn.py : 156 F4, état GDN mis à jour en place (défaut 1)
     "ACVRAM_GDN_CONV_FUSEE",    # engine/gdn.py : 156 F2, conv de décodage fusionnée (défaut 1)
+    "ACVRAM_DEPAQ_PARTAGE",     # kernels : 172, poids déquantifié partagé par la boucle par séquence (défaut 1, au bit)
     "ACVRAM_GDN_PORTES_NOYAU",  # engine/gdn.py : 156 F1, portes dans le noyau fla (défaut 1, ± ulp)
     "ACVRAM_GDN_NORME_FUSEE",   # engine/gdn.py : 156 F3, norme gated Triton (défaut 1, ± ulp)
     "ACVRAM_GDN_QKV_GATE",      # engine/gdn.py : 176, qkv‖gate INT8 en une pile au décodage (défaut 1, au bit)
@@ -756,6 +757,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         group_size=args.group_size, n_grid=args.grid,
         lm_head_format=args.lm_head_format, dry_run=args.dry_run,
         attn_qkvo_int8_canal=args.attn_qkvo_int8_canal,
+        gdn_int8_canal=args.gdn_int8_canal,
         q3n_table=(tuple(float(v) for v in args.q3n_table.split(","))
                    if args.q3n_table else None),
         mixed_precision=args.mixed_precision, snr_floor=args.snr_floor,
@@ -1148,6 +1150,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="q/k/v/o en int8 symetrique par canal (une echelle "
                          "par ligne, sans point-zero variable) au lieu du "
                          "groupe de 128 affine du reste du modele")
+    cv.add_argument("--gdn-int8-canal", action="store_true",
+                    help="153 : les cinq projections du GatedDeltaNet "
+                         "(qkv/gate/alpha/beta/out) en int8 symetrique par "
+                         "canal, meme regime que --attn-qkvo-int8-canal mais "
+                         "drapeau distinct (les deux se cumulent)")
     cv.add_argument("--q3n-table", help=("niveaux q3n de ce modèle, huit "
                     "flottants séparés par des virgules (symétriques, bornes "
                     "±1) ; défaut : table de la spécification"))
