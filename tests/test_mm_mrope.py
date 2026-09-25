@@ -409,6 +409,8 @@ def test_qwen3_vl_2b_cpu_positions_3d_et_delta_contre_get_rope_index():
     from acvram.engine.config import load_model_spec
     from acvram.engine.mrope import grille_de
     from acvram.server.chat import _par_image
+    if not torch.cuda.is_available():
+        pytest.skip("CI sans carte (CUDA_VISIBLE_DEVICES vide) : rien a attendre, pas de queue")
     verrou = "/tmp/acvram-carte-0.lock.qui"  # lecture seule du vrai verrou : on attend, on n'y écrit jamais
     t0 = time.time()
     # Sous une prise de NOTRE chaîne (ACVRAM_CARTE_TENUE : CI publique lancée sous carte.sh par le chef),
