@@ -52,8 +52,9 @@ AB_BILAN = {"fusionnees": 0, "raisons": {}}          # 175 : ce que le chargemen
 # Pièce 194 (b2) : β‖α (3 programmes, 9-14 µs, jusqu'ici sur le chemin critique) lancé sur un SECOND flux pendant la pile
 # qkv‖gate (1 024 programmes, 60 µs) qui lit la même entrée ; jointure avant de rendre, la récurrence les consomme. Au bit
 # par construction (mêmes noyaux, mêmes entrées). Banc : −12,15 µs/couche, 0,58 ms/pas à b=8 (poste1-194-b2-banc-25-09).
-# Opt-in jusqu'à l'ABBA servi ; 0 = témoin (série).
-_GDN_AB_FLUX = os.environ.get("ACVRAM_GDN_AB_FLUX", "0") == "1"
+# DÉFAUT depuis le verdict 194 b2 (chef 25/09 : servi mixte b=8 +2,20 %, J/jeton −1,9 %, b=1 +0,46 %, témoins nvfp4 nuls,
+# capture 4/4) ; 0 = témoin (série).
+_GDN_AB_FLUX = os.environ.get("ACVRAM_GDN_AB_FLUX", "1") == "1"
 _FLUX_AB: dict = {}
 
 
@@ -117,7 +118,7 @@ def _ab_texte() -> str:
         return ""
     raisons = ",".join(f"{k}×{v}" for k, v in sorted(AB_BILAN["raisons"].items()))
     return (f" ab={_GDN_AB}({AB_BILAN['fusionnees']}" + (f":{raisons}" if raisons else "") + ")"
-            + (" abflux" if _GDN_AB_FLUX else ""))
+            + (" abflux" if _GDN_AB_FLUX and AB_BILAN["fusionnees"] else ""))   # 194 : seulement si β‖α existe (inerte sinon)
 
 
 def _recurrence_en_place(q, k, v, g, beta, S: torch.Tensor, A_log=None, dt_bias=None) -> torch.Tensor:

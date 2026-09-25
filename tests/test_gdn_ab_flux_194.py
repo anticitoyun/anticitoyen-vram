@@ -74,6 +74,9 @@ def test_sans_jointure_le_consommateur_lit_trop_tot(monkeypatch):
 def test_la_ligne_de_regime_le_dit(monkeypatch):
     monkeypatch.setattr(gdn, "_GDN_AB", "auto")
     monkeypatch.setattr(gdn, "_GDN_AB_FLUX", True)
+    monkeypatch.setitem(gdn.AB_BILAN, "fusionnees", 0)
+    assert "abflux" not in gdn._ab_texte(), "inerte sans β‖α fusionné : la ligne ne doit pas le prétendre"
+    monkeypatch.setitem(gdn.AB_BILAN, "fusionnees", 48)
     assert gdn._ab_texte().endswith(" abflux")
     monkeypatch.setattr(gdn, "_GDN_AB_FLUX", False)
     assert "abflux" not in gdn._ab_texte()
@@ -89,8 +92,16 @@ def test_a_sec_aucun_flux(monkeypatch):
         assert torch.equal(a, b)
 
 
-def test_la_variable_est_opt_in():
+def test_le_defaut_est_le_second_flux():
+    """Verdict 194 b2 (chef, 25/09) : 1 au défaut. Casse si le défaut revient à 0, dans le code OU dans la table."""
     import os
-    from acvram import regime
+    import subprocess
+    import sys
+    from acvram import cli, regime
     v = next(v for v in regime.VARIABLES if v.nom == "GDN_AB_FLUX")
-    assert v.defaut == "0" and ("ACVRAM_GDN_AB_FLUX" in os.environ or gdn._GDN_AB_FLUX is False)
+    assert v.defaut == "1" and "ACVRAM_GDN_AB_FLUX" in cli.VARIABLES_LUES
+    env = {k: val for k, val in os.environ.items() if k != "ACVRAM_GDN_AB_FLUX"}
+    env["CUDA_VISIBLE_DEVICES"] = ""
+    r = subprocess.run([sys.executable, "-c", "from acvram.engine import gdn; print(gdn._GDN_AB_FLUX)"],
+                       env=env, capture_output=True, text=True, check=True)
+    assert r.stdout.strip() == "True", r.stdout + r.stderr
