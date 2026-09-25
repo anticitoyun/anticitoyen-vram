@@ -22,3 +22,14 @@ Trois formes (6144 × 5120, 17408 × 5120, 5120 × 17408), N ∈ {12, 16, 32, 64
   est > 1,25. Entre les deux, je le dis sans conclure et la décision revient à chef.
 * Contrôle de prise : à N = 12, les deux bras font un seul lancement, donc T(12) / T(16) doit valoir 1,00 ± 0,05. Sinon
   la tranche n'a pas pris, ou l'instrument ment.
+
+## Résultat de l'étape 0 (prise 07:4x-07:45:14, 72ef86f5, 4 processus alternés 16/12/16/12, minimum des médianes par bras)
+Contrôle N = 12 : 0,999 / 1,001 / 1,026, tenu. **T(12) / T(16) à N = 78 : 0,779 (6144 × 5120), 0,748 (17408 × 5120),
+0,811 (5120 × 17408)** ; de 0,72 à 0,85 pour tout N de 16 à 78.
+* **Prédiction FAUSSE dans l'autre sens.** J'attendais 1,00 à 1,10 ; la tranche 12 est 19 à 28 % plus RAPIDE. Les 2
+  relectures de W en plus coûtent moins que ce que NV = 16 perd (registres ou occupation, à lire par ptxas).
+* **187 telle qu'ordonnée (NV↑) : ARRÊT** (ratio < 1,15). Monter NV ralentirait encore.
+* Levier opposé, au bit par construction (même ordre, cf. plus haut) : **une tranche plus petite pour 17 ≤ N ≤ 80**,
+  12 ou moins, à balayer. Le témoin `ACVRAM_INT8_TRANCHE=12` existe déjà. Réserve : la tranche 16 a été posée le 14/09 pour
+  le godet 16 du décodage b=12. Or ici, à N = 16, la tranche 12 (12 + 4) va aussi plus vite (0,100 contre 0,134 ms), ce qui
+  est à revoir au régime du moteur (graphes, godets).
