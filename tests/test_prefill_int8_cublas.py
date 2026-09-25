@@ -57,8 +57,15 @@ def test_temoins_cassants_affine_zero_et_petit_m():
     z = t.zeros.clone(); z[3, 0] = 127                              # un zéro ≠ 128
     t_z = INT8Tensor(t.qweight, t.scales, z, t.group_size, t.shape, t.format)
     assert _i8c_poids(t_z) is None
-    # la copie int8 est faite une fois et gardée
-    assert _i8c_poids(t) is _i8c_poids(t) and _i8c_poids(t).dtype == torch.int8
+    # pièce 201 : la copie int8 est TRANSITOIRE — refaite à chaque appel hors portée (mêmes octets), une fois par
+    # portée de partage B' ; rien n'est gardé sur le tenseur
+    from acvram import kernels
+    a, b = _i8c_poids(t), _i8c_poids(t)
+    assert a is not b and torch.equal(a, b) and a.dtype == torch.int8
+    assert t.__dict__["_i8c"] is True, "seule l'éligibilité est gardée, jamais la copie"
+    if kernels._DEPAQ_PARTAGE:
+        with kernels.depaquetage_partage():
+            assert _i8c_poids(t) is _i8c_poids(t)
 
 
 def test_int8_matmul_prend_cublas_sous_regime(monkeypatch):
