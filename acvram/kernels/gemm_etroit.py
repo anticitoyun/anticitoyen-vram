@@ -262,18 +262,6 @@ def decouper_k(ng: int, tuiles_n: int, device) -> tuple[int, int]:
     return -(-ng // gpt), gpt
 
 
-def bn_pour(N: int, ng: int, device) -> int:
-    """Pièce 176b : largeur de tuile N. 64 par défaut ; 32 quand la forme n'a qu'UNE tranche K et déborde d'à peine une
-    vague (3 blocs/SM à 146 registres : 510 places sur la 5090) — gate‖up 34 816 × 5 120 : 544 tuiles = 1,07 vague, la 2e
-    presque vide (queue longue) ; à 32, 1 088 petites tuiles : 165,5 → 151,9 µs à M = 8, AU BIT (tl.dot rend la même
-    somme par colonne, harnais bn32.py). Ailleurs 32 est plus lent (qkv +29 %, down +20 %) : la règle ne vise que ce cas."""
-    tuiles = -(-N // BN)
-    places = 3 * _programmes(device)
-    if decouper_k(ng, tuiles, device)[0] == 1 and places < tuiles <= places * 3 // 2:
-        return 32
-    return BN
-
-
 def tranches_de(x: torch.Tensor, t) -> int:
     N, k_pad = t.qweight.shape
     return decouper_k(k_pad // t.group_size, -(-N // BN), x.device)[0]
@@ -306,7 +294,7 @@ def gemm_etroit(x: torch.Tensor, t, sortie_fp32: bool = False, compact: bool = F
                 outs.append(gemm_etroit(x, vue, sortie_fp32, compact=False))
                 d += n
             return torch.cat(outs, dim=-1)
-        gpt_t, ntr_t, tmax = _tables_segments(t, x.device)          # segments : BN 64 (partition par tuile de 64)
+        gpt_t, ntr_t, tmax = _tables_segments(t, x.device)
         y = torch.empty(tmax, M, N, dtype=torch.float32, device=x.device)
         out = torch.empty(M, N, dtype=torch.float32 if sortie_fp32 else x.dtype, device=x.device)
         _etroit_segments_kernel[(tuiles_n, tmax)](
@@ -315,21 +303,18 @@ def gemm_etroit(x: torch.Tensor, t, sortie_fp32: bool = False, compact: bool = F
             BM_=BM, BN_=BN, G=G, num_warps=forme_noyau()[0], num_stages=forme_noyau()[1])
         return out
     tranches, gpt = decouper_k(ng, tuiles_n, x.device)
-    bn = bn_pour(N, ng, x.device)                                    # 176b : 32 pour gate‖up (1,07 vague), sinon 64
-    if bn != BN:
-        tuiles_n = -(-N // bn)
     if compact:
         y = torch.empty(tranches, M, N, dtype=torch.float32, device=x.device)
         out = torch.empty(M, N, dtype=torch.float32 if sortie_fp32 else x.dtype, device=x.device)
         _etroit_reduit_kernel[(tuiles_n, tranches)](
             x, t.qweight, t.scales, t.zeros, y, _compteur(tuiles_n, x.device), out, M, N, K, ng, gpt, tranches,
             x.stride(0), t.qweight.stride(0), t.scales.stride(0), y.stride(0), y.stride(1), out.stride(0),
-            BM_=BM, BN_=bn, G=G, num_warps=forme_noyau()[0], num_stages=forme_noyau()[1])
+            BM_=BM, BN_=BN, G=G, num_warps=forme_noyau()[0], num_stages=forme_noyau()[1])
         return out
     y = torch.zeros(tranches, M, N, dtype=torch.float32, device=x.device)
     _etroit_kernel[(tuiles_n, tranches)](
         x, t.qweight, t.scales, t.zeros, y, M, N, K, ng, gpt,
         x.stride(0), t.qweight.stride(0), t.scales.stride(0), y.stride(0), y.stride(1),
-        BM_=BM, BN_=bn, G=G, num_warps=forme_noyau()[0], num_stages=forme_noyau()[1])
+        BM_=BM, BN_=BN, G=G, num_warps=forme_noyau()[0], num_stages=forme_noyau()[1])
     out = y.sum(0) if tranches > 1 else y[0]
     return out if sortie_fp32 else out.to(x.dtype)
