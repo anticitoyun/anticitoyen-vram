@@ -33,3 +33,22 @@ Contrôle N = 12 : 0,999 / 1,001 / 1,026, tenu. **T(12) / T(16) à N = 78 : 0,77
   12 ou moins, à balayer. Le témoin `ACVRAM_INT8_TRANCHE=12` existe déjà. Réserve : la tranche 16 a été posée le 14/09 pour
   le godet 16 du décodage b=12. Or ici, à N = 16, la tranche 12 (12 + 4) va aussi plus vite (0,100 contre 0,134 ms), ce qui
   est à revoir au régime du moteur (graphes, godets).
+
+## Suite (feu de chef 07 h 5x) : balayage de la tranche par plage, écrit AVANT la prise 1
+Code : `ACVRAM_INT8_TRANCHE` (N ≤ 16) et `ACVRAM_INT8_TRANCHE_PREFILL` (N > 16), valeurs 4/6/8/10/12/16, défaut 16 inchangé
+(acvram_kernels.cu, `lire_tranche`). **ptxas (cuobjdump -res-usage, build de l'étape 0, bf16)** : NV 4 = 99 registres,
+5-6 = 128, 8-9 = 168, 10 = 205, 12 = 217, 16 = 254, 0 déversement. À 256 fils, cela fait 2 blocs par SM pour NV ≤ 6 et 1 bloc
+de NV 7 à 16. J'ajoute donc 4 et 6 au balayage (8, 10, 12 ordonnés).
+* **Prise 1, banc isolé** (3 formes, N 12/16/32/64/78, 2 passes par tranche) : meilleure tranche contre 16 à N = 78,
+  **−20 à −35 %** ; godet 16, **−20 à −30 %**. Prédit : les tranches 4-6 (2 blocs par SM) devant 8-12, sans certitude
+  (4 lectures de W de plus à N = 78). **FAUX** si aucune tranche ne passe sous −15 % à N = 78.
+* **Test au bit** (`tests/test_int8_tranche_187.py`) : couche 0 réelle du mixte (qkv, gate, out), N 2-80, sorties bf16 et
+  fp32. Prédit : 6/6 au bit contre la tranche 16. Cassant (prise 2) : ordre des mots inversé pour NV ≤ 12 → ROUGE.
+  **FAUX** si un seul écart hors cassant.
+* **Prise 3, servi** : la meilleure tranche de chaque plage, choisie par le banc isolé selon cette règle écrite ici
+  (plus petit temps à N = 78 pour le préfill, à N = 16 pour le décodage), ABBA A = 16/16, B = choisie.
+  * banc chat b=8, mixte : **+2 à +5 %**. Les int8 du préfill passent au GEMV environ 3 456 fois par passage, part du
+    préfill non mesurée. **FAUX** sous +1 %.
+  * banc chat b=8, Qwen3.8-27B-nvfp4 : **0 ± bruit** (aucun int8 servi au préfill, 183). Témoin nul ; > 2 σ = instrument.
+  * décodage b=16, mixte : **0 à +3 %**, selon la part de `int8_gemv` au godet 16 (les i8c à M ≤ 16 prennent aussi les
+    chemins étroits, kernels/__init__.py:1366-1392). Compteur `CHEMINS_INT8` relevé dans la prise.

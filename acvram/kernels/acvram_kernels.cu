@@ -1725,10 +1725,20 @@ torch::Tensor int8_gemv(torch::Tensor qweight, torch::Tensor scales,
     // tous les poids — 1,25 Go par pas de décodage b=12, 19 % des octets DRAM
     // du pas, vus sous ncu en rejeu (revue/instr-par-octet-14-09.md).
     // ACVRAM_INT8_TRANCHE=12 rend l'ancien découpage (témoin A/B).
-    static const int tranche = [] {
-        const char *e = std::getenv("ACVRAM_INT8_TRANCHE");
-        return (e && std::string(e) == "12") ? 12 : 16;
-    }();
+    // Pièce 187 : la tranche se règle par plage, ACVRAM_INT8_TRANCHE pour N ≤ 16 (décodage, godets) et
+    // ACVRAM_INT8_TRANCHE_PREFILL pour N > 16 (préfill ≤ INT8_GEMV_MAX), valeurs 4/6/8/10/12/16. Au bit par
+    // construction : chaque sortie (r, n) garde son accumulateur et son ordre, quelle que soit la tranche. Banc
+    // isolé du 25/09 : tranche 12 −19 à −28 % contre 16 à N 16-78 ; ptxas : NV 16 = 254 registres, NV ≤ 6 = 128
+    // (2 blocs de 256 fils par SM au lieu d'un).
+    auto lire_tranche = [](const char *nom, int defaut) {
+        const char *e = std::getenv(nom);
+        if (e == nullptr || *e == '\0') return defaut;
+        const int v = std::atoi(e);
+        return (v == 4 || v == 6 || v == 8 || v == 10 || v == 12 || v == 16) ? v : defaut;
+    };
+    static const int tranche_dec = lire_tranche("ACVRAM_INT8_TRANCHE", 16);
+    static const int tranche_pre = lire_tranche("ACVRAM_INT8_TRANCHE_PREFILL", tranche_dec);
+    const int tranche = N > 16 ? tranche_pre : tranche_dec;
     const int Ntot = N;
     for (int base = 0; base < Ntot; base += tranche) {
         const int N = min(tranche, Ntot - base);     // masque volontaire pour I8G_N
