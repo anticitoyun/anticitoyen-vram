@@ -69,12 +69,16 @@ def test_octets_retenus_dans_la_reserve(monkeypatch):
     # Retenu = ce que la SORTIE de la portée rend. « après − avant » comptait aussi les allocations persistantes
     # faites pendant la portée (espace de travail cuBLAS au premier GEMM d'une forme) : vert seul, rouge dans la
     # suite complète (179, 25/09).
-    torch.cuda.synchronize()
+    # Octets DEMANDÉS, pas `memory_allocated` (pièce 191) : l'allocateur caché ne découpe pas un bloc libre du grand
+    # pool quand le reste est ≤ 1 Mio (`kSmallSize`) et compte alors le bloc entier. Ce reste dépend des segments
+    # laissés par les tests précédents : +1 048 576 o, rouge dans la suite à b6c0d2c54, vert seul.
+    def _demandes():
+        torch.cuda.synchronize()
+        return torch.cuda.memory_stats()["requested_bytes.all.current"]
+
     with kernels.depaquetage_partage():
         for lin, k in lins:
             lin(_x(k)[:92]); lin(_x(k)[92:184])
-        torch.cuda.synchronize()
-        dedans = torch.cuda.memory_allocated()
-    torch.cuda.synchronize()
-    retenu = dedans - torch.cuda.memory_allocated()
+        dedans = _demandes()
+    retenu = dedans - _demandes()
     assert 0 < retenu <= spec.poids_bf16_couche_lineaire_bytes(), (retenu, spec.poids_bf16_couche_lineaire_bytes())
