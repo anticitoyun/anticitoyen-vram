@@ -110,15 +110,29 @@ def test_triton_a_un_ulp_et_deterministe(monkeypatch, m):
 
 
 @carte
-@pytest.mark.parametrize("m", [1, 2, 4, 8, 12, 16, 24])
+@pytest.mark.parametrize("m", [1, 2, 3, 4, 6, 8, 12, 16, 24])
 def test_auto_au_bit_des_deux_appels(monkeypatch, m):
-    """Prise 3 : à b=8, triton == les deux F.linear AU BIT sur 32 pas (même ordre d'accumulation tensor-core que le wmma
-    128x1 de cuBLAS) ; à M = 1, concat == les deux appels au bit. `auto` doit rester au bit à chaque M ≤ 16 ; au-delà, les
-    deux appels eux-mêmes. Rouge si cuBLAS change de noyau ou si le mode auto dévie."""
+    """Prises 3-4 : triton == les deux F.linear AU BIT à M = 2, 4, 8 (même ordre d'accumulation tensor-core que le wmma
+    128x1 de cuBLAS), PLUS à M = 12 et 16 (autre noyau cuBLAS) ; à M = 1, concat == les deux appels au bit. `auto` (concat
+    à 1, triton à 2-8, les deux appels au-delà) doit rester au bit à CHAQUE M. Rouge si cuBLAS change de noyau."""
     c, wa, wb = _couche(monkeypatch, "auto")
     x = torch.randn(m, K, device="cuda", dtype=torch.bfloat16)
     b, a = c._ab(x)
     assert torch.equal(b, torch.nn.functional.linear(x, wb)) and torch.equal(a, torch.nn.functional.linear(x, wa)), m
+
+
+@carte
+@pytest.mark.parametrize("mode", ["auto", "concat", "triton"])
+@pytest.mark.parametrize("m", [1, 8, 16])
+def test_les_casts_absorbes_sont_au_bit(monkeypatch, mode, m):
+    """175 (poste1, 182) : `_ab(x, fp32=True)` == `_ab(x).to(float32)` au bit, et `_projections` rend b, a en fp32 sans cast."""
+    c, wa, wb = _couche(monkeypatch, mode)
+    x = torch.randn(m, K, device="cuda", dtype=torch.bfloat16)
+    b, a = c._ab(x)
+    b32, a32 = c._ab(x, fp32=True)
+    assert b32.dtype == torch.float32 and torch.equal(b32, b.to(torch.float32)) and torch.equal(a32, a.to(torch.float32))
+    _, _, bp, ap = c._projections(x)
+    assert bp.dtype == torch.float32 and torch.equal(bp, b32) and torch.equal(ap, a32)
 
 
 @carte

@@ -193,22 +193,26 @@ class GatedDeltaNet(nn.Module):
         w = torch.cat([wb.weight, wa.weight]).contiguous()
         return QuantLinear(PlainTensor(w, tuple(w.shape), wb.format), None, None, w.shape[0], w.shape[1])
 
-    def _ab(self, x: torch.Tensor):
+    def _ab(self, x: torch.Tensor, fp32: bool = False):
         """(b, a) par le poids fusionné. `concat` : F.linear sur β‖α (cuBLAS choisit à N = 96 un noyau 128x2 : 3,9 µs à M = 8
         mais HORS bit des deux appels, KL 3,4 × les témoins ; au bit à M = 1). `triton` : GEMM étroite fp32 (8,9 µs à M = 8,
         AU BIT des deux appels cuBLAS wmma 128x1 à M = 8 sur 32 pas × 8 séquences ; plus lente que cuBLAS à M = 1).
-        `auto` (candidat au défaut, prise 3 de la 175) : M = 1 → concat, 2 ≤ M ≤ 16 → triton, au-delà → les deux appels."""
+        `auto` (candidat au défaut, prises 3-4 de la 175) : M = 1 → concat, 2 ≤ M ≤ 8 → triton, au-delà → les deux appels."""
         m = x.shape[0]
         mode = _GDN_AB
         if mode == "auto":
-            mode = "concat" if m == 1 else "triton" if m <= 16 else "separe"
+            # prise 4 : triton == les deux appels au bit à M = 2, 4, 8 ; PLUS à M = 12 et 16 (cuBLAS change de noyau) → 8
+            mode = "concat" if m == 1 else "triton" if m <= 8 else "separe"
         if mode == "separe":
-            return self.beta_proj(x), self.alpha(x)
+            b, a = self.beta_proj(x), self.alpha(x)
+            return (b.to(torch.float32), a.to(torch.float32)) if fp32 else (b, a)
         if mode == "triton" and m <= 16:
             from ..kernels.gemv_bf16_etroit import gemv_bf16_etroit
-            ba = gemv_bf16_etroit(x, self.ab.qweight.weight)
+            ba = gemv_bf16_etroit(x, self.ab.qweight.weight, fp32=fp32)   # 175 (poste1, 182) : le cast dans le noyau
         else:
             ba = self.ab(x)
+            if fp32:
+                ba = ba.to(torch.float32)                                   # UN cast sur β‖α au lieu de deux
         return ba[:, : self.nv], ba[:, self.nv:]
 
     def _projections(self, x: torch.Tensor, qkv_brut: bool = False):
@@ -221,10 +225,9 @@ class GatedDeltaNet(nn.Module):
             return (qkv if qkv_brut else qkv.to(torch.float32)), z.to(torch.float32), \
                 b.to(torch.float32), a.to(torch.float32)
         qkv = self.qkv(x)
-        if self.ab is not None:                                        # pièce 175 : β‖α en un appel
-            b, a = self._ab(x)
-            return ((qkv if qkv_brut else qkv.to(torch.float32)), self.gate(x).to(torch.float32),
-                    b.to(torch.float32), a.to(torch.float32))
+        if self.ab is not None:                                        # pièce 175 : β‖α en un appel, casts absorbés
+            b, a = self._ab(x, fp32=True)
+            return ((qkv if qkv_brut else qkv.to(torch.float32)), self.gate(x).to(torch.float32), b, a)
         return ((qkv if qkv_brut else qkv.to(torch.float32)), self.gate(x).to(torch.float32),
                 self.beta_proj(x).to(torch.float32), self.alpha(x).to(torch.float32))
 
