@@ -74,3 +74,6 @@ et prédiction (0 ± 1 ms).
 **Avant la mesure suivante** : gain au banc b=8 de la version rafale (Qwen3.8, A 0 / B 5 ms, 10 passes,
 `prise-b8.sh`). Prédit : B/A +1,5 à +3 % (version d'origine : +2,5 %) ; FAUX si < +1 % (la rafale serait manquée au
 réveil).
+**Résultat banc b=8, version rafale (293d2a9f, → 06:12:22, 10 passes, 0 nulle)** : Qwen3.8 A 538,3 t/s (σ 2,6) contre
+B 549,2 (σ 1,2), **B/A +2,0 %**, J/jeton −2,0 %. Prédit +1,5 à +3 % : tenu. La version rafale garde ≈ 80 % du gain
+de la version d'origine (+2,5 %), sans aucun coût en solo.
