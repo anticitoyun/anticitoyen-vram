@@ -48,6 +48,27 @@ KL T1/T2 non tentés (bloqués par le même OOM, comme prévu par le scellé).
 (règle « on ne relance pas à l'identique » + plafond de prise) — en attente d'un créneau ou d'un arbitrage
 de priorité de chef.
 
+## 25/09 12 h — cause trouvée et corrigée (piste chiffrée de chef)
+
+chef a factorisé 5 085 593 600 = 248 320 × 5 120 × 4 = vocab × hidden × fp32 (config.json de ce modèle,
+vocab étendu vision : 248 320, pas les 151 936 habituels). Trouvé : **`acvram/kernels/__init__.py:747`**
+(`nvfp4_matmul`, repli « naturel » du mode prefill bf16 par défaut, pris quand `n=256 > gemv_threshold`
+— jamais le cas en service où `n≤12`, toujours le cas en PPL par tranches de 256). Ce repli déquantifiait
+la matrice ENTIÈRE en bf16 (`nvfp4_dequant(t, bf16)`, 2,49 Gio) **puis** la recopiait entière en fp32
+(`w.to(x.dtype)`, 4,74 Gio) — deux allocations plein tenseur d'affilée, jamais tranchées (contrairement au
+repli int8 voisin, déjà corrigé pour Gemma-4-31B, poste3 0cf7fe6, jamais porté ici).
+
+**Corrigé** : tranchage par lignes de sortie borné par `_DEQUANT_TRANCHE_MAX` (même motif que le repli
+int8). **Test** : `tests/test_nvfp4_matmul_tranches.py` (3 tests, CUDA réelle sous `carte.sh`, skip sans
+GPU). **Écart trouvé en testant** : PAS au bit sur GPU — cuBLAS choisit un ordre de réduction K différent
+selon la largeur N du GEMM (40×1000 en un appel vs 8× 40×≤128) ; écart absolu mesuré 1,53e-5 sur des
+logits ~O(1-10) (`scratchpad/poste4-p153-25-09/test-tranches-cuda.py`), homogène sur les 1000 colonnes
+(signature de non-associativité flottante, pas un bug localisé). Négligeable devant tout seuil KL du
+protocole (0,5-1,4), mais ce n'est PAS la promesse « au bit » de REGLES §1 pour le défaut — je le signale
+tel quel plutôt que de le cacher sous `torch.equal`. **À ton arbitrage** : ce chemin n'est de toute façon
+jamais servi (n≤12 en service, seuil GEMV jamais franchi) — accepter l'écart nommé pour PPL/KL seulement,
+ou une autre piste (algo cuBLAS déterministe, buffer combiné) si tu préfères le bit strict même ici.
+
 ## Suite proposée
 
 Le format mixte lui-même est plus lourd, pas le planificateur. Options avant nouvelle mesure : (a)

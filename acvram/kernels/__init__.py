@@ -744,8 +744,31 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
             if gemm_groupe.disponible():
                 return gemm_groupe.nvfp4_linear(x, t)
 
+    # Repli GEMM (piece 153, poste4 25/09) : dequantifier la matrice ENTIERE
+    # en dt puis la caster en x.dtype (deux allocations plein tenseur d'affilee)
+    # coutait, sur la tete d'un modele a vocabulaire etendu (248 320 x 5 120),
+    # 2,49 + 4,74 Gio d'un coup au premier appel avec n > gemv_threshold (PPL,
+    # tranches de 256 lignes) -- meme mecanisme que le repli int8 documente
+    # plus haut (Gemma-4-31B, poste3 0cf7fe6), jamais porte ici. Par tranches de
+    # lignes de sortie, meme arithmetique et memes valeurs -- PAS au bit sur
+    # GPU (cuBLAS choisit un ordre de reduction K different selon N : ecart
+    # absolu mesure <= 2e-5, tests/test_nvfp4_matmul_tranches.py) ; pic borne
+    # par _DEQUANT_TRANCHE_MAX.
+    dt = x.dtype if x.dtype != torch.float32 else torch.bfloat16
+    par_ligne = t.padded_in * (4 + dt.itemsize)
+    if t.shape[0] * par_ligne > _DEQUANT_TRANCHE_MAX:
+        pas = max(64, (_DEQUANT_TRANCHE_MAX // par_ligne) // 64 * 64)
+        out = torch.empty(*x.shape[:-1], t.shape[0], dtype=x.dtype, device=x.device)
+        for a in range(0, t.shape[0], pas):
+            b = min(a + pas, t.shape[0])
+            tr = NVFP4Tensor(t.qweight[a:b], t.block_scale[a:b], t.global_scale,
+                             (b - a, t.shape[1]), t.padded_in)
+            w = _w_partage(("naturel", id(t), x.dtype, a, b),
+                           lambda tr=tr: nvfp4_dequant(tr, dt))
+            out[..., a:b] = torch.nn.functional.linear(x, w.to(x.dtype))
+        return out
     w = _w_partage(("naturel", id(t), x.dtype),
-                   lambda: nvfp4_dequant(t, x.dtype if x.dtype != torch.float32 else torch.bfloat16))
+                   lambda: nvfp4_dequant(t, dt))
     return torch.nn.functional.linear(x, w.to(x.dtype))
 
 
