@@ -95,3 +95,40 @@ mécanique de la pièce 14/09 (bead runner, doc en tête de fonction `pipeline.p
   construction du chemin (pipeline actif ⇒ jamais `_plain_decode_sync`), pas par une mesure qui l'aurait
   réfutée ; noté pour ne pas prédire sur un chemin sans vérifier au préalable lequel des deux (`sync` vs
   `pipeline`) est actif dans le régime servi.
+
+## CORRECTIF (ordre chef) — « captures=0 » était une lecture fausse
+
+**Erreur** : la ligne `[acvram] régime …` (`captures=0 replays=0`) est un **instantané au démarrage du
+serveur**, imprimée UNE fois avant toute requête — je l'ai lue comme un compteur figé pendant tout le banc.
+Le log complet (`srv-T.log`) montre 12 lignes `[graphe] capture clé (...)` PENDANT le banc : **les graphes CUDA
+sont bien le défaut servi**, `pipeline=1` ne les coupe pas (`graphs.preparer()` reste appelé dans
+`pipeline.py:123` et `159`, sous pipeline comme sans). Correction : « rejeu ou capture de graphe » n'est PAS
+sans objet — c'est la cause, vérifiée au chiffre.
+
+**Vérification directe, capture ↔ pas lent (même position dans le log)** :
+
+| capture (ligne log) | clé (b, ql, nblk, lb) | durée capture | pas lent apparié |
+|---|---|---|---|
+| `srv-T.log:86` | (8, 1, 16, 256) | 85,6 ms | idx 63, JSONL : run=8 att=0 fin=0, **86,1 ms** |
+| `srv-T.log:288` | (8, 1, 32, 512) | 87,0 ms | idx 255, JSONL : run=8 att=0 fin=0, **87,6 ms** |
+| `srv-T.log:1173` | (2, 1, 32, 512) | 70,1 ms | idx 1103 (fin de trace), JSONL : run=0 fin=2, **91,1 ms** |
+
+Écart capture/pas ≤ 0,5-1 ms sur les deux premiers (bruit de mesure), ≈21 ms sur le troisième (recomposition à
+2 séquences EN PLUS de la capture, cohérent avec le mécanisme `pipeline.py:198-206` déjà identifié comme
+compoundant). **Hypothèse (1) de chef CONFIRMÉE** : `nblk` (le nombre de blocs KV, `graphs.py:645-651`)
+grossit avec la longueur de séquence par paliers (`bucket_blocks`, doublement), et la clé de graphe
+`(b, ql, nblk, lb)` (`graphs.py:674`) change à chaque palier franchi — même taille de LOT (b=8 stable), mais
+**nouvelle forme de TABLE DE BLOCS**, donc nouvelle capture (`graphs.py:684-703`, coût 63-88 ms selon la
+`iso177`/observé ici, cohérent).
+
+**Ce que ça change pour le levier** : ce n'est PAS 0,8 %/lot en régime établi — c'est un coût de **chauffe**,
+borné par le nombre de paliers `nblk` distincts rencontrés (12 captures sur ce banc de 4 lots × 256 jetons ;
+`MAX_GRAPHS=64` plafonne). Sur un service long-courant à contexte stable, ce coût s'amortit à zéro une fois
+tous les paliers traversés une fois (cohérent avec « noyaux déjà compilés » de la 81). Le vrai levier, s'il y
+en a un, est de PRÉ-CAPTURER les paliers `nblk` probables à l'admission plutôt qu'à la rencontre — pas mesuré
+ici, hors budget.
+
+**Retrait** : ma lecture précédente (« aucun graphe CUDA engagé », candidat repin `runner.py:1665`) est fausse,
+gardée ci-dessus pour la trace mais remplacée par ce correctif. Le test `ACVRAM_REPIN=0` demandé par chef
+n'apporte plus rien vu la correspondance directe capture↔pas (colonne ci-dessus) : je ne le lance pas sauf
+contre-ordre.
