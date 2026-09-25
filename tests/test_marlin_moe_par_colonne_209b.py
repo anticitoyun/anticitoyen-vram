@@ -193,3 +193,35 @@ def test_pile_reelle_du_coder_par_colonne_contre_la_reference():
             d = _tensor(MP, ext, marlin, x, eid)
             hors, dmax = _ecart(d, torch.zeros(eid.shape[0], K, device=dev).index_copy_(0, reel.nonzero().flatten(), d_ref), eid)
             assert hors == 0, f"tensor godet {godet} : {hors} lignes hors 2⁻⁷ (Δ max {dmax:.3g})"
+
+
+def test_mma2_sur_marlin_refuse_une_pile_par_ligne(monkeypatch):
+    """C17 (`ACVRAM_MOE_DECODE_MMA_MARLIN=1`, mma2 sur les tuiles Marlin à échelle naturelle + décalage global) n'a pas de
+    décalage unique pour une pile à g [E, N] : `_forward_grouped_mma` rend None (GEMV Marlin gardée) et `_decal_marlin` lève."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from test_marlin_prefill_p1 import _bloc_moe_jouet
+    from acvram.engine import moe as MOE_D
+    kernels, MP, ext, banc = _charger()
+    if not hasattr(ext, "nvfp4_gemm_grouped_mma"):
+        pytest.skip("MMA FP4 indisponible")
+    dev = torch.device("cuda:0")
+    E_, H, I_, top_k, T = 8, 256, 128, 2, 12
+    bloc = _bloc_moe_jouet(E_, H, I_, top_k)
+    monkeypatch.setattr(MOE_D, "_GEMV_LAYOUT", "marlin"); monkeypatch.setattr(MOE_D, "_PREFILL_GROUPED", "marlin")
+    monkeypatch.setattr(MOE_D, "_MOE_W13", False); monkeypatch.setattr(MOE_D, "_MOE_DECODE_MMA_MARLIN", True)
+    assert bloc._try_build_stacks()
+    bloc._stacks_marlin = bloc._construire_marlin(bloc._stacks, bloc._stacks_awq, bloc._stacks_awq.get("hadamard", {}))
+    assert bloc._stacks_marlin is not None
+    # la même pile, forcée par colonne (g[e] recopié) : ce que rend preparer_pile pour une pile à sous-normales
+    for n in ("gate_proj", "up_proj", "down_proj"):
+        w, sc, g, k, m = bloc._stacks_marlin[n]
+        bloc._stacks_marlin[n] = (w, sc, g.reshape(-1, 1).expand(-1, w.shape[2] // 2).contiguous(), k, m)
+    bloc._liberer_pile_naturelle()
+    torch.manual_seed(T)
+    x = (torch.randn(T, H, device=dev) * 0.5).to(torch.bfloat16)
+    topw, topi = torch.topk(torch.softmax(bloc.router(x).float(), -1), top_k, dim=-1)
+    assert bloc._forward_grouped_mma(x, (topw / topw.sum(-1, keepdim=True)).float(), topi.to(torch.int32)) is None
+    with pytest.raises(RuntimeError, match="par \\(expert, colonne\\)"):
+        bloc._decal_marlin("gate_proj")

@@ -738,6 +738,8 @@ class MoEBlock(nn.Module):
         cache = self.__dict__.setdefault("_decals_marlin", {})
         if nom not in cache:
             import math
+            if self._stacks_marlin[nom][2].dim() != 1:
+                raise RuntimeError(f"C17 : {nom} est une pile à échelle globale par (expert, colonne) (209) — pas de décalage unique")
             g_nat = self._stacks[nom][3].reshape(-1)[0].item()
             g_mar = self._stacks_marlin[nom][2].reshape(-1)[0].item()
             facteur = g_nat * (2.0 ** 119) / g_mar
@@ -1093,6 +1095,13 @@ class MoEBlock(nn.Module):
                     and awq0.get("gate_proj") is None and awq0.get("down_proj") is None
                     and not awq0.get("hadamard", {}).get("gate_proj", 0) and not awq0.get("hadamard", {}).get("down_proj", 0)
                     and pd[1] is None):
+                return None
+            # Pièce 209 : une pile à facteur PAR LIGNE (g [E, N]) n'a pas UN décalage par expert — mma2 (échelle
+            # naturelle + décalage global) y serait faux : refus nommé, la GEMV Marlin (g par colonne) sert.
+            if any(st_m[n][2].dim() != 1 for n in ("gate_proj", "up_proj", "down_proj")):
+                if not self.__dict__.get("_dit_c17_par_ligne"):
+                    self.__dict__["_dit_c17_par_ligne"] = True
+                    print("[moe] C17 (mma2 sur Marlin) refusé : pile à échelle globale par (expert, colonne) (209) — GEMV Marlin gardée", flush=True)
                 return None
             marlin_c17 = True                          # C17 : mma2 lit les tuiles Marlin
         ext = kernels.get_extension()
