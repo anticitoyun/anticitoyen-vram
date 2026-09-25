@@ -317,6 +317,9 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("GDN_NORME_FUSEE", "1", ("acvram.engine.gdn", "_GDN_NORME_FUSEE"), "0",
              "pièce 156 F3 (DÉFAUT depuis 156 d, ± ulp, même KL ; 0 = témoin) : 1 = norme gated de la sortie GDN en un noyau Triton (gdn_norme.py), "
              "sortie bf16 ; lot, b=1 et préfill"),
+    Variable("GDN_QKV_GATE", "1", None, "0",
+             "pièce 176 : 1 = GDN qkv‖gate INT8 en UNE pile au décodage (M ≤ 16), chaque segment gardant sa partition K "
+             "(gemm_etroit._etroit_segments_kernel, au bit des deux appels) ; lue à la fusion ; 0 = deux appels (témoin)"),
     Variable("NORME_REGISTRES", "1", ("acvram.engine.layers", "_NORME_REGISTRES"), "0",
              "pièce 156 F6 (DÉFAUT depuis 156 d, au bit ; 0 = témoin) : 1 = RMSNorm hors préfill par rmsnorm_bf16_reg "
              "(ligne en registres, même découpe et même ordre de somme que rmsnorm_bf16) ; Qwen3.8 −0,30 ms/pas à b=8"),

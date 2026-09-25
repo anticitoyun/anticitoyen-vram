@@ -868,7 +868,7 @@ def vue_g128(t: INT8Tensor) -> INT8Tensor:
     ng = k_pad // 128
     vue = INT8Tensor(t.qweight, t.scales.expand(N, ng).contiguous(), t.zeros.expand(N, ng).contiguous(),
                      128, t.shape, t.format)
-    for k in ("etroit",):                       # désignations portées par le tenseur d'origine
+    for k in ("etroit", "_segments"):           # désignations portées par le tenseur d'origine (176 : segments)
         if k in t.__dict__:
             vue.__dict__[k] = t.__dict__[k]
     t.__dict__["_g128"] = vue

@@ -127,6 +127,64 @@ if triton is not None:
             tl.store(cnt_ptr + pn, 0)
 
 
+    @triton.jit
+    def _etroit_segments_kernel(x_ptr, q_ptr, s_ptr, z_ptr, y_ptr, cnt_ptr, out_ptr, gpt_ptr, ntr_ptr, M, N, K, NG,
+                                stride_xm, stride_qn, stride_sn, stride_ys, stride_ym, stride_om,
+                                BM_: tl.constexpr, BN_: tl.constexpr, G: tl.constexpr):
+        """Pièce 176 : `_etroit_reduit_kernel` pour une PILE de segments de même entrée (GDN qkv‖gate) où chaque
+        tuile garde la partition K de SON segment (gpt, tranches lus dans des tables par tuile) : chaque colonne est
+        sommée exactement comme par l'appel séparé de son segment — au bit. Grille Y = max des tranches ; un programme
+        au-delà des tranches de sa tuile sort aussitôt (la 4e tranche, vide, des tuiles qkv)."""
+        pn = tl.program_id(0)
+        ps = tl.program_id(1)
+        groupes_par_tranche = tl.load(gpt_ptr + pn)
+        tranches = tl.load(ntr_ptr + pn)
+        if ps < tranches:
+            rows = tl.arange(0, BM_)
+            cols = pn * BN_ + tl.arange(0, BN_)
+            masque_m = rows < M
+            masque_n = cols < N
+            masque = masque_m[:, None] & masque_n[None, :]
+            acc = _acc_tranche(x_ptr, q_ptr, s_ptr, z_ptr, M, N, K, NG, ps * groupes_par_tranche,
+                               groupes_par_tranche, rows, cols, masque_m, masque_n,
+                               stride_xm, stride_qn, stride_sn, BM_, BN_, G)
+            tl.store(y_ptr + ps * stride_ys + rows[:, None] * stride_ym + cols[None, :], acc, mask=masque)
+            tl.debug_barrier()
+            n = tl.atomic_add(cnt_ptr + pn, 1, sem="acq_rel", scope="gpu")
+            tl.debug_barrier()
+            if n == tranches - 1:
+                somme = tl.zeros((BM_, BN_), dtype=tl.float32)
+                for t in range(0, tranches):
+                    somme += tl.load(y_ptr + t * stride_ys + rows[:, None] * stride_ym + cols[None, :],
+                                     mask=masque, other=0.0, cache_modifier=".cg")
+                tl.store(out_ptr + rows[:, None] * stride_om + cols[None, :],
+                         somme.to(out_ptr.dtype.element_ty), mask=masque)
+                tl.store(cnt_ptr + pn, 0)
+
+
+def _tables_segments(t, device):
+    """Pièce 176 : (gpt [tuiles], tranches [tuiles], max des tranches) d'une pile à ``t._segments`` — la partition K
+    que `decouper_k` donne à CHAQUE segment appelé seul. Construites une fois (jamais pendant une capture)."""
+    tab = t.__dict__.get("_tables_segments")
+    if tab is not None and tab[0].device == device:
+        return tab
+    if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError("gemm_etroit : tables de segments construites pendant une capture — l'échauffement eager "
+                           "doit précéder")
+    ng = t.qweight.shape[1] // t.group_size
+    gpts, ntrs = [], []
+    for i, n in enumerate(t._segments):
+        assert i == len(t._segments) - 1 or n % BN == 0, "segment non aligné sur BN : une tuile chevaucherait deux segments"
+        tu = -(-n // BN)
+        tr, gpt = decouper_k(ng, tu, device)
+        gpts += [gpt] * tu
+        ntrs += [tr] * tu
+    tab = (torch.tensor(gpts, dtype=torch.int32, device=device), torch.tensor(ntrs, dtype=torch.int32, device=device),
+           max(ntrs))
+    t.__dict__["_tables_segments"] = tab
+    return tab
+
+
 def _programmes(device) -> int:
     if device.type == "cuda":
         return torch.cuda.get_device_properties(device).multi_processor_count
@@ -227,6 +285,23 @@ def gemm_etroit(x: torch.Tensor, t, sortie_fp32: bool = False, compact: bool = F
     ng = k_pad // G
     assert t.scales.shape == (N, ng) and t.zeros.shape == (N, ng), (t.scales.shape, t.zeros.shape, N, ng)
     tuiles_n = -(-N // BN)
+    seg = getattr(t, "_segments", None)
+    if seg is not None:
+        if not compact:                   # voie témoin : chaque segment par son propre appel (au bit par construction)
+            outs, d = [], 0
+            for n in seg:
+                vue = type(t)(t.qweight[d:d + n], t.scales[d:d + n], t.zeros[d:d + n], G, (n, t.shape[1]))
+                outs.append(gemm_etroit(x, vue, sortie_fp32, compact=False))
+                d += n
+            return torch.cat(outs, dim=-1)
+        gpt_t, ntr_t, tmax = _tables_segments(t, x.device)
+        y = torch.empty(tmax, M, N, dtype=torch.float32, device=x.device)
+        out = torch.empty(M, N, dtype=torch.float32 if sortie_fp32 else x.dtype, device=x.device)
+        _etroit_segments_kernel[(tuiles_n, tmax)](
+            x, t.qweight, t.scales, t.zeros, y, _compteur(tuiles_n, x.device), out, gpt_t, ntr_t, M, N, K, ng,
+            x.stride(0), t.qweight.stride(0), t.scales.stride(0), y.stride(0), y.stride(1), out.stride(0),
+            BM_=BM, BN_=BN, G=G, num_warps=forme_noyau()[0], num_stages=forme_noyau()[1])
+        return out
     tranches, gpt = decouper_k(ng, tuiles_n, x.device)
     if compact:
         y = torch.empty(tranches, M, N, dtype=torch.float32, device=x.device)
