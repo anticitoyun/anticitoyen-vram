@@ -321,9 +321,18 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("GDN_NORME_FUSEE", "1", ("acvram.engine.gdn", "_GDN_NORME_FUSEE"), "0",
              "pièce 156 F3 (DÉFAUT depuis 156 d, ± ulp, même KL ; 0 = témoin) : 1 = norme gated de la sortie GDN en un noyau Triton (gdn_norme.py), "
              "sortie bf16 ; lot, b=1 et préfill"),
+    Variable("GDN_QKV_GATE", "1", None, "0",
+             "pièce 176 : 1 = GDN qkv‖gate INT8 en UNE pile au décodage (M ≤ 16), chaque segment gardant sa partition K "
+             "(gemm_etroit._etroit_segments_kernel, au bit des deux appels) ; lue à la fusion ; 0 = deux appels (témoin)"),
     Variable("NORME_REGISTRES", "1", ("acvram.engine.layers", "_NORME_REGISTRES"), "0",
              "pièce 156 F6 (DÉFAUT depuis 156 d, au bit ; 0 = témoin) : 1 = RMSNorm hors préfill par rmsnorm_bf16_reg "
              "(ligne en registres, même découpe et même ordre de somme que rmsnorm_bf16) ; Qwen3.8 −0,30 ms/pas à b=8"),
+    Variable("ADMISSION_FENETRE_MS", "0", None, None,
+             "pièce 179 (opt-in) : fenêtre d'admission du serveur en ms — moteur vide, attendre que la file cesse de "
+             "grossir avant le pas, pour préfiller ensemble les requêtes arrivées à quelques ms d'écart"),
+    Variable("DEPAQ_PARTAGE", "1", ("acvram.kernels", "_DEPAQ_PARTAGE"), "0",
+             "pièce 172 (DÉFAUT, au bit ; 0 = témoin) : au préfill de plusieurs séquences, la boucle par séquence d'une "
+             "couche à récurrence linéaire déquantifie chaque poids NVFP4 UNE fois (GEMM toujours par séquence)"),
     Variable("GDN_PREFILL_LOT", "0", ("acvram.engine.couches", "_GDN_PREFILL_LOT"), "0",
              "pièce 150 bis (opt-in) : 1 = au préfill de plusieurs séquences, projections Gated DeltaNet du lot en un "
              "appel (couches.py, forward_lot), convolution et règle delta par séquence ; autre M, donc pas au bit : KL"),

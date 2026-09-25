@@ -167,8 +167,18 @@ class GatedDeltaNet(nn.Module):
         avec son scaler) à 2 ≤ b ≤ 32 sous ACVRAM_DENSE_NVFP4=triton."""
         from .model import _multi_projection
         self.multi = _multi_projection([self.qkv, self.gate, self.alpha, self.beta_proj])
-        self.ab = self._fusionner_ab()
-        return self.multi is not None
+        self.ab = self._fusionner_ab()                                  # pièce 175 : β‖α en un appel (alias mixte)
+        # Pièce 176 : qkv et gate INT8 lisent la même entrée — UNE pile (vues, aucune copie), servie au décodage
+        # (M ≤ 16) en un appel au lieu de deux ; `_segments` garde à chaque segment sa partition K (au bit des deux
+        # appels, gemm_etroit._etroit_segments_kernel). Préfill : les vues, appels séparés (cuBLAS choisit selon N).
+        if os.environ.get("ACVRAM_GDN_QKV_GATE", "1") != "0":
+            from .layers import stack_int8_linears
+            n_qkv, n_gate = self.qkv.qweight.shape[0], self.gate.qweight.shape[0]
+            pile = stack_int8_linears([self.qkv, self.gate])
+            if pile is not None:
+                pile.qweight._segments = (n_qkv, n_gate)
+                self.qkv_gate = pile
+        return self.multi is not None or getattr(self, "qkv_gate", None) is not None
 
     def _fusionner_ab(self):
         """Pièce 175 : β‖α en un `QuantLinear` bf16 [2nv, K] quand les deux sont des `PlainTensor` sur la carte
@@ -224,11 +234,16 @@ class GatedDeltaNet(nn.Module):
             qkv, z, a, b = torch.split(mp(x), mp.tailles, dim=-1)
             return (qkv if qkv_brut else qkv.to(torch.float32)), z.to(torch.float32), \
                 b.to(torch.float32), a.to(torch.float32)
-        qkv = self.qkv(x)
+        pile = getattr(self, "qkv_gate", None)
+        if pile is not None and x.shape[0] <= 16:                            # pièce 176 : un appel au décodage
+            qkv, z = torch.split(pile(x), pile.qweight._segments, dim=-1)
+            z = z.to(torch.float32)
+        else:
+            qkv, z = self.qkv(x), self.gate(x).to(torch.float32)
         if self.ab is not None:                                        # pièce 175 : β‖α en un appel, casts absorbés
             b, a = self._ab(x, fp32=True)
-            return ((qkv if qkv_brut else qkv.to(torch.float32)), self.gate(x).to(torch.float32), b, a)
-        return ((qkv if qkv_brut else qkv.to(torch.float32)), self.gate(x).to(torch.float32),
+            return ((qkv if qkv_brut else qkv.to(torch.float32)), z, b, a)
+        return ((qkv if qkv_brut else qkv.to(torch.float32)), z,
                 self.beta_proj(x).to(torch.float32), self.alpha(x).to(torch.float32))
 
     # -- normalisation gated (RMSNorm de la sortie, porte SiLU(z)) --------

@@ -57,6 +57,9 @@ from .protocol import (ChatChoice, ChatCompletionChunk, ChatCompletionRequest,
 __all__ = ["create_app", "EngineService"]
 
 
+# Pièce 179 (opt-in, 0 = coupé) : fenêtre d'admission du fil moteur, en ms — voir `_attendre_les_arrivees`.
+_FENETRE_ADMISSION_S = float(os.environ.get("ACVRAM_ADMISSION_FENETRE_MS", "0")) / 1000.0
+
 class EngineService:
     """Anime le moteur depuis un fil d'arrière-plan et redistribue les résultats."""
 
@@ -98,6 +101,25 @@ class EngineService:
         if self._thread:
             self._thread.join(timeout=5)
 
+    def _attendre_les_arrivees(self) -> None:
+        """Pièce 179 (opt-in `ACVRAM_ADMISSION_FENETRE_MS`) : moteur sans séquence en cours et file non pleine — attendre
+        que la file cesse de grossir pendant la fenêtre (plafond : 4 fenêtres) avant le pas, pour admettre ensemble des
+        requêtes arrivées à quelques ms d'écart (banc chat : 7 puis 1, pièce 177) au lieu de les préfiller en deux pas.
+        Coût : jusqu'à une fenêtre de plus sur le premier jeton d'une requête seule."""
+        eng = self.engine
+        if eng.running or not eng.waiting:
+            return
+        debut = derniere = time.perf_counter()
+        n = len(eng.waiting)
+        while n < eng.max_batch_size:
+            time.sleep(0.0005)
+            maintenant = time.perf_counter()
+            m = len(eng.waiting)
+            if m != n:
+                n, derniere = m, maintenant
+            elif maintenant - derniere >= _FENETRE_ADMISSION_S or maintenant - debut >= 4 * _FENETRE_ADMISSION_S:
+                break
+
     def _run(self) -> None:
         trace = bool(os.environ.get("ACVRAM_TRACE_STEPS"))
         durees: list[float] = []
@@ -118,6 +140,8 @@ class EngineService:
             if self.engine.idle:
                 time.sleep(0.002)
                 continue
+            if _FENETRE_ADMISSION_S > 0:
+                self._attendre_les_arrivees()
             try:
                 t0 = time.perf_counter()
                 outputs = self.engine.step()
