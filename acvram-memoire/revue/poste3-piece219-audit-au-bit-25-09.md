@@ -50,3 +50,28 @@ trancher si le rejeu doit aussi les couvrir.
 1. 172, 175, 195(kl2/195b) — patron exact, moteur complet, risque le plus direct.
 2. 182 (partie « en processus »), 194 b2 — granularité intermédiaire.
 3. 176, 179, 194(test), 201(test), 209(a/b) — granularité noyau/couche, risque résiduel à trancher par chef.
+
+## Tri demandé par chef : le biais du 1er moteur ne peut créer qu'une DIFFÉRENCE parasite, jamais
+une ÉGALITÉ parasite — seuls les verdicts FAUX/NON TENUS obtenus en même processus sont en danger
+
+| pièce | comparaison en même processus | verdict de CETTE comparaison | en danger ? |
+|---|---|---|---|
+| 172 (`diag172.py`) | logits fp32 A/B' | **TENU** (égal au bit) | non — une égalité ne peut pas être un artefact du biais |
+| 175 (`kl-decode-lot.py`) | KL(A‖·) qualité | **TENU** | non |
+| 175 (`frontiere-pas.py`) | vitesse A/C/T (b=1 triton NON TENU) | **NON TENU** (triton b=1) | **processus séparés en réalité** (`prise-vitesse.sh:15` relance `frontiere-pas.py` par bras, `ACVRAM_GDN_AB=$E` posé avant chaque sous-processus) — je m'étais trompée de colonne dans le tableau du dessus en le classant tel quel : à corriger, cette vitesse-là n'est PAS en même processus, hors du tri demandé ici |
+| 176 (tests) | au bit | TENU | non |
+| 179 (`test_depaq_int8_179.py`) | au bit | TENU | non |
+| 179 (`eng179.py`, en processus, L=92/120/78) | diagnostic (pas de TENU/FAUX noté) — explique le **FAUX du banc mixte B/A −0,8 % (prédit +5 à +8)** | le FAUX lui-même vient du banc HTTP, **processus séparés** (serveur neuf par passe) — hors du tri ; MAIS l'explication du FAUX s'appuie sur un chiffre en-processus (905→439 ms, moteur complet, même patron que 172/175) | **zone grise, signalée** : le FAUX du banc n'est pas en danger (processus séparés), mais sa CAUSE alléguée (le gain 92→ mesuré en processus) mériterait un rejeu avant de la considérer acquise |
+| 182 (en processus) | z sans cast + GQA au bit | **TENU** (bas des fourchettes) | non |
+| 187 | au bit | TENU, processus séparés de toute façon | non (hors mécanisme) |
+| 194 b2 (tests) | au bit | TENU | non |
+| 195 kl2 | KL A‖B | **TENU** (0,0049 ≤ 0,0104) | non — biais en plus la rendait plus dure à tenir, elle tient quand même |
+| 201 (tests) | au bit | TENU | non |
+| 209 a/b (tests) | au bit | TENU (avec une nuance connue et expliquée : w13 tensoriel à 2⁻⁷, pas au bit — cause identifiée, bf16, pas le biais du 1er moteur) | non |
+
+**Réponse directe** : sur les onze pièces couvertes, **aucun verdict FAUX/NON TENU n'a été obtenu par
+une comparaison en même processus** — le seul NON TENU en même processus apparent (175, vitesse
+triton b=1) est en réalité en processus séparés (correction du tableau ci-dessus) ; le seul FAUX
+recensé (179, banc mixte) vient d'un banc HTTP à processus séparés, mais sa cause alléguée repose
+sur un chiffre en-processus (`eng179.py`) du même patron que 172/175 — la seule zone grise à
+vérifier avant de tenir cette explication pour acquise, pas un verdict à rouvrir.
