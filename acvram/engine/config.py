@@ -392,7 +392,45 @@ class ModelSpec:
         # Pièce 172 (B', `kernels.depaquetage_partage`) : au préfill de PLUSIEURS séquences, une couche à récurrence
         # linéaire garde vivants, le temps de sa boucle, TOUS ses poids déquantifiés (qkv, gate, alpha, beta, out),
         # et non plus un seul à la fois : sur Qwen3.8, 232 Mio contre les 178 de la plus grosse matrice ci-dessus.
-        return T * par_jeton + max(plus_grosse, self.poids_bf16_couche_lineaire_bytes())
+        # Pièce 153 (25/09) : un gate+up RÉELLEMENT fusionné en un tenseur nvfp4 (2× cette taille) n'est
+        # PAS connu ici -- `ModelSpec` ne voit que l'architecture, pas la conversion -- il est ajouté
+        # depuis le manifeste par `loader._reserve_prefill` (qui, lui, sait si la fusion a eu lieu),
+        # pas ici : blanchir ce terme à toute architecture dense aurait sur-réservé le 70B de poste3
+        # (verdict-palier1-bloc6-17-09, jamais fusionné) de +448 Mio pour rien.
+        return T * par_jeton + max(plus_grosse, self.poids_bf16_couche_lineaire_bytes(),
+                                   self.octets_transitoires_i8c_bytes())
+
+    def octets_transitoires_i8c_bytes(self) -> int:
+        """Pic transitoire du chemin i8c partagé (pièce 153, `kernels.int8_matmul_partage` →
+        `_i8c_poids`, kernels/__init__.py:868 et 941-960) : c'est ce chemin, invisible ici avant
+        aujourd'hui, qui a fait tomber le premier préfill servi d'un modèle attn+GDN promus int8
+        en OOM (37,94 Mio libres, 120 Mio demandés) alors que la réserve du planificateur
+        (`config.py`, `loader.py:1173` `_marge_carte`, `loader.py:1889` `_reserve_prefill`) ne
+        comptait QUE les tenseurs nvfp4 (`_octets_marlin`, `loader.py:1869`, filtre explicite
+        `format != "nvfp4"`) — les promus int8 n'y existent pas.
+
+        Comme B' (pièce 172), une couche garde vivants TOUS ses poids i8c déquantifiés le temps
+        de sa boucle (`int8_matmul_partage` traite q/k/v/o -- ou qkv/gate/alpha/beta/out du GDN --
+        ensemble). S'y ajoute, une fois, la copie int16 transitoire de `_i8c_poids`
+        (`(qweight.to(int16) - 128).to(int8)`) sur le tenseur en cours AVANT son recodage en int8
+        -- 2 octets/poids, le double du stockage final, jamais libérée avant le recodage.
+
+        Borne HAUTE volontaire (pas de forme exacte d'un projecteur à ce niveau, contrairement à
+        `poids_bf16_couche_lineaire_bytes` qui connaît les têtes GDN) : 2×qkv (couvre q+k+v+o d'une
+        marge large, mesuré 104,86 Mio réels contre 2×qkv=114,7 Mio ici) pour l'attention, et pour le
+        GDN la même chose que `poids_bf16_couche_lineaire_bytes` (déjà exact) plus une seconde fois
+        son plus gros terme (`qkv`, le tenseur fusionné) pour le passage int16. Sur-réserver coûte du
+        KV ; sous-réserver coûte un OOM servi -- l'asymétrie choisit la marge large."""
+        D = self.head_dim or (self.hidden_size // max(1, self.num_attention_heads))
+        qkv = (self.num_attention_heads + 2 * self.num_key_value_heads) * D
+        attn = 2 * qkv * self.hidden_size
+        nv, nk = self.linear_num_value_heads, self.linear_num_key_heads
+        gdn = 0
+        if nv:
+            kd, vd = nk * self.linear_key_head_dim, nv * self.linear_value_head_dim
+            qkv_gdn = 2 * kd + vd
+            gdn = self.poids_bf16_couche_lineaire_bytes() + qkv_gdn * self.hidden_size
+        return max(attn, gdn)
 
     def poids_bf16_couche_lineaire_bytes(self) -> int:
         """Octets bf16 des linéaires d'UNE couche Gated DeltaNet déquantifiés ensemble (pièce 172) ; 0 sans couche
