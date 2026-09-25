@@ -27,8 +27,15 @@ def test_multi_projection_retiree_et_naturelle_liberee(monkeypatch):
     m.qkv, m.gate = _lin(4096, 2048, 21), _lin(2048, 2048, 22)
     m.multi = MultiProjection([m.qkv, m.gate])
     naturelle = sum(l.qweight.qweight.numel() + l.qweight.block_scale.numel() for l in (m.qkv, m.gate))
-    torch.cuda.synchronize(); avant = torch.cuda.memory_allocated()
+    # Octets DEMANDÉS, pas `memory_allocated` (pièce 197, même défaut que la 191) : un bloc libre du grand pool n'est
+    # pas découpé si le reste est ≤ 1 Mio et `memory_allocated` le compte entier ; chaque allocation Marlin de 2 Mio
+    # peut alors peser 3 Mio selon ce que les tests précédents ont laissé en cache, au-delà de la marge (0,675 Mio).
+    def _demandes():
+        torch.cuda.synchronize()
+        return torch.cuda.memory_stats()["requested_bytes.all.current"]
+
+    avant = _demandes()
     bilan = kernels.preparer_disposition_marlin(m)
-    torch.cuda.synchronize(); apres = torch.cuda.memory_allocated()
+    apres = _demandes()
     assert bilan["seuls"] == 2 and bilan["multi_retirees"] == 1 and m.multi is None
     assert apres - avant < 0.1 * naturelle, f"naturelle retenue : +{(apres - avant) / 2**20:.1f} Mio (naturelle {naturelle / 2**20:.1f})"
