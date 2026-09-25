@@ -208,7 +208,7 @@ EXEMPTES_SESSION: set[str] = set()
 _EXTENSIONS_BINAIRES = {".pt", ".npy", ".raw", ".safetensors", ".bin", ".deb", ".jpg", ".jpeg", ".png"}
 
 
-def _suivis():
+def _suivis(racine=RACINE):
     # `git ls-files`, PAS `git ls-tree HEAD`. La premiere version lisait le
     # COMMIT : un fichier ajoute a l'index mais pas encore commite n'etait pas
     # vu, donc le garde ne pouvait refuser une fuite qu'APRES son entree dans
@@ -216,19 +216,19 @@ def _suivis():
     # Verifie par un temoin ajoute a l'index : il passait. `ls-files` liste
     # l'index et lit l'arbre de travail, donc il mord des `git add`.
     out = subprocess.run(["git", "ls-files"],
-                         cwd=RACINE, capture_output=True, text=True)
+                         cwd=racine, capture_output=True, text=True)
     for nom in out.stdout.split("\n"):
         nom = nom.strip()
         if not nom or nom in GARDES:
             continue
-        p = RACINE / nom
+        p = racine / nom
         if p.is_file() and p.suffix not in _EXTENSIONS_BINAIRES:
             yield nom, p
 
 
-def _trouve(motif, tolere=()):
+def _trouve(motif, tolere=(), racine=RACINE):
     trouves = {}
-    for nom, p in _suivis():
+    for nom, p in _suivis(racine):
         try:
             texte = p.read_text(errors="ignore")
         except Exception:
@@ -295,16 +295,26 @@ def test_le_cliquet_des_chemins_absolus_ne_monte_pas():
     assert not inutiles, f"exemption(s) de chemins qui ne servent plus : {inutiles}"
 
 
-def test_les_fichiers_binaires_suivis_sont_ecartes():
-    """Temoin du 18/09 : un .pt suivi existe reellement dans le depot
-    (`scratchpad/bloc-sage11-17-09/`), et il doit rester hors de `_suivis()`
-    -- sinon ses octets binaires refont lever de faux courriels."""
+def test_les_fichiers_binaires_suivis_sont_ecartes(tmp_path):
+    """Temoin du 18/09 : un .pt suivi doit rester hors de `_suivis()` -- sinon
+    ses octets binaires refont lever de faux courriels. 25/09 (191) : le temoin
+    lisait les .pt du depot, et depuis la purge aucun n'est suivi (voulu) ; il
+    ne passait plus que grace a des .pt NON SUIVIS restes dans un arbre de
+    travail, rouge sur un worktree neuf. Il est fabrique ici, dans un depot git
+    jetable : il rougit si l'on retire le filtre d'extension de `_suivis()`."""
     binaires = [nom for nom, _ in _suivis() if nom.endswith(".pt")]
     assert not binaires, f".pt encore scannes comme texte : {binaires}"
-    if not (RACINE / "scratchpad").is_dir():
-        pytest.skip("instantané public : le témoin .pt vit sous scratchpad/, non publié")
-    reel = list((RACINE / "scratchpad").rglob("*.pt"))
-    assert reel, "aucun .pt sous scratchpad/ -- le temoin ne teste plus rien"
+
+    faux = b"\x80\x02}q\x00quelquun@courriel.fr\x00"   # octets de dump qui miment un courriel
+    assert COURRIEL.search(faux.decode(errors="ignore")), "temoin aveugle : le .pt ne mime aucun courriel"
+    (tmp_path / "scratchpad").mkdir()
+    (tmp_path / "scratchpad" / "dump.pt").write_bytes(faux)
+    (tmp_path / "texte.md").write_text("rien\n")
+    git = dict(cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "init", "-q"], **git)
+    subprocess.run(["git", "add", "-f", "scratchpad/dump.pt", "texte.md"], **git)
+    assert [nom for nom, _ in _suivis(tmp_path)] == ["texte.md"], "le .pt suivi n'est pas ecarte"
+    assert not _trouve(COURRIEL, racine=tmp_path), "faux courriel leve par un binaire suivi"
 
 
 def test_les_trois_detecteurs_savent_tirer():
