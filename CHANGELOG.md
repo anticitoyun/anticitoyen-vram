@@ -1,10 +1,44 @@
 # Journal des changements
 
+* **25/09/2026 — pièce 190 (bilan de la nuit 24-25/09)** : cellule officielle ABAB×5 mesurant
+  ensemble les six pièces fusionnées depuis 24bcdd07 (172, 175/175b, 176, 179, 182, 187).
+  Qwen3.8-27B-unsloth-mixte-i8c b=8 : débit médian **323,4 → 394,8 t/s (+22,08 %)**, J/jeton net
+  0,8784 → 0,8125 (−7,50 %) — `revue/poste2-piece190-cellule-mixte-b8-25-09.md:5`. Attribution par
+  composition (chef) : le gain se décompose en 175b (−12,0 % de pas_gpu,
+  `revue/poste6-piece175-verdict-25-09.md:64`) × 187 (+6,65 % au banc b=8,
+  `revue/poste5-piece187-verdict-25-09.md:10`) × ≈+2 % (fenêtre d'admission, 179,
+  `revue/poste5-piece179-verdict-25-09.md:78`) ≈ 1/(1−0,12) × 1,0665 × 1,02 ≈ +24 %, cohérent avec
+  le +22,08 % mesuré ; 172 (déquant partagé préfill, −12,5 %/−11,3 % forward,
+  `revue/poste5-piece172-verdict-25-09.md:20`), 176 (GDN qkv‖gate pile int8, 0,9967 à b=8 — FAUX
+  sur l'ampleur mais sans régression, `revue/verdict-176-gdn-qkv-gate-25-09.md:16`) et 182 (z sans
+  cast +0,40 %, GQA neutre au banc, `revue/poste1-182-verdict-25-09.md:7`) contribuent au décodage
+  mais pèsent peu au b=8 servi. Qwen3.8-27B-nvfp4 b=8 (témoin, hors chemin int8/GDN mixte) :
+  481,9 → 499,0 t/s (+3,55 %), `revue/poste2-piece190-cellule-mixte-b8-25-09.md:9` — dans la
+  fourchette du scellé, TENU. gemma-4-31B-it-nvfp4-vision b=8 (falsificateur direct, aucune des
+  six pièces ne le touche) : 402,3 → 406,2 t/s (+0,97 %, NEUTRE ± 2 %),
+  `revue/poste2-piece190-cellule-mixte-b8-25-09.md:14` — TENU, confirme que le gain mixte est bien
+  localisé aux pièces GDN/int8. Qwen3.8-27B-unsloth-mixte-i8c b=1 : 62,2 → 64,3 t/s (+3,38 %),
+  J/jeton plat (dominé par la puissance de repos à ce B) — `revue/poste2-piece190-cellule-mixte-b8-25-09.md:19`.
+  Le scellé (`revue/poste2-piece190-scelle-25-09.md`) ne portait pas 175b ni 187 :
+  faute de PÉRIMÈTRE du scellé, pas de mesure.
+
 * **25/09/2026 — pièce 175 b** : `ACVRAM_GDN_AB=auto` **au défaut** (était `separe`, opt-in) : les portes α et β bf16 des
   couches GDN de l'alias mixte en un appel par couche — M = 1 concat, 2 ≤ M ≤ 8 GEMM étroite fp32 (`kernels/gemv_bf16_etroit.py`),
   au-delà les deux appels ; AU BIT des deux F.linear à chaque M (`test_gdn_ab_175`, `torch.equal`), donc sans critère KL.
   Décodage b=8 mixte −2,3 ms/pas (−12 %), b=1 −0,25 ms ; inerte sur des α/β nvfp4 (défaut). `separe` reste le témoin.
   Détail : revue/poste6-piece175-verdict-25-09.md.
+
+* **25/09/2026 — pièce 176** (poste1) : les projections GDN qkv‖gate de l'alias mixte-i8c en une
+  pile int8 (`stack_int8_linears`, `GatedDeltaNet.fuse`, servie à M ≤ 16), témoin
+  `ACVRAM_GDN_QKV_GATE=0`. Sortie inchangée au bit. ABBA certifie-b12 : b=8 mixte 0,9967 (**FAUX
+  sur l'ampleur**, −0,065 ms prédit −0,25, sans régression), b=1 mixte 0,9863 (TENU, −1,4 %) ;
+  Qwen3.8 nvfp4 témoin inchangé aux deux B. Détail : revue/verdict-176-gdn-qkv-gate-25-09.md.
+
+* **25/09/2026 — pièce 182** (poste1) : (1) GDN `z` sans cast bf16→fp32 intermédiaire
+  (`ACVRAM_GDN_Z_BF16`), au bit, +0,40 % méd. au banc chat mixte b=8 (TENU au critère scellé,
+  seuil +0,2 %). (2) attention GQA optimisée (`ACVRAM_PA_GQA`), au bit ; gain en processus TENU
+  (−0,18 ms ctx≈600, −0,42 ms ctx≈2000) mais NEUTRE au banc (+0,12 %, sous 2 σ). Les deux restent
+  au défaut (au bit, aucune régression). Détail : revue/poste1-182-verdict-25-09.md.
 
 * **25/09/2026 — pièce 187** : le GEMV int8 traite ses activations par tranches de **6** au lieu de 16
   (`ACVRAM_INT8_TRANCHE` pour N ≤ 16, `ACVRAM_INT8_TRANCHE_PREFILL` au-delà ; 16 = témoin d'avant). Sortie **identique au
