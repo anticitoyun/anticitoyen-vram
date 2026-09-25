@@ -47,6 +47,10 @@ def _appel(ext, c, tables, lens, q, hkv, q_len=1, window=0):
 @pytest.mark.parametrize("q_len,window", [(1, 0), (1, 100), (3, 0)])
 def test_octets_egaux_au_noyau_d_origine(lens, n_rep, d, q_len, window, monkeypatch):
     ext = _ext()
+    # seq_len compte les q_len jetons vérifiés, donc seq_len >= q_len en service. En dessous, les lignes à slen <= 0
+    # ne sont écrites par AUCUN des deux noyaux (sortie torch::empty) : comparer leurs octets compare du non-initialisé
+    # (182, diag-lignes-slen0.log : 12 284 écarts, tous sur ces lignes, 0 sur les lignes valides).
+    lens = [max(n, q_len) for n in lens]
     c, tables, L, q = _montage(lens, n_rep=n_rep, d=d, q_len=q_len)
     monkeypatch.setenv("ACVRAM_PA_GQA", "0")
     ref = _appel(ext, c, tables, L, q, 4, q_len, window)
@@ -82,7 +86,7 @@ def test_le_chemin_servi_lance_la_variante(monkeypatch):
 
 
 @carte
-@pytest.mark.parametrize("forme", [dict(dtype="bfloat16"), dict(dtype="k8v4"), dict(dtype="int8", canal=True, rangs=8)])
+@pytest.mark.parametrize("forme", [dict(dtype="bf16"), dict(dtype="k8v4"), dict(dtype="int8", canal=True, rangs=8)])
 def test_les_autres_caches_ne_sont_jamais_routes(forme, monkeypatch):
     """KV bf16 (repli, pas de noyau paginé), k8v4 (variante V4) et canal (C5-b) : la variante groupée ne lit que l'int8
     simple ; aucun de ces caches ne doit la lancer, même au défaut."""
@@ -96,5 +100,5 @@ def test_les_autres_caches_ne_sont_jamais_routes(forme, monkeypatch):
     avant = ext.paged_attn_gqa_lancements()
     out = kernels.paged_attention(q, c, tables, L, 6, 256 ** -0.5)
     assert ext.paged_attn_gqa_lancements() == avant, f"{forme} routé vers la variante GQA"
-    if forme["dtype"] != "bfloat16":
+    if forme["dtype"] != "bf16":
         assert out is not None, f"montage : {forme} n'a lancé aucun noyau paginé, le test ne prouve rien"
