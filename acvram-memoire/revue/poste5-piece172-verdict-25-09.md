@@ -56,3 +56,8 @@ par couche) ne figurent pas dans `activations_prefill_bytes`. Tests : 20 verts. 
 transpose PAS au service. Il reste inexpliqué, et je ne l'affirme pas comme défaut du service. Nouvel instrument, écrit
 avant la 3e mesure : `pic2.py`, le moteur `Engine` comme `acvram serve`, cas 1 × 8 000 et 8 × 1 000, A B' A B'
 basculés à chaud, OOM rattrapé et rapporté par bras. Prédiction inchangée.
+**3e mesure (2dd9c0b0, 02:1x-02:22:36, moteur servi)** : 11 056 Mio libres après le moteur ; 1 × 8 000 jetons : pic
+3 570,1 Mio, A = B' à 0,1 Mio près (A, B', A, B') ; 8 × 1 000 : 522,5 Mio, A = B'. Aucun OOM par le moteur : l'OOM des
+mesures 1-2 tient au `model(batch)` nu. Doute, écrit avant la 4e mesure : 522 Mio pour 8 × 1 000, contre 3 570 pour
+1 × 8 000, suggère que le moteur préfille ces 8 requêtes séquence par séquence ; B' n'y serait alors pas PRIS, et
+« A = B' » ne dirait rien. 4e mesure : compteur de réutilisations relevé, cas 8 × 1 000 et 8 × 78 (celui du TTFT).
