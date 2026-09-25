@@ -487,7 +487,7 @@ class MoEBlock(nn.Module):
                 if k % 64 or qw.shape[1] % 64:
                     raison = f"{n} : K={k} ou N={qw.shape[1]} non multiple de 64"
                 elif (ecr := MP.echelles_ecrasees(bs.view(torch.float8_e4m3fn) if bs.dtype == torch.uint8 else bs,
-                                                  par_ligne=True)):
+                                                  par_ligne=_MARLIN_PAR_LIGNE)):
                     # pièce 157 : un facteur commun écraserait des sous-normales ; pièce 209 : `preparer_pile` prend
                     # alors un facteur PAR LIGNE d'expert (g par (expert, colonne)) — refus seulement si une ligne
                     # dépasse à elle seule la plage S0E5M3
@@ -511,7 +511,7 @@ class MoEBlock(nn.Module):
         for n in ("gate_proj", "up_proj", "down_proj"):
             _, qw, bs, gs, k, m = piles[n]
             w, sc, g = MP.preparer_pile(qw, bs.view(torch.float8_e4m3fn) if bs.dtype == torch.uint8 else bs,
-                                        gs.reshape(-1).to(torch.float32))
+                                        gs.reshape(-1).to(torch.float32), par_ligne=_MARLIN_PAR_LIGNE)
             out[n] = (w, sc, g, k, m)
         if _MOE_W13 and not awq.get("up_distinct"):          # entrées distinctes : deux GEMV, pas de w13
             wg, sg, gg, k, m = out["gate_proj"]
@@ -1983,6 +1983,11 @@ _MOE_TENSOR_FUSION = os.environ.get("ACVRAM_MOE_TENSOR_FUSION", "1") == "1"
 # tensor au 2⁻⁷ ; KL Coder b=12 ≤ témoin + 0,025 et b=1 identique au témoin, jouées dans la même prise
 # (revue/poste1-piece82ter-w13-decodage-23-09.md). Témoin : ACVRAM_MOE_W13=0.
 _MOE_W13 = os.environ.get("ACVRAM_MOE_W13", "1") == "1"
+# Pièce 209 : piles d'experts qu'un facteur Marlin commun écraserait (sous-normales e4m3 à côté de 448 — Coder-30B couches
+# 0, 1, 2, 4, 157) préparées avec un facteur PAR LIGNE d'expert et une échelle globale par (expert, colonne) : exactes,
+# servies par le tensor, le GEMV Marlin et le préfill Marlin. 0 = TÉMOIN NOMMÉ : la préparation d'avant, ces piles refusées
+# (naturel, decode_mma) comme depuis la 157.
+_MARLIN_PAR_LIGNE = os.environ.get("ACVRAM_MARLIN_PAR_LIGNE", "1") == "1"
 # Pièce 82 ter : phase de la passe en cours, posée par le modèle (model.forward : batch.is_prefill ; decode_fixed :
 # False). Un préfill court (T ≤ _MOE_GROUPED_MAX) passe par le même `_forward_grouped` qu un pas de décodage : sans
 # ce drapeau, il prendrait la GEMM w13 de largeur 2N et changerait la fin du préfill (KL b=1 de la 82 ter, invite 3 :

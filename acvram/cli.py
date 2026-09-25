@@ -282,7 +282,7 @@ VARIABLES_LUES = {
     # pièce 123 (24/09) : tables AWQ des experts sur le chemin tensor, opt-in (hors défaut, FAUX au critère relatif)
     "ACVRAM_AWQ_TENSOR",
     # pièce 82 (23/09) : gate·up fusionnés (w13), opt-in
-    "ACVRAM_MOE_W13",
+    "ACVRAM_MOE_W13", "ACVRAM_MARLIN_PAR_LIGNE",
 }
 
 
