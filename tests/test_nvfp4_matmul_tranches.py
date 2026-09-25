@@ -49,7 +49,7 @@ def test_les_tranches_rendent_la_meme_sortie_a_une_tolerance_gemm_pres(monkeypat
     tranche = kernels.nvfp4_matmul(x, t)
     assert appels == [128] * 7 + [104], appels
     assert tranche.shape == (40, 1000)
-    assert torch.allclose(tranche, entier, atol=2e-4, rtol=0)
+    assert torch.allclose(tranche, entier, atol=1e-4, rtol=0)  # mesure 1,53e-5, casse au-dela (ordre chef)
 
 
 @CUDA
@@ -64,7 +64,7 @@ def test_une_tranche_sautee_se_voit(monkeypatch):
         w = orig(tt, dt)
         return torch.zeros_like(w) if tt.qweight.shape[0] == 104 else w      # la dernière tranche perdue
     monkeypatch.setattr(kernels, "nvfp4_dequant", sabote)
-    assert not torch.allclose(kernels.nvfp4_matmul(x, t), entier, atol=2e-4, rtol=0)
+    assert not torch.allclose(kernels.nvfp4_matmul(x, t), entier, atol=1e-4, rtol=0)
 
 
 @CUDA
