@@ -156,6 +156,10 @@ class GatedDeltaNet(nn.Module):
         self.conv_dim = 2 * self.key_dim + self.value_dim
         self.kernel = conv_weight.shape[-1]
         self.eps = eps
+        # 175 : β‖α fusionnés (QuantLinear) ou None — attribut d'INSTANCE : un `ab = None` de classe masquait le sous-module
+        # (nn.Module range les modules dans `_modules`, lus par __getattr__ seulement si la recherche normale échoue) et le
+        # chemin fusionné n'était jamais pris (prises 1-2 de la 175 : aucun effet, compteur à 48 pourtant).
+        self.ab = None
 
     # -- quatre projections de même entrée en un lancement (palier 2) -----
     def fuse(self) -> bool:
@@ -165,8 +169,6 @@ class GatedDeltaNet(nn.Module):
         self.multi = _multi_projection([self.qkv, self.gate, self.alpha, self.beta_proj])
         self.ab = self._fusionner_ab()
         return self.multi is not None
-
-    ab = None
 
     def _fusionner_ab(self):
         """Pièce 175 : β‖α en un `QuantLinear` bf16 [2nv, K] quand les deux sont des `PlainTensor` sur la carte
