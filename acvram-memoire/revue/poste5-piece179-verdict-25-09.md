@@ -68,3 +68,9 @@ solo (`ttft-service-p145`, une requête à la fois, L = 78 et 512) et débit b=1
 **Prédit** : TTFT solo B − A = 0 ± 1 ms aux deux L (la fenêtre ne s'ouvre pas) ; débit b=1 B/A = 1,000 ± 0,5 %.
 **Critère de chef** : TTFT solo ≤ +5 ms et débit b=1 inchangé → défaut. **FAUX** si TTFT solo > +1 ms (la fenêtre
 s'ouvrirait en solo). Le gain au banc b=8 de cette nouvelle version n'est PAS remesuré ici (limite).
+**Résultat 179 b (solo, 05:3x-05:53:47, 10 passes, 0 nulle)** : TTFT solo L = 78 : A 93,24 / B 93,31 ms (+0,07) ;
+L = 512 : 229,16 / 229,31 (+0,15) ; débit b=1 78,8 = 78,8 t/s. **Tenu** : critère de chef (≤ +5 ms, débit inchangé)
+et prédiction (0 ± 1 ms).
+**Avant la mesure suivante** : gain au banc b=8 de la version rafale (Qwen3.8, A 0 / B 5 ms, 10 passes,
+`prise-b8.sh`). Prédit : B/A +1,5 à +3 % (version d'origine : +2,5 %) ; FAUX si < +1 % (la rafale serait manquée au
+réveil).
