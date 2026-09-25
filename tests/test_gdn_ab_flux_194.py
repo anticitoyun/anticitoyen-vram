@@ -29,6 +29,9 @@ def _couche(monkeypatch, flux, device="cuda"):
                           norm_weight=torch.ones(DV, device=device),
                           num_k_heads=NK, num_v_heads=NV, head_k_dim=DK, head_v_dim=DV)
     c.ab = c._fusionner_ab()
+    if c.ab is None and device == "cpu":           # la fusion refuse l'hôte (raison « hote ») : β‖α posé à la main
+        w = torch.cat([wb, wa]).contiguous()
+        c.ab = QuantLinear(PlainTensor(w, tuple(w.shape), "bf16"), None, None, w.shape[0], w.shape[1])
     assert c.ab is not None
     return c
 
