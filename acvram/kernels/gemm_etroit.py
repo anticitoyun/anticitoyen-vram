@@ -357,8 +357,17 @@ if triton is not None:
 
 
 # (N, K) → (BN, BK, warps, étages), mesuré par `scratchpad/poste6-p195-25-09/banc-canal.py` (L2 froid, M = 8) ;
-# une forme absente reste sur le noyau servi. Vide tant que le banc n'a pas parlé (scellé avant la mesure).
-GEOMETRIE_CANAL: dict = {}
+# une forme absente reste sur le noyau servi. Mesuré le 25/09 (`banc-canal.log`, 54 géométries × 5 formes, servi = vue
+# g128 compact) : µs canal / servi — o‖out 22,70 / 25,23 · qkv attn 49,80 / 50,30 · GDN qkv‖gate 56,47 / 65,57 ·
+# down 58,92 / 66,27 · gate‖up 117,01 / 141,41 ; 0,86 ms/pas sur l'alias mixte-i8c à b = 8. BN 16 (NInfer littéral)
+# perd partout en Triton ; BN 64 × BK 512 × 4 étages déborde la mémoire partagée (2 échecs).
+GEOMETRIE_CANAL: dict = {
+    (5120, 6144): (32, 128, 4, 4),        # o_proj attention, out GDN (64 appels/pas)
+    (14336, 5120): (32, 256, 4, 3),       # q‖k‖v attention empilé (gain ≈ 0 : 49,80 contre 50,30)
+    (16384, 5120): (64, 256, 8, 2),       # qkv‖gate GDN empilé (176)
+    (5120, 17408): (64, 512, 8, 3),       # down int8 (couches MLP int8 du mixte)
+    (34816, 5120): (64, 256, 4, 2),       # gate‖up int8
+}
 
 
 def canal_actif() -> bool:
