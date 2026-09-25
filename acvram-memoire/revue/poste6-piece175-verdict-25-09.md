@@ -42,3 +42,14 @@ Un `ab = None` de CLASSE sur la nn.Module masquait le sous-module assigné (`_mo
 recherche normale échoue) : le chemin fusionné n'était jamais pris, le compteur du chargement disait 48. Les tests passaient
 sur un SimpleNamespace. Règle (ICM, MECANISMES à écrire) : attribut d'instance ; tester sur la vraie classe et par le vrai
 point d'entrée ; prouver le chemin par un compteur PRIS au forward ou par le profil, jamais par le seul chargement.
+
+## Tableau final — `auto` (prise 5, commit 3f0bd9d0, 06:18 → 06:21, bras A U U A, mixte, pas_gpu médian sur 300 pas, µs)
+| b | A separe (A1 / A2) | auto (U1 / U2) | Δ auto − A | attendu (gagnant de la prise 3, moins les casts absorbés ≤ 0,115 ms) | tenu |
+|---|---|---|---|---|---|
+| 8 | 19 340,3 / 19 370,0 | **17 127,3 / 17 137,7** | **−2 222,7 (−11,5 %)** | triton 17 248 → 17 133-17 248 | oui (−116 µs sur triton = les 96 casts) |
+| 1 | 15 184,7 / 15 184,9 | **14 939,2 / 14 939,1** | **−245,6 (−1,6 %)** | concat 14 979 → 14 864-14 979 | oui (−40 µs sur concat) |
+
+Dispersion intra-bras ≤ 0,15 % (b=8), ≤ 0,01 % (b=1) ; graphes on, repli_eager=0, replays=339 sur les quatre bras ; SM « ? » (frontière
+de pas sans dmon, comme les prises 3-4). `auto` prend à chaque M le chemin déjà prouvé au bit (prise 4) : aucun critère KL à ajouter.
+Tests `tests/test_gdn_ab_175.py` : 50 verts / 1 rouge au commit 3f0bd9d0 — `test_le_chemin_fusionne_est_pris`, faux du test seul
+(sa lambda de comptage ignorait `fp32=` après l'absorption des casts) ; corrigé et rejoué sous verrou : voir ligne « rejeu » ci-dessous.

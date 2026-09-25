@@ -79,7 +79,7 @@ def test_le_chemin_fusionne_est_pris(monkeypatch):
     assert isinstance(c.ab, QuantLinear) and c._modules.get("ab") is c.ab
     appels = []
     orig = c._ab
-    monkeypatch.setattr(c, "_ab", lambda x: appels.append(tuple(x.shape)) or orig(x))
+    monkeypatch.setattr(c, "_ab", lambda x, **kw: appels.append(tuple(x.shape)) or orig(x, **kw))
     x = torch.randn(8, K, device="cuda", dtype=torch.bfloat16)
     _, _, b, a = c._projections(x)                                  # le VRAI point d'entrée du décodage
     assert appels == [(8, K)], "le chemin fusionné n'est pas celui pris par _projections"
