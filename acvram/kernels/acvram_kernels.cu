@@ -2134,6 +2134,12 @@ torch::Tensor nvfp4_gemv_grouped_gateup(
 // déterministe, mais PAS identique au bit à v1 (autre ordre fp32) : juge
 // fp32 par ligne (≤ 2⁻⁷·max|y|), tests/test_gemv_marlin.py.
 constexpr int MB_WARPS = 8;
+// Pièce 214 : le compilateur sérialisait les chargements de la boucle « deux tuiles en vol » (SASS : LDG, consommation,
+// LDG, consommation… — quatre allers-retours mémoire en série par itération, 18 warps par SM : 1,1 To/s à b=1). Cette
+// barrière de registres (asm vide qui « modifie » les valeurs chargées) force l'émission des quatre chargements avant
+// toute consommation ; aucune instruction arithmétique ne change, l'ordre des FMA non plus : sortie au bit.
+#define MB_EN_VOL4(p) asm volatile("" : "+r"(p.x), "+r"(p.y), "+r"(p.z), "+r"(p.w))
+#define MB_EN_VOL2(s) asm volatile("" : "+r"(s.x), "+r"(s.y))
 constexpr int MB_TN = 64;                 // colonnes par tuile
 constexpr int MB_TK = 16;                 // k par tuile (= groupe d'échelle)
 
@@ -2243,15 +2249,17 @@ __global__ void __launch_bounds__(MB_WARPS * WARP) nvfp4_gemv_marlin_kernel(
     // deux tuiles en vol par voie (les chargements des deux partent avant le calcul)
     for (; kt + MB_WARPS < kt1; kt += 2 * MB_WARPS) {
         const int k2 = kt + MB_WARPS;
-        const uint4 pa = q0[bw + (long)kt * LN * 32], pb = q0[bw + (long)k2 * LN * 32];
-        const uint2 sa = *reinterpret_cast<const uint2 *>(s0 + bs + (long)kt * ldn);
-        const uint2 sb = *reinterpret_cast<const uint2 *>(s0 + bs + (long)k2 * ldn);
+        uint4 pa = q0[bw + (long)kt * LN * 32], pb = q0[bw + (long)k2 * LN * 32];
+        uint2 sa = *reinterpret_cast<const uint2 *>(s0 + bs + (long)kt * ldn);
+        uint2 sb = *reinterpret_cast<const uint2 *>(s0 + bs + (long)k2 * ldn);
         uint4 pa1, pb1; uint2 sa1, sb1;
         if constexpr (NW == 2) {
             pa1 = q1[bw + (long)kt * LN * 32]; pb1 = q1[bw + (long)k2 * LN * 32];
             sa1 = *reinterpret_cast<const uint2 *>(s1 + bs + (long)kt * ldn);
             sb1 = *reinterpret_cast<const uint2 *>(s1 + bs + (long)k2 * ldn);
+            MB_EN_VOL4(pa1); MB_EN_VOL4(pb1); MB_EN_VOL2(sa1); MB_EN_VOL2(sb1);
         }
+        MB_EN_VOL4(pa); MB_EN_VOL4(pb); MB_EN_VOL2(sa); MB_EN_VOL2(sb);
         const float2 xa01 = *reinterpret_cast<const float2 *>(xs + kt * MB_TK + tr);
         const float2 xa89 = *reinterpret_cast<const float2 *>(xs + kt * MB_TK + tr + 8);
         const float2 xb01 = *reinterpret_cast<const float2 *>(xs + k2 * MB_TK + tr);
@@ -2264,16 +2272,19 @@ __global__ void __launch_bounds__(MB_WARPS * WARP) nvfp4_gemv_marlin_kernel(
         }
     }
     for (; kt < kt1; kt += MB_WARPS) {
-        const uint4 pa = q0[bw + (long)kt * LN * 32];
-        const uint2 sa = *reinterpret_cast<const uint2 *>(s0 + bs + (long)kt * ldn);
+        uint4 pa = q0[bw + (long)kt * LN * 32];
+        uint2 sa = *reinterpret_cast<const uint2 *>(s0 + bs + (long)kt * ldn);
+        uint4 pa1; uint2 sa1;
+        if constexpr (NW == 2) {
+            pa1 = q1[bw + (long)kt * LN * 32];
+            sa1 = *reinterpret_cast<const uint2 *>(s1 + bs + (long)kt * ldn);
+            MB_EN_VOL4(pa1); MB_EN_VOL2(sa1);
+        }
+        MB_EN_VOL4(pa); MB_EN_VOL2(sa);
         const float2 xa01 = *reinterpret_cast<const float2 *>(xs + kt * MB_TK + tr);
         const float2 xa89 = *reinterpret_cast<const float2 *>(xs + kt * MB_TK + tr + 8);
         mb_tuile(pa, sa, xa01, xa89, acc[0]);
-        if constexpr (NW == 2) {
-            const uint4 pa1 = q1[bw + (long)kt * LN * 32];
-            const uint2 sa1 = *reinterpret_cast<const uint2 *>(s1 + bs + (long)kt * ldn);
-            mb_tuile(pa1, sa1, xa01, xa89, acc[1]);
-        }
+        if constexpr (NW == 2) mb_tuile(pa1, sa1, xa01, xa89, acc[1]);
     }
     // 4 voies (t%4) par colonne → une ; puis dépôt par warp
     #pragma unroll
