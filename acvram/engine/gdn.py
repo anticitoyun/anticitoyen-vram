@@ -42,10 +42,12 @@ _GDN_ETAT_EN_PLACE = os.environ.get("ACVRAM_GDN_ETAT_EN_PLACE", "1") == "1"
 # Pièce 156 F2 (défaut depuis le verdict 156 c, au bit ; 0 = témoin) : conv du décodage du lot en un noyau Triton, visé au
 # bit (`gdn_conv.py`) ; q/k sans répétition des têtes (fla les indexe).
 _GDN_CONV_FUSEE = os.environ.get("ACVRAM_GDN_CONV_FUSEE", "1") == "1"
-# Pièce 175 (opt-in) : les portes α et β (poids bf16 [nv, K] de l'alias mixte, `PlainTensor`) en UN appel par couche —
-# separe (défaut : deux F.linear, 31 µs chacun à b=8, 173) | concat (un F.linear sur β‖α [2nv, K] : au bit si cuBLAS garde le
-# même noyau, le test le dit) | triton (GEMM étroite fp32 déterministe, kernels/gemv_bf16_etroit.py : pas au bit, KL scellée).
-_GDN_AB = os.environ.get("ACVRAM_GDN_AB", "separe")
+# Pièce 175 : les portes α et β (poids bf16 [nv, K] de l'alias mixte, `PlainTensor`) en UN appel par couche —
+# auto (DÉFAUT depuis 175 b, chef 25/09 : M = 1 concat, 2 ≤ M ≤ 8 triton, au-delà les deux appels — AU BIT des deux F.linear à
+# chaque M, test_gdn_ab_175 ; b=8 mixte −2,3 ms/pas, −12 %) | separe (témoin : deux F.linear, 31 µs chacun à b=8, 173) | concat
+# (un F.linear sur β‖α [2nv, K] : au bit à M = 1 seulement) | triton (GEMM étroite fp32 déterministe, kernels/gemv_bf16_etroit.py).
+AB_DEFAUT = "auto"
+_GDN_AB = os.environ.get("ACVRAM_GDN_AB", AB_DEFAUT)
 AB_BILAN = {"fusionnees": 0, "raisons": {}}          # 175 : ce que le chargement a fait, pour la ligne de régime (preuve)
 # Pièce 156 F1 (DÉFAUT depuis 156 d ; 0 = témoin) : portes (softplus, exp, sigmoid) calculées dans le noyau fla de
 # la voie F4 — ± ulp fp32 (softplus de fla en ex2/lg2 approchés) : KL contre témoins tenue sur Qwen3.8 et Qwen3.5-35B.
@@ -187,7 +189,7 @@ class GatedDeltaNet(nn.Module):
         from .layers import QuantLinear
         if _GDN_AB not in ("concat", "triton", "auto"):
             if _GDN_AB != "separe":
-                raise ValueError(f"ACVRAM_GDN_AB={_GDN_AB!r} : attendu separe | concat | triton")
+                raise ValueError(f"ACVRAM_GDN_AB={_GDN_AB!r} : attendu auto | separe | concat | triton")
             return None
         wb, wa = getattr(self.beta_proj, "qweight", None), getattr(self.alpha, "qweight", None)
         identite = lambda lin: getattr(lin, "scaler", None) is None or getattr(lin.scaler, "is_identity", False)  # noqa: E731

@@ -305,8 +305,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("GDN_ETAT_EN_PLACE", "1", ("acvram.engine.gdn", "_GDN_ETAT_EN_PLACE"), "0",
              "pièce 156 F4 (DÉFAUT depuis 156 c, au bit ; 0 = témoin) : 1 = au décodage du lot, la récurrence fla écrit son état final dans le "
              "tampon statique (h0 = ht) au lieu d'une allocation suivie d'une copie de 25 Mo par couche (b=8, Qwen3.8)"),
-    Variable("GDN_AB", "separe", ("acvram.engine.gdn", "_GDN_AB"), None,
-             "pièce 175 (poste6, 25/09, opt-in) : portes α et β bf16 des couches GDN (alias mixte) : separe (deux F.linear) | "
+    Variable("GDN_AB", "auto", ("acvram.engine.gdn", "_GDN_AB"), "separe",
+             "pièce 175 (poste6, 25/09 ; DÉFAUT auto depuis 175 b) : portes α et β bf16 des couches GDN (alias mixte) : separe (témoin, deux F.linear) | "
              "concat (un F.linear sur β‖α) | triton (GEMM étroite fp32 déterministe, M ≤ 16) | auto (M = 1 concat, 2-8 triton, "
              "au-delà les deux appels : AU BIT des deux appels à chaque M, test_gdn_ab_175) ; inerte sur des α/β nvfp4"),
     Variable("GDN_CONV_FUSEE", "1", ("acvram.engine.gdn", "_GDN_CONV_FUSEE"), "0",

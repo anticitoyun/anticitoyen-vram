@@ -1,5 +1,11 @@
 # Journal des changements
 
+* **25/09/2026 — pièce 175 b** : `ACVRAM_GDN_AB=auto` **au défaut** (était `separe`, opt-in) : les portes α et β bf16 des
+  couches GDN de l'alias mixte en un appel par couche — M = 1 concat, 2 ≤ M ≤ 8 GEMM étroite fp32 (`kernels/gemv_bf16_etroit.py`),
+  au-delà les deux appels ; AU BIT des deux F.linear à chaque M (`test_gdn_ab_175`, `torch.equal`), donc sans critère KL.
+  Décodage b=8 mixte −2,3 ms/pas (−12 %), b=1 −0,25 ms ; inerte sur des α/β nvfp4 (défaut). `separe` reste le témoin.
+  Détail : revue/poste6-piece175-verdict-25-09.md.
+
 * **25/09/2026 — pièce 179** : (1) B' (172) couvre aussi la déquantification int8 du préfill (`int8_matmul` au-delà de
   `ACVRAM_INT8_GEMV_MAX` = 80 lignes) : au bit (tests, bras cassant, logits de l'alias mixte) ; préfill 8 × 92 −51 %,
   8 × 120 −49 % sur l'alias mixte ; sans effet sous 80 jetons par invite (GEMV). (2) **Fenêtre d'admission au défaut**
