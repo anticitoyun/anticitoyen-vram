@@ -323,9 +323,10 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("NORME_REGISTRES", "1", ("acvram.engine.layers", "_NORME_REGISTRES"), "0",
              "pièce 156 F6 (DÉFAUT depuis 156 d, au bit ; 0 = témoin) : 1 = RMSNorm hors préfill par rmsnorm_bf16_reg "
              "(ligne en registres, même découpe et même ordre de somme que rmsnorm_bf16) ; Qwen3.8 −0,30 ms/pas à b=8"),
-    Variable("ADMISSION_FENETRE_MS", "0", None, None,
-             "pièce 179 (opt-in) : fenêtre d'admission du serveur en ms — moteur vide, attendre que la file cesse de "
-             "grossir avant le pas, pour préfiller ensemble les requêtes arrivées à quelques ms d'écart"),
+    Variable("ADMISSION_FENETRE_MS", "5", None, None,
+             "pièce 179 (DÉFAUT 5 depuis 179 b ; 0 = coupé) : fenêtre d'admission du serveur en ms — moteur vide et ≥ 2 "
+             "requêtes en file, attendre que la file cesse de grossir avant le pas (préfill groupé d'une rafale) ; une "
+             "requête seule n'attend pas"),
     Variable("DEPAQ_PARTAGE", "1", ("acvram.kernels", "_DEPAQ_PARTAGE"), "0",
              "pièce 172 (DÉFAUT, au bit ; 0 = témoin) : au préfill de plusieurs séquences, la boucle par séquence d'une "
              "couche à récurrence linéaire déquantifie chaque poids NVFP4 UNE fois (GEMM toujours par séquence)"),

@@ -57,8 +57,9 @@ from .protocol import (ChatChoice, ChatCompletionChunk, ChatCompletionRequest,
 __all__ = ["create_app", "EngineService"]
 
 
-# Pièce 179 (opt-in, 0 = coupé) : fenêtre d'admission du fil moteur, en ms — voir `_attendre_les_arrivees`.
-_FENETRE_ADMISSION_S = float(os.environ.get("ACVRAM_ADMISSION_FENETRE_MS", "0")) / 1000.0
+# Pièce 179 (DÉFAUT 5 ms depuis 179 b ; 0 = coupé) : fenêtre d'admission du fil moteur — voir `_attendre_les_arrivees`.
+# Banc chat b=8 : +2,0 % (Qwen3.8), sans coût en solo (TTFT +0,07/+0,15 ms, b=1 inchangé).
+_FENETRE_ADMISSION_S = float(os.environ.get("ACVRAM_ADMISSION_FENETRE_MS", "5")) / 1000.0
 
 class EngineService:
     """Anime le moteur depuis un fil d'arrière-plan et redistribue les résultats."""
