@@ -1,0 +1,7 @@
+instrument : outils/carte.sh + `scratchpad/poste2-p190-25-09/cellule-190.sh` (banc-llamacpp-16-09.py decode, ABAB×5)
+commit : A 923700e4 (ex-74bcdd07, remappé post-purge) — B be837ca1 (main + 175b)
+régime : plein (session 12 %, hebdo 50 %)
+scellé : `revue/poste2-piece190-scelle-25-09.md` — prédiction banc mixte b=8 : +1 à +3 % débit, −2 à −6 % J/jeton
+mesuré : Qwen3.8-27B-unsloth-mixte-i8c, b=8, banc chat. Débit médian A 323,4 t/s, B 394,8 t/s → **B/A +22,08 %**. J/jeton net médian A 0,8784, B 0,8125 → **−7,50 %**. 5/5 paires sans chevauchement (A∈[322,5;323,7], B∈[393,4;396,5]). Horloges comparables (moy A≈2620 MHz, B≈2555-2590 MHz), les deux bridées puissance à 400 W.
+verdict : **falsificateur du scellé déclenché** — le gain mesuré (+22 %) est ≈4-7× la prédiction (+1-3 %), reproduit le motif « la somme des cinq pièces sous-estime le cumul réel » déjà vu à l'envers en 179 (là : sur-prédit puis raté ; ici : sous-prédit puis dépassé). Écart net, propre, ABAB sans ambiguïté — PAS un artefact de mesure. Cause non identifiée : aucune des cinq pièces sources ne prédit seule cet ordre de grandeur ; à nommer avant publication (composition non testée isolément, cf. scellé § Issue). Cellules restantes du bilan (Qwen3.8 nvfp4, gemma31, b=1) non jouées — carte très disputée.
+durée : prévu ≤ 15 min, tenu par carte.sh — 4 prises consécutives 11:03→11:22 (~19 min, file d'attente ~13 min avant la 1ʳᵉ prise incluse dans le journal, hors prise)
