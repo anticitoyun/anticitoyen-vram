@@ -1198,6 +1198,133 @@ __global__ void paged_attn_partial_kernel(
     }
 }
 
+// Pièce 182 (2) : paged_attn_partial_kernel GROUPÉ GQA, variante int8 simple (ni CANAL ni V4). La grille
+// (B·QL, HQ, C) fait lire chaque jeton K/V par les G = HQ/HKV têtes de son groupe, une fois par bloc : sur Qwen3.8
+// (24 têtes q, 4 kv, D 256), 6 lectures et 6 chaînes de latence par jeton. Ici un bloc sert (b·qi, tête kv, tranche)
+// et ses G têtes : K et V d'un jeton chargés UNE fois en registres, puis les G têtes. AU BIT de l'original, parce que
+// rien de ce qui fixe l'arithmétique d'une tête ne change : mêmes tranches (`chunk` du lanceur), même attribution des
+// jetons aux warps (t = start + wid, pas PA_WARPS), même produit `partial += sq·k` voie par voie, même arbre shfl_down,
+// mêmes __expf, même mise à jour de acc/m/l, même fusion des warps, même réduction (paged_attn_reduce_kernel inchangé).
+// Juge : tests/test_attn_gqa_182.py (octets égaux contre le noyau d'origine, et routage du chemin servi).
+unsigned long long acvram_pa_gqa_lancements = 0ULL;
+
+template <int D, typename QT, typename OT, int G>
+__global__ void paged_attn_partial_gqa_kernel(
+    const QT *__restrict__ q, const signed char *__restrict__ kc, const __half *__restrict__ ks,
+    const signed char *__restrict__ vc, const __half *__restrict__ vs,
+    const long *__restrict__ tables, const long *__restrict__ seq_lens,
+    float *__restrict__ part, float *__restrict__ part_m, float *__restrict__ part_l, OT *__restrict__ sortie,
+    int HQ, int HKV, int N, int C, int QL, float scale, int window, int chunk) {
+    const int bq = blockIdx.x;
+    const int b = bq / QL;
+    const int qi = bq % QL;
+    const int hkv = blockIdx.y;
+    const int c = blockIdx.z;
+    const long slen = seq_lens[b] - (QL - 1) + qi;
+    const long lo = window > 0 ? max(0L, slen - (long)window) : 0L;
+    const long start = max((long)c * chunk, lo);
+    const long off0 = ((long)bq * HQ + hkv * G) * C + c;      // tête h = hkv·G + g : off0 + g·C
+
+    const int lane = threadIdx.x % WARP;
+    const int wid = threadIdx.x / WARP;
+    constexpr int PER_LANE = D / WARP;
+
+    if (start >= slen || start >= (long)(c + 1) * chunk) {
+        for (int g = threadIdx.x; g < G; g += blockDim.x) {
+            part_m[off0 + (long)g * C] = -INFINITY;
+            part_l[off0 + (long)g * C] = 0.f;
+        }
+        for (int i = threadIdx.x; i < G * D; i += blockDim.x)
+            part[(off0 + (long)(i / D) * C) * D + i % D] = 0.f;
+        return;
+    }
+
+    __shared__ float sq[G][D];
+    __shared__ float sm[G][PA_WARPS], sl[G][PA_WARPS], scorr[G][PA_WARPS];
+    __shared__ float sacc[G][PA_WARPS][D];
+    for (int i = threadIdx.x; i < G * D; i += blockDim.x)
+        sq[i / D][i % D] = to_float_q<QT>(q[((long)bq * HQ + hkv * G) * D + i]) * scale;
+    __syncthreads();
+
+    float m[G], l[G], acc[G][PER_LANE];
+    #pragma unroll
+    for (int g = 0; g < G; ++g) {
+        m[g] = -INFINITY; l[g] = 0.f;
+        #pragma unroll
+        for (int i = 0; i < PER_LANE; ++i) acc[g][i] = 0.f;
+    }
+
+    const long end = min(slen, (long)(c + 1) * chunk);
+    for (long t = start + wid; t < end; t += PA_WARPS) {
+        const long blk = tables[(long)b * N + (t >> 4)];
+        const long cell = (blk * 16 + (t & 15)) * HKV + hkv;
+        const signed char *kp = kc + cell * D;
+        const signed char *vp = vc + cell * D;
+        float kf[PER_LANE], vf[PER_LANE];
+        #pragma unroll
+        for (int i = 0; i < PER_LANE; ++i) {
+            kf[i] = static_cast<float>(kp[lane * PER_LANE + i]);
+            vf[i] = static_cast<float>(vp[lane * PER_LANE + i]);
+        }
+        const float ksc = __half2float(ks[cell]);
+        const float vsc = __half2float(vs[cell]);
+        #pragma unroll
+        for (int g = 0; g < G; ++g) {
+            float partial = 0.f;
+            #pragma unroll
+            for (int i = 0; i < PER_LANE; ++i)
+                partial += sq[g][lane * PER_LANE + i] * kf[i];
+            #pragma unroll
+            for (int off = WARP / 2; off > 0; off >>= 1)
+                partial += __shfl_down_sync(0xffffffffu, partial, off);
+            const float score = __shfl_sync(0xffffffffu, partial, 0) * ksc;
+            const float m_new = fmaxf(m[g], score);
+            const float corr = __expf(m[g] - m_new);
+            const float pr = __expf(score - m_new);
+            const float pv = vsc * pr;
+            #pragma unroll
+            for (int i = 0; i < PER_LANE; ++i)
+                acc[g][i] = acc[g][i] * corr + pv * vf[i];
+            l[g] = l[g] * corr + pr;
+            m[g] = m_new;
+        }
+    }
+
+    #pragma unroll
+    for (int g = 0; g < G; ++g) {
+        if (lane == 0) { sm[g][wid] = m[g]; sl[g][wid] = l[g]; }
+        #pragma unroll
+        for (int i = 0; i < PER_LANE; ++i)
+            sacc[g][wid][lane * PER_LANE + i] = acc[g][i];
+    }
+    __syncthreads();
+
+    for (int g = threadIdx.x; g < G; g += blockDim.x) {
+        float mg = -INFINITY;
+        #pragma unroll
+        for (int w = 0; w < PA_WARPS; ++w) mg = fmaxf(mg, sm[g][w]);
+        float lg = 0.f;
+        #pragma unroll
+        for (int w = 0; w < PA_WARPS; ++w) {
+            const float cw = (sm[g][w] > -INFINITY) ? __expf(sm[g][w] - mg) : 0.f;
+            scorr[g][w] = cw;
+            lg += sl[g][w] * cw;
+        }
+        part_m[off0 + (long)g * C] = mg;
+        part_l[off0 + (long)g * C] = lg;
+    }
+    __syncthreads();
+    for (int i = threadIdx.x; i < G * D; i += blockDim.x) {
+        const int g = i / D, d = i % D;
+        const long oo = off0 + (long)g * C;
+        float a = 0.f;
+        #pragma unroll
+        for (int w = 0; w < PA_WARPS; ++w) a += sacc[g][w][d] * scorr[g][w];
+        if (C == 1 && sortie != nullptr) sortie[oo * D + d] = from_float<OT>(a / part_l[oo]);
+        else part[oo * D + d] = a;
+    }
+}
+
 template <int D, typename OT>
 __global__ void paged_attn_reduce_kernel(
     const float *__restrict__ part,       // [B, HQ, C, D]
@@ -6173,8 +6300,28 @@ torch::Tensor paged_attention_gen(torch::Tensor q, torch::Tensor kc,
     auto stream = at::cuda::getCurrentCUDAStream();
     dim3 g1(BQ, HQ, C), g2(BQ, HQ);
     const int threads = PA_WARPS * WARP;
+    // Pièce 182 : variante groupée GQA (au bit), int8 simple seulement ; l'instrument de bissection (etape < 3) et
+    // le compteur de participation restent au noyau d'origine. ACVRAM_PA_GQA=0 : témoin nommé, noyau d'origine.
+    const int G = (int)hkv > 0 && HQ % (int)hkv == 0 ? HQ / (int)hkv : 0;
+    bool gqa = !CANAL && !V4 && etape >= 3 && (G == 4 || G == 6 || G == 8) && D <= 256;
+    if (const char *v = std::getenv("ACVRAM_PA_GQA")) gqa = gqa && atoi(v) != 0;
+    if (gqa) ++acvram_pa_gqa_lancements;
+    dim3 g1g(BQ, (int)hkv, C);
 
+    // D = 512 n'est jamais routé ici (gqa exige D <= 256) : l'instanciation 256 évite 64 Kio de partagé statique.
+    #define PA_GQA_T(DD, QT, OT, PQ, PO, GG) \
+        paged_attn_partial_gqa_kernel<(DD <= 256 ? DD : 256), QT, OT, GG><<<g1g, threads, 0, stream>>>( \
+            PQ, kc.data_ptr<signed char>(), reinterpret_cast<const __half *>(ks.data_ptr()), \
+            reinterpret_cast<const signed char *>(vc.data_ptr()), reinterpret_cast<const __half *>(vs.data_ptr()), \
+            tables.data_ptr<long>(), seq_lens.data_ptr<long>(), \
+            part.data_ptr<float>(), pm.data_ptr<float>(), pl.data_ptr<float>(), (C == 1 ? (PO) : nullptr), \
+            HQ, (int)hkv, N, C, (int)q_len, (float)scale, (int)window, chunk)
     #define PA_LAUNCH_T(DD, QT, OT, PQ, PO) do { \
+        if (gqa && DD <= 256) { \
+            if (G == 4) PA_GQA_T(DD, QT, OT, PQ, PO, 4); \
+            else if (G == 6) PA_GQA_T(DD, QT, OT, PQ, PO, 6); \
+            else PA_GQA_T(DD, QT, OT, PQ, PO, 8); \
+        } else \
         paged_attn_partial_kernel<DD, QT, OT, CANAL, V4><<<g1, threads, 0, stream>>>( \
             PQ, kc.data_ptr<signed char>(), \
             reinterpret_cast<const __half *>(ks.data_ptr()), \
@@ -6206,6 +6353,7 @@ torch::Tensor paged_attention_gen(torch::Tensor q, torch::Tensor kc,
     else { PA_LAUNCH(512); }
     #undef PA_LAUNCH
     #undef PA_LAUNCH_T
+    #undef PA_GQA_T
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return out;
 }
@@ -8281,6 +8429,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           [] { return acvram_pa_tampon_octets; },
           "octets retenus par les tampons partiels — doit se stabiliser au "
           "pire cas vu, et non croitre a chaque nouvelle forme");
+    m.def("paged_attn_gqa_lancements", [] { return acvram_pa_gqa_lancements; },
+          "pièce 182 : lancements de la variante groupée GQA (témoin de routage)");
     m.def("paged_attn_participants", &paged_attn_participants,
           "nombre de blocs ayant reellement tourne a l'etape 0 (observe, pas "
           "reconstruit)", py::arg("remettre_a_zero") = true);
