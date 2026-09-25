@@ -1994,9 +1994,12 @@ _MOE_TENSOR_FUSION = os.environ.get("ACVRAM_MOE_TENSOR_FUSION", "1") == "1"
 _MOE_W13 = os.environ.get("ACVRAM_MOE_W13", "1") == "1"
 # Pièce 209 : piles d'experts qu'un facteur Marlin commun écraserait (sous-normales e4m3 à côté de 448 — Coder-30B couches
 # 0, 1, 2, 4, 157) préparées avec un facteur PAR LIGNE d'expert et une échelle globale par (expert, colonne) : exactes,
-# servies par le tensor, le GEMV Marlin et le préfill Marlin. 0 = TÉMOIN NOMMÉ : la préparation d'avant, ces piles refusées
-# (naturel, decode_mma) comme depuis la 157.
-_MARLIN_PAR_LIGNE = os.environ.get("ACVRAM_MARLIN_PAR_LIGNE", "1") == "1"
+# servies par le tensor, le GEMV Marlin et le préfill Marlin. Pièce 220 (25/09, décision chef) : OPT-IN, défaut 0 —
+# sur Qwen3-Coder-30B-A3B-nvfp4 PUR (67 477 sous-normales sur deux couches) le 1 bascule les 48 couches en Marlin-w13 et
+# le service perd 9,7 % de débit et 16-20 % de J/jeton à b=8 (217 poste3, 220 poste6) ; il ne gagne que sur qkvo-i8c
+# (4 couches basculées, +5,8 %). 0 = la préparation d'avant, ces piles refusées (naturel, decode_mma) comme depuis la 157.
+MARLIN_PAR_LIGNE_DEFAUT = "0"
+_MARLIN_PAR_LIGNE = os.environ.get("ACVRAM_MARLIN_PAR_LIGNE", MARLIN_PAR_LIGNE_DEFAUT) == "1"
 # Pièce 82 ter : phase de la passe en cours, posée par le modèle (model.forward : batch.is_prefill ; decode_fixed :
 # False). Un préfill court (T ≤ _MOE_GROUPED_MAX) passe par le même `_forward_grouped` qu un pas de décodage : sans
 # ce drapeau, il prendrait la GEMM w13 de largeur 2N et changerait la fin du préfill (KL b=1 de la 82 ter, invite 3 :

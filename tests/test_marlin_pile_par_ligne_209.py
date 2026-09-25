@@ -95,3 +95,27 @@ def test_piles_reelles_du_coder_au_bit(couche, mat):
     if couche == 0 and mat == "gate_proj":
         _, _, _, W0 = _depaquete(MP, qw, bs, gs, K, N, False)
         assert not torch.equal(W0, ref), "témoin : le facteur commun devrait rendre la pile fausse"
+
+
+def test_220_le_facteur_par_ligne_est_opt_in_et_0_le_defaut(monkeypatch):
+    """Pièce 220 (25/09, chef) : la 209 revient en OPT-IN. Sur Qwen3-Coder-30B-A3B-nvfp4 PUR, `ACVRAM_MARLIN_PAR_LIGNE=1`
+    bascule les 48 couches en Marlin-w13 et le service perd 9,7 % de débit et 16-20 % de J/jeton à b=8 (217, 220) ; il ne
+    gagne que sur qkvo-i8c (4 couches, +5,8 %). Ce test casse si le défaut revient à 1 (code, table des variables) ou si,
+    au défaut, une pile à sous-normales est encore préparée par ligne (g [E, N]) au lieu d'être refusée comme depuis la 157."""
+    from acvram import regime
+    from acvram.engine import moe
+    from acvram.kernels import marlin_port as MP
+    monkeypatch.delenv("ACVRAM_MARLIN_PAR_LIGNE", raising=False)
+    assert moe.MARLIN_PAR_LIGNE_DEFAUT == "0"
+    assert os.environ.get("ACVRAM_MARLIN_PAR_LIGNE", moe.MARLIN_PAR_LIGNE_DEFAUT) != "1"
+    v = next(v for v in regime.VARIABLES if v.nom == "MARLIN_PAR_LIGNE")
+    assert v.defaut == "0" and v.torch == "1"
+    E, N, K = 4, 128, 256
+    _, qw, bs, gs = _pile_synthetique(E, N, K, 2200, minuscules=(1, 3))
+    assert MP.echelles_ecrasees(bs) > 0, "montage : le facteur commun doit écraser"
+    par_ligne_defaut = os.environ.get("ACVRAM_MARLIN_PAR_LIGNE", moe.MARLIN_PAR_LIGNE_DEFAUT) == "1"
+    assert MP.echelles_ecrasees(bs, par_ligne=par_ligne_defaut) > 0, "au défaut, la pile doit être REFUSÉE (moe.py:490)"
+    g0 = MP.preparer_pile(qw, bs, gs, repack=MP.repack_torch, par_ligne=par_ligne_defaut)[2]
+    assert g0.shape == (E,), "au défaut : préparation d'avant (g par expert), pas [E, N]"
+    monkeypatch.setenv("ACVRAM_MARLIN_PAR_LIGNE", "1")
+    assert MP.echelles_ecrasees(bs, par_ligne=os.environ["ACVRAM_MARLIN_PAR_LIGNE"] == "1") == 0, "l'opt-in doit encore servir la pile"
