@@ -39,3 +39,8 @@ Prédiction −35 à −45 % FAUSSE. Banc mixte (15 passes, 0 nulle) : A 326,4 t
 +5 à +8), C 332,5 (**C/B +2,7 %**, au-dessus de la prédiction +1 à +2) ; pas de préfill par passe : A 8-10, B 9-10,
 C 5. Enquête (`iso179.py`, 8 × L, L = 92, 78, 120, compteurs de chemins int8 et nvfp4) : quel chemin prennent les
 int8 du mixte à L = 92, et pourquoi B' n'y gagne rien.
+**Ajout 04 h 2x — iso179 (en processus, 8 × L)** : L = 92 : 905,4 → 439,1 ms (−51,5 %, 1 344 réutilisations, 1 240
+déquant int8) ; L = 120 : 957,9 → 492,2 (−48,6 %) ; L = 78 : 1 195 = 1 199 (GEMV, 0 partage). B' int8 marche en
+processus ; le banc servi n'en tire rien. Prochaine mesure, écrite avant : `eng179.py`, le moteur sans HTTP avec
+l'invite réelle du banc. Prédit : si B' y gagne (mur par lot −0,3 à −0,5 s), le défaut est dans le chemin HTTP ou
+dans la forme des requêtes servies ; s'il n'y gagne pas, dans le moteur (admission, préfill par séquence, cache).
