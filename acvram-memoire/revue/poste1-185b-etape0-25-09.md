@@ -51,3 +51,7 @@ segments 48 × 4). Sondes à mesurer d'abord : noyau sans épilogue (store seul)
 (ordonnancement du plus long au plus court) : même arithmétique par programme, même réduction. Prédit −3 à −5 µs
 par appel × 48 ≈ −0,15 à −0,25 ms/pas.
 Chaque levier sera seul dans son commit, avec son test au bit et son ABBA servi (ordre de chef).
+
+**Addendum 25/09 (croisement avec poste3, `revue/poste3-piece185-etroit-qkvo-debit-25-09.md`, poste3-185 62e6b418)** : son
+banc de débit confirme que BN 32 à tranches de BN 64 ne retrouve pas le débit de BN 64 (gdn_qkv_gate −10 à −13 %,
+q/o/gdn_out neutres, k/v +2 à +3 % à M = 8 seulement). **Levier BN clos.** L'étape 1 garde (a) comme diagnostic, puis (b) et (c).
