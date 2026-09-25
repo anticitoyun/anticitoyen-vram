@@ -90,6 +90,40 @@ n'importe quelle allocation transitoire. Mes deux correctifs (naturel + marlin_s
 matérialisation EN DOUBLE d'un tenseur DÉJÀ TROP GROS ; ils ne créent pas de marge. J'arrête ici comme
 demandé — pas de nouvel essai, pas de mesure de débit à donner.
 
+## 25/09 13 h 4x — pièce 153c (ordre chef) : cause trouvée et chiffrée, correctif écrit,
+## MAIS SANS EFFET sur le crash — plancher KV, pas la réserve, qui décide ici
+
+**fichier:ligne** (comme demandé) : `config.py:395` `activations_prefill_bytes` (+ nouvelle méthode
+`octets_transitoires_i8c_bytes`, `config.py`) et `loader.py:1889` `_reserve_prefill` (+ nouvelle fonction
+`_plus_grosse_nvfp4_marlin_bytes`, `loader.py`) → `loader.py:1173` `_marge_carte`. La réserve ne comptait
+QUE les tenseurs nvfp4 « doubles » (`_octets_marlin`, `loader.py:1869`, filtre explicite
+`format != "nvfp4"`) : les 308 tenseurs promus int8 (pièce 153) et un gate+up nvfp4 fusionné en un seul
+tenseur n'y existaient pas. **Chiffré (config Qwen3.8, branche poste4-153c)** : pic i8c = 284,1 Mio
+(GDN qkv+gate+alpha+beta+out domine sur attn q+k+v+o, 83,9 Mio) — indépendant de b (poids, pas
+activations) ; pic gate+up fusionné = 356,5 Mio (lu au manifeste, `_plus_grosse_nvfp4_marlin_bytes`, pas
+à l'architecture seule — sinon le 70B de poste3, jamais fusionné, aurait été sur-réservé de 448 Mio).
+
+**Correctif écrit, testé (22 tests, dont 2 nouveaux fichiers, tous verts, `test_reserve_depaq_172.py`
+adapté avec raison documentée puisque mon nouveau terme domine désormais sur ces dimensions), poussé
+(poste4-153c)** : la réserve inclut maintenant `max(plus_grosse, poids_bf16_couche_lineaire, i8c)` et
+`+ plus_grosse_nvfp4_marlin_manifeste`.
+
+**ABBA rejoué (même modèle, même script) : CRASH IDENTIQUE AU BIT** (mêmes deux sites, mêmes deux
+tailles de tentative, 120 Mio/37,94 libres et 340 Mio/265,94 libres). `kv_budget=2560/1` **inchangé**
+avant/après le correctif — la cause : `_kv_plancher` (`loader.py:1229`) impose un PLANCHER (KV minimal
+pour UNE séquence à `max_model_len`) que la réserve ne peut pas faire descendre plus bas ; ici le budget
+EST déjà à ce plancher. Ma réserve plus grosse ne réduit donc RIEN (il n'y a plus de KV « au-dessus du
+plancher » à retirer), et rien dans le chemin de chargement ne déclenche d'EXIL de couches en réponse à
+une réserve trop grosse pour la marge restante (0/64 exilées, identique avant/après) : le couplage
+réserve → exil, qui existe pour d'autres cas (poids seuls dépassant la capacité), ne semble pas réagir à
+CE type de dépassement (poids + plancher KV + réserve > capacité, poids seuls < capacité). C'est un
+mécanisme différent de celui que j'ai corrigé, plus profond, que je n'ai pas touché.
+
+J'arrête ici comme la dernière fois : mon correctif est correct et testé pour ce qu'il fait (compter
+ces tampons), mais insuffisant seul à empêcher ce crash précis — il faudrait soit forcer un exil quand
+poids + plancher + réserve dépasse la marge, soit réduire le plancher lui-même pour ce cas, et je n'ai
+pas d'ordre pour toucher à ce mécanisme.
+
 ## Suite proposée
 
 Le format mixte lui-même est plus lourd, pas le planificateur. Options avant nouvelle mesure : (a)
