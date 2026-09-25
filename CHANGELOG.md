@@ -1,5 +1,36 @@
 # Journal des changements
 
+## 0.7.0 (26/09/2026)
+
+Chaîne du 24 au 26/09 : parité de débit décodage rejointe puis dépassée contre NInfer/vLLM sur
+Qwen3.8-27B-unsloth-mixte-i8c b=8 (172/175b/176/179/182/187, bilan pièce 190 : 323,4 → 394,8 t/s,
+**+22,08 %**, `revue/poste2-piece190-cellule-mixte-b8-25-09.md`), avant les gains propres à cette
+version :
+* **175/187/194/195b** au défaut : portes GDN α/β en un appel (`ACVRAM_GDN_AB=auto`, 175/175b) ;
+  GEMV int8 par tranches de 6 au lieu de 16 (187, +6,65 % b=8 mixte) ; β‖α GDN sur un second flux
+  (194 b2, `ACVRAM_GDN_AB_FLUX=1`, +2,20 % b=8) ; GEMM int8 étroit à K entier par canal (195b,
+  `ACVRAM_ETROIT_CANAL=1`, +4,01 % b=8, −3,76 % J/jeton).
+* **201** (poste5) : un modèle vision/MTP qui ne tenait pas n'est plus chargé en silence — capacité
+  KV annoncée baisse pour en tenir compte (Qwen3.8 nvfp4 −7,4 %, gemma-4-31B-vision −21,4 %) ; copie
+  int8 transitoire (i8c servi sans OOM), coût nul au banc. `revue/poste5-piece201-verdict-25-09.md`.
+* **209 en opt-in** (poste6, 220) : le facteur Marlin par ligne d'expert (209) gagnait sur l'alias
+  qkvo-i8c (+5,77 % b=8, 4 couches sur 48) mais régressait Qwen3-Coder-30B-A3B-nvfp4 PUR (−8,91 %
+  t/s, +20,65 % J, banc `revue/poste3-piece217-verdict-25-09.md`, 48 couches basculées au lieu de 4) :
+  `ACVRAM_MARLIN_PAR_LIGNE` revient à 0 par défaut, 1 = témoin de la 209.
+* **210/210b** (poste5) : `/v1/completions` — logprobs d'un jeton à texte vide gardés (suit
+  `token_ids`, plus `text_delta`) ; usage omis dans le flux sans `stream_options.include_usage`
+  (`CompletionChunk`) au lieu de {0,0,0} sur chaque fragment ; l'outil TTFT comptait ces jetons
+  vides comme « aucun jeton reçu » — corrigé, ce n'était pas le service.
+* **212** (poste4) : la marge de VRAM avant capture des graphes double sur les modèles à couche
+  récurrente (GDN/KDA/mamba2) — `_KV_MARGE_MIN_GDN` 3 072 Mio au lieu de 1 536, ≈ −12 192 jetons de
+  capacité KV sur les Qwen3.8.
+* **Purge d'historique** (171, poste6) : `outils/purge-historique.sh` exécuté réellement le 25/09,
+  1 015 Mio → 67 Mio, 146 réfs réécrites, Dolt intacte, vérifié sur clone neuf.
+
+Suspendue à la clôture de la 213 (poste5) : contamination servie confirmée et reproductible (mixte
+b=8, même moteur, requête après requête ≠ requête seule) — cause pas encore montrée. Cette section
+prépare la version ; **rien n'est publié ni étiqueté ici**, décision de chef.
+
 * **25/09/2026 — pièce 220 (poste6, décision chef) : la 209 (facteur Marlin par ligne d'expert) revient en OPT-IN —
   `ACVRAM_MARLIN_PAR_LIGNE` vaut 0 au défaut, 1 = témoin de la 209.** Sur **Qwen3-Coder-30B-A3B-nvfp4 PUR** (67 477 échelles
   sous-normales sur deux couches, puis 128, 207, 262), le 1 ne bascule pas quatre couches mais les **48** : `experts_layout` passe de
