@@ -1,5 +1,15 @@
 # Journal des changements
 
+* **25/09/2026 — pièce 220 (poste6, décision chef) : la 209 (facteur Marlin par ligne d'expert) revient en OPT-IN —
+  `ACVRAM_MARLIN_PAR_LIGNE` vaut 0 au défaut, 1 = témoin de la 209.** Sur **Qwen3-Coder-30B-A3B-nvfp4 PUR** (67 477 échelles
+  sous-normales sur deux couches, puis 128, 207, 262), le 1 ne bascule pas quatre couches mais les **48** : `experts_layout` passe de
+  `naturel` (tout le modèle refusé, comme depuis la 157) à `marlin-w13`, et le service perd — banc de la 217 (poste3, be837ca1 → main :
+  **−8,91 % t/s, +20,65 % J/jeton**) ; 220, quatre bras isolés sur main, serveur neuf par passe, b=8 : défaut 1 539,8 t/s / 0,1521 J,
+  `ACVRAM_MARLIN_PAR_LIGNE=0` **1 689,3 / 0,1272 (+9,7 %, −16 %)**, `ACVRAM_ETROIT_CANAL=0` 1 533,2 / 0,1541 (hors de cause).
+  La 209 ne gagne que là où peu de piles basculent : qkvo-i8c, 4 couches sur 48, +5,77 % b=8 (`poste6-piece209c-verdict-25-09.md`) ;
+  elle y reste disponible par `ACVRAM_MARLIN_PAR_LIGNE=1`. Mécanisme à établir (pièce à venir : quand le Marlin MoE gagne-t-il
+  contre la naturelle — préfill contre décodage, fraction de piles basculées). Test cassant si le défaut revient à 1 :
+  `tests/test_marlin_pile_par_ligne_209.py::test_220_le_facteur_par_ligne_est_opt_in_et_0_le_defaut`.
 * **25/09/2026 — pièce 212 (poste4, sur la 201 de poste5) : la marge de VRAM avant capture des graphes
   DOUBLE sur les modèles à couche récurrente (GDN/KDA/mamba2/lfm2) — `warm_graphs` grossit la mémoire de
   la carte APRÈS le chargement, hors de tout ce que la réserve de préfill voyait.**

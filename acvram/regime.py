@@ -117,8 +117,8 @@ VARIABLES: tuple[Variable, ...] = (
              "pièce 63 : glue fusionnée, reproductible (défaut) | 0 témoin glue A4 (aligneur vLLM par atomiques, NON reproductible) — jamais servi"),
     Variable("MOE_W13", "1", ("acvram.engine.moe", "_MOE_W13"), "0",
              "pièces 82/82 ter (23/09) : 1 défaut = gate·up en une pile Marlin w13 (disposition unique, gate/up rendues, experts_layout=marlin-w13) — GEMM w13 au seul décodage tensor, sortie au 2⁻⁷ ; préfill (deux GEMM de largeur N lues dans w13) et GEMV au bit | 0 témoin gate et up séparées"),
-    Variable("MARLIN_PAR_LIGNE", "1", ("acvram.engine.moe", "_MARLIN_PAR_LIGNE"), "0",
-             "pièce 209 (25/09) : 1 = piles d experts à sous-normales (Coder-30B couches 0, 1, 2, 4, 157) préparées en Marlin avec un facteur par ligne d expert (échelle globale par (expert, colonne), exact au bit des poids) et servies par le tensor / GEMV Marlin | 0 témoin : préparation d avant, ces piles refusées (naturel, decode_mma) — ligne marlin(N/M) refus=[…]"),
+    Variable("MARLIN_PAR_LIGNE", "0", ("acvram.engine.moe", "_MARLIN_PAR_LIGNE"), "1",
+             "pièce 209 (25/09), OPT-IN depuis la 220 (25/09, chef) : 1 = piles d experts à sous-normales (Coder-30B couches 0, 1, 2, 4, 157) préparées en Marlin avec un facteur par ligne d expert (échelle globale par (expert, colonne), exact au bit des poids) et servies par le tensor / GEMV Marlin — gagne sur qkvo-i8c (+5,8 % b=8), PERD sur le Coder nvfp4 pur (48 couches basculées : −9,7 % t/s, +16-20 % J/jeton) | 0 défaut : préparation d avant, ces piles refusées (naturel, decode_mma) — ligne marlin(N/M) refus=[…]"),
     Variable("MARLIN_DISTINCT", "0", ("acvram.engine.moe", "_MARLIN_DISTINCT"), "0",
              "C10 : 1 = la disposition unique Marlin sert aussi les MoE à gate/up distincts (tables AWQ séparées : GLM k48-calibA) — décodage par le GEMV Marlin à une projection, gate puis up ; 0 défaut = refus nommé, pile naturelle gardée, chemin d'avant (verdict-glm-b12-19-09) ; scellé GLM b=12 ≥ chemin d'avant × 1,05"),
     # --- capacités, plafonds, modes du moteur (19/09 : sortis de HORS_REGIME, poste7) ---
