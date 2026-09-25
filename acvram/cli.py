@@ -79,7 +79,6 @@ VARIABLES_LUES = {
     "ACVRAM_GDN_ETAT_EN_PLACE", # engine/gdn.py : 156 F4, état GDN mis à jour en place (défaut 1)
     "ACVRAM_GDN_CONV_FUSEE",    # engine/gdn.py : 156 F2, conv de décodage fusionnée (défaut 1)
     "ACVRAM_ADMISSION_FENETRE_MS",  # server/app.py : 179, fenêtre d'admission (défaut 5 ms, en rafale)
-    "ACVRAM_INT8_GEMV_MAX_PARTAGE",  # kernels : 183, seuil GEMV int8 sous B' (opt-in)
     "ACVRAM_DEPAQ_PARTAGE",     # kernels : 172, poids déquantifié partagé par la boucle par séquence (défaut 1, au bit)
     "ACVRAM_GDN_PORTES_NOYAU",  # engine/gdn.py : 156 F1, portes dans le noyau fla (défaut 1, ± ulp)
     "ACVRAM_GDN_NORME_FUSEE",   # engine/gdn.py : 156 F3, norme gated Triton (défaut 1, ± ulp)

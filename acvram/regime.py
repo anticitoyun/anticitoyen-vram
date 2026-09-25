@@ -327,9 +327,6 @@ VARIABLES: tuple[Variable, ...] = (
              "pièce 179 (DÉFAUT 5 depuis 179 b ; 0 = coupé) : fenêtre d'admission du serveur en ms — moteur vide et ≥ 2 "
              "requêtes en file, attendre que la file cesse de grossir avant le pas (préfill groupé d'une rafale) ; une "
              "requête seule n'attend pas"),
-    Variable("INT8_GEMV_MAX_PARTAGE", "0", ("acvram.kernels", "_INT8_GEMV_MAX_PARTAGE"), None,
-             "pièce 183 (opt-in, 0 = coupé) : seuil GEMV int8 dans la portée de B' (boucle par séquence d'une couche "
-             "à récurrence) ; au-dessus, déquant partagée + GEMM ; change la sortie (KL)"),
     Variable("DEPAQ_PARTAGE", "1", ("acvram.kernels", "_DEPAQ_PARTAGE"), "0",
              "pièce 172 (DÉFAUT, au bit ; 0 = témoin) : au préfill de plusieurs séquences, la boucle par séquence d'une "
              "couche à récurrence linéaire déquantifie chaque poids NVFP4 UNE fois (GEMM toujours par séquence)"),

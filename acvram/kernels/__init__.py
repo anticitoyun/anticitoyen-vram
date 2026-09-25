@@ -803,12 +803,6 @@ def int8_dequant(t: INT8Tensor, dtype: torch.dtype = torch.float16) -> torch.Ten
 
 
 _INT8_GEMV_MAX = int(os.environ.get("ACVRAM_INT8_GEMV_MAX", "80"))
-# Pièce 183 (opt-in, 0 = coupé) : seuil GEMV int8 DANS la portée de B' (`depaquetage_partage`, boucle par séquence
-# d'une couche à récurrence linéaire). Le seuil de 80 vient d'une mesure sur UNE séquence : la déquant entière y est un
-# coût fixe par appel. Sous B', elle est payée une fois pour toutes les séquences de la boucle, et le GEMV par tranches
-# à M = 78 coûte plus que déquant + GEMM (179 : 8 × 78 1 195 ms, contre 439 à M = 92 sous B'). GEMV et GEMM n'ont pas
-# la même arithmétique : la sortie change, d'où la KL contre témoins (scellé 183).
-_INT8_GEMV_MAX_PARTAGE = int(os.environ.get("ACVRAM_INT8_GEMV_MAX_PARTAGE", "0"))
 # Linéaires INT8 au préfill (n > INT8_GEMV_MAX) : bf16 (défaut jusqu'au scellé
 # P0 : déquant entière + cutlass) | a8 (kernels/gemm_w8a8.py : activation int8
 # par jeton, tensor cores int8, sans déquant). Scellé : Coder préfill 2 048
@@ -1360,8 +1354,6 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
     """
     if gemv_threshold <= 0:
         gemv_threshold = _INT8_GEMV_MAX
-        if _INT8_GEMV_MAX_PARTAGE > 0 and _W_PARTAGES is not None:
-            gemv_threshold = min(gemv_threshold, _INT8_GEMV_MAX_PARTAGE)
     t_servi = t               # pièce 179 : le poids servi, avant `vue_g128` (objet neuf à chaque appel)
     ext = get_extension()
     orig_shape = x.shape
