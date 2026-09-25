@@ -9,4 +9,9 @@ verdict : **falsificateur du scellé déclenché, mais faute de PÉRIMÈTRE du s
 ABAB×5 (mêmes A/B). Débit médian A 481,9 t/s, B 499,0 t/s → **+3,55 %**. J/jeton net médian A
 0,6611, B 0,6366 → **−3,71 %**. Prédiction scellé pour ce modèle : +1 à +4 % débit, −1 à −4 %
 J/jeton — **TENU, dans la fourchette, aucun falsificateur**.
+
+## gemma-4-31B-it-nvfp4-vision, b=8 — 25/09 12h01
+ABAB×5. Débit médian A 402,3 t/s, B 406,2 t/s → **+0,97 %**. J/jeton net médian A 0,7944, B
+0,7819 → **−1,57 %**. Prédiction scellé : NEUTRE 0 ± 2 % — **TENU, aucune des cinq pièces sources
+ne touche ce chemin, cohérent avec le rôle de falsificateur direct que lui donnait le scellé**.
 durée : prévu ≤ 15 min, tenu par carte.sh — 4 prises consécutives 11:03→11:22 (~19 min, file d'attente ~13 min avant la 1ʳᵉ prise incluse dans le journal, hors prise)
