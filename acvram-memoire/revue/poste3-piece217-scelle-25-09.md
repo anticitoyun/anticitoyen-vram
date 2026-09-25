@@ -73,3 +73,26 @@ remesure de 201/212, un simple relevé qui doit être cohérent avec ces deux ve
 Prévu ≤ 90 min de carte (comparable à la 190, quatre cellules ~19 min hors attente ; ici cinq
 cellules et deux modèles plus lourds — Coder 30B, gemma31 vision). `ACVRAM_ATTENTE=5400` (ordre
 chef) : la file peut attendre jusqu'à 90 min avant chaque prise si la carte est tenue ailleurs.
+
+## Addendum du 25/09 22h0x (poste3, après mesure) — deux suppositions fausses nommées, prédictions non réécrites
+
+Cellule Coder-30B-A3B-nvfp4 b=8 mesurée : **FALSIFICATEUR net**, −8,91 % débit / +20,65 % J (prédit
++4 à +7 % / −6 à −11 %), journaux serveur vérifiés (`experts_layout` naturel→marlin-w13 comme
+attendu, 0 refus en B). Deux suppositions du scellé ci-dessus étaient FAUSSES, nommées ici sans
+retoucher les prédictions d'origine :
+
+1. **« 209 seul » pour Coder** — la prédiction s'appuyait sur le verdict 209, mesuré et scellé sur
+   l'alias **Coder qkvo-i8c**, jamais sur **Qwen3-Coder-30B-A3B-nvfp4** (celui de ma cellule).
+   L'ampleur des échelles sous-normales diffère fortement entre les deux : 209 a/b testait « 8
+   piles réelles / 70,8 M éléments » ; le journal de ma cellule 3 montre 4 refus en A dont
+   **67 477** échelles sous-normales sur un seul up_proj (deux fois), contre 128/207/262 pour les
+   trois autres — un ordre de grandeur au-dessus de ce que 209 a mesuré. Je n'avais pas vérifié que
+   le scellé de 209 couvrait CET alias avant de composer la prédiction.
+2. **« 195b inerte sur Coder (pas d'int8 servi) »** — FAUX : le journal serveur de B porte
+   `etroites=serie+canal(table)`, donc le noyau de la 195b est bien actif sur des linéaires int8 de
+   cet alias Coder. Je l'avais classée inerte sans vérifier la ligne de régime réellement servie.
+
+Piste ouverte, pas encore vérifiée par moi : le facteur par (expert, ligne) de la 209 pourrait avoir
+un surcoût qui domine quand la fraction sous-normale d'un up_proj est énorme (quasi une couche
+entière) plutôt que quelques piles isolées — ou une interaction 195b×209 non prédite. poste6 isole
+(220, PAR_LIGNE=0/CANAL=0/les deux, processus séparés).
