@@ -26,6 +26,30 @@
   sur 48) : KL de décodage b=8 max 0,324 ≤ 2 × témoin 0,286 (témoins à échantillon égal), argmax 0,961 ≥ 0,957, PPL 12,80 → 12,61.
   Servi, banc chat ABBA ×5 : Coder b=8 1 669,9 → 1 766,3 t/s (**+5,77 %**), J/jeton net −8,58 % ; b=1 +0,52 %.
   `revue/poste6-piece209{a,b,c}-verdict-25-09.md`. Ligne de régime : `experts_layout=marlin-w13`, plus aucun « pas de piles Marlin ».
+* **25/09/2026 — pièce 210b (poste5, suite de la 210) : `/v1/completions` — logprobs d'un jeton à texte vide gardés,
+  usage omis en flux sans `include_usage`.** (a) `acvram/server/app.py:1201` : la boucle de logprobs (hors flux) ne
+  retenait un pas que si `out.text_delta` — un jeton décodé en texte vide (octet UTF-8 partiel, jeton spécial) sortait
+  des listes (`tokens` = [] pour `completion_tokens` = 1, logprob perdu) ; suit désormais `out.token_ids`, listes
+  alignées sur les jetons générés. (b) `acvram/server/protocol.py:323` : les fragments de flux étaient des
+  `CompletionResponse`, `usage` par défaut {0, 0, 0} sur chaque fragment ; `CompletionChunk` (`usage: Optional[Usage] =
+  None`, omis par `exclude_none`) ne le porte plus que sur le dernier fragment, avec `stream_options.include_usage`
+  (contrat OpenAI). Tests fabriqués (`tests/test_server.py`) : tokens ["", "hello"], logprobs [−1,5, −0,25] ; sans
+  `include_usage` aucun `usage`, avec : dernier fragment {3, 2, 5} ; témoins sur l'ancien code → ROUGES. 83 verts.
+  `revue/poste5-piece210b-verdict-25-09.md`.
+* **25/09/2026 — pièces 210 + 211 (poste5, poste2) : l'outil TTFT comptait un jeton à texte vide comme « aucun jeton
+  reçu » — outil faux, pas le service ; 13 outils de mesure important l'installation editable au lieu de leur propre
+  worktree.** 210 : `outils/gpu/mesure/ttft-service-p145.py:40` (`premier_fragment`) n'acceptait comme premier jeton
+  qu'un fragment au texte non vide ; le service génère bien le jeton (`completion_tokens` = 1), il se décode en "" —
+  toutes les passes L = 512 du mixte-i8c et de l'attn-gdn-i8c de la 201 (`revue/poste5-piece201-verdict-25-09.md`)
+  étaient rendues nulles par ce défaut d'instrument, pas par le service. Corrigé : tout fragment à `choices` compte
+  (texte vide compris), `jetons_texte_vide` compté à part. Servi (rejoué) : L = 78 **180,78 ms** (n 40, 0 vide), L = 512
+  **299,08 ms** (n 27, 1 vide). `tests/test_ttft_texte_vide_210.py` : jeton vide compté, ancien critère lève sur le même
+  flux, flux sans `choices` reste une erreur. 211 : même mécanisme que la 168 (`_regime_noyaux()` ne pose pas
+  `sys.path`, à l'appelant de le faire) — 13/22 scripts de `outils/gpu/mesure/` dérivaient leur racine du `cwd`, d'un
+  chemin en dur ou pas du tout ; corrigés pour dériver de `__file__` (`tests/test_arbre_outils_mesure.py:1`, garde qui
+  rejoue la logique `sys.path` de chaque fichier et se rend faux sur un faux outil fabriqué exprès). Périmètre non
+  couvert (à la demande de chef) : `outils/` hors `gpu/mesure/`, une soixantaine de candidats non revus.
+  `revue/poste5-piece210-verdict-25-09.md`, `revue/poste2-piece211-25-09.md`.
 * **25/09/2026 — pièce 201 (poste5, sur la 153c de poste4) : un modèle qui ne tient pas n'est plus chargé en silence ;
   la capacité KV annoncée BAISSE sur les modèles à vision ou à MTP — c'est le prix d'un compte juste.**
   Qwen3.8-27B-nvfp4-attn-gdn-i8c chargeait sans exil puis tombait en OOM au premier pas (0/64 couches exilées,
