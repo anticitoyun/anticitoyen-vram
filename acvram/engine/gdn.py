@@ -46,6 +46,7 @@ _GDN_CONV_FUSEE = os.environ.get("ACVRAM_GDN_CONV_FUSEE", "1") == "1"
 # separe (défaut : deux F.linear, 31 µs chacun à b=8, 173) | concat (un F.linear sur β‖α [2nv, K] : au bit si cuBLAS garde le
 # même noyau, le test le dit) | triton (GEMM étroite fp32 déterministe, kernels/gemv_bf16_etroit.py : pas au bit, KL scellée).
 _GDN_AB = os.environ.get("ACVRAM_GDN_AB", "separe")
+AB_BILAN = {"fusionnees": 0, "raisons": {}}          # 175 : ce que le chargement a fait, pour la ligne de régime (preuve)
 # Pièce 156 F1 (DÉFAUT depuis 156 d ; 0 = témoin) : portes (softplus, exp, sigmoid) calculées dans le noyau fla de
 # la voie F4 — ± ulp fp32 (softplus de fla en ex2/lg2 approchés) : KL contre témoins tenue sur Qwen3.8 et Qwen3.5-35B.
 _GDN_PORTES_NOYAU = os.environ.get("ACVRAM_GDN_PORTES_NOYAU", "1") == "1"
@@ -74,7 +75,15 @@ def gdn_regime() -> str:
         return "torch(fla absent)"
     if not (torch.cuda.is_available() or os.environ.get("TRITON_INTERPRET") == "1"):
         return "torch(sans carte)"
-    return "fla"
+    return "fla" + _ab_texte()
+
+
+def _ab_texte() -> str:
+    """175 : ` ab=concat(48)` (couches fusionnées) ; ` ab=triton(0:scaler=…)` = demandé mais pas pris, raison nommée."""
+    if _GDN_AB == "separe":
+        return ""
+    raisons = ",".join(f"{k}×{v}" for k, v in sorted(AB_BILAN["raisons"].items()))
+    return f" ab={_GDN_AB}({AB_BILAN['fusionnees']}" + (f":{raisons}" if raisons else "") + ")"
 
 
 def _recurrence_en_place(q, k, v, g, beta, S: torch.Tensor, A_log=None, dt_bias=None) -> torch.Tensor:
@@ -169,11 +178,16 @@ class GatedDeltaNet(nn.Module):
                 raise ValueError(f"ACVRAM_GDN_AB={_GDN_AB!r} : attendu separe | concat | triton")
             return None
         wb, wa = getattr(self.beta_proj, "qweight", None), getattr(self.alpha, "qweight", None)
-        if not (isinstance(wb, PlainTensor) and isinstance(wa, PlainTensor) and wb.weight.is_cuda
-                and wb.weight.dtype == torch.bfloat16 and wa.weight.dtype == wb.weight.dtype
-                and self.beta_proj.bias is None and self.alpha.bias is None
-                and getattr(self.beta_proj, "scaler", None) is None and getattr(self.alpha, "scaler", None) is None):
+        identite = lambda lin: getattr(lin, "scaler", None) is None or getattr(lin.scaler, "is_identity", False)  # noqa: E731
+        raison = ("format" if not (isinstance(wb, PlainTensor) and isinstance(wa, PlainTensor)) else
+                  "hote" if not wb.weight.is_cuda else
+                  "dtype" if wb.weight.dtype != torch.bfloat16 or wa.weight.dtype != wb.weight.dtype else
+                  "biais" if self.beta_proj.bias is not None or self.alpha.bias is not None else
+                  "scaler" if not (identite(self.beta_proj) and identite(self.alpha)) else None)
+        if raison:
+            AB_BILAN["raisons"][raison] = AB_BILAN["raisons"].get(raison, 0) + 1
             return None
+        AB_BILAN["fusionnees"] += 1
         w = torch.cat([wb.weight, wa.weight]).contiguous()
         return QuantLinear(PlainTensor(w, tuple(w.shape), wb.format), None, None, w.shape[0], w.shape[1])
 
