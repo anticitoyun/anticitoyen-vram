@@ -61,3 +61,19 @@ basculés à chaud, OOM rattrapé et rapporté par bras. Prédiction inchangée.
 mesures 1-2 tient au `model(batch)` nu. Doute, écrit avant la 4e mesure : 522 Mio pour 8 × 1 000, contre 3 570 pour
 1 × 8 000, suggère que le moteur préfille ces 8 requêtes séquence par séquence ; B' n'y serait alors pas PRIS, et
 « A = B' » ne dirait rien. 4e mesure : compteur de réutilisations relevé, cas 8 × 1 000 et 8 × 78 (celui du TTFT).
+**4e mesure (moteur servi, compteur relevé, → 02:38:00)** :
+
+| cas | pic A | pic B' | B' − A | réutilisations sous B' |
+|---|---|---|---|---|
+| 1 × 8 000 (3e mesure) | 3 570,1 Mio | 3 570,1 | 0 | — (une séquence : portée fermée) |
+| 8 × 1 000 | 522,5 | 522,5 | 0 | **0** : le moteur préfille ces 8 requêtes séparément, B' n'est pas pris |
+| 8 × 78 | 1 438,9 | 1 470,0 | **+31,1 Mio** | 1 680 (pris) |
+
+**Réponse à chef** : le surcoût mesuré de B' est de +31 Mio, et seulement quand il est pris (préfill groupé de courtes
+invites). Le plus long préfill servi (une invite) n'est pas touché. Il est désormais COMPTÉ : `config.py:395`,
+`activations_prefill_bytes` prend max(plus grosse matrice, `poids_bf16_couche_lineaire_bytes` `config.py:397`), soit
++54 Mio de réserve sur Qwen3.8 (232 − 178), qui couvre les 31 mesurés. Cette réserve passe par `loader.py:1887`
+`_reserve_prefill`, puis par `loader.py:1173` `_marge_carte`. Portée fermée pour une séquence : `couches.py:150`.
+Tests : `tests/test_reserve_depaq_172.py` (casse si le terme est retiré), `test_une_seule_sequence_ne_garde_rien`.
+Constat à part, non imputable à B' : `model(batch)` nu tombe en OOM dès 4 096 jetons dans ce chargement, alors que le
+moteur tient 8 000. Cause non cherchée.
