@@ -49,7 +49,7 @@ from .chat import extraire_appels, messages_pour_gabarit
 from .chat import ProcesseurVision, charger_processeur_vision, preparer_images
 from .protocol import (ChatChoice, ChatCompletionChunk, ChatCompletionRequest,
                        ChatCompletionResponse, ChoiceMessage, ChunkChoice,
-                       CompletionChoice, CompletionRequest, CompletionResponse,
+                       CompletionChoice, CompletionChunk, CompletionRequest, CompletionResponse,
                        DeltaMessage, EmbeddingData, EmbeddingRequest,
                        EmbeddingResponse, ErrorResponse, ModelCard, ModelList,
                        Usage, charger_image, new_id)
@@ -1195,7 +1195,10 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
         # (sinon la sortie est identique au bit — cf. sampler `veut_logprobs`).
         lp_tok: list[str] = []; lp_val: list = []; lp_top: list = []; lp_off: list = []
         async for out in service.collect(request_id, q):
-            if nlp is not None and out.text_delta:
+            # Pièce 210b : un jeton à texte VIDE (octet UTF-8 partiel, jeton spécial) reste dans les logprobs — la
+            # condition était `out.text_delta` : tokens = [] pour completion_tokens = 1, logprob perdu, listes
+            # désalignées. On suit le JETON (`token_ids`), pas son texte.
+            if nlp is not None and out.token_ids:
                 lp_off.append(len(text)); lp_tok.append(out.text_delta)
                 lp_val.append(getattr(out, "logprob", None))
                 top = getattr(out, "top_logprobs", None)
@@ -1438,7 +1441,7 @@ async def _stream_completion(service: EngineService, request_id: str,
     cid = new_id("cmpl")
     try:
         async for out in service.collect(request_id, q):
-            resp = CompletionResponse(
+            resp = CompletionChunk(
                 id=cid, model=model,
                 choices=[CompletionChoice(
                     text=out.text_delta,
