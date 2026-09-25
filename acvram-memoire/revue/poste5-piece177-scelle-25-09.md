@@ -16,8 +16,8 @@ SYNC), `/metrics` avant et après : pas, pas avec préfill, jetons de préfill, 
 le compteur de B' ; temps hôte contre temps carte.
 
 **Prédictions** :
-* invite L ≈ 30-45 jetons (gabarit de chat + texte) ; 1 à 2 pas de préfill par lot ; 1,5 à 2 préfills « événements »
-  par seconde, pour ≈ 1,3 lot/s au plus… soit ≈ 0,16 lot/s mesuré (6,3 s par lot) ;
+* invite L ≈ 30-45 jetons (gabarit de chat + texte) ; 1 à 2 pas de préfill par lot ; ≈ 0,16 lot/s (6,3 s par lot),
+  soit 0,16 à 0,32 pas de préfill par seconde et 1,3 requête préfillée par seconde ;
 * coût réel du préfill (SYNC) : **0,6 à 1,0 s par lot**, soit 50 à 85 % des 1,19 s ; le reste est l'aller-retour HTTP
   et l'admission entre deux lots (0,1-0,4 s) ;
 * préfill isolé 8 × L : 0,5 à 0,9 s ; dans les ±20 % du préfill servi ; 7 × L puis 1 × L ≈ 8 × L + 30 à 60 % ;
