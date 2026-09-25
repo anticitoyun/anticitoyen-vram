@@ -51,3 +51,8 @@ probablement le pic, auquel cas les deux différences sont nulles.
 jetons ne tient pas dans ce chargement. Les tampons fp32 du préfill par blocs de fla (T × têtes v × 128 × 4 o, plusieurs
 par couche) ne figurent pas dans `activations_prefill_bytes`. Tests : 20 verts. Mesure refaite aux longueurs qui passent
 (1 × 4 096, 8 × 512), prédiction inchangée.
+**2e mesure (02:1x) : OOM encore dès A, à 1 × 4 096** (11 064 Mio libres après chargement ; `gdn.py:253`, fla chunk). Le
+`model(batch)` nu n'est donc pas le chemin servi pour les longues invites : l'OOM à 8 192 de la 1re mesure ne se
+transpose PAS au service. Il reste inexpliqué, et je ne l'affirme pas comme défaut du service. Nouvel instrument, écrit
+avant la 3e mesure : `pic2.py`, le moteur `Engine` comme `acvram serve`, cas 1 × 8 000 et 8 × 1 000, A B' A B'
+basculés à chaud, OOM rattrapé et rapporté par bras. Prédiction inchangée.
