@@ -486,10 +486,12 @@ class MoEBlock(nn.Module):
                 _, qw, bs, gs, k, m = piles[n]
                 if k % 64 or qw.shape[1] % 64:
                     raison = f"{n} : K={k} ou N={qw.shape[1]} non multiple de 64"
-                elif (ecr := MP.echelles_ecrasees(bs.view(torch.float8_e4m3fn) if bs.dtype == torch.uint8 else bs)):
-                    # pièce 157 : un facteur commun à la pile (g par expert seulement) écraserait des sous-normales à
-                    # zéro — Qwen3-Coder-30B couches 0, 1, 2, 4 ; la pile naturelle est exacte
-                    raison = f"{n} : {ecr} échelles sous-normales non représentables en Marlin (S0E5M3)"
+                elif (ecr := MP.echelles_ecrasees(bs.view(torch.float8_e4m3fn) if bs.dtype == torch.uint8 else bs,
+                                                  par_ligne=_MARLIN_PAR_LIGNE)):
+                    # pièce 157 : un facteur commun écraserait des sous-normales ; pièce 209 : `preparer_pile` prend
+                    # alors un facteur PAR LIGNE d'expert (g par (expert, colonne)) — refus seulement si une ligne
+                    # dépasse à elle seule la plage S0E5M3
+                    raison = f"{n} : {ecr} échelles sous-normales non représentables en Marlin même par ligne (S0E5M3)"
         if raison is None:
             from ..kernels import marlin_port as MP
             if MP.charger(compiler=False) is None:
@@ -509,7 +511,7 @@ class MoEBlock(nn.Module):
         for n in ("gate_proj", "up_proj", "down_proj"):
             _, qw, bs, gs, k, m = piles[n]
             w, sc, g = MP.preparer_pile(qw, bs.view(torch.float8_e4m3fn) if bs.dtype == torch.uint8 else bs,
-                                        gs.reshape(-1).to(torch.float32))
+                                        gs.reshape(-1).to(torch.float32), par_ligne=_MARLIN_PAR_LIGNE)
             out[n] = (w, sc, g, k, m)
         if _MOE_W13 and not awq.get("up_distinct"):          # entrées distinctes : deux GEMV, pas de w13
             wg, sg, gg, k, m = out["gate_proj"]
@@ -521,7 +523,17 @@ class MoEBlock(nn.Module):
             # un w13 vLLM découpé, sert gate et up à 8·10⁻³).
             w13, s13 = torch.cat([wg, wu], dim=2).contiguous(), torch.cat([sg, su], dim=2).contiguous()
             del wg, wu, sg, su
-            out["w13"] = (w13, s13, gg, gu, k, m, (gu / gg).contiguous(), torch.ones_like(gg))
+            if gg.dim() == 2 or gu.dim() == 2:
+                # Pièce 209 : facteur par ligne sur gate ou up → échelle globale par (expert, colonne) [E, 2N] ;
+                # l épilogue Marlin (et le GEMV w13) l applique colonne par colonne, gate et up chacune avec la sienne :
+                # rien à corriger dans moe_act (rapport gu/gg = None). La moitié d up est une VUE de g13 (stride 2N).
+                ng = s13.shape[2] // 2
+                gg2 = gg if gg.dim() == 2 else gg.reshape(-1, 1).expand(-1, ng)
+                gu2 = gu if gu.dim() == 2 else gu.reshape(-1, 1).expand(-1, ng)
+                g13 = torch.cat([gg2, gu2], dim=1).contiguous()
+                out["w13"] = (w13, s13, g13, g13[:, ng:], k, m, None, None)
+            else:
+                out["w13"] = (w13, s13, gg, gu, k, m, (gu / gg).contiguous(), torch.ones_like(gg))
             # gate/up rendues : les champs de forme restent (K, N, échelles globales) ; poids et échelles à None,
             # tout chemin qui les relirait casse au lieu de mesurer une double disposition.
             out["gate_proj"], out["up_proj"] = (None, None, gg, k, m), (None, None, gu, k, m)
@@ -726,6 +738,8 @@ class MoEBlock(nn.Module):
         cache = self.__dict__.setdefault("_decals_marlin", {})
         if nom not in cache:
             import math
+            if self._stacks_marlin[nom][2].dim() != 1:
+                raise RuntimeError(f"C17 : {nom} est une pile à échelle globale par (expert, colonne) (209) — pas de décalage unique")
             g_nat = self._stacks[nom][3].reshape(-1)[0].item()
             g_mar = self._stacks_marlin[nom][2].reshape(-1)[0].item()
             facteur = g_nat * (2.0 ** 119) / g_mar
@@ -1081,6 +1095,13 @@ class MoEBlock(nn.Module):
                     and awq0.get("gate_proj") is None and awq0.get("down_proj") is None
                     and not awq0.get("hadamard", {}).get("gate_proj", 0) and not awq0.get("hadamard", {}).get("down_proj", 0)
                     and pd[1] is None):
+                return None
+            # Pièce 209 : une pile à facteur PAR LIGNE (g [E, N]) n'a pas UN décalage par expert — mma2 (échelle
+            # naturelle + décalage global) y serait faux : refus nommé, la GEMV Marlin (g par colonne) sert.
+            if any(st_m[n][2].dim() != 1 for n in ("gate_proj", "up_proj", "down_proj")):
+                if not self.__dict__.get("_dit_c17_par_ligne"):
+                    self.__dict__["_dit_c17_par_ligne"] = True
+                    print("[moe] C17 (mma2 sur Marlin) refusé : pile à échelle globale par (expert, colonne) (209) — GEMV Marlin gardée", flush=True)
                 return None
             marlin_c17 = True                          # C17 : mma2 lit les tuiles Marlin
         ext = kernels.get_extension()
@@ -1971,6 +1992,11 @@ _MOE_TENSOR_FUSION = os.environ.get("ACVRAM_MOE_TENSOR_FUSION", "1") == "1"
 # tensor au 2⁻⁷ ; KL Coder b=12 ≤ témoin + 0,025 et b=1 identique au témoin, jouées dans la même prise
 # (revue/poste1-piece82ter-w13-decodage-23-09.md). Témoin : ACVRAM_MOE_W13=0.
 _MOE_W13 = os.environ.get("ACVRAM_MOE_W13", "1") == "1"
+# Pièce 209 : piles d'experts qu'un facteur Marlin commun écraserait (sous-normales e4m3 à côté de 448 — Coder-30B couches
+# 0, 1, 2, 4, 157) préparées avec un facteur PAR LIGNE d'expert et une échelle globale par (expert, colonne) : exactes,
+# servies par le tensor, le GEMV Marlin et le préfill Marlin. 0 = TÉMOIN NOMMÉ : la préparation d'avant, ces piles refusées
+# (naturel, decode_mma) comme depuis la 157.
+_MARLIN_PAR_LIGNE = os.environ.get("ACVRAM_MARLIN_PAR_LIGNE", "1") == "1"
 # Pièce 82 ter : phase de la passe en cours, posée par le modèle (model.forward : batch.is_prefill ; decode_fixed :
 # False). Un préfill court (T ≤ _MOE_GROUPED_MAX) passe par le même `_forward_grouped` qu un pas de décodage : sans
 # ce drapeau, il prendrait la GEMM w13 de largeur 2N et changerait la fin du préfill (KL b=1 de la 82 ter, invite 3 :
