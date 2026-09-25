@@ -58,3 +58,22 @@ La 181 mesure un préfill servi de 1,30 à 1,46 s par lot, contre « 0,907 s gro
 à L = 92, qui est faux (L réel = 78). Au moteur, avec l'invite réelle, le lot groupé en UN pas coûte **1,19 s**
 (`eng179`). L'admission en deux pas coûte donc **0,11 à 0,27 s par lot**, et non 0,4 à 0,5. C'est cohérent avec le
 gain de la fenêtre de 5 ms : +2,7 % ≈ 0,17 s par lot.
+
+## Addendum 179 b (25/09 06 h, AVANT la prise) — coût en SOLO de la fenêtre d'admission (demande de chef)
+Changement de code, avant la mesure : la fenêtre ne s'ouvre qu'en RAFALE, c'est-à-dire avec ≥ 2 requêtes déjà en file
+au réveil du fil (`server/app.py`, `_attendre_les_arrivees`). Dans la version mesurée au banc, une requête seule
+attendait la fenêtre entière (≥ 5 ms). Au banc, le premier pas prenait 2 ou 4 requêtes (181) : la rafale y est vue.
+Instrument : `scratchpad/poste5-p179b-25-09/prise.sh`, Qwen3.8 servi, A (0) / B (5 ms), A B B A A B B A A B ; TTFT
+solo (`ttft-service-p145`, une requête à la fois, L = 78 et 512) et débit b=1 (banc chat b=1).
+**Prédit** : TTFT solo B − A = 0 ± 1 ms aux deux L (la fenêtre ne s'ouvre pas) ; débit b=1 B/A = 1,000 ± 0,5 %.
+**Critère de chef** : TTFT solo ≤ +5 ms et débit b=1 inchangé → défaut. **FAUX** si TTFT solo > +1 ms (la fenêtre
+s'ouvrirait en solo). Le gain au banc b=8 de cette nouvelle version n'est PAS remesuré ici (limite).
+**Résultat 179 b (solo, 05:3x-05:53:47, 10 passes, 0 nulle)** : TTFT solo L = 78 : A 93,24 / B 93,31 ms (+0,07) ;
+L = 512 : 229,16 / 229,31 (+0,15) ; débit b=1 78,8 = 78,8 t/s. **Tenu** : critère de chef (≤ +5 ms, débit inchangé)
+et prédiction (0 ± 1 ms).
+**Avant la mesure suivante** : gain au banc b=8 de la version rafale (Qwen3.8, A 0 / B 5 ms, 10 passes,
+`prise-b8.sh`). Prédit : B/A +1,5 à +3 % (version d'origine : +2,5 %) ; FAUX si < +1 % (la rafale serait manquée au
+réveil).
+**Résultat banc b=8, version rafale (293d2a9f, → 06:12:22, 10 passes, 0 nulle)** : Qwen3.8 A 538,3 t/s (σ 2,6) contre
+B 549,2 (σ 1,2), **B/A +2,0 %**, J/jeton −2,0 %. Prédit +1,5 à +3 % : tenu. La version rafale garde ≈ 80 % du gain
+de la version d'origine (+2,5 %), sans aucun coût en solo.

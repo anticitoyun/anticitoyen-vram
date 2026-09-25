@@ -1,5 +1,14 @@
 # Journal des changements
 
+* **25/09/2026 — pièce 179** : (1) B' (172) couvre aussi la déquantification int8 du préfill (`int8_matmul` au-delà de
+  `ACVRAM_INT8_GEMV_MAX` = 80 lignes) : au bit (tests, bras cassant, logits de l'alias mixte) ; préfill 8 × 92 −51 %,
+  8 × 120 −49 % sur l'alias mixte ; sans effet sous 80 jetons par invite (GEMV). (2) **Fenêtre d'admission au défaut**
+  (`ACVRAM_ADMISSION_FENETRE_MS=5`, 0 = coupé) : moteur vide et au moins 2 requêtes en file, le serveur attend que la
+  file cesse de grossir (5 ms, 20 au plus) avant de préfiller, pour grouper une rafale au lieu de la couper en deux pas.
+  Banc chat b=8 : Qwen3.8 +2,0 % de débit, −2 % de J/jeton ; une requête seule n'attend pas (TTFT +0,07 ms à 78 jetons,
+  +0,15 à 512, débit b=1 inchangé). La composition des lots de préfill, qui dépendait déjà du moment d'arrivée, change ;
+  l'arithmétique d'un lot, non. Détail : revue/poste5-piece179-verdict-25-09.md.
+
 * **25/09/2026 — pièce 172** : au préfill de plusieurs séquences, la boucle par séquence des couches à récurrence
   linéaire (Gated DeltaNet de Qwen3.5/3.8) déquantifie chaque poids NVFP4 UNE fois au lieu d'une fois par séquence
   (`ACVRAM_DEPAQ_PARTAGE`, défaut 1 ; 0 = témoin). Sortie **identique au bit** : tests, bras cassants, logits de

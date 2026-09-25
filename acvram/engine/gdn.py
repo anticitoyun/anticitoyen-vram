@@ -42,6 +42,11 @@ _GDN_ETAT_EN_PLACE = os.environ.get("ACVRAM_GDN_ETAT_EN_PLACE", "1") == "1"
 # Pièce 156 F2 (défaut depuis le verdict 156 c, au bit ; 0 = témoin) : conv du décodage du lot en un noyau Triton, visé au
 # bit (`gdn_conv.py`) ; q/k sans répétition des têtes (fla les indexe).
 _GDN_CONV_FUSEE = os.environ.get("ACVRAM_GDN_CONV_FUSEE", "1") == "1"
+# Pièce 175 (opt-in) : les portes α et β (poids bf16 [nv, K] de l'alias mixte, `PlainTensor`) en UN appel par couche —
+# separe (défaut : deux F.linear, 31 µs chacun à b=8, 173) | concat (un F.linear sur β‖α [2nv, K] : au bit si cuBLAS garde le
+# même noyau, le test le dit) | triton (GEMM étroite fp32 déterministe, kernels/gemv_bf16_etroit.py : pas au bit, KL scellée).
+_GDN_AB = os.environ.get("ACVRAM_GDN_AB", "separe")
+AB_BILAN = {"fusionnees": 0, "raisons": {}}          # 175 : ce que le chargement a fait, pour la ligne de régime (preuve)
 # Pièce 156 F1 (DÉFAUT depuis 156 d ; 0 = témoin) : portes (softplus, exp, sigmoid) calculées dans le noyau fla de
 # la voie F4 — ± ulp fp32 (softplus de fla en ex2/lg2 approchés) : KL contre témoins tenue sur Qwen3.8 et Qwen3.5-35B.
 _GDN_PORTES_NOYAU = os.environ.get("ACVRAM_GDN_PORTES_NOYAU", "1") == "1"
@@ -73,7 +78,15 @@ def gdn_regime() -> str:
         return "torch(fla absent)"
     if not (torch.cuda.is_available() or os.environ.get("TRITON_INTERPRET") == "1"):
         return "torch(sans carte)"
-    return "fla"
+    return "fla" + _ab_texte()
+
+
+def _ab_texte() -> str:
+    """175 : ` ab=concat(48)` (couches fusionnées) ; ` ab=triton(0:scaler=…)` = demandé mais pas pris, raison nommée."""
+    if _GDN_AB == "separe":
+        return ""
+    raisons = ",".join(f"{k}×{v}" for k, v in sorted(AB_BILAN["raisons"].items()))
+    return f" ab={_GDN_AB}({AB_BILAN['fusionnees']}" + (f":{raisons}" if raisons else "") + ")"
 
 
 def _recurrence_en_place(q, k, v, g, beta, S: torch.Tensor, A_log=None, dt_bias=None) -> torch.Tensor:
@@ -146,6 +159,10 @@ class GatedDeltaNet(nn.Module):
         self.conv_dim = 2 * self.key_dim + self.value_dim
         self.kernel = conv_weight.shape[-1]
         self.eps = eps
+        # 175 : β‖α fusionnés (QuantLinear) ou None — attribut d'INSTANCE : un `ab = None` de classe masquait le sous-module
+        # (nn.Module range les modules dans `_modules`, lus par __getattr__ seulement si la recherche normale échoue) et le
+        # chemin fusionné n'était jamais pris (prises 1-2 de la 175 : aucun effet, compteur à 48 pourtant).
+        self.ab = None
 
     # -- quatre projections de même entrée en un lancement (palier 2) -----
     def fuse(self) -> bool:
@@ -153,6 +170,7 @@ class GatedDeltaNet(nn.Module):
         avec son scaler) à 2 ≤ b ≤ 32 sous ACVRAM_DENSE_NVFP4=triton."""
         from .model import _multi_projection
         self.multi = _multi_projection([self.qkv, self.gate, self.alpha, self.beta_proj])
+        self.ab = self._fusionner_ab()                                  # pièce 175 : β‖α en un appel (alias mixte)
         # Pièce 176 : qkv et gate INT8 lisent la même entrée — UNE pile (vues, aucune copie), servie au décodage
         # (M ≤ 16) en un appel au lieu de deux ; `_segments` garde à chaque segment sa partition K (au bit des deux
         # appels, gemm_etroit._etroit_segments_kernel). Préfill : les vues, appels séparés (cuBLAS choisit selon N).
@@ -164,6 +182,51 @@ class GatedDeltaNet(nn.Module):
                 pile.qweight._segments = (n_qkv, n_gate)
                 self.qkv_gate = pile
         return self.multi is not None or getattr(self, "qkv_gate", None) is not None
+
+    def _fusionner_ab(self):
+        """Pièce 175 : β‖α en un `QuantLinear` bf16 [2nv, K] quand les deux sont des `PlainTensor` sur la carte
+        (alias mixte) et que ACVRAM_GDN_AB ≠ separe. Les poids nvfp4 (défaut) ne sont pas concernés : None."""
+        from ..quant.formats import PlainTensor
+        from .layers import QuantLinear
+        if _GDN_AB not in ("concat", "triton", "auto"):
+            if _GDN_AB != "separe":
+                raise ValueError(f"ACVRAM_GDN_AB={_GDN_AB!r} : attendu separe | concat | triton")
+            return None
+        wb, wa = getattr(self.beta_proj, "qweight", None), getattr(self.alpha, "qweight", None)
+        identite = lambda lin: getattr(lin, "scaler", None) is None or getattr(lin.scaler, "is_identity", False)  # noqa: E731
+        raison = ("format" if not (isinstance(wb, PlainTensor) and isinstance(wa, PlainTensor)) else
+                  "hote" if not wb.weight.is_cuda else
+                  "dtype" if wb.weight.dtype != torch.bfloat16 or wa.weight.dtype != wb.weight.dtype else
+                  "biais" if self.beta_proj.bias is not None or self.alpha.bias is not None else
+                  "scaler" if not (identite(self.beta_proj) and identite(self.alpha)) else None)
+        if raison:
+            AB_BILAN["raisons"][raison] = AB_BILAN["raisons"].get(raison, 0) + 1
+            return None
+        AB_BILAN["fusionnees"] += 1
+        w = torch.cat([wb.weight, wa.weight]).contiguous()
+        return QuantLinear(PlainTensor(w, tuple(w.shape), wb.format), None, None, w.shape[0], w.shape[1])
+
+    def _ab(self, x: torch.Tensor, fp32: bool = False):
+        """(b, a) par le poids fusionné. `concat` : F.linear sur β‖α (cuBLAS choisit à N = 96 un noyau 128x2 : 3,9 µs à M = 8
+        mais HORS bit des deux appels, KL 3,4 × les témoins ; au bit à M = 1). `triton` : GEMM étroite fp32 (8,9 µs à M = 8,
+        AU BIT des deux appels cuBLAS wmma 128x1 à M = 8 sur 32 pas × 8 séquences ; plus lente que cuBLAS à M = 1).
+        `auto` (candidat au défaut, prises 3-4 de la 175) : M = 1 → concat, 2 ≤ M ≤ 8 → triton, au-delà → les deux appels."""
+        m = x.shape[0]
+        mode = _GDN_AB
+        if mode == "auto":
+            # prise 4 : triton == les deux appels au bit à M = 2, 4, 8 ; PLUS à M = 12 et 16 (cuBLAS change de noyau) → 8
+            mode = "concat" if m == 1 else "triton" if m <= 8 else "separe"
+        if mode == "separe":
+            b, a = self.beta_proj(x), self.alpha(x)
+            return (b.to(torch.float32), a.to(torch.float32)) if fp32 else (b, a)
+        if mode == "triton" and m <= 16:
+            from ..kernels.gemv_bf16_etroit import gemv_bf16_etroit
+            ba = gemv_bf16_etroit(x, self.ab.qweight.weight, fp32=fp32)   # 175 (poste1, 182) : le cast dans le noyau
+        else:
+            ba = self.ab(x)
+            if fp32:
+                ba = ba.to(torch.float32)                                   # UN cast sur β‖α au lieu de deux
+        return ba[:, : self.nv], ba[:, self.nv:]
 
     def _projections(self, x: torch.Tensor, qkv_brut: bool = False):
         """(qkv, z, b, a) en fp32 — un lancement si la multi-projection sert. Pièce 182 : z reste dans le dtype de la
@@ -182,6 +245,9 @@ class GatedDeltaNet(nn.Module):
             qkv, z = self.qkv(x), self.gate(x)
         if not _GDN_Z_BF16:
             z = z.to(torch.float32)
+        if self.ab is not None:                                        # pièce 175 : β‖α en un appel, casts absorbés
+            b, a = self._ab(x, fp32=True)
+            return ((qkv if qkv_brut else qkv.to(torch.float32)), z, b, a)
         return ((qkv if qkv_brut else qkv.to(torch.float32)), z,
                 self.beta_proj(x).to(torch.float32), self.alpha(x).to(torch.float32))
 

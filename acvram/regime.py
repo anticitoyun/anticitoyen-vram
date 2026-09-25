@@ -308,6 +308,10 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("GDN_ETAT_EN_PLACE", "1", ("acvram.engine.gdn", "_GDN_ETAT_EN_PLACE"), "0",
              "pièce 156 F4 (DÉFAUT depuis 156 c, au bit ; 0 = témoin) : 1 = au décodage du lot, la récurrence fla écrit son état final dans le "
              "tampon statique (h0 = ht) au lieu d'une allocation suivie d'une copie de 25 Mo par couche (b=8, Qwen3.8)"),
+    Variable("GDN_AB", "separe", ("acvram.engine.gdn", "_GDN_AB"), None,
+             "pièce 175 (poste6, 25/09, opt-in) : portes α et β bf16 des couches GDN (alias mixte) : separe (deux F.linear) | "
+             "concat (un F.linear sur β‖α) | triton (GEMM étroite fp32 déterministe, M ≤ 16) | auto (M = 1 concat, 2-8 triton, "
+             "au-delà les deux appels : AU BIT des deux appels à chaque M, test_gdn_ab_175) ; inerte sur des α/β nvfp4"),
     Variable("GDN_CONV_FUSEE", "1", ("acvram.engine.gdn", "_GDN_CONV_FUSEE"), "0",
              "pièce 156 F2 (DÉFAUT depuis 156 c, au bit ; 0 = témoin) : 1 = au décodage du lot, cast de qkv, état de conv, conv depthwise, "
              "silu et découpe q/k/v en un noyau Triton (gdn_conv.py), q/k sans répétition des têtes"),
@@ -329,9 +333,10 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("NORME_REGISTRES", "1", ("acvram.engine.layers", "_NORME_REGISTRES"), "0",
              "pièce 156 F6 (DÉFAUT depuis 156 d, au bit ; 0 = témoin) : 1 = RMSNorm hors préfill par rmsnorm_bf16_reg "
              "(ligne en registres, même découpe et même ordre de somme que rmsnorm_bf16) ; Qwen3.8 −0,30 ms/pas à b=8"),
-    Variable("ADMISSION_FENETRE_MS", "0", None, None,
-             "pièce 179 (opt-in) : fenêtre d'admission du serveur en ms — moteur vide, attendre que la file cesse de "
-             "grossir avant le pas, pour préfiller ensemble les requêtes arrivées à quelques ms d'écart"),
+    Variable("ADMISSION_FENETRE_MS", "5", None, None,
+             "pièce 179 (DÉFAUT 5 depuis 179 b ; 0 = coupé) : fenêtre d'admission du serveur en ms — moteur vide et ≥ 2 "
+             "requêtes en file, attendre que la file cesse de grossir avant le pas (préfill groupé d'une rafale) ; une "
+             "requête seule n'attend pas"),
     Variable("DEPAQ_PARTAGE", "1", ("acvram.kernels", "_DEPAQ_PARTAGE"), "0",
              "pièce 172 (DÉFAUT, au bit ; 0 = témoin) : au préfill de plusieurs séquences, la boucle par séquence d'une "
              "couche à récurrence linéaire déquantifie chaque poids NVFP4 UNE fois (GEMM toujours par séquence)"),
