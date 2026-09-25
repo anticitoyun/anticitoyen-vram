@@ -274,17 +274,21 @@ def test_195_le_canal_refuse_ce_qui_n_est_pas_par_canal():
     assert not ge.canal_eligible(t)
 
 
-def test_195_l_opt_in_est_ferme_au_defaut_et_le_regime_l_imprime(monkeypatch):
+def test_195_le_canal_est_le_defaut_et_0_le_temoin_nomme(monkeypatch):
+    """25/09, décision déléguée par l'utilisateur : le K entier par canal est SERVI PAR DÉFAUT ; ce test casse si le
+    défaut revient à 0 (code, table des variables, ligne de régime). 0 reste le témoin nommé, imprimé `+canal(temoin)`."""
     ge = _ge()
     monkeypatch.delenv("ACVRAM_ETROIT_CANAL", raising=False)
     monkeypatch.delenv("ACVRAM_ETROITES_FORME", raising=False)
     ge.regler_forme(None)
-    assert not ge.canal_actif() and ge.etroites_texte() == "serie"
-    from acvram import regime
-    assert any(v.nom == "ETROIT_CANAL" and v.defaut == "0" for v in regime.VARIABLES)
-    monkeypatch.setenv("ACVRAM_ETROIT_CANAL", "1")
+    assert ge.CANAL_DEFAUT == "1"
     assert ge.canal_actif() and ge.etroites_texte() == "serie+canal(table)"
-    assert ge.geometrie_canal(1, 2) is None                              # forme non mesurée : reste sur le servi
+    assert ge.geometrie_canal(5120, 6144) == ge.GEOMETRIE_CANAL[(5120, 6144)]
+    assert ge.geometrie_canal(1, 2) is None                              # forme non mesurée : reste sur le noyau d'avant
+    from acvram import regime
+    assert any(v.nom == "ETROIT_CANAL" and v.defaut == "1" for v in regime.VARIABLES)
+    monkeypatch.setenv("ACVRAM_ETROIT_CANAL", "0")
+    assert not ge.canal_actif() and ge.etroites_texte() == "serie+canal(temoin)"
     monkeypatch.setenv("ACVRAM_ETROIT_CANAL", "32,512,8,3")
     assert ge.geometrie_canal(5120, 6144) == (32, 512, 8, 3) and ge.etroites_texte() == "serie+canal(32x512x8x3)"
 
@@ -310,29 +314,26 @@ def test_195_le_zero_point_et_k_entier_sont_juges(m, n, k, geo):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="chemin servi : extension CUDA")
 def test_195_le_defaut_est_au_bit_du_chemin_servi_et_l_opt_in_prend(monkeypatch):
-    """(a) de chef (198) : sans ACVRAM_ETROIT_CANAL (ou à 0), `int8_matmul` rend EXACTEMENT la sortie du noyau servi
-    (vue g128, `gemm_etroit` compact) et ne compte aucun `etroit_canal` ; à 1, le chemin canal est pris (compteur) sur une
-    forme de la table et sa sortie reste dans ± 2⁻⁷ de la référence fp64 (hors bit : jamais comparée au bit au servi)."""
+    """(a) de chef (198), retourné au défaut 1 (25/09) : à 0 (témoin nommé), `int8_matmul` rend EXACTEMENT la sortie
+    du noyau d'avant (vue g128, `gemm_etroit` compact) et ne compte aucun `etroit_canal` ; sans variable (défaut) et à 1,
+    le chemin canal est pris (compteur) sur une forme de la table et sa sortie reste dans ± 2⁻⁷ de la référence fp64."""
     from acvram import kernels
     ge = _ge()
     if kernels.get_extension() is None:
         pytest.skip("extension CUDA absente")
     x, t = _montage_canal(8, 5120, 6144, graine=3)                # forme de GEOMETRIE_CANAL (o_proj / out GDN)
-    servi = ge.gemm_etroit(x, kernels.vue_g128(t), compact=kernels.glue_compact("etroit"))
-    for valeur in (None, "0"):
+    temoin = ge.gemm_etroit(x, kernels.vue_g128(t), compact=kernels.glue_compact("etroit"))
+    ref = x.double() @ ((t.qweight.double() - 128) * t.scales.double()).T
+    for valeur in (None, "1"):
         if valeur is None:
             monkeypatch.delenv("ACVRAM_ETROIT_CANAL", raising=False)
         else:
             monkeypatch.setenv("ACVRAM_ETROIT_CANAL", valeur)
         kernels.CHEMINS_INT8.clear()
-        y = kernels.int8_matmul(x, t)
-        assert torch.equal(y, servi), valeur
-        assert kernels.CHEMINS_INT8["etroit_canal"] == 0 and kernels.CHEMINS_INT8["etroit_triton"] == 1
-    monkeypatch.setenv("ACVRAM_ETROIT_CANAL", "1")
-    kernels.CHEMINS_INT8.clear()
-    y1 = kernels.int8_matmul(x, t)
-    assert kernels.CHEMINS_INT8["etroit_canal"] == 1 and kernels.CHEMINS_INT8["etroit_triton"] == 0
-    ref = x.double() @ ((t.qweight.double() - 128) * t.scales.double()).T
-    assert (y1.double() - ref).abs().max() <= 2 ** -7 * ref.abs().max()
+        y1 = kernels.int8_matmul(x, t)
+        assert kernels.CHEMINS_INT8["etroit_canal"] == 1 and kernels.CHEMINS_INT8["etroit_triton"] == 0, valeur
+        assert (y1.double() - ref).abs().max() <= 2 ** -7 * ref.abs().max()
     monkeypatch.setenv("ACVRAM_ETROIT_CANAL", "0")
-    assert torch.equal(kernels.int8_matmul(x, t), servi)          # l'opt-in se referme sans trace
+    kernels.CHEMINS_INT8.clear()
+    assert torch.equal(kernels.int8_matmul(x, t), temoin)         # le témoin nommé : au bit du noyau d'avant
+    assert kernels.CHEMINS_INT8["etroit_canal"] == 0 and kernels.CHEMINS_INT8["etroit_triton"] == 1

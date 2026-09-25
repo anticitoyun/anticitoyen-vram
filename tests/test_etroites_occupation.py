@@ -19,11 +19,11 @@ def _defaut(monkeypatch):
 
 
 def test_forme_par_defaut_et_variable(monkeypatch):
-    assert GE.forme_noyau() == (GE._WARPS, GE._STAGES) == (4, 3) and GE.etroites_texte() == "serie"
+    assert GE.forme_noyau() == (GE._WARPS, GE._STAGES) == (4, 3) and GE.etroites_texte() == "serie+canal(table)"
     monkeypatch.setenv("ACVRAM_ETROITES_FORME", "8,2")
-    assert GE.forme_noyau() == (8, 2) and GE.etroites_texte() == "w8s2"
+    assert GE.forme_noyau() == (8, 2) and GE.etroites_texte() == "w8s2+canal(table)"
     GE.regler_forme((2, 3))
-    assert GE.forme_noyau() == (2, 3) and GE.etroites_texte() == "w2s3"
+    assert GE.forme_noyau() == (2, 3) and GE.etroites_texte() == "w2s3+canal(table)"
     GE.regler_forme(None)
     assert GE.forme_noyau() == (8, 2)
 

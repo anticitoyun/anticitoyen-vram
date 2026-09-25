@@ -1,5 +1,20 @@
 # Journal des changements
 
+* **25/09/2026 — pièce 195 (poste6) : GEMM int8 étroit à K ENTIER PAR CANAL, AU DÉFAUT** (`ACVRAM_ETROIT_CANAL=1` ;
+  0 = témoin nommé, le noyau à tranches d'avant ; décision déléguée par l'utilisateur). Les linéaires int8 symétriques par
+  canal (tous les int8 du mixte-i8c, attention et GDN de `Qwen3.8-27B-nvfp4-attn-gdn-i8c`) à 2 ≤ b ≤ 16 sont servies par
+  `_etroit_canal_kernel` (`kernels/gemm_etroit.py`) : K entier par programme, sans tranche ni partiel ni atomique, géométrie
+  de NInfer, table par forme mesurée (o‖out 25,2 → 22,7 µs, GDN qkv‖gate 65,6 → 56,5, gate‖up 141 → 117, down 66 → 59,
+  qkv attention ≈ 0 ; 0,86 ms/pas au banc). **La sortie servie change** : somme fp32 sur K entier au lieu de 2-5 tranches
+  (mode « ± 1 ulp », REGLES § 1), jamais au bit du témoin. Servi, banc chat ABBA ×5, mixte b=8 : **397,7 → 413,6 t/s
+  (+4,01 %)**, J/jeton net 0,804 → 0,773 (**−3,76 %**), W égaux. Qualité en décodage b=8 (KL par position, 8 × 32) : deux
+  prises — la 1re donnait NON tenu sur le mixte (max 0,0049 > 2 × 0,00054), mais son témoin T1 ne couvrait qu'une séquence
+  (32 positions contre 256 pour B : défaut d'instrument) ; le rejeu scellé par chef, témoins à échantillon égal (8 séquences
+  seules à b=1), donne T1 max 0,0052 → seuil 0,0104, **KL A‖B max 0,0049 tenue**, argmax identique (0,984 = 0,984), PPL
+  9,728 / 9,732 / témoin 9,716 ; sur `attn-gdn-i8c` : 0,0038 ≤ 0,0202, argmax 0,992. Tests : référence ± 2⁻⁷ qui refuse un
+  zéro à ± 1 et K/2 (fautes injectées une fois, 198 poste2), témoin 0 au bit du noyau d'avant sur carte, défaut 1 verrouillé
+  par test. Formes hors table (α/β int8 48 × 5120) restent sur le noyau d'avant. `revue/poste6-piece195-verdict-25-09.md`.
+  Ligne de régime : ` etroites=serie+canal(table|temoin|BNxBKxWxS)`.
 * **25/09/2026 — pièce 194 b2 (poste1) : β‖α des couches GDN sur un second flux, AU DÉFAUT** (`ACVRAM_GDN_AB_FLUX=1` ;
   0 = témoin série). Les portes α‖β bf16 (3 programmes, 9-14 µs, jusqu'ici sur le chemin critique) tournent pendant la
   pile qkv‖gate int8 qui lit la même entrée ; jointure avant la récurrence. Au bit par construction, test qui casse quand

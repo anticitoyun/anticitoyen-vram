@@ -249,10 +249,10 @@ def regler_forme(forme: Optional[tuple]) -> None:
 
 
 def etroites_texte() -> str:
-    """Ligne de régime : `serie` au défaut (4 warps, 3 étages), sinon `w{W}s{S}` ; `+canal(...)` si l'opt-in 195 est posé."""
+    """Ligne de régime : `serie` (4 warps, 3 étages) ou `w{W}s{S}`, puis `+canal(table|temoin|BNxBKxWxS)` (195)."""
     w, e = forme_noyau()
     base = "serie" if (w, e) == (_WARPS, _STAGES) else f"w{w}s{e}"
-    return base + (f"+canal({canal_texte()})" if canal_actif() else "")
+    return base + f"+canal({canal_texte()})"
 
 
 def decouper_k(ng: int, tuiles_n: int, device) -> tuple[int, int]:
@@ -322,12 +322,13 @@ def gemm_etroit(x: torch.Tensor, t, sortie_fp32: bool = False, compact: bool = F
 
 
 # ---------------------------------------------------------------------------
-# Pièce 195 (opt-in, HORS BIT « ± 1 ulp », REGLES § 1) : poids int8 symétrique
+# Pièce 195 (AU DÉFAUT depuis le 25/09, décision déléguée par l'utilisateur ; HORS BIT « ± 1 ulp », REGLES § 1) : poids int8 symétrique
 # PAR CANAL (échelle [N, 1], zéro 128 — tous les int8 de l'alias mixte-i8c),
 # K ENTIER par programme, sans tranche ni partiel ni atomique : la géométrie
 # de NInfer (`fp8_gemv_kernel<Fp8Geometry<N, K>>`, 194 § c). La somme fp32 sur
-# K entier n'a pas l'ordre des 2-5 tranches du noyau servi : jamais au défaut.
-# `ACVRAM_ETROIT_CANAL=1` (table par forme) ou `=BN,BK,W,S` (géométrie imposée).
+# K entier n'a pas l'ordre des 2-5 tranches du noyau d'avant, qui reste le TÉMOIN NOMMÉ : `ACVRAM_ETROIT_CANAL=0`.
+# `=1` (défaut : table par forme) ou `=BN,BK,W,S` (géométrie imposée). Qualifié par `revue/poste6-piece195-verdict-25-09.md`
+# (banc 0,86 ms/pas, ABBA mixte b=8 +4,01 % / −3,76 % J, KL ≤ 2 × témoin à échantillon égal sur deux modèles, argmax égal).
 # ---------------------------------------------------------------------------
 if triton is not None:
 
@@ -370,19 +371,25 @@ GEOMETRIE_CANAL: dict = {
 }
 
 
+CANAL_DEFAUT = "1"          # 25/09 : au défaut ; 0 = témoin nommé (noyau à tranches, vue g128)
+
+
 def canal_actif() -> bool:
-    return os.environ.get("ACVRAM_ETROIT_CANAL", "0") not in ("", "0")
+    return os.environ.get("ACVRAM_ETROIT_CANAL", CANAL_DEFAUT) not in ("", "0")
 
 
 def canal_texte() -> str:
-    v = os.environ.get("ACVRAM_ETROIT_CANAL", "0")
+    """`table` (défaut), `temoin` (0 : noyau d'avant), ou la géométrie imposée `BNxBKxWxS`."""
+    v = os.environ.get("ACVRAM_ETROIT_CANAL", CANAL_DEFAUT)
+    if v in ("", "0"):
+        return "temoin"
     return "table" if v == "1" else v.replace(",", "x")
 
 
 def geometrie_canal(N: int, k_pad: int) -> Optional[tuple[int, int, int, int]]:
     """Géométrie imposée (`BN,BK,W,S`), sinon celle de la table pour cette forme, sinon None : une forme que le banc
     n'a pas mesurée (α/β int8 48 × 5120 de l'alias attn-gdn-i8c : 2 programmes à K entier) reste sur le noyau servi."""
-    v = os.environ.get("ACVRAM_ETROIT_CANAL", "0")
+    v = os.environ.get("ACVRAM_ETROIT_CANAL", CANAL_DEFAUT)
     if "," in v:
         bn, bk, w, e = (int(t) for t in v.split(","))
         return bn, bk, w, e
