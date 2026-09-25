@@ -315,6 +315,9 @@ VARIABLES: tuple[Variable, ...] = (
              "pièce 175 (poste6, 25/09 ; DÉFAUT auto depuis 175 b) : portes α et β bf16 des couches GDN (alias mixte) : separe (témoin, deux F.linear) | "
              "concat (un F.linear sur β‖α) | triton (GEMM étroite fp32 déterministe, M ≤ 16) | auto (M = 1 concat, 2-8 triton, "
              "au-delà les deux appels : AU BIT des deux appels à chaque M, test_gdn_ab_175) ; inerte sur des α/β nvfp4"),
+    Variable("GDN_AB_FLUX", "1", ("acvram.engine.gdn", "_GDN_AB_FLUX"), "0",
+             "pièce 194 b2 (poste1, 25/09 ; DÉFAUT depuis le verdict 194 b2, au bit ; mixte b=8 +2,2 %) : 1 = β‖α (GDN_AB) sur un second flux pendant "
+             "qkv‖gate, jointure avant la récurrence (M ≤ 16) ; ligne de régime « abflux » ; 0 = série (témoin)"),
     Variable("GDN_CONV_FUSEE", "1", ("acvram.engine.gdn", "_GDN_CONV_FUSEE"), "0",
              "pièce 156 F2 (DÉFAUT depuis 156 c, au bit ; 0 = témoin) : 1 = au décodage du lot, cast de qkv, état de conv, conv depthwise, "
              "silu et découpe q/k/v en un noyau Triton (gdn_conv.py), q/k sans répétition des têtes"),
