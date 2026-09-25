@@ -81,3 +81,19 @@ sha256 : kl-Qwen3.8-27B-unsloth-mixte-i8c-logits.pt d7c59562051848a0… · kl-Qw
   deux bras faux (zéro 127, K/2) soient REFUSÉS par le même juge. Fautes injectées à sec une fois puis annulées (arbre
   restauré, `git status` propre) : zéro 127 → 2 échecs (les deux formes) ; `range(0, K // 2, BK)` → 4 échecs, dont
   2 × 100 × 200 ; noyau restauré → 7/7 verts.
+
+## 7. Prise kl2 (ordre chef 13 h 4x : témoins à échantillon égal) — TENU
+* scellé `scelle-kl2.md` (3bb46bad6, poussé avant) ; instrument `kl-decode-195-kl2.py` ; prise poste6-p195-kl2, tenue 21 s
+  (poids en cache de pages), mixte-i8c, mêmes invites, même code ; A et B identiques à la prise précédente (rejeu 0, B déterministe).
+* T1 = 8 séquences décodées seules à b=1 sous A (chemins : gemv 38 656 = 8 × 4 832), T2 = KL(A‖A₂) = 0.
+
+| | max | moy | p99 | max par séquence |
+|---|---|---|---|---|
+| KL(A‖B) | 0,0049 | 0,00024 | 0,0015 | 0,0004 · 0,0012 · 0,0009 · 0,0049 · 0,0015 · 0,0021 · 0,0012 · 0,0014 |
+| KL(A‖T1) | **0,0052** | 0,00038 | 0,0036 | 0,0005 · 0,0019 · 0,0009 · 0,0052 · 0,0035 · 0,0048 · 0,0016 · 0,0015 |
+Seuil 2 × max(T1, T2) = **0,0104** ; KL AB max 0,0049 ≤ 0,0104 : **TENU** (prédit T1 max 0,001-0,006, pari « tenu à 55-65 % » :
+tenu). Argmax AB 0,984 = argmax T1 0,984 (tenu) ; PPL A 9,728 · B 9,732 · T1 9,716 ; fenêtres de 16 pas : B dans l'écart A/T1.
+Lecture : T1 suit AB séquence par séquence (0,0052 / 0,0049 sur la 3e, 0,0005 / 0,0004 sur la 0e) — les deux sont un changement
+d'ordre des sommes fp32 dans les mêmes 145 appels par pas, que le service accepte déjà entre b=1 et b=8 ; le « NON tenu » du § 3
+était un défaut d'échantillon du témoin (32 positions contre 256), pas un résultat. Logits hors git : kl2-…-logits.pt aeac38e3995442d9….
+**Décision du défaut : à chef** (critère scellé tenu dans les deux sens, ABBA +4,01 % / −3,76 % J, tests 198 en place).
