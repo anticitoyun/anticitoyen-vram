@@ -27,9 +27,10 @@ def test_le_regime_porte_le_plafond():
 
 
 def test_couverture_experts_par_couche():
-    """`experts_layout` du régime dit la couverture Marlin PAR COUCHE (GLM :
-    33 Marlin / 13 refusées) — « marlin » seul quand toutes le sont, « naturel »
-    quand aucune, « marlin(N/M) » sinon."""
+    """`experts_layout` du régime dit la couverture PAR COUCHE (GLM : 33 Marlin / 13 refusées) —
+    la seule disposition quand toutes la partagent, sinon le COMPTE par disposition, le plus
+    fréquent en tête (pièce 227, chef : avant, un mélange sans aucune couche littéralement
+    « marlin » — p. ex. marlin-w13 + naturel — retombait à tort sur le seul mot « naturel »)."""
     import torch
     from acvram.engine.runner import _couverture_experts
     from acvram.engine.model import MoEBlock
@@ -46,8 +47,31 @@ def test_couverture_experts_par_couche():
                 self.blocs.append(b)
     assert _couverture_experts(Faux(["marlin", "marlin"])) == "marlin"
     assert _couverture_experts(Faux([None, None])) == "naturel"
-    assert _couverture_experts(Faux(["marlin"] * 33 + [None] * 13)) == "marlin(33/46)"
+    assert _couverture_experts(Faux(["marlin"] * 33 + [None] * 13)) == "marlin×33+naturel×13"
     assert _couverture_experts(Faux([])) == "aucun"
+
+
+def test_couverture_experts_marlin_w13_melange_a_du_naturel_227():
+    """Le cas RÉEL trouvé par la 217/226 : 44 couches en `marlin-w13`, 4 en naturel, 0 littéralement
+    `marlin` — avant la 227, `n_marlin` (compte des seules couches == "marlin") valait 0 et le
+    mélange retombait sur « naturel » seul, en MENTANT sur les 44 couches marlin-w13 réelles."""
+    import torch
+    from acvram.engine.runner import _couverture_experts
+    from acvram.engine.model import MoEBlock
+
+    class Faux(torch.nn.Module):
+        def __init__(self, dispositions):
+            super().__init__()
+            self.blocs = torch.nn.ModuleList()
+            for d in dispositions:
+                b = MoEBlock.__new__(MoEBlock)
+                torch.nn.Module.__init__(b)
+                if d is not None:
+                    b.__dict__["experts_layout"] = d
+                self.blocs.append(b)
+    assert _couverture_experts(Faux(["marlin-w13"] * 44 + [None] * 4)) == "marlin-w13×44+naturel×4"
+    # cassant : le code d'avant la 227 (n_marlin compte "marlin" au sens strict) rendrait "naturel"
+    # ici — preuve que ce test aurait détecté la régression que la 217 a mesurée sans le savoir.
 
 
 def test_tout_repli_eager_est_compte():

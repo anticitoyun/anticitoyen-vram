@@ -49,3 +49,29 @@ départager si c'est la 209 seule, la 195b seule, ou une interaction, qui régre
 * **durée** : scellé 22:0x, cellules 21:14→22:42 (~90 min avec les files d'attente derrière la
   publication GitHub de chef et la mesure p213 de poste5), audit 219 et son tri en parallèle
   pendant les files d'attente.
+
+## Addendum du 26/09 01h0x (poste3, ordre chef, sur constat poste6 226) — la cellule Coder b=8 est gardée telle quelle, sa lecture est corrigée
+
+La cellule Coder-30B-A3B-nvfp4 b=8 ci-dessus (**−8,91 % débit, +20,65 % J**) N'EST PAS RETOUCHÉE —
+la mesure elle-même n'a rien de faux, seule l'interprétation « la 209 régresse cet alias » l'était.
+La 226 (poste6, `revue/poste6-piece226-verdict-26-09.md`) a montré la cause : le banc de la 217
+(`scratchpad/banc-llamacpp-16-09.py`, fonction `invite()`) génère ses invites en JETONS TIRÉS,
+sans texte réel — en génération libre sur un modèle MoE, cela produit des sorties dégénérées
+(répétition d'un seul caractère) qui DIVERGENT entre les bras A et B, donc le ROUTAGE des experts
+diffère entre les deux : les deux bras ne mesurent plus le même chemin de calcul, indépendamment de
+la 209. À invites RÉELLES (banc chat), le même alias donne **+12,80 % de débit et −18,4 % de
+J/jeton** avec la 209 — un gain, pas une régression. Les deux suppositions fausses nommées plus
+haut (alias qkvo-i8c ≠ nvfp4 pur, 195b active sur Coder) restaient vraies mais ne portaient pas la
+bonne conclusion : l'ampleur mesurée ici n'était pas un effet du volume de piles basculées, c'était
+l'artefact du banc.
+
+Corrigé en pièce 227 (poste3, branche `poste3-227`) : `scratchpad/banc-llamacpp-16-09.py` force
+désormais des invites réelles (texte fixe du banc chat de la 102) pour tout modèle MoE en
+génération libre, avec test (`tests/test_banc_moe_invite_227.py`) ; et `experts_layout`
+(`acvram/engine/runner.py:_couverture_experts`) compte désormais par disposition
+(`marlin-w13×44+naturel×4`) au lieu de retomber sur le seul mot « naturel » quand aucune couche
+n'est littéralement `"marlin"` — c'est ce second défaut qui avait fait lire B « naturel » dans mes
+journaux du 25/09 alors que 44 couches sur 48 étaient déjà en `marlin-w13`.
+
+**Aucune cellule de la 217 n'est rejouée ici** — la 217 reste la preuve que le banc mentait sur ce
+cas précis, la 226 reste la mesure corrigée qui sert de référence pour la 209.
