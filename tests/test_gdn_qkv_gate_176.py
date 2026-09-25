@@ -25,10 +25,19 @@ def _pret():
 
 
 @carte
+@pytest.mark.parametrize("regime", ["defaut", "0"])         # 195 b : canal K entier au défaut ; 0 = témoin (tranches)
 @pytest.mark.parametrize("par_canal", [True, False])
 @pytest.mark.parametrize("M", [1, 2, 5, 8, 16])
-def test_pile_a_segments_au_bit_des_deux_appels(M, par_canal):
+def test_pile_a_segments_au_bit_des_deux_appels(M, par_canal, regime, monkeypatch):
+    """Au défaut (195 b, `ACVRAM_ETROIT_CANAL=1`), la pile et ses deux segments passent tous trois par le noyau K entier
+    avec la géométrie DE LA PILE (`GEOMETRIE_CANAL[(10240, 5120)]` = `[(6144, 5120)]` = `[(16384, 5120)]`) : à K entier,
+    une colonne ne dépend que de sa partition K, pas de sa tuile N — au bit par construction. À 0 (témoin nommé), le
+    noyau à tranches garde la partition de chaque segment (`_etroit_segments_kernel`) : au bit aussi."""
     _pret()
+    if regime == "0":
+        monkeypatch.setenv("ACVRAM_ETROIT_CANAL", "0")
+    else:
+        monkeypatch.delenv("ACVRAM_ETROIT_CANAL", raising=False)
     from acvram.engine.layers import stack_int8_linears
     qkv, gate = _lin(10240, 5120, 1, par_canal), _lin(6144, 5120, 2, par_canal)       # formes GDN de Qwen3.8
     x = torch.randn(M, 5120, device="cuda", dtype=torch.bfloat16)
@@ -40,16 +49,37 @@ def test_pile_a_segments_au_bit_des_deux_appels(M, par_canal):
 
 
 @carte
-def test_temoin_partition_commune_differe():
-    """Sans `_segments`, la pile prend la partition commune (2 tranches) : elle DOIT différer à b=8 — sinon l'équivalence
-    ci-dessus ne prouverait rien."""
+def test_temoin_partition_commune_differe(monkeypatch):
+    """Témoin du régime à tranches (`ACVRAM_ETROIT_CANAL=0`) : sans `_segments`, la pile prend la partition commune
+    (2 tranches) et DOIT différer à b=8 — sinon l'équivalence ci-dessus ne prouverait rien. Au défaut (canal, K entier) il
+    n'y a plus de partition : le témoin de ce régime est `test_temoin_canal_geometrie_differente`."""
     _pret()
+    monkeypatch.setenv("ACVRAM_ETROIT_CANAL", "0")
     from acvram.engine.layers import stack_int8_linears
     qkv, gate = _lin(10240, 5120, 1), _lin(6144, 5120, 2)
     x = torch.randn(8, 5120, device="cuda", dtype=torch.bfloat16)
     ref = torch.cat([qkv(x), gate(x)], dim=-1)
     pile = stack_int8_linears([qkv, gate])
     assert not torch.equal(pile(x), ref), "la partition commune rend le même résultat : le test d'équivalence est aveugle"
+
+
+@carte
+def test_temoin_canal_differe_du_temoin_tranches(monkeypatch):
+    """Témoin du régime au défaut (195 b) : la pile en canal (K entier) DOIT différer des deux segments calculés par le
+    noyau à tranches (`ACVRAM_ETROIT_CANAL=0`) — sinon l'équivalence au défaut ne distinguerait pas les noyaux. (Constat
+    du 25/09 : une autre tuile K, `64,128,8,2`, rend la pile AU BIT — `acc += tl.dot` garde une chaîne MMA continue sur K,
+    l'ordre des sommes ne dépend pas de BK ; ce n'est donc pas un témoin.)"""
+    _pret()
+    from acvram.engine.layers import stack_int8_linears
+    qkv, gate = _lin(10240, 5120, 1), _lin(6144, 5120, 2)
+    x = torch.randn(8, 5120, device="cuda", dtype=torch.bfloat16)
+    monkeypatch.setenv("ACVRAM_ETROIT_CANAL", "0")
+    tranches = torch.cat([qkv(x), gate(x)], dim=-1)
+    monkeypatch.delenv("ACVRAM_ETROIT_CANAL", raising=False)
+    pile = stack_int8_linears([qkv, gate])
+    pile.qweight._segments = (10240, 6144)
+    assert torch.equal(pile(x), torch.cat([qkv(x), gate(x)], dim=-1))
+    assert not torch.equal(pile(x), tranches), "le canal rend les bits du noyau à tranches : le témoin est aveugle"
 
 
 @carte
