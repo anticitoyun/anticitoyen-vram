@@ -11,6 +11,7 @@ sans compilateur, et la suite de tests peut vérifier les noyaux face à lui.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import glob
 import hashlib
@@ -570,6 +571,48 @@ def _narrow_rows(n_sortie: int) -> int:
     return _NARROW_ROWS if n_sortie <= 16384 else 128
 
 
+# Pièce 172 (B', DÉFAUT ; `ACVRAM_DEPAQ_PARTAGE=0` = témoin) : au préfill de plusieurs séquences, une couche à
+# récurrence linéaire boucle PAR SÉQUENCE (couches.py) et chaque linéaire NVFP4 re-déquantifiait (ou dépaquetait la
+# disposition Marlin) le même poids à chaque séquence — 1 008 appels de trop par passage sur Qwen3.8 à 8 séquences
+# (poste6, 164). Dans `depaquetage_partage()`, le poids bf16 est fabriqué une fois et réutilisé ; les GEMM restent
+# une par séquence, au M de chacune. AU BIT par construction : mêmes valeurs de W (la déquantification est
+# déterministe), mêmes appels cuBLAS. Grouper les GEMM (GDN_PREFILL_LOT=1) rendrait le gain entier mais change la
+# sortie : cuBLAS bf16 découpe sa réduction selon M (pièce 169). Coût : le W bf16 d'une couche reste vivant le temps de
+# la boucle (≈ 230 Mo sur Qwen3.8), au lieu d'être rendu après chaque appel.
+_DEPAQ_PARTAGE = os.environ.get("ACVRAM_DEPAQ_PARTAGE", "1") == "1"
+_W_PARTAGES: Optional[dict] = None
+
+
+@contextlib.contextmanager
+def depaquetage_partage():
+    """Portée d'un partage des poids déquantifiés (une boucle par séquence d'une couche) ; imbriqué : sans effet."""
+    global _W_PARTAGES
+    if not _DEPAQ_PARTAGE or _W_PARTAGES is not None:
+        yield
+        return
+    _W_PARTAGES = {}
+    try:
+        yield
+    finally:
+        _W_PARTAGES = None
+
+
+def _w_partage(cle, fabrique):
+    """Le poids bf16 de ``cle`` : fabriqué une fois dans une portée `depaquetage_partage`, sinon à chaque appel.
+    Les clés portent des objets PERSISTANTS (tenseur de poids, disposition Marlin) : jamais un temporaire, dont
+    l'adresse pourrait resservir à un autre poids dans la même portée."""
+    c = _W_PARTAGES
+    if c is None:
+        return fabrique()
+    w = c.get(cle)
+    if w is None:
+        CHEMINS_NVFP4["depaquetage_partage_fabrique"] += 1
+        w = c[cle] = fabrique()
+    else:
+        CHEMINS_NVFP4["depaquetage_partage_reutilise"] += 1
+    return w
+
+
 def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
                  gemv_threshold: int = 0) -> torch.Tensor:
     """``x @ W.T`` avec W stocké en NVFP4.
@@ -597,8 +640,9 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
             # 147 : les vues passent telles quelles au noyau CUDA (pas de ligne libre) ; les autres noyaux copient
             vue_ok = MP._depaqueter_cuda_disponible() and MP._DEPAQUETAGE in ("auto", "cuda")
             wv, sv = w[:, 2 * d:2 * (d + n_lig)], s_[:, d:d + n_lig]
-            W = MP.depaqueter_marlin(wv if vue_ok else wv.contiguous(), sv if vue_ok else sv.contiguous(), gv,
-                                     k_pad, n_lig)
+            W = _w_partage(("marlin_vue", id(pile), d, n_lig),
+                           lambda: MP.depaqueter_marlin(wv if vue_ok else wv.contiguous(),
+                                                        sv if vue_ok else sv.contiguous(), gv, k_pad, n_lig))
             if k_pad != t.shape[1]:
                 W = W[:, : t.shape[1]]
             dt = x.dtype if x.dtype != torch.float32 else torch.bfloat16
@@ -670,8 +714,9 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
         # mauvaise échelle dès que le prefill dépassait huit jetons, et le
         # modèle répondait « de de de de ». La déquantification, elle, sait
         # appliquer une échelle par ligne.
-        w = nvfp4_dequant(t, x.dtype if x.dtype != torch.float32 else torch.bfloat16,
-                          gscale_rows=gsr, rows_per_group=1)
+        w = _w_partage(("gsr", id(t), x.dtype),
+                       lambda: nvfp4_dequant(t, x.dtype if x.dtype != torch.float32 else torch.bfloat16,
+                                             gscale_rows=gsr, rows_per_group=1))
         return torch.nn.functional.linear(x, w.to(x.dtype))
 
     # Prefill. Par défaut ``bf16`` : déquantification exacte puis cuBLAS —
@@ -698,7 +743,8 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
             if gemm_groupe.disponible():
                 return gemm_groupe.nvfp4_linear(x, t)
 
-    w = nvfp4_dequant(t, x.dtype if x.dtype != torch.float32 else torch.bfloat16)
+    w = _w_partage(("naturel", id(t), x.dtype),
+                   lambda: nvfp4_dequant(t, x.dtype if x.dtype != torch.float32 else torch.bfloat16))
     return torch.nn.functional.linear(x, w.to(x.dtype))
 
 
@@ -1048,7 +1094,7 @@ def _marlin_seul(x: torch.Tensor, t):
         CHEMINS_NVFP4["marlin_depaquete_prefill"] += 1
         # comme le défaut (fin de nvfp4_matmul) : W [N, K] non rembourré, x d'origine, F.linear au dtype de x
         dt = x.dtype if x.dtype != torch.float32 else torch.bfloat16
-        W = MP.depaqueter_marlin(w, s_, g, k_pad, N)
+        W = _w_partage(("marlin", id(t), k_pad, N), lambda: MP.depaqueter_marlin(w, s_, g, k_pad, N))
         if k_pad != t.shape[1]:
             W = W[:, : t.shape[1]]
         y = torch.nn.functional.linear(x.reshape(-1, orig[-1]), W.to(dt).to(x.dtype))
