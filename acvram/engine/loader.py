@@ -926,6 +926,8 @@ def load_model(path: str, plan: Optional[Plan] = None,
     # trouver la place : il y parvenait, en laissant la trace
     # « memory allocation failed with OOM » à chaque paire, et en fragmentant.
     # Ici la fusion se fait pendant que le budget KV est encore libre.
+    from .gdn import ab_bilan_reinit
+    ab_bilan_reinit()                     # 175 b : bilan α‖β de CE chargement, pas le cumul du processus
     for layer in layers:
         experts = {id(e) for m in layer.modules() if isinstance(m, MoEBlock)
                    for e in m.experts}

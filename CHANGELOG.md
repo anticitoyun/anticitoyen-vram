@@ -1,5 +1,11 @@
 # Journal des changements
 
+* **25/09/2026 — pièce 175 b** : `ACVRAM_GDN_AB=auto` **au défaut** (était `separe`, opt-in) : les portes α et β bf16 des
+  couches GDN de l'alias mixte en un appel par couche — M = 1 concat, 2 ≤ M ≤ 8 GEMM étroite fp32 (`kernels/gemv_bf16_etroit.py`),
+  au-delà les deux appels ; AU BIT des deux F.linear à chaque M (`test_gdn_ab_175`, `torch.equal`), donc sans critère KL.
+  Décodage b=8 mixte −2,3 ms/pas (−12 %), b=1 −0,25 ms ; inerte sur des α/β nvfp4 (défaut). `separe` reste le témoin.
+  Détail : revue/poste6-piece175-verdict-25-09.md.
+
 * **25/09/2026 — pièce 187** : le GEMV int8 traite ses activations par tranches de **6** au lieu de 16
   (`ACVRAM_INT8_TRANCHE` pour N ≤ 16, `ACVRAM_INT8_TRANCHE_PREFILL` au-delà ; 16 = témoin d'avant). Sortie **identique au
   bit** : test sur les poids réels du mixte (N 2-80, bf16 et fp32) et bras cassant. À NV ≤ 6, le noyau tient en 128
