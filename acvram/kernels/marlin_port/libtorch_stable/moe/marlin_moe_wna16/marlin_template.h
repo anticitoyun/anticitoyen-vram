@@ -78,7 +78,8 @@ __global__ void Marlin(
     int* locks,             // extra global storage for barrier synchronization
     bool use_atomic_add,    // whether to use atomic add to reduce
     bool use_fp32_reduce,   // whether to use fp32 global reduce
-    int ldn                 // acvram : largeur stockée de B (= prob_n si contigu)
+    int ldn,                // acvram : largeur stockée de B (= prob_n si contigu)
+    int gs_par_colonne      // acvram (pièce 209) : 1 = échelle globale NVFP4 par (expert, colonne) [E, ldn]
 ) {}
 
 }  // namespace MARLIN_NAMESPACE_NAME
@@ -281,7 +282,8 @@ __global__ void Marlin(
     bool has_bias,
     bool use_atomic_add,  // whether to use atomic add to reduce
     bool use_fp32_reduce,  // whether to use fp32 global reduce
-    int ldn                // acvram (pièce 82 ter) : largeur stockée de B et de ses échelles
+    int ldn,               // acvram (pièce 82 ter) : largeur stockée de B et de ses échelles
+    int gs_par_colonne     // acvram (pièce 209) : 1 = échelle globale NVFP4 par (expert, colonne) [E, ldn]
 ) {
   // Each threadblock processes one "stripe" of the B matrix with (roughly) the
   // same size, which might involve multiple column "slices" (of width 16 *

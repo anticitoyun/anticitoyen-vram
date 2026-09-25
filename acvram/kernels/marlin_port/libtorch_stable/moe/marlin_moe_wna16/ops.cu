@@ -675,10 +675,7 @@ torch::stable::Tensor moe_wna16_marlin_gemm(
   STD_TORCH_CHECK(b_scales.stride(2) == 1 && b_scales.stride(1) == ldn &&
                       b_scales.stride(0) == b_scales.size(1) * b_scales.stride(1),
                   "b_scales : largeur stockée ", b_scales.stride(1), " != celle de b_q_weight ", ldn);
-  if (gs_par_colonne) {
-    STD_TORCH_CHECK(global_scale.size(1) >= size_n && global_scale.stride(1) == 1 && global_scale.stride(0) == ldn,
-                    "global_scale par colonne : [E, ≥ N] de stride ", ldn, " (largeur stockée)");
-  }
+
 
   torch::stable::Tensor a_scales;
   constexpr auto kFloat = torch::headeronly::ScalarType::Float;
@@ -793,7 +790,11 @@ torch::stable::Tensor moe_wna16_marlin_gemm(
                     "global_scale can only be used for nvfp4 format.");
     // acvram (pièce 209) : échelle globale par (expert, colonne) [E, ≥ N] — vue de colonnes admise (moitié d'up de
     // w13), stride(0) = largeur stockée ldn ; [E] = par expert, chemin d'avant au bit.
-    if (global_scale.dim() == 2) gs_par_colonne = 1;
+    if (global_scale.dim() == 2) {
+      gs_par_colonne = 1;
+      STD_TORCH_CHECK(global_scale.size(1) >= size_n && global_scale.stride(1) == 1 && global_scale.stride(0) == ldn,
+                      "global_scale par colonne : [E, ≥ N] de stride ", ldn, " (largeur stockée)");
+    }
   } else {
     global_scale = torch::stable::new_empty(a, {0}, kFloat);
     STD_TORCH_CHECK(

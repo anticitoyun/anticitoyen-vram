@@ -77,9 +77,10 @@ def _w13(marlin, par_colonne):
 def _forcer_colonne(marlin, n):
     """Même pile, g[e] recopié sur n colonnes : la sortie doit être au bit de la version scalaire."""
     out = {}
-    for nom, (w, s, g, k, m) in marlin.items():
+    for nom, pile in marlin.items():
         if nom == "w13":
             continue
+        w, s, g, k, m = pile
         out[nom] = (w, s, g.reshape(-1, 1).expand(-1, n if nom != "down_proj" else K).contiguous(), k, m)
     return out
 
@@ -106,8 +107,17 @@ def test_par_colonne_forcee_au_bit_du_scalaire(b, godet):
     x = (torch.randn(godet, K, generator=torch.Generator().manual_seed(b)) * 0.5).to(torch.bfloat16).to(dev)
     eid = _routage(b, godet, dev)
     if godet >= 8:
-        d1, d2 = _tensor(MP, ext, marlin, x, eid), _tensor(MP, ext, forcee, x, eid)
+        # tensor SANS w13 (gate et up séparées, chacune avec son g) : par colonne forcée = scalaire AU BIT (même flottant
+        # multiplié au même endroit de l'épilogue, branches m_block_size_8 (godet 8) et 16)
+        sans = {k: v for k, v in marlin.items() if k != "w13"}; sans_f = {k: v for k, v in forcee.items() if k != "w13"}
+        d1, d2 = _tensor(MP, ext, sans, x, eid), _tensor(MP, ext, sans_f, x, eid)
         assert torch.equal(d1, d2), f"chemin tensor godet {godet} : {int((d1 != d2).sum())} valeurs diffèrent"
+        # tensor w13 par colonne : up prend directement son g dans l'épilogue (un arrondi bf16 de moins que le w13
+        # scalaire, qui corrige up par gu/gg dans moe_act — 82 ter : « au 2⁻⁷, pas au bit ») : juge 2⁻⁷ par ligne
+        # contre le chemin séparé, comme test_moe_w13
+        d3 = _tensor(MP, ext, forcee, x, eid)
+        hors, dmax = _ecart(d3, d1, eid)
+        assert hors == 0, f"w13 par colonne contre séparé, godet {godet} : {hors} lignes hors 2⁻⁷ (Δ max {dmax:.3g})"
     y1, y2 = _gemv(ext, marlin, x, eid), _gemv(ext, forcee, x, eid)
     assert torch.equal(y1, y2), f"GEMV w13 + down : {int((y1 != y2).sum())} valeurs diffèrent"
     sans = {k: v for k, v in marlin.items() if k != "w13"}; sans_f = {k: v for k, v in forcee.items() if k != "w13"}
