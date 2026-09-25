@@ -56,6 +56,11 @@ lignes = message.split(b"\n")
 gardees = [l for l in lignes if not re.match(rb"^(Co-Authored-By|Claude-Session):", l, re.I)]
 return b"\n".join(gardees).rstrip(b"\n") + b"\n"
 '
+# Chemins retirés de TOUT l'historique (chef, 25/09) : les 9 fichiers de scratchpad de poste3 entrés par la fusion c392fe08
+# (poussée puis annulée par 0bc30c13), qui portaient des chemins /home/… — retirés plutôt que réécrits.
+CHEMINS_RETIRES=(--path scratchpad/poste3-effaceur-23-09 --path scratchpad/poste3-thf-23-09
+                 --path-glob 'scratchpad/poste3-piece116-*' --path-glob 'scratchpad/poste3-piece126-*')
+( cd "$M" && python3 "$FILTER_REPO" --force --invert-paths "${CHEMINS_RETIRES[@]}" --quiet )
 ( cd "$M" && python3 "$FILTER_REPO" --force --strip-blobs-bigger-than "$SEUIL" --replace-text "$REMPL" --message-callback "$CALLBACK" --quiet )
 MAIN_APRES=$(git -C "$M" rev-parse refs/heads/main)
 N_APRES=$(git -C "$M" rev-list --all --count); T_APRES=$(taille); P_APRES=$(compte)
@@ -84,7 +89,8 @@ git -C "$M" update-ref -d refs/purge/main-source; git -C "$M" reflog expire --ex
   echo; echo "## Blobs retirés ($N_GROS)"; printf '%s\n' "$GROS" | sed 's/^/* /'
   echo; echo "## Diff d'arbre main (source → réécrit) — attendu : seulement les blobs retirés et les fichiers dont un chemin a été remplacé"
   echo '```'; printf '%s\n' "$DIFF"; echo '```'
-  echo; echo "Remplacements : \`/home/$UTILISATEUR\` → \`~\`, \`/tmp/claude-<uid>/-home-…\` → \`/tmp/claude-session\` (tous les blobs, binaires compris)."
+  echo; echo "Chemins retirés de l'historique : scratchpad/poste3-effaceur-23-09, poste3-thf-23-09, poste3-piece116-*, poste3-piece126-* (fusion c392fe08, annulée par 0bc30c13)."
+  echo "Remplacements : \`/home/$UTILISATEUR\` → \`~\`, \`/tmp/claude-<uid>/-home-…\` → \`/tmp/claude-session\` (tous les blobs, binaires compris)."
 } > "$R"
 echo "rapport : $R"; sed -n '1,12p' "$R"
 
