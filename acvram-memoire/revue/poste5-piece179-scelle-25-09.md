@@ -32,3 +32,10 @@ la 165, qui n'est pas au bit. Je la chiffre donc en opt-in ; son passage au déf
   * mixte : B/A **+5 à +8 %** ; C/B **+1 à +2 %**, avec ≈ 1 pas de préfill par lot sous C (≈ 2 sous B) ;
   * Qwen3.8 : B/A +0,5 à +2 % (B' nvfp4, préfill ≈ 10 % du lot) ; C/B +0,5 à +2 %.
 * **FAUX** si : B' ≠ A au bit ; mixte B/A < +3 % ; C sans baisse des pas de préfill.
+
+**Ajout 25/09 04 h 1x (après la prise tests/diag et le banc mixte, avant l'enquête)** : diag mixte, logits au bit ;
+forward C1 (8 × 78) 0 % et 0 réutilisation (78 ≤ 80 : GEMV, rien à déquantifier) ; C2 −21,5 % (576 réutilisations).
+Prédiction −35 à −45 % FAUSSE. Banc mixte (15 passes, 0 nulle) : A 326,4 t/s, B 323,7 (**B/A −0,8 %, FAUX** : prédit
++5 à +8), C 332,5 (**C/B +2,7 %**, au-dessus de la prédiction +1 à +2) ; pas de préfill par passe : A 8-10, B 9-10,
+C 5. Enquête (`iso179.py`, 8 × L, L = 92, 78, 120, compteurs de chemins int8 et nvfp4) : quel chemin prennent les
+int8 du mixte à L = 92, et pourquoi B' n'y gagne rien.
