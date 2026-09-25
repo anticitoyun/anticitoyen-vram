@@ -2,10 +2,16 @@
 
 ## 0.7.0 (26/09/2026)
 
-Chaîne du 24 au 26/09 : parité de débit décodage rejointe puis dépassée contre NInfer/vLLM sur
-Qwen3.8-27B-unsloth-mixte-i8c b=8 (172/175b/176/179/182/187, bilan pièce 190 : 323,4 → 394,8 t/s,
-**+22,08 %**, `revue/poste2-piece190-cellule-mixte-b8-25-09.md`), avant les gains propres à cette
-version :
+Chaîne du 24 au 26/09, deux faits distincts, chacun avec sa pièce :
+* **parité du pas de décodage contre NInfer** (202, poste1) : Qwen3.8-27B-unsloth-mixte-i8c b=8, pas
+  hôte 16,09 ms contre 15,98 chez NInfer (**+0,7 %, parité**). Le banc chat servi reste derrière,
+  422,6 t/s contre ≈ 463 chez NInfer (**−8,7 %**) : l'écart est dans le service (banc − pas, 2,84 ms
+  contre 1,29 au bit), pas dans les noyaux — décomposition en cours (204/221).
+* **gain interne de la nuit du 24-25/09** (190, bilan poste2, main contre main, sans comparaison à un
+  autre moteur) : même alias, même b, débit 323,4 → 394,8 t/s (**+22,08 %**), composé de
+  172/175b/176/179/182/187 (`revue/poste2-piece190-cellule-mixte-b8-25-09.md`).
+
+Gains propres à cette version, au-dessus de ces deux faits :
 * **175/187/194/195b** au défaut : portes GDN α/β en un appel (`ACVRAM_GDN_AB=auto`, 175/175b) ;
   GEMV int8 par tranches de 6 au lieu de 16 (187, +6,65 % b=8 mixte) ; β‖α GDN sur un second flux
   (194 b2, `ACVRAM_GDN_AB_FLUX=1`, +2,20 % b=8) ; GEMM int8 étroit à K entier par canal (195b,
