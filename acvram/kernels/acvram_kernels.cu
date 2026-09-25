@@ -1764,6 +1764,25 @@ std::vector<torch::Tensor> int8_gemv_norme(torch::Tensor qweight, torch::Tensor 
     return {x.dim() == 1 ? out.squeeze(0) : out, x.dim() == 1 ? xout.squeeze(0) : xout};
 }
 
+// Pièce 187 : la tranche du GEMV int8 se règle par plage, ACVRAM_INT8_TRANCHE pour N ≤ 16 (décodage, godets) et
+// ACVRAM_INT8_TRANCHE_PREFILL pour N > 16 (préfill ≤ INT8_GEMV_MAX), valeurs 4/6/8/10/12/16 ; DÉFAUT 6 depuis la 187
+// (16 = témoin d'avant, 12 = témoin du 14/09). Au bit par construction : chaque sortie (r, n) garde son accumulateur
+// et son ordre, quelle que soit la tranche (test_int8_tranche_187). ptxas : NV ≤ 6 = 128 registres, 2 blocs de 256 fils
+// par SM, contre 1 de NV 7 à 16 (NV 16 = 254) ; l'occupation l'emporte sur les relectures de W (5 → 13 à N = 78).
+// Mesuré (revue/poste5-piece187-verdict-25-09) : GEMV −22 à −44 % à N 16-78 ; servi mixte b=8 +6,65 %, b=16 +10,93 %.
+static int lire_tranche_int8(const char *e, int defaut) {
+    if (e == nullptr || *e == '\0') return defaut;
+    const int v = std::atoi(e);
+    return (v == 4 || v == 6 || v == 8 || v == 10 || v == 12 || v == 16) ? v : defaut;
+}
+
+// (tranche N ≤ 16, tranche N > 16), lues une fois par processus ; exposée pour le test du défaut.
+std::pair<int64_t, int64_t> int8_tranches() {
+    static const int dec = lire_tranche_int8(std::getenv("ACVRAM_INT8_TRANCHE"), 6);
+    static const int pre = lire_tranche_int8(std::getenv("ACVRAM_INT8_TRANCHE_PREFILL"), dec);
+    return {dec, pre};
+}
+
 torch::Tensor int8_gemv(torch::Tensor qweight, torch::Tensor scales,
                         torch::Tensor zeros, torch::Tensor x, int64_t group, bool sortie_fp32) {
     CHECK_CUDA(qweight); CHECK_CUDA(x);
@@ -1852,10 +1871,8 @@ torch::Tensor int8_gemv(torch::Tensor qweight, torch::Tensor scales,
     // tous les poids — 1,25 Go par pas de décodage b=12, 19 % des octets DRAM
     // du pas, vus sous ncu en rejeu (revue/instr-par-octet-14-09.md).
     // ACVRAM_INT8_TRANCHE=12 rend l'ancien découpage (témoin A/B).
-    static const int tranche = [] {
-        const char *e = std::getenv("ACVRAM_INT8_TRANCHE");
-        return (e && std::string(e) == "12") ? 12 : 16;
-    }();
+    const auto tr = int8_tranches();
+    const int tranche = N > 16 ? tr.second : tr.first;
     const int Ntot = N;
     for (int base = 0; base < Ntot; base += tranche) {
         const int N = min(tranche, Ntot - base);     // masque volontaire pour I8G_N
@@ -8461,6 +8478,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("int8_gemv_norme", &int8_gemv_norme, py::arg("qweight"), py::arg("scales"), py::arg("zeros"),
           py::arg("x"), py::arg("group"), py::arg("res"), py::arg("w"), py::arg("eps"), py::arg("mult") = 1.0,
           "INT8 : y = W . rmsnorm(res + mult*x) et xout = res + mult*x en un lancement (poste F, 3b)");
+    m.def("int8_tranches", &int8_tranches, "pièce 187 : (tranche N ≤ 16, tranche N > 16) du GEMV int8");
     m.def("int8_gemv", &int8_gemv, py::arg("qweight"), py::arg("scales"), py::arg("zeros"), py::arg("x"),
           py::arg("group"), py::arg("sortie_fp32") = false,
           "INT8 : dequantification + produit fusionnes ; sortie_fp32 : x bf16, accumulation et sortie fp32 (tete)");

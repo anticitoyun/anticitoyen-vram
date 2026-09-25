@@ -1343,7 +1343,8 @@ def int8_matmul(x: torch.Tensor, t: INT8Tensor,
 
     Le seuil de bascule vaut ``ACVRAM_INT8_GEMV_MAX`` (80 par défaut). Le noyau
     GEMV traite N activations par lecture de poids et relit W une fois par
-    tranche de 8 ; la déquantification, elle, lit W, écrit W en 16 bits et le
+    tranche (6 depuis la pièce 187, 16 avant ; `ACVRAM_INT8_TRANCHE`, le
+    croisement ci-dessous date de l'ancienne tranche) ; la déquantification, elle, lit W, écrit W en 16 bits et le
     relit — un coût fixe, indépendant du nombre de jetons. Mesuré sur un
     tenseur 5120x5120 par groupes de 128 : le GEMV gagne jusqu'à 64 jetons
     (0,409 ms contre 0,561), les deux se croisent vers 88, et la

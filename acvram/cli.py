@@ -182,6 +182,7 @@ VARIABLES_LUES = {
     "ACVRAM_PA_CHUNK",
     "ACVRAM_PA_GQA",            # kernels/acvram_kernels.cu : 182, attention paginée groupée GQA (défaut actif, au bit)
     "ACVRAM_INT8_TRANCHE",
+    "ACVRAM_INT8_TRANCHE_PREFILL",
     "ACVRAM_KDA_CHUNK",
     "ACVRAM_MAMBA_CHUNK",
     "ACVRAM_MLA_BATCH",
