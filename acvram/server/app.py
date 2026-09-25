@@ -105,9 +105,11 @@ class EngineService:
         """Pièce 179 (opt-in `ACVRAM_ADMISSION_FENETRE_MS`) : moteur sans séquence en cours et file non pleine — attendre
         que la file cesse de grossir pendant la fenêtre (plafond : 4 fenêtres) avant le pas, pour admettre ensemble des
         requêtes arrivées à quelques ms d'écart (banc chat : 7 puis 1, pièce 177) au lieu de les préfiller en deux pas.
-        Coût : jusqu'à une fenêtre de plus sur le premier jeton d'une requête seule."""
+        Ouverte seulement en RAFALE (≥ 2 requêtes déjà en file au réveil du fil) : une requête seule ne paie rien
+        (chef, 25/09 : le coût en solo décide du défaut). Une rafale dont une seule requête est arrivée au réveil
+        reste en deux pas, comme sans fenêtre."""
         eng = self.engine
-        if eng.running or not eng.waiting:
+        if eng.running or len(eng.waiting) < 2:
             return
         debut = derniere = time.perf_counter()
         n = len(eng.waiting)

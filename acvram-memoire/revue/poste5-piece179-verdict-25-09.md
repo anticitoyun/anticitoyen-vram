@@ -58,3 +58,13 @@ La 181 mesure un préfill servi de 1,30 à 1,46 s par lot, contre « 0,907 s gro
 à L = 92, qui est faux (L réel = 78). Au moteur, avec l'invite réelle, le lot groupé en UN pas coûte **1,19 s**
 (`eng179`). L'admission en deux pas coûte donc **0,11 à 0,27 s par lot**, et non 0,4 à 0,5. C'est cohérent avec le
 gain de la fenêtre de 5 ms : +2,7 % ≈ 0,17 s par lot.
+
+## Addendum 179 b (25/09 06 h, AVANT la prise) — coût en SOLO de la fenêtre d'admission (demande de chef)
+Changement de code, avant la mesure : la fenêtre ne s'ouvre qu'en RAFALE, c'est-à-dire avec ≥ 2 requêtes déjà en file
+au réveil du fil (`server/app.py`, `_attendre_les_arrivees`). Dans la version mesurée au banc, une requête seule
+attendait la fenêtre entière (≥ 5 ms). Au banc, le premier pas prenait 2 ou 4 requêtes (181) : la rafale y est vue.
+Instrument : `scratchpad/poste5-p179b-25-09/prise.sh`, Qwen3.8 servi, A (0) / B (5 ms), A B B A A B B A A B ; TTFT
+solo (`ttft-service-p145`, une requête à la fois, L = 78 et 512) et débit b=1 (banc chat b=1).
+**Prédit** : TTFT solo B − A = 0 ± 1 ms aux deux L (la fenêtre ne s'ouvre pas) ; débit b=1 B/A = 1,000 ± 0,5 %.
+**Critère de chef** : TTFT solo ≤ +5 ms et débit b=1 inchangé → défaut. **FAUX** si TTFT solo > +1 ms (la fenêtre
+s'ouvrirait en solo). Le gain au banc b=8 de cette nouvelle version n'est PAS remesuré ici (limite).
