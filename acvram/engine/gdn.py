@@ -175,7 +175,7 @@ class GatedDeltaNet(nn.Module):
         (alias mixte) et que ACVRAM_GDN_AB ≠ separe. Les poids nvfp4 (défaut) ne sont pas concernés : None."""
         from ..quant.formats import PlainTensor
         from .layers import QuantLinear
-        if _GDN_AB not in ("concat", "triton"):
+        if _GDN_AB not in ("concat", "triton", "auto"):
             if _GDN_AB != "separe":
                 raise ValueError(f"ACVRAM_GDN_AB={_GDN_AB!r} : attendu separe | concat | triton")
             return None
@@ -194,8 +194,17 @@ class GatedDeltaNet(nn.Module):
         return QuantLinear(PlainTensor(w, tuple(w.shape), wb.format), None, None, w.shape[0], w.shape[1])
 
     def _ab(self, x: torch.Tensor):
-        """(b, a) par le poids fusionné : F.linear (concat) ou la GEMM étroite Triton (triton, M ≤ 16)."""
-        if _GDN_AB == "triton" and x.shape[0] <= 16:
+        """(b, a) par le poids fusionné. `concat` : F.linear sur β‖α (cuBLAS choisit à N = 96 un noyau 128x2 : 3,9 µs à M = 8
+        mais HORS bit des deux appels, KL 3,4 × les témoins ; au bit à M = 1). `triton` : GEMM étroite fp32 (8,9 µs à M = 8,
+        AU BIT des deux appels cuBLAS wmma 128x1 à M = 8 sur 32 pas × 8 séquences ; plus lente que cuBLAS à M = 1).
+        `auto` (candidat au défaut, prise 3 de la 175) : M = 1 → concat, 2 ≤ M ≤ 16 → triton, au-delà → les deux appels."""
+        m = x.shape[0]
+        mode = _GDN_AB
+        if mode == "auto":
+            mode = "concat" if m == 1 else "triton" if m <= 16 else "separe"
+        if mode == "separe":
+            return self.beta_proj(x), self.alpha(x)
+        if mode == "triton" and m <= 16:
             from ..kernels.gemv_bf16_etroit import gemv_bf16_etroit
             ba = gemv_bf16_etroit(x, self.ab.qweight.weight)
         else:

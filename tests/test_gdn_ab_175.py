@@ -110,6 +110,18 @@ def test_triton_a_un_ulp_et_deterministe(monkeypatch, m):
 
 
 @carte
+@pytest.mark.parametrize("m", [1, 2, 4, 8, 12, 16, 24])
+def test_auto_au_bit_des_deux_appels(monkeypatch, m):
+    """Prise 3 : à b=8, triton == les deux F.linear AU BIT sur 32 pas (même ordre d'accumulation tensor-core que le wmma
+    128x1 de cuBLAS) ; à M = 1, concat == les deux appels au bit. `auto` doit rester au bit à chaque M ≤ 16 ; au-delà, les
+    deux appels eux-mêmes. Rouge si cuBLAS change de noyau ou si le mode auto dévie."""
+    c, wa, wb = _couche(monkeypatch, "auto")
+    x = torch.randn(m, K, device="cuda", dtype=torch.bfloat16)
+    b, a = c._ab(x)
+    assert torch.equal(b, torch.nn.functional.linear(x, wb)) and torch.equal(a, torch.nn.functional.linear(x, wa)), m
+
+
+@carte
 def test_bras_cassant_un_poids_corrompu_change_la_sortie(monkeypatch):
     c, wa, wb = _couche(monkeypatch, "concat")
     x = torch.randn(8, K, device="cuda", dtype=torch.bfloat16)
