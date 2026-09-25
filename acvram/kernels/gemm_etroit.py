@@ -249,9 +249,10 @@ def regler_forme(forme: Optional[tuple]) -> None:
 
 
 def etroites_texte() -> str:
-    """Ligne de régime : `serie` au défaut (4 warps, 3 étages), sinon `w{W}s{S}`."""
+    """Ligne de régime : `serie` au défaut (4 warps, 3 étages), sinon `w{W}s{S}` ; `+canal(...)` si l'opt-in 195 est posé."""
     w, e = forme_noyau()
-    return "serie" if (w, e) == (_WARPS, _STAGES) else f"w{w}s{e}"
+    base = "serie" if (w, e) == (_WARPS, _STAGES) else f"w{w}s{e}"
+    return base + (f"+canal({canal_texte()})" if canal_actif() else "")
 
 
 def decouper_k(ng: int, tuiles_n: int, device) -> tuple[int, int]:
@@ -318,3 +319,97 @@ def gemm_etroit(x: torch.Tensor, t, sortie_fp32: bool = False, compact: bool = F
         BM_=BM, BN_=BN, G=G, num_warps=forme_noyau()[0], num_stages=forme_noyau()[1])
     out = y.sum(0) if tranches > 1 else y[0]
     return out if sortie_fp32 else out.to(x.dtype)
+
+
+# ---------------------------------------------------------------------------
+# Pièce 195 (opt-in, HORS BIT « ± 1 ulp », REGLES § 1) : poids int8 symétrique
+# PAR CANAL (échelle [N, 1], zéro 128 — tous les int8 de l'alias mixte-i8c),
+# K ENTIER par programme, sans tranche ni partiel ni atomique : la géométrie
+# de NInfer (`fp8_gemv_kernel<Fp8Geometry<N, K>>`, 194 § c). La somme fp32 sur
+# K entier n'a pas l'ordre des 2-5 tranches du noyau servi : jamais au défaut.
+# `ACVRAM_ETROIT_CANAL=1` (table par forme) ou `=BN,BK,W,S` (géométrie imposée).
+# ---------------------------------------------------------------------------
+if triton is not None:
+
+    @triton.jit
+    def _etroit_canal_kernel(x_ptr, q_ptr, s_ptr, out_ptr, M, N, K, stride_xm, stride_qn, stride_om,
+                             BM_: tl.constexpr, BN_: tl.constexpr, BK: tl.constexpr):
+        """y[m, n] = s[n] · Σ_k x[m, k] · (q[n, k] − 128) ; (q − 128) ∈ [−128, 127] est exact en
+        bf16, donc aucun terme Σx·z à retrancher (pas de perte par annulation sur K entier)."""
+        pn = tl.program_id(0)
+        rows = tl.arange(0, BM_)
+        cols = pn * BN_ + tl.arange(0, BN_)
+        masque_m = rows < M
+        masque_n = cols < N
+        acc = tl.zeros((BM_, BN_), dtype=tl.float32)
+        for k0 in range(0, K, BK):
+            ks = k0 + tl.arange(0, BK)
+            masque_k = ks < K
+            x = tl.load(x_ptr + rows[:, None] * stride_xm + ks[None, :],
+                        mask=masque_m[:, None] & masque_k[None, :], other=0.0)
+            q = tl.load(q_ptr + cols[:, None] * stride_qn + ks[None, :],
+                        mask=masque_n[:, None] & masque_k[None, :], other=128)
+            acc += tl.dot(x, tl.trans(q.to(x.dtype) - 128.0))
+        s = tl.load(s_ptr + cols, mask=masque_n, other=0.0).to(tl.float32)
+        tl.store(out_ptr + rows[:, None] * stride_om + cols[None, :],
+                 (acc * s[None, :]).to(out_ptr.dtype.element_ty),
+                 mask=masque_m[:, None] & masque_n[None, :])
+
+
+# (N, K) → (BN, BK, warps, étages), mesuré par `scratchpad/poste6-p195-25-09/banc-canal.py` (L2 froid, M = 8) ;
+# une forme absente reste sur le noyau servi. Mesuré le 25/09 (`banc-canal.log`, 54 géométries × 5 formes, servi = vue
+# g128 compact) : µs canal / servi — o‖out 22,70 / 25,23 · qkv attn 49,80 / 50,30 · GDN qkv‖gate 56,47 / 65,57 ·
+# down 58,92 / 66,27 · gate‖up 117,01 / 141,41 ; 0,86 ms/pas sur l'alias mixte-i8c à b = 8. BN 16 (NInfer littéral)
+# perd partout en Triton ; BN 64 × BK 512 × 4 étages déborde la mémoire partagée (2 échecs).
+GEOMETRIE_CANAL: dict = {
+    (5120, 6144): (32, 128, 4, 4),        # o_proj attention, out GDN (64 appels/pas)
+    (14336, 5120): (32, 256, 4, 3),       # q‖k‖v attention empilé (gain ≈ 0 : 49,80 contre 50,30)
+    (16384, 5120): (64, 256, 8, 2),       # qkv‖gate GDN empilé (176)
+    (5120, 17408): (64, 512, 8, 3),       # down int8 (couches MLP int8 du mixte)
+    (34816, 5120): (64, 256, 4, 2),       # gate‖up int8
+}
+
+
+def canal_actif() -> bool:
+    return os.environ.get("ACVRAM_ETROIT_CANAL", "0") not in ("", "0")
+
+
+def canal_texte() -> str:
+    v = os.environ.get("ACVRAM_ETROIT_CANAL", "0")
+    return "table" if v == "1" else v.replace(",", "x")
+
+
+def geometrie_canal(N: int, k_pad: int) -> Optional[tuple[int, int, int, int]]:
+    """Géométrie imposée (`BN,BK,W,S`), sinon celle de la table pour cette forme, sinon None : une forme que le banc
+    n'a pas mesurée (α/β int8 48 × 5120 de l'alias attn-gdn-i8c : 2 programmes à K entier) reste sur le noyau servi."""
+    v = os.environ.get("ACVRAM_ETROIT_CANAL", "0")
+    if "," in v:
+        bn, bk, w, e = (int(t) for t in v.split(","))
+        return bn, bk, w, e
+    return GEOMETRIE_CANAL.get((N, k_pad))
+
+
+def canal_eligible(t) -> bool:
+    """INT8 symétrique par canal : échelle [N, 1], zéro 128 partout, groupe = K (vérifié une fois par tenseur)."""
+    c = t.__dict__.get("_canal")
+    if c is None:
+        N, k_pad = t.qweight.shape
+        c = bool(t.group_size == k_pad and tuple(t.scales.shape) == (N, 1) and tuple(t.zeros.shape) == (N, 1)
+                 and bool((t.zeros == 128).all()))
+        t.__dict__["_canal"] = c
+    return c
+
+
+def gemm_canal(x: torch.Tensor, t, geometrie: Optional[tuple] = None) -> torch.Tensor:
+    """``x`` [M ≤ 16, K] bf16 × poids int8 par canal → [M, N] bf16, K entier par programme (195, opt-in)."""
+    M, K = x.shape
+    N, k_pad = t.qweight.shape
+    assert M <= BM and K <= k_pad, (M, K, k_pad)
+    geo = geometrie or geometrie_canal(N, k_pad)
+    assert geo is not None, ("forme sans géométrie mesurée", N, k_pad)
+    bn, bk, w, e = geo
+    out = torch.empty(M, N, dtype=x.dtype, device=x.device)
+    _etroit_canal_kernel[(-(-N // bn),)](
+        x, t.qweight, t.scales, out, M, N, K, x.stride(0), t.qweight.stride(0), out.stride(0),
+        BM_=BM, BN_=bn, BK=bk, num_warps=w, num_stages=e)
+    return out
