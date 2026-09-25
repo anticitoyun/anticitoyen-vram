@@ -81,6 +81,7 @@ VARIABLES_LUES = {
     "ACVRAM_DEPAQ_PARTAGE",     # kernels : 172, poids déquantifié partagé par la boucle par séquence (défaut 1, au bit)
     "ACVRAM_GDN_PORTES_NOYAU",  # engine/gdn.py : 156 F1, portes dans le noyau fla (défaut 1, ± ulp)
     "ACVRAM_GDN_NORME_FUSEE",   # engine/gdn.py : 156 F3, norme gated Triton (défaut 1, ± ulp)
+    "ACVRAM_GDN_Z_BF16",        # engine/gdn.py : 182, z sans cast fp32 au décodage (défaut 1, au bit)
     "ACVRAM_GDN_QKV_GATE",      # engine/gdn.py : 176, qkv‖gate INT8 en une pile au décodage (défaut 1, au bit)
     "ACVRAM_NORME_REGISTRES",   # engine/layers.py : 156 F6, RMSNorm en registres (défaut 1, au bit)
     "ACVRAM_GDN_RES_DIFFERE",   # engine/model.py : 156 F5, résidu différé des couches GDN (défaut 1)
@@ -177,6 +178,7 @@ VARIABLES_LUES = {
     "ACVRAM_PAGED_ALLOC",
     "ACVRAM_PA_ETAPE",
     "ACVRAM_PA_CHUNK",
+    "ACVRAM_PA_GQA",            # kernels/acvram_kernels.cu : 182, attention paginée groupée GQA (défaut actif, au bit)
     "ACVRAM_INT8_TRANCHE",
     "ACVRAM_KDA_CHUNK",
     "ACVRAM_MAMBA_CHUNK",

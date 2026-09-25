@@ -165,6 +165,9 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("ORDRE_SAC_INVERSE", "", None, None, "1 = sac à dos inversé"),
     Variable("PAGED_ALLOC", "", None, None, "allocateur paginé"),
     Variable("PA_CHUNK", "", None, None, "bloc de l'attention paginée"),
+    Variable("PA_GQA", "1", None, "0",
+             "pièce 182 : attention paginée int8 groupée GQA (un bloc par tête kv, K/V lus une fois pour ses G têtes), "
+             "au bit du noyau d'origine ; lue par le lanceur CUDA à chaque appel ; 0 = noyau d'origine (témoin)"),
     Variable("PA_ETAPE", "", None, None, "étape de l'attention paginée"),
     Variable("PA_SANS_COMPTEUR", "", None, None, "attention paginée sans compteur"),
     Variable("INT8_GEMV_WARP", "", None, None, "warps du GEMV int8 (lu dans le .cu)"),
@@ -317,6 +320,9 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("GDN_NORME_FUSEE", "1", ("acvram.engine.gdn", "_GDN_NORME_FUSEE"), "0",
              "pièce 156 F3 (DÉFAUT depuis 156 d, ± ulp, même KL ; 0 = témoin) : 1 = norme gated de la sortie GDN en un noyau Triton (gdn_norme.py), "
              "sortie bf16 ; lot, b=1 et préfill"),
+    Variable("GDN_Z_BF16", "1", ("acvram.engine.gdn", "_GDN_Z_BF16"), "0",
+             "pièce 182 (au bit) : 1 = z de la norme GDN rendu bf16 par _projections, lu en place (vue de la pile) par "
+             "la norme F3 ; 0 = cast fp32 d'avant (témoin)"),
     Variable("GDN_QKV_GATE", "1", None, "0",
              "pièce 176 : 1 = GDN qkv‖gate INT8 en UNE pile au décodage (M ≤ 16), chaque segment gardant sa partition K "
              "(gemm_etroit._etroit_segments_kernel, au bit des deux appels) ; lue à la fusion ; 0 = deux appels (témoin)"),

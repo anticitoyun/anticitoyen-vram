@@ -48,6 +48,9 @@ _GDN_PORTES_NOYAU = os.environ.get("ACVRAM_GDN_PORTES_NOYAU", "1") == "1"
 # Pièce 156 F3 (DÉFAUT depuis 156 d ; 0 = témoin) : norme gated en un noyau Triton (gdn_norme.py) — ± ulp (ordre de
 # la somme des carrés) ; même KL.
 _GDN_NORME_FUSEE = os.environ.get("ACVRAM_GDN_NORME_FUSEE", "1") == "1"
+# Pièce 182 (1) : z (porte de la norme) rendu par `_projections` dans le dtype de la projection, sans cast fp32 — ses
+# consommateurs castent au chargement (exact) ; au décodage, 48 copies de moins par pas sur Qwen3.8. 0 = témoin (cast).
+_GDN_Z_BF16 = os.environ.get("ACVRAM_GDN_Z_BF16", "1") == "1"
 
 
 def _fla():
@@ -163,7 +166,8 @@ class GatedDeltaNet(nn.Module):
         return self.multi is not None or getattr(self, "qkv_gate", None) is not None
 
     def _projections(self, x: torch.Tensor, qkv_brut: bool = False):
-        """(qkv, z, b, a) en fp32 — un lancement si la multi-projection sert.
+        """(qkv, z, b, a) en fp32 — un lancement si la multi-projection sert. Pièce 182 : z reste dans le dtype de la
+        projection hors multi-projection (bf16), ses consommateurs le castent au chargement (exact).
         ``qkv_brut`` : qkv rendu tel que la projection le sort (F2 le lit)."""
         from .model import _multi_utilisable
         mp = getattr(self, "multi", None)
@@ -174,9 +178,10 @@ class GatedDeltaNet(nn.Module):
         pile = getattr(self, "qkv_gate", None)
         if pile is not None and x.shape[0] <= 16:                            # pièce 176 : un appel au décodage
             qkv, z = torch.split(pile(x), pile.qweight._segments, dim=-1)
-            z = z.to(torch.float32)
         else:
-            qkv, z = self.qkv(x), self.gate(x).to(torch.float32)
+            qkv, z = self.qkv(x), self.gate(x)
+        if not _GDN_Z_BF16:
+            z = z.to(torch.float32)
         return ((qkv if qkv_brut else qkv.to(torch.float32)), z,
                 self.beta_proj(x).to(torch.float32), self.alpha(x).to(torch.float32))
 
@@ -191,7 +196,7 @@ class GatedDeltaNet(nn.Module):
         var = x32.pow(2).mean(-1, keepdim=True)
         x32 = x32 * torch.rsqrt(var + self.eps)
         x32 = x32 * self.norm_weight.to(torch.float32)
-        return (x32 * F.silu(z.to(torch.float32))).to(x.dtype)
+        return (x32 * F.silu(z.reshape(x.shape).to(torch.float32))).to(x.dtype)
 
     def forward(self, x: torch.Tensor,
                 state: Optional[tuple] = None
@@ -360,7 +365,7 @@ class GatedDeltaNet(nn.Module):
         q, k, v, g, beta, z = self._lot_projete(h, conv_state)
         core, S_new = _fla()[1](q, k, v, g=g, beta=beta, initial_state=S.contiguous(),
                                 output_final_state=True, use_qk_l2norm_in_kernel=True)
-        y = self._norm_gated(core.reshape(-1, self.dv), z.reshape(-1, self.dv), h.dtype).reshape(b, self.value_dim)
+        y = self._norm_gated(core.reshape(-1, self.dv), z.view(b, self.nv, self.dv), h.dtype).reshape(b, self.value_dim)
         y = self.out_proj(y.to(h.dtype))
         return y, [(conv_state[i].clone(), S_new[i:i + 1].to(torch.float32)) for i in range(b)]
 
@@ -389,5 +394,5 @@ class GatedDeltaNet(nn.Module):
         if not contigu:
             for i, st in enumerate(statics[:b]):
                 st["conv"].copy_(conv_state[i]); st["S"].copy_(S[i:i + 1])
-        y = self._norm_gated(core.reshape(-1, self.dv), z.reshape(-1, self.dv), h.dtype).reshape(b, self.value_dim)
+        y = self._norm_gated(core.reshape(-1, self.dv), z.view(b, self.nv, self.dv), h.dtype).reshape(b, self.value_dim)
         return self.out_proj(y.to(h.dtype))
