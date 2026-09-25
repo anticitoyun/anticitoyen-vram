@@ -19,10 +19,13 @@ Gains propres à cette version, au-dessus de ces deux faits :
 * **201** (poste5) : un modèle vision/MTP qui ne tenait pas n'est plus chargé en silence — capacité
   KV annoncée baisse pour en tenir compte (Qwen3.8 nvfp4 −7,4 %, gemma-4-31B-vision −21,4 %) ; copie
   int8 transitoire (i8c servi sans OOM), coût nul au banc. `revue/poste5-piece201-verdict-25-09.md`.
-* **209 en opt-in** (poste6, 220) : le facteur Marlin par ligne d'expert (209) gagnait sur l'alias
-  qkvo-i8c (+5,77 % b=8, 4 couches sur 48) mais régressait Qwen3-Coder-30B-A3B-nvfp4 PUR (−8,91 %
-  t/s, +20,65 % J, banc `revue/poste3-piece217-verdict-25-09.md`, 48 couches basculées au lieu de 4) :
-  `ACVRAM_MARLIN_PAR_LIGNE` revient à 0 par défaut, 1 = témoin de la 209.
+* **209 au défaut, confirmée par la 226** (poste6) : le facteur Marlin par ligne d'expert (209,
+  exact au bit, +5,77 % sur qkvo-i8c) reste servi par défaut (`ACVRAM_MARLIN_PAR_LIGNE=1`, 0 =
+  témoin). La 220 l'avait remis en opt-in sur une « régression » du Coder-30B-A3B-nvfp4 pur mesurée
+  par le banc de la 217 (−8,9 % t/s) ; la 226 a démontré l'artefact — ce banc génère librement
+  depuis des invites de jetons tirés, ses sorties dégénérées divergent entre bras et routent vers
+  d'autres experts — et, à invites réelles (banc chat), le même modèle gagne **+12,8 % de débit et
+  −18,4 % de J/jeton** à b=8 (`revue/poste6-piece226-verdict-26-09.md`).
 * **210/210b** (poste5) : `/v1/completions` — logprobs d'un jeton à texte vide gardés (suit
   `token_ids`, plus `text_delta`) ; usage omis dans le flux sans `stream_options.include_usage`
   (`CompletionChunk`) au lieu de {0,0,0} sur chaque fragment ; l'outil TTFT comptait ces jetons
