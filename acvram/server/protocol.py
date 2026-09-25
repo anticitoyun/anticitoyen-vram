@@ -320,6 +320,14 @@ class CompletionResponse(BaseModel):
     usage: Usage = Field(default_factory=Usage)
 
 
+class CompletionChunk(CompletionResponse):
+    """Fragment du flux /v1/completions. Pièce 210b (contrat OpenAI) : l'usage n'y figure QUE sur demande
+    (`stream_options.include_usage`), sur le dernier fragment ; hérité de `CompletionResponse`, chaque fragment portait
+    `usage` = {0, 0, 0} (valeur par défaut) — un compte faux plutôt qu'absent. None : omis à la sérialisation
+    (`exclude_none`), comme le fragment de chat."""
+    usage: Optional[Usage] = None
+
+
 class EmbeddingRequest(BaseModel):
     model: str
     input: Union[str, list[str], list[int], list[list[int]]]

@@ -744,8 +744,31 @@ def nvfp4_matmul(x: torch.Tensor, t: NVFP4Tensor,
             if gemm_groupe.disponible():
                 return gemm_groupe.nvfp4_linear(x, t)
 
+    # Repli GEMM (piece 153, poste4 25/09) : dequantifier la matrice ENTIERE
+    # en dt puis la caster en x.dtype (deux allocations plein tenseur d'affilee)
+    # coutait, sur la tete d'un modele a vocabulaire etendu (248 320 x 5 120),
+    # 2,49 + 4,74 Gio d'un coup au premier appel avec n > gemv_threshold (PPL,
+    # tranches de 256 lignes) -- meme mecanisme que le repli int8 documente
+    # plus haut (Gemma-4-31B, poste3 0cf7fe6), jamais porte ici. Par tranches de
+    # lignes de sortie, meme arithmetique et memes valeurs -- PAS au bit sur
+    # GPU (cuBLAS choisit un ordre de reduction K different selon N : ecart
+    # absolu mesure <= 2e-5, tests/test_nvfp4_matmul_tranches.py) ; pic borne
+    # par _DEQUANT_TRANCHE_MAX.
+    dt = x.dtype if x.dtype != torch.float32 else torch.bfloat16
+    par_ligne = t.padded_in * (4 + dt.itemsize)
+    if t.shape[0] * par_ligne > _DEQUANT_TRANCHE_MAX and _tranche_copie(t.shape[0], t.padded_in):
+        pas = max(64, (_DEQUANT_TRANCHE_MAX // par_ligne) // 64 * 64)
+        out = torch.empty(*x.shape[:-1], t.shape[0], dtype=x.dtype, device=x.device)
+        for a in range(0, t.shape[0], pas):
+            b = min(a + pas, t.shape[0])
+            tr = NVFP4Tensor(t.qweight[a:b], t.block_scale[a:b], t.global_scale,
+                             (b - a, t.shape[1]), t.padded_in)
+            w = _w_partage(("naturel", id(t), x.dtype, a, b),
+                           lambda tr=tr: nvfp4_dequant(tr, dt))
+            out[..., a:b] = torch.nn.functional.linear(x, w.to(x.dtype))
+        return out
     w = _w_partage(("naturel", id(t), x.dtype),
-                   lambda: nvfp4_dequant(t, x.dtype if x.dtype != torch.float32 else torch.bfloat16))
+                   lambda: nvfp4_dequant(t, dt))
     return torch.nn.functional.linear(x, w.to(x.dtype))
 
 
@@ -824,26 +847,40 @@ if _PREFILL_INT8 not in ("bf16", "a8", "cublas"):
     raise ValueError(f"ACVRAM_PREFILL_INT8={_PREFILL_INT8!r} : attendu bf16 | a8 | cublas")
 
 
-def _i8c_poids(t: INT8Tensor):
-    """Poids int8 signés (q − 128) [N, K_pad] d'un INT8Tensor symétrique par
-    canal, construits UNE fois et gardés sur le tenseur (copie int8 de la
-    taille du poids : q/k/v/o de Coder ≈ 0,9 Gio) ; None si le tenseur n'est
-    pas par canal symétrique (group_size ≠ K_pad ou un zéro ≠ 128)."""
-    cache = t.__dict__.get("_i8c")
-    if cache is not None:
-        return cache if cache is not False else None
-    if t.__dict__.get("prefill_bf16"):
+def _i8c_eligible(t: INT8Tensor) -> bool:
+    """Poids symétrique par canal (group_size = K_pad, zéros tous à 128) servi par cuBLASLt int8 ; décidé une fois
+    et gardé sur le tenseur (le test des zéros synchronise la carte)."""
+    ok = t.__dict__.get("_i8c")
+    if ok is None:
         # Pièce 139 : poids marqué par le chargeur (manifeste « origine: fp8 ») — AUCUNE copie : 233 tenseurs
         # d'un Qwen3.8-27B mixte y perdaient ~10,6 Go au premier préfill (OOM) ; il suit la déquant bf16 (W8A16).
-        t.__dict__["_i8c"] = False
+        ok = (not t.__dict__.get("prefill_bf16") and t.group_size == t.qweight.shape[1]
+              and t.zeros.shape[1] == 1 and bool((t.zeros == 128).all()))
+        t.__dict__["_i8c"] = ok
+    return ok
+
+
+def _i8c_poids(t: INT8Tensor):
+    """Poids int8 signés (q − 128) [N, K_pad] d'un INT8Tensor symétrique par canal ; None s'il n'est pas éligible.
+
+    Pièce 201 : TRANSITOIRE. La copie était gardée à vie sur le tenseur dès le premier préfill : 6,84 Gio sur
+    Qwen3.8-27B-nvfp4-attn-gdn-i8c (308 poids par canal), fabriqués pendant `warm_graphs`, après la borne du KV —
+    OOM au warm, service impossible. Elle est maintenant fabriquée par appel, ou une fois par portée
+    `depaquetage_partage` (la boucle par séquence d'une couche GDN, pièce 179), puis rendue. Mêmes octets, même
+    `_int_mm` : au bit par construction. Le pic transitoire est dans la réserve de préfill
+    (`ModelSpec.octets_transitoires_i8c_bytes`)."""
+    if not _i8c_eligible(t):
         return None
-    ok = (t.group_size == t.qweight.shape[1] and t.zeros.shape[1] == 1
-          and bool((t.zeros == 128).all()))
-    if not ok:
-        t.__dict__["_i8c"] = False
-        return None
-    w = (t.qweight.to(torch.int16) - 128).to(torch.int8).contiguous()
-    t.__dict__["_i8c"] = w
+    c = _W_PARTAGES
+    cle = ("i8c", t.qweight.data_ptr(), tuple(t.qweight.shape))
+    w = c.get(cle) if c is not None else None
+    if w is None:
+        CHEMINS_INT8["i8c_fabrique"] += 1
+        w = (t.qweight.to(torch.int16) - 128).to(torch.int8).contiguous()
+        if c is not None:
+            c[cle] = w
+    else:
+        CHEMINS_INT8["i8c_reutilise"] += 1
     return w
 
 
@@ -881,11 +918,11 @@ def gemm_i8c_cublas(x: torch.Tensor, t: INT8Tensor, sortie_fp32: bool = False, a
     exact, échelles en fp32. None si inéligible (poids affine/groupé, M ≤ 16 :
     cuBLASLt exige M > 16, K et N multiples de 8). ``a8`` : (a8, s_x) déjà
     quantifiés par `quantifier_a8_i8c(x)` (C15-prefill, q/k/v partagent x)."""
-    w = _i8c_poids(t)
     M, K = x.shape
     N, k_pad = t.qweight.shape
-    if w is None or M <= 16 or k_pad % 8 or N % 8:
+    if M <= 16 or k_pad % 8 or N % 8 or not _i8c_eligible(t):
         return None
+    w = _i8c_poids(t)                        # pièce 201 : transitoire, fabriqué seulement si le chemin est pris
     from .gemm_w8a8 import quantifier_a8, quantifier_a8_torch, disponible as _w8a8_dispo
     if a8 is not None:
         a, sx = a8                               # C15-prefill : A8 quantifiée une fois pour q/k/v
@@ -938,7 +975,7 @@ def int8_matmul_partage(x: torch.Tensor, ts: list) -> Optional[list]:
     if x.is_cuda and (not ts[0].qweight.is_cuda or _bk.resolve("int8", ts[0].qweight.device)[0].name != "cuda-fusionne"):
         return None                                  # backend masqué : la référence torch
     for t in ts:
-        if _i8c_poids(t) is None or t.qweight.shape[1] % 8 or t.qweight.shape[0] % 8:
+        if not _i8c_eligible(t) or t.qweight.shape[1] % 8 or t.qweight.shape[0] % 8:
             return None
     a8 = quantifier_a8_i8c(xf)
     sorties = []
@@ -1098,7 +1135,26 @@ def _marlin_seul(x: torch.Tensor, t):
         W = _w_partage(("marlin", id(t), k_pad, N), lambda: MP.depaqueter_marlin(w, s_, g, k_pad, N))
         if k_pad != t.shape[1]:
             W = W[:, : t.shape[1]]
-        y = torch.nn.functional.linear(x.reshape(-1, orig[-1]), W.to(dt).to(x.dtype))
+        xr = x.reshape(-1, orig[-1])
+        # Piece 153 (poste4 25/09) : `W.to(dt).to(x.dtype)` sur les N lignes
+        # ENTIERES d'un coup materialisait une deuxieme copie plein tenseur en
+        # x.dtype (tete a vocabulaire etendu 248 320 x 5 120 : 4,74 Gio) apres
+        # le depaquetage deja mis en cache par `_w_partage` -- OOM sur un
+        # modele deja serre en marge (meme mecanisme que le repli nvfp4
+        # "naturel" plus haut, meme borne). Le cast final par tranches de
+        # lignes de sortie, meme arithmetique et memes valeurs -- PAS au bit
+        # sur GPU (cuBLAS, cf. test_nvfp4_matmul_tranches.py) ; pic borne par
+        # _DEQUANT_TRANCHE_MAX.
+        par_ligne = W.shape[1] * (4 + dt.itemsize)
+        if W.shape[0] * par_ligne > _DEQUANT_TRANCHE_MAX and _tranche_copie(W.shape[0], W.shape[1]):
+            pas = max(64, (_DEQUANT_TRANCHE_MAX // par_ligne) // 64 * 64)
+            out = torch.empty(xr.shape[0], W.shape[0], dtype=x.dtype, device=x.device)
+            for a in range(0, W.shape[0], pas):
+                b = min(a + pas, W.shape[0])
+                out[:, a:b] = torch.nn.functional.linear(xr, W[a:b].to(x.dtype))
+            y = out
+        else:
+            y = torch.nn.functional.linear(xr, W.to(dt).to(x.dtype))
         return y[:, : t.shape[0]].reshape(*orig[:-1], t.shape[0])
     else:
         CHEMINS_NVFP4["marlin_dense_seul"] += 1
@@ -1271,6 +1327,17 @@ _DENSE_NVFP4_MIN_M = int(os.environ.get("ACVRAM_DENSE_NVFP4_MIN_M", "4"))
 # Plafond (octets) du pic de déquantification du repli GEMM d'int8_matmul,
 # au-delà duquel la matrice est traitée par tranches de lignes.
 _DEQUANT_TRANCHE_MAX = int(os.environ.get("ACVRAM_DEQUANT_TRANCHE_MAX", str(256 * 2**20)))
+# Pièce 201 (décision chef) : les replis nvfp4 « naturel » et `_marlin_seul` (pièce 153) ne tranchent que si la copie
+# fp32 ENTIÈRE du poids dépasserait ce seuil — la tête d'un vocabulaire étendu (248 320 × 5 120 : 4,74 Gio), pour la PPL.
+# Au seuil de `_DEQUANT_TRANCHE_MAX` seul (256 Mio pour 6 o par élément), toute projection de plus de 44,7 M éléments
+# était tranchée au préfill servi, et cuBLAS y change l'ordre de réduction : logits d'un préfill 8 × 512 du mixte
+# différents de main (diag201). Plus grande projection servie : gate+up fusionné de Qwen3.8, 0,66 Gio en fp32.
+_TRANCHE_COPIE_MIN = int(os.environ.get("ACVRAM_TRANCHE_COPIE_MIN", str(2**30)))
+
+
+def _tranche_copie(n: int, k: int) -> bool:
+    """Le repli nvfp4 tranche-t-il un poids [n, k] ? Seulement si sa copie fp32 entière dépasse `_TRANCHE_COPIE_MIN`."""
+    return n * k * 4 > _TRANCHE_COPIE_MIN
 # Linéaires INT8 à b ≤ 16 (poste C, poste7-e-c-verdict-17-09 § 2) : "mixte"
 # (défaut : Triton dès b ≥ NARROW_TRITON_MIN_B, CUDA en dessous) | "cuda"
 # (narrow_gemm / int8_gemv) | "triton" (kernels/gemm_etroit.py partout) |

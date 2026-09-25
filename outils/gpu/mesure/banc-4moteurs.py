@@ -56,7 +56,12 @@ MAX_TOKENS = 200
 MESURES = 3
 FORCER_EXIL = False
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Pièce 211 (garde d'import a86fa1dd, comme la 168 sur banc-llamacpp-16-09.py) : la racine doit
+# venir de CE script, jamais de l'installation editable — sinon la sonde de regime d'energie.py
+# importe l'arbre principal depuis un worktree et la garde refuse, nommement, « indisponible ».
+_ICI = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_ICI))))
+sys.path.insert(0, _ICI)
 from energie import Energie, repos            # noqa: E402
 
 
@@ -599,7 +604,11 @@ def generer(moteur):
                         dernier = maintenant
                         n += 1
     if premier is None:
-        raise RuntimeError("aucun jeton reçu")
+        # Pièce 210b : en CHAT, le premier fragment est souvent le rôle seul ({"role": "assistant", "content": ""}) —
+        # le TTFT se prend donc au premier CONTENU, à dessein (pas comme ttft-service-p145, où tout fragment à
+        # `choices` est un jeton). Mais « aucun jeton reçu » mentait quand le moteur en annonce : on le dit.
+        nj = (usage or {}).get("completion_tokens") or 0
+        raise RuntimeError(f"aucun texte reçu, {nj} jetons annoncés par le moteur" if nj else "aucun jeton reçu")
     morceaux = n
     # Le banc a compté les morceaux du flux ; le moteur, lui, annonce SON
     # nombre de jetons. On garde le sien pour le débit — c'est la grandeur que

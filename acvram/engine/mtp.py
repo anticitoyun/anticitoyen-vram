@@ -63,6 +63,12 @@ class MTPHead(nn.Module):
         return self.final_norm(x)
 
 
+def est_tenseur_mtp(nom: str) -> bool:
+    """Tenseur d'une tête MTP, dans les deux conventions de `cles_mtp` (partagés ``mtp.*`` compris). Pièce 201 : le
+    compte des poids chargés après la borne du KV (`loader._octets_annexes`) les retire sous ``ACVRAM_MTP=non``."""
+    return nom.startswith(("model.mtp.", "mtp."))
+
+
 def cles_mtp(manifest: dict) -> list[int]:
     """Indices des têtes MTP présentes dans un manifeste, dans l'ordre. Deux conventions :
     ``model.mtp.<n>.`` (GGUF renommé par quant/gguf.py, DeepSeek) et, pièce 105, celle des checkpoints HF de la

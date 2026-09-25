@@ -2,7 +2,9 @@
 qkv [5120, 2048] et o [2048, 4096], M = 12, L2 froid (24 copies des poids dans un graphe, harnais p57).
     outils/carte.sh python scratchpad/poste5-p71-23-09/banc-marlin-dense.py sortie.json"""
 import importlib.util, json, os, sys, torch
-R = os.path.dirname(os.path.abspath(__file__)) + "/../.."
+# Pièce 211 : R atteignait "outils" (2 "..") au lieu de la racine du dépôt (3 "..") — la garde
+# d'import a86fa1dd refusait depuis un worktree (constat poste5, 25/09, comme la 168).
+R = os.path.dirname(os.path.abspath(__file__)) + "/../../.."
 sys.path.insert(0, R); sys.path.insert(0, R + "/outils/gpu/mesure")
 def _mod(nom, chemin):
     sp = importlib.util.spec_from_file_location(nom, chemin); m = importlib.util.module_from_spec(sp); sp.loader.exec_module(m); return m

@@ -24,6 +24,14 @@ PREFIXES_TOUR = ("model.vision_tower.", "model.embed_vision.",
                  "model.multi_modal_projector.", "model.vision_embedder.",   # vision_embedder : gemma4_unified
                  "model.visual.")                                            # Qwen3-VL : tour + merger + deepstack_merger_list
 
+
+def tour_declaree(manifest: dict) -> bool:
+    """Le manifeste déclare une tour (``vision`` présent et ni faux ni « non ») : `TourVision.depuis_dossier` la
+    charge, et `loader._octets_annexes` la compte dans les poids chargés après la borne du KV (pièce 201)."""
+    decl = manifest.get("vision")
+    return bool(decl) and not (isinstance(decl, str) and decl.strip().lower() in ("non", "no", "false", "0"))
+
+
 # La ligne de régime (acvram/regime.py) nomme la tour dès qu'une est chargée.
 _CHARGEE: Optional[str] = None
 # Dépendance ÉPINGLÉE du moteur (poste7 14 h 10) : la version qui charge gemma4 sur le poste, la même que
@@ -150,8 +158,7 @@ class TourVision:
         faux ou « non ») ; sinon la tour transformers chargée en bf16 sur
         ``device``. Un manifeste qui déclare une tour introuvable est une
         erreur nommée, pas un modèle texte."""
-        decl = manifest.get("vision")
-        if not decl or (isinstance(decl, str) and decl.strip().lower() in ("non", "no", "false", "0")):
+        if not tour_declaree(manifest):
             return None
         try:
             import transformers

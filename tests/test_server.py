@@ -328,3 +328,53 @@ def test_speculation_texte_dans_regime_ligne():
     frag = _speculation_texte(actif)
     assert frag.startswith(" speculation=ngram(")
     assert "on" in frag and "lot_max=4" in frag and "gain=1.5" in frag
+
+
+# -- Pièce 210b : contrats OpenAI de /v1/completions --------------------------------------------------------------
+def _sorties_210b(monkeypatch, sorties):
+    """Le service rend ces `GenerationOutput` fabriquées (un jeton à texte vide, puis un jeton ordinaire), sans moteur."""
+    import asyncio
+    from acvram.server import app as A
+
+    async def submit(self, prompt_ids, params, *a, **kw):
+        return "req-210b", asyncio.Queue()
+
+    async def collect(self, request_id, q):
+        for s in sorties:
+            yield s
+    monkeypatch.setattr(A.EngineService, "submit", submit)
+    monkeypatch.setattr(A.EngineService, "collect", collect)
+
+
+def _deux_jetons():
+    from acvram.engine.runner import GenerationOutput
+    return [GenerationOutput(sequence_id=1, request_id="req-210b", token_ids=[7], text_delta="", logprob=-1.5,
+                             completion_tokens=1),
+            GenerationOutput(sequence_id=1, request_id="req-210b", token_ids=[8], text_delta="hello", logprob=-0.25,
+                             completion_tokens=2, finished=True, finish_reason="length")]
+
+
+def test_jeton_a_texte_vide_garde_son_logprob_210b(client, monkeypatch):
+    """(a) tokens/token_logprobs alignés sur completion_tokens : le jeton à texte vide y reste. Témoin : sous l'ancienne
+    condition (`out.text_delta`), tokens = ["hello"] pour 2 jetons générés — ce test rougit."""
+    _sorties_210b(monkeypatch, _deux_jetons())
+    r = client.post("/v1/completions", json={"model": "tiny", "prompt": [5, 6, 7], "max_tokens": 2, "logprobs": 1})
+    j = r.json(); lp = j["choices"][0]["logprobs"]
+    assert j["usage"]["completion_tokens"] == 2
+    assert lp["tokens"] == ["", "hello"] and lp["token_logprobs"] == [-1.5, -0.25], lp
+    assert lp["text_offset"] == [0, 0]
+
+
+def test_flux_sans_include_usage_ne_porte_pas_d_usage_210b(client, monkeypatch):
+    """(b) Sans `stream_options.include_usage`, aucun fragment ne porte `usage` (avant : {0, 0, 0} sur chacun) ; avec,
+    le dernier seulement, et juste."""
+    def fragments(corps):
+        _sorties_210b(monkeypatch, _deux_jetons())
+        r = client.post("/v1/completions", json=corps)
+        return [json.loads(l[6:]) for l in r.text.splitlines() if l.startswith("data: ") and "[DONE]" not in l]
+    base = {"model": "tiny", "prompt": [5, 6, 7], "max_tokens": 2, "stream": True}
+    sans = fragments(base)
+    assert len(sans) == 2 and all("usage" not in f for f in sans), sans
+    avec = fragments({**base, "stream_options": {"include_usage": True}})
+    assert "usage" not in avec[0], avec[0]
+    assert avec[-1]["usage"] == {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}, avec[-1]

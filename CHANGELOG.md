@@ -10,6 +10,22 @@
   sur 48) : KL de décodage b=8 max 0,324 ≤ 2 × témoin 0,286 (témoins à échantillon égal), argmax 0,961 ≥ 0,957, PPL 12,80 → 12,61.
   Servi, banc chat ABBA ×5 : Coder b=8 1 669,9 → 1 766,3 t/s (**+5,77 %**), J/jeton net −8,58 % ; b=1 +0,52 %.
   `revue/poste6-piece209{a,b,c}-verdict-25-09.md`. Ligne de régime : `experts_layout=marlin-w13`, plus aucun « pas de piles Marlin ».
+* **25/09/2026 — pièce 201 (poste5, sur la 153c de poste4) : un modèle qui ne tient pas n'est plus chargé en silence ;
+  la capacité KV annoncée BAISSE sur les modèles à vision ou à MTP — c'est le prix d'un compte juste.**
+  Qwen3.8-27B-nvfp4-attn-gdn-i8c chargeait sans exil puis tombait en OOM au premier pas (0/64 couches exilées,
+  148 Mio libres). Deux poids que le planificateur ne voyait pas : (1) la tour de vision (runner) et les têtes MTP
+  (`_charger_mtp`), chargées après la borne du KV — `_octets_reels` ne comptait que couches, embed et tête ; (2) la
+  copie int8 signée de chaque poids par canal (`kernels._i8c_poids`), gardée à vie dès le premier préfill cuBLAS :
+  6,84 Gio sur ce modèle, fabriqués pendant `warm_graphs`. Correctifs : `loader._octets_annexes` compte par
+  exclusion tout bloc hors couches/embed/tête dans la borne et l'exil ; la copie i8c est transitoire (par appel, ou
+  une fois par portée de partage B'), au bit par construction ; la tranche nvfp4 de la 153 (PPL de la tête à
+  vocabulaire étendu) ne s'active plus qu'au-delà de 1 Gio de copie fp32 (`ACVRAM_TRANCHE_COPIE_MIN`, 0 = témoin) : au
+  seuil de 256 Mio elle tranchait les projections servies et changeait les logits d'un préfill 8 × 512 (retour au bit
+  de main, sha256 à l'appui). Capacité KV annoncée, B = 8 :
+  Qwen3.8-27B-nvfp4 à 32 k **128 960 → 119 440 jetons (−7,4 %, MTP 299,7 Mio)** ;
+  gemma-4-31B-it-nvfp4-vision à 8 k **10 848 → 8 528 (−21,4 %, vision + MTP 1 098 Mio)** ; l'i8c à 32 k passe de
+  l'OOM à 9/64 couches exilées. Coût de la copie transitoire au banc chat b=8 mixte (ABBA ×4 contre main) :
+  médianes 426,05 → 426,05 t/s (0,00 %), J/jeton +0,28 %, TTFT L = 78 +0,04 %. Verdict : `revue/poste5-piece201-verdict-25-09.md`.
 * **25/09/2026 — pièce 195 (poste6) : GEMM int8 étroit à K ENTIER PAR CANAL, AU DÉFAUT** (`ACVRAM_ETROIT_CANAL=1` ;
   0 = témoin nommé, le noyau à tranches d'avant ; décision déléguée par l'utilisateur). Les linéaires int8 symétriques par
   canal (tous les int8 du mixte-i8c, attention et GDN de `Qwen3.8-27B-nvfp4-attn-gdn-i8c`) à 2 ≤ b ≤ 16 sont servies par
