@@ -1730,14 +1730,13 @@ torch::Tensor int8_gemv(torch::Tensor qweight, torch::Tensor scales,
     // construction : chaque sortie (r, n) garde son accumulateur et son ordre, quelle que soit la tranche. Banc
     // isolé du 25/09 : tranche 12 −19 à −28 % contre 16 à N 16-78 ; ptxas : NV 16 = 254 registres, NV ≤ 6 = 128
     // (2 blocs de 256 fils par SM au lieu d'un).
-    auto lire_tranche = [](const char *nom, int defaut) {
-        const char *e = std::getenv(nom);
+    auto lire_tranche = [](const char *e, int defaut) {
         if (e == nullptr || *e == '\0') return defaut;
         const int v = std::atoi(e);
         return (v == 4 || v == 6 || v == 8 || v == 10 || v == 12 || v == 16) ? v : defaut;
     };
-    static const int tranche_dec = lire_tranche("ACVRAM_INT8_TRANCHE", 16);
-    static const int tranche_pre = lire_tranche("ACVRAM_INT8_TRANCHE_PREFILL", tranche_dec);
+    static const int tranche_dec = lire_tranche(std::getenv("ACVRAM_INT8_TRANCHE"), 16);
+    static const int tranche_pre = lire_tranche(std::getenv("ACVRAM_INT8_TRANCHE_PREFILL"), tranche_dec);
     const int tranche = N > 16 ? tranche_pre : tranche_dec;
     const int Ntot = N;
     for (int base = 0; base < Ntot; base += tranche) {

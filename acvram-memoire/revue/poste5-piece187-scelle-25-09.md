@@ -52,3 +52,13 @@ de NV 7 à 16. J'ajoute donc 4 et 6 au balayage (8, 10, 12 ordonnés).
   * banc chat b=8, Qwen3.8-27B-nvfp4 : **0 ± bruit** (aucun int8 servi au préfill, 183). Témoin nul ; > 2 σ = instrument.
   * décodage b=16, mixte : **0 à +3 %**, selon la part de `int8_gemv` au godet 16 (les i8c à M ≤ 16 prennent aussi les
     chemins étroits, kernels/__init__.py:1366-1392). Compteur `CHEMINS_INT8` relevé dans la prise.
+
+## Résultat de la prise 1 (07:57:11-08:00:27, 9534dd6d)
+Balayage (minimum de 2 passes, écart à la tranche 16) : **la tranche 6 est la meilleure partout** : N = 78 −21,9 / −37,8 / −43,4 % ;
+N = 16 −23,2 / −36,8 / −43,0 % ; N = 12 −3,4 / −21,9 / −23,4 % (6 + 6 fait mieux que 12 d'un coup). Tranche 4 : −23 à −39 %,
+tranche 8 : −1 à −28 %, tranches 10 et 12 : −15 à −36 %. La prédiction (−20 à −35 % à N = 78) tient, et le haut de la fourchette
+est dépassé sur 17408 × 5120 (−43 %). Les 2 blocs par SM (NV ≤ 6) l'emportent sur les relectures de W.
+Test au bit : **6/6 verts** (couche 0 réelle du mixte, N 2-80, bf16 et fp32). Un échec : `test_toute_variable_de_chemin…`,
+parce que `lire_tranche` recevait le nom de la variable et que le scanner ne voit que `getenv("ACVRAM_…")` littéral.
+Corrigé, à rejouer en prise 2.
+**Choix par la règle écrite avant : B = 6/6** (décodage et préfill).
