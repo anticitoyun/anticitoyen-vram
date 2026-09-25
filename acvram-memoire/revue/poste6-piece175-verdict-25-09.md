@@ -53,3 +53,6 @@ Dispersion intra-bras ≤ 0,15 % (b=8), ≤ 0,01 % (b=1) ; graphes on, repli_eag
 de pas sans dmon, comme les prises 3-4). `auto` prend à chaque M le chemin déjà prouvé au bit (prise 4) : aucun critère KL à ajouter.
 Tests `tests/test_gdn_ab_175.py` : 50 verts / 1 rouge au commit 3f0bd9d0 — `test_le_chemin_fusionne_est_pris`, faux du test seul
 (sa lambda de comptage ignorait `fp32=` après l'absorption des casts) ; corrigé et rejoué sous verrou : voir ligne « rejeu » ci-dessous.
+Rejeu (commit d29766b1, 07:25:13, sous verrou `ACVRAM_NOM=poste6-175`, 46 s d'attente, PID hors verrou : llama-server 4242 seul,
+avant et après) : `tests/test_gdn_ab_175.py` **28/28 verts** en 1,1 s (`scratchpad/poste6-p175-25-09/prise-tests-rejeu.txt`).
+Branche poste6-175 fusionnable ; `auto` au défaut = décision de chef (issue nommée : b = 12 sans gain, les deux appels).
