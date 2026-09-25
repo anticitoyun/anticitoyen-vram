@@ -49,6 +49,13 @@ _GDN_CONV_FUSEE = os.environ.get("ACVRAM_GDN_CONV_FUSEE", "1") == "1"
 AB_DEFAUT = "auto"
 _GDN_AB = os.environ.get("ACVRAM_GDN_AB", AB_DEFAUT)
 AB_BILAN = {"fusionnees": 0, "raisons": {}}          # 175 : ce que le chargement a fait, pour la ligne de régime (preuve)
+
+
+def ab_bilan_reinit() -> None:
+    """175 b : le bilan est celui du DERNIER chargement — le chargeur l'appelle avant sa passe de fusion, sinon il s'accumule
+    entre les modèles d'un même processus (vu dans une suite pytest : « ab=auto(28:…) » sur un modèle chargé à sec)."""
+    AB_BILAN["fusionnees"] = 0
+    AB_BILAN["raisons"].clear()
 # Pièce 156 F1 (DÉFAUT depuis 156 d ; 0 = témoin) : portes (softplus, exp, sigmoid) calculées dans le noyau fla de
 # la voie F4 — ± ulp fp32 (softplus de fla en ex2/lg2 approchés) : KL contre témoins tenue sur Qwen3.8 et Qwen3.5-35B.
 _GDN_PORTES_NOYAU = os.environ.get("ACVRAM_GDN_PORTES_NOYAU", "1") == "1"

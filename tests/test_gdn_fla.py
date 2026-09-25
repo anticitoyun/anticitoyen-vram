@@ -166,7 +166,13 @@ def test_un_moteur_charge_a_sec_ecrit_la_voie_gdn_dans_son_regime(converted, mon
     _voie(monkeypatch, "fla")
     engine = Engine(load_model(converted, dtype=torch.float32, device_override="cpu"), None,
                     max_batch_size=2, max_model_len=256)
+    import re
     ligne = engine.regime_ligne()
-    assert "ACVRAM_GDN=fla" in ligne and engine.regime()["gdn"] == "fla", ligne
+    voie = engine.regime()["gdn"]
+    # 175 b : le champ porte la voie PUIS, au défaut auto, le bilan α‖β « ab=auto(n:raisons) » — on lit le jeton de voie seul,
+    # et le bilan doit être celui de CE chargement (à sec : 0 couche fusionnée, raison hote ou format), pas le cumul du processus.
+    assert re.search(r"(^| )ACVRAM_GDN=fla( |$)", ligne), ligne
+    assert voie.split(" ")[0] == "fla", voie
+    assert re.fullmatch(r"fla( ab=\w+\(0:(format|hote)×\d+\))?", voie), voie
     _voie(monkeypatch, "torch")
-    assert "ACVRAM_GDN=torch" in engine.regime_ligne()
+    assert re.search(r"(^| )ACVRAM_GDN=torch( |$)", engine.regime_ligne())
