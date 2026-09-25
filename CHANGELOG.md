@@ -1,5 +1,11 @@
 # Journal des changements
 
+* **25/09/2026 — pièce 194 b2 (poste1) : β‖α des couches GDN sur un second flux, AU DÉFAUT** (`ACVRAM_GDN_AB_FLUX=1` ;
+  0 = témoin série). Les portes α‖β bf16 (3 programmes, 9-14 µs, jusqu'ici sur le chemin critique) tournent pendant la
+  pile qkv‖gate int8 qui lit la même entrée ; jointure avant la récurrence. Au bit par construction, test qui casse quand
+  la jointure manque (`tests/test_gdn_ab_flux_194.py`). Servi, banc chat ABBA ×5 : mixte b=8 399,2 → 408,0 t/s
+  (**+2,20 %**, z 8,3), J/jeton net −1,9 % ; b=1 +0,46 % ; Qwen3.8-27B-nvfp4 inerte (−0,02 % / 0,00 %) ; capture
+  godets {1, 2, 8, 16} 4/4 — `revue/poste1-194-b2-verdict-25-09.md`. Ligne de régime : ` abflux`.
 * **25/09/2026 — pièce 190 (bilan de la nuit 24-25/09)** : cellule officielle ABAB×5 mesurant
   ensemble les six pièces fusionnées depuis 24bcdd07 (172, 175/175b, 176, 179, 182, 187).
   Qwen3.8-27B-unsloth-mixte-i8c b=8 : débit médian **323,4 → 394,8 t/s (+22,08 %)**, J/jeton net

@@ -49,6 +49,28 @@ _GDN_CONV_FUSEE = os.environ.get("ACVRAM_GDN_CONV_FUSEE", "1") == "1"
 AB_DEFAUT = "auto"
 _GDN_AB = os.environ.get("ACVRAM_GDN_AB", AB_DEFAUT)
 AB_BILAN = {"fusionnees": 0, "raisons": {}}          # 175 : ce que le chargement a fait, pour la ligne de régime (preuve)
+# Pièce 194 (b2) : β‖α (3 programmes, 9-14 µs, jusqu'ici sur le chemin critique) lancé sur un SECOND flux pendant la pile
+# qkv‖gate (1 024 programmes, 60 µs) qui lit la même entrée ; jointure avant de rendre, la récurrence les consomme. Au bit
+# par construction (mêmes noyaux, mêmes entrées). Banc : −12,15 µs/couche, 0,58 ms/pas à b=8 (poste1-194-b2-banc-25-09).
+# DÉFAUT depuis le verdict 194 b2 (chef 25/09 : servi mixte b=8 +2,20 %, J/jeton −1,9 %, b=1 +0,46 %, témoins nvfp4 nuls,
+# capture 4/4) ; 0 = témoin (série).
+_GDN_AB_FLUX = os.environ.get("ACVRAM_GDN_AB_FLUX", "1") == "1"
+_FLUX_AB: dict = {}
+
+
+def _flux_ab(device) -> "torch.cuda.Stream":
+    """Un second flux par carte, créé au premier appel (l'échauffement eager précède toute capture)."""
+    f = _FLUX_AB.get(device.index)
+    if f is None:
+        f = _FLUX_AB[device.index] = torch.cuda.Stream(device)
+    return f
+
+
+def _joindre(courant, flux) -> None:
+    """Le flux principal attend β‖α avant tout consommateur. Isolé pour que test_gdn_ab_flux_194 prouve qu'il casse sans.
+    Pas de record_stream : chaque fourche attend le flux principal, donc un bloc de β‖α libéré n'est réutilisé sur le
+    second flux qu'après ses consommateurs, et un bloc de x réutilisé sur le flux principal l'est après la jointure."""
+    courant.wait_stream(flux)
 
 
 def ab_bilan_reinit() -> None:
@@ -95,7 +117,8 @@ def _ab_texte() -> str:
     if _GDN_AB == "separe":
         return ""
     raisons = ",".join(f"{k}×{v}" for k, v in sorted(AB_BILAN["raisons"].items()))
-    return f" ab={_GDN_AB}({AB_BILAN['fusionnees']}" + (f":{raisons}" if raisons else "") + ")"
+    return (f" ab={_GDN_AB}({AB_BILAN['fusionnees']}" + (f":{raisons}" if raisons else "") + ")"
+            + (" abflux" if _GDN_AB_FLUX and AB_BILAN["fusionnees"] else ""))   # 194 : seulement si β‖α existe (inerte sinon)
 
 
 def _recurrence_en_place(q, k, v, g, beta, S: torch.Tensor, A_log=None, dt_bias=None) -> torch.Tensor:
@@ -247,6 +270,12 @@ class GatedDeltaNet(nn.Module):
             qkv, z, a, b = torch.split(mp(x), mp.tailles, dim=-1)
             return (qkv if qkv_brut else qkv.to(torch.float32)), z.to(torch.float32), \
                 b.to(torch.float32), a.to(torch.float32)
+        flux = None
+        if _GDN_AB_FLUX and self.ab is not None and x.is_cuda and x.shape[0] <= 16:    # pièce 194 (b2)
+            flux, courant = _flux_ab(x.device), torch.cuda.current_stream(x.device)
+            flux.wait_stream(courant)
+            with torch.cuda.stream(flux):
+                b, a = self._ab(x, fp32=True)
         pile = getattr(self, "qkv_gate", None)
         if pile is not None and x.shape[0] <= 16:                            # pièce 176 : un appel au décodage
             qkv, z = torch.split(pile(x), pile.qweight._segments, dim=-1)
@@ -254,6 +283,9 @@ class GatedDeltaNet(nn.Module):
             qkv, z = self.qkv(x), self.gate(x)
         if not _GDN_Z_BF16:
             z = z.to(torch.float32)
+        if flux is not None:
+            _joindre(courant, flux)
+            return ((qkv if qkv_brut else qkv.to(torch.float32)), z, b, a)
         if self.ab is not None:                                        # pièce 175 : β‖α en un appel, casts absorbés
             b, a = self._ab(x, fp32=True)
             return ((qkv if qkv_brut else qkv.to(torch.float32)), z, b, a)
