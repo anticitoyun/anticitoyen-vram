@@ -221,6 +221,8 @@ DEFAUTS_PAR_VERSION = {
         "mla_core=tf32(≤2048 clés) mla_prep=grille mla_glue=2 glue=compact(8) prefill_glue=compact",   # inchangée (relevée à sec le 26/09)
     ),
 }
+# 0.7.2 (26/09, pièces 070 b/273) : doctor et paquets seulement — défauts et fin de ligne identiques à la 0.7.1.
+DEFAUTS_PAR_VERSION["0.7.2"] = DEFAUTS_PAR_VERSION["0.7.1"]
 
 
 def _var(nom):
