@@ -30,7 +30,8 @@ def url_de_la_roue(fichier: str, index: str, sha256: str | None = None, pypi: st
     erreurs = []
     for base in (f"{index.rstrip('/')}/{nom}/", f"{pypi.rstrip('/')}/{nom}/"):
         try:
-            with urllib.request.urlopen(base, timeout=60) as r:
+            # UA explicite : download-r2.pytorch.org (CDN des roues) refuse « Python-urllib » (403), pas les autres
+            with urllib.request.urlopen(urllib.request.Request(base, headers={"User-Agent": "acvram-sources-torch/266b"}), timeout=60) as r:
                 return url_depuis_index(r.read().decode("utf-8", "replace"), base, fichier, sha256)
         except (LookupError, OSError) as exc:
             erreurs.append(f"{base} : {exc}")
