@@ -43,6 +43,8 @@ __all__ = ["get_extension", "kernels_available", "build_info", "matmul",
 _EXT: Optional[Any] = None
 _TRIED = False
 _ERROR: str = ""
+_PRECOMPILE: str = ""       # pièce 240 : chemin du .so PRÉCOMPILÉ chargé (vide = compilation JIT ou repli)
+_SRC_HASH_ACTUEL: str = ""  # empreinte complète (source + drapeaux) de la dernière compilation JIT
 _SO_HASH: str = ""          # sha256 du .so effectivement charge : a joindre
 _SO_PATH: str = ""          # a tout releve, car une empreinte .cu/.so prouve
                             # la coherence, jamais l identite de l arbre
@@ -223,6 +225,7 @@ def build_info() -> dict:
         "torch_cuda": torch.version.cuda,
         "device_caps": caps,
         "arch_flags": _arch_flags(),
+        "precompile": _PRECOMPILE,             # 240 : chemin du .so précompilé chargé, vide = JIT
         "cpu": cpu_build_info(),
         "fp4_tensorcore": fp4_mm_info(),
     }
@@ -282,8 +285,67 @@ def noyaux_masques() -> list[str]:
     return sorted(_EXT._noms) if isinstance(_EXT, _ExtensionMasquee) else []
 
 
+# Pièce 240 (Flatpak, 236) : NOYAUX PRÉCOMPILÉS. Le bac à sable n'a pas nvcc ; sans lui, le repli de référence servait
+# à un tiers du débit sans le dire. Un répertoire `ACVRAM_KERNELS_PRECOMPILES` (défaut : <paquet>/precompiles) porte, par
+# empreinte de SOURCE (sha256 du .cu, 16 hex), un `acvram_kernels.so` et son `empreinte.json` :
+#   {"src_sha": sha256 complet du .cu, "src_hash": empreinte source+drapeaux que le .so PORTE (ACVRAM_SRC_HASH),
+#    "archs": ["sm_120f", …], "torch": torch.__version__, "cuda": torch.version.cuda}
+# Le .so est chargé SANS ninja ni nvcc quand tout concorde : même .cu (au bit : c'est le même binaire qu'une compilation
+# JIT de cette source), même torch/CUDA, architecture de la carte présente, et le .so porte bien l'empreinte de son
+# fichier. Sinon : compilation JIT comme avant (et, si le répertoire avait été demandé explicitement, la raison est dite).
+def _precompile_utilisable(dossier: str, src_octets: bytes, caps, torch_version: str, torch_cuda: str):
+    """(chemin du .so à charger, raison) — pur, testable à sec (tests/test_noyaux_precompiles_240.py)."""
+    import json
+    src_sha = hashlib.sha256(src_octets).hexdigest()
+    cand = os.path.join(dossier, src_sha[:16])
+    man, so = os.path.join(cand, "empreinte.json"), os.path.join(cand, "acvram_kernels.so")
+    if not (os.path.isfile(man) and os.path.isfile(so)):
+        return None, f"aucun précompilé pour la source {src_sha[:16]} sous {dossier}"
+    try:
+        with open(man, encoding="utf-8") as fh:
+            e = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return None, f"empreinte.json illisible : {exc}"
+    if e.get("src_sha") != src_sha:
+        return None, "empreinte.json : src_sha différent de la source courante (autre version du .cu)"
+    if e.get("torch") != torch_version or e.get("cuda") != str(torch_cuda):
+        return None, f"précompilé pour torch {e.get('torch')} / CUDA {e.get('cuda')}, ici {torch_version} / {torch_cuda}"
+    archs = set(e.get("archs") or [])
+    for a, b in caps:
+        if not ({f"sm_{a}{b}", f"sm_{a}{b}f", f"sm_{a}{b}a"} & archs):
+            return None, f"précompilé sans sm_{a}{b} (architectures : {sorted(archs)})"
+    try:
+        u64 = int(str(e.get("src_hash", "")), 16).to_bytes(8, "little")
+    except (ValueError, OverflowError):
+        return None, "empreinte.json : src_hash invalide"
+    with open(so, "rb") as fh:
+        if u64 not in fh.read():
+            return None, "le .so ne porte pas l'empreinte annoncée par son empreinte.json"
+    return so, "précompilé"
+
+
+def ecrire_precompile(dossier: str) -> str:
+    """Range le .so de la compilation JIT courante (get_extension() déjà appelée, sans repli) sous
+    ``dossier/<src_sha16>/`` avec son empreinte.json ; rend ce sous-dossier. C'est ce que fait la CI pour le Flatpak (236)."""
+    import json
+    import shutil
+    if _EXT is None or not _SO_PATH or not _SRC_HASH_ACTUEL or _PRECOMPILE:
+        raise RuntimeError("ecrire_precompile : il faut une extension compilée en JIT dans ce processus")
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "acvram_kernels.cu"), "rb") as fh:
+        src_sha = hashlib.sha256(fh.read()).hexdigest()
+    cand = os.path.join(dossier, src_sha[:16])
+    os.makedirs(cand, exist_ok=True)
+    shutil.copy2(_SO_PATH, os.path.join(cand, "acvram_kernels.so"))
+    archs = sorted({f.split("code=")[1] for f in _arch_flags() if "code=sm_" in f})
+    with open(os.path.join(cand, "empreinte.json"), "w", encoding="utf-8") as fh:
+        json.dump({"src_sha": src_sha, "src_hash": _SRC_HASH_ACTUEL, "archs": archs,
+                   "torch": torch.__version__, "cuda": str(torch.version.cuda)}, fh, indent=1)
+    return cand
+
+
 def get_extension():
-    """Compile une fois, puis rend le module d'extension, ou None."""
+    """Charge un .so précompilé quand il concorde (240), sinon compile une fois ; rend le module d'extension, ou None."""
     global _EXT, _TRIED, _ERROR
     if _TRIED:
         return _EXT
@@ -304,6 +366,26 @@ def get_extension():
                   f"ou plus recent. Installez une version cu128 ou cu130.")
         warnings.warn(_ERROR)
         return None
+
+    # Pièce 240 : d'abord un .so précompilé qui concorde (Flatpak : pas de nvcc) — avant tout ce qui exige un toolkit.
+    global _SO_HASH, _SO_PATH, _PRECOMPILE
+    here_pre = os.path.dirname(os.path.abspath(__file__))
+    dossier_pre = os.environ.get("ACVRAM_KERNELS_PRECOMPILES") or os.path.join(here_pre, "precompiles")
+    try:
+        with open(os.path.join(here_pre, "acvram_kernels.cu"), "rb") as fh:
+            octets_src = fh.read()
+        so_pre, raison_pre = _precompile_utilisable(dossier_pre, octets_src, caps, torch.__version__, torch.version.cuda)
+        if so_pre:
+            from torch.utils.cpp_extension import _import_module_from_library
+            _EXT = _import_module_from_library("acvram_kernels", os.path.dirname(so_pre), True)
+            with open(so_pre, "rb") as fh:
+                _SO_HASH = hashlib.sha256(fh.read()).hexdigest()[:16]
+            _SO_PATH, _PRECOMPILE = so_pre, so_pre
+            return _EXT
+        if os.environ.get("ACVRAM_KERNELS_PRECOMPILES"):
+            warnings.warn(f"acvram : noyaux précompilés refusés ({raison_pre}) — compilation JIT")
+    except Exception as exc:                      # noqa: BLE001 — un précompilé cassé ne doit pas empêcher le JIT
+        warnings.warn(f"acvram : noyaux précompilés inutilisables ({type(exc).__name__}: {exc}) — compilation JIT")
 
     # Le source inclut ``cuda_fp4.h``, qui n'existe qu'a partir de CUDA 12.8 :
     # l'exigence ne depend pas de l'architecture visee. Un poste dont le nvcc
@@ -412,6 +494,8 @@ def get_extension():
             _EXT = None
             return None
         _SRC_U64 = int(_SRC_HASH, 16)          # entier : aucun guillemet a echapper
+        global _SRC_HASH_ACTUEL
+        _SRC_HASH_ACTUEL = _SRC_HASH
         _EXT = load(
             name="acvram_kernels",
             sources=[src],
@@ -438,7 +522,6 @@ def get_extension():
             # depot principal avec son propre binaire, parfaitement coherent.
             # Une empreinte prouve la coherence, pas l'identite : c'est le sha
             # du .so, joint au chiffre, qui identifie ce qui a tourne.
-            global _SO_HASH, _SO_PATH
             _SO_HASH = hashlib.sha256(octets).hexdigest()[:16]
             _SO_PATH = so
         except OSError:
