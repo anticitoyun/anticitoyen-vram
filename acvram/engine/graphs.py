@@ -281,7 +281,13 @@ class GraphRunner:
         # rejeu, et événement enregistré après chaque rejeu
         self._prepare = None
         self.abandon_capture: Optional[str] = None     # cause d un dépassement de délai : captures suivantes refusées
-        self.evenement_jetons = torch.cuda.Event()
+        # Pièce 267 : `GraphRunner` est construit par TOUT `Engine`, même sur un torch CPU-only
+        # (roue sans extension CUDA) où `torch.cuda.Event` est une classe factice qui lève à
+        # l'instanciation — CI GitHub (runner sans CUDA) rouge sur 62 tests, tous des `Engine`
+        # construits sans jamais capturer de graphe. `.record()`/`.wait()` sur cet événement ne
+        # sont atteints que depuis `rejouer_suivant()`, qui exige `self._prepare` posé par
+        # `preparer()` — jamais appelé sans CUDA (les graphes n'existent pas sans device CUDA).
+        self.evenement_jetons = torch.cuda.Event() if torch.cuda.is_available() else None
         self._pool = None
         # Levier 1 (poste1-levier-1-conception-21-09) : le glouton de
         # `_sample_lent` (argmax, gather, logsumexp sur les logits fp32) est

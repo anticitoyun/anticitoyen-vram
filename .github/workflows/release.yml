@@ -137,6 +137,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
+          fetch-depth: 0                          # 266 b : l'historique entier, pour extraire packaging/flathub d'une autre ref
+      # 266 b (chef) : la source d'acvram reste AU TAG, mais packaging/flathub/ (manifeste, sources-torch.sh, roue_url.py)
+      # est de l'OUTILLAGE de construction, pas du code livré : il vient de la ref du workflow (github.sha), sinon une
+      # relance de la release v0.7.0 reconstruirait avec le sources-torch.sh cassé du tag. tests/test_release_flatpak_outillage_266b.py.
+      - name: packaging/flathub depuis la ref du workflow (outillage), la source reste au tag
+        run: |
+          git checkout ${{ github.sha }} -- packaging/flathub
+          git status --short packaging/flathub | sed 's/^/  /'
       - uses: actions/download-artifact@v4
         with:
           name: noyaux-precompiles

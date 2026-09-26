@@ -232,6 +232,14 @@ def _regime_des_marqueurs(request, monkeypatch):
     marqueurs = {m.name for m in request.node.iter_markers()}
     if "a_sec" in marqueurs and torch.cuda.is_available():
         pytest.skip("test à sec (Triton interprété) : carte visible — passe CUDA_VISIBLE_DEVICES=")
+    if "a_sec" in marqueurs:
+        try:
+            import triton                                  # noqa: F401
+        except ImportError:
+            # Pièce 267 : CI GitHub (runner sans CUDA, roue torch CPU) n'installe pas triton —
+            # un « à sec » interprété reste hors de portée sans le paquet lui-même, distinct du
+            # cas « carte visible » ci-dessus. NameError nu sinon (test_marlin_port_a_sec).
+            pytest.skip("test à sec (Triton interprété) : triton n'est pas installé")
     if "sans_extension" in marqueurs:
         from acvram import kernels as K
         monkeypatch.setattr(K, "get_extension", lambda: None)

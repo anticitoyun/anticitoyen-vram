@@ -13,8 +13,14 @@ total, confirmé par dry-run avant la reconversion `--no-awq` explicite.
 """
 import json
 
+import pytest
 import torch
 from safetensors.torch import save_file
+
+# Pièce 267 : `acvram/engine/gdn.py:_refs()` importe transformers inconditionnellement
+# (référence torch, même quand fla sert la voie réelle) — extra optionnel (`pyproject.toml`
+# `gdn`), absent en CI de base (runner sans CUDA).
+pytest.importorskip("transformers")
 
 from acvram.engine.config import load_model_spec
 from acvram.quant.collect import collect_activation_stats, load_calib_ids

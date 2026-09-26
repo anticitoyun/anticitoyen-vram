@@ -791,6 +791,12 @@ def aligner_blocs_capturable(flat_e: torch.Tensor, block_size: int, num_experts:
     (P_max = G + E·(block−1)) : capturable dans un graphe CUDA. ``flat_e``
     [G] int32 (expert de chaque paire, ordre des jetons). ``tampons`` :
     (sorted_ids, expert_ids, num_post) réutilisés (adresses stables)."""
+    # Pièce 267 : `_aligner_kernel` n'existe QUE `if triton is not None:` (tête du fichier) —
+    # sans garde, triton absent (roue CPU, aucun `@triton.jit` compilé) rendait un NameError
+    # nu plutôt qu'un refus nommé (CI GitHub, torch CPU).
+    if triton is None:
+        raise RuntimeError("aligner_blocs_capturable : triton absent — ce chemin "
+                            "(décodage sous graphe) exige triton, même interprété (CPU)")
     G = flat_e.numel()
     E = num_experts
     P = G + E * (block_size - 1)

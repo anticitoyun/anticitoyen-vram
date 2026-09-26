@@ -22,6 +22,10 @@ def _release_simulee(dossier: pathlib.Path, *, sans_rpm: bool = False, pkgbuild_
     (racine / "DEBIAN" / "control").write_text(
         f"Package: acvram\nVersion: {V}\nArchitecture: amd64\nMaintainer: acvram\nDescription: simulation 259\n", encoding="utf-8")
     (racine / "usr" / "bin" / "acvram").write_text("#!/bin/sh\necho simulation\n", encoding="utf-8")
+    # 266 b : 300 entrées de plus — un .deb réel en a 274 ; avec `grep -q` sous pipefail le tube rendait faux (SIGPIPE)
+    (racine / "usr" / "share" / "acvram").mkdir(parents=True)
+    for i in range(300):
+        (racine / "usr" / "share" / "acvram" / f"f{i:03d}").write_text("x", encoding="utf-8")
     subprocess.run(["dpkg-deb", "-b", "--root-owner-group", str(racine), str(dossier / f"acvram_{V}_amd64.deb")],
                    check=True, capture_output=True)
     # AUR : acvram/PKGBUILD + acvram/.SRCINFO
