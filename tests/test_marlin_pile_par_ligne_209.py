@@ -97,28 +97,27 @@ def test_piles_reelles_du_coder_au_bit(couche, mat):
         assert not torch.equal(W0, ref), "témoin : le facteur commun devrait rendre la pile fausse"
 
 
-def test_226_le_facteur_par_ligne_est_le_defaut_et_0_le_temoin(monkeypatch):
-    """Pièce 226 (26/09, chef) : la 209 est AU DÉFAUT — la 220 l'avait remise en opt-in sur une « régression » du Coder pur
-    (217, −8,9 %) que la 226 a démontrée être un artefact du banc (invites de jetons tirés, sorties dégénérées divergentes
-    entre bras) ; à invites réelles le 1 gagne +12,8 % / −18,4 % J (b=8). Ce test casse si le défaut revient à 0 (code, table
-    des variables) ou si, au défaut, une pile à sous-normales est refusée au lieu d'être préparée par ligne (g [E, N]) ;
-    0 reste le témoin nommé (préparation d'avant, pile refusée)."""
+def test_232_le_facteur_par_ligne_est_a_la_demande_et_0_le_defaut(monkeypatch):
+    """Pièce 232 b (26/09, chef) : la 209 est À LA DEMANDE. Historique : 209 au défaut (25/09) → 220 opt-in sur le banc 217 → 226 b
+    au défaut (artefact du banc 217 démontré, +12,8 % en salve unique à invites réelles) → 229 (poste3) : en débit SOUTENU le 1 perd
+    −15,3 % / +25,4 % J sur le Coder pur — écart entre protocoles non expliqué, la release garde l'ancien comportement.
+    Ce test casse si le défaut revient à 1 (code, table des variables) ou si, au défaut, une pile à sous-normales est préparée
+    par ligne (g [E, N]) au lieu d'être refusée comme depuis la 157 ; 1 doit encore servir la pile (à la demande)."""
     from acvram import regime
     from acvram.engine import moe
     from acvram.kernels import marlin_port as MP
     monkeypatch.delenv("ACVRAM_MARLIN_PAR_LIGNE", raising=False)
-    assert moe.MARLIN_PAR_LIGNE_DEFAUT == "1"
-    assert os.environ.get("ACVRAM_MARLIN_PAR_LIGNE", moe.MARLIN_PAR_LIGNE_DEFAUT) == "1"
+    assert moe.MARLIN_PAR_LIGNE_DEFAUT == "0"
+    assert os.environ.get("ACVRAM_MARLIN_PAR_LIGNE", moe.MARLIN_PAR_LIGNE_DEFAUT) != "1"
     v = next(v for v in regime.VARIABLES if v.nom == "MARLIN_PAR_LIGNE")
-    assert v.defaut == "1" and v.torch == "0"
+    assert v.defaut == "0" and v.torch == "1"
     E, N, K = 4, 128, 256
-    _, qw, bs, gs = _pile_synthetique(E, N, K, 2260, minuscules=(1, 3))
+    _, qw, bs, gs = _pile_synthetique(E, N, K, 2320, minuscules=(1, 3))
     assert MP.echelles_ecrasees(bs) > 0, "montage : le facteur commun doit écraser"
     par_ligne_defaut = os.environ.get("ACVRAM_MARLIN_PAR_LIGNE", moe.MARLIN_PAR_LIGNE_DEFAUT) == "1"
-    assert MP.echelles_ecrasees(bs, par_ligne=par_ligne_defaut) == 0, "au défaut, la pile doit être SERVIE (moe.py:490)"
-    g1 = MP.preparer_pile(qw, bs, gs, repack=MP.repack_torch, par_ligne=par_ligne_defaut)[2]
-    assert g1.shape == (E, N), "au défaut : facteur par ligne, g par (expert, colonne)"
-    monkeypatch.setenv("ACVRAM_MARLIN_PAR_LIGNE", "0")
-    temoin = os.environ["ACVRAM_MARLIN_PAR_LIGNE"] == "1"
-    assert MP.echelles_ecrasees(bs, par_ligne=temoin) > 0, "le témoin 0 doit encore refuser la pile"
-    assert MP.preparer_pile(qw, bs, gs, repack=MP.repack_torch, par_ligne=temoin)[2].shape == (E,)
+    assert MP.echelles_ecrasees(bs, par_ligne=par_ligne_defaut) > 0, "au défaut, la pile doit être REFUSÉE (moe.py:490)"
+    assert MP.preparer_pile(qw, bs, gs, repack=MP.repack_torch, par_ligne=par_ligne_defaut)[2].shape == (E,)
+    monkeypatch.setenv("ACVRAM_MARLIN_PAR_LIGNE", "1")
+    demande = os.environ["ACVRAM_MARLIN_PAR_LIGNE"] == "1"
+    assert MP.echelles_ecrasees(bs, par_ligne=demande) == 0, "à la demande, la pile doit être servie"
+    assert MP.preparer_pile(qw, bs, gs, repack=MP.repack_torch, par_ligne=demande)[2].shape == (E, N)

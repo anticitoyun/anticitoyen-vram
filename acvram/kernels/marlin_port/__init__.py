@@ -402,7 +402,9 @@ def depaqueter_marlin(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, 
     if par_colonne and E == 1 and noyau not in ("triton", "cuda", "torch") and not (
             noyau == "auto" and w.device.type == "cuda" and (triton is not None or _depaqueter_cuda_disponible())):
         raise ValueError("depaqueter_marlin : échelle globale par colonne servie par les noyaux Triton, CUDA et torch")
-    if par_colonne and noyau == "cuda":
+    # 209 (a) refusait ici TOUTE échelle par colonne au noyau CUDA, y compris E = 1 (le cas 134/147 que l'extension sert
+    # au bit) : deux tests p147 rouges depuis le 25/09 (232, rejeu main = branche). Seule la pile E > 1 lui est fermée.
+    if par_colonne and E > 1 and noyau == "cuda":
         raise ValueError("depaqueter_marlin : échelle globale par colonne d'une pile (E > 1) : noyau triton ou torch")
     if out is None:
         out = torch.empty(E, N, K, dtype=torch.bfloat16, device=w.device)
@@ -410,7 +412,8 @@ def depaqueter_marlin(w_marlin: torch.Tensor, s_marlin: torch.Tensor, g_marlin, 
     if noyau == "auto":
         noyau = _DEPAQUETAGE if _DEPAQUETAGE in ("cuda", "triton", "torch") else "auto"
     if noyau == "auto":
-        if w.device.type == "cuda" and _depaqueter_cuda_disponible():
+        # une pile E > 1 à g [E, N] ne va JAMAIS au noyau CUDA (il lirait g[e] comme scalaire, sans erreur) : triton/torch
+        if w.device.type == "cuda" and _depaqueter_cuda_disponible() and not (par_colonne and E > 1):
             noyau = "cuda"
         else:
             noyau = "triton" if (w.device.type == "cuda" and triton is not None) else "torch"

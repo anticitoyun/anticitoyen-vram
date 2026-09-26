@@ -318,7 +318,7 @@ fi
 # la carte est REFUSEE plutot que rendue a l'aveugle par-dessus une commande
 # qui tourne encore.
 _ancien_p=; _ancien_pgid=
-read -r _ancien_p _ _ _ _ancien_pgid < "$INFO" 2>/dev/null || true
+read -r _ancien_p _ _ _ _ancien_pgid 2>/dev/null < "$INFO" || true
 if [ -n "${_ancien_pgid:-}" ] && kill -0 -- "-$_ancien_pgid" 2>/dev/null; then
   echo "carte.sh : REFUS — le groupe pgid $_ancien_pgid d'une prise precedente ($INFO) est" >&2
   echo "  encore vivant alors que le verrou est libre (KILL -9 du carte.sh parent, sans doute) :" >&2
@@ -466,7 +466,7 @@ _fils=$!
 # N'ECRASE PAS un $INFO deja repris par quelqu'un d'autre entre-temps (meme
 # garde que le trap EXIT generique, jxm) : si le premier champ n'est plus $$,
 # ce n'est plus notre fichier a completer.
-_p5=; read -r _p5 _ < "$INFO" 2>/dev/null
+_p5=; read -r _p5 _ 2>/dev/null < "$INFO"
 [ "$_p5" = "$$" ] && printf '%s %s %s %s %s\n' "$$" "$_pris" "$NOM" "$TYPE" "$_fils" > "$INFO"
 _garde=
 if [ "$DUREE_MAX" -gt 0 ]; then

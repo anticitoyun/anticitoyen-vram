@@ -90,3 +90,16 @@ def test_metrics_porte_les_cartes(client):
     c, engine = client
     m = c.get("/metrics").json()
     assert m["cartes"] == engine.regime()["cartes"]
+
+
+def test_metrics_porte_les_chemins_int8(client, monkeypatch):
+    """Pièce 243 : /metrics expose `kernels.CHEMINS_INT8` tel quel — seule preuve en service qu'un
+    seuil GEMV→GEMM a pris. Cassant : un compteur figé ou absent rend ce test rouge."""
+    import collections
+
+    from acvram import kernels
+    c, _ = client
+    monkeypatch.setattr(kernels, "CHEMINS_INT8", collections.Counter({"dequant": 7, "gemv": 2}))
+    assert c.get("/metrics").json()["int8_chemins"] == {"dequant": 7, "gemv": 2}
+    kernels.CHEMINS_INT8["dequant"] += 1
+    assert c.get("/metrics").json()["int8_chemins"]["dequant"] == 8
