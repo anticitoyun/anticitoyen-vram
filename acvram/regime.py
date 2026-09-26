@@ -56,7 +56,7 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("I8C_FP8_PREFILL", "bf16", ("acvram.kernels", "_I8C_FP8_PREFILL"), None,
              "pièce 260 (opt-in, hors bit) : int8 ré-encodés du fp8 au préfill : bf16 (défaut, déquant de la 139) | cublas (W8A8 int8, A8 par jeton fusionnée, copie signée transitoire de la 201)"),
     Variable("I8C_COPIE", "xor", ("acvram.kernels", "_I8C_COPIE"), None,
-             "pièce 260 (au bit) : copie signée q − 128 du chemin cublas : xor (un noyau, 2 o/poids) | int16 (témoin : l'aller-retour int16 d'avant)"),
+             "pièce 260x (au bit) : copie signée q − 128 du chemin cublas (poids transitoires de la 201) : xor (défaut, un noyau, 2 o/poids) | int16 (témoin : l'aller-retour int16 d'avant)"),
     Variable("COLLE_MOE", "torch", ("acvram.engine.moe", "_COLLE_MOE"), "torch",
              "colle du préfill MoE : torch (argsort + bincount + _tuiles) | triton (P0 : tri + histogramme et grille en deux lancements, mêmes tenseurs)"),
     Variable("NVFP4_GEMV_MAX", "32", ("acvram.kernels", "_NVFP4_GEMV_MAX")),

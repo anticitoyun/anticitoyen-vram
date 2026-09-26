@@ -1,5 +1,14 @@
 # Journal des changements
 
+* **26/09/2026 — pièce 260 (poste5, décision chef) : `ACVRAM_I8C_FP8_PREFILL=cublas` À LA DEMANDE, pas au défaut.** Les int8
+  ré-encodés du fp8 (manifeste « origine: fp8 », 233 tenseurs du Qwen3.8-27B-unsloth-mixte-i8c) étaient exclus du chemin W8A8
+  int8 du préfill depuis la 139 (copie signée persistante, 10,6 Go) ; la 201 a rendu cette copie transitoire, l'opt-in les y
+  remet. **Gain** : préfill par lot 8 × 78 **−26,8 %** (0,4105 → 0,3005 s), mur par lot seulement **−2,4 %**. **Prix** : KL de
+  décodage (b=8, 32 pas après le préfill) max **0,215**, 9 × le seuil admis (0,0242) ; argmax **94,1 %** contre 99,6 % au
+  témoin ; PPL wiki-gptq 2048 **+1,05 %** (7,0273 → 7,1013). Au mur, le gain ne paie pas la qualité : défaut inchangé (bf16).
+  Aide : `acvram serve --help`. `revue/poste5-piece260-{scelle,banc,moteur}-26-09.md` ; tests `tests/test_i8c_copie_260.py`.
+  Écartés en chemin (255) : le FP8 natif W8A8 (`_scaled_mm`, CUTLASS sm_120) — plus lent au décodage, et deux fois plus
+  d'erreur que l'int8 W8A8 au préfill.
 * **26/09/2026 — pièce 232 b (poste6, décision chef) : `ACVRAM_MARLIN_PAR_LIGNE` revient à 0 par défaut pour la 0.7.0 — la 209 est À LA
   DEMANDE.** Deux protocoles, deux résultats sur le même Qwen3-Coder-30B-A3B-nvfp4 pur à b=8 : la 226 (banc chat 102, invites réelles,
   salve unique de 20 s, 5 + 5) donnait 1 = **+12,8 % / −18,4 % J** ; la 229 (poste3, `banc-llamacpp-16-09.py`, invites réelles, lots

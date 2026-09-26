@@ -35,7 +35,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends python3 python3-venv python3-gi \
             gir1.2-gtk-3.0 gir1.2-webkit2-4.1 python3-psutil dpkg-dev
-          sudo pip install --break-system-packages --quiet numpy safetensors fastapi \
+          # 266 : --ignore-installed — typing_extensions vient d'un paquet Debian sans RECORD, pip ne sait pas le
+          # désinstaller (« Cannot uninstall typing_extensions 4.10.0, RECORD file not found ») ; /usr/bin/python3 est
+          # l'interpréteur que construire-deb.sh teste, un venv ne le servirait pas.
+          sudo pip install --break-system-packages --ignore-installed --quiet numpy safetensors fastapi \
             "uvicorn[standard]" pydantic pyyaml tokenizers huggingface-hub jinja2 nvidia-ml-py
       - name: Paquet .deb (tools/construire-deb.sh)
         run: |
@@ -80,7 +83,7 @@ jobs:
           pacman -Syu --noconfirm base-devel git github-cli
           V="${TAG#v}"
           useradd -m builder
-          mkdir /build/pkg
+          mkdir -p /build/pkg                     # 266 : /build n'existe pas dans archlinux:latest
           sed "s/@VERSION@/$V/" packaging/aur/PKGBUILD > /build/pkg/PKGBUILD
           cp packaging/aur/acvram.install /build/pkg/
           chown -R builder /build/pkg
@@ -108,15 +111,17 @@ jobs:
           ref: ${{ env.TAG }}
       - name: Python et torch cu130 (la roue que le Flatpak embarque)
         run: |
-          apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python3-venv ninja-build git
+          # 266 : python3-dev (Python.h, exigé par la compilation de l'extension) ; numpy (torch l'importe, sinon avertissement)
+          apt-get update && apt-get install -y --no-install-recommends python3 python3-dev python3-pip python3-venv ninja-build git
           python3 -m venv /opt/venv && . /opt/venv/bin/activate
-          pip install --index-url https://download.pytorch.org/whl/cu130 "torch==2.14.0" && pip install ninja
+          pip install --index-url https://download.pytorch.org/whl/cu130 "torch==2.14.0" && pip install ninja numpy
           pip install --no-deps .
       - name: Noyaux précompilés (sm_120f, sm_89, sm_86)
         env:
           CUDA_HOME: /usr/local/cuda
         run: |
           . /opt/venv/bin/activate
+          mkdir -p build/noyaux                   # 266 : `tee build/noyaux/…` échouait, le dossier n'existait pas
           python -m acvram.kernels.precompiles --dossier build/noyaux --archs 12.0,8.9,8.6 | tee build/noyaux/precompiles.json
           test -n "$(find build/noyaux -name acvram_kernels.so)"
       - uses: actions/upload-artifact@v4
@@ -182,3 +187,20 @@ jobs:
           V="${TAG#v}"
           zip -q "translations-$V.zip" packaging/langues/*.json docs/TRADUIRE.md
           gh release upload "$TAG" "translations-$V.zip" --clobber --repo "$GITHUB_REPOSITORY"
+
+  # Pièce 259 b (poste6) : les sommes des fichiers joints, écrites APRÈS tous les jobs qui joignent — un seul
+  # fichier SHA256SUMS (format `sha256sum`, vérifiable par `sha256sum -c`), lu par outils/verifier-release.sh.
+  # `!cancelled()` : si un job a échoué, les sommes des fichiers présents sont quand même publiées ; le fichier
+  # manquant apparaît alors comme MANQUE dans verifier-release.sh, pas comme une somme absente.
+  # tests/test_release_sommes_259b.py : tout job qui joint un fichier est dans `needs` de ce job.
+  sommes:
+    needs: [deb, rpm, aur, flatpak, translations]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: SHA256SUMS de tout ce que la release joint
+        run: |
+          mkdir joints && gh release download "$TAG" --dir joints --repo "$GITHUB_REPOSITORY"
+          cd joints && rm -f SHA256SUMS
+          sha256sum -- * > ../SHA256SUMS && cat ../SHA256SUMS
+          gh release upload "$TAG" ../SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"
