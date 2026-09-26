@@ -151,7 +151,9 @@ if [ -n "$FLAT" ]; then
     flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo >/dev/null 2>&1 || true
     if flatpak install --user --noninteractive -y --bundle "$FLAT" >"$DOSSIER/flatpak-install.log" 2>&1; then
       ok "flatpak : installé dans $FLATPAK_USER_DIR ($(flatpak info --user "$APP" 2>/dev/null | sed -n 's/^ *Version: *//p' | head -n1))"
-      if flatpak run --user --command=acvram "$APP" doctor >"$DOSSIER/flatpak-doctor.txt" 2>&1; then
+      # verif-070 : `flatpak run` garde le cwd de l'appelant ; lancé depuis le dépôt, acvram (_garde_arbre) refuse d'être
+      # importé depuis /app quand le cwd est dans un arbre acvram — le bac à sable se lance depuis le dossier de la release
+      if (cd "$DOSSIER" && flatpak run --user --command=acvram "$APP" doctor) >"$DOSSIER/flatpak-doctor.txt" 2>&1; then
         ok "flatpak : acvram doctor dans le bac à sable (flatpak-doctor.txt)"
         grep -i -E 'noyau|kernel|précompil|precompil' "$DOSSIER/flatpak-doctor.txt" | head -n5 | sed 's/^/        /'
       else faux "flatpak : acvram doctor a échoué (flatpak-doctor.txt)"; tail -n5 "$DOSSIER/flatpak-doctor.txt" | sed 's/^/        /'; fi
