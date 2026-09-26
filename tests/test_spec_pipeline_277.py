@@ -12,8 +12,8 @@ Deux volets (décision chef, 277cm) :
   construction ; à CHAQUE divergence, le jeton de référence doit être le premier choix de la cible, le jeton
   spéculatif le second, marge ≤ 0,5 (seuil du scellé 277a-bis, jamais relevé après coup). Mesuré après
   correctif : 2 divergences, marges 0,0152 et 0,0154.
-Condition d'entrée : les deux volets rendent FAUX sur la base sans correctif (prise poste5-p277fin, même fichier
-lancé dans l'arbre 8d5c5580c). Carte et modèles requis (sous carte.sh) ; ignoré sinon."""
+Condition d'entrée, TENUE (prises poste5-p277fin et poste5-p277finc, même fichier lancé dans l'arbre 8d5c5580c
+sans correctif) : mixte ROUGE (k = 4 et k = 1) ; Coder ROUGE — invite 0, j = 8, réf 79 / spéc 397, marge 12,19. Carte et modèles requis (sous carte.sh) ; ignoré sinon."""
 import os
 
 import pytest

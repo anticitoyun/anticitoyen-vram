@@ -21,3 +21,9 @@ spéculer. Branche poste5-277fix (8e580ebe2, base main 8d5c5580c). Scellés : 27
   annule le recouvrement quand le proposeur hésite. Cahier des charges 277e (chef) : pas de retour du ngram au défaut tant
   qu'il fait plus de pas que none. Q26 (poste4) : ni vLLM ni SGLang ne vident ; ils corrigent l'état hôte optimiste après la
   vérification et ne gardent que le préfixe accepté — la voie propre pour la 277e.
+
+## Entrée en main (décision chef, 0.7.5, hors défaut)
+Test en deux volets (`tests/test_spec_pipeline_277.py`) : sur 277fix (ed9b165b5) **3/3 verts** (mixte au bit k = 4 et 1 ;
+Coder : divergences toutes top1/top2 à marge ≤ 0,5) ; sur la base 8d5c5580c SANS correctif : **mixte ROUGE 2/2**, **Coder
+ROUGE** (invite 0, j = 8, marge 12,19). Avertissement de `serve --speculative ngram` et test 283 réécrits (bogue corrigé,
+quasi-égalités < 0,02 sur le Coder, jusqu'à 55 pas pour 32 jetons, pas le défaut). Tests à sec ciblés : 27 passed.
