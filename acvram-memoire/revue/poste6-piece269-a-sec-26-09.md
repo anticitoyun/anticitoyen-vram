@@ -52,3 +52,12 @@ durée : prévu 3 bras × (7 tours à 12 + 5 tours solo) ≈ 3 × 4 min + contr�
   mange le gain des tours fusionnés → défaut inchangé, et la porte (bras D) devient le seul levier.
 * Décision annoncée : P1-P5 tenus → défaut `ADMISSION_FENETRE_MS=10` (regime.py, CHANGELOG, test cassant « défaut 10, 5 témoin ») ;
   sinon défaut 5 inchangé, note de verdict dans les deux cas.
+
+## 5. Décision de chef AVANT la mesure (26/09, écrite ici pour que rien ne soit réécrit après)
+* Lecture de P6 : ce qui compte est le PIRE cas — p50, p95 ET TTFT max par tour ; une requête qui passe de 45 à 245 ms reste sous le
+  max actuel (263-274) : pas une perte d'équité au sens du service. Le min par tour est relevé à titre d'information, il ne juge pas.
+  → P2 devient : p50 B ≤ 258, p95 B ≤ 262, max par tour B ≤ max A (médiane des 7 tours). FAUX si l'un des trois manque.
+* Bras D (micro-guet à 1 requête) : ÉCARTÉ — il coûte au solo, contre la 179 b ; on ne le mesure pas.
+* Cause (b) (gabarit + tokeniseur ≈ 3 ms/req dans la boucle HTTP) : signalée à poste1 pour la 268 (/metrics hors boucle), qui pourrait
+  en sortir aussi la tokenisation. Si la 268 le fait, l'étalement des arrivées se resserre et la fenêtre de 5 ms peut suffire aux
+  tours (b) : la 269 se mesure APRÈS la 268, sur son arbre, et le bras A est alors le témoin de ce que la 268 a déjà changé.
