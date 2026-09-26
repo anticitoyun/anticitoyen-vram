@@ -227,3 +227,74 @@ def test_le_test_sait_dire_faux(tmp_path):
     altere = src.replace("1 995,1", "1 995,2", 1)
     assert Counter(_nombres(altere)) != Counter(_nombres(src)), (
         "l'altération n'a pas changé le multiset de chiffres — gabarit du test à revoir")
+
+
+# ---- 249 : les dates aussi, et les témoins de l'élargissement ----------------------------------------------
+
+def _dates_jour_mois(texte: str, garder: frozenset | None) -> Counter:
+    """Multiset des (jour, mois) des dates du texte — l'année est omise parce que le FR l'omet lui-même
+    dans ses notes (« Erratum du 22/09 ») là où d'autres langues l'écrivent (« 2026-09-22 »). Source
+    (`garder` None) : forme stricte du FR ; traduction : forme large, hors nombres du FR (« 16.02 »)."""
+    t = re.sub(r"```.*?```", "", _sans_cibles(texte), flags=re.S)
+    out = []
+    for m in (_DATE_FR if garder is None else _DATE).finditer(t):
+        if garder is not None and re.sub(r"\D", "", m.group(0)) in garder:
+            continue
+        champs = re.findall(r"\d+", m.group(0))
+        if len(champs[0]) == 4:                                   # 2026-09-22, 2026.09.22
+            jour, mois = int(champs[2]), int(champs[1])
+        elif len(champs) == 2 and len(champs[0]) == 2 and int(champs[0]) <= 12 < int(champs[1]):
+            jour, mois = int(champs[1]), int(champs[0])           # 09.22 (hongrois, mois d'abord)
+        else:
+            jour, mois = int(champs[0]), int(champs[1])
+        out.append((jour, mois))
+    return Counter(out)
+
+
+def test_les_dates_sont_les_memes():
+    """Une date changée par la traduction est une erreur comme un chiffre changé — retirer les dates
+    des chiffres (ci-dessus) ne doit pas les soustraire à tout contrôle. Comparées en (jour, mois),
+    toutes langues, le FR comme référence."""
+    src = README.read_text(encoding="utf-8")
+    garder = frozenset(_nombres(src))
+    src_dates = _dates_jour_mois(src, None)
+    assert len(src_dates) >= 3, "gabarit du test obsolète : moins de 3 dates distinctes dans README.md"
+    for code in LANGUES:
+        p = DOCS / f"README.{code}.md"
+        if not p.exists():
+            continue
+        t = p.read_text(encoding="utf-8")
+        if not _migree_au_nouveau_modele(t):
+            continue
+        assert _dates_jour_mois(t, garder) == src_dates, {
+            "code": code, "dates (jour, mois)": dict(_dates_jour_mois(t, garder)), "FR": dict(src_dates)}
+
+
+def test_l_elargissement_249_sait_dire_faux():
+    """REGLES n° 5 : l'élargissement de la 249 (dates locales, nombres du FR gardés, 億 ÷ 10) doit rester
+    un contrôle — chaque témoin ci-dessous DOIT casser, sinon c'est un relâchement."""
+    src = README.read_text(encoding="utf-8")
+    garder = frozenset(_nombres(src))
+    src_compte = Counter(_nombres(src))
+    ja = (DOCS / "README.ja.md").read_text(encoding="utf-8")
+    zh = (DOCS / "README.zh.md").read_text(encoding="utf-8")
+    fi = (DOCS / "README.fi.md").read_text(encoding="utf-8")
+    hu = (DOCS / "README.hu.md").read_text(encoding="utf-8")
+    for nom, t in (("ja", ja), ("zh", zh), ("fi", fi), ("hu", hu)):
+        assert Counter(_nombres(t, garder)) == src_compte, f"{nom} : le témoin part d'un fichier déjà rouge"
+    # un débit altéré (312,3 → 321,3), en japonais et en chinois
+    for nom, t in (("ja", ja), ("zh", zh)):
+        assert t.count("312.3") == 1, f"{nom} : gabarit du témoin obsolète (312.3 absent)"
+        assert Counter(_nombres(t.replace("312.3", "321.3"), garder)) != src_compte, f"{nom} : débit altéré non vu"
+    # 560 億 → 56 億 (ce n'est plus 56 milliards mais 5,6)
+    assert ja.count("560 億") == 1 and zh.count("560 亿") == 1, "gabarit du témoin obsolète (560 億/亿 absent)"
+    assert Counter(_nombres(ja.replace("560 億", "56 億"), garder)) != src_compte, "ja : 560 億 → 56 億 non vu"
+    assert Counter(_nombres(zh.replace("560 亿", "56 亿"), garder)) != src_compte, "zh : 560 亿 → 56 亿 non vu"
+    # une date réelle changée, dans une forme locale (finnois 22.9.2026, hongrois 2026.09.22)
+    src_dates = _dates_jour_mois(src, None)
+    assert fi.count("22.9.2026") == 1 and hu.count("2026.09.22") == 1, "gabarit du témoin obsolète (date absente)"
+    assert _dates_jour_mois(fi.replace("22.9.2026", "21.9.2026"), garder) != src_dates, "fi : date changée non vue"
+    assert _dates_jour_mois(hu.replace("2026.09.22", "2026.09.21"), garder) != src_dates, "hu : date changée non vue"
+    # un « 16.02 » (nombre du FR au point décimal) altéré reste vu, même s'il ressemble à une date
+    assert ja.count("16.02") == 1
+    assert Counter(_nombres(ja.replace("16.02", "16.03"), garder)) != src_compte, "ja : 16.02 → 16.03 non vu"
