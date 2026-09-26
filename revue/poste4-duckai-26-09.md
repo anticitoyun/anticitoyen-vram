@@ -661,6 +661,14 @@ FP8 blockwise SM120), nvidia.com (SGLang Release 26.02 notes).
 
 ## Q18 — préfill GDN groupé par cu_seqlens (FLA) : au bit en fp32 (8/8), pas en bf16 (0/7) — normal ?
 
+**PRÉMISSE INVALIDÉE (poste1, 245, 26/09)** : les 0/7 bf16 venaient d'une ERREUR du test (poids de
+convolution bf16 comparés à une convolution de référence en fp32, boucle de référence qui plantait), pas
+d'une dérive numérique réelle. Test corrigé : 35 passed, dont le bf16 au bit ; diagnostic séparé confirme
+fla bf16 isolé = varlen = groupé, à 0 ulp (`scratchpad/poste1-p245-26-09/diag.txt`). La réponse ci-dessous
+reste une synthèse duck.ai VALIDE sur ce que garantissent FLA/vLLM/SGLang en général, mais **ne pas la
+citer comme une mesure sur notre cas** : notre 0/7 n'était pas une mesure de dérive bf16, c'était un bogue
+de banc.
+
 **3 avis convergents (Luna, gpt-oss, Gemma 4)** : NON, l'égalité au bit en bf16 entre un appel groupé
 (cu_seqlens) et des appels séparés par séquence n'est PAS un contrat raisonnable — seul le fp32 s'en
 approche, et encore sous réserve (voir plus bas).
