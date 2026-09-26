@@ -18,7 +18,7 @@ INDEX = REVUE / "INDEX.md"
 
 # Cliquet : nombre de notes non indexées le 26/09, après la pièce 263 (213-262/25-26-09
 # ajoutées). Baisser ce chiffre est bienvenu (l'indexation d'un passif) ; jamais le monter.
-PLAFOND_NON_INDEXEES = 424
+PLAFOND_NON_INDEXEES = 324
 
 
 def _notes_du_dossier(revue_dir: pathlib.Path = REVUE) -> set[str]:
