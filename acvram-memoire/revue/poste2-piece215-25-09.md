@@ -1,10 +1,10 @@
-instrument : outils/gpu/mesure/familles-b1.py, familles-comparees.py, nsys-tete-sampler.sh (Qwen3.5-35B-A3B, b=1 et b=8)
-commit : branche poste2-p215 depuis origin/main 1b56f68e9
+instrument : outils/gpu/mesure/familles-b1.py (corrigé d599b0ceb), nsys profile+stats, CSV brut regroupé par grille
+commit : poste2-p215 d08cb4f27, prise-familles.sh (scratchpad/poste2-p215-25-09/)
 régime : plein (ordre chef, reprise post-pause)
-scellé : voir prédiction ci-dessous, écrite avant toute prise
-mesuré : —
-verdict : —
-durée : —
+scellé : 3 postes GDN nommés avant mesure (qkv/gate/out_proj) ; falsificateur : <60 % du delta attribué → faux
+mesuré : b=1 (350,1 pas), b=8 (349,9 pas), portée Marlin globale, Qwen3.5-35B-A3B-srcQ4_K_M-nvfp4
+verdict : qkv+gate CONFIRMÉS (Marlin, pas plain), out_proj NON TRANCHÉ sans NVTX — voir ## Verdict
+durée : b=1 ~20 min (file + capture + post-traitement), b=8 ~35 min (file + capture)
 
 ## Prédiction (avant mesure)
 
@@ -85,8 +85,38 @@ la prédiction pointait la bonne cause, la mauvaise famille). `out_proj` reste �
 `gdn.py:_projections` si le chef le juge nécessaire, sinon le verdict se limite à qkv+gate, confirmé, out_proj
 non isolé.
 
-b=8 en file FIFO (`ACVRAM_NOM=poste2-p215-b8`), sortie `scratchpad/poste2-p215-25-09/b8/` — comparaison b=1/b=8 à
-suivre dès la capture.
+## Verdict — b=1 vs b=8, familles et postes GDN
+
+b=1 (noyaux_us_pas 3532,7) : experts 1508,6 (43 %), autres+projections après correctif 341,1+297,2 = 638,3 inchangé
+en somme (le correctif reclasse, ne change pas le total), glue_torch 816,3, attention 210,8.
+b=8 (noyaux_us_pas 5699,9, +61 % vs b=1) : experts 3013,9 (53 %, part MONTANTE avec b — attendu, cf. 199 : 51-58 %
+sur les autres MoE), autres 1031,3, projections 616,6, experts_glue 172,1 (quasi nul à b=1, 35,8 — le
+regroupement d'experts routés pèse à b>1). **À b=8, le noyau dominant change de nature** : `marlin_moe_wna16::Marlin`
+(grille [510x1x1], 1883,0 µs/pas, 72,8×) et `marlin::Marlin` générique ([170x1x1], 1054,0 µs/pas, 106,2×)
+remplacent les `nvfp4_gemv_marlin2_kernel` étroits de b=1 — confirme le motif connu (156) : Marlin bascule vers
+des noyaux tuilés/groupés amortis dès M>1, ce qui explique le +4,52 % TENU à b=8 (200) pendant que M=1 reste sur
+la voie étroite pénalisée.
+
+**Postes nommés dans la prédiction, verdict par poste** :
+- `qkv` (N=8192) — CONFIRMÉ à b=1 : `nvfp4_gemv_marlin2_kernel` grille (128,1,4), 30,1/pas (= couches
+  `linear_attention` exactement), 245,2 µs/pas, 8,18 µs/lancement. Poste le plus coûteux des deux isolés.
+- `gate` (N=4096) — CONFIRMÉ à b=1 : grille (64,1,8), 30,1/pas, 157,5 µs/pas, 5,25 µs/lancement — moitié du poids
+  de `qkv`, cohérent avec un noyau mémoire-lié (bande passante ∝ octets de poids, N moitié).
+- `out_proj` (N=2048) — NON TRANCHÉ : aucun 3ᵉ groupe à ~30/pas isolé (ni Marlin narrow, ni plain), nommé par
+  `role_marlin` (`gdn.out`) donc probablement piloté avec `shared_expert.down_proj` (tie de disposition, pas de
+  N distinct côté grille) dans la pile doublée. Reste ouvert.
+- `alpha`/`beta_proj` (N=32 chacun) — tie confirmé (grille 8,1,1, 60,1/pas = 2×30), part négligeable (37,7 µs/pas
+  à b=1), non retenus comme poste dominant (conforme à la prédiction).
+
+qkv+gate ensemble : 402,7 µs/pas sur 3532,7 (11,4 % du temps noyau total, b=1) — poste significatif, cohérent
+avec le sens de la régression −3,13 % (200) même si le mécanisme prédit initialement (« projections plain mal
+classées ») était erroné : elles sont bien en Marlin, simplement sur la voie étroite non amortie à M=1. Seuil de
+falsification de la prédiction (§ ci-dessus, ≥ 60 % du delta) non évalué faute d'une capture nsys du témoin
+« sans Marlin GDN » (portée denses) — hors périmètre de cette pièce, à demander si le chef veut la borne
+quantitative complète plutôt que le mécanisme qualitatif rendu ici.
+
+Repos sur 215 : verdict qualitatif rendu (qkv+gate confirmés, out_proj ouvert), 2 postes sur 3 tranchés sans
+NVTX comme demandé.
 
 ## Blocage avant prise
 
