@@ -827,3 +827,81 @@ CUTLASS discussion #1536 split-K petit-M ; TensorRT-LLM issue #11932 échec NVFP
 DeepGemmFP4Experts, Blackwell SM100/SM120), Hugging Face (comparatif B200 NVFP4 SGLang/vLLM GPT-OSS-20B),
 arXiv (Cross-Platform Fused MoE Dispatch in Triton), mufeezamjad.com (worklog GEMM groupé persistant,
 238→23,8 µs).
+
+---
+
+## Q22 — décodage spéculatif RTX 5090 (SM120) pour Qwen3/Qwen3-Coder : MTP natif, EAGLE-3, Medusa
+
+**3 avis (Luna très prudente et sourcée, gpt-oss chiffré mais incohérent en interne, Gemma sans réponse
+exploitable)**. Écart notable entre Luna et gpt-oss : à traiter comme un signal d'alerte, pas comme deux
+sources équivalentes — voir mise en garde en fin de section.
+
+**Point de départ important (Luna)** : les Qwen3 originaux (4B/8B/14B/32B/30B-A3B) N'ONT PAS de tête MTP
+native en général. Seuls Qwen3-Next, Qwen3.5, Qwen3.6/3.8 et Qwen3-Coder-Next en ont une (ou un format de
+checkpoint compatible MTP), selon le checkpoint exact. Vérifier lequel de nos modèles Qwen3 a réellement
+une tête MTP avant de planifier autour de ce chiffre.
+
+**Taux d'acceptation** (Luna, plages larges, PAS de mesure RTX 5090/Qwen3 publiée en tableau croisé) :
+- **MTP natif** : ~50-90 % par jeton proposé, souvent 65-85 %, peut chuter fortement en long contexte.
+  Repère réel opposé : mesure utilisateur Qwen3.8-27B sur DGX Spark (proche Blackwell) à **47,5 %**
+  d'acceptation, longueur moyenne acceptée 2,42 — l'acceptation native n'est PAS automatiquement haute.
+  Une issue vLLM Qwen3.5 MTP documente un effondrement vers 0 % quand les configs positionnelles
+  cible/brouillon divergent en long contexte.
+- **EAGLE-3** : ~70-90 % sur trafic code/instruction bien apparié, MAIS dépend fortement de l'appariement
+  brouillon/cible — une tête EAGLE-3 entraînée pour Qwen3-8B n'est pas automatiquement adaptée à
+  Qwen3-30B-A3B, Qwen3-Next ou Qwen3-Coder-Next ; un brouillon mal apparié peut être PIRE que le MTP natif
+  tout en coûtant plus de VRAM.
+- **Medusa** : aucun checkpoint Medusa Qwen3/Qwen3-Coder de production identifié — pas mesurable pour du
+  Qwen3 de série, à traiter comme un projet de recherche/entraînement personnalisé, pas une option prête.
+
+**Gain mesuré/attendu à b=1 et b=4** : AUCUNE mesure publique RTX 5090 + Qwen3 + b=1/b=4 pour les 3
+méthodes n'existe (Luna). Repères de proxy (autre matériel/modèle) : MTP natif Qwen3.6-27B sur DGX Spark
+~1,8-1,94× ; Qwen3.8-27B 11,4→24,7 t/s (~2,17×, note explicite de sensibilité au prompt par l'auteur) ;
+EAGLE-3 générique 2,7-3,3× (papier, pas RTX 5090). Plage de planification (engineering expectations, pas
+des mesures) : MTP 1,4-2,0× à b=1 / 0,9-1,4× à b=4 (peut devenir négatif) ; EAGLE-3 1,7-3,0× à b=1 /
+1,0-1,6× à b=4. **Pour les modèles MoE (notre cas Qwen3-Coder-30B-A3B)** : ne pas présumer qu'un bon taux
+d'acceptation donne un gain proportionnel — le dispatch d'experts et le coût de vérifier K+1 jetons peuvent
+dominer ; à plus grand lot, le décodage spéculatif peut être plus lent même avec une bonne acceptation.
+
+**Coût VRAM** : MTP natif le moins cher (partage embeddings/tête LM/poids cible, coût additionnel ≈ poids
+du bloc MTP + KV brouillon B×K×taille_KV). EAGLE-3 ajoute un modèle brouillon complet + KV + tampons
+d'arbre de candidats — peut consommer plusieurs Go même pour un brouillon dit « petit » (repère cité : ~3 Go
+pour un déploiement Llama 70B, spécifique au modèle). Medusa : pas de modèle brouillon séparé mais plusieurs
+têtes avec projection de vocabulaire potentiellement grande chacune si non partagée.
+
+**Ce que servent vLLM/SGLang aujourd'hui (Luna, avec fichiers exacts)** :
+- **vLLM** : `vllm/config/speculative.py` liste les méthodes (`ngram`, `medusa`, `mlp_speculator`,
+  `draft_model`, `eagle`, `eagle3`...) et les types de modèles MTP (`qwen3_next_mtp`, `qwen3_5_mtp`, `mtp`).
+  Fichiers pertinents : `vllm/v1/spec_decode/`, `vllm/model_executor/models/{llama_eagle3,qwen3_next_mtp}.py`,
+  `vllm/v1/spec_decode/medusa.py`. Bogues connus : problème de forme de poids dans `qwen3_next_mtp.py`
+  (à vérifier contre le commit exact déployé) ; une issue documente que le RoPE/YaRN du brouillon n'hérite
+  pas toujours des overrides du modèle cible en long contexte (acceptation qui s'effondre). Une issue
+  récente (model-runner-V2) rapporte que l'autorégresseur ignore parfois le K dynamique du planificateur,
+  reproduite sur RTX 5090 double carte — pertinent à b≥4.
+- **SGLang** : support EAGLE/EAGLE3/NEXTN selon modèle et version (`--speculative-algorithm EAGLE3`,
+  `--speculative-draft-model-path`, `--speculative-num-steps`, etc.). NEXTN vient historiquement de
+  DeepSeek, compatibilité Qwen3 à vérifier au cas par cas. Un format de checkpoint EAGLE-3 SpecForge
+  n'est PAS forcément interposable avec le format vLLM/référence — vérifier le format avant de réutiliser
+  un brouillon d'un moteur à l'autre.
+
+**MISE EN GARDE sur gpt-oss** : sa réponse donne des chiffres très précis (EAGLE-3 4,3-5×, tableau VRAM en
+dixièmes de Go) mais est **incohérente en interne** — elle affirme d'abord une acceptation EAGLE-3 de
+75-85 %, puis cite dans la MÊME réponse une issue SGLang « confirmant » une acceptation de ~0,5 % et un
+gain de seulement 1,x× sur RTX 5090. Ne pas retenir les chiffres précis de gpt-oss sans re-vérification
+directe des sources qu'il cite (issue GitHub #11948, arXiv, DFlash blog) — possible confabulation de
+précision. Gemma n'a pas produit de réponse exploitable (recherche web non aboutie).
+
+**Recommandation pour la 279/poste1** : pour Qwen3-Coder-Next, commencer par MTP natif à K=2 ou 3 si le
+checkpoint en a une vraie tête (vérifier d'abord) ; mesurer l'acceptation ET la longueur moyenne acceptée
+par tour, pas seulement un taux nominal ; ne comparer à EAGLE-3 que si un checkpoint brouillon RÉELLEMENT
+apparié à notre famille Qwen3-Coder existe ; désactiver la spéculation si le gain mesuré disparaît à
+notre concurrence cible ; prévoir la VRAM du KV brouillon et des tampons de graphe CUDA séparément du KV
+cible. Medusa hors périmètre sans entraînement dédié.
+
+**Sources** : GitHub (`vllm/config/speculative.py`, `vllm/v1/spec_decode/`,
+`model_executor/models/{llama_eagle3,qwen3_next_mtp}.py`, issue poids qwen3_next_mtp, issue RoPE/YaRN long
+contexte, issue model-runner-V2 K dynamique RTX 5090, SGLang issue Eagle3 RTX 5090 inconsistante), nvidia.com
+(rapports utilisateurs Qwen3.6-27B/Qwen3.8-27B/Qwen3-Coder-Next sur DGX Spark), arXiv (Medusa original,
+benchmark Qwen3 générique EAGLE-3, TriSpec), vllm.ai (doc spec-decode, tailles de capture CUDA graph),
+spheron.network (guide déploiement EAGLE-3/Medusa, DFlash), amd.com (MTP DeepSeek V3/SGLang),
+consciousengines.com (compatibilité formats checkpoint EAGLE-3).
