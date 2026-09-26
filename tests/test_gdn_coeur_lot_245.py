@@ -77,7 +77,10 @@ def test_cassant_frontiere_fuyante(monkeypatch):
     couche = _couche(torch.float32)
     vraie = G._fla()
 
-    def fuyante(q, k, v, g, beta, initial_state, output_final_state, use_qk_l2norm_in_kernel, cu_seqlens):
+    def fuyante(q, k, v, g, beta, initial_state, output_final_state, use_qk_l2norm_in_kernel, cu_seqlens=None):
+        if cu_seqlens is None:                      # boucle de référence (`_coeur`) : fla intact
+            return vraie[0](q, k, v, g=g, beta=beta, initial_state=initial_state, output_final_state=output_final_state,
+                            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel)
         cu = torch.cat([cu_seqlens[:1], cu_seqlens[2:]])
         o, s = vraie[0](q, k, v, g=g, beta=beta, initial_state=initial_state[1:].contiguous(),
                         output_final_state=output_final_state, use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
