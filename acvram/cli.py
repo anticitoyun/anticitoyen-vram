@@ -90,6 +90,7 @@ VARIABLES_LUES = {
     "ACVRAM_ARBRE_LIBRE",       # garde d'import (__init__.py) : contournement nommé, arbre ≠ cwd
     "ACVRAM_DEPAQUETAGE",       # kernels/marlin_port/__init__.py : auto | cuda | triton | torch
     "ACVRAM_GDN_PREFILL_LOT",   # engine/couches.py : lot au préfill GDN
+    "ACVRAM_GDN_COEUR_LOT",     # engine/couches.py : 245, cœur GDN du préfill en longueurs variables (opt-in, au bit)
     "ACVRAM_GDN_ETAT_EN_PLACE", # engine/gdn.py : 156 F4, état GDN mis à jour en place (défaut 1)
     "ACVRAM_GDN_AB",            # engine/gdn.py : 175, portes α‖β bf16 en un appel (auto défaut | separe témoin | concat | triton)
     "ACVRAM_GDN_CONV_FUSEE",    # engine/gdn.py : 156 F2, conv de décodage fusionnée (défaut 1)

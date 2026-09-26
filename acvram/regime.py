@@ -359,6 +359,9 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("DEPAQ_PARTAGE", "1", ("acvram.kernels", "_DEPAQ_PARTAGE"), "0",
              "pièce 172 (DÉFAUT, au bit ; 0 = témoin) : au préfill de plusieurs séquences, la boucle par séquence d'une "
              "couche à récurrence linéaire déquantifie chaque poids NVFP4 UNE fois (GEMM toujours par séquence)"),
+    Variable("GDN_COEUR_LOT", "0", ("acvram.engine.couches", "_GDN_COEUR_LOT"), "0",
+             "pièce 245 (opt-in) : 1 = au préfill de plusieurs séquences, cœur Gated DeltaNet (portes, fla cu_seqlens, "
+             "norme) en un appel ; projections, convolution et out_proj par séquence ; au bit de la boucle (test 245)"),
     Variable("GDN_PREFILL_LOT", "0", ("acvram.engine.couches", "_GDN_PREFILL_LOT"), "0",
              "pièce 150 bis (opt-in) : 1 = au préfill de plusieurs séquences, projections Gated DeltaNet du lot en un "
              "appel (couches.py, forward_lot), convolution et règle delta par séquence ; autre M, donc pas au bit : KL"),

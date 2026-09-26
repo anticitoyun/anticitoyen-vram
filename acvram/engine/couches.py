@@ -50,6 +50,9 @@ _NORME_FUSEE = os.environ.get("ACVRAM_NORME_FUSEE", "0") == "1"
 # séquence par séquence) ; 1 = noyau d'attention seul batché ; 0 = boucle.
 _MLA_BATCH = int(os.environ.get("ACVRAM_MLA_BATCH", "2"))
 _GDN_PREFILL_LOT = os.environ.get("ACVRAM_GDN_PREFILL_LOT", "0") == "1"
+# Pièce 245 (opt-in) : au préfill de plusieurs séquences, projections et out_proj PAR SÉQUENCE (même M, même noyau),
+# cœur GDN (portes, fla en longueurs variables, norme) en UN appel sur le lot — au bit de la boucle (test 245).
+_GDN_COEUR_LOT = os.environ.get("ACVRAM_GDN_COEUR_LOT", "0") == "1"
 # Marque, dans le magasin d'états, une séquence dont l'état réside dans les
 # tampons fixes d'une couche (chemin graphes) plutôt qu'en tuple fonctionnel.
 _STATIC = object()
@@ -148,6 +151,24 @@ class DecoderLayerGDN(nn.Module):
         # kernels.depaquetage_partage) ; les GEMM restent une par séquence. Une seule séquence : rien à partager, et
         # garder les poids de la couche vivants ne ferait que monter le pic (chef, 25/09) — portée fermée.
         with (kernels.depaquetage_partage() if len(batch.query_lens) > 1 else contextlib.nullcontext()):
+            sids = [batch.seq_ids[i] if batch.seq_ids else i for i in range(len(batch.query_lens))]
+            # Pièce 245 : dans la même portée B' (la 243 y lit son seuil GEMV), projections et out_proj par séquence.
+            # Refusé AVANT de toucher aux états : un décodage dans le lot (t = 1 avec état) prend la règle récurrente,
+            # pas la règle par blocs — le grouper changerait sa sortie.
+            if (_GDN_COEUR_LOT and hasattr(la, "coeur_lot") and len(batch.query_lens) > 1
+                    and la.coeur_lot_possible(h)
+                    and not any(ql == 1 and store.get(sid) is not None for ql, sid in zip(batch.query_lens, sids))):
+                etats = []
+                for sid in sids:
+                    etat = store.get(sid)
+                    etats.append(self._reprendre(sid) if etat is _STATIC else etat)
+                ys, etats_new = la.coeur_lot(h, etats, list(batch.query_lens))
+                for sid, e in zip(sids, etats_new):
+                    store[sid] = e
+                x = x + torch.cat(ys).to(x.dtype)
+                if self.mlp is None:
+                    return x
+                return self._mlp(x)
             for i, ql in enumerate(batch.query_lens):
                 sid = batch.seq_ids[i] if batch.seq_ids else i
                 etat = store.get(sid)
