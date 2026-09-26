@@ -128,14 +128,63 @@ def _fichiers_revue_historiques():
     return tuple(paires)
 
 
-def _notes_pour(numero):
+def _notes_pour_chemin(numero):
     racine = _racine(numero)
     motif = re.compile(rf"(^|[^0-9]){re.escape(numero)}([^0-9]|$)|(^|[^0-9]){re.escape(racine)}([^0-9]|$)")
     return [(sha, chemin) for sha, chemin in _fichiers_revue_historiques() if motif.search(chemin)]
 
 
+@lru_cache(maxsize=1)
+def _sha_head():
+    return _git("rev-parse", "HEAD").stdout.strip()
+
+
+def _notes_par_titre(numero):
+    """280 : une note peut ne rien porter de la pièce dans son NOM de fichier mais la citer dans
+    un titre (`#`) ou une ligne de tableau (`|`) — cas réel, pièce 070b : pas de fichier à son
+    nom, sa ligne est `| 070 b | … |` dans `revue/poste6-serie266-flatpak-verdict-26-09.md`.
+    Cherché sur l'arbre COURANT (HEAD), pas tout l'historique comme `_notes_pour_chemin` : une
+    note de titre compte une fois fusionnée, pas pendant qu'elle est encore un brouillon isolé
+    sur une branche à part — une pièce non fusionnée reste couverte par le nom de fichier
+    (contrôle historique) si son auteur en a donné un, jamais par ce repli-ci."""
+    racine = _racine(numero)
+    suffixe = numero[len(racine):]
+    identifiant = rf"{racine}\s*{re.escape(suffixe)}" if suffixe else rf"{racine}\b"
+    motif = rf"^\s*(#|\|)[^\n]*{identifiant}\b"
+    r = _git("grep", "-n", "-i", "-E", motif, "--", "revue/*.md", "acvram-memoire/revue/*.md")
+    if r.returncode != 0:
+        return []
+    sha = _sha_head()
+    chemins = sorted({ligne.split(":", 1)[0] for ligne in r.stdout.splitlines() if ligne})
+    return [(sha, chemin) for chemin in chemins]
+
+
+def _notes_pour(numero):
+    # union, jamais un OU court-circuité : un faux positif de _notes_pour_chemin (une racine qui
+    # matche par hasard le chemin d'une note sans rapport, cas réel « 070 » dans
+    # `poste2-piece251-contre-lecture-v070-26-09.md`) ne doit pas empêcher de trouver la VRAIE
+    # note par son titre — les deux listes sont complémentaires, pas substituables.
+    vu = set()
+    resultat = []
+    for paire in [*_notes_pour_chemin(numero), *_notes_par_titre(numero)]:
+        if paire not in vu:
+            vu.add(paire)
+            resultat.append(paire)
+    return resultat
+
+
+# 280 : v0.7.0.md est déjà publié (release v0.7.0) et truffé de co-citations de plusieurs pièces
+# dans un même paragraphe — limite documentée du contrôle 3, connue avant même la 251. On ne
+# réécrit pas un fichier déjà livré pour satisfaire un contrôle après coup : ce fichier SEUL est
+# exempté des deux contrôles de contenu (note de verdict, chiffres), jamais de celui des sha.
+# `test_l_exemption_de_co_citations_reste_limitee_a_v070` casse si ce jeu s'étend.
+FICHIERS_CO_CITATIONS_ADMISES = frozenset({"v0.7.0.md"})
+
+
 @pytest.mark.parametrize("nom", FICHIERS)
 def test_chaque_piece_citee_a_sa_note_de_verdict(nom):
+    if nom in FICHIERS_CO_CITATIONS_ADMISES:
+        pytest.skip(f"{nom} : exempté (co-citations admises, voir FICHIERS_CO_CITATIONS_ADMISES)")
     _, minimum_pieces, _ = GABARITS[nom]
     texte = _notes(nom)
     pieces = _pieces_citees(texte)
@@ -216,6 +265,8 @@ def _contenu_note(sha, chemin):
 
 @pytest.mark.parametrize("nom", FICHIERS)
 def test_chaque_chiffre_cite_est_dans_la_note_de_sa_piece(nom):
+    if nom in FICHIERS_CO_CITATIONS_ADMISES:
+        pytest.skip(f"{nom} : exempté (co-citations admises, voir FICHIERS_CO_CITATIONS_ADMISES)")
     _, _, minimum_avec_chiffres = GABARITS[nom]
     texte = _notes(nom)
     par_piece = {}
@@ -252,3 +303,12 @@ def test_le_test_sait_dire_faux():
     assert "f0b1e381e" in shas
     assert _git("cat-file", "-e", "f0b1e381e").returncode != 0, (
         "le sha altéré existe par hasard dans le dépôt — gabarit du test à revoir")
+
+
+def test_l_exemption_de_co_citations_reste_limitee_a_v070():
+    """280 : v0.7.0.md est exempté des contrôles 2 et 3 (déjà publié, co-citations connues avant
+    la 251). Casse si un autre fichier rejoint l'exemption sans décision explicite — ce test-ci,
+    pas un skip discret dans les deux contrôles."""
+    assert FICHIERS_CO_CITATIONS_ADMISES == frozenset({"v0.7.0.md"}), (
+        "l'exemption des co-citations doit rester limitée à v0.7.0.md — toute extension à un "
+        "autre fichier est une décision à écrire ici explicitement, pas un effet de bord")
