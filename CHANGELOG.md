@@ -1,5 +1,18 @@
 # Journal des changements
 
+* **26/09/2026 — pièce 226 (poste6, décision chef) : `ACVRAM_MARLIN_PAR_LIGNE=1` REVIENT AU DÉFAUT — la « régression » de la 209
+  sur le Coder nvfp4 pur était un artefact du banc.** L'histoire vraie : la 209 (25/09) sert en Marlin les piles d'experts à échelles
+  sous-normales par un facteur par ligne, exact au bit, +5,77 % sur qkvo-i8c ; la 220 (25/09) l'a remise en opt-in sur le banc de la 217
+  (Coder pur b=8 : −8,9 % t/s, +20,7 % J, confirmé par quatre bras isolés) ; la 226 (26/09) a démontré l'artefact : ce banc
+  (`banc-llamacpp-16-09.py decode`) génère librement depuis des invites de **jetons tirés** (`invite(k, n)`), ses sorties sont dégénérées
+  (8/16 = un caractère répété) et **divergent entre bras** (9/16), donc le routage et les octets lus aussi — à jetons FIXES la 209 est plus
+  rapide (pas GPU 4 862 contre 4 946 µs), à piles égales le GEMM Marlin ne diffère que par les données. **ABBA à invites réelles** (banc
+  chat 102, celui du 209 c), Coder pur b=8, 5 + 5, serveur neuf par passe : défaut 0 **1 630,9 t/s · 0,1364 J** (bridage puissance) contre
+  1 **1 839,7 · 0,1113** (aucun bridage) = **+12,8 % / −18,4 %**. Ni le préfill (égal), ni l'épilogue par colonne (+2 µs/couche) n'y étaient
+  pour rien ; le compte direct d'experts distincts reste un résidu (trace de routage non écrite à l'arrêt du serveur).
+  `revue/poste6-piece226-verdict-26-09.md`. REGLES § 4 : une cellule de débit MoE en génération libre se prend à invites réelles ou à
+  jetons fixes, jamais à jetons tirés. Test cassant si le défaut revient à 0 :
+  `tests/test_marlin_pile_par_ligne_209.py::test_226_le_facteur_par_ligne_est_le_defaut_et_0_le_temoin` (remplace celui de la 220).
 * **25/09/2026 — pièce 220 (poste6, décision chef) : la 209 (facteur Marlin par ligne d'expert) revient en OPT-IN —
   `ACVRAM_MARLIN_PAR_LIGNE` vaut 0 au défaut, 1 = témoin de la 209.** Sur **Qwen3-Coder-30B-A3B-nvfp4 PUR** (67 477 échelles
   sous-normales sur deux couches, puis 128, 207, 262), le 1 ne bascule pas quatre couches mais les **48** : `experts_layout` passe de

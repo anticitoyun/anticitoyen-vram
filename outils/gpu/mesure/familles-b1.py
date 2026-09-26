@@ -9,7 +9,7 @@ MOTEURS = {
         ("experts", r"nvfp4_gemv_marlin|nvfp4_gemv_grouped|marlin_moe|moe_wna16|Marlin"),
         ("experts_glue", r"moe_reduce|moe_act|moe_aligner|moe_align|moe_slots"),
         ("routage", r"_route|moe_route|routeur|topk"),
-        ("projections", r"_etroit|int8_gemv|nvfp4_gemv\b|nvfp4_gemv<|_quant_a8|_epilogue_i8c|narrow|dense_nvfp4"),
+        ("projections", r"_etroit|int8_gemv|nvfp4_gemv\b|nvfp4_gemv<|nvfp4_gemv_kernel|_quant_a8|_epilogue_i8c|narrow|dense_nvfp4"),
         ("tete", r"lm_head|tete|logits|sampler|argmax|softmax_|penal|gumbel"),
         ("attention", r"fmha|flash|paged|attn|attention"),
         ("normes", r"rmsnorm|rms_norm|layer_norm"),
