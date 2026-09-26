@@ -719,8 +719,12 @@ class RotaryEmbedding(nn.Module):
         return inv
 
     def _ensure(self, seq_len: int, device, dtype) -> None:
+        # 235 (calibration) / 213 (service) : le dtype n'entrait pas dans la garde de
+        # rebuild -- le premier appelant (`forward(x.dtype)` ou `tables32(self._dtype)`,
+        # selon lequel touche l'objet en premier) gelait la précision pour tous les
+        # suivants, silencieusement (un upcast bf16→fp32 ne lève jamais d'erreur).
         if self._cos is not None and seq_len <= self._cache_len \
-                and self._cos.device == device:
+                and self._cos.device == device and self._cos.dtype == dtype:
             return
         if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
             # Un graphe capturé garde l'adresse des tables : les remplacer
