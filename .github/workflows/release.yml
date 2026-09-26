@@ -1,0 +1,108 @@
+name: Release packages
+
+# When a release is published, build the AUR/Copr artefacts and attach them to the
+# GitHub release. Nothing is pushed to AUR, Copr or Flathub here — those accounts belong
+# to the maintainer (pièce 236a); this workflow only produces the files each channel needs.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.7.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  rpm:
+    runs-on: ubuntu-24.04
+    container: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Build RPM and source RPM (for Copr)
+        run: |
+          dnf install -y rpm-build python3 gh
+          V="${TAG#v}"
+          mkdir -p ~/rpmbuild/SOURCES ~/rpmbuild/SPECS
+          # git is missing when checkout runs in this container: the tree has no .git
+          tar --exclude=.git --transform "s,^\.,anticitoyen-vram-$V," \
+            -czf ~/rpmbuild/SOURCES/anticitoyen-vram-$V.tar.gz .
+          sed "s/@VERSION@/$V/" packaging/rpm/acvram.spec > ~/rpmbuild/SPECS/acvram.spec
+          rpmbuild -bb ~/rpmbuild/SPECS/acvram.spec
+          rpmbuild -bs ~/rpmbuild/SPECS/acvram.spec
+          gh release upload "$TAG" ~/rpmbuild/RPMS/noarch/*.rpm ~/rpmbuild/SRPMS/*.src.rpm \
+            --clobber --repo "$GITHUB_REPOSITORY"
+
+  aur:
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: AUR files (PKGBUILD, .SRCINFO, install script)
+        run: |
+          # No CUDA in this container, and none is needed here: acvram's CUDA kernels JIT-compile
+          # at first real use (torch.utils.cpp_extension), not at package-build time — unlike a
+          # project that ships prebuilt .so files. `makepkg` only stages the source tree, so a
+          # plain archlinux:latest image is enough; the runtime `cuda` dependency is declared in
+          # the PKGBUILD (depends=), not exercised in CI.
+          pacman -Syu --noconfirm base-devel git github-cli
+          V="${TAG#v}"
+          useradd -m builder
+          mkdir /build/pkg
+          sed "s/@VERSION@/$V/" packaging/aur/PKGBUILD > /build/pkg/PKGBUILD
+          cp packaging/aur/acvram.install /build/pkg/
+          chown -R builder /build/pkg
+          su builder -c "cd /build/pkg && makepkg --nodeps --noconfirm"
+          SUM=$(sha256sum /build/pkg/*-"$V".tar.gz | cut -d' ' -f1)
+          sed -i "s/^sha256sums=('SKIP')/sha256sums=('$SUM')/" /build/pkg/PKGBUILD
+          su builder -c "cd /build/pkg && makepkg --printsrcinfo > .SRCINFO"
+          mkdir -p aur/acvram
+          cp /build/pkg/PKGBUILD /build/pkg/.SRCINFO /build/pkg/acvram.install aur/acvram/
+          tar -C aur -czf "aur-$V.tar.gz" acvram
+          gh release upload "$TAG" "aur-$V.tar.gz" --clobber --repo "$GITHUB_REPOSITORY"
+
+  # Flathub: manifest and module list supplied by poste6 (packaging/flathub/). Job wired the
+  # same way as animematrix's (pin the manifest's source to this tag/commit, attach a bundle
+  # and the pinned manifest to the release) — filled in once packaging/flathub/*.yml exists.
+  flatpak:
+    runs-on: ubuntu-24.04
+    if: false  # flip to true once packaging/flathub/ lands (poste6)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Build Flatpak bundle and pin the Flathub manifest to this tag
+        run: |
+          sudo apt-get update && sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          APP=io.github.anticitoyun.anticitoyen-vram   # confirm with poste6's manifest filename
+          flatpak install --user -y flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
+          flatpak-builder --user --force-clean --sandbox --repo=repo build "packaging/flathub/$APP.yml"
+          flatpak build-bundle repo "acvram-${TAG#v}.flatpak" "$APP"
+          gh release upload "$TAG" acvram-*.flatpak --clobber --repo "$GITHUB_REPOSITORY"
+
+  # Weblate: acvram has no locale/*.json (unlike animematrix) — poste2's 236c extracted the
+  # translatable UI strings into packaging/langues/_source.json instead (README.md itself is
+  # excluded: Weblate segments a whole .md poorly, and nothing there could guard the numbers
+  # or HTTP field names inside it — revue/poste2-piece236c-25-09.md).
+  translations:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Translation files (Weblate)
+        run: |
+          V="${TAG#v}"
+          zip -q "translations-$V.zip" packaging/langues/*.json docs/TRADUIRE.md
+          gh release upload "$TAG" "translations-$V.zip" --clobber --repo "$GITHUB_REPOSITORY"
