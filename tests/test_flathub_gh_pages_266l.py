@@ -29,7 +29,8 @@ def test_266l_un_seul_job_flatpak_a_la_fois_sans_annulation():
 def test_266l_le_depot_servi_amorce_repo_avant_la_construction():
     run = _run()
     assert run.index("git worktree add pages gh-pages") < run.index("flatpak-builder --user"), "gh-pages se lit AVANT de construire"
-    assert "[ -d pages/flatpak/objects ] && cp -a pages/flatpak repo" in run
+    ligne = next(l for l in run.splitlines() if "cp -a pages/flatpak repo" in l)      # 266 m : dans un `if`, suivi du mkdir
+    assert "[ -d pages/flatpak/objects ]" in ligne and ligne.index("[ -d pages/flatpak/objects ]") < ligne.index("cp -a pages/flatpak repo")
     assert run.count("--prune --prune-depth=1") == 2, "les deux branches (signée ou non) élaguent"
 
 
@@ -72,3 +73,17 @@ def test_266l_gh_pages_est_un_commit_orphelin_pousse_de_force():
     assert "commit-tree" in ligne and " -p " not in ligne and "github-actions[bot]" in ligne
     assert 'git push --force origin "$NOUVEAU:refs/heads/gh-pages"' in run
     assert "git -C pages push origin gh-pages" not in run and "git -C pages commit" not in run
+
+
+def test_266m_le_depot_copie_depuis_gh_pages_retrouve_ses_dossiers_vides():
+    """Run 36243027577 (premier run 266 l) : `cp -a pages/flatpak repo` depuis un clone git → refs/remotes absent (git ne
+    garde pas les dossiers vides) → build-update-repo : « Listing refs: opendir(refs/remotes): No such file ». Témoin local
+    du 26/09 : copie brute du clone gh-pages v0.7.2 → même erreur, code 1 ; copie + mkdir -p des quatre dossiers → « Updating
+    summary », code 0 ; avec des .keep dedans → code 0 aussi. Le job recrée les dossiers à l'amorçage et pose des .keep à
+    la publication pour que gh-pages les conserve."""
+    run = _run()
+    i = run.index("cp -a pages/flatpak repo")
+    assert "mkdir -p repo/refs/remotes repo/refs/mirrors repo/tmp repo/state" in run[i:i + 200], "mkdir juste après la copie"
+    j = run.index("cp -a repo pages/flatpak")
+    assert 'for d in refs/remotes refs/mirrors tmp state; do mkdir -p "pages/flatpak/$d" && touch "pages/flatpak/$d/.keep"; done' in run[j:j + 400]
+    assert run.index("mkdir -p repo/refs/remotes") < run.index("flatpak-builder --user"), "avant la construction"
