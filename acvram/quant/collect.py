@@ -254,12 +254,10 @@ def collect_activation_stats(
         return t
 
     collector = _StatCollector()
-    # dtype de la calibration (pièces 213/235) : sans lui fp32, et la table dépendait du 1er appelant (rope_fusee
-    # sur carte, repli forward sur processeur) — calibration différente selon le chemin
     rope = RotaryEmbedding(spec.head_dim, spec.max_position_embeddings,
-                           spec.rope_theta, spec.rope_scaling, None, dtype)
+                           spec.rope_theta, spec.rope_scaling)
     rope_mla = (RotaryEmbedding(spec.qk_rope_head_dim, spec.max_position_embeddings,
-                                spec.rope_theta, spec.rope_scaling, None, dtype)
+                                spec.rope_theta, spec.rope_scaling)
                if spec.est_mla and spec.mla_rope else None)
     embed = get("model.embed_tokens.weight").to(dtype).to(dev)
 

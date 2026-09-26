@@ -5,18 +5,23 @@ la longueur. Le RoPE principal (loader.py, construit sans dtype → fp32) était
 fusionné) en fp32 NON arrondi, puis reconstruit en bf16 par `reserver` : le 1er lot d'un processus tournait sur
 d'autres tables que tous les suivants (contam2 de la 213, mixte b=8 : Y seul ≠ Y après n'importe quel lot, 700-2 j15 /
 700-5 j3 ; défaut présent en 0.6.38).
-(1-3) processeur : table identique quel que soit l'ordre des appelants, dtype de retour = celui de l'appelant,
-reconstruction sur changement de dtype. (4) carte + modèle : le même lot joué deux fois dans UN moteur rend les mêmes
-jetons au bit. Bras cassant (prise de la 213) : ce fichier sur main → (1), (2) et (4) rouges."""
+Processeur : (1) table identique quel que soit l ordre des appelants (module fp32 appelé en bf16, la configuration
+fautive), (2) dtype de retour = celui de l appelant, (3) reconstruction sur changement de dtype, (4) chemin processeur
+= chemin carte simulé, (5) tout constructeur du moteur passe un dtype. Carte + modèle : (6) le même lot joué deux fois
+dans UN moteur rend les mêmes jetons au bit. Bras cassant (prise de la 213b) : ce fichier sur main → rouges."""
+import ast
 import os
+import pathlib
 import sys
 
 import pytest
 import torch
 
+import acvram
 from acvram.engine.layers import RotaryEmbedding
 
 POS = torch.tensor([0, 1, 7, 300, 1152])
+POS8 = torch.arange(8, dtype=torch.long)
 
 
 def _rope(dtype=torch.bfloat16):
@@ -24,7 +29,8 @@ def _rope(dtype=torch.bfloat16):
 
 
 def test_table_ne_depend_pas_du_premier_appelant():
-    a, b = _rope(), _rope()
+    # module sans dtype (fp32 par défaut) : la configuration fautive du RoPE principal avant la 213b, appelé en bf16
+    a, b = RotaryEmbedding(128, 32768, 1e6), RotaryEmbedding(128, 32768, 1e6)
     a.tables32(1153, torch.device("cpu"))                         # préfill fusionné d'abord (l'ordre du 1er lot)
     ca, sa = a(POS, torch.device("cpu"), torch.bfloat16, max_pos=1153)
     cb, sb = b(POS, torch.device("cpu"), torch.bfloat16, max_pos=1153)   # chemin eager d'abord
@@ -55,7 +61,32 @@ def test_reconstruction_sur_changement_de_dtype():
     assert torch.equal(r._cos32, r._cos.float()) and not torch.equal(r._cos32, avant)
 
 
-# ---- (4) le même lot deux fois dans un moteur : au bit (cellule contam de la 213) ----
+def test_chemin_processeur_egal_chemin_carte_simule():
+    """RoPE bf16 (le service ; collect.py après la 235) : chemin processeur (repli forward d'abord) et chemin carte
+    simulé (tables32 de rope_fusee d'abord) rendent les mêmes tables et les mêmes cos/sin."""
+    proc, carte = RotaryEmbedding(64, 128, 10000.0, None, dtype=torch.bfloat16), RotaryEmbedding(64, 128, 10000.0, None, dtype=torch.bfloat16)
+    cp, sp = proc(POS8, torch.device("cpu"), torch.bfloat16, max_pos=64)
+    proc.tables32(64, torch.device("cpu"))
+    carte.tables32(64, torch.device("cpu"))
+    cc, sc = carte(POS8, torch.device("cpu"), torch.bfloat16, max_pos=64)
+    assert torch.equal(proc._cos32, carte._cos32) and torch.equal(proc._sin32, carte._sin32)
+    assert torch.equal(cp, cc) and torch.equal(sp, sc)
+
+
+def test_tout_constructeur_du_moteur_passe_un_dtype():
+    """loader.py:313 (RoPE principal du service) construisait sans dtype → fp32 par défaut. Portée : engine/ (le
+    service) ; quant/collect.py relève de la 235 (poste2)."""
+    racine = pathlib.Path(acvram.__file__).resolve().parent / "engine"
+    sans = []
+    for f in racine.rglob("*.py"):
+        for n in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
+            if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", None)) == "RotaryEmbedding":
+                if len(n.args) < 6 and not any(k.arg == "dtype" for k in n.keywords):
+                    sans.append(f"{f.relative_to(racine)}:{n.lineno}")
+    assert not sans, f"RotaryEmbedding construit sans dtype (fp32 par défaut) : {sans}"
+
+
+# ---- (6) le même lot deux fois dans un moteur : au bit (cellule contam de la 213) ----
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outils"))
 
 
