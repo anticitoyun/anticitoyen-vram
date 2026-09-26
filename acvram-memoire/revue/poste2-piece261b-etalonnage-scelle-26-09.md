@@ -68,3 +68,29 @@ effectifs). Script à écrire à la 237d si chef le demande — hors périmètre
 Test rapide (n=10/tâche) pour confirmer le correctif avant la mesure complète : ≤ 10 min.
 Mesure complète (acvram n=100/50 + llama.cpp n=100/50) : ≤ 30 min sous `carte.sh` pour la
 partie acvram (llama.cpp hors carte, CPU/3080Ti selon dispo, à vérifier avant lancement).
+
+## Addendum 2 (chef, avant la mesure de santé) — plancher de santé, pas d'étalon externe
+
+Décision de chef, plus simple que l'addendum précédent : `llama.cpp` Q4_K_M n'est PAS un
+étalon d'acvram NVFP4 (quantification différente) — gardé comme REPÈRE seulement, jamais
+comme référence de tolérance. Aucun score MMLU/GSM8K publié n'existe pour
+`Qwen3-Coder-30B-A3B-Instruct` (vérifié : sa carte HF et BenchmarkList ne rapportent que des
+bancs agentiques/code — SWE-bench, Terminal-Bench, GDPval, Tau2 ; les 81,38/91,81 trouvés
+d'abord sont pour Qwen3-30B-A3B-**Base**, un autre modèle, écartés).
+
+Pour la 237c (P1 contre P0), un biais de l'instrument touche les DEUX bras également — inutile
+d'étalonner finement, il suffit que l'instrument ne soit ni au plancher (hasard) ni au plafond
+(saturé, ne discriminerait plus rien).
+
+**Plancher de santé (P0 seul, AVANT toute comparaison P1)** :
+* GSM8K, n=50 : score ≥ **0,70**.
+* UNE tâche MMLU, n=100 : score ≥ **0,50**. Tâche choisie AVANT la mesure (pas après avoir vu
+  les scores) : `mmlu_flan_cot_zeroshot_college_computer_science` — celle qui donnait le
+  signal le plus net au test rapide (n=10 : 0,4-0,5 des deux côtés, acvram et llama.cpp).
+* **Sous ce plancher** : instrument INVALIDE, arrêt, pas de mesure P1 ni de McNemar.
+* **Au-dessus** : P0 et P1 sur les MÊMES questions (graine 1234 fixe, ordre déterministe des
+  documents lm-eval), prises ≤ 30 min chacune (REGLES, régime mesuré), test apparié de
+  McNemar (avec correction de continuité), rapporté avec sa p-valeur et le nombre de paires
+  discordantes (b = P0 correct/P1 faux, c = P0 faux/P1 correct).
+
+Écrit et poussé AVANT la mesure de santé.
