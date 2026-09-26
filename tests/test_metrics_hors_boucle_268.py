@@ -101,3 +101,48 @@ def test_identite_des_champs(client):
     for cle, defaut in DE_REGIME.items():
         attendu = r[cle] if cle == "cartes" else r.get(cle, defaut)
         assert m[cle] == json.loads(json.dumps(attendu)), cle
+
+
+# -- étape 2 : gabarit et tokeniseur hors de la boucle HTTP ------------------------------------------------------------
+
+def test_cassant_gabarit_hors_boucle(client, monkeypatch):
+    """Gabarit retardé de 0,3 s : /health doit répondre pendant ce temps (ancien code : boucle bloquée → ROUGE)."""
+    from acvram.server import app as A
+    c, _ = client
+    vrai = A.render_chat
+
+    def lent(*a, **k):
+        time.sleep(0.3)
+        return vrai(*a, **k)
+    monkeypatch.setattr(A, "render_chat", lent)
+    fil = threading.Thread(target=lambda: c.post("/v1/chat/completions", json={
+        "model": "tiny", "max_tokens": 1, "messages": [{"role": "user", "content": "hello world"}]}))
+    fil.start()
+    time.sleep(0.05)
+    t0 = time.perf_counter()
+    assert c.get("/health").status_code == 200
+    attente = time.perf_counter() - t0
+    fil.join()
+    assert attente < 0.1, f"/health a attendu {attente:.3f} s derrière le gabarit : la boucle HTTP est bloquée"
+
+
+def test_memes_jetons_au_bit(client, monkeypatch):
+    """Les jetons soumis au moteur = gabarit puis tokeniseur appelés directement, dans le même ordre, au jeton près."""
+    from acvram.server.app import _encode
+    from acvram.server.chat import messages_pour_gabarit, render_chat
+    from acvram.server.protocol import ChatCompletionRequest
+    c, engine = client
+    vus, vrai = [], engine.add_request
+
+    def espion(prompt_ids, *a, **k):
+        vus.append(list(prompt_ids))
+        return vrai(prompt_ids, *a, **k)
+    monkeypatch.setattr(engine, "add_request", espion)
+    corps = {"model": "tiny", "max_tokens": 1,
+             "messages": [{"role": "system", "content": "the a of"}, {"role": "user", "content": "hello world and the"}]}
+    assert c.post("/v1/chat/completions", json=corps).status_code == 200
+    req = ChatCompletionRequest(**corps)
+    tok = engine.tokenizer                              # le tokeniseur que create_app a reçu
+    attendu = _encode(tok, render_chat(tok, messages_pour_gabarit(req.messages, avec_images=False),
+                                       req.add_generation_prompt, {}))
+    assert vus == [attendu]

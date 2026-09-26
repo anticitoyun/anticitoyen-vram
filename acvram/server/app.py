@@ -1060,7 +1060,9 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
         extra = dict(req.chat_template_kwargs or {})
         if req.tools:
             extra["tools"] = req.tools          # les gabarits HF les rendent eux-mêmes
-        prompt = render_chat(tokenizer, messages, req.add_generation_prompt, extra)
+        # Pièce 268 étape 2 : gabarit (Jinja) et tokeniseur dans un fil (~3 ms par requête, 262/269) — dans la boucle,
+        # ils étalaient une rafale de 12 au-delà de la fenêtre d'admission ; mêmes fonctions, mêmes jetons, même ordre.
+        prompt = await asyncio.to_thread(render_chat, tokenizer, messages, req.add_generation_prompt, extra)
         params = _params_from(req, 512)
         images = None
         if urls:
@@ -1069,7 +1071,7 @@ def create_app(engine: Engine, tokenizer: Optional[Tokenizer],
             n_img = sum(f.n_jetons for f in images)
             _garde_contexte(engine, prompt_ids, f" dont {n_img} jetons image ({len(images)} image(s))", params=params)
         else:
-            prompt_ids = _encode(tokenizer, prompt)
+            prompt_ids = await asyncio.to_thread(_encode, tokenizer, prompt)
             _garde_contexte(engine, prompt_ids, params=params)
         request_id, q = await service.submit(prompt_ids, params, images)
 
