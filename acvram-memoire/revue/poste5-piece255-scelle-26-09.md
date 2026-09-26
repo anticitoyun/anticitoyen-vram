@@ -94,3 +94,10 @@ Si non tenue : opt-in seulement, et la suite honnête est un format fp8 unique j
 
 ## 3. Durée
 À sec : 45 min. Micro-banc : une prise ≤ 10 min (chargement de 4 poids × 2 formats, pas du modèle).
+
+## Addendum instrument (avant mesure, 26/09 05 h)
+Harnais retenu = celui du banc 243 (témoin comparable) : événements CUDA, 8 appels par fenêtre, médiane de 5 fenêtres,
+L2 vidé (192 Mo) avant chaque fenêtre, rotation sur 4 couches (0-3 GDN, 56-59 mlp) — PAS de graphe (le § 2 disait « 30
+rejeux sous graphe » : écart d'écriture, corrigé avant mesure). Si `_scaled_mm` refuse un M brut, M est rembourré à 16 et
+c'est relevé (`F_pad`). Poids int8 lus directement dans le converti (INT8Tensor marqué `prefill_bf16`, comme loader.py:116),
+pas le modèle entier.
