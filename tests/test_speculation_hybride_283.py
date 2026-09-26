@@ -74,14 +74,17 @@ def test_defaut_none_sur_non_hybride_aussi(monkeypatch):
 def test_ngram_explicite_sur_hybride_sert_quand_meme_avec_avertissement(monkeypatch):
     parsed, sortie = _lancer(monkeypatch, True, "--speculative", "ngram")
     assert parsed.speculative == "ngram"
-    assert "AVERTISSEMENT" in sortie and "277fix" in sortie and "qualification en cours" in sortie
+    assert "AVERTISSEMENT" in sortie and "bogue 277" in sortie and "qualification en cours" in sortie
 
 
 def test_ngram_explicite_sur_non_hybride_avertit_aussi(monkeypatch):
     """283 élargie : l'avertissement ne dépend plus de l'hybride, le bogue touchait le dense aussi."""
     parsed, sortie = _lancer(monkeypatch, False, "--speculative", "ngram")
     assert parsed.speculative == "ngram"
-    assert "AVERTISSEMENT" in sortie and "277fix" in sortie
+    assert "AVERTISSEMENT" in sortie and "bogue 277" in sortie
+    # chef (relecture 283) : le message ne doit jamais affirmer que le correctif est livré —
+    # la 0.7.4 peut sortir sans la 277fix (test Coder non tranché).
+    assert "277fix inclus" not in sortie
 
 
 def test_none_explicite_pas_d_avertissement(monkeypatch):

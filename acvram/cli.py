@@ -892,7 +892,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
     # poste5 : le pipeline n'était pas vidé au passage du décodage simple au spéculatif,
     # jetons répétés. Le bogue touche TOUT modèle servi avec ngram, dense compris — pas
     # seulement les hybrides. Défaut = none pour TOUS les alias ; ngram reste servable sur
-    # demande explicite (le correctif 277fix est inclus, qualification encore en cours).
+    # demande explicite, avec un avertissement — le correctif n'est pas forcément livré dans
+    # cette version (le test Coder de la 277fix n'est pas tranché), le message ne le suppose pas.
     demande_explicitement = args.speculative is not None
     if args.speculative is None:
         args.speculative = "none"
@@ -901,8 +902,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
         # Qwen3.8 étaient converties mais jamais chargées, et rien ne le disait).
         args.speculative, repli = repli_speculatif(loaded.model)
     if demande_explicitement and args.speculative == "ngram":
-        print(red("  AVERTISSEMENT : --speculative ngram demandé explicitement — pièce 277 (poste5) : "
-                  "correctif 277fix inclus, qualification en cours."))
+        print(red("  AVERTISSEMENT : ngram — bogue 277 (jetons répétés au passage simple → spéculatif) ; "
+                  "sortie possiblement différente de --speculative none ; qualification en cours."))
     if args.speculative == "ngram":
         from .engine.speculative import NGramProposer
         speculator = NGramProposer()
@@ -1347,9 +1348,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "pipeline n'etait pas vide au passage du decodage simple au speculatif "
                          "(ngram), jetons repetes ; touche tout modele servi avec ngram, dense "
                          "compris (277a-bis : hybride GDN, jetons 13 a 24 logits sous le premier "
-                         "choix, 4/5 invites). Demander ngram explicitement reste possible (le "
-                         "correctif 277fix est inclus, qualification en cours), avec un "
-                         "avertissement au demarrage. "
+                         "choix, 4/5 invites). Demander ngram explicitement reste possible, avec "
+                         "un avertissement au demarrage (sortie possiblement differente de none, "
+                         "qualification du correctif en cours). "
                          "ngram ne coute rien et paie quand la sortie recopie "
                          "l'entree ; draft exige --draft-model ; mtp utilise "
                          "la tete nextn du modele charge si elle porte une "
