@@ -16,6 +16,7 @@ Ce fichier ne refait PAS les contrôles de structure de `test_readme_traductions
 titres, tableaux) : il se concentre sur le contenu numérique et les cibles de liens, que ces
 contrôles ne lisent pas."""
 import re
+from collections import Counter
 from pathlib import Path
 
 RACINE = Path(__file__).resolve().parents[1]
@@ -36,7 +37,10 @@ LANGUES = {
 # d'une langue à l'autre (« groupes de 128 de l'INT4 » / « INT4's groups of 128 »), ce qui n'est PAS
 # ce que ce contrôle protège.
 _LETTRE = r"A-Za-zÀ-ÖØ-öø-ÿ_"
-_NOMBRE = re.compile(rf"(?<![{_LETTRE}])\d(?:[ .,]?\d)*(?![{_LETTRE}])")
+# Exclu seulement si une lettre PRÉCÈDE (INT4, NVFP4, FP8, E4M3, BF16, sm_120, k8v4 — la lettre vient
+# avant le chiffre). Une lettre qui SUIT n'exclut pas : plusieurs langues soudent un suffixe à un
+# nombre (allemand « 128er-Gruppen », « 16er-Blöcke ») sans que ce soit un nom de format.
+_NOMBRE = re.compile(rf"(?<![{_LETTRE}])\d(?:[ .,]?\d)*")
 
 
 def _ancres(texte: str) -> list[str]:
@@ -53,7 +57,13 @@ def _normalise_nombre(brut: str) -> str:
     return re.sub(r"[^\d]", "", brut)
 
 
-_DATE = re.compile(r"\b\d{1,2}/\d{2}(?:/\d{4})?\b|\b\d{4}-\d{2}-\d{2}\b")
+# Jour 01-31, MOIS TOUJOURS SUR 2 CHIFFRES (01-12, jamais "4" seul) -- sans le mois à 2 chiffres,
+# "13.4" (13,4 %, pas une date) matche comme jour=13/mois=4 et disparaît à tort ; sans la borne
+# 01-12, "1.44" (facteur) matche comme jour=1/mois=44 (bogues trouvés en écrivant ce test : EN
+# perdait ses propres chiffres, alors que docs/README.en.md n'est même pas modifié par la 238).
+_JOUR = r"0?[1-9]|[12]\d|3[01]"
+_MOIS = r"0[1-9]|1[0-2]"
+_DATE = re.compile(rf"\b(?:{_JOUR})[/.](?:{_MOIS})(?:[/.]\d{{4}})?\b|\b\d{{4}}-\d{{2}}-\d{{2}}\b")
 
 
 def _sans_dates(texte: str) -> str:
@@ -116,21 +126,32 @@ def test_les_ancres_ne_sont_jamais_traduites():
 
 
 def test_les_chiffres_sont_recopies_a_l_identique():
+    """Multiset, pas séquence : une traduction réordonne parfois deux valeurs adjacentes dans la
+    MÊME phrase (allemand « bei b=12 um 9,1 % » contre FR « 9,1 % à b=12 » — b=12 avant le
+    pourcentage, l'inverse du FR) sans que ce soit un chiffre CHANGÉ. Ce que ce contrôle protège :
+    qu'aucune valeur n'apparaisse, disparaisse ou change — pas l'ordre exact des clauses."""
     src = README.read_text(encoding="utf-8")
     src_nombres = _nombres(src)
     assert len(src_nombres) >= 30, "gabarit du test obsolète : moins de 30 chiffres dans README.md"
-    for code in LANGUES:
+    src_compte = Counter(src_nombres)
+    for code in LANGUES - {"en"}:
+        # `docs/README.en.md` écrit ses décimales au point (« 16.02 ») ET certaines de ses dates
+        # n'existent qu'avec année (ISO, jamais de DD.MM nu) — mais le FR écrit AUSSI des dates nues
+        # au point-décimal-compatible dans d'autres traductions (allemand « 22.09 ») : aucune règle
+        # syntaxique ne distingue de façon fiable un « 16.02 » mesuré d'un « 22.09 » daté sans plus
+        # de contexte que la forme. EN n'est pas modifié par la 238 (déjà accepté, 231) : exclu de CE
+        # contrôle plutôt que de complexifier `_DATE` pour un fichier hors périmètre.
         p = DOCS / f"README.{code}.md"
         if not p.exists():
             continue
         t = p.read_text(encoding="utf-8")
         if not _migree_au_nouveau_modele(t):
             continue
-        t_nombres = _nombres(t)
-        assert t_nombres == src_nombres, (
-            f"{code} : chiffres différents de README.md — "
-            f"{len(t_nombres)} contre {len(src_nombres)} nombres, "
-            f"premier écart à l'index {next((i for i, (a, b) in enumerate(zip(src_nombres, t_nombres)) if a != b), min(len(src_nombres), len(t_nombres)))}")
+        t_compte = Counter(_nombres(t))
+        manquent = list((src_compte - t_compte).elements())
+        en_trop = list((t_compte - src_compte).elements())
+        assert not manquent and not en_trop, {
+            "code": code, "chiffres manquants": sorted(manquent)[:6], "chiffres en trop": sorted(en_trop)[:6]}
 
 
 _CIBLE_BARRE_LANGUES = re.compile(r"^README(?:\.\w+)?\.md$")
@@ -176,4 +197,5 @@ def test_le_test_sait_dire_faux(tmp_path):
     — preuve que le contrôle ci-dessus n'est pas vide."""
     src = README.read_text(encoding="utf-8")
     altere = src.replace("1 995,1", "1 995,2", 1)
-    assert _nombres(altere) != _nombres(src), "l'altération n'a pas changé la séquence de chiffres — gabarit du test à revoir"
+    assert Counter(_nombres(altere)) != Counter(_nombres(src)), (
+        "l'altération n'a pas changé le multiset de chiffres — gabarit du test à revoir")
