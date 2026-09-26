@@ -32,6 +32,14 @@
   alias vision servant du texte seul (guet coupé pour lui aussi), plusieurs images par requête, b = 12 avec images, 2e
   modèle (274).** `revue/poste6-piece276-{a-sec,verdict}-26-09.md`.
 
+### Paquets
+
+* **26/09/2026 — pièce 266 m : le Flatpak se construit de nouveau.** La 0.7.3 n'a pas de `.flatpakref` :
+  le dépôt OSTree amorcé depuis la branche gh-pages perdait ses dossiers vides (git ne les garde pas), et
+  `flatpak build-update-repo` échouait sur `opendir(refs/remotes)`. Les dossiers `refs/remotes`, `refs/mirrors`,
+  `tmp` et `state` sont recréés avant la mise à jour, avec un `.keep`. Témoin local : copie brute → code 1, copie
+  recréée → code 0. Garde `test_266m`.
+
 ## 0.7.3 (26/09/2026)
 
 * **26/09/2026 — pièce 269 c (poste6, décision chef sur la mesure 269 b) : le guet d'admission est AU DÉFAUT
