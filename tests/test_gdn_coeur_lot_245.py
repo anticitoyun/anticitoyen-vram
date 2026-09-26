@@ -32,7 +32,7 @@ def _couche(dtype, seed=245) -> GatedDeltaNet:
     conv_dim = 2 * NK * DK + NV * DV
     return GatedDeltaNet(
         qkv=lin(conv_dim, H), gate=lin(NV * DV, H), alpha=lin(NV, H), beta=lin(NV, H), out=lin(H, NV * DV),
-        conv_weight=(torch.randn(conv_dim, KER) * 0.3).to(dtype), dt_bias=torch.rand(NV) - 0.5,
+        conv_weight=torch.randn(conv_dim, KER) * 0.3, dt_bias=torch.rand(NV) - 0.5,
         a_log=torch.rand(NV) * 3 - 2, norm_weight=torch.ones(DV) + 0.1 * torch.randn(DV),
         num_k_heads=NK, num_v_heads=NV, head_k_dim=DK, head_v_dim=DV).to("cuda")
 
