@@ -1,5 +1,31 @@
 # Journal des changements
 
+## 0.7.5 (26/09/2026)
+
+### Correctifs
+
+* **26/09/2026 — pièce 277fix (poste5, poste5-277fix 557c761a0) : le bogue 277 est corrigé ; la spéculation reste
+  hors défaut.** Le pipeline de décodage est vidé avant un pas spéculatif (`_pipeline_vider`, `acvram/engine/pipeline.py`,
+  `acvram/engine/runner.py`) : plus de jetons répétés au passage simple → spéculatif. Mixte-i8c : sortie ngram
+  identique au bit à `--speculative none` (k = 4 et k = 1). Qwen3-Coder : deux écarts restants sur 5 × 32 jetons, tous
+  deux des quasi-égalités (jeton spéculatif = second choix du modèle, marge 0,0152 et 0,0154, seuil scellé 0,5 avant
+  la mesure). Sans le correctif, les mêmes tests sont ROUGES (mixte 2/2 ; Coder marge 12,19). **Défaut inchangé :
+  `none` pour tous les alias** — le ngram corrigé peut faire plus de pas que `none` (jusqu'à 55 pas pour 32 jetons) ;
+  il ne reviendra au défaut qu'après la 277e. L'avertissement de `--speculative ngram` dit désormais « bogue 277
+  corrigé ». Tests : `tests/test_spec_pipeline_277.py`, `tests/test_speculation_hybride_283.py`.
+  `revue/poste5-piece277fix-verdict-26-09.md`.
+
+### Outillage de sortie
+
+* **26/09/2026 — pièce 285 (poste3, poste3-285 ba09fa7cb) : `outils/verifier-release.sh` refuse deux défauts qu'il
+  laissait passer.** (a) un fichier `releases/download/vX.Y.Z/…` cité dans le corps de la release mais absent de ses
+  assets (cas réel : le `.flatpakref` cité par les notes de la v0.7.3, jamais produit) ; (b) un Flatpak installé qui
+  n'est pas la version publiée (cas réel : la vérification de la v0.7.4 a écrit « OK … (0.7.2) », GitHub Pages
+  servant encore l'ancien commit) — jusqu'à 10 `flatpak update`, puis refus (code 66). `outils/sortir-version.sh` :
+  le run « Release packages » est choisi par son tag (`headBranch`), plus le premier venu ; reprise explicite
+  `--depuis N` après un échec d'étape. Tests : `tests/test_corps_release_assets_285.py`,
+  `tests/test_flatpak_version_285c.py`, `tests/test_sortir_version_285b.py`.
+
 ## 0.7.4 (26/09/2026)
 
 ### Correctif de sûreté
