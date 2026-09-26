@@ -63,3 +63,4 @@ modules:
     sources:
       - type: dir
         path: ../..
+        skip: [construction-flatpak, repo, .flatpak-builder]   # 266 c : ce que flatpak-builder écrit lui-même, en CI, à la racine du dépôt
