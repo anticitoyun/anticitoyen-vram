@@ -768,3 +768,62 @@ avant de conclure à une régression.
 d'évaluation llama.cpp), Oracle Cloud (blog FP8 dynamique, recovery Llama 3.3-70B), GMI Cloud (blog
 FP8/FP4), NVIDIA (blog Transformer Engine/Blackwell, MXFP8 vs BF16), vllm.ai (doc FP8, doc KV-cache FP8
 état de l'art), Hugging Face (cartes modèles compressed-tensors, carte Red Hat NVFP4/FP8 GSM8K/AIME25).
+
+---
+
+## Q20 — préfill MoE solo (Qwen3-Coder-30B-A3B, 128 experts top-8, NVFP4) : ≈29 jetons/expert, borné par les lancements/petites tuiles — que font vLLM/SGLang/TensorRT-LLM, quel gain typique ?
+
+**3 avis (gpt-oss, Luna très détaillé, Gemma 4 générique)** : convergents sur le fond, avec un avertissement
+important de Luna spécifique à notre carte (SM120).
+
+**Ce qui compte le plus à M≈29, par ordre (Luna)** :
+1. **Passer d'une boucle par expert à UN lancement groupé/scheduled** — le plus gros gain, avant même la
+   taille de tuile. Une boucle naïve (128 lancements séparés × 3 GEMM) est catastrophique en surcoût de
+   lancement ; un noyau groupé aplati (`moe_align_block_size` côté vLLM : tri des jetons, table
+   `sorted_token_ids`/`expert_ids`/`num_tokens_post_padded`, code exact dans
+   `vllm/model_executor/layers/fused_moe/{fused_moe,moe_align_block_size}.py`) traite tous les experts en
+   quelques lancements, indépendamment de leur nombre.
+2. **Éviter le sur-remplissage (padding) des tuiles** : à M=29, `BLOCK_M=32` ne gaspille que 3 lignes ;
+   `BLOCK_M=64` en gaspille plus de la moitié. Mais `BLOCK_M=16` double le nombre de tuiles et peut coûter
+   plus en métadonnées — pas un choix automatique, dépend de N/K/registres/nombre d'experts non-vides.
+   Balayage utile : `BLOCK_M={16,32,64} × BLOCK_N={64,128,256} × GROUP_SIZE_M={1,4,8} × split-K`.
+3. **Ordonnancement persistant/grille adaptative** — utile si la grille initiale sous-occupe le GPU
+   (peu de tuiles par expert). SGLang documente une grille adaptative (divise BLOCK_SIZE, double la grille
+   si trop petite) — bénéfice relatif MOINDRE sur RTX 5090 (moins de SM) que sur B200 où c'est mesuré.
+4. **Fusion gate+up** : remplace 2 petits GEMM par 1 plus grand — optimisation de second ordre APRÈS le
+   groupement, pas le levier principal.
+5. **Tri/permutation (`moe_align_block_size`)** : nécessaire mais coûte un lancement + tampon séparé ; à
+   M≈29 son coût peut être comparable aux GEMM eux-mêmes — les meilleures implémentations fusionnent
+   l'indexation avec le premier GEMM plutôt qu'un tri générique séparé.
+6. **Split-K** : utile seulement si le premier GEMM est sous-occupé en parallélisme N ; sinon coûte plus
+   qu'il ne rapporte (réduction partielle supplémentaire) — à autotuner, jamais activer sans mesure.
+
+**AVERTISSEMENT SPÉCIFIQUE SM120 (Luna, à vérifier avant toute conclusion)** : TensorRT-LLM issue #11932
+rapporte qu'au moins une release candidate 1.3.0 voit ÉCHOUER les deux chemins NVFP4 MoE (TRTLLMGen ET
+CUTLASS) sur SM120 pendant le profilage de tactique, y compris l'échec d'initialisation d'un GEMM groupé
+TMA warp-specialized. Les comparatifs publiés B200/SM100 (SGLang 1,78× vLLM à b=1, 1,40× à b=128, GPT-OSS-20B
+NVFP4) NE SE TRANSPOSENT PAS forcément à SM120 — vérifier la version exacte de tout moteur tiers avant
+d'utiliser ses chiffres comme référence pour nous.
+
+**Gain typique attendu (engineering expectations, PAS de mesure publiée exacte pour notre cas précis)** :
+- Contre une boucle naïve par expert : **2-6×** (GEMM groupé seul) → **3-8×** (+ gate/up empaqueté + petites
+  tuiles) → **5-10× ou plus** si la boucle de référence est particulièrement mauvaise (lancement séparé par
+  expert/projection/activation/réduction, synchronisation après chaque expert).
+- Contre un GEMM groupé DÉJÀ compétent (notre cas probable, puisqu'on a déjà un chemin groupé) : plutôt
+  **1,2-1,5×** de mieux fusion/ordonnancement/tuiles, **1,5-2×** si l'implémentation de référence a un mauvais
+  ordonnancement à petit M. Repère mesuré (H20, CUTLASS) : 42,0→74,5 µs à b=4 (**1,77×**), 85,7→209,2 µs à
+  b=16 (**2,44×**) pour un chemin fusionné routage+gate-up+quant+down+réduction en pipeline persistant bas
+  latence — plus proche de notre régime que les chiffres B200 top-4/32-experts.
+
+**Recommandation pour la 270 (poste1)** : ne pas comparer notre débit à un chiffre publié SGLang/vLLM/TRT-LLM
+tel quel (GPU, nombre d'experts, top-k et modèle différents à chaque fois cité). Mesurer d'abord si notre
+chemin actuel est déjà un GEMM groupé à une passe ou une boucle par expert — c'est ce qui détermine si le
+levier est 2-6× (boucle→groupé) ou 1,2-2× (groupé→mieux optimisé). Vérifier aussi la version exacte de tout
+moteur tiers utilisé en comparaison sur SM120, vu l'issue #11932.
+
+**Sources** : GitHub (vLLM `fused_moe.py`, `moe_align_block_size.py` + tests `test_moe_align_block_size.py` ;
+SGLang issue #7994 NVFP4 MoE pipeline ; TensorRT-LLM `cutlass_extensions/gemm/kernel/splitk_gemm_grouped.h` ;
+CUTLASS discussion #1536 split-K petit-M ; TensorRT-LLM issue #11932 échec NVFP4 SM120), vllm.ai (doc
+DeepGemmFP4Experts, Blackwell SM100/SM120), Hugging Face (comparatif B200 NVFP4 SGLang/vLLM GPT-OSS-20B),
+arXiv (Cross-Platform Fused MoE Dispatch in Triton), mufeezamjad.com (worklog GEMM groupé persistant,
+238→23,8 µs).
