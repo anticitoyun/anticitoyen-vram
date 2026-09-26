@@ -40,11 +40,20 @@ def test_une_en_file_une_entree_la_porte_s_ouvre(monkeypatch):
     assert 0.018 <= dt < 0.06, dt
 
 
-def test_au_defaut_le_guet_est_coupe(monkeypatch):
-    """Défaut 0 : une requête en file + une entrée = comportement d'avant, pas d'attente (opt-in seulement)."""
+def test_en_opt_out_zero_le_guet_est_coupe(monkeypatch):
+    """ACVRAM_ADMISSION_GUET=0 (opt-out depuis 269 c) : une requête en file + une entrée = comportement d'avant, pas d'attente."""
     monkeypatch.setattr(A, "_FENETRE_ADMISSION_S", 0.005)
     monkeypatch.setattr(A, "_GUET_ADMISSION", False)
     assert _duree(_service(1, en_entree=1)) < 0.002
+
+
+def test_269c_au_defaut_le_guet_est_ouvert(monkeypatch):
+    """Test cassant « défaut 1 » (269 c, décision chef sur la mesure 269 b) : sans variable, le guet est actif — la
+    valeur lue par app.py est celle que donne « 1 » par défaut, et le régime déclare « 1 »."""
+    import os
+    assert A._GUET_ADMISSION is (os.environ.get("ACVRAM_ADMISSION_GUET", "1") == "1")
+    from acvram.regime import VARIABLES
+    assert next(x for x in VARIABLES if x.nom == "ADMISSION_GUET").defaut == "1"
 
 
 def test_la_rafale_a_deux_attend_comme_avant(monkeypatch):
@@ -70,9 +79,9 @@ def test_le_compteur_monte_et_redescend_meme_sur_exception():
     assert s.en_entree == 0, "une requête refusée avant submit doit libérer le compteur"
 
 
-def test_defaut_zero_et_variable_declaree():
+def test_defaut_un_et_variable_declaree():
     import os
-    assert A._GUET_ADMISSION is False or os.environ.get("ACVRAM_ADMISSION_GUET") == "1"
+    assert A._GUET_ADMISSION is True or os.environ.get("ACVRAM_ADMISSION_GUET") == "0"
     from acvram.regime import VARIABLES
     v = [x for x in VARIABLES if x.nom == "ADMISSION_GUET"]
-    assert len(v) == 1 and v[0].defaut == "0" and v[0].lu_a == ("acvram.server.app", "_GUET_ADMISSION")
+    assert len(v) == 1 and v[0].defaut == "1" and v[0].lu_a == ("acvram.server.app", "_GUET_ADMISSION")

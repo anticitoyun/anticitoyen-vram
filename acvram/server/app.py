@@ -73,7 +73,9 @@ _FENETRE_ADMISSION_S = float(os.environ.get("ACVRAM_ADMISSION_FENETRE_MS", "5"))
 # le service (gestionnaire HTTP commencé, `submit` pas encore fait) — 269 : après la 268, tout tour à deux pas restant
 # venait du fil moteur réveillé avec une seule requête en file, la 2e à quelques ms derrière dans le gabarit/tokeniseur.
 # Une requête seule n'a personne derrière elle : compteur à 0, porte fermée, elle ne paie rien (179 b).
-_GUET_ADMISSION = os.environ.get("ACVRAM_ADMISSION_GUET", "0") == "1"
+# 269 c : AU DÉFAUT depuis la 0.7.3 (mesure 269 b, ABBA ×3 sous carte.sh : 21/21 tours à 12 en un pas contre 15/21,
+# TTFT p50 247,4 ms contre 251,6, solo −0,7 ms) ; ACVRAM_ADMISSION_GUET=0 = opt-out, comportement d'avant.
+_GUET_ADMISSION = os.environ.get("ACVRAM_ADMISSION_GUET", "1") == "1"
 
 class EngineService:
     """Anime le moteur depuis un fil d'arrière-plan et redistribue les résultats."""
