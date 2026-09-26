@@ -1,15 +1,28 @@
 #!/bin/bash
-# Pièce 261 (poste2, ordre chef 26/09, reprise de poste4 partie sur la 070b) : panel de
-# tâches mini lm-eval contre un `acvram serve` DÉJÀ LANCÉ (ce script ne lance aucun serveur) —
-# sort le score par tâche, la moyenne et la pire tâche, pour une comparaison P1/P0 (critère
-# Q19 : récupération moyenne ≥ 99 %, pire tâche jamais cachée derrière la moyenne).
+# Pièce 261b (poste2, ordre chef 26/09) : panel de tâches mini lm-eval contre un `acvram
+# serve` DÉJÀ LANCÉ — sort le score par tâche, la moyenne et la pire tâche, pour une
+# comparaison P1/P0 (critère Q19 : récupération moyenne ≥ 99 %, pire tâche jamais cachée
+# derrière la moyenne).
 #
-# Sous-ensemble et graine FIXÉS ICI, jamais en argument : deux bras comparés (P0, P1) doivent
-# tourner sur EXACTEMENT le même tirage, sinon la comparaison ne vaut rien.
-#   MMLU (loglikelihood, echo+logprobs de /v1/completions) : mmlu_high_school_mathematics,
-#   mmlu_professional_law, mmlu_college_computer_science — 100 questions chacune.
+# 261b (chef, après un 1er essai à quasi-hasard, 26/09) : `local-completions` en 5-shot
+# BRUT (sans gabarit de conversation) donnait MMLU ≈ 20 % (le hasard, 4 choix) et GSM8K 0/50
+# sur un modèle Instruct — l'INSTRUMENT était faux, pas le modèle. Corrigé : `local-chat-
+# completions` + `--apply_chat_template` (le gabarit du modèle, via `/v1/chat/completions`)
+# ET les variantes MMLU *_generative (`local-chat-completions` ne supporte PAS
+# `loglikelihood` — `openai_completions.py:LocalChatCompletion.loglikelihood` lève
+# `NotImplementedError` — les variantes par défaut de MMLU sont donc incompatibles avec un
+# gabarit de conversation, seules les *_generative le sont).
+#
+# Sous-ensemble et graine FIXÉS ICI, jamais en argument : deux bras comparés (P0, P1, ou un
+# bras et sa référence llama.cpp) doivent tourner sur EXACTEMENT le même tirage.
+#   MMLU (generative, gabarit de conversation) : mmlu_high_school_mathematics_generative,
+#   mmlu_professional_law_generative, mmlu_college_computer_science_generative — 100/tâche.
 #   GSM8K (génération) : 50 questions.
 #   graine : 1234 (python, numpy, torch, few-shot).
+#
+# `--log_samples` : conservé (jamais supprimé) sous `$SORTIE.echantillons/` — nécessaire à la
+# vérification humaine de 5 échantillons (261b, demande chef) : réponse brute, extraite,
+# attendue.
 #
 # Usage : panel-taches.sh <served_name> <base_url> <repertoire_tokenizer> <sortie.json>
 #   ex.  : panel-taches.sh coder http://127.0.0.1:8151 \
@@ -22,28 +35,28 @@ set -euo pipefail
 SERVED=$1; BASE_URL=${2%/}; TOK=$3; SORTIE=$4
 ICI="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$ICI/.venv-panel/bin/python"
-[ -x "$PY" ] || { echo "REFUS : $PY absent — installer d'abord (uv venv .venv-panel --python 3.12 && uv pip install --python .venv-panel lm-eval)"; exit 66; }
+[ -x "$PY" ] || { echo "REFUS : $PY absent — installer d'abord (uv venv .venv-panel --python 3.12 && uv pip install --python .venv-panel 'lm-eval[api]' transformers)"; exit 66; }
 
 GRAINE=1234
-TACHES_MMLU="mmlu_high_school_mathematics,mmlu_professional_law,mmlu_college_computer_science"
-LIMITE_MMLU=100
+TACHES_MMLU="mmlu_high_school_mathematics_generative,mmlu_professional_law_generative,mmlu_college_computer_science_generative"
+LIMITE_MMLU=${LIMITE_MMLU:-100}
 TACHE_GSM8K="gsm8k"
-LIMITE_GSM8K=50
+LIMITE_GSM8K=${LIMITE_GSM8K:-50}
 
-D=$(mktemp -d)
-trap 'rm -rf "$D"' EXIT
+D="${SORTIE}.echantillons"
+mkdir -p "$D"
 
-echo "=== MMLU (loglikelihood, limite $LIMITE_MMLU/tâche, graine $GRAINE)"
-"$PY" -m lm_eval run --model local-completions \
-  --model_args "model=${SERVED},base_url=${BASE_URL}/v1/completions,tokenizer=${TOK},tokenizer_backend=huggingface,num_concurrent=1,max_retries=3" \
+echo "=== MMLU generative (gabarit de conversation, limite $LIMITE_MMLU/tâche, graine $GRAINE)"
+"$PY" -m lm_eval run --model local-chat-completions --apply_chat_template \
+  --model_args "model=${SERVED},base_url=${BASE_URL}/v1/chat/completions,tokenizer_backend=huggingface,tokenizer=${TOK},num_concurrent=1,max_retries=3" \
   --tasks "$TACHES_MMLU" --limit "$LIMITE_MMLU" --seed "$GRAINE" \
-  --output_path "$D/mmlu" --batch_size 1
+  --output_path "$D/mmlu" --batch_size 1 --log_samples
 
-echo "=== GSM8K (génération, limite $LIMITE_GSM8K, graine $GRAINE)"
-"$PY" -m lm_eval run --model local-completions \
-  --model_args "model=${SERVED},base_url=${BASE_URL}/v1/completions,tokenizer=${TOK},tokenizer_backend=huggingface,num_concurrent=1,max_retries=3" \
+echo "=== GSM8K (gabarit de conversation, limite $LIMITE_GSM8K, graine $GRAINE)"
+"$PY" -m lm_eval run --model local-chat-completions --apply_chat_template \
+  --model_args "model=${SERVED},base_url=${BASE_URL}/v1/chat/completions,tokenizer_backend=huggingface,tokenizer=${TOK},num_concurrent=1,max_retries=3" \
   --tasks "$TACHE_GSM8K" --limit "$LIMITE_GSM8K" --seed "$GRAINE" \
-  --output_path "$D/gsm8k" --batch_size 1
+  --output_path "$D/gsm8k" --batch_size 1 --log_samples
 
 R_MMLU=$(find "$D/mmlu" -name "results_*.json" | head -1)
 R_GSM8K=$(find "$D/gsm8k" -name "results_*.json" | head -1)
@@ -51,3 +64,4 @@ R_GSM8K=$(find "$D/gsm8k" -name "results_*.json" | head -1)
 [ -n "$R_GSM8K" ] || { echo "REFUS : aucun results_*.json pour GSM8K"; exit 70; }
 
 "$PY" "$ICI/outils/panel-taches-resume.py" "$R_MMLU" "$R_GSM8K" "$SORTIE"
+echo "échantillons (log_samples) conservés sous $D"
