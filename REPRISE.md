@@ -69,6 +69,45 @@ a été conservée.
   `outils/carte.sh` est la seule vérité (REGLES § 2). Dépôt :
   `https://outils.nuages.noho.st/gitlab/anticitoyen/anticitoyen-vram` (privé).
 
+## 2b. État à la 0.7.0 (26/09/2026)
+
+Détail complet et chiffré : `docs/notes/v0.7.0.md`. Ici, ce qui change pour qui reprend le
+code — chaque ligne cite sa pièce, aucun chiffre sans source.
+
+* **Défauts changés** :
+  * `ACVRAM_MARLIN_PAR_LIGNE=0`, à nouveau (pièce 209/226 l'avait mis à 1, décision revenue
+    en pièce 232b, poste6, sur le 3-bras de la pièce 229, poste3 c40a952b1 : B/C −15,3 %
+    TENU en charge soutenue, contredit la salve unique de la 226 — la pièce 209 seule porte
+    la régression). `=1` reste disponible en opt-in.
+  * `ACVRAM_INT8_GEMV_MAX_PARTAGE=16` (pièce 243, poste5 cdf709c80) : +9,70 % t/s mixte
+    b=8, −9,3 % J/jeton, KL tenue (`revue/poste5-piece243-verdict-26-09.md`).
+  * `ACVRAM_ETROIT_CANAL=1` (pièce 195b, décision déléguée par l'utilisateur, HORS BIT
+    « ± 1 ulp » — ordre des sommes fp32) : +4,01 % débit, −3,76 % J/jeton à b=8.
+  * `ACVRAM_GDN_AB=auto` (pièces 175/175b, poste6) : portes α/β GDN en un seul appel,
+    exact au bit contre les deux `F.linear` séparés.
+  * `TRANCHE_COPIE_MIN` (pièce 201) : capacité KV désormais correcte pour les modèles
+    vision/MTP (Qwen3.8-nvfp4 −7,4 %, gemma-4-31B-vision −21,4 % de capacité annoncée,
+    plus juste, pas moins).
+  * `_KV_MARGE_MIN_GDN = 3072 Mio` au lieu de 1536 (pièce 212, `acvram/engine/loader.py:1201`) :
+    marge doublée pour les architectures GDN/KDA/mamba2, ≈ −12 192 jetons de capacité KV
+    annoncée sur les Qwen3.8 concernés, plus de risque d'OOM silencieux à la capture de
+    graphes.
+* **RoPE à dtype fixe** (pièce 213b, poste5 d57159556 + dd28d98dd) : le 1er lot de décodage
+  d'un processus divergeait des suivants — cache RoPE cos/sin (`layers.py:674/721/863`)
+  construit en fp32 non arrondi au 1er préfill, en bf16 ensuite. Correctif : dtype fixe du
+  module + `loader.py:313`. La calibration portait la même dérive (`quant/collect.py:257`),
+  corrigée par la pièce 235 (poste2 bbad9e189).
+* **Paquets** : AUR (`packaging/aur/`, dépend de `python-pytorch-cuda`) et RPM/COPR
+  (`packaging/rpm/`, pas de torch CUDA empaqueté sous Fedora → venv privé bootstrapé au
+  premier lancement) livrés par la pièce 236a (poste3 749ef7e46) ; Flathub
+  (`packaging/flathub/`, embarque `org.freedesktop.Platform.GL.nvidia`, ≈ 1,9 Go, noyaux
+  PRÉCOMPILÉS obligatoires — pas de nvcc dans le bac à sable) par la pièce 236b (poste6
+  e19ca029c), job CI complet par la pièce 241 (poste6 772c8bf61) ; noyaux précompilés
+  eux-mêmes par la pièce 240 (poste6 a7302f0a2, `_precompile_utilisable`,
+  `ACVRAM_KERNELS_PRECOMPILES`) ; Weblate sert les chaînes d'interface (le README reste
+  hors Weblate, pièce 236c, poste2 fae740994) ; `.deb` inchangé dans son mécanisme (venv
+  bootstrapé, torch choisi selon les GPU présents). `SECURITY.md` ajouté (main 29a8ff944).
+
 ## 3. Matériel cible
 
 i9-14900K · ASUS ROG Maximus Z790 Dark Hero · 96 Go DDR5 · ASUS RTX 5090 Astral
@@ -236,6 +275,44 @@ mais le reste est écrit à l'aveugle.
   large que le PCIe, et cela libère le GPU.
 * **Dépôt privé** par défaut. Le projet ne contient aucun secret, mais la
   visibilité est une décision qui appartient au propriétaire.
+
+## 9b. Règles d'outillage nées le 26/09 (0.7.0)
+
+Toutes trouvées en marge d'une pièce de fond, jamais cherchées pour elles-mêmes —
+chacune ferme une classe d'incident réellement observée ce jour-là.
+
+* **`outils/carte.sh` tue tout le groupe de processus de la commande** (pièce 244, poste3
+  5eb5e05a7, `tests/test_carte_groupe_signal_244.py`) : un TERM/INT/HUP reçu par `carte.sh`
+  lui-même (un `kill` externe) tuait le script sans jamais toucher la commande, encore
+  vivante hors verrou — 3e contamination en trois jours. `setsid` + signal au groupe avant
+  de rendre le verrou ; refuse la prise suivante si un `.qui` pointe un groupe encore vivant
+  (cas `KILL -9`, qu'aucun trap ne peut rattraper).
+* **`ACVRAM_TESTS_PENDANT_MESURE` ne dispense plus seule du contrôle de verrou-mesure**
+  (pièce 246, poste3 a3b11cfc5, `tests/test_conftest_verrou_mesure.py`) : seul un pytest qui
+  tourne SOUS la prise `carte.sh` en question (`ACVRAM_CARTE_TENUE` = pid du `.qui`) passe ;
+  sinon REFUS nommant la prise, même avec la variable — 3e contournement de la garde en
+  trois jours, dont un par la même session.
+* **Garde contre les invites répétées dans une cellule MoE** (pièce 256/256b, poste3
+  62eb805b4/12ad66e8c, `tests/test_banc_repetition_256.py`, REGLES § 4) : un texte réel mais
+  RÉPÉTÉ (remplissage de longueur par tuilage) déplace le coût du GEMM experts de
+  ± 0,6-0,9 ms/pas SELON LE SENS (pièce 237, poste1) — aussi faux qu'une invite à jetons
+  tirés (pièce 227). Seuil de trigrammes répétés mesuré (0,5, sur le tokenizer réel), pas
+  supposé, dans `banc-llamacpp-16-09.py` et `banc-chat-openai.py`.
+* **Cliquet d'index des notes de revue** (pièce 263/263b, poste3 7fbc6b7df/189bd7190,
+  `tests/test_index_revue_263.py`) : `acvram-memoire/revue/INDEX.md` ne référençait aucune
+  note par une garde exécutée — deux notes (231, 244) en étaient sorties sans que rien ne le
+  voie. Le compte de notes non indexées ne doit plus JAMAIS augmenter ; toute note neuve
+  s'indexe dans le même commit qui l'ajoute.
+* **La relance d'une session reprend le worktree le plus récemment commité, pas le premier
+  de `git worktree list`** (pièce 252, poste3 15cc02520, `outils/session-acvram-worktree.sh`) :
+  plusieurs worktrees d'un même prénom existent presque toujours ; `git worktree list | grep
+  -i $p` rendait la première ligne dans l'ordre d'AJOUT du worktree, jamais celui de
+  fraîcheur du travail — poste2 et poste4 ont repris sur un vieux worktree au redémarrage du
+  26/09 à cause de ce piège. Proposition écrite (pas encore appliquée à `~/.local/bin`,
+  chef l'applique lui-même) : classer les branches `origin/<prénom>[-*]` par
+  `git for-each-ref --sort=-committerdate`, rendre le worktree de la première qui en a un ;
+  purger `CLAUDE*`/`ANTHROPIC*`/`ACVRAM_SESSION` hérités avant de lancer `claude` (une
+  relance depuis une session désactivait les transcripts).
 
 ## 11. Terminé — définition (20/09/2026, `revue/poste7-tests-rapides-cloture-20-09`, mot pour mot)
 
