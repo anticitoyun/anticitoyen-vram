@@ -440,8 +440,14 @@ def test_d_une_taille_fausse_et_un_format_tu_cassent_c(tmp_path):
     racines = _disque_fabrique(tmp_path)
     texte = _MENU_COHERENT.replace("(300K)", "(360K)").replace(" — témoin int8, expert partagé", "")
     _, _, c = _fautes(racines, texte)
-    assert sorted(c) == ["Trois-temoin : rangé sous NVFP4 sans tenseur nvfp4, la ligne ne dit pas ['int8']",
-                         "Un-Q4_K_M : menu 360.00K, du -sh 300K (20%)"], c
+    # 267d (CI GitHub) : le chiffre exact de `du -sh` (300K, 20%) dépend de l'arrondi de
+    # bloc du système de fichiers du runner (304K, 18% vu en CI) — le témoin porte sur la
+    # DÉTECTION (Un-Q4_K_M signalé, avec un couple taille/écart présent sur sa ligne),
+    # jamais sur le chiffre, qui n'a jamais été ce que ce test prouve.
+    assert "Trois-temoin : rangé sous NVFP4 sans tenseur nvfp4, la ligne ne dit pas ['int8']" in c, c
+    lignes_taille = [f for f in c if f.startswith("Un-Q4_K_M : menu 360.00K, du -sh ")]
+    assert len(lignes_taille) == 1 and re.search(r"du -sh \d+(\.\d)?[KMGT] \(\d+%\)$", lignes_taille[0]), c
+    assert len(c) == 2, c
     _, _, c = _fautes(racines, _MENU_COHERENT.replace("(300K)", "(312K)"))
     assert c == [], f"4 % doit passer : {c}"
 
