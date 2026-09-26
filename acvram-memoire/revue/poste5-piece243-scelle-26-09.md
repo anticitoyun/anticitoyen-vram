@@ -41,3 +41,10 @@ b=1), un seuil abaissé régresserait si n* non partagé > seuil → le seuil gl
 Implémentation prévue (opt-in d'abord) : `ACVRAM_INT8_GEMV_MAX_PARTAGE` (défaut = `INT8_GEMV_MAX`, sortie inchangée),
 seuil lu quand une portée `depaquetage_partage` est active. Q14 (seuils vLLM/SGLang/TRT-LLM, poste4 → duck.ai) :
 intégrée si elle arrive avant la mesure.
+
+## Addendum (avant mesure) — Q14 reçue (poste4 → duck.ai, poste4-224 d142d5f38, revue/poste4-duckai-26-09.md)
+Aucun seuil universel ; convergence : M ≤ 16 GEMV, 16-32 transition, 32-64 GEMM int8 MMA en général meilleur, ≥ 64 GEMM
+d'abord ; vLLM (SM90) ne choisit que la tuile CUTLASS par tranche de M, pas GEMV contre GEMM ; TRT-LLM : un croisement
+mesuré ≈ 32 (H800, autre format). Cohérent avec P1 (croisement non partagé 16-40, partagé ≤ 17) ; rien ne change aux
+prédictions. Point noté, hors portée : vLLM déconseille l'INT8 sur CC ≥ 10 (FP8 recommandé) — nos poids du mixte sont
+d'origine fp8 et servis en int8 par canal ; à ouvrir en question séparée si chef le veut.
