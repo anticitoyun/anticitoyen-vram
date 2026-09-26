@@ -891,9 +891,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
     # hybride GDN : 13 à 24 logits sous le premier choix, 4/5 invites) — cause trouvée par
     # poste5 : le pipeline n'était pas vidé au passage du décodage simple au spéculatif,
     # jetons répétés. Le bogue touche TOUT modèle servi avec ngram, dense compris — pas
-    # seulement les hybrides. Défaut = none pour TOUS les alias ; ngram reste servable sur
-    # demande explicite, avec un avertissement — le correctif n'est pas forcément livré dans
-    # cette version (le test Coder de la 277fix n'est pas tranché), le message ne le suppose pas.
+    # seulement les hybrides. CORRIGÉ par la 277fix (`_pipeline_vider`, runner/pipeline) : mixte au
+    # bit contre none ; Coder : deux écarts restants, quasi-égalités (marge 0,015, jeton spéculatif
+    # = second choix). Défaut = none pour TOUS les alias (le ngram corrigé peut faire plus de pas que
+    # none : jusqu'à 55 pour 32 jetons, 277e) ; ngram reste servable sur demande, avec cet avis.
     demande_explicitement = args.speculative is not None
     if args.speculative is None:
         args.speculative = "none"
@@ -902,8 +903,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
         # Qwen3.8 étaient converties mais jamais chargées, et rien ne le disait).
         args.speculative, repli = repli_speculatif(loaded.model)
     if demande_explicitement and args.speculative == "ngram":
-        print(red("  AVERTISSEMENT : ngram — bogue 277 (jetons répétés au passage simple → spéculatif) ; "
-                  "sortie possiblement différente de --speculative none ; qualification en cours."))
+        print(red("  AVERTISSEMENT : ngram — bogue 277 corrigé (jetons répétés au passage simple → spéculatif) ; "
+                  "écarts restants avec --speculative none : quasi-égalités (marge < 0,02 sur le Coder) ; "
+                  "le ngram peut faire PLUS de pas que none (jusqu'à 55 pour 32 jetons) ; il n'est pas le défaut."))
     if args.speculative == "ngram":
         from .engine.speculative import NGramProposer
         speculator = NGramProposer()
@@ -1348,9 +1350,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "pipeline n'etait pas vide au passage du decodage simple au speculatif "
                          "(ngram), jetons repetes ; touche tout modele servi avec ngram, dense "
                          "compris (277a-bis : hybride GDN, jetons 13 a 24 logits sous le premier "
-                         "choix, 4/5 invites). Demander ngram explicitement reste possible, avec "
-                         "un avertissement au demarrage (sortie possiblement differente de none, "
-                         "qualification du correctif en cours). "
+                         "choix, 4/5 invites) ; corrige par la 277fix (ecarts restants : "
+                         "quasi-egalites, marge < 0,02 sur le Coder). Demander ngram explicitement "
+                         "reste possible, avec un avertissement au demarrage (il peut faire plus de "
+                         "pas que none : jusqu'a 55 pour 32 jetons ; il n'est pas le defaut). "
                          "ngram ne coute rien et paie quand la sortie recopie "
                          "l'entree ; draft exige --draft-model ; mtp utilise "
                          "la tete nextn du modele charge si elle porte une "

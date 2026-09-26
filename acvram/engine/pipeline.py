@@ -105,6 +105,21 @@ class PipelineDecodage:
         evenement.record()
         return epingle, evenement
 
+    def _pipeline_vider(self) -> list[GenerationOutput]:
+        """Rapatrie et livre le pas simple EN VOL (`_pipeline_pendiente`) sans en lancer d'autre.
+
+        Pièce 277 : `step()` passait au pas spéculatif alors qu'un pas simple, lancé en recouvrement, était encore en
+        vol — son jeton n'était pas dans `output_ids` mais l'état (KV, récurrence GDN) avait déjà consommé l'entrée.
+        La vérification relisait donc le dernier jeton une seconde fois, puis le pas simple suivant livrait le
+        résultat périmé : jetons répétés, que la cible rejette de 13 à 24 logits (277a-bis, mixte-i8c, ngram)."""
+        pend = self._pipeline_pendiente
+        if pend is None:
+            return []
+        self._pipeline_pendiente = None
+        pend["event"].synchronize()
+        return self._consommer(pend["tokens_dev"], pend["logprobs_dev"], pend["seqs"],
+                               epingle=pend.get("epingle"), tops=pend.get("tops"))
+
     def _pipeline_amorcer(self, decodable: list[Sequence]) -> list[GenerationOutput]:
         """Un pas NORMAL (synchrone, comme `_plain_decode_sync`), qui pose ou
         REPOSE l'état du pipeline plutôt que de le poursuivre en
