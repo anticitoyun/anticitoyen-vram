@@ -41,12 +41,19 @@ def test_tranches_egalent_la_fenetre_entiere(converted):
         nll_ref = torch.nn.functional.cross_entropy(ref, targets, reduction="none")
         batch2 = _batch(chunk, (len(chunk) + BLOCK_SIZE - 1) // BLOCK_SIZE + 1)
         h = model(batch2, return_hidden=True)
-        # Pièce 267 (CI GitHub, runner CPU) : atol=1e-6 était franchi de ~2,6e-6
-        # (60,894676542969 contre 60,894673955078) — même calcul, mais la tête
-        # entière et par tranches n'accumulent pas les produits dans le même
-        # ordre en fp32 sur CPU (BLAS différent de la carte, où l'ordre est
-        # fixe) ; 1e-5 reste bien en deçà d'une vraie divergence de chemin.
-        atol = 1e-5
+        # Pièce 267 (CI GitHub, runner CPU, `device_override="cpu"` ci-dessus force
+        # d'ailleurs TOUJOURS ce test sur processeur, carte ou pas) : atol=1e-6
+        # était franchi de ~2,6e-6 — valeur observée en CI 60,894676542969 contre
+        # la référence 60,894673955078 (même calcul, même modèle jouet). Cause :
+        # la tête entière (un seul appel) et la tête par tranches (plusieurs
+        # appels plus petits) n'accumulent pas les produits matriciels dans le
+        # même ordre en fp32 — le BLAS processeur choisit son propre découpage,
+        # contrairement à la carte où l'ordre des accumulations est fixe pour
+        # une même forme. 1e-5 couvre l'écart observé (2,6e-6) avec de la marge,
+        # sans s'approcher d'une vraie divergence de chemin (le témoin cassant
+        # plus bas diverge de ≥ 1e-3). CONDITIONNÉ au device réellement utilisé,
+        # jamais élargi à l'aveugle si ce test tournait un jour aussi sur carte.
+        atol = 1e-5 if h.device.type == "cpu" else 1e-6
         for tranche in (1, 7, 16, 256):
             nll = _pertes_par_tranches(model, h, targets, 0, tranche)
             assert nll.shape == nll_ref.shape
